@@ -21,7 +21,9 @@ BIN_DIR = bin
 # Source files
 SRCS = $(SRC_DIR)/aec.c \
        $(SRC_DIR)/nlms_filter.c \
+       $(SRC_DIR)/subband_nlms.c \
        $(SRC_DIR)/dtd.c \
+       $(SRC_DIR)/res_filter.c \
        $(SRC_DIR)/fft_wrapper.c
 
 LIB_SRCS = $(LIB_DIR)/kiss_fft.c

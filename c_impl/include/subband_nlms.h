@@ -1,0 +1,108 @@
+/**
+ * subband_nlms.h - Frequency-domain NLMS adaptive filter
+ *
+ * Partitioned Block Frequency-Domain Adaptive Filter (PBFDAF)
+ * More efficient than time-domain NLMS for long echo paths.
+ *
+ * Advantages:
+ * - O(N log N) vs O(N^2) complexity
+ * - Faster convergence due to frequency-domain whitening
+ * - Per-bin step size adaptation
+ */
+
+#ifndef SUBBAND_NLMS_H
+#define SUBBAND_NLMS_H
+
+#include <stdbool.h>
+#include "fft_wrapper.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Opaque subband NLMS handle
+typedef struct SubbandNlms SubbandNlms;
+
+/**
+ * Create subband NLMS filter
+ *
+ * @param block_size FFT block size (e.g., 512)
+ * @param n_partitions Number of filter partitions (filter_length / block_size)
+ * @param mu Step size (0.1-0.5)
+ * @param delta Regularization (1e-8)
+ * @return Filter handle, or NULL on error
+ */
+SubbandNlms* subband_nlms_create(int block_size, int n_partitions,
+                                  float mu, float delta);
+
+/**
+ * Destroy subband NLMS filter
+ */
+void subband_nlms_destroy(SubbandNlms* filter);
+
+/**
+ * Reset filter state
+ */
+void subband_nlms_reset(SubbandNlms* filter);
+
+/**
+ * Process one block of samples
+ *
+ * Uses overlap-save method for linear convolution
+ *
+ * @param filter Filter handle
+ * @param near_end Microphone input [block_size/2] (hop_size samples)
+ * @param far_end Reference input [block_size/2]
+ * @param output Echo-cancelled output [block_size/2]
+ * @param update_weights If false, only compute output
+ * @return 0 on success
+ */
+int subband_nlms_process(SubbandNlms* filter,
+                         const float* near_end,
+                         const float* far_end,
+                         float* output,
+                         bool update_weights);
+
+/**
+ * Get echo estimate spectrum (for RES post-filter)
+ *
+ * @param filter Filter handle
+ * @param echo_spec Output echo spectrum [n_freqs]
+ */
+void subband_nlms_get_echo_spectrum(const SubbandNlms* filter,
+                                     Complex* echo_spec);
+
+/**
+ * Get error spectrum (for RES post-filter)
+ *
+ * @param filter Filter handle
+ * @param error_spec Output error spectrum [n_freqs]
+ */
+void subband_nlms_get_error_spectrum(const SubbandNlms* filter,
+                                      Complex* error_spec);
+
+/**
+ * Get block size
+ */
+int subband_nlms_get_block_size(const SubbandNlms* filter);
+
+/**
+ * Get hop size (block_size / 2)
+ */
+int subband_nlms_get_hop_size(const SubbandNlms* filter);
+
+/**
+ * Get number of frequency bins
+ */
+int subband_nlms_get_n_freqs(const SubbandNlms* filter);
+
+/**
+ * Get filter length in samples
+ */
+int subband_nlms_get_filter_length(const SubbandNlms* filter);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // SUBBAND_NLMS_H
