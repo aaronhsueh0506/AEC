@@ -1,0 +1,119 @@
+/**
+ * aec_types.h - Common types and configuration for AEC
+ *
+ * Acoustic Echo Cancellation Implementation
+ * Based on NLMS adaptive filter with DTD and RES post-filter
+ */
+
+#ifndef AEC_TYPES_H
+#define AEC_TYPES_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * Configuration structure for AEC
+ */
+typedef struct {
+    int sample_rate;            // Sample rate (16000 Hz)
+    int frame_size_ms;          // Frame length in ms (20)
+    int frame_shift_ms;         // Frame shift in ms (10) = hop size
+    int fft_size;               // FFT size (512)
+
+    // NLMS adaptive filter parameters
+    int filter_length_ms;       // Filter length in ms (250)
+    float mu;                   // Step size (0.3)
+    float delta;                // Regularization (1e-8)
+    float leak;                 // Weight leakage factor (0.9999)
+
+    // DTD (Double-Talk Detection) parameters
+    bool enable_dtd;            // Enable DTD (true)
+    float dtd_threshold;        // Geigel threshold (0.6)
+    int dtd_hangover_frames;    // Hangover duration in frames (15)
+    float dtd_energy_ratio;     // Energy ratio threshold (0.4)
+
+    // RES (Residual Echo Suppressor) parameters
+    bool enable_res;            // Enable post-filter (true)
+    float res_g_min_db;         // Minimum gain in dB (-20)
+    float res_over_sub;         // Over-subtraction factor (1.5)
+    float res_alpha;            // Gain smoothing (0.8)
+
+    // Subband mode (for future use)
+    bool enable_subband;        // Use subband NLMS (false for now)
+
+} AecConfig;
+
+/**
+ * Create default configuration for given sample rate
+ * FFT size is automatically calculated to be >= frame_size (next power of 2)
+ */
+static inline AecConfig aec_default_config(int sample_rate) {
+    AecConfig config;
+
+    config.sample_rate = sample_rate;
+    config.frame_size_ms = 20;
+    config.frame_shift_ms = 10;
+
+    // Calculate FFT size (next power of 2 >= frame_size)
+    int frame_size = sample_rate * config.frame_size_ms / 1000;
+    int fft_size = 256;
+    while (fft_size < frame_size) {
+        fft_size *= 2;
+    }
+    config.fft_size = fft_size;
+
+    // NLMS parameters (tuned for 200-300ms echo path)
+    config.filter_length_ms = 250;
+    config.mu = 0.3f;
+    config.delta = 1e-8f;
+    config.leak = 0.9999f;
+
+    // DTD parameters
+    config.enable_dtd = true;
+    config.dtd_threshold = 0.6f;
+    config.dtd_hangover_frames = 15;
+    config.dtd_energy_ratio = 0.4f;
+
+    // RES parameters
+    config.enable_res = true;
+    config.res_g_min_db = -20.0f;
+    config.res_over_sub = 1.5f;
+    config.res_alpha = 0.8f;
+
+    // Subband mode (disabled by default, time-domain first)
+    config.enable_subband = false;
+
+    return config;
+}
+
+/**
+ * Derived parameters (computed from config)
+ */
+typedef struct {
+    int frame_size;         // Samples per frame
+    int hop_size;           // Samples per hop (frame shift)
+    int filter_length;      // Filter length in samples
+    int n_freqs;            // Number of frequency bins (fft_size/2 + 1)
+} AecDerivedParams;
+
+/**
+ * Compute derived parameters from configuration
+ */
+static inline AecDerivedParams aec_compute_params(const AecConfig* config) {
+    AecDerivedParams params;
+    params.frame_size = config->sample_rate * config->frame_size_ms / 1000;
+    params.hop_size = config->sample_rate * config->frame_shift_ms / 1000;
+    params.filter_length = config->sample_rate * config->filter_length_ms / 1000;
+    params.n_freqs = config->fft_size / 2 + 1;
+    return params;
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // AEC_TYPES_H

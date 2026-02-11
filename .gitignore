@@ -1,0 +1,22 @@
+# Build artifacts
+*.o
+*.a
+bin/
+obj/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+
+# Test outputs
+*.wav
