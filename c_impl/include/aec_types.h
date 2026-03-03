@@ -17,10 +17,16 @@ extern "C" {
 
 /**
  * AEC filter mode selection
+ *
+ * Three modes with different trade-offs:
+ *   - TIME:    Time-domain NLMS, sample-by-sample, lowest latency
+ *   - FREQ:    Frequency-domain NLMS, single FFT block, no partitions
+ *   - SUBBAND: Partitioned block FDAF (PBFDAF), for long echo paths
  */
 typedef enum {
-    AEC_MODE_NLMS,      // Time-domain NLMS (default, lower latency)
-    AEC_MODE_SUBBAND    // Frequency-domain Subband NLMS (faster convergence)
+    AEC_MODE_TIME,      // Time-domain NLMS (default, lowest latency)
+    AEC_MODE_FREQ,      // Frequency-domain NLMS (single block, no partitions)
+    AEC_MODE_SUBBAND    // Partitioned block FDAF (PBFDAF, for long echo paths)
 } AecFilterMode;
 
 /**
@@ -33,7 +39,7 @@ typedef struct {
     int fft_size;               // FFT size (512)
 
     // Filter mode selection
-    AecFilterMode filter_mode;  // AEC_MODE_NLMS or AEC_MODE_SUBBAND
+    AecFilterMode filter_mode;  // AEC_MODE_TIME, AEC_MODE_FREQ, or AEC_MODE_SUBBAND
 
     // NLMS adaptive filter parameters
     int filter_length_ms;       // Filter length in ms (250)
@@ -60,8 +66,9 @@ typedef struct {
  * FFT size is automatically calculated to be >= frame_size (next power of 2)
  *
  * Note: hop_size depends on filter_mode:
- *   - AEC_MODE_NLMS:    hop = sample_rate * frame_shift_ms / 1000 (e.g., 160 @ 16kHz)
- *   - AEC_MODE_SUBBAND: hop = fft_size / 2 (e.g., 256 @ fft_size=512)
+ *   - AEC_MODE_TIME:    hop = sample_rate * frame_shift_ms / 1000 (e.g., 160 @ 16kHz)
+ *   - AEC_MODE_FREQ:    hop = fft_size / 2 (e.g., 256 @ fft_size=512)
+ *   - AEC_MODE_SUBBAND: hop = fft_size / 2 (same as FREQ)
  */
 static inline AecConfig aec_default_config(int sample_rate) {
     AecConfig config;
@@ -78,8 +85,8 @@ static inline AecConfig aec_default_config(int sample_rate) {
     }
     config.fft_size = fft_size;
 
-    // Filter mode: default to time-domain NLMS (lower latency)
-    config.filter_mode = AEC_MODE_NLMS;
+    // Filter mode: default to time-domain NLMS (lowest latency)
+    config.filter_mode = AEC_MODE_TIME;
 
     // NLMS parameters (tuned for 200-300ms echo path)
     config.filter_length_ms = 250;
@@ -117,8 +124,9 @@ typedef struct {
  * Compute derived parameters from configuration
  *
  * Note: hop_size is mode-dependent:
- *   - NLMS mode:    hop = sample_rate * frame_shift_ms / 1000
- *   - Subband mode: hop = fft_size / 2 (overlap-save requirement)
+ *   - TIME mode:    hop = sample_rate * frame_shift_ms / 1000
+ *   - FREQ mode:    hop = fft_size / 2, n_partitions = 1
+ *   - SUBBAND mode: hop = fft_size / 2, n_partitions = ceil(filter_length / hop)
  */
 static inline AecDerivedParams aec_compute_params(const AecConfig* config) {
     AecDerivedParams params;
@@ -126,15 +134,25 @@ static inline AecDerivedParams aec_compute_params(const AecConfig* config) {
     params.filter_length = config->sample_rate * config->filter_length_ms / 1000;
     params.n_freqs = config->fft_size / 2 + 1;
 
-    if (config->filter_mode == AEC_MODE_SUBBAND) {
-        // Subband mode: hop = fft_size / 2 (overlap-save)
-        params.hop_size = config->fft_size / 2;
-        // n_partitions = ceil(filter_length / hop_size)
-        params.n_partitions = (params.filter_length + params.hop_size - 1) / params.hop_size;
-    } else {
-        // NLMS mode: use configured frame shift
-        params.hop_size = config->sample_rate * config->frame_shift_ms / 1000;
-        params.n_partitions = 0;  // Not used in NLMS mode
+    switch (config->filter_mode) {
+        case AEC_MODE_FREQ:
+            // Frequency-domain NLMS: single FFT block, no partitioning
+            params.hop_size = config->fft_size / 2;
+            params.n_partitions = 1;
+            break;
+
+        case AEC_MODE_SUBBAND:
+            // Partitioned block FDAF: multiple partitions for long echo paths
+            params.hop_size = config->fft_size / 2;
+            params.n_partitions = (params.filter_length + params.hop_size - 1) / params.hop_size;
+            break;
+
+        case AEC_MODE_TIME:
+        default:
+            // Time-domain NLMS: use configured frame shift
+            params.hop_size = config->sample_rate * config->frame_shift_ms / 1000;
+            params.n_partitions = 0;  // Not used in time-domain mode
+            break;
     }
 
     return params;

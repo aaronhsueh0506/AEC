@@ -1,14 +1,17 @@
 """
 Acoustic Echo Cancellation (AEC) - Python Reference Implementation
 
-Supports:
-- Time-domain NLMS adaptive filter
-- Frequency-domain (Subband) NLMS
+Supports three filter modes:
+- Time-domain NLMS (--mode time): sample-by-sample, lowest latency
+- Frequency-domain NLMS (--mode freq): single FFT block, no partitions
+- Partitioned FDAF (--mode subband): multiple partitions, for long echo paths
+
+Additional features:
 - Double-Talk Detection (DTD)
 - Residual Echo Suppressor (RES)
 
 Usage:
-    python aec.py mic.wav ref.wav output.wav [--mode subband] [--enable-res]
+    python aec.py mic.wav ref.wav output.wav [--mode time|freq|subband] [--enable-res]
 """
 
 import numpy as np
@@ -20,8 +23,9 @@ import soundfile as sf
 
 
 class AecMode(Enum):
-    TIME_DOMAIN = "time"
-    SUBBAND = "subband"
+    TIME = "time"       # Time-domain NLMS (sample-by-sample)
+    FREQ = "freq"       # Frequency-domain NLMS (single block, n_partitions=1)
+    SUBBAND = "subband" # Partitioned block FDAF (multiple partitions)
 
 
 @dataclass
@@ -45,7 +49,7 @@ class AecConfig:
     res_alpha: float = 0.8
 
     # Mode
-    mode: AecMode = AecMode.TIME_DOMAIN
+    mode: AecMode = AecMode.TIME
 
     @property
     def frame_size(self) -> int:
@@ -312,15 +316,26 @@ class AEC:
     """
     Acoustic Echo Cancellation
 
-    Supports time-domain and frequency-domain modes with optional RES.
+    Supports three filter modes:
+    - TIME:    Time-domain NLMS (sample-by-sample processing)
+    - FREQ:    Frequency-domain NLMS (single FFT block, n_partitions=1)
+    - SUBBAND: Partitioned block FDAF (multiple partitions for long echo paths)
     """
 
     def __init__(self, config: Optional[AecConfig] = None):
         self.config = config or AecConfig()
 
-        # Create adaptive filter
-        if self.config.mode == AecMode.SUBBAND:
-            n_partitions = max(1, self.config.filter_length // (self.config.fft_size // 2))
+        # Create adaptive filter based on mode
+        if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
+            # Frequency-domain modes
+            hop_size = self.config.fft_size // 2
+            if self.config.mode == AecMode.FREQ:
+                # Single block, no partitioning
+                n_partitions = 1
+            else:
+                # SUBBAND: multiple partitions for long echo paths
+                n_partitions = max(1, self.config.filter_length // hop_size)
+
             self.filter = SubbandNlms(
                 block_size=self.config.fft_size,
                 n_partitions=n_partitions,
@@ -328,7 +343,9 @@ class AEC:
                 delta=self.config.delta
             )
             self._hop_size = self.filter.hop_size
+            self._n_partitions = n_partitions
         else:
+            # TIME: Time-domain NLMS
             self.filter = NlmsFilter(
                 filter_length=self.config.filter_length,
                 mu=self.config.mu,
@@ -336,6 +353,7 @@ class AEC:
                 leak=self.config.leak
             )
             self._hop_size = self.config.hop_size
+            self._n_partitions = 0
 
         # DTD
         self.dtd = DtdEstimator(
@@ -344,8 +362,8 @@ class AEC:
             hangover_frames=self.config.dtd_hangover_frames
         ) if self.config.enable_dtd else None
 
-        # RES
-        if self.config.enable_res and self.config.mode == AecMode.SUBBAND:
+        # RES (only for frequency-domain modes)
+        if self.config.enable_res and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
             self.res = ResFilter(
                 n_freqs=self.config.fft_size // 2 + 1,
                 g_min_db=self.config.res_g_min_db,
@@ -379,8 +397,9 @@ class AEC:
         if self.dtd and self.config.enable_dtd:
             update_weights = not self.dtd.detect_block(near_end, far_end)
 
-        # Process
-        if self.config.mode == AecMode.SUBBAND:
+        # Process based on mode
+        if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
+            # Frequency-domain modes (both use SubbandNlms, differ in n_partitions)
             output = self.filter.process(near_end, far_end, update_weights)
 
             # RES post-filter
@@ -392,6 +411,7 @@ class AEC:
                                                   echo_spec, far_power)
                 output = np.fft.irfft(enhanced_spec, len(output) * 2)[:len(output)]
         else:
+            # TIME: Time-domain NLMS
             output, _ = self.filter.process_block(near_end, far_end, update_weights)
 
         # ERLE
@@ -486,8 +506,14 @@ def main():
         description='Acoustic Echo Cancellation (AEC)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Filter modes:
+    time    - Time-domain NLMS (sample-by-sample, lowest latency)
+    freq    - Frequency-domain NLMS (single FFT block, no partitions)
+    subband - Partitioned block FDAF (for long echo paths, fastest convergence)
+
 Examples:
     python aec.py mic.wav ref.wav output.wav
+    python aec.py mic.wav ref.wav output.wav --mode freq
     python aec.py mic.wav ref.wav output.wav --mode subband --enable-res
     python aec.py mic.wav ref.wav output.wav --mu 0.5 --filter-ms 300
         """
@@ -497,7 +523,7 @@ Examples:
     parser.add_argument('output', help='Output WAV file')
     parser.add_argument('--mu', type=float, default=0.3, help='Step size (default: 0.3)')
     parser.add_argument('--filter-ms', type=int, default=250, help='Filter length in ms')
-    parser.add_argument('--mode', choices=['time', 'subband'], default='time',
+    parser.add_argument('--mode', choices=['time', 'freq', 'subband'], default='time',
                         help='Filter mode (default: time)')
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
@@ -505,10 +531,17 @@ Examples:
 
     args = parser.parse_args()
 
+    # Map mode string to enum
+    mode_map = {
+        'time': AecMode.TIME,
+        'freq': AecMode.FREQ,
+        'subband': AecMode.SUBBAND
+    }
+
     config = AecConfig(
         mu=args.mu,
         filter_length_ms=args.filter_ms,
-        mode=AecMode.SUBBAND if args.mode == 'subband' else AecMode.TIME_DOMAIN,
+        mode=mode_map[args.mode],
         enable_dtd=not args.no_dtd,
         enable_res=args.enable_res,
         res_g_min_db=args.res_g_min

@@ -2,7 +2,10 @@
  * aec.c - Acoustic Echo Cancellation main implementation
  *
  * Orchestrates adaptive filter with DTD protection.
- * Supports both time-domain NLMS and frequency-domain Subband NLMS.
+ * Supports three filter modes:
+ *   - TIME:    Time-domain NLMS (sample-by-sample)
+ *   - FREQ:    Frequency-domain NLMS (single FFT block)
+ *   - SUBBAND: Partitioned block FDAF (PBFDAF)
  * Streaming architecture with hop-size based processing.
  */
 
@@ -19,8 +22,8 @@ struct Aec {
     AecDerivedParams params;
 
     // Sub-modules (one of these is active based on filter_mode)
-    NlmsFilter* nlms;           // Time-domain NLMS
-    SubbandNlms* subband;       // Frequency-domain Subband NLMS
+    NlmsFilter* nlms;           // Time-domain NLMS (AEC_MODE_TIME)
+    SubbandNlms* subband;       // Frequency-domain NLMS (AEC_MODE_FREQ or AEC_MODE_SUBBAND)
     DtdEstimator* dtd;
 
     // Buffers for block processing
@@ -47,32 +50,38 @@ Aec* aec_create(const AecConfig* config) {
     aec->params = aec_compute_params(config);
 
     // Create adaptive filter based on mode
-    if (config->filter_mode == AEC_MODE_SUBBAND) {
-        // Frequency-domain Subband NLMS
-        aec->subband = subband_nlms_create(
-            config->fft_size,
-            aec->params.n_partitions,
-            config->mu,
-            config->delta
-        );
-        if (!aec->subband) {
-            aec_destroy(aec);
-            return NULL;
-        }
-        aec->nlms = NULL;
-    } else {
-        // Time-domain NLMS (default)
-        aec->nlms = nlms_create(
-            aec->params.filter_length,
-            config->mu,
-            config->delta,
-            config->leak
-        );
-        if (!aec->nlms) {
-            aec_destroy(aec);
-            return NULL;
-        }
-        aec->subband = NULL;
+    switch (config->filter_mode) {
+        case AEC_MODE_FREQ:
+        case AEC_MODE_SUBBAND:
+            // Frequency-domain NLMS (FREQ uses n_partitions=1, SUBBAND uses multiple)
+            aec->subband = subband_nlms_create(
+                config->fft_size,
+                aec->params.n_partitions,
+                config->mu,
+                config->delta
+            );
+            if (!aec->subband) {
+                aec_destroy(aec);
+                return NULL;
+            }
+            aec->nlms = NULL;
+            break;
+
+        case AEC_MODE_TIME:
+        default:
+            // Time-domain NLMS (sample-by-sample)
+            aec->nlms = nlms_create(
+                aec->params.filter_length,
+                config->mu,
+                config->delta,
+                config->leak
+            );
+            if (!aec->nlms) {
+                aec_destroy(aec);
+                return NULL;
+            }
+            aec->subband = NULL;
+            break;
     }
 
     // Create DTD (if enabled)
@@ -181,13 +190,19 @@ int aec_process(Aec* aec,
     }
 
     // Process block through adaptive filter (mode-dependent)
-    if (aec->config.filter_mode == AEC_MODE_SUBBAND) {
-        // Frequency-domain Subband NLMS
-        subband_nlms_process(aec->subband, near_end, far_end, output, update_weights);
-    } else {
-        // Time-domain NLMS
-        nlms_process_block(aec->nlms, near_end, far_end, output,
-                           aec->echo_est_buffer, hop_size, update_weights);
+    switch (aec->config.filter_mode) {
+        case AEC_MODE_FREQ:
+        case AEC_MODE_SUBBAND:
+            // Frequency-domain NLMS (both use SubbandNlms, differ in n_partitions)
+            subband_nlms_process(aec->subband, near_end, far_end, output, update_weights);
+            break;
+
+        case AEC_MODE_TIME:
+        default:
+            // Time-domain NLMS
+            nlms_process_block(aec->nlms, near_end, far_end, output,
+                               aec->echo_est_buffer, hop_size, update_weights);
+            break;
     }
 
     // Update detailed DTD state (for query functions)
@@ -217,14 +232,15 @@ int aec_get_frame_size(const Aec* aec) {
 
 int aec_get_latency(const Aec* aec) {
     if (!aec) return 0;
-    // Both modes have hop_size latency, but subband mode has larger hop
-    // NLMS: hop_size (e.g., 160 @ 16kHz = 10ms)
-    // Subband: fft_size/2 (e.g., 256 @ 16kHz = 16ms)
+    // Latency = hop_size (mode-dependent):
+    // TIME:    hop_size (e.g., 160 @ 16kHz = 10ms)
+    // FREQ:    fft_size/2 (e.g., 256 @ 16kHz = 16ms)
+    // SUBBAND: fft_size/2 (e.g., 256 @ 16kHz = 16ms)
     return aec->params.hop_size;
 }
 
 AecFilterMode aec_get_filter_mode(const Aec* aec) {
-    return aec ? aec->config.filter_mode : AEC_MODE_NLMS;
+    return aec ? aec->config.filter_mode : AEC_MODE_TIME;
 }
 
 float aec_get_erle(const Aec* aec) {

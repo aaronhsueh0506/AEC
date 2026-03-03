@@ -15,6 +15,16 @@
 #include "aec.h"
 #include "wav_io.h"
 
+// Mode name helper
+static const char* mode_name(AecFilterMode mode) {
+    switch (mode) {
+        case AEC_MODE_TIME:    return "time";
+        case AEC_MODE_FREQ:    return "freq";
+        case AEC_MODE_SUBBAND: return "subband";
+        default:               return "unknown";
+    }
+}
+
 // Print usage
 static void print_usage(const char* program) {
     printf("AEC (Acoustic Echo Cancellation)\n");
@@ -24,13 +34,14 @@ static void print_usage(const char* program) {
     printf("  ref.wav    - Reference/loudspeaker signal (16-bit mono WAV)\n");
     printf("  output.wav - Echo-cancelled output\n\n");
     printf("Options:\n");
-    printf("  --mode <nlms|subband>  - Filter mode (default: nlms)\n");
-    printf("  --mu <value>           - Step size (default: 0.3)\n");
-    printf("  --filter <ms>          - Filter length in ms (default: 250)\n");
-    printf("  --no-dtd               - Disable double-talk detection\n");
+    printf("  --mode <time|freq|subband>  - Filter mode (default: time)\n");
+    printf("  --mu <value>                - Step size (default: 0.3)\n");
+    printf("  --filter <ms>               - Filter length in ms (default: 250)\n");
+    printf("  --no-dtd                    - Disable double-talk detection\n");
     printf("\nFilter modes:\n");
-    printf("  nlms    - Time-domain NLMS (lower latency, hop=10ms)\n");
-    printf("  subband - Frequency-domain NLMS (faster convergence, hop=16ms)\n");
+    printf("  time    - Time-domain NLMS (lowest latency, hop=10ms)\n");
+    printf("  freq    - Frequency-domain NLMS (single block, hop=16ms)\n");
+    printf("  subband - Partitioned FDAF (faster convergence, long echo paths)\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -47,17 +58,19 @@ int main(int argc, char* argv[]) {
     float mu = 0.3f;
     int filter_ms = 250;
     bool enable_dtd = true;
-    AecFilterMode mode = AEC_MODE_NLMS;
+    AecFilterMode mode = AEC_MODE_TIME;
 
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
             i++;
-            if (strcmp(argv[i], "subband") == 0) {
+            if (strcmp(argv[i], "time") == 0) {
+                mode = AEC_MODE_TIME;
+            } else if (strcmp(argv[i], "freq") == 0) {
+                mode = AEC_MODE_FREQ;
+            } else if (strcmp(argv[i], "subband") == 0) {
                 mode = AEC_MODE_SUBBAND;
-            } else if (strcmp(argv[i], "nlms") == 0) {
-                mode = AEC_MODE_NLMS;
             } else {
-                fprintf(stderr, "Unknown mode: %s (use 'nlms' or 'subband')\n", argv[i]);
+                fprintf(stderr, "Unknown mode: %s (use 'time', 'freq', or 'subband')\n", argv[i]);
                 return 1;
             }
         } else if (strcmp(argv[i], "--mu") == 0 && i + 1 < argc) {
@@ -113,13 +126,13 @@ int main(int argc, char* argv[]) {
     printf("  Reference:  %s (%d samples)\n", ref_path, ref_samples);
     printf("  Sample rate: %d Hz\n", sample_rate);
     printf("  Duration: %.2f seconds\n", (float)num_samples / sample_rate);
-    printf("  Filter mode: %s\n", mode == AEC_MODE_SUBBAND ? "subband" : "nlms");
+    printf("  Filter mode: %s\n", mode_name(mode));
     printf("  Hop size: %d samples (%.1f ms)\n", params.hop_size,
            1000.0f * params.hop_size / sample_rate);
     printf("  Step size (mu): %.3f\n", mu);
     printf("  Filter length: %d ms (%d taps)\n",
            filter_ms, sample_rate * filter_ms / 1000);
-    if (mode == AEC_MODE_SUBBAND) {
+    if (mode == AEC_MODE_FREQ || mode == AEC_MODE_SUBBAND) {
         printf("  Partitions: %d\n", params.n_partitions);
     }
     printf("  DTD: %s\n", enable_dtd ? "enabled" : "disabled");
