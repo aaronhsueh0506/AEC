@@ -16,19 +16,30 @@ extern "C" {
 #endif
 
 /**
+ * AEC filter mode selection
+ */
+typedef enum {
+    AEC_MODE_NLMS,      // Time-domain NLMS (default, lower latency)
+    AEC_MODE_SUBBAND    // Frequency-domain Subband NLMS (faster convergence)
+} AecFilterMode;
+
+/**
  * Configuration structure for AEC
  */
 typedef struct {
     int sample_rate;            // Sample rate (16000 Hz)
     int frame_size_ms;          // Frame length in ms (20)
-    int frame_shift_ms;         // Frame shift in ms (10) = hop size
+    int frame_shift_ms;         // Frame shift in ms (10) = hop size for NLMS mode
     int fft_size;               // FFT size (512)
+
+    // Filter mode selection
+    AecFilterMode filter_mode;  // AEC_MODE_NLMS or AEC_MODE_SUBBAND
 
     // NLMS adaptive filter parameters
     int filter_length_ms;       // Filter length in ms (250)
     float mu;                   // Step size (0.3)
     float delta;                // Regularization (1e-8)
-    float leak;                 // Weight leakage factor (0.9999)
+    float leak;                 // Weight leakage factor (0.9999, NLMS only)
 
     // DTD (Double-Talk Detection) parameters
     bool enable_dtd;            // Enable DTD (true)
@@ -42,14 +53,15 @@ typedef struct {
     float res_over_sub;         // Over-subtraction factor (1.5)
     float res_alpha;            // Gain smoothing (0.8)
 
-    // Subband mode (for future use)
-    bool enable_subband;        // Use subband NLMS (false for now)
-
 } AecConfig;
 
 /**
  * Create default configuration for given sample rate
  * FFT size is automatically calculated to be >= frame_size (next power of 2)
+ *
+ * Note: hop_size depends on filter_mode:
+ *   - AEC_MODE_NLMS:    hop = sample_rate * frame_shift_ms / 1000 (e.g., 160 @ 16kHz)
+ *   - AEC_MODE_SUBBAND: hop = fft_size / 2 (e.g., 256 @ fft_size=512)
  */
 static inline AecConfig aec_default_config(int sample_rate) {
     AecConfig config;
@@ -65,6 +77,9 @@ static inline AecConfig aec_default_config(int sample_rate) {
         fft_size *= 2;
     }
     config.fft_size = fft_size;
+
+    // Filter mode: default to time-domain NLMS (lower latency)
+    config.filter_mode = AEC_MODE_NLMS;
 
     // NLMS parameters (tuned for 200-300ms echo path)
     config.filter_length_ms = 250;
@@ -84,9 +99,6 @@ static inline AecConfig aec_default_config(int sample_rate) {
     config.res_over_sub = 1.5f;
     config.res_alpha = 0.8f;
 
-    // Subband mode (disabled by default, time-domain first)
-    config.enable_subband = false;
-
     return config;
 }
 
@@ -95,20 +107,36 @@ static inline AecConfig aec_default_config(int sample_rate) {
  */
 typedef struct {
     int frame_size;         // Samples per frame
-    int hop_size;           // Samples per hop (frame shift)
+    int hop_size;           // Samples per hop (mode-dependent)
     int filter_length;      // Filter length in samples
     int n_freqs;            // Number of frequency bins (fft_size/2 + 1)
+    int n_partitions;       // Number of filter partitions (subband mode)
 } AecDerivedParams;
 
 /**
  * Compute derived parameters from configuration
+ *
+ * Note: hop_size is mode-dependent:
+ *   - NLMS mode:    hop = sample_rate * frame_shift_ms / 1000
+ *   - Subband mode: hop = fft_size / 2 (overlap-save requirement)
  */
 static inline AecDerivedParams aec_compute_params(const AecConfig* config) {
     AecDerivedParams params;
     params.frame_size = config->sample_rate * config->frame_size_ms / 1000;
-    params.hop_size = config->sample_rate * config->frame_shift_ms / 1000;
     params.filter_length = config->sample_rate * config->filter_length_ms / 1000;
     params.n_freqs = config->fft_size / 2 + 1;
+
+    if (config->filter_mode == AEC_MODE_SUBBAND) {
+        // Subband mode: hop = fft_size / 2 (overlap-save)
+        params.hop_size = config->fft_size / 2;
+        // n_partitions = ceil(filter_length / hop_size)
+        params.n_partitions = (params.filter_length + params.hop_size - 1) / params.hop_size;
+    } else {
+        // NLMS mode: use configured frame shift
+        params.hop_size = config->sample_rate * config->frame_shift_ms / 1000;
+        params.n_partitions = 0;  // Not used in NLMS mode
+    }
+
     return params;
 }
 

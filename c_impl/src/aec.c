@@ -1,12 +1,14 @@
 /**
  * aec.c - Acoustic Echo Cancellation main implementation
  *
- * Orchestrates NLMS adaptive filter with DTD protection.
+ * Orchestrates adaptive filter with DTD protection.
+ * Supports both time-domain NLMS and frequency-domain Subband NLMS.
  * Streaming architecture with hop-size based processing.
  */
 
 #include "aec.h"
 #include "nlms_filter.h"
+#include "subband_nlms.h"
 #include "dtd.h"
 #include <stdlib.h>
 #include <string.h>
@@ -16,8 +18,9 @@ struct Aec {
     AecConfig config;
     AecDerivedParams params;
 
-    // Sub-modules
-    NlmsFilter* nlms;
+    // Sub-modules (one of these is active based on filter_mode)
+    NlmsFilter* nlms;           // Time-domain NLMS
+    SubbandNlms* subband;       // Frequency-domain Subband NLMS
     DtdEstimator* dtd;
 
     // Buffers for block processing
@@ -43,16 +46,33 @@ Aec* aec_create(const AecConfig* config) {
     aec->config = *config;
     aec->params = aec_compute_params(config);
 
-    // Create NLMS filter
-    aec->nlms = nlms_create(
-        aec->params.filter_length,
-        config->mu,
-        config->delta,
-        config->leak
-    );
-    if (!aec->nlms) {
-        aec_destroy(aec);
-        return NULL;
+    // Create adaptive filter based on mode
+    if (config->filter_mode == AEC_MODE_SUBBAND) {
+        // Frequency-domain Subband NLMS
+        aec->subband = subband_nlms_create(
+            config->fft_size,
+            aec->params.n_partitions,
+            config->mu,
+            config->delta
+        );
+        if (!aec->subband) {
+            aec_destroy(aec);
+            return NULL;
+        }
+        aec->nlms = NULL;
+    } else {
+        // Time-domain NLMS (default)
+        aec->nlms = nlms_create(
+            aec->params.filter_length,
+            config->mu,
+            config->delta,
+            config->leak
+        );
+        if (!aec->nlms) {
+            aec_destroy(aec);
+            return NULL;
+        }
+        aec->subband = NULL;
     }
 
     // Create DTD (if enabled)
@@ -95,6 +115,7 @@ Aec* aec_create(const AecConfig* config) {
 void aec_destroy(Aec* aec) {
     if (aec) {
         nlms_destroy(aec->nlms);
+        subband_nlms_destroy(aec->subband);
         dtd_destroy(aec->dtd);
         free(aec->near_buffer);
         free(aec->far_buffer);
@@ -107,7 +128,12 @@ void aec_destroy(Aec* aec) {
 void aec_reset(Aec* aec) {
     if (!aec) return;
 
-    nlms_reset(aec->nlms);
+    if (aec->nlms) {
+        nlms_reset(aec->nlms);
+    }
+    if (aec->subband) {
+        subband_nlms_reset(aec->subband);
+    }
     if (aec->dtd) {
         dtd_reset(aec->dtd);
     }
@@ -154,9 +180,15 @@ int aec_process(Aec* aec,
         }
     }
 
-    // Process block through NLMS
-    nlms_process_block(aec->nlms, near_end, far_end, output,
-                       aec->echo_est_buffer, hop_size, update_weights);
+    // Process block through adaptive filter (mode-dependent)
+    if (aec->config.filter_mode == AEC_MODE_SUBBAND) {
+        // Frequency-domain Subband NLMS
+        subband_nlms_process(aec->subband, near_end, far_end, output, update_weights);
+    } else {
+        // Time-domain NLMS
+        nlms_process_block(aec->nlms, near_end, far_end, output,
+                           aec->echo_est_buffer, hop_size, update_weights);
+    }
 
     // Update detailed DTD state (for query functions)
     if (aec->dtd) {
@@ -184,8 +216,15 @@ int aec_get_frame_size(const Aec* aec) {
 }
 
 int aec_get_latency(const Aec* aec) {
-    // Time-domain NLMS has minimal latency (just the hop_size)
-    return aec ? aec->params.hop_size : 0;
+    if (!aec) return 0;
+    // Both modes have hop_size latency, but subband mode has larger hop
+    // NLMS: hop_size (e.g., 160 @ 16kHz = 10ms)
+    // Subband: fft_size/2 (e.g., 256 @ 16kHz = 16ms)
+    return aec->params.hop_size;
+}
+
+AecFilterMode aec_get_filter_mode(const Aec* aec) {
+    return aec ? aec->config.filter_mode : AEC_MODE_NLMS;
 }
 
 float aec_get_erle(const Aec* aec) {

@@ -24,9 +24,13 @@ static void print_usage(const char* program) {
     printf("  ref.wav    - Reference/loudspeaker signal (16-bit mono WAV)\n");
     printf("  output.wav - Echo-cancelled output\n\n");
     printf("Options:\n");
-    printf("  --mu <value>     - Step size (default: 0.3)\n");
-    printf("  --filter <ms>    - Filter length in ms (default: 250)\n");
-    printf("  --no-dtd         - Disable double-talk detection\n");
+    printf("  --mode <nlms|subband>  - Filter mode (default: nlms)\n");
+    printf("  --mu <value>           - Step size (default: 0.3)\n");
+    printf("  --filter <ms>          - Filter length in ms (default: 250)\n");
+    printf("  --no-dtd               - Disable double-talk detection\n");
+    printf("\nFilter modes:\n");
+    printf("  nlms    - Time-domain NLMS (lower latency, hop=10ms)\n");
+    printf("  subband - Frequency-domain NLMS (faster convergence, hop=16ms)\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -43,9 +47,20 @@ int main(int argc, char* argv[]) {
     float mu = 0.3f;
     int filter_ms = 250;
     bool enable_dtd = true;
+    AecFilterMode mode = AEC_MODE_NLMS;
 
     for (int i = 4; i < argc; i++) {
-        if (strcmp(argv[i], "--mu") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+            i++;
+            if (strcmp(argv[i], "subband") == 0) {
+                mode = AEC_MODE_SUBBAND;
+            } else if (strcmp(argv[i], "nlms") == 0) {
+                mode = AEC_MODE_NLMS;
+            } else {
+                fprintf(stderr, "Unknown mode: %s (use 'nlms' or 'subband')\n", argv[i]);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--mu") == 0 && i + 1 < argc) {
             mu = (float)atof(argv[++i]);
         } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
             filter_ms = atoi(argv[++i]);
@@ -83,22 +98,32 @@ int main(int argc, char* argv[]) {
     int ref_samples = ref_reader->info.num_samples;
     int num_samples = (mic_samples < ref_samples) ? mic_samples : ref_samples;
 
+    // Create AEC config first so we can show accurate hop size
+    AecConfig config = aec_default_config(sample_rate);
+    config.filter_mode = mode;
+    config.mu = mu;
+    config.filter_length_ms = filter_ms;
+    config.enable_dtd = enable_dtd;
+
+    // Compute derived params to show accurate info
+    AecDerivedParams params = aec_compute_params(&config);
+
     printf("AEC Processing:\n");
     printf("  Microphone: %s (%d samples)\n", mic_path, mic_samples);
     printf("  Reference:  %s (%d samples)\n", ref_path, ref_samples);
     printf("  Sample rate: %d Hz\n", sample_rate);
     printf("  Duration: %.2f seconds\n", (float)num_samples / sample_rate);
+    printf("  Filter mode: %s\n", mode == AEC_MODE_SUBBAND ? "subband" : "nlms");
+    printf("  Hop size: %d samples (%.1f ms)\n", params.hop_size,
+           1000.0f * params.hop_size / sample_rate);
     printf("  Step size (mu): %.3f\n", mu);
     printf("  Filter length: %d ms (%d taps)\n",
            filter_ms, sample_rate * filter_ms / 1000);
+    if (mode == AEC_MODE_SUBBAND) {
+        printf("  Partitions: %d\n", params.n_partitions);
+    }
     printf("  DTD: %s\n", enable_dtd ? "enabled" : "disabled");
     printf("\n");
-
-    // Create AEC
-    AecConfig config = aec_default_config(sample_rate);
-    config.mu = mu;
-    config.filter_length_ms = filter_ms;
-    config.enable_dtd = enable_dtd;
 
     Aec* aec = aec_create(&config);
     if (!aec) {

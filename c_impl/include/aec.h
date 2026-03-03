@@ -8,8 +8,11 @@
  *
  * Usage:
  *   AecConfig cfg = aec_default_config(16000);
+ *   // Optional: switch to subband mode for faster convergence
+ *   cfg.filter_mode = AEC_MODE_SUBBAND;
  *   Aec* aec = aec_create(&cfg);
  *
+ *   int hop = aec_get_hop_size(aec);  // Mode-dependent!
  *   while (has_audio) {
  *       aec_process(aec, mic_in, ref_in, output);
  *   }
@@ -91,6 +94,11 @@ bool aec_is_dtd_active(const Aec* aec);
  * Get configuration (for inspection)
  */
 const AecConfig* aec_get_config(const Aec* aec);
+
+/**
+ * Get current filter mode
+ */
+AecFilterMode aec_get_filter_mode(const Aec* aec);
 
 #ifdef __cplusplus
 }
