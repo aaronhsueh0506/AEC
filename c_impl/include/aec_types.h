@@ -26,7 +26,8 @@ extern "C" {
 typedef enum {
     AEC_MODE_TIME,      // Time-domain NLMS (default, lowest latency)
     AEC_MODE_FREQ,      // Frequency-domain NLMS (single block, no partitions)
-    AEC_MODE_SUBBAND    // Partitioned block FDAF (PBFDAF, for long echo paths)
+    AEC_MODE_SUBBAND,   // Partitioned block FDAF (PBFDAF, for long echo paths)
+    AEC_MODE_LMS        // Time-domain LMS (no normalization, simplest)
 } AecFilterMode;
 
 /**
@@ -74,8 +75,8 @@ static inline AecConfig aec_default_config(int sample_rate) {
     AecConfig config;
 
     config.sample_rate = sample_rate;
-    config.frame_size_ms = 20;
-    config.frame_shift_ms = 10;
+    config.frame_size_ms = 32;
+    config.frame_shift_ms = 16;
 
     // Calculate FFT size (next power of 2 >= frame_size)
     int frame_size = sample_rate * config.frame_size_ms / 1000;
@@ -147,9 +148,10 @@ static inline AecDerivedParams aec_compute_params(const AecConfig* config) {
             params.n_partitions = (params.filter_length + params.hop_size - 1) / params.hop_size;
             break;
 
+        case AEC_MODE_LMS:
         case AEC_MODE_TIME:
         default:
-            // Time-domain NLMS: use configured frame shift
+            // Time-domain NLMS/LMS: use configured frame shift
             params.hop_size = config->sample_rate * config->frame_shift_ms / 1000;
             params.n_partitions = 0;  // Not used in time-domain mode
             break;

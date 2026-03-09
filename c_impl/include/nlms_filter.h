@@ -18,15 +18,17 @@ extern "C" {
 typedef struct NlmsFilter NlmsFilter;
 
 /**
- * Create NLMS filter
+ * Create NLMS/LMS filter
  *
  * @param filter_length Filter length in samples
- * @param mu Step size (0.1-0.8, typical 0.3)
+ * @param mu Step size (NLMS: 0.1-0.8, LMS: 0.001-0.05)
  * @param delta Regularization constant (1e-8)
- * @param leak Weight leakage factor (0.9999)
- * @return NLMS filter handle, or NULL on error
+ * @param leak Weight leakage factor (0.9999 for NLMS, 1.0 for LMS)
+ * @param normalize true=NLMS (power normalization), false=LMS (fixed step)
+ * @return Filter handle, or NULL on error
  */
-NlmsFilter* nlms_create(int filter_length, float mu, float delta, float leak);
+NlmsFilter* nlms_create(int filter_length, float mu, float delta, float leak,
+                         bool normalize);
 
 /**
  * Destroy NLMS filter

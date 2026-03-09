@@ -23,6 +23,7 @@ import soundfile as sf
 
 
 class AecMode(Enum):
+    LMS = "lms"         # Time-domain LMS (no normalization, simplest)
     TIME = "time"       # Time-domain NLMS (sample-by-sample)
     FREQ = "freq"       # Frequency-domain NLMS (single block, n_partitions=1)
     SUBBAND = "subband" # Partitioned block FDAF (multiple partitions)
@@ -32,8 +33,8 @@ class AecMode(Enum):
 class AecConfig:
     """AEC Configuration"""
     sample_rate: int = 16000
-    frame_size_ms: int = 20
-    frame_shift_ms: int = 10
+    frame_size_ms: int = 32
+    frame_shift_ms: int = 16
     filter_length_ms: int = 250
     mu: float = 0.3              # Step size
     delta: float = 1e-8          # Regularization
@@ -74,11 +75,13 @@ class NlmsFilter:
     """Time-domain NLMS Adaptive Filter"""
 
     def __init__(self, filter_length: int, mu: float = 0.3,
-                 delta: float = 1e-8, leak: float = 0.9999):
+                 delta: float = 1e-8, leak: float = 0.9999,
+                 normalize: bool = True):
         self.filter_length = filter_length
         self.mu = mu
         self.delta = delta
         self.leak = leak
+        self.normalize = normalize
         self.weights = np.zeros(filter_length, dtype=np.float32)
         self.ref_buffer = np.zeros(filter_length, dtype=np.float32)
         self.power_sum = 0.0
@@ -98,7 +101,10 @@ class NlmsFilter:
         error = near_end - echo_est
 
         if update_weights:
-            mu_eff = self.mu / (self.power_sum + self.delta)
+            if self.normalize:
+                mu_eff = self.mu / (self.power_sum + self.delta)
+            else:
+                mu_eff = self.mu
             self.weights = self.leak * self.weights + mu_eff * error * self.ref_buffer
 
         return error, echo_est
@@ -344,13 +350,25 @@ class AEC:
             )
             self._hop_size = self.filter.hop_size
             self._n_partitions = n_partitions
+        elif self.config.mode == AecMode.LMS:
+            # LMS: Time-domain, no normalization
+            self.filter = NlmsFilter(
+                filter_length=self.config.filter_length,
+                mu=self.config.mu,
+                delta=self.config.delta,
+                leak=1.0,
+                normalize=False
+            )
+            self._hop_size = self.config.hop_size
+            self._n_partitions = 0
         else:
             # TIME: Time-domain NLMS
             self.filter = NlmsFilter(
                 filter_length=self.config.filter_length,
                 mu=self.config.mu,
                 delta=self.config.delta,
-                leak=self.config.leak
+                leak=self.config.leak,
+                normalize=True
             )
             self._hop_size = self.config.hop_size
             self._n_partitions = 0
@@ -507,7 +525,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Filter modes:
-    time    - Time-domain NLMS (sample-by-sample, lowest latency)
+    lms     - Time-domain LMS (simplest, fixed step size, mu~0.01)
+    time    - Time-domain NLMS (normalized, default)
     freq    - Frequency-domain NLMS (single FFT block, no partitions)
     subband - Partitioned block FDAF (for long echo paths, fastest convergence)
 
@@ -523,7 +542,7 @@ Examples:
     parser.add_argument('output', help='Output WAV file')
     parser.add_argument('--mu', type=float, default=0.3, help='Step size (default: 0.3)')
     parser.add_argument('--filter-ms', type=int, default=250, help='Filter length in ms')
-    parser.add_argument('--mode', choices=['time', 'freq', 'subband'], default='time',
+    parser.add_argument('--mode', choices=['lms', 'time', 'freq', 'subband'], default='time',
                         help='Filter mode (default: time)')
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
@@ -533,13 +552,19 @@ Examples:
 
     # Map mode string to enum
     mode_map = {
+        'lms': AecMode.LMS,
         'time': AecMode.TIME,
         'freq': AecMode.FREQ,
         'subband': AecMode.SUBBAND
     }
 
+    # LMS needs much smaller step size
+    mu = args.mu
+    if args.mode == 'lms' and args.mu == 0.3:
+        mu = 0.01  # Default mu for LMS
+
     config = AecConfig(
-        mu=args.mu,
+        mu=mu,
         filter_length_ms=args.filter_ms,
         mode=mode_map[args.mode],
         enable_dtd=not args.no_dtd,

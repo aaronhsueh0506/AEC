@@ -21,6 +21,7 @@ static const char* mode_name(AecFilterMode mode) {
         case AEC_MODE_TIME:    return "time";
         case AEC_MODE_FREQ:    return "freq";
         case AEC_MODE_SUBBAND: return "subband";
+        case AEC_MODE_LMS:     return "lms";
         default:               return "unknown";
     }
 }
@@ -34,14 +35,15 @@ static void print_usage(const char* program) {
     printf("  ref.wav    - Reference/loudspeaker signal (16-bit mono WAV)\n");
     printf("  output.wav - Echo-cancelled output\n\n");
     printf("Options:\n");
-    printf("  --mode <time|freq|subband>  - Filter mode (default: time)\n");
+    printf("  --mode <time|freq|subband|lms> - Filter mode (default: time)\n");
     printf("  --mu <value>                - Step size (default: 0.3)\n");
     printf("  --filter <ms>               - Filter length in ms (default: 250)\n");
     printf("  --no-dtd                    - Disable double-talk detection\n");
     printf("\nFilter modes:\n");
-    printf("  time    - Time-domain NLMS (lowest latency, hop=10ms)\n");
-    printf("  freq    - Frequency-domain NLMS (single block, hop=16ms)\n");
+    printf("  time    - Time-domain NLMS (lowest latency)\n");
+    printf("  freq    - Frequency-domain NLMS (single block)\n");
     printf("  subband - Partitioned FDAF (faster convergence, long echo paths)\n");
+    printf("  lms     - Time-domain LMS (simplest, fixed step size)\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -69,8 +71,10 @@ int main(int argc, char* argv[]) {
                 mode = AEC_MODE_FREQ;
             } else if (strcmp(argv[i], "subband") == 0) {
                 mode = AEC_MODE_SUBBAND;
+            } else if (strcmp(argv[i], "lms") == 0) {
+                mode = AEC_MODE_LMS;
             } else {
-                fprintf(stderr, "Unknown mode: %s (use 'time', 'freq', or 'subband')\n", argv[i]);
+                fprintf(stderr, "Unknown mode: %s (use 'time', 'freq', 'subband', or 'lms')\n", argv[i]);
                 return 1;
             }
         } else if (strcmp(argv[i], "--mu") == 0 && i + 1 < argc) {
@@ -110,6 +114,11 @@ int main(int argc, char* argv[]) {
     int mic_samples = mic_reader->info.num_samples;
     int ref_samples = ref_reader->info.num_samples;
     int num_samples = (mic_samples < ref_samples) ? mic_samples : ref_samples;
+
+    // LMS mode: auto-set small mu if user didn't override
+    if (mode == AEC_MODE_LMS && mu == 0.3f) {
+        mu = 0.01f;
+    }
 
     // Create AEC config first so we can show accurate hop size
     AecConfig config = aec_default_config(sample_rate);

@@ -67,6 +67,22 @@ Aec* aec_create(const AecConfig* config) {
             aec->nlms = NULL;
             break;
 
+        case AEC_MODE_LMS:
+            // Time-domain LMS (no normalization, fixed step size)
+            aec->nlms = nlms_create(
+                aec->params.filter_length,
+                config->mu,
+                config->delta,
+                1.0f,   // leak=1.0 for LMS (no weight decay)
+                false   // normalize=false -> LMS
+            );
+            if (!aec->nlms) {
+                aec_destroy(aec);
+                return NULL;
+            }
+            aec->subband = NULL;
+            break;
+
         case AEC_MODE_TIME:
         default:
             // Time-domain NLMS (sample-by-sample)
@@ -74,7 +90,8 @@ Aec* aec_create(const AecConfig* config) {
                 aec->params.filter_length,
                 config->mu,
                 config->delta,
-                config->leak
+                config->leak,
+                true    // normalize=true -> NLMS
             );
             if (!aec->nlms) {
                 aec_destroy(aec);
@@ -197,9 +214,10 @@ int aec_process(Aec* aec,
             subband_nlms_process(aec->subband, near_end, far_end, output, update_weights);
             break;
 
+        case AEC_MODE_LMS:
         case AEC_MODE_TIME:
         default:
-            // Time-domain NLMS
+            // Time-domain NLMS/LMS
             nlms_process_block(aec->nlms, near_end, far_end, output,
                                aec->echo_est_buffer, hop_size, update_weights);
             break;

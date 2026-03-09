@@ -18,6 +18,7 @@ struct NlmsFilter {
     float mu;               // Step size
     float delta;            // Regularization
     float leak;             // Weight leakage
+    bool normalize;         // true=NLMS (power norm), false=LMS (fixed step)
 
     float* weights;         // Filter weights [filter_length]
     float* ref_buffer;      // Circular buffer for reference [filter_length]
@@ -25,8 +26,9 @@ struct NlmsFilter {
     float power_sum;        // Running sum of x^2 for efficiency
 };
 
-NlmsFilter* nlms_create(int filter_length, float mu, float delta, float leak) {
-    if (filter_length <= 0 || mu <= 0 || mu > 1.0f) {
+NlmsFilter* nlms_create(int filter_length, float mu, float delta, float leak,
+                         bool normalize) {
+    if (filter_length <= 0 || mu <= 0) {
         return NULL;
     }
 
@@ -37,6 +39,7 @@ NlmsFilter* nlms_create(int filter_length, float mu, float delta, float leak) {
     filter->mu = mu;
     filter->delta = delta;
     filter->leak = leak;
+    filter->normalize = normalize;
 
     filter->weights = (float*)calloc(filter_length, sizeof(float));
     filter->ref_buffer = (float*)calloc(filter_length, sizeof(float));
@@ -104,9 +107,16 @@ float nlms_process_sample(NlmsFilter* filter,
 
     // Update weights if enabled (not during double-talk)
     if (update_weights) {
-        // Normalized step size
-        float norm_power = filter->power_sum + filter->delta;
-        float mu_eff = filter->mu / norm_power;
+        // Compute effective step size (NLMS vs LMS)
+        float mu_eff;
+        if (filter->normalize) {
+            // NLMS: normalize by input power
+            float norm_power = filter->power_sum + filter->delta;
+            mu_eff = filter->mu / norm_power;
+        } else {
+            // LMS: fixed step size
+            mu_eff = filter->mu;
+        }
 
         // Weight update with leakage
         for (int k = 0; k < L; k++) {
