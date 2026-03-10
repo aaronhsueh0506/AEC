@@ -143,15 +143,12 @@ static inline AecDerivedParams aec_compute_params(const AecConfig* config) {
 
     switch (config->filter_mode) {
         case AEC_MODE_FREQ:
-            // Single block: filter limited to hop_size
-            params.filter_length = config->hop_size;
-            params.n_partitions = 1;
-            break;
-
         case AEC_MODE_SUBBAND:
-            // Partitioned block FDAF: multiple partitions
+            // Frequency-domain modes: both use SubbandNlms with n_partitions
+            // Respects user-specified filter_length
             params.filter_length = config->filter_length;
             params.n_partitions = (config->filter_length + config->hop_size - 1) / config->hop_size;
+            if (params.n_partitions < 1) params.n_partitions = 1;
             break;
 
         case AEC_MODE_LMS:

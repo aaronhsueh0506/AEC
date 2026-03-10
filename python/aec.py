@@ -333,14 +333,12 @@ class AEC:
 
         # Create adaptive filter based on mode
         if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
-            # Frequency-domain modes
+            # Frequency-domain modes: both use SubbandNlms with n_partitions
+            # FREQ default: 1 partition (hop_size filter)
+            # SUBBAND default: ceil(filter_length / hop_size) partitions
+            # Both respect user-specified filter_length
             hop_size = self.config.fft_size // 2
-            if self.config.mode == AecMode.FREQ:
-                # Single block: filter limited to hop_size
-                n_partitions = 1
-            else:
-                # SUBBAND: multiple partitions
-                n_partitions = max(1, (self.config.filter_length + hop_size - 1) // hop_size)
+            n_partitions = max(1, (self.config.filter_length + hop_size - 1) // hop_size)
 
             self.filter = SubbandNlms(
                 block_size=self.config.fft_size,
@@ -419,17 +417,15 @@ class AEC:
         # This avoids the bootstrap problem where the filter can't converge
         # because DTD blocks updates before echo estimates are valid.
 
-        # Error-based DTD: use previous block's decision
-        # Subband: freeze weights (block-level update, recovers quickly)
-        # NLMS/LMS: reduce mu (soft DTD, prevents stale-weight divergence)
-        update_weights = True
-        if self.config.enable_dtd and self._dtd_active:
-            if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
-                update_weights = False
-            # NLMS/LMS: soft DTD — reduce mu instead of freezing
-
-        # Process based on mode
+        # DTD strategy per mode:
+        # - FREQ/SUBBAND: error-based DTD, freeze weights during double-talk
+        # - NLMS/LMS: NO DTD — leak factor handles double-talk naturally;
+        #   DTD causes weight explosion (soft DTD) or stale-weight drift (hard DTD)
         if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
+            update_weights = True
+            if self.config.enable_dtd and self._dtd_active:
+                update_weights = False
+
             output = self.filter.process(near_end, far_end, update_weights)
 
             # RES post-filter
@@ -448,24 +444,8 @@ class AEC:
                 near_energy = np.mean(near_end ** 2)
                 self._update_dtd(error_energy, echo_energy, near_energy)
         else:
-            # NLMS/LMS: soft DTD via reduced mu
-            saved_mu = None
-            if self.config.enable_dtd and self._dtd_active:
-                saved_mu = self.filter.mu
-                self.filter.mu = saved_mu * 0.1  # 10x reduced step during double-talk
-
-            output, echo_est = self.filter.process_block(
-                near_end, far_end, update_weights=True)
-
-            if saved_mu is not None:
-                self.filter.mu = saved_mu
-
-            # Update DTD state for NEXT block
-            if self.config.enable_dtd:
-                error_energy = np.mean(output ** 2)
-                echo_energy = np.mean(echo_est ** 2)
-                near_energy = np.mean(near_end ** 2)
-                self._update_dtd(error_energy, echo_energy, near_energy)
+            # NLMS/LMS: always update weights (no DTD)
+            output, _ = self.filter.process_block(near_end, far_end, update_weights=True)
 
         # ERLE
         for i in range(len(near_end)):
