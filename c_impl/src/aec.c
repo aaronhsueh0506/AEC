@@ -32,6 +32,13 @@ struct Aec {
     float* output_buffer;   // [hop_size]
     float* echo_est_buffer; // [hop_size]
 
+    // FREQ buffered FDAF (when internal_hop > hop_size)
+    float* freq_near_queue;     // [internal_hop]
+    float* freq_far_queue;      // [internal_hop]
+    float* freq_out_queue;      // [internal_hop]
+    int freq_queue_write;       // write position
+    int freq_out_read;          // read position in output queue
+
     // ERLE estimation
     float erle_smoothed;
     float near_power;
@@ -57,9 +64,10 @@ Aec* aec_create(const AecConfig* config) {
     switch (config->filter_mode) {
         case AEC_MODE_FREQ:
         case AEC_MODE_SUBBAND:
-            // FREQ=FDAF (n_partitions=1), SUBBAND=PBFDAF (n_partitions from filter_length)
+            // FREQ: FDAF (block_size from filter_length, n_partitions=1)
+            // SUBBAND: PBFDAF (block_size=fft_size, n_partitions from filter_length)
             aec->subband = subband_nlms_create(
-                config->fft_size,
+                aec->params.block_size,
                 aec->params.n_partitions,
                 config->mu,
                 config->delta
@@ -69,6 +77,22 @@ Aec* aec_create(const AecConfig* config) {
                 return NULL;
             }
             aec->nlms = NULL;
+
+            // FREQ: allocate buffering queues if internal_hop > hop_size
+            if (config->filter_mode == AEC_MODE_FREQ &&
+                aec->params.internal_hop > aec->params.hop_size) {
+                int ihop = aec->params.internal_hop;
+                aec->freq_near_queue = (float*)calloc(ihop, sizeof(float));
+                aec->freq_far_queue = (float*)calloc(ihop, sizeof(float));
+                aec->freq_out_queue = (float*)calloc(ihop, sizeof(float));
+                if (!aec->freq_near_queue || !aec->freq_far_queue ||
+                    !aec->freq_out_queue) {
+                    aec_destroy(aec);
+                    return NULL;
+                }
+                aec->freq_queue_write = 0;
+                aec->freq_out_read = 0;
+            }
             break;
 
         case AEC_MODE_LMS:
@@ -160,6 +184,9 @@ void aec_destroy(Aec* aec) {
         free(aec->far_buffer);
         free(aec->output_buffer);
         free(aec->echo_est_buffer);
+        free(aec->freq_near_queue);
+        free(aec->freq_far_queue);
+        free(aec->freq_out_queue);
         free(aec);
     }
 }
@@ -182,6 +209,15 @@ void aec_reset(Aec* aec) {
     memset(aec->far_buffer, 0, hop_size * sizeof(float));
     memset(aec->output_buffer, 0, hop_size * sizeof(float));
     memset(aec->echo_est_buffer, 0, hop_size * sizeof(float));
+
+    if (aec->freq_near_queue) {
+        int ihop = aec->params.internal_hop;
+        memset(aec->freq_near_queue, 0, ihop * sizeof(float));
+        memset(aec->freq_far_queue, 0, ihop * sizeof(float));
+        memset(aec->freq_out_queue, 0, ihop * sizeof(float));
+        aec->freq_queue_write = 0;
+        aec->freq_out_read = 0;
+    }
 
     aec->erle_smoothed = 0.0f;
     aec->near_power = 0.0f;
@@ -216,6 +252,36 @@ int aec_process(Aec* aec,
     // Process block through adaptive filter (mode-dependent)
     switch (aec->config.filter_mode) {
         case AEC_MODE_FREQ:
+            if (aec->freq_near_queue) {
+                // Buffered FDAF: accumulate hop_size into internal queue
+                memcpy(aec->freq_near_queue + aec->freq_queue_write,
+                       near_end, hop_size * sizeof(float));
+                memcpy(aec->freq_far_queue + aec->freq_queue_write,
+                       far_end, hop_size * sizeof(float));
+                aec->freq_queue_write += hop_size;
+
+                if (aec->freq_queue_write >= aec->params.internal_hop) {
+                    // Buffer full — run one big FDAF
+                    subband_nlms_process(aec->subband,
+                                         aec->freq_near_queue,
+                                         aec->freq_far_queue,
+                                         aec->freq_out_queue,
+                                         update_weights);
+                    aec->freq_queue_write = 0;
+                    aec->freq_out_read = 0;
+                }
+
+                // Read hop_size output from queue
+                memcpy(output, aec->freq_out_queue + aec->freq_out_read,
+                       hop_size * sizeof(float));
+                aec->freq_out_read += hop_size;
+            } else {
+                // No buffering needed (filter_length <= hop_size)
+                subband_nlms_process(aec->subband, near_end, far_end,
+                                     output, update_weights);
+            }
+            break;
+
         case AEC_MODE_SUBBAND:
             subband_nlms_process(aec->subband, near_end, far_end, output, update_weights);
             break;
@@ -285,11 +351,9 @@ int aec_get_frame_size(const Aec* aec) {
 
 int aec_get_latency(const Aec* aec) {
     if (!aec) return 0;
-    // Latency = hop_size (mode-dependent):
-    // TIME:    hop_size (e.g., 160 @ 16kHz = 10ms)
-    // FREQ:    fft_size/2 (e.g., 256 @ 16kHz = 16ms)
-    // SUBBAND: fft_size/2 (e.g., 256 @ 16kHz = 16ms)
-    return aec->params.hop_size;
+    // FREQ buffered FDAF: latency includes buffering delay
+    // Other modes: latency = hop_size
+    return aec->params.internal_hop;
 }
 
 AecFilterMode aec_get_filter_mode(const Aec* aec) {

@@ -20,13 +20,13 @@ extern "C" {
  *
  * Four modes with different trade-offs:
  *   - NLMS:    Time-domain NLMS, sample-by-sample
- *   - FREQ:    Frequency-domain NLMS, single FFT block, no partitions
+ *   - FREQ:    FDAF, single FFT block (buffered if filter > hop)
  *   - SUBBAND: Partitioned block FDAF (PBFDAF), for long echo paths
  *   - LMS:     Time-domain LMS, fixed step size, simplest
  */
 typedef enum {
     AEC_MODE_NLMS,      // Time-domain NLMS (default)
-    AEC_MODE_FREQ,      // Frequency-domain NLMS (single block, no partitions)
+    AEC_MODE_FREQ,      // FDAF: single FFT block (buffered if filter > hop)
     AEC_MODE_SUBBAND,   // Partitioned block FDAF (PBFDAF, for long echo paths)
     AEC_MODE_LMS        // Time-domain LMS (no normalization, simplest)
 } AecFilterMode;
@@ -122,46 +122,61 @@ static inline AecConfig aec_default_config(int sample_rate) {
  */
 typedef struct {
     int frame_size;         // = config.frame_size
-    int hop_size;           // = config.hop_size
-    int filter_length;      // Mode-dependent (FREQ: clamped to hop_size)
-    int n_freqs;            // Number of frequency bins (fft_size/2 + 1)
+    int hop_size;           // External hop size (= config.hop_size, e.g. 256)
+    int block_size;         // SubbandNlms FFT size (FREQ: 2*filter, SUBBAND: fft_size)
+    int internal_hop;       // SubbandNlms hop (= block_size/2)
+    int filter_length;      // Effective filter length
+    int n_freqs;            // Number of frequency bins (block_size/2 + 1)
     int n_partitions;       // Number of filter partitions (FREQ=1, SUBBAND=N)
 } AecDerivedParams;
 
 /**
  * Compute derived parameters from configuration
  *
- * FREQ mode:  filter_length forced to hop_size (1 hop history via overlap-save)
- * TIME/LMS:   filter_length forced to hop_size (1 hop history via circular buffer)
- * SUBBAND:    n_partitions = ceil(filter_length / hop_size), P hops history
+ * FREQ:    Buffered FDAF — single large FFT, block_size = next_pow2(2*filter_length)
+ *          External hop = config.hop_size, internal hop = block_size/2
+ * SUBBAND: PBFDAF — multiple partitions, block_size = config.fft_size
+ * NLMS/LMS: Time-domain, no SubbandNlms
  */
 static inline AecDerivedParams aec_compute_params(const AecConfig* config) {
     AecDerivedParams params;
     params.frame_size = config->frame_size;
     params.hop_size = config->hop_size;
-    params.n_freqs = config->fft_size / 2 + 1;
 
     switch (config->filter_mode) {
-        case AEC_MODE_FREQ:
-            // FDAF: single-block frequency-domain filter
-            params.filter_length = config->hop_size;
+        case AEC_MODE_FREQ: {
+            // True FDAF: single big FFT block, n_partitions=1
+            params.filter_length = config->filter_length;
             params.n_partitions = 1;
+            // block_size = next power of 2 >= 2 * filter_length
+            int desired = 2 * config->filter_length;
+            int bs = 256;
+            while (bs < desired) bs *= 2;
+            params.block_size = bs;
+            params.internal_hop = bs / 2;
+            params.n_freqs = bs / 2 + 1;
             break;
+        }
 
         case AEC_MODE_SUBBAND:
             // PBFDAF: partitioned block, configurable filter_length
             params.filter_length = config->filter_length;
             params.n_partitions = (config->filter_length + config->hop_size - 1) / config->hop_size;
             if (params.n_partitions < 1) params.n_partitions = 1;
+            params.block_size = config->fft_size;
+            params.internal_hop = config->hop_size;
+            params.n_freqs = config->fft_size / 2 + 1;
             break;
 
         case AEC_MODE_LMS:
         case AEC_MODE_NLMS:
         default:
-            // filter_length = user config (default: frame_size=512)
-            // circular buffer naturally retains filter_length-1 samples across blocks
+            // Time-domain: no SubbandNlms
             params.filter_length = config->filter_length;
             params.n_partitions = 0;
+            params.block_size = 0;
+            params.internal_hop = config->hop_size;
+            params.n_freqs = 0;
             break;
     }
 

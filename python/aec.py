@@ -340,25 +340,42 @@ class AEC:
 
         # Create adaptive filter based on mode
         if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
-            hop_size = self.config.fft_size // 2
             if self.config.mode == AecMode.FREQ:
-                # FDAF: single-block frequency-domain filter
+                # True FDAF: single big FFT block, n_partitions=1
+                # block_size = next power of 2 >= 2 * filter_length
+                desired = 2 * self.config.filter_length
+                block_size = 256
+                while block_size < desired:
+                    block_size *= 2
                 n_partitions = 1
+                self._internal_hop = block_size // 2
             else:
                 # PBFDAF: partitioned block, configurable filter_length
+                block_size = self.config.fft_size
+                hop_size = block_size // 2
                 n_partitions = max(1, (self.config.filter_length + hop_size - 1) // hop_size)
+                self._internal_hop = hop_size
 
             self.filter = SubbandNlms(
-                block_size=self.config.fft_size,
+                block_size=block_size,
                 n_partitions=n_partitions,
                 mu=self.config.mu,
                 delta=self.config.delta
             )
-            self._hop_size = self.filter.hop_size
+            self._hop_size = self.config.hop_size  # External hop (always 256)
             self._n_partitions = n_partitions
+
+            # FREQ buffering (when internal_hop > external hop)
+            if self.config.mode == AecMode.FREQ and self._internal_hop > self._hop_size:
+                self._freq_near_queue = np.zeros(self._internal_hop, dtype=np.float32)
+                self._freq_far_queue = np.zeros(self._internal_hop, dtype=np.float32)
+                self._freq_out_queue = np.zeros(self._internal_hop, dtype=np.float32)
+                self._freq_queue_write = 0
+                self._freq_out_read = 0
+            else:
+                self._freq_near_queue = None
         elif self.config.mode == AecMode.LMS:
             # LMS: Time-domain, no normalization
-            # filter_length = user config (default: frame_size)
             self.filter = NlmsFilter(
                 filter_length=self.config.filter_length,
                 mu=self.config.mu,
@@ -368,7 +385,9 @@ class AEC:
             )
             self.filter.clear_history = self.config.clear_filter_history
             self._hop_size = self.config.hop_size
+            self._internal_hop = self.config.hop_size
             self._n_partitions = 0
+            self._freq_near_queue = None
         else:
             # TIME: Time-domain NLMS
             # filter_length = user config (default: frame_size)
@@ -381,7 +400,9 @@ class AEC:
             )
             self.filter.clear_history = self.config.clear_filter_history
             self._hop_size = self.config.hop_size
+            self._internal_hop = self.config.hop_size
             self._n_partitions = 0
+            self._freq_near_queue = None
 
         # Error-based DTD state
         self._dtd_active = False
@@ -390,7 +411,7 @@ class AEC:
         # RES (only for frequency-domain modes)
         if self.config.enable_res and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
             self.res = ResFilter(
-                n_freqs=self.config.fft_size // 2 + 1,
+                n_freqs=self.filter.n_freqs,
                 g_min_db=self.config.res_g_min_db,
                 over_sub=self.config.res_over_sub,
                 alpha=self.config.res_alpha
@@ -409,6 +430,12 @@ class AEC:
         self._dtd_ratio_smooth = 0.0
         if self.res:
             self.res.reset()
+        if self._freq_near_queue is not None:
+            self._freq_near_queue.fill(0)
+            self._freq_far_queue.fill(0)
+            self._freq_out_queue.fill(0)
+            self._freq_queue_write = 0
+            self._freq_out_read = 0
         self.near_power = 0.0
         self.error_power = 0.0
 
@@ -434,10 +461,31 @@ class AEC:
             if self.config.enable_dtd and self._dtd_active:
                 update_weights = False
 
-            output = self.filter.process(near_end, far_end, update_weights)
+            if self._freq_near_queue is not None:
+                # Buffered FDAF: accumulate into queue
+                hop = self._hop_size
+                ihop = self._internal_hop
+                w = self._freq_queue_write
+                self._freq_near_queue[w:w+hop] = near_end
+                self._freq_far_queue[w:w+hop] = far_end
+                self._freq_queue_write = w + hop
 
-            # RES post-filter
-            if self.res:
+                if self._freq_queue_write >= ihop:
+                    # Buffer full — run one big FDAF
+                    big_out = self.filter.process(
+                        self._freq_near_queue, self._freq_far_queue, update_weights)
+                    self._freq_out_queue[:] = big_out
+                    self._freq_queue_write = 0
+                    self._freq_out_read = 0
+
+                r = self._freq_out_read
+                output = self._freq_out_queue[r:r+hop].copy()
+                self._freq_out_read = r + hop
+            else:
+                output = self.filter.process(near_end, far_end, update_weights)
+
+            # RES post-filter (skip for buffered FDAF — specs are for internal_hop)
+            if self.res and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
                 output_spec = np.fft.rfft(np.pad(output, (0, len(output))))
                 echo_spec = self.filter.echo_spec
@@ -448,8 +496,11 @@ class AEC:
             # Update DTD state for NEXT block
             if self.config.enable_dtd:
                 error_energy = np.mean(output ** 2)
-                echo_energy = np.mean(np.abs(self.filter.echo_spec) ** 2)
                 near_energy = np.mean(near_end ** 2)
+                if hasattr(self.filter, 'echo_spec'):
+                    echo_energy = np.mean(np.abs(self.filter.echo_spec) ** 2)
+                else:
+                    echo_energy = 0.0
                 self._update_dtd(error_energy, echo_energy, near_energy)
         else:
             # NLMS/LMS: always update weights (no DTD)

@@ -42,8 +42,8 @@ static void print_usage(const char* program) {
     printf("  --clear-history             - Clear TIME/LMS buffer each block (no carry-over)\n");
     printf("\nFilter modes:\n");
     printf("  nlms    - Time-domain NLMS (configurable filter length, default=frame_size)\n");
-    printf("  freq    - Frequency-domain NLMS (filter=hop_size, overlap-save)\n");
-    printf("  subband - Partitioned FDAF (P hops history, default filter=hop*4)\n");
+    printf("  freq    - FDAF (single big FFT, buffered if filter>hop, default=hop*4)\n");
+    printf("  subband - PBFDAF (partitioned, default filter=hop*4)\n");
     printf("  lms     - Time-domain LMS (configurable filter length, default=frame_size)\n");
 }
 
@@ -135,6 +135,7 @@ int main(int argc, char* argv[]) {
     // Set mode-dependent filter_length default if not specified
     if (!user_set_filter) {
         switch (mode) {
+            case AEC_MODE_FREQ:
             case AEC_MODE_SUBBAND: filter_length = config.hop_size * 4; break;  // 1024 @ 16kHz
             default:               filter_length = config.frame_size;   break;  // 512 @ 16kHz
         }
@@ -157,6 +158,9 @@ int main(int argc, char* argv[]) {
     printf("  Filter length: %d samples (%.1f ms)\n",
            params.filter_length, 1000.0f * params.filter_length / sample_rate);
     if (mode == AEC_MODE_FREQ || mode == AEC_MODE_SUBBAND) {
+        printf("  FFT block size: %d\n", params.block_size);
+        printf("  Internal hop: %d samples (%.1f ms)\n",
+               params.internal_hop, 1000.0f * params.internal_hop / sample_rate);
         printf("  Partitions: %d\n", params.n_partitions);
     }
     printf("  DTD: %s\n", enable_dtd ? "enabled" : "disabled");
