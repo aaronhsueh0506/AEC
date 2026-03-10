@@ -40,7 +40,7 @@ class AecConfig:
     delta: float = 1e-8          # Regularization
     leak: float = 0.9999         # Weight leakage
     enable_dtd: bool = True
-    dtd_threshold: float = 0.6   # Geigel threshold
+    dtd_threshold: float = 2.0   # Error-based DTD: error_energy/echo_energy ratio
     dtd_hangover_frames: int = 15
 
     # RES parameters
@@ -377,12 +377,9 @@ class AEC:
             self._hop_size = self.config.hop_size
             self._n_partitions = 0
 
-        # DTD
-        self.dtd = DtdEstimator(
-            window_length=self.config.filter_length,
-            threshold=self.config.dtd_threshold,
-            hangover_frames=self.config.dtd_hangover_frames
-        ) if self.config.enable_dtd else None
+        # Error-based DTD state
+        self._dtd_active = False
+        self._dtd_ratio_smooth = 0.0  # Smoothed error/echo ratio
 
         # RES (only for frequency-domain modes)
         if self.config.enable_res and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
@@ -402,8 +399,8 @@ class AEC:
 
     def reset(self):
         self.filter.reset()
-        if self.dtd:
-            self.dtd.reset()
+        self._dtd_active = False
+        self._dtd_ratio_smooth = 0.0
         if self.res:
             self.res.reset()
         self.near_power = 0.0
@@ -414,14 +411,25 @@ class AEC:
         return self._hop_size
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
-        # DTD
+        # Error-based DTD: compare error energy vs echo estimate energy.
+        # Old Geigel DTD compared mic vs ref, but mic includes echo, causing
+        # false triggers when echo_gain > threshold (e.g., gain=1.28 > 0.6).
+        #
+        # Use PREVIOUS block's smoothed ratio to decide current block's update.
+        # This avoids the bootstrap problem where the filter can't converge
+        # because DTD blocks updates before echo estimates are valid.
+
+        # Error-based DTD: use previous block's decision
+        # Subband: freeze weights (block-level update, recovers quickly)
+        # NLMS/LMS: reduce mu (soft DTD, prevents stale-weight divergence)
         update_weights = True
-        if self.dtd and self.config.enable_dtd:
-            update_weights = not self.dtd.detect_block(near_end, far_end)
+        if self.config.enable_dtd and self._dtd_active:
+            if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
+                update_weights = False
+            # NLMS/LMS: soft DTD — reduce mu instead of freezing
 
         # Process based on mode
         if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
-            # Frequency-domain modes (both use SubbandNlms, differ in n_partitions)
             output = self.filter.process(near_end, far_end, update_weights)
 
             # RES post-filter
@@ -432,9 +440,32 @@ class AEC:
                 enhanced_spec = self.res.process(output_spec[:len(echo_spec)],
                                                   echo_spec, far_power)
                 output = np.fft.irfft(enhanced_spec, len(output) * 2)[:len(output)]
+
+            # Update DTD state for NEXT block
+            if self.config.enable_dtd:
+                error_energy = np.mean(output ** 2)
+                echo_energy = np.mean(np.abs(self.filter.echo_spec) ** 2)
+                near_energy = np.mean(near_end ** 2)
+                self._update_dtd(error_energy, echo_energy, near_energy)
         else:
-            # TIME: Time-domain NLMS
-            output, _ = self.filter.process_block(near_end, far_end, update_weights)
+            # NLMS/LMS: soft DTD via reduced mu
+            saved_mu = None
+            if self.config.enable_dtd and self._dtd_active:
+                saved_mu = self.filter.mu
+                self.filter.mu = saved_mu * 0.1  # 10x reduced step during double-talk
+
+            output, echo_est = self.filter.process_block(
+                near_end, far_end, update_weights=True)
+
+            if saved_mu is not None:
+                self.filter.mu = saved_mu
+
+            # Update DTD state for NEXT block
+            if self.config.enable_dtd:
+                error_energy = np.mean(output ** 2)
+                echo_energy = np.mean(echo_est ** 2)
+                near_energy = np.mean(near_end ** 2)
+                self._update_dtd(error_energy, echo_energy, near_energy)
 
         # ERLE
         for i in range(len(near_end)):
@@ -448,8 +479,25 @@ class AEC:
             return 0.0
         return 10 * np.log10(self.near_power / (self.error_power + 1e-10) + 1e-10)
 
+    def _update_dtd(self, error_energy: float, echo_energy: float,
+                     near_energy: float):
+        """Update error-based DTD state for next block.
+
+        Only activate DTD when the filter is producing meaningful echo
+        estimates (echo_energy > 1% of near_energy). Otherwise, the filter
+        hasn't converged yet and DTD should remain inactive.
+        """
+        if echo_energy > near_energy * 0.01 and echo_energy > 1e-10:
+            ratio = error_energy / (echo_energy + 1e-10)
+            self._dtd_ratio_smooth = 0.8 * self._dtd_ratio_smooth + 0.2 * ratio
+            self._dtd_active = self._dtd_ratio_smooth > self.config.dtd_threshold
+        else:
+            # Filter not converged yet — keep DTD inactive, reset smoothing
+            self._dtd_ratio_smooth *= 0.9  # Slow decay
+            self._dtd_active = False
+
     def is_dtd_active(self) -> bool:
-        return self.dtd.dtd_active if self.dtd else False
+        return self._dtd_active
 
 
 def process_wav_files(mic_path: str, ref_path: str, out_path: str,

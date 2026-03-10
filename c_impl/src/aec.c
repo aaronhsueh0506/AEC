@@ -37,6 +37,10 @@ struct Aec {
     float near_power;
     float error_power;
     float alpha_erle;
+
+    // Error-based DTD state
+    bool dtd_active;            // Current DTD decision (for next block)
+    float dtd_ratio_smooth;     // Smoothed error/echo ratio
 };
 
 Aec* aec_create(const AecConfig* config) {
@@ -140,6 +144,10 @@ Aec* aec_create(const AecConfig* config) {
     aec->error_power = 0.0f;
     aec->alpha_erle = 0.95f;
 
+    // Error-based DTD init
+    aec->dtd_active = false;
+    aec->dtd_ratio_smooth = 0.0f;
+
     return aec;
 }
 
@@ -178,6 +186,8 @@ void aec_reset(Aec* aec) {
     aec->erle_smoothed = 0.0f;
     aec->near_power = 0.0f;
     aec->error_power = 0.0f;
+    aec->dtd_active = false;
+    aec->dtd_ratio_smooth = 0.0f;
 }
 
 int aec_process(Aec* aec,
@@ -191,44 +201,88 @@ int aec_process(Aec* aec,
     const int hop_size = aec->params.hop_size;
     const float alpha = aec->alpha_erle;
 
-    // Block-level DTD: compute energies first
-    float near_energy = 0.0f;
-    float far_energy = 0.0f;
-    for (int n = 0; n < hop_size; n++) {
-        near_energy += near_end[n] * near_end[n];
-        far_energy += far_end[n] * far_end[n];
-    }
-    near_energy /= hop_size;
-    far_energy /= hop_size;
-
-    // Block-level DTD decision (simple energy ratio)
+    // Error-based DTD: use PREVIOUS block's decision for current block.
+    // Old Geigel DTD compared mic vs ref, but mic includes echo, causing
+    // false triggers when echo_gain > threshold.
+    // New approach: compare error energy vs echo estimate energy AFTER processing.
     bool update_weights = true;
-    if (aec->config.enable_dtd && far_energy > 1e-10f) {
-        // If near-end is significantly louder than expected echo, likely double-talk
-        float ratio = sqrtf(near_energy) / (sqrtf(far_energy) + 1e-10f);
-        if (ratio > aec->config.dtd_threshold) {
+    if (aec->config.enable_dtd && aec->dtd_active) {
+        if (aec->config.filter_mode == AEC_MODE_FREQ ||
+            aec->config.filter_mode == AEC_MODE_SUBBAND) {
+            // Subband: freeze weights during double-talk
             update_weights = false;
         }
+        // NLMS/LMS: soft DTD — reduce mu (handled below)
     }
 
     // Process block through adaptive filter (mode-dependent)
+    float saved_mu = 0.0f;
     switch (aec->config.filter_mode) {
         case AEC_MODE_FREQ:
         case AEC_MODE_SUBBAND:
-            // Frequency-domain NLMS (both use SubbandNlms, differ in n_partitions)
             subband_nlms_process(aec->subband, near_end, far_end, output, update_weights);
             break;
 
         case AEC_MODE_LMS:
         case AEC_MODE_NLMS:
         default:
-            // Time-domain NLMS/LMS
+            // Soft DTD for NLMS/LMS: reduce mu during double-talk
+            if (aec->config.enable_dtd && aec->dtd_active && aec->nlms) {
+                saved_mu = nlms_get_mu(aec->nlms);
+                nlms_set_mu(aec->nlms, saved_mu * 0.1f);
+            }
             nlms_process_block(aec->nlms, near_end, far_end, output,
-                               aec->echo_est_buffer, hop_size, update_weights);
+                               aec->echo_est_buffer, hop_size, true);
+            // Restore mu
+            if (saved_mu > 0.0f && aec->nlms) {
+                nlms_set_mu(aec->nlms, saved_mu);
+            }
             break;
     }
 
-    // Update detailed DTD state (for query functions)
+    // Update error-based DTD state for NEXT block
+    if (aec->config.enable_dtd) {
+        float error_energy = 0.0f;
+        float echo_energy = 0.0f;
+        float near_energy = 0.0f;
+
+        for (int n = 0; n < hop_size; n++) {
+            error_energy += output[n] * output[n];
+            near_energy += near_end[n] * near_end[n];
+        }
+        error_energy /= hop_size;
+        near_energy /= hop_size;
+
+        // Compute echo estimate energy based on mode
+        if (aec->config.filter_mode == AEC_MODE_FREQ ||
+            aec->config.filter_mode == AEC_MODE_SUBBAND) {
+            // Use echo estimate from subband filter
+            for (int n = 0; n < hop_size; n++) {
+                float echo_est = near_end[n] - output[n];
+                echo_energy += echo_est * echo_est;
+            }
+            echo_energy /= hop_size;
+        } else {
+            // NLMS/LMS: use echo_est_buffer
+            for (int n = 0; n < hop_size; n++) {
+                echo_energy += aec->echo_est_buffer[n] * aec->echo_est_buffer[n];
+            }
+            echo_energy /= hop_size;
+        }
+
+        // Only update DTD when filter produces meaningful echo estimates
+        if (echo_energy > near_energy * 0.01f && echo_energy > 1e-10f) {
+            float ratio = error_energy / (echo_energy + 1e-10f);
+            aec->dtd_ratio_smooth = 0.8f * aec->dtd_ratio_smooth + 0.2f * ratio;
+            aec->dtd_active = (aec->dtd_ratio_smooth > aec->config.dtd_threshold);
+        } else {
+            // Filter not converged yet — keep DTD inactive
+            aec->dtd_ratio_smooth *= 0.9f;
+            aec->dtd_active = false;
+        }
+    }
+
+    // Update detailed DTD estimator (for query functions)
     if (aec->dtd) {
         dtd_detect_block(aec->dtd, near_end, far_end, output,
                          aec->echo_est_buffer, hop_size);
@@ -279,10 +333,8 @@ float aec_get_erle(const Aec* aec) {
 }
 
 bool aec_is_dtd_active(const Aec* aec) {
-    if (!aec || !aec->dtd) {
-        return false;
-    }
-    return dtd_is_active(aec->dtd);
+    if (!aec) return false;
+    return aec->dtd_active;
 }
 
 const AecConfig* aec_get_config(const Aec* aec) {

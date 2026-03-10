@@ -53,7 +53,7 @@ typedef struct {
 
     // DTD (Double-Talk Detection) parameters
     bool enable_dtd;            // Enable DTD (true)
-    float dtd_threshold;        // Geigel threshold (0.6)
+    float dtd_threshold;        // Error-based DTD: error/echo ratio (2.0)
     int dtd_hangover_frames;    // Hangover duration in frames (15)
     float dtd_energy_ratio;     // Energy ratio threshold (0.4)
 
@@ -101,7 +101,7 @@ static inline AecConfig aec_default_config(int sample_rate) {
 
     // DTD parameters
     config.enable_dtd = true;
-    config.dtd_threshold = 0.6f;
+    config.dtd_threshold = 2.0f;
     config.dtd_hangover_frames = 15;
     config.dtd_energy_ratio = 0.4f;
 
