@@ -37,13 +37,14 @@ static void print_usage(const char* program) {
     printf("Options:\n");
     printf("  --mode <time|freq|subband|lms> - Filter mode (default: time)\n");
     printf("  --mu <value>                - Step size (default: 0.3)\n");
-    printf("  --filter <ms>               - Filter length in ms (default: 250)\n");
+    printf("  --filter <samples>          - Filter length in samples (default: frame_size)\n");
     printf("  --no-dtd                    - Disable double-talk detection\n");
+    printf("  --clear-history             - Clear TIME/LMS buffer each block (no carry-over)\n");
     printf("\nFilter modes:\n");
-    printf("  time    - Time-domain NLMS (lowest latency)\n");
-    printf("  freq    - Frequency-domain NLMS (single block)\n");
-    printf("  subband - Partitioned FDAF (faster convergence, long echo paths)\n");
-    printf("  lms     - Time-domain LMS (simplest, fixed step size)\n");
+    printf("  time    - Time-domain NLMS (configurable filter length, default=frame_size)\n");
+    printf("  freq    - Frequency-domain NLMS (filter=hop_size, overlap-save)\n");
+    printf("  subband - Partitioned FDAF (P hops history, default filter=hop*4)\n");
+    printf("  lms     - Time-domain LMS (configurable filter length, default=frame_size)\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -58,8 +59,10 @@ int main(int argc, char* argv[]) {
 
     // Parse optional arguments
     float mu = 0.3f;
-    int filter_ms = 250;
+    int filter_length = 0;  // 0 = use mode-dependent default
+    bool user_set_filter = false;
     bool enable_dtd = true;
+    bool clear_history = false;
     AecFilterMode mode = AEC_MODE_TIME;
 
     for (int i = 4; i < argc; i++) {
@@ -80,9 +83,12 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--mu") == 0 && i + 1 < argc) {
             mu = (float)atof(argv[++i]);
         } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
-            filter_ms = atoi(argv[++i]);
+            filter_length = atoi(argv[++i]);
+            user_set_filter = true;
         } else if (strcmp(argv[i], "--no-dtd") == 0) {
             enable_dtd = false;
+        } else if (strcmp(argv[i], "--clear-history") == 0) {
+            clear_history = true;
         }
     }
 
@@ -120,12 +126,21 @@ int main(int argc, char* argv[]) {
         mu = 0.01f;
     }
 
-    // Create AEC config first so we can show accurate hop size
+    // Create AEC config
     AecConfig config = aec_default_config(sample_rate);
     config.filter_mode = mode;
     config.mu = mu;
-    config.filter_length_ms = filter_ms;
     config.enable_dtd = enable_dtd;
+
+    // Set mode-dependent filter_length default if not specified
+    if (!user_set_filter) {
+        switch (mode) {
+            case AEC_MODE_SUBBAND: filter_length = config.hop_size * 4; break;  // 1024 @ 16kHz
+            default:               filter_length = config.frame_size;   break;  // 512 @ 16kHz
+        }
+    }
+    config.filter_length = filter_length;
+    config.clear_filter_history = clear_history;
 
     // Compute derived params to show accurate info
     AecDerivedParams params = aec_compute_params(&config);
@@ -139,8 +154,8 @@ int main(int argc, char* argv[]) {
     printf("  Hop size: %d samples (%.1f ms)\n", params.hop_size,
            1000.0f * params.hop_size / sample_rate);
     printf("  Step size (mu): %.3f\n", mu);
-    printf("  Filter length: %d ms (%d taps)\n",
-           filter_ms, sample_rate * filter_ms / 1000);
+    printf("  Filter length: %d samples (%.1f ms)\n",
+           params.filter_length, 1000.0f * params.filter_length / sample_rate);
     if (mode == AEC_MODE_FREQ || mode == AEC_MODE_SUBBAND) {
         printf("  Partitions: %d\n", params.n_partitions);
     }

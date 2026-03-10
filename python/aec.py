@@ -31,11 +31,11 @@ class AecMode(Enum):
 
 @dataclass
 class AecConfig:
-    """AEC Configuration"""
+    """AEC Configuration (all sizes in samples)"""
     sample_rate: int = 16000
-    frame_size_ms: int = 32
-    frame_shift_ms: int = 16
-    filter_length_ms: int = 250
+    frame_size: int = 512         # Frame length in samples (512 @ 16kHz)
+    hop_size: int = 256           # Hop size in samples (256 @ 16kHz)
+    filter_length: int = 512     # Filter length in samples (mode-dependent)
     mu: float = 0.3              # Step size
     delta: float = 1e-8          # Regularization
     leak: float = 0.9999         # Weight leakage
@@ -52,22 +52,13 @@ class AecConfig:
     # Mode
     mode: AecMode = AecMode.TIME
 
-    @property
-    def frame_size(self) -> int:
-        return self.sample_rate * self.frame_size_ms // 1000
-
-    @property
-    def hop_size(self) -> int:
-        return self.sample_rate * self.frame_shift_ms // 1000
-
-    @property
-    def filter_length(self) -> int:
-        return self.sample_rate * self.filter_length_ms // 1000
+    # TIME/LMS history control
+    clear_filter_history: bool = False  # Clear ref_buffer each block (default: keep 1 hop history)
 
     @property
     def fft_size(self) -> int:
-        # Next power of 2 >= frame_size * 2 (for overlap-save)
-        n = self.frame_size * 2
+        # Next power of 2 >= frame_size (= frame_size when frame_size is power of 2)
+        n = self.frame_size
         return 1 << (n - 1).bit_length()
 
 
@@ -85,6 +76,7 @@ class NlmsFilter:
         self.weights = np.zeros(filter_length, dtype=np.float32)
         self.ref_buffer = np.zeros(filter_length, dtype=np.float32)
         self.power_sum = 0.0
+        self.clear_history = False
 
     def reset(self):
         self.weights.fill(0)
@@ -111,6 +103,11 @@ class NlmsFilter:
 
     def process_block(self, near_end: np.ndarray, far_end: np.ndarray,
                       update_weights: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+        # Optionally clear history (no carry-over between blocks)
+        if self.clear_history:
+            self.ref_buffer.fill(0)
+            self.power_sum = 0.0
+
         n = len(near_end)
         output = np.zeros(n, dtype=np.float32)
         echo_est = np.zeros(n, dtype=np.float32)
@@ -336,11 +333,11 @@ class AEC:
             # Frequency-domain modes
             hop_size = self.config.fft_size // 2
             if self.config.mode == AecMode.FREQ:
-                # Single block, no partitioning
+                # Single block: filter limited to hop_size
                 n_partitions = 1
             else:
-                # SUBBAND: multiple partitions for long echo paths
-                n_partitions = max(1, self.config.filter_length // hop_size)
+                # SUBBAND: multiple partitions
+                n_partitions = max(1, (self.config.filter_length + hop_size - 1) // hop_size)
 
             self.filter = SubbandNlms(
                 block_size=self.config.fft_size,
@@ -352,6 +349,7 @@ class AEC:
             self._n_partitions = n_partitions
         elif self.config.mode == AecMode.LMS:
             # LMS: Time-domain, no normalization
+            # filter_length = user config (default: frame_size)
             self.filter = NlmsFilter(
                 filter_length=self.config.filter_length,
                 mu=self.config.mu,
@@ -359,10 +357,12 @@ class AEC:
                 leak=1.0,
                 normalize=False
             )
+            self.filter.clear_history = self.config.clear_filter_history
             self._hop_size = self.config.hop_size
             self._n_partitions = 0
         else:
             # TIME: Time-domain NLMS
+            # filter_length = user config (default: frame_size)
             self.filter = NlmsFilter(
                 filter_length=self.config.filter_length,
                 mu=self.config.mu,
@@ -370,6 +370,7 @@ class AEC:
                 leak=self.config.leak,
                 normalize=True
             )
+            self.filter.clear_history = self.config.clear_filter_history
             self._hop_size = self.config.hop_size
             self._n_partitions = 0
 
@@ -479,7 +480,7 @@ def process_wav_files(mic_path: str, ref_path: str, out_path: str,
 
     print(f"  Mode: {config.mode.value}")
     print(f"  Step size (mu): {config.mu}")
-    print(f"  Filter length: {config.filter_length_ms} ms")
+    print(f"  Filter length: {config.filter_length} samples ({1000 * config.filter_length / config.sample_rate:.1f} ms)")
     print(f"  DTD: {'enabled' if config.enable_dtd else 'disabled'}")
     print(f"  RES: {'enabled' if config.enable_res else 'disabled'}")
     print()
@@ -534,19 +535,22 @@ Examples:
     python aec.py mic.wav ref.wav output.wav
     python aec.py mic.wav ref.wav output.wav --mode freq
     python aec.py mic.wav ref.wav output.wav --mode subband --enable-res
-    python aec.py mic.wav ref.wav output.wav --mu 0.5 --filter-ms 300
+    python aec.py mic.wav ref.wav output.wav --mu 0.5 --filter 1024
         """
     )
     parser.add_argument('mic', help='Microphone input WAV file')
     parser.add_argument('ref', help='Reference/loudspeaker WAV file')
     parser.add_argument('output', help='Output WAV file')
     parser.add_argument('--mu', type=float, default=0.3, help='Step size (default: 0.3)')
-    parser.add_argument('--filter-ms', type=int, default=250, help='Filter length in ms')
+    parser.add_argument('--filter', type=int, default=0,
+                        help='Filter length in samples (default: mode-dependent)')
     parser.add_argument('--mode', choices=['lms', 'time', 'freq', 'subband'], default='time',
                         help='Filter mode (default: time)')
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
+    parser.add_argument('--clear-history', action='store_true',
+                        help='Clear TIME/LMS buffer each block (no carry-over)')
 
     args = parser.parse_args()
 
@@ -558,18 +562,29 @@ Examples:
         'subband': AecMode.SUBBAND
     }
 
+    aec_mode = mode_map[args.mode]
+
     # LMS needs much smaller step size
     mu = args.mu
     if args.mode == 'lms' and args.mu == 0.3:
         mu = 0.01  # Default mu for LMS
 
+    # Mode-dependent filter_length default
+    filter_length = args.filter
+    if filter_length == 0:
+        if aec_mode == AecMode.SUBBAND:
+            filter_length = 1024  # 4 partitions
+        else:
+            filter_length = 512   # frame_size
+
     config = AecConfig(
         mu=mu,
-        filter_length_ms=args.filter_ms,
-        mode=mode_map[args.mode],
+        filter_length=filter_length,
+        mode=aec_mode,
         enable_dtd=not args.no_dtd,
         enable_res=args.enable_res,
-        res_g_min_db=args.res_g_min
+        res_g_min_db=args.res_g_min,
+        clear_filter_history=args.clear_history
     )
 
     process_wav_files(args.mic, args.ref, args.output, config)

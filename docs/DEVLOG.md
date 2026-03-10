@@ -100,7 +100,7 @@ DTD = 1, if E_error / E_echo > threshold
 | 參數 | 說明 | 建議範圍 | 預設值 |
 |------|------|----------|--------|
 | `mu` | 步長 | 0.1 - 0.8 | 0.3 |
-| `filter_length_ms` | 濾波器長度 | 100 - 500 ms | 250 ms |
+| `filter_length` | 濾波器長度 (samples) | 256 - 4096 | 512 |
 | `dtd_threshold` | DTD 閾值 | 0.4 - 0.8 | 0.6 |
 | `leak` | 權重洩漏 | 0.999 - 0.9999 | 0.9999 |
 
@@ -108,7 +108,7 @@ DTD = 1, if E_error / E_echo > threshold
 
 1. **mu 較大**: 收斂快，但穩態誤差大，對雙講敏感
 2. **mu 較小**: 收斂慢，但更穩定
-3. **filter_length**: 需大於實際回音路徑長度
+3. **filter_length**: 需大於實際回音路徑長度（TIME/LMS/SUBBAND 可配置，FREQ 固定=hop_size）
 4. **dtd_threshold**: 較低可能誤判為雙講，較高可能漏判
 
 ---

@@ -88,7 +88,7 @@ w[n+1] = w[n] + μ · e[n] · x[n]
 | 參數 | 典型值 | 說明 |
 |------|--------|------|
 | μ (step size) | 0.001~0.05 | 步長，越大收斂越快但越不穩定 |
-| filter_length | 4000 (250ms@16kHz) | 濾波器長度 |
+| filter_length | 512 (32ms@16kHz) | 濾波器長度 (samples)，可配置 |
 
 ### 穩定性條件
 
@@ -153,7 +153,7 @@ w[n+1] = leak · w[n] + mu_eff · e[n] · x[n]
 | μ (step size) | 0.3 | 歸一化後的步長 |
 | δ (regularization) | 1e-8 | 防止除零 |
 | leak | 0.9999 | 權重洩漏，防止權重爆炸 |
-| filter_length | 4000 (250ms@16kHz) | 濾波器長度 |
+| filter_length | 512 (32ms@16kHz) | 濾波器長度 (samples)，可配置，circular buffer 跨 block 保留歷史 |
 
 ### 穩定性條件
 
@@ -187,7 +187,7 @@ power_sum += x_new² - x_old²
 
 **缺點：**
 - 計算複雜度 O(N²)（每個樣本需遍歷所有權重）
-- 不適合長 echo path（filter_length > 5000）
+- 不適合長 echo path（filter_length > 5000），計算量 O(filter_length × hop_size) per block
 
 ---
 
@@ -272,8 +272,8 @@ Echo path = [Partition 0 | Partition 1 | ... | Partition P-1]
              ←─ hop ──→  ←─ hop ──→         ←─ hop ──→
 
 P = ceil(filter_length / hop_size)
-  = ceil(4000 / 256)
-  = 16 partitions (@ 16kHz, 250ms echo path)
+  = ceil(1024 / 256)
+  = 4 partitions (@ 16kHz, 64ms echo path)
 ```
 
 ### 公式
@@ -312,7 +312,7 @@ for each partition p:
 | α_power | 0.9 | PSD 平滑因子 |
 | fft_size | 512 | FFT 大小（block size） |
 | hop_size | 256 | 每次處理樣本數 |
-| n_partitions | 16 | 分區數（250ms / 16ms） |
+| n_partitions | 4 | 分區數（64ms / 16ms） |
 
 ### 與頻域 NLMS 的區別
 
@@ -531,17 +531,15 @@ bin 數量 = fft_size/2 + 1
 
 ### 不同 Sampling Rate 的自動適應
 
-frame/hop 使用毫秒為單位定義，自動計算對應的樣本數：
+frame/hop 使用 samples 為單位定義，根據 sample rate 自動計算（next power of 2 >= ~32ms）：
 
-| Sample Rate | frame_size_ms | frame_shift_ms | frame (samples) | hop (samples) | FFT size |
-|------------|--------------|----------------|-----------------|---------------|----------|
-| 8 kHz | 32 | 16 | 256 | 128 | 256 |
-| 16 kHz | 32 | 16 | 512 | 256 | 512 |
-| 48 kHz | ~21.3 | ~10.7 | 1024 | 512 | 1024 |
+| Sample Rate | frame_size (samples) | hop_size (samples) | FFT size | 對應毫秒 |
+|------------|---------------------|-------------------|----------|---------|
+| 8 kHz | 256 | 128 | 256 | 32ms / 16ms |
+| 16 kHz | 512 | 256 | 512 | 32ms / 16ms |
+| 48 kHz | 1024 | 512 | 1024 | ~21ms / ~11ms |
 
 **關鍵設計：** frame_size = FFT size，無需零填充，50% overlap。
-
-48 kHz 時 frame/hop 直接用樣本數計算（1024/512），毫秒數為近似值。
 
 ### 為什麼不用 Filter Bank？
 
@@ -657,7 +655,7 @@ ERLE = 10 · log₁₀(E[d²] / E[e²])    (dB)
 | 參數 | 影響 | 調整方向 |
 |------|------|---------|
 | μ (step size) | 收斂速度 vs 穩定性 | 不穩定→降低；收斂慢→提高 |
-| filter_length | echo path 覆蓋 | 根據房間大小，一般 250ms |
+| filter_length | echo path 覆蓋 | TIME/LMS/SUBBAND 可配置（預設 512/1024），FREQ 固定=hop_size |
 | δ (regularization) | 數值穩定性 | 保持 1e-8 |
 | leak | 權重衰減（TIME only） | 接近 1.0，防止權重爆炸 |
 | dtd_threshold | 雙講靈敏度 | 降低→更敏感；提高→更保守 |

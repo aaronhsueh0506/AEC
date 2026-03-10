@@ -34,6 +34,7 @@ w = leak * w + mu_eff * e(n) * x(n)  // 權重更新 (含洩漏)
 - 功率正規化使收斂速度與輸入信號無關
 - 複雜度: O(N) per sample
 - hop_size: 256 samples (16ms @ 16kHz)
+- filter_length: 可配置（預設 frame_size=512, 即 32ms@16kHz）
 
 #### 3. 頻域 NLMS (`--mode freq`)
 ```
@@ -78,7 +79,7 @@ make
 ./bin/aec_wav mic.wav ref.wav output.wav --mode subband
 
 # 調整參數
-./bin/aec_wav mic.wav ref.wav output.wav --mode subband --mu 0.5 --filter 300
+./bin/aec_wav mic.wav ref.wav output.wav --mode subband --mu 0.5 --filter 1024
 
 # LMS 自訂步長 (預設 mu=0.01)
 ./bin/aec_wav mic.wav ref.wav output.wav --mode lms --mu 0.005
@@ -103,7 +104,7 @@ python aec.py mic.wav ref.wav output.wav --mode freq
 python aec.py mic.wav ref.wav output.wav --mode subband --enable-res
 
 # 調整參數
-python aec.py mic.wav ref.wav output.wav --mu 0.5 --filter-ms 300
+python aec.py mic.wav ref.wav output.wav --mu 0.5 --filter 1024
 
 # LMS 自訂步長 (預設 mu=0.01)
 python aec.py mic.wav ref.wav output.wav --mode lms --mu 0.005
@@ -211,7 +212,7 @@ while has_audio:
 | 參數 | 預設值 | 範圍 | 說明 |
 |------|--------|------|------|
 | `mu` | 0.3 (NLMS) / 0.01 (LMS) | NLMS: 0.1-0.8, LMS: 0.001-0.05 | 步長，越大收斂越快但穩態誤差增加 |
-| `filter_length_ms` | 250 | 100-500 | 濾波器長度 (ms) |
+| `filter_length` | 512 (TIME/LMS), 1024 (SUBBAND) | 256-4096 | 濾波器長度 (samples), TIME/LMS/SUBBAND 可配置, FREQ 固定 = hop_size |
 | `dtd_threshold` | 0.6 | 0.4-0.8 | DTD 閾值 |
 
 ### RES 參數 (僅 freq/subband 模式)
@@ -224,13 +225,14 @@ while has_audio:
 
 ### 模式選擇指南
 
-| 應用場景 | 推薦模式 | mu | filter_length_ms |
-|----------|----------|-----|------------------|
-| 手機/耳機 (短回音) | time | 0.3 | 100-150 |
-| 會議室 | freq | 0.3 | 200-250 |
-| 智慧音箱 (長回音) | subband | 0.2 | 300-400 |
-| 即時通訊 (低延遲) | time | 0.3 | 150 |
-| 穩態環境 (極低資源) | lms | 0.01 | 100-200 |
+| 應用場景 | 推薦模式 | mu | filter_length (samples) |
+|----------|----------|-----|------------------------|
+| 手機/耳機 (短回音) | time | 0.3 | 512 |
+| 會議室 (中等回音) | time | 0.3 | 1024 |
+| 會議室 (頻域) | freq | 0.3 | 256 (= hop_size, 固定) |
+| 智慧音箱 (長回音) | subband | 0.2 | 1024-4096 |
+| 即時通訊 (低延遲) | time | 0.3 | 512 |
+| 穩態環境 (極低資源) | lms | 0.01 | 512 |
 
 ## 檔案結構
 

@@ -24,6 +24,7 @@ struct NlmsFilter {
     float* ref_buffer;      // Circular buffer for reference [filter_length]
     int buf_idx;            // Current buffer index (newest sample)
     float power_sum;        // Running sum of x^2 for efficiency
+    bool clear_history;     // Clear ref_buffer each block (no carry-over)
 };
 
 NlmsFilter* nlms_create(int filter_length, float mu, float delta, float leak,
@@ -51,6 +52,7 @@ NlmsFilter* nlms_create(int filter_length, float mu, float delta, float leak,
 
     filter->buf_idx = 0;
     filter->power_sum = 0.0f;
+    filter->clear_history = false;
 
     return filter;
 }
@@ -139,6 +141,13 @@ void nlms_process_block(NlmsFilter* filter,
                         float* echo_est,
                         int num_samples,
                         bool update_weights) {
+    // Optionally clear history (no carry-over between blocks)
+    if (filter->clear_history) {
+        memset(filter->ref_buffer, 0, filter->filter_length * sizeof(float));
+        filter->buf_idx = 0;
+        filter->power_sum = 0.0f;
+    }
+
     for (int n = 0; n < num_samples; n++) {
         float err = nlms_process_sample(filter, near_end[n], far_end[n], update_weights);
         output[n] = err;
@@ -174,6 +183,12 @@ float nlms_get_mu(const NlmsFilter* filter) {
 void nlms_set_mu(NlmsFilter* filter, float mu) {
     if (filter && mu > 0 && mu <= 1.0f) {
         filter->mu = mu;
+    }
+}
+
+void nlms_set_clear_history(NlmsFilter* filter, bool clear) {
+    if (filter) {
+        filter->clear_history = clear;
     }
 }
 

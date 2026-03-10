@@ -97,6 +97,14 @@ float nlms_get_mu(const NlmsFilter* filter);
 void nlms_set_mu(NlmsFilter* filter, float mu);
 
 /**
+ * Set clear-history mode: clear ref_buffer at start of each block
+ *
+ * When enabled, the filter has no carry-over between blocks.
+ * Default: false (keep 1 hop_size of history in circular buffer)
+ */
+void nlms_set_clear_history(NlmsFilter* filter, bool clear);
+
+/**
  * Get current reference signal power (for debugging/monitoring)
  */
 float nlms_get_ref_power(const NlmsFilter* filter);

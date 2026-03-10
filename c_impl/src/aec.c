@@ -101,6 +101,11 @@ Aec* aec_create(const AecConfig* config) {
             break;
     }
 
+    // Apply clear_filter_history setting for TIME/LMS
+    if (aec->nlms) {
+        nlms_set_clear_history(aec->nlms, config->clear_filter_history);
+    }
+
     // Create DTD (if enabled)
     if (config->enable_dtd) {
         // DTD window = filter length for Geigel
