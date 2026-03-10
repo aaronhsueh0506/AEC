@@ -77,6 +77,7 @@ class NlmsFilter:
         self.ref_buffer = np.zeros(filter_length, dtype=np.float32)
         self.power_sum = 0.0
         self.clear_history = False
+        self.max_w_norm = 4.0  # Weight norm constraint (prevents explosion during double-talk)
 
     def reset(self):
         self.weights.fill(0)
@@ -114,6 +115,12 @@ class NlmsFilter:
         for i in range(n):
             output[i], echo_est[i] = self.process_sample(
                 near_end[i], far_end[i], update_weights)
+
+        # Weight norm constraint: prevent explosion during double-talk
+        w_norm = np.linalg.norm(self.weights)
+        if w_norm > self.max_w_norm:
+            self.weights *= self.max_w_norm / w_norm
+
         return output, echo_est
 
 
@@ -333,12 +340,13 @@ class AEC:
 
         # Create adaptive filter based on mode
         if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
-            # Frequency-domain modes: both use SubbandNlms with n_partitions
-            # FREQ default: 1 partition (hop_size filter)
-            # SUBBAND default: ceil(filter_length / hop_size) partitions
-            # Both respect user-specified filter_length
             hop_size = self.config.fft_size // 2
-            n_partitions = max(1, (self.config.filter_length + hop_size - 1) // hop_size)
+            if self.config.mode == AecMode.FREQ:
+                # FDAF: single-block frequency-domain filter
+                n_partitions = 1
+            else:
+                # PBFDAF: partitioned block, configurable filter_length
+                n_partitions = max(1, (self.config.filter_length + hop_size - 1) // hop_size)
 
             self.filter = SubbandNlms(
                 block_size=self.config.fft_size,

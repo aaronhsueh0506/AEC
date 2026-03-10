@@ -25,6 +25,7 @@ struct NlmsFilter {
     int buf_idx;            // Current buffer index (newest sample)
     float power_sum;        // Running sum of x^2 for efficiency
     bool clear_history;     // Clear ref_buffer each block (no carry-over)
+    float max_w_norm;       // Weight norm constraint (prevents explosion during double-talk)
 };
 
 NlmsFilter* nlms_create(int filter_length, float mu, float delta, float leak,
@@ -53,6 +54,7 @@ NlmsFilter* nlms_create(int filter_length, float mu, float delta, float leak,
     filter->buf_idx = 0;
     filter->power_sum = 0.0f;
     filter->clear_history = false;
+    filter->max_w_norm = 4.0f;
 
     return filter;
 }
@@ -156,6 +158,22 @@ void nlms_process_block(NlmsFilter* filter,
         if (echo_est) {
             // Echo estimate = near_end - error
             echo_est[n] = near_end[n] - err;
+        }
+    }
+
+    // Weight norm constraint: prevent explosion during double-talk
+    if (filter->max_w_norm > 0.0f) {
+        const int L = filter->filter_length;
+        float w_norm_sq = 0.0f;
+        for (int k = 0; k < L; k++) {
+            w_norm_sq += filter->weights[k] * filter->weights[k];
+        }
+        float max_sq = filter->max_w_norm * filter->max_w_norm;
+        if (w_norm_sq > max_sq) {
+            float scale = filter->max_w_norm / sqrtf(w_norm_sq);
+            for (int k = 0; k < L; k++) {
+                filter->weights[k] *= scale;
+            }
         }
     }
 }

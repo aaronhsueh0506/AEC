@@ -57,7 +57,7 @@ Aec* aec_create(const AecConfig* config) {
     switch (config->filter_mode) {
         case AEC_MODE_FREQ:
         case AEC_MODE_SUBBAND:
-            // Frequency-domain NLMS (FREQ uses n_partitions=1, SUBBAND uses multiple)
+            // FREQ=FDAF (n_partitions=1), SUBBAND=PBFDAF (n_partitions from filter_length)
             aec->subband = subband_nlms_create(
                 config->fft_size,
                 aec->params.n_partitions,
