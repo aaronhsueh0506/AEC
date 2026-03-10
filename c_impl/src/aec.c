@@ -3,7 +3,7 @@
  *
  * Orchestrates adaptive filter with DTD protection.
  * Supports three filter modes:
- *   - TIME:    Time-domain NLMS (sample-by-sample)
+ *   - NLMS:    Time-domain NLMS (sample-by-sample)
  *   - FREQ:    Frequency-domain NLMS (single FFT block)
  *   - SUBBAND: Partitioned block FDAF (PBFDAF)
  * Streaming architecture with hop-size based processing.
@@ -22,7 +22,7 @@ struct Aec {
     AecDerivedParams params;
 
     // Sub-modules (one of these is active based on filter_mode)
-    NlmsFilter* nlms;           // Time-domain NLMS (AEC_MODE_TIME)
+    NlmsFilter* nlms;           // Time-domain NLMS (AEC_MODE_NLMS)
     SubbandNlms* subband;       // Frequency-domain NLMS (AEC_MODE_FREQ or AEC_MODE_SUBBAND)
     DtdEstimator* dtd;
 
@@ -83,7 +83,7 @@ Aec* aec_create(const AecConfig* config) {
             aec->subband = NULL;
             break;
 
-        case AEC_MODE_TIME:
+        case AEC_MODE_NLMS:
         default:
             // Time-domain NLMS (sample-by-sample)
             aec->nlms = nlms_create(
@@ -220,7 +220,7 @@ int aec_process(Aec* aec,
             break;
 
         case AEC_MODE_LMS:
-        case AEC_MODE_TIME:
+        case AEC_MODE_NLMS:
         default:
             // Time-domain NLMS/LMS
             nlms_process_block(aec->nlms, near_end, far_end, output,
@@ -263,7 +263,7 @@ int aec_get_latency(const Aec* aec) {
 }
 
 AecFilterMode aec_get_filter_mode(const Aec* aec) {
-    return aec ? aec->config.filter_mode : AEC_MODE_TIME;
+    return aec ? aec->config.filter_mode : AEC_MODE_NLMS;
 }
 
 float aec_get_erle(const Aec* aec) {

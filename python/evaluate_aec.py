@@ -19,7 +19,7 @@ Dataset 結構（flat directory，用 fileid_N 配對）：
   echo_signal_fileid_0.wav
 
 Usage:
-  python evaluate_aec.py <dataset_dir> [--mode time|freq|subband|lms|all]
+  python evaluate_aec.py <dataset_dir> [--mode nlms|freq|subband|lms|all]
   python evaluate_aec.py <dataset_dir> --mode all --output results.csv
 """
 
@@ -28,6 +28,7 @@ import os
 import sys
 import re
 import csv
+import time
 import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -283,8 +284,14 @@ def scan_dataset(dataset_dir: str) -> List[Dict[str, str]]:
     """
     Scan dataset directory for AEC Challenge file groups.
 
-    Looks for files matching: {type}_fileid_{N}.wav
-    Groups them by fileid.
+    Supports two layouts:
+    1. Flat: all wav files in one directory
+    2. AEC Challenge structure: subdirectories per signal type
+       synthetic/
+         echo_signal/echo_fileid_N.wav
+         farend_speech/farend_speech_fileid_N.wav
+         nearend_mic_signal/nearend_mic_fileid_N.wav
+         nearend_speech/nearend_speech_fileid_N.wav
 
     Returns:
         List of dicts, each with keys: 'fileid', 'nearend_mic', 'farend_speech',
@@ -292,36 +299,84 @@ def scan_dataset(dataset_dir: str) -> List[Dict[str, str]]:
     """
     dataset_path = Path(dataset_dir)
 
-    # Find all nearend_mic files to get file IDs
+    # --- Try AEC Challenge subdirectory structure first ---
+    mic_subdir = dataset_path / 'nearend_mic_signal'
+    if mic_subdir.is_dir():
+        mic_files = sorted(mic_subdir.glob('nearend_mic_fileid_*.wav'))
+        if mic_files:
+            print(f"  Detected AEC Challenge subdirectory layout")
+            groups = []
+            for mic_file in mic_files:
+                match = re.search(r'fileid_(\d+)', mic_file.stem)
+                if not match:
+                    continue
+                fileid = match.group(1)
+
+                nearend_speech = dataset_path / 'nearend_speech' / f'nearend_speech_fileid_{fileid}.wav'
+                farend_speech = dataset_path / 'farend_speech' / f'farend_speech_fileid_{fileid}.wav'
+                # echo file: try echo_fileid_N.wav first, then echo_signal_fileid_N.wav
+                echo_dir = dataset_path / 'echo_signal'
+                echo_signal = echo_dir / f'echo_fileid_{fileid}.wav'
+                if not echo_signal.exists():
+                    echo_signal = echo_dir / f'echo_signal_fileid_{fileid}.wav'
+
+                missing = []
+                if not nearend_speech.exists(): missing.append('nearend_speech')
+                if not farend_speech.exists(): missing.append('farend_speech')
+                if not echo_signal.exists(): missing.append('echo_signal')
+                if missing:
+                    print(f"  Warning: fileid_{fileid} missing {missing}")
+                    continue
+
+                groups.append({
+                    'fileid': fileid,
+                    'nearend_mic': str(mic_file),
+                    'farend_speech': str(farend_speech),
+                    'nearend_speech': str(nearend_speech),
+                    'echo_signal': str(echo_signal),
+                })
+            return groups
+
+    # --- Flat directory layout ---
+    # Try multiple mic naming patterns
     mic_files = sorted(dataset_path.glob('nearend_mic_fileid_*.wav'))
+    if not mic_files:
+        mic_files = sorted(dataset_path.glob('nearend_mic_signal_fileid_*.wav'))
 
     if not mic_files:
-        # Try alternative: nearend_mic_signal pattern
-        mic_files = sorted(dataset_path.glob('nearend_mic_signal_fileid_*.wav'))
+        # Show what exists to help debug
+        all_wavs = sorted(dataset_path.glob('*.wav'))
+        subdirs = [d.name for d in dataset_path.iterdir() if d.is_dir()]
+        if subdirs:
+            print(f"  Subdirectories found: {subdirs}")
+            print(f"  Hint: if using AEC Challenge structure, point to the parent directory")
+        if all_wavs:
+            print(f"  Found {len(all_wavs)} wav files but none match 'nearend_mic_fileid_*.wav'")
+            print(f"  Sample files: {[f.name for f in all_wavs[:5]]}")
+        else:
+            print(f"  No wav files found in {dataset_dir}")
 
     groups = []
     for mic_file in mic_files:
-        # Extract fileid
         name = mic_file.stem
         match = re.search(r'fileid_(\d+)', name)
         if not match:
             continue
         fileid = match.group(1)
 
-        # Build expected paths
         nearend_speech = dataset_path / f'nearend_speech_fileid_{fileid}.wav'
         farend_speech = dataset_path / f'farend_speech_fileid_{fileid}.wav'
+        # Try both echo naming patterns
         echo_signal = dataset_path / f'echo_signal_fileid_{fileid}.wav'
-
-        # Check all exist
-        if not nearend_speech.exists():
-            print(f"  Warning: missing nearend_speech for fileid_{fileid}")
-            continue
-        if not farend_speech.exists():
-            print(f"  Warning: missing farend_speech for fileid_{fileid}")
-            continue
         if not echo_signal.exists():
-            print(f"  Warning: missing echo_signal for fileid_{fileid}")
+            echo_signal = dataset_path / f'echo_fileid_{fileid}.wav'
+
+        missing = []
+        if not nearend_speech.exists(): missing.append('nearend_speech')
+        if not farend_speech.exists(): missing.append('farend_speech')
+        if not echo_signal.exists(): missing.append('echo_signal/echo')
+        if missing:
+            print(f"  Warning: fileid_{fileid} missing {missing}")
             continue
 
         groups.append({
@@ -379,9 +434,15 @@ def process_and_evaluate(group: Dict[str, str], config: AecConfig,
     # Create AEC and process
     aec = AEC(config)
     hop_size = aec.hop_size
+    duration = min_len / mic_sr
+    total_hops = (min_len - hop_size) // hop_size + 1
+
+    print(f" ({duration:.1f}s, {min_len} samples) ", end='', flush=True)
 
     output = np.zeros(min_len, dtype=np.float32)
     processed = 0
+    hop_count = 0
+    t_start = time.time()
 
     while processed + hop_size <= min_len:
         mic_block = mic_data[processed:processed + hop_size]
@@ -389,6 +450,16 @@ def process_and_evaluate(group: Dict[str, str], config: AecConfig,
         out_block = aec.process(mic_block, ref_block)
         output[processed:processed + hop_size] = out_block
         processed += hop_size
+        hop_count += 1
+
+        # Progress every 25%
+        if hop_count % max(1, total_hops // 4) == 0:
+            pct = 100 * hop_count // total_hops
+            elapsed = time.time() - t_start
+            print(f"{pct}%({elapsed:.1f}s) ", end='', flush=True)
+
+    elapsed = time.time() - t_start
+    print(f"done({elapsed:.1f}s)", end='', flush=True)
 
     # Trim to processed length
     output = output[:processed]
@@ -518,15 +589,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python evaluate_aec.py ./synthetic_data --mode time
+    python evaluate_aec.py ./synthetic_data --mode nlms
     python evaluate_aec.py ./synthetic_data --mode all --output results.csv
     python evaluate_aec.py ./synthetic_data --mode subband --filter 1024 --mu 0.3
-    python evaluate_aec.py ./synthetic_data --mode time --save-output ./aec_output
+    python evaluate_aec.py ./synthetic_data --mode nlms --save-output ./aec_output
         """
     )
     parser.add_argument('dataset_dir', help='Directory containing AEC Challenge wav files')
-    parser.add_argument('--mode', choices=['lms', 'time', 'freq', 'subband', 'all'],
-                        default='time', help='Filter mode (default: time)')
+    parser.add_argument('--mode', choices=['lms', 'nlms', 'freq', 'subband', 'all'],
+                        default='nlms', help='Filter mode (default: nlms)')
     parser.add_argument('--mu', type=float, default=None, help='Step size override')
     parser.add_argument('--filter', type=int, default=None, help='Filter length in samples')
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
@@ -557,13 +628,13 @@ Examples:
     # Determine modes to run
     mode_map = {
         'lms': AecMode.LMS,
-        'time': AecMode.TIME,
+        'nlms': AecMode.NLMS,
         'freq': AecMode.FREQ,
         'subband': AecMode.SUBBAND,
     }
 
     if args.mode == 'all':
-        modes_to_run = ['time', 'freq', 'subband', 'lms']
+        modes_to_run = ['nlms', 'freq', 'subband', 'lms']
     else:
         modes_to_run = [args.mode]
 

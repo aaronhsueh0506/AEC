@@ -108,7 +108,7 @@ DTD = 1, if E_error / E_echo > threshold
 
 1. **mu 較大**: 收斂快，但穩態誤差大，對雙講敏感
 2. **mu 較小**: 收斂慢，但更穩定
-3. **filter_length**: 需大於實際回音路徑長度（TIME/LMS/SUBBAND 可配置，FREQ 固定=hop_size）
+3. **filter_length**: 需大於實際回音路徑長度（NLMS/LMS/SUBBAND 可配置，FREQ 固定=hop_size）
 4. **dtd_threshold**: 較低可能誤判為雙講，較高可能漏判
 
 ---

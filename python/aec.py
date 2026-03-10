@@ -2,7 +2,7 @@
 Acoustic Echo Cancellation (AEC) - Python Reference Implementation
 
 Supports three filter modes:
-- Time-domain NLMS (--mode time): sample-by-sample, lowest latency
+- Time-domain NLMS (--mode nlms): sample-by-sample, lowest latency
 - Frequency-domain NLMS (--mode freq): single FFT block, no partitions
 - Partitioned FDAF (--mode subband): multiple partitions, for long echo paths
 
@@ -11,7 +11,7 @@ Additional features:
 - Residual Echo Suppressor (RES)
 
 Usage:
-    python aec.py mic.wav ref.wav output.wav [--mode time|freq|subband] [--enable-res]
+    python aec.py mic.wav ref.wav output.wav [--mode nlms|freq|subband] [--enable-res]
 """
 
 import numpy as np
@@ -24,7 +24,7 @@ import soundfile as sf
 
 class AecMode(Enum):
     LMS = "lms"         # Time-domain LMS (no normalization, simplest)
-    TIME = "time"       # Time-domain NLMS (sample-by-sample)
+    NLMS = "nlms"       # Time-domain NLMS (sample-by-sample)
     FREQ = "freq"       # Frequency-domain NLMS (single block, n_partitions=1)
     SUBBAND = "subband" # Partitioned block FDAF (multiple partitions)
 
@@ -50,7 +50,7 @@ class AecConfig:
     res_alpha: float = 0.8
 
     # Mode
-    mode: AecMode = AecMode.TIME
+    mode: AecMode = AecMode.NLMS
 
     # TIME/LMS history control
     clear_filter_history: bool = False  # Clear ref_buffer each block (default: keep 1 hop history)
@@ -92,7 +92,7 @@ class NlmsFilter:
         echo_est = np.dot(self.weights, self.ref_buffer)
         error = near_end - echo_est
 
-        if update_weights:
+        if update_weights and self.power_sum > self.delta * self.filter_length:
             if self.normalize:
                 mu_eff = self.mu / (self.power_sum + self.delta)
             else:
@@ -202,11 +202,14 @@ class SubbandNlms:
         error_time[hop:] = output
         self.error_spec = np.fft.rfft(error_time)
 
-        # Update weights
-        if update_weights:
+        # Update weights (skip when reference power too low)
+        total_power = np.sum(self.power)
+        if update_weights and total_power > self.delta * self.n_freqs:
+            # Per-bin normalization with power floor to prevent divergence
+            power_floor = np.maximum(self.power, np.max(self.power) * 1e-4)
+            mu_eff = self.mu / (power_floor * self.n_partitions + self.delta)
             for p in range(self.n_partitions):
                 p_idx = (curr_p - p) % self.n_partitions
-                mu_eff = self.mu / (self.power + self.delta)
                 grad = self.error_spec * np.conj(self.X_buf[p_idx])
                 self.W[p] += mu_eff * grad
 
@@ -527,7 +530,7 @@ def main():
         epilog="""
 Filter modes:
     lms     - Time-domain LMS (simplest, fixed step size, mu~0.01)
-    time    - Time-domain NLMS (normalized, default)
+    nlms    - Time-domain NLMS (normalized, default)
     freq    - Frequency-domain NLMS (single FFT block, no partitions)
     subband - Partitioned block FDAF (for long echo paths, fastest convergence)
 
@@ -544,8 +547,8 @@ Examples:
     parser.add_argument('--mu', type=float, default=0.3, help='Step size (default: 0.3)')
     parser.add_argument('--filter', type=int, default=0,
                         help='Filter length in samples (default: mode-dependent)')
-    parser.add_argument('--mode', choices=['lms', 'time', 'freq', 'subband'], default='time',
-                        help='Filter mode (default: time)')
+    parser.add_argument('--mode', choices=['lms', 'nlms', 'freq', 'subband'], default='nlms',
+                        help='Filter mode (default: nlms)')
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
@@ -557,7 +560,7 @@ Examples:
     # Map mode string to enum
     mode_map = {
         'lms': AecMode.LMS,
-        'time': AecMode.TIME,
+        'nlms': AecMode.NLMS,
         'freq': AecMode.FREQ,
         'subband': AecMode.SUBBAND
     }

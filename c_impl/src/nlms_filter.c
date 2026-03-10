@@ -108,7 +108,8 @@ float nlms_process_sample(NlmsFilter* filter,
     float error = near_end - echo_est;
 
     // Update weights if enabled (not during double-talk)
-    if (update_weights) {
+    // Skip update when reference power is too low to avoid divergence
+    if (update_weights && filter->power_sum > filter->delta * L) {
         // Compute effective step size (NLMS vs LMS)
         float mu_eff;
         if (filter->normalize) {

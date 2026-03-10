@@ -18,7 +18,7 @@
 // Mode name helper
 static const char* mode_name(AecFilterMode mode) {
     switch (mode) {
-        case AEC_MODE_TIME:    return "time";
+        case AEC_MODE_NLMS:    return "nlms";
         case AEC_MODE_FREQ:    return "freq";
         case AEC_MODE_SUBBAND: return "subband";
         case AEC_MODE_LMS:     return "lms";
@@ -35,13 +35,13 @@ static void print_usage(const char* program) {
     printf("  ref.wav    - Reference/loudspeaker signal (16-bit mono WAV)\n");
     printf("  output.wav - Echo-cancelled output\n\n");
     printf("Options:\n");
-    printf("  --mode <time|freq|subband|lms> - Filter mode (default: time)\n");
+    printf("  --mode <nlms|freq|subband|lms> - Filter mode (default: nlms)\n");
     printf("  --mu <value>                - Step size (default: 0.3)\n");
     printf("  --filter <samples>          - Filter length in samples (default: frame_size)\n");
     printf("  --no-dtd                    - Disable double-talk detection\n");
     printf("  --clear-history             - Clear TIME/LMS buffer each block (no carry-over)\n");
     printf("\nFilter modes:\n");
-    printf("  time    - Time-domain NLMS (configurable filter length, default=frame_size)\n");
+    printf("  nlms    - Time-domain NLMS (configurable filter length, default=frame_size)\n");
     printf("  freq    - Frequency-domain NLMS (filter=hop_size, overlap-save)\n");
     printf("  subband - Partitioned FDAF (P hops history, default filter=hop*4)\n");
     printf("  lms     - Time-domain LMS (configurable filter length, default=frame_size)\n");
@@ -63,13 +63,13 @@ int main(int argc, char* argv[]) {
     bool user_set_filter = false;
     bool enable_dtd = true;
     bool clear_history = false;
-    AecFilterMode mode = AEC_MODE_TIME;
+    AecFilterMode mode = AEC_MODE_NLMS;
 
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
             i++;
-            if (strcmp(argv[i], "time") == 0) {
-                mode = AEC_MODE_TIME;
+            if (strcmp(argv[i], "nlms") == 0) {
+                mode = AEC_MODE_NLMS;
             } else if (strcmp(argv[i], "freq") == 0) {
                 mode = AEC_MODE_FREQ;
             } else if (strcmp(argv[i], "subband") == 0) {
@@ -77,7 +77,7 @@ int main(int argc, char* argv[]) {
             } else if (strcmp(argv[i], "lms") == 0) {
                 mode = AEC_MODE_LMS;
             } else {
-                fprintf(stderr, "Unknown mode: %s (use 'time', 'freq', 'subband', or 'lms')\n", argv[i]);
+                fprintf(stderr, "Unknown mode: %s (use 'nlms', 'freq', 'subband', or 'lms')\n", argv[i]);
                 return 1;
             }
         } else if (strcmp(argv[i], "--mu") == 0 && i + 1 < argc) {

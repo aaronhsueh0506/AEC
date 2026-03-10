@@ -19,7 +19,7 @@
 | 方法 | 模式 | 更新公式 | 複雜度 | 典型 μ | 適用場景 |
 |------|------|---------|--------|--------|---------|
 | LMS | `AEC_MODE_LMS` | `w += μ·e·x` | O(N) | 0.001~0.05 | 穩態環境、極低資源 |
-| NLMS | `AEC_MODE_TIME` | `w = leak·w + μ/(‖x‖²+δ)·e·x` | O(N) | 0.1~0.8 | 一般用途、低延遲 |
+| NLMS | `AEC_MODE_NLMS` | `w = leak·w + μ/(‖x‖²+δ)·e·x` | O(N) | 0.1~0.8 | 一般用途、低延遲 |
 | 頻域 NLMS | `AEC_MODE_FREQ` | `W += μ/(P+δ)·E·conj(X)` | O(N log N) | 0.1~0.8 | 中等 echo path |
 | PBFDAF | `AEC_MODE_SUBBAND` | 多 partition 頻域更新 | O(N log N) | 0.1~0.8 | 長 echo path (300ms+) |
 
@@ -253,7 +253,7 @@ W[k] += mu_eff[k] · E[k] · conj(X[k])
 - 頻域逐 bin 歸一化，自然的頻域白化效果
 
 **缺點：**
-- 延遲較 TIME 模式大（hop_size = 256 = 16ms）
+- 延遲較 NLMS 模式大（hop_size = 256 = 16ms）
 - 單一 block 長度限制可覆蓋的 echo path
 
 ---
@@ -644,7 +644,7 @@ ERLE = 10 · log₁₀(E[d²] / E[e²])    (dB)
 
 | 模式 | 延遲 (16kHz) |
 |------|-------------|
-| LMS/NLMS (TIME) | 16 ms (hop=256) |
+| LMS/NLMS | 16 ms (hop=256) |
 | FREQ | 16 ms (hop=256) |
 | SUBBAND (PBFDAF) | 16 ms (hop=256) |
 

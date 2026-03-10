@@ -6,7 +6,7 @@
 
 | 模式 | CLI | 演算法 | 延遲 | 適用場景 |
 |------|-----|--------|------|----------|
-| **time** | `--mode time` | 時域 NLMS | 16ms | 一般用途（預設） |
+| **nlms** | `--mode nlms` | 時域 NLMS | 16ms | 一般用途（預設） |
 | **freq** | `--mode freq` | 頻域 NLMS (單一 block) | 16ms | 中等回音、平衡效能 |
 | **subband** | `--mode subband` | 分區頻域 NLMS (PBFDAF) | 16ms | 長回音路徑、快速收斂 |
 | **lms** | `--mode lms` | 時域 LMS (固定步長) | 16ms | 穩態環境、極低資源 |
@@ -24,7 +24,7 @@ w = w + mu * e(n) * x(n)        // 固定步長更新
 - 複雜度: O(N) per sample
 - 適合穩態環境、極低計算資源場景
 
-#### 2. 時域 NLMS (`--mode time`)
+#### 2. 時域 NLMS (`--mode nlms`)
 ```
 y_hat(n) = w^T * x(n)           // 估計回音
 e(n) = d(n) - y_hat(n)          // 誤差信號
@@ -123,7 +123,7 @@ Reference Signal (far-end/喇叭播放)
                                      v
                      +---------------------------+
                      | Adaptive Filter           |
-                     | (lms/time/freq/subband)   |
+                     | (lms/nlms/freq/subband)   |
                      +---------------------------+
                                      |
                                      v
@@ -150,7 +150,7 @@ Reference Signal (far-end/喇叭播放)
 
 // 建立 AEC (時域模式)
 AecConfig config = aec_default_config(16000);
-config.filter_mode = AEC_MODE_TIME;  // 或 AEC_MODE_FREQ / AEC_MODE_SUBBAND / AEC_MODE_LMS
+config.filter_mode = AEC_MODE_NLMS;  // 或 AEC_MODE_FREQ / AEC_MODE_SUBBAND / AEC_MODE_LMS
 config.mu = 0.3f;
 config.enable_dtd = true;
 
@@ -179,7 +179,7 @@ Aec* lms_aec = aec_create(&lms_cfg);
 from aec import AEC, AecConfig, AecMode
 
 # 時域 NLMS 模式
-config = AecConfig(mode=AecMode.TIME, mu=0.3)
+config = AecConfig(mode=AecMode.NLMS, mu=0.3)
 aec = AEC(config)
 
 # 時域 LMS 模式 (固定步長)
@@ -212,7 +212,7 @@ while has_audio:
 | 參數 | 預設值 | 範圍 | 說明 |
 |------|--------|------|------|
 | `mu` | 0.3 (NLMS) / 0.01 (LMS) | NLMS: 0.1-0.8, LMS: 0.001-0.05 | 步長，越大收斂越快但穩態誤差增加 |
-| `filter_length` | 512 (TIME/LMS), 1024 (SUBBAND) | 256-4096 | 濾波器長度 (samples), TIME/LMS/SUBBAND 可配置, FREQ 固定 = hop_size |
+| `filter_length` | 512 (NLMS/LMS), 1024 (SUBBAND) | 256-4096 | 濾波器長度 (samples), NLMS/LMS/SUBBAND 可配置, FREQ 固定 = hop_size |
 | `dtd_threshold` | 0.6 | 0.4-0.8 | DTD 閾值 |
 
 ### RES 參數 (僅 freq/subband 模式)
@@ -227,11 +227,11 @@ while has_audio:
 
 | 應用場景 | 推薦模式 | mu | filter_length (samples) |
 |----------|----------|-----|------------------------|
-| 手機/耳機 (短回音) | time | 0.3 | 512 |
-| 會議室 (中等回音) | time | 0.3 | 1024 |
+| 手機/耳機 (短回音) | nlms | 0.3 | 512 |
+| 會議室 (中等回音) | nlms | 0.3 | 1024 |
 | 會議室 (頻域) | freq | 0.3 | 256 (= hop_size, 固定) |
 | 智慧音箱 (長回音) | subband | 0.2 | 1024-4096 |
-| 即時通訊 (低延遲) | time | 0.3 | 512 |
+| 即時通訊 (低延遲) | nlms | 0.3 | 512 |
 | 穩態環境 (極低資源) | lms | 0.01 | 512 |
 
 ## 檔案結構
@@ -299,7 +299,7 @@ while (has_audio) {
 | 模式 | ERLE | 複雜度 | 收斂時間 | hop_size |
 |------|------|--------|----------|----------|
 | lms | 10-15 dB | O(N) | 1-5s | 256 |
-| time | 15-20 dB | O(N) | 0.5-2s | 256 |
+| nlms | 15-20 dB | O(N) | 0.5-2s | 256 |
 | freq | 18-22 dB | O(N log N) | 0.3-1s | 256 |
 | subband | 20-25 dB | O(N log N) | 0.2-0.8s | 256 |
 | + RES | +10-15 dB | O(K) | - | - |

@@ -19,13 +19,13 @@ extern "C" {
  * AEC filter mode selection
  *
  * Four modes with different trade-offs:
- *   - TIME:    Time-domain NLMS, sample-by-sample
+ *   - NLMS:    Time-domain NLMS, sample-by-sample
  *   - FREQ:    Frequency-domain NLMS, single FFT block, no partitions
  *   - SUBBAND: Partitioned block FDAF (PBFDAF), for long echo paths
  *   - LMS:     Time-domain LMS, fixed step size, simplest
  */
 typedef enum {
-    AEC_MODE_TIME,      // Time-domain NLMS (default)
+    AEC_MODE_NLMS,      // Time-domain NLMS (default)
     AEC_MODE_FREQ,      // Frequency-domain NLMS (single block, no partitions)
     AEC_MODE_SUBBAND,   // Partitioned block FDAF (PBFDAF, for long echo paths)
     AEC_MODE_LMS        // Time-domain LMS (no normalization, simplest)
@@ -43,7 +43,7 @@ typedef struct {
     int fft_size;               // FFT size (512, = frame_size)
 
     // Filter mode selection
-    AecFilterMode filter_mode;  // AEC_MODE_TIME, AEC_MODE_FREQ, AEC_MODE_SUBBAND, AEC_MODE_LMS
+    AecFilterMode filter_mode;  // AEC_MODE_NLMS, AEC_MODE_FREQ, AEC_MODE_SUBBAND, AEC_MODE_LMS
 
     // Adaptive filter parameters
     int filter_length;          // Filter length in samples (512 @ 16kHz for TIME/LMS)
@@ -91,7 +91,7 @@ static inline AecConfig aec_default_config(int sample_rate) {
     config.fft_size = frame_size;         // = frame_size (no zero-padding)
 
     // Filter mode: default to time-domain NLMS
-    config.filter_mode = AEC_MODE_TIME;
+    config.filter_mode = AEC_MODE_NLMS;
 
     // Adaptive filter parameters
     config.filter_length = frame_size;    // 512 @ 16kHz (TIME/LMS default)
@@ -155,7 +155,7 @@ static inline AecDerivedParams aec_compute_params(const AecConfig* config) {
             break;
 
         case AEC_MODE_LMS:
-        case AEC_MODE_TIME:
+        case AEC_MODE_NLMS:
         default:
             // filter_length = user config (default: frame_size=512)
             // circular buffer naturally retains filter_length-1 samples across blocks
