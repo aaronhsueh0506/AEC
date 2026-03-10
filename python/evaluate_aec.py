@@ -339,13 +339,17 @@ def scan_dataset(dataset_dir: str) -> List[Dict[str, str]]:
 # AEC processing + evaluation
 # ============================================================
 
-def process_and_evaluate(group: Dict[str, str], config: AecConfig) -> Dict:
+def process_and_evaluate(group: Dict[str, str], config: AecConfig,
+                         save_dir: Optional[str] = None,
+                         mode_name: str = '') -> Dict:
     """
     Run AEC on one file group and compute all metrics.
 
     Args:
         group: Dict with file paths
         config: AEC configuration
+        save_dir: If set, save processed output wav to this directory
+        mode_name: Mode name for output filename
 
     Returns:
         Dict with all metric results
@@ -392,6 +396,13 @@ def process_and_evaluate(group: Dict[str, str], config: AecConfig) -> Dict:
     ref_data = ref_data[:processed]
     clean_data = clean_data[:processed]
     echo_data = echo_data[:processed]
+
+    # Save output wav if requested
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        suffix = f"_{mode_name}" if mode_name else ""
+        out_path = os.path.join(save_dir, f"output_fileid_{group['fileid']}{suffix}.wav")
+        sf.write(out_path, output, mic_sr)
 
     # Calculate metrics
     results = {}
@@ -510,6 +521,7 @@ Examples:
     python evaluate_aec.py ./synthetic_data --mode time
     python evaluate_aec.py ./synthetic_data --mode all --output results.csv
     python evaluate_aec.py ./synthetic_data --mode subband --filter 1024 --mu 0.3
+    python evaluate_aec.py ./synthetic_data --mode time --save-output ./aec_output
         """
     )
     parser.add_argument('dataset_dir', help='Directory containing AEC Challenge wav files')
@@ -520,6 +532,8 @@ Examples:
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--clear-history', action='store_true', help='Clear TIME/LMS history each block')
     parser.add_argument('--output', type=str, default=None, help='Output CSV file path')
+    parser.add_argument('--save-output', type=str, default=None,
+                        help='Directory to save processed output wav files')
     parser.add_argument('--limit', type=int, default=0, help='Limit number of test cases (0=all)')
 
     args = parser.parse_args()
@@ -587,7 +601,9 @@ Examples:
         for i, group in enumerate(groups):
             print(f"  [{i+1}/{len(groups)}] fileid_{group['fileid']}...", end='', flush=True)
             try:
-                r = process_and_evaluate(group, config)
+                r = process_and_evaluate(group, config,
+                                        save_dir=args.save_output,
+                                        mode_name=mode_name)
                 results.append(r)
                 print(f" ERLE={r['erle_mean']:.1f}dB, PESQ={r['pesq']}" if r['pesq'] else
                       f" ERLE={r['erle_mean']:.1f}dB")
