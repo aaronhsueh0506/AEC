@@ -77,7 +77,7 @@ class NlmsFilter:
         self.ref_buffer = np.zeros(filter_length, dtype=np.float32)
         self.power_sum = 0.0
         self.clear_history = False
-        self.max_w_norm = 2.0  # Weight norm constraint (prevents explosion during double-talk)
+        self.max_w_norm = 1.5  # Weight norm constraint (prevents explosion during double-talk)
 
     def reset(self):
         self.weights.fill(0)
