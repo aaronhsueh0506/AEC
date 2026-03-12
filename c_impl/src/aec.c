@@ -1,18 +1,15 @@
 /**
  * aec.c - Acoustic Echo Cancellation main implementation
  *
- * Orchestrates adaptive filter with DTD protection.
- * Supports three filter modes:
- *   - NLMS:    Time-domain NLMS (sample-by-sample)
- *   - FREQ:    Frequency-domain NLMS (single FFT block)
- *   - SUBBAND: Partitioned block FDAF (PBFDAF)
+ * PBFDAF (Partitioned Block Frequency Domain Adaptive Filter) with:
+ *   - Error-based DTD with warmup and holdover
+ *   - RES post-filter (optional)
  * Streaming architecture with hop-size based processing.
  */
 
 #include "aec.h"
-#include "nlms_filter.h"
 #include "subband_nlms.h"
-#include "dtd.h"
+#include "res_filter.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -21,33 +18,24 @@ struct Aec {
     AecConfig config;
     AecDerivedParams params;
 
-    // Sub-modules (one of these is active based on filter_mode)
-    NlmsFilter* nlms;           // Time-domain NLMS (AEC_MODE_NLMS)
-    SubbandNlms* subband;       // Frequency-domain NLMS (AEC_MODE_FREQ or AEC_MODE_SUBBAND)
-    DtdEstimator* dtd;
+    // PBFDAF adaptive filter
+    SubbandNlms* filter;
 
-    // Buffers for block processing
-    float* near_buffer;     // [hop_size]
-    float* far_buffer;      // [hop_size]
+    // RES post-filter (optional)
+    ResFilter* res;
+
+    // Buffers
     float* output_buffer;   // [hop_size]
-    float* echo_est_buffer; // [hop_size]
-
-    // FREQ buffered FDAF (when internal_hop > hop_size)
-    float* freq_near_queue;     // [internal_hop]
-    float* freq_far_queue;      // [internal_hop]
-    float* freq_out_queue;      // [internal_hop]
-    int freq_queue_write;       // write position
-    int freq_out_read;          // read position in output queue
 
     // ERLE estimation
-    float erle_smoothed;
     float near_power;
     float error_power;
     float alpha_erle;
 
     // Error-based DTD state
-    bool dtd_active;            // Current DTD decision (for next block)
-    float dtd_ratio_smooth;     // Smoothed error/echo ratio
+    bool dtd_active;
+    float dtd_ratio_smooth;
+    int frame_count;
 };
 
 Aec* aec_create(const AecConfig* config) {
@@ -56,137 +44,57 @@ Aec* aec_create(const AecConfig* config) {
     Aec* aec = (Aec*)calloc(1, sizeof(Aec));
     if (!aec) return NULL;
 
-    // Copy configuration
     aec->config = *config;
     aec->params = aec_compute_params(config);
 
-    // Create adaptive filter based on mode
-    switch (config->filter_mode) {
-        case AEC_MODE_FREQ:
-        case AEC_MODE_SUBBAND:
-            // FREQ: FDAF (block_size from filter_length, n_partitions=1)
-            // SUBBAND: PBFDAF (block_size=fft_size, n_partitions from filter_length)
-            aec->subband = subband_nlms_create(
-                aec->params.block_size,
-                aec->params.n_partitions,
-                config->mu,
-                config->delta
-            );
-            if (!aec->subband) {
-                aec_destroy(aec);
-                return NULL;
-            }
-            aec->nlms = NULL;
-
-            // FREQ: allocate buffering queues if internal_hop > hop_size
-            if (config->filter_mode == AEC_MODE_FREQ &&
-                aec->params.internal_hop > aec->params.hop_size) {
-                int ihop = aec->params.internal_hop;
-                aec->freq_near_queue = (float*)calloc(ihop, sizeof(float));
-                aec->freq_far_queue = (float*)calloc(ihop, sizeof(float));
-                aec->freq_out_queue = (float*)calloc(ihop, sizeof(float));
-                if (!aec->freq_near_queue || !aec->freq_far_queue ||
-                    !aec->freq_out_queue) {
-                    aec_destroy(aec);
-                    return NULL;
-                }
-                aec->freq_queue_write = 0;
-                aec->freq_out_read = 0;
-            }
-            break;
-
-        case AEC_MODE_LMS:
-            // Time-domain LMS (no normalization, fixed step size)
-            aec->nlms = nlms_create(
-                aec->params.filter_length,
-                config->mu,
-                config->delta,
-                1.0f,   // leak=1.0 for LMS (no weight decay)
-                false   // normalize=false -> LMS
-            );
-            if (!aec->nlms) {
-                aec_destroy(aec);
-                return NULL;
-            }
-            aec->subband = NULL;
-            break;
-
-        case AEC_MODE_NLMS:
-        default:
-            // Time-domain NLMS (sample-by-sample)
-            aec->nlms = nlms_create(
-                aec->params.filter_length,
-                config->mu,
-                config->delta,
-                config->leak,
-                true    // normalize=true -> NLMS
-            );
-            if (!aec->nlms) {
-                aec_destroy(aec);
-                return NULL;
-            }
-            aec->subband = NULL;
-            break;
-    }
-
-    // Apply clear_filter_history setting for TIME/LMS
-    if (aec->nlms) {
-        nlms_set_clear_history(aec->nlms, config->clear_filter_history);
-    }
-
-    // Create DTD (if enabled)
-    if (config->enable_dtd) {
-        // DTD window = filter length for Geigel
-        aec->dtd = dtd_create(
-            aec->params.filter_length,
-            config->dtd_threshold,
-            config->dtd_hangover_frames,
-            config->dtd_energy_ratio
-        );
-        if (!aec->dtd) {
-            aec_destroy(aec);
-            return NULL;
-        }
-    }
-
-    // Allocate buffers
-    int hop_size = aec->params.hop_size;
-    aec->near_buffer = (float*)calloc(hop_size, sizeof(float));
-    aec->far_buffer = (float*)calloc(hop_size, sizeof(float));
-    aec->output_buffer = (float*)calloc(hop_size, sizeof(float));
-    aec->echo_est_buffer = (float*)calloc(hop_size, sizeof(float));
-
-    if (!aec->near_buffer || !aec->far_buffer ||
-        !aec->output_buffer || !aec->echo_est_buffer) {
+    // Create PBFDAF filter
+    aec->filter = subband_nlms_create(
+        aec->params.block_size,
+        aec->params.n_partitions,
+        config->mu,
+        config->delta
+    );
+    if (!aec->filter) {
         aec_destroy(aec);
         return NULL;
     }
 
-    // ERLE estimation init
-    aec->erle_smoothed = 0.0f;
+    // Create RES post-filter (optional)
+    if (config->enable_res) {
+        aec->res = res_create(
+            aec->params.n_freqs,
+            config->res_g_min_db,
+            config->res_over_sub,
+            config->res_alpha
+        );
+        // Non-fatal if RES creation fails
+    }
+
+    // Allocate buffers
+    aec->output_buffer = (float*)calloc(aec->params.hop_size, sizeof(float));
+    if (!aec->output_buffer) {
+        aec_destroy(aec);
+        return NULL;
+    }
+
+    // Init ERLE
     aec->near_power = 0.0f;
     aec->error_power = 0.0f;
     aec->alpha_erle = 0.95f;
 
-    // Error-based DTD init
+    // Init DTD
     aec->dtd_active = false;
     aec->dtd_ratio_smooth = 0.0f;
+    aec->frame_count = 0;
 
     return aec;
 }
 
 void aec_destroy(Aec* aec) {
     if (aec) {
-        nlms_destroy(aec->nlms);
-        subband_nlms_destroy(aec->subband);
-        dtd_destroy(aec->dtd);
-        free(aec->near_buffer);
-        free(aec->far_buffer);
+        subband_nlms_destroy(aec->filter);
+        res_destroy(aec->res);
         free(aec->output_buffer);
-        free(aec->echo_est_buffer);
-        free(aec->freq_near_queue);
-        free(aec->freq_far_queue);
-        free(aec->freq_out_queue);
         free(aec);
     }
 }
@@ -194,36 +102,39 @@ void aec_destroy(Aec* aec) {
 void aec_reset(Aec* aec) {
     if (!aec) return;
 
-    if (aec->nlms) {
-        nlms_reset(aec->nlms);
+    if (aec->filter) {
+        subband_nlms_reset(aec->filter);
     }
-    if (aec->subband) {
-        subband_nlms_reset(aec->subband);
-    }
-    if (aec->dtd) {
-        dtd_reset(aec->dtd);
+    if (aec->res) {
+        res_reset(aec->res);
     }
 
     int hop_size = aec->params.hop_size;
-    memset(aec->near_buffer, 0, hop_size * sizeof(float));
-    memset(aec->far_buffer, 0, hop_size * sizeof(float));
     memset(aec->output_buffer, 0, hop_size * sizeof(float));
-    memset(aec->echo_est_buffer, 0, hop_size * sizeof(float));
 
-    if (aec->freq_near_queue) {
-        int ihop = aec->params.internal_hop;
-        memset(aec->freq_near_queue, 0, ihop * sizeof(float));
-        memset(aec->freq_far_queue, 0, ihop * sizeof(float));
-        memset(aec->freq_out_queue, 0, ihop * sizeof(float));
-        aec->freq_queue_write = 0;
-        aec->freq_out_read = 0;
-    }
-
-    aec->erle_smoothed = 0.0f;
     aec->near_power = 0.0f;
     aec->error_power = 0.0f;
     aec->dtd_active = false;
     aec->dtd_ratio_smooth = 0.0f;
+    aec->frame_count = 0;
+}
+
+void aec_retrain(Aec* aec) {
+    if (!aec) return;
+
+    // Reset weights only — keep X_buf, power, overlap buffers
+    if (aec->filter) {
+        subband_nlms_reset_weights(aec->filter);
+    }
+
+    // Restart DTD warmup
+    aec->dtd_active = false;
+    aec->dtd_ratio_smooth = 0.0f;
+    aec->frame_count = 0;
+
+    // Reset ERLE
+    aec->near_power = 0.0f;
+    aec->error_power = 0.0f;
 }
 
 int aec_process(Aec* aec,
@@ -237,68 +148,22 @@ int aec_process(Aec* aec,
     const int hop_size = aec->params.hop_size;
     const float alpha = aec->alpha_erle;
 
-    // DTD strategy per mode:
-    // - FREQ/SUBBAND: error-based DTD, freeze weights during double-talk
-    // - NLMS/LMS: NO DTD — leak factor handles double-talk naturally;
-    //   DTD causes weight explosion (soft) or stale-weight drift (hard)
+    // DTD: freeze weights during double-talk
     bool update_weights = true;
     if (aec->config.enable_dtd && aec->dtd_active) {
-        if (aec->config.filter_mode == AEC_MODE_FREQ ||
-            aec->config.filter_mode == AEC_MODE_SUBBAND) {
-            update_weights = false;
-        }
+        update_weights = false;
     }
 
-    // Process block through adaptive filter (mode-dependent)
-    switch (aec->config.filter_mode) {
-        case AEC_MODE_FREQ:
-            if (aec->freq_near_queue) {
-                // Buffered FDAF: accumulate hop_size into internal queue
-                memcpy(aec->freq_near_queue + aec->freq_queue_write,
-                       near_end, hop_size * sizeof(float));
-                memcpy(aec->freq_far_queue + aec->freq_queue_write,
-                       far_end, hop_size * sizeof(float));
-                aec->freq_queue_write += hop_size;
+    // Process through PBFDAF
+    subband_nlms_process(aec->filter, near_end, far_end, output, update_weights);
 
-                if (aec->freq_queue_write >= aec->params.internal_hop) {
-                    // Buffer full — run one big FDAF
-                    subband_nlms_process(aec->subband,
-                                         aec->freq_near_queue,
-                                         aec->freq_far_queue,
-                                         aec->freq_out_queue,
-                                         update_weights);
-                    aec->freq_queue_write = 0;
-                    aec->freq_out_read = 0;
-                }
+    // TODO: RES post-filter (requires spectrum access refactoring)
 
-                // Read hop_size output from queue
-                memcpy(output, aec->freq_out_queue + aec->freq_out_read,
-                       hop_size * sizeof(float));
-                aec->freq_out_read += hop_size;
-            } else {
-                // No buffering needed (filter_length <= hop_size)
-                subband_nlms_process(aec->subband, near_end, far_end,
-                                     output, update_weights);
-            }
-            break;
-
-        case AEC_MODE_SUBBAND:
-            subband_nlms_process(aec->subband, near_end, far_end, output, update_weights);
-            break;
-
-        case AEC_MODE_LMS:
-        case AEC_MODE_NLMS:
-        default:
-            // NLMS/LMS: always update weights (no DTD)
-            nlms_process_block(aec->nlms, near_end, far_end, output,
-                               aec->echo_est_buffer, hop_size, true);
-            break;
-    }
-
-    // Update error-based DTD state for NEXT block (FREQ/SUBBAND only)
+    // Update error-based DTD state for NEXT block
+    aec->frame_count++;
     if (aec->config.enable_dtd &&
-        (aec->config.filter_mode == AEC_MODE_FREQ ||
-         aec->config.filter_mode == AEC_MODE_SUBBAND)) {
+        aec->frame_count >= aec->config.dtd_warmup_frames) {
+
         float error_energy = 0.0f;
         float echo_energy = 0.0f;
         float near_energy = 0.0f;
@@ -313,21 +178,21 @@ int aec_process(Aec* aec,
         near_energy /= hop_size;
         echo_energy /= hop_size;
 
-        // Only update DTD when filter produces meaningful echo estimates
-        if (echo_energy > near_energy * 0.01f && echo_energy > 1e-10f) {
+        // Convergence guard + holdover
+        if (echo_energy > near_energy * 0.1f && echo_energy > 1e-10f) {
+            // Normal DTD: filter has converged, check error/echo ratio
             float ratio = error_energy / (echo_energy + 1e-10f);
-            aec->dtd_ratio_smooth = 0.8f * aec->dtd_ratio_smooth + 0.2f * ratio;
+            aec->dtd_ratio_smooth = 0.95f * aec->dtd_ratio_smooth + 0.05f * ratio;
             aec->dtd_active = (aec->dtd_ratio_smooth > aec->config.dtd_threshold);
+        } else if (aec->dtd_active && near_energy > 1e-6f) {
+            // Holdover: far-end stopped but near-end still active.
+            // Keep DTD active to prevent weight corruption from residual X_buf.
+            // (do nothing — dtd_active stays true)
         } else {
+            // Filter not converged yet — keep DTD inactive
             aec->dtd_ratio_smooth *= 0.9f;
             aec->dtd_active = false;
         }
-    }
-
-    // Update detailed DTD estimator (for query functions)
-    if (aec->dtd) {
-        dtd_detect_block(aec->dtd, near_end, far_end, output,
-                         aec->echo_est_buffer, hop_size);
     }
 
     // Update ERLE estimation
@@ -350,26 +215,18 @@ int aec_get_frame_size(const Aec* aec) {
 }
 
 int aec_get_latency(const Aec* aec) {
-    if (!aec) return 0;
-    // FREQ buffered FDAF: latency includes buffering delay
-    // Other modes: latency = hop_size
-    return aec->params.internal_hop;
-}
-
-AecFilterMode aec_get_filter_mode(const Aec* aec) {
-    return aec ? aec->config.filter_mode : AEC_MODE_NLMS;
+    return aec ? aec->params.hop_size : 0;
 }
 
 float aec_get_erle(const Aec* aec) {
-    if (!aec || aec->error_power < 1e-10f) {
+    if (!aec) return 0.0f;
+
+    const float eps = 1e-10f;
+    if (aec->near_power < eps && aec->error_power < eps) {
         return 0.0f;
     }
 
-    // ERLE = 10 * log10(near_power / error_power)
-    float erle_linear = aec->near_power / (aec->error_power + 1e-10f);
-    float erle_db = 10.0f * log10f(erle_linear + 1e-10f);
-
-    return erle_db;
+    return 10.0f * log10f((aec->near_power + eps) / (aec->error_power + eps));
 }
 
 bool aec_is_dtd_active(const Aec* aec) {

@@ -164,6 +164,15 @@ void subband_nlms_reset(SubbandNlms* f) {
     f->partition_idx = 0;
 }
 
+void subband_nlms_reset_weights(SubbandNlms* f) {
+    if (!f) return;
+
+    // Only reset W (filter weights), keep X_buf, buffers, power
+    for (int p = 0; p < f->n_partitions; p++) {
+        memset(f->W[p], 0, f->n_freqs * sizeof(Complex));
+    }
+}
+
 // Complex multiply: a * conj(b)
 static inline Complex cmul_conj(Complex a, Complex b) {
     Complex result;

@@ -1,5 +1,5 @@
 # AEC (Acoustic Echo Cancellation) Makefile
-# Time-domain NLMS with DTD
+# PBFDAF with error-based DTD
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c99
@@ -20,9 +20,7 @@ BIN_DIR = bin
 
 # Source files
 SRCS = $(SRC_DIR)/aec.c \
-       $(SRC_DIR)/nlms_filter.c \
        $(SRC_DIR)/subband_nlms.c \
-       $(SRC_DIR)/dtd.c \
        $(SRC_DIR)/res_filter.c \
        $(SRC_DIR)/fft_wrapper.c
 

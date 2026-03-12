@@ -1,18 +1,13 @@
 /**
  * aec.h - Acoustic Echo Cancellation main interface
  *
- * Main AEC module that orchestrates:
- * - NLMS adaptive filter (time-domain or subband)
- * - Double-talk detection (DTD)
- * - Residual echo suppression (RES) - future
+ * PBFDAF-based AEC with error-based DTD and RES post-filter.
  *
  * Usage:
  *   AecConfig cfg = aec_default_config(16000);
- *   // Optional: switch to subband mode for faster convergence
- *   cfg.filter_mode = AEC_MODE_SUBBAND;
  *   Aec* aec = aec_create(&cfg);
  *
- *   int hop = aec_get_hop_size(aec);  // Mode-dependent!
+ *   int hop = aec_get_hop_size(aec);
  *   while (has_audio) {
  *       aec_process(aec, mic_in, ref_in, output);
  *   }
@@ -46,9 +41,19 @@ Aec* aec_create(const AecConfig* config);
 void aec_destroy(Aec* aec);
 
 /**
- * Reset AEC state (clear filter weights, buffers)
+ * Reset AEC state (clear filter weights, buffers, DTD)
+ * Full reset — equivalent to destroy + create with same config.
  */
 void aec_reset(Aec* aec);
+
+/**
+ * Retrain AEC filter — clear weights only, keep buffers.
+ *
+ * Use when echo path changes (e.g., device/room switch).
+ * Preserves reference history (X_buf) for faster reconvergence.
+ * Restarts DTD warmup.
+ */
+void aec_retrain(Aec* aec);
 
 /**
  * Process hop_size samples through AEC
@@ -94,11 +99,6 @@ bool aec_is_dtd_active(const Aec* aec);
  * Get configuration (for inspection)
  */
 const AecConfig* aec_get_config(const Aec* aec);
-
-/**
- * Get current filter mode
- */
-AecFilterMode aec_get_filter_mode(const Aec* aec);
 
 #ifdef __cplusplus
 }

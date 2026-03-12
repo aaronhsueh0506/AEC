@@ -41,9 +41,15 @@ SubbandNlms* subband_nlms_create(int block_size, int n_partitions,
 void subband_nlms_destroy(SubbandNlms* filter);
 
 /**
- * Reset filter state
+ * Reset filter state (weights + buffers + power)
  */
 void subband_nlms_reset(SubbandNlms* filter);
+
+/**
+ * Reset filter weights only (keep buffers and power estimates)
+ * Used for retrain: faster reconvergence since X_buf history is preserved
+ */
+void subband_nlms_reset_weights(SubbandNlms* filter);
 
 /**
  * Process one block of samples
