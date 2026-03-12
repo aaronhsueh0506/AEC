@@ -24,7 +24,7 @@ N = FS * DURATION_S
 REF_LEVEL = 0.3         # white noise amplitude
 ECHO_DECAY_MS = 60      # echo tail length
 ECHO_DELAY_MS = 10      # direct-path delay
-NEAR_LEVEL = 0.15       # near-end sine amplitude
+NEAR_LEVEL = 0.02       # near-end sine amplitude (comparable to echo level)
 NEAR_FREQ = 400         # Hz
 DT_ONSET_S = 1.0        # double-talk starts at 1 s
 
