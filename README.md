@@ -213,7 +213,7 @@ while has_audio:
 |------|--------|------|------|
 | `mu` | 0.3 (NLMS) / 0.01 (LMS) | NLMS: 0.1-0.8, LMS: 0.001-0.05 | 步長，越大收斂越快但穩態誤差增加 |
 | `filter_length` | 512 (NLMS/LMS), 1024 (SUBBAND) | 256-4096 | 濾波器長度 (samples), NLMS/LMS/SUBBAND 可配置, FREQ 固定 = hop_size |
-| `dtd_threshold` | 0.6 | 0.4-0.8 | DTD 閾值 |
+| `dtd_threshold` | 2.0 | 1.0-4.0 | DTD 閾值（error/echo 平滑比值） |
 
 ### RES 參數 (僅 freq/subband 模式)
 

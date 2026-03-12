@@ -344,79 +344,169 @@ for each partition p:
 偵測近端和遠端同時說話（double-talk）的狀況。雙講時必須停止權重更新，
 否則自適應濾波器會把近端語音當作回聲來消除，導致濾波器發散。
 
-### 方法 1: Geigel DTD
+**所有四個模式（LMS、NLMS、FREQ、SUBBAND）都使用 DTD。**
 
-**原理：** 比較近端信號和遠端信號的振幅比。
+### 核心方法：Error-based DTD
+
+**原理：** 比較誤差信號與回聲估計的能量比。如果誤差遠大於回聲估計，
+代表有額外的近端信號（雙講），應停止權重更新。
+
+```
+error_energy = mean(output²)          // AEC 輸出（殘餘信號）
+echo_energy  = mean(echo_estimate²)   // 回聲估計
+
+ratio = error_energy / (echo_energy + ε)
+
+ratio_smooth = 0.95 · ratio_smooth + 0.05 · ratio    // 平滑
+
+判斷條件: ratio_smooth > dtd_threshold (預設 2.0)
+```
+
+| 參數 | 典型值 | 說明 |
+|------|--------|------|
+| dtd_threshold | 2.0 | 平滑比值門限 |
+| α_smooth | 0.95 | 比值平滑因子（慢追蹤，防止單幀噪聲誤觸發） |
+
+**為什麼用 error/echo 而不是 Geigel（mic vs ref）？**
+
+Geigel 方法比較 mic 和 ref 的振幅，但 mic 已經包含回聲，當回音增益較大時
+（如 gain > threshold），會導致 DTD 誤判為雙講，阻止濾波器收斂。
+Error-based 方法使用濾波器自身的輸出，更準確反映是否有未被建模的信號。
+
+### 收斂保護（Convergence Guard）
+
+DTD 只在濾波器已經產生有意義的回聲估計時才啟用：
+
+```
+if echo_energy > near_energy × 0.1 AND echo_energy > 1e-10:
+    // 正常 DTD 判斷
+    更新 ratio_smooth，判斷是否 active
+elif dtd_active AND near_energy > 1e-6:
+    // Holdover: 保持 DTD active（見下方說明）
+else:
+    // 濾波器尚未收斂，DTD 保持 inactive
+    ratio_smooth *= 0.9    // 緩慢衰減
+    dtd_active = false
+```
+
+這防止了 **false-lock 問題**：如果 DTD 在濾波器還沒收斂就啟用，
+會阻止權重更新，導致濾波器永遠無法收斂。
+
+### Warmup 機制
+
+濾波器剛啟動時需要一段時間收斂，此期間不啟用 DTD：
+
+| 模式 | Warmup 幀數 | 時間 (@hop=256, sr=16kHz) |
+|------|-------------|--------------------------|
+| **LMS / NLMS** | 50 幀 | ~0.8 秒 |
+| **FREQ / SUBBAND** | 200 幀 | ~3.2 秒 |
+
+NLMS/LMS 使用較短的 warmup，因為時域逐樣本更新收斂更快。
+FREQ/SUBBAND 使用較長的 warmup，因為頻域方法需要更多 block 來建立準確的功率估計。
+
+```
+frame_count++
+if frame_count < warmup_frames:
+    // 不執行 DTD，直接更新權重
+```
+
+### Holdover 機制
+
+**問題場景：** 當遠端（far-end）突然停止但近端仍在說話時：
+1. echo_energy 急遽下降（沒有遠端信號 → 回聲估計為零）
+2. 收斂保護條件不滿足 → DTD 被關閉
+3. 但 ref_buffer 中仍殘留遠端歷史數據（約 filter_length 個樣本）
+4. NLMS 用近端語音作為 error 去更新這些殘留的 ref_buffer 方向 → **權重爆炸**
+
+**解法：** 當 DTD 已是 active 狀態且近端仍有能量時，維持 DTD active：
+
+```
+elif dtd_active AND near_energy > 1e-6:
+    pass    // 保持 DTD active，不更新 ratio_smooth
+```
+
+這確保了 far-end 到 near-end 的過渡期間，權重不會被近端語音污染。
+DTD 會在近端也靜音後自然解除（進入 else 分支，衰減並關閉）。
+
+**實際案例：** 在 fileid_2 (double-talk) 測試中，far-end 在 9.5s 停止但
+near-end 持續到 10.0s。沒有 holdover 時，權重在一幀內從正確（peak@200）
+爆炸到完全錯誤（peak@1018, norm=1.5）。加入 holdover 後問題消除。
+
+### DTD 流程圖
+
+```
+                     ┌──────────────┐
+                     │ frame_count  │
+                     │ < warmup?    │
+                     └──────┬───────┘
+                            │
+                    Yes ────┤──── No
+                    │       │        │
+             [Skip DTD]     │   ┌────▼────────────┐
+             [Update        │   │ echo_energy >    │
+              weights]      │   │ 10% near_energy? │
+                            │   └────┬────────────┘
+                            │        │
+                            │  Yes ──┤── No
+                            │  │     │     │
+                            │  │     │  ┌──▼──────────────┐
+                            │  │     │  │ DTD was active   │
+                            │  │     │  │ AND near > 1e-6? │
+                            │  │     │  └──┬──────────────┘
+                            │  │     │     │
+                            │  │     │ Yes─┤── No
+                            │  │     │  │  │    │
+                            │  │     │  │  │  [Decay ratio]
+                            │  │     │  │  │  [DTD = false]
+                            │  │     │  │  │
+                            │  │     │[Hold │
+                            │  │     │ over]│
+                            │  │     │      │
+                            │  ├─────┘      │
+                            │  │            │
+                            │  ▼            │
+                      ┌─────────────┐       │
+                      │ Update      │       │
+                      │ ratio_smooth│       │
+                      │ DTD active =│       │
+                      │ ratio > 2.0 │       │
+                      └─────────────┘       │
+                                            │
+```
+
+### NLMS 權重 Norm 約束
+
+除了 DTD，NLMS 還有一個額外的安全機制：
+
+```
+w_norm = ||weights||
+if w_norm > max_w_norm (預設 1.5):
+    weights *= max_w_norm / w_norm
+```
+
+這防止了 DTD 未能及時啟用時（如 warmup 期間的短暫 double-talk），
+權重 norm 不會無限增長。對於 fileid_1（single-talk），true IR norm ≈ 0.85，
+1.5 的上限不會影響正常收斂。
+
+### 各模式的 DTD 實作差異
+
+| | NLMS/LMS | FREQ/SUBBAND |
+|---|---|---|
+| **DTD 方法** | Error-based | Error-based |
+| **Warmup** | 50 幀 (~0.8s) | 200 幀 (~3.2s) |
+| **echo_energy 來源** | `process_block` 回傳的 `echo_est` | `near_end - output`（時域） |
+| **額外保護** | max_w_norm=1.5 | — |
+| **Holdover** | 有 | 有 |
+
+### Geigel DTD（C 版本，僅供參考）
+
+C 版本另有 Geigel 方法實作（`dtd.c`），但 Python 版本已改用 error-based。
 
 ```
 判斷條件: |d[n]| > θ · max(|x[n-k]|)   for k ∈ [0, window_length)
 ```
 
-| 參數 | 典型值 | 說明 |
-|------|--------|------|
-| θ (threshold) | 0.6 | 門限，越低越敏感 |
-| window_length | 4000 | 最大值追蹤窗口（= filter_length） |
-
-**運作方式：**
-- 維護一個環形緩衝區追蹤遠端信號的近期最大值
-- 當近端超過遠端最大值的 θ 倍時，判定為雙講
-- 快速更新：若新值 >= 當前最大值直接替換
-- 定期重算：每圈環形緩衝區重新計算一次最大值
-
-### 方法 2: 能量比 DTD
-
-**原理：** 比較誤差信號與回聲估計的能量比。
-
-```
-near_energy  = α · near_energy  + (1-α) · d²[n]
-error_energy = α · error_energy + (1-α) · e²[n]
-echo_energy  = α · echo_energy  + (1-α) · ŷ²[n]
-
-ratio = error_energy / (echo_energy + ε)
-
-判斷條件: ratio > energy_threshold
-```
-
-| 參數 | 典型值 | 說明 |
-|------|--------|------|
-| α_energy | 0.95 | 能量平滑因子 |
-| energy_threshold | 0.4 | 能量比門限 |
-
-**解釋：** 當誤差能量遠大於回聲估計時，代表有額外的近端信號（雙講）。
-
-### 組合判決
-
-```
-dtd_detected = geigel_detected OR energy_detected
-```
-
-### Hangover 機制
-
-防止 DTD 快速開關造成的不穩定：
-
-```
-if (detected):
-    hangover_count = hangover_max    (例如 15 幀)
-    dtd_active = true
-elif (hangover_count > 0):
-    hangover_count--
-    dtd_active = true                (hangover 期間仍然啟用)
-else:
-    dtd_active = false
-```
-
-| 參數 | 典型值 | 說明 |
-|------|--------|------|
-| hangover_max | 15 幀 | 持續抑制時間 (~240ms @ 16ms/frame) |
-
-### 信心度追蹤
-
-```
-if (detected):
-    confidence = min(confidence + 0.1, 1.0)     // 快速上升
-else:
-    confidence = max(confidence - 0.02, 0.0)    // 緩慢下降
-```
+Geigel 方法在回音增益 > threshold 時會誤判，不建議使用。
 
 ---
 

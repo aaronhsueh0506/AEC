@@ -2,6 +2,68 @@
 
 ## 版本歷史
 
+### v1.2.0 (2025-03-12) - DTD 全面改進
+
+#### 改動內容
+
+1. **DTD 擴展至所有模式**
+   - 原本只有 FREQ/SUBBAND 有 DTD，NLMS/LMS 依賴 leak 防 double-talk
+   - 現在所有四個模式都使用 error-based DTD
+   - 原因：leak=0.99999 不足以防止 double-talk 權重漂移
+
+2. **DTD Warmup 分模式設定**
+   - NLMS/LMS: 50 幀 (~0.8s) — 時域逐樣本更新收斂快
+   - FREQ/SUBBAND: 200 幀 (~3.2s) — 頻域需更多 block 建立功率估計
+   - 原因：warmup 太長 → double-talk 開始時 DTD 來不及啟動
+
+3. **DTD Holdover 機制**
+   - 當 far-end 停止但 near-end 仍在說話時，保持 DTD active
+   - 原因：far-end 停止後 echo_energy 歸零 → 收斂保護條件失敗 → DTD 關閉 →
+     ref_buffer 殘留數據被 near-end speech 污染 → 權重在一幀內爆炸
+   - 實測：fileid_2 在 9.52s→9.60s 之間，weights 從 peak@200 爆炸到 peak@1018
+
+4. **NLMS max_w_norm 調整**
+   - 2.0 → 1.5
+   - 原因：max_w_norm=2.0 時 fileid_2 output peak (0.867) > mic peak (0.667)
+
+5. **ERLE 計算修正**
+   - `get_erle()` 加 eps 保護，避免 log(0) 和信號結尾靜音期的不穩定
+
+#### 修正的問題
+
+- NLMS fileid_2 estimated IR 完全錯誤（peak 在 filter 末尾而非 tap 200）
+- NLMS fileid_2 output 比 mic 還大（信號放大而非消除回音）
+- `get_erle()` 在信號靜音期回傳不穩定值
+
+---
+
+### v1.1.0 (2025-03-11) - 四模式調校與 DTD 改進
+
+#### 改動內容
+
+1. **DTD 能量尺度修正**
+   - FREQ/SUBBAND 的 echo_energy 原本取自頻域 `echo_spec`，與時域 error_energy 尺度不匹配
+   - 改用 `echo_est_time = near_end - output`，統一為時域能量
+
+2. **DTD Warmup 機制**（首次引入，針對 FREQ/SUBBAND）
+   - 200 幀 warmup，防止收斂初期 DTD 誤觸發導致 false-lock
+   - 收斂保護提升至 10%（echo_energy > 10% near_energy）
+
+3. **FREQ 預設 mu 調整**
+   - 0.3 → 0.1（單一 FFT block 的 FDAF，mu=0.3 過大導致信號放大）
+
+4. **NLMS leak 調整**
+   - 0.9999 → 0.99999
+   - 原因：leak=0.9999 使收斂精度只到 14 dB，weights 只達真值的 39%
+
+5. **Plot 改進**
+   - 標題不再被切掉
+   - True IR 只對 gen_sim_data 產生的檔案顯示（fileid >= 1）
+   - IR 圖 x 軸顯示完整 filter length
+   - Filter length 依模式自動選擇（SUBBAND=1024，其他=512）
+
+---
+
 ### v1.0.0 (2025-02-11) - 初始版本
 
 #### 實作內容
@@ -101,8 +163,8 @@ DTD = 1, if E_error / E_echo > threshold
 |------|------|----------|--------|
 | `mu` | 步長 | 0.1 - 0.8 | 0.3 |
 | `filter_length` | 濾波器長度 (samples) | 256 - 4096 | 512 |
-| `dtd_threshold` | DTD 閾值 | 0.4 - 0.8 | 0.6 |
-| `leak` | 權重洩漏 | 0.999 - 0.9999 | 0.9999 |
+| `dtd_threshold` | DTD 閾值 (error/echo ratio) | 1.0 - 4.0 | 2.0 |
+| `leak` | 權重洩漏 (NLMS only) | 0.9999 - 0.99999 | 0.99999 |
 
 ### 調校原則
 

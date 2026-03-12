@@ -408,7 +408,11 @@ class AEC:
         self._dtd_active = False
         self._dtd_ratio_smooth = 0.0  # Smoothed error/echo ratio
         self._frame_count = 0
-        self._dtd_warmup_frames = 200  # ~3.2s at hop=256, sr=16000
+        # DTD warmup: NLMS/LMS converge faster, need shorter warmup
+        if self.config.mode in (AecMode.LMS, AecMode.NLMS):
+            self._dtd_warmup_frames = 50   # ~0.8s at hop=256, sr=16000
+        else:
+            self._dtd_warmup_frames = 200  # ~3.2s at hop=256, sr=16000
 
         # RES (only for frequency-domain modes)
         if self.config.enable_res and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
@@ -455,10 +459,7 @@ class AEC:
         # This avoids the bootstrap problem where the filter can't converge
         # because DTD blocks updates before echo estimates are valid.
 
-        # DTD strategy per mode:
-        # - FREQ/SUBBAND: error-based DTD, freeze weights during double-talk
-        # - NLMS/LMS: NO DTD — leak factor handles double-talk naturally;
-        #   DTD causes weight explosion (soft DTD) or stale-weight drift (hard DTD)
+        # DTD strategy: all modes use error-based DTD to freeze weights during double-talk
         if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
             update_weights = True
             if self.config.enable_dtd and self._dtd_active:
@@ -506,8 +507,19 @@ class AEC:
                 echo_energy = np.mean(echo_est_time ** 2)
                 self._update_dtd(error_energy, echo_energy, near_energy)
         else:
-            # NLMS/LMS: always update weights (no DTD)
-            output, _ = self.filter.process_block(near_end, far_end, update_weights=True)
+            # NLMS/LMS: use DTD to freeze weights during double-talk
+            update_weights = True
+            if self.config.enable_dtd and self._dtd_active:
+                update_weights = False
+            output, echo_est = self.filter.process_block(near_end, far_end,
+                                                         update_weights=update_weights)
+            # Update DTD state for NEXT block (skip during warmup)
+            self._frame_count += 1
+            if self.config.enable_dtd and self._frame_count >= self._dtd_warmup_frames:
+                error_energy = np.mean(output ** 2)
+                echo_energy = np.mean(echo_est ** 2)
+                near_energy = np.mean(near_end ** 2)
+                self._update_dtd(error_energy, echo_energy, near_energy)
 
         # ERLE
         for i in range(len(near_end)):
@@ -517,9 +529,10 @@ class AEC:
         return output.astype(np.float32)
 
     def get_erle(self) -> float:
-        if self.error_power < 1e-10:
+        eps = 1e-10
+        if self.near_power < eps and self.error_power < eps:
             return 0.0
-        return 10 * np.log10(self.near_power / (self.error_power + 1e-10) + 1e-10)
+        return 10 * np.log10((self.near_power + eps) / (self.error_power + eps))
 
     def _update_dtd(self, error_energy: float, echo_energy: float,
                      near_energy: float):
@@ -533,6 +546,10 @@ class AEC:
             ratio = error_energy / (echo_energy + 1e-10)
             self._dtd_ratio_smooth = 0.95 * self._dtd_ratio_smooth + 0.05 * ratio
             self._dtd_active = self._dtd_ratio_smooth > self.config.dtd_threshold
+        elif self._dtd_active and near_energy > 1e-6:
+            # DTD holdover: far-end stopped but near-end still active.
+            # Keep DTD active to prevent weight corruption from residual ref_buffer.
+            pass
         else:
             # Filter not converged yet — keep DTD inactive, reset smoothing
             self._dtd_ratio_smooth *= 0.9  # Slow decay
