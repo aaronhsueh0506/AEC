@@ -20,7 +20,7 @@ from aec import AEC, AecConfig, AecMode
 from gen_test_signals import make_rir, FS, ECHO_DELAY_MS, ECHO_DECAY_MS
 
 
-def run_aec(mic_path, ref_path, mode):
+def run_aec(mic_path, ref_path, mode, enable_dtd=True):
     """Run AEC and return output + filter object."""
     mic, sr = sf.read(mic_path)
     ref, _ = sf.read(ref_path)
@@ -30,7 +30,7 @@ def run_aec(mic_path, ref_path, mode):
     config = AecConfig(
         sample_rate=sr,
         mode=mode,
-        enable_dtd=True,
+        enable_dtd=enable_dtd,
         mu=0.3,
         filter_length_ms=250,
     )
@@ -70,6 +70,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=['time', 'freq', 'subband'],
                         default='time')
+    parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     args = parser.parse_args()
 
     mode_map = {'time': AecMode.TIME, 'freq': AecMode.FREQ,
@@ -93,7 +94,8 @@ def main():
         mic_path = os.path.join(base, mic_f)
         ref_path = os.path.join(base, ref_f)
 
-        mic, ref, out, aec, sr = run_aec(mic_path, ref_path, mode)
+        mic, ref, out, aec, sr = run_aec(mic_path, ref_path, mode,
+                                         enable_dtd=not args.no_dtd)
         est_ir = get_estimated_ir(aec)
 
         t = np.arange(len(mic)) / sr
@@ -138,10 +140,12 @@ def main():
         ax.legend(fontsize=8)
         ax.set_xlim(0, max(t_true[-1], t_est[-1]) * 0.5)
 
-    fig.suptitle(f'AEC Results (mode={args.mode})', fontsize=14, y=1.01)
+    dtd_str = 'DTD off' if args.no_dtd else 'DTD on'
+    fig.suptitle(f'AEC Results (mode={args.mode}, {dtd_str})', fontsize=14, y=1.01)
     plt.tight_layout()
 
-    out_path = os.path.join(base, f'aec_results_{args.mode}.png')
+    dtd_tag = '_no_dtd' if args.no_dtd else ''
+    out_path = os.path.join(base, f'aec_results_{args.mode}{dtd_tag}.png')
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     print(f"Saved: {out_path}")
     plt.show()
