@@ -3,14 +3,14 @@
 gen_sim_data.py - Generate simulated AEC test data
 
 Produces two sets of test files with known echo paths:
-  fileid_1: Speech-like signals (chirp + harmonics)
-  fileid_2: White noise far-end
+  fileid_1: Single-talk — white noise far-end, echo only (no near-end speech)
+  fileid_2: Double-talk — white noise far-end echo + near-end speech
 
 Each set has 4 files:
   farend_speech_fileid_{N}.wav   — far-end (loudspeaker) signal
-  nearend_speech_fileid_{N}.wav  — clean near-end speech
+  nearend_speech_fileid_{N}.wav  — clean near-end speech (zeros for single-talk)
   echo_fileid_{N}.wav            — echo = farend * RIR
-  nearend_mic_fileid_{N}.wav     — mic = echo + nearend_speech (with DT schedule)
+  nearend_mic_fileid_{N}.wav     — mic = echo + nearend_speech
 
 Usage:
   python3 gen_sim_data.py [output_dir]
@@ -201,16 +201,20 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     rir = make_rir(delay=200, gain=0.8, n_taps=512)
-    nearend_speech = make_different_speech(DURATION, SR)
 
-    # Set 1: Speech-like far-end
-    print("Generating fileid_1 (speech far-end)...")
-    farend_speech = make_speech_signal(DURATION, SR)
-    generate_set(1, farend_speech, nearend_speech, rir, output_dir)
-
-    # Set 2: White noise far-end
-    print("Generating fileid_2 (white noise far-end)...")
+    # Far-end: white noise (easier to observe convergence than speech)
     farend_noise = make_white_noise(DURATION, SR)
+
+    # Set 1: Single-talk — echo only, no near-end speech
+    # Best case for AEC: filter should converge and estimated IR should match true IR
+    print("Generating fileid_1 (single-talk, white noise far-end)...")
+    silence = np.zeros(N_SAMPLES, dtype=np.float32)
+    generate_set(1, farend_noise, silence, rir, output_dir)
+
+    # Set 2: Double-talk — echo + near-end speech
+    # Challenging for LMS/NLMS without DTD: near-end corrupts weight updates
+    print("Generating fileid_2 (double-talk, white noise far-end)...")
+    nearend_speech = make_different_speech(DURATION, SR)
     generate_set(2, farend_noise, nearend_speech, rir, output_dir)
 
     print(f"\nFiles written to: {output_dir}")
