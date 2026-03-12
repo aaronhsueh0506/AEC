@@ -59,7 +59,7 @@ def scan_fileids(dataset_dir):
     return groups
 
 
-def run_aec(mic_path, ref_path, mode, enable_dtd=True, mu=0.3, filter_length=512):
+def run_aec(mic_path, ref_path, mode, enable_dtd=True, mu=0.3, filter_length=0):
     """Run AEC and return output + filter object."""
     mic, sr = sf.read(mic_path)
     ref, _ = sf.read(ref_path)
@@ -70,6 +70,9 @@ def run_aec(mic_path, ref_path, mode, enable_dtd=True, mu=0.3, filter_length=512
         mu = 0.01
     elif mode == AecMode.FREQ and mu == 0.3:
         mu = 0.1
+
+    if filter_length == 0:
+        filter_length = 1024 if mode == AecMode.SUBBAND else 512
 
     config = AecConfig(
         sample_rate=sr,
@@ -117,8 +120,8 @@ def main():
                         default='nlms')
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--mu', type=float, default=0.3)
-    parser.add_argument('--filter', type=int, default=512,
-                        help='Filter length in samples')
+    parser.add_argument('--filter', type=int, default=0,
+                        help='Filter length in samples (0=mode default)')
     args = parser.parse_args()
 
     mode_map = {'lms': AecMode.LMS, 'nlms': AecMode.NLMS,

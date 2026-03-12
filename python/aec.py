@@ -38,7 +38,7 @@ class AecConfig:
     filter_length: int = 512     # Filter length in samples (mode-dependent)
     mu: float = 0.3              # Step size
     delta: float = 1e-8          # Regularization
-    leak: float = 0.9999         # Weight leakage
+    leak: float = 0.99999        # Weight leakage (slight leak for double-talk stability)
     enable_dtd: bool = True
     dtd_threshold: float = 2.0   # Error-based DTD: error_energy/echo_energy ratio
     dtd_hangover_frames: int = 15
@@ -77,7 +77,7 @@ class NlmsFilter:
         self.ref_buffer = np.zeros(filter_length, dtype=np.float32)
         self.power_sum = 0.0
         self.clear_history = False
-        self.max_w_norm = 4.0  # Weight norm constraint (prevents explosion during double-talk)
+        self.max_w_norm = 2.0  # Weight norm constraint (prevents explosion during double-talk)
 
     def reset(self):
         self.weights.fill(0)
@@ -407,6 +407,8 @@ class AEC:
         # Error-based DTD state
         self._dtd_active = False
         self._dtd_ratio_smooth = 0.0  # Smoothed error/echo ratio
+        self._frame_count = 0
+        self._dtd_warmup_frames = 200  # ~3.2s at hop=256, sr=16000
 
         # RES (only for frequency-domain modes)
         if self.config.enable_res and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
@@ -428,6 +430,7 @@ class AEC:
         self.filter.reset()
         self._dtd_active = False
         self._dtd_ratio_smooth = 0.0
+        self._frame_count = 0
         if self.res:
             self.res.reset()
         if self._freq_near_queue is not None:
@@ -493,8 +496,9 @@ class AEC:
                                                   echo_spec, far_power)
                 output = np.fft.irfft(enhanced_spec, len(output) * 2)[:len(output)]
 
-            # Update DTD state for NEXT block
-            if self.config.enable_dtd:
+            # Update DTD state for NEXT block (skip during warmup)
+            self._frame_count += 1
+            if self.config.enable_dtd and self._frame_count >= self._dtd_warmup_frames:
                 error_energy = np.mean(output ** 2)
                 near_energy = np.mean(near_end ** 2)
                 # Use time-domain echo estimate (near - output) for consistent scale
@@ -522,12 +526,12 @@ class AEC:
         """Update error-based DTD state for next block.
 
         Only activate DTD when the filter is producing meaningful echo
-        estimates (echo_energy > 1% of near_energy). Otherwise, the filter
+        estimates (echo_energy > 10% of near_energy). Otherwise, the filter
         hasn't converged yet and DTD should remain inactive.
         """
-        if echo_energy > near_energy * 0.01 and echo_energy > 1e-10:
+        if echo_energy > near_energy * 0.1 and echo_energy > 1e-10:
             ratio = error_energy / (echo_energy + 1e-10)
-            self._dtd_ratio_smooth = 0.8 * self._dtd_ratio_smooth + 0.2 * ratio
+            self._dtd_ratio_smooth = 0.95 * self._dtd_ratio_smooth + 0.05 * ratio
             self._dtd_active = self._dtd_ratio_smooth > self.config.dtd_threshold
         else:
             # Filter not converged yet — keep DTD inactive, reset smoothing
