@@ -204,10 +204,7 @@ def main():
         ax.set_xlabel('Samples')
         ax.set_ylabel('Amplitude')
         ax.legend(fontsize=8)
-        xlim = int(len(est_ir) * 0.6)
-        if true_ir is not None:
-            xlim = max(xlim, len(true_ir))
-        ax.set_xlim(0, xlim)
+        ax.set_xlim(0, len(est_ir))
 
     dtd_str = 'DTD off' if args.no_dtd else 'DTD on'
     fig.suptitle(f'AEC Results (mode={args.mode}, {dtd_str})', fontsize=14)
