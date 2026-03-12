@@ -497,10 +497,9 @@ class AEC:
             if self.config.enable_dtd:
                 error_energy = np.mean(output ** 2)
                 near_energy = np.mean(near_end ** 2)
-                if hasattr(self.filter, 'echo_spec'):
-                    echo_energy = np.mean(np.abs(self.filter.echo_spec) ** 2)
-                else:
-                    echo_energy = 0.0
+                # Use time-domain echo estimate (near - output) for consistent scale
+                echo_est_time = near_end - output
+                echo_energy = np.mean(echo_est_time ** 2)
                 self._update_dtd(error_energy, echo_energy, near_energy)
         else:
             # NLMS/LMS: always update weights (no DTD)
@@ -654,10 +653,12 @@ Examples:
 
     aec_mode = mode_map[args.mode]
 
-    # LMS needs much smaller step size
+    # Mode-dependent default step size
     mu = args.mu
     if args.mode == 'lms' and args.mu == 0.3:
-        mu = 0.01  # Default mu for LMS
+        mu = 0.01  # LMS needs much smaller step size
+    elif args.mode == 'freq' and args.mu == 0.3:
+        mu = 0.1   # FREQ single-block: smaller mu to avoid overshoot
 
     # Mode-dependent filter_length default
     filter_length = args.filter
