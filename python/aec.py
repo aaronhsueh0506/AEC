@@ -335,8 +335,20 @@ class AEC:
     - SUBBAND: Partitioned block FDAF (multiple partitions for long echo paths)
     """
 
+    # Per-mode optimal mu defaults (tuned on fileid_0/1/2)
+    _MODE_DEFAULT_MU = {
+        AecMode.LMS: 0.02,
+        AecMode.NLMS: 0.4,
+        AecMode.FREQ: 0.2,
+        AecMode.SUBBAND: 0.5,
+    }
+
     def __init__(self, config: Optional[AecConfig] = None):
         self.config = config or AecConfig()
+
+        # Apply per-mode default mu if user didn't override
+        if self.config.mu == AecConfig.mu:  # still at dataclass default
+            self.config.mu = self._MODE_DEFAULT_MU.get(self.config.mode, 0.3)
 
         # Create adaptive filter based on mode
         if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
