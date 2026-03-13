@@ -595,11 +595,11 @@ class AEC:
             self._n_partitions = 0
             self._freq_near_queue = None
 
-        # DTD: dual detector for FREQ/SUBBAND modes
-        #   1. Divergence detector: output > input (safety net)
-        #   2. Coherence detector: error-reference MSC (double-talk detection)
-        # Combined confidence = max(divergence, coherence)
-        if self.config.enable_dtd:
+        # DTD: FREQ/SUBBAND only (divergence + coherence dual detector)
+        # LMS/NLMS have no effective DTD — all methods (Geigel, NCC, coherence,
+        # VSS-NLMS) either don't work for AEC or cause vicious cycles with slow
+        # convergence. Output Limiter provides the safety net instead.
+        if self.config.enable_dtd and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
             warmup = 50
             self.dtd_divergence = DtdEstimator(
                 mode='divergence',
@@ -608,29 +608,19 @@ class AEC:
                 release=self.config.dtd_confidence_release,
                 warmup_frames=warmup,
             )
-            # Coherence DTD: FREQ/SUBBAND only (default)
-            # LMS/NLMS converge too slowly — coherence DTD reduces mu during DT,
-            # but slow convergence means filter can't recover in single-talk gaps,
-            # creating a vicious cycle (ERLE drops from 3.4→0.7 dB on fileid_0).
-            if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
-                if hasattr(self.filter, 'n_freqs'):
-                    coh_n_freqs = self.filter.n_freqs
-                else:
-                    coh_n_freqs = self.config.hop_size // 2 + 1
-                self.dtd_coherence = DtdEstimator(
-                    mode='coherence',
-                    n_freqs=coh_n_freqs,
-                    coh_alpha=self.config.dtd_coh_alpha,
-                    coh_high=self.config.dtd_coh_high,
-                    coh_low=self.config.dtd_coh_low,
-                    coh_energy_floor=self.config.dtd_coh_energy_floor,
-                    hangover_max=self.config.dtd_coh_hangover,
-                    attack=self.config.dtd_confidence_attack,
-                    release=self.config.dtd_coh_release,
-                    warmup_frames=warmup,
-                )
-            else:
-                self.dtd_coherence = None
+            coh_n_freqs = self.filter.n_freqs
+            self.dtd_coherence = DtdEstimator(
+                mode='coherence',
+                n_freqs=coh_n_freqs,
+                coh_alpha=self.config.dtd_coh_alpha,
+                coh_high=self.config.dtd_coh_high,
+                coh_low=self.config.dtd_coh_low,
+                coh_energy_floor=self.config.dtd_coh_energy_floor,
+                hangover_max=self.config.dtd_coh_hangover,
+                attack=self.config.dtd_confidence_attack,
+                release=self.config.dtd_coh_release,
+                warmup_frames=warmup,
+            )
         else:
             self.dtd_divergence = None
             self.dtd_coherence = None
@@ -773,17 +763,8 @@ class AEC:
                     error_spec=self.filter.error_spec,
                     far_spec=self.filter.far_spec)
         else:
-            # LMS/NLMS: divergence + coherence detection
-            output, echo_est = self.filter.process_block(near_end, far_end,
-                                                         mu_scale=mu_scale)
-            if self.dtd_divergence:
-                self.dtd_divergence.detect_block(near_end, far_end, output=output)
-            if self.dtd_coherence:
-                error_spec = np.fft.rfft(output)
-                far_spec = np.fft.rfft(far_end)
-                self.dtd_coherence.detect_block(
-                    near_end, far_end,
-                    error_spec=error_spec, far_spec=far_spec)
+            # LMS/NLMS: no DTD (Output Limiter provides safety net)
+            output, echo_est = self.filter.process_block(near_end, far_end)
 
         # Output limiter: output should never exceed mic amplitude.
         # If echo_est is correct, output = mic - echo ≤ mic. Exceeding

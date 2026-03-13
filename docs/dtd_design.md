@@ -54,16 +54,28 @@
 
 | 功能 | LMS | NLMS | FREQ | SUBBAND |
 |------|-----|------|------|---------|
-| Divergence DTD | ✅ | ✅ | ✅ | ✅ |
+| Divergence DTD | — | — | ✅ | ✅ |
 | Coherence DTD | — | — | ✅ | ✅ |
 | Shadow Filter | — | — | ✅ | ✅ |
 | RES Post-Filter | — | — | ✅ | ✅ |
+| Output Limiter | ✅ | ✅ | ✅ | ✅ |
 
-**為什麼 LMS/NLMS 不啟用 Coherence DTD**：
-LMS/NLMS 收斂速度慢（1-5s），coherence DTD 在 double-talk 期間降低 mu，
-但 single-talk 恢復窗口不夠長讓 filter 重新收斂，形成惡性循環。
-測試顯示 fileid_0 (double-talk) ERLE 從 3.4 dB 降至 0.7 dB。
-FREQ/SUBBAND 收斂快（0.2-0.8s），不受此問題影響。
+**為什麼 LMS/NLMS 不啟用任何 DTD**：
+
+經過業界調研，時域慢收斂濾波器沒有有效的 DTD 方案：
+
+| 方法 | 問題 |
+|------|------|
+| Geigel | AEC echo gain≈1.0 → 100% 假觸發（設計用於 LEC, ERL≈-6dB） |
+| NCC | 循環依賴：需要 filter 部分收斂，但 DT 時 filter 被污染 |
+| Coherence DTD | 降低 mu → 慢收斂更慢 → 惡性循環（ERLE 3.4→0.7 dB） |
+| VSS-NLMS | DT-robust 版本核心也是 cross-correlation，同樣問題 |
+| Two-Path/Shadow | Background 也是慢收斂，DT 時一樣被污染無法恢復 |
+
+LMS/NLMS 的 Divergence detector 在正常 DT 場景下也無實質幫助
+（output < input → ratio < 1.0 → 不觸發）。Output Limiter 已提供安全網。
+
+**結論**：需要 double-talk robustness → 使用 FREQ/SUBBAND 模式。
 
 ---
 
@@ -215,24 +227,27 @@ DT 結束
   → Total ≈ 208ms
 ```
 
-### 3.5 為什麼 LMS/NLMS 不啟用 Coherence DTD
+### 3.5 為什麼 LMS/NLMS 完全不用 DTD
 
-LMS/NLMS 預設不啟用 coherence DTD，原因是收斂速度的根本限制：
+LMS/NLMS 不啟用任何 DTD（包括 divergence 和 coherence），原因是慢收斂的根本限制。
 
-| | SUBBAND | NLMS |
-|---|---------|------|
-| 收斂時間 | 0.2-0.8s | 1-5s |
-| DT 期間 mu 被降低 | 快速恢復 | 無法在 single-talk gap 內恢復 |
-| 測試 ERLE (fileid_0) | 19.3 dB | 0.7 dB (with coh) / 3.4 dB (without) |
+**所有 DTD 方案都不適用**：
 
-**惡性循環**：
-1. Coherence DTD 正確偵測 double-talk → 降低 mu
-2. LMS/NLMS 收斂慢 → 降低 mu 後更慢恢復
-3. Single-talk 窗口不夠長讓 filter 收斂回來
-4. 下次 double-talk 時 filter 仍未收斂 → ERLE 更差
+| 方法 | 為什麼不行 |
+|------|-----------|
+| Coherence DTD | 降 mu → 慢收斂更慢 → 惡性循環（ERLE 3.4→0.7 dB） |
+| Divergence DTD | 正常 DT 時 output < input → ratio < 1.0 → 不觸發，無實質幫助 |
+| Geigel | AEC echo gain≈1.0 → 100% 假觸發 |
+| NCC | 循環依賴濾波器收斂 |
+| VSS-NLMS | DT-robust 版本核心也是 cross-correlation |
+| Two-Path/Shadow | Background 也慢收斂，DT 時被污染無法恢復 |
 
-LMS/NLMS 仍有 divergence detector 作為安全網（偵測 output > input 發散）。
-程式碼路徑保留，進階使用者可手動啟用 coherence DTD 做實驗。
+**LMS/NLMS 的安全機制**：
+- **Output Limiter**：output 永遠不超過 mic amplitude（硬限制）
+- **Weight norm constraint**（NLMS）：防止權重爆炸
+- 這兩層已足以防止可聽的失真
+
+**需要 DT robustness → 使用 FREQ/SUBBAND 模式。**
 
 ### 3.6 參數
 

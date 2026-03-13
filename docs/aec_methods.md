@@ -355,7 +355,7 @@ AEC 自適應濾波器在以下情況需要控制更新：
 
 ### 6.1.1 DTD 整體運作機制
 
-本專案使用**三層防護**控制自適應更新（FREQ/SUBBAND 支援 Divergence + Coherence DTD，LMS/NLMS 僅 Divergence）：
+本專案使用**三層防護**控制自適應更新（僅 FREQ/SUBBAND 模式，LMS/NLMS 無 DTD — 詳見 [dtd_design.md §3.5](dtd_design.md)）：
 
 ```
 每個 hop (256 samples, 16ms @ 16kHz):
