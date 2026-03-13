@@ -316,10 +316,10 @@ int aec_process(Aec* aec,
         } else if (ratio > div_factor) {
             // Severe divergence
             aec->dtd_confidence = fminf(aec->dtd_confidence + attack, 1.0f);
-        } else if (ratio > 1.0f) {
-            // Mild divergence
+        } else if (ratio > 1.2f) {
+            // Mild divergence (threshold 1.2: ratio < 1.2 is normal unconverged state)
             aec->dtd_confidence = fminf(
-                aec->dtd_confidence + attack * (ratio - 1.0f), 1.0f);
+                aec->dtd_confidence + attack * (ratio - 1.2f), 1.0f);
         } else {
             // Normal — faster release when ratio is well below 1.0
             float release_scale = (1.0f - ratio > 0.2f) ? (1.0f - ratio) : 0.2f;

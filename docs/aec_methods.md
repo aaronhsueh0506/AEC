@@ -416,13 +416,18 @@ if near_energy < 1e-10 and near_peak < 1e-6:
     confidence -= release               // 靜音 → 正常
 elif ratio > divergence_factor:
     confidence += attack                 // 嚴重發散
-elif ratio > 1.0:
-    confidence += attack × (ratio - 1.0) // 輕微發散（比例反應）
+elif ratio > 1.2:
+    confidence += attack × (ratio - 1.2) // 輕微發散（比例反應，閾值 1.2）
 else:
     // Proportional release: faster when ratio well below 1.0
     release_scale = max(1.0 - ratio, 0.2)  // 0.2x ~ 1.0x
     confidence -= release × (1.0 + 4.0 × release_scale)  // 正常
 ```
+
+**為什麼 mild threshold = 1.2（而非 1.0）**：
+- ratio ≈ 1.0 只代表濾波器尚未收斂，不代表發散
+- 若閾值為 1.0，warmup 結束後 DTD 會在收斂期間誤觸發，降低 mu 形成死循環
+- 1.0-1.2 範圍的 output 僅比 input 大 <1 dB，有 Output Limiter 兜底，不會產生可聽的失真
 
 **為什麼同時用 energy + peak**：
 - Energy-based：捕捉整體發散（mean level）
@@ -529,7 +534,8 @@ Shadow filter: mu = config.mu × shadow_mu_ratio (0.5), always mu_scale = 1.0
 
 | 參數 | 典型值 | 說明 |
 |------|--------|------|
-| divergence_factor | 1.5 | output > 1.5× input → 發散 |
+| divergence_factor | 1.5 | output > 1.5× input → 嚴重發散 |
+| mild_threshold | 1.2 | ratio > 1.2 才觸發輕微發散偵測 |
 | confidence_attack | 0.3 | confidence 上升速率 |
 | confidence_release | 0.05 | confidence 下降速率（慢放） |
 | mu_min_ratio | 0.05 | 最低 mu 比例（不完全凍結） |

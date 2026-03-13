@@ -392,13 +392,14 @@ class DtdEstimator:
         peak_ratio = output_peak / (near_peak + 1e-10) if near_peak > 1e-6 else 0.0
         ratio = max(energy_ratio, peak_ratio)
 
+        mild_threshold = 1.2  # ratio < 1.2 is normal (unconverged, not diverging)
         if ratio > self.divergence_factor:
             # Severe divergence
             self.confidence = min(self.confidence + self.attack, 1.0)
-        elif ratio > 1.0:
+        elif ratio > mild_threshold:
             # Mild divergence — proportional attack
             self.confidence = min(
-                self.confidence + self.attack * (ratio - 1.0), 1.0)
+                self.confidence + self.attack * (ratio - mild_threshold), 1.0)
         else:
             # Normal — faster release when ratio is well below 1.0
             release_scale = max(1.0 - ratio, 0.2)  # 0.2x ~ 1.0x
