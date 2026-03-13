@@ -31,6 +31,12 @@ struct Aec {
     Complex* res_output_spec;   // [n_freqs]
     float* res_temp;            // [block_size] IFFT scratch
 
+    // Shadow filter (dual-filter divergence control)
+    SubbandNlms* shadow_filter;
+    float* shadow_output;       // [hop_size]
+    float main_err_smooth;
+    float shadow_err_smooth;
+
     // Buffers
     float* output_buffer;   // [hop_size]
 
@@ -63,6 +69,26 @@ Aec* aec_create(const AecConfig* config) {
     if (!aec->filter) {
         aec_destroy(aec);
         return NULL;
+    }
+
+    // Create shadow filter (dual-filter divergence control)
+    if (config->enable_shadow) {
+        float shadow_mu = config->mu * config->shadow_mu_ratio;
+        aec->shadow_filter = subband_nlms_create(
+            aec->params.block_size,
+            aec->params.n_partitions,
+            shadow_mu,
+            config->delta
+        );
+        if (aec->shadow_filter) {
+            aec->shadow_output = (float*)calloc(aec->params.hop_size, sizeof(float));
+            if (!aec->shadow_output) {
+                subband_nlms_destroy(aec->shadow_filter);
+                aec->shadow_filter = NULL;
+            }
+        }
+        aec->main_err_smooth = 0.0f;
+        aec->shadow_err_smooth = 0.0f;
     }
 
     // Create RES post-filter (optional)
@@ -122,6 +148,8 @@ Aec* aec_create(const AecConfig* config) {
 void aec_destroy(Aec* aec) {
     if (aec) {
         subband_nlms_destroy(aec->filter);
+        subband_nlms_destroy(aec->shadow_filter);
+        free(aec->shadow_output);
         res_destroy(aec->res);
         fft_destroy(aec->res_fft);
         free(aec->res_echo_spec);
@@ -139,12 +167,20 @@ void aec_reset(Aec* aec) {
     if (aec->filter) {
         subband_nlms_reset(aec->filter);
     }
+    if (aec->shadow_filter) {
+        subband_nlms_reset(aec->shadow_filter);
+        aec->main_err_smooth = 0.0f;
+        aec->shadow_err_smooth = 0.0f;
+    }
     if (aec->res) {
         res_reset(aec->res);
     }
 
     int hop_size = aec->params.hop_size;
     memset(aec->output_buffer, 0, hop_size * sizeof(float));
+    if (aec->shadow_output) {
+        memset(aec->shadow_output, 0, hop_size * sizeof(float));
+    }
 
     aec->near_power = 0.0f;
     aec->error_power = 0.0f;
@@ -158,6 +194,11 @@ void aec_retrain(Aec* aec) {
     // Reset weights only — keep X_buf, power, overlap buffers
     if (aec->filter) {
         subband_nlms_reset_weights(aec->filter);
+    }
+    if (aec->shadow_filter) {
+        subband_nlms_reset_weights(aec->shadow_filter);
+        aec->main_err_smooth = 0.0f;
+        aec->shadow_err_smooth = 0.0f;
     }
 
     // Restart DTD warmup
@@ -191,6 +232,29 @@ int aec_process(Aec* aec,
     // Process through PBFDAF
     subband_nlms_process(aec->filter, near_end, far_end, output, mu_scale);
 
+    // Shadow filter: always adapts with full step, copy to main if better
+    if (aec->shadow_filter) {
+        subband_nlms_process(aec->shadow_filter, near_end, far_end,
+                             aec->shadow_output, 1.0f);
+
+        float main_err = subband_nlms_get_error_energy(aec->filter);
+        float shadow_err = subband_nlms_get_error_energy(aec->shadow_filter);
+
+        float alpha_s = aec->config.shadow_err_alpha;
+        aec->main_err_smooth = alpha_s * aec->main_err_smooth +
+                               (1.0f - alpha_s) * main_err;
+        aec->shadow_err_smooth = alpha_s * aec->shadow_err_smooth +
+                                 (1.0f - alpha_s) * shadow_err;
+
+        if (aec->shadow_err_smooth <
+            aec->main_err_smooth * aec->config.shadow_copy_threshold) {
+            // Shadow is better — copy weights to main
+            subband_nlms_copy_weights(aec->filter, aec->shadow_filter);
+            memcpy(output, aec->shadow_output, hop_size * sizeof(float));
+            aec->main_err_smooth = aec->shadow_err_smooth;
+        }
+    }
+
     // RES post-filter: suppress residual echo in frequency domain
     if (aec->res) {
         subband_nlms_get_echo_spectrum(aec->filter, aec->res_echo_spec);
@@ -214,38 +278,28 @@ int aec_process(Aec* aec,
         }
     }
 
-    // Output limiter: output should never exceed mic amplitude
-    float near_peak = 0.0f;
-    float out_peak = 0.0f;
-    for (int n = 0; n < hop_size; n++) {
-        float abs_near = fabsf(near_end[n]);
-        float abs_out = fabsf(output[n]);
-        if (abs_near > near_peak) near_peak = abs_near;
-        if (abs_out > out_peak) out_peak = abs_out;
-    }
-    if (out_peak > near_peak && near_peak > 1e-6f) {
-        float scale = near_peak / out_peak;
-        for (int n = 0; n < hop_size; n++) {
-            output[n] *= scale;
-        }
-    }
-
-    // Update divergence detection for NEXT block
+    // Update divergence detection BEFORE limiter (so DTD sees true output)
     aec->frame_count++;
     if (aec->config.enable_dtd &&
         aec->frame_count >= aec->config.dtd_warmup_frames) {
 
         float output_energy = 0.0f;
         float near_energy = 0.0f;
+        float near_peak = 0.0f;
+        float out_peak = 0.0f;
 
         for (int n = 0; n < hop_size; n++) {
             output_energy += output[n] * output[n];
             near_energy += near_end[n] * near_end[n];
+            float abs_near = fabsf(near_end[n]);
+            float abs_out = fabsf(output[n]);
+            if (abs_near > near_peak) near_peak = abs_near;
+            if (abs_out > out_peak) out_peak = abs_out;
         }
         output_energy /= hop_size;
         near_energy /= hop_size;
 
-        // Also check peak ratio
+        // Check both energy and peak divergence
         float energy_ratio = (near_energy > 1e-10f) ?
             output_energy / (near_energy + 1e-10f) : 0.0f;
         float peak_ratio = (near_peak > 1e-6f) ?
@@ -267,8 +321,28 @@ int aec_process(Aec* aec,
             aec->dtd_confidence = fminf(
                 aec->dtd_confidence + attack * (ratio - 1.0f), 1.0f);
         } else {
-            // Normal
-            aec->dtd_confidence = fmaxf(aec->dtd_confidence - release, 0.0f);
+            // Normal — faster release when ratio is well below 1.0
+            float release_scale = (1.0f - ratio > 0.2f) ? (1.0f - ratio) : 0.2f;
+            aec->dtd_confidence = fmaxf(
+                aec->dtd_confidence - release * (1.0f + 4.0f * release_scale), 0.0f);
+        }
+    }
+
+    // Output limiter: output should never exceed mic amplitude
+    {
+        float near_peak = 0.0f;
+        float out_peak = 0.0f;
+        for (int n = 0; n < hop_size; n++) {
+            float abs_near = fabsf(near_end[n]);
+            float abs_out = fabsf(output[n]);
+            if (abs_near > near_peak) near_peak = abs_near;
+            if (abs_out > out_peak) out_peak = abs_out;
+        }
+        if (out_peak > near_peak && near_peak > 1e-6f) {
+            float scale = near_peak / out_peak;
+            for (int n = 0; n < hop_size; n++) {
+                output[n] *= scale;
+            }
         }
     }
 

@@ -362,7 +362,7 @@ AEC 自適應濾波器在以下情況需要控制更新：
 | 目標 | 偵測「近端有人在講話」 | 偵測「濾波器壞掉了」 |
 | 時機 | 在更新前判斷 | 在更新後檢查 |
 | 反應 | 凍結更新 | 連續 mu scaling |
-| 代表 | Geigel, NCC | WebRTC AEC3 |
+| 代表 | Geigel, NCC | Output-vs-Input, Dual Filter |
 
 ### 6.2 經典 DTD 方法（不推薦）
 
@@ -396,9 +396,11 @@ ratio = E[e²] / E[ŷ²] > threshold → Divergence
 - 靜音→語音轉場時 ratio 瞬間飆升（假觸發）
 - **❌ 不建議作為主要 DTD**（本專案 v1.2.0 曾使用，v1.3.0 移除）
 
-### 6.3 WebRTC-style 發散偵測 ✅ 本專案採用
+### 6.3 Output-vs-Input 發散偵測 ✅ 本專案採用
 
 **核心思想**：不做明確 DTD，改為偵測 output 是否比 input 更差
+
+> **注意**：此方法並非 WebRTC AEC3 原生做法。WebRTC AEC3 使用 dual filter（main + shadow）隱式處理發散，沒有顯式 DTD。我們的方法是獨立設計的 output-vs-input 比較機制。
 
 ```
 output_energy = mean(output²)
@@ -417,7 +419,9 @@ elif ratio > divergence_factor:
 elif ratio > 1.0:
     confidence += attack × (ratio - 1.0) // 輕微發散（比例反應）
 else:
-    confidence -= release                // 正常
+    // Proportional release: faster when ratio well below 1.0
+    release_scale = max(1.0 - ratio, 0.2)  // 0.2x ~ 1.0x
+    confidence -= release × (1.0 + 4.0 × release_scale)  // 正常
 ```
 
 **為什麼同時用 energy + peak**：
@@ -451,27 +455,58 @@ if out_peak > near_peak and near_peak > 1e-6:
 
 | 模式 | Warmup 幀數 | 時間 (@hop=256, sr=16kHz) |
 |------|-------------|--------------------------|
-| **LMS / NLMS** | 50 幀 | ~0.8 秒 |
-| **FREQ / SUBBAND** | 200 幀 | ~3.2 秒 |
+| **全模式** | 50 幀 | ~0.8 秒 |
 
-### 6.4 其他現代 DTD 方法
+### 6.4 Dual Filter (Shadow Filter) — 本專案可選
 
-#### SpeexDSP — 雙濾波器法
+**核心思想**：使用兩個自適應濾波器，shadow filter 永遠以保守步長更新，main filter 用於輸出。
+當 shadow 表現更好時，將 shadow 權重複製到 main，天然解決發散問題。
+
+這是 WebRTC AEC3 和 SpeexDSP 的核心機制。
 
 ```
-Background filter (BG): 永遠更新，較小 step size
-Foreground filter (FG): 用於實際輸出
+Main filter:   mu = config.mu, mu_scale from DTD
+Shadow filter: mu = config.mu × shadow_mu_ratio (0.5), always mu_scale = 1.0
 
 每個 block:
-  1. BG 更新權重
-  2. if MSE(BG) < MSE(FG) × factor:
-         FG ← BG
+  1. Main: output = process(near, far, mu_scale)
+  2. Shadow: shadow_out = process(near, far, 1.0)
+  3. Smooth error energy:
+     main_err_smooth   = α × main_err_smooth   + (1-α) × main_err
+     shadow_err_smooth = α × shadow_err_smooth + (1-α) × shadow_err
+  4. if shadow_err_smooth < main_err_smooth × threshold:
+         main.W ← shadow.W        // 複製權重
+         output = shadow_out       // 使用 shadow 輸出
+         main_err_smooth = shadow_err_smooth
 ```
 
-- ✅ 最穩健——BG 壞掉不影響 FG
-- ✅ 自動處理 echo path change
-- ❌ 2× 計算量和記憶體
-- ❌ BG→FG 轉移可能不連續
+**與 DTD 的互補**：
+- DTD 偵測發散後降低 mu → 防止 main filter 惡化
+- Shadow filter 同時以保守 mu 持續追蹤 → 當 main 發散時自動修正
+- 兩者可同時啟用，互不衝突
+
+**參數**：
+
+| 參數 | 預設值 | 說明 |
+|------|--------|------|
+| enable_shadow | false | 啟用 shadow filter |
+| shadow_mu_ratio | 0.5 | shadow mu = main mu × ratio |
+| shadow_copy_threshold | 0.8 | shadow_err < main_err × threshold 時複製 |
+| shadow_err_alpha | 0.95 | error energy EMA 平滑係數 |
+
+**記憶體影響**：額外 ~35KB（SubbandNlms ~34KB + output buffer 1KB），可接受。
+
+**與 SpeexDSP 比較**：
+
+| | SpeexDSP | 本專案 |
+|---|---|---|
+| 命名 | Background / Foreground | Shadow / Main |
+| 保守濾波器 | BG (永遠更新) | Shadow (永遠更新) |
+| 輸出濾波器 | FG (條件更新) | Main (DTD mu_scale) |
+| 複製方向 | BG → FG | Shadow → Main |
+| 額外偵測 | 無 (純雙濾波器) | 可選 DTD |
+
+### 6.5 其他現代 DTD 方法
 
 #### Coherence-based DTD (MSC)
 
@@ -479,18 +514,18 @@ Foreground filter (FG): 用於實際輸出
 - Per-bin DTD，理論紮實
 - 需要長窗口估計，不適合短延遲場景
 
-### 6.5 DTD 方法比較
+### 6.6 DTD 方法比較
 
 | 方法 | 計算量 | 適用 AEC | 準確度 | 穩健性 | 本專案 |
 |------|--------|----------|--------|--------|--------|
 | Geigel | 極低 | ❌ | 低 | 低 | — |
 | NCC | 中 | △ | 中 | 中 | — |
 | Error/Echo Ratio | 低 | ❌ | 低 | 低 | v1.2（已移除） |
-| **WebRTC 發散偵測** | **低** | **✅** | **高** | **高** | **✅ v1.3 採用** |
-| 雙濾波器 (SpeexDSP) | 高 (2×) | ✅ | 最高 | 最高 | — |
+| **Output-vs-Input 發散偵測** | **低** | **✅** | **高** | **高** | **✅ 預設啟用** |
+| **Dual Filter (Shadow)** | **高 (2×)** | **✅** | **最高** | **最高** | **✅ 可選** |
 | MSC Coherence | 中-高 | ✅ | 高 | 中 | — |
 
-### 6.6 參數
+### 6.7 參數
 
 | 參數 | 典型值 | 說明 |
 |------|--------|------|
@@ -498,9 +533,9 @@ Foreground filter (FG): 用於實際輸出
 | confidence_attack | 0.3 | confidence 上升速率 |
 | confidence_release | 0.05 | confidence 下降速率（慢放） |
 | mu_min_ratio | 0.05 | 最低 mu 比例（不完全凍結） |
-| warmup_frames | 200 (freq) / 50 (time) | 初始收斂期不偵測 |
+| warmup_frames | 50 | 初始收斂期不偵測 |
 
-### 6.7 NLMS 額外保護：權重 Norm 約束
+### 6.8 NLMS 額外保護：權重 Norm 約束
 
 NLMS 還有一個額外的安全機制：
 

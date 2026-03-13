@@ -49,7 +49,7 @@ class AecConfig:
     dtd_confidence_attack: float = 0.3    # Confidence ramp-up rate per block
     dtd_confidence_release: float = 0.05  # Confidence ramp-down rate per block
 
-    # Divergence detection parameters (FREQ/SUBBAND, WebRTC-style)
+    # Divergence detection parameters (FREQ/SUBBAND, output-vs-input)
     dtd_divergence_factor: float = 1.5    # output > input × factor → diverged
 
     # RES parameters
@@ -57,6 +57,12 @@ class AecConfig:
     res_g_min_db: float = -20.0
     res_over_sub: float = 1.5
     res_alpha: float = 0.8
+
+    # Shadow filter (dual-filter divergence control)
+    enable_shadow: bool = False
+    shadow_mu_ratio: float = 0.5
+    shadow_copy_threshold: float = 0.8
+    shadow_err_alpha: float = 0.95
 
     # Mode
     mode: AecMode = AecMode.NLMS
@@ -237,6 +243,12 @@ class SubbandNlms:
         self.partition_idx = (self.partition_idx + 1) % self.n_partitions
         return output.astype(np.float32)
 
+    def get_error_energy(self) -> float:
+        return float(np.sum(np.abs(self.error_spec) ** 2))
+
+    def copy_weights_from(self, src: 'SubbandNlms'):
+        self.W[:] = src.W
+
 
 class ResFilter:
     """
@@ -300,7 +312,7 @@ class DtdEstimator:
     """Double-Talk Detector with per-mode strategy.
 
     - 'geigel' mode (LMS/NLMS): Geigel DTD with hangover + confidence
-    - 'divergence' mode (FREQ/SUBBAND): WebRTC-style divergence detection
+    - 'divergence' mode (FREQ/SUBBAND): Output-vs-input divergence detection
     """
 
     def __init__(self, mode: str = 'geigel', *,
@@ -360,7 +372,7 @@ class DtdEstimator:
         self._update_confidence(detected)
 
     def _detect_divergence(self, near_end: np.ndarray, output: np.ndarray):
-        """WebRTC-style: detect filter divergence (output > input).
+        """Output-vs-input divergence detection (output > input).
 
         Uses both energy-based and peak-based detection. Peak-based catches
         localized spikes that energy-based misses (e.g., transition transients).
@@ -388,8 +400,10 @@ class DtdEstimator:
             self.confidence = min(
                 self.confidence + self.attack * (ratio - 1.0), 1.0)
         else:
-            # Normal
-            self.confidence = max(self.confidence - self.release, 0.0)
+            # Normal — faster release when ratio is well below 1.0
+            release_scale = max(1.0 - ratio, 0.2)  # 0.2x ~ 1.0x
+            self.confidence = max(
+                self.confidence - self.release * (1.0 + 4.0 * release_scale), 0.0)
 
     def detect_block(self, near_end: np.ndarray, far_end: np.ndarray,
                      output: np.ndarray = None) -> float:
@@ -502,13 +516,13 @@ class AEC:
             self._n_partitions = 0
             self._freq_near_queue = None
 
-        # DTD: WebRTC-style divergence detection for all modes
+        # DTD: Output-vs-input divergence detection for all modes
         # Geigel DTD is unsuitable for AEC because mic includes echo,
         # causing |mic| > threshold * max(|ref|) to always trigger
         # when echo gain ≈ 1.0. Divergence detection avoids this by
         # checking if |output| > |input| (filter misbehaving).
         if self.config.enable_dtd:
-            warmup = 50 if self.config.mode in (AecMode.LMS, AecMode.NLMS) else 200
+            warmup = 50
             self.dtd = DtdEstimator(
                 mode='divergence',
                 divergence_factor=self.config.dtd_divergence_factor,
@@ -530,6 +544,22 @@ class AEC:
         else:
             self.res = None
 
+        # Shadow filter (dual-filter, FREQ/SUBBAND only)
+        self.shadow_filter = None
+        self.shadow_output = None
+        self.main_err_smooth = 0.0
+        self.shadow_err_smooth = 0.0
+        if (self.config.enable_shadow and
+                self.config.mode in (AecMode.FREQ, AecMode.SUBBAND) and
+                hasattr(self.filter, 'W')):
+            shadow_mu = self.config.mu * self.config.shadow_mu_ratio
+            self.shadow_filter = SubbandNlms(
+                block_size=self.filter.block_size,
+                n_partitions=self.filter.n_partitions,
+                mu=shadow_mu,
+                delta=self.config.delta
+            )
+
         # ERLE
         self.near_power = 0.0
         self.error_power = 0.0
@@ -540,6 +570,10 @@ class AEC:
 
     def reset(self):
         self.filter.reset()
+        if self.shadow_filter:
+            self.shadow_filter.reset()
+            self.main_err_smooth = 0.0
+            self.shadow_err_smooth = 0.0
         if self.dtd:
             self.dtd.reset()
         if self.res:
@@ -596,6 +630,22 @@ class AEC:
                 self._freq_out_read = r + hop
             else:
                 output = self.filter.process(near_end, far_end, mu_scale)
+
+            # Shadow filter: always adapts, copy to main if better
+            if self.shadow_filter is not None and self._freq_near_queue is None:
+                shadow_out = self.shadow_filter.process(near_end, far_end, 1.0)
+
+                main_err = self.filter.get_error_energy()
+                shadow_err = self.shadow_filter.get_error_energy()
+
+                alpha_s = self.config.shadow_err_alpha
+                self.main_err_smooth = alpha_s * self.main_err_smooth + (1 - alpha_s) * main_err
+                self.shadow_err_smooth = alpha_s * self.shadow_err_smooth + (1 - alpha_s) * shadow_err
+
+                if self.shadow_err_smooth < self.main_err_smooth * self.config.shadow_copy_threshold:
+                    self.filter.copy_weights_from(self.shadow_filter)
+                    output = shadow_out
+                    self.main_err_smooth = self.shadow_err_smooth
 
             # RES post-filter (skip for buffered FDAF — specs are for internal_hop)
             if self.res and self._freq_near_queue is None:
@@ -748,6 +798,7 @@ Examples:
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
+    parser.add_argument('--enable-shadow', action='store_true', help='Enable shadow filter (dual-filter)')
     parser.add_argument('--clear-history', action='store_true',
                         help='Clear TIME/LMS buffer each block (no carry-over)')
 
@@ -785,6 +836,7 @@ Examples:
         enable_dtd=not args.no_dtd,
         enable_res=args.enable_res,
         res_g_min_db=args.res_g_min,
+        enable_shadow=args.enable_shadow,
         clear_filter_history=args.clear_history
     )
 

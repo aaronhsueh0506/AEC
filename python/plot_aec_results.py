@@ -60,7 +60,7 @@ def scan_fileids(dataset_dir):
 
 
 def run_aec(mic_path, ref_path, mode, enable_dtd=True, enable_res=False,
-            mu=0.3, filter_length=0):
+            enable_shadow=False, mu=0.3, filter_length=0):
     """Run AEC and return output + filter object + confidence history."""
     mic, sr = sf.read(mic_path)
     ref, _ = sf.read(ref_path)
@@ -80,6 +80,7 @@ def run_aec(mic_path, ref_path, mode, enable_dtd=True, enable_res=False,
         mode=mode,
         enable_dtd=enable_dtd,
         enable_res=enable_res,
+        enable_shadow=enable_shadow,
         mu=mu,
         filter_length=filter_length,
     )
@@ -149,6 +150,7 @@ def main():
                         default='nlms')
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
+    parser.add_argument('--enable-shadow', action='store_true', help='Enable shadow filter (dual-filter)')
     parser.add_argument('--mu', type=float, default=0.3)
     parser.add_argument('--filter', type=int, default=0,
                         help='Filter length in samples (0=mode default)')
@@ -179,7 +181,7 @@ def main():
 
     # Plot
     n_sets = len(groups)
-    fig, axes = plt.subplots(n_sets, 3, figsize=(16, 4 * n_sets))
+    fig, axes = plt.subplots(n_sets, 4, figsize=(20, 4 * n_sets))
     if n_sets == 1:
         axes = axes[np.newaxis, :]
 
@@ -191,51 +193,65 @@ def main():
             group['mic'], group['ref'], mode,
             enable_dtd=not args.no_dtd,
             enable_res=args.enable_res,
+            enable_shadow=args.enable_shadow,
             mu=args.mu, filter_length=args.filter)
         est_ir = get_estimated_ir(aec)
         print(f" done (ERLE={aec.get_erle():.1f} dB)")
 
         t = np.arange(len(mic)) / sr
 
-        # ── Col 0: waveforms ────────────────────────────────────────
+        # Compute shared y-axis limit across waveform columns
+        nearend_speech = None
+        if group['nearend_speech']:
+            nearend_speech, _ = sf.read(group['nearend_speech'])
+            nearend_speech = nearend_speech.astype(np.float32)[:len(mic)]
+
+        ymax = max(np.max(np.abs(mic)), np.max(np.abs(ref)))
+        if nearend_speech is not None:
+            ymax = max(ymax, np.max(np.abs(nearend_speech)))
+        ylim = (-ymax * 1.05, ymax * 1.05)
+
+        # ── Col 0: mic + AEC output ───────────────────────────────
         ax = axes[row, 0]
-        # Draw DTD active regions (red background) — only when DTD is on
         if not args.no_dtd:
             draw_dtd_spans(ax, aec.confidence_history, aec.hop_size, sr)
         ax.plot(t, mic, alpha=0.6, label='mic')
         ax.plot(t, out, alpha=0.8, label='AEC output')
-        ax.set_title(f'fileid_{fid} — Waveforms')
+        ax.set_title(f'fileid_{fid} — Mic + Output')
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('Amplitude')
         ax.legend(loc='upper right', fontsize=8)
         ax.set_xlim(0, t[-1])
+        ax.set_ylim(ylim)
 
-        # ── Col 1: ERLE ────────────────────────────────────────────
+        # ── Col 1: reference (far-end) ───────────────────────────
         ax = axes[row, 1]
-        frame_len = 256
-        n_frames = len(mic) // frame_len
-        mic_energy = np.array([np.mean(mic[i*frame_len:(i+1)*frame_len]**2)
-                               for i in range(n_frames)])
-        out_energy = np.array([np.mean(out[i*frame_len:(i+1)*frame_len]**2)
-                               for i in range(n_frames)])
-        t_frames = np.arange(n_frames) * frame_len / sr
-        eps = 1e-10
-        # Only compute ERLE where mic has energy
-        erle = np.where(mic_energy > eps,
-                        10 * np.log10(mic_energy / (out_energy + eps)),
-                        0.0)
-        ax.plot(t_frames, erle)
-        ax.set_title(f'fileid_{fid} — ERLE (dB)')
+        ax.plot(t, ref, alpha=0.7, color='green')
+        ax.set_title(f'fileid_{fid} — Reference (far-end)')
         ax.set_xlabel('Time (s)')
-        ax.set_ylabel('ERLE (dB)')
-        ax.set_xlim(0, t_frames[-1])
-        ax.axhline(0, color='gray', ls='--', lw=0.5)
+        ax.set_ylabel('Amplitude')
+        ax.set_xlim(0, t[-1])
+        ax.set_ylim(ylim)
 
-        # ── Col 2: estimated IR (+ true IR if available) ───────────
+        # ── Col 2: nearend speech (simulation only) ─────────────
         ax = axes[row, 2]
+        if nearend_speech is not None:
+            t_ns = np.arange(len(nearend_speech)) / sr
+            ax.plot(t_ns, nearend_speech, alpha=0.7, color='purple')
+            ax.set_title(f'fileid_{fid} — Near-end Speech')
+            ax.set_xlim(0, t_ns[-1])
+        else:
+            ax.set_title(f'fileid_{fid} — Near-end Speech (N/A)')
+            ax.text(0.5, 0.5, 'No nearend_speech file', ha='center', va='center',
+                    transform=ax.transAxes, color='gray', fontsize=10)
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Amplitude')
+        ax.set_ylim(ylim)
+
+        # ── Col 3: estimated IR (+ true IR if available) ─────────
+        ax = axes[row, 3]
         idx_est = np.arange(len(est_ir))
         ax.plot(idx_est, est_ir, label='Estimated IR', lw=1.0, alpha=0.8)
-        # Only overlay true IR for files generated by gen_sim_data (fileid >= 1)
         if true_ir is not None and fid != '0':
             idx_true = np.arange(len(true_ir))
             ax.plot(idx_true, true_ir, label='True IR', lw=1.5, alpha=0.6)
@@ -247,12 +263,14 @@ def main():
 
     dtd_str = 'DTD off' if args.no_dtd else 'DTD on'
     res_str = 'RES on' if args.enable_res else 'RES off'
-    fig.suptitle(f'AEC Results (mode={args.mode}, {dtd_str}, {res_str})', fontsize=14)
+    shadow_str = 'Shadow on' if args.enable_shadow else 'Shadow off'
+    fig.suptitle(f'AEC Results (mode={args.mode}, {dtd_str}, {res_str}, {shadow_str})', fontsize=14)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
     dtd_tag = '_no_dtd' if args.no_dtd else ''
     res_tag = '_res' if args.enable_res else ''
-    out_path = os.path.join(base, f'aec_results_{args.mode}{dtd_tag}{res_tag}.png')
+    shadow_tag = '_shadow' if args.enable_shadow else ''
+    out_path = os.path.join(base, f'aec_results_{args.mode}{dtd_tag}{res_tag}{shadow_tag}.png')
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     print(f"Saved: {out_path}")
     plt.show()

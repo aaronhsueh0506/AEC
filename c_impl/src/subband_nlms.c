@@ -321,3 +321,28 @@ int subband_nlms_get_n_freqs(const SubbandNlms* f) {
 int subband_nlms_get_filter_length(const SubbandNlms* f) {
     return f ? f->hop_size * f->n_partitions : 0;
 }
+
+int subband_nlms_copy_weights(SubbandNlms* dst, const SubbandNlms* src) {
+    if (!dst || !src) return -1;
+    if (dst->n_partitions != src->n_partitions ||
+        dst->n_freqs != src->n_freqs) return -1;
+
+    for (int p = 0; p < src->n_partitions; p++) {
+        memcpy(dst->W[p], src->W[p], src->n_freqs * sizeof(Complex));
+    }
+    return 0;
+}
+
+float subband_nlms_get_error_energy(const SubbandNlms* f) {
+    if (!f) return 0.0f;
+    float energy = 0.0f;
+    for (int k = 0; k < f->n_freqs; k++) {
+        energy += f->error_spec[k].r * f->error_spec[k].r +
+                  f->error_spec[k].i * f->error_spec[k].i;
+    }
+    return energy;
+}
+
+int subband_nlms_get_n_partitions(const SubbandNlms* f) {
+    return f ? f->n_partitions : 0;
+}

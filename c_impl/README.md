@@ -23,6 +23,9 @@ make clean    # 清除編譯產物
 ./bin/aec_wav mic.wav ref.wav output.wav --no-dtd
 ./bin/aec_wav mic.wav ref.wav output.wav --no-res
 
+# 開啟 Shadow Filter (雙濾波器)
+./bin/aec_wav mic.wav ref.wav output.wav --enable-shadow
+
 # 調整 RES 最小增益
 ./bin/aec_wav mic.wav ref.wav output.wav --res-gmin -25
 ```
@@ -37,16 +40,19 @@ make clean    # 清除編譯產物
 | `--no-res` | - | 關閉殘餘回音抑制 |
 | `--enable-res` | 預設開啟 | 開啟殘餘回音抑制 |
 | `--res-gmin <dB>` | -20 | RES 最小增益 (dB) |
+| `--enable-shadow` | - | 開啟 Shadow Filter (雙濾波器) |
+| `--no-shadow` | 預設關閉 | 關閉 Shadow Filter |
 
 ## API
 
 ```c
 #include "aec.h"
 
-// 建立 AEC（預設開啟 DTD + RES）
+// 建立 AEC（預設開啟 DTD + RES，Shadow 關閉）
 AecConfig config = aec_default_config(16000);
 config.mu = 0.3f;
 config.filter_length = 1024;
+// config.enable_shadow = true;  // 可選：開啟雙濾波器自動修正
 
 Aec* aec = aec_create(&config);
 int hop_size = aec_get_hop_size(aec);  // 256 @ 16kHz
@@ -79,15 +85,20 @@ aec_destroy(aec);
 ```
 far-end ──┐
            v
-near-end ──> PBFDAF ──> RES Post-Filter ──> Output Limiter ──> output
-              ^                                    |
-              └── DTD (mu scaling) <───────────────┘
+near-end ──> PBFDAF (Main) ──> Shadow Compare ──> RES ──> Output Limiter ──> output
+              ^                  (optional)                      |
+              └── DTD (mu scaling) <─────────────────────────────┘
+
+Shadow Filter (optional):
+  - 保守步長 (mu × 0.5)，永遠更新
+  - 若 shadow error < main error × 0.8 → 複製權重到 main
 ```
 
 1. **PBFDAF**: 分區頻域自適應濾波，估計並消除回音
-2. **DTD**: WebRTC 風格發散偵測，透過 mu_scale 控制更新速率
-3. **RES**: 殘餘回音抑制，頻域譜減法進一步消除殘餘回音
-4. **Output Limiter**: 確保輸出不超過麥克風振幅
+2. **Shadow Filter** (可選): 保守步長的影子濾波器，發散時自動修正主濾波器
+3. **DTD**: Output-vs-input 發散偵測，透過 mu_scale 控制更新速率
+4. **RES**: 殘餘回音抑制，頻域譜減法進一步消除殘餘回音
+5. **Output Limiter**: 確保輸出不超過麥克風振幅
 
 ## 檔案結構
 
@@ -120,6 +131,7 @@ c_impl/
 AecConfig aec_cfg = aec_default_config(16000);
 aec_cfg.enable_res = true;
 aec_cfg.res_g_min_db = -25.0f;
+// aec_cfg.enable_shadow = true;  // 可選：雙濾波器
 
 Aec* aec = aec_create(&aec_cfg);
 

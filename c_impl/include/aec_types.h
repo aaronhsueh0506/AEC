@@ -41,6 +41,12 @@ typedef struct {
     float dtd_confidence_release;   // Confidence ramp-down rate per block (0.05)
     int dtd_warmup_frames;          // Frames to skip DTD at startup (200)
 
+    // Shadow filter (dual-filter divergence control)
+    bool enable_shadow;             // Enable shadow filter (false)
+    float shadow_mu_ratio;          // Shadow mu = main mu × ratio (0.5)
+    float shadow_copy_threshold;    // Copy when shadow_err < main_err × threshold (0.8)
+    float shadow_err_alpha;         // Error energy EMA smoothing (0.95)
+
     // RES (Residual Echo Suppressor) parameters
     bool enable_res;            // Enable post-filter (true)
     float res_g_min_db;         // Minimum gain in dB (-20)
@@ -76,13 +82,19 @@ static inline AecConfig aec_default_config(int sample_rate) {
     config.mu = 0.3f;
     config.delta = 1e-8f;
 
-    // DTD parameters (WebRTC-style divergence detection)
+    // DTD parameters (output-vs-input divergence detection)
     config.enable_dtd = true;
     config.dtd_divergence_factor = 1.5f;
     config.dtd_mu_min_ratio = 0.05f;
     config.dtd_confidence_attack = 0.3f;
     config.dtd_confidence_release = 0.05f;
-    config.dtd_warmup_frames = 200;
+    config.dtd_warmup_frames = 50;
+
+    // Shadow filter (dual-filter)
+    config.enable_shadow = false;
+    config.shadow_mu_ratio = 0.5f;
+    config.shadow_copy_threshold = 0.8f;
+    config.shadow_err_alpha = 0.95f;
 
     // RES parameters
     config.enable_res = true;

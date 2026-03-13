@@ -33,6 +33,9 @@ python3 aec.py mic.wav ref.wav output.wav --mode freq
 # 分區頻域模式 + RES
 python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res
 
+# 分區頻域模式 + Shadow Filter (雙濾波器)
+python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-shadow
+
 # 調整參數
 python3 aec.py mic.wav ref.wav output.wav --mu 0.5 --filter 1024
 ```
@@ -41,8 +44,9 @@ python3 aec.py mic.wav ref.wav output.wav --mu 0.5 --filter 1024
 
 ```bash
 cd c_impl && make
-./bin/aec_wav mic.wav ref.wav output.wav           # DTD + RES 預設開啟
-./bin/aec_wav mic.wav ref.wav output.wav --no-res   # 關閉 RES
+./bin/aec_wav mic.wav ref.wav output.wav                    # DTD + RES 預設開啟
+./bin/aec_wav mic.wav ref.wav output.wav --no-res            # 關閉 RES
+./bin/aec_wav mic.wav ref.wav output.wav --enable-shadow     # 開啟 Shadow Filter
 ```
 
 詳見 [c_impl/README.md](c_impl/README.md)。
@@ -54,15 +58,19 @@ Reference Signal (far-end/喇叭播放)
           |
           v
 +-------------------+     +---------------------------+
-| Microphone Signal |---->| Adaptive Filter           |
+| Microphone Signal |---->| Adaptive Filter (Main)    |
 | (near-end)        |     | (lms/nlms/freq/subband)   |
 +-------------------+     +---------------------------+
                                      |
-                                     v
-                     +---------------------------+
-                     | Divergence Detection      |
-                     | (WebRTC-style, mu scaling) |
-                     +---------------------------+
+                          +----------+----------+
+                          |                     |
+                          v                     v
+               +------------------+  +--------------------+
+               | Shadow Filter    |  | Divergence Detect  |
+               | (optional, 可選) |  | (mu scaling)       |
+               +------------------+  +--------------------+
+                          |                     |
+                          +----------+----------+
                                      |
                                      v
                      +---------------------------+
@@ -96,6 +104,13 @@ config = AecConfig(
 )
 aec = AEC(config)
 
+# 分區頻域模式 + Shadow Filter (雙濾波器自動修正)
+config = AecConfig(
+    mode=AecMode.SUBBAND,
+    enable_shadow=True
+)
+aec = AEC(config)
+
 # 處理
 hop_size = aec.hop_size  # 256 samples (16ms @ 16kHz)
 while has_audio:
@@ -114,6 +129,20 @@ while has_audio:
 | `filter_length` | 512 (NLMS/LMS), 1024 (SUBBAND) | 256-4096 | 濾波器長度 (samples) |
 | `enable_dtd` | True | - | 發散偵測（Python 預設開，C 預設開） |
 | `enable_res` | False (Python) / True (C) | - | 殘餘回音抑制 |
+| `enable_shadow` | False | - | Shadow filter（僅 freq/subband，見下方說明） |
+
+### Shadow Filter 參數 (僅 freq/subband 模式)
+
+Shadow filter（雙濾波器）使用一個保守步長的影子濾波器持續追蹤回音路徑，當主濾波器發散時自動修正。
+這是 WebRTC AEC3 和 SpeexDSP 的核心機制。
+
+| 參數 | 預設值 | 範圍 | 說明 |
+|------|--------|------|------|
+| `shadow_mu_ratio` | 0.5 | 0.1-0.8 | Shadow mu = main mu × ratio |
+| `shadow_copy_threshold` | 0.8 | 0.5-1.0 | Shadow error < main error × threshold 時複製權重 |
+| `shadow_err_alpha` | 0.95 | 0.9-0.99 | Error energy EMA 平滑係數 |
+
+**與 DTD 的關係**：兩者互補，可同時啟用。DTD 降低 mu 防止惡化，shadow 在背景持續追蹤並自動修正。
 
 ### RES 參數 (僅 freq/subband 模式)
 
@@ -140,6 +169,9 @@ python3 plot_aec_results.py ../wav/ --mode subband
 
 # 開啟 RES
 python3 plot_aec_results.py ../wav/ --mode subband --enable-res
+
+# 開啟 Shadow Filter
+python3 plot_aec_results.py ../wav/ --mode subband --enable-shadow
 ```
 
 ## 效能指標

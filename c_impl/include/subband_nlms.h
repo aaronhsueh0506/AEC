@@ -107,6 +107,25 @@ int subband_nlms_get_n_freqs(const SubbandNlms* filter);
  */
 int subband_nlms_get_filter_length(const SubbandNlms* filter);
 
+/**
+ * Copy filter weights from src to dst (W only)
+ * Both filters must have same block_size and n_partitions.
+ *
+ * @return 0 on success, -1 on mismatch
+ */
+int subband_nlms_copy_weights(SubbandNlms* dst, const SubbandNlms* src);
+
+/**
+ * Get total error energy from last process() call
+ * Returns sum of |error_spec[k]|^2 for all frequency bins.
+ */
+float subband_nlms_get_error_energy(const SubbandNlms* filter);
+
+/**
+ * Get number of partitions
+ */
+int subband_nlms_get_n_partitions(const SubbandNlms* filter);
+
 #ifdef __cplusplus
 }
 #endif
