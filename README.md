@@ -65,24 +65,17 @@ make
 
 ### 使用 C 版本
 
+C 版本僅支援 PBFDAF（分區頻域）模式。
+
 ```bash
-# 時域 NLMS 模式 (預設)
+# 基本用法
 ./bin/aec_wav mic.wav ref.wav output.wav
 
-# 時域 LMS 模式 (固定步長，穩態環境)
-./bin/aec_wav mic.wav ref.wav output.wav --mode lms
-
-# 頻域模式
-./bin/aec_wav mic.wav ref.wav output.wav --mode freq
-
-# 分區頻域模式 (長回音路徑)
-./bin/aec_wav mic.wav ref.wav output.wav --mode subband
-
 # 調整參數
-./bin/aec_wav mic.wav ref.wav output.wav --mode subband --mu 0.5 --filter 1024
+./bin/aec_wav mic.wav ref.wav output.wav --mu 0.5 --filter 1024
 
-# LMS 自訂步長 (預設 mu=0.01)
-./bin/aec_wav mic.wav ref.wav output.wav --mode lms --mu 0.005
+# 關閉發散偵測
+./bin/aec_wav mic.wav ref.wav output.wav --no-dtd
 ```
 
 ### Python 版本
@@ -117,13 +110,20 @@ Reference Signal (far-end/喇叭播放)
           |
           v
 +-------------------+     +---------------------------+
-| Microphone Signal |---->| Double-Talk Detector (DTD)|
-| (near-end)        |     +---------------------------+
-+-------------------+                |
+| Microphone Signal |---->| Adaptive Filter           |
+| (near-end)        |     | (lms/nlms/freq/subband)   |
++-------------------+     +---------------------------+
+                                     |
                                      v
                      +---------------------------+
-                     | Adaptive Filter           |
-                     | (lms/nlms/freq/subband)   |
+                     | Divergence Detection      |
+                     | (WebRTC-style, mu scaling) |
+                     +---------------------------+
+                                     |
+                                     v
+                     +---------------------------+
+                     | Output Limiter            |
+                     | (output ≤ mic amplitude)  |
                      +---------------------------+
                                      |
                                      v
@@ -137,7 +137,7 @@ Reference Signal (far-end/喇叭播放)
                                      |
                                      v
                      +---------------------------+
-                     | LSA v3-2 (Noise Reduction)|
+                     | NR (Noise Reduction)      |
                      +---------------------------+
 ```
 
@@ -148,29 +148,24 @@ Reference Signal (far-end/喇叭播放)
 ```c
 #include "aec.h"
 
-// 建立 AEC (時域模式)
+// 建立 AEC (PBFDAF 模式)
 AecConfig config = aec_default_config(16000);
-config.filter_mode = AEC_MODE_NLMS;  // 或 AEC_MODE_FREQ / AEC_MODE_SUBBAND / AEC_MODE_LMS
 config.mu = 0.3f;
+config.filter_length = 1024;   // 4 partitions × 256 hop
 config.enable_dtd = true;
 
 Aec* aec = aec_create(&config);
 
-// hop_size: 所有模式統一 256 samples (16ms @ 16kHz)
+// hop_size = 256 samples (16ms @ 16kHz)
 int hop_size = aec_get_hop_size(aec);
 
 while (has_audio) {
     aec_process(aec, mic_buf, ref_buf, out_buf);
     float erle = aec_get_erle(aec);
+    float conf = aec_get_dtd_confidence(aec);
 }
 
 aec_destroy(aec);
-
-// LMS 模式 (固定步長，適合穩態環境)
-AecConfig lms_cfg = aec_default_config(16000);
-lms_cfg.filter_mode = AEC_MODE_LMS;
-lms_cfg.mu = 0.01f;  // LMS 步長需極小 (典型 0.001~0.05)
-Aec* lms_aec = aec_create(&lms_cfg);
 ```
 
 ### Python
@@ -213,7 +208,8 @@ while has_audio:
 |------|--------|------|------|
 | `mu` | 0.3 (NLMS) / 0.01 (LMS) | NLMS: 0.1-0.8, LMS: 0.001-0.05 | 步長，越大收斂越快但穩態誤差增加 |
 | `filter_length` | 512 (NLMS/LMS), 1024 (SUBBAND) | 256-4096 | 濾波器長度 (samples), NLMS/LMS/SUBBAND 可配置, FREQ 固定 = hop_size |
-| `dtd_threshold` | 2.0 | 1.0-4.0 | DTD 閾值（error/echo 平滑比值） |
+| `dtd_divergence_factor` | 1.5 | 1.2-2.0 | 發散偵測倍數（output > input × factor → 發散） |
+| `dtd_mu_min_ratio` | 0.05 | 0.01-0.1 | 發散時最低 mu 比例（不完全凍結） |
 
 ### RES 參數 (僅 freq/subband 模式)
 
@@ -242,17 +238,13 @@ AEC/
 ├── c_impl/
 │   ├── include/
 │   │   ├── aec.h              # 主要 API
-│   │   ├── aec_types.h        # 配置結構 (AecFilterMode)
-│   │   ├── nlms_filter.h      # 時域 NLMS
-│   │   ├── subband_nlms.h     # 頻域 NLMS
-│   │   ├── dtd.h              # 雙講偵測器
+│   │   ├── aec_types.h        # 配置結構
+│   │   ├── subband_nlms.h     # PBFDAF 頻域濾波器
 │   │   ├── res_filter.h       # 殘餘回音抑制器
 │   │   └── fft_wrapper.h      # FFT 介面
 │   ├── src/
-│   │   ├── aec.c              # 主協調器 (四模式支援)
-│   │   ├── nlms_filter.c      # 時域 NLMS / LMS (normalize 旗標切換)
-│   │   ├── subband_nlms.c
-│   │   ├── dtd.c
+│   │   ├── aec.c              # 主協調器 (PBFDAF + 發散偵測 + Output Limiter)
+│   │   ├── subband_nlms.c     # PBFDAF 實作
 │   │   ├── res_filter.c
 │   │   └── fft_wrapper.c
 │   ├── example/
@@ -260,21 +252,23 @@ AEC/
 │   │   ├── aec_lsa_pipeline.c # AEC+LSA 整合範例
 │   │   └── wav_io.h
 │   ├── lib/kiss_fft/
-│   ├── docs/
-│   │   └── aec_methods.md     # 演算法詳細文檔
 │   └── Makefile
 ├── python/
-│   └── aec.py                 # Python 實作 (四模式支援)
-└── docs/
-    └── DEVLOG.md              # 開發紀錄
+│   ├── aec.py                 # Python 實作 (四模式支援)
+│   ├── plot_aec_results.py    # 結果繪圖 (含 DTD 紅底標示)
+│   └── gen_sim_data.py        # 測試資料生成
+├── docs/
+│   ├── aec_methods.md         # 演算法與方法論文檔
+│   └── DEVLOG.md              # 開發紀錄
+└── wav/                       # 測試音檔
 ```
 
 ## 與 LSA 整合
 
 ```c
-// AEC + LSA 處理鏈
+// AEC + NR 處理鏈
 AecConfig aec_cfg = aec_default_config(16000);
-aec_cfg.filter_mode = AEC_MODE_SUBBAND;
+aec_cfg.filter_length = 1024;
 aec_cfg.enable_res = true;
 aec_cfg.res_g_min_db = -25.0f;
 
@@ -284,8 +278,7 @@ lsa_cfg.g_min_db = -15.0f;
 Aec* aec = aec_create(&aec_cfg);
 MmseLsaDenoiser* lsa = mmse_lsa_create(&lsa_cfg);
 
-// 所有模式統一 hop_size = 256 (16ms @ 16kHz)
-int aec_hop = aec_get_hop_size(aec);
+int aec_hop = aec_get_hop_size(aec);   // 256 (16ms @ 16kHz)
 int lsa_hop = mmse_lsa_get_hop_size(lsa);
 
 while (has_audio) {

@@ -51,6 +51,8 @@ near_end (mic) ─┐  │                              │
 
 ## 2. LMS - 最小均方演算法
 
+> **實作狀態：** Python only（C 版本僅實作 PBFDAF）
+
 ### 原理
 
 LMS (Least Mean Squares) 是最簡單的自適應濾波演算法，由 Widrow & Hoff (1960) 提出。
@@ -129,6 +131,8 @@ LMS 模式下 `leak = 1.0`（無權重洩漏）。
 
 ## 3. NLMS - 歸一化最小均方演算法
 
+> **實作狀態：** Python only（C 版本僅實作 PBFDAF）
+
 ### 原理
 
 NLMS (Normalized LMS) 在 LMS 基礎上加入功率歸一化，使步長自動隨輸入功率調整。
@@ -193,6 +197,8 @@ power_sum += x_new² - x_old²
 ---
 
 ## 4. 頻域 NLMS
+
+> **實作狀態：** Python only（C 版本僅實作 PBFDAF）
 
 ### 原理
 
@@ -369,7 +375,7 @@ if |d[n]| > threshold × max(|x[n-k]|, k=0..L-1):
 
 - 計算量極小，不依賴濾波器狀態
 - **❌ 不適用於 AEC**：設計用於線路回聲消除 (LEC)，ERL ≈ -6dB。在 AEC 中 echo gain ≈ 1.0，`|mic|` 幾乎永遠 > `threshold × |ref|`，導致 100% 假觸發
-- C 版本有 Geigel 實作（`dtd.c`），僅供參考
+- C 版本曾有 Geigel 實作（`dtd.c`），已移除
 
 #### Normalized Cross-Correlation (NCC)
 

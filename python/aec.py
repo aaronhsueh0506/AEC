@@ -535,6 +535,9 @@ class AEC:
         self.error_power = 0.0
         self.alpha = 0.95
 
+        # DTD confidence history (one entry per process() call)
+        self.confidence_history = []
+
     def reset(self):
         self.filter.reset()
         if self.dtd:
@@ -626,6 +629,9 @@ class AEC:
         for i in range(len(near_end)):
             self.near_power = self.alpha * self.near_power + (1 - self.alpha) * near_end[i] ** 2
             self.error_power = self.alpha * self.error_power + (1 - self.alpha) * output[i] ** 2
+
+        # Record DTD confidence for plotting
+        self.confidence_history.append(self.get_dtd_confidence())
 
         return output.astype(np.float32)
 

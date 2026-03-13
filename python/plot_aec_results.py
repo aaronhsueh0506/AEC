@@ -60,7 +60,7 @@ def scan_fileids(dataset_dir):
 
 
 def run_aec(mic_path, ref_path, mode, enable_dtd=True, mu=0.3, filter_length=0):
-    """Run AEC and return output + filter object."""
+    """Run AEC and return output + filter object + confidence history."""
     mic, sr = sf.read(mic_path)
     ref, _ = sf.read(ref_path)
     mic = mic.astype(np.float32)
@@ -94,6 +94,33 @@ def run_aec(mic_path, ref_path, mode, enable_dtd=True, mu=0.3, filter_length=0):
         processed += hop
 
     return mic[:n], ref[:n], output, aec, sr
+
+
+def draw_dtd_spans(ax, confidence_history, hop_size, sr):
+    """Draw red background spans where DTD confidence > 0 (not updating)."""
+    if not confidence_history:
+        return
+    conf = np.array(confidence_history)
+    # Find contiguous regions where confidence > 0
+    active = conf > 0.0
+    if not np.any(active):
+        return
+    # Find edges
+    diff = np.diff(active.astype(int))
+    starts = np.where(diff == 1)[0] + 1
+    ends = np.where(diff == -1)[0] + 1
+    # Handle edge cases
+    if active[0]:
+        starts = np.concatenate(([0], starts))
+    if active[-1]:
+        ends = np.concatenate((ends, [len(conf)]))
+    # Draw spans with alpha proportional to max confidence in region
+    for s, e in zip(starts, ends):
+        t_start = s * hop_size / sr
+        t_end = e * hop_size / sr
+        max_conf = np.max(conf[s:e])
+        alpha = 0.1 + 0.3 * max_conf  # 0.1 ~ 0.4
+        ax.axvspan(t_start, t_end, color='red', alpha=alpha, zorder=0)
 
 
 def get_estimated_ir(aec):
@@ -168,6 +195,9 @@ def main():
 
         # ── Col 0: waveforms ────────────────────────────────────────
         ax = axes[row, 0]
+        # Draw DTD active regions (red background) — only when DTD is on
+        if not args.no_dtd:
+            draw_dtd_spans(ax, aec.confidence_history, aec.hop_size, sr)
         ax.plot(t, mic, alpha=0.6, label='mic')
         ax.plot(t, out, alpha=0.8, label='AEC output')
         ax.set_title(f'fileid_{fid} — Waveforms')
