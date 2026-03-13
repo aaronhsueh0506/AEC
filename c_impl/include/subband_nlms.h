@@ -116,6 +116,16 @@ int subband_nlms_get_filter_length(const SubbandNlms* filter);
 int subband_nlms_copy_weights(SubbandNlms* dst, const SubbandNlms* src);
 
 /**
+ * Copy echo spectrum from src to dst (for RES consistency after weight copy)
+ */
+void subband_nlms_copy_echo_spec(SubbandNlms* dst, const SubbandNlms* src);
+
+/**
+ * Get far-end spectrum (for coherence DTD)
+ */
+void subband_nlms_get_far_spectrum(const SubbandNlms* filter, Complex* far_spec);
+
+/**
  * Get total error energy from last process() call
  * Returns sum of |error_spec[k]|^2 for all frequency bins.
  */

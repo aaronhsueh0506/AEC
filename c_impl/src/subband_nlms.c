@@ -306,6 +306,12 @@ void subband_nlms_get_error_spectrum(const SubbandNlms* f, Complex* error_spec) 
     }
 }
 
+void subband_nlms_get_far_spectrum(const SubbandNlms* f, Complex* far_spec) {
+    if (f && far_spec) {
+        memcpy(far_spec, f->far_spec, f->n_freqs * sizeof(Complex));
+    }
+}
+
 int subband_nlms_get_block_size(const SubbandNlms* f) {
     return f ? f->block_size : 0;
 }
@@ -331,6 +337,11 @@ int subband_nlms_copy_weights(SubbandNlms* dst, const SubbandNlms* src) {
         memcpy(dst->W[p], src->W[p], src->n_freqs * sizeof(Complex));
     }
     return 0;
+}
+
+void subband_nlms_copy_echo_spec(SubbandNlms* dst, const SubbandNlms* src) {
+    if (!dst || !src || dst->n_freqs != src->n_freqs) return;
+    memcpy(dst->echo_spec, src->echo_spec, src->n_freqs * sizeof(Complex));
 }
 
 float subband_nlms_get_error_energy(const SubbandNlms* f) {

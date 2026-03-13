@@ -46,8 +46,18 @@ struct Aec {
     float alpha_erle;
 
     // Divergence detection state
-    float dtd_confidence;   // [0.0, 1.0]
+    float dtd_confidence;       // [0.0, 1.0] divergence confidence
     int frame_count;
+
+    // Coherence-based DT detection state
+    float dtd_coh_confidence;   // [0.0, 1.0] coherence confidence
+    float* S_ex_r;              // [n_freqs] smoothed cross-PSD real
+    float* S_ex_i;              // [n_freqs] smoothed cross-PSD imag
+    float* S_ee;                // [n_freqs] smoothed error auto-PSD
+    float* S_xx;                // [n_freqs] smoothed far-end auto-PSD
+    Complex* coh_far_spec;      // [n_freqs] temp buffer for far spectrum
+    Complex* coh_error_spec;    // [n_freqs] temp buffer for error spectrum
+    int coh_hangover_count;
 };
 
 Aec* aec_create(const AecConfig* config) {
@@ -142,6 +152,28 @@ Aec* aec_create(const AecConfig* config) {
     aec->dtd_confidence = 0.0f;
     aec->frame_count = 0;
 
+    // Init coherence DTD
+    aec->dtd_coh_confidence = 0.0f;
+    aec->coh_hangover_count = 0;
+    if (config->enable_dtd) {
+        int n_freqs = aec->params.n_freqs;
+        aec->S_ex_r = (float*)calloc(n_freqs, sizeof(float));
+        aec->S_ex_i = (float*)calloc(n_freqs, sizeof(float));
+        aec->S_ee = (float*)calloc(n_freqs, sizeof(float));
+        aec->S_xx = (float*)calloc(n_freqs, sizeof(float));
+        aec->coh_far_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
+        aec->coh_error_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
+        if (!aec->S_ex_r || !aec->S_ex_i || !aec->S_ee || !aec->S_xx ||
+            !aec->coh_far_spec || !aec->coh_error_spec) {
+            free(aec->S_ex_r); free(aec->S_ex_i);
+            free(aec->S_ee); free(aec->S_xx);
+            free(aec->coh_far_spec); free(aec->coh_error_spec);
+            aec->S_ex_r = NULL; aec->S_ex_i = NULL;
+            aec->S_ee = NULL; aec->S_xx = NULL;
+            aec->coh_far_spec = NULL; aec->coh_error_spec = NULL;
+        }
+    }
+
     return aec;
 }
 
@@ -157,6 +189,12 @@ void aec_destroy(Aec* aec) {
         free(aec->res_output_spec);
         free(aec->res_temp);
         free(aec->output_buffer);
+        free(aec->S_ex_r);
+        free(aec->S_ex_i);
+        free(aec->S_ee);
+        free(aec->S_xx);
+        free(aec->coh_far_spec);
+        free(aec->coh_error_spec);
         free(aec);
     }
 }
@@ -185,7 +223,16 @@ void aec_reset(Aec* aec) {
     aec->near_power = 0.0f;
     aec->error_power = 0.0f;
     aec->dtd_confidence = 0.0f;
+    aec->dtd_coh_confidence = 0.0f;
+    aec->coh_hangover_count = 0;
     aec->frame_count = 0;
+    if (aec->S_ex_r) {
+        int n = aec->params.n_freqs;
+        memset(aec->S_ex_r, 0, n * sizeof(float));
+        memset(aec->S_ex_i, 0, n * sizeof(float));
+        memset(aec->S_ee, 0, n * sizeof(float));
+        memset(aec->S_xx, 0, n * sizeof(float));
+    }
 }
 
 void aec_retrain(Aec* aec) {
@@ -221,10 +268,12 @@ int aec_process(Aec* aec,
     const int hop_size = aec->params.hop_size;
     const float alpha = aec->alpha_erle;
 
-    // Compute mu_scale from previous block's divergence confidence
+    // Compute mu_scale from combined confidence (divergence + coherence)
     float mu_scale = 1.0f;
     if (aec->config.enable_dtd) {
-        float conf = aec->dtd_confidence;
+        float conf_div = aec->dtd_confidence;
+        float conf_coh = aec->dtd_coh_confidence;
+        float conf = (conf_div > conf_coh) ? conf_div : conf_coh;
         float min_r = aec->config.dtd_mu_min_ratio;
         mu_scale = 1.0f - conf * (1.0f - min_r);
     }
@@ -248,8 +297,9 @@ int aec_process(Aec* aec,
 
         if (aec->shadow_err_smooth <
             aec->main_err_smooth * aec->config.shadow_copy_threshold) {
-            // Shadow is better — copy weights to main
+            // Shadow is better — copy weights and echo spectrum to main
             subband_nlms_copy_weights(aec->filter, aec->shadow_filter);
+            subband_nlms_copy_echo_spec(aec->filter, aec->shadow_filter);
             memcpy(output, aec->shadow_output, hop_size * sizeof(float));
             aec->main_err_smooth = aec->shadow_err_smooth;
         }
@@ -325,6 +375,61 @@ int aec_process(Aec* aec,
             float release_scale = (1.0f - ratio > 0.2f) ? (1.0f - ratio) : 0.2f;
             aec->dtd_confidence = fmaxf(
                 aec->dtd_confidence - release * (1.0f + 4.0f * release_scale), 0.0f);
+        }
+    }
+
+    // Coherence-based double-talk detection
+    if (aec->config.enable_dtd && aec->S_ex_r &&
+        aec->frame_count >= aec->config.dtd_warmup_frames) {
+
+        int nfreq = aec->params.n_freqs;
+        float coh_alpha = aec->config.dtd_coh_alpha;
+        float attack = aec->config.dtd_confidence_attack;
+        float release = aec->config.dtd_coh_release;
+
+        subband_nlms_get_error_spectrum(aec->filter, aec->coh_error_spec);
+        subband_nlms_get_far_spectrum(aec->filter, aec->coh_far_spec);
+
+        float sum_num = 0.0f, sum_den = 0.0f;
+        float sum_ee = 0.0f, sum_xx = 0.0f;
+
+        for (int k = 0; k < nfreq; k++) {
+            float er = aec->coh_error_spec[k].r, ei = aec->coh_error_spec[k].i;
+            float xr = aec->coh_far_spec[k].r, xi = aec->coh_far_spec[k].i;
+
+            // Cross-PSD: error × conj(far)
+            float cx_r = er * xr + ei * xi;
+            float cx_i = ei * xr - er * xi;
+
+            aec->S_ex_r[k] = coh_alpha * aec->S_ex_r[k] + (1.0f - coh_alpha) * cx_r;
+            aec->S_ex_i[k] = coh_alpha * aec->S_ex_i[k] + (1.0f - coh_alpha) * cx_i;
+            aec->S_ee[k] = coh_alpha * aec->S_ee[k] + (1.0f - coh_alpha) * (er*er + ei*ei);
+            aec->S_xx[k] = coh_alpha * aec->S_xx[k] + (1.0f - coh_alpha) * (xr*xr + xi*xi);
+
+            sum_num += aec->S_ex_r[k] * aec->S_ex_r[k] + aec->S_ex_i[k] * aec->S_ex_i[k];
+            sum_den += aec->S_ee[k] * aec->S_xx[k];
+            sum_ee += aec->S_ee[k];
+            sum_xx += aec->S_xx[k];
+        }
+
+        float coherence = sum_num / (sum_den + 1e-10f);
+        int has_energy = (sum_ee > aec->config.dtd_coh_energy_floor * sum_xx) && (sum_xx > 1e-10f);
+
+        if (coherence > aec->config.dtd_coh_high) {
+            // Correlated → not DT → release
+            if (aec->coh_hangover_count > 0) {
+                aec->coh_hangover_count--;
+                aec->dtd_coh_confidence = fmaxf(aec->dtd_coh_confidence - release * 0.5f, 0.0f);
+            } else {
+                aec->dtd_coh_confidence = fmaxf(aec->dtd_coh_confidence - release, 0.0f);
+            }
+        } else if (coherence < aec->config.dtd_coh_low && has_energy) {
+            // Uncorrelated + energy → DT
+            aec->coh_hangover_count = aec->config.dtd_coh_hangover;
+            aec->dtd_coh_confidence = fminf(aec->dtd_coh_confidence + attack, 1.0f);
+        } else {
+            // Ambiguous → slow release
+            aec->dtd_coh_confidence = fmaxf(aec->dtd_coh_confidence - release * 0.5f, 0.0f);
         }
     }
 

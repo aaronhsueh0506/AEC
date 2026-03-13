@@ -511,13 +511,42 @@ Shadow filter: mu = config.mu × shadow_mu_ratio (0.5), always mu_scale = 1.0
 | 複製方向 | BG → FG | Shadow → Main |
 | 額外偵測 | 無 (純雙濾波器) | 可選 DTD |
 
-### 6.5 其他現代 DTD 方法
+### 6.5 Coherence-Based Double-Talk Detection ✅ 本專案採用
 
-#### Coherence-based DTD (MSC)
+Divergence detection 的限制：收斂後的 double-talk 中，output ≈ near_speech < mic，ratio < 1.0，
+偵測不到。Error 包含近端語音（跟 far-end 不相關），filter 持續更新導致權重漂移。
 
-利用 Magnitude Squared Coherence `C_de(f)` 判斷近端語音 presence。
-- Per-bin DTD，理論紮實
-- 需要長窗口估計，不適合短延遲場景
+**解法**：用 error-reference Magnitude Squared Coherence (MSC) 偵測 DT。
+
+```
+Smoothed PSDs (EMA smoothing on cross-spectrum):
+  S_ex[k] = α × S_ex[k] + (1-α) × error_spec[k] × conj(far_spec[k])
+  S_ee[k] = α × S_ee[k] + (1-α) × |error_spec[k]|²
+  S_xx[k] = α × S_xx[k] + (1-α) × |far_spec[k]|²
+
+Broadband coherence (ratio-of-sums):
+  C_avg = Σ|S_ex[k]|² / (Σ(S_ee[k] × S_xx[k]) + ε)
+
+Decision (hysteresis):
+  if C_avg > coh_high(0.6):     no DT → release confidence
+  elif C_avg < coh_low(0.3) AND error_energy > 0.1 × far_energy:
+                                 DT detected → attack confidence
+  else:                          ambiguous → slow release
+```
+
+**三種情境的行為**：
+
+| 情境 | Coherence | NER (error/far) | DT 判定 |
+|------|-----------|-----------------|---------|
+| 未收斂 (single-talk) | 中~高 (residual echo correlated) | 低 (<0.01) | ❌ 不觸發 |
+| 收斂後 (single-talk) | 低 (error ≈ noise) | 極低 (~0) | ❌ 不觸發 |
+| 收斂後 (double-talk) | 低 (near-end uncorrelated) | 高 (>0.1) | ✅ 觸發 |
+
+**跟 divergence detection 的關係**：互補，取 `max(div_conf, coh_conf)` 作為最終 confidence。
+Divergence 偵測 filter 發散，coherence 偵測近端語音汙染。
+
+**Shadow filter 在 DT 期間**：依照 WebRTC AEC3 和 SpeexDSP 做法，永遠全速更新（mu_scale=1.0）。
+Shadow mu 本身已很小 (main_mu × 0.5)，DT 期間漂移速度有限，DT 結束後會重新收斂。
 
 ### 6.6 DTD 方法比較
 
@@ -527,10 +556,12 @@ Shadow filter: mu = config.mu × shadow_mu_ratio (0.5), always mu_scale = 1.0
 | NCC | 中 | △ | 中 | 中 | — |
 | Error/Echo Ratio | 低 | ❌ | 低 | 低 | v1.2（已移除） |
 | **Output-vs-Input 發散偵測** | **低** | **✅** | **高** | **高** | **✅ 預設啟用** |
+| **Coherence-based DT** | **中** | **✅** | **高** | **高** | **✅ 預設啟用** |
 | **Dual Filter (Shadow)** | **高 (2×)** | **✅** | **最高** | **最高** | **✅ 可選** |
-| MSC Coherence | 中-高 | ✅ | 高 | 中 | — |
 
 ### 6.7 參數
+
+**Divergence detection**：
 
 | 參數 | 典型值 | 說明 |
 |------|--------|------|
@@ -540,6 +571,23 @@ Shadow filter: mu = config.mu × shadow_mu_ratio (0.5), always mu_scale = 1.0
 | confidence_release | 0.05 | confidence 下降速率（慢放） |
 | mu_min_ratio | 0.05 | 最低 mu 比例（不完全凍結） |
 | warmup_frames | 50 | 初始收斂期不偵測 |
+
+**Coherence-based DT detection**：
+
+| 參數 | 典型值 | 說明 |
+|------|--------|------|
+| dtd_coh_alpha | 0.85 | PSD smoothing (~6 block 時間常數) |
+| dtd_coh_high | 0.6 | coherence > 此值 → 非 DT |
+| dtd_coh_low | 0.3 | coherence < 此值 → DT |
+| dtd_coh_energy_floor | 0.1 | error_energy > floor × far_energy 才觸發 |
+| dtd_coh_hangover | 3 | DT 偵測後的持續 block 數（參考 WebRTC ≈3 blocks） |
+| dtd_coh_release | 0.1 | confidence 下降速率（比 divergence 的 0.05 更快） |
+
+**Coherence DTD hangover 設計**：PSD EMA smoothing (α=0.85) 本身已提供 ~6 block 的平滑效果，
+因此 coherence DTD 不需要像 Geigel DTD 那樣長的 hangover（15 blocks）。
+WebRTC AEC3 的 stationarity estimator 也只用 ~3 blocks hangover。
+較短的 hangover + 較快的 release 讓 DT→ST 轉換約 ~208ms（vs 舊的 ~560ms），
+改善了短 DT 間隔的時間解析度。
 
 ### 6.8 NLMS 額外保護：權重 Norm 約束
 

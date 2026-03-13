@@ -52,6 +52,14 @@ class AecConfig:
     # Divergence detection parameters (FREQ/SUBBAND, output-vs-input)
     dtd_divergence_factor: float = 1.5    # output > input × factor → diverged
 
+    # Coherence-based DTD parameters (FREQ/SUBBAND, complements divergence)
+    dtd_coh_alpha: float = 0.85           # PSD smoothing factor (~6 block time constant)
+    dtd_coh_high: float = 0.6            # Coherence above → no DT (correlated error)
+    dtd_coh_low: float = 0.3             # Coherence below → DT (uncorrelated error)
+    dtd_coh_energy_floor: float = 0.1    # Min error/far energy ratio to trigger DT
+    dtd_coh_hangover: int = 3            # Coherence DTD hangover blocks (shorter than Geigel)
+    dtd_coh_release: float = 0.1         # Coherence confidence release rate (faster recovery)
+
     # RES parameters
     enable_res: bool = False
     res_g_min_db: float = -20.0
@@ -171,9 +179,10 @@ class SubbandNlms:
         # Power estimation
         self.power = np.zeros(self.n_freqs, dtype=np.float32)
 
-        # Output spectra (for RES)
+        # Output spectra (for RES / coherence DTD)
         self.echo_spec = np.zeros(self.n_freqs, dtype=np.complex64)
         self.error_spec = np.zeros(self.n_freqs, dtype=np.complex64)
+        self.far_spec = np.zeros(self.n_freqs, dtype=np.complex64)
 
     def reset(self):
         self.W.fill(0)
@@ -198,6 +207,7 @@ class SubbandNlms:
         # FFT
         near_spec = np.fft.rfft(self.near_buffer)
         far_spec = np.fft.rfft(self.far_buffer)
+        self.far_spec = far_spec  # expose for coherence DTD
 
         # Store far-end spectrum
         curr_p = self.partition_idx
@@ -313,6 +323,7 @@ class DtdEstimator:
 
     - 'geigel' mode (LMS/NLMS): Geigel DTD with hangover + confidence
     - 'divergence' mode (FREQ/SUBBAND): Output-vs-input divergence detection
+    - 'coherence' mode (FREQ/SUBBAND): Error-reference coherence DT detection
     """
 
     def __init__(self, mode: str = 'geigel', *,
@@ -322,8 +333,14 @@ class DtdEstimator:
                  divergence_factor: float = 1.5,
                  attack: float = 0.3,
                  release: float = 0.05,
-                 warmup_frames: int = 50):
-        self.mode = mode  # 'geigel' or 'divergence'
+                 warmup_frames: int = 50,
+                 # Coherence mode params
+                 n_freqs: int = 0,
+                 coh_alpha: float = 0.85,
+                 coh_high: float = 0.6,
+                 coh_low: float = 0.3,
+                 coh_energy_floor: float = 0.01):
+        self.mode = mode  # 'geigel', 'divergence', or 'coherence'
         self.confidence = 0.0
         self.attack = attack
         self.release = release
@@ -340,12 +357,30 @@ class DtdEstimator:
         # Divergence state
         self.divergence_factor = divergence_factor
 
+        # Coherence state
+        self.coh_alpha = coh_alpha
+        self.coh_high = coh_high
+        self.coh_low = coh_low
+        self.coh_energy_floor = coh_energy_floor
+        if mode == 'coherence' and n_freqs > 0:
+            self.S_ex = np.zeros(n_freqs, dtype=np.complex64)
+            self.S_ee = np.zeros(n_freqs, dtype=np.float32)
+            self.S_xx = np.zeros(n_freqs, dtype=np.float32)
+        else:
+            self.S_ex = None
+            self.S_ee = None
+            self.S_xx = None
+
     def reset(self):
         self.confidence = 0.0
         self.frame_count = 0
         self.far_abs_buffer.fill(0)
         self.buf_idx = 0
         self.hangover_count = 0
+        if self.S_ex is not None:
+            self.S_ex.fill(0)
+            self.S_ee.fill(0)
+            self.S_xx.fill(0)
 
     def _update_confidence(self, detected: bool):
         """Update confidence with attack/release + hangover."""
@@ -406,12 +441,50 @@ class DtdEstimator:
             self.confidence = max(
                 self.confidence - self.release * (1.0 + 4.0 * release_scale), 0.0)
 
+    def _detect_coherence(self, error_spec: np.ndarray, far_spec: np.ndarray):
+        """Coherence-based double-talk detection.
+
+        Uses smoothed magnitude-squared coherence between error and far-end.
+        Low coherence + high error energy → near-end speech present → DT.
+        High coherence → residual echo (unconverged) → keep updating.
+        """
+        alpha = self.coh_alpha
+
+        # Update smoothed PSDs
+        cross = error_spec * np.conj(far_spec)
+        self.S_ex = alpha * self.S_ex + (1 - alpha) * cross
+        self.S_ee = alpha * self.S_ee + (1 - alpha) * np.abs(error_spec) ** 2
+        self.S_xx = alpha * self.S_xx + (1 - alpha) * np.abs(far_spec) ** 2
+
+        # Broadband coherence (ratio-of-sums)
+        num = np.sum(np.abs(self.S_ex) ** 2)
+        den = np.sum(self.S_ee * self.S_xx)
+        coherence = num / (den + 1e-10)
+
+        # Energy check: only declare DT if error has meaningful energy
+        sum_ee = np.sum(self.S_ee)
+        sum_xx = np.sum(self.S_xx)
+        has_energy = sum_ee > self.coh_energy_floor * sum_xx and sum_xx > 1e-10
+
+        if coherence > self.coh_high:
+            # Correlated → residual echo, not DT → release
+            self._update_confidence(False)
+        elif coherence < self.coh_low and has_energy:
+            # Uncorrelated + energy → near-end speech → DT
+            self._update_confidence(True)
+        else:
+            # Ambiguous → slow release
+            self.confidence = max(self.confidence - self.release * 0.5, 0.0)
+
     def detect_block(self, near_end: np.ndarray, far_end: np.ndarray,
-                     output: np.ndarray = None) -> float:
+                     output: np.ndarray = None,
+                     error_spec: np.ndarray = None,
+                     far_spec: np.ndarray = None) -> float:
         """Update DTD state and return confidence [0.0, 1.0].
 
         For geigel mode: uses near_end and far_end.
         For divergence mode: uses near_end and output.
+        For coherence mode: uses error_spec and far_spec.
         """
         self.frame_count += 1
         if self.frame_count < self.warmup_frames:
@@ -419,6 +492,9 @@ class DtdEstimator:
 
         if self.mode == 'geigel':
             self._detect_geigel(near_end, far_end)
+        elif self.mode == 'coherence':
+            if error_spec is not None and far_spec is not None:
+                self._detect_coherence(error_spec, far_spec)
         else:
             self._detect_divergence(near_end, output)
 
@@ -517,22 +593,38 @@ class AEC:
             self._n_partitions = 0
             self._freq_near_queue = None
 
-        # DTD: Output-vs-input divergence detection for all modes
-        # Geigel DTD is unsuitable for AEC because mic includes echo,
-        # causing |mic| > threshold * max(|ref|) to always trigger
-        # when echo gain ≈ 1.0. Divergence detection avoids this by
-        # checking if |output| > |input| (filter misbehaving).
+        # DTD: dual detector for FREQ/SUBBAND modes
+        #   1. Divergence detector: output > input (safety net)
+        #   2. Coherence detector: error-reference MSC (double-talk detection)
+        # Combined confidence = max(divergence, coherence)
         if self.config.enable_dtd:
             warmup = 50
-            self.dtd = DtdEstimator(
+            self.dtd_divergence = DtdEstimator(
                 mode='divergence',
                 divergence_factor=self.config.dtd_divergence_factor,
                 attack=self.config.dtd_confidence_attack,
                 release=self.config.dtd_confidence_release,
                 warmup_frames=warmup,
             )
+            # Coherence DTD only for frequency-domain modes
+            if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND) and hasattr(self, 'filter') and hasattr(self.filter, 'n_freqs'):
+                self.dtd_coherence = DtdEstimator(
+                    mode='coherence',
+                    n_freqs=self.filter.n_freqs,
+                    coh_alpha=self.config.dtd_coh_alpha,
+                    coh_high=self.config.dtd_coh_high,
+                    coh_low=self.config.dtd_coh_low,
+                    coh_energy_floor=self.config.dtd_coh_energy_floor,
+                    hangover_max=self.config.dtd_coh_hangover,
+                    attack=self.config.dtd_confidence_attack,
+                    release=self.config.dtd_coh_release,
+                    warmup_frames=warmup,
+                )
+            else:
+                self.dtd_coherence = None
         else:
-            self.dtd = None
+            self.dtd_divergence = None
+            self.dtd_coherence = None
 
         # RES (only for frequency-domain modes)
         if self.config.enable_res and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
@@ -575,8 +667,10 @@ class AEC:
             self.shadow_filter.reset()
             self.main_err_smooth = 0.0
             self.shadow_err_smooth = 0.0
-        if self.dtd:
-            self.dtd.reset()
+        if self.dtd_divergence:
+            self.dtd_divergence.reset()
+        if self.dtd_coherence:
+            self.dtd_coherence.reset()
         if self.res:
             self.res.reset()
         if self._freq_near_queue is not None:
@@ -593,18 +687,18 @@ class AEC:
         return self._hop_size
 
     def _compute_mu_scale(self) -> float:
-        """Convert DTD confidence to mu_scale [mu_min_ratio, 1.0]."""
-        if self.dtd is None:
+        """Convert combined DTD confidence to mu_scale [mu_min_ratio, 1.0]."""
+        conf_div = self.dtd_divergence.confidence if self.dtd_divergence else 0.0
+        conf_coh = self.dtd_coherence.confidence if self.dtd_coherence else 0.0
+        conf = max(conf_div, conf_coh)
+        if conf == 0.0:
             return 1.0
-        conf = self.dtd.confidence
         min_r = self.config.dtd_mu_min_ratio
         return 1.0 - conf * (1.0 - min_r)
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
-        # DTD strategy:
-        #   LMS/NLMS → Geigel DTD (compare |mic| vs max(|ref|))
-        #   FREQ/SUBBAND → WebRTC-style divergence detection (output > input)
-        # Both use confidence-based mu scaling instead of binary freeze.
+        # DTD: dual detector (divergence + coherence) for FREQ/SUBBAND
+        # Combined confidence = max(divergence, coherence) → mu_scale
 
         mu_scale = self._compute_mu_scale()
 
@@ -632,7 +726,7 @@ class AEC:
             else:
                 output = self.filter.process(near_end, far_end, mu_scale)
 
-            # Shadow filter: always adapts, copy to main if better
+            # Shadow filter: always adapts at full speed (SpeexDSP-style)
             if self.shadow_filter is not None and self._freq_near_queue is None:
                 shadow_out = self.shadow_filter.process(near_end, far_end, 1.0)
 
@@ -645,6 +739,7 @@ class AEC:
 
                 if self.shadow_err_smooth < self.main_err_smooth * self.config.shadow_copy_threshold:
                     self.filter.copy_weights_from(self.shadow_filter)
+                    self.filter.echo_spec[:] = self.shadow_filter.echo_spec
                     output = shadow_out
                     self.main_err_smooth = self.shadow_err_smooth
 
@@ -657,16 +752,20 @@ class AEC:
                                                   echo_spec, far_power)
                 output = np.fft.irfft(enhanced_spec, len(output) * 2)[:len(output)]
 
-            # Update divergence detection for NEXT block
-            if self.dtd:
-                self.dtd.detect_block(near_end, far_end, output=output)
+            # Update DTD detectors for NEXT block
+            if self.dtd_divergence:
+                self.dtd_divergence.detect_block(near_end, far_end, output=output)
+            if self.dtd_coherence and self._freq_near_queue is None:
+                self.dtd_coherence.detect_block(
+                    near_end, far_end,
+                    error_spec=self.filter.error_spec,
+                    far_spec=self.filter.far_spec)
         else:
-            # LMS/NLMS: Geigel DTD with confidence-based mu scaling
+            # LMS/NLMS: divergence detection only
             output, echo_est = self.filter.process_block(near_end, far_end,
                                                          mu_scale=mu_scale)
-            # Update divergence detection for NEXT block
-            if self.dtd:
-                self.dtd.detect_block(near_end, far_end, output=output)
+            if self.dtd_divergence:
+                self.dtd_divergence.detect_block(near_end, far_end, output=output)
 
         # Output limiter: output should never exceed mic amplitude.
         # If echo_est is correct, output = mic - echo ≤ mic. Exceeding
@@ -693,10 +792,12 @@ class AEC:
         return 10 * np.log10((self.near_power + eps) / (self.error_power + eps))
 
     def is_dtd_active(self) -> bool:
-        return self.dtd is not None and self.dtd.confidence > 0.5
+        return self.get_dtd_confidence() > 0.5
 
     def get_dtd_confidence(self) -> float:
-        return self.dtd.confidence if self.dtd else 0.0
+        conf_div = self.dtd_divergence.confidence if self.dtd_divergence else 0.0
+        conf_coh = self.dtd_coherence.confidence if self.dtd_coherence else 0.0
+        return max(conf_div, conf_coh)
 
 
 def process_wav_files(mic_path: str, ref_path: str, out_path: str,

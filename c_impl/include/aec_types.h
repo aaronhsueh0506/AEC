@@ -33,13 +33,21 @@ typedef struct {
     float mu;                   // Step size (0.3)
     float delta;                // Regularization (1e-8)
 
-    // DTD: WebRTC-style divergence detection
+    // DTD: divergence detection + coherence-based DT detection
     bool enable_dtd;                // Enable DTD (true)
     float dtd_divergence_factor;    // output > input × factor → diverged (1.5)
     float dtd_mu_min_ratio;         // Minimum mu scale during divergence (0.05)
     float dtd_confidence_attack;    // Confidence ramp-up rate per block (0.3)
     float dtd_confidence_release;   // Confidence ramp-down rate per block (0.05)
-    int dtd_warmup_frames;          // Frames to skip DTD at startup (200)
+    int dtd_warmup_frames;          // Frames to skip DTD at startup (50)
+
+    // Coherence-based DTD (complements divergence detection)
+    float dtd_coh_alpha;            // PSD smoothing factor (0.85)
+    float dtd_coh_high;             // Coherence above → no DT (0.6)
+    float dtd_coh_low;              // Coherence below → DT (0.3)
+    float dtd_coh_energy_floor;     // Min error/far energy ratio to trigger DT (0.1)
+    int dtd_coh_hangover;           // Coherence DTD hangover blocks (3)
+    float dtd_coh_release;          // Coherence confidence release rate (0.1)
 
     // Shadow filter (dual-filter divergence control)
     bool enable_shadow;             // Enable shadow filter (false)
@@ -82,13 +90,19 @@ static inline AecConfig aec_default_config(int sample_rate) {
     config.mu = 0.3f;
     config.delta = 1e-8f;
 
-    // DTD parameters (output-vs-input divergence detection)
+    // DTD parameters (divergence + coherence)
     config.enable_dtd = true;
     config.dtd_divergence_factor = 1.5f;
     config.dtd_mu_min_ratio = 0.05f;
     config.dtd_confidence_attack = 0.3f;
     config.dtd_confidence_release = 0.05f;
     config.dtd_warmup_frames = 50;
+    config.dtd_coh_alpha = 0.85f;
+    config.dtd_coh_high = 0.6f;
+    config.dtd_coh_low = 0.3f;
+    config.dtd_coh_energy_floor = 0.1f;
+    config.dtd_coh_hangover = 3;
+    config.dtd_coh_release = 0.1f;
 
     // Shadow filter (dual-filter)
     config.enable_shadow = false;
