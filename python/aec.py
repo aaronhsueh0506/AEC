@@ -608,22 +608,24 @@ class AEC:
                 release=self.config.dtd_confidence_release,
                 warmup_frames=warmup,
             )
-            # Coherence DTD only for frequency-domain modes
-            if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND) and hasattr(self, 'filter') and hasattr(self.filter, 'n_freqs'):
-                self.dtd_coherence = DtdEstimator(
-                    mode='coherence',
-                    n_freqs=self.filter.n_freqs,
-                    coh_alpha=self.config.dtd_coh_alpha,
-                    coh_high=self.config.dtd_coh_high,
-                    coh_low=self.config.dtd_coh_low,
-                    coh_energy_floor=self.config.dtd_coh_energy_floor,
-                    hangover_max=self.config.dtd_coh_hangover,
-                    attack=self.config.dtd_confidence_attack,
-                    release=self.config.dtd_coh_release,
-                    warmup_frames=warmup,
-                )
+            # Coherence DTD for all modes
+            # Freq-domain modes: n_freqs from filter; time-domain: from hop_size
+            if hasattr(self.filter, 'n_freqs'):
+                coh_n_freqs = self.filter.n_freqs
             else:
-                self.dtd_coherence = None
+                coh_n_freqs = self.config.hop_size // 2 + 1  # 256→129 bins
+            self.dtd_coherence = DtdEstimator(
+                mode='coherence',
+                n_freqs=coh_n_freqs,
+                coh_alpha=self.config.dtd_coh_alpha,
+                coh_high=self.config.dtd_coh_high,
+                coh_low=self.config.dtd_coh_low,
+                coh_energy_floor=self.config.dtd_coh_energy_floor,
+                hangover_max=self.config.dtd_coh_hangover,
+                attack=self.config.dtd_confidence_attack,
+                release=self.config.dtd_coh_release,
+                warmup_frames=warmup,
+            )
         else:
             self.dtd_divergence = None
             self.dtd_coherence = None
@@ -766,11 +768,17 @@ class AEC:
                     error_spec=self.filter.error_spec,
                     far_spec=self.filter.far_spec)
         else:
-            # LMS/NLMS: divergence detection only
+            # LMS/NLMS: divergence + coherence detection
             output, echo_est = self.filter.process_block(near_end, far_end,
                                                          mu_scale=mu_scale)
             if self.dtd_divergence:
                 self.dtd_divergence.detect_block(near_end, far_end, output=output)
+            if self.dtd_coherence:
+                error_spec = np.fft.rfft(output)
+                far_spec = np.fft.rfft(far_end)
+                self.dtd_coherence.detect_block(
+                    near_end, far_end,
+                    error_spec=error_spec, far_spec=far_spec)
 
         # Output limiter: output should never exceed mic amplitude.
         # If echo_est is correct, output = mic - echo ≤ mic. Exceeding
