@@ -121,6 +121,11 @@ int subband_nlms_copy_weights(SubbandNlms* dst, const SubbandNlms* src);
 void subband_nlms_copy_echo_spec(SubbandNlms* dst, const SubbandNlms* src);
 
 /**
+ * Get near-end spectrum (for RES overlap-save)
+ */
+void subband_nlms_get_near_spectrum(const SubbandNlms* filter, Complex* near_spec);
+
+/**
  * Get far-end spectrum (for coherence DTD)
  */
 void subband_nlms_get_far_spectrum(const SubbandNlms* filter, Complex* far_spec);

@@ -306,6 +306,12 @@ void subband_nlms_get_error_spectrum(const SubbandNlms* f, Complex* error_spec) 
     }
 }
 
+void subband_nlms_get_near_spectrum(const SubbandNlms* f, Complex* near_spec) {
+    if (f && near_spec) {
+        memcpy(near_spec, f->near_spec, f->n_freqs * sizeof(Complex));
+    }
+}
+
 void subband_nlms_get_far_spectrum(const SubbandNlms* f, Complex* far_spec) {
     if (f && far_spec) {
         memcpy(far_spec, f->far_spec, f->n_freqs * sizeof(Complex));

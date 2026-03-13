@@ -23,11 +23,12 @@ struct Aec {
     // PBFDAF adaptive filter
     SubbandNlms* filter;
 
-    // RES post-filter (optional)
+    // RES post-filter (optional, uses overlap-save)
     ResFilter* res;
     FftHandle* res_fft;         // FFT for RES IFFT (pre-allocated)
     Complex* res_echo_spec;     // [n_freqs]
-    Complex* res_error_spec;    // [n_freqs]
+    Complex* res_near_spec;     // [n_freqs] near-end spectrum for overlap-save
+    Complex* res_residual_spec; // [n_freqs] residual = near - echo
     Complex* res_output_spec;   // [n_freqs]
     float* res_temp;            // [block_size] IFFT scratch
 
@@ -114,22 +115,25 @@ Aec* aec_create(const AecConfig* config) {
             int block_size = aec->params.block_size;
             aec->res_fft = fft_create(block_size);
             aec->res_echo_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
-            aec->res_error_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
+            aec->res_near_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
+            aec->res_residual_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
             aec->res_output_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
             aec->res_temp = (float*)calloc(block_size, sizeof(float));
-            if (!aec->res_fft || !aec->res_echo_spec || !aec->res_error_spec ||
-                !aec->res_output_spec || !aec->res_temp) {
+            if (!aec->res_fft || !aec->res_echo_spec || !aec->res_near_spec ||
+                !aec->res_residual_spec || !aec->res_output_spec || !aec->res_temp) {
                 // RES allocation failed — disable RES gracefully
                 fft_destroy(aec->res_fft);
                 free(aec->res_echo_spec);
-                free(aec->res_error_spec);
+                free(aec->res_near_spec);
+                free(aec->res_residual_spec);
                 free(aec->res_output_spec);
                 free(aec->res_temp);
                 res_destroy(aec->res);
                 aec->res = NULL;
                 aec->res_fft = NULL;
                 aec->res_echo_spec = NULL;
-                aec->res_error_spec = NULL;
+                aec->res_near_spec = NULL;
+                aec->res_residual_spec = NULL;
                 aec->res_output_spec = NULL;
                 aec->res_temp = NULL;
             }
@@ -185,7 +189,8 @@ void aec_destroy(Aec* aec) {
         res_destroy(aec->res);
         fft_destroy(aec->res_fft);
         free(aec->res_echo_spec);
-        free(aec->res_error_spec);
+        free(aec->res_near_spec);
+        free(aec->res_residual_spec);
         free(aec->res_output_spec);
         free(aec->res_temp);
         free(aec->output_buffer);
@@ -305,10 +310,20 @@ int aec_process(Aec* aec,
         }
     }
 
-    // RES post-filter: suppress residual echo in frequency domain
+    // RES post-filter: suppress residual echo using overlap-save
+    // Apply RES gain to full-block residual spectrum (near_spec - echo_spec),
+    // then IFFT and take last hop_size samples. This inherits the overlap-save
+    // framework from PBFDAF, avoiding block boundary artifacts.
     if (aec->res) {
+        int nfreq = aec->params.n_freqs;
         subband_nlms_get_echo_spectrum(aec->filter, aec->res_echo_spec);
-        subband_nlms_get_error_spectrum(aec->filter, aec->res_error_spec);
+        subband_nlms_get_near_spectrum(aec->filter, aec->res_near_spec);
+
+        // Compute residual spectrum: near_spec - echo_spec
+        for (int k = 0; k < nfreq; k++) {
+            aec->res_residual_spec[k].r = aec->res_near_spec[k].r - aec->res_echo_spec[k].r;
+            aec->res_residual_spec[k].i = aec->res_near_spec[k].i - aec->res_echo_spec[k].i;
+        }
 
         // Compute far-end power for activity detection
         float far_power = 0.0f;
@@ -317,8 +332,8 @@ int aec_process(Aec* aec,
         }
         far_power /= hop_size;
 
-        // Apply RES spectral suppression
-        res_process(aec->res, aec->res_error_spec, aec->res_echo_spec,
+        // Apply RES spectral suppression to residual
+        res_process(aec->res, aec->res_residual_spec, aec->res_echo_spec,
                     far_power, aec->res_output_spec);
 
         // IFFT back to time domain, overlap-save: take last hop_size samples

@@ -180,6 +180,7 @@ class SubbandNlms:
         self.power = np.zeros(self.n_freqs, dtype=np.float32)
 
         # Output spectra (for RES / coherence DTD)
+        self.near_spec = np.zeros(self.n_freqs, dtype=np.complex64)
         self.echo_spec = np.zeros(self.n_freqs, dtype=np.complex64)
         self.error_spec = np.zeros(self.n_freqs, dtype=np.complex64)
         self.far_spec = np.zeros(self.n_freqs, dtype=np.complex64)
@@ -207,6 +208,7 @@ class SubbandNlms:
         # FFT
         near_spec = np.fft.rfft(self.near_buffer)
         far_spec = np.fft.rfft(self.far_buffer)
+        self.near_spec = near_spec  # expose for RES overlap-save
         self.far_spec = far_spec  # expose for coherence DTD
 
         # Store far-end spectrum
@@ -743,14 +745,17 @@ class AEC:
                     output = shadow_out
                     self.main_err_smooth = self.shadow_err_smooth
 
-            # RES post-filter (skip for buffered FDAF — specs are for internal_hop)
+            # RES post-filter using overlap-save (skip for buffered FDAF)
+            # Apply RES gain to full-block residual spectrum (near_spec - echo_spec),
+            # then IFFT and take last hop_size samples. This inherits the overlap-save
+            # framework from PBFDAF, avoiding block boundary artifacts.
             if self.res and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
-                output_spec = np.fft.rfft(np.pad(output, (0, len(output))))
-                echo_spec = self.filter.echo_spec
-                enhanced_spec = self.res.process(output_spec[:len(echo_spec)],
-                                                  echo_spec, far_power)
-                output = np.fft.irfft(enhanced_spec, len(output) * 2)[:len(output)]
+                residual_spec = self.filter.near_spec - self.filter.echo_spec
+                enhanced_spec = self.res.process(residual_spec,
+                                                  self.filter.echo_spec, far_power)
+                enhanced_time = np.fft.irfft(enhanced_spec, self.filter.block_size)
+                output = enhanced_time[self.filter.hop_size:].astype(np.float32)
 
             # Update DTD detectors for NEXT block
             if self.dtd_divergence:
