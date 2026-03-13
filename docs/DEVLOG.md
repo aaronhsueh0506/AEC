@@ -2,6 +2,48 @@
 
 ## 版本歷史
 
+### v1.3.0 (2025-03-13) - DTD 改為 WebRTC-style 發散偵測
+
+#### 改動內容
+
+1. **DTD 從 error-based 改為 WebRTC-style 發散偵測**
+   - 移除 error/echo ratio DTD（循環依賴：ratio 依賴濾波器品質）
+   - 改用 output vs input 比較：`ratio = max(energy_ratio, peak_ratio)`
+   - 同時使用 energy-based + peak-based 偵測（peak 捕捉瞬態尖峰）
+   - 所有模式（LMS/NLMS/FREQ/SUBBAND）統一使用發散偵測
+
+2. **二元凍結 → confidence-based mu scaling**
+   - `update_weights: bool` → `mu_scale: float`（Python + C 全部改）
+   - `mu_scale = 1.0 - confidence × (1.0 - mu_min_ratio)`
+   - confidence=0 → mu_scale=1.0, confidence=1 → mu_scale=0.05
+   - 避免完全凍結導致濾波器停滯
+
+3. **Output Limiter（安全網）**
+   - `if max(|output|) > max(|near|): output *= max(|near|) / max(|output|)`
+   - 保證 output 永遠不超過 mic amplitude，即使 DTD 來不及反應
+
+4. **C code 同步更新**
+   - `aec_types.h`：DTD 參數改為 `dtd_divergence_factor`, `dtd_mu_min_ratio`, `dtd_confidence_attack/release`
+   - `aec.c`：inline 發散偵測 + output limiter + mu_scale
+   - `subband_nlms.c/h`、`nlms_filter.c/h`：`update_weights` → `mu_scale`
+
+5. **新增文檔** `docs/aec_methods.md`
+   - DT 方法比較：Geigel, NCC, Error/Echo, WebRTC, SpeexDSP, MSC
+   - Post-filter 方法比較：RES, Wiener, Coherence, NLP
+
+#### 修正的問題
+
+- fileid_0: error-based DTD 假觸發 → 凍結權重在壞狀態 → output 超過 mic
+- fileid_2 @ 4.5s: 靜音→語音轉場 error ratio 飆升 → 錯誤觸發 DTD
+- Geigel DTD 在 AEC 中 100% 假觸發（echo gain ≈ 1.0）
+
+#### 驗證結果
+
+- Python: 全 4 模式 × 3 fileid 均通過（output 不超過 mic）
+- C: 編譯通過
+
+---
+
 ### v1.2.0 (2025-03-12) - DTD 全面改進
 
 #### 改動內容
@@ -94,11 +136,12 @@
 - **區塊級 DTD**：簡化實作，降低計算量
 - **與 LSA v3-2 相容**：相同的 hop_size (160 samples @ 16kHz)
 
-#### 已知限制
+#### 已知限制（v1.0.0 時）
 
 - 目前僅支援 16kHz 取樣率
 - 時域 NLMS 對長回音路徑計算量較大
 - 尚未實作 Residual Echo Suppressor (RES)
+- *(v1.1.0+ 已加入 Subband NLMS; v1.3.0 已實作 RES class 但尚未啟用)*
 
 ---
 
@@ -106,8 +149,9 @@
 
 ### Phase 2: 進階功能
 
-- [ ] 實作 Subband NLMS (頻域)
-- [ ] 實作 Residual Echo Suppressor (RES)
+- [x] 實作 Subband NLMS (PBFDAF 頻域)
+- [x] DTD 改為 WebRTC-style 發散偵測
+- [ ] 啟用 RES post-filter（需要 spectrum access refactoring）
 - [ ] 加入非線性處理 (NLP)
 - [ ] 延遲估計模組
 
@@ -119,7 +163,7 @@
 
 ### Phase 4: 整合
 
-- [ ] AEC + LSA 整合範例
+- [x] AEC + NR pipeline（`Audio_ALG/pipelines/`）
 - [ ] 完整測試套件
 - [ ] 效能基準測試
 
@@ -141,19 +185,22 @@
 輸出: e[n] (回音消除後的信號)
 ```
 
-### DTD (Double-Talk Detection)
+### DTD / 發散偵測 (WebRTC-style)
 
-**Geigel 方法:**
+**發散偵測**（v1.3.0 起採用）：
 ```
-DTD = 1, if |d[n]| > threshold * max(|x[n-k]|), k=0..L-1
+energy_ratio = mean(output²) / mean(near²)
+peak_ratio = max(|output|) / max(|near|)
+ratio = max(energy_ratio, peak_ratio)
+
+ratio > divergence_factor → confidence 上升
+ratio < 1.0             → confidence 下降
+
+mu_scale = 1.0 - confidence × (1.0 - mu_min_ratio)
 ```
 
-**能量比方法:**
-```
-DTD = 1, if E_error / E_echo > threshold
-```
-
-當 DTD 偵測到雙講時，停止權重更新以防止濾波器發散。
+搭配 output limiter 確保 output 永遠不超過 mic amplitude。
+詳見 `docs/aec_methods.md`。
 
 ---
 
@@ -163,15 +210,19 @@ DTD = 1, if E_error / E_echo > threshold
 |------|------|----------|--------|
 | `mu` | 步長 | 0.1 - 0.8 | 0.3 |
 | `filter_length` | 濾波器長度 (samples) | 256 - 4096 | 512 |
-| `dtd_threshold` | DTD 閾值 (error/echo ratio) | 1.0 - 4.0 | 2.0 |
 | `leak` | 權重洩漏 (NLMS only) | 0.9999 - 0.99999 | 0.99999 |
+| `dtd_divergence_factor` | 發散判定倍數 | 1.2 - 2.0 | 1.5 |
+| `dtd_mu_min_ratio` | 發散時最低 mu 比例 | 0.01 - 0.1 | 0.05 |
+| `dtd_confidence_attack` | Confidence 上升速率 | 0.1 - 0.5 | 0.3 |
+| `dtd_confidence_release` | Confidence 下降速率 | 0.01 - 0.1 | 0.05 |
 
 ### 調校原則
 
 1. **mu 較大**: 收斂快，但穩態誤差大，對雙講敏感
 2. **mu 較小**: 收斂慢，但更穩定
 3. **filter_length**: 需大於實際回音路徑長度（NLMS/LMS/SUBBAND 可配置，FREQ 固定=hop_size）
-4. **dtd_threshold**: 較低可能誤判為雙講，較高可能漏判
+4. **divergence_factor**: 較低 → 更敏感（更快降 mu），較高 → 更寬鬆
+5. **mu_min_ratio**: 不建議設為 0（完全凍結會導致濾波器停滯）
 
 ---
 

@@ -193,7 +193,7 @@ int subband_nlms_process(SubbandNlms* f,
                          const float* near_end,
                          const float* far_end,
                          float* output,
-                         bool update_weights) {
+                         float mu_scale) {
     if (!f || !near_end || !far_end || !output) {
         return -1;
     }
@@ -255,7 +255,7 @@ int subband_nlms_process(SubbandNlms* f,
     for (int k = 0; k < nfreq; k++) {
         total_power += f->power[k];
     }
-    if (update_weights && total_power > f->delta * nfreq) {
+    if (mu_scale > 0 && total_power > f->delta * nfreq) {
         // Find max power for per-bin floor
         float max_power = 0.0f;
         for (int k = 0; k < nfreq; k++) {
@@ -270,7 +270,7 @@ int subband_nlms_process(SubbandNlms* f,
             for (int k = 0; k < nfreq; k++) {
                 // Per-bin normalization with power floor
                 float bin_power = f->power[k] > power_floor_val ? f->power[k] : power_floor_val;
-                float mu_eff = f->mu / (bin_power * f->n_partitions + f->delta);
+                float mu_eff = (f->mu * mu_scale) / (bin_power * f->n_partitions + f->delta);
 
                 // Gradient: E * conj(X)
                 Complex grad = cmul_conj(f->error_spec[k], f->X_buf[p_idx][k]);

@@ -60,14 +60,14 @@ void subband_nlms_reset_weights(SubbandNlms* filter);
  * @param near_end Microphone input [block_size/2] (hop_size samples)
  * @param far_end Reference input [block_size/2]
  * @param output Echo-cancelled output [block_size/2]
- * @param update_weights If false, only compute output
+ * @param mu_scale Step-size scale factor [0.0, 1.0]. 0 = no update, 1 = full update
  * @return 0 on success
  */
 int subband_nlms_process(SubbandNlms* filter,
                          const float* near_end,
                          const float* far_end,
                          float* output,
-                         bool update_weights);
+                         float mu_scale);
 
 /**
  * Get echo estimate spectrum (for RES post-filter)

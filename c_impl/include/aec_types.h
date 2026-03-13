@@ -33,10 +33,13 @@ typedef struct {
     float mu;                   // Step size (0.3)
     float delta;                // Regularization (1e-8)
 
-    // DTD (Double-Talk Detection) parameters
-    bool enable_dtd;            // Enable DTD (true)
-    float dtd_threshold;        // Error-based DTD: smoothed error/echo ratio (2.0)
-    int dtd_warmup_frames;      // Frames to skip DTD at startup (200)
+    // DTD: WebRTC-style divergence detection
+    bool enable_dtd;                // Enable DTD (true)
+    float dtd_divergence_factor;    // output > input × factor → diverged (1.5)
+    float dtd_mu_min_ratio;         // Minimum mu scale during divergence (0.05)
+    float dtd_confidence_attack;    // Confidence ramp-up rate per block (0.3)
+    float dtd_confidence_release;   // Confidence ramp-down rate per block (0.05)
+    int dtd_warmup_frames;          // Frames to skip DTD at startup (200)
 
     // RES (Residual Echo Suppressor) parameters
     bool enable_res;            // Enable post-filter (true)
@@ -73,9 +76,12 @@ static inline AecConfig aec_default_config(int sample_rate) {
     config.mu = 0.3f;
     config.delta = 1e-8f;
 
-    // DTD parameters
+    // DTD parameters (WebRTC-style divergence detection)
     config.enable_dtd = true;
-    config.dtd_threshold = 2.0f;
+    config.dtd_divergence_factor = 1.5f;
+    config.dtd_mu_min_ratio = 0.05f;
+    config.dtd_confidence_attack = 0.3f;
+    config.dtd_confidence_release = 0.05f;
     config.dtd_warmup_frames = 200;
 
     // RES parameters

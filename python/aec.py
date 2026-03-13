@@ -40,8 +40,17 @@ class AecConfig:
     delta: float = 1e-8          # Regularization
     leak: float = 0.99999        # Weight leakage (slight leak for double-talk stability)
     enable_dtd: bool = True
-    dtd_threshold: float = 2.0   # Error-based DTD: error_energy/echo_energy ratio
+    dtd_threshold: float = 2.0   # (legacy, kept for compat) Error-based DTD ratio
     dtd_hangover_frames: int = 15
+
+    # Geigel DTD parameters (LMS/NLMS)
+    dtd_geigel_threshold: float = 0.5     # |mic| > thresh × max(|ref|) → double-talk
+    dtd_mu_min_ratio: float = 0.05        # During double-talk, mu drops to 5%
+    dtd_confidence_attack: float = 0.3    # Confidence ramp-up rate per block
+    dtd_confidence_release: float = 0.05  # Confidence ramp-down rate per block
+
+    # Divergence detection parameters (FREQ/SUBBAND, WebRTC-style)
+    dtd_divergence_factor: float = 1.5    # output > input × factor → diverged
 
     # RES parameters
     enable_res: bool = False
@@ -85,7 +94,7 @@ class NlmsFilter:
         self.power_sum = 0.0
 
     def process_sample(self, near_end: float, far_end: float,
-                       update_weights: bool = True) -> Tuple[float, float]:
+                       mu_scale: float = 1.0) -> Tuple[float, float]:
         oldest = self.ref_buffer[-1]
         self.power_sum = max(0, self.power_sum - oldest * oldest + far_end * far_end)
         self.ref_buffer[1:] = self.ref_buffer[:-1]
@@ -93,17 +102,17 @@ class NlmsFilter:
         echo_est = np.dot(self.weights, self.ref_buffer)
         error = near_end - echo_est
 
-        if update_weights and self.power_sum > self.delta * self.filter_length:
+        if mu_scale > 0 and self.power_sum > self.delta * self.filter_length:
             if self.normalize:
-                mu_eff = self.mu / (self.power_sum + self.delta)
+                mu_eff = (self.mu * mu_scale) / (self.power_sum + self.delta)
             else:
-                mu_eff = self.mu
+                mu_eff = self.mu * mu_scale
             self.weights = self.leak * self.weights + mu_eff * error * self.ref_buffer
 
         return error, echo_est
 
     def process_block(self, near_end: np.ndarray, far_end: np.ndarray,
-                      update_weights: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+                      mu_scale: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
         # Optionally clear history (no carry-over between blocks)
         if self.clear_history:
             self.ref_buffer.fill(0)
@@ -114,7 +123,7 @@ class NlmsFilter:
         echo_est = np.zeros(n, dtype=np.float32)
         for i in range(n):
             output[i], echo_est[i] = self.process_sample(
-                near_end[i], far_end[i], update_weights)
+                near_end[i], far_end[i], mu_scale)
 
         # Weight norm constraint: prevent explosion during double-talk
         w_norm = np.linalg.norm(self.weights)
@@ -169,8 +178,8 @@ class SubbandNlms:
         self.partition_idx = 0
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray,
-                update_weights: bool = True) -> np.ndarray:
-        """Process hop_size samples"""
+                mu_scale: float = 1.0) -> np.ndarray:
+        """Process hop_size samples. mu_scale in [0,1] controls adaptation rate."""
         hop = self.hop_size
 
         # Shift buffers (overlap-save)
@@ -211,10 +220,10 @@ class SubbandNlms:
 
         # Update weights (skip when reference power too low)
         total_power = np.sum(self.power)
-        if update_weights and total_power > self.delta * self.n_freqs:
+        if mu_scale > 0 and total_power > self.delta * self.n_freqs:
             # Per-bin normalization with power floor to prevent divergence
             power_floor = np.maximum(self.power, np.max(self.power) * 1e-4)
-            mu_eff = self.mu / (power_floor * self.n_partitions + self.delta)
+            mu_eff = (self.mu * mu_scale) / (power_floor * self.n_partitions + self.delta)
             for p in range(self.n_partitions):
                 p_idx = (curr_p - p) % self.n_partitions
                 grad = self.error_spec * np.conj(self.X_buf[p_idx])
@@ -288,41 +297,117 @@ class ResFilter:
 
 
 class DtdEstimator:
-    """Double-Talk Detector"""
+    """Double-Talk Detector with per-mode strategy.
 
-    def __init__(self, window_length: int, threshold: float = 0.6,
-                 hangover_frames: int = 15):
-        self.threshold = threshold
-        self.hangover_max = hangover_frames
-        self.current_far_max = 0.0
-        self.dtd_active = False
+    - 'geigel' mode (LMS/NLMS): Geigel DTD with hangover + confidence
+    - 'divergence' mode (FREQ/SUBBAND): WebRTC-style divergence detection
+    """
+
+    def __init__(self, mode: str = 'geigel', *,
+                 window_blocks: int = 4,
+                 geigel_threshold: float = 0.5,
+                 hangover_max: int = 15,
+                 divergence_factor: float = 1.5,
+                 attack: float = 0.3,
+                 release: float = 0.05,
+                 warmup_frames: int = 50):
+        self.mode = mode  # 'geigel' or 'divergence'
+        self.confidence = 0.0
+        self.attack = attack
+        self.release = release
+        self.warmup_frames = warmup_frames
+        self.frame_count = 0
+
+        # Geigel state
+        self.far_abs_buffer = np.zeros(max(1, window_blocks))
+        self.buf_idx = 0
+        self.geigel_threshold = geigel_threshold
+        self.hangover_max = hangover_max
         self.hangover_count = 0
+
+        # Divergence state
+        self.divergence_factor = divergence_factor
 
     def reset(self):
-        self.current_far_max = 0.0
-        self.dtd_active = False
+        self.confidence = 0.0
+        self.frame_count = 0
+        self.far_abs_buffer.fill(0)
+        self.buf_idx = 0
         self.hangover_count = 0
 
-    def detect_block(self, near_end: np.ndarray, far_end: np.ndarray) -> bool:
-        self.current_far_max = max(self.current_far_max * 0.99,
-                                   np.max(np.abs(far_end)))
-        near_max = np.max(np.abs(near_end))
-        detected = False
-
-        if self.current_far_max > 1e-10:
-            ratio = near_max / self.current_far_max
-            detected = ratio > self.threshold
-
+    def _update_confidence(self, detected: bool):
+        """Update confidence with attack/release + hangover."""
         if detected:
             self.hangover_count = self.hangover_max
-            self.dtd_active = True
+            self.confidence = min(self.confidence + self.attack, 1.0)
         elif self.hangover_count > 0:
             self.hangover_count -= 1
-            self.dtd_active = True
+            self.confidence = max(self.confidence - self.release * 0.5, 0.0)
         else:
-            self.dtd_active = False
+            self.confidence = max(self.confidence - self.release, 0.0)
 
-        return self.dtd_active
+    def _detect_geigel(self, near_end: np.ndarray, far_end: np.ndarray):
+        """Geigel DTD: |mic| > threshold × max(|ref|) over window."""
+        # Update far-end max circular buffer
+        self.far_abs_buffer[self.buf_idx] = np.max(np.abs(far_end))
+        self.buf_idx = (self.buf_idx + 1) % len(self.far_abs_buffer)
+        far_max = np.max(self.far_abs_buffer)
+
+        # Geigel test
+        near_max = np.max(np.abs(near_end))
+        detected = (far_max > 1e-6) and (near_max > self.geigel_threshold * far_max)
+
+        self._update_confidence(detected)
+
+    def _detect_divergence(self, near_end: np.ndarray, output: np.ndarray):
+        """WebRTC-style: detect filter divergence (output > input).
+
+        Uses both energy-based and peak-based detection. Peak-based catches
+        localized spikes that energy-based misses (e.g., transition transients).
+        """
+        output_energy = np.mean(output ** 2)
+        near_energy = np.mean(near_end ** 2)
+        output_peak = np.max(np.abs(output))
+        near_peak = np.max(np.abs(near_end))
+
+        if near_energy < 1e-10 and near_peak < 1e-6:
+            # Silence → release
+            self.confidence = max(self.confidence - self.release, 0.0)
+            return
+
+        # Check both energy and peak divergence
+        energy_ratio = output_energy / (near_energy + 1e-10) if near_energy > 1e-10 else 0.0
+        peak_ratio = output_peak / (near_peak + 1e-10) if near_peak > 1e-6 else 0.0
+        ratio = max(energy_ratio, peak_ratio)
+
+        if ratio > self.divergence_factor:
+            # Severe divergence
+            self.confidence = min(self.confidence + self.attack, 1.0)
+        elif ratio > 1.0:
+            # Mild divergence — proportional attack
+            self.confidence = min(
+                self.confidence + self.attack * (ratio - 1.0), 1.0)
+        else:
+            # Normal
+            self.confidence = max(self.confidence - self.release, 0.0)
+
+    def detect_block(self, near_end: np.ndarray, far_end: np.ndarray,
+                     output: np.ndarray = None) -> float:
+        """Update DTD state and return confidence [0.0, 1.0].
+
+        For geigel mode: uses near_end and far_end.
+        For divergence mode: uses near_end and output.
+        """
+        self.frame_count += 1
+        if self.frame_count < self.warmup_frames:
+            return 0.0
+
+        if self.mode == 'geigel':
+            self._detect_geigel(near_end, far_end)
+        else:
+            self._detect_divergence(near_end, output)
+
+        return self.confidence
 
 
 class AEC:
@@ -417,15 +502,22 @@ class AEC:
             self._n_partitions = 0
             self._freq_near_queue = None
 
-        # Error-based DTD state
-        self._dtd_active = False
-        self._dtd_ratio_smooth = 0.0  # Smoothed error/echo ratio
-        self._frame_count = 0
-        # DTD warmup: NLMS/LMS converge faster, need shorter warmup
-        if self.config.mode in (AecMode.LMS, AecMode.NLMS):
-            self._dtd_warmup_frames = 50   # ~0.8s at hop=256, sr=16000
+        # DTD: WebRTC-style divergence detection for all modes
+        # Geigel DTD is unsuitable for AEC because mic includes echo,
+        # causing |mic| > threshold * max(|ref|) to always trigger
+        # when echo gain ≈ 1.0. Divergence detection avoids this by
+        # checking if |output| > |input| (filter misbehaving).
+        if self.config.enable_dtd:
+            warmup = 50 if self.config.mode in (AecMode.LMS, AecMode.NLMS) else 200
+            self.dtd = DtdEstimator(
+                mode='divergence',
+                divergence_factor=self.config.dtd_divergence_factor,
+                attack=self.config.dtd_confidence_attack,
+                release=self.config.dtd_confidence_release,
+                warmup_frames=warmup,
+            )
         else:
-            self._dtd_warmup_frames = 200  # ~3.2s at hop=256, sr=16000
+            self.dtd = None
 
         # RES (only for frequency-domain modes)
         if self.config.enable_res and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
@@ -445,9 +537,8 @@ class AEC:
 
     def reset(self):
         self.filter.reset()
-        self._dtd_active = False
-        self._dtd_ratio_smooth = 0.0
-        self._frame_count = 0
+        if self.dtd:
+            self.dtd.reset()
         if self.res:
             self.res.reset()
         if self._freq_near_queue is not None:
@@ -463,21 +554,23 @@ class AEC:
     def hop_size(self) -> int:
         return self._hop_size
 
+    def _compute_mu_scale(self) -> float:
+        """Convert DTD confidence to mu_scale [mu_min_ratio, 1.0]."""
+        if self.dtd is None:
+            return 1.0
+        conf = self.dtd.confidence
+        min_r = self.config.dtd_mu_min_ratio
+        return 1.0 - conf * (1.0 - min_r)
+
     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
-        # Error-based DTD: compare error energy vs echo estimate energy.
-        # Old Geigel DTD compared mic vs ref, but mic includes echo, causing
-        # false triggers when echo_gain > threshold (e.g., gain=1.28 > 0.6).
-        #
-        # Use PREVIOUS block's smoothed ratio to decide current block's update.
-        # This avoids the bootstrap problem where the filter can't converge
-        # because DTD blocks updates before echo estimates are valid.
+        # DTD strategy:
+        #   LMS/NLMS → Geigel DTD (compare |mic| vs max(|ref|))
+        #   FREQ/SUBBAND → WebRTC-style divergence detection (output > input)
+        # Both use confidence-based mu scaling instead of binary freeze.
 
-        # DTD strategy: all modes use error-based DTD to freeze weights during double-talk
+        mu_scale = self._compute_mu_scale()
+
         if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
-            update_weights = True
-            if self.config.enable_dtd and self._dtd_active:
-                update_weights = False
-
             if self._freq_near_queue is not None:
                 # Buffered FDAF: accumulate into queue
                 hop = self._hop_size
@@ -490,7 +583,7 @@ class AEC:
                 if self._freq_queue_write >= ihop:
                     # Buffer full — run one big FDAF
                     big_out = self.filter.process(
-                        self._freq_near_queue, self._freq_far_queue, update_weights)
+                        self._freq_near_queue, self._freq_far_queue, mu_scale)
                     self._freq_out_queue[:] = big_out
                     self._freq_queue_write = 0
                     self._freq_out_read = 0
@@ -499,7 +592,7 @@ class AEC:
                 output = self._freq_out_queue[r:r+hop].copy()
                 self._freq_out_read = r + hop
             else:
-                output = self.filter.process(near_end, far_end, update_weights)
+                output = self.filter.process(near_end, far_end, mu_scale)
 
             # RES post-filter (skip for buffered FDAF — specs are for internal_hop)
             if self.res and self._freq_near_queue is None:
@@ -510,29 +603,24 @@ class AEC:
                                                   echo_spec, far_power)
                 output = np.fft.irfft(enhanced_spec, len(output) * 2)[:len(output)]
 
-            # Update DTD state for NEXT block (skip during warmup)
-            self._frame_count += 1
-            if self.config.enable_dtd and self._frame_count >= self._dtd_warmup_frames:
-                error_energy = np.mean(output ** 2)
-                near_energy = np.mean(near_end ** 2)
-                # Use time-domain echo estimate (near - output) for consistent scale
-                echo_est_time = near_end - output
-                echo_energy = np.mean(echo_est_time ** 2)
-                self._update_dtd(error_energy, echo_energy, near_energy)
+            # Update divergence detection for NEXT block
+            if self.dtd:
+                self.dtd.detect_block(near_end, far_end, output=output)
         else:
-            # NLMS/LMS: use DTD to freeze weights during double-talk
-            update_weights = True
-            if self.config.enable_dtd and self._dtd_active:
-                update_weights = False
+            # LMS/NLMS: Geigel DTD with confidence-based mu scaling
             output, echo_est = self.filter.process_block(near_end, far_end,
-                                                         update_weights=update_weights)
-            # Update DTD state for NEXT block (skip during warmup)
-            self._frame_count += 1
-            if self.config.enable_dtd and self._frame_count >= self._dtd_warmup_frames:
-                error_energy = np.mean(output ** 2)
-                echo_energy = np.mean(echo_est ** 2)
-                near_energy = np.mean(near_end ** 2)
-                self._update_dtd(error_energy, echo_energy, near_energy)
+                                                         mu_scale=mu_scale)
+            # Update divergence detection for NEXT block
+            if self.dtd:
+                self.dtd.detect_block(near_end, far_end, output=output)
+
+        # Output limiter: output should never exceed mic amplitude.
+        # If echo_est is correct, output = mic - echo ≤ mic. Exceeding
+        # means filter weights are wrong — scale down to prevent artifacts.
+        near_peak = np.max(np.abs(near_end))
+        out_peak = np.max(np.abs(output))
+        if out_peak > near_peak > 1e-6:
+            output *= near_peak / out_peak
 
         # ERLE
         for i in range(len(near_end)):
@@ -547,29 +635,11 @@ class AEC:
             return 0.0
         return 10 * np.log10((self.near_power + eps) / (self.error_power + eps))
 
-    def _update_dtd(self, error_energy: float, echo_energy: float,
-                     near_energy: float):
-        """Update error-based DTD state for next block.
-
-        Only activate DTD when the filter is producing meaningful echo
-        estimates (echo_energy > 10% of near_energy). Otherwise, the filter
-        hasn't converged yet and DTD should remain inactive.
-        """
-        if echo_energy > near_energy * 0.1 and echo_energy > 1e-10:
-            ratio = error_energy / (echo_energy + 1e-10)
-            self._dtd_ratio_smooth = 0.95 * self._dtd_ratio_smooth + 0.05 * ratio
-            self._dtd_active = self._dtd_ratio_smooth > self.config.dtd_threshold
-        elif self._dtd_active and near_energy > 1e-6:
-            # DTD holdover: far-end stopped but near-end still active.
-            # Keep DTD active to prevent weight corruption from residual ref_buffer.
-            pass
-        else:
-            # Filter not converged yet — keep DTD inactive, reset smoothing
-            self._dtd_ratio_smooth *= 0.9  # Slow decay
-            self._dtd_active = False
-
     def is_dtd_active(self) -> bool:
-        return self._dtd_active
+        return self.dtd is not None and self.dtd.confidence > 0.5
+
+    def get_dtd_confidence(self) -> float:
+        return self.dtd.confidence if self.dtd else 0.0
 
 
 def process_wav_files(mic_path: str, ref_path: str, out_path: str,

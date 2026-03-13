@@ -79,7 +79,7 @@ void nlms_reset(NlmsFilter* filter) {
 float nlms_process_sample(NlmsFilter* filter,
                           float near_end,
                           float far_end,
-                          bool update_weights) {
+                          float mu_scale) {
     const int L = filter->filter_length;
 
     // Update power sum: remove oldest, add newest
@@ -111,16 +111,16 @@ float nlms_process_sample(NlmsFilter* filter,
 
     // Update weights if enabled (not during double-talk)
     // Skip update when reference power is too low to avoid divergence
-    if (update_weights && filter->power_sum > filter->delta * L) {
+    if (mu_scale > 0 && filter->power_sum > filter->delta * L) {
         // Compute effective step size (NLMS vs LMS)
         float mu_eff;
         if (filter->normalize) {
             // NLMS: normalize by input power
             float norm_power = filter->power_sum + filter->delta;
-            mu_eff = filter->mu / norm_power;
+            mu_eff = (filter->mu * mu_scale) / norm_power;
         } else {
             // LMS: fixed step size
-            mu_eff = filter->mu;
+            mu_eff = filter->mu * mu_scale;
         }
 
         // Weight update with leakage
@@ -143,7 +143,7 @@ void nlms_process_block(NlmsFilter* filter,
                         float* output,
                         float* echo_est,
                         int num_samples,
-                        bool update_weights) {
+                        float mu_scale) {
     // Optionally clear history (no carry-over between blocks)
     if (filter->clear_history) {
         memset(filter->ref_buffer, 0, filter->filter_length * sizeof(float));
@@ -152,7 +152,7 @@ void nlms_process_block(NlmsFilter* filter,
     }
 
     for (int n = 0; n < num_samples; n++) {
-        float err = nlms_process_sample(filter, near_end[n], far_end[n], update_weights);
+        float err = nlms_process_sample(filter, near_end[n], far_end[n], mu_scale);
         output[n] = err;
 
         if (echo_est) {

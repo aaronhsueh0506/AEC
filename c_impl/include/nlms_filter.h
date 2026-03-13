@@ -46,13 +46,13 @@ void nlms_reset(NlmsFilter* filter);
  * @param filter NLMS filter handle
  * @param near_end Microphone input sample (d[n])
  * @param far_end Reference/loudspeaker sample (x[n])
- * @param update_weights If false, only compute output without updating
+ * @param mu_scale Step-size scale factor [0.0, 1.0]. 0 = no update, 1 = full update
  * @return Echo-cancelled output sample (e[n])
  */
 float nlms_process_sample(NlmsFilter* filter,
                           float near_end,
                           float far_end,
-                          bool update_weights);
+                          float mu_scale);
 
 /**
  * Process block of samples through NLMS filter
@@ -63,7 +63,7 @@ float nlms_process_sample(NlmsFilter* filter,
  * @param output Echo-cancelled output [num_samples]
  * @param echo_est Estimated echo output [num_samples] (can be NULL)
  * @param num_samples Number of samples
- * @param update_weights If false, only compute output without updating
+ * @param mu_scale Step-size scale factor [0.0, 1.0]. 0 = no update, 1 = full update
  */
 void nlms_process_block(NlmsFilter* filter,
                         const float* near_end,
@@ -71,7 +71,7 @@ void nlms_process_block(NlmsFilter* filter,
                         float* output,
                         float* echo_est,
                         int num_samples,
-                        bool update_weights);
+                        float mu_scale);
 
 /**
  * Get current estimated echo for a sample (without processing)

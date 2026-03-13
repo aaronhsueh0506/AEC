@@ -2,7 +2,8 @@
  * aec.c - Acoustic Echo Cancellation main implementation
  *
  * PBFDAF (Partitioned Block Frequency Domain Adaptive Filter) with:
- *   - Error-based DTD with warmup and holdover
+ *   - WebRTC-style divergence detection (confidence-based mu scaling)
+ *   - Output limiter (output never exceeds mic amplitude)
  *   - RES post-filter (optional)
  * Streaming architecture with hop-size based processing.
  */
@@ -32,9 +33,8 @@ struct Aec {
     float error_power;
     float alpha_erle;
 
-    // Error-based DTD state
-    bool dtd_active;
-    float dtd_ratio_smooth;
+    // Divergence detection state
+    float dtd_confidence;   // [0.0, 1.0]
     int frame_count;
 };
 
@@ -83,8 +83,7 @@ Aec* aec_create(const AecConfig* config) {
     aec->alpha_erle = 0.95f;
 
     // Init DTD
-    aec->dtd_active = false;
-    aec->dtd_ratio_smooth = 0.0f;
+    aec->dtd_confidence = 0.0f;
     aec->frame_count = 0;
 
     return aec;
@@ -114,8 +113,7 @@ void aec_reset(Aec* aec) {
 
     aec->near_power = 0.0f;
     aec->error_power = 0.0f;
-    aec->dtd_active = false;
-    aec->dtd_ratio_smooth = 0.0f;
+    aec->dtd_confidence = 0.0f;
     aec->frame_count = 0;
 }
 
@@ -128,8 +126,7 @@ void aec_retrain(Aec* aec) {
     }
 
     // Restart DTD warmup
-    aec->dtd_active = false;
-    aec->dtd_ratio_smooth = 0.0f;
+    aec->dtd_confidence = 0.0f;
     aec->frame_count = 0;
 
     // Reset ERLE
@@ -148,50 +145,74 @@ int aec_process(Aec* aec,
     const int hop_size = aec->params.hop_size;
     const float alpha = aec->alpha_erle;
 
-    // DTD: freeze weights during double-talk
-    bool update_weights = true;
-    if (aec->config.enable_dtd && aec->dtd_active) {
-        update_weights = false;
+    // Compute mu_scale from previous block's divergence confidence
+    float mu_scale = 1.0f;
+    if (aec->config.enable_dtd) {
+        float conf = aec->dtd_confidence;
+        float min_r = aec->config.dtd_mu_min_ratio;
+        mu_scale = 1.0f - conf * (1.0f - min_r);
     }
 
     // Process through PBFDAF
-    subband_nlms_process(aec->filter, near_end, far_end, output, update_weights);
+    subband_nlms_process(aec->filter, near_end, far_end, output, mu_scale);
 
     // TODO: RES post-filter (requires spectrum access refactoring)
 
-    // Update error-based DTD state for NEXT block
+    // Output limiter: output should never exceed mic amplitude
+    float near_peak = 0.0f;
+    float out_peak = 0.0f;
+    for (int n = 0; n < hop_size; n++) {
+        float abs_near = fabsf(near_end[n]);
+        float abs_out = fabsf(output[n]);
+        if (abs_near > near_peak) near_peak = abs_near;
+        if (abs_out > out_peak) out_peak = abs_out;
+    }
+    if (out_peak > near_peak && near_peak > 1e-6f) {
+        float scale = near_peak / out_peak;
+        for (int n = 0; n < hop_size; n++) {
+            output[n] *= scale;
+        }
+    }
+
+    // Update divergence detection for NEXT block
     aec->frame_count++;
     if (aec->config.enable_dtd &&
         aec->frame_count >= aec->config.dtd_warmup_frames) {
 
-        float error_energy = 0.0f;
-        float echo_energy = 0.0f;
+        float output_energy = 0.0f;
         float near_energy = 0.0f;
 
         for (int n = 0; n < hop_size; n++) {
-            error_energy += output[n] * output[n];
+            output_energy += output[n] * output[n];
             near_energy += near_end[n] * near_end[n];
-            float echo_est = near_end[n] - output[n];
-            echo_energy += echo_est * echo_est;
         }
-        error_energy /= hop_size;
+        output_energy /= hop_size;
         near_energy /= hop_size;
-        echo_energy /= hop_size;
 
-        // Convergence guard + holdover
-        if (echo_energy > near_energy * 0.1f && echo_energy > 1e-10f) {
-            // Normal DTD: filter has converged, check error/echo ratio
-            float ratio = error_energy / (echo_energy + 1e-10f);
-            aec->dtd_ratio_smooth = 0.95f * aec->dtd_ratio_smooth + 0.05f * ratio;
-            aec->dtd_active = (aec->dtd_ratio_smooth > aec->config.dtd_threshold);
-        } else if (aec->dtd_active && near_energy > 1e-6f) {
-            // Holdover: far-end stopped but near-end still active.
-            // Keep DTD active to prevent weight corruption from residual X_buf.
-            // (do nothing — dtd_active stays true)
+        // Also check peak ratio
+        float energy_ratio = (near_energy > 1e-10f) ?
+            output_energy / (near_energy + 1e-10f) : 0.0f;
+        float peak_ratio = (near_peak > 1e-6f) ?
+            out_peak / (near_peak + 1e-10f) : 0.0f;
+        float ratio = (energy_ratio > peak_ratio) ? energy_ratio : peak_ratio;
+
+        float attack = aec->config.dtd_confidence_attack;
+        float release = aec->config.dtd_confidence_release;
+        float div_factor = aec->config.dtd_divergence_factor;
+
+        if (near_energy < 1e-10f && near_peak < 1e-6f) {
+            // Silence
+            aec->dtd_confidence = fmaxf(aec->dtd_confidence - release, 0.0f);
+        } else if (ratio > div_factor) {
+            // Severe divergence
+            aec->dtd_confidence = fminf(aec->dtd_confidence + attack, 1.0f);
+        } else if (ratio > 1.0f) {
+            // Mild divergence
+            aec->dtd_confidence = fminf(
+                aec->dtd_confidence + attack * (ratio - 1.0f), 1.0f);
         } else {
-            // Filter not converged yet — keep DTD inactive
-            aec->dtd_ratio_smooth *= 0.9f;
-            aec->dtd_active = false;
+            // Normal
+            aec->dtd_confidence = fmaxf(aec->dtd_confidence - release, 0.0f);
         }
     }
 
@@ -231,7 +252,11 @@ float aec_get_erle(const Aec* aec) {
 
 bool aec_is_dtd_active(const Aec* aec) {
     if (!aec) return false;
-    return aec->dtd_active;
+    return aec->dtd_confidence > 0.5f;
+}
+
+float aec_get_dtd_confidence(const Aec* aec) {
+    return aec ? aec->dtd_confidence : 0.0f;
 }
 
 const AecConfig* aec_get_config(const Aec* aec) {

@@ -1,7 +1,7 @@
 /**
  * aec.h - Acoustic Echo Cancellation main interface
  *
- * PBFDAF-based AEC with error-based DTD and RES post-filter.
+ * PBFDAF-based AEC with divergence detection and RES post-filter.
  *
  * Usage:
  *   AecConfig cfg = aec_default_config(16000);
@@ -91,9 +91,14 @@ int aec_get_latency(const Aec* aec);
 float aec_get_erle(const Aec* aec);
 
 /**
- * Check if double-talk is currently detected
+ * Check if double-talk/divergence is currently detected
  */
 bool aec_is_dtd_active(const Aec* aec);
+
+/**
+ * Get DTD confidence (0.0 = normal, 1.0 = fully diverged)
+ */
+float aec_get_dtd_confidence(const Aec* aec);
 
 /**
  * Get configuration (for inspection)
