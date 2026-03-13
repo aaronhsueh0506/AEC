@@ -344,7 +344,7 @@ for each partition p:
 
 ---
 
-## 6. DTD / 發散偵測
+## 6. DTD — 自適應更新控制
 
 ### 6.1 問題定義
 
@@ -353,16 +353,99 @@ AEC 自適應濾波器在以下情況需要控制更新：
 - **Echo Path Change**：回聲路徑改變，需要重新收斂
 - **Filter Divergence**：output 品質比 input 更差
 
-**所有四個模式（LMS、NLMS、FREQ、SUBBAND）都使用發散偵測。**
+### 6.1.1 DTD 整體運作機制
+
+本專案在 FREQ/SUBBAND 模式下使用**三層防護**控制自適應更新：
+
+```
+每個 hop (256 samples, 16ms @ 16kHz):
+
+  ┌─────────────────────────────────────────────────────────┐
+  │ 1. PBFDAF 處理                                          │
+  │    output = filter.process(near, far, mu_scale)         │
+  │    → 產生 output、error_spec、echo_spec、far_spec       │
+  └───────────────┬─────────────────────────────────────────┘
+                  │
+  ┌───────────────▼─────────────────────────────────────────┐
+  │ 2. Shadow Filter (可選)                                  │
+  │    shadow_out = shadow.process(near, far, 1.0)  ← 永遠全速│
+  │    if shadow_err < main_err × 0.8:                      │
+  │        main.W ← shadow.W    ← 自動修正發散權重            │
+  │        main.echo_spec ← shadow.echo_spec  ← RES 一致性   │
+  └───────────────┬─────────────────────────────────────────┘
+                  │
+  ┌───────────────▼─────────────────────────────────────────┐
+  │ 3. Divergence Detector                                   │
+  │    ratio = max(energy_ratio, peak_ratio)                 │
+  │    → 更新 div_confidence [0,1]                           │
+  │                                                          │
+  │    偵測目標：output 比 input 更差 (ratio > 1.2)           │
+  │    適用場景：filter 發散、嚴重失真                         │
+  └───────────────┬─────────────────────────────────────────┘
+                  │
+  ┌───────────────▼─────────────────────────────────────────┐
+  │ 4. Coherence Detector                                    │
+  │    coherence = MSC(error_spec, far_spec)                 │
+  │    → 更新 coh_confidence [0,1]                           │
+  │                                                          │
+  │    偵測目標：error 含近端語音（跟 far-end 不相關）          │
+  │    適用場景：收斂後的 double-talk（divergence 偵測不到）    │
+  └───────────────┬─────────────────────────────────────────┘
+                  │
+  ┌───────────────▼─────────────────────────────────────────┐
+  │ 5. mu_scale 計算                                        │
+  │    confidence = max(div_confidence, coh_confidence)      │
+  │    mu_scale = 1.0 - confidence × (1.0 - 0.05)           │
+  │                                                          │
+  │    confidence=0 → mu_scale=1.0  正常更新                  │
+  │    confidence=1 → mu_scale=0.05 幾乎凍結（保留 5% 追蹤）  │
+  └───────────────┬─────────────────────────────────────────┘
+                  │
+  ┌───────────────▼─────────────────────────────────────────┐
+  │ 6. RES Post-Filter (可選)                                │
+  │    頻域譜減法，抑制殘餘回音 10~20 dB                      │
+  └───────────────┬─────────────────────────────────────────┘
+                  │
+  ┌───────────────▼─────────────────────────────────────────┐
+  │ 7. Output Limiter (安全網)                               │
+  │    if |output| > |mic|: output *= |mic| / |output|      │
+  └─────────────────────────────────────────────────────────┘
+```
+
+**關鍵設計原則**：
+
+1. **不完全凍結**：mu_scale 最低 0.05（而非 0），保留微量追蹤能力，避免 DT 結束後無法恢復
+2. **Dual detector**：Divergence 和 Coherence 偵測不同異常，取 max 互補
+3. **Warmup 保護**：前 50 幀（~0.8s）不啟用任何偵測，讓濾波器有時間初始收斂
+4. **Shadow filter 不受 DTD 控制**：永遠以 mu×0.5 全速更新，DT 期間漂移有限，結束後重新收斂
+
+**各偵測器的覆蓋範圍**：
+
+| 場景 | Divergence | Coherence | Shadow |
+|------|-----------|-----------|--------|
+| Filter 發散 (output > input) | ✅ 主要偵測 | — | ✅ 自動修正 |
+| 收斂後 double-talk | ❌ ratio < 1 | ✅ 主要偵測 | ✅ 背景追蹤 |
+| 未收斂 single-talk | ✅ 若 ratio > 1.2 | ❌ coherence 高 | ✅ 保守追蹤 |
+| 靜音 | — release | — release | — 持續更新 |
+
+**Confidence 時間行為**：
+
+| 偵測器 | Attack | Release | Hangover | DT→ST 轉換 |
+|--------|--------|---------|----------|------------|
+| Divergence | 0.3/block | 0.05/block | 15 blocks (240ms) | ~560ms |
+| Coherence | 0.3/block | 0.1/block | 3 blocks (48ms) | ~208ms |
+
+Coherence DTD 使用較短 hangover 和較快 release，因為 PSD EMA smoothing (α=0.85)
+本身已提供 ~6 block 的平滑效果（相當於內建 hangover），不需要額外長時間保持。
 
 #### DTD vs 發散偵測
 
-| | 傳統 DTD | 發散偵測（本專案採用） |
+| | 傳統 DTD | 本專案做法 |
 |---|---|---|
-| 目標 | 偵測「近端有人在講話」 | 偵測「濾波器壞掉了」 |
+| 目標 | 偵測「近端有人在講話」 | Divergence：偵測發散；Coherence：偵測 DT |
 | 時機 | 在更新前判斷 | 在更新後檢查 |
 | 反應 | 凍結更新 | 連續 mu scaling |
-| 代表 | Geigel, NCC | Output-vs-Input, Dual Filter |
+| 代表 | Geigel, NCC | Output-vs-Input + MSC Coherence |
 
 ### 6.2 經典 DTD 方法（不推薦）
 

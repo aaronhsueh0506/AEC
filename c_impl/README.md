@@ -85,18 +85,23 @@ aec_destroy(aec);
 ```
 far-end ──┐
            v
-near-end ──> PBFDAF (Main) ──> Shadow Compare ──> RES ──> Output Limiter ──> output
-              ^                  (optional)                      |
-              └── DTD (mu scaling) <─────────────────────────────┘
+near-end ──> PBFDAF (Main) ──> Shadow Compare ──> DTD ──> RES ──> Limiter ──> output
+              ^                  (optional)         |
+              └── mu_scale <────────────────────────┘
+
+DTD (Dual Detector):
+  1. Divergence: output > input × 1.2 → 降 mu（偵測 filter 發散）
+  2. Coherence:  MSC(error, far) 低 + error 能量高 → 降 mu（偵測 double-talk）
+  confidence = max(div, coh) → mu_scale = 1.0 - conf × 0.95
 
 Shadow Filter (optional):
-  - 保守步長 (mu × 0.5)，永遠更新
-  - 若 shadow error < main error × 0.8 → 複製權重到 main
+  - 保守步長 (mu × 0.5)，永遠全速更新（不受 DTD 控制）
+  - 若 shadow error < main error × 0.8 → 複製權重 + echo_spec 到 main
 ```
 
 1. **PBFDAF**: 分區頻域自適應濾波，估計並消除回音
 2. **Shadow Filter** (可選): 保守步長的影子濾波器，發散時自動修正主濾波器
-3. **DTD**: Output-vs-input 發散偵測，透過 mu_scale 控制更新速率
+3. **DTD (Dual Detector)**: Divergence 偵測 filter 發散 + Coherence 偵測 double-talk，透過 mu_scale 連續控制更新速率
 4. **RES**: 殘餘回音抑制，頻域譜減法進一步消除殘餘回音
 5. **Output Limiter**: 確保輸出不超過麥克風振幅
 

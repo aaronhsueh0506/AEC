@@ -65,11 +65,14 @@ Reference Signal (far-end/喇叭播放)
                           +----------+----------+
                           |                     |
                           v                     v
-               +------------------+  +--------------------+
-               | Shadow Filter    |  | Divergence Detect  |
-               | (optional, 可選) |  | (mu scaling)       |
-               +------------------+  +--------------------+
+               +------------------+  +------------------------+
+               | Shadow Filter    |  | DTD (Dual Detector)    |
+               | (optional, 可選) |  |  Divergence: output>in |
+               +------------------+  |  Coherence: MSC(e,x)   |
+                          |          +------------------------+
                           |                     |
+                          |           confidence = max(div, coh)
+                          |           mu_scale = 1 - conf×0.95
                           +----------+----------+
                                      |
                                      v
@@ -127,7 +130,7 @@ while has_audio:
 |------|--------|------|------|
 | `mu` | 0.3 (NLMS) / 0.01 (LMS) | NLMS: 0.1-0.8, LMS: 0.001-0.05 | 步長 |
 | `filter_length` | 512 (NLMS/LMS), 1024 (SUBBAND) | 256-4096 | 濾波器長度 (samples) |
-| `enable_dtd` | True | - | 發散偵測（Python 預設開，C 預設開） |
+| `enable_dtd` | True | - | DTD：Divergence + Coherence 雙偵測器 |
 | `enable_res` | False (Python) / True (C) | - | 殘餘回音抑制 |
 | `enable_shadow` | False | - | Shadow filter（僅 freq/subband，見下方說明） |
 
