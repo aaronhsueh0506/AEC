@@ -402,12 +402,13 @@ class AEC:
             self._freq_near_queue = None
         else:
             # TIME: Time-domain NLMS
-            # filter_length = user config (default: frame_size)
+            # leak=1.0: NLMS has DTD + weight norm constraint for stability,
+            # so leak is unnecessary and hurts convergence (75dB → 31dB with 0.99999)
             self.filter = NlmsFilter(
                 filter_length=self.config.filter_length,
                 mu=self.config.mu,
                 delta=self.config.delta,
-                leak=self.config.leak,
+                leak=1.0,
                 normalize=True
             )
             self.filter.clear_history = self.config.clear_filter_history
