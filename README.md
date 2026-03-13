@@ -71,7 +71,7 @@ Reference Signal (far-end/喇叭播放)
                +------------------+  |  Coherence: MSC(e,x)   |
                           |          +------------------------+
                           |                     |
-                          |           confidence = max(div, coh)
+                          |           Coherence 主導, Divergence fallback
                           |           mu_scale = 1 - conf×0.95
                           +----------+----------+
                                      |
@@ -132,18 +132,22 @@ while has_audio:
 | `filter_length` | 512 (NLMS/LMS), 1024 (SUBBAND) | 256-4096 | 濾波器長度 (samples) |
 | `enable_dtd` | True | - | DTD：僅 FREQ/SUBBAND（Divergence + Coherence），詳見 [docs/dtd_design.md](docs/dtd_design.md) |
 | `enable_res` | False (Python) / True (C) | - | 殘餘回音抑制 |
-| `enable_shadow` | False | - | Shadow filter（僅 freq/subband，見下方說明） |
+| `enable_shadow` | False | - | Shadow filter（僅 freq/subband，需要 DTD 開啟，見下方說明） |
 
-### Shadow Filter 參數 (僅 freq/subband 模式)
+### Shadow Filter 參數 (僅 freq/subband 模式，需要 DTD)
 
 Shadow filter（雙濾波器）使用一個保守步長的影子濾波器持續追蹤回音路徑，當主濾波器發散時自動修正。
 這是 WebRTC AEC3 和 SpeexDSP 的核心機制。
+
+> **注意**：Shadow 依賴 DTD 保護。若同時使用 `--no-dtd --enable-shadow`，shadow 會自動停用並印出警告。
 
 | 參數 | 預設值 | 範圍 | 說明 |
 |------|--------|------|------|
 | `shadow_mu_ratio` | 0.5 | 0.1-0.8 | Shadow mu = main mu × ratio |
 | `shadow_copy_threshold` | 0.8 | 0.5-1.0 | Shadow error < main error × threshold 時複製權重 |
 | `shadow_err_alpha` | 0.95 | 0.9-0.99 | Error energy EMA 平滑係數 |
+| `shadow_dtd_mu_min` | 0.2 | 0.1-0.5 | Shadow DTD mu 最低比例（比 main 的 5% 更寬鬆） |
+| `shadow_copy_hysteresis` | 3 | 1-10 | 連續 N frames 符合條件才觸發 copy |
 
 **與 DTD 的關係**：兩者互補，可同時啟用。DTD 降低 mu 防止惡化，shadow 在背景持續追蹤並自動修正。
 

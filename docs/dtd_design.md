@@ -39,7 +39,8 @@
                   │
   ┌───────────────▼─────────────────────────────────────────┐
   │ 5. mu_scale 計算                                        │
-  │    confidence = max(div_confidence, coh_confidence)      │
+  │    Coherence 主導，Divergence 為 Fallback                │
+  │    confidence 帶記憶衰減 (prev × 0.9)                     │
   │    mu_scale = 1.0 - confidence × (1.0 - 0.05)           │
   │    → 用於下一個 hop 的濾波器更新                           │
   └───────────────┬─────────────────────────────────────────┘
@@ -70,7 +71,8 @@
 | NCC | 循環依賴：需要 filter 部分收斂，但 DT 時 filter 被污染 |
 | Coherence DTD | 降低 mu → 慢收斂更慢 → 惡性循環（ERLE 3.4→0.7 dB） |
 | VSS-NLMS | DT-robust 版本核心也是 cross-correlation，同樣問題 |
-| Two-Path/Shadow | Background 也是慢收斂，DT 時一樣被污染無法恢復 |
+| Cross-correlation | 本質同 Coherence（時域 vs 頻域），加上 AEC delay 後 lag=0 連 single-talk 都誤判 |
+| Two-Path (凍結 fg) | Foreground 只靠 copy 更新，ERLE 23.3→6.9 dB；DT 偵測也因收斂波動 50% false positive |
 
 LMS/NLMS 的 Divergence detector 在正常 DT 場景下也無實質幫助
 （output < input → ratio < 1.0 → 不觸發）。Output Limiter 已提供安全網。
@@ -169,11 +171,15 @@ S_ex[k] = α × S_ex[k] + (1-α) × error_spec[k] × conj(far_spec[k])
 S_ee[k] = α × S_ee[k] + (1-α) × |error_spec[k]|²
 S_xx[k] = α × S_xx[k] + (1-α) × |far_spec[k]|²
 
-# 3. 寬頻 coherence（ratio-of-sums，非 per-bin average）
-coherence = Σ|S_ex[k]|² / (Σ(S_ee[k] × S_xx[k]) + 1e-10)
+# 3. 語音頻段加權寬頻 coherence（#7）
+#    voice_weight[k]: 300-4kHz → 3.0, <100Hz/>6kHz → 0.3, 其餘 → 1.0
+coherence = Σ(w[k] × |S_ex[k]|²) / (Σ(w[k] × S_ee[k] × S_xx[k]) + 1e-10)
 
 # 4. 能量檢查：避免低能量時假觸發
-has_energy = (Σ S_ee > energy_floor × Σ S_xx) AND (Σ S_xx > 1e-10)
+#    加絕對 floor 防止 far-end 極安靜時誤觸發（#8）
+has_energy = (Σ S_ee > energy_floor × Σ S_xx) AND
+             (Σ S_xx > 1e-10) AND
+             (Σ S_ee > coh_abs_floor)
 
 # 5. Hysteresis 判定
 if coherence > coh_high (0.6):
@@ -259,6 +265,7 @@ LMS/NLMS 不啟用任何 DTD（包括 divergence 和 coherence），原因是慢
 | `dtd_coh_energy_floor` | 0.1 | error_energy > floor × far_energy 才觸發 |
 | `dtd_coh_hangover` | 3 | DT 偵測後的持續 block 數 |
 | `dtd_coh_release` | 0.1 | confidence 下降速率 |
+| `dtd_coh_abs_floor` | 1e-6 | #8: 絕對 error energy 下限 |
 
 **Hysteresis (0.3/0.6) 的由來**：業界常見設定。0.3 和 0.6 之間的 gap 防止 coherence 在邊界附近
 時 confidence 頻繁切換（flicker）。
@@ -267,19 +274,34 @@ LMS/NLMS 不啟用任何 DTD（包括 divergence 和 coherence），原因是慢
 
 ## 4. Confidence 合併與 mu_scale
 
-兩個偵測器各自維護 confidence ∈ [0, 1]，最終取 max：
+兩個偵測器各自維護 confidence ∈ [0, 1]，合併策略如下：
 
 ```python
-confidence = max(div_confidence, coh_confidence)
-mu_scale   = 1.0 - confidence × (1.0 - mu_min_ratio)
+# Coherence 主導，Divergence 為 Fallback（#3）
+if conf_coh > 0.1:
+    raw_conf = conf_coh          # Coherence 啟動時，忽略 divergence
+else:
+    raw_conf = max(conf_div, conf_coh)  # Coherence 未啟動，fallback 到 max
 
-# confidence=0.0 → mu_scale=1.00  正常更新
-# confidence=0.5 → mu_scale=0.525 半速更新
-# confidence=1.0 → mu_scale=0.05  幾乎凍結（保留 5% 追蹤）
+# Confidence 帶記憶衰減（#4）
+conf = max(raw_conf, prev_dtd_conf × 0.9)
+prev_dtd_conf = conf
+
+mu_scale = 1.0 - conf × (1.0 - mu_min_ratio)
+
+# conf=0.0 → mu_scale=1.00  正常更新
+# conf=0.5 → mu_scale=0.525 半速更新
+# conf=1.0 → mu_scale=0.05  幾乎凍結（保留 5% 追蹤）
 ```
 
-**為什麼取 max 而非平均**：任一偵測器發現問題就應降低 mu。
-Divergence 和 coherence 偵測的是不同異常，不需要兩者同時觸發。
+**為什麼 Coherence 主導（#3）**：
+- Coherence 偵測「快要壞了」（事前），Divergence 偵測「已經壞了」（事後）
+- Echo path change 時 divergence 先觸發壓 mu，阻礙 filter 追蹤新路徑
+- Coherence > 0.1 代表已啟動，此時 divergence 的判斷不再需要
+
+**為什麼帶記憶衰減（#4）**：
+- 偵測器交替時（如 coherence release → divergence 尚未 attack），confidence 可能瞬間歸零
+- 乘以 0.9 的衰減慣性避免保護空窗
 
 **為什麼不完全凍結（5% 最低）**：
 - DT 結束後濾波器需要恢復能力
@@ -303,31 +325,42 @@ shadow 因步長小而漂移有限，可自動修正主濾波器。
 這是 WebRTC AEC3 和 SpeexDSP 的核心機制。
 
 ```
-Main filter:   mu = config.mu × mu_scale    ← DTD 控制
-Shadow filter: mu = config.mu × 0.5 × 1.0   ← 永遠全速（不受 DTD 控制）
+Main filter:   mu = config.mu × mu_scale            ← DTD 控制（最低 5%）
+Shadow filter: mu = config.mu × 0.5 × shadow_scale  ← 寬鬆 DTD（最低 20%）（#1）
 
 每個 block:
   1. main_out   = main.process(near, far, mu_scale)
-  2. shadow_out = shadow.process(near, far, 1.0)
+  2. shadow_mu_scale = 1.0 - conf × (1.0 - 0.2)    # 最低保留 20%
+     shadow_out = shadow.process(near, far, shadow_mu_scale)
   3. 平滑 error energy (EMA α=0.95):
      main_err   = α × main_err   + (1-α) × mean(main_out²)
      shadow_err = α × shadow_err + (1-α) × mean(shadow_out²)
-  4. if shadow_err < main_err × 0.8:
-       main.weights ← shadow.weights
-       main.echo_spec ← shadow.echo_spec  (RES 一致性)
-       output = shadow_out
-       main_err = shadow_err
+  4. Copy hysteresis (#5): 連續 3 frames shadow_err < main_err × 0.8 才複製
+     if shadow_err < main_err × 0.8:
+       copy_counter += 1
+     else:
+       copy_counter = 0
+     if copy_counter >= 3:
+       main.weights ← shadow.weights   (shadow → main)
+       copy_counter = 0
+  5. 雙向複製 (#6): main 明顯好時，shadow 跟上
+     elif main_err < shadow_err × 0.8:
+       shadow.weights ← main.weights   (main → shadow)
 ```
 
 ### 5.2 與 DTD 的互補
 
 | 場景 | DTD 做什麼 | Shadow 做什麼 |
 |------|-----------|--------------|
-| Filter 發散 | 降低 mu 防止惡化 | 自動複製修正 |
-| Double-talk | 降低 mu 保護權重 | 背景持續追蹤 |
-| Echo path change | — | 保守追蹤新路徑 |
+| Filter 發散 | 降低 mu 防止惡化 | 自動複製修正（shadow→main） |
+| Double-talk | 降低 mu 保護權重 | 寬鬆 DTD 保護（#1），背景追蹤 |
+| Echo path change | EPC 維持 mu≥0.5 | Main 學更快，#6 同步 shadow（main→shadow） |
 
 Shadow filter 僅適用於 FREQ/SUBBAND 模式（需要頻域權重結構）。
+
+**重要：Shadow 依賴 DTD 保護**。若 `--no-dtd` 關閉 DTD，shadow 會自動停用並印出警告。
+原因：沒有 DTD 時 main filter 在 DT 期間全速更新會 diverge，shadow 也全速跑一樣 diverge，
+copy threshold 比較的是兩個都壞的 filter，失去意義。
 
 ### 5.3 參數
 
@@ -337,6 +370,8 @@ Shadow filter 僅適用於 FREQ/SUBBAND 模式（需要頻域權重結構）。
 | `shadow_mu_ratio` | 0.5 | shadow mu = main mu × ratio |
 | `shadow_copy_threshold` | 0.8 | shadow_err < main_err × threshold 時複製 |
 | `shadow_err_alpha` | 0.95 | error energy EMA 平滑 |
+| `shadow_dtd_mu_min` | 0.2 | #1: Shadow DTD 最低 mu 比例（20%） |
+| `shadow_copy_hysteresis` | 3 | #5: 連續 N frames 才觸發複製 |
 
 ---
 
@@ -359,14 +394,15 @@ if out_peak > near_peak > 1e-6:
 ## 7. Warmup 機制
 
 濾波器剛啟動時權重為零，output ≈ input，ratio ≈ 1.0。
-如果此時啟用偵測，ratio > 1.0 可能觸發 divergence detection，降低 mu，
+如果此時啟用 divergence 偵測，ratio > 1.0 可能觸發，降低 mu，
 形成「偵測到發散 → 降低 mu → 更慢收斂 → 更久看起來像發散」的死循環。
 
-所以前 50 幀（~0.8 秒）不啟用任何偵測，讓濾波器自由收斂：
+**所有偵測器共用 warmup**：Coherence 也需要 warmup，因為未收斂時 error ≈ echo，
+coherence 估計不穩定（實測 fileid_1 在 frame 35-62 假觸發 DT）。
 
 ```python
 if frame_count < warmup_frames:
-    return 0.0  # confidence 固定為 0
+    return 0.0  # 所有偵測器: confidence 固定為 0
 ```
 
 ---

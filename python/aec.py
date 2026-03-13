@@ -66,11 +66,22 @@ class AecConfig:
     res_over_sub: float = 1.5
     res_alpha: float = 0.8
 
-    # Shadow filter (dual-filter divergence control)
+    # Shadow filter (dual-filter divergence control, FREQ/SUBBAND only)
     enable_shadow: bool = False
     shadow_mu_ratio: float = 0.5
     shadow_copy_threshold: float = 0.8
     shadow_err_alpha: float = 0.95
+    shadow_dtd_mu_min: float = 0.2      # #1: Shadow DTD floor (20% vs main's 5%)
+    shadow_copy_hysteresis: int = 3     # #5: Consecutive frames needed for copy
+
+    # Coherence DTD absolute energy floor
+    dtd_coh_abs_floor: float = 1e-6     # #8: Absolute error energy floor
+
+    # Echo path change detection (requires shadow filter)
+    epc_delta_threshold: float = 0.3    # |ΔE/total_E| < threshold → echo change
+    epc_total_rise: float = 1.5         # total_err > prev × rise → errors increasing
+    epc_hangover: int = 20              # keep EPC active for N frames after detection
+    epc_mu_floor: float = 0.5           # mu_scale floor during EPC
 
     # Mode
     mode: AecMode = AecMode.NLMS
@@ -341,7 +352,10 @@ class DtdEstimator:
                  coh_alpha: float = 0.85,
                  coh_high: float = 0.6,
                  coh_low: float = 0.3,
-                 coh_energy_floor: float = 0.01):
+                 coh_energy_floor: float = 0.01,
+                 coh_abs_floor: float = 1e-6,
+                 sample_rate: int = 16000,
+                 block_size: int = 512):
         self.mode = mode  # 'geigel', 'divergence', or 'coherence'
         self.confidence = 0.0
         self.attack = attack
@@ -364,14 +378,25 @@ class DtdEstimator:
         self.coh_high = coh_high
         self.coh_low = coh_low
         self.coh_energy_floor = coh_energy_floor
+        self.coh_abs_floor = coh_abs_floor  # #8: Absolute energy floor
         if mode == 'coherence' and n_freqs > 0:
             self.S_ex = np.zeros(n_freqs, dtype=np.complex64)
             self.S_ee = np.zeros(n_freqs, dtype=np.float32)
             self.S_xx = np.zeros(n_freqs, dtype=np.float32)
+            # #7: Voice-band weighting (300Hz-4kHz emphasized)
+            self.voice_weight = np.ones(n_freqs, dtype=np.float32)
+            freq_per_bin = sample_rate / block_size
+            for k in range(n_freqs):
+                f = k * freq_per_bin
+                if 300.0 <= f <= 4000.0:
+                    self.voice_weight[k] = 3.0  # 3× weight for speech band
+                elif f < 100.0 or f > 6000.0:
+                    self.voice_weight[k] = 0.3  # De-weight extremes
         else:
             self.S_ex = None
             self.S_ee = None
             self.S_xx = None
+            self.voice_weight = None
 
     def reset(self):
         self.confidence = 0.0
@@ -458,15 +483,19 @@ class DtdEstimator:
         self.S_ee = alpha * self.S_ee + (1 - alpha) * np.abs(error_spec) ** 2
         self.S_xx = alpha * self.S_xx + (1 - alpha) * np.abs(far_spec) ** 2
 
-        # Broadband coherence (ratio-of-sums)
-        num = np.sum(np.abs(self.S_ex) ** 2)
-        den = np.sum(self.S_ee * self.S_xx)
+        # #7: Voice-band weighted coherence (ratio-of-sums)
+        w = self.voice_weight
+        num = np.sum(w * np.abs(self.S_ex) ** 2)
+        den = np.sum(w * self.S_ee * self.S_xx)
         coherence = num / (den + 1e-10)
 
         # Energy check: only declare DT if error has meaningful energy
         sum_ee = np.sum(self.S_ee)
         sum_xx = np.sum(self.S_xx)
-        has_energy = sum_ee > self.coh_energy_floor * sum_xx and sum_xx > 1e-10
+        # #8: Absolute energy floor prevents false triggers on quiet far-end
+        has_energy = (sum_ee > self.coh_energy_floor * sum_xx and
+                      sum_xx > 1e-10 and
+                      sum_ee > self.coh_abs_floor)
 
         if coherence > self.coh_high:
             # Correlated → residual echo, not DT → release
@@ -489,6 +518,9 @@ class DtdEstimator:
         For coherence mode: uses error_spec and far_spec.
         """
         self.frame_count += 1
+        # Warmup: all detectors share the same warmup period.
+        # Coherence also needs warmup because unconverged filter → error ≈ echo
+        # → coherence estimate is unreliable (false DT triggers).
         if self.frame_count < self.warmup_frames:
             return 0.0
 
@@ -616,10 +648,13 @@ class AEC:
                 coh_high=self.config.dtd_coh_high,
                 coh_low=self.config.dtd_coh_low,
                 coh_energy_floor=self.config.dtd_coh_energy_floor,
+                coh_abs_floor=self.config.dtd_coh_abs_floor,
                 hangover_max=self.config.dtd_coh_hangover,
                 attack=self.config.dtd_confidence_attack,
                 release=self.config.dtd_coh_release,
                 warmup_frames=warmup,
+                sample_rate=self.config.sample_rate,
+                block_size=self.filter.block_size,
             )
         else:
             self.dtd_divergence = None
@@ -636,21 +671,37 @@ class AEC:
         else:
             self.res = None
 
-        # Shadow filter (dual-filter, FREQ/SUBBAND only)
+        # Shadow filter (dual-filter, FREQ/SUBBAND only, requires DTD)
         self.shadow_filter = None
         self.shadow_output = None
         self.main_err_smooth = 0.0
         self.shadow_err_smooth = 0.0
         if (self.config.enable_shadow and
-                self.config.mode in (AecMode.FREQ, AecMode.SUBBAND) and
-                hasattr(self.filter, 'W')):
-            shadow_mu = self.config.mu * self.config.shadow_mu_ratio
-            self.shadow_filter = SubbandNlms(
-                block_size=self.filter.block_size,
-                n_partitions=self.filter.n_partitions,
-                mu=shadow_mu,
-                delta=self.config.delta
-            )
+                self.config.mode in (AecMode.FREQ, AecMode.SUBBAND)):
+            if not self.config.enable_dtd:
+                import warnings
+                warnings.warn("Shadow filter disabled: requires DTD for safe operation "
+                              "(--no-dtd disables DTD, shadow loses its safety reference)")
+                self.config.enable_shadow = False
+            elif hasattr(self.filter, 'W'):
+                shadow_mu = self.config.mu * self.config.shadow_mu_ratio
+                self.shadow_filter = SubbandNlms(
+                    block_size=self.filter.block_size,
+                    n_partitions=self.filter.n_partitions,
+                    mu=shadow_mu,
+                    delta=self.config.delta
+                )
+
+        # Echo path change detection state
+        self.prev_total_err = 0.0
+        self.epc_active = False
+        self.epc_hangover_count = 0
+
+        # #4: Confidence memory decay
+        self.prev_dtd_conf = 0.0
+
+        # #5: Copy hysteresis counter
+        self.shadow_copy_counter = 0
 
         # ERLE
         self.near_power = 0.0
@@ -666,6 +717,11 @@ class AEC:
             self.shadow_filter.reset()
             self.main_err_smooth = 0.0
             self.shadow_err_smooth = 0.0
+        self.prev_total_err = 0.0
+        self.epc_active = False
+        self.epc_hangover_count = 0
+        self.prev_dtd_conf = 0.0
+        self.shadow_copy_counter = 0
         if self.dtd_divergence:
             self.dtd_divergence.reset()
         if self.dtd_coherence:
@@ -686,14 +742,35 @@ class AEC:
         return self._hop_size
 
     def _compute_mu_scale(self) -> float:
-        """Convert combined DTD confidence to mu_scale [mu_min_ratio, 1.0]."""
+        """Convert combined DTD confidence to mu_scale [mu_min_ratio, 1.0].
+
+        #3: Coherence is primary; divergence is fallback only when coherence inactive.
+        #4: Confidence has memory decay to avoid sudden drops.
+        EPC: mu_scale floor during echo path change.
+        """
         conf_div = self.dtd_divergence.confidence if self.dtd_divergence else 0.0
         conf_coh = self.dtd_coherence.confidence if self.dtd_coherence else 0.0
-        conf = max(conf_div, conf_coh)
+
+        # #3: Coherence primary, divergence fallback
+        if conf_coh > 0.1:
+            raw_conf = conf_coh
+        else:
+            raw_conf = max(conf_div, conf_coh)
+
+        # #4: Confidence memory decay (avoid sudden drops)
+        conf = max(raw_conf, self.prev_dtd_conf * 0.9)
+        self.prev_dtd_conf = conf
+
         if conf == 0.0:
             return 1.0
         min_r = self.config.dtd_mu_min_ratio
-        return 1.0 - conf * (1.0 - min_r)
+        mu_scale = 1.0 - conf * (1.0 - min_r)
+
+        # Echo path change: keep mu high so filter can adapt to new path
+        if self.epc_active:
+            mu_scale = max(mu_scale, self.config.epc_mu_floor)
+
+        return mu_scale
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
         # DTD: dual detector (divergence + coherence) for FREQ/SUBBAND
@@ -725,9 +802,12 @@ class AEC:
             else:
                 output = self.filter.process(near_end, far_end, mu_scale)
 
-            # Shadow filter: always adapts at full speed (SpeexDSP-style)
+            # Shadow filter with DTD protection (#1) and bidirectional copy (#6)
             if self.shadow_filter is not None and self._freq_near_queue is None:
-                shadow_out = self.shadow_filter.process(near_end, far_end, 1.0)
+                # #1: Shadow also receives DTD protection, but more lenient
+                conf = self.prev_dtd_conf  # use same conf from _compute_mu_scale
+                shadow_mu_scale = 1.0 - conf * (1.0 - self.config.shadow_dtd_mu_min)
+                shadow_out = self.shadow_filter.process(near_end, far_end, shadow_mu_scale)
 
                 main_err = self.filter.get_error_energy()
                 shadow_err = self.shadow_filter.get_error_energy()
@@ -736,11 +816,51 @@ class AEC:
                 self.main_err_smooth = alpha_s * self.main_err_smooth + (1 - alpha_s) * main_err
                 self.shadow_err_smooth = alpha_s * self.shadow_err_smooth + (1 - alpha_s) * shadow_err
 
-                if self.shadow_err_smooth < self.main_err_smooth * self.config.shadow_copy_threshold:
+                threshold = self.config.shadow_copy_threshold
+                # #5: Copy hysteresis — require N consecutive frames
+                if self.shadow_err_smooth < self.main_err_smooth * threshold:
+                    self.shadow_copy_counter += 1
+                else:
+                    self.shadow_copy_counter = 0
+
+                if self.shadow_copy_counter >= self.config.shadow_copy_hysteresis:
+                    # Shadow → Main copy
                     self.filter.copy_weights_from(self.shadow_filter)
                     self.filter.echo_spec[:] = self.shadow_filter.echo_spec
                     output = shadow_out
                     self.main_err_smooth = self.shadow_err_smooth
+                    self.shadow_copy_counter = 0
+                # #6: Bidirectional — Main → Shadow when main is clearly better
+                elif self.main_err_smooth < self.shadow_err_smooth * threshold:
+                    self.shadow_filter.copy_weights_from(self.filter)
+                    self.shadow_err_smooth = self.main_err_smooth
+
+            # Echo path change detection (shadow-based)
+            # DT: refined error ↑, shadow stable → ΔE/total large
+            # Echo change: both errors ↑ → ΔE/total small
+            # When echo change detected, suppress coherence confidence
+            # so filter can adapt to new echo path quickly.
+            if self.shadow_filter is not None and self.dtd_coherence:
+                total_err = self.main_err_smooth + self.shadow_err_smooth
+                if total_err > 1e-10:
+                    delta_ratio = abs(self.main_err_smooth - self.shadow_err_smooth) / total_err
+                else:
+                    delta_ratio = 0.0
+
+                errors_rising = (total_err > self.prev_total_err * self.config.epc_total_rise
+                                 and self.prev_total_err > 1e-10)
+                is_echo_change = errors_rising and delta_ratio < self.config.epc_delta_threshold
+                self.prev_total_err = total_err
+
+                if is_echo_change:
+                    self.dtd_coherence.confidence *= 0.3
+                    self.epc_hangover_count = self.config.epc_hangover
+                    self.epc_active = True
+                elif self.epc_hangover_count > 0:
+                    self.epc_hangover_count -= 1
+                    self.epc_active = True
+                else:
+                    self.epc_active = False
 
             # RES post-filter using overlap-save (skip for buffered FDAF)
             # Apply RES gain to full-block residual spectrum (near_spec - echo_spec),
@@ -796,6 +916,9 @@ class AEC:
     def get_dtd_confidence(self) -> float:
         conf_div = self.dtd_divergence.confidence if self.dtd_divergence else 0.0
         conf_coh = self.dtd_coherence.confidence if self.dtd_coherence else 0.0
+        # #3: Same logic as _compute_mu_scale — coherence primary
+        if conf_coh > 0.1:
+            return conf_coh
         return max(conf_div, conf_coh)
 
 
@@ -899,7 +1022,7 @@ Examples:
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
-    parser.add_argument('--enable-shadow', action='store_true', help='Enable shadow filter (dual-filter)')
+    parser.add_argument('--enable-shadow', action='store_true', help='Enable shadow filter (dual-filter, FREQ/SUBBAND, requires DTD)')
     parser.add_argument('--clear-history', action='store_true',
                         help='Clear TIME/LMS buffer each block (no carry-over)')
 

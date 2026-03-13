@@ -368,10 +368,10 @@ AEC 自適應濾波器在以下情況需要控制更新：
                   │
   ┌───────────────▼─────────────────────────────────────────┐
   │ 2. Shadow Filter (可選)                                  │
-  │    shadow_out = shadow.process(near, far, 1.0)  ← 永遠全速│
-  │    if shadow_err < main_err × 0.8:                      │
-  │        main.W ← shadow.W    ← 自動修正發散權重            │
-  │        main.echo_spec ← shadow.echo_spec  ← RES 一致性   │
+  │    shadow_mu = 1.0 - conf × (1-0.2) ← 寬鬆 DTD（最低 20%）│
+  │    shadow_out = shadow.process(near, far, shadow_mu)     │
+  │    連續 3 frames shadow_err < main_err × 0.8 → copy      │
+  │    main 明顯好時 → 反向同步 shadow（雙向 copy）             │
   └───────────────┬─────────────────────────────────────────┘
                   │
   ┌───────────────▼─────────────────────────────────────────┐
@@ -394,11 +394,10 @@ AEC 自適應濾波器在以下情況需要控制更新：
                   │
   ┌───────────────▼─────────────────────────────────────────┐
   │ 5. mu_scale 計算                                        │
-  │    confidence = max(div_confidence, coh_confidence)      │
+  │    Coherence 主導，Divergence 為 Fallback                │
+  │    confidence 帶記憶衰減 (prev × 0.9)                     │
   │    mu_scale = 1.0 - confidence × (1.0 - 0.05)           │
-  │                                                          │
-  │    confidence=0 → mu_scale=1.0  正常更新                  │
-  │    confidence=1 → mu_scale=0.05 幾乎凍結（保留 5% 追蹤）  │
+  │    EPC 時 mu_scale ≥ 0.5（維持追蹤能力）                   │
   └───────────────┬─────────────────────────────────────────┘
                   │
   ┌───────────────▼─────────────────────────────────────────┐
@@ -415,16 +414,19 @@ AEC 自適應濾波器在以下情況需要控制更新：
 **關鍵設計原則**：
 
 1. **不完全凍結**：mu_scale 最低 0.05（而非 0），保留微量追蹤能力，避免 DT 結束後無法恢復
-2. **Dual detector**：Divergence 和 Coherence 偵測不同異常，取 max 互補
-3. **Warmup 保護**：前 50 幀（~0.8s）不啟用任何偵測，讓濾波器有時間初始收斂
-4. **Shadow filter 不受 DTD 控制**：永遠以 mu×0.5 全速更新，DT 期間漂移有限，結束後重新收斂
+2. **Coherence 主導，Divergence 為 Fallback**：Coherence 偵測「快要壞」（事前），Divergence 偵測「已經壞」（事後）。Coherence 啟動時忽略 Divergence，避免 echo path change 時誤壓 mu
+3. **Confidence 記憶衰減**：conf = max(raw, prev × 0.9)，避免偵測器交替時保護空窗
+4. **Warmup 保護**：前 50 幀（~0.8s）不啟用任何偵測，讓濾波器和 PSD 估計穩定
+5. **Shadow filter 寬鬆 DTD**：DT 時 mu 最低保留 20%（vs main 的 5%），平衡保護和追蹤能力
+6. **Echo Path Change (EPC)**：shadow-based ΔE 偵測，維持 mu≥0.5 讓 filter 追蹤新路徑
 
 **各偵測器的覆蓋範圍**：
 
 | 場景 | Divergence | Coherence | Shadow |
 |------|-----------|-----------|--------|
-| Filter 發散 (output > input) | ✅ 主要偵測 | — | ✅ 自動修正 |
-| 收斂後 double-talk | ❌ ratio < 1 | ✅ 主要偵測 | ✅ 背景追蹤 |
+| Filter 發散 (output > input) | ✅ fallback | — | ✅ 自動修正（shadow→main）|
+| 收斂後 double-talk | ❌ ratio < 1 | ✅ 主要偵測 | ✅ 寬鬆 DTD 追蹤 |
+| Echo path change | ❌ 被 Coherence 抑制 | EPC 壓低 conf | Main 學更快，#6 同步 shadow |
 | 未收斂 single-talk | ✅ 若 ratio > 1.2 | ❌ coherence 高 | ✅ 保守追蹤 |
 | 靜音 | — release | — release | — 持續更新 |
 
