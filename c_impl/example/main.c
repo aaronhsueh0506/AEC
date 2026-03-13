@@ -26,6 +26,8 @@ static void print_usage(const char* program) {
     printf("  --mu <value>       - Step size (default: 0.3)\n");
     printf("  --filter <samples> - Filter length in samples (default: 1024)\n");
     printf("  --no-dtd           - Disable double-talk detection\n");
+    printf("  --enable-res       - Enable residual echo suppressor (RES)\n");
+    printf("  --res-gmin <dB>    - RES minimum gain in dB (default: -20)\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -42,6 +44,8 @@ int main(int argc, char* argv[]) {
     float mu = 0.3f;
     int filter_length = 0;  // 0 = use default
     bool enable_dtd = true;
+    bool enable_res = true;
+    float res_gmin = -20.0f;
 
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "--mu") == 0 && i + 1 < argc) {
@@ -50,6 +54,12 @@ int main(int argc, char* argv[]) {
             filter_length = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--no-dtd") == 0) {
             enable_dtd = false;
+        } else if (strcmp(argv[i], "--enable-res") == 0) {
+            enable_res = true;
+        } else if (strcmp(argv[i], "--no-res") == 0) {
+            enable_res = false;
+        } else if (strcmp(argv[i], "--res-gmin") == 0 && i + 1 < argc) {
+            res_gmin = (float)atof(argv[++i]);
         }
     }
 
@@ -83,6 +93,8 @@ int main(int argc, char* argv[]) {
     AecConfig config = aec_default_config(sample_rate);
     config.mu = mu;
     config.enable_dtd = enable_dtd;
+    config.enable_res = enable_res;
+    config.res_g_min_db = res_gmin;
     if (filter_length > 0) {
         config.filter_length = filter_length;
     }
@@ -103,7 +115,9 @@ int main(int argc, char* argv[]) {
     printf("  Partitions: %d\n", params.n_partitions);
     printf("  DTD: %s (warmup: %d frames)\n",
            enable_dtd ? "enabled" : "disabled", config.dtd_warmup_frames);
-    printf("\n");
+    printf("  RES: %s", enable_res ? "enabled" : "disabled");
+    if (enable_res) printf(" (g_min=%.0f dB)", res_gmin);
+    printf("\n\n");
 
     Aec* aec = aec_create(&config);
     if (!aec) {

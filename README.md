@@ -1,6 +1,8 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組，支援四種濾波器模式，搭配雙講偵測 (DTD) 和殘餘回音抑制 (RES)。
+回音消除模組，Python 支援四種濾波器模式，搭配發散偵測 (DTD) 和殘餘回音抑制 (RES)。
+
+> C 實作僅支援 PBFDAF 模式，詳見 [c_impl/README.md](c_impl/README.md)。
 
 ## 濾波器模式
 
@@ -11,97 +13,39 @@
 | **subband** | `--mode subband` | 分區頻域 NLMS (PBFDAF) | 16ms | 長回音路徑、快速收斂 |
 | **lms** | `--mode lms` | 時域 LMS (固定步長) | 16ms | 穩態環境、極低資源 |
 
-### 演算法原理
-
-#### 1. 時域 LMS (`--mode lms`)
-```
-y_hat(n) = w^T * x(n)           // 估計回音
-e(n) = d(n) - y_hat(n)          // 誤差信號
-w = w + mu * e(n) * x(n)        // 固定步長更新
-```
-- 最簡單的自適應濾波器，固定步長 μ（典型 0.001~0.05）
-- 無功率正規化，收斂速度取決於輸入信號功率
-- 複雜度: O(N) per sample
-- 適合穩態環境、極低計算資源場景
-
-#### 2. 時域 NLMS (`--mode nlms`)
-```
-y_hat(n) = w^T * x(n)           // 估計回音
-e(n) = d(n) - y_hat(n)          // 誤差信號
-mu_eff = mu / (||x||^2 + delta) // 正規化步長
-w = leak * w + mu_eff * e(n) * x(n)  // 權重更新 (含洩漏)
-```
-- 功率正規化使收斂速度與輸入信號無關
-- 複雜度: O(N) per sample
-- hop_size: 256 samples (16ms @ 16kHz)
-- filter_length: 可配置（預設 frame_size=512, 即 32ms@16kHz）
-
-#### 3. 頻域 NLMS (`--mode freq`)
-```
-X = FFT(x_block)                // 頻域轉換
-Y_hat = W * X                   // 頻域濾波 (單一 block)
-y_hat = IFFT(Y_hat)             // 時域輸出
-```
-- 單一 FFT block，n_partitions=1
-- 複雜度: O(N log N) per block
-- hop_size: 256 samples (16ms @ 16kHz)
-
-#### 4. 分區頻域 NLMS (`--mode subband`)
-```
-Y_hat = sum(W[p] * X_buf[p])    // 多分區卷積
-```
-- 分區塊 (Partitioned Block FDAF) 處理長回音路徑
-- n_partitions = ceil(filter_length / hop_size)
-- 收斂更快，適合 200-300ms 回音路徑
-
 ## 快速開始
 
-### 編譯 C 版本
-
-```bash
-cd c_impl
-make
-```
-
-### 使用 C 版本
-
-C 版本僅支援 PBFDAF（分區頻域）模式。
-
-```bash
-# 基本用法
-./bin/aec_wav mic.wav ref.wav output.wav
-
-# 調整參數
-./bin/aec_wav mic.wav ref.wav output.wav --mu 0.5 --filter 1024
-
-# 關閉發散偵測
-./bin/aec_wav mic.wav ref.wav output.wav --no-dtd
-```
-
-### Python 版本
+### Python
 
 ```bash
 cd python
 pip install numpy soundfile
 
-# 時域 NLMS 模式 (預設)
-python aec.py mic.wav ref.wav output.wav
+# 時域 NLMS 模式 (預設，DTD 開啟，RES 關閉)
+python3 aec.py mic.wav ref.wav output.wav
 
-# 時域 LMS 模式 (固定步長，穩態環境)
-python aec.py mic.wav ref.wav output.wav --mode lms
+# 時域 LMS 模式 (固定步長)
+python3 aec.py mic.wav ref.wav output.wav --mode lms
 
 # 頻域模式
-python aec.py mic.wav ref.wav output.wav --mode freq
+python3 aec.py mic.wav ref.wav output.wav --mode freq
 
 # 分區頻域模式 + RES
-python aec.py mic.wav ref.wav output.wav --mode subband --enable-res
+python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res
 
 # 調整參數
-python aec.py mic.wav ref.wav output.wav --mu 0.5 --filter 1024
-
-# LMS 自訂步長 (預設 mu=0.01)
-python aec.py mic.wav ref.wav output.wav --mode lms --mu 0.005
+python3 aec.py mic.wav ref.wav output.wav --mu 0.5 --filter 1024
 ```
+
+### C (PBFDAF only)
+
+```bash
+cd c_impl && make
+./bin/aec_wav mic.wav ref.wav output.wav           # DTD + RES 預設開啟
+./bin/aec_wav mic.wav ref.wav output.wav --no-res   # 關閉 RES
+```
+
+詳見 [c_impl/README.md](c_impl/README.md)。
 
 ## 系統架構
 
@@ -122,67 +66,26 @@ Reference Signal (far-end/喇叭播放)
                                      |
                                      v
                      +---------------------------+
+                     | RES Post-Filter (optional) |
+                     +---------------------------+
+                                     |
+                                     v
+                     +---------------------------+
                      | Output Limiter            |
                      | (output ≤ mic amplitude)  |
                      +---------------------------+
                                      |
                                      v
-                     +---------------------------+
-                     | Residual Echo Suppressor  |
-                     | (RES Post-Filter)         |
-                     +---------------------------+
-                                     |
-                                     v
                                Clean Output
-                                     |
-                                     v
-                     +---------------------------+
-                     | NR (Noise Reduction)      |
-                     +---------------------------+
 ```
 
 ## API 使用
 
-### C 語言
-
-```c
-#include "aec.h"
-
-// 建立 AEC (PBFDAF 模式)
-AecConfig config = aec_default_config(16000);
-config.mu = 0.3f;
-config.filter_length = 1024;   // 4 partitions × 256 hop
-config.enable_dtd = true;
-
-Aec* aec = aec_create(&config);
-
-// hop_size = 256 samples (16ms @ 16kHz)
-int hop_size = aec_get_hop_size(aec);
-
-while (has_audio) {
-    aec_process(aec, mic_buf, ref_buf, out_buf);
-    float erle = aec_get_erle(aec);
-    float conf = aec_get_dtd_confidence(aec);
-}
-
-aec_destroy(aec);
-```
-
-### Python
-
 ```python
 from aec import AEC, AecConfig, AecMode
 
-# 時域 NLMS 模式
+# 時域 NLMS 模式（預設 DTD 開啟，RES 關閉）
 config = AecConfig(mode=AecMode.NLMS, mu=0.3)
-aec = AEC(config)
-
-# 時域 LMS 模式 (固定步長)
-config = AecConfig(mode=AecMode.LMS, mu=0.01)
-aec = AEC(config)
-
-# 頻域模式
-config = AecConfig(mode=AecMode.FREQ)
 aec = AEC(config)
 
 # 分區頻域模式 + RES
@@ -193,11 +96,12 @@ config = AecConfig(
 )
 aec = AEC(config)
 
-# hop_size: 所有模式統一 256 samples (16ms @ 16kHz)
-hop_size = aec.hop_size
-
+# 處理
+hop_size = aec.hop_size  # 256 samples (16ms @ 16kHz)
 while has_audio:
     output = aec.process(mic_block, ref_block)
+    erle = aec.get_erle()
+    conf = aec.get_dtd_confidence()
 ```
 
 ## 參數說明
@@ -206,10 +110,10 @@ while has_audio:
 
 | 參數 | 預設值 | 範圍 | 說明 |
 |------|--------|------|------|
-| `mu` | 0.3 (NLMS) / 0.01 (LMS) | NLMS: 0.1-0.8, LMS: 0.001-0.05 | 步長，越大收斂越快但穩態誤差增加 |
-| `filter_length` | 512 (NLMS/LMS), 1024 (SUBBAND) | 256-4096 | 濾波器長度 (samples), NLMS/LMS/SUBBAND 可配置, FREQ 固定 = hop_size |
-| `dtd_divergence_factor` | 1.5 | 1.2-2.0 | 發散偵測倍數（output > input × factor → 發散） |
-| `dtd_mu_min_ratio` | 0.05 | 0.01-0.1 | 發散時最低 mu 比例（不完全凍結） |
+| `mu` | 0.3 (NLMS) / 0.01 (LMS) | NLMS: 0.1-0.8, LMS: 0.001-0.05 | 步長 |
+| `filter_length` | 512 (NLMS/LMS), 1024 (SUBBAND) | 256-4096 | 濾波器長度 (samples) |
+| `enable_dtd` | True | - | 發散偵測（Python 預設開，C 預設開） |
+| `enable_res` | False (Python) / True (C) | - | 殘餘回音抑制 |
 
 ### RES 參數 (僅 freq/subband 模式)
 
@@ -221,81 +125,53 @@ while has_audio:
 
 ### 模式選擇指南
 
-| 應用場景 | 推薦模式 | mu | filter_length (samples) |
-|----------|----------|-----|------------------------|
+| 應用場景 | 推薦模式 | mu | filter_length |
+|----------|----------|-----|---------------|
 | 手機/耳機 (短回音) | nlms | 0.3 | 512 |
 | 會議室 (中等回音) | nlms | 0.3 | 1024 |
-| 會議室 (頻域) | freq | 0.3 | 256 (= hop_size, 固定) |
 | 智慧音箱 (長回音) | subband | 0.2 | 1024-4096 |
-| 即時通訊 (低延遲) | nlms | 0.3 | 512 |
 | 穩態環境 (極低資源) | lms | 0.01 | 512 |
+
+### 繪圖工具
+
+```bash
+# 繪製 AEC 結果（DTD 紅底標示）
+python3 plot_aec_results.py ../wav/ --mode subband
+
+# 開啟 RES
+python3 plot_aec_results.py ../wav/ --mode subband --enable-res
+```
+
+## 效能指標
+
+| 模式 | ERLE | 複雜度 | 收斂時間 |
+|------|------|--------|----------|
+| lms | 10-15 dB | O(N) | 1-5s |
+| nlms | 15-20 dB | O(N) | 0.5-2s |
+| freq | 18-22 dB | O(N log N) | 0.3-1s |
+| subband | 20-25 dB | O(N log N) | 0.2-0.8s |
+| + RES | +10-15 dB | O(K) | - |
 
 ## 檔案結構
 
 ```
 AEC/
-├── README.md
-├── c_impl/
-│   ├── include/
-│   │   ├── aec.h              # 主要 API
-│   │   ├── aec_types.h        # 配置結構
-│   │   ├── subband_nlms.h     # PBFDAF 頻域濾波器
-│   │   ├── res_filter.h       # 殘餘回音抑制器
-│   │   └── fft_wrapper.h      # FFT 介面
-│   ├── src/
-│   │   ├── aec.c              # 主協調器 (PBFDAF + 發散偵測 + Output Limiter)
-│   │   ├── subband_nlms.c     # PBFDAF 實作
-│   │   ├── res_filter.c
-│   │   └── fft_wrapper.c
-│   ├── example/
-│   │   ├── main.c             # CLI 工具
-│   │   ├── aec_lsa_pipeline.c # AEC+LSA 整合範例
-│   │   └── wav_io.h
-│   ├── lib/kiss_fft/
+├── README.md                  # 本文件（Python 為主）
+├── c_impl/                    # C 實作 (PBFDAF only)
+│   ├── README.md              # C 版本文檔
+│   ├── include/               # 標頭檔
+│   ├── src/                   # 原始碼
+│   ├── example/               # CLI 工具
 │   └── Makefile
 ├── python/
-│   ├── aec.py                 # Python 實作 (四模式支援)
-│   ├── plot_aec_results.py    # 結果繪圖 (含 DTD 紅底標示)
+│   ├── aec.py                 # Python 實作 (四模式)
+│   ├── plot_aec_results.py    # 結果繪圖 (含 DTD 紅底)
 │   └── gen_sim_data.py        # 測試資料生成
 ├── docs/
-│   ├── aec_methods.md         # 演算法與方法論文檔
+│   ├── aec_methods.md         # 演算法文檔
 │   └── DEVLOG.md              # 開發紀錄
 └── wav/                       # 測試音檔
 ```
-
-## 與 LSA 整合
-
-```c
-// AEC + NR 處理鏈
-AecConfig aec_cfg = aec_default_config(16000);
-aec_cfg.filter_length = 1024;
-aec_cfg.enable_res = true;
-aec_cfg.res_g_min_db = -25.0f;
-
-MmseLsaConfig lsa_cfg = mmse_lsa_default_config(16000);
-lsa_cfg.g_min_db = -15.0f;
-
-Aec* aec = aec_create(&aec_cfg);
-MmseLsaDenoiser* lsa = mmse_lsa_create(&lsa_cfg);
-
-int aec_hop = aec_get_hop_size(aec);   // 256 (16ms @ 16kHz)
-int lsa_hop = mmse_lsa_get_hop_size(lsa);
-
-while (has_audio) {
-    aec_process(aec, mic_buf, ref_buf, aec_out);
-    mmse_lsa_process(lsa, aec_out, final_out);
-}
-```
-
-## 效能指標
-
-| 模式 | ERLE | 複雜度 | 收斂時間 | hop_size |
-|------|------|--------|----------|----------|
-| lms | 10-15 dB | O(N) | 1-5s | 256 |
-| nlms | 15-20 dB | O(N) | 0.5-2s | 256 |
-| freq | 18-22 dB | O(N log N) | 0.3-1s | 256 |
-| subband | 20-25 dB | O(N log N) | 0.2-0.8s | 256 |
-| + RES | +10-15 dB | O(K) | - | - |
 
 ## 參考文獻
 

@@ -59,7 +59,8 @@ def scan_fileids(dataset_dir):
     return groups
 
 
-def run_aec(mic_path, ref_path, mode, enable_dtd=True, mu=0.3, filter_length=0):
+def run_aec(mic_path, ref_path, mode, enable_dtd=True, enable_res=False,
+            mu=0.3, filter_length=0):
     """Run AEC and return output + filter object + confidence history."""
     mic, sr = sf.read(mic_path)
     ref, _ = sf.read(ref_path)
@@ -78,6 +79,7 @@ def run_aec(mic_path, ref_path, mode, enable_dtd=True, mu=0.3, filter_length=0):
         sample_rate=sr,
         mode=mode,
         enable_dtd=enable_dtd,
+        enable_res=enable_res,
         mu=mu,
         filter_length=filter_length,
     )
@@ -146,6 +148,7 @@ def main():
     parser.add_argument('--mode', choices=['lms', 'nlms', 'freq', 'subband'],
                         default='nlms')
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
+    parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
     parser.add_argument('--mu', type=float, default=0.3)
     parser.add_argument('--filter', type=int, default=0,
                         help='Filter length in samples (0=mode default)')
@@ -187,6 +190,7 @@ def main():
         mic, ref, out, aec, sr = run_aec(
             group['mic'], group['ref'], mode,
             enable_dtd=not args.no_dtd,
+            enable_res=args.enable_res,
             mu=args.mu, filter_length=args.filter)
         est_ir = get_estimated_ir(aec)
         print(f" done (ERLE={aec.get_erle():.1f} dB)")
@@ -242,11 +246,13 @@ def main():
         ax.set_xlim(0, len(est_ir))
 
     dtd_str = 'DTD off' if args.no_dtd else 'DTD on'
-    fig.suptitle(f'AEC Results (mode={args.mode}, {dtd_str})', fontsize=14)
+    res_str = 'RES on' if args.enable_res else 'RES off'
+    fig.suptitle(f'AEC Results (mode={args.mode}, {dtd_str}, {res_str})', fontsize=14)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
     dtd_tag = '_no_dtd' if args.no_dtd else ''
-    out_path = os.path.join(base, f'aec_results_{args.mode}{dtd_tag}.png')
+    res_tag = '_res' if args.enable_res else ''
+    out_path = os.path.join(base, f'aec_results_{args.mode}{dtd_tag}{res_tag}.png')
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     print(f"Saved: {out_path}")
     plt.show()
