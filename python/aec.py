@@ -608,24 +608,29 @@ class AEC:
                 release=self.config.dtd_confidence_release,
                 warmup_frames=warmup,
             )
-            # Coherence DTD for all modes
-            # Freq-domain modes: n_freqs from filter; time-domain: from hop_size
-            if hasattr(self.filter, 'n_freqs'):
-                coh_n_freqs = self.filter.n_freqs
+            # Coherence DTD: FREQ/SUBBAND only (default)
+            # LMS/NLMS converge too slowly — coherence DTD reduces mu during DT,
+            # but slow convergence means filter can't recover in single-talk gaps,
+            # creating a vicious cycle (ERLE drops from 3.4→0.7 dB on fileid_0).
+            if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
+                if hasattr(self.filter, 'n_freqs'):
+                    coh_n_freqs = self.filter.n_freqs
+                else:
+                    coh_n_freqs = self.config.hop_size // 2 + 1
+                self.dtd_coherence = DtdEstimator(
+                    mode='coherence',
+                    n_freqs=coh_n_freqs,
+                    coh_alpha=self.config.dtd_coh_alpha,
+                    coh_high=self.config.dtd_coh_high,
+                    coh_low=self.config.dtd_coh_low,
+                    coh_energy_floor=self.config.dtd_coh_energy_floor,
+                    hangover_max=self.config.dtd_coh_hangover,
+                    attack=self.config.dtd_confidence_attack,
+                    release=self.config.dtd_coh_release,
+                    warmup_frames=warmup,
+                )
             else:
-                coh_n_freqs = self.config.hop_size // 2 + 1  # 256→129 bins
-            self.dtd_coherence = DtdEstimator(
-                mode='coherence',
-                n_freqs=coh_n_freqs,
-                coh_alpha=self.config.dtd_coh_alpha,
-                coh_high=self.config.dtd_coh_high,
-                coh_low=self.config.dtd_coh_low,
-                coh_energy_floor=self.config.dtd_coh_energy_floor,
-                hangover_max=self.config.dtd_coh_hangover,
-                attack=self.config.dtd_confidence_attack,
-                release=self.config.dtd_coh_release,
-                warmup_frames=warmup,
-            )
+                self.dtd_coherence = None
         else:
             self.dtd_divergence = None
             self.dtd_coherence = None

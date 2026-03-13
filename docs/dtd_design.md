@@ -32,7 +32,7 @@
   └───────────────┬─────────────────────────────────────────┘
                   │
   ┌───────────────▼─────────────────────────────────────────┐
-  │ 4. Coherence Detector（所有模式）                         │
+  │ 4. Coherence Detector（FREQ/SUBBAND 預設啟用）              │
   │    coherence = MSC(error_spec, far_spec)                │
   │    → 更新 coh_confidence [0,1]                           │
   └───────────────┬─────────────────────────────────────────┘
@@ -55,12 +55,15 @@
 | 功能 | LMS | NLMS | FREQ | SUBBAND |
 |------|-----|------|------|---------|
 | Divergence DTD | ✅ | ✅ | ✅ | ✅ |
-| Coherence DTD | ✅ | ✅ | ✅ | ✅ |
+| Coherence DTD | — | — | ✅ | ✅ |
 | Shadow Filter | — | — | ✅ | ✅ |
 | RES Post-Filter | — | — | ✅ | ✅ |
 
-LMS/NLMS 的 coherence DTD 透過對 error 和 far-end 做 hop_size-point real FFT (256→129 bins) 取得頻譜，
-重用與 FREQ/SUBBAND 完全相同的 coherence 偵測邏輯。
+**為什麼 LMS/NLMS 不啟用 Coherence DTD**：
+LMS/NLMS 收斂速度慢（1-5s），coherence DTD 在 double-talk 期間降低 mu，
+但 single-talk 恢復窗口不夠長讓 filter 重新收斂，形成惡性循環。
+測試顯示 fileid_0 (double-talk) ERLE 從 3.4 dB 降至 0.7 dB。
+FREQ/SUBBAND 收斂快（0.2-0.8s），不受此問題影響。
 
 ---
 
@@ -146,9 +149,8 @@ else:
 使用 error-reference Magnitude Squared Coherence (MSC)：
 
 ```python
-# 1. 取得頻譜
-#    FREQ/SUBBAND：直接使用 filter 內部的 error_spec, far_spec
-#    LMS/NLMS：    對 output 和 far_end 做 hop_size-point rfft
+# 1. 取得頻譜（FREQ/SUBBAND 模式）
+#    直接使用 filter 內部的 error_spec, far_spec
 
 # 2. EMA 平滑 PSD 估計
 S_ex[k] = α × S_ex[k] + (1-α) × error_spec[k] × conj(far_spec[k])
@@ -213,27 +215,24 @@ DT 結束
   → Total ≈ 208ms
 ```
 
-### 3.5 LMS/NLMS 的 Coherence DTD
+### 3.5 為什麼 LMS/NLMS 不啟用 Coherence DTD
 
-LMS/NLMS 是時域濾波器，沒有內建的頻域表示。本專案透過額外的短時 FFT 實現 coherence DTD：
+LMS/NLMS 預設不啟用 coherence DTD，原因是收斂速度的根本限制：
 
-```python
-# 在 LMS/NLMS process() 路徑中
-error_spec = np.fft.rfft(output)    # 256-point real FFT → 129 bins
-far_spec   = np.fft.rfft(far_end)   # 256-point real FFT → 129 bins
-coherence_dtd.detect(error_spec, far_spec)
-```
+| | SUBBAND | NLMS |
+|---|---------|------|
+| 收斂時間 | 0.2-0.8s | 1-5s |
+| DT 期間 mu 被降低 | 快速恢復 | 無法在 single-talk gap 內恢復 |
+| 測試 ERLE (fileid_0) | 19.3 dB | 0.7 dB (with coh) / 3.4 dB (without) |
 
-**計算成本**：
-- 兩次 256-point rfft：~O(256 log 256) ≈ 2048 ops
-- PSD 更新：~O(129 × 3) = 387 ops
-- 濾波器更新（比較）：O(filter_length × hop_size) = O(512 × 256) = 131,072 ops
-- **DTD 額外成本 < 2%**
+**惡性循環**：
+1. Coherence DTD 正確偵測 double-talk → 降低 mu
+2. LMS/NLMS 收斂慢 → 降低 mu 後更慢恢復
+3. Single-talk 窗口不夠長讓 filter 收斂回來
+4. 下次 double-talk 時 filter 仍未收斂 → ERLE 更差
 
-**與 FREQ/SUBBAND 的差異**：
-- FREQ/SUBBAND 直接使用 filter 內部的 block_size-point (512→257 bins) 頻譜
-- LMS/NLMS 使用 hop_size-point (256→129 bins) 頻譜
-- 頻率解析度不同（62.5 Hz vs 31.25 Hz per bin），但 coherence 是 ratio-based 指標，不受影響
+LMS/NLMS 仍有 divergence detector 作為安全網（偵測 output > input 發散）。
+程式碼路徑保留，進階使用者可手動啟用 coherence DTD 做實驗。
 
 ### 3.6 參數
 

@@ -355,7 +355,7 @@ AEC 自適應濾波器在以下情況需要控制更新：
 
 ### 6.1.1 DTD 整體運作機制
 
-本專案使用**三層防護**控制自適應更新（所有模式均支援 Divergence + Coherence DTD）：
+本專案使用**三層防護**控制自適應更新（FREQ/SUBBAND 支援 Divergence + Coherence DTD，LMS/NLMS 僅 Divergence）：
 
 ```
 每個 hop (256 samples, 16ms @ 16kHz):
@@ -594,15 +594,15 @@ Shadow filter: mu = config.mu × shadow_mu_ratio (0.5), always mu_scale = 1.0
 | 複製方向 | BG → FG | Shadow → Main |
 | 額外偵測 | 無 (純雙濾波器) | 可選 DTD |
 
-### 6.5 Coherence-Based Double-Talk Detection ✅ 本專案採用（所有模式）
+### 6.5 Coherence-Based Double-Talk Detection ✅ 本專案採用（FREQ/SUBBAND）
 
 > 完整 DTD 設計文檔見 [dtd_design.md](dtd_design.md)。
 
 Divergence detection 的限制：收斂後的 double-talk 中，output ≈ near_speech < mic，ratio < 1.0，
 偵測不到。Error 包含近端語音（跟 far-end 不相關），filter 持續更新導致權重漂移。
 
-**適用範圍**：所有模式（LMS/NLMS/FREQ/SUBBAND）。LMS/NLMS 透過對 error 和 far-end
-做 hop_size-point real FFT 取得頻譜，重用相同的 coherence 偵測邏輯。額外計算量 < 2%。
+**適用範圍**：FREQ/SUBBAND 模式。LMS/NLMS 因收斂速度慢，coherence DTD 會在 double-talk
+場景下過度降低 mu 導致惡性循環（詳見 dtd_design.md §3.5），預設僅使用 divergence DTD。
 
 **解法**：用 error-reference Magnitude Squared Coherence (MSC) 偵測 DT。
 
