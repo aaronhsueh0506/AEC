@@ -549,7 +549,7 @@ class AEC:
     _MODE_DEFAULT_MU = {
         AecMode.LMS: 0.02,
         AecMode.NLMS: 0.4,
-        AecMode.FREQ: 0.2,
+        AecMode.FREQ: 0.3,
         AecMode.SUBBAND: 0.5,
     }
 
@@ -727,6 +727,9 @@ class AEC:
         self.near_power = 0.0
         self.error_power = 0.0
         self.alpha = 0.95
+        # Cumulative ERLE (full-segment average)
+        self.near_power_sum = 0.0
+        self.error_power_sum = 0.0
 
         # DTD confidence history (one entry per process() call)
         self.confidence_history = []
@@ -756,6 +759,8 @@ class AEC:
             self._freq_out_read = 0
         self.near_power = 0.0
         self.error_power = 0.0
+        self.near_power_sum = 0.0
+        self.error_power_sum = 0.0
 
     @property
     def hop_size(self) -> int:
@@ -940,6 +945,8 @@ class AEC:
         for i in range(len(near_end)):
             self.near_power = self.alpha * self.near_power + (1 - self.alpha) * near_end[i] ** 2
             self.error_power = self.alpha * self.error_power + (1 - self.alpha) * output[i] ** 2
+        self.near_power_sum += np.sum(near_end ** 2)
+        self.error_power_sum += np.sum(output ** 2)
 
         # Record DTD confidence for plotting
         self.confidence_history.append(self.get_dtd_confidence())
@@ -947,6 +954,14 @@ class AEC:
         return output.astype(np.float32)
 
     def get_erle(self) -> float:
+        """Return cumulative ERLE (full-segment average)."""
+        eps = 1e-10
+        if self.near_power_sum < eps and self.error_power_sum < eps:
+            return 0.0
+        return 10 * np.log10((self.near_power_sum + eps) / (self.error_power_sum + eps))
+
+    def get_erle_instant(self) -> float:
+        """Return instantaneous ERLE (EMA-smoothed)."""
         eps = 1e-10
         if self.near_power < eps and self.error_power < eps:
             return 0.0

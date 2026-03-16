@@ -69,11 +69,9 @@ def run_aec(mic_path, ref_path, mode, enable_dtd=True, enable_res=False,
 
     if mode == AecMode.LMS and mu == 0.3:
         mu = 0.01
-    elif mode == AecMode.FREQ and mu == 0.3:
-        mu = 0.1
 
     if filter_length == 0:
-        filter_length = 1024 if mode in (AecMode.SUBBAND, AecMode.FREQ) else 512
+        filter_length = 512
 
     config = AecConfig(
         sample_rate=sr,
