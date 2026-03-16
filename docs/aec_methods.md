@@ -326,9 +326,17 @@ for each partition p:
 | | 頻域 NLMS (FREQ) | PBFDAF (SUBBAND) |
 |---|---|---|
 | Partition 數 | 1 | P (多個) |
+| block_size | next_pow2(2×FL) | fft_size (固定 512) |
+| _internal_hop | block_size/2 (= FL) | 256 (= hop_size) |
 | 最大 echo path | ~16ms | 250ms+ |
 | 記憶體 | W[n_freqs] | W[P][n_freqs] |
 | 計算量 | O(N log N) | O(P·N log N) |
+| DTD cadence | 每 FL/2/hop_size frames | 每 frame |
+| DT 處理粒度 | 粗（整個 FL 一次更新） | 細（256 samples 一次更新） |
+
+**FREQ 模式的根本限制**：filter_length 與 block_size 耦合。FL 越長 → block_size 越大 →
+每次 weight update 涵蓋更多 samples → DT 期間污染更嚴重。SUBBAND 解耦了這兩者，
+filter_length 只影響 partition 數，不影響 block_size 和 DTD cadence。
 
 ### 優缺點
 
@@ -614,8 +622,14 @@ Smoothed PSDs (EMA smoothing on cross-spectrum):
   S_ee[k] = α × S_ee[k] + (1-α) × |error_spec[k]|²
   S_xx[k] = α × S_xx[k] + (1-α) × |far_spec[k]|²
 
-Broadband coherence (ratio-of-sums):
-  C_avg = Σ|S_ex[k]|² / (Σ(S_ee[k] × S_xx[k]) + ε)
+Broadband coherence (voice-band weighted, ratio-of-sums):
+  C_avg = Σ(w[k]×|S_ex[k]|²) / (Σ(w[k]×S_ee[k]×S_xx[k]) + ε)
+  voice_weight: 300-4kHz → 3.0, <100Hz/>6kHz → 0.3, 其餘 → 1.0
+
+Spectra source:
+  SUBBAND: 直接用 FDAF 的 error_spec/far_spec（每 frame）
+  FREQ: 獨立 FL-point FFT sliding buffer（每 FL/2 samples）
+        → 解耦 DTD 與 FDAF 的大 block_size
 
 Decision (hysteresis):
   if C_avg > coh_high(0.6):     no DT → release confidence
@@ -635,8 +649,11 @@ Decision (hysteresis):
 **跟 divergence detection 的關係**：互補，取 `max(div_conf, coh_conf)` 作為最終 confidence。
 Divergence 偵測 filter 發散，coherence 偵測近端語音汙染。
 
-**Shadow filter 在 DT 期間**：依照 WebRTC AEC3 和 SpeexDSP 做法，永遠全速更新（mu_scale=1.0）。
+**Shadow filter 在 DT 期間**：寬鬆 DTD 保護（mu 最低 20%，vs main 的 5%）。
 Shadow mu 本身已很小 (main_mu × 0.5)，DT 期間漂移速度有限，DT 結束後會重新收斂。
+
+> **注意**：Shadow filter 僅在 SUBBAND 模式下有效。FREQ 模式因 buffering 機制（block_size > hop_size），
+> shadow filter 和 RES post-filter 會自動跳過。
 
 ### 6.6 DTD 方法比較
 

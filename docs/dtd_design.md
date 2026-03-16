@@ -32,7 +32,9 @@
   └───────────────┬─────────────────────────────────────────┘
                   │
   ┌───────────────▼─────────────────────────────────────────┐
-  │ 4. Coherence Detector（FREQ/SUBBAND 預設啟用）              │
+  │ 4. Coherence Detector（FREQ/SUBBAND）                     │
+  │    SUBBAND: 用 FDAF 自己的 spectra，每 frame 偵測        │
+  │    FREQ: 獨立 FL-point FFT buffer，每 FL/2 samples 偵測  │
   │    coherence = MSC(error_spec, far_spec)                │
   │    → 更新 coh_confidence [0,1]                           │
   └───────────────┬─────────────────────────────────────────┘
@@ -163,8 +165,10 @@ else:
 使用 error-reference Magnitude Squared Coherence (MSC)：
 
 ```python
-# 1. 取得頻譜（FREQ/SUBBAND 模式）
-#    直接使用 filter 內部的 error_spec, far_spec
+# 1. 取得頻譜
+#    SUBBAND: 直接使用 filter 內部的 error_spec, far_spec（每 frame）
+#    FREQ: 獨立 FL-point FFT sliding buffer（每 FL/2 samples）
+#          → 解耦 DTD 與 FDAF 的 block_size，避免 FDAF 大 block 拖慢偵測
 
 # 2. EMA 平滑 PSD 估計
 S_ex[k] = α × S_ex[k] + (1-α) × error_spec[k] × conj(far_spec[k])
@@ -404,6 +408,57 @@ coherence 估計不穩定（實測 fileid_1 在 frame 35-62 假觸發 DT）。
 if frame_count < warmup_frames:
     return 0.0  # 所有偵測器: confidence 固定為 0
 ```
+
+**各模式的 warmup 實際時間**：warmup = 50 DTD invocations，
+但 FREQ 的 DTD 每 FL/2 / hop_size 個外部 frame 才跑一次。
+
+| 模式 | DTD 頻率 | Warmup 外部 frames | 實際時間 (@16kHz) |
+|------|----------|-------------------|-----------------|
+| SUBBAND | 每 frame | 50 | ~0.8s |
+| FREQ FL=512 | 每 frame | 50 | ~0.8s |
+| FREQ FL=1024 | 每 2 frames | 100 | ~1.6s |
+
+### FREQ 模式 DTD 獨立 Buffer
+
+FREQ 模式的 FDAF 使用大 block（block_size = next_pow2(2×FL)），導致：
+- `_internal_hop = block_size/2`，遠大於外部 `hop_size=256`
+- FDAF 的 `error_spec` / `far_spec` 每 `ihop/hop_size` 個外部 frame 才更新一次
+- 若 DTD 依賴 FDAF spectra，偵測會嚴重滯後
+
+**解法**：DTD coherence 使用獨立的 FL-point FFT sliding buffer：
+
+```python
+# 初始化：DTD 專用 buffer
+dtd_fft_size = filter_length           # e.g., 1024
+dtd_hop = filter_length // 2           # e.g., 512
+dtd_err_buf = zeros(dtd_fft_size)      # sliding window
+dtd_far_buf = zeros(dtd_fft_size)
+dtd_acc_err = zeros(dtd_hop)           # accumulator
+dtd_acc_far = zeros(dtd_hop)
+
+# 每個外部 frame (256 samples)：
+acc_err[pos:pos+256] = output          # 累積 output
+acc_far[pos:pos+256] = far_end         # 累積 far-end
+pos += 256
+if pos >= dtd_hop:                     # 累積滿 FL/2
+    err_buf[:dh] = err_buf[dh:]        # shift left
+    err_buf[dh:] = acc_err             # append
+    far_buf[:dh] = far_buf[dh:]
+    far_buf[dh:] = acc_far
+    error_spec = FFT(err_buf)          # FL-point FFT
+    far_spec = FFT(far_buf)
+    dtd_coherence.detect_block(error_spec, far_spec)
+    pos = 0
+```
+
+**各模式 DTD cadence 對比**：
+
+| 模式 | DTD FFT size | DTD hop | 偵測間隔 |
+|------|-------------|---------|---------|
+| SUBBAND | filter.block_size (512) | 256 (每 frame) | 16ms |
+| FREQ FL=512 | 512 | 256 (每 frame) | 16ms |
+| FREQ FL=1024 | 1024 | 512 (每 2 frames) | 32ms |
+| FREQ FL=2048 | 2048 | 1024 (每 4 frames) | 64ms |
 
 ---
 

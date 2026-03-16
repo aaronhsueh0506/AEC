@@ -594,8 +594,19 @@ class AEC:
                 self._freq_out_queue = np.zeros(self._internal_hop, dtype=np.float32)
                 self._freq_queue_write = 0
                 self._freq_out_read = 0
+                # DTD independent buffer: FL-point FFT with hop=FL/2
+                # Decouples coherence DTD from FDAF's larger block_size
+                fl = self.config.filter_length
+                self._dtd_fft_size = fl
+                self._dtd_hop = fl // 2
+                self._dtd_err_buf = np.zeros(fl, dtype=np.float32)
+                self._dtd_far_buf = np.zeros(fl, dtype=np.float32)
+                self._dtd_acc_err = np.zeros(fl // 2, dtype=np.float32)
+                self._dtd_acc_far = np.zeros(fl // 2, dtype=np.float32)
+                self._dtd_acc_pos = 0
             else:
                 self._freq_near_queue = None
+                self._dtd_fft_size = 0
         elif self.config.mode == AecMode.LMS:
             # LMS: Time-domain, no normalization
             self.filter = NlmsFilter(
@@ -632,6 +643,9 @@ class AEC:
         # VSS-NLMS) either don't work for AEC or cause vicious cycles with slow
         # convergence. Output Limiter provides the safety net instead.
         if self.config.enable_dtd and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
+            # Warmup: 50 DTD invocations before coherence starts.
+            # FREQ DTD runs every dtd_hop/hop_size external frames,
+            # so 50 DTD invocations = 50 * dtd_hop/hop_size external frames.
             warmup = 50
             self.dtd_divergence = DtdEstimator(
                 mode='divergence',
@@ -640,7 +654,13 @@ class AEC:
                 release=self.config.dtd_confidence_release,
                 warmup_frames=warmup,
             )
-            coh_n_freqs = self.filter.n_freqs
+            # FREQ: FL-point FFT (matches filter length, hop=FL/2)
+            # SUBBAND: use FDAF's own spectra (block_size from filter)
+            if self._dtd_fft_size > 0:
+                dtd_block_size = self._dtd_fft_size
+            else:
+                dtd_block_size = self.filter.block_size
+            coh_n_freqs = dtd_block_size // 2 + 1
             self.dtd_coherence = DtdEstimator(
                 mode='coherence',
                 n_freqs=coh_n_freqs,
@@ -654,7 +674,7 @@ class AEC:
                 release=self.config.dtd_coh_release,
                 warmup_frames=warmup,
                 sample_rate=self.config.sample_rate,
-                block_size=self.filter.block_size,
+                block_size=dtd_block_size,
             )
         else:
             self.dtd_divergence = None
@@ -877,11 +897,33 @@ class AEC:
             # Update DTD detectors for NEXT block
             if self.dtd_divergence:
                 self.dtd_divergence.detect_block(near_end, far_end, output=output)
-            if self.dtd_coherence and self._freq_near_queue is None:
-                self.dtd_coherence.detect_block(
-                    near_end, far_end,
-                    error_spec=self.filter.error_spec,
-                    far_spec=self.filter.far_spec)
+            if self.dtd_coherence:
+                if self._dtd_fft_size > 0:
+                    # FREQ buffered: accumulate into DTD buffer, run at hop=FL/2
+                    hop = self._hop_size
+                    pos = self._dtd_acc_pos
+                    self._dtd_acc_err[pos:pos+hop] = output
+                    self._dtd_acc_far[pos:pos+hop] = far_end
+                    self._dtd_acc_pos = pos + hop
+                    if self._dtd_acc_pos >= self._dtd_hop:
+                        # Shift main buffer and run DTD
+                        dh = self._dtd_hop
+                        self._dtd_err_buf[:dh] = self._dtd_err_buf[dh:]
+                        self._dtd_err_buf[dh:] = self._dtd_acc_err
+                        self._dtd_far_buf[:dh] = self._dtd_far_buf[dh:]
+                        self._dtd_far_buf[dh:] = self._dtd_acc_far
+                        self._dtd_acc_pos = 0
+                        error_spec = np.fft.rfft(self._dtd_err_buf)
+                        far_spec = np.fft.rfft(self._dtd_far_buf)
+                        self.dtd_coherence.detect_block(
+                            near_end, far_end,
+                            error_spec=error_spec, far_spec=far_spec)
+                else:
+                    # SUBBAND: use FDAF's spectra directly (every frame)
+                    self.dtd_coherence.detect_block(
+                        near_end, far_end,
+                        error_spec=self.filter.error_spec,
+                        far_spec=self.filter.far_spec)
         else:
             # LMS/NLMS: no DTD (Output Limiter provides safety net)
             output, echo_est = self.filter.process_block(near_end, far_end)
