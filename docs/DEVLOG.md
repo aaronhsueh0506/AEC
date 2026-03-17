@@ -2,6 +2,46 @@
 
 ## 版本歷史
 
+### v1.4.0 (2026-03-17) - RES OLA 重寫 + Shadow 修正 + DTD-aware RES
+
+#### 改動內容
+
+1. **RES 改用 OLA + sqrt-Hann 窗**
+   - 修正棋盤頻譜（musical noise）和無線電不連續感
+   - 根因：舊版無窗函數、attack 太快（0.3）、無跨頻率平滑、無 crossfade
+   - 分析窗 × 合成窗 = Hann，50% overlap-add 完美重建
+   - 加入 3-bin cross-frequency smoothing 消除孤立 gain 峰谷
+   - Attack 放慢 0.3→0.6（time constant 1.4→2.5 frames）
+
+2. **RES DTD-aware 壓制**
+   - `over_sub_eff = over_sub × (1 - dtd_conf)`
+   - DT 時自動降低壓制強度，保護近端語音
+   - dtd_conf=0 → 正常壓制，dtd_conf=1 → 完全 bypass
+
+3. **Shadow filter 修正**
+   - 加入 50-frame warm-up guard：收斂前不允許 copy
+   - 移除 `output = shadow_out`：copy 只複製 weights，不切換 output
+   - 修正：舊版在 frame 3, 8 就觸發 copy，把未收斂的 weights 複製到 main 導致退化
+
+4. **ERLE 改用 cumulative average**
+   - 舊版 EMA（α=0.95）只看最後幾個 sample → fileid_1 結尾靜音顯示 0 dB
+   - 新版 `near_power_sum / error_power_sum` 全段平均
+
+5. **FREQ mu 0.2→0.3**
+   - 配合 mode default mu table 統一
+
+#### 驗證結果（FL=1024, subband）
+
+| Config | fileid_0 (DT) | fileid_1 (far only) | fileid_2 (alternating) |
+|--------|---------------|---------------------|----------------------|
+| DTD only | 7.0 dB | 21.0 dB | 1.4 dB |
+| DTD+Shadow | 6.7 dB | 21.0 dB | 1.3 dB |
+| DTD+RES | 8.3 dB | 25.1 dB | 1.7 dB |
+
+Shadow 不再退化（差距 <0.3 dB），RES 在 far-only 場景提升 +4 dB，DT 場景因 DTD-aware 降低壓制。
+
+---
+
 ### v1.3.0 (2025-03-13) - DTD 改為 WebRTC-style 發散偵測
 
 #### 改動內容
@@ -151,7 +191,7 @@
 
 - [x] 實作 Subband NLMS (PBFDAF 頻域)
 - [x] DTD 改為 WebRTC-style 發散偵測
-- [ ] 啟用 RES post-filter（需要 spectrum access refactoring）
+- [x] 啟用 RES post-filter（Python OLA + sqrt-Hann + DTD-aware）
 - [ ] 加入非線性處理 (NLP)
 - [ ] 延遲估計模組
 

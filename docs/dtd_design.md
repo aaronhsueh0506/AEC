@@ -335,22 +335,29 @@ Shadow filter: mu = config.mu × 0.5 × shadow_scale  ← 寬鬆 DTD（最低 20
 每個 block:
   1. main_out   = main.process(near, far, mu_scale)
   2. shadow_mu_scale = 1.0 - conf × (1.0 - 0.2)    # 最低保留 20%
-     shadow_out = shadow.process(near, far, shadow_mu_scale)
+     shadow.process(near, far, shadow_mu_scale)      # 只更新 weights
   3. 平滑 error energy (EMA α=0.95):
      main_err   = α × main_err   + (1-α) × mean(main_out²)
      shadow_err = α × shadow_err + (1-α) × mean(shadow_out²)
-  4. Copy hysteresis (#5): 連續 3 frames shadow_err < main_err × 0.8 才複製
+  4. Warm-up guard: 前 50 frames 跳過 copy 邏輯（讓兩個 filter 都先收斂）
+  5. Copy hysteresis (#5): 連續 3 frames shadow_err < main_err × 0.8 才複製
      if shadow_err < main_err × 0.8:
        copy_counter += 1
      else:
        copy_counter = 0
      if copy_counter >= 3:
-       main.weights ← shadow.weights   (shadow → main)
+       main.weights ← shadow.weights   (shadow → main, 只複製 weights)
        copy_counter = 0
-  5. 雙向複製 (#6): main 明顯好時，shadow 跟上
+  6. 雙向複製 (#6): main 明顯好時，shadow 跟上
      elif main_err < shadow_err × 0.8:
        shadow.weights ← main.weights   (main → shadow)
 ```
+
+**設計變更**：
+- **移除 `output = shadow_out`**：copy 時只複製 weights，不切換當 frame 的 output，
+  避免 copy 瞬間造成 output 不連續
+- **50-frame warm-up**：收斂前 error 比較不穩定（兩者都接近 0），容易誤觸發 copy
+  導致退化（實測 frame 3, 8 就觸發，把 far-end 加回來）
 
 ### 5.2 與 DTD 的互補
 

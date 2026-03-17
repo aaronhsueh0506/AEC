@@ -377,9 +377,9 @@ AEC 自適應濾波器在以下情況需要控制更新：
   ┌───────────────▼─────────────────────────────────────────┐
   │ 2. Shadow Filter (可選)                                  │
   │    shadow_mu = 1.0 - conf × (1-0.2) ← 寬鬆 DTD（最低 20%）│
-  │    shadow_out = shadow.process(near, far, shadow_mu)     │
-  │    連續 3 frames shadow_err < main_err × 0.8 → copy      │
-  │    main 明顯好時 → 反向同步 shadow（雙向 copy）             │
+  │    shadow.process(near, far, shadow_mu)  ← 只更新 weights│
+  │    50-frame warm-up → 連續 3 frames shadow_err < main_err │
+  │    × 0.8 → copy weights（不切換 output）                   │
   └───────────────┬─────────────────────────────────────────┘
                   │
   ┌───────────────▼─────────────────────────────────────────┐
@@ -410,7 +410,9 @@ AEC 自適應濾波器在以下情況需要控制更新：
                   │
   ┌───────────────▼─────────────────────────────────────────┐
   │ 6. RES Post-Filter (可選)                                │
-  │    頻域譜減法，抑制殘餘回音 10~20 dB                      │
+  │    OLA + sqrt-Hann 窗，EER-based 增益                    │
+  │    DTD-aware: over_sub × (1-dtd_conf)，DT 時自動放鬆     │
+  │    cross-freq smoothing + 慢 attack，抑制殘餘回音 2~4 dB  │
   └───────────────┬─────────────────────────────────────────┘
                   │
   ┌───────────────▼─────────────────────────────────────────┐
@@ -563,20 +565,26 @@ if out_peak > near_peak and near_peak > 1e-6:
 這是 WebRTC AEC3 和 SpeexDSP 的核心機制。
 
 ```
-Main filter:   mu = config.mu, mu_scale from DTD
-Shadow filter: mu = config.mu × shadow_mu_ratio (0.5), always mu_scale = 1.0
+Main filter:   mu = config.mu × mu_scale (DTD 控制，最低 5%)
+Shadow filter: mu = config.mu × 0.5 × shadow_mu_scale (寬鬆 DTD，最低 20%)
 
 每個 block:
   1. Main: output = process(near, far, mu_scale)
-  2. Shadow: shadow_out = process(near, far, 1.0)
+  2. Shadow: shadow.process(near, far, shadow_mu_scale)  // 只更新 weights
   3. Smooth error energy:
      main_err_smooth   = α × main_err_smooth   + (1-α) × main_err
      shadow_err_smooth = α × shadow_err_smooth + (1-α) × shadow_err
-  4. if shadow_err_smooth < main_err_smooth × threshold:
-         main.W ← shadow.W        // 複製權重
-         output = shadow_out       // 使用 shadow 輸出
+  4. Warm-up guard: 前 50 frames 不允許 copy（兩個 filter 都需要先收斂）
+  5. Copy hysteresis: 連續 3 frames shadow_err < main_err × 0.8 才觸發
+     if shadow_err_smooth < main_err_smooth × threshold:
+         main.W ← shadow.W        // 只複製權重（不切換 output）
          main_err_smooth = shadow_err_smooth
 ```
+
+**設計要點**：
+- **不切換 output**：copy 只複製 weights，不用 `output = shadow_out`，避免 output 不連續
+- **50-frame warm-up**：收斂前兩個 filter 的 error 都不穩定，比較無意義，強行 copy 會退化
+- **寬鬆 DTD**：shadow DTD mu 最低 20%（vs main 的 5%），保留更多追蹤能力
 
 **與 DTD 的互補**：
 - DTD 偵測發散後降低 mu → 防止 main filter 惡化
@@ -715,7 +723,24 @@ if w_norm > max_w_norm (預設 4.0):
 ### 目的
 
 自適應濾波器無法完全消除回聲（受限於收斂速度、非線性失真等），
-RES post-filter 在頻域對殘餘回聲進行額外 10~20 dB 的抑制。
+RES post-filter 對殘餘回聲進行額外 2~4 dB 的抑制。
+
+### 架構：OLA + sqrt-Hann 窗
+
+RES 使用獨立的 Overlap-Add 框架（與 PBFDAF 的 Overlap-Save 分離），
+避免 frame 邊界不連續和棋盤頻譜（musical noise）：
+
+```
+1. 接收 hop-size (256) 的時域 error 信號
+2. Sliding buffer：拼接前一 hop 和當前 hop → block_size (512) 的 frame
+3. 分析窗：sqrt-Hann × frame → FFT
+4. 頻域增益：EER-based gain → cross-freq smoothing → temporal smoothing
+5. 合成窗：IFFT → sqrt-Hann × frame
+6. Overlap-Add：累加到 OLA buffer，輸出前 hop
+```
+
+**為什麼用 sqrt-Hann**：分析窗 × 合成窗 = Hann，50% overlap-add 完美重建
+（`Σ hann[n + k·hop] = 1`），不會引入振幅調制。
 
 ### 核心公式
 
@@ -734,17 +759,20 @@ EER[k] = echo_psd[k] / (error_psd[k] + ε)
 - EER 高 → 殘餘回聲多 → 需要更多抑制
 - EER 低 → 回聲已被消除 → 不需要抑制
 
-**增益計算：**
+**DTD-aware 增益計算：**
 ```
-G[k] = 1 / (1 + α_os · EER[k])
+over_sub_eff = α_os × (1.0 - dtd_conf)    // DT 時降低壓制強度
+G[k] = 1 / (1 + over_sub_eff · EER[k])
 ```
 
-| EER 值 | G 值 | 含義 |
-|--------|------|------|
-| 0 | 1.0 | 無回聲，不抑制 |
-| 0.5 | 0.57 | 中等抑制 |
-| 1.0 | 0.4 | 較強抑制 |
-| → ∞ | → 0 | 最大抑制 |
+| dtd_conf | over_sub_eff | 行為 |
+|----------|-------------|------|
+| 0.0 | 1.5 | 正常壓制（far-end single talk） |
+| 0.5 | 0.75 | 減半壓制（疑似 DT） |
+| 1.0 | 0.0 | 完全 bypass（確定 DT，保護近端語音） |
+
+**為什麼需要 DTD-aware**：DT 時 error = 近端語音 + 殘餘回音。若不降低 over_sub，
+RES 會把近端語音也一起壓掉，造成語音失真。
 
 **增益下限（Floor）：**
 ```
@@ -752,17 +780,23 @@ G[k] = max(G[k], g_min)
 ```
 例如 g_min_db = -20 dB → g_min = 0.1，防止過度抑制造成不自然的靜音。
 
+**跨頻率平滑（Cross-frequency smoothing）：**
+```
+G[k] = moving_average(G, width=3)[k]    // 3-bin moving average
+```
+消除相鄰 bin 間的孤立 gain 峰谷，減少 musical noise（棋盤頻譜的主因之一）。
+
 **非對稱時間平滑：**
 ```
 if G[k] < gain_smooth[k]:        // Attack（回聲突然出現）
-    α_g = 0.3                    // 快速反應
+    α_g = 0.6                    // 中速反應（避免 binary-like switching）
 else:                             // Release（回聲消失）
     α_g = 0.8                    // 緩慢恢復
 
 gain_smooth[k] = α_g · gain_smooth[k] + (1 - α_g) · G[k]
 ```
 
-- **快攻（attack = 0.3）：** 回聲突然出現時快速壓制
+- **中速攻（attack = 0.6）：** time constant ~2.5 frames，避免太快切換造成不連續
 - **慢放（release = 0.8）：** 回聲消失後緩慢恢復，避免音樂噪聲
 
 **遠端靜音自動釋放：**
@@ -775,28 +809,24 @@ if (far_power < 1e-6):
 
 | 參數 | 典型值 | 說明 |
 |------|--------|------|
-| α_os (over_sub) | 1.5 | 過減因子，越大抑制越強 |
+| α_os (over_sub) | 1.5 | 過減因子，越大抑制越強（DT 時自動降低） |
 | g_min_db | -20 dB | 最小增益限制 |
 | α_psd | 0.9 | PSD 平滑因子 |
-| α_attack | 0.3 | 攻擊平滑（快） |
+| α_attack | 0.6 | 攻擊平滑（中速，避免 musical noise） |
 | α_release | 0.8 | 釋放平滑（慢） |
-
-### 輸出
-
-```
-E_out[k] = gain_smooth[k] · E[k]
-```
+| cross_freq_width | 3 bins | 跨頻率平滑寬度 |
 
 ### 典型效能
 
 - 語音主導時：G ≈ 1.0（最小影響）
-- 回聲突發時：快速壓低（10~20 dB）
+- 回聲突發時：壓低 2~4 dB（ERLE 提升）
+- DT 時：自動放鬆壓制，保護近端語音
 - 噪聲環境：G = 1.0（不抑制背景噪聲，那是 NR 的工作）
 
 ### 本專案狀態
 
-- `ResFilter` class（Python `aec.py`）和 `res_filter.c`（C）已實作
-- `aec_process()` 中 RES 標記為 TODO，需要 spectrum access refactoring 才能啟用
+- Python：`ResFilter` class（`aec.py`）已啟用，使用 OLA + sqrt-Hann + DTD-aware
+- C：`res_filter.c` 已實作（尚未同步 OLA 架構）
 
 ---
 
@@ -850,9 +880,9 @@ if ERLE < target_ERLE:
 
 ### 未來改進方向
 
-1. 啟用 RES post-filter（需要 spectrum access refactoring）
-2. 考慮 Wiener + comfort noise（如果 musical noise 成為問題）
-3. Echo-only 段落的 NLP 可進一步提升 ERLE
+1. 考慮 Wiener + comfort noise（進一步降低 musical noise）
+2. Echo-only 段落的 NLP 可進一步提升 ERLE
+3. C 版本同步 OLA + sqrt-Hann + DTD-aware 架構
 
 ---
 
