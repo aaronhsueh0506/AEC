@@ -277,44 +277,60 @@ class ResFilter:
     """
     Residual Echo Suppressor (Post-Filter)
 
-    Uses Echo-to-Error Ratio (EER) based spectral suppression.
+    Uses EER-based spectral suppression with OLA + sqrt-Hann windowing
+    to avoid frame-boundary artifacts and musical noise.
     """
 
-    def __init__(self, n_freqs: int, g_min_db: float = -20.0,
+    def __init__(self, block_size: int, n_freqs: int, g_min_db: float = -20.0,
                  over_sub: float = 1.5, alpha: float = 0.8):
+        self.block_size = block_size
+        self.hop_size = block_size // 2
         self.n_freqs = n_freqs
         self.g_min = 10 ** (g_min_db / 20)
         self.over_sub = over_sub
         self.alpha = alpha
         self.alpha_psd = 0.9
 
-        self.gain = np.ones(n_freqs, dtype=np.float32)
         self.gain_smooth = np.ones(n_freqs, dtype=np.float32)
         self.echo_psd = np.zeros(n_freqs, dtype=np.float32)
         self.error_psd = np.zeros(n_freqs, dtype=np.float32)
 
+        # OLA: sqrt-Hann window + sliding input buffer + overlap buffer
+        self.window = np.sqrt(np.hanning(block_size)).astype(np.float32)
+        self.input_buf = np.zeros(block_size, dtype=np.float32)
+        self.ola_buf = np.zeros(block_size, dtype=np.float32)
+
     def reset(self):
-        self.gain.fill(1)
         self.gain_smooth.fill(1)
         self.echo_psd.fill(0)
         self.error_psd.fill(0)
+        self.input_buf.fill(0)
+        self.ola_buf.fill(0)
 
-    def process(self, error_spec: np.ndarray, echo_spec: np.ndarray,
+    def process(self, error_hop: np.ndarray, echo_spec: np.ndarray,
                 far_power: float) -> np.ndarray:
-        """Process spectrum and return enhanced output spectrum"""
+        """Process hop-size error signal, return enhanced hop via OLA."""
+        hop = self.hop_size
+
+        # Slide in new error samples
+        self.input_buf[:hop] = self.input_buf[hop:]
+        self.input_buf[hop:] = error_hop
+
+        # Analysis: sqrt-Hann window + FFT
+        windowed = self.input_buf * self.window
+        spec = np.fft.rfft(windowed)
+
         # Compute power spectra
         echo_pwr = np.abs(echo_spec) ** 2
-        error_pwr = np.abs(error_spec) ** 2
+        error_pwr = np.abs(spec) ** 2
 
         # Smooth PSD
         self.echo_psd = self.alpha_psd * self.echo_psd + (1 - self.alpha_psd) * echo_pwr
         self.error_psd = self.alpha_psd * self.error_psd + (1 - self.alpha_psd) * error_pwr
 
-        # EER
+        # EER-based gain
         eps = 1e-10
         eer = self.echo_psd / (self.error_psd + eps)
-
-        # Gain
         g = 1.0 / (1.0 + self.over_sub * eer)
         g = np.maximum(g, self.g_min)
 
@@ -322,13 +338,25 @@ class ResFilter:
         if far_power < 1e-6:
             g = np.ones_like(g)
 
-        self.gain = g
+        # Cross-frequency smoothing (3-bin moving average)
+        g = np.convolve(g, np.ones(3) / 3, mode='same').astype(np.float32)
 
-        # Smooth (asymmetric)
-        alpha_g = np.where(g < self.gain_smooth, 0.3, self.alpha)
+        # Temporal smoothing (asymmetric: slower attack, normal release)
+        alpha_g = np.where(g < self.gain_smooth, 0.6, self.alpha)
         self.gain_smooth = alpha_g * self.gain_smooth + (1 - alpha_g) * g
 
-        return self.gain_smooth * error_spec
+        # Apply gain + synthesis sqrt-Hann window + IFFT
+        enhanced_spec = self.gain_smooth * spec
+        enhanced_time = np.fft.irfft(enhanced_spec, self.block_size)
+        enhanced_time *= self.window
+
+        # Overlap-add
+        self.ola_buf += enhanced_time
+        output = self.ola_buf[:hop].copy()
+        self.ola_buf[:hop] = self.ola_buf[hop:]
+        self.ola_buf[hop:] = 0.0
+
+        return output.astype(np.float32)
 
 
 class DtdEstimator:
@@ -683,6 +711,7 @@ class AEC:
         # RES (only for frequency-domain modes)
         if self.config.enable_res and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
             self.res = ResFilter(
+                block_size=self.filter.block_size,
                 n_freqs=self.filter.n_freqs,
                 g_min_db=self.config.res_g_min_db,
                 over_sub=self.config.res_over_sub,
@@ -722,6 +751,7 @@ class AEC:
 
         # #5: Copy hysteresis counter
         self.shadow_copy_counter = 0
+        self.shadow_frame_count = 0  # warm-up counter for shadow copy
 
         # ERLE
         self.near_power = 0.0
@@ -745,6 +775,7 @@ class AEC:
         self.epc_hangover_count = 0
         self.prev_dtd_conf = 0.0
         self.shadow_copy_counter = 0
+        self.shadow_frame_count = 0
         if self.dtd_divergence:
             self.dtd_divergence.reset()
         if self.dtd_coherence:
@@ -829,10 +860,11 @@ class AEC:
 
             # Shadow filter with DTD protection (#1) and bidirectional copy (#6)
             if self.shadow_filter is not None and self._freq_near_queue is None:
+                self.shadow_frame_count += 1
                 # #1: Shadow also receives DTD protection, but more lenient
                 conf = self.prev_dtd_conf  # use same conf from _compute_mu_scale
                 shadow_mu_scale = 1.0 - conf * (1.0 - self.config.shadow_dtd_mu_min)
-                shadow_out = self.shadow_filter.process(near_end, far_end, shadow_mu_scale)
+                self.shadow_filter.process(near_end, far_end, shadow_mu_scale)
 
                 main_err = self.filter.get_error_energy()
                 shadow_err = self.shadow_filter.get_error_energy()
@@ -841,24 +873,25 @@ class AEC:
                 self.main_err_smooth = alpha_s * self.main_err_smooth + (1 - alpha_s) * main_err
                 self.shadow_err_smooth = alpha_s * self.shadow_err_smooth + (1 - alpha_s) * shadow_err
 
-                threshold = self.config.shadow_copy_threshold
-                # #5: Copy hysteresis — require N consecutive frames
-                if self.shadow_err_smooth < self.main_err_smooth * threshold:
-                    self.shadow_copy_counter += 1
-                else:
-                    self.shadow_copy_counter = 0
+                # Warm-up: skip copy logic for first 50 frames (let both filters converge)
+                if self.shadow_frame_count >= 50:
+                    threshold = self.config.shadow_copy_threshold
+                    # #5: Copy hysteresis — require N consecutive frames
+                    if self.shadow_err_smooth < self.main_err_smooth * threshold:
+                        self.shadow_copy_counter += 1
+                    else:
+                        self.shadow_copy_counter = 0
 
-                if self.shadow_copy_counter >= self.config.shadow_copy_hysteresis:
-                    # Shadow → Main copy
-                    self.filter.copy_weights_from(self.shadow_filter)
-                    self.filter.echo_spec[:] = self.shadow_filter.echo_spec
-                    output = shadow_out
-                    self.main_err_smooth = self.shadow_err_smooth
-                    self.shadow_copy_counter = 0
-                # #6: Bidirectional — Main → Shadow when main is clearly better
-                elif self.main_err_smooth < self.shadow_err_smooth * threshold:
-                    self.shadow_filter.copy_weights_from(self.filter)
-                    self.shadow_err_smooth = self.main_err_smooth
+                    if self.shadow_copy_counter >= self.config.shadow_copy_hysteresis:
+                        # Shadow → Main copy (weights only, no output switch)
+                        self.filter.copy_weights_from(self.shadow_filter)
+                        self.filter.echo_spec[:] = self.shadow_filter.echo_spec
+                        self.main_err_smooth = self.shadow_err_smooth
+                        self.shadow_copy_counter = 0
+                    # #6: Bidirectional — Main → Shadow when main is clearly better
+                    elif self.main_err_smooth < self.shadow_err_smooth * threshold:
+                        self.shadow_filter.copy_weights_from(self.filter)
+                        self.shadow_err_smooth = self.main_err_smooth
 
             # Echo path change detection (shadow-based)
             # DT: refined error ↑, shadow stable → ΔE/total large
@@ -887,17 +920,10 @@ class AEC:
                 else:
                     self.epc_active = False
 
-            # RES post-filter using overlap-save (skip for buffered FDAF)
-            # Apply RES gain to full-block residual spectrum (near_spec - echo_spec),
-            # then IFFT and take last hop_size samples. This inherits the overlap-save
-            # framework from PBFDAF, avoiding block boundary artifacts.
+            # RES post-filter using OLA + sqrt-Hann (skip for buffered FDAF)
             if self.res and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
-                residual_spec = self.filter.near_spec - self.filter.echo_spec
-                enhanced_spec = self.res.process(residual_spec,
-                                                  self.filter.echo_spec, far_power)
-                enhanced_time = np.fft.irfft(enhanced_spec, self.filter.block_size)
-                output = enhanced_time[self.filter.hop_size:].astype(np.float32)
+                output = self.res.process(output, self.filter.echo_spec, far_power)
 
             # Update DTD detectors for NEXT block
             if self.dtd_divergence:
