@@ -324,19 +324,22 @@ class ResFilter:
         echo_pwr = np.abs(echo_spec) ** 2
         error_pwr = np.abs(spec) ** 2
 
-        # Smooth PSD
-        self.echo_psd = self.alpha_psd * self.echo_psd + (1 - self.alpha_psd) * echo_pwr
+        # Smooth PSD — scale echo_psd by far-end activity to avoid
+        # stale echo estimate suppressing near-end speech after far-end stops
+        far_scale = min(far_power / (np.mean(error_pwr) + 1e-10), 1.0)
+        echo_pwr_scaled = echo_pwr * far_scale
+        self.echo_psd = self.alpha_psd * self.echo_psd + (1 - self.alpha_psd) * echo_pwr_scaled
         self.error_psd = self.alpha_psd * self.error_psd + (1 - self.alpha_psd) * error_pwr
 
-        # EER-based gain (≈ Wiener with over-subtraction)
+        # Fast decay echo_psd when far-end is weak
+        if far_power < 1e-4:
+            self.echo_psd *= 0.5
+
+        # EER-based gain (≈ Wiener gain)
         eps = 1e-10
         eer = self.echo_psd / (self.error_psd + eps)
         g = 1.0 / (1.0 + self.over_sub * eer)
         g = np.maximum(g, self.g_min)
-
-        # Release when far-end inactive
-        if far_power < 1e-6:
-            g = np.ones_like(g)
 
         # Cross-frequency smoothing (3-bin moving average)
         g = np.convolve(g, np.ones(3) / 3, mode='same').astype(np.float32)
