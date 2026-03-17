@@ -411,7 +411,7 @@ AEC 自適應濾波器在以下情況需要控制更新：
   ┌───────────────▼─────────────────────────────────────────┐
   │ 6. RES Post-Filter (可選)                                │
   │    OLA + sqrt-Hann 窗，EER-based 增益                    │
-  │    DTD-aware: over_sub × (1-dtd_conf)，DT 時自動放鬆     │
+  │    EER-based Wiener gain，DT 時 EER 自然降低 → 壓制減少  │
   │    cross-freq smoothing + 慢 attack，抑制殘餘回音 2~4 dB  │
   └───────────────┬─────────────────────────────────────────┘
                   │
@@ -613,7 +613,7 @@ Shadow filter: mu = config.mu × 0.5 × shadow_mu_scale (寬鬆 DTD，最低 20%
 | mu 控制 | Adaptive（convergence-based） | Variable（optimal NLMS theory） | DTD mu_scale [0.05, 1.0] |
 | Copy 觸發 | shadow_err < main_err × threshold | error_FG > error_BG（連續 N frames） | 連續 3 frames + 50-frame warm-up |
 | Copy 行為 | Shadow → Main + output switch | BG → FG | Shadow → Main（只 copy weights） |
-| Post-filter | Wiener-like suppressor + comfort noise | NLP (spectral subtraction) | EER-based RES（≈ Wiener with over_sub, DTD-aware） |
+| Post-filter | Wiener-like suppressor + comfort noise | NLP (spectral subtraction) | EER-based RES（≈ Wiener gain） |
 | DT 反應速度 | 慢（等 error 翻轉） | 中（variable μ 自動降低） | 快（Coherence DTD 2-3 frames） |
 | 計算量 | 永遠 2x filter | 永遠 2x filter | DTD-only: 1x + DTD; +Shadow: 2x |
 | 參數數量 | 少（copy_threshold, mu） | 少（variance smooth factors） | 多（DTD 6+ params + shadow params） |
@@ -665,7 +665,6 @@ Shadow-only 可運作但 DT ERLE 較低（事後修正 vs 預防式）。far-onl
 | 預防式 DT 保護 | Coherence DTD 在 2-3 frames 內偵測 DT → 立即降 mu。Dual-filter-only 是事後修正 |
 | 連續 mu scaling | mu_scale ∈ [0.05, 1.0] 精細控制更新速率。Dual filter 只有 binary 決策（copy or not） |
 | 可省計算 | DTD-only 不需 2x filter（省 ~35KB memory + 1x PBFDAF） |
-| RES DTD-aware | DTD confidence 傳給 RES → DT 時放鬆壓制保護近端語音 |
 
 **本專案的劣勢**：
 
@@ -838,20 +837,14 @@ EER[k] = echo_psd[k] / (error_psd[k] + ε)
 - EER 高 → 殘餘回聲多 → 需要更多抑制
 - EER 低 → 回聲已被消除 → 不需要抑制
 
-**DTD-aware 增益計算：**
+**增益計算（Wiener gain）：**
 ```
-over_sub_eff = α_os × (1.0 - dtd_conf)    // DT 時降低壓制強度
-G[k] = 1 / (1 + over_sub_eff · EER[k])
+G[k] = 1 / (1 + α_os · EER[k])
 ```
 
-| dtd_conf | over_sub_eff | 行為 |
-|----------|-------------|------|
-| 0.0 | 1.5 | 正常壓制（far-end single talk） |
-| 0.5 | 0.75 | 減半壓制（疑似 DT） |
-| 1.0 | 0.0 | 完全 bypass（確定 DT，保護近端語音） |
+當 `α_os = 1.0` 時等價於標準 Wiener gain：`G = error_psd / (error_psd + echo_psd)`。
 
-**為什麼需要 DTD-aware**：DT 時 error = 近端語音 + 殘餘回音。若不降低 over_sub，
-RES 會把近端語音也一起壓掉，造成語音失真。
+**DT 天生保護**：DT 時 error = 近端語音 + 殘餘回音 → `error_psd` 增大 → `EER` 自然降低 → `G` 接近 1.0 → 壓制自動減少。這與 SpeexDSP 的 Wiener post-filter 機制相同，不需要額外的 DTD 資訊。
 
 **增益下限（Floor）：**
 ```
@@ -888,7 +881,7 @@ if (far_power < 1e-6):
 
 | 參數 | 典型值 | 說明 |
 |------|--------|------|
-| α_os (over_sub) | 1.5 | 過減因子，越大抑制越強（DT 時自動降低） |
+| α_os (over_sub) | 1.0 | 過減因子（1.0 = 標準 Wiener gain） |
 | g_min_db | -20 dB | 最小增益限制 |
 | α_psd | 0.9 | PSD 平滑因子 |
 | α_attack | 0.6 | 攻擊平滑（中速，避免 musical noise） |
@@ -899,12 +892,12 @@ if (far_power < 1e-6):
 
 - 語音主導時：G ≈ 1.0（最小影響）
 - 回聲突發時：壓低 2~4 dB（ERLE 提升）
-- DT 時：自動放鬆壓制，保護近端語音
+- DT 時：EER 自然降低 → 壓制自動減少（Wiener 天生特性）
 - 噪聲環境：G = 1.0（不抑制背景噪聲，那是 NR 的工作）
 
 ### 本專案狀態
 
-- Python：`ResFilter` class（`aec.py`）已啟用，使用 OLA + sqrt-Hann + DTD-aware
+- Python：`ResFilter` class（`aec.py`）已啟用，使用 OLA + sqrt-Hann + Wiener gain
 - C：`res_filter.c` 已實作（尚未同步 OLA 架構）
 
 ---
@@ -961,7 +954,7 @@ if ERLE < target_ERLE:
 
 1. 考慮 Wiener + comfort noise（進一步降低 musical noise）
 2. Echo-only 段落的 NLP 可進一步提升 ERLE
-3. C 版本同步 OLA + sqrt-Hann + DTD-aware 架構
+3. C 版本同步 OLA + sqrt-Hann + Wiener gain 架構
 
 ---
 
@@ -1120,7 +1113,7 @@ ERLE = 10 · log₁₀(E[d²] / E[e²])    (dB)
 | leak | 權重衰減（TIME only） | 接近 1.0，防止權重爆炸 |
 | divergence_factor | 發散靈敏度 | 降低→更敏感（更快降 mu）；提高→更寬鬆 |
 | mu_min_ratio | 最低更新量 | 不建議設為 0（停滯）；0.05 適合大部分場景 |
-| res_over_sub | 殘餘回聲抑制強度 | 提高→更強抑制，風險失真 |
+| res_over_sub | 殘餘回聲抑制強度 | 1.0=Wiener，提高→更強抑制，風險失真 |
 | res_g_min_db | 最大抑制量 | 降低→更深抑制，-20dB 通常夠用 |
 
 ---

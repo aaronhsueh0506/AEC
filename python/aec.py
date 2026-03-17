@@ -63,7 +63,7 @@ class AecConfig:
     # RES parameters
     enable_res: bool = False
     res_g_min_db: float = -20.0
-    res_over_sub: float = 1.5
+    res_over_sub: float = 1.0
     res_alpha: float = 0.8
 
     # Shadow filter (dual-filter divergence control, FREQ/SUBBAND only)
@@ -308,13 +308,8 @@ class ResFilter:
         self.ola_buf.fill(0)
 
     def process(self, error_hop: np.ndarray, echo_spec: np.ndarray,
-                far_power: float, dtd_conf: float = 0.0) -> np.ndarray:
-        """Process hop-size error signal, return enhanced hop via OLA.
-
-        Args:
-            dtd_conf: DTD confidence [0,1]. Higher = more likely double-talk,
-                      RES suppression is reduced to protect near-end speech.
-        """
+                far_power: float) -> np.ndarray:
+        """Process hop-size error signal, return enhanced hop via OLA."""
         hop = self.hop_size
 
         # Slide in new error samples
@@ -333,11 +328,10 @@ class ResFilter:
         self.echo_psd = self.alpha_psd * self.echo_psd + (1 - self.alpha_psd) * echo_pwr
         self.error_psd = self.alpha_psd * self.error_psd + (1 - self.alpha_psd) * error_pwr
 
-        # EER-based gain — reduce over_sub during double-talk to protect near-end
-        over_sub_eff = self.over_sub * (1.0 - dtd_conf)
+        # EER-based gain (≈ Wiener with over-subtraction)
         eps = 1e-10
         eer = self.echo_psd / (self.error_psd + eps)
-        g = 1.0 / (1.0 + over_sub_eff * eer)
+        g = 1.0 / (1.0 + self.over_sub * eer)
         g = np.maximum(g, self.g_min)
 
         # Release when far-end inactive
@@ -926,7 +920,7 @@ class AEC:
             if self.res and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
                 output = self.res.process(output, self.filter.echo_spec,
-                                          far_power, dtd_conf=self.prev_dtd_conf)
+                                          far_power)
 
             # Update DTD detectors for NEXT block
             if self.dtd_divergence:

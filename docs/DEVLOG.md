@@ -2,7 +2,23 @@
 
 ## 版本歷史
 
-### v1.4.0 (2026-03-17) - RES OLA 重寫 + Shadow 修正 + DTD-aware RES
+### v1.4.1 (2026-03-17) - RES 改為純 Wiener gain + Shadow-only 支援
+
+#### 改動內容
+
+1. **RES 移除 DTD-aware，改為純 Wiener gain**
+   - 移除 `dtd_conf` 參數，`over_sub` 預設 1.5→1.0（標準 Wiener）
+   - DT 保護改由 EER 天生特性：DT 時 error_psd↑ → EER↓ → gain↑（自動減少壓制）
+   - 與 SpeexDSP Wiener post-filter 一致
+
+2. **Shadow-only 模式**
+   - 移除 shadow 對 DTD 的依賴 guard（≈ WebRTC/SpeexDSP 做法）
+   - 新增三方架構比較（WebRTC AEC3 / SpeexDSP / 本專案）
+   - 新增 DTD×Shadow 四種組合行為表
+
+---
+
+### v1.4.0 (2026-03-17) - RES OLA 重寫 + Shadow 修正
 
 #### 改動內容
 
@@ -13,12 +29,7 @@
    - 加入 3-bin cross-frequency smoothing 消除孤立 gain 峰谷
    - Attack 放慢 0.3→0.6（time constant 1.4→2.5 frames）
 
-2. **RES DTD-aware 壓制**
-   - `over_sub_eff = over_sub × (1 - dtd_conf)`
-   - DT 時自動降低壓制強度，保護近端語音
-   - dtd_conf=0 → 正常壓制，dtd_conf=1 → 完全 bypass
-
-3. **Shadow filter 修正**
+2. **Shadow filter 修正**
    - 加入 50-frame warm-up guard：收斂前不允許 copy
    - 移除 `output = shadow_out`：copy 只複製 weights，不切換 output
    - 修正：舊版在 frame 3, 8 就觸發 copy，把未收斂的 weights 複製到 main 導致退化
@@ -38,7 +49,7 @@
 | DTD+Shadow | 6.7 dB | 21.0 dB | 1.3 dB |
 | DTD+RES | 8.3 dB | 25.1 dB | 1.7 dB |
 
-Shadow 不再退化（差距 <0.3 dB），RES 在 far-only 場景提升 +4 dB，DT 場景因 DTD-aware 降低壓制。
+Shadow 不再退化（差距 <0.3 dB），RES 在 far-only 場景提升 +4 dB。
 
 ---
 
@@ -191,7 +202,7 @@ Shadow 不再退化（差距 <0.3 dB），RES 在 far-only 場景提升 +4 dB，
 
 - [x] 實作 Subband NLMS (PBFDAF 頻域)
 - [x] DTD 改為 WebRTC-style 發散偵測
-- [x] 啟用 RES post-filter（Python OLA + sqrt-Hann + DTD-aware）
+- [x] 啟用 RES post-filter（Python OLA + sqrt-Hann + Wiener gain）
 - [ ] 加入非線性處理 (NLP)
 - [ ] 延遲估計模組
 
