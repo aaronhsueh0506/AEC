@@ -745,6 +745,9 @@ class AEC:
         # #4: Confidence memory decay
         self.prev_dtd_conf = 0.0
 
+        # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
+        self._simple_mu_ratio = 1.0
+
         # #5: Copy hysteresis counter
         self.shadow_copy_counter = 0
         self.shadow_frame_count = 0  # warm-up counter for shadow copy
@@ -770,6 +773,7 @@ class AEC:
         self.epc_active = False
         self.epc_hangover_count = 0
         self.prev_dtd_conf = 0.0
+        self._simple_mu_ratio = 1.0
         self.shadow_copy_counter = 0
         self.shadow_frame_count = 0
         if self.dtd_divergence:
@@ -824,11 +828,32 @@ class AEC:
 
         return mu_scale
 
+    def _get_simple_mu_scale(self, mu_min: float = None) -> float:
+        """Get mu_scale from smoothed far/error ratio (for non-DTD modes)."""
+        if mu_min is None:
+            mu_min = self.config.dtd_mu_min_ratio  # 0.05
+        return mu_min + (1.0 - mu_min) * self._simple_mu_ratio
+
+    def _update_simple_mu_ratio(self, output: np.ndarray,
+                                 far: np.ndarray) -> None:
+        """Update simple variable mu ratio after process (Valin 2007 RER-inspired).
+
+        far/error ratio: DT → error >> far → ratio low → next frame mu drops.
+        """
+        error_power = np.mean(output ** 2) + 1e-10
+        far_power = np.mean(far ** 2) + 1e-10
+        ratio = min(far_power / error_power, 1.0)
+        self._simple_mu_ratio = 0.9 * self._simple_mu_ratio + 0.1 * ratio
+
     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
         # DTD: dual detector (divergence + coherence) for FREQ/SUBBAND
         # Combined confidence = max(divergence, coherence) → mu_scale
+        # Non-DTD: simple variable mu (Valin 2007 RER-inspired)
 
-        mu_scale = self._compute_mu_scale()
+        if self.config.enable_dtd:
+            mu_scale = self._compute_mu_scale()
+        else:
+            mu_scale = self._get_simple_mu_scale()
 
         if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
             if self._freq_near_queue is not None:
@@ -854,12 +879,20 @@ class AEC:
             else:
                 output = self.filter.process(near_end, far_end, mu_scale)
 
+            # Update simple variable mu ratio (for non-DTD modes)
+            if not self.config.enable_dtd:
+                self._update_simple_mu_ratio(output, far_end)
+
             # Shadow filter with DTD protection (#1) and bidirectional copy (#6)
             if self.shadow_filter is not None and self._freq_near_queue is None:
                 self.shadow_frame_count += 1
-                # #1: Shadow also receives DTD protection, but more lenient
-                conf = self.prev_dtd_conf  # use same conf from _compute_mu_scale
-                shadow_mu_scale = 1.0 - conf * (1.0 - self.config.shadow_dtd_mu_min)
+                # Shadow mu: DTD mode uses DTD conf, non-DTD uses simple variable mu
+                if self.config.enable_dtd:
+                    conf = self.prev_dtd_conf
+                    shadow_mu_scale = 1.0 - conf * (1.0 - self.config.shadow_dtd_mu_min)
+                else:
+                    shadow_mu_scale = self._get_simple_mu_scale(
+                        mu_min=self.config.shadow_dtd_mu_min)  # 0.2, more lenient
                 self.shadow_filter.process(near_end, far_end, shadow_mu_scale)
 
                 main_err = self.filter.get_error_energy()
@@ -953,8 +986,11 @@ class AEC:
                         error_spec=self.filter.error_spec,
                         far_spec=self.filter.far_spec)
         else:
-            # LMS/NLMS: no DTD (Output Limiter provides safety net)
-            output, echo_est = self.filter.process_block(near_end, far_end)
+            # LMS/NLMS: use mu_scale from DTD or simple variable mu
+            output, echo_est = self.filter.process_block(near_end, far_end,
+                                                          mu_scale=mu_scale)
+            if not self.config.enable_dtd:
+                self._update_simple_mu_ratio(output, far_end)
 
         # Output limiter: output should never exceed mic amplitude.
         # If echo_est is correct, output = mic - echo ≤ mic. Exceeding
