@@ -726,26 +726,22 @@ class AEC:
         else:
             self.res = None
 
-        # Shadow filter (dual-filter, FREQ/SUBBAND only, requires DTD)
+        # Shadow filter (dual-filter, FREQ/SUBBAND only)
+        # Can be used alone (≈ WebRTC/SpeexDSP) or with DTD (dual protection)
         self.shadow_filter = None
         self.shadow_output = None
         self.main_err_smooth = 0.0
         self.shadow_err_smooth = 0.0
         if (self.config.enable_shadow and
-                self.config.mode in (AecMode.FREQ, AecMode.SUBBAND)):
-            if not self.config.enable_dtd:
-                import warnings
-                warnings.warn("Shadow filter disabled: requires DTD for safe operation "
-                              "(--no-dtd disables DTD, shadow loses its safety reference)")
-                self.config.enable_shadow = False
-            elif hasattr(self.filter, 'W'):
-                shadow_mu = self.config.mu * self.config.shadow_mu_ratio
-                self.shadow_filter = SubbandNlms(
-                    block_size=self.filter.block_size,
-                    n_partitions=self.filter.n_partitions,
-                    mu=shadow_mu,
-                    delta=self.config.delta
-                )
+                self.config.mode in (AecMode.FREQ, AecMode.SUBBAND)
+                and hasattr(self.filter, 'W')):
+            shadow_mu = self.config.mu * self.config.shadow_mu_ratio
+            self.shadow_filter = SubbandNlms(
+                block_size=self.filter.block_size,
+                n_partitions=self.filter.n_partitions,
+                mu=shadow_mu,
+                delta=self.config.delta
+            )
 
         # Echo path change detection state
         self.prev_total_err = 0.0

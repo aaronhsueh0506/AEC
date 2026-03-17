@@ -602,15 +602,94 @@ Shadow filter: mu = config.mu × 0.5 × shadow_mu_scale (寬鬆 DTD，最低 20%
 
 **記憶體影響**：額外 ~35KB（SubbandNlms ~34KB + output buffer 1KB），可接受。
 
-**與 SpeexDSP 比較**：
+**三方比較（WebRTC AEC3 / SpeexDSP / 本專案）**：
 
-| | SpeexDSP | 本專案 |
+| | WebRTC AEC3 | SpeexDSP | 本專案 |
+|---|---|---|---|
+| 架構 | PBFDAF + dual filter | MDF + dual filter | PBFDAF + 顯式 DTD + 可選 shadow |
+| 主要濾波器 | Main (refined) | Foreground (FG) | Main (DTD mu_scale) |
+| 備份濾波器 | Shadow (coarse) | Background (BG) | Shadow (寬鬆 DTD, 可選) |
+| DT 處理 | 隱式（dual filter 比較） | 隱式（variable μ, Valin 2007） | 顯式 DTD（Coherence + Divergence） |
+| mu 控制 | Adaptive（convergence-based） | Variable（optimal NLMS theory） | DTD mu_scale [0.05, 1.0] |
+| Copy 觸發 | shadow_err < main_err × threshold | error_FG > error_BG（連續 N frames） | 連續 3 frames + 50-frame warm-up |
+| Copy 行為 | Shadow → Main + output switch | BG → FG | Shadow → Main（只 copy weights） |
+| Post-filter | Wiener-like suppressor + comfort noise | NLP (spectral subtraction) | EER-based RES（≈ Wiener with over_sub, DTD-aware） |
+| DT 反應速度 | 慢（等 error 翻轉） | 中（variable μ 自動降低） | 快（Coherence DTD 2-3 frames） |
+| 計算量 | 永遠 2x filter | 永遠 2x filter | DTD-only: 1x + DTD; +Shadow: 2x |
+| 參數數量 | 少（copy_threshold, mu） | 少（variance smooth factors） | 多（DTD 6+ params + shadow params） |
+| Shadow 是否必要 | ✅ 必須（唯一 DT 機制） | ✅ 必須（唯一 DT 機制） | 可選（DTD 獨立提供 DT 保護） |
+
+### 6.4.1 DTD × Shadow 組合行為
+
+本專案的 DTD 和 Shadow 可獨立啟用，提供四種組合：
+
+| | DTD off | DTD on |
 |---|---|---|
-| 命名 | Background / Foreground | Shadow / Main |
-| 保守濾波器 | BG (永遠更新) | Shadow (永遠更新) |
-| 輸出濾波器 | FG (條件更新) | Main (DTD mu_scale) |
-| 複製方向 | BG → FG | Shadow → Main |
-| 額外偵測 | 無 (純雙濾波器) | 可選 DTD |
+| **Shadow off** | 無保護（僅 output limiter）。適合無 DT 場景 | **DTD-only**：Coherence 預防式降 mu。輕量首選 |
+| **Shadow on** | **Shadow-only**：≈ WebRTC/SpeexDSP 做法。免調 DTD 參數 | **DTD+Shadow**：預防 + 修正雙重保護。最高品質 |
+
+#### 各組合的 DT 保護行為
+
+| 組合 | DT 反應速度 | 保護機制 | weights 汙染程度 | 適用場景 |
+|------|-----------|---------|---------------|---------|
+| 無保護 | — | Output limiter 兜底 | 嚴重（全速學習 near-end） | 純 far-end 場景、測試用 |
+| DTD-only | 快（2-3 frames） | 降 mu → 減速更新（預防式） | 極少（mu 降到 5%） | 嵌入式、低資源 |
+| Shadow-only | 慢（需 error 翻轉） | Shadow copy 修正（事後式） | 中等（copy 前有數 frame 汙染） | 不想調 DTD 參數、跟 WebRTC 一致 |
+| DTD+Shadow | 快 | DTD 預防 + Shadow fallback | 極少 + safety net | 品質優先、EPC 場景 |
+
+#### 算力影響
+
+| 組合 | 額外計算量 | 額外記憶體 | 說明 |
+|------|----------|----------|------|
+| 無保護 | 0 | 0 | 基礎 PBFDAF |
+| DTD-only | +DTD（PSD smoothing + coherence） | +~2KB（PSD buffers） | 極低 overhead |
+| Shadow-only | +1x PBFDAF | +~35KB（完整 filter） | 計算量翻倍 |
+| DTD+Shadow | +DTD + 1x PBFDAF | +~37KB | 最重 |
+
+#### 實測 ERLE（FL=1024, subband）
+
+| 組合 | fileid_0 (DT) | fileid_1 (far only) | fileid_2 (alternating) |
+|------|---------------|---------------------|----------------------|
+| DTD-only | 7.0 dB | 21.0 dB | 1.4 dB |
+| DTD+Shadow | 6.7 dB | 21.0 dB | 1.3 dB |
+| Shadow-only | 6.3 dB | 21.0 dB | 1.0 dB |
+
+Shadow-only 可運作但 DT ERLE 較低（事後修正 vs 預防式）。far-only 場景三者一致。
+
+### 6.4.2 三種架構的優劣分析
+
+**本專案（顯式 DTD + 可選 Shadow）的優勢**：
+
+| 優勢 | 說明 |
+|------|------|
+| 預防式 DT 保護 | Coherence DTD 在 2-3 frames 內偵測 DT → 立即降 mu。Dual-filter-only 是事後修正 |
+| 連續 mu scaling | mu_scale ∈ [0.05, 1.0] 精細控制更新速率。Dual filter 只有 binary 決策（copy or not） |
+| 可省計算 | DTD-only 不需 2x filter（省 ~35KB memory + 1x PBFDAF） |
+| RES DTD-aware | DTD confidence 傳給 RES → DT 時放鬆壓制保護近端語音 |
+
+**本專案的劣勢**：
+
+| 劣勢 | 說明 |
+|------|------|
+| 更多參數 | Coherence DTD 有 6+ 參數要調。WebRTC/SpeexDSP 只需 copy_threshold + mu_ratio |
+| DTD 過度保護風險 | DTD 太敏感 → mu 長期壓低 → 收斂慢 |
+| Warmup 依賴 | 需 50-frame（~0.8s）等 PSD 穩定。Dual-filter 從 frame 0 就保護 |
+
+**WebRTC/SpeexDSP（純 Dual Filter）的優勢**：
+
+| 優勢 | 說明 |
+|------|------|
+| 概念簡潔 | 一個機制處理所有場景（DT、divergence、EPC） |
+| 免調參 | 不需 DTD 閾值 |
+| 實戰驗證 | WebRTC 在 Chrome/Android 數十億設備驗證 |
+
+**WebRTC/SpeexDSP 的劣勢**：
+
+| 劣勢 | 說明 |
+|------|------|
+| 永遠 2x 計算 | Shadow 必須始終運行 |
+| 事後修正 | Main diverge → shadow copy。中間有數 frame 汙染 output |
+| Post-filter 缺 DT 資訊 | 無法在 DT 時智能減少壓制 |
 
 ### 6.5 Coherence-Based Double-Talk Detection ✅ 本專案採用（FREQ/SUBBAND）
 

@@ -369,9 +369,11 @@ Shadow filter: mu = config.mu × 0.5 × shadow_scale  ← 寬鬆 DTD（最低 20
 
 Shadow filter 僅適用於 FREQ/SUBBAND 模式（需要頻域權重結構）。
 
-**重要：Shadow 依賴 DTD 保護**。若 `--no-dtd` 關閉 DTD，shadow 會自動停用並印出警告。
-原因：沒有 DTD 時 main filter 在 DT 期間全速更新會 diverge，shadow 也全速跑一樣 diverge，
-copy threshold 比較的是兩個都壞的 filter，失去意義。
+**Shadow 可獨立使用（不需 DTD）**。Shadow-only 模式等同 WebRTC AEC3 / SpeexDSP 的做法：
+- Shadow mu = main_mu × 0.5（保守步長），DT 時 main 全速漂移、shadow 半速漂移
+- Shadow error < main error → copy 修正（事後式）
+- 與 DTD 同時啟用可獲得雙重保護（預防 + 修正）
+- 詳見 `aec_methods.md` §6.4.1 組合行為表
 
 ### 5.3 參數
 

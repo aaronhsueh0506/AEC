@@ -139,7 +139,8 @@ while has_audio:
 Shadow filter（雙濾波器）使用一個保守步長的影子濾波器持續追蹤回音路徑，當主濾波器發散時自動修正。
 這是 WebRTC AEC3 和 SpeexDSP 的核心機制。
 
-> **注意**：Shadow 依賴 DTD 保護。若同時使用 `--no-dtd --enable-shadow`，shadow 會自動停用並印出警告。
+> Shadow 可單獨使用（≈ WebRTC/SpeexDSP 做法），也可與 DTD 同時啟用（雙重保護）。
+> 詳見 [docs/aec_methods.md §6.4](docs/aec_methods.md) 的組合行為表。
 
 | 參數 | 預設值 | 範圍 | 說明 |
 |------|--------|------|------|
