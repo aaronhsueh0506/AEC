@@ -747,6 +747,7 @@ class AEC:
 
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
         self._simple_mu_ratio = 1.0
+        self._simple_mu_holdoff = 0  # holdoff counter: blocks release for N frames
 
         # #5: Copy hysteresis counter
         self.shadow_copy_counter = 0
@@ -774,6 +775,7 @@ class AEC:
         self.epc_hangover_count = 0
         self.prev_dtd_conf = 0.0
         self._simple_mu_ratio = 1.0
+        self._simple_mu_holdoff = 0
         self.shadow_copy_counter = 0
         self.shadow_frame_count = 0
         if self.dtd_divergence:
@@ -839,11 +841,25 @@ class AEC:
         """Update simple variable mu ratio after process (Valin 2007 RER-inspired).
 
         far/error ratio: DT → error >> far → ratio low → next frame mu drops.
+        Asymmetric EMA: fast attack (ratio drops), slow release (ratio recovers).
         """
         error_power = np.mean(output ** 2) + 1e-10
         far_power = np.mean(far ** 2) + 1e-10
         ratio = min(far_power / error_power, 1.0)
-        self._simple_mu_ratio = 0.9 * self._simple_mu_ratio + 0.1 * ratio
+
+        # Asymmetric EMA + holdoff: fast attack, slow release with holdoff
+        if ratio < self._simple_mu_ratio:
+            # Attack: fast drop + start holdoff
+            alpha = 0.5
+            self._simple_mu_holdoff = 30  # hold low for ~30 frames (~480ms)
+        elif self._simple_mu_holdoff > 0:
+            # Holdoff active: keep ratio low, don't release yet
+            self._simple_mu_holdoff -= 1
+            alpha = 0.99  # nearly frozen
+        else:
+            # Release: slow recovery
+            alpha = 0.95
+        self._simple_mu_ratio = alpha * self._simple_mu_ratio + (1 - alpha) * ratio
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
         # DTD: dual detector (divergence + coherence) for FREQ/SUBBAND
