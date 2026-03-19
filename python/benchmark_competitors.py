@@ -67,7 +67,30 @@ def compute_erle(mic, output):
     return 10.0 * np.log10(mic_pwr / (out_pwr + 1e-20))
 
 
-def run_ours(mic, ref, sr, filter_length=1024, enable_res=True):
+def compute_nearend_retention(mic, ref, output, hop=256):
+    """Near-end retention during far-end silence (dB, 0=perfect).
+
+    Measures how much near-end speech is preserved when far-end is silent.
+    Only considers frames where far-end power < threshold and mic has signal.
+    """
+    n = min(len(mic), len(ref), len(output))
+    gain_sum, count = 0.0, 0
+    processed = 0
+    while processed + hop <= n:
+        ref_pwr = np.mean(ref[processed:processed+hop] ** 2)
+        mic_pwr = np.mean(mic[processed:processed+hop] ** 2)
+        if ref_pwr < 1e-6 and mic_pwr > 1e-6:  # far-end silent, near-end active
+            out_pwr = np.mean(output[processed:processed+hop] ** 2)
+            gain_sum += out_pwr / (mic_pwr + 1e-10)
+            count += 1
+        processed += hop
+    if count == 0:
+        return None
+    return 10.0 * np.log10(gain_sum / count + 1e-10)
+
+
+def run_ours(mic, ref, sr, filter_length=1024, enable_res=True,
+             res_over_sub=None):
     """Run our AEC (subband DTD+RES)."""
     config = AecConfig(
         sample_rate=sr,
@@ -76,6 +99,8 @@ def run_ours(mic, ref, sr, filter_length=1024, enable_res=True):
         enable_res=enable_res,
         filter_length=filter_length,
     )
+    if res_over_sub is not None:
+        config.res_over_sub = res_over_sub
     aec = AEC(config)
     hop = aec.hop_size
     n = min(len(mic), len(ref))
@@ -141,6 +166,8 @@ def main():
                         help='SpeexDSP filter length (default: 2048)')
     parser.add_argument('--files', type=str, default=None,
                         help='Comma-separated fileid list')
+    parser.add_argument('--res-over-sub', type=float, default=None,
+                        help='Override RES over_sub value')
     args = parser.parse_args()
 
     base = os.path.dirname(os.path.abspath(__file__))
@@ -156,7 +183,8 @@ def main():
         sys.exit(1)
 
     print(f"Benchmarking {len(groups)} files from {dataset_dir}")
-    print(f"Our config: subband DTD+RES, FL={args.filter}")
+    os_str = f", over_sub={args.res_over_sub}" if args.res_over_sub else ""
+    print(f"Our config: subband DTD+RES, FL={args.filter}{os_str}")
     if HAS_SPEEX:
         print(f"SpeexDSP: FL={args.speex_filter}")
     if HAS_AEC3:
@@ -164,11 +192,11 @@ def main():
     print()
 
     # Header
-    cols = f"{'fileid':>8} {'Ours':>8} {'Ours-NR':>8}"
+    cols = f"{'fileid':>8} {'Ours':>8} {'Ret':>6} {'Ours-NR':>8}"
     if HAS_SPEEX:
-        cols += f" {'Speex':>8}"
+        cols += f" {'Speex':>8} {'Ret':>6}"
     if HAS_AEC3:
-        cols += f" {'AEC3':>8}"
+        cols += f" {'AEC3':>8} {'Ret':>6}"
     cols += f" {'Winner':>8}"
     print(cols)
     print("-" * len(cols))
@@ -185,20 +213,25 @@ def main():
         ref = ref[:n]
 
         # Our AEC with RES
-        out_ours = run_ours(mic, ref, sr, filter_length=args.filter, enable_res=True)
+        out_ours = run_ours(mic, ref, sr, filter_length=args.filter,
+                            enable_res=True, res_over_sub=args.res_over_sub)
         erle_ours = compute_erle(mic, out_ours)
+        ret_ours = compute_nearend_retention(mic, ref, out_ours)
 
         # Our AEC without RES
         out_ours_nr = run_ours(mic, ref, sr, filter_length=args.filter, enable_res=False)
         erle_ours_nr = compute_erle(mic, out_ours_nr)
 
-        row = {'fileid': fid, 'ours': erle_ours, 'ours_nores': erle_ours_nr}
+        row = {'fileid': fid, 'ours': erle_ours, 'ours_nores': erle_ours_nr,
+               'retention': ret_ours}
 
         erle_speex = None
         if HAS_SPEEX:
             out_speex = run_speexdsp(mic, ref, sr, filter_length=args.speex_filter)
             erle_speex = compute_erle(mic, out_speex)
+            ret_speex = compute_nearend_retention(mic, ref, out_speex)
             row['speex'] = erle_speex
+            row['speex_ret'] = ret_speex
 
         erle_aec3 = None
         if HAS_AEC3:
@@ -206,7 +239,9 @@ def main():
             if out_aec3 is not None:
                 out_aec3 = out_aec3[:n]
                 erle_aec3 = compute_erle(mic, out_aec3)
+                ret_aec3 = compute_nearend_retention(mic, ref, out_aec3)
                 row['aec3'] = erle_aec3
+                row['aec3_ret'] = ret_aec3
 
         results.append(row)
 
@@ -218,34 +253,55 @@ def main():
             candidates['AEC3'] = erle_aec3
         winner = max(candidates, key=candidates.get)
 
-        line = f"{fid:>8} {erle_ours:>7.1f}  {erle_ours_nr:>7.1f} "
+        ret_str = f"{ret_ours:>5.1f} " if ret_ours is not None else f"{'N/A':>5} "
+        line = f"{fid:>8} {erle_ours:>7.1f}  {ret_str} {erle_ours_nr:>7.1f} "
         if HAS_SPEEX:
-            line += f" {erle_speex:>7.1f} " if erle_speex is not None else f" {'N/A':>7} "
+            speex_ret_str = f"{row.get('speex_ret', None):>5.1f} " if row.get('speex_ret') is not None else f"{'N/A':>5} "
+            line += f" {erle_speex:>7.1f}  {speex_ret_str}" if erle_speex is not None else f" {'N/A':>7}  {'N/A':>5} "
         if HAS_AEC3:
-            line += f" {erle_aec3:>7.1f} " if erle_aec3 is not None else f" {'N/A':>7} "
+            aec3_ret_str = f"{row.get('aec3_ret', None):>5.1f} " if row.get('aec3_ret') is not None else f"{'N/A':>5} "
+            line += f" {erle_aec3:>7.1f}  {aec3_ret_str}" if erle_aec3 is not None else f" {'N/A':>7}  {'N/A':>5} "
         line += f" {winner:>8}"
         print(line)
+
+    # Summary helper
+    def _ret_stats(key):
+        vals = [r[key] for r in results if r.get(key) is not None]
+        if not vals:
+            return None, None
+        return np.mean(vals), np.median(vals)
 
     # Summary
     print("-" * len(cols))
     ours_mean = np.mean([r['ours'] for r in results])
     ours_nr_mean = np.mean([r['ours_nores'] for r in results])
-    summary = f"{'MEAN':>8} {ours_mean:>7.1f}  {ours_nr_mean:>7.1f} "
+    ret_mean, ret_med = _ret_stats('retention')
+    ret_mean_str = f"{ret_mean:>5.1f} " if ret_mean is not None else f"{'N/A':>5} "
+    summary = f"{'MEAN':>8} {ours_mean:>7.1f}  {ret_mean_str} {ours_nr_mean:>7.1f} "
     if HAS_SPEEX:
         speex_vals = [r['speex'] for r in results if 'speex' in r]
-        summary += f" {np.mean(speex_vals):>7.1f} " if speex_vals else f" {'N/A':>7} "
+        speex_ret_mean, _ = _ret_stats('speex_ret')
+        speex_ret_str = f"{speex_ret_mean:>5.1f} " if speex_ret_mean is not None else f"{'N/A':>5} "
+        summary += f" {np.mean(speex_vals):>7.1f}  {speex_ret_str}" if speex_vals else f" {'N/A':>7}  {'N/A':>5} "
     if HAS_AEC3:
         aec3_vals = [r['aec3'] for r in results if 'aec3' in r]
-        summary += f" {np.mean(aec3_vals):>7.1f} " if aec3_vals else f" {'N/A':>7} "
+        aec3_ret_mean, _ = _ret_stats('aec3_ret')
+        aec3_ret_str = f"{aec3_ret_mean:>5.1f} " if aec3_ret_mean is not None else f"{'N/A':>5} "
+        summary += f" {np.mean(aec3_vals):>7.1f}  {aec3_ret_str}" if aec3_vals else f" {'N/A':>7}  {'N/A':>5} "
     print(summary)
 
     ours_med = np.median([r['ours'] for r in results])
     ours_nr_med = np.median([r['ours_nores'] for r in results])
-    summary2 = f"{'MEDIAN':>8} {ours_med:>7.1f}  {ours_nr_med:>7.1f} "
+    ret_med_str = f"{ret_med:>5.1f} " if ret_med is not None else f"{'N/A':>5} "
+    summary2 = f"{'MEDIAN':>8} {ours_med:>7.1f}  {ret_med_str} {ours_nr_med:>7.1f} "
     if HAS_SPEEX:
-        summary2 += f" {np.median(speex_vals):>7.1f} " if speex_vals else f" {'N/A':>7} "
+        _, speex_ret_med = _ret_stats('speex_ret')
+        speex_ret_med_str = f"{speex_ret_med:>5.1f} " if speex_ret_med is not None else f"{'N/A':>5} "
+        summary2 += f" {np.median(speex_vals):>7.1f}  {speex_ret_med_str}" if speex_vals else f" {'N/A':>7}  {'N/A':>5} "
     if HAS_AEC3:
-        summary2 += f" {np.median(aec3_vals):>7.1f} " if aec3_vals else f" {'N/A':>7} "
+        _, aec3_ret_med = _ret_stats('aec3_ret')
+        aec3_ret_med_str = f"{aec3_ret_med:>5.1f} " if aec3_ret_med is not None else f"{'N/A':>5} "
+        summary2 += f" {np.median(aec3_vals):>7.1f}  {aec3_ret_med_str}" if aec3_vals else f" {'N/A':>7}  {'N/A':>5} "
     print(summary2)
 
     # Win/Loss summary

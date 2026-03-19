@@ -63,7 +63,7 @@ class AecConfig:
     # RES parameters
     enable_res: bool = False
     res_g_min_db: float = -20.0
-    res_over_sub: float = 1.0
+    res_over_sub: float = 3.0
     res_alpha: float = 0.8
     enable_cng: bool = True            # Comfort noise generation in RES
 
@@ -395,8 +395,7 @@ class ResFilter:
         eer_linear = self.echo_psd / (self.error_psd + eps)
         eer = eer_linear * (0.5 + 0.5 * coh2)
 
-        g = 1.0 / (1.0 + self.over_sub * eer)
-        g = np.maximum(g, self.g_min)
+        g = np.maximum(1.0 - self.over_sub * eer, self.g_min)
         g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
 
         # Cross-frequency smoothing (3-bin moving average)

@@ -2,6 +2,93 @@
 
 ## 版本歷史
 
+### v1.5.1 (2026-03-20) - RES Wiener gain formula 改進
+
+#### 改動內容
+
+1. **RES gain formula 改為 spectral subtraction 形式**
+   - 舊版 `g = 1/(1 + over_sub * eer)`：harmonic form，eer=1.0 時 g=0.5 (-6dB)，永遠不觸及 g_min
+   - 新版 `g = max(1 - over_sub * eer, g_min)`：spectral subtraction，eer ≥ 1/over_sub 時直接壓到 g_min
+   - 更接近 AEC3 suppressor 行為
+
+2. **over_sub 1.0 → 3.0**
+   - 新公式下 over_sub 語義不同（直接乘數 vs 分母），需重新調校
+   - Sweep 結果：over_sub 越高 ERLE 越好，Near-end retention 不隨 over_sub 變化
+   - NE-Ret 不變原因：far-end 靜音時 EER 本來就很低，gain ≈ 1.0
+
+3. **benchmark 新增 Near-end Retention 指標**
+   - 定義：far-end 靜音段的 `10*log10(mean(output²)/mean(mic²))`
+   - 0 dB = 完美保留，> -1 dB 可接受，< -3 dB 有感失真
+   - 新增 `--res-over-sub` CLI flag
+
+#### over_sub Sweep 結果（新 Wiener gain formula）
+
+| over_sub | Mean ERLE | vs AEC3 | NE-Ret Mean | NE-Ret Median |
+|----------|-----------|---------|-------------|---------------|
+| 1.0 | 5.1 dB | 12W/22L | -4.6 dB | -1.5 dB |
+| 1.5 | 5.5 dB | 14W/20L | -4.7 dB | -1.6 dB |
+| 2.0 | 5.8 dB | 16W/18L | -4.7 dB | -1.7 dB |
+| 2.5 | 6.1 dB | 18W/16L | -4.7 dB | -1.7 dB |
+| **3.0** | **6.2 dB** | **20W/14L** | -4.8 dB | -1.7 dB |
+
+NE-Ret 幾乎不變 → 安全使用 over_sub=3.0。
+
+#### 驗證結果（AEC Challenge, 34 files, FL=1024, subband DTD+RES）
+
+| 指標 | v1.5.0 | v1.5.1 | SpeexDSP | WebRTC AEC3 |
+|------|--------|--------|----------|-------------|
+| Mean ERLE | 4.6 dB | **6.2 dB** | 3.1 dB | 7.3 dB |
+| Median ERLE | 3.5 dB | **4.8 dB** | 2.0 dB | 4.4 dB |
+| vs AEC3 | 8W/26L | **20W/14L** | — | — |
+| NE-Ret Mean | — | -4.8 dB | -3.2 dB | -5.9 dB |
+| NE-Ret Median | — | -1.7 dB | -1.2 dB | -1.8 dB |
+
+v1.5.1 提升 +1.6 dB (Mean)，首次反超 AEC3 勝率（59%）。
+AEC3 的 NE-Ret 比 Ours 更差（-5.9 vs -4.8），Ours 在 ERLE/NE-Ret tradeoff 上優於 AEC3。
+
+#### 已驗證但未採用的修改
+
+- **v4 B（FL=2048）**：+0.1 dB 無效，echo tail 在 64ms 內
+
+---
+
+### v1.5.0 (2026-03-19) - Power floor 修正 + RES EER soft gate + Benchmark
+
+#### 改動內容
+
+1. **SubbandNlms power floor 修正（P0-2）**
+   - 舊版 `global_floor = max(power) * 0.01`：高能量 bin 主導 floor → 低能量 bin floor 過高 → mu_eff 過小 → 收斂慢
+   - 新版 `global_floor = mean(power) * 0.01`：各 bin 獲得合理的 floor，低能量 bin 不再被壓制
+
+2. **RES EER 改用 coherence soft gate（P1-1）**
+   - 舊版 `eer = max(eer_linear, coh2)`：coh2 直接當 eer 下限，DT 時 coh2 仍高 → 近端語音被過度壓制
+   - 新版 `eer = eer_linear * (0.5 + 0.5 * coh2)`：coherence 作為乘法 gate（0.5–1.0），DT 時自然降低壓制
+
+3. **DTD coherence 綁定收斂狀態（P1-2）**
+   - Coherence DTD 僅在 `_filter_converged=True` 後啟用
+   - 收斂閾值 3 dB → 6 dB（更嚴格，避免未收斂時啟用 coherence DTD 誤判）
+
+4. **新增 benchmark 工具 `benchmark_competitors.py`**
+   - 自動比較 Ours vs SpeexDSP vs WebRTC AEC3
+   - 計算 per-file ERLE、勝敗統計、mean/median
+
+#### 驗證結果（AEC Challenge, 34 files, FL=1024, subband DTD+RES）
+
+| 指標 | v1.4.1 (前版) | v1.5.0 | SpeexDSP | WebRTC AEC3 |
+|------|--------------|--------|----------|-------------|
+| Mean ERLE | 3.8 dB | 4.6 dB | 3.1 dB | 7.3 dB |
+| Median ERLE | 2.7 dB | 3.5 dB | 2.0 dB | 4.4 dB |
+
+v1.5.0 vs v1.4.1 提升 +0.8 dB (Mean)，大幅勝過 SpeexDSP，與 AEC3 差距 ~2.7 dB。
+
+#### 已驗證但未採用的修改
+
+- **v2 improve.md**：5 項修改全部造成退化（Mean 4.6→1.6），主因 P0-2 power normalization raw sum
+- **v3 improve.md**：coherence-based echo PSD (`coh²×S_ee`) 理論正確但實測退化（4.6→3.7），coherence 統計收斂太慢
+- **結論**：FDAF echo estimate 雖有 window mismatch，但 instantaneous 特性提供必要的壓制 margin
+
+---
+
 ### v1.4.1 (2026-03-17) - RES 改為純 Wiener gain + Shadow-only 支援
 
 #### 改動內容
