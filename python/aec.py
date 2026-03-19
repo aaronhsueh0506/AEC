@@ -252,7 +252,9 @@ class SubbandNlms:
         total_power = np.sum(self.power)
         if mu_scale > 0 and total_power > self.delta * self.n_freqs:
             # Per-bin normalization with power floor to prevent divergence
-            power_floor = np.maximum(self.power, np.max(self.power) * 1e-4)
+            # Use mean-based floor (not max-based) so low-power bins get adequate floor
+            global_floor = np.mean(self.power) * 0.01 + self.delta
+            power_floor = np.maximum(self.power, global_floor)
             mu_eff = (self.mu * mu_scale) / (power_floor * self.n_partitions + self.delta)
             for p in range(self.n_partitions):
                 p_idx = (curr_p - p) % self.n_partitions
@@ -367,9 +369,9 @@ class ResFilter:
                 self.S_ff *= 0.5
 
         # Linear EER from adaptive filter echo estimate
-        far_scale = min(far_power / (np.mean(error_pwr) + 1e-10), 1.0)
-        echo_pwr_scaled = echo_pwr_linear * far_scale
-        self.echo_psd = self.alpha_psd * self.echo_psd + (1 - self.alpha_psd) * echo_pwr_scaled
+        # No far_scale: use echo estimate directly (far_scale suppresses
+        # valid echo PSD when filter is converged)
+        self.echo_psd = self.alpha_psd * self.echo_psd + (1 - self.alpha_psd) * echo_pwr_linear
         self.error_psd = self.alpha_psd * self.error_psd + (1 - self.alpha_psd) * error_pwr
 
         if far_power < 1e-4:
@@ -386,12 +388,12 @@ class ResFilter:
         quiet_mask = ((self.echo_psd < noise_floor)
                       & (self.error_psd < noise_floor))
 
-        # Compute EER: take max of linear EER and coherence-based EER
-        # Linear EER: good when filter has converged (linear echo path)
-        # Coherence EER (coh²): captures nonlinear echo too
+        # Compute EER: linear EER modulated by coherence as soft gate
+        # coh2 high (echo dominant) → eer stays high → suppress
+        # coh2 low (near-end dominant) → eer reduced → preserve near-end
         eps = 1e-10
         eer_linear = self.echo_psd / (self.error_psd + eps)
-        eer = np.maximum(eer_linear, coh2)
+        eer = eer_linear * (0.5 + 0.5 * coh2)
 
         g = 1.0 / (1.0 + self.over_sub * eer)
         g = np.maximum(g, self.g_min)
@@ -1059,7 +1061,7 @@ class AEC:
             # when filter hasn't learned echo path yet, not actual divergence)
             if self.dtd_divergence and self._filter_converged:
                 self.dtd_divergence.detect_block(near_end, far_end, output=output)
-            if self.dtd_coherence:
+            if self.dtd_coherence and self._filter_converged:
                 if self._dtd_fft_size > 0:
                     # FREQ buffered: accumulate into DTD buffer, run at hop=FL/2
                     hop = self._hop_size
@@ -1108,11 +1110,12 @@ class AEC:
         self.near_power_sum += np.sum(near_end ** 2)
         self.error_power_sum += np.sum(output ** 2)
 
-        # Convergence detection: once instantaneous ERLE exceeds 3 dB,
-        # consider filter converged (enables divergence DTD + lowers mu_min)
+        # Convergence detection: once instantaneous ERLE exceeds 6 dB,
+        # consider filter converged (enables DTD + lowers mu_min).
+        # 6 dB (not 3 dB) to avoid premature DTD activation.
         if not self._filter_converged and self.near_power > 1e-8:
             inst_erle = 10 * np.log10(self.near_power / (self.error_power + 1e-10))
-            if inst_erle > 3.0:
+            if inst_erle > 6.0:
                 self._filter_converged = True
 
         # Record DTD confidence for plotting
