@@ -65,6 +65,7 @@ class AecConfig:
     res_g_min_db: float = -20.0
     res_over_sub: float = 1.0
     res_alpha: float = 0.8
+    enable_cng: bool = True            # Comfort noise generation in RES
 
     # Shadow filter (dual-filter divergence control, FREQ/SUBBAND only)
     enable_shadow: bool = False
@@ -282,7 +283,8 @@ class ResFilter:
     """
 
     def __init__(self, block_size: int, n_freqs: int, g_min_db: float = -20.0,
-                 over_sub: float = 1.5, alpha: float = 0.8):
+                 over_sub: float = 1.5, alpha: float = 0.8,
+                 enable_cng: bool = False):
         self.block_size = block_size
         self.hop_size = block_size // 2
         self.n_freqs = n_freqs
@@ -295,6 +297,19 @@ class ResFilter:
         self.echo_psd = np.zeros(n_freqs, dtype=np.float32)
         self.error_psd = np.zeros(n_freqs, dtype=np.float32)
 
+        # Coherence-based nonlinear echo PSD estimation
+        # Coherence between far-end and error captures both linear and
+        # nonlinear echo components (both correlate with far-end).
+        self.alpha_coh = 0.85           # Cross-PSD smoothing
+        self.S_fe = np.zeros(n_freqs, dtype=np.complex64)  # Cross-PSD far×error
+        self.S_ff = np.zeros(n_freqs, dtype=np.float32)    # Far-end PSD
+        self.S_ee = np.zeros(n_freqs, dtype=np.float32)    # Error PSD
+
+        # CNG (comfort noise generation)
+        self.enable_cng = enable_cng
+        self.noise_psd = np.zeros(n_freqs, dtype=np.float32)
+        self.alpha_noise = 0.98
+
         # OLA: sqrt-Hann window + sliding input buffer + overlap buffer
         self.window = np.sqrt(np.hanning(block_size)).astype(np.float32)
         self.input_buf = np.zeros(block_size, dtype=np.float32)
@@ -304,12 +319,20 @@ class ResFilter:
         self.gain_smooth.fill(1)
         self.echo_psd.fill(0)
         self.error_psd.fill(0)
+        self.S_fe.fill(0)
+        self.S_ff.fill(0)
+        self.S_ee.fill(0)
+        self.noise_psd.fill(0)
         self.input_buf.fill(0)
         self.ola_buf.fill(0)
 
     def process(self, error_hop: np.ndarray, echo_spec: np.ndarray,
-                far_power: float) -> np.ndarray:
-        """Process hop-size error signal, return enhanced hop via OLA."""
+                far_power: float, far_spec: np.ndarray = None) -> np.ndarray:
+        """Process hop-size error signal, return enhanced hop via OLA.
+
+        far_spec: far-end frequency spectrum (complex), used for coherence-
+                  based nonlinear echo PSD estimation.
+        """
         hop = self.hop_size
 
         # Slide in new error samples
@@ -321,25 +344,58 @@ class ResFilter:
         spec = np.fft.rfft(windowed)
 
         # Compute power spectra
-        echo_pwr = np.abs(echo_spec) ** 2
+        echo_pwr_linear = np.abs(echo_spec) ** 2
         error_pwr = np.abs(spec) ** 2
 
-        # Smooth PSD — scale echo_psd by far-end activity to avoid
-        # stale echo estimate suppressing near-end speech after far-end stops
+        # --- Coherence-based echo PSD estimation ---
+        # Coherence² between far-end and error IS the echo-to-error ratio:
+        #   coh²[k] = |S_fe[k]|² / (S_ff[k] × S_ee[k])
+        # This captures both linear and nonlinear echo (both correlate with
+        # far-end). During DT, near-end is uncorrelated → coh² drops → less
+        # suppression → near-end preserved.
+        coh2 = np.zeros(self.n_freqs, dtype=np.float32)
+        if far_spec is not None and far_power > 1e-4:
+            a = self.alpha_coh
+            self.S_fe = a * self.S_fe + (1 - a) * spec * np.conj(far_spec)
+            self.S_ff = a * self.S_ff + (1 - a) * np.abs(far_spec) ** 2
+            self.S_ee = a * self.S_ee + (1 - a) * error_pwr
+            coh2 = np.abs(self.S_fe) ** 2 / (self.S_ff * self.S_ee + 1e-10)
+            coh2 = np.minimum(coh2, 1.0).astype(np.float32)
+        else:
+            if far_power <= 1e-4:
+                self.S_fe *= 0.5
+                self.S_ff *= 0.5
+
+        # Linear EER from adaptive filter echo estimate
         far_scale = min(far_power / (np.mean(error_pwr) + 1e-10), 1.0)
-        echo_pwr_scaled = echo_pwr * far_scale
+        echo_pwr_scaled = echo_pwr_linear * far_scale
         self.echo_psd = self.alpha_psd * self.echo_psd + (1 - self.alpha_psd) * echo_pwr_scaled
         self.error_psd = self.alpha_psd * self.error_psd + (1 - self.alpha_psd) * error_pwr
 
-        # Fast decay echo_psd when far-end is weak
         if far_power < 1e-4:
             self.echo_psd *= 0.5
+            # Track noise floor for CNG during far-end silence
+            if self.enable_cng:
+                self.noise_psd = np.minimum(
+                    self.alpha_noise * self.noise_psd
+                    + (1 - self.alpha_noise) * error_pwr,
+                    error_pwr * 2)
 
-        # EER-based gain (≈ Wiener gain)
+        # --- Noise gate: don't suppress quiet segments ---
+        noise_floor = 1e-6
+        quiet_mask = ((self.echo_psd < noise_floor)
+                      & (self.error_psd < noise_floor))
+
+        # Compute EER: take max of linear EER and coherence-based EER
+        # Linear EER: good when filter has converged (linear echo path)
+        # Coherence EER (coh²): captures nonlinear echo too
         eps = 1e-10
-        eer = self.echo_psd / (self.error_psd + eps)
+        eer_linear = self.echo_psd / (self.error_psd + eps)
+        eer = np.maximum(eer_linear, coh2)
+
         g = 1.0 / (1.0 + self.over_sub * eer)
         g = np.maximum(g, self.g_min)
+        g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
 
         # Cross-frequency smoothing (3-bin moving average)
         g = np.convolve(g, np.ones(3) / 3, mode='same').astype(np.float32)
@@ -350,6 +406,19 @@ class ResFilter:
 
         # Apply gain + synthesis sqrt-Hann window + IFFT
         enhanced_spec = self.gain_smooth * spec
+
+        # --- CNG: inject comfort noise to avoid unnatural silence ---
+        if self.enable_cng and np.sum(self.noise_psd) > 0:
+            suppressed_pwr = (self.gain_smooth ** 2) * error_pwr
+            target_pwr = self.noise_psd * 0.5  # Half noise floor level
+            deficit = np.maximum(0, target_pwr - suppressed_pwr)
+            if np.any(deficit > 0):
+                cng_mag = np.sqrt(deficit).astype(np.float32)
+                cng_phase = np.random.uniform(
+                    -np.pi, np.pi, self.n_freqs).astype(np.float32)
+                cng_spec = cng_mag * np.exp(1j * cng_phase)
+                enhanced_spec = enhanced_spec + cng_spec.astype(np.complex64)
+
         enhanced_time = np.fft.irfft(enhanced_spec, self.block_size)
         enhanced_time *= self.window
 
@@ -718,7 +787,8 @@ class AEC:
                 n_freqs=self.filter.n_freqs,
                 g_min_db=self.config.res_g_min_db,
                 over_sub=self.config.res_over_sub,
-                alpha=self.config.res_alpha
+                alpha=self.config.res_alpha,
+                enable_cng=self.config.enable_cng
             )
         else:
             self.res = None
@@ -747,6 +817,10 @@ class AEC:
 
         # #4: Confidence memory decay
         self.prev_dtd_conf = 0.0
+
+        # Convergence state: prevent divergence DTD and allow higher mu_min
+        # until filter has demonstrated basic echo cancellation (ERLE > 3 dB)
+        self._filter_converged = False
 
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
         self._simple_mu_ratio = 1.0
@@ -777,6 +851,7 @@ class AEC:
         self.epc_active = False
         self.epc_hangover_count = 0
         self.prev_dtd_conf = 0.0
+        self._filter_converged = False
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0
         self.shadow_copy_counter = 0
@@ -825,6 +900,9 @@ class AEC:
         if conf == 0.0:
             return 1.0
         min_r = self.config.dtd_mu_min_ratio
+        # Before convergence, allow higher mu_min so filter can still learn during DT
+        if not self._filter_converged:
+            min_r = max(min_r, 0.3)
         mu_scale = 1.0 - conf * (1.0 - min_r)
 
         # Echo path change: keep mu high so filter can adapt to new path
@@ -837,6 +915,8 @@ class AEC:
         """Get mu_scale from smoothed far/error ratio (for non-DTD modes)."""
         if mu_min is None:
             mu_min = self.config.dtd_mu_min_ratio  # 0.05
+        if not self._filter_converged:
+            mu_min = max(mu_min, 0.3)
         return mu_min + (1.0 - mu_min) * self._simple_mu_ratio
 
     def _update_simple_mu_ratio(self, output: np.ndarray,
@@ -972,10 +1052,12 @@ class AEC:
             if self.res and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
                 output = self.res.process(output, self.filter.echo_spec,
-                                          far_power)
+                                          far_power, self.filter.far_spec)
 
             # Update DTD detectors for NEXT block
-            if self.dtd_divergence:
+            # Skip divergence detector before convergence (output>mic is normal
+            # when filter hasn't learned echo path yet, not actual divergence)
+            if self.dtd_divergence and self._filter_converged:
                 self.dtd_divergence.detect_block(near_end, far_end, output=output)
             if self.dtd_coherence:
                 if self._dtd_fft_size > 0:
@@ -1025,6 +1107,13 @@ class AEC:
             self.error_power = self.alpha * self.error_power + (1 - self.alpha) * output[i] ** 2
         self.near_power_sum += np.sum(near_end ** 2)
         self.error_power_sum += np.sum(output ** 2)
+
+        # Convergence detection: once instantaneous ERLE exceeds 3 dB,
+        # consider filter converged (enables divergence DTD + lowers mu_min)
+        if not self._filter_converged and self.near_power > 1e-8:
+            inst_erle = 10 * np.log10(self.near_power / (self.error_power + 1e-10))
+            if inst_erle > 3.0:
+                self._filter_converged = True
 
         # Record DTD confidence for plotting
         self.confidence_history.append(self.get_dtd_confidence())
@@ -1157,6 +1246,7 @@ Examples:
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
+    parser.add_argument('--no-cng', action='store_true', help='Disable comfort noise generation in RES')
     parser.add_argument('--enable-shadow', action='store_true', help='Enable shadow filter (dual-filter, FREQ/SUBBAND, requires DTD)')
     parser.add_argument('--clear-history', action='store_true',
                         help='Clear TIME/LMS buffer each block (no carry-over)')
@@ -1195,6 +1285,7 @@ Examples:
         enable_dtd=not args.no_dtd,
         enable_res=args.enable_res,
         res_g_min_db=args.res_g_min,
+        enable_cng=not args.no_cng,
         enable_shadow=args.enable_shadow,
         clear_filter_history=args.clear_history
     )
