@@ -152,6 +152,8 @@ def main():
     parser.add_argument('--mu', type=float, default=0.3)
     parser.add_argument('--filter', type=int, default=0,
                         help='Filter length in samples (0=mode default)')
+    parser.add_argument('--files', type=str, default=None,
+                        help='Comma-separated fileid list (e.g. "450,50")')
     args = parser.parse_args()
 
     mode_map = {'lms': AecMode.LMS, 'nlms': AecMode.NLMS,
@@ -165,6 +167,9 @@ def main():
 
     # Scan for files
     groups = scan_fileids(dataset_dir)
+    if args.files:
+        selected = set(args.files.split(','))
+        groups = [g for g in groups if g['fileid'] in selected]
     if not groups:
         print(f"No AEC Challenge files found in {dataset_dir}")
         print("Run: python3 gen_sim_data.py first")
@@ -177,101 +182,81 @@ def main():
     if HAS_TRUE_RIR:
         true_ir = make_true_rir(delay=200, gain=0.8, n_taps=512)
 
-    # Plot
-    n_sets = len(groups)
-    fig, axes = plt.subplots(n_sets, 4, figsize=(20, 4 * n_sets))
-    if n_sets == 1:
-        axes = axes[np.newaxis, :]
+    # Each fileid → separate figure with 3 rows (far, mic, output)
+    # Output row overlays RES-off and RES-on
+    rows_per_file = 3
 
-    for row, group in enumerate(groups):
+    for gi, group in enumerate(groups):
         fid = group['fileid']
         print(f"  Processing fileid_{fid} ...", end='', flush=True)
 
-        mic, ref, out, aec, sr = run_aec(
+        # Run without RES
+        mic, ref, out_no_res, aec_no_res, sr = run_aec(
             group['mic'], group['ref'], mode,
             enable_dtd=not args.no_dtd,
-            enable_res=args.enable_res,
+            enable_res=False,
             enable_shadow=args.enable_shadow,
             mu=args.mu, filter_length=args.filter)
-        est_ir = get_estimated_ir(aec)
-        print(f" done (ERLE={aec.get_erle():.1f} dB)")
+        erle_no_res = aec_no_res.get_erle()
+
+        # Run with RES
+        _, _, out_res, aec_res, _ = run_aec(
+            group['mic'], group['ref'], mode,
+            enable_dtd=not args.no_dtd,
+            enable_res=True,
+            enable_shadow=args.enable_shadow,
+            mu=args.mu, filter_length=args.filter)
+        erle_res = aec_res.get_erle()
+        print(f" done (no-RES={erle_no_res:.1f}, RES={erle_res:.1f} dB)")
 
         t = np.arange(len(mic)) / sr
-
-        # Compute shared y-axis limit across waveform columns
-        nearend_speech = None
-        if group['nearend_speech']:
-            nearend_speech, _ = sf.read(group['nearend_speech'])
-            nearend_speech = nearend_speech.astype(np.float32)[:len(mic)]
-
         ymax = max(np.max(np.abs(mic)), np.max(np.abs(ref)))
-        if nearend_speech is not None:
-            ymax = max(ymax, np.max(np.abs(nearend_speech)))
         ylim = (-ymax * 1.05, ymax * 1.05)
 
-        # ── Col 0: mic + AEC output ───────────────────────────────
-        ax = axes[row, 0]
+        fig, axes = plt.subplots(rows_per_file, 1, figsize=(16, 7),
+                                 sharex=True)
+
+        # Row 0: Far-end (reference)
+        ax = axes[0]
+        ax.plot(t, ref, color='green', linewidth=0.4, alpha=0.8)
+        ax.set_ylabel('Far-end', fontsize=9)
+        dtd_str = 'DTD off' if args.no_dtd else 'DTD on'
+        shadow_str = ', Shadow on' if args.enable_shadow else ''
+        ax.set_title(f'fileid_{fid} (mode={args.mode}, FL={args.filter}, {dtd_str}{shadow_str})',
+                     fontsize=12, fontweight='bold', loc='left')
+        ax.set_ylim(ylim)
+        ax.grid(True, alpha=0.2)
+
+        # Row 1: Mic (near-end + echo)
+        ax = axes[1]
+        ax.plot(t, mic, color='royalblue', linewidth=0.4, alpha=0.8)
+        ax.set_ylabel('Mic', fontsize=9)
+        ax.set_ylim(ylim)
+        ax.grid(True, alpha=0.2)
+
+        # Row 2: AEC output — overlay no-RES vs RES
+        ax = axes[2]
         if not args.no_dtd:
-            draw_dtd_spans(ax, aec.confidence_history, aec.hop_size, sr)
-        ax.plot(t, mic, alpha=0.6, label='mic')
-        ax.plot(t, out, alpha=0.8, label='AEC output')
-        ax.set_title(f'fileid_{fid} — Mic + Output')
+            draw_dtd_spans(ax, aec_res.confidence_history, aec_res.hop_size, sr)
+        ax.plot(t, out_no_res, color='orange', linewidth=0.4, alpha=0.7,
+                label=f'No RES (ERLE={erle_no_res:.1f} dB)')
+        ax.plot(t, out_res, color='darkgreen', linewidth=0.4, alpha=0.8,
+                label=f'RES on (ERLE={erle_res:.1f} dB)')
+        ax.set_ylabel('AEC Output', fontsize=9)
         ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Amplitude')
+        ax.set_ylim(ylim)
         ax.legend(loc='upper right', fontsize=8)
-        ax.set_xlim(0, t[-1])
-        ax.set_ylim(ylim)
+        ax.grid(True, alpha=0.2)
 
-        # ── Col 1: reference (far-end) ───────────────────────────
-        ax = axes[row, 1]
-        ax.plot(t, ref, alpha=0.7, color='green')
-        ax.set_title(f'fileid_{fid} — Reference (far-end)')
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Amplitude')
-        ax.set_xlim(0, t[-1])
-        ax.set_ylim(ylim)
+        plt.tight_layout()
 
-        # ── Col 2: nearend speech (simulation only) ─────────────
-        ax = axes[row, 2]
-        if nearend_speech is not None:
-            t_ns = np.arange(len(nearend_speech)) / sr
-            ax.plot(t_ns, nearend_speech, alpha=0.7, color='purple')
-            ax.set_title(f'fileid_{fid} — Near-end Speech')
-            ax.set_xlim(0, t_ns[-1])
-        else:
-            ax.set_title(f'fileid_{fid} — Near-end Speech (N/A)')
-            ax.text(0.5, 0.5, 'No nearend_speech file', ha='center', va='center',
-                    transform=ax.transAxes, color='gray', fontsize=10)
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Amplitude')
-        ax.set_ylim(ylim)
-
-        # ── Col 3: estimated IR (+ true IR if available) ─────────
-        ax = axes[row, 3]
-        idx_est = np.arange(len(est_ir))
-        ax.plot(idx_est, est_ir, label='Estimated IR', lw=1.0, alpha=0.8)
-        if true_ir is not None and fid != '0':
-            idx_true = np.arange(len(true_ir))
-            ax.plot(idx_true, true_ir, label='True IR', lw=1.5, alpha=0.6)
-        ax.set_title(f'fileid_{fid} — Impulse Response')
-        ax.set_xlabel('Samples')
-        ax.set_ylabel('Amplitude')
-        ax.legend(fontsize=8)
-        ax.set_xlim(0, len(est_ir))
-
-    dtd_str = 'DTD off' if args.no_dtd else 'DTD on'
-    res_str = 'RES on' if args.enable_res else 'RES off'
-    shadow_str = 'Shadow on' if args.enable_shadow else 'Shadow off'
-    fig.suptitle(f'AEC Results (mode={args.mode}, {dtd_str}, {res_str}, {shadow_str})', fontsize=14)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-
-    dtd_tag = '_no_dtd' if args.no_dtd else ''
-    res_tag = '_res' if args.enable_res else ''
-    shadow_tag = '_shadow' if args.enable_shadow else ''
-    out_path = os.path.join(base, f'aec_results_{args.mode}{dtd_tag}{res_tag}{shadow_tag}.png')
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    print(f"Saved: {out_path}")
-    plt.show()
+        dtd_tag = '_no_dtd' if args.no_dtd else ''
+        shadow_tag = '_shadow' if args.enable_shadow else ''
+        out_path = os.path.join(base,
+            f'aec_results_{args.mode}{dtd_tag}_res_compare{shadow_tag}_fileid_{fid}.png')
+        plt.savefig(out_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved: {out_path}")
+        plt.close(fig)
 
 
 if __name__ == '__main__':
