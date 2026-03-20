@@ -886,13 +886,18 @@ class AEC:
         self.shadow_copy_counter = 0
         self.shadow_frame_count = 0  # warm-up counter for shadow copy
 
-        # ERLE
+        # ERLE (raw = filter-only, final = post-RES)
         self.near_power = 0.0
-        self.error_power = 0.0
+        self.error_power = 0.0  # backward compat alias for raw
+        self.raw_error_power = 0.0
+        self.final_error_power = 0.0
         self.alpha = 0.95
         # Cumulative ERLE (full-segment average)
         self.near_power_sum = 0.0
-        self.error_power_sum = 0.0
+        self.error_power_sum = 0.0  # backward compat alias for raw
+        self.raw_error_power_sum = 0.0
+        self.final_error_power_sum = 0.0
+        self._conv_counter = 0  # convergence consecutive frame counter
 
         # DTD confidence history (one entry per process() call)
         self.confidence_history = []
@@ -926,8 +931,13 @@ class AEC:
             self._freq_out_read = 0
         self.near_power = 0.0
         self.error_power = 0.0
+        self.raw_error_power = 0.0
+        self.final_error_power = 0.0
         self.near_power_sum = 0.0
         self.error_power_sum = 0.0
+        self.raw_error_power_sum = 0.0
+        self.final_error_power_sum = 0.0
+        self._conv_counter = 0
 
     @property
     def hop_size(self) -> int:
@@ -972,9 +982,9 @@ class AEC:
         if mu_min is None:
             mu_min = self.config.shadow_mu_min
         if not self._filter_converged:
-            # Pre-convergence: full mu for fast convergence (per_bin unreliable)
-            return 1.0
-        mu_min = max(mu_min, 0.2)
+            mu_min = max(mu_min, 0.5)   # Pre-convergence: floor 0.5, ratio modulates
+        else:
+            mu_min = max(mu_min, 0.2)
         # Per-bin mu_scale from RES echo_psd/error_psd (set previous frame, post-RES)
         if self._per_bin_mu_scale is not None:
             return np.maximum(self._per_bin_mu_scale, mu_min)
@@ -1034,10 +1044,10 @@ class AEC:
                     self._freq_out_read = 0
 
                 r = self._freq_out_read
-                output = self._freq_out_queue[r:r+hop].copy()
+                raw_output = self._freq_out_queue[r:r+hop].copy()
                 self._freq_out_read = r + hop
             else:
-                output = self.filter.process(near_end, far_end, mu_scale)
+                raw_output = self.filter.process(near_end, far_end, mu_scale)
 
             # Shadow filter with DTD protection (#1) and bidirectional copy (#6)
             if self.shadow_filter is not None and self._freq_near_queue is None:
@@ -1053,16 +1063,21 @@ class AEC:
                 self.main_err_smooth = alpha_s * self.main_err_smooth + (1 - alpha_s) * main_err
                 self.shadow_err_smooth = alpha_s * self.shadow_err_smooth + (1 - alpha_s) * shadow_err
 
-                # Copy gate: only compare during far-end active + non-DT (AEC3 style)
+                # Copy gate: only during far-end active + non-DT + no echo path change
                 if self.shadow_frame_count >= 50:
                     threshold = self.config.shadow_copy_threshold
                     far_active = np.mean(far_end ** 2) > 1e-4
                     if self.config.enable_dtd:
                         not_dt = self.get_dtd_confidence() < 0.3
                     else:
-                        not_dt = self._simple_mu_ratio > 0.6
+                        # Use raw far/error ratio as DT indicator
+                        raw_err_pwr = np.mean(raw_output ** 2) + 1e-10
+                        far_pwr_now = np.mean(far_end ** 2) + 1e-10
+                        not_dt = far_pwr_now / raw_err_pwr > 0.3
 
-                    if far_active:
+                    copy_allowed = far_active and not_dt and not self.epc_active
+
+                    if copy_allowed:
                         if self.shadow_err_smooth < self.main_err_smooth * threshold:
                             self.shadow_copy_counter += 1
                         else:
@@ -1073,12 +1088,11 @@ class AEC:
                             self.filter.copy_weights_from(self.shadow_filter)
                             self.main_err_smooth = self.shadow_err_smooth
                             self.shadow_copy_counter = 0
-                        elif self.main_err_smooth < self.shadow_err_smooth * threshold:
+                        elif self.main_err_smooth < self.shadow_err_smooth * threshold and not_dt:
                             # Bidirectional: Main → Shadow
                             self.shadow_filter.copy_weights_from(self.filter)
                             self.shadow_err_smooth = self.main_err_smooth
                     else:
-                        # Far-end silent: reset counter
                         self.shadow_copy_counter = 0
 
             # Echo path change detection (shadow-based)
@@ -1108,8 +1122,8 @@ class AEC:
                 else:
                     self.epc_active = False
 
-            # Record filter output BEFORE RES for accurate ERLE tracking
-            filter_output_pre_res = output.copy()
+            # final_output starts from raw_output; RES modifies final_output only
+            final_output = raw_output.copy()
 
             # RES post-filter using OLA + sqrt-Hann (skip for buffered FDAF)
             if self.res and self._freq_near_queue is None:
@@ -1117,34 +1131,40 @@ class AEC:
                 # Dynamic over_sub: aggressive when unconverged, conservative when converged
                 inst_erle = self.get_erle_instant()
                 erle_factor = np.clip((inst_erle - 5.0) / 20.0, 0.0, 1.0)
-                self.res.over_sub = 1.0 + 2.0 * erle_factor
-                output = self.res.process(output, self.filter.echo_spec,
-                                          far_power, self.filter.far_spec,
-                                          filter_converged=self._filter_converged,
-                                          erle_factor=erle_factor)
+                base_over_sub = 1.0 + 2.0 * erle_factor
+                # DT protection: reduce suppression when near-end is active
+                dtd_conf = self.get_dtd_confidence()  # 0 if DTD disabled
+                dt_reduction = 1.5 * dtd_conf
+                self.res.over_sub = max(base_over_sub - dt_reduction, 0.5)
+                final_output = self.res.process(raw_output, self.filter.echo_spec,
+                                                far_power, self.filter.far_spec,
+                                                filter_converged=self._filter_converged,
+                                                erle_factor=erle_factor)
 
                 # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
-                if not self.config.enable_dtd and self._filter_converged:
-                    per_bin_eer = self.res.echo_psd / (self.res.error_psd + 1e-10)
-                    per_bin_eer = np.clip(per_bin_eer, 0.0, 1.0)
-                    mu_min = self.config.shadow_mu_min
-                    self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
-                    self._simple_mu_ratio = float(np.mean(per_bin_eer))
-                elif not self.config.enable_dtd and not self._filter_converged:
-                    self._per_bin_mu_scale = None
-                    self._simple_mu_ratio = 1.0
+                if not self.config.enable_dtd:
+                    if self._filter_converged:
+                        per_bin_eer = self.res.echo_psd / (self.res.error_psd + 1e-10)
+                        per_bin_eer = np.clip(per_bin_eer, 0.0, 1.0)
+                        mu_min = self.config.shadow_mu_min
+                        self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
+                        self._simple_mu_ratio = float(np.mean(per_bin_eer))
+                    else:
+                        # Pre-convergence: no per_bin, let ratio track DT naturally
+                        self._per_bin_mu_scale = None
+                        self._update_simple_mu_ratio(raw_output, far_end)
 
             # Update DTD detectors for NEXT block
             # Skip divergence detector before convergence (output>mic is normal
             # when filter hasn't learned echo path yet, not actual divergence)
             if self.dtd_divergence and self._filter_converged:
-                self.dtd_divergence.detect_block(near_end, far_end, output=output)
+                self.dtd_divergence.detect_block(near_end, far_end, output=raw_output)
             if self.dtd_coherence and self._filter_converged:
                 if self._dtd_fft_size > 0:
                     # FREQ buffered: accumulate into DTD buffer, run at hop=FL/2
                     hop = self._hop_size
                     pos = self._dtd_acc_pos
-                    self._dtd_acc_err[pos:pos+hop] = output
+                    self._dtd_acc_err[pos:pos+hop] = raw_output
                     self._dtd_acc_far[pos:pos+hop] = far_end
                     self._dtd_acc_pos = pos + hop
                     if self._dtd_acc_pos >= self._dtd_hop:
@@ -1168,15 +1188,16 @@ class AEC:
                         far_spec=self.filter.far_spec)
         else:
             # LMS/NLMS: use mu_scale from DTD or simple variable mu
-            output, echo_est = self.filter.process_block(near_end, far_end,
-                                                          mu_scale=mu_scale)
+            raw_output, echo_est = self.filter.process_block(near_end, far_end,
+                                                              mu_scale=mu_scale)
+            final_output = raw_output.copy()
             if not self.config.enable_dtd:
-                self._update_simple_mu_ratio(output, far_end)
+                self._update_simple_mu_ratio(raw_output, far_end)
 
-        # Output limiter: output should never exceed mic amplitude.
+        # Output limiter: final_output should never exceed mic amplitude.
         # Uses smoothed gain to avoid frame-boundary clicking artifacts.
         near_peak = np.max(np.abs(near_end))
-        out_peak = np.max(np.abs(output))
+        out_peak = np.max(np.abs(final_output))
         if out_peak > near_peak > 1e-6:
             target_gain = near_peak / out_peak
         else:
@@ -1186,37 +1207,43 @@ class AEC:
         else:
             alpha_lim = 0.8   # release: recover moderately
         self._limiter_gain = alpha_lim * self._limiter_gain + (1 - alpha_lim) * target_gain
-        output *= self._limiter_gain
+        final_output *= self._limiter_gain
 
         # Output noise gate: suppress very low-level residual (far-end only)
-        out_power = np.mean(output ** 2)
+        out_power = np.mean(final_output ** 2)
         near_power_inst = np.mean(near_end ** 2)
         far_power_inst = np.mean(far_end ** 2)
         if far_power_inst > 1e-4 and near_power_inst > 1e-8:
             snr = out_power / near_power_inst
-            if snr < 0.01:  # output < -20dB of mic
-                output *= snr / 0.01  # soft fade
+            if snr < 0.01:  # final_output < -20dB of mic
+                final_output *= snr / 0.01  # soft fade
 
-        # ERLE (use filter error before RES for accurate convergence tracking)
-        erle_src = filter_output_pre_res if 'filter_output_pre_res' in locals() else output
+        # ERLE: track raw (filter-only) and final (post-RES) separately
         for i in range(len(near_end)):
             self.near_power = self.alpha * self.near_power + (1 - self.alpha) * near_end[i] ** 2
-            self.error_power = self.alpha * self.error_power + (1 - self.alpha) * erle_src[i] ** 2
+            self.raw_error_power = self.alpha * self.raw_error_power + (1 - self.alpha) * raw_output[i] ** 2
+            self.final_error_power = self.alpha * self.final_error_power + (1 - self.alpha) * final_output[i] ** 2
         self.near_power_sum += np.sum(near_end ** 2)
-        self.error_power_sum += np.sum(output ** 2)
+        self.raw_error_power_sum += np.sum(raw_output ** 2)
+        self.final_error_power_sum += np.sum(final_output ** 2)
+        # Backward compat: error_power = raw (for convergence detection / inst ERLE)
+        self.error_power = self.raw_error_power
+        self.error_power_sum = self.raw_error_power_sum
 
-        # Convergence detection: once instantaneous ERLE exceeds 6 dB,
-        # consider filter converged (enables DTD + lowers mu_min).
-        # 6 dB (not 3 dB) to avoid premature DTD activation.
+        # Convergence detection: 10 consecutive frames with ERLE > 6 dB
         if not self._filter_converged and self.near_power > 1e-8:
-            inst_erle = 10 * np.log10(self.near_power / (self.error_power + 1e-10))
+            inst_erle = 10 * np.log10(self.near_power / (self.raw_error_power + 1e-10))
             if inst_erle > 6.0:
+                self._conv_counter += 1
+            else:
+                self._conv_counter = 0
+            if self._conv_counter >= 10:
                 self._filter_converged = True
 
         # Record DTD confidence for plotting
         self.confidence_history.append(self.get_dtd_confidence())
 
-        return output.astype(np.float32)
+        return final_output.astype(np.float32)
 
     def get_erle(self) -> float:
         """Return cumulative ERLE (full-segment average)."""
