@@ -64,7 +64,7 @@ class AecConfig:
 
     # RES parameters
     enable_res: bool = False
-    res_g_min_db: float = -20.0
+    res_g_min_db: float = -40.0
     res_over_sub: float = 3.0
     res_alpha: float = 0.8
     enable_cng: bool = True            # Comfort noise generation in RES
@@ -306,7 +306,7 @@ class ResFilter:
         self.alpha_echo_psd = 0.85   # echo PSD: TC≈107ms (faster decay to reduce reverb)
         self.alpha_error_psd = 0.9   # error PSD: stable TC≈160ms
 
-        self.gain_smooth = np.ones(n_freqs, dtype=np.float32)
+        self.gain_smooth = np.full(n_freqs, self.g_min, dtype=np.float32)
         self.echo_psd = np.zeros(n_freqs, dtype=np.float32)
         self.error_psd = np.zeros(n_freqs, dtype=np.float32)
 
@@ -333,7 +333,7 @@ class ResFilter:
         self.ola_buf = np.zeros(block_size, dtype=np.float32)
 
     def reset(self):
-        self.gain_smooth.fill(1)
+        self.gain_smooth.fill(self.g_min)
         self.echo_psd.fill(0)
         self.error_psd.fill(0)
         self.S_fe.fill(0)
@@ -384,9 +384,12 @@ class ResFilter:
                 self.S_fe *= 0.5
                 self.S_ff *= 0.5
 
+        # Cold start: skip EMA warmup, initialize PSD directly on first far-end frame
+        if far_power > 1e-4 and np.sum(self.echo_psd) < 1e-10:
+            self.echo_psd[:] = echo_pwr_linear
+            self.error_psd[:] = error_pwr
+
         # Linear EER from adaptive filter echo estimate
-        # No far_scale: use echo estimate directly (far_scale suppresses
-        # valid echo PSD when filter is converged)
         self.echo_psd = self.alpha_echo_psd * self.echo_psd + (1 - self.alpha_echo_psd) * echo_pwr_linear
         self.error_psd = self.alpha_error_psd * self.error_psd + (1 - self.alpha_error_psd) * error_pwr
 
@@ -1092,6 +1095,10 @@ class AEC:
             # RES post-filter using OLA + sqrt-Hann (skip for buffered FDAF)
             if self.res and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
+                # Dynamic over_sub: aggressive when unconverged, conservative when converged
+                inst_erle = self.get_erle_instant()
+                erle_factor = np.clip((inst_erle - 5.0) / 20.0, 0.0, 1.0)
+                self.res.over_sub = 4.0 - 2.0 * erle_factor
                 output = self.res.process(output, self.filter.echo_spec,
                                           far_power, self.filter.far_spec)
 
