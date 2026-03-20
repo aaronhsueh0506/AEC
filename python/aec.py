@@ -65,7 +65,7 @@ class AecConfig:
     # RES parameters
     enable_res: bool = False
     res_g_min_db: float = -40.0
-    res_over_sub: float = 3.0
+    res_over_sub: float = 10.0
     res_alpha: float = 0.8
     enable_cng: bool = True            # Comfort noise generation in RES
 
@@ -81,11 +81,21 @@ class AecConfig:
     # Coherence DTD absolute energy floor
     dtd_coh_abs_floor: float = 1e-6     # #8: Absolute error energy floor
 
+    # FDKF (Frequency Domain Kalman Filter) — faster convergence than NLMS
+    use_kalman: bool = False
+
     # Echo path change detection (requires shadow filter)
     epc_delta_threshold: float = 0.3    # |ΔE/total_E| < threshold → echo change
     epc_total_rise: float = 1.5         # total_err > prev × rise → errors increasing
     epc_hangover: int = 20              # keep EPC active for N frames after detection
     epc_mu_floor: float = 0.5           # mu_scale floor during EPC
+
+    # Delay estimation (GCC-PHAT)
+    enable_delay_est: bool = True       # Enable automatic delay estimation + ref alignment
+    max_delay_ms: float = 250.0         # Maximum delay to search (ms)
+    delay_est_period_s: float = 2.0     # Re-estimate delay every N seconds
+    delay_est_init_s: float = 0.5       # Accumulate this much data before first estimate
+    fixed_delay_samples: int = -1       # If >= 0, use this fixed delay instead of estimation
 
     # Mode
     mode: AecMode = AecMode.NLMS
@@ -98,6 +108,129 @@ class AecConfig:
         # Next power of 2 >= frame_size (= frame_size when frame_size is power of 2)
         n = self.frame_size
         return 1 << (n - 1).bit_length()
+
+
+class DelayEstimator:
+    """GCC-PHAT delay estimator for AEC reference alignment.
+
+    Uses short overlapping segments for fast initial estimation.
+    Cross-spectrum is accumulated over segments and smoothed with EMA.
+    """
+
+    def __init__(self, sample_rate: int, max_delay_ms: float = 250.0,
+                 init_seconds: float = 0.5, period_seconds: float = 2.0):
+        self.sample_rate = sample_rate
+        self.max_delay_samples = int(max_delay_ms * sample_rate / 1000)
+        self.init_seconds = init_seconds
+        self.period_seconds = period_seconds
+
+        # Analysis window: 2x max_delay, but at least 2048
+        self.seg_size = 1
+        min_seg = max(2048, 2 * self.max_delay_samples)
+        while self.seg_size < min_seg:
+            self.seg_size *= 2
+        self.seg_hop = self.seg_size // 2  # 50% overlap
+        self.n_freqs = self.seg_size // 2 + 1
+
+        # Smoothed cross-spectrum
+        self._cross_spec = np.zeros(self.n_freqs, dtype=np.complex128)
+        self._alpha = 0.6
+        self._n_updates = 0
+
+        # Sliding buffers (accumulate hop-by-hop)
+        self._mic_buf = np.zeros(self.seg_size, dtype=np.float32)
+        self._ref_buf = np.zeros(self.seg_size, dtype=np.float32)
+        self._buf_pos = 0  # how many samples in current segment
+
+        # State
+        self.estimated_delay = -1
+        self._samples_accumulated = 0
+        self._samples_since_est = 0
+        self._init_done = False
+        self._init_samples = int(init_seconds * sample_rate)
+        self._period_samples = int(period_seconds * sample_rate)
+        self._n_estimates = 0
+
+    def reset(self):
+        self._cross_spec.fill(0)
+        self._mic_buf.fill(0)
+        self._ref_buf.fill(0)
+        self._buf_pos = 0
+        self._n_updates = 0
+        self.estimated_delay = -1
+        self._samples_accumulated = 0
+        self._samples_since_est = 0
+        self._init_done = False
+        self._n_estimates = 0
+
+    def accumulate(self, mic: np.ndarray, ref: np.ndarray) -> bool:
+        """Feed mic/ref samples. Returns True if a new delay estimate was made."""
+        n = len(mic)
+        self._samples_accumulated += n
+        self._samples_since_est += n
+
+        # Accumulate into segment buffer
+        remaining = n
+        src_pos = 0
+        while remaining > 0:
+            space = self.seg_size - self._buf_pos
+            chunk = min(remaining, space)
+            self._mic_buf[self._buf_pos:self._buf_pos + chunk] = mic[src_pos:src_pos + chunk]
+            self._ref_buf[self._buf_pos:self._buf_pos + chunk] = ref[src_pos:src_pos + chunk]
+            self._buf_pos += chunk
+            src_pos += chunk
+            remaining -= chunk
+
+            if self._buf_pos >= self.seg_size:
+                # Segment full — update cross-spectrum
+                self._update_cross_spectrum()
+                # Shift by seg_hop (50% overlap)
+                self._mic_buf[:self.seg_hop] = self._mic_buf[self.seg_hop:]
+                self._ref_buf[:self.seg_hop] = self._ref_buf[self.seg_hop:]
+                self._buf_pos = self.seg_hop
+
+        # Estimate when enough data accumulated
+        if self._n_updates < 2:
+            return False
+
+        if not self._init_done:
+            if self._samples_accumulated >= self._init_samples:
+                self._estimate()
+                self._init_done = True
+                return True
+        else:
+            if self._samples_since_est >= self._period_samples:
+                self._estimate()
+                return True
+
+        return False
+
+    def _update_cross_spectrum(self):
+        """Update smoothed cross-spectrum from current segment."""
+        mic_spec = np.fft.rfft(self._mic_buf)
+        ref_spec = np.fft.rfft(self._ref_buf)
+        cross = mic_spec * np.conj(ref_spec)
+        self._n_updates += 1
+        if self._n_updates == 1:
+            self._cross_spec = cross.copy()
+        else:
+            self._cross_spec = self._alpha * self._cross_spec + (1 - self._alpha) * cross
+
+    def _estimate(self):
+        """Estimate delay from accumulated cross-spectrum using GCC-PHAT."""
+        magnitude = np.abs(self._cross_spec) + 1e-10
+        phat = self._cross_spec / magnitude
+        gcc = np.fft.irfft(phat, n=self.seg_size)
+
+        max_d = min(self.max_delay_samples, self.seg_size // 2)
+
+        # Search positive delays (mic lags ref — normal case)
+        pos_range = gcc[:max_d + 1]
+        best_pos = np.argmax(np.abs(pos_range))
+
+        self.estimated_delay = best_pos
+        self._samples_since_est = 0
+        self._n_estimates += 1
 
 
 class NlmsFilter:
@@ -164,15 +297,19 @@ class NlmsFilter:
 
 class SubbandNlms:
     """
-    Frequency-domain NLMS (Partitioned Block FDAF)
+    Frequency-domain Partitioned Block Adaptive Filter
 
-    More efficient than time-domain for long echo paths.
+    Supports two adaptation modes:
+    - NLMS: classic normalized LMS (mu / power normalization)
+    - FDKF: Frequency-Domain Kalman Filter (per-bin Kalman gain, faster convergence)
+
     Uses overlap-save method for linear convolution.
     """
 
     def __init__(self, block_size: int, n_partitions: int,
                  mu: float = 0.3, delta: float = 1e-8,
-                 use_leakage: bool = False, leakage: float = 0.9999):
+                 use_leakage: bool = False, leakage: float = 0.9999,
+                 use_kalman: bool = False):
         self.block_size = block_size
         self.hop_size = block_size // 2
         self.n_partitions = n_partitions
@@ -182,6 +319,7 @@ class SubbandNlms:
         self.alpha_power = 0.9
         self.use_leakage = use_leakage
         self.leakage = leakage
+        self.use_kalman = use_kalman
 
         # Filter weights [n_partitions, n_freqs]
         self.W = np.zeros((n_partitions, self.n_freqs), dtype=np.complex64)
@@ -203,6 +341,17 @@ class SubbandNlms:
         self.error_spec = np.zeros(self.n_freqs, dtype=np.complex64)
         self.far_spec = np.zeros(self.n_freqs, dtype=np.complex64)
 
+        # FDKF state: per-partition, per-bin error covariance
+        if self.use_kalman:
+            # P: error covariance (real, per-partition per-bin)
+            self.P = np.ones((n_partitions, self.n_freqs), dtype=np.float32) * 0.5
+            # Q: process noise — controls adaptation speed
+            self.Q = np.ones(self.n_freqs, dtype=np.float32) * 1e-5
+            # R: measurement noise PSD (estimated from error)
+            self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
+            self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
+            self._alpha_r = 0.95  # smoothing for R estimation
+
     def reset(self):
         self.W.fill(0)
         self.X_buf.fill(0)
@@ -210,6 +359,10 @@ class SubbandNlms:
         self.far_buffer.fill(0)
         self.power.fill(0)
         self.partition_idx = 0
+        if self.use_kalman:
+            self.P.fill(0.1)
+            self.R.fill(1e-2)
+            self._error_psd.fill(1e-2)
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray,
                 mu_scale=1.0) -> np.ndarray:
@@ -254,33 +407,85 @@ class SubbandNlms:
         error_time[hop:] = output
         self.error_spec = np.fft.rfft(error_time)
 
-        # Update weights (skip when reference power too low)
+        # Update weights
         total_power = np.sum(self.power)
-        mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
-        if mu_scale_arr.ndim == 0:
-            mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
-        if np.any(mu_scale_arr > 0) and total_power > self.delta * self.n_freqs:
-            # Per-bin normalization with power floor to prevent divergence
-            # Use mean-based floor (not max-based) so low-power bins get adequate floor
-            global_floor = np.mean(self.power) * 0.01 + self.delta
-            power_floor = np.maximum(self.power, global_floor)
-            mu_eff = (self.mu * mu_scale_arr) / (power_floor * self.n_partitions + self.delta)
-            for p in range(self.n_partitions):
-                p_idx = (curr_p - p) % self.n_partitions
-                grad = self.error_spec * np.conj(self.X_buf[p_idx])
-                self.W[p] += mu_eff * grad
-
-                if self.use_leakage:
-                    # Leakage: 1 scalar multiply replaces 2 FFTs
-                    self.W[p] *= self.leakage
-                else:
-                    # Constraint: time-domain truncation (2 FFTs per partition)
-                    w_time = np.fft.irfft(self.W[p], self.block_size)
-                    w_time[hop:] = 0
-                    self.W[p] = np.fft.rfft(w_time)
+        if total_power > self.delta * self.n_freqs:
+            if self.use_kalman:
+                self._update_kalman(curr_p, mu_scale)
+            else:
+                self._update_nlms(curr_p, mu_scale)
 
         self.partition_idx = (self.partition_idx + 1) % self.n_partitions
         return output.astype(np.float32)
+
+    def _update_nlms(self, curr_p: int, mu_scale):
+        """NLMS weight update."""
+        mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
+        if mu_scale_arr.ndim == 0:
+            mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
+        if not np.any(mu_scale_arr > 0):
+            return
+        global_floor = np.mean(self.power) * 0.01 + self.delta
+        power_floor = np.maximum(self.power, global_floor)
+        mu_eff = (self.mu * mu_scale_arr) / (power_floor * self.n_partitions + self.delta)
+        for p in range(self.n_partitions):
+            p_idx = (curr_p - p) % self.n_partitions
+            grad = self.error_spec * np.conj(self.X_buf[p_idx])
+            self.W[p] += mu_eff * grad
+            if self.use_leakage:
+                self.W[p] *= self.leakage
+            else:
+                w_time = np.fft.irfft(self.W[p], self.block_size)
+                w_time[self.hop_size:] = 0
+                self.W[p] = np.fft.rfft(w_time)
+
+    def _update_kalman(self, curr_p: int, mu_scale):
+        """Frequency-Domain Kalman Filter weight update.
+
+        Per-bin Kalman gain replaces fixed step size:
+        K = P * X / (X^H * P * X + R)
+        W += K * error
+        P = P - K * X^H * P + Q
+
+        Advantages over NLMS:
+        - Per-bin adaptation rate (bins with strong ref get faster updates)
+        - Automatic step size: converges fast initially, slows at steady-state
+        - Better handling of colored signals
+        """
+        mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
+        if mu_scale_arr.ndim == 0:
+            mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
+
+        # Update measurement noise estimate from error PSD
+        error_psd = np.abs(self.error_spec) ** 2
+        self._error_psd = self._alpha_r * self._error_psd + (1 - self._alpha_r) * error_psd
+        # R = smoothed error PSD (represents noise + residual echo)
+        self.R = np.maximum(self._error_psd, self.delta)
+
+        for p in range(self.n_partitions):
+            p_idx = (curr_p - p) % self.n_partitions
+            X = self.X_buf[p_idx]
+            X_power = np.abs(X) ** 2 + self.delta
+
+            # Kalman gain: K = P * X^* / (|X|^2 * P + R)
+            denominator = X_power * self.P[p] + self.R
+            K = (self.P[p] * np.conj(X)) / (denominator + self.delta)
+
+            # Apply mu_scale as DT protection
+            K *= mu_scale_arr
+
+            # Weight update
+            self.W[p] += K * self.error_spec
+
+            # Covariance update: P = (1 - K*X) * P + Q
+            KX = np.real(K * X)
+            self.P[p] = np.maximum((1.0 - KX) * self.P[p] + self.Q, self.delta)
+
+            # Constraint: time-domain truncation
+            if not self.use_leakage:
+                w_time = np.fft.irfft(self.W[p], self.block_size)
+                w_time[self.hop_size:] = 0
+                self.W[p] = np.fft.rfft(w_time)
 
     def get_error_energy(self) -> float:
         return float(np.sum(np.abs(self.error_spec) ** 2))
@@ -306,8 +511,8 @@ class ResFilter:
         self.g_min = 10 ** (g_min_db / 20)
         self.over_sub = over_sub
         self.alpha = alpha
-        self.alpha_echo_psd = 0.85   # echo PSD: TC≈107ms (faster decay to reduce reverb)
-        self.alpha_error_psd = 0.9   # error PSD: stable TC≈160ms
+        self.alpha_echo_psd = 0.5    # echo PSD: fast tracking (TC≈32ms)
+        self.alpha_error_psd = 0.8   # error PSD: moderate TC≈80ms
 
         self.gain_smooth = np.full(n_freqs, self.g_min, dtype=np.float32)
         self.echo_psd = np.zeros(n_freqs, dtype=np.float32)
@@ -316,7 +521,7 @@ class ResFilter:
         # Coherence-based nonlinear echo PSD estimation
         # Coherence between far-end and error captures both linear and
         # nonlinear echo components (both correlate with far-end).
-        self.alpha_coh = 0.65           # Cross-PSD smoothing (TC≈45ms, was 0.85/107ms)
+        self.alpha_coh = 0.3            # Cross-PSD smoothing (TC≈23ms, fast tracking)
         self.S_fe = np.zeros(n_freqs, dtype=np.complex64)  # Cross-PSD far×error
         self.S_ff = np.zeros(n_freqs, dtype=np.float32)    # Far-end PSD
         self.S_ee = np.zeros(n_freqs, dtype=np.float32)    # Error PSD
@@ -708,6 +913,31 @@ class AEC:
         if self.config.mu == AecConfig.mu:  # still at dataclass default
             self.config.mu = self._MODE_DEFAULT_MU.get(self.config.mode, 0.3)
 
+        # Delay estimation + reference alignment
+        if self.config.enable_delay_est or self.config.fixed_delay_samples >= 0:
+            max_delay_samp = int(self.config.max_delay_ms * self.config.sample_rate / 1000)
+            if self.config.fixed_delay_samples >= 0:
+                max_delay_samp = max(max_delay_samp, self.config.fixed_delay_samples + 256)
+                self.delay_est = None
+                self._current_delay = self.config.fixed_delay_samples
+            else:
+                self.delay_est = DelayEstimator(
+                    sample_rate=self.config.sample_rate,
+                    max_delay_ms=self.config.max_delay_ms,
+                    init_seconds=self.config.delay_est_init_s,
+                    period_seconds=self.config.delay_est_period_s,
+                )
+                self._current_delay = -1  # -1 = not yet estimated
+            # Reference ring buffer for delay compensation
+            self._ref_ring = np.zeros(max_delay_samp + 4096, dtype=np.float32)
+            self._ref_ring_write = 0
+            self._ref_ring_size = len(self._ref_ring)
+            self._ref_ring_filled = 0  # Total samples written (for warmup)
+            self._delay_active = True
+        else:
+            self.delay_est = None
+            self._delay_active = False
+
         # Create adaptive filter based on mode
         if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
             if self.config.mode == AecMode.FREQ:
@@ -732,7 +962,8 @@ class AEC:
                 mu=self.config.mu,
                 delta=self.config.delta,
                 use_leakage=self.config.use_leakage,
-                leakage=self.config.freq_leakage
+                leakage=self.config.freq_leakage,
+                use_kalman=self.config.use_kalman
             )
             self._hop_size = self.config.hop_size  # External hop (always 256)
             self._n_partitions = n_partitions
@@ -908,6 +1139,15 @@ class AEC:
             self.shadow_filter.reset()
             self.main_err_smooth = 0.0
             self.shadow_err_smooth = 0.0
+        if self._delay_active:
+            if self.delay_est is not None:
+                self.delay_est.reset()
+                self._current_delay = -1
+            else:
+                self._current_delay = self.config.fixed_delay_samples
+            self._ref_ring.fill(0)
+            self._ref_ring_write = 0
+            self._ref_ring_filled = 0
         self.prev_total_err = 0.0
         self.epc_active = False
         self.epc_hangover_count = 0
@@ -1016,6 +1256,45 @@ class AEC:
         self._simple_mu_ratio = alpha * self._simple_mu_ratio + (1 - alpha) * ratio
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
+        # Delay estimation + reference alignment
+        if self._delay_active:
+            hop = len(far_end)
+
+            # Online delay estimation (if not using fixed delay)
+            if self.delay_est is not None:
+                self.delay_est.accumulate(near_end, far_end)
+                new_delay = self.delay_est.estimated_delay
+                if new_delay >= 0:
+                    if self._current_delay < 0:
+                        self._current_delay = new_delay
+                    elif abs(new_delay - self._current_delay) > 32:
+                        self._current_delay = new_delay
+
+            # Write far_end into ring buffer
+            w = self._ref_ring_write
+            ring_sz = self._ref_ring_size
+            if w + hop <= ring_sz:
+                self._ref_ring[w:w + hop] = far_end
+            else:
+                part1 = ring_sz - w
+                self._ref_ring[w:ring_sz] = far_end[:part1]
+                self._ref_ring[:hop - part1] = far_end[part1:]
+            self._ref_ring_write = (w + hop) % ring_sz
+            self._ref_ring_filled += hop
+
+            # Apply delay compensation (only after enough data in ring buffer)
+            if self._current_delay > 0 and self._ref_ring_filled >= self._current_delay + hop:
+                d = self._current_delay
+                read_pos = (self._ref_ring_write - hop - d) % ring_sz
+                if read_pos + hop <= ring_sz:
+                    far_end = self._ref_ring[read_pos:read_pos + hop].copy()
+                else:
+                    part1 = ring_sz - read_pos
+                    far_end = np.concatenate([
+                        self._ref_ring[read_pos:ring_sz],
+                        self._ref_ring[:hop - part1]
+                    ])
+
         # DTD: dual detector (divergence + coherence) for FREQ/SUBBAND
         # Combined confidence = max(divergence, coherence) → mu_scale
         # Non-DTD: simple variable mu (Valin 2007 RER-inspired)
@@ -1128,14 +1407,15 @@ class AEC:
             # RES post-filter using OLA + sqrt-Hann (skip for buffered FDAF)
             if self.res and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
-                # Dynamic over_sub: aggressive when unconverged, conservative when converged
+                # Dynamic over_sub: always aggressive, scale with config
                 inst_erle = self.get_erle_instant()
-                erle_factor = np.clip((inst_erle - 5.0) / 20.0, 0.0, 1.0)
-                base_over_sub = 1.0 + 2.0 * erle_factor
+                erle_factor = np.clip((inst_erle - 3.0) / 15.0, 0.0, 1.0)
+                # Base: use config over_sub as minimum, scale up with convergence
+                base_over_sub = self.config.res_over_sub + 2.0 * erle_factor
                 # DT protection: reduce suppression when near-end is active
                 dtd_conf = self.get_dtd_confidence()  # 0 if DTD disabled
                 dt_reduction = 1.5 * dtd_conf
-                self.res.over_sub = max(base_over_sub - dt_reduction, 0.5)
+                self.res.over_sub = max(base_over_sub - dt_reduction, 1.0)
                 final_output = self.res.process(raw_output, self.filter.echo_spec,
                                                 far_power, self.filter.far_spec,
                                                 filter_converged=self._filter_converged,

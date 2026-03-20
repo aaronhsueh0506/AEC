@@ -39,17 +39,53 @@ AEC3_CLI = '/tmp/webrtc-ap/aec3_cli'
 HAS_AEC3 = os.path.isfile(AEC3_CLI) and os.access(AEC3_CLI, os.X_OK)
 
 
+def estimate_delay(mic, ref, sr, max_delay_ms=250.0):
+    """Pre-compute delay using full-signal cross-correlation.
+
+    Uses the entire signal for maximum accuracy.
+    Plain cross-correlation (no whitening) is most reliable for reverberant data.
+    """
+    max_d = int(max_delay_ms * sr / 1000)
+    n = min(len(mic), len(ref))
+    m = mic[:n].astype(np.float64)
+    r = ref[:n].astype(np.float64)
+
+    # FFT-based cross-correlation (full signal)
+    fft_size = 1
+    while fft_size < 2 * n:
+        fft_size *= 2
+    mic_spec = np.fft.rfft(m, n=fft_size)
+    ref_spec = np.fft.rfft(r, n=fft_size)
+    cross = mic_spec * np.conj(ref_spec)
+    xcorr = np.fft.irfft(cross, n=fft_size)
+
+    # Search positive delays only (mic lags ref)
+    max_search = min(max_d, fft_size // 2)
+    delay = int(np.argmax(xcorr[:max_search + 1]))
+    return delay
+
+
 def run_ours(mic, ref, sr, fl):
+    # Pre-compute delay and align reference signal
+    delay = estimate_delay(mic, ref, sr)
+    n = min(len(mic), len(ref))
+    if delay > 0 and delay < n:
+        # Delay ref: ref_aligned[t] = ref[t - delay], so filter sees aligned echo
+        ref_aligned = np.zeros(n, dtype=np.float32)
+        ref_aligned[delay:] = ref[:n - delay]
+    else:
+        ref_aligned = ref[:n]
+
     config = AecConfig(sample_rate=sr, mode=AecMode.SUBBAND,
                        filter_length=fl, enable_dtd=False,
-                       enable_shadow=True, enable_res=True)
+                       enable_shadow=True, enable_res=True,
+                       enable_delay_est=False, use_kalman=True)
     aec = AEC(config)
     hop = aec.hop_size
-    n = min(len(mic), len(ref))
     out = np.zeros(n, dtype=np.float32)
     pos = 0
     while pos + hop <= n:
-        out[pos:pos+hop] = aec.process(mic[pos:pos+hop], ref[pos:pos+hop])
+        out[pos:pos+hop] = aec.process(mic[pos:pos+hop], ref_aligned[pos:pos+hop])
         pos += hop
     return out[:n]
 
