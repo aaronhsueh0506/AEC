@@ -385,7 +385,7 @@ class ResFilter:
         self.error_psd = self.alpha_psd * self.error_psd + (1 - self.alpha_psd) * error_pwr
 
         if far_power < 1e-4:
-            self.echo_psd *= 0.5
+            self.echo_psd *= 0.3  # fast decay during far-end silence
             # Track noise floor for CNG during far-end silence
             if self.enable_cng:
                 self.noise_psd = np.minimum(
@@ -394,9 +394,10 @@ class ResFilter:
                     error_pwr * 2)
 
         # --- Noise gate: don't suppress quiet segments ---
-        noise_floor = 1e-6
-        quiet_mask = ((self.echo_psd < noise_floor)
-                      & (self.error_psd < noise_floor))
+        # Adaptive floor tracks signal level to avoid passing low-energy residual echo
+        signal_floor = np.mean(self.error_psd) * 0.001 + 1e-8
+        quiet_mask = ((self.echo_psd < signal_floor)
+                      & (self.error_psd < signal_floor))
 
         # Compute EER: linear EER modulated by coherence as soft gate
         # coh2 high (echo dominant) → eer stays high → suppress
@@ -835,6 +836,9 @@ class AEC:
         # until filter has demonstrated basic echo cancellation (ERLE > 3 dB)
         self._filter_converged = False
 
+        # Output limiter: smoothed gain to avoid frame-boundary clicking
+        self._limiter_gain = 1.0
+
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0  # holdoff counter: blocks release for N frames
@@ -1025,9 +1029,8 @@ class AEC:
                             self.shadow_copy_counter = 0
 
                         if self.shadow_copy_counter >= self.config.shadow_copy_hysteresis:
-                            # Shadow → Main copy
+                            # Shadow → Main copy (don't copy echo_spec to avoid output discontinuity)
                             self.filter.copy_weights_from(self.shadow_filter)
-                            self.filter.echo_spec[:] = self.shadow_filter.echo_spec
                             self.main_err_smooth = self.shadow_err_smooth
                             self.shadow_copy_counter = 0
                         elif self.main_err_smooth < self.shadow_err_smooth * threshold:
@@ -1111,12 +1114,19 @@ class AEC:
                 self._update_simple_mu_ratio(output, far_end)
 
         # Output limiter: output should never exceed mic amplitude.
-        # If echo_est is correct, output = mic - echo ≤ mic. Exceeding
-        # means filter weights are wrong — scale down to prevent artifacts.
+        # Uses smoothed gain to avoid frame-boundary clicking artifacts.
         near_peak = np.max(np.abs(near_end))
         out_peak = np.max(np.abs(output))
         if out_peak > near_peak > 1e-6:
-            output *= near_peak / out_peak
+            target_gain = near_peak / out_peak
+        else:
+            target_gain = 1.0
+        if target_gain < self._limiter_gain:
+            alpha_lim = 0.3   # attack: compress quickly
+        else:
+            alpha_lim = 0.8   # release: recover moderately
+        self._limiter_gain = alpha_lim * self._limiter_gain + (1 - alpha_lim) * target_gain
+        output *= self._limiter_gain
 
         # ERLE
         for i in range(len(near_end)):
