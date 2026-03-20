@@ -212,8 +212,8 @@ class SubbandNlms:
         self.partition_idx = 0
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray,
-                mu_scale: float = 1.0) -> np.ndarray:
-        """Process hop_size samples. mu_scale in [0,1] controls adaptation rate."""
+                mu_scale=1.0) -> np.ndarray:
+        """Process hop_size samples. mu_scale: scalar or per-bin array [n_freqs]."""
         hop = self.hop_size
 
         # Shift buffers (overlap-save)
@@ -256,12 +256,15 @@ class SubbandNlms:
 
         # Update weights (skip when reference power too low)
         total_power = np.sum(self.power)
-        if mu_scale > 0 and total_power > self.delta * self.n_freqs:
+        mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
+        if mu_scale_arr.ndim == 0:
+            mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
+        if np.any(mu_scale_arr > 0) and total_power > self.delta * self.n_freqs:
             # Per-bin normalization with power floor to prevent divergence
             # Use mean-based floor (not max-based) so low-power bins get adequate floor
             global_floor = np.mean(self.power) * 0.01 + self.delta
             power_floor = np.maximum(self.power, global_floor)
-            mu_eff = (self.mu * mu_scale) / (power_floor * self.n_partitions + self.delta)
+            mu_eff = (self.mu * mu_scale_arr) / (power_floor * self.n_partitions + self.delta)
             for p in range(self.n_partitions):
                 p_idx = (curr_p - p) % self.n_partitions
                 grad = self.error_spec * np.conj(self.X_buf[p_idx])
@@ -378,12 +381,13 @@ class ResFilter:
             self.S_fe = a * self.S_fe + (1 - a) * spec * np.conj(far_spec)
             self.S_ff = a * self.S_ff + (1 - a) * np.abs(far_spec) ** 2
             self.S_ee = a * self.S_ee + (1 - a) * error_pwr
-            coh2 = np.abs(self.S_fe) ** 2 / (self.S_ff * self.S_ee + 1e-10)
-            coh2 = np.minimum(coh2, 1.0).astype(np.float32)
-            # Lightweight EMA to stabilize noisy coh2 (alpha_coh is fast)
+            coh2_raw = np.abs(self.S_fe) ** 2 / (self.S_ff * self.S_ee + 1e-10)
+            coh2_raw = np.minimum(coh2_raw, 1.0).astype(np.float32)
+            # Asymmetric EMA: fast drop (DT protection) / slow rise (stable tracking)
             if not hasattr(self, '_coh2_smooth'):
                 self._coh2_smooth = np.zeros(self.n_freqs, dtype=np.float32)
-            self._coh2_smooth = 0.7 * self._coh2_smooth + 0.3 * coh2
+            a_coh = np.where(coh2_raw < self._coh2_smooth, 0.50, 0.80)
+            self._coh2_smooth = a_coh * self._coh2_smooth + (1.0 - a_coh) * coh2_raw
             coh2 = self._coh2_smooth
         else:
             if far_power <= 1e-4:
@@ -443,7 +447,9 @@ class ResFilter:
         # far_activity low (far-end silent) → fast release (TC≈25ms)
         alpha_release = 0.4 + 0.5 * self.far_activity
 
-        alpha_g = np.where(g < self.gain_smooth, 0.6, alpha_release)
+        # Attack alpha: slow when unconverged (suppress oscillation), fast when converged
+        alpha_attack = 0.60 + 0.25 * (1.0 - erle_factor)
+        alpha_g = np.where(g < self.gain_smooth, alpha_attack, alpha_release)
         self.gain_smooth = alpha_g * self.gain_smooth + (1 - alpha_g) * g
 
         # Apply gain + synthesis sqrt-Hann window + IFFT
@@ -866,6 +872,9 @@ class AEC:
         # until filter has demonstrated basic echo cancellation (ERLE > 3 dB)
         self._filter_converged = False
 
+        # Per-bin mu_scale (updated from RES echo_psd/error_psd each frame)
+        self._per_bin_mu_scale = None  # None = use scalar fallback
+
         # Output limiter: smoothed gain to avoid frame-boundary clicking
         self._limiter_gain = 1.0
 
@@ -958,12 +967,15 @@ class AEC:
 
         return mu_scale
 
-    def _get_simple_mu_scale(self, mu_min: float = None) -> float:
-        """Get mu_scale from smoothed far/error ratio (for non-DTD modes)."""
+    def _get_simple_mu_scale(self, mu_min: float = None):
+        """Get mu_scale from smoothed EER (per-bin array or scalar fallback)."""
         if mu_min is None:
             mu_min = self.config.shadow_mu_min  # 0.2
         if not self._filter_converged:
             mu_min = max(mu_min, 0.3)
+        # Per-bin mu_scale from RES echo_psd/error_psd (set previous frame)
+        if self._per_bin_mu_scale is not None:
+            return np.maximum(self._per_bin_mu_scale, mu_min)
         return mu_min + (1.0 - mu_min) * self._simple_mu_ratio
 
     def _update_simple_mu_ratio(self, output: np.ndarray,
@@ -1025,16 +1037,16 @@ class AEC:
             else:
                 output = self.filter.process(near_end, far_end, mu_scale)
 
-            # Update simple variable mu ratio (for non-DTD modes)
-            # EER-driven mu: use echo_psd/error_psd instead of far/error ratio
-            # Avoids deadlock in high-DT scenarios (far+near strong → ratio always low)
+            # Update mu_scale from RES echo_psd/error_psd (for non-DTD modes)
             if not self.config.enable_dtd:
                 if self.res is not None:
-                    eer_mean = float(np.mean(
-                        self.res.echo_psd / (self.res.error_psd + 1e-10)
-                    ))
-                    self._simple_mu_ratio = float(np.clip(eer_mean, 0.0, 1.0))
+                    per_bin_eer = self.res.echo_psd / (self.res.error_psd + 1e-10)
+                    per_bin_eer = np.clip(per_bin_eer, 0.0, 1.0)
+                    mu_min = self.config.shadow_mu_min
+                    self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
+                    self._simple_mu_ratio = float(np.mean(per_bin_eer))
                 else:
+                    self._per_bin_mu_scale = None
                     self._update_simple_mu_ratio(output, far_end)
 
             # Shadow filter with DTD protection (#1) and bidirectional copy (#6)
@@ -1115,7 +1127,7 @@ class AEC:
                 # Dynamic over_sub: aggressive when unconverged, conservative when converged
                 inst_erle = self.get_erle_instant()
                 erle_factor = np.clip((inst_erle - 5.0) / 20.0, 0.0, 1.0)
-                self.res.over_sub = 5.0 - 2.0 * erle_factor
+                self.res.over_sub = 1.0 + 2.0 * erle_factor
                 output = self.res.process(output, self.filter.echo_spec,
                                           far_power, self.filter.far_spec,
                                           filter_converged=self._filter_converged,
