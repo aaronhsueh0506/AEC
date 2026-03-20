@@ -200,7 +200,7 @@ python3 plot_aec_results.py ../wav/ --mode subband --enable-dtd
 |------|-------------------|----------|-------------|
 | Mean ERLE | 7.0 dB | 3.1 dB | 7.3 dB |
 | Median ERLE | 5.6 dB | 2.0 dB | 4.4 dB |
-| vs Ours 勝/敗 | — | 34W / 0L | 7W / 27L |
+| vs Ours 勝/敗 | — | 0W / 34L | 7W / 27L |
 | NE-Ret Mean | -3.9 dB | -3.2 dB | -5.9 dB |
 | NE-Ret Median | -1.6 dB | -1.2 dB | -1.8 dB |
 
