@@ -436,18 +436,10 @@ class ResFilter:
         # Cross-frequency smoothing (3-bin moving average)
         g = np.convolve(g, np.ones(3) / 3, mode='same').astype(np.float32)
 
-        # Temporal smoothing with silence lock to prevent musical noise
-        mean_error_pwr = np.mean(error_pwr)
-        is_near_silent = (mean_error_pwr < 1e-7)  # ~-70 dBFS
-
-        if is_near_silent:
-            # Silence: near-freeze gain (TC≈3s) to avoid gain oscillation → musical noise
-            alpha_release = 0.99
-        elif far_spec is not None and far_power > 1e-4:
-            near_end_likelihood = 1.0 - float(np.mean(coh2))
-            alpha_release = self.alpha * (1.0 - 0.1 * near_end_likelihood)
-        else:
-            alpha_release = self.alpha
+        # Temporal smoothing: far_activity-driven release (no feedback loop)
+        # far_activity high (far-end speaking) → slow release (TC≈200ms)
+        # far_activity low (far-end silent) → fast release (TC≈25ms)
+        alpha_release = 0.4 + 0.5 * self.far_activity
 
         alpha_g = np.where(g < self.gain_smooth, 0.6, alpha_release)
         self.gain_smooth = alpha_g * self.gain_smooth + (1 - alpha_g) * g
