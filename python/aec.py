@@ -75,7 +75,7 @@ class AecConfig:
     shadow_copy_threshold: float = 0.7
     shadow_err_alpha: float = 0.85
     shadow_dtd_mu_min: float = 0.2      # #1: Shadow DTD floor (20% vs main's 5%)
-    shadow_mu_min: float = 0.2           # Shadow-only mode: DT mu floor (20%)
+    shadow_mu_min: float = 0.5           # Shadow-only mode: DT mu floor (50%)
     shadow_copy_hysteresis: int = 5     # #5: Consecutive frames needed for copy
 
     # Coherence DTD absolute energy floor
@@ -970,10 +970,12 @@ class AEC:
     def _get_simple_mu_scale(self, mu_min: float = None):
         """Get mu_scale from smoothed EER (per-bin array or scalar fallback)."""
         if mu_min is None:
-            mu_min = self.config.shadow_mu_min  # 0.2
+            mu_min = self.config.shadow_mu_min
         if not self._filter_converged:
-            mu_min = max(mu_min, 0.3)
-        # Per-bin mu_scale from RES echo_psd/error_psd (set previous frame)
+            # Pre-convergence: full mu for fast convergence (per_bin unreliable)
+            return 1.0
+        mu_min = max(mu_min, 0.2)
+        # Per-bin mu_scale from RES echo_psd/error_psd (set previous frame, post-RES)
         if self._per_bin_mu_scale is not None:
             return np.maximum(self._per_bin_mu_scale, mu_min)
         return mu_min + (1.0 - mu_min) * self._simple_mu_ratio
@@ -1036,18 +1038,6 @@ class AEC:
                 self._freq_out_read = r + hop
             else:
                 output = self.filter.process(near_end, far_end, mu_scale)
-
-            # Update mu_scale from RES echo_psd/error_psd (for non-DTD modes)
-            if not self.config.enable_dtd:
-                if self.res is not None:
-                    per_bin_eer = self.res.echo_psd / (self.res.error_psd + 1e-10)
-                    per_bin_eer = np.clip(per_bin_eer, 0.0, 1.0)
-                    mu_min = self.config.shadow_mu_min
-                    self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
-                    self._simple_mu_ratio = float(np.mean(per_bin_eer))
-                else:
-                    self._per_bin_mu_scale = None
-                    self._update_simple_mu_ratio(output, far_end)
 
             # Shadow filter with DTD protection (#1) and bidirectional copy (#6)
             if self.shadow_filter is not None and self._freq_near_queue is None:
@@ -1132,6 +1122,17 @@ class AEC:
                                           far_power, self.filter.far_spec,
                                           filter_converged=self._filter_converged,
                                           erle_factor=erle_factor)
+
+                # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
+                if not self.config.enable_dtd and self._filter_converged:
+                    per_bin_eer = self.res.echo_psd / (self.res.error_psd + 1e-10)
+                    per_bin_eer = np.clip(per_bin_eer, 0.0, 1.0)
+                    mu_min = self.config.shadow_mu_min
+                    self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
+                    self._simple_mu_ratio = float(np.mean(per_bin_eer))
+                elif not self.config.enable_dtd and not self._filter_converged:
+                    self._per_bin_mu_scale = None
+                    self._simple_mu_ratio = 1.0
 
             # Update DTD detectors for NEXT block
             # Skip divergence detector before convergence (output>mic is normal
