@@ -64,7 +64,7 @@ class AecConfig:
 
     # RES parameters
     enable_res: bool = False
-    res_g_min_db: float = -25.0
+    res_g_min_db: float = -20.0
     res_over_sub: float = 3.0
     res_alpha: float = 0.8
     enable_cng: bool = True            # Comfort noise generation in RES
@@ -303,7 +303,8 @@ class ResFilter:
         self.g_min = 10 ** (g_min_db / 20)
         self.over_sub = over_sub
         self.alpha = alpha
-        self.alpha_psd = 0.9
+        self.alpha_echo_psd = 0.85   # echo PSD: TC≈107ms (faster decay to reduce reverb)
+        self.alpha_error_psd = 0.9   # error PSD: stable TC≈160ms
 
         self.gain_smooth = np.ones(n_freqs, dtype=np.float32)
         self.echo_psd = np.zeros(n_freqs, dtype=np.float32)
@@ -322,6 +323,10 @@ class ResFilter:
         self.noise_psd = np.zeros(n_freqs, dtype=np.float32)
         self.alpha_noise = 0.98
 
+        # Far-end activity tracking for dynamic g_min
+        self.far_activity = 0.0
+        self.alpha_far_act = 0.99    # TC≈1.6s (slow release to maintain suppression)
+
         # OLA: sqrt-Hann window + sliding input buffer + overlap buffer
         self.window = np.sqrt(np.hanning(block_size)).astype(np.float32)
         self.input_buf = np.zeros(block_size, dtype=np.float32)
@@ -335,6 +340,7 @@ class ResFilter:
         self.S_ff.fill(0)
         self.S_ee.fill(0)
         self.noise_psd.fill(0)
+        self.far_activity = 0.0
         self.input_buf.fill(0)
         self.ola_buf.fill(0)
 
@@ -381,8 +387,8 @@ class ResFilter:
         # Linear EER from adaptive filter echo estimate
         # No far_scale: use echo estimate directly (far_scale suppresses
         # valid echo PSD when filter is converged)
-        self.echo_psd = self.alpha_psd * self.echo_psd + (1 - self.alpha_psd) * echo_pwr_linear
-        self.error_psd = self.alpha_psd * self.error_psd + (1 - self.alpha_psd) * error_pwr
+        self.echo_psd = self.alpha_echo_psd * self.echo_psd + (1 - self.alpha_echo_psd) * echo_pwr_linear
+        self.error_psd = self.alpha_error_psd * self.error_psd + (1 - self.alpha_error_psd) * error_pwr
 
         if far_power < 1e-4:
             self.echo_psd *= 0.3  # fast decay during far-end silence
@@ -393,27 +399,42 @@ class ResFilter:
                     + (1 - self.alpha_noise) * error_pwr,
                     error_pwr * 2)
 
+        # --- Dynamic g_min: track far-end activity ---
+        is_far_active = float(far_power > 1e-4)
+        if is_far_active > self.far_activity:
+            alpha_fa = 0.5   # fast attack
+        else:
+            alpha_fa = self.alpha_far_act  # slow release
+        self.far_activity = alpha_fa * self.far_activity + (1 - alpha_fa) * is_far_active
+        # far_activity=1.0 → g_min normal; far_activity=0.0 → g_min→1.0 (no suppression)
+        effective_g_min = self.g_min + (1.0 - self.g_min) * (1.0 - self.far_activity)
+
         # --- Noise gate: don't suppress quiet segments ---
-        # Adaptive floor tracks signal level to avoid passing low-energy residual echo
         signal_floor = np.mean(self.error_psd) * 0.001 + 1e-8
         quiet_mask = ((self.echo_psd < signal_floor)
                       & (self.error_psd < signal_floor))
 
         # Compute EER: linear EER modulated by coherence as soft gate
-        # coh2 high (echo dominant) → eer stays high → suppress
-        # coh2 low (near-end dominant) → eer reduced → preserve near-end
         eps = 1e-10
         eer_linear = self.echo_psd / (self.error_psd + eps)
         eer = eer_linear * (0.5 + 0.5 * coh2)
 
-        g = np.maximum(1.0 - self.over_sub * eer, self.g_min)
+        g = np.maximum(1.0 - self.over_sub * eer, effective_g_min)
         g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
 
         # Cross-frequency smoothing (3-bin moving average)
         g = np.convolve(g, np.ones(3) / 3, mode='same').astype(np.float32)
 
-        # Temporal smoothing (asymmetric: slower attack, normal release)
-        alpha_g = np.where(g < self.gain_smooth, 0.6, self.alpha)
+        # Near-end likelihood for adaptive release
+        if far_spec is not None and far_power > 1e-4:
+            near_end_likelihood = 1.0 - float(np.mean(coh2))
+        else:
+            near_end_likelihood = 0.0
+
+        # Temporal smoothing: attack fast, release adapts to near-end
+        # Gentle near-end speedup (0.2×) to reduce reverb without losing ERLE
+        alpha_release = self.alpha * (1.0 - 0.1 * near_end_likelihood)
+        alpha_g = np.where(g < self.gain_smooth, 0.6, alpha_release)
         self.gain_smooth = alpha_g * self.gain_smooth + (1 - alpha_g) * g
 
         # Apply gain + synthesis sqrt-Hann window + IFFT
