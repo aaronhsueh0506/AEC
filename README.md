@@ -190,31 +190,31 @@ python3 plot_aec_results.py ../wav/ --mode subband --enable-res
 python3 plot_aec_results.py ../wav/ --mode subband --enable-dtd
 ```
 
-## Benchmark 比較（AEC Challenge, 34 files）
+## Benchmark 比較（AEC Challenge, 33 files）
 
-測試條件：subband 模式，FL=1024，Shadow+RES 開啟（v1.6.0 預設）。
+測試條件：subband 模式，FL=2048，Shadow+RES 開啟（v1.6.0 預設）。排除 fileid 1（白噪音 outlier）。
 對照：SpeexDSP (FL=2048)、WebRTC AEC3。
 指標：`ERLE = 10·log10(mean(mic²) / mean(output²))`，全段平均。
 
 | 指標 | Ours (Shadow+RES) | SpeexDSP | WebRTC AEC3 |
 |------|-------------------|----------|-------------|
-| Mean ERLE | 7.0 dB | 3.1 dB | 7.3 dB |
-| Median ERLE | 5.6 dB | 2.0 dB | 4.4 dB |
-| vs Ours 勝/敗 | — | 0W / 34L | 7W / 27L |
-| NE-Ret Mean | -3.9 dB | -3.2 dB | -5.9 dB |
-| NE-Ret Median | -1.6 dB | -1.2 dB | -1.8 dB |
+| Mean ERLE | 6.3 dB | 2.6 dB | 5.3 dB |
+| Median ERLE | 5.2 dB | 2.0 dB | 4.4 dB |
+| vs Ours 勝/敗 | — | 0W / 33L | 7W / 25L |
+| NE-Ret Mean | -1.9 dB | -2.0 dB | -3.9 dB |
+| NE-Ret Median | -1.7 dB | -1.1 dB | -1.8 dB |
 
-> **解讀**：Ours Median ERLE 5.6 dB 超越 AEC3 的 4.4 dB，勝率 79%（27W/7L）。
+> **解讀**：Ours Mean ERLE 6.3 dB 超越 AEC3 的 5.3 dB，勝率 76%（25W/7L）。
 > NE-Ret（Near-end Retention）衡量 far-end 靜音時近端語音保留程度（0 dB = 完美，> -1 dB 可接受）。
-> Ours NE-Ret -3.9 dB 優於 AEC3 的 -5.9 dB，在 ERLE/NE-Ret tradeoff 上全面優於 AEC3。
-> SpeexDSP 保留最好（-3.2）但 ERLE 最低（3.1），符合壓制越少 ERLE 越低的 tradeoff。
+> Ours NE-Ret -1.9 dB 遠優於 AEC3 的 -3.9 dB，近端語音保留接近 SpeexDSP（-2.0）但 ERLE 高出 3.7 dB。
+> SpeexDSP 保留最好（-1.1 median）但 ERLE 最低（2.6），符合壓制越少 ERLE 越低的 tradeoff。
 
 ### 工具
 
 ```bash
 # 執行 benchmark（需 speexdsp Python binding + WebRTC AEC3 CLI）
 cd python
-python3 benchmark_competitors.py ../wav/ --filter 1024
+python3 benchmark_competitors.py ../wav/ --filter 2048
 ```
 
 ## 效能指標
