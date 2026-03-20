@@ -18,5 +18,5 @@ __pycache__/
 # OS
 .DS_Store
 
-# Test outputs
+# AEC output (user runs locally)
 wav/aec_output/
