@@ -444,7 +444,7 @@ class ResFilter:
         enhanced_spec = self.gain_smooth * spec
 
         # --- CNG: inject comfort noise to avoid unnatural silence ---
-        if self.enable_cng and np.sum(self.noise_psd) > 0:
+        if self.enable_cng and np.sum(self.noise_psd) > 0 and far_power <= 1e-4:
             suppressed_pwr = (self.gain_smooth ** 2) * error_pwr
             target_pwr = self.noise_psd * 0.5  # Half noise floor level
             deficit = np.maximum(0, target_pwr - suppressed_pwr)
