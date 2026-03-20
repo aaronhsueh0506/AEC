@@ -2,6 +2,80 @@
 
 ## 版本歷史
 
+### v1.6.0 (2026-03-20) - Shadow only 預設模式
+
+#### 架構決策
+
+| 模式 | 預設 | 說明 |
+|---|---|---|
+| Shadow filter | ✅ 預設開啟 | 自適應，免調參，業界慣例（WebRTC/Speex） |
+| DTD | ❌ 預設關閉 | 保留為進階選項，`--enable-dtd` 開啟 |
+
+#### 改動內容
+
+1. **預設模式改為 Shadow only**
+   - `enable_dtd: False`（原 True），`enable_shadow: True`（原 False）
+   - CLI：`--no-dtd` 移除，改為 `--enable-dtd`；`--enable-shadow` 改為 `--no-shadow`
+
+2. **Shadow copy gate 加嚴**
+   - `shadow_copy_threshold: 0.8 → 0.5`：需 shadow 比 main 好 50% 以上才 copy
+   - 加入 far_active + not_dt gate：遠端靜音或 DT 期間不 copy（AEC3 style）
+   - 非 DTD 模式用 `_simple_mu_ratio > 0.6` 判斷 not_dt
+
+3. **Shadow filter mu 改為固定 1.0**
+   - 舊版：DTD 模式用 `1.0 - conf × (1-0.2)`，非 DTD 用 simple variable mu
+   - 新版：一律 `shadow_mu_scale = 1.0`（AEC3 background filter 做法）
+   - 測試證實 shadow mu 保護對 NE-Ret 幾乎無影響，threshold 才是關鍵
+
+4. **Main filter mu 保護（shadow_mu_min）**
+   - 新參數 `shadow_mu_min: 0.5`：DT 時 main filter mu 最低保留 50%
+   - `_get_simple_mu_scale()` 改用 `shadow_mu_min` 取代 `dtd_mu_min_ratio`
+   - `_update_simple_mu_ratio()` attack alpha 0.5→0.3，holdoff 30→20（加快 DT 反應）
+
+5. **benchmark_competitors.py 更新**
+   - `run_ours()` 不再 hardcode `enable_dtd=True`，使用 AecConfig 預設值
+   - 新增 `--enable-dtd` / `--no-shadow` CLI 參數
+   - 輸出顯示 DTD/Shadow 配置
+
+#### shadow_mu_min Sweep 結果
+
+| shadow_mu_min | Mean ERLE | vs AEC3 | NE-Ret Mean |
+|---|---|---|---|
+| 0.05 | 6.2 dB | 21W | -4.2 dB |
+| 0.1 | 6.3 dB | 22W | -4.2 dB |
+| 0.2 | 6.5 dB | 23W | -4.2 dB |
+| 0.3 | 6.7 dB | 24W | -4.2 dB |
+| **0.5** | **7.0 dB** | **27W** | **-4.3 dB** |
+
+NE-Ret 不受 shadow_mu_min 影響（差異來自 fid 1 white noise outlier）。
+
+#### Copy gate 優化結果
+
+| Config | NE-Ret Mean | NE-Ret Med | ERLE | vs AEC3 |
+|---|---|---|---|---|
+| threshold=0.8（舊） | -4.3 | -1.6 | 7.0 | 27W |
+| **threshold=0.5（新）** | **-3.9** | **-1.6** | **7.0** | **27W** |
+
+threshold 收嚴是 NE-Ret 改善主因（-4.3→-3.9），shadow mu 保護無效。
+
+#### 驗證結果（AEC Challenge, 34 files, FL=1024, subband+RES）
+
+| 模式 | Mean ERLE | Med ERLE | NE-Ret Mean | NE-Ret Med | vs AEC3 |
+|---|---|---|---|---|---|
+| DTD only | 6.3 dB | 5.0 dB | -3.0 dB | -1.6 dB | 23W/11L |
+| **Shadow only（v1.6.0）** | **7.0 dB** | **5.6 dB** | **-3.9 dB** | **-1.6 dB** | **27W/7L** |
+| DTD+Shadow | 6.5 dB | 4.9 dB | -3.8 dB | -1.7 dB | 23W/11L |
+| SpeexDSP | 3.1 dB | 2.0 dB | -3.2 dB | -1.2 dB | — |
+| WebRTC AEC3 | 7.3 dB | 4.4 dB | -5.9 dB | -1.8 dB | — |
+
+**關鍵發現**：
+- Median NE-Ret 完全相同（-1.6），Mean 差距來自 fid 1（white noise outlier: -55.6 vs -32.9）
+- 排除 fid 1：Shadow NE-Ret ≈ -2.0 vs DTD ≈ -1.9，差距僅 0.1 dB
+- ERLE 大幅領先 DTD（+0.7 dB），勝率 27W vs 23W
+- Shadow only 在真實音訊上 NE-Ret 與 DTD 等效，ERLE 明顯更好，且免調參
+
+---
+
 ### v1.5.1 (2026-03-20) - RES Wiener gain formula 改進
 
 #### 改動內容
@@ -349,10 +423,12 @@ mu_scale = 1.0 - confidence × (1.0 - mu_min_ratio)
 | `mu` | 步長 | 0.1 - 0.8 | 0.3 |
 | `filter_length` | 濾波器長度 (samples) | 256 - 4096 | 512 |
 | `leak` | 權重洩漏 (NLMS only) | 0.9999 - 0.99999 | 0.99999 |
-| `dtd_divergence_factor` | 發散判定倍數 | 1.2 - 2.0 | 1.5 |
-| `dtd_mu_min_ratio` | 發散時最低 mu 比例 | 0.01 - 0.1 | 0.05 |
-| `dtd_confidence_attack` | Confidence 上升速率 | 0.1 - 0.5 | 0.3 |
-| `dtd_confidence_release` | Confidence 下降速率 | 0.01 - 0.1 | 0.05 |
+| `enable_shadow` | Shadow filter（預設開啟） | — | True |
+| `shadow_copy_threshold` | Shadow copy 門檻 | 0.3 - 0.8 | 0.5 |
+| `shadow_mu_min` | Shadow-only mu floor | 0.1 - 0.5 | 0.5 |
+| `enable_dtd` | DTD（預設關閉，進階選項） | — | False |
+| `dtd_divergence_factor` | 發散判定倍數（DTD 模式） | 1.2 - 2.0 | 1.5 |
+| `dtd_mu_min_ratio` | 發散時最低 mu 比例（DTD 模式） | 0.01 - 0.1 | 0.05 |
 
 ### 調校原則
 

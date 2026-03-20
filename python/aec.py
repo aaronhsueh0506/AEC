@@ -41,7 +41,7 @@ class AecConfig:
     leak: float = 0.99999        # Weight leakage (slight leak for double-talk stability)
     use_leakage: bool = True     # Use leakage instead of per-partition truncation (saves ~60% FLOP)
     freq_leakage: float = 0.9999 # Frequency-domain weight leakage coefficient
-    enable_dtd: bool = True
+    enable_dtd: bool = False
     dtd_threshold: float = 2.0   # (legacy, kept for compat) Error-based DTD ratio
     dtd_hangover_frames: int = 15
 
@@ -70,11 +70,12 @@ class AecConfig:
     enable_cng: bool = True            # Comfort noise generation in RES
 
     # Shadow filter (dual-filter divergence control, FREQ/SUBBAND only)
-    enable_shadow: bool = False
+    enable_shadow: bool = True
     shadow_mu_ratio: float = 0.5
-    shadow_copy_threshold: float = 0.8
+    shadow_copy_threshold: float = 0.5
     shadow_err_alpha: float = 0.95
     shadow_dtd_mu_min: float = 0.2      # #1: Shadow DTD floor (20% vs main's 5%)
+    shadow_mu_min: float = 0.5           # Shadow-only mode: DT mu floor (50%)
     shadow_copy_hysteresis: int = 3     # #5: Consecutive frames needed for copy
 
     # Coherence DTD absolute energy floor
@@ -926,7 +927,7 @@ class AEC:
     def _get_simple_mu_scale(self, mu_min: float = None) -> float:
         """Get mu_scale from smoothed far/error ratio (for non-DTD modes)."""
         if mu_min is None:
-            mu_min = self.config.dtd_mu_min_ratio  # 0.05
+            mu_min = self.config.shadow_mu_min  # 0.2
         if not self._filter_converged:
             mu_min = max(mu_min, 0.3)
         return mu_min + (1.0 - mu_min) * self._simple_mu_ratio
@@ -945,8 +946,8 @@ class AEC:
         # Asymmetric EMA + holdoff: fast attack, slow release with holdoff
         if ratio < self._simple_mu_ratio:
             # Attack: fast drop + start holdoff
-            alpha = 0.5
-            self._simple_mu_holdoff = 30  # hold low for ~30 frames (~480ms)
+            alpha = 0.3
+            self._simple_mu_holdoff = 20  # hold low for ~20 frames (~320ms)
         elif self._simple_mu_holdoff > 0:
             # Holdoff active: keep ratio low, don't release yet
             self._simple_mu_holdoff -= 1
@@ -997,13 +998,8 @@ class AEC:
             # Shadow filter with DTD protection (#1) and bidirectional copy (#6)
             if self.shadow_filter is not None and self._freq_near_queue is None:
                 self.shadow_frame_count += 1
-                # Shadow mu: DTD mode uses DTD conf, non-DTD uses simple variable mu
-                if self.config.enable_dtd:
-                    conf = self.prev_dtd_conf
-                    shadow_mu_scale = 1.0 - conf * (1.0 - self.config.shadow_dtd_mu_min)
-                else:
-                    shadow_mu_scale = self._get_simple_mu_scale(
-                        mu_min=self.config.shadow_dtd_mu_min)  # 0.2, more lenient
+                # Shadow mu: always full mu (AEC3 background filter style)
+                shadow_mu_scale = 1.0
                 self.shadow_filter.process(near_end, far_end, shadow_mu_scale)
 
                 main_err = self.filter.get_error_energy()
@@ -1013,25 +1009,34 @@ class AEC:
                 self.main_err_smooth = alpha_s * self.main_err_smooth + (1 - alpha_s) * main_err
                 self.shadow_err_smooth = alpha_s * self.shadow_err_smooth + (1 - alpha_s) * shadow_err
 
-                # Warm-up: skip copy logic for first 50 frames (let both filters converge)
+                # Copy gate: only compare during far-end active + non-DT (AEC3 style)
                 if self.shadow_frame_count >= 50:
                     threshold = self.config.shadow_copy_threshold
-                    # #5: Copy hysteresis — require N consecutive frames
-                    if self.shadow_err_smooth < self.main_err_smooth * threshold:
-                        self.shadow_copy_counter += 1
+                    far_active = np.mean(far_end ** 2) > 1e-4
+                    if self.config.enable_dtd:
+                        not_dt = self.get_dtd_confidence() < 0.3
                     else:
-                        self.shadow_copy_counter = 0
+                        not_dt = self._simple_mu_ratio > 0.6
 
-                    if self.shadow_copy_counter >= self.config.shadow_copy_hysteresis:
-                        # Shadow → Main copy (weights only, no output switch)
-                        self.filter.copy_weights_from(self.shadow_filter)
-                        self.filter.echo_spec[:] = self.shadow_filter.echo_spec
-                        self.main_err_smooth = self.shadow_err_smooth
+                    if far_active and not_dt:
+                        if self.shadow_err_smooth < self.main_err_smooth * threshold:
+                            self.shadow_copy_counter += 1
+                        else:
+                            self.shadow_copy_counter = 0
+
+                        if self.shadow_copy_counter >= self.config.shadow_copy_hysteresis:
+                            # Shadow → Main copy
+                            self.filter.copy_weights_from(self.shadow_filter)
+                            self.filter.echo_spec[:] = self.shadow_filter.echo_spec
+                            self.main_err_smooth = self.shadow_err_smooth
+                            self.shadow_copy_counter = 0
+                        elif self.main_err_smooth < self.shadow_err_smooth * threshold:
+                            # Bidirectional: Main → Shadow
+                            self.shadow_filter.copy_weights_from(self.filter)
+                            self.shadow_err_smooth = self.main_err_smooth
+                    else:
+                        # DT or far-end silent: reset counter
                         self.shadow_copy_counter = 0
-                    # #6: Bidirectional — Main → Shadow when main is clearly better
-                    elif self.main_err_smooth < self.shadow_err_smooth * threshold:
-                        self.shadow_filter.copy_weights_from(self.filter)
-                        self.shadow_err_smooth = self.main_err_smooth
 
             # Echo path change detection (shadow-based)
             # DT: refined error ↑, shadow stable → ΔE/total large
@@ -1256,11 +1261,12 @@ Examples:
                         help='Filter length in samples (default: mode-dependent)')
     parser.add_argument('--mode', choices=['lms', 'nlms', 'freq', 'subband'], default='nlms',
                         help='Filter mode (default: nlms)')
-    parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
+    parser.add_argument('--enable-dtd', action='store_true',
+                        help='Enable DTD (default: off, shadow filter provides DT protection)')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
     parser.add_argument('--no-cng', action='store_true', help='Disable comfort noise generation in RES')
-    parser.add_argument('--enable-shadow', action='store_true', help='Enable shadow filter (dual-filter, FREQ/SUBBAND, requires DTD)')
+    parser.add_argument('--no-shadow', action='store_true', help='Disable shadow filter')
     parser.add_argument('--clear-history', action='store_true',
                         help='Clear TIME/LMS buffer each block (no carry-over)')
 
@@ -1295,11 +1301,11 @@ Examples:
         mu=mu,
         filter_length=filter_length,
         mode=aec_mode,
-        enable_dtd=not args.no_dtd,
+        enable_dtd=args.enable_dtd,
         enable_res=args.enable_res,
         res_g_min_db=args.res_g_min,
         enable_cng=not args.no_cng,
-        enable_shadow=args.enable_shadow,
+        enable_shadow=not args.no_shadow,
         clear_filter_history=args.clear_history
     )
 

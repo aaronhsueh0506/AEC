@@ -90,15 +90,18 @@ def compute_nearend_retention(mic, ref, output, hop=256):
 
 
 def run_ours(mic, ref, sr, filter_length=1024, enable_res=True,
-             res_over_sub=None):
+             res_over_sub=None, enable_dtd=None, enable_shadow=None):
     """Run our AEC (subband DTD+RES)."""
     config = AecConfig(
         sample_rate=sr,
         mode=AecMode.SUBBAND,
-        enable_dtd=True,
         enable_res=enable_res,
         filter_length=filter_length,
     )
+    if enable_dtd is not None:
+        config.enable_dtd = enable_dtd
+    if enable_shadow is not None:
+        config.enable_shadow = enable_shadow
     if res_over_sub is not None:
         config.res_over_sub = res_over_sub
     aec = AEC(config)
@@ -168,6 +171,10 @@ def main():
                         help='Comma-separated fileid list')
     parser.add_argument('--res-over-sub', type=float, default=None,
                         help='Override RES over_sub value')
+    parser.add_argument('--enable-dtd', action='store_true',
+                        help='Enable DTD (default: off)')
+    parser.add_argument('--no-shadow', action='store_true',
+                        help='Disable shadow filter')
     args = parser.parse_args()
 
     base = os.path.dirname(os.path.abspath(__file__))
@@ -184,7 +191,9 @@ def main():
 
     print(f"Benchmarking {len(groups)} files from {dataset_dir}")
     os_str = f", over_sub={args.res_over_sub}" if args.res_over_sub else ""
-    print(f"Our config: subband DTD+RES, FL={args.filter}{os_str}")
+    dtd_str = "DTD" if args.enable_dtd else "no-DTD"
+    shadow_str = "Shadow" if not args.no_shadow else "no-Shadow"
+    print(f"Our config: subband {dtd_str}+{shadow_str}+RES, FL={args.filter}{os_str}")
     if HAS_SPEEX:
         print(f"SpeexDSP: FL={args.speex_filter}")
     if HAS_AEC3:
@@ -214,12 +223,16 @@ def main():
 
         # Our AEC with RES
         out_ours = run_ours(mic, ref, sr, filter_length=args.filter,
-                            enable_res=True, res_over_sub=args.res_over_sub)
+                            enable_res=True, res_over_sub=args.res_over_sub,
+                            enable_dtd=args.enable_dtd,
+                            enable_shadow=not args.no_shadow)
         erle_ours = compute_erle(mic, out_ours)
         ret_ours = compute_nearend_retention(mic, ref, out_ours)
 
         # Our AEC without RES
-        out_ours_nr = run_ours(mic, ref, sr, filter_length=args.filter, enable_res=False)
+        out_ours_nr = run_ours(mic, ref, sr, filter_length=args.filter, enable_res=False,
+                               enable_dtd=args.enable_dtd,
+                               enable_shadow=not args.no_shadow)
         erle_ours_nr = compute_erle(mic, out_ours_nr)
 
         row = {'fileid': fid, 'ours': erle_ours, 'ours_nores': erle_ours_nr,

@@ -375,11 +375,11 @@ AEC 自適應濾波器在以下情況需要控制更新：
   └───────────────┬─────────────────────────────────────────┘
                   │
   ┌───────────────▼─────────────────────────────────────────┐
-  │ 2. Shadow Filter (可選)                                  │
-  │    shadow_mu = 1.0 - conf × (1-0.2) ← 寬鬆 DTD（最低 20%）│
-  │    shadow.process(near, far, shadow_mu)  ← 只更新 weights│
-  │    50-frame warm-up → 連續 3 frames shadow_err < main_err │
-  │    × 0.8 → copy weights（不切換 output）                   │
+  │ 2. Shadow Filter (預設開啟)                               │
+  │    shadow_mu = 1.0  ← 固定 full mu（AEC3 style）          │
+  │    shadow.process(near, far, 1.0)  ← 只更新 weights       │
+  │    Copy gate: far_active + not_dt → 連續 3 frames          │
+  │    shadow_err < main_err × 0.5 → copy weights              │
   └───────────────┬─────────────────────────────────────────┘
                   │
   ┌───────────────▼─────────────────────────────────────────┐
@@ -565,18 +565,22 @@ if out_peak > near_peak and near_peak > 1e-6:
 這是 WebRTC AEC3 和 SpeexDSP 的核心機制。
 
 ```
-Main filter:   mu = config.mu × mu_scale (DTD 控制，最低 5%)
-Shadow filter: mu = config.mu × 0.5 × shadow_mu_scale (寬鬆 DTD，最低 20%)
+Main filter:   mu = config.mu × mu_scale
+               DTD 模式: mu_scale 由 coherence/divergence 控制（最低 5%）
+               Shadow-only: mu_scale 由 simple_mu_ratio 控制（最低 shadow_mu_min=50%）
+Shadow filter: mu = config.mu × 0.5 × 1.0  (固定 full mu，AEC3 background filter style)
 
 每個 block:
   1. Main: output = process(near, far, mu_scale)
-  2. Shadow: shadow.process(near, far, shadow_mu_scale)  // 只更新 weights
+  2. Shadow: shadow.process(near, far, 1.0)     // full mu, 只更新 weights
   3. Smooth error energy:
      main_err_smooth   = α × main_err_smooth   + (1-α) × main_err
      shadow_err_smooth = α × shadow_err_smooth + (1-α) × shadow_err
-  4. Warm-up guard: 前 50 frames 不允許 copy（兩個 filter 都需要先收斂）
-  5. Copy hysteresis: 連續 3 frames shadow_err < main_err × 0.8 才觸發
-     if shadow_err_smooth < main_err_smooth × threshold:
+  4. Warm-up guard: 前 50 frames 跳過 copy 邏輯
+  5. Copy gate: far_active AND not_dt 才允許比較
+     not_dt: DTD 模式用 dtd_conf < 0.3, 否則用 simple_mu_ratio > 0.6
+  6. Copy hysteresis: 連續 3 frames shadow_err < main_err × 0.5 才觸發
+     if shadow_err_smooth < main_err_smooth × 0.5:
          main.W ← shadow.W        // 只複製權重（不切換 output）
          main_err_smooth = shadow_err_smooth
 ```
@@ -584,21 +588,25 @@ Shadow filter: mu = config.mu × 0.5 × shadow_mu_scale (寬鬆 DTD，最低 20%
 **設計要點**：
 - **不切換 output**：copy 只複製 weights，不用 `output = shadow_out`，避免 output 不連續
 - **50-frame warm-up**：收斂前兩個 filter 的 error 都不穩定，比較無意義，強行 copy 會退化
-- **寬鬆 DTD**：shadow DTD mu 最低 20%（vs main 的 5%），保留更多追蹤能力
+- **Shadow full mu（1.0）**：shadow 不做 DT 保護，讓它自由追蹤（AEC3 style）
+- **嚴格 threshold（0.5）**：需 shadow 比 main 好 50%+ 才 copy，防止 DT 污染權重被 copy
+- **Copy gate**：遠端靜音或 DT 期間不允許 copy（far_active + not_dt gate）
 
 **與 DTD 的互補**：
-- DTD 偵測發散後降低 mu → 防止 main filter 惡化
-- Shadow filter 同時以保守 mu 持續追蹤 → 當 main 發散時自動修正
-- 兩者可同時啟用，互不衝突
+- DTD 模式：DTD 預防式降 mu + Shadow 事後修正，雙重保護
+- Shadow-only 模式（預設）：main filter 用 simple_mu_ratio 輕量保護，shadow copy 修正
+- 兩者可同時啟用（`--enable-dtd`），互不衝突
 
 **參數**：
 
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
-| enable_shadow | false | 啟用 shadow filter |
+| enable_shadow | **true** | 啟用 shadow filter（預設開啟） |
 | shadow_mu_ratio | 0.5 | shadow mu = main mu × ratio |
-| shadow_copy_threshold | 0.8 | shadow_err < main_err × threshold 時複製 |
+| shadow_copy_threshold | **0.5** | shadow_err < main_err × threshold 時複製（需 50%+ 優勢） |
 | shadow_err_alpha | 0.95 | error energy EMA 平滑係數 |
+| shadow_mu_min | **0.5** | Shadow-only 模式 main filter DT mu floor（50%） |
+| shadow_copy_hysteresis | 3 | 連續 N frames 才觸發複製 |
 
 **記憶體影響**：額外 ~35KB（SubbandNlms ~34KB + output buffer 1KB），可接受。
 
@@ -606,18 +614,18 @@ Shadow filter: mu = config.mu × 0.5 × shadow_mu_scale (寬鬆 DTD，最低 20%
 
 | | WebRTC AEC3 | SpeexDSP | 本專案 |
 |---|---|---|---|
-| 架構 | PBFDAF + dual filter | MDF + dual filter | PBFDAF + 顯式 DTD + 可選 shadow |
-| 主要濾波器 | Main (refined) | Foreground (FG) | Main (DTD mu_scale) |
-| 備份濾波器 | Shadow (coarse) | Background (BG) | Shadow (寬鬆 DTD, 可選) |
-| DT 處理 | 隱式（dual filter 比較） | 隱式（variable μ, Valin 2007） | 顯式 DTD（Coherence + Divergence） |
-| mu 控制 | Adaptive（convergence-based） | Variable（optimal NLMS theory） | DTD mu_scale [0.05, 1.0] |
-| Copy 觸發 | shadow_err < main_err × threshold | error_FG > error_BG（連續 N frames） | 連續 3 frames + 50-frame warm-up |
+| 架構 | PBFDAF + dual filter | MDF + dual filter | PBFDAF + Shadow（預設）+ 可選 DTD |
+| 主要濾波器 | Main (refined) | Foreground (FG) | Main (simple mu ratio / DTD mu_scale) |
+| 備份濾波器 | Shadow (coarse) | Background (BG) | Shadow (full mu, AEC3 style) |
+| DT 處理 | 隱式（dual filter 比較） | 隱式（variable μ, Valin 2007） | Shadow-only: simple mu ratio; DTD: Coherence + Divergence |
+| mu 控制 | Adaptive（convergence-based） | Variable（optimal NLMS theory） | Shadow-only: [0.5, 1.0]; DTD: [0.05, 1.0] |
+| Copy 觸發 | shadow_err < main_err × threshold | error_FG > error_BG（連續 N frames） | far_active + not_dt + 連續 3 frames + 50-frame warmup |
 | Copy 行為 | Shadow → Main + output switch | BG → FG | Shadow → Main（只 copy weights） |
-| Post-filter | Wiener-like suppressor + comfort noise | NLP (spectral subtraction) | EER-based RES（≈ Wiener gain） |
-| DT 反應速度 | 慢（等 error 翻轉） | 中（variable μ 自動降低） | 快（Coherence DTD 2-3 frames） |
-| 計算量 | 永遠 2x filter | 永遠 2x filter | DTD-only: 1x + DTD; +Shadow: 2x |
-| 參數數量 | 少（copy_threshold, mu） | 少（variance smooth factors） | 多（DTD 6+ params + shadow params） |
-| Shadow 是否必要 | ✅ 必須（唯一 DT 機制） | ✅ 必須（唯一 DT 機制） | 可選（DTD 獨立提供 DT 保護） |
+| Post-filter | Wiener-like suppressor + comfort noise | NLP (spectral subtraction) | EER-based RES（spectral subtraction gain） |
+| DT 反應速度 | 慢（等 error 翻轉） | 中（variable μ 自動降低） | Shadow-only: 中; DTD: 快（2-3 frames） |
+| 計算量 | 永遠 2x filter | 永遠 2x filter | 預設 2x（shadow）; DTD-only: 1x + DTD |
+| 參數數量 | 少（copy_threshold, mu） | 少（variance smooth factors） | Shadow-only: 2-3 個; +DTD: 6+ |
+| Shadow 是否必要 | ✅ 必須（唯一 DT 機制） | ✅ 必須（唯一 DT 機制） | 預設開啟，可用 DTD-only 替代 |
 
 ### 6.4.1 DTD × Shadow 組合行為
 
@@ -625,8 +633,8 @@ Shadow filter: mu = config.mu × 0.5 × shadow_mu_scale (寬鬆 DTD，最低 20%
 
 | | DTD off | DTD on |
 |---|---|---|
-| **Shadow off** | 無保護（僅 output limiter）。適合無 DT 場景 | **DTD-only**：Coherence 預防式降 mu。輕量首選 |
-| **Shadow on** | **Shadow-only**：≈ WebRTC/SpeexDSP 做法。免調 DTD 參數 | **DTD+Shadow**：預防 + 修正雙重保護。最高品質 |
+| **Shadow off** | 無保護（僅 output limiter）。適合無 DT 場景 | **DTD-only**：Coherence 預防式降 mu。`--enable-dtd --no-shadow` |
+| **Shadow on** | **Shadow-only（預設）**：≈ WebRTC/SpeexDSP 做法。免調參 | **DTD+Shadow**：`--enable-dtd` |
 
 #### 各組合的 DT 保護行為
 
@@ -634,7 +642,7 @@ Shadow filter: mu = config.mu × 0.5 × shadow_mu_scale (寬鬆 DTD，最低 20%
 |------|-----------|---------|---------------|---------|
 | 無保護 | — | Output limiter 兜底 | 嚴重（全速學習 near-end） | 純 far-end 場景、測試用 |
 | DTD-only | 快（2-3 frames） | 降 mu → 減速更新（預防式） | 極少（mu 降到 5%） | 嵌入式、低資源 |
-| Shadow-only | 慢（需 error 翻轉） | Shadow copy 修正（事後式） | 中等（copy 前有數 frame 汙染） | 不想調 DTD 參數、跟 WebRTC 一致 |
+| **Shadow-only（預設）** | 中（simple mu ratio） | Shadow copy 修正 + mu 保護 | 中等（copy gate 保護） | **推薦，免調參** |
 | DTD+Shadow | 快 | DTD 預防 + Shadow fallback | 極少 + safety net | 品質優先、EPC 場景 |
 
 #### 算力影響
@@ -646,15 +654,16 @@ Shadow filter: mu = config.mu × 0.5 × shadow_mu_scale (寬鬆 DTD，最低 20%
 | Shadow-only | +1x PBFDAF | +~35KB（完整 filter） | 計算量翻倍 |
 | DTD+Shadow | +DTD + 1x PBFDAF | +~37KB | 最重 |
 
-#### 實測 ERLE（FL=1024, subband）
+#### 實測結果（AEC Challenge, 34 files, FL=1024, subband+RES）
 
-| 組合 | fileid_0 (DT) | fileid_1 (far only) | fileid_2 (alternating) |
-|------|---------------|---------------------|----------------------|
-| DTD-only | 7.0 dB | 21.0 dB | 1.4 dB |
-| DTD+Shadow | 6.7 dB | 21.0 dB | 1.3 dB |
-| Shadow-only | 6.3 dB | 21.0 dB | 1.0 dB |
+| 模式 | Mean ERLE | NE-Ret Mean | NE-Ret Med | vs AEC3 |
+|------|-----------|-------------|------------|---------|
+| DTD only | 6.3 dB | -3.0 dB | -1.6 dB | 23W/11L |
+| **Shadow only（預設）** | **7.0 dB** | **-3.9 dB** | **-1.6 dB** | **27W/7L** |
+| DTD+Shadow | 6.5 dB | -3.8 dB | -1.7 dB | 23W/11L |
 
-Shadow-only 可運作但 DT ERLE 較低（事後修正 vs 預防式）。far-only 場景三者一致。
+Shadow only ERLE 最高（+0.7 dB vs DTD），勝率最佳（27W）。
+Median NE-Ret 與 DTD 完全相同（-1.6），Mean 差距來自 fid 1 white noise outlier。
 
 ### 6.4.2 三種架構的優劣分析
 

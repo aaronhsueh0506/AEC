@@ -329,35 +329,41 @@ shadow 因步長小而漂移有限，可自動修正主濾波器。
 這是 WebRTC AEC3 和 SpeexDSP 的核心機制。
 
 ```
-Main filter:   mu = config.mu × mu_scale            ← DTD 控制（最低 5%）
-Shadow filter: mu = config.mu × 0.5 × shadow_scale  ← 寬鬆 DTD（最低 20%）（#1）
+Main filter:   mu = config.mu × mu_scale
+               DTD 模式: mu_scale 由 coherence/divergence 控制（最低 5%）
+               Shadow-only（預設）: mu_scale 由 simple_mu_ratio 控制（最低 shadow_mu_min=50%）
+Shadow filter: mu = config.mu × 0.5 × 1.0  ← 固定 full mu（AEC3 background filter style）
 
 每個 block:
   1. main_out   = main.process(near, far, mu_scale)
-  2. shadow_mu_scale = 1.0 - conf × (1.0 - 0.2)    # 最低保留 20%
-     shadow.process(near, far, shadow_mu_scale)      # 只更新 weights
+  2. shadow.process(near, far, 1.0)                  # full mu, 只更新 weights
   3. 平滑 error energy (EMA α=0.95):
      main_err   = α × main_err   + (1-α) × mean(main_out²)
      shadow_err = α × shadow_err + (1-α) × mean(shadow_out²)
-  4. Warm-up guard: 前 50 frames 跳過 copy 邏輯（讓兩個 filter 都先收斂）
-  5. Copy hysteresis (#5): 連續 3 frames shadow_err < main_err × 0.8 才複製
-     if shadow_err < main_err × 0.8:
-       copy_counter += 1
+  4. Warm-up guard: 前 50 frames 跳過 copy 邏輯
+  5. Copy gate: far_active AND not_dt 才允許比較
+     not_dt: DTD 模式用 dtd_conf < 0.3, 否則用 simple_mu_ratio > 0.6
+  6. Copy hysteresis (#5): 連續 3 frames shadow_err < main_err × 0.5 才複製
+     if far_active and not_dt:
+       if shadow_err < main_err × 0.5:
+         copy_counter += 1
+       else:
+         copy_counter = 0
+       if copy_counter >= 3:
+         main.weights ← shadow.weights   (shadow → main, 只複製 weights)
+         copy_counter = 0
+       elif main_err < shadow_err × 0.5:   # 雙向複製: main → shadow
+         shadow.weights ← main.weights
      else:
-       copy_counter = 0
-     if copy_counter >= 3:
-       main.weights ← shadow.weights   (shadow → main, 只複製 weights)
-       copy_counter = 0
-  6. 雙向複製 (#6): main 明顯好時，shadow 跟上
-     elif main_err < shadow_err × 0.8:
-       shadow.weights ← main.weights   (main → shadow)
+       copy_counter = 0   # DT 或遠端靜音: reset
 ```
 
 **設計變更**：
-- **移除 `output = shadow_out`**：copy 時只複製 weights，不切換當 frame 的 output，
-  避免 copy 瞬間造成 output 不連續
-- **50-frame warm-up**：收斂前 error 比較不穩定（兩者都接近 0），容易誤觸發 copy
-  導致退化（實測 frame 3, 8 就觸發，把 far-end 加回來）
+- **移除 `output = shadow_out`**：copy 時只複製 weights，不切換當 frame 的 output
+- **50-frame warm-up**：收斂前 error 比較不穩定，容易誤觸發 copy
+- **Shadow full mu（1.0）**：v1.6.0 起 shadow 固定 full mu，不做 DT 保護（AEC3 style）
+- **Copy threshold 0.8→0.5**：需 50%+ 優勢才 copy，防止 DT 污染權重被 copy
+- **Copy gate**：加入 far_active + not_dt 條件，遠端靜音或 DT 期間不允許 copy
 
 ### 5.2 與 DTD 的互補
 
@@ -369,21 +375,22 @@ Shadow filter: mu = config.mu × 0.5 × shadow_scale  ← 寬鬆 DTD（最低 20
 
 Shadow filter 僅適用於 FREQ/SUBBAND 模式（需要頻域權重結構）。
 
-**Shadow 可獨立使用（不需 DTD）**。Shadow-only 模式等同 WebRTC AEC3 / SpeexDSP 的做法：
-- Shadow mu = main_mu × 0.5（保守步長），DT 時 main 全速漂移、shadow 半速漂移
-- Shadow error < main error → copy 修正（事後式）
-- 與 DTD 同時啟用可獲得雙重保護（預防 + 修正）
-- 詳見 `aec_methods.md` §6.4.1 組合行為表
+**Shadow-only 為預設模式（v1.6.0 起）**，等同 WebRTC AEC3 / SpeexDSP 的做法：
+- Shadow mu = 1.0（固定 full mu），main mu 由 simple_mu_ratio 控制（floor 50%）
+- Copy gate: far_active + not_dt，需連續 3 frames shadow_err < main_err × 0.5 才 copy
+- 優勢：免調 DTD 參數（2-3 個 vs DTD 的 6+），ERLE 更高（7.0 vs 6.3），勝率更好（27W vs 23W）
+- DTD 保留為進階選項（`--enable-dtd`），詳見 `aec_methods.md` §6.4.1 組合行為表
 
 ### 5.3 參數
 
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
-| `enable_shadow` | false | 啟用 shadow filter |
+| `enable_shadow` | **true** | 啟用 shadow filter（v1.6.0 起預設開啟） |
 | `shadow_mu_ratio` | 0.5 | shadow mu = main mu × ratio |
-| `shadow_copy_threshold` | 0.8 | shadow_err < main_err × threshold 時複製 |
+| `shadow_copy_threshold` | **0.5** | shadow_err < main_err × threshold 時複製（需 50%+ 優勢） |
 | `shadow_err_alpha` | 0.95 | error energy EMA 平滑 |
-| `shadow_dtd_mu_min` | 0.2 | #1: Shadow DTD 最低 mu 比例（20%） |
+| `shadow_dtd_mu_min` | 0.2 | DTD 模式下 Shadow DTD 最低 mu 比例 |
+| `shadow_mu_min` | **0.5** | Shadow-only 模式 main filter DT mu floor（50%） |
 | `shadow_copy_hysteresis` | 3 | #5: 連續 N frames 才觸發複製 |
 
 ---
