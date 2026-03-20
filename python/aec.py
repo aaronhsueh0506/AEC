@@ -39,6 +39,8 @@ class AecConfig:
     mu: float = 0.3              # Step size
     delta: float = 1e-8          # Regularization
     leak: float = 0.99999        # Weight leakage (slight leak for double-talk stability)
+    use_leakage: bool = True     # Use leakage instead of per-partition truncation (saves ~60% FLOP)
+    freq_leakage: float = 0.9999 # Frequency-domain weight leakage coefficient
     enable_dtd: bool = True
     dtd_threshold: float = 2.0   # (legacy, kept for compat) Error-based DTD ratio
     dtd_hangover_frames: int = 15
@@ -168,7 +170,8 @@ class SubbandNlms:
     """
 
     def __init__(self, block_size: int, n_partitions: int,
-                 mu: float = 0.3, delta: float = 1e-8):
+                 mu: float = 0.3, delta: float = 1e-8,
+                 use_leakage: bool = False, leakage: float = 0.9999):
         self.block_size = block_size
         self.hop_size = block_size // 2
         self.n_partitions = n_partitions
@@ -176,6 +179,8 @@ class SubbandNlms:
         self.mu = mu
         self.delta = delta
         self.alpha_power = 0.9
+        self.use_leakage = use_leakage
+        self.leakage = leakage
 
         # Filter weights [n_partitions, n_freqs]
         self.W = np.zeros((n_partitions, self.n_freqs), dtype=np.complex64)
@@ -261,10 +266,14 @@ class SubbandNlms:
                 grad = self.error_spec * np.conj(self.X_buf[p_idx])
                 self.W[p] += mu_eff * grad
 
-                # Constraint: time-domain truncation
-                w_time = np.fft.irfft(self.W[p], self.block_size)
-                w_time[hop:] = 0
-                self.W[p] = np.fft.rfft(w_time)
+                if self.use_leakage:
+                    # Leakage: 1 scalar multiply replaces 2 FFTs
+                    self.W[p] *= self.leakage
+                else:
+                    # Constraint: time-domain truncation (2 FFTs per partition)
+                    w_time = np.fft.irfft(self.W[p], self.block_size)
+                    w_time[hop:] = 0
+                    self.W[p] = np.fft.rfft(w_time)
 
         self.partition_idx = (self.partition_idx + 1) % self.n_partitions
         return output.astype(np.float32)
@@ -683,7 +692,9 @@ class AEC:
                 block_size=block_size,
                 n_partitions=n_partitions,
                 mu=self.config.mu,
-                delta=self.config.delta
+                delta=self.config.delta,
+                use_leakage=self.config.use_leakage,
+                leakage=self.config.freq_leakage
             )
             self._hop_size = self.config.hop_size  # External hop (always 256)
             self._n_partitions = n_partitions
