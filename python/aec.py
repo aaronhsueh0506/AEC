@@ -76,7 +76,7 @@ class AecConfig:
     shadow_err_alpha: float = 0.85
     shadow_dtd_mu_min: float = 0.2      # #1: Shadow DTD floor (20% vs main's 5%)
     shadow_mu_min: float = 0.2           # Shadow-only mode: DT mu floor (20%)
-    shadow_copy_hysteresis: int = 3     # #5: Consecutive frames needed for copy
+    shadow_copy_hysteresis: int = 5     # #5: Consecutive frames needed for copy
 
     # Coherence DTD absolute energy floor
     dtd_coh_abs_floor: float = 1e-6     # #8: Absolute error energy floor
@@ -430,7 +430,10 @@ class ResFilter:
         eer_linear = self.echo_psd / (self.error_psd + eps)
         # erle_factor=0 → pre-convergence (use coh2); erle_factor=1 → converged (use linear EER)
         eer_converged = eer_linear * (0.5 + 0.5 * coh2)
-        eer = (1.0 - erle_factor) * coh2 + erle_factor * eer_converged
+        if far_power > 1e-4:
+            eer = (1.0 - erle_factor) * coh2 + erle_factor * eer_converged
+        else:
+            eer = eer_converged
 
         g = np.maximum(1.0 - self.over_sub * eer, effective_g_min)
         g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
@@ -1023,8 +1026,16 @@ class AEC:
                 output = self.filter.process(near_end, far_end, mu_scale)
 
             # Update simple variable mu ratio (for non-DTD modes)
+            # EER-driven mu: use echo_psd/error_psd instead of far/error ratio
+            # Avoids deadlock in high-DT scenarios (far+near strong → ratio always low)
             if not self.config.enable_dtd:
-                self._update_simple_mu_ratio(output, far_end)
+                if self.res is not None:
+                    eer_mean = float(np.mean(
+                        self.res.echo_psd / (self.res.error_psd + 1e-10)
+                    ))
+                    self._simple_mu_ratio = float(np.clip(eer_mean, 0.0, 1.0))
+                else:
+                    self._update_simple_mu_ratio(output, far_end)
 
             # Shadow filter with DTD protection (#1) and bidirectional copy (#6)
             if self.shadow_filter is not None and self._freq_near_queue is None:
@@ -1049,7 +1060,7 @@ class AEC:
                     else:
                         not_dt = self._simple_mu_ratio > 0.6
 
-                    if far_active and not_dt:
+                    if far_active:
                         if self.shadow_err_smooth < self.main_err_smooth * threshold:
                             self.shadow_copy_counter += 1
                         else:
@@ -1065,7 +1076,7 @@ class AEC:
                             self.shadow_filter.copy_weights_from(self.filter)
                             self.shadow_err_smooth = self.main_err_smooth
                     else:
-                        # DT or far-end silent: reset counter
+                        # Far-end silent: reset counter
                         self.shadow_copy_counter = 0
 
             # Echo path change detection (shadow-based)
@@ -1095,8 +1106,8 @@ class AEC:
                 else:
                     self.epc_active = False
 
-            # Record filter error power BEFORE RES for accurate ERLE tracking
-            filter_error_power = np.mean(output ** 2)
+            # Record filter output BEFORE RES for accurate ERLE tracking
+            filter_output_pre_res = output.copy()
 
             # RES post-filter using OLA + sqrt-Hann (skip for buffered FDAF)
             if self.res and self._freq_near_queue is None:
@@ -1173,14 +1184,11 @@ class AEC:
             if snr < 0.01:  # output < -20dB of mic
                 output *= snr / 0.01  # soft fade
 
-        # ERLE (use filter error, before RES, for accurate convergence tracking)
-        # filter_error_power set before RES in FREQ/SUBBAND path; for LMS/NLMS output IS filter error
-        if 'filter_error_power' not in locals():
-            filter_error_power = np.mean(output ** 2)
-        err_for_erle = filter_error_power
-        near_pwr_mean = np.mean(near_end ** 2)
-        self.near_power = self.alpha * self.near_power + (1 - self.alpha) * near_pwr_mean
-        self.error_power = self.alpha * self.error_power + (1 - self.alpha) * err_for_erle
+        # ERLE (use filter error before RES for accurate convergence tracking)
+        erle_src = filter_output_pre_res if 'filter_output_pre_res' in locals() else output
+        for i in range(len(near_end)):
+            self.near_power = self.alpha * self.near_power + (1 - self.alpha) * near_end[i] ** 2
+            self.error_power = self.alpha * self.error_power + (1 - self.alpha) * erle_src[i] ** 2
         self.near_power_sum += np.sum(near_end ** 2)
         self.error_power_sum += np.sum(output ** 2)
 
