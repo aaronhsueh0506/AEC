@@ -325,7 +325,6 @@ class ResFilter:
 
         # Far-end activity tracking for dynamic g_min
         self.far_activity = 0.0
-        self.alpha_far_act = 0.99    # TC≈1.6s (slow release to maintain suppression)
 
         # OLA: sqrt-Hann window + sliding input buffer + overlap buffer
         self.window = np.sqrt(np.hanning(block_size)).astype(np.float32)
@@ -345,7 +344,8 @@ class ResFilter:
         self.ola_buf.fill(0)
 
     def process(self, error_hop: np.ndarray, echo_spec: np.ndarray,
-                far_power: float, far_spec: np.ndarray = None) -> np.ndarray:
+                far_power: float, far_spec: np.ndarray = None,
+                filter_converged: bool = False) -> np.ndarray:
         """Process hop-size error signal, return enhanced hop via OLA.
 
         far_spec: far-end frequency spectrum (complex), used for coherence-
@@ -405,10 +405,11 @@ class ResFilter:
         # --- Dynamic g_min: track far-end activity ---
         is_far_active = float(far_power > 1e-4)
         if is_far_active > self.far_activity:
-            alpha_fa = 0.5   # fast attack
+            # Far-end resumes: fast attack (TC≈30ms, ~2 frames)
+            self.far_activity = 0.7 * self.far_activity + 0.3 * is_far_active
         else:
-            alpha_fa = self.alpha_far_act  # slow release
-        self.far_activity = alpha_fa * self.far_activity + (1 - alpha_fa) * is_far_active
+            # Far-end stops: slow decay (TC≈800ms, wait for echo_psd to decay first)
+            self.far_activity = 0.98 * self.far_activity + 0.02 * is_far_active
         # far_activity=1.0 → g_min normal; far_activity=0.0 → g_min→1.0 (no suppression)
         effective_g_min = self.g_min + (1.0 - self.g_min) * (1.0 - self.far_activity)
 
@@ -417,10 +418,16 @@ class ResFilter:
         quiet_mask = ((self.echo_psd < signal_floor)
                       & (self.error_psd < signal_floor))
 
-        # Compute EER: linear EER modulated by coherence as soft gate
+        # Compute EER
         eps = 1e-10
         eer_linear = self.echo_psd / (self.error_psd + eps)
-        eer = eer_linear * (0.5 + 0.5 * coh2)
+        if not filter_converged and far_power > 1e-4:
+            # Pre-convergence: filter echo estimate unreliable (W≈0 → echo_psd≈0)
+            # Use coh2 directly as EER (error≈echo → coh2≈1.0, trustworthy)
+            eer = coh2
+        else:
+            # Post-convergence: linear EER with coh2 soft gate
+            eer = eer_linear * (0.5 + 0.5 * coh2)
 
         g = np.maximum(1.0 - self.over_sub * eer, effective_g_min)
         g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
@@ -428,15 +435,19 @@ class ResFilter:
         # Cross-frequency smoothing (3-bin moving average)
         g = np.convolve(g, np.ones(3) / 3, mode='same').astype(np.float32)
 
-        # Near-end likelihood for adaptive release
-        if far_spec is not None and far_power > 1e-4:
-            near_end_likelihood = 1.0 - float(np.mean(coh2))
-        else:
-            near_end_likelihood = 0.0
+        # Temporal smoothing with silence lock to prevent musical noise
+        mean_error_pwr = np.mean(error_pwr)
+        is_near_silent = (mean_error_pwr < 1e-7)  # ~-70 dBFS
 
-        # Temporal smoothing: attack fast, release adapts to near-end
-        # Gentle near-end speedup (0.2×) to reduce reverb without losing ERLE
-        alpha_release = self.alpha * (1.0 - 0.1 * near_end_likelihood)
+        if is_near_silent:
+            # Silence: near-freeze gain (TC≈3s) to avoid gain oscillation → musical noise
+            alpha_release = 0.99
+        elif far_spec is not None and far_power > 1e-4:
+            near_end_likelihood = 1.0 - float(np.mean(coh2))
+            alpha_release = self.alpha * (1.0 - 0.1 * near_end_likelihood)
+        else:
+            alpha_release = self.alpha
+
         alpha_g = np.where(g < self.gain_smooth, 0.6, alpha_release)
         self.gain_smooth = alpha_g * self.gain_smooth + (1 - alpha_g) * g
 
@@ -1100,7 +1111,8 @@ class AEC:
                 erle_factor = np.clip((inst_erle - 5.0) / 20.0, 0.0, 1.0)
                 self.res.over_sub = 4.0 - 2.0 * erle_factor
                 output = self.res.process(output, self.filter.echo_spec,
-                                          far_power, self.filter.far_spec)
+                                          far_power, self.filter.far_spec,
+                                          filter_converged=self._filter_converged)
 
             # Update DTD detectors for NEXT block
             # Skip divergence detector before convergence (output>mic is normal
