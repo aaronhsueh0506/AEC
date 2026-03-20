@@ -412,6 +412,7 @@ class ResFilter:
             self.far_activity = 0.98 * self.far_activity + 0.02 * is_far_active
         # far_activity=1.0 → g_min normal; far_activity=0.0 → g_min→1.0 (no suppression)
         effective_g_min = self.g_min + (1.0 - self.g_min) * (1.0 - self.far_activity)
+        effective_g_min = max(effective_g_min, 10 ** (-60.0 / 20))  # floor at -60dB
 
         # --- Noise gate: don't suppress quiet segments ---
         signal_floor = np.mean(self.error_psd) * 0.001 + 1e-8
