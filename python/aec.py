@@ -71,11 +71,11 @@ class AecConfig:
 
     # Shadow filter (dual-filter divergence control, FREQ/SUBBAND only)
     enable_shadow: bool = True
-    shadow_mu_ratio: float = 0.5
-    shadow_copy_threshold: float = 0.5
-    shadow_err_alpha: float = 0.95
+    shadow_mu_ratio: float = 1.0
+    shadow_copy_threshold: float = 0.7
+    shadow_err_alpha: float = 0.85
     shadow_dtd_mu_min: float = 0.2      # #1: Shadow DTD floor (20% vs main's 5%)
-    shadow_mu_min: float = 0.5           # Shadow-only mode: DT mu floor (50%)
+    shadow_mu_min: float = 0.2           # Shadow-only mode: DT mu floor (20%)
     shadow_copy_hysteresis: int = 3     # #5: Consecutive frames needed for copy
 
     # Coherence DTD absolute energy floor
@@ -313,7 +313,7 @@ class ResFilter:
         # Coherence-based nonlinear echo PSD estimation
         # Coherence between far-end and error captures both linear and
         # nonlinear echo components (both correlate with far-end).
-        self.alpha_coh = 0.85           # Cross-PSD smoothing
+        self.alpha_coh = 0.65           # Cross-PSD smoothing (TC≈45ms, was 0.85/107ms)
         self.S_fe = np.zeros(n_freqs, dtype=np.complex64)  # Cross-PSD far×error
         self.S_ff = np.zeros(n_freqs, dtype=np.float32)    # Far-end PSD
         self.S_ee = np.zeros(n_freqs, dtype=np.float32)    # Error PSD
@@ -345,7 +345,8 @@ class ResFilter:
 
     def process(self, error_hop: np.ndarray, echo_spec: np.ndarray,
                 far_power: float, far_spec: np.ndarray = None,
-                filter_converged: bool = False) -> np.ndarray:
+                filter_converged: bool = False,
+                erle_factor: float = 0.0) -> np.ndarray:
         """Process hop-size error signal, return enhanced hop via OLA.
 
         far_spec: far-end frequency spectrum (complex), used for coherence-
@@ -379,6 +380,11 @@ class ResFilter:
             self.S_ee = a * self.S_ee + (1 - a) * error_pwr
             coh2 = np.abs(self.S_fe) ** 2 / (self.S_ff * self.S_ee + 1e-10)
             coh2 = np.minimum(coh2, 1.0).astype(np.float32)
+            # Lightweight EMA to stabilize noisy coh2 (alpha_coh is fast)
+            if not hasattr(self, '_coh2_smooth'):
+                self._coh2_smooth = np.zeros(self.n_freqs, dtype=np.float32)
+            self._coh2_smooth = 0.7 * self._coh2_smooth + 0.3 * coh2
+            coh2 = self._coh2_smooth
         else:
             if far_power <= 1e-4:
                 self.S_fe *= 0.5
@@ -419,22 +425,15 @@ class ResFilter:
         quiet_mask = ((self.echo_psd < signal_floor)
                       & (self.error_psd < signal_floor))
 
-        # Compute EER
+        # Compute EER with soft convergence switch (no hard transition click)
         eps = 1e-10
         eer_linear = self.echo_psd / (self.error_psd + eps)
-        if not filter_converged and far_power > 1e-4:
-            # Pre-convergence: filter echo estimate unreliable (W≈0 → echo_psd≈0)
-            # Use coh2 directly as EER (error≈echo → coh2≈1.0, trustworthy)
-            eer = coh2
-        else:
-            # Post-convergence: linear EER with coh2 soft gate
-            eer = eer_linear * (0.5 + 0.5 * coh2)
+        # erle_factor=0 → pre-convergence (use coh2); erle_factor=1 → converged (use linear EER)
+        eer_converged = eer_linear * (0.5 + 0.5 * coh2)
+        eer = (1.0 - erle_factor) * coh2 + erle_factor * eer_converged
 
         g = np.maximum(1.0 - self.over_sub * eer, effective_g_min)
         g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
-
-        # Cross-frequency smoothing (3-bin moving average)
-        g = np.convolve(g, np.ones(3) / 3, mode='same').astype(np.float32)
 
         # Temporal smoothing: far_activity-driven release (no feedback loop)
         # far_activity high (far-end speaking) → slow release (TC≈200ms)
@@ -1096,16 +1095,20 @@ class AEC:
                 else:
                     self.epc_active = False
 
+            # Record filter error power BEFORE RES for accurate ERLE tracking
+            filter_error_power = np.mean(output ** 2)
+
             # RES post-filter using OLA + sqrt-Hann (skip for buffered FDAF)
             if self.res and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
                 # Dynamic over_sub: aggressive when unconverged, conservative when converged
                 inst_erle = self.get_erle_instant()
                 erle_factor = np.clip((inst_erle - 5.0) / 20.0, 0.0, 1.0)
-                self.res.over_sub = 4.0 - 2.0 * erle_factor
+                self.res.over_sub = 5.0 - 2.0 * erle_factor
                 output = self.res.process(output, self.filter.echo_spec,
                                           far_power, self.filter.far_spec,
-                                          filter_converged=self._filter_converged)
+                                          filter_converged=self._filter_converged,
+                                          erle_factor=erle_factor)
 
             # Update DTD detectors for NEXT block
             # Skip divergence detector before convergence (output>mic is normal
@@ -1161,18 +1164,23 @@ class AEC:
         self._limiter_gain = alpha_lim * self._limiter_gain + (1 - alpha_lim) * target_gain
         output *= self._limiter_gain
 
-        # Output noise gate: suppress very low-level residual
+        # Output noise gate: suppress very low-level residual (far-end only)
         out_power = np.mean(output ** 2)
         near_power_inst = np.mean(near_end ** 2)
-        if near_power_inst > 1e-8:
+        far_power_inst = np.mean(far_end ** 2)
+        if far_power_inst > 1e-4 and near_power_inst > 1e-8:
             snr = out_power / near_power_inst
             if snr < 0.01:  # output < -20dB of mic
                 output *= snr / 0.01  # soft fade
 
-        # ERLE
-        for i in range(len(near_end)):
-            self.near_power = self.alpha * self.near_power + (1 - self.alpha) * near_end[i] ** 2
-            self.error_power = self.alpha * self.error_power + (1 - self.alpha) * output[i] ** 2
+        # ERLE (use filter error, before RES, for accurate convergence tracking)
+        # filter_error_power set before RES in FREQ/SUBBAND path; for LMS/NLMS output IS filter error
+        if 'filter_error_power' not in locals():
+            filter_error_power = np.mean(output ** 2)
+        err_for_erle = filter_error_power
+        near_pwr_mean = np.mean(near_end ** 2)
+        self.near_power = self.alpha * self.near_power + (1 - self.alpha) * near_pwr_mean
+        self.error_power = self.alpha * self.error_power + (1 - self.alpha) * err_for_erle
         self.near_power_sum += np.sum(near_end ** 2)
         self.error_power_sum += np.sum(output ** 2)
 
