@@ -39,7 +39,7 @@ class AecConfig:
     mu: float = 0.3              # Step size
     delta: float = 1e-8          # Regularization
     leak: float = 0.99999        # Weight leakage (slight leak for double-talk stability)
-    use_leakage: bool = True     # Use leakage instead of per-partition truncation (saves ~60% FLOP)
+    use_leakage: bool = False    # Time-domain truncation (leakage causes circular convolution artifacts)
     freq_leakage: float = 0.9999 # Frequency-domain weight leakage coefficient
     enable_dtd: bool = False
     dtd_threshold: float = 2.0   # (legacy, kept for compat) Error-based DTD ratio
@@ -64,7 +64,7 @@ class AecConfig:
 
     # RES parameters
     enable_res: bool = False
-    res_g_min_db: float = -20.0
+    res_g_min_db: float = -25.0
     res_over_sub: float = 3.0
     res_alpha: float = 0.8
     enable_cng: bool = True            # Comfort noise generation in RES
@@ -1127,6 +1127,14 @@ class AEC:
             alpha_lim = 0.8   # release: recover moderately
         self._limiter_gain = alpha_lim * self._limiter_gain + (1 - alpha_lim) * target_gain
         output *= self._limiter_gain
+
+        # Output noise gate: suppress very low-level residual
+        out_power = np.mean(output ** 2)
+        near_power_inst = np.mean(near_end ** 2)
+        if near_power_inst > 1e-8:
+            snr = out_power / near_power_inst
+            if snr < 0.01:  # output < -20dB of mic
+                output *= snr / 0.01  # soft fade
 
         # ERLE
         for i in range(len(near_end)):
