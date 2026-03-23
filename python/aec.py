@@ -90,6 +90,8 @@ class AecConfig:
 
     # FDKF (Frequency Domain Kalman Filter) — faster convergence than NLMS
     use_kalman: bool = False
+    kalman_q_high: float = 1e-3       # FDKF Q_high convergence speed
+    warmup_frames: int = 100          # Frames with forced high mu at startup
 
     # Echo path change detection (requires shadow filter)
     epc_delta_threshold: float = 0.3    # |ΔE/total_E| < threshold → echo change
@@ -150,30 +152,45 @@ class AecConfig:
             preset = AecPreset(preset)
         if preset == AecPreset.BALANCED:
             defaults = dict(
+                # RES
                 res_g_min_db=-25.0,
                 res_over_sub_base=2.5,
                 res_over_sub_scale=4.0,
                 res_dt_reduction=3.5,
                 res_spectral_floor_db=-25.0,
                 shadow_q_ratio=3.0,
+                # Adaptive filter
+                shadow_mu_min=0.5,
+                warmup_frames=100,
+                kalman_q_high=1e-3,
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
+                # RES
                 res_g_min_db=-35.0,
                 res_over_sub_base=4.0,
                 res_over_sub_scale=6.0,
                 res_dt_reduction=2.5,
                 res_spectral_floor_db=-30.0,
                 shadow_q_ratio=4.0,
+                # Adaptive filter
+                shadow_mu_min=0.7,
+                warmup_frames=150,
+                kalman_q_high=3e-3,
             )
         elif preset == AecPreset.MAXIMUM:
             defaults = dict(
+                # RES
                 res_g_min_db=-40.0,
                 res_over_sub_base=6.0,
                 res_over_sub_scale=8.0,
                 res_dt_reduction=1.5,
                 res_spectral_floor_db=-35.0,
                 shadow_q_ratio=5.0,
+                # Adaptive filter
+                shadow_mu_min=0.9,
+                warmup_frames=200,
+                kalman_q_high=1e-2,
             )
         else:
             defaults = {}
@@ -1329,7 +1346,10 @@ class AEC:
                 delta=self.config.delta,
                 use_kalman=self.config.use_kalman
             )
-            # FDKF: shadow uses higher Q for faster convergence → copy gate can trigger
+            # FDKF: apply config Q_high, then shadow uses higher Q via ratio
+            if self.config.use_kalman and hasattr(self.filter, 'Q_high'):
+                self.filter.Q_high[:] = self.config.kalman_q_high
+                self.filter.Q[:] = self.config.kalman_q_high
             if self.config.use_kalman and hasattr(self.shadow_filter, 'Q_high'):
                 self.shadow_filter.Q_high = self.filter.Q_high * self.config.shadow_q_ratio
                 self.shadow_filter.Q_low  = self.filter.Q_low  * self.config.shadow_q_ratio
@@ -1373,7 +1393,7 @@ class AEC:
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0  # holdoff counter: blocks release for N frames
-        self._warmup_frames = 100    # First 100 frames (~1.6s): high mu for fast convergence
+        self._warmup_frames = self.config.warmup_frames
 
         # #5: Copy hysteresis counter
         self.shadow_copy_counter = 0
@@ -1417,7 +1437,7 @@ class AEC:
         self._filter_converged = False
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0
-        self._warmup_frames = 100
+        self._warmup_frames = self.config.warmup_frames
         self.shadow_copy_counter = 0
         self.shadow_frame_count = 0
         if self.dtd_divergence:
