@@ -2,6 +2,57 @@
 
 ## 版本歷史
 
+### v1.15.1 (2026-03-23) - C 實作完整重寫對齊 Python v1.15.0
+
+#### 改動內容
+
+1. **C 實作完整重寫**
+   - 對齊 Python v1.15.0 SUBBAND 模式（PBFDKF + Shadow + WOLA RES + HPF + Preset）
+   - `SubbandNlms` → `Pbfdkf`（FDKF Kalman always on，移除 NLMS fallback）
+   - 獨立 `hop_size=160` 和 `block_size=512`（不再硬綁 block_size/2）
+   - RES 改為 WOLA（sqrt-Hann 窗, frame=320, zero-pad→512）
+   - 新增 HPF（2nd-order Butterworth IIR, 80Hz cutoff）
+   - 三級 Preset：`--preset balanced|aggressive|maximum`
+   - 預設 filter_length=1600（100ms，因無 delay estimation 需較長濾波器）
+
+2. **新增/重寫檔案**
+   - `include/aec_types.h` — AecPreset enum + AecConfig struct + factory functions
+   - `include/pbfdkf.h` + `src/pbfdkf.c` — PBFDKF（取代 subband_nlms）
+   - `include/res_filter.h` + `src/res_filter.c` — WOLA RES（完整重寫）
+   - `include/hpf.h` + `src/hpf.c` — 新增 HPF
+   - `include/aec.h` + `src/aec.c` — 協調器重寫（Shadow + simple mu + convergence）
+   - `example/main.c` — CLI 重寫（preset 選擇）
+   - 移除: `subband_nlms.h`, `subband_nlms.c`（由 pbfdkf 取代）
+
+3. **C 版本包含**
+   - PBFDKF Kalman（per-bin K, two-stage Q, time-domain constraint）
+   - Shadow filter（dual-filter, copy gate with hysteresis, bidirectional copy）
+   - Simple variable mu（Valin 2007 RER-inspired, asymmetric EMA + holdoff）
+   - WOLA RES（coherence NL echo PSD, per-bin near-end gate, dynamic g_min, spectral floor, rate limiting, CNG）
+   - HPF（2nd-order Butterworth IIR）
+   - Output limiter（smoothed gain clamp）
+   - Convergence detection（10 consecutive frames ERLE > 6dB → Q_high → Q_low）
+
+4. **C 版本不含**
+   - DTD（Double-Talk Detection）
+   - Delay Estimation（GCC-PHAT）
+   - Saturation Detection
+   - LMS/NLMS/FDAF 模式
+
+#### 驗證結果
+
+使用 AEC Challenge farend_singletalk 測試（filter_length=1600, 10 partitions）：
+
+| Preset | ERLE (C, 無 delay est) |
+|--------|----------------------|
+| BALANCED | 5.9 dB |
+| AGGRESSIVE | 5.5 dB |
+| MAXIMUM | 3.9 dB |
+
+> 注：C 版本無 delay estimation，需較長濾波器補償。Python v1.15.0 同一 file 使用 delay est (414 samples) + 4 partitions 達 5.8 dB。
+
+---
+
 ### v1.15.0 (2026-03-23) - Frame/Hop 統一 + Dead Code 清理 + FREQ→FDAF 重命名
 
 #### 改動內容

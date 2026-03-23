@@ -1,153 +1,166 @@
 /**
- * aec_types.h - Common types and configuration for AEC
+ * aec_types.h - AEC Configuration Types and Presets
  *
- * Acoustic Echo Cancellation Implementation
- * Based on PBFDAF (Partitioned Block Frequency Domain Adaptive Filter)
- * with error-based DTD and RES post-filter
+ * Matches Python v1.15.0 (SUBBAND PBFDKF only, Kalman always on).
+ * Three presets: BALANCED / AGGRESSIVE / MAXIMUM
  */
 
 #ifndef AEC_TYPES_H
 #define AEC_TYPES_H
 
 #include <stdint.h>
-#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/**
- * Configuration structure for AEC
- *
- * All sizes are in samples (not ms).
- * C implementation only supports PBFDAF (SUBBAND) mode.
- */
+/* --- Preset enum --- */
+typedef enum {
+    AEC_PRESET_BALANCED = 0,
+    AEC_PRESET_AGGRESSIVE,
+    AEC_PRESET_MAXIMUM
+} AecPreset;
+
+/* --- Main configuration --- */
 typedef struct {
-    int sample_rate;            // Sample rate (16000 Hz)
-    int frame_size;             // Frame length in samples (512 @ 16kHz)
-    int hop_size;               // Hop size in samples (256 @ 16kHz)
-    int fft_size;               // FFT size (512, = frame_size)
+    int sample_rate;            /* 16000 */
+    int frame_size;             /* 320 (20ms @ 16kHz) — WOLA window length */
+    int hop_size;               /* 160 (10ms @ 16kHz) */
+    int filter_length;          /* 512 samples */
+    float delta;                /* Regularization: 1e-8 */
 
-    // Adaptive filter parameters
-    int filter_length;          // Filter length in samples (1024 @ 16kHz)
-    float mu;                   // Step size (0.3)
-    float delta;                // Regularization (1e-8)
+    /* HPF */
+    int enable_highpass;        /* 1 */
+    float highpass_cutoff_hz;   /* 80.0 */
 
-    // DTD: divergence detection + coherence-based DT detection
-    bool enable_dtd;                // Enable DTD (true)
-    float dtd_divergence_factor;    // output > input × factor → diverged (1.5)
-    float dtd_mu_min_ratio;         // Minimum mu scale during divergence (0.05)
-    float dtd_confidence_attack;    // Confidence ramp-up rate per block (0.3)
-    float dtd_confidence_release;   // Confidence ramp-down rate per block (0.05)
-    int dtd_warmup_frames;          // Frames to skip DTD at startup (50)
+    /* RES parameters */
+    int enable_res;             /* 1 */
+    float res_g_min_db;         /* -25 (BALANCED) */
+    float res_over_sub_base;    /* 2.5 */
+    float res_over_sub_scale;   /* 4.0 */
+    float res_dt_reduction;     /* 3.5 */
+    float res_spectral_floor_db; /* -25.0 */
+    float res_ne_protect_db;    /* -8.0 */
+    float res_max_drop_db_per_frame; /* 6.0 */
+    float res_max_rise_db_per_frame; /* 6.0 */
+    int   enable_cng;           /* 1 */
 
-    // Coherence-based DTD (complements divergence detection)
-    float dtd_coh_alpha;            // PSD smoothing factor (0.85)
-    float dtd_coh_high;             // Coherence above → no DT (0.6)
-    float dtd_coh_low;              // Coherence below → DT (0.3)
-    float dtd_coh_energy_floor;     // Min error/far energy ratio to trigger DT (0.1)
-    int dtd_coh_hangover;           // Coherence DTD hangover blocks (3)
-    float dtd_coh_release;          // Coherence confidence release rate (0.1)
+    /* Shadow filter */
+    float shadow_q_ratio;       /* 3.0 */
+    float shadow_copy_threshold; /* 0.7 */
+    float shadow_err_alpha;     /* 0.85 */
+    float shadow_mu_min;        /* 0.5 */
+    int   shadow_copy_hysteresis; /* 5 */
 
-    // Shadow filter (dual-filter divergence control)
-    bool enable_shadow;             // Enable shadow filter (false)
-    float shadow_mu_ratio;          // Shadow mu = main mu × ratio (0.5)
-    float shadow_copy_threshold;    // Copy when shadow_err < main_err × threshold (0.8)
-    float shadow_err_alpha;         // Error energy EMA smoothing (0.95)
+    /* FDKF Kalman */
+    float kalman_q_high;        /* 1e-3 */
+    int   warmup_frames;        /* 100 */
 
-    // RES (Residual Echo Suppressor) parameters
-    bool enable_res;            // Enable post-filter (true)
-    float res_g_min_db;         // Minimum gain in dB (-20)
-    float res_over_sub;         // Over-subtraction factor (1.5)
-    float res_alpha;            // Gain smoothing (0.8)
-
+    /* Derived (computed by factory) */
+    int fft_size;               /* 512 (next pow2 >= frame_size) */
+    int n_freqs;                /* 257 (fft_size/2 + 1) */
+    int n_partitions;           /* 4 (ceil(filter_length / hop_size)) */
 } AecConfig;
 
+/* --- Factory functions --- */
+
 /**
- * Create default configuration for given sample rate
- *
- * frame_size = next power of 2 >= sample_rate * 32ms (= fft_size)
- * hop_size = frame_size / 2 (50% overlap)
- * filter_length = hop_size * 4 (4 partitions, 64ms @ 16kHz)
+ * Create default config (BALANCED preset) for given sample rate
  */
 static inline AecConfig aec_default_config(int sample_rate) {
-    AecConfig config;
+    AecConfig c;
+    c.sample_rate = sample_rate;
+    c.frame_size = 320;
+    c.hop_size = 160;
+    c.filter_length = 1600;   /* 100ms @ 16kHz (no delay est → need longer filter) */
+    c.delta = 1e-8f;
 
-    config.sample_rate = sample_rate;
+    c.enable_highpass = 1;
+    c.highpass_cutoff_hz = 80.0f;
 
-    // frame_size = next power of 2 >= ~32ms worth of samples
-    int target = sample_rate * 32 / 1000;
-    int frame_size = 256;
-    while (frame_size < target) {
-        frame_size *= 2;
-    }
-    config.frame_size = frame_size;       // 512 @ 16kHz
-    config.hop_size = frame_size / 2;     // 256 @ 16kHz
-    config.fft_size = frame_size;         // = frame_size (no zero-padding)
+    c.enable_res = 1;
+    c.res_g_min_db = -25.0f;
+    c.res_over_sub_base = 2.5f;
+    c.res_over_sub_scale = 4.0f;
+    c.res_dt_reduction = 3.5f;
+    c.res_spectral_floor_db = -25.0f;
+    c.res_ne_protect_db = -8.0f;
+    c.res_max_drop_db_per_frame = 6.0f;
+    c.res_max_rise_db_per_frame = 6.0f;
+    c.enable_cng = 1;
 
-    // Adaptive filter parameters (PBFDAF)
-    config.filter_length = config.hop_size * 4;  // 1024 @ 16kHz (4 partitions)
-    config.mu = 0.3f;
-    config.delta = 1e-8f;
+    c.shadow_q_ratio = 3.0f;
+    c.shadow_copy_threshold = 0.7f;
+    c.shadow_err_alpha = 0.85f;
+    c.shadow_mu_min = 0.5f;
+    c.shadow_copy_hysteresis = 5;
 
-    // DTD parameters (divergence + coherence)
-    config.enable_dtd = true;
-    config.dtd_divergence_factor = 1.5f;
-    config.dtd_mu_min_ratio = 0.05f;
-    config.dtd_confidence_attack = 0.3f;
-    config.dtd_confidence_release = 0.05f;
-    config.dtd_warmup_frames = 50;
-    config.dtd_coh_alpha = 0.85f;
-    config.dtd_coh_high = 0.6f;
-    config.dtd_coh_low = 0.3f;
-    config.dtd_coh_energy_floor = 0.1f;
-    config.dtd_coh_hangover = 3;
-    config.dtd_coh_release = 0.1f;
+    c.kalman_q_high = 1e-3f;
+    c.warmup_frames = 100;
 
-    // Shadow filter (dual-filter)
-    config.enable_shadow = false;
-    config.shadow_mu_ratio = 0.5f;
-    config.shadow_copy_threshold = 0.8f;
-    config.shadow_err_alpha = 0.95f;
+    /* Derived */
+    c.fft_size = 512;
+    c.n_freqs = 257;
+    c.n_partitions = (c.filter_length + c.hop_size - 1) / c.hop_size; /* 4 */
 
-    // RES parameters
-    config.enable_res = true;
-    config.res_g_min_db = -20.0f;
-    config.res_over_sub = 1.5f;
-    config.res_alpha = 0.8f;
-
-    return config;
+    return c;
 }
 
 /**
- * Derived parameters (computed from config)
+ * Create config from preset
  */
-typedef struct {
-    int frame_size;         // = config.frame_size
-    int hop_size;           // = config.hop_size (e.g. 256)
-    int block_size;         // = config.fft_size (SubbandNlms FFT size)
-    int filter_length;      // = config.filter_length
-    int n_freqs;            // = fft_size / 2 + 1
-    int n_partitions;       // = ceil(filter_length / hop_size)
-} AecDerivedParams;
+static inline AecConfig aec_config_from_preset(AecPreset preset, int sample_rate) {
+    AecConfig c = aec_default_config(sample_rate);
+
+    switch (preset) {
+    case AEC_PRESET_BALANCED:
+        /* Already set by default */
+        break;
+
+    case AEC_PRESET_AGGRESSIVE:
+        c.res_g_min_db = -35.0f;
+        c.res_over_sub_base = 4.0f;
+        c.res_over_sub_scale = 6.0f;
+        c.res_dt_reduction = 2.0f;
+        c.res_spectral_floor_db = -30.0f;
+        c.res_ne_protect_db = -5.0f;
+        c.shadow_q_ratio = 4.0f;
+        c.shadow_mu_min = 0.7f;
+        c.warmup_frames = 150;
+        c.kalman_q_high = 3e-3f;
+        break;
+
+    case AEC_PRESET_MAXIMUM:
+        c.res_g_min_db = -40.0f;
+        c.res_over_sub_base = 6.0f;
+        c.res_over_sub_scale = 8.0f;
+        c.res_dt_reduction = 0.0f;
+        c.res_spectral_floor_db = -35.0f;
+        c.res_ne_protect_db = -2.0f;
+        c.shadow_q_ratio = 5.0f;
+        c.shadow_mu_min = 0.9f;
+        c.warmup_frames = 200;
+        c.kalman_q_high = 1e-2f;
+        break;
+    }
+
+    return c;
+}
 
 /**
- * Compute derived parameters from configuration
+ * Get preset name string
  */
-static inline AecDerivedParams aec_compute_params(const AecConfig* config) {
-    AecDerivedParams params;
-    params.frame_size = config->frame_size;
-    params.hop_size = config->hop_size;
-    params.filter_length = config->filter_length;
-    params.block_size = config->fft_size;
-    params.n_freqs = config->fft_size / 2 + 1;
-    params.n_partitions = (config->filter_length + config->hop_size - 1) / config->hop_size;
-    if (params.n_partitions < 1) params.n_partitions = 1;
-    return params;
+static inline const char* aec_preset_name(AecPreset preset) {
+    switch (preset) {
+    case AEC_PRESET_BALANCED:   return "balanced";
+    case AEC_PRESET_AGGRESSIVE: return "aggressive";
+    case AEC_PRESET_MAXIMUM:    return "maximum";
+    default: return "unknown";
+    }
 }
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // AEC_TYPES_H
+#endif /* AEC_TYPES_H */

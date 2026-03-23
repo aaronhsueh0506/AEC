@@ -1,5 +1,5 @@
 # AEC (Acoustic Echo Cancellation) Makefile
-# PBFDAF with error-based DTD
+# PBFDKF + Shadow + WOLA RES + HPF + Preset
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c99
@@ -20,8 +20,9 @@ BIN_DIR = bin
 
 # Source files
 SRCS = $(SRC_DIR)/aec.c \
-       $(SRC_DIR)/subband_nlms.c \
+       $(SRC_DIR)/pbfdkf.c \
        $(SRC_DIR)/res_filter.c \
+       $(SRC_DIR)/hpf.c \
        $(SRC_DIR)/fft_wrapper.c
 
 LIB_SRCS = $(LIB_DIR)/kiss_fft.c
@@ -89,11 +90,12 @@ help:
 	@echo "  help   - Show this help"
 	@echo ""
 	@echo "Usage:"
-	@echo "  ./bin/aec_wav <mic.wav> <ref.wav> <output.wav>"
+	@echo "  ./bin/aec_wav <mic.wav> <ref.wav> <output.wav> [--preset balanced|aggressive|maximum]"
 	@echo ""
-	@echo "Input files:"
-	@echo "  mic.wav - Microphone input (near-end + echo)"
-	@echo "  ref.wav - Reference signal (far-end/loudspeaker)"
-	@echo "  output.wav - Echo-cancelled output"
+	@echo "Options:"
+	@echo "  --preset <name>    - balanced (default), aggressive, maximum"
+	@echo "  --no-res           - Disable RES post-filter"
+	@echo "  --no-hpf           - Disable high-pass filter"
+	@echo "  --filter <samples> - Filter length in samples (default: 512)"
 
 .PHONY: all dirs clean lib help debug

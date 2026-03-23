@@ -2,7 +2,7 @@
 
 回音消除模組（v1.15.0），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度，搭配 per-bin near-end gate 精確 DT 保護。
 
-> C 實作僅支援 PBFDAF 模式，詳見 [c_impl/README.md](c_impl/README.md)。
+> C 實作已重寫對齊 Python v1.15.0：PBFDKF + Shadow + WOLA RES + HPF + Preset，詳見 [c_impl/README.md](c_impl/README.md)。
 
 ## 濾波器模式
 
@@ -48,16 +48,20 @@ python3 aec.py mic.wav ref.wav output.wav
 python3 aec.py mic.wav ref.wav output.wav --mu 0.5 --filter 1024
 ```
 
-### C (PBFDAF only)
+### C (PBFDKF + Shadow + WOLA RES)
 
 ```bash
 cd c_impl && make
-./bin/aec_wav mic.wav ref.wav output.wav                    # DTD + RES 預設開啟（C 版本仍用 DTD）
-./bin/aec_wav mic.wav ref.wav output.wav --no-res            # 關閉 RES
-./bin/aec_wav mic.wav ref.wav output.wav --enable-shadow     # 開啟 Shadow Filter（C 版本需手動開啟）
+./bin/aec_wav mic.wav ref.wav output.wav                           # BALANCED preset（預設）
+./bin/aec_wav mic.wav ref.wav output.wav --preset aggressive       # AGGRESSIVE preset
+./bin/aec_wav mic.wav ref.wav output.wav --preset maximum          # MAXIMUM preset
+./bin/aec_wav mic.wav ref.wav output.wav --no-res                  # 關閉 RES
+./bin/aec_wav mic.wav ref.wav output.wav --no-hpf                  # 關閉 HPF
+./bin/aec_wav mic.wav ref.wav output.wav --filter 2400             # 自訂濾波器長度
 ```
 
-詳見 [c_impl/README.md](c_impl/README.md)。
+C 版本已完整對齊 Python v1.15.0（SUBBAND 模式），包含 PBFDKF Kalman + Shadow + WOLA RES + HPF + 三級 Preset。
+不含：DTD、Delay Estimation、Saturation Detection、LMS/NLMS/FDAF 模式。
 
 ## 系統架構
 
@@ -414,11 +418,10 @@ python3 python/eval_aec_challenge.py wav/aec_challenge/ --all-presets
 ```
 AEC/
 ├── README.md                  # 本文件（Python 為主）
-├── c_impl/                    # C 實作 (PBFDAF only)
-│   ├── README.md              # C 版本文檔
-│   ├── include/               # 標頭檔
-│   ├── src/                   # 原始碼
-│   ├── example/               # CLI 工具
+├── c_impl/                    # C 實作 (PBFDKF + Shadow + WOLA RES + HPF + Preset)
+│   ├── include/               # aec.h, aec_types.h, pbfdkf.h, res_filter.h, hpf.h
+│   ├── src/                   # aec.c, pbfdkf.c, res_filter.c, hpf.c, fft_wrapper.c
+│   ├── example/               # main.c (CLI), wav_io.h
 │   └── Makefile
 ├── python/
 │   ├── aec.py                 # Python 實作 (LMS/NLMS/FDAF/SUBBAND + FDKF + Delay Est.)

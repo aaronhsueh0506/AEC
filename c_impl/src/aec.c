@@ -1,64 +1,75 @@
 /**
- * aec.c - Acoustic Echo Cancellation main implementation
+ * aec.c - AEC Coordinator
  *
- * PBFDAF (Partitioned Block Frequency Domain Adaptive Filter) with:
- *   - WebRTC-style divergence detection (confidence-based mu scaling)
- *   - Output limiter (output never exceeds mic amplitude)
- *   - RES post-filter (optional)
- * Streaming architecture with hop-size based processing.
+ * Orchestrates: HPF → PBFDKF (main + shadow) → simple variable mu →
+ *               convergence detection → RES (WOLA) → output limiter
+ *
+ * Matches Python AEC v1.15.0 (SUBBAND mode, FDKF always on).
  */
 
 #include "aec.h"
-#include "subband_nlms.h"
+#include "pbfdkf.h"
 #include "res_filter.h"
-#include "fft_wrapper.h"
+#include "hpf.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
+static inline float maxf(float a, float b) { return a > b ? a : b; }
+static inline float minf(float a, float b) { return a < b ? a : b; }
+static inline float clampf(float x, float lo, float hi) {
+    return x < lo ? lo : (x > hi ? hi : x);
+}
+
 struct Aec {
     AecConfig config;
-    AecDerivedParams params;
 
-    // PBFDAF adaptive filter
-    SubbandNlms* filter;
+    /* HPF (mic + ref) */
+    Hpf* hp_mic;
+    Hpf* hp_ref;
 
-    // RES post-filter (optional, uses overlap-save)
-    ResFilter* res;
-    FftHandle* res_fft;         // FFT for RES IFFT (pre-allocated)
-    Complex* res_echo_spec;     // [n_freqs]
-    Complex* res_near_spec;     // [n_freqs] near-end spectrum for overlap-save
-    Complex* res_residual_spec; // [n_freqs] residual = near - echo
-    Complex* res_output_spec;   // [n_freqs]
-    float* res_temp;            // [block_size] IFFT scratch
+    /* Main adaptive filter */
+    Pbfdkf* filter;
 
-    // Shadow filter (dual-filter divergence control)
-    SubbandNlms* shadow_filter;
-    float* shadow_output;       // [hop_size]
+    /* Shadow filter */
+    Pbfdkf* shadow_filter;
     float main_err_smooth;
     float shadow_err_smooth;
+    int shadow_frame_count;
+    int shadow_copy_counter;
 
-    // Buffers
-    float* output_buffer;   // [hop_size]
+    /* RES post-filter */
+    ResFilter* res;
 
-    // ERLE estimation
+    /* Simple variable mu (Valin 2007 RER-inspired) */
+    float simple_mu_ratio;
+    int simple_mu_holdoff;
+    int warmup_frames;
+
+    /* Convergence */
+    int filter_converged;
+    int conv_counter;
+
+    /* ERLE tracking */
     float near_power;
-    float error_power;
+    float raw_error_power;
+    float final_error_power;
+    float near_power_sum;
+    float raw_error_power_sum;
+    float final_error_power_sum;
     float alpha_erle;
 
-    // Divergence detection state
-    float dtd_confidence;       // [0.0, 1.0] divergence confidence
-    int frame_count;
+    /* Output limiter */
+    float limiter_gain;
 
-    // Coherence-based DT detection state
-    float dtd_coh_confidence;   // [0.0, 1.0] coherence confidence
-    float* S_ex_r;              // [n_freqs] smoothed cross-PSD real
-    float* S_ex_i;              // [n_freqs] smoothed cross-PSD imag
-    float* S_ee;                // [n_freqs] smoothed error auto-PSD
-    float* S_xx;                // [n_freqs] smoothed far-end auto-PSD
-    Complex* coh_far_spec;      // [n_freqs] temp buffer for far spectrum
-    Complex* coh_error_spec;    // [n_freqs] temp buffer for error spectrum
-    int coh_hangover_count;
+    /* Temp buffers */
+    float* mic_buf;     /* [hop_size] HPF scratch */
+    float* ref_buf;     /* [hop_size] HPF scratch */
+    float* raw_output;  /* [hop_size] */
+
+    /* Per-bin mu_scale from RES */
+    float* per_bin_mu_scale; /* [n_freqs] or NULL */
+    int n_freqs;
 };
 
 Aec* aec_create(const AecConfig* config) {
@@ -68,445 +79,413 @@ Aec* aec_create(const AecConfig* config) {
     if (!aec) return NULL;
 
     aec->config = *config;
-    aec->params = aec_compute_params(config);
+    int hop = config->hop_size;
+    int nf = config->n_freqs;
+    aec->n_freqs = nf;
 
-    // Create PBFDAF filter
-    aec->filter = subband_nlms_create(
-        aec->params.block_size,
-        aec->params.n_partitions,
-        config->mu,
-        config->delta
-    );
-    if (!aec->filter) {
-        aec_destroy(aec);
-        return NULL;
+    /* HPF */
+    if (config->enable_highpass) {
+        aec->hp_mic = hpf_create(config->highpass_cutoff_hz, config->sample_rate);
+        aec->hp_ref = hpf_create(config->highpass_cutoff_hz, config->sample_rate);
     }
 
-    // Create shadow filter (dual-filter divergence control)
-    if (config->enable_shadow) {
-        float shadow_mu = config->mu * config->shadow_mu_ratio;
-        aec->shadow_filter = subband_nlms_create(
-            aec->params.block_size,
-            aec->params.n_partitions,
-            shadow_mu,
-            config->delta
-        );
-        if (aec->shadow_filter) {
-            aec->shadow_output = (float*)calloc(aec->params.hop_size, sizeof(float));
-            if (!aec->shadow_output) {
-                subband_nlms_destroy(aec->shadow_filter);
-                aec->shadow_filter = NULL;
-            }
-        }
-        aec->main_err_smooth = 0.0f;
-        aec->shadow_err_smooth = 0.0f;
-    }
+    /* Main filter (PBFDKF) */
+    aec->filter = pbfdkf_create(config->fft_size, hop,
+                                 config->n_partitions, config->delta,
+                                 config->kalman_q_high);
+    if (!aec->filter) { aec_destroy(aec); return NULL; }
 
-    // Create RES post-filter (optional)
+    /* Shadow filter */
+    aec->shadow_filter = pbfdkf_create(config->fft_size, hop,
+                                        config->n_partitions, config->delta,
+                                        config->kalman_q_high);
+    if (!aec->shadow_filter) { aec_destroy(aec); return NULL; }
+
+    /* Set shadow Q = main Q × ratio */
+    pbfdkf_set_q_ratio(aec->shadow_filter, config->kalman_q_high,
+                        config->shadow_q_ratio);
+
+    /* RES */
     if (config->enable_res) {
-        aec->res = res_create(
-            aec->params.n_freqs,
-            config->res_g_min_db,
-            config->res_over_sub,
-            config->res_alpha
-        );
-        if (aec->res) {
-            int n_freqs = aec->params.n_freqs;
-            int block_size = aec->params.block_size;
-            aec->res_fft = fft_create(block_size);
-            aec->res_echo_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
-            aec->res_near_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
-            aec->res_residual_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
-            aec->res_output_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
-            aec->res_temp = (float*)calloc(block_size, sizeof(float));
-            if (!aec->res_fft || !aec->res_echo_spec || !aec->res_near_spec ||
-                !aec->res_residual_spec || !aec->res_output_spec || !aec->res_temp) {
-                // RES allocation failed — disable RES gracefully
-                fft_destroy(aec->res_fft);
-                free(aec->res_echo_spec);
-                free(aec->res_near_spec);
-                free(aec->res_residual_spec);
-                free(aec->res_output_spec);
-                free(aec->res_temp);
-                res_destroy(aec->res);
-                aec->res = NULL;
-                aec->res_fft = NULL;
-                aec->res_echo_spec = NULL;
-                aec->res_near_spec = NULL;
-                aec->res_residual_spec = NULL;
-                aec->res_output_spec = NULL;
-                aec->res_temp = NULL;
-            }
-        }
+        ResConfig rc;
+        rc.block_size = config->fft_size;
+        rc.frame_size = config->frame_size;
+        rc.hop_size = hop;
+        rc.n_freqs = nf;
+        rc.g_min_db = config->res_g_min_db;
+        rc.max_drop_db_per_frame = config->res_max_drop_db_per_frame;
+        rc.max_rise_db_per_frame = config->res_max_rise_db_per_frame;
+        rc.spectral_floor_db = config->res_spectral_floor_db;
+        rc.ne_protect_db = config->res_ne_protect_db;
+        rc.enable_cng = config->enable_cng;
+        aec->res = res_create(&rc);
     }
 
-    // Allocate buffers
-    aec->output_buffer = (float*)calloc(aec->params.hop_size, sizeof(float));
-    if (!aec->output_buffer) {
-        aec_destroy(aec);
-        return NULL;
-    }
+    /* Variable mu */
+    aec->simple_mu_ratio = 1.0f;
+    aec->simple_mu_holdoff = 0;
+    aec->warmup_frames = config->warmup_frames;
 
-    // Init ERLE
-    aec->near_power = 0.0f;
-    aec->error_power = 0.0f;
+    /* Convergence */
+    aec->filter_converged = 0;
+    aec->conv_counter = 0;
+
+    /* ERLE */
     aec->alpha_erle = 0.95f;
 
-    // Init DTD
-    aec->dtd_confidence = 0.0f;
-    aec->frame_count = 0;
+    /* Limiter */
+    aec->limiter_gain = 1.0f;
 
-    // Init coherence DTD
-    aec->dtd_coh_confidence = 0.0f;
-    aec->coh_hangover_count = 0;
-    if (config->enable_dtd) {
-        int n_freqs = aec->params.n_freqs;
-        aec->S_ex_r = (float*)calloc(n_freqs, sizeof(float));
-        aec->S_ex_i = (float*)calloc(n_freqs, sizeof(float));
-        aec->S_ee = (float*)calloc(n_freqs, sizeof(float));
-        aec->S_xx = (float*)calloc(n_freqs, sizeof(float));
-        aec->coh_far_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
-        aec->coh_error_spec = (Complex*)calloc(n_freqs, sizeof(Complex));
-        if (!aec->S_ex_r || !aec->S_ex_i || !aec->S_ee || !aec->S_xx ||
-            !aec->coh_far_spec || !aec->coh_error_spec) {
-            free(aec->S_ex_r); free(aec->S_ex_i);
-            free(aec->S_ee); free(aec->S_xx);
-            free(aec->coh_far_spec); free(aec->coh_error_spec);
-            aec->S_ex_r = NULL; aec->S_ex_i = NULL;
-            aec->S_ee = NULL; aec->S_xx = NULL;
-            aec->coh_far_spec = NULL; aec->coh_error_spec = NULL;
-        }
+    /* Buffers */
+    aec->mic_buf    = (float*)malloc(hop * sizeof(float));
+    aec->ref_buf    = (float*)malloc(hop * sizeof(float));
+    aec->raw_output = (float*)malloc(hop * sizeof(float));
+    aec->per_bin_mu_scale = NULL;
+
+    if (!aec->mic_buf || !aec->ref_buf || !aec->raw_output) {
+        aec_destroy(aec); return NULL;
     }
+
+    /* Shadow init */
+    aec->main_err_smooth = 0.0f;
+    aec->shadow_err_smooth = 0.0f;
+    aec->shadow_frame_count = 0;
+    aec->shadow_copy_counter = 0;
 
     return aec;
 }
 
 void aec_destroy(Aec* aec) {
-    if (aec) {
-        subband_nlms_destroy(aec->filter);
-        subband_nlms_destroy(aec->shadow_filter);
-        free(aec->shadow_output);
-        res_destroy(aec->res);
-        fft_destroy(aec->res_fft);
-        free(aec->res_echo_spec);
-        free(aec->res_near_spec);
-        free(aec->res_residual_spec);
-        free(aec->res_output_spec);
-        free(aec->res_temp);
-        free(aec->output_buffer);
-        free(aec->S_ex_r);
-        free(aec->S_ex_i);
-        free(aec->S_ee);
-        free(aec->S_xx);
-        free(aec->coh_far_spec);
-        free(aec->coh_error_spec);
-        free(aec);
-    }
+    if (!aec) return;
+    hpf_destroy(aec->hp_mic);
+    hpf_destroy(aec->hp_ref);
+    pbfdkf_destroy(aec->filter);
+    pbfdkf_destroy(aec->shadow_filter);
+    res_destroy(aec->res);
+    free(aec->mic_buf);
+    free(aec->ref_buf);
+    free(aec->raw_output);
+    free(aec->per_bin_mu_scale);
+    free(aec);
 }
 
 void aec_reset(Aec* aec) {
     if (!aec) return;
-
-    if (aec->filter) {
-        subband_nlms_reset(aec->filter);
-    }
-    if (aec->shadow_filter) {
-        subband_nlms_reset(aec->shadow_filter);
-        aec->main_err_smooth = 0.0f;
-        aec->shadow_err_smooth = 0.0f;
-    }
-    if (aec->res) {
-        res_reset(aec->res);
-    }
-
-    int hop_size = aec->params.hop_size;
-    memset(aec->output_buffer, 0, hop_size * sizeof(float));
-    if (aec->shadow_output) {
-        memset(aec->shadow_output, 0, hop_size * sizeof(float));
-    }
-
-    aec->near_power = 0.0f;
-    aec->error_power = 0.0f;
-    aec->dtd_confidence = 0.0f;
-    aec->dtd_coh_confidence = 0.0f;
-    aec->coh_hangover_count = 0;
-    aec->frame_count = 0;
-    if (aec->S_ex_r) {
-        int n = aec->params.n_freqs;
-        memset(aec->S_ex_r, 0, n * sizeof(float));
-        memset(aec->S_ex_i, 0, n * sizeof(float));
-        memset(aec->S_ee, 0, n * sizeof(float));
-        memset(aec->S_xx, 0, n * sizeof(float));
-    }
+    if (aec->hp_mic) { hpf_reset(aec->hp_mic); hpf_reset(aec->hp_ref); }
+    pbfdkf_reset(aec->filter);
+    pbfdkf_reset(aec->shadow_filter);
+    pbfdkf_set_q_ratio(aec->shadow_filter, aec->config.kalman_q_high,
+                        aec->config.shadow_q_ratio);
+    if (aec->res) res_reset(aec->res);
+    aec->simple_mu_ratio = 1.0f;
+    aec->simple_mu_holdoff = 0;
+    aec->warmup_frames = aec->config.warmup_frames;
+    aec->filter_converged = 0;
+    aec->conv_counter = 0;
+    aec->near_power = 0; aec->raw_error_power = 0; aec->final_error_power = 0;
+    aec->near_power_sum = 0; aec->raw_error_power_sum = 0; aec->final_error_power_sum = 0;
+    aec->limiter_gain = 1.0f;
+    aec->main_err_smooth = 0; aec->shadow_err_smooth = 0;
+    aec->shadow_frame_count = 0; aec->shadow_copy_counter = 0;
+    free(aec->per_bin_mu_scale); aec->per_bin_mu_scale = NULL;
 }
 
-void aec_retrain(Aec* aec) {
-    if (!aec) return;
+/* --- Simple variable mu (Valin 2007 RER-inspired) --- */
+static float get_simple_mu_scale(Aec* aec) {
+    float mu_min = aec->config.shadow_mu_min;
 
-    // Reset weights only — keep X_buf, power, overlap buffers
-    if (aec->filter) {
-        subband_nlms_reset_weights(aec->filter);
-    }
-    if (aec->shadow_filter) {
-        subband_nlms_reset_weights(aec->shadow_filter);
-        aec->main_err_smooth = 0.0f;
-        aec->shadow_err_smooth = 0.0f;
+    /* Warmup: high mu for fast initial convergence */
+    if (aec->warmup_frames > 0) {
+        aec->warmup_frames--;
+        return minf(1.0f, maxf(0.7f, aec->simple_mu_ratio + 0.3f));
     }
 
-    // Restart DTD warmup
-    aec->dtd_confidence = 0.0f;
-    aec->frame_count = 0;
+    if (!aec->filter_converged)
+        mu_min = maxf(mu_min, 0.5f);
+    else
+        mu_min = maxf(mu_min, 0.2f);
 
-    // Reset ERLE
-    aec->near_power = 0.0f;
-    aec->error_power = 0.0f;
+    /* Per-bin mu_scale from RES (post-convergence) */
+    /* (returned as scalar fallback when per_bin not available) */
+    return mu_min + (1.0f - mu_min) * aec->simple_mu_ratio;
+}
+
+static void update_simple_mu_ratio(Aec* aec, const float* output,
+                                    const float* far, int hop) {
+    float err_pwr = 0.0f, far_pwr = 0.0f;
+    for (int i = 0; i < hop; i++) {
+        err_pwr += output[i] * output[i];
+        far_pwr += far[i] * far[i];
+    }
+    err_pwr = err_pwr / hop + 1e-10f;
+    far_pwr = far_pwr / hop + 1e-10f;
+    float ratio = far_pwr / err_pwr;
+    if (ratio > 1.0f) ratio = 1.0f;
+
+    /* Echo estimate ratio boost */
+    const Complex* echo_spec = pbfdkf_get_echo_spec(aec->filter);
+    if (echo_spec) {
+        int nf = aec->n_freqs;
+        float echo_pwr = 0.0f;
+        for (int k = 0; k < nf; k++)
+            echo_pwr += echo_spec[k].r * echo_spec[k].r +
+                        echo_spec[k].i * echo_spec[k].i;
+        echo_pwr += 1e-10f;
+        /* Use near_power_sum as approximation */
+        float near_pwr = aec->near_power + 1e-10f;
+        if (near_pwr > 1e-8f) {
+            float ratio_echo = clampf(echo_pwr / (near_pwr * nf), 0.0f, 1.0f);
+            ratio = maxf(ratio, ratio_echo * 0.5f);
+        }
+    }
+
+    /* Asymmetric EMA + holdoff */
+    float alpha;
+    if (ratio < aec->simple_mu_ratio) {
+        alpha = 0.3f;
+        aec->simple_mu_holdoff = 20;
+    } else if (aec->simple_mu_holdoff > 0) {
+        aec->simple_mu_holdoff--;
+        alpha = 0.99f;
+    } else {
+        alpha = 0.95f;
+    }
+    aec->simple_mu_ratio = alpha * aec->simple_mu_ratio + (1.0f - alpha) * ratio;
 }
 
 int aec_process(Aec* aec,
                 const float* near_end,
                 const float* far_end,
                 float* output) {
-    if (!aec || !near_end || !far_end || !output) {
-        return -1;
-    }
+    if (!aec || !near_end || !far_end || !output) return -1;
 
-    const int hop_size = aec->params.hop_size;
+    const int hop = aec->config.hop_size;
     const float alpha = aec->alpha_erle;
+    const AecConfig* cfg = &aec->config;
 
-    // Compute mu_scale from combined confidence (divergence + coherence)
-    float mu_scale = 1.0f;
-    if (aec->config.enable_dtd) {
-        float conf_div = aec->dtd_confidence;
-        float conf_coh = aec->dtd_coh_confidence;
-        float conf = (conf_div > conf_coh) ? conf_div : conf_coh;
-        float min_r = aec->config.dtd_mu_min_ratio;
-        mu_scale = 1.0f - conf * (1.0f - min_r);
+    /* Copy input (we modify via HPF) */
+    memcpy(aec->mic_buf, near_end, hop * sizeof(float));
+    memcpy(aec->ref_buf, far_end, hop * sizeof(float));
+
+    /* HPF */
+    if (aec->hp_mic) {
+        hpf_process(aec->hp_mic, aec->mic_buf, hop);
+        hpf_process(aec->hp_ref, aec->ref_buf, hop);
     }
 
-    // Process through PBFDAF
-    subband_nlms_process(aec->filter, near_end, far_end, output, mu_scale);
+    const float* mic = aec->mic_buf;
+    const float* ref = aec->ref_buf;
 
-    // Shadow filter: always adapts with full step, copy to main if better
-    if (aec->shadow_filter) {
-        subband_nlms_process(aec->shadow_filter, near_end, far_end,
-                             aec->shadow_output, 1.0f);
+    /* Compute mu_scale */
+    float mu_scale = get_simple_mu_scale(aec);
 
-        float main_err = subband_nlms_get_error_energy(aec->filter);
-        float shadow_err = subband_nlms_get_error_energy(aec->shadow_filter);
+    /* === Main filter === */
+    pbfdkf_process(aec->filter, mic, ref, aec->raw_output, mu_scale);
 
-        float alpha_s = aec->config.shadow_err_alpha;
-        aec->main_err_smooth = alpha_s * aec->main_err_smooth +
-                               (1.0f - alpha_s) * main_err;
-        aec->shadow_err_smooth = alpha_s * aec->shadow_err_smooth +
-                                 (1.0f - alpha_s) * shadow_err;
+    /* === Shadow filter (always mu_scale=1.0) === */
+    float shadow_out[160]; /* stack alloc, hop <= 160 */
+    aec->shadow_frame_count++;
+    pbfdkf_process(aec->shadow_filter, mic, ref, shadow_out, 1.0f);
 
-        if (aec->shadow_err_smooth <
-            aec->main_err_smooth * aec->config.shadow_copy_threshold) {
-            // Shadow is better — copy weights and echo spectrum to main
-            subband_nlms_copy_weights(aec->filter, aec->shadow_filter);
-            subband_nlms_copy_echo_spec(aec->filter, aec->shadow_filter);
-            memcpy(output, aec->shadow_output, hop_size * sizeof(float));
-            aec->main_err_smooth = aec->shadow_err_smooth;
-        }
-    }
+    /* Smoothed error tracking */
+    float main_err = pbfdkf_get_error_energy(aec->filter);
+    float shadow_err = pbfdkf_get_error_energy(aec->shadow_filter);
+    float alpha_s = cfg->shadow_err_alpha;
+    aec->main_err_smooth   = alpha_s * aec->main_err_smooth   + (1.0f - alpha_s) * main_err;
+    aec->shadow_err_smooth = alpha_s * aec->shadow_err_smooth + (1.0f - alpha_s) * shadow_err;
 
-    // RES post-filter: suppress residual echo using overlap-save
-    // Apply RES gain to full-block residual spectrum (near_spec - echo_spec),
-    // then IFFT and take last hop_size samples. This inherits the overlap-save
-    // framework from PBFDAF, avoiding block boundary artifacts.
-    if (aec->res) {
-        int nfreq = aec->params.n_freqs;
-        subband_nlms_get_echo_spectrum(aec->filter, aec->res_echo_spec);
-        subband_nlms_get_near_spectrum(aec->filter, aec->res_near_spec);
+    /* Copy gate (after warmup) */
+    if (aec->shadow_frame_count >= 50) {
+        float threshold = cfg->shadow_copy_threshold;
 
-        // Compute residual spectrum: near_spec - echo_spec
-        for (int k = 0; k < nfreq; k++) {
-            aec->res_residual_spec[k].r = aec->res_near_spec[k].r - aec->res_echo_spec[k].r;
-            aec->res_residual_spec[k].i = aec->res_near_spec[k].i - aec->res_echo_spec[k].i;
-        }
+        /* Far-end activity check */
+        float far_pwr = 0.0f;
+        for (int i = 0; i < hop; i++) far_pwr += ref[i] * ref[i];
+        int far_active = (far_pwr / hop > 1e-4f);
 
-        // Compute far-end power for activity detection
-        float far_power = 0.0f;
-        for (int n = 0; n < hop_size; n++) {
-            far_power += far_end[n] * far_end[n];
-        }
-        far_power /= hop_size;
+        /* DT check: far/error ratio */
+        float raw_err_pwr = 0.0f;
+        for (int i = 0; i < hop; i++)
+            raw_err_pwr += aec->raw_output[i] * aec->raw_output[i];
+        raw_err_pwr = raw_err_pwr / hop + 1e-10f;
+        float far_pwr_avg = far_pwr / hop + 1e-10f;
+        int not_dt = (far_pwr_avg / raw_err_pwr > 0.3f);
 
-        // Apply RES spectral suppression to residual
-        res_process(aec->res, aec->res_residual_spec, aec->res_echo_spec,
-                    far_power, aec->res_output_spec);
+        int copy_allowed = far_active && not_dt;
 
-        // IFFT back to time domain, overlap-save: take last hop_size samples
-        fft_inverse(aec->res_fft, aec->res_output_spec, aec->res_temp);
-        for (int n = 0; n < hop_size; n++) {
-            output[n] = aec->res_temp[hop_size + n];
-        }
-    }
-
-    // Update divergence detection BEFORE limiter (so DTD sees true output)
-    aec->frame_count++;
-    if (aec->config.enable_dtd &&
-        aec->frame_count >= aec->config.dtd_warmup_frames) {
-
-        float output_energy = 0.0f;
-        float near_energy = 0.0f;
-        float near_peak = 0.0f;
-        float out_peak = 0.0f;
-
-        for (int n = 0; n < hop_size; n++) {
-            output_energy += output[n] * output[n];
-            near_energy += near_end[n] * near_end[n];
-            float abs_near = fabsf(near_end[n]);
-            float abs_out = fabsf(output[n]);
-            if (abs_near > near_peak) near_peak = abs_near;
-            if (abs_out > out_peak) out_peak = abs_out;
-        }
-        output_energy /= hop_size;
-        near_energy /= hop_size;
-
-        // Check both energy and peak divergence
-        float energy_ratio = (near_energy > 1e-10f) ?
-            output_energy / (near_energy + 1e-10f) : 0.0f;
-        float peak_ratio = (near_peak > 1e-6f) ?
-            out_peak / (near_peak + 1e-10f) : 0.0f;
-        float ratio = (energy_ratio > peak_ratio) ? energy_ratio : peak_ratio;
-
-        float attack = aec->config.dtd_confidence_attack;
-        float release = aec->config.dtd_confidence_release;
-        float div_factor = aec->config.dtd_divergence_factor;
-
-        if (near_energy < 1e-10f && near_peak < 1e-6f) {
-            // Silence
-            aec->dtd_confidence = fmaxf(aec->dtd_confidence - release, 0.0f);
-        } else if (ratio > div_factor) {
-            // Severe divergence
-            aec->dtd_confidence = fminf(aec->dtd_confidence + attack, 1.0f);
-        } else if (ratio > 1.2f) {
-            // Mild divergence (threshold 1.2: ratio < 1.2 is normal unconverged state)
-            aec->dtd_confidence = fminf(
-                aec->dtd_confidence + attack * (ratio - 1.2f), 1.0f);
-        } else {
-            // Normal — faster release when ratio is well below 1.0
-            float release_scale = (1.0f - ratio > 0.2f) ? (1.0f - ratio) : 0.2f;
-            aec->dtd_confidence = fmaxf(
-                aec->dtd_confidence - release * (1.0f + 4.0f * release_scale), 0.0f);
-        }
-    }
-
-    // Coherence-based double-talk detection
-    if (aec->config.enable_dtd && aec->S_ex_r &&
-        aec->frame_count >= aec->config.dtd_warmup_frames) {
-
-        int nfreq = aec->params.n_freqs;
-        float coh_alpha = aec->config.dtd_coh_alpha;
-        float attack = aec->config.dtd_confidence_attack;
-        float release = aec->config.dtd_coh_release;
-
-        subband_nlms_get_error_spectrum(aec->filter, aec->coh_error_spec);
-        subband_nlms_get_far_spectrum(aec->filter, aec->coh_far_spec);
-
-        float sum_num = 0.0f, sum_den = 0.0f;
-        float sum_ee = 0.0f, sum_xx = 0.0f;
-
-        for (int k = 0; k < nfreq; k++) {
-            float er = aec->coh_error_spec[k].r, ei = aec->coh_error_spec[k].i;
-            float xr = aec->coh_far_spec[k].r, xi = aec->coh_far_spec[k].i;
-
-            // Cross-PSD: error × conj(far)
-            float cx_r = er * xr + ei * xi;
-            float cx_i = ei * xr - er * xi;
-
-            aec->S_ex_r[k] = coh_alpha * aec->S_ex_r[k] + (1.0f - coh_alpha) * cx_r;
-            aec->S_ex_i[k] = coh_alpha * aec->S_ex_i[k] + (1.0f - coh_alpha) * cx_i;
-            aec->S_ee[k] = coh_alpha * aec->S_ee[k] + (1.0f - coh_alpha) * (er*er + ei*ei);
-            aec->S_xx[k] = coh_alpha * aec->S_xx[k] + (1.0f - coh_alpha) * (xr*xr + xi*xi);
-
-            sum_num += aec->S_ex_r[k] * aec->S_ex_r[k] + aec->S_ex_i[k] * aec->S_ex_i[k];
-            sum_den += aec->S_ee[k] * aec->S_xx[k];
-            sum_ee += aec->S_ee[k];
-            sum_xx += aec->S_xx[k];
-        }
-
-        float coherence = sum_num / (sum_den + 1e-10f);
-        int has_energy = (sum_ee > aec->config.dtd_coh_energy_floor * sum_xx) && (sum_xx > 1e-10f);
-
-        if (coherence > aec->config.dtd_coh_high) {
-            // Correlated → not DT → release
-            if (aec->coh_hangover_count > 0) {
-                aec->coh_hangover_count--;
-                aec->dtd_coh_confidence = fmaxf(aec->dtd_coh_confidence - release * 0.5f, 0.0f);
+        if (copy_allowed) {
+            if (aec->shadow_err_smooth < aec->main_err_smooth * threshold) {
+                aec->shadow_copy_counter++;
             } else {
-                aec->dtd_coh_confidence = fmaxf(aec->dtd_coh_confidence - release, 0.0f);
+                aec->shadow_copy_counter = 0;
             }
-        } else if (coherence < aec->config.dtd_coh_low && has_energy) {
-            // Uncorrelated + energy → DT
-            aec->coh_hangover_count = aec->config.dtd_coh_hangover;
-            aec->dtd_coh_confidence = fminf(aec->dtd_coh_confidence + attack, 1.0f);
+
+            if (aec->shadow_copy_counter >= cfg->shadow_copy_hysteresis) {
+                /* Shadow → Main copy */
+                pbfdkf_copy_weights(aec->filter, aec->shadow_filter);
+                aec->main_err_smooth = aec->shadow_err_smooth;
+                aec->shadow_copy_counter = 0;
+            } else if (aec->main_err_smooth < aec->shadow_err_smooth * threshold && not_dt) {
+                /* Bidirectional: Main → Shadow */
+                pbfdkf_copy_weights(aec->shadow_filter, aec->filter);
+                aec->shadow_err_smooth = aec->main_err_smooth;
+            }
         } else {
-            // Ambiguous → slow release
-            aec->dtd_coh_confidence = fmaxf(aec->dtd_coh_confidence - release * 0.5f, 0.0f);
+            aec->shadow_copy_counter = 0;
         }
     }
 
-    // Output limiter: output should never exceed mic amplitude
-    {
-        float near_peak = 0.0f;
-        float out_peak = 0.0f;
-        for (int n = 0; n < hop_size; n++) {
-            float abs_near = fabsf(near_end[n]);
-            float abs_out = fabsf(output[n]);
-            if (abs_near > near_peak) near_peak = abs_near;
-            if (abs_out > out_peak) out_peak = abs_out;
+    /* Copy raw output for ERLE + RES input */
+    memcpy(output, aec->raw_output, hop * sizeof(float));
+
+    /* === RES post-filter === */
+    if (aec->res) {
+        float far_power = 0.0f;
+        for (int i = 0; i < hop; i++) far_power += ref[i] * ref[i];
+        far_power /= hop;
+
+        /* Dynamic over_sub */
+        float inst_erle = aec_get_erle_instant(aec);
+        float erle_factor = clampf((inst_erle - 3.0f) / 15.0f, 0.0f, 1.0f);
+        float base_over_sub = cfg->res_over_sub_base +
+                               cfg->res_over_sub_scale * erle_factor;
+
+        /* DT indicator */
+        float mic_pwr = 0.0f;
+        for (int i = 0; i < hop; i++) mic_pwr += mic[i] * mic[i];
+        mic_pwr = mic_pwr / hop + 1e-10f;
+        float far_p = far_power + 1e-10f;
+        float dt_indicator = clampf(1.0f - far_p / (mic_pwr + far_p), 0.0f, 0.8f);
+
+        float dt_reduction = cfg->res_dt_reduction * dt_indicator;
+        float over_sub = maxf(base_over_sub - dt_reduction, 0.5f);
+
+        res_process(aec->res, aec->raw_output,
+                    pbfdkf_get_echo_spec(aec->filter),
+                    pbfdkf_get_far_spec(aec->filter),
+                    far_power, aec->filter_converged,
+                    erle_factor, dt_indicator, over_sub,
+                    output);
+
+        /* Update per-bin mu_scale from RES PSDs */
+        if (aec->filter_converged) {
+            const float* echo_psd = res_get_echo_psd(aec->res);
+            const float* error_psd = res_get_error_psd(aec->res);
+            if (echo_psd && error_psd) {
+                float mean_eer = 0.0f;
+                int nf = aec->n_freqs;
+                for (int k = 0; k < nf; k++) {
+                    float eer_k = clampf(echo_psd[k] / (error_psd[k] + 1e-10f), 0.0f, 1.0f);
+                    mean_eer += eer_k;
+                }
+                aec->simple_mu_ratio = mean_eer / nf;
+            }
+        } else {
+            update_simple_mu_ratio(aec, aec->raw_output, ref, hop);
         }
-        if (out_peak > near_peak && near_peak > 1e-6f) {
-            float scale = near_peak / out_peak;
-            for (int n = 0; n < hop_size; n++) {
-                output[n] *= scale;
+    } else {
+        update_simple_mu_ratio(aec, aec->raw_output, ref, hop);
+    }
+
+    /* === Output limiter (smoothed gain) === */
+    {
+        float near_peak = 0.0f, out_peak = 0.0f;
+        for (int i = 0; i < hop; i++) {
+            float an = fabsf(mic[i]);
+            float ao = fabsf(output[i]);
+            if (an > near_peak) near_peak = an;
+            if (ao > out_peak) out_peak = ao;
+        }
+        float target_gain;
+        if (out_peak > near_peak && near_peak > 1e-6f)
+            target_gain = near_peak / out_peak;
+        else
+            target_gain = 1.0f;
+
+        float alpha_lim = (target_gain < aec->limiter_gain) ? 0.3f : 0.8f;
+        aec->limiter_gain = alpha_lim * aec->limiter_gain +
+                             (1.0f - alpha_lim) * target_gain;
+
+        for (int i = 0; i < hop; i++)
+            output[i] *= aec->limiter_gain;
+    }
+
+    /* === Noise gate === */
+    {
+        float out_power = 0.0f, near_power_inst = 0.0f, far_power_inst = 0.0f;
+        for (int i = 0; i < hop; i++) {
+            out_power += output[i] * output[i];
+            near_power_inst += mic[i] * mic[i];
+            far_power_inst += ref[i] * ref[i];
+        }
+        out_power /= hop;
+        near_power_inst /= hop;
+        far_power_inst /= hop;
+
+        if (far_power_inst > 1e-4f && near_power_inst > 1e-8f) {
+            float snr = out_power / near_power_inst;
+            if (snr < 0.01f) {
+                float scale = snr / 0.01f;
+                for (int i = 0; i < hop; i++) output[i] *= scale;
             }
         }
     }
 
-    // Update ERLE estimation
-    for (int n = 0; n < hop_size; n++) {
-        aec->near_power = alpha * aec->near_power +
-                         (1.0f - alpha) * (near_end[n] * near_end[n]);
-        aec->error_power = alpha * aec->error_power +
-                          (1.0f - alpha) * (output[n] * output[n]);
+    /* === ERLE tracking === */
+    for (int i = 0; i < hop; i++) {
+        aec->near_power      = alpha * aec->near_power      + (1.0f - alpha) * mic[i] * mic[i];
+        aec->raw_error_power = alpha * aec->raw_error_power  + (1.0f - alpha) * aec->raw_output[i] * aec->raw_output[i];
+        aec->final_error_power = alpha * aec->final_error_power + (1.0f - alpha) * output[i] * output[i];
+    }
+    for (int i = 0; i < hop; i++) {
+        aec->near_power_sum += mic[i] * mic[i];
+        aec->raw_error_power_sum += aec->raw_output[i] * aec->raw_output[i];
+        aec->final_error_power_sum += output[i] * output[i];
+    }
+
+    /* === Convergence detection: 10 consecutive frames ERLE > 6dB === */
+    if (!aec->filter_converged && aec->near_power > 1e-8f) {
+        float inst_erle = 10.0f * log10f(aec->near_power /
+                                          (aec->raw_error_power + 1e-10f));
+        if (inst_erle > 6.0f)
+            aec->conv_counter++;
+        else
+            aec->conv_counter = 0;
+
+        if (aec->conv_counter >= 10) {
+            aec->filter_converged = 1;
+            pbfdkf_switch_q_low(aec->filter);
+            pbfdkf_switch_q_low(aec->shadow_filter);
+        }
     }
 
     return 0;
 }
 
 int aec_get_hop_size(const Aec* aec) {
-    return aec ? aec->params.hop_size : 0;
-}
-
-int aec_get_frame_size(const Aec* aec) {
-    return aec ? aec->params.frame_size : 0;
-}
-
-int aec_get_latency(const Aec* aec) {
-    return aec ? aec->params.hop_size : 0;
+    return aec ? aec->config.hop_size : 0;
 }
 
 float aec_get_erle(const Aec* aec) {
     if (!aec) return 0.0f;
-
     const float eps = 1e-10f;
-    if (aec->near_power < eps && aec->error_power < eps) {
+    if (aec->near_power_sum < eps && aec->raw_error_power_sum < eps)
         return 0.0f;
-    }
-
-    return 10.0f * log10f((aec->near_power + eps) / (aec->error_power + eps));
+    return 10.0f * log10f((aec->near_power_sum + eps) /
+                           (aec->raw_error_power_sum + eps));
 }
 
-bool aec_is_dtd_active(const Aec* aec) {
-    if (!aec) return false;
-    return aec->dtd_confidence > 0.5f;
+float aec_get_erle_instant(const Aec* aec) {
+    if (!aec) return 0.0f;
+    const float eps = 1e-10f;
+    if (aec->near_power < eps && aec->raw_error_power < eps)
+        return 0.0f;
+    return 10.0f * log10f((aec->near_power + eps) /
+                           (aec->raw_error_power + eps));
 }
 
-float aec_get_dtd_confidence(const Aec* aec) {
-    return aec ? aec->dtd_confidence : 0.0f;
+int aec_is_converged(const Aec* aec) {
+    return aec ? aec->filter_converged : 0;
 }
 
 const AecConfig* aec_get_config(const Aec* aec) {
