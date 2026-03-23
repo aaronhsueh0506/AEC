@@ -356,30 +356,34 @@ python3 plot_aec_results.py ../wav/ --mode subband --enable-res
 python3 plot_aec_results.py ../wav/ --mode subband --enable-dtd
 ```
 
-## Benchmark 比較（AEC Challenge, v1.15.0）
-
-### 三級 Preset 比較 — ERLE
+## Benchmark 比較（AEC Challenge）
 
 測試條件：subband + Shadow + FDKF + RES（per-bin gate）+ delay pre-alignment + HPF + saturation detect。
 Frame/hop: 320/160 (20ms/10ms), FFT: 512, filter_length: 512。
 
-#### Farend Single-Talk（15 cases）
+### Farend Single-Talk（15 cases）
 
-| 指標 | BALANCED | AGGRESSIVE | MAXIMUM | SpeexDSP | WebRTC AEC3 |
-|------|----------|------------|---------|----------|-------------|
-| Mean ERLE | 12.4 dB | **15.7 dB** | 15.0 dB | 6.9 dB | 25.8 dB |
+| Preset | ERLE (v1.15.0) | echo_mos (v1.14.0) | SpeexDSP | WebRTC AEC3 |
+|--------|----------------|---------------------|----------|-------------|
+| BALANCED | 12.4 dB | 3.18 | 3.09 / 6.9 dB | 4.47 / 25.8 dB |
+| **AGGRESSIVE** | **15.7 dB** | **3.36** | — | — |
+| MAXIMUM | 15.0 dB | 3.41 | — | — |
 
-#### Doubletalk（15 real cases）
+### Doubletalk（15 real cases）
 
-| 指標 | BALANCED | AGGRESSIVE | MAXIMUM | SpeexDSP | WebRTC AEC3 |
-|------|----------|------------|---------|----------|-------------|
-| Mean ERLE | 4.2 dB | **7.2 dB** | **7.9 dB** | 1.3 dB | 3.7 dB |
+| Preset | ERLE (v1.15.0) | echo_mos (v1.14.0) | deg_mos (v1.14.0) | SpeexDSP | WebRTC AEC3 |
+|--------|----------------|---------------------|---------------------|----------|-------------|
+| BALANCED | 4.2 dB | 3.06 | **3.51** | 2.76 / 1.3 dB | 4.39 / 3.7 dB |
+| **AGGRESSIVE** | **7.2 dB** | **3.42** | 3.22 | — | — |
+| MAXIMUM | **7.9 dB** | 3.59 | 2.59 | — | — |
 
 > **解讀**：
 > - **v1.15.0 frame size 統一後 FS ERLE 提升**：AGGRESSIVE 14.7→15.7 dB (+1.0 dB)。
 > - **DT ERLE 碾壓 AEC3**：AGGRESSIVE 7.2 dB vs AEC3 3.7 dB（+3.5 dB）。
-> - **AGGRESSIVE 推薦**：FS ERLE 15.7 dB, DT ERLE 7.2 dB — 最佳平衡點。
-> - FS echo_mos 差距主要來自 AEC3 的 NLP（非線性後處理），而非線性濾波器性能。
+> - **DT echo_mos 碾壓 AEC3 之外所有方案**：AGGRESSIVE 3.42 vs SpeexDSP 2.76。
+> - **DT deg_mos 優勢**：BALANCED 3.51 vs AEC3 2.51（近端品質保留更好）。
+> - **AGGRESSIVE 推薦**：FS ERLE 15.7 dB, DT ERLE 7.2 dB, echo_mos 3.42 — 最佳平衡點。
+> - FS echo_mos 與 AEC3 差距（3.36 vs 4.47）主要來自 AEC3 的 NLP（非線性後處理），而非線性濾波器性能。
 > - 詳見 [docs/aec_improve_v7.md](docs/aec_improve_v7.md)。
 
 ### 工具
