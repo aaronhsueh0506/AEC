@@ -3,19 +3,19 @@ Acoustic Echo Cancellation (AEC) - Python Reference Implementation
 
 Supports three filter modes:
 - Time-domain NLMS (--mode nlms): sample-by-sample, lowest latency
-- Frequency-domain NLMS (--mode freq): single FFT block, no partitions
-- Partitioned FDAF (--mode subband): multiple partitions, for long echo paths
+- Frequency-domain Adaptive Filter (--mode fdaf): single FFT block, no partitions
+- Partitioned block FDAF (--mode subband): multiple partitions, for long echo paths
 
 Additional features:
 - Double-Talk Detection (DTD)
 - Residual Echo Suppressor (RES)
 
 Usage:
-    python aec.py mic.wav ref.wav output.wav [--mode nlms|freq|subband] [--enable-res]
+    python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|subband] [--enable-res]
 """
 
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Tuple
 from enum import Enum
 import argparse
@@ -25,7 +25,7 @@ import soundfile as sf
 class AecMode(Enum):
     LMS = "lms"         # Time-domain LMS (no normalization, simplest)
     NLMS = "nlms"       # Time-domain NLMS (sample-by-sample)
-    FREQ = "freq"       # Frequency-domain NLMS (single block, n_partitions=1)
+    FDAF = "fdaf"       # Frequency-domain Adaptive Filter (single block, n_partitions=1)
     SUBBAND = "subband" # Partitioned block FDAF (multiple partitions)
 
 
@@ -39,16 +39,12 @@ class AecPreset(Enum):
 class AecConfig:
     """AEC Configuration (all sizes in samples)"""
     sample_rate: int = 16000
-    frame_size: int = 512         # Frame length in samples (512 @ 16kHz)
-    hop_size: int = 256           # Hop size in samples (256 @ 16kHz)
+    frame_size: int = 320         # Frame length in samples (320 = 20ms @ 16kHz)
+    hop_size: int = 160           # Hop size in samples (160 = 10ms @ 16kHz)
     filter_length: int = 512     # Filter length in samples (mode-dependent)
     mu: float = 0.3              # Step size
     delta: float = 1e-8          # Regularization
-    leak: float = 0.99999        # Weight leakage (slight leak for double-talk stability)
-    use_leakage: bool = False    # Time-domain truncation (leakage causes circular convolution artifacts)
-    freq_leakage: float = 0.9999 # Frequency-domain weight leakage coefficient
     enable_dtd: bool = False
-    dtd_threshold: float = 2.0   # (legacy, kept for compat) Error-based DTD ratio
     dtd_hangover_frames: int = 15
 
     # Geigel DTD parameters (LMS/NLMS)
@@ -57,10 +53,10 @@ class AecConfig:
     dtd_confidence_attack: float = 0.3    # Confidence ramp-up rate per block
     dtd_confidence_release: float = 0.05  # Confidence ramp-down rate per block
 
-    # Divergence detection parameters (FREQ/SUBBAND, output-vs-input)
+    # Divergence detection parameters (FDAF/SUBBAND, output-vs-input)
     dtd_divergence_factor: float = 1.5    # output > input × factor → diverged
 
-    # Coherence-based DTD parameters (FREQ/SUBBAND, complements divergence)
+    # Coherence-based DTD parameters (FDAF/SUBBAND, complements divergence)
     dtd_coh_alpha: float = 0.85           # PSD smoothing factor (~6 block time constant)
     dtd_coh_high: float = 0.6            # Coherence above → no DT (correlated error)
     dtd_coh_low: float = 0.3             # Coherence below → DT (uncorrelated error)
@@ -75,7 +71,7 @@ class AecConfig:
     res_alpha: float = 0.8
     enable_cng: bool = True            # Comfort noise generation in RES
 
-    # Shadow filter (dual-filter divergence control, FREQ/SUBBAND only)
+    # Shadow filter (dual-filter divergence control, FDAF/SUBBAND only)
     enable_shadow: bool = True
     shadow_mu_ratio: float = 1.0
     shadow_copy_threshold: float = 0.7
@@ -89,7 +85,7 @@ class AecConfig:
     dtd_coh_abs_floor: float = 1e-6     # #8: Absolute error energy floor
 
     # FDKF (Frequency Domain Kalman Filter) — faster convergence than NLMS
-    use_kalman: bool = False
+    use_kalman: bool = True
     kalman_q_high: float = 1e-3       # FDKF Q_high convergence speed
     warmup_frames: int = 100          # Frames with forced high mu at startup
 
@@ -126,6 +122,7 @@ class AecConfig:
     res_max_rise_db_per_frame: float = 6.0   # Max gain rise per frame (dB)
     res_spectral_floor: bool = True          # Spectral-shape-preserving gain floor
     res_spectral_floor_db: float = -25.0     # Floor relative to spectral envelope
+    res_ne_protect_db: float = -10.0         # Per-bin near-end protection ceiling (dB)
 
     # Mode
     mode: AecMode = AecMode.NLMS
@@ -158,6 +155,7 @@ class AecConfig:
                 res_over_sub_scale=4.0,
                 res_dt_reduction=3.5,
                 res_spectral_floor_db=-25.0,
+                res_ne_protect_db=-8.0,
                 shadow_q_ratio=3.0,
                 # Adaptive filter
                 shadow_mu_min=0.5,
@@ -170,8 +168,9 @@ class AecConfig:
                 res_g_min_db=-35.0,
                 res_over_sub_base=4.0,
                 res_over_sub_scale=6.0,
-                res_dt_reduction=2.5,
+                res_dt_reduction=2.0,
                 res_spectral_floor_db=-30.0,
+                res_ne_protect_db=-5.0,
                 shadow_q_ratio=4.0,
                 # Adaptive filter
                 shadow_mu_min=0.7,
@@ -184,8 +183,9 @@ class AecConfig:
                 res_g_min_db=-40.0,
                 res_over_sub_base=6.0,
                 res_over_sub_scale=8.0,
-                res_dt_reduction=1.5,
+                res_dt_reduction=0.0,
                 res_spectral_floor_db=-35.0,
+                res_ne_protect_db=-2.0,
                 shadow_q_ratio=5.0,
                 # Adaptive filter
                 shadow_mu_min=0.9,
@@ -325,12 +325,11 @@ class NlmsFilter:
     """Time-domain NLMS Adaptive Filter"""
 
     def __init__(self, filter_length: int, mu: float = 0.3,
-                 delta: float = 1e-8, leak: float = 0.9999,
+                 delta: float = 1e-8,
                  normalize: bool = True):
         self.filter_length = filter_length
         self.mu = mu
         self.delta = delta
-        self.leak = leak
         self.normalize = normalize
         self.weights = np.zeros(filter_length, dtype=np.float32)
         self.ref_buffer = np.zeros(filter_length, dtype=np.float32)
@@ -357,7 +356,7 @@ class NlmsFilter:
                 mu_eff = (self.mu * mu_scale) / (self.power_sum + self.delta)
             else:
                 mu_eff = self.mu * mu_scale
-            self.weights = self.leak * self.weights + mu_eff * error * self.ref_buffer
+            self.weights += mu_eff * error * self.ref_buffer
 
         return error, echo_est
 
@@ -396,17 +395,15 @@ class SubbandNlms:
 
     def __init__(self, block_size: int, n_partitions: int,
                  mu: float = 0.3, delta: float = 1e-8,
-                 use_leakage: bool = False, leakage: float = 0.9999,
-                 use_kalman: bool = False):
+                 use_kalman: bool = True,
+                 hop_size: int = 0):
         self.block_size = block_size
-        self.hop_size = block_size // 2
+        self.hop_size = hop_size if hop_size > 0 else block_size // 2
         self.n_partitions = n_partitions
         self.n_freqs = block_size // 2 + 1
         self.mu = mu
         self.delta = delta
         self.alpha_power = 0.9
-        self.use_leakage = use_leakage
-        self.leakage = leakage
         self.use_kalman = use_kalman
 
         # Filter weights [n_partitions, n_freqs]
@@ -461,11 +458,11 @@ class SubbandNlms:
         hop = self.hop_size
 
         # Shift buffers (overlap-save)
-        self.near_buffer[:hop] = self.near_buffer[hop:]
-        self.near_buffer[hop:] = near_end
+        self.near_buffer[:-hop] = self.near_buffer[hop:]
+        self.near_buffer[-hop:] = near_end
 
-        self.far_buffer[:hop] = self.far_buffer[hop:]
-        self.far_buffer[hop:] = far_end
+        self.far_buffer[:-hop] = self.far_buffer[hop:]
+        self.far_buffer[-hop:] = far_end
 
         # FFT
         near_spec = np.fft.rfft(self.near_buffer)
@@ -490,12 +487,12 @@ class SubbandNlms:
         # IFFT
         echo_time = np.fft.irfft(self.echo_spec, self.block_size)
 
-        # Error (take last hop_size samples)
-        output = self.near_buffer[hop:] - echo_time[hop:]
+        # Error (take last hop_size samples — valid region of overlap-save)
+        output = self.near_buffer[-hop:] - echo_time[-hop:]
 
-        # Error spectrum (zero-pad first half)
+        # Error spectrum (zero-pad, only last hop samples are valid)
         error_time = np.zeros(self.block_size, dtype=np.float32)
-        error_time[hop:] = output
+        error_time[-hop:] = output
         self.error_spec = np.fft.rfft(error_time)
 
         # Update weights
@@ -525,12 +522,10 @@ class SubbandNlms:
             p_idx = (curr_p - p) % self.n_partitions
             grad = self.error_spec * np.conj(self.X_buf[p_idx])
             self.W[p] += mu_eff * grad
-            if self.use_leakage:
-                self.W[p] *= self.leakage
-            else:
-                w_time = np.fft.irfft(self.W[p], self.block_size)
-                w_time[self.hop_size:] = 0
-                self.W[p] = np.fft.rfft(w_time)
+            # Time-domain constraint: zero out non-causal part
+            w_time = np.fft.irfft(self.W[p], self.block_size)
+            w_time[self.hop_size:] = 0
+            self.W[p] = np.fft.rfft(w_time)
 
     def _update_kalman(self, curr_p: int, mu_scale):
         """Frequency-Domain Kalman Filter weight update.
@@ -574,11 +569,10 @@ class SubbandNlms:
             KX = np.real(K * X)
             self.P[p] = np.maximum((1.0 - KX) * self.P[p] + self.Q, self.delta)
 
-            # Constraint: time-domain truncation
-            if not self.use_leakage:
-                w_time = np.fft.irfft(self.W[p], self.block_size)
-                w_time[self.hop_size:] = 0
-                self.W[p] = np.fft.rfft(w_time)
+            # Time-domain constraint: zero out non-causal part
+            w_time = np.fft.irfft(self.W[p], self.block_size)
+            w_time[self.hop_size:] = 0
+            self.W[p] = np.fft.rfft(w_time)
 
     def get_error_energy(self) -> float:
         return float(np.sum(np.abs(self.error_spec) ** 2))
@@ -710,13 +704,18 @@ class ResFilter:
                  max_drop_db_per_frame: float = 6.0,
                  max_rise_db_per_frame: float = 3.0,
                  enable_spectral_floor: bool = True,
-                 spectral_floor_db: float = -25.0):
-        self.block_size = block_size
-        self.hop_size = block_size // 2
+                 spectral_floor_db: float = -25.0,
+                 ne_protect_db: float = -10.0,
+                 frame_size: int = 0,
+                 hop_size: int = 0):
+        self.block_size = block_size          # FFT size (power of 2)
+        self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
+        self.hop_size = hop_size if hop_size > 0 else self.frame_size // 2
         self.n_freqs = n_freqs
         self.g_min = 10 ** (g_min_db / 20)
         self.over_sub = over_sub
         self.alpha = alpha
+        self.ne_protect_db = ne_protect_db
         self.alpha_echo_psd = 0.7    # echo PSD: moderate tracking (TC≈53ms), was 0.5
         self.alpha_error_psd = 0.8   # error PSD: moderate TC≈80ms
 
@@ -751,9 +750,9 @@ class ResFilter:
         self.alpha_envelope = 0.95  # Slow-tracking spectral envelope
 
         # OLA: sqrt-Hann window + sliding input buffer + overlap buffer
-        self.window = np.sqrt(np.hanning(block_size)).astype(np.float32)
-        self.input_buf = np.zeros(block_size, dtype=np.float32)
-        self.ola_buf = np.zeros(block_size, dtype=np.float32)
+        self.window = np.sqrt(np.hanning(self.frame_size)).astype(np.float32)
+        self.input_buf = np.zeros(self.frame_size, dtype=np.float32)
+        self.ola_buf = np.zeros(self.frame_size, dtype=np.float32)
 
     def reset(self):
         self.gain_smooth.fill(self.g_min)
@@ -779,13 +778,13 @@ class ResFilter:
         """
         hop = self.hop_size
 
-        # Slide in new error samples
-        self.input_buf[:hop] = self.input_buf[hop:]
-        self.input_buf[hop:] = error_hop
+        # Slide in new error samples (frame_size buffer)
+        self.input_buf[:-hop] = self.input_buf[hop:]
+        self.input_buf[-hop:] = error_hop
 
-        # Analysis: sqrt-Hann window + FFT
+        # Analysis: sqrt-Hann window + zero-pad to FFT size
         windowed = self.input_buf * self.window
-        spec = np.fft.rfft(windowed)
+        spec = np.fft.rfft(windowed, n=self.block_size)
 
         # Compute power spectra
         echo_pwr_linear = np.abs(echo_spec) ** 2
@@ -806,9 +805,16 @@ class ResFilter:
             coh2_raw = np.abs(self.S_fe) ** 2 / (self.S_ff * self.S_ee + 1e-10)
             coh2_raw = np.minimum(coh2_raw, 1.0).astype(np.float32)
             # Asymmetric EMA: fast drop (DT protection) / slow rise (stable tracking)
+            # After convergence: rise slower → coh2 more stable near 1.0 in echo-only
             if not hasattr(self, '_coh2_smooth'):
                 self._coh2_smooth = np.zeros(self.n_freqs, dtype=np.float32)
-            a_coh = np.where(coh2_raw < self._coh2_smooth, 0.50, 0.80)
+            if filter_converged:
+                a_coh_rise = 0.90   # TC≈160ms, stable echo-only tracking
+                a_coh_drop = 0.50   # TC≈25ms, fast DT protection
+            else:
+                a_coh_rise = 0.80
+                a_coh_drop = 0.50
+            a_coh = np.where(coh2_raw < self._coh2_smooth, a_coh_drop, a_coh_rise)
             self._coh2_smooth = a_coh * self._coh2_smooth + (1.0 - a_coh) * coh2_raw
             coh2 = self._coh2_smooth
         else:
@@ -844,10 +850,6 @@ class ResFilter:
             self.far_activity = 0.98 * self.far_activity + 0.02 * is_far_active
         # far_activity=1.0 → g_min normal; far_activity=0.0 → g_min→1.0 (no suppression)
         effective_g_min = self.g_min + (1.0 - self.g_min) * (1.0 - self.far_activity)
-        # DT-adaptive g_min: raise g_min during DT to preserve near-end
-        # dt_indicator high → g_min closer to -10dB; dt_indicator=0 → use configured g_min
-        dt_g_min = 10 ** (-10.0 / 20)  # -10dB floor during DT
-        effective_g_min = effective_g_min + (dt_g_min - effective_g_min) * dt_indicator
         effective_g_min = max(effective_g_min, 10 ** (-60.0 / 20))  # floor at -60dB
 
         # --- Noise gate: don't suppress quiet segments ---
@@ -877,6 +879,16 @@ class ResFilter:
             spectral_g_min = np.maximum(spectral_g_min, effective_g_min)
         else:
             spectral_g_min = effective_g_min
+
+        # --- Per-bin near-end gate (replaces broadband dt_indicator→g_min) ---
+        # coh2 high (echo bin) → ne_protection≈0 → allow full suppression
+        # coh2 low (near-end bin) → ne_protection≈1 → raise floor to protect
+        # Only active after convergence (erle_factor gates it)
+        ne_protection = (1.0 - coh2) * erle_factor    # [n_freqs]
+        ne_g_min_ceil = 10 ** (self.ne_protect_db / 20)
+        ne_g_floor = effective_g_min + (ne_g_min_ceil - effective_g_min) * ne_protection
+        ne_g_floor = np.maximum(ne_g_floor, effective_g_min)
+        spectral_g_min = np.maximum(spectral_g_min, ne_g_floor)
 
         g = np.maximum(1.0 - self.over_sub * eer, spectral_g_min)
         g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
@@ -923,14 +935,14 @@ class ResFilter:
                 cng_spec = cng_mag * np.exp(1j * cng_phase)
                 enhanced_spec = enhanced_spec + cng_spec.astype(np.complex64)
 
-        enhanced_time = np.fft.irfft(enhanced_spec, self.block_size)
+        enhanced_time = np.fft.irfft(enhanced_spec, self.block_size)[:self.frame_size]
         enhanced_time *= self.window
 
-        # Overlap-add
+        # Overlap-add (frame_size buffer)
         self.ola_buf += enhanced_time
         output = self.ola_buf[:hop].copy()
-        self.ola_buf[:hop] = self.ola_buf[hop:]
-        self.ola_buf[hop:] = 0.0
+        self.ola_buf[:-hop] = self.ola_buf[hop:]
+        self.ola_buf[-hop:] = 0.0
 
         return output.astype(np.float32)
 
@@ -939,8 +951,8 @@ class DtdEstimator:
     """Double-Talk Detector with per-mode strategy.
 
     - 'geigel' mode (LMS/NLMS): Geigel DTD with hangover + confidence
-    - 'divergence' mode (FREQ/SUBBAND): Output-vs-input divergence detection
-    - 'coherence' mode (FREQ/SUBBAND): Error-reference coherence DT detection
+    - 'divergence' mode (FDAF/SUBBAND): Output-vs-input divergence detection
+    - 'coherence' mode (FDAF/SUBBAND): Error-reference coherence DT detection
     """
 
     def __init__(self, mode: str = 'geigel', *,
@@ -1145,7 +1157,7 @@ class AEC:
 
     Supports three filter modes:
     - TIME:    Time-domain NLMS (sample-by-sample processing)
-    - FREQ:    Frequency-domain NLMS (single FFT block, n_partitions=1)
+    - FDAF:    Frequency-domain Adaptive Filter (single FFT block, n_partitions=1)
     - SUBBAND: Partitioned block FDAF (multiple partitions for long echo paths)
     """
 
@@ -1153,7 +1165,7 @@ class AEC:
     _MODE_DEFAULT_MU = {
         AecMode.LMS: 0.02,
         AecMode.NLMS: 0.4,
-        AecMode.FREQ: 0.3,
+        AecMode.FDAF: 0.3,
         AecMode.SUBBAND: 0.5,
     }
 
@@ -1190,8 +1202,8 @@ class AEC:
             self._delay_active = False
 
         # Create adaptive filter based on mode
-        if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
-            if self.config.mode == AecMode.FREQ:
+        if self.config.mode in (AecMode.FDAF, AecMode.SUBBAND):
+            if self.config.mode == AecMode.FDAF:
                 # True FDAF: single big FFT block, n_partitions=1
                 # block_size = next power of 2 >= 2 * filter_length
                 desired = 2 * self.config.filter_length
@@ -1203,7 +1215,7 @@ class AEC:
             else:
                 # PBFDAF: partitioned block, configurable filter_length
                 block_size = self.config.fft_size
-                hop_size = block_size // 2
+                hop_size = self.config.hop_size
                 n_partitions = max(1, (self.config.filter_length + hop_size - 1) // hop_size)
                 self._internal_hop = hop_size
 
@@ -1212,20 +1224,22 @@ class AEC:
                 n_partitions=n_partitions,
                 mu=self.config.mu,
                 delta=self.config.delta,
-                use_leakage=self.config.use_leakage,
-                leakage=self.config.freq_leakage,
-                use_kalman=self.config.use_kalman
+                use_kalman=self.config.use_kalman,
+                hop_size=self._internal_hop
             )
-            self._hop_size = self.config.hop_size  # External hop (always 256)
+            self._hop_size = self.config.hop_size
             self._n_partitions = n_partitions
 
-            # FREQ buffering (when internal_hop > external hop)
-            if self.config.mode == AecMode.FREQ and self._internal_hop > self._hop_size:
-                self._freq_near_queue = np.zeros(self._internal_hop, dtype=np.float32)
-                self._freq_far_queue = np.zeros(self._internal_hop, dtype=np.float32)
-                self._freq_out_queue = np.zeros(self._internal_hop, dtype=np.float32)
-                self._freq_queue_write = 0
+            # FDAF buffering (when internal_hop > external hop)
+            if self.config.mode == AecMode.FDAF and self._internal_hop > self._hop_size:
+                # Buffer large enough for accumulation (internal_hop + one extra external hop)
+                buf_size = self._internal_hop + self._hop_size
+                self._freq_near_queue = np.zeros(buf_size, dtype=np.float32)
+                self._freq_far_queue = np.zeros(buf_size, dtype=np.float32)
+                self._freq_out_buf = np.zeros(buf_size, dtype=np.float32)
+                self._freq_out_valid = 0  # valid output samples remaining
                 self._freq_out_read = 0
+                self._freq_queue_write = 0
                 # DTD independent buffer: FL-point FFT with hop=FL/2
                 # Decouples coherence DTD from FDAF's larger block_size
                 fl = self.config.filter_length
@@ -1245,7 +1259,6 @@ class AEC:
                 filter_length=self.config.filter_length,
                 mu=self.config.mu,
                 delta=self.config.delta,
-                leak=1.0,
                 normalize=False
             )
             self.filter.clear_history = self.config.clear_filter_history
@@ -1255,13 +1268,10 @@ class AEC:
             self._freq_near_queue = None
         else:
             # TIME: Time-domain NLMS
-            # leak=1.0: NLMS has DTD + weight norm constraint for stability,
-            # so leak is unnecessary and hurts convergence (75dB → 31dB with 0.99999)
             self.filter = NlmsFilter(
                 filter_length=self.config.filter_length,
                 mu=self.config.mu,
                 delta=self.config.delta,
-                leak=1.0,
                 normalize=True
             )
             self.filter.clear_history = self.config.clear_filter_history
@@ -1270,13 +1280,13 @@ class AEC:
             self._n_partitions = 0
             self._freq_near_queue = None
 
-        # DTD: FREQ/SUBBAND only (divergence + coherence dual detector)
+        # DTD: FDAF/SUBBAND only (divergence + coherence dual detector)
         # LMS/NLMS have no effective DTD — all methods (Geigel, NCC, coherence,
         # VSS-NLMS) either don't work for AEC or cause vicious cycles with slow
         # convergence. Output Limiter provides the safety net instead.
-        if self.config.enable_dtd and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
+        if self.config.enable_dtd and self.config.mode in (AecMode.FDAF, AecMode.SUBBAND):
             # Warmup: 50 DTD invocations before coherence starts.
-            # FREQ DTD runs every dtd_hop/hop_size external frames,
+            # FDAFDTD runs every dtd_hop/hop_size external frames,
             # so 50 DTD invocations = 50 * dtd_hop/hop_size external frames.
             warmup = 50
             self.dtd_divergence = DtdEstimator(
@@ -1286,7 +1296,7 @@ class AEC:
                 release=self.config.dtd_confidence_release,
                 warmup_frames=warmup,
             )
-            # FREQ: FL-point FFT (matches filter length, hop=FL/2)
+            # FDAF: FL-point FFT (matches filter length, hop=FL/2)
             # SUBBAND: use FDAF's own spectra (block_size from filter)
             if self._dtd_fft_size > 0:
                 dtd_block_size = self._dtd_fft_size
@@ -1313,7 +1323,7 @@ class AEC:
             self.dtd_coherence = None
 
         # RES (only for frequency-domain modes)
-        if self.config.enable_res and self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
+        if self.config.enable_res and self.config.mode in (AecMode.FDAF, AecMode.SUBBAND):
             self.res = ResFilter(
                 block_size=self.filter.block_size,
                 n_freqs=self.filter.n_freqs,
@@ -1324,19 +1334,22 @@ class AEC:
                 max_drop_db_per_frame=self.config.res_max_drop_db_per_frame,
                 max_rise_db_per_frame=self.config.res_max_rise_db_per_frame,
                 enable_spectral_floor=self.config.res_spectral_floor,
-                spectral_floor_db=self.config.res_spectral_floor_db
+                spectral_floor_db=self.config.res_spectral_floor_db,
+                ne_protect_db=self.config.res_ne_protect_db,
+                frame_size=self.config.frame_size,
+                hop_size=self.config.hop_size
             )
         else:
             self.res = None
 
-        # Shadow filter (dual-filter, FREQ/SUBBAND only)
+        # Shadow filter (dual-filter, FDAF/SUBBAND only)
         # Can be used alone (≈ WebRTC/SpeexDSP) or with DTD (dual protection)
         self.shadow_filter = None
         self.shadow_output = None
         self.main_err_smooth = 0.0
         self.shadow_err_smooth = 0.0
         if (self.config.enable_shadow and
-                self.config.mode in (AecMode.FREQ, AecMode.SUBBAND)
+                self.config.mode in (AecMode.FDAF, AecMode.SUBBAND)
                 and hasattr(self.filter, 'W')):
             shadow_mu = self.config.mu * self.config.shadow_mu_ratio
             self.shadow_filter = SubbandNlms(
@@ -1344,7 +1357,8 @@ class AEC:
                 n_partitions=self.filter.n_partitions,
                 mu=shadow_mu,
                 delta=self.config.delta,
-                use_kalman=self.config.use_kalman
+                use_kalman=self.config.use_kalman,
+                hop_size=self.filter.hop_size
             )
             # FDKF: apply config Q_high, then shadow uses higher Q via ratio
             if self.config.use_kalman and hasattr(self.filter, 'Q_high'):
@@ -1449,8 +1463,9 @@ class AEC:
         if self._freq_near_queue is not None:
             self._freq_near_queue.fill(0)
             self._freq_far_queue.fill(0)
-            self._freq_out_queue.fill(0)
+            self._freq_out_buf.fill(0)
             self._freq_queue_write = 0
+            self._freq_out_valid = 0
             self._freq_out_read = 0
         self.near_power = 0.0
         self.error_power = 0.0
@@ -1609,7 +1624,7 @@ class AEC:
                         self._ref_ring[:hop - part1]
                     ])
 
-        # DTD: dual detector (divergence + coherence) for FREQ/SUBBAND
+        # DTD: dual detector (divergence + coherence) for FDAF/SUBBAND
         # Combined confidence = max(divergence, coherence) → mu_scale
         # Non-DTD: simple variable mu (Valin 2007 RER-inspired)
 
@@ -1618,9 +1633,9 @@ class AEC:
         else:
             mu_scale = self._get_simple_mu_scale()
 
-        if self.config.mode in (AecMode.FREQ, AecMode.SUBBAND):
+        if self.config.mode in (AecMode.FDAF, AecMode.SUBBAND):
             if self._freq_near_queue is not None:
-                # Buffered FDAF: accumulate into queue
+                # Buffered FDAF: accumulate into queue, process when enough
                 hop = self._hop_size
                 ihop = self._internal_hop
                 w = self._freq_queue_write
@@ -1629,15 +1644,22 @@ class AEC:
                 self._freq_queue_write = w + hop
 
                 if self._freq_queue_write >= ihop:
-                    # Buffer full — run one big FDAF
+                    # Process one internal block
                     big_out = self.filter.process(
-                        self._freq_near_queue, self._freq_far_queue, mu_scale)
-                    self._freq_out_queue[:] = big_out
-                    self._freq_queue_write = 0
+                        self._freq_near_queue[:ihop],
+                        self._freq_far_queue[:ihop], mu_scale)
+                    # Store output and shift leftover input
+                    leftover = self._freq_queue_write - ihop
+                    self._freq_out_buf[:ihop] = big_out
+                    self._freq_out_valid = ihop
                     self._freq_out_read = 0
+                    if leftover > 0:
+                        self._freq_near_queue[:leftover] = self._freq_near_queue[ihop:ihop+leftover]
+                        self._freq_far_queue[:leftover] = self._freq_far_queue[ihop:ihop+leftover]
+                    self._freq_queue_write = leftover
 
                 r = self._freq_out_read
-                raw_output = self._freq_out_queue[r:r+hop].copy()
+                raw_output = self._freq_out_buf[r:r+hop].copy()
                 self._freq_out_read = r + hop
             else:
                 raw_output = self.filter.process(near_end, far_end, mu_scale)
@@ -1763,7 +1785,7 @@ class AEC:
                 self.dtd_divergence.detect_block(near_end, far_end, output=raw_output)
             if self.dtd_coherence and self._filter_converged:
                 if self._dtd_fft_size > 0:
-                    # FREQ buffered: accumulate into DTD buffer, run at hop=FL/2
+                    # FDAFbuffered: accumulate into DTD buffer, run at hop=FL/2
                     hop = self._hop_size
                     pos = self._dtd_acc_pos
                     self._dtd_acc_err[pos:pos+hop] = raw_output
@@ -1956,12 +1978,12 @@ def main():
 Filter modes:
     lms     - Time-domain LMS (simplest, fixed step size, mu~0.01)
     nlms    - Time-domain NLMS (normalized, default)
-    freq    - Frequency-domain NLMS (single FFT block, no partitions)
+    fdaf    - Frequency-domain Adaptive Filter (single FFT block, no partitions)
     subband - Partitioned block FDAF (for long echo paths, fastest convergence)
 
 Examples:
     python aec.py mic.wav ref.wav output.wav
-    python aec.py mic.wav ref.wav output.wav --mode freq
+    python aec.py mic.wav ref.wav output.wav --mode fdaf
     python aec.py mic.wav ref.wav output.wav --mode subband --enable-res
     python aec.py mic.wav ref.wav output.wav --mu 0.5 --filter 1024
         """
@@ -1972,7 +1994,7 @@ Examples:
     parser.add_argument('--mu', type=float, default=0.3, help='Step size (default: 0.3)')
     parser.add_argument('--filter', type=int, default=0,
                         help='Filter length in samples (default: mode-dependent)')
-    parser.add_argument('--mode', choices=['lms', 'nlms', 'freq', 'subband'], default='nlms',
+    parser.add_argument('--mode', choices=['lms', 'nlms', 'fdaf', 'subband'], default='nlms',
                         help='Filter mode (default: nlms)')
     parser.add_argument('--enable-dtd', action='store_true',
                         help='Enable DTD (default: off, shadow filter provides DT protection)')
@@ -1994,7 +2016,7 @@ Examples:
     mode_map = {
         'lms': AecMode.LMS,
         'nlms': AecMode.NLMS,
-        'freq': AecMode.FREQ,
+        'fdaf': AecMode.FDAF,
         'subband': AecMode.SUBBAND
     }
 
@@ -2004,16 +2026,16 @@ Examples:
     mu = args.mu
     if args.mode == 'lms' and args.mu == 0.3:
         mu = 0.01  # LMS needs much smaller step size
-    elif args.mode == 'freq' and args.mu == 0.3:
-        mu = 0.1   # FREQ single-block: smaller mu to avoid overshoot
+    elif args.mode == 'fdaf' and args.mu == 0.3:
+        mu = 0.1   # FDAFsingle-block: smaller mu to avoid overshoot
 
     # Mode-dependent filter_length default
     filter_length = args.filter
     if filter_length == 0:
         if aec_mode == AecMode.SUBBAND:
-            filter_length = 1024  # 4 partitions
+            filter_length = 1024  # ~64ms echo path
         else:
-            filter_length = 512   # frame_size
+            filter_length = 512   # ~32ms echo path
 
     config = AecConfig(
         mu=mu,

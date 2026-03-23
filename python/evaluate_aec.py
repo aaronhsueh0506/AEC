@@ -19,7 +19,7 @@ Dataset 結構（flat directory，用 fileid_N 配對）：
   echo_signal_fileid_0.wav
 
 Usage:
-  python evaluate_aec.py <dataset_dir> [--mode nlms|freq|subband|lms|all]
+  python evaluate_aec.py <dataset_dir> [--mode nlms|fdaf|subband|lms|all]
   python evaluate_aec.py <dataset_dir> --mode all --output results.csv
 """
 
@@ -596,7 +596,7 @@ Examples:
         """
     )
     parser.add_argument('dataset_dir', help='Directory containing AEC Challenge wav files')
-    parser.add_argument('--mode', choices=['lms', 'nlms', 'freq', 'subband', 'all'],
+    parser.add_argument('--mode', choices=['lms', 'nlms', 'fdaf', 'subband', 'all'],
                         default='nlms', help='Filter mode (default: nlms)')
     parser.add_argument('--mu', type=float, default=None, help='Step size override')
     parser.add_argument('--filter', type=int, default=None, help='Filter length in samples')
@@ -629,12 +629,12 @@ Examples:
     mode_map = {
         'lms': AecMode.LMS,
         'nlms': AecMode.NLMS,
-        'freq': AecMode.FREQ,
+        'fdaf': AecMode.FDAF,
         'subband': AecMode.SUBBAND,
     }
 
     if args.mode == 'all':
-        modes_to_run = ['nlms', 'freq', 'subband', 'lms']
+        modes_to_run = ['nlms', 'fdaf', 'subband', 'lms']
     else:
         modes_to_run = [args.mode]
 

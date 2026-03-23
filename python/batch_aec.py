@@ -85,7 +85,7 @@ def compute_nearend_retention(mic, ref, output, hop=256):
 
 
 def run_ours(mic, ref, sr, filter_length, mode, enable_dtd, enable_shadow, enable_res, mu):
-    mode_map = {'nlms': AecMode.NLMS, 'freq': AecMode.FREQ,
+    mode_map = {'nlms': AecMode.NLMS, 'fdaf': AecMode.FDAF,
                 'subband': AecMode.SUBBAND, 'lms': AecMode.LMS}
     config = AecConfig(
         sample_rate=sr,
@@ -171,7 +171,7 @@ def main():
                         help='Filter length (default: 2048)')
     parser.add_argument('--speex-filter', type=int, default=2048,
                         help='SpeexDSP filter length (default: 2048)')
-    parser.add_argument('--mode', choices=['nlms', 'freq', 'subband', 'lms'],
+    parser.add_argument('--mode', choices=['nlms', 'fdaf', 'subband', 'lms'],
                         default='subband', help='Filter mode (default: subband)')
     parser.add_argument('--mu', type=float, default=None, help='Step size override')
     parser.add_argument('--enable-dtd', action='store_true', help='Enable DTD')

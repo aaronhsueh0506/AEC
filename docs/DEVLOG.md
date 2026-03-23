@@ -2,6 +2,124 @@
 
 ## 版本歷史
 
+### v1.15.0 (2026-03-23) - Frame/Hop 統一 + Dead Code 清理 + FREQ→FDAF 重命名
+
+#### 改動內容
+
+1. **統一 frame/hop/FFT size**
+   - `frame_size`: 512 → **320** (20ms @ 16kHz)
+   - `hop_size`: 256 → **160** (10ms @ 16kHz)
+   - `fft_size`: 512（不變，nearest 2^n ≥ 320）
+   - 延遲從 16ms 降至 **10ms**
+
+2. **SubbandNlms overlap-save 調整**
+   - 新增獨立 `hop_size` 參數（不再硬綁 `block_size // 2`）
+   - Output 提取改為 `buffer[-hop:]`（取最後 hop 個 valid sample）
+   - Weight constraint: `w_time[hop_size:] = 0`（partition 長度 = hop = 160）
+   - n_partitions: `ceil(filter_length / 160)` = 4 partitions（was 4 with hop=256, fl=1024）
+
+3. **ResFilter WOLA 調整**
+   - `frame_size=320`（WOLA 窗長），`hop_size=160`（50% overlap，sqrt-Hann 完美重建 ✓）
+   - FFT: zero-pad 320→512 → `rfft(512)` → 257 bins（與 SubbandNlms 相同 n_freqs）
+   - IFFT: `irfft(257, n=512)[:320]` → synthesis window → OLA
+
+4. **FDAF buffering 修正**
+   - FDAF 模式 internal_hop (512) 不整除 external_hop (160)
+   - Buffer 擴大至 `internal_hop + hop_size` 並加入 leftover 處理
+
+5. **FREQ → FDAF 重命名**
+   - `AecMode.FREQ` → `AecMode.FDAF`
+   - CLI: `--mode freq` → `--mode fdaf`
+   - 所有相關檔案同步更新（evaluate_aec.py, batch_aec.py, plot_aec_results.py 等）
+
+6. **Dead code 清理**
+   - 移除 `from dataclasses import field`（未使用 import）
+   - 移除 `AecConfig.leak`（永遠被 override 為 1.0）
+   - 移除 `AecConfig.use_leakage` + `freq_leakage`（default False，CLI 無 flag，無使用）
+   - 移除 `AecConfig.dtd_threshold`（legacy，never read）
+   - 移除 `NlmsFilter.leak` 參數（永遠 1.0，乘法無效果）
+   - 移除 `SubbandNlms.use_leakage`/`leakage` 參數
+
+7. **`use_kalman` 預設改為 True**
+   - `AecConfig.use_kalman: bool = False` → `True`
+   - FDKF 為推薦配置，預設開啟更符合使用習慣
+
+#### 驗證結果（AEC Challenge, 15 files, FL=512, subband + Shadow + FDKF + RES）
+
+**Farend Single-Talk**：
+
+| Preset | ERLE | vs v1.14.0 |
+|--------|------|------------|
+| BALANCED | 12.4 dB | +0.5 dB |
+| AGGRESSIVE | **15.7 dB** | **+1.0 dB** |
+| MAXIMUM | 15.0 dB | +1.1 dB |
+
+**Doubletalk**：
+
+| Preset | ERLE | vs v1.14.0 |
+|--------|------|------------|
+| BALANCED | 4.2 dB | -0.2 dB |
+| AGGRESSIVE | **7.2 dB** | -0.2 dB |
+| MAXIMUM | 7.9 dB | -0.3 dB |
+
+**關鍵發現**：
+- FS ERLE 全面提升（AGGRESSIVE +1.0 dB），frame size 縮小提升時間解析度
+- DT ERLE 輕微下降（-0.2 dB），在噪聲範圍內，可接受
+- 延遲從 16ms 降至 10ms，更適合即時通話場景
+
+---
+
+### v1.14.0 (2026-03-23) - Per-bin Near-end Gate + Preset 微調
+
+#### 改動內容
+
+1. **Per-bin near-end gate（取代 broadband dt_indicator）**
+   - 舊版：broadband `dt_indicator = 1 - far/(mic+far)` → FS 時 mic≈far → dt_indicator≈0.5 → g_min 被抬到 -10dB → echo-only 無法激進壓制
+   - 新版：per-bin `coh2` 控制 g_min floor
+     - `coh2[k]` 高（echo bin）→ ne_protection≈0 → 允許壓到 g_min
+     - `coh2[k]` 低（near-end bin）→ ne_protection≈1 → floor 提高到 `ne_protect_db`
+   - 僅在收斂後啟用（`erle_factor` gate）
+
+2. **新增 AecConfig 參數**
+   - `res_ne_protect_db: float = -10.0`：per-bin 近端保護上限
+
+3. **coh2 收斂後 alpha 調整**
+   - 收斂後 rise alpha 0.80→0.90（TC≈160ms），coh2 在 echo-only 段更穩定接近 1.0
+   - Drop alpha 不變（0.50），DT 時快速反應
+
+4. **Preset 參數微調**
+
+   | 參數 | BALANCED | AGGRESSIVE | MAXIMUM |
+   |------|----------|------------|---------|
+   | res_ne_protect_db | -8 | -5 | -2 |
+   | res_dt_reduction | 3.5 | 2.0 (was 2.5) | 0.0 (was 1.5) |
+
+#### 驗證結果（AEC Challenge, 15 files, FL=1024, subband + Shadow + FDKF + RES）
+
+**Farend Single-Talk AECMOS**：
+
+| Preset | echo_mos | ERLE | vs v1.13.0 |
+|--------|----------|------|------------|
+| BALANCED | 3.18 | 11.9 dB | ≈ baseline |
+| AGGRESSIVE | **3.36** | **14.7 dB** | **+0.06** |
+| MAXIMUM | 3.41 | 13.9 dB | +0.03 |
+
+**Doubletalk AECMOS**：
+
+| Preset | echo_mos | deg_mos | ERLE | vs v1.13.0 echo_mos |
+|--------|----------|---------|------|---------------------|
+| BALANCED | 3.06 | **3.51** | 4.4 dB | +0.04 |
+| AGGRESSIVE | **3.42** | 3.22 | **7.4 dB** | **+0.21** |
+| MAXIMUM | 3.59 | 2.59 | 8.2 dB | +0.26 |
+
+**關鍵發現**：
+- Per-bin gate 是 DT echo_mos 改善的主力：AGGRESSIVE +0.21（3.21→3.42），deg_mos 僅 -0.07
+- DT ERLE 大幅提升：AGGRESSIVE 7.4 dB vs AEC3 3.7 dB（+3.7 dB）
+- FS echo_mos 改善有限（+0.06），AECMOS 對 FS echo 評估更偏感知而非 ERLE
+- MAXIMUM DT deg_mos 2.59 仍 > AEC3 2.51
+
+---
+
 ### v1.13.0 (2026-03-23) - Preset Adaptive Filter 層參數
 
 #### 改動內容
