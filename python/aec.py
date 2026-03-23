@@ -29,6 +29,12 @@ class AecMode(Enum):
     SUBBAND = "subband" # Partitioned block FDAF (multiple partitions)
 
 
+class AecPreset(Enum):
+    BALANCED = "balanced"       # Best near-end preservation (default)
+    AGGRESSIVE = "aggressive"   # Stronger echo suppression, moderate near-end impact
+    MAXIMUM = "maximum"         # Maximum echo suppression, significant near-end impact
+
+
 @dataclass
 class AecConfig:
     """AEC Configuration (all sizes in samples)"""
@@ -108,6 +114,11 @@ class AecConfig:
     saturation_over_sub_boost: float = 3.0   # Extra over_sub during saturation
     saturation_softclip_ref: bool = True     # Soft-clip reference for better filter modeling
 
+    # RES dynamic over_sub formula: base + scale × erle_factor - dt_reduction × dt_indicator
+    res_over_sub_base: float = 2.5           # Unconverged over_sub base
+    res_over_sub_scale: float = 4.0          # Scale with erle_factor (converged adds this)
+    res_dt_reduction: float = 3.5            # DT reduction coefficient
+
     # RES anti-blackout
     res_max_drop_db_per_frame: float = 6.0   # Max gain drop per frame (dB)
     res_max_rise_db_per_frame: float = 6.0   # Max gain rise per frame (dB)
@@ -125,6 +136,49 @@ class AecConfig:
         # Next power of 2 >= frame_size (= frame_size when frame_size is power of 2)
         n = self.frame_size
         return 1 << (n - 1).bit_length()
+
+    @classmethod
+    def from_preset(cls, preset: 'AecPreset', **kwargs) -> 'AecConfig':
+        """Create config from preset with optional overrides.
+
+        Presets (echo suppression strength):
+          BALANCED:   Best near-end preservation, moderate echo suppression (default)
+          AGGRESSIVE: Stronger echo suppression, moderate near-end degradation
+          MAXIMUM:    Maximum echo suppression, significant near-end impact
+        """
+        if isinstance(preset, str):
+            preset = AecPreset(preset)
+        if preset == AecPreset.BALANCED:
+            defaults = dict(
+                res_g_min_db=-25.0,
+                res_over_sub_base=2.5,
+                res_over_sub_scale=4.0,
+                res_dt_reduction=3.5,
+                res_spectral_floor_db=-25.0,
+                shadow_q_ratio=3.0,
+            )
+        elif preset == AecPreset.AGGRESSIVE:
+            defaults = dict(
+                res_g_min_db=-35.0,
+                res_over_sub_base=4.0,
+                res_over_sub_scale=6.0,
+                res_dt_reduction=2.5,
+                res_spectral_floor_db=-30.0,
+                shadow_q_ratio=4.0,
+            )
+        elif preset == AecPreset.MAXIMUM:
+            defaults = dict(
+                res_g_min_db=-40.0,
+                res_over_sub_base=6.0,
+                res_over_sub_scale=8.0,
+                res_dt_reduction=1.5,
+                res_spectral_floor_db=-35.0,
+                shadow_q_ratio=5.0,
+            )
+        else:
+            defaults = {}
+        defaults.update(kwargs)
+        return cls(**defaults)
 
 
 class DelayEstimator:
@@ -1650,7 +1704,7 @@ class AEC:
                 # Dynamic over_sub: moderate base, scale with convergence
                 inst_erle = self.get_erle_instant()
                 erle_factor = np.clip((inst_erle - 3.0) / 15.0, 0.0, 1.0)
-                base_over_sub = 2.5 + 4.0 * erle_factor  # 2.5 (unconverged) → 6.5 (converged)
+                base_over_sub = self.config.res_over_sub_base + self.config.res_over_sub_scale * erle_factor
                 # Saturation boost: non-linear echo needs more suppression
                 base_over_sub += self._saturation_level * self.config.saturation_over_sub_boost
                 # DT protection: use DTD if enabled, otherwise far/mic ratio as DT indicator
@@ -1661,7 +1715,7 @@ class AEC:
                     mic_pwr = np.mean(near_end ** 2) + 1e-10
                     # near-end stronger than far-end → likely DT → reduce suppression
                     dt_indicator = np.clip(1.0 - far_pwr / (mic_pwr + far_pwr), 0.0, 0.8)
-                dt_reduction = 3.5 * dt_indicator
+                dt_reduction = self.config.res_dt_reduction * dt_indicator
                 self.res.over_sub = max(base_over_sub - dt_reduction, 0.5)
                 final_output = self.res.process(raw_output, self.filter.echo_spec,
                                                 far_power, self.filter.far_spec,

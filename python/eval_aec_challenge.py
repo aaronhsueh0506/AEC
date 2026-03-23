@@ -65,7 +65,7 @@ def estimate_delay(mic, ref, sr, max_delay_ms=250.0):
     return delay
 
 
-def run_ours(mic, ref, sr, fl, enable_res=True):
+def run_ours(mic, ref, sr, fl, enable_res=True, preset=None):
     # Pre-compute delay and align reference signal
     delay = estimate_delay(mic, ref, sr)
     n = min(len(mic), len(ref))
@@ -76,10 +76,18 @@ def run_ours(mic, ref, sr, fl, enable_res=True):
     else:
         ref_aligned = ref[:n]
 
-    config = AecConfig(sample_rate=sr, mode=AecMode.SUBBAND,
-                       filter_length=fl, enable_dtd=False,
-                       enable_shadow=True, enable_res=enable_res,
-                       enable_delay_est=False, use_kalman=True)
+    if preset is not None:
+        from aec import AecPreset
+        config = AecConfig.from_preset(preset,
+                                       sample_rate=sr, mode=AecMode.SUBBAND,
+                                       filter_length=fl, enable_dtd=False,
+                                       enable_shadow=True, enable_res=enable_res,
+                                       enable_delay_est=False, use_kalman=True)
+    else:
+        config = AecConfig(sample_rate=sr, mode=AecMode.SUBBAND,
+                           filter_length=fl, enable_dtd=False,
+                           enable_shadow=True, enable_res=enable_res,
+                           enable_delay_est=False, use_kalman=True)
     aec = AEC(config)
     hop = aec.hop_size
     out = np.zeros(n, dtype=np.float32)
@@ -142,7 +150,7 @@ def compute_pesq(ref, deg, sr):
         return None
 
 
-def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, out_dir):
+def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, out_dir, preset=None):
     """Evaluate farend_singletalk with ERLE."""
     sc_dir = os.path.join(base_dir, 'farend_singletalk')
     if not os.path.isdir(sc_dir):
@@ -180,13 +188,13 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, out_dir):
         mic, ref = mic[:n], ref[:n]
 
         # Ours
-        output = run_ours(mic, ref, sr, fl)
+        output = run_ours(mic, ref, sr, fl, preset=preset)
         sf.write(os.path.join(out_dir, f"fs_{i}_ours.wav"), output, sr)
         e_ours = compute_erle(mic, output)
         erles['ours'].append(e_ours)
 
         # Ours (no RES) — raw PBFDAF output
-        output_nores = run_ours(mic, ref, sr, fl, enable_res=False)
+        output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset)
         sf.write(os.path.join(out_dir, f"fs_{i}_ours_nores.wav"), output_nores, sr)
 
         line = f"{i:>5} {e_ours:>8.1f}"
@@ -223,7 +231,7 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, out_dir):
     print(summary)
 
 
-def eval_doubletalk(base_dir, fl, do_speex, do_aec3, out_dir):
+def eval_doubletalk(base_dir, fl, do_speex, do_aec3, out_dir, preset=None):
     """Evaluate doubletalk with ERLE (real recordings from clean test set)."""
     sc_dir = os.path.join(base_dir, 'doubletalk')
     if not os.path.isdir(sc_dir):
@@ -261,13 +269,13 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, out_dir):
         mic, ref = mic[:n], ref[:n]
 
         # Ours
-        output = run_ours(mic, ref, sr, fl)
+        output = run_ours(mic, ref, sr, fl, preset=preset)
         sf.write(os.path.join(out_dir, f"dt_{i}_ours.wav"), output, sr)
         e_ours = compute_erle(mic, output)
         erles['ours'].append(e_ours)
 
         # Ours (no RES) — raw PBFDAF output
-        output_nores = run_ours(mic, ref, sr, fl, enable_res=False)
+        output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset)
         sf.write(os.path.join(out_dir, f"dt_{i}_ours_nores.wav"), output_nores, sr)
 
         line = f"{i:>5} {e_ours:>8.1f}"
@@ -310,6 +318,10 @@ def main():
     parser.add_argument('--filter', type=int, default=2048, help='Filter length')
     parser.add_argument('--speex', action='store_true', help='Also run SpeexDSP')
     parser.add_argument('--aec3', action='store_true', help='Also run WebRTC AEC3')
+    parser.add_argument('--preset', choices=['balanced', 'aggressive', 'maximum'],
+                        default=None, help='AEC preset (default: no preset)')
+    parser.add_argument('--all-presets', action='store_true',
+                        help='Run all 3 presets and compare')
     parser.add_argument('-o', '--output-dir', default=None, help='Output directory')
     args = parser.parse_args()
 
@@ -327,8 +339,20 @@ def main():
     if not HAS_PESQ:
         print("Warning: pesq not installed. pip3 install pesq")
 
-    eval_farend_singletalk(base_dir, args.filter, do_speex, do_aec3, out_dir)
-    eval_doubletalk(base_dir, args.filter, do_speex, do_aec3, out_dir)
+    from aec import AecPreset
+    if args.all_presets:
+        for p in AecPreset:
+            preset_dir = os.path.join(out_dir, p.value)
+            os.makedirs(preset_dir, exist_ok=True)
+            print(f"\n{'#'*60}")
+            print(f"  PRESET: {p.value.upper()}")
+            print(f"{'#'*60}")
+            eval_farend_singletalk(base_dir, args.filter, do_speex, do_aec3, preset_dir, preset=p)
+            eval_doubletalk(base_dir, args.filter, do_speex, do_aec3, preset_dir, preset=p)
+    else:
+        preset = AecPreset(args.preset) if args.preset else None
+        eval_farend_singletalk(base_dir, args.filter, do_speex, do_aec3, out_dir, preset=preset)
+        eval_doubletalk(base_dir, args.filter, do_speex, do_aec3, out_dir, preset=preset)
 
     print(f"\nOutput saved to {out_dir}")
 

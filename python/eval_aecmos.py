@@ -14,10 +14,11 @@ import numpy as np
 METHODS = ['ours', 'ours_nores', 'aec3', 'speex']
 METHOD_LABELS = ['Ours', 'NoRES', 'AEC3', 'Speex']
 
-def find_fs_cases(base_dir):
+def find_fs_cases(base_dir, out_dir=None):
     """Find farend singletalk cases and map to output files."""
     fs_dir = os.path.join(base_dir, 'farend_singletalk')
-    out_dir = os.path.join(base_dir, 'output')
+    if out_dir is None:
+        out_dir = os.path.join(base_dir, 'output')
     mic_files = sorted([f for f in os.listdir(fs_dir) if '_farend_singletalk_mic.wav' in f])
 
     cases = []
@@ -36,10 +37,11 @@ def find_fs_cases(base_dir):
         })
     return cases
 
-def find_dt_cases(base_dir):
+def find_dt_cases(base_dir, out_dir=None):
     """Find doubletalk cases and map to output files."""
     dt_dir = os.path.join(base_dir, 'doubletalk')
-    out_dir = os.path.join(base_dir, 'output')
+    if out_dir is None:
+        out_dir = os.path.join(base_dir, 'output')
 
     mic_files = sorted([f for f in os.listdir(dt_dir) if '_doubletalk_mic.wav' in f])
 
@@ -140,23 +142,45 @@ def print_results(title, results):
         print(line)
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <aec_challenge_dir>")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(description='Evaluate AEC outputs using AECMOS')
+    parser.add_argument('dataset_dir', help='aec_challenge/ directory')
+    parser.add_argument('-o', '--output-dir', default=None, help='Output directory (default: <dataset_dir>/output)')
+    parser.add_argument('--all-presets', action='store_true',
+                        help='Evaluate all preset subdirs (balanced/aggressive/maximum)')
+    args = parser.parse_args()
 
-    base_dir = sys.argv[1]
+    base_dir = args.dataset_dir
+    out_dir = args.output_dir or os.path.join(base_dir, 'output')
 
-    # Far-end singletalk
-    fs_cases = find_fs_cases(base_dir)
-    print(f"Found {len(fs_cases)} farend singletalk cases")
-    fs_results = eval_aecmos(fs_cases, talk_type=None)
-    print_results("FAREND SINGLETALK — AECMOS", fs_results)
+    if args.all_presets:
+        for preset in ['balanced', 'aggressive', 'maximum']:
+            preset_dir = os.path.join(out_dir, preset)
+            if not os.path.isdir(preset_dir):
+                print(f"Skipping {preset}: {preset_dir} not found")
+                continue
+            print(f"\n{'#'*60}")
+            print(f"  PRESET: {preset.upper()}")
+            print(f"{'#'*60}")
+            fs_cases = find_fs_cases(base_dir, preset_dir)
+            print(f"Found {len(fs_cases)} farend singletalk cases")
+            fs_results = eval_aecmos(fs_cases, talk_type=None)
+            print_results(f"FAREND SINGLETALK — AECMOS [{preset.upper()}]", fs_results)
 
-    # Doubletalk
-    dt_cases = find_dt_cases(base_dir)
-    print(f"\nFound {len(dt_cases)} doubletalk cases")
-    dt_results = eval_aecmos(dt_cases, talk_type=None)
-    print_results("DOUBLETALK — AECMOS", dt_results)
+            dt_cases = find_dt_cases(base_dir, preset_dir)
+            print(f"\nFound {len(dt_cases)} doubletalk cases")
+            dt_results = eval_aecmos(dt_cases, talk_type=None)
+            print_results(f"DOUBLETALK — AECMOS [{preset.upper()}]", dt_results)
+    else:
+        fs_cases = find_fs_cases(base_dir, out_dir)
+        print(f"Found {len(fs_cases)} farend singletalk cases")
+        fs_results = eval_aecmos(fs_cases, talk_type=None)
+        print_results("FAREND SINGLETALK — AECMOS", fs_results)
+
+        dt_cases = find_dt_cases(base_dir, out_dir)
+        print(f"\nFound {len(dt_cases)} doubletalk cases")
+        dt_results = eval_aecmos(dt_cases, talk_type=None)
+        print_results("DOUBLETALK — AECMOS", dt_results)
 
 if __name__ == '__main__':
     main()
