@@ -7,11 +7,14 @@
 3. [NLMS - 歸一化最小均方演算法](#3-nlms---歸一化最小均方演算法)
 4. [頻域 NLMS](#4-頻域-nlms)
 5. [PBFDAF - 分區塊頻域自適應濾波器](#5-pbfdaf---分區塊頻域自適應濾波器)
+5.1. [FDKF - 頻域卡爾曼濾波器](#51-fdkf---頻域卡爾曼濾波器)
 6. [DTD / 發散偵測](#6-dtd--發散偵測)
 7. [RES Post-Filter - 殘餘回聲抑制後濾波器](#7-res-post-filter---殘餘回聲抑制後濾波器)
 8. [Post-Filter 方法比較](#8-post-filter-方法比較)
 9. [Subband 分頻方式說明](#9-subband-分頻方式說明)
 10. [NR Subband 適用性分析](#10-nr-subband-適用性分析)
+11. [前處理模組](#11-前處理模組)
+12. [收斂控制與 Output Limiter](#12-收斂控制與-output-limiter)
 
 ---
 
@@ -352,6 +355,219 @@ filter_length 只影響 partition 數，不影響 block_size 和 DTD cadence。
 
 ---
 
+## 5.1 FDKF — 頻域卡爾曼濾波器
+
+> **實作狀態：** Python（`SubbandNlms._update_kalman()`），C 版本尚未同步。
+> **啟用方式：** `AecConfig(use_kalman=True)` 或 CLI `--use-kalman`
+
+### 原理
+
+FDKF（Frequency-Domain Kalman Filter）將 PBFDAF 的 NLMS adaptation 替換為 per-bin Kalman filter。
+NLMS 對所有頻率 bin 使用同一個步長 μ（或 per-bin μ/P[k]），而 FDKF 為每個 bin 獨立計算最佳 Kalman gain K[k]，根據該 bin 的 signal-to-noise 特性自動調整 adaptation rate。
+
+**與 NLMS 的關鍵差異**：
+
+| | NLMS | FDKF |
+|---|---|---|
+| 步長控制 | 固定 μ / (P[k] + δ) | Kalman gain K = f(P, X, R) |
+| 每 bin 獨立 | 部分（power normalization） | 完全（P, R per-bin） |
+| 收斂-穩態 tradeoff | μ 固定 → 無法同時最佳化 | Two-stage Q 自動切換 |
+| 彩色信號處理 | 差（power normalization 有限） | 好（per-bin 自動適應） |
+| 記憶體額外開銷 | 0 | P[n_part, n_freq] + Q + R + error_psd |
+
+### 數學推導
+
+**狀態空間模型**（每個頻率 bin k 獨立）：
+
+系統模型：
+```
+W[k, n+1] = W[k, n] + w[k, n]        w ~ N(0, Q)    (process noise)
+D[k, n]   = X[k, n] × W[k, n] + v[k, n]  v ~ N(0, R)    (measurement noise)
+```
+
+其中：
+- `W[k, n]`：第 k 個 bin 的 echo path 權重（待估計狀態）
+- `X[k, n]`：far-end reference 頻譜
+- `D[k, n]`：near-end microphone 頻譜（= echo + near speech + noise）
+- `Q`：process noise covariance — 模型化 echo path 的時變性
+- `R`：measurement noise covariance — 近端語音 + 背景噪聲 + 殘餘 echo
+
+**Kalman filter 更新（per-partition per-bin）**：
+
+```
+Prediction:
+  P_pred[k] = P[k] + Q[k]                          (已隱含在 covariance update)
+
+Kalman gain:
+  K[k] = P[k] × conj(X[k]) / (|X[k]|² × P[k] + R[k])
+
+Weight update:
+  W[k] += K[k] × E[k]                              (E = error spectrum)
+
+Covariance update:
+  P[k] = (1 - K[k] × X[k]) × P[k] + Q[k]
+  P[k] = max(P[k], δ)                               (numerical stability)
+```
+
+**Measurement noise R 估計**：
+```
+error_psd[k] = α_R × error_psd[k] + (1 - α_R) × |E[k]|²
+R[k] = max(error_psd[k], δ)
+```
+
+R 從 error spectrum 的 PSD 估計，代表 noise + residual echo 的功率。
+當 echo path 匹配良好時，error 主要是 noise → R 低 → K 適中。
+當 echo path 不匹配時，error 包含殘餘 echo → R 高 → K 降低（保守更新）。
+
+### Two-Stage Q：解決 R Self-Reinforcing Deadlock
+
+**問題：固定低 Q 的惡性循環**
+
+```
+初始狀態：P 小（低 Q 無法注入足夠 P）
+    → K = P×X/(X²P+R) ≈ small/R → K 很小
+    → Weight update 很慢
+    → Error 仍然大（echo 未被消除）
+    → R = smoothed(|E|²) 持續很高
+    → K = P/(P×X²+R) ≈ P/R → K 更小
+    → 收斂進一步減慢
+    ... 惡性循環 ...
+```
+
+這是 FDKF 的根本問題：R 從 error PSD 估計，未收斂時 error 很大 → R 很大 → K 被壓低 → 收斂更慢 → R 持續高。
+
+**解法：Two-Stage Q**
+
+```
+Phase 1 — 快速收斂（Q = Q_high = 1e-3）：
+  高 Q 持續注入 P → P 維持在 0.1~0.5
+  → K = P×X²/(X²P+R) 分子夠大
+  → 即使 R 高（1e-2），K 仍 ≈ 0.3~0.8
+  → 濾波器快速收斂
+  → Error 下降 → R 下降 → 正向循環啟動
+
+Phase 2 — 穩態追蹤（Q = Q_low = 1e-5）：
+  收斂後 error 小 → R 小（~1e-4）
+  低 Q → P 自然衰減至 ~1e-4
+  → K ≈ 0.01~0.1
+  → 微量追蹤，不干擾已收斂權重
+
+切換條件：
+  連續 10 幀 instantaneous ERLE > 6dB → 判定收斂
+  → Q 從 Q_high 切換到 Q_low（main + shadow 同時切換）
+```
+
+**Kalman gain K 的動態行為**：
+
+```
+# 假設某 bin 的典型值
+
+# Phase 1 (未收斂, Q_high=1e-3):
+P ≈ 0.3, |X|² ≈ 0.1, R ≈ 1e-2
+K = 0.3 × 0.1 / (0.1 × 0.3 + 0.01) = 0.03 / 0.04 = 0.75
+→ 接近 NLMS μ=0.75，非常積極
+
+# Phase 2 (已收斂, Q_low=1e-5):
+P ≈ 1e-4, |X|² ≈ 0.1, R ≈ 1e-4
+K = 1e-4 × 0.1 / (0.1 × 1e-4 + 1e-4) = 1e-5 / 2e-5 = 0.5
+→ 但 P 很小所以 K×E 的絕對更新量很小
+→ 有效追蹤，不會過度修改已收斂權重
+```
+
+### DT 保護
+
+FDKF 的 DT 保護透過 `mu_scale` 施加在 K 上：
+
+```python
+K *= mu_scale  # mu_scale ∈ [0.05, 1.0]
+```
+
+DT 時 mu_scale → 0.05 → K 被壓到 5% → 幾乎凍結更新。
+結合 R 的自然保護（DT 時 error 含近端語音 → R 升高 → K 本身就降低），雙重保護。
+
+### 實作細節
+
+**初始化**（`SubbandNlms.__init__()`）：
+```python
+if self.use_kalman:
+    self.P = np.ones((n_partitions, n_freqs)) * 0.5    # per-partition per-bin
+    self.Q_high = np.ones(n_freqs) * 1e-3              # fast convergence
+    self.Q_low  = np.ones(n_freqs) * 1e-5              # stable tracking
+    self.Q = self.Q_high.copy()                         # start fast
+    self.R = np.ones(n_freqs) * 1e-2                    # initial measurement noise
+    self._error_psd = np.ones(n_freqs) * 1e-2
+    self._alpha_r = 0.95                                # R smoothing
+```
+
+**Per-partition 更新**（`_update_kalman()`）：
+```python
+for p in range(n_partitions):
+    X = X_buf[p_idx]
+    X_power = |X|² + δ
+
+    # Kalman gain
+    K = (P[p] × conj(X)) / (X_power × P[p] + R + δ)
+    K *= mu_scale  # DT protection
+
+    # Weight update
+    W[p] += K × error_spec
+
+    # Covariance update
+    KX = real(K × X)
+    P[p] = max((1 - KX) × P[p] + Q, δ)
+
+    # Time-domain truncation (prevent circular convolution)
+    w_time = IFFT(W[p])
+    w_time[hop:] = 0
+    W[p] = FFT(w_time)
+```
+
+**重置**（`reset()`）：
+```python
+if self.use_kalman:
+    self.P.fill(0.5)        # 與 init 一致
+    self.R.fill(1e-2)
+    self._error_psd.fill(1e-2)
+    self.Q[:] = self.Q_high  # 重置回 Q_high（重新快速收斂）
+```
+
+**權重複製**（`copy_weights_from()`）：
+```python
+def copy_weights_from(self, src):
+    self.W[:] = src.W
+    if self.use_kalman and hasattr(src, 'P'):
+        self.P[:] = src.P    # FDKF 需要 P 和 W 一起複製
+```
+
+### 參數
+
+| 參數 | 值 | 說明 |
+|------|-----|------|
+| P_init | 0.5 | 初始 error covariance，不宜太大（K→1 發散）也不宜太小（收斂慢） |
+| Q_high | 1e-3 | 快速收斂 process noise，越大 K 越大收斂越快，但穩態 misadjustment 越大 |
+| Q_low | 1e-5 | 穩態 process noise，越小穩態越穩定但追蹤越慢 |
+| R_init | 1e-2 | 初始 measurement noise（從 error PSD 動態估計） |
+| α_R | 0.95 | R 估計 EMA 係數（越大 R 越平滑、反應越慢） |
+| 收斂門檻 | ERLE > 6dB, 10 幀 | Q 切換觸發條件 |
+
+### 與 NLMS 的性能比較
+
+| 指標 | NLMS (PBFDAF) | FDKF (Two-stage Q) |
+|------|---------------|---------------------|
+| FS echo_mos | 2.76 | **3.20** (+0.44) |
+| DT echo_mos | ~2.8 | **3.03** |
+| DT deg_mos | ~3.5 | **3.52** |
+| 收斂速度 | 中（μ=0.5 固定） | 快（K 自適應，Q_high 驅動） |
+| 穩態 ERLE | 中 | 高（Q_low 後 K 自動降低） |
+| 額外複雜度 | 0 | +1 array multiply + 1 division per bin |
+
+### 參考文獻
+
+- Enzner, G. & Vary, P. "Frequency-domain adaptive Kalman filter for acoustic echo control in hands-free telephones", Signal Processing, 2006
+- Yang, J. et al. "Frequency-domain adaptive Kalman filter with fast recovery of abrupt echo-path changes", IEEE Signal Processing Letters, 2017
+
+---
+
 ## 6. DTD — 自適應更新控制
 
 ### 6.1 問題定義
@@ -577,36 +793,64 @@ Shadow filter: mu = config.mu × 0.5 × 1.0  (固定 full mu，AEC3 background f
      main_err_smooth   = α × main_err_smooth   + (1-α) × main_err
      shadow_err_smooth = α × shadow_err_smooth + (1-α) × shadow_err
   4. Warm-up guard: 前 50 frames 跳過 copy 邏輯
-  5. Copy gate: far_active AND not_dt 才允許比較
-     not_dt: DTD 模式用 dtd_conf < 0.3, 否則用 simple_mu_ratio > 0.6
-  6. Copy hysteresis: 連續 3 frames shadow_err < main_err × 0.5 才觸發
-     if shadow_err_smooth < main_err_smooth × 0.5:
+  5. Copy gate: far_active AND not_dt AND NOT epc_active 才允許比較
+     not_dt: DTD 模式用 dtd_conf < 0.3, 否則用 far/error ratio > 0.3
+  6. Copy hysteresis: 連續 5 frames shadow_err < main_err × 0.7 才觸發
+     if shadow_err_smooth < main_err_smooth × 0.7:
          main.W ← shadow.W        // 只複製權重（不切換 output）
+         if FDKF: main.P ← shadow.P  // FDKF 需複製 P
          main_err_smooth = shadow_err_smooth
+  7. Bidirectional: 若 main_err < shadow_err × 0.7，反向 copy main → shadow
 ```
 
 **設計要點**：
-- **不切換 output**：copy 只複製 weights，不用 `output = shadow_out`，避免 output 不連續
+- **不切換 output**：copy 只複製 weights（+ FDKF P），不用 `output = shadow_out`，避免 output 不連續
 - **50-frame warm-up**：收斂前兩個 filter 的 error 都不穩定，比較無意義，強行 copy 會退化
 - **Shadow full mu（1.0）**：shadow 不做 DT 保護，讓它自由追蹤（AEC3 style）
-- **嚴格 threshold（0.5）**：需 shadow 比 main 好 50%+ 才 copy，防止 DT 污染權重被 copy
-- **Copy gate**：遠端靜音或 DT 期間不允許 copy（far_active + not_dt gate）
+- **threshold（0.7）**：需 shadow 比 main 好 30%+ 才 copy，防止 DT 污染權重被 copy
+- **Copy gate**：遠端靜音或 DT 或 EPC 期間不允許 copy（far_active + not_dt + not epc_active gate）
+- **Bidirectional copy**：main 比 shadow 好時也會反向 copy（main → shadow），保持兩者同步
+- **FDKF P 同步**：copy weights 時同時複製 P（error covariance），否則 K 計算不匹配
 
 **與 DTD 的互補**：
 - DTD 模式：DTD 預防式降 mu + Shadow 事後修正，雙重保護
 - Shadow-only 模式（預設）：main filter 用 simple_mu_ratio 輕量保護，shadow copy 修正
 - 兩者可同時啟用（`--enable-dtd`），互不衝突
 
+#### FDKF 模式下的 Shadow Q Ratio
+
+FDKF 模式下，shadow 和 main 都使用 Kalman adaptation。若兩者 Q 相同，收斂速度相同，
+`shadow_err ≈ main_err` → copy gate 永不觸發 → shadow 形同虛設。
+
+**解法**：`shadow_q_ratio = 3.0`
+
+```python
+# AEC.__init__() — shadow 建立後
+if self.config.use_kalman and hasattr(self.shadow_filter, 'Q_high'):
+    self.shadow_filter.Q_high = self.filter.Q_high * self.config.shadow_q_ratio  # 3e-3
+    self.shadow_filter.Q_low  = self.filter.Q_low  * self.config.shadow_q_ratio  # 3e-5
+    self.shadow_filter.Q      = self.shadow_filter.Q_high.copy()
+```
+
+Shadow Q 更高 → K 更大 → 收斂更快 → `shadow_err < main_err × 0.7` → copy gate 觸發。
+
+| 階段 | main Q | shadow Q | shadow K | 效果 |
+|------|--------|----------|----------|------|
+| 收斂前 | 1e-3 | 3e-3 | 比 main 高 ~30% | Shadow 更快收斂，frame 5 起可觸發 copy |
+| 收斂後 | 1e-5 | 3e-5 | 比 main 高 ~30% | Shadow 更敏感追蹤 echo path 變化 |
+| Echo path 變化 | 慢速恢復 | 快速恢復 | — | Shadow ~3 幀偵測 → copy → main 快速跟上 |
+
 **參數**：
 
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
 | enable_shadow | **true** | 啟用 shadow filter（預設開啟） |
-| shadow_mu_ratio | 0.5 | shadow mu = main mu × ratio |
-| shadow_copy_threshold | **0.5** | shadow_err < main_err × threshold 時複製（需 50%+ 優勢） |
-| shadow_err_alpha | 0.95 | error energy EMA 平滑係數 |
+| shadow_mu_ratio | 1.0 | shadow mu = main mu × ratio |
+| shadow_copy_threshold | **0.7** | shadow_err < main_err × threshold 時複製（需 30%+ 優勢） |
+| shadow_err_alpha | 0.85 | error energy EMA 平滑係數 |
 | shadow_mu_min | **0.5** | Shadow-only 模式 main filter DT mu floor（50%） |
-| shadow_copy_hysteresis | 3 | 連續 N frames 才觸發複製 |
+| shadow_copy_hysteresis | 5 | 連續 N frames 才觸發複製 |
+| shadow_q_ratio | **3.0** | FDKF 模式：shadow Q = main Q × ratio（越大越積極） |
 
 **記憶體影響**：額外 ~35KB（SubbandNlms ~34KB + output buffer 1KB），可接受。
 
@@ -1075,6 +1319,164 @@ Bark Band 20: bins 100-150 (3125~4688 Hz)
 - 計算資源極度受限（MCU 等級）
 - 可接受品質下降以換取計算量減少
 - 此時建議使用 MEL scale（~40 bands），兼顧感知特性
+
+---
+
+## 11. 前處理模組
+
+### 11.1 High-Pass Filter（高通濾波器）
+
+> **實作**：`HighPassFilter` class，2 階 Butterworth IIR
+
+**目的**：移除 DC 偏移、50/60Hz 電源線干擾、低頻機械振動。
+若不移除 DC，自適應濾波器會在 DC bin 投入大量 capacity 去學習一個慢變的 offset。
+
+**實作方式**：
+```
+cutoff = 80 Hz
+bilinear transform → 2nd-order IIR (a0, a1, a2, b0, b1, b2)
+Direct Form II: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
+```
+
+分別對 mic 和 ref 各建一個 HPF instance，確保兩路有一致的相位延遲。
+
+### 11.2 Saturation Detector（飽和偵測）
+
+> **實作**：`SaturationDetector` class
+
+**問題**：Speaker 飽和時產生非線性失真（削波、諧波），echo path 不再是線性的，
+線性自適應濾波器無法正確建模 → ERLE 下降。
+
+**做法**：
+```python
+sat_ratio = count(|sample| > 0.95) / len(signal)  # [0, 1]
+# sat_ratio > 0.1 → 啟動 soft-clipping:
+soft_clipped = tanh(signal × 1.5) / tanh(1.5)
+```
+
+Soft-clip reference 讓 filter 看到的 reference 更接近 speaker 實際輸出的失真信號，
+改善 echo estimate 的準確度。同時 RES 會加大 `over_sub` 補償非線性殘餘 echo。
+
+### 11.3 Delay Estimation（延遲估計）
+
+> **實作**：`DelayEstimator` class，GCC-PHAT
+
+**問題**：真實系統中 mic 和 ref 之間有 system delay（speaker→mic 傳播 + device buffer），
+若不補償，adaptive filter 必須用部分 capacity 建模純粹的延遲，浪費 filter length。
+
+AEC Challenge 資料的典型 delay：23~127ms。
+
+**做法**：
+1. **累積 cross-spectrum**：收集 `init_seconds`（0.5s）的 mic/ref 資料
+2. **GCC-PHAT 估計**：
+   ```python
+   R_xy = Σ X_ref^* × X_mic / |X_ref^* × X_mic|   # PHAT 白化
+   r_xy = IFFT(R_xy)
+   delay = argmax(r_xy[0:max_delay])
+   ```
+3. **週期性重估**：每 `period_seconds`（2s）重新估計，若差距 > 32 samples 才更新
+4. **Ring buffer 延遲補償**：far-end 寫入 ring buffer，讀取時偏移 delay samples
+
+**關鍵發現**：
+- Plain cross-correlation（不做 PHAT whitening）在真實資料上更穩健
+- GCC-PHAT（full whitening）在 reverberant 環境中 6/10 cases 估計錯誤
+- 評測腳本 (`eval_aec_challenge.py`) 使用全信號 offline 估計以獲得最佳精度
+
+### 11.4 Reference Alignment（參考信號對齊）
+
+使用 ring buffer 實現：
+```python
+# 寫入
+_ref_ring[write_pos:write_pos+hop] = far_end
+write_pos = (write_pos + hop) % ring_size
+
+# 讀取（延遲 d samples）
+read_pos = (write_pos - hop - d) % ring_size
+far_aligned = _ref_ring[read_pos:read_pos+hop]
+```
+
+Ring buffer 大小 = `max_delay_samples + 4096`，確保有足夠的 look-back 空間。
+
+---
+
+## 12. 收斂控制與 Output Limiter
+
+### 12.1 收斂偵測
+
+**目的**：判斷 adaptive filter 是否已學到有效的 echo path，用於：
+1. Two-stage Q 切換（Q_high → Q_low）
+2. DTD 啟用門檻（收斂前不啟用 coherence/divergence 偵測）
+3. RES dynamic over_sub 計算
+4. Per-bin mu_scale（收斂後啟用）
+
+**判定條件**：
+```python
+inst_erle = 10 × log10(near_power / raw_error_power)
+if inst_erle > 6.0:
+    conv_counter += 1
+else:
+    conv_counter = 0
+
+if conv_counter >= 10:  # 連續 10 幀 (~160ms)
+    filter_converged = True
+    # 切換 Q_high → Q_low（main + shadow）
+    for filt in [main_filter, shadow_filter]:
+        filt.Q = filt.Q_low.copy()
+```
+
+6dB 門檻 + 10 幀連續要求 → 避免偶發的 ERLE spike 誤判。
+收斂後不會回退（one-shot），因為正常操作中 ERLE 不應持續低於 6dB。
+
+### 12.2 Warmup 機制
+
+前 50 幀（~0.8s）不啟用以下功能：
+- Shadow filter copy gate
+- DTD divergence/coherence 偵測
+
+原因：filter 和 PSD 估計尚未穩定，過早啟動這些機制會導致誤判。
+
+Shadow-only 模式下，前 100 幀（~1.6s）使用 warmup mu：
+```python
+if warmup_frames > 0:
+    mu_scale = min(1.0, max(0.7, ratio + 0.3))  # floor at 0.7
+```
+確保冷啟動階段 mu 不被過度壓低。
+
+### 12.3 Output Limiter
+
+**安全網**：確保 output 永不超過 mic amplitude，即使 DTD 或 adaptation 來不及反應。
+
+```python
+near_peak = max(|near_end|)
+out_peak = max(|output|)
+if out_peak > near_peak > 1e-6:
+    target_gain = near_peak / out_peak
+else:
+    target_gain = 1.0
+
+# Smoothed gain: avoid frame-boundary clicking
+if target_gain < limiter_gain:
+    alpha = 0.3   # attack: compress quickly
+else:
+    alpha = 0.8   # release: recover slowly
+limiter_gain = alpha × limiter_gain + (1-alpha) × target_gain
+output *= limiter_gain
+```
+
+**設計要點**：
+- 使用 smoothed gain 而非 instantaneous clamp，避免 frame 邊界的 click 聲
+- Attack 快（α=0.3）：一旦超過立即壓縮
+- Release 慢（α=0.8）：避免 gain pumping（gain 在壓/放之間快速抖動）
+
+### 12.4 Output Noise Gate
+
+遠端有活動但 output 已極低時（< -20dB of mic），進一步 soft fade 降低底噪：
+
+```python
+snr = out_power / near_power
+if snr < 0.01:  # -20dB
+    output *= snr / 0.01  # soft fade
+```
 
 ---
 

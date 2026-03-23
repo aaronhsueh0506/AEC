@@ -2,6 +2,45 @@
 
 ## 版本歷史
 
+### v1.12.0 (2026-03-23) - FDKF Two-stage Q + Shadow Q Ratio
+
+#### 改動內容
+
+1. **FDKF Two-stage Q**
+   - 新增 `Q_high = 1e-3`（快速收斂）和 `Q_low = 1e-5`（穩態追蹤）
+   - 收斂判定：連續 10 幀 ERLE > 6dB → 切換 Q_high → Q_low
+   - 解決 R self-reinforcing deadlock：低 Q → 低 P → 低 K → 高 R → 惡性循環
+   - FS echo_mos +0.41（2.76 → 3.17）
+
+2. **三項 Bug 修正**
+   - Bug 1: Shadow filter 缺少 `use_kalman`，導致 shadow 跑 NLMS 而 main 跑 FDKF
+   - Bug 2: `reset()` P 初始值不一致（0.1 vs init 的 0.5），Q 未重置為 Q_high
+   - Bug 3: `copy_weights_from()` 未複製 P（FDKF 需要 P 和 W 一起複製）
+
+3. **Shadow Q Ratio**
+   - 新參數 `shadow_q_ratio: float = 3.0`
+   - Shadow Q = main Q × ratio → shadow 收斂更快 → copy gate 開始觸發
+   - 解決同 Q 下 copy gate 永不觸發的問題
+   - FS echo_mos +0.03（3.17 → 3.20）
+
+#### 驗證結果（AEC Challenge, 15 files, FL=1024, subband + Shadow + FDKF + RES）
+
+| 指標 | v1.11.0 | v1.12.0 | SpeexDSP | WebRTC AEC3 |
+|---|---|---|---|---|
+| FS ERLE | 10.6 dB | **11.7 dB** | 6.9 dB | 25.8 dB |
+| FS echo_mos | 2.76 | **3.20** | 3.09 | 4.47 |
+| DT ERLE | — | **4.3 dB** | 1.3 dB | 3.7 dB |
+| DT echo_mos | — | **3.03** | 2.76 | 4.39 |
+| DT deg_mos | — | **3.52** | 3.90 | 2.51 |
+
+**關鍵發現**：
+- Two-stage Q 是最大的單一改善（FS echo_mos +0.41）
+- DT deg_mos 大幅領先 AEC3（+1.01），近端語音保留最好
+- DT ERLE 超越 AEC3（4.3 vs 3.7）
+- 測試集從 10 cases 擴充至 15 cases
+
+---
+
 ### v1.6.0 (2026-03-20) - Shadow only 預設模式
 
 #### 架構決策
@@ -365,7 +404,7 @@ Shadow 不再退化（差距 <0.3 dB），RES 在 far-only 場景提升 +4 dB。
 - [x] DTD 改為 WebRTC-style 發散偵測
 - [x] 啟用 RES post-filter（Python OLA + sqrt-Hann + Wiener gain）
 - [ ] 加入非線性處理 (NLP)
-- [ ] 延遲估計模組
+- [x] 延遲估計模組
 
 ### Phase 3: 優化
 

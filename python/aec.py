@@ -77,6 +77,7 @@ class AecConfig:
     shadow_dtd_mu_min: float = 0.2      # #1: Shadow DTD floor (20% vs main's 5%)
     shadow_mu_min: float = 0.5           # Shadow-only mode: DT mu floor (50%)
     shadow_copy_hysteresis: int = 5     # #5: Consecutive frames needed for copy
+    shadow_q_ratio: float = 3.0        # Shadow Q = main Q × ratio (FDKF mode)
 
     # Coherence DTD absolute energy floor
     dtd_coh_abs_floor: float = 1e-6     # #8: Absolute error energy floor
@@ -361,8 +362,10 @@ class SubbandNlms:
         if self.use_kalman:
             # P: error covariance (real, per-partition per-bin)
             self.P = np.ones((n_partitions, self.n_freqs), dtype=np.float32) * 0.5
-            # Q: process noise — controls adaptation speed
-            self.Q = np.ones(self.n_freqs, dtype=np.float32) * 1e-5
+            # Q: process noise — controls adaptation speed (two-stage)
+            self.Q_high = np.ones(self.n_freqs, dtype=np.float32) * 1e-3  # fast convergence
+            self.Q_low  = np.ones(self.n_freqs, dtype=np.float32) * 1e-5  # stable tracking
+            self.Q = self.Q_high.copy()  # start with high Q
             # R: measurement noise PSD (estimated from error)
             self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
             self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
@@ -376,9 +379,10 @@ class SubbandNlms:
         self.power.fill(0)
         self.partition_idx = 0
         if self.use_kalman:
-            self.P.fill(0.1)
+            self.P.fill(0.5)
             self.R.fill(1e-2)
             self._error_psd.fill(1e-2)
+            self.Q[:] = self.Q_high
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray,
                 mu_scale=1.0) -> np.ndarray:
@@ -510,6 +514,8 @@ class SubbandNlms:
 
     def copy_weights_from(self, src: 'SubbandNlms'):
         self.W[:] = src.W
+        if self.use_kalman and hasattr(src, 'P'):
+            self.P[:] = src.P
 
 
 class HighPassFilter:
@@ -1266,8 +1272,14 @@ class AEC:
                 block_size=self.filter.block_size,
                 n_partitions=self.filter.n_partitions,
                 mu=shadow_mu,
-                delta=self.config.delta
+                delta=self.config.delta,
+                use_kalman=self.config.use_kalman
             )
+            # FDKF: shadow uses higher Q for faster convergence → copy gate can trigger
+            if self.config.use_kalman and hasattr(self.shadow_filter, 'Q_high'):
+                self.shadow_filter.Q_high = self.filter.Q_high * self.config.shadow_q_ratio
+                self.shadow_filter.Q_low  = self.filter.Q_low  * self.config.shadow_q_ratio
+                self.shadow_filter.Q      = self.shadow_filter.Q_high.copy()
 
         # Echo path change detection state
         self.prev_total_err = 0.0
@@ -1425,7 +1437,7 @@ class AEC:
         """Get mu_scale from smoothed EER (per-bin array or scalar fallback)."""
         if mu_min is None:
             mu_min = self.config.shadow_mu_min
-        # Warmup: first 100 frames use high mu for fast initial convergence
+        # Warmup: first 150 frames use high mu for fast initial convergence
         if self._warmup_frames > 0:
             self._warmup_frames -= 1
             return min(1.0, max(0.7, self._simple_mu_ratio + 0.3))
@@ -1755,6 +1767,10 @@ class AEC:
                 self._conv_counter = 0
             if self._conv_counter >= 10:
                 self._filter_converged = True
+                # Switch to low Q: stable tracking mode
+                for filt in [self.filter, self.shadow_filter]:
+                    if filt and hasattr(filt, 'Q_low'):
+                        filt.Q = filt.Q_low.copy()
 
         # Record DTD confidence for plotting
         self.confidence_history.append(self.get_dtd_confidence())

@@ -41,22 +41,21 @@ def find_dt_cases(base_dir):
     dt_dir = os.path.join(base_dir, 'doubletalk')
     out_dir = os.path.join(base_dir, 'output')
 
-    fids = sorted(set(
-        f.replace('nearend_mic_fileid_', '').replace('.wav', '')
-        for f in os.listdir(dt_dir) if f.startswith('nearend_mic_fileid_')
-    ), key=int)
+    mic_files = sorted([f for f in os.listdir(dt_dir) if '_doubletalk_mic.wav' in f])
 
     cases = []
-    for fid in fids:
+    for i, mic_f in enumerate(mic_files):
+        prefix = mic_f.replace('_doubletalk_mic.wav', '')
+        lpb_f = f"{prefix}_doubletalk_lpb.wav"
         cases.append({
-            'fid': fid,
+            'idx': i,
             'type': 'dt',
-            'mic': os.path.join(dt_dir, f'nearend_mic_fileid_{fid}.wav'),
-            'lpb': os.path.join(dt_dir, f'farend_speech_fileid_{fid}.wav'),
-            'ours': os.path.join(out_dir, f'dt_{fid}_ours.wav'),
-            'ours_nores': os.path.join(out_dir, f'dt_{fid}_ours_nores.wav'),
-            'aec3': os.path.join(out_dir, f'dt_{fid}_aec3.wav'),
-            'speex': os.path.join(out_dir, f'dt_{fid}_speex.wav'),
+            'mic': os.path.join(dt_dir, mic_f),
+            'lpb': os.path.join(dt_dir, lpb_f),
+            'ours': os.path.join(out_dir, f'dt_{i}_ours.wav'),
+            'ours_nores': os.path.join(out_dir, f'dt_{i}_ours_nores.wav'),
+            'aec3': os.path.join(out_dir, f'dt_{i}_aec3.wav'),
+            'speex': os.path.join(out_dir, f'dt_{i}_speex.wav'),
         })
     return cases
 
