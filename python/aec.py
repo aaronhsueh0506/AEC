@@ -64,8 +64,8 @@ class AecConfig:
 
     # RES parameters
     enable_res: bool = False
-    res_g_min_db: float = -40.0
-    res_over_sub: float = 6.0
+    res_g_min_db: float = -25.0
+    res_over_sub: float = 3.0
     res_alpha: float = 0.8
     enable_cng: bool = True            # Comfort noise generation in RES
 
@@ -441,8 +441,10 @@ class SubbandNlms:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
         if not np.any(mu_scale_arr > 0):
             return
-        global_floor = np.mean(self.power) * 0.01 + self.delta
-        power_floor = np.maximum(self.power, global_floor)
+        # Per-bin local floor: allows low-energy mid-freq bins higher effective mu
+        local_floor = self.power * 0.01 + self.delta        # per-bin 1% floor
+        global_floor = np.mean(self.power) * 0.001 + self.delta  # global extreme floor
+        power_floor = np.maximum(self.power, np.maximum(local_floor, global_floor))
         mu_eff = (self.mu * mu_scale_arr) / (power_floor * self.n_partitions + self.delta)
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
@@ -691,7 +693,8 @@ class ResFilter:
     def process(self, error_hop: np.ndarray, echo_spec: np.ndarray,
                 far_power: float, far_spec: np.ndarray = None,
                 filter_converged: bool = False,
-                erle_factor: float = 0.0) -> np.ndarray:
+                erle_factor: float = 0.0,
+                dt_indicator: float = 0.0) -> np.ndarray:
         """Process hop-size error signal, return enhanced hop via OLA.
 
         far_spec: far-end frequency spectrum (complex), used for coherence-
@@ -764,6 +767,10 @@ class ResFilter:
             self.far_activity = 0.98 * self.far_activity + 0.02 * is_far_active
         # far_activity=1.0 → g_min normal; far_activity=0.0 → g_min→1.0 (no suppression)
         effective_g_min = self.g_min + (1.0 - self.g_min) * (1.0 - self.far_activity)
+        # DT-adaptive g_min: raise g_min during DT to preserve near-end
+        # dt_indicator high → g_min closer to -10dB; dt_indicator=0 → use configured g_min
+        dt_g_min = 10 ** (-10.0 / 20)  # -10dB floor during DT
+        effective_g_min = effective_g_min + (dt_g_min - effective_g_min) * dt_indicator
         effective_g_min = max(effective_g_min, 10 ** (-60.0 / 20))  # floor at -60dB
 
         # --- Noise gate: don't suppress quiet segments ---
@@ -1300,6 +1307,7 @@ class AEC:
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0  # holdoff counter: blocks release for N frames
+        self._warmup_frames = 100    # First 100 frames (~1.6s): high mu for fast convergence
 
         # #5: Copy hysteresis counter
         self.shadow_copy_counter = 0
@@ -1343,6 +1351,7 @@ class AEC:
         self._filter_converged = False
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0
+        self._warmup_frames = 100
         self.shadow_copy_counter = 0
         self.shadow_frame_count = 0
         if self.dtd_divergence:
@@ -1416,6 +1425,10 @@ class AEC:
         """Get mu_scale from smoothed EER (per-bin array or scalar fallback)."""
         if mu_min is None:
             mu_min = self.config.shadow_mu_min
+        # Warmup: first 100 frames use high mu for fast initial convergence
+        if self._warmup_frames > 0:
+            self._warmup_frames -= 1
+            return min(1.0, max(0.7, self._simple_mu_ratio + 0.3))
         if not self._filter_converged:
             mu_min = max(mu_min, 0.5)   # Pre-convergence: floor 0.5, ratio modulates
         else:
@@ -1435,6 +1448,13 @@ class AEC:
         error_power = np.mean(output ** 2) + 1e-10
         far_power = np.mean(far ** 2) + 1e-10
         ratio = min(far_power / error_power, 1.0)
+        # Echo estimate ratio: if filter is learning echo, don't suppress mu too much
+        if hasattr(self.filter, 'echo_spec') and self.filter.echo_spec is not None:
+            echo_est_pwr = np.sum(np.abs(self.filter.echo_spec) ** 2) + 1e-10
+            near_pwr = np.sum(np.abs(getattr(self.filter, 'near_spec', np.zeros(1))) ** 2) + 1e-10
+            if near_pwr > 1e-8:
+                ratio_echo = np.clip(echo_est_pwr / near_pwr, 0.0, 1.0)
+                ratio = max(ratio, ratio_echo * 0.5)
 
         # Asymmetric EMA + holdoff: fast attack, slow release with holdoff
         if ratio < self._simple_mu_ratio:
@@ -1615,21 +1635,27 @@ class AEC:
             # RES post-filter using OLA + sqrt-Hann (skip for buffered FDAF)
             if self.res and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
-                # Dynamic over_sub: always aggressive, scale with config
+                # Dynamic over_sub: moderate base, scale with convergence
                 inst_erle = self.get_erle_instant()
                 erle_factor = np.clip((inst_erle - 3.0) / 15.0, 0.0, 1.0)
-                # Base: use config over_sub as minimum, scale up with convergence
-                base_over_sub = self.config.res_over_sub + 2.0 * erle_factor
+                base_over_sub = 2.5 + 4.0 * erle_factor  # 2.5 (unconverged) → 6.5 (converged)
                 # Saturation boost: non-linear echo needs more suppression
                 base_over_sub += self._saturation_level * self.config.saturation_over_sub_boost
-                # DT protection: reduce suppression when near-end is active
-                dtd_conf = self.get_dtd_confidence()  # 0 if DTD disabled
-                dt_reduction = 1.5 * dtd_conf
-                self.res.over_sub = max(base_over_sub - dt_reduction, 1.0)
+                # DT protection: use DTD if enabled, otherwise far/mic ratio as DT indicator
+                if self.config.enable_dtd:
+                    dt_indicator = self.get_dtd_confidence()
+                else:
+                    far_pwr = np.mean(far_end ** 2) + 1e-10
+                    mic_pwr = np.mean(near_end ** 2) + 1e-10
+                    # near-end stronger than far-end → likely DT → reduce suppression
+                    dt_indicator = np.clip(1.0 - far_pwr / (mic_pwr + far_pwr), 0.0, 0.8)
+                dt_reduction = 3.5 * dt_indicator
+                self.res.over_sub = max(base_over_sub - dt_reduction, 0.5)
                 final_output = self.res.process(raw_output, self.filter.echo_spec,
                                                 far_power, self.filter.far_spec,
                                                 filter_converged=self._filter_converged,
-                                                erle_factor=erle_factor)
+                                                erle_factor=erle_factor,
+                                                dt_indicator=dt_indicator)
 
                 # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
                 if not self.config.enable_dtd:

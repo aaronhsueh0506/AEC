@@ -65,7 +65,7 @@ def estimate_delay(mic, ref, sr, max_delay_ms=250.0):
     return delay
 
 
-def run_ours(mic, ref, sr, fl):
+def run_ours(mic, ref, sr, fl, enable_res=True):
     # Pre-compute delay and align reference signal
     delay = estimate_delay(mic, ref, sr)
     n = min(len(mic), len(ref))
@@ -78,7 +78,7 @@ def run_ours(mic, ref, sr, fl):
 
     config = AecConfig(sample_rate=sr, mode=AecMode.SUBBAND,
                        filter_length=fl, enable_dtd=False,
-                       enable_shadow=True, enable_res=True,
+                       enable_shadow=True, enable_res=enable_res,
                        enable_delay_est=False, use_kalman=True)
     aec = AEC(config)
     hop = aec.hop_size
@@ -184,6 +184,10 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, out_dir):
         sf.write(os.path.join(out_dir, f"fs_{i}_ours.wav"), output, sr)
         e_ours = compute_erle(mic, output)
         erles['ours'].append(e_ours)
+
+        # Ours (no RES) — raw PBFDAF output
+        output_nores = run_ours(mic, ref, sr, fl, enable_res=False)
+        sf.write(os.path.join(out_dir, f"fs_{i}_ours_nores.wav"), output_nores, sr)
 
         line = f"{i:>5} {e_ours:>8.1f}"
 
@@ -293,6 +297,10 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, out_dir):
         p_ours = compute_pesq(pesq_ref, output, sr) if pesq_ref is not None else None
         if p_ours is not None:
             results['ours_pesq'].append(p_ours)
+
+        # Ours (no RES) — raw PBFDAF output
+        output_nores = run_ours(mic, ref, sr, fl, enable_res=False)
+        sf.write(os.path.join(out_dir, f"dt_{fid}_ours_nores.wav"), output_nores, sr)
 
         line = f"{fid:>6} {ser:>4} {e_ours:>6.1f}"
         line += f" {p_ours:>6.2f}" if p_ours is not None else f" {'N/A':>6}"
