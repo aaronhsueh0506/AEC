@@ -1,6 +1,6 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v1.12.0），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。
+回音消除模組（v1.13.0），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
 > C 實作僅支援 PBFDAF 模式，詳見 [c_impl/README.md](c_impl/README.md)。
 
@@ -23,6 +23,11 @@ pip install numpy soundfile
 
 # 推薦：PBFDAF + FDKF + Shadow + RES（最佳品質配置）
 python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --use-kalman
+
+# 使用 Preset（控制 echo 壓制強度）
+python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --use-kalman --preset balanced
+python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --use-kalman --preset aggressive
+python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --use-kalman --preset maximum
 
 # 無 FDKF（標準 NLMS adaptation）
 python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res
@@ -137,9 +142,21 @@ Reference Signal (far-end)        Microphone Signal (near-end)
 ## API 使用
 
 ```python
-from aec import AEC, AecConfig, AecMode
+from aec import AEC, AecConfig, AecMode, AecPreset
 
-# 推薦配置：subband + FDKF + Shadow + RES
+# 推薦：使用 Preset（自動配置 RES + adaptive filter 參數）
+config = AecConfig.from_preset(AecPreset.BALANCED,
+                               sample_rate=16000, mode=AecMode.SUBBAND,
+                               enable_res=True, use_kalman=True)
+aec = AEC(config)
+
+# 更強 echo 壓制（犧牲部分近端品質）
+config = AecConfig.from_preset(AecPreset.AGGRESSIVE,
+                               sample_rate=16000, mode=AecMode.SUBBAND,
+                               enable_res=True, use_kalman=True)
+aec = AEC(config)
+
+# 手動配置（無 preset）
 config = AecConfig(
     mode=AecMode.SUBBAND,
     enable_res=True,
@@ -149,13 +166,6 @@ aec = AEC(config)
 
 # 標準配置：subband + Shadow（無 FDKF、無 RES）
 config = AecConfig(mode=AecMode.SUBBAND)
-aec = AEC(config)
-
-# subband + DTD + Shadow（雙重保護，進階）
-config = AecConfig(
-    mode=AecMode.SUBBAND,
-    enable_dtd=True
-)
 aec = AEC(config)
 
 # 時域 NLMS 模式（無 Shadow/DTD）
@@ -189,6 +199,46 @@ while has_audio:
 | `enable_saturation_detect` | True | - | 飽和偵測（非線性 echo 處理） |
 | `enable_shadow` | True | - | Shadow filter（僅 freq/subband，預設開啟） |
 
+### AecPreset 系統
+
+三級 preset 控制 **RES 後處理** 和 **自適應濾波器** 的積極程度，提供 echo 壓制 vs 近端品質的 trade-off：
+
+| Preset | Echo 壓制 | 近端品質 | 適用場景 |
+|--------|-----------|----------|----------|
+| **BALANCED** | 適中 | 最佳保留 | 會議通話（預設） |
+| **AGGRESSIVE** | 強 | 輕微損傷 | 免持電話、車用 |
+| **MAXIMUM** | 最強 | 明顯損傷 | 揚聲器對話、高回聲環境 |
+
+**Preset 控制的參數**：
+
+| 參數 | BALANCED | AGGRESSIVE | MAXIMUM | 說明 |
+|------|----------|------------|---------|------|
+| **RES 層** | | | | |
+| `res_g_min_db` | -25 | -35 | -40 | RES 最小增益 |
+| `res_over_sub_base` | 2.5 | 4.0 | 6.0 | 過減因子基底 |
+| `res_over_sub_scale` | 4.0 | 6.0 | 8.0 | 過減因子隨 ERLE 縮放 |
+| `res_dt_reduction` | 3.5 | 2.5 | 1.5 | DT 時 over_sub 降低倍率 |
+| `res_spectral_floor_db` | -25 | -30 | -35 | 頻譜底噪估計 |
+| `shadow_q_ratio` | 3.0 | 4.0 | 5.0 | Shadow Q 倍率 |
+| **Adaptive 層** | | | | |
+| `shadow_mu_min` | 0.5 | 0.7 | 0.9 | DT 時 mu floor（越高 = 越積極更新） |
+| `warmup_frames` | 100 | 150 | 200 | 強制高 mu 的 warmup 幀數 |
+| `kalman_q_high` | 1e-3 | 3e-3 | 1e-2 | FDKF Q_high（越高 = 越快收斂） |
+
+```python
+from aec import AecConfig, AecPreset, AecMode
+
+# Preset + 自訂覆蓋
+config = AecConfig.from_preset(
+    AecPreset.AGGRESSIVE,
+    sample_rate=16000,
+    mode=AecMode.SUBBAND,
+    enable_res=True,
+    use_kalman=True,
+    filter_length=2048,   # 覆蓋 preset 以外的參數
+)
+```
+
 ### FDKF 參數 (Frequency Domain Kalman Filter)
 
 FDKF 使用 per-bin Kalman gain 取代 NLMS 的固定步長 mu，自動為每個頻率 bin 選擇最佳 adaptation rate。
@@ -206,7 +256,7 @@ R[k] = α × R[k] + (1-α) × |E[k]|²                     # Measurement noise (
 
 | 階段 | Q 值 | K (Kalman gain) | 行為 |
 |------|------|-----------------|------|
-| 收斂前 (Q_high) | 1e-3 | 0.5~0.9 | 積極更新，打破 R deadlock |
+| 收斂前 (Q_high) | `kalman_q_high`（預設 1e-3） | 0.5~0.9 | 積極更新，打破 R deadlock |
 | 收斂後 (Q_low) | 1e-5 | 0.01~0.1 | 穩態追蹤，不干擾已收斂權重 |
 | 切換條件 | — | — | 連續 10 幀 ERLE > 6dB |
 
@@ -219,8 +269,9 @@ Q_high = 1e-3 解決此問題：高 Q 持續注入 P → 即使 R 高，K 仍維
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
 | `use_kalman` | False | 啟用 FDKF adaptation |
+| `kalman_q_high` | 1e-3 | 快速收斂 process noise（Preset 可調） |
+| `warmup_frames` | 100 | 強制高 mu 的 warmup 幀數（Preset 可調） |
 | P_init | 0.5 | Per-partition per-bin 初始 error covariance |
-| Q_high | 1e-3 | 快速收斂 process noise |
 | Q_low | 1e-5 | 穩態追蹤 process noise |
 | R_init | 1e-2 | 初始 measurement noise |
 | α_R | 0.95 | R 估計 EMA 平滑係數 |
@@ -247,9 +298,9 @@ FDKF 模式下，shadow 使用 `shadow_q_ratio` 倍的 Q 值，確保 shadow 收
 
 | 階段 | main Q | shadow Q | 效果 |
 |------|--------|----------|------|
-| 收斂前 (Q_high) | 1e-3 | 3e-3 | Shadow 更快收斂，前 5 幀即可觸發 copy |
-| 收斂後 (Q_low) | 1e-5 | 3e-5 | Shadow 仍比 main 積極，echo path 變化時更快偵測 |
-| Echo path 變化 | 慢速恢復 | 3x 快速恢復 | Shadow copy 在 ~3 幀內觸發，main 快速跟上 |
+| 收斂前 (Q_high) | `kalman_q_high` | Q_high × `shadow_q_ratio` | Shadow 更快收斂，copy gate 更早觸發 |
+| 收斂後 (Q_low) | 1e-5 | Q_low × `shadow_q_ratio` | Shadow 仍比 main 積極，echo path 變化時更快偵測 |
+| Echo path 變化 | 慢速恢復 | ratio × 快速恢復 | Shadow copy 觸發，main 快速跟上 |
 
 **設計要點**：
 - Shadow 使用 full mu（1.0），不受 DT 影響，持續追蹤回音路徑
@@ -295,34 +346,32 @@ python3 plot_aec_results.py ../wav/ --mode subband --enable-res
 python3 plot_aec_results.py ../wav/ --mode subband --enable-dtd
 ```
 
-## Benchmark 比較（AEC Challenge, v1.12.0）
+## Benchmark 比較（AEC Challenge, v1.13.0）
 
-### Farend Single-Talk（15 cases）— ERLE + AECMOS
+### 三級 Preset 比較 — AECMOS
 
-測試條件：subband + Shadow + FDKF（two-stage Q）+ RES + delay pre-alignment + HPF + saturation detect。
-對照：SpeexDSP (FL=2048)、WebRTC AEC3。
+測試條件：subband + Shadow + FDKF + RES + delay pre-alignment + HPF + saturation detect。
 
-| 指標 | Ours | Ours (NoRES) | SpeexDSP | WebRTC AEC3 |
-|------|------|-------------|----------|-------------|
-| Mean ERLE | **11.7 dB** | — | 6.9 dB | 25.8 dB |
-| AECMOS echo_mos | **3.20** | 3.05 | 3.09 | 4.47 |
-| AECMOS deg_mos | **5.00** | 5.00 | 5.00 | 5.00 |
+#### Farend Single-Talk（15 cases）
 
-### Doubletalk（15 real cases）— ERLE + AECMOS
+| 指標 | BALANCED | AGGRESSIVE | MAXIMUM | SpeexDSP | WebRTC AEC3 |
+|------|----------|------------|---------|----------|-------------|
+| AECMOS echo_mos | 3.19 | **3.30** | 3.38 | 3.09 | 4.47 |
+| AECMOS deg_mos | **5.00** | **5.00** | **5.00** | 5.00 | 5.00 |
 
-| 指標 | Ours | Ours (NoRES) | SpeexDSP | WebRTC AEC3 |
-|------|------|-------------|----------|-------------|
-| Mean ERLE | **4.3 dB** | — | 1.3 dB | 3.7 dB |
-| AECMOS echo_mos | **3.03** | 2.51 | 2.76 | 4.39 |
-| AECMOS deg_mos | **3.52** | 3.58 | 3.90 | 2.51 |
+#### Doubletalk（15 real cases）
+
+| 指標 | BALANCED | AGGRESSIVE | MAXIMUM | SpeexDSP | WebRTC AEC3 |
+|------|----------|------------|---------|----------|-------------|
+| AECMOS echo_mos | 3.02 | 3.21 | **3.33** | 2.76 | 4.39 |
+| AECMOS deg_mos | **3.52** | 3.29 | 3.10 | 3.90 | 2.51 |
 
 > **解讀**：
-> - **DT ERLE 超越 AEC3（4.3 vs 3.7）**：我們的線性濾波器在 DT 場景 ERLE 更高。
-> - **DT deg_mos 大幅領先 AEC3（3.52 vs 2.51, +1.01）**：AEC3 嚴重損傷近端語音，我們保留最好。
-> - FS echo_mos 3.20，差 AEC3 1.27。差距主要來自 AEC3 的 NLP（非線性後處理），而非線性濾波器性能。
-> - 線性濾波器 ERLE 理論上限 ~5dB（time-varying echo path），RES 提供額外 2-4dB 壓制。
-> - v1.12.0 vs v1.11.0：FS echo_mos +0.44（2.76→3.20），最大單次改善。
-> - 詳見 [docs/aec_improve_v5.md](docs/aec_improve_v5.md)。
+> - **Preset 提供明確 trade-off**：BALANCED→MAXIMUM，FS echo_mos +0.19，DT echo_mos +0.31，DT deg_mos -0.42。
+> - **AGGRESSIVE 推薦**：FS echo_mos 3.30, DT echo_mos 3.21, DT deg_mos 3.29 — 最佳平衡點。
+> - **DT deg_mos 全面領先 AEC3**：即使 MAXIMUM (3.10) 仍大幅優於 AEC3 (2.51)。
+> - FS echo_mos 差距主要來自 AEC3 的 NLP（非線性後處理），而非線性濾波器性能。
+> - 詳見 [docs/aec_improve_v6.md](docs/aec_improve_v6.md)。
 
 ### 工具
 
@@ -331,8 +380,17 @@ python3 plot_aec_results.py ../wav/ --mode subband --enable-dtd
 cd AEC
 python3 python/eval_aec_challenge.py wav/aec_challenge/ --aec3 --speex
 
+# 指定 preset
+python3 python/eval_aec_challenge.py wav/aec_challenge/ --preset aggressive
+
+# 比較全部 preset
+python3 python/eval_aec_challenge.py wav/aec_challenge/ --all-presets
+
 # AECMOS 評估（需 speechmos + onnxruntime，Python 3.13+）
 /opt/homebrew/bin/python3 python/eval_aecmos.py wav/aec_challenge/
+
+# AECMOS 比較全部 preset
+/opt/homebrew/bin/python3 python/eval_aecmos.py wav/aec_challenge/ --all-presets
 ```
 
 ## 效能指標
@@ -368,6 +426,7 @@ AEC/
 │   ├── aec_improve_v3.md      # v1.9.0 改善紀錄（Delay+FDKF+RES）
 │   ├── aec_improve_v4.md      # v1.11.0 改善紀錄（warmup+adaptive g_min+AECMOS）
 │   ├── aec_improve_v5.md      # v1.12.0 改善紀錄（Two-stage Q+Shadow Q ratio）
+│   ├── aec_improve_v6.md      # v1.13.0 改善紀錄（Preset adaptive filter 層）
 │   ├── dtd_design.md          # DTD 設計文檔（完整說明）
 │   └── DEVLOG.md              # 開發紀錄
 └── wav/                       # 測試音檔

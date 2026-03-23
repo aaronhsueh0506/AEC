@@ -2,6 +2,54 @@
 
 ## 版本歷史
 
+### v1.13.0 (2026-03-23) - Preset Adaptive Filter 層參數
+
+#### 改動內容
+
+1. **AecConfig 新增可配置參數**
+   - `kalman_q_high: float = 1e-3`：FDKF Q_high 收斂速度（原 hardcoded）
+   - `warmup_frames: int = 100`：強制高 mu 的 warmup 幀數（原 hardcoded 100）
+
+2. **AecPreset 新增 Adaptive Filter 層控制**
+   - v1.12.0 的 preset 僅控制 RES 後處理層
+   - v1.13.0 擴展至自適應濾波器層：`shadow_mu_min`、`warmup_frames`、`kalman_q_high`
+   - 更高的值 = 更快收斂 + 更強 echo 消除，代價是 DT 時近端品質降低
+
+   | 參數 | BALANCED | AGGRESSIVE | MAXIMUM |
+   |------|----------|------------|---------|
+   | shadow_mu_min | 0.5 | 0.7 | 0.9 |
+   | warmup_frames | 100 | 150 | 200 |
+   | kalman_q_high | 1e-3 | 3e-3 | 1e-2 |
+
+3. **AEC.__init__() 套用 config 參數**
+   - FDKF 模式：用 `config.kalman_q_high` 設定 main filter 的 Q_high/Q，再乘 `shadow_q_ratio` 給 shadow
+   - warmup: 使用 `config.warmup_frames` 取代 hardcoded 100
+
+#### 驗證結果（AEC Challenge, 15 files, FL=1024, subband + Shadow + FDKF + RES）
+
+**Farend Single-Talk AECMOS**：
+
+| Preset | echo_mos | deg_mos | vs v1.12.0 (no preset) |
+|--------|----------|---------|------------------------|
+| BALANCED | 3.19 | 5.00 | ≈ baseline |
+| AGGRESSIVE | **3.30** | 5.00 | **+0.10** |
+| MAXIMUM | 3.38 | 5.00 | +0.18 |
+
+**Doubletalk AECMOS**：
+
+| Preset | echo_mos | deg_mos | 備註 |
+|--------|----------|---------|------|
+| BALANCED | 3.02 | 3.52 | 近端保留最佳 |
+| AGGRESSIVE | **3.21** | 3.29 | **推薦平衡點** |
+| MAXIMUM | 3.33 | 3.10 | echo 最低，近端損傷明顯 |
+
+**關鍵發現**：
+- Adaptive 層參數是 echo_mos 改善的主力（shadow_mu_min + kalman_q_high 加速收斂）
+- AGGRESSIVE 推薦：FS echo_mos 3.30 (+0.10), DT echo_mos 3.21 (+0.19), DT deg_mos 3.29 (-0.23) — 可接受的 trade-off
+- 即使 MAXIMUM 的 DT deg_mos (3.10) 仍大幅領先 AEC3 (2.51)
+
+---
+
 ### v1.12.0 (2026-03-23) - FDKF Two-stage Q + Shadow Q Ratio
 
 #### 改動內容
