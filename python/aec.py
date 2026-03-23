@@ -65,7 +65,7 @@ class AecConfig:
     # RES parameters
     enable_res: bool = False
     res_g_min_db: float = -40.0
-    res_over_sub: float = 10.0
+    res_over_sub: float = 6.0
     res_alpha: float = 0.8
     enable_cng: bool = True            # Comfort noise generation in RES
 
@@ -96,6 +96,22 @@ class AecConfig:
     delay_est_period_s: float = 2.0     # Re-estimate delay every N seconds
     delay_est_init_s: float = 0.5       # Accumulate this much data before first estimate
     fixed_delay_samples: int = -1       # If >= 0, use this fixed delay instead of estimation
+
+    # High-pass filter (DC blocker + low-freq removal)
+    enable_highpass: bool = True
+    highpass_cutoff_hz: float = 80.0    # Cutoff freq: removes DC, 50/60Hz hum, rumble
+
+    # Saturation / non-linear echo handling
+    enable_saturation_detect: bool = True
+    saturation_threshold: float = 0.95       # |sample| > threshold → clipping
+    saturation_over_sub_boost: float = 3.0   # Extra over_sub during saturation
+    saturation_softclip_ref: bool = True     # Soft-clip reference for better filter modeling
+
+    # RES anti-blackout
+    res_max_drop_db_per_frame: float = 6.0   # Max gain drop per frame (dB)
+    res_max_rise_db_per_frame: float = 6.0   # Max gain rise per frame (dB)
+    res_spectral_floor: bool = True          # Spectral-shape-preserving gain floor
+    res_spectral_floor_db: float = -25.0     # Floor relative to spectral envelope
 
     # Mode
     mode: AecMode = AecMode.NLMS
@@ -494,6 +510,113 @@ class SubbandNlms:
         self.W[:] = src.W
 
 
+class HighPassFilter:
+    """2nd-order Butterworth IIR high-pass filter (bilinear transform).
+
+    Removes DC offset, 50/60Hz hum, and low-frequency rumble.
+    12 dB/octave rolloff. Processes sample-by-sample with two delay states.
+    """
+
+    def __init__(self, cutoff_hz: float, sample_rate: int):
+        # Bilinear transform: pre-warp analog frequency
+        wc = 2.0 * np.pi * cutoff_hz / sample_rate
+        wc_w = np.tan(wc / 2.0)
+        k = wc_w * wc_w
+        sqrt2 = np.sqrt(2.0)
+        norm = 1.0 / (1.0 + sqrt2 * wc_w + k)
+
+        # Transfer function coefficients (Direct Form II)
+        self.b0 = norm
+        self.b1 = -2.0 * norm
+        self.b2 = norm
+        self.a1 = 2.0 * (k - 1.0) * norm
+        self.a2 = (1.0 - sqrt2 * wc_w + k) * norm
+
+        # Delay states
+        self.z1 = 0.0
+        self.z2 = 0.0
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        """Process a block of samples through the HP filter."""
+        out = np.empty_like(x)
+        b0, b1, b2, a1, a2 = self.b0, self.b1, self.b2, self.a1, self.a2
+        z1, z2 = self.z1, self.z2
+        for i in range(len(x)):
+            xi = float(x[i])
+            yi = b0 * xi + z1
+            z1 = b1 * xi - a1 * yi + z2
+            z2 = b2 * xi - a2 * yi
+            out[i] = yi
+        self.z1, self.z2 = z1, z2
+        return out
+
+    def reset(self):
+        self.z1 = 0.0
+        self.z2 = 0.0
+
+
+class SaturationDetector:
+    """Detects speaker clipping/saturation in audio signals.
+
+    Returns a smoothed saturation_level in [0, 1] indicating how much
+    non-linear distortion is present. Also provides soft-clipping to
+    model the speaker's saturation behavior for the adaptive filter.
+    """
+
+    def __init__(self, threshold: float = 0.95):
+        self.threshold = threshold
+        self.saturation_level = 0.0
+        self.alpha_attack = 0.3    # Fast attack when saturation detected
+        self.alpha_release = 0.98  # Slow release (echo path retains saturation effects)
+
+    def detect(self, signal: np.ndarray) -> float:
+        """Detect saturation level in signal. Returns smoothed level in [0, 1]."""
+        n = len(signal)
+        if n == 0:
+            return self.saturation_level
+
+        abs_sig = np.abs(signal)
+        # Count clipped samples
+        clip_count = np.sum(abs_sig > self.threshold)
+
+        # Count consecutive identical peak samples (digital clipping signature)
+        consec_count = 0
+        high_mask = abs_sig > self.threshold * 0.8
+        for i in range(1, n):
+            if high_mask[i] and high_mask[i - 1] and abs(signal[i] - signal[i - 1]) < 1e-6:
+                consec_count += 1
+
+        raw_sat = min((clip_count + 2 * consec_count) / n, 1.0)
+
+        # Asymmetric EMA
+        if raw_sat > self.saturation_level:
+            alpha = self.alpha_attack
+        else:
+            alpha = self.alpha_release
+        self.saturation_level = alpha * self.saturation_level + (1.0 - alpha) * raw_sat
+        return self.saturation_level
+
+    @staticmethod
+    def soft_clip(signal: np.ndarray, knee: float = 0.8) -> np.ndarray:
+        """Soft-clip signal to model speaker saturation behavior.
+
+        Below knee: pass through. Above knee: tanh compression.
+        """
+        out = signal.copy()
+        abs_sig = np.abs(signal)
+        mask = abs_sig >= knee
+        if np.any(mask):
+            sign = np.sign(signal[mask])
+            excess = abs_sig[mask] - knee
+            scale = 1.0 - knee
+            compressed = knee + np.tanh(excess / max(scale, 1e-6)) * scale
+            out[mask] = sign * compressed
+        return out
+
+    def reset(self):
+        self.saturation_level = 0.0
+
+
 class ResFilter:
     """
     Residual Echo Suppressor (Post-Filter)
@@ -504,14 +627,18 @@ class ResFilter:
 
     def __init__(self, block_size: int, n_freqs: int, g_min_db: float = -20.0,
                  over_sub: float = 1.5, alpha: float = 0.8,
-                 enable_cng: bool = False):
+                 enable_cng: bool = False,
+                 max_drop_db_per_frame: float = 6.0,
+                 max_rise_db_per_frame: float = 3.0,
+                 enable_spectral_floor: bool = True,
+                 spectral_floor_db: float = -25.0):
         self.block_size = block_size
         self.hop_size = block_size // 2
         self.n_freqs = n_freqs
         self.g_min = 10 ** (g_min_db / 20)
         self.over_sub = over_sub
         self.alpha = alpha
-        self.alpha_echo_psd = 0.5    # echo PSD: fast tracking (TC≈32ms)
+        self.alpha_echo_psd = 0.7    # echo PSD: moderate tracking (TC≈53ms), was 0.5
         self.alpha_error_psd = 0.8   # error PSD: moderate TC≈80ms
 
         self.gain_smooth = np.full(n_freqs, self.g_min, dtype=np.float32)
@@ -533,6 +660,16 @@ class ResFilter:
 
         # Far-end activity tracking for dynamic g_min
         self.far_activity = 0.0
+
+        # Anti-blackout: gain rate limiting
+        self.max_drop_ratio = 10 ** (max_drop_db_per_frame / 20)  # e.g., 6dB → 1.995
+        self.max_rise_ratio = 10 ** (max_rise_db_per_frame / 20)  # e.g., 3dB → 1.413
+
+        # Spectral-shape-preserving floor
+        self.enable_spectral_floor = enable_spectral_floor
+        self.spectral_floor_ratio = 10 ** (spectral_floor_db / 20)  # e.g., -25dB → 0.056
+        self.error_envelope = np.ones(n_freqs, dtype=np.float32)
+        self.alpha_envelope = 0.95  # Slow-tracking spectral envelope
 
         # OLA: sqrt-Hann window + sliding input buffer + overlap buffer
         self.window = np.sqrt(np.hanning(block_size)).astype(np.float32)
@@ -644,7 +781,20 @@ class ResFilter:
         else:
             eer = eer_converged
 
-        g = np.maximum(1.0 - self.over_sub * eer, effective_g_min)
+        # --- Spectral-shape-preserving floor ---
+        if self.enable_spectral_floor and far_power > 1e-4:
+            error_mag = np.sqrt(error_pwr + 1e-10)
+            self.error_envelope = (self.alpha_envelope * self.error_envelope
+                                   + (1 - self.alpha_envelope) * error_mag)
+            env_max = np.max(self.error_envelope) + 1e-10
+            env_normalized = self.error_envelope / env_max
+            # Bins with more energy get higher floor → preserves spectral shape
+            spectral_g_min = effective_g_min + (1.0 - effective_g_min) * env_normalized * self.spectral_floor_ratio
+            spectral_g_min = np.maximum(spectral_g_min, effective_g_min)
+        else:
+            spectral_g_min = effective_g_min
+
+        g = np.maximum(1.0 - self.over_sub * eer, spectral_g_min)
         g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
 
         # Temporal smoothing: far_activity-driven release (no feedback loop)
@@ -655,7 +805,24 @@ class ResFilter:
         # Attack alpha: slow when unconverged (suppress oscillation), fast when converged
         alpha_attack = 0.60 + 0.25 * (1.0 - erle_factor)
         alpha_g = np.where(g < self.gain_smooth, alpha_attack, alpha_release)
-        self.gain_smooth = alpha_g * self.gain_smooth + (1 - alpha_g) * g
+        smoothed = alpha_g * self.gain_smooth + (1 - alpha_g) * g
+
+        # --- Gain rate limiting: prevent sudden blackout / pop ---
+        # Relax rate limiting when far-end is silent (near-end needs to pass through)
+        activity_scale = 0.5 + 0.5 * self.far_activity  # [0.5, 1.0]
+        eff_drop = self.max_drop_ratio ** activity_scale  # Less limiting when silent
+        eff_rise = self.max_rise_ratio ** (1.0 / activity_scale)  # More permissive when silent
+        gain_floor = self.gain_smooth / eff_drop
+        gain_ceil = self.gain_smooth * eff_rise
+        smoothed = np.maximum(smoothed, gain_floor)
+        smoothed = np.minimum(smoothed, gain_ceil)
+        # Clamp to valid range
+        if isinstance(spectral_g_min, np.ndarray):
+            smoothed = np.maximum(smoothed, spectral_g_min)
+        else:
+            smoothed = np.maximum(smoothed, effective_g_min)
+        smoothed = np.minimum(smoothed, 1.0)
+        self.gain_smooth = smoothed
 
         # Apply gain + synthesis sqrt-Hann window + IFFT
         enhanced_spec = self.gain_smooth * spec
@@ -1069,7 +1236,11 @@ class AEC:
                 g_min_db=self.config.res_g_min_db,
                 over_sub=self.config.res_over_sub,
                 alpha=self.config.res_alpha,
-                enable_cng=self.config.enable_cng
+                enable_cng=self.config.enable_cng,
+                max_drop_db_per_frame=self.config.res_max_drop_db_per_frame,
+                max_rise_db_per_frame=self.config.res_max_rise_db_per_frame,
+                enable_spectral_floor=self.config.res_spectral_floor,
+                spectral_floor_db=self.config.res_spectral_floor_db
             )
         else:
             self.res = None
@@ -1108,6 +1279,23 @@ class AEC:
 
         # Output limiter: smoothed gain to avoid frame-boundary clicking
         self._limiter_gain = 1.0
+
+        # High-pass filter (DC blocker + low-freq removal)
+        if self.config.enable_highpass:
+            self._hp_mic = HighPassFilter(self.config.highpass_cutoff_hz, self.config.sample_rate)
+            self._hp_ref = HighPassFilter(self.config.highpass_cutoff_hz, self.config.sample_rate)
+        else:
+            self._hp_mic = None
+            self._hp_ref = None
+
+        # Saturation detector (non-linear echo handling)
+        if self.config.enable_saturation_detect:
+            self._sat_detector_ref = SaturationDetector(self.config.saturation_threshold)
+            self._sat_detector_mic = SaturationDetector(self.config.saturation_threshold)
+        else:
+            self._sat_detector_ref = None
+            self._sat_detector_mic = None
+        self._saturation_level = 0.0
 
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
         self._simple_mu_ratio = 1.0
@@ -1178,6 +1366,13 @@ class AEC:
         self.raw_error_power_sum = 0.0
         self.final_error_power_sum = 0.0
         self._conv_counter = 0
+        if self._hp_mic is not None:
+            self._hp_mic.reset()
+            self._hp_ref.reset()
+        if self._sat_detector_ref is not None:
+            self._sat_detector_ref.reset()
+            self._sat_detector_mic.reset()
+        self._saturation_level = 0.0
 
     @property
     def hop_size(self) -> int:
@@ -1256,6 +1451,19 @@ class AEC:
         self._simple_mu_ratio = alpha * self._simple_mu_ratio + (1 - alpha) * ratio
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
+        # High-pass filter: remove DC + low-freq noise
+        if self._hp_mic is not None:
+            near_end = self._hp_mic.process(near_end.copy())
+            far_end = self._hp_ref.process(far_end.copy())
+
+        # Saturation detection + soft-clip reference
+        if self._sat_detector_ref is not None:
+            sat_ref = self._sat_detector_ref.detect(far_end)
+            sat_mic = self._sat_detector_mic.detect(near_end)
+            self._saturation_level = max(sat_ref, sat_mic * 0.5)
+            if self.config.saturation_softclip_ref and sat_ref > 0.1:
+                far_end = SaturationDetector.soft_clip(far_end.copy())
+
         # Delay estimation + reference alignment
         if self._delay_active:
             hop = len(far_end)
@@ -1412,6 +1620,8 @@ class AEC:
                 erle_factor = np.clip((inst_erle - 3.0) / 15.0, 0.0, 1.0)
                 # Base: use config over_sub as minimum, scale up with convergence
                 base_over_sub = self.config.res_over_sub + 2.0 * erle_factor
+                # Saturation boost: non-linear echo needs more suppression
+                base_over_sub += self._saturation_level * self.config.saturation_over_sub_boost
                 # DT protection: reduce suppression when near-end is active
                 dtd_conf = self.get_dtd_confidence()  # 0 if DTD disabled
                 dt_reduction = 1.5 * dtd_conf
@@ -1654,6 +1864,11 @@ Examples:
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
     parser.add_argument('--no-cng', action='store_true', help='Disable comfort noise generation in RES')
     parser.add_argument('--no-shadow', action='store_true', help='Disable shadow filter')
+    parser.add_argument('--no-highpass', action='store_true', help='Disable high-pass filter')
+    parser.add_argument('--highpass-cutoff', type=float, default=80.0,
+                        help='High-pass filter cutoff frequency in Hz (default: 80)')
+    parser.add_argument('--no-saturation-detect', action='store_true',
+                        help='Disable saturation/clipping detection')
     parser.add_argument('--clear-history', action='store_true',
                         help='Clear TIME/LMS buffer each block (no carry-over)')
 
@@ -1693,6 +1908,9 @@ Examples:
         res_g_min_db=args.res_g_min,
         enable_cng=not args.no_cng,
         enable_shadow=not args.no_shadow,
+        enable_highpass=not args.no_highpass,
+        highpass_cutoff_hz=args.highpass_cutoff,
+        enable_saturation_detect=not args.no_saturation_detect,
         clear_filter_history=args.clear_history
     )
 
