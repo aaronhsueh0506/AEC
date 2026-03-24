@@ -86,7 +86,8 @@ class AecConfig:
 
     # FDKF (Frequency Domain Kalman Filter) — faster convergence than NLMS
     use_kalman: bool = True
-    kalman_q_high: float = 1e-3       # FDKF Q_high convergence speed
+    kalman_q_high: float = 1e-4       # FDKF Q_high convergence speed (1e-3 causes weight jitter)
+    kalman_q_low: float = 1e-7        # FDKF Q_low stable tracking (lower = less weight jitter)
     warmup_frames: int = 100          # Frames with forced high mu at startup
 
     # Echo path change detection (requires shadow filter)
@@ -179,7 +180,7 @@ class AecConfig:
                 # Adaptive filter
                 shadow_mu_min=0.5,
                 warmup_frames=100,
-                kalman_q_high=1e-3,
+                kalman_q_high=1e-4,
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
@@ -203,7 +204,7 @@ class AecConfig:
                 # Adaptive filter
                 shadow_mu_min=0.7,
                 warmup_frames=150,
-                kalman_q_high=3e-3,
+                kalman_q_high=1e-4,
             )
         elif preset == AecPreset.MAXIMUM:
             defaults = dict(
@@ -227,7 +228,7 @@ class AecConfig:
                 # Adaptive filter
                 shadow_mu_min=0.9,
                 warmup_frames=200,
-                kalman_q_high=1e-2,
+                kalman_q_high=1e-4,
             )
         else:
             defaults = {}
@@ -466,10 +467,10 @@ class SubbandNlms:
         # FDKF state: per-partition, per-bin error covariance
         if self.use_kalman:
             # P: error covariance (real, per-partition per-bin)
-            self.P = np.ones((n_partitions, self.n_freqs), dtype=np.float32) * 0.5
+            self.P = np.ones((n_partitions, self.n_freqs), dtype=np.float32) * 0.01
             # Q: process noise — controls adaptation speed (two-stage)
-            self.Q_high = np.ones(self.n_freqs, dtype=np.float32) * 1e-3  # fast convergence
-            self.Q_low  = np.ones(self.n_freqs, dtype=np.float32) * 1e-5  # stable tracking
+            self.Q_high = np.ones(self.n_freqs, dtype=np.float32) * 1e-4  # fast convergence
+            self.Q_low  = np.ones(self.n_freqs, dtype=np.float32) * 1e-7  # stable tracking (low = less jitter)
             self.Q = self.Q_high.copy()  # start with high Q
             # R: measurement noise PSD (estimated from error)
             self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
@@ -484,7 +485,7 @@ class SubbandNlms:
         self.power.fill(0)
         self.partition_idx = 0
         if self.use_kalman:
-            self.P.fill(0.5)
+            self.P.fill(0.01)
             self.R.fill(1e-2)
             self._error_psd.fill(1e-2)
             self.Q[:] = self.Q_high
@@ -532,9 +533,10 @@ class SubbandNlms:
         error_time[-hop:] = output
         self.error_spec = np.fft.rfft(error_time)
 
-        # Update weights
-        total_power = np.sum(self.power)
-        if total_power > self.delta * self.n_freqs:
+        # Update weights — gate on far-end activity
+        # Use energy of current hop (not smoothed) for responsive activity detection
+        far_hop_energy = np.sum(far_end ** 2) / hop  # mean power of far-end hop
+        if far_hop_energy > 1e-6:  # ~ -60 dBFS, skip update during ref silence
             if self.use_kalman:
                 self._update_kalman(curr_p, mu_scale)
             else:
@@ -587,6 +589,14 @@ class SubbandNlms:
         # R = smoothed error PSD (represents noise + residual echo)
         self.R = np.maximum(self._error_psd, self.delta)
 
+        # Per-bin far-end activity mask: only add Q where ref has energy
+        # Prevents P from growing unboundedly during silence
+        far_power_smooth = self.power  # already smoothed
+        far_activity_mask = far_power_smooth > (np.mean(far_power_smooth) * 0.01 + 1e-6)
+        Q_gated = np.where(far_activity_mask, self.Q, 0.0)
+
+        P_MAX = 0.02  # prevent P explosion; steady-state P ≈ 1e-3
+
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
             X = self.X_buf[p_idx]
@@ -603,8 +613,12 @@ class SubbandNlms:
             self.W[p] += K * self.error_spec
 
             # Covariance update: P = (1 - K*X) * P + Q
+            # Q only added for bins with far-end activity; P clamped to P_MAX
             KX = np.real(K * X)
-            self.P[p] = np.maximum((1.0 - KX) * self.P[p] + self.Q, self.delta)
+            self.P[p] = np.minimum(
+                np.maximum((1.0 - KX) * self.P[p] + Q_gated, self.delta),
+                P_MAX
+            )
 
             # Time-domain constraint: zero out non-causal part
             w_time = np.fft.irfft(self.W[p], self.block_size)
@@ -1521,9 +1535,10 @@ class AEC:
                 use_kalman=self.config.use_kalman,
                 hop_size=self.filter.hop_size
             )
-            # FDKF: apply config Q_high, then shadow uses higher Q via ratio
+            # FDKF: apply config Q_high/Q_low, then shadow uses higher Q via ratio
             if self.config.use_kalman and hasattr(self.filter, 'Q_high'):
                 self.filter.Q_high[:] = self.config.kalman_q_high
+                self.filter.Q_low[:]  = self.config.kalman_q_low
                 self.filter.Q[:] = self.config.kalman_q_high
             if self.config.use_kalman and hasattr(self.shadow_filter, 'Q_high'):
                 self.shadow_filter.Q_high = self.filter.Q_high * self.config.shadow_q_ratio
@@ -1892,6 +1907,12 @@ class AEC:
                     self.dtd_coherence.confidence *= 0.3
                     self.epc_hangover_count = self.config.epc_hangover
                     self.epc_active = True
+                    # Reset Q to Q_high for fast re-convergence
+                    for filt in [self.filter, self.shadow_filter]:
+                        if filt and hasattr(filt, 'Q'):
+                            filt.Q = filt.Q_high.copy()
+                    self._filter_converged = False
+                    self._conv_counter = 0
                 elif self.epc_hangover_count > 0:
                     self.epc_hangover_count -= 1
                     self.epc_active = True
@@ -2029,7 +2050,6 @@ class AEC:
                 for filt in [self.filter, self.shadow_filter]:
                     if filt and hasattr(filt, 'Q_low'):
                         filt.Q = filt.Q_low.copy()
-
         # Record DTD confidence for plotting
         self.confidence_history.append(self.get_dtd_confidence())
 
