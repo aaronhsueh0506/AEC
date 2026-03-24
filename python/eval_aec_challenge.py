@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Evaluate AEC on AEC Challenge dataset.
-- farend_singletalk: ERLE metric
-- doubletalk (synthetic): PESQ metric (using nearend_speech * nearend_scale as ref)
+- farend_singletalk: ERLE metric (echo removal)
+- nearend_singletalk: SDR metric (near-end preservation)
+- doubletalk: ERLE metric (both)
 
 Usage:
     python3 eval_aec_challenge.py ../wav/aec_challenge/ --aec3 --speex
@@ -138,6 +139,21 @@ def compute_erle(mic, output):
     return 10.0 * np.log10(mic_pwr / (out_pwr + 1e-20))
 
 
+def compute_sdr(mic, output):
+    """Signal-to-Distortion Ratio: how well near-end is preserved.
+
+    SDR = 10*log10(sum(mic²) / sum((mic - output)²))
+    Higher = less distortion. Inf means perfect passthrough.
+    """
+    n = min(len(mic), len(output))
+    mic, output = mic[:n], output[:n]
+    sig_pwr = np.mean(mic ** 2)
+    dist_pwr = np.mean((mic - output) ** 2)
+    if dist_pwr < 1e-20:
+        return 60.0
+    return 10.0 * np.log10(sig_pwr / (dist_pwr + 1e-20))
+
+
 def compute_pesq(ref, deg, sr):
     if not HAS_PESQ:
         return None
@@ -228,6 +244,82 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, out_dir, preset=None
         summary += f" {np.mean(erles['speex']):>8.1f}"
     if do_aec3 and erles['aec3']:
         summary += f" {np.mean(erles['aec3']):>8.1f}"
+    print(summary)
+
+
+def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, out_dir, preset=None):
+    """Evaluate nearend_singletalk with SDR (near-end preservation)."""
+    sc_dir = os.path.join(base_dir, 'nearend_singletalk')
+    if not os.path.isdir(sc_dir):
+        print("No nearend_singletalk directory found, skipping")
+        return
+
+    mic_files = sorted([f for f in os.listdir(sc_dir) if '_nearend_singletalk_mic.wav' in f])
+    if not mic_files:
+        print("No nearend_singletalk files found")
+        return
+
+    print(f"\n{'='*60}")
+    print(f"NEAREND SINGLETALK — SDR ({len(mic_files)} cases)")
+    print(f"{'='*60}")
+
+    hdr = f"{'Case':>5} {'Ours':>8}"
+    if do_speex: hdr += f" {'Speex':>8}"
+    if do_aec3:  hdr += f" {'AEC3':>8}"
+    print(hdr)
+    print("-" * len(hdr))
+
+    sdrs = {'ours': [], 'speex': [], 'aec3': []}
+
+    for i, mf in enumerate(mic_files):
+        uuid = mf.replace('_nearend_singletalk_mic.wav', '')
+        lpb_f = f'{uuid}_nearend_singletalk_lpb.wav'
+        mic_path = os.path.join(sc_dir, mf)
+        lpb_path = os.path.join(sc_dir, lpb_f)
+
+        mic, sr = sf.read(mic_path)
+        ref, _ = sf.read(lpb_path)
+        mic, ref = mic.astype(np.float32), ref.astype(np.float32)
+        n = min(len(mic), len(ref))
+        mic, ref = mic[:n], ref[:n]
+
+        # Ours
+        output = run_ours(mic, ref, sr, fl, preset=preset)
+        sf.write(os.path.join(out_dir, f"ne_{i}_ours.wav"), output, sr)
+        s_ours = compute_sdr(mic, output)
+        sdrs['ours'].append(s_ours)
+
+        line = f"{i:>5} {s_ours:>8.1f}"
+
+        # Speex
+        if do_speex:
+            out_sp = run_speex(mic, ref, sr)
+            sf.write(os.path.join(out_dir, f"ne_{i}_speex.wav"), out_sp, sr)
+            s_sp = compute_sdr(mic, out_sp)
+            sdrs['speex'].append(s_sp)
+            line += f" {s_sp:>8.1f}"
+
+        # AEC3
+        if do_aec3:
+            out_a3 = run_aec3(mic_path, lpb_path, sr)
+            if out_a3 is not None:
+                out_a3 = out_a3[:n]
+                sf.write(os.path.join(out_dir, f"ne_{i}_aec3.wav"), out_a3, sr)
+                s_a3 = compute_sdr(mic, out_a3)
+                sdrs['aec3'].append(s_a3)
+                line += f" {s_a3:>8.1f}"
+            else:
+                line += f" {'N/A':>8}"
+
+        print(line)
+
+    # Summary
+    print("-" * len(hdr))
+    summary = f"{'MEAN':>5} {np.mean(sdrs['ours']):>8.1f}"
+    if do_speex and sdrs['speex']:
+        summary += f" {np.mean(sdrs['speex']):>8.1f}"
+    if do_aec3 and sdrs['aec3']:
+        summary += f" {np.mean(sdrs['aec3']):>8.1f}"
     print(summary)
 
 
@@ -348,10 +440,12 @@ def main():
             print(f"  PRESET: {p.value.upper()}")
             print(f"{'#'*60}")
             eval_farend_singletalk(base_dir, args.filter, do_speex, do_aec3, preset_dir, preset=p)
+            eval_nearend_singletalk(base_dir, args.filter, do_speex, do_aec3, preset_dir, preset=p)
             eval_doubletalk(base_dir, args.filter, do_speex, do_aec3, preset_dir, preset=p)
     else:
         preset = AecPreset(args.preset) if args.preset else None
         eval_farend_singletalk(base_dir, args.filter, do_speex, do_aec3, out_dir, preset=preset)
+        eval_nearend_singletalk(base_dir, args.filter, do_speex, do_aec3, out_dir, preset=preset)
         eval_doubletalk(base_dir, args.filter, do_speex, do_aec3, out_dir, preset=preset)
 
     print(f"\nOutput saved to {out_dir}")
