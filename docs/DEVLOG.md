@@ -2,6 +2,47 @@
 
 ## 版本歷史
 
+### v1.18.0 (2026-03-24) - Reverb Render Signal + Divergence Suppression + Delay Tracking
+
+#### 改動內容
+
+1. **Reverb tail 改用 render signal 估計**
+   - 改前：`reverb_psd = decay × reverb_psd + (1-decay) × |echo_spec|²`（依賴 filter 建模品質）
+   - 改後：`reverb_psd = decay × reverb_psd + (1-decay) × |far_spec|²`（直接用 render signal）
+   - `far_spec` 代表揚聲器正在播放的 render energy，無論 filter 收了多少都正確
+   - Filter 未建模的 reverb tail 部分也能正確估計 → suppressor 更積極壓制殘餘 reverb
+   - **ERLE +1.4 dB**（BALANCED: 5.1 → 6.5 dB）
+
+2. **Divergence-triggered suppression**
+   - 新增 `_divergence_indicator`：smoothed EMA [0,1]，追蹤 filter 發散狀態
+   - 觸發條件：收斂後 `inst_erle_linear < 0.63`（ERLE < -2dB = filter 放大而非消除）
+   - RES gain override：`divergence > 0.3` → `g ≤ 0.01 + 0.99 × (1 - divergence)`
+   - 仿 AEC3 transparent mode：filter 發散時強制壓制，防止 echo 穿透
+   - Benchmark 無退化（固定 echo path 不會觸發 divergence）
+
+3. **延遲追蹤頻率加快 + 漂移保護**
+   - `delay_est_period_s`: 2.0 → **0.5**（每 0.5 秒重估）
+   - `delay_est_init_s`: 0.5 → **0.3**（更快取得第一次估計）
+   - 漂移保護：延遲大幅改變（>32 samples）需連續兩次估計一致才更新
+   - 防止 GCC-PHAT 單次誤判導致延遲跳變
+   - Benchmark 無退化（固定延遲測試集不受影響，效果在真實裝置延遲漂移場景）
+
+#### Benchmark 結果（AEC Challenge, 15 files, subband + FDKF + Shadow + RES）
+
+| Preset | v1.17.0 | v1.18.0 | 提升 |
+|--------|---------|---------|------|
+| BALANCED | 5.1 dB | **6.5 dB** | **+1.4 dB** |
+| AGGRESSIVE | — | **8.6 dB** | — |
+| MAXIMUM | — | **9.1 dB** | — |
+
+#### 設計決策
+
+- **為何 reverb 用 far_psd 而非 echo_pwr**：filter 只建模 echo path 前段（direct path），reverb tail 建模不完整 → echo_pwr 低估 → suppressor 放行殘餘 reverb。far_psd 直接反映揚聲器播放能量，與 filter 品質無關。
+- **為何 divergence 用 smoothed EMA**：單幀 ERLE 波動大，直接用會誤觸發。α=0.9 attack + 0.95 decay 提供約 10 幀（100ms）的平滑，避免瞬態假陽性。
+- **為何延遲需要兩次確認**：GCC-PHAT 在低 SNR 或近端語音活動時可能產生錯誤峰值。連續兩次一致（差 < 16 samples）才確認是真正的延遲漂移。
+
+---
+
 ### v1.17.0 (2026-03-24) - Kalman 修正 + C 實作全同步 Python v1.17.0
 
 #### 改動內容

@@ -192,6 +192,54 @@ while (has_audio) {
 aec_destroy(aec);
 ```
 
+## C / Python 功能比較（SUBBAND + FDKF + RES 路徑）
+
+C 對齊 Python v1.17.0，Python 最新為 v1.18.0。以下為同一路徑上的功能差異：
+
+### PBFDKF (Adaptive Filter)
+
+| 功能 | Python | C | 說明 |
+|------|--------|---|------|
+| Per-bin Kalman (P/Q/R/K) | ✓ | ✓ | 對齊 |
+| Two-stage Q (Q_high→Q_low) | ✓ | ✓ | 對齊 |
+| P_init=0.01, P_MAX=0.02 | ✓ | ✓ | 對齊 |
+| Per-bin Q gating | ✓ | ✓ | 對齊 |
+| Far-end activity gate | ✓ | ✓ | 對齊 |
+| Echo Path Change Detection | ✓ | ❌ | 環境改變時自動重收斂+重置 Q |
+| Divergence indicator | ✓ (v1.18.0) | ❌ | ERLE<-2dB 時標記發散 |
+
+### Shadow Filter
+
+| 功能 | Python | C | 說明 |
+|------|--------|---|------|
+| Bidirectional copy gate | ✓ | ✓ | 對齊 |
+| Q_ratio scaling | ✓ | ✓ | 對齊 |
+| EPC blocks copy | ✓ | ❌ | C 無 Echo Path Change Detection |
+
+### RES (Residual Echo Suppressor)
+
+| 功能 | Python | C | 說明 |
+|------|--------|---|------|
+| ENR masking / Wiener / spectral_sub | ✓ | ✓ | 對齊 |
+| Direct echo est (per-bin ERLE) | ✓ | ✓ | 對齊 |
+| 4-block near-end PSD avg | ✓ | ✓ | 對齊 |
+| Freq postprocessing (DC+HF cap) | ✓ | ✓ | 對齊 |
+| Configurable PSD alphas | ✓ | ✓ | 對齊 |
+| Reverb tail (render signal) | ✓ (v1.18.0) | ❌ (用 echo_pwr) | C 仍用 filter echo estimate |
+| Divergence gain override | ✓ (v1.18.0) | ❌ | Filter 發散時 RES 緊急壓制 |
+| Saturation over_sub boost | ✓ | ❌ | C 無 saturation detection |
+
+### Coordinator
+
+| 功能 | Python | C | 說明 |
+|------|--------|---|------|
+| Simple variable mu (RER) | ✓ | ✓ | 對齊 |
+| Convergence detection | ✓ | ✓ | 對齊 |
+| Output limiter | ✓ | ✓ | 對齊 |
+| Noise gate | ✓ | ✓ | 對齊 |
+| Saturation detection + softclip | ✓ | ❌ | 處理 speaker 失真 |
+| Delay estimation (GCC-PHAT) | ✓ | ❌ | C 用長 filter (1600 samples) 補償 |
+
 ## 注意事項
 
 - C 版本不包含 Delay Estimation，預設濾波器長度為 1600 samples（100ms）以應對未對齊的延遲

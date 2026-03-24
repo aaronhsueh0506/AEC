@@ -99,8 +99,8 @@ class AecConfig:
     # Delay estimation (GCC-PHAT)
     enable_delay_est: bool = True       # Enable automatic delay estimation + ref alignment
     max_delay_ms: float = 250.0         # Maximum delay to search (ms)
-    delay_est_period_s: float = 2.0     # Re-estimate delay every N seconds
-    delay_est_init_s: float = 0.5       # Accumulate this much data before first estimate
+    delay_est_period_s: float = 0.5     # Re-estimate delay every N seconds
+    delay_est_init_s: float = 0.3       # Accumulate this much data before first estimate
     fixed_delay_samples: int = -1       # If >= 0, use this fixed delay instead of estimation
 
     # High-pass filter (DC blocker + low-freq removal)
@@ -854,7 +854,8 @@ class ResFilter:
                 filter_converged: bool = False,
                 erle_factor: float = 0.0,
                 dt_indicator: float = 0.0,
-                near_spec: np.ndarray = None) -> np.ndarray:
+                near_spec: np.ndarray = None,
+                divergence: float = 0.0) -> np.ndarray:
         """Process hop-size error signal, return enhanced hop via OLA.
 
         far_spec: far-end frequency spectrum (complex), used for coherence-
@@ -974,9 +975,12 @@ class ResFilter:
             residual_echo_psd = (1.0 - erle_factor) * direct_est + erle_factor * erle_est
 
             # Add reverb tail if enabled
+            # Use render signal (far_spec) power instead of filter echo estimate
+            # → doesn't depend on filter modeling quality for reverb tail
             if self.enable_reverb:
+                far_psd = np.abs(far_spec) ** 2 if far_spec is not None else echo_pwr_linear
                 self.reverb_psd = (self.reverb_decay * self.reverb_psd
-                                   + (1 - self.reverb_decay) * echo_pwr_linear)
+                                   + (1 - self.reverb_decay) * far_psd)
                 # Gate by far_activity to decay fast when far-end stops
                 residual_echo_psd = (residual_echo_psd
                                      + self.reverb_gain * self.reverb_psd * self.far_activity)
@@ -1058,6 +1062,11 @@ class ResFilter:
             if self.n_freqs > hf_cap_bin + 1:
                 hf_cap = g[hf_cap_bin]
                 g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
+
+        # Divergence override: when filter diverges, cap gain severely
+        if divergence > 0.3:
+            divergence_gain = 0.01 + (1.0 - 0.01) * (1.0 - divergence)
+            g = np.minimum(g, divergence_gain)
 
         # Temporal smoothing: far_activity-driven release (no feedback loop)
         # far_activity high (far-end speaking) → slow release (TC≈200ms)
@@ -1557,6 +1566,9 @@ class AEC:
         # until filter has demonstrated basic echo cancellation (ERLE > 3 dB)
         self._filter_converged = False
 
+        # Divergence indicator: smoothed signal [0,1] for suppressor override
+        self._divergence_indicator = 0.0
+
         # Per-bin mu_scale (updated from RES echo_psd/error_psd each frame)
         self._per_bin_mu_scale = None  # None = use scalar fallback
 
@@ -1625,6 +1637,7 @@ class AEC:
         self.epc_hangover_count = 0
         self.prev_dtd_conf = 0.0
         self._filter_converged = False
+        self._divergence_indicator = 0.0
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0
         self._warmup_frames = self.config.warmup_frames
@@ -1773,7 +1786,12 @@ class AEC:
                     if self._current_delay < 0:
                         self._current_delay = new_delay
                     elif abs(new_delay - self._current_delay) > 32:
-                        self._current_delay = new_delay
+                        # Require two consecutive consistent estimates before updating
+                        if hasattr(self, '_pending_delay') and abs(new_delay - self._pending_delay) < 16:
+                            self._current_delay = new_delay
+                            del self._pending_delay
+                        else:
+                            self._pending_delay = new_delay
 
             # Write far_end into ring buffer
             w = self._ref_ring_write
@@ -1941,12 +1959,23 @@ class AEC:
                     dt_indicator = np.clip(1.0 - far_pwr / (mic_pwr + far_pwr), 0.0, 0.8)
                 dt_reduction = self.config.res_dt_reduction * dt_indicator
                 self.res.over_sub = max(base_over_sub - dt_reduction, 0.5)
+
+                # Divergence detection: monitor after convergence
+                if self._filter_converged and self.near_power > 1e-8:
+                    inst_erle_linear = self.near_power / (self.raw_error_power + 1e-10)
+                    is_diverged = float(inst_erle_linear < 0.63)  # ERLE < -2dB
+                    self._divergence_indicator = (0.9 * self._divergence_indicator
+                                                  + 0.1 * is_diverged)
+                else:
+                    self._divergence_indicator *= 0.95
+
                 final_output = self.res.process(raw_output, self.filter.echo_spec,
                                                 far_power, self.filter.far_spec,
                                                 filter_converged=self._filter_converged,
                                                 erle_factor=erle_factor,
                                                 dt_indicator=dt_indicator,
-                                                near_spec=self.filter.near_spec)
+                                                near_spec=self.filter.near_spec,
+                                                divergence=self._divergence_indicator)
 
                 # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
                 if not self.config.enable_dtd:
