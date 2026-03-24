@@ -1,6 +1,6 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v1.15.0），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度，搭配 per-bin near-end gate 精確 DT 保護。
+回音消除模組（v1.16.0），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
 > C 實作已重寫對齊 Python v1.15.0：PBFDKF + Shadow + WOLA RES + HPF + Preset，詳見 [c_impl/README.md](c_impl/README.md)。
 
@@ -60,8 +60,8 @@ cd c_impl && make
 ./bin/aec_wav mic.wav ref.wav output.wav --filter 2400             # 自訂濾波器長度
 ```
 
-C 版本已完整對齊 Python v1.15.0（SUBBAND 模式），包含 PBFDKF Kalman + Shadow + WOLA RES + HPF + 三級 Preset。
-不含：DTD、Delay Estimation、Saturation Detection、LMS/NLMS/FDAF 模式。
+C 版本已對齊 Python v1.15.0（SUBBAND 模式），包含 PBFDKF Kalman + Shadow + WOLA RES + HPF + 三級 Preset。
+不含：RES v2（ENR masking / direct echo est / reverb tail）、DTD、Delay Estimation、Saturation Detection、LMS/NLMS/FDAF 模式。
 
 ## 系統架構
 
@@ -115,10 +115,10 @@ Reference Signal (far-end)        Microphone Signal (near-end)
               |
               v
          +---------------------------+
-         | RES Post-Filter           |
-         | (coherence-based EER,     |
-         |  spectral subtraction,    |
-         |  OLA + sqrt-Hann)         |
+         | RES Post-Filter (v2)      |
+         | (ENR masking / Wiener,    |
+         |  direct echo est + ERLE,  |
+         |  reverb tail, OLA)        |
          +---------------------------+
                          |
                          v
@@ -143,7 +143,7 @@ Reference Signal (far-end)        Microphone Signal (near-end)
 | **FDKF** | 頻域卡爾曼濾波器 adaptation | Per-bin Kalman gain 取代 NLMS 固定步長，two-stage Q 控制 |
 | **Shadow Filter** | 背景濾波器（dual-filter 架構） | 更積極的 Q 設定，copy gate 自動修正 main filter |
 | **DTD** | 雙講偵測（可選） | Divergence + Coherence 偵測器，連續 mu scaling |
-| **RES** | 殘餘回音抑制 | EER-based spectral subtraction，OLA + sqrt-Hann 完美重建 |
+| **RES** | 殘餘回音抑制 | ENR masking（預設）/ Wiener / spectral sub，direct echo est + reverb tail，OLA + sqrt-Hann |
 | **Output Limiter** | 安全網 | 保證 output 永不超過 mic amplitude |
 
 ## API 使用
@@ -219,18 +219,22 @@ while has_audio:
 
 | 參數 | BALANCED | AGGRESSIVE | MAXIMUM | 說明 |
 |------|----------|------------|---------|------|
+| **RES v2 層** | | | | |
+| `res_gain_type` | enr | enr | enr | 增益公式 |
+| `res_echo_method` | direct | direct | direct | Echo 估計方法 |
+| `res_enr_scale` | 1.0 | 0.7 | 0.5 | ENR 門檻縮放（越低越激進） |
+| `res_enable_reverb` | True | True | True | Reverb tail |
+| `res_reverb_decay` | 0.5 | 0.6 | 0.7 | Reverb 衰減率 |
+| `res_reverb_gain` | 0.5 | 1.0 | 1.5 | Reverb 貢獻 |
 | **RES 層** | | | | |
-| `res_g_min_db` | -25 | -35 | -40 | RES 最小增益 |
-| `res_over_sub_base` | 2.5 | 4.0 | 6.0 | 過減因子基底 |
-| `res_over_sub_scale` | 4.0 | 6.0 | 8.0 | 過減因子隨 ERLE 縮放 |
-| `res_dt_reduction` | 3.5 | 2.0 | 0.0 | DT 時 over_sub 降低倍率 |
-| `res_ne_protect_db` | -8 | -5 | -2 | Per-bin 近端保護上限（越高=保護越弱） |
+| `res_g_min_db` | -35 | -45 | -55 | RES 最小增益 |
+| `res_ne_protect_db` | -12 | -8 | -5 | Per-bin 近端保護上限 |
 | `res_spectral_floor_db` | -25 | -30 | -35 | 頻譜底噪估計 |
 | `shadow_q_ratio` | 3.0 | 4.0 | 5.0 | Shadow Q 倍率 |
 | **Adaptive 層** | | | | |
-| `shadow_mu_min` | 0.5 | 0.7 | 0.9 | DT 時 mu floor（越高 = 越積極更新） |
+| `shadow_mu_min` | 0.5 | 0.7 | 0.9 | DT 時 mu floor |
 | `warmup_frames` | 100 | 150 | 200 | 強制高 mu 的 warmup 幀數 |
-| `kalman_q_high` | 1e-3 | 3e-3 | 1e-2 | FDKF Q_high（越高 = 越快收斂） |
+| `kalman_q_high` | 1e-3 | 3e-3 | 1e-2 | FDKF Q_high |
 
 ```python
 from aec import AecConfig, AecPreset, AecMode
@@ -319,19 +323,34 @@ FDKF 模式下，shadow 使用 `shadow_q_ratio` 倍的 Q 值，確保 shadow 收
 
 ### RES 參數 (僅 fdaf/subband 模式)
 
-RES（Residual Echo Suppressor）使用 OLA + sqrt-Hann 窗框架，避免 frame 邊界不連續和棋盤頻譜（musical noise）。
-增益公式為 spectral subtraction Wiener gain：`G = max(1 - over_sub × EER, g_min)`。
+RES v2（Residual Echo Suppressor）使用 OLA + sqrt-Hann 窗框架，支援三種增益公式：
 
-**Per-bin near-end gate（v1.14.0）**：使用 far-end ↔ error 的 coherence² (coh2) 做 per-bin 近端偵測：
-- `coh2[k]` 高（echo bin）→ 允許壓到 g_min（激進壓制）
-- `coh2[k]` 低（near-end bin）→ 提高 floor 至 `ne_protect_db`（保護近端）
-- 取代舊版 broadband `dt_indicator` → 解決 FS 時 echo 被誤判為 DT 的問題
+**增益公式（`res_gain_type`）**：
+- **`"enr"`（預設）**: ENR masking（仿 AEC3 `GainToNoAudibleEcho`），不需要 nearend PSD 估計，FS 自然完全抑制
+- `"wiener"`: Wiener gain `G = nearend / (nearend + β × echo)`，DT 保護好但 FS 可能 gain pumping
+- `"spectral_sub"`: Legacy spectral subtraction `G = 1 - over_sub × EER`
+
+**Echo 估計（`res_echo_method`）**：
+- **`"direct"`（預設）**: 使用自適應濾波器 echo spectrum + per-bin ERLE tracking，快速追蹤
+- `"coherence"`: Legacy coherence-based EER
+
+**附加功能**：
+- **Reverb tail**: 指數衰減模型捕捉晚期殘響（`res_enable_reverb`）
+- **4-block 近端平均**: 平滑近端 PSD，減少幀間增益抖動
+- **頻率域後處理**: DC 一致性 + HF cap（仿 AEC3 `PostprocessGains`）
+- **Per-bin near-end gate**: coherence² 做 per-bin 近端偵測（v1.14.0+）
 
 | 參數 | 預設值 | 範圍 | 說明 |
 |------|--------|------|------|
-| `res_g_min_db` | -25 | -40 ~ -10 | 最小增益（echo-only bin 的壓制下限） |
-| `res_ne_protect_db` | -10 | -2 ~ -10 | Per-bin 近端保護上限（Preset 可調） |
-| `res_over_sub` | 3.0 | 1.0-15.0 | 過減因子（動態：base+scale×erle_factor，DT 時降低） |
+| `res_gain_type` | `"enr"` | enr/wiener/spectral_sub | 增益公式（Preset 預設 enr） |
+| `res_echo_method` | `"direct"` | direct/coherence | Echo 估計方法（Preset 預設 direct） |
+| `res_enr_scale` | 1.0 | 0.1-2.0 | ENR 門檻縮放（<1 更激進，1.0=AEC3 默認） |
+| `res_enable_reverb` | True | - | Reverb tail model（Preset 預設開啟） |
+| `res_reverb_decay` | 0.5 | 0.3-0.9 | Reverb 指數衰減率 |
+| `res_reverb_gain` | 0.5 | 0.0-2.0 | Reverb 貢獻縮放 |
+| `res_g_min_db` | -25 | -55 ~ -10 | 最小增益（echo-only bin 的壓制下限） |
+| `res_ne_protect_db` | -10 | -12 ~ -2 | Per-bin 近端保護上限（Preset 可調） |
+| `res_over_sub` | 3.0 | 1.0-15.0 | 過減因子（wiener/spectral_sub 用，ENR 不使用） |
 | `res_alpha` | 0.8 | 0.5-0.95 | 增益平滑係數 |
 
 ### 模式選擇指南
@@ -358,33 +377,37 @@ python3 plot_aec_results.py ../wav/ --mode subband --enable-dtd
 
 ## Benchmark 比較（AEC Challenge）
 
-測試條件：subband + Shadow + FDKF + RES（per-bin gate）+ delay pre-alignment + HPF + saturation detect。
+測試條件：subband + Shadow + FDKF + RES v2（ENR masking, direct echo est, reverb tail）+ delay pre-alignment + HPF + saturation detect。
 Frame/hop: 320/160 (20ms/10ms), FFT: 512, filter_length: 512。
 
-### Farend Single-Talk（15 cases）
+### 小資料集（15 cases, BALANCED preset）
 
-| Preset | ERLE (v1.15.0) | echo_mos (v1.14.0) | SpeexDSP | WebRTC AEC3 |
-|--------|----------------|---------------------|----------|-------------|
-| BALANCED | 12.4 dB | 3.18 | 3.09 / 6.9 dB | 4.47 / 25.8 dB |
-| **AGGRESSIVE** | **15.7 dB** | **3.36** | — | — |
-| MAXIMUM | 15.0 dB | 3.41 | — | — |
+| 指標 | v1.15.0 | v1.16.0 (ENR) | SpeexDSP | WebRTC AEC3 |
+|------|---------|---------------|----------|-------------|
+| FS ERLE | 12.4 dB | **16.2 dB** | 6.9 dB | 25.8 dB |
+| FS echo_mos | 3.18 | **3.42** | 3.09 | 4.47 |
+| DT echo_mos | 3.06 | **3.67** | 2.76 | 4.39 |
+| DT deg_mos | **3.51** | 3.06 | 3.90 | 2.51 |
+| DT ERLE | 4.2 dB | **6.5 dB** | 1.3 dB | 3.7 dB |
 
-### Doubletalk（15 real cases）
+### Blind test（555 cases, BALANCED preset）
 
-| Preset | ERLE (v1.15.0) | echo_mos (v1.14.0) | deg_mos (v1.14.0) | SpeexDSP | WebRTC AEC3 |
-|--------|----------------|---------------------|---------------------|----------|-------------|
-| BALANCED | 4.2 dB | 3.06 | **3.51** | 2.76 / 1.3 dB | 4.39 / 3.7 dB |
-| **AGGRESSIVE** | **7.2 dB** | **3.42** | 3.22 | — | — |
-| MAXIMUM | **7.9 dB** | 3.59 | 2.59 | — | — |
+| 指標 | v1.16.0 (ENR) | WebRTC AEC3 |
+|------|---------------|-------------|
+| FS ERLE | **13.4 dB** | — |
+| FS echo_mos | **3.478** | 3.985 |
+| DT echo_mos | **3.868** | 4.464 |
+| DT deg_mos | **2.703** | 2.233 |
+| NE echo_mos | **4.998** | 4.956 |
+| NE deg_mos | **4.077** | 3.530 |
 
 > **解讀**：
-> - **v1.15.0 frame size 統一後 FS ERLE 提升**：AGGRESSIVE 14.7→15.7 dB (+1.0 dB)。
-> - **DT ERLE 碾壓 AEC3**：AGGRESSIVE 7.2 dB vs AEC3 3.7 dB（+3.5 dB）。
-> - **DT echo_mos 碾壓 AEC3 之外所有方案**：AGGRESSIVE 3.42 vs SpeexDSP 2.76。
-> - **DT deg_mos 優勢**：BALANCED 3.51 vs AEC3 2.51（近端品質保留更好）。
-> - **AGGRESSIVE 推薦**：FS ERLE 15.7 dB, DT ERLE 7.2 dB, echo_mos 3.42 — 最佳平衡點。
-> - FS echo_mos 與 AEC3 差距（3.36 vs 4.47）主要來自 AEC3 的 NLP（非線性後處理），而非線性濾波器性能。
-> - 詳見 [docs/aec_improve_v7.md](docs/aec_improve_v7.md)。
+> - **RES v2 全面提升**：FS echo_mos 3.18→3.478 (+0.30)，FS ERLE 12.4→13.4 dB (+1.0)。
+> - **DT ERLE 碾壓 AEC3**：6.5 dB vs 3.7 dB（+2.8 dB）。
+> - **DT deg_mos 大幅領先 AEC3**：2.703 vs 2.233（近端品質保留更好）。
+> - **NE deg_mos 大幅領先 AEC3**：4.077 vs 3.530（近端語音幾乎無損）。
+> - FS echo_mos 與 AEC3 差距縮小至 0.507（原 1.29），ENR masking 大幅改善。
+> - 詳見 [docs/DEVLOG.md](docs/DEVLOG.md) v1.16.0。
 
 ### 工具
 
@@ -399,11 +422,12 @@ python3 python/eval_aec_challenge.py wav/aec_challenge/ --preset aggressive
 # 比較全部 preset
 python3 python/eval_aec_challenge.py wav/aec_challenge/ --all-presets
 
-# AECMOS 評估（需 speechmos + onnxruntime，Python 3.13+）
-/opt/homebrew/bin/python3 python/eval_aecmos.py wav/aec_challenge/
+# AECMOS 評估（需 speechmos + onnxruntime≤1.16.3 + numpy<2，用 venv）
+source .venv/bin/activate
+python3 python/eval_aecmos.py wav/aec_challenge/
 
 # AECMOS 比較全部 preset
-/opt/homebrew/bin/python3 python/eval_aecmos.py wav/aec_challenge/ --all-presets
+python3 python/eval_aecmos.py wav/aec_challenge/ --all-presets
 ```
 
 ## 效能指標

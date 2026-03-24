@@ -2,6 +2,90 @@
 
 ## 版本歷史
 
+### v1.16.0 (2026-03-24) - RES v2: ENR Masking + Direct Echo Estimation + Reverb Tail
+
+#### 改動內容
+
+1. **ENR masking 增益公式（取代 spectral subtraction）**
+   - 新增 `res_gain_type="enr"` 作為預設增益公式（仿 AEC3 `GainToNoAudibleEcho`）
+   - `ENR = residual_echo / (nearend_est + 1.0)`，不需要估計 nearend PSD
+   - 頻率相關門檻：LF `enr_t=0.3, enr_s=0.4`、HF `enr_t=0.07, enr_s=0.1`（平滑過渡 bins 5-10）
+   - Soft gate: `enr < enr_t → g=1.0`、`enr > enr_s → g=0`、中間線性內插
+   - FS 場景 nearend≈0 → ENR 很大 → 自然完全抑制，無 gain pumping
+   - 保留 `"wiener"` 和 `"spectral_sub"` 供比較
+
+2. **獨立 ENR 門檻參數 `res_enr_scale`**
+   - ENR 門檻與 `over_sub` 解耦，避免語義反轉問題
+   - `scale < 1.0` → 門檻更低 → 更激進壓制
+   - Preset: BALANCED=1.0（AEC3 默認）、AGGRESSIVE=0.7、MAXIMUM=0.5
+
+3. **Direct echo estimation（取代 coherence-based）**
+   - `res_echo_method="direct"`: 使用自適應濾波器的 echo spectrum + per-bin ERLE 追蹤
+   - Per-bin ERLE: `inst_erle = near_psd / error_psd`，EMA α=0.95，3-bin 頻率平滑
+   - 兩種估計融合：`residual = (1-erle_factor) × direct + erle_factor × erle_corrected`
+   - 僅在安全條件下更新（far_active + not_dt + converged）
+
+4. **4-block 近端移動平均**（仿 AEC3 `nearend_average_blocks=4`）
+   - Ring buffer 平滑近端 PSD，減少幀間增益抖動
+   - `near_psd = mean(near_psd_buf[0:4], axis=0)`
+
+5. **Reverb tail model**
+   - `reverb_psd = decay × reverb_psd + (1-decay) × echo_pwr`
+   - `residual_echo_psd += reverb_gain × reverb_psd × far_activity`
+   - Preset: BALANCED decay=0.5/gain=0.5、AGGRESSIVE 0.6/1.0、MAXIMUM 0.7/1.5
+
+6. **頻率域後處理**（仿 AEC3 `PostprocessGains`）
+   - DC 一致性：`g[:2] = min(g[1], g[2])`
+   - HF cap: `g[17:] ≤ g[16]`（~2kHz 以上不超過 2kHz 增益）
+
+7. **收緊增益上升速度**
+   - `eff_rise = max_rise ^ (0.5 + 0.5 × (1 - far_activity))`
+   - Far-end 活躍時上升更慢，防止 echo burst 穿透
+
+8. **Wiener gain 修正**（保留供比較）
+   - Noise floor 提高至 `mean(error_psd) × 0.01`（原 0.001），防止 FS gain pumping
+
+9. **輸出檔名修正**
+   - `{uuid}_fs_ours.wav` → `{uuid}_farend_singletalk_ours.wav`（與原始 AEC Challenge 命名一致）
+   - eval_aec_challenge.py / eval_aecmos.py 同步更新
+
+10. **其他**
+    - `.gitignore` 新增 `wav/aec_challenge/` 和 `wav/aec_challenge_blind/`（本地 dataset 不入版控）
+    - `benchmark_competitors.py` 新增 AEC3 Linear 支援
+    - `eval_aec_challenge.py` 新增 `AEC_GAIN_TYPE` env var 支援（A/B test 用）
+
+#### A/B Test 結果
+
+**小資料集（15 cases, BALANCED preset）**：
+
+| 指標 | v1.15.0 | Wiener (fixed) | ENR (v2) |
+|------|---------|----------------|----------|
+| FS ERLE | 11.9 dB | 17.2 dB | **16.2 dB** |
+| FS echo_mos | 3.18 | 3.45 | **3.42** |
+| DT echo_mos | 3.06 | 3.66 | **3.67** |
+| DT deg_mos | 3.51 | 3.34 | **3.06** |
+
+**Blind test（555 cases, BALANCED preset, ENR old scale）**：
+
+| 指標 | Wiener | ENR | 差異 |
+|------|--------|-----|------|
+| FS ERLE | 13.1 dB | **13.4 dB** | +0.3 |
+| FS echo_mos | 3.263 | **3.478** | **+0.215** |
+| DT echo_mos | 3.876 | 3.868 | ~持平 |
+| DT deg_mos | 2.686 | **2.703** | +0.017 |
+| NE echo_mos | 4.997 | 4.998 | ~持平 |
+| NE deg_mos | 4.080 | 4.077 | ~持平 |
+
+**結論**: ENR 在 FS echo_mos 上顯著領先 Wiener (+0.215)，其他持平。選擇 ENR 作為預設。
+
+#### 設計決策
+
+- **為何選 ENR 而非 Wiener**: Wiener gain 在 FS 場景 `nearend_est → 0` 時不穩定（gain pumping），即使加了 noise floor 修正仍不如 ENR 穩定。ENR masking 不需要 nearend 估計，FS 時自然趨近 0，DT 時自然放行。
+- **為何 ENR 用獨立 `res_enr_scale` 而非 `over_sub`**: `over_sub` 越高 = 越激進（spectral_sub/wiener），但 ENR 中 `scale` 越高 = 門檻越高 = 越寬鬆，語義相反。獨立參數更直觀。
+- **ENR 不需要動態縮放**: `residual_echo_psd` 已隨收斂狀態自適應（收斂前保守 → 壓多；收斂後準確 → 壓剛好），不需要像 spectral_sub 那樣動態調整 over_sub。
+
+---
+
 ### v1.15.1 (2026-03-23) - C 實作完整重寫對齊 Python v1.15.0
 
 #### 改動內容
