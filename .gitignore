@@ -18,5 +18,7 @@ __pycache__/
 # OS
 .DS_Store
 
-# AEC output (user runs locally)
+# AEC output & local datasets (user runs locally)
 wav/aec_output/
+wav/aec_challenge/
+wav/aec_challenge_blind/

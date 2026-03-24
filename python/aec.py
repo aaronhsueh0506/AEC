@@ -124,6 +124,16 @@ class AecConfig:
     res_spectral_floor_db: float = -25.0     # Floor relative to spectral envelope
     res_ne_protect_db: float = -10.0         # Per-bin near-end protection ceiling (dB)
 
+    # RES v2: direct echo estimation + Wiener gain + reverb tail
+    res_echo_method: str = "coherence"       # "coherence" (legacy) or "direct" (use filter echo est)
+    res_gain_type: str = "spectral_sub"      # "spectral_sub" (legacy) / "wiener" / "enr"
+    res_enable_reverb: bool = False          # Reverb tail model
+    res_reverb_decay: float = 0.5            # Exponential decay rate
+    res_reverb_gain: float = 1.0             # Reverb contribution scale
+    res_alpha_echo_psd: float = 0.7          # Echo PSD smoothing (overridable per preset)
+    res_alpha_error_psd: float = 0.8         # Error PSD smoothing (overridable per preset)
+    res_enr_scale: float = 1.0              # ENR threshold scale (1.0=AEC3 defaults, <1=more aggressive)
+
     # Mode
     mode: AecMode = AecMode.NLMS
 
@@ -149,13 +159,22 @@ class AecConfig:
             preset = AecPreset(preset)
         if preset == AecPreset.BALANCED:
             defaults = dict(
+                # RES v2
+                res_echo_method="direct",
+                res_gain_type="enr",
+                res_enable_reverb=True,
+                res_reverb_decay=0.5,
+                res_reverb_gain=0.5,
+                res_alpha_echo_psd=0.5,
+                res_alpha_error_psd=0.6,
+                res_enr_scale=1.0,
                 # RES
-                res_g_min_db=-25.0,
+                res_g_min_db=-35.0,
                 res_over_sub_base=2.5,
                 res_over_sub_scale=4.0,
                 res_dt_reduction=3.5,
                 res_spectral_floor_db=-25.0,
-                res_ne_protect_db=-8.0,
+                res_ne_protect_db=-12.0,
                 shadow_q_ratio=3.0,
                 # Adaptive filter
                 shadow_mu_min=0.5,
@@ -164,13 +183,22 @@ class AecConfig:
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
+                # RES v2
+                res_echo_method="direct",
+                res_gain_type="enr",
+                res_enable_reverb=True,
+                res_reverb_decay=0.6,
+                res_reverb_gain=1.0,
+                res_alpha_echo_psd=0.4,
+                res_alpha_error_psd=0.5,
+                res_enr_scale=0.7,
                 # RES
-                res_g_min_db=-35.0,
+                res_g_min_db=-45.0,
                 res_over_sub_base=4.0,
                 res_over_sub_scale=6.0,
                 res_dt_reduction=2.0,
                 res_spectral_floor_db=-30.0,
-                res_ne_protect_db=-5.0,
+                res_ne_protect_db=-8.0,
                 shadow_q_ratio=4.0,
                 # Adaptive filter
                 shadow_mu_min=0.7,
@@ -179,13 +207,22 @@ class AecConfig:
             )
         elif preset == AecPreset.MAXIMUM:
             defaults = dict(
+                # RES v2
+                res_echo_method="direct",
+                res_gain_type="enr",
+                res_enable_reverb=True,
+                res_reverb_decay=0.7,
+                res_reverb_gain=1.5,
+                res_alpha_echo_psd=0.3,
+                res_alpha_error_psd=0.4,
+                res_enr_scale=0.5,
                 # RES
-                res_g_min_db=-40.0,
+                res_g_min_db=-55.0,
                 res_over_sub_base=6.0,
                 res_over_sub_scale=8.0,
                 res_dt_reduction=0.0,
                 res_spectral_floor_db=-35.0,
-                res_ne_protect_db=-2.0,
+                res_ne_protect_db=-5.0,
                 shadow_q_ratio=5.0,
                 # Adaptive filter
                 shadow_mu_min=0.9,
@@ -707,7 +744,15 @@ class ResFilter:
                  spectral_floor_db: float = -25.0,
                  ne_protect_db: float = -10.0,
                  frame_size: int = 0,
-                 hop_size: int = 0):
+                 hop_size: int = 0,
+                 echo_method: str = "coherence",
+                 gain_type: str = "spectral_sub",
+                 enable_reverb: bool = False,
+                 reverb_decay: float = 0.5,
+                 reverb_gain: float = 1.0,
+                 alpha_echo_psd: float = 0.7,
+                 alpha_error_psd: float = 0.8,
+                 enr_scale: float = 1.0):
         self.block_size = block_size          # FFT size (power of 2)
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
         self.hop_size = hop_size if hop_size > 0 else self.frame_size // 2
@@ -716,8 +761,16 @@ class ResFilter:
         self.over_sub = over_sub
         self.alpha = alpha
         self.ne_protect_db = ne_protect_db
-        self.alpha_echo_psd = 0.7    # echo PSD: moderate tracking (TC≈53ms), was 0.5
-        self.alpha_error_psd = 0.8   # error PSD: moderate TC≈80ms
+        self.alpha_echo_psd = alpha_echo_psd
+        self.alpha_error_psd = alpha_error_psd
+        self.enr_scale = enr_scale           # ENR threshold scale (1.0=AEC3 defaults)
+
+        # RES v2: direct echo estimation + Wiener gain + reverb
+        self.echo_method = echo_method       # "coherence" or "direct"
+        self.gain_type = gain_type           # "spectral_sub" or "wiener"
+        self.enable_reverb = enable_reverb
+        self.reverb_decay = reverb_decay
+        self.reverb_gain = reverb_gain
 
         self.gain_smooth = np.full(n_freqs, self.g_min, dtype=np.float32)
         self.echo_psd = np.zeros(n_freqs, dtype=np.float32)
@@ -730,6 +783,17 @@ class ResFilter:
         self.S_fe = np.zeros(n_freqs, dtype=np.complex64)  # Cross-PSD far×error
         self.S_ff = np.zeros(n_freqs, dtype=np.float32)    # Far-end PSD
         self.S_ee = np.zeros(n_freqs, dtype=np.float32)    # Error PSD
+
+        # Direct echo estimation: per-bin ERLE tracking
+        self.erle_per_bin = np.ones(n_freqs, dtype=np.float32)
+        self.near_psd = np.zeros(n_freqs, dtype=np.float32)
+        self.alpha_erle = 0.95   # slow tracking for stable per-bin ERLE
+        # 4-block near-end moving average (reduces gain fluctuation, cf. AEC3)
+        self.near_psd_buf = np.zeros((4, n_freqs), dtype=np.float32)
+        self.near_psd_idx = 0
+
+        # Reverb tail model
+        self.reverb_psd = np.zeros(n_freqs, dtype=np.float32)
 
         # CNG (comfort noise generation)
         self.enable_cng = enable_cng
@@ -765,16 +829,23 @@ class ResFilter:
         self.far_activity = 0.0
         self.input_buf.fill(0)
         self.ola_buf.fill(0)
+        self.erle_per_bin.fill(1.0)
+        self.near_psd.fill(0)
+        self.near_psd_buf.fill(0)
+        self.near_psd_idx = 0
+        self.reverb_psd.fill(0)
 
     def process(self, error_hop: np.ndarray, echo_spec: np.ndarray,
                 far_power: float, far_spec: np.ndarray = None,
                 filter_converged: bool = False,
                 erle_factor: float = 0.0,
-                dt_indicator: float = 0.0) -> np.ndarray:
+                dt_indicator: float = 0.0,
+                near_spec: np.ndarray = None) -> np.ndarray:
         """Process hop-size error signal, return enhanced hop via OLA.
 
         far_spec: far-end frequency spectrum (complex), used for coherence-
                   based nonlinear echo PSD estimation.
+        near_spec: mic signal spectrum (complex), used for direct echo method.
         """
         hop = self.hop_size
 
@@ -857,10 +928,47 @@ class ResFilter:
         quiet_mask = ((self.echo_psd < signal_floor)
                       & (self.error_psd < signal_floor))
 
-        # Compute EER with soft convergence switch (no hard transition click)
+        # --- Residual echo PSD estimation ---
         eps = 1e-10
+        residual_echo_psd = None
+
+        if self.echo_method == "direct" and near_spec is not None:
+            # Direct method: use echo estimate + per-bin ERLE to estimate residual
+            near_pwr = np.abs(near_spec) ** 2
+            # 4-block moving average for stable near-end PSD (cf. AEC3)
+            self.near_psd_buf[self.near_psd_idx] = near_pwr
+            self.near_psd_idx = (self.near_psd_idx + 1) % 4
+            self.near_psd = np.mean(self.near_psd_buf, axis=0)
+
+            # Update per-bin ERLE only when safe: far active, no DT, converged
+            if far_power > 1e-4 and dt_indicator < 0.3 and erle_factor > 0.3:
+                inst_erle = self.near_psd / (self.error_psd + eps)
+                inst_erle = np.clip(inst_erle, 1.0, 1000.0)  # 0~30 dB
+                self.erle_per_bin = (self.alpha_erle * self.erle_per_bin
+                                     + (1 - self.alpha_erle) * inst_erle)
+                # 3-bin frequency smoothing to reduce per-bin noise
+                kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
+                self.erle_per_bin = np.convolve(
+                    self.erle_per_bin, kernel, mode='same').astype(np.float32)
+                self.erle_per_bin = np.clip(self.erle_per_bin, 1.0, 1000.0)
+
+            # Residual echo PSD: blend two estimates based on convergence
+            # 1) echo_psd / erle_per_bin: good when ERLE is well estimated (converged)
+            # 2) echo_psd directly: conservative upper bound (always available)
+            erle_est = self.echo_psd / self.erle_per_bin
+            direct_est = self.echo_psd
+            residual_echo_psd = (1.0 - erle_factor) * direct_est + erle_factor * erle_est
+
+            # Add reverb tail if enabled
+            if self.enable_reverb:
+                self.reverb_psd = (self.reverb_decay * self.reverb_psd
+                                   + (1 - self.reverb_decay) * echo_pwr_linear)
+                # Gate by far_activity to decay fast when far-end stops
+                residual_echo_psd = (residual_echo_psd
+                                     + self.reverb_gain * self.reverb_psd * self.far_activity)
+
+        # Compute coherence-based EER (used for legacy mode AND per-bin NE gate)
         eer_linear = self.echo_psd / (self.error_psd + eps)
-        # erle_factor=0 → pre-convergence (use coh2); erle_factor=1 → converged (use linear EER)
         eer_converged = eer_linear * (0.5 + 0.5 * coh2)
         if far_power > 1e-4:
             eer = (1.0 - erle_factor) * coh2 + erle_factor * eer_converged
@@ -890,8 +998,52 @@ class ResFilter:
         ne_g_floor = np.maximum(ne_g_floor, effective_g_min)
         spectral_g_min = np.maximum(spectral_g_min, ne_g_floor)
 
-        g = np.maximum(1.0 - self.over_sub * eer, spectral_g_min)
+        # --- Gain computation ---
+        if self.gain_type == "enr" and residual_echo_psd is not None:
+            # ENR masking (cf. AEC3 GainToNoAudibleEcho)
+            nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0)
+            enr = residual_echo_psd / (nearend_est + 1.0)
+            # Frequency-dependent thresholds: LF more aggressive, HF more sensitive
+            freq_bins = np.arange(self.n_freqs, dtype=np.float32)
+            # ENR thresholds scaled by enr_scale (independent of over_sub)
+            # AEC3 defaults (scale=1.0): LF enr_t=0.3, enr_s=0.4; HF enr_t=0.07, enr_s=0.1
+            scale = self.enr_scale
+            # Smooth interpolation between LF/HF (bins 5-10)
+            freq_bins_f = freq_bins  # already float
+            blend = np.clip((freq_bins_f - 5) / 5, 0, 1)
+            enr_t = (1 - blend) * (0.3 * scale) + blend * (0.07 * scale)
+            enr_s = (1 - blend) * (0.4 * scale) + blend * (0.1 * scale)
+            # Soft gate: linear interpolation between transparent/suppress
+            g = np.where(enr > enr_t,
+                         np.clip((enr_s - enr) / (enr_s - enr_t + eps), 0.0, 1.0),
+                         1.0)
+            g = np.maximum(g, spectral_g_min)
+        elif self.gain_type == "wiener" and residual_echo_psd is not None:
+            # Wiener gain (fixed: higher noise floor for FS stability)
+            noise_floor_psd = np.mean(self.error_psd) * 0.01 + eps  # 1% floor
+            nearend_est = np.maximum(self.error_psd - residual_echo_psd, noise_floor_psd)
+            beta = self.over_sub
+            g = nearend_est / (nearend_est + beta * residual_echo_psd + eps)
+            g = np.maximum(g, spectral_g_min)
+        elif residual_echo_psd is not None:
+            # Spectral subtraction with direct residual echo PSD
+            eer_direct = residual_echo_psd / (self.error_psd + eps)
+            g = np.maximum(1.0 - self.over_sub * eer_direct, spectral_g_min)
+        else:
+            # Legacy coherence-based spectral subtraction
+            g = np.maximum(1.0 - self.over_sub * eer, spectral_g_min)
         g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
+
+        # --- Frequency-domain postprocessing (cf. AEC3 PostprocessGains) ---
+        if far_power > 1e-4:
+            # DC consistency: bins 0-1 follow bin 2
+            if self.n_freqs > 2:
+                g[:2] = np.minimum(g[1], g[2])
+            # HF cap: upper bins capped at ~2kHz gain (bin 16 for 512-FFT)
+            hf_cap_bin = min(16, self.n_freqs - 1)
+            if self.n_freqs > hf_cap_bin + 1:
+                hf_cap = g[hf_cap_bin]
+                g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
 
         # Temporal smoothing: far_activity-driven release (no feedback loop)
         # far_activity high (far-end speaking) → slow release (TC≈200ms)
@@ -907,7 +1059,8 @@ class ResFilter:
         # Relax rate limiting when far-end is silent (near-end needs to pass through)
         activity_scale = 0.5 + 0.5 * self.far_activity  # [0.5, 1.0]
         eff_drop = self.max_drop_ratio ** activity_scale  # Less limiting when silent
-        eff_rise = self.max_rise_ratio ** (1.0 / activity_scale)  # More permissive when silent
+        # Tighter rise when far-end active (cf. AEC3 max_inc_factor=2.0)
+        eff_rise = self.max_rise_ratio ** (0.5 + 0.5 * (1.0 - self.far_activity))
         gain_floor = self.gain_smooth / eff_drop
         gain_ceil = self.gain_smooth * eff_rise
         smoothed = np.maximum(smoothed, gain_floor)
@@ -1337,7 +1490,15 @@ class AEC:
                 spectral_floor_db=self.config.res_spectral_floor_db,
                 ne_protect_db=self.config.res_ne_protect_db,
                 frame_size=self.config.frame_size,
-                hop_size=self.config.hop_size
+                hop_size=self.config.hop_size,
+                echo_method=self.config.res_echo_method,
+                gain_type=self.config.res_gain_type,
+                enable_reverb=self.config.res_enable_reverb,
+                reverb_decay=self.config.res_reverb_decay,
+                reverb_gain=self.config.res_reverb_gain,
+                alpha_echo_psd=self.config.res_alpha_echo_psd,
+                alpha_error_psd=self.config.res_alpha_error_psd,
+                enr_scale=self.config.res_enr_scale,
             )
         else:
             self.res = None
@@ -1763,7 +1924,8 @@ class AEC:
                                                 far_power, self.filter.far_spec,
                                                 filter_converged=self._filter_converged,
                                                 erle_factor=erle_factor,
-                                                dt_indicator=dt_indicator)
+                                                dt_indicator=dt_indicator,
+                                                near_spec=self.filter.near_spec)
 
                 # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
                 if not self.config.enable_dtd:

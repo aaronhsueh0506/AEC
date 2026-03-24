@@ -11,8 +11,8 @@ import os
 import sys
 import numpy as np
 
-METHODS = ['ours', 'ours_nores', 'aec3', 'speex']
-METHOD_LABELS = ['Ours', 'NoRES', 'AEC3', 'Speex']
+METHODS = ['ours', 'ours_nores', 'aec3', 'aec3_linear', 'speex']
+METHOD_LABELS = ['Ours', 'NoRES', 'AEC3', 'AEC3-Lin', 'Speex']
 
 def find_fs_cases(base_dir, out_dir=None):
     """Find farend singletalk cases and map to output files."""
@@ -30,10 +30,11 @@ def find_fs_cases(base_dir, out_dir=None):
             'type': 'fs',
             'mic': os.path.join(fs_dir, mic_f),
             'lpb': os.path.join(fs_dir, lpb_f),
-            'ours': os.path.join(out_dir, f'{prefix}_fs_ours.wav'),
-            'ours_nores': os.path.join(out_dir, f'{prefix}_fs_ours_nores.wav'),
-            'aec3': os.path.join(out_dir, f'{prefix}_fs_aec3.wav'),
-            'speex': os.path.join(out_dir, f'{prefix}_fs_speex.wav'),
+            'ours': os.path.join(out_dir, f'{prefix}_farend_singletalk_ours.wav'),
+            'ours_nores': os.path.join(out_dir, f'{prefix}_farend_singletalk_ours_nores.wav'),
+            'aec3': os.path.join(out_dir, f'{prefix}_farend_singletalk_aec3.wav'),
+            'aec3_linear': os.path.join(out_dir, f'{prefix}_farend_singletalk_aec3_linear.wav'),
+            'speex': os.path.join(out_dir, f'{prefix}_farend_singletalk_speex.wav'),
         })
     return cases
 
@@ -54,10 +55,11 @@ def find_dt_cases(base_dir, out_dir=None):
             'type': 'dt',
             'mic': os.path.join(dt_dir, mic_f),
             'lpb': os.path.join(dt_dir, lpb_f),
-            'ours': os.path.join(out_dir, f'{prefix}_dt_ours.wav'),
-            'ours_nores': os.path.join(out_dir, f'{prefix}_dt_ours_nores.wav'),
-            'aec3': os.path.join(out_dir, f'{prefix}_dt_aec3.wav'),
-            'speex': os.path.join(out_dir, f'{prefix}_dt_speex.wav'),
+            'ours': os.path.join(out_dir, f'{prefix}_doubletalk_ours.wav'),
+            'ours_nores': os.path.join(out_dir, f'{prefix}_doubletalk_ours_nores.wav'),
+            'aec3': os.path.join(out_dir, f'{prefix}_doubletalk_aec3.wav'),
+            'aec3_linear': os.path.join(out_dir, f'{prefix}_doubletalk_aec3_linear.wav'),
+            'speex': os.path.join(out_dir, f'{prefix}_doubletalk_speex.wav'),
         })
     return cases
 
@@ -80,10 +82,11 @@ def find_ne_cases(base_dir, out_dir=None):
             'type': 'ne',
             'mic': os.path.join(ne_dir, mic_f),
             'lpb': os.path.join(ne_dir, lpb_f),
-            'ours': os.path.join(out_dir, f'{prefix}_ne_ours.wav'),
-            'ours_nores': os.path.join(out_dir, f'{prefix}_ne_ours_nores.wav'),
-            'aec3': os.path.join(out_dir, f'{prefix}_ne_aec3.wav'),
-            'speex': os.path.join(out_dir, f'{prefix}_ne_speex.wav'),
+            'ours': os.path.join(out_dir, f'{prefix}_nearend_singletalk_ours.wav'),
+            'ours_nores': os.path.join(out_dir, f'{prefix}_nearend_singletalk_ours_nores.wav'),
+            'aec3': os.path.join(out_dir, f'{prefix}_nearend_singletalk_aec3.wav'),
+            'aec3_linear': os.path.join(out_dir, f'{prefix}_nearend_singletalk_aec3_linear.wav'),
+            'speex': os.path.join(out_dir, f'{prefix}_nearend_singletalk_speex.wav'),
         })
     return cases
 
