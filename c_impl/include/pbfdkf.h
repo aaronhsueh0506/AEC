@@ -22,13 +22,14 @@ typedef struct Pbfdkf Pbfdkf;
  *
  * @param block_size  FFT size (512)
  * @param hop_size    Processing hop (160, must be <= block_size/2)
- * @param n_partitions Number of filter partitions (4)
+ * @param n_partitions Number of filter partitions (10)
  * @param delta       Regularization (1e-8)
- * @param q_high      Initial Kalman Q (process noise)
+ * @param q_high      Initial Kalman Q (process noise, 1e-4)
+ * @param q_low       Stable tracking Q (1e-7)
  * @return Filter handle, or NULL on error
  */
 Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
-                       float delta, float q_high);
+                       float delta, float q_high, float q_low);
 
 /**
  * Destroy filter
@@ -74,7 +75,7 @@ void pbfdkf_set_q_high(Pbfdkf* f, float q_high);
 /**
  * Set Q_high with ratio (shadow filter: Q = main_Q × ratio)
  */
-void pbfdkf_set_q_ratio(Pbfdkf* f, float q_high, float ratio);
+void pbfdkf_set_q_ratio(Pbfdkf* f, float q_high, float q_low, float ratio);
 
 /**
  * Copy weights + Kalman P from src to dst
@@ -98,7 +99,12 @@ const Complex* pbfdkf_get_echo_spec(const Pbfdkf* f);
 const Complex* pbfdkf_get_far_spec(const Pbfdkf* f);
 
 /**
- * Get far-end power (smoothed, per-bin sum)
+ * Get near-end (mic) spectrum pointer (read-only)
+ */
+const Complex* pbfdkf_get_near_spec(const Pbfdkf* f);
+
+/**
+ * Get far-end power (smoothed, per-bin mean)
  */
 float pbfdkf_get_far_power(const Pbfdkf* f);
 

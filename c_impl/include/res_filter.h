@@ -1,18 +1,20 @@
 /**
- * res_filter.h - Residual Echo Suppressor with WOLA
+ * res_filter.h - Residual Echo Suppressor with WOLA (v2)
  *
  * WOLA (Weighted Overlap-Add) with sqrt-Hann window:
  * - Analysis: frame_size=320 × sqrt-Hann → zero-pad → FFT(512) → 257 bins
  * - Synthesis: IFFT → truncate → sqrt-Hann → OLA
  *
- * Features: coherence-based NL echo PSD, per-bin near-end gate,
- * dynamic g_min, spectral floor, rate limiting, CNG.
+ * v2 features: ENR masking gain, direct echo estimation (per-bin ERLE),
+ * reverb tail model, frequency postprocessing, configurable PSD alphas.
+ * Legacy: coherence-based spectral subtraction still available.
  */
 
 #ifndef RES_FILTER_H
 #define RES_FILTER_H
 
 #include "fft_wrapper.h"
+#include "aec_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,8 +34,18 @@ typedef struct {
     float max_drop_db_per_frame; /* 6.0 */
     float max_rise_db_per_frame; /* 6.0 */
     float spectral_floor_db;    /* -25.0 */
-    float ne_protect_db;        /* -8.0 */
+    float ne_protect_db;        /* -12.0 */
     int enable_cng;             /* 1 */
+
+    /* v2 configurable */
+    float alpha_echo_psd;       /* PSD smoothing (0.5 balanced) */
+    float alpha_error_psd;      /* PSD smoothing (0.6 balanced) */
+    int echo_method;            /* RES_ECHO_COHERENCE or RES_ECHO_DIRECT */
+    int gain_type;              /* RES_GAIN_SPECTRAL_SUB / _WIENER / _ENR */
+    int enable_reverb;          /* reverb tail model */
+    float reverb_decay;         /* 0.5 */
+    float reverb_gain;          /* 0.5 */
+    float enr_scale;            /* ENR threshold scale (1.0) */
 } ResConfig;
 
 /**
@@ -58,6 +70,7 @@ void res_reset(ResFilter* res);
  * @param error_hop    Error signal from adaptive filter [hop_size]
  * @param echo_spec    Echo estimate spectrum [n_freqs] (from PBFDKF)
  * @param far_spec     Far-end spectrum [n_freqs] (for coherence)
+ * @param near_spec    Near-end (mic) spectrum [n_freqs] (for direct echo est, may be NULL)
  * @param far_power    Far-end mean power (activity detection)
  * @param converged    Filter convergence flag
  * @param erle_factor  [0,1] convergence factor for EER blending
@@ -69,6 +82,7 @@ void res_process(ResFilter* res,
                  const float* error_hop,
                  const Complex* echo_spec,
                  const Complex* far_spec,
+                 const Complex* near_spec,
                  float far_power,
                  int converged,
                  float erle_factor,

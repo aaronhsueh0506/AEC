@@ -4,7 +4,7 @@
  * Orchestrates: HPF → PBFDKF (main + shadow) → simple variable mu →
  *               convergence detection → RES (WOLA) → output limiter
  *
- * Matches Python AEC v1.15.0 (SUBBAND mode, FDKF always on).
+ * Matches Python AEC v1.17.0 (SUBBAND mode, FDKF always on).
  */
 
 #include "aec.h"
@@ -92,18 +92,18 @@ Aec* aec_create(const AecConfig* config) {
     /* Main filter (PBFDKF) */
     aec->filter = pbfdkf_create(config->fft_size, hop,
                                  config->n_partitions, config->delta,
-                                 config->kalman_q_high);
+                                 config->kalman_q_high, config->kalman_q_low);
     if (!aec->filter) { aec_destroy(aec); return NULL; }
 
     /* Shadow filter */
     aec->shadow_filter = pbfdkf_create(config->fft_size, hop,
                                         config->n_partitions, config->delta,
-                                        config->kalman_q_high);
+                                        config->kalman_q_high, config->kalman_q_low);
     if (!aec->shadow_filter) { aec_destroy(aec); return NULL; }
 
     /* Set shadow Q = main Q × ratio */
     pbfdkf_set_q_ratio(aec->shadow_filter, config->kalman_q_high,
-                        config->shadow_q_ratio);
+                        config->kalman_q_low, config->shadow_q_ratio);
 
     /* RES */
     if (config->enable_res) {
@@ -118,6 +118,14 @@ Aec* aec_create(const AecConfig* config) {
         rc.spectral_floor_db = config->res_spectral_floor_db;
         rc.ne_protect_db = config->res_ne_protect_db;
         rc.enable_cng = config->enable_cng;
+        rc.alpha_echo_psd = config->res_alpha_echo_psd;
+        rc.alpha_error_psd = config->res_alpha_error_psd;
+        rc.echo_method = config->res_echo_method;
+        rc.gain_type = config->res_gain_type;
+        rc.enable_reverb = config->res_enable_reverb;
+        rc.reverb_decay = config->res_reverb_decay;
+        rc.reverb_gain = config->res_reverb_gain;
+        rc.enr_scale = config->res_enr_scale;
         aec->res = res_create(&rc);
     }
 
@@ -175,7 +183,7 @@ void aec_reset(Aec* aec) {
     pbfdkf_reset(aec->filter);
     pbfdkf_reset(aec->shadow_filter);
     pbfdkf_set_q_ratio(aec->shadow_filter, aec->config.kalman_q_high,
-                        aec->config.shadow_q_ratio);
+                        aec->config.kalman_q_low, aec->config.shadow_q_ratio);
     if (aec->res) res_reset(aec->res);
     aec->simple_mu_ratio = 1.0f;
     aec->simple_mu_holdoff = 0;
@@ -363,6 +371,7 @@ int aec_process(Aec* aec,
         res_process(aec->res, aec->raw_output,
                     pbfdkf_get_echo_spec(aec->filter),
                     pbfdkf_get_far_spec(aec->filter),
+                    pbfdkf_get_near_spec(aec->filter),
                     far_power, aec->filter_converged,
                     erle_factor, dt_indicator, over_sub,
                     output);

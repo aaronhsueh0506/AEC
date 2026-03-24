@@ -1,12 +1,19 @@
 # AEC C Implementation — PBFDKF + Shadow + WOLA RES
 
-C 語言 AEC 實作，對齊 Python AEC v1.15.0（SUBBAND PBFDKF 模式）。
+C 語言 AEC 實作，對齊 Python AEC v1.17.0（SUBBAND PBFDKF 模式）。
 
 ## 特點
 
 - **PBFDKF**（Partitioned Block Frequency-Domain Kalman Filter）— Kalman 永遠開啟
+  - P_init=0.01, P_MAX=0.02（防 Kalman gain 爆炸）
+  - Per-bin Q gating（僅在 far-end 有能量的 bin 注入 Q）
+  - Far-end activity gate（far_hop_energy > 1e-6 才更新 weights）
 - **Shadow Filter** — 雙濾波器自動修正，永遠啟用
-- **WOLA RES** — Weighted Overlap-Add 殘餘回音抑制（sqrt-Hann 窗，frame=320, FFT=512）
+- **WOLA RES v2** — Weighted Overlap-Add 殘餘回音抑制（sqrt-Hann 窗，frame=320, FFT=512）
+  - ENR masking 增益（仿 AEC3，預設）/ Wiener / spectral subtraction
+  - Direct echo estimation（per-bin ERLE tracking）
+  - Reverb tail model（指數衰減）
+  - 4-block 近端 PSD 平均 + 頻率域後處理
 - **HPF** — 2 階 Butterworth IIR 高通濾波器（80 Hz）
 - **三階段 Preset** — BALANCED / AGGRESSIVE / MAXIMUM
 - **Output Limiter** — 平滑增益限制（輸出不超過麥克風振幅）
@@ -51,15 +58,28 @@ make clean    # 清除編譯產物
 
 | 參數 | BALANCED | AGGRESSIVE | MAXIMUM |
 |------|----------|------------|---------|
-| `res_g_min_db` | -25 | -35 | -40 |
-| `res_over_sub_base` | 2.5 | 4.0 | 6.0 |
-| `res_over_sub_scale` | 4.0 | 6.0 | 8.0 |
-| `res_dt_reduction` | 3.5 | 2.0 | 0.0 |
-| `res_ne_protect_db` | -8 | -5 | -2 |
-| `res_spectral_floor_db` | -25 | -30 | -35 |
+| **Kalman** | | | |
+| `kalman_q_high` | 1e-4 | 1e-4 | 1e-4 |
+| `kalman_q_low` | 1e-7 | 1e-7 | 1e-7 |
+| **RES v2** | | | |
+| `res_gain_type` | enr | enr | enr |
+| `res_echo_method` | direct | direct | direct |
+| `res_enr_scale` | 1.0 | 0.3 | 0.15 |
+| `res_enable_reverb` | 1 | 1 | 1 |
+| `res_reverb_decay` | 0.5 | 0.7 | 0.8 |
+| `res_reverb_gain` | 0.5 | 2.0 | 3.0 |
+| `alpha_echo_psd` | 0.5 | 0.3 | 0.2 |
+| `alpha_error_psd` | 0.6 | 0.4 | 0.3 |
+| **RES** | | | |
+| `res_g_min_db` | -35 | -60 | -72 |
+| `res_ne_protect_db` | -12 | -3 | -1 |
+| `res_spectral_floor_db` | -25 | -40 | -50 |
+| `res_over_sub_base` | 2.5 | 6.0 | 10.0 |
+| `res_over_sub_scale` | 4.0 | 10.0 | 15.0 |
+| `res_dt_reduction` | 3.5 | 1.0 | 0.0 |
+| **Shadow/Adaptive** | | | |
 | `shadow_q_ratio` | 3.0 | 4.0 | 5.0 |
 | `shadow_mu_min` | 0.5 | 0.7 | 0.9 |
-| `kalman_q_high` | 1e-3 | 3e-3 | 1e-2 |
 | `warmup_frames` | 100 | 150 | 200 |
 
 ## API
@@ -113,9 +133,10 @@ near-end ─> HPF ──> │       ↓ copy gate ↕                │
                                ↓
                     Convergence Detection (ERLE > 6dB × 10 frames)
                                ↓
-                    WOLA RES (Residual Echo Suppressor)
-                      - Coherence-based near-end gate
-                      - Dynamic over-subtraction
+                    WOLA RES v2 (Residual Echo Suppressor)
+                      - ENR masking / Wiener / spectral sub
+                      - Direct echo est + per-bin ERLE + reverb tail
+                      - 4-block near-end avg + freq postprocessing
                       - Spectral floor + rate limiting + CNG
                                ↓
                     Output Limiter → Noise Gate → output

@@ -2,6 +2,42 @@
 
 ## 版本歷史
 
+### v1.17.0 (2026-03-24) - Kalman 修正 + C 實作全同步 Python v1.17.0
+
+#### 改動內容
+
+1. **Kalman 參數修正（Python + C）**
+   - P_init: 0.5 → **0.01**（防止啟動時 K≈33 造成 weight jitter / buzzing）
+   - P_MAX: 無 → **0.02**（clamp 上限，防止 P 爆炸）
+   - Q_high: 1e-3/3e-3/1e-2（per-preset）→ **1e-4**（所有 preset 統一，消除格子狀 artifact）
+   - Q_low: 1e-5 hardcoded → **1e-7**（configurable via `kalman_q_low`）
+   - Per-bin Q gating: 僅在 `power[k] > mean_power*0.01+1e-6` 的 bin 注入 Q（靜音 bin 不加 Q）
+   - Far-end gate: `total_power > delta*nfreq` → **`far_hop_energy > 1e-6`**（~-60 dBFS，更精確的活動偵測）
+
+2. **Preset 大幅加強（AGGRESSIVE / MAXIMUM）**
+   - AGGRESSIVE: g_min=-35→**-60**, enr_scale=0.7→**0.3**, over_sub_base=4→**6**, ne_protect=-5→**-3**, reverb_gain=1.0→**2.0**
+   - MAXIMUM: g_min=-40→**-72**, enr_scale=0.5→**0.15**, over_sub_base=6→**10**, ne_protect=-2→**-1**, reverb_gain=1.5→**3.0**
+   - 設計哲學：「傷到語音沒關係」，最大限度壓制殘餘 echo
+
+3. **C 實作全面同步 Python v1.17.0**
+   - `pbfdkf.c`: P_init=0.01, P_MAX=0.02, Q gating, far-end gate, configurable q_low
+   - `res_filter.c`: RES v2（ENR masking, direct echo est, 4-block near-end avg, reverb tail, freq postprocessing）
+   - `aec_types.h`: 新增 `ResEchoMethod`/`ResGainType` enum, `kalman_q_low` + RES v2 config 欄位
+   - `aec.c`: 接線所有新參數到 PBFDKF 和 RES
+   - `example/main.c`: 印出 RES v2 / Reverb / Kalman Q_low 參數
+
+4. **移除失敗的測試 code**
+   - Q decay 方案（無效，移除）
+   - Debug print（移除）
+
+#### 設計決策
+
+- **為何 Q_high=1e-4 而非 1e-3**: Q_high=1e-3 在 startup 造成 K 值過高，weight 在 DT 時劇烈震動產生格子狀 spectrogram artifact。1e-4 配合 P_init=0.01 和 P_MAX=0.02 足以打破 R deadlock 同時避免 jitter。
+- **為何所有 preset 統一 Q_high**: 不同 Q_high 導致 AGGRESSIVE 收斂反而比 BALANCED 差（更高 Q → 更大 jitter → 更差 ERLE）。統一 1e-4 後所有 preset 共享相同收斂品質，差異化改由 RES preset 控制。
+- **為何 P_MAX=0.02**: P_init=0.01 正常運作，但在某些場景 P 可能回升。0.02 提供 2× headroom 同時防止失控。
+
+---
+
 ### v1.16.0 (2026-03-24) - RES v2: ENR Masking + Direct Echo Estimation + Reverb Tail
 
 #### 改動內容

@@ -1,11 +1,13 @@
 /**
- * res_filter.c - Residual Echo Suppressor with WOLA
+ * res_filter.c - Residual Echo Suppressor with WOLA (v2)
  *
- * Matches Python ResFilter v1.15.0:
+ * Matches Python ResFilter v1.17.0:
  * - WOLA analysis/synthesis with sqrt-Hann window
- * - Coherence-based nonlinear echo PSD estimation
- * - Per-bin near-end gate (protects near-end during DT)
- * - Dynamic g_min, spectral floor, rate limiting, CNG
+ * - Coherence-based + direct echo PSD estimation
+ * - ENR masking gain (default) + Wiener + spectral subtraction
+ * - Per-bin ERLE tracking, reverb tail model
+ * - Frequency postprocessing (DC consistency, HF cap)
+ * - Per-bin near-end gate, dynamic g_min, spectral floor, rate limiting, CNG
  */
 
 #include "res_filter.h"
@@ -16,6 +18,8 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+#define NEAR_PSD_BLOCKS 4   /* ring buffer size for near-end PSD averaging */
 
 struct ResFilter {
     int block_size;       /* 512 */
@@ -35,9 +39,9 @@ struct ResFilter {
     float* error_envelope; /* [n_freqs] */
     float alpha_envelope;  /* 0.95 */
 
-    /* PSD smoothing */
-    float alpha_echo_psd;  /* 0.7 */
-    float alpha_error_psd; /* 0.8 */
+    /* PSD smoothing (configurable per-preset) */
+    float alpha_echo_psd;
+    float alpha_error_psd;
     float* echo_psd;      /* [n_freqs] */
     float* error_psd;     /* [n_freqs] */
     float* gain_smooth;   /* [n_freqs] */
@@ -58,6 +62,22 @@ struct ResFilter {
     float* noise_psd;     /* [n_freqs] */
     float alpha_noise;    /* 0.98 */
 
+    /* === v2: direct echo estimation === */
+    int echo_method;      /* RES_ECHO_COHERENCE or RES_ECHO_DIRECT */
+    int gain_type;        /* RES_GAIN_SPECTRAL_SUB / _WIENER / _ENR */
+    float enr_scale;
+    float* erle_per_bin;  /* [n_freqs] per-bin ERLE estimate */
+    float alpha_erle;     /* 0.95 */
+    float* near_psd_buf;  /* [NEAR_PSD_BLOCKS * n_freqs] ring buffer */
+    int near_psd_idx;
+    float* near_psd;      /* [n_freqs] 4-block average */
+
+    /* v2: reverb tail */
+    int enable_reverb;
+    float reverb_decay;
+    float reverb_gain;
+    float* reverb_psd;    /* [n_freqs] */
+
     /* WOLA */
     float* window;        /* [frame_size] sqrt-Hann */
     float* input_buf;     /* [frame_size] analysis sliding buffer */
@@ -71,7 +91,9 @@ struct ResFilter {
 
 static inline float maxf(float a, float b) { return a > b ? a : b; }
 static inline float minf(float a, float b) { return a < b ? a : b; }
-/* clampf reserved for future use */
+static inline float clampf(float x, float lo, float hi) {
+    return x < lo ? lo : (x > hi ? hi : x);
+}
 
 ResFilter* res_create(const ResConfig* cfg) {
     if (!cfg || cfg->n_freqs <= 0) return NULL;
@@ -90,13 +112,23 @@ ResFilter* res_create(const ResConfig* cfg) {
     r->max_rise_ratio = powf(10.0f, cfg->max_rise_db_per_frame / 20.0f);
     r->spectral_floor_ratio = powf(10.0f, cfg->spectral_floor_db / 20.0f);
 
-    r->alpha_echo_psd = 0.7f;
-    r->alpha_error_psd = 0.8f;
+    r->alpha_echo_psd = cfg->alpha_echo_psd;
+    r->alpha_error_psd = cfg->alpha_error_psd;
     r->alpha_envelope = 0.95f;
     r->alpha_coh = 0.3f;
     r->alpha_noise = 0.98f;
     r->far_activity = 0.0f;
     r->enable_cng = cfg->enable_cng;
+
+    /* v2 config */
+    r->echo_method = cfg->echo_method;
+    r->gain_type = cfg->gain_type;
+    r->enr_scale = cfg->enr_scale;
+    r->enable_reverb = cfg->enable_reverb;
+    r->reverb_decay = cfg->reverb_decay;
+    r->reverb_gain = cfg->reverb_gain;
+    r->alpha_erle = 0.95f;
+    r->near_psd_idx = 0;
 
     int nf = cfg->n_freqs;
     int fs = cfg->frame_size;
@@ -113,6 +145,13 @@ ResFilter* res_create(const ResConfig* cfg) {
     r->S_ee           = (float*)calloc(nf, sizeof(float));
     r->coh2_smooth    = (float*)calloc(nf, sizeof(float));
     r->noise_psd      = (float*)calloc(nf, sizeof(float));
+
+    /* v2 arrays */
+    r->erle_per_bin   = (float*)malloc(nf * sizeof(float));
+    r->near_psd_buf   = (float*)calloc(NEAR_PSD_BLOCKS * nf, sizeof(float));
+    r->near_psd       = (float*)calloc(nf, sizeof(float));
+    r->reverb_psd     = (float*)calloc(nf, sizeof(float));
+
     r->window         = (float*)malloc(fs * sizeof(float));
     r->input_buf      = (float*)calloc(fs, sizeof(float));
     r->ola_buf        = (float*)calloc(fs, sizeof(float));
@@ -122,16 +161,19 @@ ResFilter* res_create(const ResConfig* cfg) {
     if (!r->echo_psd || !r->error_psd || !r->gain_smooth ||
         !r->error_envelope || !r->S_fe_r || !r->S_fe_i ||
         !r->S_ff || !r->S_ee || !r->coh2_smooth || !r->noise_psd ||
+        !r->erle_per_bin || !r->near_psd_buf || !r->near_psd ||
+        !r->reverb_psd ||
         !r->window || !r->input_buf || !r->ola_buf ||
         !r->time_buf || !r->spec_buf) {
         res_destroy(r);
         return NULL;
     }
 
-    /* Init gains */
+    /* Init gains + v2 state */
     for (int k = 0; k < nf; k++) {
         r->gain_smooth[k] = r->g_min;
         r->error_envelope[k] = 1.0f;
+        r->erle_per_bin[k] = 1.0f;
     }
 
     /* Compute sqrt-Hann window */
@@ -162,6 +204,10 @@ void res_destroy(ResFilter* r) {
     free(r->S_ee);
     free(r->coh2_smooth);
     free(r->noise_psd);
+    free(r->erle_per_bin);
+    free(r->near_psd_buf);
+    free(r->near_psd);
+    free(r->reverb_psd);
     free(r->window);
     free(r->input_buf);
     free(r->ola_buf);
@@ -179,6 +225,7 @@ void res_reset(ResFilter* r) {
     for (int k = 0; k < nf; k++) {
         r->gain_smooth[k] = r->g_min;
         r->error_envelope[k] = 1.0f;
+        r->erle_per_bin[k] = 1.0f;
     }
     memset(r->S_fe_r, 0, nf * sizeof(float));
     memset(r->S_fe_i, 0, nf * sizeof(float));
@@ -186,6 +233,10 @@ void res_reset(ResFilter* r) {
     memset(r->S_ee, 0, nf * sizeof(float));
     memset(r->coh2_smooth, 0, nf * sizeof(float));
     memset(r->noise_psd, 0, nf * sizeof(float));
+    memset(r->near_psd_buf, 0, NEAR_PSD_BLOCKS * nf * sizeof(float));
+    memset(r->near_psd, 0, nf * sizeof(float));
+    memset(r->reverb_psd, 0, nf * sizeof(float));
+    r->near_psd_idx = 0;
     memset(r->input_buf, 0, r->frame_size * sizeof(float));
     memset(r->ola_buf, 0, r->frame_size * sizeof(float));
     r->far_activity = 0.0f;
@@ -195,13 +246,15 @@ void res_process(ResFilter* r,
                  const float* error_hop,
                  const Complex* echo_spec,
                  const Complex* far_spec,
+                 const Complex* near_spec,
                  float far_power,
                  int converged,
                  float erle_factor,
-                 float dt_indicator __attribute__((unused)),
+                 float dt_indicator,
                  float over_sub,
                  float* output_hop) {
     if (!r || !error_hop || !output_hop) return;
+    (void)dt_indicator; /* used implicitly via over_sub from coordinator */
 
     const int nf = r->n_freqs;
     const int hop = r->hop_size;
@@ -315,6 +368,69 @@ void res_process(ResFilter* r,
         }
     }
 
+    /* === Residual echo PSD estimation (v2: direct method) === */
+    float residual_echo_psd[257];
+    int have_residual = 0;
+
+    if (r->echo_method == RES_ECHO_DIRECT && near_spec) {
+        /* Near-end power */
+        float near_pwr[257];
+        for (int k = 0; k < nf; k++) {
+            near_pwr[k] = near_spec[k].r * near_spec[k].r +
+                          near_spec[k].i * near_spec[k].i;
+        }
+
+        /* 4-block ring buffer moving average for stable near-end PSD */
+        float* ring_slot = r->near_psd_buf + r->near_psd_idx * nf;
+        memcpy(ring_slot, near_pwr, nf * sizeof(float));
+        r->near_psd_idx = (r->near_psd_idx + 1) % NEAR_PSD_BLOCKS;
+
+        for (int k = 0; k < nf; k++) {
+            float sum = 0.0f;
+            for (int b = 0; b < NEAR_PSD_BLOCKS; b++)
+                sum += r->near_psd_buf[b * nf + k];
+            r->near_psd[k] = sum * (1.0f / NEAR_PSD_BLOCKS);
+        }
+
+        /* Update per-bin ERLE: only when far active, no DT, converged */
+        if (far_power > 1e-4f && dt_indicator < 0.3f && erle_factor > 0.3f) {
+            float temp[257];
+            for (int k = 0; k < nf; k++) {
+                float inst = r->near_psd[k] / (r->error_psd[k] + eps);
+                inst = clampf(inst, 1.0f, 1000.0f);
+                r->erle_per_bin[k] = r->alpha_erle * r->erle_per_bin[k]
+                                     + (1.0f - r->alpha_erle) * inst;
+            }
+            /* 3-bin frequency smoothing [0.25, 0.5, 0.25] */
+            temp[0] = 0.75f * r->erle_per_bin[0] + 0.25f * r->erle_per_bin[1];
+            for (int k = 1; k < nf - 1; k++)
+                temp[k] = 0.25f * r->erle_per_bin[k-1] + 0.5f * r->erle_per_bin[k]
+                          + 0.25f * r->erle_per_bin[k+1];
+            temp[nf-1] = 0.25f * r->erle_per_bin[nf-2] + 0.75f * r->erle_per_bin[nf-1];
+            for (int k = 0; k < nf; k++)
+                r->erle_per_bin[k] = clampf(temp[k], 1.0f, 1000.0f);
+        }
+
+        /* Residual echo PSD: blend based on convergence */
+        for (int k = 0; k < nf; k++) {
+            float erle_est = r->echo_psd[k] / r->erle_per_bin[k];
+            float direct_est = r->echo_psd[k];
+            residual_echo_psd[k] = (1.0f - erle_factor) * direct_est
+                                   + erle_factor * erle_est;
+        }
+
+        /* Reverb tail */
+        if (r->enable_reverb) {
+            for (int k = 0; k < nf; k++) {
+                r->reverb_psd[k] = r->reverb_decay * r->reverb_psd[k]
+                                   + (1.0f - r->reverb_decay) * echo_pwr[k];
+                residual_echo_psd[k] += r->reverb_gain * r->reverb_psd[k]
+                                        * r->far_activity;
+            }
+        }
+        have_residual = 1;
+    }
+
     /* === Dynamic g_min: far-end activity tracking === */
     float is_far_active = (far_power > 1e-4f) ? 1.0f : 0.0f;
     if (is_far_active > r->far_activity) {
@@ -331,7 +447,7 @@ void res_process(ResFilter* r,
     mean_error /= nf;
     float signal_floor = mean_error * 0.001f + 1e-8f;
 
-    /* === EER computation with convergence blending === */
+    /* === EER computation (for legacy + near-end gate) === */
     float eer[257];
     for (int k = 0; k < nf; k++) {
         float eer_linear = r->echo_psd[k] / (r->error_psd[k] + eps);
@@ -346,7 +462,6 @@ void res_process(ResFilter* r,
     /* === Spectral floor + near-end gate === */
     float spectral_g_min[257];
     if (far_power > 1e-4f) {
-        /* Update spectral envelope */
         float env_max = 0.0f;
         for (int k = 0; k < nf; k++) {
             float err_mag = sqrtf(error_pwr[k] + 1e-10f);
@@ -376,14 +491,72 @@ void res_process(ResFilter* r,
         spectral_g_min[k] = maxf(spectral_g_min[k], ne_g_floor);
     }
 
-    /* === Compute gain === */
+    /* === Gain computation (v2: three branches) === */
     float g[257];
-    for (int k = 0; k < nf; k++) {
-        g[k] = maxf(1.0f - over_sub * eer[k], spectral_g_min[k]);
 
-        /* Noise gate: pass through quiet bins */
-        if (r->echo_psd[k] < signal_floor && r->error_psd[k] < signal_floor) {
+    if (r->gain_type == RES_GAIN_ENR && have_residual) {
+        /* ENR masking (cf. AEC3 GainToNoAudibleEcho) */
+        float scale = r->enr_scale;
+        for (int k = 0; k < nf; k++) {
+            float nearend_est = maxf(r->error_psd[k] - residual_echo_psd[k], 0.0f);
+            float enr = residual_echo_psd[k] / (nearend_est + 1.0f);
+
+            /* Frequency-dependent thresholds: LF more aggressive, HF more sensitive */
+            float blend = clampf((k - 5.0f) / 5.0f, 0.0f, 1.0f);
+            float enr_t = (1.0f - blend) * 0.3f * scale + blend * 0.07f * scale;
+            float enr_s = (1.0f - blend) * 0.4f * scale + blend * 0.1f * scale;
+
+            /* Soft gate */
+            if (enr > enr_t) {
+                g[k] = clampf((enr_s - enr) / (enr_s - enr_t + eps), 0.0f, 1.0f);
+            } else {
+                g[k] = 1.0f;
+            }
+            g[k] = maxf(g[k], spectral_g_min[k]);
+        }
+    } else if (r->gain_type == RES_GAIN_WIENER && have_residual) {
+        /* Wiener gain */
+        float noise_floor_psd = mean_error * 0.01f + eps;
+        for (int k = 0; k < nf; k++) {
+            float nearend_est = maxf(r->error_psd[k] - residual_echo_psd[k],
+                                     noise_floor_psd);
+            float beta = over_sub;
+            g[k] = nearend_est / (nearend_est + beta * residual_echo_psd[k] + eps);
+            g[k] = maxf(g[k], spectral_g_min[k]);
+        }
+    } else if (have_residual) {
+        /* Spectral subtraction with direct residual echo PSD */
+        for (int k = 0; k < nf; k++) {
+            float eer_direct = residual_echo_psd[k] / (r->error_psd[k] + eps);
+            g[k] = maxf(1.0f - over_sub * eer_direct, spectral_g_min[k]);
+        }
+    } else {
+        /* Legacy coherence-based spectral subtraction */
+        for (int k = 0; k < nf; k++) {
+            g[k] = maxf(1.0f - over_sub * eer[k], spectral_g_min[k]);
+        }
+    }
+
+    /* Noise gate: pass through quiet bins */
+    for (int k = 0; k < nf; k++) {
+        if (r->echo_psd[k] < signal_floor && r->error_psd[k] < signal_floor)
             g[k] = 1.0f;
+    }
+
+    /* === Frequency-domain postprocessing (cf. AEC3 PostprocessGains) === */
+    if (far_power > 1e-4f) {
+        /* DC consistency: bins 0-1 follow bin 2 */
+        if (nf > 2) {
+            float dc_g = minf(g[1], g[2]);
+            g[0] = dc_g;
+            g[1] = dc_g;
+        }
+        /* HF cap: upper bins capped at ~2kHz gain (bin 16 for 512-FFT) */
+        int hf_cap_bin = 16 < (nf - 1) ? 16 : (nf - 1);
+        if (nf > hf_cap_bin + 1) {
+            float hf_cap = g[hf_cap_bin];
+            for (int k = hf_cap_bin + 1; k < nf; k++)
+                g[k] = minf(g[k], hf_cap);
         }
     }
 
@@ -398,7 +571,7 @@ void res_process(ResFilter* r,
         /* Rate limiting */
         float act_scale = 0.5f + 0.5f * r->far_activity;
         float eff_drop = powf(r->max_drop_ratio, act_scale);
-        float eff_rise = powf(r->max_rise_ratio, 1.0f / act_scale);
+        float eff_rise = powf(r->max_rise_ratio, 0.5f + 0.5f * (1.0f - r->far_activity));
         float gain_floor = r->gain_smooth[k] / eff_drop;
         float gain_ceil  = r->gain_smooth[k] * eff_rise;
         smoothed = maxf(smoothed, gain_floor);
@@ -426,7 +599,6 @@ void res_process(ResFilter* r,
                 float deficit = target_pwr - suppressed_pwr;
                 if (deficit > 0) {
                     float cng_mag = sqrtf(deficit);
-                    /* Simple pseudo-random phase using k as seed */
                     float phase = (float)(k * 2654435761u % 1000) / 1000.0f *
                                   2.0f * (float)M_PI;
                     r->spec_buf[k].r += cng_mag * cosf(phase);
@@ -439,18 +611,13 @@ void res_process(ResFilter* r,
     /* === Synthesis: IFFT → truncate → sqrt-Hann → OLA === */
     fft_inverse(r->fft, r->spec_buf, r->time_buf);
 
-    /* Apply synthesis window (first frame_size samples only) */
     for (int i = 0; i < fs; i++)
         r->time_buf[i] *= r->window[i];
 
-    /* OLA */
     for (int i = 0; i < fs; i++)
         r->ola_buf[i] += r->time_buf[i];
 
-    /* Extract output hop */
     memcpy(output_hop, r->ola_buf, hop * sizeof(float));
-
-    /* Shift OLA buffer */
     memmove(r->ola_buf, r->ola_buf + hop, (fs - hop) * sizeof(float));
     memset(r->ola_buf + fs - hop, 0, hop * sizeof(float));
 }
@@ -461,9 +628,4 @@ const float* res_get_echo_psd(const ResFilter* r) {
 
 const float* res_get_error_psd(const ResFilter* r) {
     return r ? r->error_psd : NULL;
-}
-
-void res_set_over_sub(ResFilter* r, float over_sub) {
-    (void)r; (void)over_sub;
-    /* over_sub is now passed per-frame to res_process */
 }

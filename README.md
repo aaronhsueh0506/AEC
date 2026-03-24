@@ -1,8 +1,8 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v1.16.0），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
+回音消除模組（v1.17.0），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
-> C 實作已重寫對齊 Python v1.15.0：PBFDKF + Shadow + WOLA RES + HPF + Preset，詳見 [c_impl/README.md](c_impl/README.md)。
+> C 實作已對齊 Python v1.17.0：PBFDKF（Kalman P_init/P_MAX/Q gating/far-end gate 修正）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + Preset，詳見 [c_impl/README.md](c_impl/README.md)。
 
 ## 濾波器模式
 
@@ -60,8 +60,8 @@ cd c_impl && make
 ./bin/aec_wav mic.wav ref.wav output.wav --filter 2400             # 自訂濾波器長度
 ```
 
-C 版本已對齊 Python v1.15.0（SUBBAND 模式），包含 PBFDKF Kalman + Shadow + WOLA RES + HPF + 三級 Preset。
-不含：RES v2（ENR masking / direct echo est / reverb tail）、DTD、Delay Estimation、Saturation Detection、LMS/NLMS/FDAF 模式。
+C 版本已對齊 Python v1.17.0（SUBBAND 模式），包含 PBFDKF Kalman（P_init=0.01, P_MAX=0.02, Q gating, far-end gate）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + 三級 Preset。
+不含：DTD、Delay Estimation、Saturation Detection、LMS/NLMS/FDAF 模式。
 
 ## 系統架構
 
@@ -222,19 +222,20 @@ while has_audio:
 | **RES v2 層** | | | | |
 | `res_gain_type` | enr | enr | enr | 增益公式 |
 | `res_echo_method` | direct | direct | direct | Echo 估計方法 |
-| `res_enr_scale` | 1.0 | 0.7 | 0.5 | ENR 門檻縮放（越低越激進） |
+| `res_enr_scale` | 1.0 | 0.3 | 0.15 | ENR 門檻縮放（越低越激進） |
 | `res_enable_reverb` | True | True | True | Reverb tail |
-| `res_reverb_decay` | 0.5 | 0.6 | 0.7 | Reverb 衰減率 |
-| `res_reverb_gain` | 0.5 | 1.0 | 1.5 | Reverb 貢獻 |
+| `res_reverb_decay` | 0.5 | 0.7 | 0.8 | Reverb 衰減率 |
+| `res_reverb_gain` | 0.5 | 2.0 | 3.0 | Reverb 貢獻 |
 | **RES 層** | | | | |
-| `res_g_min_db` | -35 | -45 | -55 | RES 最小增益 |
-| `res_ne_protect_db` | -12 | -8 | -5 | Per-bin 近端保護上限 |
-| `res_spectral_floor_db` | -25 | -30 | -35 | 頻譜底噪估計 |
+| `res_g_min_db` | -35 | -60 | -72 | RES 最小增益 |
+| `res_ne_protect_db` | -12 | -3 | -1 | Per-bin 近端保護上限 |
+| `res_spectral_floor_db` | -25 | -40 | -50 | 頻譜底噪估計 |
 | `shadow_q_ratio` | 3.0 | 4.0 | 5.0 | Shadow Q 倍率 |
 | **Adaptive 層** | | | | |
 | `shadow_mu_min` | 0.5 | 0.7 | 0.9 | DT 時 mu floor |
 | `warmup_frames` | 100 | 150 | 200 | 強制高 mu 的 warmup 幀數 |
-| `kalman_q_high` | 1e-3 | 3e-3 | 1e-2 | FDKF Q_high |
+| `kalman_q_high` | 1e-4 | 1e-4 | 1e-4 | FDKF Q_high |
+| `kalman_q_low` | 1e-7 | 1e-7 | 1e-7 | FDKF Q_low |
 
 ```python
 from aec import AecConfig, AecPreset, AecMode
@@ -266,23 +267,24 @@ R[k] = α × R[k] + (1-α) × |E[k]|²                     # Measurement noise (
 
 | 階段 | Q 值 | K (Kalman gain) | 行為 |
 |------|------|-----------------|------|
-| 收斂前 (Q_high) | `kalman_q_high`（預設 1e-3） | 0.5~0.9 | 積極更新，打破 R deadlock |
-| 收斂後 (Q_low) | 1e-5 | 0.01~0.1 | 穩態追蹤，不干擾已收斂權重 |
+| 收斂前 (Q_high) | `kalman_q_high`（預設 1e-4） | 0.3~0.7 | 積極更新，打破 R deadlock |
+| 收斂後 (Q_low) | `kalman_q_low`（預設 1e-7） | 0.01~0.05 | 穩態追蹤，不干擾已收斂權重 |
 | 切換條件 | — | — | 連續 10 幀 ERLE > 6dB |
 
 **R self-reinforcing deadlock（Q_low 固定時的問題）**：
 ```
 高 error → 高 R → 低 K → 慢更新 → 仍然高 error（惡性循環）
 ```
-Q_high = 1e-3 解決此問題：高 Q 持續注入 P → 即使 R 高，K 仍維持合理值。
+Q_high = 1e-4 解決此問題：高 Q 持續注入 P → 即使 R 高，K 仍維持合理值。搭配 P_MAX=0.02 和 per-bin Q gating 防止 weight jitter。
 
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
 | `use_kalman` | True | 啟用 FDKF adaptation（v1.15.0 起預設開啟） |
-| `kalman_q_high` | 1e-3 | 快速收斂 process noise（Preset 可調） |
+| `kalman_q_high` | 1e-4 | 快速收斂 process noise（所有 Preset 統一） |
+| `kalman_q_low` | 1e-7 | 穩態追蹤 process noise |
 | `warmup_frames` | 100 | 強制高 mu 的 warmup 幀數（Preset 可調） |
-| P_init | 0.5 | Per-partition per-bin 初始 error covariance |
-| Q_low | 1e-5 | 穩態追蹤 process noise |
+| P_init | 0.01 | Per-partition per-bin 初始 error covariance |
+| P_MAX | 0.02 | P clamp 上限（防 Kalman gain 爆炸） |
 | R_init | 1e-2 | 初始 measurement noise |
 | α_R | 0.95 | R 估計 EMA 平滑係數 |
 
@@ -308,8 +310,8 @@ FDKF 模式下，shadow 使用 `shadow_q_ratio` 倍的 Q 值，確保 shadow 收
 
 | 階段 | main Q | shadow Q | 效果 |
 |------|--------|----------|------|
-| 收斂前 (Q_high) | `kalman_q_high` | Q_high × `shadow_q_ratio` | Shadow 更快收斂，copy gate 更早觸發 |
-| 收斂後 (Q_low) | 1e-5 | Q_low × `shadow_q_ratio` | Shadow 仍比 main 積極，echo path 變化時更快偵測 |
+| 收斂前 (Q_high) | `kalman_q_high` (1e-4) | Q_high × `shadow_q_ratio` | Shadow 更快收斂，copy gate 更早觸發 |
+| 收斂後 (Q_low) | `kalman_q_low` (1e-7) | Q_low × `shadow_q_ratio` | Shadow 仍比 main 積極，echo path 變化時更快偵測 |
 | Echo path 變化 | 慢速恢復 | ratio × 快速恢復 | Shadow copy 觸發，main 快速跟上 |
 
 **設計要點**：
@@ -348,8 +350,8 @@ RES v2（Residual Echo Suppressor）使用 OLA + sqrt-Hann 窗框架，支援三
 | `res_enable_reverb` | True | - | Reverb tail model（Preset 預設開啟） |
 | `res_reverb_decay` | 0.5 | 0.3-0.9 | Reverb 指數衰減率 |
 | `res_reverb_gain` | 0.5 | 0.0-2.0 | Reverb 貢獻縮放 |
-| `res_g_min_db` | -25 | -55 ~ -10 | 最小增益（echo-only bin 的壓制下限） |
-| `res_ne_protect_db` | -10 | -12 ~ -2 | Per-bin 近端保護上限（Preset 可調） |
+| `res_g_min_db` | -35 | -72 ~ -10 | 最小增益（echo-only bin 的壓制下限） |
+| `res_ne_protect_db` | -12 | -12 ~ -1 | Per-bin 近端保護上限（Preset 可調） |
 | `res_over_sub` | 3.0 | 1.0-15.0 | 過減因子（wiener/spectral_sub 用，ENR 不使用） |
 | `res_alpha` | 0.8 | 0.5-0.95 | 增益平滑係數 |
 

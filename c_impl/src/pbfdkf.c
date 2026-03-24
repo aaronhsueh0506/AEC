@@ -4,6 +4,13 @@
  * Overlap-save with independent hop_size (160) and block_size (512).
  * FDKF Kalman adaptation (always on, no NLMS fallback).
  *
+ * v1.17.0 fixes:
+ * - P_init=0.01 (was 0.5) to prevent Kalman gain explosion
+ * - P_MAX=0.02 clamping
+ * - Q_low configurable (was hardcoded 1e-5)
+ * - Per-bin Q gating on far-end activity
+ * - Far-end energy gate for weight update (skip during silence)
+ *
  * Algorithm:
  * 1. Shift buffer, insert hop_size new samples
  * 2. X[k] = FFT(far_buffer[block_size])
@@ -11,7 +18,7 @@
  * 4. echo_time = IFFT(Y_hat)
  * 5. output = near_buffer[-hop:] - echo_time[-hop:]  (valid region)
  * 6. error_time = [0...0, output]  (zero-pad for constraint)
- * 7. Kalman update: K, W, P per partition
+ * 7. Kalman update: K, W, P per partition (with Q gating + P clamping)
  * 8. Time-domain constraint: w[hop_size:] = 0
  */
 
@@ -19,6 +26,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+#define P_INIT  0.01f   /* Initial error covariance (was 0.5, caused K explosion) */
+#define P_MAX   0.02f   /* Max P to prevent covariance growth during silence */
 
 struct Pbfdkf {
     int block_size;       /* FFT size (512) */
@@ -45,6 +55,7 @@ struct Pbfdkf {
     float* R;             /* [n_freqs] measurement noise PSD */
     float* error_psd;     /* [n_freqs] smoothed error PSD */
     float alpha_r;        /* R smoothing (0.95) */
+    float q_low_base;     /* base Q_low value for set_q_ratio */
 
     /* Input buffers [block_size] */
     float* near_buffer;
@@ -72,18 +83,8 @@ static inline Complex cmul(Complex a, Complex b) {
     return r;
 }
 
-/* Complex multiply: a * conj(b) — reserved for future use */
-#if 0
-static inline Complex cmul_conj(Complex a, Complex b) {
-    Complex r;
-    r.r = a.r * b.r + a.i * b.i;
-    r.i = a.i * b.r - a.r * b.i;
-    return r;
-}
-#endif
-
 Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
-                       float delta, float q_high) {
+                       float delta, float q_high, float q_low) {
     if (block_size <= 0 || hop_size <= 0 || n_partitions <= 0) return NULL;
     if (hop_size > block_size / 2) return NULL; /* overlap-save constraint */
 
@@ -98,6 +99,7 @@ Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
     f->alpha_power = 0.9f;
     f->alpha_r = 0.95f;
     f->partition_idx = 0;
+    f->q_low_base = q_low;
 
     f->fft = fft_create(block_size);
     if (!f->fft) goto error;
@@ -124,7 +126,7 @@ Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
     for (int p = 0; p < n_partitions; p++) {
         f->P[p] = (float*)malloc(f->n_freqs * sizeof(float));
         if (!f->P[p]) goto error;
-        for (int k = 0; k < f->n_freqs; k++) f->P[p][k] = 0.5f;
+        for (int k = 0; k < f->n_freqs; k++) f->P[p][k] = P_INIT;
     }
 
     /* Q, Q_high, Q_low, R, error_psd */
@@ -137,7 +139,7 @@ Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
 
     for (int k = 0; k < f->n_freqs; k++) {
         f->Q_high[k] = q_high;
-        f->Q_low[k]  = 1e-5f;
+        f->Q_low[k]  = q_low;
         f->Q[k]      = q_high;
         f->R[k]      = 1e-2f;
         f->error_psd[k] = 1e-2f;
@@ -208,7 +210,7 @@ void pbfdkf_reset(Pbfdkf* f) {
     for (int p = 0; p < f->n_partitions; p++) {
         memset(f->W[p], 0, f->n_freqs * sizeof(Complex));
         memset(f->X_buf[p], 0, f->n_freqs * sizeof(Complex));
-        for (int k = 0; k < f->n_freqs; k++) f->P[p][k] = 0.5f;
+        for (int k = 0; k < f->n_freqs; k++) f->P[p][k] = P_INIT;
     }
     for (int k = 0; k < f->n_freqs; k++) {
         f->Q[k] = f->Q_high[k];
@@ -225,7 +227,7 @@ void pbfdkf_reset_weights(Pbfdkf* f) {
     if (!f) return;
     for (int p = 0; p < f->n_partitions; p++) {
         memset(f->W[p], 0, f->n_freqs * sizeof(Complex));
-        for (int k = 0; k < f->n_freqs; k++) f->P[p][k] = 0.5f;
+        for (int k = 0; k < f->n_freqs; k++) f->P[p][k] = P_INIT;
     }
     for (int k = 0; k < f->n_freqs; k++) {
         f->Q[k] = f->Q_high[k];
@@ -293,11 +295,13 @@ int pbfdkf_process(Pbfdkf* f,
     memcpy(f->temp_time + bs - hop, output, hop * sizeof(float));
     fft_forward(f->fft, f->temp_time, f->error_spec);
 
-    /* Check if enough reference power for update */
-    float total_power = 0.0f;
-    for (int k = 0; k < nfreq; k++) total_power += f->power[k];
+    /* Far-end activity gate: skip update when ref is silent */
+    float far_hop_energy = 0.0f;
+    for (int n = 0; n < hop; n++)
+        far_hop_energy += far_end[n] * far_end[n];
+    far_hop_energy /= hop;
 
-    if (mu_scale > 0 && total_power > delta * nfreq) {
+    if (mu_scale > 0 && far_hop_energy > 1e-6f) {
         /* Update R (measurement noise) from error PSD */
         for (int k = 0; k < nfreq; k++) {
             float epsd = f->error_spec[k].r * f->error_spec[k].r +
@@ -306,6 +310,12 @@ int pbfdkf_process(Pbfdkf* f,
                                (1.0f - f->alpha_r) * epsd;
             f->R[k] = f->error_psd[k] > delta ? f->error_psd[k] : delta;
         }
+
+        /* Per-bin Q gating: only add Q where far-end has energy */
+        float mean_power = 0.0f;
+        for (int k = 0; k < nfreq; k++) mean_power += f->power[k];
+        mean_power /= nfreq;
+        float q_gate_thresh = mean_power * 0.01f + 1e-6f;
 
         /* Kalman update per partition */
         for (int p = 0; p < f->n_partitions; p++) {
@@ -329,11 +339,13 @@ int pbfdkf_process(Pbfdkf* f,
                 f->W[p][k].r += Ke.r;
                 f->W[p][k].i += Ke.i;
 
-                /* P update: P = max((1 - Re(K*X)) * P + Q, delta) */
-                /* K*X = K_scale * mu_scale * conj(X) * X = K_scale * mu_scale * |X|^2 */
+                /* P update: P = clamp((1 - Re(K*X)) * P + Q_gated, delta, P_MAX) */
                 float KX = K_scale * mu_scale * (X.r * X.r + X.i * X.i);
-                float P_new = (1.0f - KX) * f->P[p][k] + f->Q[k];
-                f->P[p][k] = P_new > delta ? P_new : delta;
+                float Q_gated = (f->power[k] > q_gate_thresh) ? f->Q[k] : 0.0f;
+                float P_new = (1.0f - KX) * f->P[p][k] + Q_gated;
+                if (P_new < delta) P_new = delta;
+                if (P_new > P_MAX) P_new = P_MAX;
+                f->P[p][k] = P_new;
             }
 
             /* Time-domain constraint: w[hop_size:] = 0 */
@@ -362,11 +374,11 @@ void pbfdkf_set_q_high(Pbfdkf* f, float q_high) {
     }
 }
 
-void pbfdkf_set_q_ratio(Pbfdkf* f, float q_high, float ratio) {
+void pbfdkf_set_q_ratio(Pbfdkf* f, float q_high, float q_low, float ratio) {
     if (!f) return;
     for (int k = 0; k < f->n_freqs; k++) {
         f->Q_high[k] = q_high * ratio;
-        f->Q_low[k]  = 1e-5f * ratio;
+        f->Q_low[k]  = q_low * ratio;
         f->Q[k]      = f->Q_high[k];
     }
 }
@@ -399,6 +411,10 @@ const Complex* pbfdkf_get_echo_spec(const Pbfdkf* f) {
 
 const Complex* pbfdkf_get_far_spec(const Pbfdkf* f) {
     return f ? f->far_spec : NULL;
+}
+
+const Complex* pbfdkf_get_near_spec(const Pbfdkf* f) {
+    return f ? f->near_spec : NULL;
 }
 
 float pbfdkf_get_far_power(const Pbfdkf* f) {

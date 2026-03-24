@@ -111,10 +111,18 @@ int main(int argc, char* argv[]) {
            1000.0f * config.hop_size / sample_rate);
     printf("  Filter: %d samples (%d partitions)\n",
            config.filter_length, config.n_partitions);
-    printf("  Kalman Q_high: %.1e\n", config.kalman_q_high);
+    printf("  Kalman: Q_high=%.1e, Q_low=%.1e\n",
+           config.kalman_q_high, config.kalman_q_low);
     printf("  RES: %s (g_min=%.0f dB, base_over_sub=%.1f)\n",
            enable_res ? "enabled" : "disabled",
            config.res_g_min_db, config.res_over_sub_base);
+    printf("  RES v2: echo=%s, gain=%s, enr_scale=%.2f\n",
+           res_echo_method_name(config.res_echo_method),
+           res_gain_type_name(config.res_gain_type),
+           config.res_enr_scale);
+    printf("  Reverb: %s (decay=%.1f, gain=%.1f)\n",
+           config.res_enable_reverb ? "enabled" : "disabled",
+           config.res_reverb_decay, config.res_reverb_gain);
     printf("  HPF: %s (%.0f Hz)\n",
            enable_hpf ? "enabled" : "disabled",
            config.highpass_cutoff_hz);
