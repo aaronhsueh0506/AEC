@@ -2163,6 +2163,8 @@ Examples:
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
     parser.add_argument('--no-cng', action='store_true', help='Disable comfort noise generation in RES')
+    parser.add_argument('--preset', choices=['balanced', 'aggressive', 'maximum'],
+                        help='Use preset config (overrides RES/adaptive params)')
     parser.add_argument('--no-shadow', action='store_true', help='Disable shadow filter')
     parser.add_argument('--no-highpass', action='store_true', help='Disable high-pass filter')
     parser.add_argument('--highpass-cutoff', type=float, default=80.0,
@@ -2199,7 +2201,7 @@ Examples:
         else:
             filter_length = 512   # ~32ms echo path
 
-    config = AecConfig(
+    common_kw = dict(
         mu=mu,
         filter_length=filter_length,
         mode=aec_mode,
@@ -2211,8 +2213,12 @@ Examples:
         enable_highpass=not args.no_highpass,
         highpass_cutoff_hz=args.highpass_cutoff,
         enable_saturation_detect=not args.no_saturation_detect,
-        clear_filter_history=args.clear_history
+        clear_filter_history=args.clear_history,
     )
+    if args.preset:
+        config = AecConfig.from_preset(args.preset, **common_kw)
+    else:
+        config = AecConfig(**common_kw)
 
     process_wav_files(args.mic, args.ref, args.output, config)
 
