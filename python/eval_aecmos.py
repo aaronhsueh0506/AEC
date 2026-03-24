@@ -61,6 +61,33 @@ def find_dt_cases(base_dir, out_dir=None):
         })
     return cases
 
+def find_ne_cases(base_dir, out_dir=None):
+    """Find nearend singletalk cases and map to output files."""
+    ne_dir = os.path.join(base_dir, 'nearend_singletalk')
+    if out_dir is None:
+        out_dir = os.path.join(base_dir, 'output')
+    if not os.path.isdir(ne_dir):
+        return []
+
+    mic_files = sorted([f for f in os.listdir(ne_dir) if '_nearend_singletalk_mic.wav' in f])
+
+    cases = []
+    for i, mic_f in enumerate(mic_files):
+        prefix = mic_f.replace('_nearend_singletalk_mic.wav', '')
+        lpb_f = f"{prefix}_nearend_singletalk_lpb.wav"
+        cases.append({
+            'idx': i,
+            'type': 'ne',
+            'mic': os.path.join(ne_dir, mic_f),
+            'lpb': os.path.join(ne_dir, lpb_f),
+            'ours': os.path.join(out_dir, f'ne_{i}_ours.wav'),
+            'ours_nores': os.path.join(out_dir, f'ne_{i}_ours_nores.wav'),
+            'aec3': os.path.join(out_dir, f'ne_{i}_aec3.wav'),
+            'speex': os.path.join(out_dir, f'ne_{i}_speex.wav'),
+        })
+    return cases
+
+
 def eval_aecmos(cases, talk_type=None):
     """Run AECMOS on all cases for all methods."""
     from speechmos.aecmos import run
@@ -167,6 +194,12 @@ def main():
             fs_results = eval_aecmos(fs_cases, talk_type=None)
             print_results(f"FAREND SINGLETALK — AECMOS [{preset.upper()}]", fs_results)
 
+            ne_cases = find_ne_cases(base_dir, preset_dir)
+            if ne_cases:
+                print(f"\nFound {len(ne_cases)} nearend singletalk cases")
+                ne_results = eval_aecmos(ne_cases, talk_type=None)
+                print_results(f"NEAREND SINGLETALK — AECMOS [{preset.upper()}]", ne_results)
+
             dt_cases = find_dt_cases(base_dir, preset_dir)
             print(f"\nFound {len(dt_cases)} doubletalk cases")
             dt_results = eval_aecmos(dt_cases, talk_type=None)
@@ -176,6 +209,12 @@ def main():
         print(f"Found {len(fs_cases)} farend singletalk cases")
         fs_results = eval_aecmos(fs_cases, talk_type=None)
         print_results("FAREND SINGLETALK — AECMOS", fs_results)
+
+        ne_cases = find_ne_cases(base_dir, out_dir)
+        if ne_cases:
+            print(f"\nFound {len(ne_cases)} nearend singletalk cases")
+            ne_results = eval_aecmos(ne_cases, talk_type=None)
+            print_results("NEAREND SINGLETALK — AECMOS", ne_results)
 
         dt_cases = find_dt_cases(base_dir, out_dir)
         print(f"\nFound {len(dt_cases)} doubletalk cases")
