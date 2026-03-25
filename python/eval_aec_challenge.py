@@ -65,6 +65,9 @@ def estimate_delay(mic, ref, sr, max_delay_ms=250.0):
     mic_spec = np.fft.rfft(m, n=fft_size)
     ref_spec = np.fft.rfft(r, n=fft_size)
     cross = mic_spec * np.conj(ref_spec)
+    # GCC-PHAT whitening: sharper peak, robust to reverb
+    magnitude = np.abs(cross) + 1e-10
+    cross = cross / magnitude
     xcorr = np.fft.irfft(cross, n=fft_size)
 
     # Search positive delays only (mic lags ref)
@@ -73,16 +76,25 @@ def estimate_delay(mic, ref, sr, max_delay_ms=250.0):
     return delay
 
 
-def run_ours(mic, ref, sr, fl, enable_res=True, preset=None, **config_overrides):
-    # Pre-compute delay and align reference signal
-    delay = estimate_delay(mic, ref, sr)
+def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
+             is_movement=False, **config_overrides):
     n = min(len(mic), len(ref))
+
+    # Always pre-align with global delay
+    delay = estimate_delay(mic, ref, sr)
     if delay > 0 and delay < n:
-        # Delay ref: ref_aligned[t] = ref[t - delay], so filter sees aligned echo
         ref_aligned = np.zeros(n, dtype=np.float32)
         ref_aligned[delay:] = ref[:n - delay]
     else:
         ref_aligned = ref[:n]
+
+    # Movement files: also enable online delay estimation for tracking changes
+    if is_movement:
+        delay_est_kw = dict(enable_delay_est=True,
+                            delay_est_period_s=0.25,
+                            delay_est_init_s=0.2)
+    else:
+        delay_est_kw = dict(enable_delay_est=False)
 
     # Allow CLI override of gain type via env var or config_overrides
     env_gain_type = os.environ.get('AEC_GAIN_TYPE')
@@ -91,8 +103,8 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None, **config_overrides)
     common_kw = dict(sample_rate=sr, mode=AecMode.SUBBAND,
                      filter_length=fl, enable_dtd=False,
                      enable_shadow=True, enable_res=enable_res,
-                     enable_delay_est=False, use_kalman=True,
-                     **config_overrides)
+                     use_kalman=True,
+                     **delay_est_kw, **config_overrides)
     if preset is not None:
         from aec import AecPreset
         config = AecConfig.from_preset(preset, **common_kw)
@@ -185,6 +197,11 @@ def compute_sdr(mic, output):
     return 10.0 * np.log10(sig_pwr / (dist_pwr + 1e-20))
 
 
+def _is_movement(filename):
+    """Check if a filename is a movement case."""
+    return '_with_movement_' in filename
+
+
 def compute_pesq(ref, deg, sr):
     if not HAS_PESQ:
         return None
@@ -235,14 +252,15 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
         n = min(len(mic), len(ref))
         mic, ref = mic[:n], ref[:n]
 
+        movement = _is_movement(mf)
         # Ours
-        output = run_ours(mic, ref, sr, fl, preset=preset)
+        output = run_ours(mic, ref, sr, fl, preset=preset, is_movement=movement)
         sf.write(os.path.join(out_dir, f"{uuid}_farend_singletalk_ours.wav"), output, sr)
         e_ours = compute_erle(mic, output)
         erles['ours'].append(e_ours)
 
         # Ours (no RES) — raw PBFDAF output
-        output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset)
+        output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset, is_movement=movement)
         sf.write(os.path.join(out_dir, f"{uuid}_farend_singletalk_ours_nores.wav"), output_nores, sr)
 
         line = f"{i:>5} {e_ours:>8.1f}"
@@ -422,14 +440,15 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
         n = min(len(mic), len(ref))
         mic, ref = mic[:n], ref[:n]
 
+        movement = _is_movement(mf)
         # Ours
-        output = run_ours(mic, ref, sr, fl, preset=preset)
+        output = run_ours(mic, ref, sr, fl, preset=preset, is_movement=movement)
         sf.write(os.path.join(out_dir, f"{uuid}_doubletalk_ours.wav"), output, sr)
         e_ours = compute_erle(mic, output)
         erles['ours'].append(e_ours)
 
         # Ours (no RES) — raw PBFDAF output
-        output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset)
+        output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset, is_movement=movement)
         sf.write(os.path.join(out_dir, f"{uuid}_doubletalk_ours_nores.wav"), output_nores, sr)
 
         line = f"{i:>5} {e_ours:>8.1f}"

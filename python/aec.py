@@ -164,23 +164,23 @@ class AecConfig:
                 res_echo_method="direct",
                 res_gain_type="enr",
                 res_enable_reverb=True,
-                res_reverb_decay=0.5,
-                res_reverb_gain=0.5,
+                res_reverb_decay=0.6,
+                res_reverb_gain=0.8,
                 res_alpha_echo_psd=0.5,
                 res_alpha_error_psd=0.6,
                 res_enr_scale=1.0,
                 # RES
-                res_g_min_db=-35.0,
+                res_g_min_db=-40.0,
                 res_over_sub_base=2.5,
                 res_over_sub_scale=4.0,
                 res_dt_reduction=3.5,
-                res_spectral_floor_db=-25.0,
+                res_spectral_floor_db=-30.0,
                 res_ne_protect_db=-12.0,
                 shadow_q_ratio=3.0,
                 # Adaptive filter
                 shadow_mu_min=0.5,
-                warmup_frames=100,
-                kalman_q_high=1e-4,
+                warmup_frames=150,
+                kalman_q_high=2e-4,
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
@@ -835,6 +835,11 @@ class ResFilter:
         self.error_envelope = np.ones(n_freqs, dtype=np.float32)
         self.alpha_envelope = 0.95  # Slow-tracking spectral envelope
 
+        # Dominant nearend detection (cf. AEC3 two-tuning suppressor)
+        self._ne_detect_count = 0
+        self._ne_detect_hold = 0
+        self._nearend_state = False
+
         # OLA: sqrt-Hann window + sliding input buffer + overlap buffer
         self.window = np.sqrt(np.hanning(self.frame_size)).astype(np.float32)
         self.input_buf = np.zeros(self.frame_size, dtype=np.float32)
@@ -856,6 +861,9 @@ class ResFilter:
         self.near_psd_buf.fill(0)
         self.near_psd_idx = 0
         self.reverb_psd.fill(0)
+        self._ne_detect_count = 0
+        self._ne_detect_hold = 0
+        self._nearend_state = False
 
     def process(self, error_hop: np.ndarray, echo_spec: np.ndarray,
                 far_power: float, far_spec: np.ndarray = None,
@@ -973,7 +981,12 @@ class ResFilter:
                 kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
                 self.erle_per_bin = np.convolve(
                     self.erle_per_bin, kernel, mode='same').astype(np.float32)
-                self.erle_per_bin = np.clip(self.erle_per_bin, 1.0, 1000.0)
+                # Frequency-dependent ERLE cap (suggest.md D)
+                erle_max = np.full(self.n_freqs, 4.0, dtype=np.float32)
+                lf_bins = min(8, self.n_freqs)
+                erle_max[:lf_bins] = 8.0
+                self.erle_per_bin = np.minimum(self.erle_per_bin, erle_max)
+                self.erle_per_bin = np.maximum(self.erle_per_bin, 1.0)
 
             # Residual echo PSD: blend two estimates based on convergence
             # 1) echo_psd / erle_per_bin: good when ERLE is well estimated (converged)
@@ -994,9 +1007,11 @@ class ResFilter:
                 far_psd = np.abs(far_spec) ** 2 if far_spec is not None else echo_pwr_linear
                 self.reverb_psd = (self.reverb_decay * self.reverb_psd
                                    + (1 - self.reverb_decay) * far_psd)
-                # Gate by far_activity to decay fast when far-end stops
+                # Gate by far_activity; reduce reverb only during confirmed nearend
+                ne_reverb_factor = 0.3 if self._nearend_state else 1.0
+                reverb_gate = self.far_activity * ne_reverb_factor
                 residual_echo_psd = (residual_echo_psd
-                                     + self.reverb_gain * self.reverb_psd * self.far_activity)
+                                     + self.reverb_gain * self.reverb_psd * reverb_gate)
 
         # Compute coherence-based EER (used for legacy mode AND per-bin NE gate)
         eer_linear = self.echo_psd / (self.error_psd + eps)
@@ -1035,19 +1050,50 @@ class ResFilter:
 
         # --- Gain computation ---
         if self.gain_type == "enr" and residual_echo_psd is not None:
-            # ENR masking (cf. AEC3 GainToNoAudibleEcho)
+            # ENR masking with two-tuning (cf. AEC3 suppressor)
             nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0)
             enr = residual_echo_psd / (nearend_est + 1.0)
-            # Frequency-dependent thresholds: LF more aggressive, HF more sensitive
+
+            # --- Dominant nearend detection (cf. AEC3) ---
+            # Use mid-high freq ENR only (500Hz+, bin 8+) for stable detection
+            hf_start = min(8, self.n_freqs // 4)
+            avg_enr = float(np.mean(enr[hf_start:]))
+            NE_ENR_THRESHOLD = 0.4
+            NE_ENR_EXIT = 10.0
+            NE_TRIGGER_FRAMES = 12
+            NE_HOLD_FRAMES = 30
+
+            if self._nearend_state:
+                if avg_enr > NE_ENR_EXIT:
+                    self._ne_detect_hold -= 1
+                    if self._ne_detect_hold <= 0:
+                        self._nearend_state = False
+                        self._ne_detect_count = 0
+                else:
+                    self._ne_detect_hold = NE_HOLD_FRAMES
+            else:
+                if avg_enr < NE_ENR_THRESHOLD and far_power > 1e-4:
+                    self._ne_detect_count += 1
+                    if self._ne_detect_count >= NE_TRIGGER_FRAMES:
+                        self._nearend_state = True
+                        self._ne_detect_hold = NE_HOLD_FRAMES
+                else:
+                    self._ne_detect_count = max(0, self._ne_detect_count - 1)
+
+            # --- Two-tuning ENR thresholds ---
             freq_bins = np.arange(self.n_freqs, dtype=np.float32)
-            # ENR thresholds scaled by enr_scale (independent of over_sub)
-            # AEC3 defaults (scale=1.0): LF enr_t=0.3, enr_s=0.4; HF enr_t=0.07, enr_s=0.1
+            blend = np.clip((freq_bins - 5) / 5, 0, 1)
             scale = self.enr_scale
-            # Smooth interpolation between LF/HF (bins 5-10)
-            freq_bins_f = freq_bins  # already float
-            blend = np.clip((freq_bins_f - 5) / 5, 0, 1)
-            enr_t = (1 - blend) * (0.3 * scale) + blend * (0.07 * scale)
-            enr_s = (1 - blend) * (0.4 * scale) + blend * (0.1 * scale)
+
+            if self._nearend_state:
+                # Nearend tuning: permissive (preserve near-end speech)
+                enr_t = (1 - blend) * 1.09 + blend * 0.1
+                enr_s = (1 - blend) * 1.1 + blend * 0.3
+            else:
+                # Normal tuning: aggressive echo suppression (AEC3 defaults)
+                enr_t = (1 - blend) * (0.3 * scale) + blend * (0.07 * scale)
+                enr_s = (1 - blend) * (0.4 * scale) + blend * (0.1 * scale)
+
             # Soft gate: linear interpolation between transparent/suppress
             g = np.where(enr > enr_t,
                          np.clip((enr_s - enr) / (enr_s - enr_t + eps), 0.0, 1.0),
@@ -1103,6 +1149,11 @@ class ResFilter:
         eff_rise = self.max_rise_ratio ** (0.5 + 0.5 * (1.0 - self.far_activity))
         gain_floor = self.gain_smooth / eff_drop
         gain_ceil = self.gain_smooth * eff_rise
+        # LF gain decrease limiting during nearend (cf. AEC3 max_dec_factor_lf=0.25)
+        if self._nearend_state:
+            lf_limit = min(8, self.n_freqs)
+            gain_floor[:lf_limit] = np.maximum(
+                gain_floor[:lf_limit], self.gain_smooth[:lf_limit] * 0.25)
         smoothed = np.maximum(smoothed, gain_floor)
         smoothed = np.minimum(smoothed, gain_ceil)
         # Clamp to valid range
