@@ -192,14 +192,14 @@ class AecConfig:
                 res_reverb_gain=2.0,
                 res_alpha_echo_psd=0.3,
                 res_alpha_error_psd=0.4,
-                res_enr_scale=0.3,
+                res_enr_scale=0.7,
                 # RES
                 res_g_min_db=-60.0,
                 res_over_sub_base=6.0,
                 res_over_sub_scale=10.0,
                 res_dt_reduction=1.0,
                 res_spectral_floor_db=-40.0,
-                res_ne_protect_db=-3.0,
+                res_ne_protect_db=-20.0,
                 shadow_q_ratio=4.0,
                 # Adaptive filter
                 shadow_mu_min=0.7,
@@ -216,14 +216,14 @@ class AecConfig:
                 res_reverb_gain=3.0,
                 res_alpha_echo_psd=0.2,
                 res_alpha_error_psd=0.3,
-                res_enr_scale=0.15,
+                res_enr_scale=0.5,
                 # RES
                 res_g_min_db=-72.0,
                 res_over_sub_base=10.0,
                 res_over_sub_scale=15.0,
                 res_dt_reduction=0.0,
                 res_spectral_floor_db=-50.0,
-                res_ne_protect_db=-1.0,
+                res_ne_protect_db=-35.0,
                 shadow_q_ratio=5.0,
                 # Adaptive filter
                 shadow_mu_min=0.9,
@@ -790,6 +790,14 @@ class ResFilter:
         self.echo_psd = np.zeros(n_freqs, dtype=np.float32)
         self.error_psd = np.zeros(n_freqs, dtype=np.float32)
 
+        # Diagnostic attributes (initialized here, updated in process())
+        self._diag_gain_mean = 1.0
+        self._diag_gain_min = 1.0
+        self._diag_effective_g_min = 1.0
+        self._diag_far_activity = 0.0
+        self._diag_echo_psd_mean = 0.0
+        self._diag_error_psd_mean = 0.0
+
         # Coherence-based nonlinear echo PSD estimation
         # Coherence between far-end and error captures both linear and
         # nonlinear echo components (both correlate with far-end).
@@ -972,6 +980,11 @@ class ResFilter:
             # 2) echo_psd directly: conservative upper bound (always available)
             erle_est = self.echo_psd / self.erle_per_bin
             direct_est = self.echo_psd
+            # Before convergence, blend in far-end power as conservative echo upper bound
+            # Filter echo estimate is unreliable pre-convergence → use far_psd as backup
+            if erle_factor < 0.3 and far_spec is not None:
+                far_psd_est = np.abs(far_spec) ** 2
+                direct_est = np.maximum(direct_est, far_psd_est * 0.3)
             residual_echo_psd = (1.0 - erle_factor) * direct_est + erle_factor * erle_est
 
             # Add reverb tail if enabled
@@ -1009,8 +1022,12 @@ class ResFilter:
         # --- Per-bin near-end gate (replaces broadband dt_indicator→g_min) ---
         # coh2 high (echo bin) → ne_protection≈0 → allow full suppression
         # coh2 low (near-end bin) → ne_protection≈1 → raise floor to protect
-        # Only active after convergence (erle_factor gates it)
-        ne_protection = (1.0 - coh2) * erle_factor    # [n_freqs]
+        # Pre-convergence: moderate protection for all presets
+        if erle_factor < 0.3:
+            ne_erle_gate = 0.3
+        else:
+            ne_erle_gate = max(erle_factor, 0.2)
+        ne_protection = (1.0 - coh2) * ne_erle_gate    # [n_freqs]
         ne_g_min_ceil = 10 ** (self.ne_protect_db / 20)
         ne_g_floor = effective_g_min + (ne_g_min_ceil - effective_g_min) * ne_protection
         ne_g_floor = np.maximum(ne_g_floor, effective_g_min)
@@ -1119,6 +1136,14 @@ class ResFilter:
         output = self.ola_buf[:hop].copy()
         self.ola_buf[:-hop] = self.ola_buf[hop:]
         self.ola_buf[-hop:] = 0.0
+
+        # Diagnostic: store latest gains for external access
+        self._diag_gain_mean = float(np.mean(self.gain_smooth))
+        self._diag_gain_min = float(np.min(self.gain_smooth))
+        self._diag_effective_g_min = float(effective_g_min)
+        self._diag_far_activity = float(self.far_activity)
+        self._diag_echo_psd_mean = float(np.mean(self.echo_psd))
+        self._diag_error_psd_mean = float(np.mean(self.error_psd))
 
         return output.astype(np.float32)
 
@@ -1572,6 +1597,14 @@ class AEC:
         # Per-bin mu_scale (updated from RES echo_psd/error_psd each frame)
         self._per_bin_mu_scale = None  # None = use scalar fallback
 
+        # Diagnostic tracking (per-frame, latest values)
+        self._diag = {
+            'erle_inst': 0.0, 'mu_scale': 1.0, 'far_activity': 0.0,
+            'res_gain_mean': 1.0, 'res_gain_min': 1.0, 'effective_g_min': 1.0,
+            'converged': False, 'erle_factor': 0.0,
+            'echo_psd_mean': 0.0, 'error_psd_mean': 0.0, 'divergence': 0.0,
+        }
+
         # Output limiter: smoothed gain to avoid frame-boundary clicking
         self._limiter_gain = 1.0
 
@@ -1596,6 +1629,7 @@ class AEC:
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0  # holdoff counter: blocks release for N frames
         self._warmup_frames = self.config.warmup_frames
+        self._warmup_far_active = False  # only consume warmup when far-end is active
 
         # #5: Copy hysteresis counter
         self.shadow_copy_counter = 0
@@ -1641,6 +1675,13 @@ class AEC:
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0
         self._warmup_frames = self.config.warmup_frames
+        self._warmup_far_active = False
+        self._diag = {
+            'erle_inst': 0.0, 'mu_scale': 1.0, 'far_activity': 0.0,
+            'res_gain_mean': 1.0, 'res_gain_min': 1.0, 'effective_g_min': 1.0,
+            'converged': False, 'erle_factor': 0.0,
+            'echo_psd_mean': 0.0, 'error_psd_mean': 0.0, 'divergence': 0.0,
+        }
         self.shadow_copy_counter = 0
         self.shadow_frame_count = 0
         if self.dtd_divergence:
@@ -1715,12 +1756,17 @@ class AEC:
         """Get mu_scale from smoothed EER (per-bin array or scalar fallback)."""
         if mu_min is None:
             mu_min = self.config.shadow_mu_min
-        # Warmup: first 150 frames use high mu for fast initial convergence
+        # Warmup: fast convergence, but respect DT signals to protect near-end
         if self._warmup_frames > 0:
-            self._warmup_frames -= 1
-            return min(1.0, max(0.7, self._simple_mu_ratio + 0.3))
+            # Only consume warmup when far-end is active (don't waste on silence)
+            if self._warmup_far_active:
+                self._warmup_frames -= 1
+            if self._simple_mu_ratio < 0.2:
+                # Strong DT detected: don't force high mu, protect filter
+                return max(0.2, self._simple_mu_ratio)
+            return min(1.0, max(0.5, self._simple_mu_ratio + 0.2))
         if not self._filter_converged:
-            mu_min = max(mu_min, 0.5)   # Pre-convergence: floor 0.5, ratio modulates
+            mu_min = max(mu_min, 0.3)   # Pre-convergence: floor 0.3, better DT protection
         else:
             mu_min = max(mu_min, 0.2)
         # Per-bin mu_scale from RES echo_psd/error_psd (set previous frame, post-RES)
@@ -1737,6 +1783,17 @@ class AEC:
         """
         error_power = np.mean(output ** 2) + 1e-10
         far_power = np.mean(far ** 2) + 1e-10
+
+        # Don't update ratio during silence — preserve current value for warmup
+        if far_power < 1e-6 and error_power < 1e-6:
+            return
+
+        # Quick reset when far-end transitions from silence to active
+        if far_power > 1e-4 and self._simple_mu_ratio < 0.1:
+            self._simple_mu_ratio = 0.8
+            self._simple_mu_holdoff = 0
+            return
+
         ratio = min(far_power / error_power, 1.0)
         # Echo estimate ratio: if filter is learning echo, don't suppress mu too much
         if hasattr(self.filter, 'echo_spec') and self.filter.echo_spec is not None:
@@ -1821,6 +1878,9 @@ class AEC:
         # DTD: dual detector (divergence + coherence) for FDAF/SUBBAND
         # Combined confidence = max(divergence, coherence) → mu_scale
         # Non-DTD: simple variable mu (Valin 2007 RER-inspired)
+
+        # Track far-end activity for warmup gating
+        self._warmup_far_active = np.mean(far_end ** 2) > 1e-6
 
         if self.config.enable_dtd:
             mu_scale = self._compute_mu_scale()
@@ -1945,7 +2005,7 @@ class AEC:
                 far_power = np.mean(far_end ** 2)
                 # Dynamic over_sub: moderate base, scale with convergence
                 inst_erle = self.get_erle_instant()
-                erle_factor = np.clip((inst_erle - 3.0) / 15.0, 0.0, 1.0)
+                erle_factor = np.clip((inst_erle - 2.0) / 8.0, 0.0, 1.0)
                 base_over_sub = self.config.res_over_sub_base + self.config.res_over_sub_scale * erle_factor
                 # Saturation boost: non-linear echo needs more suppression
                 base_over_sub += self._saturation_level * self.config.saturation_over_sub_boost
@@ -1989,6 +2049,21 @@ class AEC:
                         # Pre-convergence: no per_bin, let ratio track DT naturally
                         self._per_bin_mu_scale = None
                         self._update_simple_mu_ratio(raw_output, far_end)
+
+            # Update diagnostics
+            if self.res and hasattr(self.res, '_diag_gain_mean'):
+                self._diag['res_gain_mean'] = self.res._diag_gain_mean
+                self._diag['res_gain_min'] = self.res._diag_gain_min
+                self._diag['effective_g_min'] = self.res._diag_effective_g_min
+                self._diag['far_activity'] = self.res._diag_far_activity
+                self._diag['echo_psd_mean'] = self.res._diag_echo_psd_mean
+                self._diag['error_psd_mean'] = self.res._diag_error_psd_mean
+            self._diag['erle_inst'] = self.get_erle_instant()
+            mu_val = mu_scale
+            self._diag['mu_scale'] = float(np.mean(mu_val)) if isinstance(mu_val, np.ndarray) else float(mu_val)
+            self._diag['converged'] = self._filter_converged
+            self._diag['erle_factor'] = float(erle_factor) if 'erle_factor' in locals() else 0.0
+            self._diag['divergence'] = self._divergence_indicator
 
             # Update DTD detectors for NEXT block
             # Skip divergence detector before convergence (output>mic is normal
@@ -2066,23 +2141,30 @@ class AEC:
         self.error_power = self.raw_error_power
         self.error_power_sum = self.raw_error_power_sum
 
-        # Convergence detection: 10 consecutive frames with ERLE > 6 dB
+        # Convergence detection: 6 consecutive single-talk frames with ERLE > 4 dB
         if not self._filter_converged and self.near_power > 1e-8:
             inst_erle = 10 * np.log10(self.near_power / (self.raw_error_power + 1e-10))
-            if inst_erle > 6.0:
-                self._conv_counter += 1
-            else:
-                self._conv_counter = 0
-            if self._conv_counter >= 10:
-                self._filter_converged = True
-                # Switch to low Q: stable tracking mode
-                for filt in [self.filter, self.shadow_filter]:
-                    if filt and hasattr(filt, 'Q_low'):
-                        filt.Q = filt.Q_low.copy()
+            # Only evaluate during far-end single-talk (DT corrupts ERLE measurement)
+            if self._simple_mu_ratio > 0.5:
+                if inst_erle > 4.0:
+                    self._conv_counter += 1
+                else:
+                    self._conv_counter = 0
+                if self._conv_counter >= 6:
+                    self._filter_converged = True
+                    # Switch to low Q: stable tracking mode
+                    for filt in [self.filter, self.shadow_filter]:
+                        if filt and hasattr(filt, 'Q_low'):
+                            filt.Q = filt.Q_low.copy()
+            # else: DT detected, don't update counter (preserve progress)
         # Record DTD confidence for plotting
         self.confidence_history.append(self.get_dtd_confidence())
 
         return final_output.astype(np.float32)
+
+    def get_diagnostics(self) -> dict:
+        """Return per-frame diagnostic dict (latest values)."""
+        return self._diag.copy()
 
     def get_erle(self) -> float:
         """Return cumulative ERLE (full-segment average)."""
@@ -2111,7 +2193,7 @@ class AEC:
 
 
 def process_wav_files(mic_path: str, ref_path: str, out_path: str,
-                      config: Optional[AecConfig] = None):
+                      config: Optional[AecConfig] = None, diag: bool = False):
     """Process WAV files through AEC"""
     mic_data, mic_sr = sf.read(mic_path)
     ref_data, ref_sr = sf.read(ref_path)
@@ -2168,9 +2250,22 @@ def process_wav_files(mic_path: str, ref_path: str, out_path: str,
         max_erle = max(max_erle, erle)
         processed += hop_size
 
-        if processed % mic_sr == 0:
-            print(f"  Processed: {processed / mic_sr:.1f} s, ERLE: {erle:.1f} dB\r",
-                  end='', flush=True)
+        if processed % (mic_sr // 2) == 0:
+            if diag:
+                d = aec.get_diagnostics()
+                t = processed / mic_sr
+                g_mean_db = 20 * np.log10(max(d['res_gain_mean'], 1e-10))
+                g_min_db = 20 * np.log10(max(d['res_gain_min'], 1e-10))
+                eff_gmin_db = 20 * np.log10(max(d['effective_g_min'], 1e-10))
+                print(f"[{t:5.1f}s] ERLE={d['erle_inst']:6.1f}dB mu={d['mu_scale']:.2f} "
+                      f"far_act={d['far_activity']:.2f} "
+                      f"g_mean={g_mean_db:5.1f}dB g_min={g_min_db:5.1f}dB "
+                      f"eff_gmin={eff_gmin_db:5.1f}dB "
+                      f"conv={'Y' if d['converged'] else 'N'} "
+                      f"div={d['divergence']:.2f}")
+            else:
+                print(f"  Processed: {processed / mic_sr:.1f} s, ERLE: {erle:.1f} dB\r",
+                      end='', flush=True)
 
     print(f"\n\nResults:")
     print(f"  Processed samples: {processed}")
@@ -2222,6 +2317,8 @@ Examples:
                         help='Disable saturation/clipping detection')
     parser.add_argument('--clear-history', action='store_true',
                         help='Clear TIME/LMS buffer each block (no carry-over)')
+    parser.add_argument('--diag', action='store_true',
+                        help='Print per-second diagnostic output (ERLE, gains, etc.)')
 
     args = parser.parse_args()
 
@@ -2256,7 +2353,6 @@ Examples:
         mode=aec_mode,
         enable_dtd=args.enable_dtd,
         enable_res=args.enable_res,
-        res_g_min_db=args.res_g_min,
         enable_cng=not args.no_cng,
         enable_shadow=not args.no_shadow,
         enable_highpass=not args.no_highpass,
@@ -2264,12 +2360,16 @@ Examples:
         enable_saturation_detect=not args.no_saturation_detect,
         clear_filter_history=args.clear_history,
     )
+    # Only override preset RES params if user explicitly specified them
+    # (don't let CLI default -20dB override preset values like -35dB)
+    if not args.preset or args.res_g_min != -20.0:
+        common_kw['res_g_min_db'] = args.res_g_min
     if args.preset:
         config = AecConfig.from_preset(args.preset, **common_kw)
     else:
         config = AecConfig(**common_kw)
 
-    process_wav_files(args.mic, args.ref, args.output, config)
+    process_wav_files(args.mic, args.ref, args.output, config, diag=args.diag)
 
 
 if __name__ == '__main__':
