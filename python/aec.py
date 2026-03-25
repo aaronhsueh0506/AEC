@@ -2141,12 +2141,12 @@ class AEC:
         self.error_power = self.raw_error_power
         self.error_power_sum = self.raw_error_power_sum
 
-        # Convergence detection: 6 consecutive single-talk frames with ERLE > 4 dB
+        # Convergence detection: 6 consecutive single-talk frames with ERLE > 6 dB
         if not self._filter_converged and self.near_power > 1e-8:
             inst_erle = 10 * np.log10(self.near_power / (self.raw_error_power + 1e-10))
             # Only evaluate during far-end single-talk (DT corrupts ERLE measurement)
             if self._simple_mu_ratio > 0.5:
-                if inst_erle > 4.0:
+                if inst_erle > 6.0:
                     self._conv_counter += 1
                 else:
                     self._conv_counter = 0

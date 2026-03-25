@@ -1,6 +1,6 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v1.18.0），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail（render signal 估計）+ divergence suppression。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
+回音消除模組（v1.19.5），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail（render signal 估計）+ divergence suppression。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。v1.19.x 新增 per-frame 診斷輸出（`--diag`）。
 
 > C 實作已對齊 Python v1.17.0：PBFDKF（Kalman P_init/P_MAX/Q gating/far-end gate 修正）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + Preset，詳見 [c_impl/README.md](c_impl/README.md)。
 
@@ -31,6 +31,9 @@ python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --preset m
 
 # 無 FDKF（標準 NLMS adaptation，需在 API 中設定 use_kalman=False）
 python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res
+
+# 啟用 per-frame 診斷輸出（ERLE, mu, gain, convergence 等）
+python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --preset balanced --diag
 
 # 啟用 DTD（進階，特定場景）
 python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --enable-dtd
@@ -222,13 +225,13 @@ while has_audio:
 | **RES v2 層** | | | | |
 | `res_gain_type` | enr | enr | enr | 增益公式 |
 | `res_echo_method` | direct | direct | direct | Echo 估計方法 |
-| `res_enr_scale` | 1.0 | 0.3 | 0.15 | ENR 門檻縮放（越低越激進） |
+| `res_enr_scale` | 1.0 | 0.7 | 0.5 | ENR 門檻縮放（越低越激進） |
 | `res_enable_reverb` | True | True | True | Reverb tail |
 | `res_reverb_decay` | 0.5 | 0.7 | 0.8 | Reverb 衰減率 |
 | `res_reverb_gain` | 0.5 | 2.0 | 3.0 | Reverb 貢獻 |
 | **RES 層** | | | | |
 | `res_g_min_db` | -35 | -60 | -72 | RES 最小增益 |
-| `res_ne_protect_db` | -12 | -3 | -1 | Per-bin 近端保護上限 |
+| `res_ne_protect_db` | -12 | -20 | -35 | Per-bin 近端保護上限（越低保護越少、壓越深） |
 | `res_spectral_floor_db` | -25 | -40 | -50 | 頻譜底噪估計 |
 | `shadow_q_ratio` | 3.0 | 4.0 | 5.0 | Shadow Q 倍率 |
 | **Adaptive 層** | | | | |
@@ -269,7 +272,7 @@ R[k] = α × R[k] + (1-α) × |E[k]|²                     # Measurement noise (
 |------|------|-----------------|------|
 | 收斂前 (Q_high) | `kalman_q_high`（預設 1e-4） | 0.3~0.7 | 積極更新，打破 R deadlock |
 | 收斂後 (Q_low) | `kalman_q_low`（預設 1e-7） | 0.01~0.05 | 穩態追蹤，不干擾已收斂權重 |
-| 切換條件 | — | — | 連續 10 幀 ERLE > 6dB |
+| 切換條件 | — | — | 連續 6 幀 single-talk ERLE > 4dB |
 
 **R self-reinforcing deadlock（Q_low 固定時的問題）**：
 ```
@@ -351,7 +354,7 @@ RES v2（Residual Echo Suppressor）使用 OLA + sqrt-Hann 窗框架，支援三
 | `res_reverb_decay` | 0.5 | 0.3-0.9 | Reverb 指數衰減率 |
 | `res_reverb_gain` | 0.5 | 0.0-2.0 | Reverb 貢獻縮放 |
 | `res_g_min_db` | -35 | -72 ~ -10 | 最小增益（echo-only bin 的壓制下限） |
-| `res_ne_protect_db` | -12 | -12 ~ -1 | Per-bin 近端保護上限（Preset 可調） |
+| `res_ne_protect_db` | -12 | -35 ~ -6 | Per-bin 近端保護上限（越低保護越少，Preset 可調） |
 | `res_over_sub` | 3.0 | 1.0-15.0 | 過減因子（wiener/spectral_sub 用，ENR 不使用） |
 | `res_alpha` | 0.8 | 0.5-0.95 | 增益平滑係數 |
 
@@ -467,6 +470,7 @@ AEC/
 │   ├── aec_improve_v6.md      # v1.13.0 改善紀錄（Preset adaptive filter 層）
 │   ├── aec_improve_v7.md      # v1.14.0 改善紀錄（Per-bin near-end gate）
 │   ├── aec_improve_v8.md      # v1.15.0 改善紀錄（Frame/hop 統一 + 清理 + 重命名）
+│   ├── aec_improve_v9.md      # v1.19.x 改善紀錄（Echo 抑制 + 診斷 + Preset 修正）
 │   ├── dtd_design.md          # DTD 設計文檔（完整說明）
 │   └── DEVLOG.md              # 開發紀錄
 └── wav/                       # 測試音檔
