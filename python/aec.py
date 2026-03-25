@@ -170,11 +170,11 @@ class AecConfig:
                 res_alpha_error_psd=0.6,
                 res_enr_scale=1.0,
                 # RES
-                res_g_min_db=-40.0,
+                res_g_min_db=-35.0,
                 res_over_sub_base=2.5,
                 res_over_sub_scale=4.0,
                 res_dt_reduction=3.5,
-                res_spectral_floor_db=-30.0,
+                res_spectral_floor_db=-25.0,
                 res_ne_protect_db=-12.0,
                 shadow_q_ratio=3.0,
                 # Adaptive filter
