@@ -36,6 +36,7 @@ struct ResFilter {
     int frame_size;       /* 320 */
     int hop_size;         /* 160 */
     int n_freqs;          /* 257 */
+    int is_static;        /* 1 = placed in external memory, skip free */
 
     float g_min;          /* linear minimum gain */
     float ne_protect_db;
@@ -202,8 +203,143 @@ ResFilter* res_create(const ResConfig* cfg) {
     return r;
 }
 
+/* Shared config setup (used by both create and init) */
+static void res_setup_config(ResFilter* r, const ResConfig* cfg) {
+    r->block_size = cfg->block_size;
+    r->frame_size = cfg->frame_size;
+    r->hop_size = cfg->hop_size;
+    r->n_freqs = cfg->n_freqs;
+    r->g_min = db_to_amp(cfg->g_min_db);
+    r->ne_protect_db = cfg->ne_protect_db;
+    r->max_drop_ratio = db_to_amp(cfg->max_drop_db_per_frame);
+    r->max_rise_ratio = db_to_amp(cfg->max_rise_db_per_frame);
+    r->spectral_floor_ratio = db_to_amp(cfg->spectral_floor_db);
+    r->alpha_echo_psd = cfg->alpha_echo_psd;
+    r->alpha_error_psd = cfg->alpha_error_psd;
+    r->alpha_envelope = 0.95f;
+    r->alpha_coh = 0.3f;
+    r->alpha_noise = 0.98f;
+    r->far_activity = 0.0f;
+    r->enable_cng = cfg->enable_cng;
+    r->echo_method = cfg->echo_method;
+    r->gain_type = cfg->gain_type;
+    r->enr_scale = cfg->enr_scale;
+    r->enable_reverb = cfg->enable_reverb;
+    r->reverb_decay = cfg->reverb_decay;
+    r->reverb_gain = cfg->reverb_gain;
+    r->alpha_erle = 0.95f;
+    r->near_psd_idx = 0;
+}
+
+/* Init state arrays and window (shared by both create and init) */
+static void res_init_state(ResFilter* r) {
+    int nf = r->n_freqs;
+    int fs = r->frame_size;
+    for (int k = 0; k < nf; k++) {
+        r->gain_smooth[k] = r->g_min;
+        r->error_envelope[k] = 1.0f;
+        r->erle_per_bin[k] = 1.0f;
+    }
+    for (int i = 0; i < fs; i++) {
+        float hann = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / fs));
+        r->window[i] = sqrtf(hann);
+    }
+}
+
+/* --- Static memory API --- */
+
+size_t res_get_mem_size(const ResConfig* cfg) {
+    if (!cfg || cfg->n_freqs <= 0) return 0;
+    int nf = cfg->n_freqs;
+    int fs = cfg->frame_size;
+    int bs = cfg->block_size;
+    size_t total = 0;
+
+    total += ALIGN16(sizeof(ResFilter));
+    total += ALIGN16(nf * sizeof(float)) * 10;                     /* echo_psd..noise_psd (10 arrays) */
+    total += ALIGN16(nf * sizeof(float));                           /* erle_per_bin */
+    total += ALIGN16(NEAR_PSD_BLOCKS * nf * sizeof(float));         /* near_psd_buf */
+    total += ALIGN16(nf * sizeof(float));                           /* near_psd */
+    total += ALIGN16(nf * sizeof(float));                           /* reverb_psd */
+    total += ALIGN16(fs * sizeof(float)) * 3;                      /* window, input_buf, ola_buf */
+    total += ALIGN16(bs * sizeof(float));                           /* time_buf */
+    total += ALIGN16(nf * sizeof(Complex));                         /* spec_buf */
+    total += fft_get_mem_size(bs);                                  /* fft */
+
+    return total;
+}
+
+ResFilter* res_init(void* mem, size_t mem_size, const ResConfig* cfg) {
+    if (!mem || !cfg || cfg->n_freqs <= 0) return NULL;
+    if (mem_size < res_get_mem_size(cfg)) return NULL;
+
+    int nf = cfg->n_freqs;
+    int fs = cfg->frame_size;
+    int bs = cfg->block_size;
+    uint8_t* ptr = (uint8_t*)mem;
+
+    ResFilter* r = (ResFilter*)ptr;
+    ptr += ALIGN16(sizeof(ResFilter));
+    memset(r, 0, sizeof(ResFilter));
+    r->is_static = 1;
+
+    res_setup_config(r, cfg);
+
+    /* Allocate arrays (10 × nf float) */
+    r->echo_psd       = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    r->error_psd      = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    r->gain_smooth    = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    r->error_envelope = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    r->S_fe_r         = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    r->S_fe_i         = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    r->S_ff           = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    r->S_ee           = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    r->coh2_smooth    = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    r->noise_psd      = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+
+    r->erle_per_bin   = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    r->near_psd_buf   = (float*)ptr; ptr += ALIGN16(NEAR_PSD_BLOCKS * nf * sizeof(float));
+    r->near_psd       = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    r->reverb_psd     = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+
+    r->window    = (float*)ptr; ptr += ALIGN16(fs * sizeof(float));
+    r->input_buf = (float*)ptr; ptr += ALIGN16(fs * sizeof(float));
+    r->ola_buf   = (float*)ptr; ptr += ALIGN16(fs * sizeof(float));
+    r->time_buf  = (float*)ptr; ptr += ALIGN16(bs * sizeof(float));
+    r->spec_buf  = (Complex*)ptr; ptr += ALIGN16(nf * sizeof(Complex));
+
+    /* Zero all buffers */
+    memset(r->echo_psd, 0, nf * sizeof(float));
+    memset(r->error_psd, 0, nf * sizeof(float));
+    memset(r->S_fe_r, 0, nf * sizeof(float));
+    memset(r->S_fe_i, 0, nf * sizeof(float));
+    memset(r->S_ff, 0, nf * sizeof(float));
+    memset(r->S_ee, 0, nf * sizeof(float));
+    memset(r->coh2_smooth, 0, nf * sizeof(float));
+    memset(r->noise_psd, 0, nf * sizeof(float));
+    memset(r->near_psd_buf, 0, NEAR_PSD_BLOCKS * nf * sizeof(float));
+    memset(r->near_psd, 0, nf * sizeof(float));
+    memset(r->reverb_psd, 0, nf * sizeof(float));
+    memset(r->input_buf, 0, fs * sizeof(float));
+    memset(r->ola_buf, 0, fs * sizeof(float));
+    memset(r->time_buf, 0, bs * sizeof(float));
+    memset(r->spec_buf, 0, nf * sizeof(Complex));
+
+    /* FFT */
+    size_t fft_mem = fft_get_mem_size(bs);
+    r->fft = fft_init(ptr, fft_mem, bs);
+    if (!r->fft) return NULL;
+
+    /* Init state */
+    res_init_state(r);
+
+    return r;
+}
+
 void res_destroy(ResFilter* r) {
     if (!r) return;
+    if (r->is_static) return;
+
     free(r->echo_psd);
     free(r->error_psd);
     free(r->gain_smooth);

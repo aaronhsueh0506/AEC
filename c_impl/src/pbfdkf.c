@@ -35,6 +35,7 @@ struct Pbfdkf {
     int hop_size;         /* Processing hop (160) */
     int n_partitions;
     int n_freqs;          /* block_size/2 + 1 = 257 */
+    int is_static;        /* 1 = placed in external memory, skip free */
     float delta;
     float alpha_power;    /* 0.9 */
 
@@ -169,8 +170,138 @@ error:
     return NULL;
 }
 
+/* --- Static memory API --- */
+
+size_t pbfdkf_get_mem_size(int block_size, int hop_size, int n_partitions) {
+    if (block_size <= 0 || hop_size <= 0 || n_partitions <= 0) return 0;
+    if (hop_size > block_size / 2) return 0;
+    int nf = block_size / 2 + 1;
+    size_t total = 0;
+
+    total += ALIGN16(sizeof(Pbfdkf));
+    total += fft_get_mem_size(block_size);                          /* fft */
+
+    /* 2D arrays: pointer arrays + data */
+    total += ALIGN16(n_partitions * sizeof(Complex*));              /* W ptrs */
+    total += n_partitions * ALIGN16(nf * sizeof(Complex));          /* W data */
+    total += ALIGN16(n_partitions * sizeof(Complex*));              /* X_buf ptrs */
+    total += n_partitions * ALIGN16(nf * sizeof(Complex));          /* X_buf data */
+    total += ALIGN16(n_partitions * sizeof(float*));                /* P ptrs */
+    total += n_partitions * ALIGN16(nf * sizeof(float));            /* P data */
+
+    /* 1D Kalman arrays */
+    total += ALIGN16(nf * sizeof(float)) * 5;                      /* Q, Q_high, Q_low, R, error_psd */
+
+    /* Buffers */
+    total += ALIGN16(block_size * sizeof(float)) * 2;              /* near_buffer, far_buffer */
+    total += ALIGN16(nf * sizeof(Complex)) * 4;                    /* near/far/echo/error_spec */
+    total += ALIGN16(nf * sizeof(float));                          /* power */
+    total += ALIGN16(block_size * sizeof(float));                  /* temp_time */
+    total += ALIGN16(nf * sizeof(Complex));                        /* temp_spec */
+
+    return total;
+}
+
+Pbfdkf* pbfdkf_init(void* mem, size_t mem_size,
+                     int block_size, int hop_size, int n_partitions,
+                     float delta, float q_high, float q_low) {
+    if (!mem || block_size <= 0 || hop_size <= 0 || n_partitions <= 0) return NULL;
+    if (hop_size > block_size / 2) return NULL;
+    if (mem_size < pbfdkf_get_mem_size(block_size, hop_size, n_partitions)) return NULL;
+
+    int nf = block_size / 2 + 1;
+    uint8_t* ptr = (uint8_t*)mem;
+
+    Pbfdkf* f = (Pbfdkf*)ptr;
+    ptr += ALIGN16(sizeof(Pbfdkf));
+    memset(f, 0, sizeof(Pbfdkf));
+
+    f->block_size = block_size;
+    f->hop_size = hop_size;
+    f->n_partitions = n_partitions;
+    f->n_freqs = nf;
+    f->is_static = 1;
+    f->delta = delta;
+    f->alpha_power = 0.9f;
+    f->alpha_r = 0.95f;
+    f->partition_idx = 0;
+    f->q_low_base = q_low;
+
+    /* FFT */
+    size_t fft_mem = fft_get_mem_size(block_size);
+    f->fft = fft_init(ptr, fft_mem, block_size);
+    ptr += fft_mem;
+    if (!f->fft) return NULL;
+
+    /* W [n_partitions][n_freqs] */
+    f->W = (Complex**)ptr;
+    ptr += ALIGN16(n_partitions * sizeof(Complex*));
+    for (int p = 0; p < n_partitions; p++) {
+        f->W[p] = (Complex*)ptr;
+        ptr += ALIGN16(nf * sizeof(Complex));
+        memset(f->W[p], 0, nf * sizeof(Complex));
+    }
+
+    /* X_buf [n_partitions][n_freqs] */
+    f->X_buf = (Complex**)ptr;
+    ptr += ALIGN16(n_partitions * sizeof(Complex*));
+    for (int p = 0; p < n_partitions; p++) {
+        f->X_buf[p] = (Complex*)ptr;
+        ptr += ALIGN16(nf * sizeof(Complex));
+        memset(f->X_buf[p], 0, nf * sizeof(Complex));
+    }
+
+    /* P [n_partitions][n_freqs] */
+    f->P = (float**)ptr;
+    ptr += ALIGN16(n_partitions * sizeof(float*));
+    for (int p = 0; p < n_partitions; p++) {
+        f->P[p] = (float*)ptr;
+        ptr += ALIGN16(nf * sizeof(float));
+        for (int k = 0; k < nf; k++) f->P[p][k] = P_INIT;
+    }
+
+    /* Q, Q_high, Q_low, R, error_psd */
+    f->Q      = (float*)ptr;  ptr += ALIGN16(nf * sizeof(float));
+    f->Q_high = (float*)ptr;  ptr += ALIGN16(nf * sizeof(float));
+    f->Q_low  = (float*)ptr;  ptr += ALIGN16(nf * sizeof(float));
+    f->R      = (float*)ptr;  ptr += ALIGN16(nf * sizeof(float));
+    f->error_psd = (float*)ptr; ptr += ALIGN16(nf * sizeof(float));
+    for (int k = 0; k < nf; k++) {
+        f->Q_high[k] = q_high;
+        f->Q_low[k]  = q_low;
+        f->Q[k]      = q_high;
+        f->R[k]      = 1e-2f;
+        f->error_psd[k] = 1e-2f;
+    }
+
+    /* Buffers */
+    f->near_buffer = (float*)ptr;  ptr += ALIGN16(block_size * sizeof(float));
+    f->far_buffer  = (float*)ptr;  ptr += ALIGN16(block_size * sizeof(float));
+    memset(f->near_buffer, 0, block_size * sizeof(float));
+    memset(f->far_buffer,  0, block_size * sizeof(float));
+
+    f->near_spec  = (Complex*)ptr; ptr += ALIGN16(nf * sizeof(Complex));
+    f->far_spec   = (Complex*)ptr; ptr += ALIGN16(nf * sizeof(Complex));
+    f->echo_spec  = (Complex*)ptr; ptr += ALIGN16(nf * sizeof(Complex));
+    f->error_spec = (Complex*)ptr; ptr += ALIGN16(nf * sizeof(Complex));
+    memset(f->near_spec,  0, nf * sizeof(Complex));
+    memset(f->far_spec,   0, nf * sizeof(Complex));
+    memset(f->echo_spec,  0, nf * sizeof(Complex));
+    memset(f->error_spec, 0, nf * sizeof(Complex));
+
+    f->power = (float*)ptr;     ptr += ALIGN16(nf * sizeof(float));
+    f->temp_time = (float*)ptr; ptr += ALIGN16(block_size * sizeof(float));
+    f->temp_spec = (Complex*)ptr;
+    memset(f->power, 0, nf * sizeof(float));
+    memset(f->temp_time, 0, block_size * sizeof(float));
+    memset(f->temp_spec, 0, nf * sizeof(Complex));
+
+    return f;
+}
+
 void pbfdkf_destroy(Pbfdkf* f) {
     if (!f) return;
+    if (f->is_static) return;
 
     if (f->W) {
         for (int p = 0; p < f->n_partitions; p++) free(f->W[p]);

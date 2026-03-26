@@ -31,9 +31,15 @@ typedef struct Pbfdkf Pbfdkf;
 Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
                        float delta, float q_high, float q_low);
 
-/**
- * Destroy filter
- */
+/** Initialize PBFDKF in pre-allocated memory (static version) */
+Pbfdkf* pbfdkf_init(void* mem, size_t mem_size,
+                     int block_size, int hop_size, int n_partitions,
+                     float delta, float q_high, float q_low);
+
+/** Get memory required for pbfdkf_init() */
+size_t pbfdkf_get_mem_size(int block_size, int hop_size, int n_partitions);
+
+/** Destroy filter (no-op if created via pbfdkf_init) */
 void pbfdkf_destroy(Pbfdkf* f);
 
 /**

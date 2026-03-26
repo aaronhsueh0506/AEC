@@ -14,6 +14,7 @@
 struct FftHandle {
     int fft_size;
     int n_freqs;            // fft_size/2 + 1
+    int is_static;          // 1 = placed in external memory, skip free
 
     kiss_fft_cfg fft_cfg;   // Forward FFT config
     kiss_fft_cfg ifft_cfg;  // Inverse FFT config
@@ -55,8 +56,60 @@ FftHandle* fft_create(int fft_size) {
     return h;
 }
 
+/* --- Static memory API --- */
+
+size_t fft_get_mem_size(int fft_size) {
+    if (fft_size <= 0 || (fft_size & (fft_size - 1)) != 0) return 0;
+    size_t total = 0;
+    total += ALIGN16(sizeof(FftHandle));
+    size_t kiss_len = 0;
+    kiss_fft_alloc(fft_size, 0, NULL, &kiss_len);
+    total += ALIGN16(kiss_len);  /* forward */
+    total += ALIGN16(kiss_len);  /* inverse */
+    total += ALIGN16(fft_size * sizeof(kiss_fft_cpx));  /* fft_in */
+    total += ALIGN16(fft_size * sizeof(kiss_fft_cpx));  /* fft_out */
+    return total;
+}
+
+FftHandle* fft_init(void* mem, size_t mem_size, int fft_size) {
+    if (!mem || fft_size <= 0 || (fft_size & (fft_size - 1)) != 0) return NULL;
+    if (mem_size < fft_get_mem_size(fft_size)) return NULL;
+
+    uint8_t* ptr = (uint8_t*)mem;
+    FftHandle* h = (FftHandle*)ptr;
+    ptr += ALIGN16(sizeof(FftHandle));
+    memset(h, 0, sizeof(FftHandle));
+
+    h->fft_size = fft_size;
+    h->n_freqs = fft_size / 2 + 1;
+    h->is_static = 1;
+
+    size_t kiss_len = 0;
+    kiss_fft_alloc(fft_size, 0, NULL, &kiss_len);
+    size_t fwd_len = ALIGN16(kiss_len);
+
+    h->fft_cfg = kiss_fft_alloc(fft_size, 0, ptr, &kiss_len);
+    ptr += fwd_len;
+    if (!h->fft_cfg) return NULL;
+
+    kiss_len = fwd_len;
+    h->ifft_cfg = kiss_fft_alloc(fft_size, 1, ptr, &kiss_len);
+    ptr += fwd_len;
+    if (!h->ifft_cfg) return NULL;
+
+    h->fft_in = (kiss_fft_cpx*)ptr;
+    ptr += ALIGN16(fft_size * sizeof(kiss_fft_cpx));
+    memset(h->fft_in, 0, fft_size * sizeof(kiss_fft_cpx));
+
+    h->fft_out = (kiss_fft_cpx*)ptr;
+    memset(h->fft_out, 0, fft_size * sizeof(kiss_fft_cpx));
+
+    return h;
+}
+
 void fft_destroy(FftHandle* h) {
     if (!h) return;
+    if (h->is_static) return;
 
     if (h->fft_cfg) kiss_fft_free(h->fft_cfg);
     if (h->ifft_cfg) kiss_fft_free(h->ifft_cfg);

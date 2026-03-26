@@ -30,6 +30,7 @@
 #define AEC_H
 
 #include "aec_types.h"
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,14 +38,16 @@ extern "C" {
 
 typedef struct Aec Aec;
 
-/**
- * Create AEC instance from config
- */
+/** Create AEC instance (malloc version) */
 Aec* aec_create(const AecConfig* config);
 
-/**
- * Destroy AEC instance
- */
+/** Initialize AEC in pre-allocated memory (static version) */
+Aec* aec_init(void* mem, size_t mem_size, const AecConfig* config);
+
+/** Get memory required for aec_init() */
+size_t aec_get_mem_size(const AecConfig* config);
+
+/** Destroy AEC instance (no-op if created via aec_init) */
 void aec_destroy(Aec* aec);
 
 /**
@@ -88,14 +91,16 @@ int aec_process_ex(Aec* aec,
 
 /* --- Context allocation --- */
 
-/**
- * Create AEC context (allocates internal buffers based on n_freqs)
- */
+/** Create AEC context (malloc version) */
 AecResContext* aec_context_create(const Aec* aec);
 
-/**
- * Destroy AEC context
- */
+/** Initialize AEC context in pre-allocated memory (static version) */
+AecResContext* aec_context_init(void* mem, size_t mem_size, int n_freqs);
+
+/** Get memory required for aec_context_init() */
+size_t aec_context_get_mem_size(int n_freqs);
+
+/** Destroy AEC context (no-op if created via aec_context_init) */
 void aec_context_destroy(AecResContext* ctx);
 
 /* --- Getters --- */

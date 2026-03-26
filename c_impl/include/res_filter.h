@@ -74,14 +74,16 @@ static inline ResConfig res_config_from_aec(const AecConfig* aec_cfg) {
     return rc;
 }
 
-/**
- * Create RES filter
- */
+/** Create RES filter (malloc version) */
 ResFilter* res_create(const ResConfig* cfg);
 
-/**
- * Destroy RES filter
- */
+/** Initialize RES in pre-allocated memory (static version) */
+ResFilter* res_init(void* mem, size_t mem_size, const ResConfig* cfg);
+
+/** Get memory required for res_init() */
+size_t res_get_mem_size(const ResConfig* cfg);
+
+/** Destroy RES filter (no-op if created via res_init) */
 void res_destroy(ResFilter* res);
 
 /**

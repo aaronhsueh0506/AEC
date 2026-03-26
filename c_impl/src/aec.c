@@ -24,6 +24,7 @@ static inline float clampf(float x, float lo, float hi) {
 
 struct Aec {
     AecConfig config;
+    int is_static;      /* 1 = placed in external memory, skip free */
 
     /* HPF (mic + ref) */
     Hpf* hp_mic;
@@ -164,8 +165,110 @@ Aec* aec_create(const AecConfig* config) {
     return aec;
 }
 
+/* --- Static memory API --- */
+
+size_t aec_get_mem_size(const AecConfig* config) {
+    if (!config) return 0;
+    int hop = config->hop_size;
+    size_t total = 0;
+
+    total += ALIGN16(sizeof(Aec));
+
+    /* HPF (2 instances, conditional) */
+    if (config->enable_highpass) {
+        total += hpf_get_mem_size() * 2;
+    }
+
+    /* Main + shadow PBFDKF */
+    size_t pbf_size = pbfdkf_get_mem_size(config->fft_size, hop, config->n_partitions);
+    total += pbf_size * 2;
+
+    /* RES (conditional) */
+    if (config->enable_res) {
+        ResConfig rc = res_config_from_aec(config);
+        total += res_get_mem_size(&rc);
+    }
+
+    /* Temp buffers */
+    total += ALIGN16(hop * sizeof(float)) * 3;  /* mic_buf, ref_buf, raw_output */
+
+    return total;
+}
+
+Aec* aec_init(void* mem, size_t mem_size, const AecConfig* config) {
+    if (!mem || !config) return NULL;
+    if (mem_size < aec_get_mem_size(config)) return NULL;
+
+    int hop = config->hop_size;
+    int nf = config->n_freqs;
+    uint8_t* ptr = (uint8_t*)mem;
+
+    Aec* aec = (Aec*)ptr;
+    ptr += ALIGN16(sizeof(Aec));
+    memset(aec, 0, sizeof(Aec));
+
+    aec->config = *config;
+    aec->is_static = 1;
+    aec->n_freqs = nf;
+
+    /* HPF */
+    if (config->enable_highpass) {
+        size_t hpf_sz = hpf_get_mem_size();
+        aec->hp_mic = hpf_init(ptr, hpf_sz, config->highpass_cutoff_hz, config->sample_rate);
+        ptr += hpf_sz;
+        aec->hp_ref = hpf_init(ptr, hpf_sz, config->highpass_cutoff_hz, config->sample_rate);
+        ptr += hpf_sz;
+        if (!aec->hp_mic || !aec->hp_ref) return NULL;
+    }
+
+    /* Main PBFDKF */
+    size_t pbf_size = pbfdkf_get_mem_size(config->fft_size, hop, config->n_partitions);
+    aec->filter = pbfdkf_init(ptr, pbf_size, config->fft_size, hop,
+                               config->n_partitions, config->delta,
+                               config->kalman_q_high, config->kalman_q_low);
+    ptr += pbf_size;
+    if (!aec->filter) return NULL;
+
+    /* Shadow PBFDKF */
+    aec->shadow_filter = pbfdkf_init(ptr, pbf_size, config->fft_size, hop,
+                                      config->n_partitions, config->delta,
+                                      config->kalman_q_high, config->kalman_q_low);
+    ptr += pbf_size;
+    if (!aec->shadow_filter) return NULL;
+    pbfdkf_set_q_ratio(aec->shadow_filter, config->kalman_q_high,
+                        config->kalman_q_low, config->shadow_q_ratio);
+
+    /* RES */
+    if (config->enable_res) {
+        ResConfig rc = res_config_from_aec(config);
+        size_t res_sz = res_get_mem_size(&rc);
+        aec->res = res_init(ptr, res_sz, &rc);
+        ptr += res_sz;
+        if (!aec->res) return NULL;
+    }
+
+    /* Temp buffers */
+    aec->mic_buf    = (float*)ptr; ptr += ALIGN16(hop * sizeof(float));
+    aec->ref_buf    = (float*)ptr; ptr += ALIGN16(hop * sizeof(float));
+    aec->raw_output = (float*)ptr;
+    memset(aec->mic_buf, 0, hop * sizeof(float));
+    memset(aec->ref_buf, 0, hop * sizeof(float));
+    memset(aec->raw_output, 0, hop * sizeof(float));
+
+    /* Init state */
+    aec->simple_mu_ratio = 1.0f;
+    aec->warmup_frames = config->warmup_frames;
+    aec->alpha_erle = 0.95f;
+    aec->limiter_gain = 1.0f;
+    aec->per_bin_mu_scale = NULL;
+
+    return aec;
+}
+
 void aec_destroy(Aec* aec) {
     if (!aec) return;
+    if (aec->is_static) return;
+
     hpf_destroy(aec->hp_mic);
     hpf_destroy(aec->hp_ref);
     pbfdkf_destroy(aec->filter);
@@ -288,8 +391,48 @@ AecResContext* aec_context_create(const Aec* aec) {
     return ctx;
 }
 
+/* --- Context static memory API --- */
+
+size_t aec_context_get_mem_size(int n_freqs) {
+    size_t total = 0;
+    total += ALIGN16(sizeof(AecResContext));
+    total += ALIGN16(n_freqs * sizeof(float)) * 6;  /* 6 spectrum arrays */
+    return total;
+}
+
+AecResContext* aec_context_init(void* mem, size_t mem_size, int n_freqs) {
+    if (!mem || n_freqs <= 0) return NULL;
+    if (mem_size < aec_context_get_mem_size(n_freqs)) return NULL;
+
+    uint8_t* ptr = (uint8_t*)mem;
+    AecResContext* ctx = (AecResContext*)ptr;
+    ptr += ALIGN16(sizeof(AecResContext));
+    memset(ctx, 0, sizeof(AecResContext));
+
+    ctx->n_freqs = n_freqs;
+    ctx->is_static = 1;
+
+    ctx->echo_spec_re = (float*)ptr; ptr += ALIGN16(n_freqs * sizeof(float));
+    ctx->echo_spec_im = (float*)ptr; ptr += ALIGN16(n_freqs * sizeof(float));
+    ctx->far_spec_re  = (float*)ptr; ptr += ALIGN16(n_freqs * sizeof(float));
+    ctx->far_spec_im  = (float*)ptr; ptr += ALIGN16(n_freqs * sizeof(float));
+    ctx->near_spec_re = (float*)ptr; ptr += ALIGN16(n_freqs * sizeof(float));
+    ctx->near_spec_im = (float*)ptr;
+
+    memset(ctx->echo_spec_re, 0, n_freqs * sizeof(float));
+    memset(ctx->echo_spec_im, 0, n_freqs * sizeof(float));
+    memset(ctx->far_spec_re,  0, n_freqs * sizeof(float));
+    memset(ctx->far_spec_im,  0, n_freqs * sizeof(float));
+    memset(ctx->near_spec_re, 0, n_freqs * sizeof(float));
+    memset(ctx->near_spec_im, 0, n_freqs * sizeof(float));
+
+    return ctx;
+}
+
 void aec_context_destroy(AecResContext* ctx) {
     if (!ctx) return;
+    if (ctx->is_static) return;
+
     free(ctx->echo_spec_re);
     free(ctx->echo_spec_im);
     free(ctx->far_spec_re);
