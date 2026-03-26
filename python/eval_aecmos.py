@@ -177,14 +177,14 @@ def main():
     parser.add_argument('dataset_dir', help='aec_challenge/ directory')
     parser.add_argument('-o', '--output-dir', default=None, help='Output directory (default: <dataset_dir>/output)')
     parser.add_argument('--all-presets', action='store_true',
-                        help='Evaluate all preset subdirs (balanced/aggressive/maximum)')
+                        help='Evaluate all preset subdirs (mild/balanced/aggressive/maximum)')
     args = parser.parse_args()
 
     base_dir = args.dataset_dir
     out_dir = args.output_dir or os.path.join(base_dir, 'output')
 
     if args.all_presets:
-        for preset in ['balanced', 'aggressive', 'maximum']:
+        for preset in ['mild', 'balanced', 'aggressive', 'maximum']:
             preset_dir = os.path.join(out_dir, preset)
             if not os.path.isdir(preset_dir):
                 print(f"Skipping {preset}: {preset_dir} not found")

@@ -39,7 +39,8 @@ _PB_MODES = (AecMode.PBFDAF, AecMode.PBFDKF, AecMode.SUBBAND)
 
 
 class AecPreset(Enum):
-    BALANCED = "balanced"       # Best near-end preservation (default)
+    MILD = "mild"               # Best near-end preservation, lightest echo suppression
+    BALANCED = "balanced"       # Balanced echo suppression and near-end quality (default)
     AGGRESSIVE = "aggressive"   # Stronger echo suppression, moderate near-end impact
     MAXIMUM = "maximum"         # Maximum echo suppression, significant near-end impact
 
@@ -161,13 +162,14 @@ class AecConfig:
         """Create config from preset with optional overrides.
 
         Presets (echo suppression strength):
-          BALANCED:   Best near-end preservation, moderate echo suppression (default)
+          MILD:       Best near-end preservation, lightest echo suppression
+          BALANCED:   Balanced echo suppression and near-end quality (default)
           AGGRESSIVE: Stronger echo suppression, moderate near-end degradation
           MAXIMUM:    Maximum echo suppression, significant near-end impact
         """
         if isinstance(preset, str):
             preset = AecPreset(preset)
-        if preset == AecPreset.BALANCED:
+        if preset == AecPreset.MILD:
             defaults = dict(
                 # RES v2
                 res_echo_method="direct",
@@ -190,6 +192,30 @@ class AecConfig:
                 shadow_mu_min=0.5,
                 warmup_frames=150,
                 kalman_q_high=2e-4,
+            )
+        elif preset == AecPreset.BALANCED:
+            defaults = dict(
+                # RES v2
+                res_echo_method="direct",
+                res_gain_type="enr",
+                res_enable_reverb=True,
+                res_reverb_decay=0.65,
+                res_reverb_gain=1.4,
+                res_alpha_echo_psd=0.4,
+                res_alpha_error_psd=0.5,
+                res_enr_scale=0.85,
+                # RES
+                res_g_min_db=-45.0,
+                res_over_sub_base=4.0,
+                res_over_sub_scale=7.0,
+                res_dt_reduction=2.0,
+                res_spectral_floor_db=-32.0,
+                res_ne_protect_db=-16.0,
+                shadow_q_ratio=3.5,
+                # Adaptive filter
+                shadow_mu_min=0.6,
+                warmup_frames=150,
+                kalman_q_high=1.5e-4,
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
@@ -2393,7 +2419,7 @@ Examples:
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
     parser.add_argument('--no-cng', action='store_true', help='Disable comfort noise generation in RES')
-    parser.add_argument('--preset', choices=['balanced', 'aggressive', 'maximum'],
+    parser.add_argument('--preset', choices=['mild', 'balanced', 'aggressive', 'maximum'],
                         help='Use preset config (overrides RES/adaptive params)')
     parser.add_argument('--no-shadow', action='store_true', help='Disable shadow filter')
     parser.add_argument('--no-highpass', action='store_true', help='Disable high-pass filter')

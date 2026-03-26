@@ -221,17 +221,19 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
         print("No farend_singletalk directory found")
         return
 
-    # Find all mic files
-    mic_files = sorted([f for f in os.listdir(sc_dir) if '_farend_singletalk_mic.wav' in f])
+    # Find all mic files (including _with_movement_ variants)
+    mic_files = sorted([f for f in os.listdir(sc_dir)
+                        if '_farend_singletalk' in f and f.endswith('_mic.wav')])
     if not mic_files:
         print("No farend_singletalk files found")
         return
 
+    n_move = sum(1 for f in mic_files if '_with_movement_' in f)
     print(f"\n{'='*60}")
-    print(f"FAREND SINGLETALK — ERLE ({len(mic_files)} cases)")
+    print(f"FAREND SINGLETALK — ERLE ({len(mic_files)} cases, {n_move} with movement)")
     print(f"{'='*60}")
 
-    hdr = f"{'Case':>5} {'Ours':>8}"
+    hdr = f"{'Case':>5} {'Mv':>2} {'Ours':>8}"
     if do_speex: hdr += f" {'Speex':>8}"
     if do_aec3:  hdr += f" {'AEC3':>8}"
     if do_aec3_linear: hdr += f" {'AEC3-Lin':>8}"
@@ -241,8 +243,8 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
     erles = {'ours': [], 'speex': [], 'aec3': [], 'aec3_linear': []}
 
     for i, mf in enumerate(mic_files):
-        uuid = mf.replace('_farend_singletalk_mic.wav', '')
-        lpb_f = f'{uuid}_farend_singletalk_lpb.wav'
+        uuid = mf[:mf.index('_farend_singletalk')]
+        lpb_f = mf.replace('_mic.wav', '_lpb.wav')
         mic_path = os.path.join(sc_dir, mf)
         lpb_path = os.path.join(sc_dir, lpb_f)
 
@@ -253,22 +255,24 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
         mic, ref = mic[:n], ref[:n]
 
         movement = _is_movement(mf)
+        mv_tag = 'M' if movement else ' '
+        out_suffix = mf.replace('_mic.wav', '')  # uuid_farend_singletalk[_with_movement]
         # Ours
         output = run_ours(mic, ref, sr, fl, preset=preset, is_movement=movement)
-        sf.write(os.path.join(out_dir, f"{uuid}_farend_singletalk_ours.wav"), output, sr)
+        sf.write(os.path.join(out_dir, f"{out_suffix}_ours.wav"), output, sr)
         e_ours = compute_erle(mic, output)
         erles['ours'].append(e_ours)
 
         # Ours (no RES) — raw PBFDAF output
         output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset, is_movement=movement)
-        sf.write(os.path.join(out_dir, f"{uuid}_farend_singletalk_ours_nores.wav"), output_nores, sr)
+        sf.write(os.path.join(out_dir, f"{out_suffix}_ours_nores.wav"), output_nores, sr)
 
-        line = f"{i:>5} {e_ours:>8.1f}"
+        line = f"{i:>5} {mv_tag:>2} {e_ours:>8.1f}"
 
         # Speex
         if do_speex:
             out_sp = run_speex(mic, ref, sr)
-            sf.write(os.path.join(out_dir, f"{uuid}_farend_singletalk_speex.wav"), out_sp, sr)
+            sf.write(os.path.join(out_dir, f"{out_suffix}_speex.wav"), out_sp, sr)
             e_sp = compute_erle(mic, out_sp)
             erles['speex'].append(e_sp)
             line += f" {e_sp:>8.1f}"
@@ -278,7 +282,7 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
             out_a3 = run_aec3(mic_path, lpb_path, sr)
             if out_a3 is not None:
                 out_a3 = out_a3[:n]
-                sf.write(os.path.join(out_dir, f"{uuid}_farend_singletalk_aec3.wav"), out_a3, sr)
+                sf.write(os.path.join(out_dir, f"{out_suffix}_aec3.wav"), out_a3, sr)
                 e_a3 = compute_erle(mic, out_a3)
                 erles['aec3'].append(e_a3)
                 line += f" {e_a3:>8.1f}"
@@ -290,7 +294,7 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
             _, out_lin = run_aec3_linear(mic_path, lpb_path, sr)
             if out_lin is not None:
                 out_lin = out_lin[:n]
-                sf.write(os.path.join(out_dir, f"{uuid}_farend_singletalk_aec3_linear.wav"), out_lin, sr)
+                sf.write(os.path.join(out_dir, f"{out_suffix}_aec3_linear.wav"), out_lin, sr)
                 e_lin = compute_erle(mic, out_lin)
                 erles['aec3_linear'].append(e_lin)
                 line += f" {e_lin:>8.1f}"
@@ -318,16 +322,18 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
         print("No nearend_singletalk directory found, skipping")
         return
 
-    mic_files = sorted([f for f in os.listdir(sc_dir) if '_nearend_singletalk_mic.wav' in f])
+    mic_files = sorted([f for f in os.listdir(sc_dir)
+                        if '_nearend_singletalk' in f and f.endswith('_mic.wav')])
     if not mic_files:
         print("No nearend_singletalk files found")
         return
 
+    n_move = sum(1 for f in mic_files if '_with_movement_' in f)
     print(f"\n{'='*60}")
-    print(f"NEAREND SINGLETALK — SDR ({len(mic_files)} cases)")
+    print(f"NEAREND SINGLETALK — SDR ({len(mic_files)} cases, {n_move} with movement)")
     print(f"{'='*60}")
 
-    hdr = f"{'Case':>5} {'Ours':>8}"
+    hdr = f"{'Case':>5} {'Mv':>2} {'Ours':>8}"
     if do_speex: hdr += f" {'Speex':>8}"
     if do_aec3:  hdr += f" {'AEC3':>8}"
     if do_aec3_linear: hdr += f" {'AEC3-Lin':>8}"
@@ -337,8 +343,8 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
     sdrs = {'ours': [], 'speex': [], 'aec3': [], 'aec3_linear': []}
 
     for i, mf in enumerate(mic_files):
-        uuid = mf.replace('_nearend_singletalk_mic.wav', '')
-        lpb_f = f'{uuid}_nearend_singletalk_lpb.wav'
+        uuid = mf[:mf.index('_nearend_singletalk')]
+        lpb_f = mf.replace('_mic.wav', '_lpb.wav')
         mic_path = os.path.join(sc_dir, mf)
         lpb_path = os.path.join(sc_dir, lpb_f)
 
@@ -348,18 +354,21 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
         n = min(len(mic), len(ref))
         mic, ref = mic[:n], ref[:n]
 
+        movement = _is_movement(mf)
+        mv_tag = 'M' if movement else ' '
+        out_suffix = mf.replace('_mic.wav', '')
         # Ours
-        output = run_ours(mic, ref, sr, fl, preset=preset)
-        sf.write(os.path.join(out_dir, f"{uuid}_nearend_singletalk_ours.wav"), output, sr)
+        output = run_ours(mic, ref, sr, fl, preset=preset, is_movement=movement)
+        sf.write(os.path.join(out_dir, f"{out_suffix}_ours.wav"), output, sr)
         s_ours = compute_sdr(mic, output)
         sdrs['ours'].append(s_ours)
 
-        line = f"{i:>5} {s_ours:>8.1f}"
+        line = f"{i:>5} {mv_tag:>2} {s_ours:>8.1f}"
 
         # Speex
         if do_speex:
             out_sp = run_speex(mic, ref, sr)
-            sf.write(os.path.join(out_dir, f"{uuid}_nearend_singletalk_speex.wav"), out_sp, sr)
+            sf.write(os.path.join(out_dir, f"{out_suffix}_speex.wav"), out_sp, sr)
             s_sp = compute_sdr(mic, out_sp)
             sdrs['speex'].append(s_sp)
             line += f" {s_sp:>8.1f}"
@@ -369,7 +378,7 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
             out_a3 = run_aec3(mic_path, lpb_path, sr)
             if out_a3 is not None:
                 out_a3 = out_a3[:n]
-                sf.write(os.path.join(out_dir, f"{uuid}_nearend_singletalk_aec3.wav"), out_a3, sr)
+                sf.write(os.path.join(out_dir, f"{out_suffix}_aec3.wav"), out_a3, sr)
                 s_a3 = compute_sdr(mic, out_a3)
                 sdrs['aec3'].append(s_a3)
                 line += f" {s_a3:>8.1f}"
@@ -381,7 +390,7 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
             _, out_lin = run_aec3_linear(mic_path, lpb_path, sr)
             if out_lin is not None:
                 out_lin = out_lin[:n]
-                sf.write(os.path.join(out_dir, f"{uuid}_nearend_singletalk_aec3_linear.wav"), out_lin, sr)
+                sf.write(os.path.join(out_dir, f"{out_suffix}_aec3_linear.wav"), out_lin, sr)
                 s_lin = compute_sdr(mic, out_lin)
                 sdrs['aec3_linear'].append(s_lin)
                 line += f" {s_lin:>8.1f}"
@@ -409,17 +418,19 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
         print("No doubletalk directory found")
         return
 
-    # Find all mic files: {uuid}_doubletalk_mic.wav
-    mic_files = sorted([f for f in os.listdir(sc_dir) if '_doubletalk_mic.wav' in f])
+    # Find all mic files (including _with_movement_ variants)
+    mic_files = sorted([f for f in os.listdir(sc_dir)
+                        if '_doubletalk' in f and f.endswith('_mic.wav')])
     if not mic_files:
         print("No doubletalk files found")
         return
 
+    n_move = sum(1 for f in mic_files if '_with_movement_' in f)
     print(f"\n{'='*60}")
-    print(f"DOUBLETALK (real) — ERLE ({len(mic_files)} cases)")
+    print(f"DOUBLETALK (real) — ERLE ({len(mic_files)} cases, {n_move} with movement)")
     print(f"{'='*60}")
 
-    hdr = f"{'Case':>5} {'Ours':>8}"
+    hdr = f"{'Case':>5} {'Mv':>2} {'Ours':>8}"
     if do_speex: hdr += f" {'Speex':>8}"
     if do_aec3:  hdr += f" {'AEC3':>8}"
     if do_aec3_linear: hdr += f" {'AEC3-Lin':>8}"
@@ -429,8 +440,8 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
     erles = {'ours': [], 'speex': [], 'aec3': [], 'aec3_linear': []}
 
     for i, mf in enumerate(mic_files):
-        uuid = mf.replace('_doubletalk_mic.wav', '')
-        lpb_f = f'{uuid}_doubletalk_lpb.wav'
+        uuid = mf[:mf.index('_doubletalk')]
+        lpb_f = mf.replace('_mic.wav', '_lpb.wav')
         mic_path = os.path.join(sc_dir, mf)
         lpb_path = os.path.join(sc_dir, lpb_f)
 
@@ -441,22 +452,24 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
         mic, ref = mic[:n], ref[:n]
 
         movement = _is_movement(mf)
+        mv_tag = 'M' if movement else ' '
+        out_suffix = mf.replace('_mic.wav', '')
         # Ours
         output = run_ours(mic, ref, sr, fl, preset=preset, is_movement=movement)
-        sf.write(os.path.join(out_dir, f"{uuid}_doubletalk_ours.wav"), output, sr)
+        sf.write(os.path.join(out_dir, f"{out_suffix}_ours.wav"), output, sr)
         e_ours = compute_erle(mic, output)
         erles['ours'].append(e_ours)
 
         # Ours (no RES) — raw PBFDAF output
         output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset, is_movement=movement)
-        sf.write(os.path.join(out_dir, f"{uuid}_doubletalk_ours_nores.wav"), output_nores, sr)
+        sf.write(os.path.join(out_dir, f"{out_suffix}_ours_nores.wav"), output_nores, sr)
 
-        line = f"{i:>5} {e_ours:>8.1f}"
+        line = f"{i:>5} {mv_tag:>2} {e_ours:>8.1f}"
 
         # Speex
         if do_speex:
             out_sp = run_speex(mic, ref, sr)
-            sf.write(os.path.join(out_dir, f"{uuid}_doubletalk_speex.wav"), out_sp, sr)
+            sf.write(os.path.join(out_dir, f"{out_suffix}_speex.wav"), out_sp, sr)
             e_sp = compute_erle(mic, out_sp)
             erles['speex'].append(e_sp)
             line += f" {e_sp:>8.1f}"
@@ -466,7 +479,7 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
             out_a3 = run_aec3(mic_path, lpb_path, sr)
             if out_a3 is not None:
                 out_a3 = out_a3[:n]
-                sf.write(os.path.join(out_dir, f"{uuid}_doubletalk_aec3.wav"), out_a3, sr)
+                sf.write(os.path.join(out_dir, f"{out_suffix}_aec3.wav"), out_a3, sr)
                 e_a3 = compute_erle(mic, out_a3)
                 erles['aec3'].append(e_a3)
                 line += f" {e_a3:>8.1f}"
@@ -478,7 +491,7 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
             _, out_lin = run_aec3_linear(mic_path, lpb_path, sr)
             if out_lin is not None:
                 out_lin = out_lin[:n]
-                sf.write(os.path.join(out_dir, f"{uuid}_doubletalk_aec3_linear.wav"), out_lin, sr)
+                sf.write(os.path.join(out_dir, f"{out_suffix}_aec3_linear.wav"), out_lin, sr)
                 e_lin = compute_erle(mic, out_lin)
                 erles['aec3_linear'].append(e_lin)
                 line += f" {e_lin:>8.1f}"
@@ -548,7 +561,7 @@ def main():
     parser.add_argument('--speex', action='store_true', help='Also run SpeexDSP')
     parser.add_argument('--aec3', action='store_true', help='Also run WebRTC AEC3')
     parser.add_argument('--aec3-linear', action='store_true', help='Also run WebRTC AEC3 linear-only')
-    parser.add_argument('--preset', choices=['balanced', 'aggressive', 'maximum'],
+    parser.add_argument('--preset', choices=['mild', 'balanced', 'aggressive', 'maximum'],
                         default=None, help='AEC preset (default: no preset)')
     parser.add_argument('--all-presets', action='store_true',
                         help='Run all 3 presets and compare')
