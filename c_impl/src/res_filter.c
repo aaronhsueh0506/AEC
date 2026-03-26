@@ -11,6 +11,7 @@
  */
 
 #include "res_filter.h"
+#include "fast_math.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -18,6 +19,15 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+/* dB to amplitude: 10^(db/20) = exp(db * ln(10)/20) */
+static inline float db_to_amp(float db) {
+#ifdef USE_STANDARD_MATH
+    return powf(10.0f, db / 20.0f);
+#else
+    return fast_exp(db * (FM_LN10 / 20.0f));
+#endif
+}
 
 #define NEAR_PSD_BLOCKS 4   /* ring buffer size for near-end PSD averaging */
 
@@ -105,12 +115,12 @@ ResFilter* res_create(const ResConfig* cfg) {
     r->frame_size = cfg->frame_size;
     r->hop_size = cfg->hop_size;
     r->n_freqs = cfg->n_freqs;
-    r->g_min = powf(10.0f, cfg->g_min_db / 20.0f);
+    r->g_min = db_to_amp(cfg->g_min_db);
     r->ne_protect_db = cfg->ne_protect_db;
 
-    r->max_drop_ratio = powf(10.0f, cfg->max_drop_db_per_frame / 20.0f);
-    r->max_rise_ratio = powf(10.0f, cfg->max_rise_db_per_frame / 20.0f);
-    r->spectral_floor_ratio = powf(10.0f, cfg->spectral_floor_db / 20.0f);
+    r->max_drop_ratio = db_to_amp(cfg->max_drop_db_per_frame);
+    r->max_rise_ratio = db_to_amp(cfg->max_rise_db_per_frame);
+    r->spectral_floor_ratio = db_to_amp(cfg->spectral_floor_db);
 
     r->alpha_echo_psd = cfg->alpha_echo_psd;
     r->alpha_error_psd = cfg->alpha_error_psd;
@@ -439,7 +449,7 @@ void res_process(ResFilter* r,
         r->far_activity = 0.98f * r->far_activity + 0.02f * is_far_active;
     }
     float eff_g_min = r->g_min + (1.0f - r->g_min) * (1.0f - r->far_activity);
-    eff_g_min = maxf(eff_g_min, powf(10.0f, -60.0f / 20.0f));
+    eff_g_min = maxf(eff_g_min, db_to_amp(-60.0f));
 
     /* === Noise gate: quiet bins pass through === */
     float mean_error = 0.0f;
@@ -464,7 +474,7 @@ void res_process(ResFilter* r,
     if (far_power > 1e-4f) {
         float env_max = 0.0f;
         for (int k = 0; k < nf; k++) {
-            float err_mag = sqrtf(error_pwr[k] + 1e-10f);
+            float err_mag = fast_sqrt(error_pwr[k] + 1e-10f);
             r->error_envelope[k] = r->alpha_envelope * r->error_envelope[k] +
                                     (1.0f - r->alpha_envelope) * err_mag;
             if (r->error_envelope[k] > env_max)
@@ -483,7 +493,7 @@ void res_process(ResFilter* r,
     }
 
     /* Per-bin near-end gate */
-    float ne_g_min_ceil = powf(10.0f, r->ne_protect_db / 20.0f);
+    float ne_g_min_ceil = db_to_amp(r->ne_protect_db);
     for (int k = 0; k < nf; k++) {
         float ne_protection = (1.0f - coh2[k]) * erle_factor;
         float ne_g_floor = eff_g_min + (ne_g_min_ceil - eff_g_min) * ne_protection;
@@ -570,8 +580,8 @@ void res_process(ResFilter* r,
 
         /* Rate limiting */
         float act_scale = 0.5f + 0.5f * r->far_activity;
-        float eff_drop = powf(r->max_drop_ratio, act_scale);
-        float eff_rise = powf(r->max_rise_ratio, 0.5f + 0.5f * (1.0f - r->far_activity));
+        float eff_drop = fast_exp(act_scale * fast_log(r->max_drop_ratio));
+        float eff_rise = fast_exp((0.5f + 0.5f * (1.0f - r->far_activity)) * fast_log(r->max_rise_ratio));
         float gain_floor = r->gain_smooth[k] / eff_drop;
         float gain_ceil  = r->gain_smooth[k] * eff_rise;
         smoothed = maxf(smoothed, gain_floor);
@@ -598,7 +608,7 @@ void res_process(ResFilter* r,
                 float target_pwr = r->noise_psd[k] * 0.5f;
                 float deficit = target_pwr - suppressed_pwr;
                 if (deficit > 0) {
-                    float cng_mag = sqrtf(deficit);
+                    float cng_mag = fast_sqrt(deficit);
                     float phase = (float)(k * 2654435761u % 1000) / 1000.0f *
                                   2.0f * (float)M_PI;
                     r->spec_buf[k].r += cng_mag * cosf(phase);

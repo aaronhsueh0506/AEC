@@ -1,8 +1,8 @@
 /**
  * aec_types.h - AEC Configuration Types and Presets
  *
- * Matches Python v1.17.0 (PBFDKF mode, Kalman always on).
- * Three presets: BALANCED / AGGRESSIVE / MAXIMUM
+ * Matches Python v1.21.0 (PBFDKF mode, Kalman always on).
+ * Four presets: MILD / BALANCED / AGGRESSIVE / MAXIMUM
  */
 
 #ifndef AEC_TYPES_H
@@ -16,7 +16,8 @@ extern "C" {
 
 /* --- Preset enum --- */
 typedef enum {
-    AEC_PRESET_BALANCED = 0,
+    AEC_PRESET_MILD = 0,
+    AEC_PRESET_BALANCED,
     AEC_PRESET_AGGRESSIVE,
     AEC_PRESET_MAXIMUM
 } AecPreset;
@@ -86,6 +87,23 @@ typedef struct {
     int n_partitions;           /* 10 (ceil(filter_length / hop_size)) */
 } AecConfig;
 
+/* --- AEC context for external RES (linear pipeline) --- */
+typedef struct {
+    float*   echo_spec_re;      /* [n_freqs] echo estimate (real) */
+    float*   echo_spec_im;      /* [n_freqs] echo estimate (imag) */
+    float*   far_spec_re;       /* [n_freqs] far-end spectrum (real) */
+    float*   far_spec_im;       /* [n_freqs] far-end spectrum (imag) */
+    float*   near_spec_re;      /* [n_freqs] mic spectrum (real) */
+    float*   near_spec_im;      /* [n_freqs] mic spectrum (imag) */
+    float    far_power;         /* mean(far²) */
+    int      filter_converged;  /* 0 or 1 */
+    float    erle_factor;       /* [0, 1] convergence metric */
+    float    dt_indicator;      /* [0, 0.8] double-talk confidence */
+    float    divergence;        /* [0, 1] divergence indicator */
+    float    over_sub;          /* dynamic over_sub value */
+    int      n_freqs;           /* number of frequency bins */
+} AecResContext;
+
 /* --- Factory functions --- */
 
 /**
@@ -103,12 +121,12 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.highpass_cutoff_hz = 80.0f;
 
     c.enable_res = 1;
-    c.res_g_min_db = -35.0f;
-    c.res_over_sub_base = 2.5f;
-    c.res_over_sub_scale = 4.0f;
-    c.res_dt_reduction = 3.5f;
-    c.res_spectral_floor_db = -25.0f;
-    c.res_ne_protect_db = -12.0f;
+    c.res_g_min_db = -45.0f;
+    c.res_over_sub_base = 4.0f;
+    c.res_over_sub_scale = 7.0f;
+    c.res_dt_reduction = 2.0f;
+    c.res_spectral_floor_db = -32.0f;
+    c.res_ne_protect_db = -16.0f;
     c.res_max_drop_db_per_frame = 6.0f;
     c.res_max_rise_db_per_frame = 6.0f;
     c.enable_cng = 1;
@@ -116,22 +134,22 @@ static inline AecConfig aec_default_config(int sample_rate) {
     /* RES v2 */
     c.res_echo_method = RES_ECHO_DIRECT;
     c.res_gain_type = RES_GAIN_ENR;
-    c.res_enr_scale = 1.0f;
+    c.res_enr_scale = 0.85f;
     c.res_enable_reverb = 1;
-    c.res_reverb_decay = 0.5f;
-    c.res_reverb_gain = 0.5f;
-    c.res_alpha_echo_psd = 0.5f;
-    c.res_alpha_error_psd = 0.6f;
+    c.res_reverb_decay = 0.65f;
+    c.res_reverb_gain = 1.4f;
+    c.res_alpha_echo_psd = 0.4f;
+    c.res_alpha_error_psd = 0.5f;
 
-    c.shadow_q_ratio = 3.0f;
+    c.shadow_q_ratio = 3.5f;
     c.shadow_copy_threshold = 0.7f;
     c.shadow_err_alpha = 0.85f;
-    c.shadow_mu_min = 0.5f;
+    c.shadow_mu_min = 0.6f;
     c.shadow_copy_hysteresis = 5;
 
-    c.kalman_q_high = 1e-4f;
+    c.kalman_q_high = 1.5e-4f;
     c.kalman_q_low = 1e-7f;
-    c.warmup_frames = 100;
+    c.warmup_frames = 150;
 
     /* Derived */
     c.fft_size = 512;
@@ -148,6 +166,25 @@ static inline AecConfig aec_config_from_preset(AecPreset preset, int sample_rate
     AecConfig c = aec_default_config(sample_rate);
 
     switch (preset) {
+    case AEC_PRESET_MILD:
+        c.res_g_min_db = -35.0f;
+        c.res_over_sub_base = 2.5f;
+        c.res_over_sub_scale = 4.0f;
+        c.res_dt_reduction = 3.5f;
+        c.res_spectral_floor_db = -25.0f;
+        c.res_ne_protect_db = -12.0f;
+        c.res_enr_scale = 1.0f;
+        c.res_enable_reverb = 1;
+        c.res_reverb_decay = 0.6f;
+        c.res_reverb_gain = 0.8f;
+        c.res_alpha_echo_psd = 0.5f;
+        c.res_alpha_error_psd = 0.6f;
+        c.shadow_q_ratio = 3.0f;
+        c.shadow_mu_min = 0.5f;
+        c.warmup_frames = 150;
+        c.kalman_q_high = 2e-4f;
+        break;
+
     case AEC_PRESET_BALANCED:
         /* Already set by default */
         break;
@@ -199,6 +236,7 @@ static inline AecConfig aec_config_from_preset(AecPreset preset, int sample_rate
  */
 static inline const char* aec_preset_name(AecPreset preset) {
     switch (preset) {
+    case AEC_PRESET_MILD:       return "mild";
     case AEC_PRESET_BALANCED:   return "balanced";
     case AEC_PRESET_AGGRESSIVE: return "aggressive";
     case AEC_PRESET_MAXIMUM:    return "maximum";

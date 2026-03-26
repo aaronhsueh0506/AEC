@@ -4,13 +4,14 @@
  * Orchestrates: HPF → PBFDKF (main + shadow) → simple variable mu →
  *               convergence detection → RES (WOLA) → output limiter
  *
- * Matches Python AEC v1.17.0 (PBFDKF mode, Kalman always on).
+ * Matches Python AEC v1.21.0 (PBFDKF mode, Kalman always on).
  */
 
 #include "aec.h"
 #include "pbfdkf.h"
 #include "res_filter.h"
 #include "hpf.h"
+#include "fast_math.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -261,10 +262,98 @@ static void update_simple_mu_ratio(Aec* aec, const float* output,
     aec->simple_mu_ratio = alpha * aec->simple_mu_ratio + (1.0f - alpha) * ratio;
 }
 
-int aec_process(Aec* aec,
-                const float* near_end,
-                const float* far_end,
-                float* output) {
+/* --- Context allocation / destruction --- */
+
+AecResContext* aec_context_create(const Aec* aec) {
+    if (!aec) return NULL;
+    int nf = aec->n_freqs;
+
+    AecResContext* ctx = (AecResContext*)calloc(1, sizeof(AecResContext));
+    if (!ctx) return NULL;
+    ctx->n_freqs = nf;
+
+    ctx->echo_spec_re = (float*)calloc(nf, sizeof(float));
+    ctx->echo_spec_im = (float*)calloc(nf, sizeof(float));
+    ctx->far_spec_re  = (float*)calloc(nf, sizeof(float));
+    ctx->far_spec_im  = (float*)calloc(nf, sizeof(float));
+    ctx->near_spec_re = (float*)calloc(nf, sizeof(float));
+    ctx->near_spec_im = (float*)calloc(nf, sizeof(float));
+
+    if (!ctx->echo_spec_re || !ctx->echo_spec_im ||
+        !ctx->far_spec_re  || !ctx->far_spec_im  ||
+        !ctx->near_spec_re || !ctx->near_spec_im) {
+        aec_context_destroy(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+void aec_context_destroy(AecResContext* ctx) {
+    if (!ctx) return;
+    free(ctx->echo_spec_re);
+    free(ctx->echo_spec_im);
+    free(ctx->far_spec_re);
+    free(ctx->far_spec_im);
+    free(ctx->near_spec_re);
+    free(ctx->near_spec_im);
+    free(ctx);
+}
+
+/* Fill context from current PBFDKF state */
+static void fill_context(Aec* aec, const float* mic, const float* ref,
+                          int hop, AecResContext* ctx) {
+    const AecConfig* cfg = &aec->config;
+    int nf = aec->n_freqs;
+
+    /* Copy spectra from PBFDKF (Complex → split re/im) */
+    const Complex* echo = pbfdkf_get_echo_spec(aec->filter);
+    const Complex* far  = pbfdkf_get_far_spec(aec->filter);
+    const Complex* near = pbfdkf_get_near_spec(aec->filter);
+    for (int k = 0; k < nf; k++) {
+        ctx->echo_spec_re[k] = echo[k].r;
+        ctx->echo_spec_im[k] = echo[k].i;
+        ctx->far_spec_re[k]  = far[k].r;
+        ctx->far_spec_im[k]  = far[k].i;
+        ctx->near_spec_re[k] = near[k].r;
+        ctx->near_spec_im[k] = near[k].i;
+    }
+
+    /* Far-end power */
+    float far_power = 0.0f;
+    for (int i = 0; i < hop; i++) far_power += ref[i] * ref[i];
+    far_power /= hop;
+    ctx->far_power = far_power;
+
+    ctx->filter_converged = aec->filter_converged;
+
+    /* ERLE factor */
+    float inst_erle = aec_get_erle_instant(aec);
+    ctx->erle_factor = clampf((inst_erle - 3.0f) / 15.0f, 0.0f, 1.0f);
+
+    /* DT indicator */
+    float mic_pwr = 0.0f;
+    for (int i = 0; i < hop; i++) mic_pwr += mic[i] * mic[i];
+    mic_pwr = mic_pwr / hop + 1e-10f;
+    float far_p = far_power + 1e-10f;
+    ctx->dt_indicator = clampf(1.0f - far_p / (mic_pwr + far_p), 0.0f, 0.8f);
+
+    /* Dynamic over_sub */
+    float base_over_sub = cfg->res_over_sub_base +
+                           cfg->res_over_sub_scale * ctx->erle_factor;
+    float dt_reduction = cfg->res_dt_reduction * ctx->dt_indicator;
+    ctx->over_sub = maxf(base_over_sub - dt_reduction, 0.5f);
+
+    /* Divergence (simple: error/near ratio) */
+    float err_pwr = aec->raw_error_power + 1e-10f;
+    float near_pwr = aec->near_power + 1e-10f;
+    ctx->divergence = clampf(err_pwr / near_pwr - 0.5f, 0.0f, 1.0f);
+}
+
+int aec_process_ex(Aec* aec,
+                   const float* near_end,
+                   const float* far_end,
+                   float* output,
+                   AecResContext* ctx) {
     if (!aec || !near_end || !far_end || !output) return -1;
 
     const int hop = aec->config.hop_size;
@@ -396,6 +485,11 @@ int aec_process(Aec* aec,
         update_simple_mu_ratio(aec, aec->raw_output, ref, hop);
     }
 
+    /* === Fill external context (if requested) === */
+    if (ctx) {
+        fill_context(aec, mic, ref, hop, ctx);
+    }
+
     /* === Output limiter (smoothed gain) === */
     {
         float near_peak = 0.0f, out_peak = 0.0f;
@@ -454,7 +548,7 @@ int aec_process(Aec* aec,
 
     /* === Convergence detection: 10 consecutive frames ERLE > 6dB === */
     if (!aec->filter_converged && aec->near_power > 1e-8f) {
-        float inst_erle = 10.0f * log10f(aec->near_power /
+        float inst_erle = 10.0f * fast_log10(aec->near_power /
                                           (aec->raw_error_power + 1e-10f));
         if (inst_erle > 6.0f)
             aec->conv_counter++;
@@ -471,6 +565,13 @@ int aec_process(Aec* aec,
     return 0;
 }
 
+int aec_process(Aec* aec,
+                const float* near_end,
+                const float* far_end,
+                float* output) {
+    return aec_process_ex(aec, near_end, far_end, output, NULL);
+}
+
 int aec_get_hop_size(const Aec* aec) {
     return aec ? aec->config.hop_size : 0;
 }
@@ -480,7 +581,7 @@ float aec_get_erle(const Aec* aec) {
     const float eps = 1e-10f;
     if (aec->near_power_sum < eps && aec->raw_error_power_sum < eps)
         return 0.0f;
-    return 10.0f * log10f((aec->near_power_sum + eps) /
+    return 10.0f * fast_log10((aec->near_power_sum + eps) /
                            (aec->raw_error_power_sum + eps));
 }
 
@@ -489,7 +590,7 @@ float aec_get_erle_instant(const Aec* aec) {
     const float eps = 1e-10f;
     if (aec->near_power < eps && aec->raw_error_power < eps)
         return 0.0f;
-    return 10.0f * log10f((aec->near_power + eps) /
+    return 10.0f * fast_log10((aec->near_power + eps) /
                            (aec->raw_error_power + eps));
 }
 

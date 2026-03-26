@@ -49,6 +49,32 @@ typedef struct {
 } ResConfig;
 
 /**
+ * Create ResConfig from AecConfig (for standalone RES in linear pipeline)
+ */
+static inline ResConfig res_config_from_aec(const AecConfig* aec_cfg) {
+    ResConfig rc;
+    rc.block_size = aec_cfg->fft_size;
+    rc.frame_size = aec_cfg->frame_size;
+    rc.hop_size = aec_cfg->hop_size;
+    rc.n_freqs = aec_cfg->n_freqs;
+    rc.g_min_db = aec_cfg->res_g_min_db;
+    rc.max_drop_db_per_frame = aec_cfg->res_max_drop_db_per_frame;
+    rc.max_rise_db_per_frame = aec_cfg->res_max_rise_db_per_frame;
+    rc.spectral_floor_db = aec_cfg->res_spectral_floor_db;
+    rc.ne_protect_db = aec_cfg->res_ne_protect_db;
+    rc.enable_cng = aec_cfg->enable_cng;
+    rc.alpha_echo_psd = aec_cfg->res_alpha_echo_psd;
+    rc.alpha_error_psd = aec_cfg->res_alpha_error_psd;
+    rc.echo_method = aec_cfg->res_echo_method;
+    rc.gain_type = aec_cfg->res_gain_type;
+    rc.enable_reverb = aec_cfg->res_enable_reverb;
+    rc.reverb_decay = aec_cfg->res_reverb_decay;
+    rc.reverb_gain = aec_cfg->res_reverb_gain;
+    rc.enr_scale = aec_cfg->res_enr_scale;
+    return rc;
+}
+
+/**
  * Create RES filter
  */
 ResFilter* res_create(const ResConfig* cfg);
