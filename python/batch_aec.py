@@ -6,7 +6,7 @@ Each fileid also produces a 4-channel wav:
   ch0=nearend_mic, ch1=aec_output, ch2=farend, ch3=nearend_speech (or silence)
 
 Usage:
-    python3 batch_aec.py ../wav/                          # default: subband Shadow+RES, FL=2048
+    python3 batch_aec.py ../wav/                          # default: pbfdkf Shadow+RES, FL=2048
     python3 batch_aec.py ../wav/ -o ../wav/output/        # save to custom dir
     python3 batch_aec.py ../wav/ --speex --aec3           # also run Speex and WebRTC AEC3
     python3 batch_aec.py ../wav/ --files 0,20,800         # specific fileids only
@@ -86,7 +86,8 @@ def compute_nearend_retention(mic, ref, output, hop=256):
 
 def run_ours(mic, ref, sr, filter_length, mode, enable_dtd, enable_shadow, enable_res, mu):
     mode_map = {'nlms': AecMode.NLMS, 'fdaf': AecMode.FDAF,
-                'subband': AecMode.SUBBAND, 'lms': AecMode.LMS}
+                'pbfdaf': AecMode.PBFDAF, 'pbfdkf': AecMode.PBFDKF,
+                'subband': AecMode.PBFDKF, 'lms': AecMode.LMS}
     config = AecConfig(
         sample_rate=sr,
         mode=mode_map[mode],
@@ -171,8 +172,8 @@ def main():
                         help='Filter length (default: 2048)')
     parser.add_argument('--speex-filter', type=int, default=2048,
                         help='SpeexDSP filter length (default: 2048)')
-    parser.add_argument('--mode', choices=['nlms', 'fdaf', 'subband', 'lms'],
-                        default='subband', help='Filter mode (default: subband)')
+    parser.add_argument('--mode', choices=['nlms', 'fdaf', 'pbfdaf', 'pbfdkf', 'subband', 'lms'],
+                        default='pbfdkf', help='Filter mode (default: pbfdkf)')
     parser.add_argument('--mu', type=float, default=None, help='Step size override')
     parser.add_argument('--enable-dtd', action='store_true', help='Enable DTD')
     parser.add_argument('--no-shadow', action='store_true', help='Disable shadow filter')

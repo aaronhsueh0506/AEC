@@ -43,7 +43,7 @@ def make_rir(delay, gain, n_taps=512):
 
 def run_aec(mic, ref, enable_shadow, enable_dtd=True):
     config = AecConfig(
-        mode=AecMode.SUBBAND,
+        mode=AecMode.PBFDKF,
         enable_shadow=enable_shadow,
         enable_dtd=enable_dtd,
     )

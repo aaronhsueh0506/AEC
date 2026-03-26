@@ -100,7 +100,7 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     env_gain_type = os.environ.get('AEC_GAIN_TYPE')
     if env_gain_type and 'res_gain_type' not in config_overrides:
         config_overrides['res_gain_type'] = env_gain_type
-    common_kw = dict(sample_rate=sr, mode=AecMode.SUBBAND,
+    common_kw = dict(sample_rate=sr, mode=AecMode.PBFDKF,
                      filter_length=fl, enable_dtd=False,
                      enable_shadow=True, enable_res=enable_res,
                      use_kalman=True,

@@ -25,7 +25,7 @@
 | LMS | `AEC_MODE_LMS` | `w += μ·e·x` | O(N) | 0.001~0.05 | 穩態環境、極低資源 |
 | NLMS | `AEC_MODE_NLMS` | `w = leak·w + μ/(‖x‖²+δ)·e·x` | O(N) | 0.1~0.8 | 一般用途、低延遲 |
 | 頻域 NLMS | `AEC_MODE_FREQ` | `W += μ/(P+δ)·E·conj(X)` | O(N log N) | 0.1~0.8 | 中等 echo path |
-| PBFDAF | `AEC_MODE_SUBBAND` | 多 partition 頻域更新 | O(N log N) | 0.1~0.8 | 長 echo path (300ms+) |
+| PBFDAF/PBFDKF | `AEC_MODE_PBFDAF/PBFDKF` | 多 partition 頻域更新 | O(N log N) | 0.1~0.8 | 長 echo path (300ms+) |
 
 ### 信號流程
 
@@ -326,7 +326,7 @@ for each partition p:
 
 ### 與頻域 NLMS 的區別
 
-| | 頻域 NLMS (FREQ) | PBFDAF (SUBBAND) |
+| | 頻域 NLMS (FREQ) | PBFDAF/PBFDKF |
 |---|---|---|
 | Partition 數 | 1 | P (多個) |
 | block_size | next_pow2(2×FL) | fft_size (固定 512) |
@@ -338,7 +338,7 @@ for each partition p:
 | DT 處理粒度 | 粗（整個 FL 一次更新） | 細（256 samples 一次更新） |
 
 **FREQ 模式的根本限制**：filter_length 與 block_size 耦合。FL 越長 → block_size 越大 →
-每次 weight update 涵蓋更多 samples → DT 期間污染更嚴重。SUBBAND 解耦了這兩者，
+每次 weight update 涵蓋更多 samples → DT 期間污染更嚴重。PBFDAF/PBFDKF 解耦了這兩者，
 filter_length 只影響 partition 數，不影響 block_size 和 DTD cadence。
 
 ### 優缺點
@@ -579,7 +579,7 @@ AEC 自適應濾波器在以下情況需要控制更新：
 
 ### 6.1.1 DTD 整體運作機制
 
-本專案使用**三層防護**控制自適應更新（僅 FREQ/SUBBAND 模式，LMS/NLMS 無 DTD — 詳見 [dtd_design.md §3.5](dtd_design.md)）：
+本專案使用**三層防護**控制自適應更新（僅頻域模式 FDAF/PBFDAF/PBFDKF，LMS/NLMS 無 DTD — 詳見 [dtd_design.md §3.5](dtd_design.md)）：
 
 ```
 每個 hop (256 samples, 16ms @ 16kHz):
@@ -943,14 +943,14 @@ Median NE-Ret 與 DTD 完全相同（-1.6），Mean 差距來自 fid 1 white noi
 | 事後修正 | Main diverge → shadow copy。中間有數 frame 汙染 output |
 | Post-filter 缺 DT 資訊 | 無法在 DT 時智能減少壓制 |
 
-### 6.5 Coherence-Based Double-Talk Detection ✅ 本專案採用（FREQ/SUBBAND）
+### 6.5 Coherence-Based Double-Talk Detection ✅ 本專案採用（頻域模式）
 
 > 完整 DTD 設計文檔見 [dtd_design.md](dtd_design.md)。
 
 Divergence detection 的限制：收斂後的 double-talk 中，output ≈ near_speech < mic，ratio < 1.0，
 偵測不到。Error 包含近端語音（跟 far-end 不相關），filter 持續更新導致權重漂移。
 
-**適用範圍**：FREQ/SUBBAND 模式。LMS/NLMS 因收斂速度慢，coherence DTD 會在 double-talk
+**適用範圍**：頻域模式（FDAF/PBFDAF/PBFDKF）。LMS/NLMS 因收斂速度慢，coherence DTD 會在 double-talk
 場景下過度降低 mu 導致惡性循環（詳見 dtd_design.md §3.5），預設僅使用 divergence DTD。
 
 **解法**：用 error-reference Magnitude Squared Coherence (MSC) 偵測 DT。
@@ -966,7 +966,7 @@ Broadband coherence (voice-band weighted, ratio-of-sums):
   voice_weight: 300-4kHz → 3.0, <100Hz/>6kHz → 0.3, 其餘 → 1.0
 
 Spectra source:
-  SUBBAND: 直接用 FDAF 的 error_spec/far_spec（每 frame）
+  PBFDAF/PBFDKF: 直接用 FDAF 的 error_spec/far_spec（每 frame）
   FREQ: 獨立 FL-point FFT sliding buffer（每 FL/2 samples）
         → 解耦 DTD 與 FDAF 的大 block_size
 
@@ -991,7 +991,7 @@ Divergence 偵測 filter 發散，coherence 偵測近端語音汙染。
 **Shadow filter 在 DT 期間**：寬鬆 DTD 保護（mu 最低 20%，vs main 的 5%）。
 Shadow mu 本身已很小 (main_mu × 0.5)，DT 期間漂移速度有限，DT 結束後會重新收斂。
 
-> **注意**：Shadow filter 僅在 SUBBAND 模式下有效。FREQ 模式因 buffering 機制（block_size > hop_size），
+> **注意**：Shadow filter 僅在 PBFDAF/PBFDKF 模式下有效。FREQ 模式因 buffering 機制（block_size > hop_size），
 > shadow filter 和 RES post-filter 會自動跳過。
 
 ### 6.6 DTD 方法比較
@@ -1213,10 +1213,10 @@ if ERLE < target_ERLE:
 
 ## 9. Subband 分頻方式說明
 
-### 目前的「SUBBAND」模式
+### 目前的 PBFDAF/PBFDKF 模式
 
-**重要澄清：** 本專案中 `AEC_MODE_SUBBAND` 並非傳統的分析-合成 filter bank 分頻，
-而是 **PBFDAF（Partitioned Block Frequency Domain Adaptive Filter）**。
+**重要澄清：** 本專案的頻域濾波器並非傳統的分析-合成 filter bank 分頻，
+而是 **PBFDAF/PBFDKF（Partitioned Block Frequency Domain Adaptive Filter / Kalman Filter）**。
 
 ### 頻率分解方式
 
@@ -1510,7 +1510,7 @@ ERLE = 10 · log₁₀(E[d²] / E[e²])    (dB)
 |------|-------------|
 | LMS/NLMS | 16 ms (hop=256) |
 | FREQ | 16 ms (hop=256) |
-| SUBBAND (PBFDAF) | 16 ms (hop=256) |
+| PBFDAF/PBFDKF | 16 ms (hop=256) |
 
 ---
 
@@ -1519,7 +1519,7 @@ ERLE = 10 · log₁₀(E[d²] / E[e²])    (dB)
 | 參數 | 影響 | 調整方向 |
 |------|------|---------|
 | μ (step size) | 收斂速度 vs 穩定性 | 不穩定→降低；收斂慢→提高 |
-| filter_length | echo path 覆蓋 | TIME/LMS/SUBBAND 可配置（預設 512/1024），FREQ 固定=hop_size |
+| filter_length | echo path 覆蓋 | LMS/NLMS/PBFDAF/PBFDKF 可配置（預設 512/1024），FDAF 固定=hop_size |
 | δ (regularization) | 數值穩定性 | 保持 1e-8 |
 | leak | 權重衰減（TIME only） | 接近 1.0，防止權重爆炸 |
 | divergence_factor | 發散靈敏度 | 降低→更敏感（更快降 mu）；提高→更寬鬆 |

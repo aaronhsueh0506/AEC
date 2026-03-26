@@ -2,7 +2,7 @@
 Benchmark AEC competitors on AEC Challenge dataset.
 
 Compares:
-  - Our AEC (subband DTD+RES)
+  - Our AEC (PBFDKF + RES)
   - SpeexDSP echo canceller
   - WebRTC AEC3 (via compiled CLI)
 
@@ -95,10 +95,10 @@ def compute_nearend_retention(mic, ref, output, hop=256):
 
 def run_ours(mic, ref, sr, filter_length=1024, enable_res=True,
              res_over_sub=None, enable_dtd=None, enable_shadow=None):
-    """Run our AEC (subband DTD+RES)."""
+    """Run our AEC (PBFDKF + RES)."""
     config = AecConfig(
         sample_rate=sr,
-        mode=AecMode.SUBBAND,
+        mode=AecMode.PBFDKF,
         enable_res=enable_res,
         filter_length=filter_length,
     )
@@ -220,7 +220,7 @@ def main():
     os_str = f", over_sub={args.res_over_sub}" if args.res_over_sub else ""
     dtd_str = "DTD" if args.enable_dtd else "no-DTD"
     shadow_str = "Shadow" if not args.no_shadow else "no-Shadow"
-    print(f"Our config: subband {dtd_str}+{shadow_str}+RES, FL={args.filter}{os_str}")
+    print(f"Our config: PBFDKF {dtd_str}+{shadow_str}+RES, FL={args.filter}{os_str}")
     if HAS_SPEEX:
         print(f"SpeexDSP: FL={args.speex_filter}")
     if HAS_AEC3:

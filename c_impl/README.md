@@ -1,6 +1,6 @@
 # AEC C Implementation — PBFDKF + Shadow + WOLA RES
 
-C 語言 AEC 實作，對齊 Python AEC v1.17.0（SUBBAND PBFDKF 模式）。
+C 語言 AEC 實作，對齊 Python AEC v1.17.0（PBFDKF 模式）。
 
 ## 特點
 
@@ -192,7 +192,7 @@ while (has_audio) {
 aec_destroy(aec);
 ```
 
-## C / Python 功能比較（SUBBAND + FDKF + RES 路徑）
+## C / Python 功能比較（PBFDKF + RES 路徑）
 
 C 對齊 Python v1.17.0，Python 最新為 v1.18.0。以下為同一路徑上的功能差異：
 

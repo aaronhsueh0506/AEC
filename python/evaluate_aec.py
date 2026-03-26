@@ -19,7 +19,7 @@ Dataset 結構（flat directory，用 fileid_N 配對）：
   echo_signal_fileid_0.wav
 
 Usage:
-  python evaluate_aec.py <dataset_dir> [--mode nlms|fdaf|subband|lms|all]
+  python evaluate_aec.py <dataset_dir> [--mode nlms|fdaf|pbfdaf|pbfdkf|lms|all]
   python evaluate_aec.py <dataset_dir> --mode all --output results.csv
 """
 
@@ -591,12 +591,12 @@ def main():
 Examples:
     python evaluate_aec.py ./synthetic_data --mode nlms
     python evaluate_aec.py ./synthetic_data --mode all --output results.csv
-    python evaluate_aec.py ./synthetic_data --mode subband --filter 1024 --mu 0.3
+    python evaluate_aec.py ./synthetic_data --mode pbfdkf --filter 1024 --mu 0.3
     python evaluate_aec.py ./synthetic_data --mode nlms --save-output ./aec_output
         """
     )
     parser.add_argument('dataset_dir', help='Directory containing AEC Challenge wav files')
-    parser.add_argument('--mode', choices=['lms', 'nlms', 'fdaf', 'subband', 'all'],
+    parser.add_argument('--mode', choices=['lms', 'nlms', 'fdaf', 'pbfdaf', 'pbfdkf', 'subband', 'all'],
                         default='nlms', help='Filter mode (default: nlms)')
     parser.add_argument('--mu', type=float, default=None, help='Step size override')
     parser.add_argument('--filter', type=int, default=None, help='Filter length in samples')
@@ -630,11 +630,13 @@ Examples:
         'lms': AecMode.LMS,
         'nlms': AecMode.NLMS,
         'fdaf': AecMode.FDAF,
-        'subband': AecMode.SUBBAND,
+        'pbfdaf': AecMode.PBFDAF,
+        'pbfdkf': AecMode.PBFDKF,
+        'subband': AecMode.PBFDKF,
     }
 
     if args.mode == 'all':
-        modes_to_run = ['nlms', 'fdaf', 'subband', 'lms']
+        modes_to_run = ['nlms', 'fdaf', 'pbfdkf', 'lms']
     else:
         modes_to_run = [args.mode]
 
@@ -653,7 +655,7 @@ Examples:
 
         filter_length = args.filter
         if filter_length is None:
-            if mode_name == 'subband':
+            if mode_name in ('pbfdaf', 'pbfdkf', 'subband'):
                 filter_length = 1024
             else:
                 filter_length = 512  # frame_size default

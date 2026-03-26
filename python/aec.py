@@ -1,17 +1,18 @@
 """
 Acoustic Echo Cancellation (AEC) - Python Reference Implementation
 
-Supports three filter modes:
+Supports five filter modes:
 - Time-domain NLMS (--mode nlms): sample-by-sample, lowest latency
 - Frequency-domain Adaptive Filter (--mode fdaf): single FFT block, no partitions
-- Partitioned block FDAF (--mode subband): multiple partitions, for long echo paths
+- Partitioned Block FDAF (--mode pbfdaf): multiple partitions, NLMS adaptation
+- Partitioned Block FDKF (--mode pbfdkf): multiple partitions, Kalman adaptation (recommended)
 
 Additional features:
 - Double-Talk Detection (DTD)
 - Residual Echo Suppressor (RES)
 
 Usage:
-    python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|subband] [--enable-res]
+    python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
 import numpy as np
@@ -26,7 +27,15 @@ class AecMode(Enum):
     LMS = "lms"         # Time-domain LMS (no normalization, simplest)
     NLMS = "nlms"       # Time-domain NLMS (sample-by-sample)
     FDAF = "fdaf"       # Frequency-domain Adaptive Filter (single block, n_partitions=1)
-    SUBBAND = "subband" # Partitioned block FDAF (multiple partitions)
+    PBFDAF = "pbfdaf"   # Partitioned Block FDAF (NLMS adaptation)
+    PBFDKF = "pbfdkf"   # Partitioned Block FDKF (Kalman adaptation, recommended)
+    SUBBAND = "subband" # Backward compat alias (= PBFDKF)
+
+
+# Frequency-domain modes (partitioned or single block)
+_FREQ_MODES = (AecMode.FDAF, AecMode.PBFDAF, AecMode.PBFDKF, AecMode.SUBBAND)
+# Partitioned block modes
+_PB_MODES = (AecMode.PBFDAF, AecMode.PBFDKF, AecMode.SUBBAND)
 
 
 class AecPreset(Enum):
@@ -53,10 +62,10 @@ class AecConfig:
     dtd_confidence_attack: float = 0.3    # Confidence ramp-up rate per block
     dtd_confidence_release: float = 0.05  # Confidence ramp-down rate per block
 
-    # Divergence detection parameters (FDAF/SUBBAND, output-vs-input)
+    # Divergence detection parameters (frequency-domain modes, output-vs-input)
     dtd_divergence_factor: float = 1.5    # output > input × factor → diverged
 
-    # Coherence-based DTD parameters (FDAF/SUBBAND, complements divergence)
+    # Coherence-based DTD parameters (frequency-domain modes, complements divergence)
     dtd_coh_alpha: float = 0.85           # PSD smoothing factor (~6 block time constant)
     dtd_coh_high: float = 0.6            # Coherence above → no DT (correlated error)
     dtd_coh_low: float = 0.3             # Coherence below → DT (uncorrelated error)
@@ -71,7 +80,7 @@ class AecConfig:
     res_alpha: float = 0.8
     enable_cng: bool = True            # Comfort noise generation in RES
 
-    # Shadow filter (dual-filter divergence control, FDAF/SUBBAND only)
+    # Shadow filter (dual-filter divergence control, frequency-domain modes only)
     enable_shadow: bool = True
     shadow_mu_ratio: float = 1.0
     shadow_copy_threshold: float = 0.7
@@ -1215,8 +1224,8 @@ class DtdEstimator:
     """Double-Talk Detector with per-mode strategy.
 
     - 'geigel' mode (LMS/NLMS): Geigel DTD with hangover + confidence
-    - 'divergence' mode (FDAF/SUBBAND): Output-vs-input divergence detection
-    - 'coherence' mode (FDAF/SUBBAND): Error-reference coherence DT detection
+    - 'divergence' mode (frequency-domain modes): Output-vs-input divergence detection
+    - 'coherence' mode (frequency-domain modes): Error-reference coherence DT detection
     """
 
     def __init__(self, mode: str = 'geigel', *,
@@ -1419,10 +1428,11 @@ class AEC:
     """
     Acoustic Echo Cancellation
 
-    Supports three filter modes:
-    - TIME:    Time-domain NLMS (sample-by-sample processing)
+    Supports five filter modes:
+    - NLMS:    Time-domain NLMS (sample-by-sample processing)
     - FDAF:    Frequency-domain Adaptive Filter (single FFT block, n_partitions=1)
-    - SUBBAND: Partitioned block FDAF (multiple partitions for long echo paths)
+    - PBFDAF:  Partitioned Block FDAF (NLMS adaptation)
+    - PBFDKF:  Partitioned Block FDKF (Kalman adaptation, recommended)
     """
 
     # Per-mode optimal mu defaults (tuned on fileid_0/1/2)
@@ -1430,6 +1440,8 @@ class AEC:
         AecMode.LMS: 0.02,
         AecMode.NLMS: 0.4,
         AecMode.FDAF: 0.3,
+        AecMode.PBFDAF: 0.5,
+        AecMode.PBFDKF: 0.5,
         AecMode.SUBBAND: 0.5,
     }
 
@@ -1466,10 +1478,9 @@ class AEC:
             self._delay_active = False
 
         # Create adaptive filter based on mode
-        if self.config.mode in (AecMode.FDAF, AecMode.SUBBAND):
+        if self.config.mode in _FREQ_MODES:
             if self.config.mode == AecMode.FDAF:
                 # True FDAF: single big FFT block, n_partitions=1
-                # block_size = next power of 2 >= 2 * filter_length
                 desired = 2 * self.config.filter_length
                 block_size = 256
                 while block_size < desired:
@@ -1477,13 +1488,19 @@ class AEC:
                 n_partitions = 1
                 self._internal_hop = block_size // 2
             else:
-                # PBFDAF: partitioned block, configurable filter_length
+                # Partitioned block (PBFDAF/PBFDKF/SUBBAND)
                 block_size = self.config.fft_size
                 hop_size = self.config.hop_size
                 n_partitions = max(1, (self.config.filter_length + hop_size - 1) // hop_size)
                 self._internal_hop = hop_size
 
-            FilterClass = PBFDKF if self.config.use_kalman else PBFDAF
+            # FilterClass: mode determines adaptation algorithm
+            if self.config.mode in (AecMode.PBFDKF, AecMode.SUBBAND):
+                FilterClass = PBFDKF
+            elif self.config.mode == AecMode.PBFDAF:
+                FilterClass = PBFDAF
+            else:  # FDAF — use_kalman flag for flexibility
+                FilterClass = PBFDKF if self.config.use_kalman else PBFDAF
             self.filter = FilterClass(
                 block_size=block_size,
                 n_partitions=n_partitions,
@@ -1544,11 +1561,11 @@ class AEC:
             self._n_partitions = 0
             self._freq_near_queue = None
 
-        # DTD: FDAF/SUBBAND only (divergence + coherence dual detector)
+        # DTD: frequency-domain modes only (divergence + coherence dual detector)
         # LMS/NLMS have no effective DTD — all methods (Geigel, NCC, coherence,
         # VSS-NLMS) either don't work for AEC or cause vicious cycles with slow
         # convergence. Output Limiter provides the safety net instead.
-        if self.config.enable_dtd and self.config.mode in (AecMode.FDAF, AecMode.SUBBAND):
+        if self.config.enable_dtd and self.config.mode in _FREQ_MODES:
             # Warmup: 50 DTD invocations before coherence starts.
             # FDAFDTD runs every dtd_hop/hop_size external frames,
             # so 50 DTD invocations = 50 * dtd_hop/hop_size external frames.
@@ -1561,7 +1578,7 @@ class AEC:
                 warmup_frames=warmup,
             )
             # FDAF: FL-point FFT (matches filter length, hop=FL/2)
-            # SUBBAND: use FDAF's own spectra (block_size from filter)
+            # PBFDAF/PBFDKF: use filter's own spectra (block_size from filter)
             if self._dtd_fft_size > 0:
                 dtd_block_size = self._dtd_fft_size
             else:
@@ -1587,7 +1604,7 @@ class AEC:
             self.dtd_coherence = None
 
         # RES (only for frequency-domain modes)
-        if self.config.enable_res and self.config.mode in (AecMode.FDAF, AecMode.SUBBAND):
+        if self.config.enable_res and self.config.mode in _FREQ_MODES:
             self.res = ResFilter(
                 block_size=self.filter.block_size,
                 n_freqs=self.filter.n_freqs,
@@ -1614,14 +1631,14 @@ class AEC:
         else:
             self.res = None
 
-        # Shadow filter (dual-filter, FDAF/SUBBAND only)
+        # Shadow filter (dual-filter, frequency-domain modes only)
         # Can be used alone (≈ WebRTC/SpeexDSP) or with DTD (dual protection)
         self.shadow_filter = None
         self.shadow_output = None
         self.main_err_smooth = 0.0
         self.shadow_err_smooth = 0.0
         if (self.config.enable_shadow and
-                self.config.mode in (AecMode.FDAF, AecMode.SUBBAND)
+                self.config.mode in _FREQ_MODES
                 and hasattr(self.filter, 'W')):
             shadow_mu = self.config.mu * self.config.shadow_mu_ratio
             self.shadow_filter = FilterClass(
@@ -1937,7 +1954,7 @@ class AEC:
                         self._ref_ring[:hop - part1]
                     ])
 
-        # DTD: dual detector (divergence + coherence) for FDAF/SUBBAND
+        # DTD: dual detector (divergence + coherence) for frequency-domain modes
         # Combined confidence = max(divergence, coherence) → mu_scale
         # Non-DTD: simple variable mu (Valin 2007 RER-inspired)
 
@@ -1949,7 +1966,7 @@ class AEC:
         else:
             mu_scale = self._get_simple_mu_scale()
 
-        if self.config.mode in (AecMode.FDAF, AecMode.SUBBAND):
+        if self.config.mode in _FREQ_MODES:
             if self._freq_near_queue is not None:
                 # Buffered FDAF: accumulate into queue, process when enough
                 hop = self._hop_size
@@ -2159,7 +2176,7 @@ class AEC:
                             near_end, far_end,
                             error_spec=error_spec, far_spec=far_spec)
                 else:
-                    # SUBBAND: use FDAF's spectra directly (every frame)
+                    # PBFDAF/PBFDKF: use filter's spectra directly (every frame)
                     self.dtd_coherence.detect_block(
                         near_end, far_end,
                         error_spec=self.filter.error_spec,
@@ -2352,12 +2369,14 @@ Filter modes:
     lms     - Time-domain LMS (simplest, fixed step size, mu~0.01)
     nlms    - Time-domain NLMS (normalized, default)
     fdaf    - Frequency-domain Adaptive Filter (single FFT block, no partitions)
-    subband - Partitioned block FDAF (for long echo paths, fastest convergence)
+    pbfdaf  - Partitioned Block FDAF (NLMS adaptation, multiple partitions)
+    pbfdkf  - Partitioned Block FDKF (Kalman adaptation, recommended)
+    subband - Alias for pbfdkf (backward compatibility)
 
 Examples:
     python aec.py mic.wav ref.wav output.wav
-    python aec.py mic.wav ref.wav output.wav --mode fdaf
-    python aec.py mic.wav ref.wav output.wav --mode subband --enable-res
+    python aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res
+    python aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res --preset balanced
     python aec.py mic.wav ref.wav output.wav --mu 0.5 --filter 1024
         """
     )
@@ -2367,8 +2386,8 @@ Examples:
     parser.add_argument('--mu', type=float, default=0.3, help='Step size (default: 0.3)')
     parser.add_argument('--filter', type=int, default=0,
                         help='Filter length in samples (default: mode-dependent)')
-    parser.add_argument('--mode', choices=['lms', 'nlms', 'fdaf', 'subband'], default='nlms',
-                        help='Filter mode (default: nlms)')
+    parser.add_argument('--mode', choices=['lms', 'nlms', 'fdaf', 'pbfdaf', 'pbfdkf', 'subband'],
+                        default='nlms', help='Filter mode (default: nlms)')
     parser.add_argument('--enable-dtd', action='store_true',
                         help='Enable DTD (default: off, shadow filter provides DT protection)')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
@@ -2394,7 +2413,9 @@ Examples:
         'lms': AecMode.LMS,
         'nlms': AecMode.NLMS,
         'fdaf': AecMode.FDAF,
-        'subband': AecMode.SUBBAND
+        'pbfdaf': AecMode.PBFDAF,
+        'pbfdkf': AecMode.PBFDKF,
+        'subband': AecMode.PBFDKF,  # backward compat
     }
 
     aec_mode = mode_map[args.mode]
@@ -2409,7 +2430,7 @@ Examples:
     # Mode-dependent filter_length default
     filter_length = args.filter
     if filter_length == 0:
-        if aec_mode == AecMode.SUBBAND:
+        if aec_mode in _PB_MODES:
             filter_length = 1024  # ~64ms echo path
         else:
             filter_length = 512   # ~32ms echo path

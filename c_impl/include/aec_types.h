@@ -1,7 +1,7 @@
 /**
  * aec_types.h - AEC Configuration Types and Presets
  *
- * Matches Python v1.17.0 (SUBBAND PBFDKF only, Kalman always on).
+ * Matches Python v1.17.0 (PBFDKF mode, Kalman always on).
  * Three presets: BALANCED / AGGRESSIVE / MAXIMUM
  */
 

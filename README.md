@@ -10,7 +10,8 @@
 |------|-----|--------|------|----------|
 | **nlms** | `--mode nlms` | 時域 NLMS | 10ms | 一般用途（預設） |
 | **fdaf** | `--mode fdaf` | 頻域 NLMS (單一 block) | 10ms | 中等回音、平衡效能 |
-| **subband** | `--mode subband` | 分區頻域 PBFDAF + FDKF | 10ms | 長回音路徑、最佳品質 |
+| **pbfdaf** | `--mode pbfdaf` | 分區頻域 PBFDAF (NLMS) | 10ms | 長回音路徑 |
+| **pbfdkf** | `--mode pbfdkf` | 分區頻域 PBFDKF (Kalman) | 10ms | 長回音路徑、最佳品質（推薦） |
 | **lms** | `--mode lms` | 時域 LMS (固定步長) | 10ms | 穩態環境、極低資源 |
 
 ## 快速開始
@@ -21,28 +22,28 @@
 cd python
 pip install numpy soundfile
 
-# 推薦：PBFDAF + FDKF + Shadow + RES（最佳品質配置，FDKF 預設開啟）
-python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res
+# 推薦：PBFDKF + Shadow + RES（Kalman adaptation，最佳品質）
+python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res
 
 # 使用 Preset（控制 echo 壓制強度）
-python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --preset balanced
-python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --preset aggressive
-python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --preset maximum
+python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res --preset balanced
+python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res --preset aggressive
+python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res --preset maximum
 
-# 無 FDKF（標準 NLMS adaptation，需在 API 中設定 use_kalman=False）
-python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res
+# PBFDAF 模式（NLMS adaptation，不使用 Kalman）
+python3 aec.py mic.wav ref.wav output.wav --mode pbfdaf --enable-res
 
 # 啟用 per-frame 診斷輸出（ERLE, mu, gain, convergence 等）
-python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --preset balanced --diag
+python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res --preset balanced --diag
 
 # 啟用 DTD（進階，特定場景）
-python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --enable-dtd
+python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res --enable-dtd
 
 # FDAF 模式（單一 FFT block，中等回音）
 python3 aec.py mic.wav ref.wav output.wav --mode fdaf --enable-res
 
 # 純 PBFDAF（debug 用，關閉 Shadow）
-python3 aec.py mic.wav ref.wav output.wav --mode subband --enable-res --no-shadow
+python3 aec.py mic.wav ref.wav output.wav --mode pbfdaf --enable-res --no-shadow
 
 # 時域 NLMS 模式
 python3 aec.py mic.wav ref.wav output.wav
@@ -63,7 +64,7 @@ cd c_impl && make
 ./bin/aec_wav mic.wav ref.wav output.wav --filter 2400             # 自訂濾波器長度
 ```
 
-C 版本已對齊 Python v1.17.0（SUBBAND 模式），包含 PBFDKF Kalman（P_init=0.01, P_MAX=0.02, Q gating, far-end gate）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + 三級 Preset。
+C 版本已對齊 Python v1.17.0（PBFDKF 模式），包含 PBFDKF Kalman（P_init=0.01, P_MAX=0.02, Q gating, far-end gate）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + 三級 Preset。
 不含：DTD、Delay Estimation、Saturation Detection、LMS/NLMS/FDAF 模式。
 
 ## 系統架構
@@ -156,25 +157,25 @@ from aec import AEC, AecConfig, AecMode, AecPreset
 
 # 推薦：使用 Preset（自動配置 RES + adaptive filter 參數，FDKF 預設開啟）
 config = AecConfig.from_preset(AecPreset.BALANCED,
-                               sample_rate=16000, mode=AecMode.SUBBAND,
+                               sample_rate=16000, mode=AecMode.PBFDKF,
                                enable_res=True)
 aec = AEC(config)
 
 # 更強 echo 壓制（犧牲部分近端品質）
 config = AecConfig.from_preset(AecPreset.AGGRESSIVE,
-                               sample_rate=16000, mode=AecMode.SUBBAND,
+                               sample_rate=16000, mode=AecMode.PBFDKF,
                                enable_res=True)
 aec = AEC(config)
 
 # 手動配置（無 preset，FDKF 預設開啟）
 config = AecConfig(
-    mode=AecMode.SUBBAND,
+    mode=AecMode.PBFDKF,
     enable_res=True,
 )
 aec = AEC(config)
 
-# 標準配置：subband + Shadow（無 FDKF、無 RES）
-config = AecConfig(mode=AecMode.SUBBAND)
+# 標準配置：PBFDKF + Shadow（無 RES）
+config = AecConfig(mode=AecMode.PBFDKF)
 aec = AEC(config)
 
 # 時域 NLMS 模式（無 Shadow/DTD）
@@ -195,9 +196,9 @@ while has_audio:
 
 | 參數 | 預設值 | 範圍 | 說明 |
 |------|--------|------|------|
-| `mu` | 0.5 (SUBBAND) / 0.3 (NLMS) | 0.1-0.8 | 步長（FDKF 模式下由 Kalman gain 取代） |
-| `filter_length` | 512 (NLMS/LMS/FDAF/SUBBAND) | 256-4096 | 濾波器長度 (samples) |
-| `enable_dtd` | False | - | DTD：僅 FDAF/SUBBAND（Divergence + Coherence），詳見 [docs/dtd_design.md](docs/dtd_design.md) |
+| `mu` | 0.5 (PBFDKF) / 0.3 (NLMS) | 0.1-0.8 | 步長（PBFDKF 模式下由 Kalman gain 取代） |
+| `filter_length` | 512 (NLMS/LMS/FDAF) / 1024 (PBFDAF/PBFDKF) | 256-4096 | 濾波器長度 (samples) |
+| `enable_dtd` | False | - | DTD：僅頻域模式（Divergence + Coherence），詳見 [docs/dtd_design.md](docs/dtd_design.md) |
 | `enable_res` | False (Python) / True (C) | - | 殘餘回音抑制 |
 | `use_kalman` | True | - | FDKF adaptation（per-bin Kalman gain，搭配 two-stage Q），預設開啟 |
 | `enable_delay_est` | True | - | 自動延遲估計（GCC-PHAT） |
@@ -206,7 +207,7 @@ while has_audio:
 | `enable_highpass` | True | - | 高通濾波器（移除 DC + 低頻雜訊） |
 | `highpass_cutoff_hz` | 80.0 | 20-200 | 高通截止頻率 (Hz) |
 | `enable_saturation_detect` | True | - | 飽和偵測（非線性 echo 處理） |
-| `enable_shadow` | True | - | Shadow filter（僅 fdaf/subband，預設開啟） |
+| `enable_shadow` | True | - | Shadow filter（僅頻域模式，預設開啟） |
 
 ### AecPreset 系統
 
@@ -247,7 +248,7 @@ from aec import AecConfig, AecPreset, AecMode
 config = AecConfig.from_preset(
     AecPreset.AGGRESSIVE,
     sample_rate=16000,
-    mode=AecMode.SUBBAND,
+    mode=AecMode.PBFDKF,
     enable_res=True,
     filter_length=2048,   # 覆蓋 preset 以外的參數
 )
@@ -291,7 +292,7 @@ Q_high = 1e-4 解決此問題：高 Q 持續注入 P → 即使 R 高，K 仍維
 | R_init | 1e-2 | 初始 measurement noise |
 | α_R | 0.95 | R 估計 EMA 平滑係數 |
 
-### Shadow Filter 參數 (僅 fdaf/subband 模式，預設開啟)
+### Shadow Filter 參數 (僅頻域模式，預設開啟)
 
 Shadow filter（雙濾波器）使用更積極參數的背景濾波器持續追蹤回音路徑，當 shadow 表現更好時透過 copy gate 自動將權重複製到 main filter。
 這是 WebRTC AEC3 和 SpeexDSP 的核心機制，v1.6.0 起為預設保護策略。
@@ -326,7 +327,7 @@ FDKF 模式下，shadow 使用 `shadow_q_ratio` 倍的 Q 值，確保 shadow 收
 - 雙向 copy：main 比 shadow 好時也會反向 copy（main → shadow）
 - 可與 DTD 互補：DTD 降低 mu 防止惡化，shadow 在背景持續追蹤並自動修正
 
-### RES 參數 (僅 fdaf/subband 模式)
+### RES 參數 (僅頻域模式)
 
 RES v2（Residual Echo Suppressor）使用 OLA + sqrt-Hann 窗框架，支援三種增益公式：
 
@@ -362,7 +363,7 @@ RES v2（Residual Echo Suppressor）使用 OLA + sqrt-Hann 窗框架，支援三
 
 | 應用場景 | 推薦模式 | 推薦配置 |
 |----------|----------|----------|
-| 最佳品質（會議系統、智慧音箱） | subband | `--enable-res`（FDKF + Shadow + RES，FDKF 預設開啟） |
+| 最佳品質（會議系統、智慧音箱） | pbfdkf | `--enable-res`（Kalman + Shadow + RES） |
 | 一般用途（手機/耳機） | nlms | 預設（無 Shadow/DTD） |
 | 中等回音 | fdaf | `--enable-res` |
 | 極低資源（MCU） | lms | `--mu 0.01` |
@@ -371,18 +372,18 @@ RES v2（Residual Echo Suppressor）使用 OLA + sqrt-Hann 窗框架，支援三
 
 ```bash
 # 繪製 AEC 結果（預設 Shadow 開啟）
-python3 plot_aec_results.py ../wav/ --mode subband
+python3 plot_aec_results.py ../wav/ --mode pbfdkf
 
 # 開啟 RES
-python3 plot_aec_results.py ../wav/ --mode subband --enable-res
+python3 plot_aec_results.py ../wav/ --mode pbfdkf --enable-res
 
 # 加入 DTD（雙重保護）
-python3 plot_aec_results.py ../wav/ --mode subband --enable-dtd
+python3 plot_aec_results.py ../wav/ --mode pbfdkf --enable-dtd
 ```
 
 ## Benchmark 比較（AEC Challenge）
 
-測試條件：subband + Shadow + FDKF + RES v2（ENR masking, direct echo est, reverb tail）+ delay pre-alignment + HPF + saturation detect。
+測試條件：PBFDKF + Shadow + RES v2（ENR masking, direct echo est, reverb tail）+ delay pre-alignment + HPF + saturation detect。
 Frame/hop: 320/160 (20ms/10ms), FFT: 512, filter_length: 512。
 
 ### 小資料集（15 cases, BALANCED preset）
@@ -447,8 +448,8 @@ python3 python/eval_aecmos.py wav/aec_challenge/ --all-presets
 | lms | 10-15 dB | O(N) | 1-5s |
 | nlms | 15-20 dB | O(N) | 0.5-2s |
 | fdaf | 18-22 dB | O(N log N) | 0.3-1s |
-| subband | 20-25 dB | O(N log N) | 0.2-0.8s |
-| subband + FDKF | 25-30 dB | O(N log N) | 0.1-0.5s |
+| pbfdaf | 20-25 dB | O(N log N) | 0.2-0.8s |
+| pbfdkf | 25-30 dB | O(N log N) | 0.1-0.5s |
 | + RES | +2-4 dB | O(K) | - |
 
 ## 檔案結構

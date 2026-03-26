@@ -32,8 +32,8 @@
   └───────────────┬─────────────────────────────────────────┘
                   │
   ┌───────────────▼─────────────────────────────────────────┐
-  │ 4. Coherence Detector（FREQ/SUBBAND）                     │
-  │    SUBBAND: 用 FDAF 自己的 spectra，每 frame 偵測        │
+  │ 4. Coherence Detector（頻域）                     │
+  │    PBFDKF: 用 filter 自己的 spectra，每 frame 偵測        │
   │    FREQ: 獨立 FL-point FFT buffer，每 FL/2 samples 偵測  │
   │    coherence = MSC(error_spec, far_spec)                │
   │    → 更新 coh_confidence [0,1]                           │
@@ -55,7 +55,7 @@
 
 **各模式支援情況**：
 
-| 功能 | LMS | NLMS | FREQ | SUBBAND |
+| 功能 | LMS | NLMS | FREQ | PBFDKF |
 |------|-----|------|------|---------|
 | Divergence DTD | — | — | ✅ | ✅ |
 | Coherence DTD | — | — | ✅ | ✅ |
@@ -79,7 +79,7 @@
 LMS/NLMS 的 Divergence detector 在正常 DT 場景下也無實質幫助
 （output < input → ratio < 1.0 → 不觸發）。Output Limiter 已提供安全網。
 
-**結論**：需要 double-talk robustness → 使用 FREQ/SUBBAND 模式。
+**結論**：需要 double-talk robustness → 使用 頻域 模式。
 
 ---
 
@@ -166,7 +166,7 @@ else:
 
 ```python
 # 1. 取得頻譜
-#    SUBBAND: 直接使用 filter 內部的 error_spec, far_spec（每 frame）
+#    PBFDKF: 直接使用 filter 內部的 error_spec, far_spec（每 frame）
 #    FREQ: 獨立 FL-point FFT sliding buffer（每 FL/2 samples）
 #          → 解耦 DTD 與 FDAF 的 block_size，避免 FDAF 大 block 拖慢偵測
 
@@ -257,7 +257,7 @@ LMS/NLMS 不啟用任何 DTD（包括 divergence 和 coherence），原因是慢
 - **Weight norm constraint**（NLMS）：防止權重爆炸
 - 這兩層已足以防止可聽的失真
 
-**需要 DT robustness → 使用 FREQ/SUBBAND 模式。**
+**需要 DT robustness → 使用 頻域 模式。**
 
 ### 3.6 參數
 
@@ -315,7 +315,7 @@ mu_scale = 1.0 - conf × (1.0 - mu_min_ratio)
 **mu_scale 的應用方式**：
 - LMS：`mu_eff = mu × mu_scale`
 - NLMS：`mu_eff = (mu × mu_scale) / (power_sum + delta)`
-- FREQ/SUBBAND：`mu_eff = mu × mu_scale`（per-block）
+- 頻域：`mu_eff = mu × mu_scale`（per-block）
 
 ---
 
@@ -373,7 +373,7 @@ Shadow filter: mu = config.mu × 0.5 × 1.0  ← 固定 full mu（AEC3 backgroun
 | Double-talk | 降低 mu 保護權重 | 寬鬆 DTD 保護（#1），背景追蹤 |
 | Echo path change | EPC 維持 mu≥0.5 | Main 學更快，#6 同步 shadow（main→shadow） |
 
-Shadow filter 僅適用於 FREQ/SUBBAND 模式（需要頻域權重結構）。
+Shadow filter 僅適用於 頻域 模式（需要頻域權重結構）。
 
 **Shadow-only 為預設模式（v1.6.0 起）**，等同 WebRTC AEC3 / SpeexDSP 的做法：
 - Shadow mu = 1.0（固定 full mu），main mu 由 simple_mu_ratio 控制（floor 50%）
@@ -430,7 +430,7 @@ if frame_count < warmup_frames:
 
 | 模式 | DTD 頻率 | Warmup 外部 frames | 實際時間 (@16kHz) |
 |------|----------|-------------------|-----------------|
-| SUBBAND | 每 frame | 50 | ~0.8s |
+| PBFDKF | 每 frame | 50 | ~0.8s |
 | FREQ FL=512 | 每 frame | 50 | ~0.8s |
 | FREQ FL=1024 | 每 2 frames | 100 | ~1.6s |
 
@@ -471,7 +471,7 @@ if pos >= dtd_hop:                     # 累積滿 FL/2
 
 | 模式 | DTD FFT size | DTD hop | 偵測間隔 |
 |------|-------------|---------|---------|
-| SUBBAND | filter.block_size (512) | 256 (每 frame) | 16ms |
+| PBFDKF | filter.block_size (512) | 256 (每 frame) | 16ms |
 | FREQ FL=512 | 512 | 256 (每 frame) | 16ms |
 | FREQ FL=1024 | 1024 | 512 (每 2 frames) | 32ms |
 | FREQ FL=2048 | 2048 | 1024 (每 4 frames) | 64ms |
@@ -563,4 +563,4 @@ Python 和 C 的 DTD 實作**完全等價**：
 所有閾值、smoothing 係數、attack/release 速率完全相同。
 差異僅在實作風格（Python 用 class/method，C 用 inline code）。
 
-> **注意**：C 版本僅支援 PBFDAF (subband) 模式，因此不需要 LMS/NLMS 的 FFT-based coherence DTD。
+> **注意**：C 版本僅支援 PBFDKF 模式，因此不需要 LMS/NLMS 的 FFT-based coherence DTD。

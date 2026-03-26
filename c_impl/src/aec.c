@@ -4,7 +4,7 @@
  * Orchestrates: HPF → PBFDKF (main + shadow) → simple variable mu →
  *               convergence detection → RES (WOLA) → output limiter
  *
- * Matches Python AEC v1.17.0 (SUBBAND mode, FDKF always on).
+ * Matches Python AEC v1.17.0 (PBFDKF mode, Kalman always on).
  */
 
 #include "aec.h"

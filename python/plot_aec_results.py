@@ -11,7 +11,7 @@ Reads files from gen_sim_data.py output (AEC Challenge naming):
   echo_fileid_N.wav            (optional)
 
 Usage:
-    python3 plot_aec_results.py ../wav/ [--mode nlms|lms|fdaf|subband] [--no-dtd]
+    python3 plot_aec_results.py ../wav/ [--mode nlms|lms|fdaf|pbfdaf|pbfdkf] [--no-dtd]
 """
 
 import numpy as np
@@ -144,7 +144,7 @@ def main():
         description='Plot AEC results with estimated impulse response')
     parser.add_argument('dataset_dir', nargs='?', default=None,
                         help='Directory with AEC Challenge wav files (default: ../wav/)')
-    parser.add_argument('--mode', choices=['lms', 'nlms', 'fdaf', 'subband'],
+    parser.add_argument('--mode', choices=['lms', 'nlms', 'fdaf', 'pbfdaf', 'pbfdkf', 'subband'],
                         default='nlms')
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
@@ -157,7 +157,8 @@ def main():
     args = parser.parse_args()
 
     mode_map = {'lms': AecMode.LMS, 'nlms': AecMode.NLMS,
-                'fdaf': AecMode.FDAF, 'subband': AecMode.SUBBAND}
+                'fdaf': AecMode.FDAF, 'pbfdaf': AecMode.PBFDAF,
+                'pbfdkf': AecMode.PBFDKF, 'subband': AecMode.PBFDKF}
     mode = mode_map[args.mode]
 
     # Default dataset dir
