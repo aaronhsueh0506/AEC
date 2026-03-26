@@ -46,6 +46,22 @@ class AecPreset(Enum):
 
 
 @dataclass
+class AecResContext:
+    """Per-frame context for external RES processing."""
+    raw_output: np.ndarray       # (hop_size,) linear AEC output
+    echo_spec: np.ndarray        # (n_freqs,) complex echo estimate
+    far_power: float             # mean(far_end²)
+    far_spec: np.ndarray         # (n_freqs,) complex far-end spectrum
+    near_spec: np.ndarray        # (n_freqs,) complex mic spectrum
+    filter_converged: bool
+    erle_factor: float           # [0, 1] convergence metric
+    dt_indicator: float          # [0, 0.8] double-talk confidence
+    divergence: float            # [0, 1] divergence indicator
+    over_sub: float              # dynamic over_sub value
+    saturation_level: float
+
+
+@dataclass
 class AecConfig:
     """AEC Configuration (all sizes in samples)"""
     sample_rate: int = 16000
@@ -147,6 +163,9 @@ class AecConfig:
 
     # Mode
     mode: AecMode = AecMode.NLMS
+
+    # External RES context
+    return_res_context: bool = False   # True → process() returns (output, AecResContext)
 
     # TIME/LMS history control
     clear_filter_history: bool = False  # Clear ref_buffer each block (default: keep 1 hop history)
@@ -1992,6 +2011,8 @@ class AEC:
         else:
             mu_scale = self._get_simple_mu_scale()
 
+        _res_context = None  # populated when return_res_context=True and no internal RES
+
         if self.config.mode in _FREQ_MODES:
             if self._freq_near_queue is not None:
                 # Buffered FDAF: accumulate into queue, process when enough
@@ -2111,7 +2132,7 @@ class AEC:
             final_output = raw_output.copy()
 
             # RES post-filter using OLA + sqrt-Hann (skip for buffered FDAF)
-            if self.res and self._freq_near_queue is None:
+            if (self.res or self.config.return_res_context) and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
                 # Dynamic over_sub: moderate base, scale with convergence
                 inst_erle = self.get_erle_instant()
@@ -2128,7 +2149,7 @@ class AEC:
                     # near-end stronger than far-end → likely DT → reduce suppression
                     dt_indicator = np.clip(1.0 - far_pwr / (mic_pwr + far_pwr), 0.0, 0.8)
                 dt_reduction = self.config.res_dt_reduction * dt_indicator
-                self.res.over_sub = max(base_over_sub - dt_reduction, 0.5)
+                effective_over_sub = max(base_over_sub - dt_reduction, 0.5)
 
                 # Divergence detection: monitor after convergence
                 if self._filter_converged and self.near_power > 1e-8:
@@ -2139,26 +2160,43 @@ class AEC:
                 else:
                     self._divergence_indicator *= 0.95
 
-                final_output = self.res.process(raw_output, self.filter.echo_spec,
-                                                far_power, self.filter.far_spec,
-                                                filter_converged=self._filter_converged,
-                                                erle_factor=erle_factor,
-                                                dt_indicator=dt_indicator,
-                                                near_spec=self.filter.near_spec,
-                                                divergence=self._divergence_indicator)
+                if self.res:
+                    self.res.over_sub = effective_over_sub
+                    final_output = self.res.process(raw_output, self.filter.echo_spec,
+                                                    far_power, self.filter.far_spec,
+                                                    filter_converged=self._filter_converged,
+                                                    erle_factor=erle_factor,
+                                                    dt_indicator=dt_indicator,
+                                                    near_spec=self.filter.near_spec,
+                                                    divergence=self._divergence_indicator)
 
-                # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
-                if not self.config.enable_dtd:
-                    if self._filter_converged:
-                        per_bin_eer = self.res.echo_psd / (self.res.error_psd + 1e-10)
-                        per_bin_eer = np.clip(per_bin_eer, 0.0, 1.0)
-                        mu_min = self.config.shadow_mu_min
-                        self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
-                        self._simple_mu_ratio = float(np.mean(per_bin_eer))
-                    else:
-                        # Pre-convergence: no per_bin, let ratio track DT naturally
-                        self._per_bin_mu_scale = None
-                        self._update_simple_mu_ratio(raw_output, far_end)
+                    # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
+                    if not self.config.enable_dtd:
+                        if self._filter_converged:
+                            per_bin_eer = self.res.echo_psd / (self.res.error_psd + 1e-10)
+                            per_bin_eer = np.clip(per_bin_eer, 0.0, 1.0)
+                            mu_min = self.config.shadow_mu_min
+                            self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
+                            self._simple_mu_ratio = float(np.mean(per_bin_eer))
+                        else:
+                            # Pre-convergence: no per_bin, let ratio track DT naturally
+                            self._per_bin_mu_scale = None
+                            self._update_simple_mu_ratio(raw_output, far_end)
+
+                if self.config.return_res_context and not self.res:
+                    _res_context = AecResContext(
+                        raw_output=raw_output.copy(),
+                        echo_spec=self.filter.echo_spec.copy(),
+                        far_power=far_power,
+                        far_spec=self.filter.far_spec.copy(),
+                        near_spec=self.filter.near_spec.copy(),
+                        filter_converged=self._filter_converged,
+                        erle_factor=float(erle_factor),
+                        dt_indicator=float(dt_indicator),
+                        divergence=float(self._divergence_indicator),
+                        over_sub=float(effective_over_sub),
+                        saturation_level=float(self._saturation_level),
+                    )
 
             # Update diagnostics
             if self.res and hasattr(self.res, '_diag_gain_mean'):
@@ -2270,7 +2308,10 @@ class AEC:
         # Record DTD confidence for plotting
         self.confidence_history.append(self.get_dtd_confidence())
 
-        return final_output.astype(np.float32)
+        result = final_output.astype(np.float32)
+        if _res_context is not None:
+            return (result, _res_context)
+        return result
 
     def get_diagnostics(self) -> dict:
         """Return per-frame diagnostic dict (latest values)."""
