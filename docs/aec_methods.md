@@ -11,7 +11,7 @@
 6. [DTD / 發散偵測](#6-dtd--發散偵測)
 7. [RES Post-Filter - 殘餘回聲抑制後濾波器](#7-res-post-filter---殘餘回聲抑制後濾波器)
 8. [Post-Filter 方法比較](#8-post-filter-方法比較)
-9. [Subband 分頻方式說明](#9-subband-分頻方式說明)
+9. [頻域分區處理方式說明](#9-頻域分區處理方式說明)
 10. [NR Subband 適用性分析](#10-nr-subband-適用性分析)
 11. [前處理模組](#11-前處理模組)
 12. [收斂控制與 Output Limiter](#12-收斂控制與-output-limiter)
@@ -898,7 +898,7 @@ Shadow Q 更高 → K 更大 → 收斂更快 → `shadow_err < main_err × 0.7`
 | Shadow-only | +1x PBFDAF | +~35KB（完整 filter） | 計算量翻倍 |
 | DTD+Shadow | +DTD + 1x PBFDAF | +~37KB | 最重 |
 
-#### 實測結果（AEC Challenge, 34 files, FL=1024, subband+RES）
+#### 實測結果（AEC Challenge, 34 files, FL=1024, PBFDKF+RES）
 
 | 模式 | Mean ERLE | NE-Ret Mean | NE-Ret Med | vs AEC3 |
 |------|-----------|-------------|------------|---------|
@@ -1211,7 +1211,7 @@ if ERLE < target_ERLE:
 
 ---
 
-## 9. Subband 分頻方式說明
+## 9. 頻域分區處理方式說明
 
 ### 目前的 PBFDAF/PBFDKF 模式
 
