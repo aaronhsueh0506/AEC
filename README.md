@@ -1,6 +1,6 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v1.21.0），Python 支援四種濾波器模式，搭配 PBFDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail（render signal 估計）+ divergence suppression。v1.21.0 新增 PBFDAF/PBFDKF 類別分離、NE singletalk 保護、EPC P_MAX override、per-bin echo boost。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
+回音消除模組（v1.21.0），Python 支援四種濾波器模式，搭配 PBFDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail（render signal 估計）+ divergence suppression。v1.21.0 新增 PBFDAF/PBFDKF 類別分離、NE singletalk 保護、EPC P_MAX override、per-bin echo boost。支援四級 Preset（MILD / BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
 > C 實作已對齊 Python v1.17.0：PBFDKF（Kalman P_init/P_MAX/Q gating/far-end gate 修正）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + Preset，詳見 [c_impl/README.md](c_impl/README.md)。
 
@@ -25,8 +25,9 @@ pip install numpy soundfile
 # 推薦：PBFDKF + Shadow + RES（Kalman adaptation，最佳品質）
 python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res
 
-# 使用 Preset（控制 echo 壓制強度）
-python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res --preset balanced
+# 使用 Preset（控制 echo 壓制強度，四級：mild / balanced / aggressive / maximum）
+python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res --preset mild        # 最保守
+python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res --preset balanced    # 推薦
 python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res --preset aggressive
 python3 aec.py mic.wav ref.wav output.wav --mode pbfdkf --enable-res --preset maximum
 
@@ -211,35 +212,35 @@ while has_audio:
 
 ### AecPreset 系統
 
-三級 preset 控制 **RES 後處理** 和 **自適應濾波器** 的積極程度，提供 echo 壓制 vs 近端品質的 trade-off：
+四級 preset 控制 **RES 後處理** 和 **自適應濾波器** 的積極程度，提供 echo 壓制 vs 近端品質的 trade-off：
 
 | Preset | Echo 壓制 | 近端品質 | 適用場景 |
 |--------|-----------|----------|----------|
-| **BALANCED** | 適中 | 最佳保留 | 會議通話（預設） |
+| **MILD** | 輕 | 最佳保留 | 會議通話、近端品質優先 |
+| **BALANCED** | 適中 | 良好 | 一般用途（推薦預設） |
 | **AGGRESSIVE** | 強 | 輕微損傷 | 免持電話、車用 |
 | **MAXIMUM** | 最強 | 明顯損傷 | 揚聲器對話、高回聲環境 |
 
 **Preset 控制的參數**：
 
-| 參數 | BALANCED | AGGRESSIVE | MAXIMUM | 說明 |
-|------|----------|------------|---------|------|
-| **RES v2 層** | | | | |
-| `res_gain_type` | enr | enr | enr | 增益公式 |
-| `res_echo_method` | direct | direct | direct | Echo 估計方法 |
-| `res_enr_scale` | 1.0 | 0.7 | 0.5 | ENR 門檻縮放（越低越激進） |
-| `res_enable_reverb` | True | True | True | Reverb tail |
-| `res_reverb_decay` | 0.6 | 0.7 | 0.8 | Reverb 衰減率 |
-| `res_reverb_gain` | 0.8 | 2.0 | 3.0 | Reverb 貢獻 |
-| **RES 層** | | | | |
-| `res_g_min_db` | -35 | -60 | -72 | RES 最小增益 |
-| `res_ne_protect_db` | -12 | -20 | -35 | Per-bin 近端保護上限（越低保護越少、壓越深） |
-| `res_spectral_floor_db` | -25 | -40 | -50 | 頻譜底噪估計 |
-| `shadow_q_ratio` | 3.0 | 4.0 | 5.0 | Shadow Q 倍率 |
-| **Adaptive 層** | | | | |
-| `shadow_mu_min` | 0.5 | 0.7 | 0.9 | DT 時 mu floor |
-| `warmup_frames` | 150 | 150 | 200 | 強制高 mu 的 warmup 幀數 |
-| `kalman_q_high` | 2e-4 | 1e-4 | 1e-4 | PBFDKF Q_high |
-| `kalman_q_low` | 1e-7 | 1e-7 | 1e-7 | PBFDKF Q_low |
+| 參數 | MILD | BALANCED | AGGRESSIVE | MAXIMUM | 說明 |
+|------|------|----------|------------|---------|------|
+| **RES v2 層** | | | | | |
+| `res_enr_scale` | 1.0 | 0.85 | 0.7 | 0.5 | ENR 門檻縮放（越低越激進） |
+| `res_reverb_decay` | 0.6 | 0.65 | 0.7 | 0.8 | Reverb 衰減率 |
+| `res_reverb_gain` | 0.8 | 1.4 | 2.0 | 3.0 | Reverb 貢獻 |
+| **RES 層** | | | | | |
+| `res_g_min_db` | -35 | -45 | -60 | -72 | RES 最小增益 |
+| `res_over_sub_base` | 2.5 | 4.0 | 6.0 | 10.0 | 基礎 over-subtraction |
+| `res_over_sub_scale` | 4.0 | 7.0 | 10.0 | 15.0 | ERLE-scaled over-sub |
+| `res_dt_reduction` | 3.5 | 2.0 | 1.0 | 0.0 | DT 時放鬆壓制量 |
+| `res_ne_protect_db` | -12 | -16 | -20 | -35 | Per-bin 近端保護上限 |
+| `res_spectral_floor_db` | -25 | -32 | -40 | -50 | 頻譜底噪估計 |
+| `shadow_q_ratio` | 3.0 | 3.5 | 4.0 | 5.0 | Shadow Q 倍率 |
+| **Adaptive 層** | | | | | |
+| `shadow_mu_min` | 0.5 | 0.6 | 0.7 | 0.9 | DT 時 mu floor |
+| `warmup_frames` | 150 | 150 | 150 | 200 | 強制高 mu 的 warmup 幀數 |
+| `kalman_q_high` | 2e-4 | 1.5e-4 | 1e-4 | 1e-4 | PBFDKF Q_high |
 
 ```python
 from aec import AecConfig, AecPreset, AecMode
@@ -386,7 +387,7 @@ python3 plot_aec_results.py ../wav/ --mode pbfdkf --enable-dtd
 測試條件：PBFDKF + Shadow + RES v2（ENR masking, direct echo est, reverb tail）+ delay pre-alignment + HPF + saturation detect。
 Frame/hop: 320/160 (20ms/10ms), FFT: 512, filter_length: 512。
 
-### 小資料集（15 cases, BALANCED preset）
+### 小資料集（15 cases, MILD preset）
 
 | 指標 | v1.15.0 | v1.16.0 (ENR) | SpeexDSP | WebRTC AEC3 |
 |------|---------|---------------|----------|-------------|
@@ -396,7 +397,7 @@ Frame/hop: 320/160 (20ms/10ms), FFT: 512, filter_length: 512。
 | DT deg_mos | **3.51** | 3.06 | 3.90 | 2.51 |
 | DT ERLE | 4.2 dB | **6.5 dB** | 1.3 dB | 3.7 dB |
 
-### Blind test（ICASSP 2021 AEC Challenge, BALANCED preset）
+### Blind test（ICASSP 2021 AEC Challenge, MILD preset）
 
 | 指標 | v1.16.0 | v1.20.1 | v1.21.0 | WebRTC AEC3 |
 |------|---------|---------|---------|-------------|
