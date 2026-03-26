@@ -1,6 +1,6 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v1.19.5），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail（render signal 估計）+ divergence suppression。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。v1.19.x 新增 per-frame 診斷輸出（`--diag`）。
+回音消除模組（v1.20.1），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail（render signal 估計）+ divergence suppression。v1.20.x 新增 GCC-PHAT delay estimation、two-tuning suppressor（nearend detection 自動切換 ENR 門檻）、頻率相依 ERLE cap、movement 場景支援。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
 > C 實作已對齊 Python v1.17.0：PBFDKF（Kalman P_init/P_MAX/Q gating/far-end gate 修正）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + Preset，詳見 [c_impl/README.md](c_impl/README.md)。
 
@@ -395,24 +395,24 @@ Frame/hop: 320/160 (20ms/10ms), FFT: 512, filter_length: 512。
 | DT deg_mos | **3.51** | 3.06 | 3.90 | 2.51 |
 | DT ERLE | 4.2 dB | **6.5 dB** | 1.3 dB | 3.7 dB |
 
-### Blind test（555 cases, BALANCED preset）
+### Blind test（ICASSP 2021 AEC Challenge, BALANCED preset）
 
-| 指標 | v1.16.0 (ENR) | WebRTC AEC3 |
-|------|---------------|-------------|
-| FS ERLE | **13.4 dB** | — |
-| FS echo_mos | **3.478** | 3.985 |
-| DT echo_mos | **3.868** | 4.464 |
-| DT deg_mos | **2.703** | 2.233 |
-| NE echo_mos | **4.998** | 4.956 |
-| NE deg_mos | **4.077** | 3.530 |
+| 指標 | v1.16.0 | v1.20.1 | WebRTC AEC3 |
+|------|---------|---------|-------------|
+| FS echo_mos | 3.478 | **3.352** | 3.963 |
+| DT echo_mos | 3.868 | **3.796** | 4.440 |
+| DT deg_mos | 2.703 | **2.701** | 2.258 |
+| NE echo_mos | 4.998 | **4.999** | — |
+| NE deg_mos | 4.077 | **4.118** | 3.530 |
 
-> **解讀**：
-> - **RES v2 全面提升**：FS echo_mos 3.18→3.478 (+0.30)，FS ERLE 12.4→13.4 dB (+1.0)。
-> - **DT ERLE 碾壓 AEC3**：6.5 dB vs 3.7 dB（+2.8 dB）。
-> - **DT deg_mos 大幅領先 AEC3**：2.703 vs 2.233（近端品質保留更好）。
-> - **NE deg_mos 大幅領先 AEC3**：4.077 vs 3.530（近端語音幾乎無損）。
-> - FS echo_mos 與 AEC3 差距縮小至 0.507（原 1.29），ENR masking 大幅改善。
-> - 詳見 [docs/DEVLOG.md](docs/DEVLOG.md) v1.16.0。
+> **v1.20.1 改進**（vs v1.19.5 baseline: FS 3.204, DT echo 3.649, DT deg 2.761）：
+> - **GCC-PHAT delay estimation**：eval script 改用 PHAT whitening，reverberant 場景 delay 估計更準確。
+> - **Two-tuning suppressor**：dominant nearend detection（中高頻 ENR）自動切換 normal/nearend ENR 門檻。
+> - **頻率相依 ERLE cap**：LF=8, HF=4（取代固定 cap=1000），更合理的 residual echo 估計。
+> - **Movement 支援**：自動偵測 echo path 變化，啟用 online delay estimation。
+> - **DT deg_mos 大幅領先 AEC3**：2.701 vs 2.258（近端品質保留更好）。
+> - **NE deg_mos 大幅領先 AEC3**：4.118 vs 3.530（近端語音幾乎無損）。
+> - FS echo_mos 與 AEC3 差距：0.611（需架構性改進如 dual-filter 才能進一步縮小）。
 
 ### 工具
 
