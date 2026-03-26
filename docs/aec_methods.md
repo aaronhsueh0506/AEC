@@ -357,7 +357,7 @@ filter_length 只影響 partition 數，不影響 block_size 和 DTD cadence。
 
 ## 5.1 FDKF — 頻域卡爾曼濾波器
 
-> **實作狀態：** Python（`SubbandNlms._update_kalman()`），C 版本尚未同步。
+> **實作狀態：** Python（`PBFDKF._update_weights()`），C 版本尚未同步。
 > **啟用方式：** `AecConfig(use_kalman=True)` 或 CLI `--use-kalman`
 
 ### 原理
@@ -487,7 +487,7 @@ DT 時 mu_scale → 0.05 → K 被壓到 5% → 幾乎凍結更新。
 
 ### 實作細節
 
-**初始化**（`SubbandNlms.__init__()`）：
+**初始化**（`PBFDKF.__init__()`）：
 ```python
 if self.use_kalman:
     self.P = np.ones((n_partitions, n_freqs)) * 0.5    # per-partition per-bin
@@ -852,7 +852,7 @@ Shadow Q 更高 → K 更大 → 收斂更快 → `shadow_err < main_err × 0.7`
 | shadow_copy_hysteresis | 5 | 連續 N frames 才觸發複製 |
 | shadow_q_ratio | **3.0** | FDKF 模式：shadow Q = main Q × ratio（越大越積極） |
 
-**記憶體影響**：額外 ~35KB（SubbandNlms ~34KB + output buffer 1KB），可接受。
+**記憶體影響**：額外 ~35KB（PBFDKF ~34KB + output buffer 1KB），可接受。
 
 **三方比較（WebRTC AEC3 / SpeexDSP / 本專案）**：
 

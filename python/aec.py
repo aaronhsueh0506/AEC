@@ -84,10 +84,10 @@ class AecConfig:
     # Coherence DTD absolute energy floor
     dtd_coh_abs_floor: float = 1e-6     # #8: Absolute error energy floor
 
-    # FDKF (Frequency Domain Kalman Filter) — faster convergence than NLMS
-    use_kalman: bool = True
-    kalman_q_high: float = 1e-4       # FDKF Q_high convergence speed (1e-3 causes weight jitter)
-    kalman_q_low: float = 1e-7        # FDKF Q_low stable tracking (lower = less weight jitter)
+    # PBFDKF (Partitioned Block Frequency Domain Kalman Filter) — faster convergence than NLMS
+    use_kalman: bool = True           # True=PBFDKF, False=PBFDAF (NLMS)
+    kalman_q_high: float = 1e-4       # PBFDKF Q_high convergence speed (1e-3 causes weight jitter)
+    kalman_q_low: float = 1e-7        # PBFDKF Q_low stable tracking (lower = less weight jitter)
     warmup_frames: int = 100          # Frames with forced high mu at startup
 
     # Echo path change detection (requires shadow filter)
@@ -420,20 +420,16 @@ class NlmsFilter:
         return output, echo_est
 
 
-class SubbandNlms:
+class PBFDAF:
     """
-    Frequency-domain Partitioned Block Adaptive Filter
+    Partitioned Block Frequency-Domain Adaptive Filter (PBFDAF)
 
-    Supports two adaptation modes:
-    - NLMS: classic normalized LMS (mu / power normalization)
-    - FDKF: Frequency-Domain Kalman Filter (per-bin Kalman gain, faster convergence)
-
-    Uses overlap-save method for linear convolution.
+    NLMS-based adaptive filter using overlap-save for linear convolution.
+    For Kalman-based adaptation, use PBFDKF subclass.
     """
 
     def __init__(self, block_size: int, n_partitions: int,
                  mu: float = 0.3, delta: float = 1e-8,
-                 use_kalman: bool = True,
                  hop_size: int = 0):
         self.block_size = block_size
         self.hop_size = hop_size if hop_size > 0 else block_size // 2
@@ -442,7 +438,6 @@ class SubbandNlms:
         self.mu = mu
         self.delta = delta
         self.alpha_power = 0.9
-        self.use_kalman = use_kalman
 
         # Filter weights [n_partitions, n_freqs]
         self.W = np.zeros((n_partitions, self.n_freqs), dtype=np.complex64)
@@ -464,19 +459,6 @@ class SubbandNlms:
         self.error_spec = np.zeros(self.n_freqs, dtype=np.complex64)
         self.far_spec = np.zeros(self.n_freqs, dtype=np.complex64)
 
-        # FDKF state: per-partition, per-bin error covariance
-        if self.use_kalman:
-            # P: error covariance (real, per-partition per-bin)
-            self.P = np.ones((n_partitions, self.n_freqs), dtype=np.float32) * 0.01
-            # Q: process noise — controls adaptation speed (two-stage)
-            self.Q_high = np.ones(self.n_freqs, dtype=np.float32) * 1e-4  # fast convergence
-            self.Q_low  = np.ones(self.n_freqs, dtype=np.float32) * 1e-7  # stable tracking (low = less jitter)
-            self.Q = self.Q_high.copy()  # start with high Q
-            # R: measurement noise PSD (estimated from error)
-            self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
-            self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
-            self._alpha_r = 0.95  # smoothing for R estimation
-
     def reset(self):
         self.W.fill(0)
         self.X_buf.fill(0)
@@ -484,11 +466,6 @@ class SubbandNlms:
         self.far_buffer.fill(0)
         self.power.fill(0)
         self.partition_idx = 0
-        if self.use_kalman:
-            self.P.fill(0.01)
-            self.R.fill(1e-2)
-            self._error_psd.fill(1e-2)
-            self.Q[:] = self.Q_high
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray,
                 mu_scale=1.0) -> np.ndarray:
@@ -534,18 +511,14 @@ class SubbandNlms:
         self.error_spec = np.fft.rfft(error_time)
 
         # Update weights — gate on far-end activity
-        # Use energy of current hop (not smoothed) for responsive activity detection
-        far_hop_energy = np.sum(far_end ** 2) / hop  # mean power of far-end hop
+        far_hop_energy = np.sum(far_end ** 2) / hop
         if far_hop_energy > 1e-6:  # ~ -60 dBFS, skip update during ref silence
-            if self.use_kalman:
-                self._update_kalman(curr_p, mu_scale)
-            else:
-                self._update_nlms(curr_p, mu_scale)
+            self._update_weights(curr_p, mu_scale)
 
         self.partition_idx = (self.partition_idx + 1) % self.n_partitions
         return output.astype(np.float32)
 
-    def _update_nlms(self, curr_p: int, mu_scale):
+    def _update_weights(self, curr_p: int, mu_scale):
         """NLMS weight update."""
         mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
         if mu_scale_arr.ndim == 0:
@@ -566,19 +539,46 @@ class SubbandNlms:
             w_time[self.hop_size:] = 0
             self.W[p] = np.fft.rfft(w_time)
 
-    def _update_kalman(self, curr_p: int, mu_scale):
-        """Frequency-Domain Kalman Filter weight update.
+    def get_error_energy(self) -> float:
+        return float(np.sum(np.abs(self.error_spec) ** 2))
 
-        Per-bin Kalman gain replaces fixed step size:
-        K = P * X / (X^H * P * X + R)
-        W += K * error
-        P = P - K * X^H * P + Q
+    def copy_weights_from(self, src: 'PBFDAF'):
+        self.W[:] = src.W
 
-        Advantages over NLMS:
-        - Per-bin adaptation rate (bins with strong ref get faster updates)
-        - Automatic step size: converges fast initially, slows at steady-state
-        - Better handling of colored signals
-        """
+
+class PBFDKF(PBFDAF):
+    """
+    Partitioned Block Frequency-Domain Kalman Filter (PBFDKF)
+
+    Extends PBFDAF with per-bin Kalman gain for faster convergence
+    and automatic step-size adaptation.
+    """
+
+    def __init__(self, block_size: int, n_partitions: int,
+                 mu: float = 0.3, delta: float = 1e-8,
+                 hop_size: int = 0):
+        super().__init__(block_size, n_partitions, mu, delta, hop_size)
+
+        # P: error covariance (real, per-partition per-bin)
+        self.P = np.ones((n_partitions, self.n_freqs), dtype=np.float32) * 0.01
+        # Q: process noise — controls adaptation speed (two-stage)
+        self.Q_high = np.ones(self.n_freqs, dtype=np.float32) * 1e-4
+        self.Q_low  = np.ones(self.n_freqs, dtype=np.float32) * 1e-7
+        self.Q = self.Q_high.copy()
+        # R: measurement noise PSD (estimated from error)
+        self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
+        self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
+        self._alpha_r = 0.95
+
+    def reset(self):
+        super().reset()
+        self.P.fill(0.01)
+        self.R.fill(1e-2)
+        self._error_psd.fill(1e-2)
+        self.Q[:] = self.Q_high
+
+    def _update_weights(self, curr_p: int, mu_scale):
+        """Frequency-Domain Kalman Filter weight update."""
         mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
         if mu_scale_arr.ndim == 0:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
@@ -586,16 +586,20 @@ class SubbandNlms:
         # Update measurement noise estimate from error PSD
         error_psd = np.abs(self.error_spec) ** 2
         self._error_psd = self._alpha_r * self._error_psd + (1 - self._alpha_r) * error_psd
-        # R = smoothed error PSD (represents noise + residual echo)
         self.R = np.maximum(self._error_psd, self.delta)
 
-        # Per-bin far-end activity mask: only add Q where ref has energy
-        # Prevents P from growing unboundedly during silence
-        far_power_smooth = self.power  # already smoothed
+        # Per-bin far-end activity mask
+        far_power_smooth = self.power
         far_activity_mask = far_power_smooth > (np.mean(far_power_smooth) * 0.01 + 1e-6)
         Q_gated = np.where(far_activity_mask, self.Q, 0.0)
 
-        P_MAX = 0.02  # prevent P explosion; steady-state P ≈ 1e-3
+        # P_MAX: overridable during EPC for faster re-convergence
+        p_max = getattr(self, '_p_max_override', 0.02)
+        if hasattr(self, '_p_max_override_frames'):
+            self._p_max_override_frames -= 1
+            if self._p_max_override_frames <= 0:
+                self._p_max_override = 0.02
+                del self._p_max_override_frames
 
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
@@ -605,33 +609,30 @@ class SubbandNlms:
             # Kalman gain: K = P * X^* / (|X|^2 * P + R)
             denominator = X_power * self.P[p] + self.R
             K = (self.P[p] * np.conj(X)) / (denominator + self.delta)
-
-            # Apply mu_scale as DT protection
             K *= mu_scale_arr
 
-            # Weight update
             self.W[p] += K * self.error_spec
 
             # Covariance update: P = (1 - K*X) * P + Q
-            # Q only added for bins with far-end activity; P clamped to P_MAX
             KX = np.real(K * X)
             self.P[p] = np.minimum(
                 np.maximum((1.0 - KX) * self.P[p] + Q_gated, self.delta),
-                P_MAX
+                p_max
             )
 
-            # Time-domain constraint: zero out non-causal part
+            # Time-domain constraint
             w_time = np.fft.irfft(self.W[p], self.block_size)
             w_time[self.hop_size:] = 0
             self.W[p] = np.fft.rfft(w_time)
 
-    def get_error_energy(self) -> float:
-        return float(np.sum(np.abs(self.error_spec) ** 2))
-
-    def copy_weights_from(self, src: 'SubbandNlms'):
+    def copy_weights_from(self, src: 'PBFDAF'):
         self.W[:] = src.W
-        if self.use_kalman and hasattr(src, 'P'):
+        if hasattr(src, 'P'):
             self.P[:] = src.P
+
+
+# Backward compatibility alias
+SubbandNlms = PBFDKF
 
 
 class HighPassFilter:
@@ -1013,6 +1014,12 @@ class ResFilter:
                 residual_echo_psd = (residual_echo_psd
                                      + self.reverb_gain * self.reverb_psd * reverb_gate)
 
+        # Per-bin echo boost: high-coh2 bins are echo-dominant → boost residual estimate
+        # Only when filter converged (erle_factor > 0.3) to avoid over-suppression early
+        if far_power > 1e-4 and erle_factor > 0.3 and residual_echo_psd is not None:
+            echo_boost = 1.0 + 2.0 * coh2
+            residual_echo_psd = residual_echo_psd * echo_boost
+
         # Compute coherence-based EER (used for legacy mode AND per-bin NE gate)
         eer_linear = self.echo_psd / (self.error_psd + eps)
         eer_converged = eer_linear * (0.5 + 0.5 * coh2)
@@ -1063,7 +1070,12 @@ class ResFilter:
             NE_TRIGGER_FRAMES = 12
             NE_HOLD_FRAMES = 30
 
-            if self._nearend_state:
+            # NE singletalk fast-path: no far-end → immediately protect near-end
+            if far_power < 1e-4:
+                self._nearend_state = True
+                self._ne_detect_hold = NE_HOLD_FRAMES
+                self._ne_detect_count = 0
+            elif self._nearend_state:
                 if avg_enr > NE_ENR_EXIT:
                     self._ne_detect_hold -= 1
                     if self._ne_detect_hold <= 0:
@@ -1072,7 +1084,7 @@ class ResFilter:
                 else:
                     self._ne_detect_hold = NE_HOLD_FRAMES
             else:
-                if avg_enr < NE_ENR_THRESHOLD and far_power > 1e-4:
+                if avg_enr < NE_ENR_THRESHOLD:
                     self._ne_detect_count += 1
                     if self._ne_detect_count >= NE_TRIGGER_FRAMES:
                         self._nearend_state = True
@@ -1471,12 +1483,12 @@ class AEC:
                 n_partitions = max(1, (self.config.filter_length + hop_size - 1) // hop_size)
                 self._internal_hop = hop_size
 
-            self.filter = SubbandNlms(
+            FilterClass = PBFDKF if self.config.use_kalman else PBFDAF
+            self.filter = FilterClass(
                 block_size=block_size,
                 n_partitions=n_partitions,
                 mu=self.config.mu,
                 delta=self.config.delta,
-                use_kalman=self.config.use_kalman,
                 hop_size=self._internal_hop
             )
             self._hop_size = self.config.hop_size
@@ -1612,20 +1624,19 @@ class AEC:
                 self.config.mode in (AecMode.FDAF, AecMode.SUBBAND)
                 and hasattr(self.filter, 'W')):
             shadow_mu = self.config.mu * self.config.shadow_mu_ratio
-            self.shadow_filter = SubbandNlms(
+            self.shadow_filter = FilterClass(
                 block_size=self.filter.block_size,
                 n_partitions=self.filter.n_partitions,
                 mu=shadow_mu,
                 delta=self.config.delta,
-                use_kalman=self.config.use_kalman,
                 hop_size=self.filter.hop_size
             )
-            # FDKF: apply config Q_high/Q_low, then shadow uses higher Q via ratio
-            if self.config.use_kalman and hasattr(self.filter, 'Q_high'):
+            # PBFDKF: apply config Q_high/Q_low, then shadow uses higher Q via ratio
+            if isinstance(self.filter, PBFDKF):
                 self.filter.Q_high[:] = self.config.kalman_q_high
                 self.filter.Q_low[:]  = self.config.kalman_q_low
                 self.filter.Q[:] = self.config.kalman_q_high
-            if self.config.use_kalman and hasattr(self.shadow_filter, 'Q_high'):
+            if isinstance(self.shadow_filter, PBFDKF):
                 self.shadow_filter.Q_high = self.filter.Q_high * self.config.shadow_q_ratio
                 self.shadow_filter.Q_low  = self.filter.Q_low  * self.config.shadow_q_ratio
                 self.shadow_filter.Q      = self.shadow_filter.Q_high.copy()
@@ -2042,6 +2053,11 @@ class AEC:
                             filt.Q = filt.Q_high.copy()
                     self._filter_converged = False
                     self._conv_counter = 0
+                    # Temporarily relax P_MAX for faster re-convergence
+                    for filt in [self.filter, self.shadow_filter]:
+                        if filt:
+                            filt._p_max_override = 0.1
+                            filt._p_max_override_frames = 30
                 elif self.epc_hangover_count > 0:
                     self.epc_hangover_count -= 1
                     self.epc_active = True

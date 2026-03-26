@@ -1,6 +1,6 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v1.20.1），Python 支援四種濾波器模式，搭配 FDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail（render signal 估計）+ divergence suppression。v1.20.x 新增 GCC-PHAT delay estimation、two-tuning suppressor（nearend detection 自動切換 ENR 門檻）、頻率相依 ERLE cap、movement 場景支援。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
+回音消除模組（v1.21.0），Python 支援四種濾波器模式，搭配 PBFDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail（render signal 估計）+ divergence suppression。v1.21.0 新增 PBFDAF/PBFDKF 類別分離、NE singletalk 保護、EPC P_MAX override、per-bin echo boost。支援三級 Preset（BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
 > C 實作已對齊 Python v1.17.0：PBFDKF（Kalman P_init/P_MAX/Q gating/far-end gate 修正）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + Preset，詳見 [c_impl/README.md](c_impl/README.md)。
 
@@ -99,8 +99,8 @@ Reference Signal (far-end)        Microphone Signal (near-end)
                          |
                          v
               +---------------------------+
-              | PBFDAF (Main Filter)      |
-              | Adaptation: FDKF or NLMS  |
+              | PBFDKF (Main Filter)      |
+              | Kalman adaptation         |
               |  Two-stage Q control      |
               +---------------------------+
                          |
@@ -142,8 +142,8 @@ Reference Signal (far-end)        Microphone Signal (near-end)
 | **Saturation Detect** | 偵測 speaker 飽和失真，soft-clip reference | 避免非線性 echo 破壞濾波器建模 |
 | **Delay Estimation** | 自動估計 mic-ref 延遲 | GCC-PHAT，週期性重估（每 2s） |
 | **Reference Alignment** | Ring buffer 延遲補償 | 讓自適應濾波器專注學習 echo path，不浪費 capacity 建模 delay |
-| **PBFDAF** | 分區頻域自適應濾波器 | 多 partition 頻域 echo 估計與消除 |
-| **FDKF** | 頻域卡爾曼濾波器 adaptation | Per-bin Kalman gain 取代 NLMS 固定步長，two-stage Q 控制 |
+| **PBFDAF** | 分區頻域自適應濾波器（NLMS base） | 多 partition 頻域 echo 估計與消除 |
+| **PBFDKF** | 頻域卡爾曼濾波器（繼承 PBFDAF） | Per-bin Kalman gain 取代 NLMS 固定步長，two-stage Q 控制 |
 | **Shadow Filter** | 背景濾波器（dual-filter 架構） | 更積極的 Q 設定，copy gate 自動修正 main filter |
 | **DTD** | 雙講偵測（可選） | Divergence + Coherence 偵測器，連續 mu scaling |
 | **RES** | 殘餘回音抑制 | ENR masking（預設）/ Wiener / spectral sub，direct echo est + reverb tail，OLA + sqrt-Hann |
@@ -227,8 +227,8 @@ while has_audio:
 | `res_echo_method` | direct | direct | direct | Echo 估計方法 |
 | `res_enr_scale` | 1.0 | 0.7 | 0.5 | ENR 門檻縮放（越低越激進） |
 | `res_enable_reverb` | True | True | True | Reverb tail |
-| `res_reverb_decay` | 0.5 | 0.7 | 0.8 | Reverb 衰減率 |
-| `res_reverb_gain` | 0.5 | 2.0 | 3.0 | Reverb 貢獻 |
+| `res_reverb_decay` | 0.6 | 0.7 | 0.8 | Reverb 衰減率 |
+| `res_reverb_gain` | 0.8 | 2.0 | 3.0 | Reverb 貢獻 |
 | **RES 層** | | | | |
 | `res_g_min_db` | -35 | -60 | -72 | RES 最小增益 |
 | `res_ne_protect_db` | -12 | -20 | -35 | Per-bin 近端保護上限（越低保護越少、壓越深） |
@@ -236,9 +236,9 @@ while has_audio:
 | `shadow_q_ratio` | 3.0 | 4.0 | 5.0 | Shadow Q 倍率 |
 | **Adaptive 層** | | | | |
 | `shadow_mu_min` | 0.5 | 0.7 | 0.9 | DT 時 mu floor |
-| `warmup_frames` | 100 | 150 | 200 | 強制高 mu 的 warmup 幀數 |
-| `kalman_q_high` | 1e-4 | 1e-4 | 1e-4 | FDKF Q_high |
-| `kalman_q_low` | 1e-7 | 1e-7 | 1e-7 | FDKF Q_low |
+| `warmup_frames` | 150 | 150 | 200 | 強制高 mu 的 warmup 幀數 |
+| `kalman_q_high` | 2e-4 | 1e-4 | 1e-4 | PBFDKF Q_high |
+| `kalman_q_low` | 1e-7 | 1e-7 | 1e-7 | PBFDKF Q_low |
 
 ```python
 from aec import AecConfig, AecPreset, AecMode
@@ -253,9 +253,9 @@ config = AecConfig.from_preset(
 )
 ```
 
-### FDKF 參數 (Frequency Domain Kalman Filter)
+### PBFDKF 參數 (Partitioned Block Frequency Domain Kalman Filter)
 
-FDKF 使用 per-bin Kalman gain 取代 NLMS 的固定步長 mu，自動為每個頻率 bin 選擇最佳 adaptation rate。
+PBFDKF（繼承 PBFDAF）使用 per-bin Kalman gain 取代 NLMS 的固定步長 mu，自動為每個頻率 bin 選擇最佳 adaptation rate。
 搭配 two-stage Q（process noise）控制：Q_high 快速收斂，Q_low 穩態追蹤。
 
 **核心公式**：
@@ -282,12 +282,12 @@ Q_high = 1e-4 解決此問題：高 Q 持續注入 P → 即使 R 高，K 仍維
 
 | 參數 | 預設值 | 說明 |
 |------|--------|------|
-| `use_kalman` | True | 啟用 FDKF adaptation（v1.15.0 起預設開啟） |
+| `use_kalman` | True | True=PBFDKF（Kalman），False=PBFDAF（NLMS） |
 | `kalman_q_high` | 1e-4 | 快速收斂 process noise（所有 Preset 統一） |
 | `kalman_q_low` | 1e-7 | 穩態追蹤 process noise |
 | `warmup_frames` | 100 | 強制高 mu 的 warmup 幀數（Preset 可調） |
 | P_init | 0.01 | Per-partition per-bin 初始 error covariance |
-| P_MAX | 0.02 | P clamp 上限（防 Kalman gain 爆炸） |
+| P_MAX | 0.02 | P clamp 上限（EPC 期間臨時放寬至 0.1, 30 frames） |
 | R_init | 1e-2 | 初始 measurement noise |
 | α_R | 0.95 | R 估計 EMA 平滑係數 |
 
@@ -397,22 +397,27 @@ Frame/hop: 320/160 (20ms/10ms), FFT: 512, filter_length: 512。
 
 ### Blind test（ICASSP 2021 AEC Challenge, BALANCED preset）
 
-| 指標 | v1.16.0 | v1.20.1 | WebRTC AEC3 |
-|------|---------|---------|-------------|
-| FS echo_mos | 3.478 | **3.352** | 3.963 |
-| DT echo_mos | 3.868 | **3.796** | 4.440 |
-| DT deg_mos | 2.703 | **2.701** | 2.258 |
-| NE echo_mos | 4.998 | **4.999** | — |
-| NE deg_mos | 4.077 | **4.118** | 3.530 |
+| 指標 | v1.16.0 | v1.20.1 | v1.21.0 | WebRTC AEC3 |
+|------|---------|---------|---------|-------------|
+| FS echo_mos | 3.478 | 3.352 | **3.300** | 3.963 |
+| DT echo_mos | 3.868 | 3.796 | **3.792** | 4.440 |
+| DT deg_mos | 2.703 | 2.701 | **2.720** | 2.258 |
+| NE echo_mos | 4.998 | 4.999 | **4.999** | — |
+| NE deg_mos | 4.077 | 4.118 | **4.118** | 3.530 |
 
+> **v1.21.0 改進**（vs v1.20.1）：
+> - **PBFDAF/PBFDKF 類別分離**：PBFDAF（NLMS base）與 PBFDKF（Kalman subclass）正式分離，架構更清晰。
+> - **NE singletalk 保護**：`far_power < 1e-4` fast-path 立即進入 nearend_state，保護近端語音。
+> - **EPC P_MAX override (L2-C)**：echo path change 後臨時放寬 P_MAX（0.02→0.1, 30 frames），加速 Kalman 再收斂。
+> - **Per-bin residual echo boost (L3-C)**：`echo_boost = 1.0 + 2.0 * coh2`，高 coherence bin 加強 echo 估計。
+> - **DT deg_mos 提升**：2.720 vs 2.701（+0.019），近端品質持續領先 AEC3。
+> - **NE deg_mos 維持**：4.118（無退化），近端語音幾乎無損。
+>
 > **v1.20.1 改進**（vs v1.19.5 baseline: FS 3.204, DT echo 3.649, DT deg 2.761）：
 > - **GCC-PHAT delay estimation**：eval script 改用 PHAT whitening，reverberant 場景 delay 估計更準確。
 > - **Two-tuning suppressor**：dominant nearend detection（中高頻 ENR）自動切換 normal/nearend ENR 門檻。
 > - **頻率相依 ERLE cap**：LF=8, HF=4（取代固定 cap=1000），更合理的 residual echo 估計。
 > - **Movement 支援**：自動偵測 echo path 變化，啟用 online delay estimation。
-> - **DT deg_mos 大幅領先 AEC3**：2.701 vs 2.258（近端品質保留更好）。
-> - **NE deg_mos 大幅領先 AEC3**：4.118 vs 3.530（近端語音幾乎無損）。
-> - FS echo_mos 與 AEC3 差距：0.611（需架構性改進如 dual-filter 才能進一步縮小）。
 
 ### 工具
 
@@ -457,7 +462,7 @@ AEC/
 │   ├── example/               # main.c (CLI), wav_io.h
 │   └── Makefile
 ├── python/
-│   ├── aec.py                 # Python 實作 (LMS/NLMS/FDAF/SUBBAND + FDKF + Delay Est.)
+│   ├── aec.py                 # Python 實作 (PBFDAF/PBFDKF + Shadow + RES + Delay Est.)
 │   ├── eval_aec_challenge.py  # AEC Challenge benchmark 評測 (ERLE/PESQ)
 │   ├── eval_aecmos.py         # AECMOS 評測 (echo_mos/deg_mos)
 │   ├── plot_aec_results.py    # 結果繪圖 (含 DTD 紅底)
