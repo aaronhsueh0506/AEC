@@ -100,11 +100,11 @@ class AecConfig:
     # Shadow filter (dual-filter divergence control, frequency-domain modes only)
     enable_shadow: bool = True
     shadow_mu_ratio: float = 1.0
-    shadow_copy_threshold: float = 0.7
+    shadow_copy_threshold: float = 0.65
     shadow_err_alpha: float = 0.85
     shadow_dtd_mu_min: float = 0.2      # #1: Shadow DTD floor (20% vs main's 5%)
     shadow_mu_min: float = 0.5           # Shadow-only mode: DT mu floor (50%)
-    shadow_copy_hysteresis: int = 5     # #5: Consecutive frames needed for copy
+    shadow_copy_hysteresis: int = 3     # Consecutive frames needed for copy
     shadow_q_ratio: float = 3.0        # Shadow Q = main Q × ratio (FDKF mode)
 
     # Coherence DTD absolute energy floor
@@ -113,7 +113,7 @@ class AecConfig:
     # PBFDKF (Partitioned Block Frequency Domain Kalman Filter) — faster convergence than NLMS
     use_kalman: bool = True           # True=PBFDKF, False=PBFDAF (NLMS)
     kalman_q_high: float = 1e-4       # PBFDKF Q_high convergence speed (1e-3 causes weight jitter)
-    kalman_q_low: float = 1e-7        # PBFDKF Q_low stable tracking (lower = less weight jitter)
+    kalman_q_low: float = 1e-5        # PBFDKF Q_low stable tracking (1e-7 too small → P dies)
     warmup_frames: int = 100          # Frames with forced high mu at startup
 
     # Echo path change detection (requires shadow filter)
@@ -224,11 +224,11 @@ class AecConfig:
                 res_alpha_error_psd=0.5,
                 res_enr_scale=0.85,
                 # RES
-                res_g_min_db=-45.0,
-                res_over_sub_base=4.0,
-                res_over_sub_scale=7.0,
-                res_dt_reduction=2.0,
-                res_spectral_floor_db=-32.0,
+                res_g_min_db=-55.0,
+                res_over_sub_base=5.0,
+                res_over_sub_scale=9.0,
+                res_dt_reduction=2.5,
+                res_spectral_floor_db=-38.0,
                 res_ne_protect_db=-16.0,
                 shadow_q_ratio=3.5,
                 # Adaptive filter
@@ -617,7 +617,7 @@ class PBFDKF(PBFDAF):
         self.P = np.ones((n_partitions, self.n_freqs), dtype=np.float32) * 0.01
         # Q: process noise — controls adaptation speed (two-stage)
         self.Q_high = np.ones(self.n_freqs, dtype=np.float32) * 1e-4
-        self.Q_low  = np.ones(self.n_freqs, dtype=np.float32) * 1e-7
+        self.Q_low  = np.ones(self.n_freqs, dtype=np.float32) * 1e-5
         self.Q = self.Q_high.copy()
         # R: measurement noise PSD (estimated from error)
         self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
@@ -642,10 +642,18 @@ class PBFDKF(PBFDAF):
         self._error_psd = self._alpha_r * self._error_psd + (1 - self._alpha_r) * error_psd
         self.R = np.maximum(self._error_psd, self.delta)
 
+        # Adaptive R: scale by mu_scale to break R-deadlock
+        # FS (mu_scale≈1): R × 0.3 → K large → adapt aggressively
+        # DT (mu_scale≈0.05): R × 1.0 → K small → protect weights
+        mu_mean = float(np.mean(mu_scale_arr))
+        R_scale = 0.3 + 0.7 * (1.0 - mu_mean)
+        self.R = self.R * R_scale
+
         # Per-bin far-end activity mask
         far_power_smooth = self.power
         far_activity_mask = far_power_smooth > (np.mean(far_power_smooth) * 0.01 + 1e-6)
-        Q_gated = np.where(far_activity_mask, self.Q, 0.0)
+        Q_floor = self.Q * 0.05
+        Q_gated = np.where(far_activity_mask, self.Q, Q_floor)
 
         # P_MAX: overridable during EPC for faster re-convergence
         p_max = getattr(self, '_p_max_override', 0.02)
@@ -856,7 +864,7 @@ class ResFilter:
         # Coherence-based nonlinear echo PSD estimation
         # Coherence between far-end and error captures both linear and
         # nonlinear echo components (both correlate with far-end).
-        self.alpha_coh = 0.3            # Cross-PSD smoothing (TC≈23ms, fast tracking)
+        self.alpha_coh = 0.65           # Cross-PSD smoothing (TC≈50ms, stable)
         self.S_fe = np.zeros(n_freqs, dtype=np.complex64)  # Cross-PSD far×error
         self.S_ff = np.zeros(n_freqs, dtype=np.float32)    # Far-end PSD
         self.S_ee = np.zeros(n_freqs, dtype=np.float32)    # Error PSD
@@ -1037,9 +1045,9 @@ class ResFilter:
                 self.erle_per_bin = np.convolve(
                     self.erle_per_bin, kernel, mode='same').astype(np.float32)
                 # Frequency-dependent ERLE cap (suggest.md D)
-                erle_max = np.full(self.n_freqs, 4.0, dtype=np.float32)
+                erle_max = np.full(self.n_freqs, 16.0, dtype=np.float32)
                 lf_bins = min(8, self.n_freqs)
-                erle_max[:lf_bins] = 8.0
+                erle_max[:lf_bins] = 32.0
                 self.erle_per_bin = np.minimum(self.erle_per_bin, erle_max)
                 self.erle_per_bin = np.maximum(self.erle_per_bin, 1.0)
 
@@ -1048,11 +1056,15 @@ class ResFilter:
             # 2) echo_psd directly: conservative upper bound (always available)
             erle_est = self.echo_psd / self.erle_per_bin
             direct_est = self.echo_psd
-            # Before convergence, blend in far-end power as conservative echo upper bound
-            # Filter echo estimate is unreliable pre-convergence → use far_psd as backup
-            if erle_factor < 0.3 and far_spec is not None:
-                far_psd_est = np.abs(far_spec) ** 2
-                direct_est = np.maximum(direct_est, far_psd_est * 0.3)
+            # Pre-convergence echo floor using coh2-weighted error_psd
+            # coh2 high → echo bin → error ≈ residual echo → use as floor
+            # coh2 low → nearend bin → error includes speech → don't use
+            # This avoids the binary nearend_state problem
+            if erle_factor < 0.5 and far_power > 1e-4:
+                ef_fade = 1.0 - erle_factor * 2.0  # 1.0 at ef=0, 0.0 at ef=0.5
+                # Per-bin: coh2 as soft FS/DT indicator (no binary switch)
+                echo_floor = self.error_psd * coh2 * ef_fade * self.far_activity
+                direct_est = np.maximum(direct_est, echo_floor)
             residual_echo_psd = (1.0 - erle_factor) * direct_est + erle_factor * erle_est
 
             # Add reverb tail if enabled
@@ -1071,7 +1083,7 @@ class ResFilter:
         # Per-bin echo boost: high-coh2 bins are echo-dominant → boost residual estimate
         # Only when filter converged (erle_factor > 0.3) to avoid over-suppression early
         if far_power > 1e-4 and erle_factor > 0.3 and residual_echo_psd is not None:
-            echo_boost = 1.0 + 2.0 * coh2
+            echo_boost = 1.0 + 0.5 * coh2 if dt_indicator < 0.2 else np.ones_like(coh2)
             residual_echo_psd = residual_echo_psd * echo_boost
 
         # Compute coherence-based EER (used for legacy mode AND per-bin NE gate)
@@ -1969,8 +1981,20 @@ class AEC:
                     elif abs(new_delay - self._current_delay) > 32:
                         # Require two consecutive consistent estimates before updating
                         if hasattr(self, '_pending_delay') and abs(new_delay - self._pending_delay) < 16:
+                            old_delay = self._current_delay
                             self._current_delay = new_delay
                             del self._pending_delay
+                            # Bug fix: trigger EPC on delay shift — filter W/P are
+                            # for old delay, need fast re-convergence
+                            self.epc_active = True
+                            self.epc_hangover_count = getattr(self.config, 'epc_hangover', 50)
+                            for filt in [self.filter, self.shadow_filter]:
+                                if filt is not None and hasattr(filt, 'Q'):
+                                    filt.Q = filt.Q_high.copy()
+                                    filt._p_max_override = 0.1
+                                    filt._p_max_override_frames = 30
+                            self._filter_converged = False
+                            self._conv_counter = 0
                         else:
                             self._pending_delay = new_delay
 

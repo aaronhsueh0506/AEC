@@ -2,6 +2,35 @@
 
 ## 版本歷史
 
+### v1.22.0 (2026-03-29) - Kalman R-Deadlock Fix + RES Tuning + AEC3 Gap Analysis
+
+**Kalman filter convergence fix (biggest impact):**
+- R scaling by mu_scale: FS R×0.3 (K large), DT R×1.0 (protect weights)
+- Q_low 1e-7→1e-5: prevent P from dying after convergence
+- EPC triggered on delay shift: filter re-converges after delay change
+- Linear-only ERLE improved from 2.05 to 2.50 (+0.45 on blind test)
+
+**RES/NLP improvements:**
+- Q_gated soft floor (Q×0.05): weak bins don't freeze
+- alpha_coh 0.3→0.65: more stable coherence tracking
+- ERLE cap HF 4→16, LF 8→32: more accurate ERLE tracking
+- Echo boost DT guard: 2.0→0.5 in FS, off in DT
+- coh2-weighted echo floor: per-bin residual echo estimation
+- BALANCED preset: g_min -45→-55, over_sub 4/7→5/9, dt_reduction 2→2.5
+
+**Shadow filter:**
+- shadow_copy_threshold 0.7→0.65, hysteresis 5→3
+
+**Documentation:**
+- aec_methods.md §9.1: Filter Length / Partition design guide
+
+**Blind test results (fl=512, preset balanced):**
+| Metric | v1.18.0 | v1.22.0 | Change |
+|--------|---------|---------|--------|
+| FS echo_mos | 3.210 | 3.336 | +0.126 |
+| DT echo_mos | 4.000 | 4.025 | +0.025 |
+| DT deg_mos | 2.215 | 2.146 | -0.069 |
+
 ### v1.18.0 (2026-03-24) - Reverb Render Signal + Divergence Suppression + Delay Tracking
 
 #### 改動內容

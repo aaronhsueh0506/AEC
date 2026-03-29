@@ -5,6 +5,8 @@ Compares:
   - Our AEC (PBFDKF + RES)
   - SpeexDSP echo canceller
   - WebRTC AEC3 (via compiled CLI)
+  - WebRTC AECM (mobile, via compiled CLI)
+  - WebRTC old AEC (legacy, via compiled CLI)
 
 Usage:
     python3 benchmark_competitors.py ../wav/ [--filter 1024]
@@ -40,6 +42,18 @@ if not HAS_AEC3:
 # WebRTC AEC3 Linear CLI
 AEC3_LINEAR_CLI = '/tmp/webrtc-ap/aec3_linear_cli'
 HAS_AEC3_LINEAR = os.path.isfile(AEC3_LINEAR_CLI) and os.access(AEC3_LINEAR_CLI, os.X_OK)
+
+# WebRTC AECM CLI
+AECM_CLI = '/tmp/webrtc-ap/aecm_cli'
+HAS_AECM = os.path.isfile(AECM_CLI) and os.access(AECM_CLI, os.X_OK)
+if not HAS_AECM:
+    print("Warning: WebRTC AECM CLI not found at", AECM_CLI)
+
+# WebRTC old AEC CLI
+OLD_AEC_CLI = '/tmp/webrtc-ap/old_aec_cli'
+HAS_OLD_AEC = os.path.isfile(OLD_AEC_CLI) and os.access(OLD_AEC_CLI, os.X_OK)
+if not HAS_OLD_AEC:
+    print("Warning: WebRTC old AEC CLI not found at", OLD_AEC_CLI)
 
 
 def scan_fileids(dataset_dir):
@@ -187,6 +201,44 @@ def run_webrtc_aec3_linear(mic_path, ref_path, sr):
                 os.unlink(p)
 
 
+def run_webrtc_aecm(mic_path, ref_path, sr):
+    """Run WebRTC AECM via CLI tool."""
+    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+        out_path = tmp.name
+    try:
+        result = subprocess.run(
+            [AECM_CLI, mic_path, ref_path, out_path],
+            capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return None
+        output, _ = sf.read(out_path)
+        return output.astype(np.float32)
+    except Exception:
+        return None
+    finally:
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
+def run_old_aec(mic_path, ref_path, sr):
+    """Run WebRTC old AEC (legacy) via CLI tool."""
+    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+        out_path = tmp.name
+    try:
+        result = subprocess.run(
+            [OLD_AEC_CLI, mic_path, ref_path, out_path],
+            capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return None
+        output, _ = sf.read(out_path)
+        return output.astype(np.float32)
+    except Exception:
+        return None
+    finally:
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Benchmark AEC competitors')
     parser.add_argument('dataset_dir', nargs='?', default=None)
@@ -227,6 +279,10 @@ def main():
         print(f"WebRTC AEC3: {AEC3_CLI}")
     if HAS_AEC3_LINEAR:
         print(f"WebRTC AEC3 Linear: {AEC3_LINEAR_CLI}")
+    if HAS_AECM:
+        print(f"WebRTC AECM: {AECM_CLI}")
+    if HAS_OLD_AEC:
+        print(f"WebRTC old AEC: {OLD_AEC_CLI}")
     print()
 
     # Header
@@ -237,6 +293,10 @@ def main():
         cols += f" {'AEC3':>8} {'Ret':>6}"
     if HAS_AEC3_LINEAR:
         cols += f" {'AEC3-Lin':>8} {'Ret':>6}"
+    if HAS_AECM:
+        cols += f" {'AECM':>8} {'Ret':>6}"
+    if HAS_OLD_AEC:
+        cols += f" {'OldAEC':>8} {'Ret':>6}"
     cols += f" {'Winner':>8}"
     print(cols)
     print("-" * len(cols))
@@ -297,6 +357,26 @@ def main():
                 row['aec3_linear'] = erle_aec3_lin
                 row['aec3_linear_ret'] = ret_lin
 
+        erle_aecm = None
+        if HAS_AECM:
+            out_aecm = run_webrtc_aecm(group['mic'], group['ref'], sr)
+            if out_aecm is not None:
+                out_aecm = out_aecm[:n]
+                erle_aecm = compute_erle(mic, out_aecm)
+                ret_aecm = compute_nearend_retention(mic, ref, out_aecm)
+                row['aecm'] = erle_aecm
+                row['aecm_ret'] = ret_aecm
+
+        erle_old_aec = None
+        if HAS_OLD_AEC:
+            out_old = run_old_aec(group['mic'], group['ref'], sr)
+            if out_old is not None:
+                out_old = out_old[:n]
+                erle_old_aec = compute_erle(mic, out_old)
+                ret_old = compute_nearend_retention(mic, ref, out_old)
+                row['old_aec'] = erle_old_aec
+                row['old_aec_ret'] = ret_old
+
         results.append(row)
 
         # Determine winner
@@ -307,6 +387,10 @@ def main():
             candidates['AEC3'] = erle_aec3
         if erle_aec3_lin is not None:
             candidates['AEC3-Lin'] = erle_aec3_lin
+        if erle_aecm is not None:
+            candidates['AECM'] = erle_aecm
+        if erle_old_aec is not None:
+            candidates['OldAEC'] = erle_old_aec
         winner = max(candidates, key=candidates.get)
 
         ret_str = f"{ret_ours:>5.1f} " if ret_ours is not None else f"{'N/A':>5} "
@@ -320,6 +404,12 @@ def main():
         if HAS_AEC3_LINEAR:
             lin_ret_str = f"{row.get('aec3_linear_ret', None):>5.1f} " if row.get('aec3_linear_ret') is not None else f"{'N/A':>5} "
             line += f" {erle_aec3_lin:>7.1f}  {lin_ret_str}" if erle_aec3_lin is not None else f" {'N/A':>7}  {'N/A':>5} "
+        if HAS_AECM:
+            aecm_ret_str = f"{row.get('aecm_ret', None):>5.1f} " if row.get('aecm_ret') is not None else f"{'N/A':>5} "
+            line += f" {erle_aecm:>7.1f}  {aecm_ret_str}" if erle_aecm is not None else f" {'N/A':>7}  {'N/A':>5} "
+        if HAS_OLD_AEC:
+            old_ret_str = f"{row.get('old_aec_ret', None):>5.1f} " if row.get('old_aec_ret') is not None else f"{'N/A':>5} "
+            line += f" {erle_old_aec:>7.1f}  {old_ret_str}" if erle_old_aec is not None else f" {'N/A':>7}  {'N/A':>5} "
         line += f" {winner:>8}"
         print(line)
 
@@ -352,6 +442,16 @@ def main():
         lin_ret_mean, _ = _ret_stats('aec3_linear_ret')
         lin_ret_str = f"{lin_ret_mean:>5.1f} " if lin_ret_mean is not None else f"{'N/A':>5} "
         summary += f" {np.mean(lin_vals):>7.1f}  {lin_ret_str}" if lin_vals else f" {'N/A':>7}  {'N/A':>5} "
+    if HAS_AECM:
+        aecm_vals = [r['aecm'] for r in results if 'aecm' in r]
+        aecm_ret_mean, _ = _ret_stats('aecm_ret')
+        aecm_ret_str = f"{aecm_ret_mean:>5.1f} " if aecm_ret_mean is not None else f"{'N/A':>5} "
+        summary += f" {np.mean(aecm_vals):>7.1f}  {aecm_ret_str}" if aecm_vals else f" {'N/A':>7}  {'N/A':>5} "
+    if HAS_OLD_AEC:
+        old_vals = [r['old_aec'] for r in results if 'old_aec' in r]
+        old_ret_mean, _ = _ret_stats('old_aec_ret')
+        old_ret_str = f"{old_ret_mean:>5.1f} " if old_ret_mean is not None else f"{'N/A':>5} "
+        summary += f" {np.mean(old_vals):>7.1f}  {old_ret_str}" if old_vals else f" {'N/A':>7}  {'N/A':>5} "
     print(summary)
 
     ours_med = np.median([r['ours'] for r in results])
@@ -370,11 +470,20 @@ def main():
         _, lin_ret_med = _ret_stats('aec3_linear_ret')
         lin_ret_med_str = f"{lin_ret_med:>5.1f} " if lin_ret_med is not None else f"{'N/A':>5} "
         summary2 += f" {np.median(lin_vals):>7.1f}  {lin_ret_med_str}" if lin_vals else f" {'N/A':>7}  {'N/A':>5} "
+    if HAS_AECM:
+        _, aecm_ret_med = _ret_stats('aecm_ret')
+        aecm_ret_med_str = f"{aecm_ret_med:>5.1f} " if aecm_ret_med is not None else f"{'N/A':>5} "
+        summary2 += f" {np.median(aecm_vals):>7.1f}  {aecm_ret_med_str}" if aecm_vals else f" {'N/A':>7}  {'N/A':>5} "
+    if HAS_OLD_AEC:
+        _, old_ret_med = _ret_stats('old_aec_ret')
+        old_ret_med_str = f"{old_ret_med:>5.1f} " if old_ret_med is not None else f"{'N/A':>5} "
+        summary2 += f" {np.median(old_vals):>7.1f}  {old_ret_med_str}" if old_vals else f" {'N/A':>7}  {'N/A':>5} "
     print(summary2)
 
     # Win/Loss summary
     print()
-    for comp_name, comp_key in [('Speex', 'speex'), ('AEC3', 'aec3'), ('AEC3-Lin', 'aec3_linear')]:
+    for comp_name, comp_key in [('Speex', 'speex'), ('AEC3', 'aec3'), ('AEC3-Lin', 'aec3_linear'),
+                                 ('AECM', 'aecm'), ('OldAEC', 'old_aec')]:
         comp_results = [r for r in results if comp_key in r]
         if not comp_results:
             continue

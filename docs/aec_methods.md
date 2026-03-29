@@ -10,11 +10,27 @@
 5.1. [FDKF - 頻域卡爾曼濾波器](#51-fdkf---頻域卡爾曼濾波器)
 6. [DTD / 發散偵測](#6-dtd--發散偵測)
 7. [RES Post-Filter - 殘餘回聲抑制後濾波器](#7-res-post-filter---殘餘回聲抑制後濾波器)
+    - 7.0 [Legacy Mode](#70-legacy-modeeer--wiener-gain)
+    - 7.1 [RES v2 架構總覽](#71-res-v2-架構總覽)
+    - 7.2 [Direct Echo Method + Per-bin ERLE](#72-direct-echo-method--per-bin-erle-tracking)
+    - 7.3 [Reverb Tail Model](#73-reverb-tail-model)
+    - 7.4 [Echo Boost](#74-echo-boostper-bin-echo-boost)
+    - 7.5 [Dynamic g_min + Far Activity](#75-dynamic-g_min--far-activity-tracking)
+    - 7.6 [Spectral-Shape-Preserving Floor](#76-spectral-shape-preserving-floor)
+    - 7.7 [Per-bin Near-end Gate](#77-per-bin-near-end-gate)
+    - 7.8 [ENR Masking](#78-enr-maskinggain_typeenr)
+    - 7.9 [Gain Rate Limiting](#79-gain-rate-limiting)
+    - 7.10 [CNG](#710-cngcomfort-noise-generation)
+    - 7.11 [其他 Gain 後處理](#711-其他-gain-後處理)
+    - 7.12 [Preset 系統](#712-preset-系統)
 8. [Post-Filter 方法比較](#8-post-filter-方法比較)
 9. [頻域分區處理方式說明](#9-頻域分區處理方式說明)
+    - 9.1 [Filter Length / Partition 設計指南](#91-filter-lengthpartition-數與-delay-estimation-設計指南)
 10. [NR Subband 適用性分析](#10-nr-subband-適用性分析)
 11. [前處理模組](#11-前處理模組)
 12. [收斂控制與 Output Limiter](#12-收斂控制與-output-limiter)
+    - 12.2 [Echo Path Change (EPC) Detection](#122-echo-path-change-epc-detection)
+- [附錄 C: Blind Test 分析與改進方向](#附錄-c-blind-test-分析與改進方向)
 
 ---
 
@@ -1054,7 +1070,7 @@ if w_norm > max_w_norm (預設 4.0):
 ### 目的
 
 自適應濾波器無法完全消除回聲（受限於收斂速度、非線性失真等），
-RES post-filter 對殘餘回聲進行額外 2~4 dB 的抑制。
+RES post-filter 對殘餘回聲進行額外抑制。
 
 ### 架構：OLA + sqrt-Hann 窗
 
@@ -1065,7 +1081,7 @@ RES 使用獨立的 Overlap-Add 框架（與 PBFDAF 的 Overlap-Save 分離）�
 1. 接收 hop-size (256) 的時域 error 信號
 2. Sliding buffer：拼接前一 hop 和當前 hop → block_size (512) 的 frame
 3. 分析窗：sqrt-Hann × frame → FFT
-4. 頻域增益：EER-based gain → cross-freq smoothing → temporal smoothing
+4. 頻域增益：residual echo PSD 估計 → gain 計算 → floor/gate → smoothing
 5. 合成窗：IFFT → sqrt-Hann × frame
 6. Overlap-Add：累加到 OLA buffer，輸出前 hop
 ```
@@ -1073,7 +1089,10 @@ RES 使用獨立的 Overlap-Add 框架（與 PBFDAF 的 Overlap-Save 分離）�
 **為什麼用 sqrt-Hann**：分析窗 × 合成窗 = Hann，50% overlap-add 完美重建
 （`Σ hann[n + k·hop] = 1`），不會引入振幅調制。
 
-### 核心公式
+### 7.0 Legacy Mode（舊版 EER → Wiener gain）
+
+> 以下描述 RES v1 的原始行為，目前仍可透過 `echo_method="coherence"` + `gain_type="spectral_sub"` 使用。
+> 新版預設為 RES v2（§7.1 起）。
 
 **PSD 估計（指數平滑）：**
 ```
@@ -1090,14 +1109,12 @@ EER[k] = echo_psd[k] / (error_psd[k] + ε)
 - EER 高 → 殘餘回聲多 → 需要更多抑制
 - EER 低 → 回聲已被消除 → 不需要抑制
 
-**增益計算（Wiener gain）：**
+**增益計算（Spectral Subtraction）：**
 ```
-G[k] = 1 / (1 + α_os · EER[k])
+G[k] = max(1.0 - over_sub × EER[k], g_min)
 ```
 
-當 `α_os = 1.0` 時等價於標準 Wiener gain：`G = error_psd / (error_psd + echo_psd)`。
-
-**DT 天生保護**：DT 時 error = 近端語音 + 殘餘回音 → `error_psd` 增大 → `EER` 自然降低 → `G` 接近 1.0 → 壓制自動減少。這與 SpeexDSP 的 Wiener post-filter 機制相同，不需要額外的 DTD 資訊。
+**DT 天生保護**：DT 時 error = 近端語音 + 殘餘回音 → `error_psd` 增大 → `EER` 自然降低 → `G` 接近 1.0 → 壓制自動減少。
 
 **增益下限（Floor）：**
 ```
@@ -1105,53 +1122,496 @@ G[k] = max(G[k], g_min)
 ```
 例如 g_min_db = -20 dB → g_min = 0.1，防止過度抑制造成不自然的靜音。
 
-**跨頻率平滑（Cross-frequency smoothing）：**
-```
-G[k] = moving_average(G, width=3)[k]    // 3-bin moving average
-```
-消除相鄰 bin 間的孤立 gain 峰谷，減少 musical noise（棋盤頻譜的主因之一）。
-
-**非對稱時間平滑：**
-```
-if G[k] < gain_smooth[k]:        // Attack（回聲突然出現）
-    α_g = 0.6                    // 中速反應（避免 binary-like switching）
-else:                             // Release（回聲消失）
-    α_g = 0.8                    // 緩慢恢復
-
-gain_smooth[k] = α_g · gain_smooth[k] + (1 - α_g) · G[k]
-```
-
-- **中速攻（attack = 0.6）：** time constant ~2.5 frames，避免太快切換造成不連續
-- **慢放（release = 0.8）：** 回聲消失後緩慢恢復，避免音樂噪聲
-
-**遠端靜音自動釋放：**
-```
-if (far_power < 1e-6):
-    G[k] = 1.0    // 遠端無信號時不抑制
-```
-
-### 參數
+**舊版參數：**
 
 | 參數 | 典型值 | 說明 |
 |------|--------|------|
-| α_os (over_sub) | 1.0 | 過減因子（1.0 = 標準 Wiener gain） |
+| α_os (over_sub) | 1.0 | 過減因子 |
 | g_min_db | -20 dB | 最小增益限制 |
 | α_psd | 0.9 | PSD 平滑因子 |
-| α_attack | 0.6 | 攻擊平滑（中速，避免 musical noise） |
-| α_release | 0.8 | 釋放平滑（慢） |
+| α_attack | 0.6 | 攻擊平滑 |
+| α_release | 0.8 | 釋放平滑 |
 | cross_freq_width | 3 bins | 跨頻率平滑寬度 |
 
-### 典型效能
+### 7.1 RES v2 架構總覽
 
-- 語音主導時：G ≈ 1.0（最小影響）
-- 回聲突發時：壓低 2~4 dB（ERLE 提升）
-- DT 時：EER 自然降低 → 壓制自動減少（Wiener 天生特性）
-- 噪聲環境：G = 1.0（不抑制背景噪聲，那是 NR 的工作）
+RES v2 大幅擴展了殘餘回聲抑制的功能，引入多種 echo 估計方法、gain 計算策略及動態保護機制。
+
+#### Echo Method（殘餘回聲 PSD 估計方法）
+
+| 方法 | 設定值 | 說明 |
+|------|--------|------|
+| Coherence-based | `echo_method="coherence"` | 舊版，用 EER（echo_psd / error_psd）估計殘餘，不需要額外輸入 |
+| Direct | `echo_method="direct"` | 新版（預設），用 filter echo estimate + per-bin ERLE tracking 精確估計殘餘 echo PSD |
+
+#### Gain Type（增益計算方式）
+
+| 方式 | 設定值 | 說明 |
+|------|--------|------|
+| Spectral Subtraction | `gain_type="spectral_sub"` | 舊版：`G = max(1 - over_sub × EER, g_min)` |
+| Wiener | `gain_type="wiener"` | Wiener gain：`G = nearend_est / (nearend_est + β × residual_echo_psd)` |
+| ENR Masking | `gain_type="enr"` | 新版（預設），Echo-to-Nearend Ratio 雙調參 soft gate，參考 AEC3 suppressor |
+
+#### RES v2 新增功能一覽
+
+- **Reverb tail model**：建模濾波器長度外的混響尾部
+- **Echo boost**：高 coherence bin 加強 residual echo 估計
+- **Per-bin near-end gate**：per-bin 保護近端語音，取代全域 DT indicator
+- **Spectral-shape-preserving floor**：保留語音頻譜形狀的動態增益下限
+- **Dynamic g_min**：依據遠端活動度自動調整最小增益
+- **Nearend singletalk detection**：ENR-based 近端偵測 state machine
+- **Gain rate limiting**：限制每幀增益變化速率，避免突然 blackout / pop
+- **CNG**：舒適雜訊注入，避免抑制後不自然的靜音
+
+#### RES v2 信號流
+
+```
+error_signal (from adaptive filter)
+    │
+    ├─→ [PSD estimation] → echo_psd, error_psd
+    │
+    ├─→ [Dynamic g_min] → effective_g_min (based on far_activity)
+    │
+    ├─→ [Residual echo PSD] ─┬─ coherence method: EER-based
+    │                         └─ direct method: per-bin ERLE + reverb tail + echo boost
+    │
+    ├─→ [Spectral floor] → spectral_g_min (shape-preserving)
+    │
+    ├─→ [Per-bin NE gate] → ne_g_floor → merged into spectral_g_min
+    │
+    ├─→ [Gain computation] ─┬─ spectral_sub: 1 - over_sub × EER
+    │                        ├─ wiener: nearend / (nearend + β × echo)
+    │                        └─ enr: soft gate with two-tuning thresholds
+    │
+    ├─→ [Freq-domain post] → DC consistency, HF cap
+    │
+    ├─→ [Temporal smoothing] → asymmetric attack/release
+    │
+    ├─→ [Gain rate limiting] → max_drop / max_rise per frame
+    │
+    ├─→ [Nearend bypass] → skip RES when confirmed NE + no far-end
+    │
+    └─→ [CNG injection] → comfort noise during far-end silence
+```
+
+### 7.2 Direct Echo Method + Per-bin ERLE Tracking
+
+> 對應 `aec.py` line 1022-1057
+
+Direct method 利用自適應濾波器的 echo estimate（而非 coherence）來估計殘餘 echo PSD，
+並透過 per-bin ERLE tracking 隨時間校正估計精度。
+
+#### 4-block Moving Average for Near-end PSD
+
+```
+near_psd_buf[idx] = |near_spec|²
+idx = (idx + 1) % 4
+near_psd = mean(near_psd_buf, axis=0)
+```
+
+使用 4-block 移動平均穩定近端 PSD 估計（參考 AEC3 做法），減少單幀噪聲對 ERLE 計算的影響。
+
+#### Per-bin ERLE 更新條件
+
+只在安全條件下更新 per-bin ERLE，避免 DT 或未收斂時的錯誤估計：
+
+```
+if far_active AND dt_indicator < 0.3 AND erle_factor > 0.3:
+    inst_erle = near_psd / (error_psd + eps)
+    inst_erle = clip(inst_erle, 1.0, 1000.0)    # 0~30 dB
+    erle_per_bin = α_erle × erle_per_bin + (1 - α_erle) × inst_erle
+```
+
+- **far_active**：遠端有信號（`far_power > 1e-4`）
+- **dt_indicator < 0.3**：非雙講（DT indicator 低）
+- **erle_factor > 0.3**：濾波器已部分收斂
+
+#### 3-bin 頻率平滑
+
+```
+kernel = [0.25, 0.5, 0.25]
+erle_per_bin = convolve(erle_per_bin, kernel, mode='same')
+```
+
+減少 per-bin 估計的雜訊，提高頻率維度的穩定性。
+
+#### 頻率依賴 ERLE Cap
+
+```
+erle_max = 4.0 for all bins (HF default)
+erle_max[:8] = 8.0  (LF bins, 低頻允許更高 ERLE)
+erle_per_bin = clip(erle_per_bin, 1.0, erle_max)
+```
+
+低頻的 ERLE 通常較高（echo path 在低頻更易建模），故 LF cap 設為 8.0；
+HF cap 設為 4.0，避免高頻 ERLE 過估導致欠抑制。
+
+#### Residual Echo PSD 混合估計
+
+```
+erle_est = echo_psd / erle_per_bin           # ERLE-based estimate (good when converged)
+direct_est = echo_psd                         # Conservative upper bound (always available)
+
+# Pre-convergence: use far_psd as conservative echo upper bound
+if erle_factor < 0.3:
+    direct_est = max(direct_est, far_psd × 0.3)
+
+# Blend based on convergence level
+residual_echo_psd = (1 - erle_factor) × direct_est + erle_factor × erle_est
+```
+
+- **收斂前**（erle_factor < 0.3）：偏重 direct_est，並加入 `far_psd × 0.3` 作為保守上界，因為此時 filter echo estimate 不可靠
+- **收斂後**：偏重 erle_est，利用 per-bin ERLE 提供更精確的殘餘估計
+
+### 7.3 Reverb Tail Model
+
+> 對應 `aec.py` line 1059-1070
+
+自適應濾波器長度有限（e.g., 128ms），無法完全建模 room impulse response 的混響尾部。
+Reverb tail model 使用一階遞迴估計混響 PSD，補償濾波器長度外的殘餘回聲。
+
+```
+reverb_psd = reverb_decay × reverb_psd + (1 - reverb_decay) × far_psd
+```
+
+**Gating 機制**：
+```
+ne_reverb_factor = 0.3  if nearend_state else 1.0
+reverb_gate = far_activity × ne_reverb_factor
+residual_echo_psd += reverb_gain × reverb_psd × reverb_gate
+```
+
+- 使用 `far_psd`（render signal power）而非 filter echo estimate，不依賴 filter 品質
+- `far_activity` gating：遠端無信號時不加混響
+- `ne_reverb_factor`：確認 nearend singletalk 時，reverb 貢獻降為 30%，避免過度抑制近端語音
+
+| 參數 | Mild | Balanced | Aggressive | Maximum |
+|------|------|----------|------------|---------|
+| reverb_decay | 0.6 | 0.65 | 0.7 | 0.8 |
+| reverb_gain | 0.8 | 1.4 | 2.0 | 3.0 |
+
+### 7.4 Echo Boost（Per-bin Echo Boost）
+
+> 對應 `aec.py` line 1072-1076
+
+高 coherence 的 bin 是 echo-dominant 的，residual echo 估計可以更積極：
+
+```
+if far_active AND erle_factor > 0.3:
+    echo_boost = 1.0 + 2.0 × coh²
+    residual_echo_psd = residual_echo_psd × echo_boost
+```
+
+- `coh² ≈ 1.0`（echo bin）→ echo_boost ≈ 3.0（boost 3 倍）
+- `coh² ≈ 0.0`（near-end bin）→ echo_boost ≈ 1.0（不 boost）
+- 只在收斂後啟用（`erle_factor > 0.3`），避免收斂前過度抑制
+
+### 7.5 Dynamic g_min + Far Activity Tracking
+
+> 對應 `aec.py` line 1001-1011
+
+傳統的固定 g_min 在遠端靜音時會不必要地壓低近端語音。
+Dynamic g_min 根據 far-end activity 自動調整最小增益。
+
+#### Far Activity 追蹤（Asymmetric EMA）
+
+```
+is_far_active = float(far_power > 1e-4)
+
+if is_far_active > far_activity:
+    # Attack: 快速上升 (TC≈30ms, ~2 frames)
+    far_activity = 0.7 × far_activity + 0.3 × is_far_active
+else:
+    # Decay: 緩慢下降 (TC≈800ms)
+    far_activity = 0.98 × far_activity + 0.02 × is_far_active
+```
+
+#### Effective g_min
+
+```
+effective_g_min = g_min + (1 - g_min) × (1 - far_activity)
+effective_g_min = max(effective_g_min, 10^(-60/20))    # floor at -60dB
+```
+
+- `far_activity = 1.0`（遠端活躍）→ `effective_g_min = g_min`（正常抑制）
+- `far_activity = 0.0`（遠端靜音）→ `effective_g_min ≈ 1.0`（不抑制）
+- 過渡期平滑變化，避免 gain 跳動
+
+### 7.6 Spectral-Shape-Preserving Floor
+
+> 對應 `aec.py` line 1086-1097
+
+固定的 g_min 會把所有 bin 壓到同一 floor，破壞語音頻譜形狀。
+Spectral floor 根據 error envelope 給予高能量 bin 更高的 floor，保留語音自然感。
+
+```
+# Error envelope tracking (α = 0.95)
+error_envelope = 0.95 × error_envelope + 0.05 × |E|
+
+# Normalize
+env_normalized = error_envelope / max(error_envelope)
+
+# Per-bin floor
+spectral_g_min = effective_g_min + (1 - effective_g_min) × env_normalized × spectral_floor_ratio
+spectral_g_min = max(spectral_g_min, effective_g_min)
+```
+
+- 高能量 bin（e.g., 語音 formant 頻率）→ floor 較高 → 保留語音特徵
+- 低能量 bin → floor = effective_g_min → 正常抑制
+- 只在遠端有活動時啟用（`far_power > 1e-4`）
+
+### 7.7 Per-bin Near-end Gate
+
+> 對應 `aec.py` line 1099-1111
+
+取代舊版的全域 dt_indicator → g_min 映射，per-bin NE gate 利用 coherence 區分每個 bin 是 echo 還是 near-end：
+
+```
+# Pre-convergence: moderate protection
+if erle_factor < 0.3:
+    ne_erle_gate = 0.3
+else:
+    ne_erle_gate = max(erle_factor, 0.2)
+
+ne_protection = (1 - coh²) × ne_erle_gate         # [n_freqs]
+ne_g_min_ceil = 10^(ne_protect_db / 20)
+ne_g_floor = effective_g_min + (ne_g_min_ceil - effective_g_min) × ne_protection
+ne_g_floor = max(ne_g_floor, effective_g_min)
+
+# Merge into spectral_g_min
+spectral_g_min = max(spectral_g_min, ne_g_floor)
+```
+
+- `coh² ≈ 1.0`（echo bin）→ `ne_protection ≈ 0` → 允許完全抑制
+- `coh² ≈ 0.0`（near-end bin）→ `ne_protection ≈ ne_erle_gate` → 提高 floor 保護近端
+- `ne_protect_db` 控制保護強度（Mild: -12dB, Aggressive: -20dB）
+
+### 7.8 ENR Masking（gain_type="enr"）
+
+> 對應 `aec.py` line 1113-1167
+
+ENR masking 是 RES v2 的預設 gain 計算方式，參考 AEC3 suppressor 設計，
+使用 Echo-to-Nearend Ratio 和雙調參 soft gate 實現自適應抑制。
+
+#### ENR 計算
+
+```
+nearend_est = max(error_psd - residual_echo_psd, 0)
+enr = residual_echo_psd / (nearend_est + 1.0)
+```
+
+#### Nearend Singletalk Detection（State Machine）
+
+使用 mid-high frequency ENR（500Hz+ / bin 8+）偵測近端 singletalk 狀態：
+
+```
+avg_enr = mean(enr[hf_start:])
+
+State machine:
+┌──────────┐   avg_enr < 0.4 持續 12 frames   ┌───────────┐
+│  Normal   │ ──────────────────────────────→ │  Nearend   │
+│  (echo    │                                  │  (protect  │
+│  suppress)│ ←────────────────────────────── │  speech)   │
+└──────────┘   avg_enr > 10.0 持續 hold=0     └───────────┘
+                                                    │
+      ┌─────────────────────────────────────────────┘
+      │ hold = 30 frames (reset on low ENR)
+      │ Exit: hold countdown while avg_enr > 10.0
+
+Fast-path: far_power < 1e-4 → 立即進入 nearend state (hold = 30)
+```
+
+| 參數 | 值 | 說明 |
+|------|-----|------|
+| NE_ENR_THRESHOLD | 0.4 | 進入 nearend 的 avg_enr 門檻 |
+| NE_ENR_EXIT | 10.0 | 離開 nearend 的 avg_enr 門檻 |
+| NE_TRIGGER_FRAMES | 12 | 連續低 ENR 幀數才觸發 |
+| NE_HOLD_FRAMES | 30 | Nearend 狀態 hold time |
+
+#### Two-tuning ENR Thresholds
+
+ENR thresholds 依據 nearend state 和頻率位置動態調整：
+
+```
+freq_bins = [0, 1, 2, ..., n_freqs-1]
+blend = clip((freq_bins - 5) / 5, 0, 1)    # LF → 0.0, HF → 1.0
+
+Nearend mode (protect speech):
+    enr_t = (1-blend) × 1.09 + blend × 0.1
+    enr_s = (1-blend) × 1.1  + blend × 0.3
+
+Normal mode (suppress echo):
+    enr_t = (1-blend) × (0.3 × scale) + blend × (0.07 × scale)
+    enr_s = (1-blend) × (0.4 × scale) + blend × (0.1 × scale)
+```
+
+其中 `scale = enr_scale`（preset 控制，Mild=1.0, Maximum=0.5）。
+
+#### Soft Gate
+
+```
+if enr > enr_t:
+    g = clip((enr_s - enr) / (enr_s - enr_t), 0.0, 1.0)
+else:
+    g = 1.0
+
+g = max(g, spectral_g_min)
+```
+
+- `enr < enr_t`：no suppression（near-end dominant）
+- `enr_t < enr < enr_s`：linear interpolation（transition zone）
+- `enr > enr_s`：full suppression to spectral_g_min
+
+Nearend mode 的 threshold 遠高於 Normal mode，使得近端語音幾乎不被壓制。
+
+### 7.9 Gain Rate Limiting
+
+> 對應 `aec.py` line 1211-1225
+
+限制每幀增益的最大變化速率，避免突然的 blackout（gain 瞬間大幅下降）或 pop（gain 瞬間大幅上升）。
+
+```
+# Activity-scaled rate limits
+activity_scale = 0.5 + 0.5 × far_activity          # [0.5, 1.0]
+eff_drop = max_drop_ratio ^ activity_scale           # Less limiting when far-end silent
+eff_rise = max_rise_ratio ^ (0.5 + 0.5 × (1 - far_activity))  # Tighter rise when active
+
+gain_floor = gain_smooth / eff_drop
+gain_ceil  = gain_smooth × eff_rise
+```
+
+#### LF Special Handling During Nearend
+
+```
+if nearend_state:
+    gain_floor[:8] = max(gain_floor[:8], gain_smooth[:8] × 0.25)
+```
+
+Nearend singletalk 時，低頻 bin（0-8）的下降速率更受限（max decrease factor = 0.25），
+參考 AEC3 的 `max_dec_factor_lf`，保護低頻語音不被快速壓掉。
+
+### 7.10 CNG（Comfort Noise Generation）
+
+> 對應 `aec.py` line 1242-1252
+
+抑制後的段落可能出現不自然的靜音（尤其在遠端剛停止後），CNG 注入少量舒適雜訊填補。
+
+#### Noise PSD Tracking
+
+```
+# During far-end silence (far_power < 1e-4):
+noise_psd = min(α_noise × noise_psd + (1 - α_noise) × error_pwr,
+                error_pwr × 2)
+```
+
+在遠端靜音時追蹤背景噪聲 PSD（有上界保護，避免突發干擾污染估計）。
+
+#### Deficit-based Injection
+
+```
+if far_power ≤ 1e-4 AND noise_psd > 0:
+    suppressed_pwr = gain² × error_pwr
+    target_pwr = noise_psd × 0.5               # Half noise floor level
+    deficit = max(0, target_pwr - suppressed_pwr)
+    cng_mag = sqrt(deficit)
+    cng_phase = random_uniform(-π, π)           # Random phase
+    enhanced_spec += cng_mag × exp(j × cng_phase)
+```
+
+- 只在遠端靜音時注入（避免干擾 echo suppression）
+- Target 為 noise floor 的 50%，確保 CNG 不突兀
+- Random phase 避免產生 tonal artifact
+
+### 7.11 其他 Gain 後處理
+
+#### Noise Gate
+
+```
+signal_floor = mean(error_psd) × 0.001 + 1e-8
+quiet_mask = (echo_psd < signal_floor) AND (error_psd < signal_floor)
+G[quiet_mask] = 1.0    # Pass through quiet bins
+```
+
+#### DC Consistency & HF Cap（參考 AEC3 PostprocessGains）
+
+```
+# DC bins 0-1 follow bin 2
+G[:2] = min(G[1], G[2])
+
+# HF cap: upper bins capped at ~2kHz bin gain
+hf_cap_bin = 16  # for 512-FFT
+G[hf_cap_bin+1:] = min(G[hf_cap_bin+1:], G[hf_cap_bin])
+```
+
+#### Temporal Smoothing
+
+```
+# Activity-driven release
+alpha_release = 0.4 + 0.5 × far_activity    # slow when far-end active
+alpha_attack  = 0.60 + 0.25 × (1 - erle_factor)  # slow when unconverged
+alpha_g = where(g < gain_smooth, alpha_attack, alpha_release)
+smoothed = alpha_g × gain_smooth + (1 - alpha_g) × g
+```
+
+#### Divergence Override
+
+```
+if divergence > 0.3:
+    divergence_gain = 0.01 + 0.99 × (1 - divergence)
+    G = min(G, divergence_gain)
+```
+
+#### Nearend Bypass
+
+```
+if nearend_state AND far_power < 1e-4:
+    gain_smooth = 1.0    # Skip RES entirely
+```
 
 ### 本專案狀態
 
-- Python：`ResFilter` class（`aec.py`）已啟用，使用 OLA + sqrt-Hann + Wiener gain
-- C：`res_filter.c` 已實作（尚未同步 OLA 架構）
+- Python：`ResFilter` class（`aec.py`）已啟用，RES v2 完整實作
+  - 預設組合：`echo_method="direct"` + `gain_type="enr"` + reverb + echo boost + CNG
+- C：`res_filter.c` 已實作（尚未同步 RES v2 架構）
+
+---
+
+### 7.12 Preset 系統
+
+RES v2 透過四個 preset 控制抑制強度與語音保護的平衡。
+所有 preset 預設使用 `echo_method="direct"` + `gain_type="enr"` + `enable_reverb=True`。
+
+#### 完整參數表
+
+| 參數 | Mild | Balanced | Aggressive | Maximum | 說明 |
+|------|------|----------|------------|---------|------|
+| g_min_db | -35 | -45 | -60 | -72 | 最小增益限制 (dB) |
+| over_sub_base | 2.5 | 4.0 | 6.0 | 10.0 | 過減因子基準 |
+| over_sub_scale | 4.0 | 7.0 | 10.0 | 15.0 | 過減因子收斂後 scale |
+| enr_scale | 1.0 | 0.85 | 0.7 | 0.5 | ENR threshold 縮放（越小越 aggressive） |
+| reverb_decay | 0.6 | 0.65 | 0.7 | 0.8 | 混響衰減（越大→混響持續越久） |
+| reverb_gain | 0.8 | 1.4 | 2.0 | 3.0 | 混響 PSD 加成倍率 |
+| dt_reduction | 3.5 | 2.0 | 1.0 | 0.0 | DT 時 over_sub 降低量 |
+| alpha_echo_psd | 0.5 | 0.4 | 0.3 | 0.2 | Echo PSD 平滑 α（越小→追蹤越快） |
+| alpha_error_psd | 0.6 | 0.5 | 0.4 | 0.3 | Error PSD 平滑 α |
+| spectral_floor_db | -25 | -32 | -40 | -50 | Spectral floor 強度 (dB) |
+| ne_protect_db | -12 | -16 | -20 | -35 | NE gate 保護上限 (dB) |
+
+#### Preset 選擇指引
+
+- **Mild**：會議場景、近端語音品質最重要、可容忍少量殘餘回聲
+- **Balanced**：一般用途（預設）、echo/quality 平衡
+- **Aggressive**：高回聲環境、speaker 近 mic、可容忍輕微語音退化
+- **Maximum**：極端回聲、demo/測試用途、語音品質顯著退化
+
+#### 附加 Adaptive Filter 參數
+
+| 參數 | Mild | Balanced | Aggressive | Maximum |
+|------|------|----------|------------|---------|
+| shadow_q_ratio | 3.0 | 3.5 | 4.0 | 5.0 |
+| shadow_mu_min | 0.5 | 0.6 | 0.7 | 0.9 |
+| warmup_frames | 150 | 150 | 150 | 200 |
+| kalman_q_high | 2e-4 | 1.5e-4 | 1e-4 | 1e-4 |
 
 ---
 
@@ -1197,17 +1657,19 @@ if ERLE < target_ERLE:
 
 | 方法 | 計算量 | 抑制量 | 語音品質 | Musical Noise | 本專案 |
 |------|--------|--------|----------|---------------|--------|
-| **RES (Spectral Sub.)** | **低** | **中 (10-20dB)** | **中-高** | **中** | **✅ 已實作** |
-| Wiener Filter | 中 | 中-高 | 高 | 低 | — |
-| WebRTC (Wiener+CN) | 中 | 中-高 | 高 | 低 | — |
+| **RES (Spectral Sub.)** | **低** | **中 (10-20dB)** | **中-高** | **中** | **✅ 已實作** (legacy) |
+| Wiener Filter | 中 | 中-高 | 高 | 低 | ✅ 已實作 (`gain_type="wiener"`) |
+| **Direct + ERLE** | **中** | **中-高** | **高** | **低** | **✅ 已實作** (`echo_method="direct"`) |
+| **ENR Masking** | **中** | **中-高** | **高** | **低** | **✅ 已實作** (`gain_type="enr"`, 預設) |
+| WebRTC (Wiener+CN) | 中 | 中-高 | 高 | 低 | — (參考實作) |
 | Coherence-based | 中-高 | 中 | 高 | 低 | — |
 | NLP (hard suppress) | 低 | 極高 (>40dB) | 低-中 | 無 | — |
 
 ### 未來改進方向
 
-1. 考慮 Wiener + comfort noise（進一步降低 musical noise）
-2. Echo-only 段落的 NLP 可進一步提升 ERLE
-3. C 版本同步 OLA + sqrt-Hann + Wiener gain 架構
+1. C 版本同步 RES v2 架構（ENR masking + direct + reverb tail）
+2. DNN postfilter 用於超越純 DSP 天花板（見附錄 C）
+3. 非線性 branch 用於 speaker 飽和場景
 
 ---
 
@@ -1257,6 +1719,83 @@ frame/hop 使用 samples 為單位定義，根據 sample rate 自動計算（nex
 2. **實現簡潔：** 不需要 filter bank 的分析-合成架構
 3. **無 aliasing 問題：** FFT 是完美重建的
 4. **參數簡單：** 只需 fft_size、hop_size，不需 band 數、prototype filter 等
+
+### 9.1 Filter Length、Partition 數與 Delay Estimation 設計指���
+
+#### Partition 計算公式
+
+```
+n_partitions = ceil(filter_length / hop_size)
+```
+
+每個 partition 對應 1 個 hop（160 samples = 10ms @ 16kHz）的 echo path。
+所有 partition 共用同一個 FFT size（block_size = 512），在頻域做 multiply-accumulate。
+
+#### 各 Filter Length 對應的資源消耗
+
+| filter_length | 時間 | partitions | 記憶體 (W+P+X, 含 shadow) | 每 frame 計算 |
+|--------------|------|-----------|--------------------------|-------------|
+| 512 | 32ms | 4 | ~48KB | 4× complex multiply per bin |
+| 768 | 48ms | 5 | ~60KB | 5× |
+| 1024 | 64ms | 7 | ~84KB | 7× |
+| 1600 | 100ms | 10 | ~120KB | 10× |
+| 2048 | 128ms | 13 | ~156KB | 13× |
+| 3200 | 200ms | 20 | ~240KB | 20× |
+
+> 記憶體計算：每 partition 需 W[257] (complex64, 2KB) + P[257] (float32, 1KB) + X_buf[257] (complex64, 2KB) = 5KB。
+> 含 shadow filter 則 ×2（main + shadow 各一組 W/P/X）。加上 ring buffer、histogram 等輔助結構。
+
+#### Filter Length 的決定因素
+
+Filter length = **delay estimation 不確定性** + **room impulse response (RIR) 長度**。
+
+1. **Delay estimation 精度** — delay 估計不準的部分需要 filter cover：
+   - 精確到 ±1ms → filter 只需 cover echo IR → 512-768 足夠
+   - 精確到 ±10ms → 需多 ~160 samples margin → 1024 較安全
+   - 無 delay estimation → filter 需 cover 整個 delay + IR → 2048+
+
+2. **Room impulse response ��度** — 取決於房間 RT60：
+   - 小房間 / 近場 (RT60 < 100ms) → 512 足夠
+   - 中等房間 (RT60 100-200ms) → 1024
+   - 大會議室 (RT60 200-500ms) → 1600-2048
+   - 超過 filter 長度的 late reverb → 由 NLP/RES suppressor 處理
+
+#### 業界產品典型配置
+
+| 產品類型 / 環境 | Filter Length | Delay Estimation | 備註 |
+|---------------|-------------|-----------------|------|
+| 開源 browser AEC (如 WebRTC AEC3) | 768 (48ms) | Matched-filter，精確度高 | 強 NLP 補足短 filter |
+| 開源語音通訊 library | 1024-2048 | GCC-PHAT | NLP 中等 |
+| 嵌入式 DSP (手機 SoC) | 512-1024 | 硬體加速 delay est | 資源受限，靠 NLP |
+| 嵌入式 DSP (IoT / 低功耗) | 1024-1600 | 簡單 cross-corr | 資源有限，filter 稍長 |
+| PC / 高階手機 | 2048-4096 | 精確 delay est | 資源充裕 |
+| 智慧音箱 (遠場) | 2048-4096+ | 多通道 delay est | RT60 長，需要長 filter |
+
+#### 設計策略：短 Filter + 強 NLP（推薦）
+
+**核心思路**：線性 adaptive filter 負責消除 direct echo（~6dB ERLE），
+NLP/RES suppressor 負責壓制 residual echo + late reverb（~15-20dB）。
+兩者合計達到 20-25dB 總 ERLE���
+
+```
+Linear Filter (短, 48-64ms):
+  - 消除 direct path echo
+  - ERLE: ~3-10dB (取決於收斂狀態)
+  - 成本：O(n_partitions) per frame
+
+NLP/RES Suppressor:
+  - 壓制 filter 建模不到的殘餘 echo
+  - 壓制 late reverb tail
+  - 使用 per-bin ENR masking + echo path gain 估計
+  - 額外 ERLE: ~15-20dB
+  - 成本：O(n_freqs) per frame (與 partition 數無關)
+```
+
+這個策略下 **filter=1024 (64ms)** 是嵌入式的甜蜜點：
+- 足夠建模大部分房間的 early reflections
+- 資源消耗適中（7 partitions, ~84KB）
+- 對 delay estimation 精度的要求合理（±32ms）
+- 剩餘的 late reverb 和 residual echo 由 NLP 處理
 
 ---
 
@@ -1342,20 +1881,65 @@ Direct Form II: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
 
 ### 11.2 Saturation Detector（飽和偵測）
 
-> **實作**：`SaturationDetector` class
+> **實作**：`SaturationDetector` class（`aec.py` line 745-798）
 
 **問題**：Speaker 飽和時產生非線性失真（削波、諧波），echo path 不再是線性的，
 線性自適應濾波器無法正確建模 → ERLE 下降。
 
-**做法**：
-```python
-sat_ratio = count(|sample| > 0.95) / len(signal)  # [0, 1]
-# sat_ratio > 0.1 → 啟動 soft-clipping:
-soft_clipped = tanh(signal × 1.5) / tanh(1.5)
+#### 偵測機制
+
+`SaturationDetector` 偵測兩種飽和特徵：
+
+1. **Clipped samples**：`|sample| > threshold`（threshold 預設 0.95）
+2. **Consecutive identical peaks**：連續相鄰 sample 皆超過 `threshold × 0.8` 且差值 < 1e-6（digital clipping 特徵）
+
+```
+clip_count = count(|signal| > 0.95)
+consec_count = count(high_mask[i] AND high_mask[i-1] AND |signal[i] - signal[i-1]| < 1e-6)
+raw_sat = min((clip_count + 2 × consec_count) / n, 1.0)
 ```
 
-Soft-clip reference 讓 filter 看到的 reference 更接近 speaker 實際輸出的失真信號，
-改善 echo estimate 的準確度。同時 RES 會加大 `over_sub` 補償非線性殘餘 echo。
+Consecutive identical peaks 權重為 2 倍（更可靠的飽和指標）。
+
+#### Asymmetric EMA Smoothing
+
+```
+if raw_sat > saturation_level:
+    alpha = 0.3    # Fast attack: 飽和快速偵測
+else:
+    alpha = 0.98   # Slow release: echo path 仍保留飽和效應
+saturation_level = alpha × saturation_level + (1 - alpha) × raw_sat
+```
+
+- Attack TC ≈ 30ms：快速反應飽和事件
+- Release TC ≈ 800ms：飽和的 echo path 效應持續較久，慢放避免過早解除保護
+
+#### Soft-clipping（tanh compression）
+
+```python
+def soft_clip(signal, knee=0.8):
+    # Below knee: pass through
+    # Above knee: tanh compression
+    if |signal| >= knee:
+        excess = |signal| - knee
+        scale = 1.0 - knee
+        compressed = knee + tanh(excess / scale) × scale
+        output = sign(signal) × compressed
+```
+
+- `knee = 0.8`：80% 以下為線性通過區
+- 80% 以上使用 tanh 壓縮，模擬 speaker 的非線性行為
+- Soft-clip 後的 reference 更接近 speaker 實際輸出 → filter 能更好地建模 echo path
+
+#### RES Over-sub Boost
+
+偵測到飽和時，RES 的 `over_sub` 會根據 `saturation_level` 加大：
+```
+over_sub_boost = saturation_level × saturation_over_sub_boost
+effective_over_sub = over_sub + over_sub_boost
+```
+
+補償 filter 因非線性失真而無法完全建模的殘餘 echo。
 
 ### 11.3 Delay Estimation（延遲估計）
 
@@ -1427,7 +2011,48 @@ if conv_counter >= 10:  # 連續 10 幀 (~160ms)
 6dB 門檻 + 10 幀連續要求 → 避免偶發的 ERLE spike 誤判。
 收斂後不會回退（one-shot），因為正常操作中 ERLE 不應持續低於 6dB。
 
-### 12.2 Warmup 機制
+### 12.2 Echo Path Change (EPC) Detection
+
+> 對應 `aec.py` line ~2098-2134
+
+**問題**：Echo path 改變時（e.g., 移動 speaker、開門），原有的 filter 不再有效，
+需要快速重新收斂。但 DT 和 echo change 都會導致 error 上升，需要區分二者。
+
+#### EPC 偵測邏輯（Shadow-based）
+
+利用 main filter 和 shadow filter 的 error 差異區分 DT 和 echo change：
+
+```
+total_err = main_err_smooth + shadow_err_smooth
+delta_ratio = |main_err_smooth - shadow_err_smooth| / total_err
+
+errors_rising = (total_err > prev_total_err × epc_total_rise) AND (prev_total_err > 1e-10)
+is_echo_change = errors_rising AND (delta_ratio < epc_delta_threshold)
+```
+
+- **DT**：refined error ↑, shadow stable → `delta_ratio` 大 → 非 echo change
+- **Echo change**：both errors ↑ → `delta_ratio` 小 → 偵測為 echo change
+
+#### EPC 觸發後的動作
+
+1. **Confidence suppression**：`dtd_coherence.confidence *= 0.3`，讓 filter 能快速 adapt
+2. **Q reset**：main + shadow filter 的 Q 重設為 Q_high（加速收斂）
+3. **P_MAX override**：`P_MAX: 0.02 → 0.1`，持續 30 frames
+   - 正常 P_MAX = 0.02 限制 Kalman gain，避免 divergence
+   - EPC 期間放寬至 0.1，讓 Kalman gain 更大，加速追蹤新 echo path
+4. **收斂狀態重設**：`filter_converged = False`, `conv_counter = 0`
+5. **Hangover**：EPC active 狀態持續 `epc_hangover` frames
+
+#### Shadow Filter Copy Gating
+
+Shadow filter copy to main 的條件包含 EPC 狀態：
+```
+copy_allowed = far_active AND not_dt AND not epc_active
+```
+
+EPC active 期間不 copy，因為 shadow 也在重新收斂中。
+
+### 12.3 Warmup 機制
 
 前 50 幀（~0.8s）不啟用以下功能：
 - Shadow filter copy gate
@@ -1442,7 +2067,7 @@ if warmup_frames > 0:
 ```
 確保冷啟動階段 mu 不被過度壓低。
 
-### 12.3 Output Limiter
+### 12.4 Output Limiter
 
 **安全網**：確保 output 永不超過 mic amplitude，即使 DTD 或 adaptation 來不及反應。
 
@@ -1468,7 +2093,7 @@ output *= limiter_gain
 - Attack 快（α=0.3）：一旦超過立即壓縮
 - Release 慢（α=0.8）：避免 gain pumping（gain 在壓/放之間快速抖動）
 
-### 12.4 Output Noise Gate
+### 12.5 Output Noise Gate
 
 遠端有活動但 output 已極低時（< -20dB of mic），進一步 soft fade 降低底噪：
 
@@ -1526,6 +2151,107 @@ ERLE = 10 · log₁₀(E[d²] / E[e²])    (dB)
 | mu_min_ratio | 最低更新量 | 不建議設為 0（停滯）；0.05 適合大部分場景 |
 | res_over_sub | 殘餘回聲抑制強度 | 1.0=Wiener，提高→更強抑制，風險失真 |
 | res_g_min_db | 最大抑制量 | 降低→更深抑制，-20dB 通常夠用 |
+
+---
+
+## 附錄 C: Blind Test 分析與改進方向
+
+### C.1 目前系統真實狀態
+
+本系統的完整架構：
+
+- **前端**：Subband Partitioned FDKF (Kalman) AEC, `filter_length=2048` (128ms @16kHz)
+- **副路**：Shadow Kalman filter, Q = main Q × `shadow_q_ratio`
+- **後端**：RES v2 (ENR masking + direct residual echo + reverb tail model)
+- **控制**：EPC detection + convergence detection + divergence detection + output limiter + output gate
+- **結論**：已經是完整的純 DSP 線性 AEC 架構，不是低水準 baseline
+
+### C.2 瓶頸分析
+
+#### Kalman R 自我強化死鎖
+
+R 直接來自 `error_psd`，形成正回饋迴路：
+
+```
+DT/near-end 時：
+  error_psd ↑ → R ↑ → K ↓ → 更新變慢 → 收斂慢 → residual ↑ → error_psd ↑ (循環)
+```
+
+嘗試 R_max cap (L2-A) 的代價太高：NE deg_mos -0.268，
+根因是 DT 時 near-end bin 也被放開（R_max 是全域 cap，無法區分 echo/near-end bin）。
+
+#### Q_gated Binary Mask
+
+目前 `Q_gated` 使用 binary mask：弱於平均 1% 的 bin 完全不加 Q：
+
+```
+Q_gated[k] = Q[k]   if power[k] > mean(power) × 0.01
+Q_gated[k] = 0       otherwise
+```
+
+問題：P 縮死 → K 趨近 0 → filter 對這些頻率完全停止學習。
+
+#### Suppressor Trade-off（結構性問題）
+
+前端 residual echo 越多 → suppressor 越 aggressive → deg_mos 下降。
+這是 linear AEC + suppressor 架構的固有限制，純 DSP 無法根本解決。
+
+### C.3 已完成的改進（v1.20.1 → v5d）
+
+| 版本 | 改進 | FS echo_mos | DT echo_mos | DT deg_mos | NE deg_mos |
+|------|------|-------------|-------------|------------|------------|
+| v1.20.1 | baseline | 3.352 | 3.796 | 2.701 | 4.118 |
+| v5d | L1-A + L3-C + L3-A | 3.429 | 3.848 | 2.720 | 3.850 |
+
+各改進項目：
+
+- **L1-A (PHAT whitening)**：FS ERLE +0.3 dB, FS echo_mos +0.077
+  - 原因：eval script 的 `estimate_delay()` 沒有 PHAT whitening，修正後延遲估計更準確
+- **L3-C (Per-bin echo boost)**：已整合至 v5d，高 coherence bin 加強 residual echo 估計
+- **L3-A (NE singletalk fast-path)**：NE deg_mos +0.012
+  - No far-end → 立即進入 nearend state，skip RES
+
+### C.4 已回退的改進
+
+- **L2-A (R_max cap)**：NE deg_mos -0.268
+  - 根因：DT 時 R_max cap 放開所有 bin（包含 near-end bin），導致 filter 在 near-end 頻率過度更新
+  - 解法方向：per-bin R scaling（用 coh² 保護 near-end bin）
+
+### C.5 後續改進路線圖
+
+1. **L2-B: Q_gated soft floor**
+   - `Q_gated = max(Q × 0.1, Q_gated)`
+   - 避免弱 bin 完全停止學習，同時不過度放大雜訊 bin 的更新
+   - 優先於 R_max 方案
+
+2. **Per-bin R scaling**
+   - `R_scale[k] = 1 + 2 × (1 - coh²[k])`
+   - 高 coherence（echo bin）→ R 不變 → 正常更新
+   - 低 coherence（near-end bin）→ R × 3 → 保護 near-end
+   - 解決 R_max cap 的「一刀切」問題
+
+3. **Ablation test**
+   - Limiter / output gate 的 gain 對 deg_mos 的影響
+   - 確認是否有過度保護
+
+### C.6 純 DSP 天花板評估
+
+| 指標 | v5d | 估計上限 | AEC3 (參考) |
+|------|-----|---------|-------------|
+| FS echo_mos | 3.429 | ~3.6-3.8 | 3.963 |
+| DT echo_mos | 3.848 | ~3.9-4.1 | 4.440 |
+| NE deg_mos | 3.850 | ~4.1 | 4.118 |
+
+超越 AEC3 的 echo_mos 需要非線性 branch 或 DNN postfilter。
+NE deg_mos 已接近 AEC3 水準，主要差距在 echo suppression。
+
+### C.7 GPT 分析修正表
+
+| GPT 說法 | 實測後修正 |
+|----------|----------|
+| Delay estimator 已有 PHAT | eval script 的 `estimate_delay()` 沒有 PHAT，L1-A 修完後 FS +0.077 |
+| R_max 可解決 Kalman R 死鎖 | R_max 代價太高 (NE -0.268)，需要 per-bin coh² 方案 |
+| Q_gated soft floor 值得做 | 尚未測，優先於 R_max，預期改善弱 bin 學習 |
 
 ---
 
