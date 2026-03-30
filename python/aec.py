@@ -1114,28 +1114,33 @@ class ResFilter:
         # coh2 high (echo bin) → ne_protection≈0 → allow full suppression
         # coh2 low (near-end bin) → ne_protection≈1 → raise floor to protect
         # Pre-convergence: moderate protection for all presets
+        # fs_confidence: continuous FS/DT/NE indicator
+        # Used by ENR two-tuning, ne_g_floor, attack speed, LF rate limit
+        fs_confidence = self.far_activity * (1.0 - dt_indicator) ** 2.0
+
+        # --- Per-bin near-end gate with fs_confidence ---
         if erle_factor < 0.3:
             ne_erle_gate = 0.3
         else:
             ne_erle_gate = max(erle_factor, 0.2)
-        ne_protection = (1.0 - coh2) * ne_erle_gate    # [n_freqs]
+        # Scale ne_protection by (1-fs_confidence): FS→no protection, DT/NE→full protection
+        ne_protection = (1.0 - coh2) * ne_erle_gate * (1.0 - fs_confidence)
         ne_g_min_ceil = 10 ** (self.ne_protect_db / 20)
         ne_g_floor = effective_g_min + (ne_g_min_ceil - effective_g_min) * ne_protection
         ne_g_floor = np.maximum(ne_g_floor, effective_g_min)
         spectral_g_min = np.maximum(spectral_g_min, ne_g_floor)
 
         # --- Gain computation ---
+
         if self.gain_type == "enr" and residual_echo_psd is not None:
             # ENR masking with two-tuning (cf. AEC3 suppressor)
-            # AEC3: enr = R2 / (E2 + 1), where E2 = error PSD directly (no subtraction)
-            # Using error_psd directly avoids the near-zero nearend_est problem
             enr = residual_echo_psd / (self.error_psd + 1e-10)
 
             # --- Dominant nearend detection ---
             hf_start = min(8, self.n_freqs // 4)
             avg_enr = float(np.mean(enr[hf_start:]))
             NE_ENR_THRESHOLD = 0.4
-            NE_ENR_EXIT = 10.0
+            NE_ENR_EXIT = 1.5
             NE_TRIGGER_FRAMES = 12
             NE_HOLD_FRAMES = 30
 
@@ -1144,12 +1149,17 @@ class ResFilter:
                 self._ne_detect_hold = NE_HOLD_FRAMES
                 self._ne_detect_count = 0
             elif self._nearend_state:
-                if avg_enr > NE_ENR_EXIT:
+                # Exit condition: ENR high OR (far-end active + moderate ENR)
+                # NE_ENR_EXIT=10 is unreachable (ENR≈1 after convergence),
+                # so add far_activity-based exit as parallel path
+                far_activity_exit = (self.far_activity > 0.85 and avg_enr > 0.8)
+                if avg_enr > NE_ENR_EXIT or far_activity_exit:
                     self._ne_detect_hold -= 1
                     if self._ne_detect_hold <= 0:
                         self._nearend_state = False
                         self._ne_detect_count = 0
-                else:
+                # Only reset hold if ENR is truly low (near-end dominant)
+                elif avg_enr < NE_ENR_THRESHOLD:
                     self._ne_detect_hold = NE_HOLD_FRAMES
             else:
                 if avg_enr < NE_ENR_THRESHOLD:
@@ -1160,19 +1170,20 @@ class ResFilter:
                 else:
                     self._ne_detect_count = max(0, self._ne_detect_count - 1)
 
-            # --- Two-tuning ENR thresholds ---
+            # --- Continuous ENR two-tuning (no binary nearend_state dependency) ---
             freq_bins = np.arange(self.n_freqs, dtype=np.float32)
             blend = np.clip((freq_bins - 5) / 5, 0, 1)
             scale = self.enr_scale
+            ne_confidence = 1.0 - fs_confidence  # reuse from attack blend
 
-            if self._nearend_state:
-                # Nearend tuning: permissive (preserve near-end speech)
-                enr_t = (1 - blend) * 3.0 + blend * 0.3
-                enr_s = (1 - blend) * 5.0 + blend * 0.5
-            else:
-                # Normal tuning: aggressive echo suppression (AEC3 defaults)
-                enr_t = (1 - blend) * (0.3 * scale) + blend * (0.07 * scale)
-                enr_s = (1 - blend) * (0.4 * scale) + blend * (0.1 * scale)
+            # Two sets of thresholds, blended by ne_confidence
+            enr_t_ne = (1 - blend) * 3.0 + blend * 0.3
+            enr_s_ne = (1 - blend) * 5.0 + blend * 0.5
+            enr_t_fs = (1 - blend) * (0.3 * scale) + blend * (0.07 * scale)
+            enr_s_fs = (1 - blend) * (0.4 * scale) + blend * (0.1 * scale)
+
+            enr_t = ne_confidence * enr_t_ne + (1 - ne_confidence) * enr_t_fs
+            enr_s = ne_confidence * enr_s_ne + (1 - ne_confidence) * enr_s_fs
 
             # Soft gate: linear interpolation between transparent/suppress
             g = np.where(enr > enr_t,
@@ -1247,11 +1258,15 @@ class ResFilter:
         eff_rise = self.max_rise_ratio ** (0.5 + 0.5 * (1.0 - self.far_activity))
         gain_floor = self.gain_smooth / eff_drop
         gain_ceil = self.gain_smooth * eff_rise
-        # LF gain decrease limiting during nearend (cf. AEC3 max_dec_factor_lf=0.25)
-        if self._nearend_state:
+        # LF gain decrease limiting: scale by (1-fs_confidence)
+        # FS (fs_conf≈1): no LF protection → gain drops freely
+        # DT/NE (fs_conf≈0): full LF protection (0.25× floor)
+        if fs_confidence < 0.9:  # skip entirely when clearly FS
             lf_limit = min(8, self.n_freqs)
-            gain_floor[:lf_limit] = np.maximum(
-                gain_floor[:lf_limit], self.gain_smooth[:lf_limit] * 0.25)
+            lf_factor = 0.25 * max(1.0 - fs_confidence * 2.0, 0.0)
+            if lf_factor > 0.01:
+                gain_floor[:lf_limit] = np.maximum(
+                    gain_floor[:lf_limit], self.gain_smooth[:lf_limit] * lf_factor)
         smoothed = np.maximum(smoothed, gain_floor)
         smoothed = np.minimum(smoothed, gain_ceil)
         # Clamp to valid range
