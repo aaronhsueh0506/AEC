@@ -2,6 +2,38 @@
 
 ## 版本歷史
 
+### v1.24.0 (2026-03-30) - RES Suppression Breakthrough
+
+**Critical bug fix: ENR offset +1.0 → adaptive (committed in v1.23.0)**
+- `enr = echo / (nearend + 1.0)` — +1.0 was too large for PSD scale (0.01-10)
+- ENR was always < 1.0, preventing gain from reaching g_min
+- Fix: `enr = echo / (nearend + mean(error) * 0.01)`
+- Result: FS echo +0.17 (3.40→3.57), DT echo +0.14
+
+**RES architecture improvements (AEC3-style):**
+- **Fixed g_min**: removed far_activity gating on g_min (was raising floor during low echo)
+  - AEC3 uses fixed g_min; gain is purely ENR-driven
+  - Fixes low-echo segments where output stayed at -10dB instead of -40dB
+- **Nearend-aware attack speed**: fast attack (α=0.3) in FS, slow (α=0.7) in DT
+  - FS: gain drops to g_min in ~5 frames (50ms) instead of ~30 frames (300ms)
+  - DT: gain changes slowly to protect near-end speech
+- **Nearend ENR threshold recalibrated**: 1.09→3.0 (LF), 0.1→0.3 (HF)
+  - Old threshold 1.09 was designed for +1.0 offset (enr ≤ 1)
+  - New scale after offset fix: enr can reach 100+, threshold 3.0 is appropriate
+- **Soft upper bound**: residual_echo_psd ≤ 4× error_psd
+  - Prevents echo_psd spikes (20× error) from crushing DT speech
+- **Convergence detection**: ERLE > 10dB × 10 frames (was 6dB × 6)
+- **R alpha**: 0.95 → 0.98 (slower R tracking)
+- **Warmup guard**: no convergence detection during warmup
+
+**Blind test results (fl=512, preset balanced):**
+| Metric | v1.18.0 (original) | v1.24.0 | Change | AEC3 |
+|--------|-------------------|---------|--------|------|
+| FS echo_mos | 3.210 | **3.625** | **+0.415** | 3.963 |
+| DT echo_mos | 4.000 | **4.257** | **+0.257** | 4.440 |
+| DT deg_mos | 2.215 | 2.064 | -0.151 | 2.258 |
+| NE deg_mos | 4.018 | 4.011 | -0.007 | 3.530 |
+
 ### v1.22.0 (2026-03-29) - Kalman R-Deadlock Fix + RES Tuning + AEC3 Gap Analysis
 
 **Kalman filter convergence fix (biggest impact):**

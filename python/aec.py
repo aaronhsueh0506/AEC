@@ -1012,8 +1012,9 @@ class ResFilter:
             # Far-end stops: slow decay (TC≈800ms, wait for echo_psd to decay first)
             self.far_activity = 0.98 * self.far_activity + 0.02 * is_far_active
         # far_activity=1.0 → g_min normal; far_activity=0.0 → g_min→1.0 (no suppression)
-        effective_g_min = self.g_min + (1.0 - self.g_min) * (1.0 - self.far_activity)
-        effective_g_min = max(effective_g_min, 10 ** (-60.0 / 20))  # floor at -60dB
+        # Fixed g_min: gain floor is constant regardless of far_activity
+        # (AEC3 style — gain is purely ENR-driven, not activity-gated)
+        effective_g_min = self.g_min
 
         # --- Noise gate: don't suppress quiet segments ---
         signal_floor = np.mean(self.error_psd) * 0.001 + 1e-8
@@ -1083,6 +1084,11 @@ class ResFilter:
         if far_power > 1e-4 and erle_factor > 0.3 and residual_echo_psd is not None:
             echo_boost = 1.0 + 0.5 * coh2 if dt_indicator < 0.2 else np.ones_like(coh2)
             residual_echo_psd = residual_echo_psd * echo_boost
+
+        # Soft upper bound: prevent echo_psd spikes from crushing DT speech
+        # echo_psd can spike to 20× error_psd due to filter artifacts
+        if residual_echo_psd is not None:
+            residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * 4.0)
 
         # Compute coherence-based EER (used for legacy mode AND per-bin NE gate)
         eer_linear = self.echo_psd / (self.error_psd + eps)
@@ -1165,8 +1171,8 @@ class ResFilter:
 
             if self._nearend_state:
                 # Nearend tuning: permissive (preserve near-end speech)
-                enr_t = (1 - blend) * 1.09 + blend * 0.1
-                enr_s = (1 - blend) * 1.1 + blend * 0.3
+                enr_t = (1 - blend) * 3.0 + blend * 0.3
+                enr_s = (1 - blend) * 5.0 + blend * 0.5
             else:
                 # Normal tuning: aggressive echo suppression (AEC3 defaults)
                 enr_t = (1 - blend) * (0.3 * scale) + blend * (0.07 * scale)
@@ -1214,8 +1220,11 @@ class ResFilter:
         # far_activity low (far-end silent) → fast release (TC≈25ms)
         alpha_release = 0.4 + 0.5 * self.far_activity
 
-        # Attack alpha: slow when unconverged (suppress oscillation), fast when converged
-        alpha_attack = 0.60 + 0.25 * (1.0 - erle_factor)
+        # Attack alpha: fast when echo-dominant, slow when nearend (protect speech)
+        if self._nearend_state:
+            alpha_attack = 0.7 + 0.15 * (1.0 - erle_factor)  # 0.7-0.85 (slow, protect speech)
+        else:
+            alpha_attack = 0.3 + 0.2 * (1.0 - erle_factor)   # 0.3-0.5 (fast, suppress echo)
         alpha_g = np.where(g < self.gain_smooth, alpha_attack, alpha_release)
         smoothed = alpha_g * self.gain_smooth + (1 - alpha_g) * g
 

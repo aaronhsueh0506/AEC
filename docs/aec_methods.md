@@ -26,7 +26,6 @@
 8. [Post-Filter 方法比較](#8-post-filter-方法比較)
 9. [頻域分區處理方式說明](#9-頻域分區處理方式說明)
     - 9.1 [Filter Length / Partition 設計指南](#91-filter-lengthpartition-數與-delay-estimation-設計指南)
-10. [NR Subband 適用性分析](#10-nr-subband-適用性分析)
 11. [前處理模組](#11-前處理模組)
 12. [收斂控制與 Output Limiter](#12-收斂控制與-output-limiter)
     - 12.2 [Echo Path Change (EPC) Detection](#122-echo-path-change-epc-detection)
@@ -1306,12 +1305,9 @@ if far_active AND erle_factor > 0.3:
 - `coh² ≈ 0.0`（near-end bin）→ echo_boost ≈ 1.0（不 boost）
 - 只在收斂後啟用（`erle_factor > 0.3`），避免收斂前過度抑制
 
-### 7.5 Dynamic g_min + Far Activity Tracking
+### 7.5 Fixed g_min + Far Activity Tracking
 
-> 對應 `aec.py` line 1001-1011
-
-傳統的固定 g_min 在遠端靜音時會不必要地壓低近端語音。
-Dynamic g_min 根據 far-end activity 自動調整最小增益。
+> 對應 `aec.py` line 1001-1016
 
 #### Far Activity 追蹤（Asymmetric EMA）
 
@@ -1326,16 +1322,25 @@ else:
     far_activity = 0.98 × far_activity + 0.02 × is_far_active
 ```
 
-#### Effective g_min
+`far_activity` 用於 gain rate limiting 的 release 速度控制，但**不影響 g_min**。
+
+#### Effective g_min（AEC3-style 固定值）
 
 ```
-effective_g_min = g_min + (1 - g_min) × (1 - far_activity)
-effective_g_min = max(effective_g_min, 10^(-60/20))    # floor at -60dB
+effective_g_min = g_min    # 固定值，不受 far_activity 影響
 ```
 
-- `far_activity = 1.0`（遠端活躍）→ `effective_g_min = g_min`（正常抑制）
-- `far_activity = 0.0`（遠端靜音）→ `effective_g_min ≈ 1.0`（不抑制）
-- 過渡期平滑變化，避免 gain 跳動
+**設計理由（v1.24.0 變更）**：
+
+之前版本用 `g_min + (1-g_min) × (1-far_activity)` 在遠端靜音時抬高 g_min。
+但這導致低 echo 段（far-end 能量低）的 output 停在 -10dB 而非壓到 noise floor。
+AEC3 的 g_min 是固定值 — gain 的大小純粹由 ENR ratio 決定。
+ENR 低時 gain 自然接近 1.0（不壓），不需要額外用 far_activity 抬高 g_min。
+
+遠端靜音時的近端保護由以下機制提供：
+- ENR → 0（無 echo）→ gain → 1.0（不壓）
+- nearend_state = True → ENR two-tuning 更保守
+- CNG 在遠端靜音時注入 comfort noise
 
 ### 7.6 Spectral-Shape-Preserving Floor
 
@@ -1397,8 +1402,13 @@ ENR masking 是 RES v2 的預設 gain 計算方式，參考 AEC3 suppressor 設�
 
 ```
 nearend_est = max(error_psd - residual_echo_psd, 0)
-enr = residual_echo_psd / (nearend_est + 1.0)
+enr_offset = mean(error_psd) × 0.01     # adaptive offset (v1.24.0)
+enr = residual_echo_psd / (nearend_est + enr_offset)
 ```
+
+> **v1.24.0 變更**：offset 從固定 +1.0 改為 `mean(error_psd) × 0.01`。
+> 固定 +1.0 對 PSD 量級 0.01-10 太大，導致 ENR 永遠 < 1.0，
+> gain 無法到達 g_min。adaptive offset 讓 ENR 的動態範圍正確反映 echo/nearend 比例。
 
 #### Nearend Singletalk Detection（State Machine）
 
@@ -1437,8 +1447,8 @@ freq_bins = [0, 1, 2, ..., n_freqs-1]
 blend = clip((freq_bins - 5) / 5, 0, 1)    # LF → 0.0, HF → 1.0
 
 Nearend mode (protect speech):
-    enr_t = (1-blend) × 1.09 + blend × 0.1
-    enr_s = (1-blend) × 1.1  + blend × 0.3
+    enr_t = (1-blend) × 3.0 + blend × 0.3
+    enr_s = (1-blend) × 5.0 + blend × 0.5
 
 Normal mode (suppress echo):
     enr_t = (1-blend) × (0.3 × scale) + blend × (0.07 × scale)
@@ -1464,17 +1474,33 @@ g = max(g, spectral_g_min)
 
 Nearend mode 的 threshold 遠高於 Normal mode，使得近端語音幾乎不被壓制。
 
-### 7.9 Gain Rate Limiting
+### 7.9 Gain Temporal Smoothing + Rate Limiting
 
-> 對應 `aec.py` line 1211-1225
+> 對應 `aec.py` line 1211-1240
 
-限制每幀增益的最大變化速率，避免突然的 blackout（gain 瞬間大幅下降）或 pop（gain 瞬間大幅上升）。
+#### Nearend-Aware Attack Speed（v1.24.0）
+
+gain 的 EMA smoothing 速度根據 nearend_state 動態調整：
 
 ```
-# Activity-scaled rate limits
-activity_scale = 0.5 + 0.5 × far_activity          # [0.5, 1.0]
-eff_drop = max_drop_ratio ^ activity_scale           # Less limiting when far-end silent
-eff_rise = max_rise_ratio ^ (0.5 + 0.5 × (1 - far_activity))  # Tighter rise when active
+if nearend_state:
+    alpha_attack = 0.7 + 0.15 × (1 - erle_factor)   # 0.7-0.85（慢，保護語音）
+else:
+    alpha_attack = 0.3 + 0.2 × (1 - erle_factor)    # 0.3-0.5（快，壓制 echo）
+
+alpha_release = 0.4 + 0.5 × far_activity            # release 速度
+gain_smooth = alpha × gain_smooth + (1-alpha) × g
+```
+
+**設計理由**：FS 時 gain 需快速降到 g_min（50ms 內到 -55dB），
+DT 時 gain 變化要慢（防止語音被突然壓制）。
+
+#### Rate Limiting
+
+```
+activity_scale = 0.5 + 0.5 × far_activity
+eff_drop = max_drop_ratio ^ activity_scale
+eff_rise = max_rise_ratio ^ (0.5 + 0.5 × (1 - far_activity))
 
 gain_floor = gain_smooth / eff_drop
 gain_ceil  = gain_smooth × eff_rise
@@ -1798,66 +1824,6 @@ NLP/RES Suppressor:
 - 剩餘的 late reverb 和 residual echo 由 NLP 處理
 
 ---
-
-## 10. NR Subband 適用性分析
-
-### 問題：NR 是否也適用 Subband 處理？
-
-### 目前 NR 的處理方式
-
-NR 已經是 **per-bin（逐頻率 bin）處理**，這是最細粒度的 subband：
-
-```python
-# NR 逐 bin 處理
-for k in range(n_freqs):  # 257 bins @ FFT=512
-    gain[k] = f(SNR[k], noise_psd[k], ...)
-    enhanced[k] = gain[k] * noisy[k]
-```
-
-每個 frequency bin 有獨立的：
-- 噪聲 PSD 估計
-- SNR 估計
-- 增益計算
-
-### 如果改用 Bark/MEL Subband？
-
-將 257 個 bin 分組為 ~24 個 Bark band 或 ~40 個 MEL band：
-
-```
-Bark Band 1: bins 0-2     (0~94 Hz)
-Bark Band 2: bins 3-4     (94~188 Hz)
-...
-Bark Band 20: bins 100-150 (3125~4688 Hz)
-...
-```
-
-每組 band 共享同一個增益值。
-
-### 比較分析
-
-| | Per-Bin (目前) | Bark/MEL Subband |
-|---|---|---|
-| **頻率解析度** | 31.25 Hz/bin | 低頻高、高頻低 |
-| **增益數量** | 257 | ~24 (Bark) / ~40 (MEL) |
-| **計算量** | 257 次增益計算 | ~24~40 次 |
-| **精確度** | 最高 | 較低（同 band 共用增益） |
-| **音樂噪聲** | 可能較多 | 較少（band 內平均效果） |
-| **語音保留** | 最佳 | 可能模糊相鄰頻率的語音 |
-
-### 結論
-
-**Per-bin 處理更精確，建議維持現狀。**
-
-原因：
-1. NR 的增益計算（MMSE/LSA）計算量不大，257 bin vs 24 band 的節省有限
-2. 瓶頸在 FFT（O(N log N)），不在增益計算
-3. Per-bin 提供最精確的噪聲估計和增益控制
-4. Bark/MEL 分組會降低頻率解析度，可能影響語音品質
-
-**唯一考慮改用 Subband 的場景：**
-- 計算資源極度受限（MCU 等級）
-- 可接受品質下降以換取計算量減少
-- 此時建議使用 MEL scale（~40 bands），兼顧感知特性
 
 ---
 
