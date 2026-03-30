@@ -647,11 +647,18 @@ class PBFDKF(PBFDAF):
         R_scale = 0.3 + 0.7 * (1.0 - mu_mean)
         self.R = self.R * R_scale
 
+        # Q modulation: reduce Q during DT (Kalman-specific, not in NLMS)
+        # DT: large error from nearend → Q should be low (don't interpret as echo path change)
+        # FS: normal Q for tracking echo path changes
+        mu_mean = float(np.mean(mu_scale_arr))
+        q_scale = 0.1 + 0.9 * mu_mean  # FS: 1.0, strong DT: 0.1
+        Q_modulated = self.Q * q_scale
+
         # Per-bin far-end activity mask
         far_power_smooth = self.power
         far_activity_mask = far_power_smooth > (np.mean(far_power_smooth) * 0.01 + 1e-6)
-        Q_floor = self.Q * 0.05
-        Q_gated = np.where(far_activity_mask, self.Q, Q_floor)
+        Q_floor = Q_modulated * 0.05
+        Q_gated = np.where(far_activity_mask, Q_modulated, Q_floor)
 
         # P_MAX: overridable during EPC for faster re-convergence
         p_max = getattr(self, '_p_max_override', 0.02)
@@ -1174,6 +1181,16 @@ class ResFilter:
             g = np.where(enr > enr_t,
                          np.clip((enr_s - enr) / (enr_s - enr_t + eps), 0.0, 1.0),
                          1.0)
+
+            # EMR: echo-to-masker ratio (AEC3-style noise masking)
+            # If echo is below noise floor at a bin, don't suppress (echo is inaudible)
+            if np.sum(self.noise_psd) > 0:
+                emr = residual_echo_psd / (self.noise_psd + 1e-10)
+                emr_transparent = 0.3
+                # Bins where echo is masked by noise → raise gain toward 1.0
+                g_emr = np.clip(emr_transparent / (emr + 1e-10), 0.0, 1.0)
+                g = np.maximum(g, g_emr)  # Don't suppress below noise-masking level
+
             g = np.maximum(g, spectral_g_min)
         elif self.gain_type == "wiener" and residual_echo_psd is not None:
             # Wiener gain (fixed: higher noise floor for FS stability)
