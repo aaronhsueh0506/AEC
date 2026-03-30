@@ -1085,11 +1085,6 @@ class ResFilter:
             echo_boost = 1.0 + 0.5 * coh2 if dt_indicator < 0.2 else np.ones_like(coh2)
             residual_echo_psd = residual_echo_psd * echo_boost
 
-        # Soft upper bound: prevent echo_psd spikes from crushing DT speech
-        # echo_psd can spike to 20× error_psd due to filter artifacts
-        if residual_echo_psd is not None:
-            residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * 4.0)
-
         # Compute coherence-based EER (used for legacy mode AND per-bin NE gate)
         eer_linear = self.echo_psd / (self.error_psd + eps)
         eer_converged = eer_linear * (0.5 + 0.5 * coh2)
@@ -1128,12 +1123,9 @@ class ResFilter:
         # --- Gain computation ---
         if self.gain_type == "enr" and residual_echo_psd is not None:
             # ENR masking with two-tuning (cf. AEC3 suppressor)
-            nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0)
-            # ENR: adaptive offset scaled to signal level
-            # +1.0 is too large for our PSD scale (0.01-10) → enr always < 1
-            # Use fraction of error_psd as offset to maintain proper ENR dynamic range
-            enr_offset = np.mean(self.error_psd) * 0.01 + eps
-            enr = residual_echo_psd / (nearend_est + enr_offset)
+            # AEC3: enr = R2 / (E2 + 1), where E2 = error PSD directly (no subtraction)
+            # Using error_psd directly avoids the near-zero nearend_est problem
+            enr = residual_echo_psd / (self.error_psd + 1e-10)
 
             # --- Dominant nearend detection ---
             hf_start = min(8, self.n_freqs // 4)
@@ -1222,7 +1214,7 @@ class ResFilter:
 
         # Attack alpha: fast when echo-dominant, slow when nearend (protect speech)
         if self._nearend_state:
-            alpha_attack = 0.7 + 0.15 * (1.0 - erle_factor)  # 0.7-0.85 (slow, protect speech)
+            alpha_attack = 0.85 + 0.1 * (1.0 - erle_factor)  # 0.85-0.95 (very slow, max speech protection)
         else:
             alpha_attack = 0.3 + 0.2 * (1.0 - erle_factor)   # 0.3-0.5 (fast, suppress echo)
         alpha_g = np.where(g < self.gain_smooth, alpha_attack, alpha_release)
