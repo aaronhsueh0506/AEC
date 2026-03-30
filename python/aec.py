@@ -622,7 +622,7 @@ class PBFDKF(PBFDAF):
         # R: measurement noise PSD (estimated from error)
         self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
         self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
-        self._alpha_r = 0.95
+        self._alpha_r = 0.98
 
     def reset(self):
         super().reset()
@@ -1127,8 +1127,8 @@ class ResFilter:
             nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0)
             enr = residual_echo_psd / (nearend_est + 1.0)
 
-            # --- Dominant nearend detection (cf. AEC3) ---
-            # Use mid-high freq ENR only (500Hz+, bin 8+) for stable detection
+            # --- Dominant nearend detection ---
+            # Use ENR with corrected echo estimate for detection
             hf_start = min(8, self.n_freqs // 4)
             avg_enr = float(np.mean(enr[hf_start:]))
             NE_ENR_THRESHOLD = 0.4
@@ -2313,16 +2313,17 @@ class AEC:
         self.error_power = self.raw_error_power
         self.error_power_sum = self.raw_error_power_sum
 
-        # Convergence detection: 6 consecutive single-talk frames with ERLE > 6 dB
-        if not self._filter_converged and self.near_power > 1e-8:
+        # Convergence detection: 10 consecutive single-talk frames with ERLE > 10 dB
+        # Skip during warmup — let filter learn with Q_high before judging convergence
+        if not self._filter_converged and self.near_power > 1e-8 and self._warmup_frames <= 0:
             inst_erle = 10 * np.log10(self.near_power / (self.raw_error_power + 1e-10))
             # Only evaluate during far-end single-talk (DT corrupts ERLE measurement)
             if self._simple_mu_ratio > 0.5:
-                if inst_erle > 6.0:
+                if inst_erle > 10.0:
                     self._conv_counter += 1
                 else:
                     self._conv_counter = 0
-                if self._conv_counter >= 6:
+                if self._conv_counter >= 10:
                     self._filter_converged = True
                     # Switch to low Q: stable tracking mode
                     for filt in [self.filter, self.shadow_filter]:
