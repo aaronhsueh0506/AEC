@@ -1246,17 +1246,16 @@ class ResFilter:
         # Apply gain + synthesis sqrt-Hann window + IFFT
         enhanced_spec = self.gain_smooth * spec
 
-        # --- CNG: inject comfort noise to avoid unnatural silence ---
-        if self.enable_cng and np.sum(self.noise_psd) > 0 and far_power <= 1e-4:
-            suppressed_pwr = (self.gain_smooth ** 2) * error_pwr
-            target_pwr = self.noise_psd * 0.5  # Half noise floor level
-            deficit = np.maximum(0, target_pwr - suppressed_pwr)
-            if np.any(deficit > 0):
-                cng_mag = np.sqrt(deficit).astype(np.float32)
-                cng_phase = np.random.uniform(
-                    -np.pi, np.pi, self.n_freqs).astype(np.float32)
-                cng_spec = cng_mag * np.exp(1j * cng_phase)
-                enhanced_spec = enhanced_spec + cng_spec.astype(np.complex64)
+        # --- CNG: AEC3-style comfort noise crossfade ---
+        # cn_gain = sqrt(1 - G²): as suppression deepens, more comfort noise fills in
+        # This prevents unnatural silence during deep echo suppression
+        if self.enable_cng and np.sum(self.noise_psd) > 0:
+            cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0))
+            noise_mag = np.sqrt(self.noise_psd + 1e-10).astype(np.float32)
+            cng_phase = np.random.uniform(
+                -np.pi, np.pi, self.n_freqs).astype(np.float32)
+            cng_spec = (cn_gain * noise_mag * np.exp(1j * cng_phase)).astype(np.complex64)
+            enhanced_spec = enhanced_spec + cng_spec
 
         enhanced_time = np.fft.irfft(enhanced_spec, self.block_size)[:self.frame_size]
         enhanced_time *= self.window
