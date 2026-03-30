@@ -648,9 +648,6 @@ class PBFDKF(PBFDAF):
         self.R = self.R * R_scale
 
         # Q modulation: reduce Q during DT (Kalman-specific, not in NLMS)
-        # DT: large error from nearend → Q should be low (don't interpret as echo path change)
-        # FS: normal Q for tracking echo path changes
-        mu_mean = float(np.mean(mu_scale_arr))
         q_scale = 0.1 + 0.9 * mu_mean  # FS: 1.0, strong DT: 0.1
         Q_modulated = self.Q * q_scale
 
@@ -1003,7 +1000,7 @@ class ResFilter:
 
         if far_power < 1e-4:
             self.echo_psd *= 0.3  # fast decay during far-end silence
-            # Track noise floor for CNG during far-end silence
+            # Track noise floor during far-end silence (echo-free)
             if self.enable_cng:
                 self.noise_psd = np.minimum(
                     self.alpha_noise * self.noise_psd
