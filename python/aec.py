@@ -1229,11 +1229,16 @@ class ResFilter:
         # far_activity low (far-end silent) → fast release (TC≈25ms)
         alpha_release = 0.4 + 0.5 * self.far_activity
 
-        # Attack alpha: fast when echo-dominant, slow when nearend (protect speech)
-        if self._nearend_state:
-            alpha_attack = 0.85 + 0.1 * (1.0 - erle_factor)  # 0.85-0.95 (very slow, max speech protection)
-        else:
-            alpha_attack = 0.3 + 0.2 * (1.0 - erle_factor)   # 0.3-0.5 (fast, suppress echo)
+        # Attack alpha: continuous blend based on far_activity and dt_indicator
+        # far_activity high + low dt → fast attack (FS: suppress echo quickly)
+        # far_activity high + high dt → slow attack (DT: protect speech)
+        # far_activity low → slow attack (NE: don't suppress)
+        # This avoids binary nearend_state dependency
+        # DT weighting: power 2.0 for balanced FS/DT trade-off
+        fs_confidence = self.far_activity * (1.0 - dt_indicator) ** 2.0
+        alpha_fast = 0.3 + 0.2 * (1.0 - erle_factor)   # 0.3-0.5
+        alpha_slow = 0.85 + 0.1 * (1.0 - erle_factor)  # 0.85-0.95
+        alpha_attack = alpha_slow + (alpha_fast - alpha_slow) * fs_confidence
         alpha_g = np.where(g < self.gain_smooth, alpha_attack, alpha_release)
         smoothed = alpha_g * self.gain_smooth + (1 - alpha_g) * g
 
