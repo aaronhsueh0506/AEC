@@ -643,8 +643,6 @@ class PBFDKF(PBFDAF):
         self.R = np.maximum(self._error_psd, self.delta)
 
         # Adaptive R: scale by mu_scale to break R-deadlock
-        # FS (mu_scale≈1): R × 0.3 → K large → adapt aggressively
-        # DT (mu_scale≈0.05): R × 1.0 → K small → protect weights
         mu_mean = float(np.mean(mu_scale_arr))
         R_scale = 0.3 + 0.7 * (1.0 - mu_mean)
         self.R = self.R * R_scale
@@ -1125,10 +1123,13 @@ class ResFilter:
         if self.gain_type == "enr" and residual_echo_psd is not None:
             # ENR masking with two-tuning (cf. AEC3 suppressor)
             nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0)
-            enr = residual_echo_psd / (nearend_est + 1.0)
+            # ENR: adaptive offset scaled to signal level
+            # +1.0 is too large for our PSD scale (0.01-10) → enr always < 1
+            # Use fraction of error_psd as offset to maintain proper ENR dynamic range
+            enr_offset = np.mean(self.error_psd) * 0.01 + eps
+            enr = residual_echo_psd / (nearend_est + enr_offset)
 
             # --- Dominant nearend detection ---
-            # Use ENR with corrected echo estimate for detection
             hf_start = min(8, self.n_freqs // 4)
             avg_enr = float(np.mean(enr[hf_start:]))
             NE_ENR_THRESHOLD = 0.4
@@ -1136,7 +1137,6 @@ class ResFilter:
             NE_TRIGGER_FRAMES = 12
             NE_HOLD_FRAMES = 30
 
-            # NE singletalk fast-path: no far-end → immediately protect near-end
             if far_power < 1e-4:
                 self._nearend_state = True
                 self._ne_detect_hold = NE_HOLD_FRAMES
