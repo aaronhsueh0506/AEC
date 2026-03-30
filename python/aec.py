@@ -199,13 +199,13 @@ class AecConfig:
                 res_alpha_echo_psd=0.5,
                 res_alpha_error_psd=0.6,
                 res_enr_scale=1.0,
-                # RES
+                # RES suppression (lightest)
                 res_g_min_db=-35.0,
                 res_over_sub_base=2.5,
                 res_over_sub_scale=4.0,
                 res_dt_reduction=3.5,
                 res_spectral_floor_db=-25.0,
-                res_ne_protect_db=-12.0,
+                res_ne_protect_db=-10.0,
                 shadow_q_ratio=3.0,
                 # Adaptive filter
                 shadow_mu_min=0.5,
@@ -223,7 +223,7 @@ class AecConfig:
                 res_alpha_echo_psd=0.4,
                 res_alpha_error_psd=0.5,
                 res_enr_scale=0.85,
-                # RES
+                # RES suppression (balanced echo/speech trade-off)
                 res_g_min_db=-55.0,
                 res_over_sub_base=5.0,
                 res_over_sub_scale=9.0,
@@ -247,13 +247,13 @@ class AecConfig:
                 res_alpha_echo_psd=0.3,
                 res_alpha_error_psd=0.4,
                 res_enr_scale=0.7,
-                # RES
-                res_g_min_db=-60.0,
-                res_over_sub_base=6.0,
-                res_over_sub_scale=10.0,
-                res_dt_reduction=1.0,
-                res_spectral_floor_db=-40.0,
-                res_ne_protect_db=-20.0,
+                # RES suppression (stronger echo suppression)
+                res_g_min_db=-65.0,
+                res_over_sub_base=7.0,
+                res_over_sub_scale=12.0,
+                res_dt_reduction=1.5,
+                res_spectral_floor_db=-45.0,
+                res_ne_protect_db=-22.0,
                 shadow_q_ratio=4.0,
                 # Adaptive filter
                 shadow_mu_min=0.7,
@@ -271,13 +271,13 @@ class AecConfig:
                 res_alpha_echo_psd=0.2,
                 res_alpha_error_psd=0.3,
                 res_enr_scale=0.5,
-                # RES
+                # RES suppression (maximum, significant near-end impact)
                 res_g_min_db=-72.0,
                 res_over_sub_base=10.0,
                 res_over_sub_scale=15.0,
-                res_dt_reduction=0.0,
-                res_spectral_floor_db=-50.0,
-                res_ne_protect_db=-35.0,
+                res_dt_reduction=0.5,
+                res_spectral_floor_db=-55.0,
+                res_ne_protect_db=-30.0,
                 shadow_q_ratio=5.0,
                 # Adaptive filter
                 shadow_mu_min=0.9,

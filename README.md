@@ -1,6 +1,25 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v1.21.0），Python 支援四種濾波器模式，搭配 PBFDKF（頻域卡爾曼濾波器）、Shadow Filter 和殘餘回音抑制 (RES)。RES v2 採用 ENR masking 增益（仿 AEC3）+ direct echo estimation + reverb tail（render signal 估計）+ divergence suppression。v1.21.0 新增 PBFDAF/PBFDKF 類別分離、NE singletalk 保護、EPC P_MAX override、per-bin echo boost。支援四級 Preset（MILD / BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
+回音消除模組（v1.27.0），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Shadow Filter 和 AEC3-style RES（殘餘回音抑制）。
+
+**v1.27.0 主要改進**：
+- **ENR offset 修正**：修復導致 RES gain 無法到達 g_min 的嚴重 bug（FS echo +0.17）
+- **AEC3-style ENR**：`echo/error` 公式取代 `echo/(error-echo+offset)`，更穩定
+- **Continuous attack speed**：用 `far_activity × (1-dt)²` 取代 binary nearend_state
+- **CNG crossfade**：`cn_gain = sqrt(1-G²)`，深壓制時填充 comfort noise
+- **Kalman R-deadlock fix**：adaptive R scaling + Q_low 1e-5 防止 P 萎縮
+- **Fixed g_min**：gain floor 不受 far_activity 影響（AEC3 style）
+- **EMR noise masking**：echo < noise floor 的 bin 不壓制
+
+**Blind test 成績（fl=512, BALANCED preset, AEC Challenge 2021）**：
+| 指標 | v1.18.0 | v1.27.0 | AEC3 |
+|------|---------|---------|------|
+| FS echo_mos | 3.210 | **3.709** | 3.963 |
+| DT echo_mos | 4.000 | **4.273** | 4.440 |
+| DT deg_mos | 2.215 | **2.187** | 2.258 |
+| NE deg_mos | 4.018 | **4.005** | 3.530 |
+
+支援四級 Preset（MILD / BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
 > C 實作已對齊 Python v1.17.0：PBFDKF（Kalman P_init/P_MAX/Q gating/far-end gate 修正）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + Preset，詳見 [c_impl/README.md](c_impl/README.md)。
 

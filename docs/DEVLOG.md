@@ -2,6 +2,33 @@
 
 ## 版本歷史
 
+### v1.27.0 (2026-03-31) - AEC3-Style RES + Continuous Attack + CNG Crossfade
+
+**Architecture improvements (v1.25-v1.27):**
+- ENR formula: `echo/(error-echo+offset)` → `echo/error` (AEC3 style, no subtraction)
+- Continuous attack speed: `fs_confidence = far_activity × (1-dt)²` replaces binary nearend_state
+- CNG crossfade: `cn_gain = sqrt(1 - G²)` fills suppressed regions with comfort noise
+- EMR noise masking: don't suppress echo below noise floor
+- Q modulation: Q × (0.1 + 0.9 × mu) during DT
+- Preset recalibration for new ENR scale
+
+**Tested but reverted/ineffective:**
+- noise_psd continuous tracking: hurt FS echo -0.24 (noise level too high during far-end active)
+- R alpha adaptive (0.98-0.10×mu): marginal effect
+- NE_TRIGGER_FRAMES 5: no benefit vs 12
+- filter_length 1024: +0.003 FS echo vs 512, not worth cost
+- coh2-based nearend detection: coh2 too low in FS (0.1-0.19)
+- filter-based |H(f)|² path gain: too small at fl=512
+- Audibility weighting: FS echo -0.02
+
+**Final blind test (fl=512, preset balanced):**
+| Metric | v1.18.0 (original) | v1.27.0 | Change | AEC3 |
+|--------|-------------------|---------|--------|------|
+| FS echo_mos | 3.210 | **3.709** | **+0.499** | 3.963 |
+| DT echo_mos | 4.000 | **4.273** | **+0.273** | 4.440 |
+| DT deg_mos | 2.215 | **2.187** | -0.028 | 2.258 |
+| NE deg_mos | 4.018 | **4.005** | -0.013 | 3.530 |
+
 ### v1.24.0 (2026-03-30) - RES Suppression Breakthrough
 
 **Critical bug fix: ENR offset +1.0 → adaptive (committed in v1.23.0)**

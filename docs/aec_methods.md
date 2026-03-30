@@ -1607,21 +1607,21 @@ if nearend_state AND far_power < 1e-4:
 RES v2 透過四個 preset 控制抑制強度與語音保護的平衡。
 所有 preset 預設使用 `echo_method="direct"` + `gain_type="enr"` + `enable_reverb=True`。
 
-#### 完整參數表
+#### 完整參數表（v1.27.0 更新）
 
 | 參數 | Mild | Balanced | Aggressive | Maximum | 說明 |
 |------|------|----------|------------|---------|------|
-| g_min_db | -35 | -45 | -60 | -72 | 最小增益限制 (dB) |
-| over_sub_base | 2.5 | 4.0 | 6.0 | 10.0 | 過減因子基準 |
-| over_sub_scale | 4.0 | 7.0 | 10.0 | 15.0 | 過減因子收斂後 scale |
+| g_min_db | -35 | -55 | -65 | -72 | 最小增益限制 (dB)，固定值不受 far_activity 影響 |
+| over_sub_base | 2.5 | 5.0 | 7.0 | 10.0 | 過減因子基準（未收斂時） |
+| over_sub_scale | 4.0 | 9.0 | 12.0 | 15.0 | 過減因子收斂後 scale |
 | enr_scale | 1.0 | 0.85 | 0.7 | 0.5 | ENR threshold 縮放（越小越 aggressive） |
 | reverb_decay | 0.6 | 0.65 | 0.7 | 0.8 | 混響衰減（越大→混響持續越久） |
 | reverb_gain | 0.8 | 1.4 | 2.0 | 3.0 | 混響 PSD 加成倍率 |
-| dt_reduction | 3.5 | 2.0 | 1.0 | 0.0 | DT 時 over_sub 降低量 |
+| dt_reduction | 3.5 | 2.5 | 1.5 | 0.5 | DT 時 over_sub 降低量 |
 | alpha_echo_psd | 0.5 | 0.4 | 0.3 | 0.2 | Echo PSD 平滑 α（越小→追蹤越快） |
 | alpha_error_psd | 0.6 | 0.5 | 0.4 | 0.3 | Error PSD 平滑 α |
-| spectral_floor_db | -25 | -32 | -40 | -50 | Spectral floor 強度 (dB) |
-| ne_protect_db | -12 | -16 | -20 | -35 | NE gate 保護上限 (dB) |
+| spectral_floor_db | -25 | -38 | -45 | -55 | Spectral floor 強度 (dB) |
+| ne_protect_db | -10 | -16 | -22 | -30 | NE gate 保護上限 (dB) |
 
 #### Preset 選擇指引
 
