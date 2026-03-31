@@ -890,10 +890,6 @@ class ResFilter:
         # Far-end activity tracking for dynamic g_min
         self.far_activity = 0.0
 
-        # NL echo path gain tracking: near_psd / far_psd
-        self._echo_path_gain = np.full(n_freqs, 1.0, dtype=np.float32)
-        self._echo_path_gain_alpha = 0.95
-
         # Anti-blackout: gain rate limiting
         self.max_drop_ratio = 10 ** (max_drop_db_per_frame / 20)  # e.g., 6dB → 1.995
         self.max_rise_ratio = 10 ** (max_rise_db_per_frame / 20)  # e.g., 3dB → 1.413
@@ -1024,10 +1020,6 @@ class ResFilter:
         # (AEC3 style — gain is purely ENR-driven, not activity-gated)
         effective_g_min = self.g_min
 
-        # fs_confidence: continuous FS/DT/NE indicator
-        # Used by NL echo floor, ENR two-tuning, ne_g_floor, attack speed, LF rate limit
-        fs_confidence = self.far_activity * (1.0 - dt_indicator) ** 2.0
-
         # --- Noise gate: don't suppress quiet segments ---
         signal_floor = np.mean(self.error_psd) * 0.001 + 1e-8
         quiet_mask = ((self.echo_psd < signal_floor)
@@ -1076,21 +1068,6 @@ class ResFilter:
                 # Per-bin: coh2 as soft FS/DT indicator (no binary switch)
                 echo_floor = self.error_psd * coh2 * ef_fade * self.far_activity
                 direct_est = np.maximum(direct_est, echo_floor)
-            # NL echo floor: far_psd × path_gain, gated by fs_confidence
-            if far_spec is not None and far_power > 1e-4:
-                far_psd_nl = np.abs(far_spec) ** 2 + 1e-10
-                # Update path_gain: EMA of near_psd/far_psd (only during high fs_confidence)
-                inst_pg = self.near_psd / far_psd_nl
-                a = self._echo_path_gain_alpha
-                pg_update = a * self._echo_path_gain + (1 - a) * inst_pg
-                # Blend update: FS → full update, DT → freeze (near_psd contaminated)
-                self._echo_path_gain = (fs_confidence * pg_update
-                                        + (1 - fs_confidence) * self._echo_path_gain)
-                # NL echo floor gated by fs_confidence
-                nl_echo = far_psd_nl * self._echo_path_gain
-                nl_weight = fs_confidence * (1.0 - erle_factor * 0.5)
-                direct_est = np.maximum(direct_est, nl_echo * nl_weight)
-
             residual_echo_psd = (1.0 - erle_factor) * direct_est + erle_factor * erle_est
 
             # Add reverb tail if enabled
@@ -1137,6 +1114,9 @@ class ResFilter:
         # coh2 high (echo bin) → ne_protection≈0 → allow full suppression
         # coh2 low (near-end bin) → ne_protection≈1 → raise floor to protect
         # Pre-convergence: moderate protection for all presets
+        # fs_confidence: continuous FS/DT/NE indicator
+        # Used by ENR two-tuning, ne_g_floor, attack speed, LF rate limit
+        fs_confidence = self.far_activity * (1.0 - dt_indicator) ** 2.0
 
         # --- Per-bin near-end gate with fs_confidence ---
         if erle_factor < 0.3:
@@ -1262,7 +1242,8 @@ class ResFilter:
         # far_activity high + high dt → slow attack (DT: protect speech)
         # far_activity low → slow attack (NE: don't suppress)
         # This avoids binary nearend_state dependency
-        # fs_confidence already computed earlier (before residual echo PSD)
+        # DT weighting: power 2.0 for balanced FS/DT trade-off
+        fs_confidence = self.far_activity * (1.0 - dt_indicator) ** 2.0
         alpha_fast = 0.3 + 0.2 * (1.0 - erle_factor)   # 0.3-0.5
         alpha_slow = 0.85 + 0.1 * (1.0 - erle_factor)  # 0.85-0.95
         alpha_attack = alpha_slow + (alpha_fast - alpha_slow) * fs_confidence
