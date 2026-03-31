@@ -113,9 +113,9 @@ class AecConfig:
 
     # PBFDKF (Partitioned Block Frequency Domain Kalman Filter) — faster convergence than NLMS
     use_kalman: bool = True           # True=PBFDKF, False=PBFDAF (NLMS)
-    kalman_q_high: float = 1e-3       # PBFDKF Q_high convergence speed (post Kalman bug fix)
+    kalman_q_high: float = 1e-3     # PBFDKF Q_high convergence speed
     kalman_q_low: float = 1e-5        # PBFDKF Q_low stable tracking (1e-7→P dies)
-    warmup_frames: int = 80           # Frames with forced high mu at startup
+    warmup_frames: int = 80          # Frames with forced high mu at startup
 
     # Echo path change detection (requires shadow filter)
     epc_delta_threshold: float = 0.3    # |ΔE/total_E| < threshold → echo change
@@ -683,9 +683,7 @@ class PBFDKF(PBFDAF):
                 self._p_max_override = 0.02
                 del self._p_max_override_frames
 
-        # Bug 1 fix: compute global denominator (sum over ALL partitions)
-        # Innovation variance = Σ_p P[p] × |X_p|² + R
-        # Old code only used one partition → K was ~n_partitions× too large
+        # Global denominator: sum over ALL partitions (correct Kalman theory)
         total_echo_var = np.zeros(self.n_freqs, dtype=np.float32)
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
@@ -697,12 +695,9 @@ class PBFDKF(PBFDAF):
             p_idx = (curr_p - p) % self.n_partitions
             X = self.X_buf[p_idx]
 
-            # Kalman gain with correct global denominator
             K_optimal = (self.P[p] * np.conj(X)) / denominator
 
             # Bug 2 fix: separate K for weights (scaled) and P update (unscaled)
-            # Covariance update must use unscaled K (Kalman theory)
-            # mu_scale only affects weight update, not error covariance
             K_scaled = K_optimal * mu_scale_arr
 
             self.W[p] += K_scaled * self.error_spec
@@ -1095,19 +1090,18 @@ class ResFilter:
                 self.erle_per_bin = np.maximum(self.erle_per_bin, 1.0)
 
             # Residual echo PSD: blend two estimates based on convergence
-            # 1) echo_psd / erle_per_bin: good when ERLE is well estimated (converged)
-            # 2) echo_psd directly: conservative upper bound (always available)
+            # Residual echo PSD: blend direct + ERLE-corrected estimates
             erle_est = self.echo_psd / self.erle_per_bin
             direct_est = self.echo_psd
-            # Pre-convergence echo floor using coh2-weighted error_psd
-            # coh2 high → echo bin → error ≈ residual echo → use as floor
-            # coh2 low → nearend bin → error includes speech → don't use
-            # This avoids the binary nearend_state problem
-            if erle_factor < 0.5 and far_power > 1e-4:
-                ef_fade = 1.0 - erle_factor * 2.0  # 1.0 at ef=0, 0.0 at ef=0.5
-                # Per-bin: coh2 as soft FS/DT indicator (no binary switch)
-                echo_floor = self.error_psd * coh2 * ef_fade * self.far_activity
-                direct_est = np.maximum(direct_est, echo_floor)
+
+            # Coherence-based nonlinear echo floor (always active, no erle_factor gate)
+            # Non-linear echo survives FDKF but correlates with far-end → coh2 high
+            # Applied to BOTH direct_est AND erle_est to prevent ERLE division trap
+            if far_power > 1e-4:
+                nonlinear_floor = self.error_psd * coh2 * self.far_activity
+                direct_est = np.maximum(direct_est, nonlinear_floor)
+                erle_est = np.maximum(erle_est, nonlinear_floor)
+
             residual_echo_psd = (1.0 - erle_factor) * direct_est + erle_factor * erle_est
 
             # Add reverb tail if enabled
