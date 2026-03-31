@@ -332,9 +332,9 @@ int pbfdkf_process(Pbfdkf* f,
         output[n] = f->near_buffer[hop + n] - f->temp_time[hop + n];
     }
 
-    /* Error spectrum: zero-pad to fft_size, valid region at end */
+    /* Error spectrum: zero-pad to fft_size, valid region at [hop, block_size) */
     memset(f->temp_time, 0, fft_sz * sizeof(float));
-    memcpy(f->temp_time + fft_sz - hop, output, hop * sizeof(float));
+    memcpy(f->temp_time + hop, output, hop * sizeof(float));
     fft_forward(f->fft, f->temp_time, f->error_spec);
 
     /* Far-end activity gate: skip update when ref is silent */
