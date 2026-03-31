@@ -237,7 +237,8 @@ static inline void wav_write_float(WavWriter* w, const float* buf, int n) {
         if (sample > 1.0f) sample = 1.0f;
         if (sample < -1.0f) sample = -1.0f;
 
-        int16_t s16 = (int16_t)(sample * 32767.0f);
+        float scaled = sample * 32768.0f;
+        int16_t s16 = (int16_t)(scaled >= 0 ? scaled + 0.5f : scaled - 0.5f);
         fwrite(&s16, 2, 1, w->fp);
         w->samples_written++;
     }
