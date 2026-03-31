@@ -113,9 +113,9 @@ class AecConfig:
 
     # PBFDKF (Partitioned Block Frequency Domain Kalman Filter) — faster convergence than NLMS
     use_kalman: bool = True           # True=PBFDKF, False=PBFDAF (NLMS)
-    kalman_q_high: float = 6e-4       # PBFDKF Q_high convergence speed (post Kalman bug fix)
+    kalman_q_high: float = 1e-3       # PBFDKF Q_high convergence speed (post Kalman bug fix)
     kalman_q_low: float = 1e-5        # PBFDKF Q_low stable tracking (1e-7→P dies)
-    warmup_frames: int = 100          # Frames with forced high mu at startup
+    warmup_frames: int = 80           # Frames with forced high mu at startup
 
     # Echo path change detection (requires shadow filter)
     epc_delta_threshold: float = 0.3    # |ΔE/total_E| < threshold → echo change
@@ -210,8 +210,8 @@ class AecConfig:
                 shadow_q_ratio=3.0,
                 # Adaptive filter
                 shadow_mu_min=0.5,
-                warmup_frames=150,
-                kalman_q_high=8e-4,
+                warmup_frames=80,
+                kalman_q_high=1.5e-3,
             )
         elif preset == AecPreset.BALANCED:
             defaults = dict(
@@ -234,8 +234,8 @@ class AecConfig:
                 shadow_q_ratio=3.5,
                 # Adaptive filter
                 shadow_mu_min=0.6,
-                warmup_frames=150,
-                kalman_q_high=6e-4,
+                warmup_frames=80,
+                kalman_q_high=1e-3,
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
@@ -258,8 +258,8 @@ class AecConfig:
                 shadow_q_ratio=4.0,
                 # Adaptive filter
                 shadow_mu_min=0.7,
-                warmup_frames=150,
-                kalman_q_high=4e-4,
+                warmup_frames=80,
+                kalman_q_high=7e-4,
             )
         elif preset == AecPreset.MAXIMUM:
             defaults = dict(
@@ -282,8 +282,8 @@ class AecConfig:
                 shadow_q_ratio=5.0,
                 # Adaptive filter
                 shadow_mu_min=0.9,
-                warmup_frames=200,
-                kalman_q_high=4e-4,
+                warmup_frames=100,
+                kalman_q_high=7e-4,
             )
         else:
             defaults = {}
@@ -556,9 +556,13 @@ class PBFDAF:
         curr_p = self.partition_idx
         self.X_buf[curr_p] = far_spec
 
-        # Update power estimate
-        self.power = (self.alpha_power * self.power +
-                     (1 - self.alpha_power) * np.abs(far_spec) ** 2)
+        # Update power estimate (cold start: initialize directly on first active frame)
+        far_psd = np.abs(far_spec) ** 2
+        if np.sum(self.power) < 1e-10 and np.sum(far_psd) > 1e-10:
+            self.power = far_psd.astype(np.float32)
+        else:
+            self.power = (self.alpha_power * self.power +
+                         (1 - self.alpha_power) * far_psd)
 
         # Compute echo estimate
         self.echo_spec.fill(0)
@@ -2069,7 +2073,7 @@ class AEC:
                             for filt in [self.filter, self.shadow_filter]:
                                 if filt is not None and hasattr(filt, 'Q'):
                                     filt.Q = filt.Q_high.copy()
-                                    filt._p_max_override = 0.1
+                                    filt._p_max_override = 0.05
                                     filt._p_max_override_frames = 30
                             self._filter_converged = False
                             self._conv_counter = 0
@@ -2223,7 +2227,7 @@ class AEC:
                     # Temporarily relax P_MAX for faster re-convergence
                     for filt in [self.filter, self.shadow_filter]:
                         if filt:
-                            filt._p_max_override = 0.1
+                            filt._p_max_override = 0.05
                             filt._p_max_override_frames = 30
                 elif self.epc_hangover_count > 0:
                     self.epc_hangover_count -= 1
