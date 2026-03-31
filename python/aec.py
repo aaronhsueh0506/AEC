@@ -114,7 +114,7 @@ class AecConfig:
     # PBFDKF (Partitioned Block Frequency Domain Kalman Filter) — faster convergence than NLMS
     use_kalman: bool = True           # True=PBFDKF, False=PBFDAF (NLMS)
     kalman_q_high: float = 1e-4       # PBFDKF Q_high convergence speed (1e-3 causes weight jitter)
-    kalman_q_low: float = 1e-5        # PBFDKF Q_low stable tracking (1e-7 too small → P dies)
+    kalman_q_low: float = 1e-5        # PBFDKF Q_low stable tracking (1e-7→P dies)
     warmup_frames: int = 100          # Frames with forced high mu at startup
 
     # Echo path change detection (requires shadow filter)
@@ -495,6 +495,15 @@ class PBFDAF:
         self.alpha_power = 0.9
         self.enable_td_constraint = True  # can be disabled for diagnosis
 
+        # Time-domain constraint window: raised cosine fade at truncation edge
+        # Eliminates Gibbs ringing from hard truncation at hop_size/block_size boundary
+        # (hop=160, block=512 → 31.25% truncation ratio, needs smooth transition)
+        self._td_window = np.ones(block_size, dtype=np.float32)
+        fade_len = min(16, self.hop_size // 4)
+        fade = 0.5 * (1.0 - np.cos(np.pi * np.arange(fade_len) / fade_len))
+        self._td_window[self.hop_size - fade_len:self.hop_size] = fade[::-1].astype(np.float32)
+        self._td_window[self.hop_size:] = 0.0
+
         # Filter weights [n_partitions, n_freqs]
         self.W = np.zeros((n_partitions, self.n_freqs), dtype=np.complex64)
 
@@ -590,10 +599,10 @@ class PBFDAF:
             p_idx = (curr_p - p) % self.n_partitions
             grad = self.error_spec * np.conj(self.X_buf[p_idx])
             self.W[p] += mu_eff * grad
-            # Time-domain constraint: zero out non-causal part
+            # Time-domain constraint: fade out non-causal part (raised cosine)
             if self.enable_td_constraint:
                 w_time = np.fft.irfft(self.W[p], self.block_size)
-                w_time[self.hop_size:] = 0
+                w_time *= self._td_window
                 self.W[p] = np.fft.rfft(w_time)
 
     def get_error_energy(self) -> float:
@@ -687,10 +696,10 @@ class PBFDKF(PBFDAF):
                 p_max
             )
 
-            # Time-domain constraint
+            # Time-domain constraint (raised cosine fade)
             if self.enable_td_constraint:
                 w_time = np.fft.irfft(self.W[p], self.block_size)
-                w_time[self.hop_size:] = 0
+                w_time *= self._td_window
                 self.W[p] = np.fft.rfft(w_time)
 
     def copy_weights_from(self, src: 'PBFDAF'):
@@ -1299,7 +1308,14 @@ class ResFilter:
         # This prevents unnatural silence during deep echo suppression
         if self.enable_cng and np.sum(self.noise_psd) > 0:
             cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0))
-            noise_mag = np.sqrt(self.noise_psd + 1e-10).astype(np.float32)
+            # Heavy spectral smoothing on noise_psd: remove tonal/echo residual
+            # patterns, keep only broadband noise floor. Without this, CNG
+            # replays the echo spectral shape → reverb artifact.
+            smooth_noise = self.noise_psd.copy()
+            for _ in range(3):  # 3 passes of 5-bin averaging
+                kernel = np.ones(5, dtype=np.float32) / 5.0
+                smooth_noise = np.convolve(smooth_noise, kernel, mode='same').astype(np.float32)
+            noise_mag = np.sqrt(smooth_noise + 1e-10).astype(np.float32)
             cng_phase = np.random.uniform(
                 -np.pi, np.pi, self.n_freqs).astype(np.float32)
             cng_spec = (cn_gain * noise_mag * np.exp(1j * cng_phase)).astype(np.complex64)
