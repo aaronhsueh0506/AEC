@@ -6,21 +6,28 @@
 
 ## 成績對比
 
-### Blind Test（AEC Challenge 2021, 800 cases, fl=512, BALANCED preset）
+### Blind Test（AEC Challenge Interspeech 2021, 800 cases, fl=512）
 
-| 指標 | v1.18.0 | v1.27.0 | v1.28.0 | 變化(total) | AEC3 | vs AEC3 |
-|------|---------|---------|---------|------------|------|---------|
-| FS echo_mos | 3.210 | 3.709 | **3.713** | **+0.503** | 3.963 | -0.250 |
-| DT echo_mos | 4.000 | 4.273 | **4.370** | **+0.370** | 4.440 | -0.070 |
-| DT deg_mos | 2.215 | 2.187 | **2.092** | -0.123 | 2.258 | -0.166 |
-| NE deg_mos | 4.018 | 4.005 | **3.996** | -0.022 | 3.530 | **+0.466** |
+#### 全 Preset + Benchmark 比較（Overall）
 
-### AEC Challenge（15 files, fl=512, BALANCED preset）
+| Method | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
+|--------|----------|----------|---------|---------|
+| Speex | 2.808 | 3.368 | 3.225 | 4.128 |
+| Old WebRTC AEC | 3.484 | 4.262 | 2.389 | 4.098 |
+| **mild** | 3.420 | 4.105 | **2.257** | 4.005 |
+| **balanced** | 3.710 | 4.368 | 2.093 | 3.997 |
+| **aggressive** | 3.830 | 4.468 | 2.051 | 3.990 |
+| **maximum** | **3.951** | 4.527 | 2.044 | 3.976 |
+| WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
 
-| 指標 | v1.18.0 | v1.27.0 | AEC3 |
-|------|---------|---------|------|
-| FS echo_mos | 3.210 | 3.34 | 3.39 |
-| DT deg_mos | 3.21 | 3.11 | 3.13 |
+#### balanced 版本演進
+
+| 指標 | v1.18.0 | v1.27.0 | v1.28.1 | 變化(total) | AEC3 |
+|------|---------|---------|---------|------------|------|
+| FS echo | 3.210 | 3.709 | **3.710** | **+0.500** | 3.875 |
+| DT echo | 4.000 | 4.273 | **4.368** | **+0.368** | 4.538 |
+| DT deg | 2.215 | 2.187 | **2.093** | -0.122 | 1.850 |
+| NE deg | 4.018 | 4.005 | **3.997** | -0.021 | 3.454 |
 
 ---
 
@@ -226,6 +233,35 @@ g = (1 - erle_factor) * g_coh + erle_factor * g_enr
 ```
 **結果**: FS echo -0.50
 **原因**: coh2 在 FS 太低（0.15）→ g_coh ≈ 0.53 → 壓不下去
+
+### Masked ERLE 收斂偵測（方向三）
+```python
+# 只看高 coupling bin 的 ERLE，避免低 coupling bin 拖累 broadband
+high_far_mask = far_psd_bin > far_mean * 0.3
+masked_erle_db = 10 * log10(mean(near[mask]) / mean(error[mask]))
+```
+**結果**: 收斂率 24%→67%，但 Type A（低 coupling）大量誤觸發
+**原因**: Kalman overfit noise → broadband ERLE 在 Type A 也高達 16.6dB
+嘗試 coupling_ratio / echo_frac / coherence gate 均無法區分 Type A 和 Type B
+
+### FilterErleEstimator / Multi-ERLE Phase 1（方向一）
+```python
+erle_L1[k] = |echo_spec[k]|² / |error_spec[k]|²
+per_bin_conv[k] = clip((erle_L1[k] - 1.0) / 9.0, 0, 1)
+residual[k] = (1-per_bin_conv[k]) * direct_est + per_bin_conv[k] * erle_est
+```
+**結果**: FS echo -0.047（退步）
+**原因**: erle_L1 同樣被 Kalman noise overfit 污染。低 coupling case（Type A）
+的 erle_L1 mean=8.0（比高 coupling case 的 1.3 還高）。Kalman 把 noise 當
+echo 消除 → echo_spec 增大、error_spec 減小 → erle_L1 失真。
+
+### 收斂偵測根本問題
+**診斷**: 300 FS cases 中只有 24% (73 cases) 通過 10dB×10 frames 收斂。
+分類：Converged 73 (24%), Type A (coupling<3dB) 160 (53%), Type B (coupling≥3dB, 未收斂) 67 (22%)。
+**根本限制**: Kalman filter noise overfit 讓所有基於 filter I/O 的指標
+（echo_spec, error_spec, ERLE, coupling_ratio）在 Type A 和 Type B 之間
+無法可靠區分。echo_spec 包含 noise 成分，erle_L1 / masked_erle / coupling_est
+都被污染。目前無法通過放寬收斂條件來只選擇性地讓 Type B 收斂。
 
 ---
 

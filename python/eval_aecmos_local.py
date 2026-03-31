@@ -195,7 +195,13 @@ def main():
             continue
         print(f"\nScoring {len(cases)} {subdir} cases with AECMOS...")
         results = eval_aecmos(cases, talk_type, estimator)
+        # Split by movement
+        results_nomove = [r for r, c in zip(results, cases) if '_with_movement' not in c['stem']]
+        results_move = [r for r, c in zip(results, cases) if '_with_movement' in c['stem']]
         print_results(f"{subdir.upper()} — AECMOS", results)
+        if results_nomove and results_move:
+            print_results(f"{subdir.upper()} (no movement) — AECMOS", results_nomove)
+            print_results(f"{subdir.upper()} (with movement) — AECMOS", results_move)
 
 
 if __name__ == '__main__':

@@ -39,12 +39,39 @@ except ImportError:
 
 # WebRTC AEC3 CLI
 import subprocess, tempfile
-AEC3_CLI = '/tmp/webrtc-ap/aec3_cli'
+_BIN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bin')
+AEC3_CLI = os.path.join(_BIN_DIR, 'aec3_cli')
+if not os.path.isfile(AEC3_CLI):
+    AEC3_CLI = '/tmp/webrtc-ap/aec3_cli'
 HAS_AEC3 = os.path.isfile(AEC3_CLI) and os.access(AEC3_CLI, os.X_OK)
 
 # WebRTC AEC3 Linear CLI (outputs both full and linear-only)
-AEC3_LINEAR_CLI = '/tmp/webrtc-ap/aec3_linear_cli'
+AEC3_LINEAR_CLI = os.path.join(_BIN_DIR, 'aec3_linear_cli')
+if not os.path.isfile(AEC3_LINEAR_CLI):
+    AEC3_LINEAR_CLI = '/tmp/webrtc-ap/aec3_linear_cli'
 HAS_AEC3_LINEAR = os.path.isfile(AEC3_LINEAR_CLI) and os.access(AEC3_LINEAR_CLI, os.X_OK)
+
+# WebRTC old AEC (AEC2) CLI
+OLD_AEC_CLI = os.path.join(_BIN_DIR, 'old_aec_cli')
+HAS_OLD_AEC = os.path.isfile(OLD_AEC_CLI) and os.access(OLD_AEC_CLI, os.X_OK)
+
+
+def run_old_aec(mic_path, ref_path, sr):
+    """Run WebRTC old AEC (AEC2)."""
+    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+        out_path = f.name
+    try:
+        r = subprocess.run([OLD_AEC_CLI, mic_path, ref_path, out_path],
+                           capture_output=True, timeout=30)
+        if r.returncode == 0 and os.path.isfile(out_path):
+            data, _ = sf.read(out_path)
+            return data.astype(np.float32)
+    except Exception:
+        pass
+    finally:
+        if os.path.isfile(out_path):
+            os.unlink(out_path)
+    return None
 
 
 def estimate_delay(mic, ref, sr, max_delay_ms=250.0):
@@ -214,7 +241,7 @@ def compute_pesq(ref, deg, sr):
         return None
 
 
-def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None):
+def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, do_old_aec=False):
     """Evaluate farend_singletalk with ERLE."""
     sc_dir = os.path.join(base_dir, 'farend_singletalk')
     if not os.path.isdir(sc_dir):
@@ -237,10 +264,11 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
     if do_speex: hdr += f" {'Speex':>8}"
     if do_aec3:  hdr += f" {'AEC3':>8}"
     if do_aec3_linear: hdr += f" {'AEC3-Lin':>8}"
+    if do_old_aec: hdr += f" {'OldAEC':>8}"
     print(hdr)
     print("-" * len(hdr))
 
-    erles = {'ours': [], 'speex': [], 'aec3': [], 'aec3_linear': []}
+    erles = {'ours': [], 'speex': [], 'aec3': [], 'aec3_linear': [], 'old_aec': []}
 
     for i, mf in enumerate(mic_files):
         uuid = mf[:mf.index('_farend_singletalk')]
@@ -301,6 +329,18 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
             else:
                 line += f" {'N/A':>8}"
 
+        # Old AEC (AEC2)
+        if do_old_aec:
+            out_oa = run_old_aec(mic_path, lpb_path, sr)
+            if out_oa is not None:
+                out_oa = out_oa[:n]
+                sf.write(os.path.join(out_dir, f"{out_suffix}_old_aec.wav"), out_oa, sr)
+                e_oa = compute_erle(mic, out_oa)
+                erles['old_aec'].append(e_oa)
+                line += f" {e_oa:>8.1f}"
+            else:
+                line += f" {'N/A':>8}"
+
         print(line)
 
     # Summary
@@ -312,10 +352,12 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
         summary += f" {np.mean(erles['aec3']):>8.1f}"
     if do_aec3_linear and erles['aec3_linear']:
         summary += f" {np.mean(erles['aec3_linear']):>8.1f}"
+    if do_old_aec and erles['old_aec']:
+        summary += f" {np.mean(erles['old_aec']):>8.1f}"
     print(summary)
 
 
-def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None):
+def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, do_old_aec=False):
     """Evaluate nearend_singletalk with SDR (near-end preservation)."""
     sc_dir = os.path.join(base_dir, 'nearend_singletalk')
     if not os.path.isdir(sc_dir):
@@ -337,10 +379,11 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
     if do_speex: hdr += f" {'Speex':>8}"
     if do_aec3:  hdr += f" {'AEC3':>8}"
     if do_aec3_linear: hdr += f" {'AEC3-Lin':>8}"
+    if do_old_aec: hdr += f" {'OldAEC':>8}"
     print(hdr)
     print("-" * len(hdr))
 
-    sdrs = {'ours': [], 'speex': [], 'aec3': [], 'aec3_linear': []}
+    sdrs = {'ours': [], 'speex': [], 'aec3': [], 'aec3_linear': [], 'old_aec': []}
 
     for i, mf in enumerate(mic_files):
         uuid = mf[:mf.index('_nearend_singletalk')]
@@ -401,6 +444,18 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
             else:
                 line += f" {'N/A':>8}"
 
+        # Old AEC (AEC2)
+        if do_old_aec:
+            out_oa = run_old_aec(mic_path, lpb_path, sr)
+            if out_oa is not None:
+                out_oa = out_oa[:n]
+                sf.write(os.path.join(out_dir, f"{out_suffix}_old_aec.wav"), out_oa, sr)
+                s_oa = compute_sdr(mic, out_oa)
+                sdrs['old_aec'].append(s_oa)
+                line += f" {s_oa:>8.1f}"
+            else:
+                line += f" {'N/A':>8}"
+
         print(line)
 
     # Summary
@@ -412,10 +467,12 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
         summary += f" {np.mean(sdrs['aec3']):>8.1f}"
     if do_aec3_linear and sdrs['aec3_linear']:
         summary += f" {np.mean(sdrs['aec3_linear']):>8.1f}"
+    if do_old_aec and sdrs['old_aec']:
+        summary += f" {np.mean(sdrs['old_aec']):>8.1f}"
     print(summary)
 
 
-def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None):
+def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, do_old_aec=False):
     """Evaluate doubletalk with ERLE (real recordings from clean test set)."""
     sc_dir = os.path.join(base_dir, 'doubletalk')
     if not os.path.isdir(sc_dir):
@@ -438,10 +495,11 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
     if do_speex: hdr += f" {'Speex':>8}"
     if do_aec3:  hdr += f" {'AEC3':>8}"
     if do_aec3_linear: hdr += f" {'AEC3-Lin':>8}"
+    if do_old_aec: hdr += f" {'OldAEC':>8}"
     print(hdr)
     print("-" * len(hdr))
 
-    erles = {'ours': [], 'speex': [], 'aec3': [], 'aec3_linear': []}
+    erles = {'ours': [], 'speex': [], 'aec3': [], 'aec3_linear': [], 'old_aec': []}
 
     for i, mf in enumerate(mic_files):
         uuid = mf[:mf.index('_doubletalk')]
@@ -502,6 +560,18 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
             else:
                 line += f" {'N/A':>8}"
 
+        # Old AEC (AEC2)
+        if do_old_aec:
+            out_oa = run_old_aec(mic_path, lpb_path, sr)
+            if out_oa is not None:
+                out_oa = out_oa[:n]
+                sf.write(os.path.join(out_dir, f"{out_suffix}_old_aec.wav"), out_oa, sr)
+                e_oa = compute_erle(mic, out_oa)
+                erles['old_aec'].append(e_oa)
+                line += f" {e_oa:>8.1f}"
+            else:
+                line += f" {'N/A':>8}"
+
         print(line)
 
     # Summary
@@ -513,6 +583,8 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
         summary += f" {np.mean(erles['aec3']):>8.1f}"
     if do_aec3_linear and erles['aec3_linear']:
         summary += f" {np.mean(erles['aec3_linear']):>8.1f}"
+    if do_old_aec and erles['old_aec']:
+        summary += f" {np.mean(erles['old_aec']):>8.1f}"
     print(summary)
 
 
@@ -526,19 +598,19 @@ def _run_eval_captured(func, *args, **kwargs):
 
 def _run_scenario(scenario_args):
     """Worker function for parallel execution (must be top-level for pickling)."""
-    func_name, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset = scenario_args
+    func_name, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec = scenario_args
     func = {'fs': eval_farend_singletalk,
             'ne': eval_nearend_singletalk,
             'dt': eval_doubletalk}[func_name]
-    return func_name, _run_eval_captured(func, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=preset)
+    return func_name, _run_eval_captured(func, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=preset, do_old_aec=do_old_aec)
 
 
-def run_scenarios(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, parallel=False):
+def run_scenarios(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, parallel=False, do_old_aec=False):
     """Run all three scenarios, optionally in parallel."""
     scenarios = [
-        ('fs', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset),
-        ('ne', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset),
-        ('dt', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset),
+        ('fs', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec),
+        ('ne', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec),
+        ('dt', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec),
     ]
 
     if parallel:
@@ -553,9 +625,9 @@ def run_scenarios(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pres
             if key in results and results[key]:
                 print(results[key], end='')
     else:
-        eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=preset)
-        eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=preset)
-        eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=preset)
+        eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=preset, do_old_aec=do_old_aec)
+        eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=preset, do_old_aec=do_old_aec)
+        eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=preset, do_old_aec=do_old_aec)
 
 
 def main():
@@ -565,6 +637,7 @@ def main():
     parser.add_argument('--speex', action='store_true', help='Also run SpeexDSP')
     parser.add_argument('--aec3', action='store_true', help='Also run WebRTC AEC3')
     parser.add_argument('--aec3-linear', action='store_true', help='Also run WebRTC AEC3 linear-only')
+    parser.add_argument('--old-aec', action='store_true', help='Also run WebRTC old AEC (AEC2)')
     parser.add_argument('--preset', choices=['mild', 'balanced', 'aggressive', 'maximum'],
                         default=None, help='AEC preset (default: no preset)')
     parser.add_argument('--all-presets', action='store_true',
@@ -583,6 +656,7 @@ def main():
     do_speex = args.speex and HAS_SPEEX
     do_aec3 = args.aec3 and HAS_AEC3
     do_aec3_linear = args.aec3_linear and HAS_AEC3_LINEAR
+    do_old_aec = args.old_aec and HAS_OLD_AEC
 
     if args.speex and not HAS_SPEEX:
         print("Warning: speexdsp not installed")
@@ -590,6 +664,8 @@ def main():
         print(f"Warning: AEC3 CLI not found at {AEC3_CLI}")
     if args.aec3_linear and not HAS_AEC3_LINEAR:
         print(f"Warning: AEC3 Linear CLI not found at {AEC3_LINEAR_CLI}")
+    if args.old_aec and not HAS_OLD_AEC:
+        print(f"Warning: Old AEC CLI not found at {OLD_AEC_CLI}")
     if not HAS_PESQ:
         print("Warning: pesq not installed. pip3 install pesq")
     if args.parallel:
@@ -604,11 +680,11 @@ def main():
             print(f"  PRESET: {p.value.upper()}")
             print(f"{'#'*60}")
             run_scenarios(base_dir, args.filter, do_speex, do_aec3, do_aec3_linear, preset_dir,
-                          preset=p, parallel=args.parallel)
+                          preset=p, parallel=args.parallel, do_old_aec=do_old_aec)
     else:
         preset = AecPreset(args.preset) if args.preset else None
         run_scenarios(base_dir, args.filter, do_speex, do_aec3, do_aec3_linear, out_dir,
-                      preset=preset, parallel=args.parallel)
+                      preset=preset, parallel=args.parallel, do_old_aec=do_old_aec)
 
     print(f"\nOutput saved to {out_dir}")
 

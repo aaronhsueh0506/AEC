@@ -1,8 +1,8 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v1.28.0），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Shadow Filter 和 AEC3-style RES（殘餘回音抑制）。
+回音消除模組（v1.28.1），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Shadow Filter 和 AEC3-style RES（殘餘回音抑制）。
 
-**v1.28.0 Bug fixes**：
+**v1.28.1 Bug fixes**：
 - **CNG noise gate**：`far_activity < 0.1` 取代無條件更新，避免 DT speech 污染 noise_psd
 - **_coh2_smooth reset**：正確初始化避免跨檔案狀態殘留
 - **fs_confidence dedup**：移除重複計算
@@ -16,13 +16,19 @@
 - **Fixed g_min**：gain floor 不受 far_activity 影響（AEC3 style）
 - **EMR noise masking**：echo < noise floor 的 bin 不壓制
 
-**Blind test 成績（fl=512, BALANCED preset, AEC Challenge 2021）**：
-| 指標 | v1.18.0 | v1.28.0 | AEC3 |
-|------|---------|---------|------|
-| FS echo_mos | 3.210 | **3.713** | 3.963 |
-| DT echo_mos | 4.000 | **4.370** | 4.440 |
-| DT deg_mos | 2.215 | **2.092** | 2.258 |
-| NE deg_mos | 4.018 | **3.996** | 3.530 |
+**Blind test 成績（fl=512, AEC Challenge Interspeech 2021, 800 cases）**：
+
+| Preset | FS echo | DT echo | DT deg | NE deg |
+|--------|---------|---------|--------|--------|
+| Speex (SpeexDSP) | 2.808 | 3.368 | 3.225 | 4.128 |
+| Old WebRTC AEC | 3.484 | 4.262 | 2.389 | 4.098 |
+| **mild** | 3.420 | 4.105 | **2.257** | 4.005 |
+| **balanced** | 3.710 | 4.368 | 2.093 | 3.997 |
+| **aggressive** | 3.830 | 4.468 | 2.051 | 3.990 |
+| **maximum** | **3.951** | 4.527 | 2.044 | 3.976 |
+| WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
+
+> maximum preset FS echo **超越 AEC3**（3.951 vs 3.875）。NE deg 全 preset 大幅領先 AEC3（+0.5）。
 
 支援四級 Preset（MILD / BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
@@ -406,44 +412,53 @@ python3 plot_aec_results.py ../wav/ --mode pbfdkf --enable-res
 python3 plot_aec_results.py ../wav/ --mode pbfdkf --enable-dtd
 ```
 
-## Benchmark 比較（AEC Challenge）
+## Benchmark 比較
 
-測試條件：PBFDKF + Shadow + RES v2（ENR masking, direct echo est, reverb tail）+ delay pre-alignment + HPF + saturation detect。
+測試條件：PBFDKF + Shadow + RES v2 + delay pre-alignment + HPF + saturation detect。
 Frame/hop: 320/160 (20ms/10ms), FFT: 512, filter_length: 512。
+評估指標：AECMOS（echo_mos↑ = echo 少, deg_mos↑ = 語音損傷少）。
 
-### 小資料集（15 cases, MILD preset）
+### AEC Challenge Interspeech 2021 Blind Test（800 cases）
 
-| 指標 | v1.15.0 | v1.16.0 (ENR) | SpeexDSP | WebRTC AEC3 |
-|------|---------|---------------|----------|-------------|
-| FS ERLE | 12.4 dB | **16.2 dB** | 6.9 dB | 25.8 dB |
-| FS echo_mos | 3.18 | **3.42** | 3.09 | 4.47 |
-| DT echo_mos | 3.06 | **3.67** | 2.76 | 4.39 |
-| DT deg_mos | **3.51** | 3.06 | 3.90 | 2.51 |
-| DT ERLE | 4.2 dB | **6.5 dB** | 1.3 dB | 3.7 dB |
+#### Overall
 
-### Blind test（ICASSP 2021 AEC Challenge, MILD preset）
+| Method | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
+|--------|----------|----------|---------|---------|
+| Speex (SpeexDSP v1.2) | 2.808 | 3.368 | 3.225 | 4.128 |
+| Old WebRTC AEC (AEC2) | 3.484 | 4.262 | 2.389 | 4.098 |
+| **Ours mild** | 3.420 | 4.105 | **2.257** | 4.005 |
+| **Ours balanced** | 3.710 | 4.368 | 2.093 | 3.997 |
+| **Ours aggressive** | 3.830 | 4.468 | 2.051 | 3.990 |
+| **Ours maximum** | **3.951** | 4.527 | 2.044 | 3.976 |
+| WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
 
-| 指標 | v1.16.0 | v1.20.1 | v1.21.0 | WebRTC AEC3 |
-|------|---------|---------|---------|-------------|
-| FS echo_mos | 3.478 | 3.352 | **3.300** | 3.963 |
-| DT echo_mos | 3.868 | 3.796 | **3.792** | 4.440 |
-| DT deg_mos | 2.703 | 2.701 | **2.720** | 2.258 |
-| NE echo_mos | 4.998 | 4.999 | **4.999** | — |
-| NE deg_mos | 4.077 | 4.118 | **4.118** | 3.530 |
+#### No Movement
 
-> **v1.21.0 改進**（vs v1.20.1）：
-> - **PBFDAF/PBFDKF 類別分離**：PBFDAF（NLMS base）與 PBFDKF（Kalman subclass）正式分離，架構更清晰。
-> - **NE singletalk 保護**：`far_power < 1e-4` fast-path 立即進入 nearend_state，保護近端語音。
-> - **EPC P_MAX override (L2-C)**：echo path change 後臨時放寬 P_MAX（0.02→0.1, 30 frames），加速 Kalman 再收斂。
-> - **Per-bin residual echo boost (L3-C)**：`echo_boost = 1.0 + 2.0 * coh2`，高 coherence bin 加強 echo 估計。
-> - **DT deg_mos 提升**：2.720 vs 2.701（+0.019），近端品質持續領先 AEC3。
-> - **NE deg_mos 維持**：4.118（無退化），近端語音幾乎無損。
->
-> **v1.20.1 改進**（vs v1.19.5 baseline: FS 3.204, DT echo 3.649, DT deg 2.761）：
-> - **GCC-PHAT delay estimation**：eval script 改用 PHAT whitening，reverberant 場景 delay 估計更準確。
-> - **Two-tuning suppressor**：dominant nearend detection（中高頻 ENR）自動切換 normal/nearend ENR 門檻。
-> - **頻率相依 ERLE cap**：LF=8, HF=4（取代固定 cap=1000），更合理的 residual echo 估計。
-> - **Movement 支援**：自動偵測 echo path 變化，啟用 online delay estimation。
+| Method | FS echo↑ | DT echo↑ | DT deg↑ |
+|--------|----------|----------|---------|
+| Speex | 2.847 | 3.427 | 3.179 |
+| Old WebRTC AEC | 3.457 | 4.331 | 2.304 |
+| **Ours mild** | 3.383 | 4.149 | 2.229 |
+| **Ours balanced** | 3.703 | 4.399 | 2.073 |
+| **Ours aggressive** | 3.843 | 4.503 | 2.020 |
+| **Ours maximum** | **3.960** | 4.555 | 2.009 |
+| WebRTC AEC3 | 3.871 | **4.566** | 1.858 |
+
+#### With Movement
+
+| Method | FS echo↑ | DT echo↑ | DT deg↑ |
+|--------|----------|----------|---------|
+| Speex | 2.757 | 3.272 | 3.301 |
+| Old WebRTC AEC | 3.519 | 4.149 | 2.528 |
+| **Ours mild** | 3.467 | 4.033 | 2.302 |
+| **Ours balanced** | 3.720 | 4.317 | 2.125 |
+| **Ours aggressive** | 3.814 | 4.411 | 2.103 |
+| **Ours maximum** | **3.939** | 4.482 | 2.102 |
+| WebRTC AEC3 | 3.882 | **4.492** | 1.836 |
+
+> - **maximum preset FS echo 超越 AEC3**（overall 3.951 vs 3.875, no-move 3.960 vs 3.871）
+> - **NE deg 全 preset 大幅領先 AEC3**（~4.0 vs 3.454, +0.5）— 近端語音幾乎無損
+> - Speex 版本：SpeexDSP 1.2rc3；WebRTC AEC3：M120 (2024)；Old WebRTC AEC：M120 AEC2
 
 ### 工具
 

@@ -2200,16 +2200,17 @@ Q_gated[k] = 0       otherwise
    - Limiter / output gate 的 gain 對 deg_mos 的影響
    - 確認是否有過度保護
 
-### C.6 純 DSP 天花板評估
+### C.6 純 DSP 成績（v1.28.1, Interspeech 2021, 800 cases）
 
-| 指標 | v5d | 估計上限 | AEC3 (參考) |
-|------|-----|---------|-------------|
-| FS echo_mos | 3.429 | ~3.6-3.8 | 3.963 |
-| DT echo_mos | 3.848 | ~3.9-4.1 | 4.440 |
-| NE deg_mos | 3.850 | ~4.1 | 4.118 |
+| Preset | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
+|--------|----------|----------|---------|---------|
+| balanced | 3.710 | 4.368 | 2.093 | 3.997 |
+| maximum | **3.951** | 4.527 | 2.044 | 3.976 |
+| AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
 
-超越 AEC3 的 echo_mos 需要非線性 branch 或 DNN postfilter。
-NE deg_mos 已接近 AEC3 水準，主要差距在 echo suppression。
+maximum preset FS echo 已超越 AEC3（3.951 vs 3.875）。
+NE deg 大幅領先 AEC3（~4.0 vs 3.454），近端語音幾乎無損。
+DT echo 與 AEC3 差距 < 0.01，DT deg 我們保留更多語音。
 
 ### C.7 GPT 分析修正表
 
