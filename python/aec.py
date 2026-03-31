@@ -113,7 +113,7 @@ class AecConfig:
 
     # PBFDKF (Partitioned Block Frequency Domain Kalman Filter) — faster convergence than NLMS
     use_kalman: bool = True           # True=PBFDKF, False=PBFDAF (NLMS)
-    kalman_q_high: float = 1e-4       # PBFDKF Q_high convergence speed (1e-3 causes weight jitter)
+    kalman_q_high: float = 6e-4       # PBFDKF Q_high convergence speed (post Kalman bug fix)
     kalman_q_low: float = 1e-5        # PBFDKF Q_low stable tracking (1e-7→P dies)
     warmup_frames: int = 100          # Frames with forced high mu at startup
 
@@ -211,7 +211,7 @@ class AecConfig:
                 # Adaptive filter
                 shadow_mu_min=0.5,
                 warmup_frames=150,
-                kalman_q_high=2e-4,
+                kalman_q_high=8e-4,
             )
         elif preset == AecPreset.BALANCED:
             defaults = dict(
@@ -235,7 +235,7 @@ class AecConfig:
                 # Adaptive filter
                 shadow_mu_min=0.6,
                 warmup_frames=150,
-                kalman_q_high=1.5e-4,
+                kalman_q_high=6e-4,
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
@@ -259,7 +259,7 @@ class AecConfig:
                 # Adaptive filter
                 shadow_mu_min=0.7,
                 warmup_frames=150,
-                kalman_q_high=1e-4,
+                kalman_q_high=4e-4,
             )
         elif preset == AecPreset.MAXIMUM:
             defaults = dict(
@@ -283,7 +283,7 @@ class AecConfig:
                 # Adaptive filter
                 shadow_mu_min=0.9,
                 warmup_frames=200,
-                kalman_q_high=1e-4,
+                kalman_q_high=4e-4,
             )
         else:
             defaults = {}
@@ -2398,7 +2398,7 @@ class AEC:
             inst_erle = 10 * np.log10(self.near_power / (self.raw_error_power + 1e-10))
             # Only evaluate during far-end single-talk (DT corrupts ERLE measurement)
             if self._simple_mu_ratio > 0.5:
-                if inst_erle > 10.0:
+                if inst_erle > 5.0:
                     self._conv_counter += 1
                 else:
                     self._conv_counter = 0
