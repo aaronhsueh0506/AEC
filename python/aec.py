@@ -569,10 +569,10 @@ class PBFDAF:
         # IFFT (fft_size → take block_size valid samples)
         echo_time = np.fft.irfft(self.echo_spec, self.fft_size).astype(np.float32)
 
-        # Error (take last hop_size samples — valid region of overlap-save)
+        # Error (take valid region for output)
         output = self.near_buffer[-hop:] - echo_time[self.hop_size:self.block_size]
 
-        # Error spectrum (zero-pad to fft_size, only last hop samples are valid)
+        # Error spectrum (zero-pad to fft_size, valid region at [hop, block_size))
         error_time = np.zeros(self.fft_size, dtype=np.float32)
         error_time[self.hop_size:self.block_size] = output
         self.error_spec = np.fft.rfft(error_time).astype(np.complex64)
@@ -2238,8 +2238,10 @@ class AEC:
             if (self.res or self.config.return_res_context) and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
                 # Dynamic over_sub: moderate base, scale with convergence
-                inst_erle = self.get_erle_instant()
-                erle_factor = np.clip((inst_erle - 2.0) / 8.0, 0.0, 1.0)
+                # Use max(instant, cumulative) ERLE: instant EMA is unstable
+                # (negative during silence/onset), cumulative is stable but lags
+                erle_for_factor = max(self.get_erle_instant(), self.get_erle())
+                erle_factor = np.clip((erle_for_factor - 2.0) / 8.0, 0.0, 1.0)
                 base_over_sub = self.config.res_over_sub_base + self.config.res_over_sub_scale * erle_factor
                 # Saturation boost: non-linear echo needs more suppression
                 base_over_sub += self._saturation_level * self.config.saturation_over_sub_boost
