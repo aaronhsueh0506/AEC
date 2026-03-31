@@ -2550,7 +2550,8 @@ Examples:
                         help='Enable DTD (default: off, shadow filter provides DT protection)')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
-    parser.add_argument('--no-cng', action='store_true', help='Disable comfort noise generation in RES')
+    parser.add_argument('--cng', action='store_true', help='Enable comfort noise generation in RES (default: off)')
+    parser.add_argument('--no-cng', action='store_true', help='(deprecated, CNG off by default)')
     parser.add_argument('--no-td-constraint', action='store_true',
                         help='Disable time-domain constraint on filter weights (diagnostic)')
     parser.add_argument('--preset', choices=['mild', 'balanced', 'aggressive', 'maximum'],
@@ -2601,7 +2602,7 @@ Examples:
         mode=aec_mode,
         enable_dtd=args.enable_dtd,
         enable_res=args.enable_res,
-        enable_cng=not args.no_cng,
+        enable_cng=args.cng,
         enable_td_constraint=not args.no_td_constraint,
         enable_shadow=not args.no_shadow,
         enable_highpass=not args.no_highpass,
