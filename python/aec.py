@@ -679,20 +679,32 @@ class PBFDKF(PBFDAF):
                 self._p_max_override = 0.02
                 del self._p_max_override_frames
 
+        # Bug 1 fix: compute global denominator (sum over ALL partitions)
+        # Innovation variance = Σ_p P[p] × |X_p|² + R
+        # Old code only used one partition → K was ~n_partitions× too large
+        total_echo_var = np.zeros(self.n_freqs, dtype=np.float32)
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
             X = self.X_buf[p_idx]
-            X_power = np.abs(X) ** 2 + self.delta
+            total_echo_var += self.P[p] * (np.abs(X) ** 2)
+        denominator = total_echo_var + self.R + self.delta
 
-            # Kalman gain: K = P * X^* / (|X|^2 * P + R)
-            denominator = X_power * self.P[p] + self.R
-            K = (self.P[p] * np.conj(X)) / (denominator + self.delta)
-            K *= mu_scale_arr
+        for p in range(self.n_partitions):
+            p_idx = (curr_p - p) % self.n_partitions
+            X = self.X_buf[p_idx]
 
-            self.W[p] += K * self.error_spec
+            # Kalman gain with correct global denominator
+            K_optimal = (self.P[p] * np.conj(X)) / denominator
 
-            # Covariance update: P = (1 - K*X) * P + Q
-            KX = np.real(K * X)
+            # Bug 2 fix: separate K for weights (scaled) and P update (unscaled)
+            # Covariance update must use unscaled K (Kalman theory)
+            # mu_scale only affects weight update, not error covariance
+            K_scaled = K_optimal * mu_scale_arr
+
+            self.W[p] += K_scaled * self.error_spec
+
+            # Covariance update with UNSCALED K_optimal
+            KX = np.real(K_optimal * X)
             self.P[p] = np.minimum(
                 np.maximum((1.0 - KX) * self.P[p] + Q_gated, self.delta),
                 p_max

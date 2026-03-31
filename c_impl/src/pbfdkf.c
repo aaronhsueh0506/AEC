@@ -367,30 +367,44 @@ int pbfdkf_process(Pbfdkf* f,
         mean_power /= nfreq;
         float q_gate_thresh = mean_power * 0.01f + 1e-6f;
 
+        /* Bug 1 fix: compute global denominator (sum over ALL partitions)
+         * Innovation variance = Σ_p P[p] × |X_p|² + R
+         * Old code only used one partition → K was ~n_partitions× too large */
+        float* denom_buf = f->temp_time;  /* reuse temp buffer (fft_size >= nfreq) */
+        for (int k = 0; k < nfreq; k++) {
+            float total_echo_var = 0.0f;
+            for (int p = 0; p < f->n_partitions; p++) {
+                int p_idx = (curr_p - p + f->n_partitions) % f->n_partitions;
+                Complex X = f->X_buf[p_idx][k];
+                total_echo_var += f->P[p][k] * (X.r * X.r + X.i * X.i);
+            }
+            denom_buf[k] = total_echo_var + f->R[k] + delta;
+        }
+
         /* Kalman update per partition */
         for (int p = 0; p < f->n_partitions; p++) {
             int p_idx = (curr_p - p + f->n_partitions) % f->n_partitions;
 
             for (int k = 0; k < nfreq; k++) {
                 Complex X = f->X_buf[p_idx][k];
-                float X_power = X.r * X.r + X.i * X.i + delta;
 
-                /* K = P * conj(X) / (|X|^2 * P + R + delta) */
-                float denom = X_power * f->P[p][k] + f->R[k] + delta;
-                float K_scale = f->P[p][k] / denom;
+                /* K_optimal = P * conj(X) / global_denominator */
+                float K_scale = f->P[p][k] / denom_buf[k];
 
-                /* K = K_scale * conj(X) * mu_scale */
-                Complex K;
-                K.r = K_scale * X.r * mu_scale;
-                K.i = K_scale * (-X.i) * mu_scale;
+                /* Bug 2 fix: separate K for weights (scaled) and P update (unscaled)
+                 * mu_scale only affects weight update, not covariance */
+                float K_scale_mu = K_scale * mu_scale;
+                Complex K_w;  /* for weight update */
+                K_w.r = K_scale_mu * X.r;
+                K_w.i = K_scale_mu * (-X.i);
 
-                /* W += K * error_spec */
-                Complex Ke = cmul(K, f->error_spec[k]);
+                /* W += K_scaled * error_spec */
+                Complex Ke = cmul(K_w, f->error_spec[k]);
                 f->W[p][k].r += Ke.r;
                 f->W[p][k].i += Ke.i;
 
-                /* P update: P = clamp((1 - Re(K*X)) * P + Q_gated, delta, P_MAX) */
-                float KX = K_scale * mu_scale * (X.r * X.r + X.i * X.i);
+                /* P update with UNSCALED K_optimal (Kalman theory) */
+                float KX = K_scale * (X.r * X.r + X.i * X.i);
                 float Q_mod = f->Q[k] * q_scale;
                 float Q_gated = (f->power[k] > q_gate_thresh) ? Q_mod : (Q_mod * 0.05f);
                 float P_new = (1.0f - KX) * f->P[p][k] + Q_gated;
