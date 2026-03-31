@@ -501,7 +501,7 @@ class PBFDAF:
         # Time-domain constraint window: clean 50% truncation
         # block_size = 2×hop → truncation at 50%, minimal Gibbs ringing
         self._td_window = np.ones(self.fft_size, dtype=np.float32)
-        fade_len = min(16, self.hop_size // 4)
+        fade_len = self.hop_size // 4  # 40 samples for hop=160
         fade = 0.5 * (1.0 - np.cos(np.pi * np.arange(fade_len) / fade_len))
         self._td_window[self.hop_size - fade_len:self.hop_size] = fade[::-1].astype(np.float32)
         self._td_window[self.hop_size:] = 0.0
