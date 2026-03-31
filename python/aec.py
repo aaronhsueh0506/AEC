@@ -2180,12 +2180,11 @@ class AEC:
                     else:
                         self.shadow_copy_counter = 0
 
-            # Echo path change detection (shadow-based)
-            # DT: refined error ↑, shadow stable → ΔE/total large
+            # Echo path change detection (shadow-based, independent of DTD)
+            # DT: one filter's error ↑, other stable → ΔE/total large
             # Echo change: both errors ↑ → ΔE/total small
-            # When echo change detected, suppress coherence confidence
-            # so filter can adapt to new echo path quickly.
-            if self.shadow_filter is not None and self.dtd_coherence:
+            # When detected: reset Q to Q_high for fast re-convergence
+            if self.shadow_filter is not None:
                 total_err = self.main_err_smooth + self.shadow_err_smooth
                 if total_err > 1e-10:
                     delta_ratio = abs(self.main_err_smooth - self.shadow_err_smooth) / total_err
@@ -2198,7 +2197,8 @@ class AEC:
                 self.prev_total_err = total_err
 
                 if is_echo_change:
-                    self.dtd_coherence.confidence *= 0.3
+                    if self.dtd_coherence:
+                        self.dtd_coherence.confidence *= 0.3
                     self.epc_hangover_count = self.config.epc_hangover
                     self.epc_active = True
                     # Reset Q to Q_high for fast re-convergence
