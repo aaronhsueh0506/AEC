@@ -486,19 +486,21 @@ class PBFDAF:
     def __init__(self, block_size: int, n_partitions: int,
                  mu: float = 0.3, delta: float = 1e-8,
                  hop_size: int = 0):
-        self.block_size = block_size
+        # Overlap-save: block_size = 2 × hop (proper 50% ratio for TD constraint)
+        # FFT zero-pads to next power of 2 if block_size isn't one
         self.hop_size = hop_size if hop_size > 0 else block_size // 2
+        self.block_size = 2 * self.hop_size  # overlap-save buffer (exactly 2× hop)
+        self.fft_size = 1 << (self.block_size - 1).bit_length()  # next pow2
         self.n_partitions = n_partitions
-        self.n_freqs = block_size // 2 + 1
+        self.n_freqs = self.fft_size // 2 + 1
         self.mu = mu
         self.delta = delta
         self.alpha_power = 0.9
         self.enable_td_constraint = True  # can be disabled for diagnosis
 
-        # Time-domain constraint window: raised cosine fade at truncation edge
-        # Eliminates Gibbs ringing from hard truncation at hop_size/block_size boundary
-        # (hop=160, block=512 → 31.25% truncation ratio, needs smooth transition)
-        self._td_window = np.ones(block_size, dtype=np.float32)
+        # Time-domain constraint window: clean 50% truncation
+        # block_size = 2×hop → truncation at 50%, minimal Gibbs ringing
+        self._td_window = np.ones(self.fft_size, dtype=np.float32)
         fade_len = min(16, self.hop_size // 4)
         fade = 0.5 * (1.0 - np.cos(np.pi * np.arange(fade_len) / fade_len))
         self._td_window[self.hop_size - fade_len:self.hop_size] = fade[::-1].astype(np.float32)
@@ -511,9 +513,9 @@ class PBFDAF:
         self.X_buf = np.zeros((n_partitions, self.n_freqs), dtype=np.complex64)
         self.partition_idx = 0
 
-        # Input buffers
-        self.near_buffer = np.zeros(block_size, dtype=np.float32)
-        self.far_buffer = np.zeros(block_size, dtype=np.float32)
+        # Input buffers (block_size = 2 × hop for overlap-save)
+        self.near_buffer = np.zeros(self.block_size, dtype=np.float32)
+        self.far_buffer = np.zeros(self.block_size, dtype=np.float32)
 
         # Power estimation
         self.power = np.zeros(self.n_freqs, dtype=np.float32)
@@ -544,9 +546,9 @@ class PBFDAF:
         self.far_buffer[:-hop] = self.far_buffer[hop:]
         self.far_buffer[-hop:] = far_end
 
-        # FFT
-        near_spec = np.fft.rfft(self.near_buffer)
-        far_spec = np.fft.rfft(self.far_buffer)
+        # FFT (zero-pad block_size buffer to fft_size)
+        near_spec = np.fft.rfft(self.near_buffer, self.fft_size)
+        far_spec = np.fft.rfft(self.far_buffer, self.fft_size)
         self.near_spec = near_spec  # expose for RES overlap-save
         self.far_spec = far_spec  # expose for coherence DTD
 
@@ -564,15 +566,15 @@ class PBFDAF:
             p_idx = (curr_p - p) % self.n_partitions
             self.echo_spec += self.W[p] * self.X_buf[p_idx]
 
-        # IFFT
-        echo_time = np.fft.irfft(self.echo_spec, self.block_size)
+        # IFFT (fft_size → take block_size valid samples)
+        echo_time = np.fft.irfft(self.echo_spec, self.fft_size)
 
         # Error (take last hop_size samples — valid region of overlap-save)
-        output = self.near_buffer[-hop:] - echo_time[-hop:]
+        output = self.near_buffer[-hop:] - echo_time[self.hop_size:self.block_size]
 
-        # Error spectrum (zero-pad, only last hop samples are valid)
-        error_time = np.zeros(self.block_size, dtype=np.float32)
-        error_time[-hop:] = output
+        # Error spectrum (zero-pad to fft_size, only last hop samples are valid)
+        error_time = np.zeros(self.fft_size, dtype=np.float32)
+        error_time[self.hop_size:self.block_size] = output
         self.error_spec = np.fft.rfft(error_time)
 
         # Update weights — gate on far-end activity
@@ -601,7 +603,7 @@ class PBFDAF:
             self.W[p] += mu_eff * grad
             # Time-domain constraint: fade out non-causal part (raised cosine)
             if self.enable_td_constraint:
-                w_time = np.fft.irfft(self.W[p], self.block_size)
+                w_time = np.fft.irfft(self.W[p], self.fft_size)
                 w_time *= self._td_window
                 self.W[p] = np.fft.rfft(w_time)
 
@@ -698,7 +700,7 @@ class PBFDKF(PBFDAF):
 
             # Time-domain constraint (raised cosine fade)
             if self.enable_td_constraint:
-                w_time = np.fft.irfft(self.W[p], self.block_size)
+                w_time = np.fft.irfft(self.W[p], self.fft_size)
                 w_time *= self._td_window
                 self.W[p] = np.fft.rfft(w_time)
 
@@ -1308,9 +1310,10 @@ class ResFilter:
         # This prevents unnatural silence during deep echo suppression
         if self.enable_cng and np.sum(self.noise_psd) > 0:
             cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0))
+            # Scale down CNG level to avoid being too loud / sudden
+            cn_gain *= 0.4
             # Heavy spectral smoothing on noise_psd: remove tonal/echo residual
-            # patterns, keep only broadband noise floor. Without this, CNG
-            # replays the echo spectral shape → reverb artifact.
+            # patterns, keep only broadband noise floor
             smooth_noise = self.noise_psd.copy()
             for _ in range(3):  # 3 passes of 5-bin averaging
                 kernel = np.ones(5, dtype=np.float32) / 5.0
@@ -1610,8 +1613,10 @@ class AEC:
                 self._internal_hop = block_size // 2
             else:
                 # Partitioned block (PBFDAF/PBFDKF/SUBBAND)
-                block_size = self.config.fft_size
+                # block_size = 2 × hop (proper overlap-save, 50% TD constraint)
+                # FFT size determined inside PBFDAF as next_pow2(block_size)
                 hop_size = self.config.hop_size
+                block_size = 2 * hop_size
                 n_partitions = max(1, (self.config.filter_length + hop_size - 1) // hop_size)
                 self._internal_hop = hop_size
 
@@ -1728,7 +1733,7 @@ class AEC:
         # RES (only for frequency-domain modes)
         if self.config.enable_res and self.config.mode in _FREQ_MODES:
             self.res = ResFilter(
-                block_size=self.filter.block_size,
+                block_size=self.filter.fft_size,
                 n_freqs=self.filter.n_freqs,
                 g_min_db=self.config.res_g_min_db,
                 over_sub=self.config.res_over_sub,
@@ -1764,7 +1769,7 @@ class AEC:
                 and hasattr(self.filter, 'W')):
             shadow_mu = self.config.mu * self.config.shadow_mu_ratio
             self.shadow_filter = FilterClass(
-                block_size=self.filter.block_size,
+                block_size=self.filter.fft_size,
                 n_partitions=self.filter.n_partitions,
                 mu=shadow_mu,
                 delta=self.config.delta,
