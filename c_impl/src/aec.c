@@ -255,19 +255,20 @@ static void update_simple_mu_ratio(Aec* aec, const float* output,
     float ratio = far_pwr / err_pwr;
     if (ratio > 1.0f) ratio = 1.0f;
 
-    /* Echo estimate ratio boost */
+    /* Echo estimate ratio boost (matches Python: sum(|echo|²) / sum(|near|²)) */
     const Complex* echo_spec = pbfdkf_get_echo_spec(aec->filter);
-    if (echo_spec) {
+    const Complex* near_spec = pbfdkf_get_near_spec(aec->filter);
+    if (echo_spec && near_spec) {
         int nf = aec->n_freqs;
-        float echo_pwr = 0.0f;
-        for (int k = 0; k < nf; k++)
+        float echo_pwr = 1e-10f, near_spec_pwr = 1e-10f;
+        for (int k = 0; k < nf; k++) {
             echo_pwr += echo_spec[k].r * echo_spec[k].r +
                         echo_spec[k].i * echo_spec[k].i;
-        echo_pwr += 1e-10f;
-        /* Use near_power_sum as approximation */
-        float near_pwr = aec->near_power + 1e-10f;
-        if (near_pwr > 1e-8f) {
-            float ratio_echo = clampf(echo_pwr / (near_pwr * nf), 0.0f, 1.0f);
+            near_spec_pwr += near_spec[k].r * near_spec[k].r +
+                             near_spec[k].i * near_spec[k].i;
+        }
+        if (near_spec_pwr > 1e-8f) {
+            float ratio_echo = clampf(echo_pwr / near_spec_pwr, 0.0f, 1.0f);
             ratio = maxf(ratio, ratio_echo * 0.5f);
         }
     }
