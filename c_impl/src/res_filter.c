@@ -1,7 +1,7 @@
 /**
  * res_filter.c - Residual Echo Suppressor with WOLA (v2)
  *
- * Matches Python ResFilter v1.17.0:
+ * Matches Python ResFilter v1.28.1:
  * - WOLA analysis/synthesis with sqrt-Hann window
  * - Coherence-based + direct echo PSD estimation
  * - ENR masking gain (default) + Wiener + spectral subtraction
@@ -57,7 +57,7 @@ struct ResFilter {
     float* gain_smooth;   /* [n_freqs] */
 
     /* Coherence */
-    float alpha_coh;      /* 0.3 */
+    float alpha_coh;      /* 0.65 */
     float* S_fe_r;        /* [n_freqs] cross-PSD real */
     float* S_fe_i;        /* [n_freqs] cross-PSD imag */
     float* S_ff;          /* [n_freqs] far PSD */
@@ -125,7 +125,7 @@ ResFilter* res_create(const ResConfig* cfg) {
     r->alpha_echo_psd = cfg->alpha_echo_psd;
     r->alpha_error_psd = cfg->alpha_error_psd;
     r->alpha_envelope = 0.95f;
-    r->alpha_coh = 0.3f;
+    r->alpha_coh = 0.65f;
     r->alpha_noise = 0.98f;
     r->far_activity = 0.0f;
     r->enable_cng = cfg->enable_cng;
@@ -264,7 +264,6 @@ void res_process(ResFilter* r,
                  float over_sub,
                  float* output_hop) {
     if (!r || !error_hop || !output_hop) return;
-    (void)dt_indicator; /* used implicitly via over_sub from coordinator */
 
     const int nf = r->n_freqs;
     const int hop = r->hop_size;
@@ -367,8 +366,8 @@ void res_process(ResFilter* r,
 
     if (far_power < 1e-4f) {
         for (int k = 0; k < nf; k++) r->echo_psd[k] *= 0.3f;
-        /* Track noise for CNG */
-        if (r->enable_cng) {
+        /* Track noise for CNG: only when far-end silent for ~800ms */
+        if (r->enable_cng && r->far_activity < 0.1f) {
             for (int k = 0; k < nf; k++) {
                 float updated = r->alpha_noise * r->noise_psd[k] +
                                 (1.0f - r->alpha_noise) * error_pwr[k];
@@ -417,27 +416,59 @@ void res_process(ResFilter* r,
                 temp[k] = 0.25f * r->erle_per_bin[k-1] + 0.5f * r->erle_per_bin[k]
                           + 0.25f * r->erle_per_bin[k+1];
             temp[nf-1] = 0.25f * r->erle_per_bin[nf-2] + 0.75f * r->erle_per_bin[nf-1];
-            for (int k = 0; k < nf; k++)
-                r->erle_per_bin[k] = clampf(temp[k], 1.0f, 1000.0f);
+            /* Frequency-dependent ERLE cap: LF=32, HF=16 */
+            {
+                int lf_bins = 8 < nf ? 8 : nf;
+                for (int k = 0; k < nf; k++) {
+                    float erle_max = (k < lf_bins) ? 32.0f : 16.0f;
+                    r->erle_per_bin[k] = clampf(temp[k], 1.0f, erle_max);
+                }
+            }
         }
 
         /* Residual echo PSD: blend based on convergence */
         for (int k = 0; k < nf; k++) {
             float erle_est = r->echo_psd[k] / r->erle_per_bin[k];
             float direct_est = r->echo_psd[k];
+
+            /* Pre-convergence echo floor: coh2-weighted error_psd */
+            if (erle_factor < 0.5f && far_power > 1e-4f) {
+                float ef_fade = 1.0f - erle_factor * 2.0f;
+                float echo_floor = r->error_psd[k] * coh2[k] * ef_fade
+                                   * r->far_activity;
+                if (direct_est < echo_floor) direct_est = echo_floor;
+            }
+
             residual_echo_psd[k] = (1.0f - erle_factor) * direct_est
                                    + erle_factor * erle_est;
         }
 
-        /* Reverb tail */
+        /* Reverb tail: use far_spec power (render signal) */
         if (r->enable_reverb) {
             for (int k = 0; k < nf; k++) {
+                float far_psd_k;
+                if (far_spec) {
+                    far_psd_k = far_spec[k].r * far_spec[k].r +
+                                far_spec[k].i * far_spec[k].i;
+                } else {
+                    far_psd_k = echo_pwr[k];
+                }
                 r->reverb_psd[k] = r->reverb_decay * r->reverb_psd[k]
-                                   + (1.0f - r->reverb_decay) * echo_pwr[k];
+                                   + (1.0f - r->reverb_decay) * far_psd_k;
                 residual_echo_psd[k] += r->reverb_gain * r->reverb_psd[k]
                                         * r->far_activity;
             }
         }
+
+        /* Echo boost: high-coh2 bins → boost residual estimate */
+        if (far_power > 1e-4f && erle_factor > 0.3f) {
+            for (int k = 0; k < nf; k++) {
+                float echo_boost = (dt_indicator < 0.2f)
+                                   ? (1.0f + 0.5f * coh2[k]) : 1.0f;
+                residual_echo_psd[k] *= echo_boost;
+            }
+        }
+
         have_residual = 1;
     }
 
@@ -448,8 +479,12 @@ void res_process(ResFilter* r,
     } else {
         r->far_activity = 0.98f * r->far_activity + 0.02f * is_far_active;
     }
-    float eff_g_min = r->g_min + (1.0f - r->g_min) * (1.0f - r->far_activity);
-    eff_g_min = maxf(eff_g_min, db_to_amp(-60.0f));
+    /* Fixed g_min: gain floor is constant (AEC3 style — purely ENR-driven) */
+    float eff_g_min = r->g_min;
+
+    /* fs_confidence: continuous FS/DT/NE indicator */
+    float dt_inv = 1.0f - dt_indicator;
+    float fs_confidence = r->far_activity * dt_inv * dt_inv;
 
     /* === Noise gate: quiet bins pass through === */
     float mean_error = 0.0f;
@@ -492,10 +527,17 @@ void res_process(ResFilter* r,
         for (int k = 0; k < nf; k++) spectral_g_min[k] = eff_g_min;
     }
 
-    /* Per-bin near-end gate */
+    /* Per-bin near-end gate with fs_confidence */
+    float ne_erle_gate;
+    if (erle_factor < 0.3f) {
+        ne_erle_gate = 0.3f;
+    } else {
+        ne_erle_gate = maxf(erle_factor, 0.2f);
+    }
     float ne_g_min_ceil = db_to_amp(r->ne_protect_db);
     for (int k = 0; k < nf; k++) {
-        float ne_protection = (1.0f - coh2[k]) * erle_factor;
+        float ne_protection = (1.0f - coh2[k]) * ne_erle_gate
+                              * (1.0f - fs_confidence);
         float ne_g_floor = eff_g_min + (ne_g_min_ceil - eff_g_min) * ne_protection;
         ne_g_floor = maxf(ne_g_floor, eff_g_min);
         spectral_g_min[k] = maxf(spectral_g_min[k], ne_g_floor);
@@ -505,16 +547,24 @@ void res_process(ResFilter* r,
     float g[257];
 
     if (r->gain_type == RES_GAIN_ENR && have_residual) {
-        /* ENR masking (cf. AEC3 GainToNoAudibleEcho) */
+        /* ENR masking with two-tuning (cf. AEC3 suppressor) */
         float scale = r->enr_scale;
+        float ne_confidence = 1.0f - fs_confidence;
         for (int k = 0; k < nf; k++) {
-            float nearend_est = maxf(r->error_psd[k] - residual_echo_psd[k], 0.0f);
-            float enr = residual_echo_psd[k] / (nearend_est + 1.0f);
+            /* ENR: echo / error (not echo / nearend) */
+            float enr = residual_echo_psd[k] / (r->error_psd[k] + 1e-10f);
 
-            /* Frequency-dependent thresholds: LF more aggressive, HF more sensitive */
+            /* Frequency-dependent blend factor */
             float blend = clampf((k - 5.0f) / 5.0f, 0.0f, 1.0f);
-            float enr_t = (1.0f - blend) * 0.3f * scale + blend * 0.07f * scale;
-            float enr_s = (1.0f - blend) * 0.4f * scale + blend * 0.1f * scale;
+
+            /* Two sets of thresholds blended by ne_confidence */
+            float enr_t_ne = (1.0f - blend) * 3.0f + blend * 0.3f;
+            float enr_s_ne = (1.0f - blend) * 5.0f + blend * 0.5f;
+            float enr_t_fs = (1.0f - blend) * 0.3f * scale + blend * 0.07f * scale;
+            float enr_s_fs = (1.0f - blend) * 0.4f * scale + blend * 0.1f * scale;
+
+            float enr_t = ne_confidence * enr_t_ne + (1.0f - ne_confidence) * enr_t_fs;
+            float enr_s = ne_confidence * enr_s_ne + (1.0f - ne_confidence) * enr_s_fs;
 
             /* Soft gate */
             if (enr > enr_t) {
@@ -523,6 +573,19 @@ void res_process(ResFilter* r,
                 g[k] = 1.0f;
             }
             g[k] = maxf(g[k], spectral_g_min[k]);
+        }
+
+        /* EMR noise masking: if echo below noise, don't suppress */
+        {
+            float noise_sum = 0.0f;
+            for (int k = 0; k < nf; k++) noise_sum += r->noise_psd[k];
+            if (noise_sum > 0.0f) {
+                for (int k = 0; k < nf; k++) {
+                    float emr = residual_echo_psd[k] / (r->noise_psd[k] + 1e-10f);
+                    float g_emr = clampf(0.3f / (emr + 1e-10f), 0.0f, 1.0f);
+                    g[k] = maxf(g[k], g_emr);
+                }
+            }
         }
     } else if (r->gain_type == RES_GAIN_WIENER && have_residual) {
         /* Wiener gain */
@@ -572,18 +635,37 @@ void res_process(ResFilter* r,
 
     /* === Temporal smoothing === */
     float alpha_release = 0.4f + 0.5f * r->far_activity;
-    float alpha_attack  = 0.60f + 0.25f * (1.0f - erle_factor);
+    /* Continuous attack blend: FS→fast, DT/NE→slow */
+    float alpha_fast = 0.3f + 0.2f * (1.0f - erle_factor);
+    float alpha_slow = 0.85f + 0.1f * (1.0f - erle_factor);
+    float alpha_attack = alpha_slow + (alpha_fast - alpha_slow) * fs_confidence;
+
+    /* Pre-compute rate limiting constants outside per-bin loop */
+    float act_scale = 0.5f + 0.5f * r->far_activity;
+    float eff_drop = fast_exp(act_scale * fast_log(r->max_drop_ratio));
+    float eff_rise = fast_exp((0.5f + 0.5f * (1.0f - r->far_activity))
+                              * fast_log(r->max_rise_ratio));
+    /* LF gain decrease limiting */
+    int lf_limit = 8 < nf ? 8 : nf;
+    float lf_factor = 0.0f;
+    if (fs_confidence < 0.9f) {
+        lf_factor = 0.25f * maxf(1.0f - fs_confidence * 2.0f, 0.0f);
+    }
 
     for (int k = 0; k < nf; k++) {
         float alpha_g = (g[k] < r->gain_smooth[k]) ? alpha_attack : alpha_release;
         float smoothed = alpha_g * r->gain_smooth[k] + (1.0f - alpha_g) * g[k];
 
         /* Rate limiting */
-        float act_scale = 0.5f + 0.5f * r->far_activity;
-        float eff_drop = fast_exp(act_scale * fast_log(r->max_drop_ratio));
-        float eff_rise = fast_exp((0.5f + 0.5f * (1.0f - r->far_activity)) * fast_log(r->max_rise_ratio));
         float gain_floor = r->gain_smooth[k] / eff_drop;
         float gain_ceil  = r->gain_smooth[k] * eff_rise;
+
+        /* LF gain decrease limiting: protect low frequencies during DT/NE */
+        if (k < lf_limit && lf_factor > 0.01f) {
+            float lf_floor = r->gain_smooth[k] * lf_factor;
+            gain_floor = maxf(gain_floor, lf_floor);
+        }
+
         smoothed = maxf(smoothed, gain_floor);
         smoothed = minf(smoothed, gain_ceil);
         smoothed = maxf(smoothed, spectral_g_min[k]);
@@ -598,22 +680,21 @@ void res_process(ResFilter* r,
         r->spec_buf[k].i *= r->gain_smooth[k];
     }
 
-    /* === CNG === */
-    if (r->enable_cng && far_power <= 1e-4f) {
+    /* === CNG: AEC3-style comfort noise crossfade (always-on) === */
+    /* cn_gain = sqrt(max(1 - G^2, 0)): as suppression deepens, more comfort noise */
+    if (r->enable_cng) {
         float noise_sum = 0.0f;
         for (int k = 0; k < nf; k++) noise_sum += r->noise_psd[k];
-        if (noise_sum > 0) {
+        if (noise_sum > 0.0f) {
             for (int k = 0; k < nf; k++) {
-                float suppressed_pwr = r->gain_smooth[k] * r->gain_smooth[k] * error_pwr[k];
-                float target_pwr = r->noise_psd[k] * 0.5f;
-                float deficit = target_pwr - suppressed_pwr;
-                if (deficit > 0) {
-                    float cng_mag = fast_sqrt(deficit);
-                    float phase = (float)(k * 2654435761u % 1000) / 1000.0f *
-                                  2.0f * (float)M_PI;
-                    r->spec_buf[k].r += cng_mag * cosf(phase);
-                    r->spec_buf[k].i += cng_mag * sinf(phase);
-                }
+                float g2 = r->gain_smooth[k] * r->gain_smooth[k];
+                float cn_gain = fast_sqrt(maxf(1.0f - g2, 0.0f));
+                float noise_mag = fast_sqrt(r->noise_psd[k] + 1e-10f);
+                /* Pseudo-random phase per bin */
+                float phase = (float)(k * 2654435761u % 1000) / 1000.0f *
+                              2.0f * (float)M_PI;
+                r->spec_buf[k].r += cn_gain * noise_mag * cosf(phase);
+                r->spec_buf[k].i += cn_gain * noise_mag * sinf(phase);
             }
         }
     }

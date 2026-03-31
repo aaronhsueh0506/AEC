@@ -54,7 +54,7 @@ struct Pbfdkf {
     float* Q_low;         /* [n_freqs] stable tracking Q */
     float* R;             /* [n_freqs] measurement noise PSD */
     float* error_psd;     /* [n_freqs] smoothed error PSD */
-    float alpha_r;        /* R smoothing (0.95) */
+    float alpha_r;        /* R smoothing (0.98) */
     float q_low_base;     /* base Q_low value for set_q_ratio */
 
     /* Input buffers [block_size] */
@@ -97,7 +97,7 @@ Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
     f->n_freqs = block_size / 2 + 1;
     f->delta = delta;
     f->alpha_power = 0.9f;
-    f->alpha_r = 0.95f;
+    f->alpha_r = 0.98f;
     f->partition_idx = 0;
     f->q_low_base = q_low;
 
@@ -311,6 +311,13 @@ int pbfdkf_process(Pbfdkf* f,
             f->R[k] = f->error_psd[k] > delta ? f->error_psd[k] : delta;
         }
 
+        /* Adaptive R: scale by mu_scale to break R-deadlock */
+        float R_scale = 0.3f + 0.7f * (1.0f - mu_scale);
+        for (int k = 0; k < nfreq; k++) f->R[k] *= R_scale;
+
+        /* Q modulation: reduce Q during DT */
+        float q_scale = 0.1f + 0.9f * mu_scale;
+
         /* Per-bin Q gating: only add Q where far-end has energy */
         float mean_power = 0.0f;
         for (int k = 0; k < nfreq; k++) mean_power += f->power[k];
@@ -341,7 +348,8 @@ int pbfdkf_process(Pbfdkf* f,
 
                 /* P update: P = clamp((1 - Re(K*X)) * P + Q_gated, delta, P_MAX) */
                 float KX = K_scale * mu_scale * (X.r * X.r + X.i * X.i);
-                float Q_gated = (f->power[k] > q_gate_thresh) ? f->Q[k] : 0.0f;
+                float Q_mod = f->Q[k] * q_scale;
+                float Q_gated = (f->power[k] > q_gate_thresh) ? Q_mod : (Q_mod * 0.05f);
                 float P_new = (1.0f - KX) * f->P[p][k] + Q_gated;
                 if (P_new < delta) P_new = delta;
                 if (P_new > P_MAX) P_new = P_MAX;

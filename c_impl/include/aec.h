@@ -2,7 +2,7 @@
  * aec.h - Acoustic Echo Cancellation main interface
  *
  * PBFDKF (Kalman always on) + Shadow + RES (WOLA) + HPF + Preset
- * Matches Python AEC v1.21.0 (PBFDKF mode).
+ * Matches Python AEC v1.28.1 (PBFDKF mode).
  *
  * Usage (standalone):
  *   AecConfig cfg = aec_config_from_preset(AEC_PRESET_BALANCED, 16000);

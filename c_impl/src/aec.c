@@ -4,7 +4,7 @@
  * Orchestrates: HPF → PBFDKF (main + shadow) → simple variable mu →
  *               convergence detection → RES (WOLA) → output limiter
  *
- * Matches Python AEC v1.21.0 (PBFDKF mode, Kalman always on).
+ * Matches Python AEC v1.28.1 (PBFDKF mode, Kalman always on).
  */
 
 #include "aec.h"
@@ -46,6 +46,7 @@ struct Aec {
     float simple_mu_ratio;
     int simple_mu_holdoff;
     int warmup_frames;
+    int warmup_far_active;
 
     /* Convergence */
     int filter_converged;
@@ -189,6 +190,7 @@ void aec_reset(Aec* aec) {
     aec->simple_mu_ratio = 1.0f;
     aec->simple_mu_holdoff = 0;
     aec->warmup_frames = aec->config.warmup_frames;
+    aec->warmup_far_active = 0;
     aec->filter_converged = 0;
     aec->conv_counter = 0;
     aec->near_power = 0; aec->raw_error_power = 0; aec->final_error_power = 0;
@@ -203,14 +205,19 @@ void aec_reset(Aec* aec) {
 static float get_simple_mu_scale(Aec* aec) {
     float mu_min = aec->config.shadow_mu_min;
 
-    /* Warmup: high mu for fast initial convergence */
+    /* Warmup: fast convergence, but respect DT signals to protect near-end */
     if (aec->warmup_frames > 0) {
-        aec->warmup_frames--;
-        return minf(1.0f, maxf(0.7f, aec->simple_mu_ratio + 0.3f));
+        /* Only consume warmup when far-end is active (don't waste on silence) */
+        if (aec->warmup_far_active)
+            aec->warmup_frames--;
+        /* Strong DT detected: don't force high mu, protect filter */
+        if (aec->simple_mu_ratio < 0.2f)
+            return maxf(0.2f, aec->simple_mu_ratio);
+        return minf(1.0f, maxf(0.5f, aec->simple_mu_ratio + 0.2f));
     }
 
     if (!aec->filter_converged)
-        mu_min = maxf(mu_min, 0.5f);
+        mu_min = maxf(mu_min, 0.3f);
     else
         mu_min = maxf(mu_min, 0.2f);
 
@@ -328,7 +335,7 @@ static void fill_context(Aec* aec, const float* mic, const float* ref,
 
     /* ERLE factor */
     float inst_erle = aec_get_erle_instant(aec);
-    ctx->erle_factor = clampf((inst_erle - 3.0f) / 15.0f, 0.0f, 1.0f);
+    ctx->erle_factor = clampf((inst_erle - 2.0f) / 8.0f, 0.0f, 1.0f);
 
     /* DT indicator */
     float mic_pwr = 0.0f;
@@ -443,7 +450,7 @@ int aec_process_ex(Aec* aec,
 
         /* Dynamic over_sub */
         float inst_erle = aec_get_erle_instant(aec);
-        float erle_factor = clampf((inst_erle - 3.0f) / 15.0f, 0.0f, 1.0f);
+        float erle_factor = clampf((inst_erle - 2.0f) / 8.0f, 0.0f, 1.0f);
         float base_over_sub = cfg->res_over_sub_base +
                                cfg->res_over_sub_scale * erle_factor;
 
@@ -546,20 +553,32 @@ int aec_process_ex(Aec* aec,
         aec->final_error_power_sum += output[i] * output[i];
     }
 
-    /* === Convergence detection: 10 consecutive frames ERLE > 6dB === */
-    if (!aec->filter_converged && aec->near_power > 1e-8f) {
+    /* === Track far-end activity for warmup gating === */
+    {
+        float far_pwr_warmup = 0.0f;
+        for (int i = 0; i < hop; i++) far_pwr_warmup += ref[i] * ref[i];
+        aec->warmup_far_active = (far_pwr_warmup / hop > 1e-6f);
+    }
+
+    /* === Convergence detection: 10 consecutive single-talk frames ERLE > 10dB === */
+    /* Skip during warmup — let filter learn with Q_high before judging convergence */
+    if (!aec->filter_converged && aec->near_power > 1e-8f && aec->warmup_frames <= 0) {
         float inst_erle = 10.0f * fast_log10(aec->near_power /
                                           (aec->raw_error_power + 1e-10f));
-        if (inst_erle > 6.0f)
-            aec->conv_counter++;
-        else
-            aec->conv_counter = 0;
+        /* Only evaluate during far-end single-talk (DT corrupts ERLE measurement) */
+        if (aec->simple_mu_ratio > 0.5f) {
+            if (inst_erle > 10.0f)
+                aec->conv_counter++;
+            else
+                aec->conv_counter = 0;
 
-        if (aec->conv_counter >= 10) {
-            aec->filter_converged = 1;
-            pbfdkf_switch_q_low(aec->filter);
-            pbfdkf_switch_q_low(aec->shadow_filter);
+            if (aec->conv_counter >= 10) {
+                aec->filter_converged = 1;
+                pbfdkf_switch_q_low(aec->filter);
+                pbfdkf_switch_q_low(aec->shadow_filter);
+            }
         }
+        /* else: DT detected, don't update counter (preserve progress) */
     }
 
     return 0;

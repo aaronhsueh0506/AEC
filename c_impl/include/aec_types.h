@@ -1,7 +1,7 @@
 /**
  * aec_types.h - AEC Configuration Types and Presets
  *
- * Matches Python v1.21.0 (PBFDKF mode, Kalman always on).
+ * Matches Python v1.28.1 (PBFDKF mode, Kalman always on).
  * Four presets: MILD / BALANCED / AGGRESSIVE / MAXIMUM
  */
 
@@ -49,12 +49,12 @@ typedef struct {
 
     /* RES parameters */
     int enable_res;             /* 1 */
-    float res_g_min_db;         /* -35 (BALANCED) */
-    float res_over_sub_base;    /* 2.5 */
-    float res_over_sub_scale;   /* 4.0 */
-    float res_dt_reduction;     /* 3.5 */
-    float res_spectral_floor_db; /* -25.0 */
-    float res_ne_protect_db;    /* -12.0 */
+    float res_g_min_db;         /* -55 (BALANCED) */
+    float res_over_sub_base;    /* 5.0 */
+    float res_over_sub_scale;   /* 9.0 */
+    float res_dt_reduction;     /* 2.5 */
+    float res_spectral_floor_db; /* -38.0 */
+    float res_ne_protect_db;    /* -16.0 */
     float res_max_drop_db_per_frame; /* 6.0 */
     float res_max_rise_db_per_frame; /* 6.0 */
     int   enable_cng;           /* 1 */
@@ -62,7 +62,7 @@ typedef struct {
     /* RES v2 */
     int   res_echo_method;      /* RES_ECHO_DIRECT */
     int   res_gain_type;        /* RES_GAIN_ENR */
-    float res_enr_scale;        /* 1.0 */
+    float res_enr_scale;        /* 0.85 (BALANCED) */
     int   res_enable_reverb;    /* 1 */
     float res_reverb_decay;     /* 0.5 */
     float res_reverb_gain;      /* 0.5 */
@@ -70,16 +70,16 @@ typedef struct {
     float res_alpha_error_psd;  /* 0.6 */
 
     /* Shadow filter */
-    float shadow_q_ratio;       /* 3.0 */
+    float shadow_q_ratio;       /* 3.5 */
     float shadow_copy_threshold; /* 0.7 */
     float shadow_err_alpha;     /* 0.85 */
-    float shadow_mu_min;        /* 0.5 */
+    float shadow_mu_min;        /* 0.6 */
     int   shadow_copy_hysteresis; /* 5 */
 
     /* FDKF Kalman */
     float kalman_q_high;        /* 1e-4 */
-    float kalman_q_low;         /* 1e-7 */
-    int   warmup_frames;        /* 100 */
+    float kalman_q_low;         /* 1e-5 */
+    int   warmup_frames;        /* 150 */
 
     /* Derived (computed by factory) */
     int fft_size;               /* 512 (next pow2 >= frame_size) */
@@ -121,11 +121,11 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.highpass_cutoff_hz = 80.0f;
 
     c.enable_res = 1;
-    c.res_g_min_db = -45.0f;
-    c.res_over_sub_base = 4.0f;
-    c.res_over_sub_scale = 7.0f;
-    c.res_dt_reduction = 2.0f;
-    c.res_spectral_floor_db = -32.0f;
+    c.res_g_min_db = -55.0f;
+    c.res_over_sub_base = 5.0f;
+    c.res_over_sub_scale = 9.0f;
+    c.res_dt_reduction = 2.5f;
+    c.res_spectral_floor_db = -38.0f;
     c.res_ne_protect_db = -16.0f;
     c.res_max_drop_db_per_frame = 6.0f;
     c.res_max_rise_db_per_frame = 6.0f;
@@ -148,7 +148,7 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.shadow_copy_hysteresis = 5;
 
     c.kalman_q_high = 1.5e-4f;
-    c.kalman_q_low = 1e-7f;
+    c.kalman_q_low = 1e-5f;
     c.warmup_frames = 150;
 
     /* Derived */
@@ -172,7 +172,7 @@ static inline AecConfig aec_config_from_preset(AecPreset preset, int sample_rate
         c.res_over_sub_scale = 4.0f;
         c.res_dt_reduction = 3.5f;
         c.res_spectral_floor_db = -25.0f;
-        c.res_ne_protect_db = -12.0f;
+        c.res_ne_protect_db = -10.0f;
         c.res_enr_scale = 1.0f;
         c.res_enable_reverb = 1;
         c.res_reverb_decay = 0.6f;
@@ -190,13 +190,13 @@ static inline AecConfig aec_config_from_preset(AecPreset preset, int sample_rate
         break;
 
     case AEC_PRESET_AGGRESSIVE:
-        c.res_g_min_db = -60.0f;
-        c.res_over_sub_base = 6.0f;
-        c.res_over_sub_scale = 10.0f;
-        c.res_dt_reduction = 1.0f;
-        c.res_spectral_floor_db = -40.0f;
-        c.res_ne_protect_db = -3.0f;
-        c.res_enr_scale = 0.3f;
+        c.res_g_min_db = -65.0f;
+        c.res_over_sub_base = 7.0f;
+        c.res_over_sub_scale = 12.0f;
+        c.res_dt_reduction = 1.5f;
+        c.res_spectral_floor_db = -45.0f;
+        c.res_ne_protect_db = -22.0f;
+        c.res_enr_scale = 0.7f;
         c.res_enable_reverb = 1;
         c.res_reverb_decay = 0.7f;
         c.res_reverb_gain = 2.0f;
@@ -212,10 +212,10 @@ static inline AecConfig aec_config_from_preset(AecPreset preset, int sample_rate
         c.res_g_min_db = -72.0f;
         c.res_over_sub_base = 10.0f;
         c.res_over_sub_scale = 15.0f;
-        c.res_dt_reduction = 0.0f;
-        c.res_spectral_floor_db = -50.0f;
-        c.res_ne_protect_db = -1.0f;
-        c.res_enr_scale = 0.15f;
+        c.res_dt_reduction = 0.5f;
+        c.res_spectral_floor_db = -55.0f;
+        c.res_ne_protect_db = -30.0f;
+        c.res_enr_scale = 0.5f;
         c.res_enable_reverb = 1;
         c.res_reverb_decay = 0.8f;
         c.res_reverb_gain = 3.0f;

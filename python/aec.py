@@ -96,6 +96,7 @@ class AecConfig:
     res_over_sub: float = 3.0
     res_alpha: float = 0.8
     enable_cng: bool = True            # Comfort noise generation in RES
+    enable_td_constraint: bool = True  # Time-domain constraint on filter weights
 
     # Shadow filter (dual-filter divergence control, frequency-domain modes only)
     enable_shadow: bool = True
@@ -492,6 +493,7 @@ class PBFDAF:
         self.mu = mu
         self.delta = delta
         self.alpha_power = 0.9
+        self.enable_td_constraint = True  # can be disabled for diagnosis
 
         # Filter weights [n_partitions, n_freqs]
         self.W = np.zeros((n_partitions, self.n_freqs), dtype=np.complex64)
@@ -589,9 +591,10 @@ class PBFDAF:
             grad = self.error_spec * np.conj(self.X_buf[p_idx])
             self.W[p] += mu_eff * grad
             # Time-domain constraint: zero out non-causal part
-            w_time = np.fft.irfft(self.W[p], self.block_size)
-            w_time[self.hop_size:] = 0
-            self.W[p] = np.fft.rfft(w_time)
+            if self.enable_td_constraint:
+                w_time = np.fft.irfft(self.W[p], self.block_size)
+                w_time[self.hop_size:] = 0
+                self.W[p] = np.fft.rfft(w_time)
 
     def get_error_energy(self) -> float:
         return float(np.sum(np.abs(self.error_spec) ** 2))
@@ -685,9 +688,10 @@ class PBFDKF(PBFDAF):
             )
 
             # Time-domain constraint
-            w_time = np.fft.irfft(self.W[p], self.block_size)
-            w_time[self.hop_size:] = 0
-            self.W[p] = np.fft.rfft(w_time)
+            if self.enable_td_constraint:
+                w_time = np.fft.irfft(self.W[p], self.block_size)
+                w_time[self.hop_size:] = 0
+                self.W[p] = np.fft.rfft(w_time)
 
     def copy_weights_from(self, src: 'PBFDAF'):
         self.W[:] = src.W
@@ -1008,10 +1012,13 @@ class ResFilter:
             # → echo tail fully decayed → error_pwr is pure background noise
             # DT naturally excluded: far_power won't be < 1e-4 during double-talk
             if self.enable_cng and self.far_activity < 0.1:
-                self.noise_psd = np.minimum(
-                    self.alpha_noise * self.noise_psd
-                    + (1 - self.alpha_noise) * error_pwr,
-                    error_pwr * 2)
+                # Asymmetric tracking: fast down (follow noise drop), slow up
+                # (reject transient artifacts from Kalman / gain transitions).
+                # Prevents artifact-inflated noise_psd → CNG reverb.
+                alpha_up = 0.995    # very slow rise (~200 frames = 2s)
+                alpha_down = 0.95   # normal drop speed (~20 frames = 200ms)
+                alpha_n = np.where(error_pwr > self.noise_psd, alpha_up, alpha_down)
+                self.noise_psd = alpha_n * self.noise_psd + (1 - alpha_n) * error_pwr
 
         # --- Dynamic g_min: track far-end activity ---
         is_far_active = float(far_power > 1e-4)
@@ -1222,6 +1229,10 @@ class ResFilter:
 
         # --- Frequency-domain postprocessing (cf. AEC3 PostprocessGains) ---
         if far_power > 1e-4:
+            # 3-bin cross-frequency smoothing: reduce isolated gain peaks/valleys
+            # that cause musical noise / electrical noise artifacts
+            kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
+            g = np.convolve(g, kernel, mode='same').astype(np.float32)
             # DC consistency: bins 0-1 follow bin 2
             if self.n_freqs > 2:
                 g[:2] = np.minimum(g[1], g[2])
@@ -1602,6 +1613,7 @@ class AEC:
                 delta=self.config.delta,
                 hop_size=self._internal_hop
             )
+            self.filter.enable_td_constraint = self.config.enable_td_constraint
             self._hop_size = self.config.hop_size
             self._n_partitions = n_partitions
 
@@ -1742,6 +1754,7 @@ class AEC:
                 delta=self.config.delta,
                 hop_size=self.filter.hop_size
             )
+            self.shadow_filter.enable_td_constraint = self.config.enable_td_constraint
             # PBFDKF: apply config Q_high/Q_low, then shadow uses higher Q via ratio
             if isinstance(self.filter, PBFDKF):
                 self.filter.Q_high[:] = self.config.kalman_q_high
@@ -2522,6 +2535,8 @@ Examples:
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
     parser.add_argument('--no-cng', action='store_true', help='Disable comfort noise generation in RES')
+    parser.add_argument('--no-td-constraint', action='store_true',
+                        help='Disable time-domain constraint on filter weights (diagnostic)')
     parser.add_argument('--preset', choices=['mild', 'balanced', 'aggressive', 'maximum'],
                         help='Use preset config (overrides RES/adaptive params)')
     parser.add_argument('--no-shadow', action='store_true', help='Disable shadow filter')
@@ -2571,6 +2586,7 @@ Examples:
         enable_dtd=args.enable_dtd,
         enable_res=args.enable_res,
         enable_cng=not args.no_cng,
+        enable_td_constraint=not args.no_td_constraint,
         enable_shadow=not args.no_shadow,
         enable_highpass=not args.no_highpass,
         highpass_cutoff_hz=args.highpass_cutoff,
