@@ -363,6 +363,10 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
         s_ours = compute_sdr(mic, output)
         sdrs['ours'].append(s_ours)
 
+        # Ours (no RES) — raw PBFDAF output
+        output_nores = run_ours(mic, ref, sr, fl, enable_res=False, preset=preset, is_movement=movement)
+        sf.write(os.path.join(out_dir, f"{out_suffix}_ours_nores.wav"), output_nores, sr)
+
         line = f"{i:>5} {mv_tag:>2} {s_ours:>8.1f}"
 
         # Speex

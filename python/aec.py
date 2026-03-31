@@ -887,6 +887,9 @@ class ResFilter:
         self.noise_psd = np.zeros(n_freqs, dtype=np.float32)
         self.alpha_noise = 0.98
 
+        # Coherence smoothing (init here instead of lazy hasattr)
+        self._coh2_smooth = np.zeros(n_freqs, dtype=np.float32)
+
         # Far-end activity tracking for dynamic g_min
         self.far_activity = 0.0
 
@@ -925,6 +928,7 @@ class ResFilter:
         self.near_psd.fill(0)
         self.near_psd_buf.fill(0)
         self.near_psd_idx = 0
+        self._coh2_smooth.fill(0)
         self.reverb_psd.fill(0)
         self._ne_detect_count = 0
         self._ne_detect_hold = 0
@@ -973,8 +977,7 @@ class ResFilter:
             coh2_raw = np.minimum(coh2_raw, 1.0).astype(np.float32)
             # Asymmetric EMA: fast drop (DT protection) / slow rise (stable tracking)
             # After convergence: rise slower → coh2 more stable near 1.0 in echo-only
-            if not hasattr(self, '_coh2_smooth'):
-                self._coh2_smooth = np.zeros(self.n_freqs, dtype=np.float32)
+            # _coh2_smooth initialized in __init__ and cleared in reset()
             if filter_converged:
                 a_coh_rise = 0.90   # TC≈160ms, stable echo-only tracking
                 a_coh_drop = 0.50   # TC≈25ms, fast DT protection
@@ -1000,8 +1003,11 @@ class ResFilter:
 
         if far_power < 1e-4:
             self.echo_psd *= 0.3  # fast decay during far-end silence
-            # Track noise floor during far-end silence (echo-free)
-            if self.enable_cng:
+            # Track noise floor only during true far-end silence
+            # far_activity < 0.1 means far-end silent for ~800ms (EMA TC≈80 frames)
+            # → echo tail fully decayed → error_pwr is pure background noise
+            # DT naturally excluded: far_power won't be < 1e-4 during double-talk
+            if self.enable_cng and self.far_activity < 0.1:
                 self.noise_psd = np.minimum(
                     self.alpha_noise * self.noise_psd
                     + (1 - self.alpha_noise) * error_pwr,
@@ -1110,13 +1116,11 @@ class ResFilter:
         else:
             spectral_g_min = effective_g_min
 
-        # --- Per-bin near-end gate (replaces broadband dt_indicator→g_min) ---
-        # coh2 high (echo bin) → ne_protection≈0 → allow full suppression
-        # coh2 low (near-end bin) → ne_protection≈1 → raise floor to protect
-        # Pre-convergence: moderate protection for all presets
-        # fs_confidence: continuous FS/DT/NE indicator
-        # Used by ENR two-tuning, ne_g_floor, attack speed, LF rate limit
+        # fs_confidence: continuous FS/DT/NE indicator (single definition)
+        # Used by ne_g_floor, ENR two-tuning, attack speed, LF rate limit
         fs_confidence = self.far_activity * (1.0 - dt_indicator) ** 2.0
+
+        # --- Per-bin near-end gate ---
 
         # --- Per-bin near-end gate with fs_confidence ---
         if erle_factor < 0.3:
@@ -1242,8 +1246,7 @@ class ResFilter:
         # far_activity high + high dt → slow attack (DT: protect speech)
         # far_activity low → slow attack (NE: don't suppress)
         # This avoids binary nearend_state dependency
-        # DT weighting: power 2.0 for balanced FS/DT trade-off
-        fs_confidence = self.far_activity * (1.0 - dt_indicator) ** 2.0
+        # fs_confidence already computed earlier
         alpha_fast = 0.3 + 0.2 * (1.0 - erle_factor)   # 0.3-0.5
         alpha_slow = 0.85 + 0.1 * (1.0 - erle_factor)  # 0.85-0.95
         alpha_attack = alpha_slow + (alpha_fast - alpha_slow) * fs_confidence

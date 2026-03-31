@@ -1,6 +1,11 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v1.27.0），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Shadow Filter 和 AEC3-style RES（殘餘回音抑制）。
+回音消除模組（v1.28.0），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Shadow Filter 和 AEC3-style RES（殘餘回音抑制）。
+
+**v1.28.0 Bug fixes**：
+- **CNG noise gate**：`far_activity < 0.1` 取代無條件更新，避免 DT speech 污染 noise_psd
+- **_coh2_smooth reset**：正確初始化避免跨檔案狀態殘留
+- **fs_confidence dedup**：移除重複計算
 
 **v1.27.0 主要改進**：
 - **ENR offset 修正**：修復導致 RES gain 無法到達 g_min 的嚴重 bug（FS echo +0.17）
@@ -12,12 +17,12 @@
 - **EMR noise masking**：echo < noise floor 的 bin 不壓制
 
 **Blind test 成績（fl=512, BALANCED preset, AEC Challenge 2021）**：
-| 指標 | v1.18.0 | v1.27.0 | AEC3 |
+| 指標 | v1.18.0 | v1.28.0 | AEC3 |
 |------|---------|---------|------|
-| FS echo_mos | 3.210 | **3.709** | 3.963 |
-| DT echo_mos | 4.000 | **4.273** | 4.440 |
-| DT deg_mos | 2.215 | **2.187** | 2.258 |
-| NE deg_mos | 4.018 | **4.005** | 3.530 |
+| FS echo_mos | 3.210 | **3.713** | 3.963 |
+| DT echo_mos | 4.000 | **4.370** | 4.440 |
+| DT deg_mos | 2.215 | **2.092** | 2.258 |
+| NE deg_mos | 4.018 | **3.996** | 3.530 |
 
 支援四級 Preset（MILD / BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 

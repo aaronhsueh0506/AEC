@@ -2,6 +2,26 @@
 
 ## 版本歷史
 
+### v1.28.0 (2026-03-31) - Bug Fixes: CNG Gate, Coherence Reset, fs_confidence Dedup
+
+**Bug fixes:**
+- **CNG noise tracking gate**: `far_activity < 0.1` gate 取代無條件更新
+  - 原版在 far-end silence 時無條件更新 noise_psd，DT 時 near-end speech 可能污染 noise
+  - 初版用 `dt_indicator < 0.1` 太嚴格（echo 衰減尾巴讓 dt_indicator 殘留 > 0.1 → noise_psd 全零 → CNG 失效）
+  - 最終改用 `far_activity < 0.1`：EMA TC≈800ms，真正靜音才更新，DT 天然隔離
+- **_coh2_smooth proper init/reset**: 從 lazy `hasattr` 改為 `__init__` + `reset()` 正確初始化
+  - 舊版 hasattr lazy init 在 reset() 後狀態殘留（跨檔案污染）
+- **fs_confidence single definition**: 移除重複計算（原本在 ne_g_floor 和 attack blend 各算一次）
+- **NE nores output**: eval_aec_challenge.py 補上 nearend_singletalk 的 ours_nores 輸出
+
+**Blind test (fl=512, balanced, 800 cases):**
+| Metric | v1.27.0 | v1.28.0 | Change |
+|--------|---------|---------|--------|
+| FS echo_mos | 3.709 | **3.713** | +0.004 |
+| DT echo_mos | 4.273 | **4.370** | **+0.097** |
+| DT deg_mos | 2.187 | 2.092 | -0.095 |
+| NE deg_mos | 4.005 | 3.996 | -0.009 |
+
 ### v1.27.0 (2026-03-31) - AEC3-Style RES + Continuous Attack + CNG Crossfade
 
 **Architecture improvements (v1.25-v1.27):**
