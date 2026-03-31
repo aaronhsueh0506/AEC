@@ -456,8 +456,8 @@ int aec_process_ex(Aec* aec,
         }
     }
 
-    /* === Echo Path Change detection (requires shadow filter) === */
-    if (aec->shadow_filter) {
+    /* === Echo Path Change detection (only after convergence) === */
+    if (aec->shadow_filter && aec->filter_converged) {
         float total_err = aec->main_err_smooth + aec->shadow_err_smooth;
         float delta_ratio = 0.0f;
         if (total_err > 1e-10f)

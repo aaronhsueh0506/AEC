@@ -546,9 +546,9 @@ class PBFDAF:
         self.far_buffer[:-hop] = self.far_buffer[hop:]
         self.far_buffer[-hop:] = far_end
 
-        # FFT (zero-pad block_size buffer to fft_size)
-        near_spec = np.fft.rfft(self.near_buffer, self.fft_size)
-        far_spec = np.fft.rfft(self.far_buffer, self.fft_size)
+        # FFT (zero-pad block_size buffer to fft_size, cast to float32 precision)
+        near_spec = np.fft.rfft(self.near_buffer, self.fft_size).astype(np.complex64)
+        far_spec = np.fft.rfft(self.far_buffer, self.fft_size).astype(np.complex64)
         self.near_spec = near_spec  # expose for RES overlap-save
         self.far_spec = far_spec  # expose for coherence DTD
 
@@ -567,7 +567,7 @@ class PBFDAF:
             self.echo_spec += self.W[p] * self.X_buf[p_idx]
 
         # IFFT (fft_size → take block_size valid samples)
-        echo_time = np.fft.irfft(self.echo_spec, self.fft_size)
+        echo_time = np.fft.irfft(self.echo_spec, self.fft_size).astype(np.float32)
 
         # Error (take last hop_size samples — valid region of overlap-save)
         output = self.near_buffer[-hop:] - echo_time[self.hop_size:self.block_size]
@@ -575,7 +575,7 @@ class PBFDAF:
         # Error spectrum (zero-pad to fft_size, only last hop samples are valid)
         error_time = np.zeros(self.fft_size, dtype=np.float32)
         error_time[self.hop_size:self.block_size] = output
-        self.error_spec = np.fft.rfft(error_time)
+        self.error_spec = np.fft.rfft(error_time).astype(np.complex64)
 
         # Update weights — gate on far-end activity
         far_hop_energy = np.sum(far_end ** 2) / hop
@@ -603,9 +603,9 @@ class PBFDAF:
             self.W[p] += mu_eff * grad
             # Time-domain constraint: fade out non-causal part (raised cosine)
             if self.enable_td_constraint:
-                w_time = np.fft.irfft(self.W[p], self.fft_size)
+                w_time = np.fft.irfft(self.W[p], self.fft_size).astype(np.float32)
                 w_time *= self._td_window
-                self.W[p] = np.fft.rfft(w_time)
+                self.W[p] = np.fft.rfft(w_time).astype(np.complex64)
 
     def get_error_energy(self) -> float:
         return float(np.sum(np.abs(self.error_spec) ** 2))
@@ -700,9 +700,9 @@ class PBFDKF(PBFDAF):
 
             # Time-domain constraint (raised cosine fade)
             if self.enable_td_constraint:
-                w_time = np.fft.irfft(self.W[p], self.fft_size)
+                w_time = np.fft.irfft(self.W[p], self.fft_size).astype(np.float32)
                 w_time *= self._td_window
-                self.W[p] = np.fft.rfft(w_time)
+                self.W[p] = np.fft.rfft(w_time).astype(np.complex64)
 
     def copy_weights_from(self, src: 'PBFDAF'):
         self.W[:] = src.W
@@ -2184,7 +2184,8 @@ class AEC:
             # DT: one filter's error ↑, other stable → ΔE/total large
             # Echo change: both errors ↑ → ΔE/total small
             # When detected: reset Q to Q_high for fast re-convergence
-            if self.shadow_filter is not None:
+            # Only after convergence: before that, errors naturally rise (filter learning)
+            if self.shadow_filter is not None and self._filter_converged:
                 total_err = self.main_err_smooth + self.shadow_err_smooth
                 if total_err > 1e-10:
                     delta_ratio = abs(self.main_err_smooth - self.shadow_err_smooth) / total_err
