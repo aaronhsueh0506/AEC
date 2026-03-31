@@ -901,6 +901,9 @@ class ResFilter:
         self.enable_cng = enable_cng
         self.noise_psd = np.zeros(n_freqs, dtype=np.float32)
         self.alpha_noise = 0.98
+        # Phase accumulator: continuous phase evolution avoids frame-boundary clicks
+        self._cng_phase = np.random.uniform(-np.pi, np.pi, n_freqs).astype(np.float32)
+        self._cng_freq = np.random.uniform(-0.1, 0.1, n_freqs).astype(np.float32)
 
         # Coherence smoothing (init here instead of lazy hasattr)
         self._coh2_smooth = np.zeros(n_freqs, dtype=np.float32)
@@ -936,6 +939,7 @@ class ResFilter:
         self.S_ff.fill(0)
         self.S_ee.fill(0)
         self.noise_psd.fill(0)
+        self._cng_phase = np.random.uniform(-np.pi, np.pi, self.n_freqs).astype(np.float32)
         self.far_activity = 0.0
         self.input_buf.fill(0)
         self.ola_buf.fill(0)
@@ -1310,18 +1314,17 @@ class ResFilter:
         # This prevents unnatural silence during deep echo suppression
         if self.enable_cng and np.sum(self.noise_psd) > 0:
             cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0))
-            # Scale down CNG level to avoid being too loud / sudden
-            cn_gain *= 0.4
-            # Heavy spectral smoothing on noise_psd: remove tonal/echo residual
-            # patterns, keep only broadband noise floor
+            cn_gain *= 0.4  # scale down to avoid sudden loud noise
+            # Spectral smoothing: remove tonal/echo residual patterns
             smooth_noise = self.noise_psd.copy()
-            for _ in range(3):  # 3 passes of 5-bin averaging
+            for _ in range(3):
                 kernel = np.ones(5, dtype=np.float32) / 5.0
                 smooth_noise = np.convolve(smooth_noise, kernel, mode='same').astype(np.float32)
             noise_mag = np.sqrt(smooth_noise + 1e-10).astype(np.float32)
-            cng_phase = np.random.uniform(
-                -np.pi, np.pi, self.n_freqs).astype(np.float32)
-            cng_spec = (cn_gain * noise_mag * np.exp(1j * cng_phase)).astype(np.complex64)
+            # Phase accumulator: continuous phase avoids frame-boundary clicks
+            self._cng_phase += self._cng_freq
+            cng_spec = (cn_gain * noise_mag
+                        * np.exp(1j * self._cng_phase)).astype(np.complex64)
             enhanced_spec = enhanced_spec + cng_spec
 
         enhanced_time = np.fft.irfft(enhanced_spec, self.block_size)[:self.frame_size]
