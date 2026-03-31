@@ -95,7 +95,7 @@ class AecConfig:
     res_g_min_db: float = -25.0
     res_over_sub: float = 3.0
     res_alpha: float = 0.8
-    enable_cng: bool = True            # Comfort noise generation in RES
+    enable_cng: bool = False           # Comfort noise generation in RES (off by default)
     enable_td_constraint: bool = True  # Time-domain constraint on filter weights
 
     # Shadow filter (dual-filter divergence control, frequency-domain modes only)
