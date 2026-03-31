@@ -81,6 +81,12 @@ typedef struct {
     float kalman_q_low;         /* 1e-5 */
     int   warmup_frames;        /* 150 */
 
+    /* Echo path change detection */
+    float epc_delta_threshold;  /* 0.3 */
+    float epc_total_rise;       /* 1.5 */
+    int   epc_hangover;         /* 20 */
+    float epc_mu_floor;         /* 0.5 */
+
     /* Derived (computed by factory) */
     int fft_size;               /* 512 (next pow2 >= frame_size) */
     int n_freqs;                /* 257 (fft_size/2 + 1) */
@@ -129,7 +135,7 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.res_ne_protect_db = -16.0f;
     c.res_max_drop_db_per_frame = 6.0f;
     c.res_max_rise_db_per_frame = 6.0f;
-    c.enable_cng = 1;
+    c.enable_cng = 0;
 
     /* RES v2 */
     c.res_echo_method = RES_ECHO_DIRECT;
@@ -150,6 +156,11 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.kalman_q_high = 1.5e-4f;
     c.kalman_q_low = 1e-5f;
     c.warmup_frames = 150;
+
+    c.epc_delta_threshold = 0.3f;
+    c.epc_total_rise = 1.5f;
+    c.epc_hangover = 20;
+    c.epc_mu_floor = 0.5f;
 
     /* Derived */
     c.fft_size = 512;

@@ -616,6 +616,16 @@ void res_process(ResFilter* r,
             g[k] = 1.0f;
     }
 
+    /* === Cross-frequency smoothing (3-bin convolution) === */
+    if (far_power > 1e-4f) {
+        float prev = g[0];
+        for (int k = 1; k < nf - 1; k++) {
+            float cur = g[k];
+            g[k] = 0.25f * prev + 0.5f * cur + 0.25f * g[k+1];
+            prev = cur;
+        }
+    }
+
     /* === Frequency-domain postprocessing (cf. AEC3 PostprocessGains) === */
     if (far_power > 1e-4f) {
         /* DC consistency: bins 0-1 follow bin 2 */
@@ -680,21 +690,21 @@ void res_process(ResFilter* r,
         r->spec_buf[k].i *= r->gain_smooth[k];
     }
 
-    /* === CNG: AEC3-style comfort noise crossfade (always-on) === */
-    /* cn_gain = sqrt(max(1 - G^2, 0)): as suppression deepens, more comfort noise */
+    /* === CNG: complex Gaussian comfort noise === */
     if (r->enable_cng) {
         float noise_sum = 0.0f;
         for (int k = 0; k < nf; k++) noise_sum += r->noise_psd[k];
         if (noise_sum > 0.0f) {
             for (int k = 0; k < nf; k++) {
-                float g2 = r->gain_smooth[k] * r->gain_smooth[k];
-                float cn_gain = fast_sqrt(maxf(1.0f - g2, 0.0f));
-                float noise_mag = fast_sqrt(r->noise_psd[k] + 1e-10f);
-                /* Pseudo-random phase per bin */
-                float phase = (float)(k * 2654435761u % 1000) / 1000.0f *
-                              2.0f * (float)M_PI;
-                r->spec_buf[k].r += cn_gain * noise_mag * cosf(phase);
-                r->spec_buf[k].i += cn_gain * noise_mag * sinf(phase);
+                float cn_gain_k = fast_sqrt(maxf(1.0f - r->gain_smooth[k] * r->gain_smooth[k], 0.0f));
+                float noise_std = fast_sqrt(r->noise_psd[k] / 2.0f + 1e-10f);
+                /* Box-Muller for two N(0,1) samples */
+                float u1 = (float)(rand() + 1) / ((float)RAND_MAX + 2.0f);
+                float u2 = (float)rand() / ((float)RAND_MAX + 1.0f);
+                float z0 = fast_sqrt(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
+                float z1 = fast_sqrt(-2.0f * logf(u1)) * sinf(2.0f * (float)M_PI * u2);
+                r->spec_buf[k].r += cn_gain_k * noise_std * z0;
+                r->spec_buf[k].i += cn_gain_k * noise_std * z1;
             }
         }
     }

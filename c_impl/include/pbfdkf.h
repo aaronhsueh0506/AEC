@@ -110,6 +110,7 @@ float pbfdkf_get_far_power(const Pbfdkf* f);
 
 /* Getters */
 int pbfdkf_get_block_size(const Pbfdkf* f);
+int pbfdkf_get_fft_size(const Pbfdkf* f);
 int pbfdkf_get_hop_size(const Pbfdkf* f);
 int pbfdkf_get_n_freqs(const Pbfdkf* f);
 int pbfdkf_get_n_partitions(const Pbfdkf* f);

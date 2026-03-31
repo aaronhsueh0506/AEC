@@ -48,6 +48,11 @@ struct Aec {
     int warmup_frames;
     int warmup_far_active;
 
+    /* Echo Path Change detection */
+    float prev_total_err;
+    int epc_active;
+    int epc_hangover_count;
+
     /* Convergence */
     int filter_converged;
     int conv_counter;
@@ -162,6 +167,11 @@ Aec* aec_create(const AecConfig* config) {
     aec->shadow_frame_count = 0;
     aec->shadow_copy_counter = 0;
 
+    /* EPC init */
+    aec->prev_total_err = 0.0f;
+    aec->epc_active = 0;
+    aec->epc_hangover_count = 0;
+
     return aec;
 }
 
@@ -198,6 +208,7 @@ void aec_reset(Aec* aec) {
     aec->limiter_gain = 1.0f;
     aec->main_err_smooth = 0; aec->shadow_err_smooth = 0;
     aec->shadow_frame_count = 0; aec->shadow_copy_counter = 0;
+    aec->prev_total_err = 0.0f; aec->epc_active = 0; aec->epc_hangover_count = 0;
     free(aec->per_bin_mu_scale); aec->per_bin_mu_scale = NULL;
 }
 
@@ -223,7 +234,13 @@ static float get_simple_mu_scale(Aec* aec) {
 
     /* Per-bin mu_scale from RES (post-convergence) */
     /* (returned as scalar fallback when per_bin not available) */
-    return mu_min + (1.0f - mu_min) * aec->simple_mu_ratio;
+    float mu_scale = mu_min + (1.0f - mu_min) * aec->simple_mu_ratio;
+
+    /* Echo path change: keep mu high so filter can adapt to new path */
+    if (aec->epc_active)
+        mu_scale = maxf(mu_scale, aec->config.epc_mu_floor);
+
+    return mu_scale;
 }
 
 static void update_simple_mu_ratio(Aec* aec, const float* output,
@@ -415,7 +432,7 @@ int aec_process_ex(Aec* aec,
         float far_pwr_avg = far_pwr / hop + 1e-10f;
         int not_dt = (far_pwr_avg / raw_err_pwr > 0.3f);
 
-        int copy_allowed = far_active && not_dt;
+        int copy_allowed = far_active && not_dt && !aec->epc_active;
 
         if (copy_allowed) {
             if (aec->shadow_err_smooth < aec->main_err_smooth * threshold) {
@@ -436,6 +453,35 @@ int aec_process_ex(Aec* aec,
             }
         } else {
             aec->shadow_copy_counter = 0;
+        }
+    }
+
+    /* === Echo Path Change detection (requires shadow filter) === */
+    if (aec->shadow_filter) {
+        float total_err = aec->main_err_smooth + aec->shadow_err_smooth;
+        float delta_ratio = 0.0f;
+        if (total_err > 1e-10f)
+            delta_ratio = fabsf(aec->main_err_smooth - aec->shadow_err_smooth) / total_err;
+
+        int errors_rising = (total_err > aec->prev_total_err * cfg->epc_total_rise
+                             && aec->prev_total_err > 1e-10f);
+        int is_echo_change = errors_rising && (delta_ratio < cfg->epc_delta_threshold);
+        aec->prev_total_err = total_err;
+
+        if (is_echo_change) {
+            aec->epc_hangover_count = cfg->epc_hangover;
+            aec->epc_active = 1;
+            /* Reset Q to Q_high for fast re-convergence */
+            pbfdkf_set_q_high(aec->filter, cfg->kalman_q_high);
+            pbfdkf_set_q_high(aec->shadow_filter,
+                              cfg->kalman_q_high * cfg->shadow_q_ratio);
+            aec->filter_converged = 0;
+            aec->conv_counter = 0;
+        } else if (aec->epc_hangover_count > 0) {
+            aec->epc_hangover_count--;
+            aec->epc_active = 1;
+        } else {
+            aec->epc_active = 0;
         }
     }
 

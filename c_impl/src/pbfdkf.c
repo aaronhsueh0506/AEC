@@ -27,14 +27,19 @@
 #include <string.h>
 #include <math.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #define P_INIT  0.01f   /* Initial error covariance (was 0.5, caused K explosion) */
 #define P_MAX   0.02f   /* Max P to prevent covariance growth during silence */
 
 struct Pbfdkf {
-    int block_size;       /* FFT size (512) */
+    int block_size;       /* Input block size (2*hop = 320) */
     int hop_size;         /* Processing hop (160) */
+    int fft_size;         /* FFT size = next pow2 >= block_size (512) */
     int n_partitions;
-    int n_freqs;          /* block_size/2 + 1 = 257 */
+    int n_freqs;          /* fft_size/2 + 1 = 257 */
     float delta;
     float alpha_power;    /* 0.9 */
 
@@ -70,7 +75,10 @@ struct Pbfdkf {
     /* Power estimation [n_freqs] */
     float* power;
 
-    /* Temporary [block_size] / [n_freqs] */
+    /* TD constraint window [fft_size] */
+    float* td_window;
+
+    /* Temporary [fft_size] / [n_freqs] */
     float* temp_time;
     Complex* temp_spec;
 };
@@ -83,25 +91,34 @@ static inline Complex cmul(Complex a, Complex b) {
     return r;
 }
 
+/* Next power of 2 >= n */
+static int next_pow2(int n) {
+    int p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+
 Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
                        float delta, float q_high, float q_low) {
-    if (block_size <= 0 || hop_size <= 0 || n_partitions <= 0) return NULL;
-    if (hop_size > block_size / 2) return NULL; /* overlap-save constraint */
+    (void)block_size; /* block_size now derived from hop_size */
+    if (hop_size <= 0 || n_partitions <= 0) return NULL;
 
     Pbfdkf* f = (Pbfdkf*)calloc(1, sizeof(Pbfdkf));
     if (!f) return NULL;
 
-    f->block_size = block_size;
+    /* Direction A: block_size = 2*hop, FFT zero-pads to next pow2 */
+    f->block_size = 2 * hop_size;
     f->hop_size = hop_size;
+    f->fft_size = next_pow2(f->block_size);
     f->n_partitions = n_partitions;
-    f->n_freqs = block_size / 2 + 1;
+    f->n_freqs = f->fft_size / 2 + 1;
     f->delta = delta;
     f->alpha_power = 0.9f;
     f->alpha_r = 0.98f;
     f->partition_idx = 0;
     f->q_low_base = q_low;
 
-    f->fft = fft_create(block_size);
+    f->fft = fft_create(f->fft_size);
     if (!f->fft) goto error;
 
     /* Allocate W [n_partitions][n_freqs] */
@@ -145,21 +162,39 @@ Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
         f->error_psd[k] = 1e-2f;
     }
 
-    /* Buffers */
-    f->near_buffer = (float*)calloc(block_size, sizeof(float));
-    f->far_buffer  = (float*)calloc(block_size, sizeof(float));
+    /* Input buffers [block_size] (not fft_size) */
+    f->near_buffer = (float*)calloc(f->block_size, sizeof(float));
+    f->far_buffer  = (float*)calloc(f->block_size, sizeof(float));
+    /* Spectrum buffers [n_freqs] */
     f->near_spec   = (Complex*)calloc(f->n_freqs, sizeof(Complex));
     f->far_spec    = (Complex*)calloc(f->n_freqs, sizeof(Complex));
     f->echo_spec   = (Complex*)calloc(f->n_freqs, sizeof(Complex));
     f->error_spec  = (Complex*)calloc(f->n_freqs, sizeof(Complex));
     f->power       = (float*)calloc(f->n_freqs, sizeof(float));
-    f->temp_time   = (float*)calloc(block_size, sizeof(float));
+    /* Temporary buffers use fft_size */
+    f->temp_time   = (float*)calloc(f->fft_size, sizeof(float));
     f->temp_spec   = (Complex*)calloc(f->n_freqs, sizeof(Complex));
 
     if (!f->near_buffer || !f->far_buffer || !f->near_spec ||
         !f->far_spec || !f->echo_spec || !f->error_spec ||
         !f->power || !f->temp_time || !f->temp_spec) {
         goto error;
+    }
+
+    /* TD constraint window [fft_size]: raised cosine fade */
+    f->td_window = (float*)malloc(f->fft_size * sizeof(float));
+    if (!f->td_window) goto error;
+    {
+        int fade_len = hop_size / 4;  /* 40 for hop=160 */
+        int fade_start = hop_size - fade_len;
+        for (int i = 0; i < fade_start; i++)
+            f->td_window[i] = 1.0f;
+        for (int i = 0; i < fade_len; i++) {
+            float t = (float)(i + 1) / (float)(fade_len + 1);
+            f->td_window[fade_start + i] = 0.5f * (1.0f + cosf((float)M_PI * t));
+        }
+        for (int i = hop_size; i < f->fft_size; i++)
+            f->td_window[i] = 0.0f;
     }
 
     return f;
@@ -192,6 +227,7 @@ void pbfdkf_destroy(Pbfdkf* f) {
     free(f->error_psd);
 
     fft_destroy(f->fft);
+    free(f->td_window);
     free(f->near_buffer);
     free(f->far_buffer);
     free(f->near_spec);
@@ -243,7 +279,8 @@ int pbfdkf_process(Pbfdkf* f,
                    float mu_scale) {
     if (!f || !near_end || !far_end || !output) return -1;
 
-    const int bs = f->block_size;
+    const int bs = f->block_size;       /* 2*hop = 320 */
+    const int fft_sz = f->fft_size;     /* next pow2 = 512 */
     const int hop = f->hop_size;
     const int nfreq = f->n_freqs;
     const float alpha = f->alpha_power;
@@ -256,9 +293,14 @@ int pbfdkf_process(Pbfdkf* f,
     memmove(f->far_buffer, f->far_buffer + hop, (bs - hop) * sizeof(float));
     memcpy(f->far_buffer + bs - hop, far_end, hop * sizeof(float));
 
-    /* FFT */
-    fft_forward(f->fft, f->near_buffer, f->near_spec);
-    fft_forward(f->fft, f->far_buffer, f->far_spec);
+    /* FFT: zero-pad block_size to fft_size */
+    memcpy(f->temp_time, f->near_buffer, bs * sizeof(float));
+    memset(f->temp_time + bs, 0, (fft_sz - bs) * sizeof(float));
+    fft_forward(f->fft, f->temp_time, f->near_spec);
+
+    memcpy(f->temp_time, f->far_buffer, bs * sizeof(float));
+    memset(f->temp_time + bs, 0, (fft_sz - bs) * sizeof(float));
+    fft_forward(f->fft, f->temp_time, f->far_spec);
 
     /* Store far spec in circular buffer */
     int curr_p = f->partition_idx;
@@ -282,17 +324,17 @@ int pbfdkf_process(Pbfdkf* f,
         }
     }
 
-    /* IFFT echo estimate */
+    /* IFFT echo estimate (fft_size) */
     fft_inverse(f->fft, f->echo_spec, f->temp_time);
 
-    /* Output = last hop samples (valid region of overlap-save) */
+    /* Output = valid region [hop, block_size) of overlap-save */
     for (int n = 0; n < hop; n++) {
-        output[n] = f->near_buffer[bs - hop + n] - f->temp_time[bs - hop + n];
+        output[n] = f->near_buffer[hop + n] - f->temp_time[hop + n];
     }
 
-    /* Error spectrum: zero-pad, valid region at end */
-    memset(f->temp_time, 0, bs * sizeof(float));
-    memcpy(f->temp_time + bs - hop, output, hop * sizeof(float));
+    /* Error spectrum: zero-pad to fft_size, valid region at end */
+    memset(f->temp_time, 0, fft_sz * sizeof(float));
+    memcpy(f->temp_time + fft_sz - hop, output, hop * sizeof(float));
     fft_forward(f->fft, f->temp_time, f->error_spec);
 
     /* Far-end activity gate: skip update when ref is silent */
@@ -356,9 +398,10 @@ int pbfdkf_process(Pbfdkf* f,
                 f->P[p][k] = P_new;
             }
 
-            /* Time-domain constraint: w[hop_size:] = 0 */
+            /* Time-domain constraint: raised cosine fade window */
             fft_inverse(f->fft, f->W[p], f->temp_time);
-            memset(f->temp_time + hop, 0, (bs - hop) * sizeof(float));
+            for (int k = 0; k < fft_sz; k++)
+                f->temp_time[k] *= f->td_window[k];
             fft_forward(f->fft, f->temp_time, f->W[p]);
         }
     }
@@ -433,6 +476,7 @@ float pbfdkf_get_far_power(const Pbfdkf* f) {
 }
 
 int pbfdkf_get_block_size(const Pbfdkf* f)    { return f ? f->block_size : 0; }
+int pbfdkf_get_fft_size(const Pbfdkf* f)      { return f ? f->fft_size : 0; }
 int pbfdkf_get_hop_size(const Pbfdkf* f)      { return f ? f->hop_size : 0; }
 int pbfdkf_get_n_freqs(const Pbfdkf* f)       { return f ? f->n_freqs : 0; }
 int pbfdkf_get_n_partitions(const Pbfdkf* f)  { return f ? f->n_partitions : 0; }
