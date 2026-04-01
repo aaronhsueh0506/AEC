@@ -1215,11 +1215,17 @@ class ResFilter:
             scale = self.enr_scale
             ne_confidence = 1.0 - fs_confidence  # reuse from attack blend
 
+            # Saturation penalty: lower thresholds when speaker distortion detected
+            # over_sub carries saturation info (boosted by AEC.process when saturated)
+            # High over_sub → more aggressive → lower thresholds
+            sat_penalty = np.clip(4.0 / max(self.over_sub, 4.0), 0.3, 1.0)
+            effective_scale = scale * sat_penalty
+
             # Two sets of thresholds, blended by ne_confidence
             enr_t_ne = (1 - blend) * 3.0 + blend * 0.3
             enr_s_ne = (1 - blend) * 5.0 + blend * 0.5
-            enr_t_fs = (1 - blend) * (0.3 * scale) + blend * (0.07 * scale)
-            enr_s_fs = (1 - blend) * (0.4 * scale) + blend * (0.1 * scale)
+            enr_t_fs = (1 - blend) * (0.3 * effective_scale) + blend * (0.07 * effective_scale)
+            enr_s_fs = (1 - blend) * (0.4 * effective_scale) + blend * (0.1 * effective_scale)
 
             enr_t = ne_confidence * enr_t_ne + (1 - ne_confidence) * enr_t_fs
             enr_s = ne_confidence * enr_s_ne + (1 - ne_confidence) * enr_s_fs
