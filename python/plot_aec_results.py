@@ -159,6 +159,8 @@ def main():
                         help='Filter length in samples (0=mode default)')
     parser.add_argument('--rir', type=str, default=None,
                         help='Path to target RIR wav file (for synthetic data)')
+    parser.add_argument('--save-wav', action='store_true',
+                        help='Save AEC output wav files (no-RES and RES)')
     parser.add_argument('--files', type=str, default=None,
                         help='Comma-separated fileid list (e.g. "450,50")')
     args = parser.parse_args()
@@ -313,6 +315,16 @@ def main():
         plt.savefig(out_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {out_path}")
         plt.close(fig)
+
+        if args.save_wav:
+            wav_no_res = os.path.join(base,
+                f'aec_out_{args.mode}{dtd_tag}{shadow_tag}_nores_{fid}.wav')
+            wav_res = os.path.join(base,
+                f'aec_out_{args.mode}{dtd_tag}{shadow_tag}_res_{fid}.wav')
+            sf.write(wav_no_res, out_no_res, sr)
+            sf.write(wav_res, out_res, sr)
+            print(f"  Saved: {wav_no_res}")
+            print(f"  Saved: {wav_res}")
 
 
 if __name__ == '__main__':
