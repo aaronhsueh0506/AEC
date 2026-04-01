@@ -92,14 +92,24 @@ def estimate_delay(mic, ref, sr, max_delay_ms=250.0):
     mic_spec = np.fft.rfft(m, n=fft_size)
     ref_spec = np.fft.rfft(r, n=fft_size)
     cross = mic_spec * np.conj(ref_spec)
-    # GCC-PHAT whitening: sharper peak, robust to reverb
-    magnitude = np.abs(cross) + 1e-10
-    cross = cross / magnitude
-    xcorr = np.fft.irfft(cross, n=fft_size)
 
-    # Search positive delays only (mic lags ref)
+    # Primary: GCC-PHAT (sharp peak for most cases)
+    cross_phat = cross / (np.abs(cross) + 1e-10)
+    xcorr_phat = np.fft.irfft(cross_phat, n=fft_size)
     max_search = min(max_d, fft_size // 2)
-    delay = int(np.argmax(xcorr[:max_search + 1]))
+    peak_val_phat = np.max(np.abs(xcorr_phat[:max_search + 1]))
+    peak_idx_phat = int(np.argmax(np.abs(xcorr_phat[:max_search + 1])))
+
+    # Confidence: peak relative to RMS (high = reliable, low = noise)
+    rms = np.sqrt(np.mean(xcorr_phat[:max_search + 1] ** 2))
+    confidence = peak_val_phat / (rms + 1e-10)
+
+    # Low confidence → fallback to plain xcorr
+    if confidence < 5.0:
+        xcorr_plain = np.fft.irfft(cross, n=fft_size)
+        delay = int(np.argmax(np.abs(xcorr_plain[:max_search + 1])))
+    else:
+        delay = peak_idx_phat
     return delay
 
 

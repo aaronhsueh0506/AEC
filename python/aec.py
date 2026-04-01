@@ -676,11 +676,11 @@ class PBFDKF(PBFDAF):
         Q_gated = np.where(far_activity_mask, Q_modulated, Q_floor)
 
         # P_MAX: overridable during EPC for faster re-convergence
-        p_max = getattr(self, '_p_max_override', 0.02)
+        p_max = getattr(self, '_p_max_override', 0.5)
         if hasattr(self, '_p_max_override_frames'):
             self._p_max_override_frames -= 1
             if self._p_max_override_frames <= 0:
-                self._p_max_override = 0.02
+                self._p_max_override = 0.5
                 del self._p_max_override_frames
 
         # Global denominator: sum over ALL partitions (correct Kalman theory)
@@ -1166,7 +1166,14 @@ class ResFilter:
 
         if self.gain_type == "enr" and residual_echo_psd is not None:
             # ENR masking with two-tuning (cf. AEC3 suppressor)
-            enr = residual_echo_psd / (self.error_psd + 1e-10)
+            # True ENR: echo / nearend (not echo / error which caps at 1.0)
+            # Subtract residual echo from error to estimate nearend power
+            noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
+            nearend_est = np.maximum(
+                self.error_psd - residual_echo_psd,
+                noise_floor_psd
+            )
+            enr = residual_echo_psd / nearend_est
 
             # --- Dominant nearend detection ---
             hf_start = min(8, self.n_freqs // 4)
@@ -2067,7 +2074,7 @@ class AEC:
                             for filt in [self.filter, self.shadow_filter]:
                                 if filt is not None and hasattr(filt, 'Q'):
                                     filt.Q = filt.Q_high.copy()
-                                    filt._p_max_override = 0.05
+                                    filt._p_max_override = 1.0
                                     filt._p_max_override_frames = 30
                             self._filter_converged = False
                             self._conv_counter = 0
@@ -2221,7 +2228,7 @@ class AEC:
                     # Temporarily relax P_MAX for faster re-convergence
                     for filt in [self.filter, self.shadow_filter]:
                         if filt:
-                            filt._p_max_override = 0.05
+                            filt._p_max_override = 1.0
                             filt._p_max_override_frames = 30
                 elif self.epc_hangover_count > 0:
                     self.epc_hangover_count -= 1
