@@ -640,7 +640,7 @@ class PBFDKF(PBFDAF):
         # R: measurement noise PSD (estimated from error)
         self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
         self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
-        self._alpha_r = 0.98
+        self._alpha_r = 0.95   # faster R tracking for DT protection
 
     def reset(self):
         super().reset()
@@ -1169,15 +1169,19 @@ class ResFilter:
         # --- Gain computation ---
 
         if self.gain_type == "enr" and residual_echo_psd is not None:
-            # ENR = residual / error_psd (preserves DT speech quality)
-            # nonlinear_floor on residual ensures ENR > 1.0 in FS when needed
-            enr = residual_echo_psd / (self.error_psd + 1e-10)
+            # ENR = echo / nearend (true ENR, can exceed 1.0)
+            noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
+            nearend_est = np.maximum(
+                self.error_psd - residual_echo_psd,
+                noise_floor_psd
+            )
+            enr = residual_echo_psd / nearend_est
 
             # --- Dominant nearend detection ---
             hf_start = min(8, self.n_freqs // 4)
             avg_enr = float(np.mean(enr[hf_start:]))
             NE_ENR_THRESHOLD = 0.4
-            NE_ENR_EXIT = 1.5
+            NE_ENR_EXIT = 0.8   # was 1.5, unreachable with nearend_est denom
             NE_TRIGGER_FRAMES = 12
             NE_HOLD_FRAMES = 30
 
