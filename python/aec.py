@@ -1169,15 +1169,9 @@ class ResFilter:
         # --- Gain computation ---
 
         if self.gain_type == "enr" and residual_echo_psd is not None:
-            # ENR masking with two-tuning (cf. AEC3 suppressor)
-            # True ENR: echo / nearend (not echo / error which caps at 1.0)
-            # Subtract residual echo from error to estimate nearend power
-            noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
-            nearend_est = np.maximum(
-                self.error_psd - residual_echo_psd,
-                noise_floor_psd
-            )
-            enr = residual_echo_psd / nearend_est
+            # ENR = residual / error_psd (preserves DT speech quality)
+            # nonlinear_floor on residual ensures ENR > 1.0 in FS when needed
+            enr = residual_echo_psd / (self.error_psd + 1e-10)
 
             # --- Dominant nearend detection ---
             hf_start = min(8, self.n_freqs // 4)
