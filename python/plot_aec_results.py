@@ -12,7 +12,7 @@ Reads files from gen_sim_data.py output (AEC Challenge naming):
 
 Usage:
     python3 plot_aec_results.py ../wav/ [--mode nlms|lms|fdaf|pbfdaf|pbfdkf] [--no-dtd]
-    python3 plot_aec_results.py --mic mic.wav --ref ref.wav [--mode nlms] [--no-dtd]
+    python3 plot_aec_results.py --mic mic.wav --ref ref.wav [--rir rir.wav] [--mode nlms] [--no-dtd]
 """
 
 import numpy as np
@@ -157,6 +157,8 @@ def main():
     parser.add_argument('--mu', type=float, default=0.3)
     parser.add_argument('--filter', type=int, default=0,
                         help='Filter length in samples (0=mode default)')
+    parser.add_argument('--rir', type=str, default=None,
+                        help='Path to target RIR wav file (for synthetic data)')
     parser.add_argument('--files', type=str, default=None,
                         help='Comma-separated fileid list (e.g. "450,50")')
     args = parser.parse_args()
@@ -207,14 +209,21 @@ def main():
 
         print(f"Found {len(groups)} file(s) in {dataset_dir}")
 
-    # True IR (from gen_sim_data defaults)
+    # Target RIR: from --rir file, or from gen_sim_data defaults
     true_ir = None
-    if HAS_TRUE_RIR:
+    if args.rir:
+        rir_path = os.path.abspath(args.rir)
+        if not os.path.isfile(rir_path):
+            print(f"RIR file not found: {rir_path}")
+            sys.exit(1)
+        true_ir, _ = sf.read(rir_path)
+        true_ir = true_ir.astype(np.float32)
+        print(f"Using target RIR: {rir_path} ({len(true_ir)} taps)")
+    elif HAS_TRUE_RIR:
         true_ir = make_true_rir(delay=200, gain=0.8, n_taps=512)
 
-    # Each fileid → separate figure with 3 rows (far, mic, output)
-    # Output row overlays RES-off and RES-on
-    rows_per_file = 3
+    # Each fileid → separate figure with 4 rows (far, mic, output, RIR)
+    rows_per_file = 4
 
     for gi, group in enumerate(groups):
         fid = group['fileid']
@@ -243,8 +252,11 @@ def main():
         ymax = max(np.max(np.abs(mic)), np.max(np.abs(ref)))
         ylim = (-ymax * 1.05, ymax * 1.05)
 
-        fig, axes = plt.subplots(rows_per_file, 1, figsize=(16, 7),
-                                 sharex=True)
+        fig, axes = plt.subplots(rows_per_file, 1, figsize=(16, 9),
+                                 gridspec_kw={'height_ratios': [1, 1, 1, 0.8]})
+        # Share x-axis for waveform rows (0-2)
+        axes[1].sharex(axes[0])
+        axes[2].sharex(axes[0])
 
         # Row 0: Far-end (reference)
         ax = axes[0]
@@ -273,8 +285,22 @@ def main():
         ax.plot(t, out_res, color='darkgreen', linewidth=0.4, alpha=0.8,
                 label=f'RES on (ERLE={erle_res:.1f} dB)')
         ax.set_ylabel('AEC Output', fontsize=9)
-        ax.set_xlabel('Time (s)')
         ax.set_ylim(ylim)
+        ax.legend(loc='upper right', fontsize=8)
+        ax.grid(True, alpha=0.2)
+
+        # Row 3: Estimated RIR (vs target if available)
+        ax = axes[3]
+        est_ir = get_estimated_ir(aec_res)
+        t_ir = np.arange(len(est_ir)) / sr * 1000  # ms
+        if true_ir is not None:
+            t_true = np.arange(len(true_ir)) / sr * 1000
+            ax.plot(t_true, true_ir, color='royalblue', linewidth=0.8, alpha=0.6,
+                    label='Target RIR')
+        ax.plot(t_ir, est_ir, color='red', linewidth=0.6, alpha=0.8,
+                label='Estimated RIR')
+        ax.set_ylabel('RIR', fontsize=9)
+        ax.set_xlabel('Time (ms)')
         ax.legend(loc='upper right', fontsize=8)
         ax.grid(True, alpha=0.2)
 
