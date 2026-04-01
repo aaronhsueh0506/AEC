@@ -1098,7 +1098,11 @@ class ResFilter:
             # Non-linear echo survives FDKF but correlates with far-end → coh2 high
             # Applied to BOTH direct_est AND erle_est to prevent ERLE division trap
             if far_power > 1e-4:
-                nonlinear_floor = self.error_psd * coh2 * self.far_activity
+                # DT scaling: reduce nonlinear_floor during double-talk
+                # to avoid over-estimating residual → over-suppressing speech
+                dt_weight = 1.0 - dt_indicator  # FS≈1.0, DT≈0.3-0.6
+                nonlinear_floor = (self.error_psd * coh2
+                                   * self.far_activity * dt_weight)
                 direct_est = np.maximum(direct_est, nonlinear_floor)
                 erle_est = np.maximum(erle_est, nonlinear_floor)
 
@@ -1331,7 +1335,9 @@ class ResFilter:
         # --- CNG: AEC3-style comfort noise crossfade ---
         # cn_gain = sqrt(1 - G²): as suppression deepens, more comfort noise fills in
         # This prevents unnatural silence during deep echo suppression
-        if self.enable_cng and np.sum(self.noise_psd) > 0:
+        if (self.enable_cng
+                and self.far_activity < 0.1       # only during true silence
+                and np.sum(self.noise_psd) > 1e-8):
             cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0))
             # Complex Gaussian CNG: real and imag each ~ N(0, noise_psd/2)
             # Amplitude and phase both random → OLA + sqrt-Hann smooths frame
