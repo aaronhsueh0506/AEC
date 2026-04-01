@@ -12,6 +12,7 @@ Reads files from gen_sim_data.py output (AEC Challenge naming):
 
 Usage:
     python3 plot_aec_results.py ../wav/ [--mode nlms|lms|fdaf|pbfdaf|pbfdkf] [--no-dtd]
+    python3 plot_aec_results.py --mic mic.wav --ref ref.wav [--mode nlms] [--no-dtd]
 """
 
 import numpy as np
@@ -144,6 +145,10 @@ def main():
         description='Plot AEC results with estimated impulse response')
     parser.add_argument('dataset_dir', nargs='?', default=None,
                         help='Directory with AEC Challenge wav files (default: ../wav/)')
+    parser.add_argument('--mic', type=str, default=None,
+                        help='Path to mic (near-end) wav file')
+    parser.add_argument('--ref', type=str, default=None,
+                        help='Path to ref (far-end) wav file')
     parser.add_argument('--mode', choices=['lms', 'nlms', 'fdaf', 'pbfdaf', 'pbfdkf', 'subband'],
                         default='nlms')
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
@@ -156,27 +161,51 @@ def main():
                         help='Comma-separated fileid list (e.g. "450,50")')
     args = parser.parse_args()
 
+    if (args.mic is None) != (args.ref is None):
+        parser.error('--mic and --ref must be specified together')
+
+
     mode_map = {'lms': AecMode.LMS, 'nlms': AecMode.NLMS,
                 'fdaf': AecMode.FDAF, 'pbfdaf': AecMode.PBFDAF,
                 'pbfdkf': AecMode.PBFDKF, 'subband': AecMode.PBFDKF}
     mode = mode_map[args.mode]
 
-    # Default dataset dir
     base = os.path.dirname(os.path.abspath(__file__))
-    dataset_dir = args.dataset_dir or os.path.join(base, '..', 'wav')
-    dataset_dir = os.path.abspath(dataset_dir)
 
-    # Scan for files
-    groups = scan_fileids(dataset_dir)
-    if args.files:
-        selected = set(args.files.split(','))
-        groups = [g for g in groups if g['fileid'] in selected]
-    if not groups:
-        print(f"No AEC Challenge files found in {dataset_dir}")
-        print("Run: python3 gen_sim_data.py first")
-        sys.exit(1)
+    if args.mic and args.ref:
+        # Direct mic/ref mode
+        mic_path = os.path.abspath(args.mic)
+        ref_path = os.path.abspath(args.ref)
+        if not os.path.isfile(mic_path):
+            print(f"Mic file not found: {mic_path}")
+            sys.exit(1)
+        if not os.path.isfile(ref_path):
+            print(f"Ref file not found: {ref_path}")
+            sys.exit(1)
+        label = Path(mic_path).stem
+        groups = [{
+            'fileid': label,
+            'mic': mic_path,
+            'ref': ref_path,
+            'nearend_speech': None,
+            'echo': None,
+        }]
+        print(f"Using mic={mic_path}, ref={ref_path}")
+    else:
+        # Dataset directory mode
+        dataset_dir = args.dataset_dir or os.path.join(base, '..', 'wav')
+        dataset_dir = os.path.abspath(dataset_dir)
 
-    print(f"Found {len(groups)} file(s) in {dataset_dir}")
+        groups = scan_fileids(dataset_dir)
+        if args.files:
+            selected = set(args.files.split(','))
+            groups = [g for g in groups if g['fileid'] in selected]
+        if not groups:
+            print(f"No AEC Challenge files found in {dataset_dir}")
+            print("Run: python3 gen_sim_data.py first")
+            sys.exit(1)
+
+        print(f"Found {len(groups)} file(s) in {dataset_dir}")
 
     # True IR (from gen_sim_data defaults)
     true_ir = None
