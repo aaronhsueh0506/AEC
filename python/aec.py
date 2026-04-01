@@ -662,7 +662,7 @@ class PBFDKF(PBFDAF):
 
         # Adaptive R: scale by mu_scale to break R-deadlock
         mu_mean = float(np.mean(mu_scale_arr))
-        R_scale = 0.3 + 0.7 * (1.0 - mu_mean)
+        R_scale = 0.1 + 0.9 * (1.0 - mu_mean)
         self.R = self.R * R_scale
 
         # Q modulation: reduce Q during DT (Kalman-specific, not in NLMS)
@@ -719,6 +719,10 @@ class PBFDKF(PBFDAF):
         self.W[:] = src.W
         if hasattr(src, 'P'):
             self.P[:] = src.P
+        if hasattr(src, 'R'):
+            self.R[:] = src.R
+        if hasattr(src, '_error_psd'):
+            self._error_psd[:] = src._error_psd
 
 
 # Backward compatibility alias
@@ -1115,8 +1119,8 @@ class ResFilter:
                 far_psd = np.abs(far_spec) ** 2 if far_spec is not None else echo_pwr_linear
                 self.reverb_psd = (self.reverb_decay * self.reverb_psd
                                    + (1 - self.reverb_decay) * far_psd)
-                # Gate by far_activity; reduce reverb only during confirmed nearend
-                ne_reverb_factor = 0.3 if self._nearend_state else 1.0
+                # Gate by far_activity; continuous NE/FS blend (not binary nearend_state)
+                ne_reverb_factor = 0.3 + 0.7 * self.far_activity * (1.0 - dt_indicator)
                 reverb_gate = self.far_activity * ne_reverb_factor
                 residual_echo_psd = (residual_echo_psd
                                      + self.reverb_gain * self.reverb_psd * reverb_gate)
@@ -1169,13 +1173,12 @@ class ResFilter:
         # --- Gain computation ---
 
         if self.gain_type == "enr" and residual_echo_psd is not None:
-            # ENR = echo / nearend (true ENR, can exceed 1.0)
+            # Coherence-based ENR: no circular dependency on residual
+            # coh2 high (FS echo) → (1-coh2) small → nearend small → ENR high → suppress
+            # coh2 low (DT speech) → (1-coh2) large → nearend large → ENR low → protect
             noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
-            nearend_est = np.maximum(
-                self.error_psd - residual_echo_psd,
-                noise_floor_psd
-            )
-            enr = residual_echo_psd / nearend_est
+            nearend_est_coh = self.error_psd * (1.0 - coh2) + noise_floor_psd
+            enr = residual_echo_psd / nearend_est_coh
 
             # --- Dominant nearend detection ---
             hf_start = min(8, self.n_freqs // 4)
