@@ -32,8 +32,8 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define P_INIT  0.01f   /* Initial error covariance (was 0.5, caused K explosion) */
-#define P_MAX   0.02f   /* Max P to prevent covariance growth during silence */
+#define P_INIT  0.01f   /* Initial error covariance */
+#define P_MAX   0.5f    /* Max P — let correct Kalman math converge naturally */
 
 struct Pbfdkf {
     int block_size;       /* Input block size (2*hop = 320) */
@@ -355,7 +355,7 @@ int pbfdkf_process(Pbfdkf* f,
         }
 
         /* Adaptive R: scale by mu_scale to break R-deadlock */
-        float R_scale = 0.3f + 0.7f * (1.0f - mu_scale);
+        float R_scale = 0.1f + 0.9f * (1.0f - mu_scale);
         for (int k = 0; k < nfreq; k++) f->R[k] *= R_scale;
 
         /* Q modulation: reduce Q during DT */
@@ -458,6 +458,11 @@ int pbfdkf_copy_weights(Pbfdkf* dst, const Pbfdkf* src) {
         memcpy(dst->W[p], src->W[p], src->n_freqs * sizeof(Complex));
         memcpy(dst->P[p], src->P[p], src->n_freqs * sizeof(float));
     }
+    /* Copy Kalman state: R, Q (v2.0.0) */
+    if (dst->R && src->R)
+        memcpy(dst->R, src->R, src->n_freqs * sizeof(float));
+    if (dst->Q && src->Q)
+        memcpy(dst->Q, src->Q, src->n_freqs * sizeof(float));
     return 0;
 }
 

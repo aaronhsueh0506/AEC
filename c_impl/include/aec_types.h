@@ -153,9 +153,9 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.shadow_mu_min = 0.6f;
     c.shadow_copy_hysteresis = 5;
 
-    c.kalman_q_high = 1.5e-4f;
+    c.kalman_q_high = 1e-3f;
     c.kalman_q_low = 1e-5f;
-    c.warmup_frames = 150;
+    c.warmup_frames = 80;
 
     c.epc_delta_threshold = 0.3f;
     c.epc_total_rise = 1.5f;
@@ -192,8 +192,8 @@ static inline AecConfig aec_config_from_preset(AecPreset preset, int sample_rate
         c.res_alpha_error_psd = 0.6f;
         c.shadow_q_ratio = 3.0f;
         c.shadow_mu_min = 0.5f;
-        c.warmup_frames = 150;
-        c.kalman_q_high = 2e-4f;
+        c.warmup_frames = 80;
+        c.kalman_q_high = 1.5e-3f;
         break;
 
     case AEC_PRESET_BALANCED:
@@ -215,8 +215,8 @@ static inline AecConfig aec_config_from_preset(AecPreset preset, int sample_rate
         c.res_alpha_error_psd = 0.4f;
         c.shadow_q_ratio = 4.0f;
         c.shadow_mu_min = 0.7f;
-        c.warmup_frames = 150;
-        c.kalman_q_high = 1e-4f;
+        c.warmup_frames = 80;
+        c.kalman_q_high = 7e-4f;
         break;
 
     case AEC_PRESET_MAXIMUM:
@@ -234,8 +234,8 @@ static inline AecConfig aec_config_from_preset(AecPreset preset, int sample_rate
         c.res_alpha_error_psd = 0.3f;
         c.shadow_q_ratio = 5.0f;
         c.shadow_mu_min = 0.9f;
-        c.warmup_frames = 200;
-        c.kalman_q_high = 1e-4f;
+        c.warmup_frames = 100;
+        c.kalman_q_high = 7e-4f;
         break;
     }
 

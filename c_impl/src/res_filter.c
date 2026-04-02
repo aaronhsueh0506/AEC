@@ -547,26 +547,33 @@ void res_process(ResFilter* r,
     float g[257];
 
     if (r->gain_type == RES_GAIN_ENR && have_residual) {
-        /* ENR masking with two-tuning (cf. AEC3 suppressor) */
+        /* ENR with dt_indicator × nearend_est (v2.0.0) */
         float scale = r->enr_scale;
-        float ne_confidence = 1.0f - fs_confidence;
-        for (int k = 0; k < nf; k++) {
-            /* ENR: echo / error (not echo / nearend) */
-            float enr = residual_echo_psd[k] / (r->error_psd[k] + 1e-10f);
+        /* ne_confidence directly from dt_indicator (ERLE-corrected at source) */
+        float ne_confidence = dt_indicator;
 
-            /* Frequency-dependent blend factor */
+        /* Compute noise floor for nearend_est */
+        float error_mean = 0.0f;
+        for (int k = 0; k < nf; k++) error_mean += r->error_psd[k];
+        error_mean /= nf;
+        float noise_floor_psd = error_mean * 0.01f + 1e-10f;
+
+        for (int k = 0; k < nf; k++) {
+            /* dt × nearend_est: FS(dt≈0) → ENR>>10, DT(dt≈0.5) → ENR low */
+            float raw_ne = maxf(r->error_psd[k] - residual_echo_psd[k], 0.0f);
+            float nearend_est = maxf(raw_ne * dt_indicator, noise_floor_psd);
+            float enr = residual_echo_psd[k] / nearend_est;
+
             float blend = clampf((k - 5.0f) / 5.0f, 0.0f, 1.0f);
 
-            /* Two sets of thresholds blended by ne_confidence */
-            float enr_t_ne = (1.0f - blend) * 3.0f + blend * 0.3f;
-            float enr_s_ne = (1.0f - blend) * 5.0f + blend * 0.5f;
+            float enr_t_ne = (1.0f - blend) * 2.0f + blend * 0.5f;
+            float enr_s_ne = (1.0f - blend) * 3.0f + blend * 1.0f;
             float enr_t_fs = (1.0f - blend) * 0.3f * scale + blend * 0.07f * scale;
             float enr_s_fs = (1.0f - blend) * 0.4f * scale + blend * 0.1f * scale;
 
             float enr_t = ne_confidence * enr_t_ne + (1.0f - ne_confidence) * enr_t_fs;
             float enr_s = ne_confidence * enr_s_ne + (1.0f - ne_confidence) * enr_s_fs;
 
-            /* Soft gate */
             if (enr > enr_t) {
                 g[k] = clampf((enr_s - enr) / (enr_s - enr_t + eps), 0.0f, 1.0f);
             } else {

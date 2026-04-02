@@ -66,6 +66,9 @@ struct Aec {
     float final_error_power_sum;
     float alpha_erle;
 
+    /* dt_indicator ERLE correction */
+    float inst_erle_smooth;
+
     /* Output limiter */
     float limiter_gain;
 
@@ -150,6 +153,7 @@ Aec* aec_create(const AecConfig* config) {
 
     /* Limiter */
     aec->limiter_gain = 1.0f;
+    aec->inst_erle_smooth = 1.0f;
 
     /* Buffers */
     aec->mic_buf    = (float*)malloc(hop * sizeof(float));
@@ -206,6 +210,7 @@ void aec_reset(Aec* aec) {
     aec->near_power = 0; aec->raw_error_power = 0; aec->final_error_power = 0;
     aec->near_power_sum = 0; aec->raw_error_power_sum = 0; aec->final_error_power_sum = 0;
     aec->limiter_gain = 1.0f;
+    aec->inst_erle_smooth = 1.0f;
     aec->main_err_smooth = 0; aec->shadow_err_smooth = 0;
     aec->shadow_frame_count = 0; aec->shadow_copy_counter = 0;
     aec->prev_total_err = 0.0f; aec->epc_active = 0; aec->epc_hangover_count = 0;
@@ -355,12 +360,22 @@ static void fill_context(Aec* aec, const float* mic, const float* ref,
     float inst_erle = aec_get_erle_instant(aec);
     ctx->erle_factor = clampf((inst_erle - 2.0f) / 8.0f, 0.0f, 1.0f);
 
-    /* DT indicator */
+    /* DT indicator with ERLE correction (v2.0.0) */
     float mic_pwr = 0.0f;
     for (int i = 0; i < hop; i++) mic_pwr += mic[i] * mic[i];
     mic_pwr = mic_pwr / hop + 1e-10f;
     float far_p = far_power + 1e-10f;
-    ctx->dt_indicator = clampf(1.0f - far_p / (mic_pwr + far_p), 0.0f, 0.8f);
+    float raw_dt = 1.0f - far_p / (mic_pwr + far_p);
+
+    /* Instant ERLE with 3-frame EMA smoothing */
+    float raw_err_pwr = 0.0f;
+    for (int i = 0; i < hop; i++) raw_err_pwr += aec->raw_output[i] * aec->raw_output[i];
+    raw_err_pwr = raw_err_pwr / hop + 1e-10f;
+    float inst_erle_raw = mic_pwr / raw_err_pwr;
+    aec->inst_erle_smooth = 0.7f * aec->inst_erle_smooth + 0.3f * inst_erle_raw;
+    if (aec->inst_erle_smooth > 2.0f)
+        raw_dt /= aec->inst_erle_smooth;
+    ctx->dt_indicator = clampf(raw_dt, 0.0f, 0.8f);
 
     /* Dynamic over_sub */
     float base_over_sub = cfg->res_over_sub_base +
@@ -607,14 +622,14 @@ int aec_process_ex(Aec* aec,
         aec->warmup_far_active = (far_pwr_warmup / hop > 1e-6f);
     }
 
-    /* === Convergence detection: 10 consecutive single-talk frames ERLE > 10dB === */
+    /* === Convergence detection: 10 consecutive single-talk frames ERLE > 5dB === */
     /* Skip during warmup — let filter learn with Q_high before judging convergence */
     if (!aec->filter_converged && aec->near_power > 1e-8f && aec->warmup_frames <= 0) {
         float inst_erle = 10.0f * fast_log10(aec->near_power /
                                           (aec->raw_error_power + 1e-10f));
         /* Only evaluate during far-end single-talk (DT corrupts ERLE measurement) */
         if (aec->simple_mu_ratio > 0.5f) {
-            if (inst_erle > 10.0f)
+            if (inst_erle > 5.0f)
                 aec->conv_counter++;
             else
                 aec->conv_counter = 0;
