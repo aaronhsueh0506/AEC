@@ -833,12 +833,23 @@ int aec_process_ex(Aec* aec,
         float base_over_sub = cfg->res_over_sub_base +
                                cfg->res_over_sub_scale * erle_factor;
 
-        /* DT indicator */
+        /* DT indicator: use raw input (before HPF), matching Python */
         float mic_pwr = 0.0f;
-        for (int i = 0; i < hop; i++) mic_pwr += mic[i] * mic[i];
+        for (int i = 0; i < hop; i++) mic_pwr += near_end[i] * near_end[i];
         mic_pwr = mic_pwr / hop + 1e-10f;
-        float far_p = far_power + 1e-10f;
-        float dt_indicator = clampf(1.0f - far_p / (mic_pwr + far_p), 0.0f, 0.8f);
+        float far_p_dt = 0.0f;
+        for (int i = 0; i < hop; i++) far_p_dt += far_end[i] * far_end[i];
+        far_p_dt = far_p_dt / hop + 1e-10f;
+        float raw_dt = 1.0f - far_p_dt / (mic_pwr + far_p_dt);
+        /* ERLE correction: smoothed inst ERLE */
+        float raw_err_pwr_dt = 0.0f;
+        for (int i = 0; i < hop; i++) raw_err_pwr_dt += aec->raw_output[i] * aec->raw_output[i];
+        raw_err_pwr_dt = raw_err_pwr_dt / hop + 1e-10f;
+        float inst_erle_raw_dt = mic_pwr / raw_err_pwr_dt;
+        aec->inst_erle_smooth = 0.7f * aec->inst_erle_smooth + 0.3f * inst_erle_raw_dt;
+        if (aec->inst_erle_smooth > 2.0f)
+            raw_dt /= aec->inst_erle_smooth;
+        float dt_indicator = clampf(raw_dt, 0.0f, 0.8f);
 
         float dt_reduction = cfg->res_dt_reduction * dt_indicator;
         float over_sub = maxf(base_over_sub - dt_reduction, 0.5f);

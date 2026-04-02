@@ -748,9 +748,8 @@ void res_process(ResFilter* r,
 
     /* === (w) Gain rate limiting === */
     float act_scale = 0.5f + 0.5f * r->far_activity;
-    float eff_drop = fast_exp(act_scale * fast_log(r->max_drop_ratio));
-    float eff_rise = fast_exp((0.5f + 0.5f * (1.0f - r->far_activity))
-                              * fast_log(r->max_rise_ratio));
+    float eff_drop = powf(r->max_drop_ratio, act_scale);
+    float eff_rise = powf(r->max_rise_ratio, 0.5f + 0.5f * (1.0f - r->far_activity));
 
     /* LF protection */
     int lf_limit = 8 < nf ? 8 : nf;
