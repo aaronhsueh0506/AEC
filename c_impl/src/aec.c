@@ -11,6 +11,7 @@
 #include "pbfdkf.h"
 #include "res_filter.h"
 #include "hpf.h"
+#include "fft_wrapper.h"
 #include "fast_math.h"
 #include <stdlib.h>
 #include <string.h>
@@ -80,6 +81,46 @@ struct Aec {
     /* Per-bin mu_scale from RES */
     float* per_bin_mu_scale; /* [n_freqs] or NULL */
     int n_freqs;
+
+    /* Delay estimation (GCC-PHAT) */
+    struct {
+        int enabled;
+        int seg_size;         /* FFT size for cross-correlation (power of 2) */
+        int seg_hop;          /* seg_size / 2 */
+        int n_freqs;          /* seg_size / 2 + 1 */
+        int max_delay;        /* samples */
+
+        float* mic_buf;       /* [seg_size] accumulation buffer */
+        float* ref_buf;       /* [seg_size] accumulation buffer */
+        int buf_pos;
+
+        float* cross_re;      /* [n_freqs] smoothed cross-spectrum real */
+        float* cross_im;      /* [n_freqs] smoothed cross-spectrum imag */
+        int n_updates;
+        float alpha;          /* 0.6 EMA smoothing */
+
+        int estimated_delay;  /* -1 = not yet estimated */
+        int current_delay;    /* currently applied delay */
+        int pending_delay;    /* pending delay for two-consecutive-estimate check */
+        int has_pending;      /* whether pending_delay is valid */
+        int samples_accumulated;
+        int samples_since_est;
+        int init_samples;
+        int period_samples;
+        int init_done;
+
+        FftHandle* fft;       /* dedicated FFT handle (may differ from PBFDKF size) */
+        Complex* mic_spec;    /* [n_freqs] scratch */
+        Complex* ref_spec;    /* [n_freqs] scratch */
+        Complex* phat;        /* [n_freqs] scratch for PHAT normalization */
+        float* gcc;           /* [seg_size] scratch for IRFFT output */
+    } delay_est;
+
+    /* Reference delay ring buffer */
+    float* ref_delay_buf;     /* circular buffer [ref_delay_buf_size] */
+    int ref_delay_buf_size;
+    int ref_delay_write_pos;
+    int ref_delay_filled;     /* total samples written (for warmup) */
 };
 
 Aec* aec_create(const AecConfig* config) {
@@ -176,6 +217,73 @@ Aec* aec_create(const AecConfig* config) {
     aec->epc_active = 0;
     aec->epc_hangover_count = 0;
 
+    /* Delay estimation */
+    aec->delay_est.enabled = 0;
+    aec->delay_est.estimated_delay = -1;
+    aec->delay_est.current_delay = -1;
+    aec->delay_est.fft = NULL;
+    aec->delay_est.mic_buf = NULL;
+    aec->delay_est.ref_buf = NULL;
+    aec->delay_est.cross_re = NULL;
+    aec->delay_est.cross_im = NULL;
+    aec->delay_est.mic_spec = NULL;
+    aec->delay_est.ref_spec = NULL;
+    aec->delay_est.phat = NULL;
+    aec->delay_est.gcc = NULL;
+    aec->ref_delay_buf = NULL;
+
+    if (config->enable_delay_est) {
+        int max_delay = (int)(config->delay_est_max_ms * config->sample_rate / 1000.0f);
+        int min_seg = 2 * max_delay;
+        if (min_seg < 2048) min_seg = 2048;
+        int seg_size = 1;
+        while (seg_size < min_seg) seg_size *= 2;
+        int de_nfreqs = seg_size / 2 + 1;
+
+        aec->delay_est.enabled = 1;
+        aec->delay_est.seg_size = seg_size;
+        aec->delay_est.seg_hop = seg_size / 2;
+        aec->delay_est.n_freqs = de_nfreqs;
+        aec->delay_est.max_delay = max_delay;
+        aec->delay_est.buf_pos = 0;
+        aec->delay_est.n_updates = 0;
+        aec->delay_est.alpha = 0.6f;
+        aec->delay_est.estimated_delay = -1;
+        aec->delay_est.current_delay = -1;
+        aec->delay_est.pending_delay = -1;
+        aec->delay_est.has_pending = 0;
+        aec->delay_est.samples_accumulated = 0;
+        aec->delay_est.samples_since_est = 0;
+        aec->delay_est.init_samples = (int)(config->delay_est_init_s * config->sample_rate);
+        aec->delay_est.period_samples = (int)(config->delay_est_period_s * config->sample_rate);
+        aec->delay_est.init_done = 0;
+
+        aec->delay_est.fft = fft_create(seg_size);
+        aec->delay_est.mic_buf  = (float*)calloc(seg_size, sizeof(float));
+        aec->delay_est.ref_buf  = (float*)calloc(seg_size, sizeof(float));
+        aec->delay_est.cross_re = (float*)calloc(de_nfreqs, sizeof(float));
+        aec->delay_est.cross_im = (float*)calloc(de_nfreqs, sizeof(float));
+        aec->delay_est.mic_spec = (Complex*)calloc(de_nfreqs, sizeof(Complex));
+        aec->delay_est.ref_spec = (Complex*)calloc(de_nfreqs, sizeof(Complex));
+        aec->delay_est.phat     = (Complex*)calloc(de_nfreqs, sizeof(Complex));
+        aec->delay_est.gcc      = (float*)calloc(seg_size, sizeof(float));
+
+        if (!aec->delay_est.fft || !aec->delay_est.mic_buf || !aec->delay_est.ref_buf ||
+            !aec->delay_est.cross_re || !aec->delay_est.cross_im ||
+            !aec->delay_est.mic_spec || !aec->delay_est.ref_spec ||
+            !aec->delay_est.phat || !aec->delay_est.gcc) {
+            aec_destroy(aec); return NULL;
+        }
+
+        /* Reference delay ring buffer: max_delay + some extra for hop reads */
+        int ring_size = max_delay + 4096;
+        aec->ref_delay_buf = (float*)calloc(ring_size, sizeof(float));
+        aec->ref_delay_buf_size = ring_size;
+        aec->ref_delay_write_pos = 0;
+        aec->ref_delay_filled = 0;
+        if (!aec->ref_delay_buf) { aec_destroy(aec); return NULL; }
+    }
+
     return aec;
 }
 
@@ -190,6 +298,17 @@ void aec_destroy(Aec* aec) {
     free(aec->ref_buf);
     free(aec->raw_output);
     free(aec->per_bin_mu_scale);
+    /* Delay estimation */
+    fft_destroy(aec->delay_est.fft);
+    free(aec->delay_est.mic_buf);
+    free(aec->delay_est.ref_buf);
+    free(aec->delay_est.cross_re);
+    free(aec->delay_est.cross_im);
+    free(aec->delay_est.mic_spec);
+    free(aec->delay_est.ref_spec);
+    free(aec->delay_est.phat);
+    free(aec->delay_est.gcc);
+    free(aec->ref_delay_buf);
     free(aec);
 }
 
@@ -215,6 +334,26 @@ void aec_reset(Aec* aec) {
     aec->shadow_frame_count = 0; aec->shadow_copy_counter = 0;
     aec->prev_total_err = 0.0f; aec->epc_active = 0; aec->epc_hangover_count = 0;
     free(aec->per_bin_mu_scale); aec->per_bin_mu_scale = NULL;
+
+    /* Reset delay estimation */
+    if (aec->delay_est.enabled) {
+        memset(aec->delay_est.mic_buf, 0, aec->delay_est.seg_size * sizeof(float));
+        memset(aec->delay_est.ref_buf, 0, aec->delay_est.seg_size * sizeof(float));
+        memset(aec->delay_est.cross_re, 0, aec->delay_est.n_freqs * sizeof(float));
+        memset(aec->delay_est.cross_im, 0, aec->delay_est.n_freqs * sizeof(float));
+        aec->delay_est.buf_pos = 0;
+        aec->delay_est.n_updates = 0;
+        aec->delay_est.estimated_delay = -1;
+        aec->delay_est.current_delay = -1;
+        aec->delay_est.pending_delay = -1;
+        aec->delay_est.has_pending = 0;
+        aec->delay_est.samples_accumulated = 0;
+        aec->delay_est.samples_since_est = 0;
+        aec->delay_est.init_done = 0;
+        memset(aec->ref_delay_buf, 0, aec->ref_delay_buf_size * sizeof(float));
+        aec->ref_delay_write_pos = 0;
+        aec->ref_delay_filled = 0;
+    }
 }
 
 /* --- Simple variable mu (Valin 2007 RER-inspired) --- */
@@ -389,6 +528,124 @@ static void fill_context(Aec* aec, const float* mic, const float* ref,
     ctx->divergence = clampf(err_pwr / near_pwr - 0.5f, 0.0f, 1.0f);
 }
 
+/* --- Delay estimation (GCC-PHAT) --- */
+
+/* Update smoothed cross-spectrum from filled segment buffers */
+static void delay_est_update_cross(Aec* aec) {
+    int nf = aec->delay_est.n_freqs;
+    float alpha = aec->delay_est.alpha;
+
+    fft_forward(aec->delay_est.fft, aec->delay_est.mic_buf, aec->delay_est.mic_spec);
+    fft_forward(aec->delay_est.fft, aec->delay_est.ref_buf, aec->delay_est.ref_spec);
+
+    /* cross = mic_spec * conj(ref_spec) */
+    aec->delay_est.n_updates++;
+    if (aec->delay_est.n_updates == 1) {
+        for (int k = 0; k < nf; k++) {
+            float mr = aec->delay_est.mic_spec[k].r;
+            float mi = aec->delay_est.mic_spec[k].i;
+            float rr = aec->delay_est.ref_spec[k].r;
+            float ri = aec->delay_est.ref_spec[k].i;
+            aec->delay_est.cross_re[k] = mr * rr + mi * ri;
+            aec->delay_est.cross_im[k] = mi * rr - mr * ri;
+        }
+    } else {
+        for (int k = 0; k < nf; k++) {
+            float mr = aec->delay_est.mic_spec[k].r;
+            float mi = aec->delay_est.mic_spec[k].i;
+            float rr = aec->delay_est.ref_spec[k].r;
+            float ri = aec->delay_est.ref_spec[k].i;
+            float cr = mr * rr + mi * ri;
+            float ci = mi * rr - mr * ri;
+            aec->delay_est.cross_re[k] = alpha * aec->delay_est.cross_re[k] + (1.0f - alpha) * cr;
+            aec->delay_est.cross_im[k] = alpha * aec->delay_est.cross_im[k] + (1.0f - alpha) * ci;
+        }
+    }
+}
+
+/* Estimate delay from accumulated cross-spectrum */
+static void delay_est_estimate(Aec* aec) {
+    int nf = aec->delay_est.n_freqs;
+    int seg_size = aec->delay_est.seg_size;
+
+    /* PHAT normalization: cross / |cross| */
+    for (int k = 0; k < nf; k++) {
+        float re = aec->delay_est.cross_re[k];
+        float im = aec->delay_est.cross_im[k];
+        float mag = sqrtf(re * re + im * im) + 1e-10f;
+        aec->delay_est.phat[k].r = re / mag;
+        aec->delay_est.phat[k].i = im / mag;
+    }
+
+    /* IRFFT */
+    fft_inverse(aec->delay_est.fft, aec->delay_est.phat, aec->delay_est.gcc);
+
+    /* Find peak in [0, max_delay] range (positive delays: mic lags ref) */
+    int max_d = aec->delay_est.max_delay;
+    if (max_d > seg_size / 2) max_d = seg_size / 2;
+
+    int best_pos = 0;
+    float best_val = fabsf(aec->delay_est.gcc[0]);
+    for (int d = 1; d <= max_d; d++) {
+        float v = fabsf(aec->delay_est.gcc[d]);
+        if (v > best_val) {
+            best_val = v;
+            best_pos = d;
+        }
+    }
+
+    aec->delay_est.estimated_delay = best_pos;
+    aec->delay_est.samples_since_est = 0;
+}
+
+/* Accumulate mic/ref samples for delay estimation.
+   Returns 1 if a new estimate was produced. */
+static int delay_est_accumulate(Aec* aec, const float* mic, const float* ref, int n) {
+    aec->delay_est.samples_accumulated += n;
+    aec->delay_est.samples_since_est += n;
+
+    int seg_size = aec->delay_est.seg_size;
+    int seg_hop = aec->delay_est.seg_hop;
+    int remaining = n;
+    int src_pos = 0;
+
+    while (remaining > 0) {
+        int space = seg_size - aec->delay_est.buf_pos;
+        int chunk = remaining < space ? remaining : space;
+        memcpy(aec->delay_est.mic_buf + aec->delay_est.buf_pos, mic + src_pos, chunk * sizeof(float));
+        memcpy(aec->delay_est.ref_buf + aec->delay_est.buf_pos, ref + src_pos, chunk * sizeof(float));
+        aec->delay_est.buf_pos += chunk;
+        src_pos += chunk;
+        remaining -= chunk;
+
+        if (aec->delay_est.buf_pos >= seg_size) {
+            delay_est_update_cross(aec);
+            /* Shift by seg_hop (50% overlap) */
+            memmove(aec->delay_est.mic_buf, aec->delay_est.mic_buf + seg_hop, seg_hop * sizeof(float));
+            memmove(aec->delay_est.ref_buf, aec->delay_est.ref_buf + seg_hop, seg_hop * sizeof(float));
+            aec->delay_est.buf_pos = seg_hop;
+        }
+    }
+
+    /* Need at least 2 cross-spectrum updates before estimating */
+    if (aec->delay_est.n_updates < 2)
+        return 0;
+
+    if (!aec->delay_est.init_done) {
+        if (aec->delay_est.samples_accumulated >= aec->delay_est.init_samples) {
+            delay_est_estimate(aec);
+            aec->delay_est.init_done = 1;
+            return 1;
+        }
+    } else {
+        if (aec->delay_est.samples_since_est >= aec->delay_est.period_samples) {
+            delay_est_estimate(aec);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int aec_process_ex(Aec* aec,
                    const float* near_end,
                    const float* far_end,
@@ -410,8 +667,66 @@ int aec_process_ex(Aec* aec,
         hpf_process(aec->hp_ref, aec->ref_buf, hop);
     }
 
-    const float* mic = aec->mic_buf;
-    const float* ref = aec->ref_buf;
+    float* mic = aec->mic_buf;
+    float* ref = aec->ref_buf;
+
+    /* === Delay estimation === */
+    if (aec->delay_est.enabled) {
+        /* Accumulate into delay estimator (using HPF'd signals) */
+        delay_est_accumulate(aec, mic, ref, hop);
+
+        int new_delay = aec->delay_est.estimated_delay;
+        if (new_delay >= 0) {
+            if (aec->delay_est.current_delay < 0) {
+                /* First estimate */
+                aec->delay_est.current_delay = new_delay;
+            } else if (abs(new_delay - aec->delay_est.current_delay) > 32) {
+                /* Require two consecutive consistent estimates before switching */
+                if (aec->delay_est.has_pending &&
+                    abs(new_delay - aec->delay_est.pending_delay) < 16) {
+                    aec->delay_est.current_delay = new_delay;
+                    aec->delay_est.has_pending = 0;
+                    /* Trigger EPC for fast re-convergence */
+                    aec->epc_active = 1;
+                    aec->epc_hangover_count = cfg->epc_hangover;
+                    pbfdkf_set_q_high(aec->filter, cfg->kalman_q_high);
+                    pbfdkf_set_q_high(aec->shadow_filter,
+                                      cfg->kalman_q_high * cfg->shadow_q_ratio);
+                    aec->filter_converged = 0;
+                    aec->conv_counter = 0;
+                } else {
+                    aec->delay_est.pending_delay = new_delay;
+                    aec->delay_est.has_pending = 1;
+                }
+            }
+        }
+
+        /* Write ref into ring buffer */
+        int ring_sz = aec->ref_delay_buf_size;
+        int w = aec->ref_delay_write_pos;
+        for (int i = 0; i < hop; i++) {
+            aec->ref_delay_buf[w] = ref[i];
+            w++;
+            if (w >= ring_sz) w = 0;
+        }
+        aec->ref_delay_write_pos = w;
+        aec->ref_delay_filled += hop;
+
+        /* Read delayed ref from ring buffer */
+        int delay = aec->delay_est.current_delay;
+        if (delay < 0) delay = 0;
+        if (aec->ref_delay_filled >= delay + hop) {
+            /* Read position = write_pos - delay - hop */
+            int r = aec->ref_delay_write_pos - delay - hop;
+            if (r < 0) r += ring_sz;
+            for (int i = 0; i < hop; i++) {
+                ref[i] = aec->ref_delay_buf[r];
+                r++;
+                if (r >= ring_sz) r = 0;
+            }
+        }
+        /* else: not enough data yet, use ref as-is */
+    }
 
     /* Compute mu_scale */
     float mu_scale = get_simple_mu_scale(aec);
@@ -681,4 +996,9 @@ int aec_is_converged(const Aec* aec) {
 
 const AecConfig* aec_get_config(const Aec* aec) {
     return aec ? &aec->config : NULL;
+}
+
+int aec_get_delay(const Aec* aec) {
+    if (!aec || !aec->delay_est.enabled) return -1;
+    return aec->delay_est.current_delay;
 }

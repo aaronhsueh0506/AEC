@@ -105,6 +105,11 @@ float aec_get_erle_instant(const Aec* aec);
 int   aec_is_converged(const Aec* aec);
 const AecConfig* aec_get_config(const Aec* aec);
 
+/**
+ * Get estimated delay in samples (-1 if not yet estimated or disabled)
+ */
+int   aec_get_delay(const Aec* aec);
+
 #ifdef __cplusplus
 }
 #endif

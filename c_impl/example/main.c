@@ -28,6 +28,9 @@ static void print_usage(const char* program) {
     printf("  --no-res           - Disable residual echo suppressor\n");
     printf("  --no-hpf           - Disable high-pass filter\n");
     printf("  --filter <samples> - Filter length in samples (default: 512)\n");
+    printf("  --enable-delay-est - Enable GCC-PHAT delay estimation\n");
+    printf("  --no-delay-est     - Disable delay estimation (overrides preset)\n");
+    printf("  --max-delay <ms>   - Max delay to search in ms (default: 250)\n");
 }
 
 static AecPreset parse_preset(const char* name) {
@@ -51,6 +54,8 @@ int main(int argc, char* argv[]) {
     int enable_res = 1;
     int enable_hpf = 1;
     int filter_length = 0; /* 0 = default */
+    int delay_est_override = -1; /* -1 = use preset default, 0 = force off, 1 = force on */
+    float max_delay_ms = 0.0f;  /* 0 = use default */
 
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "--preset") == 0 && i + 1 < argc) {
@@ -61,6 +66,12 @@ int main(int argc, char* argv[]) {
             enable_hpf = 0;
         } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
             filter_length = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--enable-delay-est") == 0) {
+            delay_est_override = 1;
+        } else if (strcmp(argv[i], "--no-delay-est") == 0) {
+            delay_est_override = 0;
+        } else if (strcmp(argv[i], "--max-delay") == 0 && i + 1 < argc) {
+            max_delay_ms = (float)atof(argv[++i]);
         }
     }
 
@@ -98,6 +109,10 @@ int main(int argc, char* argv[]) {
         config.filter_length = filter_length;
         config.n_partitions = (filter_length + config.hop_size - 1) / config.hop_size;
     }
+    if (delay_est_override >= 0)
+        config.enable_delay_est = delay_est_override;
+    if (max_delay_ms > 0.0f)
+        config.delay_est_max_ms = max_delay_ms;
 
     printf("AEC Processing (PBFDKF + Shadow + WOLA RES):\n");
     printf("  Preset: %s\n", aec_preset_name(preset));
@@ -126,8 +141,13 @@ int main(int argc, char* argv[]) {
     printf("  HPF: %s (%.0f Hz)\n",
            enable_hpf ? "enabled" : "disabled",
            config.highpass_cutoff_hz);
-    printf("  Shadow: enabled (Q_ratio=%.1f)\n\n",
+    printf("  Shadow: enabled (Q_ratio=%.1f)\n",
            config.shadow_q_ratio);
+    printf("  Delay est: %s", config.enable_delay_est ? "enabled" : "disabled");
+    if (config.enable_delay_est)
+        printf(" (max=%.0f ms, init=%.1f s, period=%.1f s)",
+               config.delay_est_max_ms, config.delay_est_init_s, config.delay_est_period_s);
+    printf("\n\n");
 
     Aec* aec = aec_create(&config);
     if (!aec) {
@@ -184,9 +204,15 @@ int main(int argc, char* argv[]) {
         processed += hop_size;
 
         if (processed % (sample_rate / 10 * 10) < hop_size) {
-            printf("  Processed: %.1f s, ERLE: %.1f dB%s\r",
-                   (float)processed / sample_rate, erle,
-                   aec_is_converged(aec) ? " [converged]" : "");
+            int delay = aec_get_delay(aec);
+            if (delay >= 0)
+                printf("  Processed: %.1f s, ERLE: %.1f dB, delay: %d%s\r",
+                       (float)processed / sample_rate, erle, delay,
+                       aec_is_converged(aec) ? " [converged]" : "");
+            else
+                printf("  Processed: %.1f s, ERLE: %.1f dB%s\r",
+                       (float)processed / sample_rate, erle,
+                       aec_is_converged(aec) ? " [converged]" : "");
             fflush(stdout);
         }
     }
@@ -196,6 +222,14 @@ int main(int argc, char* argv[]) {
     printf("  Max ERLE: %.1f dB\n", max_erle);
     printf("  Final ERLE: %.1f dB\n", aec_get_erle(aec));
     printf("  Converged: %s\n", aec_is_converged(aec) ? "yes" : "no");
+    {
+        int delay = aec_get_delay(aec);
+        if (delay >= 0)
+            printf("  Estimated delay: %d samples (%.1f ms)\n",
+                   delay, 1000.0f * delay / sample_rate);
+        else if (config.enable_delay_est)
+            printf("  Estimated delay: not determined\n");
+    }
     printf("\nOutput written to: %s\n", out_path);
 
     free(mic_buf);

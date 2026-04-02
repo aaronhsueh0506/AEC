@@ -87,6 +87,12 @@ typedef struct {
     int   epc_hangover;         /* 20 */
     float epc_mu_floor;         /* 0.5 */
 
+    /* Delay estimation (GCC-PHAT) */
+    int enable_delay_est;        /* 0 = disabled (default for backward compat) */
+    float delay_est_max_ms;      /* 250.0 — max delay to search (ms) */
+    float delay_est_init_s;      /* 0.3 — initial accumulation before first estimate */
+    float delay_est_period_s;    /* 0.5 — re-estimation period (seconds) */
+
     /* Derived (computed by factory) */
     int fft_size;               /* next pow2 >= frame_size: 256@8k, 512@16k, 1024@48k */
     int n_freqs;                /* fft_size/2 + 1: 129@8k, 257@16k, 513@48k */
@@ -162,6 +168,12 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.epc_hangover = 20;
     c.epc_mu_floor = 0.5f;
 
+    /* Delay estimation (disabled by default for backward compat) */
+    c.enable_delay_est = 0;
+    c.delay_est_max_ms = 250.0f;
+    c.delay_est_init_s = 0.3f;
+    c.delay_est_period_s = 0.5f;
+
     /* Derived */
     c.fft_size = 256;
     while (c.fft_size < c.frame_size) c.fft_size *= 2;  /* next pow2 >= frame_size */
@@ -176,6 +188,9 @@ static inline AecConfig aec_default_config(int sample_rate) {
  */
 static inline AecConfig aec_config_from_preset(AecPreset preset, int sample_rate) {
     AecConfig c = aec_default_config(sample_rate);
+
+    /* Enable delay estimation for all presets */
+    c.enable_delay_est = 1;
 
     switch (preset) {
     case AEC_PRESET_MILD:

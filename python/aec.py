@@ -1322,7 +1322,7 @@ class ResFilter:
             if self.n_freqs > 2:
                 g[:2] = np.minimum(g[1], g[2])
             # HF cap: upper bins capped at gain of bin near ~500Hz
-            freq_res = self._cfg.sample_rate / self.block_size  # Hz per bin
+            freq_res = 16000.0 / self.block_size  # Hz per bin (16kHz assumed)
             hf_cap_bin = min(int(500.0 / freq_res), self.n_freqs - 1)
             if self.n_freqs > hf_cap_bin + 1:
                 hf_cap = g[hf_cap_bin]
