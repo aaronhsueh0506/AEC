@@ -1,34 +1,30 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v1.28.1），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Shadow Filter 和 AEC3-style RES（殘餘回音抑制）。
+回音消除模組（v2.0.0），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
 
-**v1.28.1 Bug fixes**：
-- **CNG noise gate**：`far_activity < 0.1` 取代無條件更新，避免 DT speech 污染 noise_psd
-- **_coh2_smooth reset**：正確初始化避免跨檔案狀態殘留
-- **fs_confidence dedup**：移除重複計算
+**v2.0.0 主要改進**：
 
-**v1.27.0 主要改進**：
-- **ENR offset 修正**：修復導致 RES gain 無法到達 g_min 的嚴重 bug（FS echo +0.17）
-- **AEC3-style ENR**：`echo/error` 公式取代 `echo/(error-echo+offset)`，更穩定
-- **Continuous attack speed**：用 `far_activity × (1-dt)²` 取代 binary nearend_state
-- **CNG crossfade**：`cn_gain = sqrt(1-G²)`，深壓制時填充 comfort noise
-- **Kalman R-deadlock fix**：adaptive R scaling + Q_low 1e-5 防止 P 萎縮
-- **Fixed g_min**：gain floor 不受 far_activity 影響（AEC3 style）
-- **EMR noise masking**：echo < noise floor 的 bin 不壓制
+- **Multi-ERLE**：`FilterErleEstimator`（per-bin，`|echo_spec|²/|error_spec|²`）+ `FullbandErleEstimator`（broadband 交叉驗證），打破 `erle_per_bin` 循環依賴
+- **dt_indicator 源頭修正**：用當前幀 `raw_output` 即時 ERLE（3 幀 EMA 平滑）壓制高 coupling FS 的假 DT 偵測
+- **ENR 重構**：`nearend_est = max(raw_nearend × dt_indicator, noise_floor)`，FS 時 ENR >> 10 全壓（含非線性破音），DT 時語音保留
+- **ne_confidence = dt_indicator**：直接用已修正的 dt_indicator 控制 ENR 門檻混合，移除 `fs_confidence` 間接路徑
+- **CNG 凍結式底噪追蹤**：壓制中（gain < 0.9）凍結 noise_psd 上升，避免學習到回音形狀
+- **Bug fixes**：Shadow copy 補 Q stage、移除 nearend state machine dead code、移除 output noise gate dead code
 
-**Blind test 成績（fl=512, AEC Challenge Interspeech 2021, 800 cases）**：
+**Blind test 成績（fl=512, AEC Challenge Interspeech 2021, 800 cases, AECMOS）**：
 
-| Preset | FS echo | DT echo | DT deg | NE deg |
-|--------|---------|---------|--------|--------|
+| Method | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
+|--------|----------|----------|---------|---------|
+| Linear (balanced) | 2.710 | 3.167 | 3.198 | 4.069 |
 | Speex (SpeexDSP) | 2.808 | 3.368 | 3.225 | 4.128 |
 | Old WebRTC AEC | 3.484 | 4.262 | 2.389 | 4.098 |
-| **mild** | 3.420 | 4.105 | **2.257** | 4.005 |
-| **balanced** | 3.710 | 4.368 | 2.093 | 3.997 |
-| **aggressive** | 3.830 | 4.468 | 2.051 | 3.990 |
-| **maximum** | **3.951** | 4.527 | 2.044 | 3.976 |
+| **mild** | 3.272 | 3.943 | **2.267** | 3.988 |
+| **balanced** | 3.615 | 4.232 | 2.095 | 3.975 |
+| **aggressive** | 3.771 | 4.375 | 2.044 | 3.962 |
+| **maximum** | **3.912** | 4.505 | 2.025 | 3.940 |
 | WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
 
-> maximum preset FS echo **超越 AEC3**（3.951 vs 3.875）。NE deg 全 preset 大幅領先 AEC3（+0.5）。
+> maximum preset FS echo **3.912 超越 AEC3**（3.875）。DT deg 全 preset 優於 AEC3（2.0+ vs 1.850）。NE deg 全 preset 大幅領先 AEC3（+0.5）。
 
 支援四級 Preset（MILD / BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
@@ -95,8 +91,8 @@ cd c_impl && make
 ./bin/aec_wav mic.wav ref.wav output.wav --filter 2400             # 自訂濾波器長度
 ```
 
-C 版本已對齊 Python v1.17.0（PBFDKF 模式），包含 PBFDKF Kalman（P_init=0.01, P_MAX=0.02, Q gating, far-end gate）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + 三級 Preset。
-不含：DTD、Delay Estimation、Saturation Detection、LMS/NLMS/FDAF 模式。
+C 版本已對齊 Python v1.28.1（PBFDKF 模式），包含 PBFDKF Kalman（correct K, P_MAX=0.5）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail / CNG）+ HPF + 四級 Preset。
+不含：Multi-ERLE、dt_indicator ERLE correction、DTD、Delay Estimation、Saturation Detection、LMS/NLMS/FDAF 模式。待同步至 v2.0.0。
 
 ## 系統架構
 

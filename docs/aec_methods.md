@@ -1262,6 +1262,33 @@ residual_echo_psd = (1 - erle_factor) × direct_est + erle_factor × erle_est
 - **收斂前**（erle_factor < 0.3）：偏重 direct_est，並加入 `far_psd × 0.3` 作為保守上界，因為此時 filter echo estimate 不可靠
 - **收斂後**：偏重 erle_est，利用 per-bin ERLE 提供更精確的殘餘估計
 
+#### Multi-ERLE（v2.0.0）
+
+`erle_per_bin = near_psd / error_psd` 有循環依賴問題（趨向恆等式，ENR 鎖死 ≤ 1.0）。
+v2.0.0 新增兩個獨立的 ERLE estimator 打破循環：
+
+**FilterErleEstimator**（per-bin，`|echo_spec|² / |error_spec|²`）：
+```
+inst_erle = |echo_spec|² / |error_spec|²   # 不依賴 near_psd
+inst_erle = clip(inst_erle, 0.1, 1000.0)
+alpha = where(inst < erle, alpha_drop=0.7, alpha_rise=0.95)
+erle = alpha × erle + (1 - alpha) × inst
+erle = convolve(erle, [0.25, 0.5, 0.25])   # 3-bin 頻率平滑
+```
+
+**FullbandErleEstimator**（broadband 交叉驗證）：
+```
+# 僅 FS 更新（dt_indicator < 0.3）
+fb_erle = 0.97 × fb_erle + 0.03 × clip(near_power / error_power, 0.5, 100)
+```
+
+**Confidence 交叉驗證**：
+```
+confidence = exp(-|log(mean(filter_erle)) - log(fb_erle)| / 2)
+erle_corrected = confidence × filter_erle + (1 - confidence) × 1.0
+residual_from_erle = echo_psd / erle_corrected
+```
+
 ### 7.3 Reverb Tail Model
 
 > 對應 `aec.py` line 1059-1070
@@ -1398,61 +1425,61 @@ spectral_g_min = max(spectral_g_min, ne_g_floor)
 ENR masking 是 RES v2 的預設 gain 計算方式，參考 AEC3 suppressor 設計，
 使用 Echo-to-Nearend Ratio 和雙調參 soft gate 實現自適應抑制。
 
-#### ENR 計算
+#### ENR 計算（v2.0.0 重構）
 
 ```
-nearend_est = max(error_psd - residual_echo_psd, 0)
-enr_offset = mean(error_psd) × 0.01     # adaptive offset (v1.24.0)
-enr = residual_echo_psd / (nearend_est + enr_offset)
+# Step 1: 原始近端估計（error 減去殘餘回音）
+raw_nearend_est = max(error_psd - residual_echo_psd, 0)
+
+# Step 2: dt_indicator 控制近端保留量
+# FS (dt≈0): nearend → noise_floor → ENR >> 10 → 全壓（含非線性破音）
+# DT (dt≈0.5): 語音保留 → ENR 低 → 保護
+noise_floor = mean(error_psd) × 0.01 + 1e-10
+nearend_est = max(raw_nearend × dt_indicator, noise_floor)
+
+enr = residual_echo_psd / nearend_est
 ```
 
-> **v1.24.0 變更**：offset 從固定 +1.0 改為 `mean(error_psd) × 0.01`。
-> 固定 +1.0 對 PSD 量級 0.01-10 太大，導致 ENR 永遠 < 1.0，
-> gain 無法到達 g_min。adaptive offset 讓 ENR 的動態範圍正確反映 echo/nearend 比例。
+> **v2.0.0 變更**：`nearend_est` 乘以 `dt_indicator`（已在 AEC.process() 用即時 ERLE 修正高 coupling 誤判）。
+> 解決非線性回音陷阱：FDKF 只消線性 echo，非線性破音殘留在 error_psd 中，
+> 純 `error - residual` 會把非線性破音當成近端語音 → ENR 暴跌 → FS 放行。
+> dt_indicator 在 FS 時趨近 0，強制 nearend_est → noise_floor，非線性破音一起被壓制。
 
-#### Nearend Singletalk Detection（State Machine）
-
-使用 mid-high frequency ENR（500Hz+ / bin 8+）偵測近端 singletalk 狀態：
+#### dt_indicator 源頭修正（v2.0.0）
 
 ```
-avg_enr = mean(enr[hf_start:])
-
-State machine:
-┌──────────┐   avg_enr < 0.4 持續 12 frames   ┌───────────┐
-│  Normal   │ ──────────────────────────────→ │  Nearend   │
-│  (echo    │                                  │  (protect  │
-│  suppress)│ ←────────────────────────────── │  speech)   │
-└──────────┘   avg_enr > 10.0 持續 hold=0     └───────────┘
-                                                    │
-      ┌─────────────────────────────────────────────┘
-      │ hold = 30 frames (reset on low ENR)
-      │ Exit: hold countdown while avg_enr > 10.0
-
-Fast-path: far_power < 1e-4 → 立即進入 nearend state (hold = 30)
+# AEC.process() 中計算 dt_indicator:
+raw_dt = 1 - far_pwr / (mic_pwr + far_pwr)
+inst_erle = mic_pwr / raw_err_pwr           # 即時 ERLE
+inst_erle_smooth = 0.7 × smooth + 0.3 × inst_erle  # 3 幀 EMA
+if inst_erle_smooth > 2.0:                  # ERLE > 3dB = echo dominant
+    raw_dt /= inst_erle_smooth              # 壓制假 DT
+dt_indicator = clip(raw_dt, 0, 0.8)
 ```
 
-| 參數 | 值 | 說明 |
-|------|-----|------|
-| NE_ENR_THRESHOLD | 0.4 | 進入 nearend 的 avg_enr 門檻 |
-| NE_ENR_EXIT | 10.0 | 離開 nearend 的 avg_enr 門檻 |
-| NE_TRIGGER_FRAMES | 12 | 連續低 ENR 幀數才觸發 |
-| NE_HOLD_FRAMES | 30 | Nearend 狀態 hold time |
+> 高 coupling FS 時 `mic >> far`（echo 主導），原始 dt_indicator 誤判為 0.9（DT）。
+> 但 filter ERLE 很高 → `raw_dt / erle` 壓到 ~0.1，正確識別為 FS。
+> 真 DT 時 ERLE 低（近端語音讓 error 增大）→ 不觸發 → dt_indicator 保持正確。
 
 #### Two-tuning ENR Thresholds
 
-ENR thresholds 依據 nearend state 和頻率位置動態調整：
+ENR thresholds 由 `ne_confidence = dt_indicator` 連續控制（v2.0.0 移除 nearend state machine）：
 
 ```
 freq_bins = [0, 1, 2, ..., n_freqs-1]
 blend = clip((freq_bins - 5) / 5, 0, 1)    # LF → 0.0, HF → 1.0
 
 Nearend mode (protect speech):
-    enr_t = (1-blend) × 3.0 + blend × 0.3
-    enr_s = (1-blend) × 5.0 + blend × 0.5
+    enr_t = (1-blend) × 2.0 + blend × 0.5
+    enr_s = (1-blend) × 3.0 + blend × 1.0
 
 Normal mode (suppress echo):
     enr_t = (1-blend) × (0.3 × scale) + blend × (0.07 × scale)
     enr_s = (1-blend) × (0.4 × scale) + blend × (0.1 × scale)
+
+# 混合：ne_confidence = dt_indicator
+enr_t = ne_confidence × enr_t_ne + (1 - ne_confidence) × enr_t_fs
+enr_s = ne_confidence × enr_s_ne + (1 - ne_confidence) × enr_s_fs
 ```
 
 其中 `scale = enr_scale`（preset 控制，Mild=1.0, Maximum=0.5）。
@@ -1516,37 +1543,45 @@ if nearend_state:
 Nearend singletalk 時，低頻 bin（0-8）的下降速率更受限（max decrease factor = 0.25），
 參考 AEC3 的 `max_dec_factor_lf`，保護低頻語音不被快速壓掉。
 
-### 7.10 CNG（Comfort Noise Generation）
+### 7.10 CNG（Comfort Noise Generation，v2.0.0 重構）
 
-> 對應 `aec.py` line 1242-1252
+> 對應 `aec.py` line ~1376-1404
 
-抑制後的段落可能出現不自然的靜音（尤其在遠端剛停止後），CNG 注入少量舒適雜訊填補。
+抑制後的段落可能出現不自然的靜音（pumping effect），CNG 注入少量舒適雜訊填補。
 
-#### Noise PSD Tracking
-
-```
-# During far-end silence (far_power < 1e-4):
-noise_psd = min(α_noise × noise_psd + (1 - α_noise) × error_pwr,
-                error_pwr × 2)
-```
-
-在遠端靜音時追蹤背景噪聲 PSD（有上界保護，避免突發干擾污染估計）。
-
-#### Deficit-based Injection
+#### Freeze-Gated Minima Tracking（v2.0.0）
 
 ```
-if far_power ≤ 1e-4 AND noise_psd > 0:
-    suppressed_pwr = gain² × error_pwr
-    target_pwr = noise_psd × 0.5               # Half noise floor level
-    deficit = max(0, target_pwr - suppressed_pwr)
-    cng_mag = sqrt(deficit)
-    cng_phase = random_uniform(-π, π)           # Random phase
-    enhanced_spec += cng_mag × exp(j × cng_phase)
+# 凍結式底噪追蹤：壓制中禁止學習回音形狀
+is_suppressing = mean(gain_smooth) < 0.9
+
+alpha_down = 0.90   # 快降：瞬間跌入字句間停頓谷底
+if is_suppressing:
+    alpha_up = 1.0   # 凍結：禁止學習回音
+else:
+    alpha_up = 0.998  # 極慢升：適應環境噪音變化
+
+alpha = where(error_psd > noise_psd, alpha_up, alpha_down)
+noise_psd = alpha × noise_psd + (1 - alpha) × error_psd
 ```
 
-- 只在遠端靜音時注入（避免干擾 echo suppression）
-- Target 為 noise floor 的 50%，確保 CNG 不突兀
-- Random phase 避免產生 tonal artifact
+> 初始化使用第一幀 error_psd。壓制中 alpha_up=1.0 確保 noise_psd 不會學到回音形狀。
+
+#### AEC3-style Crossfade Injection
+
+```
+cn_gain = sqrt(max(1 - gain_smooth², 0)) × 0.3   # -10dB 衰減
+
+# Complex Gaussian CNG（幅度和相位同時隨機）
+noise_std = sqrt(noise_psd / 2)
+cng_real = randn(n_freqs) × noise_std
+cng_imag = randn(n_freqs) × noise_std
+enhanced_spec += cn_gain × (cng_real + j × cng_imag)
+```
+
+- `cn_gain = sqrt(1-G²)`：壓制越深，填補越多（AEC3 style）
+- `× 0.3`（-10dB）：舒適噪音應為點綴，不喧賓奪主
+- Complex Gaussian：幅度和相位都隨機，OLA + sqrt-Hann 自然平滑幀邊界
 
 ### 7.11 其他 Gain 後處理
 

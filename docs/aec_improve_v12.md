@@ -1,6 +1,6 @@
-# AEC 改進紀錄 v12 — v1.18.0 → v1.28.0
+# AEC 改進紀錄 v12 — v1.18.0 → v2.0.0
 
-> 本文記錄 v1.18.0 到 v1.28.0 的所有改動、測試結果和實驗紀錄。
+> 本文記錄 v1.18.0 到 v2.0.0 的所有改動、測試結果和實驗紀錄。
 
 ---
 
@@ -8,30 +8,83 @@
 
 ### Blind Test（AEC Challenge Interspeech 2021, 800 cases, fl=512）
 
-#### 全 Preset + Benchmark 比較（Overall）
+#### 全 Preset + Benchmark 比較（Overall, AECMOS）
 
 | Method | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
 |--------|----------|----------|---------|---------|
+| Linear (balanced) | 2.710 | 3.167 | 3.198 | 4.069 |
 | Speex | 2.808 | 3.368 | 3.225 | 4.128 |
 | Old WebRTC AEC | 3.484 | 4.262 | 2.389 | 4.098 |
-| **mild** | 3.420 | 4.105 | **2.257** | 4.005 |
-| **balanced** | 3.710 | 4.368 | 2.093 | 3.997 |
-| **aggressive** | 3.830 | 4.468 | 2.051 | 3.990 |
-| **maximum** | **3.951** | 4.527 | 2.044 | 3.976 |
+| **mild** | 3.272 | 3.943 | **2.267** | 3.988 |
+| **balanced** | 3.615 | 4.232 | 2.095 | 3.975 |
+| **aggressive** | 3.771 | 4.375 | 2.044 | 3.962 |
+| **maximum** | **3.912** | 4.505 | 2.025 | 3.940 |
 | WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
+
+> maximum FS echo **3.912 超越 AEC3**（3.875）。DT deg 全 preset > 2.0（AEC3 僅 1.850）。
 
 #### balanced 版本演進
 
-| 指標 | v1.18.0 | v1.27.0 | v1.28.1 | 變化(total) | AEC3 |
-|------|---------|---------|---------|------------|------|
-| FS echo | 3.210 | 3.709 | **3.710** | **+0.500** | 3.875 |
-| DT echo | 4.000 | 4.273 | **4.368** | **+0.368** | 4.538 |
-| DT deg | 2.215 | 2.187 | **2.093** | -0.122 | 1.850 |
-| NE deg | 4.018 | 4.005 | **3.997** | -0.021 | 3.454 |
+| 指標 | v1.18.0 | v1.28.1 | v2.0.0 | 變化(total) | AEC3 |
+|------|---------|---------|--------|------------|------|
+| FS echo | 3.210 | 3.710 | **3.615** | +0.405 | 3.875 |
+| DT echo | 4.000 | 4.368 | **4.232** | +0.232 | 4.538 |
+| DT deg | 2.215 | 2.093 | **2.095** | -0.120 | 1.850 |
+| NE deg | 4.018 | 3.997 | **3.975** | -0.043 | 3.454 |
+
+> v2.0.0 修正了 Kalman 數學錯誤（global denominator, unscaled K for P update），
+> FS echo/DT echo 因 correct K 收斂較慢而退步，但 DT deg 穩定。
+> Multi-ERLE + dt_indicator ERLE correction 是新架構基礎。
 
 ---
 
-## 有效改動（已保留）
+## v2.0.0 新增改動
+
+### 13. Kalman Bug 1: Global Denominator（v2.0.0）
+**位置**: `PBFDKF._update_weights()`
+Innovation variance 應加總所有 partition 的 `P×|X|²`，原本只用單一 partition → K 約 4× 太大。
+修正後 K 正確收斂但較慢 → FS echo 退步，DT deg 改善。
+
+### 14. Kalman Bug 2: Unscaled K for P Update（v2.0.0）
+**位置**: `PBFDKF._update_weights()`
+P update 應用 `K_optimal`（未乘 mu_scale），原本用 `K_scaled` 導致 DT 時 P 膨脹。
+
+### 15. Multi-ERLE: FilterErleEstimator + FullbandErleEstimator（v2.0.0）
+**位置**: `aec.py` 新 class（~L.730）
+打破 `erle_per_bin = near_psd/error_psd` 循環依賴。
+- `FilterErleEstimator`：`|echo_spec|²/|error_spec|²`，非對稱 EMA，3-bin 頻率平滑
+- `FullbandErleEstimator`：broadband `near_power/error_power`，僅 FS 更新
+- `compute_erle_confidence()`：交叉驗證兩者一致性
+
+### 16. dt_indicator 源頭修正（v2.0.0）
+**位置**: `AEC.process()` ~L.2325
+用 `mic_pwr / raw_err_pwr`（3 幀 EMA 平滑）即時 ERLE 壓制高 coupling FS 的假 DT。
+ERLE > 2.0 (3dB) 時 `raw_dt /= inst_erle_smooth`。
+
+### 17. ENR 重構: dt × nearend_est（v2.0.0）
+**位置**: `ResFilter.process()` ~L.1250
+`nearend_est = max(raw_nearend × dt_indicator, noise_floor)`
+- FS (dt≈0): nearend → noise_floor → ENR >> 10 → 全壓（含非線性破音）
+- DT (dt≈0.5): 語音 × 0.5 保留 → ENR 低 → 保護
+
+### 18. ne_confidence = dt_indicator（v2.0.0）
+移除 `ne_confidence = 1 - fs_confidence` 間接路徑，直接用 dt_indicator 控制 ENR 門檻混合。
+
+### 19. CNG 凍結式底噪追蹤（v2.0.0）
+**位置**: `ResFilter.process()` ~L.1376
+壓制中（gain < 0.9）凍結 noise_psd 上升（alpha_up=1.0），避免學習回音形狀。
+
+### 20. Bug fixes（v2.0.0）
+- Shadow copy 補 Q stage
+- 移除 nearend state machine dead code
+- 移除 output noise gate dead code
+- P_MAX 0.02 → 0.5
+- R_scale FS 下限 0.3 → 0.1
+- Convergence threshold 10dB → 5dB
+
+---
+
+## v1.18.0 → v1.28.1 有效改動
 
 ### 1. Kalman R scaling by mu_scale（v1.22.0）
 **位置**: `PBFDKF._update_weights()`
