@@ -40,7 +40,7 @@ typedef struct {
     int sample_rate;            /* 8000 / 16000 / 48000 */
     int frame_size;             /* 20ms: 160@8k, 320@16k, 960@48k */
     int hop_size;               /* 10ms: 80@8k, 160@16k, 480@48k */
-    int filter_length;          /* default 1024, user-configurable */
+    int filter_length;          /* 32ms: 256@8k, 512@16k, 1536@48k */
     float delta;                /* Regularization: 1e-8 */
 
     /* HPF */
@@ -120,7 +120,7 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.sample_rate = sample_rate;
     c.frame_size = sample_rate * 20 / 1000;   /* 20ms: 160@8k, 320@16k, 960@48k */
     c.hop_size = c.frame_size / 2;            /* 10ms: 80@8k, 160@16k, 480@48k */
-    c.filter_length = 1024;                    /* user-configurable, default 1024 */
+    c.filter_length = sample_rate * 32 / 1000;  /* 32ms: 256@8k, 512@16k, 1536@48k */
     c.delta = 1e-8f;
 
     c.enable_highpass = 1;

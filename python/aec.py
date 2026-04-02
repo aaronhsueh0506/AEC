@@ -67,7 +67,7 @@ class AecConfig:
     sample_rate: int = 16000      # 8000 / 16000 / 48000
     frame_size: int = -1          # Auto: sample_rate * 20ms (160@8k, 320@16k, 960@48k)
     hop_size: int = -1            # Auto: frame_size / 2 (80@8k, 160@16k, 480@48k)
-    filter_length: int = 1024    # Samples (mode/rate-dependent, set by CLI or preset)
+    filter_length: int = -1      # Auto: sample_rate * 32ms (256@8k, 512@16k, 1536@48k)
     mu: float = 0.3              # Step size
     delta: float = 1e-8          # Regularization
     enable_dtd: bool = False
@@ -176,6 +176,8 @@ class AecConfig:
             self.frame_size = self.sample_rate * 20 // 1000  # 20ms
         if self.hop_size == -1:
             self.hop_size = self.frame_size // 2             # 10ms
+        if self.filter_length == -1:
+            self.filter_length = self.sample_rate * 32 // 1000  # 32ms
 
     @property
     def fft_size(self) -> int:
@@ -2677,13 +2679,10 @@ Examples:
     elif args.mode == 'fdaf' and args.mu == 0.3:
         mu = 0.1   # FDAFsingle-block: smaller mu to avoid overshoot
 
-    # Mode-dependent filter_length default (scale by sample rate)
+    # filter_length default: auto (-1) or user-specified
     filter_length = args.filter
     if filter_length == 0:
-        if aec_mode in _PB_MODES:
-            filter_length = mic_sr * 64 // 1000   # 64ms: 512@8k, 1024@16k, 3072@48k
-        else:
-            filter_length = mic_sr * 32 // 1000   # 32ms: 256@8k, 512@16k, 1536@48k
+        filter_length = -1  # Auto: 32ms (resolved in __post_init__)
 
     common_kw = dict(
         mu=mu,
