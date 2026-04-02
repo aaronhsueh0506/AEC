@@ -69,6 +69,7 @@ struct ResFilter {
 
     /* CNG */
     int enable_cng;
+    int noise_initialized; /* 0 until first CNG frame */
     float* noise_psd;     /* [n_freqs] */
     float alpha_noise;    /* 0.98 */
 
@@ -255,6 +256,7 @@ void res_reset(ResFilter* r) {
     memset(r->S_ee, 0, nf * sizeof(float));
     memset(r->coh2_smooth, 0, nf * sizeof(float));
     memset(r->noise_psd, 0, nf * sizeof(float));
+    r->noise_initialized = 0;
     memset(r->near_psd_buf, 0, NEAR_PSD_BLOCKS * nf * sizeof(float));
     memset(r->near_psd, 0, nf * sizeof(float));
     memset(r->reverb_psd, 0, nf * sizeof(float));
@@ -327,6 +329,7 @@ void res_process(ResFilter* r,
                  float erle_factor,
                  float dt_indicator,
                  float over_sub,
+                 float divergence,
                  float* output_hop) {
     if (!r || !error_hop || !output_hop) return;
 
@@ -336,11 +339,10 @@ void res_process(ResFilter* r,
     const int bs = r->block_size;
     const float eps = 1e-10f;
 
-    /* === Analysis: slide input_buf, window, zero-pad, FFT === */
+    /* === (a) WOLA analysis: slide input_buf, window, zero-pad, FFT === */
     memmove(r->input_buf, r->input_buf + hop, (fs - hop) * sizeof(float));
     memcpy(r->input_buf + fs - hop, error_hop, hop * sizeof(float));
 
-    /* Windowed + zero-pad */
     for (int i = 0; i < fs; i++)
         r->time_buf[i] = r->input_buf[i] * r->window[i];
     memset(r->time_buf + fs, 0, (bs - fs) * sizeof(float));
@@ -348,13 +350,12 @@ void res_process(ResFilter* r,
     fft_forward(r->fft, r->time_buf, r->spec_buf);
 
     /* Power spectra */
-    float error_pwr[257]; /* stack alloc, nf <= 257 */
+    float echo_pwr[257];
+    float error_pwr[257];
     for (int k = 0; k < nf; k++) {
         error_pwr[k] = r->spec_buf[k].r * r->spec_buf[k].r +
                         r->spec_buf[k].i * r->spec_buf[k].i;
     }
-
-    float echo_pwr[257];
     if (echo_spec) {
         for (int k = 0; k < nf; k++) {
             echo_pwr[k] = echo_spec[k].r * echo_spec[k].r +
@@ -364,14 +365,13 @@ void res_process(ResFilter* r,
         memset(echo_pwr, 0, nf * sizeof(float));
     }
 
-    /* === Coherence-based echo PSD estimation === */
+    /* === (b) Coherence tracking === */
     float coh2[257];
     memset(coh2, 0, nf * sizeof(float));
 
     if (far_spec && far_power > 1e-4f) {
         float a = r->alpha_coh;
         for (int k = 0; k < nf; k++) {
-            /* Cross-PSD: spec × conj(far_spec) */
             float cr = r->spec_buf[k].r * far_spec[k].r +
                        r->spec_buf[k].i * far_spec[k].i;
             float ci = r->spec_buf[k].i * far_spec[k].r -
@@ -390,7 +390,7 @@ void res_process(ResFilter* r,
             float c2_raw = num / den;
             if (c2_raw > 1.0f) c2_raw = 1.0f;
 
-            /* Asymmetric EMA */
+            /* Asymmetric EMA: fast drop / slow rise */
             float a_coh;
             if (converged) {
                 a_coh = (c2_raw < r->coh2_smooth[k]) ? 0.50f : 0.90f;
@@ -411,7 +411,7 @@ void res_process(ResFilter* r,
         }
     }
 
-    /* Cold start: init PSD on first far-end frame */
+    /* === (c) Cold start: init PSD on first far-end frame === */
     {
         float sum_echo = 0.0f;
         for (int k = 0; k < nf; k++) sum_echo += r->echo_psd[k];
@@ -421,7 +421,7 @@ void res_process(ResFilter* r,
         }
     }
 
-    /* Smooth PSD */
+    /* === (d) PSD smoothing === */
     for (int k = 0; k < nf; k++) {
         r->echo_psd[k]  = r->alpha_echo_psd * r->echo_psd[k] +
                            (1.0f - r->alpha_echo_psd) * echo_pwr[k];
@@ -429,12 +429,11 @@ void res_process(ResFilter* r,
                            (1.0f - r->alpha_error_psd) * error_pwr[k];
     }
 
-    /* === Multi-ERLE update (v2.0.0) === */
+    /* === (e) Multi-ERLE update === */
     {
         int far_active_flag = (far_power > 1e-4f) ? 1 : 0;
         update_filter_erle(r, echo_pwr, error_pwr, far_active_flag, dt_indicator);
 
-        /* Fullband ERLE: use broadband near and error power */
         float near_pwr_broad = 0.0f, error_pwr_broad = 0.0f;
         if (near_spec) {
             for (int k = 0; k < nf; k++)
@@ -448,39 +447,38 @@ void res_process(ResFilter* r,
                        far_active_flag, dt_indicator);
     }
 
+    /* === (f) Far-end silence handling: echo_psd decay === */
     if (far_power < 1e-4f) {
         for (int k = 0; k < nf; k++) r->echo_psd[k] *= 0.3f;
     }
 
-    /* Freeze-gated CNG noise tracking (v2.0.0) */
-    if (r->enable_cng) {
-        float gain_mean = 0.0f;
-        for (int k = 0; k < nf; k++) gain_mean += r->gain_smooth[k];
-        gain_mean /= nf;
-        int is_suppressing = (gain_mean < 0.9f);
-        float alpha_down_cng = 0.90f;
-        float alpha_up_cng = is_suppressing ? 1.0f : 0.998f;
-        for (int k = 0; k < nf; k++) {
-            float alpha_n = (r->error_psd[k] > r->noise_psd[k])
-                            ? alpha_up_cng : alpha_down_cng;
-            r->noise_psd[k] = alpha_n * r->noise_psd[k]
-                               + (1.0f - alpha_n) * r->error_psd[k];
-        }
+    /* === (g) Dynamic g_min: far_activity tracking === */
+    float is_far_active = (far_power > 1e-4f) ? 1.0f : 0.0f;
+    if (is_far_active > r->far_activity) {
+        r->far_activity = 0.7f * r->far_activity + 0.3f * is_far_active;
+    } else {
+        r->far_activity = 0.98f * r->far_activity + 0.02f * is_far_active;
     }
+    float eff_g_min = r->g_min;
 
-    /* === Residual echo PSD estimation (v2: direct method) === */
+    /* === (h) Noise gate: quiet_mask === */
+    float mean_error = 0.0f;
+    for (int k = 0; k < nf; k++) mean_error += r->error_psd[k];
+    mean_error /= nf;
+    float signal_floor = mean_error * 0.001f + 1e-8f;
+
+    /* === (i) Residual echo PSD estimation === */
     float residual_echo_psd[257];
     int have_residual = 0;
 
     if (r->echo_method == RES_ECHO_DIRECT && near_spec) {
-        /* Near-end power */
         float near_pwr[257];
         for (int k = 0; k < nf; k++) {
             near_pwr[k] = near_spec[k].r * near_spec[k].r +
                           near_spec[k].i * near_spec[k].i;
         }
 
-        /* 4-block ring buffer moving average for stable near-end PSD */
+        /* 4-block ring buffer moving average */
         float* ring_slot = r->near_psd_buf + r->near_psd_idx * nf;
         memcpy(ring_slot, near_pwr, nf * sizeof(float));
         r->near_psd_idx = (r->near_psd_idx + 1) % NEAR_PSD_BLOCKS;
@@ -492,7 +490,7 @@ void res_process(ResFilter* r,
             r->near_psd[k] = sum * (1.0f / NEAR_PSD_BLOCKS);
         }
 
-        /* Update per-bin ERLE: only when far active, no DT, converged */
+        /* Update per-bin ERLE */
         if (far_power > 1e-4f && dt_indicator < 0.3f && erle_factor > 0.3f) {
             float temp[257];
             for (int k = 0; k < nf; k++) {
@@ -517,7 +515,7 @@ void res_process(ResFilter* r,
             }
         }
 
-        /* Residual echo PSD: Multi-ERLE (v2.0.0) */
+        /* Multi-ERLE residual estimation */
         float confidence = compute_erle_confidence(r->filter_erle, nf, r->fb_erle);
         for (int k = 0; k < nf; k++) {
             float erle_corrected = confidence * r->filter_erle[k]
@@ -526,7 +524,7 @@ void res_process(ResFilter* r,
             float erle_est = r->echo_psd[k] / erle_corrected;
             float direct_est = r->echo_psd[k];
 
-            /* Nonlinear echo floor: always active when far-end present */
+            /* Nonlinear echo floor */
             if (far_power > 1e-4f) {
                 float dt_weight = 1.0f - dt_indicator;
                 float nonlinear_floor = r->error_psd[k] * coh2[k]
@@ -537,12 +535,12 @@ void res_process(ResFilter* r,
 
             residual_echo_psd[k] = (1.0f - erle_factor) * direct_est
                                    + erle_factor * erle_est;
-            /* Cap at 2x echo_psd */
+            /* Residual cap at 2x echo_psd */
             float cap = r->echo_psd[k] * 2.0f;
             if (residual_echo_psd[k] > cap) residual_echo_psd[k] = cap;
         }
 
-        /* Reverb tail: use far_spec power (render signal) */
+        /* === (j) Reverb tail === */
         if (r->enable_reverb) {
             for (int k = 0; k < nf; k++) {
                 float far_psd_k;
@@ -554,7 +552,6 @@ void res_process(ResFilter* r,
                 }
                 r->reverb_psd[k] = r->reverb_decay * r->reverb_psd[k]
                                    + (1.0f - r->reverb_decay) * far_psd_k;
-                /* Gate by far_activity + dt_indicator (match Python) */
                 float ne_reverb_factor = 0.3f + 0.7f * r->far_activity
                                          * (1.0f - dt_indicator);
                 float reverb_gate = r->far_activity * ne_reverb_factor;
@@ -563,39 +560,19 @@ void res_process(ResFilter* r,
             }
         }
 
-        /* Echo boost: high-coh2 bins → boost residual estimate */
-        if (far_power > 1e-4f && erle_factor > 0.3f) {
-            for (int k = 0; k < nf; k++) {
-                float echo_boost = (dt_indicator < 0.2f)
-                                   ? (1.0f + 0.5f * coh2[k]) : 1.0f;
-                residual_echo_psd[k] *= echo_boost;
-            }
-        }
-
         have_residual = 1;
     }
 
-    /* === Dynamic g_min: far-end activity tracking === */
-    float is_far_active = (far_power > 1e-4f) ? 1.0f : 0.0f;
-    if (is_far_active > r->far_activity) {
-        r->far_activity = 0.7f * r->far_activity + 0.3f * is_far_active;
-    } else {
-        r->far_activity = 0.98f * r->far_activity + 0.02f * is_far_active;
+    /* === (k) Echo boost: high-coh2 bins → boost residual estimate === */
+    if (far_power > 1e-4f && erle_factor > 0.3f && have_residual) {
+        for (int k = 0; k < nf; k++) {
+            float echo_boost = (dt_indicator < 0.2f)
+                               ? (1.0f + 0.5f * coh2[k]) : 1.0f;
+            residual_echo_psd[k] *= echo_boost;
+        }
     }
-    /* Fixed g_min: gain floor is constant (AEC3 style — purely ENR-driven) */
-    float eff_g_min = r->g_min;
 
-    /* fs_confidence: continuous FS/DT/NE indicator */
-    float dt_inv = 1.0f - dt_indicator;
-    float fs_confidence = r->far_activity * dt_inv * dt_inv;
-
-    /* === Noise gate: quiet bins pass through === */
-    float mean_error = 0.0f;
-    for (int k = 0; k < nf; k++) mean_error += r->error_psd[k];
-    mean_error /= nf;
-    float signal_floor = mean_error * 0.001f + 1e-8f;
-
-    /* === EER computation (for legacy + near-end gate) === */
+    /* EER computation (for legacy + near-end gate) */
     float eer[257];
     for (int k = 0; k < nf; k++) {
         float eer_linear = r->echo_psd[k] / (r->error_psd[k] + eps);
@@ -607,7 +584,7 @@ void res_process(ResFilter* r,
         }
     }
 
-    /* === Spectral floor + near-end gate === */
+    /* === (l) Spectral floor: error_envelope tracking, spectral_g_min === */
     float spectral_g_min[257];
     if (far_power > 1e-4f) {
         float env_max = 0.0f;
@@ -630,7 +607,11 @@ void res_process(ResFilter* r,
         for (int k = 0; k < nf; k++) spectral_g_min[k] = eff_g_min;
     }
 
-    /* Per-bin near-end gate with fs_confidence */
+    /* fs_confidence: continuous FS/DT/NE indicator */
+    float dt_inv = 1.0f - dt_indicator;
+    float fs_confidence = r->far_activity * dt_inv * dt_inv;
+
+    /* === (m) Per-bin near-end gate === */
     float ne_erle_gate;
     if (erle_factor < 0.3f) {
         ne_erle_gate = 0.3f;
@@ -646,23 +627,21 @@ void res_process(ResFilter* r,
         spectral_g_min[k] = maxf(spectral_g_min[k], ne_g_floor);
     }
 
-    /* === Gain computation (v2: three branches) === */
+    /* === Gain computation === */
     float g[257];
 
     if (r->gain_type == RES_GAIN_ENR && have_residual) {
-        /* ENR with dt_indicator × nearend_est (v2.0.0) */
+        /* === (n) ENR computation === */
         float scale = r->enr_scale;
-        /* ne_confidence directly from dt_indicator (ERLE-corrected at source) */
+        /* === (o) ENR two-tuning === */
         float ne_confidence = dt_indicator;
 
-        /* Compute noise floor for nearend_est */
         float error_mean = 0.0f;
         for (int k = 0; k < nf; k++) error_mean += r->error_psd[k];
         error_mean /= nf;
         float noise_floor_psd = error_mean * 0.01f + 1e-10f;
 
         for (int k = 0; k < nf; k++) {
-            /* dt × nearend_est: FS(dt≈0) → ENR>>10, DT(dt≈0.5) → ENR low */
             float raw_ne = maxf(r->error_psd[k] - residual_echo_psd[k], 0.0f);
             float nearend_est = maxf(raw_ne * dt_indicator, noise_floor_psd);
             float enr = residual_echo_psd[k] / nearend_est;
@@ -677,15 +656,15 @@ void res_process(ResFilter* r,
             float enr_t = ne_confidence * enr_t_ne + (1.0f - ne_confidence) * enr_t_fs;
             float enr_s = ne_confidence * enr_s_ne + (1.0f - ne_confidence) * enr_s_fs;
 
+            /* === (p) Soft gate: linear interpolation === */
             if (enr > enr_t) {
                 g[k] = clampf((enr_s - enr) / (enr_s - enr_t + eps), 0.0f, 1.0f);
             } else {
                 g[k] = 1.0f;
             }
-            g[k] = maxf(g[k], spectral_g_min[k]);
         }
 
-        /* EMR noise masking: if echo below noise, don't suppress */
+        /* === (q) EMR noise masking === */
         {
             float noise_sum = 0.0f;
             for (int k = 0; k < nf; k++) noise_sum += r->noise_psd[k];
@@ -697,8 +676,12 @@ void res_process(ResFilter* r,
                 }
             }
         }
+
+        /* Apply spectral_g_min after EMR (matches Python order) */
+        for (int k = 0; k < nf; k++) {
+            g[k] = maxf(g[k], spectral_g_min[k]);
+        }
     } else if (r->gain_type == RES_GAIN_WIENER && have_residual) {
-        /* Wiener gain */
         float noise_floor_psd = mean_error * 0.01f + eps;
         for (int k = 0; k < nf; k++) {
             float nearend_est = maxf(r->error_psd[k] - residual_echo_psd[k],
@@ -708,44 +691,41 @@ void res_process(ResFilter* r,
             g[k] = maxf(g[k], spectral_g_min[k]);
         }
     } else if (have_residual) {
-        /* Spectral subtraction with direct residual echo PSD */
         for (int k = 0; k < nf; k++) {
             float eer_direct = residual_echo_psd[k] / (r->error_psd[k] + eps);
             g[k] = maxf(1.0f - over_sub * eer_direct, spectral_g_min[k]);
         }
     } else {
-        /* Legacy coherence-based spectral subtraction */
         for (int k = 0; k < nf; k++) {
             g[k] = maxf(1.0f - over_sub * eer[k], spectral_g_min[k]);
         }
     }
 
-    /* Noise gate: pass through quiet bins */
+    /* === (t) Quiet mask application === */
     for (int k = 0; k < nf; k++) {
         if (r->echo_psd[k] < signal_floor && r->error_psd[k] < signal_floor)
             g[k] = 1.0f;
     }
 
-    /* === Cross-frequency smoothing (3-bin convolution) === */
+    /* === (r) Cross-frequency smoothing: 3-bin kernel [0.25, 0.5, 0.25] === */
     if (far_power > 1e-4f) {
-        float prev = g[0];
-        for (int k = 1; k < nf - 1; k++) {
-            float cur = g[k];
-            g[k] = 0.25f * prev + 0.5f * cur + 0.25f * g[k+1];
-            prev = cur;
-        }
-    }
+        float temp[257];
+        temp[0] = 0.75f * g[0] + 0.25f * g[1];
+        for (int k = 1; k < nf - 1; k++)
+            temp[k] = 0.25f * g[k-1] + 0.5f * g[k] + 0.25f * g[k+1];
+        temp[nf-1] = 0.25f * g[nf-2] + 0.75f * g[nf-1];
+        memcpy(g, temp, nf * sizeof(float));
 
-    /* === Frequency-domain postprocessing (cf. AEC3 PostprocessGains) === */
-    if (far_power > 1e-4f) {
-        /* DC consistency: bins 0-1 follow bin 2 */
+        /* === (s) DC consistency: bins 0-1 follow bin 2 === */
         if (nf > 2) {
             float dc_g = minf(g[1], g[2]);
             g[0] = dc_g;
             g[1] = dc_g;
         }
-        /* HF cap: upper bins capped at ~2kHz gain (bin 16 for 512-FFT) */
-        int hf_cap_bin = 16 < (nf - 1) ? 16 : (nf - 1);
+        /* HF cap: upper bins capped at gain of bin near ~500Hz */
+        float freq_res = 16000.0f / (float)bs;
+        int hf_cap_bin = (int)(500.0f / freq_res);
+        if (hf_cap_bin > nf - 1) hf_cap_bin = nf - 1;
         if (nf > hf_cap_bin + 1) {
             float hf_cap = g[hf_cap_bin];
             for (int k = hf_cap_bin + 1; k < nf; k++)
@@ -753,19 +733,26 @@ void res_process(ResFilter* r,
         }
     }
 
-    /* === Temporal smoothing === */
+    /* === (u) Divergence override === */
+    if (divergence > 0.3f) {
+        float divergence_gain = 0.01f + (1.0f - 0.01f) * (1.0f - divergence);
+        for (int k = 0; k < nf; k++)
+            g[k] = minf(g[k], divergence_gain);
+    }
+
+    /* === (v) Gain temporal smoothing === */
     float alpha_release = 0.4f + 0.5f * r->far_activity;
-    /* Continuous attack blend: FS→fast, DT/NE→slow */
     float alpha_fast = 0.3f + 0.2f * (1.0f - erle_factor);
     float alpha_slow = 0.85f + 0.1f * (1.0f - erle_factor);
     float alpha_attack = alpha_slow + (alpha_fast - alpha_slow) * fs_confidence;
 
-    /* Pre-compute rate limiting constants outside per-bin loop */
+    /* === (w) Gain rate limiting === */
     float act_scale = 0.5f + 0.5f * r->far_activity;
     float eff_drop = fast_exp(act_scale * fast_log(r->max_drop_ratio));
     float eff_rise = fast_exp((0.5f + 0.5f * (1.0f - r->far_activity))
                               * fast_log(r->max_rise_ratio));
-    /* LF gain decrease limiting */
+
+    /* LF protection */
     int lf_limit = 8 < nf ? 8 : nf;
     float lf_factor = 0.0f;
     if (fs_confidence < 0.9f) {
@@ -776,11 +763,10 @@ void res_process(ResFilter* r,
         float alpha_g = (g[k] < r->gain_smooth[k]) ? alpha_attack : alpha_release;
         float smoothed = alpha_g * r->gain_smooth[k] + (1.0f - alpha_g) * g[k];
 
-        /* Rate limiting */
         float gain_floor = r->gain_smooth[k] / eff_drop;
         float gain_ceil  = r->gain_smooth[k] * eff_rise;
 
-        /* LF gain decrease limiting: protect low frequencies during DT/NE */
+        /* LF gain decrease limiting */
         if (k < lf_limit && lf_factor > 0.01f) {
             float lf_floor = r->gain_smooth[k] * lf_factor;
             gain_floor = maxf(gain_floor, lf_floor);
@@ -788,26 +774,50 @@ void res_process(ResFilter* r,
 
         smoothed = maxf(smoothed, gain_floor);
         smoothed = minf(smoothed, gain_ceil);
+
+        /* === (x) spectral_g_min clamping === */
         smoothed = maxf(smoothed, spectral_g_min[k]);
         smoothed = minf(smoothed, 1.0f);
 
         r->gain_smooth[k] = smoothed;
     }
 
-    /* === Apply gain to spectrum === */
+    /* === (y) Apply gain: spec *= gain_smooth === */
     for (int k = 0; k < nf; k++) {
         r->spec_buf[k].r *= r->gain_smooth[k];
         r->spec_buf[k].i *= r->gain_smooth[k];
     }
 
-    /* === CNG: complex Gaussian comfort noise === */
+    /* === (z) CNG: freeze-gated noise tracking + comfort noise injection === */
     if (r->enable_cng) {
+        /* Noise PSD initialization on first frame */
+        if (!r->noise_initialized) {
+            for (int k = 0; k < nf; k++)
+                r->noise_psd[k] = r->error_psd[k] + 1e-8f;
+            r->noise_initialized = 1;
+        }
+
+        /* Freeze-gated minima tracking (uses current frame's gain_smooth) */
+        float gain_mean = 0.0f;
+        for (int k = 0; k < nf; k++) gain_mean += r->gain_smooth[k];
+        gain_mean /= nf;
+        int is_suppressing = (gain_mean < 0.9f);
+        float alpha_down_cng = 0.90f;
+        float alpha_up_cng = is_suppressing ? 1.0f : 0.998f;
+        for (int k = 0; k < nf; k++) {
+            float alpha_n = (r->error_psd[k] > r->noise_psd[k])
+                            ? alpha_up_cng : alpha_down_cng;
+            r->noise_psd[k] = alpha_n * r->noise_psd[k]
+                               + (1.0f - alpha_n) * r->error_psd[k];
+        }
+
+        /* Comfort noise injection */
         float noise_sum = 0.0f;
         for (int k = 0; k < nf; k++) noise_sum += r->noise_psd[k];
-        if (noise_sum > 0.0f) {
+        if (noise_sum > 1e-7f) {
             for (int k = 0; k < nf; k++) {
                 float cn_gain_k = fast_sqrt(maxf(1.0f - r->gain_smooth[k] * r->gain_smooth[k], 0.0f)) * 0.3f;
-                float noise_std = fast_sqrt(r->noise_psd[k] / 2.0f + 1e-10f);
+                float noise_std = fast_sqrt(r->noise_psd[k] / 2.0f);
                 /* Box-Muller for two N(0,1) samples */
                 float u1 = (float)(rand() + 1) / ((float)RAND_MAX + 2.0f);
                 float u2 = (float)rand() / ((float)RAND_MAX + 1.0f);
@@ -819,7 +829,7 @@ void res_process(ResFilter* r,
         }
     }
 
-    /* === Synthesis: IFFT → truncate → sqrt-Hann → OLA === */
+    /* === (aa) WOLA synthesis: IFFT → truncate → sqrt-Hann → OLA === */
     fft_inverse(r->fft, r->spec_buf, r->time_buf);
 
     for (int i = 0; i < fs; i++)

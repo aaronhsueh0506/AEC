@@ -102,6 +102,7 @@ void res_reset(ResFilter* res);
  * @param erle_factor  [0,1] convergence factor for EER blending
  * @param dt_indicator [0,1] double-talk indicator
  * @param over_sub     Over-subtraction factor (dynamic, set by coordinator)
+ * @param divergence   [0,1] filter divergence indicator
  * @param output_hop   Enhanced output [hop_size]
  */
 void res_process(ResFilter* res,
@@ -114,6 +115,7 @@ void res_process(ResFilter* res,
                  float erle_factor,
                  float dt_indicator,
                  float over_sub,
+                 float divergence,
                  float* output_hop);
 
 /**

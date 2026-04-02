@@ -843,13 +843,21 @@ int aec_process_ex(Aec* aec,
         float dt_reduction = cfg->res_dt_reduction * dt_indicator;
         float over_sub = maxf(base_over_sub - dt_reduction, 0.5f);
 
+        /* Compute divergence for RES */
+        float res_divergence;
+        {
+            float err_p = aec->raw_error_power + 1e-10f;
+            float near_p = aec->near_power + 1e-10f;
+            res_divergence = clampf(err_p / near_p - 0.5f, 0.0f, 1.0f);
+        }
+
         res_process(aec->res, aec->raw_output,
                     pbfdkf_get_echo_spec(aec->filter),
                     pbfdkf_get_far_spec(aec->filter),
                     pbfdkf_get_near_spec(aec->filter),
                     far_power, aec->filter_converged,
                     erle_factor, dt_indicator, over_sub,
-                    output);
+                    res_divergence, output);
 
         /* Update per-bin mu_scale from RES PSDs */
         if (aec->filter_converged) {
