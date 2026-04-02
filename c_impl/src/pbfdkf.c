@@ -60,7 +60,7 @@ struct Pbfdkf {
     float* Q_low;         /* [n_freqs] stable tracking Q */
     float* R;             /* [n_freqs] measurement noise PSD */
     float* error_psd;     /* [n_freqs] smoothed error PSD */
-    float alpha_r;        /* R smoothing (0.98) */
+    float alpha_r;        /* R smoothing (0.95, aligned with Python) */
     float q_low_base;     /* base Q_low value for set_q_ratio */
 
     /* Input buffers [block_size] */
@@ -115,7 +115,7 @@ Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
     f->n_freqs = f->fft_size / 2 + 1;
     f->delta = delta;
     f->alpha_power = 0.9f;
-    f->alpha_r = 0.98f;
+    f->alpha_r = 0.95f;
     f->partition_idx = 0;
     f->q_low_base = q_low;
 
@@ -191,8 +191,9 @@ Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
         for (int i = 0; i < fade_start; i++)
             f->td_window[i] = 1.0f;
         for (int i = 0; i < fade_len; i++) {
-            float t = (float)(i + 1) / (float)(fade_len + 1);
-            f->td_window[fade_start + i] = 0.5f * (1.0f + cosf((float)M_PI * t));
+            /* Python: fade = 0.5*(1-cos(pi*arange(fade_len)/fade_len))[::-1] */
+            float t = (float)(fade_len - 1 - i) / (float)fade_len;
+            f->td_window[fade_start + i] = 0.5f * (1.0f - cosf((float)M_PI * t));
         }
         for (int i = hop_size; i < f->fft_size; i++)
             f->td_window[i] = 0.0f;
