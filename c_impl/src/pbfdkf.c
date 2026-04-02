@@ -370,7 +370,8 @@ int pbfdkf_process(Pbfdkf* f,
         /* Bug 1 fix: compute global denominator (sum over ALL partitions)
          * Innovation variance = Σ_p P[p] × |X_p|² + R
          * Old code only used one partition → K was ~n_partitions× too large */
-        float* denom_buf = f->temp_time;  /* reuse temp buffer (fft_size >= nfreq) */
+        /* Use stack buffer for denominator — temp_time is reused by TD constraint */
+        float denom_buf[257];  /* max n_freqs for 512-FFT */
         for (int k = 0; k < nfreq; k++) {
             float total_echo_var = 0.0f;
             for (int p = 0; p < f->n_partitions; p++) {
