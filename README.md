@@ -26,6 +26,50 @@
 
 > maximum preset FS echo **3.912 超越 AEC3**（3.875）。DT deg 全 preset 優於 AEC3（2.0+ vs 1.850）。NE deg 全 preset 大幅領先 AEC3（+0.5）。
 
+## 規格與限制
+
+### 輸入規格
+
+| 項目 | 規格 |
+|------|------|
+| 取樣率 | 16 kHz（固定） |
+| 位元深度 | 16-bit PCM / 32-bit float |
+| 通道數 | 單聲道（mono） |
+| 幀長度 | 320 samples（20ms） |
+| Hop size | 160 samples（10ms） |
+| FFT size | 512（自動，next power of 2 ≥ block_size=320） |
+| 濾波器長度 | 512 samples（預設，32ms @16kHz，4 partitions） |
+| 延遲 | 10ms（1 hop，algorithmic delay） |
+
+### 適用場景
+
+- 全雙工免持通話（手機、智慧音箱、會議系統）
+- 單通道 AEC（1 mic + 1 ref）
+- 回音路徑 ≤ 32ms（fl=512）或 ≤ 64ms（fl=1024）
+
+### 使用注意事項
+
+| 項目 | 說明 |
+|------|------|
+| **收斂時間** | Filter 需要約 0.5-2 秒的遠端信號才能收斂（ERLE > 10dB）。收斂前 RES 使用保守的 direct echo estimate |
+| **Warmup 期** | 前 80-100 幀（0.8-1.0 秒）為 warmup 階段，不進行收斂判定，避免誤判 |
+| **延遲對齊** | 若 mic-ref 延遲 > filter_length，需啟用 delay estimation（`--enable-delay-est`）或手動指定延遲 |
+| **遠端信號要求** | 遠端需要有足夠的能量和頻譜豐富度才能有效收斂。純靜音或極低能量段不會觸發 filter 更新 |
+| **Echo path 變化** | 支援 Echo Path Change (EPC) 偵測，自動提高 P_MAX 加速重新收斂。但快速大幅變化（如移動設備）仍會暫時增加殘餘 echo |
+| **Preset 選擇** | mild 最保守（DT deg 最佳 2.267），maximum 最激進（FS echo 最佳 3.912）。推薦 balanced 作為通用設定 |
+
+### 已知限制
+
+| 限制 | 說明 |
+|------|------|
+| **僅 16kHz** | 不支援 8/32/48 kHz，需外部 resample |
+| **單通道** | 不支援多麥克風陣列 |
+| **線性 echo 為主** | 非線性 echo（speaker 飽和）靠 RES 壓制，無獨立非線性模型 |
+| **高 coupling FS** | 30% 幀仍存在 dt_indicator 偏高（filter 間歇失效），影響 FS echo |
+| **高 coupling DT** | inst_erle_fast 修正可能誤壓 DT 語音（echo 與語音能量相近時） |
+| **CNG** | 底噪追蹤在遠端持續講話時效果有限（noise_psd 可能偏高） |
+| **延遲估計** | GCC-PHAT 在低 SNR 或強非線性場景可能不準確 |
+
 支援四級 Preset（MILD / BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
 > C 實作已對齊 Python v1.17.0：PBFDKF（Kalman P_init/P_MAX/Q gating/far-end gate 修正）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + Preset，詳見 [c_impl/README.md](c_impl/README.md)。
