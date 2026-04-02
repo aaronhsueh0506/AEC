@@ -129,7 +129,7 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.filter_length = sample_rate * 32 / 1000;  /* 32ms: 256@8k, 512@16k, 1536@48k */
     c.delta = 1e-8f;
 
-    c.enable_highpass = 1;
+    c.enable_highpass = 0;  /* HPF at pipeline/app layer, not inside AEC */
     c.highpass_cutoff_hz = 80.0f;
 
     c.enable_res = 1;

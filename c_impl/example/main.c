@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "aec.h"
+#include "hpf.h"
 #include "wav_io.h"
 
 static void print_usage(const char* program) {
@@ -185,6 +186,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    /* HPF at application layer (not inside AEC module) */
+    Hpf* hp_mic = enable_hpf ? hpf_create(80.0f, sample_rate) : NULL;
+    Hpf* hp_ref = enable_hpf ? hpf_create(80.0f, sample_rate) : NULL;
+
     /* Process */
     int processed = 0;
     float max_erle = 0.0f;
@@ -197,6 +202,10 @@ int main(int argc, char* argv[]) {
             for (int i = mic_read; i < hop_size; i++) mic_buf[i] = 0.0f;
             for (int i = ref_read; i < hop_size; i++) ref_buf[i] = 0.0f;
         }
+
+        /* HPF before AEC */
+        if (hp_mic) { hpf_process(hp_mic, mic_buf, hop_size); }
+        if (hp_ref) { hpf_process(hp_ref, ref_buf, hop_size); }
 
         aec_process(aec, mic_buf, ref_buf, out_buf);
         wav_write_float(writer, out_buf, hop_size);
@@ -238,6 +247,8 @@ int main(int argc, char* argv[]) {
     free(mic_buf);
     free(ref_buf);
     free(out_buf);
+    hpf_destroy(hp_mic);
+    hpf_destroy(hp_ref);
     aec_destroy(aec);
     wav_close_read(mic_reader);
     wav_close_read(ref_reader);
