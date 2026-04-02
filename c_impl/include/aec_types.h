@@ -37,10 +37,10 @@ typedef enum {
 
 /* --- Main configuration --- */
 typedef struct {
-    int sample_rate;            /* 16000 */
-    int frame_size;             /* 320 (20ms @ 16kHz) — WOLA window length */
-    int hop_size;               /* 160 (10ms @ 16kHz) */
-    int filter_length;          /* 1600 samples (100ms) */
+    int sample_rate;            /* 8000 / 16000 / 48000 */
+    int frame_size;             /* 20ms: 160@8k, 320@16k, 960@48k */
+    int hop_size;               /* 10ms: 80@8k, 160@16k, 480@48k */
+    int filter_length;          /* 100ms: 800@8k, 1600@16k, 4800@48k */
     float delta;                /* Regularization: 1e-8 */
 
     /* HPF */
@@ -88,9 +88,9 @@ typedef struct {
     float epc_mu_floor;         /* 0.5 */
 
     /* Derived (computed by factory) */
-    int fft_size;               /* 512 (next pow2 >= frame_size) */
-    int n_freqs;                /* 257 (fft_size/2 + 1) */
-    int n_partitions;           /* 10 (ceil(filter_length / hop_size)) */
+    int fft_size;               /* next pow2 >= frame_size: 256@8k, 512@16k, 1024@48k */
+    int n_freqs;                /* fft_size/2 + 1: 129@8k, 257@16k, 513@48k */
+    int n_partitions;           /* ceil(filter_length / hop_size): 10@8k/16k, 10@48k */
 } AecConfig;
 
 /* --- AEC context for external RES (linear pipeline) --- */
@@ -118,9 +118,9 @@ typedef struct {
 static inline AecConfig aec_default_config(int sample_rate) {
     AecConfig c;
     c.sample_rate = sample_rate;
-    c.frame_size = 320;
-    c.hop_size = 160;
-    c.filter_length = 1600;   /* 100ms @ 16kHz (no delay est → need longer filter) */
+    c.frame_size = sample_rate * 20 / 1000;   /* 20ms: 160@8k, 320@16k, 960@48k */
+    c.hop_size = c.frame_size / 2;            /* 10ms: 80@8k, 160@16k, 480@48k */
+    c.filter_length = sample_rate / 10;       /* 100ms: 800@8k, 1600@16k, 4800@48k */
     c.delta = 1e-8f;
 
     c.enable_highpass = 1;
@@ -163,8 +163,9 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.epc_mu_floor = 0.5f;
 
     /* Derived */
-    c.fft_size = 512;
-    c.n_freqs = 257;
+    c.fft_size = 256;
+    while (c.fft_size < c.frame_size) c.fft_size *= 2;  /* next pow2 >= frame_size */
+    c.n_freqs = c.fft_size / 2 + 1;
     c.n_partitions = (c.filter_length + c.hop_size - 1) / c.hop_size;
 
     return c;
