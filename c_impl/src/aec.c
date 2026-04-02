@@ -753,9 +753,9 @@ int aec_process_ex(Aec* aec,
     if (aec->shadow_frame_count >= 50) {
         float threshold = cfg->shadow_copy_threshold;
 
-        /* Far-end activity check */
+        /* Far-end activity check (use raw input, matching Python) */
         float far_pwr = 0.0f;
-        for (int i = 0; i < hop; i++) far_pwr += ref[i] * ref[i];
+        for (int i = 0; i < hop; i++) far_pwr += far_end[i] * far_end[i];
         int far_active = (far_pwr / hop > 1e-4f);
 
         /* DT check: far/error ratio */
@@ -824,8 +824,9 @@ int aec_process_ex(Aec* aec,
 
     /* === RES post-filter === */
     if (aec->res) {
+        /* Use raw far_end for far_power (matching Python) */
         float far_power = 0.0f;
-        for (int i = 0; i < hop; i++) far_power += ref[i] * ref[i];
+        for (int i = 0; i < hop; i++) far_power += far_end[i] * far_end[i];
         far_power /= hop;
 
         /* Dynamic over_sub: use max(instant, cumulative) ERLE like Python */
