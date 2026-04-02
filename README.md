@@ -32,20 +32,18 @@
 
 | 項目 | 規格 |
 |------|------|
-| 取樣率 | 16 kHz（固定） |
+| 取樣率 | 8000 / 16000 / 48000 Hz（自動計算 frame/fft/hop） |
 | 位元深度 | 16-bit PCM / 32-bit float |
 | 通道數 | 單聲道（mono） |
-| 幀長度 | 320 samples（20ms） |
-| Hop size | 160 samples（10ms） |
-| FFT size | 512（自動，next power of 2 ≥ block_size=320） |
-| 濾波器長度 | 512 samples（預設，32ms @16kHz，4 partitions） |
+| 幀長度 / Hop | 20ms / 10ms（依 sample rate 自動配置） |
+| 濾波器長度 | 64ms（預設，可調。512@8k, 1024@16k, 3072@48k） |
 | 延遲 | 10ms（1 hop，algorithmic delay） |
 
 ### 適用場景
 
 - 全雙工免持通話（手機、智慧音箱、會議系統）
 - 單通道 AEC（1 mic + 1 ref）
-- 回音路徑 ≤ 32ms（fl=512）或 ≤ 64ms（fl=1024）
+- 回音路徑 ≤ 64ms（預設），可透過 `filter_length` 參數延長
 
 ### 使用注意事項
 
@@ -62,7 +60,7 @@
 
 | 限制 | 說明 |
 |------|------|
-| **僅 16kHz** | 不支援 8/32/48 kHz，需外部 resample |
+| **不支援 32kHz** | 僅支援 8/16/48 kHz，32kHz 需外部 resample |
 | **單通道** | 不支援多麥克風陣列 |
 | **線性 echo 為主** | 非線性 echo（speaker 飽和）靠 RES 壓制，無獨立非線性模型 |
 | **高 coupling FS** | 30% 幀仍存在 dt_indicator 偏高（filter 間歇失效），影響 FS echo |
@@ -455,7 +453,7 @@ python3 plot_aec_results.py ../wav/ --mode pbfdkf --enable-dtd
 ## Benchmark 比較
 
 測試條件：PBFDKF + Shadow + RES v2 + delay pre-alignment + HPF + saturation detect。
-Frame/hop: 320/160 (20ms/10ms), FFT: 512, filter_length: 512。
+Frame/hop: 20ms/10ms（自動依 sample rate 配置），filter_length: 100ms。以下測試使用 16kHz。
 評估指標：AECMOS（echo_mos↑ = echo 少, deg_mos↑ = 語音損傷少）。
 
 ### AEC Challenge Interspeech 2021 Blind Test（800 cases）

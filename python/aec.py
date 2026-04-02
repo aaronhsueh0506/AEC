@@ -64,10 +64,10 @@ class AecResContext:
 @dataclass
 class AecConfig:
     """AEC Configuration (all sizes in samples)"""
-    sample_rate: int = 16000
-    frame_size: int = 320         # Frame length in samples (320 = 20ms @ 16kHz)
-    hop_size: int = 160           # Hop size in samples (160 = 10ms @ 16kHz)
-    filter_length: int = 512     # Filter length in samples (mode-dependent)
+    sample_rate: int = 16000      # 8000 / 16000 / 48000
+    frame_size: int = -1          # Auto: sample_rate * 20ms (160@8k, 320@16k, 960@48k)
+    hop_size: int = -1            # Auto: frame_size / 2 (80@8k, 160@16k, 480@48k)
+    filter_length: int = -1      # Auto: sample_rate * 64ms (512@8k, 1024@16k, 3072@48k)
     mu: float = 0.3              # Step size
     delta: float = 1e-8          # Regularization
     enable_dtd: bool = False
@@ -170,6 +170,14 @@ class AecConfig:
 
     # TIME/LMS history control
     clear_filter_history: bool = False  # Clear ref_buffer each block (default: keep 1 hop history)
+
+    def __post_init__(self):
+        if self.frame_size == -1:
+            self.frame_size = self.sample_rate * 20 // 1000  # 20ms
+        if self.hop_size == -1:
+            self.hop_size = self.frame_size // 2             # 10ms
+        if self.filter_length == -1:
+            self.filter_length = self.sample_rate * 64 // 1000  # 64ms: 512@8k, 1024@16k, 3072@48k
 
     @property
     def fft_size(self) -> int:
@@ -1313,8 +1321,9 @@ class ResFilter:
             # DC consistency: bins 0-1 follow bin 2
             if self.n_freqs > 2:
                 g[:2] = np.minimum(g[1], g[2])
-            # HF cap: upper bins capped at ~2kHz gain (bin 16 for 512-FFT)
-            hf_cap_bin = min(16, self.n_freqs - 1)
+            # HF cap: upper bins capped at gain of bin near ~500Hz
+            freq_res = self._cfg.sample_rate / self.block_size  # Hz per bin
+            hf_cap_bin = min(int(500.0 / freq_res), self.n_freqs - 1)
             if self.n_freqs > hf_cap_bin + 1:
                 hf_cap = g[hf_cap_bin]
                 g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
@@ -2670,13 +2679,13 @@ Examples:
     elif args.mode == 'fdaf' and args.mu == 0.3:
         mu = 0.1   # FDAFsingle-block: smaller mu to avoid overshoot
 
-    # Mode-dependent filter_length default
+    # Mode-dependent filter_length default (scale by sample rate)
     filter_length = args.filter
     if filter_length == 0:
         if aec_mode in _PB_MODES:
-            filter_length = 1024  # ~64ms echo path
+            filter_length = mic_sr * 64 // 1000   # 64ms: 512@8k, 1024@16k, 3072@48k
         else:
-            filter_length = 512   # ~32ms echo path
+            filter_length = mic_sr * 32 // 1000   # 32ms: 256@8k, 512@16k, 1536@48k
 
     common_kw = dict(
         mu=mu,
