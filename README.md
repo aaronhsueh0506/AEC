@@ -266,7 +266,7 @@ while has_audio:
 | 參數 | 預設值 | 範圍 | 說明 |
 |------|--------|------|------|
 | `mu` | 0.5 (PBFDKF) / 0.3 (NLMS) | 0.1-0.8 | 步長（PBFDKF 模式下由 Kalman gain 取代） |
-| `filter_length` | 512 (NLMS/LMS/FDAF) / 1024 (PBFDAF/PBFDKF) | 256-4096 | 濾波器長度 (samples) |
+| `filter_length` | 512 (NLMS/LMS/FDAF) / 1024 (PBFDAF/PBFDKF) | 256-4096 | 濾波器長度 (samples)。CLI 依 mode + sample_rate 自動設定：PB=sr×64ms, 非PB=sr×32ms |
 | `enable_dtd` | False | - | DTD：僅頻域模式（Divergence + Coherence），詳見 [docs/dtd_design.md](docs/dtd_design.md) |
 | `enable_res` | False (Python) / True (C) | - | 殘餘回音抑制 |
 | `use_kalman` | True | - | FDKF adaptation（per-bin Kalman gain，搭配 two-stage Q），預設開啟 |
