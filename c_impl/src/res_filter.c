@@ -82,6 +82,10 @@ struct ResFilter {
     int near_psd_idx;
     float* near_psd;      /* [n_freqs] 4-block average */
 
+    /* Multi-ERLE (v2.0.0) */
+    float* filter_erle;   /* [n_freqs] per-bin ERLE from echo_spec²/error_spec² */
+    float  fb_erle;       /* fullband ERLE for cross-validation */
+
     /* v2: reverb tail */
     int enable_reverb;
     float reverb_decay;
@@ -162,6 +166,10 @@ ResFilter* res_create(const ResConfig* cfg) {
     r->near_psd       = (float*)calloc(nf, sizeof(float));
     r->reverb_psd     = (float*)calloc(nf, sizeof(float));
 
+    /* Multi-ERLE arrays */
+    r->filter_erle    = (float*)malloc(nf * sizeof(float));
+    r->fb_erle        = 1.0f;
+
     r->window         = (float*)malloc(fs * sizeof(float));
     r->input_buf      = (float*)calloc(fs, sizeof(float));
     r->ola_buf        = (float*)calloc(fs, sizeof(float));
@@ -172,7 +180,7 @@ ResFilter* res_create(const ResConfig* cfg) {
         !r->error_envelope || !r->S_fe_r || !r->S_fe_i ||
         !r->S_ff || !r->S_ee || !r->coh2_smooth || !r->noise_psd ||
         !r->erle_per_bin || !r->near_psd_buf || !r->near_psd ||
-        !r->reverb_psd ||
+        !r->reverb_psd || !r->filter_erle ||
         !r->window || !r->input_buf || !r->ola_buf ||
         !r->time_buf || !r->spec_buf) {
         res_destroy(r);
@@ -184,6 +192,7 @@ ResFilter* res_create(const ResConfig* cfg) {
         r->gain_smooth[k] = r->g_min;
         r->error_envelope[k] = 1.0f;
         r->erle_per_bin[k] = 1.0f;
+        r->filter_erle[k] = 1.0f;
     }
 
     /* Compute sqrt-Hann window */
@@ -215,6 +224,7 @@ void res_destroy(ResFilter* r) {
     free(r->coh2_smooth);
     free(r->noise_psd);
     free(r->erle_per_bin);
+    free(r->filter_erle);
     free(r->near_psd_buf);
     free(r->near_psd);
     free(r->reverb_psd);
@@ -236,7 +246,9 @@ void res_reset(ResFilter* r) {
         r->gain_smooth[k] = r->g_min;
         r->error_envelope[k] = 1.0f;
         r->erle_per_bin[k] = 1.0f;
+        r->filter_erle[k] = 1.0f;
     }
+    r->fb_erle = 1.0f;
     memset(r->S_fe_r, 0, nf * sizeof(float));
     memset(r->S_fe_i, 0, nf * sizeof(float));
     memset(r->S_ff, 0, nf * sizeof(float));
@@ -250,6 +262,57 @@ void res_reset(ResFilter* r) {
     memset(r->input_buf, 0, r->frame_size * sizeof(float));
     memset(r->ola_buf, 0, r->frame_size * sizeof(float));
     r->far_activity = 0.0f;
+}
+
+/* === Multi-ERLE helper functions (v2.0.0) === */
+
+static void update_filter_erle(ResFilter* r, const float* echo_pwr,
+                                const float* error_pwr,
+                                int far_active, float dt_indicator) {
+    if (!far_active) return;
+    int nf = r->n_freqs;
+    for (int k = 0; k < nf; k++) {
+        float inst = echo_pwr[k] / (error_pwr[k] + 1e-10f);
+        if (inst < 0.1f) inst = 0.1f;
+        if (inst > 1000.0f) inst = 1000.0f;
+        float dt_weight = 1.0f - dt_indicator * 1.5f;
+        if (dt_weight < 0.1f) dt_weight = 0.1f;
+        float alpha = (inst < r->filter_erle[k])
+            ? (0.7f * dt_weight + (1.0f - dt_weight) * 0.5f)
+            : (0.95f * dt_weight);
+        r->filter_erle[k] = alpha * r->filter_erle[k] + (1.0f - alpha) * inst;
+    }
+    /* 3-bin smoothing */
+    float prev = r->filter_erle[0];
+    for (int k = 1; k < nf - 1; k++) {
+        float cur = r->filter_erle[k];
+        r->filter_erle[k] = 0.25f * prev + 0.5f * cur + 0.25f * r->filter_erle[k+1];
+        prev = cur;
+    }
+    /* Clip */
+    for (int k = 0; k < nf; k++) {
+        if (r->filter_erle[k] < 0.5f) r->filter_erle[k] = 0.5f;
+        if (r->filter_erle[k] > 200.0f) r->filter_erle[k] = 200.0f;
+    }
+}
+
+static void update_fb_erle(ResFilter* r, float near_power, float error_power,
+                            int far_active, float dt_indicator) {
+    if (!far_active || dt_indicator > 0.3f || near_power < 1e-8f) return;
+    float inst = near_power / (error_power + 1e-10f);
+    if (inst < 0.5f) inst = 0.5f;
+    if (inst > 100.0f) inst = 100.0f;
+    r->fb_erle = 0.97f * r->fb_erle + 0.03f * inst;
+}
+
+static float compute_erle_confidence(const float* filter_erle, int nf,
+                                      float fb_erle) {
+    float l1_mean = 0.0f;
+    for (int k = 0; k < nf; k++) l1_mean += filter_erle[k];
+    l1_mean /= nf;
+    if (l1_mean < 0.5f || fb_erle < 0.5f) return 0.0f;
+    float log_diff = fabsf(logf(l1_mean + 1e-10f) - logf(fb_erle + 1e-10f));
+    return expf(-log_diff / 2.0f);
 }
 
 void res_process(ResFilter* r,
@@ -364,16 +427,42 @@ void res_process(ResFilter* r,
                            (1.0f - r->alpha_error_psd) * error_pwr[k];
     }
 
+    /* === Multi-ERLE update (v2.0.0) === */
+    {
+        int far_active_flag = (far_power > 1e-4f) ? 1 : 0;
+        update_filter_erle(r, echo_pwr, error_pwr, far_active_flag, dt_indicator);
+
+        /* Fullband ERLE: use broadband near and error power */
+        float near_pwr_broad = 0.0f, error_pwr_broad = 0.0f;
+        if (near_spec) {
+            for (int k = 0; k < nf; k++)
+                near_pwr_broad += near_spec[k].r * near_spec[k].r +
+                                  near_spec[k].i * near_spec[k].i;
+            near_pwr_broad /= nf;
+        }
+        for (int k = 0; k < nf; k++) error_pwr_broad += error_pwr[k];
+        error_pwr_broad /= nf;
+        update_fb_erle(r, near_pwr_broad, error_pwr_broad,
+                       far_active_flag, dt_indicator);
+    }
+
     if (far_power < 1e-4f) {
         for (int k = 0; k < nf; k++) r->echo_psd[k] *= 0.3f;
-        /* Track noise for CNG: only when far-end silent for ~800ms */
-        if (r->enable_cng && r->far_activity < 0.1f) {
-            for (int k = 0; k < nf; k++) {
-                float updated = r->alpha_noise * r->noise_psd[k] +
-                                (1.0f - r->alpha_noise) * error_pwr[k];
-                float ceil_val = error_pwr[k] * 2.0f;
-                r->noise_psd[k] = updated < ceil_val ? updated : ceil_val;
-            }
+    }
+
+    /* Freeze-gated CNG noise tracking (v2.0.0) */
+    if (r->enable_cng) {
+        float gain_mean = 0.0f;
+        for (int k = 0; k < nf; k++) gain_mean += r->gain_smooth[k];
+        gain_mean /= nf;
+        int is_suppressing = (gain_mean < 0.9f);
+        float alpha_down_cng = 0.90f;
+        float alpha_up_cng = is_suppressing ? 1.0f : 0.998f;
+        for (int k = 0; k < nf; k++) {
+            float alpha_n = (r->error_psd[k] > r->noise_psd[k])
+                            ? alpha_up_cng : alpha_down_cng;
+            r->noise_psd[k] = alpha_n * r->noise_psd[k]
+                               + (1.0f - alpha_n) * r->error_psd[k];
         }
     }
 
@@ -426,9 +515,13 @@ void res_process(ResFilter* r,
             }
         }
 
-        /* Residual echo PSD: blend based on convergence */
+        /* Residual echo PSD: Multi-ERLE (v2.0.0) */
+        float confidence = compute_erle_confidence(r->filter_erle, nf, r->fb_erle);
         for (int k = 0; k < nf; k++) {
-            float erle_est = r->echo_psd[k] / r->erle_per_bin[k];
+            float erle_corrected = confidence * r->filter_erle[k]
+                                   + (1.0f - confidence) * 1.0f;
+            if (erle_corrected < 0.5f) erle_corrected = 0.5f;
+            float erle_est = r->echo_psd[k] / erle_corrected;
             float direct_est = r->echo_psd[k];
 
             /* Pre-convergence echo floor: coh2-weighted error_psd */
