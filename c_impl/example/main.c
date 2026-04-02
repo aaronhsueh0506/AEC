@@ -53,6 +53,7 @@ int main(int argc, char* argv[]) {
     AecPreset preset = AEC_PRESET_BALANCED;
     int enable_res = 1;
     int enable_hpf = 1;
+    int enable_shadow = 1;
     int filter_length = 0; /* 0 = default */
     int delay_est_override = -1; /* -1 = use preset default, 0 = force off, 1 = force on */
     float max_delay_ms = 0.0f;  /* 0 = use default */
@@ -64,6 +65,8 @@ int main(int argc, char* argv[]) {
             enable_res = 0;
         } else if (strcmp(argv[i], "--no-hpf") == 0) {
             enable_hpf = 0;
+        } else if (strcmp(argv[i], "--no-shadow") == 0) {
+            enable_shadow = 0;
         } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
             filter_length = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--enable-delay-est") == 0) {
