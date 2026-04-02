@@ -753,9 +753,9 @@ int aec_process_ex(Aec* aec,
     if (aec->shadow_frame_count >= 50) {
         float threshold = cfg->shadow_copy_threshold;
 
-        /* Far-end activity check (use raw input, matching Python) */
+        /* Far-end activity check (HPF'd ref, matching Python which HPFs first) */
         float far_pwr = 0.0f;
-        for (int i = 0; i < hop; i++) far_pwr += far_end[i] * far_end[i];
+        for (int i = 0; i < hop; i++) far_pwr += ref[i] * ref[i];
         int far_active = (far_pwr / hop > 1e-4f);
 
         /* DT check: far/error ratio */
@@ -824,9 +824,9 @@ int aec_process_ex(Aec* aec,
 
     /* === RES post-filter === */
     if (aec->res) {
-        /* Use raw far_end for far_power (matching Python) */
+        /* far_power from HPF'd ref (Python does HPF before all processing) */
         float far_power = 0.0f;
-        for (int i = 0; i < hop; i++) far_power += far_end[i] * far_end[i];
+        for (int i = 0; i < hop; i++) far_power += ref[i] * ref[i];
         far_power /= hop;
 
         /* Dynamic over_sub: use max(instant, cumulative) ERLE like Python */
@@ -837,14 +837,13 @@ int aec_process_ex(Aec* aec,
         float base_over_sub = cfg->res_over_sub_base +
                                cfg->res_over_sub_scale * erle_factor;
 
-        /* DT indicator: use raw input (before HPF), matching Python */
+        /* DT indicator: use HPF'd mic/ref (Python does HPF before all control signals) */
         float mic_pwr = 0.0f;
-        for (int i = 0; i < hop; i++) mic_pwr += near_end[i] * near_end[i];
+        for (int i = 0; i < hop; i++) mic_pwr += mic[i] * mic[i];
         mic_pwr = mic_pwr / hop + 1e-10f;
-        float far_p_dt = 0.0f;
-        for (int i = 0; i < hop; i++) far_p_dt += far_end[i] * far_end[i];
-        far_p_dt = far_p_dt / hop + 1e-10f;
+        float far_p_dt = far_power + 1e-10f;
         float raw_dt = 1.0f - far_p_dt / (mic_pwr + far_p_dt);
+        /* Note: far_power already computed from HPF'd ref (line 828) */
         /* ERLE correction: smoothed inst ERLE */
         float raw_err_pwr_dt = 0.0f;
         for (int i = 0; i < hop; i++) raw_err_pwr_dt += aec->raw_output[i] * aec->raw_output[i];
