@@ -825,9 +825,11 @@ int aec_process_ex(Aec* aec,
         for (int i = 0; i < hop; i++) far_power += ref[i] * ref[i];
         far_power /= hop;
 
-        /* Dynamic over_sub */
+        /* Dynamic over_sub: use max(instant, cumulative) ERLE like Python */
         float inst_erle = aec_get_erle_instant(aec);
-        float erle_factor = clampf((inst_erle - 2.0f) / 8.0f, 0.0f, 1.0f);
+        float cum_erle = aec_get_erle(aec);
+        float erle_for_factor = inst_erle > cum_erle ? inst_erle : cum_erle;
+        float erle_factor = clampf((erle_for_factor - 2.0f) / 8.0f, 0.0f, 1.0f);
         float base_over_sub = cfg->res_over_sub_base +
                                cfg->res_over_sub_scale * erle_factor;
 

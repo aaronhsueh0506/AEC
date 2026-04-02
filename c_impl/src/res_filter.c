@@ -289,10 +289,12 @@ static void update_filter_erle(ResFilter* r, const float* echo_pwr,
         r->filter_erle[k] = 0.25f * prev + 0.5f * cur + 0.25f * r->filter_erle[k+1];
         prev = cur;
     }
-    /* Clip */
+    /* Clip: frequency-dependent cap (LF 32, HF 16) aligned with Python */
+    int lf_bins = nf > 8 ? 8 : nf;
     for (int k = 0; k < nf; k++) {
         if (r->filter_erle[k] < 0.5f) r->filter_erle[k] = 0.5f;
-        if (r->filter_erle[k] > 200.0f) r->filter_erle[k] = 200.0f;
+        float erle_max = (k < lf_bins) ? 32.0f : 16.0f;
+        if (r->filter_erle[k] > erle_max) r->filter_erle[k] = erle_max;
     }
 }
 
@@ -524,16 +526,20 @@ void res_process(ResFilter* r,
             float erle_est = r->echo_psd[k] / erle_corrected;
             float direct_est = r->echo_psd[k];
 
-            /* Pre-convergence echo floor: coh2-weighted error_psd */
-            if (erle_factor < 0.5f && far_power > 1e-4f) {
-                float ef_fade = 1.0f - erle_factor * 2.0f;
-                float echo_floor = r->error_psd[k] * coh2[k] * ef_fade
-                                   * r->far_activity;
-                if (direct_est < echo_floor) direct_est = echo_floor;
+            /* Nonlinear echo floor: always active when far-end present */
+            if (far_power > 1e-4f) {
+                float dt_weight = 1.0f - dt_indicator;
+                float nonlinear_floor = r->error_psd[k] * coh2[k]
+                                        * r->far_activity * dt_weight;
+                if (direct_est < nonlinear_floor) direct_est = nonlinear_floor;
+                if (erle_est < nonlinear_floor) erle_est = nonlinear_floor;
             }
 
             residual_echo_psd[k] = (1.0f - erle_factor) * direct_est
                                    + erle_factor * erle_est;
+            /* Cap at 2x echo_psd */
+            float cap = r->echo_psd[k] * 2.0f;
+            if (residual_echo_psd[k] > cap) residual_echo_psd[k] = cap;
         }
 
         /* Reverb tail: use far_spec power (render signal) */
@@ -548,8 +554,12 @@ void res_process(ResFilter* r,
                 }
                 r->reverb_psd[k] = r->reverb_decay * r->reverb_psd[k]
                                    + (1.0f - r->reverb_decay) * far_psd_k;
+                /* Gate by far_activity + dt_indicator (match Python) */
+                float ne_reverb_factor = 0.3f + 0.7f * r->far_activity
+                                         * (1.0f - dt_indicator);
+                float reverb_gate = r->far_activity * ne_reverb_factor;
                 residual_echo_psd[k] += r->reverb_gain * r->reverb_psd[k]
-                                        * r->far_activity;
+                                        * reverb_gate;
             }
         }
 
