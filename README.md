@@ -70,9 +70,20 @@
 | **CNG** | 底噪追蹤在遠端持續講話時效果有限（noise_psd 可能偏高） |
 | **延遲估計** | GCC-PHAT 在低 SNR 或強非線性場景可能不準確 |
 
+### 資源消耗（C 實作，fl=512 @16kHz）
+
+| 項目 | 值 |
+|------|-----|
+| 記憶體（main + shadow filter） | ~200 KB |
+| 記憶體（含 RES + delay est） | ~280 KB |
+| 每幀計算量 | ~2 × 512-FFT + Kalman update (257 bins × 4 partitions) |
+| FFT 函式庫 | kiss_fft（single precision, MIT license） |
+
+> C vs Python correlation: 0.971。差異來自 kiss_fft vs numpy.fft 演算法精度（max 9.83e-7 per FFT call，~113× float32 epsilon），在 Kalman 正回饋中累積。
+
 支援四級 Preset（MILD / BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
-> C 實作已對齊 Python v1.17.0：PBFDKF（Kalman P_init/P_MAX/Q gating/far-end gate 修正）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail）+ HPF + Preset，詳見 [c_impl/README.md](c_impl/README.md)。
+> C 實作已對齊 Python v2.0.0（correlation 0.971）。包含 Multi-ERLE、dt_indicator ERLE correction、ENR 重構、Delay Estimation。詳見 [c_impl/README.md](c_impl/README.md)。
 
 ## 濾波器模式
 
@@ -135,8 +146,20 @@ cd c_impl && make
 ./bin/aec_wav mic.wav ref.wav output.wav --filter 2400             # 自訂濾波器長度
 ```
 
-C 版本已對齊 Python v1.28.1（PBFDKF 模式），包含 PBFDKF Kalman（correct K, P_MAX=0.5）+ Shadow + WOLA RES v2（ENR masking / direct echo est / reverb tail / CNG）+ HPF + 四級 Preset。
-不含：Multi-ERLE、dt_indicator ERLE correction、DTD、Delay Estimation、Saturation Detection、LMS/NLMS/FDAF 模式。待同步至 v2.0.0。
+C 版本已對齊 Python v2.0.0（PBFDKF 模式），包含：
+- PBFDKF Kalman（correct K, P_MAX=0.5, global denominator）
+- Shadow filter + bidirectional copy
+- Multi-ERLE（FilterErleEstimator + FullbandErleEstimator）
+- dt_indicator ERLE correction（3-frame EMA smoothed inst_erle）
+- ENR 重構（dt × nearend_est）
+- WOLA RES v2（完整重寫，對齊 Python）
+- CNG freeze-gated noise tracking（×0.3 attenuation）
+- GCC-PHAT Delay Estimation（inline, 250ms max）
+- HPF + 四級 Preset
+
+C vs Python correlation: **0.971**（frame 1-10 完美一致 corr=1.0，剩餘差異為 kiss_fft vs numpy.fft 演算法精度）。
+
+不含：DTD、Saturation Detection、LMS/NLMS/FDAF 模式。
 
 ## 系統架構
 
