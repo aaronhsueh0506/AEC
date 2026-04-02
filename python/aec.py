@@ -723,10 +723,82 @@ class PBFDKF(PBFDAF):
             self.R[:] = src.R
         if hasattr(src, '_error_psd'):
             self._error_psd[:] = src._error_psd
+        if hasattr(src, 'Q'):
+            self.Q[:] = src.Q
 
 
 # Backward compatibility alias
 SubbandNlms = PBFDKF
+
+
+class FilterErleEstimator:
+    """Per-bin ERLE from adaptive filter echo estimate vs error.
+    erle[k] = |echo_spec[k]|² / |error_spec[k]|²
+
+    Key difference from erle_per_bin:
+    - Does NOT use near_psd → breaks circular dependency
+    - DT: erle naturally drops (speech increases error, echo_spec stays)
+    """
+    def __init__(self, n_freqs: int):
+        self.n_freqs = n_freqs
+        self.erle = np.ones(n_freqs, dtype=np.float32)
+        self._alpha_rise = 0.95   # slow rise (stable convergence)
+        self._alpha_drop = 0.7    # fast drop (DT protection)
+
+    def update(self, echo_spec: np.ndarray, error_spec: np.ndarray,
+               far_active: bool, dt_indicator: float) -> None:
+        if not far_active:
+            return
+        echo_pwr = np.abs(echo_spec) ** 2
+        error_pwr = np.abs(error_spec) ** 2 + 1e-10
+        inst_erle = np.clip(echo_pwr / error_pwr, 0.1, 1000.0)
+
+        # Asymmetric EMA: fast drop (DT), slow rise (FS convergence)
+        dt_weight = max(1.0 - dt_indicator * 1.5, 0.1)
+        alpha = np.where(
+            inst_erle < self.erle,
+            self._alpha_drop * dt_weight + (1.0 - dt_weight) * 0.5,
+            self._alpha_rise * dt_weight
+        )
+        self.erle = alpha * self.erle + (1.0 - alpha) * inst_erle
+
+        # 3-bin smoothing + cap
+        kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
+        self.erle = np.convolve(self.erle, kernel, mode='same').astype(np.float32)
+        self.erle = np.clip(self.erle, 0.5, 200.0)
+
+    def reset(self):
+        self.erle.fill(1.0)
+
+
+class FullbandErleEstimator:
+    """Broadband ERLE for cross-validation confidence.
+    Uses near_psd/error_psd broadband mean — stable but slow, FS-only update.
+    """
+    def __init__(self):
+        self.fb_erle = 1.0
+        self._alpha = 0.97
+
+    def update(self, near_power: float, error_power: float,
+               far_active: bool, dt_indicator: float) -> None:
+        if not far_active or dt_indicator > 0.3 or near_power < 1e-8:
+            return
+        inst = np.clip(near_power / (error_power + 1e-10), 0.5, 100.0)
+        self.fb_erle = self._alpha * self.fb_erle + (1.0 - self._alpha) * inst
+
+    def reset(self):
+        self.fb_erle = 1.0
+
+
+def compute_erle_confidence(erle_l1: np.ndarray, fb_erle: float) -> float:
+    """Compare FilterErle mean (L1) with FullbandErle (L2).
+    Returns confidence in [0, 1]: 1 = consistent, 0 = divergent.
+    """
+    l1_mean = float(np.mean(erle_l1))
+    if l1_mean < 0.5 or fb_erle < 0.5:
+        return 0.0
+    log_diff = abs(np.log(l1_mean + 1e-10) - np.log(fb_erle + 1e-10))
+    return float(np.exp(-log_diff / 2.0))
 
 
 class HighPassFilter:
@@ -933,10 +1005,9 @@ class ResFilter:
         self.error_envelope = np.ones(n_freqs, dtype=np.float32)
         self.alpha_envelope = 0.95  # Slow-tracking spectral envelope
 
-        # Dominant nearend detection (cf. AEC3 two-tuning suppressor)
-        self._ne_detect_count = 0
-        self._ne_detect_hold = 0
-        self._nearend_state = False
+        # Multi-ERLE estimators (Phase 2)
+        self._filter_erle_est = FilterErleEstimator(n_freqs)
+        self._fb_erle_est = FullbandErleEstimator()
 
         # OLA: sqrt-Hann window + sliding input buffer + overlap buffer
         self.window = np.sqrt(np.hanning(self.frame_size)).astype(np.float32)
@@ -951,6 +1022,8 @@ class ResFilter:
         self.S_ff.fill(0)
         self.S_ee.fill(0)
         self.noise_psd.fill(0)
+        if hasattr(self, '_noise_initialized'):
+            del self._noise_initialized
         self.far_activity = 0.0
         self.input_buf.fill(0)
         self.ola_buf.fill(0)
@@ -960,9 +1033,8 @@ class ResFilter:
         self.near_psd_idx = 0
         self._coh2_smooth.fill(0)
         self.reverb_psd.fill(0)
-        self._ne_detect_count = 0
-        self._ne_detect_hold = 0
-        self._nearend_state = False
+        self._filter_erle_est.reset()
+        self._fb_erle_est.reset()
 
     def process(self, error_hop: np.ndarray, echo_spec: np.ndarray,
                 far_power: float, far_spec: np.ndarray = None,
@@ -1031,20 +1103,15 @@ class ResFilter:
         self.echo_psd = self.alpha_echo_psd * self.echo_psd + (1 - self.alpha_echo_psd) * echo_pwr_linear
         self.error_psd = self.alpha_error_psd * self.error_psd + (1 - self.alpha_error_psd) * error_pwr
 
+        # Multi-ERLE update (Phase 2)
+        far_active = far_power > 1e-4
+        self._filter_erle_est.update(echo_spec, spec, far_active, dt_indicator)
+        near_power_broad = float(np.mean(self.near_psd)) if near_spec is not None else 0.0
+        error_power_broad = float(np.mean(error_pwr))
+        self._fb_erle_est.update(near_power_broad, error_power_broad, far_active, dt_indicator)
+
         if far_power < 1e-4:
             self.echo_psd *= 0.3  # fast decay during far-end silence
-            # Track noise floor only during true far-end silence
-            # far_activity < 0.1 means far-end silent for ~800ms (EMA TC≈80 frames)
-            # → echo tail fully decayed → error_pwr is pure background noise
-            # DT naturally excluded: far_power won't be < 1e-4 during double-talk
-            if self.enable_cng and self.far_activity < 0.1:
-                # Asymmetric tracking: fast down (follow noise drop), slow up
-                # (reject transient artifacts from Kalman / gain transitions).
-                # Prevents artifact-inflated noise_psd → CNG reverb.
-                alpha_up = 0.995    # very slow rise (~200 frames = 2s)
-                alpha_down = 0.95   # normal drop speed (~20 frames = 200ms)
-                alpha_n = np.where(error_pwr > self.noise_psd, alpha_up, alpha_down)
-                self.noise_psd = alpha_n * self.noise_psd + (1 - alpha_n) * error_pwr
 
         # --- Dynamic g_min: track far-end activity ---
         is_far_active = float(far_power > 1e-4)
@@ -1093,24 +1160,31 @@ class ResFilter:
                 self.erle_per_bin = np.minimum(self.erle_per_bin, erle_max)
                 self.erle_per_bin = np.maximum(self.erle_per_bin, 1.0)
 
-            # Residual echo PSD: blend two estimates based on convergence
-            # Residual echo PSD: blend direct + ERLE-corrected estimates
-            erle_est = self.echo_psd / self.erle_per_bin
+            # Multi-ERLE residual estimation (Phase 2)
+            # FilterErleEstimator breaks circular dependency: echo_spec²/error_spec²
+            confidence = compute_erle_confidence(
+                self._filter_erle_est.erle, self._fb_erle_est.fb_erle
+            )
+
+            # Corrected ERLE: blend L1 (filter-based) with conservative fallback (1.0)
+            erle_corrected = (confidence * self._filter_erle_est.erle
+                              + (1.0 - confidence) * 1.0)
+            erle_corrected = np.maximum(erle_corrected, 0.5)
+
+            # Residual from multi-ERLE (can be << error_psd when ERLE is high)
+            erle_est = self.echo_psd / erle_corrected
             direct_est = self.echo_psd
 
-            # Coherence-based nonlinear echo floor (always active, no erle_factor gate)
-            # Non-linear echo survives FDKF but correlates with far-end → coh2 high
-            # Applied to BOTH direct_est AND erle_est to prevent ERLE division trap
+            # Nonlinear echo floor
             if far_power > 1e-4:
-                # DT scaling: reduce nonlinear_floor during double-talk
-                # to avoid over-estimating residual → over-suppressing speech
-                dt_weight = 1.0 - dt_indicator  # FS≈1.0, DT≈0.3-0.6
+                dt_weight = 1.0 - dt_indicator
                 nonlinear_floor = (self.error_psd * coh2
                                    * self.far_activity * dt_weight)
                 direct_est = np.maximum(direct_est, nonlinear_floor)
                 erle_est = np.maximum(erle_est, nonlinear_floor)
 
             residual_echo_psd = (1.0 - erle_factor) * direct_est + erle_factor * erle_est
+            residual_echo_psd = np.minimum(residual_echo_psd, self.echo_psd * 2.0)
 
             # Add reverb tail if enabled
             # Use render signal (far_spec) power instead of filter echo estimate
@@ -1173,58 +1247,28 @@ class ResFilter:
         # --- Gain computation ---
 
         if self.gain_type == "enr" and residual_echo_psd is not None:
-            # Coherence-based ENR: no circular dependency on residual
-            # coh2 high (FS echo) → (1-coh2) small → nearend small → ENR high → suppress
-            # coh2 low (DT speech) → (1-coh2) large → nearend large → ENR low → protect
+            # dt_indicator × nearend_est: solves non-linear echo trap
+            # FS (dt≈0): nearend_est → noise_floor → ENR >> 10 → full suppression
+            # DT (dt≈0.5): real speech preserved → ENR low → protect speech
+            # dt² penalty: 0.7→0.49 (aggressive FS suppression), 0.9→0.81 (DT preserved)
+            raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
+            nearend_est = raw_nearend_est * (dt_indicator ** 2.0)
             noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
-            nearend_est_coh = self.error_psd * (1.0 - coh2) + noise_floor_psd
-            enr = residual_echo_psd / nearend_est_coh
+            nearend_est = np.maximum(nearend_est, noise_floor_psd)
+            enr = residual_echo_psd / nearend_est
 
-            # --- Dominant nearend detection ---
-            hf_start = min(8, self.n_freqs // 4)
-            avg_enr = float(np.mean(enr[hf_start:]))
-            NE_ENR_THRESHOLD = 0.4
-            NE_ENR_EXIT = 0.8   # was 1.5, unreachable with nearend_est denom
-            NE_TRIGGER_FRAMES = 12
-            NE_HOLD_FRAMES = 30
-
-            if far_power < 1e-4:
-                self._nearend_state = True
-                self._ne_detect_hold = NE_HOLD_FRAMES
-                self._ne_detect_count = 0
-            elif self._nearend_state:
-                # Exit condition: ENR high OR (far-end active + moderate ENR)
-                # NE_ENR_EXIT=10 is unreachable (ENR≈1 after convergence),
-                # so add far_activity-based exit as parallel path
-                far_activity_exit = (self.far_activity > 0.85 and avg_enr > 0.8)
-                if avg_enr > NE_ENR_EXIT or far_activity_exit:
-                    self._ne_detect_hold -= 1
-                    if self._ne_detect_hold <= 0:
-                        self._nearend_state = False
-                        self._ne_detect_count = 0
-                # Only reset hold if ENR is truly low (near-end dominant)
-                elif avg_enr < NE_ENR_THRESHOLD:
-                    self._ne_detect_hold = NE_HOLD_FRAMES
-            else:
-                if avg_enr < NE_ENR_THRESHOLD:
-                    self._ne_detect_count += 1
-                    if self._ne_detect_count >= NE_TRIGGER_FRAMES:
-                        self._nearend_state = True
-                        self._ne_detect_hold = NE_HOLD_FRAMES
-                else:
-                    self._ne_detect_count = max(0, self._ne_detect_count - 1)
-
-            # --- Continuous ENR two-tuning (no binary nearend_state dependency) ---
+            # --- ENR two-tuning (continuous, driven by dt_indicator) ---
             freq_bins = np.arange(self.n_freqs, dtype=np.float32)
             blend = np.clip((freq_bins - 5) / 5, 0, 1)
             scale = self.enr_scale
-            ne_confidence = 1.0 - fs_confidence  # reuse from attack blend
+            # ne_confidence directly from dt_indicator (already ERLE-corrected at source)
+            ne_confidence = dt_indicator
 
-            effective_scale = scale  # no sat_penalty (was interfering with ENR)
+            effective_scale = scale
 
-            # Two sets of thresholds, blended by ne_confidence
-            enr_t_ne = (1 - blend) * 3.0 + blend * 0.3
-            enr_s_ne = (1 - blend) * 5.0 + blend * 0.5
+            # Standard thresholds (ENR can now >> 1.0 with dt_indicator × nearend_est)
+            enr_t_ne = (1 - blend) * 2.0 + blend * 0.5
+            enr_s_ne = (1 - blend) * 3.0 + blend * 1.0
             enr_t_fs = (1 - blend) * (0.3 * effective_scale) + blend * (0.07 * effective_scale)
             enr_s_fs = (1 - blend) * (0.4 * effective_scale) + blend * (0.1 * effective_scale)
 
@@ -1329,21 +1373,35 @@ class ResFilter:
         # Apply gain + synthesis sqrt-Hann window + IFFT
         enhanced_spec = self.gain_smooth * spec
 
-        # --- CNG: AEC3-style comfort noise crossfade ---
-        # cn_gain = sqrt(1 - G²): as suppression deepens, more comfort noise fills in
-        # This prevents unnatural silence during deep echo suppression
-        if (self.enable_cng
-                and self.far_activity < 0.1       # only during true silence
-                and np.sum(self.noise_psd) > 1e-8):
-            cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0))
-            # Complex Gaussian CNG: real and imag each ~ N(0, noise_psd/2)
-            # Amplitude and phase both random → OLA + sqrt-Hann smooths frame
-            # boundaries naturally, no clicks or horizontal lines
-            noise_std = np.sqrt(self.noise_psd / 2.0 + 1e-10).astype(np.float32)
-            cng_real = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
-            cng_imag = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
-            cng_spec = (cn_gain * (cng_real + 1j * cng_imag)).astype(np.complex64)
-            enhanced_spec = enhanced_spec + cng_spec
+        # --- CNG: echo-subtracted comfort noise crossfade ---
+        if self.enable_cng:
+            if not hasattr(self, '_noise_initialized'):
+                # Init to tiny value — let it naturally climb, avoid echo pollution
+                self.noise_psd = np.full(self.n_freqs, 1e-8, dtype=np.float32)
+                self._noise_initialized = True
+
+            # Strip echo: track pure background noise (error minus residual echo)
+            if residual_echo_psd is not None:
+                pure_bg_noise = np.maximum(self.error_psd - residual_echo_psd, 1e-8)
+            else:
+                pure_bg_noise = self.error_psd
+
+            # Very slow asymmetric tracking (TC ~500ms)
+            # alpha_up=0.999: never pulled up by residual echo or speech
+            # alpha_down=0.98: don't fall into transient computation voids
+            alpha_up = 0.999
+            alpha_down = 0.98
+            alpha_n = np.where(pure_bg_noise > self.noise_psd, alpha_up, alpha_down)
+            self.noise_psd = alpha_n * self.noise_psd + (1 - alpha_n) * pure_bg_noise
+
+            if np.sum(self.noise_psd) > 1e-7:
+                # Inject at -10dB (×0.3): comfort noise should be subtle, not dominant
+                cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0)) * 0.3
+                noise_std = np.sqrt(self.noise_psd / 2.0).astype(np.float32)
+                cng_real = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
+                cng_imag = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
+                cng_spec = (cn_gain * (cng_real + 1j * cng_imag)).astype(np.complex64)
+                enhanced_spec = enhanced_spec + cng_spec
 
         enhanced_time = np.fft.irfft(enhanced_spec, self.block_size)[:self.frame_size]
         enhanced_time *= self.window
@@ -1822,6 +1880,10 @@ class AEC:
         # Divergence indicator: smoothed signal [0,1] for suppressor override
         self._divergence_indicator = 0.0
 
+        # Smoothed inst ERLE for dt_indicator correction (~3 frame / 30ms)
+        self._inst_erle_smooth = 1.0
+        self._erle_peak = 1.0
+
         # Per-bin mu_scale (updated from RES echo_psd/error_psd each frame)
         self._per_bin_mu_scale = None  # None = use scalar fallback
 
@@ -1900,6 +1962,8 @@ class AEC:
         self.prev_dtd_conf = 0.0
         self._filter_converged = False
         self._divergence_indicator = 0.0
+        self._inst_erle_smooth = 1.0
+        self._erle_peak = 1.0
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0
         self._warmup_frames = self.config.warmup_frames
@@ -2265,8 +2329,28 @@ class AEC:
                 else:
                     far_pwr = np.mean(far_end ** 2) + 1e-10
                     mic_pwr = np.mean(near_end ** 2) + 1e-10
-                    # near-end stronger than far-end → likely DT → reduce suppression
-                    dt_indicator = np.clip(1.0 - far_pwr / (mic_pwr + far_pwr), 0.0, 0.8)
+                    raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
+                    raw_err_pwr = np.mean(raw_output ** 2) + 1e-10
+                    inst_erle_fast_raw = mic_pwr / raw_err_pwr
+                    self._inst_erle_smooth = (0.7 * self._inst_erle_smooth
+                                              + 0.3 * inst_erle_fast_raw)
+
+                    # ERLE drop detection: rescue high-coupling DT
+                    # Track peak ERLE; sudden drop = nearend speech entered
+                    if not hasattr(self, '_erle_peak'):
+                        self._erle_peak = 1.0
+                    if self._inst_erle_smooth > self._erle_peak:
+                        self._erle_peak = self._inst_erle_smooth
+                    else:
+                        self._erle_peak = 0.998 * self._erle_peak + 0.002 * self._inst_erle_smooth
+
+                    # Drop ratio: 1.0 = stable, <0.5 = sudden error burst (speech)
+                    erle_drop_ratio = self._inst_erle_smooth / (self._erle_peak + 1e-10)
+
+                    # Only suppress dt when ERLE high AND no drop detected
+                    if self._inst_erle_smooth > 2.0 and erle_drop_ratio > 0.4:
+                        raw_dt /= self._inst_erle_smooth
+                    dt_indicator = np.clip(raw_dt, 0.0, 0.8)
                 dt_reduction = self.config.res_dt_reduction * dt_indicator
                 effective_over_sub = max(base_over_sub - dt_reduction, 0.5)
 
@@ -2386,15 +2470,6 @@ class AEC:
             alpha_lim = 0.8   # release: recover moderately
         self._limiter_gain = alpha_lim * self._limiter_gain + (1 - alpha_lim) * target_gain
         final_output *= self._limiter_gain
-
-        # Output noise gate: suppress very low-level residual (far-end only)
-        out_power = np.mean(final_output ** 2)
-        near_power_inst = np.mean(near_end ** 2)
-        far_power_inst = np.mean(far_end ** 2)
-        if far_power_inst > 1e-4 and near_power_inst > 1e-8:
-            snr = out_power / near_power_inst
-            if snr < 0.01:  # final_output < -20dB of mic
-                final_output *= snr / 0.01  # soft fade
 
         # ERLE: track raw (filter-only) and final (post-RES) separately
         for i in range(len(near_end)):

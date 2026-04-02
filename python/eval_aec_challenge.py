@@ -23,6 +23,8 @@ from contextlib import redirect_stdout
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aec import AEC, AecConfig, AecMode
 
+_ENABLE_CNG = False  # global CNG flag, set by --cng CLI arg
+
 # Try PESQ
 try:
     from pesq import pesq as pesq_fn
@@ -137,6 +139,9 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     env_gain_type = os.environ.get('AEC_GAIN_TYPE')
     if env_gain_type and 'res_gain_type' not in config_overrides:
         config_overrides['res_gain_type'] = env_gain_type
+    # CNG override from global flag
+    if _ENABLE_CNG and 'enable_cng' not in config_overrides:
+        config_overrides['enable_cng'] = True
     common_kw = dict(sample_rate=sr, mode=AecMode.PBFDKF,
                      filter_length=fl, enable_dtd=False,
                      enable_shadow=True, enable_res=enable_res,
@@ -657,7 +662,11 @@ def main():
     parser.add_argument('-o', '--output-dir', default=None, help='Output directory')
     parser.add_argument('--gain-type', choices=['wiener', 'enr', 'spectral_sub'],
                         default=None, help='Override RES gain type')
+    parser.add_argument('--cng', action='store_true', help='Enable comfort noise generation')
     args = parser.parse_args()
+
+    global _ENABLE_CNG
+    _ENABLE_CNG = args.cng
 
     base_dir = os.path.abspath(args.dataset_dir)
     out_dir = args.output_dir or os.path.join(base_dir, 'output')
