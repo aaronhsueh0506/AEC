@@ -806,7 +806,7 @@ void res_process(ResFilter* r,
         for (int k = 0; k < nf; k++) noise_sum += r->noise_psd[k];
         if (noise_sum > 0.0f) {
             for (int k = 0; k < nf; k++) {
-                float cn_gain_k = fast_sqrt(maxf(1.0f - r->gain_smooth[k] * r->gain_smooth[k], 0.0f));
+                float cn_gain_k = fast_sqrt(maxf(1.0f - r->gain_smooth[k] * r->gain_smooth[k], 0.0f)) * 0.3f;
                 float noise_std = fast_sqrt(r->noise_psd[k] / 2.0f + 1e-10f);
                 /* Box-Muller for two N(0,1) samples */
                 float u1 = (float)(rand() + 1) / ((float)RAND_MAX + 2.0f);
