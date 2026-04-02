@@ -1250,11 +1250,9 @@ class ResFilter:
             # dt_indicator × nearend_est: solves non-linear echo trap
             # FS (dt≈0): nearend_est → noise_floor → ENR >> 10 → full suppression
             # DT (dt≈0.5): real speech preserved → ENR low → protect speech
-            # dt² penalty: 0.7→0.49 (aggressive FS suppression), 0.9→0.81 (DT preserved)
             raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
-            nearend_est = raw_nearend_est * (dt_indicator ** 2.0)
             noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
-            nearend_est = np.maximum(nearend_est, noise_floor_psd)
+            nearend_est = np.maximum(raw_nearend_est * dt_indicator, noise_floor_psd)
             enr = residual_echo_psd / nearend_est
 
             # --- ENR two-tuning (continuous, driven by dt_indicator) ---
@@ -1373,29 +1371,25 @@ class ResFilter:
         # Apply gain + synthesis sqrt-Hann window + IFFT
         enhanced_spec = self.gain_smooth * spec
 
-        # --- CNG: echo-subtracted comfort noise crossfade ---
+        # --- CNG: Freeze-Gated Minima Tracking ---
         if self.enable_cng:
             if not hasattr(self, '_noise_initialized'):
-                # Init to tiny value — let it naturally climb, avoid echo pollution
-                self.noise_psd = np.full(self.n_freqs, 1e-8, dtype=np.float32)
+                self.noise_psd = self.error_psd.copy() + 1e-8
                 self._noise_initialized = True
 
-            # Strip echo: track pure background noise (error minus residual echo)
-            if residual_echo_psd is not None:
-                pure_bg_noise = np.maximum(self.error_psd - residual_echo_psd, 1e-8)
+            # Freeze when suppressing: gain < 0.9 means echo is being removed
+            # → error_psd contains echo energy → forbid noise_psd from learning it
+            is_suppressing = float(np.mean(self.gain_smooth)) < 0.9
+            alpha_down = 0.90  # fast drop: catch breath pauses for true noise floor
+            if is_suppressing:
+                alpha_up = 1.0   # freeze: never learn echo shape
             else:
-                pure_bg_noise = self.error_psd
+                alpha_up = 0.998  # ultra-slow rise: adapt to fan/AC changes over seconds
 
-            # Very slow asymmetric tracking (TC ~500ms)
-            # alpha_up=0.999: never pulled up by residual echo or speech
-            # alpha_down=0.98: don't fall into transient computation voids
-            alpha_up = 0.999
-            alpha_down = 0.98
-            alpha_n = np.where(pure_bg_noise > self.noise_psd, alpha_up, alpha_down)
-            self.noise_psd = alpha_n * self.noise_psd + (1 - alpha_n) * pure_bg_noise
+            alpha_n = np.where(self.error_psd > self.noise_psd, alpha_up, alpha_down)
+            self.noise_psd = alpha_n * self.noise_psd + (1 - alpha_n) * self.error_psd
 
             if np.sum(self.noise_psd) > 1e-7:
-                # Inject at -10dB (×0.3): comfort noise should be subtle, not dominant
                 cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0)) * 0.3
                 noise_std = np.sqrt(self.noise_psd / 2.0).astype(np.float32)
                 cng_real = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
@@ -1882,7 +1876,6 @@ class AEC:
 
         # Smoothed inst ERLE for dt_indicator correction (~3 frame / 30ms)
         self._inst_erle_smooth = 1.0
-        self._erle_peak = 1.0
 
         # Per-bin mu_scale (updated from RES echo_psd/error_psd each frame)
         self._per_bin_mu_scale = None  # None = use scalar fallback
@@ -1963,7 +1956,6 @@ class AEC:
         self._filter_converged = False
         self._divergence_indicator = 0.0
         self._inst_erle_smooth = 1.0
-        self._erle_peak = 1.0
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0
         self._warmup_frames = self.config.warmup_frames
@@ -2334,21 +2326,7 @@ class AEC:
                     inst_erle_fast_raw = mic_pwr / raw_err_pwr
                     self._inst_erle_smooth = (0.7 * self._inst_erle_smooth
                                               + 0.3 * inst_erle_fast_raw)
-
-                    # ERLE drop detection: rescue high-coupling DT
-                    # Track peak ERLE; sudden drop = nearend speech entered
-                    if not hasattr(self, '_erle_peak'):
-                        self._erle_peak = 1.0
-                    if self._inst_erle_smooth > self._erle_peak:
-                        self._erle_peak = self._inst_erle_smooth
-                    else:
-                        self._erle_peak = 0.998 * self._erle_peak + 0.002 * self._inst_erle_smooth
-
-                    # Drop ratio: 1.0 = stable, <0.5 = sudden error burst (speech)
-                    erle_drop_ratio = self._inst_erle_smooth / (self._erle_peak + 1e-10)
-
-                    # Only suppress dt when ERLE high AND no drop detected
-                    if self._inst_erle_smooth > 2.0 and erle_drop_ratio > 0.4:
+                    if self._inst_erle_smooth > 2.0:
                         raw_dt /= self._inst_erle_smooth
                     dt_indicator = np.clip(raw_dt, 0.0, 0.8)
                 dt_reduction = self.config.res_dt_reduction * dt_indicator
