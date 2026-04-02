@@ -69,6 +69,7 @@ struct Aec {
 
     /* dt_indicator ERLE correction */
     float inst_erle_smooth;
+    float divergence_indicator;
 
     /* Output limiter */
     float limiter_gain;
@@ -195,6 +196,7 @@ Aec* aec_create(const AecConfig* config) {
     /* Limiter */
     aec->limiter_gain = 1.0f;
     aec->inst_erle_smooth = 1.0f;
+    aec->divergence_indicator = 0.0f;
 
     /* Buffers */
     aec->mic_buf    = (float*)malloc(hop * sizeof(float));
@@ -330,6 +332,7 @@ void aec_reset(Aec* aec) {
     aec->near_power_sum = 0; aec->raw_error_power_sum = 0; aec->final_error_power_sum = 0;
     aec->limiter_gain = 1.0f;
     aec->inst_erle_smooth = 1.0f;
+    aec->divergence_indicator = 0.0f;
     aec->main_err_smooth = 0; aec->shadow_err_smooth = 0;
     aec->shadow_frame_count = 0; aec->shadow_copy_counter = 0;
     aec->prev_total_err = 0.0f; aec->epc_active = 0; aec->epc_hangover_count = 0;
@@ -854,13 +857,15 @@ int aec_process_ex(Aec* aec,
         float dt_reduction = cfg->res_dt_reduction * dt_indicator;
         float over_sub = maxf(base_over_sub - dt_reduction, 0.5f);
 
-        /* Compute divergence for RES */
-        float res_divergence;
-        {
-            float err_p = aec->raw_error_power + 1e-10f;
-            float near_p = aec->near_power + 1e-10f;
-            res_divergence = clampf(err_p / near_p - 0.5f, 0.0f, 1.0f);
+        /* Compute divergence for RES (matching Python: only after convergence) */
+        if (aec->filter_converged && aec->near_power > 1e-8f) {
+            float inst_erle_linear = aec->near_power / (aec->raw_error_power + 1e-10f);
+            float is_diverged = (inst_erle_linear < 0.63f) ? 1.0f : 0.0f;
+            aec->divergence_indicator = 0.9f * aec->divergence_indicator + 0.1f * is_diverged;
+        } else {
+            aec->divergence_indicator *= 0.95f;
         }
+        float res_divergence = aec->divergence_indicator;
 
         res_process(aec->res, aec->raw_output,
                     pbfdkf_get_echo_spec(aec->filter),
