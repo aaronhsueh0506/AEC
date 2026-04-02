@@ -67,7 +67,7 @@ class AecConfig:
     sample_rate: int = 16000      # 8000 / 16000 / 48000
     frame_size: int = -1          # Auto: sample_rate * 20ms (160@8k, 320@16k, 960@48k)
     hop_size: int = -1            # Auto: frame_size / 2 (80@8k, 160@16k, 480@48k)
-    filter_length: int = -1      # Auto: sample_rate * 64ms (512@8k, 1024@16k, 3072@48k)
+    filter_length: int = 1024    # Samples (mode/rate-dependent, set by CLI or preset)
     mu: float = 0.3              # Step size
     delta: float = 1e-8          # Regularization
     enable_dtd: bool = False
@@ -176,8 +176,6 @@ class AecConfig:
             self.frame_size = self.sample_rate * 20 // 1000  # 20ms
         if self.hop_size == -1:
             self.hop_size = self.frame_size // 2             # 10ms
-        if self.filter_length == -1:
-            self.filter_length = self.sample_rate * 64 // 1000  # 64ms: 512@8k, 1024@16k, 3072@48k
 
     @property
     def fft_size(self) -> int:
