@@ -61,7 +61,8 @@ def scan_fileids(dataset_dir):
 
 
 def run_aec(mic_path, ref_path, mode, enable_dtd=True, enable_res=False,
-            enable_shadow=False, mu=0.3, filter_length=0):
+            enable_shadow=False, mu=0.3, filter_length=0,
+            res_gain_type='enr'):
     """Run AEC and return output + filter object + confidence history."""
     mic, sr = sf.read(mic_path)
     ref, _ = sf.read(ref_path)
@@ -82,6 +83,7 @@ def run_aec(mic_path, ref_path, mode, enable_dtd=True, enable_res=False,
         enable_shadow=enable_shadow,
         mu=mu,
         filter_length=filter_length,
+        res_gain_type=res_gain_type,
     )
     aec = AEC(config)
     hop = aec.hop_size
@@ -153,6 +155,8 @@ def main():
                         default='nlms')
     parser.add_argument('--no-dtd', action='store_true', help='Disable DTD')
     parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
+    parser.add_argument('--res-gain-type', choices=['spectral_sub', 'wiener', 'enr'],
+                        default='enr', help='RES gain type (default: enr)')
     parser.add_argument('--enable-shadow', action='store_true', help='Enable shadow filter (dual-filter)')
     parser.add_argument('--mu', type=float, default=0.3)
     parser.add_argument('--filter', type=int, default=0,
@@ -236,7 +240,8 @@ def main():
             enable_dtd=not args.no_dtd,
             enable_res=False,
             enable_shadow=args.enable_shadow,
-            mu=args.mu, filter_length=args.filter)
+            mu=args.mu, filter_length=args.filter,
+            res_gain_type=args.res_gain_type)
         erle_primary = aec_primary.get_erle()
 
         # Optionally run with RES for comparison
@@ -247,7 +252,8 @@ def main():
                 enable_dtd=not args.no_dtd,
                 enable_res=True,
                 enable_shadow=args.enable_shadow,
-                mu=args.mu, filter_length=args.filter)
+                mu=args.mu, filter_length=args.filter,
+                res_gain_type=args.res_gain_type)
             erle_res = aec_res.get_erle()
             print(f" done (no-RES={erle_primary:.1f}, RES={erle_res:.1f} dB)")
         else:
@@ -316,7 +322,7 @@ def main():
 
         dtd_tag = '_no_dtd' if args.no_dtd else ''
         shadow_tag = '_shadow' if args.enable_shadow else ''
-        res_tag = '_res_compare' if args.enable_res else ''
+        res_tag = f'_res_{args.res_gain_type}' if args.enable_res else ''
         out_path = os.path.join(base,
             f'aec_results_{args.mode}{dtd_tag}{res_tag}{shadow_tag}_fileid_{fid}.png')
         plt.savefig(out_path, dpi=150, bbox_inches='tight')
