@@ -221,8 +221,7 @@ def main():
         true_ir, _ = sf.read(rir_path)
         true_ir = true_ir.astype(np.float32)
         print(f"Using target RIR: {rir_path} ({len(true_ir)} taps)")
-    elif HAS_TRUE_RIR:
-        true_ir = make_true_rir(delay=200, gain=0.8, n_taps=512)
+    # Only show target RIR when explicitly provided via --rir
 
     # Each fileid → separate figure with 4 rows (far, mic, output, RIR)
     rows_per_file = 4
