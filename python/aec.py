@@ -2335,13 +2335,20 @@ class AEC:
                 else:
                     far_pwr = np.mean(far_end ** 2) + 1e-10
                     mic_pwr = np.mean(near_end ** 2) + 1e-10
-                    raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
                     raw_err_pwr = np.mean(raw_output ** 2) + 1e-10
+
+                    # far/mic ratio
+                    raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
+
+                    # ERLE correction: suppress false DT in high-coupling FS.
+                    # Cap correction at 4× to prevent over-suppression with
+                    # white noise far-end (broadband ERLE is always high).
                     inst_erle_fast_raw = mic_pwr / raw_err_pwr
                     self._inst_erle_smooth = (0.7 * self._inst_erle_smooth
                                               + 0.3 * inst_erle_fast_raw)
                     if self._inst_erle_smooth > 2.0:
-                        raw_dt /= self._inst_erle_smooth
+                        raw_dt /= min(self._inst_erle_smooth, 4.0)
+
                     dt_indicator = np.clip(raw_dt, 0.0, 0.8)
                 dt_reduction = self.config.res_dt_reduction * dt_indicator
                 effective_over_sub = max(base_over_sub - dt_reduction, 0.5)
