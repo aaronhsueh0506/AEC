@@ -1686,7 +1686,10 @@ class AEC:
         # Create adaptive filter based on mode
         if self.config.mode in _FREQ_MODES:
             if self.config.mode == AecMode.FDAF:
-                # True FDAF: single big FFT block, n_partitions=1
+                # Classic FDAF: single FFT block, n_partitions=1
+                # block_size = 2 × filter_length, hop = filter_length
+                # Faster than time-domain LMS (O(N log N) vs O(N²)) with same result.
+                # Limitation: large hop → slow update rate → motivates partitioned approach.
                 desired = 2 * self.config.filter_length
                 block_size = 256
                 while block_size < desired:

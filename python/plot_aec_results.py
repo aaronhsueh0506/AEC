@@ -231,24 +231,28 @@ def main():
         fid = group['fileid']
         print(f"  Processing fileid_{fid} ...", end='', flush=True)
 
-        # Run without RES
-        mic, ref, out_no_res, aec_no_res, sr = run_aec(
+        # Run primary (no-RES)
+        mic, ref, out_primary, aec_primary, sr = run_aec(
             group['mic'], group['ref'], mode,
             enable_dtd=not args.no_dtd,
             enable_res=False,
             enable_shadow=args.enable_shadow,
             mu=args.mu, filter_length=args.filter)
-        erle_no_res = aec_no_res.get_erle()
+        erle_primary = aec_primary.get_erle()
 
-        # Run with RES
-        _, _, out_res, aec_res, _ = run_aec(
-            group['mic'], group['ref'], mode,
-            enable_dtd=not args.no_dtd,
-            enable_res=True,
-            enable_shadow=args.enable_shadow,
-            mu=args.mu, filter_length=args.filter)
-        erle_res = aec_res.get_erle()
-        print(f" done (no-RES={erle_no_res:.1f}, RES={erle_res:.1f} dB)")
+        # Optionally run with RES for comparison
+        out_res = aec_res = erle_res = None
+        if args.enable_res:
+            _, _, out_res, aec_res, _ = run_aec(
+                group['mic'], group['ref'], mode,
+                enable_dtd=not args.no_dtd,
+                enable_res=True,
+                enable_shadow=args.enable_shadow,
+                mu=args.mu, filter_length=args.filter)
+            erle_res = aec_res.get_erle()
+            print(f" done (no-RES={erle_primary:.1f}, RES={erle_res:.1f} dB)")
+        else:
+            print(f" done (ERLE={erle_primary:.1f} dB)")
 
         t = np.arange(len(mic)) / sr
         ymax = max(np.max(np.abs(mic)), np.max(np.abs(ref)))
@@ -278,14 +282,17 @@ def main():
         ax.set_ylim(ylim)
         ax.grid(True, alpha=0.2)
 
-        # Row 2: AEC output — overlay no-RES vs RES
+        # Row 2: AEC output
         ax = axes[2]
-        if not args.no_dtd:
+        if args.enable_res and aec_res and not args.no_dtd:
             draw_dtd_spans(ax, aec_res.confidence_history, aec_res.hop_size, sr)
-        ax.plot(t, out_no_res, color='orange', linewidth=0.4, alpha=0.7,
-                label=f'No RES (ERLE={erle_no_res:.1f} dB)')
-        ax.plot(t, out_res, color='darkgreen', linewidth=0.4, alpha=0.8,
-                label=f'RES on (ERLE={erle_res:.1f} dB)')
+        elif not args.no_dtd:
+            draw_dtd_spans(ax, aec_primary.confidence_history, aec_primary.hop_size, sr)
+        ax.plot(t, out_primary, color='orange', linewidth=0.4, alpha=0.8,
+                label=f'No RES (ERLE={erle_primary:.1f} dB)')
+        if args.enable_res and out_res is not None:
+            ax.plot(t, out_res, color='darkgreen', linewidth=0.4, alpha=0.8,
+                    label=f'RES on (ERLE={erle_res:.1f} dB)')
         ax.set_ylabel('AEC Output', fontsize=9)
         ax.set_ylim(ylim)
         ax.legend(loc='upper right', fontsize=8)
@@ -293,7 +300,7 @@ def main():
 
         # Row 3: Estimated RIR (vs target if available)
         ax = axes[3]
-        est_ir = get_estimated_ir(aec_res)
+        est_ir = get_estimated_ir(aec_res if aec_res else aec_primary)
         t_ir = np.arange(len(est_ir)) / sr * 1000  # ms
         if true_ir is not None:
             t_true = np.arange(len(true_ir)) / sr * 1000
@@ -310,21 +317,23 @@ def main():
 
         dtd_tag = '_no_dtd' if args.no_dtd else ''
         shadow_tag = '_shadow' if args.enable_shadow else ''
+        res_tag = '_res_compare' if args.enable_res else ''
         out_path = os.path.join(base,
-            f'aec_results_{args.mode}{dtd_tag}_res_compare{shadow_tag}_fileid_{fid}.png')
+            f'aec_results_{args.mode}{dtd_tag}{res_tag}{shadow_tag}_fileid_{fid}.png')
         plt.savefig(out_path, dpi=150, bbox_inches='tight')
         print(f"  Saved: {out_path}")
         plt.close(fig)
 
         if args.save_wav:
-            wav_no_res = os.path.join(base,
+            wav_path = os.path.join(base,
                 f'aec_out_{args.mode}{dtd_tag}{shadow_tag}_nores_{fid}.wav')
-            wav_res = os.path.join(base,
-                f'aec_out_{args.mode}{dtd_tag}{shadow_tag}_res_{fid}.wav')
-            sf.write(wav_no_res, out_no_res, sr)
-            sf.write(wav_res, out_res, sr)
-            print(f"  Saved: {wav_no_res}")
-            print(f"  Saved: {wav_res}")
+            sf.write(wav_path, out_primary, sr)
+            print(f"  Saved: {wav_path}")
+            if args.enable_res and out_res is not None:
+                wav_res_path = os.path.join(base,
+                    f'aec_out_{args.mode}{dtd_tag}{shadow_tag}_res_{fid}.wav')
+                sf.write(wav_res_path, out_res, sr)
+                print(f"  Saved: {wav_res_path}")
 
 
 if __name__ == '__main__':
