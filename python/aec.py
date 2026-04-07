@@ -1347,7 +1347,13 @@ class ResFilter:
         # Temporal smoothing: far_activity-driven release (no feedback loop)
         # far_activity high (far-end speaking) → slow release (TC≈200ms)
         # far_activity low (far-end silent) → fast release (TC≈25ms)
-        alpha_release = 0.4 + 0.5 * self.far_activity
+        # DT (high dt_indicator) → fast release to let speech through
+        alpha_release = 0.4 + 0.5 * self.far_activity * (1.0 - dt_indicator)
+
+        # DT gain floor: prevent gain_smooth from staying at g_min during DT
+        # dt=0.8 → floor=0.8, gain immediately jumps from g_min to dt level
+        if dt_indicator > 0.3:
+            self.gain_smooth = np.maximum(self.gain_smooth, dt_indicator)
 
         # Attack alpha: continuous blend based on far_activity and dt_indicator
         # far_activity high + low dt → fast attack (FS: suppress echo quickly)
