@@ -1194,6 +1194,11 @@ class ResFilter:
             residual_echo_psd = (1.0 - erle_factor) * direct_est + erle_factor * erle_est
             residual_echo_psd = np.minimum(residual_echo_psd, self.echo_psd * 2.0)
 
+            # Physical limit: residual echo cannot exceed total error energy.
+            # Prevents confidence collapse (e.g. white noise) from overestimating
+            # residual and crushing near-end speech.
+            residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd)
+
             # Add reverb tail if enabled
             # Use render signal (far_spec) power instead of filter echo estimate
             # → doesn't depend on filter modeling quality for reverb tail
@@ -2358,19 +2363,26 @@ class AEC:
 
                 # === White Noise Stationarity Gate (global, works with or without DTD) ===
 
-                # Fix A: Baseline decoupled from CV2 gate
-                # Track error before convergence so baseline is accurate at convergence instant
-                if not self._filter_converged:
-                    self._wn_err_baseline = raw_err_pwr
+                # Voice-band spike detection: only look at 100Hz~3kHz (bins 2~48)
+                # Speech energy concentrates here; broadband white noise masks it
+                if hasattr(self.filter, 'error_spec'):
+                    vb_limit = min(48, len(self.filter.error_spec))
+                    track_err_pwr = float(np.sum(np.abs(self.filter.error_spec[2:vb_limit])**2)) + 1e-10
                 else:
-                    if raw_err_pwr < self._wn_err_baseline * 1.5:
+                    track_err_pwr = raw_err_pwr
+
+                # Baseline decoupled from CV2 gate — track before convergence too
+                if not self._filter_converged:
+                    self._wn_err_baseline = track_err_pwr
+                else:
+                    if track_err_pwr < self._wn_err_baseline * 1.5:
                         self._wn_err_baseline = (0.95 * self._wn_err_baseline
-                                                  + 0.05 * raw_err_pwr)
+                                                  + 0.05 * track_err_pwr)
                     else:
                         self._wn_err_baseline = (0.999 * self._wn_err_baseline
-                                                  + 0.001 * raw_err_pwr)
+                                                  + 0.001 * track_err_pwr)
 
-                # Fix B: CV2 snap-on-onset — skip EMA warmup (α=0.98 needs 0.5s)
+                # CV2 snap-on-onset — skip EMA warmup
                 if far_pwr > 1e-6:
                     if not self._far_active_prev:
                         self._far_env_mean = far_pwr
@@ -2391,7 +2403,8 @@ class AEC:
 
                 is_wn_dt = False
                 if is_stationary_far and self._filter_converged:
-                    jump_ratio = raw_err_pwr / (self._wn_err_baseline + 1e-10)
+                    # Voice-band jump ratio — speech spike is very obvious here
+                    jump_ratio = track_err_pwr / (self._wn_err_baseline + 1e-10)
                     if jump_ratio > 1.5:
                         wn_dt_conf = np.clip((jump_ratio - 1.5) / 1.5 + 0.4, 0.4, 0.8)
                         raw_dt = max(raw_dt, wn_dt_conf)
