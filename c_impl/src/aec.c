@@ -1,7 +1,7 @@
 /**
  * aec.c - AEC Coordinator
  *
- * Orchestrates: HPF → PBFDKF (main + shadow) → simple variable mu →
+ * Orchestrates: PBFDKF (main + shadow) → simple variable mu →
  *               convergence detection → RES (WOLA) → output limiter
  *
  * Matches Python AEC v1.28.1 (PBFDKF mode, Kalman always on).
@@ -10,7 +10,6 @@
 #include "aec.h"
 #include "pbfdkf.h"
 #include "res_filter.h"
-#include "hpf.h"
 #include "fft_wrapper.h"
 #include "fast_math.h"
 #include <stdlib.h>
@@ -25,10 +24,6 @@ static inline float clampf(float x, float lo, float hi) {
 
 struct Aec {
     AecConfig config;
-
-    /* HPF (mic + ref) */
-    Hpf* hp_mic;
-    Hpf* hp_ref;
 
     /* Main adaptive filter */
     Pbfdkf* filter;
@@ -75,8 +70,8 @@ struct Aec {
     float limiter_gain;
 
     /* Temp buffers */
-    float* mic_buf;     /* [hop_size] HPF scratch */
-    float* ref_buf;     /* [hop_size] HPF scratch */
+    float* mic_buf;     /* [hop_size] working copy */
+    float* ref_buf;     /* [hop_size] working copy */
     float* raw_output;  /* [hop_size] */
 
     /* Per-bin mu_scale from RES */
@@ -134,12 +129,6 @@ Aec* aec_create(const AecConfig* config) {
     int hop = config->hop_size;
     int nf = config->n_freqs;
     aec->n_freqs = nf;
-
-    /* HPF */
-    if (config->enable_highpass) {
-        aec->hp_mic = hpf_create(config->highpass_cutoff_hz, config->sample_rate);
-        aec->hp_ref = hpf_create(config->highpass_cutoff_hz, config->sample_rate);
-    }
 
     /* Main filter (PBFDKF) */
     aec->filter = pbfdkf_create(config->fft_size, hop,
@@ -291,8 +280,6 @@ Aec* aec_create(const AecConfig* config) {
 
 void aec_destroy(Aec* aec) {
     if (!aec) return;
-    hpf_destroy(aec->hp_mic);
-    hpf_destroy(aec->hp_ref);
     pbfdkf_destroy(aec->filter);
     pbfdkf_destroy(aec->shadow_filter);
     res_destroy(aec->res);
@@ -316,7 +303,6 @@ void aec_destroy(Aec* aec) {
 
 void aec_reset(Aec* aec) {
     if (!aec) return;
-    if (aec->hp_mic) { hpf_reset(aec->hp_mic); hpf_reset(aec->hp_ref); }
     pbfdkf_reset(aec->filter);
     pbfdkf_reset(aec->shadow_filter);
     pbfdkf_set_q_ratio(aec->shadow_filter, aec->config.kalman_q_high,
@@ -660,22 +646,16 @@ int aec_process_ex(Aec* aec,
     const float alpha = aec->alpha_erle;
     const AecConfig* cfg = &aec->config;
 
-    /* Copy input (we modify via HPF) */
+    /* Copy input (working buffers) */
     memcpy(aec->mic_buf, near_end, hop * sizeof(float));
     memcpy(aec->ref_buf, far_end, hop * sizeof(float));
-
-    /* HPF */
-    if (aec->hp_mic) {
-        hpf_process(aec->hp_mic, aec->mic_buf, hop);
-        hpf_process(aec->hp_ref, aec->ref_buf, hop);
-    }
 
     float* mic = aec->mic_buf;
     float* ref = aec->ref_buf;
 
     /* === Delay estimation === */
     if (aec->delay_est.enabled) {
-        /* Accumulate into delay estimator (using HPF'd signals) */
+        /* Accumulate into delay estimator */
         delay_est_accumulate(aec, mic, ref, hop);
 
         int new_delay = aec->delay_est.estimated_delay;
@@ -753,7 +733,7 @@ int aec_process_ex(Aec* aec,
     if (aec->shadow_frame_count >= 50) {
         float threshold = cfg->shadow_copy_threshold;
 
-        /* Far-end activity check (HPF'd ref, matching Python which HPFs first) */
+        /* Far-end activity check */
         float far_pwr = 0.0f;
         for (int i = 0; i < hop; i++) far_pwr += ref[i] * ref[i];
         int far_active = (far_pwr / hop > 1e-4f);
@@ -824,7 +804,7 @@ int aec_process_ex(Aec* aec,
 
     /* === RES post-filter === */
     if (aec->res) {
-        /* far_power from HPF'd ref (Python does HPF before all processing) */
+        /* far_power from ref */
         float far_power = 0.0f;
         for (int i = 0; i < hop; i++) far_power += ref[i] * ref[i];
         far_power /= hop;
@@ -837,13 +817,13 @@ int aec_process_ex(Aec* aec,
         float base_over_sub = cfg->res_over_sub_base +
                                cfg->res_over_sub_scale * erle_factor;
 
-        /* DT indicator: use HPF'd mic/ref (Python does HPF before all control signals) */
+        /* DT indicator */
         float mic_pwr = 0.0f;
         for (int i = 0; i < hop; i++) mic_pwr += mic[i] * mic[i];
         mic_pwr = mic_pwr / hop + 1e-10f;
         float far_p_dt = far_power + 1e-10f;
         float raw_dt = 1.0f - far_p_dt / (mic_pwr + far_p_dt);
-        /* Note: far_power already computed from HPF'd ref (line 828) */
+        /* Note: far_power already computed from ref above */
         /* ERLE correction: smoothed inst ERLE */
         float raw_err_pwr_dt = 0.0f;
         for (int i = 0; i < hop; i++) raw_err_pwr_dt += aec->raw_output[i] * aec->raw_output[i];

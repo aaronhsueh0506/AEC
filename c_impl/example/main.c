@@ -6,7 +6,6 @@
  * Options:
  *   --preset balanced|aggressive|maximum  (default: balanced)
  *   --no-res       Disable RES post-filter
- *   --no-hpf       Disable high-pass filter
  *   --filter <N>   Filter length in samples (default: 512)
  */
 
@@ -14,7 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "aec.h"
-#include "hpf.h"
 #include "wav_io.h"
 
 static void print_usage(const char* program) {
@@ -27,7 +25,6 @@ static void print_usage(const char* program) {
     printf("Options:\n");
     printf("  --preset <name>    - balanced (default), aggressive, maximum\n");
     printf("  --no-res           - Disable residual echo suppressor\n");
-    printf("  --no-hpf           - Disable high-pass filter\n");
     printf("  --filter <samples> - Filter length in samples (default: 512)\n");
     printf("  --enable-delay-est - Enable GCC-PHAT delay estimation\n");
     printf("  --no-delay-est     - Disable delay estimation (overrides preset)\n");
@@ -53,7 +50,6 @@ int main(int argc, char* argv[]) {
     /* Parse options */
     AecPreset preset = AEC_PRESET_BALANCED;
     int enable_res = 1;
-    int enable_hpf = 1;
     int enable_shadow = 1;
     int filter_length = 0; /* 0 = default */
     int delay_est_override = -1; /* -1 = use preset default, 0 = force off, 1 = force on */
@@ -64,8 +60,6 @@ int main(int argc, char* argv[]) {
             preset = parse_preset(argv[++i]);
         } else if (strcmp(argv[i], "--no-res") == 0) {
             enable_res = 0;
-        } else if (strcmp(argv[i], "--no-hpf") == 0) {
-            enable_hpf = 0;
         } else if (strcmp(argv[i], "--no-shadow") == 0) {
             enable_shadow = 0;
         } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
@@ -108,7 +102,6 @@ int main(int argc, char* argv[]) {
     /* Create config from preset */
     AecConfig config = aec_config_from_preset(preset, sample_rate);
     config.enable_res = enable_res;
-    config.enable_highpass = enable_hpf;
     if (filter_length > 0) {
         config.filter_length = filter_length;
         config.n_partitions = (filter_length + config.hop_size - 1) / config.hop_size;
@@ -142,9 +135,6 @@ int main(int argc, char* argv[]) {
     printf("  Reverb: %s (decay=%.1f, gain=%.1f)\n",
            config.res_enable_reverb ? "enabled" : "disabled",
            config.res_reverb_decay, config.res_reverb_gain);
-    printf("  HPF: %s (%.0f Hz)\n",
-           enable_hpf ? "enabled" : "disabled",
-           config.highpass_cutoff_hz);
     printf("  Shadow: enabled (Q_ratio=%.1f)\n",
            config.shadow_q_ratio);
     printf("  Delay est: %s", config.enable_delay_est ? "enabled" : "disabled");
@@ -186,10 +176,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    /* HPF at application layer (not inside AEC module) */
-    Hpf* hp_mic = enable_hpf ? hpf_create(80.0f, sample_rate) : NULL;
-    Hpf* hp_ref = enable_hpf ? hpf_create(80.0f, sample_rate) : NULL;
-
     /* Process */
     int processed = 0;
     float max_erle = 0.0f;
@@ -202,10 +188,6 @@ int main(int argc, char* argv[]) {
             for (int i = mic_read; i < hop_size; i++) mic_buf[i] = 0.0f;
             for (int i = ref_read; i < hop_size; i++) ref_buf[i] = 0.0f;
         }
-
-        /* HPF before AEC */
-        if (hp_mic) { hpf_process(hp_mic, mic_buf, hop_size); }
-        if (hp_ref) { hpf_process(hp_ref, ref_buf, hop_size); }
 
         aec_process(aec, mic_buf, ref_buf, out_buf);
         wav_write_float(writer, out_buf, hop_size);
@@ -247,8 +229,6 @@ int main(int argc, char* argv[]) {
     free(mic_buf);
     free(ref_buf);
     free(out_buf);
-    hpf_destroy(hp_mic);
-    hpf_destroy(hp_ref);
     aec_destroy(aec);
     wav_close_read(mic_reader);
     wav_close_read(ref_reader);

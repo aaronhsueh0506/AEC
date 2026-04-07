@@ -1,5 +1,5 @@
 # AEC (Acoustic Echo Cancellation) Makefile
-# PBFDKF + Shadow + WOLA RES + HPF + Preset
+# PBFDKF + Shadow + WOLA RES + Preset
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c99
@@ -22,7 +22,6 @@ BIN_DIR = bin
 SRCS = $(SRC_DIR)/aec.c \
        $(SRC_DIR)/pbfdkf.c \
        $(SRC_DIR)/res_filter.c \
-       $(SRC_DIR)/hpf.c \
        $(SRC_DIR)/fft_wrapper.c
 
 LIB_SRCS = $(LIB_DIR)/kiss_fft.c
@@ -95,7 +94,6 @@ help:
 	@echo "Options:"
 	@echo "  --preset <name>    - balanced (default), aggressive, maximum"
 	@echo "  --no-res           - Disable RES post-filter"
-	@echo "  --no-hpf           - Disable high-pass filter"
 	@echo "  --filter <samples> - Filter length in samples (default: 512)"
 
 .PHONY: all dirs clean lib help debug
