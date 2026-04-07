@@ -18,6 +18,9 @@ __pycache__/
 # OS
 .DS_Store
 
+# Claude Code
+.claude/
+
 # AEC output & local datasets (user runs locally)
 wav/aec_output/
 wav/aec_challenge/
