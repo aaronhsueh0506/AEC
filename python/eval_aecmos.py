@@ -15,51 +15,52 @@ METHODS = ['ours', 'ours_nores', 'aec3', 'aec3_linear', 'speex']
 METHOD_LABELS = ['Ours', 'NoRES', 'AEC3', 'AEC3-Lin', 'Speex']
 
 def find_fs_cases(base_dir, out_dir=None):
-    """Find farend singletalk cases and map to output files."""
+    """Find farend singletalk cases (including with_movement) and map to output files."""
     fs_dir = os.path.join(base_dir, 'farend_singletalk')
     if out_dir is None:
         out_dir = os.path.join(base_dir, 'output')
-    mic_files = sorted([f for f in os.listdir(fs_dir) if '_farend_singletalk_mic.wav' in f])
+    mic_files = sorted([f for f in os.listdir(fs_dir) if f.endswith('_mic.wav')])
 
     cases = []
     for i, mic_f in enumerate(mic_files):
-        prefix = mic_f.replace('_farend_singletalk_mic.wav', '')
-        lpb_f = f"{prefix}_farend_singletalk_lpb.wav"
+        # Strip _mic.wav to get the full prefix (handles both normal and with_movement)
+        stem = mic_f[:-len('_mic.wav')]
+        lpb_f = f"{stem}_lpb.wav"
         cases.append({
             'idx': i,
             'type': 'fs',
             'mic': os.path.join(fs_dir, mic_f),
             'lpb': os.path.join(fs_dir, lpb_f),
-            'ours': os.path.join(out_dir, f'{prefix}_farend_singletalk_ours.wav'),
-            'ours_nores': os.path.join(out_dir, f'{prefix}_farend_singletalk_ours_nores.wav'),
-            'aec3': os.path.join(out_dir, f'{prefix}_farend_singletalk_aec3.wav'),
-            'aec3_linear': os.path.join(out_dir, f'{prefix}_farend_singletalk_aec3_linear.wav'),
-            'speex': os.path.join(out_dir, f'{prefix}_farend_singletalk_speex.wav'),
+            'ours': os.path.join(out_dir, f'{stem}_ours.wav'),
+            'ours_nores': os.path.join(out_dir, f'{stem}_ours_nores.wav'),
+            'aec3': os.path.join(out_dir, f'{stem}_aec3.wav'),
+            'aec3_linear': os.path.join(out_dir, f'{stem}_aec3_linear.wav'),
+            'speex': os.path.join(out_dir, f'{stem}_speex.wav'),
         })
     return cases
 
 def find_dt_cases(base_dir, out_dir=None):
-    """Find doubletalk cases and map to output files."""
+    """Find doubletalk cases (including with_movement) and map to output files."""
     dt_dir = os.path.join(base_dir, 'doubletalk')
     if out_dir is None:
         out_dir = os.path.join(base_dir, 'output')
 
-    mic_files = sorted([f for f in os.listdir(dt_dir) if '_doubletalk_mic.wav' in f])
+    mic_files = sorted([f for f in os.listdir(dt_dir) if f.endswith('_mic.wav')])
 
     cases = []
     for i, mic_f in enumerate(mic_files):
-        prefix = mic_f.replace('_doubletalk_mic.wav', '')
-        lpb_f = f"{prefix}_doubletalk_lpb.wav"
+        stem = mic_f[:-len('_mic.wav')]
+        lpb_f = f"{stem}_lpb.wav"
         cases.append({
             'idx': i,
             'type': 'dt',
             'mic': os.path.join(dt_dir, mic_f),
             'lpb': os.path.join(dt_dir, lpb_f),
-            'ours': os.path.join(out_dir, f'{prefix}_doubletalk_ours.wav'),
-            'ours_nores': os.path.join(out_dir, f'{prefix}_doubletalk_ours_nores.wav'),
-            'aec3': os.path.join(out_dir, f'{prefix}_doubletalk_aec3.wav'),
-            'aec3_linear': os.path.join(out_dir, f'{prefix}_doubletalk_aec3_linear.wav'),
-            'speex': os.path.join(out_dir, f'{prefix}_doubletalk_speex.wav'),
+            'ours': os.path.join(out_dir, f'{stem}_ours.wav'),
+            'ours_nores': os.path.join(out_dir, f'{stem}_ours_nores.wav'),
+            'aec3': os.path.join(out_dir, f'{stem}_aec3.wav'),
+            'aec3_linear': os.path.join(out_dir, f'{stem}_aec3_linear.wav'),
+            'speex': os.path.join(out_dir, f'{stem}_speex.wav'),
         })
     return cases
 
@@ -71,22 +72,22 @@ def find_ne_cases(base_dir, out_dir=None):
     if not os.path.isdir(ne_dir):
         return []
 
-    mic_files = sorted([f for f in os.listdir(ne_dir) if '_nearend_singletalk_mic.wav' in f])
+    mic_files = sorted([f for f in os.listdir(ne_dir) if f.endswith('_mic.wav')])
 
     cases = []
     for i, mic_f in enumerate(mic_files):
-        prefix = mic_f.replace('_nearend_singletalk_mic.wav', '')
-        lpb_f = f"{prefix}_nearend_singletalk_lpb.wav"
+        stem = mic_f[:-len('_mic.wav')]
+        lpb_f = f"{stem}_lpb.wav"
         cases.append({
             'idx': i,
             'type': 'ne',
             'mic': os.path.join(ne_dir, mic_f),
             'lpb': os.path.join(ne_dir, lpb_f),
-            'ours': os.path.join(out_dir, f'{prefix}_nearend_singletalk_ours.wav'),
-            'ours_nores': os.path.join(out_dir, f'{prefix}_nearend_singletalk_ours_nores.wav'),
-            'aec3': os.path.join(out_dir, f'{prefix}_nearend_singletalk_aec3.wav'),
-            'aec3_linear': os.path.join(out_dir, f'{prefix}_nearend_singletalk_aec3_linear.wav'),
-            'speex': os.path.join(out_dir, f'{prefix}_nearend_singletalk_speex.wav'),
+            'ours': os.path.join(out_dir, f'{stem}_ours.wav'),
+            'ours_nores': os.path.join(out_dir, f'{stem}_ours_nores.wav'),
+            'aec3': os.path.join(out_dir, f'{stem}_aec3.wav'),
+            'aec3_linear': os.path.join(out_dir, f'{stem}_aec3_linear.wav'),
+            'speex': os.path.join(out_dir, f'{stem}_speex.wav'),
         })
     return cases
 
