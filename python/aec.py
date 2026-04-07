@@ -1723,6 +1723,12 @@ class AEC:
             self._hop_size = self.config.hop_size
             self._n_partitions = n_partitions
 
+            # PBFDKF: apply config Q_high/Q_low
+            if isinstance(self.filter, PBFDKF):
+                self.filter.Q_high[:] = self.config.kalman_q_high
+                self.filter.Q_low[:]  = self.config.kalman_q_low
+                self.filter.Q[:] = self.config.kalman_q_high
+
             # FDAF buffering (when internal_hop > external hop)
             if self.config.mode == AecMode.FDAF and self._internal_hop > self._hop_size:
                 # Buffer large enough for accumulation (internal_hop + one extra external hop)
@@ -1861,11 +1867,7 @@ class AEC:
                 hop_size=self.filter.hop_size
             )
             self.shadow_filter.enable_td_constraint = self.config.enable_td_constraint
-            # PBFDKF: apply config Q_high/Q_low, then shadow uses higher Q via ratio
-            if isinstance(self.filter, PBFDKF):
-                self.filter.Q_high[:] = self.config.kalman_q_high
-                self.filter.Q_low[:]  = self.config.kalman_q_low
-                self.filter.Q[:] = self.config.kalman_q_high
+            # PBFDKF shadow: higher Q via ratio for faster tracking
             if isinstance(self.shadow_filter, PBFDKF):
                 self.shadow_filter.Q_high = self.filter.Q_high * self.config.shadow_q_ratio
                 self.shadow_filter.Q_low  = self.filter.Q_low  * self.config.shadow_q_ratio

@@ -131,11 +131,11 @@ def get_estimated_ir(aec):
         return aec.filter.weights.copy()
     else:
         W = aec.filter.W
-        block_size = aec.filter.block_size
+        fft_size = aec.filter.fft_size
         hop = aec.filter.hop_size
         ir = np.zeros(W.shape[0] * hop, dtype=np.float32)
         for p in range(W.shape[0]):
-            w_time = np.fft.irfft(W[p], block_size)
+            w_time = np.fft.irfft(W[p], fft_size)
             ir[p * hop:(p + 1) * hop] = w_time[:hop]
         return ir
 
