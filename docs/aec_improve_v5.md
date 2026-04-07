@@ -112,4 +112,4 @@ python3 python/eval_aec_challenge.py wav/aec_challenge/ --aec3 --speex
 
 - FS echo_mos 與 AEC3 仍有 1.27 的差距（3.20 vs 4.47），主要受限於線性 filter ERLE 上限
 - NN-based NLP 預期可進一步提升 echo_mos
-- C 版本需同步更新
+- ~~C 版本需同步更新~~ (已同步)

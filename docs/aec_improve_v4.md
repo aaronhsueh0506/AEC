@@ -149,4 +149,4 @@ python3 python/eval_aecmos.py wav/aec_challenge/
 
 - FS/DT echo_mos 與 AEC3 仍有 0.85/1.59 的差距，主要受限於線性 filter ERLE 上限
 - NN-based NLP 或 hybrid approach 預期可進一步提升 echo_mos 5-10 分
-- C 版本仍使用 DTD 模式，未同步 adaptive g_min 等改善
+- ~~C 版本仍使用 DTD 模式，未同步 adaptive g_min 等改善~~ (已同步)

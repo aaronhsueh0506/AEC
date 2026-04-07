@@ -147,4 +147,4 @@ python3 python/eval_aec_challenge.py wav/aec_challenge/ --aec3 --speex --all-pre
 ## 後續方向
 
 - FS echo_mos 與 AEC3 仍有 ~1.1 差距（3.36 vs 4.47），需 NN-based NLP
-- C 版本需同步更新 per-bin gate + preset 參數
+- ~~C 版本需同步更新 per-bin gate + preset 參數~~ (已同步)

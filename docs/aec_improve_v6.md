@@ -135,4 +135,4 @@ python3 python/eval_aec_challenge.py wav/aec_challenge/ --preset aggressive
 
 - FS echo_mos 與 AEC3 仍有 ~1.1 差距（3.30 vs 4.47），主要受限於無 NLP
 - NN-based NLP 預期可進一步大幅提升 echo_mos
-- C 版本需同步更新 preset adaptive 層參數
+- ~~C 版本需同步更新 preset adaptive 層參數~~ (已同步)

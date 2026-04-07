@@ -372,7 +372,7 @@ filter_length 只影響 partition 數，不影響 block_size 和 DTD cadence。
 
 ## 5.1 FDKF — 頻域卡爾曼濾波器
 
-> **實作狀態：** Python（`PBFDKF._update_weights()`），C 版本尚未同步。
+> **實作狀態：** Python（`PBFDKF._update_weights()`）+ C（`pbfdkf.c`，Kalman always on）。
 > **啟用方式：** `AecConfig(use_kalman=True)` 或 CLI `--use-kalman`
 
 ### 原理
@@ -1633,7 +1633,7 @@ if nearend_state AND far_power < 1e-4:
 
 - Python：`ResFilter` class（`aec.py`）已啟用，RES v2 完整實作
   - 預設組合：`echo_method="direct"` + `gain_type="enr"` + reverb + echo boost + CNG
-- C：`res_filter.c` 已實作（尚未同步 RES v2 架構）
+- C：`res_filter.c` 已實作 RES v2 完整架構（ENR masking + direct echo + reverb tail）
 
 ---
 
@@ -1728,9 +1728,8 @@ if ERLE < target_ERLE:
 
 ### 未來改進方向
 
-1. C 版本同步 RES v2 架構（ENR masking + direct + reverb tail）
-2. DNN postfilter 用於超越純 DSP 天花板（見附錄 C）
-3. 非線性 branch 用於 speaker 飽和場景
+1. DNN postfilter 用於超越純 DSP 天花板（見附錄 C）
+2. 非線性 branch 用於 speaker 飽和場景
 
 ---
 
