@@ -1195,9 +1195,13 @@ class ResFilter:
             residual_echo_psd = np.minimum(residual_echo_psd, self.echo_psd * 2.0)
 
             # Physical limit: residual echo cannot exceed total error energy.
-            # Prevents confidence collapse (e.g. white noise) from overestimating
-            # residual and crushing near-end speech.
             residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd)
+
+            # DT physical limit: dt_indicator=0.8 means 80% confidence it's speech,
+            # so residual echo can be at most 20% of error energy.
+            # Floor at 0.1 prevents residual from vanishing completely at dt≈1.0.
+            dt_suppress = np.clip(1.0 - dt_indicator, 0.1, 1.0)
+            residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * dt_suppress)
 
             # Add reverb tail if enabled
             # Use render signal (far_spec) power instead of filter echo estimate
@@ -1284,8 +1288,8 @@ class ResFilter:
             effective_scale = scale
 
             # Standard thresholds (ENR can now >> 1.0 with dt_indicator × nearend_est)
-            enr_t_ne = (1 - blend) * 2.0 + blend * 0.5
-            enr_s_ne = (1 - blend) * 3.0 + blend * 1.0
+            enr_t_ne = (1 - blend) * 2.0 + blend * 1.5
+            enr_s_ne = (1 - blend) * 3.0 + blend * 2.5
             enr_t_fs = (1 - blend) * (0.3 * effective_scale) + blend * (0.07 * effective_scale)
             enr_s_fs = (1 - blend) * (0.4 * effective_scale) + blend * (0.1 * effective_scale)
 
@@ -1333,9 +1337,10 @@ class ResFilter:
             if self.n_freqs > 2:
                 g[:2] = np.minimum(g[1], g[2])
             # HF cap: upper bins capped at gain of bin near ~500Hz
+            # Bypass during DT: speech harmonics above 500Hz must not be crushed
             freq_res = 16000.0 / self.block_size  # Hz per bin (16kHz assumed)
             hf_cap_bin = min(int(500.0 / freq_res), self.n_freqs - 1)
-            if self.n_freqs > hf_cap_bin + 1:
+            if self.n_freqs > hf_cap_bin + 1 and dt_indicator < 0.2:
                 hf_cap = g[hf_cap_bin]
                 g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
 
@@ -1347,13 +1352,10 @@ class ResFilter:
         # Temporal smoothing: far_activity-driven release (no feedback loop)
         # far_activity high (far-end speaking) → slow release (TC≈200ms)
         # far_activity low (far-end silent) → fast release (TC≈25ms)
-        # DT (high dt_indicator) → fast release to let speech through
-        alpha_release = 0.4 + 0.5 * self.far_activity * (1.0 - dt_indicator)
+        alpha_release_base = 0.4 + 0.5 * self.far_activity
 
-        # DT gain floor: prevent gain_smooth from staying at g_min during DT
-        # dt=0.8 → floor=0.8, gain immediately jumps from g_min to dt level
-        if dt_indicator > 0.3:
-            self.gain_smooth = np.maximum(self.gain_smooth, dt_indicator)
+        # DT-aware release: dt=0.8 → alpha from 0.9 to 0.18, gain recovers in 1-2 frames
+        alpha_release = alpha_release_base * np.clip(1.0 - dt_indicator, 0.1, 1.0)
 
         # Attack alpha: continuous blend based on far_activity and dt_indicator
         # far_activity high + low dt → fast attack (FS: suppress echo quickly)
@@ -1373,6 +1375,11 @@ class ResFilter:
         eff_drop = self.max_drop_ratio ** activity_scale  # Less limiting when silent
         # Tighter rise when far-end active (cf. AEC3 max_inc_factor=2.0)
         eff_rise = self.max_rise_ratio ** (0.5 + 0.5 * (1.0 - self.far_activity))
+
+        # DT rise boost: dt=0.8 → allow gain to jump 16x per frame
+        dt_rise_boost = 1.0 + 19.0 * dt_indicator
+        eff_rise = eff_rise * dt_rise_boost
+
         gain_floor = self.gain_smooth / eff_drop
         gain_ceil = self.gain_smooth * eff_rise
         # LF gain decrease limiting: scale by (1-fs_confidence)
