@@ -1936,8 +1936,10 @@ class AEC:
         # White noise stationarity gate state
         self._far_env_mean = 1e-10
         self._far_env_var = 0.0
-        self._wn_err_baseline = 1e-8
         self._far_active_prev = False
+        self._is_stationary_far = False
+        self._inst_erle_smooth = 1.0
+        self._wn_err_baseline = 1e-8
 
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
         self._simple_mu_ratio = 1.0
@@ -2030,8 +2032,10 @@ class AEC:
         self._saturation_level = 0.0
         self._far_env_mean = 1e-10
         self._far_env_var = 0.0
-        self._wn_err_baseline = 1e-8
         self._far_active_prev = False
+        self._is_stationary_far = False
+        self._inst_erle_smooth = 1.0
+        self._wn_err_baseline = 1e-8
 
     @property
     def hop_size(self) -> int:
@@ -2220,6 +2224,25 @@ class AEC:
 
         _res_context = None  # populated when return_res_context=True and no internal RES
 
+        # === Global stationary feature extraction (before EPC, before all modules) ===
+        far_pwr_global = np.mean(far_end ** 2) + 1e-10
+        if far_pwr_global > 1e-6:
+            if not self._far_active_prev:
+                self._far_env_mean = far_pwr_global
+                self._far_env_var = 0.0
+                self._far_active_prev = True
+            else:
+                alpha_cv = 0.95
+                self._far_env_mean = (alpha_cv * self._far_env_mean
+                                      + (1 - alpha_cv) * far_pwr_global)
+                self._far_env_var = (alpha_cv * self._far_env_var
+                                     + (1 - alpha_cv) * (far_pwr_global - self._far_env_mean) ** 2)
+            far_cv2 = self._far_env_var / (self._far_env_mean ** 2 + 1e-10)
+            self._is_stationary_far = (far_cv2 < 0.05)
+        else:
+            self._far_active_prev = False
+            self._is_stationary_far = False
+
         if self.config.mode in _FREQ_MODES:
             if self._freq_near_queue is not None:
                 # Buffered FDAF: accumulate into queue, process when enough
@@ -2312,6 +2335,9 @@ class AEC:
                 errors_rising = (total_err > self.prev_total_err * self.config.epc_total_rise
                                  and self.prev_total_err > 1e-10)
                 is_echo_change = errors_rising and delta_ratio < self.config.epc_delta_threshold
+                # White noise guard: stationary far-end + error rise = DT, not echo path change
+                if is_echo_change and self._is_stationary_far:
+                    is_echo_change = False
                 self.prev_total_err = total_err
 
                 if is_echo_change:
@@ -2361,53 +2387,27 @@ class AEC:
                 else:
                     raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
 
-                # === White Noise Stationarity Gate (global, works with or without DTD) ===
+                # === White Noise DT rescue (uses pre-computed _is_stationary_far) ===
+                is_wn_dt = False
+                if self._is_stationary_far and self._filter_converged:
+                    # Voice-band spike detection: bins 2~48 (100Hz~3kHz)
+                    if hasattr(self.filter, 'error_spec'):
+                        vb_limit = min(48, len(self.filter.error_spec))
+                        track_err_pwr = (float(np.sum(np.abs(self.filter.error_spec[2:vb_limit])**2))
+                                         + 1e-10)
+                    else:
+                        track_err_pwr = raw_err_pwr
 
-                # Voice-band spike detection: only look at 100Hz~3kHz (bins 2~48)
-                # Speech energy concentrates here; broadband white noise masks it
-                if hasattr(self.filter, 'error_spec'):
-                    vb_limit = min(48, len(self.filter.error_spec))
-                    track_err_pwr = float(np.sum(np.abs(self.filter.error_spec[2:vb_limit])**2)) + 1e-10
-                else:
-                    track_err_pwr = raw_err_pwr
-
-                # Baseline decoupled from CV2 gate — track before convergence too
-                if not self._filter_converged:
-                    self._wn_err_baseline = track_err_pwr
-                else:
+                    # Baseline tracking (only during converged + no surge)
                     if track_err_pwr < self._wn_err_baseline * 1.5:
                         self._wn_err_baseline = (0.95 * self._wn_err_baseline
                                                   + 0.05 * track_err_pwr)
-                    else:
-                        self._wn_err_baseline = (0.999 * self._wn_err_baseline
-                                                  + 0.001 * track_err_pwr)
+                    # Spike: freeze baseline
 
-                # CV2 snap-on-onset — skip EMA warmup
-                if far_pwr > 1e-6:
-                    if not self._far_active_prev:
-                        self._far_env_mean = far_pwr
-                        self._far_env_var = 0.0
-                        self._far_active_prev = True
-                    else:
-                        alpha_cv = 0.95
-                        self._far_env_mean = (alpha_cv * self._far_env_mean
-                                              + (1 - alpha_cv) * far_pwr)
-                        self._far_env_var = (alpha_cv * self._far_env_var
-                                             + (1 - alpha_cv) * (far_pwr - self._far_env_mean) ** 2)
-
-                    far_cv2 = self._far_env_var / (self._far_env_mean ** 2 + 1e-10)
-                    is_stationary_far = (far_cv2 < 0.05)
-                else:
-                    self._far_active_prev = False
-                    is_stationary_far = False
-
-                is_wn_dt = False
-                if is_stationary_far and self._filter_converged:
-                    # Voice-band jump ratio — speech spike is very obvious here
                     jump_ratio = track_err_pwr / (self._wn_err_baseline + 1e-10)
                     if jump_ratio > 1.5:
-                        wn_dt_conf = np.clip((jump_ratio - 1.5) / 1.5 + 0.4, 0.4, 0.8)
-                        raw_dt = max(raw_dt, wn_dt_conf)
+                        # Full 0.8 DT protection: nearend_est = error×0.8 → ENR≈0.25 → RES pass
+                        raw_dt = max(raw_dt, 0.8)
                         is_wn_dt = True
 
                 # Step 3: inst_erle correction (only no-DTD, skip during WN DT)
