@@ -1255,13 +1255,19 @@ class ResFilter:
         # --- Gain computation ---
 
         if self.gain_type == "enr" and residual_echo_psd is not None:
-            # dt_indicator × nearend_est: solves non-linear echo trap
-            # FS (dt≈0): nearend_est → noise_floor → ENR >> 10 → full suppression
-            # DT (dt≈0.5): real speech preserved → ENR low → protect speech
+            # dt_indicator decoupling: strips nonlinear distortion misidentified as nearend
+            # FS (dt_indicator ≈ 0): nearend_est → noise_floor → ENR >> 1 → full suppress
+            # DT (dt_indicator high): real speech preserved in nearend_est → ENR low → protect
             raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
             noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
             nearend_est = np.maximum(raw_nearend_est * dt_indicator, noise_floor_psd)
-            enr = residual_echo_psd / nearend_est
+
+            # Anti-zero guard: ensure DT nearend_est doesn't collapse when residual > error
+            # Even if residual is overestimated, dt_indicator still preserves speech floor
+            min_ne_from_dt = self.error_psd * dt_indicator
+            nearend_est = np.maximum(nearend_est, min_ne_from_dt)
+
+            enr = residual_echo_psd / (nearend_est + 1e-10)
 
             # --- ENR two-tuning (continuous, driven by dt_indicator) ---
             freq_bins = np.arange(self.n_freqs, dtype=np.float32)
@@ -2337,55 +2343,50 @@ class AEC:
                 base_over_sub = self.config.res_over_sub_base + self.config.res_over_sub_scale * erle_factor
                 # Saturation boost: non-linear echo needs more suppression
                 base_over_sub += self._saturation_level * self.config.saturation_over_sub_boost
-                # DT protection: use DTD if enabled, otherwise far/mic ratio as DT indicator
-                if self.config.enable_dtd:
-                    dt_indicator = self.get_dtd_confidence()
-                else:
-                    far_pwr = np.mean(far_end ** 2) + 1e-10
-                    mic_pwr = np.mean(near_end ** 2) + 1e-10
-                    raw_err_pwr = np.mean(raw_output ** 2) + 1e-10
+                # DT protection
+                far_pwr = np.mean(far_end ** 2) + 1e-10
+                mic_pwr = np.mean(near_end ** 2) + 1e-10
+                raw_err_pwr = np.mean(raw_output ** 2) + 1e-10
 
+                # Step 1: base DT confidence
+                if self.config.enable_dtd:
+                    raw_dt = self.get_dtd_confidence()
+                else:
                     raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
 
-                    # White Noise Stationarity Gate (CV2)
-                    # White noise CV2 ≈ 0.01~0.02, speech CV2 >> 1.0
-                    # 800-case speech far-end: CV2 always >> 0.05, gate never triggers
-                    self._far_env_mean = 0.98 * self._far_env_mean + 0.02 * far_pwr
-                    self._far_env_var = (0.98 * self._far_env_var
-                                         + 0.02 * (far_pwr - self._far_env_mean) ** 2)
-                    far_cv2 = self._far_env_var / (self._far_env_mean ** 2 + 1e-10)
+                # Step 2: White Noise Stationarity Gate (global, works with or without DTD)
+                self._far_env_mean = 0.98 * self._far_env_mean + 0.02 * far_pwr
+                self._far_env_var = (0.98 * self._far_env_var
+                                     + 0.02 * (far_pwr - self._far_env_mean) ** 2)
+                far_cv2 = self._far_env_var / (self._far_env_mean ** 2 + 1e-10)
 
-                    is_stationary_far = (far_cv2 < 0.05) and (far_pwr > 1e-6)
+                is_stationary_far = (far_cv2 < 0.05) and (far_pwr > 1e-6)
+                is_wn_dt = False
 
-                    is_wn_dt = False
-                    if is_stationary_far and self._filter_converged:
-                        # Dynamic baseline tracking: error compares against itself
-                        # Fixes extreme negative SNR where fixed 5% threshold fails
-                        # Baseline updates only when no spike (< 1.5x current)
-                        if raw_err_pwr < self._wn_err_baseline * 1.5:
-                            self._wn_err_baseline = (0.95 * self._wn_err_baseline
-                                                      + 0.05 * raw_err_pwr)
-                        else:
-                            # Spike: very slow update, avoid speech polluting baseline
-                            self._wn_err_baseline = (0.999 * self._wn_err_baseline
-                                                      + 0.001 * raw_err_pwr)
+                if is_stationary_far and self._filter_converged:
+                    # Dynamic baseline tracking
+                    if raw_err_pwr < self._wn_err_baseline * 1.5:
+                        self._wn_err_baseline = (0.95 * self._wn_err_baseline
+                                                  + 0.05 * raw_err_pwr)
+                    else:
+                        self._wn_err_baseline = (0.999 * self._wn_err_baseline
+                                                  + 0.001 * raw_err_pwr)
 
-                        # Error jumps > 2.5x baseline (~4dB) → nearend speech detected
-                        jump_ratio = raw_err_pwr / (self._wn_err_baseline + 1e-10)
-                        if jump_ratio > 2.5:
-                            wn_dt_conf = np.clip((jump_ratio - 2.5) / 3.0, 0.4, 0.8)
-                            raw_dt = max(raw_dt, wn_dt_conf)
-                            is_wn_dt = True
+                    jump_ratio = raw_err_pwr / (self._wn_err_baseline + 1e-10)
+                    if jump_ratio > 1.5:
+                        wn_dt_conf = np.clip((jump_ratio - 1.5) / 1.5 + 0.4, 0.4, 0.8)
+                        raw_dt = max(raw_dt, wn_dt_conf)
+                        is_wn_dt = True
 
-                    # inst_erle correction: only when NOT white noise DT
-                    # Preserves FS suppression for 800-case speech
+                # Step 3: inst_erle correction (only no-DTD, skip during WN DT)
+                if not self.config.enable_dtd:
                     inst_erle_fast_raw = mic_pwr / raw_err_pwr
                     self._inst_erle_smooth = (0.7 * self._inst_erle_smooth
                                               + 0.3 * inst_erle_fast_raw)
                     if self._inst_erle_smooth > 2.0 and not is_wn_dt:
                         raw_dt /= self._inst_erle_smooth
 
-                    dt_indicator = np.clip(raw_dt, 0.0, 0.8)
+                dt_indicator = np.clip(raw_dt, 0.0, 0.8)
                 dt_reduction = self.config.res_dt_reduction * dt_indicator
                 effective_over_sub = max(base_over_sub - dt_reduction, 0.5)
 
