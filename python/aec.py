@@ -1932,6 +1932,7 @@ class AEC:
         self._far_env_mean = 1e-10
         self._far_env_var = 0.0
         self._wn_err_baseline = 1e-8
+        self._far_active_prev = False
 
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
         self._simple_mu_ratio = 1.0
@@ -2025,6 +2026,7 @@ class AEC:
         self._far_env_mean = 1e-10
         self._far_env_var = 0.0
         self._wn_err_baseline = 1e-8
+        self._far_active_prev = False
 
     @property
     def hop_size(self) -> int:
@@ -2354,17 +2356,13 @@ class AEC:
                 else:
                     raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
 
-                # Step 2: White Noise Stationarity Gate (global, works with or without DTD)
-                self._far_env_mean = 0.98 * self._far_env_mean + 0.02 * far_pwr
-                self._far_env_var = (0.98 * self._far_env_var
-                                     + 0.02 * (far_pwr - self._far_env_mean) ** 2)
-                far_cv2 = self._far_env_var / (self._far_env_mean ** 2 + 1e-10)
+                # === White Noise Stationarity Gate (global, works with or without DTD) ===
 
-                is_stationary_far = (far_cv2 < 0.05) and (far_pwr > 1e-6)
-                is_wn_dt = False
-
-                if is_stationary_far and self._filter_converged:
-                    # Dynamic baseline tracking
+                # Fix A: Baseline decoupled from CV2 gate
+                # Track error before convergence so baseline is accurate at convergence instant
+                if not self._filter_converged:
+                    self._wn_err_baseline = raw_err_pwr
+                else:
                     if raw_err_pwr < self._wn_err_baseline * 1.5:
                         self._wn_err_baseline = (0.95 * self._wn_err_baseline
                                                   + 0.05 * raw_err_pwr)
@@ -2372,6 +2370,27 @@ class AEC:
                         self._wn_err_baseline = (0.999 * self._wn_err_baseline
                                                   + 0.001 * raw_err_pwr)
 
+                # Fix B: CV2 snap-on-onset — skip EMA warmup (α=0.98 needs 0.5s)
+                if far_pwr > 1e-6:
+                    if not self._far_active_prev:
+                        self._far_env_mean = far_pwr
+                        self._far_env_var = 0.0
+                        self._far_active_prev = True
+                    else:
+                        alpha_cv = 0.95
+                        self._far_env_mean = (alpha_cv * self._far_env_mean
+                                              + (1 - alpha_cv) * far_pwr)
+                        self._far_env_var = (alpha_cv * self._far_env_var
+                                             + (1 - alpha_cv) * (far_pwr - self._far_env_mean) ** 2)
+
+                    far_cv2 = self._far_env_var / (self._far_env_mean ** 2 + 1e-10)
+                    is_stationary_far = (far_cv2 < 0.05)
+                else:
+                    self._far_active_prev = False
+                    is_stationary_far = False
+
+                is_wn_dt = False
+                if is_stationary_far and self._filter_converged:
                     jump_ratio = raw_err_pwr / (self._wn_err_baseline + 1e-10)
                     if jump_ratio > 1.5:
                         wn_dt_conf = np.clip((jump_ratio - 1.5) / 1.5 + 0.4, 0.4, 0.8)
