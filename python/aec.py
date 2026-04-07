@@ -1922,6 +1922,10 @@ class AEC:
             self._sat_detector_mic = None
         self._saturation_level = 0.0
 
+        # White noise stationarity gate state
+        self._far_env_mean = 1e-10
+        self._far_env_var = 0.0
+
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0  # holdoff counter: blocks release for N frames
@@ -2011,6 +2015,8 @@ class AEC:
             self._sat_detector_ref.reset()
             self._sat_detector_mic.reset()
         self._saturation_level = 0.0
+        self._far_env_mean = 1e-10
+        self._far_env_var = 0.0
 
     @property
     def hop_size(self) -> int:
@@ -2335,13 +2341,36 @@ class AEC:
                 else:
                     far_pwr = np.mean(far_end ** 2) + 1e-10
                     mic_pwr = np.mean(near_end ** 2) + 1e-10
-                    raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
                     raw_err_pwr = np.mean(raw_output ** 2) + 1e-10
+
+                    raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
+
+                    # White Noise Stationarity Gate (CV2)
+                    # White noise CV2 ≈ 0.01~0.02, speech CV2 >> 1.0
+                    # 800-case speech far-end: CV2 always >> 0.05, gate never triggers
+                    self._far_env_mean = 0.98 * self._far_env_mean + 0.02 * far_pwr
+                    self._far_env_var = (0.98 * self._far_env_var
+                                         + 0.02 * (far_pwr - self._far_env_mean) ** 2)
+                    far_cv2 = self._far_env_var / (self._far_env_mean ** 2 + 1e-10)
+
+                    is_stationary_far = (far_cv2 < 0.05) and (far_pwr > 1e-6)
+
+                    is_wn_dt = False
+                    if is_stationary_far and self._filter_converged:
+                        # WN FS converged: error << far (ERLE > 13dB)
+                        # If error > 5% of far → nearend speech present
+                        wn_dt_raw = raw_err_pwr / (far_pwr * 0.05 + 1e-10)
+                        if wn_dt_raw > 1.0:
+                            raw_dt = max(raw_dt, np.clip(wn_dt_raw * 0.5, 0.0, 0.8))
+                            is_wn_dt = True
+
+                    # inst_erle correction: only when NOT white noise DT
                     inst_erle_fast_raw = mic_pwr / raw_err_pwr
                     self._inst_erle_smooth = (0.7 * self._inst_erle_smooth
                                               + 0.3 * inst_erle_fast_raw)
-                    if self._inst_erle_smooth > 2.0:
+                    if self._inst_erle_smooth > 2.0 and not is_wn_dt:
                         raw_dt /= self._inst_erle_smooth
+
                     dt_indicator = np.clip(raw_dt, 0.0, 0.8)
                 dt_reduction = self.config.res_dt_reduction * dt_indicator
                 effective_over_sub = max(base_over_sub - dt_reduction, 0.5)
