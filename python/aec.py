@@ -1925,6 +1925,7 @@ class AEC:
         # White noise stationarity gate state
         self._far_env_mean = 1e-10
         self._far_env_var = 0.0
+        self._wn_err_baseline = 1e-8
 
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
         self._simple_mu_ratio = 1.0
@@ -2017,6 +2018,7 @@ class AEC:
         self._saturation_level = 0.0
         self._far_env_mean = 1e-10
         self._far_env_var = 0.0
+        self._wn_err_baseline = 1e-8
 
     @property
     def hop_size(self) -> int:
@@ -2357,14 +2359,26 @@ class AEC:
 
                     is_wn_dt = False
                     if is_stationary_far and self._filter_converged:
-                        # WN FS converged: error << far (ERLE > 13dB)
-                        # If error > 5% of far → nearend speech present
-                        wn_dt_raw = raw_err_pwr / (far_pwr * 0.05 + 1e-10)
-                        if wn_dt_raw > 1.0:
-                            raw_dt = max(raw_dt, np.clip(wn_dt_raw * 0.5, 0.0, 0.8))
+                        # Dynamic baseline tracking: error compares against itself
+                        # Fixes extreme negative SNR where fixed 5% threshold fails
+                        # Baseline updates only when no spike (< 1.5x current)
+                        if raw_err_pwr < self._wn_err_baseline * 1.5:
+                            self._wn_err_baseline = (0.95 * self._wn_err_baseline
+                                                      + 0.05 * raw_err_pwr)
+                        else:
+                            # Spike: very slow update, avoid speech polluting baseline
+                            self._wn_err_baseline = (0.999 * self._wn_err_baseline
+                                                      + 0.001 * raw_err_pwr)
+
+                        # Error jumps > 2.5x baseline (~4dB) → nearend speech detected
+                        jump_ratio = raw_err_pwr / (self._wn_err_baseline + 1e-10)
+                        if jump_ratio > 2.5:
+                            wn_dt_conf = np.clip((jump_ratio - 2.5) / 3.0, 0.4, 0.8)
+                            raw_dt = max(raw_dt, wn_dt_conf)
                             is_wn_dt = True
 
                     # inst_erle correction: only when NOT white noise DT
+                    # Preserves FS suppression for 800-case speech
                     inst_erle_fast_raw = mic_pwr / raw_err_pwr
                     self._inst_erle_smooth = (0.7 * self._inst_erle_smooth
                                               + 0.3 * inst_erle_fast_raw)
