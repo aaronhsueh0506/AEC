@@ -790,46 +790,55 @@ if out_peak > near_peak and near_peak > 1e-6:
 
 ### 6.4 Dual Filter (Shadow Filter) — 本專案可選
 
-**核心思想**：使用兩個自適應濾波器，shadow filter 永遠以保守步長更新，main filter 用於輸出。
-當 shadow 表現更好時，將 shadow 權重複製到 main，天然解決發散問題。
+**核心思想**：使用兩個自適應濾波器。Shadow 是更**激進**的追蹤器（高 Q、full mu），
+main 是更**謹慎**的輸出器（低 mu_scale、受 DTD/DT 保護）。
 
-這是 WebRTC AEC3 和 SpeexDSP 的核心機制。
+- **Main**：負責產生 output。DT 時降 mu 保護，犧牲追蹤速度換取穩定
+- **Shadow**：不產生 output，只追蹤 echo path。不受 DT 保護（full mu），收斂更快
+- **Copy**：當 shadow error < main error × 0.7 時，shadow → main 複製權重
+
+這是 WebRTC AEC3 和 SpeexDSP 的核心機制，但角色常被誤解：
+shadow 不是「保守版」，而是「激進版」— 它用更高的 Q（FDKF 模式 3 倍）和 full mu，
+收斂更快但可能被 DT 污染。Copy gate 確保只在 FS + 收斂後才把 shadow 的好結果交給 main。
 
 ```
 Main filter:   mu = config.mu × mu_scale
                DTD 模式: mu_scale 由 coherence/divergence 控制（最低 5%）
                Shadow-only: mu_scale 由 simple_mu_ratio 控制（最低 shadow_mu_min=50%）
-Shadow filter: mu = config.mu × 0.5 × 1.0  (固定 full mu，AEC3 background filter style)
+Shadow filter: mu = config.mu × 1.0  (固定 full mu，不受 DT 保護)
+               FDKF: Q = main_Q × shadow_q_ratio (3.0)  → 收斂速度約快 30%
 
 每個 block:
-  1. Main: output = process(near, far, mu_scale)
-  2. Shadow: shadow.process(near, far, 1.0)     // full mu, 只更新 weights
+  1. Main: output = process(near, far, mu_scale)   ← 謹慎，產生 output
+  2. Shadow: shadow.process(near, far, 1.0)         ← 激進，只更新 weights
   3. Smooth error energy:
      main_err_smooth   = α × main_err_smooth   + (1-α) × main_err
      shadow_err_smooth = α × shadow_err_smooth + (1-α) × shadow_err
   4. Warm-up guard: 前 50 frames 跳過 copy 邏輯
   5. Copy gate: far_active AND not_dt AND NOT epc_active 才允許比較
-     not_dt: DTD 模式用 dtd_conf < 0.3, 否則用 far/error ratio > 0.3
   6. Copy hysteresis: 連續 5 frames shadow_err < main_err × 0.7 才觸發
      if shadow_err_smooth < main_err_smooth × 0.7:
          main.W ← shadow.W        // 只複製權重（不切換 output）
-         if FDKF: main.P ← shadow.P  // FDKF 需複製 P
+         if FDKF: main.P ← shadow.P
          main_err_smooth = shadow_err_smooth
   7. Bidirectional: 若 main_err < shadow_err × 0.7，反向 copy main → shadow
 ```
 
+**為什麼 shadow 更激進是安全的**：
+- Shadow 不產生 output → DT 污染不會被聽到
+- Copy gate 只在 FS（not_dt）期間允許 → DT 期間 shadow 的錯誤權重不會傳給 main
+- 代價是 DT → FS 切換時 shadow 可能短暫不準，但幾幀後就會重新收斂
+
 **設計要點**：
-- **不切換 output**：copy 只複製 weights（+ FDKF P），不用 `output = shadow_out`，避免 output 不連續
-- **50-frame warm-up**：收斂前兩個 filter 的 error 都不穩定，比較無意義，強行 copy 會退化
-- **Shadow full mu（1.0）**：shadow 不做 DT 保護，讓它自由追蹤（AEC3 style）
-- **threshold（0.7）**：需 shadow 比 main 好 30%+ 才 copy，防止 DT 污染權重被 copy
-- **Copy gate**：遠端靜音或 DT 或 EPC 期間不允許 copy（far_active + not_dt + not epc_active gate）
-- **Bidirectional copy**：main 比 shadow 好時也會反向 copy（main → shadow），保持兩者同步
-- **FDKF P 同步**：copy weights 時同時複製 P（error covariance），否則 K 計算不匹配
+- **不切換 output**：copy 只複製 weights（+ FDKF P），避免 output 不連續
+- **50-frame warm-up**：收斂前 error 不穩定，比較無意義
+- **threshold（0.7）**：shadow 需比 main 好 30%+ 才 copy，防止 DT 污染
+- **Bidirectional copy**：main 比 shadow 好時也會反向 copy，保持同步
+- **FDKF P 同步**：copy weights 時同時複製 P（error covariance）
 
 **與 DTD 的互補**：
 - DTD 模式：DTD 預防式降 mu + Shadow 事後修正，雙重保護
-- Shadow-only 模式（預設）：main filter 用 simple_mu_ratio 輕量保護，shadow copy 修正
+- Shadow-only 模式（預設）：main 用 simple_mu_ratio 輕量保護，shadow copy 修正
 - 兩者可同時啟用（`--enable-dtd`），互不衝突
 
 #### FDKF 模式下的 Shadow Q Ratio
