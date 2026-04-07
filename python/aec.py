@@ -2399,7 +2399,10 @@ class AEC:
                         track_err_pwr = raw_err_pwr
 
                     # Baseline tracking (only during converged + no surge)
-                    if track_err_pwr < self._wn_err_baseline * 1.5:
+                    if self._wn_err_baseline < 1e-6:
+                        # First time converged: snap baseline to current value
+                        self._wn_err_baseline = track_err_pwr
+                    elif track_err_pwr < self._wn_err_baseline * 1.5:
                         self._wn_err_baseline = (0.95 * self._wn_err_baseline
                                                   + 0.05 * track_err_pwr)
                     # Spike: freeze baseline
