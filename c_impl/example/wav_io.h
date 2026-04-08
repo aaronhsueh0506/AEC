@@ -211,7 +211,10 @@ static inline WavWriter* wav_open_write(const char* path, int sample_rate, int c
     w->fp = fp;
     w->info.sample_rate = sample_rate;
     w->info.channels = channels;
-    w->info.bits_per_sample = 16;
+    /* Default PCM16. Set AEC_OUT_FLOAT=1 to write IEEE float32 (for testing) */
+    const char* float_env = getenv("AEC_OUT_FLOAT");
+    w->info.is_float = (float_env && float_env[0] == '1') ? 1 : 0;
+    w->info.bits_per_sample = w->info.is_float ? 32 : 16;
 
     // Write placeholder header (will update at close)
     uint8_t header[44] = {0};
@@ -230,6 +233,13 @@ static inline WavWriter* wav_open_write(const char* path, int sample_rate, int c
  */
 static inline void wav_write_float(WavWriter* w, const float* buf, int n) {
     if (!w || !buf) return;
+
+    if (w->info.is_float) {
+        /* IEEE float32 (no quantization, for C-vs-Python correlation tests) */
+        fwrite(buf, sizeof(float), n, w->fp);
+        w->samples_written += n;
+        return;
+    }
 
     for (int i = 0; i < n; i++) {
         float sample = buf[i];
@@ -267,22 +277,23 @@ static inline void wav_close_write(WavWriter* w) {
     fwrite("fmt ", 1, 4, w->fp);
     uint32_t subchunk1_size = 16;
     fwrite(&subchunk1_size, 4, 1, w->fp);
-    uint16_t audio_format = 1;  // PCM
+    int sample_bytes = w->info.is_float ? 4 : 2;
+    uint16_t audio_format = w->info.is_float ? 3 : 1;  // 3 = IEEE float, 1 = PCM
     fwrite(&audio_format, 2, 1, w->fp);
     uint16_t num_channels = w->info.channels;
     fwrite(&num_channels, 2, 1, w->fp);
     uint32_t sample_rate = w->info.sample_rate;
     fwrite(&sample_rate, 4, 1, w->fp);
-    uint32_t byte_rate = sample_rate * num_channels * 2;
+    uint32_t byte_rate = sample_rate * num_channels * sample_bytes;
     fwrite(&byte_rate, 4, 1, w->fp);
-    uint16_t block_align = num_channels * 2;
+    uint16_t block_align = num_channels * sample_bytes;
     fwrite(&block_align, 2, 1, w->fp);
-    uint16_t bits_per_sample = 16;
+    uint16_t bits_per_sample = sample_bytes * 8;
     fwrite(&bits_per_sample, 2, 1, w->fp);
 
     // data chunk header
     fwrite("data", 1, 4, w->fp);
-    uint32_t data_sz = data_size;
+    uint32_t data_sz = w->samples_written * num_channels * sample_bytes;
     fwrite(&data_sz, 4, 1, w->fp);
 
     fclose(w->fp);
