@@ -536,6 +536,9 @@ static void fill_context(Aec* aec, const float* mic, const float* ref,
     float err_pwr = aec->raw_error_power + 1e-10f;
     float near_pwr = aec->near_power + 1e-10f;
     ctx->divergence = clampf(err_pwr / near_pwr - 0.5f, 0.0f, 1.0f);
+
+    /* Stationary far-end DT detection result (computed in aec_process_ex) */
+    ctx->is_stationary_dt = aec->is_stationary_dt;
 }
 
 /* --- Delay estimation (GCC-PHAT) --- */
@@ -857,6 +860,53 @@ int aec_process_ex(Aec* aec,
     /* Copy raw output for ERLE + RES input */
     memcpy(output, aec->raw_output, hop * sizeof(float));
 
+    /* === Stationary DT detection (jump_ratio + 800ms hangover) ===
+     * Always run regardless of internal/external RES, so AecResContext
+     * sees a valid is_stationary_dt for pipeline use.
+     */
+    if (aec->is_stationary_far && aec->filter_converged) {
+        const Complex* err_spec = pbfdkf_get_error_spec(aec->filter);
+        float track_err_pwr = 1e-10f;
+        if (err_spec) {
+            int fft_size = pbfdkf_get_fft_size(aec->filter);
+            float freq_per_bin = (float)cfg->sample_rate / (float)fft_size;
+            int vb_start = (int)(100.0f / freq_per_bin);
+            if (vb_start < 1) vb_start = 1;
+            int vb_limit = (int)(3000.0f / freq_per_bin);
+            if (vb_limit > aec->n_freqs) vb_limit = aec->n_freqs;
+            for (int k = vb_start; k < vb_limit; k++) {
+                track_err_pwr += err_spec[k].r * err_spec[k].r
+                               + err_spec[k].i * err_spec[k].i;
+            }
+        }
+        if (aec->wn_err_baseline < 1e-6f) {
+            aec->wn_err_baseline = track_err_pwr;
+        }
+        float jump_ratio = track_err_pwr / (aec->wn_err_baseline + 1e-10f);
+
+        if (jump_ratio > 1.5f) {
+            aec->stat_dt_hangover = 80;  /* 800ms hold */
+        }
+
+        if (aec->stat_dt_hangover > 0) {
+            aec->is_stationary_dt = 1;
+            aec->stat_dt_hangover--;
+            aec->wn_err_baseline = 0.999f * aec->wn_err_baseline
+                                 + 0.001f * track_err_pwr;
+        } else {
+            aec->is_stationary_dt = 0;
+            aec->wn_err_baseline = 0.95f * aec->wn_err_baseline
+                                 + 0.05f * track_err_pwr;
+        }
+    } else {
+        aec->is_stationary_dt = 0;
+    }
+
+    /* EPC physical gate */
+    if (aec->epc_active) {
+        aec->is_stationary_dt = 0;
+    }
+
     /* === RES post-filter === */
     if (aec->res) {
         /* far_power from ref */
@@ -888,54 +938,8 @@ int aec_process_ex(Aec* aec,
         if (aec->inst_erle_smooth > 2.0f)
             raw_dt /= aec->inst_erle_smooth;
 
-        /* === Stationary DT detection (jump_ratio + 800ms hangover) ===
-         * Matches Python aec.py — voice-band (100-3000Hz) error spike vs baseline.
-         */
-        if (aec->is_stationary_far && aec->filter_converged) {
-            const Complex* err_spec = pbfdkf_get_error_spec(aec->filter);
-            float track_err_pwr = 1e-10f;
-            if (err_spec) {
-                int fft_size = pbfdkf_get_fft_size(aec->filter);
-                float freq_per_bin = (float)cfg->sample_rate / (float)fft_size;
-                int vb_start = (int)(100.0f / freq_per_bin);
-                if (vb_start < 1) vb_start = 1;
-                int vb_limit = (int)(3000.0f / freq_per_bin);
-                if (vb_limit > aec->n_freqs) vb_limit = aec->n_freqs;
-                for (int k = vb_start; k < vb_limit; k++) {
-                    track_err_pwr += err_spec[k].r * err_spec[k].r
-                                   + err_spec[k].i * err_spec[k].i;
-                }
-            }
-            if (aec->wn_err_baseline < 1e-6f) {
-                aec->wn_err_baseline = track_err_pwr;
-            }
-            float jump_ratio = track_err_pwr / (aec->wn_err_baseline + 1e-10f);
-
-            if (jump_ratio > 1.5f) {
-                aec->stat_dt_hangover = 80;  /* 800ms hold */
-            }
-
-            if (aec->stat_dt_hangover > 0) {
-                aec->is_stationary_dt = 1;
-                aec->stat_dt_hangover--;
-                /* Freeze baseline (TC ≈ 1000 frames) during speech */
-                aec->wn_err_baseline = 0.999f * aec->wn_err_baseline
-                                     + 0.001f * track_err_pwr;
-            } else {
-                aec->is_stationary_dt = 0;
-                /* Normal EMA tracking */
-                aec->wn_err_baseline = 0.95f * aec->wn_err_baseline
-                                     + 0.05f * track_err_pwr;
-            }
-        } else {
-            aec->is_stationary_dt = 0;
-        }
-
-        /* EPC physical gate */
-        if (aec->epc_active) {
-            raw_dt = 0.0f;
-            aec->is_stationary_dt = 0;
-        }
+        /* EPC physical gate also zeroes raw_dt for the dt_indicator below */
+        if (aec->epc_active) raw_dt = 0.0f;
 
         float dt_indicator = clampf(raw_dt, 0.0f, 0.8f);
 

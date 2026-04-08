@@ -110,6 +110,7 @@ typedef struct {
     float    divergence;        /* [0, 1] divergence indicator */
     float    over_sub;          /* dynamic over_sub value */
     int      n_freqs;           /* number of frequency bins */
+    int      is_stationary_dt;  /* 1 = stationary far-end DT detected */
 } AecResContext;
 
 /* --- Factory functions --- */
