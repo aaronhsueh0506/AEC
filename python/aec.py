@@ -91,7 +91,7 @@ class AecConfig:
     dtd_coh_release: float = 0.1         # Coherence confidence release rate (faster recovery)
 
     # RES parameters
-    enable_res: bool = False
+    enable_res: bool = True
     res_g_min_db: float = -25.0
     res_over_sub: float = 3.0
     res_alpha: float = 0.8
@@ -163,7 +163,7 @@ class AecConfig:
     res_enr_scale: float = 1.0              # ENR threshold scale (1.0=AEC3 defaults, <1=more aggressive)
 
     # Mode
-    mode: AecMode = AecMode.NLMS
+    mode: AecMode = AecMode.PBFDKF
 
     # External RES context
     return_res_context: bool = False   # True → process() returns (output, AecResContext)
