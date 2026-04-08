@@ -529,6 +529,81 @@ ratio = E[e²] / E[ŷ²] > threshold → Divergence
 
 ---
 
+## 9.5. Stationary Far-end DT Detection (v13+)
+
+### 動機
+
+當 far-end 是穩態訊號（白噪音、純音、風扇、冷氣）時，原本的 DTD 全部失效：
+
+| 偵測器 | 失效原因 |
+|--------|---------|
+| `dt_indicator = 1 - far_pwr/(mic_pwr+far_pwr)` | far_pwr >> mic_pwr → dt ≈ 0 |
+| Coherence DTD (1-coh²) | 穩態訊號所有 bin coherence 都高 → mask ≈ 0 |
+| Divergence DTD | filter 收斂良好，沒有 divergence |
+| Shadow filter | shadow 也學進語音 |
+
+結果：RES 把近端語音當 echo 全部壓掉。
+
+### 兩階段偵測
+
+#### 階段 1: Stationarity gate (`_is_stationary_far`)
+
+CV2 (Coefficient of Variation squared) 偵測 far-end 能量穩態性：
+
+```python
+α = 0.99  # TC ≈ 1s
+mean = α * mean + (1-α) * far_pwr
+var  = α * var  + (1-α) * (far_pwr - old_mean)²
+CV² = var / mean²
+_is_stationary_far = (CV² < 0.02)
+```
+
+**為什麼 α=0.99**：
+- 16kHz / hop=160 → 每 frame 採樣 10ms
+- 單 hop 內的 WN 能量 std/mean ≈ 11%（噪聲統計量）
+- α=0.95 (TC=200ms) 對這個短期變動反應太大 → flicker
+- α=0.99 (TC=1s) 才能平均掉 hop-level variance
+
+CV² < 0.02 = 變異係數 < 14%（一般語音 CV² > 0.5）。
+
+#### 階段 2: Speech spike detection (`is_stationary_dt`)
+
+```python
+if _is_stationary_far and _filter_converged:
+    track_err_pwr = sum(|error_spec[100Hz:3000Hz]|²)  # voice band
+    jump_ratio = track_err_pwr / baseline
+    if jump_ratio > 1.5:
+        _stat_dt_hangover = 80  # 800ms hold
+    if hangover > 0:
+        is_stationary_dt = True
+        baseline α = 0.999  # freeze (prevent speech contamination)
+    else:
+        is_stationary_dt = False
+        baseline α = 0.95   # normal track
+```
+
+**hangover 800ms 的理由**：
+- 30 frames (300ms) 太短，音節間停頓就過期
+- 80 frames (800ms) 涵蓋音節間隔
+- 偵測率 39% → 95%
+
+### 各偵測器在 stationary 場景的覆蓋
+
+| 場景 | dt_indicator | Coherence | Stationary DT |
+|------|-------------|-----------|---------------|
+| Speech far-end + speech near | ✅ | ✅ | — |
+| WN/tone far-end (no near) | ❌ (dt≈0, 但不需要) | ❌ | ❌ (no jump) |
+| **WN/tone far-end + speech near** | ❌ | ❌ | ✅ **主要偵測** |
+| Movement / EPC | ✅ | ✅ | bypass (epc_active) |
+
+### Trade-off
+
+- **延遲**: CV² EMA 需 ~1s 收斂 → 穩態場景前 1s 走一般 RES 路徑
+- **EPC 遮罩**: 穩態 far-end 下 EPC 偵測被守門禁用（避免語音突波被當 EPC）
+- **Hangover 800ms**: 真正的 EPC 在穩態場景被延遲 800ms 偵測（罕見場景）
+
+---
+
 ## 10. 業界參考
 
 ### WebRTC AEC3

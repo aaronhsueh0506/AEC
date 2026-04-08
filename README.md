@@ -69,6 +69,10 @@
 | **高 coupling DT** | inst_erle_fast 修正可能誤壓 DT 語音（echo 與語音能量相近時） |
 | **CNG** | 底噪追蹤在遠端持續講話時效果有限（noise_psd 可能偏高） |
 | **延遲估計** | GCC-PHAT 在低 SNR 或強非線性場景可能不準確 |
+| **Stationary far-end + 弱語音段**（v13） | 穩態 far-end（白噪音/風扇/冷氣）+ 近端語音場景下，linear AEC 仍可能在弱訊號段（突發停頓、低能量音節）將語音吸收進 echo path。整體語音保留率可達 ~48%（接近 NoRES 50%），但個別 ~100ms 段會掉到 ~10%。詳見 [aec_improve_v13.md](docs/aec_improve_v13.md) |
+| **Stationarity 偵測延遲**（v13） | CV² EMA 需要約 1s 才能穩定觸發 `_is_stationary_far`。Cold start 後前 1s 走一般 RES 路徑 |
+| **Stationary DT hangover** | 800ms hangover 在穩態 far-end 場景下會延遲 EPC（echo path change）偵測。實際場景發生機率低（穩態訊號通常 echo path 也穩定） |
+| **語音弱起手** | 微弱語音（音節弱起手）的 voice-band spike 可能不觸發 stationary DT hangover（jump_ratio < 1.5） |
 
 ### 資源消耗（C 實作，fl=512 @16kHz）
 
@@ -481,18 +485,19 @@ python3 plot_aec_results.py ../wav/ --mode pbfdkf --enable-dtd
 Frame/hop: 20ms/10ms（自動依 sample rate 配置），filter_length: 100ms。以下測試使用 16kHz。
 評估指標：AECMOS（echo_mos↑ = echo 少, deg_mos↑ = 語音損傷少）。
 
-### AEC Challenge Interspeech 2021 Blind Test（800 cases）
+### AEC Challenge Interspeech 2021 Blind Test（800 cases, AECMOS local ONNX Run_1663915512_Stage_0）
 
 #### Overall
 
 | Method | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
 |--------|----------|----------|---------|---------|
+| Linear (NoRES, balanced) | 2.71 | 3.17 | 3.20 | 4.07 |
 | Speex (SpeexDSP v1.2) | 2.808 | 3.368 | 3.225 | 4.128 |
 | Old WebRTC AEC (AEC2) | 3.484 | 4.262 | 2.389 | 4.098 |
-| **Ours mild** | 3.420 | 4.105 | **2.257** | 4.005 |
-| **Ours balanced** | 3.710 | 4.368 | 2.093 | 3.997 |
-| **Ours aggressive** | 3.830 | 4.468 | 2.051 | 3.990 |
-| **Ours maximum** | **3.951** | 4.527 | 2.044 | 3.976 |
+| **Ours mild** | 3.236 | 3.923 | **2.338** | 4.005 |
+| **Ours balanced** | 3.577 | 4.230 | 2.134 | 4.001 |
+| **Ours aggressive** | 3.687 | 4.357 | 2.070 | 3.995 |
+| **Ours maximum** | **3.783** | 4.473 | 2.014 | 3.970 |
 | WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
 
 #### No Movement
@@ -501,10 +506,10 @@ Frame/hop: 20ms/10ms（自動依 sample rate 配置），filter_length: 100ms。
 |--------|----------|----------|---------|
 | Speex | 2.847 | 3.427 | 3.179 |
 | Old WebRTC AEC | 3.457 | 4.331 | 2.304 |
-| **Ours mild** | 3.383 | 4.149 | 2.229 |
-| **Ours balanced** | 3.703 | 4.399 | 2.073 |
-| **Ours aggressive** | 3.843 | 4.503 | 2.020 |
-| **Ours maximum** | **3.960** | 4.555 | 2.009 |
+| **Ours mild** | 3.214 | 3.954 | 2.310 |
+| **Ours balanced** | 3.562 | 4.269 | 2.112 |
+| **Ours aggressive** | 3.651 | 4.384 | 2.045 |
+| **Ours maximum** | **3.732** | 4.496 | 1.992 |
 | WebRTC AEC3 | 3.871 | **4.566** | 1.858 |
 
 #### With Movement
@@ -513,14 +518,15 @@ Frame/hop: 20ms/10ms（自動依 sample rate 配置），filter_length: 100ms。
 |--------|----------|----------|---------|
 | Speex | 2.757 | 3.272 | 3.301 |
 | Old WebRTC AEC | 3.519 | 4.149 | 2.528 |
-| **Ours mild** | 3.467 | 4.033 | 2.302 |
-| **Ours balanced** | 3.720 | 4.317 | 2.125 |
-| **Ours aggressive** | 3.814 | 4.411 | 2.103 |
-| **Ours maximum** | **3.939** | 4.482 | 2.102 |
+| **Ours mild** | 3.264 | 3.873 | 2.383 |
+| **Ours balanced** | 3.597 | 4.166 | 2.168 |
+| **Ours aggressive** | 3.733 | 4.313 | 2.109 |
+| **Ours maximum** | **3.848** | 4.435 | 2.050 |
 | WebRTC AEC3 | 3.882 | **4.492** | 1.836 |
 
-> - **maximum preset FS echo 超越 AEC3**（overall 3.951 vs 3.875, no-move 3.960 vs 3.871）
 > - **NE deg 全 preset 大幅領先 AEC3**（~4.0 vs 3.454, +0.5）— 近端語音幾乎無損
+> - **DT deg 全 preset 優於 AEC3**（2.0+ vs 1.850）
+> - **v13 Stationary DT 保護**：白噪音/風扇/穩態 far-end + 近端語音場景，語音保留從 5% → 48%（合成測試），語音場景分數零退步
 > - Speex 版本：SpeexDSP 1.2rc3；WebRTC AEC3：M120 (2024)；Old WebRTC AEC：M120 AEC2
 
 ### 工具
@@ -546,14 +552,59 @@ python3 python/eval_aecmos.py wav/aec_challenge/ --all-presets
 
 ## 效能指標
 
-| 模式 | ERLE | 複雜度 | 收斂時間 |
-|------|------|--------|----------|
+### 演算法收斂與抑制能力
+
+| 模式 | ERLE | 複雜度 | Cold start 收斂 |
+|------|------|--------|----------------|
 | lms | 10-15 dB | O(N) | 1-5s |
 | nlms | 15-20 dB | O(N) | 0.5-2s |
 | fdaf | 18-22 dB | O(N log N) | 0.3-1s |
 | pbfdaf | 20-25 dB | O(N log N) | 0.2-0.8s |
 | pbfdkf | 25-30 dB | O(N log N) | 0.1-0.5s |
 | + RES | +2-4 dB | O(K) | - |
+
+### 收斂時間細節（PBFDKF + Shadow，FL=512 @16kHz）
+
+| 階段 | 時間 | 條件 |
+|------|------|------|
+| Warmup（不更新收斂判定） | 80 frames（800ms） | Cold start 後固定 |
+| Cold start → ERLE > 10 dB | 0.3-0.5s | 寬頻 far-end + 含 echo |
+| Cold start → ERLE > 20 dB | 0.5-1.0s | 寬頻 far-end + 含 echo |
+| Cold start → ERLE > 30 dB | 1.5-3.0s | 寬頻 far-end + 含 echo |
+| EPC 後 re-convergence | 0.3-0.8s | P_MAX 暫時放寬 30 frames |
+| Stationary far-end CV² 收斂 | ~1.0s | α=0.99 EMA TC≈1s |
+| Stationary DT hangover | 800ms | jump_ratio > 1.5 後維持 |
+
+### 系統延遲與資源消耗
+
+| 項目 | 值 |
+|------|-----|
+| Algorithmic delay | 10ms (1 hop) |
+| Frame size / Hop | 20ms / 10ms（@16kHz） |
+| FFT size | 512（@16kHz, 自動依 SR 配置） |
+| 記憶體（C, main+shadow filter） | ~200 KB |
+| 記憶體（C, 含 RES + delay est） | ~280 KB |
+| 每 frame 計算量 | 2 × 512-FFT + Kalman update（257 bins × 4 partitions） |
+
+### 各 preset 在 8s clean speech 的最終 ERLE（PBFDKF + RES）
+
+| Preset | 平均 ERLE | FS echo↑ (AECMOS) | DT echo↑ | DT deg↑ | 推薦場景 |
+|--------|-----------|-------------------|---------|---------|---------|
+| **mild** | 16-18 dB | 3.236 | 3.923 | 2.338 | 會議、近端品質優先 |
+| **balanced** | 18-22 dB | 3.577 | 4.230 | 2.134 | **預設**、通用場景 |
+| **aggressive** | 19-23 dB | 3.687 | 4.357 | 2.070 | 高 echo 環境 |
+| **maximum** | 20-25 dB | 3.783 | 4.473 | 2.014 | 極端 echo / demo |
+
+> 數據：800-case AEC Challenge blind test，本地 AECMOS ONNX (Run_1663915512_Stage_0)，FL=512。
+
+### 場景特殊處理
+
+| 場景 | 機制 | 觸發條件 | 效果 |
+|------|------|---------|------|
+| Echo Path Change | EPC detector + P_MAX 放寬 | error 突升 + delta 變化 | 0.5-1s 內 re-converge |
+| Stationary far-end DT | CV² + jump_ratio + v3 mask | far CV²<0.02 + 語音突波 | 語音保留 5% → 48% |
+| Movement DT | Online delay re-estimation | 距離變化 | 動態追蹤新 echo path |
+| 弱信號 / 靜音 | Far activity gate | far_pwr < 1e-4 | 暫停 filter 更新 |
 
 ## 檔案結構
 

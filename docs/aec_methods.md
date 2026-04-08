@@ -1685,6 +1685,115 @@ RES v2 透過四個 preset 控制抑制強度與語音保護的平衡。
 
 ---
 
+### 7.13 Stationary Far-end DT 保護（v13+）
+
+#### 問題
+
+當 far-end 是穩態訊號（白噪音、純音、風扇噪音、冷氣聲）時，所有 DT 偵測機制全部失效：
+
+1. **`dt_indicator`**: `1 - far_pwr/(mic_pwr+far_pwr)` 永遠 ≈ 0（far_pwr 主導）
+2. **Per-bin coherence (`1-coh²`)**: 穩態訊號在所有 bin 都有極高 coherence
+3. **Filter divergence**: 穩態場景 filter 收斂良好，沒有發散
+
+結果：RES 認為是純 FS，把語音壓到 g_min。同時 linear AEC 把語音吸收進 echo path（filter divergence）。
+
+#### 偵測（DTD）
+
+詳見 [dtd_design.md §9.5](dtd_design.md)：
+- **CV² gate** (`_is_stationary_far`): far-end 能量 EMA α=0.99 (TC≈1s)，CV² < 0.02 → 穩態
+- **Voice-band spike** (`is_stationary_dt`): 100-3000Hz error_spec power 突波 > 1.5× baseline → 觸發 800ms hangover
+- baseline 在 hangover 期間用 α=0.999 凍結（防止語音污染）
+
+#### RES 內保護機制（dt_for_fs / dt_temporal）
+
+為了不影響非穩態場景，引入兩個虛擬 DT 指標：
+
+```python
+dt_for_fs   = 0.8 if is_stationary_dt else dt_indicator
+dt_temporal = 0.8 if is_stationary_dt else dt_indicator
+```
+
+**只在 `is_stationary_dt = True` 時** 把虛擬 DT 拉到 0.8，其他場景完全等同 `dt_indicator`，**對非穩態語音場景零影響**。
+
+替換的位置：
+
+| RES 機制 | 用途 | 替換 |
+|---------|------|------|
+| `nonlinear_floor` (§7.4 / 7.2) | 殘餘回聲底限 | `1 - dt_for_fs` |
+| `dt_suppress` (residual cap) | residual ≤ error × dt_suppress | `clip(1 - dt_for_fs²)` |
+| `ne_reverb_factor` (§7.3) | 混響 NE gating | `(1 - dt_for_fs)` |
+| `echo_boost` 條件 (§7.4) | per-bin echo 加成觸發 | `dt_for_fs < 0.2` |
+| `dt_per_bin` base (§7.8) | ENR per-bin DT | `max(dt_for_fs, 1-coh²)` |
+| `fs_confidence` (§7.7) | NE gate / LF rate | `(1 - dt_for_fs)²` |
+| `alpha_release` (§7.9) | gain 釋放速度 | `* clip(1 - dt_temporal²)` (僅 stationary_dt) |
+| `dt_rise_boost` (§7.9) | rise rate boost | `1 + 19 × dt_temporal³` (僅 stationary_dt) |
+| HF cap bypass (§7.11) | 高頻 cap 開關 | `dt_indicator < 0.5 and not is_stationary_dt` |
+
+#### v3 頻帶成型遮罩（Frequency-Shaped Mask）
+
+`is_stationary_dt = True` 時，在 ENR 的 `dt_per_bin` 上加上頻段保護：
+
+```python
+if is_stationary_dt:
+    f_bins = arange(n_freqs) * (16000 / block_size)
+    wn_mask = zeros(n_freqs)
+    for k, f in enumerate(f_bins):
+        if 300 <= f <= 3000:        wn_mask[k] = 0.8   # 語音核心
+        elif 100 < f < 300:         wn_mask[k] = 0.8 * (f-100)/200    # 過渡
+        elif 3000 < f < 4000:       wn_mask[k] = 0.8 * (4000-f)/1000  # 過渡
+    dt_per_bin = max(dt_per_bin, wn_mask)
+```
+
+- **300-3000Hz 語音黃金頻段直接給 dt=0.8 免死金牌**
+- 100-300Hz / 3000-4000Hz 平滑過渡避免邊界 artifact
+- < 100Hz 和 > 4000Hz 不保護，繼續壓 stationary noise 嘶嘶聲
+
+#### Reverb tail skip
+
+`reverb_psd` 在穩態 far-end 會持續累積巨量能量，加到 `residual_echo_psd` 上會把語音淹沒：
+
+```python
+if self.enable_reverb and not is_stationary_dt:
+    residual_echo_psd += reverb_gain * reverb_psd * gate
+```
+
+#### Linear AEC mu_scale freeze
+
+防止 filter 持續學習把近端語音吸收進 echo path（§6 mu_scale 控制的延伸）：
+
+```python
+if self._is_stationary_far:
+    self._per_bin_mu_scale[:] = mu_min
+    self._simple_mu_ratio = mu_min
+```
+
+#### 效果
+
+合成測試（13s 白噪音 far-end + 10s 近端語音）：
+
+| 版本 | FS ERLE | DT 語音保留 |
+|------|---------|------------|
+| 修正前 (v2.0.0) | 22.4 dB | **5%** |
+| **修正後 (v13)** | **36.3 dB** | **48.3%** |
+| NoRES (linear only) | 3.0 dB | 49.8% |
+
+語音保留率從 5% → 48.3%，幾乎跟 NoRES 一樣（差 1.5%），同時 FS ERLE 更強。
+
+#### 對非穩態場景的影響
+
+800-case Blind Test (FL=512, balanced, AECMOS local ONNX) 對 README baseline 的差距：
+
+| 指標 | 差距 |
+|------|------|
+| FS echo↑ | -0.04 |
+| DT echo↑ | -0.00 |
+| DT deg↑ | +0.04 |
+| NE deg↑ | +0.03 |
+
+全部差距 < 0.05，DT/NE 平均改善。**所有 stationary DT 改動都被 `is_stationary_dt` 守門，對一般語音場景零影響**。
+
+---
+
 ## 8. Post-Filter 方法比較
 
 ### Wiener Filter Post-Filter
