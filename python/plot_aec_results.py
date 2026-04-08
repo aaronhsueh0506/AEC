@@ -130,9 +130,9 @@ def draw_dtd_spans(ax, confidence_history, hop_size, sr):
 
 
 def get_estimated_ir(aec):
-    """Extract estimated impulse response from AEC filter."""
+    """Extract estimated impulse response from AEC filter, shifted by estimated delay."""
     if isinstance(aec.filter, NlmsFilter):
-        return aec.filter.weights.copy()
+        ir = aec.filter.weights.copy()
     else:
         W = aec.filter.W
         fft_size = aec.filter.fft_size
@@ -141,7 +141,18 @@ def get_estimated_ir(aec):
         for p in range(W.shape[0]):
             w_time = np.fft.irfft(W[p], fft_size)
             ir[p * hop:(p + 1) * hop] = w_time[:hop]
-        return ir
+
+    # Compensate for ref alignment delay so estimated RIR aligns with target RIR
+    delay = 0
+    if hasattr(aec, 'delay_est') and aec.delay_est is not None:
+        d = getattr(aec.delay_est, 'estimated_delay', -1)
+        if d > 0:
+            delay = d
+    if delay > 0:
+        shifted = np.zeros(len(ir) + delay, dtype=np.float32)
+        shifted[delay:delay + len(ir)] = ir
+        return shifted
+    return ir
 
 
 def main():

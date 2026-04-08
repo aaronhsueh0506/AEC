@@ -153,8 +153,8 @@ class AecConfig:
     res_ne_protect_db: float = -10.0         # Per-bin near-end protection ceiling (dB)
 
     # RES v2: direct echo estimation + Wiener gain + reverb tail
-    res_echo_method: str = "coherence"       # "coherence" (legacy) or "direct" (use filter echo est)
-    res_gain_type: str = "spectral_sub"      # "spectral_sub" (legacy) / "wiener" / "enr"
+    res_echo_method: str = "direct"           # "coherence" (legacy) or "direct" (use filter echo est)
+    res_gain_type: str = "enr"               # "spectral_sub" (legacy) / "wiener" / "enr"
     res_enable_reverb: bool = False          # Reverb tail model
     res_reverb_decay: float = 0.5            # Exponential decay rate
     res_reverb_gain: float = 1.0             # Reverb contribution scale
@@ -1050,7 +1050,8 @@ class ResFilter:
                 erle_factor: float = 0.0,
                 dt_indicator: float = 0.0,
                 near_spec: np.ndarray = None,
-                divergence: float = 0.0) -> np.ndarray:
+                divergence: float = 0.0,
+                is_stationary_dt: bool = False) -> np.ndarray:
         """Process hop-size error signal, return enhanced hop via OLA.
 
         far_spec: far-end frequency spectrum (complex), used for coherence-
@@ -1139,6 +1140,9 @@ class ResFilter:
         quiet_mask = ((self.echo_psd < signal_floor)
                       & (self.error_psd < signal_floor))
 
+        # --- Stationary DT virtual DT indicator ---
+        dt_for_fs = 0.8 if is_stationary_dt else dt_indicator
+
         # --- Residual echo PSD estimation ---
         eps = 1e-10
         residual_echo_psd = None
@@ -1185,7 +1189,7 @@ class ResFilter:
 
             # Nonlinear echo floor
             if far_power > 1e-4:
-                dt_weight = 1.0 - dt_indicator
+                dt_weight = 1.0 - dt_for_fs
                 nonlinear_floor = (self.error_psd * coh2
                                    * self.far_activity * dt_weight)
                 direct_est = np.maximum(direct_est, nonlinear_floor)
@@ -1200,7 +1204,7 @@ class ResFilter:
             # DT physical limit: dt_indicator=0.8 means 80% confidence it's speech,
             # so residual echo can be at most 20% of error energy.
             # Floor at 0.1 prevents residual from vanishing completely at dt≈1.0.
-            dt_suppress = np.clip(1.0 - dt_indicator, 0.1, 1.0)
+            dt_suppress = np.clip(1.0 - dt_for_fs**2, 0.1, 1.0)
             residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * dt_suppress)
 
             # Add reverb tail if enabled
@@ -1211,15 +1215,17 @@ class ResFilter:
                 self.reverb_psd = (self.reverb_decay * self.reverb_psd
                                    + (1 - self.reverb_decay) * far_psd)
                 # Gate by far_activity; continuous NE/FS blend (not binary nearend_state)
-                ne_reverb_factor = 0.3 + 0.7 * self.far_activity * (1.0 - dt_indicator)
-                reverb_gate = self.far_activity * ne_reverb_factor
-                residual_echo_psd = (residual_echo_psd
-                                     + self.reverb_gain * self.reverb_psd * reverb_gate)
+                # Stationary DT: far_psd is huge WN energy, reverb accumulates and drowns speech
+                if not is_stationary_dt:
+                    ne_reverb_factor = 0.3 + 0.7 * self.far_activity * (1.0 - dt_for_fs)
+                    reverb_gate = self.far_activity * ne_reverb_factor
+                    residual_echo_psd = (residual_echo_psd
+                                         + self.reverb_gain * self.reverb_psd * reverb_gate)
 
         # Per-bin echo boost: high-coh2 bins are echo-dominant → boost residual estimate
         # Only when filter converged (erle_factor > 0.3) to avoid over-suppression early
         if far_power > 1e-4 and erle_factor > 0.3 and residual_echo_psd is not None:
-            echo_boost = 1.0 + 0.5 * coh2 if dt_indicator < 0.2 else np.ones_like(coh2)
+            echo_boost = 1.0 + 0.5 * coh2 if dt_for_fs < 0.2 else np.ones_like(coh2)
             residual_echo_psd = residual_echo_psd * echo_boost
 
         # Compute coherence-based EER (used for legacy mode AND per-bin NE gate)
@@ -1229,6 +1235,7 @@ class ResFilter:
             eer = (1.0 - erle_factor) * coh2 + erle_factor * eer_converged
         else:
             eer = eer_converged
+
 
         # --- Spectral-shape-preserving floor ---
         if self.enable_spectral_floor and far_power > 1e-4:
@@ -1245,7 +1252,7 @@ class ResFilter:
 
         # fs_confidence: continuous FS/DT/NE indicator (single definition)
         # Used by ne_g_floor, ENR two-tuning, attack speed, LF rate limit
-        fs_confidence = self.far_activity * (1.0 - dt_indicator) ** 2.0
+        fs_confidence = self.far_activity * (1.0 - dt_for_fs) ** 2.0
 
         # --- Per-bin near-end gate ---
 
@@ -1264,26 +1271,44 @@ class ResFilter:
         # --- Gain computation ---
 
         if self.gain_type == "enr" and residual_echo_psd is not None:
-            # dt_indicator decoupling: strips nonlinear distortion misidentified as nearend
-            # FS (dt_indicator ≈ 0): nearend_est → noise_floor → ENR >> 1 → full suppress
-            # DT (dt_indicator high): real speech preserved in nearend_est → ENR low → protect
             raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
             noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
-            nearend_est = np.maximum(raw_nearend_est * dt_indicator, noise_floor_psd)
 
-            # Anti-zero guard: ensure DT nearend_est doesn't collapse when residual > error
-            # Even if residual is overestimated, dt_indicator still preserves speech floor
-            min_ne_from_dt = self.error_psd * dt_indicator
+            # Per-bin DT indicator: base from coh2 (works for speech far-end)
+            dt_per_bin = np.maximum(
+                np.full(self.n_freqs, dt_for_fs, dtype=np.float32),
+                1.0 - coh2
+            )
+
+            # Stationary far-end DT: coh2 fails (all bins high), use Frequency-Shaped Masking (v3)
+            # jump_ratio already confirmed speech presence; protect speech band directly
+            if is_stationary_dt:
+                freq_res = 16000.0 / self.block_size
+                f_bins = np.arange(self.n_freqs) * freq_res
+                stat_dt_mask = np.zeros(self.n_freqs, dtype=np.float32)
+                for k, f in enumerate(f_bins):
+                    if 300.0 <= f <= 3000.0:
+                        stat_dt_mask[k] = 0.8
+                    elif 100.0 < f < 300.0:
+                        stat_dt_mask[k] = 0.8 * ((f - 100.0) / 200.0)
+                    elif 3000.0 < f < 4000.0:
+                        stat_dt_mask[k] = 0.8 * ((4000.0 - f) / 1000.0)
+                dt_per_bin = np.maximum(dt_per_bin, stat_dt_mask)
+
+            dt_sq_per_bin = dt_per_bin ** 2
+            nearend_est = np.maximum(raw_nearend_est * dt_sq_per_bin, noise_floor_psd)
+
+            # Anti-zero guard (per-bin)
+            min_ne_from_dt = self.error_psd * dt_sq_per_bin
             nearend_est = np.maximum(nearend_est, min_ne_from_dt)
 
             enr = residual_echo_psd / (nearend_est + 1e-10)
 
-            # --- ENR two-tuning (continuous, driven by dt_indicator) ---
+            # --- ENR two-tuning (per-bin ne_confidence) ---
             freq_bins = np.arange(self.n_freqs, dtype=np.float32)
             blend = np.clip((freq_bins - 5) / 5, 0, 1)
             scale = self.enr_scale
-            # ne_confidence directly from dt_indicator (already ERLE-corrected at source)
-            ne_confidence = dt_indicator
+            ne_confidence = dt_per_bin
 
             effective_scale = scale
 
@@ -1340,7 +1365,7 @@ class ResFilter:
             # Bypass during DT: speech harmonics above 500Hz must not be crushed
             freq_res = 16000.0 / self.block_size  # Hz per bin (16kHz assumed)
             hf_cap_bin = min(int(500.0 / freq_res), self.n_freqs - 1)
-            if self.n_freqs > hf_cap_bin + 1 and dt_indicator < 0.2:
+            if self.n_freqs > hf_cap_bin + 1 and dt_indicator < 0.5 and not is_stationary_dt:
                 hf_cap = g[hf_cap_bin]
                 g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
 
@@ -1354,8 +1379,14 @@ class ResFilter:
         # far_activity low (far-end silent) → fast release (TC≈25ms)
         alpha_release_base = 0.4 + 0.5 * self.far_activity
 
-        # DT-aware release: dt=0.8 → alpha from 0.9 to 0.18, gain recovers in 1-2 frames
-        alpha_release = alpha_release_base * np.clip(1.0 - dt_indicator, 0.1, 1.0)
+        # Temporal DT: when Stationary DT confirmed, treat as dt=0.8 for smoothing/rate
+        dt_temporal = 0.8 if is_stationary_dt else dt_indicator
+
+        # DT-aware release: only when stationary DT (use dt_temporal=0.8)
+        if is_stationary_dt:
+            alpha_release = alpha_release_base * np.clip(1.0 - dt_temporal**2, 0.1, 1.0)
+        else:
+            alpha_release = alpha_release_base
 
         # Attack alpha: continuous blend based on far_activity and dt_indicator
         # far_activity high + low dt → fast attack (FS: suppress echo quickly)
@@ -1377,8 +1408,10 @@ class ResFilter:
         eff_rise = self.max_rise_ratio ** (0.5 + 0.5 * (1.0 - self.far_activity))
 
         # DT rise boost: dt=0.8 → allow gain to jump 16x per frame
-        dt_rise_boost = 1.0 + 19.0 * dt_indicator
-        eff_rise = eff_rise * dt_rise_boost
+        # DT rise boost: only when stationary DT
+        if is_stationary_dt:
+            dt_rise_boost = 1.0 + 19.0 * (dt_temporal ** 3)
+            eff_rise = eff_rise * dt_rise_boost
 
         gain_floor = self.gain_smooth / eff_drop
         gain_ceil = self.gain_smooth * eff_rise
@@ -1404,30 +1437,37 @@ class ResFilter:
         # Apply gain + synthesis sqrt-Hann window + IFFT
         enhanced_spec = self.gain_smooth * spec
 
-        # --- CNG: Freeze-Gated Minima Tracking ---
+        # --- CNG: Comfort Noise Generation ---
         if self.enable_cng:
             if not hasattr(self, '_noise_initialized'):
                 self.noise_psd = self.error_psd.copy() + 1e-8
                 self._noise_initialized = True
+                self._smooth_cn_gain = np.zeros(self.n_freqs, dtype=np.float32)
 
-            # Freeze when suppressing: gain < 0.9 means echo is being removed
-            # → error_psd contains echo energy → forbid noise_psd from learning it
-            is_suppressing = float(np.mean(self.gain_smooth)) < 0.9
-            alpha_down = 0.90  # fast drop: catch breath pauses for true noise floor
-            if is_suppressing:
-                alpha_up = 1.0   # freeze: never learn echo shape
+            # Strict guard: only learn noise when far-end silent AND no near-end
+            # Prevents echo shape from contaminating noise model
+            is_learning_safe = (self.far_activity < 0.01) and (dt_indicator < 0.1)
+
+            alpha_down = 0.98   # slow drop: prevents echo leaking into noise model
+            if not is_learning_safe:
+                alpha_up = 1.0   # freeze: dangerous period
             else:
-                alpha_up = 0.998  # ultra-slow rise: adapt to fan/AC changes over seconds
+                alpha_up = 0.998  # slow rise: adapt to fan/AC changes over seconds
 
             alpha_n = np.where(self.error_psd > self.noise_psd, alpha_up, alpha_down)
             self.noise_psd = alpha_n * self.noise_psd + (1 - alpha_n) * self.error_psd
 
             if np.sum(self.noise_psd) > 1e-7:
-                cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0)) * 0.3
+                # Moderate compensation (0.4 ≈ 16% energy), enough to fill vacuum
+                target_cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0)) * 0.4
+
+                # Temporal smoothing: fade in/out naturally, no abrupt bursts
+                self._smooth_cn_gain = 0.8 * self._smooth_cn_gain + 0.2 * target_cn_gain
+
                 noise_std = np.sqrt(self.noise_psd / 2.0).astype(np.float32)
                 cng_real = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
                 cng_imag = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
-                cng_spec = (cn_gain * (cng_real + 1j * cng_imag)).astype(np.complex64)
+                cng_spec = (self._smooth_cn_gain * (cng_real + 1j * cng_imag)).astype(np.complex64)
                 enhanced_spec = enhanced_spec + cng_spec
 
         enhanced_time = np.fft.irfft(enhanced_spec, self.block_size)[:self.frame_size]
@@ -1951,8 +1991,10 @@ class AEC:
         self._far_env_var = 0.0
         self._far_active_prev = False
         self._is_stationary_far = False
+        self._stat_far_hangover = 0
         self._inst_erle_smooth = 1.0
         self._wn_err_baseline = 1e-8
+        self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
 
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
         self._simple_mu_ratio = 1.0
@@ -2047,8 +2089,10 @@ class AEC:
         self._far_env_var = 0.0
         self._far_active_prev = False
         self._is_stationary_far = False
+        self._stat_far_hangover = 0
         self._inst_erle_smooth = 1.0
         self._wn_err_baseline = 1e-8
+        self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
 
     @property
     def hop_size(self) -> int:
@@ -2245,13 +2289,16 @@ class AEC:
                 self._far_env_var = 0.0
                 self._far_active_prev = True
             else:
-                alpha_cv = 0.95
+                # α=0.99 (TC≈1s): long enough to average out hop-level WN variance
+                # (single hop std ≈ 11% mean for WN; α=0.95 gave CV2 flicker)
+                alpha_cv = 0.99
+                old_mean = self._far_env_mean
                 self._far_env_mean = (alpha_cv * self._far_env_mean
                                       + (1 - alpha_cv) * far_pwr_global)
                 self._far_env_var = (alpha_cv * self._far_env_var
-                                     + (1 - alpha_cv) * (far_pwr_global - self._far_env_mean) ** 2)
+                                     + (1 - alpha_cv) * (far_pwr_global - old_mean) ** 2)
             far_cv2 = self._far_env_var / (self._far_env_mean ** 2 + 1e-10)
-            self._is_stationary_far = (far_cv2 < 0.05)
+            self._is_stationary_far = (far_cv2 < 0.02)
         else:
             self._far_active_prev = False
             self._is_stationary_far = False
@@ -2400,39 +2447,50 @@ class AEC:
                 else:
                     raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
 
-                # === White Noise DT rescue (uses pre-computed _is_stationary_far) ===
-                is_wn_dt = False
+                # Stationary DT macro detection (sets flag only, does NOT override raw_dt)
+                is_stationary_dt = False
                 if self._is_stationary_far and self._filter_converged:
-                    # Voice-band spike detection: bins 2~48 (100Hz~3kHz)
                     if hasattr(self.filter, 'error_spec'):
-                        vb_limit = min(48, len(self.filter.error_spec))
-                        track_err_pwr = (float(np.sum(np.abs(self.filter.error_spec[2:vb_limit])**2))
-                                         + 1e-10)
+                        freq_per_bin = self.config.sample_rate / self.filter.fft_size
+                        vb_start = max(1, int(100.0 / freq_per_bin))
+                        vb_limit = min(int(3000.0 / freq_per_bin), len(self.filter.error_spec))
+                        track_err_pwr = (float(np.sum(
+                            np.abs(self.filter.error_spec[vb_start:vb_limit]) ** 2)) + 1e-10)
                     else:
                         track_err_pwr = raw_err_pwr
 
-                    # Baseline tracking (only during converged + no surge)
                     if self._wn_err_baseline < 1e-6:
-                        # First time converged: snap baseline to current value
                         self._wn_err_baseline = track_err_pwr
-                    elif track_err_pwr < self._wn_err_baseline * 1.5:
-                        self._wn_err_baseline = (0.95 * self._wn_err_baseline
-                                                  + 0.05 * track_err_pwr)
-                    # Spike: freeze baseline
 
                     jump_ratio = track_err_pwr / (self._wn_err_baseline + 1e-10)
-                    if jump_ratio > 1.5:
-                        # Full 0.8 DT protection: nearend_est = error×0.8 → ENR≈0.25 → RES pass
-                        raw_dt = max(raw_dt, 0.8)
-                        is_wn_dt = True
 
-                # Step 3: inst_erle correction (only no-DTD, skip during WN DT)
+                    if jump_ratio > 1.5:
+                        self._stat_dt_hangover = 80  # 800ms protection window (covers syllable gaps)
+
+                    if self._stat_dt_hangover > 0:
+                        is_stationary_dt = True
+                        self._stat_dt_hangover -= 1
+                        # Speech active: nearly freeze baseline (TC ≈ 1000 frames)
+                        self._wn_err_baseline = (0.999 * self._wn_err_baseline
+                                                  + 0.001 * track_err_pwr)
+                    else:
+                        is_stationary_dt = False
+                        # Silence: normal EMA tracking WN baseline
+                        self._wn_err_baseline = (0.95 * self._wn_err_baseline
+                                                  + 0.05 * track_err_pwr)
+
+                # inst_erle correction (only no-DTD)
                 if not self.config.enable_dtd:
                     inst_erle_fast_raw = mic_pwr / raw_err_pwr
                     self._inst_erle_smooth = (0.7 * self._inst_erle_smooth
                                               + 0.3 * inst_erle_fast_raw)
-                    if self._inst_erle_smooth > 2.0 and not is_wn_dt:
+                    if self._inst_erle_smooth > 2.0:
                         raw_dt /= self._inst_erle_smooth
+
+                # EPC physical gate
+                if self.epc_active:
+                    raw_dt = 0.0
+                    is_stationary_dt = False  # EPC error spike is from filter divergence, not speech
 
                 dt_indicator = np.clip(raw_dt, 0.0, 0.8)
                 dt_reduction = self.config.res_dt_reduction * dt_indicator
@@ -2455,7 +2513,8 @@ class AEC:
                                                     erle_factor=erle_factor,
                                                     dt_indicator=dt_indicator,
                                                     near_spec=self.filter.near_spec,
-                                                    divergence=self._divergence_indicator)
+                                                    divergence=self._divergence_indicator,
+                                                    is_stationary_dt=is_stationary_dt)
 
                     # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
                     if not self.config.enable_dtd:
@@ -2465,6 +2524,13 @@ class AEC:
                             mu_min = self.config.shadow_mu_min
                             self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
                             self._simple_mu_ratio = float(np.mean(per_bin_eer))
+                            # Stationary far-end: filter is already converged on
+                            # the noise spectrum; further adaptation only learns
+                            # any near-end speech that arrives. Freeze adaptation
+                            # to protect speech from being absorbed into echo path.
+                            if self._is_stationary_far:
+                                self._per_bin_mu_scale[:] = mu_min
+                                self._simple_mu_ratio = mu_min
                         else:
                             # Pre-convergence: no per_bin, let ratio track DT naturally
                             self._per_bin_mu_scale = None
