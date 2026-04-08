@@ -103,6 +103,7 @@ void res_reset(ResFilter* res);
  * @param dt_indicator [0,1] double-talk indicator
  * @param over_sub     Over-subtraction factor (dynamic, set by coordinator)
  * @param divergence   [0,1] filter divergence indicator
+ * @param is_stationary_dt 1 if stationary far-end DT detected (use protection)
  * @param output_hop   Enhanced output [hop_size]
  */
 void res_process(ResFilter* res,
@@ -116,6 +117,7 @@ void res_process(ResFilter* res,
                  float dt_indicator,
                  float over_sub,
                  float divergence,
+                 int is_stationary_dt,
                  float* output_hop);
 
 /**

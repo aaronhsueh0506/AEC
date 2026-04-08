@@ -104,6 +104,11 @@ const Complex* pbfdkf_get_far_spec(const Pbfdkf* f);
 const Complex* pbfdkf_get_near_spec(const Pbfdkf* f);
 
 /**
+ * Get error spectrum pointer (read-only)
+ */
+const Complex* pbfdkf_get_error_spec(const Pbfdkf* f);
+
+/**
  * Get far-end power (smoothed, per-bin mean)
  */
 float pbfdkf_get_far_power(const Pbfdkf* f);

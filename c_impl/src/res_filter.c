@@ -327,11 +327,19 @@ void res_process(ResFilter* r,
                  float far_power,
                  int converged,
                  float erle_factor,
-                 float dt_indicator,
+                 float dt_indicator_in,
                  float over_sub,
                  float divergence,
+                 int is_stationary_dt,
                  float* output_hop) {
     if (!r || !error_hop || !output_hop) return;
+
+    /* Stationary DT virtual indicators (matches Python v13)
+     * - dt_for_fs / dt_temporal = 0.8 only when stationary DT detected.
+     * - For non-stationary scenes both equal dt_indicator_in (zero impact). */
+    float dt_indicator = dt_indicator_in;
+    float dt_for_fs   = is_stationary_dt ? 0.8f : dt_indicator_in;
+    float dt_temporal = is_stationary_dt ? 0.8f : dt_indicator_in;
 
     const int nf = r->n_freqs;
     const int hop = r->hop_size;
@@ -524,9 +532,9 @@ void res_process(ResFilter* r,
             float erle_est = r->echo_psd[k] / erle_corrected;
             float direct_est = r->echo_psd[k];
 
-            /* Nonlinear echo floor */
+            /* Nonlinear echo floor (uses dt_for_fs to bypass on stationary DT) */
             if (far_power > 1e-4f) {
-                float dt_weight = 1.0f - dt_indicator;
+                float dt_weight = 1.0f - dt_for_fs;
                 float nonlinear_floor = r->error_psd[k] * coh2[k]
                                         * r->far_activity * dt_weight;
                 if (direct_est < nonlinear_floor) direct_est = nonlinear_floor;
@@ -540,7 +548,9 @@ void res_process(ResFilter* r,
             if (residual_echo_psd[k] > cap) residual_echo_psd[k] = cap;
         }
 
-        /* === (j) Reverb tail === */
+        /* === (j) Reverb tail ===
+         * Skip on stationary DT — reverb_psd accumulates massive WN energy
+         * that drowns near-end speech in residual_echo_psd. */
         if (r->enable_reverb) {
             for (int k = 0; k < nf; k++) {
                 float far_psd_k;
@@ -552,11 +562,13 @@ void res_process(ResFilter* r,
                 }
                 r->reverb_psd[k] = r->reverb_decay * r->reverb_psd[k]
                                    + (1.0f - r->reverb_decay) * far_psd_k;
-                float ne_reverb_factor = 0.3f + 0.7f * r->far_activity
-                                         * (1.0f - dt_indicator);
-                float reverb_gate = r->far_activity * ne_reverb_factor;
-                residual_echo_psd[k] += r->reverb_gain * r->reverb_psd[k]
-                                        * reverb_gate;
+                if (!is_stationary_dt) {
+                    float ne_reverb_factor = 0.3f + 0.7f * r->far_activity
+                                             * (1.0f - dt_for_fs);
+                    float reverb_gate = r->far_activity * ne_reverb_factor;
+                    residual_echo_psd[k] += r->reverb_gain * r->reverb_psd[k]
+                                            * reverb_gate;
+                }
             }
         }
 
@@ -566,7 +578,7 @@ void res_process(ResFilter* r,
     /* === (k) Echo boost: high-coh2 bins → boost residual estimate === */
     if (far_power > 1e-4f && erle_factor > 0.3f && have_residual) {
         for (int k = 0; k < nf; k++) {
-            float echo_boost = (dt_indicator < 0.2f)
+            float echo_boost = (dt_for_fs < 0.2f)
                                ? (1.0f + 0.5f * coh2[k]) : 1.0f;
             residual_echo_psd[k] *= echo_boost;
         }
@@ -607,8 +619,8 @@ void res_process(ResFilter* r,
         for (int k = 0; k < nf; k++) spectral_g_min[k] = eff_g_min;
     }
 
-    /* fs_confidence: continuous FS/DT/NE indicator */
-    float dt_inv = 1.0f - dt_indicator;
+    /* fs_confidence: continuous FS/DT/NE indicator (uses dt_for_fs) */
+    float dt_inv = 1.0f - dt_for_fs;
     float fs_confidence = r->far_activity * dt_inv * dt_inv;
 
     /* === (m) Per-bin near-end gate === */
@@ -633,23 +645,49 @@ void res_process(ResFilter* r,
     if (r->gain_type == RES_GAIN_ENR && have_residual) {
         /* === (n) ENR computation === */
         float scale = r->enr_scale;
-        /* === (o) ENR two-tuning === */
-        float ne_confidence = dt_indicator;
-
         float error_mean = 0.0f;
         for (int k = 0; k < nf; k++) error_mean += r->error_psd[k];
         error_mean /= nf;
         float noise_floor_psd = error_mean * 0.01f + 1e-10f;
 
+        /* === Per-bin DT indicator with v3 frequency-shaped mask ===
+         * dt_per_bin = max(dt_for_fs, 1-coh2)
+         * + on stationary DT, raise speech band (300-3000Hz) to 0.8 */
+        float dt_per_bin[257];
         for (int k = 0; k < nf; k++) {
+            float v = 1.0f - coh2[k];
+            dt_per_bin[k] = (dt_for_fs > v) ? dt_for_fs : v;
+        }
+        if (is_stationary_dt) {
+            float freq_per_bin = 16000.0f / (float)bs;
+            for (int k = 0; k < nf; k++) {
+                float f = (float)k * freq_per_bin;
+                float wn_mask = 0.0f;
+                if (f >= 300.0f && f <= 3000.0f) {
+                    wn_mask = 0.8f;
+                } else if (f > 100.0f && f < 300.0f) {
+                    wn_mask = 0.8f * (f - 100.0f) / 200.0f;
+                } else if (f > 3000.0f && f < 4000.0f) {
+                    wn_mask = 0.8f * (4000.0f - f) / 1000.0f;
+                }
+                if (wn_mask > dt_per_bin[k]) dt_per_bin[k] = wn_mask;
+            }
+        }
+
+        for (int k = 0; k < nf; k++) {
+            float dt_pb = dt_per_bin[k];
+            float dt_pb_sq = dt_pb * dt_pb;
             float raw_ne = maxf(r->error_psd[k] - residual_echo_psd[k], 0.0f);
-            float nearend_est = maxf(raw_ne * dt_indicator, noise_floor_psd);
+            float nearend_est = maxf(raw_ne * dt_pb_sq, noise_floor_psd);
+            float min_ne_from_dt = r->error_psd[k] * dt_pb_sq;
+            if (nearend_est < min_ne_from_dt) nearend_est = min_ne_from_dt;
+            float ne_confidence = dt_pb;
             float enr = residual_echo_psd[k] / nearend_est;
 
             float blend = clampf((k - 5.0f) / 5.0f, 0.0f, 1.0f);
 
-            float enr_t_ne = (1.0f - blend) * 2.0f + blend * 0.5f;
-            float enr_s_ne = (1.0f - blend) * 3.0f + blend * 1.0f;
+            float enr_t_ne = (1.0f - blend) * 2.0f + blend * 1.5f;
+            float enr_s_ne = (1.0f - blend) * 3.0f + blend * 2.5f;
             float enr_t_fs = (1.0f - blend) * 0.3f * scale + blend * 0.07f * scale;
             float enr_s_fs = (1.0f - blend) * 0.4f * scale + blend * 0.1f * scale;
 
@@ -722,11 +760,12 @@ void res_process(ResFilter* r,
             g[0] = dc_g;
             g[1] = dc_g;
         }
-        /* HF cap: upper bins capped at gain of bin near ~500Hz */
+        /* HF cap: upper bins capped at gain of bin near ~500Hz
+         * Bypass during DT: speech harmonics above 500Hz must not be crushed */
         float freq_res = 16000.0f / (float)bs;
         int hf_cap_bin = (int)(500.0f / freq_res);
         if (hf_cap_bin > nf - 1) hf_cap_bin = nf - 1;
-        if (nf > hf_cap_bin + 1) {
+        if (nf > hf_cap_bin + 1 && dt_indicator < 0.5f && !is_stationary_dt) {
             float hf_cap = g[hf_cap_bin];
             for (int k = hf_cap_bin + 1; k < nf; k++)
                 g[k] = minf(g[k], hf_cap);
@@ -740,8 +779,17 @@ void res_process(ResFilter* r,
             g[k] = minf(g[k], divergence_gain);
     }
 
-    /* === (v) Gain temporal smoothing === */
-    float alpha_release = 0.4f + 0.5f * r->far_activity;
+    /* === (v) Gain temporal smoothing ===
+     * DT-aware release only on stationary DT (matches Python v13 gating). */
+    float alpha_release_base = 0.4f + 0.5f * r->far_activity;
+    float alpha_release = alpha_release_base;
+    if (is_stationary_dt) {
+        float t_sq = dt_temporal * dt_temporal;
+        float clamped = 1.0f - t_sq;
+        if (clamped < 0.1f) clamped = 0.1f;
+        if (clamped > 1.0f) clamped = 1.0f;
+        alpha_release = alpha_release_base * clamped;
+    }
     float alpha_fast = 0.3f + 0.2f * (1.0f - erle_factor);
     float alpha_slow = 0.85f + 0.1f * (1.0f - erle_factor);
     float alpha_attack = alpha_slow + (alpha_fast - alpha_slow) * fs_confidence;
@@ -750,6 +798,11 @@ void res_process(ResFilter* r,
     float act_scale = 0.5f + 0.5f * r->far_activity;
     float eff_drop = powf(r->max_drop_ratio, act_scale);
     float eff_rise = powf(r->max_rise_ratio, 0.5f + 0.5f * (1.0f - r->far_activity));
+    /* DT rise boost only on stationary DT */
+    if (is_stationary_dt) {
+        float dt_cu = dt_temporal * dt_temporal * dt_temporal;
+        eff_rise *= (1.0f + 19.0f * dt_cu);
+    }
 
     /* LF protection */
     int lf_limit = 8 < nf ? 8 : nf;

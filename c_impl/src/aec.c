@@ -49,6 +49,15 @@ struct Aec {
     int epc_active;
     int epc_hangover_count;
 
+    /* Stationary far-end DT detection (matches Python v13) */
+    float far_env_mean;            /* EMA α=0.99, TC≈1s */
+    float far_env_var;
+    int   far_active_prev;
+    int   is_stationary_far;       /* CV² < 0.02 */
+    float wn_err_baseline;         /* voice-band error baseline */
+    int   stat_dt_hangover;        /* 800ms (80 frames @10ms) */
+    int   is_stationary_dt;
+
     /* Convergence */
     int filter_converged;
     int conv_counter;
@@ -208,6 +217,15 @@ Aec* aec_create(const AecConfig* config) {
     aec->epc_active = 0;
     aec->epc_hangover_count = 0;
 
+    /* Stationary far-end DT init */
+    aec->far_env_mean = 0.0f;
+    aec->far_env_var = 0.0f;
+    aec->far_active_prev = 0;
+    aec->is_stationary_far = 0;
+    aec->wn_err_baseline = 1e-8f;
+    aec->stat_dt_hangover = 0;
+    aec->is_stationary_dt = 0;
+
     /* Delay estimation */
     aec->delay_est.enabled = 0;
     aec->delay_est.estimated_delay = -1;
@@ -322,6 +340,9 @@ void aec_reset(Aec* aec) {
     aec->main_err_smooth = 0; aec->shadow_err_smooth = 0;
     aec->shadow_frame_count = 0; aec->shadow_copy_counter = 0;
     aec->prev_total_err = 0.0f; aec->epc_active = 0; aec->epc_hangover_count = 0;
+    aec->far_env_mean = 0; aec->far_env_var = 0; aec->far_active_prev = 0;
+    aec->is_stationary_far = 0; aec->wn_err_baseline = 1e-8f;
+    aec->stat_dt_hangover = 0; aec->is_stationary_dt = 0;
     free(aec->per_bin_mu_scale); aec->per_bin_mu_scale = NULL;
 
     /* Reset delay estimation */
@@ -653,6 +674,38 @@ int aec_process_ex(Aec* aec,
     float* mic = aec->mic_buf;
     float* ref = aec->ref_buf;
 
+    /* === Stationary far-end detection (CV² gate) ===
+     * Matches Python aec.py — α=0.99 EMA on far_pwr, CV² < 0.02 → stationary.
+     * α=0.99 (TC≈1s) needed because single-hop WN power std/mean ≈ 11%.
+     */
+    {
+        float far_pwr_global = 0.0f;
+        for (int i = 0; i < hop; i++) far_pwr_global += far_end[i] * far_end[i];
+        far_pwr_global = far_pwr_global / hop + 1e-10f;
+
+        if (far_pwr_global > 1e-6f) {
+            if (!aec->far_active_prev) {
+                aec->far_env_mean = far_pwr_global;
+                aec->far_env_var = 0.0f;
+                aec->far_active_prev = 1;
+            } else {
+                const float alpha_cv = 0.99f;
+                float old_mean = aec->far_env_mean;
+                aec->far_env_mean = alpha_cv * aec->far_env_mean
+                                    + (1.0f - alpha_cv) * far_pwr_global;
+                float dev = far_pwr_global - old_mean;
+                aec->far_env_var = alpha_cv * aec->far_env_var
+                                   + (1.0f - alpha_cv) * (dev * dev);
+            }
+            float far_cv2 = aec->far_env_var /
+                            (aec->far_env_mean * aec->far_env_mean + 1e-10f);
+            aec->is_stationary_far = (far_cv2 < 0.02f) ? 1 : 0;
+        } else {
+            aec->far_active_prev = 0;
+            aec->is_stationary_far = 0;
+        }
+    }
+
     /* === Delay estimation === */
     if (aec->delay_est.enabled) {
         /* Accumulate into delay estimator */
@@ -780,6 +833,8 @@ int aec_process_ex(Aec* aec,
         int errors_rising = (total_err > aec->prev_total_err * cfg->epc_total_rise
                              && aec->prev_total_err > 1e-10f);
         int is_echo_change = errors_rising && (delta_ratio < cfg->epc_delta_threshold);
+        /* Stationary far-end guard: error rise is DT, not echo path change */
+        if (is_echo_change && aec->is_stationary_far) is_echo_change = 0;
         aec->prev_total_err = total_err;
 
         if (is_echo_change) {
@@ -832,6 +887,56 @@ int aec_process_ex(Aec* aec,
         aec->inst_erle_smooth = 0.7f * aec->inst_erle_smooth + 0.3f * inst_erle_raw_dt;
         if (aec->inst_erle_smooth > 2.0f)
             raw_dt /= aec->inst_erle_smooth;
+
+        /* === Stationary DT detection (jump_ratio + 800ms hangover) ===
+         * Matches Python aec.py — voice-band (100-3000Hz) error spike vs baseline.
+         */
+        if (aec->is_stationary_far && aec->filter_converged) {
+            const Complex* err_spec = pbfdkf_get_error_spec(aec->filter);
+            float track_err_pwr = 1e-10f;
+            if (err_spec) {
+                int fft_size = pbfdkf_get_fft_size(aec->filter);
+                float freq_per_bin = (float)cfg->sample_rate / (float)fft_size;
+                int vb_start = (int)(100.0f / freq_per_bin);
+                if (vb_start < 1) vb_start = 1;
+                int vb_limit = (int)(3000.0f / freq_per_bin);
+                if (vb_limit > aec->n_freqs) vb_limit = aec->n_freqs;
+                for (int k = vb_start; k < vb_limit; k++) {
+                    track_err_pwr += err_spec[k].r * err_spec[k].r
+                                   + err_spec[k].i * err_spec[k].i;
+                }
+            }
+            if (aec->wn_err_baseline < 1e-6f) {
+                aec->wn_err_baseline = track_err_pwr;
+            }
+            float jump_ratio = track_err_pwr / (aec->wn_err_baseline + 1e-10f);
+
+            if (jump_ratio > 1.5f) {
+                aec->stat_dt_hangover = 80;  /* 800ms hold */
+            }
+
+            if (aec->stat_dt_hangover > 0) {
+                aec->is_stationary_dt = 1;
+                aec->stat_dt_hangover--;
+                /* Freeze baseline (TC ≈ 1000 frames) during speech */
+                aec->wn_err_baseline = 0.999f * aec->wn_err_baseline
+                                     + 0.001f * track_err_pwr;
+            } else {
+                aec->is_stationary_dt = 0;
+                /* Normal EMA tracking */
+                aec->wn_err_baseline = 0.95f * aec->wn_err_baseline
+                                     + 0.05f * track_err_pwr;
+            }
+        } else {
+            aec->is_stationary_dt = 0;
+        }
+
+        /* EPC physical gate */
+        if (aec->epc_active) {
+            raw_dt = 0.0f;
+            aec->is_stationary_dt = 0;
+        }
+
         float dt_indicator = clampf(raw_dt, 0.0f, 0.8f);
 
         float dt_reduction = cfg->res_dt_reduction * dt_indicator;
@@ -853,7 +958,7 @@ int aec_process_ex(Aec* aec,
                     pbfdkf_get_near_spec(aec->filter),
                     far_power, aec->filter_converged,
                     erle_factor, dt_indicator, over_sub,
-                    res_divergence, output);
+                    res_divergence, aec->is_stationary_dt, output);
 
         /* Update per-bin mu_scale from RES PSDs */
         if (aec->filter_converged) {
@@ -867,6 +972,10 @@ int aec_process_ex(Aec* aec,
                     mean_eer += eer_k;
                 }
                 aec->simple_mu_ratio = mean_eer / nf;
+                /* Stationary far-end: freeze adaptation to protect speech */
+                if (aec->is_stationary_far) {
+                    aec->simple_mu_ratio = cfg->shadow_mu_min;
+                }
             }
         } else {
             update_simple_mu_ratio(aec, aec->raw_output, ref, hop);
@@ -1007,4 +1116,53 @@ const AecConfig* aec_get_config(const Aec* aec) {
 int aec_get_delay(const Aec* aec) {
     if (!aec || !aec->delay_est.enabled) return -1;
     return aec->delay_est.current_delay;
+}
+
+/* ============================================================
+ * Filter training API — TODO stubs
+ * ============================================================
+ *
+ * Future implementation plan:
+ *   - AecTrainer: lightweight wrapper around PBFDKF with full mu,
+ *     no shadow gating, no DTD, no RES.
+ *   - aec_train_process(): runs adaptive filter on (mic, ref) pairs
+ *     containing only echo (no near-end speech).
+ *   - aec_train_get_filter(): exposes PBFDKF W array for serialization.
+ *   - aec_load_filter(): injects pre-trained weights into runtime AEC,
+ *     skipping cold-start convergence.
+ */
+
+struct AecTrainer {
+    int placeholder;
+};
+
+AecTrainer* aec_train_create(const AecConfig* config) {
+    (void)config;
+    /* TODO: allocate trainer with full-mu PBFDKF */
+    return NULL;
+}
+
+void aec_train_process(AecTrainer* trainer,
+                       const float* mic,
+                       const float* ref,
+                       int n_samples) {
+    (void)trainer; (void)mic; (void)ref; (void)n_samples;
+    /* TODO: feed (mic, ref) into PBFDKF training loop */
+}
+
+const void* aec_train_get_filter(const AecTrainer* trainer) {
+    (void)trainer;
+    /* TODO: return pointer to PBFDKF W array */
+    return NULL;
+}
+
+int aec_load_filter(Aec* aec, const void* weights) {
+    (void)aec; (void)weights;
+    /* TODO: copy weights into aec->filter->W */
+    return -1;
+}
+
+void aec_train_destroy(AecTrainer* trainer) {
+    (void)trainer;
+    /* TODO: free trainer */
 }

@@ -110,6 +110,54 @@ const AecConfig* aec_get_config(const Aec* aec);
  */
 int   aec_get_delay(const Aec* aec);
 
+/* ============================================================
+ * Filter training API (TODO: empty stubs for future implementation)
+ * ============================================================
+ *
+ * Goal: train the adaptive filter offline / in a controlled environment
+ * (large mu, no DTD, no shadow gating) to obtain a good initial RIR
+ * estimate that can later be loaded into the runtime AEC instance.
+ *
+ * Typical workflow:
+ *   1. aec_train_create() with training config (no RES, full mu)
+ *   2. Feed pairs of (mic, ref) clips containing only echo (no near-end)
+ *   3. aec_train_get_filter() returns trained PBFDKF weights
+ *   4. aec_load_filter() to install into runtime aec_create() instance
+ */
+
+typedef struct AecTrainer AecTrainer;
+
+/**
+ * Create a filter trainer (TODO: empty)
+ */
+AecTrainer* aec_train_create(const AecConfig* config);
+
+/**
+ * Process one block of (mic, ref) for training (TODO: empty)
+ */
+void aec_train_process(AecTrainer* trainer,
+                       const float* mic,
+                       const float* ref,
+                       int n_samples);
+
+/**
+ * Get trained filter weights (PBFDKF W array, frequency domain)
+ * Returns: pointer to interleaved [n_partitions][n_freqs] complex weights
+ *          NULL if not yet trained (TODO: empty)
+ */
+const void* aec_train_get_filter(const AecTrainer* trainer);
+
+/**
+ * Load pre-trained filter weights into a runtime AEC instance
+ * (TODO: empty — requires PBFDKF weight injection support)
+ */
+int aec_load_filter(Aec* aec, const void* weights);
+
+/**
+ * Destroy trainer
+ */
+void aec_train_destroy(AecTrainer* trainer);
+
 #ifdef __cplusplus
 }
 #endif

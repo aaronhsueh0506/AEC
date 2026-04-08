@@ -490,6 +490,10 @@ const Complex* pbfdkf_get_near_spec(const Pbfdkf* f) {
     return f ? f->near_spec : NULL;
 }
 
+const Complex* pbfdkf_get_error_spec(const Pbfdkf* f) {
+    return f ? f->error_spec : NULL;
+}
+
 float pbfdkf_get_far_power(const Pbfdkf* f) {
     if (!f) return 0.0f;
     float total = 0.0f;
