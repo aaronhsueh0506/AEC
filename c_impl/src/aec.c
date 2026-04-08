@@ -972,8 +972,10 @@ int aec_process_ex(Aec* aec,
                     mean_eer += eer_k;
                 }
                 aec->simple_mu_ratio = mean_eer / nf;
-                /* Stationary far-end: freeze adaptation to protect speech */
-                if (aec->is_stationary_far) {
+                /* Stationary DT: only freeze when speech actually detected
+                 * (is_stationary_far alone fires on 32% of normal speech
+                 * frames; that would crush filter convergence on plain FS). */
+                if (aec->is_stationary_dt) {
                     aec->simple_mu_ratio = cfg->shadow_mu_min;
                 }
             }

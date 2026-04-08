@@ -2524,11 +2524,11 @@ class AEC:
                             mu_min = self.config.shadow_mu_min
                             self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
                             self._simple_mu_ratio = float(np.mean(per_bin_eer))
-                            # Stationary far-end: filter is already converged on
-                            # the noise spectrum; further adaptation only learns
-                            # any near-end speech that arrives. Freeze adaptation
-                            # to protect speech from being absorbed into echo path.
-                            if self._is_stationary_far:
+                            # Stationary DT: only freeze when speech actually
+                            # detected (jump_ratio + hangover). _is_stationary_far
+                            # alone fires on 32% of normal speech far-end frames,
+                            # which would crush filter convergence on plain FS.
+                            if is_stationary_dt:
                                 self._per_bin_mu_scale[:] = mu_min
                                 self._simple_mu_ratio = mu_min
                         else:
