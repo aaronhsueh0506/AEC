@@ -17,12 +17,12 @@
 |--------|----|----|----------|----------|---------|---------|
 | Linear (balanced) | 16k | 512 | 2.710 | 3.167 | 3.198 | 4.069 |
 | Speex (SpeexDSP 1.2) | 16k | 2048 | 2.808 | 3.368 | 3.225 | 4.128 |
-| Old WebRTC AEC (M120) | 16k | — | 3.484 | 4.262 | 2.389 | 4.098 |
+| Old WebRTC AEC (M72) | 16k | — | 3.484 | 4.262 | 2.389 | 4.098 |
 | **mild** | 16k | 512 | 3.272 | 3.943 | **2.267** | 3.988 |
 | **balanced** | 16k | 512 | 3.615 | 4.232 | 2.095 | 3.975 |
 | **aggressive** | 16k | 512 | 3.771 | 4.375 | 2.044 | 3.962 |
 | **maximum** | 16k | 512 | **3.912** | 4.505 | 2.025 | 3.940 |
-| WebRTC AEC3 (M120) | 16k | 768 | 3.875 | **4.538** | 1.850 | 3.454 |
+| WebRTC AEC3 (M72) | 16k | 768 | 3.875 | **4.538** | 1.850 | 3.454 |
 
 > maximum preset FS echo **3.912 超越 AEC3**（3.875）。DT deg 全 preset 優於 AEC3（2.0+ vs 1.850）。NE deg 全 preset 大幅領先 AEC3（+0.5）。
 
@@ -527,7 +527,7 @@ Frame/hop: 20ms/10ms（自動依 sample rate 配置），filter_length: 100ms。
 > - **NE deg 全 preset 大幅領先 AEC3**（~4.0 vs 3.454, +0.5）— 近端語音幾乎無損
 > - **DT deg 全 preset 優於 AEC3**（2.0+ vs 1.850）
 > - **v13 Stationary DT 保護**：白噪音/風扇/穩態 far-end + 近端語音場景，語音保留從 5% → 48%（合成測試），語音場景分數零退步
-> - Speex 版本：SpeexDSP 1.2rc3；WebRTC AEC3：M120 (2024)；Old WebRTC AEC：M120 AEC2
+> - Speex 版本：SpeexDSP 1.2rc3；WebRTC AEC3：M72；Old WebRTC AEC：M72 AEC2
 
 ### 工具
 
