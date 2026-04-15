@@ -613,7 +613,10 @@ def _run_eval_captured(func, *args, **kwargs):
 
 def _run_scenario(scenario_args):
     """Worker function for parallel execution (must be top-level for pickling)."""
-    func_name, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec = scenario_args
+    func_name, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, enable_cng = scenario_args
+    # Propagate CNG flag to subprocess (global is lost across ProcessPoolExecutor fork)
+    global _ENABLE_CNG
+    _ENABLE_CNG = enable_cng
     func = {'fs': eval_farend_singletalk,
             'ne': eval_nearend_singletalk,
             'dt': eval_doubletalk}[func_name]
@@ -623,9 +626,9 @@ def _run_scenario(scenario_args):
 def run_scenarios(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, parallel=False, do_old_aec=False):
     """Run all three scenarios, optionally in parallel."""
     scenarios = [
-        ('fs', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec),
-        ('ne', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec),
-        ('dt', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec),
+        ('fs', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG),
+        ('ne', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG),
+        ('dt', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG),
     ]
 
     if parallel:
