@@ -78,6 +78,12 @@ void pbfdkf_set_q_high(Pbfdkf* f, float q_high);
 void pbfdkf_set_q_ratio(Pbfdkf* f, float q_high, float q_low, float ratio);
 
 /**
+ * Set P-floor beta for EPC (v2.1.0)
+ * beta=1.0 during EPC, decays back to 0.1 after `frames` frames.
+ */
+void pbfdkf_set_p_floor_epc(Pbfdkf* f, float beta, int frames);
+
+/**
  * Copy weights + Kalman P from src to dst
  * Both must have same dimensions.
  */

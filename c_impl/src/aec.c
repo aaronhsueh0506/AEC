@@ -126,6 +126,31 @@ struct Aec {
     int ref_delay_buf_size;
     int ref_delay_write_pos;
     int ref_delay_filled;     /* total samples written (for warmup) */
+
+    /* v2.3.x: Energy DT signal */
+    float dt_from_energy;     /* pre-filter energy-based DT [0, 1] */
+    float dt_from_shadow;     /* shadow DTD signal [0, 1] */
+    float shadow_advantage;   /* main_err / shadow_err */
+    int   shadow_advantage_streak; /* G3: consecutive advantage frames */
+
+    /* v2.3.x: Dynamic ERL (B4) */
+    float erl_estimate;       /* tracked ERL for render-based echo */
+
+    /* v2.3.x: EPC render-forced (G1) */
+    int epc_render_forced_remaining;
+
+    /* v2.3.x: erle_factor_prev for diagnostics */
+    float erle_factor_prev;
+
+    /* v2.3.x: ERLE windowed (v2.1.0) */
+    float erle_window_near;
+    float erle_window_err;
+
+    /* v2.3.x: saturation level */
+    float saturation_level;
+
+    /* v2.3.x: GCC-PHAT PAR (A5) */
+    float delay_last_par;
 };
 
 Aec* aec_create(const AecConfig* config) {
@@ -195,6 +220,19 @@ Aec* aec_create(const AecConfig* config) {
     aec->limiter_gain = 1.0f;
     aec->inst_erle_smooth = 1.0f;
     aec->divergence_indicator = 0.0f;
+
+    /* v2.3.x state */
+    aec->dt_from_energy = 0.0f;
+    aec->dt_from_shadow = 0.0f;
+    aec->shadow_advantage = 1.0f;
+    aec->shadow_advantage_streak = 0;
+    aec->erl_estimate = 0.1f;
+    aec->epc_render_forced_remaining = 0;
+    aec->erle_factor_prev = 0.0f;
+    aec->erle_window_near = 1e-10f;
+    aec->erle_window_err = 1e-10f;
+    aec->saturation_level = 0.0f;
+    aec->delay_last_par = 0.0f;
 
     /* Buffers */
     aec->mic_buf    = (float*)malloc(hop * sizeof(float));
@@ -344,6 +382,19 @@ void aec_reset(Aec* aec) {
     aec->is_stationary_far = 0; aec->wn_err_baseline = 1e-8f;
     aec->stat_dt_hangover = 0; aec->is_stationary_dt = 0;
     free(aec->per_bin_mu_scale); aec->per_bin_mu_scale = NULL;
+
+    /* v2.3.x state */
+    aec->dt_from_energy = 0.0f;
+    aec->dt_from_shadow = 0.0f;
+    aec->shadow_advantage = 1.0f;
+    aec->shadow_advantage_streak = 0;
+    aec->erl_estimate = 0.1f;
+    aec->epc_render_forced_remaining = 0;
+    aec->erle_factor_prev = 0.0f;
+    aec->erle_window_near = 1e-10f;
+    aec->erle_window_err = 1e-10f;
+    aec->saturation_level = 0.0f;
+    aec->delay_last_par = 0.0f;
 
     /* Reset delay estimation */
     if (aec->delay_est.enabled) {
@@ -507,7 +558,7 @@ static void fill_context(Aec* aec, const float* mic, const float* ref,
 
     /* ERLE factor */
     float inst_erle = aec_get_erle_instant(aec);
-    ctx->erle_factor = clampf((inst_erle - 2.0f) / 8.0f, 0.0f, 1.0f);
+    ctx->erle_factor = clampf(inst_erle / 10.0f, 0.0f, 1.0f);
 
     /* DT indicator with ERLE correction (v2.0.0) */
     float mic_pwr = 0.0f;
@@ -522,8 +573,10 @@ static void fill_context(Aec* aec, const float* mic, const float* ref,
     raw_err_pwr = raw_err_pwr / hop + 1e-10f;
     float inst_erle_raw = mic_pwr / raw_err_pwr;
     aec->inst_erle_smooth = 0.7f * aec->inst_erle_smooth + 0.3f * inst_erle_raw;
-    if (aec->inst_erle_smooth > 2.0f)
-        raw_dt /= aec->inst_erle_smooth;
+    if (aec->inst_erle_smooth > 2.0f) {
+        float erle_for_dt = aec->inst_erle_smooth < 4.0f ? aec->inst_erle_smooth : 4.0f;
+        raw_dt /= erle_for_dt;
+    }
     ctx->dt_indicator = clampf(raw_dt, 0.0f, 0.8f);
 
     /* Dynamic over_sub */
@@ -539,6 +592,10 @@ static void fill_context(Aec* aec, const float* mic, const float* ref,
 
     /* Stationary far-end DT detection result (computed in aec_process_ex) */
     ctx->is_stationary_dt = aec->is_stationary_dt;
+
+    /* v2.3.x context fields */
+    ctx->saturation_level = aec->saturation_level;
+    ctx->erl_estimate = aec->erl_estimate;
 }
 
 /* --- Delay estimation (GCC-PHAT) --- */
@@ -599,13 +656,19 @@ static void delay_est_estimate(Aec* aec) {
 
     int best_pos = 0;
     float best_val = fabsf(aec->delay_est.gcc[0]);
+    float sum_gcc = fabsf(aec->delay_est.gcc[0]);
     for (int d = 1; d <= max_d; d++) {
         float v = fabsf(aec->delay_est.gcc[d]);
+        sum_gcc += v;
         if (v > best_val) {
             best_val = v;
             best_pos = d;
         }
     }
+
+    /* A5: Compute PAR (Peak-to-Average Ratio) for confidence */
+    float avg_gcc = sum_gcc / (float)(max_d + 1) + 1e-10f;
+    aec->delay_last_par = best_val / avg_gcc;
 
     aec->delay_est.estimated_delay = best_pos;
     aec->delay_est.samples_since_est = 0;
@@ -717,8 +780,20 @@ int aec_process_ex(Aec* aec,
         int new_delay = aec->delay_est.estimated_delay;
         if (new_delay >= 0) {
             if (aec->delay_est.current_delay < 0) {
-                /* First estimate */
-                aec->delay_est.current_delay = new_delay;
+                /* First estimate — A5 PAR confidence gate */
+                if (aec->delay_last_par > 5.0f) {
+                    aec->delay_est.current_delay = new_delay;
+                    /* B3: reset filters for clean start at correct delay */
+                    pbfdkf_reset_weights(aec->filter);
+                    pbfdkf_reset_weights(aec->shadow_filter);
+                    if (aec->res) res_reset(aec->res);
+                    /* A2: Q = Q_high for fast convergence at new delay */
+                    pbfdkf_set_q_high(aec->filter, cfg->kalman_q_high);
+                    pbfdkf_set_q_high(aec->shadow_filter,
+                                      cfg->kalman_q_high * cfg->shadow_q_ratio);
+                    aec->filter_converged = 0;
+                    aec->conv_counter = 0;
+                }
             } else if (abs(new_delay - aec->delay_est.current_delay) > 32) {
                 /* Require two consecutive consistent estimates before switching */
                 if (aec->delay_est.has_pending &&
@@ -731,6 +806,8 @@ int aec_process_ex(Aec* aec,
                     pbfdkf_set_q_high(aec->filter, cfg->kalman_q_high);
                     pbfdkf_set_q_high(aec->shadow_filter,
                                       cfg->kalman_q_high * cfg->shadow_q_ratio);
+                    pbfdkf_set_p_floor_epc(aec->filter, 1.0f, 30);
+                    pbfdkf_set_p_floor_epc(aec->shadow_filter, 1.0f, 30);
                     aec->filter_converged = 0;
                     aec->conv_counter = 0;
                 } else {
@@ -785,6 +862,24 @@ int aec_process_ex(Aec* aec,
     aec->main_err_smooth   = alpha_s * aec->main_err_smooth   + (1.0f - alpha_s) * main_err;
     aec->shadow_err_smooth = alpha_s * aec->shadow_err_smooth + (1.0f - alpha_s) * shadow_err;
 
+    /* === Shadow DTD with offset (B2) === */
+    {
+        float far_pwr_shadow = 0.0f;
+        for (int i = 0; i < hop; i++) far_pwr_shadow += ref[i] * ref[i];
+        int far_active_shadow = (far_pwr_shadow / hop > 1e-4f);
+
+        if (aec->shadow_frame_count >= 50 && far_active_shadow) {
+            float shadow_advantage = aec->main_err_smooth / (aec->shadow_err_smooth + 1e-10f);
+            aec->shadow_advantage = shadow_advantage;
+            float dt_from_shadow = clampf(
+                (shadow_advantage - cfg->shadow_dtd_offset) / cfg->shadow_dtd_advantage_scale,
+                0.0f, 1.0f);
+            aec->dt_from_shadow = 0.7f * aec->dt_from_shadow + 0.3f * dt_from_shadow;
+        } else {
+            aec->dt_from_shadow *= 0.95f;
+        }
+    }
+
     /* Copy gate (after warmup) */
     if (aec->shadow_frame_count >= 50) {
         float threshold = cfg->shadow_copy_threshold;
@@ -807,15 +902,19 @@ int aec_process_ex(Aec* aec,
         if (copy_allowed) {
             if (aec->shadow_err_smooth < aec->main_err_smooth * threshold) {
                 aec->shadow_copy_counter++;
+                aec->shadow_advantage_streak++;
             } else {
                 aec->shadow_copy_counter = 0;
+                aec->shadow_advantage_streak = 0;
             }
 
-            if (aec->shadow_copy_counter >= cfg->shadow_copy_hysteresis) {
+            if (aec->shadow_copy_counter >= cfg->shadow_copy_hysteresis
+                && aec->shadow_advantage_streak >= 10) {
                 /* Shadow → Main copy */
                 pbfdkf_copy_weights(aec->filter, aec->shadow_filter);
                 aec->main_err_smooth = aec->shadow_err_smooth;
                 aec->shadow_copy_counter = 0;
+                aec->shadow_advantage_streak = 0;
             } else if (aec->main_err_smooth < aec->shadow_err_smooth * threshold && not_dt) {
                 /* Bidirectional: Main → Shadow */
                 pbfdkf_copy_weights(aec->shadow_filter, aec->filter);
@@ -847,8 +946,14 @@ int aec_process_ex(Aec* aec,
             pbfdkf_set_q_high(aec->filter, cfg->kalman_q_high);
             pbfdkf_set_q_high(aec->shadow_filter,
                               cfg->kalman_q_high * cfg->shadow_q_ratio);
+            pbfdkf_set_p_floor_epc(aec->filter, 1.0f, 30);
+            pbfdkf_set_p_floor_epc(aec->shadow_filter, 1.0f, 30);
             aec->filter_converged = 0;
             aec->conv_counter = 0;
+            /* G1: render-forced countdown */
+            aec->epc_render_forced_remaining = cfg->epc_hangover;
+            /* A4: clamp ERL estimate on EPC */
+            if (aec->erl_estimate > 0.3f) aec->erl_estimate = 0.3f;
         } else if (aec->epc_hangover_count > 0) {
             aec->epc_hangover_count--;
             aec->epc_active = 1;
@@ -907,6 +1012,20 @@ int aec_process_ex(Aec* aec,
         aec->is_stationary_dt = 0;
     }
 
+    /* D4: wn_err_baseline slow tracking during converged non-stationary far */
+    {
+        float far_pwr_d4 = 0.0f;
+        for (int i = 0; i < hop; i++) far_pwr_d4 += ref[i] * ref[i];
+        float far_pwr_d4_avg = far_pwr_d4 / hop;
+        float raw_err_pwr_d4 = 0.0f;
+        for (int i = 0; i < hop; i++) raw_err_pwr_d4 += aec->raw_output[i] * aec->raw_output[i];
+        raw_err_pwr_d4 = raw_err_pwr_d4 / hop + 1e-10f;
+        if (aec->filter_converged && !aec->is_stationary_far
+            && far_pwr_d4_avg > 1e-4f && aec->wn_err_baseline > 1e-6f) {
+            aec->wn_err_baseline = 0.995f * aec->wn_err_baseline + 0.005f * raw_err_pwr_d4;
+        }
+    }
+
     /* === RES post-filter === */
     if (aec->res) {
         /* far_power from ref */
@@ -914,78 +1033,129 @@ int aec_process_ex(Aec* aec,
         for (int i = 0; i < hop; i++) far_power += ref[i] * ref[i];
         far_power /= hop;
 
-        /* Dynamic over_sub: use max(instant, cumulative) ERLE like Python */
-        float inst_erle = aec_get_erle_instant(aec);
-        float cum_erle = aec_get_erle(aec);
-        float erle_for_factor = inst_erle > cum_erle ? inst_erle : cum_erle;
-        float erle_factor = clampf((erle_for_factor - 2.0f) / 8.0f, 0.0f, 1.0f);
-        float base_over_sub = cfg->res_over_sub_base +
-                               cfg->res_over_sub_scale * erle_factor;
-
-        /* DT indicator */
+        /* mic_pwr for DT + energy DT */
         float mic_pwr = 0.0f;
         for (int i = 0; i < hop; i++) mic_pwr += mic[i] * mic[i];
         mic_pwr = mic_pwr / hop + 1e-10f;
-        float far_p_dt = far_power + 1e-10f;
-        float raw_dt = 1.0f - far_p_dt / (mic_pwr + far_p_dt);
-        /* Note: far_power already computed from ref above */
-        /* ERLE correction: smoothed inst ERLE */
+
+        /* raw error power */
         float raw_err_pwr_dt = 0.0f;
         for (int i = 0; i < hop; i++) raw_err_pwr_dt += aec->raw_output[i] * aec->raw_output[i];
         raw_err_pwr_dt = raw_err_pwr_dt / hop + 1e-10f;
-        float inst_erle_raw_dt = mic_pwr / raw_err_pwr_dt;
-        aec->inst_erle_smooth = 0.7f * aec->inst_erle_smooth + 0.3f * inst_erle_raw_dt;
-        if (aec->inst_erle_smooth > 2.0f)
-            raw_dt /= aec->inst_erle_smooth;
 
-        /* EPC physical gate also zeroes raw_dt for the dt_indicator below */
-        if (aec->epc_active) raw_dt = 0.0f;
+        int far_active = (far_power > 1e-4f);
 
-        float dt_indicator = clampf(raw_dt, 0.0f, 0.8f);
+        /* === E: Windowed ERLE (v2.1.0 style) === */
+        float inst_erle = aec_get_erle_instant(aec);
+        {
+            float erle_decay = 0.999f;
+            aec->erle_window_near = erle_decay * aec->erle_window_near + aec->near_power;
+            aec->erle_window_err = erle_decay * aec->erle_window_err + aec->raw_error_power;
+            float erle_windowed = 10.0f * fast_log10((aec->erle_window_near + 1e-10f) /
+                                                      (aec->erle_window_err + 1e-10f));
+            float erle_for_factor = inst_erle > erle_windowed ? inst_erle : erle_windowed;
 
-        float dt_reduction = cfg->res_dt_reduction * dt_indicator;
-        float over_sub = maxf(base_over_sub - dt_reduction, 0.5f);
+            /* Dynamic over_sub: use max(instant, windowed) ERLE */
+            float erle_factor_raw = clampf(erle_for_factor / 10.0f, 0.0f, 1.0f);
+            /* Note: erle_factor ramp already applied by previous agent — keep as-is */
+            float erle_factor = erle_factor_raw;
+            aec->erle_factor_prev = erle_factor;
 
-        /* Compute divergence for RES (matching Python: only after convergence) */
-        if (aec->filter_converged && aec->near_power > 1e-8f) {
-            float inst_erle_linear = aec->near_power / (aec->raw_error_power + 1e-10f);
-            float is_diverged = (inst_erle_linear < 0.63f) ? 1.0f : 0.0f;
-            aec->divergence_indicator = 0.9f * aec->divergence_indicator + 0.1f * is_diverged;
-        } else {
-            aec->divergence_indicator *= 0.95f;
-        }
-        float res_divergence = aec->divergence_indicator;
+            float base_over_sub = cfg->res_over_sub_base +
+                                   cfg->res_over_sub_scale * erle_factor;
 
-        res_process(aec->res, aec->raw_output,
-                    pbfdkf_get_echo_spec(aec->filter),
-                    pbfdkf_get_far_spec(aec->filter),
-                    pbfdkf_get_near_spec(aec->filter),
-                    far_power, aec->filter_converged,
-                    erle_factor, dt_indicator, over_sub,
-                    res_divergence, aec->is_stationary_dt, output);
+            /* DT indicator with ERLE correction */
+            float far_p_dt = far_power + 1e-10f;
+            float raw_dt = 1.0f - far_p_dt / (mic_pwr + far_p_dt);
+            float inst_erle_raw_dt = mic_pwr / raw_err_pwr_dt;
+            aec->inst_erle_smooth = 0.7f * aec->inst_erle_smooth + 0.3f * inst_erle_raw_dt;
+            if (aec->inst_erle_smooth > 2.0f) {
+                float erle_for_dt = aec->inst_erle_smooth < 4.0f ? aec->inst_erle_smooth : 4.0f;
+                raw_dt /= erle_for_dt;
+            }
 
-        /* Update per-bin mu_scale from RES PSDs */
-        if (aec->filter_converged) {
-            const float* echo_psd = res_get_echo_psd(aec->res);
-            const float* error_psd = res_get_error_psd(aec->res);
-            if (echo_psd && error_psd) {
-                float mean_eer = 0.0f;
-                int nf = aec->n_freqs;
-                for (int k = 0; k < nf; k++) {
-                    float eer_k = clampf(echo_psd[k] / (error_psd[k] + 1e-10f), 0.0f, 1.0f);
-                    mean_eer += eer_k;
-                }
-                aec->simple_mu_ratio = mean_eer / nf;
-                /* Stationary DT: only freeze when speech actually detected
-                 * (is_stationary_far alone fires on 32% of normal speech
-                 * frames; that would crush filter convergence on plain FS). */
-                if (aec->is_stationary_dt) {
-                    aec->simple_mu_ratio = cfg->shadow_mu_min;
+            /* EPC physical gate also zeroes raw_dt for the dt_indicator below */
+            if (aec->epc_active) raw_dt = 0.0f;
+
+            float dt_indicator = clampf(raw_dt, 0.0f, 0.8f);
+
+            float dt_reduction = cfg->res_dt_reduction * dt_indicator;
+            float over_sub = maxf(base_over_sub - dt_reduction, 0.5f);
+
+            /* === F: Energy DT signal (pre-filter, immune to inst_erle) === */
+            if (aec->far_active_prev && far_active) {
+                float max_echo = far_power * 4.0f;
+                float dt_energy = maxf(0.0f, (mic_pwr - max_echo) / mic_pwr);
+                if (dt_energy > aec->dt_from_energy)
+                    aec->dt_from_energy = 0.3f * aec->dt_from_energy + 0.7f * dt_energy;
+                else
+                    aec->dt_from_energy = 0.9f * aec->dt_from_energy + 0.1f * dt_energy;
+            } else {
+                aec->dt_from_energy = 0.0f;
+            }
+
+            /* === G: Dynamic ERL tracking (B4) === */
+            if (far_active && !aec->filter_converged) {
+                float raw_dt_ratio = raw_err_pwr_dt / (far_power + 1e-10f);
+                if (raw_dt_ratio < 2.0f) {
+                    float inst_erl = clampf(mic_pwr / far_power, 0.001f, 1.0f);
+                    aec->erl_estimate = 0.99f * aec->erl_estimate + 0.01f * inst_erl;
                 }
             }
-        } else {
-            update_simple_mu_ratio(aec, aec->raw_output, ref, hop);
-        }
+
+            /* Compute divergence for RES (matching Python: only after convergence) */
+            if (aec->filter_converged && aec->near_power > 1e-8f) {
+                float inst_erle_linear = aec->near_power / (aec->raw_error_power + 1e-10f);
+                float is_diverged = (inst_erle_linear < 0.63f) ? 1.0f : 0.0f;
+                aec->divergence_indicator = 0.9f * aec->divergence_indicator + 0.1f * is_diverged;
+            } else {
+                aec->divergence_indicator *= 0.95f;
+            }
+            float res_divergence = aec->divergence_indicator;
+
+            /* === I: Combined shadow_dt for RES === */
+            float shadow_dt_signal = aec->epc_active ? 0.0f
+                : maxf(aec->dt_from_energy, aec->dt_from_shadow);
+
+            /* === J: EPC render-forced countdown (G1) === */
+            if (aec->epc_render_forced_remaining > 0) {
+                aec->epc_render_forced_remaining--;
+                res_force_render_based(aec->res);
+            }
+
+            /* v2.1.0: pass shadow_dt separately — RES merges via effective_dt */
+            res_process(aec->res, aec->raw_output,
+                        pbfdkf_get_echo_spec(aec->filter),
+                        pbfdkf_get_far_spec(aec->filter),
+                        pbfdkf_get_near_spec(aec->filter),
+                        far_power, aec->filter_converged,
+                        erle_factor, dt_indicator, over_sub,
+                        res_divergence, aec->is_stationary_dt,
+                        shadow_dt_signal, aec->erl_estimate,
+                        aec->epc_active, aec->saturation_level,
+                        output);
+
+            /* Update per-bin mu_scale from RES PSDs */
+            if (aec->filter_converged) {
+                const float* echo_psd = res_get_echo_psd(aec->res);
+                const float* error_psd = res_get_error_psd(aec->res);
+                if (echo_psd && error_psd) {
+                    float mean_eer = 0.0f;
+                    int nf = aec->n_freqs;
+                    for (int k = 0; k < nf; k++) {
+                        float eer_k = clampf(echo_psd[k] / (error_psd[k] + 1e-10f), 0.0f, 1.0f);
+                        mean_eer += eer_k;
+                    }
+                    aec->simple_mu_ratio = mean_eer / nf;
+                    /* Stationary DT: only freeze when speech actually detected */
+                    if (aec->is_stationary_dt) {
+                        aec->simple_mu_ratio = cfg->shadow_mu_min;
+                    }
+                }
+            } else {
+                update_simple_mu_ratio(aec, aec->raw_output, ref, hop);
+            }
+        } /* end E block */
     } else {
         update_simple_mu_ratio(aec, aec->raw_output, ref, hop);
     }

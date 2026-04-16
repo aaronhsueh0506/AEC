@@ -93,6 +93,10 @@ struct ResFilter {
     float reverb_gain;
     float* reverb_psd;    /* [n_freqs] */
 
+    /* v2.1.0: AEC3-style echo switching */
+    int using_render_based;
+    int render_hold;
+
     /* WOLA */
     float* window;        /* [frame_size] sqrt-Hann */
     float* input_buf;     /* [frame_size] analysis sliding buffer */
@@ -264,6 +268,12 @@ void res_reset(ResFilter* r) {
     memset(r->input_buf, 0, r->frame_size * sizeof(float));
     memset(r->ola_buf, 0, r->frame_size * sizeof(float));
     r->far_activity = 0.0f;
+    r->using_render_based = 0;
+    r->render_hold = 0;
+}
+
+void res_force_render_based(ResFilter* r) {
+    if (r) r->using_render_based = 1;
 }
 
 /* === Multi-ERLE helper functions (v2.0.0) === */
@@ -331,6 +341,10 @@ void res_process(ResFilter* r,
                  float over_sub,
                  float divergence,
                  int is_stationary_dt,
+                 float shadow_dt,
+                 float erl_estimate,
+                 int epc_active,
+                 float saturation_level,
                  float* output_hop) {
     if (!r || !error_hop || !output_hop) return;
 
@@ -339,7 +353,12 @@ void res_process(ResFilter* r,
      * - For non-stationary scenes both equal dt_indicator_in (zero impact). */
     float dt_indicator = dt_indicator_in;
     float dt_for_fs   = is_stationary_dt ? 0.8f : dt_indicator_in;
-    float dt_temporal = is_stationary_dt ? 0.8f : dt_indicator_in;
+
+    /* v2.1.0: three-line effective_dt drive — merge shadow_dt */
+    float effective_dt = maxf(dt_for_fs, shadow_dt);
+
+    /* v2.1.0: light release EMA — dt_temporal uses shadow_dt blend */
+    float dt_temporal = is_stationary_dt ? 0.8f : maxf(dt_indicator_in, shadow_dt * 0.5f);
 
     const int nf = r->n_freqs;
     const int hop = r->hop_size;
@@ -415,6 +434,7 @@ void res_process(ResFilter* r,
                 r->S_fe_r[k] *= 0.5f;
                 r->S_fe_i[k] *= 0.5f;
                 r->S_ff[k]   *= 0.5f;
+                r->S_ee[k]   *= 0.5f;  /* A1: sync decay */
             }
         }
     }
@@ -548,6 +568,46 @@ void res_process(ResFilter* r,
             if (residual_echo_psd[k] > cap) residual_echo_psd[k] = cap;
         }
 
+        /* === v2.1.0: AEC3-style render-based vs filter-based switching === */
+        {
+            float enr_avg = 0.0f;
+            float error_psd_sum = 0.0f;
+            for (int k = 0; k < nf; k++) {
+                enr_avg += r->echo_psd[k];
+                error_psd_sum += r->error_psd[k];
+            }
+            enr_avg /= (error_psd_sum + 1e-10f);
+            float switching_threshold = 0.5f * clampf(enr_avg / (enr_avg + 1.0f), 0.3f, 0.7f);
+
+            float hysteresis = 0.05f;
+            float eff_threshold = r->using_render_based
+                ? switching_threshold + hysteresis : switching_threshold;
+
+            /* G2: explicit overrides */
+            int force_render = epc_active || (saturation_level > 0.5f);
+
+            /* G5: minimum hold time */
+            int want_render = (erle_factor < eff_threshold) || force_render;
+            if (want_render && !r->using_render_based)
+                r->render_hold = 5;
+            if (r->using_render_based && r->render_hold > 0)
+                r->render_hold--;
+            int can_exit = !want_render && (r->render_hold == 0);
+            r->using_render_based = want_render || (r->using_render_based && !can_exit);
+
+            if (r->using_render_based && far_spec) {
+                /* Render-based: far_psd × erl_estimate */
+                for (int k = 0; k < nf; k++) {
+                    float far_psd_k = far_spec[k].r * far_spec[k].r +
+                                      far_spec[k].i * far_spec[k].i;
+                    float render_echo = far_psd_k * erl_estimate;
+                    float blend = clampf(1.0f - erle_factor / eff_threshold, 0.0f, 1.0f);
+                    residual_echo_psd[k] = (1.0f - blend) * residual_echo_psd[k]
+                                           + blend * render_echo;
+                }
+            }
+        }
+
         /* === (j) Reverb tail ===
          * Skip on stationary DT — reverb_psd accumulates massive WN energy
          * that drowns near-end speech in residual_echo_psd. */
@@ -619,8 +679,8 @@ void res_process(ResFilter* r,
         for (int k = 0; k < nf; k++) spectral_g_min[k] = eff_g_min;
     }
 
-    /* fs_confidence: continuous FS/DT/NE indicator (uses dt_for_fs) */
-    float dt_inv = 1.0f - dt_for_fs;
+    /* fs_confidence: continuous FS/DT/NE indicator (uses effective_dt) */
+    float dt_inv = 1.0f - effective_dt;
     float fs_confidence = r->far_activity * dt_inv * dt_inv;
 
     /* === (m) Per-bin near-end gate === */
@@ -656,7 +716,7 @@ void res_process(ResFilter* r,
         float dt_per_bin[257];
         for (int k = 0; k < nf; k++) {
             float v = 1.0f - coh2[k];
-            dt_per_bin[k] = (dt_for_fs > v) ? dt_for_fs : v;
+            dt_per_bin[k] = (effective_dt > v) ? effective_dt : v;
         }
         if (is_stationary_dt) {
             float freq_per_bin = 16000.0f / (float)bs;
@@ -695,6 +755,8 @@ void res_process(ResFilter* r,
             float enr_s = ne_confidence * enr_s_ne + (1.0f - ne_confidence) * enr_s_fs;
 
             /* === (p) Soft gate: linear interpolation === */
+            float min_gate_width = 0.2f;
+            if (enr_s < enr_t + min_gate_width) enr_s = enr_t + min_gate_width;
             if (enr > enr_t) {
                 g[k] = clampf((enr_s - enr) / (enr_s - enr_t + eps), 0.0f, 1.0f);
             } else {
@@ -765,7 +827,7 @@ void res_process(ResFilter* r,
         float freq_res = 16000.0f / (float)bs;
         int hf_cap_bin = (int)(500.0f / freq_res);
         if (hf_cap_bin > nf - 1) hf_cap_bin = nf - 1;
-        if (nf > hf_cap_bin + 1 && dt_indicator < 0.5f && !is_stationary_dt) {
+        if (nf > hf_cap_bin + 1 && effective_dt < 0.5f && !is_stationary_dt) {
             float hf_cap = g[hf_cap_bin];
             for (int k = hf_cap_bin + 1; k < nf; k++)
                 g[k] = minf(g[k], hf_cap);
@@ -780,16 +842,8 @@ void res_process(ResFilter* r,
     }
 
     /* === (v) Gain temporal smoothing ===
-     * DT-aware release only on stationary DT (matches Python v13 gating). */
-    float alpha_release_base = 0.4f + 0.5f * r->far_activity;
-    float alpha_release = alpha_release_base;
-    if (is_stationary_dt) {
-        float t_sq = dt_temporal * dt_temporal;
-        float clamped = 1.0f - t_sq;
-        if (clamped < 0.1f) clamped = 0.1f;
-        if (clamped > 1.0f) clamped = 1.0f;
-        alpha_release = alpha_release_base * clamped;
-    }
+     * v2.1.0: light release EMA driven by dt_temporal */
+    float alpha_release = 0.5f - 0.2f * dt_temporal;
     float alpha_fast = 0.3f + 0.2f * (1.0f - erle_factor);
     float alpha_slow = 0.85f + 0.1f * (1.0f - erle_factor);
     float alpha_attack = alpha_slow + (alpha_fast - alpha_slow) * fs_confidence;

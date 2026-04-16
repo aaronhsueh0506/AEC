@@ -68,14 +68,20 @@ typedef struct {
     /* Shadow filter */
     float shadow_q_ratio;       /* 3.5 */
     float shadow_copy_threshold; /* 0.7 */
-    float shadow_err_alpha;     /* 0.85 */
+    float shadow_err_alpha;     /* 0.80 (D3: was 0.85) */
     float shadow_mu_min;        /* 0.6 */
     int   shadow_copy_hysteresis; /* 5 */
+    float shadow_dtd_advantage_scale; /* 3.0 — (advantage-offset)/scale → DT confidence */
+    float shadow_dtd_offset;    /* 1.5 (B2) — advantage must exceed this to signal DT */
 
     /* FDKF Kalman */
     float kalman_q_high;        /* 1e-4 */
-    float kalman_q_low;         /* 1e-5 */
+    float kalman_q_low;         /* 1e-6 (D6: was 1e-5) */
     int   warmup_frames;        /* 150 */
+
+    /* Saturation detection */
+    float saturation_threshold; /* 0.95 */
+    float saturation_over_sub_boost; /* 3.0 */
 
     /* Echo path change detection */
     float epc_delta_threshold;  /* 0.3 */
@@ -111,6 +117,8 @@ typedef struct {
     float    over_sub;          /* dynamic over_sub value */
     int      n_freqs;           /* number of frequency bins */
     int      is_stationary_dt;  /* 1 = stationary far-end DT detected */
+    float    saturation_level;  /* [0, 1] speaker saturation */
+    float    erl_estimate;      /* dynamic ERL for render-based (B4) */
 } AecResContext;
 
 /* --- Factory functions --- */
@@ -123,7 +131,10 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.sample_rate = sample_rate;
     c.frame_size = sample_rate * 20 / 1000;   /* 20ms: 160@8k, 320@16k, 960@48k */
     c.hop_size = c.frame_size / 2;            /* 10ms: 80@8k, 160@16k, 480@48k */
-    c.filter_length = sample_rate * 32 / 1000;  /* 32ms: 256@8k, 512@16k, 1536@48k */
+    /* D5: 48kHz needs longer filter (room reverb more prominent) */
+    c.filter_length = (sample_rate >= 44100)
+        ? sample_rate * 64 / 1000    /* 64ms @ 48kHz */
+        : sample_rate * 32 / 1000;   /* 32ms @ 8k/16k */
     c.delta = 1e-8f;
 
     c.enable_res = 1;
@@ -149,13 +160,18 @@ static inline AecConfig aec_default_config(int sample_rate) {
 
     c.shadow_q_ratio = 3.5f;
     c.shadow_copy_threshold = 0.7f;
-    c.shadow_err_alpha = 0.85f;
+    c.shadow_err_alpha = 0.80f;      /* D3: was 0.85 */
     c.shadow_mu_min = 0.6f;
     c.shadow_copy_hysteresis = 5;
+    c.shadow_dtd_advantage_scale = 3.0f;
+    c.shadow_dtd_offset = 1.5f;      /* B2 */
 
     c.kalman_q_high = 1e-3f;
-    c.kalman_q_low = 1e-5f;
+    c.kalman_q_low = 1e-6f;          /* D6: was 1e-5 */
     c.warmup_frames = 80;
+
+    c.saturation_threshold = 0.95f;
+    c.saturation_over_sub_boost = 3.0f;
 
     c.epc_delta_threshold = 0.3f;
     c.epc_total_rise = 1.5f;

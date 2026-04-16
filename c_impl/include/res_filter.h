@@ -104,6 +104,10 @@ void res_reset(ResFilter* res);
  * @param over_sub     Over-subtraction factor (dynamic, set by coordinator)
  * @param divergence   [0,1] filter divergence indicator
  * @param is_stationary_dt 1 if stationary far-end DT detected (use protection)
+ * @param shadow_dt    [0,1] shadow filter DT indicator (for effective_dt)
+ * @param erl_estimate Echo return loss estimate (for render-based echo)
+ * @param epc_active   1 if echo path change detected (force render-based)
+ * @param saturation_level [0,1] mic saturation level (force render-based + nonlinear echo)
  * @param output_hop   Enhanced output [hop_size]
  */
 void res_process(ResFilter* res,
@@ -118,7 +122,16 @@ void res_process(ResFilter* res,
                  float over_sub,
                  float divergence,
                  int is_stationary_dt,
+                 float shadow_dt,
+                 float erl_estimate,
+                 int epc_active,
+                 float saturation_level,
                  float* output_hop);
+
+/**
+ * Force render-based echo switching mode
+ */
+void res_force_render_based(ResFilter* res);
 
 /**
  * Get echo_psd and error_psd arrays (for per-bin mu_scale)

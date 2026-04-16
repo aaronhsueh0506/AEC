@@ -63,6 +63,10 @@ struct Pbfdkf {
     float alpha_r;        /* R smoothing (0.95, aligned with Python) */
     float q_low_base;     /* base Q_low value for set_q_ratio */
 
+    /* P-floor clamping (v2.1.0) */
+    float p_floor_beta;       /* 0.1 normal, 1.0 during EPC */
+    int   p_floor_beta_frames;/* countdown frames for EPC beta */
+
     /* Input buffers [block_size] */
     float* near_buffer;
     float* far_buffer;
@@ -118,6 +122,8 @@ Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
     f->alpha_r = 0.95f;
     f->partition_idx = 0;
     f->q_low_base = q_low;
+    f->p_floor_beta = 0.1f;
+    f->p_floor_beta_frames = 0;
 
     f->fft = fft_create(f->fft_size);
     if (!f->fft) goto error;
@@ -259,6 +265,8 @@ void pbfdkf_reset(Pbfdkf* f) {
     memset(f->far_buffer, 0, f->block_size * sizeof(float));
     memset(f->power, 0, f->n_freqs * sizeof(float));
     f->partition_idx = 0;
+    f->p_floor_beta = 0.1f;
+    f->p_floor_beta_frames = 0;
 }
 
 void pbfdkf_reset_weights(Pbfdkf* f) {
@@ -272,6 +280,8 @@ void pbfdkf_reset_weights(Pbfdkf* f) {
         f->R[k] = 1e-2f;
         f->error_psd[k] = 1e-2f;
     }
+    f->p_floor_beta = 0.1f;
+    f->p_floor_beta_frames = 0;
 }
 
 int pbfdkf_process(Pbfdkf* f,
@@ -412,6 +422,9 @@ int pbfdkf_process(Pbfdkf* f,
                 float P_new = (1.0f - KX) * f->P[p][k] + Q_gated;
                 if (P_new < delta) P_new = delta;
                 if (P_new > P_MAX) P_new = P_MAX;
+                /* P-floor: clamp P >= Q_high * beta (v2.1.0) */
+                float p_floor = f->Q_high[k] * f->p_floor_beta;
+                if (P_new < p_floor) P_new = p_floor;
                 f->P[p][k] = P_new;
             }
 
@@ -421,6 +434,13 @@ int pbfdkf_process(Pbfdkf* f,
                 f->temp_time[k] *= f->td_window[k];
             fft_forward(f->fft, f->temp_time, f->W[p]);
         }
+    }
+
+    /* P-floor beta countdown (v2.1.0) */
+    if (f->p_floor_beta_frames > 0) {
+        f->p_floor_beta_frames--;
+        if (f->p_floor_beta_frames == 0)
+            f->p_floor_beta = 0.1f;
     }
 
     /* Advance partition index */
@@ -449,6 +469,12 @@ void pbfdkf_set_q_ratio(Pbfdkf* f, float q_high, float q_low, float ratio) {
         f->Q_low[k]  = q_low * ratio;
         f->Q[k]      = f->Q_high[k];
     }
+}
+
+void pbfdkf_set_p_floor_epc(Pbfdkf* f, float beta, int frames) {
+    if (!f) return;
+    f->p_floor_beta = beta;
+    f->p_floor_beta_frames = frames;
 }
 
 int pbfdkf_copy_weights(Pbfdkf* dst, const Pbfdkf* src) {
