@@ -69,7 +69,7 @@ class AecConfig:
     sample_rate: int = 16000      # 8000 / 16000 / 48000
     frame_size: int = -1          # Auto: sample_rate * 20ms (160@8k, 320@16k, 960@48k)
     hop_size: int = -1            # Auto: frame_size / 2 (80@8k, 160@16k, 480@48k)
-    filter_length: int = -1      # Auto: sample_rate * 32ms (256@8k, 512@16k, 1536@48k)
+    filter_length: int = -1      # Auto: 32ms (8k/16k) or 64ms (48k)
     mu: float = 0.3              # Step size
     delta: float = 1e-8          # Regularization
     enable_dtd: bool = False
@@ -180,7 +180,11 @@ class AecConfig:
         if self.hop_size == -1:
             self.hop_size = self.frame_size // 2             # 10ms
         if self.filter_length == -1:
-            self.filter_length = self.sample_rate * 32 // 1000  # 32ms
+            # D5: 48kHz needs longer filter (room reverb more prominent)
+            if self.sample_rate >= 44100:
+                self.filter_length = self.sample_rate * 64 // 1000  # 64ms
+            else:
+                self.filter_length = self.sample_rate * 32 // 1000  # 32ms
 
     @property
     def fft_size(self) -> int:
@@ -1020,96 +1024,71 @@ class ResFilter:
         self.reverb_decay = reverb_decay
         self.reverb_gain = reverb_gain
 
+        # --- Immutable config (set once, not cleared by reset) ---
+        self.alpha_coh = 0.65           # Cross-PSD smoothing (TC≈50ms)
+        self.enable_cng = enable_cng
+        self.alpha_noise = 0.98
+        self.max_drop_ratio = 10 ** (max_drop_db_per_frame / 20)
+        self.max_rise_ratio = 10 ** (max_rise_db_per_frame / 20)
+        self.enable_spectral_floor = enable_spectral_floor
+        self.spectral_floor_ratio = 10 ** (spectral_floor_db / 20)
+        self.alpha_envelope = 0.95
+        self.window = np.sqrt(np.hanning(self.frame_size)).astype(np.float32)
+
+        # --- Runtime state arrays (allocated once, cleared by reset) ---
         self.gain_smooth = np.full(n_freqs, self.g_min, dtype=np.float32)
         self.echo_psd = np.zeros(n_freqs, dtype=np.float32)
         self.error_psd = np.zeros(n_freqs, dtype=np.float32)
-
-        # Diagnostic attributes (initialized here, updated in process())
-        self._diag_gain_mean = 1.0
-        self._diag_gain_min = 1.0
-        self._diag_effective_g_min = 1.0
-        self._diag_far_activity = 0.0
-        self._diag_echo_psd_mean = 0.0
-        self._diag_error_psd_mean = 0.0
-        self._noise_initialized = False  # B5: explicit bool instead of hasattr
-        self._render_based_hold = 0    # G5: minimum hold frames for render-based mode
-        self._using_render_based = False  # E1: explicit init (was only in reset())
-
-        # Coherence-based nonlinear echo PSD estimation
-        # Coherence between far-end and error captures both linear and
-        # nonlinear echo components (both correlate with far-end).
-        self.alpha_coh = 0.65           # Cross-PSD smoothing (TC≈50ms, stable)
-        self.S_fe = np.zeros(n_freqs, dtype=np.complex64)  # Cross-PSD far×error
-        self.S_ff = np.zeros(n_freqs, dtype=np.float32)    # Far-end PSD
-        self.S_ee = np.zeros(n_freqs, dtype=np.float32)    # Error PSD
-
-        # Direct echo estimation: near-end PSD (used by FullbandErleEstimator)
+        self.S_fe = np.zeros(n_freqs, dtype=np.complex64)
+        self.S_ff = np.zeros(n_freqs, dtype=np.float32)
+        self.S_ee = np.zeros(n_freqs, dtype=np.float32)
         self.near_psd = np.zeros(n_freqs, dtype=np.float32)
-        # 4-block near-end moving average (reduces gain fluctuation, cf. AEC3)
         self.near_psd_buf = np.zeros((4, n_freqs), dtype=np.float32)
-        self.near_psd_idx = 0
-
-        # Reverb tail model
         self.reverb_psd = np.zeros(n_freqs, dtype=np.float32)
-
-        # Nonlinear echo mode: sustained saturation → boost echo estimate
-        self._nonlinear_frames = 0
-
-        # CNG (comfort noise generation)
-        self.enable_cng = enable_cng
         self.noise_psd = np.zeros(n_freqs, dtype=np.float32)
-        self.alpha_noise = 0.98
-
-        # Coherence smoothing (init here instead of lazy hasattr)
         self._coh2_smooth = np.zeros(n_freqs, dtype=np.float32)
-
-        # Far-end activity tracking for dynamic g_min
-        self.far_activity = 0.0
-
-        # Anti-blackout: gain rate limiting
-        self.max_drop_ratio = 10 ** (max_drop_db_per_frame / 20)  # e.g., 6dB → 1.995
-        self.max_rise_ratio = 10 ** (max_rise_db_per_frame / 20)  # e.g., 3dB → 1.413
-
-        # Spectral-shape-preserving floor
-        self.enable_spectral_floor = enable_spectral_floor
-        self.spectral_floor_ratio = 10 ** (spectral_floor_db / 20)  # e.g., -25dB → 0.056
         self.error_envelope = np.ones(n_freqs, dtype=np.float32)
-        self.alpha_envelope = 0.95  # Slow-tracking spectral envelope
-
-        # Multi-ERLE estimators (Phase 2)
-        self._filter_erle_est = FilterErleEstimator(n_freqs)
-        self._fb_erle_est = FullbandErleEstimator()
-
-        # OLA: sqrt-Hann window + sliding input buffer + overlap buffer
-        self.window = np.sqrt(np.hanning(self.frame_size)).astype(np.float32)
         self.input_buf = np.zeros(self.frame_size, dtype=np.float32)
         self.ola_buf = np.zeros(self.frame_size, dtype=np.float32)
 
+        # Multi-ERLE estimators
+        self._filter_erle_est = FilterErleEstimator(n_freqs)
+        self._fb_erle_est = FullbandErleEstimator()
+
+        # E1: call reset() to initialize all runtime scalar state
+        # from a single source of truth (avoids init/reset divergence)
+        self.reset()
+
     def reset(self):
+        """Reset all runtime state. Arrays are .fill(0), scalars are set."""
         self.gain_smooth.fill(self.g_min)
         self.echo_psd.fill(0)
         self.error_psd.fill(0)
         self.S_fe.fill(0)
         self.S_ff.fill(0)
         self.S_ee.fill(0)
-        self.noise_psd.fill(0)
-        self._noise_initialized = False
-        self._render_based_hold = 0
-        self.far_activity = 0.0
-        self.input_buf.fill(0)
-        self.ola_buf.fill(0)
         self.near_psd.fill(0)
         self.near_psd_buf.fill(0)
         self.near_psd_idx = 0
-        self._coh2_smooth.fill(0)
         self.reverb_psd.fill(0)
+        self.noise_psd.fill(0)
+        self._noise_initialized = False
+        self._coh2_smooth.fill(0)
+        self.error_envelope.fill(1.0)
+        self.input_buf.fill(0)
+        self.ola_buf.fill(0)
+        self.far_activity = 0.0
+        self._nonlinear_frames = 0
+        self._render_based_hold = 0
+        self._using_render_based = False
+        self._diag_gain_mean = 1.0
+        self._diag_gain_min = 1.0
+        self._diag_effective_g_min = 1.0
+        self._diag_far_activity = 0.0
+        self._diag_echo_psd_mean = 0.0
+        self._diag_error_psd_mean = 0.0
         self._filter_erle_est.reset()
         self._fb_erle_est.reset()
-        self.error_envelope.fill(1.0)
-        self._nonlinear_frames = 0
-        # D-4: clear render-based state so next call starts from
-        # filter-based (will switch to render-based if erle_factor is low).
-        self._using_render_based = False
 
     def process(self, error_hop: np.ndarray, echo_spec: np.ndarray,
                 far_power: float, far_spec: np.ndarray = None,
