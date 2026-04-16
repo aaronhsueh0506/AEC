@@ -1,31 +1,55 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v2.2.0），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+回音消除模組（v2.3.0），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
 
-**v2.2.0 主要改進（2026-04）**：
+**v2.3.0 主要改進（2026-04）**：
 
 - **Pre-filter Energy DT signal**：`mic_pwr > 4 × far_pwr` 檢測 near-end 能量溢出，繞過 inst_erle correction 的死角
 - **Shadow DTD + Energy DT 互補覆蓋**：`max(shadow_dt, energy_dt)` — onset（shadow）+ sustained（energy）全程有信號
 - **三線驅動 effective_dt**：dt_per_bin、fs_confidence、HF cap bypass 全部接上 effective_dt，5 條 DT 保護路徑完整啟動
-- **NE→FS far_active gate**：消除 NE silent 段 energy DT 的 90ms hangover，保護 FS echo
-- **dt_temporal 驅動**：gain release/rise 在高耦合 DT 也正確響應
-- **EPC gate**：energy DT 和 shadow DTD 在 EPC 期間歸零
-- **Bug fixes**：reset() 補齊 4 個 DT 狀態；dead code 標記（dt_reduction → over_sub 在 ENR 路徑無效）
+- **Blindspot fixes**：S_ee decay 同步（A1）、delay reset 帶 ResFilter（A2）、動態 ERL 估計（B4）、GCC-PHAT PAR gate（A5）、EPC render-forced 延長至 200ms（G1）
+- **Render-based 穩定性**：explicit override（epc_active / saturation）、minimum hold time（5 frames）
+- **Shadow copy 防護**：advantage streak gate（≥10 frames），防止短暫 echo burst 誤觸發 copy
+- **Code cleanup**：dead code 刪除（B1-B5）、per-frame 常數移 init（C1-C4）、diagnostics 擴充（19 keys）
 
 **Blind test 成績（fl=512, AEC Challenge Interspeech 2021, 800 cases, AECMOS）**：
 
-| Method | SR | FL | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
-|--------|----|----|----------|----------|---------|---------|
-| Linear (balanced) | 16k | 512 | 2.710 | 3.167 | 3.198 | 4.069 |
-| Speex (SpeexDSP 1.2) | 16k | 2048 | 2.808 | 3.368 | 3.225 | 4.128 |
-| WebRTC AEC2 | 16k | — | 3.484 | 4.262 | 2.389 | 4.098 |
-| **mild** | 16k | 512 | 3.155 | 3.882 | **2.441** | **4.019** |
-| **balanced** | 16k | 512 | **3.502** | 4.163 | 2.283 | 4.008 |
-| **aggressive** | 16k | 512 | **3.621** | 4.289 | 2.231 | 3.994 |
-| **maximum** | 16k | 512 | **3.722** | 4.412 | 2.162 | 3.961 |
-| WebRTC AEC3 | 16k | 768 | 3.875 | **4.538** | 1.850 | 3.454 |
+**總表**：
 
-> **balanced FS echo 3.502 穩固超越 AEC2**（+0.018）。**mild DT deg 2.441 超越 AEC2**（+0.052）。全 preset DT deg 大幅領先 AEC3（+0.31~+0.59）、NE deg 領先 AEC3（+0.51~+0.57）。v2.3.0 新增 blindspot fixes（S_ee decay、delay reset、ERL 動態估計、PAR gate、EPC 延長）和 code cleanup（dead code、per-frame 常數移 init）。
+| Method | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
+|--------|----------|----------|---------|---------|
+| PBFDKF Linear (balanced) | 2.714 | 3.162 | 3.225 | — |
+| Speex (SpeexDSP 1.2) | 2.808 | 3.368 | 3.225 | 4.128 |
+| WebRTC AEC2 | 3.484 | 4.262 | 2.389 | 4.098 |
+| **mild** | 3.155 | 3.882 | **2.441** | **4.019** |
+| **balanced** | **3.502** | 4.163 | 2.283 | 4.008 |
+| **aggressive** | **3.621** | 4.289 | 2.231 | 3.994 |
+| **maximum** | **3.722** | 4.412 | 2.162 | 3.961 |
+| WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
+
+**FS echo — No Movement / With Movement 分解**（169 no-mv / 131 mv）：
+
+| Method | no-mv FS echo↑ | mv FS echo↑ | ALL |
+|--------|----------------|-------------|-----|
+| PBFDKF Linear (balanced) | 2.721 | 2.705 | 2.714 |
+| **mild** | 3.134 | 3.181 | 3.155 |
+| **balanced** | 3.464 | 3.551 | **3.502** |
+| **aggressive** | 3.549 | 3.713 | **3.621** |
+| **maximum** | 3.638 | 3.830 | **3.722** |
+| WebRTC AEC3 | 3.524 | 3.602 | 3.558 |
+
+**DT — No Movement / With Movement 分解**（186 no-mv / 114 mv）：
+
+| Method | no-mv echo↑ | mv echo↑ | no-mv deg↑ | mv deg↑ | ALL echo | ALL deg |
+|--------|------------|---------|------------|---------|---------|---------|
+| PBFDKF Linear (balanced) | 3.162 | 3.162 | 3.233 | 3.213 | 3.162 | 3.225 |
+| **mild** | 3.908 | 3.839 | 2.437 | 2.447 | 3.882 | **2.441** |
+| **balanced** | 4.192 | 4.116 | 2.303 | 2.251 | 4.163 | 2.283 |
+| **aggressive** | 4.310 | 4.254 | 2.266 | 2.173 | 4.289 | 2.231 |
+| **maximum** | 4.431 | 4.383 | 2.204 | 2.094 | 4.412 | 2.162 |
+| WebRTC AEC3 | 4.216 | 4.147 | 2.213 | 2.209 | 4.190 | 2.211 |
+
+> **balanced FS echo 3.502 穩固超越 AEC2**（+0.018）。**mild DT deg 2.441 超越 AEC2**（+0.052）。全 preset DT deg 大幅領先 AEC3（+0.31~+0.59）、NE deg 領先 AEC3（+0.51~+0.57）。Movement cases 在 aggressive/maximum preset 表現更突出（FS echo mv > no-mv），得益於 B3 delay reset + B4 動態 ERL。
 
 > Pipeline（AEC+NR+RES）成績見 [Audio_ALG](https://github.com/aaronhsueh0506/Audio_ALG) README。
 

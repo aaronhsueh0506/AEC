@@ -2,7 +2,10 @@
 
 C 語言 AEC 實作，對齊 Python **v2.0.0**（correlation 0.971）。
 
-> **Python v2.1.0 (2026-04-16) 尚未同步到 C 端**。v2.1.0 主要改動集中在 ResFilter（AEC3-style echo switching / P-floor / inst_erle cap / light release EMA / BUG-3 min_gate_width）和 PBFDKF 的 P-floor 邏輯。C 端移植計畫見 [docs/DEVLOG.md](../docs/DEVLOG.md) v2.1.0 條目。
+> **Python v2.3.0 (2026-04-16) 尚未同步到 C 端**。C 端仍對齊 v2.0.0。待移植改動：
+> - v2.1.0：AEC3-style echo switching / P-floor / inst_erle cap / light release EMA / BUG-3 min_gate_width
+> - v2.3.0：Energy DT 三線驅動 / shadow DTD offset / 動態 ERL / PAR gate / EPC 延長 / S_ee decay fix / shadow copy streak / render-based hold + override / dead code cleanup / per-frame 常數移 init
+> C 端移植計畫見 [docs/DEVLOG.md](../docs/DEVLOG.md)。
 
 ## 特點
 
