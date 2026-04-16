@@ -357,8 +357,8 @@ void res_process(ResFilter* r,
     /* v2.1.0: three-line effective_dt drive — merge shadow_dt */
     float effective_dt = maxf(dt_for_fs, shadow_dt);
 
-    /* v2.1.0: light release EMA — dt_temporal uses shadow_dt blend */
-    float dt_temporal = is_stationary_dt ? 0.8f : maxf(dt_indicator_in, shadow_dt * 0.5f);
+    /* v2.1.0: dt_temporal uses effective_dt (match Python aec.py:1536) */
+    float dt_temporal = is_stationary_dt ? 0.8f : maxf(dt_indicator_in, effective_dt * 0.5f);
 
     const int nf = r->n_freqs;
     const int hop = r->hop_size;
@@ -848,15 +848,24 @@ void res_process(ResFilter* r,
     float alpha_slow = 0.85f + 0.1f * (1.0f - erle_factor);
     float alpha_attack = alpha_slow + (alpha_fast - alpha_slow) * fs_confidence;
 
+    /* A1: Stationary DT speed-up attack — match Python aec.py:1558 */
+    if (is_stationary_dt) {
+        float boost = 1.0f - dt_temporal * dt_temporal;
+        if (boost < 0.1f) boost = 0.1f;
+        alpha_attack *= boost;
+    }
+
     /* === (w) Gain rate limiting === */
     float act_scale = 0.5f + 0.5f * r->far_activity;
     float eff_drop = powf(r->max_drop_ratio, act_scale);
-    float eff_rise = powf(r->max_rise_ratio, 0.5f + 0.5f * (1.0f - r->far_activity));
-    /* DT rise boost only on stationary DT */
-    if (is_stationary_dt) {
-        float dt_cu = dt_temporal * dt_temporal * dt_temporal;
-        eff_rise *= (1.0f + 19.0f * dt_cu);
+    /* A2: DT-aware rise exponent — match Python aec.py:1574-1578.
+     * When dt_temporal > 0.3, divide exponent by (1+dt_temporal) → faster rise. */
+    float rise_exp = 0.5f + 0.5f * (1.0f - r->far_activity);
+    if (dt_temporal > 0.3f) {
+        float dt_rise_boost = 1.0f + dt_temporal;
+        rise_exp /= dt_rise_boost;
     }
+    float eff_rise = powf(r->max_rise_ratio, rise_exp);
 
     /* LF protection */
     int lf_limit = 8 < nf ? 8 : nf;
