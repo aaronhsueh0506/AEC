@@ -2,14 +2,14 @@
 
 ## 高優先（影響分數或正確性）
 
-| # | 來源 | 項目 | 說明 | 預期影響 |
-|---|------|------|------|---------|
-| 1 | CODE_REVIEW A3 | GCC-PHAT 負延遲偵測 | 系統假設 acoustic delay ≥ 0，software loopback 場景會失敗。至少加 diagnostic warning | 邊界 case 修正 |
-| 2 | CODE_REVIEW D4 | `_wn_err_baseline` 初始化 | 首次 stationary far-end 出現時 baseline=1e-8 → jump_ratio 極大 → 誤觸發 stationary DT | edge case |
-| 3 | CODE_REVIEW D2 | erle_factor ramp 下限 2→0 dB | 讓 filter-based/render-based blend 更平滑，搭配 B4 動態 ERL | 需 A/B test |
-| 4 | CODE_REVIEW D3 | shadow_err_alpha 0.85→0.80 | Shadow EMA 追蹤太慢，copy 延遲。需先確認 copy gate 穩定 | 需 A/B test |
-| 5 | CODE_REVIEW D6 | kalman_q_low 1e-5→1e-6 | 收斂後 misadjustment 更低，P_floor=1e-4 仍保護 | 需 A/B test |
-| 6 | BLINDSPOTS B5 | BUG-1+2 coh2 窗函數統一 | 需獨立 session 從頭 retune（rectangular 或 windowed spec） | 系統性改善 |
+| # | 來源 | 項目 | 說明 | 狀態 |
+|---|------|------|------|------|
+| 1 | CODE_REVIEW A3 | GCC-PHAT 負延遲 | 寫入 README 限制條件，客戶端責任 | ✅ v2.3.1 |
+| 2 | CODE_REVIEW D4 | `_wn_err_baseline` 初始化 | 非 stationary 時緩慢追蹤 baseline | ✅ v2.3.1 |
+| 3 | CODE_REVIEW D2 | erle_factor ramp 2→0 dB | `erle/10.0`，搭配 B4 動態 ERL | ⏳ 800-case 驗證中 |
+| 4 | CODE_REVIEW D3 | shadow_err_alpha 0.85→0.80 | 更快追蹤 shadow advantage | ⏳ 800-case 驗證中 |
+| 5 | CODE_REVIEW D6 | kalman_q_low 1e-5→1e-6 | 更低 misadjustment | ⏳ 800-case 驗證中 |
+| 6 | BLINDSPOTS B5 | BUG-1+2 coh2 窗函數統一 | 需獨立 session 從頭 retune | ⏭️ C 移植後再做 |
 
 ## 中優先（結構/完整性）
 
@@ -29,7 +29,20 @@
 | 13 | BLINDSPOTS P3 | ERLE EMA closed-form decay | sample-by-sample loop → dot product |
 | 14 | CODE_REVIEW F5 | ring buffer wrap 優化 | np.concatenate → 預分配 buffer |
 
-## 架構重構（下一個 major version）
+## 下一步：C 移植（v2.3.1 收版後）
+
+| # | 項目 | Python 版本 | 狀態 |
+|---|------|------------|------|
+| 21 | v2.1.0 改動移植 | AEC3 echo switching, P-floor, inst_erle cap, light release, BUG-3 | 未開始 |
+| 22 | v2.3.x 改動移植 | Energy DT, shadow offset, 動態 ERL, PAR, EPC 延長, cleanup | 未開始 |
+
+## C 移植後：BUG-1+2 重新嘗試
+
+| # | 項目 | 說明 |
+|---|------|------|
+| 6 | BUG-1+2 coh2 窗函數統一 | 獨立 session，從頭 retune。之前兩次嘗試失敗（rectangular FS -0.040、windowed FS -0.023） |
+
+## 架構重構（BUG-1+2 後）
 
 | # | 來源 | 項目 | 說明 |
 |---|------|------|------|
@@ -39,13 +52,6 @@
 | 18 | GPT 3.1 | Kalman 控制邏輯分層 | P update / W update / hard reset / external trust |
 | 19 | GPT 4.1 | RES gain 分層結構 | primary / modifier / clamp / temporal |
 | 20 | GPT 4.2 | AecResContext 完整重設計 | signal / confidence / mode+event 三類本體 |
-
-## C 移植
-
-| # | 項目 | Python 版本 | 狀態 |
-|---|------|------------|------|
-| 21 | v2.1.0 改動移植 | AEC3 echo switching, P-floor, inst_erle cap, light release, BUG-3 | 未開始 |
-| 22 | v2.3.0 改動移植 | Energy DT, shadow offset, 動態 ERL, PAR, EPC 延長, cleanup | 未開始 |
 
 ---
 

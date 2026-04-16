@@ -60,6 +60,7 @@ class AecResContext:
     divergence: float            # [0, 1] divergence indicator
     over_sub: float              # dynamic over_sub value
     saturation_level: float
+    erl_estimate: float = 0.01    # E2: dynamic ERL for external RES render-based
 
 
 @dataclass
@@ -103,7 +104,7 @@ class AecConfig:
     enable_shadow: bool = True
     shadow_mu_ratio: float = 1.0
     shadow_copy_threshold: float = 0.65
-    shadow_err_alpha: float = 0.85
+    shadow_err_alpha: float = 0.80      # D3: 0.85→0.80, faster shadow EMA tracking
     shadow_mu_min: float = 0.5           # Shadow-only mode: DT mu floor (50%)
     shadow_copy_hysteresis: int = 3     # Consecutive frames needed for copy
     shadow_q_ratio: float = 3.0        # Shadow Q = main Q × ratio (FDKF mode)
@@ -116,7 +117,7 @@ class AecConfig:
     # PBFDKF (Partitioned Block Frequency Domain Kalman Filter) — faster convergence than NLMS
     use_kalman: bool = True           # True=PBFDKF, False=PBFDAF (NLMS)
     kalman_q_high: float = 1e-3     # PBFDKF Q_high convergence speed
-    kalman_q_low: float = 1e-5        # PBFDKF Q_low stable tracking (1e-7→P dies)
+    kalman_q_low: float = 1e-6        # D6: 1e-5→1e-6, lower misadjustment (P_floor=1e-4 protects)
     warmup_frames: int = 80          # Frames with forced high mu at startup
 
     # Echo path change detection (requires shadow filter)
@@ -421,7 +422,7 @@ class DelayEstimator:
         best_pos = np.argmax(np.abs(pos_range))
 
         # A5: PAR (Peak-to-Average Ratio) confidence
-        peak = np.abs(gcc[best_pos])
+        peak = float(np.abs(gcc[best_pos]))
         mean_excl = (np.sum(np.abs(pos_range)) - peak) / (len(pos_range) - 1 + 1e-10)
         self._last_par = float(peak / (mean_excl + 1e-10))
 
@@ -2748,7 +2749,9 @@ class AEC:
                     (self._erle_window_near + 1e-10)
                     / (self._erle_window_err + 1e-10))
                 erle_for_factor = max(self.get_erle_instant(), erle_windowed)
-                erle_factor = np.clip((erle_for_factor - 2.0) / 8.0, 0.0, 1.0)
+                # D2: ramp from 0 dB (was 2 dB). With B4 dynamic ERL,
+                # render-based is now useful at low ERLE → smoother blend.
+                erle_factor = np.clip(erle_for_factor / 10.0, 0.0, 1.0)
                 self._erle_factor_prev = float(erle_factor)
                 base_over_sub = self.config.res_over_sub_base + self.config.res_over_sub_scale * erle_factor
                 # Saturation boost: non-linear echo needs more suppression
@@ -2827,6 +2830,15 @@ class AEC:
                         # Silence: normal EMA tracking WN baseline
                         self._wn_err_baseline = (0.95 * self._wn_err_baseline
                                                   + 0.05 * track_err_pwr)
+
+                # D4: slowly track baseline during non-stationary far-end
+                # (converged only). Prevents stale 1e-8 baseline when clip
+                # starts with speech far-end → first stationary transition
+                # sees huge jump_ratio → false stationary DT trigger.
+                if (self._filter_converged and not self._is_stationary_far
+                        and far_pwr > 1e-4 and self._wn_err_baseline > 1e-6):
+                    self._wn_err_baseline = (0.995 * self._wn_err_baseline
+                                              + 0.005 * raw_err_pwr)
 
                 # inst_erle correction (only no-DTD)
                 if not self.config.enable_dtd:
@@ -2922,6 +2934,7 @@ class AEC:
                         divergence=float(self._divergence_indicator),
                         over_sub=float(effective_over_sub),
                         saturation_level=float(self._saturation_level),
+                        erl_estimate=float(self._erl_estimate),
                     )
 
             # Update diagnostics

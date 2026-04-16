@@ -94,6 +94,7 @@
 | **高 coupling DT** | inst_erle_fast 修正可能誤壓 DT 語音（echo 與語音能量相近時） |
 | **CNG** | 底噪追蹤在遠端持續講話時效果有限（noise_psd 可能偏高） |
 | **延遲估計** | GCC-PHAT 在低 SNR 或強非線性場景可能不準確 |
+| **延遲方向** | 僅支援正延遲（mic 晚於 ref）。負延遲場景（software loopback、driver latency 異常）需由應用層確保 ref 信號正確對齊 |
 | **Stationary far-end + 弱語音段**（v13） | 穩態 far-end（白噪音/風扇/冷氣）+ 近端語音場景下，linear AEC 仍可能在弱訊號段（突發停頓、低能量音節）將語音吸收進 echo path。整體語音保留率可達 ~48%（接近 NoRES 50%），但個別 ~100ms 段會掉到 ~10%。詳見 [aec_improve_v13.md](docs/aec_improve_v13.md) |
 | **Stationarity 偵測延遲**（v13） | CV² EMA 需要約 1s 才能穩定觸發 `_is_stationary_far`。Cold start 後前 1s 走一般 RES 路徑 |
 | **Stationary DT hangover** | 800ms hangover 在穩態 far-end 場景下會延遲 EPC（echo path change）偵測。實際場景發生機率低（穩態訊號通常 echo path 也穩定） |
