@@ -1,15 +1,16 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v2.0.0），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+回音消除模組（v2.2.0），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
 
-**v2.0.0 主要改進**：
+**v2.2.0 主要改進（2026-04）**：
 
-- **Multi-ERLE**：`FilterErleEstimator`（per-bin，`|echo_spec|²/|error_spec|²`）+ `FullbandErleEstimator`（broadband 交叉驗證），打破 `erle_per_bin` 循環依賴
-- **dt_indicator 源頭修正**：用當前幀 `raw_output` 即時 ERLE（3 幀 EMA 平滑）壓制高 coupling FS 的假 DT 偵測
-- **ENR 重構**：`nearend_est = max(raw_nearend × dt_indicator, noise_floor)`，FS 時 ENR >> 10 全壓（含非線性破音），DT 時語音保留
-- **ne_confidence = dt_indicator**：直接用已修正的 dt_indicator 控制 ENR 門檻混合，移除 `fs_confidence` 間接路徑
-- **CNG 凍結式底噪追蹤**：壓制中（gain < 0.9）凍結 noise_psd 上升，避免學習到回音形狀
-- **Bug fixes**：Shadow copy 補 Q stage、移除 nearend state machine dead code、移除 output noise gate dead code
+- **Pre-filter Energy DT signal**：`mic_pwr > 4 × far_pwr` 檢測 near-end 能量溢出，繞過 inst_erle correction 的死角
+- **Shadow DTD + Energy DT 互補覆蓋**：`max(shadow_dt, energy_dt)` — onset（shadow）+ sustained（energy）全程有信號
+- **三線驅動 effective_dt**：dt_per_bin、fs_confidence、HF cap bypass 全部接上 effective_dt，5 條 DT 保護路徑完整啟動
+- **NE→FS far_active gate**：消除 NE silent 段 energy DT 的 90ms hangover，保護 FS echo
+- **dt_temporal 驅動**：gain release/rise 在高耦合 DT 也正確響應
+- **EPC gate**：energy DT 和 shadow DTD 在 EPC 期間歸零
+- **Bug fixes**：reset() 補齊 4 個 DT 狀態；dead code 標記（dt_reduction → over_sub 在 ENR 路徑無效）
 
 **Blind test 成績（fl=512, AEC Challenge Interspeech 2021, 800 cases, AECMOS）**：
 
@@ -18,13 +19,13 @@
 | Linear (balanced) | 16k | 512 | 2.710 | 3.167 | 3.198 | 4.069 |
 | Speex (SpeexDSP 1.2) | 16k | 2048 | 2.808 | 3.368 | 3.225 | 4.128 |
 | WebRTC AEC2 | 16k | — | 3.484 | 4.262 | 2.389 | 4.098 |
-| **mild** | 16k | 512 | 3.272 | 3.943 | **2.267** | 3.988 |
-| **balanced** | 16k | 512 | 3.615 | 4.232 | 2.095 | 3.975 |
-| **aggressive** | 16k | 512 | 3.771 | 4.375 | 2.044 | 3.962 |
-| **maximum** | 16k | 512 | **3.912** | 4.505 | 2.025 | 3.940 |
+| **mild** | 16k | 512 | — | — | — | — |
+| **balanced** | 16k | 512 | 3.485 | 4.165 | **2.298** | 4.009 |
+| **aggressive** | 16k | 512 | — | — | — | — |
+| **maximum** | 16k | 512 | — | — | — | — |
 | WebRTC AEC3 | 16k | 768 | 3.875 | **4.538** | 1.850 | 3.454 |
 
-> maximum preset FS echo **3.912 超越 AEC3**（3.875）。DT deg 全 preset 優於 AEC3（2.0+ vs 1.850）。NE deg 全 preset 大幅領先 AEC3（+0.5）。
+> **balanced DT deg 2.298（+0.061 vs v2.1.0）** — 本輪最大單項改善。FS echo 3.485 剛好壓在 AEC2 線上（3.484）。**全 preset DT deg 大幅領先 AEC3**（+0.45）。4 preset 完整數字待更新。
 
 > Pipeline（AEC+NR+RES）成績見 [Audio_ALG](https://github.com/aaronhsueh0506/Audio_ALG) README。
 
@@ -87,7 +88,7 @@
 
 支援四級 Preset（MILD / BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
-> C 實作已對齊 Python v2.0.0（correlation 0.971）。包含 Multi-ERLE、dt_indicator ERLE correction、ENR 重構、Delay Estimation。詳見 [c_impl/README.md](c_impl/README.md)。
+> C 實作對齊 Python **v2.0.0**（correlation 0.971）。**v2.1.0 的 ResFilter 改動（AEC3-style echo switching / P-floor / inst_erle cap / light release EMA / BUG-3 min_gate_width）尚未同步到 C 端**，計畫在下一輪移植。詳見 [c_impl/README.md](c_impl/README.md) 和 [docs/DEVLOG.md](docs/DEVLOG.md) v2.1.0 條目。
 
 ## 濾波器模式
 

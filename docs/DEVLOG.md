@@ -2,6 +2,196 @@
 
 ## 版本歷史
 
+### v2.2.0 (2026-04-16) - Energy DT + Shadow DTD 三線驅動：balanced DT deg +0.061
+
+**核心動機**：v2.1.0 的 DT deg 改善主要來自 `inst_erle cap=4.0`，但 cap 只限制了 `dt_indicator` 的壓制程度，根本問題是 `effective_dt`（驅動 RES 所有 DT 保護路徑的信號）在高耦合 DT 段仍然接近 0。本版本建立完整的 pre-filter DT 信號管線，繞過 inst_erle correction 的死角。
+
+**根因分析**：
+```
+v2.1.0 的問題：
+① effective_dt = max(dt_for_fs, shadow_dt)，但 shadow_dt 參數是空的（diagnostic only）
+② dt_for_fs ≈ dt_indicator，在高耦合 DT 即使有 cap=4 仍然只有 ~0.15
+③ effective_dt 只接了 ENR threshold relaxation 一條線（最弱的路徑）
+④ dt_per_bin、fs_confidence、HF cap bypass、dt_temporal 全用 dt_for_fs/dt_indicator
+⑤ 結果：5 條 DT 保護路徑中只有 1 條被 energy DT 驅動，4 條仍然失效
+```
+
+**主要改動**：
+
+1. **Pre-filter Energy DT signal**（`AEC.process`）：
+   ```python
+   max_echo_expected = far_pwr * 4.0  # +6 dB ERL ceiling
+   dt_from_energy = max(0.0, (mic_pwr - max_echo_expected) / mic_pwr)
+   ```
+   利用 `mic_pwr > 4 × far_pwr` 檢測 near-end 能量溢出。Pre-filter 信號不受 inst_erle correction 影響。高耦合 DT 時穩定輸出 54-63%（vs FS 的 1-8%）。
+
+2. **NE→FS far_active gate**（`AEC.process`）：
+   ```python
+   if self._far_active_prev and far_pwr > 1e-4:
+       dt_from_energy = ...
+   else:
+       dt_from_energy = 0.0  # NE silent → no DT evidence
+   ```
+   NE-only 段 far≈0 會產生 dt_from_energy≈1.0，EMA 慢衰減（TC≈90ms）hang over 到下一個 FS 段。gate 消除 NE→FS 過渡期的 false positive。
+
+3. **Shadow DTD 重新接入 combined signal**（`AEC.process`）：
+   ```python
+   shadow_dt = max(float(self._dt_from_energy),
+                   float(self._dt_from_shadow))
+   ```
+   Shadow DTD（transient，onset 強）+ Energy DT（sustained，持續強）互補覆蓋。
+
+4. **三線驅動 effective_dt**（`ResFilter.process`）：
+   - **dt_per_bin**：`max(effective_dt, 1-coh2)` → nearend_est 分母在 DT 時更大，ENR 直接降低
+   - **fs_confidence**：`far_activity × (1-effective_dt)²` → ne_protection 和 attack speed 響應 DT
+   - **HF cap bypass**：`effective_dt < 0.5` → DT 時不壓 HF harmonics
+
+5. **dt_temporal 驅動**（`ResFilter.process`）：
+   ```python
+   dt_temporal = 0.8 if is_stationary_dt else max(dt_indicator, effective_dt * 0.5)
+   ```
+   Gain release/rise speed 在高耦合 DT 也能正確響應（0.5× 係數避免過度激進）。
+
+6. **Config 化 shadow_dtd_advantage_scale**：
+   `shadow_dtd_advantage_scale: float = 3.0`，硬編碼 `/3.0` → config 參數。
+
+7. **reset() 補齊**：`_dt_from_energy`、`_dt_from_shadow`、`_shadow_advantage`、`_epc_render_forced_remaining` 在 `AEC.reset()` 清零。
+
+8. **EPC gate**：energy DT 和 shadow DTD 在 EPC 期間歸零，避免 filter divergence 的 error spike 被誤讀為 DT。
+
+9. **dead code 標記**：`dt_reduction → effective_over_sub` 在 ENR gain type 下無效（over_sub 只被 wiener/spectral_sub 讀取），加註解標記。
+
+**Blind test (fl=512, balanced, 800 cases):**
+
+| Metric | v2.1.0 | v2.2.0 (v4) | Δ | AEC2 | AEC3 |
+|---|---|---|---|---|---|
+| FS echo↑ | 3.534 | 3.485 | -0.049 | 3.484 | 3.875 |
+| NE deg↑ | 4.008 | 4.009 | +0.001 | 4.098 | 3.454 |
+| DT echo↑ | 4.187 | 4.165 | -0.022 | 4.262 | 4.538 |
+| **DT deg↑** | **2.237** | **2.298** | **+0.061** | **2.389** | **1.850** |
+
+**4 preset 結果**：（待 4-preset 800-case 完成後更新）
+
+**主要 trade-off**：FS echo -0.049（3.534→3.485），剛好壓在 AEC2 線上（3.484）。DT deg +0.061 是本輪最大單項改善。DT echo -0.022 微退，NE deg 不動。
+
+**測試過但不採用的改動**：
+- **D-3 收斂 guard（硬歸零）**：修 FS echo +0.020，但 DT deg -0.033（砍掉 onset 保護）
+- **D-3 erle_factor soft guard**：FS echo +0.016，DT deg -0.028（仍然太粗糙）
+- **D-3 固定 0.3 soft guard**：效果介於硬歸零和 erle_factor 之間
+- **Dynamic ne_physical_floor (effective_dt 驅動)**：v4 沒有它 DT deg 反而更高
+- **Problem 4 over_sub 用 effective_dt**：zero regression（over_sub 在 ENR 路徑是 dead code）
+- **BUG-1+2 窗函數統一**：啟用後 raw_nearend_est 基礎改變，floor/scale 補償不足，需獨立 session 從頭 retune。留待 v2.3
+
+**技術發現**：
+1. **Energy DT 只接一條線無效**：只接 ENR threshold relaxation 時 800-case DT deg +0.001。接齊 dt_per_bin + fs_confidence + HF cap 後才有效果
+2. **Shadow DTD 是 onset 覆蓋，Energy DT 是 sustained 覆蓋**：取 max 互補，缺一不可
+3. **dt_reduction → over_sub 是 dead code**：ENR gain type 不讀 over_sub，歷史殘留
+4. **BUG-1+2 的 raw_nearend_est 問題**：error_psd 升 2.67× 但 echo_psd 不變 → `error_psd - echo_psd` 大增 → 不是 floor 能補償的，需要重新理解整個 gain pipeline
+
+### v2.1.0 (2026-04-16) - DT deg 突破：mild preset 首次超越 AEC2
+
+**核心動機**：v2.0.x 的 DT deg 在所有 preset 都輸 AEC2（2.02-2.27 vs 2.389）。本版本從信號路徑追查 `dt_indicator` 為何在高耦合 DT 被壓到接近 0，並修復根因鏈。
+
+**根因發現**：
+```
+① inst_erle_smooth 在高耦合 DT 高達 10-15
+② raw_dt /= inst_erle_smooth → dt_indicator ≈ 0.04（接近 0）
+③ dt_per_bin = max(dt_indicator, 1-coh2) → ne_confidence ≈ 0
+④ ENR threshold 退化為 FS 設定 (enr_t≈0.07, enr_s≈0.1)
+⑤ ENR 只需 2 就遠超 enr_s → gain → 0 → 語音被壓死
+```
+
+**主要改動**：
+1. **inst_erle correction cap=4.0**（最關鍵修正）：
+   ```python
+   erle_for_dt = min(self._inst_erle_smooth, 4.0)
+   raw_dt /= erle_for_dt
+   ```
+   保留 inst_erle correction 的原始目的（防止高耦合 FS 誤觸發 DT），但限制除數上限，避免 DT 段 `dt_indicator` 歸零。
+
+2. **AEC3-style echo estimate switching**（`aec.py` ResFilter）：
+   ```python
+   if erle_factor < effective_threshold:
+       render_based_echo = far_psd * 0.01  # -20 dB ERL fallback
+       residual_echo_psd = blend * render_based_echo + (1-blend) * residual_echo_psd
+   ```
+   filter 未收斂時避開垃圾 echo_spec。
+
+3. **ENR-adaptive switching threshold**：
+   ```python
+   enr = far_power / error_power_mean
+   switching_threshold = 0.5 * np.clip(enr / (enr + 1.0), 0.3, 0.7)
+   ```
+   高 ambient noise（低 ENR）場景用更嚴格的閾值，避免誤觸發 render-based。
+
+4. **Transparent mode hysteresis**：進入 render-based 後需 `erle_factor > threshold + 0.05` 才回到 filter-based，防止邊界震盪。
+
+5. **P-floor for Kalman**（`PBFDKF._update_weights`）：
+   ```python
+   P_floor = self.Q_high * beta  # beta=0.1 stable, =1.0 during EPC
+   self.P[p] = np.minimum(np.maximum((1.0 - KX) * self.P[p] + Q_gated, P_floor), p_max)
+   ```
+   防止 long convergence 讓 P 塌陷到 delta，保留 echo path change 追蹤能力。
+
+6. **Light release EMA** (`ResFilter.process` temporal smoothing)：
+   ```python
+   alpha_release_light = 0.5  # α=0.5 → TC≈20ms for gain recovery
+   smoothed = np.where(g < self.gain_smooth,
+                       alpha_attack * prev + (1 - alpha_attack) * g,     # attack
+                       alpha_release_light * prev + (1 - alpha_release_light) * g)  # release
+   ```
+   DT→NE 過渡時 gain 可以快速恢復到 1.0，避免語音被尾巴壓住。
+
+7. **Nonlinear echo mode**：持續 saturation → `residual_echo_psd *= (1.0 + saturation_level)`，處理 speaker 飽和。
+
+8. **BUG-3 ENR gate min_gate_width=0.2**：
+   ```python
+   enr_s_safe = np.maximum(enr_s, enr_t + 0.2)
+   g = np.where(enr > enr_t, np.clip((enr_s_safe - enr) / (enr_s_safe - enr_t + eps), 0.0, 1.0), 1.0)
+   ```
+   FS 端 `enr_s_fs - enr_t_fs ≈ 0.03`，原本是硬截斷（33× slope）。min_gate_width 保證至少 0.2 的過渡帶。
+
+9. **Bug fixes**：
+   - `AEC.reset()` 補齊 `_limiter_gain`、`_per_bin_mu_scale`、DTD buffers
+   - `PBFDKF.reset()` 清理 `_p_max_override` / `_p_floor_beta` transient state
+   - `ResFilter.reset()` 補 `error_envelope.fill(1.0)` 和 `_using_render_based = False`
+   - `confidence_history` 改用 `deque(maxlen=1000)` 避免 memory leak
+   - EPC render-forced 5 frames（correctness，AECMOS 無感）
+   - `eval_aec_challenge.py`：`_ENABLE_CNG` 透過 scenario_args 傳遞到 subprocess（修復 ProcessPoolExecutor fork 後 module global 遺失）
+
+**Blind test (fl=512, 800 cases, AECMOS):**
+
+| Preset | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ | vs AEC2 DT deg | vs AEC3 DT deg |
+|---|---|---|---|---|---|---|
+| mild     | 3.197 | 3.893 | **2.429** | **4.019** | **+0.040 贏** | +0.579 贏 |
+| balanced | 3.534 | 4.187 | 2.237 | 4.008 | -0.152 | +0.387 贏 |
+| aggressive | 3.651 | 4.307 | 2.181 | 3.991 | -0.208 | +0.331 贏 |
+| maximum  | 3.759 | 4.426 | 2.129 | 3.957 | -0.260 | +0.279 贏 |
+| AEC2     | 3.484 | 4.262 | 2.389 | 4.098 | — | — |
+| AEC3     | 3.875 | 4.538 | 1.850 | 3.454 | — | — |
+
+**亮點**：
+- **mild preset DT deg 2.429 首次超越 AEC2** (2.389)
+- 全 preset DT deg 大幅領先 AEC3（+0.28~+0.58）
+- 全 preset NE deg 大幅領先 AEC3（+0.50）
+- balanced FS echo 3.534 贏 AEC2 (+0.050)
+
+**主要 trade-off**：vs v2.0.0，FS echo 在 mild/balanced/aggressive 退 -0.08~-0.15，maximum 退 -0.15，換取 **DT deg 全 preset +0.10~+0.16 的改善**。本版本刻意把 trade-off 往「preserve speech」方向調，使 mild preset 成為 DT deg 優先的選擇。
+
+**測試過但不採用的改動（詳見 session log）**：
+- **窗函數統一**（BUG-1+2 fix）：改用 filter.error_spec 做 error_psd/coherence，數值尺度改變需要全 preset 重新 tune，留待 v2.2 處理
+- **Shadow-based DTD merge into dt_indicator**：改善 DT deg +0.055 但傷 FS echo -0.079，trade-off 不划算
+- **Shadow DTD + hangover + ENR relaxation via effective_dt**（B+C hard）：同上 trade-off
+- **Dynamic ne_physical_floor (with dt_for_fs)**：`dt_for_fs ≈ 0` 在 crush cases，無觸發
+- **Phase 1.3 EPC → render-based permanent (hysteresis)**：傷 DT deg -0.030
+- **Phase 2 D-3 convergence detector DT guard**：小 sample 無感，全 800-case 同樣無感
+
+**技術發現**：
+1. **AECMOS noise level ≈ ±0.005** — 小於 ±0.03 的 aggregate 改善不可信
+2. **Shadow DTD 本質是 transient detector**：`shadow_advantage` 只在 DT onset 短暫飆高（1~5% 幀 >0.4），hangover 延展可以但伴隨 FS false positive
+3. **ENR relaxation 有非線性 FS 損害閾值**：max 1.5× 傷 FS -0.079，max 1.2× 傷 FS 0.000。低於某個 scaling threshold 完全不傷 FS 但也無 DT 改善
+4. **EPC 觸發率 0.088%**（800-case 中 63 次），frame-level protection 影響太小不足以撼動 AECMOS
+
 ### v1.28.0 (2026-03-31) - Bug Fixes: CNG Gate, Coherence Reset, fs_confidence Dedup
 
 **Bug fixes:**
