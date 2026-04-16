@@ -573,10 +573,10 @@ void res_process(ResFilter* r,
             float enr_avg = 0.0f;
             float error_psd_sum = 0.0f;
             for (int k = 0; k < nf; k++) {
-                enr_avg += r->echo_psd[k];
                 error_psd_sum += r->error_psd[k];
             }
-            enr_avg /= (error_psd_sum + 1e-10f);
+            /* Python uses far_power / mean(error_psd), not echo/error ratio */
+            enr_avg = far_power / (error_psd_sum / nf + 1e-10f);
             float switching_threshold = 0.5f * clampf(enr_avg / (enr_avg + 1.0f), 0.3f, 0.7f);
 
             float hysteresis = 0.05f;

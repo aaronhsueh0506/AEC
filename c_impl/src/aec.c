@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 
 static inline float maxf(float a, float b) { return a > b ? a : b; }
 static inline float minf(float a, float b) { return a < b ? a : b; }
@@ -783,9 +784,13 @@ int aec_process_ex(Aec* aec,
                 /* First estimate — A5 PAR confidence gate */
                 if (aec->delay_last_par > 5.0f) {
                     aec->delay_est.current_delay = new_delay;
-                    /* B3: reset filters for clean start at correct delay */
-                    pbfdkf_reset_weights(aec->filter);
-                    pbfdkf_reset_weights(aec->shadow_filter);
+                    /* B3: full reset for clean start at correct delay.
+                     * Must clear X_buf/buffers too — old spectra were from
+                     * wrong alignment and corrupt early Kalman updates. */
+                    pbfdkf_reset(aec->filter);
+                    pbfdkf_reset(aec->shadow_filter);
+                    pbfdkf_set_q_ratio(aec->shadow_filter, cfg->kalman_q_high,
+                                        cfg->kalman_q_low, cfg->shadow_q_ratio);
                     if (aec->res) res_reset(aec->res);
                     /* A2: Q = Q_high for fast convergence at new delay */
                     pbfdkf_set_q_high(aec->filter, cfg->kalman_q_high);
@@ -847,8 +852,34 @@ int aec_process_ex(Aec* aec,
     /* Compute mu_scale */
     float mu_scale = get_simple_mu_scale(aec);
 
+    /* DEBUG: frame-level diagnostics for first 20 frames */
+    {
+        static int debug_frame = 0;
+        if (debug_frame < 20) {
+            float mic_pwr = 0, ref_pwr = 0;
+            for (int i = 0; i < hop; i++) { mic_pwr += mic[i]*mic[i]; ref_pwr += ref[i]*ref[i]; }
+            mic_pwr /= hop; ref_pwr /= hop;
+            fprintf(stderr, "DBG frame %d: mu=%.4f ratio=%.4f mic_pwr=%.6e ref_pwr=%.6e warmup=%d delay=%d\n",
+                    debug_frame, mu_scale, aec->simple_mu_ratio, mic_pwr, ref_pwr,
+                    aec->warmup_frames, aec->delay_est.current_delay);
+        }
+        debug_frame++;
+    }
+
     /* === Main filter === */
     pbfdkf_process(aec->filter, mic, ref, aec->raw_output, mu_scale);
+
+    /* DEBUG: output power */
+    {
+        static int debug_frame2 = 0;
+        if (debug_frame2 < 20) {
+            float out_pwr = 0;
+            for (int i = 0; i < hop; i++) out_pwr += aec->raw_output[i]*aec->raw_output[i];
+            out_pwr /= hop;
+            fprintf(stderr, "DBG frame %d: out_pwr=%.6e\n", debug_frame2, out_pwr);
+        }
+        debug_frame2++;
+    }
 
     /* === Shadow filter (always mu_scale=1.0) === */
     float shadow_out[160]; /* stack alloc, hop <= 160 */
@@ -1228,13 +1259,20 @@ int aec_process_ex(Aec* aec,
         aec->warmup_far_active = (far_pwr_warmup / hop > 1e-6f);
     }
 
-    /* === Convergence detection: 10 consecutive single-talk frames ERLE > 5dB === */
+    /* === Convergence detection: 10 consecutive far-active frames ERLE > 5dB === */
+    /* Gate on far_active (not _simple_mu_ratio) to avoid deadlock in
+     * high-coupling FS where mic ≈ far × strong_coupling pulls
+     * _simple_mu_ratio < 0.5 forever, blocking convergence.
+     * ERLE > 5 dB sustained 10 frames is essentially impossible during
+     * real DT, so we don't need an extra DT exclusion gate. */
     /* Skip during warmup — let filter learn with Q_high before judging convergence */
     if (!aec->filter_converged && aec->near_power > 1e-8f && aec->warmup_frames <= 0) {
         float inst_erle = 10.0f * fast_log10(aec->near_power /
                                           (aec->raw_error_power + 1e-10f));
-        /* Only evaluate during far-end single-talk (DT corrupts ERLE measurement) */
-        if (aec->simple_mu_ratio > 0.5f) {
+        float far_pwr_conv = 0.0f;
+        for (int i = 0; i < hop; i++) far_pwr_conv += ref[i] * ref[i];
+        int far_active_conv = (far_pwr_conv / hop > 1e-4f);
+        if (far_active_conv) {
             if (inst_erle > 5.0f)
                 aec->conv_counter++;
             else
@@ -1246,7 +1284,6 @@ int aec_process_ex(Aec* aec,
                 pbfdkf_switch_q_low(aec->shadow_filter);
             }
         }
-        /* else: DT detected, don't update counter (preserve progress) */
     }
 
     return 0;

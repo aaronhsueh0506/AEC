@@ -159,10 +159,10 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.res_alpha_error_psd = 0.5f;
 
     c.shadow_q_ratio = 3.5f;
-    c.shadow_copy_threshold = 0.7f;
+    c.shadow_copy_threshold = 0.65f;  /* sync with Python v2.3.1 */
     c.shadow_err_alpha = 0.80f;      /* D3: was 0.85 */
     c.shadow_mu_min = 0.6f;
-    c.shadow_copy_hysteresis = 5;
+    c.shadow_copy_hysteresis = 3;     /* sync with Python v2.3.1 */
     c.shadow_dtd_advantage_scale = 3.0f;
     c.shadow_dtd_offset = 1.5f;      /* B2 */
 
