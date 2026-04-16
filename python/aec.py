@@ -992,6 +992,26 @@ class ResFilter:
         self.alpha_error_psd = alpha_error_psd
         self.enr_scale = enr_scale           # ENR threshold scale (1.0=AEC3 defaults)
 
+        # C1-C4: precomputed per-bin constants (invariant after init)
+        freq_res = sample_rate / block_size
+        f_bins = np.arange(n_freqs, dtype=np.float32) * freq_res
+        # C1: stationary DT mask
+        self._stat_dt_mask = np.zeros(n_freqs, dtype=np.float32)
+        self._stat_dt_mask[(f_bins >= 300) & (f_bins <= 3000)] = 0.8
+        low = (f_bins > 100) & (f_bins < 300)
+        self._stat_dt_mask[low] = 0.8 * ((f_bins[low] - 100.0) / 200.0)
+        high = (f_bins > 3000) & (f_bins < 4000)
+        self._stat_dt_mask[high] = 0.8 * ((4000.0 - f_bins[high]) / 1000.0)
+        # C2: ENR blend array
+        self._enr_blend = np.clip((np.arange(n_freqs, dtype=np.float32) - 5) / 5, 0, 1)
+        # C3: frequency bin indices
+        self._hf_cap_bin = min(int(500.0 / freq_res), n_freqs - 1)
+        # C4: harmonic distortion bin bounds
+        self._harm_lf_start = max(1, int(100.0 / freq_res))
+        self._harm_lf_end = min(int(500.0 / freq_res), n_freqs - 1)
+        self._harm_hf_start = int(1000.0 / freq_res)
+        self._harm_hf_end = min(int(4000.0 / freq_res), n_freqs - 1)
+
         # RES v2: direct echo estimation + Wiener gain + reverb
         self.echo_method = echo_method       # "coherence" or "direct"
         self.gain_type = gain_type           # "spectral_sub" or "wiener"
@@ -1010,6 +1030,9 @@ class ResFilter:
         self._diag_far_activity = 0.0
         self._diag_echo_psd_mean = 0.0
         self._diag_error_psd_mean = 0.0
+        self._noise_initialized = False  # B5: explicit bool instead of hasattr
+        self._render_based_hold = 0    # G5: minimum hold frames for render-based mode
+        self._using_render_based = False  # E1: explicit init (was only in reset())
 
         # Coherence-based nonlinear echo PSD estimation
         # Coherence between far-end and error captures both linear and
@@ -1069,8 +1092,8 @@ class ResFilter:
         self.S_ff.fill(0)
         self.S_ee.fill(0)
         self.noise_psd.fill(0)
-        if hasattr(self, '_noise_initialized'):
-            del self._noise_initialized
+        self._noise_initialized = False
+        self._render_based_hold = 0
         self.far_activity = 0.0
         self.input_buf.fill(0)
         self.ola_buf.fill(0)
@@ -1278,12 +1301,21 @@ class ResFilter:
                 else:
                     effective_threshold = switching_threshold
                 # G2: explicit overrides for known unreliable states
+                # Note: divergence > 0.5 removed — DT triggers false divergence
+                # (mic = echo + speech → output > input). Divergence is already
+                # handled by gain cap (L1514), no need for render-based override.
                 force_render = (
                     epc_active
                     or saturation_level > 0.5
-                    or divergence > 0.5
                 )
-                self._using_render_based = (erle_factor < effective_threshold) or force_render
+                want_render = (erle_factor < effective_threshold) or force_render
+                # G5: minimum hold time — once in render-based, stay ≥5 frames
+                if want_render and not self._using_render_based:
+                    self._render_based_hold = 5  # 50ms minimum hold
+                if self._using_render_based:
+                    self._render_based_hold = max(self._render_based_hold - 1, 0)
+                can_exit = (not want_render and self._render_based_hold == 0)
+                self._using_render_based = want_render or (self._using_render_based and not can_exit)
 
                 if self._using_render_based:
                     # Filter unreliable → render-based conservative estimate
@@ -1314,11 +1346,8 @@ class ResFilter:
             # Harmonic distortion mapping: HF floor from LF echo
             # (always active, complementary to nonlinear mode above)
             if saturation_level > 0.05 and far_power > 1e-4:
-                hz_per_bin = self.sample_rate / self.block_size
-                lf_start = max(1, int(100.0 / hz_per_bin))
-                lf_end   = min(int(500.0 / hz_per_bin), self.n_freqs - 1)
-                hf_start = int(1000.0 / hz_per_bin)
-                hf_end   = min(int(4000.0 / hz_per_bin), self.n_freqs - 1)
+                lf_start, lf_end = self._harm_lf_start, self._harm_lf_end  # C4: precomputed
+                hf_start, hf_end = self._harm_hf_start, self._harm_hf_end
                 if lf_end > lf_start and hf_end > hf_start:
                     lf_echo_mean = float(np.mean(residual_echo_psd[lf_start:lf_end]))
                     distortion_factor = 0.1 + 0.4 * saturation_level
@@ -1358,13 +1387,16 @@ class ResFilter:
             echo_boost = 1.0 + 0.5 * coh2 if dt_for_fs < 0.2 else np.ones_like(coh2)
             residual_echo_psd = residual_echo_psd * echo_boost
 
-        # Compute coherence-based EER (used for legacy mode AND per-bin NE gate)
-        eer_linear = self.echo_psd / (self.error_psd + eps)
-        eer_converged = eer_linear * (0.5 + 0.5 * coh2)
-        if far_power > 1e-4:
-            eer = (1.0 - erle_factor) * coh2 + erle_factor * eer_converged
+        # Compute coherence-based EER (only used by legacy spectral_sub path)
+        if self.gain_type not in ("enr", "wiener"):
+            eer_linear = self.echo_psd / (self.error_psd + eps)
+            eer_converged = eer_linear * (0.5 + 0.5 * coh2)
+            if far_power > 1e-4:
+                eer = (1.0 - erle_factor) * coh2 + erle_factor * eer_converged
+            else:
+                eer = eer_converged
         else:
-            eer = eer_converged
+            eer = None  # B3: not used in ENR/Wiener path
 
 
         # --- Spectral-shape-preserving floor ---
@@ -1388,10 +1420,7 @@ class ResFilter:
         # --- Per-bin near-end gate ---
 
         # --- Per-bin near-end gate with fs_confidence ---
-        if erle_factor < 0.3:
-            ne_erle_gate = 0.3
-        else:
-            ne_erle_gate = max(erle_factor, 0.2)
+        ne_erle_gate = max(erle_factor, 0.3)  # B4: simplified (0.2 floor never triggered)
         # Scale ne_protection by (1-fs_confidence): FS→no protection, DT/NE→full protection
         ne_protection = (1.0 - coh2) * ne_erle_gate * (1.0 - fs_confidence)
         ne_g_min_ceil = 10 ** (self.ne_protect_db / 20)
@@ -1413,20 +1442,9 @@ class ResFilter:
                 1.0 - coh2
             )
 
-            # Stationary far-end DT: coh2 fails (all bins high), use Frequency-Shaped Masking (v3)
-            # jump_ratio already confirmed speech presence; protect speech band directly
+            # Stationary far-end DT: coh2 fails (all bins high), use precomputed mask (C1)
             if is_stationary_dt:
-                freq_res = self.sample_rate / self.block_size
-                f_bins = np.arange(self.n_freqs) * freq_res
-                stat_dt_mask = np.zeros(self.n_freqs, dtype=np.float32)
-                for k, f in enumerate(f_bins):
-                    if 300.0 <= f <= 3000.0:
-                        stat_dt_mask[k] = 0.8
-                    elif 100.0 < f < 300.0:
-                        stat_dt_mask[k] = 0.8 * ((f - 100.0) / 200.0)
-                    elif 3000.0 < f < 4000.0:
-                        stat_dt_mask[k] = 0.8 * ((4000.0 - f) / 1000.0)
-                dt_per_bin = np.maximum(dt_per_bin, stat_dt_mask)
+                dt_per_bin = np.maximum(dt_per_bin, self._stat_dt_mask)
 
             dt_sq_per_bin = dt_per_bin ** 2
             nearend_est = np.maximum(raw_nearend_est * dt_sq_per_bin, noise_floor_psd)
@@ -1441,8 +1459,7 @@ class ResFilter:
             enr = residual_echo_psd / (nearend_est + 1e-10)
 
             # --- ENR two-tuning (per-bin ne_confidence) ---
-            freq_bins = np.arange(self.n_freqs, dtype=np.float32)
-            blend = np.clip((freq_bins - 5) / 5, 0, 1)
+            blend = self._enr_blend  # C2: precomputed
             scale = self.enr_scale
             ne_confidence = dt_per_bin
 
@@ -1517,8 +1534,7 @@ class ResFilter:
                 g[:2] = np.minimum(g[1], g[2])
             # HF cap: upper bins capped at gain of bin near ~500Hz
             # Bypass during DT: speech harmonics above 500Hz must not be crushed
-            freq_res = self.sample_rate / self.block_size  # Hz per bin
-            hf_cap_bin = min(int(500.0 / freq_res), self.n_freqs - 1)
+            hf_cap_bin = self._hf_cap_bin  # C3: precomputed
             if self.n_freqs > hf_cap_bin + 1 and effective_dt < 0.5 and not is_stationary_dt:
                 hf_cap = g[hf_cap_bin]
                 g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
@@ -1531,13 +1547,8 @@ class ResFilter:
         # Temporal smoothing: far_activity-driven release (no feedback loop)
         # far_activity high (far-end speaking) → slow release (TC≈200ms)
         # far_activity low (far-end silent) → fast release (TC≈25ms)
-        # Per-band: LF (< 1 kHz) needs ~3× slower TC to avoid pumping artifacts.
-        hz_per_bin = self.sample_rate / self.block_size
-        lf_cutoff_bin = min(int(1000.0 / hz_per_bin), self.n_freqs - 1)
-        alpha_release_hf = 0.4 + 0.5 * self.far_activity
-        alpha_release_lf = 0.75 + 0.23 * self.far_activity
-        alpha_release_base = np.full(self.n_freqs, alpha_release_hf, dtype=np.float32)
-        alpha_release_base[:lf_cutoff_bin] = alpha_release_lf
+        # B1 cleanup: alpha_release_base was computed but never used (legacy dual EMA).
+        # Actual release uses alpha_release_light only (rate-clamp approach).
 
         # Temporal DT: when Stationary DT confirmed, treat as dt=0.8 for smoothing/rate
         # Include effective_dt (shadow+energy) at 0.5× to help gain release/rise in
@@ -1558,8 +1569,8 @@ class ResFilter:
         alpha_attack = alpha_slow + (alpha_fast - alpha_slow) * fs_confidence
 
         # Stationary DT: also speed up attack (let gain rise to protect speech)
+        # dt_temporal is already 0.8 (set above when is_stationary_dt)
         if is_stationary_dt:
-            dt_temporal = 0.8
             alpha_attack = alpha_attack * np.clip(1.0 - dt_temporal**2, 0.1, 1.0)
 
         # Split attack/release: attack uses heavy EMA (smooth onset), release
@@ -1613,7 +1624,7 @@ class ResFilter:
 
         # --- CNG: Comfort Noise Generation ---
         if self.enable_cng:
-            if not hasattr(self, '_noise_initialized'):
+            if not self._noise_initialized:
                 self.noise_psd = self.error_psd.copy() + 1e-8
                 self._noise_initialized = True
                 self._smooth_cn_gain = np.zeros(self.n_freqs, dtype=np.float32)
@@ -2149,6 +2160,15 @@ class AEC:
             'res_gain_mean': 1.0, 'res_gain_min': 1.0, 'effective_g_min': 1.0,
             'converged': False, 'erle_factor': 0.0,
             'echo_psd_mean': 0.0, 'error_psd_mean': 0.0, 'divergence': 0.0,
+            # G4: expanded diagnostics
+            'using_render_based': False,
+            'shadow_advantage': 1.0,
+            'dt_from_energy': 0.0,
+            'dt_from_shadow': 0.0,
+            'erl_estimate': 0.1,
+            'epc_active': False,
+            'saturation_level': 0.0,
+            'erle_windowed': 0.0,
         }
 
         # Output limiter: smoothed gain to avoid frame-boundary clicking
@@ -2189,6 +2209,7 @@ class AEC:
 
         # #5: Copy hysteresis counter
         self.shadow_copy_counter = 0
+        self._shadow_advantage_streak = 0  # G3: consecutive advantage frames
         self.shadow_frame_count = 0  # warm-up counter for shadow copy
         self._copy_err_baseline = 1e-6  # FS error baseline for copy gate
 
@@ -2242,8 +2263,17 @@ class AEC:
             'res_gain_mean': 1.0, 'res_gain_min': 1.0, 'effective_g_min': 1.0,
             'converged': False, 'erle_factor': 0.0,
             'echo_psd_mean': 0.0, 'error_psd_mean': 0.0, 'divergence': 0.0,
+            'using_render_based': False,
+            'shadow_advantage': 1.0,
+            'dt_from_energy': 0.0,
+            'dt_from_shadow': 0.0,
+            'erl_estimate': 0.1,
+            'epc_active': False,
+            'saturation_level': 0.0,
+            'erle_windowed': 0.0,
         }
         self.shadow_copy_counter = 0
+        self._shadow_advantage_streak = 0
         self.shadow_frame_count = 0
         self._copy_err_baseline = 1e-6
         if self.dtd_divergence:
@@ -2619,19 +2649,27 @@ class AEC:
                     if copy_allowed:
                         if self.shadow_err_smooth < self.main_err_smooth * threshold:
                             self.shadow_copy_counter += 1
+                            self._shadow_advantage_streak += 1  # G3: track duration
                         else:
                             self.shadow_copy_counter = 0
+                            self._shadow_advantage_streak = 0
 
-                        if self.shadow_copy_counter >= self.config.shadow_copy_hysteresis:
+                        # G3: require both hysteresis AND minimum streak (100ms)
+                        # to prevent short echo bursts from triggering copy
+                        min_streak = 10
+                        if (self.shadow_copy_counter >= self.config.shadow_copy_hysteresis
+                                and self._shadow_advantage_streak >= min_streak):
                             self.filter.copy_weights_from(self.shadow_filter)
                             self.main_err_smooth = self.shadow_err_smooth
                             self.shadow_copy_counter = 0
+                            self._shadow_advantage_streak = 0
                         elif (self.main_err_smooth < self.shadow_err_smooth * threshold
                               and error_is_normal):
                             self.shadow_filter.copy_weights_from(self.filter)
                             self.shadow_err_smooth = self.main_err_smooth
                     else:
                         self.shadow_copy_counter = 0
+                        self._shadow_advantage_streak = 0  # Fix 1: reset on copy_allowed=False
 
             # Echo path change detection (shadow-based, independent of DTD)
             # DT: one filter's error ↑, other stable → ΔE/total large
@@ -2833,9 +2871,9 @@ class AEC:
                         self._epc_render_forced_remaining -= 1
                         self.res._using_render_based = True
                     self.res.over_sub = effective_over_sub
-                    # BUG-1+2 windowed spec: sqrt-Hann windowed error for
-                    # coherence/PSD alignment, with OLA-like variance (no
-                    # alpha retune needed, unlike raw rectangular error_spec).
+                    # Note: error_spec_from_filter intentionally NOT passed.
+                    # Windowed spec tested but caused FS echo -0.023 (mixed-window
+                    # bias at low ERLE). Using OLA spec_synth fallback.
                     final_output = self.res.process(raw_output, self.filter.echo_spec,
                                                     far_power, self.filter.far_spec,
                                                     filter_converged=self._filter_converged,
@@ -2900,6 +2938,15 @@ class AEC:
             self._diag['converged'] = self._filter_converged
             self._diag['erle_factor'] = float(erle_factor) if 'erle_factor' in locals() else 0.0
             self._diag['divergence'] = self._divergence_indicator
+            # G4: expanded diagnostics
+            self._diag['using_render_based'] = bool(getattr(self.res, '_using_render_based', False)) if self.res else False
+            self._diag['shadow_advantage'] = getattr(self, '_shadow_advantage', 1.0)
+            self._diag['dt_from_energy'] = self._dt_from_energy
+            self._diag['dt_from_shadow'] = getattr(self, '_dt_from_shadow', 0.0)
+            self._diag['erl_estimate'] = self._erl_estimate
+            self._diag['epc_active'] = self.epc_active
+            self._diag['saturation_level'] = self._saturation_level
+            self._diag['erle_windowed'] = float(erle_windowed) if 'erle_windowed' in locals() else 0.0
 
             # Update DTD detectors for NEXT block
             # Skip divergence detector before convergence (output>mic is normal

@@ -2,7 +2,7 @@
 
 ## 版本歷史
 
-### v2.2.0 (2026-04-16) - Energy DT + Shadow DTD 三線驅動：balanced DT deg +0.061
+### v2.3.0 (2026-04-16) - Energy DT + Shadow DTD 三線驅動 + Blindspot Fixes
 
 **核心動機**：v2.1.0 的 DT deg 改善主要來自 `inst_erle cap=4.0`，但 cap 只限制了 `dt_indicator` 的壓制程度，根本問題是 `effective_dt`（驅動 RES 所有 DT 保護路徑的信號）在高耦合 DT 段仍然接近 0。本版本建立完整的 pre-filter DT 信號管線，繞過 inst_erle correction 的死角。
 
@@ -70,17 +70,40 @@ v2.1.0 的問題：
 | DT echo↑ | 4.187 | 4.165 | -0.022 | 4.262 | 4.538 |
 | **DT deg↑** | **2.237** | **2.298** | **+0.061** | **2.389** | **1.850** |
 
-**4 preset 結果**：（待 4-preset 800-case 完成後更新）
+**4 preset 結果（fl=512, 800 cases, AECMOS）**：
 
-**主要 trade-off**：FS echo -0.049（3.534→3.485），剛好壓在 AEC2 線上（3.484）。DT deg +0.061 是本輪最大單項改善。DT echo -0.022 微退，NE deg 不動。
+| Preset | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
+|---|---|---|---|---|
+| mild | 3.155 | 3.882 | **2.441** | **4.019** |
+| balanced | **3.502** | 4.163 | 2.283 | 4.008 |
+| aggressive | **3.621** | 4.289 | 2.231 | 3.994 |
+| maximum | **3.722** | 4.412 | 2.162 | 3.961 |
+| AEC2 | 3.484 | 4.262 | 2.389 | 4.098 |
+| AEC3 | 3.875 | 4.538 | 1.850 | 3.454 |
+
+**Blindspot fixes（A/G 系列，v2.2.0 → v2.3.0）**：
+- **A1**：S_ee far-silence decay 同步（coh2 bias fix，FS echo +0.011）
+- **A2**：delay reset 同步 ResFilter（stale PSD 清除）
+- **A4**：EPC 後 ERL partial reset（min to 0.3）
+- **A5**：GCC-PHAT PAR confidence gate（threshold 5.0）
+- **G1**：EPC render-forced 5→epc_hangover（20 frames）
+- **G2**：render-based explicit override（epc_active / saturation > 0.5）
+- **G3**：shadow copy advantage streak gate（10 frames minimum）
+- **G4**：diagnostics 擴充（19 keys）
+- **G5**：render-based minimum hold time（5 frames）
+
+**Code cleanup**：
+- B1-B5：dead code 刪除（alpha_release_base、dt_temporal 重複、eer guard、ne_erle_gate 簡化、_noise_initialized bool）
+- C1-C4：per-frame 常數移 init（stat_dt_mask、enr_blend、hf_cap_bin、harmonic bins）
 
 **測試過但不採用的改動**：
-- **D-3 收斂 guard（硬歸零）**：修 FS echo +0.020，但 DT deg -0.033（砍掉 onset 保護）
-- **D-3 erle_factor soft guard**：FS echo +0.016，DT deg -0.028（仍然太粗糙）
-- **D-3 固定 0.3 soft guard**：效果介於硬歸零和 erle_factor 之間
-- **Dynamic ne_physical_floor (effective_dt 驅動)**：v4 沒有它 DT deg 反而更高
-- **Problem 4 over_sub 用 effective_dt**：zero regression（over_sub 在 ENR 路徑是 dead code）
-- **BUG-1+2 窗函數統一**：啟用後 raw_nearend_est 基礎改變，floor/scale 補償不足，需獨立 session 從頭 retune。留待 v2.3
+- **D-3 收斂 guard（硬歸零）**：DT deg -0.033（砍掉 onset 保護）
+- **D-3 erle_factor soft guard**：DT deg -0.028（仍太粗糙）
+- **Dynamic ne_physical_floor**：v4 無此 floor 分數更好
+- **BUG-1+2 rectangular error_spec**：FS -0.040 / DT -0.027（alpha 不匹配）
+- **BUG-1+2 windowed spec（sqrt-Hann）**：FS -0.023（mixed-window bias at low ERLE）
+- **D7 max_drop_db 6→4dB**：FS echo -0.024（onset suppression 不足）
+- **G2 divergence > 0.5 override**：DT deg -0.017（DT 誤觸發）
 
 **技術發現**：
 1. **Energy DT 只接一條線無效**：只接 ENR threshold relaxation 時 800-case DT deg +0.001。接齊 dt_per_bin + fs_confidence + HF cap 後才有效果

@@ -12,10 +12,11 @@ import os
 import sys
 import numpy as np
 
-sys.path.insert(0, '/tmp/AEC-Challenge/AECMOS/AECMOS_local')
+_model_dir = os.path.join(os.path.dirname(__file__), '..', 'model')
+sys.path.insert(0, _model_dir)
 from aecmos import AECMOSEstimator
 
-ONNX_PATH = '/tmp/AEC-Challenge/AECMOS/AECMOS_local/Run_1663915512_Stage_0.onnx'
+ONNX_PATH = os.path.join(_model_dir, 'Run_1663915512_Stage_0.onnx')
 METHODS = ['ours', 'ours_nores']
 METHOD_LABELS = ['Ours', 'NoRES']
 

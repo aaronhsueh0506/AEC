@@ -19,13 +19,13 @@
 | Linear (balanced) | 16k | 512 | 2.710 | 3.167 | 3.198 | 4.069 |
 | Speex (SpeexDSP 1.2) | 16k | 2048 | 2.808 | 3.368 | 3.225 | 4.128 |
 | WebRTC AEC2 | 16k | — | 3.484 | 4.262 | 2.389 | 4.098 |
-| **mild** | 16k | 512 | — | — | — | — |
-| **balanced** | 16k | 512 | 3.485 | 4.165 | **2.298** | 4.009 |
-| **aggressive** | 16k | 512 | — | — | — | — |
-| **maximum** | 16k | 512 | — | — | — | — |
+| **mild** | 16k | 512 | 3.155 | 3.882 | **2.441** | **4.019** |
+| **balanced** | 16k | 512 | **3.502** | 4.163 | 2.283 | 4.008 |
+| **aggressive** | 16k | 512 | **3.621** | 4.289 | 2.231 | 3.994 |
+| **maximum** | 16k | 512 | **3.722** | 4.412 | 2.162 | 3.961 |
 | WebRTC AEC3 | 16k | 768 | 3.875 | **4.538** | 1.850 | 3.454 |
 
-> **balanced DT deg 2.298（+0.061 vs v2.1.0）** — 本輪最大單項改善。FS echo 3.485 剛好壓在 AEC2 線上（3.484）。**全 preset DT deg 大幅領先 AEC3**（+0.45）。4 preset 完整數字待更新。
+> **balanced FS echo 3.502 穩固超越 AEC2**（+0.018）。**mild DT deg 2.441 超越 AEC2**（+0.052）。全 preset DT deg 大幅領先 AEC3（+0.31~+0.59）、NE deg 領先 AEC3（+0.51~+0.57）。v2.3.0 新增 blindspot fixes（S_ee decay、delay reset、ERL 動態估計、PAR gate、EPC 延長）和 code cleanup（dead code、per-frame 常數移 init）。
 
 > Pipeline（AEC+NR+RES）成績見 [Audio_ALG](https://github.com/aaronhsueh0506/Audio_ALG) README。
 
