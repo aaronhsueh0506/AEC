@@ -26,7 +26,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <stdio.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -482,14 +481,15 @@ int pbfdkf_copy_weights(Pbfdkf* dst, const Pbfdkf* src) {
     if (dst->n_partitions != src->n_partitions ||
         dst->n_freqs != src->n_freqs) return -1;
 
-    /* Only copy filter coefficients W, NOT Kalman internal state (P/Q/R).
-     * P/Q/R are confidence states accumulated from each filter's own
-     * learning history — copying them across filters contaminates the
-     * destination's Kalman gain. After W copy, P may temporarily mismatch
-     * W but Kalman self-corrects within a few frames. */
     for (int p = 0; p < src->n_partitions; p++) {
         memcpy(dst->W[p], src->W[p], src->n_freqs * sizeof(Complex));
+        memcpy(dst->P[p], src->P[p], src->n_freqs * sizeof(float));
     }
+    /* Copy Kalman state: R, Q (v2.0.0) */
+    if (dst->R && src->R)
+        memcpy(dst->R, src->R, src->n_freqs * sizeof(float));
+    if (dst->Q && src->Q)
+        memcpy(dst->Q, src->Q, src->n_freqs * sizeof(float));
     return 0;
 }
 

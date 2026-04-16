@@ -15,7 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <stdio.h>
 
 static inline float maxf(float a, float b) { return a > b ? a : b; }
 static inline float minf(float a, float b) { return a < b ? a : b; }
@@ -781,21 +780,22 @@ int aec_process_ex(Aec* aec,
         int new_delay = aec->delay_est.estimated_delay;
         if (new_delay >= 0) {
             if (aec->delay_est.current_delay < 0) {
-                /* First estimate — A5 PAR confidence gate */
-                if (aec->delay_last_par > 5.0f) {
+                /* First estimate — A5 PAR confidence gate + n_updates >= 3.
+                 * n_updates >= 3 ensures enough cross-spectrum averaging
+                 * to avoid spurious delay=0 from early weak correlation.
+                 * (Matches Python aec.py line 2437.) */
+                if (aec->delay_last_par > 5.0f && aec->delay_est.n_updates >= 3) {
                     aec->delay_est.current_delay = new_delay;
                     /* B3: full reset for clean start at correct delay.
-                     * Must clear X_buf/buffers too — old spectra were from
-                     * wrong alignment and corrupt early Kalman updates. */
+                     * Clear X_buf/input buffers too — old spectra from wrong
+                     * alignment corrupt early Kalman updates.
+                     * (Matches Python self.filter.reset().) */
                     pbfdkf_reset(aec->filter);
                     pbfdkf_reset(aec->shadow_filter);
+                    /* Restore shadow Q ratio after full reset */
                     pbfdkf_set_q_ratio(aec->shadow_filter, cfg->kalman_q_high,
                                         cfg->kalman_q_low, cfg->shadow_q_ratio);
                     if (aec->res) res_reset(aec->res);
-                    /* A2: Q = Q_high for fast convergence at new delay */
-                    pbfdkf_set_q_high(aec->filter, cfg->kalman_q_high);
-                    pbfdkf_set_q_high(aec->shadow_filter,
-                                      cfg->kalman_q_high * cfg->shadow_q_ratio);
                     aec->filter_converged = 0;
                     aec->conv_counter = 0;
                 }
@@ -852,34 +852,8 @@ int aec_process_ex(Aec* aec,
     /* Compute mu_scale */
     float mu_scale = get_simple_mu_scale(aec);
 
-    /* DEBUG: frame-level diagnostics for first 20 frames */
-    {
-        static int debug_frame = 0;
-        if (debug_frame < 20) {
-            float mic_pwr = 0, ref_pwr = 0;
-            for (int i = 0; i < hop; i++) { mic_pwr += mic[i]*mic[i]; ref_pwr += ref[i]*ref[i]; }
-            mic_pwr /= hop; ref_pwr /= hop;
-            fprintf(stderr, "DBG frame %d: mu=%.4f ratio=%.4f mic_pwr=%.6e ref_pwr=%.6e warmup=%d delay=%d\n",
-                    debug_frame, mu_scale, aec->simple_mu_ratio, mic_pwr, ref_pwr,
-                    aec->warmup_frames, aec->delay_est.current_delay);
-        }
-        debug_frame++;
-    }
-
     /* === Main filter === */
     pbfdkf_process(aec->filter, mic, ref, aec->raw_output, mu_scale);
-
-    /* DEBUG: output power */
-    {
-        static int debug_frame2 = 0;
-        if (debug_frame2 < 20) {
-            float out_pwr = 0;
-            for (int i = 0; i < hop; i++) out_pwr += aec->raw_output[i]*aec->raw_output[i];
-            out_pwr /= hop;
-            fprintf(stderr, "DBG frame %d: out_pwr=%.6e\n", debug_frame2, out_pwr);
-        }
-        debug_frame2++;
-    }
 
     /* === Shadow filter (always mu_scale=1.0) === */
     float shadow_out[160]; /* stack alloc, hop <= 160 */
@@ -1264,7 +1238,8 @@ int aec_process_ex(Aec* aec,
      * high-coupling FS where mic ≈ far × strong_coupling pulls
      * _simple_mu_ratio < 0.5 forever, blocking convergence.
      * ERLE > 5 dB sustained 10 frames is essentially impossible during
-     * real DT, so we don't need an extra DT exclusion gate. */
+     * real DT, so we don't need an extra DT exclusion gate.
+     * (Matches Python aec.py line 3016-3029.) */
     /* Skip during warmup — let filter learn with Q_high before judging convergence */
     if (!aec->filter_converged && aec->near_power > 1e-8f && aec->warmup_frames <= 0) {
         float inst_erle = 10.0f * fast_log10(aec->near_power /

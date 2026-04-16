@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "aec.h"
+#include "hpf.h"
 #include "wav_io.h"
 
 static void print_usage(const char* program) {
@@ -29,6 +30,7 @@ static void print_usage(const char* program) {
     printf("  --enable-delay-est - Enable GCC-PHAT delay estimation\n");
     printf("  --no-delay-est     - Disable delay estimation (overrides preset)\n");
     printf("  --max-delay <ms>   - Max delay to search in ms (default: 250)\n");
+    printf("  --no-hpf           - Disable 80Hz high-pass filter\n");
 }
 
 static AecPreset parse_preset(const char* name) {
@@ -54,6 +56,7 @@ int main(int argc, char* argv[]) {
     int filter_length = 0; /* 0 = default */
     int delay_est_override = -1; /* -1 = use preset default, 0 = force off, 1 = force on */
     float max_delay_ms = 0.0f;  /* 0 = use default */
+    int enable_hpf = 1;          /* HPF on by default (matches Python) */
 
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "--preset") == 0 && i + 1 < argc) {
@@ -70,6 +73,8 @@ int main(int argc, char* argv[]) {
             delay_est_override = 0;
         } else if (strcmp(argv[i], "--max-delay") == 0 && i + 1 < argc) {
             max_delay_ms = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "--no-hpf") == 0) {
+            enable_hpf = 0;
         }
     }
 
@@ -151,6 +156,14 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    /* HPF (application layer, matching Python's 80Hz Butterworth) */
+    Hpf* hp_mic = NULL;
+    Hpf* hp_ref = NULL;
+    if (enable_hpf) {
+        hp_mic = hpf_create(80.0f, sample_rate);
+        hp_ref = hpf_create(80.0f, sample_rate);
+    }
+
     int hop_size = aec_get_hop_size(aec);
 
     WavWriter* writer = wav_open_write(out_path, sample_rate, 1);
@@ -188,6 +201,10 @@ int main(int argc, char* argv[]) {
             for (int i = mic_read; i < hop_size; i++) mic_buf[i] = 0.0f;
             for (int i = ref_read; i < hop_size; i++) ref_buf[i] = 0.0f;
         }
+
+        /* HPF before AEC (matches Python preprocessing) */
+        if (hp_mic) hpf_process(hp_mic, mic_buf, hop_size);
+        if (hp_ref) hpf_process(hp_ref, ref_buf, hop_size);
 
         aec_process(aec, mic_buf, ref_buf, out_buf);
         wav_write_float(writer, out_buf, hop_size);
@@ -229,6 +246,8 @@ int main(int argc, char* argv[]) {
     free(mic_buf);
     free(ref_buf);
     free(out_buf);
+    hpf_destroy(hp_mic);
+    hpf_destroy(hp_ref);
     aec_destroy(aec);
     wav_close_read(mic_reader);
     wav_close_read(ref_reader);
