@@ -1355,6 +1355,14 @@ class ResFilter:
             dt_suppress = np.clip(1.0 - dt_for_fs**2, 0.1, 1.0)
             residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * dt_suppress)
 
+            # P2: render-based physical ceiling — echo cannot exceed ERL × far_psd × 2.0.
+            # Prevents ENR blow-up when filter echo_spec overestimates residual.
+            # Conservative (factor=2.0): only caps when residual greatly exceeds expected echo.
+            if far_spec is not None and far_power > 1e-4 and erl_estimate > 0.0:
+                far_psd_k = np.abs(far_spec) ** 2
+                render_ceil = far_psd_k * min(erl_estimate * 2.0, 1.0)
+                residual_echo_psd = np.minimum(residual_echo_psd, render_ceil)
+
             # Add reverb tail if enabled
             # Use render signal (far_spec) power instead of filter echo estimate
             # → doesn't depend on filter modeling quality for reverb tail
@@ -1445,6 +1453,7 @@ class ResFilter:
 
             ne_physical_floor = self.error_psd * 0.05
             nearend_est = np.maximum(nearend_est, ne_physical_floor)
+
 
             enr = residual_echo_psd / (nearend_est + 1e-10)
 
