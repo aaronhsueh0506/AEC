@@ -25,3 +25,13 @@ __pycache__/
 wav/aec_output/
 wav/aec_challenge/
 wav/aec_challenge_blind/
+wav/*.wav
+
+# Eval output directories
+python/output_*/
+
+# Smoke/tuning scripts (local experiments)
+python/smoke_retune.py
+python/smoke_log.txt
+python/batch_c_eval.py
+python/dump_res_stats.py

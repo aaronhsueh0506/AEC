@@ -97,6 +97,12 @@ struct ResFilter {
     int using_render_based;
     int render_hold;
 
+    /* Debug (set by res_process) */
+    float dbg_erle_factor;
+    float dbg_switching_threshold;
+    float dbg_enr_avg;
+    float dbg_residual_mean;
+
     /* WOLA */
     float* window;        /* [frame_size] sqrt-Hann */
     float* input_buf;     /* [frame_size] analysis sliding buffer */
@@ -283,15 +289,19 @@ static void update_filter_erle(ResFilter* r, const float* echo_pwr,
                                 int far_active, float dt_indicator) {
     if (!far_active) return;
     int nf = r->n_freqs;
+    /* Bug 2 fix: dt_indicator now freezes rise (alpha_rise→1), instead of
+     * inverted dt_weight that accelerated rise during DT (echo leak). */
+    float dt_factor = dt_indicator;
+    if (dt_factor < 0.0f) dt_factor = 0.0f;
+    if (dt_factor > 1.0f) dt_factor = 1.0f;
+    const float alpha_rise_base = 0.95f;
+    const float alpha_drop = 0.7f;
+    float alpha_rise_eff = alpha_rise_base + (1.0f - alpha_rise_base) * dt_factor;
     for (int k = 0; k < nf; k++) {
         float inst = echo_pwr[k] / (error_pwr[k] + 1e-10f);
         if (inst < 0.1f) inst = 0.1f;
         if (inst > 1000.0f) inst = 1000.0f;
-        float dt_weight = 1.0f - dt_indicator * 1.5f;
-        if (dt_weight < 0.1f) dt_weight = 0.1f;
-        float alpha = (inst < r->filter_erle[k])
-            ? (0.7f * dt_weight + (1.0f - dt_weight) * 0.5f)
-            : (0.95f * dt_weight);
+        float alpha = (inst < r->filter_erle[k]) ? alpha_drop : alpha_rise_eff;
         r->filter_erle[k] = alpha * r->filter_erle[k] + (1.0f - alpha) * inst;
     }
     /* 3-bin smoothing */
@@ -301,12 +311,12 @@ static void update_filter_erle(ResFilter* r, const float* echo_pwr,
         r->filter_erle[k] = 0.25f * prev + 0.5f * cur + 0.25f * r->filter_erle[k+1];
         prev = cur;
     }
-    /* Clip: frequency-dependent cap (LF 32, HF 16) aligned with Python */
-    int lf_bins = nf > 8 ? 8 : nf;
+    /* FS-parity fix: uniform cap [0.5, 200] to match Python aec.py:820.
+     * Previous LF 32 / HF 16 cap was ~6-12× tighter than Python, collapsing
+     * filter_erle mean and cascading to wrong render_based decisions. */
     for (int k = 0; k < nf; k++) {
         if (r->filter_erle[k] < 0.5f) r->filter_erle[k] = 0.5f;
-        float erle_max = (k < lf_bins) ? 32.0f : 16.0f;
-        if (r->filter_erle[k] > erle_max) r->filter_erle[k] = erle_max;
+        if (r->filter_erle[k] > 200.0f) r->filter_erle[k] = 200.0f;
     }
 }
 
@@ -450,6 +460,10 @@ void res_process(ResFilter* r,
     }
 
     /* === (d) PSD smoothing === */
+    /* DEBUG: also track echo_pwr input to EMA for C/Py diff isolation */
+    r->dbg_residual_mean = 0.0f;
+    for (int k = 0; k < nf; k++) r->dbg_residual_mean += echo_pwr[k];
+    r->dbg_residual_mean /= (float)nf;
     for (int k = 0; k < nf; k++) {
         r->echo_psd[k]  = r->alpha_echo_psd * r->echo_psd[k] +
                            (1.0f - r->alpha_echo_psd) * echo_pwr[k];
@@ -462,11 +476,13 @@ void res_process(ResFilter* r,
         int far_active_flag = (far_power > 1e-4f) ? 1 : 0;
         update_filter_erle(r, echo_pwr, error_pwr, far_active_flag, dt_indicator);
 
+        /* FS-parity fix: match Python aec.py:1190-1192.
+         * near_power_broad uses the 4-block SMOOTHED near_psd (from previous
+         * frame), not instantaneous |near_spec|². Previous C used instantaneous,
+         * causing fb_erle to be ~43% lower post-convergence. */
         float near_pwr_broad = 0.0f, error_pwr_broad = 0.0f;
         if (near_spec) {
-            for (int k = 0; k < nf; k++)
-                near_pwr_broad += near_spec[k].r * near_spec[k].r +
-                                  near_spec[k].i * near_spec[k].i;
+            for (int k = 0; k < nf; k++) near_pwr_broad += r->near_psd[k];
             near_pwr_broad /= nf;
         }
         for (int k = 0; k < nf; k++) error_pwr_broad += error_pwr[k];
@@ -568,16 +584,21 @@ void res_process(ResFilter* r,
             if (residual_echo_psd[k] > cap) residual_echo_psd[k] = cap;
         }
 
-        /* === v2.1.0: AEC3-style render-based vs filter-based switching === */
-        {
+        /* === v2.1.0: AEC3-style render-based vs filter-based switching ===
+         * FS-parity fix: gate by far_power > 1e-4 (match Python aec.py:1268).
+         * Without this gate, silence frames entered render_based and latched
+         * the state forever, causing C to stay render-based 99.7% of time. */
+        if (far_power > 1e-4f) {
             float enr_avg = 0.0f;
+            /* Use far_power / mean(error_psd) (match Python L1273-1274). */
             float error_psd_sum = 0.0f;
-            for (int k = 0; k < nf; k++) {
-                enr_avg += r->echo_psd[k];
-                error_psd_sum += r->error_psd[k];
-            }
-            enr_avg /= (error_psd_sum + 1e-10f);
+            for (int k = 0; k < nf; k++) error_psd_sum += r->error_psd[k];
+            float error_psd_mean = error_psd_sum / (float)nf + 1e-10f;
+            enr_avg = far_power / error_psd_mean;
             float switching_threshold = 0.5f * clampf(enr_avg / (enr_avg + 1.0f), 0.3f, 0.7f);
+            r->dbg_erle_factor = erle_factor;
+            r->dbg_switching_threshold = switching_threshold;
+            r->dbg_enr_avg = enr_avg;
 
             float hysteresis = 0.05f;
             float eff_threshold = r->using_render_based
@@ -734,13 +755,27 @@ void res_process(ResFilter* r,
             }
         }
 
+        /* FS-parity fix set (match Python aec.py:1432-1466):
+         * (a) dt exponent 1.1 (was 1.3) — softer mid-DT shaping
+         * (b) ne_physical_floor = 5% × error_psd — prevent ENR blow-up on quiet FS
+         * (c) DT-aware ENR threshold relaxation (effective_dt > 0.4) */
+        float dt_enr_relax = 1.0f;
+        if (effective_dt > 0.4f) {
+            dt_enr_relax = 1.0f + (effective_dt - 0.4f) / 0.6f * 0.5f;   /* max 1.5× */
+            if (dt_enr_relax > 1.5f) dt_enr_relax = 1.5f;
+        }
+
         for (int k = 0; k < nf; k++) {
             float dt_pb = dt_per_bin[k];
-            float dt_pb_sq = dt_pb * dt_pb;
+            float dt_pb_shaped = powf(dt_pb, 1.1f);
             float raw_ne = maxf(r->error_psd[k] - residual_echo_psd[k], 0.0f);
-            float nearend_est = maxf(raw_ne * dt_pb_sq, noise_floor_psd);
-            float min_ne_from_dt = r->error_psd[k] * dt_pb_sq;
+            float nearend_est = maxf(raw_ne * dt_pb_shaped, noise_floor_psd);
+            float min_ne_from_dt = r->error_psd[k] * dt_pb_shaped;
             if (nearend_est < min_ne_from_dt) nearend_est = min_ne_from_dt;
+            /* (b) Physical nearend floor: 5% of error_psd ensures ENR never
+             * becomes astronomically large on quiet FS segments. */
+            float ne_physical_floor = r->error_psd[k] * 0.05f;
+            if (nearend_est < ne_physical_floor) nearend_est = ne_physical_floor;
             float ne_confidence = dt_pb;
             float enr = residual_echo_psd[k] / nearend_est;
 
@@ -750,6 +785,10 @@ void res_process(ResFilter* r,
             float enr_s_ne = (1.0f - blend) * 3.0f + blend * 2.5f;
             float enr_t_fs = (1.0f - blend) * 0.3f * scale + blend * 0.07f * scale;
             float enr_s_fs = (1.0f - blend) * 0.4f * scale + blend * 0.1f * scale;
+
+            /* (c) DT-aware relaxation on NE-side thresholds only */
+            enr_t_ne *= dt_enr_relax;
+            enr_s_ne *= dt_enr_relax;
 
             float enr_t = ne_confidence * enr_t_ne + (1.0f - ne_confidence) * enr_t_fs;
             float enr_s = ne_confidence * enr_s_ne + (1.0f - ne_confidence) * enr_s_fs;
@@ -931,7 +970,8 @@ void res_process(ResFilter* r,
         for (int k = 0; k < nf; k++) noise_sum += r->noise_psd[k];
         if (noise_sum > 1e-7f) {
             for (int k = 0; k < nf; k++) {
-                float cn_gain_k = fast_sqrt(maxf(1.0f - r->gain_smooth[k] * r->gain_smooth[k], 0.0f)) * 0.3f;
+                /* A4: CNG gain factor 0.3→0.4 to match Python (aec.py:1631). */
+                float cn_gain_k = fast_sqrt(maxf(1.0f - r->gain_smooth[k] * r->gain_smooth[k], 0.0f)) * 0.4f;
                 float noise_std = fast_sqrt(r->noise_psd[k] / 2.0f);
                 /* Box-Muller for two N(0,1) samples */
                 float u1 = (float)(rand() + 1) / ((float)RAND_MAX + 2.0f);
@@ -964,4 +1004,40 @@ const float* res_get_echo_psd(const ResFilter* r) {
 
 const float* res_get_error_psd(const ResFilter* r) {
     return r ? r->error_psd : NULL;
+}
+
+void res_dump_gain_spectrum(const ResFilter* r, float* out_gain) {
+    if (!r || !out_gain) return;
+    for (int k = 0; k < r->n_freqs; k++) out_gain[k] = r->gain_smooth[k];
+}
+
+void res_get_debug_stats(const ResFilter* r, ResDebugStats* out) {
+    if (!r || !out) return;
+    int nf = r->n_freqs;
+    float gsum = 0.0f, gmin = 1.0f;
+    float esum = 0.0f, ersum = 0.0f, csum = 0.0f, fesum = 0.0f, rvsum = 0.0f;
+    for (int k = 0; k < nf; k++) {
+        gsum += r->gain_smooth[k];
+        if (r->gain_smooth[k] < gmin) gmin = r->gain_smooth[k];
+        esum += r->echo_psd[k];
+        ersum += r->error_psd[k];
+        csum += r->coh2_smooth[k];
+        fesum += r->filter_erle[k];
+        rvsum += r->reverb_psd[k];
+    }
+    float inv = 1.0f / (float)nf;
+    out->gain_mean = gsum * inv;
+    out->gain_min = gmin;
+    out->echo_psd_mean = esum * inv;
+    out->error_psd_mean = ersum * inv;
+    out->coh2_mean = csum * inv;
+    out->filter_erle_mean = fesum * inv;
+    out->fb_erle = r->fb_erle;
+    out->reverb_psd_mean = rvsum * inv;
+    out->far_activity = r->far_activity;
+    out->using_render_based = r->using_render_based;
+    out->last_erle_factor = r->dbg_erle_factor;
+    out->last_switching_threshold = r->dbg_switching_threshold;
+    out->last_enr_avg = r->dbg_enr_avg;
+    out->last_residual_mean = r->dbg_residual_mean;
 }

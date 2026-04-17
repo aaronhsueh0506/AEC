@@ -63,6 +63,18 @@ int pbfdkf_process(Pbfdkf* f,
                    float mu_scale);
 
 /**
+ * Process with per-bin mu_scale (FS-parity fix: post-convergence Python uses
+ * different step size per frequency bin based on residual EER). If per_bin_mu
+ * is NULL, behaves identically to pbfdkf_process with scalar.
+ */
+int pbfdkf_process_per_bin(Pbfdkf* f,
+                           const float* near_end,
+                           const float* far_end,
+                           float* output,
+                           const float* per_bin_mu,
+                           float scalar_mu);
+
+/**
  * Switch Q to low (stable tracking mode after convergence)
  */
 void pbfdkf_switch_q_low(Pbfdkf* f);
@@ -118,6 +130,8 @@ const Complex* pbfdkf_get_error_spec(const Pbfdkf* f);
  * Get far-end power (smoothed, per-bin mean)
  */
 float pbfdkf_get_far_power(const Pbfdkf* f);
+/* Mean magnitude of partition-0 weights (debug/parity check) */
+float pbfdkf_get_w_mean_mag(const Pbfdkf* f);
 
 /* Getters */
 int pbfdkf_get_block_size(const Pbfdkf* f);

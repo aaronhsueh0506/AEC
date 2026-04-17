@@ -288,6 +288,16 @@ int pbfdkf_process(Pbfdkf* f,
                    const float* far_end,
                    float* output,
                    float mu_scale) {
+    return pbfdkf_process_per_bin(f, near_end, far_end, output, NULL, mu_scale);
+}
+
+int pbfdkf_process_per_bin(Pbfdkf* f,
+                           const float* near_end,
+                           const float* far_end,
+                           float* output,
+                           const float* per_bin_mu,
+                           float scalar_mu) {
+    float mu_scale = scalar_mu;
     if (!f || !near_end || !far_end || !output) return -1;
 
     const int bs = f->block_size;       /* 2*hop = 320 */
@@ -364,12 +374,21 @@ int pbfdkf_process(Pbfdkf* f,
             f->R[k] = f->error_psd[k] > delta ? f->error_psd[k] : delta;
         }
 
-        /* Adaptive R: scale by mu_scale to break R-deadlock */
-        float R_scale = 0.1f + 0.9f * (1.0f - mu_scale);
+        /* Python uses mu_mean (average of per-bin array) for R_scale and q_scale
+         * (scalar effects). Match by computing mean if per-bin is provided. */
+        float mu_mean = mu_scale;
+        if (per_bin_mu) {
+            float s = 0.0f;
+            for (int k = 0; k < nfreq; k++) s += per_bin_mu[k];
+            mu_mean = s / (float)nfreq;
+        }
+
+        /* Adaptive R: scale by mu_mean to break R-deadlock */
+        float R_scale = 0.1f + 0.9f * (1.0f - mu_mean);
         for (int k = 0; k < nfreq; k++) f->R[k] *= R_scale;
 
         /* Q modulation: reduce Q during DT */
-        float q_scale = 0.1f + 0.9f * mu_scale;
+        float q_scale = 0.1f + 0.9f * mu_mean;
 
         /* Per-bin Q gating: only add Q where far-end has energy */
         float mean_power = 0.0f;
@@ -403,8 +422,11 @@ int pbfdkf_process(Pbfdkf* f,
                 float K_scale = f->P[p][k] / denom_buf[k];
 
                 /* Bug 2 fix: separate K for weights (scaled) and P update (unscaled)
-                 * mu_scale only affects weight update, not covariance */
-                float K_scale_mu = K_scale * mu_scale;
+                 * mu_scale only affects weight update, not covariance.
+                 * Per-bin mu (FS-parity): Python applies different step size per
+                 * frequency bin post-convergence (mu_min + (1-mu_min)*per_bin_eer). */
+                float mu_k = per_bin_mu ? per_bin_mu[k] : mu_scale;
+                float K_scale_mu = K_scale * mu_k;
                 Complex K_w;  /* for weight update */
                 K_w.r = K_scale_mu * X.r;
                 K_w.i = K_scale_mu * (-X.i);
@@ -504,6 +526,14 @@ float pbfdkf_get_error_energy(const Pbfdkf* f) {
 
 const Complex* pbfdkf_get_echo_spec(const Pbfdkf* f) {
     return f ? f->echo_spec : NULL;
+}
+
+float pbfdkf_get_w_mean_mag(const Pbfdkf* f) {
+    if (!f || !f->W || !f->W[0]) return 0.0f;
+    float sum = 0.0f;
+    for (int k = 0; k < f->n_freqs; k++)
+        sum += sqrtf(f->W[0][k].r * f->W[0][k].r + f->W[0][k].i * f->W[0][k].i);
+    return sum / (float)f->n_freqs;
 }
 
 const Complex* pbfdkf_get_far_spec(const Pbfdkf* f) {

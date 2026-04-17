@@ -1,20 +1,33 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v2.3.0），Python 支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+回音消除模組（v2.5.0），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
 
-**v2.3.0 主要改進（2026-04）**：
+**v2.5.0 主要改進（2026-04-17）**：
 
-- **Pre-filter Energy DT signal**：`mic_pwr > 4 × far_pwr` 檢測 near-end 能量溢出，繞過 inst_erle correction 的死角
-- **Shadow DTD + Energy DT 互補覆蓋**：`max(shadow_dt, energy_dt)` — onset（shadow）+ sustained（energy）全程有信號
-- **三線驅動 effective_dt**：dt_per_bin、fs_confidence、HF cap bypass 全部接上 effective_dt，5 條 DT 保護路徑完整啟動
-- **Blindspot fixes**：S_ee decay 同步（A1）、delay reset 帶 ResFilter（A2）、動態 ERL 估計（B4）、GCC-PHAT PAR gate（A5）、EPC render-forced 延長至 200ms（G1）
-- **Render-based 穩定性**：explicit override（epc_active / saturation）、minimum hold time（5 frames）
-- **Shadow copy 防護**：advantage streak gate（≥10 frames），防止短暫 echo burst 誤觸發 copy
-- **Code cleanup**：dead code 刪除（B1-B5）、per-frame 常數移 init（C1-C4）、diagnostics 擴充（19 keys）
+- **RES C/Python 7 項對齊**：dt_per_bin ** 1.1、render-based threshold 公式、fb_erle smoothing input、filter_erle cap 統一 [0.5,200]、ne_physical_floor、render gate 條件、DT ENR relax
+- **Kalman float32 parity**：Python 消除 delta/KX float64 升精度，與 C float32 對齊
+- **PBFDKF mu_ratio 修正**：無 RES 路徑補上 `_update_simple_mu_ratio`（C/Py 一致）
+- **800-case 分數**：DT deg 2.296（+0.014 vs v2.3.0），FS echo 3.482，NE deg 4.007
+
+**v2.4.0 主要改進（2026-04-17）**：
+
+- **Bug 7 — DT per-bin 軟化**：`dt_per_bin ** 2` → `** 1.3`，修正 mid-range DT 過度壓制（dt=0.5 的近端壓制 0.25→0.41，dt=0.3 的近端壓制 0.09→0.22）。800-case 驗證 DT deg +0.010
+- **Bug 2 — FilterErle alpha_rise 修正**：DT 期間凍結 rise（`alpha → 1`），移除原本 dt_weight 反向加速 rise 的漏洞。架構更乾淨，metric 中性
+- **Bug 6 — 動態 ERL ceiling**：`dt_from_energy` 的 echo ceiling 由硬編碼 4× 改為 `1/erl_estimate × 2`，高耦合場景不再誤觸 ENR 放鬆。ERL 持續追蹤至收斂後（alpha 0.99→0.999）
+- **C 同步**：所有上述修正已同步至 `c_impl/src/res_filter.c` 和 `c_impl/src/aec.c`
+- **Code Review 失敗紀錄**：Bug 3（R_scale DT boost）、Bug 8（erle_factor ramp）、Bug 10（reverb re-clamp）、Bug 12（convergence threshold）、Bug 16（near_psd order）經 800-case 驗證皆造成 FS regression，已 revert
+
+**v2.3.0 主要改進（2026-04-16）**：
+
+- **Pre-filter Energy DT signal** + **Shadow DTD 互補覆蓋** + **三線驅動 effective_dt**（5 條 DT 保護路徑完整啟動）
+- **Blindspot fixes**：S_ee decay 同步、delay reset 帶 ResFilter、動態 ERL 估計、GCC-PHAT PAR gate、EPC render-forced 延長至 200ms
+- **Render-based 穩定性** + **Shadow copy 防護** + **Code cleanup**（詳見 [CHANGELOG_v2.3.0.md](docs/CHANGELOG_v2.3.0.md)）
 
 **Blind test 成績（fl=512, AEC Challenge Interspeech 2021, 800 cases, AECMOS）**：
 
-**總表**：
+**v2.5.0 balanced preset**：FS echo 3.482 / DT echo 4.162 / DT deg 2.296 / NE deg 4.007
+
+**歷史總表（v2.3.0）**：
 
 | Method | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
 |--------|----------|----------|---------|---------|
@@ -22,10 +35,14 @@
 | Speex (SpeexDSP 1.2) | 2.808 | 3.368 | 3.225 | 4.128 |
 | WebRTC AEC2 | 3.484 | 4.262 | 2.389 | 4.098 |
 | **mild** | 3.155 | 3.882 | **2.441** | **4.019** |
-| **balanced** | **3.502** | 4.163 | 2.283 | 4.008 |
+| **balanced v2.3.0** | 3.502 | 4.163 | 2.283 | 4.008 |
+| **balanced v2.4.0** | 3.487 | 4.164 | 2.293 | 4.007 |
+| **balanced v2.5.0** | **3.482** | **4.162** | **2.296** | **4.007** |
 | **aggressive** | **3.621** | 4.289 | 2.231 | 3.994 |
 | **maximum** | **3.722** | 4.412 | 2.162 | 3.961 |
 | WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
+
+> v2.4.0 僅重新驗證 balanced preset；其他 preset 未跑完整 800-case（Bug 7/2/6 對 mild/aggressive/maximum 的 RES 參數結構相同，預期 DT deg 亦有類似 +0.01 改善幅度，但未實測驗證）。
 
 **FS echo — No Movement / With Movement 分解**（169 no-mv / 131 mv）：
 
@@ -113,7 +130,7 @@
 
 支援四級 Preset（MILD / BALANCED / AGGRESSIVE / MAXIMUM）控制 echo 壓制強度。
 
-> C 實作對齊 Python **v2.0.0**（correlation 0.971）。**v2.1.0 的 ResFilter 改動（AEC3-style echo switching / P-floor / inst_erle cap / light release EMA / BUG-3 min_gate_width）尚未同步到 C 端**，計畫在下一輪移植。詳見 [c_impl/README.md](c_impl/README.md) 和 [docs/DEVLOG.md](docs/DEVLOG.md) v2.1.0 條目。
+> C 實作對齊 Python **v2.0.0**（correlation 0.971）+ v2.5.0 RES 修正（7 項對齊 + Kalman float32 + mu_ratio）。**v2.1.0 / v2.2.0 / v2.3.0 的 ResFilter 改動尚未完整同步到 C 端**，計畫在下一輪移植。使用文件見 [c_impl/USER_GUIDE.md](c_impl/USER_GUIDE.md)，移植計畫詳見 [docs/DEVLOG.md](docs/DEVLOG.md)。
 
 ## 濾波器模式
 

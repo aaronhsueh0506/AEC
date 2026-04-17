@@ -105,6 +105,16 @@ float aec_get_erle_instant(const Aec* aec);
 int   aec_is_converged(const Aec* aec);
 const AecConfig* aec_get_config(const Aec* aec);
 
+/* Debug: exposes internal RES handle for parity testing */
+struct ResFilter;
+struct ResFilter* aec_get_res(const Aec* aec);
+
+/* Debug: filter parity inspection */
+int   aec_get_warmup_frames(const Aec* aec);
+float aec_get_simple_mu_ratio(const Aec* aec);
+struct Pbfdkf;
+struct Pbfdkf* aec_get_filter(const Aec* aec);
+
 /**
  * Get estimated delay in samples (-1 if not yet estimated or disabled)
  */

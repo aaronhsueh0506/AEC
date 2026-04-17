@@ -734,12 +734,15 @@ class PBFDKF(PBFDAF):
         P_floor = self.Q_high * beta
 
         # Global denominator: sum over ALL partitions (correct Kalman theory)
+        # C-parity fix: cast delta to float32 to prevent denominator from
+        # promoting to float64, which cascades K_optimal to complex128 and
+        # causes divergence from C's float32-only arithmetic.
         total_echo_var = np.zeros(self.n_freqs, dtype=np.float32)
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
             X = self.X_buf[p_idx]
             total_echo_var += self.P[p] * (np.abs(X) ** 2)
-        denominator = total_echo_var + self.R + self.delta
+        denominator = total_echo_var + self.R + np.float32(self.delta)
 
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
@@ -753,9 +756,12 @@ class PBFDKF(PBFDAF):
             self.W[p] += K_scaled * self.error_spec
 
             # Covariance update with UNSCALED K_optimal
-            KX = np.real(K_optimal * X)
+            # C-parity fix: use np.float32(1.0) to avoid float64 promotion
+            # in (1.0 - KX) where Python literal 1.0 is float64. C uses
+            # float32 throughout so this intermediate stays float32.
+            KX = np.real(K_optimal * X).astype(np.float32)
             self.P[p] = np.minimum(
-                np.maximum((1.0 - KX) * self.P[p] + Q_gated, P_floor),
+                np.maximum((np.float32(1.0) - KX) * self.P[p] + Q_gated, P_floor),
                 p_max
             )
 
@@ -802,12 +808,15 @@ class FilterErleEstimator:
         error_pwr = np.abs(error_spec) ** 2 + 1e-10
         inst_erle = np.clip(echo_pwr / error_pwr, 0.1, 1000.0)
 
-        # Asymmetric EMA: fast drop (DT), slow rise (FS convergence)
-        dt_weight = max(1.0 - dt_indicator * 1.5, 0.1)
+        # Asymmetric EMA: fast drop (DT protection), slow rise (FS convergence).
+        # Bug 2 fix: dt_indicator now freezes rise (alpha_rise→1), instead of
+        # inverted dt_weight that accelerated rise during DT (echo leak).
+        dt_factor = float(np.clip(dt_indicator, 0.0, 1.0))
+        alpha_rise_eff = self._alpha_rise + (1.0 - self._alpha_rise) * dt_factor
         alpha = np.where(
             inst_erle < self.erle,
-            self._alpha_drop * dt_weight + (1.0 - dt_weight) * 0.5,
-            self._alpha_rise * dt_weight
+            self._alpha_drop,
+            alpha_rise_eff,
         )
         self.erle = alpha * self.erle + (1.0 - alpha) * inst_erle
 
@@ -1426,11 +1435,12 @@ class ResFilter:
             if is_stationary_dt:
                 dt_per_bin = np.maximum(dt_per_bin, self._stat_dt_mask)
 
-            dt_sq_per_bin = dt_per_bin ** 2
-            nearend_est = np.maximum(raw_nearend_est * dt_sq_per_bin, noise_floor_psd)
+            # dt=0.5 → 0.41 (was 0.25), dt=0.3 → 0.22 (was 0.09), dt=0.8 → 0.75 (was 0.64).
+            # Squared factor over-suppressed mid-range DT (>1 AECMOS damage on 51% of cases).
+            dt_shaped_per_bin = dt_per_bin ** 1.1
+            nearend_est = np.maximum(raw_nearend_est * dt_shaped_per_bin, noise_floor_psd)
 
-            # Anti-zero guard (per-bin)
-            min_ne_from_dt = self.error_psd * dt_sq_per_bin
+            min_ne_from_dt = self.error_psd * dt_shaped_per_bin
             nearend_est = np.maximum(nearend_est, min_ne_from_dt)
 
             ne_physical_floor = self.error_psd * 0.05
@@ -2744,11 +2754,12 @@ class AEC:
                 # speech (raw_dt < 2.0 allows high-coupling echo-only through).
                 # Pre-convergence only: after convergence, filter-based echo
                 # estimate is reliable and render-based mode is off.
-                if far_pwr > 1e-4 and not self._filter_converged:
+                if far_pwr > 1e-4:
                     raw_dt_ratio = raw_err_pwr / (far_pwr + 1e-10)
                     if raw_dt_ratio < 2.0:
-                        inst_erl = np.clip(mic_pwr / far_pwr, 0.001, 1.0)
-                        self._erl_estimate = 0.99 * self._erl_estimate + 0.01 * inst_erl
+                        inst_erl = np.clip(mic_pwr / far_pwr, 0.001, 10.0)
+                        alpha_erl = 0.99 if not self._filter_converged else 0.999
+                        self._erl_estimate = alpha_erl * self._erl_estimate + (1 - alpha_erl) * inst_erl
 
                 # Pre-filter DT signal (Stage B): mic energy excess over
                 # far × max_ERL. Realistic rooms have ERL ≤ +6 dB (coupling
@@ -2762,7 +2773,8 @@ class AEC:
                 # hang over into the following FS segment, relaxing ENR
                 # thresholds while echo is present → FS echo leakage.
                 if self._far_active_prev and far_pwr > 1e-4:
-                    max_echo_expected = far_pwr * 4.0  # +6 dB ERL ceiling
+                    erl_ceiling = 1.0 / max(self._erl_estimate, 0.01)  # learned, max 100×
+                    max_echo_expected = far_pwr * erl_ceiling * 2.0    # 2× safety margin
                     dt_from_energy = max(0.0, (mic_pwr - max_echo_expected) / mic_pwr)
                 else:
                     dt_from_energy = 0.0  # far silent → no DT evidence available
@@ -2862,9 +2874,6 @@ class AEC:
                         self._epc_render_forced_remaining -= 1
                         self.res._using_render_based = True
                     self.res.over_sub = effective_over_sub
-                    # Note: error_spec_from_filter intentionally NOT passed.
-                    # Windowed spec tested but caused FS echo -0.023 (mixed-window
-                    # bias at low ERLE). Using OLA spec_synth fallback.
                     final_output = self.res.process(raw_output, self.filter.echo_spec,
                                                     far_power, self.filter.far_spec,
                                                     filter_converged=self._filter_converged,
@@ -2915,6 +2924,12 @@ class AEC:
                         saturation_level=float(self._saturation_level),
                         erl_estimate=float(self._erl_estimate),
                     )
+
+            # C-parity fix: when RES is disabled, _update_simple_mu_ratio is never
+            # called in PBFDKF path. C always calls update_simple_mu_ratio regardless.
+            # Add call here when RES is not active (avoids double-update when RES is on).
+            if not self.res and not self.config.enable_dtd and not self._filter_converged:
+                self._update_simple_mu_ratio(raw_output, far_end)
 
             # Update diagnostics
             if self.res and hasattr(self.res, '_diag_gain_mean'):

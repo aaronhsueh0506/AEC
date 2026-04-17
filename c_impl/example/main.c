@@ -14,6 +14,8 @@
 #include <string.h>
 #include "aec.h"
 #include "hpf.h"
+#include "res_filter.h"
+#include "pbfdkf.h"
 #include "wav_io.h"
 
 static void print_usage(const char* program) {
@@ -193,6 +195,20 @@ int main(int argc, char* argv[]) {
     int processed = 0;
     float max_erle = 0.0f;
 
+    /* Debug dump (set AEC_DBG_CSV=path.csv and optional AEC_DBG_FRAMES=N) */
+    const char* dbg_path = getenv("AEC_DBG_CSV");
+    int dbg_max_frames = 0;
+    if (getenv("AEC_DBG_FRAMES")) dbg_max_frames = atoi(getenv("AEC_DBG_FRAMES"));
+    FILE* dbg_fp = NULL;
+    if (dbg_path) {
+        dbg_fp = fopen(dbg_path, "w");
+        if (dbg_fp) fprintf(dbg_fp,
+            "frame,gain_mean,gain_min,echo_psd,error_psd,coh2,filter_erle,"
+            "fb_erle,reverb_psd,far_activity,render_based,erle_factor,"
+            "switching_threshold,enr_avg,echo_pwr_input\n");
+    }
+    int dbg_frame = 0;
+
     while (processed + hop_size <= num_samples) {
         int mic_read = wav_read_float(mic_reader, mic_buf, hop_size);
         int ref_read = wav_read_float(ref_reader, ref_buf, hop_size);
@@ -208,6 +224,48 @@ int main(int argc, char* argv[]) {
 
         aec_process(aec, mic_buf, ref_buf, out_buf);
         wav_write_float(writer, out_buf, hop_size);
+
+        /* Filter-level debug: AEC_FDBG_CSV dumps W mag + warmup + mu per frame */
+        const char* fdbg_path = getenv("AEC_FDBG_CSV");
+        static FILE* fdbg_fp = NULL;
+        static int fdbg_init = 0;
+        if (!fdbg_init && fdbg_path) {
+            fdbg_fp = fopen(fdbg_path, "w");
+            if (fdbg_fp) fprintf(fdbg_fp,
+                "frame,W0_mean_mag,echo_mean_mag,warmup_frames,mu_ratio\n");
+            fdbg_init = 1;
+        }
+        if (fdbg_fp && (dbg_max_frames == 0 || dbg_frame < dbg_max_frames)) {
+            struct Pbfdkf* filt = aec_get_filter(aec);
+            float w_mag = filt ? pbfdkf_get_w_mean_mag(filt) : 0.0f;
+            const Complex* echo_s = filt ? pbfdkf_get_echo_spec(filt) : NULL;
+            float echo_mag = 0.0f;
+            if (echo_s) {
+                int nf = pbfdkf_get_n_freqs(filt);
+                for (int k = 0; k < nf; k++)
+                    echo_mag += sqrtf(echo_s[k].r*echo_s[k].r + echo_s[k].i*echo_s[k].i);
+                echo_mag /= (float)nf;
+            }
+            fprintf(fdbg_fp, "%d,%.6e,%.6e,%d,%.4f\n",
+                dbg_frame, w_mag, echo_mag,
+                aec_get_warmup_frames(aec),
+                aec_get_simple_mu_ratio(aec));
+        }
+
+        if (dbg_fp && (dbg_max_frames == 0 || dbg_frame < dbg_max_frames)) {
+            ResFilter* res = aec_get_res(aec);
+            if (res) {
+                ResDebugStats s;
+                res_get_debug_stats(res, &s);
+                fprintf(dbg_fp, "%d,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%d,%.6e,%.6e,%.6e,%.6e\n",
+                    dbg_frame, s.gain_mean, s.gain_min, s.echo_psd_mean,
+                    s.error_psd_mean, s.coh2_mean, s.filter_erle_mean, s.fb_erle,
+                    s.reverb_psd_mean, s.far_activity, s.using_render_based,
+                    s.last_erle_factor, s.last_switching_threshold, s.last_enr_avg,
+                    s.last_residual_mean);
+            }
+        }
+        dbg_frame++;
 
         float erle = aec_get_erle(aec);
         if (erle > max_erle) max_erle = erle;
@@ -245,6 +303,7 @@ int main(int argc, char* argv[]) {
 
     free(mic_buf);
     free(ref_buf);
+    if (dbg_fp) fclose(dbg_fp);
     free(out_buf);
     hpf_destroy(hp_mic);
     hpf_destroy(hp_ref);

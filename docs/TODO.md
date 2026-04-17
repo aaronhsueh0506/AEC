@@ -1,4 +1,4 @@
-# AEC 待辦事項（v2.3.0 後）
+# AEC 待辦事項（v2.4.0 後）
 
 ## 高優先（影響分數或正確性）
 
@@ -6,10 +6,11 @@
 |---|------|------|------|------|
 | 1 | CODE_REVIEW A3 | GCC-PHAT 負延遲 | 寫入 README 限制條件，客戶端責任 | ✅ v2.3.1 |
 | 2 | CODE_REVIEW D4 | `_wn_err_baseline` 初始化 | 非 stationary 時緩慢追蹤 baseline | ✅ v2.3.1 |
-| 3 | CODE_REVIEW D2 | erle_factor ramp 2→0 dB | `erle/10.0`，搭配 B4 動態 ERL | ⏳ 800-case 驗證中 |
-| 4 | CODE_REVIEW D3 | shadow_err_alpha 0.85→0.80 | 更快追蹤 shadow advantage | ⏳ 800-case 驗證中 |
-| 5 | CODE_REVIEW D6 | kalman_q_low 1e-5→1e-6 | 更低 misadjustment | ⏳ 800-case 驗證中 |
-| 6 | BLINDSPOTS B5 | BUG-1+2 coh2 窗函數統一 | 需獨立 session 從頭 retune | ⏭️ C 移植後再做 |
+| 3 | AEC_CODE_REVIEW Bug 7 | `dt_per_bin ** 2 → ** 1.3` | DT mid-range 軟化 | ✅ v2.4.0（DT deg +0.010）|
+| 4 | AEC_CODE_REVIEW Bug 2 | FilterErle alpha_rise freeze in DT | 移除 dt_weight 反向邏輯 | ✅ v2.4.0（中性保留）|
+| 5 | AEC_CODE_REVIEW Bug 6 | 動態 ERL ceiling | `far×4` → `far × (1/erl) × 2` | ✅ v2.4.0（中性保留）|
+| 6 | AEC_CODE_REVIEW Bug 3/8/10/12/16 | R_scale / ramp / reverb clamp / conv threshold / near_psd order | 全部 regress，已 revert | ❌ 不做 |
+| 7 | BLINDSPOTS B5 | BUG-1+2 coh2 窗函數統一 | 需獨立 session 從頭 retune | ⏭️ C 移植後再做 |
 
 ## 中優先（結構/完整性）
 
@@ -29,12 +30,13 @@
 | 13 | BLINDSPOTS P3 | ERLE EMA closed-form decay | sample-by-sample loop → dot product |
 | 14 | CODE_REVIEW F5 | ring buffer wrap 優化 | np.concatenate → 預分配 buffer |
 
-## 下一步：C 移植（v2.3.1 收版後）
+## 下一步：C 移植（v2.4.0 收版後）
 
 | # | 項目 | Python 版本 | 狀態 |
 |---|------|------------|------|
 | 21 | v2.1.0 改動移植 | AEC3 echo switching, P-floor, inst_erle cap, light release, BUG-3 | 未開始 |
 | 22 | v2.3.x 改動移植 | Energy DT, shadow offset, 動態 ERL, PAR, EPC 延長, cleanup | 未開始 |
+| 23 | v2.4.0 Bug 7/2/6 | dt_per_bin ** 1.3, FilterErle alpha_rise freeze, 動態 ERL ceiling | ✅ 2026-04-17 |
 
 ## C 移植後：BUG-1+2 重新嘗試
 
@@ -67,4 +69,4 @@
 | D7 max_drop 4dB | FS echo 代價 -0.024 不值得 |
 | BUG-1+2 rectangular error_spec | alpha 不匹配，全面退步 |
 
-*更新於 2026-04-16*
+*更新於 2026-04-17（v2.4.0）*

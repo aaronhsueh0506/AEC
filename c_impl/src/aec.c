@@ -34,6 +34,7 @@ struct Aec {
     float shadow_err_smooth;
     int shadow_frame_count;
     int shadow_copy_counter;
+    float copy_err_baseline;      /* EMA of best-filter err (v2.3.0 copy gate) */
 
     /* RES post-filter */
     ResFilter* res;
@@ -249,6 +250,7 @@ Aec* aec_create(const AecConfig* config) {
     aec->shadow_err_smooth = 0.0f;
     aec->shadow_frame_count = 0;
     aec->shadow_copy_counter = 0;
+    aec->copy_err_baseline = 0.0f;
 
     /* EPC init */
     aec->prev_total_err = 0.0f;
@@ -377,6 +379,7 @@ void aec_reset(Aec* aec) {
     aec->divergence_indicator = 0.0f;
     aec->main_err_smooth = 0; aec->shadow_err_smooth = 0;
     aec->shadow_frame_count = 0; aec->shadow_copy_counter = 0;
+    aec->copy_err_baseline = 0.0f;
     aec->prev_total_err = 0.0f; aec->epc_active = 0; aec->epc_hangover_count = 0;
     aec->far_env_mean = 0; aec->far_env_var = 0; aec->far_active_prev = 0;
     aec->is_stationary_far = 0; aec->wn_err_baseline = 1e-8f;
@@ -457,6 +460,17 @@ static void update_simple_mu_ratio(Aec* aec, const float* output,
     }
     err_pwr = err_pwr / hop + 1e-10f;
     far_pwr = far_pwr / hop + 1e-10f;
+
+    /* FS-parity fix: match Python aec.py:2392-2399.
+     * (1) Don't update during bilateral silence — preserves value for warmup.
+     * (2) Quick reset to 0.8 on silence→active transition. */
+    if (far_pwr < 1e-6f && err_pwr < 1e-6f) return;
+    if (far_pwr > 1e-4f && aec->simple_mu_ratio < 0.1f) {
+        aec->simple_mu_ratio = 0.8f;
+        aec->simple_mu_holdoff = 0;
+        return;
+    }
+
     float ratio = far_pwr / err_pwr;
     if (ratio > 1.0f) ratio = 1.0f;
 
@@ -849,11 +863,23 @@ int aec_process_ex(Aec* aec,
         /* else: not enough data yet, use ref as-is */
     }
 
+    /* FS-parity fix: update warmup_far_active BEFORE computing mu_scale so that
+     * the current frame's far activity affects warmup countdown, matching Python
+     * aec.py:2512 (_warmup_far_active set before _get_simple_mu_scale). */
+    {
+        float far_pwr_wup = 0.0f;
+        for (int i = 0; i < hop; i++) far_pwr_wup += ref[i] * ref[i];
+        aec->warmup_far_active = (far_pwr_wup / hop > 1e-6f);
+    }
+
     /* Compute mu_scale */
     float mu_scale = get_simple_mu_scale(aec);
 
-    /* === Main filter === */
-    pbfdkf_process(aec->filter, mic, ref, aec->raw_output, mu_scale);
+    /* === Main filter (per-bin mu post-convergence for FS-parity with Python) === */
+    const float* per_bin_mu = (aec->filter_converged && aec->per_bin_mu_scale)
+                              ? aec->per_bin_mu_scale : NULL;
+    pbfdkf_process_per_bin(aec->filter, mic, ref, aec->raw_output,
+                           per_bin_mu, mu_scale);
 
     /* === Shadow filter (always mu_scale=1.0) === */
     float shadow_out[160]; /* stack alloc, hop <= 160 */
@@ -885,24 +911,36 @@ int aec_process_ex(Aec* aec,
         }
     }
 
-    /* Copy gate (after warmup) */
+    /* Copy gate — aligned with Python aec.py:2616-2662
+     * Key fixes vs old C code:
+     * (a) baseline-gated copy_allowed (error_is_normal) instead of crude far/err ratio
+     * (b) shadow_advantage_streak reset on copy_allowed=False (G3 Fix 1)
+     * (c) err_balance stability check for baseline update */
     if (aec->shadow_frame_count >= 50) {
         float threshold = cfg->shadow_copy_threshold;
 
-        /* Far-end activity check */
         float far_pwr = 0.0f;
         for (int i = 0; i < hop; i++) far_pwr += ref[i] * ref[i];
         int far_active = (far_pwr / hop > 1e-4f);
 
-        /* DT check: far/error ratio */
-        float raw_err_pwr = 0.0f;
-        for (int i = 0; i < hop; i++)
-            raw_err_pwr += aec->raw_output[i] * aec->raw_output[i];
-        raw_err_pwr = raw_err_pwr / hop + 1e-10f;
-        float far_pwr_avg = far_pwr / hop + 1e-10f;
-        int not_dt = (far_pwr_avg / raw_err_pwr > 0.3f);
+        float err_sum = aec->main_err_smooth + aec->shadow_err_smooth + 1e-10f;
+        float err_balance = fabsf(aec->main_err_smooth - aec->shadow_err_smooth) / err_sum;
+        int is_stable_fs = far_active && err_balance < 0.3f && !aec->epc_active;
 
-        int copy_allowed = far_active && not_dt && !aec->epc_active;
+        /* Update copy_err_baseline when filters are stable */
+        if (is_stable_fs) {
+            float best_err = aec->main_err_smooth < aec->shadow_err_smooth
+                           ? aec->main_err_smooth : aec->shadow_err_smooth;
+            if (aec->copy_err_baseline < 1e-10f)
+                aec->copy_err_baseline = best_err;  /* cold start */
+            else
+                aec->copy_err_baseline = 0.995f * aec->copy_err_baseline + 0.005f * best_err;
+        }
+
+        int error_is_normal = (aec->copy_err_baseline < 1e-10f) ||
+                              (aec->main_err_smooth < aec->copy_err_baseline * 4.0f + 1e-10f);
+        int not_saturating = (aec->saturation_level < 0.3f);
+        int copy_allowed = far_active && error_is_normal && !aec->epc_active && not_saturating;
 
         if (copy_allowed) {
             if (aec->shadow_err_smooth < aec->main_err_smooth * threshold) {
@@ -920,13 +958,16 @@ int aec_process_ex(Aec* aec,
                 aec->main_err_smooth = aec->shadow_err_smooth;
                 aec->shadow_copy_counter = 0;
                 aec->shadow_advantage_streak = 0;
-            } else if (aec->main_err_smooth < aec->shadow_err_smooth * threshold && not_dt) {
+            } else if (aec->main_err_smooth < aec->shadow_err_smooth * threshold
+                       && error_is_normal) {
                 /* Bidirectional: Main → Shadow */
                 pbfdkf_copy_weights(aec->shadow_filter, aec->filter);
                 aec->shadow_err_smooth = aec->main_err_smooth;
             }
         } else {
+            /* (b) reset both counter AND streak on copy_allowed=False */
             aec->shadow_copy_counter = 0;
+            aec->shadow_advantage_streak = 0;
         }
     }
 
@@ -1087,9 +1128,13 @@ int aec_process_ex(Aec* aec,
             float dt_reduction = cfg->res_dt_reduction * dt_indicator;
             float over_sub = maxf(base_over_sub - dt_reduction, 0.5f);
 
-            /* === F: Energy DT signal (pre-filter, immune to inst_erle) === */
+            /* === F: Energy DT signal (pre-filter, immune to inst_erle) ===
+             * Bug 6 fix: dynamic ERL ceiling instead of hardcoded 4.0×.
+             * High-coupling scenarios (ERL > 0dB) falsely triggered dt_from_energy
+             * during FS with the 4× cap, causing ENR threshold relaxation. */
             if (aec->far_active_prev && far_active) {
-                float max_echo = far_power * 4.0f;
+                float erl_ceiling = 1.0f / (aec->erl_estimate > 0.01f ? aec->erl_estimate : 0.01f);
+                float max_echo = far_power * erl_ceiling * 2.0f;   /* 2× safety margin */
                 float dt_energy = maxf(0.0f, (mic_pwr - max_echo) / mic_pwr);
                 if (dt_energy > aec->dt_from_energy)
                     aec->dt_from_energy = 0.3f * aec->dt_from_energy + 0.7f * dt_energy;
@@ -1099,12 +1144,16 @@ int aec_process_ex(Aec* aec,
                 aec->dt_from_energy = 0.0f;
             }
 
-            /* === G: Dynamic ERL tracking (B4) === */
-            if (far_active && !aec->filter_converged) {
+            /* === G: Dynamic ERL tracking (B4) ===
+             * Bug 6 fix: continue tracking post-convergence (alpha 0.99→0.999),
+             * clip expanded 1.0→10.0 to allow high-coupling ERL > 0 dB. */
+            if (far_active) {
                 float raw_dt_ratio = raw_err_pwr_dt / (far_power + 1e-10f);
                 if (raw_dt_ratio < 2.0f) {
-                    float inst_erl = clampf(mic_pwr / far_power, 0.001f, 1.0f);
-                    aec->erl_estimate = 0.99f * aec->erl_estimate + 0.01f * inst_erl;
+                    float inst_erl = clampf(mic_pwr / far_power, 0.001f, 10.0f);
+                    float alpha_erl = aec->filter_converged ? 0.999f : 0.99f;
+                    aec->erl_estimate = alpha_erl * aec->erl_estimate
+                                        + (1.0f - alpha_erl) * inst_erl;
                 }
             }
 
@@ -1147,17 +1196,36 @@ int aec_process_ex(Aec* aec,
                 if (echo_psd && error_psd) {
                     float mean_eer = 0.0f;
                     int nf = aec->n_freqs;
+                    float mu_min = cfg->shadow_mu_min;
+                    /* FS-parity fix: populate per-bin mu_scale (matches Python
+                     * aec.py:2895-2898). Post-convergence each freq bin gets its
+                     * own step size based on residual EER, preventing the 11%
+                     * echo_psd divergence that compounded into FS gain bias. */
+                    if (!aec->per_bin_mu_scale) {
+                        aec->per_bin_mu_scale = (float*)calloc(nf, sizeof(float));
+                    }
                     for (int k = 0; k < nf; k++) {
                         float eer_k = clampf(echo_psd[k] / (error_psd[k] + 1e-10f), 0.0f, 1.0f);
                         mean_eer += eer_k;
+                        if (aec->per_bin_mu_scale)
+                            aec->per_bin_mu_scale[k] = mu_min + (1.0f - mu_min) * eer_k;
                     }
                     aec->simple_mu_ratio = mean_eer / nf;
-                    /* Stationary DT: only freeze when speech actually detected */
+                    /* Stationary DT: freeze filter at mu_min */
                     if (aec->is_stationary_dt) {
-                        aec->simple_mu_ratio = cfg->shadow_mu_min;
+                        aec->simple_mu_ratio = mu_min;
+                        if (aec->per_bin_mu_scale) {
+                            for (int k = 0; k < nf; k++)
+                                aec->per_bin_mu_scale[k] = mu_min;
+                        }
                     }
                 }
             } else {
+                /* Pre-convergence: disable per-bin mu, use scalar from simple ratio */
+                if (aec->per_bin_mu_scale) {
+                    free(aec->per_bin_mu_scale);
+                    aec->per_bin_mu_scale = NULL;
+                }
                 update_simple_mu_ratio(aec, aec->raw_output, ref, hop);
             }
         } /* end E block */
@@ -1299,6 +1367,22 @@ int aec_is_converged(const Aec* aec) {
 
 const AecConfig* aec_get_config(const Aec* aec) {
     return aec ? &aec->config : NULL;
+}
+
+struct ResFilter* aec_get_res(const Aec* aec) {
+    return aec ? aec->res : NULL;
+}
+
+int aec_get_warmup_frames(const Aec* aec) {
+    return aec ? aec->warmup_frames : 0;
+}
+
+float aec_get_simple_mu_ratio(const Aec* aec) {
+    return aec ? aec->simple_mu_ratio : 0.0f;
+}
+
+struct Pbfdkf* aec_get_filter(const Aec* aec) {
+    return aec ? aec->filter : NULL;
 }
 
 int aec_get_delay(const Aec* aec) {

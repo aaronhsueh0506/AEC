@@ -139,6 +139,29 @@ void res_force_render_based(ResFilter* res);
 const float* res_get_echo_psd(const ResFilter* res);
 const float* res_get_error_psd(const ResFilter* res);
 
+/**
+ * Debug snapshot — broadband means of internal state (for Python/C parity check)
+ */
+typedef struct {
+    float gain_mean;
+    float gain_min;
+    float echo_psd_mean;
+    float error_psd_mean;
+    float coh2_mean;
+    float filter_erle_mean;
+    float fb_erle;
+    float reverb_psd_mean;
+    float far_activity;
+    int   using_render_based;
+    float last_erle_factor;
+    float last_switching_threshold;
+    float last_enr_avg;
+    float last_residual_mean;
+} ResDebugStats;
+
+void res_get_debug_stats(const ResFilter* res, ResDebugStats* out);
+void res_dump_gain_spectrum(const ResFilter* res, float* out_gain);
+
 #ifdef __cplusplus
 }
 #endif
