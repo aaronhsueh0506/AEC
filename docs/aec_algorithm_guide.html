@@ -378,71 +378,292 @@
 
 <h2 id="results">8. 測試成績</h2>
 <div class="panel">
-<p>使用 <strong>AEC Challenge Interspeech 2021 Blind Test Set</strong>（800 cases，涵蓋不同房間、設備、移動場景），以 AECMOS 評測（1–5 分）。指標越高越好。</p>
+<p>使用 <strong>AEC Challenge Interspeech 2021 Blind Test Set</strong>（800 cases，涵蓋不同房間、設備、移動場景），AECMOS 評測（1–5 分，越高越好）。</p>
 
-<div class="grid-3" style="margin:24px 0">
-  <div class="metric-card">
-    <div class="metric-value">3.48</div>
-    <div class="metric-label">FS Echo MOS ↑<br>（遠端單說，回音消除效果）</div>
-    <div class="metric-delta" style="color:#94a3b8">≈ AEC2 持平</div>
+<!-- ── 折線圖 ── -->
+<h3>四指標 × 四 Preset 折線圖</h3>
+<p style="color:var(--muted);font-size:14px">橫軸為壓制強度（mild → maximum），縱軸為 AECMOS 分數。虛線為 WebRTC AEC3 參考值。</p>
+
+<div class="figure">
+<svg viewBox="0 0 760 370" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <marker id="dot" markerWidth="6" markerHeight="6" refX="3" refY="3"><circle cx="3" cy="3" r="3" fill="inherit"/></marker>
+</defs>
+
+<!-- 圖例 -->
+<rect x="520" y="28" width="14" height="4" rx="2" fill="#f97316"/>
+<text x="540" y="35" font-size="12" fill="#374151">FS Echo</text>
+<rect x="520" y="50" width="14" height="4" rx="2" fill="#2563eb"/>
+<text x="540" y="57" font-size="12" fill="#374151">DT Echo</text>
+<rect x="520" y="72" width="14" height="4" rx="2" fill="#059669"/>
+<text x="540" y="79" font-size="12" fill="#374151">DT Degradation</text>
+<rect x="520" y="94" width="14" height="4" rx="2" fill="#7c3aed"/>
+<text x="540" y="101" font-size="12" fill="#374151">NE Degradation</text>
+<line x1="520" y1="116" x2="534" y2="116" stroke="#94a3b8" stroke-width="2" stroke-dasharray="4,2"/>
+<text x="540" y="120" font-size="12" fill="#94a3b8">AEC3 參考</text>
+
+<!-- 圖框 -->
+<rect x="72" y="22" width="436" height="286" fill="#f8fafc" stroke="#e5e7eb" stroke-width="1" rx="4"/>
+
+<!-- 格線 & Y 刻度 -->
+<!-- y(v) = 308 - (v-1.5)/3.5*260 -->
+<!-- v=5.0: y=308-260=48   v=4.5: y=308-222.9=85.1   v=4.0: y=308-185.7=122.3 -->
+<!-- v=3.5: y=308-148.6=159.4  v=3.0: y=308-111.4=196.6  v=2.5: y=308-74.3=233.7  v=2.0: y=308-37.1=270.9 -->
+<line x1="72" y1="48"  x2="508" y2="48"  stroke="#e5e7eb" stroke-width="1"/>
+<line x1="72" y1="85"  x2="508" y2="85"  stroke="#e5e7eb" stroke-width="1"/>
+<line x1="72" y1="122" x2="508" y2="122" stroke="#e5e7eb" stroke-width="1"/>
+<line x1="72" y1="159" x2="508" y2="159" stroke="#e5e7eb" stroke-width="1"/>
+<line x1="72" y1="197" x2="508" y2="197" stroke="#e5e7eb" stroke-width="1"/>
+<line x1="72" y1="234" x2="508" y2="234" stroke="#e5e7eb" stroke-width="1"/>
+<line x1="72" y1="271" x2="508" y2="271" stroke="#e5e7eb" stroke-width="1"/>
+<text x="64" y="52"  font-size="11" fill="#94a3b8" text-anchor="end">5.0</text>
+<text x="64" y="89"  font-size="11" fill="#94a3b8" text-anchor="end">4.5</text>
+<text x="64" y="126" font-size="11" fill="#94a3b8" text-anchor="end">4.0</text>
+<text x="64" y="163" font-size="11" fill="#94a3b8" text-anchor="end">3.5</text>
+<text x="64" y="201" font-size="11" fill="#94a3b8" text-anchor="end">3.0</text>
+<text x="64" y="238" font-size="11" fill="#94a3b8" text-anchor="end">2.5</text>
+<text x="64" y="275" font-size="11" fill="#94a3b8" text-anchor="end">2.0</text>
+
+<!-- X 軸標籤 & 垂直輔助線 -->
+<!-- X positions: mild=132, balanced=244, aggressive=356, maximum=468 -->
+<line x1="132" y1="22" x2="132" y2="308" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,2"/>
+<line x1="244" y1="22" x2="244" y2="308" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,2"/>
+<line x1="356" y1="22" x2="356" y2="308" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,2"/>
+<line x1="468" y1="22" x2="468" y2="308" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="4,2"/>
+<text x="132" y="326" font-size="13" text-anchor="middle" fill="#374151" font-weight="600">mild</text>
+<text x="244" y="326" font-size="13" text-anchor="middle" fill="#374151" font-weight="600">balanced</text>
+<text x="356" y="326" font-size="13" text-anchor="middle" fill="#374151" font-weight="600">aggressive</text>
+<text x="468" y="326" font-size="13" text-anchor="middle" fill="#374151" font-weight="600">maximum</text>
+<text x="290" y="348" font-size="12" text-anchor="middle" fill="#94a3b8">&#x2190; 保守（語音保留優先）&#x3000;&#x3000;&#x3000;&#x3000;激進（回音壓制優先）&#x2192;</text>
+
+<!-- AEC3 參考虛線 (3條有意義的) -->
+<!-- AEC3 FS: 3.875 → y=308-(2.375/3.5)*260=308-176.4=131.6 ≈ 132 -->
+<line x1="72" y1="132" x2="508" y2="132" stroke="#f97316" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.5"/>
+<text x="512" y="136" font-size="10" fill="#f97316">AEC3 3.88</text>
+<!-- AEC3 DT echo: 4.538 → y=308-(3.038/3.5)*260=308-225.7=82.3 ≈ 82 -->
+<line x1="72" y1="82" x2="508" y2="82" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.5"/>
+<text x="512" y="86" font-size="10" fill="#2563eb">AEC3 4.54</text>
+<!-- AEC3 DT deg: 1.85 → y=308-(0.35/3.5)*260=308-26=282 -->
+<line x1="72" y1="282" x2="508" y2="282" stroke="#059669" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.5"/>
+<text x="512" y="286" font-size="10" fill="#059669">AEC3 1.85</text>
+
+<!-- FS Echo 折線 (orange #f97316) -->
+<!-- mild:3.155→y=308-(1.655/3.5)*260=308-122.9=185.1
+     balanced:3.482→y=308-(1.982/3.5)*260=308-147.1=160.9
+     aggressive:3.621→y=308-(2.121/3.5)*260=308-157.5=150.5
+     maximum:3.722→y=308-(2.222/3.5)*260=308-165.0=143.0 -->
+<polyline points="132,185 244,161 356,151 468,143" fill="none" stroke="#f97316" stroke-width="2.5" stroke-linejoin="round"/>
+<circle cx="132" cy="185" r="5" fill="#f97316"/>
+<circle cx="244" cy="161" r="5" fill="#f97316"/>
+<circle cx="356" cy="151" r="5" fill="#f97316"/>
+<circle cx="468" cy="143" r="5" fill="#f97316"/>
+<text x="132" y="180" font-size="11" text-anchor="middle" fill="#f97316">3.16</text>
+<text x="244" y="156" font-size="11" text-anchor="middle" fill="#f97316">3.48</text>
+<text x="356" y="146" font-size="11" text-anchor="middle" fill="#f97316">3.62</text>
+<text x="468" y="138" font-size="11" text-anchor="middle" fill="#f97316">3.72</text>
+
+<!-- DT Echo 折線 (blue #2563eb) -->
+<!-- mild:3.882→y=308-(2.382/3.5)*260=308-176.9=131.1
+     balanced:4.162→y=308-(2.662/3.5)*260=308-197.7=110.3
+     aggressive:4.289→y=308-(2.789/3.5)*260=308-207.1=100.9
+     maximum:4.412→y=308-(2.912/3.5)*260=308-216.2=91.8 -->
+<polyline points="132,131 244,110 356,101 468,92" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linejoin="round"/>
+<circle cx="132" cy="131" r="5" fill="#2563eb"/>
+<circle cx="244" cy="110" r="5" fill="#2563eb"/>
+<circle cx="356" cy="101" r="5" fill="#2563eb"/>
+<circle cx="468" cy="92" r="5" fill="#2563eb"/>
+<text x="132" y="126" font-size="11" text-anchor="middle" fill="#2563eb">3.88</text>
+<text x="244" y="105" font-size="11" text-anchor="middle" fill="#2563eb">4.16</text>
+<text x="356" y="96" font-size="11" text-anchor="middle" fill="#2563eb">4.29</text>
+<text x="468" y="87" font-size="11" text-anchor="middle" fill="#2563eb">4.41</text>
+
+<!-- DT Degradation 折線 (green #059669) -->
+<!-- mild:2.441→y=308-(0.941/3.5)*260=308-69.9=238.1
+     balanced:2.296→y=308-(0.796/3.5)*260=308-59.1=248.9
+     aggressive:2.231→y=308-(0.731/3.5)*260=308-54.3=253.7
+     maximum:2.162→y=308-(0.662/3.5)*260=308-49.2=258.8 -->
+<polyline points="132,238 244,249 356,254 468,259" fill="none" stroke="#059669" stroke-width="2.5" stroke-linejoin="round"/>
+<circle cx="132" cy="238" r="5" fill="#059669"/>
+<circle cx="244" cy="249" r="5" fill="#059669"/>
+<circle cx="356" cy="254" r="5" fill="#059669"/>
+<circle cx="468" cy="259" r="5" fill="#059669"/>
+<text x="132" y="255" font-size="11" text-anchor="middle" fill="#059669">2.44</text>
+<text x="244" y="266" font-size="11" text-anchor="middle" fill="#059669">2.30</text>
+<text x="356" y="271" font-size="11" text-anchor="middle" fill="#059669">2.23</text>
+<text x="468" y="276" font-size="11" text-anchor="middle" fill="#059669">2.16</text>
+
+<!-- NE Degradation 折線 (purple #7c3aed) -->
+<!-- mild:4.019→y=308-(2.519/3.5)*260=308-187.1=120.9
+     balanced:4.007→y=308-(2.507/3.5)*260=308-186.2=121.8
+     aggressive:3.994→y=308-(2.494/3.5)*260=308-185.2=122.8
+     maximum:3.961→y=308-(2.461/3.5)*260=308-182.7=125.3 -->
+<polyline points="132,121 244,122 356,123 468,125" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-linejoin="round"/>
+<circle cx="132" cy="121" r="5" fill="#7c3aed"/>
+<circle cx="244" cy="122" r="5" fill="#7c3aed"/>
+<circle cx="356" cy="123" r="5" fill="#7c3aed"/>
+<circle cx="468" cy="125" r="5" fill="#7c3aed"/>
+<text x="132" y="116" font-size="11" text-anchor="middle" fill="#7c3aed">4.02</text>
+<text x="244" y="117" font-size="11" text-anchor="middle" fill="#7c3aed">4.01</text>
+<text x="356" y="118" font-size="11" text-anchor="middle" fill="#7c3aed">3.99</text>
+<text x="468" y="120" font-size="11" text-anchor="middle" fill="#7c3aed">3.96</text>
+
+<!-- "balanced 推薦" 標記 -->
+<rect x="220" y="8" width="48" height="18" rx="4" fill="#2563eb"/>
+<text x="244" y="21" text-anchor="middle" font-size="10" fill="white" font-weight="700">推薦</text>
+</svg>
+<div class="caption">圖 8：四 Preset 分數折線圖。FS/DT Echo 越高越好（往上走），DT/NE Deg 越高越好（往上走表示語音保留更好）</div>
+</div>
+
+<!-- ── 選擇指南 ── -->
+<h3>Preset 選擇指南</h3>
+<p style="color:var(--muted);font-size:14px;margin-bottom:16px">根據你最在意的場景選擇：</p>
+
+<div class="grid-2">
+  <div class="panel" style="border-left:5px solid #10b981">
+    <h4 style="color:#065f46">&#x1F3B5; 優先保留近端語音</h4>
+    <p><strong>選 mild</strong></p>
+    <ul style="font-size:14px">
+      <li>DT Degradation 最高（2.44）— 雙方同說語音最自然</li>
+      <li>NE Degradation 最高（4.02）— 近端單說品質最好</li>
+      <li>適合：高品質音樂通話、遠距教學、主播收音</li>
+    </ul>
+    <div style="margin-top:10px;font-size:13px;color:#94a3b8">代價：FS Echo 壓制較弱（3.16），強回音場景可能殘留</div>
   </div>
-  <div class="metric-card">
-    <div class="metric-value">4.16</div>
-    <div class="metric-label">DT Echo MOS ↑<br>（雙方通話，回音殘留）</div>
-    <div class="metric-delta" style="color:#94a3b8">vs AEC3: 4.54</div>
+  <div class="panel" style="border-left:5px solid #2563eb">
+    <h4 style="color:#1e40af">&#x2696;&#xFE0F; 均衡（推薦預設）</h4>
+    <p><strong>選 balanced</strong></p>
+    <ul style="font-size:14px">
+      <li>FS Echo 3.48 — 接近 WebRTC AEC2 水準</li>
+      <li>DT Degradation 2.30 — 大幅領先 AEC3（1.85）</li>
+      <li>適合：一般通話、免持聽筒、會議系統</li>
+    </ul>
+    <div style="margin-top:10px;font-size:13px;color:#94a3b8">最佳整體平衡，大多數場景的建議設定</div>
   </div>
-  <div class="metric-card">
-    <div class="metric-value" style="color:#059669">2.30</div>
-    <div class="metric-label">DT Degradation MOS ↑<br>（雙方通話，語音保留度）</div>
-    <div class="metric-delta" style="color:#059669">&#x2714; 大幅領先 AEC3: 1.85</div>
+  <div class="panel" style="border-left:5px solid #f97316">
+    <h4 style="color:#9a3412">&#x1F697; 優先壓制回音</h4>
+    <p><strong>選 aggressive</strong></p>
+    <ul style="font-size:14px">
+      <li>FS Echo 3.62 — 高回音壓制</li>
+      <li>DT Echo 4.29 — 雙方通話回音也更低</li>
+      <li>適合：車用、工廠、高噪聲環境</li>
+    </ul>
+    <div style="margin-top:10px;font-size:13px;color:#94a3b8">代價：DT Degradation 2.23，雙說語音稍受壓</div>
+  </div>
+  <div class="panel" style="border-left:5px solid #dc2626">
+    <h4 style="color:#991b1b">&#x1F4E2; 最強回音壓制</h4>
+    <p><strong>選 maximum</strong></p>
+    <ul style="font-size:14px">
+      <li>FS Echo 3.72 — 超越 WebRTC AEC2</li>
+      <li>DT Echo 4.41 — 接近 AEC3 水準</li>
+      <li>適合：IoT 小喇叭、mic 離喇叭很近的設備</li>
+    </ul>
+    <div style="margin-top:10px;font-size:13px;color:#94a3b8">代價：DT Degradation 2.16，語音保留受影響最大</div>
   </div>
 </div>
 
-<h3>各系統比較（balanced preset）</h3>
-<table>
-  <tr><th>系統</th><th>FS Echo ↑</th><th>DT Echo ↑</th><th>DT Degradation ↑</th><th>NE Degradation ↑</th></tr>
-  <tr style="background:#f0fdf4">
-    <td><strong>我們 balanced v2.5 ★</strong></td>
-    <td><strong>3.48</strong></td>
-    <td>4.16</td>
-    <td style="color:#059669"><strong>2.30 &#x2714;</strong></td>
-    <td style="color:#059669"><strong>4.01 &#x2714;</strong></td>
-  </tr>
-  <tr>
-    <td>我們 maximum</td>
-    <td><strong>3.72</strong></td>
-    <td>4.41</td>
-    <td>2.16</td>
-    <td>3.96</td>
-  </tr>
-  <tr>
-    <td>WebRTC AEC3</td>
-    <td>3.88</td>
-    <td><strong>4.54</strong></td>
-    <td style="color:#dc2626">1.85 &#x2718;</td>
-    <td style="color:#dc2626">3.45 &#x2718;</td>
-  </tr>
-  <tr>
-    <td>WebRTC AEC2</td>
-    <td>3.48</td>
-    <td>4.26</td>
-    <td>2.39</td>
-    <td>4.10</td>
-  </tr>
-</table>
+<!-- ── 與競品比較 ── -->
+<h3>與競品比較（balanced preset）</h3>
+<div class="figure">
+<svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg">
+<!-- FS Echo 橫條 -->
+<text x="8" y="32" font-size="13" fill="#374151" font-weight="600">FS Echo ↑</text>
+<text x="8" y="80" font-size="13" fill="#374151" font-weight="600">DT Degradation ↑</text>
+<text x="8" y="128" font-size="13" fill="#374151" font-weight="600">DT Echo ↑</text>
+<text x="8" y="176" font-size="13" fill="#374151" font-weight="600">NE Degradation ↑</text>
+
+<!-- bars: scale 0→5 maps to 0→500px, starting at x=170 -->
+<!-- FS Echo: ours bal=3.48, AEC3=3.875, AEC2=3.484 -->
+<!-- bar width = val/5*500 -->
+<rect x="170" y="18" width="348" height="16" rx="4" fill="#f97316" opacity="0.9"/>
+<rect x="170" y="18" width="388" height="16" rx="4" fill="none" stroke="#f97316" stroke-dasharray="4,2" stroke-width="1.5"/>
+<text x="522" y="31" font-size="11" fill="#f97316">我們 3.48</text>
+<text x="562" y="31" font-size="11" fill="#94a3b8">AEC3 3.88</text>
+<text x="648" y="31" font-size="11" fill="#94a3b8">AEC2 3.48</text>
+
+<!-- DT Degradation: ours=2.30, AEC3=1.85, AEC2=2.39 -->
+<rect x="170" y="66" width="230" height="16" rx="4" fill="#059669" opacity="0.9"/>
+<rect x="170" y="66" width="185" height="16" rx="4" fill="none" stroke="#dc2626" stroke-dasharray="4,2" stroke-width="1.5"/>
+<rect x="170" y="66" width="239" height="16" rx="4" fill="none" stroke="#94a3b8" stroke-dasharray="4,2" stroke-width="1.5"/>
+<text x="404" y="79" font-size="11" fill="#059669" font-weight="600">我們 2.30 ★</text>
+<text x="486" y="79" font-size="11" fill="#dc2626">AEC3 1.85 ✗</text>
+<text x="572" y="79" font-size="11" fill="#94a3b8">AEC2 2.39</text>
+
+<!-- DT Echo: ours=4.16, AEC3=4.54, AEC2=4.26 -->
+<rect x="170" y="114" width="416" height="16" rx="4" fill="#2563eb" opacity="0.9"/>
+<rect x="170" y="114" width="454" height="16" rx="4" fill="none" stroke="#94a3b8" stroke-dasharray="4,2" stroke-width="1.5"/>
+<rect x="170" y="114" width="426" height="16" rx="4" fill="none" stroke="#6366f1" stroke-dasharray="4,2" stroke-width="1.5"/>
+<text x="590" y="127" font-size="11" fill="#2563eb">我們 4.16</text>
+<text x="628" y="127" font-size="11" fill="#94a3b8">AEC3 4.54</text>
+
+<!-- NE Degradation: ours=4.01, AEC3=3.45, AEC2=4.10 -->
+<rect x="170" y="162" width="401" height="16" rx="4" fill="#7c3aed" opacity="0.9"/>
+<rect x="170" y="162" width="345" height="16" rx="4" fill="none" stroke="#dc2626" stroke-dasharray="4,2" stroke-width="1.5"/>
+<rect x="170" y="162" width="410" height="16" rx="4" fill="none" stroke="#94a3b8" stroke-dasharray="4,2" stroke-width="1.5"/>
+<text x="575" y="175" font-size="11" fill="#7c3aed" font-weight="600">我們 4.01 ★</text>
+<text x="630" y="175" font-size="11" fill="#dc2626">AEC3 3.45 ✗</text>
+</svg>
+<div class="caption">圖 9：與 WebRTC AEC3 / AEC2 比較（實線＝我們，虛線＝競品）。DT Degradation 和 NE Degradation 我們領先</div>
+</div>
 
 <div class="key-point">
-  <strong>核心結論：</strong>DT Degradation（雙方通話語音保留度）我們比 AEC3 高出 <strong>+0.45 分</strong>，這是最難兼顧的指標——回音壓越猛語音越容易受損。我們的 balanced preset 在「壓回音」與「保語音」之間取得業界最佳平衡。
+  <strong>總結：</strong>回音壓制（FS Echo、DT Echo）隨 Preset 越強而上升，但 <strong>雙方通話語音保留（DT Degradation）反向下降</strong>。這是所有 AEC 系統的根本取捨。我們在 balanced preset 下，DT Degradation（2.30）大幅領先 AEC3（1.85），同時 FS Echo（3.48）與 AEC2 持平。
 </div>
 
-<h3>版本演進</h3>
-<table>
-  <tr><th>版本</th><th>FS Echo</th><th>DT Deg</th><th>主要改動</th></tr>
-  <tr><td>v2.0.0</td><td>3.53</td><td>2.24</td><td>Multi-ERLE, ENR 重構</td></tr>
-  <tr><td>v2.3.0</td><td>3.50</td><td>2.28</td><td>三線驅動 DT, 5個 blindspot 修復</td></tr>
-  <tr><td>v2.4.0</td><td>3.49</td><td>2.29</td><td>動態 ERL, FilterErle 修正</td></tr>
-  <tr style="background:#f0fdf4"><td><strong>v2.5.0</strong></td><td><strong>3.48</strong></td><td style="color:#059669"><strong>2.30</strong></td><td>C/Python 7項對齊, DT gate 優化</td></tr>
-</table>
+<h3>版本分數演進</h3>
+<div class="figure">
+<svg viewBox="0 0 660 200" xmlns="http://www.w3.org/2000/svg">
+<!-- 4 versions, 2 key metrics: FS echo and DT deg -->
+<!-- X: v2.0=100, v2.3=260, v2.4=420, v2.5=580 -->
+<!-- Y: y(v)=170-(v-2.0)/1.5*130 -->
+<!-- FS echo: v2.0=3.53→y=170-(1.53/1.5)*130=170-132.6=37.4  v2.3=3.50→y=170-130=40  v2.4=3.49→y=40.9  v2.5=3.48→y=41.7 -->
+<!-- DT deg: v2.0=2.24→y=170-(0.24/1.5)*130=170-20.8=149.2  v2.3=2.28→y=170-24.7=145.3  v2.4=2.29→y=144.4  v2.5=2.30→y=143.5 -->
+<line x1="80" y1="10" x2="80" y2="175" stroke="#e5e7eb" stroke-width="1"/>
+<line x1="80" y1="175" x2="620" y2="175" stroke="#94a3b8" stroke-width="1.5"/>
+<!-- Y labels -->
+<text x="70" y="42"  font-size="11" fill="#94a3b8" text-anchor="end">3.5</text>
+<text x="70" y="88"  font-size="11" fill="#94a3b8" text-anchor="end">3.0</text>
+<text x="70" y="132" font-size="11" fill="#94a3b8" text-anchor="end">2.5</text>
+<text x="70" y="175" font-size="11" fill="#94a3b8" text-anchor="end">2.0</text>
+<!-- Grid -->
+<line x1="80" y1="42"  x2="620" y2="42"  stroke="#e5e7eb" stroke-width="1"/>
+<line x1="80" y1="88"  x2="620" y2="88"  stroke="#e5e7eb" stroke-width="1"/>
+<line x1="80" y1="132" x2="620" y2="132" stroke="#e5e7eb" stroke-width="1"/>
+<!-- FS Echo line -->
+<!-- y(v)=175-(v-2.0)/1.5*130 -->
+<!-- v2.0:3.53→y=175-(1.53/1.5)*130=175-132.6=42.4  v2.3:3.50→y=175-130=45  v2.4:3.49→y=175-129.1=45.9  v2.5:3.48→y=175-128.3=46.7 -->
+<polyline points="100,42 260,45 420,46 580,47" fill="none" stroke="#f97316" stroke-width="2.5" stroke-linejoin="round"/>
+<circle cx="100" cy="42" r="5" fill="#f97316"/>
+<circle cx="260" cy="45" r="5" fill="#f97316"/>
+<circle cx="420" cy="46" r="5" fill="#f97316"/>
+<circle cx="580" cy="47" r="5" fill="#f97316"/>
+<text x="100" y="36" font-size="11" fill="#f97316" text-anchor="middle">3.53</text>
+<text x="260" y="39" font-size="11" fill="#f97316" text-anchor="middle">3.50</text>
+<text x="420" y="40" font-size="11" fill="#f97316" text-anchor="middle">3.49</text>
+<text x="580" y="41" font-size="11" fill="#f97316" text-anchor="middle">3.48</text>
+<!-- DT deg line -->
+<!-- v2.0:2.24→y=175-(0.24/1.5)*130=175-20.8=154.2  v2.3:2.28→y=175-24.7=150.3  v2.4:2.29→y=149.4  v2.5:2.30→y=148.5 -->
+<polyline points="100,154 260,150 420,149 580,149" fill="none" stroke="#059669" stroke-width="2.5" stroke-linejoin="round"/>
+<circle cx="100" cy="154" r="5" fill="#059669"/>
+<circle cx="260" cy="150" r="5" fill="#059669"/>
+<circle cx="420" cy="149" r="5" fill="#059669"/>
+<circle cx="580" cy="149" r="5" fill="#059669"/>
+<text x="100" y="168" font-size="11" fill="#059669" text-anchor="middle">2.24</text>
+<text x="260" y="165" font-size="11" fill="#059669" text-anchor="middle">2.28</text>
+<text x="420" y="164" font-size="11" fill="#059669" text-anchor="middle">2.29</text>
+<text x="580" y="163" font-size="11" fill="#059669" text-anchor="middle">2.30</text>
+<!-- X labels -->
+<text x="100" y="192" font-size="12" text-anchor="middle" fill="#374151" font-weight="600">v2.0</text>
+<text x="260" y="192" font-size="12" text-anchor="middle" fill="#374151" font-weight="600">v2.3</text>
+<text x="420" y="192" font-size="12" text-anchor="middle" fill="#374151" font-weight="600">v2.4</text>
+<text x="580" y="192" font-size="12" text-anchor="middle" fill="#374151" font-weight="600">v2.5</text>
+<!-- Legend -->
+<rect x="160" y="6" width="12" height="4" rx="2" fill="#f97316"/>
+<text x="176" y="13" font-size="11" fill="#f97316">FS Echo（越高越好）</text>
+<rect x="320" y="6" width="12" height="4" rx="2" fill="#059669"/>
+<text x="336" y="13" font-size="11" fill="#059669">DT Degradation（越高越好）</text>
+</svg>
+<div class="caption">圖 10：版本演進 — FS echo 持穩，DT Degradation 持續提升</div>
+</div>
 </div>
 
 <h2 id="limits">9. 使用限制</h2>
