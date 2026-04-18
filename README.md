@@ -4,7 +4,9 @@
 
 **v2.6.0 主要改進（2026-04-18）**：
 
-- **P2 — Render-based physical ceiling**：`residual_echo_psd` 加入物理上限 `min(erl_estimate × 2.0, 1.0) × far_psd`，防止 ENR 因 filter echo_spec 高估而觸發過度壓制。800-case 驗證 DT deg +0.010（2.296 → 2.306），FS -0.016
+- **P2 — Render-based physical ceiling**：`residual_echo_psd` 加入物理上限 `min(erl_estimate × 2.0, 1.0) × far_psd`，防止 ENR 因 filter echo_spec 高估而觸發過度壓制。
+- **A1 — EPC 期間 DT 保護**：EPC active 時 `shadow_dt` 由 0 改為 `0.08 × max(dt_from_energy, dt_from_shadow)`，緩解 EPC 誤觸時的 DT 語音壓制（特別是 movement 場景）。
+- **800-case 驗證**：DT deg 2.296 → 2.308（+0.012），FS echo 3.482 → 3.462（-0.020，在容忍範圍）
 
 **v2.5.0 主要改進（2026-04-17）**：
 
@@ -29,7 +31,7 @@
 
 **Blind test 成績（fl=512, AEC Challenge Interspeech 2021, 800 cases, AECMOS）**：
 
-**v2.6.0 balanced preset**：FS echo 3.466 / DT echo 4.158 / DT deg 2.306 / NE deg 4.007
+**v2.6.0 balanced preset**：FS echo 3.462 / DT echo 4.155 / DT deg 2.308 / NE deg 4.007
 
 **v2.5.0 balanced preset**：FS echo 3.482 / DT echo 4.162 / DT deg 2.296 / NE deg 4.007
 
@@ -44,7 +46,7 @@
 | **balanced v2.3.0** | 3.502 | 4.163 | 2.283 | 4.008 |
 | **balanced v2.4.0** | 3.487 | 4.164 | 2.293 | 4.007 |
 | **balanced v2.5.0** | 3.482 | 4.162 | 2.296 | 4.007 |
-| **balanced v2.6.0** | **3.466** | **4.158** | **2.306** | **4.007** |
+| **balanced v2.6.0** | **3.462** | **4.155** | **2.308** | **4.007** |
 | **aggressive** | **3.621** | 4.289 | 2.231 | 3.994 |
 | **maximum** | **3.722** | 4.412 | 2.162 | 3.961 |
 | WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |

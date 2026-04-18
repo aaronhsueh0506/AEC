@@ -2893,7 +2893,9 @@ class AEC:
                                                     is_stationary_dt=is_stationary_dt,
                                                     saturation_level=self._saturation_level,
                                                     epc_active=self.epc_active,
-                                                    shadow_dt=(0.0 if self.epc_active
+                                                    shadow_dt=(0.08 * max(float(self._dt_from_energy),
+                                                                        float(getattr(self, '_dt_from_shadow', 0.0)))
+                                                               if self.epc_active
                                                                else max(float(self._dt_from_energy),
                                                                         float(getattr(self, '_dt_from_shadow', 0.0)))),
                                                     erl_estimate=self._erl_estimate)
