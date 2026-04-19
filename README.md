@@ -1,6 +1,12 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v2.7.0），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+回音消除模組（v2.8.0），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+
+**v2.8.0 主要改進（2026-04-19）— RESv3 Phase B（Linear failure fallback）**：
+
+- **E8a — Linear AEC 失敗場景 aggressive mode**：偵測 `erl_estimate > 1.2` 或 `_using_render_based AND erle_factor < 0.2`，且 `effective_dt < 0.2`（排除 DT），強制 `residual_echo_psd → error_psd × 0.9`，ENR 大幅上升 → gain 壓到 g_min。處理 JteZUZ / 9xjhi 等 linear filter 無法收斂的 FS tail cases。
+- **800-case 驗證**：FS echo 3.554 → 3.564 (+0.010)，DT echo/deg/NE 持平 v2.7.0（所有 metric ≥ v2.7.0）。
+- **後續計畫（Phase A）**：per-band dominance-based dual-hypothesis gain 取代 ENR gate，推動 FS echo 向 AEC3 3.875 靠攏（目標差距 +0.32）。
 
 **v2.7.0 主要改進（2026-04-19）— 突破 DSP Pareto**：
 
@@ -37,7 +43,9 @@
 
 **Blind test 成績（fl=512, AEC Challenge Interspeech 2021, 800 cases, AECMOS）**：
 
-**v2.7.0 balanced preset**：FS echo **3.554** / DT echo 4.117 / DT deg **2.410** / NE deg 4.011
+**v2.8.0 balanced preset**：FS echo **3.564** / DT echo 4.117 / DT deg 2.410 / NE deg 4.011
+
+**v2.7.0 balanced preset**：FS echo 3.554 / DT echo 4.117 / DT deg 2.410 / NE deg 4.011
 
 **v2.6.0 balanced preset**：FS echo 3.462 / DT echo 4.155 / DT deg 2.308 / NE deg 4.007
 
@@ -55,7 +63,8 @@
 | **balanced v2.4.0** | 3.487 | 4.164 | 2.293 | 4.007 |
 | **balanced v2.5.0** | 3.482 | 4.162 | 2.296 | 4.007 |
 | **balanced v2.6.0** | 3.462 | 4.155 | 2.308 | 4.007 |
-| **balanced v2.7.0** | **3.554** | **4.117** | **2.410** | **4.011** |
+| **balanced v2.7.0** | 3.554 | 4.117 | 2.410 | 4.011 |
+| **balanced v2.8.0** | **3.564** | **4.117** | **2.410** | **4.011** |
 | **aggressive** | **3.621** | 4.289 | 2.231 | 3.994 |
 | **maximum** | **3.722** | 4.412 | 2.162 | 3.961 |
 | WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |

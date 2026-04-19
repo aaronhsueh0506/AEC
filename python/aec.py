@@ -1386,6 +1386,16 @@ class ResFilter:
             echo_boost = 1.0 + 0.5 * coh2 if dt_for_fs < 0.2 else np.ones_like(coh2)
             residual_echo_psd = residual_echo_psd * echo_boost
 
+        # RESv3 E8a: Linear AEC failure fallback (aggressive mode).
+        # When linear filter struggles (high erl or render-based with low erle),
+        # force residual_echo_psd toward error energy so ENR → large →
+        # gain = g_min. Guard by effective_dt<0.2 to protect DT.
+        linear_failed = (erl_estimate > 1.2
+                         or (self._using_render_based and erle_factor < 0.2))
+        if (far_power > 1e-4 and linear_failed
+                and effective_dt < 0.2 and residual_echo_psd is not None):
+            residual_echo_psd = np.maximum(residual_echo_psd, self.error_psd * 0.9)
+
         # Compute coherence-based EER (only used by legacy spectral_sub path)
         if self.gain_type not in ("enr", "wiener"):
             eer_linear = self.echo_psd / (self.error_psd + eps)
