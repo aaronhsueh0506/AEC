@@ -246,6 +246,8 @@ class AecConfig:
                 res_dt_reduction=2.5,
                 res_spectral_floor_db=-38.0,
                 res_ne_protect_db=-16.0,
+                # v2.7 E6: min-stat noise floor + CNG fill suppression gap
+                enable_cng=True,
                 shadow_q_ratio=3.5,
                 # Adaptive filter
                 shadow_mu_min=0.6,
@@ -1617,42 +1619,41 @@ class ResFilter:
         smoothed = np.minimum(smoothed, 1.0)
         self.gain_smooth = smoothed
 
+        # E6: min-statistics noise tracker (always on, used for dynamic floor + CNG)
+        # Tracks quiet-floor of residual over time. In DT with quiet near-end,
+        # this floor includes near-end energy — so gain >= noise_floor_gain
+        # preserves quiet speech above the learned floor (Speex/AEC3 style).
+        if not self._noise_initialized:
+            self.noise_psd = self.error_psd.copy() + 1e-8
+            self._noise_initialized = True
+            self._smooth_cn_gain = np.zeros(self.n_freqs, dtype=np.float32)
+        is_learning_safe = (self.far_activity < 0.01) and (dt_indicator < 0.1)
+        alpha_down = 0.98
+        alpha_up = 0.998 if is_learning_safe else 1.0
+        alpha_n = np.where(self.error_psd > self.noise_psd, alpha_up, alpha_down)
+        self.noise_psd = alpha_n * self.noise_psd + (1 - alpha_n) * self.error_psd
+
+        # Dynamic floor: per-bin minimum gain so output |g*spec| >= sqrt(noise_psd).
+        # Only raises floor where noise tracker shows persistent content (incl.
+        # quiet speech). Above FS echo (loud), spec_pwr >> noise_psd → floor
+        # is small → no effect on FS. Below quiet speech → floor kicks in.
+        spec_pwr_synth = np.abs(spec_synth) ** 2 + 1e-10
+        noise_floor_gain = np.sqrt(self.noise_psd / spec_pwr_synth)
+        noise_floor_gain = np.clip(noise_floor_gain, effective_g_min, 1.0)
+        self.gain_smooth = np.maximum(self.gain_smooth, noise_floor_gain)
+
         # Apply gain + synthesis sqrt-Hann window + IFFT
-        # Use spec_synth (OLA sqrt-Hann spec) so WOLA reconstruction is valid.
         enhanced_spec = self.gain_smooth * spec_synth
 
-        # --- CNG: Comfort Noise Generation ---
-        if self.enable_cng:
-            if not self._noise_initialized:
-                self.noise_psd = self.error_psd.copy() + 1e-8
-                self._noise_initialized = True
-                self._smooth_cn_gain = np.zeros(self.n_freqs, dtype=np.float32)
-
-            # Strict guard: only learn noise when far-end silent AND no near-end
-            # Prevents echo shape from contaminating noise model
-            is_learning_safe = (self.far_activity < 0.01) and (dt_indicator < 0.1)
-
-            alpha_down = 0.98   # slow drop: prevents echo leaking into noise model
-            if not is_learning_safe:
-                alpha_up = 1.0   # freeze: dangerous period
-            else:
-                alpha_up = 0.998  # slow rise: adapt to fan/AC changes over seconds
-
-            alpha_n = np.where(self.error_psd > self.noise_psd, alpha_up, alpha_down)
-            self.noise_psd = alpha_n * self.noise_psd + (1 - alpha_n) * self.error_psd
-
-            if np.sum(self.noise_psd) > 1e-7:
-                # Moderate compensation (0.4 ≈ 16% energy), enough to fill vacuum
-                target_cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0)) * 0.4
-
-                # Temporal smoothing: fade in/out naturally, no abrupt bursts
-                self._smooth_cn_gain = 0.8 * self._smooth_cn_gain + 0.2 * target_cn_gain
-
-                noise_std = np.sqrt(self.noise_psd / 2.0).astype(np.float32)
-                cng_real = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
-                cng_imag = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
-                cng_spec = (self._smooth_cn_gain * (cng_real + 1j * cng_imag)).astype(np.complex64)
-                enhanced_spec = enhanced_spec + cng_spec
+        # --- CNG: Comfort Noise Generation (fill remaining suppression gap) ---
+        if self.enable_cng and np.sum(self.noise_psd) > 1e-7:
+            target_cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0)) * 0.4
+            self._smooth_cn_gain = 0.8 * self._smooth_cn_gain + 0.2 * target_cn_gain
+            noise_std = np.sqrt(self.noise_psd / 2.0).astype(np.float32)
+            cng_real = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
+            cng_imag = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
+            cng_spec = (self._smooth_cn_gain * (cng_real + 1j * cng_imag)).astype(np.complex64)
+            enhanced_spec = enhanced_spec + cng_spec
 
         enhanced_time = np.fft.irfft(enhanced_spec, self.block_size)[:self.frame_size]
         enhanced_time *= self.window

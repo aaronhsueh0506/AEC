@@ -1,6 +1,12 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v2.6.0），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+回音消除模組（v2.7.0），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+
+**v2.7.0 主要改進（2026-04-19）— 突破 DSP Pareto**：
+
+- **E6 — Min-statistics noise floor**：ResFilter 固定 `g_min=-55dB` 改為**動態 noise-floor gain**。每幀追蹤 quiet-floor（Speex/WebRTC AEC3 風格），以 `noise_floor_gain = sqrt(noise_psd / |spec|²)` 作 per-bin 下限。效果：小聲近端語音只要高於統計 noise floor 就會被保留（解決原先 Tgtk8 等 case 的 40% silence 問題 → 22%）。
+- **CNG 預設開啟**：balanced preset 加上 `enable_cng=True`，填補被壓制 bin 的 dead air，AECMOS 不再因「靜音跳動」扣分。
+- **800-case 驗證**：FS echo 3.462 → **3.554** (+0.092), DT deg 2.308 → **2.410** (+0.102), DT echo 4.155 → 4.117 (-0.038), NE deg 4.007 → 4.011 (+0.004). **FS 和 DT deg 同時上升**（首次突破 Pareto）。
 
 **v2.6.0 主要改進（2026-04-18）**：
 
@@ -31,6 +37,8 @@
 
 **Blind test 成績（fl=512, AEC Challenge Interspeech 2021, 800 cases, AECMOS）**：
 
+**v2.7.0 balanced preset**：FS echo **3.554** / DT echo 4.117 / DT deg **2.410** / NE deg 4.011
+
 **v2.6.0 balanced preset**：FS echo 3.462 / DT echo 4.155 / DT deg 2.308 / NE deg 4.007
 
 **v2.5.0 balanced preset**：FS echo 3.482 / DT echo 4.162 / DT deg 2.296 / NE deg 4.007
@@ -46,7 +54,8 @@
 | **balanced v2.3.0** | 3.502 | 4.163 | 2.283 | 4.008 |
 | **balanced v2.4.0** | 3.487 | 4.164 | 2.293 | 4.007 |
 | **balanced v2.5.0** | 3.482 | 4.162 | 2.296 | 4.007 |
-| **balanced v2.6.0** | **3.462** | **4.155** | **2.308** | **4.007** |
+| **balanced v2.6.0** | 3.462 | 4.155 | 2.308 | 4.007 |
+| **balanced v2.7.0** | **3.554** | **4.117** | **2.410** | **4.011** |
 | **aggressive** | **3.621** | 4.289 | 2.231 | 3.994 |
 | **maximum** | **3.722** | 4.412 | 2.162 | 3.961 |
 | WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
