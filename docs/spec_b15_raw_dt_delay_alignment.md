@@ -48,19 +48,20 @@ Replace the same-time `mic_pwr / far_pwr` comparison with a
 ### Option A — Delay-aligned echo estimate as far-reference
 
 ```python
-# Compute echo estimate power in time-domain units (Parseval-aligned)
-# Use np.mean() over FFT magnitude to match time-domain mic_pwr
-# (both are mean-square power now)
-near_spec = np.fft.rfft(near_end, n=self.block_size)
-mic_pwr_fft = float(np.mean(np.abs(near_spec) ** 2)) + 1e-10
-echo_est_pwr = float(np.mean(np.abs(self.filter.echo_spec) ** 2)) + 1e-10
+# Reuse filter's existing near_spec (same rfft convention and fft_size
+# as echo_spec, so subtraction is unit-consistent by construction).
+# Filter populates self.filter.near_spec at line 674-676 before
+# returning from process(); AEC.process sees the same bin layout as
+# self.filter.echo_spec (line 699).
+mic_pwr_fft   = float(np.mean(np.abs(self.filter.near_spec) ** 2)) + 1e-10
+echo_est_pwr  = float(np.mean(np.abs(self.filter.echo_spec) ** 2)) + 1e-10
 
 # Note: mic_pwr_fft may differ from existing time-domain mic_pwr
 # (line 2893) due to FFT window / overlap. Use mic_pwr_fft here
 # for unit-consistent subtraction. Leave existing time-domain
 # mic_pwr untouched (other consumers depend on it).
 
-other_pwr = max(mic_pwr_fft - echo_est_pwr, 1e-10)
+other_pwr  = max(mic_pwr_fft - echo_est_pwr, 1e-10)
 raw_dt_new = other_pwr / (echo_est_pwr + other_pwr)
 ```
 
@@ -80,12 +81,28 @@ If mic has significant non-echo energy (near speech), raw_dt high.
 #### Unit consistency note
 
 Both `mic_pwr_fft` and `echo_est_pwr` use `np.mean` over FFT bin
-magnitudes, giving mean-square power in frequency domain.
-Parseval's theorem: for unwindowed signals,
-`mean(x²) = mean(|X[k]|²)` when `X` is rfft-normalized appropriately.
-With the codebase's FFT convention (rfft without explicit
-normalization), direct `Σ|X|²` gives N× time-domain mean;
-using `np.mean()` over bins aligns units.
+magnitudes of the filter's internal spectra, giving mean-square
+power in frequency domain with **identical bin layout** (same
+`fft_size`, same rfft convention, same source buffer scaling).
+
+Why reuse `self.filter.near_spec` instead of recomputing `rfft`
+from `near_end` at AEC.process level:
+
+- `near_end` passed into AEC.process is hop-sized; recomputing
+  `np.fft.rfft(near_end, n=fft_size)` would zero-pad and produce a
+  **different bin distribution** from `self.filter.echo_spec`
+  (which is computed from the filter's `near_buffer`, a
+  fft_size-long circular buffer at `aec.py:674`). Their
+  subtraction would be ill-defined.
+- The filter already publishes `self.near_spec` as a public
+  attribute (declared at `aec.py:92`, initialised at line 640,
+  populated at line 674-676 by
+  `np.fft.rfft(self.near_buffer, self.fft_size)`). Reuse is free
+  and guarantees bin alignment.
+
+Parseval note: with the codebase's rfft convention (no explicit
+normalization), `Σ|X|²` gives N× time-domain mean; using
+`np.mean()` over bins aligns units.
 
 This creates a NEW computation for mic power, parallel to the
 existing time-domain self-computed `mic_pwr` at line 2893.
@@ -170,6 +187,19 @@ else:
 
 → This adds minimal new state (one integer). Document in Stage 1B
 commit message.
+
+**Note on semantics**: `self._filter_converged` flips False→True
+when the filter converges post-warmup, and True→False on EPC
+trigger or divergence. `_conv_counter` is thus precisely "frames
+since last convergence". Do NOT search for a separate EPC-reset
+path for `_conv_counter` — the `_filter_converged` semantics
+already provide it. EMA blend behavior:
+
+- EPC triggered → `_filter_converged=False` → counter=0 →
+  `conv_weight=0` → `raw_dt = legacy` (safe during re-learning)
+- EPC hangover → counter stays 0 → still legacy
+- Filter re-converges → counter starts incrementing → gradually
+  shifts to new formula over 20 frames (~200ms)
 
 **Not acceptable fallbacks (do NOT do):**
 
@@ -258,23 +288,34 @@ ON for verification runs.
 
 ## 5. Diagnostic
 
-Add inside `AEC.process()` around line 3365, unconditional (not gated
-by flag) so both branches populate:
+**Placement**: inside the `else:` branch of `if self.config.enable_dtd:`
+at `aec.py:3362`, immediately before the (possibly new) `raw_dt`
+assignment. **Never run in the DTD branch** (protects Invariant
+§8.5-1).
+
+Formula MUST match §3 Option A exactly (same `np.mean`, same
+`self.filter.near_spec` / `self.filter.echo_spec` reuse), so
+`_diag_raw_dt_new` equals what the flag-ON path would produce:
 
 ```python
-# Always compute both for observability
-raw_dt_legacy_diag = 1.0 - far_pwr / (mic_pwr + far_pwr)
-if hasattr(self.filter, 'echo_spec'):
-    echo_est_pwr = float(np.sum(np.abs(self.filter.echo_spec) ** 2)) + 1e-10
-    other_pwr = max(mic_pwr - echo_est_pwr, 1e-10)
-    raw_dt_new_diag = other_pwr / (echo_est_pwr + other_pwr)
+# Always compute both for observability (else-branch only)
+raw_dt_legacy_diag = 1.0 - far_pwr / (mic_pwr + far_pwr + 1e-10)
+if (hasattr(self.filter, 'echo_spec')
+        and hasattr(self.filter, 'near_spec')):
+    mic_pwr_fft_d  = float(np.mean(np.abs(self.filter.near_spec) ** 2)) + 1e-10
+    echo_est_pwr_d = float(np.mean(np.abs(self.filter.echo_spec) ** 2)) + 1e-10
+    other_pwr_d    = max(mic_pwr_fft_d - echo_est_pwr_d, 1e-10)
+    raw_dt_new_diag = other_pwr_d / (echo_est_pwr_d + other_pwr_d)
 else:
+    mic_pwr_fft_d   = 0.0
+    echo_est_pwr_d  = 0.0
     raw_dt_new_diag = raw_dt_legacy_diag
 
 self._diag_raw_dt_legacy = float(raw_dt_legacy_diag)
 self._diag_raw_dt_new    = float(raw_dt_new_diag)
 self._diag_raw_dt_delta  = float(raw_dt_new_diag - raw_dt_legacy_diag)
-self._diag_echo_est_pwr  = float(echo_est_pwr)
+self._diag_echo_est_pwr  = float(echo_est_pwr_d)
+self._diag_mic_pwr_fft   = float(mic_pwr_fft_d)
 ```
 
 Allows post-hoc plotting of legacy vs new on PZ7V and top-20 worst
