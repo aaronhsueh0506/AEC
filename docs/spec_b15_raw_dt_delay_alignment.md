@@ -129,6 +129,56 @@ Edge cases:
 If `self._conv_counter` doesn't exist or behaves differently than
 assumed, Stage 1B must verify before implementing.
 
+#### _conv_counter fallback policy
+
+The EMA formula relies on `self._conv_counter` existing and
+incrementing once per frame (reset on EPC). Stage 1B MUST first
+verify this assumption:
+
+```bash
+grep -n "_conv_counter" aec.py
+```
+
+Three outcomes and their required handling:
+
+**Case 1: `_conv_counter` exists and behaves as assumed**
+(increments per frame, resets on EPC)
+→ Implement EMA blend as specified. Normal path.
+
+**Case 2: `_conv_counter` exists but semantics differ**
+(e.g. only counts frames after EPC, doesn't count during warmup;
+or only increments under specific conditions)
+→ Implement with observed semantics, document the divergence in
+Stage 1B commit message.
+→ If the divergence makes `conv_weight` stuck at 0 or 1, escalate:
+STOP Stage 1B and report back; do NOT implement with broken blend.
+
+**Case 3: `_conv_counter` does not exist**
+→ Introduce it as a NEW state in AEC class, alongside
+`self._filter_converged`. Semantics:
+
+```python
+# In AEC.__init__
+self._conv_counter = 0
+
+# In AEC.process, after self._filter_converged update:
+if self._filter_converged:
+    self._conv_counter += 1
+else:
+    self._conv_counter = 0   # reset on divergence or EPC
+```
+
+→ This adds minimal new state (one integer). Document in Stage 1B
+commit message.
+
+**Not acceptable fallbacks (do NOT do):**
+
+- Degrade to Boolean `_filter_converged` (causes 0.7 jump at
+  convergence, defeating the purpose of EMA blend)
+- Disable B-15 entirely (defeats the purpose of this spec)
+- Skip the EMA blend and use pure new formula without convergence
+  gate (may regress on unconverged frames)
+
 ### Option B — Mic-minus-echo residual ratio
 
 ```python
