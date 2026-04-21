@@ -142,10 +142,14 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     # CNG override from global flag
     if _ENABLE_CNG and 'enable_cng' not in config_overrides:
         config_overrides['enable_cng'] = True
-    common_kw = dict(sample_rate=sr, mode=AecMode.PBFDKF,
+    # v3.2 Stage V1: env override AEC_MODE=PBFDAF for filter comparison
+    _mode_env = os.environ.get('AEC_MODE', 'PBFDKF').upper()
+    _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF
+    _use_kalman = (_mode == AecMode.PBFDKF)
+    common_kw = dict(sample_rate=sr, mode=_mode,
                      filter_length=fl, enable_dtd=False,
                      enable_shadow=True, enable_res=enable_res,
-                     use_kalman=True,
+                     use_kalman=_use_kalman,
                      **delay_est_kw, **config_overrides)
     if preset is not None:
         from aec import AecPreset

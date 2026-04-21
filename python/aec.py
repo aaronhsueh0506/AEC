@@ -38,6 +38,22 @@ _PBFDAF_DEFAULT_ALPHA_R = 0.95
 # AEC_EPC_MULTI_LEVEL=0 回退到 B-4a/4b/12 完成後的二元行為（is_echo_change 單一觸發）.
 _EPC_MULTI_LEVEL = os.environ.get('AEC_EPC_MULTI_LEVEL', '1') != '0'
 
+# v3.7 PBFDKF Kalman fix toggles for regression bisection.
+# Each defaults ON; set =0 to revert that specific fix.
+#   AEC_FIX_A    : P update uses K_scaled (consistent with W). =0 → K_optimal (legacy)
+#   AEC_FIX_B3A  : R derives from smoothed _error_psd × smoothed R_scale. =0 → overwrite
+#   AEC_FIX_B3B  : q_scale floor 0.30, Q_floor 0.20. =0 → 0.10 / 0.05 (legacy)
+#   AEC_FIX_B3C  : Kalman gain magnitude cap 2.0. =0 → no cap (legacy)
+_FIX_A   = os.environ.get('AEC_FIX_A',   '1') != '0'
+_FIX_B3A = os.environ.get('AEC_FIX_B3A', '1') != '0'
+_FIX_B3B = os.environ.get('AEC_FIX_B3B', '1') != '0'
+_FIX_B3C = os.environ.get('AEC_FIX_B3C', '1') != '0'
+# Non-Kalman fix toggles
+#   AEC_FIX_B7  : PBFDKF freezes P+W when external saturation > 0.3. =0 → no freeze (legacy)
+#   AEC_FIX_B11 : _error_psd EMA every frame. =0 → only when far-active (legacy gate)
+_FIX_B7  = os.environ.get('AEC_FIX_B7',  '1') != '0'
+_FIX_B11 = os.environ.get('AEC_FIX_B11', '1') != '0'
+
 
 class AecMode(Enum):
     LMS = "lms"         # Time-domain LMS (no normalization, simplest)
@@ -844,6 +860,10 @@ class PBFDKF(PBFDAF):
     def _update_per_frame_state(self, far_active: bool):
         """B-11 fix: _error_psd EMA every frame (not gated by far_active).
         Skips PBFDAF's R EMA / leak (Kalman uses its own R via _error_psd)."""
+        # When B-11 disabled, only update during far-active (legacy gating from
+        # _update_weights inheritance — equivalent to old behavior).
+        if not _FIX_B11 and not far_active:
+            return
         error_psd = (np.abs(self.error_spec) ** 2).astype(np.float32)
         self._error_psd = (self.R_EMA_ALPHA * self._error_psd
                            + (np.float32(1.0) - self.R_EMA_ALPHA) * error_psd
@@ -853,7 +873,7 @@ class PBFDKF(PBFDAF):
         """Frequency-Domain Kalman Filter weight update."""
         # B-7: freeze W and P during saturation. _error_psd still tracked
         # in _update_per_frame_state, so R recovery isn't delayed.
-        if self._external_saturation_level > self.SAT_FREEZE_THRESHOLD:
+        if _FIX_B7 and self._external_saturation_level > self.SAT_FREEZE_THRESHOLD:
             return
 
         mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
@@ -865,21 +885,32 @@ class PBFDKF(PBFDAF):
         # R_scale itself is smoothed to avoid frame-to-frame jumps from mu_mean.
         mu_mean = float(np.mean(mu_scale_arr))
         target_R_scale = np.float32(0.1) + np.float32(0.9) * np.float32(1.0 - mu_mean)
-        self._R_scale_smooth = (self.R_SCALE_SMOOTH_ALPHA * self._R_scale_smooth
-                                + (np.float32(1.0) - self.R_SCALE_SMOOTH_ALPHA) * target_R_scale)
-        self.R = (np.maximum(self._error_psd, np.float32(self.delta))
-                  * self._R_scale_smooth).astype(np.float32)
+        if _FIX_B3A:
+            self._R_scale_smooth = (self.R_SCALE_SMOOTH_ALPHA * self._R_scale_smooth
+                                    + (np.float32(1.0) - self.R_SCALE_SMOOTH_ALPHA) * target_R_scale)
+            self.R = (np.maximum(self._error_psd, np.float32(self.delta))
+                      * self._R_scale_smooth).astype(np.float32)
+        else:
+            # Legacy: R = max(_error_psd, δ) × R_scale (overwrite, no smoothing)
+            self.R = (np.maximum(self._error_psd, np.float32(self.delta))
+                      * target_R_scale).astype(np.float32)
 
         # B-3b: Q modulation softer in DT (was 0.1 + 0.9 × mu_mean → P collapse).
         # Now 0.30 + 0.70 × mu_mean: DT keeps Q_modulated ≥ 0.30 × Q_high.
-        q_scale = self.Q_SCALE_MIN + (np.float32(1.0) - self.Q_SCALE_MIN) * np.float32(mu_mean)
+        if _FIX_B3B:
+            q_scale_min = self.Q_SCALE_MIN
+            q_floor_ratio = self.Q_FLOOR_RATIO
+        else:
+            # Legacy: q_scale floor 0.10, Q_floor ratio 0.05
+            q_scale_min = np.float32(0.10)
+            q_floor_ratio = np.float32(0.05)
+        q_scale = q_scale_min + (np.float32(1.0) - q_scale_min) * np.float32(mu_mean)
         Q_modulated = self.Q * q_scale
 
         # Per-bin far-end activity mask
         far_power_smooth = self.power
         far_activity_mask = far_power_smooth > (np.mean(far_power_smooth) * 0.01 + 1e-6)
-        # B-3b: Q_floor 5% → 20% so inactive bins keep enough Q for tracking
-        Q_floor = Q_modulated * self.Q_FLOOR_RATIO
+        Q_floor = Q_modulated * q_floor_ratio
         Q_gated = np.where(far_activity_mask, Q_modulated, Q_floor)
 
         # P_MAX: overridable during EPC for faster re-convergence
@@ -914,20 +945,21 @@ class PBFDKF(PBFDAF):
 
             # B-3c: cap K magnitude to prevent extreme spikes (X → 0 with high P
             # can produce K → ∞; bounded |K| ≤ K_MAX keeps W updates sane).
-            K_mag = np.abs(K_optimal).astype(np.float32)
-            cap_scale = np.minimum(np.float32(1.0),
-                                   self.K_MAX / np.maximum(K_mag, np.float32(1e-10)))
-            K_optimal = (K_optimal * cap_scale).astype(np.complex64)
+            if _FIX_B3C:
+                K_mag = np.abs(K_optimal).astype(np.float32)
+                cap_scale = np.minimum(np.float32(1.0),
+                                       self.K_MAX / np.maximum(K_mag, np.float32(1e-10)))
+                K_optimal = (K_optimal * cap_scale).astype(np.complex64)
 
             # K_scaled drives W (DT-suppressed via mu_scale_arr per bin)
             K_scaled = K_optimal * mu_scale_arr
 
             self.W[p] += K_scaled * self.error_spec
 
-            # Bug A fix: P update uses K_scaled (matching the actual W update),
-            # not the unscaled K_optimal. Otherwise P decreases as if W was
-            # fully updated → P understates uncertainty after DT → slow recovery.
-            KX = np.real(K_scaled * X).astype(np.float32)
+            # Bug A fix: P update uses K_scaled (matching actual W update);
+            # legacy used unscaled K_optimal which made P shrink as if W was
+            # fully updated even during DT — slowed post-DT recovery.
+            KX = np.real((K_scaled if _FIX_A else K_optimal) * X).astype(np.float32)
             self.P[p] = np.minimum(
                 np.maximum((np.float32(1.0) - KX) * self.P[p] + Q_gated, P_floor),
                 p_max
