@@ -48,9 +48,20 @@ Replace the same-time `mic_pwr / far_pwr` comparison with a
 ### Option A — Delay-aligned echo estimate as far-reference
 
 ```python
-echo_est_pwr = float(np.sum(np.abs(self.filter.echo_spec) ** 2)) + 1e-10
-other_pwr   = max(mic_pwr - echo_est_pwr, 1e-10)
-raw_dt = other_pwr / (echo_est_pwr + other_pwr)
+# Compute echo estimate power in time-domain units (Parseval-aligned)
+# Use np.mean() over FFT magnitude to match time-domain mic_pwr
+# (both are mean-square power now)
+near_spec = np.fft.rfft(near_end, n=self.block_size)
+mic_pwr_fft = float(np.mean(np.abs(near_spec) ** 2)) + 1e-10
+echo_est_pwr = float(np.mean(np.abs(self.filter.echo_spec) ** 2)) + 1e-10
+
+# Note: mic_pwr_fft may differ from existing time-domain mic_pwr
+# (line 2893) due to FFT window / overlap. Use mic_pwr_fft here
+# for unit-consistent subtraction. Leave existing time-domain
+# mic_pwr untouched (other consumers depend on it).
+
+other_pwr = max(mic_pwr_fft - echo_est_pwr, 1e-10)
+raw_dt_new = other_pwr / (echo_est_pwr + other_pwr)
 ```
 
 Physical intent: `echo_spec` is the filter's delay-aligned echo estimate
@@ -65,6 +76,58 @@ If mic has significant non-echo energy (near speech), raw_dt high.
   Mitigation: gate by `self._filter_converged` (already available in
   AEC.process), fall back to legacy formula until converged.
 - **Complexity**: low (~10 lines).
+
+#### Unit consistency note
+
+Both `mic_pwr_fft` and `echo_est_pwr` use `np.mean` over FFT bin
+magnitudes, giving mean-square power in frequency domain.
+Parseval's theorem: for unwindowed signals,
+`mean(x²) = mean(|X[k]|²)` when `X` is rfft-normalized appropriately.
+With the codebase's FFT convention (rfft without explicit
+normalization), direct `Σ|X|²` gives N× time-domain mean;
+using `np.mean()` over bins aligns units.
+
+This creates a NEW computation for mic power, parallel to the
+existing time-domain self-computed `mic_pwr` at line 2893.
+**Do NOT modify the existing `mic_pwr`** — other consumers rely on
+its current semantics.
+
+#### Convergence fallback with EMA smoothing
+
+Raw Boolean fallback (converged: use new; not converged: use legacy)
+causes `raw_dt` to jump ~0.7 in a single frame when
+`self._filter_converged` flips, producing audible click artifacts
+downstream.
+
+Mitigation: blend new and legacy formulas with a convergence-weighted
+EMA:
+
+```python
+# Compute both formulas unconditionally (cheap)
+raw_dt_new = other_pwr / (echo_est_pwr + other_pwr)
+raw_dt_legacy = 1.0 - far_pwr / (mic_pwr + far_pwr + 1e-10)
+
+# Smooth transition using _conv_counter (existing state in AEC)
+# Assumes _conv_counter increments per frame while converging,
+# resets to 0 on EPC reset.
+CONV_BLEND_FRAMES = 20   # ~200ms @ 10ms hop
+conv_weight = min(self._conv_counter / CONV_BLEND_FRAMES, 1.0)
+
+raw_dt = conv_weight * raw_dt_new + (1.0 - conv_weight) * raw_dt_legacy
+```
+
+This gradually shifts `raw_dt` from legacy to new formula over
+~200ms after convergence, avoiding click artifact.
+
+Edge cases:
+- `_conv_counter` reset on EPC: `raw_dt` smoothly returns to legacy
+  during filter re-convergence (correct behavior — filter output
+  unreliable during re-learning)
+- `_conv_counter` not yet incremented (first frames):
+  `conv_weight=0`, `raw_dt = raw_dt_legacy` (safe)
+
+If `self._conv_counter` doesn't exist or behaves differently than
+assumed, Stage 1B must verify before implementing.
 
 ### Option B — Mic-minus-echo residual ratio
 
@@ -267,6 +330,28 @@ Stage 1B implementation.
     fallback: when `echo_est_pwr < 0.1 * mic_pwr` AND
     `self._filter_converged`, treat as divergence and use legacy.
 
+## 8.5 Implementation invariants
+
+The following must hold in Stage 1B implementation:
+
+1. **else-branch only**: All B-15 formula changes must be inside the
+   `else:` branch of `if self.config.enable_dtd:` at line 3363.
+   The DTD branch (`raw_dt = self.get_dtd_confidence()`) MUST be
+   untouched, even in diagnostic output paths.
+2. **Legacy `mic_pwr` untouched**: The existing time-domain `mic_pwr`
+   at `aec.py:2893` must not be modified. B-15 introduces new
+   `mic_pwr_fft` for the formula only; downstream consumers of line
+   2893's `mic_pwr` (grep to verify: ENR gate, saturation detector,
+   etc.) keep their current semantics.
+3. **Diagnostic unconditional**: §5 diagnostic block runs regardless
+   of `AEC_FIX_B15` flag (always populates `_diag_raw_dt_legacy`,
+   `_diag_raw_dt_new`, `_diag_raw_dt_delta`), so post-hoc comparison
+   is always available.
+4. **Flag gates swap only**: `AEC_FIX_B15` controls which formula's
+   result becomes `raw_dt`, not which formula is COMPUTED. Both are
+   always computed for diagnostic (performance cost ~1 FFT per frame,
+   acceptable).
+
 ## 9. Completion checklist
 
 - [x] Spec committed
@@ -279,6 +364,13 @@ Stage 1B implementation.
   - Formula swap: replace line 3365 with gated Option A
   - No changes to DTD path (line 3363)
   - No changes to EPC gate (line 3423-3425)
+
+### Stage 1B implementation verification
+
+- [ ] §3 公式用 Parseval-aligned `mic_pwr_fft` (not line 2893 `mic_pwr`)
+- [ ] EMA blend 用 `self._conv_counter / CONV_BLEND_FRAMES`
+- [ ] DTD if-branch 在 diff 中未出現任何變更 (grep 驗證)
+- [ ] diagnostic 無條件執行 (不在 `if AEC_FIX_B15` block 內)
 
 ## 10. Not in scope (Stage 1A)
 
