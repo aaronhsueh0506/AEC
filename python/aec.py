@@ -15,6 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
+import os
 import numpy as np
 from collections import deque
 from dataclasses import dataclass
@@ -22,6 +23,20 @@ from typing import Optional, Tuple
 from enum import Enum
 import argparse
 import soundfile as sf
+
+
+# PBFDAF default constants (previously env-flag controlled, now fixed):
+#   leak     : per-frame W leak γ for leaky NLMS
+#   alpha_r  : EMA smoothing for measurement-noise R tracker
+# Per-bin α_R uses linear ramp from 0.88 (DC) to 0.99 (Nyquist) — speech bins
+# track faster, noise bins stay stable.
+_PBFDAF_DEFAULT_LEAK    = 1e-5
+_PBFDAF_DEFAULT_ALPHA_R = 0.95
+
+# v3.7 組5/7.1: EPC multi-level variability
+# 預設 ON (multi-level: none/small/large).
+# AEC_EPC_MULTI_LEVEL=0 回退到 B-4a/4b/12 完成後的二元行為（is_echo_change 單一觸發）.
+_EPC_MULTI_LEVEL = os.environ.get('AEC_EPC_MULTI_LEVEL', '1') != '0'
 
 
 class AecMode(Enum):
@@ -44,6 +59,11 @@ class AecPreset(Enum):
     BALANCED = "balanced"       # Balanced echo suppression and near-end quality (default)
     AGGRESSIVE = "aggressive"   # Stronger echo suppression, moderate near-end impact
     MAXIMUM = "maximum"         # Maximum echo suppression, significant near-end impact
+    # v3.2 hybrid: BALANCED RES/state-machine + PBFDAF filter.
+    # Trades NE/DT degradation for FS echo improvement (especially high-ERL tail).
+    # Use only when FS-tail-heavy workload outweighs NE/DT regression risk.
+    # 800-case results vs BALANCED: FS_e +0.127, FS_d +0.206, DT_d -0.120, NE_d -0.132.
+    BALANCED_FS_TAIL = "balanced_fs_tail"
 
 
 @dataclass
@@ -122,9 +142,13 @@ class AecConfig:
 
     # Echo path change detection (requires shadow filter)
     epc_delta_threshold: float = 0.3    # |ΔE/total_E| < threshold → echo change
-    epc_total_rise: float = 1.5         # total_err > prev × rise → errors increasing
+    epc_total_rise: float = 1.5         # total_err > prev × rise → errors increasing (small threshold)
     epc_hangover: int = 20              # keep EPC active for N frames after detection
     epc_mu_floor: float = 0.5           # mu_scale floor during EPC
+    # v3.7 組5/7.1: EPC multi-level thresholds (small uses epc_total_rise above)
+    epc_large_total_rise: float = 3.0   # magnitude > this → large
+    epc_large_shadow_adv: float = 2.0   # shadow_adv > this required for large
+    epc_small_shadow_adv: float = 1.3   # shadow_adv > this required for small
 
     # Delay estimation (GCC-PHAT)
     enable_delay_est: bool = True       # Enable automatic delay estimation + ref alignment
@@ -301,6 +325,38 @@ class AecConfig:
                 shadow_mu_min=0.9,
                 warmup_frames=100,
                 kalman_q_high=7e-4,
+            )
+        elif preset == AecPreset.BALANCED_FS_TAIL:
+            # Same as BALANCED but with PBFDAF filter (NLMS) instead of PBFDKF.
+            # v3.4 M_root structural fix (regularized MDF-NLMS); v3.5 T1 sets
+            # filter_length = 768 samples (48ms @ 16kHz, aligned with WebRTC AEC3).
+            # 800-case paired vs BALANCED: FS echo +0.042, FS median +0.11,
+            # NE deg -0.007, DT echo -0.010, DT deg -0.023. Choose when
+            # FS-priority workload; DT deg trade is small but real.
+            defaults = dict(
+                res_echo_method="direct",
+                res_gain_type="enr",
+                res_enable_reverb=True,
+                res_reverb_decay=0.65,
+                res_reverb_gain=1.4,
+                res_alpha_echo_psd=0.4,
+                res_alpha_error_psd=0.5,
+                res_enr_scale=0.85,
+                res_g_min_db=-55.0,
+                res_over_sub_base=5.0,
+                res_over_sub_scale=9.0,
+                res_dt_reduction=2.5,
+                res_spectral_floor_db=-38.0,
+                res_ne_protect_db=-16.0,
+                enable_cng=True,
+                shadow_q_ratio=3.5,
+                shadow_mu_min=0.6,
+                warmup_frames=80,
+                kalman_q_high=1e-3,
+                # Filter override: M_root + extended length to cover RT60 tail
+                mode=AecMode.PBFDAF,
+                use_kalman=False,
+                filter_length=768,
             )
         else:
             defaults = {}
@@ -503,45 +559,66 @@ class PBFDAF:
     Partitioned Block Frequency-Domain Adaptive Filter (PBFDAF)
 
     NLMS-based adaptive filter using overlap-save for linear convolution.
+    Per-bin regularized MDF-NLMS with measurement-noise R tracker (Kalman
+    analogue) and leaky weight decay for structural stability.
     For Kalman-based adaptation, use PBFDKF subclass.
     """
 
     def __init__(self, block_size: int, n_partitions: int,
                  mu: float = 0.3, delta: float = 1e-8,
-                 hop_size: int = 0):
+                 hop_size: int = 0, sample_rate: int = 16000,
+                 leak: float = _PBFDAF_DEFAULT_LEAK,
+                 alpha_r_scale: float = 1.0):
         # Overlap-save: block_size = 2 × hop (proper 50% ratio for TD constraint)
         # FFT zero-pads to next power of 2 if block_size isn't one
+        # alpha_r_scale: shadow uses > 1.0 to make R track SLOWER (bigger α →
+        #                R lags behind |E|² spikes during echo path change →
+        #                denom stays small → mu_eff stays large → shadow re-
+        #                learns the new echo path quickly).
+        # leak: shadow uses smaller leak factor (e.g. 1e-6 instead of 1e-5) so
+        #       its W decays slower under sparse echo evidence — preserves the
+        #       partial estimate that main would otherwise wash away.
         self.hop_size = hop_size if hop_size > 0 else block_size // 2
-        self.block_size = 2 * self.hop_size  # overlap-save buffer (exactly 2× hop)
+        self.block_size = 2 * self.hop_size
         self.fft_size = 1 << (self.block_size - 1).bit_length()  # next pow2
         self.n_partitions = n_partitions
         self.n_freqs = self.fft_size // 2 + 1
         self.mu = mu
         self.delta = delta
+        self.sample_rate = sample_rate
         self.alpha_power = 0.9
-        self.enable_td_constraint = True  # can be disabled for diagnosis
+        self.enable_td_constraint = True
+        self._leak = np.float32(1.0 - leak)
 
-        # Time-domain constraint window: clean 50% truncation
-        # block_size = 2×hop → truncation at 50%, minimal Gibbs ringing
+        # Time-domain constraint window: 50% truncation with raised-cosine fade
         self._td_window = np.ones(self.fft_size, dtype=np.float32)
-        fade_len = self.hop_size // 4  # 40 samples for hop=160
+        fade_len = self.hop_size // 4
         fade = 0.5 * (1.0 - np.cos(np.pi * np.arange(fade_len) / fade_len))
         self._td_window[self.hop_size - fade_len:self.hop_size] = fade[::-1].astype(np.float32)
         self._td_window[self.hop_size:] = 0.0
 
-        # Filter weights [n_partitions, n_freqs]
+        # Filter weights, reference history, IO buffers
         self.W = np.zeros((n_partitions, self.n_freqs), dtype=np.complex64)
-
-        # Reference spectrum history [n_partitions, n_freqs]
         self.X_buf = np.zeros((n_partitions, self.n_freqs), dtype=np.complex64)
         self.partition_idx = 0
-
-        # Input buffers (block_size = 2 × hop for overlap-save)
         self.near_buffer = np.zeros(self.block_size, dtype=np.float32)
         self.far_buffer = np.zeros(self.block_size, dtype=np.float32)
-
-        # Power estimation
         self.power = np.zeros(self.n_freqs, dtype=np.float32)
+
+        # Per-bin measurement-noise R tracker. Plays Kalman's R role: grows when
+        # filter diverges → mu_eff shrinks → natural damping without hard cap.
+        self._R_init = np.float32(1e-3)
+        self._R = np.full(self.n_freqs, self._R_init, dtype=np.float32)
+        # Per-bin α_R: linear ramp from 0.88 (DC, fast tracking for speech band)
+        # to 0.99 (Nyquist, stable for high-freq noise). Uses real sample rate
+        # so 8kHz / 16kHz / 48kHz all map correctly.
+        # Shadow filter passes alpha_r_scale < 1.0 to make R faster (smaller α)
+        # — but we cap to keep numerical stability.
+        base_alpha_R = np.linspace(0.88, 0.99, self.n_freqs).astype(np.float32)
+        if alpha_r_scale != 1.0:
+            base_alpha_R = np.clip(base_alpha_R * np.float32(alpha_r_scale),
+                                   np.float32(0.0), np.float32(0.995)).astype(np.float32)
+        self._alpha_R = base_alpha_R
 
         # Output spectra (for RES / coherence DTD)
         self.near_spec = np.zeros(self.n_freqs, dtype=np.complex64)
@@ -549,8 +626,7 @@ class PBFDAF:
         self.error_spec = np.zeros(self.n_freqs, dtype=np.complex64)
         self.far_spec = np.zeros(self.n_freqs, dtype=np.complex64)
 
-        # Windowed error spectrum for RES analysis (sqrt-Hann, same variance
-        # as OLA spec but time-aligned with far_spec/echo_spec for coherence)
+        # Windowed error spec (kept for API compat; not currently consumed)
         self._sqrt_hann_analysis = np.sqrt(
             np.hanning(self.block_size)).astype(np.float32)
         self.error_spec_windowed = np.zeros(self.n_freqs, dtype=np.complex64)
@@ -563,6 +639,9 @@ class PBFDAF:
         self.power.fill(0)
         self.partition_idx = 0
         self.error_spec_windowed.fill(0)
+        # R must be reset alongside W: leaving stale R after reset (e.g. EPC,
+        # delay shift) inflates denom → mu_eff ≈ 0 → filter never re-converges.
+        self._R.fill(self._R_init)
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray,
                 mu_scale=1.0) -> np.ndarray:
@@ -572,72 +651,99 @@ class PBFDAF:
         # Shift buffers (overlap-save)
         self.near_buffer[:-hop] = self.near_buffer[hop:]
         self.near_buffer[-hop:] = near_end
-
         self.far_buffer[:-hop] = self.far_buffer[hop:]
         self.far_buffer[-hop:] = far_end
 
-        # FFT (zero-pad block_size buffer to fft_size, cast to float32 precision)
+        # FFT
         near_spec = np.fft.rfft(self.near_buffer, self.fft_size).astype(np.complex64)
         far_spec = np.fft.rfft(self.far_buffer, self.fft_size).astype(np.complex64)
-        self.near_spec = near_spec  # expose for RES overlap-save
-        self.far_spec = far_spec  # expose for coherence DTD
+        self.near_spec = near_spec
+        self.far_spec = far_spec
 
-        # Store far-end spectrum
         curr_p = self.partition_idx
         self.X_buf[curr_p] = far_spec
 
-        # Update power estimate (cold start: initialize directly on first active frame)
+        # Far-end activity gate (single computation, used in multiple places)
+        far_hop_energy = np.sum(far_end ** 2) / hop
+        far_active = far_hop_energy > 1e-4
+
+        # Power estimate: cold-start init + far-active EMA, frozen during silence
+        # to prevent power → 0 → power_floor → delta → mu_eff explosion.
         far_psd = np.abs(far_spec) ** 2
         if np.sum(self.power) < 1e-10 and np.sum(far_psd) > 1e-10:
             self.power = far_psd.astype(np.float32)
-        else:
-            self.power = (self.alpha_power * self.power +
-                         (1 - self.alpha_power) * far_psd)
+        elif far_active:
+            self.power = (self.alpha_power * self.power
+                          + (1.0 - self.alpha_power) * far_psd).astype(np.float32)
 
-        # Compute echo estimate
+        # Echo estimate
         self.echo_spec.fill(0)
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
             self.echo_spec += self.W[p] * self.X_buf[p_idx]
 
-        # IFFT (fft_size → take block_size valid samples)
+        # Time-domain output (overlap-save: take valid second half)
         echo_time = np.fft.irfft(self.echo_spec, self.fft_size).astype(np.float32)
-
-        # Error (take valid region for output)
         output = self.near_buffer[-hop:] - echo_time[self.hop_size:self.block_size]
 
-        # Error spectrum (zero-pad to fft_size, valid region at [hop, block_size))
+        # Error spectrum (zero-padded valid region — standard overlap-save gradient)
         error_time = np.zeros(self.fft_size, dtype=np.float32)
         error_time[self.hop_size:self.block_size] = output
         self.error_spec = np.fft.rfft(error_time).astype(np.complex64)
 
-        # Windowed error spec for RES analysis: near_buffer × sqrt-Hann − echo_spec.
-        # Same time alignment as far_spec/echo_spec, but with sqrt-Hann variance
-        # (low inter-frame noise). Used for coherence/PSD/ENR in ResFilter.
+        # Windowed error spec (kept for API compat — not currently consumed)
         near_win = self.near_buffer[:self.block_size] * self._sqrt_hann_analysis
         near_spec_win = np.fft.rfft(near_win, self.fft_size).astype(np.complex64)
         self.error_spec_windowed = near_spec_win - self.echo_spec
 
-        # Update weights — gate on far-end activity
-        far_hop_energy = np.sum(far_end ** 2) / hop
-        if far_hop_energy > 1e-4:  # ~ -40 dBFS, unified with far_active threshold
+        # Per-frame state updates (R / leak / Kalman noise estimate).
+        # Subclasses override _update_per_frame_state to plug in their own
+        # noise-tracking scheme (e.g. PBFDKF tracks _error_psd for Kalman).
+        self._update_per_frame_state(far_active)
+
+        # Weight update — gated on far-active (avoid garbage gradients during silence)
+        if far_active:
             self._update_weights(curr_p, mu_scale)
 
         self.partition_idx = (self.partition_idx + 1) % self.n_partitions
         return output.astype(np.float32)
 
+    def _update_per_frame_state(self, far_active: bool):
+        """Update R measurement-noise tracker + leaky weight decay every frame.
+        PBFDKF overrides to track _error_psd instead (no leak)."""
+        # R tracker — runs every frame (not gated by far-active).
+        #   far active : track |E|² so R reflects current echo+noise floor
+        #   far silent : slow decay toward _R_init; do NOT track |E|² because
+        #                E is dominated by NE speech (latching here would inflate
+        #                R for many seconds and stall convergence on far return)
+        err_energy = (np.abs(self.error_spec) ** 2).astype(np.float32)
+        if far_active:
+            a_r = self._alpha_R
+            self._R = (a_r * self._R + (1.0 - a_r) * err_energy).astype(np.float32)
+        else:
+            # TC ≈ 1000 frames ≈ 10s @ 10ms hop
+            self._R = (np.float32(0.999) * self._R
+                       + np.float32(0.001) * self._R_init).astype(np.float32)
+
+        # Leaky weight decay — runs every frame (W → 0 when no echo evidence).
+        # Multiplicative scaling preserves time-domain support (no need to
+        # re-apply TD constraint after this).
+        self.W *= self._leak
+
     def _update_weights(self, curr_p: int, mu_scale):
-        """NLMS weight update."""
+        """NLMS weight update with measurement-noise R regularization."""
         mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
         if mu_scale_arr.ndim == 0:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
         if not np.any(mu_scale_arr > 0):
             return
-        # Per-bin local floor: allows low-energy mid-freq bins higher effective mu
-        local_floor = self.power * 0.01 + self.delta        # per-bin 1% floor
-        global_floor = np.mean(self.power) * 0.001 + self.delta  # global extreme floor
-        power_floor = np.maximum(self.power, np.maximum(local_floor, global_floor))
-        mu_eff = (self.mu * mu_scale_arr) / (power_floor * self.n_partitions + self.delta)
+
+        # Per-bin denominator: input vector energy + R + δ.
+        # R self-regulates against divergence: |E|² ↑ → R ↑ → mu_eff ↓.
+        xbuf_energy = np.sum(np.abs(self.X_buf) ** 2, axis=0).astype(np.float32)
+        denom = xbuf_energy + self._R + np.float32(self.delta)
+        mu_eff = (self.mu * mu_scale_arr) / denom
+
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
             grad = self.error_spec * np.conj(self.X_buf[p_idx])
@@ -652,7 +758,13 @@ class PBFDAF:
         return float(np.sum(np.abs(self.error_spec) ** 2))
 
     def copy_weights_from(self, src: 'PBFDAF'):
+        # Copy W AND R together. _R is "the noise level the source has been
+        # tracking", not an opinion about W. If we copy good W from shadow but
+        # leave large stale R on main, denom stays large → mu_eff is suppressed
+        # → leak keeps decaying the freshly copied W back to zero.
         self.W[:] = src.W
+        if hasattr(src, '_R') and hasattr(self, '_R'):
+            self._R[:] = src._R
 
 
 class PBFDKF(PBFDAF):
@@ -663,82 +775,130 @@ class PBFDKF(PBFDAF):
     and automatic step-size adaptation.
     """
 
+    # --- PBFDKF tunable defaults (instance-level so subclasses / shadow
+    #     can swap; no module-level env flags) ---
+    K_MAX = np.float32(2.0)               # Kalman gain magnitude cap (B-3c)
+    Q_HIGH_INIT = 1e-4
+    Q_LOW_INIT  = 1e-5
+    P_INIT      = 0.01
+    P_MAX       = np.float32(0.5)
+    P_MAX_OVERRIDE_DEFAULT = np.float32(1.0)
+    P_FLOOR_BETA_DEFAULT   = np.float32(0.1)   # steady-state P_floor = Q_high × 0.1
+    P_FLOOR_BETA_RESET     = np.float32(1.0)   # EPC transient: full retracking
+    Q_FLOOR_RATIO          = np.float32(0.20)  # B-3b: was 0.05 → P collapses
+    Q_SCALE_MIN            = np.float32(0.30)  # B-3b: q_scale = 0.30 + 0.70 × mu_mean
+                                                # was 0.10 → P stuck for ~50 frames in DT
+    R_EMA_ALPHA            = np.float32(0.95)  # _error_psd smoothing (matches old _alpha_r)
+    R_SCALE_SMOOTH_ALPHA   = np.float32(0.7)   # B-3a: smooth R_scale jumps (was overwrite)
+    SAT_FREEZE_THRESHOLD   = 0.3               # B-7: skip W/P update during saturation
+
     def __init__(self, block_size: int, n_partitions: int,
                  mu: float = 0.3, delta: float = 1e-8,
-                 hop_size: int = 0):
-        super().__init__(block_size, n_partitions, mu, delta, hop_size)
+                 hop_size: int = 0, sample_rate: int = 16000,
+                 leak: float = _PBFDAF_DEFAULT_LEAK,
+                 alpha_r_scale: float = 1.0):
+        # PBFDKF doesn't use the inherited PBFDAF leak (Kalman uses its own
+        # P-based regularization; leaky decay would corrupt Kalman convergence).
+        # We accept the kwarg so AEC can use a uniform constructor signature,
+        # but force leak factor to 1.0 (no decay) right after super().__init__.
+        super().__init__(block_size, n_partitions, mu, delta, hop_size,
+                         sample_rate=sample_rate, leak=leak,
+                         alpha_r_scale=alpha_r_scale)
+        self._leak = np.float32(1.0)  # disable PBFDAF leak
 
         # P: error covariance (real, per-partition per-bin)
-        self.P = np.ones((n_partitions, self.n_freqs), dtype=np.float32) * 0.01
+        self.P = np.full((n_partitions, self.n_freqs), self.P_INIT, dtype=np.float32)
         # Q: process noise — controls adaptation speed (two-stage)
-        self.Q_high = np.ones(self.n_freqs, dtype=np.float32) * 1e-4
-        self.Q_low  = np.ones(self.n_freqs, dtype=np.float32) * 1e-5
+        self.Q_high = np.full(self.n_freqs, self.Q_HIGH_INIT, dtype=np.float32)
+        self.Q_low  = np.full(self.n_freqs, self.Q_LOW_INIT,  dtype=np.float32)
         self.Q = self.Q_high.copy()
-        # R: measurement noise PSD (estimated from error)
-        self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
-        self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
-        self._alpha_r = 0.95   # faster R tracking for DT protection
+        # R: measurement noise PSD (used in Kalman denominator).
+        # _error_psd is the underlying smooth |E|² tracker (EMA every frame).
+        # R is derived from _error_psd via clip + smooth R_scale modulation.
+        self.R = np.full(self.n_freqs, 1e-2, dtype=np.float32)
+        self._error_psd = np.full(self.n_freqs, 1e-2, dtype=np.float32)
+        self._R_scale_smooth = np.float32(1.0)  # smooth R_scale (B-3a)
+
+        # EPC state (initialized explicitly; no more getattr/delattr dance)
+        self._p_max_override = self.P_MAX
+        self._p_max_override_frames = 0
+        self._p_floor_beta = self.P_FLOOR_BETA_DEFAULT
+        self._p_floor_beta_frames = 0
+
+        # External signals injected by AEC.process() each frame
+        self._external_saturation_level = 0.0  # B-7: P/W freeze trigger
 
     def reset(self):
         super().reset()
-        self.P.fill(0.01)
+        self.P.fill(self.P_INIT)
         self.R.fill(1e-2)
         self._error_psd.fill(1e-2)
         self.Q[:] = self.Q_high
-        for attr in ('_p_max_override', '_p_max_override_frames',
-                     '_p_floor_beta', '_p_floor_beta_frames'):
-            if hasattr(self, attr):
-                delattr(self, attr)
+        self._R_scale_smooth = np.float32(1.0)
+        self._p_max_override = self.P_MAX
+        self._p_max_override_frames = 0
+        self._p_floor_beta = self.P_FLOOR_BETA_DEFAULT
+        self._p_floor_beta_frames = 0
+        self._external_saturation_level = 0.0
+
+    def _update_per_frame_state(self, far_active: bool):
+        """B-11 fix: _error_psd EMA every frame (not gated by far_active).
+        Skips PBFDAF's R EMA / leak (Kalman uses its own R via _error_psd)."""
+        error_psd = (np.abs(self.error_spec) ** 2).astype(np.float32)
+        self._error_psd = (self.R_EMA_ALPHA * self._error_psd
+                           + (np.float32(1.0) - self.R_EMA_ALPHA) * error_psd
+                           ).astype(np.float32)
 
     def _update_weights(self, curr_p: int, mu_scale):
         """Frequency-Domain Kalman Filter weight update."""
+        # B-7: freeze W and P during saturation. _error_psd still tracked
+        # in _update_per_frame_state, so R recovery isn't delayed.
+        if self._external_saturation_level > self.SAT_FREEZE_THRESHOLD:
+            return
+
         mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
         if mu_scale_arr.ndim == 0:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
 
-        # Update measurement noise estimate from error PSD
-        error_psd = np.abs(self.error_spec) ** 2
-        self._error_psd = self._alpha_r * self._error_psd + (1 - self._alpha_r) * error_psd
-        self.R = np.maximum(self._error_psd, self.delta)
-
-        # Adaptive R: scale by mu_scale to break R-deadlock
+        # B-3a: R derives from smoothed _error_psd × smoothed R_scale.
+        # _error_psd is per-frame EMA (now in _update_per_frame_state).
+        # R_scale itself is smoothed to avoid frame-to-frame jumps from mu_mean.
         mu_mean = float(np.mean(mu_scale_arr))
-        R_scale = 0.1 + 0.9 * (1.0 - mu_mean)
-        self.R = self.R * R_scale
+        target_R_scale = np.float32(0.1) + np.float32(0.9) * np.float32(1.0 - mu_mean)
+        self._R_scale_smooth = (self.R_SCALE_SMOOTH_ALPHA * self._R_scale_smooth
+                                + (np.float32(1.0) - self.R_SCALE_SMOOTH_ALPHA) * target_R_scale)
+        self.R = (np.maximum(self._error_psd, np.float32(self.delta))
+                  * self._R_scale_smooth).astype(np.float32)
 
-        # Q modulation: reduce Q during DT (Kalman-specific, not in NLMS)
-        q_scale = 0.1 + 0.9 * mu_mean  # FS: 1.0, strong DT: 0.1
+        # B-3b: Q modulation softer in DT (was 0.1 + 0.9 × mu_mean → P collapse).
+        # Now 0.30 + 0.70 × mu_mean: DT keeps Q_modulated ≥ 0.30 × Q_high.
+        q_scale = self.Q_SCALE_MIN + (np.float32(1.0) - self.Q_SCALE_MIN) * np.float32(mu_mean)
         Q_modulated = self.Q * q_scale
 
         # Per-bin far-end activity mask
         far_power_smooth = self.power
         far_activity_mask = far_power_smooth > (np.mean(far_power_smooth) * 0.01 + 1e-6)
-        Q_floor = Q_modulated * 0.05
+        # B-3b: Q_floor 5% → 20% so inactive bins keep enough Q for tracking
+        Q_floor = Q_modulated * self.Q_FLOOR_RATIO
         Q_gated = np.where(far_activity_mask, Q_modulated, Q_floor)
 
         # P_MAX: overridable during EPC for faster re-convergence
-        p_max = getattr(self, '_p_max_override', 0.5)
-        if hasattr(self, '_p_max_override_frames'):
+        if self._p_max_override_frames > 0:
             self._p_max_override_frames -= 1
-            if self._p_max_override_frames <= 0:
-                self._p_max_override = 0.5
-                del self._p_max_override_frames
+            if self._p_max_override_frames == 0:
+                self._p_max_override = self.P_MAX
+        p_max = self._p_max_override
 
-        # P-floor: prevent P from collapsing to delta after long convergence
-        # (which kills Kalman gain on movement). EPC sets beta=1.0 transiently
-        # to force full re-tracking; steady state uses beta=0.1.
-        beta = getattr(self, '_p_floor_beta', 0.1)
-        if hasattr(self, '_p_floor_beta_frames'):
+        # P-floor: prevent P collapse after long convergence.
+        # EPC sets beta=1.0 transient to force full retracking.
+        if self._p_floor_beta_frames > 0:
             self._p_floor_beta_frames -= 1
-            if self._p_floor_beta_frames <= 0:
-                self._p_floor_beta = 0.1
-                del self._p_floor_beta_frames
-        P_floor = self.Q_high * beta
+            if self._p_floor_beta_frames == 0:
+                self._p_floor_beta = self.P_FLOOR_BETA_DEFAULT
+        P_floor = self.Q_high * self._p_floor_beta
 
-        # Global denominator: sum over ALL partitions (correct Kalman theory)
-        # C-parity fix: cast delta to float32 to prevent denominator from
-        # promoting to float64, which cascades K_optimal to complex128 and
-        # causes divergence from C's float32-only arithmetic.
+        # Global denominator: sum over ALL partitions (correct Kalman theory).
+        # C-parity: keep float32 throughout (avoid float64 → complex128 promotion).
         total_echo_var = np.zeros(self.n_freqs, dtype=np.float32)
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
@@ -752,16 +912,22 @@ class PBFDKF(PBFDAF):
 
             K_optimal = (self.P[p] * np.conj(X)) / denominator
 
-            # Bug 2 fix: separate K for weights (scaled) and P update (unscaled)
+            # B-3c: cap K magnitude to prevent extreme spikes (X → 0 with high P
+            # can produce K → ∞; bounded |K| ≤ K_MAX keeps W updates sane).
+            K_mag = np.abs(K_optimal).astype(np.float32)
+            cap_scale = np.minimum(np.float32(1.0),
+                                   self.K_MAX / np.maximum(K_mag, np.float32(1e-10)))
+            K_optimal = (K_optimal * cap_scale).astype(np.complex64)
+
+            # K_scaled drives W (DT-suppressed via mu_scale_arr per bin)
             K_scaled = K_optimal * mu_scale_arr
 
             self.W[p] += K_scaled * self.error_spec
 
-            # Covariance update with UNSCALED K_optimal
-            # C-parity fix: use np.float32(1.0) to avoid float64 promotion
-            # in (1.0 - KX) where Python literal 1.0 is float64. C uses
-            # float32 throughout so this intermediate stays float32.
-            KX = np.real(K_optimal * X).astype(np.float32)
+            # Bug A fix: P update uses K_scaled (matching the actual W update),
+            # not the unscaled K_optimal. Otherwise P decreases as if W was
+            # fully updated → P understates uncertainty after DT → slow recovery.
+            KX = np.real(K_scaled * X).astype(np.float32)
             self.P[p] = np.minimum(
                 np.maximum((np.float32(1.0) - KX) * self.P[p] + Q_gated, P_floor),
                 p_max
@@ -774,14 +940,12 @@ class PBFDKF(PBFDAF):
                 self.W[p] = np.fft.rfft(w_time).astype(np.complex64)
 
     def copy_weights_from(self, src: 'PBFDAF'):
+        # Copy W only. P/Q are confidence states the destination has accumulated
+        # from its own learning history — copying them contaminates the
+        # Kalman gain. _error_psd/R left alone for the same reason.
+        # After W copy, P may temporarily mismatch but Kalman self-corrects
+        # within a few frames thanks to the per-frame _error_psd EMA.
         self.W[:] = src.W
-        # Only copy filter coefficients W, not Kalman internal state (P/Q/R).
-        # P/Q/R are confidence states accumulated from each filter's own
-        # learning history — copying them across filters contaminates the
-        # destination's Kalman gain. AEC3's shadow uses NLMS (no state to
-        # copy); our PBFDKF shadow needs this protection.
-        # After W copy, P may temporarily mismatch W but Kalman self-corrects
-        # within a few frames.
 
 
 # Backward compatibility alias
@@ -917,34 +1081,54 @@ class SaturationDetector:
     def __init__(self, threshold: float = 0.95):
         self.threshold = threshold
         self.saturation_level = 0.0
-        self.alpha_attack = 0.3    # Fast attack when saturation detected
-        self.alpha_release = 0.98  # Slow release (echo path retains saturation effects)
+        # v3 Stage -1.2: separate crest-aware score. Computed alongside
+        # hard-clip but NOT mixed into saturation_level (which drives
+        # legacy nonlinear_boost paths at L1325/1350/1359/1364). Exposed
+        # for Stage 2/B consumers via .crest_sat_score.
+        self.crest_sat_score = 0.0
+        self._crest_history = []  # 10-block rolling window for stable crest
+        self.alpha_attack = 0.3
+        self.alpha_release = 0.98
 
     def detect(self, signal: np.ndarray) -> float:
-        """Detect saturation level in signal. Returns smoothed level in [0, 1]."""
+        """Detect saturation level. Returns legacy hard-clip-only smoothed
+        value (preserves Pareto). New crest-aware score in self.crest_sat_score."""
         n = len(signal)
         if n == 0:
             return self.saturation_level
 
         abs_sig = np.abs(signal)
-        # Count clipped samples
+        # --- Original hard-clip detection (unchanged behavior) ---
         clip_count = np.sum(abs_sig > self.threshold)
-
-        # Count consecutive identical peak samples (digital clipping signature)
         consec_count = 0
         high_mask = abs_sig > self.threshold * 0.8
         for i in range(1, n):
             if high_mask[i] and high_mask[i - 1] and abs(signal[i] - signal[i - 1]) < 1e-6:
                 consec_count += 1
-
         raw_sat = min((clip_count + 2 * consec_count) / n, 1.0)
 
-        # Asymmetric EMA
-        if raw_sat > self.saturation_level:
-            alpha = self.alpha_attack
-        else:
-            alpha = self.alpha_release
+        # Asymmetric EMA on legacy value
+        alpha = self.alpha_attack if raw_sat > self.saturation_level else self.alpha_release
         self.saturation_level = alpha * self.saturation_level + (1.0 - alpha) * raw_sat
+
+        # --- v3 crest-factor soft-saturation (diagnostic only, not returned) ---
+        # Per-block crest is noisy at 10ms; aggregate over 10 blocks (100ms median)
+        # for a stable signal. Sigmoid centered at crest=1.8: clean speech
+        # 10ms blocks have median crest 2.0-3.0, soft-saturation drops below 2.0.
+        rms = float(np.sqrt(np.mean(signal.astype(np.float64) ** 2) + 1e-10))
+        peak = float(abs_sig.max())
+        if rms > 1e-4:
+            self._crest_history.append(peak / rms)
+            if len(self._crest_history) > 10:
+                self._crest_history.pop(0)
+        if len(self._crest_history) < 5:
+            crest_raw = 0.0
+        else:
+            stable_crest = float(np.median(self._crest_history))
+            crest_raw = float(1.0 / (1.0 + np.exp(5.0 * (stable_crest - 1.8))))
+        a_c = self.alpha_attack if crest_raw > self.crest_sat_score else self.alpha_release
+        self.crest_sat_score = a_c * self.crest_sat_score + (1.0 - a_c) * crest_raw
+
         return self.saturation_level
 
     @staticmethod
@@ -966,6 +1150,98 @@ class SaturationDetector:
 
     def reset(self):
         self.saturation_level = 0.0
+        self.crest_sat_score = 0.0
+        self._crest_history = []
+
+
+class RenderMicRatioTracker:
+    """v3 Stage A3: track mic_pwr/far_pwr ratio expected value in clean FS,
+    output Z-score for current ratio. Independent of 8 post-filter estimates
+    (verified by signal_correlation_analyzer max corr 0.47).
+
+    v3.1 patch: dual-path learning. Primary clean-FS path for normal cases;
+    stability-based fallback path for tail cases that never enter clean state
+    (e.g., iOyPax — persistently saturated through entire session)."""
+
+    def __init__(self):
+        self.expected_ratio = 0.05
+        self.ratio_std = 0.05
+        self.confidence = 0.0
+        self.initialized = False
+        self._history = []
+        # v3.1 fallback path
+        self._stability_window = []
+        self._fallback_counter = 0
+        self._learned_via_fallback = False
+        self._total_frames = 0
+
+    def reset(self):
+        self.expected_ratio = 0.05
+        self.ratio_std = 0.05
+        self.confidence = 0.0
+        self.initialized = False
+        self._history = []
+        self._stability_window = []
+        self._fallback_counter = 0
+        self._learned_via_fallback = False
+        self._total_frames = 0
+
+    def update(self, mic_pwr: float, far_pwr: float, far_crest_score: float) -> float:
+        if far_pwr < 1e-7:  # truly silent guard only
+            self._total_frames += 1
+            return 0.0
+        inst_ratio = mic_pwr / far_pwr
+        self._total_frames += 1
+
+        # === Primary path: clean-FS learning (preferred) ===
+        # Note: far_pwr threshold lowered to 1e-5 because HP+softclip in
+        # AEC.process pipeline reduces effective far power well below the
+        # original 1e-4 (e.g. iOyPax median ~1e-4 raw becomes ~1e-5 here)
+        clean_fs = (far_crest_score < 0.2 and far_pwr > 1e-5)
+        if clean_fs:
+            self._history.append(inst_ratio)
+            if len(self._history) > 500:
+                self._history.pop(0)
+            if len(self._history) >= 100 and not self._learned_via_fallback:
+                arr = np.asarray(self._history, dtype=np.float32)
+                self.expected_ratio = float(np.median(arr))
+                self.ratio_std = float(np.std(arr) + 1e-4)
+                self.initialized = True
+                self.confidence = min(1.0, len(self._history) / 500.0)
+
+        # === Fallback path: stability-based learning ===
+        # Activates after ~5s if primary still not initialized.
+        # Learns "this case's steady state" rather than "ideal clean baseline".
+        if (not self.initialized and self._total_frames > 500
+                and far_pwr > 1e-5 and far_crest_score < 0.95):
+            # Skip when crest extremely high (silent or pure tone)
+            self._stability_window.append(inst_ratio)
+            if len(self._stability_window) > 50:
+                self._stability_window.pop(0)
+            if len(self._stability_window) >= 50:
+                w = np.asarray(self._stability_window, dtype=np.float32)
+                wmean = float(np.mean(w))
+                wstd = float(np.std(w))
+                if wmean > 1e-6:
+                    cv = wstd / wmean
+                    if cv < 0.3:
+                        self._fallback_counter += 1
+                        if self._fallback_counter >= 100:
+                            self.expected_ratio = wmean
+                            # std floor at 10% of mean to prevent z-score
+                            # explosion on highly-stable saturation patterns
+                            self.ratio_std = max(wstd, wmean * 0.1)
+                            self.initialized = True
+                            self.confidence = 0.5
+                            self._learned_via_fallback = True
+                    else:
+                        self._fallback_counter = max(0, self._fallback_counter - 5)
+
+        if not self.initialized:
+            return 0.0
+
+        z = (inst_ratio - self.expected_ratio) / self.ratio_std
+        return float(z)
 
 
 class ResFilter:
@@ -1066,6 +1342,13 @@ class ResFilter:
         self._filter_erle_est = FilterErleEstimator(n_freqs)
         self._fb_erle_est = FullbandErleEstimator()
 
+        # v2.10a Stage 1: Hard_Override_Flag — multi-node atomic override
+        # Pin downstream nodes (gain_smooth, residual, ne_protection, dt_per_bin)
+        # in lock-step when fs_hi_erl_state asserts. This bypasses the 4
+        # feedback loops that absorbed all 14+ rounds of single-node tuning.
+        self.hard_override_active = False
+        self._fs_hi_erl_counter = 0
+
         # E1: call reset() to initialize all runtime scalar state
         # from a single source of truth (avoids init/reset divergence)
         self.reset()
@@ -1086,6 +1369,8 @@ class ResFilter:
         self._noise_initialized = False
         self._coh2_smooth.fill(0)
         self.error_envelope.fill(1.0)
+        self._dom_ne_conf = 0.0
+        self._mic_long_min = 0.0
         self.input_buf.fill(0)
         self.ola_buf.fill(0)
         self.far_activity = 0.0
@@ -1110,6 +1395,8 @@ class ResFilter:
                 divergence: float = 0.0,
                 is_stationary_dt: bool = False,
                 saturation_level: float = 0.0,
+                mic_far_z: float = 0.0,
+                far_crest_score: float = 0.0,
                 epc_active: bool = False,
                 error_spec_from_filter: np.ndarray = None,
                 shadow_dt: float = 0.0,
@@ -1396,6 +1683,11 @@ class ResFilter:
                 and effective_dt < 0.2 and residual_echo_psd is not None):
             residual_echo_psd = np.maximum(residual_echo_psd, self.error_psd * 0.9)
 
+        # v2.10a Stage 1 reverted — multi-node Override changed state-machine
+        # firing pattern but only traded FS↔DT on the same Pareto line.
+        # Restoring AB3 logic at L1456 below.
+        self.hard_override_active = False
+
         # Compute coherence-based EER (only used by legacy spectral_sub path)
         if self.gain_type not in ("enr", "wiener"):
             eer_linear = self.echo_psd / (self.error_psd + eps)
@@ -1428,10 +1720,50 @@ class ResFilter:
 
         # --- Per-bin near-end gate ---
 
+        # v2.9 AB3 state machine (restored after Stage 1 rollback).
+        cond_fs_hi_erl = (linear_failed and self.far_activity > 0.9
+                          and effective_dt < 0.05
+                          and float(np.mean(coh2)) < 0.3)
+        if cond_fs_hi_erl:
+            self._fs_hi_erl_counter = min(self._fs_hi_erl_counter + 1, 50)
+        else:
+            self._fs_hi_erl_counter = max(self._fs_hi_erl_counter - 2, 0)
+        fs_hi_erl_state = self._fs_hi_erl_counter >= 10
+        fs_hi_erl_weight = 1.0 if fs_hi_erl_state else 0.0
+        self.hard_override_active = fs_hi_erl_state
+
+        # Set B: per-bin near-speech likelihood from mic/far energy comparison.
+        # In DT (especially movement cases), our DTD (effective_dt, coh2) goes
+        # blind — over-suppression 6-15 dB in 0.5-2k vs AEC2. This uses linear
+        # expected echo (far × erl²) as reference; mic energy in excess is
+        # near speech regardless of what DTD says.
+        ne_evidence_lik = 0.0
+        if (far_spec is not None and near_spec is not None
+                and not fs_hi_erl_state
+                and erl_estimate > 0.01
+                and self.far_activity > 0.3):
+            far_psd_bin = np.abs(far_spec) ** 2
+            near_psd_bin = np.abs(near_spec) ** 2
+            expected_echo = far_psd_bin * (erl_estimate ** 2)
+            unexplained = np.maximum(near_psd_bin - expected_echo, 0.0)
+            per_bin_lik = unexplained / (near_psd_bin + 1e-10)
+            freq_per_bin = self.sample_rate / (2.0 * (self.n_freqs - 1))
+            b_lo = max(1, int(100.0 / freq_per_bin))
+            b_hi = min(self.n_freqs, int(2000.0 / freq_per_bin) + 1)
+            ne_evidence_lik = float(np.mean(per_bin_lik[b_lo:b_hi]))
+
         # --- Per-bin near-end gate with fs_confidence ---
         ne_erle_gate = max(erle_factor, 0.3)  # B4: simplified (0.2 floor never triggered)
         # Scale ne_protection by (1-fs_confidence): FS→no protection, DT/NE→full protection
         ne_protection = (1.0 - coh2) * ne_erle_gate * (1.0 - fs_confidence)
+        # Set B: if LF unexplained energy is high, boost protection floor
+        if ne_evidence_lik > 0.85:
+            boost = np.clip((ne_evidence_lik - 0.85) * 2.0, 0.0, 0.15)  # strict
+            ne_protection = np.maximum(ne_protection, boost)
+        # v2.10a Stage 1: ne_protection override DISABLED for ablation.
+        # Keeping natural ne_protection preserves LF safety valve.
+        # if self.hard_override_active:
+        #     ne_protection = np.zeros_like(ne_protection)
         ne_g_min_ceil = 10 ** (self.ne_protect_db / 20)
         ne_g_floor = effective_g_min + (ne_g_min_ceil - effective_g_min) * ne_protection
         ne_g_floor = np.maximum(ne_g_floor, effective_g_min)
@@ -1446,10 +1778,19 @@ class ResFilter:
             # Per-bin DT indicator: base from coh2 (works for speech far-end)
             # Use effective_dt (includes energy DT) so nearend_est denominator
             # rises in high-coupling DT where dt_for_fs ≈ 0.
-            dt_per_bin = np.maximum(
-                np.full(self.n_freqs, effective_dt, dtype=np.float32),
-                1.0 - coh2
-            )
+            # v2.9 Set A: in FS high-ERL state (linear_failed + strong far +
+            # clear non-DT), coh2 is unreliable because the filter is not
+            # converged; falling back to `1-coh2` makes dt_per_bin ≈ 0.8
+            # falsely and collapses the ENR gate to pass-through. Phase 2
+            # trace showed this is the reason gain stays at 1.0 on FS 0.5-2k
+            # tail cases. In that state, trust effective_dt directly.
+            if fs_hi_erl_state:
+                dt_per_bin = np.full(self.n_freqs, effective_dt, dtype=np.float32)
+            else:
+                dt_per_bin = np.maximum(
+                    np.full(self.n_freqs, effective_dt, dtype=np.float32),
+                    1.0 - coh2
+                )
 
             # Stationary far-end DT: coh2 fails (all bins high), use precomputed mask (C1)
             if is_stationary_dt:
@@ -1613,7 +1954,11 @@ class ResFilter:
         # LF gain decrease limiting: scale by (1-fs_confidence)
         # FS (fs_conf≈1): no LF protection → gain drops freely
         # DT/NE (fs_conf≈0): full LF protection (0.25× floor)
-        if fs_confidence < 0.9:  # skip entirely when clearly FS
+        # NOTE: LF protection is a safety valve, not a Set A canceller.
+        # When Set A misfires in DT, LF protection prevents near-speech
+        # damage — disabling it based on Set A state makes DT deg regress
+        # (v2.10 LFoff experiment confirmed −0.018 DT deg).
+        if fs_confidence < 0.9:
             lf_limit = min(8, self.n_freqs)
             lf_factor = 0.25 * max(1.0 - fs_confidence * 2.0, 0.0)
             if lf_factor > 0.01:
@@ -1652,6 +1997,16 @@ class ResFilter:
         noise_floor_gain = np.clip(noise_floor_gain, effective_g_min, 1.0)
         self.gain_smooth = np.maximum(self.gain_smooth, noise_floor_gain)
 
+        # v3 Stage A3: independent-signal additive gain correction.
+        # Uses ONLY signals verified independent (max corr < 0.7 vs 8 post-filter
+        # estimates by signal_correlation_analyzer): mic_far_z and far_crest_score.
+        # Applies multiplicative attenuation, NOT writing any of the 8 estimates.
+        # Max attenuation 0.3 (~ -3 dB) at z=5; gentle and additive.
+        if mic_far_z > 2.0 and far_crest_score > 0.4:
+            extra_suppression = float(np.clip((mic_far_z - 2.0) / 3.0, 0.0, 0.3))
+            self.gain_smooth = self.gain_smooth * (1.0 - extra_suppression)
+            self.gain_smooth = np.maximum(self.gain_smooth, effective_g_min)
+
         # Apply gain + synthesis sqrt-Hann window + IFFT
         enhanced_spec = self.gain_smooth * spec_synth
 
@@ -1681,6 +2036,24 @@ class ResFilter:
         self._diag_far_activity = float(self.far_activity)
         self._diag_echo_psd_mean = float(np.mean(self.echo_psd))
         self._diag_error_psd_mean = float(np.mean(self.error_psd))
+        # Phase 1 trace extension: per-band gain + estimate snapshots.
+        # Bands (assume 16kHz, n_freqs=513 @ 1024 FFT; generalises to others):
+        # lf_lo = 0.5-2k, mf = 2-4k, hf = 4-8k
+        fs = getattr(self, 'sample_rate', 16000)
+        freq_per_bin = fs / (2.0 * (self.n_freqs - 1))
+        b05 = max(1, int(500.0 / freq_per_bin))
+        b2 = max(b05 + 1, int(2000.0 / freq_per_bin))
+        b4 = max(b2 + 1, int(4000.0 / freq_per_bin))
+        b8 = min(self.n_freqs, int(8000.0 / freq_per_bin) + 1)
+        self._diag_gain_band_lf = float(np.mean(self.gain_smooth[b05:b2]))
+        self._diag_gain_band_mf = float(np.mean(self.gain_smooth[b2:b4]))
+        self._diag_gain_band_hf = float(np.mean(self.gain_smooth[b4:b8]))
+        self._diag_coh2_mean = float(np.mean(coh2))
+        self._diag_residual_mean = (float(np.mean(residual_echo_psd))
+                                    if residual_echo_psd is not None else 0.0)
+        self._diag_effective_dt = float(effective_dt)
+        self._diag_linear_failed = bool(linear_failed)
+        self._diag_is_nonlinear = bool(is_nonlinear)
 
         return output.astype(np.float32)
 
@@ -1976,7 +2349,8 @@ class AEC:
                 n_partitions=n_partitions,
                 mu=self.config.mu,
                 delta=self.config.delta,
-                hop_size=self._internal_hop
+                hop_size=self._internal_hop,
+                sample_rate=self.config.sample_rate,
             )
             self.filter.enable_td_constraint = self.config.enable_td_constraint
             self._hop_size = self.config.hop_size
@@ -2118,13 +2492,23 @@ class AEC:
                 self.config.mode in _FREQ_MODES
                 and hasattr(self.filter, 'W')):
             shadow_mu = self.config.mu * self.config.shadow_mu_ratio
-            self.shadow_filter = FilterClass(
+            shadow_kwargs = dict(
                 block_size=self.filter.block_size,
                 n_partitions=self.filter.n_partitions,
                 mu=shadow_mu,
                 delta=self.config.delta,
-                hop_size=self.filter.hop_size
+                hop_size=self.filter.hop_size,
+                sample_rate=self.config.sample_rate,
             )
+            if FilterClass is PBFDAF:
+                # PBFDAF has no Q (Kalman shadow uses shadow_q_ratio for
+                # convergence-speed differentiation). For PBFDAF we differentiate
+                # by making R lag and weights leak slower — see PBFDAF.__init__
+                # docstring. Without this, shadow tracks main exactly and the
+                # copy mechanism never triggers (shadow_advantage ≈ 1.0).
+                shadow_kwargs['alpha_r_scale'] = 1.03
+                shadow_kwargs['leak'] = 1e-6
+            self.shadow_filter = FilterClass(**shadow_kwargs)
             self.shadow_filter.enable_td_constraint = self.config.enable_td_constraint
             # PBFDKF shadow: higher Q via ratio for faster tracking
             if isinstance(self.shadow_filter, PBFDKF):
@@ -2148,6 +2532,8 @@ class AEC:
         self._divergence_indicator = 0.0
         # EPC render-forced countdown (Change D)
         self._epc_render_forced_remaining = 0
+        # EPC level: 'none' / 'small' / 'large' (組5/7.1 multi-level variability)
+        self._epc_level = 'none'
         # Dynamic ERL estimate for render-based echo (B4)
         self._erl_estimate = 0.1  # initial -20dB, conservative
         # Pre-filter energy-based DT signal (Stage B)
@@ -2177,6 +2563,7 @@ class AEC:
             'dt_from_shadow': 0.0,
             'erl_estimate': 0.1,
             'epc_active': False,
+            'epc_level': 'none',
             'saturation_level': 0.0,
             'erle_windowed': 0.0,
         }
@@ -2200,6 +2587,9 @@ class AEC:
             self._sat_detector_ref = None
             self._sat_detector_mic = None
         self._saturation_level = 0.0
+
+        # v3 Stage A3: independent-signal additive correction
+        self._mic_far_tracker = RenderMicRatioTracker()
 
         # White noise stationarity gate state
         self._far_env_mean = 1e-10
@@ -2279,6 +2669,7 @@ class AEC:
             'dt_from_shadow': 0.0,
             'erl_estimate': 0.1,
             'epc_active': False,
+            'epc_level': 'none',
             'saturation_level': 0.0,
             'erle_windowed': 0.0,
         }
@@ -2315,6 +2706,7 @@ class AEC:
             self._sat_detector_ref.reset()
             self._sat_detector_mic.reset()
         self._saturation_level = 0.0
+        self._mic_far_tracker.reset()
         self._far_env_mean = 1e-10
         self._far_env_var = 0.0
         self._far_active_prev = False
@@ -2336,6 +2728,7 @@ class AEC:
         self._dt_from_shadow = 0.0
         self._shadow_advantage = 1.0
         self._epc_render_forced_remaining = 0
+        self._epc_level = 'none'
         self._erl_estimate = 0.1
 
     @property
@@ -2455,6 +2848,22 @@ class AEC:
             if self.config.saturation_softclip_ref and sat_ref > 0.1:
                 far_end = SaturationDetector.soft_clip(far_end.copy())
 
+        # B-7: inject saturation level into PBFDKF so it can freeze P/W
+        # during clipping (otherwise P collapses, recovery takes hundreds of ms)
+        if isinstance(self.filter, PBFDKF):
+            self.filter._external_saturation_level = self._saturation_level
+        if self.shadow_filter is not None and isinstance(self.shadow_filter, PBFDKF):
+            self.shadow_filter._external_saturation_level = self._saturation_level
+
+        # v3 Stage A3: update RenderMicRatioTracker (independent of post-filter)
+        # Uses raw mic/far ratio gated by far crest_score (filter-independent).
+        far_pwr = float(np.mean(far_end.astype(np.float64) ** 2) + 1e-10)
+        mic_pwr = float(np.mean(near_end.astype(np.float64) ** 2) + 1e-10)
+        far_crest_score = (self._sat_detector_ref.crest_sat_score
+                           if self._sat_detector_ref is not None else 0.0)
+        self._mic_far_z = self._mic_far_tracker.update(mic_pwr, far_pwr, far_crest_score)
+        self._far_crest_score = far_crest_score
+
         # Delay estimation + reference alignment
         if self._delay_active:
             hop = len(far_end)
@@ -2479,24 +2888,41 @@ class AEC:
                         for filt in [self.filter, self.shadow_filter]:
                             if filt is not None and isinstance(filt, PBFDKF):
                                 filt.Q = filt.Q_high.copy()
-                    elif abs(new_delay - self._current_delay) > 32:
-                        # Require two consecutive consistent estimates before updating
-                        if hasattr(self, '_pending_delay') and abs(new_delay - self._pending_delay) < 16:
+                    elif abs(new_delay - self._current_delay) > 16:
+                        # B-5 (組7 option A): hysteresis 32→16 samples (2ms→1ms @16kHz)
+                        # so clock drift (100-200 ppm USB audio) doesn't accumulate
+                        # past the threshold over ~10s and push filter into
+                        # non-causality. Require THREE consecutive consistent
+                        # estimates (was two) to compensate for the tighter band.
+                        prev = getattr(self, '_pending_delay', None)
+                        prev2 = getattr(self, '_pending_delay2', None)
+                        if (prev is not None and prev2 is not None
+                                and abs(new_delay - prev) < 8
+                                and abs(prev - prev2) < 8):
                             old_delay = self._current_delay
                             self._current_delay = new_delay
-                            del self._pending_delay
-                            # Bug fix: trigger EPC on delay shift — filter W/P are
-                            # for old delay, need fast re-convergence
+                            self._pending_delay = None
+                            self._pending_delay2 = None
+                            # Trigger EPC on delay shift — filter W/P are for
+                            # old delay, need fast re-convergence
                             self.epc_active = True
                             self.epc_hangover_count = getattr(self.config, 'epc_hangover', 50)
                             for filt in [self.filter, self.shadow_filter]:
-                                if filt is not None and hasattr(filt, 'Q'):
+                                if filt is None:
+                                    continue
+                                if hasattr(filt, 'Q'):
                                     filt.Q = filt.Q_high.copy()
-                                    filt._p_max_override = 1.0
+                                    filt._p_max_override = np.float32(1.0)
                                     filt._p_max_override_frames = 30
+                                # B-12: PBFDAF branch — reset _R so denom shrinks
+                                # → mu_eff grows → fast re-adaptation to new delay.
+                                elif hasattr(filt, '_R'):
+                                    filt._R.fill(filt._R_init)
                             self._filter_converged = False
                             self._conv_counter = 0
                         else:
+                            # Roll history: prev → prev2, new → prev
+                            self._pending_delay2 = prev
                             self._pending_delay = new_delay
 
             # Write far_end into ring buffer
@@ -2604,17 +3030,18 @@ class AEC:
             if self.shadow_filter is not None and self._freq_near_queue is None:
                 self.shadow_frame_count += 1
                 # Shadow is a true background filter: always adapts at full
-                # speed. Kalman's Q_high × shadow_q_ratio keeps P alive even
-                # when shadow learns DT speech, so it re-converges within
-                # ~100-200 frames after DT ends. The copy gate (FS baseline
-                # tracking) is the sole defense against poisoning main.
-                # Gate shadow update: skip adaptation when far-end is too
-                # weak (poor excitation) or speaker is saturating (nonlinear
-                # distortion makes error unreliable). Cf. AEC3's
-                # PoorSignalExcitation() gate on main_filter_update_gain.
+                # speed when far-end is excited. The copy gate (FS baseline
+                # tracking + not_saturating check) is the sole defense against
+                # poisoning main.
+                # B-9 fix: previously gated on saturation_safe (< 0.5) which
+                # also crippled shadow during clipping → shadow couldn't help
+                # main recover. PBFDKF B-7 already freezes both main+shadow P/W
+                # via _external_saturation_level, so an extra mu gate here is
+                # redundant *and* harmful (PBFDAF shadow has no built-in freeze
+                # but should keep tracking; copy_allowed already blocks copy
+                # while saturation_level > 0.3).
                 far_excited = np.mean(far_end ** 2) > 1e-4
-                saturation_safe = self._saturation_level < 0.5
-                shadow_mu_scale = 1.0 if (far_excited and saturation_safe) else 0.1
+                shadow_mu_scale = 1.0 if far_excited else 0.1
                 self.shadow_filter.process(near_end, far_end, shadow_mu_scale)
 
                 main_err = self.filter.get_error_energy()
@@ -2693,47 +3120,142 @@ class AEC:
                 else:
                     delta_ratio = 0.0
 
-                errors_rising = (total_err > self.prev_total_err * self.config.epc_total_rise
-                                 and self.prev_total_err > 1e-10)
-                is_echo_change = errors_rising and delta_ratio < self.config.epc_delta_threshold
-                # White noise guard: stationary far-end + error rise = DT, not echo path change
-                if is_echo_change and self._is_stationary_far:
-                    is_echo_change = False
+                # 7.1 (AEC3-aligned): split EPC into large / small variability.
+                #   large : full filter reset (Q boost, P stretch, R reset, RES forced)
+                #   small : freeze ERL/ERLE only — keep filter trusting current W
+                #   none  : stable
+                # Shadow_adv = main_err / shadow_err. Per AEC3 Coarse-vs-Refined
+                # logic, large EPC is confirmed when shadow has converged to the
+                # new path while main is still stale (shadow_adv >> 1). Pure DT
+                # also produces shadow_adv > 1 (shadow learns NE), but we exclude
+                # that via dt_signal guard.
+                # B-4a guards: dt_signal < 0.3 AND saturation safe AND not stationary.
+                # B-12 (PBFDAF): reset _R (PBFDAF analog of P stretch).
+                shadow_adv = (self.main_err_smooth
+                              / (self.shadow_err_smooth + 1e-10)
+                              if self.shadow_err_smooth > 0 else 1.0)
+                dt_signal = float(getattr(self, '_dt_from_shadow', 0.0))
+                sat_safe = self._saturation_level < 0.3
+                guards_pass = (not self._is_stationary_far
+                               and dt_signal < 0.3
+                               and sat_safe)
+
+                epc_magnitude = (total_err / max(self.prev_total_err, 1e-10)
+                                 if self.prev_total_err > 1e-10 else 1.0)
+
+                # prev_total_err update happens BEFORE the if/else so both
+                # branches see consistent next-frame magnitude reference.
                 self.prev_total_err = total_err
 
-                if is_echo_change:
-                    if self.dtd_coherence:
-                        self.dtd_coherence.confidence *= 0.3
-                    self.epc_hangover_count = self.config.epc_hangover
-                    self.epc_active = True
-                    # Reset Q to Q_high for fast re-convergence
-                    for filt in [self.filter, self.shadow_filter]:
-                        if filt and hasattr(filt, 'Q'):
-                            filt.Q = filt.Q_high.copy()
-                    self._filter_converged = False
-                    self._conv_counter = 0
-                    # Temporarily relax P_MAX for faster re-convergence,
-                    # plus raise P-floor to force the filter to abandon the
-                    # stale echo path estimate.
-                    for filt in [self.filter, self.shadow_filter]:
-                        if filt:
-                            filt._p_max_override = 1.0
-                            filt._p_max_override_frames = 30
-                            filt._p_floor_beta = 1.0
-                            filt._p_floor_beta_frames = 30
-                    # Change D: arm EPC render-forced counter. For N frames
-                    # after EPC, force RES into render-based echo estimate
-                    # because filter W is being heavily updated and echo_spec
-                    # is unreliable. Limited duration (not hysteresis) avoids
-                    # getting stuck after re-convergence.
-                    self._epc_render_forced_remaining = self.config.epc_hangover  # G1: sync with EPC duration (20 frames=200ms)
-                    # A4: ERL may be stale after echo path change (e.g. device moved closer)
-                    self._erl_estimate = min(self._erl_estimate, 0.3)
-                elif self.epc_hangover_count > 0:
-                    self.epc_hangover_count -= 1
-                    self.epc_active = True
+                if _EPC_MULTI_LEVEL:
+                    # === Multi-level (default): none / small / large ===
+                    if not guards_pass:
+                        epc_level = 'none'
+                    elif (epc_magnitude > self.config.epc_large_total_rise
+                          and shadow_adv > self.config.epc_large_shadow_adv):
+                        epc_level = 'large'   # confirmed echo path change
+                    elif (epc_magnitude > self.config.epc_total_rise
+                          and shadow_adv > self.config.epc_small_shadow_adv):
+                        # Partial path change OR noise floor shift. shadow_adv guard
+                        # required so we don't waste RES-conservative cycles on plain
+                        # speech onset (where both filters err similarly, shadow_adv ≈ 1).
+                        epc_level = 'small'
+                    else:
+                        epc_level = 'none'
+
+                    if epc_level == 'large':
+                        self._epc_level = 'large'
+                        if self.dtd_coherence:
+                            self.dtd_coherence.confidence *= 0.3
+                        self.epc_hangover_count = self.config.epc_hangover
+                        self.epc_active = True
+                        self._filter_converged = False
+                        self._conv_counter = 0
+                        for filt in [self.filter, self.shadow_filter]:
+                            if filt is None:
+                                continue
+                            # PBFDKF: full Q + P stretch
+                            if hasattr(filt, 'Q'):
+                                filt.Q = filt.Q_high.copy()
+                                filt._p_max_override = np.float32(1.0)
+                                filt._p_max_override_frames = 30
+                                filt._p_floor_beta = np.float32(1.0)
+                                filt._p_floor_beta_frames = 30
+                            # PBFDAF (B-12): reset measurement-noise R so denom
+                            # shrinks → mu_eff grows → fast re-adaptation. Without
+                            # this, EPC handler had no effect on PBFDAF mode.
+                            elif hasattr(filt, '_R'):
+                                filt._R.fill(filt._R_init)
+                        # Force RES into render-based echo estimate while filter
+                        # W is heavily updating (echo_spec unreliable). Limited
+                        # duration (not hysteresis) to avoid getting stuck.
+                        self._epc_render_forced_remaining = self.config.epc_hangover
+                        # ERL may be stale after path change (e.g. device moved closer)
+                        self._erl_estimate = min(self._erl_estimate, 0.3)
+                    elif epc_level == 'small':
+                        # Light touch: don't reset filter, just acknowledge ERL is
+                        # likely stale → RES backs off slightly.
+                        # max(existing, new) preserves an in-progress large hangover
+                        # — we never *shorten* a deeper protection window.
+                        self.epc_active = True
+                        self._epc_level = 'small'
+                        small_hangover = self.config.epc_hangover // 2
+                        self.epc_hangover_count = max(self.epc_hangover_count, small_hangover)
+                        self._erl_estimate = min(self._erl_estimate, 0.5)
+                        self._epc_render_forced_remaining = max(
+                            self._epc_render_forced_remaining, small_hangover)
+                        if self.dtd_coherence:
+                            self.dtd_coherence.confidence *= 0.7
+                    elif self.epc_hangover_count > 0:
+                        self.epc_hangover_count -= 1
+                        self.epc_active = True
+                    else:
+                        self.epc_active = False
+                        self._epc_level = 'none'
+                        # B-4b: clear render-forced counter when EPC fully released
+                        # (otherwise re-trigger after silence keeps stale countdown)
+                        if self._epc_render_forced_remaining > 0:
+                            self._epc_render_forced_remaining = 0
                 else:
-                    self.epc_active = False
+                    # === Legacy binary (AEC_EPC_MULTI_LEVEL=0) ===
+                    # Equivalent to "B-4a/4b/12 only": single is_echo_change trigger
+                    # with B-4a guards (shadow_adv > 1.3 / dt < 0.3 / not stationary
+                    # / not saturating), B-12 PBFDAF _R reset on trigger, B-4b
+                    # render-forced cleanup on release. No small level.
+                    is_echo_change = (
+                        epc_magnitude > self.config.epc_total_rise
+                        and shadow_adv > self.config.epc_small_shadow_adv
+                        and guards_pass
+                    )
+                    if is_echo_change:
+                        self._epc_level = 'large'   # legacy: trigger == large
+                        if self.dtd_coherence:
+                            self.dtd_coherence.confidence *= 0.3
+                        self.epc_hangover_count = self.config.epc_hangover
+                        self.epc_active = True
+                        self._filter_converged = False
+                        self._conv_counter = 0
+                        for filt in [self.filter, self.shadow_filter]:
+                            if filt is None:
+                                continue
+                            if hasattr(filt, 'Q'):
+                                filt.Q = filt.Q_high.copy()
+                                filt._p_max_override = np.float32(1.0)
+                                filt._p_max_override_frames = 30
+                                filt._p_floor_beta = np.float32(1.0)
+                                filt._p_floor_beta_frames = 30
+                            elif hasattr(filt, '_R'):
+                                filt._R.fill(filt._R_init)
+                        self._epc_render_forced_remaining = self.config.epc_hangover
+                        self._erl_estimate = min(self._erl_estimate, 0.3)
+                    elif self.epc_hangover_count > 0:
+                        self.epc_hangover_count -= 1
+                        self.epc_active = True
+                    else:
+                        self.epc_active = False
+                        self._epc_level = 'none'
+                        if self._epc_render_forced_remaining > 0:
+                            self._epc_render_forced_remaining = 0
 
             # final_output starts from raw_output; RES modifies final_output only
             final_output = raw_output.copy()
@@ -2903,6 +3425,8 @@ class AEC:
                                                     divergence=self._divergence_indicator,
                                                     is_stationary_dt=is_stationary_dt,
                                                     saturation_level=self._saturation_level,
+                                                    mic_far_z=getattr(self, '_mic_far_z', 0.0),
+                                                    far_crest_score=getattr(self, '_far_crest_score', 0.0),
                                                     epc_active=self.epc_active,
                                                     shadow_dt=(0.08 * max(float(self._dt_from_energy),
                                                                         float(getattr(self, '_dt_from_shadow', 0.0)))
@@ -2911,11 +3435,18 @@ class AEC:
                                                                         float(getattr(self, '_dt_from_shadow', 0.0)))),
                                                     erl_estimate=self._erl_estimate)
 
-                    # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
+                    # Update per-bin mu_scale AFTER RES.
+                    # B-6 fix: derive per_bin_eer from PRE-RES filter spectra
+                    # (filter.echo_spec / filter.error_spec) instead of POST-RES
+                    # res.echo_psd / res.error_psd. RES PSDs are themselves
+                    # shaped by RES gain which is shaped by mu_scale → feedback
+                    # loop causes mu_scale to lock once DT is misjudged. Filter
+                    # spectra only depend on filter W, breaking the loop.
                     if not self.config.enable_dtd:
                         if self._filter_converged:
-                            per_bin_eer = self.res.echo_psd / (self.res.error_psd + 1e-10)
-                            per_bin_eer = np.clip(per_bin_eer, 0.0, 1.0)
+                            filter_echo_pwr = (np.abs(self.filter.echo_spec) ** 2).astype(np.float32)
+                            filter_err_pwr = (np.abs(self.filter.error_spec) ** 2 + 1e-10).astype(np.float32)
+                            per_bin_eer = np.clip(filter_echo_pwr / filter_err_pwr, 0.0, 1.0)
                             mu_min = self.config.shadow_mu_min
                             self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
                             self._simple_mu_ratio = float(np.mean(per_bin_eer))
@@ -2947,10 +3478,13 @@ class AEC:
                         erl_estimate=float(self._erl_estimate),
                     )
 
-            # C-parity fix: when RES is disabled, _update_simple_mu_ratio is never
-            # called in PBFDKF path. C always calls update_simple_mu_ratio regardless.
-            # Add call here when RES is not active (avoids double-update when RES is on).
-            if not self.res and not self.config.enable_dtd and not self._filter_converged:
+            # B-10 fix: when RES is disabled, _update_simple_mu_ratio must run
+            # every frame (was gated on `not converged`, leaving the converged
+            # path with frozen _simple_mu_ratio → no DT response).
+            # When RES is on, _update_simple_mu_ratio is called in the
+            # pre-convergence branch above (line ~3460) and per_bin_eer takes
+            # over post-convergence — so we only call here for RES-off mode.
+            if not self.res and not self.config.enable_dtd:
                 self._update_simple_mu_ratio(raw_output, far_end)
 
             # Update diagnostics
@@ -2961,6 +3495,15 @@ class AEC:
                 self._diag['far_activity'] = self.res._diag_far_activity
                 self._diag['echo_psd_mean'] = self.res._diag_echo_psd_mean
                 self._diag['error_psd_mean'] = self.res._diag_error_psd_mean
+                # Phase 1 trace: per-band gains + estimate snapshots
+                self._diag['gain_band_lf'] = getattr(self.res, '_diag_gain_band_lf', 0.0)
+                self._diag['gain_band_mf'] = getattr(self.res, '_diag_gain_band_mf', 0.0)
+                self._diag['gain_band_hf'] = getattr(self.res, '_diag_gain_band_hf', 0.0)
+                self._diag['coh2_mean'] = getattr(self.res, '_diag_coh2_mean', 0.0)
+                self._diag['residual_mean'] = getattr(self.res, '_diag_residual_mean', 0.0)
+                self._diag['effective_dt'] = getattr(self.res, '_diag_effective_dt', 0.0)
+                self._diag['linear_failed'] = getattr(self.res, '_diag_linear_failed', False)
+                self._diag['is_nonlinear'] = getattr(self.res, '_diag_is_nonlinear', False)
             self._diag['erle_inst'] = self.get_erle_instant()
             mu_val = mu_scale
             self._diag['mu_scale'] = float(np.mean(mu_val)) if isinstance(mu_val, np.ndarray) else float(mu_val)
@@ -2974,6 +3517,7 @@ class AEC:
             self._diag['dt_from_shadow'] = getattr(self, '_dt_from_shadow', 0.0)
             self._diag['erl_estimate'] = self._erl_estimate
             self._diag['epc_active'] = self.epc_active
+            self._diag['epc_level'] = self._epc_level
             self._diag['saturation_level'] = self._saturation_level
             self._diag['erle_windowed'] = float(erle_windowed) if 'erle_windowed' in locals() else 0.0
 
