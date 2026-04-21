@@ -124,11 +124,10 @@ EMA:
 raw_dt_new = other_pwr / (echo_est_pwr + other_pwr)
 raw_dt_legacy = 1.0 - far_pwr / (mic_pwr + far_pwr + 1e-10)
 
-# Smooth transition using _conv_counter (existing state in AEC)
-# Assumes _conv_counter increments per frame while converging,
-# resets to 0 on EPC reset.
+# Smooth transition using dedicated B-15 blend counter
+# (see "B-15 blend counter" subsection below for state definition).
 CONV_BLEND_FRAMES = 20   # ~200ms @ 10ms hop
-conv_weight = min(self._conv_counter / CONV_BLEND_FRAMES, 1.0)
+conv_weight = min(self._b15_blend_counter / CONV_BLEND_FRAMES, 1.0)
 
 raw_dt = conv_weight * raw_dt_new + (1.0 - conv_weight) * raw_dt_legacy
 ```
@@ -136,78 +135,61 @@ raw_dt = conv_weight * raw_dt_new + (1.0 - conv_weight) * raw_dt_legacy
 This gradually shifts `raw_dt` from legacy to new formula over
 ~200ms after convergence, avoiding click artifact.
 
-Edge cases:
-- `_conv_counter` reset on EPC: `raw_dt` smoothly returns to legacy
-  during filter re-convergence (correct behavior — filter output
-  unreliable during re-learning)
-- `_conv_counter` not yet incremented (first frames):
-  `conv_weight=0`, `raw_dt = raw_dt_legacy` (safe)
+#### B-15 blend counter (`_b15_blend_counter`)
 
-If `self._conv_counter` doesn't exist or behaves differently than
-assumed, Stage 1B must verify before implementing.
+B-15 introduces a **new** AEC-level state variable dedicated to
+the EMA blend, independent from the existing `_conv_counter`
+(which has pre-convergence trigger semantics, latching at 10 on
+convergence — see `aec.py:3629-3640`).
 
-#### _conv_counter fallback policy
-
-The EMA formula relies on `self._conv_counter` existing and
-incrementing once per frame (reset on EPC). Stage 1B MUST first
-verify this assumption:
-
-```bash
-grep -n "_conv_counter" aec.py
-```
-
-Three outcomes and their required handling:
-
-**Case 1: `_conv_counter` exists and behaves as assumed**
-(increments per frame, resets on EPC)
-→ Implement EMA blend as specified. Normal path.
-
-**Case 2: `_conv_counter` exists but semantics differ**
-(e.g. only counts frames after EPC, doesn't count during warmup;
-or only increments under specific conditions)
-→ Implement with observed semantics, document the divergence in
-Stage 1B commit message.
-→ If the divergence makes `conv_weight` stuck at 0 or 1, escalate:
-STOP Stage 1B and report back; do NOT implement with broken blend.
-
-**Case 3: `_conv_counter` does not exist**
-→ Introduce it as a NEW state in AEC class, alongside
-`self._filter_converged`. Semantics:
+State declaration in `AEC.__init__`:
 
 ```python
-# In AEC.__init__
-self._conv_counter = 0
-
-# In AEC.process, after self._filter_converged update:
-if self._filter_converged:
-    self._conv_counter += 1
-else:
-    self._conv_counter = 0   # reset on divergence or EPC
+self._b15_blend_counter = 0   # B-15 EMA blend counter
 ```
 
-→ This adds minimal new state (one integer). Document in Stage 1B
-commit message.
+Update in `AEC.process` (after `self._filter_converged` update):
 
-**Note on semantics**: `self._filter_converged` flips False→True
-when the filter converges post-warmup, and True→False on EPC
-trigger or divergence. `_conv_counter` is thus precisely "frames
-since last convergence". Do NOT search for a separate EPC-reset
-path for `_conv_counter` — the `_filter_converged` semantics
-already provide it. EMA blend behavior:
+```python
+if self._filter_converged:
+    self._b15_blend_counter += 1
+else:
+    self._b15_blend_counter = 0   # reset on EPC/divergence
+```
+
+Semantics: **"frames since filter convergence (or since last
+reset)"**. Monotonically increases while converged; resets to 0
+on EPC trigger or divergence.
+
+Reset points (inherits from `_filter_converged=False` transitions):
+
+- EPC triggered (`aec.py` around line 2919, 2954, 3205, 3269)
+- Saturation / other divergence causing `_filter_converged=False`
+- Manual `reset()` calls
+
+**Why a separate counter**:
+
+- Existing `_conv_counter` is pre-convergence trigger counter
+  (accumulates 0→10 during warmup, latches at 10). Reusing it
+  would cap `conv_weight` at 0.5, violating the "gradual shift
+  to new formula" design intent.
+- New counter has post-convergence semantics, exactly matching
+  the EMA blend need. Adds one integer state.
+
+EMA behavior (with `CONV_BLEND_FRAMES=20`):
 
 - EPC triggered → `_filter_converged=False` → counter=0 →
   `conv_weight=0` → `raw_dt = legacy` (safe during re-learning)
 - EPC hangover → counter stays 0 → still legacy
-- Filter re-converges → counter starts incrementing → gradually
-  shifts to new formula over 20 frames (~200ms)
+- Filter re-converges → `_filter_converged=True` → counter += 1
+  each frame → gradually shifts to new formula over 20 frames
+  (~200ms @ 10ms hop)
+- Steady-state converged → counter grows unbounded (no cap
+  needed; `conv_weight` clamped to 1.0 by `min()`)
 
-**Not acceptable fallbacks (do NOT do):**
-
-- Degrade to Boolean `_filter_converged` (causes 0.7 jump at
-  convergence, defeating the purpose of EMA blend)
-- Disable B-15 entirely (defeats the purpose of this spec)
-- Skip the EMA blend and use pure new formula without convergence
-  gate (may regress on unconverged frames)
+**Do NOT** use `_conv_counter` for B-15 blend. **Do NOT** add
+EPC-reset logic separately — the `_filter_converged` semantics
+already provide it via the reset-on-False pattern above.
 
 ### Option B — Mic-minus-echo residual ratio
 
@@ -459,7 +441,7 @@ The following must hold in Stage 1B implementation:
 ### Stage 1B implementation verification
 
 - [ ] §3 公式用 Parseval-aligned `mic_pwr_fft` (not line 2893 `mic_pwr`)
-- [ ] EMA blend 用 `self._conv_counter / CONV_BLEND_FRAMES`
+- [ ] EMA blend 用 `self._b15_blend_counter / CONV_BLEND_FRAMES`
 - [ ] DTD if-branch 在 diff 中未出現任何變更 (grep 驗證)
 - [ ] diagnostic 無條件執行 (不在 `if AEC_FIX_B15` block 內)
 
