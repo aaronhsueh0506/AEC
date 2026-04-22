@@ -84,20 +84,44 @@ self._diag_b16_veto_active = False    # diagnostic
 4 scalar states added. EMAs reset to 0 on `AEC.__init__` and
 `reset()`. No per-frame dependency on filter state.
 
+**Cold start**: all EMAs and `_raw_dt_jump_prev` initialise to
+0.0. First frame: `jump_fast = raw_dt − 0` may be large, but
+`_raw_dt_jump_prev = 0` blocks the sustained-2 condition so no
+spurious veto. Second frame onwards: sustained check operates
+normally. No explicit warmup guard needed.
+
 ### 3.3 Veto logic
 
 **Placement**: inside the `else:` branch of
-`if self.config.enable_dtd:` at `aec.py:3369`, **after** the
-`raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)` assignment (or the
-inst_erle correction at line ~3420 if that still runs for non-DTD),
-**before** the EPC physical gate (`if self.epc_active: raw_dt = 0.0`
-at line ~3423) and the `dt_indicator = np.clip(raw_dt, 0.0, 0.8)`
-(line ~3427).
+`if self.config.enable_dtd:` at `aec.py:3362`, **immediately after**
+the `raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)` assignment
+(line 3365) and **before** the `is_stationary_dt = False`
+block (line 3368).
 
-Exact insertion: just before the EPC gate, so veto modifies raw_dt
-before EPC override and final clipping. The inst_erle correction
-(line 3409-3420) is `if not self.config.enable_dtd:` which is the
-same branch — leave it unchanged; run after it.
+Critical: placement MUST be before the independent
+`if not self.config.enable_dtd: ... raw_dt /= erle_for_dt`
+inst_erle correction (L3409–L3420). Task 4/5 probe measured
+`jump_fast` on **pre-inst-erle** `raw_dt`; threshold 0.6 was
+calibrated against that distribution. Running veto after
+inst_erle would mean the threshold no longer matches probe data
+and all Task 5 analysis would need re-calibration.
+
+Verification in Stage 1B: B-16 block must sit between these two
+grep hits (include the raw_dt assignment line above, exclude the
+inst_erle block below):
+
+```bash
+grep -n 'raw_dt = 1.0 - far_pwr' aec.py     # placement upper bound
+grep -n 'if not self.config.enable_dtd:' aec.py  # placement lower bound (first hit after 3365)
+```
+
+Note on earlier spec wording: a prior revision mentioned "just
+before EPC gate" and line numbers around 3423/3447; those
+referenced an intermediate B-15 Stage 1B tree. On clean main,
+inst_erle is at L3409–L3420 and EPC gate at L3423. The current
+placement window is L3366–L3367 (after L3365 `raw_dt = ...`,
+before L3368 `is_stationary_dt = False`), **which is strictly
+above both** inst_erle and EPC gate.
 
 ```python
 # B-16: raw_dt jump veto (sustained 2-frame). Only in non-DTD branch
@@ -142,6 +166,38 @@ slow EMA tracks the safe fall-back value rather than the anomalous
 **`_raw_dt_jump_prev` stores the pre-veto jump** (the detector's
 own raw output), so the next frame's sustained check uses the
 detector signal, not the outcome.
+
+### 3.3.1 EMA update consequences
+
+During a sustained veto, EMAs update on post-veto `raw_dt`. This
+creates feedback:
+
+- Frame N: `jump_fast > 0.6`, `prev > 0.6`, veto fires → `raw_dt :=
+  slow_EMA` (low). Fast EMA pulled low on this update.
+- Frame N+1: if the raw formula's `raw_dt` is still high,
+  `jump_fast = raw_dt − low_fast_EMA` remains large →
+  `_raw_dt_jump_prev` from frame N (pre-veto jump) also > 0.6 →
+  veto continues.
+
+**This is the desired behaviour during a real gain-jump**: the
+filter needs several frames to re-converge to the new echo path;
+during that window raw_dt legitimately stays elevated and veto
+persists, keeping mu_scale healthy throughout adaptation. When
+raw_dt naturally falls back (onset ends), `jump_fast` shrinks
+and veto releases automatically.
+
+**False-positive containment**: `_raw_dt_jump_prev` gates on the
+**pre-veto** jump signal. If a single frame false-triggers, the
+next frame's pre-veto jump requires raw_dt to have actually risen
+again; a normal raw_dt (< 0.3) produces small jumps and the
+sustained-2 condition fails. A one-off false fire cannot chain
+into an infinite loop.
+
+Worst-case false sustained veto: ≤ 10–30 frames (100–300 ms)
+until raw_dt natural dynamics force `jump_fast < 0.6`. Stage 1C
+smoke test must inspect `_diag_b16_veto_active` time series on
+DT / FS non-onset cases and flag any veto window > 5 frames as
+potentially problematic.
 
 ### 3.4 Feature flag
 
@@ -224,6 +280,15 @@ Fail modes and responses:
   didn't respond. Probe: is `raw_dt_ema_slow` actually low at t=9.96
   (should be < 0.1)? If yes, downstream has additional DT signal
   source (shadow-derived) keeping effective_dt high — escalate.
+
+  **Escalation procedure**: probe `self._dt_from_shadow` and
+  `self._dt_from_energy` (or equivalent energy-DT state) during
+  the veto window. If either > 0.3 while `_raw_dt_ema_slow < 0.1`,
+  `effective_dt` is being driven by a non-raw_dt source, so B-16
+  cannot fix the leak alone. Open a follow-up ticket to review
+  `dt_from_shadow` / `dt_from_energy` contributions in gain-jump
+  scenarios — do NOT extend B-16 scope to cover these (scope creep
+  risk; design basis is raw_dt only).
 - **DT regression > 0.5 dB**: veto false-triggered somewhere. Probe:
   find frames where `_diag_b16_veto_active=True` in DT case. If
   < 3 events → tune threshold to 0.65 or require 3-frame sustained.
@@ -279,6 +344,33 @@ when the net Pareto is negative.
   - [ ] `if AEC_FIX_B16:` wraps only one line (the replacement)
   - [ ] `far_active` and `not self._is_stationary_far` present in
         veto condition
+
+## 10.5 EPC / B-16 interaction
+
+EPC physical gate at `aec.py:3423-3425`:
+```python
+if self.epc_active:
+    raw_dt = 0.0
+    is_stationary_dt = False
+```
+forces `raw_dt = 0` when EPC is active.
+
+Placement order (§3.3 above): B-16 veto runs at L3366–L3367,
+which is **before** the EPC gate at L3423. If both fire on the
+same frame:
+
+1. B-16 sets `raw_dt = self._raw_dt_ema_slow` (~0.05 in normal
+   case, the safe FS fall-back)
+2. EPC then forces `raw_dt = 0.0`
+
+Net effect: `raw_dt = 0`, identical to EPC alone. **B-16 adds no
+observable behaviour during EPC-active frames.** The veto is
+effectively dormant whenever EPC has already fired, so there is
+no double-gating conflict or compound side effect.
+
+Conversely, during B-16 veto windows where EPC is NOT active (the
+common PZ7V-class case, as Task 2 showed EPC never fires at
+onsets), B-16's replacement of raw_dt is the only effect.
 
 ## 11. Not in scope
 
