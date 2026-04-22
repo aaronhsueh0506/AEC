@@ -1,0 +1,41 @@
+=====================================================================================
+BLIND TEST 800-case AECMOS — 4 flag combinations
+=====================================================================================
+
+combo               FS_echo  DT_echo   DT_deg   NE_deg
+(0,0) baseline        3.475    4.034    2.448    4.005
+(1,0) B-16            3.475    4.033    2.449    4.005
+(0,1) Phase 2         3.445    4.039    2.458    4.012
+(1,1) stacked         3.447    4.037    2.459    4.012
+
+=== Δ vs (0,0) baseline ===
+combo                   ΔFS   ΔDT_echo   ΔDT_deg   ΔNE_deg
+(1,0) B-16           +0.000     -0.001    +0.001    +0.000
+(0,1) Phase 2        -0.030     +0.005    +0.010    +0.007
+(1,1) stacked        -0.028     +0.003    +0.011    +0.007
+
+=== Movement vs static subset (FS + DT) ===
+
+  FAREND SINGLETALK (n=300, mv=131, static=169)
+  subset     (0,0) baseline     (1,0) B-16  (0,1) Phase 2  (1,1) stacked
+ALL                 3.475         +0.000         -0.030         -0.028
+movement            3.571         -0.000         -0.016         -0.011
+static              3.400         +0.001         -0.040         -0.042
+
+  DOUBLETALK (n=300, mv=114, static=186)
+  subset     (0,0) baseline     (1,0) B-16  (0,1) Phase 2  (1,1) stacked
+ALL                 4.034         -0.001         +0.005         +0.003
+movement            3.978         -0.002         -0.017         -0.019
+static              4.068         -0.001         +0.018         +0.016
+
+=== FS big wins (Δ>+0.2) / big losses (Δ<-0.2) vs (0,0) ===
+  (1,0) B-16         wins=  0 (mv= 0) losses=  0 (mv= 0)  net=+0
+  (0,1) Phase 2      wins= 21 (mv= 8) losses= 40 (mv=13)  net=-19
+  (1,1) stacked      wins= 23 (mv= 9) losses= 38 (mv=11)  net=-15
+
+=== Cat-A 13-case wav-level (full-file RMS leak dB) ===
+  combo                  mean  PZ7V full  PZ7V onset
+  (0,0) baseline      -24.776    -17.074     -13.813
+  (1,0) B-16          -24.845    -17.430     -20.663
+  (0,1) Phase 2       -25.680    -24.431     -13.796
+  (1,1) stacked       -25.860    -26.223     -18.046
