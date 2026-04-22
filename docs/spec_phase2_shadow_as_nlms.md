@@ -1,10 +1,18 @@
 # Spec: Phase 2 — Shadow as NLMS (PBFDAF) in PBFDKF Mode
 
-Status: DRAFT (Stage 1A) — awaiting user audit before Stage 1B implementation.
+**Status: EXPERIMENTAL (Stage 1D verdict: MARGINAL)** — merged to main with flag default OFF.
+
+Phase 2 merged to main with `AEC_EXP_SHADOW_NLMS` flag default OFF. Enabling flag produces:
+- **PZ7V-class gain jump**: full-file leak −9 dB (architectural fix via shadow-as-NLMS revival of copy gate mechanism, validated by Stage 0b shadow_adv measurements)
+- **AECMOS FS_echo aggregate**: −0.03 dB regression (trade-off, 800-case)
+- **21 cases big wins** (Δ > +0.2) vs **40 cases big losses** (Δ < −0.2) in FS
+- Regression concentrated in **static farend cases**, not movement
+
+This flag is **NOT recommended for production** use in current tuning. Stage 2 (copy gate hysteresis + PBFDAF shadow param tuning) planned to address aggregate regression while preserving PZ7V-class fix.
 
 Feature flag: `AEC_EXP_SHADOW_NLMS` (default `'0'` — OFF).
-Branch: `feature/phase2-shadow-as-nlms`.
-Related: [B-16 spec](spec_b16_raw_dt_jump_veto.md), [AEC3 architecture analysis](aec3_full_architecture_analysis.md), [B-16 Stage 1D results](b16_stage_1d_results.md).
+Branch: `feature/phase2-shadow-as-nlms` (merged); kept as reference.
+Related: [B-16 spec](spec_b16_raw_dt_jump_veto.md), [AEC3 architecture analysis](aec3_full_architecture_analysis.md), [B-16 Stage 1D results](b16_stage_1d_results.md), [Phase 2 Stage 1D results](phase2_stage_1d_results.md), [Phase 2 Stage 1B interaction note](phase2_stage_1b_interaction_note.md).
 
 ---
 
@@ -535,6 +543,14 @@ MARGINAL 處理細節:
 - (1,1) < (1,0) (stacking 讓事情變糟)
 - §7.4 matrix interaction == "cancel" pattern (Δ(1,1) < max(Δ(0,1), Δ(1,0)))
 - Invariant §5.1 bit-exact baseline broken
+
+### §9.4 Retrospective (post-Stage 1D, v4)
+
+Stage 1C PZ7V individual passed §9 dual-window (full-file PASS, onset FAIL)。Stage 1D aggregate revealed Phase 2 is **not a universal fix** — PZ7V-class gain jump benefits, static farend regresses (−0.040 FS_echo on 169 static cases vs −0.011 on 131 movement)。§9 PASS criterion was case-target oriented; aggregate Pareto was not captured until Stage 1D。
+
+**Decision**: merge with flag default OFF + EXPERIMENTAL status (see spec header §1). Preserves architectural fix + spec + benchmark artifact; flag 不影響 production; Stage 2 tune 為後續 feature branch。
+
+**Lesson for future Phase specs**: dual-criterion (case-target + aggregate Pareto) needed from Stage 1A, not only case-target。Stage 1C 可加 mini-Pareto probe (e.g. 30-case sample across wins/losses categories) 在 Stage 1D 前先顯示 aggregate direction。
 
 ---
 
