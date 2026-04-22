@@ -1,0 +1,7 @@
+
+=== KSN5Jrzo7kaixP0z8xfr4Q (phase2) copy events (W_l2 jump > 1.8x) ===
+  frame=260 t=2.600s sa=1.000 W_l2 0.000e+00 -> 1.363e-01
+  frame=261 t=2.610s sa=1.156 W_l2 1.363e-01 -> 1.829e+00
+  frame=262 t=2.620s sa=1.366 W_l2 1.829e+00 -> 3.482e+00
+  frame=1799 t=17.990s sa=7.201 W_l2 3.047e+00 -> 1.839e+01
+total copy events: 4
