@@ -60,6 +60,11 @@ _FIX_B11 = os.environ.get('AEC_FIX_B11', '1') != '0'
 #   echo path gain jumps.
 AEC_FIX_B16 = int(os.environ.get('AEC_FIX_B16', '0'))
 
+# Phase 2: force shadow filter to PBFDAF (NLMS) when main is PBFDKF.
+# Breaks Kalman K saturation that pins shadow_advantage ≈ 1.0 during
+# echo path gain jumps. See docs/spec_phase2_shadow_as_nlms.md.
+AEC_EXP_SHADOW_NLMS = int(os.environ.get('AEC_EXP_SHADOW_NLMS', '0'))
+
 
 class AecMode(Enum):
     LMS = "lms"         # Time-domain LMS (no normalization, simplest)
@@ -2546,7 +2551,14 @@ class AEC:
                 # copy mechanism never triggers (shadow_advantage ≈ 1.0).
                 shadow_kwargs['alpha_r_scale'] = 1.03
                 shadow_kwargs['leak'] = 1e-6
-            self.shadow_filter = FilterClass(**shadow_kwargs)
+            # PHASE 2 START: shadow-as-NLMS for PBFDKF mode
+            ShadowClass = FilterClass
+            if AEC_EXP_SHADOW_NLMS and isinstance(self.filter, PBFDKF):
+                ShadowClass = PBFDAF
+                shadow_kwargs['alpha_r_scale'] = 1.03
+                shadow_kwargs['leak'] = 1e-6
+            # PHASE 2 END
+            self.shadow_filter = ShadowClass(**shadow_kwargs)
             self.shadow_filter.enable_td_constraint = self.config.enable_td_constraint
             # PBFDKF shadow: higher Q via ratio for faster tracking
             if isinstance(self.shadow_filter, PBFDKF):
