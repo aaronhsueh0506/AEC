@@ -60,9 +60,19 @@ _FIX_B11 = os.environ.get('AEC_FIX_B11', '1') != '0'
 #   echo path gain jumps.
 AEC_FIX_B16 = int(os.environ.get('AEC_FIX_B16', '0'))
 
-# Phase 2: force shadow filter to PBFDAF (NLMS) when main is PBFDKF.
-# Breaks Kalman K saturation that pins shadow_advantage ≈ 1.0 during
-# echo path gain jumps. See docs/spec_phase2_shadow_as_nlms.md.
+# AEC_EXP_SHADOW_NLMS: shadow-as-NLMS experiment (Phase 2).
+#
+# STATUS: EXPERIMENTAL (Stage 1D verdict MARGINAL).
+#
+# Enabling (flag=1):
+#   + PZ7V-class gain jump: full-file leak typically −9 dB
+#   − AECMOS FS_echo aggregate: −0.03 dB regression (800-case)
+#   − Trade-off: 21 big wins vs 40 big losses (Δ > ±0.2)
+#   − Regression concentrated in static farend (not movement)
+#
+# See docs/spec_phase2_shadow_as_nlms.md §1 for full context.
+# See docs/phase2_stage_1d_results.md for benchmark details.
+# Stage 2 tuning planned to address aggregate regression.
 AEC_EXP_SHADOW_NLMS = int(os.environ.get('AEC_EXP_SHADOW_NLMS', '0'))
 
 
