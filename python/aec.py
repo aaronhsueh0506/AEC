@@ -54,6 +54,12 @@ _FIX_B3C = os.environ.get('AEC_FIX_B3C', '1') != '0'
 _FIX_B7  = os.environ.get('AEC_FIX_B7',  '1') != '0'
 _FIX_B11 = os.environ.get('AEC_FIX_B11', '1') != '0'
 
+# B-16: raw_dt jump veto (see docs/spec_b16_raw_dt_jump_veto.md).
+#   Sustained 2-frame raw_dt jump > 0.6 + far_active + non-stationary →
+#   replace raw_dt with ~500ms slow EMA to prevent false DT cascade on
+#   echo path gain jumps.
+AEC_FIX_B16 = int(os.environ.get('AEC_FIX_B16', '0'))
+
 
 class AecMode(Enum):
     LMS = "lms"         # Time-domain LMS (no normalization, simplest)
@@ -2560,6 +2566,12 @@ class AEC:
         # until filter has demonstrated basic echo cancellation (ERLE > 3 dB)
         self._filter_converged = False
 
+        # B-16: raw_dt jump veto state (docs/spec_b16_raw_dt_jump_veto.md)
+        self._raw_dt_ema_fast = 0.0           # ~50ms EMA (α=0.7)
+        self._raw_dt_ema_slow = 0.0           # ~500ms EMA (α=0.98)
+        self._raw_dt_jump_prev = 0.0          # previous frame jump_fast
+        self._diag_b16_veto_active = False
+
         # Divergence indicator: smoothed signal [0,1] for suppressor override
         self._divergence_indicator = 0.0
         # EPC render-forced countdown (Change D)
@@ -2681,6 +2693,11 @@ class AEC:
         self.epc_hangover_count = 0
         self.prev_dtd_conf = 0.0
         self._filter_converged = False
+        # B-16 reset
+        self._raw_dt_ema_fast = 0.0
+        self._raw_dt_ema_slow = 0.0
+        self._raw_dt_jump_prev = 0.0
+        self._diag_b16_veto_active = False
         self._divergence_indicator = 0.0
         self._erle_window_near = 1e-10
         self._erle_window_err = 1e-10
@@ -3363,6 +3380,36 @@ class AEC:
                     raw_dt = self.get_dtd_confidence()
                 else:
                     raw_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
+
+                    # B-16: raw_dt jump veto (sustained 2-frame).
+                    # See docs/spec_b16_raw_dt_jump_veto.md §3.3.
+                    # MUST be before inst_erle correction (L3426+) per §3.3 Critical.
+                    raw_dt_jump_fast = raw_dt - self._raw_dt_ema_fast
+                    far_pwr_frame = float(np.mean(far_end ** 2) + 1e-10)
+                    far_active = far_pwr_frame > 1e-4
+
+                    # Diagnostic: always compute (§5 invariant 3)
+                    self._diag_raw_dt_jump_fast = float(raw_dt_jump_fast)
+                    self._diag_raw_dt_ema_fast  = float(self._raw_dt_ema_fast)
+                    self._diag_raw_dt_ema_slow  = float(self._raw_dt_ema_slow)
+
+                    veto_cond = (
+                        raw_dt_jump_fast > 0.6
+                        and self._raw_dt_jump_prev > 0.6
+                        and far_active
+                        and not self._is_stationary_far
+                    )
+                    self._diag_b16_veto_active = bool(veto_cond)
+
+                    # Apply veto (gated by flag, §5 invariant 4)
+                    if AEC_FIX_B16 and veto_cond:
+                        raw_dt = self._raw_dt_ema_slow
+
+                    # EMAs update using POST-veto raw_dt; jump_prev uses PRE-veto
+                    # jump (detector signal). See spec §3.3.1.
+                    self._raw_dt_ema_fast = 0.7 * self._raw_dt_ema_fast + 0.3 * raw_dt
+                    self._raw_dt_ema_slow = 0.98 * self._raw_dt_ema_slow + 0.02 * raw_dt
+                    self._raw_dt_jump_prev = raw_dt_jump_fast
 
                 # Stationary DT macro detection (sets flag only, does NOT override raw_dt)
                 is_stationary_dt = False
