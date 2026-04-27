@@ -2771,6 +2771,7 @@ class AEC:
             # Echo change: both errors ↑ → ΔE/total small
             # When detected: reset Q to Q_high for fast re-convergence
             # Only after convergence: before that, errors naturally rise (filter learning)
+            _epc_just_triggered = False
             if self.shadow_filter is not None and self._filter_converged:
                 total_err = self.main_err_smooth + self.shadow_err_smooth
                 if total_err > 1e-10:
@@ -2787,6 +2788,7 @@ class AEC:
                 self.prev_total_err = total_err
 
                 if is_echo_change:
+                    _epc_just_triggered = True
                     if self.dtd_coherence:
                         self.dtd_coherence.confidence *= 0.3
                     self.epc_hangover_count = self.config.epc_hangover
@@ -2814,7 +2816,12 @@ class AEC:
                     self._epc_render_forced_remaining = self.config.epc_hangover  # G1: sync with EPC duration (20 frames=200ms)
                     # A4: ERL may be stale after echo path change (e.g. device moved closer)
                     self._erl_estimate = min(self._erl_estimate, 0.3)
-                elif self.epc_hangover_count > 0:
+
+            # Hangover countdown runs regardless of _filter_converged.
+            # Bug fix: the previous elif/else was inside if _filter_converged, so after
+            # triggering EPC (_filter_converged→False) the countdown never ran → stuck forever.
+            if self.shadow_filter is not None and not _epc_just_triggered:
+                if self.epc_hangover_count > 0:
                     self.epc_hangover_count -= 1
                     self.epc_active = True
                 else:
