@@ -15,6 +15,8 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
+__version__ = "2.8.1"
+
 import numpy as np
 from collections import deque
 from dataclasses import dataclass
