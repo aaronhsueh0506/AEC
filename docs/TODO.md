@@ -1,72 +1,64 @@
-# AEC 待辦事項（v2.4.0 後）
+# AEC 待辦事項（v2.8.1 後）
 
-## 高優先（影響分數或正確性）
+## 當前進行中
 
-| # | 來源 | 項目 | 說明 | 狀態 |
-|---|------|------|------|------|
-| 1 | CODE_REVIEW A3 | GCC-PHAT 負延遲 | 寫入 README 限制條件，客戶端責任 | ✅ v2.3.1 |
-| 2 | CODE_REVIEW D4 | `_wn_err_baseline` 初始化 | 非 stationary 時緩慢追蹤 baseline | ✅ v2.3.1 |
-| 3 | AEC_CODE_REVIEW Bug 7 | `dt_per_bin ** 2 → ** 1.3` | DT mid-range 軟化 | ✅ v2.4.0（DT deg +0.010）|
-| 4 | AEC_CODE_REVIEW Bug 2 | FilterErle alpha_rise freeze in DT | 移除 dt_weight 反向邏輯 | ✅ v2.4.0（中性保留）|
-| 5 | AEC_CODE_REVIEW Bug 6 | 動態 ERL ceiling | `far×4` → `far × (1/erl) × 2` | ✅ v2.4.0（中性保留）|
-| 6 | AEC_CODE_REVIEW Bug 3/8/10/12/16 | R_scale / ramp / reverb clamp / conv threshold / near_psd order | 全部 regress，已 revert | ❌ 不做 |
-| 7 | BLINDSPOTS B5 | BUG-1+2 coh2 窗函數統一 | 需獨立 session 從頭 retune | ⏭️ C 移植後再做 |
+（movement DT 三輪 ablation 全部結案，目前無進行中項目）
 
-## 中優先（結構/完整性）
+## 確認不做（已測試無效或退步）
 
-| # | 來源 | 項目 | 說明 |
-|---|------|------|------|
-| 7 | CODE_REVIEW E1 | ResFilter init/reset 分離 | `__init__` 結尾呼叫 `reset()`，immutable config vs runtime state 分開 |
-| 8 | CODE_REVIEW E2 | AecResContext 加 erl_estimate | 外部 RES 需要 B4 的動態 ERL |
-| 9 | CODE_REVIEW D5 | 48kHz filter_length 64ms | 48kHz RIR 更長，32ms 不夠 |
-| 10 | CODE_REVIEW D1 | MILD shadow_dtd_offset=1.2 | mild DT deg 2.441 已 OK，可跳過 |
-
-## 低優先（效能/清理，C 移植時做）
-
-| # | 來源 | 項目 | 說明 |
-|---|------|------|------|
-| 11 | BLINDSPOTS P1 | PBFDKF _update_weights 向量化 | 7 partitions × 2 FFT/IFFT per frame → 矩陣運算 |
-| 12 | BLINDSPOTS P2 | HighPassFilter → scipy.signal.lfilter | sample-by-sample loop，48kHz 瓶頸 |
-| 13 | BLINDSPOTS P3 | ERLE EMA closed-form decay | sample-by-sample loop → dot product |
-| 14 | CODE_REVIEW F5 | ring buffer wrap 優化 | np.concatenate → 預分配 buffer |
-
-## 下一步：C 移植（v2.4.0 收版後）
-
-| # | 項目 | Python 版本 | 狀態 |
-|---|------|------------|------|
-| 21 | v2.1.0 改動移植 | AEC3 echo switching, P-floor, inst_erle cap, light release, BUG-3 | 未開始 |
-| 22 | v2.3.x 改動移植 | Energy DT, shadow offset, 動態 ERL, PAR, EPC 延長, cleanup | 未開始 |
-| 23 | v2.4.0 Bug 7/2/6 | dt_per_bin ** 1.3, FilterErle alpha_rise freeze, 動態 ERL ceiling | ✅ 2026-04-17 |
-
-## C 移植後：BUG-1+2 重新嘗試
-
-| # | 項目 | 說明 |
-|---|------|------|
-| 6 | BUG-1+2 coh2 窗函數統一 | 獨立 session，從頭 retune。之前兩次嘗試失敗（rectangular FS -0.040、windowed FS -0.023） |
-
-## 架構重構（BUG-1+2 後）
-
-| # | 來源 | 項目 | 說明 |
-|---|------|------|------|
-| 15 | GPT 1.1 | AEC/RES 3 層架構分離 | Linear AEC / State estimation / Postfilter |
-| 16 | GPT 1.3 | DT 三信號分層 | echo presence / near-end presence / filter trust |
-| 17 | GPT 1.4 | AEC.process() 拆分子函式 | 7 stage functions |
-| 18 | GPT 3.1 | Kalman 控制邏輯分層 | P update / W update / hard reset / external trust |
-| 19 | GPT 4.1 | RES gain 分層結構 | primary / modifier / clamp / temporal |
-| 20 | GPT 4.2 | AecResContext 完整重設計 | signal / confidence / mode+event 三類本體 |
-
----
-
-## 已確認不做的項目
+### Movement DT 相關（2026-04-28 三輪 ablation 結案）
 
 | 項目 | 原因 |
 |------|------|
+| Filter capacity 延長（L1 768 / L2 1024 / L3 1536）| mvDT echo Δ ≤ +0.020（噪音範圍）；filter_converged% 在所有 variant 維持 2.4%，DT 抑制 adaptation 才是瓶頸 |
+| Oracle movement 偵測 + filter reset（R1/R2/R3）| mvDT echo Δ ≤ +0.002；fc%/shb%/epc% 完全不變，DT gate 在 reset 後持續抑制 adaptation |
+| Oracle movement 偵測 + Q boost（R4/R5）| 同上；即使 oracle 注入 Q_high 也無效 |
+| RES ENR threshold scaling（S1a/b/c, ×0.75/0.50/0.25）| 增加 suppression 16%→19%，但 mvDT echo 不改善；因 filter echo estimate 在 echo path 改變後已失準，suppression 打到 speech |
+| RES RER fallback gain cap（S2a/b/c）| mvDT echo Δ ≤ +0.003（噪音範圍），同上根本原因 |
+| RES hybrid RER suppression（S3）| mvDT echo +0.007（噪音範圍），但 FS echo +0.029（代價不值得）|
+| GCC-PHAT oracle delay policy（P1-P3, R1-R4, 8 variants）| 全部無效或退步；movement DT 不是 delay estimate 問題 |
+
+### 其他
+
+| 項目 | 原因 |
+|------|------|
+| EPC hangover deadlock fix（3c3d85c） | FS echo -0.121, DT echo -0.065；epc_active stuck True 意外維持高 mu + 強壓制對 movement 有利 |
+| Per-bin dt_suppress 3.2 + dt_residual_scale 3.1 | 50-case 零效果：coh2 在 DT 也全局偏低；且 RES gain 在 DT 本就 ≈ 1.0，改 scaling 無影響 |
+| Experiment D（移除 dt_residual_scale） | 零效果：ENR 恆 < threshold，RES 透明，scaling 無關 |
+| Section 9.3 acoustic ERL detector | 零效果：movement+DT 同時發生時 dt_from_energy gate 阻擋觸發；拿掉 gate 則語音誤判 |
+| AEC_CODE_REVIEW Bug 3/8/10/12/16 | R_scale / ramp / reverb clamp / conv threshold / near_psd order，全部 regress |
+| BUG-1+2 rectangular error_spec | alpha 不匹配，全面退步 |
 | Square Root Kalman | P 是純量，矩陣正定性問題不存在 |
-| np.roll 替代滑動賦值 | allocate 新 array，反而更慢 |
 | shadow_q_ratio > 5.0 | shadow 不穩，copy gate 品質下降 |
-| scipy.linalg.blas | 不適合 per-bin element-wise 運算 |
 | Soft delay shift | Hard-shift + EPC 更快收斂 |
 | D7 max_drop 4dB | FS echo 代價 -0.024 不值得 |
-| BUG-1+2 rectangular error_spec | alpha 不匹配，全面退步 |
 
-*更新於 2026-04-17（v2.4.0）*
+## 中優先（結構完整性，不影響分數）
+
+| # | 來源 | 項目 | 說明 |
+|---|------|------|------|
+| 5 | CODE_REVIEW E1 | ResFilter init/reset 分離 | `__init__` 結尾呼叫 `reset()`，immutable config vs runtime state 分開 |
+| 6 | CODE_REVIEW E2 | AecResContext 加 erl_estimate | 外部 RES 需要動態 ERL |
+| 7 | CODE_REVIEW D5 | 48kHz filter_length 64ms | 48kHz RIR 更長，32ms 不夠 |
+
+## 低優先（效能/清理，C 移植時做）
+
+| # | 項目 | 說明 |
+|---|------|------|
+| 8 | PBFDKF _update_weights 向量化 | 7 partitions × 2 FFT/IFFT per frame → 矩陣運算 |
+| 9 | HighPassFilter → scipy.signal.lfilter | sample-by-sample loop，48kHz 瓶頸 |
+| 10 | ring buffer wrap 優化 | np.concatenate → 預分配 buffer |
+
+## C 移植待同步
+
+| 項目 | Python 版本 | 狀態 |
+|------|------------|------|
+| v2.1.0–v2.3.x 改動 | Energy DT, shadow offset, 動態 ERL, PAR, EPC 延長 | 未開始 |
+| v2.4.0 Bug 7/2/6 | dt_per_bin ** 1.3, FilterErle fix, 動態 ERL ceiling | ✅ 2026-04-17 |
+| v2.8.x per-bin DT（3.1+3.2） | coh2 per-bin dt_suppress + dt_residual_scale | 待 Python 驗證後 |
+
+## 長期架構（分數穩定後）
+
+Section 8 State Machine（STARTUP_DT / EPC_FS / EPC_DT / RECOVERY 等），Section 9.2 DT 訊號分層（dt_for_adaptation / nearend_protect_score / echo_suppress_confidence）。
+
+*更新於 2026-04-28（v2.8.1）*
