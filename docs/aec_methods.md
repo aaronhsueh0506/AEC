@@ -2274,103 +2274,61 @@ ERLE = 10 · log₁₀(E[d²] / E[e²])    (dB)
 
 ## 附錄 C: Blind Test 分析與改進方向
 
-### C.1 目前系統真實狀態
+### C.1 目前系統架構（v2.8.1）
 
-本系統的完整架構：
+| 層 | 模組 | 說明 |
+|----|------|------|
+| 前端 | PBFDKF（Kalman AEC） | filter_length=512 (32ms @16kHz), 4 partitions |
+| 副路 | Shadow Kalman filter | Q = main Q × shadow_q_ratio (3.5×) |
+| 後端 | RES v2（ENR masking）| direct echo est + per-bin ERLE + reverb tail |
+| 控制 | EPC + convergence + DT | 三線驅動 effective_dt，energy/shadow/coherence DT 訊號 |
+| 安全網 | Output Limiter | 保證 output ≤ mic amplitude |
 
-- **前端**：Subband Partitioned FDKF (Kalman) AEC, `filter_length=2048` (128ms @16kHz)
-- **副路**：Shadow Kalman filter, Q = main Q × `shadow_q_ratio`
-- **後端**：RES v2 (ENR masking + direct residual echo + reverb tail model)
-- **控制**：EPC detection + convergence detection + divergence detection + output limiter + output gate
-- **結論**：已經是完整的純 DSP 線性 AEC 架構，不是低水準 baseline
+### C.2 分數基線（AEC Challenge 2021, 800 cases, AECMOS）
 
-### C.2 瓶頸分析
-
-#### Kalman R 自我強化死鎖
-
-R 直接來自 `error_psd`，形成正回饋迴路：
-
-```
-DT/near-end 時：
-  error_psd ↑ → R ↑ → K ↓ → 更新變慢 → 收斂慢 → residual ↑ → error_psd ↑ (循環)
-```
-
-嘗試 R_max cap (L2-A) 的代價太高：NE deg_mos -0.268，
-根因是 DT 時 near-end bin 也被放開（R_max 是全域 cap，無法區分 echo/near-end bin）。
-
-#### Q_gated Binary Mask
-
-目前 `Q_gated` 使用 binary mask：弱於平均 1% 的 bin 完全不加 Q：
-
-```
-Q_gated[k] = Q[k]   if power[k] > mean(power) × 0.01
-Q_gated[k] = 0       otherwise
-```
-
-問題：P 縮死 → K 趨近 0 → filter 對這些頻率完全停止學習。
-
-#### Suppressor Trade-off（結構性問題）
-
-前端 residual echo 越多 → suppressor 越 aggressive → deg_mos 下降。
-這是 linear AEC + suppressor 架構的固有限制，純 DSP 無法根本解決。
-
-### C.3 已完成的改進（v1.20.1 → v5d）
-
-| 版本 | 改進 | FS echo_mos | DT echo_mos | DT deg_mos | NE deg_mos |
-|------|------|-------------|-------------|------------|------------|
-| v1.20.1 | baseline | 3.352 | 3.796 | 2.701 | 4.118 |
-| v5d | L1-A + L3-C + L3-A | 3.429 | 3.848 | 2.720 | 3.850 |
-
-各改進項目：
-
-- **L1-A (PHAT whitening)**：FS ERLE +0.3 dB, FS echo_mos +0.077
-  - 原因：eval script 的 `estimate_delay()` 沒有 PHAT whitening，修正後延遲估計更準確
-- **L3-C (Per-bin echo boost)**：已整合至 v5d，高 coherence bin 加強 residual echo 估計
-- **L3-A (NE singletalk fast-path)**：NE deg_mos +0.012
-  - No far-end → 立即進入 nearend state，skip RES
-
-### C.4 已回退的改進
-
-- **L2-A (R_max cap)**：NE deg_mos -0.268
-  - 根因：DT 時 R_max cap 放開所有 bin（包含 near-end bin），導致 filter 在 near-end 頻率過度更新
-  - 解法方向：per-bin R scaling（用 coh² 保護 near-end bin）
-
-### C.5 後續改進路線圖
-
-1. **L2-B: Q_gated soft floor**
-   - `Q_gated = max(Q × 0.1, Q_gated)`
-   - 避免弱 bin 完全停止學習，同時不過度放大雜訊 bin 的更新
-   - 優先於 R_max 方案
-
-2. **Per-bin R scaling**
-   - `R_scale[k] = 1 + 2 × (1 - coh²[k])`
-   - 高 coherence（echo bin）→ R 不變 → 正常更新
-   - 低 coherence（near-end bin）→ R × 3 → 保護 near-end
-   - 解決 R_max cap 的「一刀切」問題
-
-3. **Ablation test**
-   - Limiter / output gate 的 gain 對 deg_mos 的影響
-   - 確認是否有過度保護
-
-### C.6 純 DSP 成績（v1.28.1, Interspeech 2021, 800 cases）
-
-| Preset | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
+| Method | FS echo↑ | DT echo↑ | DT deg↑ | NE deg↑ |
 |--------|----------|----------|---------|---------|
-| balanced | 3.710 | 4.368 | 2.093 | 3.997 |
-| maximum | **3.951** | 4.527 | 2.044 | 3.976 |
-| AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
+| PBFDKF Linear (no RES) | 2.714 | 3.162 | 3.225 | — |
+| WebRTC AEC2 | 3.484 | 4.262 | 2.389 | 4.098 |
+| **Ours balanced** | **3.564** | 4.117 | **2.410** | **4.011** |
+| **Ours aggressive** | **3.621** | 4.289 | 2.231 | 3.994 |
+| **Ours maximum** | **3.722** | 4.412 | 2.162 | 3.961 |
+| WebRTC AEC3 | 3.875 | **4.538** | 1.850 | 3.454 |
 
-maximum preset FS echo 已超越 AEC3（3.951 vs 3.875）。
-NE deg 大幅領先 AEC3（~4.0 vs 3.454），近端語音幾乎無損。
-DT echo 與 AEC3 差距 < 0.01，DT deg 我們保留更多語音。
+**優勢**：DT deg 和 NE deg 全面領先 AEC3（+0.3~+0.6）；FS echo 超越 AEC2。  
+**主要差距**：FS echo 距 AEC3 仍差 ~0.3；movement DT echo 是唯一 Pareto 劣勢。
 
-### C.7 GPT 分析修正表
+### C.3 Movement DT 根本瓶頸（2026-04-28 三輪 ablation 結案）
 
-| GPT 說法 | 實測後修正 |
-|----------|----------|
-| Delay estimator 已有 PHAT | eval script 的 `estimate_delay()` 沒有 PHAT，L1-A 修完後 FS +0.077 |
-| R_max 可解決 Kalman R 死鎖 | R_max 代價太高 (NE -0.268)，需要 per-bin coh² 方案 |
-| Q_gated soft floor 值得做 | 尚未測，優先於 R_max，預期改善弱 bin 學習 |
+**問題描述**：Speaker 移動時 echo path（IR）改變。DT gate 同時抑制 filter adaptation，導致 filter 無法重新收斂，echo estimate 失準，RES 壓制的不是 echo 而是 speech+residual。
+
+三輪 ablation 均確認此瓶頸：
+
+| 實驗方向 | 方法 | mvDT Δecho | 結論 |
+|----------|------|-----------|------|
+| Filter capacity | 512→1536 samples (L0–L3) | ≤ +0.020 | filter_converged% 恆 2.4%，長度無關 |
+| Oracle reset/Q-boost | frame 0 注入（R0–R5）| ≤ +0.002 | DT gate 在注入後持續抑制 adaptation |
+| RES gain decision | ENR scale / RER cap / hybrid（S0–S3）| ≤ +0.007 | suppression 增加但 MOS 不改善，打到 speech |
+
+詳細數據見 [docs/movement_dt_ablation_report.md](movement_dt_ablation_report.md)。
+
+### C.4 已確認無效的改進（含歷史實驗）
+
+| 方向 | 原因 |
+|------|------|
+| GCC-PHAT oracle delay policy（8 variants）| movement DT 不是 delay 問題 |
+| Per-bin dt_suppress / dt_residual_scale | coh2 在 DT 全局偏低，無效 |
+| Acoustic ERL detector | dt_from_energy gate 阻擋觸發 |
+| EPC hangover deadlock fix | FS echo -0.121, DT echo -0.065（意外效果，revert）|
+| Filter capacity 延長 | filter_converged% 不變（DT 抑制 adaptation 才是根因）|
+| Oracle filter reset（所有形式）| DT gate 在 reset 後立即重新抑制 |
+| RES ENR/RER/hybrid gain 調整 | filter echo estimate 失準，suppression 誤打 speech |
+
+### C.5 潛在後續方向（未實驗）
+
+1. **允許 DT 下繼續 adaptation**：仿 WebRTC AEC3，DT 時不 freeze，降低 step size 但設 minimum floor（mu_min > 0）。風險：可能引入 DT deg 退步
+2. **Render-based 強制啟動**：movement+DT 情境下不依賴 linear filter，改用 render × ERL 直接估計 echo。需要可靠的 movement 偵測
+3. **接受此 gap**：movement+DT 共存是少數邊緣情況，改善其他分數（FS echo 向 AEC3 靠攏）ROI 更高
 
 ---
 

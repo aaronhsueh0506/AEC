@@ -1,6 +1,12 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v2.8.0），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+回音消除模組（v2.8.1），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+
+**v2.8.1（2026-04-28）— Movement DT 系統性排查 + Code cleanup**：
+
+- Movement DT 三輪 ablation 全部結案（filter capacity / filter state reset / RES gain decision），確認根本瓶頸為：DT gate 抑制 adaptation，filter echo estimate 在 echo path 改變後失準，無法靠 downstream 調整彌補。詳見 [docs/movement_dt_ablation_report.md](docs/movement_dt_ablation_report.md)
+- 移除三輪實驗產生的暫時性 ResFilter 參數（`res_enr_dt_scale`、`res_rer_threshold`、`res_rer_gain_cap`、`res_hybrid_rer_threshold`），恢復 v2.8.0 production code
+- **分數與 v2.8.0 完全相同**（code cleanup only）
 
 **v2.8.0 主要改進（2026-04-19）— RESv3 Phase B（Linear failure fallback）**：
 
@@ -42,6 +48,8 @@
 - **Render-based 穩定性** + **Shadow copy 防護** + **Code cleanup**（詳見 [CHANGELOG_v2.3.0.md](docs/CHANGELOG_v2.3.0.md)）
 
 **Blind test 成績（fl=512, AEC Challenge Interspeech 2021, 800 cases, AECMOS）**：
+
+**v2.8.1 balanced preset**：FS echo **3.564** / DT echo 4.117 / DT deg 2.410 / NE deg 4.011（同 v2.8.0）
 
 **v2.8.0 balanced preset**：FS echo **3.564** / DT echo 4.117 / DT deg 2.410 / NE deg 4.011
 
@@ -693,16 +701,16 @@ AEC/
 │   ├── plot_aec_results.py    # 結果繪圖 (含 DTD 紅底)
 │   └── gen_sim_data.py        # 測試資料生成
 ├── docs/
-│   ├── aec_methods.md         # 演算法文檔（完整演算法說明）
-│   ├── aec_improve_v3.md      # v1.9.0 改善紀錄（Delay+FDKF+RES）
-│   ├── aec_improve_v4.md      # v1.11.0 改善紀錄（warmup+adaptive g_min+AECMOS）
-│   ├── aec_improve_v5.md      # v1.12.0 改善紀錄（Two-stage Q+Shadow Q ratio）
-│   ├── aec_improve_v6.md      # v1.13.0 改善紀錄（Preset adaptive filter 層）
-│   ├── aec_improve_v7.md      # v1.14.0 改善紀錄（Per-bin near-end gate）
-│   ├── aec_improve_v8.md      # v1.15.0 改善紀錄（Frame/hop 統一 + 清理 + 重命名）
-│   ├── aec_improve_v9.md      # v1.19.x 改善紀錄（Echo 抑制 + 診斷 + Preset 修正）
-│   ├── dtd_design.md          # DTD 設計文檔（完整說明）
-│   └── DEVLOG.md              # 開發紀錄
+│   ├── aec_methods.md                  # 演算法完整技術文件
+│   ├── aec_algorithm_guide.html        # 技術介紹（HTML，含圖表）
+│   ├── pbfdkf_shadow_intro.md          # PBFDKF + Shadow + DTD 演算法介紹（報告用）
+│   ├── movement_dt_ablation_report.md  # Movement DT 三輪 ablation 結論報告
+│   ├── aec_improve_v12.md              # v1.20 改善紀錄
+│   ├── aec_improve_v13.md              # v2.x 改善紀錄（Stationary far-end DT）
+│   ├── dtd_design.md                   # DTD 設計文件
+│   ├── phase_kappa_report.md           # Phase κ 報告
+│   ├── DEVLOG.md                       # 開發紀錄
+│   └── TODO.md                         # 待辦與結案實驗記錄
 └── wav/                       # 測試音檔
 ```
 
