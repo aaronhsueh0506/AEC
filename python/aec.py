@@ -48,6 +48,81 @@ class AecPreset(Enum):
     MAXIMUM = "maximum"         # Maximum echo suppression, significant near-end impact
 
 
+class AecFilterState(Enum):
+    """Algorithmic state of the adaptive filter, in priority order."""
+    WARMUP         = "warmup"          # Pre-convergence: warmup frames not yet exhausted
+    DIVERGED       = "diverged"        # Filter diverged (output >> mic), adaptation unreliable
+    EPC_RECOVERY   = "epc_recovery"    # Echo path changed, filter re-converging (P_MAX raised)
+    DT_ACTIVE      = "dt_active"       # Double-talk detected, adaptation frozen / slowed
+    STATIONARY_FAR = "stationary_far"  # Stationary far-end (white noise / fan), special gating
+    CONVERGED      = "converged"       # Stable convergence, good echo cancellation
+    CONVERGING     = "converging"      # Adapting, not yet converged
+
+
+@dataclass
+class AecStats:
+    """Comprehensive per-frame statistics for debugging and algorithmic decisions.
+
+    Returned by AEC.get_stats() / AEC.GetStats().
+    All power quantities are in dB (20·log10 for amplitudes, 10·log10 for power).
+    Confidence scores are in [0, 1].
+    """
+    # ── Identity ──────────────────────────────────────────────────────────────
+    frame_count: int        # Total frames processed since last reset()
+    time_s: float           # Elapsed audio time (seconds)
+
+    # ── Filter state ──────────────────────────────────────────────────────────
+    filter_state: AecFilterState
+    filter_converged: bool
+    filter_once_converged: bool  # True if converged at least once since reset
+    warmup_remaining: int        # Frames remaining in warmup (0 when complete)
+
+    # ── ERLE — Echo Return Loss Enhancement ───────────────────────────────────
+    erle_inst_db: float       # EMA-smoothed instantaneous ERLE
+    erle_windowed_db: float   # ~10 s decaying-window ERLE (more stable)
+    erle_cumulative_db: float # Full-segment cumulative average ERLE
+
+    # ── Echo path ─────────────────────────────────────────────────────────────
+    erl_db: float        # Echo Return Loss estimate (dB); lower = harder (more coupling)
+    divergence: float    # [0, 1] filter divergence indicator
+    epc_active: bool     # Echo Path Change detector active
+    epv_ratio: float     # Echo Path Variability: fast/slow gain ratio (≠1 → path changing)
+
+    # ── Adaptation rate ───────────────────────────────────────────────────────
+    mu_scale: float       # [mu_min, 1.0] current adaptation multiplier
+    filter_w_norm: float  # Main filter weight L2 norm
+    shadow_w_norm: float  # Shadow filter weight L2 norm
+
+    # ── Double-talk detection ─────────────────────────────────────────────────
+    dt_confidence: float    # Combined DT confidence [0, 1]
+    dt_from_energy: float   # Pre-filter energy signal (immune to ERLE correction)
+    dt_from_shadow: float   # Shadow filter DT signal
+    dt_from_coherence: float# Coherence-based DT signal (fullband C²)
+    dt_active: bool         # True when dt_confidence > 0.5
+
+    # ── Energy levels ─────────────────────────────────────────────────────────
+    far_power_db: float    # EMA far-end power (dB)
+    mic_power_db: float    # EMA mic power (dB)
+    error_power_db: float  # EMA raw filter output power (dB)
+    far_activity: float    # [0, 1] far-end activity (from RES)
+    saturation_level: float# [0, 1] speaker saturation estimate
+
+    # ── Delay ─────────────────────────────────────────────────────────────────
+    delay_samples: int  # Current estimated/fixed delay (−1 = not yet estimated)
+    delay_ms: float     # Delay in milliseconds
+
+    # ── Shadow filter ─────────────────────────────────────────────────────────
+    shadow_advantage: float  # main_err / shadow_err; >1 means shadow is better
+    shadow_copy_count: int   # Total shadow→main copies since reset()
+    main_paused: bool        # True = main filter weight update frozen this frame
+
+    # ── RES post-filter ───────────────────────────────────────────────────────
+    res_gain_mean_db: float  # Mean spectral gain applied by RES (dB)
+    res_using_render: bool   # True = render-based echo estimate active
+    echo_psd_mean_db: float  # Mean residual echo PSD estimate (dB)
+    error_psd_mean_db: float # Mean error PSD (dB)
+
+
 @dataclass
 class AecResContext:
     """Per-frame context for external RES processing."""
@@ -2509,6 +2584,9 @@ class AEC:
         # EchoPathVariability: track far-end gain at two timescales
         self._epv_gain_fast = 0.0           # TC≈500ms
         self._epv_gain_slow = 0.0           # TC≈10s
+        self._far_power_ema = 0.0           # TC≈50ms for GetStats()
+        self._mic_power_ema = 0.0
+        self._frame_count = 0               # frames since reset()
 
         # ERLE (raw = filter-only, final = post-RES)
         self.near_power = 0.0
@@ -2565,6 +2643,9 @@ class AEC:
             'shadow_advantage': 1.0,
             'dt_from_energy': 0.0,
             'dt_from_shadow': 0.0,
+            'dt_from_coherence': 0.0,
+            'far_power': 0.0,
+            'mic_power': 0.0,
             'erl_estimate': 0.1,
             'epc_active': False,
             'saturation_level': 0.0,
@@ -2587,6 +2668,9 @@ class AEC:
         self._pause_resume_counter = 0
         self._epv_gain_fast = 0.0
         self._epv_gain_slow = 0.0
+        self._far_power_ema = 0.0
+        self._mic_power_ema = 0.0
+        self._frame_count = 0
         if self.dtd_divergence:
             self.dtd_divergence.reset()
         if self.dtd_coherence:
@@ -3369,6 +3453,13 @@ class AEC:
             self._diag['shadow_w_norm'] = (float(np.linalg.norm(self.shadow_filter.W))
                                             if self.shadow_filter and hasattr(self.shadow_filter, 'W') else 0.0)
             self._diag['copy_err_baseline'] = float(getattr(self, '_copy_err_baseline', 1e-6))
+            self._far_power_ema = 0.95 * self._far_power_ema + 0.05 * far_pwr_global
+            self._mic_power_ema = 0.95 * self._mic_power_ema + 0.05 * (np.mean(near_end ** 2) + 1e-10)
+            self._frame_count += 1
+            self._diag['far_power'] = self._far_power_ema
+            self._diag['mic_power'] = self._mic_power_ema
+            self._diag['dt_from_coherence'] = (
+                self.dtd_coherence.confidence if self.dtd_coherence else 0.0)
 
             # Update DTD detectors for NEXT block
             # Skip divergence detector before convergence (output>mic is normal
@@ -3494,6 +3585,113 @@ class AEC:
         if conf_coh > 0.1:
             return conf_coh
         return max(conf_div, conf_coh)
+
+    def get_filter_state(self) -> AecFilterState:
+        """Return the highest-priority active filter state."""
+        if self._warmup_frames > 0:
+            return AecFilterState.WARMUP
+        if self._divergence_indicator > 0.6:
+            return AecFilterState.DIVERGED
+        if self.epc_active:
+            return AecFilterState.EPC_RECOVERY
+        if self._diag.get('dt_indicator', 0.0) > 0.5:
+            return AecFilterState.DT_ACTIVE
+        if self._is_stationary_far:
+            return AecFilterState.STATIONARY_FAR
+        if self._filter_converged:
+            return AecFilterState.CONVERGED
+        return AecFilterState.CONVERGING
+
+    def get_stats(self) -> AecStats:
+        d = self._diag
+        _db = lambda x, floor=1e-10: 10.0 * np.log10(max(x, floor))
+        hop_s = self._hop_size / self.config.sample_rate
+        delay_ok = self._current_delay >= 0
+        return AecStats(
+            frame_count=self._frame_count,
+            time_s=self._frame_count * hop_s,
+            filter_state=self.get_filter_state(),
+            filter_converged=self._filter_converged,
+            filter_once_converged=self._filter_once_converged,
+            warmup_remaining=self._warmup_frames,
+            erle_inst_db=self.get_erle_instant(),
+            erle_windowed_db=d.get('erle_windowed', 0.0),
+            erle_cumulative_db=self.get_erle(),
+            erl_db=_db(self._erl_estimate, 1e-6),
+            divergence=self._divergence_indicator,
+            epc_active=self.epc_active,
+            epv_ratio=d.get('epv_gain_ratio', 1.0),
+            mu_scale=d.get('mu_scale', 1.0),
+            filter_w_norm=d.get('filter_w_norm', 0.0),
+            shadow_w_norm=d.get('shadow_w_norm', 0.0),
+            dt_confidence=self.get_dtd_confidence(),
+            dt_from_energy=self._dt_from_energy,
+            dt_from_shadow=self._dt_from_shadow,
+            dt_from_coherence=d.get('dt_from_coherence', 0.0),
+            dt_active=self.is_dtd_active(),
+            far_power_db=_db(self._far_power_ema),
+            mic_power_db=_db(self._mic_power_ema),
+            error_power_db=_db(self.error_power),
+            far_activity=d.get('far_activity', 0.0),
+            saturation_level=self._saturation_level,
+            delay_samples=int(self._current_delay) if delay_ok else 0,
+            delay_ms=self._current_delay / self.config.sample_rate * 1000.0 if delay_ok else 0.0,
+            shadow_advantage=self._shadow_advantage,
+            shadow_copy_count=self.shadow_copy_counter,
+            main_paused=self._main_update_paused,
+            res_gain_mean_db=_db(d.get('res_gain_mean', 1.0)),
+            res_using_render=d.get('using_render_based', False),
+            echo_psd_mean_db=_db(d.get('echo_psd_mean', 1e-10)),
+            error_psd_mean_db=_db(d.get('error_psd_mean', 1e-10)),
+        )
+
+    def GetStats(self) -> AecStats:
+        return self.get_stats()
+
+
+class AecDebugLogger:
+    """Periodically logs AEC internal state to console.
+
+    Usage::
+
+        aec = AEC(config)
+        logger = AecDebugLogger(aec, log_interval_s=1.0)
+        # inside processing loop:
+        output = aec.process(mic, ref)
+        logger.update()
+    """
+
+    _HEADER = (
+        "  t(s)  | state          |fltr| epc |dt_conf|ERLE_i|ERLE_w|  ERL |"
+        "far_dB|mic_dB|mu_scl|shd_adv|sat | delay"
+    )
+    _SEP = "-" * len(_HEADER)
+
+    def __init__(self, aec: 'AEC', log_interval_s: float = 1.0):
+        self._aec = aec
+        self._interval_frames = max(1, int(log_interval_s / (aec._hop_size / aec.config.sample_rate)))
+        self._tick = 0
+        self._header_interval = 20
+
+    def update(self) -> None:
+        self._tick += 1
+        if self._tick % self._interval_frames != 0:
+            return
+        s = self._aec.get_stats()
+        line_no = self._tick // self._interval_frames
+        if line_no % self._header_interval == 1:
+            print(self._SEP)
+            print(self._HEADER)
+            print(self._SEP)
+        conv = 'Y' if s.filter_converged else 'N'
+        epc  = 'Y' if s.epc_active else 'N'
+        print(
+            f"{s.time_s:7.2f}  | {s.filter_state.value:<14s} | {conv}  | {epc}  |"
+            f" {s.dt_confidence:5.3f} |{s.erle_inst_db:6.1f}|{s.erle_windowed_db:6.1f}|"
+            f"{s.erl_db:6.1f}|{s.far_power_db:6.1f}|{s.mic_power_db:6.1f}|"
+            f" {s.mu_scale:5.3f}| {s.shadow_advantage:5.3f} |{s.saturation_level:4.2f}|"
+            f" {s.delay_ms:.1f}ms"
+        )
 
 
 def process_wav_files(mic_path: str, ref_path: str, out_path: str,
