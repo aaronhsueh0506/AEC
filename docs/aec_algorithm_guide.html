@@ -157,206 +157,189 @@
 <h2 id="modules">2. 系統架構與模組</h2>
 <div class="panel">
 
-<!-- 完整架構圖 -->
+<!-- 完整架構圖（reworked clean layout） -->
 <div class="figure">
-<svg viewBox="0 0 960 520" xmlns="http://www.w3.org/2000/svg" style="max-width:100%">
+<svg viewBox="0 0 1100 520" xmlns="http://www.w3.org/2000/svg" style="max-width:100%; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang TC','Microsoft JhengHei',sans-serif">
   <defs>
-    <marker id="arr" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
-      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    <marker id="fig2_main_arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#1e3a8a"/>
     </marker>
-    <marker id="arrg" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
-      <path d="M0,0 L0,6 L9,3 z" fill="#059669"/>
+    <marker id="fig2_ref_arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#0f766e"/>
     </marker>
-    <marker id="arrd" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+    <marker id="fig2_ctrl_arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#ea580c"/>
+    </marker>
+    <marker id="fig2_res_arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
       <path d="M0,0 L0,6 L9,3 z" fill="#7c3aed"/>
     </marker>
-    <marker id="arror" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
-      <path d="M0,0 L0,6 L9,3 z" fill="#f97316"/>
+    <marker id="fig2_out_arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#059669"/>
     </marker>
+    <style>
+      .f2-zone-title { font-size: 13px; font-weight: 800; }
+      .f2-label { font-size: 12px; font-weight: 800; }
+      .f2-small { font-size: 10.5px; }
+      .f2-mini { font-size: 9.5px; }
+      .f2-box-title { font-size: 12.5px; font-weight: 800; fill: #fff; }
+      .f2-box-text { font-size: 10px; fill: rgba(255,255,255,.92); }
+      .f2-main { stroke:#1e3a8a; stroke-width:3.2; fill:none; marker-end:url(#fig2_main_arrow); }
+      .f2-ref { stroke:#0f766e; stroke-width:2.7; fill:none; stroke-dasharray:9 7; marker-end:url(#fig2_ref_arrow); }
+      .f2-ctrl { stroke:#ea580c; stroke-width:2.4; fill:none; stroke-dasharray:7 6; marker-end:url(#fig2_ctrl_arrow); }
+      .f2-res { stroke:#7c3aed; stroke-width:3.2; fill:none; marker-end:url(#fig2_res_arrow); }
+      .f2-out { stroke:#059669; stroke-width:3.2; fill:none; marker-end:url(#fig2_out_arrow); }
+      .f2-note-text { font-size: 10px; fill:#334155; font-weight:700; }
+    </style>
   </defs>
 
-  <!-- ── 背景分區 ── -->
-  <!-- 前處理區 -->
-  <rect x="10" y="10" width="200" height="490" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5"/>
-  <text x="110" y="28" text-anchor="middle" font-size="11" fill="#94a3b8" font-weight="600">前處理</text>
+  <!-- Background zones -->
+  <rect x="22" y="24" width="230" height="420" rx="14" fill="#f8fafc" stroke="#dbe4ee" stroke-width="1.8"/>
+  <text x="137" y="50" text-anchor="middle" class="f2-zone-title" fill="#475569">前處理與對齊</text>
 
-  <!-- 線性 AEC 區 -->
-  <rect x="220" y="10" width="340" height="490" rx="10" fill="#fff7ed" stroke="#fed7aa" stroke-width="1.5"/>
-  <text x="390" y="28" text-anchor="middle" font-size="11" fill="#c2410c" font-weight="600">線性 AEC（PBFDKF + Shadow）</text>
+  <rect x="296" y="24" width="360" height="420" rx="14" fill="#fff7ed" stroke="#fdba74" stroke-width="1.8"/>
+  <text x="476" y="50" text-anchor="middle" class="f2-zone-title" fill="#c2410c">線性 AEC：PBFDKF + Shadow</text>
 
-  <!-- 後處理區 -->
-  <rect x="570" y="10" width="380" height="490" rx="10" fill="#f5f3ff" stroke="#ddd6fe" stroke-width="1.5"/>
-  <text x="760" y="28" text-anchor="middle" font-size="11" fill="#6d28d9" font-weight="600">後處理（RES）</text>
+  <rect x="704" y="24" width="370" height="420" rx="14" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1.8"/>
+  <text x="889" y="50" text-anchor="middle" class="f2-zone-title" fill="#6d28d9">後處理：Residual Echo Suppressor</text>
 
-  <!-- ── 輸入標籤 ── -->
-  <text x="15" y="72" font-size="12" font-weight="700" fill="#1e40af">mic</text>
-  <text x="15" y="152" font-size="12" font-weight="700" fill="#1e40af">ref</text>
+  <!-- Inputs -->
+  <text x="42" y="105" class="f2-label" fill="#1e40af">mic</text>
+  <text x="42" y="193" class="f2-label" fill="#1e40af">ref</text>
+  <line x1="72" y1="101" x2="96" y2="101" class="f2-main"/>
+  <line x1="72" y1="189" x2="96" y2="189" class="f2-ref"/>
 
-  <!-- ── HPF (mic) ── -->
-  <line x1="42" y1="68" x2="60" y2="68" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
-  <rect x="62" y="52" width="70" height="32" rx="6" fill="#94a3b8"/>
-  <text x="97" y="70" text-anchor="middle" font-size="11" fill="white" font-weight="600">HPF 80Hz</text>
-  <line x1="132" y1="68" x2="155" y2="68" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <!-- Preprocess blocks -->
+  <rect x="100" y="78" width="90" height="46" rx="8" fill="#94a3b8"/>
+  <text x="145" y="106" text-anchor="middle" class="f2-label" fill="#fff">HPF 80Hz</text>
 
-  <!-- ── HPF (ref) ── -->
-  <line x1="42" y1="148" x2="60" y2="148" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
-  <rect x="62" y="132" width="70" height="32" rx="6" fill="#94a3b8"/>
-  <text x="97" y="150" text-anchor="middle" font-size="11" fill="white" font-weight="600">HPF 80Hz</text>
-  <line x1="132" y1="148" x2="155" y2="148" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="100" y="166" width="90" height="46" rx="8" fill="#94a3b8"/>
+  <text x="145" y="194" text-anchor="middle" class="f2-label" fill="#fff">HPF 80Hz</text>
 
-  <!-- ── Saturation Detect ── -->
-  <rect x="62" y="200" width="70" height="40" rx="6" fill="#64748b"/>
-  <text x="97" y="216" text-anchor="middle" font-size="11" fill="white">Saturation</text>
-  <text x="97" y="230" text-anchor="middle" font-size="11" fill="white">Detect</text>
-  <!-- ref → sat detect -->
-  <line x1="97" y1="164" x2="97" y2="198" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="100" y="238" width="90" height="50" rx="8" fill="#64748b"/>
+  <text x="145" y="259" text-anchor="middle" class="f2-label" fill="#fff">Saturation</text>
+  <text x="145" y="276" text-anchor="middle" class="f2-small" fill="#fff">Detect</text>
 
-  <!-- ── Delay Est ── -->
-  <rect x="62" y="268" width="70" height="40" rx="6" fill="#64748b"/>
-  <text x="97" y="284" text-anchor="middle" font-size="11" fill="white">Delay Est</text>
-  <text x="97" y="298" text-anchor="middle" font-size="11" fill="white">GCC-PHAT</text>
-  <line x1="97" y1="240" x2="97" y2="266" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="100" y="312" width="90" height="50" rx="8" fill="#64748b"/>
+  <text x="145" y="333" text-anchor="middle" class="f2-label" fill="#fff">Delay Est</text>
+  <text x="145" y="350" text-anchor="middle" class="f2-small" fill="#fff">GCC-PHAT</text>
 
-  <!-- ── Ref Alignment (ring buffer) ── -->
-  <rect x="62" y="336" width="70" height="40" rx="6" fill="#64748b"/>
-  <text x="97" y="352" text-anchor="middle" font-size="11" fill="white">Ref Align</text>
-  <text x="97" y="366" text-anchor="middle" font-size="11" fill="white">Ring Buffer</text>
-  <line x1="97" y1="308" x2="97" y2="334" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="100" y="386" width="90" height="50" rx="8" fill="#64748b"/>
+  <text x="145" y="407" text-anchor="middle" class="f2-label" fill="#fff">Ref Align</text>
+  <text x="145" y="424" text-anchor="middle" class="f2-small" fill="#fff">Ring Buffer</text>
 
-  <!-- ref aligned → PBFDKF -->
-  <line x1="132" y1="356" x2="228" y2="356" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
-  <text x="180" y="349" text-anchor="middle" font-size="11" fill="#475569">ref (aligned)</text>
+  <!-- Preprocess paths -->
+  <line x1="190" y1="101" x2="314" y2="101" class="f2-main"/>
+  <path d="M145 212 L145 236" class="f2-ref"/>
+  <path d="M145 288 L145 310" class="f2-ref"/>
+  <path d="M145 362 L145 384" class="f2-ref"/>
+  <path d="M190 411 L268 411 L268 154 L310 154" class="f2-ref"/>
+  <text x="234" y="401" text-anchor="middle" class="f2-small" fill="#0f766e">ref aligned</text>
+<text x="286" y="171" text-anchor="middle" class="f2-mini" fill="#0f766e">filter reference</text>
 
-  <!-- ── PBFDKF (Main Filter) ── -->
-  <rect x="230" y="38" width="150" height="100" rx="8" fill="#f97316"/>
-  <text x="305" y="62" text-anchor="middle" font-size="13" fill="white" font-weight="700">PBFDKF</text>
-  <text x="305" y="80" text-anchor="middle" font-size="11" fill="white">Main Filter</text>
-  <text x="305" y="96" text-anchor="middle" font-size="11" fill="#fed7aa">Kalman K,P,Q,R</text>
-  <text x="305" y="110" text-anchor="middle" font-size="11" fill="#fed7aa">Two-stage Q</text>
-  <text x="305" y="124" text-anchor="middle" font-size="11" fill="#fed7aa">4 partitions</text>
+  <!-- Linear AEC blocks -->
+  <rect x="316" y="70" width="152" height="96" rx="10" fill="#f97316"/>
+  <text x="392" y="96" text-anchor="middle" class="f2-box-title">PBFDKF</text>
+  <text x="392" y="116" text-anchor="middle" class="f2-box-text">Main Filter</text>
+  <text x="392" y="133" text-anchor="middle" class="f2-box-text">Kalman K / P / Q / R</text>
+  <text x="392" y="150" text-anchor="middle" class="f2-box-text">Partitioned FD update</text>
 
-  <!-- mic → main filter -->
-  <line x1="155" y1="68" x2="228" y2="68" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="316" y="250" width="152" height="82" rx="10" fill="#fb923c"/>
+  <text x="392" y="276" text-anchor="middle" class="f2-box-title">Shadow Filter</text>
+  <text x="392" y="297" text-anchor="middle" class="f2-box-text">Aggressive tracking</text>
+  <text x="392" y="314" text-anchor="middle" class="f2-box-text">candidate / guard</text>
 
-  <!-- ── Shadow Filter ── -->
-  <rect x="230" y="158" width="150" height="80" rx="8" fill="#fb923c"/>
-  <text x="305" y="183" text-anchor="middle" font-size="13" fill="white" font-weight="700">Shadow Filter</text>
-  <text x="305" y="201" text-anchor="middle" font-size="11" fill="#fed7aa">Q × shadow_q_ratio</text>
-  <text x="305" y="215" text-anchor="middle" font-size="11" fill="#fed7aa">激進學習（3.5×）</text>
-  <text x="305" y="229" text-anchor="middle" font-size="11" fill="#fed7aa">warm-up 50f guard</text>
+  <rect x="510" y="154" width="128" height="88" rx="10" fill="#fb923c" fill-opacity=".95"/>
+  <text x="574" y="180" text-anchor="middle" class="f2-box-title">DTD</text>
+  <text x="574" y="201" text-anchor="middle" class="f2-box-text">Energy DT</text>
+  <text x="574" y="218" text-anchor="middle" class="f2-box-text">Shadow/Main</text>
+  <text x="574" y="234" text-anchor="middle" class="f2-box-text">effective_dt</text>
 
-  <!-- mic → shadow -->
-  <line x1="155" y1="78" x2="220" y2="168" stroke="#64748b" stroke-width="1.2" stroke-dasharray="4,2" marker-end="url(#arr)"/>
+  <rect x="510" y="302" width="128" height="78" rx="10" fill="#c2410c"/>
+  <text x="574" y="328" text-anchor="middle" class="f2-box-title">EPC Detector</text>
+  <text x="574" y="349" text-anchor="middle" class="f2-box-text">path divergence</text>
+  <text x="574" y="366" text-anchor="middle" class="f2-box-text">P / Q recovery</text>
 
-  <!-- copy gate arrow: shadow → main -->
-  <path d="M 305,158 Q 305,147 305,140" fill="none" stroke="#f97316" stroke-width="2" stroke-dasharray="5,2" marker-end="url(#arror)"/>
-  <text x="318" y="153" font-size="11" fill="#ea580c">copy</text>
-  <text x="318" y="163" font-size="11" fill="#ea580c">gate</text>
+  <!-- Linear AEC signal lanes -->
+  <path d="M268 154 L310 154" class="f2-ref"/>
+  <path d="M268 154 L268 291 L314 291" class="f2-ref"/>
+  <path d="M190 101 L274 101 L274 270 L314 270" class="f2-ref"/>
+  <path d="M468 118 L492 118 L492 194 L508 194" class="f2-ref"/>
+  <path d="M468 291 L488 291 L488 222 L508 222" class="f2-ref"/>
+  <path d="M468 291 L488 291 L488 342 L508 342" class="f2-ref"/>
 
-  <!-- ── DTD block ── -->
-  <rect x="400" y="38" width="148" height="140" rx="8" fill="#fb923c" fill-opacity="0.85"/>
-  <text x="474" y="58" text-anchor="middle" font-size="12" fill="white" font-weight="700">DTD</text>
-  <text x="474" y="76" text-anchor="middle" font-size="11" fill="white">① Energy DT</text>
-  <text x="474" y="90" text-anchor="middle" font-size="11" fill="#fed7aa">mic_pwr vs ERL×far_pwr</text>
-  <text x="474" y="106" text-anchor="middle" font-size="11" fill="white">② Shadow DTD</text>
-  <text x="474" y="120" text-anchor="middle" font-size="11" fill="#fed7aa">shadow_err / main_err</text>
-  <text x="474" y="136" text-anchor="middle" font-size="11" fill="white">③ Coherence DT</text>
-  <text x="474" y="150" text-anchor="middle" font-size="11" fill="#fed7aa">|S_fe|² / (S_ff·S_ee)</text>
-  <text x="474" y="166" text-anchor="middle" font-size="11" fill="#fde68a">→ effective_dt</text>
+  <!-- Local control lanes: no overlap between EPC and Shadow -->
+  <path d="M574 242 L574 260 L470 260" class="f2-ctrl"/>
+  <text x="526" y="276" text-anchor="middle" class="f2-mini" fill="#ea580c">mu scale</text>
 
-  <!-- main → DTD -->
-  <line x1="380" y1="88" x2="398" y2="88" stroke="#64748b" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M574 380 L574 404 L392 404 L392 334" class="f2-ctrl"/>
+  <text x="492" y="398" text-anchor="middle" class="f2-mini" fill="#c2410c">Q/P boost</text>
 
-  <!-- effective_dt → mu_scale → main filter (feedback)
-       Routed through the Main↔Shadow gap (y≈148) to avoid crossing Shadow Filter rect.
-       Label placed in the DTD↔EPC gap (y≈195) where there is clear whitespace. -->
-  <path d="M 474,178 Q 474,148 410,148 L 305,148 L 305,140" fill="none" stroke="#f97316" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arror)"/>
-  <text x="412" y="194" font-size="11" fill="#ea580c" font-weight="600">mu_scale → main</text>
+  <path d="M392 250 L392 206 L392 168" class="f2-ctrl"/>
+  <text x="348" y="216" class="f2-mini" fill="#ea580c">copy gate</text>
 
-  <!-- ── EPC Detector ── -->
-  <rect x="400" y="200" width="148" height="70" rx="8" fill="#c2410c"/>
-  <text x="474" y="222" text-anchor="middle" font-size="12" fill="white" font-weight="700">EPC Detector</text>
-  <text x="474" y="240" text-anchor="middle" font-size="11" fill="#fed7aa">divergence + delta</text>
-  <text x="474" y="254" text-anchor="middle" font-size="11" fill="#fed7aa">P_MAX 放寬 30 frames</text>
+  <!-- Main error output to Residual Echo PSD -->
+  <line x1="468" y1="101" x2="732" y2="101" class="f2-main"/>
+  <text x="600" y="89" text-anchor="middle" class="f2-label" fill="#1e3a8a">error / linear AEC output</text>
 
-  <!-- EPC → main filter -->
-  <line x1="400" y1="235" x2="382" y2="235" stroke="#c2410c" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arr)"/>
-  <text x="385" y="250" font-size="11" fill="#c2410c" text-anchor="end">P_MAX↑</text>
+  <!-- RES blocks -->
+  <rect x="734" y="72" width="162" height="74" rx="10" fill="#7c3aed"/>
+  <text x="815" y="97" text-anchor="middle" class="f2-box-title">Residual Echo PSD</text>
+  <text x="815" y="117" text-anchor="middle" class="f2-box-text">filter echo / ERLE</text>
+  <text x="815" y="134" text-anchor="middle" class="f2-box-text">render window + tail</text>
 
-  <!-- ── error output from main filter ── -->
-  <line x1="380" y1="68" x2="540" y2="68" stroke="#64748b" stroke-width="2" marker-end="url(#arr)"/>
-  <text x="460" y="60" text-anchor="middle" font-size="11" fill="#475569" font-weight="600">error (linear AEC output)</text>
+  <rect x="734" y="178" width="162" height="78" rx="10" fill="#6d28d9"/>
+  <text x="815" y="203" text-anchor="middle" class="f2-box-title">ENR Gain Gate</text>
+  <text x="815" y="223" text-anchor="middle" class="f2-box-text">echo_psd / nearend_est</text>
+  <text x="815" y="240" text-anchor="middle" class="f2-box-text">DT relax + soft gate</text>
 
-  <!-- ── 後處理 RES 大區塊 ── -->
-  <!-- echo PSD estimation -->
-  <rect x="580" y="38" width="155" height="100" rx="8" fill="#7c3aed"/>
-  <text x="657" y="62" text-anchor="middle" font-size="12" fill="white" font-weight="700">Echo PSD 估計</text>
-  <text x="657" y="80" text-anchor="middle" font-size="11" fill="#ddd6fe">Direct: filter echo_spec</text>
-  <text x="657" y="94" text-anchor="middle" font-size="11" fill="#ddd6fe">+ per-bin ERLE tracking</text>
-  <text x="657" y="108" text-anchor="middle" font-size="11" fill="#ddd6fe">Render-based: ERL×far_psd</text>
-  <text x="657" y="122" text-anchor="middle" font-size="11" fill="#ddd6fe">Reverb tail model</text>
+  <rect x="734" y="286" width="162" height="68" rx="10" fill="#5b21b6"/>
+  <text x="815" y="311" text-anchor="middle" class="f2-box-title">Spectral Floor</text>
+  <text x="815" y="331" text-anchor="middle" class="f2-box-text">noise floor / g_min</text>
+  <text x="815" y="347" text-anchor="middle" class="f2-box-text">gain smoothing</text>
 
-  <!-- ENR gate + gain -->
-  <rect x="580" y="158" width="155" height="90" rx="8" fill="#6d28d9"/>
-  <text x="657" y="180" text-anchor="middle" font-size="12" fill="white" font-weight="700">ENR Gain Gate</text>
-  <text x="657" y="198" text-anchor="middle" font-size="11" fill="#ddd6fe">ENR = echo_psd / nearend_est</text>
-  <text x="657" y="212" text-anchor="middle" font-size="11" fill="#ddd6fe">DT: threshold × relax_factor</text>
-  <text x="657" y="226" text-anchor="middle" font-size="11" fill="#ddd6fe">soft gate → gain g</text>
-  <text x="657" y="240" text-anchor="middle" font-size="11" fill="#ddd6fe">EMR noise masking</text>
+  <rect x="734" y="382" width="162" height="56" rx="10" fill="#4c1d95"/>
+  <text x="815" y="406" text-anchor="middle" class="f2-box-title">CNG（可選）</text>
+  <text x="815" y="425" text-anchor="middle" class="f2-box-text">comfort noise</text>
 
-  <!-- echo PSD → ENR gain -->
-  <line x1="657" y1="138" x2="657" y2="156" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrd)"/>
+  <line x1="815" y1="146" x2="815" y2="176" class="f2-res"/>
+  <line x1="815" y1="256" x2="815" y2="284" class="f2-res"/>
+  <line x1="815" y1="354" x2="815" y2="380" class="f2-res"/>
 
-  <!-- Spectral floor + g_min -->
-  <rect x="580" y="268" width="155" height="70" rx="8" fill="#5b21b6"/>
-  <text x="657" y="290" text-anchor="middle" font-size="12" fill="white" font-weight="700">Spectral Floor</text>
-  <text x="657" y="308" text-anchor="middle" font-size="11" fill="#ddd6fe">noise_floor_gain (動態)</text>
-  <text x="657" y="322" text-anchor="middle" font-size="11" fill="#ddd6fe">spectral_g_min floor</text>
+  <!-- Output limiter and error stream lane -->
+  <rect x="734" y="462" width="162" height="44" rx="10" fill="#0891b2"/>
+  <text x="815" y="489" text-anchor="middle" class="f2-box-title">Output Limiter</text>
+  <path d="M682 101 L682 484 L732 484" class="f2-main"/>
+  <text x="664" y="296" text-anchor="middle" class="f2-small" fill="#1e3a8a" transform="rotate(-90 664 296)">error stream × gain</text>
+  <path d="M815 438 L815 460" class="f2-res"/>
 
-  <line x1="657" y1="248" x2="657" y2="266" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrd)"/>
+  <!-- RES auxiliary inputs: separated lanes, no shared overlap -->
+  <path d="M638 222 L704 222 L704 217 L732 217" class="f2-ctrl"/>
+  <path d="M574 380 L574 430 L714 430 L714 134 L732 134" class="f2-ctrl"/>
+  <path d="M190 411 L250 411 L250 462 L674 462 L674 130 L732 130" class="f2-ref"/>
 
-  <!-- CNG -->
-  <rect x="580" y="358" width="155" height="60" rx="8" fill="#4c1d95"/>
-  <text x="657" y="383" text-anchor="middle" font-size="12" fill="white" font-weight="700">CNG（可選）</text>
-  <text x="657" y="401" text-anchor="middle" font-size="11" fill="#ddd6fe">noise PSD → 舒適噪音注入</text>
+  <!-- Notes and legend -->
+  <rect x="930" y="76" width="126" height="104" rx="9" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="993" y="99" text-anchor="middle" class="f2-label" fill="#475569">輔助控制</text>
+  <text x="942" y="124" class="f2-mini" fill="#ea580c">• DTD → DT relax</text>
+  <text x="942" y="145" class="f2-mini" fill="#c2410c">• EPC → force render</text>
+  <text x="942" y="166" class="f2-mini" fill="#0f766e">• ref → render estimate</text>
 
-  <line x1="657" y1="338" x2="657" y2="356" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrd)"/>
+  <rect x="930" y="212" width="126" height="92" rx="9" fill="#ffffff" stroke="#e5e7eb"/>
+  <line x1="946" y1="233" x2="976" y2="233" class="f2-main"/>
+  <text x="986" y="237" class="f2-mini" fill="#475569">主訊號</text>
+  <line x1="946" y1="260" x2="976" y2="260" class="f2-ref"/>
+  <text x="986" y="264" class="f2-mini" fill="#475569">輔助 / ref</text>
+  <line x1="946" y1="287" x2="976" y2="287" class="f2-ctrl"/>
+  <text x="986" y="291" class="f2-mini" fill="#475569">控制訊號</text>
 
-  <!-- ── Output Limiter ── -->
-  <rect x="580" y="438" width="155" height="50" rx="8" fill="#0891b2"/>
-  <text x="657" y="460" text-anchor="middle" font-size="13" fill="white" font-weight="700">Output Limiter</text>
-  <text x="657" y="476" text-anchor="middle" font-size="11" fill="#e0f2fe">output ≤ mic amplitude</text>
-
-  <line x1="657" y1="418" x2="657" y2="436" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrd)"/>
-
-  <!-- error → echo PSD estimation -->
-  <line x1="540" y1="68" x2="578" y2="68" stroke="#64748b" stroke-width="2" marker-end="url(#arr)"/>
-
-  <!-- error path through RES (vertical) -->
-  <line x1="555" y1="68" x2="555" y2="468" stroke="#64748b" stroke-width="1.5" stroke-dasharray="3,2"/>
-  <line x1="555" y1="468" x2="578" y2="468" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
-  <text x="548" y="280" text-anchor="middle" font-size="11" fill="#64748b" transform="rotate(-90,548,280)">error 直通 → 乘增益</text>
-
-  <!-- effective_dt → RES ENR threshold relax -->
-  <line x1="548" y1="140" x2="578" y2="195" stroke="#f97316" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arr)"/>
-  <text x="555" y="168" font-size="11" fill="#ea580c" text-anchor="middle">DT relax</text>
-
-  <!-- output arrow -->
-  <line x1="735" y1="463" x2="770" y2="463" stroke="#059669" stroke-width="2.5" marker-end="url(#arrg)"/>
-  <rect x="772" y="445" width="120" height="36" rx="6" fill="#d1fae5" stroke="#059669" stroke-width="2"/>
-  <text x="832" y="460" text-anchor="middle" font-size="12" fill="#065f46" font-weight="700">Clean Output</text>
-  <text x="832" y="475" text-anchor="middle" font-size="11" fill="#065f46">近端語音</text>
-
-  <!-- ── 說明標籤 ── -->
-  <text x="474" y="295" text-anchor="middle" font-size="11" fill="#64748b">ref 訊號也</text>
-  <text x="474" y="308" text-anchor="middle" font-size="11" fill="#64748b">送給 RES</text>
-  <!-- ref → RES (render-based echo est) -->
-  <line x1="548" y1="356" x2="578" y2="356" stroke="#64748b" stroke-width="1.2" stroke-dasharray="3,2" marker-end="url(#arr)"/>
-  <line x1="548" y1="356" x2="548" y2="420" stroke="#64748b" stroke-width="1.2" stroke-dasharray="3,2"/>
-  <line x1="97" y1="376" x2="97" y2="420" stroke="#64748b" stroke-width="1.2" stroke-dasharray="3,2"/>
-  <line x1="97" y1="420" x2="548" y2="420" stroke="#64748b" stroke-width="1.2" stroke-dasharray="3,2"/>
+  <!-- Output -->
+  <line x1="896" y1="484" x2="928" y2="484" class="f2-out"/>
+  <rect x="932" y="462" width="124" height="44" rx="9" fill="#d1fae5" stroke="#059669" stroke-width="2"/>
+  <text x="994" y="482" text-anchor="middle" class="f2-label" fill="#065f46">Clean Output</text>
+  <text x="994" y="498" text-anchor="middle" class="f2-small" fill="#065f46">近端語音</text>
 </svg>
 <div class="caption">圖 2：完整 AEC 處理 pipeline — 每 10ms 一幀，從輸入到乾淨輸出</div>
+</div>
 </div>
 
 <div class="grid-2" style="margin-top:20px">
@@ -437,8 +420,8 @@
   <rect x="360" y="80" width="140" height="48" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="2"/>
   <text x="430" y="102" text-anchor="middle" font-size="12" fill="#166534" font-weight="700">比較誤差</text>
   <text x="430" y="119" text-anchor="middle" font-size="11" fill="#166534">Shadow &lt;&lt; Main?</text>
-  <path d="M 430,128 Q 430,175 192,175 Q 192,172 192,170" fill="none" stroke="#f97316" stroke-width="2" stroke-dasharray="5,2" marker-end="url(#a3)"/>
-  <text x="310" y="183" text-anchor="middle" font-size="12" fill="#ea580c" font-weight="600">是 &#x2192; 複製 Shadow &#x2192; Main</text>
+  <path d="M 192,115 L 192,88" fill="none" stroke="#f97316" stroke-width="2.4" stroke-dasharray="6,3" marker-end="url(#a3)"/>
+  <text x="318" y="105" text-anchor="middle" font-size="12" fill="#ea580c" font-weight="600">Shadow 優於 Main 時複製參數</text>
   <line x1="500" y1="104" x2="570" y2="104" stroke="#059669" stroke-width="2" marker-end="url(#a3)"/>
   <rect x="575" y="82" width="85" height="44" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
   <text x="617" y="101" text-anchor="middle" font-size="12" fill="#166534" font-weight="600">Main</text>
