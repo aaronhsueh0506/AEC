@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.0.2"
+__version__ = "3.1.0"
 
 import numpy as np
 from collections import deque
@@ -1522,24 +1522,38 @@ class ResFilter:
                     residual_echo_psd[hf_start:hf_end] = np.maximum(
                         residual_echo_psd[hf_start:hf_end], harmonic_floor)
 
-            residual_echo_psd = np.minimum(residual_echo_psd, self.echo_psd * 2.0)
+            # v3.1.0 cap-fix: this cap is meaningful only when echo_psd is reliable
+            # (filter has learned the echo path). In render-based mode, filter's
+            # echo_psd ≈ 0 because filter never converged → cap kills render-based
+            # estimate to ≈ 0 → ENR=0 → gain=1.0 → NO echo suppression. Worst-15
+            # static-DT analysis confirmed: render_based_pct=98% but Δecho=+1.5~+1.8
+            # (massive echo leak) and Δdeg=−2.0~−2.4 (over-preserved NE). Skip the cap
+            # when filter-side estimate is unreliable.
+            # === DEEP-TRACE HOOKS: capture residual_echo_psd at each cap stage ===
+            if self._stats is not None:
+                self._stats_last_res_after_attribute = float(np.mean(residual_echo_psd))
 
-            # Physical limit: residual echo cannot exceed total error energy.
+            if not self._residual_est.using_render_based:
+                residual_echo_psd = np.minimum(residual_echo_psd, self.echo_psd * 2.0)
+            if self._stats is not None:
+                self._stats_last_res_after_echo_cap = float(np.mean(residual_echo_psd))
+
             residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd)
+            if self._stats is not None:
+                self._stats_last_res_after_error_cap = float(np.mean(residual_echo_psd))
 
-            # DT physical limit: dt_indicator=0.8 means 80% confidence it's speech,
-            # so residual echo can be at most 20% of error energy.
-            # Floor at 0.1 prevents residual from vanishing completely at dt≈1.0.
-            dt_suppress = np.clip(1.0 - dt_for_fs**2, 0.1, 1.0)
-            residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * dt_suppress)
+            if not self._residual_est.using_render_based:
+                dt_suppress = np.clip(1.0 - dt_for_fs**2, 0.1, 1.0)
+                residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * dt_suppress)
+            if self._stats is not None:
+                self._stats_last_res_after_dt_cap = float(np.mean(residual_echo_psd))
 
-            # P2: render-based physical ceiling — echo cannot exceed ERL × far_psd × 2.0.
-            # Prevents ENR blow-up when filter echo_spec overestimates residual.
-            # Conservative (factor=2.0): only caps when residual greatly exceeds expected echo.
             if far_spec is not None and far_power > 1e-4 and erl_estimate > 0.0:
                 far_psd_k = np.abs(far_spec) ** 2
                 render_ceil = far_psd_k * min(erl_estimate * 2.0, 1.0)
                 residual_echo_psd = np.minimum(residual_echo_psd, render_ceil)
+            if self._stats is not None:
+                self._stats_last_res_after_render_ceil = float(np.mean(residual_echo_psd))
 
             # Add reverb tail if enabled
             # Use render signal (far_spec) power instead of filter echo estimate
@@ -1651,6 +1665,15 @@ class ResFilter:
                                 and not filter_once_converged)
             if _startup_dt_cond and self.startup_dt_min_ne_scale != 1.0:
                 min_ne_from_dt = min_ne_from_dt * self.startup_dt_min_ne_scale
+            # v3.1.0: in render-based mode, the floor `error × dt_shaped` inflates
+            # nearend_est to ~85% of error_psd → ENR≈0 → no echo suppression even
+            # when render estimate (far×erl) clearly says echo is present. Soften
+            # the floor by 0.5× when render-based, since render's own estimate
+            # provides a separate physical bound (residual ≤ error - render_est implicit).
+            # Empirical from worst static-DT trace (frame 66): cap dropped enr from
+            # 2.8 → 0.005 entirely due to this floor.
+            if self._residual_est.using_render_based:
+                min_ne_from_dt = min_ne_from_dt * 0.5
             nearend_est = np.maximum(nearend_est, min_ne_from_dt)
             if self._stats is not None:
                 self._stats_last_min_ne = float(np.mean(min_ne_from_dt))
