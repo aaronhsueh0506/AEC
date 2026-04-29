@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.6.0"
+__version__ = "3.6.1"
 
 import numpy as np
 from collections import deque
@@ -4141,6 +4141,17 @@ class AEC:
             self._far_power_ema = 0.95 * self._far_power_ema + 0.05 * far_pwr_global
             self._mic_power_ema = 0.95 * self._mic_power_ema + 0.05 * (np.mean(near_end ** 2) + 1e-10)
             self._frame_count += 1
+            # PR-D4: stats-only DT-from-frame-0 detector. Counts frames where
+            # filter has had ≥2s of far-active without converging AND ERL has
+            # drifted upward — signature of NE-corrupted filter learning.
+            # See docs/spec_dt_from_frame_zero.md for full rationale.
+            if self._render_activity.is_active:
+                self._far_active_blocks = getattr(self, '_far_active_blocks', 0) + 1
+            if (getattr(self, '_far_active_blocks', 0) > 200
+                    and not self._filter_converged
+                    and self._erl_estimate > 0.4):
+                self._dt_from_zero_count = getattr(self, '_dt_from_zero_count', 0) + 1
+            self._diag['dt_from_zero_count'] = getattr(self, '_dt_from_zero_count', 0)
             self._diag['far_power'] = self._far_power_ema
             self._diag['mic_power'] = self._mic_power_ema
             self._diag['dt_from_coherence'] = (
