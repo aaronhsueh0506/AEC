@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.1.0"
+__version__ = "3.2.0"
 
 import numpy as np
 from collections import deque
@@ -1538,7 +1538,11 @@ class ResFilter:
             if self._stats is not None:
                 self._stats_last_res_after_echo_cap = float(np.mean(residual_echo_psd))
 
-            residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd)
+            # v3.2 Axis 3: in render-mode, relax cap to error_psd × 1.5 so the
+            # render-based estimate (X × ERL) is not bounded by the NE-inflated
+            # error signal. Linear-mode keeps strict ≤ error_psd.
+            err_cap_mult = 1.5 if self._residual_est.using_render_based else 1.0
+            residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * err_cap_mult)
             if self._stats is not None:
                 self._stats_last_res_after_error_cap = float(np.mean(residual_echo_psd))
 
@@ -1551,6 +1555,9 @@ class ResFilter:
             if far_spec is not None and far_power > 1e-4 and erl_estimate > 0.0:
                 far_psd_k = np.abs(far_spec) ** 2
                 render_ceil = far_psd_k * min(erl_estimate * 2.0, 1.0)
+                if self._stats is not None:
+                    self._stats_last_render_ceil_mean = float(np.mean(render_ceil))
+                    self._stats_last_erl_estimate = float(erl_estimate)
                 residual_echo_psd = np.minimum(residual_echo_psd, render_ceil)
             if self._stats is not None:
                 self._stats_last_res_after_render_ceil = float(np.mean(residual_echo_psd))
@@ -1668,12 +1675,11 @@ class ResFilter:
             # v3.1.0: in render-based mode, the floor `error × dt_shaped` inflates
             # nearend_est to ~85% of error_psd → ENR≈0 → no echo suppression even
             # when render estimate (far×erl) clearly says echo is present. Soften
-            # the floor by 0.5× when render-based, since render's own estimate
-            # provides a separate physical bound (residual ≤ error - render_est implicit).
-            # Empirical from worst static-DT trace (frame 66): cap dropped enr from
-            # 2.8 → 0.005 entirely due to this floor.
+            # the floor when render-based — empirical 0.5× from worst static-DT
+            # trace (frame 66 ENR jumped 2.8 → 4.5 with halving).
+            # Tunable via render_min_ne_factor instance attr (default 0.5).
             if self._residual_est.using_render_based:
-                min_ne_from_dt = min_ne_from_dt * 0.5
+                min_ne_from_dt = min_ne_from_dt * getattr(self, 'render_min_ne_factor', 0.5)
             nearend_est = np.maximum(nearend_est, min_ne_from_dt)
             if self._stats is not None:
                 self._stats_last_min_ne = float(np.mean(min_ne_from_dt))
@@ -1855,6 +1861,14 @@ class ResFilter:
         else:
             smoothed = np.maximum(smoothed, effective_g_min)
         smoothed = np.minimum(smoothed, 1.0)
+        # v3.2 Axis 2: hard ceiling in render-mode whenever far is active, to
+        # prevent transient leaks. Trace showed gain p90=1.0 in losing cases (10%
+        # of frames no suppression); rc1 used dt_combined>0.3 gate but missed
+        # frames with low DT signal. rc3 broadens to far-active and tightens
+        # ceiling 0.7→0.6.
+        if self._residual_est.using_render_based and self.far_activity > 0.3:
+            ceil = getattr(self, 'render_dt_gain_ceil', 0.6)
+            smoothed = np.minimum(smoothed, ceil)
         self.gain_smooth = smoothed
 
         if self._stats is not None:
@@ -3840,8 +3854,11 @@ class AEC:
                 # estimate is reliable and render-based mode is off.
                 if far_pwr > 1e-4:
                     raw_dt_ratio = raw_err_pwr / (far_pwr + 1e-10)
-                    if raw_dt_ratio < 2.0:
-                        inst_erl = np.clip(mic_pwr / far_pwr, 0.001, 10.0)
+                    inst_erl_raw = mic_pwr / far_pwr
+                    # v3.2 Axis 1: NE-corruption protection. ERL > 1.5 physically
+                    # implausible (mic louder than far → NE dominates), so skip update.
+                    if raw_dt_ratio < 2.0 and inst_erl_raw < 1.5:
+                        inst_erl = np.clip(inst_erl_raw, 0.001, 1.0)
                         alpha_erl = 0.99 if not self._filter_converged else 0.999
                         self._erl_estimate = alpha_erl * self._erl_estimate + (1 - alpha_erl) * inst_erl
 
