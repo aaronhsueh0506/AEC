@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.3.0"
+__version__ = "3.4.0"
 
 import numpy as np
 from collections import deque
@@ -1558,7 +1558,15 @@ class ResFilter:
                 if self._stats is not None:
                     self._stats_last_render_ceil_mean = float(np.mean(render_ceil))
                     self._stats_last_erl_estimate = float(erl_estimate)
-                residual_echo_psd = np.minimum(residual_echo_psd, render_ceil)
+                # v3.4 Axis 1: skip render_ceil when in render-mode. This cap is
+                # meant to bound a possibly-wrong linear filter, but render-mode
+                # IS the fallback for when filter is wrong. Trace showed render_ceil
+                # cuts error-based fallback (residual=167) down to far_now×ERL×2
+                # (=2.24) at hotspots → enr collapses → gain stays high → echo leaks.
+                # (rc11 tested gating on not_once_converged: didn't recover DT_mv
+                # deg, lost FS echo. once_converged is not the deg-leak discriminator.)
+                if not self._residual_est.using_render_based:
+                    residual_echo_psd = np.minimum(residual_echo_psd, render_ceil)
             if self._stats is not None:
                 self._stats_last_res_after_render_ceil = float(np.mean(residual_echo_psd))
 
@@ -1577,6 +1585,12 @@ class ResFilter:
                     # are exactly where reverb attribution matters most.
                     ne_reverb_factor = 0.7 + 0.3 * self.far_activity * (1.0 - dt_for_fs)
                     reverb_gate = self.far_activity * ne_reverb_factor
+                    # v3.4 Axis 2: hard-cut reverb when far quiets (NE protection).
+                    # far_activity EMA decays slowly → reverb tail can linger 200ms+
+                    # after far ends, hurting NE-only frames. Force gate=0 when
+                    # current far is silent (< 0.1 activity).
+                    if self.far_activity < 0.1:
+                        reverb_gate = 0.0
                     residual_echo_psd = (residual_echo_psd
                                          + self.reverb_gain * self.reverb_psd * reverb_gate)
 
@@ -2546,7 +2560,11 @@ class ResidualEchoEstimator:
                 render_based_echo = far_psd * erl_estimate
                 far_conf = far_psd / (far_psd + error_psd * 0.05 + 1e-10)
                 far_conf = np.clip(far_conf, 0.0, 1.0)
-                error_based_floor = error_psd * far_conf * 0.7
+                # v3.4 Axis 3: DT-aware fallback factor. In strong DT (NE present),
+                # less of error_psd is echo, so reduce factor 0.7 → 0.5 to protect
+                # DT_movement deg. dt_for_fs ≈ 1 means strong DT.
+                fallback_factor = 0.7 - 0.2 * np.clip(dt_for_fs, 0.0, 1.0)
+                error_based_floor = error_psd * far_conf * fallback_factor
                 render_based_echo = np.maximum(render_based_echo, error_based_floor)
                 blend = 1.0 - erle_factor / effective_threshold
                 blend = np.clip(blend, 0.0, 1.0)
