@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.5.0"
+__version__ = "3.6.0"
 
 import numpy as np
 from collections import deque
@@ -262,10 +262,12 @@ class AecConfig:
             self.hop_size = self.frame_size // 2             # 10ms
         if self.filter_length == -1:
             # D5: 48kHz needs longer filter (room reverb more prominent)
+            # PR-D1 (v3.6.0): bumped 16/8kHz default 32→52ms to match AEC3
+            # default (13 blocks × 4ms) — captures more RT60 tail.
             if self.sample_rate >= 44100:
                 self.filter_length = self.sample_rate * 64 // 1000  # 64ms
             else:
-                self.filter_length = self.sample_rate * 32 // 1000  # 32ms
+                self.filter_length = self.sample_rate * 52 // 1000  # 52ms (was 32ms)
 
     @property
     def fft_size(self) -> int:

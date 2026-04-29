@@ -5,6 +5,62 @@ or tuning sweeps; patch is bugfix.
 
 ---
 
+## v3.6.0 (2026-04-29) — Filter length 32ms → 52ms (PR-D1)
+
+**Goal**: Investigation after v3.5.0 PR-B trade-off plateau identified the
+linear filter as the root cause of DT-from-frame-0 deg-loss (90% of worst
+cases had filter conv_far=0% per [diag_linear_stability.py](../python/diag_linear_stability.py),
+ERLE p50 < 0 dB across far-active frames). Source-verified WebRTC AEC3
+config showed 52ms default (13 blocks × 4ms) vs our 32ms — significant
+RT60 tail capture gap.
+
+**Change** ([python/aec.py:266](../python/aec.py#L266)):
+```python
+# 16/8kHz default filter_length: 32ms → 52ms
+self.filter_length = self.sample_rate * 52 // 1000  # was 32
+```
+
+At 16kHz: 512 → 832 samples, 4 → 6 partitions. Compute cost +50%.
+
+**Trace verification**
+([diag_filter_dynamics.py](../python/diag_filter_dynamics.py)):
+
+| case | v3.5.0 ERLE p90 | v3.6.0 ERLE p90 |
+|---|---:|---:|
+| Y7w0W4v9 (DT_static deg-loser) | +1~+3 dB | **+8~+10 dB** |
+| QEeKiaNiD (DT_static borderline) | +12 dB | +12 dB (sustained) |
+| hVqUmGvIlk (FS_movement winner) | -7~-10 dB | -5~-8 dB (filter still doesn't anchor) |
+| PZ7V (FS_static catastrophic) | +10/-68 dB (divergent) | +10/-72 dB (still divergent) |
+
+**800-case AECMOS vs v3.5.0**:
+
+| bucket | v3.5.0 | v3.6.0 | Δ |
+|---|---:|---:|---:|
+| FS_static echo | 3.590 | 3.675 | **+0.085** |
+| FS_movement echo | 3.916 | 3.931 | +0.015 |
+| DT_static echo | 4.111 | 4.182 | **+0.071** |
+| DT_movement echo | 4.138 | 4.151 | +0.013 |
+| DT_static deg | 2.391 | 2.325 | -0.066 |
+| DT_movement deg | 2.280 | 2.258 | -0.022 |
+| NE deg | 4.004 | 4.000 | -0.004 (at 4.0 floor) |
+
+vs AEC challenge baseline (cumulative v3.4 → v3.6):
+- FS_static echo Δ: -0.027 → **+0.218** (large lead)
+- DT_static echo Δ: -0.233 → **-0.149** (closed 36% of gap)
+- DT_movement echo Δ: -0.027 → +0.002 (first parity)
+- NE deg: 4.008 → 4.000 (at floor)
+
+**Trade-off acknowledgment**: DT_static deg lost +0.065 of v3.5.0's lead vs
+AEC2 (still +0.022 ahead). DT_movement deg widened to -0.270.
+NE = 4.000 is the floor — further pushes risk breaking it.
+
+**Next**: PR-D2 (initial-state Q×100 boost), PR-D3 (Q bifurcation on
+shadow_advantage), PR-D4 (DT-from-frame-0 detector + spec).
+
+**Plan**: ~/.claude/plans/users-mingyu-desktop-novatek-se-aec-pyr-tranquil-scroll.md
+
+---
+
 ## v3.5.0 (2026-04-29) — AEC3-style Y2-fallback for saturated-echo equivalent
 
 **Goal**: Break the v3.4.0 Pareto wall (DT_static echo −0.233 vs AEC challenge
