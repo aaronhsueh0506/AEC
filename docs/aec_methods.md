@@ -2332,6 +2332,45 @@ ERLE = 10 · log₁₀(E[d²] / E[e²])    (dB)
 
 ---
 
+## 附錄 D: v3.x 改進與當前狀態（2026-04-29）
+
+v3 系列以 trace-driven 多軸協同方式關閉與 WebRTC AEC2 的 echo gap。完整設計
+與每階段 trace 數據見 [aec_v3_evolution.md](aec_v3_evolution.md)；簡明版本
+紀錄見 [CHANGELOG.md](CHANGELOG.md)。
+
+### D.1 v3.x 軸線總覽
+
+| 版本 | 主要修改位置 | 攻擊目標 | 設計依據 |
+|------|-------------|---------|---------|
+| v3.1.0 | RES caps（line 1537/1547） | DT echo (render-mode) | render-mode 跳過 echo/dt cap、min_ne ×0.5 |
+| v3.2.0 | ERL learning + gain ceil | NE-corruption ERL + transient leak | ERL 物理上限 1.0、render-mode gain ≤ 0.6 |
+| v3.3.0 | Existing IIR reverb 調參 + render fallback | 過去 lpb 引發的 echo | reverb decay 0.85、error-based fallback |
+| v3.4.0 | render_ceil 跳過 + reverb gate + fallback factor | render_ceil 抵消 fallback | render-mode 跳 render_ceil、DT-aware factor |
+
+### D.2 當前狀態（v3.4.0 vs AEC2，800-case CNG=True）
+
+| bucket | ours_e | aec2_e | Δecho | ours_d | aec2_d | Δdeg |
+|---|---:|---:|---:|---:|---:|---:|
+| FS_static | 3.522 | 3.457 | +0.065 ✓ | 4.999 | 4.999 | 0 |
+| FS_movement | 3.871 | 3.519 | +0.353 | — | — | 0 |
+| DT_static | 4.098 | 4.331 | −0.233 | 2.440 | 2.304 | +0.136 |
+| DT_movement | 4.123 | 4.149 | −0.027 | 2.315 | 2.528 | −0.213 |
+| NE | 4.998 | 4.998 | 0 | 4.008 | 4.098 | −0.091 |
+
+Win rate: Echo 47% / Deg 42%.
+
+### D.3 框架極限與 Route B
+
+reverb + error-based fallback 框架在 v3.4.0 達到極限。trace 分析：fallback
+factor 安全上限約 0.5–0.7；要再推必須能精準分辨 echo-bin vs NE-bin per-bin。
+現有 `dt_combined`、`coh2`(current X) 不夠。
+
+候選 Route B：long-history coherence per-bin（累積 cross-spectrum mic vs
+lpb_history）。NE bin 與遠端歷史不相關 → 低信心；echo bin 高信心 → 推 fallback
+factor 至 0.9。實作複雜度中等。
+
+---
+
 ## 參考文獻
 
 1. Haykin, S. "Adaptive Filter Theory" (4th Edition)
