@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.4.0"
+__version__ = "3.5.0"
 
 import numpy as np
 from collections import deque
@@ -1494,6 +1494,21 @@ class ResFilter:
                 aec_state=aec_state,
             )
 
+            # v3.5.0: AEC3-style Y2-fallback for "saturated_echo" equivalent.
+            # When filter is in render-based mode (linear estimate unreliable)
+            # AND post-filter signal still has excessive amplitude, residual_echo_psd
+            # estimate is unreliably small → ENR ≈ 0 → soft-gate g=1.0 (no
+            # suppression). Substituting residual_echo_psd ← mic_psd × 0.5 forces
+            # ENR large → soft-gate suppresses. Trace verified WYKA2 worst-leak
+            # hotspot ratio 111,827× → 5× (mechanism functional).
+            if (far_power > 1e-4 and self._residual_est.using_render_based
+                    and near_spec is not None):
+                error_max_abs = float(np.max(np.abs(error_hop)))
+                if error_max_abs > 0.05:
+                    mic_psd = np.abs(near_spec).astype(np.float32) ** 2
+                    residual_echo_psd = np.maximum(residual_echo_psd,
+                                                   mic_psd * 0.5)
+
             # Nonlinear echo mode: when speaker distortion is sustained,
             # the linear filter can't model harmonics. Boost residual_echo_psd
             # globally (not just HF) and increase over_sub to compensate.
@@ -1753,10 +1768,14 @@ class ResFilter:
 
             if self._stats is not None:
                 self._stats_last_gain_before_floor = float(np.mean(g))
+            if getattr(self, '_capture_stages', False):
+                self._stage_gains = {'01_softgate_emr': g.copy()}
             g = np.maximum(g, spectral_g_min)
 
             if self._stats is not None:
                 self._stats_last_gain_after_floor = float(np.mean(g))
+            if getattr(self, '_capture_stages', False):
+                self._stage_gains['02_spectral_floor'] = g.copy()
 
             if self._stats is not None:
                 self._stats_last_enr = float(np.mean(enr))
@@ -1782,8 +1801,12 @@ class ResFilter:
         if epc_dt:
             EPC_DT_GAIN_CAP = 0.85
             g = np.minimum(g, EPC_DT_GAIN_CAP)
+        if getattr(self, '_capture_stages', False):
+            self._stage_gains['03_epc_dt_cap'] = g.copy()
 
         g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
+        if getattr(self, '_capture_stages', False):
+            self._stage_gains['04_quiet_mask'] = g.copy()
 
         # --- Frequency-domain postprocessing (cf. AEC3 PostprocessGains) ---
         if far_power > 1e-4:
@@ -1791,6 +1814,8 @@ class ResFilter:
             # that cause musical noise / electrical noise artifacts
             kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
             g = np.convolve(g, kernel, mode='same').astype(np.float32)
+            if getattr(self, '_capture_stages', False):
+                self._stage_gains['05_3bin_smooth'] = g.copy()
             # DC consistency: bins 0-1 follow bin 2
             if self.n_freqs > 2:
                 g[:2] = np.minimum(g[1], g[2])
@@ -1800,11 +1825,15 @@ class ResFilter:
             if self.n_freqs > hf_cap_bin + 1 and effective_dt < 0.5 and not is_stationary_dt:
                 hf_cap = g[hf_cap_bin]
                 g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
+            if getattr(self, '_capture_stages', False):
+                self._stage_gains['06_hf_cap'] = g.copy()
 
         # Divergence override: when filter diverges, cap gain severely
         if divergence > 0.3:
             divergence_gain = 0.01 + (1.0 - 0.01) * (1.0 - divergence)
             g = np.minimum(g, divergence_gain)
+        if getattr(self, '_capture_stages', False):
+            self._stage_gains['07_pre_temporal'] = g.copy()
 
         # Temporal smoothing: far_activity-driven release (no feedback loop)
         # far_activity high (far-end speaking) → slow release (TC≈200ms)
@@ -1886,6 +1915,8 @@ class ResFilter:
         if self._residual_est.using_render_based and self.far_activity > 0.3:
             ceil = getattr(self, 'render_dt_gain_ceil', 0.6)
             smoothed = np.minimum(smoothed, ceil)
+        if getattr(self, '_capture_stages', False):
+            self._stage_gains['08_post_temporal'] = smoothed.copy()
         self.gain_smooth = smoothed
 
         if self._stats is not None:

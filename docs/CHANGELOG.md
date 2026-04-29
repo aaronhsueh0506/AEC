@@ -5,6 +5,77 @@ or tuning sweeps; patch is bugfix.
 
 ---
 
+## v3.5.0 (2026-04-29) — AEC3-style Y2-fallback for saturated-echo equivalent
+
+**Goal**: Break the v3.4.0 Pareto wall (DT_static echo −0.233 vs AEC challenge
+baseline, corr Δecho/Δdeg = −0.81). Five rc attempts (rc15-20) all returned
+within ±0.005 — every "single-knob" residual-attribution fix was absorbed by
+downstream suppressor reshaping.
+
+**Trace finding** ([python/diag_gain_stages.py](../python/diag_gain_stages.py)):
+At worst leak hotspots, Wiener soft-gate output `g = 1.0` (transparent). The
+gain pipeline 8 stages do NOT suppress — only `render_dt_gain_ceil = 0.6` cap
+fires. Root cause: `attribute_legacy` returns `residual_echo_psd ≈ 0` because
+filter unreliable AND lpb_NOW silent (echo from past) → `far_psd × ERL ≈ 0`,
+`error × far_conf × factor` also ≈ 0 (far_conf ≈ 0 when far silent now).
+Soft-gate sees `ENR ≈ 0` → un-gates entirely.
+
+**Source review** ([WebRTC AEC3 main branch](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_processing/aec3/residual_echo_estimator.cc))
+identified the missing mechanism: AEC3 uses `R2 = Y2` (mic spectrum directly)
+when `saturated_echo` triggers, regardless of whether linear estimate is usable.
+This forces `ENR` large → suppressor engages.
+
+**Fix** ([python/aec.py:1497-1517](../python/aec.py#L1497)):
+```python
+if (far_power > 1e-4 and self._residual_est.using_render_based
+        and near_spec is not None):
+    error_max_abs = float(np.max(np.abs(error_hop)))
+    if error_max_abs > 0.05:
+        mic_psd = np.abs(near_spec).astype(np.float32) ** 2
+        residual_echo_psd = np.maximum(residual_echo_psd, mic_psd * 0.5)
+```
+
+Trigger: `using_render_based` (filter in fallback mode) AND post-filter signal
+amplitude still excessive (`max(|error|) > 0.05` in float32 scale; AEC3 uses
+absolute threshold `s_refined_max_abs > 20000.f`). Substitution: residual ←
+max(residual, mic_psd × 0.5).
+
+**Trace verification**: WYKA2 frame 706 worst leak ratio 111,827× → 5× (PSD
+ratio ours/aec2). NE bit-exact preserved (parity_smoke.py NE case identical).
+
+**800-case AECMOS vs v3.4.0** (CNG=True, balanced preset):
+
+| bucket | v3.4.0 | v3.5.0 | Δ |
+|---|---:|---:|---:|
+| FS_static echo | 3.522 | 3.590 | **+0.068** |
+| FS_movement echo | 3.871 | 3.916 | **+0.045** |
+| DT_static echo | 4.098 | 4.111 | +0.013 |
+| DT_movement echo | 4.123 | 4.138 | +0.015 |
+| DT_static deg | 2.440 | 2.391 | -0.049 |
+| DT_movement deg | 2.315 | 2.280 | -0.035 |
+| NE deg | 4.008 | 4.004 | -0.004 |
+
+vs AEC challenge baseline:
+- FS_static echo Δ = +0.133 (v3.4.0 was +0.065) — **FS lead doubled**
+- FS_movement echo Δ = +0.397 (v3.4.0 was +0.353)
+- DT_static echo Δ = -0.221 (v3.4.0 was -0.233) — closed 5% more
+- NE deg = 4.004 (still > 4.0 floor)
+
+**Trade-off acknowledgment**: DT_static deg -0.049 / DT_movement deg -0.035.
+The bimodal Pareto (corr -0.81) is fundamental to fullband DT decisions; this
+PR makes the trade-off lean toward echo. PR-B (Profile-swap DominantNearend)
+planned to recover DT_deg without losing echo gains.
+
+**Hotspots NOT helped**: hF9Lfj-class (frame 2682 bin 72 ratio 339,329×, final_g=0.901)
+where `using_render_based=False` (filter "converged" but echo at HF still leaks).
+These are likely speaker-nonlinear harmonics — coh ≈ 0, ERL ≈ 0, sat ≈ 0; no
+linear signal can detect. Out of v3.5.0 scope.
+
+**Plan reference**: ~/.claude/plans/users-mingyu-desktop-novatek-se-aec-pyr-tranquil-scroll.md
+(PR-A complete; PR-B and PR-C pending).
+
+---
+
 ## v3.4.0 (2026-04-29) — DT_static echo gap closure via render_ceil skip
 
 **Goal**: Continue closing DT_static echo gap vs AEC2 (was −0.285 in v3.2, −0.241
