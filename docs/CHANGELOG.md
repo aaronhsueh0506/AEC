@@ -5,6 +5,51 @@ or tuning sweeps; patch is bugfix.
 
 ---
 
+## v3.6.1 (2026-04-29) — DT-from-frame-0 spec + stats detector (PR-D4)
+
+**Goal**: Document the linear-AEC fundamental limit identified during PR-D
+investigation; add stats-only detector for production debugging.
+
+**PR-D2** (initial-state Q×N boost): tested 4 variants (10×/100, 5×/50,
+3×/30, 2×/20). All breached NE deg 4.0 floor — reverted. Q boost
+universally pushes filter toward more aggressive adaptation, which costs
+NE quality structurally regardless of magnitude.
+
+**PR-D3** (true 10× Q bifurcation on shadow_advantage): tested. Effect at
+noise level (DT_movement echo +0.008 / deg -0.009). Shadow filter being
+PBFDKF (Kalman, like main) means `shadow_advantage ≈ 1.0` in worst cases —
+both filters equally NE-corrupted, no escape signal. Reverted.
+
+**PR-D4 (this PR)**:
+- New: [docs/spec_dt_from_frame_zero.md](spec_dt_from_frame_zero.md) — full
+  symptom / root-cause / WebRTC comparison documentation.
+- New: stats-only detector in `AEC.process` ([python/aec.py:4144-4154](../python/aec.py#L4144))
+  fires on `far_active_blocks > 200 AND not _filter_converged AND
+  erl_estimate > 0.4` — signature of NE-corrupted filter learning.
+- No behavior change. 800-case AECMOS identical to v3.6.0.
+
+Detector validation on representative cases:
+
+| case | category | dt_from_zero % |
+|---|---|---:|
+| Y7w0W4v9 (top DT_static deg-loser) | DT | 45% |
+| QkRkwwFKVE (deg-loser) | DT | 21% |
+| hVqUmGvIlk (FS top winner) | FS | 0% |
+| PZ7V (FS loser) | FS | 0% |
+| 014AzuqPZ (NE control) | NE | 0% |
+
+Discrimination correct: fires only on actual DT-from-frame-0 cases; FS and
+NE clean.
+
+**PR-D5** (replace shadow Kalman → NLMS): deferred. 1-2 week refactor with
+high regression risk on existing v2.5+ shadow tuning. Only worth pursuing if
+linear AEC is the chosen direction long-term — competing direction is NN
+postfilter (DTLN-AEC, see plan `~/.claude/plans/jazzy-brewing-castle.md`).
+
+**Plan**: ~/.claude/plans/users-mingyu-desktop-novatek-se-aec-pyr-tranquil-scroll.md
+
+---
+
 ## v3.6.0 (2026-04-29) — Filter length 32ms → 52ms (PR-D1)
 
 **Goal**: Investigation after v3.5.0 PR-B trade-off plateau identified the
