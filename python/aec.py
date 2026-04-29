@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.2.0"
+__version__ = "3.3.0"
 
 import numpy as np
 from collections import deque
@@ -315,8 +315,8 @@ class AecConfig:
                 res_echo_method="direct",
                 res_gain_type="enr",
                 res_enable_reverb=True,
-                res_reverb_decay=0.65,
-                res_reverb_gain=1.4,
+                res_reverb_decay=0.85,    # v3.3: TC ~130ms (was 50ms); RT60-typical
+                res_reverb_gain=1.6,      # v3.3: bump (was 1.4); DT gate weakened separately
                 res_alpha_echo_psd=0.4,
                 res_alpha_error_psd=0.5,
                 res_enr_scale=0.85,
@@ -1562,17 +1562,20 @@ class ResFilter:
             if self._stats is not None:
                 self._stats_last_res_after_render_ceil = float(np.mean(residual_echo_psd))
 
-            # Add reverb tail if enabled
-            # Use render signal (far_spec) power instead of filter echo estimate
-            # → doesn't depend on filter modeling quality for reverb tail
+            # Reverb tail (WebRTC-AEC3-style IIR on far_psd).
+            # v3.3: tuned from preset defaults — DT cases with non-converged filter
+            # need MORE reverb attribution, not less. Trace showed echo at frame t
+            # often originates 60-320ms ago; old decay 0.6 (TC ≈ 50ms) too short.
+            # New: decay → reverb_decay (0.85 = TC ≈ 130ms by preset), gain ↑,
+            # DT gate weakened (was 0.3 base → 0.7 base).
             if self.enable_reverb:
                 far_psd = np.abs(far_spec) ** 2 if far_spec is not None else echo_pwr_linear
                 self.reverb_psd = (self.reverb_decay * self.reverb_psd
                                    + (1 - self.reverb_decay) * far_psd)
-                # Gate by far_activity; continuous NE/FS blend (not binary nearend_state)
-                # Stationary DT: far_psd is huge WN energy, reverb accumulates and drowns speech
                 if not is_stationary_dt:
-                    ne_reverb_factor = 0.3 + 0.7 * self.far_activity * (1.0 - dt_for_fs)
+                    # v3.3: DT-gate weakened. DT cases with non-converged filter
+                    # are exactly where reverb attribution matters most.
+                    ne_reverb_factor = 0.7 + 0.3 * self.far_activity * (1.0 - dt_for_fs)
                     reverb_gate = self.far_activity * ne_reverb_factor
                     residual_echo_psd = (residual_echo_psd
                                          + self.reverb_gain * self.reverb_psd * reverb_gate)
@@ -2532,9 +2535,19 @@ class ResidualEchoEstimator:
             self._using_render_based = want_render or (self._using_render_based and not can_exit)
 
             if self._using_render_based:
-                far_psd = np.abs(far_spec) ** 2 if far_spec is not None else np.zeros(self.n_freqs)
-                echo_path_gain = erl_estimate
-                render_based_echo = far_psd * echo_path_gain
+                far_psd = (np.abs(far_spec) ** 2 if far_spec is not None
+                           else np.zeros(self.n_freqs, dtype=np.float32))
+                # v3.3: render_based_echo = far × ERL underestimates by 2 orders
+                # when filter never converges (trace: 4.2 vs error 239). Fall back
+                # to error-based hypothesis: residual = max(direct, error × conf × 0.7)
+                # where conf is per-bin "active echo path" indicator (high far_psd
+                # vs error → echo dominant, low far → likely NE).
+                # The existing IIR reverb at line ~1577 handles RT60 tail accumulation.
+                render_based_echo = far_psd * erl_estimate
+                far_conf = far_psd / (far_psd + error_psd * 0.05 + 1e-10)
+                far_conf = np.clip(far_conf, 0.0, 1.0)
+                error_based_floor = error_psd * far_conf * 0.7
+                render_based_echo = np.maximum(render_based_echo, error_based_floor)
                 blend = 1.0 - erle_factor / effective_threshold
                 blend = np.clip(blend, 0.0, 1.0)
                 residual_echo_psd = ((1.0 - blend) * residual_echo_psd
