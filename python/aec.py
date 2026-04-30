@@ -4345,7 +4345,8 @@ class AEC:
         d = self._diag
         _db = lambda x, floor=1e-10: 10.0 * np.log10(max(x, floor))
         hop_s = self._hop_size / self.config.sample_rate
-        delay_ok = self._current_delay >= 0
+        delay_samples = int(self._current_delay) if self._current_delay >= 0 else 0
+        delay_ms = delay_samples / self.config.sample_rate * 1000.0
         return AecStats(
             frame_count=self._frame_count,
             time_s=self._frame_count * hop_s,
@@ -4373,8 +4374,8 @@ class AEC:
             error_power_db=_db(self.error_power),
             far_activity=d.get('far_activity', 0.0),
             saturation_level=self._saturation_level,
-            delay_samples=int(self._current_delay) if delay_ok else 0,
-            delay_ms=self._current_delay / self.config.sample_rate * 1000.0 if delay_ok else 0.0,
+            delay_samples=delay_samples,
+            delay_ms=delay_ms,
             shadow_advantage=self._shadow_advantage,
             shadow_copy_count=self._shadow_copy_ctrl.copy_counter,
             main_paused=self._shadow_copy_ctrl.main_paused,

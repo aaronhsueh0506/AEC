@@ -64,8 +64,22 @@ FS lead.
 coherence (P/W decoupling). v3.7.1 fixes residual estimator's reliance
 on e2 — two independent filter-side fixes that stack.
 
-**Other presets**: render branch removal applies preset-independently.
-README BALANCED row updated; MILD/AGGRESSIVE/MAXIMUM re-bench in progress.
+**Other presets** (2026-04-30 4-preset rebench, fl=52ms / cng / j4):
+
+| Preset | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
+|---|---|---|---|---|---|---|---|
+| MILD | 3.712 | 3.820 | 4.006 | 4.089 | 2.330 | 4.027 | 2.333 |
+| BALANCED | 3.877 | 3.941 | 3.993 | 4.263 | 2.224 | 4.162 | 2.219 |
+| AGGRESSIVE | 3.904 | 3.941 | 3.986 | 4.294 | 2.186 | 4.191 | 2.196 |
+| MAXIMUM | 3.951 | 3.969 | 3.974 | 4.332 | 2.155 | 4.223 | 2.152 |
+
+**Preset trade-off**:
+- MILD: NE deg 4.006 above floor; DT deg 2.33 (highest).
+- BALANCED: G1+B primary operating point; DT_mv deg 2.219 vs AEC2 2.528 = −0.309 gap (largest remaining).
+- AGGRESSIVE: balanced echo/deg trade; DT_st echo 4.294.
+- MAXIMUM: DT_st echo 4.332 **exceeds AEC2 (4.331)**; FS leads AEC2 by ≥+0.45.
+
+vs v3.7.0 4-preset deltas: MILD-MAX 各 metric ±0.01 內，B 改動 preset-independent 結論成立。
 
 **Plan**: continue C-stick experiment (linear_failed N-frame hysteresis
 + sticky `_filter_once_converged` gate) on `experiment/e2-architectural`

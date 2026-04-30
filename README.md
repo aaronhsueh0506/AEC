@@ -16,14 +16,14 @@
 
 **v3.7.0 PR-G1**：PBFDKF P-covariance update 用 mu_mean-blended KX，修 DT 期間 P/W decoupling。詳見 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
 
-**v3.7.0 4-preset operating points**（v3.7.1 4-preset re-bench 進行中，下表是 v3.7.0 數字）：
+**v3.7.1 4-preset operating points**（2026-04-30 rebench, fl=52ms / cng=True / j4）：
 
-| Preset (v3.7.0) | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
+| Preset (v3.7.1) | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
 |--------|-----------|-----------|--------|-----------|----------|-----------|----------|
-| MILD | 3.719 | 3.839 | **4.005** | 4.090 | 2.327 | 4.026 | 2.329 |
-| BALANCED | 3.880 | 3.957 | 3.991 | 4.264 | 2.220 | 4.163 | 2.212 |
-| AGGRESSIVE | 3.907 | 3.944 | 3.986 | 4.295 | 2.183 | 4.186 | 2.194 |
-| MAXIMUM | **3.950** | **3.969** | 3.974 | **4.331** | 2.157 | **4.222** | 2.156 |
+| MILD | 3.712 | 3.820 | **4.006** | 4.089 | 2.330 | 4.027 | **2.333** |
+| BALANCED | 3.877 | 3.941 | 3.993 | 4.263 | 2.224 | 4.162 | 2.219 |
+| AGGRESSIVE | 3.904 | 3.941 | 3.986 | 4.294 | 2.186 | 4.191 | 2.196 |
+| MAXIMUM | **3.951** | **3.969** | 3.974 | **4.332** | **2.155** | **4.223** | 2.152 |
 
 
 
