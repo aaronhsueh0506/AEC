@@ -1,20 +1,29 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v3.7.0），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+回音消除模組（v3.7.1），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
 
-**v3.7.0 4-preset 800-case AECMOS（2026-04-30，AEC Challenge Interspeech 2021, fl=52ms / cng=True / j4）**：
+**v3.7.1 BALANCED 800-case AECMOS（2026-04-30，AEC Challenge Interspeech 2021, fl=52ms / cng=True / j4）**：
 
-| Preset | FS_st echo↑ | FS_mv echo↑ | NE deg↑ | DT_st echo↑ | DT_st deg↑ | DT_mv echo↑ | DT_mv deg↑ |
+| version | FS_st echo↑ | FS_mv echo↑ | NE deg↑ | DT_st echo↑ | DT_st deg↑ | DT_mv echo↑ | DT_mv deg↑ |
 |--------|-----------|-----------|--------|-----------|----------|-----------|----------|
-| **MILD** | 3.719 | 3.839 | **4.005** | 4.090 | **2.327** | 4.026 | **2.329** |
-| **BALANCED** | 3.880 | 3.957 | 3.991 | 4.264 | 2.220 | 4.163 | 2.212 |
-| **AGGRESSIVE** | 3.907 | 3.944 | 3.986 | 4.295 | 2.183 | 4.186 | 2.194 |
-| **MAXIMUM** | **3.950** | **3.969** | 3.974 | **4.331** | 2.157 | **4.222** | 2.156 |
+| **v3.7.1 BALANCED** | 3.877 | **3.941** | **3.993** | 4.263 | **2.224** | 4.162 | **2.219** |
+| v3.7.0 BALANCED | 3.880 | 3.957 | 3.991 | 4.264 | 2.220 | 4.163 | 2.212 |
+| Δ v3.7.1 | -0.003 | **-0.016** | **+0.002** | -0.001 | **+0.004** | -0.001 | **+0.011** |
 | *WebRTC AEC2 (ref)* | *3.457* | *3.519* | *4.098* | *4.331* | *2.304* | *4.149* | *2.528* |
+| *gap vs AEC2 (v3.7.1)* | *+0.420* | *+0.422* | *−0.105* | *−0.068* | *−0.080* | *+0.013* | *−0.309* |
 
-> **v3.7.0 PR-G1 主要改進**：PBFDKF P-covariance update 用 mu_mean-blended KX，避免 DT 期間 P 跟 W decoupling 造成 Kalman 過自信、DT 結束後 recovery 慢。**首次達成全 5 bucket 同向改善（或持平）vs v3.6.1**——MAXIMUM 把 DT_st echo 推到 4.331 完全收齊 AEC2 reference，BALANCED 的 DT_mv deg 從 v3.6.1 最大 gap (−0.320) 收回 +0.004。詳見 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
+> **v3.7.1 PR-B 主要改進**：移除 `linear_failed` 的 render-based fallback branch。WebRTC AEC3 source code research 發現 AEC3 **從不用 error_psd 當 floor**（DT 期間 `e2 = NE + residual_echo`，用 e2 當 floor 結構性誤殺 NE）。Trace 證實 v3.7.0 此 branch 在 DT_mv 35% frames 觸發、effective_dt false-negative=0.008 → 砍 NE。移除後 **DT_mv deg +0.011 / NE +0.002 / DT_st deg +0.004**，代價 FS_mv echo -0.016（仍領先 AEC2 +0.422）。
 
-**vs AEC2 gap 對照（BALANCED）**：FS_st **+0.423 ahead** / FS_mv **+0.438 ahead** / NE −0.107 / DT_st echo −0.067 / DT_st deg −0.084 / DT_mv echo +0.014 / DT_mv deg −0.316。MILD 維持 NE deg ≥ 4.000、AGGRESSIVE/MAXIMUM 為了 DT/FS 性能讓 NE 略低至 ~3.97-3.99。
+**v3.7.0 PR-G1**：PBFDKF P-covariance update 用 mu_mean-blended KX，修 DT 期間 P/W decoupling。詳見 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
+
+**v3.7.0 4-preset operating points**（v3.7.1 4-preset re-bench 進行中，下表是 v3.7.0 數字）：
+
+| Preset (v3.7.0) | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
+|--------|-----------|-----------|--------|-----------|----------|-----------|----------|
+| MILD | 3.719 | 3.839 | **4.005** | 4.090 | 2.327 | 4.026 | 2.329 |
+| BALANCED | 3.880 | 3.957 | 3.991 | 4.264 | 2.220 | 4.163 | 2.212 |
+| AGGRESSIVE | 3.907 | 3.944 | 3.986 | 4.295 | 2.183 | 4.186 | 2.194 |
+| MAXIMUM | **3.950** | **3.969** | 3.974 | **4.331** | 2.157 | **4.222** | 2.156 |
 
 
 
