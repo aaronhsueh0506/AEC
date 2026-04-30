@@ -76,6 +76,23 @@ sliding returned). G2a (DT brake 0.15→0.5) softened DT regression but
 still net trade-off. Per GPT revised guidance, v3.7.1 will only modify
 DT branch (keep FS clean = 1.0) — testing in separate work cycle.
 
+**4-preset 800-case AECMOS** (2026-04-30, fl=52ms / cng=True / j4):
+
+| Preset | FS_st | FS_mv | NE deg | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| MILD | 3.719 | 3.839 | 4.005 | 4.090 | 2.327 | 4.026 | 2.329 |
+| BALANCED | 3.880 | 3.957 | 3.991 | 4.264 | 2.220 | 4.163 | 2.212 |
+| AGGRESSIVE | 3.907 | 3.944 | 3.986 | 4.295 | 2.183 | 4.186 | 2.194 |
+| MAXIMUM | 3.950 | 3.969 | 3.974 | 4.331 | 2.157 | 4.222 | 2.156 |
+| WebRTC AEC2 | 3.457 | 3.519 | 4.098 | 4.331 | 2.304 | 4.149 | 2.528 |
+
+Notes:
+- MILD: NE deg above 4.000 floor (4.005); DT deg highest among presets.
+- BALANCED: G1 KX blended primary operating point.
+- MAXIMUM: DT_st echo (4.331) **fully matches AEC2 reference**, FS leads
+  AEC2 by +0.49/+0.45; trade is NE deg −0.124 vs AEC2 and DT_mv deg
+  −0.372.
+
 ---
 
 ## v3.6.1 (2026-04-29) — DT-from-frame-0 spec + stats detector (PR-D4)
