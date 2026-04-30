@@ -2,17 +2,19 @@
 
 回音消除模組（v3.7.0），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
 
-**v3.7.0 vs v3.6.1 BALANCED 800-case AECMOS（2026-04-30，AEC Challenge Interspeech 2021）**：
+**v3.7.0 4-preset 800-case AECMOS（2026-04-30，AEC Challenge Interspeech 2021, fl=52ms / cng=True / j4）**：
 
-| Preset / version | FS_st echo↑ | FS_mv echo↑ | NE deg↑ | DT_st echo↑ | DT_st deg↑ | DT_mv echo↑ | DT_mv deg↑ |
+| Preset | FS_st echo↑ | FS_mv echo↑ | NE deg↑ | DT_st echo↑ | DT_st deg↑ | DT_mv echo↑ | DT_mv deg↑ |
 |--------|-----------|-----------|--------|-----------|----------|-----------|----------|
-| **v3.7.0 (BALANCED)** | **3.880** | **3.957** | 3.991 | **4.264** | 2.220 | **4.163** | **2.212** |
-| v3.6.1 (BALANCED) | 3.877 | 3.954 | 3.991 | 4.257 | 2.224 | 4.158 | 2.208 |
-| Δ v3.7.0 | **+0.003** | **+0.003** | 0 | **+0.007** | -0.004 | **+0.005** | **+0.004** |
+| **MILD** | 3.719 | 3.839 | **4.005** | 4.090 | **2.327** | 4.026 | **2.329** |
+| **BALANCED** | 3.880 | 3.957 | 3.991 | 4.264 | 2.220 | 4.163 | 2.212 |
+| **AGGRESSIVE** | 3.907 | 3.944 | 3.986 | 4.295 | 2.183 | 4.186 | 2.194 |
+| **MAXIMUM** | **3.950** | **3.969** | 3.974 | **4.331** | 2.157 | **4.222** | 2.156 |
 | *WebRTC AEC2 (ref)* | *3.457* | *3.519* | *4.098* | *4.331* | *2.304* | *4.149* | *2.528* |
-| *gap vs AEC2 (v3.7.0)* | *+0.423* | *+0.438* | *−0.107* | *−0.067* | *−0.084* | *+0.014* | *−0.316* |
 
-> **v3.7.0 主要改進**（PR-G1）：PBFDKF P-covariance update 用 mu_mean-blended KX，避免 DT 期間 P 跟 W decoupling 造成 Kalman 過自信、DT 結束後 recovery 慢。**首次達成全 5 bucket 同向改善（或持平）**——DT_mv deg 是 v3.6.1 最大 gap (−0.320)，G1 收回 +0.004。詳見 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
+> **v3.7.0 PR-G1 主要改進**：PBFDKF P-covariance update 用 mu_mean-blended KX，避免 DT 期間 P 跟 W decoupling 造成 Kalman 過自信、DT 結束後 recovery 慢。**首次達成全 5 bucket 同向改善（或持平）vs v3.6.1**——MAXIMUM 把 DT_st echo 推到 4.331 完全收齊 AEC2 reference，BALANCED 的 DT_mv deg 從 v3.6.1 最大 gap (−0.320) 收回 +0.004。詳見 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
+
+**vs AEC2 gap 對照（BALANCED）**：FS_st **+0.423 ahead** / FS_mv **+0.438 ahead** / NE −0.107 / DT_st echo −0.067 / DT_st deg −0.084 / DT_mv echo +0.014 / DT_mv deg −0.316。MILD 維持 NE deg ≥ 4.000、AGGRESSIVE/MAXIMUM 為了 DT/FS 性能讓 NE 略低至 ~3.97-3.99。
 
 
 
