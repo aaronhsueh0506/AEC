@@ -5,6 +5,104 @@ or tuning sweeps; patch is bugfix.
 
 ---
 
+## v3.8.0 (2026-05-01) — Remove e2/mic-as-echo-floor architectural mistakes (ABL-1 + ABL-2)
+
+**Goal**: Continue v3.7.1's AEC3-aligned cleanup. Two more legacy floors that
+structurally use NE-contaminated signals as "echo proxies".
+
+**Changes**:
+
+1. **ABL-1 — remove v3.3 `error_based_floor`** (ResidualEchoEstimator):
+   ```python
+   # Removed:
+   far_conf = far_psd / (far_psd + error_psd * 0.05 + 1e-10)
+   fallback_factor = 0.7 - 0.2 * np.clip(dt_for_fs, 0.0, 1.0)
+   error_based_floor = error_psd * far_conf * fallback_factor
+   render_based_echo = np.maximum(render_based_echo, error_based_floor)
+   ```
+   `error_psd` contains NE during DT, so using it as residual_echo floor
+   structurally over-suppresses near-end (same lesson as v3.7.1 PR-B).
+   Use only `render_based_echo = far × ERL` — AEC3-aligned.
+
+2. **ABL-2 — remove v3.5 Y2 fallback `mic_psd × 0.5`** (ResFilter.process):
+   ```python
+   # Removed:
+   if (far_power > 1e-4 and self._residual_est.using_render_based
+           and near_spec is not None):
+       error_max_abs = float(np.max(np.abs(error_hop)))
+       if error_max_abs > 0.05:
+           mic_psd = np.abs(near_spec).astype(np.float32) ** 2
+           residual_echo_psd = np.maximum(residual_echo_psd, mic_psd * 0.5)
+   ```
+   Trigger `render_based + error_peak > 0.05` is structurally NE-blind — DT
+   speech also produces high error peaks. Floor `mic_psd × 0.5` then equates
+   the near-end+echo mixture with "echo proxy" → over-suppress NE. AEC3 uses
+   explicit saturation detection (mic clipping), not error peak.
+
+3. **Kept `render_dt_gain_ceil = 0.6`** (ABL-3 reverted): ablation showed
+   removal causes +0.008 DT_mv deg / -0.046 FS_mv echo (Pareto ratio 0.17,
+   much worse than ABL-2's 0.67). Confirmed load-bearing for FS echo —
+   keep, document in code comment.
+
+**800-case AECMOS vs v3.7.1 (BALANCED / fl=52ms / cng / j4)**:
+
+| bucket | v3.7.1 | v3.8.0 | Δ |
+|---|---|---|---|
+| FS_st | 3.877 | 3.801 | **-0.076** |
+| FS_mv | 3.941 | 3.863 | **-0.078** |
+| NE deg | 3.993 | 4.002 | **+0.009** |
+| DT_st echo | 4.263 | 4.256 | -0.007 |
+| DT_st deg | 2.224 | **2.257** | **+0.033** |
+| DT_mv echo | 4.162 | 4.144 | -0.018 |
+| DT_mv deg | 2.219 | **2.269** | **+0.050** |
+
+**DT_mv deg gap vs AEC2: 0.309 → 0.259 (closed 16%)**.
+
+**Why structural, not Pareto sliding**: ABL-1 + ABL-2 both remove "use signal
+containing NE as echo proxy" floors. Same mechanism as v3.7.1 PR-B. Closing
+this entire family of architectural mistakes (`v3.7.1 e2-floor + v3.8.0
+error-based-floor + Y2-fallback`) gives DT preservation across all 4 presets.
+
+**Other presets** (2026-05-01 4-preset rebench):
+
+| Preset | FS_st | FS_mv | NE | DT_st e/d | DT_mv e/d |
+|---|---|---|---|---|---|
+| MILD | 3.626 | 3.733 | 4.013 | 4.083/2.368 | 4.010/2.395 |
+| BALANCED | 3.801 | 3.863 | 4.002 | 4.256/2.257 | 4.144/2.269 |
+| AGGRESSIVE | 3.829 | 3.867 | 3.997 | 4.285/2.218 | 4.169/2.239 |
+| MAXIMUM | 3.886 | 3.909 | 3.987 | 4.322/2.180 | 4.206/2.186 |
+
+vs v3.7.1: DT deg gain consistent across all presets (DT_mv +0.034~+0.062),
+NE deg gain consistent (+0.007~+0.013), FS echo cost consistent (-0.06~-0.09)
+— confirms preset-independent structural fix.
+
+**Out of scope (deferred to v3.8.x)**:
+
+- ABL-4: `linear_failed = erl_estimate > 1.2` branch (`error_psd × 0.9`) on
+  ResFilter.process line ~1663. Trace verified `self._erl_estimate` clipped
+  to [0.001, 1.0] so 0% fire rate — dead code. Defer to single-cut ablation
+  in v3.8.1.
+- v3.8.1 hygiene candidates tested but deferred (no metric impact in BALANCED):
+  delay_first ERL re-init, delay_shift ERL cap, reset() lazy-diag-counter clear.
+- H1 (`DominantNearendDetector` for filter-independent DT detection in
+  loud-DT) explored extensively (v1-v7) but Pareto-bound on this dataset.
+  Architectural finding preserved in plan: linear filter learns NE into W
+  during loud-DT (eff_dt false-negative); needs phase coherence (R3) or
+  masking-aware suppression (R7) to break Pareto. Stashed.
+
+**Trace investigations that informed this release** (all in plan):
+
+- C1 (far_active adaptive threshold): trace証伪. DT_mv deg gap is in
+  loud-far cases (gap_d=-0.601), not quiet-far. C1 not binding.
+- R6 (smoothed far-conditioned ERL): trace証伪. `linear_failed > 1.2` is
+  dead code, not the false-positive mechanism described pre-v3.7.1.
+- 5-site systematic trace: identified that worst-DT_mv cases have eff_dt
+  ≈ 0 + gain_after_smoothing ≈ 1.0 — root cause is linear filter learning
+  NE into W, NOT ResFilter over-suppression. RES pipeline 5 scalar-DT
+  gates are mostly inert in worst cases.
+
+---
+
 ## v3.7.1 (2026-04-30) — Drop render-based linear_failed fallback (PR-B)
 
 **Goal**: Address residual DT_mv deg gap (−0.316 vs AEC2 in v3.7.0) by

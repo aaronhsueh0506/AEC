@@ -1,29 +1,36 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v3.7.1），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+回音消除模組（v3.8.0），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
 
-**v3.7.1 BALANCED 800-case AECMOS（2026-04-30，AEC Challenge Interspeech 2021, fl=52ms / cng=True / j4）**：
+**v3.8.0 BALANCED 800-case AECMOS（2026-05-01，AEC Challenge Interspeech 2021, fl=52ms / cng=True / j4）**：
 
 | version | FS_st echo↑ | FS_mv echo↑ | NE deg↑ | DT_st echo↑ | DT_st deg↑ | DT_mv echo↑ | DT_mv deg↑ |
 |--------|-----------|-----------|--------|-----------|----------|-----------|----------|
-| **v3.7.1 BALANCED** | 3.877 | **3.941** | **3.993** | 4.263 | **2.224** | 4.162 | **2.219** |
-| v3.7.0 BALANCED | 3.880 | 3.957 | 3.991 | 4.264 | 2.220 | 4.163 | 2.212 |
-| Δ v3.7.1 | -0.003 | **-0.016** | **+0.002** | -0.001 | **+0.004** | -0.001 | **+0.011** |
+| **v3.8.0 BALANCED** | 3.801 | 3.863 | **4.002** | 4.256 | **2.257** | 4.144 | **2.269** |
+| v3.7.1 BALANCED | 3.877 | 3.941 | 3.993 | 4.263 | 2.224 | 4.162 | 2.219 |
+| Δ v3.8.0 | **-0.076** | **-0.078** | **+0.009** | -0.007 | **+0.033** | -0.018 | **+0.050** |
 | *WebRTC AEC2 (ref)* | *3.457* | *3.519* | *4.098* | *4.331* | *2.304* | *4.149* | *2.528* |
-| *gap vs AEC2 (v3.7.1)* | *+0.420* | *+0.422* | *−0.105* | *−0.068* | *−0.080* | *+0.013* | *−0.309* |
+| *gap vs AEC2 (v3.8.0)* | *+0.344* | *+0.344* | *−0.096* | *−0.075* | *−0.047* | *−0.005* | *−0.259* |
 
-> **v3.7.1 PR-B 主要改進**：移除 `linear_failed` 的 render-based fallback branch。WebRTC AEC3 source code research 發現 AEC3 **從不用 error_psd 當 floor**（DT 期間 `e2 = NE + residual_echo`，用 e2 當 floor 結構性誤殺 NE）。Trace 證實 v3.7.0 此 branch 在 DT_mv 35% frames 觸發、effective_dt false-negative=0.008 → 砍 NE。移除後 **DT_mv deg +0.011 / NE +0.002 / DT_st deg +0.004**，代價 FS_mv echo -0.016（仍領先 AEC2 +0.422）。
+> **v3.8.0 雙重 ABL 主要改進**：
+> - **ABL-1**: 移除 v3.3 `error_based_floor`（`error_psd × far_conf × 0.7`）— `error_psd` 在 DT 含 NE，當 floor 結構性誤殺 NE。
+> - **ABL-2**: 移除 v3.5 Y2 fallback `mic_psd × 0.5`（render_based + error_peak > 0.05 trigger）— 「mic 含 NE」當 echo proxy 同類錯誤，DT speech 也觸發。
+>
+> 兩者都是 v3.7.1 PR-B 移除 e2-floor 結構同類錯誤的延伸。**收益 DT_mv deg gap 0.309 → 0.259（收斂 16%）**，代價 FS echo -0.076（仍領先 AEC2 +0.344）。preset-independent 全部 4 preset 一致改善。
+>
+> **保留**：`render_dt_gain_ceil = 0.6`（ablation 驗證 load-bearing for FS echo）。
 
-**v3.7.0 PR-G1**：PBFDKF P-covariance update 用 mu_mean-blended KX，修 DT 期間 P/W decoupling。詳見 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
+**v3.7.1 PR-B**：移除 `linear_failed` render-based e2-floor，AEC3-aligned。
+**v3.7.0 PR-G1**：PBFDKF P-covariance 用 mu_mean-blended KX 修 DT P/W decoupling。詳見 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
 
-**v3.7.1 4-preset operating points**（2026-04-30 rebench, fl=52ms / cng=True / j4）：
+**v3.8.0 4-preset operating points**（2026-05-01 rebench, fl=52ms / cng=True / j4）：
 
-| Preset (v3.7.1) | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
+| Preset (v3.8.0) | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
 |--------|-----------|-----------|--------|-----------|----------|-----------|----------|
-| MILD | 3.712 | 3.820 | **4.006** | 4.089 | 2.330 | 4.027 | **2.333** |
-| BALANCED | 3.877 | 3.941 | 3.993 | 4.263 | 2.224 | 4.162 | 2.219 |
-| AGGRESSIVE | 3.904 | 3.941 | 3.986 | 4.294 | 2.186 | 4.191 | 2.196 |
-| MAXIMUM | **3.951** | **3.969** | 3.974 | **4.332** | **2.155** | **4.223** | 2.152 |
+| MILD | 3.626 | 3.733 | **4.013** | 4.083 | 2.368 | 4.010 | **2.395** |
+| BALANCED | 3.801 | 3.863 | 4.002 | 4.256 | 2.257 | 4.144 | 2.269 |
+| AGGRESSIVE | 3.829 | 3.867 | 3.997 | 4.285 | 2.218 | 4.169 | 2.239 |
+| MAXIMUM | **3.886** | **3.909** | 3.987 | **4.322** | **2.180** | **4.206** | 2.186 |
 
 
 

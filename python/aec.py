@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.6.1"
+__version__ = "3.8.0"
 
 import numpy as np
 from collections import deque
@@ -1538,20 +1538,11 @@ class ResFilter:
                 aec_state=aec_state,
             )
 
-            # v3.5.0: AEC3-style Y2-fallback for "saturated_echo" equivalent.
-            # When filter is in render-based mode (linear estimate unreliable)
-            # AND post-filter signal still has excessive amplitude, residual_echo_psd
-            # estimate is unreliably small → ENR ≈ 0 → soft-gate g=1.0 (no
-            # suppression). Substituting residual_echo_psd ← mic_psd × 0.5 forces
-            # ENR large → soft-gate suppresses. Trace verified WYKA2 worst-leak
-            # hotspot ratio 111,827× → 5× (mechanism functional).
-            if (far_power > 1e-4 and self._residual_est.using_render_based
-                    and near_spec is not None):
-                error_max_abs = float(np.max(np.abs(error_hop)))
-                if error_max_abs > 0.05:
-                    mic_psd = np.abs(near_spec).astype(np.float32) ** 2
-                    residual_echo_psd = np.maximum(residual_echo_psd,
-                                                   mic_psd * 0.5)
+            # v3.8 ABL-2 (ablate v3.5 Y2-fallback mic_psd × 0.5): trigger condition
+            # `render_based + error_peak > 0.05` is structurally NE-blind — DT speech
+            # also produces high error peaks. Floor `mic_psd × 0.5` then equates the
+            # near-end+echo mixture with "echo proxy" → over-suppress NE. AEC3 uses
+            # explicit saturation detection (mic clipping), not error peak.
 
             # Nonlinear echo mode: when speaker distortion is sustained,
             # the linear filter can't model harmonics. Boost residual_echo_psd
@@ -1961,6 +1952,9 @@ class ResFilter:
         # of frames no suppression); rc1 used dt_combined>0.3 gate but missed
         # frames with low DT signal. rc3 broadens to far-active and tightens
         # ceiling 0.7→0.6.
+        # v3.8 ablation 2026-04-30: removing this caused +0.008 DT_mv deg but
+        # -0.046 FS_mv echo regression (Pareto ratio 0.17, much worse than ABL-2's
+        # 0.67). Confirmed load-bearing for FS echo — keep.
         if self._residual_est.using_render_based and self.far_activity > 0.3:
             ceil = getattr(self, 'render_dt_gain_ceil', 0.6)
             smoothed = np.minimum(smoothed, ceil)
@@ -2631,21 +2625,11 @@ class ResidualEchoEstimator:
             if self._using_render_based:
                 far_psd = (np.abs(far_spec) ** 2 if far_spec is not None
                            else np.zeros(self.n_freqs, dtype=np.float32))
-                # v3.3: render_based_echo = far × ERL underestimates by 2 orders
-                # when filter never converges (trace: 4.2 vs error 239). Fall back
-                # to error-based hypothesis: residual = max(direct, error × conf × 0.7)
-                # where conf is per-bin "active echo path" indicator (high far_psd
-                # vs error → echo dominant, low far → likely NE).
-                # The existing IIR reverb at line ~1577 handles RT60 tail accumulation.
+                # v3.8 ABL-1 (ablate v3.3 error_based_floor): error_psd contains
+                # NE during DT, so using it as residual_echo floor structurally
+                # over-suppresses near-end (same lesson as v3.7.1 PR-B). Use only
+                # render_based_echo = far × ERL — AEC3-aligned.
                 render_based_echo = far_psd * erl_estimate
-                far_conf = far_psd / (far_psd + error_psd * 0.05 + 1e-10)
-                far_conf = np.clip(far_conf, 0.0, 1.0)
-                # v3.4 Axis 3: DT-aware fallback factor. In strong DT (NE present),
-                # less of error_psd is echo, so reduce factor 0.7 → 0.5 to protect
-                # DT_movement deg. dt_for_fs ≈ 1 means strong DT.
-                fallback_factor = 0.7 - 0.2 * np.clip(dt_for_fs, 0.0, 1.0)
-                error_based_floor = error_psd * far_conf * fallback_factor
-                render_based_echo = np.maximum(render_based_echo, error_based_floor)
                 blend = 1.0 - erle_factor / effective_threshold
                 blend = np.clip(blend, 0.0, 1.0)
                 residual_echo_psd = ((1.0 - blend) * residual_echo_psd
