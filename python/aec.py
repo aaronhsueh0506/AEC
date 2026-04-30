@@ -1659,12 +1659,17 @@ class ResFilter:
             echo_boost = 1.0 + 0.5 * coh2 if dt_for_fs < 0.2 else np.ones_like(coh2)
             residual_echo_psd = residual_echo_psd * echo_boost
 
-        # RESv3 E8a: Linear AEC failure fallback (aggressive mode).
-        # When linear filter struggles (high erl or render-based with low erle),
-        # force residual_echo_psd toward error energy so ENR → large →
-        # gain = g_min. Guard by effective_dt<0.2 to protect DT.
-        linear_failed = (erl_estimate > 1.2
-                         or (self._using_render_based and erle_factor < 0.2))
+        # PR-B (experiment 2026-04-30, AEC3-aligned): drop render-based fallback
+        # branch. WebRTC AEC3 never uses error_psd as floor — relies on
+        # render×ERL_smoothed in residual_echo_estimator.cc. Our prior
+        # `using_render_based and erle_factor < 0.2` branch fired 35% of DT_mv
+        # frames when effective_dt was false-negative (=0.008), inflating
+        # residual via e2 (which contains NE during DT) → killed near-end.
+        # Render-based mode itself already inflates residual via far×ERL, so
+        # the secondary error_psd × 0.9 floor is double-suppression.
+        # Keep ERL-based branch (erl_estimate > 1.2) — physical mic/far ratio
+        # independent of filter health.
+        linear_failed = erl_estimate > 1.2
         if (far_power > 1e-4 and linear_failed
                 and effective_dt < 0.2 and residual_echo_psd is not None):
             residual_echo_psd = np.maximum(residual_echo_psd, self.error_psd * 0.9)
