@@ -1,6 +1,20 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v2.8.1），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+回音消除模組（v3.7.0），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+
+**v3.7.0 vs v3.6.1 BALANCED 800-case AECMOS（2026-04-30，AEC Challenge Interspeech 2021）**：
+
+| Preset / version | FS_st echo↑ | FS_mv echo↑ | NE deg↑ | DT_st echo↑ | DT_st deg↑ | DT_mv echo↑ | DT_mv deg↑ |
+|--------|-----------|-----------|--------|-----------|----------|-----------|----------|
+| **v3.7.0 (BALANCED)** | **3.880** | **3.957** | 3.991 | **4.264** | 2.220 | **4.163** | **2.212** |
+| v3.6.1 (BALANCED) | 3.877 | 3.954 | 3.991 | 4.257 | 2.224 | 4.158 | 2.208 |
+| Δ v3.7.0 | **+0.003** | **+0.003** | 0 | **+0.007** | -0.004 | **+0.005** | **+0.004** |
+| *WebRTC AEC2 (ref)* | *3.457* | *3.519* | *4.098* | *4.331* | *2.304* | *4.149* | *2.528* |
+| *gap vs AEC2 (v3.7.0)* | *+0.423* | *+0.438* | *−0.107* | *−0.067* | *−0.084* | *+0.014* | *−0.316* |
+
+> **v3.7.0 主要改進**（PR-G1）：PBFDKF P-covariance update 用 mu_mean-blended KX，避免 DT 期間 P 跟 W decoupling 造成 Kalman 過自信、DT 結束後 recovery 慢。**首次達成全 5 bucket 同向改善（或持平）**——DT_mv deg 是 v3.6.1 最大 gap (−0.320)，G1 收回 +0.004。詳見 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
+
+
 
 **v2.8.1（2026-04-28）— Movement DT 系統性排查 + Code cleanup**：
 

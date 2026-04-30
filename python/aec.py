@@ -762,6 +762,12 @@ class PBFDKF(PBFDAF):
         self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
         self._alpha_r = 0.95   # faster R tracking for DT protection
 
+        # GPT Phase 1 debug trace (off by default, zero overhead).
+        # When enabled, accumulates per-frame stats to verify hypothesis:
+        # "DT 期間 mu_scale 壓低但 P 仍因 K_optimal 快下降 → DT 結束後 P 偏低 → recovery 慢"
+        self._enable_kx_trace = False
+        self._kx_trace = []  # list of dicts, one per call to _update_weights
+
     def reset(self):
         super().reset()
         self.P.fill(0.01)
@@ -829,6 +835,13 @@ class PBFDKF(PBFDAF):
             total_echo_var += self.P[p] * (np.abs(X) ** 2)
         denominator = total_echo_var + self.R + np.float32(self.delta)
 
+        # GPT Phase 1 trace: per-partition KX_optimal vs KX_scaled accumulator.
+        if self._enable_kx_trace:
+            kx_opt_acc = []
+            kx_scaled_acc = []
+            p_before_acc = []
+            p_after_acc = []
+
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
             X = self.X_buf[p_idx]
@@ -840,21 +853,50 @@ class PBFDKF(PBFDAF):
 
             self.W[p] += K_scaled * self.error_spec
 
-            # Covariance update with UNSCALED K_optimal
-            # C-parity fix: use np.float32(1.0) to avoid float64 promotion
-            # in (1.0 - KX) where Python literal 1.0 is float64. C uses
-            # float32 throughout so this intermediate stays float32.
-            KX = np.real(K_optimal * X).astype(np.float32)
+            # PR-G1 (v3.7 candidate, GPT Phase 1): blended KX for P update.
+            # KX trace 2026-04-30 confirmed hypothesis on DT_st bucket: when
+            # mu_scale=0 (full DT freeze), W stays put but P drops 72% per
+            # cycle via K_optimal — P 與 W 不一致，DT 結束後 K 偏低、recovery 慢.
+            # Blend KX_optimal (current) with KX_scaled (W-consistent) by
+            # mu_mean: FS (mu=1) → 100% optimal, DT (mu=0) → 100% scaled,
+            # smooth transition between. Avoids both extremes' regression
+            # risk (full KX_optimal: P over-confident in DT; full KX_scaled:
+            # P over-cautious in steady state with weak far / per-bin gating).
+            KX_optimal = np.real(K_optimal * X).astype(np.float32)
+            KX_scaled = np.real(K_scaled * X).astype(np.float32)
+            mu_mean_f32 = np.float32(mu_mean)
+            KX = mu_mean_f32 * KX_optimal + (np.float32(1.0) - mu_mean_f32) * KX_scaled
+            if self._enable_kx_trace:
+                kx_opt_acc.append(float(np.mean(KX_optimal)))
+                kx_scaled_acc.append(float(np.mean(KX_scaled)))
+                p_before_acc.append(float(np.mean(self.P[p])))
             self.P[p] = np.minimum(
                 np.maximum((np.float32(1.0) - KX) * self.P[p] + Q_gated, P_floor),
                 p_max
             )
+            if self._enable_kx_trace:
+                p_after_acc.append(float(np.mean(self.P[p])))
 
             # Time-domain constraint (raised cosine fade)
             if self.enable_td_constraint:
                 w_time = np.fft.irfft(self.W[p], self.fft_size).astype(np.float32)
                 w_time *= self._td_window
                 self.W[p] = np.fft.rfft(w_time).astype(np.complex64)
+
+        if self._enable_kx_trace:
+            self._kx_trace.append({
+                'mu_mean': float(np.mean(mu_scale_arr)),
+                'kx_opt_mean': float(np.mean(kx_opt_acc)),
+                'kx_scaled_mean': float(np.mean(kx_scaled_acc)),
+                'p_before_mean': float(np.mean(p_before_acc)),
+                'p_after_mean': float(np.mean(p_after_acc)),
+                'p_p10': float(np.percentile([np.percentile(self.P[p], 10) for p in range(self.n_partitions)], 50)),
+                'p_p50': float(np.median([np.median(self.P[p]) for p in range(self.n_partitions)])),
+                'p_p90': float(np.percentile([np.percentile(self.P[p], 90) for p in range(self.n_partitions)], 50)),
+                'q_gated_mean': float(np.mean(Q_gated)),
+                'far_power_mean': float(np.mean(self.power)),
+                'error_power_mean': float(np.mean(self._error_psd)),
+            })
 
     def copy_weights_from(self, src: 'PBFDAF'):
         self.W[:] = src.W

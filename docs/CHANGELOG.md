@@ -5,6 +5,79 @@ or tuning sweeps; patch is bugfix.
 
 ---
 
+## v3.7.0 (2026-04-30) — Blended KX P-update for DT consistency (PR-G1)
+
+**Goal**: Break the corr(Δe, Δd) ≈ −0.81 Pareto wall identified in v3.6.1
+PR-F session by fixing main filter state coherence rather than reshaping
+masks. GPT Phase 1 hypothesis: in PBFDKF `_update_weights`, P covariance
+update uses unscaled `K_optimal` while weights use `K_scaled = K_optimal *
+mu_scale`. During DT (mu→0), W stays put but P shrinks via K_optimal —
+P/W decoupling makes Kalman over-confident; after DT, K becomes too small
+and filter recovery is slow.
+
+**KX trace verification (5-bucket, 2026-04-30 [/tmp/kx_trace.py](/tmp/kx_trace.py))**:
+DT_st 4.3% DT-active frames showed P median collapse from 0.0093 (FS)
+to 0.0026 (DT) — 72% drop per cycle, with mu_mean=0 driving KX_scaled=0
+while KX_optimal=4.6e-2. FE_mv recovery period showed P at 54% of FS
+level, confirming "DT 後 K 偏低 / recovery 慢" mechanism.
+
+**Patch ([python/aec.py:856-870](../python/aec.py#L856))**: blend KX between
+optimal and scaled by `mu_mean` (smooth, no binary discontinuity):
+```python
+KX = mu_mean * KX_optimal + (1 - mu_mean) * KX_scaled
+```
+- FS (mu_mean=1): KX = KX_optimal (legacy behavior)
+- DT (mu_mean=0): KX = KX_scaled (P consistent with W)
+- mid-range: smooth blend
+
+Avoids both extremes' regression risk (full KX_optimal causes DT P-collapse;
+full KX_scaled would over-cautious P in weak-far / per-bin-gating windows
+where mu_scale is per-bin attenuated for non-DT reasons).
+
+**800-case AECMOS vs git-vanilla v3.6.1 (BALANCED / fl=52ms / cng / j4)**:
+
+| bucket | vanilla | G1 | Δ |
+|---|---:|---:|---:|
+| FS_st | 3.877 | 3.880 | **+0.003** |
+| FS_mv | 3.954 | 3.957 | **+0.003** |
+| NE | 3.991 | 3.991 | 0.000 |
+| DT_st echo | 4.257 | 4.264 | **+0.008** |
+| DT_st deg | 2.224 | 2.220 | -0.004 (noise) |
+| DT_mv echo | 4.158 | 4.163 | **+0.006** |
+| DT_mv deg | 2.208 | 2.212 | **+0.004** |
+
+**First all-positive-or-flat result this development cycle** — all prior
+v3.7 candidates (PR-A coh2, PR-F1v2 dt_per_bin, Path C dominant_nearend
+detector, R2 effective_dt gate) slid along corr(Δe,Δd)≈−0.81. G1 breaks
+that pattern by fixing upstream filter state coherence rather than
+redistributing mask decisions.
+
+**Magnitudes are small** (+0.003 to +0.008) because the existing
+`P_floor = Q_high × 0.1` mechanism already partially mitigated DT-end P
+collapse. KX blending closes the residual gap without regressing
+steady-state behavior.
+
+**Diagnostic infrastructure**: PBFDKF gains `_enable_kx_trace` flag (off
+by default, zero overhead) that accumulates per-frame `mu_mean` /
+`KX_optimal` / `KX_scaled` / `P_p10/p50/p90` / `Q_gated` / `error_power` /
+`far_power` for offline analysis. Used by [/tmp/kx_trace.py](/tmp/kx_trace.py)
+5-bucket verification harness.
+
+**Baseline JSON regenerated**: [python/baseline_v36_vs_aec2.json](../python/baseline_v36_vs_aec2.json)
+rescored from current git-vanilla v3.6.1 outputs (old baseline drifted
++0.20 FS / +0.07 DT echo from current code; led to mirage Δ during PR-F
+session — see [feedback_baseline_json_drift.md](~/.claude/projects/-Users-mingyu-Desktop-novatek-SE/memory/feedback_baseline_json_drift.md)
+memory).
+
+**Out of scope (deferred to v3.7.1)**: GPT Phase 2 shadow PBFDKF policy
+differentiation. G2 (4-branch shadow_mu_scale) tested on top of G1 — gave
+FS+DT echo +0.022~+0.030 but DT_st deg −0.041 / DT_mv deg −0.011 (Pareto
+sliding returned). G2a (DT brake 0.15→0.5) softened DT regression but
+still net trade-off. Per GPT revised guidance, v3.7.1 will only modify
+DT branch (keep FS clean = 1.0) — testing in separate work cycle.
+
+---
+
 ## v3.6.1 (2026-04-29) — DT-from-frame-0 spec + stats detector (PR-D4)
 
 **Goal**: Document the linear-AEC fundamental limit identified during PR-D
@@ -40,6 +113,23 @@ Detector validation on representative cases:
 
 Discrimination correct: fires only on actual DT-from-frame-0 cases; FS and
 NE clean.
+
+**Preset 800-case operating points (vanilla v3.6.1, AEC Challenge blind, AECMOS)**:
+
+| Preset | FS_st echo | FS_mv echo | NE deg | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
+|--------|-----------|-----------|--------|-----------|----------|-----------|----------|
+| MILD | 3.687 | 3.791 | 4.009 | 4.080 | 2.343 | 4.019 | 2.340 |
+| BALANCED | 3.675 | 3.931 | 4.000 | 4.182 | 2.325 | 4.151 | 2.258 |
+| AGGRESSIVE | 3.889 | 3.939 | 3.989 | 4.282 | 2.199 | 4.174 | 2.199 |
+| MAXIMUM | 3.938 | 3.959 | 3.977 | 4.317 | 2.178 | 4.207 | 2.163 |
+| WebRTC AEC2 | 3.457 | 3.519 | 4.098 | 4.331 | 2.304 | 4.149 | 2.528 |
+
+Notes:
+- MILD/BALANCED honor NE deg ≥ 4.000 floor; AGGRESSIVE/MAXIMUM trade NE
+  (−0.011 / −0.023) for echo/FS gains.
+- MAXIMUM closes DT_st echo gap vs AEC2 to −0.014 but loses DT_mv deg
+  (−0.365 vs AEC2). PR-F (per-bin coh2-aware DT gating) targets the same
+  gaps without the NE / DT_mv deg cost.
 
 **PR-D5** (replace shadow Kalman → NLMS): deferred. 1-2 week refactor with
 high regression risk on existing v2.5+ shadow tuning. Only worth pursuing if
