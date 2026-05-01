@@ -38,3 +38,6 @@ python/dump_res_stats.py
 
 # Parity baseline fixtures (regenerable, large)
 python/parity_baseline*.npz
+parity_pbfdkf_python.npz
+parity_pbfdkf_c.npz
+parity_pbfdkf_input.bin
