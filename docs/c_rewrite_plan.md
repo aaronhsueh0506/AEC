@@ -163,14 +163,47 @@ Estimated total: ~5500 LOC (vs current 4488).
 
 ---
 
-## Parity validation gates
+## Parity validation gates (HARD REQUIREMENT — float32-level)
+
+**Acceptance bar**: C output must match Python output within numerical
+precision attributable solely to float32 (single precision) vs float64
+(double precision) drift. NOT preset re-tuning, NOT "close enough", NOT
+"800-case bucket scores agree". The floor is **per-sample bit-level**
+comparison modulo unavoidable float ordering differences.
 
 Each phase must pass before next:
 
-1. Build: `make clean && make` (no warnings)
-2. Smoke: `./bin/aec_wav example/mic.wav example/ref.wav out.wav` runs without segfault
-3. Parity (after Phase 1): synthetic input → C error ≈ Python error within 1e-5 magnitude
-4. 800-case bench (after Phase 5): per-bucket diff to Python ≤ 0.005
+1. **Build**: `make clean && make` (no warnings)
+2. **Smoke**: `./bin/aec_wav example/mic.wav example/ref.wav out.wav` runs without segfault
+3. **Per-component parity** (every phase): synthetic input → C output array
+   vs Python output array, numpy `np.allclose(rtol=1e-5, atol=1e-7)`. For
+   intermediate state (P, W, error_psd, etc.): same tolerance.
+4. **End-to-end audio parity** (after Phase 5): all 800 case `out.wav` files
+   produced by C → diff against Python `out.wav`, mean abs sample diff
+   < 1e-5 across full file. AECMOS scores per-case match Python within
+   ±0.001 (= AECMOS noise floor).
+5. **Bucket-level parity** (after Phase 5): preset BALANCED 5-bucket scores
+   identical to Python within ±0.001.
+
+**Implications for implementation**:
+- All AEC internal compute is float32 (matches Python's `.astype(np.float32)`
+  casts; user explicitly cast `np.float32(self.delta)` etc. to prevent
+  float64 promotion).
+- FFT path: kiss_fft float32 (matches Python `np.fft.rfft` on float32 array).
+  Python returns complex64 (float32 pairs).
+- Order-of-operations matters: matrix-vector products (`np.matmul`,
+  `np.einsum`) reduce in a specific order; C must replicate.
+- Integer indexing: `partition_idx`, `(partition_idx - p) % n_partitions`
+  semantics (negative mod in Python returns positive; C `%` returns
+  signed). Must explicitly handle.
+
+If a phase exceeds the rtol=1e-5 budget, halt and root-cause before next
+phase. Common drift sources to inspect:
+- `np.float32 vs float`: scalar promotion in mixed arithmetic
+- `np.real()` casting: complex → float32, NOT float64
+- Reduction order: `sum()` accumulator type
+- FFT scaling: numpy normalizes IFFT by 1/N; kiss_fft does not — caller
+  must scale.
 
 ---
 

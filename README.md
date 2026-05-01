@@ -1,16 +1,16 @@
 # AEC - Acoustic Echo Cancellation
 
-回音消除模組（v3.8.0），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
+回音消除模組（v3.8.1），Python + C 兩套實作支援 PBFDKF（頻域卡爾曼濾波器）、Multi-ERLE、Shadow Filter 和 RES（殘餘回音抑制）。
 
-**v3.8.0 BALANCED 800-case AECMOS（2026-05-01，AEC Challenge Interspeech 2021, fl=52ms / cng=True / j4）**：
+**v3.8.1 BALANCED 800-case AECMOS（2026-05-01，AEC Challenge Interspeech 2021, fl=52ms / cng=True / j4）**：
 
 | version | FS_st echo↑ | FS_mv echo↑ | NE deg↑ | DT_st echo↑ | DT_st deg↑ | DT_mv echo↑ | DT_mv deg↑ |
 |--------|-----------|-----------|--------|-----------|----------|-----------|----------|
-| **v3.8.0 BALANCED** | 3.801 | 3.863 | **4.002** | 4.256 | **2.257** | 4.144 | **2.269** |
+| **v3.8.1 BALANCED** | 3.803 | 3.865 | **4.002** | 4.257 | **2.256** | 4.147 | **2.270** |
 | v3.7.1 BALANCED | 3.877 | 3.941 | 3.993 | 4.263 | 2.224 | 4.162 | 2.219 |
-| Δ v3.8.0 | **-0.076** | **-0.078** | **+0.009** | -0.007 | **+0.033** | -0.018 | **+0.050** |
+| Δ v3.8.1 | **-0.074** | **-0.076** | **+0.009** | -0.006 | **+0.032** | -0.015 | **+0.051** |
 | *WebRTC AEC2 (ref)* | *3.457* | *3.519* | *4.098* | *4.331* | *2.304* | *4.149* | *2.528* |
-| *gap vs AEC2 (v3.8.0)* | *+0.344* | *+0.344* | *−0.096* | *−0.075* | *−0.047* | *−0.005* | *−0.259* |
+| *gap vs AEC2 (v3.8.1)* | *+0.346* | *+0.346* | *−0.096* | *−0.074* | *−0.048* | *−0.002* | *−0.258* |
 
 > **v3.8.0 雙重 ABL 主要改進**：
 > - **ABL-1**: 移除 v3.3 `error_based_floor`（`error_psd × far_conf × 0.7`）— `error_psd` 在 DT 含 NE，當 floor 結構性誤殺 NE。
@@ -23,14 +23,14 @@
 **v3.7.1 PR-B**：移除 `linear_failed` render-based e2-floor，AEC3-aligned。
 **v3.7.0 PR-G1**：PBFDKF P-covariance 用 mu_mean-blended KX 修 DT P/W decoupling。詳見 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
 
-**v3.8.0 4-preset operating points**（2026-05-01 rebench, fl=52ms / cng=True / j4）：
+**v3.8.1 4-preset operating points**（2026-05-01 rebench, fl=52ms / cng=True / j4）：
 
-| Preset (v3.8.0) | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
+| Preset (v3.8.1) | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
 |--------|-----------|-----------|--------|-----------|----------|-----------|----------|
-| MILD | 3.626 | 3.733 | **4.013** | 4.083 | 2.368 | 4.010 | **2.395** |
-| BALANCED | 3.801 | 3.863 | 4.002 | 4.256 | 2.257 | 4.144 | 2.269 |
-| AGGRESSIVE | 3.829 | 3.867 | 3.997 | 4.285 | 2.218 | 4.169 | 2.239 |
-| MAXIMUM | **3.886** | **3.909** | 3.987 | **4.322** | **2.180** | **4.206** | 2.186 |
+| MILD | 3.624 | 3.732 | **4.013** | 4.084 | 2.366 | 4.012 | **2.391** |
+| BALANCED | 3.803 | 3.865 | 4.002 | 4.257 | 2.256 | 4.147 | 2.270 |
+| AGGRESSIVE | 3.830 | 3.868 | 3.997 | 4.284 | 2.222 | 4.167 | 2.237 |
+| MAXIMUM | **3.889** | **3.906** | 3.986 | **4.320** | **2.186** | **4.206** | 2.192 |
 
 
 
