@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.8.0"
+__version__ = "3.8.1"
 
 import numpy as np
 from collections import deque
@@ -1650,20 +1650,14 @@ class ResFilter:
             echo_boost = 1.0 + 0.5 * coh2 if dt_for_fs < 0.2 else np.ones_like(coh2)
             residual_echo_psd = residual_echo_psd * echo_boost
 
-        # PR-B (experiment 2026-04-30, AEC3-aligned): drop render-based fallback
-        # branch. WebRTC AEC3 never uses error_psd as floor — relies on
-        # render×ERL_smoothed in residual_echo_estimator.cc. Our prior
-        # `using_render_based and erle_factor < 0.2` branch fired 35% of DT_mv
-        # frames when effective_dt was false-negative (=0.008), inflating
-        # residual via e2 (which contains NE during DT) → killed near-end.
-        # Render-based mode itself already inflates residual via far×ERL, so
-        # the secondary error_psd × 0.9 floor is double-suppression.
-        # Keep ERL-based branch (erl_estimate > 1.2) — physical mic/far ratio
-        # independent of filter health.
-        linear_failed = erl_estimate > 1.2
-        if (far_power > 1e-4 and linear_failed
-                and effective_dt < 0.2 and residual_echo_psd is not None):
-            residual_echo_psd = np.maximum(residual_echo_psd, self.error_psd * 0.9)
+        # v3.8.x ABL-4 (ablate ERL-based linear_failed branch): trace-verified
+        # `self._erl_estimate` clipped to [0.001, 1.0] in update path (~line
+        # 3974), so `erl_estimate > 1.2` never triggers (R6 trace 2026-04-30:
+        # 0.00% fire rate across all 5 buckets). Branch was dead code retained
+        # as v3.7.1 PR-B "physical mic/far ratio" defense, but value is
+        # structurally bounded → defense is impossible to engage.
+        # Removed alongside ABL-1+2: completes the family of e2-floor /
+        # mic-as-echo-proxy / error-as-echo-proxy structural cleanups.
 
         # Compute coherence-based EER (only used by legacy spectral_sub path)
         if self.gain_type not in ("enr", "wiener"):
@@ -3454,6 +3448,11 @@ class AEC:
         self._simple_mu_holdoff = 0
         self._warmup_frames = self.config.warmup_frames
         self._warmup_far_active = False
+        # v3.8.1: clear lazy-getattr diagnostic counters so cross-case batch
+        # eval doesn't leak prior-case state into next-case stats interpretation.
+        # Diagnostics-only — does not affect audio output.
+        self._far_active_blocks = 0
+        self._dt_from_zero_count = 0
         self._diag = {
             'erle_inst': 0.0, 'mu_scale': 1.0, 'far_activity': 0.0,
             'res_gain_mean': 1.0, 'res_gain_min': 1.0, 'effective_g_min': 1.0,

@@ -5,6 +5,53 @@ or tuning sweeps; patch is bugfix.
 
 ---
 
+## v3.8.1 (2026-05-01) — Dead-branch cleanup (ABL-4) + diagnostics reset hygiene
+
+**Goal**: Cleanup pass after v3.8.0 architectural ablations. No audio metric
+change; diagnostics + code hygiene only.
+
+**Changes**:
+
+1. **ABL-4 — remove dead `linear_failed = erl_estimate > 1.2` branch**
+   (ResFilter.process line ~1663). Trace verified `self._erl_estimate` is
+   clipped to `[0.001, 1.0]` in update path (~line 3974), so the `> 1.2`
+   gate has 0.00% fire rate across all 5 buckets (NE/FS_st/FS_mv/DT_st/DT_mv).
+   Removed alongside ABL-1 + ABL-2 to complete the family of e2-floor /
+   mic-as-echo-proxy / error-as-echo-proxy structural cleanups.
+
+2. **`AEC.reset()` — clear lazy-getattr diagnostic counters** (`_far_active_blocks`,
+   `_dt_from_zero_count`). Diagnostics-only — does not affect audio output.
+   Prevents cross-case diagnostic state leakage in batch eval.
+
+**800-case AECMOS vs v3.8.0 (BALANCED / fl=52ms / cng / j4)**:
+
+| bucket | v3.8.0 | v3.8.1 | Δ |
+|---|---|---|---|
+| FS_st | 3.801 | 3.802 | +0.001 |
+| FS_mv | 3.863 | 3.863 | 0 |
+| NE deg | 4.002 | 4.002 | 0 |
+| DT_st e/d | 4.256/2.257 | 4.256/2.258 | 0/+0.001 |
+| DT_mv e/d | 4.144/2.269 | 4.145/2.268 | +0.001/-0.001 |
+
+All deltas ≤ 0.001 = AECMOS noise floor. Confirms ABL-4 is dead-code removal.
+
+**Rejected v3.8.1 candidates (no metric impact)**:
+
+- **delay_first ERL re-init** (set `_erl_estimate = 0.1`, ERLE windows = 1e-10
+  on first delay acquisition): Δ ≤ 0.003 across all metrics in BALANCED.
+  Code-review-correct (stale ERL theoretically pollutes render-based residual
+  after re-alignment) but not binding on AEC Challenge dataset because delay
+  mostly converges in one shot. Reverted to keep v3.8.0 baseline behavior
+  clean for movement-bucket future comparison.
+- **delay_shift ERL cap** (`min(_erl_estimate, 0.3)` matching EPV/shadow-rise):
+  Δ ≤ 0.003. Same rationale — delay-shift events are rare. Reverted.
+
+These two fixes remain valid theoretically; will be re-tested if a future
+dataset surfaces movement-heavy multi-shift cases that expose the stale-ERL
+mechanism.
+
+---
+
 ## v3.8.0 (2026-05-01) — Remove e2/mic-as-echo-floor architectural mistakes (ABL-1 + ABL-2)
 
 **Goal**: Continue v3.7.1's AEC3-aligned cleanup. Two more legacy floors that
