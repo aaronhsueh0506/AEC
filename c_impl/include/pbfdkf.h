@@ -139,6 +139,14 @@ float pbfdkf_get_far_power(const Pbfdkf* f);
 /* Mean magnitude of partition-0 weights (debug/parity check) */
 float pbfdkf_get_w_mean_mag(const Pbfdkf* f);
 
+/* Internal state accessors for parity verification (read-only).
+ * P[partition] returns pointer to n_freqs floats.
+ * W[partition] returns pointer to n_freqs Complex (real/imag pairs).
+ * power returns pointer to n_freqs floats. */
+const float*   pbfdkf_get_P(const Pbfdkf* f, int partition);
+const Complex* pbfdkf_get_W(const Pbfdkf* f, int partition);
+const float*   pbfdkf_get_power(const Pbfdkf* f);
+
 /* Getters */
 int pbfdkf_get_block_size(const Pbfdkf* f);
 int pbfdkf_get_fft_size(const Pbfdkf* f);

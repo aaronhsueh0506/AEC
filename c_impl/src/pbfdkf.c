@@ -338,11 +338,29 @@ int pbfdkf_process_per_bin(Pbfdkf* f,
     int curr_p = f->partition_idx;
     memcpy(f->X_buf[curr_p], f->far_spec, nfreq * sizeof(Complex));
 
-    /* Update power estimate */
-    for (int k = 0; k < nfreq; k++) {
-        float pwr = f->far_spec[k].r * f->far_spec[k].r +
-                    f->far_spec[k].i * f->far_spec[k].i;
-        f->power[k] = alpha * f->power[k] + (1.0f - alpha) * pwr;
+    /* Update power estimate (Python aec.py PBFDAF.process lines 672-678):
+     * cold start — initialize directly on first active frame instead of
+     * EMA-warming from zero (otherwise EMA needs ~30 frames to catch up). */
+    {
+        float power_sum = 0.0f, far_psd_sum = 0.0f;
+        for (int k = 0; k < nfreq; k++) {
+            power_sum += f->power[k];
+            float pwr = f->far_spec[k].r * f->far_spec[k].r +
+                        f->far_spec[k].i * f->far_spec[k].i;
+            far_psd_sum += pwr;
+        }
+        if (power_sum < 1e-10f && far_psd_sum > 1e-10f) {
+            for (int k = 0; k < nfreq; k++) {
+                f->power[k] = f->far_spec[k].r * f->far_spec[k].r +
+                              f->far_spec[k].i * f->far_spec[k].i;
+            }
+        } else {
+            for (int k = 0; k < nfreq; k++) {
+                float pwr = f->far_spec[k].r * f->far_spec[k].r +
+                            f->far_spec[k].i * f->far_spec[k].i;
+                f->power[k] = alpha * f->power[k] + (1.0f - alpha) * pwr;
+            }
+        }
     }
 
     /* Echo estimate: Y_hat = sum(W[p] * X_buf[p]) */
@@ -596,3 +614,17 @@ int pbfdkf_get_fft_size(const Pbfdkf* f)      { return f ? f->fft_size : 0; }
 int pbfdkf_get_hop_size(const Pbfdkf* f)      { return f ? f->hop_size : 0; }
 int pbfdkf_get_n_freqs(const Pbfdkf* f)       { return f ? f->n_freqs : 0; }
 int pbfdkf_get_n_partitions(const Pbfdkf* f)  { return f ? f->n_partitions : 0; }
+
+const float* pbfdkf_get_P(const Pbfdkf* f, int partition) {
+    if (!f || partition < 0 || partition >= f->n_partitions) return NULL;
+    return f->P[partition];
+}
+
+const Complex* pbfdkf_get_W(const Pbfdkf* f, int partition) {
+    if (!f || partition < 0 || partition >= f->n_partitions) return NULL;
+    return f->W[partition];
+}
+
+const float* pbfdkf_get_power(const Pbfdkf* f) {
+    return f ? f->power : NULL;
+}

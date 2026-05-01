@@ -77,6 +77,15 @@ lib: dirs $(OBJS) $(LIB_OBJS)
 	ar rcs $(LIB_TARGET) $(OBJS) $(LIB_OBJS)
 	@echo "Static library built: $(LIB_TARGET)"
 
+# Phase 1 parity verifier
+PARITY_PBFDKF_TARGET = $(BIN_DIR)/parity_pbfdkf_test
+PARITY_PBFDKF_OBJ = $(OBJ_DIR)/parity_pbfdkf_test.o
+
+parity_pbfdkf: dirs lib $(PARITY_PBFDKF_OBJ)
+	$(CC) $(CFLAGS) -o $(PARITY_PBFDKF_TARGET) $(PARITY_PBFDKF_OBJ) \
+	    $(LIB_TARGET) $(LDFLAGS)
+	@echo "Parity verifier built: $(PARITY_PBFDKF_TARGET)"
+
 # Help
 help:
 	@echo "AEC (Acoustic Echo Cancellation) Build System"
