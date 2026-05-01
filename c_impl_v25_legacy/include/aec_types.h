@@ -1,14 +1,7 @@
 /**
  * aec_types.h - AEC Configuration Types and Presets
  *
- * Public API (preserved during v2.5 → v3.8.1 rewrite).
- * Algorithmic internals are being ported to match Python aec.py v3.8.1
- * (see docs/c_rewrite_plan.md for phase status).
- *
- * Until rewrite Phase 5 (parity verification) is complete, treat the
- * algorithm internals as v2.5; only the API surface and v3.6.0 filter
- * length default are aligned with v3.8.1 in this header.
- *
+ * Matches Python v1.28.1 (PBFDKF mode, Kalman always on).
  * Four presets: MILD / BALANCED / AGGRESSIVE / MAXIMUM
  */
 
@@ -47,7 +40,7 @@ typedef struct {
     int sample_rate;            /* 8000 / 16000 / 48000 */
     int frame_size;             /* 20ms: 160@8k, 320@16k, 960@48k */
     int hop_size;               /* 10ms: 80@8k, 160@16k, 480@48k */
-    int filter_length;          /* v3.6.0: 52ms: 416@8k, 832@16k; 64ms: 3072@48k */
+    int filter_length;          /* 32ms: 256@8k, 512@16k, 1536@48k */
     float delta;                /* Regularization: 1e-8 */
 
     /* RES parameters */
@@ -108,24 +101,16 @@ typedef struct {
     int n_partitions;           /* ceil(filter_length / hop_size): 10@8k/16k, 10@48k */
 } AecConfig;
 
-/* --- AEC context for external RES (linear pipeline) ---
- *
- * Used to insert post-filtering (e.g., NR) between linear AEC and RES.
- * After aec_process_ex() populates ctx, caller may multiply
- * echo_spec_re[k]/echo_spec_im[k] by NR per-bin gain to produce a
- * NR-corrected echo estimate; remaining fields pass through to res_process().
- * See docs/c_integration_guide.md for the full contract.
- */
+/* --- AEC context for external RES (linear pipeline) --- */
 typedef struct {
-    float*   echo_spec_re;      /* [n_freqs] echo estimate (real) — caller may scale by NR gain */
-    float*   echo_spec_im;      /* [n_freqs] echo estimate (imag) — caller may scale by NR gain */
+    float*   echo_spec_re;      /* [n_freqs] echo estimate (real) */
+    float*   echo_spec_im;      /* [n_freqs] echo estimate (imag) */
     float*   far_spec_re;       /* [n_freqs] far-end spectrum (real) */
     float*   far_spec_im;       /* [n_freqs] far-end spectrum (imag) */
     float*   near_spec_re;      /* [n_freqs] mic spectrum (real) */
     float*   near_spec_im;      /* [n_freqs] mic spectrum (imag) */
     float    far_power;         /* mean(far²) */
     int      filter_converged;  /* 0 or 1 */
-    int      filter_once_converged; /* v3.x: latched once-converged flag */
     float    erle_factor;       /* [0, 1] convergence metric */
     float    dt_indicator;      /* [0, 0.8] double-talk confidence */
     float    divergence;        /* [0, 1] divergence indicator */
@@ -133,12 +118,7 @@ typedef struct {
     int      n_freqs;           /* number of frequency bins */
     int      is_stationary_dt;  /* 1 = stationary far-end DT detected */
     float    saturation_level;  /* [0, 1] speaker saturation */
-    float    erl_estimate;      /* dynamic ERL for render-based echo (clipped [0.001, 1.0]) */
-    float    shadow_dt;         /* v3.x: shadow filter DT signal */
-    float    e2_main;           /* v3.x: main filter smoothed error energy */
-    float    e2_shadow;         /* v3.x: shadow filter smoothed error energy */
-    float    y2;                /* v3.x: far-end energy (== far_power, redundant alias) */
-    int      epc_active;        /* v3.x: echo path change hangover active */
+    float    erl_estimate;      /* dynamic ERL for render-based (B4) */
 } AecResContext;
 
 /* --- Factory functions --- */
@@ -151,11 +131,10 @@ static inline AecConfig aec_default_config(int sample_rate) {
     c.sample_rate = sample_rate;
     c.frame_size = sample_rate * 20 / 1000;   /* 20ms: 160@8k, 320@16k, 960@48k */
     c.hop_size = c.frame_size / 2;            /* 10ms: 80@8k, 160@16k, 480@48k */
-    /* v3.6.0 PR-D1: bumped 8k/16k from 32→52ms to match AEC3 default
-     * (13 blocks × 4ms) — captures more RT60 tail. 48kHz keeps 64ms. */
+    /* D5: 48kHz needs longer filter (room reverb more prominent) */
     c.filter_length = (sample_rate >= 44100)
         ? sample_rate * 64 / 1000    /* 64ms @ 48kHz */
-        : sample_rate * 52 / 1000;   /* 52ms @ 8k/16k (v3.6.0; was 32ms) */
+        : sample_rate * 32 / 1000;   /* 32ms @ 8k/16k */
     c.delta = 1e-8f;
 
     c.enable_res = 1;
