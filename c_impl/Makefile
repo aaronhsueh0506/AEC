@@ -26,7 +26,9 @@ SRCS = $(SRC_DIR)/aec.c \
        $(SRC_DIR)/multi_erle.c \
        $(SRC_DIR)/render_activity.c \
        $(SRC_DIR)/convergence.c \
-       $(SRC_DIR)/dt_analyzer.c
+       $(SRC_DIR)/dt_analyzer.c \
+       $(SRC_DIR)/epc_detector.c \
+       $(SRC_DIR)/shadow_copy.c
 
 LIB_SRCS = $(LIB_DIR)/kiss_fft.c
 
@@ -107,6 +109,15 @@ parity_aux: dirs lib $(PARITY_AUX_OBJ)
 	$(CC) $(CFLAGS) -o $(PARITY_AUX_TARGET) $(PARITY_AUX_OBJ) \
 	    $(LIB_TARGET) $(LDFLAGS)
 	@echo "Parity verifier built: $(PARITY_AUX_TARGET)"
+
+# Phase 4 parity (EPC + ShadowCopy)
+PARITY_PHASE4_TARGET = $(BIN_DIR)/parity_phase4_test
+PARITY_PHASE4_OBJ = $(OBJ_DIR)/parity_phase4_test.o
+
+parity_phase4: dirs lib $(PARITY_PHASE4_OBJ)
+	$(CC) $(CFLAGS) -o $(PARITY_PHASE4_TARGET) $(PARITY_PHASE4_OBJ) \
+	    $(LIB_TARGET) $(LDFLAGS)
+	@echo "Parity verifier built: $(PARITY_PHASE4_TARGET)"
 
 # Help
 help:
