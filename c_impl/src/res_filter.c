@@ -580,9 +580,6 @@ void res_process(ResFilter* r,
 
             residual_echo_psd[k] = (1.0f - erle_factor) * direct_est
                                    + erle_factor * erle_est;
-            /* Residual cap at 2x echo_psd */
-            float cap = r->echo_psd[k] * 2.0f;
-            if (residual_echo_psd[k] > cap) residual_echo_psd[k] = cap;
         }
 
         /* === v2.1.0: AEC3-style render-based vs filter-based switching ===
@@ -631,6 +628,42 @@ void res_process(ResFilter* r,
                     residual_echo_psd[k] = (1.0f - blend) * residual_echo_psd[k]
                                            + blend * render_echo;
                 }
+            }
+        }
+
+        /* === Cap cascade (Python aec.py 1576-1620) ===
+         * Cap1: residual ≤ echo_psd × 2 (skip if render_based)
+         * Cap2: residual ≤ error_psd × err_cap_mult (1.5 if render_based, else 1.0)
+         * Cap3: residual ≤ error_psd × dt_suppress (skip if render_based)
+         *       where dt_suppress = clip(1 - dt_for_fs², 0.1, 1)
+         * Cap4: residual ≤ far_psd × min(erl × 2, 1) (skip if render_based) */
+        {
+            float err_cap_mult = r->using_render_based ? 1.5f : 1.0f;
+            float dt_suppress = 1.0f - dt_for_fs * dt_for_fs;
+            if (dt_suppress < 0.1f) dt_suppress = 0.1f;
+            if (dt_suppress > 1.0f) dt_suppress = 1.0f;
+            float erl_ceil_factor = erl_estimate * 2.0f;
+            if (erl_ceil_factor > 1.0f) erl_ceil_factor = 1.0f;
+            int do_render_caps = !r->using_render_based;
+            for (int k = 0; k < nf; k++) {
+                float v = residual_echo_psd[k];
+                if (do_render_caps) {
+                    float cap1 = r->echo_psd[k] * 2.0f;
+                    if (v > cap1) v = cap1;
+                }
+                float cap2 = r->error_psd[k] * err_cap_mult;
+                if (v > cap2) v = cap2;
+                if (do_render_caps) {
+                    float cap3 = r->error_psd[k] * dt_suppress;
+                    if (v > cap3) v = cap3;
+                    if (far_spec && far_power > 1e-4f && erl_estimate > 0.0f) {
+                        float far_psd_k = far_spec[k].r * far_spec[k].r
+                                        + far_spec[k].i * far_spec[k].i;
+                        float cap4 = far_psd_k * erl_ceil_factor;
+                        if (v > cap4) v = cap4;
+                    }
+                }
+                residual_echo_psd[k] = v;
             }
         }
 
