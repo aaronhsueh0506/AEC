@@ -1144,13 +1144,16 @@ int aec_process_ex(Aec* aec,
                 aec->dt_from_energy = 0.0f;
             }
 
-            /* === G: Dynamic ERL tracking (B4) ===
-             * Bug 6 fix: continue tracking post-convergence (alpha 0.99→0.999),
-             * clip expanded 1.0→10.0 to allow high-coupling ERL > 0 dB. */
+            /* === G: Dynamic ERL tracking — match Python aec.py 3970-3974
+             * Two gates: raw_dt_ratio < 2.0 AND inst_erl_raw < 1.5 (NE-corruption
+             * guard). Clip to [0.001, 1.0] (NOT 10.0 — Python physical cap). */
             if (far_active) {
                 float raw_dt_ratio = raw_err_pwr_dt / (far_power + 1e-10f);
-                if (raw_dt_ratio < 2.0f) {
-                    float inst_erl = clampf(mic_pwr / far_power, 0.001f, 10.0f);
+                float inst_erl_raw = mic_pwr / (far_power + 1e-10f);
+                if (raw_dt_ratio < 2.0f && inst_erl_raw < 1.5f) {
+                    float inst_erl = inst_erl_raw;
+                    if (inst_erl < 0.001f) inst_erl = 0.001f;
+                    if (inst_erl > 1.0f)   inst_erl = 1.0f;
                     float alpha_erl = aec->filter_converged ? 0.999f : 0.99f;
                     aec->erl_estimate = alpha_erl * aec->erl_estimate
                                         + (1.0f - alpha_erl) * inst_erl;
