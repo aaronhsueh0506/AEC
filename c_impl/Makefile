@@ -129,6 +129,15 @@ parity_resfilter: dirs lib $(PARITY_RESFILTER_OBJ)
 	    $(LIB_TARGET) $(LDFLAGS)
 	@echo "Parity verifier built: $(PARITY_RESFILTER_TARGET)"
 
+# AEC frame-level state dumper (for Python↔C parity diff)
+AEC_DUMP_TARGET = $(BIN_DIR)/aec_dump
+AEC_DUMP_OBJ = $(OBJ_DIR)/aec_dump.o
+
+aec_dump: dirs lib $(AEC_DUMP_OBJ)
+	$(CC) $(CFLAGS) -o $(AEC_DUMP_TARGET) $(AEC_DUMP_OBJ) \
+	    $(LIB_TARGET) $(LDFLAGS)
+	@echo "AEC dump tool built: $(AEC_DUMP_TARGET)"
+
 # Help
 help:
 	@echo "AEC (Acoustic Echo Cancellation) Build System"

@@ -137,6 +137,16 @@ struct Aec {
     /* v2.3.x: Energy DT signal */
     float dt_from_energy;     /* pre-filter energy-based DT [0, 1] */
     float dt_from_shadow;     /* shadow DTD signal [0, 1] */
+
+    /* Diagnostic snapshots from last process() call (for parity dump) */
+    float last_mu_scale;
+    float last_erle_factor;
+    float last_dt_indicator;
+    int   filter_once_converged;
+    /* Sticky far-end active state — Python RenderActivityDetector.is_active.
+     * Stays True after first audible frame (raw > 1e-6), reset only when
+     * raw drops to silence. NOT instant threshold. */
+    int   far_is_active_sticky;
     float shadow_advantage;   /* main_err / shadow_err */
     int   shadow_advantage_streak; /* G3: consecutive advantage frames */
 
@@ -241,6 +251,11 @@ Aec* aec_create(const AecConfig* config) {
     /* v2.3.x state */
     aec->dt_from_energy = 0.0f;
     aec->dt_from_shadow = 0.0f;
+    aec->last_mu_scale = 1.0f;
+    aec->last_erle_factor = 0.0f;
+    aec->last_dt_indicator = 0.0f;
+    aec->filter_once_converged = 0;
+    aec->far_is_active_sticky = 0;
     aec->shadow_advantage = 1.0f;
     aec->shadow_advantage_streak = 0;
     aec->erl_estimate = 0.1f;
@@ -410,6 +425,11 @@ void aec_reset(Aec* aec) {
     /* v2.3.x state */
     aec->dt_from_energy = 0.0f;
     aec->dt_from_shadow = 0.0f;
+    aec->last_mu_scale = 1.0f;
+    aec->last_erle_factor = 0.0f;
+    aec->last_dt_indicator = 0.0f;
+    aec->filter_once_converged = 0;
+    aec->far_is_active_sticky = 0;
     aec->shadow_advantage = 1.0f;
     aec->shadow_advantage_streak = 0;
     aec->erl_estimate = 0.1f;
@@ -932,11 +952,18 @@ int aec_process_ex(Aec* aec,
     {
         float far_pwr_wup = 0.0f;
         for (int i = 0; i < hop; i++) far_pwr_wup += ref[i] * ref[i];
-        aec->warmup_far_active = (far_pwr_wup / hop > 1e-6f);
+        float far_pwr_avg = far_pwr_wup / hop;
+        int audible = (far_pwr_avg > 1e-6f);
+        aec->warmup_far_active = audible;
+        /* Sticky is_active: rises on audible, drops only on silence. Match
+         * Python RenderActivityDetector behavior used by FilterConvergence. */
+        if (audible) aec->far_is_active_sticky = 1;
+        else if (far_pwr_avg < 1e-7f) aec->far_is_active_sticky = 0;
     }
 
     /* Compute mu_scale */
     float mu_scale = get_simple_mu_scale(aec);
+    aec->last_mu_scale = mu_scale;
 
     /* === Main filter (per-bin mu post-convergence for FS-parity with Python).
      * Python aec.py 3578-3579: when per_bin_mu_scale set, return is
@@ -1195,6 +1222,7 @@ int aec_process_ex(Aec* aec,
             float erle_factor_raw = clampf(erle_for_factor / 10.0f, 0.0f, 1.0f);
             /* Note: erle_factor ramp already applied by previous agent — keep as-is */
             float erle_factor = erle_factor_raw;
+            aec->last_erle_factor = erle_factor;
             aec->erle_factor_prev = erle_factor;
 
             float base_over_sub = cfg->res_over_sub_base +
@@ -1231,6 +1259,7 @@ int aec_process_ex(Aec* aec,
             if (aec->epc_active) raw_dt = 0.0f;
 
             float dt_indicator = clampf(raw_dt, 0.0f, 0.8f);
+            aec->last_dt_indicator = dt_indicator;
 
             float dt_reduction = cfg->res_dt_reduction * dt_indicator;
             float over_sub = maxf(base_over_sub - dt_reduction, 0.5f);
@@ -1438,9 +1467,11 @@ int aec_process_ex(Aec* aec,
     if (!aec->filter_converged && aec->near_power > 1e-8f && aec->warmup_frames <= 0) {
         float inst_erle = 10.0f * fast_log10(aec->near_power /
                                           (aec->raw_error_power + 1e-10f));
-        float far_pwr_conv = 0.0f;
-        for (int i = 0; i < hop; i++) far_pwr_conv += ref[i] * ref[i];
-        int far_active_conv = (far_pwr_conv / hop > 1e-4f);
+        /* Python aec.py FilterConvergenceAnalyzer.update_convergence uses
+         * RenderActivityDetector.is_active (sticky) — once far becomes
+         * audible (raw > 1e-6) it stays active until far drops to silence.
+         * C had instant far_pwr > 1e-4 which resets counter on every gap. */
+        int far_active_conv = aec->far_is_active_sticky;
         if (far_active_conv) {
             if (inst_erle > 5.0f)
                 aec->conv_counter++;
@@ -1449,6 +1480,7 @@ int aec_process_ex(Aec* aec,
 
             if (aec->conv_counter >= 10) {
                 aec->filter_converged = 1;
+                aec->filter_once_converged = 1;
                 pbfdkf_switch_q_low(aec->filter);
                 pbfdkf_switch_q_low(aec->shadow_filter);
             }
@@ -1515,6 +1547,34 @@ int aec_get_delay(const Aec* aec) {
     if (!aec || !aec->delay_est.enabled) return -1;
     return aec->delay_est.current_delay;
 }
+
+/* Per-frame parity-dump accessors */
+float aec_get_dt_from_energy(const Aec* aec)     { return aec ? aec->dt_from_energy : 0.0f; }
+float aec_get_dt_from_shadow(const Aec* aec)     { return aec ? aec->dt_from_shadow : 0.0f; }
+float aec_get_main_err_smooth(const Aec* aec)    { return aec ? aec->main_err_smooth : 0.0f; }
+float aec_get_shadow_err_smooth(const Aec* aec)  { return aec ? aec->shadow_err_smooth : 0.0f; }
+float aec_get_far_activity(const Aec* aec) {
+    if (!aec || !aec->res) return 0.0f;
+    ResDebugStats st; res_get_debug_stats(aec->res, &st);
+    return st.far_activity;
+}
+float aec_get_erl_estimate(const Aec* aec)       { return aec ? aec->erl_estimate : 0.1f; }
+int   aec_is_filter_once_converged(const Aec* aec) { return aec ? aec->filter_once_converged : 0; }
+int   aec_is_using_render_based(const Aec* aec) {
+    if (!aec || !aec->res) return 0;
+    ResDebugStats st; res_get_debug_stats(aec->res, &st);
+    return st.using_render_based;
+}
+int   aec_is_epc_active(const Aec* aec)          { return aec ? aec->epc_active : 0; }
+float aec_get_dt_indicator(const Aec* aec)       { return aec ? aec->last_dt_indicator : 0.0f; }
+float aec_get_mu_scale_last(const Aec* aec)      { return aec ? aec->last_mu_scale : 1.0f; }
+float aec_get_erle_factor_last(const Aec* aec)   { return aec ? aec->last_erle_factor : 0.0f; }
+float aec_get_res_gain_mean(const Aec* aec) {
+    if (!aec || !aec->res) return 1.0f;
+    ResDebugStats st; res_get_debug_stats(aec->res, &st);
+    return st.gain_mean;
+}
+float aec_get_raw_error_power(const Aec* aec)    { return aec ? aec->raw_error_power : 0.0f; }
 
 /* ============================================================
  * Filter training API — TODO stubs

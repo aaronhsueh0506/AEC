@@ -115,6 +115,22 @@ float aec_get_simple_mu_ratio(const Aec* aec);
 struct Pbfdkf;
 struct Pbfdkf* aec_get_filter(const Aec* aec);
 
+/* Per-frame diagnostic accessors (for parity dump) */
+float aec_get_dt_from_energy(const Aec* aec);
+float aec_get_dt_from_shadow(const Aec* aec);
+float aec_get_main_err_smooth(const Aec* aec);
+float aec_get_shadow_err_smooth(const Aec* aec);
+float aec_get_far_activity(const Aec* aec);
+float aec_get_erl_estimate(const Aec* aec);
+int   aec_is_filter_once_converged(const Aec* aec);
+int   aec_is_using_render_based(const Aec* aec);
+int   aec_is_epc_active(const Aec* aec);
+float aec_get_dt_indicator(const Aec* aec);
+float aec_get_mu_scale_last(const Aec* aec);  /* mu_scale used in last process() call */
+float aec_get_erle_factor_last(const Aec* aec);
+float aec_get_res_gain_mean(const Aec* aec);
+float aec_get_raw_error_power(const Aec* aec);
+
 /**
  * Get estimated delay in samples (-1 if not yet estimated or disabled)
  */
