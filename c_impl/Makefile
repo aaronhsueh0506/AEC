@@ -28,7 +28,8 @@ SRCS = $(SRC_DIR)/aec.c \
        $(SRC_DIR)/convergence.c \
        $(SRC_DIR)/dt_analyzer.c \
        $(SRC_DIR)/epc_detector.c \
-       $(SRC_DIR)/shadow_copy.c
+       $(SRC_DIR)/shadow_copy.c \
+       $(SRC_DIR)/dtd_estimator.c
 
 LIB_SRCS = $(LIB_DIR)/kiss_fft.c
 

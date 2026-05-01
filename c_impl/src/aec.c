@@ -12,6 +12,7 @@
 #include "res_filter.h"
 #include "fft_wrapper.h"
 #include "fast_math.h"
+#include "dtd_estimator.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -44,6 +45,11 @@ struct Aec {
     int simple_mu_holdoff;
     int warmup_frames;
     int warmup_far_active;
+
+    /* v3.x DTD-based mu_scale (Python aec.py _compute_mu_scale) */
+    DtdEstimator* dtd_coherence;
+    DtdEstimator* dtd_divergence;
+    float prev_dtd_conf;
 
     /* Echo Path Change detection */
     float prev_total_err;
@@ -210,6 +216,16 @@ Aec* aec_create(const AecConfig* config) {
     aec->simple_mu_holdoff = 0;
     aec->warmup_frames = config->warmup_frames;
 
+    /* v3.x DTD: coherence (primary) + divergence (fallback).
+     * Match Python AecConfig.enable_dtd default = False — only allocate when
+     * config.enable_dtd is explicitly set. BALANCED preset doesn't enable
+     * DTD, uses non-DTD path (raw_dt = max(dt_from_energy, simple_dt × 0.5)). */
+    aec->dtd_coherence = NULL;
+    aec->dtd_divergence = NULL;
+    aec->prev_dtd_conf = 0.0f;
+    /* AecConfig has no enable_dtd in C struct; default leave DTD off to
+     * match Python BALANCED. Future: add config.enable_dtd field. */
+
     /* Convergence */
     aec->filter_converged = 0;
     aec->conv_counter = 0;
@@ -341,6 +357,8 @@ void aec_destroy(Aec* aec) {
     pbfdkf_destroy(aec->filter);
     pbfdkf_destroy(aec->shadow_filter);
     res_destroy(aec->res);
+    dtd_destroy(aec->dtd_coherence);
+    dtd_destroy(aec->dtd_divergence);
     free(aec->mic_buf);
     free(aec->ref_buf);
     free(aec->raw_output);
@@ -366,6 +384,9 @@ void aec_reset(Aec* aec) {
     pbfdkf_set_q_ratio(aec->shadow_filter, aec->config.kalman_q_high,
                         aec->config.kalman_q_low, aec->config.shadow_q_ratio);
     if (aec->res) res_reset(aec->res);
+    if (aec->dtd_coherence) dtd_reset(aec->dtd_coherence);
+    if (aec->dtd_divergence) dtd_reset(aec->dtd_divergence);
+    aec->prev_dtd_conf = 0.0f;
     aec->simple_mu_ratio = 1.0f;
     aec->simple_mu_holdoff = 0;
     aec->warmup_frames = aec->config.warmup_frames;
@@ -420,8 +441,50 @@ void aec_reset(Aec* aec) {
     }
 }
 
-/* --- Simple variable mu (Valin 2007 RER-inspired) --- */
+/* --- DTD-based mu_scale (Python aec.py _compute_mu_scale, lines 3526-3558) ---
+ * Coherence is primary; divergence is fallback only when coherence inactive.
+ * Confidence has memory decay 0.9 to avoid sudden drops.
+ * Pre-convergence: mu_min raised to 0.3 so filter can still learn during DT.
+ * EPC: mu_scale floor at config.epc_mu_floor. */
+static float compute_mu_scale_dtd(Aec* aec) {
+    float conf_div = dtd_get_confidence(aec->dtd_divergence);
+    float conf_coh = dtd_get_confidence(aec->dtd_coherence);
+
+    float raw_conf;
+    if (conf_coh > 0.1f) {
+        raw_conf = conf_coh;
+    } else {
+        raw_conf = (conf_div > conf_coh) ? conf_div : conf_coh;
+    }
+
+    float decayed = aec->prev_dtd_conf * 0.9f;
+    float conf = (raw_conf > decayed) ? raw_conf : decayed;
+    aec->prev_dtd_conf = conf;
+
+    if (conf == 0.0f) return 1.0f;
+
+    /* Use shadow_mu_min as dtd_mu_min_ratio surrogate (Python BALANCED defaults
+     * align: dtd_mu_min_ratio=0.05 vs shadow_mu_min=0.6 — these are different
+     * but both clamp the floor). Match Python by using a separate min_r=0.05.
+     */
+    float min_r = 0.05f;
+    if (!aec->filter_converged) {
+        if (min_r < 0.3f) min_r = 0.3f;
+    }
+    float mu_scale = 1.0f - conf * (1.0f - min_r);
+
+    if (aec->epc_active) {
+        if (mu_scale < aec->config.epc_mu_floor) mu_scale = aec->config.epc_mu_floor;
+    }
+    return mu_scale;
+}
+
+/* --- Simple variable mu (Valin 2007 RER-inspired, used as backup) --- */
 static float get_simple_mu_scale(Aec* aec) {
+    /* If DTD active and not pre-warmup, prefer DTD-based mu_scale. */
+    if (aec->dtd_coherence && aec->warmup_frames <= 0) {
+        return compute_mu_scale_dtd(aec);
+    }
     float mu_min = aec->config.shadow_mu_min;
 
     /* Warmup: fast convergence, but respect DT signals to protect near-end */
@@ -875,9 +938,22 @@ int aec_process_ex(Aec* aec,
     /* Compute mu_scale */
     float mu_scale = get_simple_mu_scale(aec);
 
-    /* === Main filter (per-bin mu post-convergence for FS-parity with Python) === */
-    const float* per_bin_mu = (aec->filter_converged && aec->per_bin_mu_scale)
-                              ? aec->per_bin_mu_scale : NULL;
+    /* === Main filter (per-bin mu post-convergence for FS-parity with Python).
+     * Python aec.py 3578-3579: when per_bin_mu_scale set, return is
+     * np.maximum(per_bin_mu_scale, mu_min) — apply floor elementwise. C had
+     * NO floor → bins below mu_min over-suppress filter learning. */
+    const float* per_bin_mu = NULL;
+    static float per_bin_mu_floored[513];  /* enough for n_freqs=257 */
+    if (aec->filter_converged && aec->per_bin_mu_scale) {
+        float floor = aec->config.shadow_mu_min;
+        if (floor < 0.2f) floor = 0.2f;  /* converged: max(shadow_mu_min, 0.2) */
+        int nf = aec->n_freqs;
+        for (int k = 0; k < nf; k++) {
+            float v = aec->per_bin_mu_scale[k];
+            per_bin_mu_floored[k] = (v < floor) ? floor : v;
+        }
+        per_bin_mu = per_bin_mu_floored;
+    }
     pbfdkf_process_per_bin(aec->filter, mic, ref, aec->raw_output,
                            per_bin_mu, mu_scale);
 
@@ -885,6 +961,20 @@ int aec_process_ex(Aec* aec,
     float shadow_out[160]; /* stack alloc, hop <= 160 */
     aec->shadow_frame_count++;
     pbfdkf_process(aec->shadow_filter, mic, ref, shadow_out, 1.0f);
+
+    /* v3.x DTD update — Python aec.py 4197-4214: gated on filter_converged.
+     * Coherence: error_spec + far_spec from main filter.
+     * Divergence: near_end + raw_output (post-filter). */
+    if (aec->filter_converged && aec->dtd_coherence) {
+        const Complex* err_spec = pbfdkf_get_error_spec(aec->filter);
+        const Complex* far_spec_p = pbfdkf_get_far_spec(aec->filter);
+        if (err_spec && far_spec_p) {
+            dtd_detect_coherence(aec->dtd_coherence, err_spec, far_spec_p);
+        }
+        if (aec->dtd_divergence) {
+            dtd_detect_divergence(aec->dtd_divergence, mic, aec->raw_output, hop);
+        }
+    }
 
     /* Smoothed error tracking */
     float main_err = pbfdkf_get_error_energy(aec->filter);
@@ -1110,22 +1200,31 @@ int aec_process_ex(Aec* aec,
             float base_over_sub = cfg->res_over_sub_base +
                                    cfg->res_over_sub_scale * erle_factor;
 
-            /* DT indicator — match Python aec.py 3967-3972 non-DTD path:
-             *   simple_dt = 1 - far / (mic+far)
-             *   raw_dt = max(dt_from_energy, simple_dt * 0.5)
-             * The max() lifts dt_from_energy when high (true DT signal)
-             * but halves simple_dt baseline (false-DT in high-ERL FS).
-             * Then inst_erle correction divides if smoothed > 2. */
-            float far_p_dt = far_power + 1e-10f;
-            float simple_dt = 1.0f - far_p_dt / (mic_pwr + far_p_dt);
-            float raw_dt = aec->dt_from_energy > simple_dt * 0.5f
-                            ? aec->dt_from_energy
-                            : simple_dt * 0.5f;
-            float inst_erle_raw_dt = mic_pwr / raw_err_pwr_dt;
-            aec->inst_erle_smooth = 0.7f * aec->inst_erle_smooth + 0.3f * inst_erle_raw_dt;
-            if (aec->inst_erle_smooth > 2.0f) {
-                float erle_for_dt = aec->inst_erle_smooth < 4.0f ? aec->inst_erle_smooth : 4.0f;
-                raw_dt /= erle_for_dt;
+            /* DT indicator — match Python aec.py 3963-3972:
+             *   if enable_dtd: raw_dt = get_dtd_confidence()  (coherence > 0.1
+             *                                                   else max with div)
+             *   else:          raw_dt = max(dt_from_energy, simple_dt * 0.5)
+             * Then inst_erle correction (only no-DTD path). */
+            float raw_dt;
+            int dtd_active = (aec->dtd_coherence != NULL);
+            if (dtd_active) {
+                /* get_dtd_confidence: coherence primary, divergence fallback */
+                float c_coh = dtd_get_confidence(aec->dtd_coherence);
+                float c_div = dtd_get_confidence(aec->dtd_divergence);
+                if (c_coh > 0.1f) raw_dt = c_coh;
+                else raw_dt = (c_div > c_coh) ? c_div : c_coh;
+            } else {
+                float far_p_dt = far_power + 1e-10f;
+                float simple_dt = 1.0f - far_p_dt / (mic_pwr + far_p_dt);
+                raw_dt = aec->dt_from_energy > simple_dt * 0.5f
+                          ? aec->dt_from_energy
+                          : simple_dt * 0.5f;
+                float inst_erle_raw_dt = mic_pwr / raw_err_pwr_dt;
+                aec->inst_erle_smooth = 0.7f * aec->inst_erle_smooth + 0.3f * inst_erle_raw_dt;
+                if (aec->inst_erle_smooth > 2.0f) {
+                    float erle_for_dt = aec->inst_erle_smooth < 4.0f ? aec->inst_erle_smooth : 4.0f;
+                    raw_dt /= erle_for_dt;
+                }
             }
 
             /* EPC physical gate also zeroes raw_dt for the dt_indicator below */
