@@ -139,6 +139,10 @@ void res_force_render_based(ResFilter* res);
 const float* res_get_echo_psd(const ResFilter* res);
 const float* res_get_error_psd(const ResFilter* res);
 
+/* Parity inspection accessors (read-only) */
+const float* res_get_gain_smooth(const ResFilter* res);
+const float* res_get_noise_psd(const ResFilter* res);
+
 /**
  * Debug snapshot — broadband means of internal state (for Python/C parity check)
  */

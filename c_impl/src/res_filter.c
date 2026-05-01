@@ -206,9 +206,10 @@ ResFilter* res_create(const ResConfig* cfg) {
         r->filter_erle[k] = 1.0f;
     }
 
-    /* Compute sqrt-Hann window */
+    /* Compute sqrt-Hann window. Python uses np.hanning(N) which divides by
+     * (N-1), NOT N. Subtle but causes ~1e-3 drift per WOLA cycle. */
     for (int i = 0; i < fs; i++) {
-        float hann = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / fs));
+        float hann = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / (float)(fs - 1)));
         r->window[i] = sqrtf(hann);
     }
 
@@ -604,8 +605,12 @@ void res_process(ResFilter* r,
             float eff_threshold = r->using_render_based
                 ? switching_threshold + hysteresis : switching_threshold;
 
-            /* G2: explicit overrides */
-            int force_render = epc_active || (saturation_level > 0.5f);
+            /* Python aec.py 2587-2588: force_render = epc_active OR
+             * saturation > 0.5 OR not filter_converged. The
+             * not-converged path was missing in v2.5 — major source
+             * of gain drift before filter converges. */
+            int force_render = epc_active || (saturation_level > 0.5f)
+                               || !converged;
 
             /* G5: minimum hold time */
             int want_render = (erle_factor < eff_threshold) || force_render;
@@ -644,9 +649,13 @@ void res_process(ResFilter* r,
                 r->reverb_psd[k] = r->reverb_decay * r->reverb_psd[k]
                                    + (1.0f - r->reverb_decay) * far_psd_k;
                 if (!is_stationary_dt) {
-                    float ne_reverb_factor = 0.3f + 0.7f * r->far_activity
+                    /* Python aec.py 1644-1652. Coefficients are 0.7 + 0.3*
+                     * (NOT 0.3 + 0.7*). Hard-cut reverb when far_activity<0.1
+                     * (v3.4 Axis 2). */
+                    float ne_reverb_factor = 0.7f + 0.3f * r->far_activity
                                              * (1.0f - dt_for_fs);
                     float reverb_gate = r->far_activity * ne_reverb_factor;
+                    if (r->far_activity < 0.1f) reverb_gate = 0.0f;
                     residual_echo_psd[k] += r->reverb_gain * r->reverb_psd[k]
                                             * reverb_gate;
                 }
@@ -765,12 +774,19 @@ void res_process(ResFilter* r,
             if (dt_enr_relax > 1.5f) dt_enr_relax = 1.5f;
         }
 
+        /* v3.1.0 render_min_ne_factor: in render-based mode, the floor
+         * `error × dt_shaped` inflates nearend_est to ~85% of error_psd
+         * → ENR≈0 → no echo suppression even when render estimate (far×erl)
+         * says echo is present. Soften the floor 0.5× when render_based.
+         * Python aec.py lines 1731-1738. */
+        const float render_ne_factor = r->using_render_based ? 0.5f : 1.0f;
+
         for (int k = 0; k < nf; k++) {
             float dt_pb = dt_per_bin[k];
             float dt_pb_shaped = powf(dt_pb, 1.1f);
             float raw_ne = maxf(r->error_psd[k] - residual_echo_psd[k], 0.0f);
             float nearend_est = maxf(raw_ne * dt_pb_shaped, noise_floor_psd);
-            float min_ne_from_dt = r->error_psd[k] * dt_pb_shaped;
+            float min_ne_from_dt = r->error_psd[k] * dt_pb_shaped * render_ne_factor;
             if (nearend_est < min_ne_from_dt) nearend_est = min_ne_from_dt;
             /* (b) Physical nearend floor: 5% of error_psd ensures ENR never
              * becomes astronomically large on quiet FS segments. */
@@ -936,34 +952,60 @@ void res_process(ResFilter* r,
         r->gain_smooth[k] = smoothed;
     }
 
+    /* v3.2 Axis 2: hard ceiling in render-mode when far is active.
+     * Python aec.py 1942-1944. Confirmed load-bearing in v3.8 ABL-3
+     * ablation (removing caused -0.046 FS_mv echo for only +0.008
+     * DT_mv deg, Pareto ratio 0.17). KEEP. */
+    if (r->using_render_based && r->far_activity > 0.3f) {
+        const float render_ceil = 0.6f;
+        for (int k = 0; k < nf; k++) {
+            if (r->gain_smooth[k] > render_ceil) r->gain_smooth[k] = render_ceil;
+        }
+    }
+
+    /* === Min-statistics noise floor tracker (Python aec.py 1952-1964).
+     * Always-on (independent of enable_cng — used by both dynamic gain
+     * floor and CNG). Asymmetric EMA: down=0.98 always; up=0.998 only
+     * when "learning safe" (far_activity<0.01 AND dt<0.1) else 1.0
+     * (freeze upward tracking when signal active to avoid leaking
+     * speech into noise floor). */
+    if (!r->noise_initialized) {
+        for (int k = 0; k < nf; k++)
+            r->noise_psd[k] = r->error_psd[k] + 1e-8f;
+        r->noise_initialized = 1;
+    }
+    {
+        int is_learning_safe = (r->far_activity < 0.01f) && (dt_indicator_in < 0.1f);
+        const float alpha_down = 0.98f;
+        const float alpha_up = is_learning_safe ? 0.998f : 1.0f;
+        for (int k = 0; k < nf; k++) {
+            float a = (r->error_psd[k] > r->noise_psd[k]) ? alpha_up : alpha_down;
+            r->noise_psd[k] = a * r->noise_psd[k] + (1.0f - a) * r->error_psd[k];
+        }
+    }
+
+    /* === Dynamic noise floor gain (Python aec.py 1966-1984).
+     * noise_floor_gain[k] = sqrt(noise_psd[k] / |spec_synth[k]|²) clipped
+     * to [g_min, 1]. Raises gain_smooth where noise tracker shows persistent
+     * content (incl. quiet speech) so output ≥ sqrt(noise_psd). */
+    for (int k = 0; k < nf; k++) {
+        float spec_pwr = r->spec_buf[k].r * r->spec_buf[k].r
+                       + r->spec_buf[k].i * r->spec_buf[k].i + 1e-10f;
+        float nfg = fast_sqrt(r->noise_psd[k] / spec_pwr);
+        if (nfg < r->g_min) nfg = r->g_min;
+        if (nfg > 1.0f)     nfg = 1.0f;
+        if (r->gain_smooth[k] < nfg) r->gain_smooth[k] = nfg;
+    }
+
     /* === (y) Apply gain: spec *= gain_smooth === */
     for (int k = 0; k < nf; k++) {
         r->spec_buf[k].r *= r->gain_smooth[k];
         r->spec_buf[k].i *= r->gain_smooth[k];
     }
 
-    /* === (z) CNG: freeze-gated noise tracking + comfort noise injection === */
+    /* === (z) CNG: comfort-noise injection (only when enabled).
+     * Noise PSD already maintained above. */
     if (r->enable_cng) {
-        /* Noise PSD initialization on first frame */
-        if (!r->noise_initialized) {
-            for (int k = 0; k < nf; k++)
-                r->noise_psd[k] = r->error_psd[k] + 1e-8f;
-            r->noise_initialized = 1;
-        }
-
-        /* Freeze-gated minima tracking (uses current frame's gain_smooth) */
-        float gain_mean = 0.0f;
-        for (int k = 0; k < nf; k++) gain_mean += r->gain_smooth[k];
-        gain_mean /= nf;
-        int is_suppressing = (gain_mean < 0.9f);
-        float alpha_down_cng = 0.90f;
-        float alpha_up_cng = is_suppressing ? 1.0f : 0.998f;
-        for (int k = 0; k < nf; k++) {
-            float alpha_n = (r->error_psd[k] > r->noise_psd[k])
-                            ? alpha_up_cng : alpha_down_cng;
-            r->noise_psd[k] = alpha_n * r->noise_psd[k]
-                               + (1.0f - alpha_n) * r->error_psd[k];
-        }
 
         /* Comfort noise injection */
         float noise_sum = 0.0f;
@@ -1004,6 +1046,14 @@ const float* res_get_echo_psd(const ResFilter* r) {
 
 const float* res_get_error_psd(const ResFilter* r) {
     return r ? r->error_psd : NULL;
+}
+
+const float* res_get_gain_smooth(const ResFilter* r) {
+    return r ? r->gain_smooth : NULL;
+}
+
+const float* res_get_noise_psd(const ResFilter* r) {
+    return r ? r->noise_psd : NULL;
 }
 
 void res_dump_gain_spectrum(const ResFilter* r, float* out_gain) {

@@ -119,6 +119,15 @@ parity_phase4: dirs lib $(PARITY_PHASE4_OBJ)
 	    $(LIB_TARGET) $(LDFLAGS)
 	@echo "Parity verifier built: $(PARITY_PHASE4_TARGET)"
 
+# Phase 3 parity (ResFilter)
+PARITY_RESFILTER_TARGET = $(BIN_DIR)/parity_resfilter_test
+PARITY_RESFILTER_OBJ = $(OBJ_DIR)/parity_resfilter_test.o
+
+parity_resfilter: dirs lib $(PARITY_RESFILTER_OBJ)
+	$(CC) $(CFLAGS) -o $(PARITY_RESFILTER_TARGET) $(PARITY_RESFILTER_OBJ) \
+	    $(LIB_TARGET) $(LDFLAGS)
+	@echo "Parity verifier built: $(PARITY_RESFILTER_TARGET)"
+
 # Help
 help:
 	@echo "AEC (Acoustic Echo Cancellation) Build System"

@@ -47,3 +47,5 @@ parity_aux*.npz
 parity_aux*.bin
 parity_phase4*.npz
 parity_phase4*.bin
+parity_resfilter*.npz
+parity_resfilter*.bin
