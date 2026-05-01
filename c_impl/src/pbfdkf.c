@@ -66,6 +66,11 @@ struct Pbfdkf {
     float p_floor_beta;       /* 0.1 normal, 1.0 during EPC */
     int   p_floor_beta_frames;/* countdown frames for EPC beta */
 
+    /* v3.x: P_max override (matches Python _p_max_override / _p_max_override_frames).
+     * EPC events transiently raise to 1.0 for fast re-convergence. */
+    float p_max_override;       /* 0.5 default; 1.0 during EPC */
+    int   p_max_override_frames;/* countdown frames for override */
+
     /* Input buffers [block_size] */
     float* near_buffer;
     float* far_buffer;
@@ -123,6 +128,8 @@ Pbfdkf* pbfdkf_create(int block_size, int hop_size, int n_partitions,
     f->q_low_base = q_low;
     f->p_floor_beta = 0.1f;
     f->p_floor_beta_frames = 0;
+    f->p_max_override = 0.5f;
+    f->p_max_override_frames = 0;
 
     f->fft = fft_create(f->fft_size);
     if (!f->fft) goto error;
@@ -266,6 +273,8 @@ void pbfdkf_reset(Pbfdkf* f) {
     f->partition_idx = 0;
     f->p_floor_beta = 0.1f;
     f->p_floor_beta_frames = 0;
+    f->p_max_override = 0.5f;
+    f->p_max_override_frames = 0;
 }
 
 void pbfdkf_reset_weights(Pbfdkf* f) {
@@ -281,6 +290,8 @@ void pbfdkf_reset_weights(Pbfdkf* f) {
     }
     f->p_floor_beta = 0.1f;
     f->p_floor_beta_frames = 0;
+    f->p_max_override = 0.5f;
+    f->p_max_override_frames = 0;
 }
 
 int pbfdkf_process(Pbfdkf* f,
@@ -436,13 +447,25 @@ int pbfdkf_process_per_bin(Pbfdkf* f,
                 f->W[p][k].r += Ke.r;
                 f->W[p][k].i += Ke.i;
 
-                /* P update with UNSCALED K_optimal (Kalman theory) */
-                float KX = K_scale * (X.r * X.r + X.i * X.i);
+                /* v3.7.0 G1: blended KX for P update.
+                 * Python aec.py lines 856-868: KX = mu_mean*KX_optimal + (1-mu_mean)*KX_scaled
+                 * where KX_optimal = K_scale × |X|² (un-mu)
+                 *       KX_scaled  = K_scale × mu_k × |X|² (per-bin mu)
+                 *       blend factor mu_mean = mean(mu_scale_arr) — scalar.
+                 * Decouples P from W during DT-mu-scaling: FS (mu_mean=1) → 100% optimal,
+                 * DT (mu_mean=0) → 100% scaled, smooth transition between. Avoids both
+                 * extremes' regression risk (full optimal: P over-confident in DT;
+                 * full scaled: P over-cautious in steady state with weak far). */
+                float mag2 = X.r * X.r + X.i * X.i;
+                float KX_optimal = K_scale * mag2;
+                float KX_scaled  = K_scale_mu * mag2;
+                float KX = mu_mean * KX_optimal + (1.0f - mu_mean) * KX_scaled;
                 float Q_mod = f->Q[k] * q_scale;
                 float Q_gated = (f->power[k] > q_gate_thresh) ? Q_mod : (Q_mod * 0.05f);
                 float P_new = (1.0f - KX) * f->P[p][k] + Q_gated;
-                if (P_new < delta) P_new = delta;
-                if (P_new > P_MAX) P_new = P_MAX;
+                /* v3.x parity: clip(P_new, P_floor, p_max) where p_max may be EPC override */
+                float p_max_eff = f->p_max_override;
+                if (P_new > p_max_eff) P_new = p_max_eff;
                 /* P-floor: clamp P >= Q_high * beta (v2.1.0) */
                 float p_floor = f->Q_high[k] * f->p_floor_beta;
                 if (P_new < p_floor) P_new = p_floor;
@@ -462,6 +485,13 @@ int pbfdkf_process_per_bin(Pbfdkf* f,
         f->p_floor_beta_frames--;
         if (f->p_floor_beta_frames == 0)
             f->p_floor_beta = 0.1f;
+    }
+
+    /* v3.x: P_max override countdown */
+    if (f->p_max_override_frames > 0) {
+        f->p_max_override_frames--;
+        if (f->p_max_override_frames == 0)
+            f->p_max_override = 0.5f;
     }
 
     /* Advance partition index */
@@ -496,6 +526,12 @@ void pbfdkf_set_p_floor_epc(Pbfdkf* f, float beta, int frames) {
     if (!f) return;
     f->p_floor_beta = beta;
     f->p_floor_beta_frames = frames;
+}
+
+void pbfdkf_set_p_max_override(Pbfdkf* f, float p_max, int frames) {
+    if (!f) return;
+    f->p_max_override = p_max;
+    f->p_max_override_frames = frames;
 }
 
 int pbfdkf_copy_weights(Pbfdkf* dst, const Pbfdkf* src) {

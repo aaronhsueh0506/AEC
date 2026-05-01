@@ -96,6 +96,12 @@ void pbfdkf_set_q_ratio(Pbfdkf* f, float q_high, float q_low, float ratio);
 void pbfdkf_set_p_floor_epc(Pbfdkf* f, float beta, int frames);
 
 /**
+ * v3.x: Set P_max override for EPC. Matches Python _p_max_override mechanism.
+ * Default 0.5; EPC events set 1.0 with frames countdown back to 0.5.
+ */
+void pbfdkf_set_p_max_override(Pbfdkf* f, float p_max, int frames);
+
+/**
  * Copy weights + Kalman P from src to dst
  * Both must have same dimensions.
  */
