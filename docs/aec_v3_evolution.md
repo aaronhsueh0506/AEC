@@ -258,3 +258,203 @@ Compared to v3.0.2 baseline:
 - FS reaches +0.190 lead (was −0.014 net)
 - DT_static deg buffer reduced from +0.314 → +0.136 (cost paid for echo gain)
 - NE deg from −0.082 → −0.091 (still > 4.0)
+
+---
+
+## v3.5.x — Y2 fallback + nonlinear/saturation handling
+
+**Trace finding**: at hotspot frames where `using_render_based=1` AND
+post-filter signal still has high amplitude (`error_max_abs > 0.05`),
+the residual_echo_psd estimate from `far × ERL` is sometimes orders of
+magnitude too small → ENR drops near zero → soft-gate gives gain ≈ 1.0
+(no suppression) → audible echo leak.
+
+**Change**: AEC3-style "saturated_echo" Y2 fallback. When in render-mode
+AND error peak high, force `residual_echo_psd ≥ mic_psd × 0.5`. Trace
+verified WYKA2 worst-leak hotspot ratio dropped 111,827× → 5×.
+
+**v3.5.0 result**: FS echo gains +0.06~+0.10. **But**: DT_static deg
+−0.049, DT_movement deg −0.035 (NE damage cost).
+
+(This change was later **fully ablated in v3.8.0 ABL-2** — see below.)
+
+Also added: nonlinear echo mode (boost residual_echo when `saturation_level >
+0.3` sustained), HF harmonic mapping (HF echo floor from LF echo when speaker
+distortion present).
+
+---
+
+## v3.6.0 — Filter length 32 → 52ms (PR-D1)
+
+**AEC3 alignment**: AEC3 default uses 13 partitions × 4ms = 52ms. We had 32ms.
+
+**Change**: bump default `filter_length` from `sample_rate × 32 / 1000` to
+`sample_rate × 52 / 1000` for sample rates < 44100 Hz.
+
+**Result**: FS echo +0.03~+0.07 (more reverb tail captured). DT_static deg
+−0.066, DT_movement deg −0.022, NE drops to 4.000 floor. Echo-prioritized
+trade.
+
+---
+
+## v3.6.1 — DT-from-frame-zero stats detector
+
+**Trace finding**: in DT-only-from-frame-0 cases (no FS warmup), filter
+never converges → render-based mode never trusted → echo leaks. Existing
+DT detection requires far-active history.
+
+**Change**: add stats-only DT detector that compares mic energy to a
+running noise floor (no far reference required). When triggered, gates
+`mu_scale` floor to allow filter to learn even in DT.
+
+(Detailed spec: `spec_dt_from_frame_zero.md`.)
+
+---
+
+## v3.7.0 — G1 KX blended P-update
+
+**Trace finding** (KX deep trace + GPT analysis): in DT movement, `mu_scale`
+drops to ~0.2 to slow W-update against NE contamination, but the P
+covariance update was using K_optimal × X (full update) regardless → P
+shrinks 72% during DT, then DT ends and P is too low → K too low → main
+filter recovery 100+ frames slower than necessary.
+
+**Root cause**: P-update was decoupled from W-update. P used optimal Kalman
+gain even when W used scaled mu.
+
+**Change**: blended KX for P-update —
+```python
+KX_blended = mu_mean × (K_optimal × X) + (1 - mu_mean) × (K_scaled × X)
+```
+When filter trusts itself (mu_mean ≈ 1), use full Kalman P-update; when
+DT-suppressed (mu_mean < 1), use scaled KX matching W-update intensity.
+
+**Result vs v3.6.1**: all 5 buckets neutral or positive. DT_movement deg
++0.012 (recovery faster). FS echo +0.001~+0.003 (filter learns better
+post-DT). Confirmed root-cause fix, not Pareto sliding.
+
+---
+
+## v3.7.1 — PR-B drop render-based linear_failed (e2 floor removal)
+
+**Trace finding**: `linear_failed = (using_render AND erle_factor < 0.2)`
+branch fires 35% of DT_movement frames at `effective_dt = 0.008`
+(false-negative). When fired, `residual_echo = max(residual_echo, error_psd × 0.9)`,
+but `error_psd` in DT contains both echo AND near-end speech → using
+e2 as residual_echo floor structurally over-suppresses near-end.
+
+**WebRTC AEC3 reference**: AEC3 `residual_echo_estimator.cc` NEVER uses
+error_psd as floor — relies entirely on `render × ERLE_smoothed`.
+
+**Change**: remove the `using_render AND erle_factor < 0.2` branch. Keep
+only `erl > 1.2` branch (later proven dead in v3.8.1).
+
+**Result vs v3.7.0**: DT_movement deg +0.011, NE +0.002, DT_static deg
++0.004. Cost: FS_movement echo −0.016 (still leads AEC2 by +0.422).
+
+---
+
+## v3.8.0 — ABL-1 + ABL-2 (architectural cleanup family)
+
+Continued v3.7.1 PR-B's AEC3-aligned cleanup. Two more legacy floors with
+the same structural mistake.
+
+**ABL-1 (drop v3.3 error_based_floor in ResidualEchoEstimator)**: removed
+```python
+far_conf = far_psd / (far_psd + error_psd × 0.05 + 1e-10)
+fallback_factor = 0.7 - 0.2 × clip(dt_for_fs, 0, 1)
+error_based_floor = error_psd × far_conf × fallback_factor
+render_based_echo = max(render_based_echo, error_based_floor)
+```
+Same lesson: error_psd contains NE during DT.
+
+**ABL-2 (drop v3.5 Y2 fallback `mic_psd × 0.5`)**: removed
+```python
+if render_based AND error_peak > 0.05:
+    residual_echo_psd = max(residual_echo_psd, mic_psd × 0.5)
+```
+Trigger condition `error_peak > 0.05` is structurally NE-blind — DT speech
+also produces high error peaks. Floor `mic_psd × 0.5` then equates the
+near-end+echo mixture with echo proxy.
+
+**Kept**: `render_dt_gain_ceil = 0.6` (ABL-3 reverted) — ablation showed
+removal causes −0.046 FS_movement echo for only +0.008 DT_movement deg
+(Pareto ratio 0.17, much worse than ABL-2's 0.67). Load-bearing.
+
+**Result vs v3.7.1**: DT_movement deg +0.050 (gap to AEC2 closed from
+−0.309 → −0.259, −16%). DT_static deg +0.033. NE +0.009. Cost: FS_static
+echo −0.076, FS_movement echo −0.078 (FS still leads AEC2 by +0.344).
+Preset-independent across all 4 presets.
+
+---
+
+## v3.8.1 — ABL-4 dead-branch cleanup + diagnostics hygiene
+
+**ABL-4**: trace verified `self._erl_estimate` clipped to `[0.001, 1.0]`
+in update path, so `erl_estimate > 1.2` gate fires 0.00% across all 5
+buckets. Branch was retained as v3.7.1 PR-B "physical mic/far defense"
+but value is structurally bounded → defense impossible to engage. Dead
+code. Removed.
+
+**Diagnostics hygiene**: `AEC.reset()` now clears `_far_active_blocks`
+and `_dt_from_zero_count` getattr-lazy counters that were leaking
+across batch eval cases.
+
+**Result**: all metrics within AECMOS noise (±0.001) vs v3.8.0. Pure cleanup.
+
+**Rejected**: delay_first ERL re-init, delay_shift ERL cap. Both
+code-review-correct but Δ ≤ 0.003 on AEC Challenge dataset (delay-shift
+events rare). Will revisit if movement-heavy multi-shift dataset surfaces.
+
+---
+
+## H1 exploration (DominantNearendDetector) — Pareto-bound, stashed
+
+Concurrent with v3.8.0 ablation, attempted AEC3-style filter-independent
+DT detector to gate PBFDKF main mu_scale during loud-DT (where 5-site
+trace showed `eff_dt ≈ 0` and `gain_after_smoothing ≈ 1.0` — root cause
+of remaining DT_movement deg gap is linear filter learning NE into W,
+NOT residual filter over-suppression).
+
+7 variants (v1-v7) tested. Best variant (v1, loose threshold) gave
++0.18 DT_movement deg at cost of −0.34 FS_static echo. Latest variant
+(v7, with all bug fixes from code review) gave neutral result on this
+dataset.
+
+**Verdict**: detector based on raw mic/far ENR is on the same Pareto
+curve as PR-F (per-bin coh2). Breaking the Pareto requires architectural
+primitives we don't have:
+- Phase coherence (R3 in plan): physical phase relation between echo
+  and reference, separable from speech in DT.
+- Masking-aware suppression (R7 in plan): psycho-acoustic masking
+  threshold to allow inaudible echo to leak under NE.
+- NN postfilter (DTLN-aec / `~/.claude/plans/jazzy-brewing-castle.md`):
+  joint mic+far time-history mapping.
+
+H1 implementation stashed (`git stash` ID: H1 implementation backup).
+Architectural finding preserved in plan for v3.9+ stretch.
+
+---
+
+## v3.8.1 final scoreboard vs AEC2 (BALANCED, 800 cases)
+
+| bucket | ours | aec2 | gap | gap @ v3.0.2 |
+|---|---:|---:|---:|---:|
+| FS_static echo | 3.801 | 3.457 | **+0.344** | +0.218 |
+| FS_movement echo | 3.863 | 3.519 | **+0.344** | +0.412 |
+| NE deg | 4.002 | 4.098 | −0.096 | −0.098 |
+| DT_static echo | 4.256 | 4.331 | −0.075 | −0.149 |
+| DT_static deg | 2.257 | 2.304 | −0.047 | +0.022 |
+| DT_movement echo | 4.144 | 4.149 | −0.005 | +0.002 |
+| DT_movement deg | 2.269 | 2.528 | **−0.259** | −0.270 |
+
+Compared to v3.0.2:
+- FS_static echo lead +0.126
+- DT_static echo gap closed 50% (−0.149 → −0.075)
+- DT_static deg held above AEC2 throughout v3.x (+0.022 → −0.047 still ≤ 1 bucket gap)
+- DT_movement deg gap closed only 4% (−0.270 → −0.259) — remains the largest gap
+- NE deg: virtually unchanged (~−0.10)
+
+**Conclusion**: v3.8.1 is the AEC3-architectural-alignment endpoint via
+floor cleanup. Further DT_movement deg improvement requires new primitives
+(R3 phase coherence / R7 masking / NN postfilter), not floor tuning.

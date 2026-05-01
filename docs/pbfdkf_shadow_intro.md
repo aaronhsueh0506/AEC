@@ -1,6 +1,6 @@
 # PBFDKF + Shadow Filter + DTD 演算法介紹
 
-**版本**：v2.8.1  
+**版本**：v3.8.1（PBFDKF 內核含 v3.7.0 G1 KX-blended P-update；shadow / DTD 結構自 v2.8.1 起穩定）  
 **適用場景**：全雙工免持通話（手機、智慧音箱、車用、視訊會議）  
 **範圍**：線性 AEC 核心（不含 RES、CNG 後處理）
 
