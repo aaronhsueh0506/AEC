@@ -41,3 +41,7 @@ python/parity_baseline*.npz
 parity_pbfdkf_python.npz
 parity_pbfdkf_c.npz
 parity_pbfdkf_input.bin
+parity_multi_erle*.npz
+parity_multi_erle*.bin
+parity_aux*.npz
+parity_aux*.bin

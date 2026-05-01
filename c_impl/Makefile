@@ -22,7 +22,11 @@ BIN_DIR = bin
 SRCS = $(SRC_DIR)/aec.c \
        $(SRC_DIR)/pbfdkf.c \
        $(SRC_DIR)/res_filter.c \
-       $(SRC_DIR)/fft_wrapper.c
+       $(SRC_DIR)/fft_wrapper.c \
+       $(SRC_DIR)/multi_erle.c \
+       $(SRC_DIR)/render_activity.c \
+       $(SRC_DIR)/convergence.c \
+       $(SRC_DIR)/dt_analyzer.c
 
 LIB_SRCS = $(LIB_DIR)/kiss_fft.c
 
@@ -85,6 +89,24 @@ parity_pbfdkf: dirs lib $(PARITY_PBFDKF_OBJ)
 	$(CC) $(CFLAGS) -o $(PARITY_PBFDKF_TARGET) $(PARITY_PBFDKF_OBJ) \
 	    $(LIB_TARGET) $(LDFLAGS)
 	@echo "Parity verifier built: $(PARITY_PBFDKF_TARGET)"
+
+# Phase 2a parity verifier
+PARITY_MULTI_ERLE_TARGET = $(BIN_DIR)/parity_multi_erle_test
+PARITY_MULTI_ERLE_OBJ = $(OBJ_DIR)/parity_multi_erle_test.o
+
+parity_multi_erle: dirs lib $(PARITY_MULTI_ERLE_OBJ)
+	$(CC) $(CFLAGS) -o $(PARITY_MULTI_ERLE_TARGET) $(PARITY_MULTI_ERLE_OBJ) \
+	    $(LIB_TARGET) $(LDFLAGS)
+	@echo "Parity verifier built: $(PARITY_MULTI_ERLE_TARGET)"
+
+# Phase 2bcd parity verifier (RenderActivity + DT + Convergence)
+PARITY_AUX_TARGET = $(BIN_DIR)/parity_aux_test
+PARITY_AUX_OBJ = $(OBJ_DIR)/parity_aux_test.o
+
+parity_aux: dirs lib $(PARITY_AUX_OBJ)
+	$(CC) $(CFLAGS) -o $(PARITY_AUX_TARGET) $(PARITY_AUX_OBJ) \
+	    $(LIB_TARGET) $(LDFLAGS)
+	@echo "Parity verifier built: $(PARITY_AUX_TARGET)"
 
 # Help
 help:
