@@ -1110,9 +1110,17 @@ int aec_process_ex(Aec* aec,
             float base_over_sub = cfg->res_over_sub_base +
                                    cfg->res_over_sub_scale * erle_factor;
 
-            /* DT indicator with ERLE correction */
+            /* DT indicator — match Python aec.py 3967-3972 non-DTD path:
+             *   simple_dt = 1 - far / (mic+far)
+             *   raw_dt = max(dt_from_energy, simple_dt * 0.5)
+             * The max() lifts dt_from_energy when high (true DT signal)
+             * but halves simple_dt baseline (false-DT in high-ERL FS).
+             * Then inst_erle correction divides if smoothed > 2. */
             float far_p_dt = far_power + 1e-10f;
-            float raw_dt = 1.0f - far_p_dt / (mic_pwr + far_p_dt);
+            float simple_dt = 1.0f - far_p_dt / (mic_pwr + far_p_dt);
+            float raw_dt = aec->dt_from_energy > simple_dt * 0.5f
+                            ? aec->dt_from_energy
+                            : simple_dt * 0.5f;
             float inst_erle_raw_dt = mic_pwr / raw_err_pwr_dt;
             aec->inst_erle_smooth = 0.7f * aec->inst_erle_smooth + 0.3f * inst_erle_raw_dt;
             if (aec->inst_erle_smooth > 2.0f) {
@@ -1128,20 +1136,22 @@ int aec_process_ex(Aec* aec,
             float dt_reduction = cfg->res_dt_reduction * dt_indicator;
             float over_sub = maxf(base_over_sub - dt_reduction, 0.5f);
 
-            /* === F: Energy DT signal (pre-filter, immune to inst_erle) ===
-             * Bug 6 fix: dynamic ERL ceiling instead of hardcoded 4.0×.
-             * High-coupling scenarios (ERL > 0dB) falsely triggered dt_from_energy
-             * during FS with the 4× cap, causing ENR threshold relaxation. */
-            if (aec->far_active_prev && far_active) {
+            /* === F: Energy DT signal — match Python DoubleTalkAnalyzer.update_energy_dt
+             * (aec.py 2483-2497). Gate: far_active AND far_pwr > 1e-4 (NOT
+             * far_active_prev AND far_active). Else fade-out via slow decay
+             * (NOT hard zero). */
+            if (far_active && far_power > 1e-4f) {
                 float erl_ceiling = 1.0f / (aec->erl_estimate > 0.01f ? aec->erl_estimate : 0.01f);
-                float max_echo = far_power * erl_ceiling * 2.0f;   /* 2× safety margin */
-                float dt_energy = maxf(0.0f, (mic_pwr - max_echo) / mic_pwr);
+                float max_echo = far_power * erl_ceiling * 2.0f;
+                float dt_energy = (mic_pwr - max_echo) / mic_pwr;
+                if (dt_energy < 0.0f) dt_energy = 0.0f;
                 if (dt_energy > aec->dt_from_energy)
                     aec->dt_from_energy = 0.3f * aec->dt_from_energy + 0.7f * dt_energy;
                 else
                     aec->dt_from_energy = 0.9f * aec->dt_from_energy + 0.1f * dt_energy;
             } else {
-                aec->dt_from_energy = 0.0f;
+                /* inst = 0; same EMA branch with 0 input → slow decay only */
+                aec->dt_from_energy = 0.9f * aec->dt_from_energy;
             }
 
             /* === G: Dynamic ERL tracking — match Python aec.py 3970-3974
