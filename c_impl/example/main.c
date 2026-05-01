@@ -109,6 +109,10 @@ int main(int argc, char* argv[]) {
     /* Create config from preset */
     AecConfig config = aec_config_from_preset(preset, sample_rate);
     config.enable_res = enable_res;
+    /* Match Python eval_aec_challenge.py --cng (default ON in BALANCED).
+     * AECMOS-relevant: CNG fills below-g_min bins with shaped noise,
+     * which is critical for FS bucket scores. */
+    config.enable_cng = 1;
     if (filter_length > 0) {
         config.filter_length = filter_length;
         config.n_partitions = (filter_length + config.hop_size - 1) / config.hop_size;
