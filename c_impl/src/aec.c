@@ -1289,9 +1289,23 @@ int aec_process_ex(Aec* aec,
                 res_force_render_based(aec->res);
             }
 
+            /* Python aec.py 4053-4055: dt_residual_scale = 1 - 0.5 * (dt/0.8)
+             * scales echo_spec passed to RES. When dt=0.8 → scale=0.5
+             * (halves echo estimate to protect NE during DT). */
+            float dt_residual_scale = 1.0f - 0.5f * (dt_indicator / 0.8f);
+            if (dt_residual_scale < 0.5f) dt_residual_scale = 0.5f;
+            if (dt_residual_scale > 1.0f) dt_residual_scale = 1.0f;
+            const Complex* echo_spec_raw = pbfdkf_get_echo_spec(aec->filter);
+            static Complex eff_echo_spec[513];
+            int nf = aec->n_freqs;
+            for (int k = 0; k < nf; k++) {
+                eff_echo_spec[k].r = echo_spec_raw[k].r * dt_residual_scale;
+                eff_echo_spec[k].i = echo_spec_raw[k].i * dt_residual_scale;
+            }
+
             /* v2.1.0: pass shadow_dt separately — RES merges via effective_dt */
             res_process(aec->res, aec->raw_output,
-                        pbfdkf_get_echo_spec(aec->filter),
+                        eff_echo_spec,
                         pbfdkf_get_far_spec(aec->filter),
                         pbfdkf_get_near_spec(aec->filter),
                         far_power, aec->filter_converged,
