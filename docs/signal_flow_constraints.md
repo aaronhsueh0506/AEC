@@ -219,9 +219,17 @@ if far_pwr > 1e-4:
 - `echo_boost = 1.0 + 0.5·coh2 if dt_for_fs<0.2 else 1.0`
 - `residual *= echo_boost`
 
-### 7d. E8a linear-failed fallback
-- gate: `linear_failed = erl>1.2 OR (using_render AND erle_factor<0.2)` AND `effective_dt < 0.2`
-- `residual = max(residual, error_psd × 0.9)`
+### 7d. E8a linear-failed fallback — **REMOVED in v3.7.1+v3.8.0+v3.8.1**
+**Do NOT port to C.** Three structurally related branches were ablated:
+- v3.7.1 PR-B: `using_render AND erle_factor<0.2` branch (was firing 35% of DT_mv frames at false-negative effective_dt)
+- v3.8.0 ABL-1: error_based_floor `error_psd × far_conf × fallback_factor` in residual_echo_estimator
+- v3.8.0 ABL-2: Y2 fallback `mic_psd × 0.5` (gated render_based + error_peak > 0.05)
+- v3.8.1 ABL-4: ERL-based branch `erl > 1.2` (dead code, fire rate 0% verified)
+
+All shared the same architectural mistake: using a signal that contains
+near-end speech (`error_psd` / `mic_psd`) as an "echo proxy" floor → DT
+near-end gets structurally over-suppressed. AEC3-aligned policy: only
+`render_based_echo = far × ERL` floors the residual_echo estimate.
 
 ---
 

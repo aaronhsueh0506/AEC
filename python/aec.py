@@ -1213,11 +1213,10 @@ class ResFilter:
         self._stats_last_enr = 0.0
         self._stats_last_nearend = 0.0
         self._stats_last_res_psd = 0.0
-        self._stats_last_render_echo = 0.0
-        self._stats_last_linear_res = 0.0
         self._stats_last_min_ne = 0.0
-        self._stats_last_want_render = False
-        self._stats_last_should_render_v1 = False
+        # _stats_last_using_render wired from self._residual_est.using_render_based
+        # in get_stats accumulator. Removed in v3.8.x (never-wired after residual
+        # estimator refactor): render_echo, linear_res, want_render, should_render_v1.
         self._stats_last_using_render = False
         self._stats_last_ne_g_floor = 0.0
         self._stats_last_spectral_g_min = 0.0
@@ -1289,8 +1288,7 @@ class ResFilter:
             'unusable_dt': 0,
             # (4) residual echo model
             'using_render_based_dt': 0,
-            'should_render_v1_dt': 0, 'should_render_v2_dt': 0,
-            'render_echo_sum': 0.0, 'linear_res_sum': 0.0, 'min_ne_sum': 0.0,
+            'min_ne_sum': 0.0,
             # (5) startup_dt gain stage diagnostics (accumulated for not filter_converged frames)
             'startup_dt_once_conv': 0,   # DT frames where not filter_once_converged
             'st_ne_g_floor_sum': 0.0,
@@ -1305,11 +1303,7 @@ class ResFilter:
             'st_nfl_lifted_count': 0,
             'st_nfl_final_gain_sum': 0.0,
         }
-        self._stats_last_render_echo = 0.0
-        self._stats_last_linear_res = 0.0
         self._stats_last_min_ne = 0.0
-        self._stats_last_want_render = False
-        self._stats_last_should_render_v1 = False
         self._stats_last_using_render = False
         self._stats_last_ne_g_floor = 0.0
         self._stats_last_spectral_g_min = 0.0
@@ -1353,10 +1347,6 @@ class ResFilter:
             'unusable_dt_pct': s['unusable_dt'] / n,
             # (4) residual echo model
             'using_render_based_pct': s['using_render_based_dt'] / n,
-            'should_render_v1_pct': s['should_render_v1_dt'] / n,
-            'should_render_v2_pct': s['should_render_v2_dt'] / n,
-            'mean_render_echo': s['render_echo_sum'] / n,
-            'mean_linear_res': s['linear_res_sum'] / n,
             'mean_min_ne_from_dt': s['min_ne_sum'] / n,
             # (5) startup_dt gain stage diagnostics
             'startup_dt_once_conv_pct': s['startup_dt_once_conv'] / n,
@@ -2057,12 +2047,9 @@ class ResFilter:
                 if _uv3: s['usable_v3'] += 1
                 if _uv4: s['usable_v4'] += 1
                 if not _uv1: s['unusable_dt'] += 1
-                # (4) residual echo model
-                if self._stats_last_using_render:    s['using_render_based_dt'] += 1
-                if self._stats_last_should_render_v1: s['should_render_v1_dt'] += 1
-                if self._stats_last_want_render:     s['should_render_v2_dt'] += 1
-                s['render_echo_sum'] += self._stats_last_render_echo
-                s['linear_res_sum'] += self._stats_last_linear_res
+                # (4) residual echo model — wire using_render directly from estimator
+                if self._residual_est.using_render_based:
+                    s['using_render_based_dt'] += 1
                 s['min_ne_sum'] += self._stats_last_min_ne
                 # (5) startup_dt gain stage diagnostics (only when not filter_converged)
                 if not filter_converged:
@@ -3675,7 +3662,6 @@ class AEC:
                     elif abs(new_delay - self._current_delay) > 32:
                         # Require two consecutive consistent estimates before updating
                         if hasattr(self, '_pending_delay') and abs(new_delay - self._pending_delay) < 16:
-                            old_delay = self._current_delay
                             self._current_delay = new_delay
                             del self._pending_delay
                             # Bug fix: trigger EPC on delay shift — filter W/P are
@@ -4444,7 +4430,18 @@ def process_wav_files(mic_path: str, ref_path: str, out_path: str,
     if config is None:
         config = AecConfig(sample_rate=mic_sr)
     else:
-        config.sample_rate = mic_sr
+        # v3.8.x: when external config has sample_rate-dependent auto fields
+        # already resolved (frame_size/hop_size/filter_length computed in
+        # __post_init__ at construction time), updating sample_rate alone
+        # leaves stale sizes. Re-resolve auto fields by reverting them to
+        # sentinel and re-running __post_init__.
+        if config.sample_rate != mic_sr:
+            from dataclasses import replace as _dc_replace
+            config = _dc_replace(config,
+                                  sample_rate=mic_sr,
+                                  frame_size=-1,
+                                  hop_size=-1,
+                                  filter_length=-1)
 
     print(f"  Mode: {config.mode.value}")
     print(f"  Step size (mu): {config.mu}")
