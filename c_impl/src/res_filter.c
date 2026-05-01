@@ -71,6 +71,7 @@ struct ResFilter {
     int enable_cng;
     int noise_initialized; /* 0 until first CNG frame */
     float* noise_psd;     /* [n_freqs] */
+    float* smooth_cn_gain; /* [n_freqs] EMA-smoothed CNG injection gain (Python aec.py 1959/1996) */
     float alpha_noise;    /* 0.98 */
 
     /* === v2: direct echo estimation === */
@@ -170,6 +171,7 @@ ResFilter* res_create(const ResConfig* cfg) {
     r->S_ee           = (float*)calloc(nf, sizeof(float));
     r->coh2_smooth    = (float*)calloc(nf, sizeof(float));
     r->noise_psd      = (float*)calloc(nf, sizeof(float));
+    r->smooth_cn_gain = (float*)calloc(nf, sizeof(float));
 
     /* v2 arrays */
     r->erle_per_bin   = (float*)malloc(nf * sizeof(float));
@@ -235,6 +237,7 @@ void res_destroy(ResFilter* r) {
     free(r->S_ee);
     free(r->coh2_smooth);
     free(r->noise_psd);
+    free(r->smooth_cn_gain);
     free(r->erle_per_bin);
     free(r->filter_erle);
     free(r->near_psd_buf);
@@ -267,6 +270,7 @@ void res_reset(ResFilter* r) {
     memset(r->S_ee, 0, nf * sizeof(float));
     memset(r->coh2_smooth, 0, nf * sizeof(float));
     memset(r->noise_psd, 0, nf * sizeof(float));
+    if (r->smooth_cn_gain) memset(r->smooth_cn_gain, 0, nf * sizeof(float));
     r->noise_initialized = 0;
     memset(r->near_psd_buf, 0, NEAR_PSD_BLOCKS * nf * sizeof(float));
     memset(r->near_psd, 0, nf * sizeof(float));
@@ -1040,21 +1044,24 @@ void res_process(ResFilter* r,
      * Noise PSD already maintained above. */
     if (r->enable_cng) {
 
-        /* Comfort noise injection */
+        /* Comfort noise injection — Python aec.py 1993-2001:
+         * target_cn_gain = sqrt(max(1 - gain² , 0)) × 0.4
+         * smooth_cn_gain = 0.8 × prev + 0.2 × target  (per-bin EMA)
+         * Apply smooth_cn_gain × noise_std × N(0,1) to spec_buf. */
         float noise_sum = 0.0f;
         for (int k = 0; k < nf; k++) noise_sum += r->noise_psd[k];
         if (noise_sum > 1e-7f) {
             for (int k = 0; k < nf; k++) {
-                /* A4: CNG gain factor 0.3→0.4 to match Python (aec.py:1631). */
-                float cn_gain_k = fast_sqrt(maxf(1.0f - r->gain_smooth[k] * r->gain_smooth[k], 0.0f)) * 0.4f;
+                float target_cn_gain = fast_sqrt(maxf(1.0f - r->gain_smooth[k] * r->gain_smooth[k], 0.0f)) * 0.4f;
+                r->smooth_cn_gain[k] = 0.8f * r->smooth_cn_gain[k] + 0.2f * target_cn_gain;
                 float noise_std = fast_sqrt(r->noise_psd[k] / 2.0f);
                 /* Box-Muller for two N(0,1) samples */
                 float u1 = (float)(rand() + 1) / ((float)RAND_MAX + 2.0f);
                 float u2 = (float)rand() / ((float)RAND_MAX + 1.0f);
                 float z0 = fast_sqrt(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
                 float z1 = fast_sqrt(-2.0f * logf(u1)) * sinf(2.0f * (float)M_PI * u2);
-                r->spec_buf[k].r += cn_gain_k * noise_std * z0;
-                r->spec_buf[k].i += cn_gain_k * noise_std * z1;
+                r->spec_buf[k].r += r->smooth_cn_gain[k] * noise_std * z0;
+                r->spec_buf[k].i += r->smooth_cn_gain[k] * noise_std * z1;
             }
         }
     }
