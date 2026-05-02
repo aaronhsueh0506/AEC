@@ -1,7 +1,10 @@
 # AEC 方法介紹文檔
 
-**版本**：v3.8.1（2026-05-01）— 移除 e2/mic-as-echo-floor 系列結構性錯誤完成。
+**版本**：v3.8.1（演算法）/ v3.8.2（C 對齊；2026-05-02）。
 方法架構大致穩定；主要演進細節見 [aec_v3_evolution.md](aec_v3_evolution.md)。
+C 實作（`c_impl/include_v2/` + `c_impl/src_v2/`）已對齊 Python 至 SNR
+64–78 dB（per-frame state bit-exact），詳見 [c_impl/README.md](../c_impl/README.md)。
+本文以 Python 程式碼為主要參考，C 實作 1:1 對應同名 module。
 
 ## 目錄
 
@@ -2313,7 +2316,7 @@ ERLE = 10 · log₁₀(E[d²] / E[e²])    (dB)
 | Oracle reset/Q-boost | frame 0 注入（R0–R5）| ≤ +0.002 | DT gate 在注入後持續抑制 adaptation |
 | RES gain decision | ENR scale / RER cap / hybrid（S0–S3）| ≤ +0.007 | suppression 增加但 MOS 不改善，打到 speech |
 
-詳細數據見 [docs/movement_dt_ablation_report.md](movement_dt_ablation_report.md)。
+詳細數據見 [docs/archive/movement_dt_ablation_report.md](archive/movement_dt_ablation_report.md)。
 
 ### C.4 已確認無效的改進（含歷史實驗）
 

@@ -1,101 +1,171 @@
-# AEC C Implementation — PBFDKF + Shadow + Multi-ERLE + WOLA RES
+# AEC C Implementation (v2 — bit-exact aligned with Python v3.8.1)
 
-C 語言 AEC 實作。對齊 Python **v2.0.0**（correlation 0.971）+ v2.4.0 的 RES 修正（Bug 7/2/6）。
+C port of the Python `aec.py` v3.8.1 reference. Layout: `include_v2/` + `src_v2/`,
+top-level orchestration in `aec_v2.{h,c}`, CLI binary `bin/aec_wav_v2`.
 
-> **使用文件**：[USER_GUIDE.md](USER_GUIDE.md) — 發佈取向使用說明（安裝、CLI/API、使用條件、限制、常見問題）。
->
-> **同步狀態（2026-04-17）**：
-> - ✅ v2.4.0 Bug 7/2/6 已同步
-> - ❌ v2.1.0：AEC3-style echo switching / P-floor / inst_erle cap / light release EMA / BUG-3 min_gate_width
-> - ❌ v2.2.0：（見 DEVLOG）
-> - ❌ v2.3.0：Energy DT 三線驅動 / shadow DTD offset / 動態 ERL / PAR gate / EPC 延長 / S_ee decay fix / shadow copy streak / render-based hold + override / dead code cleanup
-> C 端移植計畫見 [docs/DEVLOG.md](../docs/DEVLOG.md)。
+The legacy v2.5-aligned implementation in `include/`, `src/`, and the older
+`bin/aec_wav` / `bin/aec_dump` binaries is kept frozen for reference. New code
+should use the v2 path.
 
-## 特點
+> User guide → [USER_GUIDE.md](USER_GUIDE.md) (CLI / API / build / limits)
+> Integration into a host C/C++ pipeline → [../docs/c_integration_guide.md](../docs/c_integration_guide.md)
+> Algorithm reference → [../docs/aec_methods.md](../docs/aec_methods.md)
 
-- **PBFDKF**（Partitioned Block Frequency-Domain Kalman Filter）
-  - Correct Kalman math（global denominator, unscaled K for P update）
-  - P_MAX=0.5, R_scale=0.1, alpha_r=0.95
-  - dt_indicator ERLE correction（3-frame EMA smoothed inst_erle）
-- **Shadow Filter** — 雙濾波器自動修正 + bidirectional copy
-- **Multi-ERLE** — FilterErleEstimator + FullbandErleEstimator（打破循環依賴）
-- **WOLA RES v2** — 完整重寫對齊 Python
-  - ENR: dt × nearend_est（非線性 echo 保護）
-  - ne_confidence = dt_indicator（直接控制）
-  - Divergence override、cross-frequency smoothing
-- **CNG** — 凍結式底噪追蹤（×0.3 attenuation）
-- **GCC-PHAT Delay Estimation** — inline, 250ms max
-- **四級 Preset** — MILD / BALANCED / AGGRESSIVE / MAXIMUM
-- **Output Limiter** — 平滑增益限制
+---
 
-> HPF（80Hz 高通濾波器）已移至應用層。AEC module 不再內建 HPF。
+## Parity status
 
-## 編譯
+End-to-end SNR vs Python `aec.py` v3.8.1 (`--mode pbfdkf --enable-res`,
+BALANCED preset, 16 kHz):
 
-```bash
-make          # CLI → bin/aec_wav
-make lib      # 靜態函式庫 → bin/libaec.a
-make clean    # 清除
+| Scenario              | SNR    | max abs diff |
+|-----------------------|--------|--------------|
+| farend_singletalk     | 64.15 dB | 3.05e-5 |
+| doubletalk            | 70.37 dB | 3.05e-5 |
+| nearend_singletalk    | 67.38 dB | 3.05e-5 |
+
+`max_abs_diff = 3.05e-5` is the 16-bit PCM quantization step (1/32768);
+internal float32 buffers match within fp32 ULP cumulative drift over thousands
+of frames of EMA chains.
+
+### Per-module parity gates (passed)
+
+| Module                        | Gate                                       |
+|-------------------------------|--------------------------------------------|
+| HighPassFilter                | bit-exact 0 ULP, 4237 frames × 2 sides     |
+| SaturationDetector            | bit-exact 0 ULP, 4237 frames × 2 sides     |
+| DelayEstimator (GCC-PHAT)     | delay & n_updates exact, PAR rtol < 1e-3   |
+| FilterErle / FullbandErle     | fp64 bit-exact, fp32 store-back ULP        |
+| RenderActivity / Convergence / DoubleTalkAnalyzer | bit-exact across boolean + counter + fp64 EMAs |
+| PBFDKF (G1 KX-blended)        | output / echo / P / R bit-exact pre-reset (30 frames) |
+
+Per-frame state diff (every Python `aec._diag` field): ALL of `erl_estimate`,
+`dt_indicator`, `dt_from_energy`, `far_activity`, `main_err_smooth`,
+`shadow_err_smooth`, `simple_mu_ratio`, `converged`, `once_converged`,
+`using_render_based`, `epc_active` match bit-exact across the entire 4237-frame
+test wav.
+
+---
+
+## Module layout
+
+```
+c_impl/
+├── include_v2/                   v2 API headers (active)
+│   ├── aec_v2.h                    top-level orchestration
+│   ├── aec_debug.h                 timestamped logger (build-gated)
+│   ├── hpf_v2.h                    80 Hz Butterworth IIR HPF
+│   ├── saturation_v2.h             ref-side soft-clip + level EMA
+│   ├── delay_est_v2.h              GCC-PHAT online delay
+│   ├── erle_v2.h                   FilterErle + FullbandErle + confidence
+│   ├── detectors_v2.h              RenderActivity + Convergence + DoubleTalk
+│   ├── pbfdkf_v2.h                 PBFDAF base + PBFDKF (G1 KX blend)
+│   ├── residual_echo_v2.h          ResidualEchoEstimator (legacy mode)
+│   ├── res_filter_v2.h             ResFilter (ENR + reverb + min-stat noise + CNG)
+│   ├── epc_shadow_v2.h             EchoPathChange + ShadowCopyController
+│   └── dtd_v2.h                    DTD (geigel / divergence / coherence — opt-in)
+├── src_v2/                       v2 implementations
+│   ├── fft_fp64.c                  fp64 radix-2 FFT (matches numpy pocketfft)
+│   └── (one .c per header)
+├── example/
+│   ├── aec_wav_v2.c                active CLI
+│   ├── main.c, aec_dump.c          legacy v2.5 CLI binaries (frozen)
+│   └── wav_io.h
+├── test/parity/                  per-module parity tests + harness sources
+├── lib/kiss_fft/                 legacy fp32 FFT (used only by frozen binaries)
+├── include/, src/                legacy v2.5 implementation (frozen)
+└── Makefile
 ```
 
-## CLI 使用
+---
+
+## Build
 
 ```bash
-# 基本用法（balanced preset，含 HPF + delay estimation）
-./bin/aec_wav mic.wav ref.wav output.wav
-
-# 指定 preset
-./bin/aec_wav mic.wav ref.wav output.wav --preset aggressive
-
-# 關閉 RES（純線性 AEC output）
-./bin/aec_wav mic.wav ref.wav output.wav --no-res
-
-# 關閉 HPF
-./bin/aec_wav mic.wav ref.wav output.wav --no-hpf
-
-# 啟用 delay estimation
-./bin/aec_wav mic.wav ref.wav output.wav --enable-delay-est
-
-# 自訂 filter length
-./bin/aec_wav mic.wav ref.wav output.wav --filter 1024
+make aec_wav_v2    # → bin/aec_wav_v2 (active CLI)
+make               # legacy v2.5 binary (bin/aec_wav)
+make clean
 ```
 
-## API 使用
+CLI compile flags:
+
+```
+-O2 -ffp-contract=off -I c_impl/include_v2 -I c_impl/include
+```
+
+`-ffp-contract=off` is **required** — FMA contraction breaks bit-exact parity
+on HPF / Saturation / detector states.
+
+---
+
+## CLI
+
+```bash
+./bin/aec_wav_v2 mic.wav ref.wav out.wav                    # BALANCED
+./bin/aec_wav_v2 mic.wav ref.wav out.wav --preset aggressive
+./bin/aec_wav_v2 mic.wav ref.wav out.wav --cng              # CNG on (default off)
+./bin/aec_wav_v2 mic.wav ref.wav out.wav --no-res           # skip residual filter
+./bin/aec_wav_v2 mic.wav ref.wav out.wav --no-shadow
+./bin/aec_wav_v2 mic.wav ref.wav out.wav --no-delay-est
+./bin/aec_wav_v2 mic.wav ref.wav out.wav --filter-length-ms 64
+./bin/aec_wav_v2 mic.wav ref.wav out.wav --debug-level 2    # per-frame log to stderr
+```
+
+`--preset` accepts `mild | balanced | aggressive | maximum`. Unknown preset
+exits with non-zero status (no silent fallback). Output wav defaults to fp32
+PCM for parity-friendly comparison; set env `AEC_FP32_WAV=0` for 16-bit PCM.
+
+---
+
+## API (minimum)
 
 ```c
-#include "aec.h"
-#include "aec_types.h"
-#include "hpf.h"
+#include "aec_v2.h"
 
-// 1. 建立 config（balanced preset）
-AecConfig cfg = aec_config_from_preset(AEC_PRESET_BALANCED, 16000);
+AecV2Config cfg;
+aec_v2_config_from_preset(&cfg, AECV2_PRESET_BALANCED, 16000);
+cfg.enable_cng = 0;             // default — match Python CLI default
+cfg.enable_delay_est = 1;       // default
 
-// 2. 建立 AEC（HPF 已移至應用層，AEC 不做 HPF）
-Aec* aec = aec_create(&cfg);
+AecV2 aec;
+aec_v2_create(&aec, &cfg);
 
-// 3. 建立 HPF（應用層負責）
-Hpf* hp_mic = hpf_create(80.0f, 16000);
-Hpf* hp_ref = hpf_create(80.0f, 16000);
+int hop = aec_v2_hop_size(&aec);   // 160 @16k, 480 @48k
+float mic[hop], ref[hop], out[hop];
 
-// 4. 逐幀處理
-float mic[160], ref[160], out[160];
-while (read_audio(mic, ref, 160)) {
-    hpf_process(hp_mic, mic, 160);  // HPF 在 AEC 之前
-    hpf_process(hp_ref, ref, 160);
-    aec_process(aec, mic, ref, out);
-    write_audio(out, 160);
+while (read_block(mic, ref, hop)) {
+    aec_v2_process(&aec, mic, ref, out);
+    write_block(out, hop);
 }
 
-// 5. 清除
-aec_destroy(aec);
-hpf_destroy(hp_mic);
-hpf_destroy(hp_ref);
+aec_v2_destroy(&aec);
 ```
 
-## 資源消耗（fl=512 @16kHz）
+The C library expects `hop` samples per call; HPF + saturation detect + delay
+estimation happen internally. Configurable behavior is in `AecV2Config`
+(mirrors Python `AecConfig` field-by-field).
 
-| 項目 | 值 |
-|------|-----|
-| 記憶體（main + shadow） | ~200 KB |
-| 記憶體（含 RES + delay est） | ~280 KB |
-| FFT | kiss_fft（single precision） |
+---
+
+## Resources (fl=52 ms @16 kHz)
+
+| | |
+|---|---|
+| Memory (main + shadow filter)     | ~200 KB |
+| Memory (incl. RES + delay est.)   | ~280 KB |
+| Compute / frame                   | 4 × 512-FFT + Kalman update (257 bins × 6 partitions) |
+| FFT                               | fp64 radix-2 (no external dep) |
+
+---
+
+## Build-time switches
+
+| Flag | Purpose |
+|---|---|
+| `-DAEC_DEBUG`           | enable runtime debug log call sites |
+| `-DNDEBUG`              | strip debug log strings & assertions (release) |
+| `-DAEC_PARITY_HARNESS`  | enable internal-state read/write entry points used by `test/parity/` |
+
+The debug logger writes one line per frame (`[AEC][t=  1.234s][f=  154][PBFDKF] ...`)
+to stderr (or a file via `--debug-log <path>`). In release builds the macros
+collapse to no-ops with no string literals retained in the binary.

@@ -89,8 +89,7 @@ problem but provides escape paths:
 
 ## v3.6 attempts at mitigation
 
-PR-D series in plan
-[users-mingyu-desktop-novatek-se-aec-pyr-tranquil-scroll.md](../../../.claude/plans/users-mingyu-desktop-novatek-se-aec-pyr-tranquil-scroll.md):
+PR-D series tried in v3.6 (plan tracked outside repo):
 
 | PR | mechanism | result |
 |---|---|---|

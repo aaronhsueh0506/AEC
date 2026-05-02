@@ -7,8 +7,8 @@ v3.0–v3.4. See `CHANGELOG.md` for terse version notes; this is the deeper
 For algorithm description (filter, RES pipeline, gain rules), see
 [aec_methods.md](aec_methods.md). For WebRTC AEC3 reference, see
 [aec3_reference.md](aec3_reference.md). For the original detector decoupling
-plan, see [signal_flow_constraints.md](signal_flow_constraints.md) and
-[multi_point_change_plan_v3_1.md](multi_point_change_plan_v3_1.md).
+plan, see [archive/signal_flow_constraints_v3.0.2.md](archive/signal_flow_constraints_v3.0.2.md)
+and [archive/multi_point_change_plan_v3_1.md](archive/multi_point_change_plan_v3_1.md).
 
 ---
 

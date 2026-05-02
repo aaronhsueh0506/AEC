@@ -1,187 +1,155 @@
 # C AEC Integration Guide
 
-**Target audience**: developers integrating the C AEC library into a larger pipeline (Audio_ALG, Novatek SDK, custom C/C++ project).
+**Audience**: developers integrating the v2 C AEC library into a host C/C++
+project (Audio_ALG, Novatek SDK, etc.).
 
-**Library version reference**: Python `aec.py` v3.8.1 (commit `3844169`). C is being rewritten to match.
+**Library version**: aligned bit-exact with Python `aec.py` v3.8.1
+(see [CHANGELOG.md v3.8.2 entry](CHANGELOG.md)). Active path is
+`c_impl/include_v2/` + `c_impl/src_v2/`. Legacy v2.5-aligned `c_impl/include/`
++ `c_impl/src/` is frozen.
 
----
-
-## ⚠️ Current state warning (2026-05-01)
-
-The C implementation in `c_impl/` is being rewritten. Do not assume v3.8.1 algorithmic parity until rewrite Phase 5 (parity verification) is complete. The legacy v2.5 implementation is preserved at `c_impl_v25_legacy/` for reference only.
-
-If you need a stable C build today, use Python `aec.py` via subprocess or the v2.5 legacy with explicit version label.
+> CLI usage → [c_impl/USER_GUIDE.md](../c_impl/USER_GUIDE.md)
+> Per-module parity gate evidence → [c_impl/README.md](../c_impl/README.md)
 
 ---
 
 ## API surface
 
 ```c
-#include "aec.h"
-#include "aec_types.h"
-#include "res_filter.h"
+#include "aec_v2.h"
 ```
 
-### Standard mode — single-call full pipeline
+`AecV2Config` mirrors Python `AecConfig` field-by-field. `AecV2` is the runtime
+context (open struct so parity test code can read internal state — keep
+client code reading only via accessors).
+
+### Standard mode — full pipeline in one call
 
 ```c
-AecConfig cfg = aec_config_from_preset(AEC_PRESET_BALANCED, 16000);
-cfg.enable_cng = 1;
-Aec* aec = aec_create(&cfg);
-int hop = aec_get_hop_size(aec);
+AecV2Config cfg;
+aec_v2_config_from_preset(&cfg, AECV2_PRESET_BALANCED, /*sr=*/16000);
+cfg.enable_cng       = 0;   // default — match Python CLI
+cfg.enable_delay_est = 1;   // default
+
+AecV2 aec;
+aec_v2_create(&aec, &cfg);
+int hop = aec_v2_hop_size(&aec);   // 160 @16k, 480 @48k
 
 float mic[hop], ref[hop], out[hop];
-while (read_audio(mic, ref, hop)) {
-    aec_process(aec, mic, ref, out);
-    write_audio(out, hop);
+while (read_block(mic, ref, hop)) {
+    aec_v2_process(&aec, mic, ref, out);   // HPF + sat + delay + filter + shadow + RES + limiter
+    write_block(out, hop);
 }
 
-aec_destroy(aec);
+aec_v2_destroy(&aec);
 ```
 
-### Linear-only mode — for inserting NR (or any post-filter) between linear and RES
-
-```c
-AecConfig cfg = aec_config_from_preset(AEC_PRESET_BALANCED, 16000);
-cfg.enable_res = 0;            /* disable internal RES */
-Aec* aec = aec_create(&cfg);
-ResFilter* res = res_create(&res_config_from_aec(&cfg));
-AecResContext* ctx      = aec_context_create(aec);
-AecResContext* prev_ctx = aec_context_create(aec);
-
-float aec_out[hop], nr_out[hop], res_out[hop];
-Complex corrected_echo[n_freqs];
-int have_prev = 0;
-
-while (read_audio(mic, ref, hop)) {
-    /* Stage 1: linear AEC, exposing context */
-    aec_process_ex(aec, mic, ref, aec_out, ctx);
-
-    /* Stage 2: NR (or any post-filter that produces per-bin gain) */
-    nr_process(nr, aec_out, nr_out);
-
-    /* Stage 3: RES with NR-gain-corrected echo
-     *
-     * NR has 1-frame OLA delay → use prev_ctx (delayed by 1 frame). */
-    if (have_prev) {
-        const float* g = nr_get_gain_per_bin(nr);
-        for (int k = 0; k < n_freqs; k++) {
-            corrected_echo[k].r = prev_ctx_echo_spec[k].r * g[k];
-            corrected_echo[k].i = prev_ctx_echo_spec[k].i * g[k];
-        }
-        res_process(res, nr_out, corrected_echo,
-                    prev_far_spec, prev_near_spec,
-                    prev_ctx->far_power, prev_ctx->filter_converged,
-                    prev_ctx->erle_factor, prev_ctx->dt_indicator,
-                    /* over_sub */ 5.0f,
-                    /* divergence */ 0.0f,
-                    prev_ctx->is_stationary_dt,
-                    /* shadow_dt */ 0.0f,
-                    prev_ctx->erl_estimate,
-                    /* epc_active */ 0,
-                    prev_ctx->saturation_level,
-                    res_out);
-        write_audio(res_out, hop);
-    } else {
-        write_audio(aec_out, hop);  /* first frame: no prev_ctx, output linear-only */
-    }
-
-    /* Swap ctx ↔ prev_ctx for next frame */
-    AecResContext* tmp = prev_ctx; prev_ctx = ctx; ctx = tmp;
-    have_prev = 1;
-}
-
-aec_context_destroy(ctx);
-aec_context_destroy(prev_ctx);
-res_destroy(res);
-aec_destroy(aec);
-```
-
-A working reference implementation lives at `Audio_ALG/pipelines/aec_nr_pipeline.c`.
+`aec_v2_process` runs the entire pipeline (HPF → saturation → delay-est →
+PBFDKF main + shadow → EPC + ShadowCopy → ResFilter → limiter). Disable
+sub-modules via `cfg.enable_*` flags before `aec_v2_create`.
 
 ---
 
-## File-by-file responsibilities
+## Inserting noise reduction between linear AEC and RES
 
-| File | Role | Owns |
-|------|------|------|
-| `aec.h` / `aec.c` | Top-level orchestration | Hop pacing, mu_scale computation, EPC handling, ctx export, RES dispatch |
-| `aec_types.h` | Configuration | `AecConfig` (all tunables), `AecPreset` enum, `AecResContext` (linear→RES handoff) |
-| `pbfdkf.h` / `pbfdkf.c` | Linear adaptive filter | Kalman state (W, P, Q), error/echo spec, partition shift, G1 KX blended P-update |
-| `res_filter.h` / `res_filter.c` | Residual echo suppression | WOLA, ENR mask, spectral floor, CNG, reverb tail |
-| `shadow_filter.h` / `.c` | Background filter | Parallel PBFDKF with separate Q schedule, copy-controller hook |
-| `dt_analyzer.h` / `.c` | Double-talk detection | DT-from-frame-zero stats detector, stationary far-end DT detector |
-| `multi_erle.h` / `.c` | Convergence tracking | FilterErle (per-bin) + FullbandErle (broadband), confidence |
-| `render_activity.h` / `.c` | Far-end activity | Active/stationary detection, hangover |
-| `epc_detector.h` / `.c` | Echo path change | EPV (mic energy rise), shadow-rise detection |
-| `shadow_copy.h` / `.c` | Shadow-to-main copy gate | 5-state machine, FS-baseline-tracking |
-| `delay_estimator.h` / `.c` | Delay alignment | GCC-PHAT, ring buffer, delay shift handling |
-| `fft_wrapper.h` / `.c` | FFT abstraction | kiss_fft real/complex, sqrt-Hann window |
-| `fast_math.h` | Scalar approximations | sqrtf, log2f, expf for HF inner loops |
-| `hpf.h` / `.c` | DC removal pre-filter | 80Hz Butterworth (off by default; pipeline-level use) |
+**Status (2026-05-02)**: not yet exposed in v2 public API.
+
+Python `aec.py` reference exposes `AecResContext` (legacy `c_impl/include/aec_types.h`)
+that decouples linear AEC from ResFilter so a host pipeline can insert NR/post-
+filter in between. The same surface needs to be added on top of v2 — design
+exists, port pending. Until then:
+
+- Quick option: run AEC with `cfg.enable_residual_filter = 0` to get
+  linear-only output. Pipe into NR. RES is currently not callable separately
+  in v2 (would need a `res_filter_v2_create_standalone` + context struct).
+- Reference target shape: the legacy `aec_process_ex(...)` + `AecResContext`
+  flow in `c_impl/src/aec.c` (frozen). New v2 wrapper should mirror this.
+
+`Audio_ALG/pipelines/aec_nr_pipeline.c` currently uses the legacy v2.5 API
+and remains the working example. Migration to v2 is queued.
 
 ---
 
-## Things you CANNOT do
+## Module ownership (v2)
 
-These are not "bad practice" — they cause correctness or stability failures.
+| Header | Source | Owns |
+|---|---|---|
+| `aec_v2.h` | `aec_v2.c` | top-level orchestration, control-flow state, `AecV2Config` |
+| `hpf_v2.h` | `hpf_v2.c` | 80 Hz Butterworth biquad |
+| `saturation_v2.h` | `saturation_v2.c` | clip detection + ref-side soft-clip |
+| `delay_est_v2.h` | `delay_est_v2.c` | GCC-PHAT delay estimation, ring buffer |
+| `pbfdkf_v2.h` | `pbfdkf_v2.c` | PBFDAF base + PBFDKF (G1 KX-blended P-update), Q schedule, partition rotation |
+| `erle_v2.h` | `erle_v2.c` | FilterErleEstimator + FullbandErleEstimator + `compute_erle_confidence` |
+| `detectors_v2.h` | `detectors_v2.c` | RenderActivity + FilterConvergence + DoubleTalkAnalyzer |
+| `epc_shadow_v2.h` | `epc_shadow_v2.c` | EchoPathChangeDetector + ShadowCopyController |
+| `residual_echo_v2.h` | `residual_echo_v2.c` | ResidualEchoEstimator (legacy mode — used by all 4 presets) |
+| `res_filter_v2.h` | `res_filter_v2.c` | ResFilter (ENR + reverb tail + min-stat noise + CNG, OLA + sqrt-Hann) |
+| `dtd_v2.h` | `dtd_v2.c` | DTD (geigel / divergence / coherence — opt-in; BALANCED preset has DTD off) |
+| `aec_debug.h` | `aec_debug.c` | timestamped log infrastructure (build-gated) |
+| — | `fft_fp64.c` | fp64 radix-2 FFT (replaces kiss_fft for parity with numpy pocketfft) |
+
+---
+
+## Things you must not do
+
+These cause correctness failures (not just style issues):
 
 ### 1. Do not bypass linear AEC and feed mic directly to RES
 
-```c
-res_process(res, mic, /* echo_spec= */ NULL, ...);  /* WRONG */
-```
+ResFilter consumes the linear filter's `echo_spec` as its primary echo signal.
+Without a converged linear estimate, RES has nothing to suppress.
 
-RES uses the linear filter's `echo_spec` (frequency-domain echo estimate) as its primary signal. Without it, RES has no echo to subtract — output ≈ input.
+### 2. Do not feed non-`hop_size` blocks
 
-### 2. Do not skip the NR-gain echo correction when inserting NR
+`aec_v2_process` requires exactly `hop_size` samples per call (160 @16k,
+480 @48k, etc.). Use a ring buffer upstream for variable-size input.
 
-```c
-res_process(res, nr_out, prev_ctx->echo_spec, ...);  /* WRONG: should be NR-corrected */
-```
+### 3. Do not change `filter_length_ms` mid-stream
 
-NR attenuates echo-band frequencies; the saved `echo_spec` from the linear filter is "raw echo" pre-NR. Feeding raw `echo_spec` to RES causes RES to over-suppress (RES sees echo where NR has already removed it → applies more suppression on top → audible NE damage).
+Partition count is fixed at `aec_v2_create`. Mid-stream changes invalidate
+`P`/`Q`/`W` array bounds.
 
-### 3. Do not feed current-frame ctx to RES when NR is in-line
+### 4. Do not omit `aec_v2_reset` between independent streams
 
-NR's MMSE-LSA has a 1-frame OLA latency. If you pass `ctx` (current frame) instead of `prev_ctx` (previous frame), the echo, far_spec, near_spec are misaligned with `nr_out` by one hop → RES gain spectrum is computed against the wrong frame → echo leaks or NE damage depending on signal.
+DT / EPC / convergence state accumulates across calls. For batch processing
+of multiple files, call `aec_v2_reset` before each new file. Otherwise a
+tonal far-end from file N can trigger EPC false-positives at the start of N+1.
 
-### 4. Do not omit `aec_reset()` between independent input streams
+### 5. Do not enable `enable_cng` and run RES output through another CNG layer
 
-Diagnostic counters and DT/EPC detector states accumulate across calls. For batch processing of multiple files, call `aec_reset()` before each new file. Without reset, a tonal far-end from file N can trigger EPC false-positive at the start of file N+1.
+CNG fills below-`g_min` bins with shaped noise. Stacking another CNG layer
+double-shapes the noise floor → tonal artifacts.
 
-### 5. Do not modify `AecResContext` fields after AEC populated them, except `echo_spec`
+### 6. Do not assume `enable_delay_est = 1` is free in offline mode
 
-The pipeline pattern allows you to multiply `echo_spec_re/im` by NR gain per bin. Other fields (`far_spec`, `near_spec`, `far_power`, `filter_converged`, `erle_factor`, `dt_indicator`, `is_stationary_dt`, `saturation_level`, `erl_estimate`) are passed through unchanged from the linear AEC. Modifying them produces undefined RES behavior.
+Delay estimator runs every frame and triggers filter reset on first
+acquisition (causes ~300 ms learning loss). For offline batch with
+pre-aligned files, set `cfg.enable_delay_est = 0`.
 
-### 6. Do not enable `enable_cng` and run RES output through another CNG layer
+### 7. Do not run multiple `AecV2` instances sharing FFT state across threads
 
-CNG fills below-`g_min` bins with shaped noise. Stacking another CNG layer on top double-shapes the noise floor → tonal artifacts.
+Each instance allocates its own FFT scratch. Concurrent use of a single
+instance from multiple threads is undefined.
 
-### 7. Do not assume `enable_delay_est = 1` is free in offline mode
+### 8. Do not build without `-ffp-contract=off`
 
-Delay estimator runs on every frame and triggers filter reset on first acquisition (300ms warmup loss). For offline batch where files are pre-aligned, set `enable_delay_est = 0` and pre-shift inputs.
-
-### 8. Do not change `filter_length` mid-call
-
-PBFDKF partition count is computed at `aec_create()`. Reducing `filter_length` mid-call leaks weights past array bounds.
-
-### 9. Do not feed non-`hop_size` blocks
-
-`aec_process()` requires exactly `hop_size` samples. Variable-size blocks must be ring-buffered upstream.
-
-### 10. Do not run multiple `Aec*` instances on the same `kiss_fft_cfg`
-
-`fft_wrapper` allocates per-instance kiss state. Concurrent use of one `kiss_fft_cfg` from multiple threads = data race.
+FMA contraction at `-O2` breaks bit-exact parity on HPF / saturation / detector
+states. The flag is required even in release builds if you want parity with
+Python output.
 
 ---
 
-## Memory and threading
+## Memory & threading
 
-- **Per-instance heap**: ~80 KB @ 16kHz / 52ms / 257 freqs (estimate; verify post-rewrite). Static-memory branch in flight will eliminate `malloc`.
-- **Threading**: each `Aec*` instance is single-threaded. Concurrent multi-stream = multiple instances. No shared FFT state.
-- **Real-time safety**: no I/O, no `printf`, no large `malloc` in `aec_process()` once instance is created (post-rewrite). `aec_reset()` does not allocate.
-- **Cache footprint**: PBFDKF filter weights dominate (`filter_length × n_freqs × 8 bytes complex`). For 16kHz/52ms: ~830 KB filter × 2 (main + shadow) ≈ 1.6 MB. May exceed small embedded L2.
+- **Per-instance heap** (16 kHz / 52 ms / 257 freqs): ~280 KB including main +
+  shadow filter + RES + delay-est ring buffer.
+- **Threading**: each `AecV2` instance is single-threaded. For multi-stream
+  use multiple instances; no shared state.
+- **Real-time**: after `aec_v2_create`, `aec_v2_process` does not allocate or
+  do I/O. `aec_v2_reset` likewise.
+- **Cache footprint**: PBFDKF weights dominate. For 52 ms / 16 kHz / 6
+  partitions × 257 bins × 8 bytes (complex64) × 2 (main + shadow) ≈ 25 KB
+  per filter, ~50 KB total filter weights.
 
 ---
 
@@ -189,35 +157,44 @@ PBFDKF partition count is computed at `aec_create()`. Reducing `filter_length` m
 
 ```bash
 cd c_impl/
-make clean && make lib       # builds libaec.a
-make example                 # builds bin/aec_wav demo
-./bin/aec_wav mic.wav ref.wav out.wav --preset balanced
+make aec_wav_v2          # CLI binary → bin/aec_wav_v2
+
+# Manual compile (single-binary embed):
+cc -O2 -ffp-contract=off \
+   -I include_v2 -I include -I example \
+   src_v2/*.c example/aec_wav_v2.c \
+   -o bin/aec_wav_v2 -lm
 ```
 
-For Audio_ALG pipeline:
-```bash
-cd Audio_ALG/pipelines/
-make aec_nr_pipeline
-./aec_nr_pipeline mic.wav ref.wav out.wav balanced
-```
+Required flags:
+
+- `-O2` (or `-O3`): expected optimization level
+- `-ffp-contract=off`: disable FMA contraction (mandatory for parity)
+- `-I include_v2 -I include`: legacy `include/` still provides `fft_wrapper.h`
+  + `wav_io.h`. v2 sources include `aec_v2.h` etc. from `include_v2/`.
 
 ---
 
 ## Validation checklist before deployment
 
-1. Build with `-Wall -Werror -O2` — zero warnings
-2. Run `./bin/aec_wav` on at least 5 representative samples
-3. Run 800-case bench (script: `python/eval_aec_challenge.py` C wrapper TBD) — per-bucket scores ≤0.005 vs Python v3.8.1 baseline
-4. Memory leak check: `valgrind --leak-check=full ./bin/aec_wav ...`
-5. Real-time check: process an N-minute file, ensure `process()` time per frame < hop duration (10ms @ 16kHz)
-6. Reset hygiene: `aec_create() → process() → reset() → process()` produces same output as fresh `aec_create()` for second invocation
+1. **Compiler clean**: `-Wall -Werror -O2 -ffp-contract=off` produces zero warnings
+2. **Per-module parity**: `make parity_<module>` for HPF / Saturation / Delay /
+   Erle / Detectors / PBFDKF — all gates green
+3. **End-to-end SNR**: `aec_wav_v2` output vs Python `aec.py` (`--mode pbfdkf
+   --enable-res`, same preset) → SNR ≥ 60 dB on representative cases
+4. **Bench parity**: 800-case AECMOS — per-bucket scores within ±0.005 of
+   Python v3.8.1 baseline (current target — script integration TBD)
+5. **Memory check**: `valgrind --leak-check=full ./bin/aec_wav_v2 ...`
+6. **Real-time check**: per-frame `aec_v2_process` time < hop duration (10 ms
+   @16 kHz)
+7. **Reset hygiene**: `create → process → reset → process` reproduces fresh-
+   create + process second-invocation output
 
 ---
 
 ## Reference
 
-- Python source: `python/aec.py` (v3.8.1 reference)
-- Architecture spec: `docs/signal_flow_constraints.md` (signal-flow rules + ABL'd code warnings)
-- Rewrite plan: `docs/c_rewrite_plan.md` (phase split + parity gates)
-- Changelog: `docs/CHANGELOG.md` (v3.7.0 / v3.7.1 / v3.8.0 / v3.8.1 architectural notes)
-- Pipeline reference: `Audio_ALG/pipelines/aec_nr_pipeline.c` (working AEC+NR+RES integration)
+- Python source — [python/aec.py](../python/aec.py) (v3.8.1 reference)
+- Algorithm methods — [aec_methods.md](aec_methods.md)
+- Per-version history — [CHANGELOG.md](CHANGELOG.md)
+- WebRTC AEC3 design notes — [aec3_reference.md](aec3_reference.md)
