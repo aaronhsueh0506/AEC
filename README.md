@@ -66,7 +66,7 @@ Trace-driven evolution (v3.0–v3.4 design rationale) → [docs/aec_v3_evolution
 | Echo nonlinearity         | linear filter + RES (no dedicated nonlinear model) |
 | Delay direction           | positive only (mic lags ref). Negative-delay scenarios must be aligned upstream |
 | Stationary far + weak NE  | linear AEC may absorb weak speech into echo path during stationary far-end + low-energy near-end. Hangover protection mitigates but cannot fully restore worst frames |
-| DT-from-frame-0           | NE present from sample 0 prevents convergence — see [docs/spec_dt_from_frame_zero.md](docs/spec_dt_from_frame_zero.md) |
+| DT-from-frame-0           | NE present from sample 0 prevents convergence — see [docs/aec_methods.md 附錄 E](docs/aec_methods.md#附錄-e-dt-from-frame-0-限制) |
 
 ---
 
@@ -241,7 +241,6 @@ AEC/
 │   ├── aec3_reference.md        # WebRTC AEC3 comparison notes
 │   ├── pbfdkf_shadow_intro.md   # PBFDKF + shadow + DTD overview
 │   ├── dtd_design.md            # DTD detailed design
-│   ├── spec_dt_from_frame_zero.md
 │   ├── c_integration_guide.md
 │   └── archive/                 # superseded specs / change logs
 └── wav/                         # test audio

@@ -136,7 +136,7 @@ no manual pre-processing needed.
 | Echo-path change             | EPC detector triggers fast re-convergence (~200 ms hangover) |
 | High coupling (small device) | mic ≈ speaker proximity; ~1–2 dB residual leak possible during DT |
 | Stationary far + weak NE     | linear AEC may absorb very low-energy NE syllables (mitigated by stationary-DT hangover but not fully recoverable) |
-| DT-from-frame-0              | NE present from sample 0 prevents convergence — see [../docs/spec_dt_from_frame_zero.md](../docs/spec_dt_from_frame_zero.md) |
+| DT-from-frame-0              | NE present from sample 0 prevents convergence — see [../docs/aec_methods.md 附錄 E](../docs/aec_methods.md#附錄-e-dt-from-frame-0-限制) |
 
 ### 3.3 Resources (fl=52 ms @16 kHz)
 

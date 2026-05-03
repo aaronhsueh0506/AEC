@@ -1,6 +1,0 @@
-
-=== KSN5Jrzo7kaixP0z8xfr4Q (baseline) copy events (W_l2 jump > 1.8x) ===
-  frame=260 t=2.600s sa=1.000 W_l2 0.000e+00 -> 1.363e-01
-  frame=261 t=2.610s sa=1.106 W_l2 1.363e-01 -> 1.829e+00
-  frame=262 t=2.620s sa=1.110 W_l2 1.829e+00 -> 3.482e+00
-total copy events: 3

@@ -4160,7 +4160,7 @@ class AEC:
             # PR-D4: stats-only DT-from-frame-0 detector. Counts frames where
             # filter has had ≥2s of far-active without converging AND ERL has
             # drifted upward — signature of NE-corrupted filter learning.
-            # See docs/spec_dt_from_frame_zero.md for full rationale.
+            # See docs/aec_methods.md appendix E for full rationale.
             if self._render_activity.is_active:
                 self._far_active_blocks = getattr(self, '_far_active_blocks', 0) + 1
             if (getattr(self, '_far_active_blocks', 0) > 200

@@ -405,8 +405,8 @@ PBFDKF (Kalman, like main) means `shadow_advantage ≈ 1.0` in worst cases —
 both filters equally NE-corrupted, no escape signal. Reverted.
 
 **PR-D4 (this PR)**:
-- New: [docs/spec_dt_from_frame_zero.md](spec_dt_from_frame_zero.md) — full
-  symptom / root-cause / WebRTC comparison documentation.
+- New: [docs/aec_methods.md 附錄 E](aec_methods.md#附錄-e-dt-from-frame-0-限制) —
+  full symptom / root-cause / WebRTC comparison documentation.
 - New: stats-only detector in `AEC.process` ([python/aec.py:4144-4154](../python/aec.py#L4144))
   fires on `far_active_blocks > 200 AND not _filter_converged AND
   erl_estimate > 0.4` — signature of NE-corrupted filter learning.

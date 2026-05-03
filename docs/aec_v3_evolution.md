@@ -307,7 +307,7 @@ DT detection requires far-active history.
 running noise floor (no far reference required). When triggered, gates
 `mu_scale` floor to allow filter to learn even in DT.
 
-(Detailed spec: `spec_dt_from_frame_zero.md`.)
+(Detailed spec: `aec_methods.md` appendix E.)
 
 ---
 
