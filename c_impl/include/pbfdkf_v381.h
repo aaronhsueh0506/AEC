@@ -4,7 +4,7 @@
  * Partitioned Block Frequency-Domain Kalman Filter with G1 KX-blended P-update.
  * Bit-exact parity to Python within float32 vs float64 numerical drift.
  *
- * Key v3.x fixes vs legacy (c_impl_v25_legacy/include/pbfdkf.h):
+ * Key v3.x fixes vs legacy v2.5:
  * - v3.6.0: filter_length default 32 → 52ms (caller-side; this header agnostic)
  * - v3.7.0 G1: P-update uses blended KX = mu_mean × KX_optimal +
  *              (1 - mu_mean) × KX_scaled. Decouples P from W during DT-mu-scaling.
