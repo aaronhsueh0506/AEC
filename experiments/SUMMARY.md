@@ -2003,3 +2003,208 @@ Three options remain:
 
 NN remains the only known route that does not require either upstream
 DTD-on-movement rework or the full AEC3 plumbing.
+
+
+# Round 14 — AEC3-style render-tail reverb audit (audit-passive)
+
+Branch: `algo/round14-render-tail-reverb-audit` (discarded after closure)
+Date: 2026-05-04
+Outcome: **STOP at Phase 0** for both simplified candidates δ and ε.
+ε is diagnostic-positive (avoided R13 β's best-DT_mv overshoot — first
+in R10–R14 to do so) but still non-ship: FS preservation fails by ~36–47%.
+Does NOT close the full WebRTC AEC3 ResidualEchoEstimator architecture
+(see "What this does NOT close").
+
+## Why R14 was opened (Codex direction)
+
+R13 closed STOP because β's reverb input `early_echo_psd` correlated
+with kernel convergence quality (best-DT_mv has higher early_echo →
+β fed it more reverb → 2.27× overshoot on best, opposite of need).
+R13 verdict pointed to: WebRTC AEC3 reverb input is a render-buffer
+partition tap, NOT the kernel's late partitions. R14 is that test.
+
+## Phase 0 plumbing
+
+`AEC.process()` reads `tail_p = self.filter.partition_idx` (after
+`filter.process()` advances it, that index is the next write slot =
+oldest entry in the circular buffer; for K_tail = N − 1 = 5 at
+fl=832/hop=160 with n_partitions=6, that IS the tail tap, ~50 ms back).
+`tail_far_psd = |X_buf[tail_p]|²` and the AEC's `_erl_estimate` are
+passed into `res.process()` as new optional kwargs.
+
+`ResFilter._stage_residual_model` adds an audit-passive R14 block
+AFTER the existing reverb add (so existing behavior is untouched),
+snapshots pre-reverb residual + current addend, and computes two
+candidate reverb estimators side-by-side:
+
+- **δ** — render-tail × ERL scalar shape (linear, NOT squared; ERL is
+  already a power ratio). No new state beyond `reverb_psd_δ` IIR.
+- **ε** — render-tail × per-bin slow-EMA shape from echo_psd.
+  Slow EMA TC ≈ 5 s with cold-start init at 50 far-active frames so
+  ~10 s blind-set clips have meaningful warmed samples. Marked HIGH
+  RISK in the plan because the shape is built from `echo_psd` =
+  `|W·X|²` smoothed, which could in principle still inherit kernel
+  convergence bias.
+
+12 trace fields × {`_all_mean`, `_warm_mean`} aggregates per case
+(δ unaffected by warmup; ε aggregated over warmup-completed frames
+only). Cold-start init successful on 93–98% of frames per cohort.
+
+parity_round6 5-fixture HASH MATCH × 5.
+
+## Phase 0 gate (bidirectional, warmup-excluded)
+
+- `ratio[worst-DT_mv] ≤ 0.70` (≥ 30% drop on target)
+- `ratio[FS_static]   ∈ [0.80, 1.20]`
+- `ratio[FS_movement] ∈ [0.80, 1.20]`
+- `ratio[best-DT_mv]  ∈ [0.80, 1.20]`
+- DT_static yellow flag if outside [0.60, 1.40]
+- Hard early-exit: `ratio[best-DT_mv] > 1.50` (β-style overshoot, STOP)
+
+## Per-cohort results
+
+### Sanity (warmup, tail-tap, ERL distribution)
+
+| cohort | warm coverage | tail_far_psd | ERL | slow_echo | slow_tail_far | ε ratio (slow_e/slow_tf) |
+|---|---:|---:|---:|---:|---:|---:|
+| FS_static | 98% | 4.45 | 0.234 | 0.234 | 6.80 | 0.034 |
+| FS_movement | 98% | 6.69 | 0.234 | 0.234 | 6.81 | 0.034 |
+| NE | 93% | 0.006 | 0.032 | 0.000 | 0.007 | — |
+| DT_static | 98% | 3.65 | 0.257 | 0.257 | 3.56 | 0.072 |
+| DT_movement | 98% | 4.28 | 0.261 | 0.262 | 3.91 | 0.067 |
+| **worst-DT_mv** | 98% | 6.78 | 0.288 | 0.288 | 6.04 | 0.048 |
+| **best-DT_mv** | 98% | 1.57 | 0.290 | 0.291 | **1.83** | **0.159** |
+
+ERL is roughly uniform across far-active cohorts. The notable variation
+is `slow_tail_far`: best-DT_mv has the LOWEST tail far (1.83) while
+worst-DT_mv has it among the highest (6.04). This 4× difference
+translates into ε's per-bin shape being 4× higher on best (0.159) than
+on worst (0.048) — which is what saves best-DT_mv from the β-style
+overshoot.
+
+### Predicted final residual + ratios (gate metric)
+
+| cohort | predicted_current | predicted_δ | predicted_ε | ratio_δ | ratio_ε |
+|---|---:|---:|---:|---:|---:|
+| FS_static | 8.343 | 2.464 | 5.333 | **0.295** | **0.639** |
+| FS_movement | 11.736 | 3.893 | 6.181 | **0.332** | **0.527** |
+| NE | 0.006 | 0.001 | 0.001 | 0.205 | 0.083 |
+| DT_static | 6.143 | 1.849 | 3.590 | 0.301 | 0.584 |
+| DT_movement | 7.221 | 2.179 | 3.368 | 0.302 | 0.466 |
+| **worst-DT_mv** | 11.144 | 3.207 | 5.423 | 0.288 | 0.487 |
+| **best-DT_mv** | 3.620 | 1.917 | 3.448 | 0.530 | **0.953** |
+
+### Gate evaluation
+
+| candidate | worst-DT_mv | FS_static | FS_movement | best-DT_mv | DT_static | qualified |
+|---|---:|---:|---:|---:|---:|---|
+| δ | 0.288 PASS | **0.295 FAIL** | **0.332 FAIL** | **0.530 FAIL** | 0.301 (YELLOW) | **no** |
+| ε | 0.487 PASS | **0.639 FAIL** | **0.527 FAIL** | 0.953 PASS | 0.584 (YELLOW) | **no** |
+
+## Mechanism reading
+
+### Why δ fails (uniform under-attribution)
+
+δ multiplies tail_far_psd by ERL (~0.23 across far-active cohorts).
+The current production formula uses raw far_psd (no ERL). δ's input is
+~4× smaller across the board, and reverb_gain (tuned for the larger
+input) was not adjusted. The IIR output is uniformly smaller everywhere.
+Same shape as R10 uniform tightening, opposite direction
+(uniform under-estimation). Scale mismatch dominates; no per-cohort
+discrimination.
+
+### Why ε partially works on best-DT_mv but not FS
+
+ε's per-bin shape `slow_echo / slow_tail_far` is a long-time-average
+echo-path response. Best-DT_mv has LOW slow_tail_far (1.83) so the
+ratio is HIGH (0.159), partially compensating for the smaller raw-vs-
+shaped input scale → predicted residual stays within 5% of current.
+This is a **structural success vs R13 β**: per-bin slow shape avoids
+the kernel-convergence reverse-correlation that defeated β.
+
+But on FS the slow_tail_far is high (6.80) so the ratio is low (0.034).
+Per-bin shape doesn't compensate enough → ε under-attributes reverb on
+FS by 36–47%. Same scale-mismatch story as δ, just less severe on
+best-DT_mv specifically.
+
+### What R14 demonstrates (positive finding)
+
+ε is the first candidate in R10–R14 to avoid BOTH:
+- R10's failure mode (uniform same-axis tightening) — FS still drops
+  but best-DT_mv is preserved (0.953 vs 1.0 baseline)
+- R13's failure mode (best-DT_mv overshoot from convergence bias)
+
+The remaining defect is **scale-mismatch with the existing
+`reverb_gain`**, a tuning issue rather than a structural one. The
+render-tail decoupling DOES remove the kernel-convergence bias.
+
+## Disposition
+
+- Branch `algo/round14-render-tail-reverb-audit` discarded (no merge to
+  main). R14 P0 plumbing (PBFDAF tail-tap exposure + ResFilter R14
+  audit block + 12 trace fields × _all/_warm aggregation) NOT carried
+  to main; documented here for future re-application.
+- v3.8.1 `baseline_v381_seeded` remains canonical.
+
+## What this does NOT close
+
+R14 closes only **the two simplified candidates δ and ε** under the
+constraint of NO `reverb_gain` retuning. The structural elements R14
+did NOT plumb (any of which could address the scale-mismatch FS
+failure):
+
+1. **Calibrated AecState reverb frequency response**: WebRTC AEC3
+   maintains an explicit per-bin reverb response updated from AecState
+   (not derived from echo_psd as ε does). The response would be
+   normalized so reverb prediction matches actual late-reflection
+   energy without depending on a separately-tuned reverb_gain.
+2. **State-dependent reverb gain**: WebRTC's reverb gain is itself
+   AecState-dependent (linear vs. nonlinear path).
+3. **Per-AecState gating** (saturated-echo, transition-window,
+   linear/nonlinear branching) that mediates between paths.
+
+A future round (R14b or R15) could:
+- (a) Allow `reverb_gain` to be co-tuned with the new input — would
+  resolve the scale-mismatch but is a 2-axis search; risks fitting
+  the dataset rather than the underlying model.
+- (b) Plumb the full AecState reverb frequency response — bigger
+  scope but the proper architectural fix.
+
+## Cumulative across Round 1–14
+
+| Round | Outcome | Notes |
+|---|---|---|
+| 1 | F1-F4 all null | trigger style invalidated |
+| 2 | Phase 3 / state-routing all null | cold-start / EPC unconditional fail |
+| 3 | D2 catastrophic / D3 sub-acceptance | EPC-gated bypass not viable |
+| 4 | R1 v1+v2 null | per-bin cap erased downstream |
+| 5 | A34 v2 closest (+0.023 deg, FS −0.04) | Pareto curve mapped |
+| 6 | refactor-only shippable, lift disproven | RES split clean |
+| 7 | EPV damp NULL; mix Pareto-bound | filter trajectory hypothesis raised |
+| R8 prep | R7 causal direction falsified | linear AEC fine on worst |
+| R9 | STOP-1: state cannot sort worst from best | both dominated by RENDER_FALLBACK |
+| R10 | STOP at P0: candidate is same R5/R6 axis | uniform tightening |
+| R11 | P0 GO (reverb culprit) → P1 STOP | no per-frame discriminator at residual stage |
+| R12 | STOP at P0: 5 candidates exhausted | residual-stage signal pool exhausted |
+| R13 | STOP at P0: β reverse-correlated, γ too soft | kernel-derived early/late points wrong direction |
+| **R14** | **STOP at P0: δ uniform under, ε FS under** | **render-tail decouples kernel bias (ε preserves best-DT_mv) but reverb_gain scale mismatch causes FS under-attribution** |
+
+## Recommendation
+
+R14 ε is the first candidate in R10–R14 that avoided both failure
+modes documented in prior rounds (R10 uniform same-axis, R13 best
+overshoot). The remaining defect is reverb_gain scale-mismatch — a
+tuning issue rather than a structural one.
+
+Next-round options:
+
+1. **R14b**: ε with co-tuned `reverb_gain` (small-scope follow-up).
+   Fit `reverb_gain` so ε's FS_static ratio = 1.0, then re-evaluate.
+   Risk: 2-axis tune may overfit dataset.
+2. **R15**: full AecState reverb frequency response (proper architectural
+   fix). Substantial scope.
+3. **Accept current Pareto and ship v3.8.1 as-is**, or commit to NN
+   postfilter as the ship route.
+
+NN postfilter remains the only known route that does not require
+either upstream DTD-on-movement rework or full AEC3 plumbing.
