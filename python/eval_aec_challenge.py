@@ -156,6 +156,12 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         config = AecConfig.from_preset(preset, **common_kw)
     else:
         config = AecConfig(**common_kw)
+    # Phase 3 / bench determinism: seed numpy RNG before each AEC instantiation
+    # so CNG (np.random.randn at aec.py:2009-2010) produces identical noise on
+    # every bench run. Without this, run-to-run AECMOS Δ is ±0.004 on
+    # DT_movement (CNG noise floor) which masks genuinely small code-induced
+    # changes. Determinism is per-case (each case gets a fresh seed=0 stream).
+    np.random.seed(0)
     aec = AEC(config)
     hop = aec.hop_size
     out = np.zeros(n, dtype=np.float32)

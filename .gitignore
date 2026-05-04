@@ -50,3 +50,4 @@ parity_resfilter*.npz
 parity_resfilter*.bin
 parity_pbfdkf_c.bin
 python/parity_pbfdkf_c.bin
+experiments/*/output/

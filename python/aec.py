@@ -17,6 +17,7 @@ Usage:
 
 __version__ = "3.8.1"
 
+import os
 import numpy as np
 from collections import deque
 from dataclasses import dataclass
@@ -1169,6 +1170,19 @@ class ResFilter:
         self._harm_lf_end = min(int(500.0 / freq_res), n_freqs - 1)
         self._harm_hf_start = int(1000.0 / freq_res)
         self._harm_hf_end = min(int(4000.0 / freq_res), n_freqs - 1)
+        # Round 4: voice-band mask (300–3000 Hz) for per-bin RES diagnostics + R2.
+        self._voice_band_mask = ((f_bins >= 300.0) & (f_bins <= 3000.0))
+        self._voice_band_idx = np.where(self._voice_band_mask)[0]
+        # Round 4: per-bin trace caches (audio-passive)
+        self._diag_coh2_last = np.zeros(n_freqs, dtype=np.float32)
+        self._diag_nearend_est_last = np.zeros(n_freqs, dtype=np.float32)
+        self._diag_residual_echo_psd_last = np.zeros(n_freqs, dtype=np.float32)
+        self._diag_round4 = {}
+        # Round 5: per-stage gain means (voice-band), audio-passive.
+        # Indices: 0=softgate_emr, 1=spectral_floor, 2=epc_dt_cap, 3=quiet_mask,
+        #          4=3bin_smooth, 5=hf_cap, 6=pre_temporal, 7=post_temporal,
+        #          8=after_noise_lift (final gain_smooth)
+        self._diag_round5_stages = np.zeros(9, dtype=np.float32)
 
         # RES v2: direct echo estimation + Wiener gain + reverb
         self.echo_method = echo_method       # "coherence" or "direct"
@@ -1363,6 +1377,400 @@ class ResFilter:
             'mean_final_gain_nfl': s['st_nfl_final_gain_sum'] / s['startup_dt_once_conv'] if s['startup_dt_once_conv'] > 0 else 0.0,
         }
 
+    # ── Stage methods (Round 6 refactor) ─────────────────────────────────
+    # Each _stage_* method handles a logical block of the suppressor pipeline.
+    # All share self.* state; arguments are local-only values that flow
+    # between stages. Behavior identical to the pre-refactor inline code.
+
+    def _stage_residual_model(self, *, coh2, far_spec, far_power, erle_factor,
+                                dt_for_fs, epc_active, saturation_level,
+                                filter_converged, erl_estimate, near_spec,
+                                is_stationary_dt, aec_state, echo_pwr_linear):
+        """Stage 1: residual_echo_psd attribution + 4 caps + reverb tail + echo boost.
+
+        Returns residual_echo_psd (np.ndarray or None). Mutates near_psd buffers,
+        reverb_psd, _nonlinear_frames, and stats fields.
+        """
+        residual_echo_psd = None
+        if self.echo_method == "direct" and near_spec is not None:
+            near_pwr = np.abs(near_spec) ** 2
+            self.near_psd_buf[self.near_psd_idx] = near_pwr
+            self.near_psd_idx = (self.near_psd_idx + 1) % 4
+            self.near_psd = np.mean(self.near_psd_buf, axis=0)
+
+            # Stage 1+2 of residual echo attribution: delegated to ResidualEchoEstimator.
+            residual_echo_psd = self._residual_est.attribute(
+                echo_psd=self.echo_psd, error_psd=self.error_psd,
+                coh2=coh2, far_spec=far_spec, far_power=far_power,
+                erle_factor=erle_factor, dt_for_fs=dt_for_fs,
+                far_activity=self.far_activity,
+                epc_active=epc_active, saturation_level=saturation_level,
+                filter_converged=filter_converged, erl_estimate=erl_estimate,
+                filter_erle=self._filter_erle_est, fb_erle=self._fb_erle_est,
+                aec_state=aec_state,
+            )
+
+            # Nonlinear echo mode: harmonics from speaker distortion
+            if saturation_level > 0.3:
+                self._nonlinear_frames += 1
+            else:
+                self._nonlinear_frames = max(0, self._nonlinear_frames - 1)
+            is_nonlinear = self._nonlinear_frames > 5
+            if is_nonlinear and far_power > 1e-4:
+                nonlinear_boost = 1.0 + 1.0 * saturation_level
+                residual_echo_psd = residual_echo_psd * nonlinear_boost
+
+            # Harmonic distortion: HF floor from LF echo
+            if saturation_level > 0.05 and far_power > 1e-4:
+                lf_start, lf_end = self._harm_lf_start, self._harm_lf_end
+                hf_start, hf_end = self._harm_hf_start, self._harm_hf_end
+                if lf_end > lf_start and hf_end > hf_start:
+                    lf_echo_mean = float(np.mean(residual_echo_psd[lf_start:lf_end]))
+                    distortion_factor = 0.1 + 0.4 * saturation_level
+                    harmonic_floor = lf_echo_mean * distortion_factor
+                    residual_echo_psd[hf_start:hf_end] = np.maximum(
+                        residual_echo_psd[hf_start:hf_end], harmonic_floor)
+
+            # === DEEP-TRACE HOOKS: capture residual_echo_psd at each cap stage ===
+            if self._stats is not None:
+                self._stats_last_res_after_attribute = float(np.mean(residual_echo_psd))
+
+            # Cap 1: echo_psd × 2.0 (skipped in render-mode)
+            if not self._residual_est.using_render_based:
+                residual_echo_psd = np.minimum(residual_echo_psd, self.echo_psd * 2.0)
+            if self._stats is not None:
+                self._stats_last_res_after_echo_cap = float(np.mean(residual_echo_psd))
+
+            # Cap 2: error_psd × (1.5 if render else 1.0)
+            err_cap_mult = 1.5 if self._residual_est.using_render_based else 1.0
+            residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * err_cap_mult)
+            if self._stats is not None:
+                self._stats_last_res_after_error_cap = float(np.mean(residual_echo_psd))
+
+            # Cap 3: dt_suppress (skipped in render-mode)
+            if not self._residual_est.using_render_based:
+                dt_suppress = np.clip(1.0 - dt_for_fs**2, 0.1, 1.0)
+                residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * dt_suppress)
+            if self._stats is not None:
+                self._stats_last_res_after_dt_cap = float(np.mean(residual_echo_psd))
+
+            # Cap 4: render_ceil (skipped in render-mode)
+            if far_spec is not None and far_power > 1e-4 and erl_estimate > 0.0:
+                far_psd_k = np.abs(far_spec) ** 2
+                render_ceil = far_psd_k * min(erl_estimate * 2.0, 1.0)
+                if self._stats is not None:
+                    self._stats_last_render_ceil_mean = float(np.mean(render_ceil))
+                    self._stats_last_erl_estimate = float(erl_estimate)
+                if not self._residual_est.using_render_based:
+                    residual_echo_psd = np.minimum(residual_echo_psd, render_ceil)
+            if self._stats is not None:
+                self._stats_last_res_after_render_ceil = float(np.mean(residual_echo_psd))
+
+            # Reverb tail (WebRTC-AEC3-style IIR on far_psd)
+            if self.enable_reverb:
+                far_psd = np.abs(far_spec) ** 2 if far_spec is not None else echo_pwr_linear
+                self.reverb_psd = (self.reverb_decay * self.reverb_psd
+                                   + (1 - self.reverb_decay) * far_psd)
+                if not is_stationary_dt:
+                    ne_reverb_factor = 0.7 + 0.3 * self.far_activity * (1.0 - dt_for_fs)
+                    reverb_gate = self.far_activity * ne_reverb_factor
+                    if self.far_activity < 0.1:
+                        reverb_gate = 0.0
+                    residual_echo_psd = (residual_echo_psd
+                                         + self.reverb_gain * self.reverb_psd * reverb_gate)
+
+        # Per-bin echo boost: high-coh2 bins → boost residual estimate
+        if far_power > 1e-4 and erle_factor > 0.3 and residual_echo_psd is not None:
+            echo_boost = 1.0 + 0.5 * coh2 if dt_for_fs < 0.2 else np.ones_like(coh2)
+            residual_echo_psd = residual_echo_psd * echo_boost
+        return residual_echo_psd
+
+    def _stage_gain_compute(self, *, residual_echo_psd, eer, coh2, effective_dt,
+                              is_stationary_dt, far_power, filter_once_converged,
+                              spectral_g_min, eps):
+        """Stage 2: ENR / Wiener / spectral_sub gain compute + EMR + spectral floor lift.
+
+        Returns g (post-spectral-floor). Mutates dominant_ne / Round 4 / Round 5
+        diag caches and stats.
+        """
+        if self.gain_type == "enr" and residual_echo_psd is not None:
+            raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
+            noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
+
+            # Per-bin DT indicator: base from coh2 (works for speech far-end)
+            dt_per_bin = np.maximum(
+                np.full(self.n_freqs, effective_dt, dtype=np.float32),
+                1.0 - coh2
+            )
+            if is_stationary_dt:
+                dt_per_bin = np.maximum(dt_per_bin, self._stat_dt_mask)
+
+            dt_shaped_per_bin = dt_per_bin ** 1.1
+            nearend_est = np.maximum(raw_nearend_est * dt_shaped_per_bin, noise_floor_psd)
+
+            min_ne_from_dt = self.error_psd * dt_shaped_per_bin
+            _startup_dt_cond = (effective_dt > 0.35 and far_power > 1e-4
+                                and not filter_once_converged)
+            if _startup_dt_cond and self.startup_dt_min_ne_scale != 1.0:
+                min_ne_from_dt = min_ne_from_dt * self.startup_dt_min_ne_scale
+            if self._residual_est.using_render_based:
+                min_ne_from_dt = min_ne_from_dt * getattr(self, 'render_min_ne_factor', 0.5)
+            nearend_est = np.maximum(nearend_est, min_ne_from_dt)
+            if self._stats is not None:
+                self._stats_last_min_ne = float(np.mean(min_ne_from_dt))
+
+            ne_physical_floor = self.error_psd * 0.05
+            nearend_est = np.maximum(nearend_est, ne_physical_floor)
+
+            # Round 4 trace cache (audio-passive)
+            self._diag_nearend_est_last = nearend_est
+            self._diag_residual_echo_psd_last = residual_echo_psd
+
+            enr = residual_echo_psd / (nearend_est + 1e-10)
+
+            blend = self._enr_blend
+            scale = self.enr_scale
+            ne_confidence = dt_per_bin
+            effective_scale = scale
+            enr_t_ne = (1 - blend) * 2.0 + blend * 1.5
+            enr_s_ne = (1 - blend) * 3.0 + blend * 2.5
+            enr_t_fs = (1 - blend) * (0.3 * effective_scale) + blend * (0.07 * effective_scale)
+            enr_s_fs = (1 - blend) * (0.4 * effective_scale) + blend * (0.1 * effective_scale)
+            if effective_dt > 0.4:
+                dt_enr_relax = 1.0 + (effective_dt - 0.4) / 0.6 * 0.5
+                enr_t_ne = enr_t_ne * dt_enr_relax
+                enr_s_ne = enr_s_ne * dt_enr_relax
+            enr_t = ne_confidence * enr_t_ne + (1 - ne_confidence) * enr_t_fs
+            enr_s = ne_confidence * enr_s_ne + (1 - ne_confidence) * enr_s_fs
+            min_gate_width = 0.2
+            enr_s_safe = np.maximum(enr_s, enr_t + min_gate_width)
+
+            g = np.where(enr > enr_t,
+                         np.clip((enr_s_safe - enr) / (enr_s_safe - enr_t + eps), 0.0, 1.0),
+                         1.0)
+
+            # EMR: AEC3-style noise masking
+            if np.sum(self.noise_psd) > 0:
+                emr = residual_echo_psd / (self.noise_psd + 1e-10)
+                emr_transparent = 0.3
+                g_emr = np.clip(emr_transparent / (emr + 1e-10), 0.0, 1.0)
+                g = np.maximum(g, g_emr)
+
+            if self._stats is not None:
+                self._stats_last_gain_before_floor = float(np.mean(g))
+            if getattr(self, '_capture_stages', False):
+                self._stage_gains = {'01_softgate_emr': g.copy()}
+            self._diag_round5_stages[0] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+            g = np.maximum(g, spectral_g_min)
+            if self._stats is not None:
+                self._stats_last_gain_after_floor = float(np.mean(g))
+            if getattr(self, '_capture_stages', False):
+                self._stage_gains['02_spectral_floor'] = g.copy()
+            self._diag_round5_stages[1] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+
+            if self._stats is not None:
+                self._stats_last_enr = float(np.mean(enr))
+                self._stats_last_nearend = float(np.mean(nearend_est))
+                self._stats_last_res_psd = float(np.mean(residual_echo_psd))
+
+            # Phase 0 trace: dominant_nearend_like raw signal (frame-level)
+            _ne_mean = float(np.mean(nearend_est))
+            _res_mean = float(np.mean(residual_echo_psd))
+            _noise_mean = float(np.mean(self.noise_psd)) + 1e-10
+            self._diag_dominant_nearend_raw = bool(
+                _ne_mean > 3.0 * _res_mean
+                and _ne_mean > 5.0 * _noise_mean
+            )
+
+        elif self.gain_type == "wiener" and residual_echo_psd is not None:
+            noise_floor_psd = np.mean(self.error_psd) * 0.01 + eps
+            nearend_est = np.maximum(self.error_psd - residual_echo_psd, noise_floor_psd)
+            beta = self.over_sub
+            g = nearend_est / (nearend_est + beta * residual_echo_psd + eps)
+            g = np.maximum(g, spectral_g_min)
+        elif residual_echo_psd is not None:
+            eer_direct = residual_echo_psd / (self.error_psd + eps)
+            g = np.maximum(1.0 - self.over_sub * eer_direct, spectral_g_min)
+        else:
+            g = np.maximum(1.0 - self.over_sub * eer, spectral_g_min)
+        return g
+
+    def _stage_gain_postprocess(self, *, g_in, epc_dt, quiet_mask, far_power,
+                                  effective_dt, is_stationary_dt, divergence):
+        """Stage 3: EPC_DT cap, quiet mask, 3-bin smooth, HF cap, divergence override.
+
+        Returns updated g (post-divergence-override). Mutates _diag_round5_stages[2..6].
+        """
+        g = g_in
+        # EPC_DT gain cap: echo path changed + DT → cap gain to force minimum echo suppression.
+        if epc_dt:
+            EPC_DT_GAIN_CAP = 0.85
+            g = np.minimum(g, EPC_DT_GAIN_CAP)
+        if getattr(self, '_capture_stages', False):
+            self._stage_gains['03_epc_dt_cap'] = g.copy()
+        self._diag_round5_stages[2] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+
+        g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
+        if getattr(self, '_capture_stages', False):
+            self._stage_gains['04_quiet_mask'] = g.copy()
+        self._diag_round5_stages[3] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+
+        # --- Frequency-domain postprocessing (cf. AEC3 PostprocessGains) ---
+        if far_power > 1e-4:
+            # 3-bin cross-frequency smoothing
+            kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
+            g = np.convolve(g, kernel, mode='same').astype(np.float32)
+            if getattr(self, '_capture_stages', False):
+                self._stage_gains['05_3bin_smooth'] = g.copy()
+            self._diag_round5_stages[4] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+            # DC consistency: bins 0-1 follow bin 2
+            if self.n_freqs > 2:
+                g[:2] = np.minimum(g[1], g[2])
+            # HF cap: upper bins capped at gain of bin near ~500Hz
+            hf_cap_bin = self._hf_cap_bin
+            if self.n_freqs > hf_cap_bin + 1 and effective_dt < 0.5 and not is_stationary_dt:
+                hf_cap = g[hf_cap_bin]
+                g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
+            if getattr(self, '_capture_stages', False):
+                self._stage_gains['06_hf_cap'] = g.copy()
+            self._diag_round5_stages[5] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+
+        # Divergence override: when filter diverges, cap gain severely
+        if divergence > 0.3:
+            divergence_gain = 0.01 + (1.0 - 0.01) * (1.0 - divergence)
+            g = np.minimum(g, divergence_gain)
+        if getattr(self, '_capture_stages', False):
+            self._stage_gains['07_pre_temporal'] = g.copy()
+        self._diag_round5_stages[6] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+        return g
+
+    def _stage_temporal_smoothing(self, *, g_in, dt_indicator, effective_dt,
+                                   is_stationary_dt, erle_factor, fs_confidence,
+                                   spectral_g_min, effective_g_min):
+        """Stage 4: split attack/release EMA + rate limiting + LF protect + render ceil.
+
+        Mutates: self.gain_smooth (= smoothed final gain),
+                 self._diag_round5_stages[7],
+                 self._stats_last_gain_after_smoothing.
+        """
+        g = g_in
+        # Temporal DT: when Stationary DT confirmed, treat as dt=0.8 for smoothing/rate
+        dt_temporal = 0.8 if is_stationary_dt else max(dt_indicator, effective_dt * 0.5)
+
+        alpha_fast = 0.3 + 0.2 * (1.0 - erle_factor)   # 0.3-0.5
+        alpha_slow = 0.85 + 0.1 * (1.0 - erle_factor)  # 0.85-0.95
+        alpha_attack = alpha_slow + (alpha_fast - alpha_slow) * fs_confidence
+        if is_stationary_dt:
+            alpha_attack = alpha_attack * np.clip(1.0 - dt_temporal**2, 0.1, 1.0)
+        alpha_release_light = 0.5 - 0.2 * dt_temporal
+        smoothed = np.where(g < self.gain_smooth,
+                            alpha_attack * self.gain_smooth + (1 - alpha_attack) * g,
+                            alpha_release_light * self.gain_smooth + (1 - alpha_release_light) * g)
+
+        # Rate limiting
+        activity_scale = 0.5 + 0.5 * self.far_activity
+        eff_drop = self.max_drop_ratio ** activity_scale
+        rise_exp = 0.5 + 0.5 * (1.0 - self.far_activity)
+        if dt_temporal > 0.3:
+            dt_rise_boost = 1.0 + dt_temporal
+            rise_exp = rise_exp / dt_rise_boost
+        eff_rise = self.max_rise_ratio ** rise_exp
+        gain_floor = self.gain_smooth / eff_drop
+        gain_ceil = self.gain_smooth * eff_rise
+        if fs_confidence < 0.9:
+            lf_limit = min(8, self.n_freqs)
+            lf_factor = 0.25 * max(1.0 - fs_confidence * 2.0, 0.0)
+            if lf_factor > 0.01:
+                gain_floor[:lf_limit] = np.maximum(
+                    gain_floor[:lf_limit], self.gain_smooth[:lf_limit] * lf_factor)
+        smoothed = np.maximum(smoothed, gain_floor)
+        smoothed = np.minimum(smoothed, gain_ceil)
+        if isinstance(spectral_g_min, np.ndarray):
+            smoothed = np.maximum(smoothed, spectral_g_min)
+        else:
+            smoothed = np.maximum(smoothed, effective_g_min)
+        smoothed = np.minimum(smoothed, 1.0)
+        # v3.2 Axis 2: hard ceiling in render-mode whenever far is active.
+        if self._residual_est.using_render_based and self.far_activity > 0.3:
+            ceil = getattr(self, 'render_dt_gain_ceil', 0.6)
+            smoothed = np.minimum(smoothed, ceil)
+        if getattr(self, '_capture_stages', False):
+            self._stage_gains['08_post_temporal'] = smoothed.copy()
+        self._diag_round5_stages[7] = float(np.mean(smoothed[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+        self.gain_smooth = smoothed
+        if self._stats is not None:
+            self._stats_last_gain_after_smoothing = float(np.mean(self.gain_smooth))
+
+    def _stage_noise_floor_and_cng(self, *, spec_synth, far_power, effective_dt,
+                                    dt_indicator, filter_once_converged,
+                                    effective_g_min, hop):
+        """Stage 5: noise_psd tracker + noise-floor lift + CNG + IFFT/OLA.
+
+        Mutates: self.noise_psd, self.gain_smooth, self._smooth_cn_gain,
+                 self.ola_buf, self._diag_round5_stages[8],
+                 self._stats_last_* (when stats enabled).
+        Returns: output[hop_size] (float32).
+        """
+        # E6: min-statistics noise tracker (always on, used for dynamic floor + CNG)
+        # Tracks quiet-floor of residual over time. In DT with quiet near-end,
+        # this floor includes near-end energy — so gain >= noise_floor_gain
+        # preserves quiet speech above the learned floor (Speex/AEC3 style).
+        if not self._noise_initialized:
+            self.noise_psd = self.error_psd.copy() + 1e-8
+            self._noise_initialized = True
+            self._smooth_cn_gain = np.zeros(self.n_freqs, dtype=np.float32)
+        is_learning_safe = (self.far_activity < 0.01) and (dt_indicator < 0.1)
+        alpha_down = 0.98
+        alpha_up = 0.998 if is_learning_safe else 1.0
+        alpha_n = np.where(self.error_psd > self.noise_psd, alpha_up, alpha_down)
+        self.noise_psd = alpha_n * self.noise_psd + (1 - alpha_n) * self.error_psd
+
+        # Dynamic floor: per-bin minimum gain so output |g*spec| >= sqrt(noise_psd).
+        spec_pwr_synth = np.abs(spec_synth) ** 2 + 1e-10
+        noise_floor_gain = np.sqrt(self.noise_psd / spec_pwr_synth)
+        noise_floor_gain = np.clip(noise_floor_gain, effective_g_min, 1.0)
+
+        _startup_dt_nfl = effective_dt > 0.35 and far_power > 1e-4 and not filter_once_converged
+        if self._stats is not None:
+            _nfl_mean = float(np.mean(noise_floor_gain))
+            self._stats_last_noise_floor_gain = _nfl_mean
+            self._stats_last_noise_psd = float(np.mean(self.noise_psd))
+            self._stats_last_spec_pwr = float(np.mean(spec_pwr_synth))
+            self._stats_last_nfl_lifted = _nfl_mean > float(np.mean(self.gain_smooth))
+
+        if _startup_dt_nfl and self.startup_dt_noise_floor_scale < 1.0:
+            if self.startup_dt_noise_floor_scale > 0.0:
+                self.gain_smooth = np.maximum(self.gain_smooth,
+                                              noise_floor_gain * self.startup_dt_noise_floor_scale)
+            # else scale=0.0: bypass — noise_floor_gain not applied
+        else:
+            self.gain_smooth = np.maximum(self.gain_smooth, noise_floor_gain)
+        # Round 5 stage 8: final gain after noise-floor lift (= what reaches IFFT)
+        self._diag_round5_stages[8] = float(np.mean(self.gain_smooth[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+
+        # Apply gain + synthesis sqrt-Hann window + IFFT
+        enhanced_spec = self.gain_smooth * spec_synth
+
+        # --- CNG: Comfort Noise Generation (fill remaining suppression gap) ---
+        if self.enable_cng and np.sum(self.noise_psd) > 1e-7:
+            target_cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0)) * 0.4
+            self._smooth_cn_gain = 0.8 * self._smooth_cn_gain + 0.2 * target_cn_gain
+            noise_std = np.sqrt(self.noise_psd / 2.0).astype(np.float32)
+            cng_real = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
+            cng_imag = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
+            cng_spec = (self._smooth_cn_gain * (cng_real + 1j * cng_imag)).astype(np.complex64)
+            enhanced_spec = enhanced_spec + cng_spec
+
+        enhanced_time = np.fft.irfft(enhanced_spec, self.block_size)[:self.frame_size]
+        enhanced_time *= self.window
+
+        # Overlap-add (frame_size buffer)
+        self.ola_buf += enhanced_time
+        output = self.ola_buf[:hop].copy()
+        self.ola_buf[:-hop] = self.ola_buf[hop:]
+        self.ola_buf[-hop:] = 0.0
+        return output
+
     def process(self, error_hop: np.ndarray, echo_spec: np.ndarray,
                 far_power: float, far_spec: np.ndarray = None,
                 filter_converged: bool = False,
@@ -1449,6 +1857,8 @@ class ResFilter:
                 self.S_fe *= 0.5
                 self.S_ff *= 0.5
                 self.S_ee *= 0.5  # A1: sync decay, prevent coh2 bias on far restart
+        # Round 4 trace cache (audio-passive)
+        self._diag_coh2_last = coh2
 
         # Cold start: skip EMA warmup, initialize PSD directly on first far-end frame
         if far_power > 1e-4 and np.sum(self.echo_psd) < 1e-10:
@@ -1502,143 +1912,22 @@ class ResFilter:
         # Gain cap bypasses ENR path (locked ~1.0 by DT nearend protection).
         epc_dt = epc_active and effective_dt > 0.35
 
-        # --- Residual echo PSD estimation ---
         eps = 1e-10
-        residual_echo_psd = None
-
-        if self.echo_method == "direct" and near_spec is not None:
-            # Direct method: use echo estimate + per-bin ERLE to estimate residual
-            near_pwr = np.abs(near_spec) ** 2
-            # 4-block moving average for stable near-end PSD (cf. AEC3)
-            self.near_psd_buf[self.near_psd_idx] = near_pwr
-            self.near_psd_idx = (self.near_psd_idx + 1) % 4
-            self.near_psd = np.mean(self.near_psd_buf, axis=0)
-
-            # Stage 1+2 of residual echo attribution: delegated to ResidualEchoEstimator.
-            # Default mode='legacy' preserves v2.8.1 inline behavior bit-exactly.
-            # Phase B2 R1 ablation flips to mode='split' for AEC3-style two-path R2.
-            residual_echo_psd = self._residual_est.attribute(
-                echo_psd=self.echo_psd, error_psd=self.error_psd,
-                coh2=coh2, far_spec=far_spec, far_power=far_power,
-                erle_factor=erle_factor, dt_for_fs=dt_for_fs,
-                far_activity=self.far_activity,
-                epc_active=epc_active, saturation_level=saturation_level,
-                filter_converged=filter_converged, erl_estimate=erl_estimate,
-                filter_erle=self._filter_erle_est, fb_erle=self._fb_erle_est,
-                aec_state=aec_state,
-            )
-
-            # v3.8 ABL-2 (ablate v3.5 Y2-fallback mic_psd × 0.5): trigger condition
-            # `render_based + error_peak > 0.05` is structurally NE-blind — DT speech
-            # also produces high error peaks. Floor `mic_psd × 0.5` then equates the
-            # near-end+echo mixture with "echo proxy" → over-suppress NE. AEC3 uses
-            # explicit saturation detection (mic clipping), not error peak.
-
-            # Nonlinear echo mode: when speaker distortion is sustained,
-            # the linear filter can't model harmonics. Boost residual_echo_psd
-            # globally (not just HF) and increase over_sub to compensate.
-            # saturation_level > 0.3 sustained → nonlinear mode with hangover.
-            if saturation_level > 0.3:
-                self._nonlinear_frames += 1
-            else:
-                self._nonlinear_frames = max(0, self._nonlinear_frames - 1)
-
-            is_nonlinear = self._nonlinear_frames > 5  # 50ms hangover
-
-            if is_nonlinear and far_power > 1e-4:
-                # Boost echo PSD: harmonics spread across full spectrum
-                nonlinear_boost = 1.0 + 1.0 * saturation_level  # 1.3-2.0×
-                residual_echo_psd = residual_echo_psd * nonlinear_boost
-
-            # Harmonic distortion mapping: HF floor from LF echo
-            # (always active, complementary to nonlinear mode above)
-            if saturation_level > 0.05 and far_power > 1e-4:
-                lf_start, lf_end = self._harm_lf_start, self._harm_lf_end  # C4: precomputed
-                hf_start, hf_end = self._harm_hf_start, self._harm_hf_end
-                if lf_end > lf_start and hf_end > hf_start:
-                    lf_echo_mean = float(np.mean(residual_echo_psd[lf_start:lf_end]))
-                    distortion_factor = 0.1 + 0.4 * saturation_level
-                    harmonic_floor = lf_echo_mean * distortion_factor
-                    residual_echo_psd[hf_start:hf_end] = np.maximum(
-                        residual_echo_psd[hf_start:hf_end], harmonic_floor)
-
-            # v3.1.0 cap-fix: this cap is meaningful only when echo_psd is reliable
-            # (filter has learned the echo path). In render-based mode, filter's
-            # echo_psd ≈ 0 because filter never converged → cap kills render-based
-            # estimate to ≈ 0 → ENR=0 → gain=1.0 → NO echo suppression. Worst-15
-            # static-DT analysis confirmed: render_based_pct=98% but Δecho=+1.5~+1.8
-            # (massive echo leak) and Δdeg=−2.0~−2.4 (over-preserved NE). Skip the cap
-            # when filter-side estimate is unreliable.
-            # === DEEP-TRACE HOOKS: capture residual_echo_psd at each cap stage ===
-            if self._stats is not None:
-                self._stats_last_res_after_attribute = float(np.mean(residual_echo_psd))
-
-            if not self._residual_est.using_render_based:
-                residual_echo_psd = np.minimum(residual_echo_psd, self.echo_psd * 2.0)
-            if self._stats is not None:
-                self._stats_last_res_after_echo_cap = float(np.mean(residual_echo_psd))
-
-            # v3.2 Axis 3: in render-mode, relax cap to error_psd × 1.5 so the
-            # render-based estimate (X × ERL) is not bounded by the NE-inflated
-            # error signal. Linear-mode keeps strict ≤ error_psd.
-            err_cap_mult = 1.5 if self._residual_est.using_render_based else 1.0
-            residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * err_cap_mult)
-            if self._stats is not None:
-                self._stats_last_res_after_error_cap = float(np.mean(residual_echo_psd))
-
-            if not self._residual_est.using_render_based:
-                dt_suppress = np.clip(1.0 - dt_for_fs**2, 0.1, 1.0)
-                residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * dt_suppress)
-            if self._stats is not None:
-                self._stats_last_res_after_dt_cap = float(np.mean(residual_echo_psd))
-
-            if far_spec is not None and far_power > 1e-4 and erl_estimate > 0.0:
-                far_psd_k = np.abs(far_spec) ** 2
-                render_ceil = far_psd_k * min(erl_estimate * 2.0, 1.0)
-                if self._stats is not None:
-                    self._stats_last_render_ceil_mean = float(np.mean(render_ceil))
-                    self._stats_last_erl_estimate = float(erl_estimate)
-                # v3.4 Axis 1: skip render_ceil when in render-mode. This cap is
-                # meant to bound a possibly-wrong linear filter, but render-mode
-                # IS the fallback for when filter is wrong. Trace showed render_ceil
-                # cuts error-based fallback (residual=167) down to far_now×ERL×2
-                # (=2.24) at hotspots → enr collapses → gain stays high → echo leaks.
-                # (rc11 tested gating on not_once_converged: didn't recover DT_mv
-                # deg, lost FS echo. once_converged is not the deg-leak discriminator.)
-                if not self._residual_est.using_render_based:
-                    residual_echo_psd = np.minimum(residual_echo_psd, render_ceil)
-            if self._stats is not None:
-                self._stats_last_res_after_render_ceil = float(np.mean(residual_echo_psd))
-
-            # Reverb tail (WebRTC-AEC3-style IIR on far_psd).
-            # v3.3: tuned from preset defaults — DT cases with non-converged filter
-            # need MORE reverb attribution, not less. Trace showed echo at frame t
-            # often originates 60-320ms ago; old decay 0.6 (TC ≈ 50ms) too short.
-            # New: decay → reverb_decay (0.85 = TC ≈ 130ms by preset), gain ↑,
-            # DT gate weakened (was 0.3 base → 0.7 base).
-            if self.enable_reverb:
-                far_psd = np.abs(far_spec) ** 2 if far_spec is not None else echo_pwr_linear
-                self.reverb_psd = (self.reverb_decay * self.reverb_psd
-                                   + (1 - self.reverb_decay) * far_psd)
-                if not is_stationary_dt:
-                    # v3.3: DT-gate weakened. DT cases with non-converged filter
-                    # are exactly where reverb attribution matters most.
-                    ne_reverb_factor = 0.7 + 0.3 * self.far_activity * (1.0 - dt_for_fs)
-                    reverb_gate = self.far_activity * ne_reverb_factor
-                    # v3.4 Axis 2: hard-cut reverb when far quiets (NE protection).
-                    # far_activity EMA decays slowly → reverb tail can linger 200ms+
-                    # after far ends, hurting NE-only frames. Force gate=0 when
-                    # current far is silent (< 0.1 activity).
-                    if self.far_activity < 0.1:
-                        reverb_gate = 0.0
-                    residual_echo_psd = (residual_echo_psd
-                                         + self.reverb_gain * self.reverb_psd * reverb_gate)
-
-        # Per-bin echo boost: high-coh2 bins are echo-dominant → boost residual estimate
-        # Only when filter converged (erle_factor > 0.3) to avoid over-suppression early
-        if far_power > 1e-4 and erle_factor > 0.3 and residual_echo_psd is not None:
-            echo_boost = 1.0 + 0.5 * coh2 if dt_for_fs < 0.2 else np.ones_like(coh2)
-            residual_echo_psd = residual_echo_psd * echo_boost
+        residual_echo_psd = self._stage_residual_model(
+            coh2=coh2,
+            far_spec=far_spec,
+            far_power=far_power,
+            erle_factor=erle_factor,
+            dt_for_fs=dt_for_fs,
+            epc_active=epc_active,
+            saturation_level=saturation_level,
+            filter_converged=filter_converged,
+            erl_estimate=erl_estimate,
+            near_spec=near_spec,
+            is_stationary_dt=is_stationary_dt,
+            aec_state=aec_state,
+            echo_pwr_linear=echo_pwr_linear,
+        )
 
         # v3.8.x ABL-4 (ablate ERL-based linear_failed branch): trace-verified
         # `self._erl_estimate` clipped to [0.001, 1.0] in update path (~line
@@ -1701,313 +1990,47 @@ class ResFilter:
         if _startup_dt_curr and self.startup_dt_gain_floor < 1.0:
             spectral_g_min = np.minimum(spectral_g_min, self.startup_dt_gain_floor)
 
-        # --- Gain computation ---
+        g = self._stage_gain_compute(
+            residual_echo_psd=residual_echo_psd,
+            eer=eer,
+            coh2=coh2,
+            effective_dt=effective_dt,
+            is_stationary_dt=is_stationary_dt,
+            far_power=far_power,
+            filter_once_converged=filter_once_converged,
+            spectral_g_min=spectral_g_min,
+            eps=eps,
+        )
+        g = self._stage_gain_postprocess(
+            g_in=g,
+            epc_dt=epc_dt,
+            quiet_mask=quiet_mask,
+            far_power=far_power,
+            effective_dt=effective_dt,
+            is_stationary_dt=is_stationary_dt,
+            divergence=divergence,
+        )
 
-        if self.gain_type == "enr" and residual_echo_psd is not None:
-            raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
-            noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
+        self._stage_temporal_smoothing(
+            g_in=g,
+            dt_indicator=dt_indicator,
+            effective_dt=effective_dt,
+            is_stationary_dt=is_stationary_dt,
+            erle_factor=erle_factor,
+            fs_confidence=fs_confidence,
+            spectral_g_min=spectral_g_min,
+            effective_g_min=effective_g_min,
+        )
 
-            # Per-bin DT indicator: base from coh2 (works for speech far-end)
-            dt_per_bin = np.maximum(
-                np.full(self.n_freqs, effective_dt, dtype=np.float32),
-                1.0 - coh2
-            )
-
-            # Stationary far-end DT: coh2 fails (all bins high), use precomputed mask (C1)
-            if is_stationary_dt:
-                dt_per_bin = np.maximum(dt_per_bin, self._stat_dt_mask)
-
-            # dt=0.5 → 0.41 (was 0.25), dt=0.3 → 0.22 (was 0.09), dt=0.8 → 0.75 (was 0.64).
-            # Squared factor over-suppressed mid-range DT (>1 AECMOS damage on 51% of cases).
-            dt_shaped_per_bin = dt_per_bin ** 1.1
-            nearend_est = np.maximum(raw_nearend_est * dt_shaped_per_bin, noise_floor_psd)
-
-            min_ne_from_dt = self.error_psd * dt_shaped_per_bin
-            # startup_dt: filter never converged + far active + DT — apply scale
-            _startup_dt_cond = (effective_dt > 0.35 and far_power > 1e-4
-                                and not filter_once_converged)
-            if _startup_dt_cond and self.startup_dt_min_ne_scale != 1.0:
-                min_ne_from_dt = min_ne_from_dt * self.startup_dt_min_ne_scale
-            # v3.1.0: in render-based mode, the floor `error × dt_shaped` inflates
-            # nearend_est to ~85% of error_psd → ENR≈0 → no echo suppression even
-            # when render estimate (far×erl) clearly says echo is present. Soften
-            # the floor when render-based — empirical 0.5× from worst static-DT
-            # trace (frame 66 ENR jumped 2.8 → 4.5 with halving).
-            # Tunable via render_min_ne_factor instance attr (default 0.5).
-            if self._residual_est.using_render_based:
-                min_ne_from_dt = min_ne_from_dt * getattr(self, 'render_min_ne_factor', 0.5)
-            nearend_est = np.maximum(nearend_est, min_ne_from_dt)
-            if self._stats is not None:
-                self._stats_last_min_ne = float(np.mean(min_ne_from_dt))
-
-            ne_physical_floor = self.error_psd * 0.05
-            nearend_est = np.maximum(nearend_est, ne_physical_floor)
-
-
-            enr = residual_echo_psd / (nearend_est + 1e-10)
-
-            # --- ENR two-tuning (per-bin ne_confidence) ---
-            blend = self._enr_blend  # C2: precomputed
-            scale = self.enr_scale
-            ne_confidence = dt_per_bin
-
-            effective_scale = scale
-
-            # Standard thresholds (ENR can now >> 1.0 with dt_indicator × nearend_est)
-            enr_t_ne = (1 - blend) * 2.0 + blend * 1.5
-            enr_s_ne = (1 - blend) * 3.0 + blend * 2.5
-            enr_t_fs = (1 - blend) * (0.3 * effective_scale) + blend * (0.07 * effective_scale)
-            enr_s_fs = (1 - blend) * (0.4 * effective_scale) + blend * (0.1 * effective_scale)
-
-            # DT-aware ENR threshold relaxation.
-            if effective_dt > 0.4:
-                dt_enr_relax = 1.0 + (effective_dt - 0.4) / 0.6 * 0.5  # max 1.5×
-                enr_t_ne = enr_t_ne * dt_enr_relax
-                enr_s_ne = enr_s_ne * dt_enr_relax
-
-            enr_t = ne_confidence * enr_t_ne + (1 - ne_confidence) * enr_t_fs
-            enr_s = ne_confidence * enr_s_ne + (1 - ne_confidence) * enr_s_fs
-
-            # BUG-3 fix: ensure minimum gate width to prevent hard cutoff at
-            # FS end. FS thresholds (enr_t_fs≈0.07, enr_s_fs≈0.1) have width
-            # 0.03 → slope 33× → near-vertical cutoff → gain jumps between
-            # frames as ENR hovers near the threshold. min_gate_width=0.2
-            # gives slope ≤5× at FS end, making the soft gate actually soft.
-            min_gate_width = 0.2
-            enr_s_safe = np.maximum(enr_s, enr_t + min_gate_width)
-
-            # Soft gate: linear interpolation between transparent/suppress
-            g = np.where(enr > enr_t,
-                         np.clip((enr_s_safe - enr) / (enr_s_safe - enr_t + eps), 0.0, 1.0),
-                         1.0)
-
-            # EMR: echo-to-masker ratio (AEC3-style noise masking)
-            # If echo is below noise floor at a bin, don't suppress (echo is inaudible)
-            if np.sum(self.noise_psd) > 0:
-                emr = residual_echo_psd / (self.noise_psd + 1e-10)
-                emr_transparent = 0.3
-                # Bins where echo is masked by noise → raise gain toward 1.0
-                g_emr = np.clip(emr_transparent / (emr + 1e-10), 0.0, 1.0)
-                g = np.maximum(g, g_emr)  # Don't suppress below noise-masking level
-
-            if self._stats is not None:
-                self._stats_last_gain_before_floor = float(np.mean(g))
-            if getattr(self, '_capture_stages', False):
-                self._stage_gains = {'01_softgate_emr': g.copy()}
-            g = np.maximum(g, spectral_g_min)
-
-            if self._stats is not None:
-                self._stats_last_gain_after_floor = float(np.mean(g))
-            if getattr(self, '_capture_stages', False):
-                self._stage_gains['02_spectral_floor'] = g.copy()
-
-            if self._stats is not None:
-                self._stats_last_enr = float(np.mean(enr))
-                self._stats_last_nearend = float(np.mean(nearend_est))
-                self._stats_last_res_psd = float(np.mean(residual_echo_psd))
-
-        elif self.gain_type == "wiener" and residual_echo_psd is not None:
-            # Wiener gain (fixed: higher noise floor for FS stability)
-            noise_floor_psd = np.mean(self.error_psd) * 0.01 + eps  # 1% floor
-            nearend_est = np.maximum(self.error_psd - residual_echo_psd, noise_floor_psd)
-            beta = self.over_sub
-            g = nearend_est / (nearend_est + beta * residual_echo_psd + eps)
-            g = np.maximum(g, spectral_g_min)
-        elif residual_echo_psd is not None:
-            # Spectral subtraction with direct residual echo PSD
-            eer_direct = residual_echo_psd / (self.error_psd + eps)
-            g = np.maximum(1.0 - self.over_sub * eer_direct, spectral_g_min)
-        else:
-            # Legacy coherence-based spectral subtraction
-            g = np.maximum(1.0 - self.over_sub * eer, spectral_g_min)
-        # EPC_DT gain cap: echo path changed + DT → cap gain to force minimum echo suppression.
-        # Applied before quiet_mask so silent bins (no echo) are not affected.
-        if epc_dt:
-            EPC_DT_GAIN_CAP = 0.85
-            g = np.minimum(g, EPC_DT_GAIN_CAP)
-        if getattr(self, '_capture_stages', False):
-            self._stage_gains['03_epc_dt_cap'] = g.copy()
-
-        g[quiet_mask] = 1.0  # Noise gate: pass through quiet bins
-        if getattr(self, '_capture_stages', False):
-            self._stage_gains['04_quiet_mask'] = g.copy()
-
-        # --- Frequency-domain postprocessing (cf. AEC3 PostprocessGains) ---
-        if far_power > 1e-4:
-            # 3-bin cross-frequency smoothing: reduce isolated gain peaks/valleys
-            # that cause musical noise / electrical noise artifacts
-            kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
-            g = np.convolve(g, kernel, mode='same').astype(np.float32)
-            if getattr(self, '_capture_stages', False):
-                self._stage_gains['05_3bin_smooth'] = g.copy()
-            # DC consistency: bins 0-1 follow bin 2
-            if self.n_freqs > 2:
-                g[:2] = np.minimum(g[1], g[2])
-            # HF cap: upper bins capped at gain of bin near ~500Hz
-            # Bypass during DT: speech harmonics above 500Hz must not be crushed
-            hf_cap_bin = self._hf_cap_bin  # C3: precomputed
-            if self.n_freqs > hf_cap_bin + 1 and effective_dt < 0.5 and not is_stationary_dt:
-                hf_cap = g[hf_cap_bin]
-                g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
-            if getattr(self, '_capture_stages', False):
-                self._stage_gains['06_hf_cap'] = g.copy()
-
-        # Divergence override: when filter diverges, cap gain severely
-        if divergence > 0.3:
-            divergence_gain = 0.01 + (1.0 - 0.01) * (1.0 - divergence)
-            g = np.minimum(g, divergence_gain)
-        if getattr(self, '_capture_stages', False):
-            self._stage_gains['07_pre_temporal'] = g.copy()
-
-        # Temporal smoothing: far_activity-driven release (no feedback loop)
-        # far_activity high (far-end speaking) → slow release (TC≈200ms)
-        # far_activity low (far-end silent) → fast release (TC≈25ms)
-        # B1 cleanup: alpha_release_base was computed but never used (legacy dual EMA).
-        # Actual release uses alpha_release_light only (rate-clamp approach).
-
-        # Temporal DT: when Stationary DT confirmed, treat as dt=0.8 for smoothing/rate
-        # Include effective_dt (shadow+energy) at 0.5× to help gain release/rise in
-        # high-coupling DT where dt_indicator≈0, without being too aggressive
-        dt_temporal = 0.8 if is_stationary_dt else max(dt_indicator, effective_dt * 0.5)
-
-        # Temporal smoothing: AEC3-style split attack/release.
-        # ATTACK (g < gain_smooth): EMA for smooth echo suppression onset.
-        #   Fast attack when FS-confident, slow when DT/NE.
-        # RELEASE (g >= gain_smooth): rate-clamp only, NO EMA.
-        #   AEC3 uses max_inc_factor=2.0 without EMA. Our previous dual
-        #   EMA+clamp made recovery 3-5× slower than AEC3, causing speech
-        #   crush in DT_bal segments (51% of DT cases damaged >1.0 AECMOS).
-        #   Rate-clamp-only lets gain recover in ~7 frames (70ms) from FS→DT
-        #   transition, vs ~20 frames (200ms) with EMA.
-        alpha_fast = 0.3 + 0.2 * (1.0 - erle_factor)   # 0.3-0.5
-        alpha_slow = 0.85 + 0.1 * (1.0 - erle_factor)  # 0.85-0.95
-        alpha_attack = alpha_slow + (alpha_fast - alpha_slow) * fs_confidence
-
-        # Stationary DT: also speed up attack (let gain rise to protect speech)
-        # dt_temporal is already 0.8 (set above when is_stationary_dt)
-        if is_stationary_dt:
-            alpha_attack = alpha_attack * np.clip(1.0 - dt_temporal**2, 0.1, 1.0)
-
-        # Split attack/release: attack uses heavy EMA (smooth onset), release
-        # uses light EMA (α=0.5, TC≈20ms) for fast recovery while preventing
-        # per-bin echo bounce that full bypass (α=0) caused in FS cases.
-        # Improvement B: DT-aware release acceleration.
-        # During DT, reduce release EMA inertia so gain recovers faster
-        # (speech not truncated). dt_indicator=0.8 → alpha=0.34.
-        alpha_release_light = 0.5 - 0.2 * dt_temporal
-        smoothed = np.where(g < self.gain_smooth,
-                            alpha_attack * self.gain_smooth + (1 - alpha_attack) * g,
-                            alpha_release_light * self.gain_smooth + (1 - alpha_release_light) * g)
-
-        # --- Gain rate limiting: prevent sudden blackout / pop ---
-        # Relax rate limiting when far-end is silent (near-end needs to pass through)
-        activity_scale = 0.5 + 0.5 * self.far_activity  # [0.5, 1.0]
-        eff_drop = self.max_drop_ratio ** activity_scale  # Less limiting when silent
-        # Tighter rise when far-end active (cf. AEC3 max_inc_factor=2.0)
-        # Improvement B: DT-aware rise boost. During DT, far_activity is
-        # still high but near-end speech needs faster gain recovery.
-        rise_exp = 0.5 + 0.5 * (1.0 - self.far_activity)
-        if dt_temporal > 0.3:
-            dt_rise_boost = 1.0 + dt_temporal  # dt=0.8 → 1.8× faster
-            rise_exp = rise_exp / dt_rise_boost
-        eff_rise = self.max_rise_ratio ** rise_exp
-
-        gain_floor = self.gain_smooth / eff_drop
-        gain_ceil = self.gain_smooth * eff_rise
-        # LF gain decrease limiting: scale by (1-fs_confidence)
-        # FS (fs_conf≈1): no LF protection → gain drops freely
-        # DT/NE (fs_conf≈0): full LF protection (0.25× floor)
-        if fs_confidence < 0.9:  # skip entirely when clearly FS
-            lf_limit = min(8, self.n_freqs)
-            lf_factor = 0.25 * max(1.0 - fs_confidence * 2.0, 0.0)
-            if lf_factor > 0.01:
-                gain_floor[:lf_limit] = np.maximum(
-                    gain_floor[:lf_limit], self.gain_smooth[:lf_limit] * lf_factor)
-        smoothed = np.maximum(smoothed, gain_floor)
-        smoothed = np.minimum(smoothed, gain_ceil)
-        # Clamp to valid range
-        if isinstance(spectral_g_min, np.ndarray):
-            smoothed = np.maximum(smoothed, spectral_g_min)
-        else:
-            smoothed = np.maximum(smoothed, effective_g_min)
-        smoothed = np.minimum(smoothed, 1.0)
-        # v3.2 Axis 2: hard ceiling in render-mode whenever far is active, to
-        # prevent transient leaks. Trace showed gain p90=1.0 in losing cases (10%
-        # of frames no suppression); rc1 used dt_combined>0.3 gate but missed
-        # frames with low DT signal. rc3 broadens to far-active and tightens
-        # ceiling 0.7→0.6.
-        # v3.8 ablation 2026-04-30: removing this caused +0.008 DT_mv deg but
-        # -0.046 FS_mv echo regression (Pareto ratio 0.17, much worse than ABL-2's
-        # 0.67). Confirmed load-bearing for FS echo — keep.
-        if self._residual_est.using_render_based and self.far_activity > 0.3:
-            ceil = getattr(self, 'render_dt_gain_ceil', 0.6)
-            smoothed = np.minimum(smoothed, ceil)
-        if getattr(self, '_capture_stages', False):
-            self._stage_gains['08_post_temporal'] = smoothed.copy()
-        self.gain_smooth = smoothed
-
-        if self._stats is not None:
-            self._stats_last_gain_after_smoothing = float(np.mean(self.gain_smooth))
-
-        # E6: min-statistics noise tracker (always on, used for dynamic floor + CNG)
-        # Tracks quiet-floor of residual over time. In DT with quiet near-end,
-        # this floor includes near-end energy — so gain >= noise_floor_gain
-        # preserves quiet speech above the learned floor (Speex/AEC3 style).
-        if not self._noise_initialized:
-            self.noise_psd = self.error_psd.copy() + 1e-8
-            self._noise_initialized = True
-            self._smooth_cn_gain = np.zeros(self.n_freqs, dtype=np.float32)
-        is_learning_safe = (self.far_activity < 0.01) and (dt_indicator < 0.1)
-        alpha_down = 0.98
-        alpha_up = 0.998 if is_learning_safe else 1.0
-        alpha_n = np.where(self.error_psd > self.noise_psd, alpha_up, alpha_down)
-        self.noise_psd = alpha_n * self.noise_psd + (1 - alpha_n) * self.error_psd
-
-        # Dynamic floor: per-bin minimum gain so output |g*spec| >= sqrt(noise_psd).
-        # Only raises floor where noise tracker shows persistent content (incl.
-        # quiet speech). Above FS echo (loud), spec_pwr >> noise_psd → floor
-        # is small → no effect on FS. Below quiet speech → floor kicks in.
-        spec_pwr_synth = np.abs(spec_synth) ** 2 + 1e-10
-        noise_floor_gain = np.sqrt(self.noise_psd / spec_pwr_synth)
-        noise_floor_gain = np.clip(noise_floor_gain, effective_g_min, 1.0)
-
-        _startup_dt_nfl = effective_dt > 0.35 and far_power > 1e-4 and not filter_once_converged
-        if self._stats is not None:
-            _nfl_mean = float(np.mean(noise_floor_gain))
-            self._stats_last_noise_floor_gain = _nfl_mean
-            self._stats_last_noise_psd = float(np.mean(self.noise_psd))
-            self._stats_last_spec_pwr = float(np.mean(spec_pwr_synth))
-            self._stats_last_nfl_lifted = _nfl_mean > float(np.mean(self.gain_smooth))
-
-        if _startup_dt_nfl and self.startup_dt_noise_floor_scale < 1.0:
-            if self.startup_dt_noise_floor_scale > 0.0:
-                self.gain_smooth = np.maximum(self.gain_smooth,
-                                              noise_floor_gain * self.startup_dt_noise_floor_scale)
-            # else scale=0.0: bypass — noise_floor_gain not applied
-        else:
-            self.gain_smooth = np.maximum(self.gain_smooth, noise_floor_gain)
-
-        # Apply gain + synthesis sqrt-Hann window + IFFT
-        enhanced_spec = self.gain_smooth * spec_synth
-
-        # --- CNG: Comfort Noise Generation (fill remaining suppression gap) ---
-        if self.enable_cng and np.sum(self.noise_psd) > 1e-7:
-            target_cn_gain = np.sqrt(np.maximum(1.0 - self.gain_smooth ** 2, 0.0)) * 0.4
-            self._smooth_cn_gain = 0.8 * self._smooth_cn_gain + 0.2 * target_cn_gain
-            noise_std = np.sqrt(self.noise_psd / 2.0).astype(np.float32)
-            cng_real = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
-            cng_imag = np.random.randn(self.n_freqs).astype(np.float32) * noise_std
-            cng_spec = (self._smooth_cn_gain * (cng_real + 1j * cng_imag)).astype(np.complex64)
-            enhanced_spec = enhanced_spec + cng_spec
-
-        enhanced_time = np.fft.irfft(enhanced_spec, self.block_size)[:self.frame_size]
-        enhanced_time *= self.window
-
-        # Overlap-add (frame_size buffer)
-        self.ola_buf += enhanced_time
-        output = self.ola_buf[:hop].copy()
-        self.ola_buf[:-hop] = self.ola_buf[hop:]
-        self.ola_buf[-hop:] = 0.0
+        output = self._stage_noise_floor_and_cng(
+            spec_synth=spec_synth,
+            far_power=far_power,
+            effective_dt=effective_dt,
+            dt_indicator=dt_indicator,
+            filter_once_converged=filter_once_converged,
+            effective_g_min=effective_g_min,
+            hop=hop,
+        )
 
         # Per-frame stats accumulation (no-op when _stats is None)
         if self._stats is not None:
@@ -2073,6 +2096,40 @@ class ResFilter:
         self._diag_far_activity = float(self.far_activity)
         self._diag_echo_psd_mean = float(np.mean(self.echo_psd))
         self._diag_error_psd_mean = float(np.mean(self.error_psd))
+
+        # Round 4 per-bin RES diagnostics (audio-passive). Built only when ENR
+        # path actually ran (residual_echo_psd not None). For non-ENR or no-far
+        # frames, leave previous values stale (still float-valued, won't break
+        # downstream).
+        _coh2 = self._diag_coh2_last
+        _ne = self._diag_nearend_est_last
+        _res = self._diag_residual_echo_psd_last
+        _err = self.error_psd
+        _noise = self.noise_psd
+        _vidx = self._voice_band_idx
+        _eps = 1e-10
+        _err_eps = _err + _eps
+        # Clip ratios at 10: residual_echo_psd / nearend_est can be ≫1 in
+        # quiet bins where error_psd ≈ 0; raw mean would be dominated by tails.
+        _res_over_err = np.clip(_res / _err_eps, 0.0, 10.0)
+        _ne_over_err = np.clip(_ne / _err_eps, 0.0, 10.0)
+        _noise_over_err = np.clip(_noise / _err_eps, 0.0, 10.0)
+        _g_final = self.gain_smooth
+        _g_voice = _g_final[_vidx] if _vidx.size > 0 else _g_final
+        _echo_dom = ((_coh2 > 0.5) & (_res_over_err > 0.5) & (_ne_over_err < 0.3))
+        self._diag_round4 = {
+            'coh2_mean_full': float(np.mean(_coh2)),
+            'coh2_mean_voice': float(np.mean(_coh2[_vidx])) if _vidx.size > 0 else 0.0,
+            'res_over_err_mean_full': float(np.mean(_res_over_err)),
+            'res_over_err_mean_voice': float(np.mean(_res_over_err[_vidx])) if _vidx.size > 0 else 0.0,
+            'ne_over_err_mean_full': float(np.mean(_ne_over_err)),
+            'ne_over_err_mean_voice': float(np.mean(_ne_over_err[_vidx])) if _vidx.size > 0 else 0.0,
+            'noise_over_err_mean_full': float(np.mean(_noise_over_err)),
+            'g_voice_mean': float(np.mean(_g_voice)),
+            'g_voice_min': float(np.min(_g_voice)),
+            'g_voice_p10': float(np.percentile(_g_voice, 10)),
+            'echo_dominant_bin_pct': float(np.mean(_echo_dom)),
+        }
 
         return output.astype(np.float32)
 
@@ -3041,6 +3098,12 @@ class AEC:
     def _maybe_mark_diverged(self, source: str) -> None:
         if source not in self._epc_no_reset_sources:
             self._convergence.mark_diverged()
+        # Round 3 trace: per-source counter (audio-passive)
+        if not hasattr(self, '_round3_div_counts'):
+            self._round3_div_counts = {'delay_first': 0, 'delay_shift': 0,
+                                       'epv': 0, 'shadow_rise': 0}
+        self._round3_div_counts[source] = self._round3_div_counts.get(source, 0) + 1
+        self._round3_last_div_source = source
 
     # ── EPC-state delegations (state lives in self._epc_det) ─────────────────
     @property
@@ -3846,7 +3909,23 @@ class AEC:
                 filter_converged=self._filter_converged,
                 main_paused=self._shadow_copy_ctrl.main_paused,
             )
-            if epv_event.fired:
+            # ── Round 7.1a: EPV weak-filter false-positive damping ──
+            # Worst-DT_mv fires EPV 2.75x more often than best (P0 trace) but
+            # its filter_w_norm is 40% of best (~7 vs ~18). Re-arming Kalman
+            # state on a filter that hasn't yet grown destabilises it without
+            # benefit. Skip the EPV response when main filter W norm is below
+            # threshold; let it warm up. Gated by env so default = baseline.
+            _epv_raw = bool(epv_event.fired)
+            _epv_suppressed = False
+            if _epv_raw:
+                _w_thr = float(os.environ.get('R7_EPV_WEAK_THR', '0.0') or 0.0)
+                if _w_thr > 0.0 and self.filter is not None:
+                    _w_norm_now = float(np.linalg.norm(self.filter.W))
+                    if _w_norm_now < _w_thr:
+                        _epv_suppressed = True
+            self._diag['epv_event_raw'] = _epv_raw
+            self._diag['epv_event_suppressed'] = _epv_suppressed
+            if epv_event.fired and not _epv_suppressed:
                 for filt in [self.filter, self.shadow_filter]:
                     if filt and hasattr(filt, 'Q'):
                         filt.Q = filt.Q_high.copy()
@@ -4027,6 +4106,10 @@ class AEC:
                         raw_dt /= erle_for_dt
 
                 # EPC physical gate
+                # Round 3 D3 trace: record raw_dt BEFORE the EPC zero so we can
+                # see what the suppressor would have seen if the gate were
+                # split (adaptation vs RES). audio-passive.
+                self._round3_raw_dt_pre_epc = float(raw_dt)
                 if self.epc_active:
                     raw_dt = 0.0
                     is_stationary_dt = False  # EPC error spike is from filter divergence, not speech
@@ -4257,6 +4340,142 @@ class AEC:
             for filt in [self.filter, self.shadow_filter]:
                 if filt and hasattr(filt, 'Q_low'):
                     filt.Q = filt.Q_low.copy()
+
+        # ── Phase 0 trace-only AEC3 state diagnostics (read-only; do not gate audio) ──
+        _initial_state_active = (
+            (not self._filter_once_converged)
+            or self._frame_count < (self.config.warmup_frames + 50)
+        )
+        _initial_transition_triggered = bool(just_converged)
+        _epc_hangover = self._epc_det.hangover_count if hasattr(self, '_epc_det') else 0
+        _usable_v1 = self._aec_state.usable_linear_estimate
+        _usable_v2 = (
+            _usable_v1
+            and self._frame_count > self.config.warmup_frames + 30
+            and self._convergence.divergence < 0.3
+            and _epc_hangover < 1
+        )
+        # dominant_nearend with hold counter + initial-state gate
+        _ne_raw = bool(getattr(self.res, '_diag_dominant_nearend_raw', False)) if self.res else False
+        _hold = getattr(self, '_dominant_nearend_hold', 0)
+        if _ne_raw and not _initial_state_active:
+            _hold = 5
+        else:
+            _hold = max(_hold - 1, 0)
+        self._dominant_nearend_hold = _hold
+        _dominant_ne_state = _hold > 0
+        # ERLE reset taxonomy (label only, do not actually reset)
+        if _initial_transition_triggered:
+            _erle_reset_signal = 1   # startup-tail
+        elif self._aec_state.epc_active:
+            _erle_reset_signal = 2   # EPC
+        elif self._convergence.divergence > 0.5:
+            _erle_reset_signal = 3   # divergence-spike
+        else:
+            _erle_reset_signal = 0
+        self._diag['initial_state_active'] = bool(_initial_state_active)
+        self._diag['initial_transition_triggered'] = _initial_transition_triggered
+        self._diag['usable_linear_estimate_v1'] = bool(_usable_v1)
+        self._diag['usable_linear_estimate_v2'] = bool(_usable_v2)
+        self._diag['dominant_nearend_like_state'] = bool(_dominant_ne_state)
+        self._diag['erle_reset_signal'] = int(_erle_reset_signal)
+        # ── end Phase 0 trace ──
+
+        # ── Round 3 trace-only: delay / EPC / P-override / scale ──
+        # These are audio-passive (read-only inspection of state set by other code).
+        self._diag['epc_active_now'] = bool(self._epc_det.active)
+        self._diag['epc_hangover_count'] = int(self._epc_det.hangover_count)
+        # P-override sticky-flag: True if either filter currently in transient boost.
+        _pmax_active = False
+        _pfloor_active = False
+        for _filt in [self.filter, self.shadow_filter]:
+            if _filt is None:
+                continue
+            if getattr(_filt, '_p_max_override', 0.5) > 0.6:
+                _pmax_active = True
+            if getattr(_filt, '_p_floor_beta', 0.1) > 0.15:
+                _pfloor_active = True
+        self._diag['p_max_override_active'] = _pmax_active
+        self._diag['p_floor_beta_active'] = _pfloor_active
+        self._diag['div_source_last'] = getattr(self, '_round3_last_div_source', '')
+        self._diag['div_counts'] = dict(getattr(self, '_round3_div_counts',
+                                                {'delay_first': 0, 'delay_shift': 0,
+                                                 'epv': 0, 'shadow_rise': 0}))
+        # Filter scale ratio: filter's echo_psd magnitude vs render-based estimate
+        # (far * erl). If <<1 consistently → filter underestimates → misadjustment.
+        try:
+            _fpw = float(np.mean(np.abs(self.filter.echo_spec) ** 2))
+            _fp_far = float(np.mean(np.abs(self.filter.far_spec) ** 2))
+            _scale_ratio = _fpw / (_fp_far * float(self._erl_estimate) + 1e-12)
+            self._diag['filter_scale_ratio'] = _scale_ratio
+        except Exception:
+            self._diag['filter_scale_ratio'] = 1.0
+        # Inst ERLE smooth (read from ResFilter; lives there, not on AEC).
+        self._diag['inst_erle_smooth'] = float(getattr(self, '_inst_erle_smooth', 0.0))
+        # Pre-EPC DT for D3 design: if we ZEROED raw_dt due to EPC, this records the
+        # value we WOULD have had. Set in process() before the EPC zero (search marker).
+        self._diag['raw_dt_pre_epc'] = float(getattr(self, '_round3_raw_dt_pre_epc', 0.0))
+        # ── end Round 3 trace ──
+
+        # ── Round 4 trace: per-bin RES diagnostics (audio-passive) ──
+        if self.res is not None:
+            for _k, _v in getattr(self.res, '_diag_round4', {}).items():
+                self._diag[_k] = _v
+        # ── end Round 4 trace ──
+
+        # ── Round 5 trace: per-stage gain means (voice-band, audio-passive) ──
+        if self.res is not None:
+            _r5_stages = getattr(self.res, '_diag_round5_stages', None)
+            if _r5_stages is not None:
+                _R5_NAMES = ('softgate_emr', 'spectral_floor', 'epc_dt_cap',
+                             'quiet_mask', '3bin_smooth', 'hf_cap',
+                             'pre_temporal', 'post_temporal', 'after_noise_lift')
+                for _i, _n in enumerate(_R5_NAMES):
+                    self._diag[f'g_stage_{_n}_voice'] = float(_r5_stages[_i])
+        # ── end Round 5 trace ──
+
+        # ── Round 7 trace: filter trajectory + transition events (audio-passive) ──
+        if not hasattr(self, '_r7_prev_delay'):
+            self._r7_prev_delay = -1
+            self._r7_prev_div_counts = {'delay_first': 0, 'delay_shift': 0,
+                                         'epv': 0, 'shadow_rise': 0}
+
+        cur_delay = int(getattr(self, '_current_delay', -1))
+        self._diag['delay_samples'] = cur_delay
+        if cur_delay >= 0 and self._r7_prev_delay >= 0:
+            self._diag['delay_delta'] = cur_delay - self._r7_prev_delay
+        else:
+            self._diag['delay_delta'] = 0
+        self._r7_prev_delay = cur_delay
+
+        cur_div = getattr(self, '_round3_div_counts',
+                          {'delay_first': 0, 'delay_shift': 0, 'epv': 0, 'shadow_rise': 0})
+        for _src in ('delay_first', 'delay_shift', 'epv', 'shadow_rise'):
+            self._diag[f'event_{_src}'] = bool(cur_div.get(_src, 0) > self._r7_prev_div_counts.get(_src, 0))
+        self._r7_prev_div_counts = dict(cur_div)
+
+        _filt = getattr(self, 'filter', None)
+        self._diag['p_max_override_remaining'] = int(getattr(_filt, '_p_max_override_frames', 0)) if _filt is not None else 0
+        self._diag['p_floor_beta_remaining'] = int(getattr(_filt, '_p_floor_beta_frames', 0)) if _filt is not None else 0
+
+        self._diag['filter_once_converged'] = bool(self._filter_once_converged)
+        self._diag['filter_converged_now'] = bool(self._convergence.converged)
+        self._diag['epc_render_forced_remaining'] = int(getattr(self, '_epc_render_forced_remaining', 0))
+
+        try:
+            _np_eps = 1e-12
+            _mic_pwr = float(np.mean(near_end ** 2))
+            _nores_pwr = float(np.mean(raw_output ** 2))
+            _final_pwr = float(np.mean(final_output ** 2))
+            self._diag['mic_power_frame'] = _mic_pwr
+            self._diag['nores_output_power'] = _nores_pwr
+            self._diag['final_output_power'] = _final_pwr
+            self._diag['res_required_gain'] = float(np.sqrt(_final_pwr / max(_nores_pwr, _np_eps)))
+            self._diag['nores_echo_proxy'] = float(np.sqrt(_nores_pwr / max(_mic_pwr, _np_eps)))
+        except (NameError, AttributeError):
+            pass
+        # ── end Round 7 trace ──
+
         # Record DTD confidence for plotting
         self.confidence_history.append(self.get_dtd_confidence())
 
