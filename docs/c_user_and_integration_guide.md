@@ -309,7 +309,93 @@ format.
 
 ---
 
-## 10. Reporting issues
+## 10. Streaming contract & sample-rate scaling
+
+### 10.1 Streaming contract
+
+`aec_process(Aec*, const float* mic, const float* ref, float* out)` is
+strictly **1 hop in → 1 hop out per call**. There is no internal queue
+that absorbs partial frames; the caller must feed exactly `hop_size`
+samples each call.
+
+```
+hop_size  = sample_rate × 0.010   (10 ms)
+8 kHz  →  80 samples
+16 kHz → 160 samples
+48 kHz → 480 samples
+```
+
+Get the value at runtime via `aec_hop_size(&aec)`.
+
+**Internals:** main filter and RES use 50 %-overlap sliding blocks
+(`block_size = 2 × hop_size`). On each call the input buffer is
+`memmove`-shifted by one hop and the new hop appended; FFT runs on the
+full block. From the caller's view this is fully streaming — no
+build-up phase past the first call.
+
+**Algorithmic latency:**
+- With RES enabled (default): **~10 ms** (one hop). The delay comes
+  from the RES sqrt-Hann analysis × Hann synthesis OLA.
+- With `--no-res` / `cfg.enable_res = 0`: effectively **0 ms**.
+
+There is no look-ahead beyond the current block.
+
+> ⚠️ **Wrong sample count = silent corruption.** `aec_process` does not
+> validate the input length (no assert, no length parameter). Feeding
+> fewer samples reads uninitialised memory; feeding more is ignored.
+> The CLI explicitly chunks `for (i = 0; i + hop <= n; i += hop)` and
+> drops any tail shorter than one hop.
+
+### 10.2 Sample-rate auto-derivation
+
+Most sizes are derived from `sample_rate` in `aec_derive_sizes()`.
+Caller only sets `sample_rate` (and optionally `filter_length_ms`); the
+rest is automatic:
+
+| Field | 8 kHz | 16 kHz | 48 kHz | Auto? |
+|---|---|---|---|---|
+| `hop_size` | 80 | 160 | 480 | ✓ (`0.010 · sr`) |
+| `block_size` | 160 | 320 | 960 | ✓ (`2 · hop`) |
+| `fft_size` | 256 | 512 | 1024 | ✓ (`next_pow2(2·hop)`) |
+| `n_freqs` | 129 | 257 | 513 | ✓ (`fft/2 + 1`) |
+| `n_partitions` (52 ms filter) | 6 | 6 | 6 | ✓ |
+| `ref_ring_size` | `max_delay + 4096` | same | same | ✓ |
+| RES bin resolution | sr / blk | sr / blk | sr / blk | ✓ |
+| `filter_length_ms` (default) | 52 | 52 | 52 (note 1) | ✗ user override |
+| `highpass_cutoff_hz` (80) | same | same | same | ✗ Hz, auto-correct |
+| `max_delay_ms` (250) | same | same | same | ✗ ms |
+| `saturation_threshold` (0.95) | same | same | same | ✗ amplitude |
+
+> Note 1 — Python reference uses 64 ms at SR ≥ 44.1 kHz to capture
+> longer reverb tails; the C port does not auto-bump and keeps 52 ms.
+> Set `cfg.filter_length_ms = 64.0f` manually for 48 kHz if your room
+> RT60 is high.
+
+### 10.3 Gotchas when changing SR
+
+1. **Tuning floats are 16 kHz-flavoured.** `mu`, `kalman_q_*`,
+   `res_g_min_db`, `res_dt_reduction`, etc. were tuned at 16 kHz and
+   are *not* SR-scaled. They generally still work at 8 / 48 kHz but
+   may need light tuning if you push corner cases.
+2. **8 kHz hits the high-frequency edge.** The RES stationary-DT mask
+   has Hz fades at 3000–4000 Hz; at 8 kHz Nyquist is 4 kHz so the fade
+   is right against the edge. Functional but shaped tightly.
+3. **48 kHz has tighter circular-conv margin.** `fft_size = 1024 vs
+   block = 960` is only 6.7 % padding (vs ~60 % at 16 kHz). Long
+   filters (`filter_length_ms` ≫ 52) at 48 kHz can alias — keep within
+   the partition design.
+4. **Non-standard SRs are silently truncated.** `(int)(0.010 · sr)`
+   gives `hop = 441` at 44.1 kHz, slightly off the 10 ms target. Stick
+   to 8 / 16 / 48 kHz; resample upstream if the input is anything
+   else.
+5. **Latency is fixed in *time*, not samples.** RES OLA always adds
+   one hop = 10 ms regardless of SR.
+6. **`warmup_frames` is in frames, not seconds.** Default 80 frames =
+   800 ms at 10 ms hop. Keep this in mind if you tune it.
+
+---
+
+## 11. Reporting issues
 
 When reporting, please include:
 

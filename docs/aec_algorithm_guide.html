@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AEC 回音消除 — 技術說明 v3.8.1</title>
+<title>AEC 回音消除 — 技術說明 v3.8.2</title>
 <style>
   :root {
     --bg: #fafafa;
@@ -45,6 +45,7 @@
   h4 { color: #4b5563; margin-top: 24px; margin-bottom: 8px; font-size: 16px; }
   p { margin-bottom: 14px; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 24px 28px; margin: 18px 0; }
+  .panel .panel { padding: 18px 22px; margin: 12px 0; }   /* nested panels: 較緊的內距，避免視覺上越往下越寬 */
   .figure { text-align: center; margin: 28px 0; }
   .figure svg { max-width: 100%; height: auto; }
   .caption { color: var(--muted); font-size: 13px; margin-top: 10px; font-style: italic; }
@@ -82,13 +83,14 @@
 <header>
   <div class="inner">
     <h1>&#x1F50A; AEC 回音消除技術說明</h1>
-    <p class="subtitle">Acoustic Echo Cancellation — 從原理到效能 v3.8.1</p>
+    <p class="subtitle">Acoustic Echo Cancellation — 從原理到效能 v3.8.2</p>
     <div class="badges">
-      <span class="badge">v3.8.1</span>
-      <span class="badge">PBFDKF Kalman Filter</span>
+      <span class="badge">v3.8.2 (current)</span>
+      <span class="badge">Algorithm = v3.8.1 (audio behavior unchanged)</span>
+      <span class="badge">PBFDKF Kalman</span>
       <span class="badge">Shadow Filter</span>
-      <span class="badge">Residual Echo Suppressor</span>
-      <span class="badge">16kHz / 10ms</span>
+      <span class="badge">RES + ENR + Spectral Floor</span>
+      <span class="badge">16 kHz / 10 ms</span>
       <span class="badge">AEC Challenge 2021 評測</span>
     </div>
   </div>
@@ -107,7 +109,8 @@
     <li><a href="#res">6. 殘餘回音抑制（RES）</a></li>
     <li><a href="#effort">7. 主要改進歷程</a></li>
     <li><a href="#results">8. 測試成績</a></li>
-    <li><a href="#limits">9. 使用限制</a></li>
+    <li><a href="#limits">9. 使用限制與調整建議</a></li>
+    <li><a href="#debug">10. Debug 模式 — 內部狀態觀察</a></li>
   </ul>
 </div>
 
@@ -340,7 +343,6 @@
 </svg>
 <div class="caption">圖 2：完整 AEC 處理 pipeline — 每 10ms 一幀，從輸入到乾淨輸出</div>
 </div>
-</div>
 
 <div class="grid-2" style="margin-top:20px">
   <div>
@@ -459,36 +461,208 @@
 </div>
 </div>
 
-<h2 id="res">6. 殘餘回音抑制（RES）</h2>
+<h2 id="res">6. 殘餘回音抑制（RES）— 三模組詳解</h2>
 <div class="panel">
-<p>線性 AEC 的理論上限約 20–30 dB（受 speaker 失真、模型誤差限制）。RES 是第二層頻域後濾波器，在頻域計算每個子帶的殘餘回音估計，並乘以對應增益壓制。</p>
+<p>線性 AEC 的理論上限約 <strong>20–30 dB</strong>（受 speaker 非線性、空間 reverb tail、模型誤差限制）。RES 是第二層頻域後濾波器，每幀重新決定每個 frequency bin 要乘多少 gain。三個關鍵模組依序串接：</p>
 
-<div class="grid-2" style="margin-top:16px">
-  <div class="panel" style="border-left:4px solid #f97316">
-    <h4>直接估計（filter 收斂後）</h4>
-    <p>用 filter 輸出的 echo_spec 算殘餘 PSD，精度高，可精準壓制而不傷語音。</p>
-    <p style="color:#059669; font-size:13px">✓ 啟用條件：ERLE &gt; 10dB 持續 20 幀</p>
+<div class="figure">
+<svg viewBox="0 0 880 230" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="res_a" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#1e3a8a"/></marker>
+  </defs>
+  <!-- linear AEC out / inputs box -->
+  <rect x="20" y="92" width="120" height="56" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="80" y="118" text-anchor="middle" font-size="12" fill="#1e3a8a" font-weight="700">線性 AEC</text>
+  <text x="80" y="135" text-anchor="middle" font-size="11" fill="#1e3a8a">error / echo_spec</text>
+
+  <!-- Stage 1: PSD -->
+  <rect x="170" y="78" width="170" height="84" rx="10" fill="#7c3aed"/>
+  <text x="255" y="104" text-anchor="middle" font-size="13" fill="#fff" font-weight="700">① Residual Echo PSD</text>
+  <text x="255" y="124" text-anchor="middle" font-size="11" fill="rgba(255,255,255,.92)">「殘餘有多少？」</text>
+  <text x="255" y="142" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.85)">echo_spec ÷ ERLE</text>
+  <text x="255" y="156" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.85)">+ reverb tail</text>
+
+  <!-- Stage 2: ENR -->
+  <rect x="370" y="78" width="170" height="84" rx="10" fill="#6d28d9"/>
+  <text x="455" y="104" text-anchor="middle" font-size="13" fill="#fff" font-weight="700">② ENR Gain Gate</text>
+  <text x="455" y="124" text-anchor="middle" font-size="11" fill="rgba(255,255,255,.92)">「該壓多重？」</text>
+  <text x="455" y="142" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.85)">sigmoid(echo / nearend)</text>
+  <text x="455" y="156" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.85)">DT relax 抬閾值</text>
+
+  <!-- Stage 3: Floor -->
+  <rect x="570" y="78" width="170" height="84" rx="10" fill="#5b21b6"/>
+  <text x="655" y="104" text-anchor="middle" font-size="13" fill="#fff" font-weight="700">③ Spectral Floor</text>
+  <text x="655" y="124" text-anchor="middle" font-size="11" fill="rgba(255,255,255,.92)">「不能壓到死」</text>
+  <text x="655" y="142" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.85)">min-statistics floor</text>
+  <text x="655" y="156" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.85)">+ CNG 填靜音</text>
+
+  <!-- output -->
+  <rect x="770" y="92" width="92" height="56" rx="8" fill="#d1fae5" stroke="#059669" stroke-width="2"/>
+  <text x="816" y="118" text-anchor="middle" font-size="12" fill="#065f46" font-weight="700">RES out</text>
+  <text x="816" y="135" text-anchor="middle" font-size="11" fill="#065f46">乾淨語音</text>
+
+  <!-- arrows -->
+  <line x1="140" y1="120" x2="168" y2="120" stroke="#1e3a8a" stroke-width="2.5" marker-end="url(#res_a)"/>
+  <line x1="340" y1="120" x2="368" y2="120" stroke="#1e3a8a" stroke-width="2.5" marker-end="url(#res_a)"/>
+  <line x1="540" y1="120" x2="568" y2="120" stroke="#1e3a8a" stroke-width="2.5" marker-end="url(#res_a)"/>
+  <line x1="740" y1="120" x2="768" y2="120" stroke="#1e3a8a" stroke-width="2.5" marker-end="url(#res_a)"/>
+
+  <!-- arrow labels -->
+  <text x="154" y="113" text-anchor="middle" font-size="9.5" fill="#475569">spec</text>
+  <text x="354" y="113" text-anchor="middle" font-size="9.5" fill="#475569">echo PSD</text>
+  <text x="554" y="113" text-anchor="middle" font-size="9.5" fill="#475569">gain(k)</text>
+  <text x="754" y="113" text-anchor="middle" font-size="9.5" fill="#475569">gain × spec</text>
+
+  <!-- Layered annotation -->
+  <text x="441" y="195" text-anchor="middle" font-size="11" fill="#475569" font-style="italic">每幀 (10ms) × 257 個頻率 bin 都重新計算一次</text>
+</svg>
+<div class="caption">圖 4：RES 內部三階段 — 估計殘餘 → 計算壓制比例 → 設下限避免 musical noise</div>
+</div>
+
+<!-- ===== Stage 1: PSD ===== -->
+<h3>6.1 Residual Echo PSD — 「殘餘有多少？」</h3>
+<div class="panel" style="border-left:4px solid #7c3aed">
+  <p><strong>物理意義：</strong>每個頻率 bin 估計「線性 AEC 之後還剩多少回音功率」。沒有這個估計，後面所有 gain 決定都是亂猜。輸出單位是頻譜功率（|X|²），與 nearend PSD 對等。</p>
+  <h4 style="margin-bottom:6px">怎麼算</h4>
+  <ul style="margin-top:4px">
+    <li><strong>主來源（filter-based）：</strong><code>echo_spec ÷ ERLE</code> — 用 filter 內部已估計的回音頻譜除以當前 ERLE 折扣，推估線性 AEC 漏掉多少。Filter 收斂越好越精準。</li>
+    <li><strong>備用（render-based）：</strong><code>|ref|² × ERL_avg</code> — 直接拿 ref 能量乘學到的 ERL，filter 不可信時用（冷啟動 / EPC 後 / 低 ERLE confidence）。</li>
+    <li><strong>Reverb tail：</strong>把過去 30–60 ms 的殘餘以 IIR 衰減累積（<code>S_tail = α·S_tail + β·S_now</code>），補捉混響尾。</li>
+  </ul>
+  <div class="key-point" style="margin-top:14px">
+    <strong>類比：</strong>氣象局先預報「明天每小時降雨幾毫米」。要決定「帶不帶傘、撐多大傘」之前，必須先有這個量化估計。RES 後面兩個模組都靠 PSD 的數字做決定。
   </div>
-  <div class="panel" style="border-left:4px solid #7c3aed">
-    <h4>Render-based（收斂前）</h4>
-    <p>用 ref 訊號 × 學習到的 ERL 保守估計，不依賴 filter 品質，冷啟動期間也能保護。</p>
-    <p style="color:#6366f1; font-size:13px">✓ 啟用條件：filter 未收斂或 EPC 觸發後</p>
+  <p style="font-size:13px; color:#64748b; margin-top:12px"><strong>常見失敗：</strong>PSD 過度信任 filter 的早期不準預測 → 壓制過頭傷語音；或 reverb tail 太長 → echo 結束後仍持續壓抑。v3.8 把 ERLE confidence 引進權重，初期 fallback 到 render-based 以避這個雷。</p>
+</div>
+
+<!-- ===== Stage 2: ENR ===== -->
+<h3>6.2 ENR Gain Gate — 「該壓多重？」</h3>
+<div class="panel" style="border-left:4px solid #6d28d9">
+  <p><strong>物理意義：</strong>ENR = <code>residual_echo_psd ÷ nearend_psd</code>。比例高 (echo dominant) → 該頻率以回音為主 → gain 壓低；比例低 (near-end dominant) → 近端在說話 → gain 接近 1 (不動)。把每個頻率 bin 的 ENR 餵進 sigmoid 平滑函數，得到 0–1 之間的壓制比例。</p>
+
+  <div class="figure" style="margin:14px 0">
+    <svg viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg">
+      <!-- axes -->
+      <line x1="60" y1="180" x2="660" y2="180" stroke="#475569" stroke-width="1.5"/>
+      <line x1="60" y1="30"  x2="60"  y2="180" stroke="#475569" stroke-width="1.5"/>
+      <text x="360" y="208" text-anchor="middle" font-size="12" fill="#374151">ENR (dB) — 殘餘回音 / 近端 比值</text>
+      <text x="22" y="105" font-size="12" fill="#374151" transform="rotate(-90 22 105)">gain</text>
+      <text x="55" y="36" text-anchor="end" font-size="10" fill="#94a3b8">1.0</text>
+      <text x="55" y="184" text-anchor="end" font-size="10" fill="#94a3b8">0</text>
+      <text x="60" y="196" text-anchor="middle" font-size="10" fill="#94a3b8">−20</text>
+      <text x="360" y="196" text-anchor="middle" font-size="10" fill="#94a3b8">0</text>
+      <text x="660" y="196" text-anchor="middle" font-size="10" fill="#94a3b8">+20</text>
+      <!-- threshold line -->
+      <line x1="360" y1="30" x2="360" y2="180" stroke="#94a3b8" stroke-dasharray="4,3" stroke-width="1"/>
+      <text x="360" y="22" text-anchor="middle" font-size="11" fill="#475569">threshold</text>
+      <!-- normal sigmoid (FS): centered at 0 -->
+      <path d="M 60,32 C 230,32 280,32 360,105 C 440,178 500,178 660,178" fill="none" stroke="#6d28d9" stroke-width="3"/>
+      <text x="160" y="55" font-size="11" fill="#6d28d9" font-weight="600">near-end → gain≈1 通過</text>
+      <text x="540" y="170" text-anchor="middle" font-size="11" fill="#6d28d9" font-weight="600">echo → gain≈0 壓制</text>
+      <!-- DT relax sigmoid: shifted +6dB right -->
+      <path d="M 60,40 C 250,40 320,40 460,108 C 540,180 580,180 660,180" fill="none" stroke="#22c55e" stroke-width="2.4" stroke-dasharray="6,4"/>
+      <text x="490" y="60" font-size="11" fill="#16a34a" font-weight="600">DT relax (+4–8 dB 抬閾值)</text>
+      <!-- annotations -->
+      <circle cx="360" cy="105" r="4" fill="#6d28d9"/>
+      <text x="370" y="100" font-size="10" fill="#475569">轉折點</text>
+    </svg>
+    <div class="caption">圖 5：ENR sigmoid gain — 紫線為一般情況；綠色虛線為 DT 偵測時的放寬版（閾值往右抬），確保不誤壓近端語音</div>
+  </div>
+
+  <h4 style="margin-bottom:6px">關鍵參數</h4>
+  <ul style="margin-top:4px">
+    <li><strong>threshold：</strong>sigmoid 中心 (echo / near-end 平衡點)。預設 ~0 dB。</li>
+    <li><strong>softness：</strong>sigmoid 寬度。太硬 → musical noise；太軟 → 漏 echo。</li>
+    <li><strong>DT relax：</strong>DTD 觸發時 threshold +4 ~ +8 dB（綠色虛線）→ 同 ENR 下 gain 更高，不誤壓近端。</li>
+    <li><strong>preset 影響：</strong>aggressive / maximum 把 threshold 拉低 → sigmoid 整條左移 → 同 ENR 壓得更狠。</li>
+  </ul>
+  <div class="key-point" style="margin-top:14px">
+    <strong>類比：</strong>自動音量旋鈕。對方在響時轉小，自己人在說話時手放開。Sigmoid 是「平滑過渡」，避免「啪一聲開關」造成的 click/musical noise。
   </div>
 </div>
 
-<h3>壓制強度 4 級預設</h3>
+<!-- ===== Stage 3: Spectral Floor ===== -->
+<h3>6.3 Spectral Floor — 「不能壓到死」</h3>
+<div class="panel" style="border-left:4px solid #5b21b6">
+  <p><strong>物理意義：</strong>給每個頻率 bin 設定最小 gain 下限 <code>g_min(k)</code>。完全壓到 0 會聽到「musical noise」（被壓制 bin 的殘餘變成隨機尖峰，像鳥叫 / 水滴聲），人耳極為敏感。留下底噪反而聽起來自然。</p>
+
+  <div class="figure" style="margin:14px 0">
+    <svg viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg">
+      <!-- axes -->
+      <line x1="60" y1="180" x2="660" y2="180" stroke="#475569" stroke-width="1.5"/>
+      <line x1="60" y1="30"  x2="60"  y2="180" stroke="#475569" stroke-width="1.5"/>
+      <text x="360" y="208" text-anchor="middle" font-size="12" fill="#374151">frequency (Hz)</text>
+      <text x="22" y="105" font-size="12" fill="#374151" transform="rotate(-90 22 105)">gain (dB)</text>
+      <text x="55" y="36" text-anchor="end" font-size="10" fill="#94a3b8">0</text>
+      <text x="55" y="108" text-anchor="end" font-size="10" fill="#94a3b8">−20</text>
+      <text x="55" y="180" text-anchor="end" font-size="10" fill="#94a3b8">−40</text>
+      <!-- ENR raw gain (purple) -->
+      <path d="M 60,40 L 130,55 L 200,170 L 270,165 L 340,40 L 410,90 L 480,150 L 550,160 L 620,75 L 660,80" fill="none" stroke="#6d28d9" stroke-width="2" stroke-dasharray="4,3"/>
+      <text x="120" y="36" font-size="11" fill="#6d28d9">ENR raw gain</text>
+      <!-- v2.7 dynamic floor (green) -->
+      <path d="M 60,138 L 130,135 L 200,150 L 270,145 L 340,128 L 410,140 L 480,148 L 550,145 L 620,135 L 660,138" fill="none" stroke="#22c55e" stroke-width="2.4"/>
+      <text x="60" y="156" font-size="11" fill="#16a34a">v2.7 動態 floor (min-stat)</text>
+      <!-- Old fixed floor (red dashed) -->
+      <line x1="60" y1="108" x2="660" y2="108" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="6,4"/>
+      <text x="500" y="103" font-size="11" fill="#dc2626">v2.7 前固定 floor</text>
+      <!-- final gain (blue) = max(ENR, dynamic floor) -->
+      <path d="M 60,40 L 130,55 L 200,150 L 270,145 L 340,40 L 410,90 L 480,148 L 550,145 L 620,75 L 660,80" fill="none" stroke="#2563eb" stroke-width="3"/>
+      <text x="600" y="60" text-anchor="end" font-size="11" fill="#2563eb" font-weight="600">最終 gain = max(ENR, floor)</text>
+    </svg>
+    <div class="caption">圖 6：Spectral floor 機制 — 紫虛=ENR 算出的 raw gain；紅虛=舊版固定 −20 dB 下限；綠=v2.7 動態 floor 跟隨 noise；藍=兩者取大值=最終 gain</div>
+  </div>
+
+  <h4 style="margin-bottom:6px">v2.7 之前 vs 之後</h4>
+  <table style="margin-top:6px">
+    <tr><th>版本</th><th>下限策略</th><th>結果</th></tr>
+    <tr><td>v2.7 之前</td><td>固定 g_min = 0.1 (−20 dB)</td><td>低噪場景過度壓 → 死寂；高噪場景殘餘變鳥叫</td></tr>
+    <tr><td>v2.7 之後</td><td>min-statistics 動態追蹤過去 1.5 秒 noise floor</td><td>安靜頻率 floor 低 → 大幅壓制；噪聲頻率 floor 高 → 留住自然底噪</td></tr>
+  </table>
+
+  <h4 style="margin-bottom:6px; margin-top:18px">CNG（Comfort Noise Generation，可選）</h4>
+  <p>當 gain 真的觸到 floor 之下，CNG 把該頻率用 <em>形狀化的舒適噪聲</em>（比對 mic 自身的 noise spectrum 形狀產生）填回。聽感上避免 dead-air（電話一片死寂像斷線），但不會增加 echo（因為形狀只取自近端統計，與 ref 無關）。</p>
+
+  <div class="key-point" style="margin-top:10px">
+    <strong>類比：</strong>夜間靜音模式不要把人耳完全塞起來。留一個微弱自然背景音，對方聽起來「還連著」而不是「電話斷了」。
+  </div>
+</div>
+
+<!-- ===== Sources & presets ===== -->
+<h3>6.4 兩種估計來源（PSD 子層級）</h3>
+<div class="grid-2" style="margin-top:14px">
+  <div class="panel" style="border-left:4px solid #f97316">
+    <h4>直接估計（filter 收斂後）</h4>
+    <p>用 filter 輸出的 echo_spec 算殘餘 PSD，精度高，可精準壓制而不傷語音。</p>
+    <p style="color:#059669; font-size:13px">✓ 啟用條件：ERLE &gt; 10 dB 持續 20 幀</p>
+  </div>
+  <div class="panel" style="border-left:4px solid #7c3aed">
+    <h4>Render-based（收斂前 / EPC 後）</h4>
+    <p>用 ref 訊號 × 學習到的 ERL 保守估計，不依賴 filter 品質。</p>
+    <p style="color:#6366f1; font-size:13px">✓ 啟用條件：filter 未收斂、ERLE 低、或 EPC 觸發後</p>
+  </div>
+</div>
+
+<h3>6.5 壓制強度 4 級預設</h3>
 <table>
-  <tr><th>Preset</th><th>FS 回音壓制</th><th>DT 語音保留</th><th>適用場景</th></tr>
-  <tr><td><strong>mild</strong></td><td>中</td><td>最好</td><td>高品質通話、音樂</td></tr>
-  <tr><td><strong>balanced ★</strong></td><td>高</td><td>好（推薦）</td><td>一般通話預設</td></tr>
-  <tr><td><strong>aggressive</strong></td><td>很高</td><td>普通</td><td>車用、高噪環境</td></tr>
-  <tr><td><strong>maximum</strong></td><td>極高</td><td>較弱</td><td>強回音 IoT 裝置</td></tr>
+  <tr><th>Preset</th><th>FS 回音壓制</th><th>DT 語音保留</th><th>ENR threshold</th><th>適用場景</th></tr>
+  <tr><td><strong>mild</strong></td><td>中</td><td>最好</td><td>高（保守壓）</td><td>高品質通話、音樂</td></tr>
+  <tr style="background:#f0fff4"><td><strong>balanced ★</strong></td><td>高</td><td>好（推薦）</td><td>中</td><td>一般通話預設</td></tr>
+  <tr><td><strong>aggressive</strong></td><td>很高</td><td>普通</td><td>低（激進壓）</td><td>車用、高噪環境</td></tr>
+  <tr><td><strong>maximum</strong></td><td>極高</td><td>較弱</td><td>極低</td><td>強回音 IoT 裝置</td></tr>
 </table>
+<p style="font-size:13px; color:#64748b; margin-top:8px">同一個 ENR 數值，激進 preset 會把 sigmoid 整條往左平移 → 同樣的殘餘比例下壓得更狠。代價是 DT 期間語音保留變差，因此提供 4 級讓使用者依場景挑。</p>
 </div>
 
 <h2 id="effort">7. 主要改進歷程</h2>
 <div class="panel">
-<p>從 v2.0 到 v2.5，累計超過 <strong>80+ 小時研發</strong>，透過 AEC Challenge 800 cases 評測驅動每次迭代。每次改動都要通過 800-case AECMOS 評測才算收版。</p>
+<p>從 v2.0 到 v3.8.2，累計超過 <strong>120+ 小時研發</strong>，透過 AEC Challenge 800 cases 評測驅動每次迭代。每次改動都要通過 800-case AECMOS 評測才收版。</p>
+<div class="highlight" style="margin-bottom:18px">
+  <strong>版本說明：</strong>
+  <ul style="margin:6px 0 0 0; font-size:14px">
+    <li><strong>v3.8.1</strong> = Python 演算法定版（音質行為固定在這版）</li>
+    <li><strong>v3.8.2</strong> = 當前 release。內含 v3.8.1 演算法 + C 對齊實作 + release hygiene。<em>音質行為與 v3.8.1 完全相同。</em></li>
+  </ul>
+</div>
 
 <div class="timeline">
   <div class="timeline-item">
@@ -537,7 +711,35 @@
     <div class="timeline-dot">v2.8</div>
     <div class="timeline-content">
       <strong>Linear AEC 失敗場景 aggressive mode + Movement DT 系統性排查</strong>
-      <p>偵測 linear filter 無法收斂的 FS tail cases（ERL &gt; 1.2），強制進入 aggressive 壓制（FS echo +0.010）。完成 movement DT 三輪 ablation（filter capacity / filter state reset / RES gain），確認 DT gate 抑制 adaptation 是根本瓶頸，downstream 調整無法彌補。</p>
+      <p>偵測 linear filter 無法收斂的 FS tail cases（ERL &gt; 1.2），強制進入 aggressive 壓制（FS echo +0.010）。完成 movement DT 三輪 ablation，確認 DT gate 抑制 adaptation 是根本瓶頸。</p>
+    </div>
+  </div>
+  <div class="timeline-item">
+    <div class="timeline-dot">v3.0</div>
+    <div class="timeline-content">
+      <strong>Phase ι 多軸並進改造</strong>
+      <p>同時放寬 DT mu scale 上限、shadow filter 切到 KX-blended P-update、EPC reset 邏輯收緊。之後所有實驗都從 v3.0 baseline 比較。</p>
+    </div>
+  </div>
+  <div class="timeline-item">
+    <div class="timeline-dot">v3.4</div>
+    <div class="timeline-content">
+      <strong>Adaptive ERL hardening + Q-floor 探索</strong>
+      <p>修正 ERL 上下限漂移、收斂後 Kalman Q 過小造成 EPC 後恢復慢。FS echo 提升 ~0.05。</p>
+    </div>
+  </div>
+  <div class="timeline-item">
+    <div class="timeline-dot">v3.8.1 ★</div>
+    <div class="timeline-content">
+      <strong>Python 演算法定版（current production audio behavior）</strong>
+      <p>Multi-statistics noise floor、ENR threshold 微調、CNG shaping 改進，全部凍結。BALANCED 4.006 NE deg 為當前 binding floor。R10–R16 多輪 stop-at-Phase 0 確認此版以分數論已達 plateau。</p>
+    </div>
+  </div>
+  <div class="timeline-item">
+    <div class="timeline-dot">v3.8.2</div>
+    <div class="timeline-content">
+      <strong>C parity 實作 + release hygiene</strong>
+      <p>v3.8.1 演算法移植到 C，bit-identical 驗證。新增 static-memory API 支援嵌入式（無 heap）部署。文件、版號、測試結構全面整理。<em>音質與 v3.8.1 相同，無 audio behavior 變化。</em></p>
     </div>
   </div>
 </div>
@@ -545,7 +747,31 @@
 
 <h2 id="results">8. 測試成績</h2>
 <div class="panel">
-<p>使用 <strong>AEC Challenge Interspeech 2021 Blind Test Set</strong>（800 cases，涵蓋不同房間、設備、移動場景），AECMOS 評測（1–5 分，越高越好）。各方法分數如下表：</p>
+<p>使用 <strong>AEC Challenge Interspeech 2021 Blind Test Set</strong>（800 cases，涵蓋不同房間、設備、移動場景），AECMOS 評測（1–5 分，越高越好，業界標準客觀打分模型）。</p>
+
+<div class="grid-3" style="margin:16px 0 22px">
+  <div class="metric-card">
+    <div class="metric-value">3.48</div>
+    <div class="metric-label">FS Echo（balanced）</div>
+    <div class="metric-delta" style="color:#059669">vs Speex +0.67</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">2.30</div>
+    <div class="metric-label">DT Degradation（balanced）</div>
+    <div class="metric-delta" style="color:#059669">vs AEC3 +0.45 ★</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">4.01</div>
+    <div class="metric-label">NE Degradation（balanced）</div>
+    <div class="metric-delta" style="color:#059669">vs AEC3 +0.55</div>
+  </div>
+</div>
+
+<div class="highlight">
+  <strong>一句話結論：</strong>FS/DT Echo 接近 AEC3 水準，但 DT Degradation 與 NE Degradation 都明顯領先 AEC3 — 雙方通話時對方語音保留度高出許多。可依場景選 4 個 preset 微調。
+</div>
+
+<p>各方法分數如下表（粗體 = 該欄最佳，紅色 = 顯著低於業界水準）：</p>
 
 <table>
   <tr><th>方法</th><th>FS Echo ↑</th><th>DT Echo ↑</th><th>DT Degradation ↑</th><th>NE Degradation ↑</th></tr>
@@ -567,24 +793,18 @@
 <svg viewBox="0 0 860 360" xmlns="http://www.w3.org/2000/svg">
 
 <!-- 圖例 (右側) -->
-<text x="700" y="35" font-size="11" fill="#94a3b8" font-weight="600">── 競品</text>
-<line x1="698" y1="52" x2="718" y2="52" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,2"/>
-<text x="724" y="56" font-size="11" fill="#94a3b8">Linear</text>
-<line x1="698" y1="70" x2="718" y2="70" stroke="#6b7280" stroke-width="1.5"/>
-<text x="724" y="74" font-size="11" fill="#6b7280">Speex</text>
-<line x1="698" y1="88" x2="718" y2="88" stroke="#ef4444" stroke-width="2"/>
-<text x="724" y="92" font-size="11" fill="#ef4444">AEC2</text>
-<line x1="698" y1="106" x2="718" y2="106" stroke="#7f1d1d" stroke-width="2.5"/>
-<text x="724" y="110" font-size="11" fill="#7f1d1d" font-weight="600">AEC3</text>
-<text x="700" y="132" font-size="11" fill="#2563eb" font-weight="600">── 我們</text>
-<line x1="698" y1="148" x2="718" y2="148" stroke="#22c55e" stroke-width="2"/>
-<text x="724" y="152" font-size="11" fill="#22c55e">mild</text>
-<line x1="698" y1="166" x2="718" y2="166" stroke="#2563eb" stroke-width="3"/>
-<text x="724" y="170" font-size="11" fill="#2563eb" font-weight="700">balanced ★</text>
-<line x1="698" y1="184" x2="718" y2="184" stroke="#f97316" stroke-width="2"/>
-<text x="724" y="188" font-size="11" fill="#f97316">aggressive</text>
-<line x1="698" y1="202" x2="718" y2="202" stroke="#b91c1c" stroke-width="2"/>
-<text x="724" y="206" font-size="11" fill="#b91c1c">maximum</text>
+<text x="700" y="50" font-size="11" fill="#94a3b8" font-weight="600">── 競品 / baseline</text>
+<line x1="698" y1="68" x2="718" y2="68" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,2"/>
+<text x="724" y="72" font-size="11" fill="#94a3b8">Linear</text>
+<line x1="698" y1="86" x2="718" y2="86" stroke="#6b7280" stroke-width="1.5"/>
+<text x="724" y="90" font-size="11" fill="#6b7280">Speex</text>
+<line x1="698" y1="104" x2="718" y2="104" stroke="#ef4444" stroke-width="2"/>
+<text x="724" y="108" font-size="11" fill="#ef4444">AEC2</text>
+<line x1="698" y1="122" x2="718" y2="122" stroke="#7f1d1d" stroke-width="2.5"/>
+<text x="724" y="126" font-size="11" fill="#7f1d1d" font-weight="600">AEC3</text>
+<text x="700" y="156" font-size="11" fill="#2563eb" font-weight="600">── 我們</text>
+<line x1="698" y1="174" x2="718" y2="174" stroke="#2563eb" stroke-width="3"/>
+<text x="724" y="178" font-size="11" fill="#2563eb" font-weight="700">balanced ★</text>
 
 <!-- Chart border -->
 <rect x="65" y="28" width="618" height="292" fill="#f8fafc" stroke="#e5e7eb" stroke-width="1" rx="4"/>
@@ -659,14 +879,6 @@
 <text x="465" y="306" font-size="11" text-anchor="middle" fill="#7f1d1d" font-weight="600">1.85 ✗</text>
 <text x="625" y="169" font-size="11" text-anchor="middle" fill="#7f1d1d">3.45</text>
 
-<!-- mild (light green): 3.155, 3.882, 2.441, 4.019 -->
-<!-- FS=3.155→196.7  DT_e=3.882→143.5  DT_d=2.441→247.3  NE=4.019→134.9 -->
-<polyline points="145,197 305,144 465,247 625,135" fill="none" stroke="#22c55e" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="145" cy="197" r="4" fill="#22c55e"/>
-<circle cx="305" cy="144" r="4" fill="#22c55e"/>
-<circle cx="465" cy="247" r="4" fill="#22c55e"/>
-<circle cx="625" cy="135" r="4" fill="#22c55e"/>
-
 <!-- balanced (blue, thick): 3.482, 4.162, 2.296, 4.007 -->
 <!-- FS=3.482→173.4  DT_e=4.162→123.4  DT_d=2.296→258.2  NE=4.007→135.8 -->
 <polyline points="145,173 305,123 465,258 625,136" fill="none" stroke="#2563eb" stroke-width="3.5" stroke-linejoin="round"/>
@@ -680,33 +892,18 @@
 <text x="465" y="273" font-size="11" text-anchor="middle" fill="#2563eb" font-weight="600">2.30 ★</text>
 <text x="625" y="131" font-size="11" text-anchor="middle" fill="#2563eb" font-weight="600">4.01</text>
 
-<!-- aggressive (orange): 3.621, 4.289, 2.231, 3.994 -->
-<!-- FS=3.621→162.5  DT_e=4.289→114.1  DT_d=2.231→263.2  NE=3.994→136.9 -->
-<polyline points="145,163 305,114 465,263 625,137" fill="none" stroke="#f97316" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="145" cy="163" r="4" fill="#f97316"/>
-<circle cx="305" cy="114" r="4" fill="#f97316"/>
-<circle cx="465" cy="263" r="4" fill="#f97316"/>
-<circle cx="625" cy="137" r="4" fill="#f97316"/>
-
-<!-- maximum (dark red): 3.722, 4.412, 2.162, 3.961 -->
-<!-- FS=3.722→155.8  DT_e=4.412→104.3  DT_d=2.162→268.8  NE=3.961→139.3 -->
-<polyline points="145,156 305,104 465,269 625,139" fill="none" stroke="#b91c1c" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="145" cy="156" r="4" fill="#b91c1c"/>
-<circle cx="305" cy="104" r="4" fill="#b91c1c"/>
-<circle cx="465" cy="269" r="4" fill="#b91c1c"/>
-<circle cx="625" cy="139" r="4" fill="#b91c1c"/>
-
 <!-- 指示 DT Deg 下降方向標記 -->
 <text x="465" y="20" font-size="11" text-anchor="middle" fill="#dc2626" font-weight="600">↑ 語音保留越好</text>
 <text x="145" y="20" font-size="11" text-anchor="middle" fill="#374151">↑ 回音消除越好</text>
 
 </svg>
-<div class="caption">圖 8：各方法指標剖面圖 — X 軸為四個評測指標，每條線代表一個方法。注意 DT Degradation 欄：AEC3（深紅）大幅下沉，我們的方法（藍/綠）保持在中高位</div>
+<div class="caption">圖 8：各方法指標剖面圖 — X 軸為四個評測指標，每條線代表一個方法。AEC3（深紅）DT Echo 最高但 DT Degradation 急劇下沉；我們 balanced（粗藍線）四項都接近最佳區域</div>
 </div>
 
 <div class="key-point">
-  <strong>如何讀這張圖：</strong>理想的方法應該在所有 4 個指標都「往上」。現實中沒有方法全部最高，核心取捨是「FS/DT Echo（回音壓制）↑ 而 DT Degradation（語音保留）↓」。AEC3 的問題清楚可見 — DT Echo 最高（4.54）但 DT Degradation 急劇下沉到 1.85，代表雙方通話時語音品質很差。
+  <strong>如何讀這張圖：</strong>理想的方法應該在所有 4 個指標都「往上」。現實中沒有方法全部最高，核心取捨是「FS/DT Echo（回音壓制）↑ 而 DT Degradation（語音保留）↓」。AEC3 的問題清楚可見 — DT Echo 最高（4.54）但 DT Degradation 急劇下沉到 1.85，代表雙方通話時語音品質很差。我們 balanced 在 DT Degradation 領先 AEC3 +0.45，DT Echo 仍在 4.16 的高水準。
 </div>
+<p style="font-size:13px; color:#64748b; margin-top:6px">為了讓圖容易讀，只畫 balanced 一條代表我們；mild / aggressive / maximum 三組分數見上方表格。</p>
 
 <!-- ── 選擇指南 ── -->
 <h3>Preset 選擇指南</h3>
@@ -735,45 +932,243 @@
 </div>
 </div>
 
-<h2 id="limits">9. 使用限制</h2>
+<h2 id="limits">9. 使用限制與調整建議</h2>
 <div class="panel">
+<p>分三類：<strong>(A) 解不掉的硬限制</strong>、<strong>(B) 可調的參數</strong>、<strong>(C) 整合時最常踩的雷</strong>。</p>
+
+<h3>9.A 演算法本身的硬限制</h3>
 <table>
-  <tr><th>場景</th><th>行為</th><th>說明</th></tr>
+  <tr><th>場景</th><th>行為</th><th>原因 / 解法</th></tr>
   <tr>
-    <td><strong>冷啟動前 1–2 秒</strong></td>
+    <td><strong>冷啟動前 0.5–2 秒</strong></td>
     <td>&#x26A0;&#xFE0F; 回音殘留較多</td>
-    <td>Filter 需要遠端訊號才能收斂，期間走保守 Render-based 估計</td>
+    <td>Filter 需要遠端訊號才能收斂，期間走保守 render-based 估計。應用層可在 warm-up 期間 mute 或播 "connecting…" 提示音。</td>
   </tr>
   <tr>
-    <td><strong>設備快速移動</strong></td>
-    <td>&#x26A0;&#xFE0F; 短暫約 200ms 回音</td>
-    <td>EPC 偵測後重新收斂，約 200ms 自動恢復</td>
+    <td><strong>DT-from-frame-0（一開始就雙說）</strong></td>
+    <td>&#x26A0;&#xFE0F; 收斂困難 / 殘留長</td>
+    <td>近端從第 0 sample 就講話 → DT 保護自始至終抑制 adaptation，filter 學不起來。屬於演算法 plateau，非 tuning 可解。建議產品流程設計上避免（例如先讓對方先 hello）。</td>
   </tr>
   <tr>
-    <td><strong>穩態遠端（風扇/白噪）+ 弱語音</strong></td>
-    <td>&#x26A0;&#xFE0F; 部分弱語音段可能被抑制</td>
-    <td>整體語音保留率仍約 48%，個別弱起手 100ms 段可能掉低</td>
+    <td><strong>設備快速移動 / 翻轉</strong></td>
+    <td>&#x26A0;&#xFE0F; 短暫 200 ms 漏音</td>
+    <td>Echo path 突變 → EPC 偵測後 ~200 ms 重新收斂。頻繁移動 → <code>--filter-length-ms 100</code> 加大 model capacity。</td>
   </tr>
   <tr>
-    <td><strong>Speaker 嚴重飽和/失真</strong></td>
-    <td>&#x2139;&#xFE0F; 仍有部分殘留</td>
-    <td>RES 可部分壓制，嚴重非線性失真建議搭配額外處理</td>
+    <td><strong>穩態遠端（風扇 / 白噪）+ 弱語音</strong></td>
+    <td>&#x26A0;&#xFE0F; 部分弱語音段被抑制</td>
+    <td>整體語音保留率仍 ~48 %；弱起手 100 ms 段可能掉。降到 <code>--preset mild</code> 改善。</td>
   </tr>
   <tr>
-    <td><strong>延遲超過 32ms</strong></td>
-    <td>&#x2139;&#xFE0F; 需調整設定</td>
-    <td>加大 filter_length 可處理更長回音路徑（代價：記憶體）</td>
+    <td><strong>Speaker 嚴重飽和 / 失真（非線性）</strong></td>
+    <td>&#x2139;&#xFE0F; 殘留無法完全消除</td>
+    <td>線性 filter 無法建模非線性失真；RES 可部分壓制。嚴重失真建議搭配 NN 後處理或硬體降低 speaker 失真。</td>
   </tr>
   <tr>
-    <td><strong>32kHz 取樣率</strong></td>
+    <td><strong>立體聲 / 多 mic 輸入</strong></td>
     <td>&#x274C; 不支援</td>
-    <td>支援 8 / 16 / 48kHz，32kHz 需外部 resample</td>
+    <td>目前僅支援 single mic + single ref。需要 stereo / multi-mic AEC 須使用其他演算法。</td>
+  </tr>
+  <tr>
+    <td><strong>32 kHz 取樣率</strong></td>
+    <td>&#x274C; 不支援</td>
+    <td>僅支援 8 / 16 / 48 kHz。32 kHz / 24 kHz 需外部 resample 後再進。</td>
+  </tr>
+  <tr>
+    <td><strong>負延遲（mic 早於 ref 進）</strong></td>
+    <td>&#x274C; 不支援</td>
+    <td>必須 mic 落後 ref（正延遲）。負延遲場景須上游對齊。</td>
+  </tr>
+</table>
+
+<h3>9.B 可調參數對應的調整建議</h3>
+<table>
+  <tr><th>遇到的問題</th><th>調整方法</th><th>代價</th></tr>
+  <tr>
+    <td>FS 殘餘回音太大</td>
+    <td>① 先 <code>--no-res</code> 確認 ref 正確、延遲對齊正常 → ② <code>--preset aggressive</code> 或 <code>maximum</code> → ③ <code>--filter-length-ms 100</code></td>
+    <td>aggressive/maximum 會犧牲 DT 語音保留；filter 加長 → 記憶體 +50%</td>
+  </tr>
+  <tr>
+    <td>DT 期間近端被壓掉 / 斷斷續續</td>
+    <td><code>--preset balanced</code> → <code>mild</code>（不要動個別 RES knob，preset 是 co-tuned）</td>
+    <td>FS echo 壓制變弱 0.3–0.5 分</td>
+  </tr>
+  <tr>
+    <td>第一秒回音漏出</td>
+    <td>應用層在連線最初 0.5–1 s 靜音輸出，避免暴露 cold-start residual</td>
+    <td>使用者體感上多 0.5 s 等待</td>
+  </tr>
+  <tr>
+    <td>裝置移動後回音 spike</td>
+    <td>正常行為（EPC 重收斂約 200 ms）。頻繁移動 → 加長 filter</td>
+    <td>記憶體上升</td>
+  </tr>
+  <tr>
+    <td>輸出聽起來太空 / dead-air</td>
+    <td>啟用 CNG（CLI: <code>--cng</code>；API: <code>cfg.enable_cng=1</code>）</td>
+    <td>輕微 NE deg 下降 ~0.005</td>
+  </tr>
+  <tr>
+    <td>離線批次處理 / 已對齊 wav</td>
+    <td><code>--no-delay-est</code> 關閉延遲估計，避免冷啟動 ~300 ms 的 reset</td>
+    <td>遠端 / 近端必須事先對齊好</td>
+  </tr>
+  <tr>
+    <td>想單獨聽 linear-AEC 殘餘來判斷問題</td>
+    <td><code>--no-res</code> 跳過後濾波器</td>
+    <td>輸出保留所有未壓制殘餘 → 純做 debug 用</td>
+  </tr>
+</table>
+
+<h3>9.C 整合時最常踩的雷（會直接造成功能失效）</h3>
+<table>
+  <tr><th>錯誤</th><th>後果</th><th>正確做法</th></tr>
+  <tr>
+    <td>Ref 餵錯訊號（不是真正進到 speaker 的 loopback）</td>
+    <td>&#x274C; 完全失效</td>
+    <td>Ref 必須是 playback loopback（含應用層音量控制後的訊號）。常見錯誤：直接餵原始通話對方 codec 解碼輸出。</td>
+  </tr>
+  <tr>
+    <td>Mic / ref SR 不一致或 drift</td>
+    <td>&#x274C; ERLE 崩 / 殘留高</td>
+    <td>兩路必須同 SR、time-aligned 啟動。SR drift &gt; 50 ppm 會讓 filter 永遠收斂不了。</td>
+  </tr>
+  <tr>
+    <td>Mic / ref 延遲超過 <code>filter_length</code></td>
+    <td>&#x274C; 模型完全 cover 不到</td>
+    <td>線上延遲估計 (<code>--max-delay-ms 250</code>) 可處理 250 ms 內。超過必須上游補償，或加大 filter。</td>
+  </tr>
+  <tr>
+    <td>非 hop_size 整數倍餵資料</td>
+    <td>&#x274C; assertion fail</td>
+    <td><code>aec_process</code> 必須剛好 160 samples（@16k）。上游用 ring buffer 緩衝。</td>
+  </tr>
+  <tr>
+    <td>批次處理沒呼叫 <code>aec_reset</code></td>
+    <td>&#x26A0;&#xFE0F; DT/EPC state 跨檔污染</td>
+    <td>每處理新檔前呼叫 <code>aec_reset</code>，確保 detector 狀態重置。</td>
+  </tr>
+  <tr>
+    <td>輸出再過一層 CNG / NS</td>
+    <td>&#x26A0;&#xFE0F; 噪聲底被雙重 shape，產生 tonal artifacts</td>
+    <td>CNG 只啟用一次。若已 <code>enable_cng=1</code>，不要在後級再加。</td>
+  </tr>
+  <tr>
+    <td>多 thread 共用同一個 Aec instance</td>
+    <td>&#x274C; race / state corruption</td>
+    <td>每個 instance single-threaded。Multi-stream → 每路獨立 instance，不共享 state。</td>
+  </tr>
+  <tr>
+    <td>編譯時沒用 <code>-ffp-contract=off</code></td>
+    <td>&#x26A0;&#xFE0F; FMA contraction 造成 detector 行為不一致</td>
+    <td>必加。<code>-O2</code> 預設會做 FMA contraction，會破壞 HPF / saturation / detector accumulator 的位元精度。</td>
   </tr>
 </table>
 </div>
 
+<h2 id="debug">10. Debug 模式 — 內部狀態觀察</h2>
+<div class="panel">
+<p>調 AEC 最痛苦的事是「東西不對但不知道哪裡不對」。Debug 模式提供 <strong>per-frame 內部狀態 dump</strong>，讓你立刻看到 filter 收斂到哪、DT 偵測為何觸發、ERLE 走勢、為什麼 RES 在這一幀放這個 gain。</p>
+
+<style>
+  .panel pre, .panel code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; }
+  .panel pre { background: #0f172a; color: #e2e8f0; padding: 14px 18px; border-radius: 8px; overflow-x: auto; font-size: 12.5px; line-height: 1.55; margin: 12px 0; }
+  .panel code { background: #f1f5f9; padding: 1px 6px; border-radius: 4px; font-size: 13px; color: #1e293b; }
+  .panel pre code { background: transparent; padding: 0; color: inherit; font-size: inherit; }
+</style>
+
+<h3>10.1 兩種 debug 介面</h3>
+<table>
+  <tr><th></th><th>Python (研發 / 演算法調整)</th><th>C (release / 嵌入式驗證)</th></tr>
+  <tr><td>啟用方式</td><td><code>aec.get_stats()</code> 或 <code>AecDebugLogger</code></td><td>編譯時 <code>-DAEC_DEBUG</code>，執行時 <code>--debug-level 2</code></td></tr>
+  <tr><td>輸出格式</td><td><code>AecStats</code> dataclass，30+ 欄位</td><td>Stderr 或檔案；timestamped key=value</td></tr>
+  <tr><td>頻率</td><td>每幀（10 ms）皆可呼叫</td><td>每幀，含模組 tag</td></tr>
+  <tr><td>Release builds</td><td>—</td><td><code>-DNDEBUG</code> 完全 strip log strings + assertions</td></tr>
+</table>
+
+<h3>10.2 C：CLI debug log</h3>
+<pre><code># 列印到 stderr
+./bin/aec_wav mic.wav ref.wav out.wav --debug-level 2
+
+# 寫到檔案，方便 grep
+./bin/aec_wav mic.wav ref.wav out.wav --debug-level 2 --debug-log /tmp/aec.log
+
+# 只看 PBFDKF 模組這幾幀
+grep "\[PBFDKF\]" /tmp/aec.log | head</code></pre>
+
+<p>每行格式：</p>
+<pre><code>[AEC][t= 1.234s][f=  154][PBFDKF] mu_mean=0.087 P_mean=2.13e-3 W_norm=0.421 ...
+[AEC][t= 1.234s][f=  154][DT]     conf=0.32 from_energy=0.18 from_shadow=0.41 active=N
+[AEC][t= 1.234s][f=  154][RES]    gain_mean_dB=-8.4 echo_psd_dB=-31.2 using_render=N
+[AEC][t= 1.234s][f=  154][EPC]    active=N divergence=0.04 epv_ratio=1.02</code></pre>
+
+<p>每個欄位都是 <code>key=value</code> 對，方便 <code>awk</code> / <code>grep</code> 抽出來畫圖。</p>
+
+<h3>10.3 Python：AecStats（30+ 內部欄位）</h3>
+<p>每幀呼叫 <code>aec.get_stats()</code> 拿到一個 <code>AecStats</code> dataclass，裡面是當下所有 detector / filter / RES 的 state snapshot。常用欄位：</p>
+
+<table>
+  <tr><th>類別</th><th>欄位</th><th>意義</th></tr>
+  <tr><td rowspan="3">Filter 狀態</td><td><code>filter_state</code></td><td>WARMUP / ADAPTING / CONVERGED / EPC_RECOVERING</td></tr>
+  <tr><td><code>filter_converged</code></td><td>當前是否視為已收斂</td></tr>
+  <tr><td><code>warmup_remaining</code></td><td>還剩幾幀才完成 warmup</td></tr>
+  <tr><td rowspan="3">ERLE</td><td><code>erle_inst_db</code></td><td>EMA 平滑瞬時 ERLE</td></tr>
+  <tr><td><code>erle_windowed_db</code></td><td>~10 s 衰減窗 ERLE（穩定）</td></tr>
+  <tr><td><code>erle_cumulative_db</code></td><td>整段累積平均 ERLE</td></tr>
+  <tr><td rowspan="3">回音路徑</td><td><code>erl_db</code></td><td>Echo Return Loss（越低 = 耦合越強 = 越難）</td></tr>
+  <tr><td><code>divergence</code></td><td>[0,1] filter 發散指標</td></tr>
+  <tr><td><code>epc_active</code></td><td>EPC detector 當前是否觸發</td></tr>
+  <tr><td rowspan="2">Adaptation</td><td><code>mu_scale</code></td><td>當前 adaptation 縮放（DT 期間 → 0）</td></tr>
+  <tr><td><code>filter_w_norm</code> / <code>shadow_w_norm</code></td><td>Main / Shadow filter 權重 L2 norm</td></tr>
+  <tr><td rowspan="3">DT 偵測</td><td><code>dt_confidence</code></td><td>三線整合後信心 [0,1]</td></tr>
+  <tr><td><code>dt_from_energy</code> / <code>dt_from_shadow</code> / <code>dt_from_coherence</code></td><td>三條獨立 DT 訊號</td></tr>
+  <tr><td><code>dt_active</code></td><td>當前是否視為 DT（信心 &gt; 0.5）</td></tr>
+  <tr><td rowspan="2">Shadow</td><td><code>shadow_advantage</code></td><td>main_err / shadow_err；&gt;1 表 shadow 比較好</td></tr>
+  <tr><td><code>shadow_copy_count</code></td><td>累計 shadow→main 複製次數</td></tr>
+  <tr><td rowspan="3">RES</td><td><code>res_gain_mean_db</code></td><td>當前幀 RES 平均 spectral gain</td></tr>
+  <tr><td><code>res_using_render</code></td><td>True = 走 render-based PSD（filter 不可信）</td></tr>
+  <tr><td><code>echo_psd_mean_db</code></td><td>當前估計的殘餘 echo PSD 平均</td></tr>
+  <tr><td>能量 / 延遲</td><td><code>far_power_db</code> / <code>mic_power_db</code> / <code>delay_ms</code> / <code>saturation_level</code></td><td>能量、估計延遲、speaker 飽和程度</td></tr>
+</table>
+
+<h3>10.4 範例：AecDebugLogger（一行式 console 觀測）</h3>
+<pre><code>from aec import AEC, AecConfig, AecDebugLogger
+
+aec = AEC(config)
+logger = AecDebugLogger(aec, log_interval_s=1.0)
+
+while pos + hop &lt;= n:
+    out = aec.process(mic[pos:pos+hop], ref[pos:pos+hop])
+    logger.update()
+    pos += hop</code></pre>
+
+<p>輸出長這樣（每秒一行，每 20 行重印 header）：</p>
+<pre><code>  t(s)  | state          |fltr| epc |dt_conf|ERLE_i|ERLE_w|  ERL |far_dB|mic_dB|mu_scl|shd_adv|sat | delay
+   1.00 | WARMUP         | N  | N   |  0.05 |  3.2 |  0.0 | 12.3 | -22.1| -28.4| 1.000|  1.020|0.00 | 8.2ms
+   2.00 | ADAPTING       | N  | N   |  0.18 | 11.4 |  8.7 | 14.1 | -19.8| -32.6| 0.875|  1.150|0.00 | 8.2ms
+   3.00 | CONVERGED      | Y  | N   |  0.07 | 18.6 | 16.2 | 14.5 | -19.5| -34.1| 0.500|  0.980|0.00 | 8.2ms
+   4.50 | EPC_RECOVERING | N  | Y   |  0.04 |  6.1 | 12.4 | 13.9 | -20.1| -31.2| 1.000|  3.420|0.00 | 8.2ms
+   5.50 | CONVERGED      | Y  | N   |  0.42 | 14.8 | 13.6 | 14.2 | -19.7| -28.9| 0.087|  1.080|0.00 | 8.2ms</code></pre>
+
+<h3>10.5 怎麼用 debug log 解問題</h3>
+<table>
+  <tr><th>觀察到的徵兆</th><th>看哪些欄位</th><th>對應問題</th></tr>
+  <tr><td>10 秒後 ERLE 還是個位數</td><td><code>filter_state</code> 一直 WARMUP/ADAPTING、<code>far_power_db</code> 太低</td><td>遠端能量不足、ref 接錯訊號、SR drift</td></tr>
+  <tr><td>近端被切掉</td><td><code>dt_confidence</code> 卡在 1.0、<code>dt_from_energy</code> 異常高</td><td>ERL 估計錯、preset 太激進</td></tr>
+  <tr><td>echo 突然爆出來</td><td><code>epc_active=Y</code>、<code>shadow_advantage</code> 飆高</td><td>EPC 觸發中，正常 200 ms 恢復</td></tr>
+  <tr><td>輸出過度死寂</td><td><code>res_gain_mean_db</code> &lt; −30 dB</td><td>RES 過壓 → 降 preset 或開 CNG</td></tr>
+  <tr><td>輸出 ERLE 高但聽起來像鳥叫</td><td><code>res_gain_mean_db</code> 跳動劇烈</td><td>ENR sigmoid 太硬 → preset 改 mild</td></tr>
+  <tr><td>EPC 反覆觸發</td><td><code>epc_active</code> 在 Y/N 間跳</td><td>SR drift / 延遲不穩 / 環境突變過頻繁</td></tr>
+</table>
+
+<div class="note">
+  <strong>Release build 注意：</strong>C 版本必須以 <code>make debug</code>（含 <code>-DAEC_DEBUG</code>）才會有 log call sites；<code>make</code>（release，含 <code>-DNDEBUG</code>）會把所有 log strings 完全 strip 掉，效能不受影響。Python 版本則永遠可用 <code>get_stats()</code>，無 release/debug 區分。
+</div>
+</div>
+
 <div style="text-align:center; color:var(--muted); font-size:13px; margin-top:60px; padding-top:24px; border-top:1px solid var(--border);">
-  AEC v3.8.1 &nbsp;&#xB7;&nbsp; 2026-05-01 &nbsp;&#xB7;&nbsp; PBFDKF + Shadow Filter + Multi-ERLE + WOLA RES
+  AEC v3.8.2 &nbsp;&#xB7;&nbsp; Algorithm v3.8.1 &nbsp;&#xB7;&nbsp; 2026-05-04 &nbsp;&#xB7;&nbsp; PBFDKF + Shadow + Multi-ERLE + WOLA RES (PSD / ENR Gate / Spectral Floor / CNG)
 </div>
 
 </div>

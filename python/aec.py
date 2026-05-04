@@ -306,6 +306,7 @@ class AecConfig:
                 res_dt_reduction=3.5,
                 res_spectral_floor_db=-25.0,
                 res_ne_protect_db=-10.0,
+                enable_cng=True,
                 shadow_q_ratio=3.0,
                 # Adaptive filter
                 shadow_mu_min=0.5,
@@ -356,6 +357,7 @@ class AecConfig:
                 res_dt_reduction=1.5,
                 res_spectral_floor_db=-45.0,
                 res_ne_protect_db=-22.0,
+                enable_cng=True,
                 shadow_q_ratio=4.0,
                 # Adaptive filter
                 shadow_mu_min=0.7,
@@ -380,6 +382,7 @@ class AecConfig:
                 res_dt_reduction=0.5,
                 res_spectral_floor_db=-55.0,
                 res_ne_protect_db=-30.0,
+                enable_cng=True,
                 shadow_q_ratio=5.0,
                 # Adaptive filter
                 shadow_mu_min=0.9,

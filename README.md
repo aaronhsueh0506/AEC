@@ -156,6 +156,49 @@ Algorithm details → [docs/aec_methods.md](docs/aec_methods.md). PBFDKF/shadow/
 overview → [docs/pbfdkf_shadow_intro.md](docs/pbfdkf_shadow_intro.md). DTD design
 → [docs/dtd_design.md](docs/dtd_design.md).
 
+### Future direction — NN post-filter after the linear AEC
+
+The pipeline above is split into a **linear stage** (HPF → saturation →
+delay-est → PBFDKF + shadow) and a **post-filter stage** (ResFilter:
+ENR + spectral floor + reverb tail + CNG). Both stages have stable,
+well-understood interfaces:
+
+```
+                          linear AEC                  post-filter
+mic ─►───────────────────► [PBFDKF] ──► error ──► [ ResFilter ] ──► out
+                                            │
+                                            └─► (or NN model)
+```
+
+The classical RES has hit its score plateau on the AEC Challenge 2021
+blind set (R10–R16 investigations confirmed; see
+[SUMMARY.md](docs/SUMMARY.md)). The next architectural step is to
+**replace or complement ResFilter with a neural post-filter** taking
+the same inputs the classical RES uses today:
+
+| Input to NN model | Source | Frame |
+|---|---|---|
+| `error` (linear AEC out) | `aec.process()` raw output | hop |
+| `echo_spec` (filter echo estimate) | `AecResContext.echo_spec` | n_freqs complex |
+| `near_spec`, `far_spec` | mic / ref FFT | n_freqs complex |
+| Detector telemetry (ERLE, dt_indicator, divergence, erle_factor, etc.) | `AecStats` / `AecResContext` | scalar/frame |
+
+The hooks are already in place:
+
+- **Python**: set `AecConfig.return_res_context = True` and
+  `aec.process()` returns `(linear_out, AecResContext)`. Feed the
+  context into a downstream model and skip the built-in ResFilter
+  with `enable_res = False`.
+- **C**: same plumbing exists in `c_impl/include/aec.h` —
+  `aec_process` can be split into `linear_step` + external RES via
+  exposing `AecResContext` (port from Python is the next step on the
+  Audio_ALG integration repo).
+
+Candidate models (joint NR + RES + dereverb) and the roadmap for the
+NN replacement are in the planning notes; the classical pipeline stays
+in production until the NN reaches parity on near-end preservation
+(NE deg ≥ 4.0).
+
 ---
 
 ## Python tooling overview

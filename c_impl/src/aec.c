@@ -52,6 +52,7 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
             cfg->res_spectral_floor_db = -25.0f;
             cfg->res_ne_protect_db = -10.0f;
             cfg->res_reverb_decay = 0.6f; cfg->res_reverb_gain = 0.8f;
+            cfg->enable_cng = 1;
             cfg->shadow_q_ratio = 3.0f; cfg->shadow_mu_min = 0.5f;
             cfg->kalman_q_high = 1.5e-3f;
             break;
@@ -63,8 +64,9 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
             cfg->res_dt_reduction = 2.5f;
             cfg->res_spectral_floor_db = -38.0f;
             cfg->res_ne_protect_db = -16.0f;
-            cfg->res_reverb_decay = 0.85f;  /* User Fix 1 */
-            cfg->res_reverb_gain  = 1.6f;   /* User Fix 1 */
+            cfg->res_reverb_decay = 0.85f;
+            cfg->res_reverb_gain  = 1.6f;
+            cfg->enable_cng = 1;
             cfg->shadow_q_ratio = 3.5f; cfg->shadow_mu_min = 0.6f;
             cfg->kalman_q_high = 1e-3f;
             break;
@@ -77,6 +79,7 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
             cfg->res_spectral_floor_db = -45.0f;
             cfg->res_ne_protect_db = -22.0f;
             cfg->res_reverb_decay = 0.7f; cfg->res_reverb_gain = 2.0f;
+            cfg->enable_cng = 1;
             cfg->shadow_q_ratio = 4.0f; cfg->shadow_mu_min = 0.7f;
             cfg->kalman_q_high = 7e-4f;
             break;
@@ -89,6 +92,7 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
             cfg->res_spectral_floor_db = -52.0f;
             cfg->res_ne_protect_db = -28.0f;
             cfg->res_reverb_decay = 0.8f; cfg->res_reverb_gain = 3.0f;
+            cfg->enable_cng = 1;
             cfg->shadow_q_ratio = 4.5f; cfg->shadow_mu_min = 0.75f;
             cfg->kalman_q_high = 5e-4f;
             break;
