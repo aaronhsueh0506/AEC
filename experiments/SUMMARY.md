@@ -1831,3 +1831,175 @@ PBFDKF and NOT shipping NN):
 
 NN postfilter remains the only known ship route absent the upstream
 architectural rework.
+
+
+# Round 13 — WebRTC-style early/late reverb decomposition (audit-passive)
+
+Branch: `algo/round13-residual-echo-reverb-rewrite` (discarded after closure)
+Date: 2026-05-04
+Outcome: **STOP at Phase 0** for both simplified candidates β and γ.
+Does NOT close the full WebRTC AEC3 ResidualEchoEstimator architecture
+(see "What this does NOT close").
+
+## Why R13 was opened (Codex direction)
+
+R12 closed STOP after exhausting the residual-stage signal pool for
+nearend evidence. Direction shifted from "find a local nearend signal"
+to "borrow WebRTC AEC3 *architecture* — early/late reflection state
+machines, residual estimate as a consequence of state, not a single
+multiplicative gate." R13 is the first audit-first test of this
+architectural framing.
+
+## Phase 0 plumbing
+
+`PBFDAF.process()` extends the existing echo_spec accumulation loop
+(line 686-700) with K_early=2 partition split, populating
+`self.early_echo_spec` and `self.late_echo_spec` at the SAME pre-update
+W as `echo_spec`. In-loop accumulation guarantees the identity
+`early + late ≡ echo_spec` (same operand order, same W). At
+BALANCED/16kHz fl=832 hop=160, n_partitions=5 so K_early=2 = 20 ms
+boundary (direct + first early reflection), late = 30+ ms tail.
+
+`AEC.process()` reads `self.filter.early_echo_spec` /
+`self.filter.late_echo_spec`, computes PSDs, passes into `res.process()`
+as new optional kwargs. `ResFilter._stage_residual_model` adds an
+audit-passive R13 block AFTER the existing reverb add (so existing
+behavior is untouched), snapshots pre-reverb residual + current addend,
+and computes two candidate reverb estimators side-by-side:
+
+- **β** — observation-bounded reverb IIR, input = `early_echo_psd`
+  (instead of `far_psd`). Same gain / decay / gate as production.
+  Hypothesis: when kernel sees no echo, β IIR starves.
+- **γ** — early-presence scalar gate on the existing addend:
+  `linear_echo_present = clip(early_voice_pwr / max(3·noise_voice_pwr, eps), 0, 1)`,
+  then `gamma_addend = current_addend × linear_echo_present`.
+
+α (late-partition linear echo) is recorded as a DIAGNOSTIC ONLY — not a
+candidate; the kernel's late partitions are within-FIR-window late
+reflections, not WebRTC's beyond-filter reverb tail.
+
+13 trace fields per frame, voice-band aggregates only. parity_round6
+5-fixture HASH MATCH × 5.
+
+## Phase 0 gate (bidirectional)
+
+Reviewing initial results showed an **overshoot** is just as harmful as
+a drop on non-target cohorts. Analyzer enforces both bounds:
+
+- worst-DT_mv: `ratio ≤ 0.70` (≥ 30% drop on target cohort)
+- FS_static / FS_movement: `ratio ∈ [0.80, 1.20]` (drift ≤ ±20%)
+- best-DT_mv: `ratio ∈ [0.80, 1.20]` (drift ≤ ±20%)
+
+where `ratio_K = mean(predicted_final_K_voice) / mean(predicted_final_current_voice)`
+per cohort. Predicted final = pre-reverb residual + candidate addend.
+
+## Per-cohort results (predicted final residual ratio)
+
+| cohort | n | predicted_current | predicted_β | predicted_γ | ratio_β | ratio_γ |
+|---|---:|---:|---:|---:|---:|---:|
+| FS_static | 169 | 8.371 | 7.915 | 8.122 | 0.946 | 0.970 |
+| FS_movement | 131 | 11.719 | 9.876 | 11.513 | 0.843 | 0.982 |
+| NE | 200 | 0.007 | 0.000 | 0.005 | 0.067 | 0.837 |
+| DT_static | 186 | 6.223 | 4.440 | 5.958 | 0.714 | 0.957 |
+| DT_movement | 114 | 7.224 | 4.171 | 6.910 | 0.577 | 0.957 |
+| **worst-DT_mv** | 20 | 11.122 | 4.920 | 10.665 | **0.442** | 0.959 |
+| **best-DT_mv** | 20 | 3.655 | 8.141 | 3.487 | **2.227** | 0.954 |
+
+### Gate evaluation
+
+| candidate | worst-DT_mv | FS_static | FS_movement | best-DT_mv | qualified |
+|---|---:|---:|---:|---:|---|
+| β | 0.442 (PASS) | 0.946 (PASS) | 0.843 (PASS) | **2.227 (FAIL)** | **no** |
+| γ | **0.959 (FAIL)** | 0.970 (PASS) | 0.982 (PASS) | 0.954 (PASS) | **no** |
+
+## Mechanism reading — the structural finding
+
+β's input `early_echo_psd` voice-mean per cohort:
+- best-DT_mv: 4.65  (highest among DT cohorts)
+- worst-DT_mv: 2.84
+- DT_static: 2.55
+- FS_static: 4.64
+
+`early_echo_psd` is essentially a proxy for **filter convergence
+quality on the recent room response**. Best-DT_mv has higher early_echo
+*because the kernel converged better* (mic was loud enough to drive
+clean adaptation), not because there is more echo. This recapitulates
+R8-prep's finding from the opposite side: linear AEC ERLE is BETTER on
+worst-DT_mv (1.66 dB) than best (0.72 dB).
+
+So β has the right WORST direction (-56% reduction) but **anti-correlates**
+with the cohort axis: it inflates reverb on best (already fine,
+predicted residual ×2.23) and starves it on worst. Net AECMOS impact
+predictable to be a loss on best while gaining on worst — a Pareto
+shift, not an improvement.
+
+γ's `linear_echo_present` scalar gate ranges 0.63–0.74 across
+far-active cohorts (0.10 on NE only). The 0.10-wide spread is far too
+narrow to discriminate worst-DT_mv from FS at the residual scale needed.
+
+## Disposition
+
+- Branch `algo/round13-residual-echo-reverb-rewrite` discarded (no
+  merge to main). R13 P0 plumbing (PBFDAF early/late split + ResFilter
+  R13 audit block + 13 trace fields) is NOT carried to main; documented
+  here for future re-application.
+- v3.8.1 `baseline_v381_seeded` remains canonical.
+
+## What this does NOT close
+
+R13 closes only **the two simplified candidates β and γ**. It does NOT
+close the full WebRTC AEC3 ResidualEchoEstimator architecture. Three
+structural elements R13 did NOT plumb (and which would behave
+differently than β/γ):
+
+1. **Render-buffer partition tap**: AEC3's reverb input is a
+   *render-buffer slice at a tail offset*, NOT the kernel's late
+   partitions and NOT raw `far_psd`. This decouples reverb input from
+   kernel convergence quality — addresses the β reverse-correlation.
+2. **AecState-supplied reverb frequency response**: AEC3 shapes the
+   render-buffer tail by a per-bin reverb response from AecState.
+3. **Per-AecState gating** (saturated echo, transition window, etc.)
+   that mediates between linear path and nonlinear path.
+
+A future round (R13b or R14) could plumb (1) + (2) + (3). β can be
+re-tested in that variant where input is render-buffer-tap rather than
+kernel-derived, which would not have the convergence-quality
+correlation.
+
+## Cumulative across Round 1–13
+
+| Round | Outcome | Notes |
+|---|---|---|
+| 1 | F1-F4 all null | trigger style invalidated |
+| 2 | Phase 3 / state-routing all null | cold-start / EPC unconditional fail |
+| 3 | D2 catastrophic / D3 sub-acceptance | EPC-gated bypass not viable |
+| 4 | R1 v1+v2 null | per-bin cap erased downstream |
+| 5 | A34 v2 closest (+0.023 deg, FS −0.04) | Pareto curve mapped |
+| 6 | refactor-only shippable, lift disproven | RES split clean |
+| 7 | EPV damp NULL; mix Pareto-bound | filter trajectory hypothesis raised |
+| R8 prep | R7 causal direction falsified | linear AEC fine on worst |
+| R9 | STOP-1: state cannot sort worst from best | both dominated by RENDER_FALLBACK |
+| R10 | STOP at P0: candidate is same R5/R6 axis | uniform tightening |
+| R11 | P0 GO (reverb culprit) → P1 STOP | no per-frame discriminator at residual stage |
+| R12 | STOP at P0: 5 candidates exhausted | residual-stage signal pool exhausted |
+| **R13** | **STOP at P0: β reverse-correlated, γ too soft** | **kernel-derived early/late points wrong direction; full WebRTC reverb plumbing (render-tap + AecState reverb response) not yet plumbed** |
+
+## Recommendation
+
+Three rounds in a row (R11/R12/R13) document the same pattern at
+escalating depth: at the residual stage, the cohort discriminator the
+problem demands is structurally absent OR (R13) anti-correlated.
+Three options remain:
+
+1. **Plumb full WebRTC AEC3 ResidualEchoEstimator** (R13b/R14): adds
+   render-buffer partition tap and AecState reverb frequency response.
+   Substantial scope. Decouples reverb input from kernel-convergence
+   quality, addressing β's reverse-correlation. Not guaranteed to
+   escape the same Pareto wall — the discriminator for worst-DT_mv may
+   still come down to upstream DTD weakness — but it is the next
+   architectural step the data justifies.
+2. **Accept current Pareto and ship v3.8.1 as-is** for non-NN tracks.
+3. **Commit to NN postfilter** as the ship route (existing plan).
+
+NN remains the only known route that does not require either upstream
+DTD-on-movement rework or the full AEC3 plumbing.
