@@ -9,22 +9,46 @@
 #define FFT_WRAPPER_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Complex number structure
+/* ---------------------------------------------------------------------------
+ * Static memory support (Novatek embedded — no heap).
+ *
+ * Each module exposes both a heap-based API (`_create / _destroy`) and a
+ * static API (`_get_mem_size / _init / _destroy`). The static API takes a
+ * caller-allocated buffer and places all internal state inline using
+ * pointer arithmetic with 16-byte alignment.
+ *
+ * Pattern (apply to every module):
+ *
+ *     size_t   bytes = MODULE_get_mem_size(config);
+ *     void*    buf   = ... obtained from caller's static pool ...
+ *     Module*  m     = MODULE_init(buf, bytes, config);
+ *     ...
+ *     MODULE_destroy(m);   // no-op for static path; safe for both paths
+ *
+ * `MODULE_get_mem_size` and `MODULE_init` must walk fields in identical
+ * order to keep alignment + bytes consistent.
+ * --------------------------------------------------------------------------- */
+#ifndef ALIGN16
+#define ALIGN16(x) (((size_t)(x) + 15u) & ~(size_t)15u)
+#endif
+
+/* Complex number structure */
 typedef struct {
-    float r;  // Real part
-    float i;  // Imaginary part
+    float r;  /* Real part */
+    float i;  /* Imaginary part */
 } Complex;
 
-// Opaque FFT handle
+/* Opaque FFT handle */
 typedef struct FftHandle FftHandle;
 
 /**
- * Create FFT handle for given size
+ * Create FFT handle for given size (heap path).
  *
  * @param fft_size FFT size (must be power of 2)
  * @return FFT handle, or NULL on error
@@ -32,7 +56,19 @@ typedef struct FftHandle FftHandle;
 FftHandle* fft_create(int fft_size);
 
 /**
- * Destroy FFT handle
+ * Static-memory companions to fft_create.
+ *
+ *   bytes = fft_get_mem_size(fft_size);
+ *   h     = fft_init(buffer, bytes, fft_size);
+ *
+ * The buffer must be at least `fft_get_mem_size(fft_size)` bytes and
+ * 16-byte aligned. Returns NULL if `mem_size` is too small.
+ */
+size_t     fft_get_mem_size(int fft_size);
+FftHandle* fft_init(void* mem, size_t mem_size, int fft_size);
+
+/**
+ * Destroy FFT handle. No-op when handle was created via fft_init().
  */
 void fft_destroy(FftHandle* handle);
 

@@ -23,9 +23,26 @@ struct FftHandle {
     double* tw_im;
     double* in_re;          /* [fft_size] input scratch */
     double* in_im;          /* [fft_size] */
+    int     is_static;      /* 1 if placed via fft_init (no free in destroy) */
 };
 
 static int ilog2(int n) { int k = 0; while ((1 << k) < n) k++; return k; }
+
+/* Fill twiddles + bit-rev table after struct fields are valid. */
+static void fft_compute_tables(FftHandle* h) {
+    for (int i = 0; i < h->fft_size; ++i) {
+        int x = i, y = 0;
+        for (int j = 0; j < h->log2n; ++j) { y = (y << 1) | (x & 1); x >>= 1; }
+        h->bit_rev[i] = y;
+    }
+    for (int k = 0; k < h->fft_size / 2; ++k) {
+        double ang = -2.0 * M_PI_FFT * (double)k / (double)h->fft_size;
+        h->tw_re[k] = cos(ang);
+        h->tw_im[k] = sin(ang);
+    }
+    memset(h->in_re, 0, h->fft_size * sizeof(double));
+    memset(h->in_im, 0, h->fft_size * sizeof(double));
+}
 
 FftHandle* fft_create(int fft_size) {
     if (fft_size <= 0 || (fft_size & (fft_size - 1)) != 0) return NULL;
@@ -34,27 +51,56 @@ FftHandle* fft_create(int fft_size) {
     h->fft_size = fft_size;
     h->n_freqs  = fft_size / 2 + 1;
     h->log2n    = ilog2(fft_size);
+    h->is_static = 0;
 
     h->bit_rev = (int*)malloc(fft_size * sizeof(int));
-    for (int i = 0; i < fft_size; ++i) {
-        int x = i, y = 0;
-        for (int j = 0; j < h->log2n; ++j) { y = (y << 1) | (x & 1); x >>= 1; }
-        h->bit_rev[i] = y;
-    }
-    h->tw_re = (double*)malloc((fft_size / 2) * sizeof(double));
-    h->tw_im = (double*)malloc((fft_size / 2) * sizeof(double));
-    for (int k = 0; k < fft_size / 2; ++k) {
-        double ang = -2.0 * M_PI_FFT * (double)k / (double)fft_size;
-        h->tw_re[k] = cos(ang);
-        h->tw_im[k] = sin(ang);
-    }
-    h->in_re = (double*)calloc(fft_size, sizeof(double));
-    h->in_im = (double*)calloc(fft_size, sizeof(double));
+    h->tw_re   = (double*)malloc((fft_size / 2) * sizeof(double));
+    h->tw_im   = (double*)malloc((fft_size / 2) * sizeof(double));
+    h->in_re   = (double*)calloc(fft_size, sizeof(double));
+    h->in_im   = (double*)calloc(fft_size, sizeof(double));
+    fft_compute_tables(h);
+    return h;
+}
+
+size_t fft_get_mem_size(int fft_size) {
+    if (fft_size <= 0 || (fft_size & (fft_size - 1)) != 0) return 0;
+    size_t total = 0;
+    total += ALIGN16(sizeof(FftHandle));
+    total += ALIGN16(fft_size * sizeof(int));        /* bit_rev */
+    total += ALIGN16((fft_size / 2) * sizeof(double));  /* tw_re */
+    total += ALIGN16((fft_size / 2) * sizeof(double));  /* tw_im */
+    total += ALIGN16(fft_size * sizeof(double));     /* in_re */
+    total += ALIGN16(fft_size * sizeof(double));     /* in_im */
+    return total;
+}
+
+FftHandle* fft_init(void* mem, size_t mem_size, int fft_size) {
+    if (!mem || fft_size <= 0 || (fft_size & (fft_size - 1)) != 0) return NULL;
+    if (mem_size < fft_get_mem_size(fft_size)) return NULL;
+
+    uint8_t* ptr = (uint8_t*)mem;
+    FftHandle* h = (FftHandle*)ptr;
+    ptr += ALIGN16(sizeof(FftHandle));
+    memset(h, 0, sizeof(FftHandle));
+
+    h->fft_size  = fft_size;
+    h->n_freqs   = fft_size / 2 + 1;
+    h->log2n     = ilog2(fft_size);
+    h->is_static = 1;
+
+    h->bit_rev = (int*)ptr;    ptr += ALIGN16(fft_size * sizeof(int));
+    h->tw_re   = (double*)ptr; ptr += ALIGN16((fft_size / 2) * sizeof(double));
+    h->tw_im   = (double*)ptr; ptr += ALIGN16((fft_size / 2) * sizeof(double));
+    h->in_re   = (double*)ptr; ptr += ALIGN16(fft_size * sizeof(double));
+    h->in_im   = (double*)ptr; /* last field — no further increment needed */
+
+    fft_compute_tables(h);
     return h;
 }
 
 void fft_destroy(FftHandle* h) {
     if (!h) return;
+    if (h->is_static) return;  /* static path: caller owns the buffer */
     free(h->bit_rev); free(h->tw_re); free(h->tw_im);
     free(h->in_re); free(h->in_im);
     free(h);
