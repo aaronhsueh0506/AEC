@@ -1490,3 +1490,189 @@ as input (or anything derived from it) lands on the same Pareto
 curve. The remaining structural lever would be a **better
 `residual_echo_psd` estimate itself** — i.e., shadow NLMS / kernel
 changes, both excluded from R10's scope.
+
+
+# Round 11 — Residual estimate decomposition + Phase 1 limiter audit
+
+Branch: `algo/round11-residual-nearend-audit` (discarded after closure)
+Date: 2026-05-04
+Outcome: **Phase 0 GO (single-stage culprit identified) → Phase 1 STOP
+(no per-frame discriminator at residual stage)**
+
+## Why R11 was opened (Codex direction)
+
+R10 cleared the suppressor-formula path: WebRTC-style
+SuppressionGainCandidate uniformly tightened across all cohorts and
+inherited the residual-model bias. Codex direction: stop touching
+gain, audit the **residual_echo_psd estimate itself**. Hypothesis:
+worst-DT_mv has its `residual_echo_psd` over-estimated, which collapses
+`nearend_proxy = error_psd − residual_echo_psd` and forces the
+suppressor (any formula) to over-compress.
+
+## Phase 0 — audit-passive decomposition trace
+
+Plumbing added to `ResFilter._stage_residual_model`: per-frame
+voice-band (300–3000 Hz) `mean(residual_echo_psd)` captured at all
+seven decomposition points (attribute → echo_cap → error_cap → dt_cap
+→ render_ceil → reverb → boost), plus `r11_pre_reverb_voice`,
+`r11_reverb_add_voice`, `r11_nearend_proxy_voice`,
+`r11_res_to_error_voice`, `r11_dt_for_fs`, `r11_far_activity`. All
+audit-passive. parity_round6 5-fixture HASH MATCH × 5.
+
+### Per-cohort stage snapshots (voice-band mean, 800-case trace)
+
+| cohort | attr | render_ceil (= pre_reverb) | reverb | final | err_psd |
+|---|---:|---:|---:|---:|---:|
+| FS_static | 1.99 | 0.88 | 8.37 | 9.44 | 1.80 |
+| FS_movement | 2.93 | 1.22 | 11.72 | 13.37 | 1.90 |
+| NE | 0.00 | 0.00 | 0.01 | 0.01 | 0.66 |
+| DT_static | 1.11 | 0.46 | 6.22 | 6.92 | 1.54 |
+| DT_movement | 1.30 | 0.54 | 7.22 | 7.91 | 2.16 |
+| **worst-DT_mv** | 1.39 | **0.48** | **11.12** | **12.23** | **1.47** |
+| best-DT_mv | 2.44 | 1.24 | 3.66 | 3.99 | 5.76 |
+
+### Cohen's-d separator (worst-20 vs best-20 DT_mv, rank-locked baseline_deg)
+
+| stage delta | worst | best | gate |
+|---|---:|---:|---|
+| d_echo_cap | -0.006 | -0.001 | no |
+| d_error_cap | -0.903 | -1.182 | no |
+| d_dt_cap | ~0 | ~0 | no |
+| d_render_ceil | -0.002 | -0.021 | no |
+| **d_reverb** | **+10.642** | **+2.419** | **PASS effect=0.85, |Δ|=8.22** |
+| d_boost | +1.106 | +0.336 | no |
+
+**Phase 0 verdict: GO** — single-stage culprit `d_reverb` clearly
+identified. Pre-reverb residual is similar (0.48 worst vs 1.26 best),
+but the reverb stage adds +10.64 voice units on worst vs +2.42 on best.
+This is the first round in R5–R10 with a single-stage signal that
+clears the strict Cohen's-d gate.
+
+## Phase 1 — limiter design audit (overdrive definition)
+
+Three overdrive definitions evaluated, audit-only:
+
+1. per-bin `reverb_add / max(pre_reverb_res, 0.05·error_psd)`, voice mean
+2. per-bin `reverb_add / max(pre_reverb_res, noise_psd)`, voice mean
+3. cohort-level ratio of voice-band means
+
+Per-frame def#1/def#2 are corrupted by silence-frame divisions
+(pre_reverb ≈ 0 → eps → astronomical). Cohort-level ratio (def#3)
+is the meaningful aggregate:
+
+| cohort | reverb_add_voice | pre_reverb_voice | ratio |
+|---|---:|---:|---:|
+| best-DT_mv | 2.42 | 1.24 | 1.96 |
+| FS_static | 7.49 | 0.88 | 8.48 |
+| FS_movement | 10.50 | 1.22 | 8.60 |
+| DT_static | 5.76 | 0.46 | 12.47 |
+| DT_movement (avg) | 6.69 | 0.54 | 12.42 |
+| worst-DT_mv | 10.64 | 0.48 | **22.17** |
+
+Per-case ratio distribution (p10 / p50 / p90):
+
+| cohort | p10 | p50 | p90 |
+|---|---:|---:|---:|
+| best-DT_mv | 0.4 | 5.9 | 38.7 |
+| FS_static | 2.1 | 27.5 | 298.8 |
+| FS_movement | 1.5 | 26.4 | 250.4 |
+| DT_static | 2.5 | 22.3 | 108.1 |
+| DT_movement | 1.7 | 18.4 | 95.3 |
+| worst-DT_mv | 9.4 | 26.8 | 143.7 |
+
+FS p50 (~27) overlaps worst p50 (~27) — **per-case overdrive cannot
+cleanly separate worst-DT_mv from FS**.
+
+## Co-discriminator audit (DT-side signals available at residual stage)
+
+| cohort | coh2_voice | dt_for_fs | far_act | err_psd | np/err |
+|---|---:|---:|---:|---:|---:|
+| FS_static | 0.166 | 0.135 | 0.836 | 1.804 | 0.145 |
+| FS_movement | 0.158 | 0.114 | 0.838 | 1.903 | 0.161 |
+| DT_static | 0.144 | 0.129 | 0.796 | 1.535 | 0.236 |
+| DT_movement | 0.147 | 0.151 | 0.799 | 2.155 | 0.256 |
+| worst-DT_mv | **0.144** | **0.110** | 0.834 | **1.474** | 0.191 |
+| best-DT_mv | 0.146 | 0.264 | 0.773 | 5.756 | 0.381 |
+
+- coh2 essentially identical (0.144–0.166) across all far-active cohorts.
+- dt_for_fs: worst (0.110) is indistinguishable from FS (0.114–0.135).
+- error_psd: worst (1.47) is between DT_static (1.54) and FS (1.80) — close.
+
+## Ablation iterations (limiter prototypes, all rejected)
+
+Three soft-limiter prototypes were trial-implemented and trace-evaluated
+without bench, then reverted. None passed mechanism gate "worst -50%,
+FS ±20%".
+
+| prototype | worst Δreverb | FS_static Δ | FS_mv Δ | best Δ | result |
+|---|---:|---:|---:|---:|---|
+| (a) per-bin: res_pre/err<0.5 AND add/err>1, cap=1.5·max(pre, 0.2err) | -13.7% | -13.9% | -11.6% | -18.5% | hits best more than worst |
+| (b) per-bin: overdrive>3 with err-floor 0.05·err | -89.6% | -85.5% | -87.3% | -74.7% | nukes FS |
+| (c) per-bin: overdrive>3 with noise_psd floor | -89.7% | -85.6% | -87.3% | -75.8% | same shape as (b) |
+| (d) per-bin: coh2<0.4 AND overdrive>3 (noise floor) | not run | not run | not run | not run | aborted — coh2 doesn't discriminate |
+
+## Mechanism reading
+
+The reverb stage IS the residual-side culprit (P0 PASS). But worst-DT_mv's
+signature in every signal available at the reverb stage is
+indistinguishable from FS:
+
+- same low coh2
+- same low dt_for_fs (DTD doesn't see movement-DT)
+- similar error_psd (1.47 worst vs 1.80 FS_static)
+- similar far_activity (0.83 worst vs 0.84 FS)
+- similar reverb_add magnitude (10.64 worst vs 10.50 FS_movement)
+
+The only thing that *differs* is the genuine nearend content, which
+the algorithm cannot detect at this stage — the upstream **DTD failure
+on movement-DT** is the binding root cause. Any per-frame limiter that
+discriminates by overdrive will hit FS (which legitimately needs the
+reverb tail to suppress echo after the linear filter caps).
+
+## Disposition
+
+- Branch `algo/round11-residual-nearend-audit` discarded (no merge to
+  main). R11 P0 plumbing (`_r11_diag` decomposition trace + audit-only
+  3-overdrive definitions) is NOT on main; documented here for future
+  re-application if upstream DTD-on-movement is fixed and the residual
+  stage becomes addressable.
+- No Phase 1 / 2 algorithm changes shipped.
+- v3.8.1 `baseline_v381_seeded` remains canonical.
+
+## Cumulative across Round 1-11
+
+| Round | Outcome | Notes |
+|---|---|---|
+| 1 | F1-F4 all null | trigger style invalidated |
+| 2 | Phase 3 / state-routing all null | cold-start / EPC unconditional fail |
+| 3 | D2 catastrophic / D3 sub-acceptance | EPC-gated bypass not viable |
+| 4 | R1 v1+v2 null | per-bin cap erased downstream |
+| 5 | A34 v2 closest (+0.023 deg, FS −0.04) | Pareto curve mapped |
+| 6 | refactor-only shippable, lift disproven | RES split clean |
+| 7 | EPV damp NULL; mix Pareto-bound | filter trajectory hypothesis raised |
+| R8 prep | R7 causal direction falsified | linear AEC fine on worst |
+| R9 | STOP-1: state cannot sort worst from best | both dominated by RENDER_FALLBACK |
+| R10 | STOP at P0: candidate is same R5/R6 axis | uniform tightening |
+| **R11** | **P0 GO (reverb culprit) → P1 STOP** | **no per-frame discriminator; upstream DTD-on-movement is binding root** |
+
+## Recommendation (refined after R11)
+
+Across 11 rounds, the failure pattern is now mechanistically clear:
+
+- **Suppressor side** (R5/R6/R10): every formula consuming
+  `residual_echo_psd` lands on the same Pareto curve.
+- **Filter side** (R7/R8): kernel ERLE on worst-DT_mv is *better* than
+  best — kernel is not the binding constraint.
+- **State / aggregator side** (R9): FilterQualityState cannot sort
+  worst from best — both dominated by RENDER_FALLBACK.
+- **Residual estimate side** (R11): single-stage culprit (reverb)
+  identified, but no per-frame DT discriminator exists at that stage.
+
+The remaining structural lever is **upstream DTD on movement** —
+either a better DT detector that fires on worst-DT_mv (currently
+dt_for_fs ≈ 0.110 there), or a separate DT-on-movement signal that
+the residual stage can consume. Both require new instrumentation
+outside R5–R11 scope.
+
+NN postfilter (separate plan) remains the only realistic ship route
+without that upstream rework.
