@@ -38,7 +38,7 @@ $(OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c
 lib: dirs $(OBJS)
 	ar rcs $(LIB_TARGET) $(OBJS)
 
-debug: CFLAGS += -g -DDEBUG
+debug: CFLAGS += -g -DAEC_DEBUG
 debug: dirs $(TARGET)
 
 clean:

@@ -13,6 +13,7 @@
  *   - _stats DT accumulators   (debug-only)
  */
 #include "res_filter.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,8 +25,8 @@
 
 static int next_pow2_at_least(int x) { int n = 1; while (n < x) n <<= 1; return n; }
 
-void res_filter_init(ResFilter* r, const ResFilterConfig* cfg) {
-    memset(r, 0, sizeof(*r));
+/* Apply scalar config (not the buffer pointers). Used by both init paths. */
+static void res_filter_apply_config(ResFilter* r, const ResFilterConfig* cfg) {
     r->block_size  = cfg->block_size;
     r->sample_rate = cfg->sample_rate;
     r->frame_size  = cfg->frame_size > 0 ? cfg->frame_size : cfg->block_size;
@@ -43,11 +44,25 @@ void res_filter_init(ResFilter* r, const ResFilterConfig* cfg) {
     r->startup_dt_noise_floor_scale    = cfg->startup_dt_noise_floor_scale;
     r->render_min_ne_factor            = cfg->render_min_ne_factor;
     r->render_dt_gain_ceil             = cfg->render_dt_gain_ceil;
+    r->enable_reverb        = cfg->enable_reverb;
+    r->enable_cng           = cfg->enable_cng;
+    r->enable_spectral_floor = cfg->enable_spectral_floor;
+    r->spectral_floor_ratio = (float)pow(10.0, cfg->spectral_floor_db / 20.0);
+    r->reverb_decay         = cfg->reverb_decay;
+    r->reverb_gain          = cfg->reverb_gain;
+    r->alpha_coh      = 0.65f;
+    r->alpha_noise    = 0.98f;
+    r->max_drop_ratio = (float)pow(10.0, cfg->max_drop_db_per_frame / 20.0);
+    r->max_rise_ratio = (float)pow(10.0, cfg->max_rise_db_per_frame / 20.0);
+    r->alpha_envelope = 0.95f;
+}
 
+/* Compute per-bin masks + bin indices. Run after buffers are placed. */
+static void res_filter_compute_tables(ResFilter* r, const ResFilterConfig* cfg) {
     int K = r->n_freqs;
-    r->stat_dt_mask = (float*)calloc((size_t)K, sizeof(float));
-    r->enr_blend    = (float*)calloc((size_t)K, sizeof(float));
     double freq_res = (double)cfg->sample_rate / (double)cfg->block_size;
+    memset(r->stat_dt_mask, 0, (size_t)K * sizeof(float));
+    memset(r->enr_blend,    0, (size_t)K * sizeof(float));
     for (int k = 0; k < K; ++k) {
         double f = k * freq_res;
         if (f >= 300.0 && f <= 3000.0) r->stat_dt_mask[k] = 0.8f;
@@ -66,63 +81,158 @@ void res_filter_init(ResFilter* r, const ResFilterConfig* cfg) {
     r->harm_hf_start = (int)(1000.0 / freq_res);
     r->harm_hf_end   = (int)(4000.0 / freq_res); if (r->harm_hf_end > K - 1) r->harm_hf_end = K - 1;
 
-    r->enable_reverb        = cfg->enable_reverb;
-    r->enable_cng           = cfg->enable_cng;
-    r->enable_spectral_floor = cfg->enable_spectral_floor;
-    r->spectral_floor_ratio = (float)pow(10.0, cfg->spectral_floor_db / 20.0);
-    r->reverb_decay         = cfg->reverb_decay;
-    r->reverb_gain          = cfg->reverb_gain;
-
-    r->alpha_coh      = 0.65f;
-    r->alpha_noise    = 0.98f;
-    r->max_drop_ratio = (float)pow(10.0, cfg->max_drop_db_per_frame / 20.0);
-    r->max_rise_ratio = (float)pow(10.0, cfg->max_rise_db_per_frame / 20.0);
-    r->alpha_envelope = 0.95f;
-
     /* sqrt-Hann window over frame_size: np.hanning uses (N-1) denom */
-    r->window = (float*)malloc((size_t)r->frame_size * sizeof(float));
     for (int i = 0; i < r->frame_size; ++i) {
         double h = 0.5 * (1.0 - cos(2.0 * M_PI_AEC * (double)i / (double)(r->frame_size - 1)));
         r->window[i] = (float)sqrt(h);
     }
-
-    r->gain_smooth   = (float*)malloc((size_t)K * sizeof(float));
     for (int k = 0; k < K; ++k) r->gain_smooth[k] = r->g_min;
-    r->echo_psd      = (float*)calloc((size_t)K, sizeof(float));
-    r->error_psd     = (float*)calloc((size_t)K, sizeof(float));
-    r->S_fe          = (Complex*)calloc((size_t)K, sizeof(Complex));
-    r->S_ff          = (float*)calloc((size_t)K, sizeof(float));
-    r->S_ee          = (float*)calloc((size_t)K, sizeof(float));
-    r->near_psd      = (float*)calloc((size_t)K, sizeof(float));
-    r->near_psd_buf  = (float*)calloc((size_t)4 * K, sizeof(float));
-    r->near_psd_idx  = 0;
-    r->reverb_psd    = (float*)calloc((size_t)K, sizeof(float));
-    r->noise_psd     = (float*)calloc((size_t)K, sizeof(float));
+    memset(r->echo_psd, 0, (size_t)K * sizeof(float));
+    memset(r->error_psd, 0, (size_t)K * sizeof(float));
+    memset(r->S_fe, 0, (size_t)K * sizeof(Complex));
+    memset(r->S_ff, 0, (size_t)K * sizeof(float));
+    memset(r->S_ee, 0, (size_t)K * sizeof(float));
+    memset(r->near_psd, 0, (size_t)K * sizeof(float));
+    memset(r->near_psd_buf, 0, (size_t)4 * K * sizeof(float));
+    r->near_psd_idx = 0;
+    memset(r->reverb_psd, 0, (size_t)K * sizeof(float));
+    memset(r->noise_psd, 0, (size_t)K * sizeof(float));
     r->noise_initialized = 0;
-    r->coh2_smooth   = (float*)calloc((size_t)K, sizeof(float));
-    r->error_envelope = (float*)malloc((size_t)K * sizeof(float));
+    memset(r->coh2_smooth, 0, (size_t)K * sizeof(float));
     for (int k = 0; k < K; ++k) r->error_envelope[k] = 1.0f;
-    r->input_buf     = (float*)calloc((size_t)r->frame_size, sizeof(float));
-    r->ola_buf       = (float*)calloc((size_t)r->frame_size, sizeof(float));
-    r->smooth_cn_gain = (float*)calloc((size_t)K, sizeof(float));
+    memset(r->input_buf, 0, (size_t)r->frame_size * sizeof(float));
+    memset(r->ola_buf,   0, (size_t)r->frame_size * sizeof(float));
+    memset(r->smooth_cn_gain, 0, (size_t)K * sizeof(float));
     r->far_activity = 0.0;
     r->nonlinear_frames = 0;
     r->last_effective_dt = 0.0;
+    int fft_size = next_pow2_at_least(r->block_size);
+    memset(r->time_scratch, 0, (size_t)fft_size * sizeof(float));
+    memset(r->spec_synth, 0, (size_t)K * sizeof(Complex));
+    memset(r->enhanced_spec, 0, (size_t)K * sizeof(Complex));
+    r->cng_rng_state = 0xAEC0DEC0u;
+}
 
+void res_filter_init(ResFilter* r, const ResFilterConfig* cfg) {
+    memset(r, 0, sizeof(*r));
+    res_filter_apply_config(r, cfg);
+    int K = r->n_freqs;
+    int fft_size = next_pow2_at_least(r->block_size);
+
+    r->stat_dt_mask = (float*)calloc((size_t)K, sizeof(float));
+    r->enr_blend    = (float*)calloc((size_t)K, sizeof(float));
+    r->window       = (float*)malloc((size_t)r->frame_size * sizeof(float));
+    r->gain_smooth  = (float*)malloc((size_t)K * sizeof(float));
+    r->echo_psd     = (float*)calloc((size_t)K, sizeof(float));
+    r->error_psd    = (float*)calloc((size_t)K, sizeof(float));
+    r->S_fe         = (Complex*)calloc((size_t)K, sizeof(Complex));
+    r->S_ff         = (float*)calloc((size_t)K, sizeof(float));
+    r->S_ee         = (float*)calloc((size_t)K, sizeof(float));
+    r->near_psd     = (float*)calloc((size_t)K, sizeof(float));
+    r->near_psd_buf = (float*)calloc((size_t)4 * K, sizeof(float));
+    r->reverb_psd   = (float*)calloc((size_t)K, sizeof(float));
+    r->noise_psd    = (float*)calloc((size_t)K, sizeof(float));
+    r->coh2_smooth  = (float*)calloc((size_t)K, sizeof(float));
+    r->error_envelope = (float*)malloc((size_t)K * sizeof(float));
+    r->input_buf    = (float*)calloc((size_t)r->frame_size, sizeof(float));
+    r->ola_buf      = (float*)calloc((size_t)r->frame_size, sizeof(float));
+    r->smooth_cn_gain = (float*)calloc((size_t)K, sizeof(float));
     filter_erle_init(&r->filter_erle, K);
     fullband_erle_init(&r->fb_erle);
     residual_echo_init(&r->residual_est, K);
-
-    int fft_size = next_pow2_at_least(r->block_size);
     r->fft = fft_create(fft_size);
     r->time_scratch  = (float*)calloc((size_t)fft_size, sizeof(float));
     r->spec_synth    = (Complex*)calloc((size_t)K, sizeof(Complex));
     r->enhanced_spec = (Complex*)calloc((size_t)K, sizeof(Complex));
 
-    r->cng_rng_state = 0xAEC0DEC0u;
+    res_filter_compute_tables(r, cfg);
+    r->is_static = 0;
+}
+
+size_t res_filter_get_mem_size(const ResFilterConfig* cfg) {
+    if (!cfg) return 0;
+    int K   = cfg->n_freqs;
+    int fr  = cfg->frame_size > 0 ? cfg->frame_size : cfg->block_size;
+    int fft = next_pow2_at_least(cfg->block_size);
+    if (K <= 0 || fr <= 0 || fft <= 0) return 0;
+    size_t total = 0;
+    total += ALIGN16((size_t)K * sizeof(float));      /* stat_dt_mask */
+    total += ALIGN16((size_t)K * sizeof(float));      /* enr_blend */
+    total += ALIGN16((size_t)fr * sizeof(float));     /* window */
+    total += ALIGN16((size_t)K * sizeof(float));      /* gain_smooth */
+    total += ALIGN16((size_t)K * sizeof(float));      /* echo_psd */
+    total += ALIGN16((size_t)K * sizeof(float));      /* error_psd */
+    total += ALIGN16((size_t)K * sizeof(Complex));    /* S_fe */
+    total += ALIGN16((size_t)K * sizeof(float));      /* S_ff */
+    total += ALIGN16((size_t)K * sizeof(float));      /* S_ee */
+    total += ALIGN16((size_t)K * sizeof(float));      /* near_psd */
+    total += ALIGN16((size_t)4 * K * sizeof(float));  /* near_psd_buf */
+    total += ALIGN16((size_t)K * sizeof(float));      /* reverb_psd */
+    total += ALIGN16((size_t)K * sizeof(float));      /* noise_psd */
+    total += ALIGN16((size_t)K * sizeof(float));      /* coh2_smooth */
+    total += ALIGN16((size_t)K * sizeof(float));      /* error_envelope */
+    total += ALIGN16((size_t)fr * sizeof(float));     /* input_buf */
+    total += ALIGN16((size_t)fr * sizeof(float));     /* ola_buf */
+    total += ALIGN16((size_t)K * sizeof(float));      /* smooth_cn_gain */
+    total += filter_erle_get_mem_size(K);             /* nested erle */
+    total += fft_get_mem_size(fft);                   /* nested fft */
+    total += ALIGN16((size_t)fft * sizeof(float));    /* time_scratch */
+    total += ALIGN16((size_t)K * sizeof(Complex));    /* spec_synth */
+    total += ALIGN16((size_t)K * sizeof(Complex));    /* enhanced_spec */
+    return total;
+}
+
+void res_filter_init_static(ResFilter* r, void* mem, size_t mem_size,
+                             const ResFilterConfig* cfg) {
+    if (!r || !mem || !cfg) return;
+    if (mem_size < res_filter_get_mem_size(cfg)) return;
+
+    memset(r, 0, sizeof(*r));
+    res_filter_apply_config(r, cfg);
+    int K   = r->n_freqs;
+    int fr  = r->frame_size;
+    int fft = next_pow2_at_least(r->block_size);
+
+    uint8_t* ptr = (uint8_t*)mem;
+    r->stat_dt_mask = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->enr_blend    = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->window       = (float*)ptr; ptr += ALIGN16((size_t)fr * sizeof(float));
+    r->gain_smooth  = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->echo_psd     = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->error_psd    = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->S_fe         = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+    r->S_ff         = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->S_ee         = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->near_psd     = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->near_psd_buf = (float*)ptr; ptr += ALIGN16((size_t)4 * K * sizeof(float));
+    r->reverb_psd   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->noise_psd    = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->coh2_smooth  = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->error_envelope = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->input_buf    = (float*)ptr; ptr += ALIGN16((size_t)fr * sizeof(float));
+    r->ola_buf      = (float*)ptr; ptr += ALIGN16((size_t)fr * sizeof(float));
+    r->smooth_cn_gain = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    size_t erle_sz = filter_erle_get_mem_size(K);
+    filter_erle_init_static(&r->filter_erle, ptr, erle_sz, K); ptr += erle_sz;
+    fullband_erle_init(&r->fb_erle);
+    residual_echo_init(&r->residual_est, K);
+    size_t fft_sz = fft_get_mem_size(fft);
+    r->fft = fft_init(ptr, fft_sz, fft); ptr += fft_sz;
+    r->time_scratch  = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
+    r->spec_synth    = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+    r->enhanced_spec = (Complex*)ptr; /* last */
+
+    res_filter_compute_tables(r, cfg);
+    r->is_static = 1;
 }
 
 void res_filter_free(ResFilter* r) {
+    if (!r) return;
+    if (r->is_static) {
+        filter_erle_free(&r->filter_erle);  /* no-op when nested static */
+        if (r->fft) fft_destroy(r->fft);    /* no-op when nested static */
+        return;
+    }
     free(r->stat_dt_mask); free(r->enr_blend);
     free(r->window);
     free(r->gain_smooth); free(r->echo_psd); free(r->error_psd);

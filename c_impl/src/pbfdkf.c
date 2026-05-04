@@ -12,6 +12,7 @@
  *    mu_mean to fp32 before forming KX = mu*KX_optimal + (1-mu)*KX_scaled.
  */
 #include "pbfdkf.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -22,17 +23,68 @@
 
 static int next_pow2(int x) { int n = 1; while (n < x) n <<= 1; return n; }
 
+/* Compute derived sizes. Used by both heap + static paths and by
+ * pbfdaf_get_mem_size to keep sizing consistent. */
+static void pbfdaf_compute_sizes(int hop_size, int* out_hop, int* out_blk,
+                                  int* out_fft, int* out_K) {
+    int hop = (hop_size > 0) ? hop_size : 0;
+    int blk = 2 * hop;
+    int fft = next_pow2(blk);
+    if (out_hop) *out_hop = hop;
+    if (out_blk) *out_blk = blk;
+    if (out_fft) *out_fft = fft;
+    if (out_K)   *out_K   = fft / 2 + 1;
+}
+
+/* Fill td_window + sqrt_hann tables given a placed PBFDAF. */
+static void pbfdaf_fill_windows(PBFDAF* p) {
+    int fade_len = p->hop_size / 4;
+    memset(p->td_window, 0, (size_t)p->fft_size * sizeof(float));
+    for (int i = 0; i < p->hop_size - fade_len; ++i) p->td_window[i] = 1.0f;
+    for (int i = 0; i < fade_len; ++i) {
+        double v = 0.5 * (1.0 - cos(M_PI_AEC * (double)(fade_len - 1 - i) / (double)fade_len));
+        p->td_window[p->hop_size - fade_len + i] = (float)v;
+    }
+    for (int i = 0; i < p->block_size; ++i) {
+        double h = 0.5 * (1.0 - cos(2.0 * M_PI_AEC * (double)i / (double)(p->block_size - 1)));
+        p->sqrt_hann[i] = (float)sqrt(h);
+    }
+}
+
+/* Set scalars + zero state buffers (post-placement). */
+static void pbfdaf_init_state(PBFDAF* p, int n_partitions, float mu, float delta) {
+    p->n_partitions = n_partitions;
+    p->mu = mu;
+    p->delta = delta;
+    p->alpha_power = 0.9f;
+    p->enable_td_constraint = 1;
+    p->partition_idx = 0;
+    int Wsz = p->n_partitions * p->n_freqs;
+    memset(p->W,     0, (size_t)Wsz * sizeof(Complex));
+    memset(p->X_buf, 0, (size_t)Wsz * sizeof(Complex));
+    memset(p->near_buffer, 0, (size_t)p->block_size * sizeof(float));
+    memset(p->far_buffer,  0, (size_t)p->block_size * sizeof(float));
+    memset(p->power, 0, (size_t)p->n_freqs * sizeof(float));
+    memset(p->near_spec,  0, (size_t)p->n_freqs * sizeof(Complex));
+    memset(p->echo_spec,  0, (size_t)p->n_freqs * sizeof(Complex));
+    memset(p->error_spec, 0, (size_t)p->n_freqs * sizeof(Complex));
+    memset(p->far_spec,   0, (size_t)p->n_freqs * sizeof(Complex));
+    memset(p->error_spec_windowed, 0, (size_t)p->n_freqs * sizeof(Complex));
+    memset(p->time_scratch, 0, (size_t)p->fft_size * sizeof(float));
+    memset(p->spec_scratch, 0, (size_t)p->n_freqs * sizeof(Complex));
+}
+
 /* ===== PBFDAF ============================================================ */
 
 void pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size) {
-    p->hop_size  = (hop_size > 0) ? hop_size : block_size / 2;
-    p->block_size = 2 * p->hop_size;
-    p->fft_size  = next_pow2(p->block_size);
+    int hop = (hop_size > 0) ? hop_size : block_size / 2;
+    pbfdaf_compute_sizes(hop, &p->hop_size, &p->block_size,
+                         &p->fft_size, &p->n_freqs);
     p->n_partitions = n_partitions;
-    p->n_freqs   = p->fft_size / 2 + 1;
     p->mu        = mu;
     p->delta     = delta;
+    p->is_static = 0;
     p->alpha_power = 0.9f;
     p->enable_td_constraint = 1;
 
@@ -78,7 +130,75 @@ void pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
     p->spec_scratch = (Complex*)calloc((size_t)p->n_freqs, sizeof(Complex));
 }
 
+size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size) {
+    (void)block_size;
+    int hop = (hop_size > 0) ? hop_size : 0;
+    int blk, fft, K;
+    pbfdaf_compute_sizes(hop, NULL, &blk, &fft, &K);
+    if (n_partitions <= 0 || K <= 0) return 0;
+    int Wsz = n_partitions * K;
+    size_t total = 0;
+    total += ALIGN16((size_t)fft * sizeof(float));    /* td_window */
+    total += ALIGN16((size_t)blk * sizeof(float));    /* sqrt_hann */
+    total += ALIGN16((size_t)Wsz * sizeof(Complex));  /* W */
+    total += ALIGN16((size_t)Wsz * sizeof(Complex));  /* X_buf */
+    total += ALIGN16((size_t)blk * sizeof(float));    /* near_buffer */
+    total += ALIGN16((size_t)blk * sizeof(float));    /* far_buffer */
+    total += ALIGN16((size_t)K   * sizeof(float));    /* power */
+    total += ALIGN16((size_t)K   * sizeof(Complex));  /* near_spec */
+    total += ALIGN16((size_t)K   * sizeof(Complex));  /* echo_spec */
+    total += ALIGN16((size_t)K   * sizeof(Complex));  /* error_spec */
+    total += ALIGN16((size_t)K   * sizeof(Complex));  /* far_spec */
+    total += ALIGN16((size_t)K   * sizeof(Complex));  /* error_spec_windowed */
+    total += fft_get_mem_size(fft);                   /* nested FFT */
+    total += ALIGN16((size_t)fft * sizeof(float));    /* time_scratch */
+    total += ALIGN16((size_t)K   * sizeof(Complex));  /* spec_scratch */
+    return total;
+}
+
+void pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
+                         int block_size, int n_partitions,
+                         float mu, float delta, int hop_size) {
+    if (!p || !mem) return;
+    if (mem_size < pbfdaf_get_mem_size(block_size, n_partitions, hop_size)) return;
+
+    int hop = (hop_size > 0) ? hop_size : block_size / 2;
+    memset(p, 0, sizeof(*p));
+    pbfdaf_compute_sizes(hop, &p->hop_size, &p->block_size,
+                         &p->fft_size, &p->n_freqs);
+
+    uint8_t* ptr = (uint8_t*)mem;
+    int blk = p->block_size, fft = p->fft_size, K = p->n_freqs;
+    int Wsz = n_partitions * K;
+
+    p->td_window  = (float*)ptr;   ptr += ALIGN16((size_t)fft * sizeof(float));
+    p->sqrt_hann  = (float*)ptr;   ptr += ALIGN16((size_t)blk * sizeof(float));
+    p->W          = (Complex*)ptr; ptr += ALIGN16((size_t)Wsz * sizeof(Complex));
+    p->X_buf      = (Complex*)ptr; ptr += ALIGN16((size_t)Wsz * sizeof(Complex));
+    p->near_buffer = (float*)ptr;  ptr += ALIGN16((size_t)blk * sizeof(float));
+    p->far_buffer  = (float*)ptr;  ptr += ALIGN16((size_t)blk * sizeof(float));
+    p->power      = (float*)ptr;   ptr += ALIGN16((size_t)K * sizeof(float));
+    p->near_spec  = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+    p->echo_spec  = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+    p->error_spec = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+    p->far_spec   = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+    p->error_spec_windowed = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+    size_t fft_sz = fft_get_mem_size(fft);
+    p->fft        = fft_init(ptr, fft_sz, fft); ptr += fft_sz;
+    p->time_scratch = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
+    p->spec_scratch = (Complex*)ptr; /* last */
+
+    pbfdaf_init_state(p, n_partitions, mu, delta);
+    pbfdaf_fill_windows(p);
+    p->is_static = 1;
+}
+
 void pbfdaf_free(PBFDAF* p) {
+    if (!p) return;
+    if (p->is_static) {
+        if (p->fft) fft_destroy(p->fft);  /* no-op when nested static */
+        return;
+    }
     free(p->td_window); free(p->sqrt_hann);
     free(p->W); free(p->X_buf);
     free(p->near_buffer); free(p->far_buffer); free(p->power);
@@ -271,17 +391,10 @@ void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src) {
 
 /* ===== PBFDKF =========================================================== */
 
-void pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
-                    float mu, float delta, int hop_size) {
-    pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size);
+/* Set PBFDKF scalars + per-bin defaults given placed buffers. */
+static void pbfdkf_init_state(PBFDKF* p) {
     int K = p->base.n_freqs;
-    int sz = n_partitions * K;
-    p->P      = (float*)malloc((size_t)sz * sizeof(float));
-    p->Q_high = (float*)malloc((size_t)K  * sizeof(float));
-    p->Q_low  = (float*)malloc((size_t)K  * sizeof(float));
-    p->Q      = (float*)malloc((size_t)K  * sizeof(float));
-    p->R      = (float*)malloc((size_t)K  * sizeof(float));
-    p->error_psd = (float*)malloc((size_t)K * sizeof(float));
+    int sz = p->base.n_partitions * K;
     for (int i = 0; i < sz; ++i) p->P[i] = 0.01f;
     for (int k = 0; k < K; ++k) {
         p->Q_high[k] = 1e-4f;
@@ -297,7 +410,70 @@ void pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
     p->p_floor_beta_frames   = -1;
 }
 
+void pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
+                    float mu, float delta, int hop_size) {
+    pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size);
+    int K = p->base.n_freqs;
+    int sz = n_partitions * K;
+    p->P      = (float*)malloc((size_t)sz * sizeof(float));
+    p->Q_high = (float*)malloc((size_t)K  * sizeof(float));
+    p->Q_low  = (float*)malloc((size_t)K  * sizeof(float));
+    p->Q      = (float*)malloc((size_t)K  * sizeof(float));
+    p->R      = (float*)malloc((size_t)K  * sizeof(float));
+    p->error_psd = (float*)malloc((size_t)K * sizeof(float));
+    pbfdkf_init_state(p);
+    p->is_static = 0;
+}
+
+size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
+    int hop = (hop_size > 0) ? hop_size : block_size / 2;
+    int blk, fft, K;
+    pbfdaf_compute_sizes(hop, NULL, &blk, &fft, &K);
+    if (n_partitions <= 0 || K <= 0) return 0;
+    int sz = n_partitions * K;
+    size_t total = pbfdaf_get_mem_size(block_size, n_partitions, hop_size);
+    total += ALIGN16((size_t)sz * sizeof(float));   /* P */
+    total += ALIGN16((size_t)K  * sizeof(float));   /* Q_high */
+    total += ALIGN16((size_t)K  * sizeof(float));   /* Q_low */
+    total += ALIGN16((size_t)K  * sizeof(float));   /* Q */
+    total += ALIGN16((size_t)K  * sizeof(float));   /* R */
+    total += ALIGN16((size_t)K  * sizeof(float));   /* error_psd */
+    return total;
+}
+
+void pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
+                         int block_size, int n_partitions,
+                         float mu, float delta, int hop_size) {
+    if (!p || !mem) return;
+    if (mem_size < pbfdkf_get_mem_size(block_size, n_partitions, hop_size)) return;
+
+    /* Place PBFDAF base in the front of the buffer */
+    size_t base_sz = pbfdaf_get_mem_size(block_size, n_partitions, hop_size);
+    memset(p, 0, sizeof(*p));
+    pbfdaf_init_static(&p->base, mem, base_sz,
+                       block_size, n_partitions, mu, delta, hop_size);
+
+    uint8_t* ptr = (uint8_t*)mem + base_sz;
+    int K = p->base.n_freqs;
+    int sz = n_partitions * K;
+
+    p->P         = (float*)ptr; ptr += ALIGN16((size_t)sz * sizeof(float));
+    p->Q_high    = (float*)ptr; ptr += ALIGN16((size_t)K  * sizeof(float));
+    p->Q_low     = (float*)ptr; ptr += ALIGN16((size_t)K  * sizeof(float));
+    p->Q         = (float*)ptr; ptr += ALIGN16((size_t)K  * sizeof(float));
+    p->R         = (float*)ptr; ptr += ALIGN16((size_t)K  * sizeof(float));
+    p->error_psd = (float*)ptr; /* last */
+
+    pbfdkf_init_state(p);
+    p->is_static = 1;
+}
+
 void pbfdkf_free(PBFDKF* p) {
+    if (!p) return;
+    if (p->is_static) {
+        pbfdaf_free(&p->base);  /* no-op via base.is_static */
+        return;
+    }
     free(p->P); free(p->Q_high); free(p->Q_low); free(p->Q); free(p->R);
     free(p->error_psd);
     pbfdaf_free(&p->base);

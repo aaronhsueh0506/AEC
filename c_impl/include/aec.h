@@ -158,11 +158,28 @@ typedef struct Aec {
     float* far_hop;              /* [hop] */
     float* raw_output;           /* [hop] */
     float* res_output;           /* [hop] */
+
+    int    is_static;            /* 1 = state placed in caller buffer */
 } Aec;
 
 int  aec_create(Aec* a, const AecConfig* cfg);
 void aec_destroy(Aec* a);
 void aec_reset(Aec* a);
+
+/**
+ * Static-memory companions to aec_create (heap-free init for embedded
+ * targets). Pre-allocate one buffer of size aec_get_mem_size(cfg) bytes,
+ * then pass it into aec_init. Memory must be 16-byte aligned.
+ *
+ *   size_t pool_bytes = aec_get_mem_size(&cfg);
+ *   void*  pool       = your_static_pool_alloc(pool_bytes);
+ *   Aec    aec_inst;
+ *   aec_init(&aec_inst, pool, pool_bytes, &cfg);
+ *   ...
+ *   aec_destroy(&aec_inst);  // no-op when initialised via aec_init
+ */
+size_t aec_get_mem_size(const AecConfig* cfg);
+int    aec_init(Aec* a, void* mem, size_t mem_size, const AecConfig* cfg);
 
 /* Process exactly hop_size samples. */
 void aec_process(Aec* a, const float* mic, const float* ref, float* out);

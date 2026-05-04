@@ -30,7 +30,8 @@ static void print_usage(const char* prog) {
         "  --reverb-decay <float>         override preset reverb decay\n"
         "  --reverb-gain <float>          override preset reverb gain\n"
         "  --debug-level <0..3>           0=off, 1=summary, 2=per-frame, 3=full\n"
-        "  --debug-log <path>             redirect log to file (default stderr)\n",
+        "  --debug-log <path>             redirect log to file (default stderr)\n"
+        "  --static-mem                   use static-memory init path (no heap; for embedded)\n",
         prog);
 }
 
@@ -55,6 +56,7 @@ int main(int argc, char* argv[]) {
     float reverb_decay_ovr = -1.0f, reverb_gain_ovr = -1.0f;
     int debug_level = 0;
     const char* debug_log = NULL;
+    int use_static_mem = 0;
 
     for (int i = 4; i < argc; ++i) {
         const char* arg = argv[i];
@@ -80,6 +82,7 @@ int main(int argc, char* argv[]) {
             debug_level = atoi(argv[++i]);
         else if (!strcmp(arg, "--debug-log") && i + 1 < argc)
             debug_log = argv[++i];
+        else if (!strcmp(arg, "--static-mem")) use_static_mem = 1;
         else {
             fprintf(stderr, "ERROR: unknown option '%s'\n", arg);
             return 2;
@@ -115,7 +118,19 @@ int main(int argc, char* argv[]) {
     }
 
     Aec aec;
-    aec_create(&aec, &cfg);
+    void* static_pool = NULL;
+    if (use_static_mem) {
+        size_t pool_bytes = aec_get_mem_size(&cfg);
+        fprintf(stderr, "static-mem: pool=%zu bytes (%.1f KB)\n",
+                pool_bytes, pool_bytes / 1024.0);
+        static_pool = aligned_alloc(16, (pool_bytes + 15) & ~(size_t)15);
+        if (!static_pool || aec_init(&aec, static_pool, pool_bytes, &cfg) != 0) {
+            fprintf(stderr, "ERROR: aec_init failed\n");
+            return 4;
+        }
+    } else {
+        aec_create(&aec, &cfg);
+    }
     int hop = aec_hop_size(&aec);
     aec_debug_set_frame(0, hop, sr);
 
@@ -150,5 +165,6 @@ int main(int argc, char* argv[]) {
     wav_close_write(ww);
     wav_close_read(mr); wav_close_read(rr);
     aec_destroy(&aec);
+    if (static_pool) free(static_pool);
     return 0;
 }

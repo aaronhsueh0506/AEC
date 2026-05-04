@@ -23,10 +23,14 @@ typedef struct FilterErleEst {
     float* erle;          /* [n_freqs], stored as float32 (matches Python) */
     double alpha_rise;    /* 0.95 */
     double alpha_drop;    /* 0.7 */
+    int    is_static;     /* 1 = state placed in caller buffer */
 } FilterErleEst;
 
-void filter_erle_init(FilterErleEst* f, int n_freqs);
-void filter_erle_free(FilterErleEst* f);
+void   filter_erle_init(FilterErleEst* f, int n_freqs);
+size_t filter_erle_get_mem_size(int n_freqs);
+void   filter_erle_init_static(FilterErleEst* f, void* mem, size_t mem_size,
+                                int n_freqs);
+void   filter_erle_free(FilterErleEst* f);
 void filter_erle_reset(FilterErleEst* f);
 /* echo_spec / error_spec packed (re,im) per bin (n_freqs entries each) */
 void filter_erle_update(FilterErleEst* f,

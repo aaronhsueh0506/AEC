@@ -11,37 +11,37 @@
  * We match this exactly.
  */
 #include "delay_est.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
-void delay_est_init(DelayEst* d, int sample_rate,
-                       double max_delay_ms,
-                       double init_seconds,
-                       double period_seconds) {
+/* Compute seg_size from sample_rate + max_delay_ms. Pure helper used by
+ * both init paths and get_mem_size to keep sizing consistent. */
+static int delay_est_compute_seg_size(int sample_rate, double max_delay_ms) {
+    int max_delay_samples = (int)(max_delay_ms * sample_rate / 1000.0);
+    int min_seg = 2 * max_delay_samples;
+    if (min_seg < 2048) min_seg = 2048;
+    int seg = 1;
+    while (seg < min_seg) seg *= 2;
+    return seg;
+}
+
+/* Common state initialization (post-buffer-placement). */
+static void delay_est_init_state(DelayEst* d, int sample_rate,
+                                  double max_delay_ms,
+                                  double init_seconds,
+                                  double period_seconds, int seg) {
     d->sample_rate       = sample_rate;
     d->max_delay_samples = (int)(max_delay_ms * sample_rate / 1000.0);
     d->init_seconds      = init_seconds;
     d->period_seconds    = period_seconds;
-
-    /* Segment size = next power of 2 ≥ max(2048, 2*max_delay_samples) */
-    int min_seg = 2 * d->max_delay_samples;
-    if (min_seg < 2048) min_seg = 2048;
-    int seg = 1;
-    while (seg < min_seg) seg *= 2;
-    d->seg_size = seg;
-    d->seg_hop  = seg / 2;
-    d->n_freqs  = seg / 2 + 1;
-
-    d->cross_re = (double*)calloc((size_t)d->n_freqs, sizeof(double));
-    d->cross_im = (double*)calloc((size_t)d->n_freqs, sizeof(double));
-    d->alpha     = 0.6;
-    d->n_updates = 0;
-
-    d->mic_buf = (float*)calloc((size_t)d->seg_size, sizeof(float));
-    d->ref_buf = (float*)calloc((size_t)d->seg_size, sizeof(float));
-    d->buf_pos = 0;
-
+    d->seg_size          = seg;
+    d->seg_hop           = seg / 2;
+    d->n_freqs           = seg / 2 + 1;
+    d->alpha             = 0.6;
+    d->n_updates         = 0;
+    d->buf_pos           = 0;
     d->estimated_delay     = -1;
     d->samples_accumulated = 0;
     d->samples_since_est   = 0;
@@ -50,15 +50,86 @@ void delay_est_init(DelayEst* d, int sample_rate,
     d->period_samples      = (int)(period_seconds * sample_rate);
     d->n_estimates         = 0;
     d->last_par            = 0.0;
+}
 
+void delay_est_init(DelayEst* d, int sample_rate,
+                       double max_delay_ms,
+                       double init_seconds,
+                       double period_seconds) {
+    int seg = delay_est_compute_seg_size(sample_rate, max_delay_ms);
+    delay_est_init_state(d, sample_rate, max_delay_ms,
+                         init_seconds, period_seconds, seg);
+
+    d->cross_re = (double*)calloc((size_t)d->n_freqs, sizeof(double));
+    d->cross_im = (double*)calloc((size_t)d->n_freqs, sizeof(double));
+    d->mic_buf = (float*)calloc((size_t)d->seg_size, sizeof(float));
+    d->ref_buf = (float*)calloc((size_t)d->seg_size, sizeof(float));
     d->fft      = fft_create(d->seg_size);
     d->mic_spec = (Complex*)calloc((size_t)d->n_freqs, sizeof(Complex));
     d->ref_spec = (Complex*)calloc((size_t)d->n_freqs, sizeof(Complex));
     d->phat     = (Complex*)calloc((size_t)d->n_freqs, sizeof(Complex));
     d->gcc      = (float*)calloc((size_t)d->seg_size, sizeof(float));
+    d->is_static = 0;
+}
+
+size_t delay_est_get_mem_size(int sample_rate, double max_delay_ms) {
+    int seg = delay_est_compute_seg_size(sample_rate, max_delay_ms);
+    int K   = seg / 2 + 1;
+    size_t total = 0;
+    total += ALIGN16((size_t)K   * sizeof(double));   /* cross_re */
+    total += ALIGN16((size_t)K   * sizeof(double));   /* cross_im */
+    total += ALIGN16((size_t)seg * sizeof(float));    /* mic_buf */
+    total += ALIGN16((size_t)seg * sizeof(float));    /* ref_buf */
+    total += fft_get_mem_size(seg);                   /* nested FFT */
+    total += ALIGN16((size_t)K   * sizeof(Complex));  /* mic_spec */
+    total += ALIGN16((size_t)K   * sizeof(Complex));  /* ref_spec */
+    total += ALIGN16((size_t)K   * sizeof(Complex));  /* phat */
+    total += ALIGN16((size_t)seg * sizeof(float));    /* gcc */
+    return total;
+}
+
+void delay_est_init_static(DelayEst* d, void* mem, size_t mem_size,
+                            int sample_rate, double max_delay_ms,
+                            double init_seconds, double period_seconds) {
+    if (!d || !mem) return;
+    if (mem_size < delay_est_get_mem_size(sample_rate, max_delay_ms)) return;
+
+    int seg = delay_est_compute_seg_size(sample_rate, max_delay_ms);
+    memset(d, 0, sizeof(*d));
+    delay_est_init_state(d, sample_rate, max_delay_ms,
+                         init_seconds, period_seconds, seg);
+
+    uint8_t* ptr = (uint8_t*)mem;
+    int K = d->n_freqs;
+
+    d->cross_re = (double*)ptr; ptr += ALIGN16((size_t)K * sizeof(double));
+    d->cross_im = (double*)ptr; ptr += ALIGN16((size_t)K * sizeof(double));
+    d->mic_buf  = (float*)ptr;  ptr += ALIGN16((size_t)seg * sizeof(float));
+    d->ref_buf  = (float*)ptr;  ptr += ALIGN16((size_t)seg * sizeof(float));
+    size_t fft_sz = fft_get_mem_size(seg);
+    d->fft      = fft_init(ptr, fft_sz, seg); ptr += fft_sz;
+    d->mic_spec = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+    d->ref_spec = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+    d->phat     = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+    d->gcc      = (float*)ptr;   /* last field */
+
+    memset(d->cross_re, 0, (size_t)K   * sizeof(double));
+    memset(d->cross_im, 0, (size_t)K   * sizeof(double));
+    memset(d->mic_buf,  0, (size_t)seg * sizeof(float));
+    memset(d->ref_buf,  0, (size_t)seg * sizeof(float));
+    memset(d->mic_spec, 0, (size_t)K   * sizeof(Complex));
+    memset(d->ref_spec, 0, (size_t)K   * sizeof(Complex));
+    memset(d->phat,     0, (size_t)K   * sizeof(Complex));
+    memset(d->gcc,      0, (size_t)seg * sizeof(float));
+    d->is_static = 1;
 }
 
 void delay_est_free(DelayEst* d) {
+    if (!d) return;
+    if (d->is_static) {
+        if (d->fft) fft_destroy(d->fft);  /* no-op when FFT also static */
+        return;
+    }
     free(d->cross_re); free(d->cross_im);
     free(d->mic_buf);  free(d->ref_buf);
     free(d->mic_spec); free(d->ref_spec);
