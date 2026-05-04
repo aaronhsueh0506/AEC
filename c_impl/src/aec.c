@@ -799,7 +799,12 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     float* final_out = a->raw_output;  /* default */
     double erle_factor = 0.0;
     int K = a->main_filter.base.n_freqs;
-    if (a->has_res) {
+    /* State computation block: always runs (post-filter detectors,
+     * per-frame ERLE / ERL / DT / divergence). RES-specific writes
+     * (a->res.* and per-bin Kalman fine-tune from res.echo_psd) are
+     * guarded individually below so the linear-only path
+     * (enable_residual_filter=0) gets up-to-date AecResContext. */
+    {
         double far_power = mean_sq(a->far_hop, hop);
 
         const double erle_decay = 0.999;
@@ -892,12 +897,12 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         filter_convergence_update_divergence(&a->convergence,
             a->near_power, a->raw_error_power);
 
-        /* EPC render-forced */
+        /* EPC render-forced (RES state-write only) */
         if (a->epc_render_forced_remaining > 0) {
             a->epc_render_forced_remaining--;
-            a->res.residual_est.using_render_based = 1;
+            if (a->has_res) a->res.residual_est.using_render_based = 1;
         }
-        a->res.over_sub = (float)base_over_sub;
+        if (a->has_res) a->res.over_sub = (float)base_over_sub;
 
         /* dt_residual_scale on echo_spec */
         double dt_clip = dt_indicator < 0.0 ? 0.0 : dt_indicator;
@@ -913,34 +918,39 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         if (a->dt_analyzer.dt_from_shadow > shadow_dt_v) shadow_dt_v = a->dt_analyzer.dt_from_shadow;
         if (a->epc.active) shadow_dt_v *= 0.08;
 
-        ResProcessInputs rin = {0};
-        rin.error_hop = a->raw_output;
-        rin.echo_spec = eff_echo;
-        rin.far_spec  = a->main_filter.base.far_spec;
-        rin.near_spec = a->main_filter.base.near_spec;
-        /* Python AEC.process at aec.py:4061 does NOT pass error_spec_from_filter
-         * to res.process — so ResFilter falls back to spec_synth (the windowed
-         * OLA spec). Match Python: pass NULL to use spec_synth path. */
-        rin.error_spec_from_filter = NULL;
-        rin.far_power = far_power;
-        rin.erle_factor = erle_factor;
-        rin.dt_indicator = dt_indicator;
-        rin.divergence = a->convergence.divergence;
-        rin.is_stationary_dt = is_stationary_dt;
-        rin.saturation_level = a->saturation_level;
-        rin.epc_active = a->epc.active;
-        rin.shadow_dt = shadow_dt_v;
-        rin.erl_estimate = a->erl_estimate;
-        rin.filter_converged = a->convergence.converged;
-        rin.filter_once_converged = a->convergence.once_converged;
-        /* Stash for aec_get_res_context() */
+        /* Stash always (visible via aec_get_res_context). */
         a->last_far_power         = far_power;
         a->last_shadow_dt         = shadow_dt_v;
         a->last_is_stationary_dt  = is_stationary_dt;
-        res_filter_process(&a->res, &rin, a->res_output);
+
+        if (a->has_res) {
+            ResProcessInputs rin = {0};
+            rin.error_hop = a->raw_output;
+            rin.echo_spec = eff_echo;
+            rin.far_spec  = a->main_filter.base.far_spec;
+            rin.near_spec = a->main_filter.base.near_spec;
+            /* Python AEC.process at aec.py:4061 does NOT pass error_spec_from_filter
+             * to res.process — so ResFilter falls back to spec_synth (the windowed
+             * OLA spec). Match Python: pass NULL to use spec_synth path. */
+            rin.error_spec_from_filter = NULL;
+            rin.far_power = far_power;
+            rin.erle_factor = erle_factor;
+            rin.dt_indicator = dt_indicator;
+            rin.divergence = a->convergence.divergence;
+            rin.is_stationary_dt = is_stationary_dt;
+            rin.saturation_level = a->saturation_level;
+            rin.epc_active = a->epc.active;
+            rin.shadow_dt = shadow_dt_v;
+            rin.erl_estimate = a->erl_estimate;
+            rin.filter_converged = a->convergence.converged;
+            rin.filter_once_converged = a->convergence.once_converged;
+            res_filter_process(&a->res, &rin, a->res_output);
+            final_out = a->res_output;
+        }
 
         /* per-bin mu_scale update */
-        if (a->convergence.converged) {
+        if (a->has_res && a->convergence.converged) {
+            /* Kalman fine-tune uses RES internal echo_psd / error_psd. */
             for (int k = 0; k < K; ++k) {
                 double v = (double)a->res.echo_psd[k] /
                            ((double)a->res.error_psd[k] + 1e-10);
@@ -958,13 +968,9 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             a->has_per_bin_mu = 1;
         } else {
             a->has_per_bin_mu = 0;
-            update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
-        }
-
-        final_out = a->res_output;
-    } else {
-        if (!a->convergence.converged) {
-            update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
+            if (!a->convergence.converged) {
+                update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
+            }
         }
     }
 
