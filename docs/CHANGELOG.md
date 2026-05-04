@@ -337,7 +337,7 @@ by default, zero overhead) that accumulates per-frame `mu_mean` /
 **Baseline JSON regenerated**: [archive/baselines/baseline_v36_vs_aec2.json](archive/baselines/baseline_v36_vs_aec2.json)
 rescored from current git-vanilla v3.6.1 outputs (old baseline drifted
 +0.20 FS / +0.07 DT echo from current code; led to mirage Δ during PR-F
-session — see [feedback_baseline_json_drift.md](~/.claude/projects/-Users-mingyu-Desktop-novatek-SE/memory/feedback_baseline_json_drift.md)
+session — see [feedback_baseline_json_drift.md](~/.claude/projects/aec-memory/feedback_baseline_json_drift.md)
 memory).
 
 **Out of scope (deferred to v3.7.1)**: GPT Phase 2 shadow PBFDKF policy
@@ -424,7 +424,7 @@ high regression risk on existing v2.5+ shadow tuning. Only worth pursuing if
 linear AEC is the chosen direction long-term — competing direction is NN
 postfilter (DTLN-AEC, see plan `~/.claude/plans/jazzy-brewing-castle.md`).
 
-**Plan**: ~/.claude/plans/users-mingyu-desktop-novatek-se-aec-pyr-tranquil-scroll.md
+**Plan**: ~/.claude/plans/aec-plan.md
 
 ---
 
@@ -480,7 +480,7 @@ NE = 4.000 is the floor — further pushes risk breaking it.
 **Next**: PR-D2 (initial-state Q×100 boost), PR-D3 (Q bifurcation on
 shadow_advantage), PR-D4 (DT-from-frame-0 detector + spec).
 
-**Plan**: ~/.claude/plans/users-mingyu-desktop-novatek-se-aec-pyr-tranquil-scroll.md
+**Plan**: ~/.claude/plans/aec-plan.md
 
 ---
 
@@ -550,7 +550,7 @@ where `using_render_based=False` (filter "converged" but echo at HF still leaks)
 These are likely speaker-nonlinear harmonics — coh ≈ 0, ERL ≈ 0, sat ≈ 0; no
 linear signal can detect. Out of v3.5.0 scope.
 
-**Plan reference**: ~/.claude/plans/users-mingyu-desktop-novatek-se-aec-pyr-tranquil-scroll.md
+**Plan reference**: ~/.claude/plans/aec-plan.md
 (PR-A complete; PR-B and PR-C pending).
 
 ---

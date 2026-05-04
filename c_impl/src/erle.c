@@ -2,6 +2,8 @@
  *             compute_erle_confidence.
  */
 #include "erle.h"
+#include "fft_wrapper.h"   /* ALIGN16 */
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -14,8 +16,30 @@ void filter_erle_init(FilterErleEst* f, int n_freqs) {
     for (int k = 0; k < n_freqs; ++k) f->erle[k] = 1.0f;
     f->alpha_rise = 0.95;
     f->alpha_drop = 0.7;
+    f->is_static = 0;
 }
-void filter_erle_free(FilterErleEst* f) { free(f->erle); f->erle = NULL; }
+
+size_t filter_erle_get_mem_size(int n_freqs) {
+    return ALIGN16((size_t)n_freqs * sizeof(float));
+}
+
+void filter_erle_init_static(FilterErleEst* f, void* mem, size_t mem_size,
+                              int n_freqs) {
+    if (!f || !mem || mem_size < filter_erle_get_mem_size(n_freqs)) return;
+    memset(f, 0, sizeof(*f));
+    f->n_freqs = n_freqs;
+    f->erle = (float*)mem;
+    for (int k = 0; k < n_freqs; ++k) f->erle[k] = 1.0f;
+    f->alpha_rise = 0.95;
+    f->alpha_drop = 0.7;
+    f->is_static = 1;
+}
+
+void filter_erle_free(FilterErleEst* f) {
+    if (!f) return;
+    if (!f->is_static) free(f->erle);
+    f->erle = NULL;
+}
 void filter_erle_reset(FilterErleEst* f) {
     for (int k = 0; k < f->n_freqs; ++k) f->erle[k] = 1.0f;
 }

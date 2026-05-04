@@ -106,6 +106,8 @@ typedef struct ResFilter {
 
     /* RNG state for CNG (xorshift32). 0 means uninitialised → seeded at create. */
     unsigned int cng_rng_state;
+
+    int is_static;             /* 1 = state placed in caller buffer */
 } ResFilter;
 
 /* Init parameters mirror Python kwargs in __init__. Use `enable_cng=0` for
@@ -138,8 +140,11 @@ typedef struct ResFilterConfig {
     float render_dt_gain_ceil;  /* 0.6 */
 } ResFilterConfig;
 
-void res_filter_init(ResFilter* r, const ResFilterConfig* cfg);
-void res_filter_free(ResFilter* r);
+void   res_filter_init(ResFilter* r, const ResFilterConfig* cfg);
+size_t res_filter_get_mem_size(const ResFilterConfig* cfg);
+void   res_filter_init_static(ResFilter* r, void* mem, size_t mem_size,
+                                const ResFilterConfig* cfg);
+void   res_filter_free(ResFilter* r);
 void res_filter_reset(ResFilter* r);
 
 /* Port of ResFilter.process. Outputs hop_size samples. */

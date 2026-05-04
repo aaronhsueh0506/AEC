@@ -1,5 +1,7 @@
 /* aec.c — top-level AEC orchestration. */
 #include "aec.h"
+#include "aec_debug.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -95,23 +97,99 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
 
 static int next_pow2(int x) { int n=1; while(n<x) n<<=1; return n; }
 
-int aec_create(Aec* a, const AecConfig* cfg) {
-    memset(a, 0, sizeof(*a));
-    a->cfg = *cfg;
-
-    /* Hop = 10ms by convention (matches Python `_hop_size`). */
-    a->hop_size   = (int)(0.010f * cfg->sample_rate);    /* 160 @16k, 480 @48k */
-    a->block_size = 2 * a->hop_size;
-    a->fft_size   = next_pow2(a->block_size);
-    a->n_freqs    = a->fft_size / 2 + 1;
-
-    /* n_partitions from filter_length_ms (block_size = 2*hop). */
+/* Compute derived sizes shared by aec_create / aec_init / aec_get_mem_size. */
+static void aec_derive_sizes(const AecConfig* cfg, int* out_hop, int* out_blk,
+                              int* out_fft, int* out_K, int* out_n_parts,
+                              int* out_ring_size) {
+    int hop = (int)(0.010f * cfg->sample_rate);
+    int blk = 2 * hop;
+    int fft = next_pow2(blk);
+    int K   = fft / 2 + 1;
     int n_parts = cfg->n_partitions;
     if (n_parts <= 0) {
         float filter_len_samp = cfg->filter_length_ms * cfg->sample_rate / 1000.0f;
-        n_parts = (int)ceilf(filter_len_samp / (float)a->hop_size);
+        n_parts = (int)ceilf(filter_len_samp / (float)hop);
         if (n_parts < 1) n_parts = 1;
     }
+    int ring = 0;
+    if (cfg->enable_delay_est) {
+        int max_delay_samp = (int)(cfg->max_delay_ms * cfg->sample_rate / 1000.0f);
+        ring = max_delay_samp + 4096;
+    }
+    if (out_hop) *out_hop = hop;
+    if (out_blk) *out_blk = blk;
+    if (out_fft) *out_fft = fft;
+    if (out_K) *out_K = K;
+    if (out_n_parts) *out_n_parts = n_parts;
+    if (out_ring_size) *out_ring_size = ring;
+}
+
+/* Build ResFilterConfig the way aec_create does. Used by both init paths. */
+static void aec_build_res_cfg(const Aec* a, const AecConfig* cfg,
+                               ResFilterConfig* rcfg) {
+    memset(rcfg, 0, sizeof(*rcfg));
+    rcfg->block_size = a->fft_size;
+    rcfg->n_freqs    = a->n_freqs;
+    rcfg->frame_size = a->block_size;
+    rcfg->hop_size   = a->hop_size;
+    rcfg->sample_rate = cfg->sample_rate;
+    rcfg->g_min_db = cfg->res_g_min_db;
+    rcfg->over_sub = cfg->res_over_sub_base;
+    rcfg->alpha    = 0.8f;
+    rcfg->enable_cng = cfg->enable_cng;
+    rcfg->max_drop_db_per_frame = 6.0f;
+    rcfg->max_rise_db_per_frame = 6.0f;
+    rcfg->enable_spectral_floor = 1;
+    rcfg->spectral_floor_db = cfg->res_spectral_floor_db;
+    rcfg->ne_protect_db = cfg->res_ne_protect_db;
+    rcfg->enable_reverb = 1;
+    rcfg->reverb_decay = cfg->res_reverb_decay;
+    rcfg->reverb_gain  = cfg->res_reverb_gain;
+    rcfg->alpha_echo_psd  = cfg->res_alpha_echo_psd;
+    rcfg->alpha_error_psd = cfg->res_alpha_error_psd;
+    rcfg->enr_scale       = cfg->res_enr_scale;
+    rcfg->startup_dt_min_ne_scale = 1.0f;
+    rcfg->startup_dt_gain_floor = 1.0f;
+    rcfg->startup_dt_noise_floor_scale = 1.0f;
+    rcfg->render_min_ne_factor = 0.5f;
+    rcfg->render_dt_gain_ceil  = 0.6f;
+}
+
+/* Set scalar runtime state. Called after buffers are populated. */
+static void aec_init_scalar_state(Aec* a, const AecConfig* cfg) {
+    a->saturation_level = 0.0;
+    a->erl_estimate = 0.1;
+    a->main_err_smooth = 0.0;
+    a->shadow_err_smooth = 0.0;
+    a->shadow_frame_count = 0;
+    a->epc_render_forced_remaining = 0;
+    a->erle_window_near = 1e-10;
+    a->erle_window_err = 1e-10;
+    a->erle_factor_prev = 0.0;
+    a->inst_erle_smooth = 1.0;
+    a->wn_err_baseline = 1e-8;
+    a->stat_dt_hangover = 0;
+    a->warmup_frames_remaining = cfg->warmup_frames;
+    a->warmup_far_active = 0;
+    a->simple_mu_ratio = 1.0;
+    a->simple_mu_holdoff = 0;
+    a->has_per_bin_mu = 0;
+    a->limiter_gain = 1.0;
+    a->alpha_pow = 0.95;
+    a->near_power = 0.0; a->raw_error_power = 0.0; a->final_error_power = 0.0;
+    a->near_power_sum = 0.0; a->raw_error_power_sum = 0.0;
+    a->final_error_power_sum = 0.0;
+    a->frame_count = 0;
+}
+
+int aec_create(Aec* a, const AecConfig* cfg) {
+    memset(a, 0, sizeof(*a));
+    a->cfg = *cfg;
+    aec_derive_sizes(cfg, &a->hop_size, &a->block_size, &a->fft_size,
+                     &a->n_freqs, NULL, NULL);
+
+    int n_parts;
+    aec_derive_sizes(cfg, NULL, NULL, NULL, NULL, &n_parts, NULL);
 
     if (cfg->enable_highpass) {
         hpf_init(&a->hp_mic, cfg->highpass_cutoff_hz, cfg->sample_rate);
@@ -169,71 +247,167 @@ int aec_create(Aec* a, const AecConfig* cfg) {
                         cfg->epc_hangover);
 
     if (cfg->enable_residual_filter) {
-        ResFilterConfig rcfg = {0};
-        /* Python passes ResFilter(block_size=filter.fft_size, frame_size=320,
-         * hop_size=160) — block_size IS the FFT size, frame_size is window len. */
-        rcfg.block_size = a->fft_size;          /* 512 @16k */
-        rcfg.n_freqs    = a->n_freqs;
-        rcfg.frame_size = a->block_size;        /* 320 @16k (= 2*hop) */
-        rcfg.hop_size   = a->hop_size;
-        rcfg.sample_rate = cfg->sample_rate;
-        rcfg.g_min_db = cfg->res_g_min_db;
-        rcfg.over_sub = cfg->res_over_sub_base;     /* dynamic per-frame */
-        rcfg.alpha    = 0.8f;
-        rcfg.enable_cng = cfg->enable_cng;
-        rcfg.max_drop_db_per_frame = 6.0f;
-        rcfg.max_rise_db_per_frame = 6.0f;
-        rcfg.enable_spectral_floor = 1;
-        rcfg.spectral_floor_db = cfg->res_spectral_floor_db;
-        rcfg.ne_protect_db = cfg->res_ne_protect_db;
-        rcfg.enable_reverb = 1;
-        rcfg.reverb_decay = cfg->res_reverb_decay;
-        rcfg.reverb_gain  = cfg->res_reverb_gain;
-        rcfg.alpha_echo_psd  = cfg->res_alpha_echo_psd;
-        rcfg.alpha_error_psd = cfg->res_alpha_error_psd;
-        rcfg.enr_scale       = cfg->res_enr_scale;
-        rcfg.startup_dt_min_ne_scale = 1.0f;
-        rcfg.startup_dt_gain_floor = 1.0f;
-        rcfg.startup_dt_noise_floor_scale = 1.0f;
-        rcfg.render_min_ne_factor = 0.5f;
-        rcfg.render_dt_gain_ceil  = 0.6f;
+        ResFilterConfig rcfg;
+        aec_build_res_cfg(a, cfg, &rcfg);
         res_filter_init(&a->res, &rcfg);
         a->has_res = 1;
     }
 
-    /* Scalar state */
-    a->saturation_level = 0.0;
-    a->erl_estimate = 0.1;
-    a->main_err_smooth = 0.0;
-    a->shadow_err_smooth = 0.0;
-    a->shadow_frame_count = 0;
-    a->epc_render_forced_remaining = 0;
-    a->erle_window_near = 1e-10;
-    a->erle_window_err = 1e-10;
-    a->erle_factor_prev = 0.0;
-    a->inst_erle_smooth = 1.0;
-    a->wn_err_baseline = 1e-8;
-    a->stat_dt_hangover = 0;
-    a->warmup_frames_remaining = cfg->warmup_frames;
-    a->warmup_far_active = 0;
-    a->simple_mu_ratio = 1.0;
-    a->simple_mu_holdoff = 0;
+    aec_init_scalar_state(a, cfg);
     a->per_bin_mu_scale = (float*)malloc((size_t)a->n_freqs * sizeof(float));
-    a->has_per_bin_mu = 0;
-    a->limiter_gain = 1.0;
-    a->alpha_pow = 0.95;
-    a->near_power = 0.0; a->raw_error_power = 0.0; a->final_error_power = 0.0;
-    a->near_power_sum = 0.0; a->raw_error_power_sum = 0.0; a->final_error_power_sum = 0.0;
-    a->frame_count = 0;
-
     a->near_hop = (float*)malloc((size_t)a->hop_size * sizeof(float));
     a->far_hop  = (float*)malloc((size_t)a->hop_size * sizeof(float));
     a->raw_output = (float*)malloc((size_t)a->hop_size * sizeof(float));
     a->res_output = (float*)malloc((size_t)a->hop_size * sizeof(float));
+    a->is_static = 0;
+    return 0;
+}
+
+size_t aec_get_mem_size(const AecConfig* cfg) {
+    if (!cfg) return 0;
+    int hop, blk, fft, K, n_parts, ring;
+    aec_derive_sizes(cfg, &hop, &blk, &fft, &K, &n_parts, &ring);
+
+    size_t total = 0;
+    if (cfg->enable_delay_est) {
+        total += ALIGN16((size_t)ring * sizeof(float));               /* ref_ring */
+        total += delay_est_get_mem_size(cfg->sample_rate, cfg->max_delay_ms);
+    }
+    total += pbfdkf_get_mem_size(blk, n_parts, hop);                  /* main_filter */
+    if (cfg->enable_shadow_filter) {
+        total += pbfdkf_get_mem_size(blk, n_parts, hop);              /* shadow_filter */
+    }
+    if (cfg->enable_residual_filter) {
+        Aec tmp = {0};
+        tmp.hop_size = hop; tmp.block_size = blk;
+        tmp.fft_size = fft; tmp.n_freqs = K;
+        ResFilterConfig rcfg;
+        aec_build_res_cfg(&tmp, cfg, &rcfg);
+        total += res_filter_get_mem_size(&rcfg);
+    }
+    total += ALIGN16((size_t)K * sizeof(float));                      /* per_bin_mu_scale */
+    total += ALIGN16((size_t)hop * sizeof(float));                    /* near_hop */
+    total += ALIGN16((size_t)hop * sizeof(float));                    /* far_hop */
+    total += ALIGN16((size_t)hop * sizeof(float));                    /* raw_output */
+    total += ALIGN16((size_t)hop * sizeof(float));                    /* res_output */
+    return total;
+}
+
+int aec_init(Aec* a, void* mem, size_t mem_size, const AecConfig* cfg) {
+    if (!a || !mem || !cfg) return -1;
+    size_t needed = aec_get_mem_size(cfg);
+    if (mem_size < needed) return -1;
+    AEC_DEBUG_LOG(1, "Init", "static-mem pool=%zu bytes (%.1f KB) sr=%d "
+                              "hop=%d preset_q=%g cng=%d",
+                  needed, (double)needed / 1024.0,
+                  cfg->sample_rate, (int)(0.010f * cfg->sample_rate),
+                  (double)cfg->kalman_q_high, cfg->enable_cng);
+
+    memset(a, 0, sizeof(*a));
+    a->cfg = *cfg;
+    int hop, blk, fft, K, n_parts, ring;
+    aec_derive_sizes(cfg, &hop, &blk, &fft, &K, &n_parts, &ring);
+    a->hop_size = hop; a->block_size = blk;
+    a->fft_size = fft; a->n_freqs = K;
+
+    /* Value-typed sub-modules (no buffer needed) */
+    if (cfg->enable_highpass) {
+        hpf_init(&a->hp_mic, cfg->highpass_cutoff_hz, cfg->sample_rate);
+        hpf_init(&a->hp_ref, cfg->highpass_cutoff_hz, cfg->sample_rate);
+        a->has_hp = 1;
+    }
+    if (cfg->enable_saturation) {
+        saturation_init(&a->sat_ref, cfg->saturation_threshold);
+        saturation_init(&a->sat_mic, cfg->saturation_threshold);
+        a->has_sat = 1;
+    }
+    render_activity_init(&a->render_activity);
+    filter_convergence_init(&a->convergence);
+    doubletalk_init(&a->dt_analyzer, cfg->shadow_dtd_offset, cfg->shadow_dtd_advantage_scale);
+    epc_init(&a->epc, cfg->epc_hangover, cfg->epc_total_rise, cfg->epc_delta_threshold);
+    shadow_copy_init(&a->shadow_copy, SC_GATE_ENERGY,
+                     cfg->shadow_copy_threshold, cfg->shadow_copy_hysteresis,
+                     cfg->epc_hangover);
+
+    /* Buffer-backed sub-modules — slice from caller's mem in declared order. */
+    uint8_t* ptr = (uint8_t*)mem;
+
+    if (cfg->enable_delay_est) {
+        a->ref_ring = (float*)ptr;
+        ptr += ALIGN16((size_t)ring * sizeof(float));
+        memset(a->ref_ring, 0, (size_t)ring * sizeof(float));
+        a->ref_ring_size = ring;
+        size_t de_sz = delay_est_get_mem_size(cfg->sample_rate, cfg->max_delay_ms);
+        delay_est_init_static(&a->delay_est, ptr, de_sz, cfg->sample_rate,
+                               cfg->max_delay_ms, cfg->delay_est_init_s,
+                               cfg->delay_est_period_s);
+        ptr += de_sz;
+        a->has_delay_est = 1;
+        a->current_delay = -1;
+        a->pending_delay = -1;
+        a->has_pending = 0;
+    } else {
+        a->current_delay = 0;
+    }
+
+    size_t mf_sz = pbfdkf_get_mem_size(blk, n_parts, hop);
+    pbfdkf_init_static(&a->main_filter, ptr, mf_sz,
+                        blk, n_parts, cfg->mu, cfg->delta, hop);
+    ptr += mf_sz;
+    for (int k = 0; k < K; ++k) {
+        a->main_filter.Q_high[k] = cfg->kalman_q_high;
+        a->main_filter.Q_low[k]  = cfg->kalman_q_low;
+        a->main_filter.Q[k]      = cfg->kalman_q_high;
+    }
+
+    if (cfg->enable_shadow_filter) {
+        size_t sf_sz = pbfdkf_get_mem_size(blk, n_parts, hop);
+        pbfdkf_init_static(&a->shadow_filter, ptr, sf_sz,
+                            blk, n_parts, cfg->mu, cfg->delta, hop);
+        ptr += sf_sz;
+        for (int k = 0; k < K; ++k) {
+            a->shadow_filter.Q_high[k] = cfg->kalman_q_high * cfg->shadow_q_ratio;
+            a->shadow_filter.Q_low[k]  = cfg->kalman_q_low  * cfg->shadow_q_ratio;
+            a->shadow_filter.Q[k]      = a->shadow_filter.Q_high[k];
+        }
+        a->has_shadow = 1;
+    }
+
+    if (cfg->enable_residual_filter) {
+        ResFilterConfig rcfg;
+        aec_build_res_cfg(a, cfg, &rcfg);
+        size_t rf_sz = res_filter_get_mem_size(&rcfg);
+        res_filter_init_static(&a->res, ptr, rf_sz, &rcfg);
+        ptr += rf_sz;
+        a->has_res = 1;
+    }
+
+    aec_init_scalar_state(a, cfg);
+    a->per_bin_mu_scale = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
+    a->near_hop  = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+    a->far_hop   = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+    a->raw_output = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+    a->res_output = (float*)ptr; /* last */
+    memset(a->per_bin_mu_scale, 0, (size_t)K   * sizeof(float));
+    memset(a->near_hop,  0, (size_t)hop * sizeof(float));
+    memset(a->far_hop,   0, (size_t)hop * sizeof(float));
+    memset(a->raw_output, 0, (size_t)hop * sizeof(float));
+    memset(a->res_output, 0, (size_t)hop * sizeof(float));
+    a->is_static = 1;
     return 0;
 }
 
 void aec_destroy(Aec* a) {
+    if (!a) return;
+    if (a->is_static) {
+        AEC_DEBUG_LOG(1, "Init", "destroy: static path (no free; caller owns pool)");
+        if (a->has_res) res_filter_free(&a->res);
+        pbfdkf_free(&a->main_filter);
+        if (a->has_shadow) pbfdkf_free(&a->shadow_filter);
+        if (a->has_delay_est) delay_est_free(&a->delay_est);
+        return;
+    }
+    AEC_DEBUG_LOG(1, "Init", "destroy: heap path (freeing buffers)");
     if (a->has_res) res_filter_free(&a->res);
     pbfdkf_free(&a->main_filter);
     if (a->has_shadow) pbfdkf_free(&a->shadow_filter);

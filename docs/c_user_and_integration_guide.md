@@ -74,6 +74,8 @@ fp32 PCM by default; `AEC_FP32_WAV=0` forces 16-bit PCM.
 
 ## 3. C API
 
+### 3.1 Standard heap-based init
+
 ```c
 #include "aec.h"
 
@@ -100,6 +102,29 @@ aec_destroy(&aec);
 estimation → PBFDKF main + shadow → echo-path-change handling → ResFilter
 → limiter). Disable sub-modules via `cfg.enable_*` flags before
 `aec_create`.
+
+### 3.2 Heap-free init (static memory pool)
+
+For embedded targets without a heap, supply a single pre-allocated pool:
+
+```c
+size_t pool_bytes = aec_get_mem_size(&cfg);     /* exact pool size for cfg */
+void*  pool       = your_static_pool_alloc(pool_bytes);  /* 16-byte aligned */
+
+Aec aec;
+if (aec_init(&aec, pool, pool_bytes, &cfg) != 0) { /* pool too small */ }
+
+/* aec_process / aec_reset / aec_destroy as usual */
+aec_destroy(&aec);   /* no-op for static path; safe for both paths */
+/* caller frees pool itself */
+```
+
+Both paths produce **bit-identical** output (verified across all 4
+presets and FS / DT / NE scenarios). At BALANCED / 16 kHz / 52 ms
+filter / shadow on / RES on / delay-est on the pool is **~700 KB**.
+CLI smoke: `./bin/aec_wav mic ref out --static-mem`. Full design notes
+and per-module breakdown:
+[../c_impl/STATIC_MEMORY.md](../c_impl/STATIC_MEMORY.md).
 
 ### Module ownership
 

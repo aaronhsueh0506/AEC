@@ -58,10 +58,16 @@ typedef struct PBFDAF {
     FftHandle* fft;
     float*     time_scratch;   /* [fft_size] */
     Complex*   spec_scratch;   /* [n_freqs] */
+
+    int is_static;             /* 1 = state placed in caller buffer */
 } PBFDAF;
 
-void pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
+void   pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size);
+size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size);
+void   pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
+                           int block_size, int n_partitions,
+                           float mu, float delta, int hop_size);
 void pbfdaf_free(PBFDAF* p);
 void pbfdaf_reset(PBFDAF* p);
 
@@ -96,10 +102,16 @@ typedef struct PBFDKF {
     int   p_max_override_frames; /* < 0 means unset */
     float p_floor_beta;          /* default 0.1 */
     int   p_floor_beta_frames;   /* < 0 means unset */
+
+    int is_static;               /* 1 = state placed in caller buffer */
 } PBFDKF;
 
-void pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
+void   pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size);
+size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size);
+void   pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
+                           int block_size, int n_partitions,
+                           float mu, float delta, int hop_size);
 void pbfdkf_free(PBFDKF* p);
 void pbfdkf_reset(PBFDKF* p);
 /* PBFDKF process = PBFDAF process with overridden _update_weights. */

@@ -56,12 +56,18 @@ typedef struct DelayEst {
     Complex*    ref_spec;        /* [n_freqs] */
     Complex*    phat;            /* [n_freqs] */
     float*      gcc;             /* [seg_size] (irfft output) */
+
+    int is_static;               /* 1 = state placed in caller buffer */
 } DelayEst;
 
 void delay_est_init(DelayEst* d, int sample_rate,
                        double max_delay_ms,        /* 250.0 default */
                        double init_seconds,        /* 0.5 */
                        double period_seconds);     /* 2.0 */
+size_t delay_est_get_mem_size(int sample_rate, double max_delay_ms);
+void   delay_est_init_static(DelayEst* d, void* mem, size_t mem_size,
+                              int sample_rate, double max_delay_ms,
+                              double init_seconds, double period_seconds);
 void delay_est_free(DelayEst* d);
 void delay_est_reset(DelayEst* d);
 

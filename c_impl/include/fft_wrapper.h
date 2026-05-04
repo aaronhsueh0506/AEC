@@ -16,7 +16,7 @@ extern "C" {
 #endif
 
 /* ---------------------------------------------------------------------------
- * Static memory support (Novatek embedded — no heap).
+ * Static memory support (embedded targets — no heap).
  *
  * Each module exposes both a heap-based API (`_create / _destroy`) and a
  * static API (`_get_mem_size / _init / _destroy`). The static API takes a
