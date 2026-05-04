@@ -2208,3 +2208,223 @@ Next-round options:
 
 NN postfilter remains the only known route that does not require
 either upstream DTD-on-movement rework or full AEC3 plumbing.
+
+
+# Round 15 — Feasible-region search over residual/reverb candidate formulas (closed at P0)
+
+**Branch**: `algo/round15-feasibility-search` (audit-only, NOT MERGED — discarded after verdict)
+**Date**: 2026-05-04
+**Outcome**: STOP at Phase 0 — empty feasible region over the parameterized formula family on the R14/R15 observable pool.
+
+## Why R15 was opened
+
+R10–R14 each tested ONE candidate per branch and STOPped at Phase 0.
+R14 ε was the first to avoid both R10 uniform-tightening AND R13
+best-DT_mv reverse-correlation, but failed FS scale (uniform
+under-attribution from `reverb_gain` mismatch). R14 verdict pointed to
+two follow-ups: R14b (co-tune `reverb_gain` with ε) or R15 (full
+AecState reverb response).
+
+R15 changed the methodology rather than picking a single follow-up
+candidate. Hypothesis: the one-candidate-per-branch cycle was burning
+time without sampling the design space, so a frozen trace + offline
+grid search over a parameterized family of {scale, mix, clip,
+state-conditioned gate} formulas would either (a) find a feasible
+region, in which case top-5 candidates are reported and user picks
+one to promote, or (b) prove the entire family empty — strong
+evidence to close the classical residual/reverb path.
+
+## Phase 0 plumbing
+
+- **R14 δ/ε/tail-tap audit block** cherry-picked from R14 reflog
+  (commit `c230b98`) onto R15 branch as foundation. R14 plumbing was
+  bit-exact audit-passive when first written; cherry-pick re-verified
+  parity_round6 PASS (5/5 HASH MATCH).
+- **R15 state-snapshot extension** in `ResFilter._stage_residual_model`:
+  accept `state_snapshot` kwarg dict, copy values + AecState bools/scalars
+  into `self._r15_diag`. Snapshot built in `AEC.process` from already-
+  computed values (no recomputation): dt_indicator, dtd_coherence_prev
+  (causal — DTD computed after res.process), dt_from_energy/shadow,
+  divergence, mu_scale_mean, inst_erle_smooth, shadow_dt; AecState adds
+  render_active, dt_combined, usable_linear_estimate, epc_active,
+  epc_hangover_count, filter_converged/once_converged, shadow_advantage;
+  plus res-stage scalars far_activity, dt_for_fs, saturation_level,
+  erl_estimate, is_stationary_dt.
+- **trace_phase0.py**: per-far-active-frame raw-array collection of R14+R15
+  fields into per-case `experiments/round15_p0/frames/<stem>.npz` (~80 MB
+  total across 800 cases). states.json keeps voice-band aggregates.
+- **grid_search_r15.py**: offline engine. Layer 1 base × Layer 2 clip ×
+  Layer 3 gate cross-product with prune rules (B0-equivalent, degenerate
+  clip, no-op gate). 8892 candidates. Vectorized numpy over cached
+  per-frame arrays; ~3 min runtime.
+- **analyze_round15_p0.py**: top-5 reporter with cohort-leak risk flag,
+  neighborhood density, warm-fallback retention; STOP path with scoped
+  conclusion + R16 follow-up pointer.
+- parity_round6 PASS bit-exact on plumbing commit (`4a76bbd`).
+
+## Phase 0 gate (per plan, after the 5 user-requested fixes)
+
+Bidirectional + per-case gate, on predicted final residual ratio
+computed from warm frames (per-case warm-fallback to all-frame mean if
+20 ≤ n_warm < 50, drop if < 20 far-active total):
+
+1. cohort_ratio[worst-DT_mv-20] ≤ 0.70
+2. cohort_ratio[FS_static] ∈ [0.80, 1.20]
+3. cohort_ratio[FS_movement] ∈ [0.80, 1.20]
+4. cohort_ratio[best-DT_mv-20] ∈ [0.80, 1.20]
+5. ≥ 10/20 worst-DT_mv-20 cases with case_ratio < 0.85
+6. ≤ 2 FS cases (out of FS_static ∪ FS_movement) with case_ratio > 1.50
+
+Hard early-exit: candidate dropped if cohort_ratio[best-DT_mv-20] > 1.50.
+
+Per-cohort retained-case counts (n_retained / n_warm_fallback / n_dropped)
+reported per top-5 entry. Cohort-leak flag = HIGH if a Layer-3 gate fires
+on ≥ 80 % of one cohort and ≤ 20 % of another (gate is effectively a
+cohort-label proxy).
+
+## Phase 0 result
+
+| metric | value |
+|---|---:|
+| candidates evaluated | 8892 |
+| qualifying (all 6 gates) | **0** |
+| pass g1 worst ≤ 0.70 | 932 |
+| pass g2 FS_st in band | 6386 |
+| pass g3 FS_mv in band | 6396 |
+| pass g4 best in band | 6886 |
+| pass g5 worst-20 dir ≥ 10/20 | 1945 |
+| pass g6 ≤ 2 FS overshoots | 7593 |
+| pass g1 AND g4 (both DT cohorts good) | 110 |
+
+The 110 candidates that satisfy both DT cohort gates ALL fail g2+g3
+because they uniformly tighten FS to ratio 0.62–0.69 — same axis-coupling
+as R10 uniform tightening and R14 δ uniform under-attribution. Sample
+of the g1+g4 passers:
+
+| formula | worst | best | FS_st | FS_mv | failed |
+|---|---:|---:|---:|---:|---|
+| B2(s=0.5) + clip(a=0.5, b=∞) | 0.586 | 0.806 | 0.656 | 0.654 | g2,g3 |
+| B2(s=0.5) + clip(a=0.5, b=2.0) + G_dt(τ=0.5) | 0.599 | 0.806 | 0.649 | 0.648 | g2,g3 |
+| B1(s=2) + clip(a=0.5, b=1.0) + G_dt(τ=0.3) | 0.687 | 0.814 | 0.671 | 0.679 | g2,g3 |
+
+The DT-vs-FS gap among the best candidates is only ~0.16 ratio (0.60
+DT vs 0.65 FS) — there is no formula in the searched family that
+discriminates more strongly. State-conditioned gates (G_dt, G_render,
+G_coh, G_far) only attenuate the global drop; they do NOT reverse the
+DT-vs-FS direction because every input in the observable pool is
+either uniformly sized across cohorts (current_add, far_psd,
+tail_far) or inversely correlated with the cohort axis (delta_add via
+ERL, epsilon_add via slow_echo/slow_tail) — i.e. no member of the pool
+is a positive-correlation discriminator.
+
+Top-5 nearest-misses by g1 ranking (deepest worst-DT_mv reductions,
+all uniformly over-attribute):
+
+| rank | formula | worst | best | FS_st | FS_mv | failed |
+|---:|---|---:|---:|---:|---:|---|
+| 1 | B1(s=0.5) | 0.188 | 0.373 | 0.200 | 0.213 | g2,g3,g4 |
+| 2 | B1(s=0.5) + G_satecho | 0.188 | 0.373 | 0.200 | 0.213 | g2,g3,g4 |
+| 3 | B1(s=0.5) + G_far(τ=0.1) | 0.188 | 0.373 | 0.200 | 0.213 | g2,g3,g4 |
+| 4 | B1(s=0.5) + clip(a=0.0, b=1.0) | 0.188 | 0.373 | 0.200 | 0.213 | g2,g3,g4 |
+| 5 | B1(s=0.5) + clip(a=0.0, b=1.0) + G_satecho | 0.188 | 0.373 | 0.200 | 0.213 | g2,g3,g4 |
+
+## Mechanism reading
+
+R15 reproduces and extends every prior failure mode at scale, in one
+trace + one search:
+
+- **R10 uniform tightening**: B0-mix and B1/B2/B3 base candidates
+  collapse all cohorts together. 6886 candidates (77 %) keep best-DT_mv
+  in band, but only 110 of those also tighten worst enough — and all
+  110 over-tighten FS by the same axis.
+- **R13 reverse-correlation**: any base whose input depends on filter W
+  (β candidates were not in R15's pool but the same logic applies to ε
+  via slow_echo) shows the best > worst ordering when scaled small.
+- **R14 ε scale-mismatch**: B2(s=1) — the literal R14 ε — sits at
+  worst=0.527 best=0.953 FS_st=0.487 FS_mv=0.639, exactly matching the
+  R14 verdict numbers (verifies the offline-trace calibration is
+  faithful to in-loop). Scaling ε up (B2 s=2,4,8) tightens FS further;
+  scaling down (s=0.5) pushes worst above 0.70.
+
+The 110-candidate g1+g4 boundary represents the **limit of the
+observable pool**: no Layer-1 base + Layer-2 clip + Layer-3 gate
+combination can split DT_mv worst from FS by more than ~0.16 ratio.
+The R10 / R13 / R14 patterns are not artifacts of single-point
+choices — they are the manifold of this design space.
+
+## Disposition
+
+- Branch `algo/round15-feasibility-search` discarded (no merge to main).
+  The R15 plumbing (R14 audit cherry-pick + state-snapshot extension +
+  per-frame npz output + grid_search_r15 + analyzer) is NOT on main; this
+  closure section captures everything load-bearing.
+- 80 MB `frames/` artifact and 14 MB `search_results.json` from
+  `experiments/round15_p0/` are reproducible from a future trace; not
+  retained on main.
+
+## Scoped conclusion (per plan)
+
+**Proves**: no feasible classical-DSP residual/reverb formula exists
+over the **observable pool** R14/R15 surfaced — that is, over
+{`current_add`, `delta_add`, `epsilon_add`, `tail_far`, `slow_echo`,
+`slow_tail_far`, `erl`, AecState bools (render_active, dt_combined,
+usable_linear_estimate, saturated_echo proxy, epc_active),
+DTD scalars (coh_xy, dt_for_fs), `far_activity`, `mu_scale`} via the
+parameterized Layer-1 × Layer-2 × Layer-3 family. Single-day
+one-candidate-per-branch experimentation through R10–R14 was not the
+bottleneck — there is no point in this design space.
+
+**Does NOT prove**: full WebRTC AEC3 ResidualEchoEstimator is
+impossible. AEC3 uses additional state we have not surfaced in R14/R15
+(per-band reverb decay model, calibrated frequency response,
+nonlinear/linear branching with saturated-echo handling,
+transition-window protection beyond a single bool, render-buffer late
+tap with K_tail variation).
+
+## Cumulative across Round 1–15
+
+| Round | Outcome | Notes |
+|---|---|---|
+| 1 | F1-F4 all null | trigger style invalidated |
+| 2 | Phase 3 / state-routing all null | cold-start / EPC unconditional fail |
+| 3 | D2 catastrophic / D3 sub-acceptance | EPC-gated bypass not viable |
+| 4 | R1 v1+v2 null | per-bin cap erased downstream |
+| 5 | A34 v2 closest (+0.023 deg, FS −0.04) | Pareto curve mapped |
+| 6 | refactor-only shippable, lift disproven | RES split clean |
+| 7 | EPV damp NULL; mix Pareto-bound | filter trajectory hypothesis raised |
+| R8 prep | R7 causal direction falsified | linear AEC fine on worst |
+| R9 | STOP-1: state cannot sort worst from best | both dominated by RENDER_FALLBACK |
+| R10 | STOP at P0: candidate is same R5/R6 axis | uniform tightening |
+| R11 | P0 GO (reverb culprit) → P1 STOP | no per-frame discriminator at residual stage |
+| R12 | STOP at P0: 5 candidates exhausted | residual-stage signal pool exhausted |
+| R13 | STOP at P0: β reverse-correlated, γ too soft | kernel-derived early/late points wrong direction |
+| R14 | STOP at P0: δ uniform under, ε FS under | render-tail decouples kernel bias but reverb_gain mismatch |
+| **R15** | **STOP at P0: empty feasible region (0/8892)** | **no Layer-1 × Layer-2 × Layer-3 formula over R14/R15 observable pool passes bidirectional + per-case gate; classical residual/reverb path closed** |
+
+## Recommendation
+
+R10–R15 cumulatively rule out classical-DSP residual/reverb adjustment
+over the surfaced observable pool. The remaining axes of mechanism
+work are:
+
+1. **R16 missing-state audit** (per the R15 plan's follow-up section) —
+   surface state R14/R15 did NOT plumb (per-band reverb decay model,
+   K_tail sweep at multiple offsets, nonlinear/linear branch state,
+   transition-window remaining time as continuous, saturation history,
+   per-band erle / erle-based confidence), then rerun the R15
+   grid-search engine over the enlarged pool. If that ALSO closes
+   empty, the classical residual/reverb path is dead by every
+   reasonable interpretation.
+
+2. **NN postfilter** (`~/.claude/plans/jazzy-brewing-castle.md`) —
+   learned residual; bypasses the observable-pool ceiling entirely by
+   using upstream features the DSP residual stage does not see.
+
+3. **Upstream filter-trajectory rewrite** — flagged in R8/R11 verdicts
+   as the binding root for DT_mv. Out of scope of R10–R15 (those rounds
+   only touched the residual stage); a future round would need to open
+   on the kernel side, not the residual side.
+
+4. **Accept v3.8.1 baseline as the classical-DSP Pareto ship** and
+   commit to NN as the only forward-going scoring lift. R10–R15 is the
+   cumulative evidence supporting this decision.
