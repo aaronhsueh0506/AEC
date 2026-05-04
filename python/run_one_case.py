@@ -175,12 +175,13 @@ def make_plot(mic, ref, out, erle, sample_rate, png_path, title=''):
     return True
 
 
-def make_demo_plot(mic, ref, results, sample_rate, png_path, title=''):
-    """results: list of (label, out, erle) tuples."""
+def make_demo_pair_plot(mic, ref, left, right, sample_rate, png_path, title=''):
+    """left/right: (label, out, erle). 2-column side-by-side comparison."""
     try:
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
+        from matplotlib.gridspec import GridSpec
     except ImportError:
         print('warning: matplotlib not available — skipping plot', file=sys.stderr)
         return False
@@ -188,56 +189,48 @@ def make_demo_plot(mic, ref, results, sample_rate, png_path, title=''):
     n = len(mic)
     t = np.arange(n) / sample_rate
     t_end = t[-1] if n else 1.0
-    n_runs = len(results)
-    colors = ['#7f7f7f', '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
 
-    rows = 2 + n_runs + 1  # mic+ref overlay, ref, n spectrograms, freq-resp
-    fig, axes = plt.subplots(rows, 1, figsize=(13, 2.0 + 1.8 * rows),
-                             constrained_layout=True)
-    fig.suptitle(title or 'AEC demo: feature on/off comparison', fontsize=12)
+    fig = plt.figure(figsize=(14, 11), constrained_layout=True)
+    gs = GridSpec(4, 2, figure=fig)
+    fig.suptitle(title or 'AEC demo: feature comparison', fontsize=12)
 
-    axes[0].plot(t, mic, lw=0.5, color='#1f77b4', alpha=0.6, label='mic')
-    for i, (label, out_i, _) in enumerate(results):
-        axes[0].plot(t, out_i, lw=0.5,
-                     color=colors[(i + 1) % len(colors)],
-                     alpha=0.75, label=label)
-    axes[0].set_ylabel('mic + outs')
-    axes[0].set_xlim(0, t_end)
-    axes[0].legend(loc='upper right', fontsize=8, ncol=min(n_runs + 1, 5))
-
-    axes[1].plot(t, ref, lw=0.5, color='#ff7f0e')
-    axes[1].set_ylabel('ref')
-    axes[1].set_xlim(0, t_end)
-
-    vmin, vmax = -80, 0
     Smic, t_spec, freqs = _spectrogram(mic, sample_rate)
     extent = [t_spec[0], t_spec[-1] if len(t_spec) else 1, freqs[0], freqs[-1]]
-    axes[2].imshow(Smic, aspect='auto', origin='lower', extent=extent,
-                   vmin=vmin, vmax=vmax, cmap='magma')
-    axes[2].set_ylabel('mic spec\n(Hz)')
-    axes[2].set_yticks([0, 2000, 4000, 6000, 8000])
+    vmin, vmax = -80, 0
 
-    for i, (label, out_i, _) in enumerate(results):
+    ax_ref = fig.add_subplot(gs[0, :])
+    ax_ref.plot(t, ref, lw=0.5, color='#ff7f0e')
+    ax_ref.set_ylabel('ref')
+    ax_ref.set_xlim(0, t_end)
+    ax_ref.set_title('reference (far-end loopback)', fontsize=10)
+
+    for col, (label, out_i, erle_i) in enumerate([left, right]):
+        ax_w = fig.add_subplot(gs[1, col])
+        ax_w.plot(t, mic, lw=0.5, color='#1f77b4', alpha=0.5, label='mic')
+        ax_w.plot(t, out_i, lw=0.5, color='#2ca02c', alpha=0.85, label='out')
+        ax_w.set_xlim(0, t_end)
+        ax_w.set_title(label, fontsize=11, fontweight='bold')
+        ax_w.legend(loc='upper right', fontsize=8)
+        if col == 0:
+            ax_w.set_ylabel('mic + out')
+
+        ax_s = fig.add_subplot(gs[2, col])
         S, _, _ = _spectrogram(out_i, sample_rate)
-        ax = axes[3 + i]
-        ax.imshow(S, aspect='auto', origin='lower', extent=extent,
-                  vmin=vmin, vmax=vmax, cmap='magma')
-        ax.set_ylabel(f'{label}\n(Hz)')
-        ax.set_yticks([0, 2000, 4000, 6000, 8000])
+        ax_s.imshow(S, aspect='auto', origin='lower', extent=extent,
+                    vmin=vmin, vmax=vmax, cmap='magma')
+        ax_s.set_yticks([0, 2000, 4000, 6000, 8000])
+        if col == 0:
+            ax_s.set_ylabel('out spec (Hz)')
 
-    ax_fr = axes[-1]
-    mic_db, fr = _avg_magnitude_db(mic, sample_rate)
-    ax_fr.semilogx(fr[1:], mic_db[1:], color='#1f77b4', lw=1.0,
-                   alpha=0.6, label='mic')
-    for i, (label, out_i, _) in enumerate(results):
-        out_db, _ = _avg_magnitude_db(out_i, sample_rate)
-        ax_fr.semilogx(fr[1:], out_db[1:], lw=1.0,
-                       color=colors[(i + 1) % len(colors)], label=label)
-    ax_fr.set_xlabel('frequency (Hz)')
-    ax_fr.set_ylabel('avg mag (dB)')
-    ax_fr.set_xlim(50, sample_rate / 2)
-    ax_fr.grid(True, which='both', alpha=0.3)
-    ax_fr.legend(loc='lower left', fontsize=8, ncol=min(n_runs + 1, 5))
+        ax_e = fig.add_subplot(gs[3, col])
+        if len(erle_i):
+            t_erle = np.arange(len(erle_i)) * (n / max(len(erle_i), 1)) / sample_rate
+            ax_e.plot(t_erle, erle_i, lw=0.7, color='#d62728')
+        ax_e.axhline(0, color='#888', lw=0.5)
+        ax_e.set_xlim(0, t_end)
+        ax_e.set_xlabel('time (s)')
+        if col == 0:
+            ax_e.set_ylabel('ERLE (dB)')
 
     fig.savefig(png_path, dpi=120)
     plt.close(fig)
@@ -254,7 +247,7 @@ def run_demo(args):
     ]
 
     mic_ref = None
-    results = []
+    results = {}
     for label, flags in configs:
         wav_path = f'{base}__{label.replace(" ", "").replace("+", "p")}.wav'
         mic, ref, out, erle, sr = run_aec(
@@ -265,14 +258,25 @@ def run_demo(args):
         print(f'wrote {wav_path}', file=sys.stderr)
         if mic_ref is None:
             mic_ref = (mic, ref, sr)
-        results.append((label, out, erle))
+        results[label] = (out, erle)
 
     mic, ref, sr = mic_ref
-    png_path = args.plot or f'{base}_demo.png'
-    title = (f'{os.path.basename(args.mic)} | demo | preset={args.preset} '
-             f'fl={args.filter}')
-    if make_demo_plot(mic, ref, results, sr, png_path, title=title):
-        print(f'wrote {png_path}', file=sys.stderr)
+    base_title = (f'{os.path.basename(args.mic)} | preset={args.preset} '
+                  f'fl={args.filter}')
+
+    pairs = [
+        ('linear_vs_res', 'linear', '+res',
+         'demo: linear vs linear+res'),
+        ('res_vs_rescng', '+res', '+res +cng',
+         'demo: +res vs +res+cng'),
+    ]
+    for tag, l_label, r_label, subtitle in pairs:
+        png_path = f'{base}_demo_{tag}.png'
+        l = (l_label, *results[l_label])
+        r = (r_label, *results[r_label])
+        if make_demo_pair_plot(mic, ref, l, r, sr, png_path,
+                               title=f'{base_title} | {subtitle}'):
+            print(f'wrote {png_path}', file=sys.stderr)
 
 
 def main():
