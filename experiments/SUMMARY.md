@@ -1676,3 +1676,158 @@ outside R5–R11 scope.
 
 NN postfilter (separate plan) remains the only realistic ship route
 without that upstream rework.
+
+
+# Round 12 — Movement-DT nearend-evidence audit (audit-passive)
+
+Branch: `algo/round12-nearend-evidence-audit` (discarded after closure)
+Date: 2026-05-04
+Outcome: **STOP at Phase 0** — none of the 5 nearend-evidence candidates
+qualify under the strict 2-way separation gate.
+
+## Why R12 was opened (Codex direction)
+
+R11 P0 cleanly identified the reverb stage as the residual-side
+culprit, but R11 P1 proved every limiter prototype either no-ops or
+nukes FS — worst-DT_mv was indistinguishable from FS in every signal
+available at that stage (coh2, dt_for_fs, far_activity, error_psd,
+reverb_add magnitude, r/err). R12 took the WebRTC AEC3 architectural
+hint: introduce a `DominantNearendDetector` / `SubbandNearendDetector`
+that can flip suppressor tuning, built from signals NOT already
+proven null in R5–R11.
+
+R12 was audit-first: trace 5 candidate signals, ask one question —
+**does at least one separate worst-DT_mv from FS at strict gate?**
+
+## Phase 0 plumbing
+
+`ResFilter._stage_residual_model` emits a per-frame `_r12_diag` dict
+with five candidate signals computed from local cross-spectra
+(`S_mf_r12`, `S_mm_r12`, `S_ff_r12` EMA at α=0.65, audit-passive):
+
+- **A** `r12_coh2_mf_voice` — mic-far coherence² (voice band mean)
+- **B** `r12_shape_corr_ef_voice` — Pearson(log error_psd, log far_psd) over voice band
+- **C** `r12_env_drift_voice` / `r12_env_decay_voice` / `r12_env_drift_ratio` — frame-to-frame error_psd dynamics
+- **D** `r12_phase_jitter_mf_voice` — frame-to-frame phase change of S_mf voice band
+- **E** `r12_near_residual_frac_voice` — far-uncorrelated mic energy fraction (independent of AEC filter)
+
+parity_round6 5-fixture HASH MATCH × 5.
+
+## Strict 2-way gate
+
+A candidate qualifies only if it passes BOTH:
+
+- **G1 worst-DT_mv vs FS_combined** (FS_static ∪ FS_movement, n=300):
+  |Cohen's d| ≥ 0.6 AND |Δmean| ≥ 0.05
+- **G2 worst-DT_mv vs best-DT_mv** (rank-locked baseline_v381_seeded.deg):
+  |Cohen's d| ≥ 0.5
+
+Stricter than R7/R11 default (0.5/0.05) because the R11 failure mode
+was worst-vs-FS overlap — G1 is the binding criterion.
+
+## Results (800-case trace, worst-20 vs best-20 vs FS-300)
+
+| candidate | aggregate | worst | best | FS | d(w-b) | d(w-FS) | |Δw-FS| | G1 | G2 | qualified |
+|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
+| A coh2_mf | mean | 0.305 | 0.333 | 0.359 | -0.22 | -0.43 | 0.053 | no | no | no |
+| B shape_corr_ef | p50 | 0.533 | 0.461 | 0.554 | +0.60 | -0.18 | 0.021 | no | PASS | no |
+| C env_drift | mean | 0.545 | 2.125 | 0.766 | -0.71 | -0.13 | 0.221 | no | PASS | no |
+| C env_drift_ratio | p50 | 1.689 | 1.577 | 1.616 | +1.17 | +0.57 | 0.073 | no | PASS | no |
+| D phase_jitter_mf | p50 | 0.439 | 0.379 | 0.395 | +0.41 | +0.32 | 0.044 | no | no | no |
+| E near_residual_frac | mean | 0.572 | 0.562 | 0.487 | +0.05 | +0.48 | 0.085 | no | no | no |
+
+## Mechanism reading
+
+Three close-but-not-passing patterns:
+
+1. **Coh2_mf direction is correct, magnitude small.** Worst-DT_mv
+   mic-far coherence really is lower than FS (consistent with the
+   hypothesis that nearend speech reduces far-correlated mic content),
+   but Δ=0.054 is at the floor and d=-0.43 well below 0.6.
+
+2. **Candidates B and C pass G2 only.** They sort within DT_mv (worst
+   sortable from best) but cannot sort worst-DT_mv from FS — the same
+   R11 failure mode. A reverb gate built on either would need
+   additional discrimination to avoid hitting FS.
+
+3. **Candidate E (near_residual_frac) is the inverse**: it sorts FS-vs-DT
+   (DT cohorts ~0.55, FS ~0.49) but **worst and best DT_mv are
+   identical** (0.572 vs 0.562, d=+0.05). This is the most definitive
+   null in R12 — an estimate of "mic energy NOT explained by far
+   reference" extracts equivalent nearend-energy on both worst and
+   best. The thing that differs is upstream — likely how that energy
+   is consumed (reverb attribution / suppressor decision), not whether
+   the cross-spectrum can see it.
+
+The phase-jitter candidate (D), inspired directly by Codex's WebRTC
+direction, shows the predicted directionality but magnitudes are too
+small after S_mf EMA smoothing.
+
+## Disposition
+
+- Branch `algo/round12-nearend-evidence-audit` discarded (no merge to
+  main). R12 P0 plumbing (5 candidate signals + cross-spectrum EMAs +
+  trace fields) is NOT carried to main; documented here for future
+  re-application.
+- v3.8.1 `baseline_v381_seeded` remains canonical.
+
+## What R5–R12 cumulatively rule out
+
+Combined with R11's null reading on `coh2`, `dt_for_fs`, `error_psd`,
+`far_activity`, `reverb_add` magnitude, `r/err`, R12 adds:
+
+- Mic-far coherence (A) — direction right, magnitude too small.
+- Spectral shape correlation (B) — confounded; sorts within DT but not vs FS.
+- Frame-to-frame envelope dynamics (C) — scale-confounded by mic energy.
+- Cross-spectrum phase jitter (D) — too smoothed by EMA.
+- Far-uncorrelated mic energy (E) — sorts FS-vs-DT but not worst-vs-best-DT.
+
+This exhausts the residual-stage signal pool. The required movement-DT
+nearend discriminator is not in this pool.
+
+## Cumulative across Round 1–12
+
+| Round | Outcome | Notes |
+|---|---|---|
+| 1 | F1-F4 all null | trigger style invalidated |
+| 2 | Phase 3 / state-routing all null | cold-start / EPC unconditional fail |
+| 3 | D2 catastrophic / D3 sub-acceptance | EPC-gated bypass not viable |
+| 4 | R1 v1+v2 null | per-bin cap erased downstream |
+| 5 | A34 v2 closest (+0.023 deg, FS −0.04) | Pareto curve mapped |
+| 6 | refactor-only shippable, lift disproven | RES split clean |
+| 7 | EPV damp NULL; mix Pareto-bound | filter trajectory hypothesis raised |
+| R8 prep | R7 causal direction falsified | linear AEC fine on worst |
+| R9 | STOP-1: state cannot sort worst from best | both dominated by RENDER_FALLBACK |
+| R10 | STOP at P0: candidate is same R5/R6 axis | uniform tightening |
+| R11 | P0 GO (reverb culprit) → P1 STOP | no per-frame discriminator at residual stage |
+| **R12** | **STOP at P0: 5 candidates exhausted** | **residual-stage signal pool fully exhausted; nearend evidence is upstream** |
+
+## Recommendation (refined after R12)
+
+Three rounds in a row (R10/R11/R12) STOP at Phase 0 or Phase 1 of
+a residual-stage / suppressor-stage local fix. The pattern is now
+mechanistically settled:
+
+- **Don't borrow WebRTC suppressor formulas** — R10 ruled that out
+  (gain rewrite inherits the residual bias).
+- **Don't borrow WebRTC reverb gates as local thresholds** — R11/R12
+  ruled that out (no per-frame DT discriminator at residual stage).
+- **Do borrow WebRTC architecture** — `ResidualEchoEstimator` separates
+  early/late reflections as a state machine, and `AecState` consolidates
+  decisions consumed downstream. That is a structural change, not a
+  threshold tweak.
+
+Next round candidates (under the constraint of NOT changing shadow
+PBFDKF and NOT shipping NN):
+
+- **R13**: WebRTC-style ResidualEchoEstimator / Reverb rewrite —
+  early-vs-late reflection separation as independent state machines,
+  audit-first.
+- **R14**: AecState sidecar (consolidated state module that
+  simultaneously controls residual mode / reverb / suppressor min-max /
+  CNG, not just one routing decision as in R9).
+- R15 (audibility / gain dynamics) and R16 (low-noise-render special
+  case) are polish-tier; not blocking.
+
+NN postfilter remains the only known ship route absent the upstream
+architectural rework.
