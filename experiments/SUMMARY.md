@@ -1236,3 +1236,122 @@ audit) was based on the wrong causal reading.
 
 NN postfilter (separate plan) is the remaining route to break Pareto
 on this dataset. Classical-suppressor architecture is at Pareto.
+
+---
+
+# Round 9 — AEC3-style FilterQualityState (closed at STOP-1)
+
+**Branch**: `algo/round9-filter-quality-state` (audit-only, NOT MERGED — discarded after verdict)
+**Date**: 2026-05-04
+**Outcome**: STOP-1 fired at end of Phase 0. R8-prep warning ("purely
+filter-side state may not separate") confirmed empirically. R9 closed
+without Phase 1; the FilterQualityState cannot sort worst-DT_mv from
+best-DT_mv on the cases the bench cares about.
+
+## Why R9 was opened
+
+Architectural problem identified across rounds: ResFilter / residual
+estimator / suppressor each re-derive policy from raw flags
+(`effective_dt`, `epc_active`, `_filter_converged`, `using_render_based`,
+`divergence`). One signal change at one site gets reinterpreted at
+another. R9's thesis: centralize into a single `FilterQualityState`
+whose categorical output (`residual_policy`) is the only policy input
+those consumers see.
+
+Codex direction: AEC3-style state architecture; do NOT touch shadow
+NLMS / NN / RES output mix / kernel.
+
+## Phase 0 design (audit-passive plumbing, all discarded)
+
+Extended `AecState` ([aec.py:2696](AEC/python/aec.py#L2696)) in-place
+with `compute_quality(frame_count, warmup_frames, erle_factor,
+nores_inst_erle_db, echo_psd_to_error_psd_ratio, dt_combined,
+epc_event_fired, delay_shift_event, shadow_rise_event)` and 7
+properties:
+
+- `linear_usable_for_residual` = `once_conv ∧ conv ∧ ¬epc ∧ div<0.3`
+- `linear_usable_for_output` = + `filter_quality_score≥0.5 ∧ ¬transition_recent`
+- `initial_state` = `(¬once_conv) ∨ frame<warmup+50`
+- `transition_recent` = transition_window_frames > 0 (30-frame window
+  armed on EPC fire / delay_shift / shadow_rise)
+- `transparent_mode` = `linear_usable_for_output ∧ low echo risk ∧
+  high NE confidence ∧ dt_combined<0.2`
+- `filter_quality_score` ∈ [0,1] = weighted erle_factor +
+  nores_inst_erle_db + once·conv + (1−div)
+- `residual_policy` ∈ {LINEAR_TRUSTED, LINEAR_BUT_CAP, RENDER_FALLBACK,
+  TRANSITION_HOLD, TRANSPARENT_NEAR}, priority dispatch
+
+Plus the four R8-prep echo proxies (re-applied only on this branch):
+`inst_erle_db`, `nores_inst_erle_db`, `echo_psd_to_error_psd_ratio`,
+`far_to_mic_xcorr0`. trace_phase0 extended to collect all `r9_*` /
+`qstate_*` fields.
+
+parity_round6 5-case fixture: PARITY PASS bit-exact vs golden built
+on branch HEAD before any change (audit-only / additive).
+
+## Phase 0 result — STOP-1 fired
+
+DT_movement worst-20 vs best-20, rank-locked by baseline_v381_seeded.deg.
+PROCEED criterion: ≥1 critical bucket with |Cohen's d| ≥ 0.5 AND
+|Δfraction| ≥ 0.10.
+
+| critical bucket | worst | best | |Δ| | effect | gate |
+|---|---:|---:|---:|---:|---|
+| `RENDER_FALLBACK` fraction | 90.7 % | 92.5 % | 0.018 | 0.11 | ✗ |
+| `TRANSITION_HOLD` fraction | 6.6 % | 4.2 % | 0.024 | 0.25 | ✗ |
+| `transition_recent` fraction | 6.6 % | 4.2 % | 0.024 | 0.25 | ✗ |
+
+0/3 critical PASS. 0/11 non-critical PASS. The largest non-critical
+effect was `r9_initial_state_pct` (effect 0.49, |Δ| 0.213) but
+direction is reversed (best has MORE initial-state frames — likely
+shorter clips, not a policy separator).
+
+**All 20 worst-DT_mv AND all 20 best-DT_mv have dominant policy =
+`render_fallback`**, with most cases in render_fallback ≥ 80 % of
+frames. The state cannot distinguish them.
+
+## Mechanism reading
+
+`linear_usable_for_residual` requires `once_conv AND conv AND not epc
+AND div<0.3`. DT_mv cases rarely satisfy this — DT density and
+movement-driven `mark_diverged` events keep both populations out of
+`linear_usable_for_residual` most of the time. Both worst and best
+route to RENDER_FALLBACK.
+
+The differentiator on DT_mv `deg` is therefore NOT "which residual
+source to use". Both populations use the same source. The differentiator
+is "how aggressively the suppressor cuts NE within RENDER_FALLBACK
+mode", which is exactly the R5/R6/R8-prep finding: RES is the binding
+stage. State routing isn't the lever.
+
+R8-prep verdict had explicitly flagged this: "purely filter-side state
+may not separate". R9 P0 confirmed.
+
+## Disposition
+
+- Branch `algo/round9-filter-quality-state` discarded (no merge to
+  main). The FilterQualityState plumbing + 4 P0a echo proxies are NOT
+  on main; recorded above for future re-application if a different
+  state-side hypothesis emerges.
+- No Phase 1 algorithm changes attempted (premise falsified).
+- v3.8.1 `baseline_v381_seeded` remains canonical.
+
+## Cumulative across Round 1-7 + R8 prep + R9 P0
+
+| Round | Outcome | Notes |
+|---|---|---|
+| 1 | F1-F4 all null | trigger style invalidated |
+| 2 | Phase 3 / state-routing all null | cold-start / EPC unconditional fail |
+| 3 | D2 catastrophic / D3 sub-acceptance | EPC-gated bypass not viable |
+| 4 | R1 v1+v2 null | per-bin cap erased downstream |
+| 5 | A34 v2 closest (+0.023 deg, FS −0.04) | Pareto curve mapped |
+| 6 | refactor-only shippable, lift disproven | RES split clean |
+| 7 | EPV damp NULL; mix Pareto-bound | filter trajectory hypothesis raised |
+| R8 prep | R7 causal direction falsified | linear AEC fine on worst |
+| **R9** | **STOP-1: state cannot sort worst from best** | **both populations dominated by RENDER_FALLBACK** |
+
+## Recommendation (unchanged)
+
+NN postfilter (separate plan) remains the only realistic ship route
+to break Pareto on this dataset. Classical-suppressor architecture
+is at Pareto across every in-scope lever, including state routing.
