@@ -933,6 +933,10 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         rin.erl_estimate = a->erl_estimate;
         rin.filter_converged = a->convergence.converged;
         rin.filter_once_converged = a->convergence.once_converged;
+        /* Stash for aec_get_res_context() */
+        a->last_far_power         = far_power;
+        a->last_shadow_dt         = shadow_dt_v;
+        a->last_is_stationary_dt  = is_stationary_dt;
         res_filter_process(&a->res, &rin, a->res_output);
 
         /* per-bin mu_scale update */
@@ -1005,4 +1009,26 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     }
 
     a->frame_count++;
+}
+
+void aec_get_res_context(const Aec* a, AecResContext* ctx) {
+    if (!a || !ctx) return;
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->n_freqs    = a->n_freqs;
+    ctx->hop_size   = a->hop_size;
+    ctx->linear_hop = a->raw_output;
+    ctx->echo_spec  = a->main_filter.base.echo_spec;
+    ctx->far_spec   = a->main_filter.base.far_spec;
+    ctx->near_spec  = a->main_filter.base.near_spec;
+    ctx->far_power           = (float)a->last_far_power;
+    ctx->erle_factor         = (float)a->erle_factor_prev;
+    ctx->dt_indicator        = (float)a->last_dt_indicator;
+    ctx->divergence          = (float)a->convergence.divergence;
+    ctx->saturation_level    = (float)a->saturation_level;
+    ctx->erl_estimate        = (float)a->erl_estimate;
+    ctx->shadow_dt           = (float)a->last_shadow_dt;
+    ctx->is_stationary_dt    = a->last_is_stationary_dt;
+    ctx->filter_converged    = a->convergence.converged;
+    ctx->filter_once_converged = a->convergence.once_converged;
+    ctx->epc_active          = a->epc.active;
 }

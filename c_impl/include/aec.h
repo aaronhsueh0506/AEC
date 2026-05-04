@@ -153,6 +153,10 @@ typedef struct Aec {
     /* Diagnostic fields (last frame's value, mirrors Python aec._diag) */
     double last_dt_indicator;
     double last_mu_scale;
+    /* Stashed values from last aec_process(), exposed via aec_get_res_context */
+    double last_far_power;
+    double last_shadow_dt;
+    int    last_is_stationary_dt;
     /* Hop scratch buffers */
     float* near_hop;             /* [hop] */
     float* far_hop;              /* [hop] */
@@ -186,6 +190,57 @@ void aec_process(Aec* a, const float* mic, const float* ref, float* out);
 
 /* Accessors mirroring old C diag API for parity dump tools */
 int  aec_hop_size(const Aec* a);
+
+/**
+ * Linear-AEC + external-RES integration hook.
+ *
+ * Snapshot of internal AEC state taken from the most recently processed
+ * frame. Lets a downstream component (NN post-filter, classical RES,
+ * pipeline that runs NR before RES) consume the same context that the
+ * built-in ResFilter would have seen.
+ *
+ * Typical usage:
+ *
+ *     AecConfig cfg;
+ *     aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+ *     cfg.enable_residual_filter = 0;        // skip built-in RES
+ *
+ *     Aec aec; aec_create(&aec, &cfg);
+ *     aec_process(&aec, mic_hop, ref_hop, linear_out);
+ *
+ *     AecResContext ctx;
+ *     aec_get_res_context(&aec, &ctx);       // valid until next aec_process
+ *
+ *     // ... downstream RES / NN model uses ctx ...
+ *
+ * The Complex* spec pointers reference internal storage and remain
+ * valid until the next aec_process call. Scalars are copied.
+ */
+typedef struct AecResContext {
+    int            n_freqs;
+    int            hop_size;
+    /* Time-domain linear AEC output (mic - filter echo, before built-in RES).
+     * [hop_size] samples; valid until next aec_process. */
+    const float*   linear_hop;
+    /* Frequency-domain spectra (internal storage; valid until next aec_process). */
+    const Complex* echo_spec;       /* filter echo estimate, [n_freqs] */
+    const Complex* far_spec;        /* far-end FFT, [n_freqs] */
+    const Complex* near_spec;       /* mic FFT, [n_freqs] */
+    /* Scalar context (copied). */
+    float          far_power;
+    float          erle_factor;
+    float          dt_indicator;
+    float          divergence;
+    float          saturation_level;
+    float          erl_estimate;
+    float          shadow_dt;
+    int            is_stationary_dt;
+    int            filter_converged;
+    int            filter_once_converged;
+    int            epc_active;
+} AecResContext;
+
+void aec_get_res_context(const Aec* a, AecResContext* ctx);
 
 #ifdef __cplusplus
 }
