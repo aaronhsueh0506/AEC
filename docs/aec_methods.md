@@ -1,10 +1,10 @@
 # AEC 方法介紹文檔
 
-**版本**：v3.8.1（演算法）/ v3.8.2（C 對齊；2026-05-02）。
-方法架構大致穩定；主要演進細節見 [aec_v3_evolution.md](aec_v3_evolution.md)。
-C 實作（`c_impl/include_v2/` + `c_impl/src_v2/`）已對齊 Python 至 SNR
-64–78 dB（per-frame state bit-exact），詳見 [c_impl/README.md](../c_impl/README.md)。
-本文以 Python 程式碼為主要參考，C 實作 1:1 對應同名 module。
+**版本**：v3.8.2（2026-05-02）。
+方法架構大致穩定；歷史演進細節見 [aec_v3_evolution.md](aec_v3_evolution.md)。
+本文以 Python 程式碼為主要參考；C 實作（`c_impl/include/` +
+`c_impl/src/`）採用同名 module 結構，使用方式詳見
+[c_user_and_integration_guide.md](c_user_and_integration_guide.md)。
 
 ## 目錄
 

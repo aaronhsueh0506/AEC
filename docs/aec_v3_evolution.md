@@ -1,5 +1,11 @@
 # AEC v3.x Evolution — Trace-Driven Multi-Axis Tuning
 
+> **Historical document.** This is a record of the v3.0–v3.4 design
+> rationale and the trace findings that drove each decision. It is not
+> the current user guide. For the live algorithm description, see
+> [aec_methods.md](aec_methods.md). For terse per-version notes, see
+> [CHANGELOG.md](CHANGELOG.md).
+
 This document records the design rationale, trace findings, and decisions for
 v3.0–v3.4. See `CHANGELOG.md` for terse version notes; this is the deeper
 "why" alongside the code comments.

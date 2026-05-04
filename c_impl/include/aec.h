@@ -1,191 +1,177 @@
-/**
- * aec.h - Acoustic Echo Cancellation main interface
+/* aec.h — top-level AEC orchestration for v2 rewrite.
  *
- * PBFDKF (Kalman always on) + Shadow + RES (WOLA) + HPF + Preset
- * Matches Python AEC v1.28.1 (PBFDKF mode).
+ * Wires together every Wave-1/2/3 module into one frame-level process()
+ * that mirrors python/aec.py AEC.process for the BALANCED preset
+ * (FDAF mode, enable_dtd=False, enable_delay_est=True, enable_cng per CLI).
  *
- * Usage (standalone):
- *   AecConfig cfg = aec_config_from_preset(AEC_PRESET_BALANCED, 16000);
- *   Aec* aec = aec_create(&cfg);
- *   int hop = aec_get_hop_size(aec);
- *   while (has_audio) {
- *       aec_process(aec, mic, ref, output);
- *   }
- *   aec_destroy(aec);
- *
- * Usage (linear pipeline — external RES):
- *   AecConfig cfg = aec_config_from_preset(AEC_PRESET_BALANCED, 16000);
- *   cfg.enable_res = 0;
- *   Aec* aec = aec_create(&cfg);
- *   AecResContext* ctx = aec_context_create(aec);
- *   while (has_audio) {
- *       aec_process_ex(aec, mic, ref, output, ctx);
- *       // ctx now contains echo_spec, far_spec, etc. for RES
- *   }
- *   aec_context_destroy(ctx);
- *   aec_destroy(aec);
+ * Out of scope (Plan §取捨):
+ *   - AecMode != FDAF (NLMS, buffered FDAF queue)
+ *   - DTD detectors (BALANCED has enable_dtd=False)
+ *   - get_stats / debug logger / capture_stages
+ *   - return_res_context
  */
+#ifndef AEC_AEC_H
+#define AEC_AEC_H
 
-#ifndef AEC_H
-#define AEC_H
-
-#include "aec_types.h"
+#include "hpf.h"
+#include "saturation.h"
+#include "delay_est.h"
+#include "erle.h"
+#include "detectors.h"
+#include "pbfdkf.h"
+#include "epc_shadow.h"
+#include "residual_echo.h"
+#include "res_filter.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct Aec Aec;
+typedef enum { AEC_PRESET_MILD = 0, AEC_PRESET_BALANCED,
+               AEC_PRESET_AGGRESSIVE, AEC_PRESET_MAXIMUM } AecPreset;
 
-/**
- * Create AEC instance from config
- */
-Aec* aec_create(const AecConfig* config);
+typedef struct AecConfig {
+    int          sample_rate;       /* 16000 default */
+    float        filter_length_ms;  /* 52.0 */
+    int          n_partitions;      /* derived if 0 */
+    float        mu;                /* 0.3 */
+    float        delta;             /* 1e-8 */
+    /* Toggles */
+    int          enable_cng;        /* default 0 (User Fix 2) */
+    int          enable_delay_est;  /* default 1 */
+    int          enable_highpass;   /* default 1 */
+    int          enable_saturation; /* default 1 */
+    int          enable_shadow_filter; /* default 1 */
+    int          enable_residual_filter; /* default 1 */
+    int          saturation_softclip_ref; /* default 1 */
+    /* Preset-tunable */
+    float        res_g_min_db;
+    float        res_over_sub_base;
+    float        res_over_sub_scale;
+    float        res_dt_reduction;
+    float        res_spectral_floor_db;
+    float        res_ne_protect_db;
+    float        res_alpha_echo_psd;
+    float        res_alpha_error_psd;
+    float        res_enr_scale;
+    float        res_reverb_decay;          /* User Fix 1: 0.85 BALANCED */
+    float        res_reverb_gain;           /* User Fix 1: 1.6 BALANCED */
+    float        saturation_over_sub_boost; /* 3.0 */
+    float        startup_dt_mu_min;         /* 0.0 default */
+    float        shadow_mu_min;             /* 0.6 BALANCED */
+    float        shadow_q_ratio;            /* 3.5 BALANCED */
+    float        shadow_copy_threshold;     /* 0.65 */
+    int          shadow_copy_hysteresis;    /* 3 */
+    float        shadow_dtd_offset;         /* 1.5 */
+    float        shadow_dtd_advantage_scale;/* 3.0 */
+    float        shadow_err_alpha;          /* 0.80 */
+    int          warmup_frames;             /* 80 */
+    int          epc_hangover;              /* 20 */
+    float        epc_total_rise;            /* 1.5 */
+    float        epc_delta_threshold;       /* 0.3 */
+    float        max_delay_ms;              /* 250 */
+    float        delay_est_init_s;          /* 0.3 */
+    float        delay_est_period_s;        /* 0.5 */
+    float        highpass_cutoff_hz;        /* 80 */
+    float        saturation_threshold;      /* 0.95 */
+    float        kalman_q_high;             /* 1e-3 BALANCED */
+    float        kalman_q_low;              /* 1e-6 (matches Python default) */
+    /* Debug */
+    int          debug_level;
+    const char*  debug_log_path;
+} AecConfig;
 
-/**
- * Destroy AEC instance
- */
-void aec_destroy(Aec* aec);
+void aec_config_defaults(AecConfig* cfg, int sample_rate);
+void aec_config_from_preset(AecConfig* cfg, AecPreset preset, int sample_rate);
 
-/**
- * Reset all state
- */
-void aec_reset(Aec* aec);
+/* Opaque-ish context. Members exposed for parity dump but stable layout
+ * not part of public ABI. */
+typedef struct Aec {
+    AecConfig cfg;
 
-/**
- * Process hop_size samples
- *
- * @param aec      AEC handle
- * @param near_end Microphone input [hop_size]
- * @param far_end  Reference signal [hop_size]
- * @param output   Echo-cancelled output [hop_size]
- * @return 0 on success
- */
-int aec_process(Aec* aec,
-                const float* near_end,
-                const float* far_end,
-                float* output);
+    int hop_size;
+    int block_size;
+    int fft_size;
+    int n_freqs;
 
-/**
- * Process hop_size samples with context output for external RES
- *
- * Same as aec_process(), but also fills ctx with per-frame AEC state
- * needed by an external RES post-filter. Pass ctx=NULL for no context
- * (equivalent to aec_process).
- *
- * @param aec      AEC handle
- * @param near_end Microphone input [hop_size]
- * @param far_end  Reference signal [hop_size]
- * @param output   Echo-cancelled output [hop_size]
- * @param ctx      Context output (or NULL to skip)
- * @return 0 on success
- */
-int aec_process_ex(Aec* aec,
-                   const float* near_end,
-                   const float* far_end,
-                   float* output,
-                   AecResContext* ctx);
+    /* Modules */
+    Hpf hp_mic, hp_ref;
+    int   has_hp;
+    Saturation sat_ref, sat_mic;
+    int   has_sat;
+    DelayEst delay_est;
+    int   has_delay_est;
+    PBFDKF main_filter;
+    PBFDKF shadow_filter;
+    int   has_shadow;
+    RenderActivity     render_activity;
+    FilterConvergence  convergence;
+    DoubleTalk         dt_analyzer;
+    EpcDetector        epc;
+    ShadowCopy         shadow_copy;
+    ResFilter          res;
+    int   has_res;
 
-/* --- Context allocation --- */
+    /* Delay-compensation ring buffer (only when delay_est on) */
+    float* ref_ring;
+    int    ref_ring_size;
+    int    ref_ring_write;
+    int    ref_ring_filled;
+    int    current_delay;       /* -1 until first acquisition */
+    int    pending_delay;       /* -1 until first 32+ shift candidate */
+    int    has_pending;
 
-/**
- * Create AEC context (allocates internal buffers based on n_freqs)
- */
-AecResContext* aec_context_create(const Aec* aec);
+    /* Per-frame scalars (mirrors Python AEC instance fields) */
+    double saturation_level;
+    double erl_estimate;        /* 0.1 init */
+    double main_err_smooth;
+    double shadow_err_smooth;
+    int    shadow_frame_count;
+    int    epc_render_forced_remaining;
+    double erle_window_near;
+    double erle_window_err;
+    double erle_factor_prev;
+    double inst_erle_smooth;
+    double wn_err_baseline;
+    int    stat_dt_hangover;
+    int    warmup_frames_remaining;
+    int    warmup_far_active;
+    double simple_mu_ratio;
+    int    simple_mu_holdoff;
+    float* per_bin_mu_scale;     /* NULL or [n_freqs] */
+    int    has_per_bin_mu;
+    double limiter_gain;
+    /* Power EMAs (sample-by-sample, alpha=0.95) */
+    double near_power;
+    double raw_error_power;
+    double final_error_power;
+    double alpha_pow;            /* 0.95 */
+    double near_power_sum;
+    double raw_error_power_sum;
+    double final_error_power_sum;
+    int    frame_count;
+    /* Diagnostic fields (last frame's value, mirrors Python aec._diag) */
+    double last_dt_indicator;
+    double last_mu_scale;
+    /* Hop scratch buffers */
+    float* near_hop;             /* [hop] */
+    float* far_hop;              /* [hop] */
+    float* raw_output;           /* [hop] */
+    float* res_output;           /* [hop] */
+} Aec;
 
-/**
- * Destroy AEC context
- */
-void aec_context_destroy(AecResContext* ctx);
+int  aec_create(Aec* a, const AecConfig* cfg);
+void aec_destroy(Aec* a);
+void aec_reset(Aec* a);
 
-/* --- Getters --- */
-int   aec_get_hop_size(const Aec* aec);
-float aec_get_erle(const Aec* aec);
-float aec_get_erle_instant(const Aec* aec);
-int   aec_is_converged(const Aec* aec);
-const AecConfig* aec_get_config(const Aec* aec);
+/* Process exactly hop_size samples. */
+void aec_process(Aec* a, const float* mic, const float* ref, float* out);
 
-/* Debug: exposes internal RES handle for parity testing */
-struct ResFilter;
-struct ResFilter* aec_get_res(const Aec* aec);
-
-/* Debug: filter parity inspection */
-int   aec_get_warmup_frames(const Aec* aec);
-float aec_get_simple_mu_ratio(const Aec* aec);
-struct Pbfdkf;
-struct Pbfdkf* aec_get_filter(const Aec* aec);
-
-/* Per-frame diagnostic accessors (for parity dump) */
-float aec_get_dt_from_energy(const Aec* aec);
-float aec_get_dt_from_shadow(const Aec* aec);
-float aec_get_main_err_smooth(const Aec* aec);
-float aec_get_shadow_err_smooth(const Aec* aec);
-float aec_get_far_activity(const Aec* aec);
-float aec_get_erl_estimate(const Aec* aec);
-int   aec_is_filter_once_converged(const Aec* aec);
-int   aec_is_using_render_based(const Aec* aec);
-int   aec_is_epc_active(const Aec* aec);
-float aec_get_dt_indicator(const Aec* aec);
-float aec_get_mu_scale_last(const Aec* aec);  /* mu_scale used in last process() call */
-float aec_get_erle_factor_last(const Aec* aec);
-float aec_get_res_gain_mean(const Aec* aec);
-float aec_get_raw_error_power(const Aec* aec);
-
-/**
- * Get estimated delay in samples (-1 if not yet estimated or disabled)
- */
-int   aec_get_delay(const Aec* aec);
-
-/* ============================================================
- * Filter training API (TODO: empty stubs for future implementation)
- * ============================================================
- *
- * Goal: train the adaptive filter offline / in a controlled environment
- * (large mu, no DTD, no shadow gating) to obtain a good initial RIR
- * estimate that can later be loaded into the runtime AEC instance.
- *
- * Typical workflow:
- *   1. aec_train_create() with training config (no RES, full mu)
- *   2. Feed pairs of (mic, ref) clips containing only echo (no near-end)
- *   3. aec_train_get_filter() returns trained PBFDKF weights
- *   4. aec_load_filter() to install into runtime aec_create() instance
- */
-
-typedef struct AecTrainer AecTrainer;
-
-/**
- * Create a filter trainer (TODO: empty)
- */
-AecTrainer* aec_train_create(const AecConfig* config);
-
-/**
- * Process one block of (mic, ref) for training (TODO: empty)
- */
-void aec_train_process(AecTrainer* trainer,
-                       const float* mic,
-                       const float* ref,
-                       int n_samples);
-
-/**
- * Get trained filter weights (PBFDKF W array, frequency domain)
- * Returns: pointer to interleaved [n_partitions][n_freqs] complex weights
- *          NULL if not yet trained (TODO: empty)
- */
-const void* aec_train_get_filter(const AecTrainer* trainer);
-
-/**
- * Load pre-trained filter weights into a runtime AEC instance
- * (TODO: empty — requires PBFDKF weight injection support)
- */
-int aec_load_filter(Aec* aec, const void* weights);
-
-/**
- * Destroy trainer
- */
-void aec_train_destroy(AecTrainer* trainer);
+/* Accessors mirroring old C diag API for parity dump tools */
+int  aec_hop_size(const Aec* a);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* AEC_H */
+#endif /* AEC_AEC_H */

@@ -1,173 +1,172 @@
-/**
- * res_filter.h - Residual Echo Suppressor with WOLA (v2)
+/* res_filter.h — port of aec.py ResFilter (1096-2077).
  *
- * WOLA (Weighted Overlap-Add) with sqrt-Hann window:
- * - Analysis: frame_size=320 × sqrt-Hann → zero-pad → FFT(512) → 257 bins
- * - Synthesis: IFFT → truncate → sqrt-Hann → OLA
+ * Only the "direct" echo_method + "enr" gain_type path is ported (used by
+ * all 4 presets). Legacy coherence / wiener / spectral_sub paths are not
+ * ported — Plan §取捨.
  *
- * v2 features: ENR masking gain, direct echo estimation (per-bin ERLE),
- * reverb tail model, frequency postprocessing, configurable PSD alphas.
- * Legacy: coherence-based spectral subtraction still available.
+ * Float32 storage matches Python's np.float32 arrays. Scalar EMAs (Python
+ * `float`) use double in C.
  */
+#ifndef AEC_RES_FILTER_H
+#define AEC_RES_FILTER_H
 
-#ifndef RES_FILTER_H
-#define RES_FILTER_H
-
+#include <stddef.h>
 #include "fft_wrapper.h"
-#include "aec_types.h"
+#include "erle.h"
+#include "residual_echo.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct ResFilter ResFilter;
+typedef struct ResFilter {
+    int    block_size;
+    int    sample_rate;
+    int    frame_size;
+    int    hop_size;
+    int    n_freqs;
 
-/**
- * RES configuration
- */
-typedef struct {
-    int block_size;             /* FFT size (512) */
-    int frame_size;             /* WOLA window length (320) */
-    int hop_size;               /* Processing hop (160) */
-    int n_freqs;                /* block_size/2 + 1 = 257 */
-    float g_min_db;             /* Minimum gain in dB */
-    float max_drop_db_per_frame; /* 6.0 */
-    float max_rise_db_per_frame; /* 6.0 */
-    float spectral_floor_db;    /* -25.0 */
-    float ne_protect_db;        /* -12.0 */
-    int enable_cng;             /* 1 */
+    float  g_min;
+    float  over_sub;
+    float  alpha;
+    float  ne_protect_db;
+    float  alpha_echo_psd;
+    float  alpha_error_psd;
+    float  enr_scale;
+    float  startup_dt_min_ne_scale;
+    float  startup_dt_gain_floor;
+    float  startup_dt_noise_floor_scale;
 
-    /* v2 configurable */
-    float alpha_echo_psd;       /* PSD smoothing (0.5 balanced) */
-    float alpha_error_psd;      /* PSD smoothing (0.6 balanced) */
-    int echo_method;            /* RES_ECHO_COHERENCE or RES_ECHO_DIRECT */
-    int gain_type;              /* RES_GAIN_SPECTRAL_SUB / _WIENER / _ENR */
-    int enable_reverb;          /* reverb tail model */
-    float reverb_decay;         /* 0.5 */
-    float reverb_gain;          /* 0.5 */
-    float enr_scale;            /* ENR threshold scale (1.0) */
-} ResConfig;
+    /* Precomputed per-bin constants */
+    float* stat_dt_mask;
+    float* enr_blend;
+    int    hf_cap_bin;
+    int    harm_lf_start, harm_lf_end;
+    int    harm_hf_start, harm_hf_end;
 
-/**
- * Create ResConfig from AecConfig (for standalone RES in linear pipeline)
- */
-static inline ResConfig res_config_from_aec(const AecConfig* aec_cfg) {
-    ResConfig rc;
-    rc.block_size = aec_cfg->fft_size;
-    rc.frame_size = aec_cfg->frame_size;
-    rc.hop_size = aec_cfg->hop_size;
-    rc.n_freqs = aec_cfg->n_freqs;
-    rc.g_min_db = aec_cfg->res_g_min_db;
-    rc.max_drop_db_per_frame = aec_cfg->res_max_drop_db_per_frame;
-    rc.max_rise_db_per_frame = aec_cfg->res_max_rise_db_per_frame;
-    rc.spectral_floor_db = aec_cfg->res_spectral_floor_db;
-    rc.ne_protect_db = aec_cfg->res_ne_protect_db;
-    rc.enable_cng = aec_cfg->enable_cng;
-    rc.alpha_echo_psd = aec_cfg->res_alpha_echo_psd;
-    rc.alpha_error_psd = aec_cfg->res_alpha_error_psd;
-    rc.echo_method = aec_cfg->res_echo_method;
-    rc.gain_type = aec_cfg->res_gain_type;
-    rc.enable_reverb = aec_cfg->res_enable_reverb;
-    rc.reverb_decay = aec_cfg->res_reverb_decay;
-    rc.reverb_gain = aec_cfg->res_reverb_gain;
-    rc.enr_scale = aec_cfg->res_enr_scale;
-    return rc;
-}
+    /* Mode flags */
+    int    enable_reverb;
+    int    enable_cng;
+    int    enable_spectral_floor;
+    float  spectral_floor_ratio;
+    float  reverb_decay;
+    float  reverb_gain;
 
-/**
- * Create RES filter
- */
-ResFilter* res_create(const ResConfig* cfg);
+    /* Window (sqrt-Hann over frame_size) */
+    float* window;
 
-/**
- * Destroy RES filter
- */
-void res_destroy(ResFilter* res);
+    float  alpha_coh;
+    float  alpha_noise;
+    float  max_drop_ratio;
+    float  max_rise_ratio;
+    float  alpha_envelope;
+    float  render_min_ne_factor;
+    float  render_dt_gain_ceil;
 
-/**
- * Reset RES state
- */
-void res_reset(ResFilter* res);
+    /* Runtime arrays */
+    float* gain_smooth;
+    float* echo_psd;
+    float* error_psd;
+    Complex* S_fe;
+    float* S_ff;
+    float* S_ee;
+    float* near_psd;
+    float* near_psd_buf;     /* [4 * n_freqs] */
+    int    near_psd_idx;
+    float* reverb_psd;
+    float* noise_psd;
+    int    noise_initialized;
+    float* coh2_smooth;
+    float* error_envelope;
+    float* input_buf;
+    float* ola_buf;
+    float* smooth_cn_gain;
+    double far_activity;
+    int    nonlinear_frames;
+    double last_effective_dt;
 
-/**
- * Process hop_size error samples → hop_size enhanced output
- *
- * @param res          RES handle
- * @param error_hop    Error signal from adaptive filter [hop_size]
- * @param echo_spec    Echo estimate spectrum [n_freqs] (from PBFDKF)
- * @param far_spec     Far-end spectrum [n_freqs] (for coherence)
- * @param near_spec    Near-end (mic) spectrum [n_freqs] (for direct echo est, may be NULL)
- * @param far_power    Far-end mean power (activity detection)
- * @param converged    Filter convergence flag
- * @param erle_factor  [0,1] convergence factor for EER blending
- * @param dt_indicator [0,1] double-talk indicator
- * @param over_sub     Over-subtraction factor (dynamic, set by coordinator)
- * @param divergence   [0,1] filter divergence indicator
- * @param is_stationary_dt 1 if stationary far-end DT detected (use protection)
- * @param shadow_dt    [0,1] shadow filter DT indicator (for effective_dt)
- * @param erl_estimate Echo return loss estimate (for render-based echo)
- * @param epc_active   1 if echo path change detected (force render-based)
- * @param saturation_level [0,1] mic saturation level (force render-based + nonlinear echo)
- * @param output_hop   Enhanced output [hop_size]
- */
-void res_process(ResFilter* res,
-                 const float* error_hop,
-                 const Complex* echo_spec,
-                 const Complex* far_spec,
-                 const Complex* near_spec,
-                 float far_power,
-                 int converged,
-                 float erle_factor,
-                 float dt_indicator,
-                 float over_sub,
-                 float divergence,
-                 int is_stationary_dt,
-                 float shadow_dt,
-                 float erl_estimate,
-                 int epc_active,
-                 float saturation_level,
-                 float* output_hop);
+    /* Sub-modules owned by ResFilter */
+    FilterErleEst     filter_erle;
+    FullbandErleEst   fb_erle;
+    ResidualEcho      residual_est;
 
-/**
- * Force render-based echo switching mode
- */
-void res_force_render_based(ResFilter* res);
+    /* Diagnostics */
+    double diag_gain_mean;
+    double diag_gain_min;
+    double diag_effective_g_min;
+    double diag_far_activity;
+    double diag_echo_psd_mean;
+    double diag_error_psd_mean;
 
-/**
- * Get echo_psd and error_psd arrays (for per-bin mu_scale)
- */
-const float* res_get_echo_psd(const ResFilter* res);
-const float* res_get_error_psd(const ResFilter* res);
+    /* FFT scratch */
+    FftHandle* fft;
+    float*     time_scratch;
+    Complex*   spec_synth;
+    Complex*   enhanced_spec;
 
-/* Parity inspection accessors (read-only) */
-const float* res_get_gain_smooth(const ResFilter* res);
-const float* res_get_noise_psd(const ResFilter* res);
+    /* RNG state for CNG (xorshift32). 0 means uninitialised → seeded at create. */
+    unsigned int cng_rng_state;
+} ResFilter;
 
-/**
- * Debug snapshot — broadband means of internal state (for Python/C parity check)
- */
-typedef struct {
-    float gain_mean;
-    float gain_min;
-    float echo_psd_mean;
-    float error_psd_mean;
-    float coh2_mean;
-    float filter_erle_mean;
-    float fb_erle;
-    float reverb_psd_mean;
-    float far_activity;
-    int   using_render_based;
-    float last_erle_factor;
-    float last_switching_threshold;
-    float last_enr_avg;
-    float last_residual_mean;
-} ResDebugStats;
+/* Init parameters mirror Python kwargs in __init__. Use `enable_cng=0` for
+ * BALANCED CLI default (User Fix 2). */
+typedef struct ResFilterConfig {
+    int   block_size;
+    int   n_freqs;
+    int   frame_size;       /* 0 → block_size */
+    int   hop_size;         /* 0 → frame_size/2 */
+    int   sample_rate;
+    float g_min_db;             /* default -20 */
+    float over_sub;             /* 1.5 */
+    float alpha;                /* 0.8 */
+    int   enable_cng;           /* default 0 (User Fix 2) */
+    float max_drop_db_per_frame;/* 6.0 */
+    float max_rise_db_per_frame;/* 3.0 */
+    int   enable_spectral_floor;/* 1 */
+    float spectral_floor_db;    /* -25 */
+    float ne_protect_db;        /* -10 */
+    int   enable_reverb;        /* 1 (BALANCED preset) */
+    float reverb_decay;         /* 0.85 (User Fix 1) */
+    float reverb_gain;          /* 1.6 (User Fix 1) */
+    float alpha_echo_psd;       /* 0.7 */
+    float alpha_error_psd;      /* 0.8 */
+    float enr_scale;            /* 1.0 */
+    float startup_dt_min_ne_scale;
+    float startup_dt_gain_floor;
+    float startup_dt_noise_floor_scale;
+    float render_min_ne_factor; /* 0.5 */
+    float render_dt_gain_ceil;  /* 0.6 */
+} ResFilterConfig;
 
-void res_get_debug_stats(const ResFilter* res, ResDebugStats* out);
-void res_dump_gain_spectrum(const ResFilter* res, float* out_gain);
+void res_filter_init(ResFilter* r, const ResFilterConfig* cfg);
+void res_filter_free(ResFilter* r);
+void res_filter_reset(ResFilter* r);
+
+/* Port of ResFilter.process. Outputs hop_size samples. */
+typedef struct ResProcessInputs {
+    const float*   error_hop;            /* [hop_size] time-domain residual */
+    const Complex* echo_spec;            /* [n_freqs] from filter */
+    const Complex* far_spec;             /* [n_freqs] (NULL allowed) */
+    const Complex* near_spec;            /* [n_freqs] (NULL ⇒ direct mode disabled) */
+    const Complex* error_spec_from_filter; /* [n_freqs] (NULL ⇒ use OLA spec_synth) */
+    double far_power;
+    double erle_factor;
+    double dt_indicator;
+    double divergence;
+    int    is_stationary_dt;
+    double saturation_level;
+    int    epc_active;
+    double shadow_dt;
+    double erl_estimate;
+    int    filter_converged;
+    int    filter_once_converged;
+} ResProcessInputs;
+
+void res_filter_process(ResFilter* r, const ResProcessInputs* in,
+                           float* output_hop);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* RES_FILTER_H */
+#endif /* AEC_RES_FILTER_H */

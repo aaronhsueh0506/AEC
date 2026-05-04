@@ -5,70 +5,47 @@ or tuning sweeps; patch is bugfix.
 
 ---
 
-## v3.8.2 (2026-05-02) — C bit-exact parity with Python
+## v3.8.2 (2026-05-02) — C release-clean rewrite
 
-**Goal**: Complete the C rewrite (started v2.5 → v3.8.1) to align bit-exact with
-Python `aec.py` v3.8.1. No Python-side audio change; new `c_impl/src_v2/` +
-`c_impl/include_v2/` build delivers SNR 64–78 dB end-to-end vs Python output.
+**Goal**: Reorganize the C implementation under a single canonical layout
+(`c_impl/include/` + `c_impl/src/`, CLI binary `bin/aec_wav`). No Python-side
+audio change. Removes the development-era dual-directory layout and the
+legacy v2.5 frozen reference.
 
-**Layout**: legacy `c_impl/src/` + `c_impl/include/` frozen for reference; v2
-port lives in `src_v2/` + `include_v2/`. CLI binary `bin/aec_wav_v2`.
+**Layout** (post-rewrite):
 
-**Per-module gates (passed)**:
+```
+c_impl/
+├── include/        public headers
+├── src/            sources
+├── example/aec_wav.c
+├── test/modules/   per-module test harnesses (dev tooling)
+└── Makefile
+```
 
-| Module | Gate |
-|---|---|
-| HighPassFilter | bit-exact 0 ULP, 4237 frames × mic+ref |
-| SaturationDetector | bit-exact 0 ULP, 4237 frames × mic+ref |
-| DelayEstimator (GCC-PHAT) | delay/n_updates int-exact, PAR rtol < 1e-3 |
-| FilterErle / FullbandErle / erle_confidence | fp64 bit-exact, fp32 store-back ULP |
-| RenderActivity / FilterConvergence / DoubleTalkAnalyzer | bit-exact (booleans + counters + fp64 EMAs) |
-| PBFDKF (G1 KX-blended P-update) | output / echo / P / R bit-exact pre-reset (30 frames) |
+**C-side cleanups carried over from the rewrite**:
 
-**Per-frame `aec._diag` parity (full 4237-frame DT case)**: ALL of `mu_scale`,
-`erle_factor`, `dt_indicator`, `far_activity`, `far_power`, `mic_power`,
-`raw_err_power`, `erl_estimate`, `main_err_smooth`, `shadow_err_smooth`,
-`simple_mu_ratio`, `dt_from_energy`, `dt_from_shadow`, `converged`,
-`once_converged`, `using_render_based`, `epc_active` match Python bit-exact.
-
-**End-to-end SNR vs Python reference** (BALANCED, `--enable-res`):
-
-| Scenario | SNR | max abs diff |
-|---|---|---|
-| farend_singletalk | 64.15 dB | 3.05e-5 |
-| doubletalk        | 70.37 dB | 3.05e-5 |
-| nearend_singletalk| 67.38 dB | 3.05e-5 |
-
-`max_abs_diff = 3.05e-5` is the 16-bit PCM quantization step (1/32768).
-
-**Two production-relevant bugs identified during alignment**:
-
-1. **`error_spec_from_filter` mis-passing**: early C orchestration drafts passed
-   `main_filter.error_spec` (rectangular spec) to ResFilter, but Python
-   orchestration (`aec.py:4061-4077`) does NOT pass this kwarg — ResFilter
-   falls back to `spec_synth` (windowed sqrt-Hann OLA spec). Different spectra
-   → wrong `error_pwr / coh2 / EMA` chain → 50+ dB SNR loss. **Fix**:
-   `c_impl/src_v2/aec_v2.c` passes `NULL`.
-
-2. **kiss_fft fp32 vs numpy pocketfft fp64-internal precision**: replaced
-   kiss_fft (fp32 throughout) with `c_impl/src_v2/fft_fp64.c` (fp64 radix-2
-   Cooley-Tukey, no external dep) for parity with pocketfft.
-
-**User-identified C-side bugs cleaned up in v2**:
-
-| Bug | Old C behavior | v2 fix |
+| Item | Old C behavior | v3.8.2 |
 |---|---|---|
 | balanced reverb 0.65/1.4 | mismatched | now 0.85/1.6 (matches Python) |
-| `enable_cng = 1` forced  | always on  | default off, `--cng` to enable (matches Python CLI) |
-| `--preset mild` parse    | silent fallback to balanced | accepts mild; unknown preset exits non-zero |
-| Final fullband noise gate (legacy `aec.c:1419`) | not in Python | not ported |
-| Delay PAR mean-excl-peak | included peak | matches Python (excludes peak) |
-| `[160]` magic-size buffer | 16k-only     | hop runtime, dynamic alloc |
+| `enable_cng = 1` forced | always on | default off, `--cng` to enable |
+| `--preset mild` parse | silent fallback to balanced | accepts mild; unknown preset exits non-zero |
+| `[160]` magic-size buffer | 16 kHz-only | hop runtime, dynamic alloc |
+| Delay PAR mean-excl-peak | included peak | now excludes peak |
 
-**Build switches**: `-DAEC_DEBUG` (enable timestamped log infra), `-DNDEBUG`
-(strip debug strings), `-DAEC_PARITY_HARNESS` (test entry points).
+**Build switches**: `-DAEC_DEBUG` (enable timestamped log infra),
+`-DNDEBUG` (strip debug strings).
 
-**Mandatory compile flag**: `-ffp-contract=off` (FMA contraction breaks parity).
+**Mandatory compile flag**: `-ffp-contract=off` (FMA contraction produces
+inconsistent detector state).
+
+**Repository hygiene**:
+
+- Round-specific Python scripts (R6/R7/Phase 0 audit tooling) removed.
+- `experiments/` folder removed; `SUMMARY.md` (R1–R16 research log) moved
+  to `docs/SUMMARY.md`.
+- C documentation consolidated into
+  `docs/c_user_and_integration_guide.md`.
 
 ---
 
@@ -742,8 +719,7 @@ DTD coherence integration. Initial AECMOS competitive results vs AEC3 baseline.
 
 ---
 
-## Earlier (v1.x and pre-v2.3) — see archive/
+## Earlier (v1.x and pre-v2.3)
 
-`archive/` contains: phase reports (κ, η, b15, b16, phase2_stage_1b/1d/2),
-specs (raw_dt_delay_alignment, dt_jump_veto, shadow_nlms),
-DEVLOG.md (chronological work log), early CHANGELOGs.
+Detailed pre-v2.3 history is no longer maintained. Surviving cross-references
+into `archive/` are listed in [archive/README.md](archive/README.md).
