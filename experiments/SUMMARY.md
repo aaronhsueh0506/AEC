@@ -2428,3 +2428,213 @@ work are:
 4. **Accept v3.8.1 baseline as the classical-DSP Pareto ship** and
    commit to NN as the only forward-going scoring lift. R10–R15 is the
    cumulative evidence supporting this decision.
+
+
+# Round 16 — WebRTC missing-state discriminator audit (closed at P0)
+
+**Branch**: `algo/round16-missing-state-audit` (audit-only, NOT MERGED — discarded after verdict)
+**Date**: 2026-05-04
+**Outcome**: STOP at Phase 0 — empty discriminator set across 35 fields and 5 missing-state categories.
+
+## Why R16 was opened
+
+R15 verdict was scoped: it proved no candidate-formula in the
+parameterized family qualifies *over the R14/R15 observable pool*, but
+explicitly did NOT prove that classical DSP is impossible — the
+absence might be due to missing inputs, not a structural ceiling.
+R16 tests whether **WebRTC-style missing states** (states the R14/R15
+pool did NOT include) provide a new discriminator. R16 is
+discriminator audit only — no grid search, no behavior change. A R16
+PASS means "new discriminator found, hand to R17 planning"; a R16
+STOP means classical residual/reverb closed even after expanding the
+observable pool with WebRTC-style state.
+
+## Phase 0 plumbing
+
+- **Extended render-spec ring buffer** (200 ms = 20 partitions @
+  hop=160) maintained in AEC.process layer (not PBFDAF — keeps
+  PBFDAF.X_buf untouched). Tap PSDs read at K=6/8/12/16 partitions
+  back per frame.
+- **ResFilter `_stage_residual_model` R16 audit block** (audit-passive,
+  reads only):
+  - Per-band slow EMAs (TC ~5 s, α=0.998, cold-start at 50 far-active
+    frames) over 6 coarse bands + voice for tail / echo / error / mic.
+  - Per-band reverb response: `decay_tail_to_echo` (W-derived,
+    bias-suspect) and `decay_tail_to_error`.
+  - Per-band ERLE in dB with 3× SNR-valid gate per band.
+  - Saturation / clipping rolling 100-frame ring (max + active-pct +
+    clipped-render-pct + clipped-mic-pct).
+  - Harmonic energy estimator: peak-pick on far_spec voice band → 2nd–4th
+    harmonic ratio.
+  - 5-state synthesized classifier index (computed in AEC.process from
+    existing flags; STABLE_LINEAR / WEAK_LINEAR / RENDER_FALLBACK /
+    SATURATED / TRANSITION).
+- `trace_phase0.py`: per-case voice-band aggregates + per-band buffers +
+  state-fraction counters + mic_pwr_mean / n_far_active for confound
+  checks.
+- `analyze_round16.py`: relevant-cohort std normalization
+  (`worst20 ∪ best20 ∪ FS_static ∪ FS_movement`); reports both
+  `effect_relevant` (gate) and `effect_all800` (context); confound
+  Pearson r vs (mic_pwr_mean, n_far_active); bias-suspect override for
+  W-derived fields.
+- parity_round6 PASS bit-exact on plumbing commit (`37a5bf0`).
+
+## Phase 0 gate (per plan, after R16 plan revisions)
+
+For each numeric field K and per-case voice-band aggregate:
+1. `effect_relevant_FS  ≥ 0.6`
+2. `effect_relevant_best ≥ 0.5`
+3. `|Δ_FS| ≥ floor(K)` — dB 1.0; pct/frac 0.05; ratio 0.10; power
+   10 % of std_relevant
+4. `|Pearson r vs mic_pwr_mean| < 0.5 AND |Pearson r vs n_far_active| < 0.5`
+5. **Bias-suspect override** (Cat 2 echo-derived only): if PASS but
+   `mean_best > mean_worst`, flag for R17 falsification.
+
+## Phase 0 result
+
+| category | description | PASS / total |
+|---|---|---:|
+| 1 | Extended render tail (60/80/120/160 ms) | 0 / 4 |
+| 2 | Per-band reverb response (decay tail→echo / →error) | 0 / 14 |
+| 3 | Per-band ERLE (dB) | 0 / 7 |
+| 4 | Saturation / clipping / harmonic | 0 / 5 |
+| 5 | 5-state synthesized classifier | 0 / 5 |
+| **total** | — | **0 / 35** |
+
+Closest-to-passing fields:
+
+| field | worst | FS | best | eff_FS | eff_best | failure mode |
+|---|---:|---:|---:|---:|---:|---|
+| r16_state_pct_transition | 0.547 | 0.459 | 0.352 | 0.24 | **0.53** | worst > best PASS, but worst ≈ FS (eff_FS only 0.24 < 0.6) |
+| r16_state_pct_render_fallback | 0.411 | 0.457 | 0.599 | 0.11 | 0.45 | best > worst, neither effect crosses gate |
+| r16_state_pct_weak_linear | 0.020 | 0.056 | 0.038 | **0.44** | 0.22 | worst lowest, but |Δ| 0.036 below floor 0.05 |
+| r16_tail_60ms_voice | 6.77 | 5.63 | 1.61 | 0.15 | **0.66** | tail magnitude is loudness proxy, not cohort discriminator |
+| r16_clipped_mic_pct_history | 0.005 | 0.008 | 0.014 | 0.09 | 0.27 | r_mic = +0.81 — strong loudness confound |
+
+5-state classifier occupancy (informational):
+
+| cohort | stable | weak | render_fallback | saturated | transition |
+|---|---:|---:|---:|---:|---:|
+| worst20 | 0.022 | 0.020 | 0.411 | 0.000 | 0.547 |
+| best20 | 0.011 | 0.038 | 0.599 | 0.000 | 0.352 |
+| FS_static | 0.035 | 0.064 | 0.477 | 0.000 | 0.424 |
+| FS_movement | 0.019 | 0.045 | 0.431 | 0.000 | 0.505 |
+| DT_static | 0.028 | 0.058 | 0.373 | 0.000 | 0.542 |
+| NE | 0.000 | 0.000 | 0.260 | 0.000 | 0.000 |
+
+The 5-state classifier reproduces the R9 finding at higher resolution:
+worst-DT_mv and FS spend ~equal time in render_fallback (0.41 vs 0.45)
+and ~equal time in transition (0.55 vs 0.42). best-DT_mv is the
+outlier on render_fallback (0.60) — but best-DT_mv differing from the
+gate cohorts is exactly the wrong direction for a discriminator.
+SATURATED state is empty across the dataset (no clip-loud case in
+blind set).
+
+## Mechanism reading
+
+R16 reproduces and extends the R10–R15 failure surface at scale across
+five new categories of state:
+
+- **Extended tail**: tail magnitude correlates with loudness (worst &
+  FS both have continuous render → similar magnitude; best is the
+  quieter cohort → different magnitude). The K_tail sweep (60→160 ms)
+  shows monotonically decreasing ratios (5.6 → 5.6 → 5.6 → 5.6 on FS,
+  6.8 → 6.8 → 6.8 → 6.8 on worst) — the tail is essentially
+  stationary over 100 ms windows, which means K_tail variation is not
+  going to surface a missed discriminator.
+- **Per-band reverb response (Cat 2, bias-suspect)**: `tail_to_error`
+  ratios show massive spread (best 80–128× worst on bands 4 / 5 /
+  band-6 of `tail_to_error`) but ALL in the W-derived best > worst
+  direction. Confirms slow-EMA averaging at 5 s TC does NOT remove
+  kernel-convergence bias — the R13 β / R14 ε structural risk persists
+  even with longer averaging windows. Forecloses any "slow per-band
+  shape" candidate.
+- **Per-band ERLE**: cohort differences ≤ 1.2 dB across all 7 bands.
+  ERLE is band-flat at the cohort level — the per-band breakdown does
+  not surface what the scalar collapsed.
+- **Saturation / clipping**: dataset has essentially zero saturation
+  (worst max-history mean = 0.014, FS = 0.008, best = 0.005 — all
+  below floor 0.05). Clipped-mic correlates strongly with mic loudness
+  (r_mic = +0.81) — even if it had passed effect-size, it would fail
+  confound. WebRTC's saturated-echo branching is not load-bearing on
+  this dataset.
+- **5-state classifier**: reproduces R9 at higher resolution (R9 used
+  3-state coarse classifier; R16 uses 5-state). Same conclusion: the
+  worst-DT_mv cohort is not characterized by spending more time in any
+  particular state — its time-budget is approximately the same as FS.
+  The closest discriminator is `transition` % (worst 0.55 > FS 0.46,
+  eff_FS = 0.24) but it doesn't cross the 0.6 gate threshold.
+
+The empty discriminator set across 35 fields covering 5 architecturally
+distinct categories of WebRTC-style missing state is the strongest
+evidence yet that the classical residual/reverb path is closed not
+just over the R14/R15 pool but over **any practical extension of that
+pool that uses W-, X-buf-, AecState-, mic-PSD-, or detector-derived
+features**.
+
+## Disposition
+
+- Branch `algo/round16-missing-state-audit` discarded (no merge to
+  main). The R16 plumbing (extended ring buffer + per-band EMAs +
+  saturation history + 5-state classifier + analyzer) is NOT on main;
+  this closure section captures everything load-bearing.
+
+## Scoped conclusion (per plan)
+
+**Proves**: no field in any of 5 WebRTC-style missing-state categories
+(extended tail at 60/80/120/160 ms, per-band reverb response, per-band
+ERLE, saturation/clipping/harmonic history, 5-state synthesized
+classifier) crosses the discriminator gate on this dataset. Combined
+with R10–R15: no formula or state in the union of {observable pool,
+WebRTC-style missing-state expansion} discriminates worst-DT_mv from
+FS at the bidirectional + per-case + effect-size + confound-clear gate.
+
+**Does NOT prove**: full WebRTC AEC3 plumbing is impossible. AEC3 has
+(a) calibrated reverb frequency response that R16 did not synthesize,
+(b) state-machine plumbing (LinearAecOutputUsable, ResidualEchoEstimator
+mode switching) that R16's 5-state synthesizer is a stand-in for, and
+(c) inputs from the *kernel* (per-partition ERLE, partition-aligned
+echo-path-change detector) that R16 did not surface from the residual
+stage. But R16 establishes that **no plausible per-frame, per-band,
+or per-state discriminator exists in the residual stage's reachable
+state**.
+
+## Cumulative across Round 1–16
+
+| Round | Outcome | Notes |
+|---|---|---|
+| 1 | F1-F4 all null | trigger style invalidated |
+| 2 | Phase 3 / state-routing all null | cold-start / EPC unconditional fail |
+| 3 | D2 catastrophic / D3 sub-acceptance | EPC-gated bypass not viable |
+| 4 | R1 v1+v2 null | per-bin cap erased downstream |
+| 5 | A34 v2 closest (+0.023 deg, FS −0.04) | Pareto curve mapped |
+| 6 | refactor-only shippable, lift disproven | RES split clean |
+| 7 | EPV damp NULL; mix Pareto-bound | filter trajectory hypothesis raised |
+| R8 prep | R7 causal direction falsified | linear AEC fine on worst |
+| R9 | STOP-1: state cannot sort worst from best | both dominated by RENDER_FALLBACK |
+| R10 | STOP at P0: candidate is same R5/R6 axis | uniform tightening |
+| R11 | P0 GO (reverb culprit) → P1 STOP | no per-frame discriminator at residual stage |
+| R12 | STOP at P0: 5 candidates exhausted | residual-stage signal pool exhausted |
+| R13 | STOP at P0: β reverse-correlated, γ too soft | kernel-derived early/late points wrong direction |
+| R14 | STOP at P0: δ uniform under, ε FS under | render-tail decouples kernel bias but reverb_gain mismatch |
+| R15 | STOP at P0: empty feasible region (0/8892) | no Layer-1 × Layer-2 × Layer-3 formula over R14/R15 pool passes gate |
+| **R16** | **STOP at P0: empty discriminator set (0/35)** | **no field in 5 WebRTC missing-state categories crosses effect-size + confound gate; classical residual/reverb closed even after observable-pool expansion** |
+
+## Recommendation
+
+R10–R16 cumulatively rule out the classical residual/reverb path on
+this dataset under any plausible extension of the residual-stage
+observable. The remaining axes are:
+
+1. **NN postfilter** (`~/.claude/plans/jazzy-brewing-castle.md`) — the
+   only known forward-going classical-side route. Uses upstream
+   features the DSP residual stage cannot surface.
+2. **Upstream filter-trajectory rewrite** — flagged in R8/R11 verdicts
+   as the binding root for DT_mv. Out of scope of R10–R16 (those rounds
+   only touched the residual stage); a future round would need to open
+   on the kernel side (PBFDAF / PBFDKF / shadow / EPC), not the
+   residual side. Unlikely to close cleanly given R7 / R8 conclusion
+   that linear AEC is fine on worst-DT_mv.
+3. **Accept v3.8.1 baseline as the classical-DSP Pareto ship** and
+   commit to NN as the only forward-going scoring lift. R10–R16 is
+   the cumulative evidence supporting this decision.
