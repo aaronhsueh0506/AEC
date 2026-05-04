@@ -5,17 +5,22 @@ Usage:
     python3 python/run_one_case.py mic.wav ref.wav out.wav [--preset balanced]
                                    [--cng] [--filter 832] [--no-res]
                                    [--plot out.png]
+    python3 python/run_one_case.py mic.wav ref.wav out.wav --demo
 
-The plot panels show:
-    1. Mic (near-end input) waveform
+Standard plot panels:
+    1. Mic waveform with AEC output overlaid
     2. Reference (far-end / loopback) waveform
-    3. AEC output waveform
-    4. Mic vs output spectrograms (side-by-side)
-    5. Per-frame ERLE (dB) over time
+    3. Mic spectrogram
+    4. AEC output spectrogram
+    5. Long-term magnitude spectrum (frequency response): mic vs out
+    6. Per-frame ERLE (dB) over time
 
-If --plot is omitted, the PNG is written next to the output WAV with a
-.png suffix (e.g. out.wav -> out.png). matplotlib is required for the
-plot; if unavailable, the WAV is still written and a warning is logged.
+Demo mode (--demo) runs four configurations on the same input and
+stacks them for A/B comparison:
+    - bypass     (no linear filter, no RES, no CNG — mic passthrough)
+    - linear     (linear AEC only; RES + CNG disabled)
+    - +res       (linear + residual suppressor)
+    - +res +cng  (full pipeline; the recommended default)
 """
 import argparse
 import os
@@ -38,7 +43,7 @@ PRESET_MAP = {
 
 def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             filter_length=832, enable_cng=True, enable_res=True,
-            sample_rate=16000):
+            sample_rate=16000, write_wav=True):
     """Process one case; return (mic, ref, out, erle_per_frame, sample_rate)."""
     cfg = AecConfig.from_preset(
         PRESET_MAP[preset],
@@ -71,8 +76,40 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         erle_log.append(aec.get_erle_instant())
         pos += hop
 
-    sf.write(out_path, out, sample_rate)
+    if write_wav and out_path:
+        sf.write(out_path, out, sample_rate)
     return mic[:pos], ref[:pos], out[:pos], np.asarray(erle_log), sample_rate
+
+
+def _spectrogram(x, sample_rate, nfft=512, hop=256):
+    from numpy.fft import rfft
+    n_blocks = max(0, (len(x) - nfft) // hop + 1)
+    if n_blocks <= 0:
+        return (np.zeros((nfft // 2 + 1, 1)), np.array([0.0]),
+                np.linspace(0, sample_rate / 2, nfft // 2 + 1))
+    win = np.hanning(nfft).astype(np.float32)
+    S = np.zeros((nfft // 2 + 1, n_blocks), dtype=np.float32)
+    for k in range(n_blocks):
+        seg = x[k * hop:k * hop + nfft] * win
+        S[:, k] = np.abs(rfft(seg)) + 1e-10
+    times = (np.arange(n_blocks) * hop + nfft / 2) / sample_rate
+    freqs = np.linspace(0, sample_rate / 2, nfft // 2 + 1)
+    return 20 * np.log10(S), times, freqs
+
+
+def _avg_magnitude_db(x, sample_rate, nfft=1024, hop=512):
+    from numpy.fft import rfft
+    n_blocks = max(0, (len(x) - nfft) // hop + 1)
+    freqs = np.linspace(0, sample_rate / 2, nfft // 2 + 1)
+    if n_blocks <= 0:
+        return np.full(nfft // 2 + 1, -120.0), freqs
+    win = np.hanning(nfft).astype(np.float32)
+    psum = np.zeros(nfft // 2 + 1, dtype=np.float64)
+    for k in range(n_blocks):
+        seg = x[k * hop:k * hop + nfft] * win
+        psum += np.abs(rfft(seg)) ** 2
+    avg = np.sqrt(psum / n_blocks) + 1e-12
+    return 20 * np.log10(avg), freqs
 
 
 def make_plot(mic, ref, out, erle, sample_rate, png_path, title=''):
@@ -86,68 +123,156 @@ def make_plot(mic, ref, out, erle, sample_rate, png_path, title=''):
 
     n = len(mic)
     t = np.arange(n) / sample_rate
+    t_end = t[-1] if n else 1.0
 
-    fig, axes = plt.subplots(5, 1, figsize=(12, 11), constrained_layout=True)
+    fig, axes = plt.subplots(6, 1, figsize=(12, 14), constrained_layout=True)
     fig.suptitle(title or 'AEC single-case diagnostic', fontsize=12)
 
-    axes[0].plot(t, mic, lw=0.5, color='#1f77b4')
-    axes[0].set_ylabel('mic')
-    axes[0].set_xlim(0, t[-1] if n else 1)
+    axes[0].plot(t, mic, lw=0.5, color='#1f77b4', label='mic', alpha=0.7)
+    axes[0].plot(t, out, lw=0.5, color='#2ca02c', label='AEC out', alpha=0.85)
+    axes[0].set_ylabel('mic + out')
+    axes[0].set_xlim(0, t_end)
+    axes[0].legend(loc='upper right', fontsize=8)
 
     axes[1].plot(t, ref, lw=0.5, color='#ff7f0e')
     axes[1].set_ylabel('ref')
-    axes[1].set_xlim(0, t[-1] if n else 1)
+    axes[1].set_xlim(0, t_end)
 
-    axes[2].plot(t, out, lw=0.5, color='#2ca02c')
-    axes[2].set_ylabel('AEC out')
-    axes[2].set_xlim(0, t[-1] if n else 1)
-    axes[2].set_xlabel('time (s)')
-
-    nfft = 512
-    hop_spec = 256
-    def _spec(x):
-        from numpy.fft import rfft
-        n_blocks = max(0, (len(x) - nfft) // hop_spec + 1)
-        if n_blocks <= 0:
-            return np.zeros((nfft // 2 + 1, 1)), np.array([0.0])
-        S = np.zeros((nfft // 2 + 1, n_blocks), dtype=np.float32)
-        win = np.hanning(nfft).astype(np.float32)
-        for k in range(n_blocks):
-            seg = x[k * hop_spec:k * hop_spec + nfft] * win
-            S[:, k] = np.abs(rfft(seg)) + 1e-10
-        times = (np.arange(n_blocks) * hop_spec + nfft / 2) / sample_rate
-        return 20 * np.log10(S), times
-    Smic, t_spec = _spec(mic)
-    Sout, _ = _spec(out)
-    freqs = np.linspace(0, sample_rate / 2, Smic.shape[0])
+    Smic, t_spec, freqs = _spectrogram(mic, sample_rate)
+    Sout, _, _ = _spectrogram(out, sample_rate)
     vmin, vmax = -80, 0
-    ax_l = axes[3]
-    ax_l.imshow(Smic, aspect='auto', origin='lower',
-                extent=[t_spec[0], t_spec[-1] if len(t_spec) else 1,
-                         freqs[0], freqs[-1]],
-                vmin=vmin, vmax=vmax, cmap='magma')
-    ax_l.set_ylabel('mic spec\n(Hz)')
-    ax_l.set_yticks([0, 2000, 4000, 6000, 8000])
+    extent = [t_spec[0], t_spec[-1] if len(t_spec) else 1, freqs[0], freqs[-1]]
+    axes[2].imshow(Smic, aspect='auto', origin='lower', extent=extent,
+                   vmin=vmin, vmax=vmax, cmap='magma')
+    axes[2].set_ylabel('mic spec\n(Hz)')
+    axes[2].set_yticks([0, 2000, 4000, 6000, 8000])
 
-    fig2_inset = axes[3].inset_axes([1.02, 0, 0.5, 1])
-    fig2_inset.imshow(Sout, aspect='auto', origin='lower',
-                       extent=[t_spec[0], t_spec[-1] if len(t_spec) else 1,
-                               freqs[0], freqs[-1]],
-                       vmin=vmin, vmax=vmax, cmap='magma')
-    fig2_inset.set_title('out spec', fontsize=9)
-    fig2_inset.set_yticks([])
+    axes[3].imshow(Sout, aspect='auto', origin='lower', extent=extent,
+                   vmin=vmin, vmax=vmax, cmap='magma')
+    axes[3].set_ylabel('out spec\n(Hz)')
+    axes[3].set_yticks([0, 2000, 4000, 6000, 8000])
+
+    mic_db, fr = _avg_magnitude_db(mic, sample_rate)
+    out_db, _ = _avg_magnitude_db(out, sample_rate)
+    axes[4].semilogx(fr[1:], mic_db[1:], color='#1f77b4', lw=1.0, label='mic')
+    axes[4].semilogx(fr[1:], out_db[1:], color='#2ca02c', lw=1.0, label='AEC out')
+    axes[4].set_ylabel('avg mag (dB)')
+    axes[4].set_xlabel('frequency (Hz)')
+    axes[4].set_xlim(50, sample_rate / 2)
+    axes[4].grid(True, which='both', alpha=0.3)
+    axes[4].legend(loc='lower left', fontsize=8)
 
     if len(erle):
         t_erle = np.arange(len(erle)) * (n / max(len(erle), 1)) / sample_rate
-        axes[4].plot(t_erle, erle, lw=0.7, color='#d62728')
-    axes[4].set_ylabel('ERLE (dB)')
-    axes[4].set_xlabel('time (s)')
-    axes[4].axhline(0, color='#888', lw=0.5)
-    axes[4].set_xlim(0, t[-1] if n else 1)
+        axes[5].plot(t_erle, erle, lw=0.7, color='#d62728')
+    axes[5].set_ylabel('ERLE (dB)')
+    axes[5].set_xlabel('time (s)')
+    axes[5].axhline(0, color='#888', lw=0.5)
+    axes[5].set_xlim(0, t_end)
 
     fig.savefig(png_path, dpi=120)
     plt.close(fig)
     return True
+
+
+def make_demo_plot(mic, ref, results, sample_rate, png_path, title=''):
+    """results: list of (label, out, erle) tuples."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print('warning: matplotlib not available — skipping plot', file=sys.stderr)
+        return False
+
+    n = len(mic)
+    t = np.arange(n) / sample_rate
+    t_end = t[-1] if n else 1.0
+    n_runs = len(results)
+    colors = ['#7f7f7f', '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+
+    rows = 2 + n_runs + 1  # mic+ref overlay, ref, n spectrograms, freq-resp
+    fig, axes = plt.subplots(rows, 1, figsize=(13, 2.0 + 1.8 * rows),
+                             constrained_layout=True)
+    fig.suptitle(title or 'AEC demo: feature on/off comparison', fontsize=12)
+
+    axes[0].plot(t, mic, lw=0.5, color='#1f77b4', alpha=0.6, label='mic')
+    for i, (label, out_i, _) in enumerate(results):
+        axes[0].plot(t, out_i, lw=0.5,
+                     color=colors[(i + 1) % len(colors)],
+                     alpha=0.75, label=label)
+    axes[0].set_ylabel('mic + outs')
+    axes[0].set_xlim(0, t_end)
+    axes[0].legend(loc='upper right', fontsize=8, ncol=min(n_runs + 1, 5))
+
+    axes[1].plot(t, ref, lw=0.5, color='#ff7f0e')
+    axes[1].set_ylabel('ref')
+    axes[1].set_xlim(0, t_end)
+
+    vmin, vmax = -80, 0
+    Smic, t_spec, freqs = _spectrogram(mic, sample_rate)
+    extent = [t_spec[0], t_spec[-1] if len(t_spec) else 1, freqs[0], freqs[-1]]
+    axes[2].imshow(Smic, aspect='auto', origin='lower', extent=extent,
+                   vmin=vmin, vmax=vmax, cmap='magma')
+    axes[2].set_ylabel('mic spec\n(Hz)')
+    axes[2].set_yticks([0, 2000, 4000, 6000, 8000])
+
+    for i, (label, out_i, _) in enumerate(results):
+        S, _, _ = _spectrogram(out_i, sample_rate)
+        ax = axes[3 + i]
+        ax.imshow(S, aspect='auto', origin='lower', extent=extent,
+                  vmin=vmin, vmax=vmax, cmap='magma')
+        ax.set_ylabel(f'{label}\n(Hz)')
+        ax.set_yticks([0, 2000, 4000, 6000, 8000])
+
+    ax_fr = axes[-1]
+    mic_db, fr = _avg_magnitude_db(mic, sample_rate)
+    ax_fr.semilogx(fr[1:], mic_db[1:], color='#1f77b4', lw=1.0,
+                   alpha=0.6, label='mic')
+    for i, (label, out_i, _) in enumerate(results):
+        out_db, _ = _avg_magnitude_db(out_i, sample_rate)
+        ax_fr.semilogx(fr[1:], out_db[1:], lw=1.0,
+                       color=colors[(i + 1) % len(colors)], label=label)
+    ax_fr.set_xlabel('frequency (Hz)')
+    ax_fr.set_ylabel('avg mag (dB)')
+    ax_fr.set_xlim(50, sample_rate / 2)
+    ax_fr.grid(True, which='both', alpha=0.3)
+    ax_fr.legend(loc='lower left', fontsize=8, ncol=min(n_runs + 1, 5))
+
+    fig.savefig(png_path, dpi=120)
+    plt.close(fig)
+    return True
+
+
+def run_demo(args):
+    """Run several feature configurations and produce a comparison plot."""
+    base = os.path.splitext(args.out)[0]
+    configs = [
+        ('linear',     dict(enable_res=False, enable_cng=False)),
+        ('+res',       dict(enable_res=True,  enable_cng=False)),
+        ('+res +cng',  dict(enable_res=True,  enable_cng=True)),
+    ]
+
+    mic_ref = None
+    results = []
+    for label, flags in configs:
+        wav_path = f'{base}__{label.replace(" ", "").replace("+", "p")}.wav'
+        mic, ref, out, erle, sr = run_aec(
+            args.mic, args.ref, wav_path,
+            preset=args.preset, filter_length=args.filter,
+            sample_rate=args.sample_rate, **flags,
+        )
+        print(f'wrote {wav_path}', file=sys.stderr)
+        if mic_ref is None:
+            mic_ref = (mic, ref, sr)
+        results.append((label, out, erle))
+
+    mic, ref, sr = mic_ref
+    png_path = args.plot or f'{base}_demo.png'
+    title = (f'{os.path.basename(args.mic)} | demo | preset={args.preset} '
+             f'fl={args.filter}')
+    if make_demo_plot(mic, ref, results, sr, png_path, title=title):
+        print(f'wrote {png_path}', file=sys.stderr)
 
 
 def main():
@@ -155,7 +280,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('mic')
     p.add_argument('ref')
-    p.add_argument('out', help='output WAV path')
+    p.add_argument('out', help='output WAV path (in --demo, used as base name)')
     p.add_argument('--preset', choices=PRESET_MAP.keys(), default='balanced')
     p.add_argument('--cng', action='store_true', default=True,
                     help='enable comfort noise (default: on)')
@@ -166,11 +291,18 @@ def main():
     p.add_argument('--sample-rate', type=int, default=16000)
     p.add_argument('--plot', help='diagnostic PNG path (default: <out>.png)')
     p.add_argument('--no-plot', action='store_true', help='skip the diagnostic plot')
+    p.add_argument('--demo', action='store_true',
+                   help='run linear / +res / +res+cng and produce a comparison plot')
     args = p.parse_args()
+
+    if args.demo:
+        print(f'demo mode: preset={args.preset} filter={args.filter} '
+              f'sr={args.sample_rate}', file=sys.stderr)
+        run_demo(args)
+        return
 
     print(f'preset={args.preset} cng={args.cng} res={args.res} '
           f'filter={args.filter} sr={args.sample_rate}', file=sys.stderr)
-
     mic, ref, out, erle, sr = run_aec(
         args.mic, args.ref, args.out,
         preset=args.preset, filter_length=args.filter,
