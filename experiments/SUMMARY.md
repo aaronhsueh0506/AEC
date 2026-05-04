@@ -7,7 +7,7 @@ is at Pareto on this dataset; only NN postfilter remains as plausible ship route
 
 ## Table of contents
 
-- [F1–F4 Investigation Summary](#f1�f4-investigation-summary)
+- [F1–F4 Investigation Summary](#f1�f4-investigation-summary)
 - [Round 2 — AEC3-state-routing investigation summary](#round-2--aec3-state-routing-investigation-summary)
 - [Round 3 — Delay/EPC/Filter-misadjustment investigation](#round-3--delay/epc/filter-misadjustment-investigation)
 - [Round 4 — Per-bin RES/ENR suppression investigation](#round-4--per-bin-res/enr-suppression-investigation)
@@ -1121,3 +1121,118 @@ the worst-DT_mv deg score by ≥+0.02. Three out-of-scope options remain:
 
 If the user accepts in-scope exhausted, recommend route 1 (NN postfilter)
 as the only remaining lever with realistic ship potential.
+
+---
+
+# Round 8 Pre-flight — Trace Correctness Re-evaluation (closed)
+
+**Branch**: `algo/round8-prep-trace-cleanup` (audit-only, NOT MERGED — discarded after verdict)
+**Date**: 2026-05-04
+**Outcome**: STOP R8 main line. R7's "filter doesn't grow" causal claim
+falsified by normalized re-evaluation. Worst-DT_mv `deg` loss is in RES,
+not the linear AEC kernel — re-confirms R5/R6/R7 Pareto with corrected
+measurements.
+
+## Why R8 was opened
+
+R7's strongest separator was `filter_w_norm` (worst 7.16 vs best 17.83,
+effect 0.98) combined with HIGHER `mu_scale` on worst (0.795 vs 0.716).
+The reading was: "controller asks for more learning, but actual W
+doesn't materialize". Codex direction: P/Q/R effective-update audit.
+
+## Why the premise was wrong (5 measurement findings)
+
+Code review of R7 plumbing surfaced confounds invalidating the causal
+direction:
+
+1. `nores_echo_proxy = sqrt(nores_pwr/mic_pwr)` is a power ratio, NOT an
+   echo proxy. DT/CNG/silence confound it.
+2. `filter_w_norm` separator is signal-level confounded with
+   `main_err_smooth` (both small on worst → small-signal regime, not
+   necessarily learning failure).
+3. CLI `--enable-res / --cng` `store_true` defaults silently overrode
+   BALANCED preset's `enable_res=True / enable_cng=True`.
+4. eval `--filter` default 2048 ≠ baseline 832 (52 ms @ 16 k).
+5. R7 trace lazy state (`_r7_prev_delay`, `_r7_prev_div_counts`) not
+   cleared in `AEC.reset()`.
+
+## Phase A — trace correctness fixes (built on branch, then discarded)
+
+Implemented as audit-only / additive plumbing, parity_round6 5-case
+bit-exact PASS:
+
+- Renamed power-ratio fields, kept aliases one cycle:
+  `nores_to_mic_power_ratio`, `final_to_nores_power_ratio`
+- Added real echo proxies: `inst_erle_db`, `nores_inst_erle_db`,
+  `echo_psd_to_error_psd_ratio`, `far_to_mic_xcorr0`
+- Added level-corrected: `filter_w_norm_per_sqrt_far`,
+  `predicted_echo_norm`
+- Extended PBFDKF `_kx_trace` (gated, zero-diff when off): K, P, R,
+  denom, dW_norm, X_norm, E_norm, predicted_echo_norm, ...
+- CLI `--enable-res / --cng` switched to `BooleanOptionalAction
+  default=None` so preset values govern when flag absent
+- `eval_aec_challenge.py --filter` default 2048 → 832
+- `AEC.reset()` clears R7 trace lazy state
+
+Branch was discarded after verdict — these fixes are NOT on main and
+would need to be re-applied if a future round wants the trace plumbing.
+Findings + fix list recorded above so they don't have to be re-discovered.
+
+## Phase B — light-trace re-evaluation on normalized fields
+
+800-case trace, DT_movement worst-20 vs best-20 (rank-locked by
+baseline_v381_seeded.deg). Effect-size + abs-floor gate:
+
+| field | worst | best | effect | gate |
+|---|---:|---:|---:|---|
+| `filter_w_norm_per_sqrt_far` | 63 664 | 153 117 | **1.00** | PASS |
+| `nores_inst_erle_db` (linear AEC alone) | **1.66 dB** | 0.72 dB | 0.31 | sub-gate |
+| `inst_erle_db` (full pipeline) | **13.54 dB** | 10.02 dB | 0.45 | sub-gate |
+| `echo_psd_to_error_psd_ratio` | 5.50 | 3.72 | 0.21 | sub-gate |
+| `\|far_to_mic_xcorr0\|` | 0.231 | 0.215 | 0.13 | sub-gate |
+| (R7 reference) `r7_filter_w_norm` | 7.16 | 17.83 | 0.98 | PASS |
+
+**Three answers:**
+
+1. **Level-corrected W still separates** (effect 1.00). Worst W is
+   small in both absolute and per-√far-energy terms — the differential
+   is real, not a pure signal-regime artifact.
+2. **Linear filter is NOT worse on worst — it's slightly better.**
+   Worst-20 nores ERLE 1.66 dB > best-20 0.72 dB. Full pipeline ERLE
+   also higher on worst (13.5 vs 10.0). `echo_psd_to_error_psd_ratio`
+   higher on worst (5.5 vs 3.7) → filter's echo-path estimate explains
+   MORE of the residual on worst. Smaller W is the *correct* equilibrium
+   for the smaller-far-energy regime; nothing more to learn.
+3. **Reference/mic coupling is fine.** xcorr0 worst 0.231 vs best
+   0.215 (effect 0.13) → delay tracker / SNR / reference path is not
+   the differentiator.
+
+## Where the worst-DT_mv `deg` loss lives
+
+| stage | worst-20 finding | conclusion |
+|---|---|---|
+| reference / delay | xcorr0 same as best | not the issue |
+| linear AEC ERLE | **higher** than best | working well, possibly over-working |
+| nores `deg` (R5 P0) | best-of-pipeline | RES is what removes it |
+| RES output `deg` | worst | RES suppression damages NE |
+
+R7's `filter_w_norm` separator described the *symptom* (small filter
+matches small far energy → strong linear ERLE → RES still triggers
+DT-aggressive suppression → NE damaged). R8 Codex premise (P/Q/R
+audit) was based on the wrong causal reading.
+
+## Disposition
+
+- Branch `algo/round8-prep-trace-cleanup` discarded (no merge to main).
+  Phase A trace-correctness fixes are NOT on main; recorded above for
+  future re-application if needed.
+- No Phase 1 algorithm changes attempted (premise falsified).
+- v3.8.1 `baseline_v381_seeded` remains canonical.
+- Heavy Kalman `_kx_trace` decomposition (drafted but not run) skipped:
+  Q2 says linear AEC is fine; decomposing its update path won't reveal
+  a fixable lever.
+
+## Recommendation (unchanged from R7)
+
+NN postfilter (separate plan) is the remaining route to break Pareto
+on this dataset. Classical-suppressor architecture is at Pareto.
