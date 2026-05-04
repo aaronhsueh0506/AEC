@@ -1355,3 +1355,138 @@ may not separate". R9 P0 confirmed.
 NN postfilter (separate plan) remains the only realistic ship route
 to break Pareto on this dataset. Classical-suppressor architecture
 is at Pareto across every in-scope lever, including state routing.
+
+---
+
+# Round 10 — WebRTC SuppressionGainCandidate (closed at Phase 0 STOP)
+
+**Branch**: `algo/round10-webrtc-suppression-gain` (audit-only, NOT MERGED — discarded after verdict)
+**Date**: 2026-05-04
+**Outcome**: STOP at Phase 0. WebRTC-style "no-audible-echo" candidate
+gain consumes the same input pool as the current pipeline
+(`residual_echo_psd`, `error_psd`, `noise_psd`); inherits the same
+residual-model over-estimation bias on worst-DT_mv, producing
+DEEPER suppression on the cohort RES is already over-suppressing.
+Same R5/R6 Pareto axis confirmed once more.
+
+## Why R10 was opened
+
+Codex direction: rebuild the suppressor's gain calculation using
+WebRTC `SuppressionGain` shape — `weighted_echo_audibility +
+comfort_noise + nearend → no-audible-echo gain` instead of the current
+`residual_echo / nearend → ENR softgate → noise-floor lift`. Phase 0
+strict gate: candidate must have DIFFERENT shape from current (per-
+cohort direction or magnitude differential), not just a tighter/looser
+knob on the same lever.
+
+Don't-do list: no shadow NLMS / kernel / delay estimator / NN / direct
+suppressor replacement / grid search.
+
+## Phase 0 plumbing (audit-only, all discarded)
+
+`ResFilter._r10_compute_candidate_gain()` runs ALONGSIDE the current
+pipeline after `_stage_noise_floor_and_cng` returns. Never mutates
+audio state; writes diagnostic stats to `self._r10_diag`.
+
+Formula (intentionally simple to verify shape, not curve-fit):
+
+```
+weighted_echo = max(residual_echo_psd - 1.5·noise_psd, 0)
+nearend_proxy = max(error_psd - residual_echo_psd, eps)
+target_echo   = noise_psd · 1.0
+gain = sqrt((nearend + target_echo) / (nearend + weighted_echo + eps))
+gain = clip(sqrt(gain), g_min, 1.0)
+```
+
+13 voice-band stats per frame: gain_candidate / gain_current /
+weighted_echo / comfort_noise / nearend_proxy / min/max gain /
+candidate_delta voice mean + abs + p10 + p90 / higher% / lower%.
+
+`AEC.process` trace tail wires fields to `_diag` with `r10_*` prefix.
+`trace_phase0.py` collects 13 fields on far-active frames (same
+gating as R5 stage gains).
+
+parity_round6 5-case fixture: PARITY PASS bit-exact vs golden.
+
+## Phase 0 result — STOP
+
+5 cohorts × 20 cases (rank-locked by baseline_v381_seeded; FS by echo,
+DT/NE by deg).
+
+| cohort | n | gain_curr | gain_cand | Δ mean | tighten% | relax% |
+|---|---:|---:|---:|---:|---:|---:|
+| **DT_mv worst-20** | 20 | 0.535 | 0.302 | **-0.232** | **74.4 %** | 12.2 % |
+| DT_mv best-20  | 20 | 0.581 | 0.515 | -0.065 | 51.1 % | 29.5 % |
+| FS_st worst-20 | 20 | 0.458 | 0.421 | -0.037 | 58.9 % | 32.0 % |
+| FS_mv worst-20 | 20 | 0.475 | 0.396 | -0.079 | 62.4 % | 23.3 % |
+| NE worst-20    | 20 | 0.138 | 0.096 | -0.042 | 17.2 % |  5.8 % |
+
+| cohort | weighted_echo | nearend_proxy | echo:near ratio |
+|---|---:|---:|---:|
+| **DT_mv worst** | 12.21 | 0.84 | **14.5×** |
+| DT_mv best  | 3.97 | 4.45 | 0.89× |
+| FS_st worst | 9.49 | 5.59 | 1.70× |
+| FS_mv worst | 11.21 | 2.86 | 3.92× |
+| NE worst    | 0.007 | 0.036 | 0.19× |
+
+Both Phase 0 gates fail:
+
+- **Direction differential**: ALL 5 cohorts have negative Δ (uniform
+  sign — not regime-aware policy).
+- **Worst-20 should preserve speech, not over-suppress**: candidate
+  tightens worst-DT_mv 3.6× MORE than best-DT_mv. Wrong direction.
+
+## Mechanism reading
+
+The formula consumes the SAME input pool the current pipeline consumes.
+On worst-DT_mv, `residual_echo_psd` is large (over-estimated by RES
+residual model — the R5/R6/R8/R9 binding stage). That over-estimation:
+
+1. Inflates `weighted_echo` (worst 12.21 vs best 3.97).
+2. Shrinks `nearend_proxy = error_psd − residual_echo_psd` (worst 0.84
+   vs best 4.45 — DT_mv worst nearend looks 5× weaker than best in the
+   formula's eyes).
+3. echo:nearend ratio on worst-DT_mv hits 14.5× — formula concludes
+   "echo dominates, compress hard" → gain 0.30 (vs current 0.54).
+
+The candidate is structurally the same lever as current, just a
+**stricter** mapping of the same inputs. Inherits the residual-model
+bias and produces deeper suppression on the cohort already
+over-suppressed. This is the R5/R6/R8/R9 finding once more: the
+binding stage is the **residual echo model** (which sets
+`residual_echo_psd`), NOT the suppressor's gain formula. Rewriting
+the formula on top of the same residual estimate cannot break Pareto.
+
+## Disposition
+
+- Branch `algo/round10-webrtc-suppression-gain` discarded (no merge to
+  main). The R10 candidate plumbing is NOT on main; recorded above
+  for future re-application if a different residual-model-side
+  hypothesis emerges.
+- No Phase 1 / 2 / 3 algorithm changes attempted (premise falsified
+  at strict Phase 0 gate).
+- v3.8.1 `baseline_v381_seeded` remains canonical.
+
+## Cumulative across Round 1-10
+
+| Round | Outcome | Notes |
+|---|---|---|
+| 1 | F1-F4 all null | trigger style invalidated |
+| 2 | Phase 3 / state-routing all null | cold-start / EPC unconditional fail |
+| 3 | D2 catastrophic / D3 sub-acceptance | EPC-gated bypass not viable |
+| 4 | R1 v1+v2 null | per-bin cap erased downstream |
+| 5 | A34 v2 closest (+0.023 deg, FS −0.04) | Pareto curve mapped |
+| 6 | refactor-only shippable, lift disproven | RES split clean |
+| 7 | EPV damp NULL; mix Pareto-bound | filter trajectory hypothesis raised |
+| R8 prep | R7 causal direction falsified | linear AEC fine on worst |
+| R9 | STOP-1: state cannot sort worst from best | both populations dominated by RENDER_FALLBACK |
+| **R10** | **STOP at P0: candidate is same R5/R6 axis** | **uniform tightening; over-compresses worst-DT_mv 3.6× more** |
+
+## Recommendation (unchanged)
+
+NN postfilter (separate plan) remains the only realistic ship route.
+Across 10 rounds, every classical lever that takes `residual_echo_psd`
+as input (or anything derived from it) lands on the same Pareto
+curve. The remaining structural lever would be a **better
+`residual_echo_psd` estimate itself** — i.e., shadow NLMS / kernel
+changes, both excluded from R10's scope.
