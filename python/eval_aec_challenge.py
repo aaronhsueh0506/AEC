@@ -142,6 +142,15 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     # CNG override from global flag
     if _ENABLE_CNG and 'enable_cng' not in config_overrides:
         config_overrides['enable_cng'] = True
+    # P1.0 Plan A attribution: env vars to selectively revert sub-changes
+    for _flag, _env in [
+        ('plan_a_kernel_tight', 'AEC_PLAN_A_KERNEL'),
+        ('plan_a_hf_cap_2k', 'AEC_PLAN_A_HF_CAP'),
+        ('plan_a_stat_mask_7k', 'AEC_PLAN_A_STAT_MASK'),
+    ]:
+        _v = os.environ.get(_env)
+        if _v is not None and _flag not in config_overrides:
+            config_overrides[_flag] = _v.lower() not in ('0', 'false', 'off', 'no')
     # v3.2 Stage V1: env override AEC_MODE=PBFDAF for filter comparison
     _mode_env = os.environ.get('AEC_MODE', 'PBFDKF').upper()
     _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF

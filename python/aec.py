@@ -264,6 +264,14 @@ class AecConfig:
     # one numpy copy per stage per frame; off by default.
     capture_stages: bool = False
 
+    # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
+    # release behaviour. Setting False reverts the corresponding sub-change
+    # to the v3.8.3 baseline behaviour, used for isolating each Plan A
+    # sub-change's contribution to the FS regression.
+    plan_a_kernel_tight: bool = True       # False → smoothing kernel [0.25,0.5,0.25]
+    plan_a_hf_cap_2k: bool = True          # False → HF cap anchor 500 Hz with v3.8.3 gate
+    plan_a_stat_mask_7k: bool = True       # False → stat_dt_mask cuts off at 4 kHz
+
     # Mode
     mode: AecMode = AecMode.PBFDKF
 
@@ -1224,7 +1232,13 @@ class ResFilter:
                  startup_dt_gain_floor: float = 1.0,
                  startup_dt_noise_floor_scale: float = 1.0,
                  sample_rate: int = 16000,
-                 capture_stages: bool = False):
+                 capture_stages: bool = False,
+                 plan_a_kernel_tight: bool = True,
+                 plan_a_hf_cap_2k: bool = True,
+                 plan_a_stat_mask_7k: bool = True):
+        self._plan_a_kernel_tight = plan_a_kernel_tight
+        self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
+        self._plan_a_stat_mask_7k = plan_a_stat_mask_7k
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -1251,9 +1265,12 @@ class ResFilter:
         self._stat_dt_mask[(f_bins >= 300) & (f_bins <= 3000)] = 0.8
         low = (f_bins > 100) & (f_bins < 300)
         self._stat_dt_mask[low] = 0.8 * ((f_bins[low] - 100.0) / 200.0)
-        high = (f_bins > 3000) & (f_bins < 7000)
-        self._stat_dt_mask[high] = 0.8 * np.maximum(
-            0.0, 1.0 - (f_bins[high] - 3000.0) / 4000.0)
+        # P1.0 toggle: plan_a_stat_mask_7k=False reverts to v3.8.3 behaviour
+        # (no high-band coverage; mask was silently zero above 3 kHz).
+        if self._plan_a_stat_mask_7k:
+            high = (f_bins > 3000) & (f_bins < 7000)
+            self._stat_dt_mask[high] = 0.8 * np.maximum(
+                0.0, 1.0 - (f_bins[high] - 3000.0) / 4000.0)
         # C2: ENR blend array
         self._enr_blend = np.clip((np.arange(n_freqs, dtype=np.float32) - 5) / 5, 0, 1)
         # C3: frequency bin indices
@@ -1746,7 +1763,11 @@ class ResFilter:
             # tighter kernel still suppresses single-bin spurious spikes
             # (its original purpose) while preserving cross-band gain
             # independence, which keeps fricative / formant content audible.
-            kernel = np.array([0.1, 0.8, 0.1], dtype=np.float32)
+            # P1.0 toggle: plan_a_kernel_tight=False reverts to v3.8.3 kernel
+            if self._plan_a_kernel_tight:
+                kernel = np.array([0.1, 0.8, 0.1], dtype=np.float32)
+            else:
+                kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
             g = np.convolve(g, kernel, mode='same').astype(np.float32)
             if getattr(self, '_capture_stages', False):
                 self._stage_gains['05_3bin_smooth'] = g.copy()
@@ -1769,12 +1790,22 @@ class ResFilter:
             # FS cost lives in the smoothing kernel change, not here. Left
             # as-is pending a redesigned evidence metric that distinguishes
             # DT-NE from FS-decoupling.
-            hf_cap_bin = self._hf_cap_bin_2k
-            if (self.n_freqs > hf_cap_bin + 1
-                    and effective_dt < 0.3
-                    and not is_stationary_dt):
-                high_ne_conf = float(np.mean(self._dt_per_bin_last[hf_cap_bin:]))
-                if high_ne_conf < 0.3:
+            # P1.0 toggle: plan_a_hf_cap_2k=False reverts to v3.8.3 HF cap
+            # (anchor 500 Hz, gate effective_dt<0.5, no high_ne_conf skip)
+            if self._plan_a_hf_cap_2k:
+                hf_cap_bin = self._hf_cap_bin_2k
+                if (self.n_freqs > hf_cap_bin + 1
+                        and effective_dt < 0.3
+                        and not is_stationary_dt):
+                    high_ne_conf = float(np.mean(self._dt_per_bin_last[hf_cap_bin:]))
+                    if high_ne_conf < 0.3:
+                        hf_cap = g[hf_cap_bin]
+                        g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
+            else:
+                hf_cap_bin = self._hf_cap_bin
+                if (self.n_freqs > hf_cap_bin + 1
+                        and effective_dt < 0.5
+                        and not is_stationary_dt):
                     hf_cap = g[hf_cap_bin]
                     g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
             if getattr(self, '_capture_stages', False):
@@ -3683,6 +3714,9 @@ class AEC:
                 startup_dt_noise_floor_scale=self.config.startup_dt_noise_floor_scale,
                 sample_rate=self.config.sample_rate,
                 capture_stages=self.config.capture_stages,
+                plan_a_kernel_tight=self.config.plan_a_kernel_tight,
+                plan_a_hf_cap_2k=self.config.plan_a_hf_cap_2k,
+                plan_a_stat_mask_7k=self.config.plan_a_stat_mask_7k,
             )
         else:
             self.res = None
