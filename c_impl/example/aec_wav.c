@@ -19,7 +19,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr,
         "Usage: %s <mic.wav> <ref.wav> <out.wav> [options]\n\n"
         "Options:\n"
-        "  --preset {mild|balanced|aggressive|maximum}   default: balanced\n"
+        "  --preset {mild|soft|balanced|aggressive|maximum}   default: balanced\n"
         "  --cng                          Enable comfort noise (default: off)\n"
         "  --no-cng                       Explicitly disable CNG\n"
         "  --no-delay-est                 Disable online delay estimation\n"
@@ -37,6 +37,7 @@ static void print_usage(const char* prog) {
 
 static int parse_preset(const char* s, AecPreset* out) {
     if (!strcmp(s, "mild"))       { *out = AEC_PRESET_MILD;       return 0; }
+    if (!strcmp(s, "soft"))       { *out = AEC_PRESET_SOFT;       return 0; }
     if (!strcmp(s, "balanced"))   { *out = AEC_PRESET_BALANCED;   return 0; }
     if (!strcmp(s, "aggressive")) { *out = AEC_PRESET_AGGRESSIVE; return 0; }
     if (!strcmp(s, "maximum"))    { *out = AEC_PRESET_MAXIMUM;    return 0; }
@@ -157,6 +158,7 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Processed %d frames @ hop=%d sr=%d preset=%s cng=%d delay_est=%d\n",
             frame_idx, hop, sr,
             preset == AEC_PRESET_MILD ? "mild" :
+            preset == AEC_PRESET_SOFT ? "soft" :
             preset == AEC_PRESET_BALANCED ? "balanced" :
             preset == AEC_PRESET_AGGRESSIVE ? "aggressive" : "maximum",
             cfg.enable_cng, cfg.enable_delay_est);

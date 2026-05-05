@@ -10,38 +10,33 @@ Python reference implementation + C implementation.
 
 ## Status snapshot
 
-**BALANCED preset, 800-case AECMOS** (AEC Challenge Interspeech 2021,
-fl=52 ms, cng=True). Aggregated (no movement split):
+**5-preset operating points** (800-case AECMOS, AEC Challenge Interspeech
+2021, fl=52 ms, cng=True). Aggregated (FS / DT echo = static + movement
+mean):
 
-| | FS echo↑ | NE deg↑ | DT echo↑ | DT deg↑ |
+| Preset | FS echo↑ | NE deg↑ | DT echo↑ | DT deg↑ |
 |---|---|---|---|---|
-| **AEC BALANCED** | **3.834** | **4.002** | **4.202** | **2.263** |
-| WebRTC AEC2 (ref)| 3.488   | 4.098     | 4.240     | 2.416     |
-
-Per-bucket breakdown (static vs movement):
-
-| | FS_st echo↑ | FS_mv echo↑ | NE deg↑ | DT_st echo↑ | DT_st deg↑ | DT_mv echo↑ | DT_mv deg↑ |
-|---|---|---|---|---|---|---|---|
-| **AEC BALANCED** | 3.803 | 3.865 | **4.002** | 4.257 | **2.256** | 4.147 | **2.270** |
-| WebRTC AEC2 (ref) | *3.457* | *3.519* | *4.098* | *4.331* | *2.304* | *4.149* | *2.528* |
-
-**4-preset operating points** (2026-05-01 rebench). Aggregated:
-
-| Preset | FS echo | NE deg | DT echo | DT deg |
-|---|---|---|---|---|
-| MILD | 3.678 | **4.013** | 4.048 | **2.379** |
-| BALANCED | 3.834 | 4.002 | 4.202 | 2.263 |
-| AGGRESSIVE | 3.849 | 3.997 | 4.226 | 2.230 |
-| MAXIMUM | **3.898** | 3.986 | **4.263** | 2.189 |
+| MILD          | 3.644 | **4.019** | 4.048 | **2.383** |
+| **SOFT** (新) | 3.755 | 4.013 | 4.135 | 2.309 |
+| BALANCED      | 3.798 | 4.007 | 4.186 | 2.272 |
+| AGGRESSIVE *  | 3.849 | 3.997 | 4.226 | 2.230 |
+| MAXIMUM *     | **3.898** | 3.986 | **4.263** | 2.189 |
+| WebRTC AEC2   | 3.488 | 4.098 | 4.240 | 2.416 |
 
 Per-bucket breakdown:
 
 | Preset | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
 |---|---|---|---|---|---|---|---|
-| MILD | 3.624 | 3.732 | **4.013** | 4.084 | 2.366 | 4.012 | **2.391** |
-| BALANCED | 3.803 | 3.865 | 4.002 | 4.257 | 2.256 | 4.147 | 2.270 |
-| AGGRESSIVE | 3.830 | 3.868 | 3.997 | 4.284 | 2.222 | 4.167 | 2.237 |
-| MAXIMUM | **3.889** | **3.906** | 3.986 | **4.320** | **2.186** | **4.206** | 2.192 |
+| MILD          | 3.600 | 3.688 | **4.019** | 4.090 | 2.377 | 4.005 | **2.389** |
+| **SOFT** (新) | 3.724 | 3.785 | 4.013     | 4.191 | 2.296 | 4.078 | 2.321     |
+| BALANCED      | 3.768 | 3.827 | 4.007     | 4.251 | 2.257 | 4.120 | 2.286     |
+| AGGRESSIVE *  | 3.830 | 3.868 | 3.997     | 4.284 | 2.222 | 4.167 | 2.237     |
+| MAXIMUM *     | **3.889** | **3.906** | 3.986 | **4.320** | **2.186** | **4.206** | 2.192 |
+
+> MILD / SOFT / BALANCED were re-bench'd 2026-05-05 with SOFT introduction.
+> AGGRESSIVE / MAXIMUM (\*) carry forward the 2026-05-01 rebench (filter
+> code unchanged). NE deg ≈ 4.0 is a binding floor of the current
+> architecture — every preset clusters in 4.007–4.019.
 
 Algorithm version history → [docs/CHANGELOG.md](docs/CHANGELOG.md).
 Trace-driven evolution (v3.0–v3.4 design rationale) → [docs/aec_v3_evolution.md](docs/aec_v3_evolution.md).
@@ -93,7 +88,7 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 | Symptom | Diagnosis & adjustment |
 |---|---|
 | **Residual echo too high (FS / NE)** | 1. With `--no-res`, output should be a clean linear-AEC residual. Echo still dominating → ref signal is wrong, mic-ref delay > filter length, or sample rates differ. 2. `--preset aggressive` or `maximum` for stronger RES (cost: more NE compression). 3. `--filter-length-ms 100` for big rooms / long reverb. |
-| **NE clipped during double-talk** | Lower preset → `--preset balanced` or `mild`. Don't tweak individual RES knobs — preset values are co-tuned. |
+| **NE clipped during double-talk** | Lower preset → `--preset soft` first (NE preservation ≈ mild, +0.11 FS over mild), then `mild` if still too aggressive. Don't tweak individual RES knobs — preset values are co-tuned. |
 | **Slow startup / first-second echo** | Filter convergence needs ≥ 0.5 s of meaningful far energy. Normal adaptive behavior. Consider muting output during application warm-up (e.g. play a "connecting…" cue). |
 | **Echo spikes when device moves** | Echo path changes → EPC fires → ~200 ms re-convergence with brief leak. Usually self-recovers. For frequent movement, increase filter length. |
 | **Output sounds muffled / pumping in NE-only** | Comfort noise mismatch. Try `--cng` (C) / `--enable-cng` (Python) to shape the noise floor; do NOT stack a second CNG layer downstream. |
@@ -233,7 +228,7 @@ pip install numpy soundfile matplotlib
 python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset balanced --enable-res
 
 # Other presets
-python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset {mild|aggressive|maximum} --enable-res
+python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset {mild|soft|aggressive|maximum} --enable-res
 
 # CNG on
 python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset balanced --enable-res --cng

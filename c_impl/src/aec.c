@@ -56,6 +56,23 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
             cfg->shadow_q_ratio = 3.0f; cfg->shadow_mu_min = 0.5f;
             cfg->kalman_q_high = 1.5e-3f;
             break;
+        case AEC_PRESET_SOFT:
+            /* Halfway between MILD and BALANCED. Validated on 800-case
+             * AECMOS — NE deg 4.013 (≈ MILD 4.019), FS echo +0.11 over
+             * MILD. Designed for callers reporting BALANCED over-suppresses
+             * near-end. */
+            cfg->res_alpha_echo_psd = 0.45f; cfg->res_alpha_error_psd = 0.55f;
+            cfg->res_enr_scale = 0.92f;
+            cfg->res_g_min_db = -45.0f;
+            cfg->res_over_sub_base = 3.75f; cfg->res_over_sub_scale = 6.5f;
+            cfg->res_dt_reduction = 3.0f;
+            cfg->res_spectral_floor_db = -31.0f;
+            cfg->res_ne_protect_db = -13.0f;
+            cfg->res_reverb_decay = 0.72f; cfg->res_reverb_gain = 1.2f;
+            cfg->enable_cng = 1;
+            cfg->shadow_q_ratio = 3.0f; cfg->shadow_mu_min = 0.55f;
+            cfg->kalman_q_high = 1.25e-3f;
+            break;
         case AEC_PRESET_BALANCED:
             cfg->res_alpha_echo_psd = 0.4f; cfg->res_alpha_error_psd = 0.5f;
             cfg->res_enr_scale = 0.85f;

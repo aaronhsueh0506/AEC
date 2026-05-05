@@ -27,7 +27,7 @@
 extern "C" {
 #endif
 
-typedef enum { AEC_PRESET_MILD = 0, AEC_PRESET_BALANCED,
+typedef enum { AEC_PRESET_MILD = 0, AEC_PRESET_SOFT, AEC_PRESET_BALANCED,
                AEC_PRESET_AGGRESSIVE, AEC_PRESET_MAXIMUM } AecPreset;
 
 typedef struct AecConfig {

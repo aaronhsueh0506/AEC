@@ -874,33 +874,33 @@ tuned for a target FS-suppression / DT-preservation trade-off.
 
 ### 7.1 Full preset table
 
-Source: `python/aec.py:280-388` (`AecConfig.from_preset`).
+Source: `python/aec.py:280-410` (`AecConfig.from_preset`).
 
-| Parameter | MILD | BALANCED ★ | AGGRESSIVE | MAXIMUM |
-|---|---|---|---|---|
-| **RES echo estimation** | | | | |
-| `res_echo_method`       | direct | direct | direct | direct |
-| `res_gain_type`         | enr    | enr    | enr    | enr |
-| `res_enable_reverb`     | True   | True   | True   | True |
-| `res_reverb_decay`      | 0.6    | 0.85   | 0.7    | 0.8 |
-| `res_reverb_gain`       | 0.8    | 1.6    | 2.0    | 3.0 |
-| `res_alpha_echo_psd`    | 0.5    | 0.4    | 0.3    | 0.2 |
-| `res_alpha_error_psd`   | 0.6    | 0.5    | 0.4    | 0.3 |
-| `res_enr_scale`         | 1.0    | 0.85   | 0.7    | 0.5 |
-| **RES suppression** | | | | |
-| `res_g_min_db`          | −35    | −55    | −65    | −72 |
-| `res_over_sub_base`     | 2.5    | 5.0    | 7.0    | 10.0 |
-| `res_over_sub_scale`    | 4.0    | 9.0    | 12.0   | 15.0 |
-| `res_dt_reduction`      | 3.5    | 2.5    | 1.5    | 0.5 |
-| `res_spectral_floor_db` | −25    | −38    | −45    | −55 |
-| `res_ne_protect_db`     | −10    | −16    | −22    | −30 |
-| **Comfort noise** | | | | |
-| `enable_cng`            | True   | True   | True   | True |
-| **Adaptive filter** | | | | |
-| `kalman_q_high`         | 1.5e-3 | 1.0e-3 | 7.0e-4 | 7.0e-4 |
-| `warmup_frames`         | 80     | 80     | 80     | 100 |
-| `shadow_q_ratio`        | 3.0    | 3.5    | 4.0    | 5.0 |
-| `shadow_mu_min`         | 0.5    | 0.6    | 0.7    | 0.9 |
+| Parameter | MILD | SOFT | BALANCED ★ | AGGRESSIVE | MAXIMUM |
+|---|---|---|---|---|---|
+| **RES echo estimation** | | | | | |
+| `res_echo_method`       | direct | direct | direct | direct | direct |
+| `res_gain_type`         | enr    | enr    | enr    | enr    | enr |
+| `res_enable_reverb`     | True   | True   | True   | True   | True |
+| `res_reverb_decay`      | 0.6    | 0.72   | 0.85   | 0.7    | 0.8 |
+| `res_reverb_gain`       | 0.8    | 1.2    | 1.6    | 2.0    | 3.0 |
+| `res_alpha_echo_psd`    | 0.5    | 0.45   | 0.4    | 0.3    | 0.2 |
+| `res_alpha_error_psd`   | 0.6    | 0.55   | 0.5    | 0.4    | 0.3 |
+| `res_enr_scale`         | 1.0    | 0.92   | 0.85   | 0.7    | 0.5 |
+| **RES suppression** | | | | | |
+| `res_g_min_db`          | −35    | −45    | −55    | −65    | −72 |
+| `res_over_sub_base`     | 2.5    | 3.75   | 5.0    | 7.0    | 10.0 |
+| `res_over_sub_scale`    | 4.0    | 6.5    | 9.0    | 12.0   | 15.0 |
+| `res_dt_reduction`      | 3.5    | 3.0    | 2.5    | 1.5    | 0.5 |
+| `res_spectral_floor_db` | −25    | −31    | −38    | −45    | −55 |
+| `res_ne_protect_db`     | −10    | −13    | −16    | −22    | −30 |
+| **Comfort noise** | | | | | |
+| `enable_cng`            | True   | True   | True   | True   | True |
+| **Adaptive filter** | | | | | |
+| `kalman_q_high`         | 1.5e-3 | 1.25e-3 | 1.0e-3 | 7.0e-4 | 7.0e-4 |
+| `warmup_frames`         | 80     | 80     | 80     | 80     | 100 |
+| `shadow_q_ratio`        | 3.0    | 3.0    | 3.5    | 4.0    | 5.0 |
+| `shadow_mu_min`         | 0.5    | 0.55   | 0.6    | 0.7    | 0.9 |
 
 Shared (not preset-dependent):
 
@@ -922,6 +922,7 @@ Shared (not preset-dependent):
 | Scenario | Preset | Why |
 |---|---|---|
 | Music streaming, distance learning | MILD | NE preservation top priority |
+| Sensitive NE (BALANCED feels too aggressive) | SOFT | NE preservation ≈ MILD, FS suppression +0.11 over MILD |
 | General phone / video call         | **BALANCED ★** | Co-optimised default |
 | Automotive, factory, high noise    | AGGRESSIVE | Stronger FS suppression OK |
 | IoT speaker, mic-near-speaker      | MAXIMUM | Extreme coupling needs extreme RES |
@@ -1000,20 +1001,28 @@ are automatic.
 AEC Challenge 2021 Interspeech blind test set, 800 cases, AECMOS
 (scale 1–5, higher better).
 
+FS Echo and DT Echo are the means of static + movement sub-buckets.
+
 | Method | FS Echo | DT Echo | DT Degradation | NE Degradation |
 |---|---|---|---|---|
 | Linear only          | 2.71 | 3.16 | 3.23 | — |
 | Speex                | 2.81 | 3.37 | 3.23 | 4.13 |
 | WebRTC AEC2          | 3.48 | 4.26 | 2.39 | 4.10 |
 | WebRTC AEC3          | 3.88 | **4.54** | 1.85 | 3.45 |
-| Ours MILD            | 3.16 | 3.88 | **2.44** | 4.02 |
-| **Ours BALANCED ★**  | 3.48 | 4.16 | 2.30 | 4.01 |
+| Ours MILD            | 3.64 | 4.05 | **2.38** | 4.02 |
+| Ours SOFT            | 3.76 | 4.13 | 2.31 | 4.01 |
+| **Ours BALANCED ★**  | 3.80 | 4.19 | 2.27 | 4.01 |
 | Ours AGGRESSIVE      | 3.62 | 4.29 | 2.23 | 3.99 |
 | Ours MAXIMUM         | 3.72 | 4.41 | 2.16 | 3.96 |
 
+> Numbers above are the v3.8.2 800-case AECMOS bench (preset=*, fl=52 ms,
+> CNG on). MILD/SOFT/BALANCED were re-bench-validated together for SOFT
+> introduction. AGGRESSIVE/MAXIMUM rows carry forward v3.8.1 baseline
+> figures.
+
 NE Degradation ≈ 4.006 is a binding floor under the current
-architecture (every preset clusters here regardless of suppression
-level). See Appendix C.
+architecture (every preset clusters in 4.007–4.019 regardless of
+suppression level). See Appendix C.
 
 ### Resource estimates (16 kHz, 52 ms filter, BALANCED, all features on)
 
