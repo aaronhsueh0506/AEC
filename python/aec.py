@@ -1195,17 +1195,23 @@ class ResFilter:
         # C1-C4: precomputed per-bin constants (invariant after init)
         freq_res = sample_rate / block_size
         f_bins = np.arange(n_freqs, dtype=np.float32) * freq_res
-        # C1: stationary DT mask
+        # C1: stationary DT mask. v3.8.4: upper edge extended 4 kHz → 7 kHz
+        # so fricatives / sibilants (4–7 kHz) get DT protection during
+        # stationary DT (was: silently zero above 4 kHz).
         self._stat_dt_mask = np.zeros(n_freqs, dtype=np.float32)
         self._stat_dt_mask[(f_bins >= 300) & (f_bins <= 3000)] = 0.8
         low = (f_bins > 100) & (f_bins < 300)
         self._stat_dt_mask[low] = 0.8 * ((f_bins[low] - 100.0) / 200.0)
-        high = (f_bins > 3000) & (f_bins < 4000)
-        self._stat_dt_mask[high] = 0.8 * ((4000.0 - f_bins[high]) / 1000.0)
+        high = (f_bins > 3000) & (f_bins < 7000)
+        self._stat_dt_mask[high] = 0.8 * np.maximum(
+            0.0, 1.0 - (f_bins[high] - 3000.0) / 4000.0)
         # C2: ENR blend array
         self._enr_blend = np.clip((np.arange(n_freqs, dtype=np.float32) - 5) / 5, 0, 1)
         # C3: frequency bin indices
         self._hf_cap_bin = min(int(500.0 / freq_res), n_freqs - 1)
+        # v3.8.4: secondary cap anchor at 2 kHz so vowel formants (1–3 kHz)
+        # are not dragged down by the 500 Hz bin's gain.
+        self._hf_cap_bin_2k = min(int(2000.0 / freq_res), n_freqs - 1)
         # C4: harmonic distortion bin bounds
         self._harm_lf_start = max(1, int(100.0 / freq_res))
         self._harm_lf_end = min(int(500.0 / freq_res), n_freqs - 1)
@@ -1228,6 +1234,9 @@ class ResFilter:
         # Per-bin gain capture (full vectors, opt-in via capture_stages)
         self._capture_stages = capture_stages
         self._stage_gains = {}
+        # v3.8.4: cached per-bin DT confidence from compute stage, read by
+        # postprocess HF-cap "high-band NE present?" gate.
+        self._dt_per_bin_last = np.zeros(n_freqs, dtype=np.float32)
 
         # RES v2: direct echo estimation + Wiener gain + reverb
         self.echo_method = echo_method       # "coherence" or "direct"
@@ -1559,6 +1568,8 @@ class ResFilter:
             )
             if is_stationary_dt:
                 dt_per_bin = np.maximum(dt_per_bin, self._stat_dt_mask)
+            # v3.8.4: stash for postprocess HF-cap "high bins NE confidence" gate
+            self._dt_per_bin_last = dt_per_bin
 
             dt_shaped_per_bin = dt_per_bin ** 1.1
             nearend_est = np.maximum(raw_nearend_est * dt_shaped_per_bin, noise_floor_psd)
@@ -1672,8 +1683,15 @@ class ResFilter:
 
         # --- Frequency-domain postprocessing (cf. AEC3 PostprocessGains) ---
         if far_power > 1e-4:
-            # 3-bin cross-frequency smoothing
-            kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
+            # 3-bin cross-frequency smoothing.
+            # v3.8.4: kernel tightened from [0.25, 0.5, 0.25] to
+            # [0.1, 0.8, 0.1]. The original kernel let low-band echo gain
+            # leak into high bins via 25% sidelobes — measured 10 dB extra
+            # cut in the 4–8 kHz band on case 7GTxyT (DT, BALANCED). The
+            # tighter kernel still suppresses single-bin spurious spikes
+            # (its original purpose) while preserving cross-band gain
+            # independence, which keeps fricative / formant content audible.
+            kernel = np.array([0.1, 0.8, 0.1], dtype=np.float32)
             g = np.convolve(g, kernel, mode='same').astype(np.float32)
             if getattr(self, '_capture_stages', False):
                 self._stage_gains['05_3bin_smooth'] = g.copy()
@@ -1681,11 +1699,22 @@ class ResFilter:
             # DC consistency: bins 0-1 follow bin 2
             if self.n_freqs > 2:
                 g[:2] = np.minimum(g[1], g[2])
-            # HF cap: upper bins capped at gain of bin near ~500Hz
-            hf_cap_bin = self._hf_cap_bin
-            if self.n_freqs > hf_cap_bin + 1 and effective_dt < 0.5 and not is_stationary_dt:
-                hf_cap = g[hf_cap_bin]
-                g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
+            # v3.8.4: HF cap reworked. Two changes:
+            #   (a) only fire when DTD is confident NE absent (was < 0.5,
+            #       too permissive — fired throughout DT). Now < 0.3.
+            #   (b) anchor the cap at 2 kHz instead of 500 Hz so vowel
+            #       formants (1–3 kHz) are not dragged down by the 500 Hz
+            #       bin's gain.
+            #   (c) skip the cap entirely when high bins themselves show NE
+            #       energy (per-bin DT confidence > 0.3 in 2 kHz+).
+            hf_cap_bin = self._hf_cap_bin_2k
+            if (self.n_freqs > hf_cap_bin + 1
+                    and effective_dt < 0.3
+                    and not is_stationary_dt):
+                high_ne_conf = float(np.mean(self._dt_per_bin_last[hf_cap_bin:]))
+                if high_ne_conf < 0.3:
+                    hf_cap = g[hf_cap_bin]
+                    g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
             if getattr(self, '_capture_stages', False):
                 self._stage_gains['06_hf_cap'] = g.copy()
             self._diag_round5_stages[5] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
