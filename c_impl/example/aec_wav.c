@@ -136,8 +136,10 @@ int main(int argc, char* argv[]) {
     aec_debug_set_frame(0, hop, sr);
 
     /* Default to float32 output for parity-friendly comparison; override
-     * via AEC_FP32_WAV=0 if 16-bit PCM needed. */
-    if (!getenv("AEC_FP32_WAV")) setenv("AEC_FP32_WAV", "1", 1);
+     * via AEC_OUT_FLOAT=0 if 16-bit PCM needed. v3.10.4 fix: env var key
+     * was AEC_FP32_WAV but wav_io.h:215 reads AEC_OUT_FLOAT — keys agree
+     * now so the float32 default actually takes effect. */
+    if (!getenv("AEC_OUT_FLOAT")) setenv("AEC_OUT_FLOAT", "1", 1);
     WavWriter* ww = wav_open_write(out_path, sr, 1);
     if (!ww) { fprintf(stderr, "ERROR: cannot write output\n"); return 3; }
 
