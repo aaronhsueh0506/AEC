@@ -5,6 +5,42 @@ or tuning sweeps; patch is bugfix.
 
 ---
 
+## v3.8.3 (2026-05-05) — Preset rebalance: shift gentle end one slot lighter
+
+**Goal**: User reported the BALANCED preset over-suppresses near-end on
+real-world cases, and the v3.8.2 MILD still cuts more NE than wanted on
+quiet/light-echo material. Add headroom by left-shifting the gentle half
+of the preset ladder.
+
+**Change** (parameters only — no algorithm change):
+
+| Slot | v3.8.2 | v3.8.3 |
+|---|---|---|
+| MILD | (was light) | **new ultra-light** — minimum-touch RES |
+| SOFT | midpoint MILD↔BALANCED | **= former v3.8.2 MILD** (verbatim copy) |
+| BALANCED / AGGRESSIVE / MAXIMUM | unchanged | unchanged |
+
+**New MILD levers** (vs former MILD):
+- `res_g_min_db` -35 → -25 (shallower attenuation floor)
+- `res_over_sub_base` 2.5 → 1.5
+- `res_over_sub_scale` 4.0 → 2.5
+- `res_dt_reduction` 3.5 → 4.5 (less DT gain reduction)
+- `res_spectral_floor_db` -25 → -18
+- `res_ne_protect_db` -10 → -7
+- `res_reverb_gain` 0.8 → 0.4
+- `res_reverb_decay` 0.6 → 0.45
+- `res_alpha_echo_psd` 0.5 → 0.6 (slower far PSD tracking)
+- `res_enr_scale` 1.0 → 1.15
+
+**Files**: `python/aec.py` (MILD/SOFT blocks), `c_impl/src/aec.c` (mirror),
+docs (preset tables refreshed across `aec_methods.md`,
+`aec_algorithm_guide.html`, `README.md`).
+
+**No Python algorithm change** — same code path as v3.8.1, only RES
+parameter values move. C port stays bit-exact aligned with Python.
+
+---
+
 ## v3.8.2 (2026-05-02) — C release-clean rewrite
 
 **Goal**: Reorganize the C implementation under a single canonical layout

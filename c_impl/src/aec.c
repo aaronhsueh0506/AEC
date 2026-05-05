@@ -44,6 +44,25 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
     aec_config_defaults(cfg, sr);
     switch (p) {
         case AEC_PRESET_MILD:
+            /* v3.8.3: shifted one slot lighter — minimum-touch RES for
+             * quiet/light-echo cases where NE intelligibility trumps echo
+             * cleanup. Former v3.8.2 MILD values now live in SOFT. */
+            cfg->res_alpha_echo_psd = 0.6f; cfg->res_alpha_error_psd = 0.6f;
+            cfg->res_enr_scale = 1.15f;
+            cfg->res_g_min_db = -25.0f;
+            cfg->res_over_sub_base = 1.5f; cfg->res_over_sub_scale = 2.5f;
+            cfg->res_dt_reduction = 4.5f;
+            cfg->res_spectral_floor_db = -18.0f;
+            cfg->res_ne_protect_db = -7.0f;
+            cfg->res_reverb_decay = 0.45f; cfg->res_reverb_gain = 0.4f;
+            cfg->enable_cng = 1;
+            cfg->shadow_q_ratio = 3.0f; cfg->shadow_mu_min = 0.5f;
+            cfg->kalman_q_high = 1.5e-3f;
+            break;
+        case AEC_PRESET_SOFT:
+            /* = former v3.8.2 MILD. Shifted one slot to make room for an
+             * even lighter MILD; preserved for users who liked the v3.8.2
+             * MILD positioning (light RES with audible echo cleanup). */
             cfg->res_alpha_echo_psd = 0.5f; cfg->res_alpha_error_psd = 0.6f;
             cfg->res_enr_scale = 1.0f;
             cfg->res_g_min_db = -35.0f;
@@ -55,23 +74,6 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
             cfg->enable_cng = 1;
             cfg->shadow_q_ratio = 3.0f; cfg->shadow_mu_min = 0.5f;
             cfg->kalman_q_high = 1.5e-3f;
-            break;
-        case AEC_PRESET_SOFT:
-            /* Halfway between MILD and BALANCED. Validated on 800-case
-             * AECMOS — NE deg 4.013 (≈ MILD 4.019), FS echo +0.11 over
-             * MILD. Designed for callers reporting BALANCED over-suppresses
-             * near-end. */
-            cfg->res_alpha_echo_psd = 0.45f; cfg->res_alpha_error_psd = 0.55f;
-            cfg->res_enr_scale = 0.92f;
-            cfg->res_g_min_db = -45.0f;
-            cfg->res_over_sub_base = 3.75f; cfg->res_over_sub_scale = 6.5f;
-            cfg->res_dt_reduction = 3.0f;
-            cfg->res_spectral_floor_db = -31.0f;
-            cfg->res_ne_protect_db = -13.0f;
-            cfg->res_reverb_decay = 0.72f; cfg->res_reverb_gain = 1.2f;
-            cfg->enable_cng = 1;
-            cfg->shadow_q_ratio = 3.0f; cfg->shadow_mu_min = 0.55f;
-            cfg->kalman_q_high = 1.25e-3f;
             break;
         case AEC_PRESET_BALANCED:
             cfg->res_alpha_echo_psd = 0.4f; cfg->res_alpha_error_psd = 0.5f;

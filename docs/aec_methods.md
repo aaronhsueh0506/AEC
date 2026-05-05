@@ -1,8 +1,9 @@
-# AEC Algorithm Methods (v3.8.2)
+# AEC Algorithm Methods (v3.8.3)
 
-**Version**: v3.8.2 release · algorithm = Python `aec.py` v3.8.1 (audio
-behavior unchanged in v3.8.2; v3.8.2 only adds bit-exact C parity, static
-memory API, and release hygiene).
+**Version**: v3.8.3 release · algorithm = Python `aec.py` v3.8.1 (audio
+path unchanged since v3.8.1; v3.8.2 added bit-exact C parity + static
+memory API + release hygiene; v3.8.3 rebalances the gentle end of the
+preset ladder — see CHANGELOG).
 
 This document is the **deep algorithm specification**. For other angles:
 
@@ -242,6 +243,7 @@ Per-preset `Q_high`:
 | Preset | `kalman_q_high` |
 |---|---|
 | MILD       | `1.5e-3` |
+| SOFT       | `1.5e-3` |
 | BALANCED   | `1.0e-3` |
 | AGGRESSIVE | `7.0e-4` |
 | MAXIMUM    | `7.0e-4` |
@@ -493,7 +495,8 @@ Per-preset:
 
 | Preset | `res_reverb_decay` | `res_reverb_gain` |
 |---|---|---|
-| MILD       | 0.6  | 0.8 |
+| MILD       | 0.45 | 0.4 |
+| SOFT       | 0.6  | 0.8 |
 | BALANCED   | 0.85 | 1.6 |
 | AGGRESSIVE | 0.7  | 2.0 |
 | MAXIMUM    | 0.8  | 3.0 |
@@ -520,7 +523,8 @@ gain(k) = sigmoid((threshold − ENR_dB) / softness)
 
 | Preset | `res_enr_scale` | Effect |
 |---|---|---|
-| MILD       | 1.00 | AEC3 default; conservative |
+| MILD       | 1.15 | shift ~1 dB later (NE-friendlier) |
+| SOFT       | 1.00 | AEC3 default; conservative |
 | BALANCED   | 0.85 | shift ~1.5 dB earlier |
 | AGGRESSIVE | 0.70 | shift ~3 dB earlier |
 | MAXIMUM    | 0.50 | shift ~6 dB earlier |
@@ -551,7 +555,8 @@ Per-preset:
 
 | Preset | `over_sub_base` | `over_sub_scale` | `dt_reduction` |
 |---|---|---|---|
-| MILD       | 2.5  | 4.0  | 3.5 |
+| MILD       | 1.5  | 2.5  | 4.5 |
+| SOFT       | 2.5  | 4.0  | 3.5 |
 | BALANCED   | 5.0  | 9.0  | 2.5 |
 | AGGRESSIVE | 7.0  | 12.0 | 1.5 |
 | MAXIMUM    | 10.0 | 15.0 | 0.5 |
@@ -566,7 +571,8 @@ Two floors are blended; the larger of the two clamps the gain.
 
 | Preset | `res_g_min_db` |
 |---|---|
-| MILD       | −35 dB |
+| MILD       | −25 dB |
+| SOFT       | −35 dB |
 | BALANCED   | −55 dB |
 | AGGRESSIVE | −65 dB |
 | MAXIMUM    | −72 dB |
@@ -587,7 +593,8 @@ floor(k) = res_spectral_floor_db
 
 | Preset | `res_spectral_floor_db` |
 |---|---|
-| MILD       | −25 dB |
+| MILD       | −18 dB |
+| SOFT       | −25 dB |
 | BALANCED   | −38 dB |
 | AGGRESSIVE | −45 dB |
 | MAXIMUM    | −55 dB |
@@ -600,7 +607,7 @@ gain(k)  = max( gain_from_ENR(k), g_min(k) )
 ```
 
 `per_bin_ne_protect` is a per-frequency near-end protection ceiling
-(`res_ne_protect_db`, ranging −10 dB MILD → −30 dB MAXIMUM); see §4.7.
+(`res_ne_protect_db`, ranging −7 dB MILD → −30 dB MAXIMUM); see §4.7.
 
 ### 4.6 Multi-ERLE estimation
 
@@ -882,25 +889,25 @@ Source: `python/aec.py:280-410` (`AecConfig.from_preset`).
 | `res_echo_method`       | direct | direct | direct | direct | direct |
 | `res_gain_type`         | enr    | enr    | enr    | enr    | enr |
 | `res_enable_reverb`     | True   | True   | True   | True   | True |
-| `res_reverb_decay`      | 0.6    | 0.72   | 0.85   | 0.7    | 0.8 |
-| `res_reverb_gain`       | 0.8    | 1.2    | 1.6    | 2.0    | 3.0 |
-| `res_alpha_echo_psd`    | 0.5    | 0.45   | 0.4    | 0.3    | 0.2 |
-| `res_alpha_error_psd`   | 0.6    | 0.55   | 0.5    | 0.4    | 0.3 |
-| `res_enr_scale`         | 1.0    | 0.92   | 0.85   | 0.7    | 0.5 |
+| `res_reverb_decay`      | 0.45   | 0.6    | 0.85   | 0.7    | 0.8 |
+| `res_reverb_gain`       | 0.4    | 0.8    | 1.6    | 2.0    | 3.0 |
+| `res_alpha_echo_psd`    | 0.6    | 0.5    | 0.4    | 0.3    | 0.2 |
+| `res_alpha_error_psd`   | 0.6    | 0.6    | 0.5    | 0.4    | 0.3 |
+| `res_enr_scale`         | 1.15   | 1.0    | 0.85   | 0.7    | 0.5 |
 | **RES suppression** | | | | | |
-| `res_g_min_db`          | −35    | −45    | −55    | −65    | −72 |
-| `res_over_sub_base`     | 2.5    | 3.75   | 5.0    | 7.0    | 10.0 |
-| `res_over_sub_scale`    | 4.0    | 6.5    | 9.0    | 12.0   | 15.0 |
-| `res_dt_reduction`      | 3.5    | 3.0    | 2.5    | 1.5    | 0.5 |
-| `res_spectral_floor_db` | −25    | −31    | −38    | −45    | −55 |
-| `res_ne_protect_db`     | −10    | −13    | −16    | −22    | −30 |
+| `res_g_min_db`          | −25    | −35    | −55    | −65    | −72 |
+| `res_over_sub_base`     | 1.5    | 2.5    | 5.0    | 7.0    | 10.0 |
+| `res_over_sub_scale`    | 2.5    | 4.0    | 9.0    | 12.0   | 15.0 |
+| `res_dt_reduction`      | 4.5    | 3.5    | 2.5    | 1.5    | 0.5 |
+| `res_spectral_floor_db` | −18    | −25    | −38    | −45    | −55 |
+| `res_ne_protect_db`     | −7     | −10    | −16    | −22    | −30 |
 | **Comfort noise** | | | | | |
 | `enable_cng`            | True   | True   | True   | True   | True |
 | **Adaptive filter** | | | | | |
-| `kalman_q_high`         | 1.5e-3 | 1.25e-3 | 1.0e-3 | 7.0e-4 | 7.0e-4 |
+| `kalman_q_high`         | 1.5e-3 | 1.5e-3 | 1.0e-3 | 7.0e-4 | 7.0e-4 |
 | `warmup_frames`         | 80     | 80     | 80     | 80     | 100 |
 | `shadow_q_ratio`        | 3.0    | 3.0    | 3.5    | 4.0    | 5.0 |
-| `shadow_mu_min`         | 0.5    | 0.55   | 0.6    | 0.7    | 0.9 |
+| `shadow_mu_min`         | 0.5    | 0.5    | 0.6    | 0.7    | 0.9 |
 
 Shared (not preset-dependent):
 
@@ -921,8 +928,8 @@ Shared (not preset-dependent):
 
 | Scenario | Preset | Why |
 |---|---|---|
-| Music streaming, distance learning | MILD | NE preservation top priority |
-| Sensitive NE (BALANCED feels too aggressive) | SOFT | NE preservation ≈ MILD, FS suppression +0.11 over MILD |
+| Echo 安靜、希望幾乎不動到近端 | MILD | Minimum-touch RES; NE intelligibility trumps echo cleanup |
+| 輕度 echo、近端優先 (= 舊 v3.8.2 MILD) | SOFT | Light RES with audible echo cleanup; balanced for sensitive NE |
 | General phone / video call         | **BALANCED ★** | Co-optimised default |
 | Automotive, factory, high noise    | AGGRESSIVE | Stronger FS suppression OK |
 | IoT speaker, mic-near-speaker      | MAXIMUM | Extreme coupling needs extreme RES |
@@ -964,7 +971,7 @@ If you must tune, do it via the high-level dial:
 
 ### 8.2 Bit-exactness
 
-The C port at v3.8.2 is **bit-identical** to Python v3.8.1 across all
+The C port at v3.8.3 is **bit-identical** to Python v3.8.1 across all
 4 presets and FS / DT / NE scenarios. Verified by:
 
 1. MD5 comparison of output WAVs across the 800-case AEC Challenge
@@ -996,7 +1003,7 @@ are automatic.
 
 ---
 
-## Appendix A — v3.8.1 baseline metrics
+## Appendix A — v3.8.3 baseline metrics
 
 AEC Challenge 2021 Interspeech blind test set, 800 cases, AECMOS
 (scale 1–5, higher better).
@@ -1009,19 +1016,19 @@ FS Echo and DT Echo are the means of static + movement sub-buckets.
 | Speex                | 2.81 | 3.37 | 3.23 | 4.13 |
 | WebRTC AEC2          | 3.48 | 4.26 | 2.39 | 4.10 |
 | WebRTC AEC3          | 3.88 | **4.54** | 1.85 | 3.45 |
-| Ours MILD            | 3.64 | 4.05 | **2.38** | 4.02 |
-| Ours SOFT            | 3.76 | 4.13 | 2.31 | 4.01 |
+| Ours MILD (新)       | 3.42 | 3.87 | **2.56** | **4.02** |
+| Ours SOFT            | 3.64 | 4.05 | 2.38 | 4.02 |
 | **Ours BALANCED ★**  | 3.80 | 4.19 | 2.27 | 4.01 |
-| Ours AGGRESSIVE      | 3.62 | 4.29 | 2.23 | 3.99 |
-| Ours MAXIMUM         | 3.72 | 4.41 | 2.16 | 3.96 |
+| Ours AGGRESSIVE      | 3.85 | 4.23 | 2.23 | 4.00 |
+| Ours MAXIMUM         | 3.90 | 4.26 | 2.19 | 3.99 |
 
-> Numbers above are the v3.8.2 800-case AECMOS bench (preset=*, fl=52 ms,
-> CNG on). MILD/SOFT/BALANCED were re-bench-validated together for SOFT
-> introduction. AGGRESSIVE/MAXIMUM rows carry forward v3.8.1 baseline
-> figures.
+> Numbers above: MILD = v3.8.3 800-case AECMOS bench (2026-05-05,
+> preset=mild, fl=52 ms, CNG on). SOFT = former v3.8.2 MILD numbers
+> verbatim (params unchanged, only slot moved). BALANCED+ = v3.8.1
+> baseline (filter code unchanged).
 
-NE Degradation ≈ 4.006 is a binding floor under the current
-architecture (every preset clusters in 4.007–4.019 regardless of
+NE Degradation ≈ 4.0 is a binding floor under the current
+architecture (every preset clusters in 3.99–4.02 regardless of
 suppression level). See Appendix C.
 
 ### Resource estimates (16 kHz, 52 ms filter, BALANCED, all features on)
@@ -1092,7 +1099,7 @@ cannot recover it. See `archive/movement_dt_ablation_report.md`.
 
 ### C.3 NE Degradation floor (~4.006)
 
-All 4 presets cluster at NE deg ≈ 4.0 on the 800-case blind set. This
+All 5 presets cluster at NE deg ≈ 4.0 on the 800-case blind set. This
 is a floor of the current architecture's near-end protection mechanism
 (spectral floor + per-bin gate + CNG). Pushing ENR threshold higher
 preserves NE further but at unacceptable FS cost. Likely needs an

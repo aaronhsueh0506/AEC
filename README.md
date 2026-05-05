@@ -4,7 +4,7 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v3.8.2 (2026-05-02)
+**Release**: v3.8.3 (2026-05-05)
 
 ---
 
@@ -16,27 +16,29 @@ mean):
 
 | Preset | FS echo↑ | NE deg↑ | DT echo↑ | DT deg↑ |
 |---|---|---|---|---|
-| MILD          | 3.644 | **4.019** | 4.048 | **2.383** |
-| **SOFT** (新) | 3.755 | 4.013 | 4.135 | 2.309 |
-| BALANCED      | 3.798 | 4.007 | 4.186 | 2.272 |
-| AGGRESSIVE *  | 3.849 | 3.997 | 4.226 | 2.230 |
-| MAXIMUM *     | **3.898** | 3.986 | **4.263** | 2.189 |
-| WebRTC AEC2   | 3.488 | 4.098 | 4.240 | 2.416 |
+| **MILD** (新)   | 3.420 | **4.022** | 3.873 | **2.564** |
+| SOFT *          | 3.644 | 4.019 | 4.048 | 2.383 |
+| BALANCED *      | 3.798 | 4.007 | 4.186 | 2.272 |
+| AGGRESSIVE *    | 3.849 | 3.997 | 4.226 | 2.230 |
+| MAXIMUM *       | **3.898** | 3.986 | **4.263** | 2.189 |
+| WebRTC AEC2     | 3.488 | 4.098 | 4.240 | 2.416 |
 
 Per-bucket breakdown:
 
 | Preset | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
 |---|---|---|---|---|---|---|---|
-| MILD          | 3.600 | 3.688 | **4.019** | 4.090 | 2.377 | 4.005 | **2.389** |
-| **SOFT** (新) | 3.724 | 3.785 | 4.013     | 4.191 | 2.296 | 4.078 | 2.321     |
-| BALANCED      | 3.768 | 3.827 | 4.007     | 4.251 | 2.257 | 4.120 | 2.286     |
-| AGGRESSIVE *  | 3.830 | 3.868 | 3.997     | 4.284 | 2.222 | 4.167 | 2.237     |
-| MAXIMUM *     | **3.889** | **3.906** | 3.986 | **4.320** | **2.186** | **4.206** | 2.192 |
+| **MILD** (新)   | 3.369 | 3.470 | **4.022** | 3.890 | 2.573 | 3.855 | **2.555** |
+| SOFT *          | 3.600 | 3.688 | 4.019     | 4.090 | 2.377 | 4.005 | 2.389     |
+| BALANCED *      | 3.768 | 3.827 | 4.007     | 4.251 | 2.257 | 4.120 | 2.286     |
+| AGGRESSIVE *    | 3.830 | 3.868 | 3.997     | 4.284 | 2.222 | 4.167 | 2.237     |
+| MAXIMUM *       | **3.889** | **3.906** | 3.986 | **4.320** | **2.186** | **4.206** | 2.192 |
 
-> MILD / SOFT / BALANCED were re-bench'd 2026-05-05 with SOFT introduction.
-> AGGRESSIVE / MAXIMUM (\*) carry forward the 2026-05-01 rebench (filter
-> code unchanged). NE deg ≈ 4.0 is a binding floor of the current
-> architecture — every preset clusters in 4.007–4.019.
+> v3.8.3 (2026-05-05) shifted the gentle end of the preset ladder:
+> new MILD is an ultra-light minimum-touch preset (re-bench'd 2026-05-05);
+> SOFT (\*) inherits the former v3.8.2 MILD numbers verbatim (params
+> unchanged); BALANCED+ unchanged from the 2026-05-01 baseline. NE deg
+> ≈ 4.0 is a binding floor of the current architecture — every preset
+> clusters in 3.986–4.022.
 
 Algorithm version history → [docs/CHANGELOG.md](docs/CHANGELOG.md).
 Trace-driven evolution (v3.0–v3.4 design rationale) → [docs/aec_v3_evolution.md](docs/aec_v3_evolution.md).
@@ -88,7 +90,7 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 | Symptom | Diagnosis & adjustment |
 |---|---|
 | **Residual echo too high (FS / NE)** | 1. With `--no-res`, output should be a clean linear-AEC residual. Echo still dominating → ref signal is wrong, mic-ref delay > filter length, or sample rates differ. 2. `--preset aggressive` or `maximum` for stronger RES (cost: more NE compression). 3. `--filter-length-ms 100` for big rooms / long reverb. |
-| **NE clipped during double-talk** | Lower preset → `--preset soft` first (NE preservation ≈ mild, +0.11 FS over mild), then `mild` if still too aggressive. Don't tweak individual RES knobs — preset values are co-tuned. |
+| **NE clipped during double-talk** | Lower preset → `--preset soft` first (= former v3.8.2 mild, light RES with audible echo cleanup), then `--preset mild` for minimum-touch RES. Don't tweak individual RES knobs — preset values are co-tuned. |
 | **Slow startup / first-second echo** | Filter convergence needs ≥ 0.5 s of meaningful far energy. Normal adaptive behavior. Consider muting output during application warm-up (e.g. play a "connecting…" cue). |
 | **Echo spikes when device moves** | Echo path changes → EPC fires → ~200 ms re-convergence with brief leak. Usually self-recovers. For frequent movement, increase filter length. |
 | **Output sounds muffled / pumping in NE-only** | Comfort noise mismatch. Try `--cng` (C) / `--enable-cng` (Python) to shape the noise floor; do NOT stack a second CNG layer downstream. |
@@ -280,7 +282,8 @@ Preset trade-off:
 
 | Preset | Echo suppression | NE preservation | Use |
 |---|---|---|---|
-| MILD       | light  | best  | conferencing, NE quality first |
+| MILD       | very light | best (minimum-touch) | echo 安靜、demo / 試聽 |
+| SOFT       | light  | very good | 一般通話但 BALANCED 過度壓 NE |
 | BALANCED   | medium | good  | general / default |
 | AGGRESSIVE | strong | minor loss | hands-free, automotive |
 | MAXIMUM    | max    | visible loss | speakerphone / very high echo |

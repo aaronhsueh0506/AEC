@@ -290,6 +290,37 @@ class AecConfig:
         if isinstance(preset, str):
             preset = AecPreset(preset)
         if preset == AecPreset.MILD:
+            # v3.8.3: shifted one slot lighter — minimum-touch RES for
+            # quiet/light-echo cases where NE intelligibility trumps echo
+            # cleanup. Former v3.8.2 MILD values now live in SOFT.
+            defaults = dict(
+                # RES v2
+                res_echo_method="direct",
+                res_gain_type="enr",
+                res_enable_reverb=True,
+                res_reverb_decay=0.45,
+                res_reverb_gain=0.4,
+                res_alpha_echo_psd=0.6,
+                res_alpha_error_psd=0.6,
+                res_enr_scale=1.15,
+                # RES suppression (ultra-light)
+                res_g_min_db=-25.0,
+                res_over_sub_base=1.5,
+                res_over_sub_scale=2.5,
+                res_dt_reduction=4.5,
+                res_spectral_floor_db=-18.0,
+                res_ne_protect_db=-7.0,
+                enable_cng=True,
+                shadow_q_ratio=3.0,
+                # Adaptive filter
+                shadow_mu_min=0.5,
+                warmup_frames=80,
+                kalman_q_high=1.5e-3,
+            )
+        elif preset == AecPreset.SOFT:
+            # = former v3.8.2 MILD. Shifted one slot to make room for an
+            # even lighter MILD; preserved for users who liked the v3.8.2
+            # MILD positioning (light RES with audible echo cleanup).
             defaults = dict(
                 # RES v2
                 res_echo_method="direct",
@@ -300,7 +331,7 @@ class AecConfig:
                 res_alpha_echo_psd=0.5,
                 res_alpha_error_psd=0.6,
                 res_enr_scale=1.0,
-                # RES suppression (lightest)
+                # RES suppression
                 res_g_min_db=-35.0,
                 res_over_sub_base=2.5,
                 res_over_sub_scale=4.0,
@@ -313,35 +344,6 @@ class AecConfig:
                 shadow_mu_min=0.5,
                 warmup_frames=80,
                 kalman_q_high=1.5e-3,
-            )
-        elif preset == AecPreset.SOFT:
-            # Halfway between MILD and BALANCED — addresses NE over-suppression
-            # complaint on real-world cases while keeping FS suppression
-            # noticeably above MILD. CNG always on (matches all production
-            # presets). Validated on 800-case AECMOS — see CHANGELOG.
-            defaults = dict(
-                # RES v2
-                res_echo_method="direct",
-                res_gain_type="enr",
-                res_enable_reverb=True,
-                res_reverb_decay=0.72,        # midpoint (0.6 / 0.85)
-                res_reverb_gain=1.2,          # midpoint (0.8 / 1.6)
-                res_alpha_echo_psd=0.45,      # midpoint (0.5 / 0.4)
-                res_alpha_error_psd=0.55,     # midpoint (0.6 / 0.5)
-                res_enr_scale=0.92,           # midpoint (1.0 / 0.85)
-                # RES suppression
-                res_g_min_db=-45.0,           # midpoint (-35 / -55)
-                res_over_sub_base=3.75,       # midpoint (2.5 / 5.0)
-                res_over_sub_scale=6.5,       # midpoint (4.0 / 9.0)
-                res_dt_reduction=3.0,         # midpoint (3.5 / 2.5)
-                res_spectral_floor_db=-31.0,  # midpoint (-25 / -38)
-                res_ne_protect_db=-13.0,      # midpoint (-10 / -16)
-                enable_cng=True,
-                shadow_q_ratio=3.0,           # MILD-side (avoid shadow over-eager copy)
-                # Adaptive filter
-                shadow_mu_min=0.55,           # midpoint
-                warmup_frames=80,
-                kalman_q_high=1.25e-3,        # midpoint (1.5e-3 / 1.0e-3)
             )
         elif preset == AecPreset.BALANCED:
             defaults = dict(

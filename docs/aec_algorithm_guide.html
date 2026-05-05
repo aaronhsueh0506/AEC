@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AEC 回音消除 — 技術說明 v3.8.2</title>
+<title>AEC 回音消除 — 技術說明 v3.8.3</title>
 <style>
   :root {
     --bg: #fafafa;
@@ -83,9 +83,9 @@
 <header>
   <div class="inner">
     <h1>&#x1F50A; AEC 回音消除技術說明</h1>
-    <p class="subtitle">Acoustic Echo Cancellation — 從原理到效能 v3.8.2</p>
+    <p class="subtitle">Acoustic Echo Cancellation — 從原理到效能 v3.8.3</p>
     <div class="badges">
-      <span class="badge">v3.8.2 (current)</span>
+      <span class="badge">v3.8.3 (current)</span>
       <span class="badge">Algorithm = v3.8.1 (audio behavior unchanged)</span>
       <span class="badge">PBFDKF Kalman</span>
       <span class="badge">Shadow Filter</span>
@@ -645,23 +645,24 @@
 <h3>6.5 壓制強度 5 級預設</h3>
 <table>
   <tr><th>Preset</th><th>FS 回音壓制</th><th>DT 語音保留</th><th>ENR threshold</th><th>適用場景</th></tr>
-  <tr><td><strong>mild</strong></td><td>中</td><td>最好</td><td>高（保守壓）</td><td>高品質通話、音樂</td></tr>
-  <tr><td><strong>soft</strong></td><td>中高</td><td>幾乎等於 mild</td><td>中高</td><td>BALANCED 砍 NE 太多時的折衷選</td></tr>
+  <tr><td><strong>mild</strong> (新)</td><td>輕</td><td>最好</td><td>很高（極保守）</td><td>echo 安靜、希望幾乎不動到近端</td></tr>
+  <tr><td><strong>soft</strong></td><td>中</td><td>很好</td><td>高（保守壓）</td><td>輕度 echo、近端優先 (= 舊 v3.8.2 mild)</td></tr>
   <tr style="background:#f0fff4"><td><strong>balanced ★</strong></td><td>高</td><td>好（推薦）</td><td>中</td><td>一般通話預設</td></tr>
   <tr><td><strong>aggressive</strong></td><td>很高</td><td>普通</td><td>低（激進壓）</td><td>車用、高噪環境</td></tr>
   <tr><td><strong>maximum</strong></td><td>極高</td><td>較弱</td><td>極低</td><td>強回音 IoT 裝置</td></tr>
 </table>
-<p style="font-size:13px; color:#64748b; margin-top:8px">同一個 ENR 數值，激進 preset 會把 sigmoid 整條往左平移 → 同樣的殘餘比例下壓得更狠。代價是 DT 期間語音保留變差，因此提供 5 級讓使用者依場景挑。SOFT 是 MILD 跟 BALANCED 的中位內插，800-case 驗證 NE deg 4.013（vs MILD 4.019），FS echo 比 MILD 強 +0.11。</p>
+<p style="font-size:13px; color:#64748b; margin-top:8px">v3.8.3 把溫和端整體下移一格：新 MILD 變成「最少動」的極輕版，SOFT 接手舊 MILD 的位置（輕度壓制 + 近端優先）。BALANCED 以上不變。同一個 ENR 數值，激進 preset 會把 sigmoid 整條往左平移 → 同樣的殘餘比例下壓得更狠。</p>
 </div>
 
 <h2 id="effort">7. 主要改進歷程</h2>
 <div class="panel">
-<p>從 v2.0 到 v3.8.2，累計超過 <strong>120+ 小時研發</strong>，透過 AEC Challenge 800 cases 評測驅動每次迭代。每次改動都要通過 800-case AECMOS 評測才收版。</p>
+<p>從 v2.0 到 v3.8.3，累計超過 <strong>120+ 小時研發</strong>，透過 AEC Challenge 800 cases 評測驅動每次迭代。每次改動都要通過 800-case AECMOS 評測才收版。</p>
 <div class="highlight" style="margin-bottom:18px">
   <strong>版本說明：</strong>
   <ul style="margin:6px 0 0 0; font-size:14px">
     <li><strong>v3.8.1</strong> = Python 演算法定版（音質行為固定在這版）</li>
-    <li><strong>v3.8.2</strong> = 當前 release。內含 v3.8.1 演算法 + C 對齊實作 + release hygiene。<em>音質行為與 v3.8.1 完全相同。</em></li>
+    <li><strong>v3.8.2</strong> = v3.8.1 演算法 + C 對齊實作 + release hygiene。音質行為與 v3.8.1 完全相同。</li>
+    <li><strong>v3.8.3</strong> = 當前 release。Preset rebalance：MILD 變成「最少動」極輕版，SOFT 接手 v3.8.2 MILD 的位置。<em>只動 RES 參數，演算法路徑不變。</em></li>
   </ul>
 </div>
 
@@ -780,13 +781,13 @@
   <tr><td>Speex</td><td>2.81</td><td>3.37</td><td>3.23</td><td>4.13</td></tr>
   <tr><td>WebRTC AEC2</td><td>3.48</td><td>4.26</td><td>2.39</td><td>4.10</td></tr>
   <tr><td>WebRTC AEC3</td><td>3.88</td><td><strong>4.54</strong></td><td style="color:#dc2626">1.85</td><td style="color:#dc2626">3.45</td></tr>
-  <tr style="background:#f0fff4"><td>我們 mild</td><td>3.64</td><td>4.05</td><td style="color:#059669"><strong>2.38</strong></td><td style="color:#059669">4.02</td></tr>
-  <tr style="background:#f0fff4"><td>我們 soft (新)</td><td>3.76</td><td>4.13</td><td style="color:#059669">2.31</td><td style="color:#059669">4.01</td></tr>
+  <tr style="background:#f0fff4"><td>我們 mild (v3.8.3 新)</td><td>3.42</td><td>3.87</td><td style="color:#059669"><strong>2.56</strong></td><td style="color:#059669"><strong>4.02</strong></td></tr>
+  <tr style="background:#f0fff4"><td>我們 soft (= 舊 mild)</td><td>3.64</td><td>4.05</td><td style="color:#059669">2.38</td><td style="color:#059669">4.02</td></tr>
   <tr style="background:#f0fff4"><td>我們 balanced ★</td><td>3.80</td><td>4.19</td><td style="color:#059669">2.27</td><td style="color:#059669">4.01</td></tr>
-  <tr style="background:#f0fff4"><td>我們 aggressive</td><td>3.62</td><td>4.29</td><td>2.23</td><td>3.99</td></tr>
-  <tr style="background:#f0fff4"><td>我們 maximum</td><td>3.72</td><td>4.41</td><td>2.16</td><td>3.96</td></tr>
+  <tr style="background:#f0fff4"><td>我們 aggressive</td><td>3.85</td><td>4.23</td><td>2.23</td><td>4.00</td></tr>
+  <tr style="background:#f0fff4"><td>我們 maximum</td><td>3.90</td><td>4.26</td><td>2.19</td><td>3.99</td></tr>
 </table>
-<p style="font-size:13px; color:#64748b; margin-top:6px">FS / DT echo 為 static + movement 兩 bucket 的平均。MILD/SOFT/BALANCED 為 v3.8.2 + SOFT 引入時的同批 800-case bench；AGGRESSIVE/MAXIMUM 沿用 v3.8.1 baseline。</p>
+<p style="font-size:13px; color:#64748b; margin-top:6px">FS / DT echo 為 static + movement 兩 bucket 的平均。MILD 為 v3.8.3 重新調整後的 800-case bench (2026-05-05)；SOFT 沿用 v3.8.2 MILD 數字（參數不變，只是換位）；BALANCED 以上沿用 v3.8.1 baseline。</p>
 
 <!-- ── 主要折線圖 ── -->
 <h3>各方法完整分數比較（Profile Chart）</h3>
@@ -913,14 +914,14 @@
 <p style="font-size:14px;color:var(--muted)">5 個 preset 由弱到強：mild → soft → balanced → aggressive → maximum。往右越激進，FS/DT Echo 壓制越強但 DT Degradation 越低。</p>
 <div class="grid-2">
   <div class="panel" style="border-left:5px solid #22c55e">
-    <h4 style="color:#166534">優先保留近端語音 → mild</h4>
-    <ul style="font-size:14px"><li>DT Deg 2.38，近端語音最自然</li><li>適合：音樂通話、遠距教學、主播</li></ul>
-    <p style="font-size:13px;color:#94a3b8">代價：FS Echo 壓制較弱 (3.64)</p>
+    <h4 style="color:#166534">幾乎不動近端 → mild (v3.8.3 重新調整)</h4>
+    <ul style="font-size:14px"><li>RES floor −18 dB、g_min −25 dB、NE 保護 −7 dB（5 級中最保守）</li><li>適合：echo 安靜、想保留近端原始質感、demo / 試聽</li></ul>
+    <p style="font-size:13px;color:#94a3b8">代價：強回音場景殘留較多，請改用 SOFT 或 BALANCED</p>
   </div>
   <div class="panel" style="border-left:5px solid #5eead4">
-    <h4 style="color:#0f766e">略強於 mild → soft (新)</h4>
-    <ul style="font-size:14px"><li>FS Echo 3.76（+0.12 over mild），NE Deg 4.01 ≈ mild</li><li>適合：一般通話但近端對 BALANCED 過度壓制有意見</li></ul>
-    <p style="font-size:13px;color:#94a3b8">代價：DT Deg 2.31（仍接近 mild）</p>
+    <h4 style="color:#0f766e">輕度壓制 + 近端優先 → soft (= 舊 v3.8.2 mild)</h4>
+    <ul style="font-size:14px"><li>RES floor −25 dB、g_min −35 dB、NE 保護 −10 dB</li><li>適合：一般通話但近端對 BALANCED 過度壓制有意見</li></ul>
+    <p style="font-size:13px;color:#94a3b8">參數即為 v3.8.2 MILD；位置左移留給 v3.8.3 新 MILD</p>
   </div>
   <div class="panel" style="border-left:5px solid #2563eb">
     <h4 style="color:#1e40af">均衡首選 → balanced ★</h4>
@@ -929,13 +930,13 @@
   </div>
   <div class="panel" style="border-left:5px solid #f97316">
     <h4 style="color:#9a3412">優先壓制回音 → aggressive</h4>
-    <ul style="font-size:14px"><li>FS Echo 3.62，DT Echo 4.29</li><li>適合：車用、工廠、高背景噪音</li></ul>
+    <ul style="font-size:14px"><li>FS Echo 3.85，DT Echo 4.23</li><li>適合：車用、工廠、高背景噪音</li></ul>
     <p style="font-size:13px;color:#94a3b8">代價：DT Deg 2.23，雙說語音稍受影響</p>
   </div>
   <div class="panel" style="border-left:5px solid #b91c1c">
     <h4 style="color:#991b1b">最強壓制 → maximum</h4>
-    <ul style="font-size:14px"><li>FS Echo 3.72，接近 AEC3 的 3.88</li><li>適合：IoT 小喇叭、mic 離喇叭很近</li></ul>
-    <p style="font-size:13px;color:#94a3b8">代價：DT Deg 2.16，語音保留最低</p>
+    <ul style="font-size:14px"><li>FS Echo 3.90，接近 AEC3 的 3.88</li><li>適合：IoT 小喇叭、mic 離喇叭很近</li></ul>
+    <p style="font-size:13px;color:#94a3b8">代價：DT Deg 2.19，語音保留最低</p>
   </div>
 </div>
 </div>
@@ -1176,7 +1177,7 @@ while pos + hop &lt;= n:
 </div>
 
 <div style="text-align:center; color:var(--muted); font-size:13px; margin-top:60px; padding-top:24px; border-top:1px solid var(--border);">
-  AEC v3.8.2 &nbsp;&#xB7;&nbsp; Algorithm v3.8.1 &nbsp;&#xB7;&nbsp; 2026-05-04 &nbsp;&#xB7;&nbsp; PBFDKF + Shadow + Multi-ERLE + WOLA RES (PSD / ENR Gate / Spectral Floor / CNG)
+  AEC v3.8.3 &nbsp;&#xB7;&nbsp; Algorithm v3.8.1 &nbsp;&#xB7;&nbsp; 2026-05-05 &nbsp;&#xB7;&nbsp; PBFDKF + Shadow + Multi-ERLE + WOLA RES (PSD / ENR Gate / Spectral Floor / CNG)
 </div>
 
 </div>

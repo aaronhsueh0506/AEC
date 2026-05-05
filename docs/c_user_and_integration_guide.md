@@ -65,7 +65,8 @@ fp32 PCM by default; `AEC_FP32_WAV=0` forces 16-bit PCM.
 
 | Preset | FS echo suppression | DT NE preservation | Use case |
 |---|---|---|---|
-| **mild** | medium | best | high-fidelity calls, music scenarios |
+| **mild** | light | best (minimum-touch RES) | echo 安靜場景、demo / 試聽、想保留近端原始質感 |
+| **soft** | medium | very good (= former v3.8.2 mild) | 一般通話但對 BALANCED 過度壓制有意見 |
 | **balanced** | high | medium | general calls (recommended default) |
 | **aggressive** | very high | medium-low | automotive, noisy environments |
 | **maximum** | extreme | weak | hi-coupling speakerphones, IoT |
