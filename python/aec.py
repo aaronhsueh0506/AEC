@@ -248,6 +248,11 @@ class AecConfig:
     startup_dt_noise_floor_scale: float = 1.0  # Scale noise_floor_gain during startup_dt; 0.0=bypass, 1.0=normal
     startup_dt_mu_min: float = 0.0            # Floor mu_scale during startup_dt; 0.0=no override
 
+    # Diagnostic: when True, ResFilter populates per-bin gain vectors at each
+    # post-processing stage (read via res.get_stage_gains()). Hot-path cost is
+    # one numpy copy per stage per frame; off by default.
+    capture_stages: bool = False
+
     # Mode
     mode: AecMode = AecMode.PBFDKF
 
@@ -1169,7 +1174,8 @@ class ResFilter:
                  startup_dt_min_ne_scale: float = 1.0,
                  startup_dt_gain_floor: float = 1.0,
                  startup_dt_noise_floor_scale: float = 1.0,
-                 sample_rate: int = 16000):
+                 sample_rate: int = 16000,
+                 capture_stages: bool = False):
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -1218,6 +1224,10 @@ class ResFilter:
         #          4=3bin_smooth, 5=hf_cap, 6=pre_temporal, 7=post_temporal,
         #          8=after_noise_lift (final gain_smooth)
         self._diag_round5_stages = np.zeros(9, dtype=np.float32)
+
+        # Per-bin gain capture (full vectors, opt-in via capture_stages)
+        self._capture_stages = capture_stages
+        self._stage_gains = {}
 
         # RES v2: direct echo estimation + Wiener gain + reverb
         self.echo_method = echo_method       # "coherence" or "direct"
@@ -1363,6 +1373,16 @@ class ResFilter:
         self._stats_last_noise_psd = 0.0
         self._stats_last_spec_pwr = 0.0
         self._stats_last_nfl_lifted = False
+
+    def get_stage_gains(self):
+        """Return dict of per-bin gain vectors captured this frame.
+
+        Empty dict unless `capture_stages=True` was passed to __init__.
+        Keys: '01_softgate_emr', '02_spectral_floor', '03_epc_dt_cap',
+        '04_quiet_mask', '05_3bin_smooth', '06_hf_cap', '07_pre_temporal',
+        '08_post_temporal'. Vectors are np.float32 length n_freqs.
+        """
+        return self._stage_gains
 
     def get_stats(self):
         """Return aggregated DT stats dict, or None if not enabled / no DT frames."""
@@ -3358,6 +3378,7 @@ class AEC:
                 startup_dt_gain_floor=self.config.startup_dt_gain_floor,
                 startup_dt_noise_floor_scale=self.config.startup_dt_noise_floor_scale,
                 sample_rate=self.config.sample_rate,
+                capture_stages=self.config.capture_stages,
             )
         else:
             self.res = None

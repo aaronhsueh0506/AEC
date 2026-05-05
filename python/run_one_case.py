@@ -44,8 +44,22 @@ PRESET_MAP = {
 
 def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             filter_length=832, enable_cng=True, enable_res=True,
-            sample_rate=16000, write_wav=True):
-    """Process one case; return (mic, ref, out, erle_per_frame, sample_rate)."""
+            sample_rate=16000, write_wav=True,
+            mic_pad=0, ref_pad=0,
+            diag_csv_path=None, gain_dump_path=None):
+    """Process one case; return (mic, ref, out, erle_per_frame, sample_rate).
+
+    mic_pad / ref_pad: prepend N zero samples to mic / ref before processing
+    (use to absorb a static delay larger than max_delay_ms). Output WAV is
+    stripped of the leading max(mic_pad, ref_pad) samples.
+
+    diag_csv_path: write per-frame AecStats rows for filter / DTD / RES
+    trajectory analysis.
+
+    gain_dump_path: write per-frame ResFilter stage-gain vectors as .npz
+    (requires capture_stages=True, set automatically when this flag is set).
+    """
+    capture = gain_dump_path is not None
     cfg = AecConfig.from_preset(
         PRESET_MAP[preset],
         sample_rate=sample_rate,
@@ -54,6 +68,7 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         enable_res=enable_res,
         enable_cng=enable_cng,
         enable_shadow=True,
+        capture_stages=capture,
     )
     aec = AEC(cfg)
 
@@ -63,23 +78,79 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         raise ValueError(
             f"sample rate mismatch: mic={sr_mic} ref={sr_ref} expected={sample_rate}"
         )
+    mic = np.asarray(mic, dtype=np.float32)
+    ref = np.asarray(ref, dtype=np.float32)
+    if mic_pad > 0:
+        mic = np.concatenate([np.zeros(mic_pad, dtype=np.float32), mic])
+    if ref_pad > 0:
+        ref = np.concatenate([np.zeros(ref_pad, dtype=np.float32), ref])
     n = min(len(mic), len(ref))
-    mic = mic[:n].astype(np.float32)
-    ref = ref[:n].astype(np.float32)
+    mic = mic[:n]
+    ref = ref[:n]
 
     hop = aec.hop_size
     out = np.zeros(n, dtype=np.float32)
     erle_log = []
+    diag_rows = []
+    stage_keys = ('01_softgate_emr', '02_spectral_floor', '03_epc_dt_cap',
+                  '04_quiet_mask', '05_3bin_smooth', '06_hf_cap',
+                  '07_pre_temporal', '08_post_temporal')
+    stage_acc = {k: [] for k in stage_keys} if capture else None
     pos = 0
     while pos + hop <= n:
         block = aec.process(mic[pos:pos + hop], ref[pos:pos + hop])
         out[pos:pos + hop] = block
         erle_log.append(aec.get_erle_instant())
+        if diag_csv_path is not None:
+            s = aec.get_stats()
+            diag_rows.append((
+                s.frame_count, s.time_s,
+                int(s.filter_converged), int(s.filter_once_converged),
+                s.erle_inst_db, s.erle_windowed_db,
+                s.dt_confidence, s.dt_from_energy, s.dt_from_shadow,
+                s.dt_from_coherence, int(s.dt_active),
+                s.far_power_db, s.mic_power_db, s.error_power_db,
+                s.far_activity, s.divergence, int(s.epc_active),
+                s.res_gain_mean_db, s.echo_psd_mean_db, s.error_psd_mean_db,
+                s.delay_samples, s.delay_ms,
+            ))
+        if capture and aec.res is not None:
+            sg = aec.res.get_stage_gains()
+            for k in stage_keys:
+                v = sg.get(k)
+                stage_acc[k].append(v.copy() if v is not None
+                                    else np.zeros(aec.res.n_freqs,
+                                                  dtype=np.float32))
         pos += hop
 
+    pad_strip = max(mic_pad, ref_pad)
+    out_trim = out[pad_strip:pos]
+    mic_trim = mic[pad_strip:pos]
+    ref_trim = ref[pad_strip:pos]
+
     if write_wav and out_path:
-        sf.write(out_path, out, sample_rate)
-    return mic[:pos], ref[:pos], out[:pos], np.asarray(erle_log), sample_rate
+        sf.write(out_path, out_trim, sample_rate)
+
+    if diag_csv_path is not None and diag_rows:
+        import csv
+        header = ['frame', 'time_s', 'conv', 'once_conv',
+                  'erle_inst_db', 'erle_win_db',
+                  'dt_conf', 'dt_energy', 'dt_shadow', 'dt_coh', 'dt_active',
+                  'far_db', 'mic_db', 'err_db',
+                  'far_act', 'divergence', 'epc',
+                  'res_gain_db', 'echo_psd_db', 'err_psd_db',
+                  'delay_samp', 'delay_ms']
+        with open(diag_csv_path, 'w', newline='') as fp:
+            w = csv.writer(fp)
+            w.writerow(header)
+            w.writerows(diag_rows)
+
+    if gain_dump_path is not None and stage_acc is not None:
+        np.savez(gain_dump_path,
+                 **{k: np.asarray(v, dtype=np.float32)
+                    for k, v in stage_acc.items()})
+
+    return mic_trim, ref_trim, out_trim, np.asarray(erle_log), sample_rate
 
 
 def _spectrogram(x, sample_rate, nfft=512, hop=256):
@@ -298,6 +369,14 @@ def main():
     p.add_argument('--no-plot', action='store_true', help='skip the diagnostic plot')
     p.add_argument('--demo', action='store_true',
                    help='run linear / +res / +res+cng and produce a comparison plot')
+    p.add_argument('--mic-pad', type=int, default=0,
+                   help='prepend N zero samples to mic before processing')
+    p.add_argument('--ref-pad', type=int, default=0,
+                   help='prepend N zero samples to ref before processing')
+    p.add_argument('--diag-csv',
+                   help='write per-frame AecStats trajectory CSV here')
+    p.add_argument('--res-gain-dump',
+                   help='write per-frame ResFilter stage gains as .npz here')
     args = p.parse_args()
 
     if args.demo:
@@ -313,6 +392,9 @@ def main():
         preset=args.preset, filter_length=args.filter,
         enable_cng=args.cng, enable_res=args.res,
         sample_rate=args.sample_rate,
+        mic_pad=args.mic_pad, ref_pad=args.ref_pad,
+        diag_csv_path=args.diag_csv,
+        gain_dump_path=args.res_gain_dump,
     )
     print(f'wrote {args.out} ({len(out)} samples, {len(out) / sr:.2f}s)',
           file=sys.stderr)
