@@ -16,10 +16,20 @@ typedef struct ResidualEcho {
     int    n_freqs;
     int    using_render_based;
     int    render_based_hold;
+    /* v3.10.0 — long-window far-PSD EMA (alpha=0.993, TC ≈ 100 frames).
+     * Updated every far-active frame; READ only in render-based fallback.
+     * Buffer is owned externally (caller-allocated; passed via _set_lw_buf). */
+    float* long_window_far_psd;   /* [n_freqs] */
+    int    long_window_n_updates;
+    double long_window_alpha;     /* 0.993 */
 } ResidualEcho;
 
 void residual_echo_init(ResidualEcho* r, int n_freqs);
 void residual_echo_reset(ResidualEcho* r);
+/* v3.10.2: preserve_long_window_ema=1 keeps the long-window EMA across reset. */
+void residual_echo_reset_ex(ResidualEcho* r, int preserve_long_window_ema);
+/* Caller binds the long-window EMA buffer (n_freqs floats). */
+void residual_echo_set_lw_buf(ResidualEcho* r, float* lw_buf);
 
 /* attribute_legacy(...) — outputs residual_echo_psd[n_freqs].
  * Mutates r->using_render_based / r->render_based_hold.

@@ -36,6 +36,8 @@ static void delay_est_init_state(DelayEst* d, int sample_rate,
     d->max_delay_samples = (int)(max_delay_ms * sample_rate / 1000.0);
     d->init_seconds      = init_seconds;
     d->period_seconds    = period_seconds;
+    d->par_low_threshold   = 5.0;
+    d->par_solid_threshold = 8.0;
     d->seg_size          = seg;
     d->seg_hop           = seg / 2;
     d->n_freqs           = seg / 2 + 1;
@@ -251,6 +253,7 @@ int delay_est_accumulate(DelayEst* d,
     }
 
     if (d->n_updates < 2) return 0;
+    /* fallthrough handled below */
 
     if (!d->init_done) {
         if (d->samples_accumulated >= d->init_samples) {
@@ -265,4 +268,20 @@ int delay_est_accumulate(DelayEst* d,
         }
     }
     return 0;
+}
+
+/* v3.10.0 — confidence + is_solid. Mirrors aec.py:589-610. */
+double delay_est_confidence(const DelayEst* d) {
+    if (!d) return 0.0;
+    if (d->n_updates < 3 || d->estimated_delay < 0) return 0.0;
+    double par = d->last_par;
+    double lo  = d->par_low_threshold;
+    double hi  = d->par_solid_threshold;
+    if (par <= lo) return 0.0;
+    if (par >= hi) return 1.0;
+    return (par - lo) / (hi - lo);
+}
+
+int delay_est_is_solid(const DelayEst* d) {
+    return delay_est_confidence(d) >= 1.0 ? 1 : 0;
 }

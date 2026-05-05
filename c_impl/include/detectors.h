@@ -73,6 +73,39 @@ void doubletalk_update_energy_dt(DoubleTalk* d,
                                     int far_active, double far_pwr,
                                     double mic_pwr, double erl_estimate);
 
+/* ── FilterPlateauDetector (v3.10.0 + v3.10.3 F4/H3) ─────── */
+/* Detects filter stuck below ERLE convergence threshold for sustained
+ * time despite far activity. Fires once per session (capped by max_attempts).
+ * Mirrors aec.py:2710-2848. */
+typedef struct FilterPlateauDetector {
+    /* Config */
+    int    grace_frames;        /* 400 */
+    double erle_max_db;         /* 6.0 */
+    double far_active_ratio;    /* 0.5 */
+    double dt_signal_ratio;     /* 0.10 */
+    int    max_attempts;        /* 2 */
+    /* State */
+    int    frame_count;
+    int    far_active_count;
+    int    dt_signal_count;
+    int    consecutive_match;
+    int    attempts;
+    int    cooldown_remaining;
+    int    last_reset_frame;
+} FilterPlateauDetector;
+
+#define FILTER_PLATEAU_CONSECUTIVE_REQUIRED 50
+#define FILTER_PLATEAU_POST_RESET_GRACE_FRAMES 200
+
+void filter_plateau_init(FilterPlateauDetector* p);
+void filter_plateau_reset(FilterPlateauDetector* p);
+/* Returns 1 iff a recovery action should fire this frame. */
+int  filter_plateau_update(FilterPlateauDetector* p,
+                              int    far_active,
+                              int    dt_signal_present,
+                              double erle_windowed_db,
+                              int    once_converged);
+
 #ifdef __cplusplus
 }
 #endif

@@ -113,6 +113,7 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                 s.far_activity, s.divergence, int(s.epc_active),
                 s.res_gain_mean_db, s.echo_psd_mean_db, s.error_psd_mean_db,
                 s.delay_samples, s.delay_ms,
+                int(s.res_using_render),
             ))
         if capture and aec.res is not None:
             sg = aec.res.get_stage_gains()
@@ -139,7 +140,8 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                   'far_db', 'mic_db', 'err_db',
                   'far_act', 'divergence', 'epc',
                   'res_gain_db', 'echo_psd_db', 'err_psd_db',
-                  'delay_samp', 'delay_ms']
+                  'delay_samp', 'delay_ms',
+                  'using_render']
         with open(diag_csv_path, 'w', newline='') as fp:
             w = csv.writer(fp)
             w.writerow(header)

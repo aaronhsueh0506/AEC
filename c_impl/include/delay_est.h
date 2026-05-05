@@ -25,6 +25,11 @@ typedef struct DelayEst {
     double init_seconds;
     double period_seconds;
 
+    /* v3.10.0 — PAR-based confidence. Two thresholds replace the single
+     * 5.0 gate that v3.8.x used. Linear blend in [low, solid]. */
+    double par_low_threshold;     /* 5.0 */
+    double par_solid_threshold;   /* 8.0 */
+
     int    seg_size;
     int    seg_hop;
     int    n_freqs;
@@ -61,7 +66,7 @@ typedef struct DelayEst {
 } DelayEst;
 
 void delay_est_init(DelayEst* d, int sample_rate,
-                       double max_delay_ms,        /* 250.0 default */
+                       double max_delay_ms,        /* v3.10.4: 1024.0 default */
                        double init_seconds,        /* 0.5 */
                        double period_seconds);     /* 2.0 */
 size_t delay_est_get_mem_size(int sample_rate, double max_delay_ms);
@@ -75,6 +80,13 @@ void delay_est_reset(DelayEst* d);
  * estimate was produced this call, else 0. */
 int  delay_est_accumulate(DelayEst* d,
                              const float* mic, const float* ref, size_t n);
+
+/* v3.10.0 — confidence(): linear 0..1 blend between par_low_threshold and
+ * par_solid_threshold. Returns 0 when _n_updates < 3 or estimated_delay < 0. */
+double delay_est_confidence(const DelayEst* d);
+
+/* v3.10.0 — is_solid(): confidence >= 1.0 (PAR > solid AND _n_updates >= 3). */
+int    delay_est_is_solid(const DelayEst* d);
 
 #ifdef __cplusplus
 }

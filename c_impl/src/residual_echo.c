@@ -4,15 +4,32 @@
 #include "residual_echo.h"
 #include "erle.h"
 #include <math.h>
+#include <string.h>
 
 void residual_echo_init(ResidualEcho* r, int n_freqs) {
     r->n_freqs = n_freqs;
     r->using_render_based = 0;
     r->render_based_hold  = 0;
+    r->long_window_far_psd    = NULL;
+    r->long_window_n_updates  = 0;
+    r->long_window_alpha      = 0.993;
 }
-void residual_echo_reset(ResidualEcho* r) {
+void residual_echo_set_lw_buf(ResidualEcho* r, float* lw_buf) {
+    r->long_window_far_psd = lw_buf;
+    if (lw_buf) memset(lw_buf, 0, (size_t)r->n_freqs * sizeof(float));
+    r->long_window_n_updates = 0;
+}
+void residual_echo_reset_ex(ResidualEcho* r, int preserve_long_window_ema) {
     r->using_render_based = 0;
     r->render_based_hold  = 0;
+    if (!preserve_long_window_ema) {
+        if (r->long_window_far_psd)
+            memset(r->long_window_far_psd, 0, (size_t)r->n_freqs * sizeof(float));
+        r->long_window_n_updates = 0;
+    }
+}
+void residual_echo_reset(ResidualEcho* r) {
+    residual_echo_reset_ex(r, 0);
 }
 
 void residual_echo_attribute_legacy(
@@ -66,6 +83,27 @@ void residual_echo_attribute_legacy(
                                           + erle_factor * (double)erle_est[k]);
     }
 
+    /* v3.10.0 — maintain long-window far-PSD EMA every frame regardless of
+     * render mode. Skip on silence to avoid poisoning the EMA. */
+    if (far_spec != NULL && far_power > 1e-6 && r->long_window_far_psd != NULL) {
+        if (r->long_window_n_updates == 0) {
+            for (int k = 0; k < K; ++k) {
+                double xr = far_spec[k].r, xi = far_spec[k].i;
+                r->long_window_far_psd[k] = (float)(xr * xr + xi * xi);
+            }
+        } else {
+            double a = r->long_window_alpha;
+            double b = 1.0 - a;
+            for (int k = 0; k < K; ++k) {
+                double xr = far_spec[k].r, xi = far_spec[k].i;
+                double inst = xr * xr + xi * xi;
+                r->long_window_far_psd[k] =
+                    (float)(a * (double)r->long_window_far_psd[k] + b * inst);
+            }
+        }
+        r->long_window_n_updates++;
+    }
+
     if (active_far) {
         double err_mean = 0.0;
         for (int k = 0; k < K; ++k) err_mean += (double)error_psd[k];
@@ -97,11 +135,25 @@ void residual_echo_attribute_legacy(
             double blend = 1.0 - erle_factor / effective_threshold;
             if (blend < 0.0) blend = 0.0;
             if (blend > 1.0) blend = 1.0;
+            /* v3.10.1: long-window EMA blended with instantaneous when
+             * available. warmup_weight = min(n_updates/100, 1); lw_weight = 0.7*warmup_weight. */
+            double warmup_weight = (double)r->long_window_n_updates / 100.0;
+            if (warmup_weight > 1.0) warmup_weight = 1.0;
+            if (warmup_weight < 0.0) warmup_weight = 0.0;
+            double lw_weight = 0.7 * warmup_weight;
+            int has_lw = (r->long_window_far_psd != NULL) && (lw_weight > 0.0);
             for (int k = 0; k < K; ++k) {
-                double far_psd = 0.0;
+                double inst = 0.0;
                 if (far_spec) {
                     double xr = far_spec[k].r, xi = far_spec[k].i;
-                    far_psd = xr * xr + xi * xi;
+                    inst = xr * xr + xi * xi;
+                }
+                double far_psd;
+                if (has_lw) {
+                    far_psd = (1.0 - lw_weight) * inst
+                            + lw_weight * (double)r->long_window_far_psd[k];
+                } else {
+                    far_psd = inst;
                 }
                 double render_based_echo = far_psd * erl_estimate;
                 residual_echo_psd_out[k] = (float)((1.0 - blend) * (double)residual_echo_psd_out[k]

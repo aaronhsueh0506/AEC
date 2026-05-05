@@ -65,9 +65,14 @@ static void res_filter_compute_tables(ResFilter* r, const ResFilterConfig* cfg) 
     memset(r->enr_blend,    0, (size_t)K * sizeof(float));
     for (int k = 0; k < K; ++k) {
         double f = k * freq_res;
+        /* v3.8.4: upper edge extended 4 kHz → 7 kHz (was 4000.0 / 1000.0). */
         if (f >= 300.0 && f <= 3000.0) r->stat_dt_mask[k] = 0.8f;
         else if (f > 100.0 && f < 300.0) r->stat_dt_mask[k] = (float)(0.8 * (f - 100.0) / 200.0);
-        else if (f > 3000.0 && f < 4000.0) r->stat_dt_mask[k] = (float)(0.8 * (4000.0 - f) / 1000.0);
+        else if (f > 3000.0 && f < 7000.0) {
+            double v = 1.0 - (f - 3000.0) / 4000.0;
+            if (v < 0.0) v = 0.0;
+            r->stat_dt_mask[k] = (float)(0.8 * v);
+        }
         double bv = ((double)k - 5.0) / 5.0;
         if (bv < 0.0) bv = 0.0;
         if (bv > 1.0) bv = 1.0;
@@ -76,6 +81,11 @@ static void res_filter_compute_tables(ResFilter* r, const ResFilterConfig* cfg) 
     int hf_cap = (int)(500.0 / freq_res);
     if (hf_cap > K - 1) hf_cap = K - 1;
     r->hf_cap_bin = hf_cap;
+    /* v3.8.4: secondary cap anchor at 2 kHz so vowel formants (1–3 kHz)
+     * are not dragged down by the 500 Hz bin's gain. */
+    int hf_cap_2k = (int)(2000.0 / freq_res);
+    if (hf_cap_2k > K - 1) hf_cap_2k = K - 1;
+    r->hf_cap_bin_2k = hf_cap_2k;
     r->harm_lf_start = (int)(100.0 / freq_res); if (r->harm_lf_start < 1) r->harm_lf_start = 1;
     r->harm_lf_end   = (int)(500.0 / freq_res); if (r->harm_lf_end > K - 1) r->harm_lf_end = K - 1;
     r->harm_hf_start = (int)(1000.0 / freq_res);
@@ -99,6 +109,7 @@ static void res_filter_compute_tables(ResFilter* r, const ResFilterConfig* cfg) 
     memset(r->noise_psd, 0, (size_t)K * sizeof(float));
     r->noise_initialized = 0;
     memset(r->coh2_smooth, 0, (size_t)K * sizeof(float));
+    if (r->dt_per_bin_last) memset(r->dt_per_bin_last, 0, (size_t)K * sizeof(float));
     for (int k = 0; k < K; ++k) r->error_envelope[k] = 1.0f;
     memset(r->input_buf, 0, (size_t)r->frame_size * sizeof(float));
     memset(r->ola_buf,   0, (size_t)r->frame_size * sizeof(float));
@@ -133,6 +144,7 @@ void res_filter_init(ResFilter* r, const ResFilterConfig* cfg) {
     r->reverb_psd   = (float*)calloc((size_t)K, sizeof(float));
     r->noise_psd    = (float*)calloc((size_t)K, sizeof(float));
     r->coh2_smooth  = (float*)calloc((size_t)K, sizeof(float));
+    r->dt_per_bin_last = (float*)calloc((size_t)K, sizeof(float));
     r->error_envelope = (float*)malloc((size_t)K * sizeof(float));
     r->input_buf    = (float*)calloc((size_t)r->frame_size, sizeof(float));
     r->ola_buf      = (float*)calloc((size_t)r->frame_size, sizeof(float));
@@ -140,6 +152,11 @@ void res_filter_init(ResFilter* r, const ResFilterConfig* cfg) {
     filter_erle_init(&r->filter_erle, K);
     fullband_erle_init(&r->fb_erle);
     residual_echo_init(&r->residual_est, K);
+    /* v3.10.0 — long-window far-PSD EMA buffer (heap). */
+    {
+        float* lw = (float*)calloc((size_t)K, sizeof(float));
+        residual_echo_set_lw_buf(&r->residual_est, lw);
+    }
     r->fft = fft_create(fft_size);
     r->time_scratch  = (float*)calloc((size_t)fft_size, sizeof(float));
     r->spec_synth    = (Complex*)calloc((size_t)K, sizeof(Complex));
@@ -170,6 +187,7 @@ size_t res_filter_get_mem_size(const ResFilterConfig* cfg) {
     total += ALIGN16((size_t)K * sizeof(float));      /* reverb_psd */
     total += ALIGN16((size_t)K * sizeof(float));      /* noise_psd */
     total += ALIGN16((size_t)K * sizeof(float));      /* coh2_smooth */
+    total += ALIGN16((size_t)K * sizeof(float));      /* dt_per_bin_last */
     total += ALIGN16((size_t)K * sizeof(float));      /* error_envelope */
     total += ALIGN16((size_t)fr * sizeof(float));     /* input_buf */
     total += ALIGN16((size_t)fr * sizeof(float));     /* ola_buf */
@@ -179,6 +197,7 @@ size_t res_filter_get_mem_size(const ResFilterConfig* cfg) {
     total += ALIGN16((size_t)fft * sizeof(float));    /* time_scratch */
     total += ALIGN16((size_t)K * sizeof(Complex));    /* spec_synth */
     total += ALIGN16((size_t)K * sizeof(Complex));    /* enhanced_spec */
+    total += ALIGN16((size_t)K * sizeof(float));      /* long_window_far_psd (v3.10.0) */
     return total;
 }
 
@@ -208,6 +227,7 @@ void res_filter_init_static(ResFilter* r, void* mem, size_t mem_size,
     r->reverb_psd   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     r->noise_psd    = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     r->coh2_smooth  = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    r->dt_per_bin_last = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     r->error_envelope = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     r->input_buf    = (float*)ptr; ptr += ALIGN16((size_t)fr * sizeof(float));
     r->ola_buf      = (float*)ptr; ptr += ALIGN16((size_t)fr * sizeof(float));
@@ -220,7 +240,12 @@ void res_filter_init_static(ResFilter* r, void* mem, size_t mem_size,
     r->fft = fft_init(ptr, fft_sz, fft); ptr += fft_sz;
     r->time_scratch  = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
     r->spec_synth    = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
-    r->enhanced_spec = (Complex*)ptr; /* last */
+    r->enhanced_spec = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+    /* v3.10.0 — long-window far-PSD EMA. */
+    {
+        float* lw = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+        residual_echo_set_lw_buf(&r->residual_est, lw);
+    }
 
     res_filter_compute_tables(r, cfg);
     r->is_static = 1;
@@ -239,14 +264,15 @@ void res_filter_free(ResFilter* r) {
     free(r->S_fe); free(r->S_ff); free(r->S_ee);
     free(r->near_psd); free(r->near_psd_buf);
     free(r->reverb_psd); free(r->noise_psd);
-    free(r->coh2_smooth); free(r->error_envelope);
+    free(r->coh2_smooth); free(r->dt_per_bin_last); free(r->error_envelope);
     free(r->input_buf); free(r->ola_buf); free(r->smooth_cn_gain);
+    if (r->residual_est.long_window_far_psd) free(r->residual_est.long_window_far_psd);
     filter_erle_free(&r->filter_erle);
     free(r->time_scratch); free(r->spec_synth); free(r->enhanced_spec);
     if (r->fft) fft_destroy(r->fft);
 }
 
-void res_filter_reset(ResFilter* r) {
+void res_filter_reset_ex(ResFilter* r, int preserve_long_window_ema) {
     int K = r->n_freqs;
     for (int k = 0; k < K; ++k) r->gain_smooth[k] = r->g_min;
     memset(r->echo_psd, 0, (size_t)K * sizeof(float));
@@ -261,15 +287,20 @@ void res_filter_reset(ResFilter* r) {
     memset(r->noise_psd, 0, (size_t)K * sizeof(float));
     r->noise_initialized = 0;
     memset(r->coh2_smooth, 0, (size_t)K * sizeof(float));
+    if (r->dt_per_bin_last) memset(r->dt_per_bin_last, 0, (size_t)K * sizeof(float));
     for (int k = 0; k < K; ++k) r->error_envelope[k] = 1.0f;
     memset(r->input_buf, 0, (size_t)r->frame_size * sizeof(float));
     memset(r->ola_buf, 0, (size_t)r->frame_size * sizeof(float));
     memset(r->smooth_cn_gain, 0, (size_t)K * sizeof(float));
     r->far_activity = 0.0;
     r->nonlinear_frames = 0;
-    residual_echo_reset(&r->residual_est);
+    residual_echo_reset_ex(&r->residual_est, preserve_long_window_ema);
     filter_erle_reset(&r->filter_erle);
     fullband_erle_reset(&r->fb_erle);
+}
+
+void res_filter_reset(ResFilter* r) {
+    res_filter_reset_ex(r, 0);
 }
 
 /* Helper: pairwise-mean of fp32 array (matches numpy np.mean for fp32) */
@@ -605,6 +636,8 @@ void res_filter_process(ResFilter* r, const ResProcessInputs* in,
                 if (r->stat_dt_mask[k] > dt_per_bin[k]) dt_per_bin[k] = r->stat_dt_mask[k];
             }
         }
+        /* v3.8.4: stash post-stationary dt_per_bin for postprocess HF-cap gate. */
+        memcpy(r->dt_per_bin_last, dt_per_bin, (size_t)K * sizeof(float));
         float dt_shaped[8192];
         for (int k = 0; k < K; ++k) {
             dt_shaped[k] = (float)pow(dt_per_bin[k], 1.1);
@@ -692,23 +725,37 @@ void res_filter_process(ResFilter* r, const ResProcessInputs* in,
     }
     /* Postprocess */
     if (in->far_power > 1e-4) {
-        /* 3-bin smooth */
+        /* v3.8.4: kernel tightened from [0.25, 0.5, 0.25] to [0.1, 0.8, 0.1].
+         * Tighter kernel still suppresses single-bin spurious spikes while
+         * preserving cross-band gain independence. */
         float gtmp[8192];
         for (int k = 0; k < K; ++k) {
             float left  = (k > 0)     ? g[k - 1] : 0.0f;
             float mid   = g[k];
             float right = (k < K - 1) ? g[k + 1] : 0.0f;
-            gtmp[k] = 0.25f * left + 0.5f * mid + 0.25f * right;
+            gtmp[k] = 0.1f * left + 0.8f * mid + 0.1f * right;
         }
         memcpy(g, gtmp, (size_t)K * sizeof(float));
         if (K > 2) {
             float bcap = (g[1] < g[2]) ? g[1] : g[2];
             g[0] = bcap; g[1] = bcap;
         }
-        if (K > r->hf_cap_bin + 1 && effective_dt < 0.5 && !in->is_stationary_dt) {
-            float hf_cap = g[r->hf_cap_bin];
-            for (int k = r->hf_cap_bin + 1; k < K; ++k) {
-                if (g[k] > hf_cap) g[k] = hf_cap;
+        /* v3.8.4: HF cap reworked.
+         *   (a) gate effective_dt < 0.3 (was 0.5)
+         *   (b) anchor at 2 kHz (hf_cap_bin_2k), not 500 Hz
+         *   (c) skip when high bins themselves show NE energy
+         *       (mean dt_per_bin_last[hf_cap_bin_2k:] >= 0.3) */
+        int hcb = r->hf_cap_bin_2k;
+        if (K > hcb + 1 && effective_dt < 0.3 && !in->is_stationary_dt) {
+            double sum = 0.0;
+            int cnt = K - hcb;
+            for (int k = hcb; k < K; ++k) sum += r->dt_per_bin_last[k];
+            float high_ne_conf = (cnt > 0) ? (float)(sum / (double)cnt) : 0.0f;
+            if (high_ne_conf < 0.3f) {
+                float hf_cap = g[hcb];
+                for (int k = hcb + 1; k < K; ++k) {
+                    if (g[k] > hf_cap) g[k] = hf_cap;
+                }
             }
         }
     }

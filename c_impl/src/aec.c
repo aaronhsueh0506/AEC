@@ -31,7 +31,9 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->epc_hangover = 20;
     cfg->epc_total_rise = 1.5f;
     cfg->epc_delta_threshold = 0.3f;
-    cfg->max_delay_ms = 250.0f;
+    /* v3.10.4: max_delay_ms 250 → 512 → 1024; delay_buffer_ms 1024 → 2048. */
+    cfg->max_delay_ms = 1024.0f;
+    cfg->delay_buffer_ms = 2048.0f;
     cfg->delay_est_init_s = 0.3f;
     cfg->delay_est_period_s = 0.5f;
     cfg->highpass_cutoff_hz = 80.0f;
@@ -136,8 +138,15 @@ static void aec_derive_sizes(const AecConfig* cfg, int* out_hop, int* out_blk,
     }
     int ring = 0;
     if (cfg->enable_delay_est) {
-        int max_delay_samp = (int)(cfg->max_delay_ms * cfg->sample_rate / 1000.0f);
-        ring = max_delay_samp + 4096;
+        /* v3.10.0+: ring sized to delay_buffer_ms (default 2048 ms in v3.10.4),
+         * separate from max_delay_ms. Fall back to legacy max_delay_samp+4096
+         * if delay_buffer_ms unset (== 0). */
+        if (cfg->delay_buffer_ms > 0.0f) {
+            ring = (int)(cfg->delay_buffer_ms * cfg->sample_rate / 1000.0f);
+        } else {
+            int max_delay_samp = (int)(cfg->max_delay_ms * cfg->sample_rate / 1000.0f);
+            ring = max_delay_samp + 4096;
+        }
     }
     if (out_hop) *out_hop = hop;
     if (out_blk) *out_blk = blk;
@@ -228,12 +237,18 @@ int aec_create(Aec* a, const AecConfig* cfg) {
         delay_est_init(&a->delay_est, cfg->sample_rate, cfg->max_delay_ms,
                           cfg->delay_est_init_s, cfg->delay_est_period_s);
         a->has_delay_est = 1;
-        int max_delay_samp = (int)(cfg->max_delay_ms * cfg->sample_rate / 1000.0f);
-        a->ref_ring_size = max_delay_samp + 4096;
+        /* v3.10.0+: ring sized to delay_buffer_ms (v3.10.4: 2048 ms). */
+        if (cfg->delay_buffer_ms > 0.0f) {
+            a->ref_ring_size = (int)(cfg->delay_buffer_ms * cfg->sample_rate / 1000.0f);
+        } else {
+            int max_delay_samp = (int)(cfg->max_delay_ms * cfg->sample_rate / 1000.0f);
+            a->ref_ring_size = max_delay_samp + 4096;
+        }
         a->ref_ring = (float*)calloc((size_t)a->ref_ring_size, sizeof(float));
         a->current_delay = -1;
         a->pending_delay = -1;
         a->has_pending = 0;
+        a->pending_delay_ttl = 0;
     } else {
         a->current_delay = 0;
     }
@@ -268,6 +283,7 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     shadow_copy_init(&a->shadow_copy, SC_GATE_ENERGY,
                         cfg->shadow_copy_threshold, cfg->shadow_copy_hysteresis,
                         cfg->epc_hangover);
+    filter_plateau_init(&a->plateau_detector);
 
     if (cfg->enable_residual_filter) {
         ResFilterConfig rcfg;
@@ -351,6 +367,7 @@ int aec_init(Aec* a, void* mem, size_t mem_size, const AecConfig* cfg) {
     shadow_copy_init(&a->shadow_copy, SC_GATE_ENERGY,
                      cfg->shadow_copy_threshold, cfg->shadow_copy_hysteresis,
                      cfg->epc_hangover);
+    filter_plateau_init(&a->plateau_detector);
 
     /* Buffer-backed sub-modules — slice from caller's mem in declared order. */
     uint8_t* ptr = (uint8_t*)mem;
@@ -369,6 +386,7 @@ int aec_init(Aec* a, void* mem, size_t mem_size, const AecConfig* cfg) {
         a->current_delay = -1;
         a->pending_delay = -1;
         a->has_pending = 0;
+        a->pending_delay_ttl = 0;
     } else {
         a->current_delay = 0;
     }
@@ -450,7 +468,9 @@ void aec_reset(Aec* a) {
         memset(a->ref_ring, 0, (size_t)a->ref_ring_size * sizeof(float));
         a->ref_ring_write = 0; a->ref_ring_filled = 0;
         a->current_delay = -1; a->pending_delay = -1; a->has_pending = 0;
+        a->pending_delay_ttl = 0;
     }
+    filter_plateau_reset(&a->plateau_detector);
     pbfdkf_reset(&a->main_filter);
     if (a->has_shadow) pbfdkf_reset(&a->shadow_filter);
     render_activity_reset(&a->render_activity);
@@ -478,6 +498,86 @@ void aec_reset(Aec* a) {
 }
 
 /* ---- Helpers ------------------------------------------------------------ */
+
+/* v3.10.2 — clear all filter-output-derived state. Called by:
+ *   - 'plateau' (FilterPlateauDetector fire)
+ *   - 'delay_first' (Path A: first delay acquisition)
+ *   - 'delay_shift' (Path B: delay shift confirmed)
+ *
+ * Preserves input-side / temporal context (frame_count, _current_delay,
+ * delay_est, ref_ring, plateau_detector, far/mic power EMAs, hp/sat
+ * detectors, render activity, RES long-window EMA when preserve_render_ema).
+ *
+ * Re-arms warmup: filter Q boosted to Q_high, p_max_override = 1.0 / 30 frames,
+ * warmup_frames = max(current, cfg.warmup_frames/2), warmup_far_active = 0,
+ * pending_delay cleared.
+ *
+ * Mirrors python/aec.py:3961-4115 _reset_filter_derived_state.
+ */
+static void aec_reset_filter_derived_state(Aec* a, int preserve_render_ema) {
+    /* Filter taps + shadow */
+    pbfdkf_reset(&a->main_filter);
+    if (a->has_shadow) pbfdkf_reset(&a->shadow_filter);
+
+    /* Filter convergence + EPC */
+    filter_convergence_reset(&a->convergence);
+    epc_reset(&a->epc);
+
+    /* Filter-output-derived: err smooths, error/near power EMAs, ERLE windows */
+    a->main_err_smooth = 0.0;
+    a->shadow_err_smooth = 0.0;
+    a->raw_error_power = 0.0;
+    a->final_error_power = 0.0;
+    a->raw_error_power_sum = 0.0;
+    a->final_error_power_sum = 0.0;
+    a->near_power = 0.0;
+    a->near_power_sum = 0.0;
+    a->erle_window_near = 1e-10;
+    a->erle_window_err  = 1e-10;
+    a->erle_factor_prev = 0.0;
+    a->inst_erle_smooth = 1.0;
+
+    /* Mu-scale state */
+    a->simple_mu_ratio = 1.0;
+    a->simple_mu_holdoff = 0;
+    a->has_per_bin_mu = 0;
+
+    /* ERL + EPC-render-forced + DT analyzer */
+    a->erl_estimate = 0.1;
+    a->epc_render_forced_remaining = 0;
+    doubletalk_reset(&a->dt_analyzer);
+    a->stat_dt_hangover = 0;
+
+    /* Shadow copy controller + frame count */
+    a->shadow_frame_count = 0;
+    shadow_copy_reset(&a->shadow_copy);
+
+    /* RES — clears its echo_psd / error_psd / noise_psd / gain_smooth /
+     * render state. Long-window far-PSD EMA preserved when
+     * preserve_render_ema=1. */
+    if (a->has_res) res_filter_reset_ex(&a->res, preserve_render_ema);
+
+    /* Re-arm warmup with high mu + Q_high boost. */
+    int K = a->main_filter.base.n_freqs;
+    for (int k = 0; k < K; ++k) {
+        a->main_filter.Q[k] = a->main_filter.Q_high[k];
+        if (a->has_shadow) a->shadow_filter.Q[k] = a->shadow_filter.Q_high[k];
+    }
+    a->main_filter.p_max_override = 1.0f;
+    a->main_filter.p_max_override_frames = 30;
+    if (a->has_shadow) {
+        a->shadow_filter.p_max_override = 1.0f;
+        a->shadow_filter.p_max_override_frames = 30;
+    }
+    int half = a->cfg.warmup_frames / 2;
+    if (a->warmup_frames_remaining < half) a->warmup_frames_remaining = half;
+    a->warmup_far_active = 0;
+
+    /* Clear pending delay shift state. */
+    a->pending_delay = -1;
+    a->has_pending = 0;
+    a->pending_delay_ttl = 0;
+}
 
 /* Returns nearest mu_scale; if per-bin available, use it. */
 static double get_simple_mu_scale_scalar(Aec* a, double mu_min) {
@@ -602,39 +702,50 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     if (a->has_delay_est) {
         delay_est_accumulate(&a->delay_est, a->near_hop, a->far_hop, hop);
         int new_delay = a->delay_est.estimated_delay;
-        int par_ok    = a->delay_est.last_par > 5.0;
-        /* Match Python aec.py:3648 — only n_updates>=3 + par_ok required */
-        if (new_delay >= 0 && a->delay_est.n_updates >= 3 && par_ok) {
-            if (a->current_delay < 0) {
+        int eligible = (new_delay >= 0 && a->delay_est.n_updates >= 3);
+
+        /* Path A (v3.10.2/v3.10.3) — first acquisition. Demands solid PAR. */
+        if (eligible && a->current_delay < 0 && delay_est_is_solid(&a->delay_est)) {
+            a->current_delay = new_delay;
+            aec_reset_filter_derived_state(a, /*preserve_render_ema=*/1);
+            filter_convergence_mark_diverged(&a->convergence);
+        }
+
+        /* Pending TTL decrement — runs every estimation cycle. */
+        if (a->pending_delay_ttl > 0) {
+            a->pending_delay_ttl--;
+            if (a->pending_delay_ttl <= 0) {
+                a->has_pending = 0;
+                a->pending_delay = -1;
+            }
+        }
+
+        /* Path B — delay shift. Independent of Path A. Confidence >= 0.5
+         * + |new - current| > 32. Pair with prior pending value (|<16|) → fire. */
+        double conf = delay_est_confidence(&a->delay_est);
+        if (eligible && a->current_delay >= 0 && conf >= 0.5
+                && abs(new_delay - a->current_delay) > 32) {
+            if (a->has_pending && abs(new_delay - a->pending_delay) < 16) {
                 a->current_delay = new_delay;
-                pbfdkf_reset(&a->main_filter);
-                if (a->has_shadow) pbfdkf_reset(&a->shadow_filter);
-                if (a->has_res)    res_filter_reset(&a->res);
-                filter_convergence_mark_diverged(&a->convergence);
-                /* Q boost back to high */
+                a->has_pending = 0; a->pending_delay = -1; a->pending_delay_ttl = 0;
+                aec_reset_filter_derived_state(a, /*preserve_render_ema=*/1);
+                epc_force_delay(&a->epc);
+                /* Q + p_max boost (v3.10.3 M4) */
                 for (int k = 0; k < a->main_filter.base.n_freqs; ++k) {
                     a->main_filter.Q[k] = a->main_filter.Q_high[k];
                     if (a->has_shadow) a->shadow_filter.Q[k] = a->shadow_filter.Q_high[k];
                 }
-            } else if (abs(new_delay - a->current_delay) > 32) {
-                if (a->has_pending && abs(new_delay - a->pending_delay) < 16) {
-                    a->current_delay = new_delay;
-                    a->has_pending = 0;
-                    epc_force_delay(&a->epc);
-                    for (int k = 0; k < a->main_filter.base.n_freqs; ++k) {
-                        a->main_filter.Q[k] = a->main_filter.Q_high[k];
-                        if (a->has_shadow) a->shadow_filter.Q[k] = a->shadow_filter.Q_high[k];
-                    }
-                    a->main_filter.p_max_override = 1.0f;
-                    a->main_filter.p_max_override_frames = 30;
-                    if (a->has_shadow) {
-                        a->shadow_filter.p_max_override = 1.0f;
-                        a->shadow_filter.p_max_override_frames = 30;
-                    }
-                    filter_convergence_mark_diverged(&a->convergence);
-                } else {
-                    a->pending_delay = new_delay; a->has_pending = 1;
+                a->main_filter.p_max_override = 1.0f;
+                a->main_filter.p_max_override_frames = 30;
+                if (a->has_shadow) {
+                    a->shadow_filter.p_max_override = 1.0f;
+                    a->shadow_filter.p_max_override_frames = 30;
                 }
+                filter_convergence_mark_diverged(&a->convergence);
+            } else {
+                a->pending_delay = new_delay;
+                a->has_pending = 1;
+                a->pending_delay_ttl = 3;
             }
         }
 
@@ -745,11 +856,15 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
                                        a->shadow_frame_count, far_excited,
                                        a->main_err_smooth, a->shadow_err_smooth);
 
+        /* v3.10.1: shadow-copy delay_reliable gate raised from any-confidence
+         * to >= 0.5 (PAR halfway between par_low and par_solid). */
+        int delay_reliable = a->has_delay_est
+                          && (delay_est_confidence(&a->delay_est) >= 0.5);
         ShadowCopyDecision dec = shadow_copy_update(
             &a->shadow_copy, a->shadow_frame_count, far_now,
             a->main_err_smooth, a->shadow_err_smooth,
             a->epc.active, a->saturation_level,
-            a->dt_analyzer.dt_from_energy, 0.0, 0);
+            a->dt_analyzer.dt_from_energy, 0.0, delay_reliable);
         if (dec.boost_q) {
             int Kq = a->main_filter.base.n_freqs;
             for (int k = 0; k < Kq; ++k) a->main_filter.Q[k] = a->main_filter.Q_high[k];
@@ -1030,6 +1145,23 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         for (int k = 0; k < K; ++k) {
             a->main_filter.Q[k] = a->main_filter.Q_low[k];
             if (a->has_shadow) a->shadow_filter.Q[k] = a->shadow_filter.Q_low[k];
+        }
+    }
+
+    /* v3.10.0 — filter plateau detection + one-shot recovery (post-convergence
+     * tick). Uses windowed ERLE + DT signal pattern. */
+    {
+        double far_now_pwr = mean_sq(a->far_hop, hop);
+        int    far_active_now = far_now_pwr > 1e-4;
+        double erle_w_db = 10.0 * log10(
+            (a->erle_window_near + 1e-10) / (a->erle_window_err + 1e-10));
+        int    dt_signal_now = (a->dt_analyzer.dt_from_shadow > 0.3)
+                            || (a->dt_analyzer.dt_from_energy > 0.3);
+        if (filter_plateau_update(&a->plateau_detector,
+                                     far_active_now, dt_signal_now,
+                                     erle_w_db,
+                                     a->convergence.once_converged)) {
+            aec_reset_filter_derived_state(a, /*preserve_render_ema=*/1);
         }
     }
 

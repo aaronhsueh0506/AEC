@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AEC 回音消除 — 技術說明 v3.8.3</title>
+<title>AEC 回音消除 — 技術說明 v3.10.4</title>
 <style>
   :root {
     --bg: #fafafa;
@@ -83,10 +83,10 @@
 <header>
   <div class="inner">
     <h1>&#x1F50A; AEC 回音消除技術說明</h1>
-    <p class="subtitle">Acoustic Echo Cancellation — 從原理到效能 v3.8.3</p>
+    <p class="subtitle">Acoustic Echo Cancellation — 從原理到效能 v3.10.4</p>
     <div class="badges">
-      <span class="badge">v3.8.3 (current)</span>
-      <span class="badge">Algorithm = v3.8.1 (audio behavior unchanged)</span>
+      <span class="badge">v3.10.4 (current)</span>
+      <span class="badge">Python aec.py __version__ = 3.10.4 · C port v3.10.4 follows</span>
       <span class="badge">PBFDKF Kalman</span>
       <span class="badge">Shadow Filter</span>
       <span class="badge">RES + ENR + Spectral Floor</span>
@@ -656,13 +656,19 @@
 
 <h2 id="effort">7. 主要改進歷程</h2>
 <div class="panel">
-<p>從 v2.0 到 v3.8.3，累計超過 <strong>120+ 小時研發</strong>，透過 AEC Challenge 800 cases 評測驅動每次迭代。每次改動都要通過 800-case AECMOS 評測才收版。</p>
+<p>從 v2.0 到 v3.10.4，累計超過 <strong>120+ 小時研發</strong>，透過 AEC Challenge 800 cases 評測驅動每次迭代。每次改動都要通過 800-case AECMOS 評測才收版。</p>
 <div class="highlight" style="margin-bottom:18px">
   <strong>版本說明：</strong>
   <ul style="margin:6px 0 0 0; font-size:14px">
     <li><strong>v3.8.1</strong> = Python 演算法定版（音質行為固定在這版）</li>
-    <li><strong>v3.8.2</strong> = v3.8.1 演算法 + C 對齊實作 + release hygiene。音質行為與 v3.8.1 完全相同。</li>
-    <li><strong>v3.8.3</strong> = 當前 release。Preset rebalance：MILD 變成「最少動」極輕版，SOFT 接手 v3.8.2 MILD 的位置。<em>只動 RES 參數，演算法路徑不變。</em></li>
+    <li><strong>v3.8.2</strong> = v3.8.1 演算法 + C 對齊實作 + release hygiene。</li>
+    <li><strong>v3.8.3</strong> = Preset rebalance：MILD 變成「最少動」極輕版，SOFT 接手 v3.8.2 MILD 的位置。</li>
+    <li><strong>v3.8.4</strong> = Plan A HF preservation：smoothing kernel <code>[0.25,0.5,0.25] → [0.1,0.8,0.1]</code>、HF cap anchor 500 Hz → 2 kHz、<code>_stat_dt_mask</code> 4 → 7 kHz。FS −0.142 / DT deg +0.076（locked-in trade-off）。</li>
+    <li><strong>v3.10.0</strong> = Delay + Recovery 對齊 WebRTC AEC3：<code>max_delay_ms</code> 250 → 512、DelayEstimator confidence/is_solid、render ring buffer 1024 ms、two-path delay gate、<code>mu_scale</code> 延遲信心上限、<code>FilterPlateauDetector</code>、<code>ResidualEchoEstimator</code> long-window far-PSD EMA (alpha=0.993)。</li>
+    <li><strong>v3.10.1</strong> = long-window EMA refinements（每 far-active frame 都更新；render fallback 70/30 blend）。</li>
+    <li><strong>v3.10.2</strong> = Codex round 2：兩條 delay gate 改為獨立 if、shared <code>_reset_filter_derived_state</code> helper、<code>preserve_long_window_ema</code> 旗標。</li>
+    <li><strong>v3.10.3</strong> = Codex round 3 + self-trace fixes (F3/F4/F5/F7 + H1/H2/H3 + M4)；<code>__version__</code> 從 stale 3.8.1 補正。</li>
+    <li><strong>v3.10.4</strong> = 當前 release。<code>max_delay_ms</code> 512 → 1024（match WebRTC older AEC ~1 s far-end history；AEC3 512 ms 漏 BT/mobile skew）；render buffer 1024 → 2048 ms。CLI fix：<code>--enable-res</code> / <code>--cng</code> 改用 <code>BooleanOptionalAction</code>，<code>default=None</code>，preset 值不再被 silent override。</li>
   </ul>
 </div>
 
@@ -744,6 +750,34 @@
       <p>v3.8.1 演算法移植到 C，bit-identical 驗證。新增 static-memory API 支援嵌入式（無 heap）部署。文件、版號、測試結構全面整理。<em>音質與 v3.8.1 相同，無 audio behavior 變化。</em></p>
     </div>
   </div>
+  <div class="timeline-item">
+    <div class="timeline-dot">v3.8.4</div>
+    <div class="timeline-content">
+      <strong>Plan A：HF preservation under DT</strong>
+      <p>Smoothing kernel <code>[0.25,0.5,0.25] → [0.1,0.8,0.1]</code> 阻斷低頻 echo gain 滲透到高頻 bin（4–8 kHz 量到 ~10 dB cut）；HF cap anchor 500 Hz → 2 kHz 保住 1–3 kHz 母音 formant；<code>_stat_dt_mask</code> 4 kHz → 7 kHz 線性 fade。FS −0.142 / DT deg +0.076（locked-in design trade-off）。</p>
+    </div>
+  </div>
+  <div class="timeline-item">
+    <div class="timeline-dot">v3.10.0</div>
+    <div class="timeline-content">
+      <strong>Delay + Recovery 對齊 WebRTC AEC3</strong>
+      <p><code>max_delay_ms</code> 250 → 512、render ring buffer 1024 ms；DelayEstimator 新增 <code>confidence</code> / <code>is_solid</code>；two-path delay-acquisition gate（first acquisition 重置 vs delay shift 兩格 confidence + 兩次一致性）；<code>mu_scale</code> 延遲信心上限 <code>0.5 + 0.5·delay_conf</code>；<code>FilterPlateauDetector</code> 在 DT 中 ERLE 連續 50 frame 偏低就重置 filter 抽頭；<code>ResidualEchoEstimator</code> long-window far-PSD EMA (alpha=0.993)。</p>
+    </div>
+  </div>
+  <div class="timeline-item">
+    <div class="timeline-dot">v3.10.2/3</div>
+    <div class="timeline-content">
+      <strong>Codex review 修正：shared reset helper + state hygiene</strong>
+      <p>v3.10.2 把兩條 delay gate 拆成獨立 if、shared <code>_reset_filter_derived_state(reason, preserve_render_ema)</code> helper 統一 plateau / delay_first reset。v3.10.3 補上 <code>near_power</code> EMA reset、plateau detector 用 current-frame DT 信號、<code>_pending_delay</code> reset/TTL、Path B delay shift 也呼叫 helper。<code>__version__</code> 從 stale 3.8.1 補正。</p>
+    </div>
+  </div>
+  <div class="timeline-item">
+    <div class="timeline-dot">v3.10.4 ★</div>
+    <div class="timeline-content">
+      <strong>Wider delay range + CLI fix（current release）</strong>
+      <p><code>max_delay_ms</code> 512 → 1024（match WebRTC older AEC ~1 s far-end history；AEC3 512 ms 漏 BT/mobile skew），render buffer 2048 ms。CLI <code>--enable-res</code> / <code>--cng</code> 改用 <code>BooleanOptionalAction</code>，<code>default=None</code>，preset 值不再被 silent override。Bench (BALANCED, 800-case)：FS 3.668 / NE 4.010 / DT echo 4.154 / DT deg 2.344。</p>
+    </div>
+  </div>
 </div>
 </div>
 
@@ -753,14 +787,14 @@
 
 <div class="grid-3" style="margin:16px 0 22px">
   <div class="metric-card">
-    <div class="metric-value">3.80</div>
+    <div class="metric-value">3.67</div>
     <div class="metric-label">FS Echo（balanced）</div>
-    <div class="metric-delta" style="color:#059669">vs Speex +0.99</div>
+    <div class="metric-delta" style="color:#059669">vs Speex +0.86</div>
   </div>
   <div class="metric-card">
-    <div class="metric-value">2.27</div>
+    <div class="metric-value">2.34</div>
     <div class="metric-label">DT Degradation（balanced）</div>
-    <div class="metric-delta" style="color:#059669">vs AEC3 +0.42 ★</div>
+    <div class="metric-delta" style="color:#059669">vs AEC3 +0.49 ★</div>
   </div>
   <div class="metric-card">
     <div class="metric-value">4.01</div>
@@ -781,13 +815,13 @@
   <tr><td>Speex</td><td>2.81</td><td>3.37</td><td>3.23</td><td>4.13</td></tr>
   <tr><td>WebRTC AEC2</td><td>3.48</td><td>4.26</td><td>2.39</td><td>4.10</td></tr>
   <tr><td>WebRTC AEC3</td><td>3.88</td><td><strong>4.54</strong></td><td style="color:#dc2626">1.85</td><td style="color:#dc2626">3.45</td></tr>
-  <tr style="background:#f0fff4"><td>我們 mild (v3.8.3 新)</td><td>3.42</td><td>3.87</td><td style="color:#059669"><strong>2.56</strong></td><td style="color:#059669"><strong>4.02</strong></td></tr>
-  <tr style="background:#f0fff4"><td>我們 soft (= 舊 mild)</td><td>3.64</td><td>4.05</td><td style="color:#059669">2.38</td><td style="color:#059669">4.02</td></tr>
-  <tr style="background:#f0fff4"><td>我們 balanced ★</td><td>3.80</td><td>4.19</td><td style="color:#059669">2.27</td><td style="color:#059669">4.01</td></tr>
-  <tr style="background:#f0fff4"><td>我們 aggressive</td><td>3.85</td><td>4.23</td><td>2.23</td><td>4.00</td></tr>
-  <tr style="background:#f0fff4"><td>我們 maximum</td><td>3.90</td><td>4.26</td><td>2.19</td><td>3.99</td></tr>
+  <tr style="background:#f0fff4"><td>我們 mild</td><td>3.40</td><td>3.86</td><td style="color:#059669"><strong>2.62</strong></td><td style="color:#059669"><strong>4.02</strong></td></tr>
+  <tr style="background:#f0fff4"><td>我們 soft</td><td>3.57</td><td>4.02</td><td style="color:#059669">2.46</td><td style="color:#059669">4.02</td></tr>
+  <tr style="background:#f0fff4"><td>我們 balanced ★</td><td>3.67</td><td>4.15</td><td style="color:#059669">2.34</td><td style="color:#059669">4.01</td></tr>
+  <tr style="background:#f0fff4"><td>我們 aggressive</td><td>3.69</td><td>4.18</td><td>2.32</td><td>4.01</td></tr>
+  <tr style="background:#f0fff4"><td>我們 maximum</td><td>3.75</td><td>4.22</td><td>2.27</td><td>3.99</td></tr>
 </table>
-<p style="font-size:13px; color:#64748b; margin-top:6px">FS / DT echo 為 static + movement 兩 bucket 的平均。MILD 為 v3.8.3 重新調整後的 800-case bench (2026-05-05)；SOFT 沿用 v3.8.2 MILD 數字（參數不變，只是換位）；BALANCED 以上沿用 v3.8.1 baseline。</p>
+<p style="font-size:13px; color:#64748b; margin-top:6px">FS / DT echo 為 static + movement 兩 bucket 的 n-weighted 平均。數據為 v3.10.4 800-case AECMOS bench (2026-05-05, fl=52 ms, CNG on)。BALANCED 對 v3.8.3 baseline 的 FS −0.13 是 v3.8.4 Plan A smoothing kernel <code>[0.1, 0.8, 0.1]</code> 的 locked-in cost（見 CHANGELOG）。</p>
 
 <!-- ── 主要折線圖 ── -->
 <h3>各方法完整分數比較（Profile Chart）</h3>
@@ -883,18 +917,18 @@
 <text x="465" y="306" font-size="11" text-anchor="middle" fill="#7f1d1d" font-weight="600">1.85 ✗</text>
 <text x="625" y="169" font-size="11" text-anchor="middle" fill="#7f1d1d">3.45</text>
 
-<!-- balanced (blue, thick): 3.482, 4.162, 2.296, 4.007 -->
-<!-- FS=3.482→173.4  DT_e=4.162→123.4  DT_d=2.296→258.2  NE=4.007→135.8 -->
-<polyline points="145,173 305,123 465,258 625,136" fill="none" stroke="#2563eb" stroke-width="3.5" stroke-linejoin="round"/>
-<circle cx="145" cy="173" r="6" fill="#2563eb"/>
+<!-- balanced v3.10.4 (blue, thick): 3.668, 4.154, 2.344, 4.010 -->
+<!-- y(v) = 320 - (v-1.5)/3.5*260 ; FS=3.668→158.7  DT_e=4.154→123.0  DT_d=2.344→258.7  NE=4.010→133.7 -->
+<polyline points="145,159 305,123 465,259 625,134" fill="none" stroke="#2563eb" stroke-width="3.5" stroke-linejoin="round"/>
+<circle cx="145" cy="159" r="6" fill="#2563eb"/>
 <circle cx="305" cy="123" r="6" fill="#2563eb"/>
-<circle cx="465" cy="258" r="6" fill="#2563eb"/>
-<circle cx="625" cy="136" r="6" fill="#2563eb"/>
+<circle cx="465" cy="259" r="6" fill="#2563eb"/>
+<circle cx="625" cy="134" r="6" fill="#2563eb"/>
 <!-- balanced value labels -->
-<text x="145" y="168" font-size="11" text-anchor="middle" fill="#2563eb" font-weight="600">3.48</text>
-<text x="305" y="118" font-size="11" text-anchor="middle" fill="#2563eb" font-weight="600">4.16</text>
-<text x="465" y="273" font-size="11" text-anchor="middle" fill="#2563eb" font-weight="600">2.30 ★</text>
-<text x="625" y="131" font-size="11" text-anchor="middle" fill="#2563eb" font-weight="600">4.01</text>
+<text x="145" y="154" font-size="11" text-anchor="middle" fill="#2563eb" font-weight="600">3.67</text>
+<text x="305" y="118" font-size="11" text-anchor="middle" fill="#2563eb" font-weight="600">4.15</text>
+<text x="465" y="274" font-size="11" text-anchor="middle" fill="#2563eb" font-weight="600">2.34 ★</text>
+<text x="625" y="129" font-size="11" text-anchor="middle" fill="#2563eb" font-weight="600">4.01</text>
 
 <!-- 指示 DT Deg 下降方向標記 -->
 <text x="465" y="20" font-size="11" text-anchor="middle" fill="#dc2626" font-weight="600">↑ 語音保留越好</text>
@@ -905,7 +939,7 @@
 </div>
 
 <div class="key-point">
-  <strong>如何讀這張圖：</strong>理想的方法應該在所有 4 個指標都「往上」。現實中沒有方法全部最高，核心取捨是「FS/DT Echo（回音壓制）↑ 而 DT Degradation（語音保留）↓」。AEC3 的問題清楚可見 — DT Echo 最高（4.54）但 DT Degradation 急劇下沉到 1.85，代表雙方通話時語音品質很差。我們 balanced 在 DT Degradation 領先 AEC3 +0.45，DT Echo 仍在 4.16 的高水準。
+  <strong>如何讀這張圖：</strong>理想的方法應該在所有 4 個指標都「往上」。現實中沒有方法全部最高，核心取捨是「FS/DT Echo（回音壓制）↑ 而 DT Degradation（語音保留）↓」。AEC3 的問題清楚可見 — DT Echo 最高（4.54）但 DT Degradation 急劇下沉到 1.85，代表雙方通話時語音品質很差。我們 balanced 在 DT Degradation 領先 AEC3 +0.49，DT Echo 仍在 4.15 的高水準。
 </div>
 <p style="font-size:13px; color:#64748b; margin-top:6px">為了讓圖容易讀，只畫 balanced 一條代表我們；mild / aggressive / maximum 三組分數見上方表格。</p>
 
@@ -925,18 +959,18 @@
   </div>
   <div class="panel" style="border-left:5px solid #2563eb">
     <h4 style="color:#1e40af">均衡首選 → balanced ★</h4>
-    <ul style="font-size:14px"><li>FS Echo 3.80，DT Deg 2.27（領先 AEC3 +0.42）</li><li>適合：一般通話、會議、免持</li></ul>
+    <ul style="font-size:14px"><li>FS Echo 3.67，DT Deg 2.34（領先 AEC3 +0.49）</li><li>適合：一般通話、會議、免持</li></ul>
     <p style="font-size:13px;color:#94a3b8">大多數場景的最佳預設值</p>
   </div>
   <div class="panel" style="border-left:5px solid #f97316">
     <h4 style="color:#9a3412">優先壓制回音 → aggressive</h4>
-    <ul style="font-size:14px"><li>FS Echo 3.85，DT Echo 4.23</li><li>適合：車用、工廠、高背景噪音</li></ul>
-    <p style="font-size:13px;color:#94a3b8">代價：DT Deg 2.23，雙說語音稍受影響</p>
+    <ul style="font-size:14px"><li>FS Echo 3.69，DT Echo 4.18</li><li>適合：車用、工廠、高背景噪音</li></ul>
+    <p style="font-size:13px;color:#94a3b8">代價：DT Deg 2.32，雙說語音稍受影響</p>
   </div>
   <div class="panel" style="border-left:5px solid #b91c1c">
     <h4 style="color:#991b1b">最強壓制 → maximum</h4>
-    <ul style="font-size:14px"><li>FS Echo 3.90，接近 AEC3 的 3.88</li><li>適合：IoT 小喇叭、mic 離喇叭很近</li></ul>
-    <p style="font-size:13px;color:#94a3b8">代價：DT Deg 2.19，語音保留最低</p>
+    <ul style="font-size:14px"><li>FS Echo 3.75，接近 AEC3 的 3.88</li><li>適合：IoT 小喇叭、mic 離喇叭很近</li></ul>
+    <p style="font-size:13px;color:#94a3b8">代價：DT Deg 2.27，語音保留最低</p>
   </div>
 </div>
 </div>
@@ -1177,7 +1211,7 @@ while pos + hop &lt;= n:
 </div>
 
 <div style="text-align:center; color:var(--muted); font-size:13px; margin-top:60px; padding-top:24px; border-top:1px solid var(--border);">
-  AEC v3.8.3 &nbsp;&#xB7;&nbsp; Algorithm v3.8.1 &nbsp;&#xB7;&nbsp; 2026-05-05 &nbsp;&#xB7;&nbsp; PBFDKF + Shadow + Multi-ERLE + WOLA RES (PSD / ENR Gate / Spectral Floor / CNG)
+  AEC v3.10.4 &nbsp;&#xB7;&nbsp; Python aec.py __version__ = 3.10.4 (C port v3.10.4 follows) &nbsp;&#xB7;&nbsp; 2026-05-05 &nbsp;&#xB7;&nbsp; PBFDKF + Shadow + Multi-ERLE + WOLA RES (PSD / ENR Gate / Spectral Floor / CNG) + Delay/Recovery state machine
 </div>
 
 </div>
