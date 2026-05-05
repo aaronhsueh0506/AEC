@@ -151,6 +151,12 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         _v = os.environ.get(_env)
         if _v is not None and _flag not in config_overrides:
             config_overrides[_flag] = _v.lower() not in ('0', 'false', 'off', 'no')
+    # P1 Phase 2: conditional HF cap + threshold env vars
+    if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
+        config_overrides['hf_cap_conditional'] = (
+            os.environ['AEC_HF_CAP_CONDITIONAL'].lower() not in ('0', 'false', 'off', 'no'))
+    if 'AEC_HF_CAP_THETA' in os.environ and 'hf_cap_metric_threshold' not in config_overrides:
+        config_overrides['hf_cap_metric_threshold'] = float(os.environ['AEC_HF_CAP_THETA'])
     # v3.2 Stage V1: env override AEC_MODE=PBFDAF for filter comparison
     _mode_env = os.environ.get('AEC_MODE', 'PBFDKF').upper()
     _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF

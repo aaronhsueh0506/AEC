@@ -284,6 +284,17 @@ class AecConfig:
     plan_a_hf_cap_2k: bool = True          # False → HF cap anchor 500 Hz with v3.8.3 gate
     plan_a_stat_mask_7k: bool = True       # False → stat_dt_mask cuts off at 4 kHz
 
+    # P1 Phase 2 — conditional HF cap based on m_excess_ratio (validated
+    # in P1 Phase 1 with AUROC 0.871 on FS-vs-NE+DT_positive). When
+    # hf_cap_conditional is True, the stage-6 cap behaviour is gated by
+    # the per-frame metric: metric < threshold → apply v3.8.3 strict cap
+    # (anchor 500 Hz, gate effective_dt < 0.5); metric >= threshold →
+    # skip the cap entirely (preserve high-band NE). Default off keeps
+    # v3.10.4 release behaviour. plan_a_hf_cap_2k still controls the
+    # baseline cap mode used when the conditional path is disabled.
+    hf_cap_conditional: bool = False
+    hf_cap_metric_threshold: float = 0.30
+
     # Mode
     mode: AecMode = AecMode.PBFDKF
 
@@ -1329,10 +1340,14 @@ class ResFilter:
                  capture_stages: bool = False,
                  plan_a_kernel_tight: bool = True,
                  plan_a_hf_cap_2k: bool = True,
-                 plan_a_stat_mask_7k: bool = True):
+                 plan_a_stat_mask_7k: bool = True,
+                 hf_cap_conditional: bool = False,
+                 hf_cap_metric_threshold: float = 0.30):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
         self._plan_a_stat_mask_7k = plan_a_stat_mask_7k
+        self._hf_cap_conditional = hf_cap_conditional
+        self._hf_cap_metric_threshold = hf_cap_metric_threshold
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -1828,7 +1843,8 @@ class ResFilter:
         return g
 
     def _stage_gain_postprocess(self, *, g_in, epc_dt, quiet_mask, far_power,
-                                  effective_dt, is_stationary_dt, divergence):
+                                  effective_dt, is_stationary_dt, divergence,
+                                  erl_estimate=0.01):
         """Stage 3: EPC_DT cap, quiet mask, 3-bin smooth, HF cap, divergence override.
 
         Returns updated g (post-divergence-override). Mutates _diag_round5_stages[2..6].
@@ -1884,9 +1900,35 @@ class ResFilter:
             # FS cost lives in the smoothing kernel change, not here. Left
             # as-is pending a redesigned evidence metric that distinguishes
             # DT-NE from FS-decoupling.
-            # P1.0 toggle: plan_a_hf_cap_2k=False reverts to v3.8.3 HF cap
-            # (anchor 500 Hz, gate effective_dt<0.5, no high_ne_conf skip)
-            if self._plan_a_hf_cap_2k:
+            # P1 Phase 2 — conditional HF cap based on m_excess_ratio.
+            # m_excess_ratio = mean(max(error_psd[2k:] - far_lw[2k:]·erl_est, 0))
+            #                 / (mean(error_psd[2k:]) + eps)
+            # Validated in P1 Phase 1 (AUROC 0.871 FS-vs-NE+DT_positive,
+            # α=1.0 stable across {0.5, 1.0, 2.0}). Replaces the broken
+            # `1 - coh2`-based high_ne_conf gate.
+            if self._hf_cap_conditional:
+                try:
+                    far_lw = self._residual_est._long_window_far_psd
+                    err_hb = self.error_psd[self._hf_cap_bin_2k:]
+                    far_hb = far_lw[self._hf_cap_bin_2k:]
+                    erl_e = float(erl_estimate)
+                    excess = np.maximum(err_hb - 1.0 * far_hb * erl_e, 0.0)
+                    err_hb_mean = float(np.mean(err_hb)) + 1e-10
+                    metric = float(np.mean(excess)) / err_hb_mean
+                except Exception:
+                    metric = 0.0  # fail open: skip cap when metric unavailable
+                if metric < self._hf_cap_metric_threshold:
+                    # FS-like: apply v3.8.3 strict cap (anchor 500 Hz, gate < 0.5)
+                    hf_cap_bin = self._hf_cap_bin
+                    if (self.n_freqs > hf_cap_bin + 1
+                            and effective_dt < 0.5
+                            and not is_stationary_dt):
+                        hf_cap = g[hf_cap_bin]
+                        g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
+                # else: DT-like → skip cap entirely (preserve high-band NE)
+            elif self._plan_a_hf_cap_2k:
+                # Default v3.10.4 behaviour: Plan A cap anchor 2 kHz, gate < 0.3,
+                # skip on (broken) high_ne_conf < 0.3
                 hf_cap_bin = self._hf_cap_bin_2k
                 if (self.n_freqs > hf_cap_bin + 1
                         and effective_dt < 0.3
@@ -1896,6 +1938,7 @@ class ResFilter:
                         hf_cap = g[hf_cap_bin]
                         g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
             else:
+                # P1.0 toggle: plan_a_hf_cap_2k=False reverts to v3.8.3 cap
                 hf_cap_bin = self._hf_cap_bin
                 if (self.n_freqs > hf_cap_bin + 1
                         and effective_dt < 0.5
@@ -2280,6 +2323,7 @@ class ResFilter:
             effective_dt=effective_dt,
             is_stationary_dt=is_stationary_dt,
             divergence=divergence,
+            erl_estimate=erl_estimate,
         )
 
         self._stage_temporal_smoothing(
@@ -3812,6 +3856,8 @@ class AEC:
                 plan_a_kernel_tight=self.config.plan_a_kernel_tight,
                 plan_a_hf_cap_2k=self.config.plan_a_hf_cap_2k,
                 plan_a_stat_mask_7k=self.config.plan_a_stat_mask_7k,
+                hf_cap_conditional=self.config.hf_cap_conditional,
+                hf_cap_metric_threshold=self.config.hf_cap_metric_threshold,
             )
         else:
             self.res = None
