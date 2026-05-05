@@ -46,7 +46,8 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             filter_length=832, enable_cng=True, enable_res=True,
             sample_rate=16000, write_wav=True,
             mic_pad=0, ref_pad=0,
-            diag_csv_path=None, gain_dump_path=None):
+            diag_csv_path=None, gain_dump_path=None,
+            trace_high_band_metrics=False):
     """Process one case; return (mic, ref, out, erle_per_frame, sample_rate).
 
     mic_pad / ref_pad: prepend N zero samples to mic / ref before processing
@@ -69,6 +70,7 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         enable_cng=enable_cng,
         enable_shadow=True,
         capture_stages=capture,
+        trace_high_band_metrics=trace_high_band_metrics,
     )
     aec = AEC(cfg)
 
@@ -103,7 +105,7 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         erle_log.append(aec.get_erle_instant())
         if diag_csv_path is not None:
             s = aec.get_stats()
-            diag_rows.append((
+            row = [
                 s.frame_count, s.time_s,
                 int(s.filter_converged), int(s.filter_once_converged),
                 s.erle_inst_db, s.erle_windowed_db,
@@ -114,7 +116,17 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                 s.res_gain_mean_db, s.echo_psd_mean_db, s.error_psd_mean_db,
                 s.delay_samples, s.delay_ms,
                 int(s.res_using_render),
-            ))
+            ]
+            if trace_high_band_metrics:
+                d = aec._diag
+                row.extend([
+                    d.get('m_excess_ratio_a05', 0.0),
+                    d.get('m_excess_ratio_a10', 0.0),
+                    d.get('m_excess_ratio_a20', 0.0),
+                    d.get('m_modulation', 0.0),
+                    d.get('m_spectral_flatness', 0.0),
+                ])
+            diag_rows.append(tuple(row))
         if capture and aec.res is not None:
             sg = aec.res.get_stage_gains()
             for k in stage_keys:
@@ -142,6 +154,9 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                   'res_gain_db', 'echo_psd_db', 'err_psd_db',
                   'delay_samp', 'delay_ms',
                   'using_render']
+        if trace_high_band_metrics:
+            header.extend(['m_excess_a05', 'm_excess_a10', 'm_excess_a20',
+                           'm_modulation', 'm_spectral_flatness'])
         with open(diag_csv_path, 'w', newline='') as fp:
             w = csv.writer(fp)
             w.writerow(header)
@@ -379,6 +394,8 @@ def main():
                    help='write per-frame AecStats trajectory CSV here')
     p.add_argument('--res-gain-dump',
                    help='write per-frame ResFilter stage gains as .npz here')
+    p.add_argument('--trace-high-band-metrics', action='store_true',
+                   help='P1 Phase 1: include high-band NE evidence metrics in --diag-csv')
     args = p.parse_args()
 
     if args.demo:
@@ -397,6 +414,7 @@ def main():
         mic_pad=args.mic_pad, ref_pad=args.ref_pad,
         diag_csv_path=args.diag_csv,
         gain_dump_path=args.res_gain_dump,
+        trace_high_band_metrics=args.trace_high_band_metrics,
     )
     print(f'wrote {args.out} ({len(out)} samples, {len(out) / sr:.2f}s)',
           file=sys.stderr)

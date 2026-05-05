@@ -264,6 +264,10 @@ class AecConfig:
     # one numpy copy per stage per frame; off by default.
     capture_stages: bool = False
 
+    # P1 Phase 1: trace high-band NE evidence metrics into self._diag.
+    # Off by default — purely instrumentation, no behaviour change.
+    trace_high_band_metrics: bool = False
+
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
     # release behaviour. Setting False reverts the corresponding sub-change
     # to the v3.8.3 baseline behaviour, used for isolating each Plan A
@@ -3776,6 +3780,12 @@ class AEC:
         # Per-bin mu_scale (updated from RES echo_psd/error_psd each frame)
         self._per_bin_mu_scale = None  # None = use scalar fallback
 
+        # P1 Phase 1 trace state: ring buffer of high-band mic power for
+        # modulation CV^2 metric. 32 frames @ hop=160 @ 16kHz ≈ 320 ms.
+        self._hb_mic_pwr_ring = np.zeros(32, dtype=np.float32)
+        self._hb_mic_pwr_idx = 0
+        self._hb_mic_pwr_n = 0  # filled-count (≤ 32)
+
         # Diagnostic tracking (per-frame, latest values)
         self._diag = {
             'erle_inst': 0.0, 'mu_scale': 1.0, 'far_activity': 0.0,
@@ -4849,6 +4859,56 @@ class AEC:
                 self._diag['echo_psd_mean'] = self.res._diag_echo_psd_mean
                 self._diag['error_psd_mean'] = self.res._diag_error_psd_mean
             self._diag['erle_inst'] = self.get_erle_instant()
+
+            # P1 Phase 1: high-band NE evidence metrics (trace-only).
+            # Computes 3 candidate metrics from post-attribution residual
+            # error_psd[2k:], far_lw, and mic near_psd. NO behaviour change.
+            if self.config.trace_high_band_metrics and self.res is not None:
+                try:
+                    err_psd = self.res.error_psd
+                    near_psd = self.res.near_psd
+                    far_lw = self.res._residual_est._long_window_far_psd
+                    n_freqs = err_psd.shape[0]
+                    sr = self.config.sample_rate
+                    fft_sz = self.config.fft_size
+                    bin_2k = int(round(2000.0 * fft_sz / sr))
+                    bin_2k = max(1, min(bin_2k, n_freqs - 2))
+                    err_hb = err_psd[bin_2k:]
+                    far_hb = far_lw[bin_2k:]
+                    near_hb = near_psd[bin_2k:]
+                    erl_e = float(self._erl_estimate)
+                    err_hb_mean = float(np.mean(err_hb)) + 1e-10
+                    # m_excess_ratio for α ∈ {0.5, 1.0, 2.0}
+                    for alpha, key in ((0.5, 'm_excess_ratio_a05'),
+                                        (1.0, 'm_excess_ratio_a10'),
+                                        (2.0, 'm_excess_ratio_a20')):
+                        excess = np.maximum(err_hb - alpha * far_hb * erl_e, 0.0)
+                        self._diag[key] = float(np.mean(excess)) / err_hb_mean
+                    # m_modulation: high-band mic envelope CV^2 over 32-frame window
+                    cur_pwr = float(np.mean(near_hb))
+                    self._hb_mic_pwr_ring[self._hb_mic_pwr_idx] = cur_pwr
+                    self._hb_mic_pwr_idx = (self._hb_mic_pwr_idx + 1) % 32
+                    if self._hb_mic_pwr_n < 32:
+                        self._hb_mic_pwr_n += 1
+                    win = self._hb_mic_pwr_ring[:self._hb_mic_pwr_n]
+                    win_mean = float(np.mean(win))
+                    win_var = float(np.var(win))
+                    self._diag['m_modulation'] = win_var / (win_mean ** 2 + 1e-10)
+                    # m_spectral_flatness on err_hb (Wiener entropy)
+                    err_hb_safe = err_hb + 1e-10
+                    log_geo = float(np.mean(np.log(err_hb_safe)))
+                    arith = float(np.mean(err_hb_safe)) + 1e-10
+                    self._diag['m_spectral_flatness'] = float(np.exp(log_geo)) / arith
+                    # Aux: bin index used (for sanity / debug)
+                    self._diag['m_bin_2k'] = int(bin_2k)
+                except Exception as _e:
+                    # Never break release path — trace is best-effort.
+                    self._diag['m_excess_ratio_a05'] = 0.0
+                    self._diag['m_excess_ratio_a10'] = 0.0
+                    self._diag['m_excess_ratio_a20'] = 0.0
+                    self._diag['m_modulation'] = 0.0
+                    self._diag['m_spectral_flatness'] = 0.0
+
             mu_val = mu_scale
             self._diag['mu_scale'] = float(np.mean(mu_val)) if isinstance(mu_val, np.ndarray) else float(mu_val)
             self._diag['converged'] = self._filter_converged
