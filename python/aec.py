@@ -21,7 +21,7 @@ import os
 import numpy as np
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from enum import Enum
 import argparse
 import soundfile as sf
@@ -268,6 +268,14 @@ class AecConfig:
     # Off by default — purely instrumentation, no behaviour change.
     trace_high_band_metrics: bool = False
 
+    # P3b: per-call DelayEstimator instrumentation. When True, every call
+    # to DelayEstimator.accumulate() appends one diagnostic row (input
+    # power, top-3 peaks of the running EMA cross-spectrum, state flags)
+    # to a list accessible at AEC.delay_est._trace_rows. Off by default —
+    # zero overhead and no behaviour change in the released v3.10.4 path.
+    trace_delay_est: bool = False
+    trace_delay_est_path: str = ""  # if non-empty, CSV is flushed here at AEC destruction or via dump method
+
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
     # release behaviour. Setting False reverts the corresponding sub-change
     # to the v3.8.3 baseline behaviour, used for isolating each Plan A
@@ -465,7 +473,8 @@ class DelayEstimator:
     def __init__(self, sample_rate: int, max_delay_ms: float = 1024.0,
                  init_seconds: float = 0.5, period_seconds: float = 2.0,
                  par_low_threshold: float = 5.0,
-                 par_solid_threshold: float = 8.0):
+                 par_solid_threshold: float = 8.0,
+                 trace: bool = False):
         """v3.10.4: max_delay_ms default 250 → 512 → 1024 (matches WebRTC's
         Old AEC ~1 s far-end history; AEC3's 512 ms misses BT/mobile skew
         cases). seg_size auto-scales to 2× max_delay.
@@ -512,6 +521,12 @@ class DelayEstimator:
         self._n_estimates = 0
         self._last_par = 0.0  # A5: Peak-to-Average Ratio confidence
 
+        # P3b instrumentation (opt-in; default off → zero overhead).
+        self._trace = bool(trace)
+        self._trace_rows: List[dict] = [] if self._trace else None
+        self._trace_call_idx = 0
+        self._trace_total_samples = 0
+
     def reset(self):
         self._cross_spec.fill(0)
         self._mic_buf.fill(0)
@@ -527,6 +542,13 @@ class DelayEstimator:
     def accumulate(self, mic: np.ndarray, ref: np.ndarray) -> bool:
         """Feed mic/ref samples. Returns True if a new delay estimate was made."""
         n = len(mic)
+        # P3b: capture pre-call state so we can emit a trace row even on
+        # branches that don't run _estimate.
+        if self._trace:
+            mic_pwr_pre = float(np.mean(np.asarray(mic, dtype=np.float64) ** 2))
+            ref_pwr_pre = float(np.mean(np.asarray(ref, dtype=np.float64) ** 2))
+            n_updates_pre = self._n_updates
+            samples_pre = self._samples_accumulated
         self._samples_accumulated += n
         self._samples_since_est += n
 
@@ -551,20 +573,88 @@ class DelayEstimator:
                 self._buf_pos = self.seg_hop
 
         # Estimate when enough data accumulated
+        did_estimate = False
         if self._n_updates < 2:
-            return False
-
-        if not self._init_done:
+            ret = False
+        elif not self._init_done:
             if self._samples_accumulated >= self._init_samples:
                 self._estimate()
                 self._init_done = True
-                return True
+                did_estimate = True
+                ret = True
+            else:
+                ret = False
         else:
             if self._samples_since_est >= self._period_samples:
                 self._estimate()
-                return True
+                did_estimate = True
+                ret = True
+            else:
+                ret = False
 
-        return False
+        # P3b: emit one trace row per accumulate() call.
+        if self._trace:
+            sr = self.sample_rate
+            top3 = []
+            par_top1 = 0.0
+            if self._n_updates >= 1:
+                # Recompute GCC-PHAT over the running EMA cross-spectrum
+                # (same expression as _estimate; uses fp64 throughout).
+                mag = np.abs(self._cross_spec) + 1e-12
+                phat = self._cross_spec / mag
+                gcc = np.fft.irfft(phat, n=self.seg_size).astype(np.float64)
+                max_d = min(self.max_delay_samples, self.seg_size // 2)
+                region = np.abs(gcc[: max_d + 1])
+                # Top-3 with greedy 16-sample lobe suppression.
+                tmp = region.copy()
+                for _ in range(3):
+                    idx = int(np.argmax(tmp))
+                    height = float(tmp[idx])
+                    if height <= 0.0:
+                        break
+                    # PAR vs full-region mean excluding this sample.
+                    peak_v = float(region[idx])
+                    mean_excl = (float(region.sum()) - peak_v) / (
+                        len(region) - 1 + 1e-10
+                    )
+                    par = float(peak_v / (mean_excl + 1e-10))
+                    top3.append((idx, height, par))
+                    lo = max(0, idx - 16)
+                    hi = min(len(tmp), idx + 17)
+                    tmp[lo:hi] = -1.0
+                if top3:
+                    par_top1 = top3[0][2]
+            row = {
+                "call_idx": self._trace_call_idx,
+                "frame_samples": n,
+                "time_s": self._trace_total_samples / sr,
+                "mic_pwr_pre": mic_pwr_pre,
+                "ref_pwr_pre": ref_pwr_pre,
+                "n_updates_pre": n_updates_pre,
+                "n_updates_post": self._n_updates,
+                "samples_accumulated": self._samples_accumulated,
+                "in_init_window": self._samples_accumulated < self._init_samples,
+                "init_done": self._init_done,
+                "did_estimate": did_estimate,
+                "estimated_delay": int(self.estimated_delay),
+                "last_par": float(self._last_par),
+                "confidence": float(self.confidence),
+                "is_solid": bool(self.is_solid),
+                "top1_lag": top3[0][0] if len(top3) >= 1 else -1,
+                "top1_height": top3[0][1] if len(top3) >= 1 else 0.0,
+                "top1_par": top3[0][2] if len(top3) >= 1 else 0.0,
+                "top2_lag": top3[1][0] if len(top3) >= 2 else -1,
+                "top2_height": top3[1][1] if len(top3) >= 2 else 0.0,
+                "top2_par": top3[1][2] if len(top3) >= 2 else 0.0,
+                "top3_lag": top3[2][0] if len(top3) >= 3 else -1,
+                "top3_height": top3[2][1] if len(top3) >= 3 else 0.0,
+                "top3_par": top3[2][2] if len(top3) >= 3 else 0.0,
+            }
+            self._trace_rows.append(row)
+            self._trace_call_idx += 1
+            self._trace_total_samples += n
+
+        return ret
 
     def _update_cross_spectrum(self):
         """Update smoothed cross-spectrum from current segment."""
@@ -3539,6 +3629,7 @@ class AEC:
                     period_seconds=self.config.delay_est_period_s,
                     par_low_threshold=self.config.delay_par_low_threshold,
                     par_solid_threshold=self.config.delay_par_solid_threshold,
+                    trace=getattr(self.config, "trace_delay_est", False),
                 )
                 self._current_delay = -1  # -1 = not yet estimated
             # Reference ring buffer for delay compensation
