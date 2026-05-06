@@ -5,6 +5,256 @@ or tuning sweeps; patch is bugfix.
 
 ---
 
+## v3.10.4 (2026-05-05) — Wider delay range + CLI preset/flag fix
+
+**Goal**: Cover BT/mobile clock-skew cases that fall outside AEC3's
+512 ms search window, and stop the CLI from silently overriding preset
+RES/CNG values when the user does not pass the corresponding flag.
+
+**Changes**:
+
+1. **Delay search widened**: `max_delay_ms` 512 → 1024 (matches
+   WebRTC's older AEC implementation; AEC3's 512 ms was found to miss
+   skew >512 ms in the 800-case bench). Render ring buffer
+   `delay_buffer_ms` 1024 → 2048 ms for headroom.
+2. **F6 fix — CLI preset vs flag interaction**: `aec.py` `--enable-res`
+   and `--cng` now use `argparse.BooleanOptionalAction` with
+   `default=None`. Previously both flags defaulted to `False` via
+   `store_true`, so `aec.py mic ref out --preset balanced` silently
+   ran with RES + CNG **disabled**. Now `None` lets the preset values
+   pass through; explicit `--enable-res / --no-enable-res` and
+   `--cng / --no-cng` override.
+
+**Investigated and reverted**:
+
+- **Explicit alignment-loss fallback** (mu freeze + RES render-based
+  force on detected alignment loss): bench showed FS_movement
+  −0.041 → reverted. The existing `attribute_legacy`
+  `not filter_converged → force_render` path is sufficient; the
+  added gate over-fired on movement cases.
+- **Conditional Plan A V1** (`high_ne_conf` gate to swap HF cap
+  anchor between 500 Hz and 2 kHz). `dt_per_bin = max(effective_dt,
+  1 - coh2)` saturates ~1 in FS post-cancellation, so the gate is
+  structurally non-discriminating in FS — reverted as dead code.
+
+**800-case AECMOS (BALANCED, fl=52ms, cng=True, j4)**:
+
+| Build | FS | NE | DT echo | DT deg |
+|---|---|---|---|---|
+| v3.8.3 baseline | 3.798 | 4.007 | 4.186 | 2.272 |
+| v3.10.3         | 3.651 | 4.010 | 4.160 | 2.349 |
+| **v3.10.4**     | **3.668** (+0.017) | 4.010 | 4.154 | 2.344 |
+
+FS regression vs v3.8.3 baseline (−0.130) is the locked-in cost of
+v3.8.4 Plan A's smoothing kernel `[0.1, 0.8, 0.1]` (verified
+separately; see Known trade-offs). NE / DT-echo / DT-deg unchanged
+within noise vs v3.10.3.
+
+**v3.10.4 5-preset 800-case bench** (fl=52ms, cng=True, j4;
+n-weighted FS = (169·FS_st + 131·FS_mv)/300; DT same with 186/114;
+NE = NE bucket only):
+
+| Preset | FS | NE deg | DT echo | DT deg |
+|---|---|---|---|---|
+| MILD       | 3.397 | 4.022 | 3.855 | 2.623 |
+| SOFT       | 3.565 | 4.020 | 4.015 | 2.461 |
+| BALANCED ★ | 3.668 | 4.010 | 4.154 | 2.344 |
+| AGGRESSIVE | 3.686 | 4.006 | 4.178 | 2.319 |
+| MAXIMUM    | 3.746 | 3.993 | 4.218 | 2.265 |
+
+Per-bucket detail:
+
+| Preset | FS_st | FS_mv | DT_st e/d | DT_mv e/d | NE deg |
+|---|---|---|---|---|---|
+| MILD       | 3.332 | 3.480 | 3.888 / 2.632 | 3.802 / 2.608 | 4.022 |
+| SOFT       | 3.504 | 3.643 | 4.069 / 2.453 | 3.926 / 2.474 | 4.020 |
+| BALANCED ★ | 3.641 | 3.704 | 4.217 / 2.328 | 4.051 / 2.370 | 4.010 |
+| AGGRESSIVE | 3.676 | 3.699 | 4.242 / 2.297 | 4.073 / 2.355 | 4.006 |
+| MAXIMUM    | 3.748 | 3.743 | 4.285 / 2.240 | 4.109 / 2.307 | 3.993 |
+
+**Known trade-offs / post-release work**:
+
+- Plan A FS cost: kernel `[0.1, 0.8, 0.1]` preserves DT high-band NE
+  but sacrifices FS HF echo suppression. A redesigned high-band
+  evidence metric (something other than `1 - coh2`, which saturates
+  in FS post-cancellation) is needed for proper conditional kernel
+  switching.
+- 7GT-class skew >1024 ms: even with the widened search, GCC-PHAT
+  cannot find delays beyond `max_delay_ms`. Future work: per-band
+  delay tracking or longer history buffer.
+- Alignment-loss fallback v2: the v3.10.4 attempt over-fired in
+  movement cases; redesign needed (windowed gate, no mu freeze, only
+  RES path softened).
+
+**Files**: `python/aec.py` (`__version__ = "3.10.4"`, CLI argparse,
+`DelayEstimator.max_delay_ms`, render ring buffer sizing). C port
+v3.10.4 follows in parallel.
+
+---
+
+## v3.10.3 (2026-05-05) — Codex round 3 + self-trace fixes
+
+**Goal**: Address F-class and H-class findings from the Codex review of
+v3.10.0–v3.10.2 plus self-traced state-leakage issues across the new
+recovery state machine.
+
+**Fixes**:
+
+- **F3** — `_reset_filter_derived_state` now resets `near_power` EMA
+  in addition to `error_power` EMA (was asymmetric → ERLE transient
+  spike that polluted convergence detection immediately after reset).
+- **F4** — `FilterPlateauDetector` criteria require **current-frame**
+  `dt_signal_present` (was a session-cumulative ratio that survived
+  past DT episodes and could fire on FS frames).
+- **F5** — `_pending_delay` cleared on `AEC.reset()` and from inside
+  the helper (was cross-case stale state in batch evaluation).
+- **F7** — `__version__` bump (was stale at `3.8.1` through v3.10.0–
+  v3.10.2).
+- **H1** — `_pending_delay` TTL = 3 cycles (no expiry → could pair
+  with a stale rogue estimate after the consistency window lapsed).
+- **H2** — `mu_scale` delay-confidence ceiling skipped during the
+  post-reset warmup window (was fighting the high-Q boost installed
+  by the same reset path).
+- **H3** — Plateau detector resets `_frame_count`,
+  `_far_active_count`, `_dt_signal_count` on fire (cumulative
+  counters survived → biased the second attempt's threshold check).
+- **M4** — Path B delay shift now calls
+  `_reset_filter_derived_state(reason='delay_shift',
+  preserve_render_ema=True)` (was only `mark_diverged`; taps stayed
+  misaligned for 50–100 frames after the shift).
+- **L7 (revert)** — `_round3_div_counts` and similar diagnostic
+  counters MUST survive recovery (only cleared by full
+  `AEC.reset()`). Earlier round-3 patch had cleared them inside the
+  helper; reverted.
+
+**No bench-relevant audio change vs v3.10.2** (state-correctness
+fixes; net 800-case Δ ≈ noise floor).
+
+---
+
+## v3.10.2 (2026-05-05) — Codex round 2: shared reset helper + independent delay gates
+
+**Goal**: Round-2 Codex review of v3.10.0 surfaced a structural bug
+in the delay-acquisition gate plus an incomplete state reset.
+
+**Fixes**:
+
+1. **Independent delay gates**: split the two-path delay logic into
+   two truly independent `if` blocks. The previous version wrapped
+   the solid-shift case under an outer `is_solid` check, making it
+   unreachable in the most common shift scenario.
+2. **Shared `_reset_filter_derived_state(reason,
+   preserve_render_ema)` helper**: covers both `reason='plateau'`
+   and `reason='delay_first'`. Earlier code had two ad-hoc reset
+   sites with diverging field coverage; consolidating into one
+   helper exposes a single source of truth and led directly to the
+   v3.10.3 F3/F5 fixes.
+3. **`preserve_long_window_ema` flag** plumbed through
+   `ResFilter.reset` → `ResidualEchoEstimator.reset`. Plateau /
+   delay-first reset preserves the input-side EMA when the render
+   PSD is still meaningful.
+
+---
+
+## v3.10.1 (2026-05-05) — Long-window EMA refinements
+
+**Goal**: Tighten the v3.10.0 long-window far-PSD EMA so it stays
+warm regardless of which fallback path is currently active.
+
+**Changes**:
+
+1. EMA updates **every far-active frame** regardless of current mode
+   (constant time-constant). Previously gated on render-based mode
+   selection, leaving the EMA stale when the algorithm was in direct
+   mode and dropping into render-based later.
+2. Render-based fallback blends **70 % long-window + 30 %
+   instantaneous**, warmup-gated by `n_updates / 100` so the first
+   cycles still favor instantaneous data while the EMA fills in.
+
+---
+
+## v3.10.0 (2026-05-05) — Delay + Recovery (WebRTC AEC3 alignment)
+
+**Goal**: Address two systemic gaps identified in the v3.8.x trace
+review: (1) `max_delay_ms = 250` was tighter than WebRTC AEC3's
+5-matched-filter range, missing real-world delays; (2) the filter had
+no recovery path between EPC events when ERLE stayed low for
+extended periods during DT — the linear filter quietly diverged into
+a corrupted impulse response.
+
+**Changes**:
+
+1. **`DelayEstimator`**: `max_delay_ms` 250 → 512 (matches AEC3
+   5-matched-filter range). New `confidence` property (linear 0–1
+   between PAR thresholds 5.0 / 8.0); new `is_solid` property
+   (`confidence ≥ 1.0`). `seg_size` auto-scales to `2 × max_delay`.
+2. **Render ring buffer** sized to `delay_buffer_ms = 1024.0`
+   (matches AEC3 `kRenderTransferQueueSizeFrames = 100`).
+3. **Two-path delay-acquisition gate** (split into independent ifs
+   formally in v3.10.2):
+   - **Path A — first acquisition**: heavy reset via shared helper,
+     demands solid PAR.
+   - **Path B — delay shift**: independent gate, requires
+     `confidence ≥ 0.5` AND two-strike consecutive consistency,
+     calls `force_delay()` + temporary `Q_high` boost.
+4. **`mu_scale` delay-confidence ceiling**: `mu ≤ 0.5 + 0.5 *
+   delay_conf` (capped at 0.5 when delay uncertain).
+5. **`FilterPlateauDetector`**: resets filter taps + downstream
+   derived state when ERLE stays low for 50 consecutive frames
+   during DT (grace 400, `far_active_ratio > 0.5`,
+   `dt_signal_ratio > 0.10`, `MAX_ATTEMPTS = 2`).
+6. **`ResidualEchoEstimator` long-window far-PSD EMA**
+   (`alpha = 0.993`): delay-agnostic echo template, used in the
+   render-based fallback path.
+
+---
+
+## v3.9.0 (2026-05-05) — Plan B+C investigations (NOT shipped)
+
+**Investigations**:
+
+- **Plan B**: γ²(k) per-bin coherence as primary DTD signal —
+  null result on 800-case (ΔFS / NE / DT all < ±0.01).
+- **Plan C**: 4-band sub-band ENR — null result on 800-case
+  (same magnitude).
+
+Documented in
+[research_log_v3.9.x_HF_preservation.md](research_log_v3.9.x_HF_preservation.md).
+**No code change in v3.9.0 release** — the version slot is held
+solely as a marker for the investigation log.
+
+---
+
+## v3.8.4 (2026-05-05) — Plan A: HF preservation under DT
+
+**Goal**: Stop low-band echo gain from leaking into high-frequency
+bins during double-talk, where it crushes vowel formants in the
+1–3 kHz range.
+
+**Changes**:
+
+1. **Smoothing kernel** `[0.25, 0.5, 0.25] → [0.1, 0.8, 0.1]`. The
+   tighter centre weight stops low-band echo gain from leaking into
+   high bins (≈10 dB cut measured in 4–8 kHz on case `7GTxyT`).
+2. **HF cap reworked**: anchor 500 Hz → 2 kHz (vowel formants 1–3 kHz
+   preserved), DT gate `effective_dt < 0.5 → < 0.3`, cap skipped
+   when high-band shows NE evidence.
+3. **`_stat_dt_mask`** extended from 4 kHz to 7 kHz with linear fade.
+
+**800-case BALANCED**:
+
+| bucket | v3.8.3 | v3.8.4 | Δ |
+|---|---|---|---|
+| FS    | 3.798 | 3.656 | **−0.142** (design trade-off) |
+| DT deg | 2.272 | 2.348 | **+0.076** |
+
+The FS regression is the locked-in cost of preserving DT high-band
+NE; the kernel change is load-bearing for v3.10's recovery state
+machine to land cleanly. Carries through the v3.10 line — see
+v3.10.4 entry for cumulative numbers.
+
+---
+
 ## v3.8.3 (2026-05-05) — Preset rebalance: shift gentle end one slot lighter
 
 **Goal**: User reported the BALANCED preset over-suppresses near-end on

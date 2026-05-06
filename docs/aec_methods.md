@@ -1,9 +1,15 @@
-# AEC Algorithm Methods (v3.8.3)
+# AEC Algorithm Methods (v3.10.4)
 
-**Version**: v3.8.3 release · algorithm = Python `aec.py` v3.8.1 (audio
-path unchanged since v3.8.1; v3.8.2 added bit-exact C parity + static
-memory API + release hygiene; v3.8.3 rebalances the gentle end of the
-preset ladder — see CHANGELOG).
+**Version**: v3.10.4 release · Python `aec.py` `__version__ = "3.10.4"`
+(C port v3.10.4 follows). Audio behavior changed cumulatively from
+v3.8.3 → v3.10.4: v3.8.4 Plan A HF preservation (smoothing kernel +
+HF cap anchor), v3.10.0 delay + recovery state machine (max_delay 512,
+plateau detector, long-window EMA, mu-scale delay-confidence ceiling),
+v3.10.1 long-window EMA refinements, v3.10.2–v3.10.3 Codex review
+fixes (shared `_reset_filter_derived_state` helper, near-power EMA
+reset, plateau-detector hygiene, `_pending_delay` TTL), v3.10.4
+widens `max_delay_ms` 512 → 1024 + CLI preset-vs-flag fix
+(`BooleanOptionalAction`, default=None). See CHANGELOG.
 
 This document is the **deep algorithm specification**. For other angles:
 
@@ -396,7 +402,66 @@ When EPC fires:
 
 Only one state at a time; priority order is the table top-down.
 
-### 3.8 NLMS-mode extras
+### 3.8 Filter recovery state machine (v3.10.0+)
+
+Beyond EPC, two new recovery paths catch slow-degradation modes that
+EPC's threshold-based trigger misses.
+
+#### `FilterPlateauDetector`
+
+Watches windowed ERLE during DT episodes — when ERLE stays low for too
+long despite active far-end and active DT signal, the linear filter
+has likely learned a corrupted impulse response. Reset taps + downstream
+derived state to give the filter a clean adaptation window.
+
+| Param | Value |
+|---|---|
+| consecutive low-ERLE frame budget | 50 |
+| grace period (frames after start / reset) | 400 |
+| `far_active_ratio` gate | > 0.5 |
+| `dt_signal_ratio` gate (current frame, v3.10.3 F4) | > 0.10 |
+| `MAX_ATTEMPTS` per case | 2 |
+
+On fire (v3.10.3 H3): cumulative counters `_frame_count`,
+`_far_active_count`, `_dt_signal_count` reset (otherwise they survive
+into the second attempt and bias its threshold). Action calls
+`_reset_filter_derived_state(reason='plateau',
+preserve_render_ema=True)`.
+
+#### `_reset_filter_derived_state(reason, preserve_render_ema)`
+
+Shared helper introduced in v3.10.2 to make plateau and delay-first
+resets symmetric. Resets:
+
+- main filter taps (`W_freq`) + `P` covariance
+- shadow filter state
+- `error_power` EMA AND `near_power` EMA (v3.10.3 F3 — the prior
+  helper reset only `error_power`, producing a transient ERLE spike
+  that fed back into convergence detection)
+- `_pending_delay` (v3.10.3 F5)
+- ResFilter / ResidualEchoEstimator state via
+  `ResFilter.reset(preserve_long_window_ema=...)` →
+  `ResidualEchoEstimator.reset(preserve_long_window_ema=...)`
+  (v3.10.2). When the input-side render PSD is still meaningful
+  (plateau or delay_shift), preserve the long-window EMA;
+  delay-first acquisition wipes it.
+
+#### `ResidualEchoEstimator` long-window far-PSD EMA (v3.10.0+)
+
+A delay-agnostic echo template tracked at `alpha = 0.993`
+(time-constant ~30 s @ 16 kHz / 100 fps). Used as the render-based
+fallback's far-end estimate so it is robust to short-term silences in
+the far signal.
+
+- v3.10.1: EMA updates **every far-active frame** regardless of
+  current mode (constant time-constant, not gated by render-vs-direct
+  selection — keeps the template warm in case the direct path later
+  fails).
+- v3.10.1: render-based fallback path blends 70 % long-window + 30 %
+  instantaneous; warmup-gated by `n_updates / 100` so the very first
+  cycles still favor instantaneous data while the EMA fills in.
+
+### 3.9 NLMS-mode extras
 
 For LMS / NLMS modes (not production), an additional **weight L2-norm
 clamp** prevents divergence:
@@ -786,13 +851,59 @@ phat = real(IFFT( S_xy / (|S_xy| + ε) ))
 delay = argmax(|phat|)
 ```
 
-Defaults:
+Defaults (v3.10.4):
 
 | Param | Value |
 |---|---|
-| `max_delay_ms`         | 250  |
+| `max_delay_ms`         | 1024 (was 250 ≤ v3.8.3, 512 in v3.10.0–v3.10.3) |
 | `delay_est_init_s`     | 0.3  |
 | `delay_est_period_s`   | 0.5  |
+| `delay_buffer_ms` (render ring) | 2048 (was 1024 in v3.10.0–v3.10.3) |
+| `seg_size`             | auto-scaled to `2 × max_delay_samples` |
+
+The ring buffer is sized to ~2× `max_delay_ms` to keep headroom for
+GCC-PHAT segments across late-arriving render frames (matches WebRTC
+AEC3's `kRenderTransferQueueSizeFrames = 100` design pattern but with
+double the depth). v3.10.4's bump from 512 → 1024 ms tracks WebRTC's
+older AEC implementation, which holds ~1 s of far-end history; AEC3's
+512 ms cap was found to miss BT/mobile clock-skew cases in our 800-case
+bench.
+
+#### Confidence / `is_solid` (v3.10.0+)
+
+```
+confidence = clip((par - PAR_LO) / (PAR_HI - PAR_LO), 0, 1)
+             with PAR_LO = 5.0, PAR_HI = 8.0
+is_solid   = confidence >= 1.0   (par >= 8.0)
+```
+
+Used by:
+- **Two-path delay-acquisition gate** (split into independent ifs in
+  v3.10.2 — the solid-shift path was unreachable when wrapped under
+  an outer `is_solid` check):
+  - **Path A — first acquisition**: heavy reset via shared helper
+    `_reset_filter_derived_state(reason='delay_first',
+    preserve_render_ema=False)`, demands `is_solid`.
+  - **Path B — delay shift**: independent gate, requires
+    `confidence ≥ 0.5` AND two consecutive consistent estimates
+    (two-strike), calls `force_delay()` + temporary `Q_high` boost,
+    plus `_reset_filter_derived_state(reason='delay_shift',
+    preserve_render_ema=True)` (added in v3.10.3 M4 — the prior path
+    relied on `mark_diverged` only and left taps misaligned for
+    50–100 frames).
+- **`mu_scale` delay-confidence ceiling**: `mu ≤ 0.5 + 0.5 *
+  delay_conf` (capped at 0.5 when delay uncertain). Skipped during
+  the post-reset warmup window (v3.10.3 H2) so it does not fight
+  the high-Q boost.
+
+#### `_pending_delay` (v3.10.3+)
+
+Cross-cycle staging buffer for two-strike consistency. Cleared on
+`AEC.reset()` and from inside the helper (F5). TTL = 3 cycles (H1)
+to prevent pairing with stale rogue estimates after the consistency
+window has lapsed. Diagnostic counters (`_round3_div_counts` etc.)
+explicitly survive recovery (L7 revert) — only `AEC.reset()` clears
+them.
 
 ### 5.4 Reference alignment
 
@@ -920,7 +1031,8 @@ Shared (not preset-dependent):
 | `dtd_coh_high` / `low`    | 0.6 / 0.3 |
 | `epc_hangover`            | 20 frames |
 | `epc_mu_floor`            | 0.5 |
-| `max_delay_ms`            | 250 |
+| `max_delay_ms`            | 1024 (v3.10.4; was 250 ≤ v3.8.3 / 512 v3.10.0–v3.10.3) |
+| `delay_buffer_ms`         | 2048 (v3.10.4; was 1024 v3.10.0–v3.10.3) |
 | `highpass_cutoff_hz`      | 80 |
 | `saturation_threshold`    | 0.95 |
 
@@ -971,8 +1083,10 @@ If you must tune, do it via the high-level dial:
 
 ### 8.2 Bit-exactness
 
-The C port at v3.8.3 is **bit-identical** to Python v3.8.1 across all
-4 presets and FS / DT / NE scenarios. Verified by:
+The C port at v3.8.3 was **bit-identical** to Python v3.8.1 across all
+4 presets and FS / DT / NE scenarios. The C port v3.10.4 follows the
+Python v3.10.4 release in parallel; bit-exact verification is
+re-established once the C port lands. Verified at v3.8.3 by:
 
 1. MD5 comparison of output WAVs across the 800-case AEC Challenge
    blind set.
@@ -1025,11 +1139,47 @@ FS Echo and DT Echo are the means of static + movement sub-buckets.
 > Numbers above: MILD = v3.8.3 800-case AECMOS bench (2026-05-05,
 > preset=mild, fl=52 ms, CNG on). SOFT = former v3.8.2 MILD numbers
 > verbatim (params unchanged, only slot moved). BALANCED+ = v3.8.1
-> baseline (filter code unchanged).
+> baseline (filter code unchanged). **For the current release see
+> Appendix A2 (v3.10.4 metrics) below.**
 
 NE Degradation ≈ 4.0 is a binding floor under the current
 architecture (every preset clusters in 3.99–4.02 regardless of
 suppression level). See Appendix C.
+
+---
+
+## Appendix A2 — v3.10.4 release metrics (current)
+
+AEC Challenge 2021 Interspeech blind test set, 800 cases, AECMOS
+(scale 1–5, higher better). Bench config: `--filter 832 --cng`,
+preset as labeled, j4 parallel.
+
+FS Echo and DT Echo are the n-weighted means of static (169 / 186 cases)
++ movement (131 / 114 cases) sub-buckets; NE = NE bucket only.
+
+| Preset | FS Echo | DT Echo | DT Degradation | NE Degradation |
+|---|---|---|---|---|
+| Ours MILD            | 3.397 | 3.855 | **2.623** | **4.022** |
+| Ours SOFT            | 3.565 | 4.015 | 2.461 | 4.020 |
+| **Ours BALANCED ★**  | 3.668 | 4.154 | 2.344 | 4.010 |
+| Ours AGGRESSIVE      | 3.686 | 4.178 | 2.319 | 4.006 |
+| Ours MAXIMUM         | 3.746 | 4.218 | 2.265 | 3.993 |
+
+Per-bucket breakdown:
+
+| Preset | FS_st | FS_mv | DT_st echo/deg | DT_mv echo/deg | NE echo/deg |
+|---|---|---|---|---|---|
+| MILD       | 3.332 | 3.480 | 3.888 / 2.632 | 3.802 / 2.608 | 4.998 / 4.022 |
+| SOFT       | 3.504 | 3.643 | 4.069 / 2.453 | 3.926 / 2.474 | 4.998 / 4.020 |
+| BALANCED ★ | 3.641 | 3.704 | 4.217 / 2.328 | 4.051 / 2.370 | 4.998 / 4.010 |
+| AGGRESSIVE | 3.676 | 3.699 | 4.242 / 2.297 | 4.073 / 2.355 | 4.998 / 4.006 |
+| MAXIMUM    | 3.748 | 3.743 | 4.285 / 2.240 | 4.109 / 2.307 | 4.998 / 3.993 |
+
+vs v3.8.3 baseline (BALANCED): FS 3.798 → 3.668 (−0.130, locked-in
+cost of v3.8.4 Plan A's `[0.1, 0.8, 0.1]` smoothing kernel — see
+[CHANGELOG.md](CHANGELOG.md) v3.8.4 / v3.10.4 entries); NE 4.007 →
+4.010 (Δ ≈ 0); DT echo 4.186 → 4.154 (−0.032); DT deg 2.272 →
+2.344 (+0.072 = Plan A DT-deg gain carried through).
 
 ### Resource estimates (16 kHz, 52 ms filter, BALANCED, all features on)
 

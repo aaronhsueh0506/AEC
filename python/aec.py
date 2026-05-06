@@ -15,13 +15,13 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.8.1"
+__version__ = "3.10.4"
 
 import os
 import numpy as np
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from enum import Enum
 import argparse
 import soundfile as sf
@@ -205,12 +205,23 @@ class AecConfig:
     epc_hangover: int = 20              # keep EPC active for N frames after detection
     epc_mu_floor: float = 0.5           # mu_scale floor during EPC
 
-    # Delay estimation (GCC-PHAT)
+    # Delay estimation (GCC-PHAT). v3.10.4: max_delay_ms 512 → 1024 to
+    # match WebRTC's older AEC (modules/audio_processing/aec/) which keeps a
+    # ~1 s far-end history and lets the binary delay estimator search the
+    # full window. AEC3 uses 512 ms because typical desktop/laptop skew is
+    # well under 200 ms; AEC challenge mobile/BT cases (e.g. ~788 ms skew)
+    # need the wider Old-AEC range. Render ring buffer sized to 2048 ms to
+    # leave headroom for max_delay_ms = 1024 + drift + tracking jitter.
     enable_delay_est: bool = True       # Enable automatic delay estimation + ref alignment
-    max_delay_ms: float = 250.0         # Maximum delay to search (ms)
+    max_delay_ms: float = 1024.0        # Maximum delay to search (ms)
+    delay_buffer_ms: float = 2048.0     # Render ring buffer total capacity (ms)
     delay_est_period_s: float = 0.5     # Re-estimate delay every N seconds
     delay_est_init_s: float = 0.3       # Accumulate this much data before first estimate
     fixed_delay_samples: int = -1       # If >= 0, use this fixed delay instead of estimation
+    # Confidence threshold below which mu_scale is held at a higher floor
+    # (don't learn aggressively while delay alignment is uncertain).
+    delay_par_low_threshold: float = 5.0     # PAR < this → low confidence
+    delay_par_solid_threshold: float = 8.0   # PAR > this → high confidence
 
     # High-pass filter (DC blocker + low-freq removal)
     enable_highpass: bool = True
@@ -247,6 +258,93 @@ class AecConfig:
     startup_dt_gain_floor: float = 1.0    # Cap spectral_g_min during startup_dt (not filter_converged); 1.0=no effect
     startup_dt_noise_floor_scale: float = 1.0  # Scale noise_floor_gain during startup_dt; 0.0=bypass, 1.0=normal
     startup_dt_mu_min: float = 0.0            # Floor mu_scale during startup_dt; 0.0=no override
+
+    # Diagnostic: when True, ResFilter populates per-bin gain vectors at each
+    # post-processing stage (read via res.get_stage_gains()). Hot-path cost is
+    # one numpy copy per stage per frame; off by default.
+    capture_stages: bool = False
+
+    # P1 Phase 1: trace high-band NE evidence metrics into self._diag.
+    # Off by default — purely instrumentation, no behaviour change.
+    trace_high_band_metrics: bool = False
+
+    # P3b: per-call DelayEstimator instrumentation. When True, every call
+    # to DelayEstimator.accumulate() appends one diagnostic row (input
+    # power, top-3 peaks of the running EMA cross-spectrum, state flags)
+    # to a list accessible at AEC.delay_est._trace_rows. Off by default —
+    # zero overhead and no behaviour change in the released v3.10.4 path.
+    trace_delay_est: bool = False
+    trace_delay_est_path: str = ""  # if non-empty, CSV is flushed here at AEC destruction or via dump method
+
+    # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
+    # release behaviour. Setting False reverts the corresponding sub-change
+    # to the v3.8.3 baseline behaviour, used for isolating each Plan A
+    # sub-change's contribution to the FS regression.
+    plan_a_kernel_tight: bool = True       # False → smoothing kernel [0.25,0.5,0.25]
+    plan_a_hf_cap_2k: bool = True          # False → HF cap anchor 500 Hz with v3.8.3 gate
+    plan_a_stat_mask_7k: bool = True       # False → stat_dt_mask cuts off at 4 kHz
+
+    # P1 Phase 2 — conditional HF cap based on m_excess_ratio (validated
+    # in P1 Phase 1 with AUROC 0.871 on FS-vs-NE+DT_positive). When
+    # hf_cap_conditional is True, the stage-6 cap behaviour is gated by
+    # the per-frame metric: metric < threshold → apply v3.8.3 strict cap
+    # (anchor 500 Hz, gate effective_dt < 0.5); metric >= threshold →
+    # skip the cap entirely (preserve high-band NE). Default off keeps
+    # v3.10.4 release behaviour. plan_a_hf_cap_2k still controls the
+    # baseline cap mode used when the conditional path is disabled.
+    hf_cap_conditional: bool = False
+    hf_cap_metric_threshold: float = 0.30
+
+    # P3e — DT advisory gate for adaptation protection (post-release work).
+    # Independent of `enable_dtd`. When True, shadow-DTD and energy-DTD
+    # signals (already smoothed by DoubleTalkAnalyzer) are routed to:
+    #   • reduce mu_scale by `dt_advisory_mu_factor` during DT
+    #   • inhibit shadow→main copies during DT
+    # Hysteresis: hold for `dt_advisory_hold_ms` after the last hit so
+    # per-frame flicker doesn't pop in and out of protection. Does NOT
+    # touch RES suppression, residual echo estimate, or HF cap; the
+    # 7GT P3d trace showed that the underlying problem is filter taps
+    # being learnt against NE-contaminated error during DT, not the
+    # post-filter. Default off keeps v3.10.4 release behaviour.
+    dt_advisory_enabled: bool = False
+    dt_advisory_shadow_th: float = 0.5
+    dt_advisory_energy_th: float = 0.4
+    dt_advisory_hold_ms: float = 400.0
+    dt_advisory_mu_factor: float = 0.3
+    # P3f Phase 3: when True, gate fires on
+    # `filter_state == 'suspicious_dt'` instead of the raw dt_shadow /
+    # dt_energy thresholds above. Phase 2a invariants showed the
+    # state-based gate is FS-safe by construction (suspicious_dt requires
+    # refined_latched + NE evidence + main_err jump + shadow lead, AND'd).
+    dt_advisory_use_p3f_state: bool = False
+
+    # P3h — filter reset on sustained diverged (high-impact action,
+    # 7GT-only dry-run only; default off, never enabled by preset).
+    # Triggered when ALL hold:
+    #   • once_converged is set (we never reset a filter that has never
+    #     been good — startup / coarse_learning is not the target)
+    #   • _p3f_diverged_streak >= diverged_reset_streak_frames (sustained)
+    #   • cooldown timer has expired
+    # On fire: _reset_filter_derived_state(reason='p3h_diverged') and
+    # cooldown timer set so we don't loop-reset on a flaky classifier.
+    diverged_reset_enabled: bool = False
+    diverged_reset_streak_frames: int = 50          # ~500 ms at hop=160 / 16 kHz
+    diverged_reset_cooldown_frames: int = 400        # ~4 s minimum gap
+
+    # P3c Phase 1a — DelayEstimator high-PAR fast-path. The shipped
+    # `confidence` property forces n_updates >= 3 before any non-zero
+    # output even when PAR is overwhelmingly above the solid threshold;
+    # P3c trace showed this costs ~1 s of unnecessary blind window on
+    # 80% of bench cases. The fast path lets us promote `is_solid` at
+    # n_updates >= 2 IF (a) PAR >= delay_fast_par_threshold and
+    # (b) the same lag is reported for two consecutive estimates.
+    # Both guards together rule out single-frame spurious peaks.
+    # Default ON — 800-case bench bit-identical to baseline n_updates>=3 path
+    # across all buckets, 0 wrong locks across 800, and median TTFS drops
+    # 4.09→3.57 s on 59 % of cases. Set False to revert to the n_updates>=3
+    # gate.
+    delay_fast_path_enabled: bool = True
+    delay_fast_par_threshold: float = 40.0           # ~5x normal solid threshold
 
     # Mode
     mode: AecMode = AecMode.PBFDKF
@@ -434,12 +532,34 @@ class DelayEstimator:
     Cross-spectrum is accumulated over segments and smoothed with EMA.
     """
 
-    def __init__(self, sample_rate: int, max_delay_ms: float = 250.0,
-                 init_seconds: float = 0.5, period_seconds: float = 2.0):
+    def __init__(self, sample_rate: int, max_delay_ms: float = 1024.0,
+                 init_seconds: float = 0.5, period_seconds: float = 2.0,
+                 par_low_threshold: float = 5.0,
+                 par_solid_threshold: float = 8.0,
+                 trace: bool = False,
+                 fast_path_enabled: bool = False,
+                 fast_par_threshold: float = 40.0):
+        """v3.10.4: max_delay_ms default 250 → 512 → 1024 (matches WebRTC's
+        Old AEC ~1 s far-end history; AEC3's 512 ms misses BT/mobile skew
+        cases). seg_size auto-scales to 2× max_delay.
+
+        Confidence reporting:
+          peak_to_avg_ratio (PAR) is the GCC-PHAT peak height divided by
+          the average magnitude over the search window. PAR > solid → trust
+          the estimate (drive aggressive RES + filter mu_scale). PAR < low
+          → don't trust (hold mu_scale at higher floor, RES stays
+          conservative). Between: progressive blend.
+        """
         self.sample_rate = sample_rate
         self.max_delay_samples = int(max_delay_ms * sample_rate / 1000)
         self.init_seconds = init_seconds
         self.period_seconds = period_seconds
+        self.par_low_threshold = par_low_threshold
+        self.par_solid_threshold = par_solid_threshold
+        # P3c Phase 1a: high-PAR fast-path knobs.
+        self.fast_path_enabled = bool(fast_path_enabled)
+        self.fast_par_threshold = float(fast_par_threshold)
+        self._prev_estimated_delay = -1  # set in _estimate before overwrite
 
         # Analysis window: 2x max_delay, but at least 2048
         self.seg_size = 1
@@ -469,6 +589,12 @@ class DelayEstimator:
         self._n_estimates = 0
         self._last_par = 0.0  # A5: Peak-to-Average Ratio confidence
 
+        # P3b instrumentation (opt-in; default off → zero overhead).
+        self._trace = bool(trace)
+        self._trace_rows: List[dict] = [] if self._trace else None
+        self._trace_call_idx = 0
+        self._trace_total_samples = 0
+
     def reset(self):
         self._cross_spec.fill(0)
         self._mic_buf.fill(0)
@@ -484,6 +610,13 @@ class DelayEstimator:
     def accumulate(self, mic: np.ndarray, ref: np.ndarray) -> bool:
         """Feed mic/ref samples. Returns True if a new delay estimate was made."""
         n = len(mic)
+        # P3b: capture pre-call state so we can emit a trace row even on
+        # branches that don't run _estimate.
+        if self._trace:
+            mic_pwr_pre = float(np.mean(np.asarray(mic, dtype=np.float64) ** 2))
+            ref_pwr_pre = float(np.mean(np.asarray(ref, dtype=np.float64) ** 2))
+            n_updates_pre = self._n_updates
+            samples_pre = self._samples_accumulated
         self._samples_accumulated += n
         self._samples_since_est += n
 
@@ -508,20 +641,88 @@ class DelayEstimator:
                 self._buf_pos = self.seg_hop
 
         # Estimate when enough data accumulated
+        did_estimate = False
         if self._n_updates < 2:
-            return False
-
-        if not self._init_done:
+            ret = False
+        elif not self._init_done:
             if self._samples_accumulated >= self._init_samples:
                 self._estimate()
                 self._init_done = True
-                return True
+                did_estimate = True
+                ret = True
+            else:
+                ret = False
         else:
             if self._samples_since_est >= self._period_samples:
                 self._estimate()
-                return True
+                did_estimate = True
+                ret = True
+            else:
+                ret = False
 
-        return False
+        # P3b: emit one trace row per accumulate() call.
+        if self._trace:
+            sr = self.sample_rate
+            top3 = []
+            par_top1 = 0.0
+            if self._n_updates >= 1:
+                # Recompute GCC-PHAT over the running EMA cross-spectrum
+                # (same expression as _estimate; uses fp64 throughout).
+                mag = np.abs(self._cross_spec) + 1e-12
+                phat = self._cross_spec / mag
+                gcc = np.fft.irfft(phat, n=self.seg_size).astype(np.float64)
+                max_d = min(self.max_delay_samples, self.seg_size // 2)
+                region = np.abs(gcc[: max_d + 1])
+                # Top-3 with greedy 16-sample lobe suppression.
+                tmp = region.copy()
+                for _ in range(3):
+                    idx = int(np.argmax(tmp))
+                    height = float(tmp[idx])
+                    if height <= 0.0:
+                        break
+                    # PAR vs full-region mean excluding this sample.
+                    peak_v = float(region[idx])
+                    mean_excl = (float(region.sum()) - peak_v) / (
+                        len(region) - 1 + 1e-10
+                    )
+                    par = float(peak_v / (mean_excl + 1e-10))
+                    top3.append((idx, height, par))
+                    lo = max(0, idx - 16)
+                    hi = min(len(tmp), idx + 17)
+                    tmp[lo:hi] = -1.0
+                if top3:
+                    par_top1 = top3[0][2]
+            row = {
+                "call_idx": self._trace_call_idx,
+                "frame_samples": n,
+                "time_s": self._trace_total_samples / sr,
+                "mic_pwr_pre": mic_pwr_pre,
+                "ref_pwr_pre": ref_pwr_pre,
+                "n_updates_pre": n_updates_pre,
+                "n_updates_post": self._n_updates,
+                "samples_accumulated": self._samples_accumulated,
+                "in_init_window": self._samples_accumulated < self._init_samples,
+                "init_done": self._init_done,
+                "did_estimate": did_estimate,
+                "estimated_delay": int(self.estimated_delay),
+                "last_par": float(self._last_par),
+                "confidence": float(self.confidence),
+                "is_solid": bool(self.is_solid),
+                "top1_lag": top3[0][0] if len(top3) >= 1 else -1,
+                "top1_height": top3[0][1] if len(top3) >= 1 else 0.0,
+                "top1_par": top3[0][2] if len(top3) >= 1 else 0.0,
+                "top2_lag": top3[1][0] if len(top3) >= 2 else -1,
+                "top2_height": top3[1][1] if len(top3) >= 2 else 0.0,
+                "top2_par": top3[1][2] if len(top3) >= 2 else 0.0,
+                "top3_lag": top3[2][0] if len(top3) >= 3 else -1,
+                "top3_height": top3[2][1] if len(top3) >= 3 else 0.0,
+                "top3_par": top3[2][2] if len(top3) >= 3 else 0.0,
+            }
+            self._trace_rows.append(row)
+            self._trace_call_idx += 1
+            self._trace_total_samples += n
+
+        return ret
 
     def _update_cross_spectrum(self):
         """Update smoothed cross-spectrum from current segment."""
@@ -551,9 +752,50 @@ class DelayEstimator:
         mean_excl = (np.sum(np.abs(pos_range)) - peak) / (len(pos_range) - 1 + 1e-10)
         self._last_par = float(peak / (mean_excl + 1e-10))
 
+        # P3c Phase 1a: remember the previous estimate's lag before
+        # overwriting, so the fast-path can require lag stability across
+        # two consecutive estimates.
+        self._prev_estimated_delay = self.estimated_delay
         self.estimated_delay = best_pos
         self._samples_since_est = 0
         self._n_estimates += 1
+
+    @property
+    def confidence(self) -> float:
+        """[0, 1] — 0 = no evidence, 1 = solid PAR ≥ par_solid_threshold.
+
+        Used by AEC mu_scale floor and RES conservative-mode gating. v3.10.0:
+        promoted from internal _last_par to first-class API.
+
+        P3c Phase 1a: when `fast_path_enabled`, allow the gate to clear at
+        n_updates >= 2 if the PAR is overwhelmingly above the solid
+        threshold AND the same lag was reported by the previous estimate.
+        Both guards are required; a single high-PAR sample alone does not
+        promote (rules out spurious peaks). Default off — opt-in.
+        """
+        if self.estimated_delay < 0:
+            return 0.0
+        par = self._last_par
+        if (self.fast_path_enabled
+                and self._n_updates >= 2
+                and par >= self.fast_par_threshold
+                and self._prev_estimated_delay == self.estimated_delay
+                and self._prev_estimated_delay >= 0):
+            return 1.0
+        if self._n_updates < 3:
+            return 0.0
+        lo = self.par_low_threshold
+        hi = self.par_solid_threshold
+        if par <= lo:
+            return 0.0
+        if par >= hi:
+            return 1.0
+        return float((par - lo) / (hi - lo))
+
+    @property
+    def is_solid(self) -> bool:
+        """Convenience: True when confidence is at the strong threshold."""
+        return self.confidence >= 1.0
 
 
 class NlmsFilter:
@@ -1169,7 +1411,18 @@ class ResFilter:
                  startup_dt_min_ne_scale: float = 1.0,
                  startup_dt_gain_floor: float = 1.0,
                  startup_dt_noise_floor_scale: float = 1.0,
-                 sample_rate: int = 16000):
+                 sample_rate: int = 16000,
+                 capture_stages: bool = False,
+                 plan_a_kernel_tight: bool = True,
+                 plan_a_hf_cap_2k: bool = True,
+                 plan_a_stat_mask_7k: bool = True,
+                 hf_cap_conditional: bool = False,
+                 hf_cap_metric_threshold: float = 0.30):
+        self._plan_a_kernel_tight = plan_a_kernel_tight
+        self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
+        self._plan_a_stat_mask_7k = plan_a_stat_mask_7k
+        self._hf_cap_conditional = hf_cap_conditional
+        self._hf_cap_metric_threshold = hf_cap_metric_threshold
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -1189,17 +1442,26 @@ class ResFilter:
         # C1-C4: precomputed per-bin constants (invariant after init)
         freq_res = sample_rate / block_size
         f_bins = np.arange(n_freqs, dtype=np.float32) * freq_res
-        # C1: stationary DT mask
+        # C1: stationary DT mask. v3.8.4: upper edge extended 4 kHz → 7 kHz
+        # so fricatives / sibilants (4–7 kHz) get DT protection during
+        # stationary DT (was: silently zero above 4 kHz).
         self._stat_dt_mask = np.zeros(n_freqs, dtype=np.float32)
         self._stat_dt_mask[(f_bins >= 300) & (f_bins <= 3000)] = 0.8
         low = (f_bins > 100) & (f_bins < 300)
         self._stat_dt_mask[low] = 0.8 * ((f_bins[low] - 100.0) / 200.0)
-        high = (f_bins > 3000) & (f_bins < 4000)
-        self._stat_dt_mask[high] = 0.8 * ((4000.0 - f_bins[high]) / 1000.0)
+        # P1.0 toggle: plan_a_stat_mask_7k=False reverts to v3.8.3 behaviour
+        # (no high-band coverage; mask was silently zero above 3 kHz).
+        if self._plan_a_stat_mask_7k:
+            high = (f_bins > 3000) & (f_bins < 7000)
+            self._stat_dt_mask[high] = 0.8 * np.maximum(
+                0.0, 1.0 - (f_bins[high] - 3000.0) / 4000.0)
         # C2: ENR blend array
         self._enr_blend = np.clip((np.arange(n_freqs, dtype=np.float32) - 5) / 5, 0, 1)
         # C3: frequency bin indices
         self._hf_cap_bin = min(int(500.0 / freq_res), n_freqs - 1)
+        # v3.8.4: secondary cap anchor at 2 kHz so vowel formants (1–3 kHz)
+        # are not dragged down by the 500 Hz bin's gain.
+        self._hf_cap_bin_2k = min(int(2000.0 / freq_res), n_freqs - 1)
         # C4: harmonic distortion bin bounds
         self._harm_lf_start = max(1, int(100.0 / freq_res))
         self._harm_lf_end = min(int(500.0 / freq_res), n_freqs - 1)
@@ -1218,6 +1480,13 @@ class ResFilter:
         #          4=3bin_smooth, 5=hf_cap, 6=pre_temporal, 7=post_temporal,
         #          8=after_noise_lift (final gain_smooth)
         self._diag_round5_stages = np.zeros(9, dtype=np.float32)
+
+        # Per-bin gain capture (full vectors, opt-in via capture_stages)
+        self._capture_stages = capture_stages
+        self._stage_gains = {}
+        # v3.8.4: cached per-bin DT confidence from compute stage, read by
+        # postprocess HF-cap "high-band NE present?" gate.
+        self._dt_per_bin_last = np.zeros(n_freqs, dtype=np.float32)
 
         # RES v2: direct echo estimation + Wiener gain + reverb
         self.echo_method = echo_method       # "coherence" or "direct"
@@ -1286,8 +1555,14 @@ class ResFilter:
         # from a single source of truth (avoids init/reset divergence)
         self.reset()
 
-    def reset(self):
-        """Reset all runtime state. Arrays are .fill(0), scalars are set."""
+    def reset(self, preserve_long_window_ema: bool = False):
+        """Reset all runtime state. Arrays are .fill(0), scalars are set.
+
+        preserve_long_window_ema (v3.10.2): forwarded to ResidualEchoEstimator
+        so the long-window far-PSD EMA survives recovery resets that are
+        triggered by bad-filter-state plateaus / delay_first acquisition —
+        the EMA is input-side and should not be discarded.
+        """
         self.gain_smooth.fill(self.g_min)
         self.echo_psd.fill(0)
         self.error_psd.fill(0)
@@ -1308,7 +1583,7 @@ class ResFilter:
         self._nonlinear_frames = 0
         # _render_based_hold + _using_render_based moved to self._residual_est
         if hasattr(self, '_residual_est'):
-            self._residual_est.reset()
+            self._residual_est.reset(preserve_long_window_ema=preserve_long_window_ema)
         self._diag_gain_mean = 1.0
         self._diag_gain_min = 1.0
         self._diag_effective_g_min = 1.0
@@ -1363,6 +1638,16 @@ class ResFilter:
         self._stats_last_noise_psd = 0.0
         self._stats_last_spec_pwr = 0.0
         self._stats_last_nfl_lifted = False
+
+    def get_stage_gains(self):
+        """Return dict of per-bin gain vectors captured this frame.
+
+        Empty dict unless `capture_stages=True` was passed to __init__.
+        Keys: '01_softgate_emr', '02_spectral_floor', '03_epc_dt_cap',
+        '04_quiet_mask', '05_3bin_smooth', '06_hf_cap', '07_pre_temporal',
+        '08_post_temporal'. Vectors are np.float32 length n_freqs.
+        """
+        return self._stage_gains
 
     def get_stats(self):
         """Return aggregated DT stats dict, or None if not enabled / no DT frames."""
@@ -1539,6 +1824,8 @@ class ResFilter:
             )
             if is_stationary_dt:
                 dt_per_bin = np.maximum(dt_per_bin, self._stat_dt_mask)
+            # v3.8.4: stash for postprocess HF-cap "high bins NE confidence" gate
+            self._dt_per_bin_last = dt_per_bin
 
             dt_shaped_per_bin = dt_per_bin ** 1.1
             nearend_est = np.maximum(raw_nearend_est * dt_shaped_per_bin, noise_floor_psd)
@@ -1631,7 +1918,8 @@ class ResFilter:
         return g
 
     def _stage_gain_postprocess(self, *, g_in, epc_dt, quiet_mask, far_power,
-                                  effective_dt, is_stationary_dt, divergence):
+                                  effective_dt, is_stationary_dt, divergence,
+                                  erl_estimate=0.01):
         """Stage 3: EPC_DT cap, quiet mask, 3-bin smooth, HF cap, divergence override.
 
         Returns updated g (post-divergence-override). Mutates _diag_round5_stages[2..6].
@@ -1652,8 +1940,19 @@ class ResFilter:
 
         # --- Frequency-domain postprocessing (cf. AEC3 PostprocessGains) ---
         if far_power > 1e-4:
-            # 3-bin cross-frequency smoothing
-            kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
+            # 3-bin cross-frequency smoothing.
+            # v3.8.4: kernel tightened from [0.25, 0.5, 0.25] to
+            # [0.1, 0.8, 0.1]. The original kernel let low-band echo gain
+            # leak into high bins via 25% sidelobes — measured 10 dB extra
+            # cut in the 4–8 kHz band on case 7GTxyT (DT, BALANCED). The
+            # tighter kernel still suppresses single-bin spurious spikes
+            # (its original purpose) while preserving cross-band gain
+            # independence, which keeps fricative / formant content audible.
+            # P1.0 toggle: plan_a_kernel_tight=False reverts to v3.8.3 kernel
+            if self._plan_a_kernel_tight:
+                kernel = np.array([0.1, 0.8, 0.1], dtype=np.float32)
+            else:
+                kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
             g = np.convolve(g, kernel, mode='same').astype(np.float32)
             if getattr(self, '_capture_stages', False):
                 self._stage_gains['05_3bin_smooth'] = g.copy()
@@ -1661,11 +1960,66 @@ class ResFilter:
             # DC consistency: bins 0-1 follow bin 2
             if self.n_freqs > 2:
                 g[:2] = np.minimum(g[1], g[2])
-            # HF cap: upper bins capped at gain of bin near ~500Hz
-            hf_cap_bin = self._hf_cap_bin
-            if self.n_freqs > hf_cap_bin + 1 and effective_dt < 0.5 and not is_stationary_dt:
-                hf_cap = g[hf_cap_bin]
-                g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
+            # v3.8.4: HF cap reworked. Two changes:
+            #   (a) only fire when DTD is confident NE absent (was < 0.5,
+            #       too permissive — fired throughout DT). Now < 0.3.
+            #   (b) anchor the cap at 2 kHz instead of 500 Hz so vowel
+            #       formants (1–3 kHz) are not dragged down by the 500 Hz
+            #       bin's gain.
+            #   (c) skip the cap entirely when high bins themselves show NE
+            #       energy (per-bin DT confidence > 0.3 in 2 kHz+).
+            # NOTE (v3.10.5 investigation): dt_per_bin = max(effective_dt,
+            # 1-coh2) saturates ~1 in FS post-cancellation (echo cancelled →
+            # low coh2 → "NE-like"), so the high_ne_conf < 0.3 gate rarely
+            # fires in FS — cap is largely dead code there. Plan A's actual
+            # FS cost lives in the smoothing kernel change, not here. Left
+            # as-is pending a redesigned evidence metric that distinguishes
+            # DT-NE from FS-decoupling.
+            # P1 Phase 2 — conditional HF cap based on m_excess_ratio.
+            # m_excess_ratio = mean(max(error_psd[2k:] - far_lw[2k:]·erl_est, 0))
+            #                 / (mean(error_psd[2k:]) + eps)
+            # Validated in P1 Phase 1 (AUROC 0.871 FS-vs-NE+DT_positive,
+            # α=1.0 stable across {0.5, 1.0, 2.0}). Replaces the broken
+            # `1 - coh2`-based high_ne_conf gate.
+            if self._hf_cap_conditional:
+                try:
+                    far_lw = self._residual_est._long_window_far_psd
+                    err_hb = self.error_psd[self._hf_cap_bin_2k:]
+                    far_hb = far_lw[self._hf_cap_bin_2k:]
+                    erl_e = float(erl_estimate)
+                    excess = np.maximum(err_hb - 1.0 * far_hb * erl_e, 0.0)
+                    err_hb_mean = float(np.mean(err_hb)) + 1e-10
+                    metric = float(np.mean(excess)) / err_hb_mean
+                except Exception:
+                    metric = 0.0  # fail open: skip cap when metric unavailable
+                if metric < self._hf_cap_metric_threshold:
+                    # FS-like: apply v3.8.3 strict cap (anchor 500 Hz, gate < 0.5)
+                    hf_cap_bin = self._hf_cap_bin
+                    if (self.n_freqs > hf_cap_bin + 1
+                            and effective_dt < 0.5
+                            and not is_stationary_dt):
+                        hf_cap = g[hf_cap_bin]
+                        g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
+                # else: DT-like → skip cap entirely (preserve high-band NE)
+            elif self._plan_a_hf_cap_2k:
+                # Default v3.10.4 behaviour: Plan A cap anchor 2 kHz, gate < 0.3,
+                # skip on (broken) high_ne_conf < 0.3
+                hf_cap_bin = self._hf_cap_bin_2k
+                if (self.n_freqs > hf_cap_bin + 1
+                        and effective_dt < 0.3
+                        and not is_stationary_dt):
+                    high_ne_conf = float(np.mean(self._dt_per_bin_last[hf_cap_bin:]))
+                    if high_ne_conf < 0.3:
+                        hf_cap = g[hf_cap_bin]
+                        g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
+            else:
+                # P1.0 toggle: plan_a_hf_cap_2k=False reverts to v3.8.3 cap
+                hf_cap_bin = self._hf_cap_bin
+                if (self.n_freqs > hf_cap_bin + 1
+                        and effective_dt < 0.5
+                        and not is_stationary_dt):
+                    hf_cap = g[hf_cap_bin]
+                    g[hf_cap_bin + 1:] = np.minimum(g[hf_cap_bin + 1:], hf_cap)
             if getattr(self, '_capture_stages', False):
                 self._stage_gains['06_hf_cap'] = g.copy()
             self._diag_round5_stages[5] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
@@ -2044,6 +2398,7 @@ class ResFilter:
             effective_dt=effective_dt,
             is_stationary_dt=is_stationary_dt,
             divergence=divergence,
+            erl_estimate=erl_estimate,
         )
 
         self._stage_temporal_smoothing(
@@ -2596,6 +2951,147 @@ class DoubleTalkAnalyzer:
     def shadow_advantage(self) -> float: return self._shadow_advantage
 
 
+class FilterPlateauDetector:
+    """v3.10.0 — detect filter stuck at bad-convergence plateau and trigger
+    a one-shot recovery (taps reset + re-warmup).
+
+    Motivation
+    ----------
+    DT-from-frame-0 cases (NE talks from sample 0) cause the main filter
+    to learn NE leak in the first ~100 frames. Once these poisoned taps
+    are encoded, even a perfect DTD downstream only prevents *further*
+    learning — the existing taps stay wrong, ERLE stays low (~4 dB),
+    coherence DTD never recovers (the positive-feedback trap that the
+    v3.9.x DTD fix addresses upstream of mu_scale, but not at the tap
+    level).
+
+    Trigger conditions (all must hold for `consecutive_required` frames)
+    ------------------------------------------------------------------
+      • frame_count > grace_frames    — give natural convergence time
+      • not once_converged            — never declared converged
+      • far_active_ratio > 0.5        — far-end has been active enough
+      • erle_windowed_db < erle_max   — filter not learning effectively
+      • dt_signal_ratio > 0.10        — DT pattern (NE present, suspect
+                                         DT-from-frame-0)
+
+    Recovery action (one-shot per session, capped by `max_attempts=2`)
+    ------------------------------------------------------------------
+      1. main filter taps reset
+      2. shadow filter taps reset
+      3. convergence state machine reset
+      4. RES reset (clears any garbage echo PSD estimate)
+      5. force a brief warmup-equivalent window with high mu
+
+    After 2nd attempt fails to converge, give up gracefully.
+    """
+
+    GRACE_FRAMES_DEFAULT = 400        # ~4 s at 100 fps
+    ERLE_MAX_DB_DEFAULT = 6.0
+    FAR_ACTIVE_RATIO_DEFAULT = 0.5
+    DT_SIGNAL_RATIO_DEFAULT = 0.10
+    CONSECUTIVE_REQUIRED = 50          # hold criteria for 50 frames before firing
+    POST_RESET_GRACE_FRAMES = 200     # don't re-arm within this many frames after a reset
+    MAX_ATTEMPTS_DEFAULT = 2
+
+    def __init__(self,
+                 grace_frames: int = GRACE_FRAMES_DEFAULT,
+                 erle_max_db: float = ERLE_MAX_DB_DEFAULT,
+                 far_active_ratio: float = FAR_ACTIVE_RATIO_DEFAULT,
+                 dt_signal_ratio: float = DT_SIGNAL_RATIO_DEFAULT,
+                 max_attempts: int = MAX_ATTEMPTS_DEFAULT):
+        self.grace_frames = grace_frames
+        self.erle_max_db = erle_max_db
+        self.far_active_ratio = far_active_ratio
+        self.dt_signal_ratio = dt_signal_ratio
+        self.max_attempts = max_attempts
+        # Session counters
+        self._frame_count = 0
+        self._far_active_count = 0
+        self._dt_signal_count = 0
+        self._consecutive_match = 0
+        self._attempts = 0
+        self._cooldown_remaining = 0
+        # Last reset frame (audio-passive trace)
+        self._last_reset_frame = -1
+
+    def reset(self) -> None:
+        """Full reset (call from AEC.reset)."""
+        self._frame_count = 0
+        self._far_active_count = 0
+        self._dt_signal_count = 0
+        self._consecutive_match = 0
+        self._attempts = 0
+        self._cooldown_remaining = 0
+        self._last_reset_frame = -1
+
+    def update(self, *, far_active: bool, dt_signal_present: bool,
+               erle_windowed_db: float, once_converged: bool) -> bool:
+        """Tick one frame. Returns True iff a recovery action should fire."""
+        self._frame_count += 1
+        if far_active:
+            self._far_active_count += 1
+        if dt_signal_present:
+            self._dt_signal_count += 1
+
+        if self._cooldown_remaining > 0:
+            self._cooldown_remaining -= 1
+            return False
+
+        if once_converged:
+            # Filter recovered naturally — clear consecutive counter so we
+            # don't fire later if temporary divergence happens. Recovery
+            # attempts are still tracked across the session.
+            self._consecutive_match = 0
+            return False
+
+        if self._attempts >= self.max_attempts:
+            return False
+
+        if self._frame_count <= self.grace_frames:
+            return False
+
+        far_ratio = self._far_active_count / max(1, self._frame_count)
+        dt_ratio = self._dt_signal_count / max(1, self._frame_count)
+
+        # v3.10.3 — require current frame to also show DT presence, otherwise
+        # session-level cumulative dt_ratio could remain >threshold long after
+        # the DT-from-zero stretch ended and trigger plateau recovery during
+        # pure FS segments (where ERLE-low + far-active alone are not pathological).
+        criteria_met = (
+            far_ratio > self.far_active_ratio
+            and erle_windowed_db < self.erle_max_db
+            and dt_ratio > self.dt_signal_ratio
+            and dt_signal_present
+        )
+
+        if not criteria_met:
+            self._consecutive_match = 0
+            return False
+
+        self._consecutive_match += 1
+        if self._consecutive_match < self.CONSECUTIVE_REQUIRED:
+            return False
+
+        # Fire — recovery action.
+        # v3.10.3 (H3) — also reset cumulative far/dt counters so the next
+        # evaluation window judges post-reset behaviour, not the bad-startup
+        # history that caused this fire. _attempts and _last_reset_frame
+        # remain session-level (we still want MAX_ATTEMPTS to bound retries).
+        self._consecutive_match = 0
+        self._attempts += 1
+        self._cooldown_remaining = self.POST_RESET_GRACE_FRAMES
+        self._last_reset_frame = self._frame_count
+        self._frame_count = 0
+        self._far_active_count = 0
+        self._dt_signal_count = 0
+        return True
+
+    @property
+    def attempts(self) -> int: return self._attempts
+    @property
+    def last_reset_frame(self) -> int: return self._last_reset_frame
+
+
 class ResidualEchoEstimator:
     """Two-path residual echo PSD attribution (stage 1 + stage 2 of ResFilter).
 
@@ -2619,15 +3115,46 @@ class ResidualEchoEstimator:
     LEGACY = 'legacy'
     SPLIT = 'split'
 
-    def __init__(self, n_freqs: int, mode: str = 'legacy'):
+    def __init__(self, n_freqs: int, mode: str = 'legacy',
+                 long_window_alpha: float = 0.993):
+        """v3.10.0: long-window render PSD EMA mirrors WebRTC AEC3's
+        kRenderTransferQueueSizeFrames=100 (= 1000 ms at 10ms/frame). When
+        delay alignment is unreliable, RES uses this long-time-averaged
+        far PSD as the echo PSD basis instead of the instantaneous far_psd
+        (which is sensitive to misalignment). Speech long-term PSD is
+        roughly stationary over 1 s, so the smoothed estimate gives a
+        usable echo template even when the filter taps are wrong.
+
+        TC ≈ 100 frames at alpha=0.993 (alpha^100 ≈ 0.5).
+        """
         self.n_freqs = n_freqs
         self.mode = mode
         self._using_render_based = False
         self._render_based_hold = 0
+        self._long_window_alpha = long_window_alpha
+        self._long_window_far_psd = np.zeros(n_freqs, dtype=np.float32)
+        self._long_window_n_updates = 0
+        # P3g Phase 0 dry-run scalars
+        self._last_linear_residual_psd_mean = 0.0
+        self._last_render_residual_psd_mean = 0.0
+        self._last_render_blend = 0.0
 
-    def reset(self) -> None:
+    def reset(self, preserve_long_window_ema: bool = False) -> None:
+        """Clear residual-echo estimator state.
+
+        preserve_long_window_ema (v3.10.2): when True, keep the long-window
+        far-PSD EMA (`_long_window_far_psd` + `_long_window_n_updates`).
+        Used by filter-derived-state resets (plateau recovery, delay_first):
+        the EMA is input-side context — its accumulated long-term render
+        spectrum is independent of the bad filter taps and should survive
+        the reset, otherwise the freshly reset filter spends 100 frames
+        in pre-warmup-fallback mode again.
+        """
         self._using_render_based = False
         self._render_based_hold = 0
+        if not preserve_long_window_ema:
+            self._long_window_far_psd.fill(0.0)
+            self._long_window_n_updates = 0
 
     @property
     def using_render_based(self) -> bool: return self._using_render_based
@@ -2672,6 +3199,24 @@ class ResidualEchoEstimator:
             erle_est = np.maximum(erle_est, nonlinear_floor)
 
         residual_echo_psd = (1.0 - erle_factor) * direct_est + erle_factor * erle_est
+        # P3g Phase 0: stash the linear-only residual (Stage-1 ERLE-blended)
+        # for dry-run audit before any Stage-2 render-based override.
+        # Read by AEC.process() into _diag — purely diagnostic.
+        self._last_linear_residual_psd_mean = float(np.mean(residual_echo_psd))
+
+        # v3.10.0: maintain long-window far-PSD EMA every frame regardless of
+        # render mode — so it's ready immediately when delay drops out and
+        # we need a delay-agnostic echo template. Skip on silence to avoid
+        # poisoning the EMA with the noise floor.
+        if far_spec is not None and far_power > 1e-6:
+            inst_far_psd = (np.abs(far_spec) ** 2).astype(np.float32)
+            if self._long_window_n_updates == 0:
+                self._long_window_far_psd[:] = inst_far_psd
+            else:
+                a = self._long_window_alpha
+                self._long_window_far_psd = (a * self._long_window_far_psd
+                                              + (1.0 - a) * inst_far_psd)
+            self._long_window_n_updates += 1
 
         if far_power > 1e-4:
             error_power_mean = float(np.mean(error_psd)) + 1e-10
@@ -2696,8 +3241,31 @@ class ResidualEchoEstimator:
             self._using_render_based = want_render or (self._using_render_based and not can_exit)
 
             if self._using_render_based:
-                far_psd = (np.abs(far_spec) ** 2 if far_spec is not None
-                           else np.zeros(self.n_freqs, dtype=np.float32))
+                # v3.10.1: long-window EMA far-PSD blended with instantaneous.
+                # The EMA is updated EVERY far-active frame (regardless of
+                # mode — see block above) so its time constant is constant,
+                # not dependent on how long fallback has been engaged.
+                # We READ it only here (fallback-only). Two refinements
+                # vs v3.10.0's hard-replace:
+                #   (a) Warmup gate: 100 updates (= 1 EMA TC at alpha=0.993)
+                #       so the EMA has formed a real long-term estimate
+                #       before being trusted. Below 100 updates: instantaneous
+                #       only.
+                #   (b) Blend, not hard replace: even after warmup, mix 70%
+                #       long-window + 30% instantaneous. The instantaneous
+                #       component preserves response to fast far-end onsets;
+                #       the long-window component carries delay-agnostic
+                #       structure. This avoids the FS smearing risk of
+                #       hard-replacing inst with stale EMA when far is
+                #       changing fast (Codex finding 3).
+                if far_spec is not None:
+                    inst_far_psd = (np.abs(far_spec) ** 2).astype(np.float32)
+                    warmup_weight = float(min(self._long_window_n_updates / 100.0, 1.0))
+                    lw_weight = 0.7 * warmup_weight
+                    far_psd = ((1.0 - lw_weight) * inst_far_psd
+                               + lw_weight * self._long_window_far_psd)
+                else:
+                    far_psd = np.zeros(self.n_freqs, dtype=np.float32)
                 # v3.8 ABL-1 (ablate v3.3 error_based_floor): error_psd contains
                 # NE during DT, so using it as residual_echo floor structurally
                 # over-suppresses near-end (same lesson as v3.7.1 PR-B). Use only
@@ -2707,7 +3275,14 @@ class ResidualEchoEstimator:
                 blend = np.clip(blend, 0.0, 1.0)
                 residual_echo_psd = ((1.0 - blend) * residual_echo_psd
                                      + blend * render_based_echo)
+                # P3g Phase 0: stash the render-based component and the
+                # blend used, for dry-run audit. (linear residual mean is
+                # already stashed above before any override.)
+                self._last_render_residual_psd_mean = float(np.mean(render_based_echo))
+                self._last_render_blend = float(np.mean(blend))
 
+        # If render-based path didn't run this frame, leave previous
+        # render-residual stale; consumers should gate on using_render_based.
         return residual_echo_psd
 
     def attribute_split(self, *, echo_psd: np.ndarray, error_psd: np.ndarray,
@@ -3170,8 +3745,14 @@ class AEC:
         # Delay estimation + reference alignment
         if self.config.enable_delay_est or self.config.fixed_delay_samples >= 0:
             max_delay_samp = int(self.config.max_delay_ms * self.config.sample_rate / 1000)
+            # v3.10.0: ring buffer sized to delay_buffer_ms (default 1024 ms,
+            # matching WebRTC AEC3 kRenderTransferQueueSizeFrames=1000 ms).
+            # The +4096 below is legacy headroom; we keep it on top of the
+            # configured buffer to absorb hop-boundary alignment.
+            buffer_samp = int(self.config.delay_buffer_ms * self.config.sample_rate / 1000)
+            buffer_samp = max(buffer_samp, max_delay_samp + 4096)
             if self.config.fixed_delay_samples >= 0:
-                max_delay_samp = max(max_delay_samp, self.config.fixed_delay_samples + 256)
+                buffer_samp = max(buffer_samp, self.config.fixed_delay_samples + 4096)
                 self.delay_est = None
                 self._current_delay = self.config.fixed_delay_samples
             else:
@@ -3180,10 +3761,17 @@ class AEC:
                     max_delay_ms=self.config.max_delay_ms,
                     init_seconds=self.config.delay_est_init_s,
                     period_seconds=self.config.delay_est_period_s,
+                    par_low_threshold=self.config.delay_par_low_threshold,
+                    par_solid_threshold=self.config.delay_par_solid_threshold,
+                    trace=getattr(self.config, "trace_delay_est", False),
+                    fast_path_enabled=getattr(self.config,
+                                              "delay_fast_path_enabled", False),
+                    fast_par_threshold=getattr(self.config,
+                                               "delay_fast_par_threshold", 40.0),
                 )
                 self._current_delay = -1  # -1 = not yet estimated
             # Reference ring buffer for delay compensation
-            self._ref_ring = np.zeros(max_delay_samp + 4096, dtype=np.float32)
+            self._ref_ring = np.zeros(buffer_samp, dtype=np.float32)
             self._ref_ring_write = 0
             self._ref_ring_size = len(self._ref_ring)
             self._ref_ring_filled = 0  # Total samples written (for warmup)
@@ -3358,6 +3946,12 @@ class AEC:
                 startup_dt_gain_floor=self.config.startup_dt_gain_floor,
                 startup_dt_noise_floor_scale=self.config.startup_dt_noise_floor_scale,
                 sample_rate=self.config.sample_rate,
+                capture_stages=self.config.capture_stages,
+                plan_a_kernel_tight=self.config.plan_a_kernel_tight,
+                plan_a_hf_cap_2k=self.config.plan_a_hf_cap_2k,
+                plan_a_stat_mask_7k=self.config.plan_a_stat_mask_7k,
+                hf_cap_conditional=self.config.hf_cap_conditional,
+                hf_cap_metric_threshold=self.config.hf_cap_metric_threshold,
             )
         else:
             self.res = None
@@ -3401,6 +3995,34 @@ class AEC:
         # Double-talk analyzer (owns _dt_from_energy / _dt_from_shadow / _shadow_advantage)
         self._dt_analyzer = DoubleTalkAnalyzer(self.config)
 
+        # v3.10.0 — filter plateau detector (one-shot recovery for
+        # DT-from-frame-0 cases where main filter learned NE leak in the
+        # first ~100 frames and is now stuck below convergence threshold).
+        self._plateau_detector = FilterPlateauDetector()
+
+        # P3e — DT advisory gate state. Hold counter is in samples so we
+        # can convert dt_advisory_hold_ms once. Diag fields exposed via _diag.
+        self._dt_advisory_hold_remaining = 0  # frames; decremented per process()
+        _hop = self._hop_size if hasattr(self, '_hop_size') else (
+            self.config.hop_size if self.config.hop_size > 0 else self.config.frame_size // 2)
+        self._dt_advisory_hold_frames = max(
+            1, int(self.config.dt_advisory_hold_ms * self.config.sample_rate / 1000.0 / max(1, _hop)))
+
+        # P3f — Mini AecState trace (no behaviour change). post_reset_age_frames
+        # is incremented per process() and zeroed by _reset_filter_derived_state.
+        # erle_inst ring buffer kept for slope estimation (~500 ms window at
+        # hop=160 / 16 kHz = 50 frames).
+        self._post_reset_age_frames = 0
+        _slope_n = max(2, int(0.5 * self.config.sample_rate / max(1, _hop)))
+        self._erle_slope_buf = deque(maxlen=_slope_n)
+        self._p3f_refined_latched = False  # latches true once refined_usable seen
+        self._p3f_main_err_baseline = 0.0  # EMA baseline for jump detection
+        self._p3f_diverged_streak = 0      # consecutive frames over diverged TH
+        # P3h — sustained-diverged reset cooldown. Decremented per frame;
+        # reset action gated on cooldown == 0.
+        self._p3h_reset_cooldown_remaining = 0
+        self._p3h_reset_count = 0           # diagnostic: reset fires this run
+
         # Windowed decaying ERLE accumulator for erle_factor (TC ≈ 10s)
         self._erle_window_near = 1e-10
         self._erle_window_err = 1e-10
@@ -3411,6 +4033,12 @@ class AEC:
 
         # Per-bin mu_scale (updated from RES echo_psd/error_psd each frame)
         self._per_bin_mu_scale = None  # None = use scalar fallback
+
+        # P1 Phase 1 trace state: ring buffer of high-band mic power for
+        # modulation CV^2 metric. 32 frames @ hop=160 @ 16kHz ≈ 320 ms.
+        self._hb_mic_pwr_ring = np.zeros(32, dtype=np.float32)
+        self._hb_mic_pwr_idx = 0
+        self._hb_mic_pwr_n = 0  # filled-count (≤ 32)
 
         # Diagnostic tracking (per-frame, latest values)
         self._diag = {
@@ -3525,6 +4153,11 @@ class AEC:
         self._epc_det.reset()
         self.prev_dtd_conf = 0.0
         self._convergence.reset()
+        # v3.10.0: clear plateau-detector counters on AEC reset
+        if hasattr(self, '_plateau_detector'):
+            self._plateau_detector.reset()
+        # P3e: clear DT advisory hold
+        self._dt_advisory_hold_remaining = 0
         self._erle_window_near = 1e-10
         self._erle_window_err = 1e-10
         self._erle_factor_prev = 0.0
@@ -3591,6 +4224,14 @@ class AEC:
         self.error_power_sum = 0.0
         self.raw_error_power_sum = 0.0
         self.final_error_power_sum = 0.0
+        # v3.10.3 — clear cross-case lazy state
+        if hasattr(self, '_pending_delay'):
+            del self._pending_delay
+        for _attr in ('_round3_div_counts', '_round3_last_div_source',
+                      '_r7_prev_delay', '_r7_prev_div_counts',
+                      '_dominant_nearend_hold'):
+            if hasattr(self, _attr):
+                delattr(self, _attr)
         # _conv_counter is owned by self._convergence (reset above)
         if self._hp_mic is not None:
             self._hp_mic.reset()
@@ -3617,6 +4258,170 @@ class AEC:
         self._epc_render_forced_remaining = 0
         self._erl_estimate = 0.1
 
+    def _reset_filter_derived_state(self, reason: str = 'plateau',
+                                     preserve_render_ema: bool = True) -> None:
+        """v3.10.2 — clear all filter-output-derived state. Generic helper
+        called by both plateau recovery (`reason='plateau'`) and first delay
+        acquisition (`reason='delay_first'`). Earlier versions of these
+        recovery paths reset only filter/shadow/res, leaving the freshly
+        reset filter to learn against poisoned downstream state
+        (main_err_smooth / DTD / EPC hangover / ERLE windows all still
+        carrying values from the bad taps).
+
+        Both recovery paths share the same shape: filter taps were trained
+        against incorrect input (misaligned ref for delay_first; NE leak
+        for plateau), and all derived state from those taps is now wrong.
+
+        Differs from full AEC.reset() in that this preserves time-axis +
+        input-side context:
+
+          PRESERVED (input-side / temporal context):
+            • _frame_count                 — elapsed time
+            • delay_est + _current_delay   — delay alignment lives upstream
+            • _ref_ring (delay buffer)     — far history is valid
+            • _plateau_detector            — its own attempts counter
+            • _far_power_ema / _mic_power_ema  — input-side
+            • _hp_mic / _hp_ref            — input-side HPF
+            • _sat_detector_*              — input-side
+            • _render_activity             — input-side
+            • RES long-window far-PSD EMA — input-side (when
+              preserve_render_ema=True; default). The EMA is updated every
+              far-active frame regardless of mode, so its accumulated
+              long-term render spectrum is independent of the bad taps.
+              Discarding it forces the freshly reset filter through 100
+              frames of pre-warmup-fallback all over again.
+
+          CLEARED (filter-output-derived; would otherwise re-poison the
+          freshly reset filter):
+            • filter / shadow_filter taps via .reset()
+            • _convergence + _epc_det
+            • main_err_smooth / shadow_err_smooth
+            • _dt_analyzer (energy / shadow DT histories)
+            • _erle_window_* / _inst_erle_smooth / _erle_factor_prev
+            • _simple_mu_ratio / _simple_mu_holdoff / _per_bin_mu_scale
+            • _epc_render_forced_remaining / _erl_estimate
+            • prev_dtd_conf
+            • DTD divergence + coherence smoothed PSDs
+            • RES post-filter state (gain_smooth / echo_psd / noise_psd /
+              gates). Long-window far-PSD EMA optionally preserved.
+            • shadow_frame_count + _shadow_copy_ctrl
+            • Diagnostic _diag dict (would otherwise show stale stats)
+        """
+        # Filter taps + shadow
+        self.filter.reset()
+        if self.shadow_filter is not None:
+            self.shadow_filter.reset()
+
+        # Filter convergence + EPC + divergence DTD + coherence DTD
+        self._convergence.reset()
+        self._epc_det.reset()
+        if self.dtd_divergence is not None:
+            self.dtd_divergence.reset()
+        if self.dtd_coherence is not None:
+            self.dtd_coherence.reset()
+
+        # Filter-output power / smoother / err quantities
+        self.main_err_smooth = 0.0
+        self.shadow_err_smooth = 0.0
+        self.error_power = 0.0
+        self.raw_error_power = 0.0
+        self.final_error_power = 0.0
+        self.error_power_sum = 0.0
+        self.raw_error_power_sum = 0.0
+        self.final_error_power_sum = 0.0
+        # v3.10.3 — near_power EMA must be reset alongside error_power, otherwise
+        # get_erle_inst() = near_power / error_power transiently spikes (stale
+        # mic EMA / fresh tiny error) and could mis-trigger early convergence.
+        # near_power is sample-loop EMA (alpha=0.999) so it recovers in ~10 frames.
+        self.near_power = 0.0
+        self.near_power_sum = 0.0
+
+        # ERLE accumulators
+        self._erle_window_near = 1e-10
+        self._erle_window_err = 1e-10
+        self._erle_factor_prev = 0.0
+        self._inst_erle_smooth = 1.0
+
+        # Mu-scale state (depends on DTD which depends on filter)
+        self._simple_mu_ratio = 1.0
+        self._simple_mu_holdoff = 0
+        self._per_bin_mu_scale = None
+        self.prev_dtd_conf = 0.0
+
+        # ERL + EPC-render forced + DT analyzer (all filter-output-derived)
+        self._erl_estimate = 0.1
+        self._epc_render_forced_remaining = 0
+        self._dt_analyzer.reset()
+        self._stat_dt_hangover = 0
+        self._stat_far_hangover = 0
+
+        # Coherence DTD's accumulated err/far PSDs (live in _dtd_acc_*)
+        if self._dtd_fft_size > 0:
+            self._dtd_acc_pos = 0
+            self._dtd_acc_err.fill(0)
+            self._dtd_acc_far.fill(0)
+            self._dtd_err_buf.fill(0)
+            self._dtd_far_buf.fill(0)
+
+        # Shadow copy controller
+        self.shadow_frame_count = 0
+        self._shadow_copy_ctrl.reset()
+
+        # P3f trace state — zero so post_reset_age_ms restarts from 0 and
+        # refined latch / err baseline don't carry pre-reset values forward.
+        self._post_reset_age_frames = 0
+        self._erle_slope_buf.clear()
+        self._p3f_refined_latched = False
+        self._p3f_main_err_baseline = 0.0
+        self._p3f_diverged_streak = 0
+
+        # RES — clears its echo_psd / error_psd / noise_psd / gain_smooth /
+        # render state. Long-window far-PSD EMA is preserved when
+        # preserve_render_ema=True (input-side context, see docstring).
+        if self.res is not None:
+            self.res.reset(preserve_long_window_ema=preserve_render_ema)
+
+        # Diagnostic dict — would otherwise show stale ERLE / DT signals
+        for k, v in (('erle_inst', 0.0), ('mu_scale', 1.0), ('far_activity', 0.0),
+                     ('res_gain_mean', 1.0), ('res_gain_min', 1.0),
+                     ('effective_g_min', 1.0), ('converged', False),
+                     ('erle_factor', 0.0), ('echo_psd_mean', 0.0),
+                     ('error_psd_mean', 0.0), ('divergence', 0.0),
+                     ('using_render_based', False), ('shadow_advantage', 1.0),
+                     ('dt_from_energy', 0.0), ('dt_from_shadow', 0.0),
+                     ('dt_from_coherence', 0.0), ('erl_estimate', 0.1),
+                     ('epc_active', False), ('erle_windowed', 0.0),
+                     ('dt_indicator', 0.0), ('main_err_smooth', 0.0),
+                     ('shadow_err_smooth', 0.0), ('main_paused', False),
+                     ('epv_gain_ratio', 1.0), ('dt_residual_scale', 1.0),
+                     ('filter_w_norm', 0.0), ('shadow_w_norm', 0.0),
+                     ('copy_err_baseline', 1e-6)):
+            self._diag[k] = v
+
+        # Re-arm warmup so the second-pass training starts with high mu.
+        # Boost Q on both filters (high-Q convergence mode).
+        for filt in [self.filter, self.shadow_filter]:
+            if filt is not None and hasattr(filt, 'Q'):
+                if hasattr(filt, 'Q_high'):
+                    filt.Q = filt.Q_high.copy()
+                if hasattr(filt, '_p_max_override'):
+                    filt._p_max_override = 1.0
+                    filt._p_max_override_frames = 30
+        self._warmup_frames = max(self._warmup_frames,
+                                   self.config.warmup_frames // 2)
+        self._warmup_far_active = False
+
+        # v3.10.3 — clear cross-recovery state that would otherwise mis-fire.
+        # _pending_delay: stale pending shift could pair with a later rogue
+        #   estimate and trigger a spurious force_delay (audio bug).
+        # NOTE: _round3_div_counts / _round3_last_div_source /
+        # _dominant_nearend_hold are session-cumulative diagnostic counters
+        # and MUST survive recovery — they are only cleared in full AEC.reset().
+        if hasattr(self, '_pending_delay'):
+            del self._pending_delay
+        if hasattr(self, '_pending_delay_ttl'):
+            del self._pending_delay_ttl
+
     @property
     def hop_size(self) -> int:
         return self._hop_size
@@ -3624,9 +4429,21 @@ class AEC:
     def _compute_mu_scale(self) -> float:
         """Convert combined DTD confidence to mu_scale [mu_min_ratio, 1.0].
 
+        v3.10.4 — when fallback is active, alignment is unreliable so we must
+        not adapt against absent/bad ref. Return 0 to freeze taps; RES rides
+        its existing render-based path because filter never converges.
+
         #3: Coherence is primary; divergence is fallback only when coherence inactive.
         #4: Confidence has memory decay to avoid sudden drops.
         EPC: mu_scale floor during echo path change.
+
+        v3.10.0 — delay-confidence ceiling:
+          When delay-est confidence is low (PAR < par_low_threshold), the
+          filter is learning against a misaligned reference — driving mu
+          high will encode garbage. Cap mu_scale at a delay-confidence-
+          dependent ceiling: low confidence → mu_scale ≤ 0.5; full
+          confidence → no cap (1.0). This mirrors WebRTC AEC3's behavior:
+          AEC3 stays conservative until matched-filter delay is solid.
         """
         conf_div = self.dtd_divergence.confidence if self.dtd_divergence else 0.0
         conf_coh = self.dtd_coherence.confidence if self.dtd_coherence else 0.0
@@ -3642,16 +4459,37 @@ class AEC:
         self.prev_dtd_conf = conf
 
         if conf == 0.0:
-            return 1.0
-        min_r = self.config.dtd_mu_min_ratio
-        # Before convergence, allow higher mu_min so filter can still learn during DT
-        if not self._filter_converged:
-            min_r = max(min_r, 0.3)
-        mu_scale = 1.0 - conf * (1.0 - min_r)
+            mu_scale = 1.0
+        else:
+            min_r = self.config.dtd_mu_min_ratio
+            # Before convergence, allow higher mu_min so filter can still learn during DT
+            if not self._filter_converged:
+                min_r = max(min_r, 0.3)
+            mu_scale = 1.0 - conf * (1.0 - min_r)
 
         # Echo path change: keep mu high so filter can adapt to new path
         if self.epc_active:
             mu_scale = max(mu_scale, self.config.epc_mu_floor)
+
+        # v3.10.0: delay-confidence ceiling. Cap mu when delay alignment
+        # is uncertain (avoid learning garbage against misaligned ref).
+        # v3.10.3 (H2): skip the ceiling during a post-reset warmup window so
+        # the high-Q boost armed by _reset_filter_derived_state can actually
+        # take effect. Otherwise PAR fluctuating between low/solid thresholds
+        # right after delay acquisition caps mu at ~0.5–0.7 and defeats the
+        # warmup re-arm, slowing ERLE rebuild and risking a wasted second
+        # plateau attempt.
+        in_post_reset_warmup = (
+            self._warmup_frames > 0
+            or (self.filter is not None
+                and getattr(self.filter, '_p_max_override_frames', 0) > 0)
+        )
+        if self.delay_est is not None and not in_post_reset_warmup:
+            delay_conf = self.delay_est.confidence
+            if delay_conf < 1.0:
+                # 0.5 ceiling at delay_conf=0, linear interpolate to 1.0
+                delay_ceiling = 0.5 + 0.5 * delay_conf
+                mu_scale = min(mu_scale, delay_ceiling)
 
         return mu_scale
 
@@ -3738,41 +4576,78 @@ class AEC:
         if self._delay_active:
             hop = len(far_end)
 
-            # Online delay estimation (if not using fixed delay)
-            if self.delay_est is not None:
+            # Online delay estimation (if not using fixed delay).
+            # v3.10.2: tier the gate logic into TWO INDEPENDENT paths so a
+            # solid-confidence shift (current_delay >= 0, is_solid, large
+            # delta) is not swallowed by the first-acquisition outer gate.
+            # Codex fix: previous v3.10.1 wrapped both paths under a single
+            # outer `if is_solid`, so the second `elif` was unreachable when
+            # is_solid was True but current_delay was already set.
+            if (self.delay_est is not None
+                    and self._delay_active):
                 self.delay_est.accumulate(near_end, far_end)
                 new_delay = self.delay_est.estimated_delay
-                par_ok = getattr(self.delay_est, '_last_par', 0) > 5.0
-                if new_delay >= 0 and self.delay_est._n_updates >= 3 and par_ok:
-                    if self._current_delay < 0:
-                        self._current_delay = new_delay
-                        # First delay acquisition: W learned on wrong
-                        # alignment (~300ms of garbage) → reset filters
-                        self.filter.reset()
-                        if self.shadow_filter is not None:
-                            self.shadow_filter.reset()
-                        if self.res is not None:
-                            self.res.reset()
-                        self._maybe_mark_diverged('delay_first')
-                        for filt in [self.filter, self.shadow_filter]:
-                            if filt is not None and isinstance(filt, PBFDKF):
-                                filt.Q = filt.Q_high.copy()
-                    elif abs(new_delay - self._current_delay) > 32:
-                        # Require two consecutive consistent estimates before updating
-                        if hasattr(self, '_pending_delay') and abs(new_delay - self._pending_delay) < 16:
-                            self._current_delay = new_delay
+                _delay_eligible = (new_delay >= 0
+                                    and self.delay_est._n_updates >= 3)
+
+                # Path A: first delay acquisition. Heavy action (resets filter
+                # taps + downstream derived state). Demands solid PAR.
+                if (_delay_eligible
+                        and self._current_delay < 0
+                        and self.delay_est.is_solid):
+                    self._current_delay = new_delay
+                    # Reset filter taps + ALL filter-output-derived state
+                    # (main_err_smooth / DTD / EPC / ERLE / mu / RES). The
+                    # first ~300 ms was learned against a misaligned ref,
+                    # so its derived state is poisoned the same way as the
+                    # plateau case. Use the shared helper to keep behavior
+                    # consistent across recovery paths.
+                    self._reset_filter_derived_state(reason='delay_first',
+                                                     preserve_render_ema=True)
+                    self._maybe_mark_diverged('delay_first')
+
+                # v3.10.3 (H1) — age out _pending_delay so a stale pending
+                # value cannot pair with a later rogue estimate hours after
+                # it was set. Decrements once per estimation cycle.
+                if hasattr(self, '_pending_delay_ttl'):
+                    self._pending_delay_ttl -= 1
+                    if self._pending_delay_ttl <= 0:
+                        if hasattr(self, '_pending_delay'):
                             del self._pending_delay
-                            # Bug fix: trigger EPC on delay shift — filter W/P are
-                            # for old delay, need fast re-convergence
-                            self._epc_det.force_delay()
-                            for filt in [self.filter, self.shadow_filter]:
-                                if filt is not None and hasattr(filt, 'Q'):
-                                    filt.Q = filt.Q_high.copy()
-                                    filt._p_max_override = 1.0
-                                    filt._p_max_override_frames = 30
-                            self._maybe_mark_diverged('delay_shift')
-                        else:
-                            self._pending_delay = new_delay
+                        del self._pending_delay_ttl
+
+                # Path B: delay shift. Independent of Path A — fires only
+                # when current_delay is already set and a meaningful shift
+                # is detected. Medium confidence (≥ 0.5) + consecutive-
+                # consistent gate prevents single-frame noise from triggering
+                # a force_delay() EPC chain.
+                if (_delay_eligible
+                        and self._current_delay >= 0
+                        and self.delay_est.confidence >= 0.5
+                        and abs(new_delay - self._current_delay) > 32):
+                    if (hasattr(self, '_pending_delay')
+                            and abs(new_delay - self._pending_delay) < 16):
+                        self._current_delay = new_delay
+                        del self._pending_delay
+                        if hasattr(self, '_pending_delay_ttl'):
+                            del self._pending_delay_ttl
+                        # v3.10.3 (M4) — filter taps were trained against the
+                        # old delay alignment; treating the shift like Path A
+                        # (clear filter-output-derived state) avoids ~50–100
+                        # frames of poor cancellation while taps re-converge
+                        # against state that no longer matches.
+                        self._reset_filter_derived_state(reason='delay_shift',
+                                                         preserve_render_ema=True)
+                        self._epc_det.force_delay()
+                        for filt in [self.filter, self.shadow_filter]:
+                            if filt is not None and hasattr(filt, 'Q'):
+                                filt.Q = filt.Q_high.copy()
+                                filt._p_max_override = 1.0
+                                filt._p_max_override_frames = 30
+                        self._maybe_mark_diverged('delay_shift')
+                    else:
+                        self._pending_delay = new_delay
+                        self._pending_delay_ttl = 3
 
             # Write far_end into ring buffer
             w = self._ref_ring_write
@@ -3812,6 +4687,52 @@ class AEC:
             mu_scale = self._compute_mu_scale()
         else:
             mu_scale = self._get_simple_mu_scale()
+
+        # P3e — DT advisory gate. Routes shadow/energy DTD evidence into
+        # mu reduction even when enable_dtd=False. The 7GT P3d trace
+        # showed dt_shadow median 0.51 / dt_energy median 0.24 in the
+        # post-alignment back half but the composite gate driving mu
+        # never fired, so the filter learnt against NE-contaminated error.
+        # Hit-then-hold hysteresis avoids per-frame flicker.
+        if self.config.dt_advisory_enabled:
+            if self.config.dt_advisory_use_p3f_state:
+                # P3f Phase 3: gate fires on filter_state == 'suspicious_dt'
+                # using the previous frame's classification (computed late
+                # in process() — 1-frame lag, ~10 ms at hop=160 / 16 kHz).
+                # The state already encodes refined_latched + NE evidence
+                # + main_err jump + shadow lead, so no additional guards
+                # are needed at this site.
+                _adv_hit = bool(self._diag.get('filter_state', 'idle')
+                                == 'suspicious_dt')
+            else:
+                # V3 (legacy) convergence guard: only honour shadow/energy
+                # DT evidence after the filter has converged at least once
+                # and is past the post-reset warmup window. Retained for
+                # A/B comparison; default off.
+                _in_post_reset_warmup = (
+                    self._warmup_frames > 0
+                    or (self.filter is not None
+                        and getattr(self.filter, '_p_max_override_frames', 0) > 0)
+                )
+                _adv_hit = (
+                    bool(_render.is_active)
+                    and bool(self._filter_once_converged)
+                    and (not _in_post_reset_warmup)
+                    and (float(self._dt_from_shadow) > self.config.dt_advisory_shadow_th
+                         or float(self._dt_from_energy) > self.config.dt_advisory_energy_th)
+                )
+            if _adv_hit:
+                self._dt_advisory_hold_remaining = self._dt_advisory_hold_frames
+            elif self._dt_advisory_hold_remaining > 0:
+                self._dt_advisory_hold_remaining -= 1
+            if self._dt_advisory_hold_remaining > 0:
+                _f = float(self.config.dt_advisory_mu_factor)
+                if isinstance(mu_scale, np.ndarray):
+                    mu_scale = mu_scale * _f
+                else:
+                    mu_scale = mu_scale * _f
+            self._diag['dt_advisory_active'] = bool(self._dt_advisory_hold_remaining > 0)
+            self._diag['dt_advisory_hit'] = bool(_adv_hit)
 
         # startup_dt mu floor: raise mu_scale during startup_dt so filter can converge despite DT
         # Uses previous frame's effective_dt from ResFilter (1-frame lag, acceptable)
@@ -3911,10 +4832,13 @@ class AEC:
                 # Phase C1: optional coherence+delay gate inputs (default gate_mode='energy'
                 # ignores them, so legacy behavior parity-preserved).
                 _dt_coh = self.dtd_coherence.confidence if self.dtd_coherence else 0.0
+                # v3.10.1: shadow-copy gate raised from any-confidence to ≥0.5.
+                # Shadow→main copy permanently overwrites filter taps; should
+                # only allow it when delay alignment is at least mid-confidence
+                # (PAR halfway between par_low and par_solid).
                 _delay_reliable = (
                     self.delay_est is not None
-                    and getattr(self.delay_est, '_n_updates', 0) >= 3
-                    and getattr(self.delay_est, '_last_par', 0.0) > 5.0
+                    and self.delay_est.confidence >= 0.5
                 )
                 shadow_decision = self._shadow_copy_ctrl.update(
                     shadow_frame_count=self.shadow_frame_count,
@@ -4245,6 +5169,56 @@ class AEC:
                 self._diag['echo_psd_mean'] = self.res._diag_echo_psd_mean
                 self._diag['error_psd_mean'] = self.res._diag_error_psd_mean
             self._diag['erle_inst'] = self.get_erle_instant()
+
+            # P1 Phase 1: high-band NE evidence metrics (trace-only).
+            # Computes 3 candidate metrics from post-attribution residual
+            # error_psd[2k:], far_lw, and mic near_psd. NO behaviour change.
+            if self.config.trace_high_band_metrics and self.res is not None:
+                try:
+                    err_psd = self.res.error_psd
+                    near_psd = self.res.near_psd
+                    far_lw = self.res._residual_est._long_window_far_psd
+                    n_freqs = err_psd.shape[0]
+                    sr = self.config.sample_rate
+                    fft_sz = self.config.fft_size
+                    bin_2k = int(round(2000.0 * fft_sz / sr))
+                    bin_2k = max(1, min(bin_2k, n_freqs - 2))
+                    err_hb = err_psd[bin_2k:]
+                    far_hb = far_lw[bin_2k:]
+                    near_hb = near_psd[bin_2k:]
+                    erl_e = float(self._erl_estimate)
+                    err_hb_mean = float(np.mean(err_hb)) + 1e-10
+                    # m_excess_ratio for α ∈ {0.5, 1.0, 2.0}
+                    for alpha, key in ((0.5, 'm_excess_ratio_a05'),
+                                        (1.0, 'm_excess_ratio_a10'),
+                                        (2.0, 'm_excess_ratio_a20')):
+                        excess = np.maximum(err_hb - alpha * far_hb * erl_e, 0.0)
+                        self._diag[key] = float(np.mean(excess)) / err_hb_mean
+                    # m_modulation: high-band mic envelope CV^2 over 32-frame window
+                    cur_pwr = float(np.mean(near_hb))
+                    self._hb_mic_pwr_ring[self._hb_mic_pwr_idx] = cur_pwr
+                    self._hb_mic_pwr_idx = (self._hb_mic_pwr_idx + 1) % 32
+                    if self._hb_mic_pwr_n < 32:
+                        self._hb_mic_pwr_n += 1
+                    win = self._hb_mic_pwr_ring[:self._hb_mic_pwr_n]
+                    win_mean = float(np.mean(win))
+                    win_var = float(np.var(win))
+                    self._diag['m_modulation'] = win_var / (win_mean ** 2 + 1e-10)
+                    # m_spectral_flatness on err_hb (Wiener entropy)
+                    err_hb_safe = err_hb + 1e-10
+                    log_geo = float(np.mean(np.log(err_hb_safe)))
+                    arith = float(np.mean(err_hb_safe)) + 1e-10
+                    self._diag['m_spectral_flatness'] = float(np.exp(log_geo)) / arith
+                    # Aux: bin index used (for sanity / debug)
+                    self._diag['m_bin_2k'] = int(bin_2k)
+                except Exception as _e:
+                    # Never break release path — trace is best-effort.
+                    self._diag['m_excess_ratio_a05'] = 0.0
+                    self._diag['m_excess_ratio_a10'] = 0.0
+                    self._diag['m_excess_ratio_a20'] = 0.0
+                    self._diag['m_modulation'] = 0.0
+                    self._diag['m_spectral_flatness'] = 0.0
+
             mu_val = mu_scale
             self._diag['mu_scale'] = float(np.mean(mu_val)) if isinstance(mu_val, np.ndarray) else float(mu_val)
             self._diag['converged'] = self._filter_converged
@@ -4272,6 +5246,192 @@ class AEC:
             self._diag['shadow_w_norm'] = (float(np.linalg.norm(self.shadow_filter.W))
                                             if self.shadow_filter and hasattr(self.shadow_filter, 'W') else 0.0)
             self._diag['copy_err_baseline'] = float(self._shadow_copy_ctrl.copy_err_baseline)
+
+            # ---- P3f Mini AecState trace (no behaviour change) ----
+            # Full-band WebRTC-style ratios e2/y2. Numerator/denominator must
+            # share units: use the sample-loop EMAs of time-domain power
+            # (self.raw_error_power, self.near_power, alpha=0.999), which are
+            # commensurate. main_err_smooth / shadow_err_smooth are sums over
+            # frequency bins (different scale from mean(near²)) so they
+            # cannot be used directly as e2 numerators. We still use them
+            # to derive shadow_err_power by scaling: same get_error_energy()
+            # scaling factor for both main and shadow, so the ratio is
+            # preserved.
+            _mic_pwr_p3f = max(float(self.near_power), 1e-12)
+            _main_err_pwr = max(float(self.raw_error_power), 1e-12)
+            _main_err_smooth_p3f = max(float(self.main_err_smooth), 1e-12)
+            _shadow_err_smooth_p3f = max(float(self.shadow_err_smooth), 1e-12)
+            # shadow_err in the same time-domain scale as raw_error_power
+            _shadow_err_pwr = _shadow_err_smooth_p3f * (
+                _main_err_pwr / _main_err_smooth_p3f)
+            _main_err_ratio = _main_err_pwr / _mic_pwr_p3f
+            _shadow_err_ratio = _shadow_err_pwr / _mic_pwr_p3f
+            _shadow_advantage_p3f = (
+                _main_err_smooth_p3f / _shadow_err_smooth_p3f)
+
+            self._post_reset_age_frames += 1
+            _hop_ms_p3f = float(self.config.hop_size) * 1000.0 / float(self.config.sample_rate)
+            _post_reset_age_ms = self._post_reset_age_frames * _hop_ms_p3f
+
+            # erle_slope: dB/s over the trailing ~0.5s window
+            _erle_inst_db = float(self._diag.get('erle_inst', 0.0))
+            self._erle_slope_buf.append(_erle_inst_db)
+            if len(self._erle_slope_buf) >= 2:
+                _slope_dt = (len(self._erle_slope_buf) - 1) * _hop_ms_p3f / 1000.0
+                _erle_slope_db_per_s = (
+                    self._erle_slope_buf[-1] - self._erle_slope_buf[0]
+                ) / max(_slope_dt, 1e-6)
+            else:
+                _erle_slope_db_per_s = 0.0
+
+            # Filter-state classifier v1 (Phase 2a). State priority order:
+            #   idle < startup < diverged < refined_usable < suspicious_dt
+            #                           < coarse_learning (default)
+            # Thresholds picked from Phase 1 smoke and Phase 2a iteration on
+            # 5 trace cases (FS_static, FS_movement, DT_static, DT_movement,
+            # 7GT). Re-tune in Phase 2b if invariants still fail.
+            # Startup is the *unstable* post-reset window only. The
+            # _p_max_override (shadow Q-boost) re-arms repeatedly during
+            # healthy adaptation and would otherwise mask refined_usable.
+            _post_reset_warmup_p3f = (self._warmup_frames > 0)
+            _far_active_p3f = bool(self._render_activity.is_active)
+            # Idle: insufficient signal to classify. Either far is silent
+            # (no excitation to evaluate filter) or near is silent (no echo
+            # / NE — main_err and mic both clamp to floor giving ratio 1).
+            # Recognise by the floor signature: main_err_smooth at clamp
+            # (1e-9 or smaller) means filter has not produced a meaningful
+            # error sample yet on the current input.
+            _is_idle = (
+                (not _far_active_p3f)
+                or _main_err_smooth_p3f <= 1e-9
+                or _mic_pwr_p3f <= 1e-8
+            )
+            # Diverged: filter actively making it worse. Require ratio
+            # comfortably above unity (1.3) for at least 5 consecutive
+            # far-active frames (~50 ms hysteresis at hop=160) to filter
+            # out single-frame noise. Reset streak when condition fails.
+            _diverged_th = 1.3
+            _diverged_min_streak = 5
+            if (not _is_idle) and _main_err_ratio > _diverged_th:
+                self._p3f_diverged_streak += 1
+            else:
+                self._p3f_diverged_streak = 0
+
+            # Pre-compute suspicious_dt criteria (used both in the flag
+            # below and to gate refined_usable): NE evidence AND
+            # main_err jump above the refined baseline AND shadow lead.
+            # All three must be present — a single shadow_advantage spike
+            # (FS-early shadow lead) does NOT qualify.
+            _ne_evidence = (
+                float(getattr(self, '_dt_from_energy', 0.0)) > 0.3
+                or float(getattr(self, '_dt_from_shadow', 0.0)) > 0.5
+            )
+            _main_err_jump = (
+                self._p3f_main_err_baseline > 1e-6
+                and _main_err_ratio > 2.0 * self._p3f_main_err_baseline
+            )
+            _shadow_lead = _shadow_advantage_p3f > 1.5
+            _suspicious_dt_hit = (
+                self._p3f_refined_latched
+                and _ne_evidence
+                and _main_err_jump
+                and _shadow_lead
+            )
+
+            if _is_idle:
+                _filter_state = 'idle'
+            elif _post_reset_warmup_p3f or _post_reset_age_ms < 200.0:
+                _filter_state = 'startup'
+            elif self._p3f_diverged_streak >= _diverged_min_streak:
+                _filter_state = 'diverged'
+            elif _suspicious_dt_hit:
+                # Suspicious_dt takes precedence over refined_usable so a
+                # frame with NE evidence + main_err jump + shadow lead is
+                # surfaced even when the absolute ratio still looks
+                # converged.
+                _filter_state = 'suspicious_dt'
+            elif (self._filter_once_converged
+                  and _main_err_ratio < 0.7
+                  and _erle_slope_db_per_s > -5.0):
+                # Latch refined once seen so suspicious_dt can subsequently
+                # detect departures from this baseline.
+                self._p3f_refined_latched = True
+                _filter_state = 'refined_usable'
+            else:
+                _filter_state = 'coarse_learning'
+
+            # Baseline tracks the *best* converged main_err_ratio: it
+            # follows downward (so a better-converged filter raises the bar
+            # for suspicious_dt) but freezes when the ratio rises (so an
+            # NE-contaminated rising ratio doesn't drag the baseline along
+            # with it and defeat the 2× jump trigger). Only updated while
+            # in refined_usable.
+            if _filter_state == 'refined_usable':
+                if self._p3f_main_err_baseline <= 1e-6:
+                    self._p3f_main_err_baseline = _main_err_ratio
+                elif _main_err_ratio < self._p3f_main_err_baseline:
+                    # downward EMA: capture better convergence
+                    self._p3f_main_err_baseline = (
+                        0.9 * self._p3f_main_err_baseline + 0.1 * _main_err_ratio)
+                # else: ratio is rising — freeze baseline so jump can fire
+
+            _delay_solid_p3f = bool(
+                self.delay_est is not None
+                and getattr(self.delay_est, 'is_solid', False))
+            _usable_linear = bool(
+                _delay_solid_p3f
+                and _filter_state == 'refined_usable')
+
+            self._diag['main_err_ratio'] = float(_main_err_ratio)
+            self._diag['shadow_err_ratio'] = float(_shadow_err_ratio)
+            self._diag['p3f_shadow_advantage'] = float(_shadow_advantage_p3f)
+            self._diag['erle_slope_db_per_s'] = float(_erle_slope_db_per_s)
+            self._diag['post_reset_age_ms'] = float(_post_reset_age_ms)
+            self._diag['filter_state'] = str(_filter_state)
+            self._diag['usable_linear'] = bool(_usable_linear)
+            self._diag['p3f_main_err_baseline'] = float(self._p3f_main_err_baseline)
+
+            # P3g Phase 0 — dry-run residual source audit. Linear residual
+            # (Stage-1 ERLE-blended) is computed every frame; render-based
+            # residual is computed only when the legacy switch hits Stage-2
+            # (`using_render_based` is True). Comparing the two tells us
+            # how much the render override is changing the residual the
+            # post-filter sees, per state class. No behaviour change.
+            if self.res is not None and hasattr(self.res, '_residual_est'):
+                _est = self.res._residual_est
+                _lin = float(getattr(_est, '_last_linear_residual_psd_mean', 0.0))
+                _ren = float(getattr(_est, '_last_render_residual_psd_mean', 0.0))
+                self._diag['residual_psd_linear'] = _lin
+                self._diag['residual_psd_render'] = _ren
+                self._diag['residual_render_blend'] = float(
+                    getattr(_est, '_last_render_blend', 0.0))
+            # ---- end P3f trace ----
+
+            # ---- P3h sustained-diverged filter reset (default off) ----
+            # Decrement cooldown every frame. Fire reset only when
+            # filter has been good before (`_filter_once_converged`),
+            # the classifier reports diverged, the streak meets the
+            # configured threshold, and cooldown has elapsed. Sets
+            # cooldown so we never loop-reset on a flaky classifier.
+            if self._p3h_reset_cooldown_remaining > 0:
+                self._p3h_reset_cooldown_remaining -= 1
+            _p3h_fired = False
+            if (self.config.diverged_reset_enabled
+                    and self._filter_once_converged
+                    and self._p3h_reset_cooldown_remaining == 0
+                    and _filter_state == 'diverged'
+                    and self._p3f_diverged_streak
+                        >= int(self.config.diverged_reset_streak_frames)):
+                self._reset_filter_derived_state(reason='p3h_diverged')
+                self._p3h_reset_cooldown_remaining = int(
+                    self.config.diverged_reset_cooldown_frames)
+                self._p3h_reset_count += 1
+                _p3h_fired = True
+            self._diag['p3h_reset_fired'] = bool(_p3h_fired)
+            self._diag['p3h_reset_cooldown'] = int(self._p3h_reset_cooldown_remaining)
+            self._diag['p3h_reset_count'] = int(self._p3h_reset_count)
+            # ---- end P3h ----
+
             self._far_power_ema = 0.95 * self._far_power_ema + 0.05 * far_pwr_global
             self._mic_power_ema = 0.95 * self._mic_power_ema + 0.05 * (np.mean(near_end ** 2) + 1e-10)
             self._frame_count += 1
@@ -4375,6 +5535,36 @@ class AEC:
             for filt in [self.filter, self.shadow_filter]:
                 if filt and hasattr(filt, 'Q_low'):
                     filt.Q = filt.Q_low.copy()
+
+        # v3.10.0 — filter plateau detection + one-shot recovery.
+        # Dispatched here (not in DT analyzer or convergence analyzer)
+        # because it needs both signals: convergence flag + DT pattern
+        # signature. Recovery action below is intentionally heavy (resets
+        # filter taps + shadow + RES + EPC mark_diverged) — it's only
+        # triggered when the filter has been stuck below ERLE convergence
+        # threshold for a sustained time despite far-end activity.
+        _far_now = float(np.mean(far_end ** 2))
+        _far_active_now = _far_now > 1e-4
+        # Use the same windowed-ERLE expression as the diag pipeline above.
+        _erle_win_db = float(10.0 * np.log10(
+            (self._erle_window_near + 1e-10)
+            / (self._erle_window_err + 1e-10)))
+        _dt_signal_now = (float(self._dt_from_shadow) > 0.3
+                          or float(self._dt_from_energy) > 0.3)
+        if self._plateau_detector.update(
+            far_active=_far_active_now,
+            dt_signal_present=_dt_signal_now,
+            erle_windowed_db=_erle_win_db,
+            once_converged=self._filter_once_converged,
+        ):
+            # Plateau confirmed — full derived-state reset. Shared helper
+            # with delay_first acquisition (Codex finding: both paths reset
+            # filter taps, both should clear downstream state the same way).
+            # preserve_render_ema=True keeps the long-window far-PSD EMA
+            # alive across recovery — it's input-side context and the
+            # freshly reset filter wants it ready immediately for fallback.
+            self._reset_filter_derived_state(reason='plateau',
+                                              preserve_render_ema=True)
 
         # ── Phase 0 trace-only AEC3 state diagnostics (read-only; do not gate audio) ──
         _initial_state_active = (
@@ -4782,10 +5972,18 @@ Examples:
                         default='nlms', help='Filter mode (default: nlms)')
     parser.add_argument('--enable-dtd', action='store_true',
                         help='Enable DTD (default: off, shadow filter provides DT protection)')
-    parser.add_argument('--enable-res', action='store_true', help='Enable RES post-filter')
+    # v3.10.4 (F6): use BooleanOptionalAction with default=None so the CLI
+    # only overrides preset values when the user explicitly passes the flag.
+    # Previously --enable-res / --cng defaulted to False and unconditionally
+    # overrode the preset's True values, making `aec.py mic ref out --preset
+    # balanced` silently disable RES + CNG.
+    parser.add_argument('--enable-res', default=None,
+                        action=argparse.BooleanOptionalAction,
+                        help='Enable RES post-filter (default: from preset, else off)')
     parser.add_argument('--res-g-min', type=float, default=-20.0, help='RES min gain (dB)')
-    parser.add_argument('--cng', action='store_true', help='Enable comfort noise generation in RES (default: off)')
-    parser.add_argument('--no-cng', action='store_true', help='(deprecated, CNG off by default)')
+    parser.add_argument('--cng', default=None,
+                        action=argparse.BooleanOptionalAction,
+                        help='Enable comfort noise generation in RES (default: from preset, else off)')
     parser.add_argument('--no-td-constraint', action='store_true',
                         help='Disable time-domain constraint on filter weights (diagnostic)')
     parser.add_argument('--preset', choices=['mild', 'soft', 'balanced', 'aggressive', 'maximum'],
@@ -4832,8 +6030,6 @@ Examples:
         filter_length=filter_length,
         mode=aec_mode,
         enable_dtd=args.enable_dtd,
-        enable_res=args.enable_res,
-        enable_cng=args.cng,
         enable_td_constraint=not args.no_td_constraint,
         enable_shadow=not args.no_shadow,
         enable_highpass=not args.no_highpass,
@@ -4845,6 +6041,15 @@ Examples:
     # (don't let CLI default -20dB override preset values like -35dB)
     if not args.preset or args.res_g_min != -20.0:
         common_kw['res_g_min_db'] = args.res_g_min
+    # v3.10.4 (F6): only forward enable_res / enable_cng to AecConfig when
+    # the user explicitly set them on the CLI. With BooleanOptionalAction +
+    # default=None, args.enable_res / args.cng are None unless --[no-]enable-res
+    # or --[no-]cng was passed; in that case the preset value (or AecConfig
+    # default) is preserved.
+    if args.enable_res is not None:
+        common_kw['enable_res'] = args.enable_res
+    if args.cng is not None:
+        common_kw['enable_cng'] = args.cng
     if args.preset:
         config = AecConfig.from_preset(args.preset, **common_kw)
     else:

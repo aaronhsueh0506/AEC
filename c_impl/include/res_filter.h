@@ -41,8 +41,13 @@ typedef struct ResFilter {
     float* stat_dt_mask;
     float* enr_blend;
     int    hf_cap_bin;
+    int    hf_cap_bin_2k;       /* v3.8.4: secondary cap anchor at 2 kHz */
     int    harm_lf_start, harm_lf_end;
     int    harm_hf_start, harm_hf_end;
+
+    /* v3.8.4: per-bin DT confidence cached from compute stage, read by the
+     * postprocess HF-cap "high-band NE present?" gate. [n_freqs] */
+    float* dt_per_bin_last;
 
     /* Mode flags */
     int    enable_reverb;
@@ -146,6 +151,8 @@ void   res_filter_init_static(ResFilter* r, void* mem, size_t mem_size,
                                 const ResFilterConfig* cfg);
 void   res_filter_free(ResFilter* r);
 void res_filter_reset(ResFilter* r);
+/* v3.10.2 — preserves the long-window far-PSD EMA when preserve_long_window_ema=1. */
+void res_filter_reset_ex(ResFilter* r, int preserve_long_window_ema);
 
 /* Port of ResFilter.process. Outputs hop_size samples. */
 typedef struct ResProcessInputs {

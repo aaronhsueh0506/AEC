@@ -69,7 +69,8 @@ typedef struct AecConfig {
     int          epc_hangover;              /* 20 */
     float        epc_total_rise;            /* 1.5 */
     float        epc_delta_threshold;       /* 0.3 */
-    float        max_delay_ms;              /* 250 */
+    float        max_delay_ms;              /* v3.10.4: 1024 (was 250 → 512 → 1024) */
+    float        delay_buffer_ms;           /* v3.10.4: 2048 — render ring buffer cap, separate from max_delay_ms */
     float        delay_est_init_s;          /* 0.3 */
     float        delay_est_period_s;        /* 0.5 */
     float        highpass_cutoff_hz;        /* 80 */
@@ -111,6 +112,8 @@ typedef struct Aec {
     ShadowCopy         shadow_copy;
     ResFilter          res;
     int   has_res;
+    /* v3.10.0 — filter plateau detector (detects bad-startup taps trap). */
+    FilterPlateauDetector plateau_detector;
 
     /* Delay-compensation ring buffer (only when delay_est on) */
     float* ref_ring;
@@ -120,6 +123,8 @@ typedef struct Aec {
     int    current_delay;       /* -1 until first acquisition */
     int    pending_delay;       /* -1 until first 32+ shift candidate */
     int    has_pending;
+    /* v3.10.3 — TTL on pending shift candidate; ages out per estimation cycle. */
+    int    pending_delay_ttl;
 
     /* Per-frame scalars (mirrors Python AEC instance fields) */
     double saturation_level;

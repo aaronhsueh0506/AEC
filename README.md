@@ -4,7 +4,7 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v3.8.3 (2026-05-05)
+**Release**: v3.10.4 (2026-05-05) — Python `aec.py` `__version__ = "3.10.4"`. C port v3.10.4 follows.
 
 ---
 
@@ -16,22 +16,22 @@ mean):
 
 | Preset | FS echo↑ | NE deg↑ | DT echo↑ | DT deg↑ |
 |---|---|---|---|---|
-| **MILD** (新)   | 3.420 | **4.022** | 3.873 | **2.564** |
-| SOFT *          | 3.644 | 4.019 | 4.048 | 2.383 |
-| BALANCED *      | 3.798 | 4.007 | 4.186 | 2.272 |
-| AGGRESSIVE *    | 3.849 | 3.997 | 4.226 | 2.230 |
-| MAXIMUM *       | **3.898** | 3.986 | **4.263** | 2.189 |
+| **MILD**        | 3.397 | **4.022** | 3.855 | **2.623** |
+| SOFT            | 3.565 | 4.020 | 4.015 | 2.461 |
+| BALANCED ★      | 3.668 | 4.010 | 4.154 | 2.344 |
+| AGGRESSIVE      | 3.686 | 4.006 | 4.178 | 2.319 |
+| MAXIMUM         | **3.746** | 3.993 | **4.218** | 2.265 |
 | WebRTC AEC2     | 3.488 | 4.098 | 4.240 | 2.416 |
 
 Per-bucket breakdown:
 
 | Preset | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
 |---|---|---|---|---|---|---|---|
-| **MILD** (新)   | 3.369 | 3.470 | **4.022** | 3.890 | 2.573 | 3.855 | **2.555** |
-| SOFT *          | 3.600 | 3.688 | 4.019     | 4.090 | 2.377 | 4.005 | 2.389     |
-| BALANCED *      | 3.768 | 3.827 | 4.007     | 4.251 | 2.257 | 4.120 | 2.286     |
-| AGGRESSIVE *    | 3.830 | 3.868 | 3.997     | 4.284 | 2.222 | 4.167 | 2.237     |
-| MAXIMUM *       | **3.889** | **3.906** | 3.986 | **4.320** | **2.186** | **4.206** | 2.192 |
+| **MILD**        | 3.332 | 3.480 | **4.022** | 3.888 | 2.632 | 3.802 | **2.608** |
+| SOFT            | 3.504 | 3.643 | 4.020     | 4.069 | 2.453 | 3.926 | 2.474     |
+| BALANCED ★      | 3.641 | 3.704 | 4.010     | 4.217 | 2.328 | 4.051 | 2.370     |
+| AGGRESSIVE      | 3.676 | 3.699 | 4.006     | 4.242 | 2.297 | 4.073 | 2.355     |
+| MAXIMUM         | **3.748** | **3.743** | 3.993 | **4.285** | **2.240** | **4.109** | 2.307 |
 
 > v3.8.3 (2026-05-05) shifted the gentle end of the preset ladder:
 > new MILD is an ultra-light minimum-touch preset (re-bench'd 2026-05-05);
@@ -40,8 +40,49 @@ Per-bucket breakdown:
 > ≈ 4.0 is a binding floor of the current architecture — every preset
 > clusters in 3.986–4.022.
 
+### What changed since v3.8.3
+
+- **v3.8.4 — Plan A (HF preservation under DT)**: smoothing kernel
+  `[0.25, 0.5, 0.25] → [0.1, 0.8, 0.1]` (stops low-band echo gain
+  leaking into HF bins, ~10 dB cut measured 4–8 kHz); HF cap anchor
+  500 Hz → 2 kHz (vowel formants 1–3 kHz preserved); DT gate
+  `effective_dt < 0.5 → < 0.3`; cap skipped when high-band shows NE
+  evidence; `_stat_dt_mask` extended 4 → 7 kHz with linear fade.
+- **v3.10.0 — Delay + Recovery (WebRTC AEC3 alignment)**: DelayEstimator
+  `max_delay_ms` 250 → 512 + `confidence` / `is_solid` properties;
+  render ring buffer 1024 ms; two-path delay-acquisition gate
+  (acquisition vs shift), `mu_scale` delay-confidence ceiling;
+  `FilterPlateauDetector` (resets filter taps when ERLE stuck low for
+  50 frames during DT); `ResidualEchoEstimator` long-window far-PSD
+  EMA (alpha=0.993).
+- **v3.10.1 — Long-window EMA refinements**: EMA updates every
+  far-active frame regardless of mode; render-based fallback blends
+  70 % long-window + 30 % instantaneous, warmup-gated.
+- **v3.10.2 — Codex round 2**: split delay gates into truly independent
+  ifs; shared `_reset_filter_derived_state(reason, preserve_render_ema)`
+  helper covers plateau and delay-first reset paths.
+- **v3.10.3 — Codex round 3 + self-trace fixes**: helper now also
+  resets `near_power` EMA (F3); plateau detector uses current-frame
+  `dt_signal_present` (F4); `_pending_delay` cleared on reset (F5);
+  `__version__` bump (F7); `_pending_delay` TTL = 3 cycles (H1);
+  `mu_scale` ceiling skipped during post-reset warmup (H2); plateau
+  detector resets cumulative counters on fire (H3); Path B delay
+  shift now calls helper (M4).
+- **v3.10.4 — Wider delay range + CLI fix**: `max_delay_ms`
+  512 → 1024 (matches WebRTC's older AEC ~1 s far-end history;
+  AEC3's 512 ms misses BT/mobile skew); render buffer 1024 → 2048 ms
+  for headroom. `aec.py` CLI: `--enable-res` / `--cng` use
+  `argparse.BooleanOptionalAction` with `default=None` so preset
+  values are no longer silently overridden when the user doesn't
+  pass the flag (F6).
+- **Bench (BALANCED, 800-case)**: v3.10.4 FS 3.668 / NE 4.010 /
+  DT echo 4.154 / DT deg 2.344. The −0.130 FS regression vs v3.8.3
+  baseline is the locked-in cost of Plan A's smoothing kernel
+  change — see CHANGELOG for details and known trade-offs.
+
 Algorithm version history → [docs/CHANGELOG.md](docs/CHANGELOG.md).
 Trace-driven evolution (v3.0–v3.4 design rationale) → [docs/aec_v3_evolution.md](docs/aec_v3_evolution.md).
+HF preservation research → [docs/research_log_v3.9.x_HF_preservation.md](docs/research_log_v3.9.x_HF_preservation.md).
 
 ---
 
@@ -97,7 +138,7 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 | **First file sounds OK but second file glitches in batch processing** | Missed `aec_reset` between files. DT / EPC / convergence state accumulates. Reset before each independent stream. |
 | **Linear-AEC residual sounds wrong (separate filter from RES)** | `./bin/aec_wav mic ref linear_only.wav --no-res` (or Python `--no-res` equivalent). Lets you isolate filter-side issues from RES-side issues. |
 | **Per-frame state inspection** | C: `--debug-level 2 --debug-log /tmp/aec.log`, then `grep PBFDKF /tmp/aec.log`. Python: `python3 aec.py mic ref out --diag`. |
-| **Detect mic/ref drift or wrong delay** | Run with `--no-delay-est`, supply pre-aligned files, compare output vs the online-delay-est version. Large divergence → drift or a delay outside `max_delay_ms` (default 250 ms). |
+| **Detect mic/ref drift or wrong delay** | Run with `--no-delay-est`, supply pre-aligned files, compare output vs the online-delay-est version. Large divergence → drift or a delay outside `max_delay_ms` (default 1024 ms since v3.10.4; was 250 ms ≤ v3.8.3 / 512 ms in v3.10.0–v3.10.3). |
 | **Build mismatch between Python and C output** | Verify C built with `-ffp-contract=off` (mandatory) and same preset / `--cng` setting. Output WAV defaults to fp32 PCM in C; `AEC_FP32_WAV=0` for 16-bit PCM. |
 
 ---

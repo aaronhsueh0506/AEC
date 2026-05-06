@@ -142,6 +142,47 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     # CNG override from global flag
     if _ENABLE_CNG and 'enable_cng' not in config_overrides:
         config_overrides['enable_cng'] = True
+    # P1.0 Plan A attribution: env vars to selectively revert sub-changes
+    for _flag, _env in [
+        ('plan_a_kernel_tight', 'AEC_PLAN_A_KERNEL'),
+        ('plan_a_hf_cap_2k', 'AEC_PLAN_A_HF_CAP'),
+        ('plan_a_stat_mask_7k', 'AEC_PLAN_A_STAT_MASK'),
+    ]:
+        _v = os.environ.get(_env)
+        if _v is not None and _flag not in config_overrides:
+            config_overrides[_flag] = _v.lower() not in ('0', 'false', 'off', 'no')
+    # P1 Phase 2: conditional HF cap + threshold env vars
+    if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
+        config_overrides['hf_cap_conditional'] = (
+            os.environ['AEC_HF_CAP_CONDITIONAL'].lower() not in ('0', 'false', 'off', 'no'))
+    if 'AEC_HF_CAP_THETA' in os.environ and 'hf_cap_metric_threshold' not in config_overrides:
+        config_overrides['hf_cap_metric_threshold'] = float(os.environ['AEC_HF_CAP_THETA'])
+    # P3e: DT advisory gate env vars
+    if 'AEC_DT_ADVISORY' in os.environ and 'dt_advisory_enabled' not in config_overrides:
+        config_overrides['dt_advisory_enabled'] = (
+            os.environ['AEC_DT_ADVISORY'].lower() not in ('0', 'false', 'off', 'no'))
+    for _flag, _env in [
+        ('dt_advisory_shadow_th', 'AEC_DT_ADV_SHADOW'),
+        ('dt_advisory_energy_th', 'AEC_DT_ADV_ENERGY'),
+        ('dt_advisory_hold_ms', 'AEC_DT_ADV_HOLD_MS'),
+        ('dt_advisory_mu_factor', 'AEC_DT_ADV_MU_FACTOR'),
+    ]:
+        if _env in os.environ and _flag not in config_overrides:
+            config_overrides[_flag] = float(os.environ[_env])
+    # P3f Phase 3: gate on filter_state == 'suspicious_dt'
+    if ('AEC_DT_ADV_P3F' in os.environ
+            and 'dt_advisory_use_p3f_state' not in config_overrides):
+        config_overrides['dt_advisory_use_p3f_state'] = (
+            os.environ['AEC_DT_ADV_P3F'].lower() not in ('0', 'false', 'off', 'no'))
+    # P3c Phase 1a: high-PAR fast-path
+    if ('AEC_DELAY_FAST_PATH' in os.environ
+            and 'delay_fast_path_enabled' not in config_overrides):
+        config_overrides['delay_fast_path_enabled'] = (
+            os.environ['AEC_DELAY_FAST_PATH'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_DELAY_FAST_PAR' in os.environ
+            and 'delay_fast_par_threshold' not in config_overrides):
+        config_overrides['delay_fast_par_threshold'] = float(
+            os.environ['AEC_DELAY_FAST_PAR'])
     # v3.2 Stage V1: env override AEC_MODE=PBFDAF for filter comparison
     _mode_env = os.environ.get('AEC_MODE', 'PBFDKF').upper()
     _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF

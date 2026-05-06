@@ -199,3 +199,67 @@ void doubletalk_update_energy_dt(DoubleTalk* d,
                           + DTE_DECAY_NEW * inst;
     }
 }
+
+/* ── FilterPlateauDetector (v3.10.0 + v3.10.3 F4/H3) ─────────── */
+
+void filter_plateau_init(FilterPlateauDetector* p) {
+    p->grace_frames     = 400;
+    p->erle_max_db      = 6.0;
+    p->far_active_ratio = 0.5;
+    p->dt_signal_ratio  = 0.10;
+    p->max_attempts     = 2;
+    filter_plateau_reset(p);
+}
+
+void filter_plateau_reset(FilterPlateauDetector* p) {
+    p->frame_count        = 0;
+    p->far_active_count   = 0;
+    p->dt_signal_count    = 0;
+    p->consecutive_match  = 0;
+    p->attempts           = 0;
+    p->cooldown_remaining = 0;
+    p->last_reset_frame   = -1;
+}
+
+int filter_plateau_update(FilterPlateauDetector* p,
+                             int    far_active,
+                             int    dt_signal_present,
+                             double erle_windowed_db,
+                             int    once_converged) {
+    p->frame_count++;
+    if (far_active)        p->far_active_count++;
+    if (dt_signal_present) p->dt_signal_count++;
+
+    if (p->cooldown_remaining > 0) {
+        p->cooldown_remaining--;
+        return 0;
+    }
+    if (once_converged) { p->consecutive_match = 0; return 0; }
+    if (p->attempts >= p->max_attempts) return 0;
+    if (p->frame_count <= p->grace_frames) return 0;
+
+    int denom = p->frame_count > 1 ? p->frame_count : 1;
+    double far_ratio = (double)p->far_active_count / (double)denom;
+    double dt_ratio  = (double)p->dt_signal_count  / (double)denom;
+
+    /* v3.10.3 F4: require dt_signal_present in the current frame too. */
+    int criteria_met = (far_ratio > p->far_active_ratio)
+                    && (erle_windowed_db < p->erle_max_db)
+                    && (dt_ratio > p->dt_signal_ratio)
+                    && dt_signal_present;
+
+    if (!criteria_met) { p->consecutive_match = 0; return 0; }
+
+    p->consecutive_match++;
+    if (p->consecutive_match < FILTER_PLATEAU_CONSECUTIVE_REQUIRED) return 0;
+
+    /* Fire — also reset cumulative counters (v3.10.3 H3). */
+    p->consecutive_match  = 0;
+    p->attempts++;
+    p->cooldown_remaining = FILTER_PLATEAU_POST_RESET_GRACE_FRAMES;
+    p->last_reset_frame   = p->frame_count;
+    p->frame_count        = 0;
+    p->far_active_count   = 0;
+    p->dt_signal_count    = 0;
+    return 1;
+}
