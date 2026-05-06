@@ -52,7 +52,8 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             diverged_reset=False,
             diverged_reset_streak_frames=50,
             diverged_reset_cooldown_frames=400,
-            trace_delay_est_path=None):
+            trace_delay_est_path=None,
+            plan_b_dt_per_bin_gamma=False):
     """Process one case; return (mic, ref, out, erle_per_frame, sample_rate).
 
     mic_pad / ref_pad: prepend N zero samples to mic / ref before processing
@@ -80,6 +81,7 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         diverged_reset_streak_frames=diverged_reset_streak_frames,
         diverged_reset_cooldown_frames=diverged_reset_cooldown_frames,
         trace_delay_est=bool(trace_delay_est_path),
+        plan_b_dt_per_bin_gamma=plan_b_dt_per_bin_gamma,
     )
     aec = AEC(cfg)
 
@@ -156,6 +158,13 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                     float(d.get('residual_render_blend', 0.0)),
                     int(d.get('p3h_reset_fired', False)),
                     int(d.get('p3h_reset_count', 0)),
+                    float(d.get('p4b_dt_per_bin_mean', 0.0)),
+                    float(d.get('p4b_dt_per_bin_hf_mean', 0.0)),
+                    float(d.get('p4b_coh2_hf_mean', 0.0)),
+                    float(d.get('p4b_effective_dt', 0.0)),
+                    int(d.get('p4b_is_stationary_dt', 0)),
+                    float(d.get('p4b_gain_hf_mean', 1.0)),
+                    float(d.get('p4b_res_echo_hf_mean_db', -120.0)),
                 ])
             diag_rows.append(tuple(row))
         if capture and aec.res is not None:
@@ -195,7 +204,11 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                            'post_reset_age_ms', 'filter_state', 'usable_linear',
                            'residual_psd_linear', 'residual_psd_render',
                            'residual_render_blend',
-                           'p3h_reset_fired', 'p3h_reset_count'])
+                           'p3h_reset_fired', 'p3h_reset_count',
+                           'p4b_dt_per_bin_mean', 'p4b_dt_per_bin_hf_mean',
+                           'p4b_coh2_hf_mean', 'p4b_effective_dt',
+                           'p4b_is_stationary_dt', 'p4b_gain_hf_mean',
+                           'p4b_res_echo_hf_mean_db'])
         with open(diag_csv_path, 'w', newline='') as fp:
             w = csv.writer(fp)
             w.writerow(header)
@@ -457,6 +470,9 @@ def main():
                    help='P3h: cooldown frames after a reset (default 400)')
     p.add_argument('--trace-delay-est',
                    help='P3c: write per-accumulate DelayEstimator trace CSV here')
+    p.add_argument('--plan-b', action='store_true',
+                   help='P4B: γ²(k)-primary dt_per_bin (γ=1-coh2 with soft '
+                        'floor lift only when effective_dt > 0.5; off by default)')
     args = p.parse_args()
 
     if args.demo:
@@ -481,6 +497,7 @@ def main():
         diverged_reset_streak_frames=args.diverged_reset_streak,
         diverged_reset_cooldown_frames=args.diverged_reset_cooldown,
         trace_delay_est_path=args.trace_delay_est,
+        plan_b_dt_per_bin_gamma=args.plan_b,
     )
     print(f'wrote {args.out} ({len(out)} samples, {len(out) / sr:.2f}s)',
           file=sys.stderr)

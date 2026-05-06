@@ -151,6 +151,10 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         _v = os.environ.get(_env)
         if _v is not None and _flag not in config_overrides:
             config_overrides[_flag] = _v.lower() not in ('0', 'false', 'off', 'no')
+    # P4B γ-primary dt_per_bin (default OFF)
+    if 'AEC_PLAN_B' in os.environ and 'plan_b_dt_per_bin_gamma' not in config_overrides:
+        config_overrides['plan_b_dt_per_bin_gamma'] = (
+            os.environ['AEC_PLAN_B'].lower() not in ('0', 'false', 'off', 'no'))
     # P1 Phase 2: conditional HF cap + threshold env vars
     if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
         config_overrides['hf_cap_conditional'] = (

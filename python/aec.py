@@ -284,6 +284,13 @@ class AecConfig:
     plan_a_hf_cap_2k: bool = True          # False → HF cap anchor 500 Hz with v3.8.3 gate
     plan_a_stat_mask_7k: bool = True       # False → stat_dt_mask cuts off at 4 kHz
 
+    # P4B — γ²(k)-primary dt_per_bin (default OFF; A/B candidate).
+    # Replaces dt_per_bin = max(effective_dt, 1-coh2) with γ²-only base
+    # plus a soft floor that lifts only when effective_dt > 0.5. Aim:
+    # remove uniform frame-scalar lift in the ambiguous DTD regime
+    # (effective_dt 0.2–0.5) so per-bin γ²(k) discrimination survives.
+    plan_b_dt_per_bin_gamma: bool = False
+
     # P1 Phase 2 — conditional HF cap based on m_excess_ratio (validated
     # in P1 Phase 1 with AUROC 0.871 on FS-vs-NE+DT_positive). When
     # hf_cap_conditional is True, the stage-6 cap behaviour is gated by
@@ -1417,8 +1424,10 @@ class ResFilter:
                  plan_a_hf_cap_2k: bool = True,
                  plan_a_stat_mask_7k: bool = True,
                  hf_cap_conditional: bool = False,
-                 hf_cap_metric_threshold: float = 0.30):
+                 hf_cap_metric_threshold: float = 0.30,
+                 plan_b_dt_per_bin_gamma: bool = False):
         self._plan_a_kernel_tight = plan_a_kernel_tight
+        self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
         self._plan_a_stat_mask_7k = plan_a_stat_mask_7k
         self._hf_cap_conditional = hf_cap_conditional
@@ -1487,6 +1496,15 @@ class ResFilter:
         # v3.8.4: cached per-bin DT confidence from compute stage, read by
         # postprocess HF-cap "high-band NE present?" gate.
         self._dt_per_bin_last = np.zeros(n_freqs, dtype=np.float32)
+
+        # P4B diag (set by gain_compute / gain_postprocess each frame).
+        self._p4b_dt_per_bin_mean = 0.0
+        self._p4b_dt_per_bin_hf_mean = 0.0
+        self._p4b_coh2_hf_mean = 0.0
+        self._p4b_effective_dt = 0.0
+        self._p4b_is_stationary_dt = 0
+        self._p4b_gain_hf_mean = 1.0
+        self._p4b_res_echo_hf_mean_db = -120.0
 
         # RES v2: direct echo estimation + Wiener gain + reverb
         self.echo_method = echo_method       # "coherence" or "direct"
@@ -1817,15 +1835,41 @@ class ResFilter:
             raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
             noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
 
-            # Per-bin DT indicator: base from coh2 (works for speech far-end)
-            dt_per_bin = np.maximum(
-                np.full(self.n_freqs, effective_dt, dtype=np.float32),
-                1.0 - coh2
-            )
+            # Per-bin DT indicator: base from coh2 (works for speech far-end).
+            # P4B: γ²(k)-primary form removes the frame-scalar floor in the
+            # ambiguous DTD regime (effective_dt 0.2–0.5) so per-bin γ²
+            # discrimination survives instead of being clamped uniformly to
+            # the frame value. effective_dt only contributes a soft floor
+            # when it crosses 0.5 (DTD strongly evidences NE).
+            if self._plan_b_dt_per_bin_gamma:
+                dt_per_bin = (1.0 - coh2).astype(np.float32)
+                if effective_dt > 0.5:
+                    floor_lift = float((effective_dt - 0.5) * 2.0)
+                    dt_per_bin = np.maximum(dt_per_bin, floor_lift)
+            else:
+                dt_per_bin = np.maximum(
+                    np.full(self.n_freqs, effective_dt, dtype=np.float32),
+                    1.0 - coh2
+                )
             if is_stationary_dt:
                 dt_per_bin = np.maximum(dt_per_bin, self._stat_dt_mask)
             # v3.8.4: stash for postprocess HF-cap "high bins NE confidence" gate
             self._dt_per_bin_last = dt_per_bin
+
+            # P4B diag (zero-cost; means over small slices). Captures the
+            # symptom this plan diagnoses: dt_per_bin and 1-coh2 both
+            # saturate ~1.0 in DT and FS post-cancel.
+            _hf_2k = self._hf_cap_bin_2k
+            self._p4b_dt_per_bin_mean = float(np.mean(dt_per_bin))
+            self._p4b_dt_per_bin_hf_mean = (
+                float(np.mean(dt_per_bin[_hf_2k:]))
+                if dt_per_bin.shape[0] > _hf_2k else 0.0
+            )
+            self._p4b_coh2_hf_mean = (
+                float(np.mean(coh2[_hf_2k:])) if coh2.shape[0] > _hf_2k else 0.0
+            )
+            self._p4b_effective_dt = float(effective_dt)
+            self._p4b_is_stationary_dt = int(is_stationary_dt)
 
             dt_shaped_per_bin = dt_per_bin ** 1.1
             nearend_est = np.maximum(raw_nearend_est * dt_shaped_per_bin, noise_floor_psd)
@@ -2031,6 +2075,20 @@ class ResFilter:
         if getattr(self, '_capture_stages', False):
             self._stage_gains['07_pre_temporal'] = g.copy()
         self._diag_round5_stages[6] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+
+        # P4B diag: HF gain after pre-temporal postprocess + HF residual echo.
+        _hf_2k = self._hf_cap_bin_2k
+        if g.shape[0] > _hf_2k:
+            self._p4b_gain_hf_mean = float(np.mean(g[_hf_2k:]))
+        else:
+            self._p4b_gain_hf_mean = 0.0
+        _re = getattr(self, '_diag_residual_echo_psd_last', None)
+        if _re is not None and _re.shape[0] > _hf_2k:
+            self._p4b_res_echo_hf_mean_db = (
+                10.0 * float(np.log10(float(np.mean(_re[_hf_2k:])) + 1e-12))
+            )
+        else:
+            self._p4b_res_echo_hf_mean_db = -120.0
         return g
 
     def _stage_temporal_smoothing(self, *, g_in, dt_indicator, effective_dt,
@@ -3952,6 +4010,7 @@ class AEC:
                 plan_a_stat_mask_7k=self.config.plan_a_stat_mask_7k,
                 hf_cap_conditional=self.config.hf_cap_conditional,
                 hf_cap_metric_threshold=self.config.hf_cap_metric_threshold,
+                plan_b_dt_per_bin_gamma=self.config.plan_b_dt_per_bin_gamma,
             )
         else:
             self.res = None
@@ -5168,6 +5227,14 @@ class AEC:
                 self._diag['far_activity'] = self.res._diag_far_activity
                 self._diag['echo_psd_mean'] = self.res._diag_echo_psd_mean
                 self._diag['error_psd_mean'] = self.res._diag_error_psd_mean
+            if self.res is not None and hasattr(self.res, '_p4b_dt_per_bin_mean'):
+                self._diag['p4b_dt_per_bin_mean'] = float(self.res._p4b_dt_per_bin_mean)
+                self._diag['p4b_dt_per_bin_hf_mean'] = float(self.res._p4b_dt_per_bin_hf_mean)
+                self._diag['p4b_coh2_hf_mean'] = float(self.res._p4b_coh2_hf_mean)
+                self._diag['p4b_effective_dt'] = float(self.res._p4b_effective_dt)
+                self._diag['p4b_is_stationary_dt'] = int(self.res._p4b_is_stationary_dt)
+                self._diag['p4b_gain_hf_mean'] = float(self.res._p4b_gain_hf_mean)
+                self._diag['p4b_res_echo_hf_mean_db'] = float(self.res._p4b_res_echo_hf_mean_db)
             self._diag['erle_inst'] = self.get_erle_instant()
 
             # P1 Phase 1: high-band NE evidence metrics (trace-only).
