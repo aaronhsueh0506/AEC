@@ -51,7 +51,8 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             trace_aec_state=False,
             diverged_reset=False,
             diverged_reset_streak_frames=50,
-            diverged_reset_cooldown_frames=400):
+            diverged_reset_cooldown_frames=400,
+            trace_delay_est_path=None):
     """Process one case; return (mic, ref, out, erle_per_frame, sample_rate).
 
     mic_pad / ref_pad: prepend N zero samples to mic / ref before processing
@@ -78,6 +79,7 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         diverged_reset_enabled=diverged_reset,
         diverged_reset_streak_frames=diverged_reset_streak_frames,
         diverged_reset_cooldown_frames=diverged_reset_cooldown_frames,
+        trace_delay_est=bool(trace_delay_est_path),
     )
     aec = AEC(cfg)
 
@@ -198,6 +200,16 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             w = csv.writer(fp)
             w.writerow(header)
             w.writerows(diag_rows)
+
+    if trace_delay_est_path and aec.delay_est is not None \
+            and getattr(aec.delay_est, '_trace_rows', None):
+        import csv as _csv
+        rows = aec.delay_est._trace_rows
+        keys = list(rows[0].keys())
+        with open(trace_delay_est_path, 'w', newline='') as fp:
+            w = _csv.DictWriter(fp, fieldnames=keys)
+            w.writeheader()
+            w.writerows(rows)
 
     if gain_dump_path is not None and stage_acc is not None:
         np.savez(gain_dump_path,
@@ -443,6 +455,8 @@ def main():
                    help='P3h: frames of sustained diverged before reset (default 50)')
     p.add_argument('--diverged-reset-cooldown', type=int, default=400,
                    help='P3h: cooldown frames after a reset (default 400)')
+    p.add_argument('--trace-delay-est',
+                   help='P3c: write per-accumulate DelayEstimator trace CSV here')
     args = p.parse_args()
 
     if args.demo:
@@ -466,6 +480,7 @@ def main():
         diverged_reset=args.diverged_reset,
         diverged_reset_streak_frames=args.diverged_reset_streak,
         diverged_reset_cooldown_frames=args.diverged_reset_cooldown,
+        trace_delay_est_path=args.trace_delay_est,
     )
     print(f'wrote {args.out} ({len(out)} samples, {len(out) / sr:.2f}s)',
           file=sys.stderr)
