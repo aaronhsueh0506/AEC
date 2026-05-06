@@ -52,6 +52,10 @@ static void delay_est_init_state(DelayEst* d, int sample_rate,
     d->period_samples      = (int)(period_seconds * sample_rate);
     d->n_estimates         = 0;
     d->last_par            = 0.0;
+    /* P3c Phase 1a — high-PAR fast-path. Defaults mirror AecConfig. */
+    d->prev_estimated_delay = -1;
+    d->fast_path_enabled   = 1;
+    d->fast_par_threshold  = 40.0;
 }
 
 void delay_est_init(DelayEst* d, int sample_rate,
@@ -147,6 +151,7 @@ void delay_est_reset(DelayEst* d) {
     d->buf_pos             = 0;
     d->n_updates           = 0;
     d->estimated_delay     = -1;
+    d->prev_estimated_delay = -1;
     d->samples_accumulated = 0;
     d->samples_since_est   = 0;
     d->init_done           = 0;
@@ -220,6 +225,9 @@ static void estimate(DelayEst* d) {
     double mean_excl = (sum_abs - best_abs) / ((double)(n_pos - 1) + 1e-10);
     d->last_par = best_abs / (mean_excl + 1e-10);
 
+    /* P3c Phase 1a: remember the previous estimate's lag before
+     * overwriting, so the fast-path's same-lag-twice guard can fire. */
+    d->prev_estimated_delay = d->estimated_delay;
     d->estimated_delay   = best_pos;
     d->samples_since_est = 0;
     d->n_estimates++;
@@ -270,11 +278,21 @@ int delay_est_accumulate(DelayEst* d,
     return 0;
 }
 
-/* v3.10.0 — confidence + is_solid. Mirrors aec.py:589-610. */
+/* v3.10.0 — confidence + is_solid. Mirrors aec.py confidence() property.
+ * P3c Phase 1a: high-PAR fast-path branch precedes the legacy
+ * n_updates >= 3 gate (default ON). */
 double delay_est_confidence(const DelayEst* d) {
     if (!d) return 0.0;
-    if (d->n_updates < 3 || d->estimated_delay < 0) return 0.0;
+    if (d->estimated_delay < 0) return 0.0;
     double par = d->last_par;
+    if (d->fast_path_enabled
+        && d->n_updates >= 2
+        && par >= d->fast_par_threshold
+        && d->prev_estimated_delay == d->estimated_delay
+        && d->prev_estimated_delay >= 0) {
+        return 1.0;
+    }
+    if (d->n_updates < 3) return 0.0;
     double lo  = d->par_low_threshold;
     double hi  = d->par_solid_threshold;
     if (par <= lo) return 0.0;

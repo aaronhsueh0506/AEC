@@ -47,6 +47,11 @@ typedef struct DelayEst {
 
     /* state */
     int    estimated_delay;     /* -1 until first estimate */
+    int    prev_estimated_delay; /* P3c Phase 1a: lag of previous estimate
+                                  * (saved in estimate() before overwrite),
+                                  * used by the high-PAR fast-path's
+                                  * same-lag-twice guard. -1 until first
+                                  * estimate. */
     int    samples_accumulated;
     int    samples_since_est;
     int    init_done;            /* 0/1 */
@@ -63,6 +68,13 @@ typedef struct DelayEst {
     float*      gcc;             /* [seg_size] (irfft output) */
 
     int is_static;               /* 1 = state placed in caller buffer */
+
+    /* P3c Phase 1a — high-PAR fast-path knobs. When fast_path_enabled,
+     * confidence promotes to 1.0 at n_updates >= 2 if last_par >=
+     * fast_par_threshold AND prev_estimated_delay == estimated_delay.
+     * Defaults match Python AecConfig (enabled=True, threshold=40.0). */
+    int    fast_path_enabled;
+    double fast_par_threshold;
 } DelayEst;
 
 void delay_est_init(DelayEst* d, int sample_rate,
@@ -82,7 +94,10 @@ int  delay_est_accumulate(DelayEst* d,
                              const float* mic, const float* ref, size_t n);
 
 /* v3.10.0 — confidence(): linear 0..1 blend between par_low_threshold and
- * par_solid_threshold. Returns 0 when _n_updates < 3 or estimated_delay < 0. */
+ * par_solid_threshold. Returns 0 when _n_updates < 3 or estimated_delay < 0.
+ * P3c Phase 1a: when fast_path_enabled, returns 1.0 at n_updates >= 2 if
+ * last_par >= fast_par_threshold AND prev_estimated_delay == estimated_delay
+ * (overwhelming PAR + same-lag confirmation). */
 double delay_est_confidence(const DelayEst* d);
 
 /* v3.10.0 — is_solid(): confidence >= 1.0 (PAR > solid AND _n_updates >= 3). */
