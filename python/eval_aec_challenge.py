@@ -174,6 +174,15 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'dt_advisory_use_p3f_state' not in config_overrides):
         config_overrides['dt_advisory_use_p3f_state'] = (
             os.environ['AEC_DT_ADV_P3F'].lower() not in ('0', 'false', 'off', 'no'))
+    # P3c Phase 1a: high-PAR fast-path
+    if ('AEC_DELAY_FAST_PATH' in os.environ
+            and 'delay_fast_path_enabled' not in config_overrides):
+        config_overrides['delay_fast_path_enabled'] = (
+            os.environ['AEC_DELAY_FAST_PATH'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_DELAY_FAST_PAR' in os.environ
+            and 'delay_fast_par_threshold' not in config_overrides):
+        config_overrides['delay_fast_par_threshold'] = float(
+            os.environ['AEC_DELAY_FAST_PAR'])
     # v3.2 Stage V1: env override AEC_MODE=PBFDAF for filter comparison
     _mode_env = os.environ.get('AEC_MODE', 'PBFDKF').upper()
     _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF

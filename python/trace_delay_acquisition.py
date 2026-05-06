@@ -56,11 +56,15 @@ def classify_scenario(stem):
 
 def run_case(args_tuple):
     mic_path, lpb_path, stem = args_tuple
+    fp_on = os.environ.get('AEC_DELAY_FAST_PATH', '0').lower() not in ('0', 'false', 'off', 'no')
+    fp_par = float(os.environ.get('AEC_DELAY_FAST_PAR', '40.0'))
     cfg = AecConfig.from_preset(
         PRESET_MAP['balanced'],
         sample_rate=16000, filter_length=832, mode=AecMode.PBFDKF,
         enable_res=True, enable_cng=True, enable_shadow=True,
         trace_delay_est=True,
+        delay_fast_path_enabled=fp_on,
+        delay_fast_par_threshold=fp_par,
     )
     aec = AEC(cfg)
     mic, _ = sf.read(mic_path)
@@ -139,7 +143,9 @@ def main():
 
     results = []
     if args.parallel:
-        with ProcessPoolExecutor() as ex:
+        # Cap workers to 3 so total python process count (parent + workers)
+        # stays within the project-wide budget of 4.
+        with ProcessPoolExecutor(max_workers=3) as ex:
             futs = {ex.submit(run_case, p): p for p in pairs}
             for i, fut in enumerate(as_completed(futs), 1):
                 results.append(fut.result())
