@@ -2638,3 +2638,209 @@ observable. The remaining axes are:
 3. **Accept v3.8.1 baseline as the classical-DSP Pareto ship** and
    commit to NN as the only forward-going scoring lift. R10–R16 is
    the cumulative evidence supporting this decision.
+
+---
+
+# Round 8 — P3 Arc (7GT post-alignment investigation, v3.10.4)
+
+Date: 2026-05-06
+Code line: v3.10.4 + P3c Phase 1a (default ON: high-PAR delay fast-path).
+All other P3 toggles default off; only zero-cost diagnostic fields retained.
+
+## Origin
+
+`7GTxyTksSUqCnP5y0ILG4A_doubletalk` — 788 ms-skew DT case in the AEC
+Challenge blind set. v3.10.4 alignment fix moved the delay search range
+to 1024 ms; path-A/B delay gate locks correct alignment at t = 4.57 s.
+Bench scores after the fix: **echo 3.366 / deg 3.895**. Question: why is
+the score still mediocre, and what's actually limiting it?
+
+## Sub-investigations and outcomes
+
+### P3a — alignment math sanity (closed, no change)
+
+GCC-PHAT diagnostics confirmed mic-ref skew at 12 606 samples (788 ms)
+is recoverable; alignment math is correct.
+
+### P3b — production wiring (closed, no change)
+
+Verified v3.10.4 production delay estimator does lock to the correct
+delay at t = 4.57 s and stays there.
+
+### P3c — delay acquisition latency (SHIPPED Phase 1a)
+
+Phase 0 trace across 800 cases revealed **80.2 % of ever-solid cases
+hit exactly 4.09 s TTFS** — universal latency, not 7GT-specific. The
+4.09 s decomposes as 2.05 s init window (`buf_pos < seg_size = 32768`)
++ ~2 s for `n_updates >= 3` legacy gate to clear.
+
+**Phase 1a (shipped, default ON)**: high-PAR fast-path that returns
+confidence 1.0 when `n_updates >= 2 AND PAR >= 40 AND prev_lag ==
+current_lag` (same-lag-twice guard). 800-case TTFS median **4.09 → 3.57 s**
+on 59 % of cases, **0 / 800 wrong locks**, 800-case AECMOS bit-identical.
+C parity verified (6/6 standalone cases match Python). New AecConfig
+fields: `delay_fast_path_enabled=True`, `delay_fast_par_threshold=40.0`.
+
+**Phase 1b (closed, negative)**: tested whether `n_updates >= 1` gate
+with high-PAR guard could eliminate the remaining ~1 s. Same-lag-1→2
+rate only **73.25 %** overall (target ≥95 %), FS_movement 71.76 %.
+Wrong-lock pool reaches PAR=199 at first update — **no PAR threshold
+separates correct from wrong cleanly**. Even at PAR ≥ 150, 2 of 55
+triggers wrong-lock. 2 of 3 7GT variants would wrong-lock under any n=1
+gate. Same-lag-twice guard from Phase 1a is doing real work. Partial-
+buffer FFT explicitly out-of-scope (separate research branch).
+
+### P3d — post-alignment trace (root cause, diagnosis only)
+
+Per-frame trace post-4.57 s on 7GT showed:
+- Filter ERLE peaks ~+5 dB at 8–12 s, collapses to 0/negative in 24–36 s
+  (NE bursts).
+- DTD signals exist (`dt_shadow` median 0.51, `dt_energy` 0.24) but the
+  composite `dt_active` gate that drives `mu_scale` never fires
+  (`enable_dtd = False` zeroes the coherence path).
+- RES sits in render-based mode 99 % of the time post-alignment.
+
+Hypothesis: filter taps learned against NE-contaminated error in the
+back half. Drove P3e/f/g/h experiments.
+
+### P3e — DT advisory gate, single-threshold sweep (closed, negative)
+
+Three 800-case `mu *= 0.3` advisory variants:
+
+| Variant | Gate | FS_static Δ | DT_static Δ deg | 7GT |
+|---|---|---:|---:|---|
+| V1 | `dt_shadow > 0.5` | **−0.095** | +0.074 | unchanged |
+| V2 | `shadow > 0.5 OR energy > 0.4` | **−0.128** | +0.104 | unchanged |
+| V3 | V2 + `once_converged AND not post_reset_warmup` | −0.011 | +0.007 | unchanged |
+
+V1/V2 fail FS gate. V3 keeps FS but loses DT action; 7GT bit-identical
+in all three. Showed V1/V2 "DT gain" was FS-side false fires
+(shadow-beats-main during early convergence), not real DT detection.
+
+### P3f — Mini AecState, state-classifier-gated mu reduction (closed, negative)
+
+Trace-only state model first (5-case audit): five state layers
+(`idle / startup / coarse_learning / refined_usable / suspicious_dt /
+diverged`) plus `usable_linear`. Audit invariants mostly held (87/59/94 %
+on 7GT phases, 0/3475 false fires on FS). Phase 3 wired `mu *= 0.3` on
+`filter_state == 'suspicious_dt'`. 800-case bench: FS_static **−0.022**
+(just outside ±0.02), DT bucket +0.013/+0.014, **7GT bit-identical
+despite 827 gate fires**. Mu-reduction action does not move the case
+regardless of gate accuracy.
+
+### P3g Phase 0 — RES linear-vs-render switch dry-run (closed, inversion)
+
+User-proposed pivot: gate RES *residual source* by state. Phase 0 dry-
+run audit (no behaviour change). Inversion finding:
+
+- **7GT 24–36 s NE frames**: linear residual median **+4.8 dB**, render
+  **−11.7 dB**. Render dominance **−16.5 dB**. Corrupt taps inflate
+  `echo_psd`; render override is the *protective* path. Switching to
+  linear would **increase** suppression based on corrupt taps.
+- **FS_static `usable_linear` frames**: render dominance **+11.7 dB**.
+  Switching to linear suppresses less in FS — pure echo regression.
+
+P3d's "`using_render = 99 %`" reads as a feature, not a defect.
+
+### P3h — sustained-diverged filter reset, 7GT-only dry-run (closed, negative)
+
+Default-off toggle (`diverged_reset_enabled`) with streak ≥ 50 frames +
+cooldown. Initial run fired 0 resets — longest sustained `diverged` run
+on 7GT is 27 frames (~270 ms). Re-ran with streak=20; one reset at
+t = 26.95 s. Trace 24–36 s: ERLE_win **+4.75 dB**, ERLE_inst +1.86 dB,
+`refined_usable` 80 → 187 (2.3×). The reset internally does its job.
+AECMOS single-case: **echo +0.011, deg −0.029**. Post-reset 10 s window
+sits inside NE-active region; freshly reset filter re-learns under NE
+and ends up similarly polluted. Per stop gate, 800-case skipped.
+
+## Net result
+
+```
+                                        affects 7GT?        ships?
+P3a alignment math sanity               n/a                 no change
+P3b production wiring                   n/a                 no change
+P3c Phase 0 (delay acquisition trace)   universal latency   diagnosis
+P3c Phase 1a (high-PAR fast-path)       neutral             YES (default ON)
+P3c Phase 1b (n=1 gate)                 unsafe              no
+P3d post-alignment trace                diagnosis           no change
+P3e DT advisory (single threshold)      no                  no
+P3f state-gated mu reduction            no (827 fires)      no
+P3g Phase 0 RES source dry-run          would worsen        no
+P3h diverged-reset (7GT dry-run)        ERLE +4.75 dB but   no
+                                        AECMOS deg −0.029
+```
+
+## What we learned beyond "all variants negative"
+
+1. **The 7GT score asymptote is real.** Filter taps degrade against NE
+   in the back half (linear residual +4.8 dB), render-based RES correctly
+   de-trusts those taps (−11.7 dB), and `3.366 / 3.895` is what that
+   architecture produces on this case. Both adaptation-side (P3e/f) and
+   RES-side (P3g) interventions that act *after* taps go bad have no
+   leverage.
+
+2. **`dt_shadow` / `dt_energy` are not DT signals on this dataset's
+   bench DT bucket.** P3f trace showed `shadow_advantage ≈ 1.0` across
+   DT_static / DT_movement bucket means; P3e V1's +0.07 deg gain was
+   entirely FS-side false fires. Future plans resting on these signals
+   need a fresh DT signal first.
+
+3. **A 5-case fixed audit falsifies but does not verify.** Fast for
+   killing wrong ideas, slow on FS-safety. Combine with single-bucket
+   bench (≤ 200 cases) before claiming FS-safety on any classifier.
+
+4. **WebRTC AEC3 architectural reading was right, the actions were wrong.**
+   AEC3-style state model (P3f) classifies correctly; the mistake was
+   assuming "`suspicious_dt → reduce mu` and `usable_linear → linear
+   residual`" were the right actions. AEC3 itself does much more
+   (subtractor analyzer, stationarity estimator, dominant-nearend-aware
+   suppression); we copied only the labels.
+
+5. **Universal 4.09 s delay-acquisition floor was hidden under "7GT slow"
+   framing.** P3c Phase 0 reframed the issue as a project-wide latency
+   structural property. Phase 1a recovered 0.52 s on 59 % of cases at
+   zero AECMOS cost. Phase 1b proved n=1 cannot be made safe by PAR
+   tightening alone.
+
+## What's left to try (if 7GT is worth more attention)
+
+All four state-driven actions on v3.10.4 have been tested; all four
+either don't move 7GT's AECMOS score or move it the wrong way.
+**7GT 3.366 / 3.895 is the v3.10.4 asymptote under all single-action
+interventions.** A future attempt would need to:
+
+- intervene **before** contamination starts (leading indicator, not the
+  post-fact `diverged` symptom);
+- ensure the post-intervention learning window does not run into more NE
+  (otherwise freshly clean state re-pollutes — P3h showed this);
+- or change a piece of the architecture itself (filter / shadow / RES
+  coupling), not just choose between paths in the existing graph.
+
+Partial-buffer FFT (smaller seg_size at first FFT only) is recorded as
+future work — would shrink the 2.05 s init component of the TTFS floor.
+
+## What's retained in v3.10.4
+
+**Behaviour-changing (default ON):**
+
+| AecConfig field | Default | Effect |
+|---|---|---|
+| `delay_fast_path_enabled` | `True` | High-PAR delay fast-path (Phase 1a) |
+| `delay_fast_par_threshold` | `40.0` | PAR threshold for fast-path |
+
+**Zero-cost diagnostic fields (retained, no behaviour effect):**
+
+| Field group | Source | Purpose |
+|---|---|---|
+| `main_err_ratio`, `shadow_err_ratio`, `p3f_shadow_advantage` | P3f | Subtractor relative-error trace |
+| `erle_slope_db_per_s`, `post_reset_age_ms` | P3f | Convergence trajectory |
+| `filter_state`, `usable_linear` | P3f | Mini AecState classifier output |
+| `residual_psd_linear/render`, `residual_render_blend` | P3g | RES source comparison |
+| `dt_advisory_active/hit`, `mu_scale` | P3e | Advisory gate diagnostics |
+| `p3h_reset_fired/count/cooldown` | P3h | Diverged-reset diagnostics |
+
+**Default-off toggles retained (gate body skipped):**
+
+`dt_advisory_enabled`, `dt_advisory_use_p3f_state`,
+`dt_advisory_shadow_th/energy_th/hold_ms/mu_factor`,
+`diverged_reset_enabled`, `diverged_reset_streak_frames/cooldown_frames`.

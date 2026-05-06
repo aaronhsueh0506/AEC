@@ -86,12 +86,25 @@ def run_case(args_tuple):
     first_solid_idx = None
     delay_at_first_solid = -1
     max_par = 0.0
+    # P3c Phase 1b — capture the per-update history. We're interested in
+    # whether the n_updates=1 cross-spectrum is already trustworthy.
+    # n_updates only increments on real updates; trace rows that share an
+    # n_updates value share the same cross-spectrum, so dedupe by n_updates_post.
+    seen_nup = {}
     for i, r in enumerate(rows):
         if r['last_par'] > max_par:
             max_par = float(r['last_par'])
         if first_solid_idx is None and r['is_solid']:
             first_solid_idx = i
             delay_at_first_solid = int(r['estimated_delay'])
+        nup = int(r['n_updates_post'])
+        if nup >= 1 and nup not in seen_nup:
+            seen_nup[nup] = {
+                'time_s': float(r['time_s']),
+                'top1_lag': int(r['top1_lag']),
+                'top1_par': float(r['top1_par']),
+                'top2_par': float(r['top2_par']),
+            }
 
     if first_solid_idx is not None:
         first_solid_s = float(rows[first_solid_idx]['time_s'])
@@ -100,6 +113,11 @@ def run_case(args_tuple):
         first_solid_s = -1.0
         ever_solid = False
 
+    nup1 = seen_nup.get(1, {})
+    nup2 = seen_nup.get(2, {})
+    nup3 = seen_nup.get(3, {})
+    same_lag_1_2 = (nup1.get('top1_lag', -1) == nup2.get('top1_lag', -2)
+                    and nup1.get('top1_lag', -1) >= 0)
     return {
         'stem': stem,
         'scenario': classify_scenario(stem),
@@ -110,6 +128,16 @@ def run_case(args_tuple):
         'max_par_observed': round(max_par, 3),
         'frames_processed': len(rows),
         'ever_solid': ever_solid,
+        # P3c Phase 1b: per-update snapshots
+        'nup1_time_s': round(nup1.get('time_s', -1.0), 3),
+        'nup1_top1_lag': nup1.get('top1_lag', -1),
+        'nup1_top1_par': round(nup1.get('top1_par', 0.0), 3),
+        'nup1_top2_par': round(nup1.get('top2_par', 0.0), 3),
+        'nup2_time_s': round(nup2.get('time_s', -1.0), 3),
+        'nup2_top1_lag': nup2.get('top1_lag', -1),
+        'nup2_top1_par': round(nup2.get('top1_par', 0.0), 3),
+        'nup3_top1_par': round(nup3.get('top1_par', 0.0), 3),
+        'same_lag_1_to_2': same_lag_1_2,
     }
 
 
