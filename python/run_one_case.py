@@ -48,7 +48,10 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             mic_pad=0, ref_pad=0,
             diag_csv_path=None, gain_dump_path=None,
             trace_high_band_metrics=False,
-            trace_aec_state=False):
+            trace_aec_state=False,
+            diverged_reset=False,
+            diverged_reset_streak_frames=50,
+            diverged_reset_cooldown_frames=400):
     """Process one case; return (mic, ref, out, erle_per_frame, sample_rate).
 
     mic_pad / ref_pad: prepend N zero samples to mic / ref before processing
@@ -72,6 +75,9 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         enable_shadow=True,
         capture_stages=capture,
         trace_high_band_metrics=trace_high_band_metrics,
+        diverged_reset_enabled=diverged_reset,
+        diverged_reset_streak_frames=diverged_reset_streak_frames,
+        diverged_reset_cooldown_frames=diverged_reset_cooldown_frames,
     )
     aec = AEC(cfg)
 
@@ -146,6 +152,8 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                     float(d.get('residual_psd_linear', 0.0)),
                     float(d.get('residual_psd_render', 0.0)),
                     float(d.get('residual_render_blend', 0.0)),
+                    int(d.get('p3h_reset_fired', False)),
+                    int(d.get('p3h_reset_count', 0)),
                 ])
             diag_rows.append(tuple(row))
         if capture and aec.res is not None:
@@ -184,7 +192,8 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                            'p3f_shadow_advantage', 'erle_slope_db_per_s',
                            'post_reset_age_ms', 'filter_state', 'usable_linear',
                            'residual_psd_linear', 'residual_psd_render',
-                           'residual_render_blend'])
+                           'residual_render_blend',
+                           'p3h_reset_fired', 'p3h_reset_count'])
         with open(diag_csv_path, 'w', newline='') as fp:
             w = csv.writer(fp)
             w.writerow(header)
@@ -428,6 +437,12 @@ def main():
                    help='P3f Phase 1: include Mini AecState fields '
                         '(main_err_ratio, shadow_err_ratio, shadow_advantage, '
                         'erle_slope, post_reset_age, filter_state, usable_linear)')
+    p.add_argument('--diverged-reset', action='store_true',
+                   help='P3h: reset filter on sustained diverged (off by default)')
+    p.add_argument('--diverged-reset-streak', type=int, default=50,
+                   help='P3h: frames of sustained diverged before reset (default 50)')
+    p.add_argument('--diverged-reset-cooldown', type=int, default=400,
+                   help='P3h: cooldown frames after a reset (default 400)')
     args = p.parse_args()
 
     if args.demo:
@@ -448,6 +463,9 @@ def main():
         gain_dump_path=args.res_gain_dump,
         trace_high_band_metrics=args.trace_high_band_metrics,
         trace_aec_state=args.trace_aec_state,
+        diverged_reset=args.diverged_reset,
+        diverged_reset_streak_frames=args.diverged_reset_streak,
+        diverged_reset_cooldown_frames=args.diverged_reset_cooldown,
     )
     print(f'wrote {args.out} ({len(out)} samples, {len(out) / sr:.2f}s)',
           file=sys.stderr)

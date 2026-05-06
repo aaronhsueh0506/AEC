@@ -318,6 +318,19 @@ class AecConfig:
     # refined_latched + NE evidence + main_err jump + shadow lead, AND'd).
     dt_advisory_use_p3f_state: bool = False
 
+    # P3h — filter reset on sustained diverged (high-impact action,
+    # 7GT-only dry-run only; default off, never enabled by preset).
+    # Triggered when ALL hold:
+    #   • once_converged is set (we never reset a filter that has never
+    #     been good — startup / coarse_learning is not the target)
+    #   • _p3f_diverged_streak >= diverged_reset_streak_frames (sustained)
+    #   • cooldown timer has expired
+    # On fire: _reset_filter_derived_state(reason='p3h_diverged') and
+    # cooldown timer set so we don't loop-reset on a flaky classifier.
+    diverged_reset_enabled: bool = False
+    diverged_reset_streak_frames: int = 50          # ~500 ms at hop=160 / 16 kHz
+    diverged_reset_cooldown_frames: int = 400        # ~4 s minimum gap
+
     # Mode
     mode: AecMode = AecMode.PBFDKF
 
@@ -3962,6 +3975,10 @@ class AEC:
         self._p3f_refined_latched = False  # latches true once refined_usable seen
         self._p3f_main_err_baseline = 0.0  # EMA baseline for jump detection
         self._p3f_diverged_streak = 0      # consecutive frames over diverged TH
+        # P3h — sustained-diverged reset cooldown. Decremented per frame;
+        # reset action gated on cooldown == 0.
+        self._p3h_reset_cooldown_remaining = 0
+        self._p3h_reset_count = 0           # diagnostic: reset fires this run
 
         # Windowed decaying ERLE accumulator for erle_factor (TC ≈ 10s)
         self._erle_window_near = 1e-10
@@ -5346,6 +5363,31 @@ class AEC:
                 self._diag['residual_render_blend'] = float(
                     getattr(_est, '_last_render_blend', 0.0))
             # ---- end P3f trace ----
+
+            # ---- P3h sustained-diverged filter reset (default off) ----
+            # Decrement cooldown every frame. Fire reset only when
+            # filter has been good before (`_filter_once_converged`),
+            # the classifier reports diverged, the streak meets the
+            # configured threshold, and cooldown has elapsed. Sets
+            # cooldown so we never loop-reset on a flaky classifier.
+            if self._p3h_reset_cooldown_remaining > 0:
+                self._p3h_reset_cooldown_remaining -= 1
+            _p3h_fired = False
+            if (self.config.diverged_reset_enabled
+                    and self._filter_once_converged
+                    and self._p3h_reset_cooldown_remaining == 0
+                    and _filter_state == 'diverged'
+                    and self._p3f_diverged_streak
+                        >= int(self.config.diverged_reset_streak_frames)):
+                self._reset_filter_derived_state(reason='p3h_diverged')
+                self._p3h_reset_cooldown_remaining = int(
+                    self.config.diverged_reset_cooldown_frames)
+                self._p3h_reset_count += 1
+                _p3h_fired = True
+            self._diag['p3h_reset_fired'] = bool(_p3h_fired)
+            self._diag['p3h_reset_cooldown'] = int(self._p3h_reset_cooldown_remaining)
+            self._diag['p3h_reset_count'] = int(self._p3h_reset_count)
+            # ---- end P3h ----
 
             self._far_power_ema = 0.95 * self._far_power_ema + 0.05 * far_pwr_global
             self._mic_power_ema = 0.95 * self._mic_power_ema + 0.05 * (np.mean(near_end ** 2) + 1e-10)

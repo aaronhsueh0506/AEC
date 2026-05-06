@@ -125,6 +125,29 @@ the bad taps.
 
 Doc: `docs/research_log_p3g_res_switch_negative.md`.
 
+### P3h — sustained-diverged filter reset, 7GT-only dry-run (closed, log written)
+
+State-driven action that P3f originally spec'd as the `diverged →
+reset` action. Implemented as default-off toggle
+(`diverged_reset_enabled`) with `streak ≥ 50 frames` + `cooldown
+400 frames` + `once_converged` guard. Initial run with default
+streak=50 fired 0 resets — the longest sustained `diverged` run on
+7GT is **27 frames** (~270 ms), not seconds-long plateaus. Re-ran
+with `streak=20`; one reset fires at t = 26.95 s.
+
+Trace metrics 24–36 s: ERLE_win **+4.75 dB**, ERLE_inst +1.86 dB,
+`diverged` 53 → 0, `refined_usable` 80 → 187 (2.3×). The reset
+internally does what it's designed to.
+
+AECMOS single-case score (full 36.7 s, talk_type='dt'):
+**echo +0.011, deg −0.029**. The post-reset 10 s window sits
+inside the case's NE-active region; the freshly reset filter
+re-learns under NE and ends up similarly polluted, only with the
+shorter render-fallback protection window. Per stop gate (AECMOS
+direction is the deciding signal), 800-case skipped.
+
+Doc: `docs/research_log_p3h_diverged_reset_negative.md`.
+
 ## Net result
 
 ```
@@ -136,6 +159,8 @@ P3d post-alignment trace                diagnosis           no change
 P3e DT advisory (single threshold)      no                  no
 P3f state-gated mu reduction            no (827 fires)      no
 P3g Phase 0 RES source dry-run          would worsen        no
+P3h diverged-reset (7GT dry-run)        ERLE +4.75 dB but   no
+                                        AECMOS deg −0.029
 ```
 
 ## What we learned beyond "all variants negative"
@@ -169,18 +194,25 @@ P3g Phase 0 RES source dry-run          would worsen        no
 
 ## What's left to try (if 7GT is worth more attention)
 
-The only state-driven action not yet tried is **filter reset on
-sustained `diverged`** (P3f originally spec'd it as the diverged
-action; we deliberately left it unwired). Risk: any false
-`diverged` classification on FS would discard a healthy filter and
-re-pay the convergence cost. Per user direction, this is the
-followup proposal:
+P3h ran the diverged-reset dry-run and closed it (above). All four
+state-driven actions on the existing v3.10.4 architecture have now
+been tested, and all four either don't move 7GT's AECMOS score or
+move it the wrong way. **7GT 3.366 / 3.895 is the v3.10.4 asymptote
+under all single-action interventions.**
 
-- 7GT-only timeline / score-proxy dry-run with reset injection at
-  sustained-diverged points;
-- only if 7GT visibly moves do we proceed to 800-case risk bench.
+A future P3 attempt that aims to move 7GT would have to do
+something the current arc has not done:
 
-Until that experiment, **7GT 3.366 / 3.895 is the v3.10.4 asymptote**.
+- intervene **before** the contamination starts (a leading
+  indicator, not the post-fact `diverged` symptom);
+- ensure the post-intervention learning window does not run into
+  more NE (otherwise the freshly clean state re-pollutes — what P3h
+  showed);
+- or change a piece of the architecture itself (filter / shadow /
+  RES coupling), not just choose between paths and parameters in
+  the existing graph.
+
+None of those are scoped here.
 
 ## What's retained in v3.10.4
 
@@ -193,6 +225,7 @@ Zero-cost diagnostic fields, default off behaviour-wise:
 | `filter_state`, `usable_linear` | P3f Phase 2 | Mini AecState classifier output |
 | `residual_psd_linear`, `residual_psd_render`, `residual_render_blend` | P3g Phase 0 | RES source comparison |
 | `dt_advisory_active`, `dt_advisory_hit`, `mu_scale` | P3e | Advisory gate hits + applied mu |
+| `p3h_reset_fired`, `p3h_reset_count`, `p3h_reset_cooldown` | P3h | Diverged-reset action diagnostics |
 
 All seven groups appear in `--trace-aec-state` CSV. None affect runtime
 or shipped behaviour.
@@ -202,6 +235,8 @@ or shipped behaviour.
 | `dt_advisory_enabled` | `False` | Retained, no effect (gate body skipped) |
 | `dt_advisory_use_p3f_state` | `False` | Retained, no effect |
 | `dt_advisory_shadow_th / energy_th / hold_ms / mu_factor` | constants | Retained |
+| `diverged_reset_enabled` | `False` | Retained, no effect |
+| `diverged_reset_streak_frames / cooldown_frames` | constants | Retained |
 
 ## Cross-references
 
@@ -209,3 +244,4 @@ or shipped behaviour.
 - `docs/research_log_p3e_dt_advisory_negative.md`
 - `docs/research_log_p3f_state_gate_negative.md`
 - `docs/research_log_p3g_res_switch_negative.md`
+- `docs/research_log_p3h_diverged_reset_negative.md`
