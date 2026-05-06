@@ -157,6 +157,23 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             os.environ['AEC_HF_CAP_CONDITIONAL'].lower() not in ('0', 'false', 'off', 'no'))
     if 'AEC_HF_CAP_THETA' in os.environ and 'hf_cap_metric_threshold' not in config_overrides:
         config_overrides['hf_cap_metric_threshold'] = float(os.environ['AEC_HF_CAP_THETA'])
+    # P3e: DT advisory gate env vars
+    if 'AEC_DT_ADVISORY' in os.environ and 'dt_advisory_enabled' not in config_overrides:
+        config_overrides['dt_advisory_enabled'] = (
+            os.environ['AEC_DT_ADVISORY'].lower() not in ('0', 'false', 'off', 'no'))
+    for _flag, _env in [
+        ('dt_advisory_shadow_th', 'AEC_DT_ADV_SHADOW'),
+        ('dt_advisory_energy_th', 'AEC_DT_ADV_ENERGY'),
+        ('dt_advisory_hold_ms', 'AEC_DT_ADV_HOLD_MS'),
+        ('dt_advisory_mu_factor', 'AEC_DT_ADV_MU_FACTOR'),
+    ]:
+        if _env in os.environ and _flag not in config_overrides:
+            config_overrides[_flag] = float(os.environ[_env])
+    # P3f Phase 3: gate on filter_state == 'suspicious_dt'
+    if ('AEC_DT_ADV_P3F' in os.environ
+            and 'dt_advisory_use_p3f_state' not in config_overrides):
+        config_overrides['dt_advisory_use_p3f_state'] = (
+            os.environ['AEC_DT_ADV_P3F'].lower() not in ('0', 'false', 'off', 'no'))
     # v3.2 Stage V1: env override AEC_MODE=PBFDAF for filter comparison
     _mode_env = os.environ.get('AEC_MODE', 'PBFDKF').upper()
     _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF

@@ -295,6 +295,29 @@ class AecConfig:
     hf_cap_conditional: bool = False
     hf_cap_metric_threshold: float = 0.30
 
+    # P3e — DT advisory gate for adaptation protection (post-release work).
+    # Independent of `enable_dtd`. When True, shadow-DTD and energy-DTD
+    # signals (already smoothed by DoubleTalkAnalyzer) are routed to:
+    #   • reduce mu_scale by `dt_advisory_mu_factor` during DT
+    #   • inhibit shadow→main copies during DT
+    # Hysteresis: hold for `dt_advisory_hold_ms` after the last hit so
+    # per-frame flicker doesn't pop in and out of protection. Does NOT
+    # touch RES suppression, residual echo estimate, or HF cap; the
+    # 7GT P3d trace showed that the underlying problem is filter taps
+    # being learnt against NE-contaminated error during DT, not the
+    # post-filter. Default off keeps v3.10.4 release behaviour.
+    dt_advisory_enabled: bool = False
+    dt_advisory_shadow_th: float = 0.5
+    dt_advisory_energy_th: float = 0.4
+    dt_advisory_hold_ms: float = 400.0
+    dt_advisory_mu_factor: float = 0.3
+    # P3f Phase 3: when True, gate fires on
+    # `filter_state == 'suspicious_dt'` instead of the raw dt_shadow /
+    # dt_energy thresholds above. Phase 2a invariants showed the
+    # state-based gate is FS-safe by construction (suspicious_dt requires
+    # refined_latched + NE evidence + main_err jump + shadow lead, AND'd).
+    dt_advisory_use_p3f_state: bool = False
+
     # Mode
     mode: AecMode = AecMode.PBFDKF
 
@@ -3059,6 +3082,10 @@ class ResidualEchoEstimator:
         self._long_window_alpha = long_window_alpha
         self._long_window_far_psd = np.zeros(n_freqs, dtype=np.float32)
         self._long_window_n_updates = 0
+        # P3g Phase 0 dry-run scalars
+        self._last_linear_residual_psd_mean = 0.0
+        self._last_render_residual_psd_mean = 0.0
+        self._last_render_blend = 0.0
 
     def reset(self, preserve_long_window_ema: bool = False) -> None:
         """Clear residual-echo estimator state.
@@ -3120,6 +3147,10 @@ class ResidualEchoEstimator:
             erle_est = np.maximum(erle_est, nonlinear_floor)
 
         residual_echo_psd = (1.0 - erle_factor) * direct_est + erle_factor * erle_est
+        # P3g Phase 0: stash the linear-only residual (Stage-1 ERLE-blended)
+        # for dry-run audit before any Stage-2 render-based override.
+        # Read by AEC.process() into _diag — purely diagnostic.
+        self._last_linear_residual_psd_mean = float(np.mean(residual_echo_psd))
 
         # v3.10.0: maintain long-window far-PSD EMA every frame regardless of
         # render mode — so it's ready immediately when delay drops out and
@@ -3192,7 +3223,14 @@ class ResidualEchoEstimator:
                 blend = np.clip(blend, 0.0, 1.0)
                 residual_echo_psd = ((1.0 - blend) * residual_echo_psd
                                      + blend * render_based_echo)
+                # P3g Phase 0: stash the render-based component and the
+                # blend used, for dry-run audit. (linear residual mean is
+                # already stashed above before any override.)
+                self._last_render_residual_psd_mean = float(np.mean(render_based_echo))
+                self._last_render_blend = float(np.mean(blend))
 
+        # If render-based path didn't run this frame, leave previous
+        # render-residual stale; consumers should gate on using_render_based.
         return residual_echo_psd
 
     def attribute_split(self, *, echo_psd: np.ndarray, error_psd: np.ndarray,
@@ -3906,6 +3944,25 @@ class AEC:
         # first ~100 frames and is now stuck below convergence threshold).
         self._plateau_detector = FilterPlateauDetector()
 
+        # P3e — DT advisory gate state. Hold counter is in samples so we
+        # can convert dt_advisory_hold_ms once. Diag fields exposed via _diag.
+        self._dt_advisory_hold_remaining = 0  # frames; decremented per process()
+        _hop = self._hop_size if hasattr(self, '_hop_size') else (
+            self.config.hop_size if self.config.hop_size > 0 else self.config.frame_size // 2)
+        self._dt_advisory_hold_frames = max(
+            1, int(self.config.dt_advisory_hold_ms * self.config.sample_rate / 1000.0 / max(1, _hop)))
+
+        # P3f — Mini AecState trace (no behaviour change). post_reset_age_frames
+        # is incremented per process() and zeroed by _reset_filter_derived_state.
+        # erle_inst ring buffer kept for slope estimation (~500 ms window at
+        # hop=160 / 16 kHz = 50 frames).
+        self._post_reset_age_frames = 0
+        _slope_n = max(2, int(0.5 * self.config.sample_rate / max(1, _hop)))
+        self._erle_slope_buf = deque(maxlen=_slope_n)
+        self._p3f_refined_latched = False  # latches true once refined_usable seen
+        self._p3f_main_err_baseline = 0.0  # EMA baseline for jump detection
+        self._p3f_diverged_streak = 0      # consecutive frames over diverged TH
+
         # Windowed decaying ERLE accumulator for erle_factor (TC ≈ 10s)
         self._erle_window_near = 1e-10
         self._erle_window_err = 1e-10
@@ -4039,6 +4096,8 @@ class AEC:
         # v3.10.0: clear plateau-detector counters on AEC reset
         if hasattr(self, '_plateau_detector'):
             self._plateau_detector.reset()
+        # P3e: clear DT advisory hold
+        self._dt_advisory_hold_remaining = 0
         self._erle_window_near = 1e-10
         self._erle_window_err = 1e-10
         self._erle_factor_prev = 0.0
@@ -4247,6 +4306,14 @@ class AEC:
         # Shadow copy controller
         self.shadow_frame_count = 0
         self._shadow_copy_ctrl.reset()
+
+        # P3f trace state — zero so post_reset_age_ms restarts from 0 and
+        # refined latch / err baseline don't carry pre-reset values forward.
+        self._post_reset_age_frames = 0
+        self._erle_slope_buf.clear()
+        self._p3f_refined_latched = False
+        self._p3f_main_err_baseline = 0.0
+        self._p3f_diverged_streak = 0
 
         # RES — clears its echo_psd / error_psd / noise_psd / gain_smooth /
         # render state. Long-window far-PSD EMA is preserved when
@@ -4560,6 +4627,52 @@ class AEC:
             mu_scale = self._compute_mu_scale()
         else:
             mu_scale = self._get_simple_mu_scale()
+
+        # P3e — DT advisory gate. Routes shadow/energy DTD evidence into
+        # mu reduction even when enable_dtd=False. The 7GT P3d trace
+        # showed dt_shadow median 0.51 / dt_energy median 0.24 in the
+        # post-alignment back half but the composite gate driving mu
+        # never fired, so the filter learnt against NE-contaminated error.
+        # Hit-then-hold hysteresis avoids per-frame flicker.
+        if self.config.dt_advisory_enabled:
+            if self.config.dt_advisory_use_p3f_state:
+                # P3f Phase 3: gate fires on filter_state == 'suspicious_dt'
+                # using the previous frame's classification (computed late
+                # in process() — 1-frame lag, ~10 ms at hop=160 / 16 kHz).
+                # The state already encodes refined_latched + NE evidence
+                # + main_err jump + shadow lead, so no additional guards
+                # are needed at this site.
+                _adv_hit = bool(self._diag.get('filter_state', 'idle')
+                                == 'suspicious_dt')
+            else:
+                # V3 (legacy) convergence guard: only honour shadow/energy
+                # DT evidence after the filter has converged at least once
+                # and is past the post-reset warmup window. Retained for
+                # A/B comparison; default off.
+                _in_post_reset_warmup = (
+                    self._warmup_frames > 0
+                    or (self.filter is not None
+                        and getattr(self.filter, '_p_max_override_frames', 0) > 0)
+                )
+                _adv_hit = (
+                    bool(_render.is_active)
+                    and bool(self._filter_once_converged)
+                    and (not _in_post_reset_warmup)
+                    and (float(self._dt_from_shadow) > self.config.dt_advisory_shadow_th
+                         or float(self._dt_from_energy) > self.config.dt_advisory_energy_th)
+                )
+            if _adv_hit:
+                self._dt_advisory_hold_remaining = self._dt_advisory_hold_frames
+            elif self._dt_advisory_hold_remaining > 0:
+                self._dt_advisory_hold_remaining -= 1
+            if self._dt_advisory_hold_remaining > 0:
+                _f = float(self.config.dt_advisory_mu_factor)
+                if isinstance(mu_scale, np.ndarray):
+                    mu_scale = mu_scale * _f
+                else:
+                    mu_scale = mu_scale * _f
+            self._diag['dt_advisory_active'] = bool(self._dt_advisory_hold_remaining > 0)
+            self._diag['dt_advisory_hit'] = bool(_adv_hit)
 
         # startup_dt mu floor: raise mu_scale during startup_dt so filter can converge despite DT
         # Uses previous frame's effective_dt from ResFilter (1-frame lag, acceptable)
@@ -5073,6 +5186,167 @@ class AEC:
             self._diag['shadow_w_norm'] = (float(np.linalg.norm(self.shadow_filter.W))
                                             if self.shadow_filter and hasattr(self.shadow_filter, 'W') else 0.0)
             self._diag['copy_err_baseline'] = float(self._shadow_copy_ctrl.copy_err_baseline)
+
+            # ---- P3f Mini AecState trace (no behaviour change) ----
+            # Full-band WebRTC-style ratios e2/y2. Numerator/denominator must
+            # share units: use the sample-loop EMAs of time-domain power
+            # (self.raw_error_power, self.near_power, alpha=0.999), which are
+            # commensurate. main_err_smooth / shadow_err_smooth are sums over
+            # frequency bins (different scale from mean(near²)) so they
+            # cannot be used directly as e2 numerators. We still use them
+            # to derive shadow_err_power by scaling: same get_error_energy()
+            # scaling factor for both main and shadow, so the ratio is
+            # preserved.
+            _mic_pwr_p3f = max(float(self.near_power), 1e-12)
+            _main_err_pwr = max(float(self.raw_error_power), 1e-12)
+            _main_err_smooth_p3f = max(float(self.main_err_smooth), 1e-12)
+            _shadow_err_smooth_p3f = max(float(self.shadow_err_smooth), 1e-12)
+            # shadow_err in the same time-domain scale as raw_error_power
+            _shadow_err_pwr = _shadow_err_smooth_p3f * (
+                _main_err_pwr / _main_err_smooth_p3f)
+            _main_err_ratio = _main_err_pwr / _mic_pwr_p3f
+            _shadow_err_ratio = _shadow_err_pwr / _mic_pwr_p3f
+            _shadow_advantage_p3f = (
+                _main_err_smooth_p3f / _shadow_err_smooth_p3f)
+
+            self._post_reset_age_frames += 1
+            _hop_ms_p3f = float(self.config.hop_size) * 1000.0 / float(self.config.sample_rate)
+            _post_reset_age_ms = self._post_reset_age_frames * _hop_ms_p3f
+
+            # erle_slope: dB/s over the trailing ~0.5s window
+            _erle_inst_db = float(self._diag.get('erle_inst', 0.0))
+            self._erle_slope_buf.append(_erle_inst_db)
+            if len(self._erle_slope_buf) >= 2:
+                _slope_dt = (len(self._erle_slope_buf) - 1) * _hop_ms_p3f / 1000.0
+                _erle_slope_db_per_s = (
+                    self._erle_slope_buf[-1] - self._erle_slope_buf[0]
+                ) / max(_slope_dt, 1e-6)
+            else:
+                _erle_slope_db_per_s = 0.0
+
+            # Filter-state classifier v1 (Phase 2a). State priority order:
+            #   idle < startup < diverged < refined_usable < suspicious_dt
+            #                           < coarse_learning (default)
+            # Thresholds picked from Phase 1 smoke and Phase 2a iteration on
+            # 5 trace cases (FS_static, FS_movement, DT_static, DT_movement,
+            # 7GT). Re-tune in Phase 2b if invariants still fail.
+            # Startup is the *unstable* post-reset window only. The
+            # _p_max_override (shadow Q-boost) re-arms repeatedly during
+            # healthy adaptation and would otherwise mask refined_usable.
+            _post_reset_warmup_p3f = (self._warmup_frames > 0)
+            _far_active_p3f = bool(self._render_activity.is_active)
+            # Idle: insufficient signal to classify. Either far is silent
+            # (no excitation to evaluate filter) or near is silent (no echo
+            # / NE — main_err and mic both clamp to floor giving ratio 1).
+            # Recognise by the floor signature: main_err_smooth at clamp
+            # (1e-9 or smaller) means filter has not produced a meaningful
+            # error sample yet on the current input.
+            _is_idle = (
+                (not _far_active_p3f)
+                or _main_err_smooth_p3f <= 1e-9
+                or _mic_pwr_p3f <= 1e-8
+            )
+            # Diverged: filter actively making it worse. Require ratio
+            # comfortably above unity (1.3) for at least 5 consecutive
+            # far-active frames (~50 ms hysteresis at hop=160) to filter
+            # out single-frame noise. Reset streak when condition fails.
+            _diverged_th = 1.3
+            _diverged_min_streak = 5
+            if (not _is_idle) and _main_err_ratio > _diverged_th:
+                self._p3f_diverged_streak += 1
+            else:
+                self._p3f_diverged_streak = 0
+
+            # Pre-compute suspicious_dt criteria (used both in the flag
+            # below and to gate refined_usable): NE evidence AND
+            # main_err jump above the refined baseline AND shadow lead.
+            # All three must be present — a single shadow_advantage spike
+            # (FS-early shadow lead) does NOT qualify.
+            _ne_evidence = (
+                float(getattr(self, '_dt_from_energy', 0.0)) > 0.3
+                or float(getattr(self, '_dt_from_shadow', 0.0)) > 0.5
+            )
+            _main_err_jump = (
+                self._p3f_main_err_baseline > 1e-6
+                and _main_err_ratio > 2.0 * self._p3f_main_err_baseline
+            )
+            _shadow_lead = _shadow_advantage_p3f > 1.5
+            _suspicious_dt_hit = (
+                self._p3f_refined_latched
+                and _ne_evidence
+                and _main_err_jump
+                and _shadow_lead
+            )
+
+            if _is_idle:
+                _filter_state = 'idle'
+            elif _post_reset_warmup_p3f or _post_reset_age_ms < 200.0:
+                _filter_state = 'startup'
+            elif self._p3f_diverged_streak >= _diverged_min_streak:
+                _filter_state = 'diverged'
+            elif _suspicious_dt_hit:
+                # Suspicious_dt takes precedence over refined_usable so a
+                # frame with NE evidence + main_err jump + shadow lead is
+                # surfaced even when the absolute ratio still looks
+                # converged.
+                _filter_state = 'suspicious_dt'
+            elif (self._filter_once_converged
+                  and _main_err_ratio < 0.7
+                  and _erle_slope_db_per_s > -5.0):
+                # Latch refined once seen so suspicious_dt can subsequently
+                # detect departures from this baseline.
+                self._p3f_refined_latched = True
+                _filter_state = 'refined_usable'
+            else:
+                _filter_state = 'coarse_learning'
+
+            # Baseline tracks the *best* converged main_err_ratio: it
+            # follows downward (so a better-converged filter raises the bar
+            # for suspicious_dt) but freezes when the ratio rises (so an
+            # NE-contaminated rising ratio doesn't drag the baseline along
+            # with it and defeat the 2× jump trigger). Only updated while
+            # in refined_usable.
+            if _filter_state == 'refined_usable':
+                if self._p3f_main_err_baseline <= 1e-6:
+                    self._p3f_main_err_baseline = _main_err_ratio
+                elif _main_err_ratio < self._p3f_main_err_baseline:
+                    # downward EMA: capture better convergence
+                    self._p3f_main_err_baseline = (
+                        0.9 * self._p3f_main_err_baseline + 0.1 * _main_err_ratio)
+                # else: ratio is rising — freeze baseline so jump can fire
+
+            _delay_solid_p3f = bool(
+                self.delay_est is not None
+                and getattr(self.delay_est, 'is_solid', False))
+            _usable_linear = bool(
+                _delay_solid_p3f
+                and _filter_state == 'refined_usable')
+
+            self._diag['main_err_ratio'] = float(_main_err_ratio)
+            self._diag['shadow_err_ratio'] = float(_shadow_err_ratio)
+            self._diag['p3f_shadow_advantage'] = float(_shadow_advantage_p3f)
+            self._diag['erle_slope_db_per_s'] = float(_erle_slope_db_per_s)
+            self._diag['post_reset_age_ms'] = float(_post_reset_age_ms)
+            self._diag['filter_state'] = str(_filter_state)
+            self._diag['usable_linear'] = bool(_usable_linear)
+            self._diag['p3f_main_err_baseline'] = float(self._p3f_main_err_baseline)
+
+            # P3g Phase 0 — dry-run residual source audit. Linear residual
+            # (Stage-1 ERLE-blended) is computed every frame; render-based
+            # residual is computed only when the legacy switch hits Stage-2
+            # (`using_render_based` is True). Comparing the two tells us
+            # how much the render override is changing the residual the
+            # post-filter sees, per state class. No behaviour change.
+            if self.res is not None and hasattr(self.res, '_residual_est'):
+                _est = self.res._residual_est
+                _lin = float(getattr(_est, '_last_linear_residual_psd_mean', 0.0))
+                _ren = float(getattr(_est, '_last_render_residual_psd_mean', 0.0))
+                self._diag['residual_psd_linear'] = _lin
+                self._diag['residual_psd_render'] = _ren
+                self._diag['residual_render_blend'] = float(
+                    getattr(_est, '_last_render_blend', 0.0))
+            # ---- end P3f trace ----
+
             self._far_power_ema = 0.95 * self._far_power_ema + 0.05 * far_pwr_global
             self._mic_power_ema = 0.95 * self._mic_power_ema + 0.05 * (np.mean(near_end ** 2) + 1e-10)
             self._frame_count += 1

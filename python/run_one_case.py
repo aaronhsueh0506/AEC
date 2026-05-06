@@ -47,7 +47,8 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             sample_rate=16000, write_wav=True,
             mic_pad=0, ref_pad=0,
             diag_csv_path=None, gain_dump_path=None,
-            trace_high_band_metrics=False):
+            trace_high_band_metrics=False,
+            trace_aec_state=False):
     """Process one case; return (mic, ref, out, erle_per_frame, sample_rate).
 
     mic_pad / ref_pad: prepend N zero samples to mic / ref before processing
@@ -126,6 +127,26 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                     d.get('m_modulation', 0.0),
                     d.get('m_spectral_flatness', 0.0),
                 ])
+            # P3e advisory + mu_scale always-on diag (cheap)
+            d = aec._diag
+            row.extend([
+                int(d.get('dt_advisory_active', False)),
+                int(d.get('dt_advisory_hit', False)),
+                float(d.get('mu_scale', 1.0)),
+            ])
+            if trace_aec_state:
+                row.extend([
+                    float(d.get('main_err_ratio', 0.0)),
+                    float(d.get('shadow_err_ratio', 0.0)),
+                    float(d.get('p3f_shadow_advantage', 1.0)),
+                    float(d.get('erle_slope_db_per_s', 0.0)),
+                    float(d.get('post_reset_age_ms', 0.0)),
+                    str(d.get('filter_state', 'startup')),
+                    int(d.get('usable_linear', False)),
+                    float(d.get('residual_psd_linear', 0.0)),
+                    float(d.get('residual_psd_render', 0.0)),
+                    float(d.get('residual_render_blend', 0.0)),
+                ])
             diag_rows.append(tuple(row))
         if capture and aec.res is not None:
             sg = aec.res.get_stage_gains()
@@ -157,6 +178,13 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         if trace_high_band_metrics:
             header.extend(['m_excess_a05', 'm_excess_a10', 'm_excess_a20',
                            'm_modulation', 'm_spectral_flatness'])
+        header.extend(['dt_adv_active', 'dt_adv_hit', 'mu_scale'])
+        if trace_aec_state:
+            header.extend(['main_err_ratio', 'shadow_err_ratio',
+                           'p3f_shadow_advantage', 'erle_slope_db_per_s',
+                           'post_reset_age_ms', 'filter_state', 'usable_linear',
+                           'residual_psd_linear', 'residual_psd_render',
+                           'residual_render_blend'])
         with open(diag_csv_path, 'w', newline='') as fp:
             w = csv.writer(fp)
             w.writerow(header)
@@ -396,6 +424,10 @@ def main():
                    help='write per-frame ResFilter stage gains as .npz here')
     p.add_argument('--trace-high-band-metrics', action='store_true',
                    help='P1 Phase 1: include high-band NE evidence metrics in --diag-csv')
+    p.add_argument('--trace-aec-state', action='store_true',
+                   help='P3f Phase 1: include Mini AecState fields '
+                        '(main_err_ratio, shadow_err_ratio, shadow_advantage, '
+                        'erle_slope, post_reset_age, filter_state, usable_linear)')
     args = p.parse_args()
 
     if args.demo:
@@ -415,6 +447,7 @@ def main():
         diag_csv_path=args.diag_csv,
         gain_dump_path=args.res_gain_dump,
         trace_high_band_metrics=args.trace_high_band_metrics,
+        trace_aec_state=args.trace_aec_state,
     )
     print(f'wrote {args.out} ({len(out)} samples, {len(out) / sr:.2f}s)',
           file=sys.stderr)
