@@ -276,6 +276,15 @@ class AecConfig:
     trace_delay_est: bool = False
     trace_delay_est_path: str = ""  # if non-empty, CSV is flushed here at AEC destruction or via dump method
 
+    # P52 A.0R.2: per-frame regime handler observability. When True, AEC
+    # records one row per frame into AEC._regime_trace_rows with the handler
+    # decision flags (boost_q_fired / reverse_copy_fired / main_paused_fired)
+    # plus main filter W L2 norm before/after the per-frame update, and
+    # ERLE_main before/after. Default False — zero overhead and no behaviour
+    # change. Audio-passive: trace reads existing state, never mutates.
+    trace_p52_regime_handler: bool = False
+    trace_p52_regime_handler_path: str = ""  # if non-empty, dump to .npz on demand
+
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
     # release behaviour. Setting False reverts the corresponding sub-change
     # to the v3.8.3 baseline behaviour, used for isolating each Plan A
@@ -3365,7 +3374,7 @@ class AecState:
     """WebRTC AEC3-style read-only aggregator over the per-frame detector outputs.
 
     Holds references to the 5 detectors (RenderActivityDetector, DoubleTalkAnalyzer,
-    FilterConvergenceAnalyzer, EchoPathChangeDetector, ShadowCopyController) and
+    FilterConvergenceAnalyzer, EchoPathChangeDetector, PathChangeRegimeHandler) and
     DtdEstimator-coherence; exposes derived flags via @property so consumers don't
     rebuild aggregation logic in multiple places.
 
@@ -3377,12 +3386,12 @@ class AecState:
     """
 
     def __init__(self, *, render_activity, convergence, dt_analyzer, epc_det,
-                 shadow_copy_ctrl, dtd_coherence_getter):
+                 regime_handler, dtd_coherence_getter):
         self._render = render_activity
         self._conv = convergence
         self._dt = dt_analyzer
         self._epc = epc_det
-        self._shadow = shadow_copy_ctrl
+        self._regime = regime_handler
         self._dtd_coh = dtd_coherence_getter
 
     # ── Render activity ──────────────────────────────────────────────────────
@@ -3419,7 +3428,7 @@ class AecState:
 
     # ── Shadow filter management ─────────────────────────────────────────────
     @property
-    def main_paused(self) -> bool: return self._shadow.main_paused
+    def main_paused(self) -> bool: return self._regime.main_paused
     @property
     def shadow_advantage(self) -> float: return self._dt.shadow_advantage
 
@@ -3562,8 +3571,8 @@ class EchoPathChangeDetector:
 
 
 @dataclass
-class ShadowCopyDecision:
-    """One-frame decision emitted by ShadowCopyController.
+class RegimeHandlerDecision:
+    """One-frame decision emitted by PathChangeRegimeHandler.
 
     pause_main:    main filter weight update is gated off this frame
     boost_q:       this frame triggered the pause; caller should boost Q on main filter
@@ -3574,12 +3583,29 @@ class ShadowCopyDecision:
     reverse_copy: bool = False
 
 
-class ShadowCopyController:
-    """Owns shadow-copy gate state machine.
+class PathChangeRegimeHandler:
+    """Catastrophe defence for cohort echo-path-nonstationarity outliers.
 
-    Inputs are read-only per-frame measurements; outputs are explicit decisions.
-    Caller (AEC.process) applies the decisions: gate main_mu, apply filter Q-boost,
-    perform shadow.copy_weights_from(main). The controller never mutates filter state.
+    Post-A.0 post-mortem reframe (2026-05-11, see docs/p52_a0_postmortem.md):
+    this handler is **correct by design**, not a legacy artifact. P52 v1.1
+    Task A.0 attempted to retire it on the premise that "shadow is just an
+    information source." Empirically that premise is invalid on at least one
+    cohort case (qNvSMyUSXUyrDGpOw7s6qg_farend_singletalk, p99.2 on
+    ERL_decile_std): with the handler retired, the main filter diverges into
+    anti-correlated output (W L2 grows large but wrong → ERLE_main −27 dB).
+    The handler's boost_q / pause_main / reverse_copy actions force main W →
+    0 on wildly-nonstationary echo paths, degrading the AEC to pass-through
+    rather than catastrophe.
+
+    The Yang-2017 / Jung-2011 R-reset-only mechanism does NOT cover this
+    failure mode (their fast-recovery assumes a stable post-change path; the
+    cohort tail has none — only W → 0 protects).
+
+    Owns shadow-copy gate state machine. Per-frame inputs are read-only
+    measurements; outputs are explicit RegimeHandlerDecision flags. Caller
+    (AEC.process) applies the decisions: gate main_mu, apply filter Q-boost,
+    perform shadow.copy_weights_from(main). The handler never mutates filter
+    state itself.
 
     State (private):
         _copy_err_baseline : EMA of best(main, shadow) error during stable FS
@@ -3647,8 +3673,8 @@ class ShadowCopyController:
                epc_active: bool, saturation_level: float,
                dt_from_energy: float,
                dt_from_coherence: float = 0.0,
-               delay_reliable: bool = False) -> ShadowCopyDecision:
-        decision = ShadowCopyDecision()
+               delay_reliable: bool = False) -> RegimeHandlerDecision:
+        decision = RegimeHandlerDecision()
         if shadow_frame_count < 50:
             return decision
 
@@ -4160,7 +4186,7 @@ class AEC:
 
         # Shadow divergence detection state (WebRTC-style: pause + Q boost, no output switch)
         self.shadow_frame_count = 0
-        self._shadow_copy_ctrl = ShadowCopyController(self.config)
+        self._regime_handler = PathChangeRegimeHandler(self.config)
         self._last_raw_output: Optional[np.ndarray] = None   # raw filter output before RES (diagnostic)
         # EchoPathVariability EMAs moved into EchoPathChangeDetector (self._epc_det)
         # AecState aggregator: WebRTC-style read-only seam over the 5 detectors.
@@ -4170,13 +4196,18 @@ class AEC:
             convergence=self._convergence,
             dt_analyzer=self._dt_analyzer,
             epc_det=self._epc_det,
-            shadow_copy_ctrl=self._shadow_copy_ctrl,
+            regime_handler=self._regime_handler,
             dtd_coherence_getter=lambda: (
                 self.dtd_coherence.confidence if self.dtd_coherence else 0.0),
         )
         self._far_power_ema = 0.0           # TC≈50ms for GetStats()
         self._mic_power_ema = 0.0
         self._frame_count = 0               # frames since reset()
+
+        # P52 A.0R.2: per-frame regime handler trace rows. Only appended to
+        # when self.config.trace_p52_regime_handler is True (default False
+        # → list stays empty → zero memory overhead).
+        self._regime_trace_rows = []
 
         # ERLE (raw = filter-only, final = post-RES)
         self.near_power = 0.0
@@ -4257,7 +4288,7 @@ class AEC:
             'copy_err_baseline': 1e-6,
         }
         self.shadow_frame_count = 0
-        self._shadow_copy_ctrl.reset()
+        self._regime_handler.reset()
         # _epc_det reset above already cleared its EPV EMAs and prev_total_err
         self._far_power_ema = 0.0
         self._mic_power_ema = 0.0
@@ -4363,7 +4394,7 @@ class AEC:
             • DTD divergence + coherence smoothed PSDs
             • RES post-filter state (gain_smooth / echo_psd / noise_psd /
               gates). Long-window far-PSD EMA optionally preserved.
-            • shadow_frame_count + _shadow_copy_ctrl
+            • shadow_frame_count + _regime_handler
             • Diagnostic _diag dict (would otherwise show stale stats)
         """
         # Filter taps + shadow
@@ -4424,7 +4455,7 @@ class AEC:
 
         # Shadow copy controller
         self.shadow_frame_count = 0
-        self._shadow_copy_ctrl.reset()
+        self._regime_handler.reset()
 
         # P3f trace state — zero so post_reset_age_ms restarts from 0 and
         # refined latch / err baseline don't carry pre-reset values forward.
@@ -4850,7 +4881,7 @@ class AEC:
                 self._freq_out_read = r + hop
             else:
                 # WebRTC-style: freeze main filter weights when shadow detected divergence
-                main_mu = 0.0 if self._shadow_copy_ctrl.main_paused else mu_scale
+                main_mu = 0.0 if self._regime_handler.main_paused else mu_scale
                 raw_output = self.filter.process(near_end, far_end, main_mu)
 
             # Shadow filter with DTD protection (#1) and bidirectional copy (#6)
@@ -4884,10 +4915,10 @@ class AEC:
                     shadow_err_smooth=self.shadow_err_smooth,
                 )
 
-                # Copy gate: delegated to ShadowCopyController. The controller
+                # Copy gate: delegated to PathChangeRegimeHandler. The handler
                 # owns _copy_err_baseline / streak counters / pause hangover and
-                # returns a ShadowCopyDecision. Filter mutations (Q-boost, reverse
-                # copy) are applied here so the controller stays decision-only.
+                # returns a RegimeHandlerDecision. Filter mutations (Q-boost, reverse
+                # copy) are applied here so the handler stays decision-only.
                 # Phase C1: optional coherence+delay gate inputs (default gate_mode='energy'
                 # ignores them, so legacy behavior parity-preserved).
                 _dt_coh = self.dtd_coherence.confidence if self.dtd_coherence else 0.0
@@ -4899,7 +4930,20 @@ class AEC:
                     self.delay_est is not None
                     and self.delay_est.confidence >= 0.5
                 )
-                shadow_decision = self._shadow_copy_ctrl.update(
+                # P52 A.0R.2 trace: snapshot regime-relevant state *before*
+                # the handler decision + filter mutations. Audio-passive.
+                _trace_p52 = getattr(self.config, 'trace_p52_regime_handler', False)
+                if _trace_p52:
+                    _t_main_w_before = float(np.linalg.norm(self.filter.W)) \
+                        if hasattr(self.filter, 'W') else 0.0
+                    _t_main_q_before = float(np.max(self.filter.Q)) \
+                        if hasattr(self.filter, 'Q') else 0.0
+                    _t_shadow_w_before = float(np.linalg.norm(self.shadow_filter.W)) \
+                        if (self.shadow_filter is not None and
+                            hasattr(self.shadow_filter, 'W')) else 0.0
+                    _t_erle_before = float(self.get_erle_instant())
+
+                shadow_decision = self._regime_handler.update(
                     shadow_frame_count=self.shadow_frame_count,
                     far_pwr=float(np.mean(far_end ** 2)),
                     main_err_smooth=float(self.main_err_smooth),
@@ -4921,11 +4965,34 @@ class AEC:
                     self.shadow_filter.copy_weights_from(self.filter)
                     self.shadow_err_smooth = self.main_err_smooth
 
+                if _trace_p52:
+                    self._regime_trace_rows.append({
+                        'frame': int(self._frame_count),
+                        'boost_q_fired': bool(shadow_decision.boost_q),
+                        'reverse_copy_fired': bool(shadow_decision.reverse_copy),
+                        'main_paused_fired': bool(shadow_decision.pause_main),
+                        'w_l2_before': _t_main_w_before,
+                        'w_l2_after': float(np.linalg.norm(self.filter.W))
+                            if hasattr(self.filter, 'W') else 0.0,
+                        'q_max_before': _t_main_q_before,
+                        'q_max_after': float(np.max(self.filter.Q))
+                            if hasattr(self.filter, 'Q') else 0.0,
+                        'shadow_w_l2_before': _t_shadow_w_before,
+                        'shadow_w_l2_after': float(np.linalg.norm(self.shadow_filter.W))
+                            if (self.shadow_filter is not None and
+                                hasattr(self.shadow_filter, 'W')) else 0.0,
+                        'erle_main_before': _t_erle_before,
+                        'erle_main_after': float(self.get_erle_instant()),
+                        'copy_counter': int(self._regime_handler.copy_counter),
+                        'copy_err_baseline': float(
+                            self._regime_handler.copy_err_baseline),
+                    })
+
             # EchoPathVariability: gain-change detection (delegated to EchoPathChangeDetector)
             epv_event = self._epc_det.update_epv(
                 far_pwr_global=far_pwr_global,
                 filter_converged=self._filter_converged,
-                main_paused=self._shadow_copy_ctrl.main_paused,
+                main_paused=self._regime_handler.main_paused,
             )
             # ── Round 7.1a: EPV weak-filter false-positive damping ──
             # Worst-DT_mv fires EPV 2.75x more often than best (P0 trace) but
@@ -5304,7 +5371,7 @@ class AEC:
             self._diag['dt_indicator'] = float(dt_indicator) if 'dt_indicator' in locals() else 0.0
             self._diag['main_err_smooth'] = float(getattr(self, 'main_err_smooth', 0.0))
             self._diag['shadow_err_smooth'] = float(getattr(self, 'shadow_err_smooth', 0.0))
-            self._diag['main_paused'] = bool(self._shadow_copy_ctrl.main_paused)
+            self._diag['main_paused'] = bool(self._regime_handler.main_paused)
             _epv_ratio = (self._epv_gain_fast / (self._epv_gain_slow + 1e-10)
                           if self._epv_gain_slow > 1e-12 else 1.0)
             self._diag['epv_gain_ratio'] = float(_epv_ratio)
@@ -5312,7 +5379,7 @@ class AEC:
             self._diag['filter_w_norm'] = float(np.linalg.norm(self.filter.W)) if hasattr(self.filter, 'W') else 0.0
             self._diag['shadow_w_norm'] = (float(np.linalg.norm(self.shadow_filter.W))
                                             if self.shadow_filter and hasattr(self.shadow_filter, 'W') else 0.0)
-            self._diag['copy_err_baseline'] = float(self._shadow_copy_ctrl.copy_err_baseline)
+            self._diag['copy_err_baseline'] = float(self._regime_handler.copy_err_baseline)
 
             # ---- P3f Mini AecState trace (no behaviour change) ----
             # Full-band WebRTC-style ratios e2/y2. Numerator/denominator must
@@ -5794,6 +5861,31 @@ class AEC:
             return 0.0
         return 10 * np.log10((self.near_power + eps) / (self.error_power + eps))
 
+    def dump_regime_trace(self, path: str) -> int:
+        """P52 A.0R.2: dump captured per-frame regime trace rows to .npz.
+
+        Returns the number of rows written. No-op (returns 0) if the flag was
+        off and the buffer is empty. Audio-passive: dump only reads the
+        already-populated `_regime_trace_rows` list.
+
+        Columns (one array per key, shape (n_frames,) with dtype matching the
+        first row's value type):
+          frame, boost_q_fired, reverse_copy_fired, main_paused_fired,
+          w_l2_before, w_l2_after, q_max_before, q_max_after,
+          shadow_w_l2_before, shadow_w_l2_after,
+          erle_main_before, erle_main_after,
+          copy_counter, copy_err_baseline
+        """
+        rows = self._regime_trace_rows
+        if not rows:
+            return 0
+        cols = {}
+        for k in rows[0].keys():
+            cols[k] = np.array([r[k] for r in rows])
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        np.savez(path, **cols)
+        return len(rows)
+
     def is_dtd_active(self) -> bool:
         return self.get_dtd_confidence() > 0.5
 
@@ -5857,8 +5949,8 @@ class AEC:
             delay_samples=delay_samples,
             delay_ms=delay_ms,
             shadow_advantage=self._shadow_advantage,
-            shadow_copy_count=self._shadow_copy_ctrl.copy_counter,
-            main_paused=self._shadow_copy_ctrl.main_paused,
+            shadow_copy_count=self._regime_handler.copy_counter,
+            main_paused=self._regime_handler.main_paused,
             res_gain_mean_db=_db(d.get('res_gain_mean', 1.0)),
             res_using_render=d.get('using_render_based', False),
             echo_psd_mean_db=_db(d.get('echo_psd_mean', 1e-10)),
