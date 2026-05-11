@@ -3648,15 +3648,13 @@ class ShadowCopyController:
                dt_from_energy: float,
                dt_from_coherence: float = 0.0,
                delay_reliable: bool = False) -> ShadowCopyDecision:
-        # P52 Task A.0: diagnostic-only mode. The controller still ticks the
-        # _copy_err_baseline / _copy_counter / _streak EMAs for trace continuity
-        # but never mutates the main filter (no pause, no Q-boost) or the
-        # shadow filter (no reverse copy). See docs/p52_design_lock_v1.1.md §2.6.
         decision = ShadowCopyDecision()
         if shadow_frame_count < 50:
             return decision
 
+        threshold = self.config.shadow_copy_threshold
         far_active = far_pwr > 1e-4
+
         err_sum = main_err_smooth + shadow_err_smooth + 1e-10
         err_balance = abs(main_err_smooth - shadow_err_smooth) / err_sum
         is_stable_fs = far_active and err_balance < 0.3 and not epc_active
@@ -3664,8 +3662,72 @@ class ShadowCopyController:
             best_err = min(main_err_smooth, shadow_err_smooth)
             self._copy_err_baseline = (0.995 * self._copy_err_baseline
                                         + 0.005 * best_err)
-        # P52 A.0: _copy_counter / _streak / _main_paused intentionally not advanced.
-        # decision flags remain False; _main_paused remains False.
+
+        error_is_normal = main_err_smooth < self._copy_err_baseline * 4.0 + 1e-10
+        not_saturating = saturation_level < 0.3
+        # DT guard: shadow may chase near-end speech during DT, making shadow_err
+        # artificially low. Gate selectable for Phase C1 ablation.
+        dt_safe = self._dt_safe(dt_from_energy, dt_from_coherence, delay_reliable)
+        copy_allowed = (far_active and error_is_normal
+                        and not epc_active and not_saturating and dt_safe)
+
+        # S3 streak-only mode: AEC3 5-block consecutive shadow-better rule, no
+        # hysteresis pair. Skip the legacy two-counter logic and go directly
+        # to a simple streak.
+        if self.gate_mode == self.GATE_STREAK:
+            if copy_allowed and shadow_err_smooth < main_err_smooth * threshold:
+                self._streak += 1
+                if self._streak >= self.AEC3_STREAK_FRAMES:
+                    self._streak = 0
+                    self._main_paused = True
+                    self._pause_resume = self.config.epc_hangover
+                    decision.boost_q = True
+            else:
+                self._streak = 0
+            if self._main_paused:
+                if self._pause_resume > 0:
+                    self._pause_resume -= 1
+                else:
+                    self._main_paused = False
+            if (copy_allowed
+                    and main_err_smooth < shadow_err_smooth * threshold
+                    and error_is_normal):
+                decision.reverse_copy = True
+            decision.pause_main = self._main_paused
+            return decision
+
+        # Legacy / coherence gates: original two-counter + streak logic.
+        if copy_allowed:
+            if shadow_err_smooth < main_err_smooth * threshold:
+                self._copy_counter += 1
+                self._streak += 1
+            else:
+                self._copy_counter = 0
+                self._streak = 0
+
+            if (self._copy_counter >= self.config.shadow_copy_hysteresis
+                    and self._streak >= self.HYS_STREAK_MIN):
+                self._copy_counter = 0
+                self._streak = 0
+                self._main_paused = True
+                self._pause_resume = self.config.epc_hangover
+                decision.boost_q = True
+
+            if self._main_paused:
+                if self._pause_resume > 0:
+                    self._pause_resume -= 1
+                else:
+                    self._main_paused = False
+
+            if (main_err_smooth < shadow_err_smooth * threshold
+                    and error_is_normal):
+                decision.reverse_copy = True
+        else:
+            self._copy_counter = 0
+            self._streak = 0
+            self._main_paused = False
+
+        decision.pause_main = self._main_paused
         return decision
 
 
