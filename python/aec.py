@@ -276,6 +276,15 @@ class AecConfig:
     trace_delay_est: bool = False
     trace_delay_est_path: str = ""  # if non-empty, CSV is flushed here at AEC destruction or via dump method
 
+    # P52 A.0R.2: per-frame regime handler observability. When True, AEC
+    # records one row per frame into AEC._regime_trace_rows with the handler
+    # decision flags (boost_q_fired / reverse_copy_fired / main_paused_fired)
+    # plus main filter W L2 norm before/after the per-frame update, and
+    # ERLE_main before/after. Default False — zero overhead and no behaviour
+    # change. Audio-passive: trace reads existing state, never mutates.
+    trace_p52_regime_handler: bool = False
+    trace_p52_regime_handler_path: str = ""  # if non-empty, dump to .npz on demand
+
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
     # release behaviour. Setting False reverts the corresponding sub-change
     # to the v3.8.3 baseline behaviour, used for isolating each Plan A
@@ -4195,6 +4204,11 @@ class AEC:
         self._mic_power_ema = 0.0
         self._frame_count = 0               # frames since reset()
 
+        # P52 A.0R.2: per-frame regime handler trace rows. Only appended to
+        # when self.config.trace_p52_regime_handler is True (default False
+        # → list stays empty → zero memory overhead).
+        self._regime_trace_rows = []
+
         # ERLE (raw = filter-only, final = post-RES)
         self.near_power = 0.0
         self.error_power = 0.0  # backward compat alias for raw
@@ -4916,6 +4930,19 @@ class AEC:
                     self.delay_est is not None
                     and self.delay_est.confidence >= 0.5
                 )
+                # P52 A.0R.2 trace: snapshot regime-relevant state *before*
+                # the handler decision + filter mutations. Audio-passive.
+                _trace_p52 = getattr(self.config, 'trace_p52_regime_handler', False)
+                if _trace_p52:
+                    _t_main_w_before = float(np.linalg.norm(self.filter.W)) \
+                        if hasattr(self.filter, 'W') else 0.0
+                    _t_main_q_before = float(np.max(self.filter.Q)) \
+                        if hasattr(self.filter, 'Q') else 0.0
+                    _t_shadow_w_before = float(np.linalg.norm(self.shadow_filter.W)) \
+                        if (self.shadow_filter is not None and
+                            hasattr(self.shadow_filter, 'W')) else 0.0
+                    _t_erle_before = float(self.get_erle_instant())
+
                 shadow_decision = self._regime_handler.update(
                     shadow_frame_count=self.shadow_frame_count,
                     far_pwr=float(np.mean(far_end ** 2)),
@@ -4937,6 +4964,29 @@ class AEC:
                     # (PBFDAF←PBFDKF copy has no Kalman state to corrupt.)
                     self.shadow_filter.copy_weights_from(self.filter)
                     self.shadow_err_smooth = self.main_err_smooth
+
+                if _trace_p52:
+                    self._regime_trace_rows.append({
+                        'frame': int(self._frame_count),
+                        'boost_q_fired': bool(shadow_decision.boost_q),
+                        'reverse_copy_fired': bool(shadow_decision.reverse_copy),
+                        'main_paused_fired': bool(shadow_decision.pause_main),
+                        'w_l2_before': _t_main_w_before,
+                        'w_l2_after': float(np.linalg.norm(self.filter.W))
+                            if hasattr(self.filter, 'W') else 0.0,
+                        'q_max_before': _t_main_q_before,
+                        'q_max_after': float(np.max(self.filter.Q))
+                            if hasattr(self.filter, 'Q') else 0.0,
+                        'shadow_w_l2_before': _t_shadow_w_before,
+                        'shadow_w_l2_after': float(np.linalg.norm(self.shadow_filter.W))
+                            if (self.shadow_filter is not None and
+                                hasattr(self.shadow_filter, 'W')) else 0.0,
+                        'erle_main_before': _t_erle_before,
+                        'erle_main_after': float(self.get_erle_instant()),
+                        'copy_counter': int(self._regime_handler.copy_counter),
+                        'copy_err_baseline': float(
+                            self._regime_handler.copy_err_baseline),
+                    })
 
             # EchoPathVariability: gain-change detection (delegated to EchoPathChangeDetector)
             epv_event = self._epc_det.update_epv(
@@ -5810,6 +5860,31 @@ class AEC:
         if self.near_power < eps and self.error_power < eps:
             return 0.0
         return 10 * np.log10((self.near_power + eps) / (self.error_power + eps))
+
+    def dump_regime_trace(self, path: str) -> int:
+        """P52 A.0R.2: dump captured per-frame regime trace rows to .npz.
+
+        Returns the number of rows written. No-op (returns 0) if the flag was
+        off and the buffer is empty. Audio-passive: dump only reads the
+        already-populated `_regime_trace_rows` list.
+
+        Columns (one array per key, shape (n_frames,) with dtype matching the
+        first row's value type):
+          frame, boost_q_fired, reverse_copy_fired, main_paused_fired,
+          w_l2_before, w_l2_after, q_max_before, q_max_after,
+          shadow_w_l2_before, shadow_w_l2_after,
+          erle_main_before, erle_main_after,
+          copy_counter, copy_err_baseline
+        """
+        rows = self._regime_trace_rows
+        if not rows:
+            return 0
+        cols = {}
+        for k in rows[0].keys():
+            cols[k] = np.array([r[k] for r in rows])
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        np.savez(path, **cols)
+        return len(rows)
 
     def is_dtd_active(self) -> bool:
         return self.get_dtd_confidence() > 0.5
