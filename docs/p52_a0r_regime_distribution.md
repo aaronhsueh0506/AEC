@@ -108,6 +108,99 @@ distribution suggests. Path 2 design (when / if it opens) must
 explicitly justify why a regime trigger would catch the *catastrophe*
 sub-population, not just the *nonstationarity* sub-population.
 
+## §3a — Mildly_nonstationary cohort controller fire breakdown
+
+Parallel data point to the wildly-cohort finding above: does the
+controller fire heavily across the 59 mildly cases, or is the pattern
+again "one outlier + bulk gentle / silent"?
+
+### Aggregate (n = 59)
+
+| Metric | Mean | Median | Max | Sum |
+|---|---:|---:|---:|---:|
+| `boost_q_count` | 0.37 | 0 | **17** | 22 |
+| `reverse_copy_count` | 3.88 | 3 | 17 | 229 |
+| `main_paused_frames` | 3.37 | 0 | **188** | 199 |
+
+### Activity classes
+
+| Class | n | Share |
+|---|---:|---:|
+| Zero handler fires (bq=0, rev=0, pause=0) | 14 | 23.7 % |
+| Reverse-copy only (bq=0, pause=0, rev>0) | 41 | 69.5 % |
+| **Any `boost_q` > 0 or `main_paused` > 0** | **4** | **6.8 %** |
+
+55 of 59 cases (93 %) have zero `boost_q` and zero `main_paused` frames —
+again, the heavy escalation machinery is silent. 41 cases incur only
+`reverse_copy` (gentle shadow←main sync); 14 cases trigger nothing at
+all (acoustic nonstationarity present per ERL_decile_std but the
+controller sees no divergence to act on).
+
+### The 4 mildly cases with heavy escalation
+
+| Case | std (dB) | boost_q | reverse_copy | main_paused frames |
+|---|---:|---:|---:|---:|
+| `MkSLte0FTkqybGcLTwA3Tw_farend_singletalk_with_movement` | 12.98 | **17** | 6 | **188** |
+| `pU21kfoo0UOz0fPMJFfydg_doubletalk` | 11.93 | 3 | 10 | 8 |
+| `SUYzW4QT30yxKUq7OGvZKg_farend_singletalk` | 10.08 | 1 | 7 | 2 |
+| `tl5UFRCXZkyL6EoWVl09xA_doubletalk` | 9.59 | 1 | 0 | 1 |
+
+The top mildly case (`MkSLte0F…`, std = 12.98 dB) has `boost_q = 17` and
+`main_paused = 188` — comparable in magnitude to the wildly catastrophe
+target (`qNvSMyU…`, std = 23.39, bq = 22, pause = 159). Yet its
+ERL_decile_std (12.98) places it well inside the mildly band (9.43 –
+21.04), not in the wildly tail. This is direct evidence that the
+catastrophe-defence trigger **does not align with the
+ERL_decile_std-defined regime label**: a "merely mildly" case can
+require the same heavy intervention as a wildly case, and 6 of 7 wildly
+cases need only gentle reverse_copy.
+
+### Cohort-wide consolidation
+
+Combining the wildly (§3) and mildly (§3a) findings across the 66
+"non-stable" cases (7 + 59):
+
+| Pattern | Wildly (n=7) | Mildly (n=59) | Combined |
+|---|---:|---:|---:|
+| Heavy escalation (`boost_q > 0` or `main_paused > 0`) | 1 | 4 | **5 / 66** (7.6 %) |
+| Reverse-copy only | 6 | 41 | 47 / 66 (71 %) |
+| Zero fires | 0 | 14 | 14 / 66 (21 %) |
+
+Across the full 800-case cohort the catastrophic-defence machinery
+(`boost_q + main_paused`) fires meaningfully on **5 non-stable cases
+(1 wildly + 4 mildly) plus at least 2 stable-cohort cases**
+(`QEeKiaN…` bq=5 pause=40 and `nyT6FUU…` bq=3 pause=25, see §4 below)
+— roughly **7 cases out of 800** (0.9 %). Reverse_copy (gentle sync)
+fires on tens of cases across all three regimes. The remaining
+~93–94 % of the cohort either is silent or uses only a handful of
+frames of light activity.
+
+### Path 2 ROI implication (updated)
+
+The A.0R.7 wildly-only finding suggested Path 2 ROI ≈ 1 / 800. The
+mildly-cohort data extends this: there is **no clean way to arm a
+Path 2 regime-triggered intervention** using ERL_decile_std alone:
+
+- A "wildly-only" trigger would fire on 7 cases but only 1 needs the
+  heavy machinery (precision 1/7 ≈ 14 %; recall 1/5 = 20 %).
+- A "wildly ∪ mildly" trigger would fire on 66 cases for 5 of ~7
+  catastrophe-candidates (precision 5/66 ≈ 7.6 %; recall 5/7 ≈ 71 %;
+  misses the 2 stable-cohort heavy-fire cases entirely).
+- A "wildly ∪ mildly ∪ stable-with-heavy-fires" trigger would catch all
+  ~7 — but the stable-cohort criterion is itself the existing
+  controller's `boost_q + main_paused` decision; this is circular and
+  Path 2 would contribute nothing new.
+
+Reading: **the controller's frame-level escalation decision is the
+discriminator that works**, not a precomputed acoustic regime label.
+A Path 2 redesign that arms on regime classification alone would either
+over-trigger (66 cases for a 5-case need) or under-trigger (7-case
+wildly catches only 1 of 5 catastrophe candidates). This is
+informational only — Path 2 remains explicitly out of v1.1 scope per
+[p52_phase_a_verdict.md](p52_phase_a_verdict.md); when / if Path 2
+opens, the anchor must be a frame-level divergence signal, not a
+pre-AEC acoustic regime label.
+
 ## Full case enumeration
 
 ### `wildly_nonstationary` (n = 7)
