@@ -50,12 +50,12 @@ LPB = _REPO / 'wav/aec_challenge_blind/farend_singletalk' / f'{CASE_STEM}_lpb.wa
 
 
 def _instrument_controller(aec):
-    """Wrap _shadow_copy_ctrl.update to record per-frame decision + state.
+    """Wrap _regime_handler.update to record per-frame decision + state.
 
     Returns a list that gets appended to once per process() call.
     """
     log = []
-    ctrl = aec._shadow_copy_ctrl
+    ctrl = aec._regime_handler
     orig = ctrl.update
 
     def wrapped(**kw):
