@@ -495,6 +495,18 @@ class AecConfig:
     f_e3_w_reset_min_gap_frames: int = 1000     # ≥10s between W resets
     f_e3_w_reset_factor: float = 0.5            # W *= this when consecutive fires
 
+    # diverged_reset triple-AND gate (v3.11 Phase 1 Sprint 13-14).
+    # Existing diverged_reset_enabled has gates (streak / cooldown /
+    # filter_state=='diverged' / once_converged) but is default-OFF
+    # because F2.2 EMA variant FAILed: EMA confuses shadow-tracking-during-
+    # movement with true divergence. The triple-AND adds shadow_advantage
+    # > 2.0 — requires shadow to also be ahead, which eliminates the
+    # false-positive movement case.
+    # Use together with diverged_reset_enabled=True (master enable).
+    # Default OFF — opt-in ablation flag.
+    diverged_reset_triple_and: bool = False
+    diverged_reset_triple_and_shadow_adv_min: float = 2.0
+
     # F-E5 — saturation handling extensions (v3.11 Phase 1 Sprint 11-12).
     # Edge case E5: clip & saturation. Current handling has 4 known gaps:
     #   E5-1: ref soft-clipped (saturation_softclip_ref), mic NOT — asymmetric
@@ -6097,11 +6109,22 @@ class AEC:
                     self._p3f_diverged_streak
                     >= int(self.config.diverged_reset_streak_frames)
                 )
+            # Sprint 13-14: triple-AND gate adds shadow_advantage > 2.0 to
+            # eliminate the F2.2 EMA false-positive pattern (shadow tracking
+            # during movement looked like divergence). Requires shadow to
+            # also be ahead — only fires on true main-filter divergence
+            # signature, not on path-change events.
+            _triple_and_ok = (
+                not self.config.diverged_reset_triple_and
+                or _shadow_advantage_p3f
+                    > float(self.config.diverged_reset_triple_and_shadow_adv_min)
+            )
             if (self.config.diverged_reset_enabled
                     and self._filter_once_converged
                     and self._p3h_reset_cooldown_remaining == 0
                     and _filter_state == 'diverged'
-                    and _streak_evidence_ok):
+                    and _streak_evidence_ok
+                    and _triple_and_ok):
                 self._reset_filter_derived_state(reason='p3h_diverged')
                 self._p3h_reset_cooldown_remaining = int(
                     self.config.diverged_reset_cooldown_frames)

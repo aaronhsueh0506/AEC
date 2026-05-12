@@ -204,6 +204,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'f_e5_enabled' not in config_overrides):
         config_overrides['f_e5_enabled'] = (
             os.environ['AEC_F_E5'].lower() not in ('0', 'false', 'off', 'no'))
+    # diverged_reset triple-AND gate (v3.11 Phase 1 Sprint 13-14)
+    if ('AEC_DIVERGED_RESET_TRIPLE' in os.environ
+            and 'diverged_reset_triple_and' not in config_overrides):
+        config_overrides['diverged_reset_triple_and'] = (
+            os.environ['AEC_DIVERGED_RESET_TRIPLE'].lower() not in ('0', 'false', 'off', 'no'))
     # P1 Phase 2: conditional HF cap + threshold env vars
     if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
         config_overrides['hf_cap_conditional'] = (
