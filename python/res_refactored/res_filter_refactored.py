@@ -18,10 +18,14 @@ from __future__ import annotations
 from aec import ResFilter  # python/ is on sys.path; sibling-module import
 
 from .residual_estimator import residual_estimator
+from .gain_computer import gain_computer
 
 
 class ResFilterRefactored(ResFilter):
-    """Drop-in subclass of ResFilter; Module 1 delegated to residual_estimator()."""
+    """Drop-in subclass of ResFilter; Modules 1-2 delegated to extracted functions."""
 
     def _stage_residual_model(self, **kwargs):  # noqa: D401
         return residual_estimator(self, **kwargs)
+
+    def _stage_gain_compute(self, **kwargs):  # noqa: D401
+        return gain_computer(self, **kwargs)
