@@ -165,6 +165,15 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'use_epc_state_reset' not in config_overrides):
         config_overrides['use_epc_state_reset'] = (
             os.environ['AEC_USE_EPC_RESET'].lower() not in ('0', 'false', 'off', 'no'))
+    # F2.2 — diverged-streak EMA + P3h reset enable
+    if ('AEC_DIVERGED_STREAK_EMA' in os.environ
+            and 'use_diverged_streak_ema' not in config_overrides):
+        config_overrides['use_diverged_streak_ema'] = (
+            os.environ['AEC_DIVERGED_STREAK_EMA'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_DIVERGED_RESET' in os.environ
+            and 'diverged_reset_enabled' not in config_overrides):
+        config_overrides['diverged_reset_enabled'] = (
+            os.environ['AEC_DIVERGED_RESET'].lower() not in ('0', 'false', 'off', 'no'))
     # P1 Phase 2: conditional HF cap + threshold env vars
     if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
         config_overrides['hf_cap_conditional'] = (

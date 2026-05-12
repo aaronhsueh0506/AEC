@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.10.4"
+__version__ = "3.10.5"
 
 import os
 import numpy as np
@@ -397,6 +397,56 @@ class AecConfig:
     diverged_reset_streak_frames: int = 50          # ~500 ms at hop=160 / 16 kHz
     diverged_reset_cooldown_frames: int = 400        # ~4 s minimum gap
 
+    # F2.2 — EMA-based diverged-streak gate (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
+    # Legacy `_p3f_diverged_streak` is a hard counter that resets to 0 on any
+    # frame below the 1.3 ratio threshold; when main_err_ratio oscillates
+    # around 1.3 it never accumulates to the 50-frame `diverged_reset_streak_frames`
+    # bar, so the P3h reset action becomes dead code. F2.2 replaces the
+    # reset-gate streak check with an EMA tracker (α=0.95 ⇒ TC ≈ 20 frames
+    # ≈ 200 ms at hop=160) so noisy frames don't fully reset the evidence.
+    # Default OFF — opt-in flag, paired with `diverged_reset_enabled=True`.
+    # Classifier-state hard-counter at `_diverged_min_streak=5` is untouched
+    # (the noisy 1-frame fast path still tags 'diverged' for diagnostics).
+    use_diverged_streak_ema: bool = False
+    diverged_streak_ema_alpha: float = 0.95
+    diverged_streak_ema_threshold: float = 0.7
+
+    # F1.2 ablation: PathChangeRegimeHandler gate mode selector.
+    # 'energy' = legacy dt_from_energy < 0.3 gate (production default).
+    # 'streak_only' = AEC3-style 5-block consecutive streak, no DT gate.
+    regime_gate_mode: str = 'energy'
+
+    # F2.3 — Yang 2017 R-reset on EPC (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
+    # When boost_q fires (echo path change detected), also reset PBFDKF._error_psd
+    # and R to their initial value (1e-2). Over-estimated R from a prior DT period
+    # suppresses Kalman gain K, causing slow reconvergence after an EPC event.
+    # Default OFF — opt-in ablation flag.
+    epc_r_reset_enabled: bool = False
+
+    # F2.4 — mu holdoff no-reset (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
+    # _update_simple_mu_ratio resets holdoff=20 every DT frame; in marginal DT
+    # (ratio oscillates around _simple_mu_ratio) holdoff never counts down → mu
+    # is stuck low indefinitely. Fix: only set holdoff when it is at 0 (fresh
+    # attack transition). During holdoff, DT frames apply fast-attack alpha but
+    # do not extend the counter.
+    # Default OFF — opt-in ablation flag.
+    mu_holdoff_no_reset: bool = False
+
+    # F2.5 — prev_dtd_conf two-stage hangover (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
+    # Current ×0.9 per-frame decay gives TC ≈ 10 frames (100ms), shorter than R EMA
+    # recovery (α=0.95, TC ≈ 20 frames). Fix: attack fast (1 frame), then hold
+    # for 10 frames before the ×0.9 decay begins → total release ~300ms.
+    # Default OFF — opt-in ablation flag.
+    dtd_conf_two_stage: bool = False
+
+    # F1.1 — reverse_copy P reset (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
+    # When reverse_copy fires (shadow←main, main-winning case), shadow gets main's W
+    # but retains its old high-Q P. Stale P → wrong K for the copied W for several
+    # frames. Fix: re-arm shadow's P_max_override + P_floor_beta so K recalibrates
+    # quickly. Also re-arm main with a mini-EPC P-boost for faster re-adaptation.
+    # Default OFF — opt-in ablation flag.
+    reverse_copy_p_reset: bool = False
+
     # P3c Phase 1a — DelayEstimator high-PAR fast-path. The shipped
     # `confidence` property forces n_updates >= 3 before any non-zero
     # output even when PAR is overwhelmingly above the solid threshold;
@@ -534,6 +584,12 @@ class AecConfig:
                 shadow_mu_min=0.6,
                 warmup_frames=80,
                 kalman_q_high=1e-3,
+                # F3.1-v3: per-bin mic-energy excess NE evidence (GREEN-PASS, 800-case)
+                use_mic_excess_evidence=True,
+                # F2.3: Yang 2017 R-reset on EPC — net 0.3× improvement ratio (800-case PASS)
+                epc_r_reset_enabled=True,
+                # F2.4: mu holdoff only armed on fresh onset — net 0.9× (800-case PASS)
+                mu_holdoff_no_reset=True,
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
@@ -4238,6 +4294,7 @@ class AEC:
 
         # #4: Confidence memory decay
         self.prev_dtd_conf = 0.0
+        self._dtd_conf_holdoff = 0  # F2.5: frames remaining in hold phase
 
         # Filter convergence + divergence-indicator (extracted to FilterConvergenceAnalyzer).
         # Backward-compat reads via @property below.
@@ -4272,6 +4329,9 @@ class AEC:
         self._p3f_refined_latched = False  # latches true once refined_usable seen
         self._p3f_main_err_baseline = 0.0  # EMA baseline for jump detection
         self._p3f_diverged_streak = 0      # consecutive frames over diverged TH
+        # F2.2 EMA tracker — always maintained (cheap), only consumed by P3h
+        # reset gate when `use_diverged_streak_ema` is True.
+        self._p3f_diverged_streak_ema = 0.0
         # P3h — sustained-diverged reset cooldown. Decremented per frame;
         # reset action gated on cooldown == 0.
         self._p3h_reset_cooldown_remaining = 0
@@ -4355,7 +4415,10 @@ class AEC:
 
         # Shadow divergence detection state (WebRTC-style: pause + Q boost, no output switch)
         self.shadow_frame_count = 0
-        self._regime_handler = PathChangeRegimeHandler(self.config)
+        self._regime_handler = PathChangeRegimeHandler(
+            self.config,
+            gate_mode=getattr(self.config, 'regime_gate_mode', 'energy'),
+        )
         self._last_raw_output: Optional[np.ndarray] = None   # raw filter output before RES (diagnostic)
         # EchoPathVariability EMAs moved into EchoPathChangeDetector (self._epc_det)
         # AecState aggregator: WebRTC-style read-only seam over the 5 detectors.
@@ -4411,6 +4474,7 @@ class AEC:
             self._ref_ring_filled = 0
         self._epc_det.reset()
         self.prev_dtd_conf = 0.0
+        self._dtd_conf_holdoff = 0
         self._convergence.reset()
         # v3.10.0: clear plateau-detector counters on AEC reset
         if hasattr(self, '_plateau_detector'):
@@ -4606,6 +4670,7 @@ class AEC:
         self._simple_mu_holdoff = 0
         self._per_bin_mu_scale = None
         self.prev_dtd_conf = 0.0
+        self._dtd_conf_holdoff = 0
 
         # ERL + EPC-render forced + DT analyzer (all filter-output-derived)
         self._erl_estimate = 0.1
@@ -4633,6 +4698,7 @@ class AEC:
         self._p3f_refined_latched = False
         self._p3f_main_err_baseline = 0.0
         self._p3f_diverged_streak = 0
+        self._p3f_diverged_streak_ema = 0.0
 
         # RES — clears its echo_psd / error_psd / noise_psd / gain_smooth /
         # render state. Long-window far-PSD EMA is preserved when
@@ -4714,7 +4780,18 @@ class AEC:
             raw_conf = max(conf_div, conf_coh)
 
         # #4: Confidence memory decay (avoid sudden drops)
-        conf = max(raw_conf, self.prev_dtd_conf * 0.9)
+        # F2.5: two-stage hangover — attack fast (1 frame), hold 10 frames, then ×0.9 decay.
+        if getattr(self.config, 'dtd_conf_two_stage', False):
+            if raw_conf > self.prev_dtd_conf:
+                conf = raw_conf
+                self._dtd_conf_holdoff = 10
+            elif self._dtd_conf_holdoff > 0:
+                conf = self.prev_dtd_conf
+                self._dtd_conf_holdoff -= 1
+            else:
+                conf = max(raw_conf, self.prev_dtd_conf * 0.9)
+        else:
+            conf = max(raw_conf, self.prev_dtd_conf * 0.9)
         self.prev_dtd_conf = conf
 
         if conf == 0.0:
@@ -4805,9 +4882,14 @@ class AEC:
 
         # Asymmetric EMA + holdoff: fast attack, slow release with holdoff
         if ratio < self._simple_mu_ratio:
-            # Attack: fast drop + start holdoff
+            # Attack: fast drop.
+            # F2.4: only arm holdoff on fresh DT onset (holdoff==0); do not
+            # reset during the holdoff window — marginal DT oscillation keeps
+            # resetting holdoff to 20 so mu never releases.
             alpha = 0.3
-            self._simple_mu_holdoff = 20  # hold low for ~20 frames (~320ms)
+            if (not getattr(self.config, 'mu_holdoff_no_reset', False)
+                    or self._simple_mu_holdoff == 0):
+                self._simple_mu_holdoff = 20  # hold low for ~20 frames (~320ms)
         elif self._simple_mu_holdoff > 0:
             # Holdoff active: keep ratio low, don't release yet
             self._simple_mu_holdoff -= 1
@@ -5128,11 +5210,31 @@ class AEC:
                         self.filter.Q = self.filter.Q_high.copy()
                         self.filter._p_max_override = 1.0
                         self.filter._p_max_override_frames = 20
+                    # F2.3: Yang 2017 R-reset — over-estimated R from a prior DT
+                    # period suppresses Kalman gain K post-EPC, causing slow
+                    # reconvergence. Reset to R_init (1e-2) so K recovers fast.
+                    if (getattr(self.config, 'epc_r_reset_enabled', False)
+                            and hasattr(self.filter, '_error_psd')
+                            and hasattr(self.filter, 'R')):
+                        self.filter._error_psd.fill(1e-2)
+                        self.filter.R.fill(1e-2)
                 if shadow_decision.reverse_copy:
                     # Sync shadow back to main when main is clearly better.
-                    # (PBFDAF←PBFDKF copy has no Kalman state to corrupt.)
                     self.shadow_filter.copy_weights_from(self.filter)
                     self.shadow_err_smooth = self.main_err_smooth
+                    # F1.1: re-arm shadow P so K recalibrates for copied W;
+                    # also boost main P for faster re-adaptation post-copy.
+                    if getattr(self.config, 'reverse_copy_p_reset', False):
+                        for filt in (self.shadow_filter, self.filter):
+                            # Use hasattr(filt, 'P') as PBFDKF guard — P is always
+                            # set as an instance var; _p_max_override is dynamic
+                            # (deleted when expired), so hasattr on it gives False
+                            # outside active EPC overrides.
+                            if filt is not None and hasattr(filt, 'P'):
+                                filt._p_max_override = 1.0
+                                filt._p_max_override_frames = 15
+                                filt._p_floor_beta = 1.0
+                                filt._p_floor_beta_frames = 15
 
                 if _trace_p52:
                     self._regime_trace_rows.append({
@@ -5619,10 +5721,20 @@ class AEC:
             # out single-frame noise. Reset streak when condition fails.
             _diverged_th = 1.3
             _diverged_min_streak = 5
-            if (not _is_idle) and _main_err_ratio > _diverged_th:
+            _diverged_hit_this_frame = (not _is_idle) and _main_err_ratio > _diverged_th
+            if _diverged_hit_this_frame:
                 self._p3f_diverged_streak += 1
             else:
                 self._p3f_diverged_streak = 0
+            # F2.2 — EMA-smoothed streak. Single-frame dips don't fully reset
+            # the evidence (legacy hard counter does). Always tracked; only
+            # consumed by P3h reset gate when `use_diverged_streak_ema` flag
+            # is True. α=0.95 by default → TC ≈ 20 frames ≈ 200 ms at hop=160.
+            _alpha_dse = float(self.config.diverged_streak_ema_alpha)
+            self._p3f_diverged_streak_ema = (
+                _alpha_dse * self._p3f_diverged_streak_ema
+                + (1.0 - _alpha_dse) * (1.0 if _diverged_hit_this_frame else 0.0)
+            )
 
             # Pre-compute suspicious_dt criteria (used both in the flag
             # below and to gate refined_usable): NE evidence AND
@@ -5723,12 +5835,27 @@ class AEC:
             if self._p3h_reset_cooldown_remaining > 0:
                 self._p3h_reset_cooldown_remaining -= 1
             _p3h_fired = False
+            # F2.2 — streak-evidence selector. Default (flag OFF): legacy
+            # hard counter `>= diverged_reset_streak_frames` (≥50 by default).
+            # Flag ON: EMA gate `streak_ema > threshold` (default 0.7 over
+            # α=0.95 ⇒ ~80%-of-frames-diverged-over-200 ms window). EMA
+            # variant survives single-frame ratio dips so the gate actually
+            # fires on cohort-tail cases where ratio oscillates around 1.3.
+            if self.config.use_diverged_streak_ema:
+                _streak_evidence_ok = (
+                    self._p3f_diverged_streak_ema
+                    > float(self.config.diverged_streak_ema_threshold)
+                )
+            else:
+                _streak_evidence_ok = (
+                    self._p3f_diverged_streak
+                    >= int(self.config.diverged_reset_streak_frames)
+                )
             if (self.config.diverged_reset_enabled
                     and self._filter_once_converged
                     and self._p3h_reset_cooldown_remaining == 0
                     and _filter_state == 'diverged'
-                    and self._p3f_diverged_streak
-                        >= int(self.config.diverged_reset_streak_frames)):
+                    and _streak_evidence_ok):
                 self._reset_filter_derived_state(reason='p3h_diverged')
                 self._p3h_reset_cooldown_remaining = int(
                     self.config.diverged_reset_cooldown_frames)
@@ -5737,6 +5864,7 @@ class AEC:
             self._diag['p3h_reset_fired'] = bool(_p3h_fired)
             self._diag['p3h_reset_cooldown'] = int(self._p3h_reset_cooldown_remaining)
             self._diag['p3h_reset_count'] = int(self._p3h_reset_count)
+            self._diag['p3f_diverged_streak_ema'] = float(self._p3f_diverged_streak_ema)
             # ---- end P3h ----
 
             self._far_power_ema = 0.95 * self._far_power_ema + 0.05 * far_pwr_global
