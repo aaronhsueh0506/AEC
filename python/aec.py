@@ -311,6 +311,45 @@ class AecConfig:
     # (effective_dt 0.2–0.5) so per-bin γ²(k) discrimination survives.
     plan_b_dt_per_bin_gamma: bool = False
 
+    # F3.1 — per-bin mic-energy excess evidence (default OFF; A/B candidate).
+    # Replaces the `(1 - coh2)` term in dt_per_bin with the validated
+    # `max(error_psd - far_lw·ERL_est, 0) / error_psd` per-bin metric.
+    # `(1 - coh2)` saturates to 1 in FS post-cancellation (echo cancelled →
+    # residual decorrelated → low coh2 → "NE-like"), an acknowledged
+    # dead-code symptom flagged in the HF-cap comment at ~line 2060. The
+    # excess-ratio metric is mic-energy-based, immune to that saturation,
+    # and was validated in P1 Phase 1 with AUROC 0.871 (FS-vs-NE+DT_positive)
+    # for the HF-cap gate; F3.1 extends the same metric per-bin to the
+    # primary dt_per_bin axis. Gated on `filter_converged AND
+    # _long_window_n_updates > 0` so the metric is only used when
+    # `erl_estimate` and `far_lw` are reliable; falls back to the legacy
+    # path (γ² primary OR coh2 primary) otherwise. Requires
+    # `res_echo_method="direct"` (the balanced default) since
+    # `_long_window_far_psd` is only maintained on that path.
+    use_mic_excess_evidence: bool = False
+
+    # F2.1 — reset stale upstream state on EPC fire (default OFF).
+    # The shipped EPC path (EPV at aec.py:~5107 and shadow_rise at
+    # ~5128) already caps `_erl_estimate` to min(0.3) and boosts Q/P,
+    # but does NOT reset:
+    #   • `_erl_estimate` — EMA α=0.999 post-conv, TC ≈ 10s; can stay
+    #     pinned to the previous-room value for a full sec after a path
+    #     change, breaking any consumer that multiplies it against
+    #     far_psd (RES residual model, F3.1 metric, render-ceil cap).
+    #   • `_erle_window_near` / `_erle_window_err` — α=0.999 windowed
+    #     accumulators (TC ≈ 10s) feeding `erle_factor`; persist old
+    #     room's ERLE shape across the change.
+    #   • `_wn_err_baseline` — speech-frozen with α=0.999 inside DT
+    #     hangover; if the freeze caught the previous room, post-change
+    #     "jump" detection mis-fires as DT.
+    # F2.1 resets all three to init values on the rising edge of
+    # `_epc_det.active`. Default OFF keeps v3.10.4 byte-identical.
+    # Companion to F3.1: F3.1's excess metric relies on
+    # `_erl_estimate` accuracy; the FS_movement worst-case -0.301 in
+    # the F3.1 Phase 1 verdict (docs/f3_1_phase1_verdict.md) traced to
+    # erl staleness during movement-induced path change.
+    use_epc_state_reset: bool = False
+
     # P1 Phase 2 — conditional HF cap based on m_excess_ratio (validated
     # in P1 Phase 1 with AUROC 0.871 on FS-vs-NE+DT_positive). When
     # hf_cap_conditional is True, the stage-6 cap behaviour is gated by
@@ -1469,13 +1508,15 @@ class ResFilter:
                  plan_a_stat_mask_7k: bool = True,
                  hf_cap_conditional: bool = False,
                  hf_cap_metric_threshold: float = 0.30,
-                 plan_b_dt_per_bin_gamma: bool = False):
+                 plan_b_dt_per_bin_gamma: bool = False,
+                 use_mic_excess_evidence: bool = False):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
         self._plan_a_stat_mask_7k = plan_a_stat_mask_7k
         self._hf_cap_conditional = hf_cap_conditional
         self._hf_cap_metric_threshold = hf_cap_metric_threshold
+        self._use_mic_excess_evidence = use_mic_excess_evidence
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -1869,11 +1910,19 @@ class ResFilter:
 
     def _stage_gain_compute(self, *, residual_echo_psd, eer, coh2, effective_dt,
                               is_stationary_dt, far_power, filter_once_converged,
-                              spectral_g_min, eps):
+                              spectral_g_min, eps,
+                              erl_estimate: float = 0.01,
+                              filter_converged: bool = False,
+                              epc_active: bool = False):
         """Stage 2: ENR / Wiener / spectral_sub gain compute + EMR + spectral floor lift.
 
         Returns g (post-spectral-floor). Mutates dominant_ne / Round 4 / Round 5
         diag caches and stats.
+
+        `erl_estimate`, `filter_converged`, and `epc_active` are consumed
+        only by the F3.1 mic-excess-evidence branch (default-OFF flag).
+        Legacy and P4B paths are byte-identical to the pre-F3.1
+        implementation.
         """
         if self.gain_type == "enr" and residual_echo_psd is not None:
             raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
@@ -1885,7 +1934,55 @@ class ResFilter:
             # discrimination survives instead of being clamped uniformly to
             # the frame value. effective_dt only contributes a soft floor
             # when it crosses 0.5 (DTD strongly evidences NE).
-            if self._plan_b_dt_per_bin_gamma:
+            # F3.1: per-bin mic-energy excess metric. Reuses the P1-Phase-1
+            # validated `max(error_psd − far_lw·ERL_est, 0) / error_psd`
+            # ratio (AUROC 0.871 in HF-cap gate) as the *primary* per-bin
+            # NE evidence — replaces `(1 - coh2)` which saturates to 1 in
+            # FS post-cancellation. Gated on `filter_converged` AND
+            # long-window initialised so `erl_estimate` and `far_lw` are
+            # reliable; falls through to the P4B / legacy path otherwise.
+            _lw_ready = (
+                self._residual_est is not None
+                and self._residual_est._long_window_n_updates > 0
+            )
+            # F3.1 v3 (2026-05-12): blend with legacy `(1 - coh2)`
+            # (weight=0.7 F3.1, 0.3 legacy) to soften HF over-
+            # suppression in high-coupling rooms where erl_estimate
+            # underestimates true ERL (Lsa5Wpw / wr54weK pattern:
+            # mic/far 0.83/0.55, true ERL ~0.68/0.30 but erl_estimate
+            # capped to 0.3 after EPC). Pure F3.1 over-attributes NE
+            # → over-suppresses → spectral imbalance hurts AECMOS
+            # even though total echo drops. Blend leaves F3.1 as the
+            # dominant signal but caps its swing.
+            #
+            # The earlier v3 attempt also tried a `mic_pwr <= 2·far·erl`
+            # envelope gate to block Regime-2 (pG9Bikvr non-echo
+            # content). It correctly blocked the FS-noise case but
+            # also blocked legitimate DT cases where mic naturally
+            # exceeds expected echo (i2BU43nm). Adding `OR effective_dt
+            # >= 0.2` softened the FS protection back out. Conclusion:
+            # binary gating on mic/far ratio can't be made FS-only
+            # without a label we don't have; the blend alone is the
+            # honest cap.
+            if (self._use_mic_excess_evidence
+                    and filter_converged
+                    and _lw_ready
+                    and not epc_active):
+                far_lw = self._residual_est._long_window_far_psd
+                erl_e = float(erl_estimate)
+                excess = np.maximum(self.error_psd - far_lw * erl_e, 0.0)
+                excess_ratio = np.clip(
+                    excess / (self.error_psd + 1e-10), 0.0, 1.0,
+                ).astype(np.float32)
+                # Blend with legacy `(1 - coh2)` to soften the over-attribution
+                # under erl_estimate underestimation (Regime-3 mitigation).
+                legacy = (1.0 - coh2).astype(np.float32)
+                _BLEND_F31 = 0.7
+                dt_per_bin = _BLEND_F31 * excess_ratio + (1.0 - _BLEND_F31) * legacy
+                if effective_dt > 0.5:
+                    floor_lift = float((effective_dt - 0.5) * 2.0)
+                    dt_per_bin = np.maximum(dt_per_bin, floor_lift)
+            elif self._plan_b_dt_per_bin_gamma:
                 dt_per_bin = (1.0 - coh2).astype(np.float32)
                 if effective_dt > 0.5:
                     floor_lift = float((effective_dt - 0.5) * 2.0)
@@ -2491,6 +2588,9 @@ class ResFilter:
             filter_once_converged=filter_once_converged,
             spectral_g_min=spectral_g_min,
             eps=eps,
+            erl_estimate=erl_estimate,
+            filter_converged=filter_converged,
+            epc_active=epc_active,
         )
         g = self._stage_gain_postprocess(
             g_in=g,
@@ -3834,6 +3934,31 @@ class AEC:
         self._round3_div_counts[source] = self._round3_div_counts.get(source, 0) + 1
         self._round3_last_div_source = source
 
+    def _apply_epc_state_reset(self, source: str) -> None:
+        """F2.1: reset stale upstream state on EPC rising edge.
+
+        Restores `_erl_estimate`, the windowed ERLE accumulators, and the
+        DT-jump baseline to their post-`__init__` values. The shipped EPC
+        code already caps `_erl_estimate` to min(0.3) and boosts Q/P
+        floors; this method completes the picture for state that has
+        decay constants on the order of 10 s and otherwise persists
+        across a path change. Gated by `config.use_epc_state_reset`;
+        callers must check the flag before invoking.
+
+        `source` is one of {'epv', 'shadow_rise'} for tracing; the reset
+        body is identical because both trigger types invalidate the same
+        upstream state by the same mechanism (room/path discontinuity).
+        """
+        self._erl_estimate = 0.1
+        self._erle_window_near = 1e-10
+        self._erle_window_err = 1e-10
+        self._wn_err_baseline = 1e-8
+        # Telemetry: count per-source firings so audit can correlate with
+        # bench deltas. Audio-passive; never read by hot path.
+        if not hasattr(self, '_f2_1_reset_counts'):
+            self._f2_1_reset_counts = {'epv': 0, 'shadow_rise': 0}
+        self._f2_1_reset_counts[source] = self._f2_1_reset_counts.get(source, 0) + 1
+
     # ── EPC-state delegations (state lives in self._epc_det) ─────────────────
     @property
     def epc_active(self) -> bool: return self._epc_det.active
@@ -4080,6 +4205,7 @@ class AEC:
                 hf_cap_conditional=self.config.hf_cap_conditional,
                 hf_cap_metric_threshold=self.config.hf_cap_metric_threshold,
                 plan_b_dt_per_bin_gamma=self.config.plan_b_dt_per_bin_gamma,
+                use_mic_excess_evidence=self.config.use_mic_excess_evidence,
             )
         else:
             self.res = None
@@ -5064,6 +5190,8 @@ class AEC:
                 self._maybe_mark_diverged('epv')
                 self._epc_render_forced_remaining = self.config.epc_hangover
                 self._erl_estimate = min(self._erl_estimate, 0.3)
+                if self.config.use_epc_state_reset:
+                    self._apply_epc_state_reset('epv')
 
             # Echo path change: shadow-error rise (delegated to EchoPathChangeDetector).
             # Update + hangover tick are inside the original (shadow_filter, filter_converged)
@@ -5091,6 +5219,8 @@ class AEC:
                     # Change D: arm RES render-forced + cap stale ERL
                     self._epc_render_forced_remaining = self.config.epc_hangover
                     self._erl_estimate = min(self._erl_estimate, 0.3)
+                    if self.config.use_epc_state_reset:
+                        self._apply_epc_state_reset('shadow_rise')
                 else:
                     # Hangover tick — only when shadow_rise did NOT fire (preserves
                     # original if/elif/else structure exactly).
