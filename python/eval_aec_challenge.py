@@ -174,6 +174,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'diverged_reset_enabled' not in config_overrides):
         config_overrides['diverged_reset_enabled'] = (
             os.environ['AEC_DIVERGED_RESET'].lower() not in ('0', 'false', 'off', 'no'))
+    # B5 — shadow R-reset symmetric extension (v3.11 Phase 1 Sprint 1-2)
+    if ('AEC_SHADOW_R_RESET' in os.environ
+            and 'shadow_r_reset_enabled' not in config_overrides):
+        config_overrides['shadow_r_reset_enabled'] = (
+            os.environ['AEC_SHADOW_R_RESET'].lower() not in ('0', 'false', 'off', 'no'))
     # P1 Phase 2: conditional HF cap + threshold env vars
     if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
         config_overrides['hf_cap_conditional'] = (

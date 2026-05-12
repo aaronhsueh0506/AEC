@@ -427,6 +427,15 @@ class AecConfig:
     # Default OFF — opt-in ablation flag.
     epc_r_reset_enabled: bool = False
 
+    # B5 — shadow R-reset symmetric extension (v3.11 Phase 1 Sprint 1-2).
+    # F2.3 resets only the main filter's R/_error_psd; shadow retains its stale
+    # R from the same DT period. When the regime handler subsequently fires
+    # reverse_copy (shadow→main), the K-handicapped shadow's W is transplanted
+    # into main, undoing the F2.3 fast-recovery benefit. Symmetric reset (both
+    # filters) closes this asymmetry. Effective only when shadow exists.
+    # Default OFF — opt-in ablation flag.
+    shadow_r_reset_enabled: bool = False
+
     # F2.4 — mu holdoff no-reset (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
     # _update_simple_mu_ratio resets holdoff=20 every DT frame; in marginal DT
     # (ratio oscillates around _simple_mu_ratio) holdoff never counts down → mu
@@ -5219,6 +5228,13 @@ class AEC:
                     if self.config.epc_r_reset_enabled:
                         self.filter._error_psd.fill(1e-2)
                         self.filter.R.fill(1e-2)
+                    # B5: symmetric R-reset on shadow filter — without it, the
+                    # K-handicapped shadow (stale R from same DT period) feeds
+                    # a wrong-K W into main on the next reverse_copy event,
+                    # undoing F2.3's fast-recovery benefit.
+                    if self.config.shadow_r_reset_enabled and self.shadow_filter is not None:
+                        self.shadow_filter._error_psd.fill(1e-2)
+                        self.shadow_filter.R.fill(1e-2)
                 if shadow_decision.reverse_copy:
                     # Sync shadow back to main when main is clearly better.
                     self.shadow_filter.copy_weights_from(self.filter)
