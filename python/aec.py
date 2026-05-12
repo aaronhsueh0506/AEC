@@ -495,6 +495,22 @@ class AecConfig:
     f_e3_w_reset_min_gap_frames: int = 1000     # ≥10s between W resets
     f_e3_w_reset_factor: float = 0.5            # W *= this when consecutive fires
 
+    # F-E5 — saturation handling extensions (v3.11 Phase 1 Sprint 11-12).
+    # Edge case E5: clip & saturation. Current handling has 4 known gaps:
+    #   E5-1: ref soft-clipped (saturation_softclip_ref), mic NOT — asymmetric
+    #   E5-2: main filter mu only freezes at extreme mic clip (>0.8); shadow
+    #         freezes at sat_level >= 0.5. Asymmetric: main keeps learning
+    #         on clipped reference at sat_level 0.5-0.8.
+    #   E5-3: filter._error_psd EMA not reset post-saturation; clipped samples
+    #         pollute the EMA for the α=0.95 TC (~20 frames after sat ends).
+    #   E5-4: sustained mid-saturation rises both filter errors → false
+    #         shadow_rise EPC fire on what is really nonlinear distortion.
+    # All four gated under one flag.
+    # Default OFF — opt-in ablation flag.
+    f_e5_enabled: bool = False
+    f_e5_main_mu_sat_threshold: float = 0.5     # freeze main mu when sat above
+    f_e5_mic_softclip_threshold: float = 0.3    # symmetric to ref soft-clip
+
     # F2.4 — mu holdoff no-reset (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
     # _update_simple_mu_ratio resets holdoff=20 every DT frame; in marginal DT
     # (ratio oscillates around _simple_mu_ratio) holdoff never counts down → mu
@@ -4443,6 +4459,9 @@ class AEC:
         # large initial value means "never fired".
         self._frames_since_last_epc = 10**9
         self._frames_since_last_f_e3_w_reset = 10**9
+        # F-E5 — saturation hysteresis: track previous frame's sat level so
+        # we can fast-attack reset _error_psd on the sat → clean transition.
+        self._f_e5_prev_sat_level = 0.0
         # F2.2 EMA tracker — always maintained (cheap), only consumed by P3h
         # reset gate when `use_diverged_streak_ema` is True.
         self._p3f_diverged_streak_ema = 0.0
@@ -4819,6 +4838,7 @@ class AEC:
         self._delay_history.clear()
         self._frames_since_last_epc = 10**9
         self._frames_since_last_f_e3_w_reset = 10**9
+        self._f_e5_prev_sat_level = 0.0
 
         # RES — clears its echo_psd / error_psd / noise_psd / gain_smooth /
         # render state. Long-window far-PSD EMA is preserved when
@@ -5031,6 +5051,22 @@ class AEC:
             self._saturation_level = max(sat_ref, sat_mic * 0.5)
             if self.config.saturation_softclip_ref and sat_ref > 0.1:
                 far_end = SaturationDetector.soft_clip(far_end.copy())
+            # F-E5 / E5-1: symmetric mic soft-clip on sat_mic threshold.
+            if (self.config.f_e5_enabled
+                    and sat_mic > self.config.f_e5_mic_softclip_threshold):
+                near_end = SaturationDetector.soft_clip(near_end.copy())
+            # F-E5 / E5-3: fast-attack _error_psd reset on sat → clean
+            # transition so the α=0.95 EMA does not propagate clipped
+            # samples into R for ~20 frames after sat ends.
+            if (self.config.f_e5_enabled
+                    and self._f_e5_prev_sat_level > 0.5
+                    and self._saturation_level < 0.2
+                    and hasattr(self.filter, '_error_psd')):
+                self.filter._error_psd.fill(1e-2)
+                if (self.shadow_filter is not None
+                        and hasattr(self.shadow_filter, '_error_psd')):
+                    self.shadow_filter._error_psd.fill(1e-2)
+            self._f_e5_prev_sat_level = float(self._saturation_level)
 
         # Delay estimation + reference alignment
         if self._delay_active:
@@ -5213,6 +5249,15 @@ class AEC:
                 mu_scale = 0.0
                 if self.res:
                     self.res.gain_smooth[:] = self.res.g_min
+        # F-E5 / E5-2: extended main mu sat-gate. Match shadow's threshold
+        # (saturation_safe = sat < 0.5) so main filter does not keep learning
+        # on a clipped reference signal while shadow is already paused.
+        if (self.config.f_e5_enabled
+                and self._saturation_level > self.config.f_e5_main_mu_sat_threshold):
+            if isinstance(mu_scale, np.ndarray):
+                mu_scale = np.zeros_like(mu_scale)
+            else:
+                mu_scale = 0.0
 
         _res_context = None  # populated when return_res_context=True and no internal RES
 
@@ -5470,6 +5515,15 @@ class AEC:
                     shadow_err_smooth=self.shadow_err_smooth,
                     is_stationary=self._render_activity.is_stationary,
                 )
+                # F-E5 / E5-4: mask shadow_rise during sustained saturation.
+                # Clipped input causes both filter errors to rise in tandem;
+                # the detector reads that as path change but it is really
+                # nonlinear distortion. Avoid false EPC triggering filter
+                # re-initialisation during a sat event.
+                if (self.config.f_e5_enabled
+                        and self._saturation_level > self.config.f_e5_main_mu_sat_threshold
+                        and rise_event.fired):
+                    rise_event = type(rise_event)(fired=False, source=rise_event.source)
                 if rise_event.fired:
                     if self.dtd_coherence:
                         self.dtd_coherence.confidence *= 0.3
