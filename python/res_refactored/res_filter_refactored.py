@@ -19,13 +19,25 @@ from aec import ResFilter  # python/ is on sys.path; sibling-module import
 
 from .residual_estimator import residual_estimator
 from .gain_computer import gain_computer
+from .spectral_shaper import spectral_shaper
+from .temporal_smoother import temporal_smoother
+from .noise_floor_cng import noise_floor_cng
 
 
 class ResFilterRefactored(ResFilter):
-    """Drop-in subclass of ResFilter; Modules 1-2 delegated to extracted functions."""
+    """Drop-in subclass of ResFilter; all five Modules delegated to extracted functions."""
 
     def _stage_residual_model(self, **kwargs):  # noqa: D401
         return residual_estimator(self, **kwargs)
 
     def _stage_gain_compute(self, **kwargs):  # noqa: D401
         return gain_computer(self, **kwargs)
+
+    def _stage_gain_postprocess(self, **kwargs):  # noqa: D401
+        return spectral_shaper(self, **kwargs)
+
+    def _stage_temporal_smoothing(self, **kwargs):  # noqa: D401
+        return temporal_smoother(self, **kwargs)
+
+    def _stage_noise_floor_and_cng(self, **kwargs):  # noqa: D401
+        return noise_floor_cng(self, **kwargs)
