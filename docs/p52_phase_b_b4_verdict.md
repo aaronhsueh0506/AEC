@@ -46,6 +46,27 @@ cases_over_0.1dB_mean_drift            : 0
 
 Top-10 max-delta cases: all 0.0 (artefacts at `/tmp/p52_b4/verdict.json`).
 
+## §B.4-supp — per-module byte-equal breakdown (gap closure)
+
+Originally B.3 committed Modules 3-5 in a single commit (`3bd58c6`) and
+B.4 measured only the cumulative all-five result. To rule out a
+theoretical "compensating drift" scenario where one module's positive
+drift cancels another's negative drift, supplementary 100-case isolated
+runs were performed by building dynamic `ResFilter` subclasses overriding
+only `M1..M{k}` for k ∈ {2, 3, 4, 5}.
+
+| Configuration | Modules overridden | Cases byte-identical | Max abs delta |
+|---|---|---:|---:|
+| `M1_through_M2` | M1, M2 | **100 / 100** | 0.0 |
+| `M1_through_M3` | M1, M2, M3 | **100 / 100** | 0.0 |
+| `M1_through_M4` | M1, M2, M3, M4 | **100 / 100** | 0.0 |
+| `M1_through_M5` | M1, M2, M3, M4, M5 | **100 / 100** | 0.0 |
+
+Every incremental module addition introduces **zero drift independently**.
+The compensating-drift theoretical bug is verified absent. Tool:
+[tools/research/p52_phase_b_b4_isolated.py](../tools/research/p52_phase_b_b4_isolated.py).
+Artefact: `/tmp/p52_b4/isolated.json`.
+
 ## Implication
 
 The subclass-and-delegate refactor of all five RES modules introduces **zero
