@@ -311,6 +311,23 @@ class AecConfig:
     # (effective_dt 0.2–0.5) so per-bin γ²(k) discrimination survives.
     plan_b_dt_per_bin_gamma: bool = False
 
+    # F3.1 — per-bin mic-energy excess evidence (default OFF; A/B candidate).
+    # Replaces the `(1 - coh2)` term in dt_per_bin with the validated
+    # `max(error_psd - far_lw·ERL_est, 0) / error_psd` per-bin metric.
+    # `(1 - coh2)` saturates to 1 in FS post-cancellation (echo cancelled →
+    # residual decorrelated → low coh2 → "NE-like"), an acknowledged
+    # dead-code symptom flagged in the HF-cap comment at ~line 2060. The
+    # excess-ratio metric is mic-energy-based, immune to that saturation,
+    # and was validated in P1 Phase 1 with AUROC 0.871 (FS-vs-NE+DT_positive)
+    # for the HF-cap gate; F3.1 extends the same metric per-bin to the
+    # primary dt_per_bin axis. Gated on `filter_converged AND
+    # _long_window_n_updates > 0` so the metric is only used when
+    # `erl_estimate` and `far_lw` are reliable; falls back to the legacy
+    # path (γ² primary OR coh2 primary) otherwise. Requires
+    # `res_echo_method="direct"` (the balanced default) since
+    # `_long_window_far_psd` is only maintained on that path.
+    use_mic_excess_evidence: bool = False
+
     # P1 Phase 2 — conditional HF cap based on m_excess_ratio (validated
     # in P1 Phase 1 with AUROC 0.871 on FS-vs-NE+DT_positive). When
     # hf_cap_conditional is True, the stage-6 cap behaviour is gated by
@@ -1469,13 +1486,15 @@ class ResFilter:
                  plan_a_stat_mask_7k: bool = True,
                  hf_cap_conditional: bool = False,
                  hf_cap_metric_threshold: float = 0.30,
-                 plan_b_dt_per_bin_gamma: bool = False):
+                 plan_b_dt_per_bin_gamma: bool = False,
+                 use_mic_excess_evidence: bool = False):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
         self._plan_a_stat_mask_7k = plan_a_stat_mask_7k
         self._hf_cap_conditional = hf_cap_conditional
         self._hf_cap_metric_threshold = hf_cap_metric_threshold
+        self._use_mic_excess_evidence = use_mic_excess_evidence
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -1869,11 +1888,17 @@ class ResFilter:
 
     def _stage_gain_compute(self, *, residual_echo_psd, eer, coh2, effective_dt,
                               is_stationary_dt, far_power, filter_once_converged,
-                              spectral_g_min, eps):
+                              spectral_g_min, eps,
+                              erl_estimate: float = 0.01,
+                              filter_converged: bool = False):
         """Stage 2: ENR / Wiener / spectral_sub gain compute + EMR + spectral floor lift.
 
         Returns g (post-spectral-floor). Mutates dominant_ne / Round 4 / Round 5
         diag caches and stats.
+
+        `erl_estimate` and `filter_converged` are consumed only by the F3.1
+        mic-excess-evidence branch (default-OFF flag). Legacy and P4B paths
+        are byte-identical to the pre-F3.1 implementation.
         """
         if self.gain_type == "enr" and residual_echo_psd is not None:
             raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
@@ -1885,7 +1910,30 @@ class ResFilter:
             # discrimination survives instead of being clamped uniformly to
             # the frame value. effective_dt only contributes a soft floor
             # when it crosses 0.5 (DTD strongly evidences NE).
-            if self._plan_b_dt_per_bin_gamma:
+            # F3.1: per-bin mic-energy excess metric. Reuses the P1-Phase-1
+            # validated `max(error_psd − far_lw·ERL_est, 0) / error_psd`
+            # ratio (AUROC 0.871 in HF-cap gate) as the *primary* per-bin
+            # NE evidence — replaces `(1 - coh2)` which saturates to 1 in
+            # FS post-cancellation. Gated on `filter_converged` AND
+            # long-window initialised so `erl_estimate` and `far_lw` are
+            # reliable; falls through to the P4B / legacy path otherwise.
+            _lw_ready = (
+                self._residual_est is not None
+                and self._residual_est._long_window_n_updates > 0
+            )
+            if (self._use_mic_excess_evidence
+                    and filter_converged
+                    and _lw_ready):
+                far_lw = self._residual_est._long_window_far_psd
+                erl_e = float(erl_estimate)
+                excess = np.maximum(self.error_psd - far_lw * erl_e, 0.0)
+                dt_per_bin = np.clip(
+                    excess / (self.error_psd + 1e-10), 0.0, 1.0,
+                ).astype(np.float32)
+                if effective_dt > 0.5:
+                    floor_lift = float((effective_dt - 0.5) * 2.0)
+                    dt_per_bin = np.maximum(dt_per_bin, floor_lift)
+            elif self._plan_b_dt_per_bin_gamma:
                 dt_per_bin = (1.0 - coh2).astype(np.float32)
                 if effective_dt > 0.5:
                     floor_lift = float((effective_dt - 0.5) * 2.0)
@@ -2491,6 +2539,8 @@ class ResFilter:
             filter_once_converged=filter_once_converged,
             spectral_g_min=spectral_g_min,
             eps=eps,
+            erl_estimate=erl_estimate,
+            filter_converged=filter_converged,
         )
         g = self._stage_gain_postprocess(
             g_in=g,
@@ -4080,6 +4130,7 @@ class AEC:
                 hf_cap_conditional=self.config.hf_cap_conditional,
                 hf_cap_metric_threshold=self.config.hf_cap_metric_threshold,
                 plan_b_dt_per_bin_gamma=self.config.plan_b_dt_per_bin_gamma,
+                use_mic_excess_evidence=self.config.use_mic_excess_evidence,
             )
         else:
             self.res = None
