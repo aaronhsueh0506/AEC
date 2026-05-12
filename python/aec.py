@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.10.6"
+__version__ = "3.11.0"
 
 import os
 import numpy as np
@@ -690,6 +690,14 @@ class AecConfig:
                 epc_r_reset_enabled=True,
                 # F2.4: mu holdoff only armed on fresh onset — net 0.9× (800-case PASS)
                 mu_holdoff_no_reset=True,
+                # v3.11 B5: symmetric Yang 2017 R-reset on shadow filter (Phase 1 Sprint 1-2 PASS)
+                shadow_r_reset_enabled=True,
+                # v3.11 F-E5: saturation handling extensions (Phase 1 Sprint 11-12 PASS)
+                f_e5_enabled=True,
+                # v3.11 diverged_reset: triple-AND gate unblocks dead code safely
+                # (Phase 1 Sprint 13-14 PASS, F2.2 trap avoided via shadow_advantage > 2.0)
+                diverged_reset_enabled=True,
+                diverged_reset_triple_and=True,
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
