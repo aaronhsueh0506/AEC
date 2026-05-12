@@ -1,26 +1,27 @@
-"""ResFilterRefactored — orchestrator placeholder.
+"""ResFilterRefactored — Phase B orchestrator (Task B.3: Module 1 migrated).
 
-Task B.2 deliverable. Will mirror ResFilter.process() (aec.py:2221-2480)
-line-for-line once Task B.3 migrates Modules 1-5.
+Subclass of legacy `ResFilter` that overrides `_stage_residual_model` to delegate
+to the extracted `residual_estimator()` function in this package. All other
+stages (Module 2-5) still use the legacy `ResFilter._stage_*` methods unchanged;
+they will be migrated incrementally in B.3 (Module 2 onwards) and B.4.
 
-Until B.3 completes for all five modules and B.4 confirms 800-case byte
-equality (atol=1e-6, rtol=1e-5; ≥99.99% (frame,bin) within tolerance),
-ResFilterRefactored remains an explicit NotImplementedError so it cannot
-accidentally be wired into production behind a half-migrated flag.
+Once all five Modules are migrated and B.4 confirms 800-case byte-equality
+(atol=1e-6, rtol=1e-5; ≥99.99% (frame,bin) within tolerance), the legacy
+methods will be retired and this orchestrator will mirror `ResFilter.process()`
+line-for-line via explicit module calls.
 
 The eventual config flag (B.5) is `use_res_refactored: bool = False`.
 """
 
 from __future__ import annotations
 
+from aec import ResFilter  # python/ is on sys.path; sibling-module import
 
-class ResFilterRefactored:
-    """Drop-in replacement for ResFilter once B.3 + B.4 complete."""
+from .residual_estimator import residual_estimator
 
-    def __init__(self, *args, **kwargs):  # noqa: D401
-        raise NotImplementedError(
-            'ResFilterRefactored is a Phase B Task B.3 deliverable; not migrated yet'
-        )
 
-    def process(self, *args, **kwargs):
-        raise NotImplementedError
+class ResFilterRefactored(ResFilter):
+    """Drop-in subclass of ResFilter; Module 1 delegated to residual_estimator()."""
+
+    def _stage_residual_model(self, **kwargs):  # noqa: D401
+        return residual_estimator(self, **kwargs)
