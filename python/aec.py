@@ -358,6 +358,20 @@ class AecConfig:
     diverged_reset_streak_frames: int = 50          # ~500 ms at hop=160 / 16 kHz
     diverged_reset_cooldown_frames: int = 400        # ~4 s minimum gap
 
+    # F2.2 — EMA-based diverged-streak gate (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
+    # Legacy `_p3f_diverged_streak` is a hard counter that resets to 0 on any
+    # frame below the 1.3 ratio threshold; when main_err_ratio oscillates
+    # around 1.3 it never accumulates to the 50-frame `diverged_reset_streak_frames`
+    # bar, so the P3h reset action becomes dead code. F2.2 replaces the
+    # reset-gate streak check with an EMA tracker (α=0.95 ⇒ TC ≈ 20 frames
+    # ≈ 200 ms at hop=160) so noisy frames don't fully reset the evidence.
+    # Default OFF — opt-in flag, paired with `diverged_reset_enabled=True`.
+    # Classifier-state hard-counter at `_diverged_min_streak=5` is untouched
+    # (the noisy 1-frame fast path still tags 'diverged' for diagnostics).
+    use_diverged_streak_ema: bool = False
+    diverged_streak_ema_alpha: float = 0.95
+    diverged_streak_ema_threshold: float = 0.7
+
     # P3c Phase 1a — DelayEstimator high-PAR fast-path. The shipped
     # `confidence` property forces n_updates >= 3 before any non-zero
     # output even when PAR is overwhelmingly above the solid threshold;
@@ -4146,6 +4160,9 @@ class AEC:
         self._p3f_refined_latched = False  # latches true once refined_usable seen
         self._p3f_main_err_baseline = 0.0  # EMA baseline for jump detection
         self._p3f_diverged_streak = 0      # consecutive frames over diverged TH
+        # F2.2 EMA tracker — always maintained (cheap), only consumed by P3h
+        # reset gate when `use_diverged_streak_ema` is True.
+        self._p3f_diverged_streak_ema = 0.0
         # P3h — sustained-diverged reset cooldown. Decremented per frame;
         # reset action gated on cooldown == 0.
         self._p3h_reset_cooldown_remaining = 0
@@ -4507,6 +4524,7 @@ class AEC:
         self._p3f_refined_latched = False
         self._p3f_main_err_baseline = 0.0
         self._p3f_diverged_streak = 0
+        self._p3f_diverged_streak_ema = 0.0
 
         # RES — clears its echo_psd / error_psd / noise_psd / gain_smooth /
         # render state. Long-window far-PSD EMA is preserved when
@@ -5489,10 +5507,20 @@ class AEC:
             # out single-frame noise. Reset streak when condition fails.
             _diverged_th = 1.3
             _diverged_min_streak = 5
-            if (not _is_idle) and _main_err_ratio > _diverged_th:
+            _diverged_hit_this_frame = (not _is_idle) and _main_err_ratio > _diverged_th
+            if _diverged_hit_this_frame:
                 self._p3f_diverged_streak += 1
             else:
                 self._p3f_diverged_streak = 0
+            # F2.2 — EMA-smoothed streak. Single-frame dips don't fully reset
+            # the evidence (legacy hard counter does). Always tracked; only
+            # consumed by P3h reset gate when `use_diverged_streak_ema` flag
+            # is True. α=0.95 by default → TC ≈ 20 frames ≈ 200 ms at hop=160.
+            _alpha_dse = float(self.config.diverged_streak_ema_alpha)
+            self._p3f_diverged_streak_ema = (
+                _alpha_dse * self._p3f_diverged_streak_ema
+                + (1.0 - _alpha_dse) * (1.0 if _diverged_hit_this_frame else 0.0)
+            )
 
             # Pre-compute suspicious_dt criteria (used both in the flag
             # below and to gate refined_usable): NE evidence AND
@@ -5593,12 +5621,27 @@ class AEC:
             if self._p3h_reset_cooldown_remaining > 0:
                 self._p3h_reset_cooldown_remaining -= 1
             _p3h_fired = False
+            # F2.2 — streak-evidence selector. Default (flag OFF): legacy
+            # hard counter `>= diverged_reset_streak_frames` (≥50 by default).
+            # Flag ON: EMA gate `streak_ema > threshold` (default 0.7 over
+            # α=0.95 ⇒ ~80%-of-frames-diverged-over-200 ms window). EMA
+            # variant survives single-frame ratio dips so the gate actually
+            # fires on cohort-tail cases where ratio oscillates around 1.3.
+            if self.config.use_diverged_streak_ema:
+                _streak_evidence_ok = (
+                    self._p3f_diverged_streak_ema
+                    > float(self.config.diverged_streak_ema_threshold)
+                )
+            else:
+                _streak_evidence_ok = (
+                    self._p3f_diverged_streak
+                    >= int(self.config.diverged_reset_streak_frames)
+                )
             if (self.config.diverged_reset_enabled
                     and self._filter_once_converged
                     and self._p3h_reset_cooldown_remaining == 0
                     and _filter_state == 'diverged'
-                    and self._p3f_diverged_streak
-                        >= int(self.config.diverged_reset_streak_frames)):
+                    and _streak_evidence_ok):
                 self._reset_filter_derived_state(reason='p3h_diverged')
                 self._p3h_reset_cooldown_remaining = int(
                     self.config.diverged_reset_cooldown_frames)
@@ -5607,6 +5650,7 @@ class AEC:
             self._diag['p3h_reset_fired'] = bool(_p3h_fired)
             self._diag['p3h_reset_cooldown'] = int(self._p3h_reset_cooldown_remaining)
             self._diag['p3h_reset_count'] = int(self._p3h_reset_count)
+            self._diag['p3f_diverged_streak_ema'] = float(self._p3f_diverged_streak_ema)
             # ---- end P3h ----
 
             self._far_power_ema = 0.95 * self._far_power_ema + 0.05 * far_pwr_global
