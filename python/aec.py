@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.10.5"
+__version__ = "3.10.6"
 
 import os
 import numpy as np
@@ -40,6 +40,10 @@ class AecMode(Enum):
 _FREQ_MODES = (AecMode.FDAF, AecMode.PBFDAF, AecMode.PBFDKF, AecMode.SUBBAND)
 # Partitioned block modes
 _PB_MODES = (AecMode.PBFDAF, AecMode.PBFDKF, AecMode.SUBBAND)
+
+# F3.1-v3: blend weight between mic-excess-ratio and legacy (1-coh²) in dt_per_bin.
+# 0.7 keeps excess as dominant signal while capping swing under ERL underestimation.
+_BLEND_F31_MIC_EXCESS = 0.7
 
 
 class AecPreset(Enum):
@@ -2032,9 +2036,9 @@ class ResFilter:
                 ).astype(np.float32)
                 # Blend with legacy `(1 - coh2)` to soften the over-attribution
                 # under erl_estimate underestimation (Regime-3 mitigation).
-                legacy = (1.0 - coh2).astype(np.float32)
-                _BLEND_F31 = 0.7
-                dt_per_bin = _BLEND_F31 * excess_ratio + (1.0 - _BLEND_F31) * legacy
+                legacy = 1.0 - coh2
+                dt_per_bin = (_BLEND_F31_MIC_EXCESS * excess_ratio
+                              + (1.0 - _BLEND_F31_MIC_EXCESS) * legacy)
                 if effective_dt > 0.5:
                     floor_lift = float((effective_dt - 0.5) * 2.0)
                     dt_per_bin = np.maximum(dt_per_bin, floor_lift)
@@ -4781,7 +4785,7 @@ class AEC:
 
         # #4: Confidence memory decay (avoid sudden drops)
         # F2.5: two-stage hangover — attack fast (1 frame), hold 10 frames, then ×0.9 decay.
-        if getattr(self.config, 'dtd_conf_two_stage', False):
+        if self.config.dtd_conf_two_stage:
             if raw_conf > self.prev_dtd_conf:
                 conf = raw_conf
                 self._dtd_conf_holdoff = 10
@@ -4887,8 +4891,7 @@ class AEC:
             # reset during the holdoff window — marginal DT oscillation keeps
             # resetting holdoff to 20 so mu never releases.
             alpha = 0.3
-            if (not getattr(self.config, 'mu_holdoff_no_reset', False)
-                    or self._simple_mu_holdoff == 0):
+            if not self.config.mu_holdoff_no_reset or self._simple_mu_holdoff == 0:
                 self._simple_mu_holdoff = 20  # hold low for ~20 frames (~320ms)
         elif self._simple_mu_holdoff > 0:
             # Holdoff active: keep ratio low, don't release yet
@@ -5213,9 +5216,7 @@ class AEC:
                     # F2.3: Yang 2017 R-reset — over-estimated R from a prior DT
                     # period suppresses Kalman gain K post-EPC, causing slow
                     # reconvergence. Reset to R_init (1e-2) so K recovers fast.
-                    if (getattr(self.config, 'epc_r_reset_enabled', False)
-                            and hasattr(self.filter, '_error_psd')
-                            and hasattr(self.filter, 'R')):
+                    if self.config.epc_r_reset_enabled:
                         self.filter._error_psd.fill(1e-2)
                         self.filter.R.fill(1e-2)
                 if shadow_decision.reverse_copy:
@@ -5224,7 +5225,7 @@ class AEC:
                     self.shadow_err_smooth = self.main_err_smooth
                     # F1.1: re-arm shadow P so K recalibrates for copied W;
                     # also boost main P for faster re-adaptation post-copy.
-                    if getattr(self.config, 'reverse_copy_p_reset', False):
+                    if self.config.reverse_copy_p_reset:
                         for filt in (self.shadow_filter, self.filter):
                             # Use hasattr(filt, 'P') as PBFDKF guard — P is always
                             # set as an instance var; _p_max_override is dynamic
@@ -5379,7 +5380,7 @@ class AEC:
                     if raw_dt_ratio < 2.0 and inst_erl_raw < 1.5:
                         inst_erl = np.clip(inst_erl_raw, 0.001, 1.0)
                         alpha_erl = 0.99 if not self._filter_converged else 0.999
-                        self._erl_estimate = alpha_erl * self._erl_estimate + (1 - alpha_erl) * inst_erl
+                        self._erl_estimate = float(alpha_erl * self._erl_estimate + (1 - alpha_erl) * inst_erl)
 
                 # Pre-filter DT signal (Stage B): mic energy excess over
                 # far × max_ERL. Realistic rooms have ERL ≤ +6 dB (coupling

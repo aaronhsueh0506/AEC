@@ -29,6 +29,7 @@ wav/*.wav
 
 # Eval output directories
 python/output_*/
+results/
 
 # Smoke/tuning scripts (local experiments)
 python/smoke_retune.py
