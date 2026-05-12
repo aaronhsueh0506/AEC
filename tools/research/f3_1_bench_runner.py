@@ -125,12 +125,21 @@ def main() -> int:
                     help='Cap number of cases (debug)')
     ap.add_argument('--no-cng', action='store_true',
                     help='Disable CNG (default: on)')
+    ap.add_argument('--skip-existing', action='store_true',
+                    help='Skip cases whose <stem>_ours.wav already exists '
+                         '(safe resume after interruption)')
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     cases = _collect_cases(args.dataset)
     if args.limit is not None:
         cases = cases[: args.limit]
+    if args.skip_existing:
+        before = len(cases)
+        cases = [c for c in cases
+                  if not os.path.isfile(os.path.join(args.out, f'{c[0]}_ours.wav'))]
+        print(f'[f3.1-bench] skip-existing: {before - len(cases)} done, '
+              f'{len(cases)} to run', flush=True)
     use_mic_excess = os.environ.get('AEC_USE_MIC_EXCESS', '0').lower() not in (
         '0', 'false', 'off', 'no', '')
     enable_cng = not args.no_cng
