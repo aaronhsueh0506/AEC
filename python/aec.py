@@ -436,6 +436,20 @@ class AecConfig:
     # Default OFF — opt-in ablation flag.
     shadow_r_reset_enabled: bool = False
 
+    # B6 — state-aware shadow µ schedule (v3.11 Phase 1 Sprint 3-4).
+    # Current shadow_mu_scale is binary (1.0 or 0.1) based on far_excited +
+    # saturation_safe only; it ignores main_paused and the filter_state
+    # classification. When main is paused (regime handler trying to let W
+    # decay), shadow keeps adapting at full speed; when filter_state is
+    # diverged, shadow trains on a broken main reference. Both cases poison
+    # the next reverse_copy.
+    # B6 adds 4-band schedule: 0 when main_paused or filter_state=='diverged';
+    # 0.1 when far weak or saturating; 0.5 when filter_state=='suspicious_dt'
+    # (DT caution); 1.0 normal. Uses previous frame's filter_state since the
+    # state classifier runs at end of process().
+    # Default OFF — opt-in ablation flag.
+    shadow_mu_state_aware: bool = False
+
     # F2.4 — mu holdoff no-reset (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
     # _update_simple_mu_ratio resets holdoff=20 every DT frame; in marginal DT
     # (ratio oscillates around _simple_mu_ratio) holdoff never counts down → mu
@@ -4342,6 +4356,10 @@ class AEC:
         self._p3f_refined_latched = False  # latches true once refined_usable seen
         self._p3f_main_err_baseline = 0.0  # EMA baseline for jump detection
         self._p3f_diverged_streak = 0      # consecutive frames over diverged TH
+        # B6 — previous-frame filter_state cache for state-aware shadow_mu.
+        # Filter state classifier runs at end of process(); shadow µ schedule
+        # at start needs the previous frame's value.
+        self._prev_filter_state = 'idle'
         # F2.2 EMA tracker — always maintained (cheap), only consumed by P3h
         # reset gate when `use_diverged_streak_ema` is True.
         self._p3f_diverged_streak_ema = 0.0
@@ -4712,6 +4730,7 @@ class AEC:
         self._p3f_main_err_baseline = 0.0
         self._p3f_diverged_streak = 0
         self._p3f_diverged_streak_ema = 0.0
+        self._prev_filter_state = 'idle'
 
         # RES — clears its echo_psd / error_psd / noise_psd / gain_smooth /
         # render state. Long-window far-PSD EMA is preserved when
@@ -5161,7 +5180,21 @@ class AEC:
                 # PoorSignalExcitation() gate on main_filter_update_gain.
                 far_excited = np.mean(far_end ** 2) > 1e-4
                 saturation_safe = self._saturation_level < 0.5
-                shadow_mu_scale = 1.0 if (far_excited and saturation_safe) else 0.1
+                if self.config.shadow_mu_state_aware:
+                    # B6: 4-band state-aware schedule. Precedence:
+                    #   pause (main_paused/diverged) > safety (sat/weak-far)
+                    #   > caution (suspicious_dt) > default.
+                    if (self._regime_handler.main_paused
+                            or self._prev_filter_state == 'diverged'):
+                        shadow_mu_scale = 0.0
+                    elif not (far_excited and saturation_safe):
+                        shadow_mu_scale = 0.1
+                    elif self._prev_filter_state == 'suspicious_dt':
+                        shadow_mu_scale = 0.5
+                    else:
+                        shadow_mu_scale = 1.0
+                else:
+                    shadow_mu_scale = 1.0 if (far_excited and saturation_safe) else 0.1
                 self.shadow_filter.process(near_end, far_end, shadow_mu_scale)
 
                 main_err = self.filter.get_error_energy()
@@ -5826,6 +5859,8 @@ class AEC:
             self._diag['filter_state'] = str(_filter_state)
             self._diag['usable_linear'] = bool(_usable_linear)
             self._diag['p3f_main_err_baseline'] = float(self._p3f_main_err_baseline)
+            # B6 — cache for next-frame shadow_mu state-aware schedule.
+            self._prev_filter_state = _filter_state
 
             # P3g Phase 0 — dry-run residual source audit. Linear residual
             # (Stage-1 ERLE-blended) is computed every frame; render-based
