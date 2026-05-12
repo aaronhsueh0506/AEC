@@ -194,6 +194,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'f_delaytrack_enabled' not in config_overrides):
         config_overrides['f_delaytrack_enabled'] = (
             os.environ['AEC_F_DELAYTRACK'].lower() not in ('0', 'false', 'off', 'no'))
+    # F-E3 — consecutive-EPC hangover + W partial reset (v3.11 Phase 1 Sprint 9-10)
+    if ('AEC_F_E3' in os.environ
+            and 'f_e3_enabled' not in config_overrides):
+        config_overrides['f_e3_enabled'] = (
+            os.environ['AEC_F_E3'].lower() not in ('0', 'false', 'off', 'no'))
     # P1 Phase 2: conditional HF cap + threshold env vars
     if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
         config_overrides['hf_cap_conditional'] = (

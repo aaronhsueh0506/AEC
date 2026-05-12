@@ -476,6 +476,25 @@ class AecConfig:
     # Default OFF — opt-in ablation flag.
     f_delaytrack_enabled: bool = False
 
+    # F-E3 — consecutive-EPC hangover extension + W partial reset
+    # (v3.11 Phase 1 Sprint 9-10). Edge case E3: echo gain change (blind
+    # test pattern — mid-clip gain ±N dB then revert to original).
+    # First gain change fires EPC (epv or shadow_rise); state reset works.
+    # Second gain change (within ~1s) fires EPC again BUT W still tracks
+    # the first-gain regime → re-learn against mismatched taps → slow
+    # convergence. F-E3 detects "consecutive" fires (within window) and:
+    #   1. Extends hangover to ≥1s so RES knows we're still in transition
+    #   2. Scales W by w_reset_factor (default 0.5) to soften stale taps
+    # Cohort-tail guard: min_gap prevents W reset from spamming in
+    # always-non-stationary paths (qNvSMyU-class cases fire shadow_rise
+    # every few frames; without a gap-guard F-E3 would erase all converged
+    # state on those cases).
+    # Default OFF — opt-in ablation flag.
+    f_e3_enabled: bool = False
+    f_e3_consecutive_window_frames: int = 100   # within 1s at hop=160 / sr=16k
+    f_e3_w_reset_min_gap_frames: int = 1000     # ≥10s between W resets
+    f_e3_w_reset_factor: float = 0.5            # W *= this when consecutive fires
+
     # F2.4 — mu holdoff no-reset (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
     # _update_simple_mu_ratio resets holdoff=20 every DT frame; in marginal DT
     # (ratio oscillates around _simple_mu_ratio) holdoff never counts down → mu
@@ -4043,6 +4062,32 @@ class AEC:
         self._round3_div_counts[source] = self._round3_div_counts.get(source, 0) + 1
         self._round3_last_div_source = source
 
+    def _f_e3_handle_epc_fire(self, source: str) -> None:
+        """F-E3 consecutive-EPC handler. Called from EPC fire sites; checks
+        whether this fire is within the consecutive window of a prior fire,
+        and if so applies (a) hangover extension to ≥1s and (b) gated W
+        partial reset (gap-guarded against cohort-tail spam).
+
+        Always resets `_frames_since_last_epc` to 0; the caller must invoke
+        this regardless of whether f_e3_enabled to keep the counter live.
+        """
+        if (self.config.f_e3_enabled
+                and self._frames_since_last_epc
+                    < self.config.f_e3_consecutive_window_frames):
+            # E3-1: extend hangover to ≥1s
+            min_hangover = self.config.f_e3_consecutive_window_frames
+            if self._epc_det._hangover < min_hangover:
+                self._epc_det._hangover = min_hangover
+            # E3-3: gap-guarded W partial reset (cohort-tail defence)
+            if (self._frames_since_last_f_e3_w_reset
+                    >= self.config.f_e3_w_reset_min_gap_frames):
+                factor = float(self.config.f_e3_w_reset_factor)
+                for filt in [self.filter, self.shadow_filter]:
+                    if filt is not None and hasattr(filt, 'W'):
+                        filt.W *= factor
+                self._frames_since_last_f_e3_w_reset = 0
+        self._frames_since_last_epc = 0
+
     def _apply_epc_state_reset(self, source: str) -> None:
         """F2.1: reset stale upstream state on EPC rising edge.
 
@@ -4394,6 +4439,10 @@ class AEC:
         # F-DelayTrack — recent delay-estimate history for variance check.
         # Bounded deque; appended only when delay_est emits a valid estimate.
         self._delay_history = deque(maxlen=8)
+        # F-E3 — consecutive-EPC tracking. Counters reset on respective fires;
+        # large initial value means "never fired".
+        self._frames_since_last_epc = 10**9
+        self._frames_since_last_f_e3_w_reset = 10**9
         # F2.2 EMA tracker — always maintained (cheap), only consumed by P3h
         # reset gate when `use_diverged_streak_ema` is True.
         self._p3f_diverged_streak_ema = 0.0
@@ -4768,6 +4817,8 @@ class AEC:
         self._f_e1_far_active = False
         self._f_e1_far_release_count = 0
         self._delay_history.clear()
+        self._frames_since_last_epc = 10**9
+        self._frames_since_last_f_e3_w_reset = 10**9
 
         # RES — clears its echo_psd / error_psd / noise_psd / gain_smooth /
         # render state. Long-window far-PSD EMA is preserved when
@@ -5365,6 +5416,14 @@ class AEC:
                             self._regime_handler.copy_err_baseline),
                     })
 
+            # F-E3: increment "frames since last EPC" counters once per frame,
+            # before EPC detection so that fire-then-reset-to-0 logic in the
+            # helper observes the correct count when consecutive EPC fires.
+            if self._frames_since_last_epc < 10**9:
+                self._frames_since_last_epc += 1
+            if self._frames_since_last_f_e3_w_reset < 10**9:
+                self._frames_since_last_f_e3_w_reset += 1
+
             # EchoPathVariability: gain-change detection (delegated to EchoPathChangeDetector)
             epv_event = self._epc_det.update_epv(
                 far_pwr_global=far_pwr_global,
@@ -5400,6 +5459,7 @@ class AEC:
                 self._erl_estimate = min(self._erl_estimate, 0.3)
                 if self.config.use_epc_state_reset:
                     self._apply_epc_state_reset('epv')
+                self._f_e3_handle_epc_fire('epv')
 
             # Echo path change: shadow-error rise (delegated to EchoPathChangeDetector).
             # Update + hangover tick are inside the original (shadow_filter, filter_converged)
@@ -5429,6 +5489,7 @@ class AEC:
                     self._erl_estimate = min(self._erl_estimate, 0.3)
                     if self.config.use_epc_state_reset:
                         self._apply_epc_state_reset('shadow_rise')
+                    self._f_e3_handle_epc_fire('shadow_rise')
                 else:
                     # Hangover tick — only when shadow_rise did NOT fire (preserves
                     # original if/elif/else structure exactly).
