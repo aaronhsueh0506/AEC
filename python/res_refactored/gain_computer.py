@@ -49,8 +49,10 @@ def gain_computer(rf, *, residual_echo_psd, eer, coh2, effective_dt,
             rf._residual_est is not None
             and rf._residual_est._long_window_n_updates > 0
         )
-        # F3.1 v2 (2026-05-12): also gate on `not epc_active` — see
-        # aec.py ResFilter._stage_gain_compute for full rationale.
+        # F3.1 v3 (2026-05-12): mic-in-echo-envelope gate + legacy blend.
+        # See aec.py ResFilter._stage_gain_compute for full rationale.
+        # F3.1 v3: drop envelope gate, keep blend only. See aec.py for
+        # full rationale on why binary gating on mic/far ratio is unsafe.
         if (getattr(rf, '_use_mic_excess_evidence', False)
                 and filter_converged
                 and _lw_ready
@@ -58,9 +60,12 @@ def gain_computer(rf, *, residual_echo_psd, eer, coh2, effective_dt,
             far_lw = rf._residual_est._long_window_far_psd
             erl_e = float(erl_estimate)
             excess = np.maximum(rf.error_psd - far_lw * erl_e, 0.0)
-            dt_per_bin = np.clip(
+            excess_ratio = np.clip(
                 excess / (rf.error_psd + 1e-10), 0.0, 1.0,
             ).astype(np.float32)
+            legacy = (1.0 - coh2).astype(np.float32)
+            _BLEND_F31 = 0.7
+            dt_per_bin = _BLEND_F31 * excess_ratio + (1.0 - _BLEND_F31) * legacy
             if effective_dt > 0.5:
                 floor_lift = float((effective_dt - 0.5) * 2.0)
                 dt_per_bin = np.maximum(dt_per_bin, floor_lift)

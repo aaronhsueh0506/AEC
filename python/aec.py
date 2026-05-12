@@ -1945,18 +1945,25 @@ class ResFilter:
                 self._residual_est is not None
                 and self._residual_est._long_window_n_updates > 0
             )
-            # F3.1 v2 (2026-05-12): also gate on `not epc_active` to skip
-            # the EPC hangover window. The outlier audit on the 5 worst
-            # FS_movement losers showed F3.1 was firing during fleeting
-            # `filter_converged=True` flashes inside EPC hangover, where
-            # `_long_window_far_psd` and `_erl_estimate` are pinned to the
-            # previous room's profile. The metric output diverges from
-            # steady-state in unpredictable ways (sparse bursts, ON-louder
-            # or ON-quieter depending on the case). Skipping EPC hangover
-            # frames removes the unstable-transition regime entirely; the
-            # tradeoff is fewer fire frames in non-stationary scenes, but
-            # the F3.1 mechanism was already only intended for the
-            # steady-state coh2-saturation regime.
+            # F3.1 v3 (2026-05-12): blend with legacy `(1 - coh2)`
+            # (weight=0.7 F3.1, 0.3 legacy) to soften HF over-
+            # suppression in high-coupling rooms where erl_estimate
+            # underestimates true ERL (Lsa5Wpw / wr54weK pattern:
+            # mic/far 0.83/0.55, true ERL ~0.68/0.30 but erl_estimate
+            # capped to 0.3 after EPC). Pure F3.1 over-attributes NE
+            # → over-suppresses → spectral imbalance hurts AECMOS
+            # even though total echo drops. Blend leaves F3.1 as the
+            # dominant signal but caps its swing.
+            #
+            # The earlier v3 attempt also tried a `mic_pwr <= 2·far·erl`
+            # envelope gate to block Regime-2 (pG9Bikvr non-echo
+            # content). It correctly blocked the FS-noise case but
+            # also blocked legitimate DT cases where mic naturally
+            # exceeds expected echo (i2BU43nm). Adding `OR effective_dt
+            # >= 0.2` softened the FS protection back out. Conclusion:
+            # binary gating on mic/far ratio can't be made FS-only
+            # without a label we don't have; the blend alone is the
+            # honest cap.
             if (self._use_mic_excess_evidence
                     and filter_converged
                     and _lw_ready
@@ -1964,9 +1971,14 @@ class ResFilter:
                 far_lw = self._residual_est._long_window_far_psd
                 erl_e = float(erl_estimate)
                 excess = np.maximum(self.error_psd - far_lw * erl_e, 0.0)
-                dt_per_bin = np.clip(
+                excess_ratio = np.clip(
                     excess / (self.error_psd + 1e-10), 0.0, 1.0,
                 ).astype(np.float32)
+                # Blend with legacy `(1 - coh2)` to soften the over-attribution
+                # under erl_estimate underestimation (Regime-3 mitigation).
+                legacy = (1.0 - coh2).astype(np.float32)
+                _BLEND_F31 = 0.7
+                dt_per_bin = _BLEND_F31 * excess_ratio + (1.0 - _BLEND_F31) * legacy
                 if effective_dt > 0.5:
                     floor_lift = float((effective_dt - 0.5) * 2.0)
                     dt_per_bin = np.maximum(dt_per_bin, floor_lift)

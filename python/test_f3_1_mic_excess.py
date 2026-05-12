@@ -183,9 +183,17 @@ class TestF31FsConverged(unittest.TestCase):
         # Legacy dt_per_bin should be near 1 (the bug we're fixing).
         self.assertGreater(float(np.mean(dtp_off)), 0.9,
                             msg="Legacy: dt_per_bin should be ~1 in FS post-cancel (the bug)")
-        # F3.1 dt_per_bin should be small (NE not present).
-        self.assertLess(float(np.mean(dtp_on)), 0.2,
-                         msg=f"F3.1: dt_per_bin should be small in FS post-cancel, got mean={float(np.mean(dtp_on))}")
+        # F3.1 v3 blends 70 % excess-ratio with 30 % legacy (1 - coh2).
+        # With excess_ratio ~ 0 and legacy ~ 1 in this scenario, blend
+        # lands around 0.3 — still well below legacy ~1 (saturation
+        # fixed) but not as low as pure F3.1 (~0). The blend cap
+        # softens HF over-suppression in high-coupling rooms; see
+        # docs/f3_1_v2_verdict.md Regime-3.
+        self.assertLess(float(np.mean(dtp_on)), 0.5,
+                         msg=f"F3.1 v3: blended dt_per_bin should sit below 0.5 "
+                             f"in FS post-cancel, got mean={float(np.mean(dtp_on))}")
+        self.assertLess(float(np.mean(dtp_on)), float(np.mean(dtp_off)) * 0.5,
+                         msg="F3.1 v3: dt_per_bin should be < half legacy in FS post-cancel")
 
 
 class TestF31DoubleTalk(unittest.TestCase):
