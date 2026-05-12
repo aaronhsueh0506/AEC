@@ -184,6 +184,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'shadow_mu_state_aware' not in config_overrides):
         config_overrides['shadow_mu_state_aware'] = (
             os.environ['AEC_SHADOW_MU_STATE'].lower() not in ('0', 'false', 'off', 'no'))
+    # F-E1 — ERL clip + far_active hysteresis (v3.11 Phase 1 Sprint 5-6)
+    if ('AEC_F_E1' in os.environ
+            and 'f_e1_enabled' not in config_overrides):
+        config_overrides['f_e1_enabled'] = (
+            os.environ['AEC_F_E1'].lower() not in ('0', 'false', 'off', 'no'))
     # P1 Phase 2: conditional HF cap + threshold env vars
     if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
         config_overrides['hf_cap_conditional'] = (

@@ -450,6 +450,18 @@ class AecConfig:
     # Default OFF — opt-in ablation flag.
     shadow_mu_state_aware: bool = False
 
+    # F-E1 — ERL clip range + far_active hysteresis (v3.11 Phase 1 Sprint 5-6).
+    # Edge case E1: ref/mic energy difference too large.
+    #   E1-1: current `np.clip(inst_erl_raw, 0.001, 1.0)` clamps real ERL=0.0005
+    #         (extreme high coupling) to 0.001, biasing mic_excess metric
+    #         downstream. Extend lower bound to 1e-5 to admit extreme cases.
+    #   E1-3: `far_pwr > 1e-4` is a single-threshold gate; far power near 1e-4
+    #         bounces in/out of "active", causing ERL updates to stall in
+    #         marginal-reference scenarios. Add fast-attack / slow-release
+    #         hysteresis (attack at 1e-4, release after 5 frames < 3e-5).
+    # Default OFF — opt-in ablation flag.
+    f_e1_enabled: bool = False
+
     # F2.4 — mu holdoff no-reset (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
     # _update_simple_mu_ratio resets holdoff=20 every DT frame; in marginal DT
     # (ratio oscillates around _simple_mu_ratio) holdoff never counts down → mu
@@ -4360,6 +4372,11 @@ class AEC:
         # Filter state classifier runs at end of process(); shadow µ schedule
         # at start needs the previous frame's value.
         self._prev_filter_state = 'idle'
+        # F-E1 — far_active hysteresis state (fast attack / slow release).
+        # Once far crosses 1e-4 it stays "active" until 5 consecutive frames
+        # below 3e-5. Stabilises ERL update gating across brief power dips.
+        self._f_e1_far_active = False
+        self._f_e1_far_release_count = 0
         # F2.2 EMA tracker — always maintained (cheap), only consumed by P3h
         # reset gate when `use_diverged_streak_ema` is True.
         self._p3f_diverged_streak_ema = 0.0
@@ -4731,6 +4748,8 @@ class AEC:
         self._p3f_diverged_streak = 0
         self._p3f_diverged_streak_ema = 0.0
         self._prev_filter_state = 'idle'
+        self._f_e1_far_active = False
+        self._f_e1_far_release_count = 0
 
         # RES — clears its echo_psd / error_psd / noise_psd / gain_smooth /
         # render state. Long-window far-PSD EMA is preserved when
@@ -5421,13 +5440,36 @@ class AEC:
                 # speech (raw_dt < 2.0 allows high-coupling echo-only through).
                 # Pre-convergence only: after convergence, filter-based echo
                 # estimate is reliable and render-based mode is off.
-                if far_pwr > 1e-4:
+                # F-E1: hysteresis far_active gate (attack 1e-4, release
+                # after 5 frames below 3e-5). Stabilises ERL update during
+                # marginal-reference dips. Falls back to simple threshold
+                # when flag disabled.
+                if self.config.f_e1_enabled:
+                    if far_pwr > 1e-4:
+                        self._f_e1_far_active = True
+                        self._f_e1_far_release_count = 0
+                    elif self._f_e1_far_active:
+                        if far_pwr < 3e-5:
+                            self._f_e1_far_release_count += 1
+                            if self._f_e1_far_release_count >= 5:
+                                self._f_e1_far_active = False
+                                self._f_e1_far_release_count = 0
+                        else:
+                            self._f_e1_far_release_count = 0
+                    erl_update_gate = self._f_e1_far_active
+                    # F-E1: extend ERL clip lower bound to 1e-5 (was 0.001)
+                    # so extreme high coupling cases pass through cleanly.
+                    erl_clip_lo = 1e-5
+                else:
+                    erl_update_gate = (far_pwr > 1e-4)
+                    erl_clip_lo = 0.001
+                if erl_update_gate:
                     raw_dt_ratio = raw_err_pwr / (far_pwr + 1e-10)
                     inst_erl_raw = mic_pwr / far_pwr
                     # v3.2 Axis 1: NE-corruption protection. ERL > 1.5 physically
                     # implausible (mic louder than far → NE dominates), so skip update.
                     if raw_dt_ratio < 2.0 and inst_erl_raw < 1.5:
-                        inst_erl = np.clip(inst_erl_raw, 0.001, 1.0)
+                        inst_erl = np.clip(inst_erl_raw, erl_clip_lo, 1.0)
                         alpha_erl = 0.99 if not self._filter_converged else 0.999
                         self._erl_estimate = float(alpha_erl * self._erl_estimate + (1 - alpha_erl) * inst_erl)
 
