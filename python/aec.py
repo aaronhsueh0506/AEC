@@ -1912,15 +1912,17 @@ class ResFilter:
                               is_stationary_dt, far_power, filter_once_converged,
                               spectral_g_min, eps,
                               erl_estimate: float = 0.01,
-                              filter_converged: bool = False):
+                              filter_converged: bool = False,
+                              epc_active: bool = False):
         """Stage 2: ENR / Wiener / spectral_sub gain compute + EMR + spectral floor lift.
 
         Returns g (post-spectral-floor). Mutates dominant_ne / Round 4 / Round 5
         diag caches and stats.
 
-        `erl_estimate` and `filter_converged` are consumed only by the F3.1
-        mic-excess-evidence branch (default-OFF flag). Legacy and P4B paths
-        are byte-identical to the pre-F3.1 implementation.
+        `erl_estimate`, `filter_converged`, and `epc_active` are consumed
+        only by the F3.1 mic-excess-evidence branch (default-OFF flag).
+        Legacy and P4B paths are byte-identical to the pre-F3.1
+        implementation.
         """
         if self.gain_type == "enr" and residual_echo_psd is not None:
             raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
@@ -1943,9 +1945,22 @@ class ResFilter:
                 self._residual_est is not None
                 and self._residual_est._long_window_n_updates > 0
             )
+            # F3.1 v2 (2026-05-12): also gate on `not epc_active` to skip
+            # the EPC hangover window. The outlier audit on the 5 worst
+            # FS_movement losers showed F3.1 was firing during fleeting
+            # `filter_converged=True` flashes inside EPC hangover, where
+            # `_long_window_far_psd` and `_erl_estimate` are pinned to the
+            # previous room's profile. The metric output diverges from
+            # steady-state in unpredictable ways (sparse bursts, ON-louder
+            # or ON-quieter depending on the case). Skipping EPC hangover
+            # frames removes the unstable-transition regime entirely; the
+            # tradeoff is fewer fire frames in non-stationary scenes, but
+            # the F3.1 mechanism was already only intended for the
+            # steady-state coh2-saturation regime.
             if (self._use_mic_excess_evidence
                     and filter_converged
-                    and _lw_ready):
+                    and _lw_ready
+                    and not epc_active):
                 far_lw = self._residual_est._long_window_far_psd
                 erl_e = float(erl_estimate)
                 excess = np.maximum(self.error_psd - far_lw * erl_e, 0.0)
@@ -2563,6 +2578,7 @@ class ResFilter:
             eps=eps,
             erl_estimate=erl_estimate,
             filter_converged=filter_converged,
+            epc_active=epc_active,
         )
         g = self._stage_gain_postprocess(
             g_in=g,

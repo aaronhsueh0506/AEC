@@ -26,16 +26,17 @@ def gain_computer(rf, *, residual_echo_psd, eer, coh2, effective_dt,
                   is_stationary_dt, far_power, filter_once_converged,
                   spectral_g_min, eps,
                   erl_estimate: float = 0.01,
-                  filter_converged: bool = False):
+                  filter_converged: bool = False,
+                  epc_active: bool = False):
     """Stage 2: ENR / Wiener / spectral_sub gain compute + EMR + spectral floor lift.
 
     Returns g (post-spectral-floor). Mutates `rf.dominant_ne` / Round 4 / Round 5
     diag caches and `rf._stats_last_*` fields.
 
-    `erl_estimate` / `filter_converged` are consumed only by the F3.1
-    mic-excess-evidence branch (gated on `rf._use_mic_excess_evidence`,
-    default-OFF). Legacy / P4B paths remain byte-identical to the
-    pre-F3.1 extraction.
+    `erl_estimate` / `filter_converged` / `epc_active` are consumed only
+    by the F3.1 mic-excess-evidence branch (gated on
+    `rf._use_mic_excess_evidence`, default-OFF). Legacy / P4B paths
+    remain byte-identical to the pre-F3.1 extraction.
     """
     if rf.gain_type == "enr" and residual_echo_psd is not None:
         raw_nearend_est = np.maximum(rf.error_psd - residual_echo_psd, 0.0)
@@ -48,9 +49,12 @@ def gain_computer(rf, *, residual_echo_psd, eer, coh2, effective_dt,
             rf._residual_est is not None
             and rf._residual_est._long_window_n_updates > 0
         )
+        # F3.1 v2 (2026-05-12): also gate on `not epc_active` — see
+        # aec.py ResFilter._stage_gain_compute for full rationale.
         if (getattr(rf, '_use_mic_excess_evidence', False)
                 and filter_converged
-                and _lw_ready):
+                and _lw_ready
+                and not epc_active):
             far_lw = rf._residual_est._long_window_far_psd
             erl_e = float(erl_estimate)
             excess = np.maximum(rf.error_psd - far_lw * erl_e, 0.0)
