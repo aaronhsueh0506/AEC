@@ -160,6 +160,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'use_mic_excess_evidence' not in config_overrides):
         config_overrides['use_mic_excess_evidence'] = (
             os.environ['AEC_USE_MIC_EXCESS'].lower() not in ('0', 'false', 'off', 'no'))
+    # F2.1 EPC state reset (default OFF)
+    if ('AEC_USE_EPC_RESET' in os.environ
+            and 'use_epc_state_reset' not in config_overrides):
+        config_overrides['use_epc_state_reset'] = (
+            os.environ['AEC_USE_EPC_RESET'].lower() not in ('0', 'false', 'off', 'no'))
     # P1 Phase 2: conditional HF cap + threshold env vars
     if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
         config_overrides['hf_cap_conditional'] = (

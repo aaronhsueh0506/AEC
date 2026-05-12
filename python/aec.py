@@ -328,6 +328,28 @@ class AecConfig:
     # `_long_window_far_psd` is only maintained on that path.
     use_mic_excess_evidence: bool = False
 
+    # F2.1 — reset stale upstream state on EPC fire (default OFF).
+    # The shipped EPC path (EPV at aec.py:~5107 and shadow_rise at
+    # ~5128) already caps `_erl_estimate` to min(0.3) and boosts Q/P,
+    # but does NOT reset:
+    #   • `_erl_estimate` — EMA α=0.999 post-conv, TC ≈ 10s; can stay
+    #     pinned to the previous-room value for a full sec after a path
+    #     change, breaking any consumer that multiplies it against
+    #     far_psd (RES residual model, F3.1 metric, render-ceil cap).
+    #   • `_erle_window_near` / `_erle_window_err` — α=0.999 windowed
+    #     accumulators (TC ≈ 10s) feeding `erle_factor`; persist old
+    #     room's ERLE shape across the change.
+    #   • `_wn_err_baseline` — speech-frozen with α=0.999 inside DT
+    #     hangover; if the freeze caught the previous room, post-change
+    #     "jump" detection mis-fires as DT.
+    # F2.1 resets all three to init values on the rising edge of
+    # `_epc_det.active`. Default OFF keeps v3.10.4 byte-identical.
+    # Companion to F3.1: F3.1's excess metric relies on
+    # `_erl_estimate` accuracy; the FS_movement worst-case -0.301 in
+    # the F3.1 Phase 1 verdict (docs/f3_1_phase1_verdict.md) traced to
+    # erl staleness during movement-induced path change.
+    use_epc_state_reset: bool = False
+
     # P1 Phase 2 — conditional HF cap based on m_excess_ratio (validated
     # in P1 Phase 1 with AUROC 0.871 on FS-vs-NE+DT_positive). When
     # hf_cap_conditional is True, the stage-6 cap behaviour is gated by
@@ -3884,6 +3906,31 @@ class AEC:
         self._round3_div_counts[source] = self._round3_div_counts.get(source, 0) + 1
         self._round3_last_div_source = source
 
+    def _apply_epc_state_reset(self, source: str) -> None:
+        """F2.1: reset stale upstream state on EPC rising edge.
+
+        Restores `_erl_estimate`, the windowed ERLE accumulators, and the
+        DT-jump baseline to their post-`__init__` values. The shipped EPC
+        code already caps `_erl_estimate` to min(0.3) and boosts Q/P
+        floors; this method completes the picture for state that has
+        decay constants on the order of 10 s and otherwise persists
+        across a path change. Gated by `config.use_epc_state_reset`;
+        callers must check the flag before invoking.
+
+        `source` is one of {'epv', 'shadow_rise'} for tracing; the reset
+        body is identical because both trigger types invalidate the same
+        upstream state by the same mechanism (room/path discontinuity).
+        """
+        self._erl_estimate = 0.1
+        self._erle_window_near = 1e-10
+        self._erle_window_err = 1e-10
+        self._wn_err_baseline = 1e-8
+        # Telemetry: count per-source firings so audit can correlate with
+        # bench deltas. Audio-passive; never read by hot path.
+        if not hasattr(self, '_f2_1_reset_counts'):
+            self._f2_1_reset_counts = {'epv': 0, 'shadow_rise': 0}
+        self._f2_1_reset_counts[source] = self._f2_1_reset_counts.get(source, 0) + 1
+
     # ── EPC-state delegations (state lives in self._epc_det) ─────────────────
     @property
     def epc_active(self) -> bool: return self._epc_det.active
@@ -5115,6 +5162,8 @@ class AEC:
                 self._maybe_mark_diverged('epv')
                 self._epc_render_forced_remaining = self.config.epc_hangover
                 self._erl_estimate = min(self._erl_estimate, 0.3)
+                if self.config.use_epc_state_reset:
+                    self._apply_epc_state_reset('epv')
 
             # Echo path change: shadow-error rise (delegated to EchoPathChangeDetector).
             # Update + hangover tick are inside the original (shadow_filter, filter_converged)
@@ -5142,6 +5191,8 @@ class AEC:
                     # Change D: arm RES render-forced + cap stale ERL
                     self._epc_render_forced_remaining = self.config.epc_hangover
                     self._erl_estimate = min(self._erl_estimate, 0.3)
+                    if self.config.use_epc_state_reset:
+                        self._apply_epc_state_reset('shadow_rise')
                 else:
                     # Hangover tick — only when shadow_rise did NOT fire (preserves
                     # original if/elif/else structure exactly).

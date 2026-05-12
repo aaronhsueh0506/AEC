@@ -47,7 +47,8 @@ def _estimate_delay(mic, ref, sr, max_delay_ms=250.0):
 
 
 def _run_one(mic_path: str, lpb_path: str, out_path: str,
-              fl: int, use_mic_excess: bool, enable_cng: bool) -> tuple[str, float, str]:
+              fl: int, use_mic_excess: bool, enable_cng: bool,
+              use_epc_reset: bool = False) -> tuple[str, float, str]:
     """Worker entrypoint: process one (mic, lpb) pair → ours.wav.
     Returns (stem, elapsed_seconds, status)."""
     from aec import AEC, AecConfig, AecMode, AecPreset
@@ -80,6 +81,7 @@ def _run_one(mic_path: str, lpb_path: str, out_path: str,
             use_kalman=True,
             enable_delay_est=False,
             use_mic_excess_evidence=use_mic_excess,
+            use_epc_state_reset=use_epc_reset,
         )
         np.random.seed(0)
         aec = AEC(cfg)
@@ -148,10 +150,13 @@ def main() -> int:
               f'{len(cases)} to run', flush=True)
     use_mic_excess = os.environ.get('AEC_USE_MIC_EXCESS', '0').lower() not in (
         '0', 'false', 'off', 'no', '')
+    use_epc_reset = os.environ.get('AEC_USE_EPC_RESET', '0').lower() not in (
+        '0', 'false', 'off', 'no', '')
     enable_cng = not args.no_cng
 
     print(f'[f3.1-bench] cases={len(cases)} jobs={args.jobs} '
-          f'use_mic_excess={use_mic_excess} cng={enable_cng} out={args.out}',
+          f'use_mic_excess={use_mic_excess} use_epc_reset={use_epc_reset} '
+          f'cng={enable_cng} out={args.out}',
           flush=True)
 
     t_start = time.time()
@@ -163,7 +168,7 @@ def main() -> int:
             out_p = os.path.join(args.out, f'{stem}_ours.wav')
             futures[pool.submit(
                 _run_one, mic_p, lpb_p, out_p,
-                args.filter, use_mic_excess, enable_cng,
+                args.filter, use_mic_excess, enable_cng, use_epc_reset,
             )] = stem
 
         for fut in as_completed(futures):
