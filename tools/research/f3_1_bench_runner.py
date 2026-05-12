@@ -98,15 +98,21 @@ def _run_one(mic_path: str, lpb_path: str, out_path: str,
 
 
 def _collect_cases(dataset_dir: str) -> list[tuple[str, str, str, str]]:
-    """Return list of (stem, scenario, mic_path, lpb_path)."""
+    """Return list of (stem, scenario, mic_path, lpb_path).
+
+    Filenames are `<id>_<scenario>[_with_movement]_mic.wav` /
+    `<id>_<scenario>[_with_movement]_lpb.wav`. Initial glob was
+    `*_<scenario>_mic.wav` which silently skipped every
+    `_with_movement_` case (~245 of 800). Strip `_mic.wav` and look up
+    the paired `_lpb.wav` instead so both static and movement land.
+    """
     cases = []
     for scenario in ('doubletalk', 'farend_singletalk', 'nearend_singletalk'):
         scen_dir = Path(dataset_dir) / scenario
         if not scen_dir.is_dir():
             continue
-        # Files are `<stem>_<scenario>_mic.wav` and `<stem>_<scenario>_lpb.wav`.
-        for mic_f in sorted(scen_dir.glob(f'*_{scenario}_mic.wav')):
-            stem = mic_f.name.replace('_mic.wav', '')
+        for mic_f in sorted(scen_dir.glob('*_mic.wav')):
+            stem = mic_f.name[: -len('_mic.wav')]
             lpb_f = scen_dir / f'{stem}_lpb.wav'
             if lpb_f.is_file():
                 cases.append((stem, scenario, str(mic_f), str(lpb_f)))
