@@ -290,6 +290,12 @@ class AecConfig:
     trace_p52_regime_handler: bool = False
     trace_p52_regime_handler_path: str = ""  # if non-empty, dump to .npz on demand
 
+    # P53 Step 0: per-frame innovation-sequence statistics on PBFDKF main
+    # filter, for offline Kalman orthogonality audit (`r = C_obs / C_exp`).
+    # Default False — zero overhead. Audit-only: never reads in production.
+    # See docs/p53_design_lock.md §2.
+    trace_p53_innovation: bool = False
+
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
     # release behaviour. Setting False reverts the corresponding sub-change
     # to the v3.8.3 baseline behaviour, used for isolating each Plan A
@@ -1067,6 +1073,12 @@ class PBFDKF(PBFDAF):
         self._enable_kx_trace = False
         self._kx_trace = []  # list of dicts, one per call to _update_weights
 
+        # P53 Step 0 innovation-audit hook (default OFF, zero overhead).
+        # When enabled, _update_weights appends per-frame per-bin arrays
+        # capturing the Kalman innovation orthogonality components.
+        self._enable_p53_trace = False
+        self._p53_innovation_trace = []  # list of dicts of np.ndarray
+
     def reset(self):
         super().reset()
         self.P.fill(0.01)
@@ -1133,6 +1145,24 @@ class PBFDKF(PBFDAF):
             X = self.X_buf[p_idx]
             total_echo_var += self.P[p] * (np.abs(X) ** 2)
         denominator = total_echo_var + self.R + np.float32(self.delta)
+
+        # P53 Step 0: per-frame innovation-audit capture (default OFF).
+        # Stores per-bin arrays needed to compute r = C_obs / C_exp offline.
+        if self._enable_p53_trace:
+            P_diag = np.zeros(self.n_freqs, dtype=np.float32)
+            far_psd_sum = np.zeros(self.n_freqs, dtype=np.float32)
+            for _p in range(self.n_partitions):
+                _pi = (curr_p - _p) % self.n_partitions
+                P_diag += self.P[_p]
+                far_psd_sum += np.abs(self.X_buf[_pi]) ** 2
+            self._p53_innovation_trace.append({
+                'innovation_power': error_psd.astype(np.float32).copy(),
+                'R': self.R.astype(np.float32).copy(),
+                'total_echo_var': total_echo_var.astype(np.float32).copy(),
+                'denominator': denominator.astype(np.float32).copy(),
+                'P_diag': P_diag,
+                'far_psd': far_psd_sum,
+            })
 
         # GPT Phase 1 trace: per-partition KX_optimal vs KX_scaled accumulator.
         if self._enable_kx_trace:
@@ -3914,6 +3944,9 @@ class AEC:
                 self.filter.Q_high[:] = self.config.kalman_q_high
                 self.filter.Q_low[:]  = self.config.kalman_q_low
                 self.filter.Q[:] = self.config.kalman_q_high
+                # P53 Step 0: enable innovation-audit hook from config.
+                self.filter._enable_p53_trace = bool(
+                    getattr(self.config, 'trace_p53_innovation', False))
 
             # FDAF buffering (when internal_hop > external hop)
             if self.config.mode == AecMode.FDAF and self._internal_hop > self._hop_size:
@@ -5870,6 +5903,30 @@ class AEC:
         if self.near_power < eps and self.error_power < eps:
             return 0.0
         return 10 * np.log10((self.near_power + eps) / (self.error_power + eps))
+
+    def dump_p53_trace(self, path: str) -> int:
+        """P53 Step 0: dump captured per-frame innovation-audit rows to .npz.
+
+        Returns the number of frames written. No-op (returns 0) if the flag
+        was off or the filter is not PBFDKF. Audit-only; never reads in
+        production. See docs/p53_design_lock.md §2.
+        """
+        if not isinstance(self.filter, PBFDKF):
+            return 0
+        rows = getattr(self.filter, '_p53_innovation_trace', [])
+        if not rows:
+            return 0
+        n_frames = len(rows)
+        n_freqs = self.filter.n_freqs
+        cols = {}
+        for k in rows[0].keys():
+            arr = np.empty((n_frames, n_freqs), dtype=np.float32)
+            for i, r in enumerate(rows):
+                arr[i] = r[k]
+            cols[k] = arr
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        np.savez(path, **cols)
+        return n_frames
 
     def dump_regime_trace(self, path: str) -> int:
         """P52 A.0R.2: dump captured per-frame regime trace rows to .npz.

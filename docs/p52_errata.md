@@ -50,3 +50,22 @@ non-listed-in-design-lock supplementary sanity check authored as part
 of Path 3 closure (not in the v1.1 § T1–T8 hard-test list).
 Future Phase A / B / C timing tests, if any, may reference this
 errata when authoring acceptance bars.
+
+---
+
+## T0 threshold methodology scope limitation (P53 finding)
+
+P52 design lock §2.4 T0 thresholds (`r_voice mean ≥ 3.0`, etc.) implicitly
+assumed whole-case mean would detect Q-related signatures. P53 forensic
+review ([docs/p53_audit_forensic_review.md](p53_audit_forensic_review.md)
+§3) found this scope limitation: transient divergence events are < 1 % of
+frames, washed out by quiescent mass.
+
+Future audit-style methodologies should either:
+
+(a) condition on handler-fire-aligned frame subsets, or
+(b) use a different statistical scope (max, p99, or event-conditional
+    means), avoiding whole-case mean for transient detection.
+
+**P52 spec NOT modified.** This errata documents methodology learning
+carried forward to future design locks.
