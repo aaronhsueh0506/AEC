@@ -462,6 +462,20 @@ class AecConfig:
     # Default OFF — opt-in ablation flag.
     f_e1_enabled: bool = False
 
+    # F-DelayTrack — continuous delay variance tracking (v3.11 Phase 1 Sprint 7-8).
+    # Edge case E2: echo path change / movement (gradual delay creep).
+    # Current `delay_reliable = self.delay_est.confidence >= 0.5` is a hard
+    # cut on PAR-derived confidence. PAR is noisy during movement (multiple
+    # peaks compete) → confidence oscillates → reliability gate bounces.
+    # F-DelayTrack replaces with variance-based stability: track the last 8
+    # delay estimates, compute std; gate true when std < 4 samples (0.25 ms
+    # at 16 kHz) AND confidence >= 0.3 (relaxed minimum since variance is
+    # the primary stability signal). Switchboard AEC3 continuous-tracking
+    # pattern; helps movement / gradual-creep scenarios where instantaneous
+    # PAR is misleading.
+    # Default OFF — opt-in ablation flag.
+    f_delaytrack_enabled: bool = False
+
     # F2.4 — mu holdoff no-reset (plan ~/.claude/plans/se-aec-aec-main-hazy-lynx.md).
     # _update_simple_mu_ratio resets holdoff=20 every DT frame; in marginal DT
     # (ratio oscillates around _simple_mu_ratio) holdoff never counts down → mu
@@ -4377,6 +4391,9 @@ class AEC:
         # below 3e-5. Stabilises ERL update gating across brief power dips.
         self._f_e1_far_active = False
         self._f_e1_far_release_count = 0
+        # F-DelayTrack — recent delay-estimate history for variance check.
+        # Bounded deque; appended only when delay_est emits a valid estimate.
+        self._delay_history = deque(maxlen=8)
         # F2.2 EMA tracker — always maintained (cheap), only consumed by P3h
         # reset gate when `use_diverged_streak_ema` is True.
         self._p3f_diverged_streak_ema = 0.0
@@ -4750,6 +4767,7 @@ class AEC:
         self._prev_filter_state = 'idle'
         self._f_e1_far_active = False
         self._f_e1_far_release_count = 0
+        self._delay_history.clear()
 
         # RES — clears its echo_psd / error_psd / noise_psd / gain_smooth /
         # render state. Long-window far-PSD EMA is preserved when
@@ -5241,10 +5259,29 @@ class AEC:
                 # Shadow→main copy permanently overwrites filter taps; should
                 # only allow it when delay alignment is at least mid-confidence
                 # (PAR halfway between par_low and par_solid).
-                _delay_reliable = (
-                    self.delay_est is not None
-                    and self.delay_est.confidence >= 0.5
-                )
+                # F-DelayTrack: track delay estimate stability via variance.
+                # Append valid estimates to bounded history; when enabled,
+                # gate reliability on variance < 4 samples AND confidence >=
+                # 0.3 (relaxed minimum since variance is the primary signal).
+                if (self.delay_est is not None
+                        and self.delay_est.estimated_delay >= 0):
+                    self._delay_history.append(int(self.delay_est.estimated_delay))
+                if self.config.f_delaytrack_enabled:
+                    if (self.delay_est is not None
+                            and len(self._delay_history) >= 3):
+                        delay_std = float(np.std(np.asarray(self._delay_history,
+                                                            dtype=np.float32)))
+                        _delay_reliable = (
+                            delay_std < 4.0
+                            and self.delay_est.confidence >= 0.3
+                        )
+                    else:
+                        _delay_reliable = False
+                else:
+                    _delay_reliable = (
+                        self.delay_est is not None
+                        and self.delay_est.confidence >= 0.5
+                    )
                 # P52 A.0R.2 trace: snapshot regime-relevant state *before*
                 # the handler decision + filter mutations. Audio-passive.
                 _trace_p52 = getattr(self.config, 'trace_p52_regime_handler', False)
