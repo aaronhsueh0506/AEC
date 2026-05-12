@@ -178,6 +178,11 @@ class AecConfig:
     res_alpha: float = 0.8
     enable_cng: bool = False           # Comfort noise generation in RES (off by default)
     enable_td_constraint: bool = True  # Time-domain constraint on filter weights
+    # P52 Phase B: route RES through `ResFilterRefactored` (subclass that
+    # delegates each `_stage_*` to a free function in `python/res_refactored/`).
+    # 800-case byte-equal verified (Task B.4). Default-OFF until a future
+    # phase retires the legacy methods.
+    use_res_refactored: bool = False
 
     # Shadow filter (dual-filter divergence control, frequency-domain modes only)
     enable_shadow: bool = True
@@ -4004,7 +4009,12 @@ class AEC:
 
         # RES (only for frequency-domain modes)
         if self.config.enable_res and self.config.mode in _FREQ_MODES:
-            self.res = ResFilter(
+            if self.config.use_res_refactored:
+                from res_refactored.res_filter_refactored import ResFilterRefactored
+                _ResCls = ResFilterRefactored
+            else:
+                _ResCls = ResFilter
+            self.res = _ResCls(
                 block_size=self.filter.fft_size,
                 n_freqs=self.filter.n_freqs,
                 g_min_db=self.config.res_g_min_db,
