@@ -1,0 +1,41 @@
+# P53 Step 0 audit case list.
+#
+# Format: <category>:<stem>
+# Categories:
+#   listener  — 9 listener-anchored windows (trace-chain regression anchors)
+#   wildly    — 7 wildly_nonstationary cohort (ERL_decile_std ≥ 21.04 dB)
+#   stable    — 12 stable baseline (random.Random(42).sample from
+#               cohort excluding all listener+wildly+known-mildly)
+#
+# Sources:
+#   listener  — project_xrtntuju_regression_clip.md (5 DT clips) +
+#               docs/p52_a0r_regime_distribution.md §3 §3a + p52_a0_postmortem
+#   wildly    — docs/p52_a0r_regime_distribution.md §3 (7-case table)
+#
+# Subset suffix not encoded here — analysis tool resolves by globbing
+# wav/aec_challenge_blind/{doubletalk,farend_singletalk,nearend_singletalk}/.
+
+# Listener-anchored (9):
+listener:XRTnTUjU5kS0mejzCqyCiw_doubletalk
+listener:LHsrJBRGnUKiMC2mihEr0g_doubletalk
+listener:SgKY30fjT0G8e3kQL0RHSQ_doubletalk_with_movement
+listener:afHuFvflAkaH7Pr85kheUQ_doubletalk_with_movement
+listener:XqvGR01tJkan17zltLs38Q_doubletalk_with_movement
+listener:qNvSMyUSXUyrDGpOw7s6qg_farend_singletalk
+listener:MkSLte0FTkqybGcLTwA3Tw_farend_singletalk_with_movement
+listener:pU21kfoo0UOz0fPMJFfydg_doubletalk
+listener:SUYzW4QT30yxKUq7OGvZKg_farend_singletalk
+
+# Wildly_nonstationary (7, from p52_a0r §3):
+wildly:SgKY30fjT0G8e3kQL0RHSQ_doubletalk
+wildly:LQhlYoXXiUevFuxMKwWB0Q_doubletalk
+wildly:0I0XMl3M0ECO0U1N0cJvpg_farend_singletalk_with_movement
+wildly:P10GsQvhskKx3fB06Zv4Yg_farend_singletalk
+wildly:s90M7MOTBkqaV4nQPLhKbA_doubletalk
+wildly:qNvSMyUSXUyrDGpOw7s6qg_farend_singletalk
+wildly:LQhlYoXXiUevFuxMKwWB0Q_farend_singletalk
+
+# Stable baseline (12, sampled at runtime with random.Random(42) from
+# cohort minus the 14 known non-stable stems above + 2 mildly outliers
+# already in listener — the analysis tool resolves these dynamically).
+stable:_RESOLVE_AT_RUNTIME_
