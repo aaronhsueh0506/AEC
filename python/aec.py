@@ -559,6 +559,18 @@ class AecConfig:
     # docs/v3_12_phase3b_v3_design.md §3.1 / §6.1.
     res_dt_per_bin_unified: bool = False
 
+    # v3.12 S11 — Cap2 (residual_echo ≤ error_psd × mult) loosening in
+    # FS-confident bins. S8 audit (800-case) shows Cap2 binding in
+    # 18.28% / 17.11% of FS_static / FS_movement bins with mean
+    # 12.34 / 12.95 dB downward magnitude shift. S6/S6b/S7/S10
+    # (all NEUTRAL) targeted the ENR denominator (nearend_est /
+    # gain-floor side); S11 targets the ENR numerator (residual_echo)
+    # in the opposite direction — disables Cap2 in FS bins so
+    # residual_echo passes through uncapped, raising ENR and lowering
+    # gain. Inverse mechanism may not be neutralised by the same
+    # downstream caps that absorbed S6-S10.
+    res_cap2_fs_loosen: bool = False
+
     # v3.12 S10 — `noise_floor_psd` refinement (Phase 3B v5 follow-up).
     # S9-A.2 pre-audit data on 800-case (BALANCED, fl=832, seed=0):
     # baseline `noise_floor_psd = mean(error_psd) * 0.01` wins argmax in
@@ -1753,7 +1765,8 @@ class ResFilter:
                  unified_gain_floor: bool = False,
                  state_driven_epc_dt_cap: bool = False,
                  dt_per_bin_unified: bool = False,
-                 noise_floor_refined: bool = False):
+                 noise_floor_refined: bool = False,
+                 cap2_fs_loosen: bool = False):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -1766,6 +1779,7 @@ class ResFilter:
         self._state_driven_epc_dt_cap = state_driven_epc_dt_cap
         self._dt_per_bin_unified = dt_per_bin_unified
         self._noise_floor_refined = noise_floor_refined
+        self._cap2_fs_loosen = cap2_fs_loosen
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -2286,7 +2300,16 @@ class ResFilter:
                     _ac_s8['s8_cap2_err_mult_reduction_sum'] += 10.0 * float(
                         np.sum(np.log10((residual_echo_psd[_bind] + 1e-30)
                                         / (_cap2_arr[_bind] + 1e-30))))
-            residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * err_cap_mult)
+            if self._cap2_fs_loosen:
+                # S11: skip Cap2 in FS-confident bins (coh² < 0.1).
+                # Raises residual_echo_psd numerator in ENR → drops gain
+                # → expected more FS suppression. Inverse mechanism vs
+                # S6-S10 (which lowered ENR denominator).
+                _cap2_val = self.error_psd * err_cap_mult
+                _capped = np.minimum(residual_echo_psd, _cap2_val)
+                residual_echo_psd = np.where(coh2 < 0.1, residual_echo_psd, _capped)
+            else:
+                residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * err_cap_mult)
             if self._stats is not None:
                 self._stats_last_res_after_error_cap = float(np.mean(residual_echo_psd))
 
@@ -4920,6 +4943,7 @@ class AEC:
                 state_driven_epc_dt_cap=self.config.res_state_driven_epc_dt_cap,
                 dt_per_bin_unified=self.config.res_dt_per_bin_unified,
                 noise_floor_refined=self.config.res_noise_floor_refined,
+                cap2_fs_loosen=self.config.res_cap2_fs_loosen,
             )
         else:
             self.res = None
