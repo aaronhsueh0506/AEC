@@ -516,6 +516,21 @@ class AecConfig:
     # per-state ENR tuple).
     res_consume_filter_state: bool = False
 
+    # v3.12 Phase 3B (S6-S7) — unified gain floor.
+    # Replaces `(1 - coh²)` evidence in `ne_g_floor` with the F3.1 v3
+    # mic-excess blend (0.7 mic + 0.3 legacy), matching the evidence used
+    # by `dt_per_bin` in NE estimation. This addresses the Q7 V3 verdict:
+    # `(1 - coh²)` saturates in FS post-cancellation, so the legacy
+    # ne_g_floor erroneously raises the floor in FS (echo leakage).
+    # Gate matches the existing F3.1 v3 path: filter_converged AND
+    # long-window-ready AND not epc_active. Requires `use_mic_excess_evidence`
+    # to be True (no-op when False since there's no blend available).
+    # Falls back to `(1 - coh²)` when the gate fails (same as legacy path).
+    # Default OFF preserves byte-equality with v3.11.2. Phase 3 verification:
+    # flag OFF must be byte-equal, flag ON must pass 800-case AECMOS with
+    # FS Δecho ≥ -0.02 / DT Δdeg ≥ -0.005 / cohort tail Δecho ≥ -0.05.
+    res_unified_gain_floor: bool = False
+
     # F-E5 — saturation handling extensions (v3.11 Phase 1 Sprint 11-12).
     # Edge case E5: clip & saturation. Current handling has 4 known gaps:
     #   E5-1: ref soft-clipped (saturation_softclip_ref), mic NOT — asymmetric
@@ -1691,7 +1706,8 @@ class ResFilter:
                  hf_cap_metric_threshold: float = 0.30,
                  plan_b_dt_per_bin_gamma: bool = False,
                  use_mic_excess_evidence: bool = False,
-                 consume_filter_state: bool = False):
+                 consume_filter_state: bool = False,
+                 unified_gain_floor: bool = False):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -1700,6 +1716,7 @@ class ResFilter:
         self._hf_cap_metric_threshold = hf_cap_metric_threshold
         self._use_mic_excess_evidence = use_mic_excess_evidence
         self._consume_filter_state = consume_filter_state
+        self._unified_gain_floor = unified_gain_floor
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -2749,10 +2766,39 @@ class ResFilter:
 
         # --- Per-bin near-end gate ---
 
+        # v3.12 Phase 3B (S6-S7) — unified gain floor.
+        # `ne_g_floor` uses `(1 - coh²)` as NE evidence by default. Q7 V3
+        # verdict: this evidence saturates in FS post-cancellation
+        # (echo cancelled → low coh² → "NE-like") and so falsely raises
+        # the floor in FS, leaking echo. The unified path swaps in the
+        # F3.1 v3 mic-excess blend (already validated AUROC 0.871, in
+        # production use for `dt_per_bin` since v3.10.6). Gate matches
+        # the F3.1 v3 path: filter_converged AND long-window-ready AND
+        # not epc_active; fallback to `(1 - coh²)` when gate fails.
+        if self._unified_gain_floor and self._use_mic_excess_evidence:
+            _lw_ready_floor = (
+                self._residual_est is not None
+                and self._residual_est._long_window_n_updates > 0
+            )
+            if filter_converged and _lw_ready_floor and not epc_active:
+                far_lw = self._residual_est._long_window_far_psd
+                erl_e = float(erl_estimate)
+                excess = np.maximum(self.error_psd - far_lw * erl_e, 0.0)
+                excess_ratio = np.clip(
+                    excess / (self.error_psd + 1e-10), 0.0, 1.0,
+                ).astype(np.float32)
+                legacy_evidence = 1.0 - coh2
+                ne_evidence = (_BLEND_F31_MIC_EXCESS * excess_ratio
+                               + (1.0 - _BLEND_F31_MIC_EXCESS) * legacy_evidence)
+            else:
+                ne_evidence = 1.0 - coh2
+        else:
+            ne_evidence = 1.0 - coh2
+
         # --- Per-bin near-end gate with fs_confidence ---
         ne_erle_gate = max(erle_factor, 0.3)  # B4: simplified (0.2 floor never triggered)
         # Scale ne_protection by (1-fs_confidence): FS→no protection, DT/NE→full protection
-        ne_protection = (1.0 - coh2) * ne_erle_gate * (1.0 - fs_confidence)
+        ne_protection = ne_evidence * ne_erle_gate * (1.0 - fs_confidence)
         ne_g_min_ceil = 10 ** (self.ne_protect_db / 20)
         ne_g_floor = effective_g_min + (ne_g_min_ceil - effective_g_min) * ne_protection
         ne_g_floor = np.maximum(ne_g_floor, effective_g_min)
@@ -4426,6 +4472,7 @@ class AEC:
                 plan_b_dt_per_bin_gamma=self.config.plan_b_dt_per_bin_gamma,
                 use_mic_excess_evidence=self.config.use_mic_excess_evidence,
                 consume_filter_state=self.config.res_consume_filter_state,
+                unified_gain_floor=self.config.res_unified_gain_floor,
             )
         else:
             self.res = None

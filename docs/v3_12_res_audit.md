@@ -199,3 +199,46 @@ sufficient to write S6 design code.
 - Q7 V3 verdict: `~/.claude/plans/se-aec-aec-main-hazy-lynx.md` (Q7 section)
 - F3.1 mic-excess AUROC 0.871: [docs/research_log_p55_phase1_verdict.md](research_log_p55_phase1_verdict.md)
 - Beroutti 1984 / Ephraim-Malah 1984 / Hänsler-Schmidt canonical RES — see `~/.claude/plans/...hazy-lynx.md` Sources section
+
+---
+
+## Addendum (2026-05-13) — S6 empirical verdict: `ne_g_floor` retarget
+
+**Outcome**: S6 800-case AECMOS with `res_unified_gain_floor=True` is byte-equal
+vs v3.11.2 across every bucket (Δecho ≤ 0.001, Δdeg ≤ 0.001) and on cohort tail
+`qNvSMyU…` (Δecho +0.000). The flag is rolled back to default-OFF; the code
+path stays in `_stage_gain_compute` as research substrate behind the flag.
+
+**Root cause of byte-equal**: Path 2's analysis above mis-identified `ne_g_floor`
+as the dominant FS-side `(1-coh²)` leak. The downstream multiplier
+`ne_protection = ne_evidence × ne_erle_gate × (1 - fs_confidence)` already
+zeroes the floor in FS: `fs_confidence = far_activity × (1 - effective_dt)²`
+saturates to ~1 when far is active and `effective_dt` is low (i.e. true FS),
+so `(1 - fs_confidence) → 0` regardless of `ne_evidence`. The Q7 V3 critique
+of `(1-coh²)` saturation is real **as a mechanism**, but `ne_g_floor` is not
+the path that carries it into output gain.
+
+**Where the real `(1-coh²)` / `effective_dt` saturation manifests**:
+- **`epc_dt_cap`** (Path 3) — uses scalar `effective_dt > 0.35` gate. Because
+  `effective_dt = max(dt_for_fs, shadow_dt)` (aec.py:2481) and `dt_for_fs`
+  ingests `(1-coh²)`-style evidence, FS post-cancellation can spike
+  `effective_dt` and gate this cap on or off in ways that bypass the
+  `(1-fs_confidence)` neutraliser used by `ne_g_floor`.
+- **`dt_per_bin`** itself (used by `softgate_emr` ENR weighting, not by floor) —
+  the v3.10.5 comment explicitly flags this. Already mitigated by F3.1 v3
+  mic-excess blend at line 2181 (production); the leftover legacy
+  `(1-coh²)` use in `_stage_gain_compute` ENR confidence is upstream of any
+  `fs_confidence` neutraliser.
+
+**Phase 3B re-target**: next sprint takes `epc_dt_cap` as the canonical merge
+target instead of `ne_g_floor`. Hypothesis: replacing the scalar
+`(epc_active AND effective_dt > 0.35)` gate with state-driven
+`filter_state in {transient, recovering}` is the higher-ROI restructure
+(also aligns Path 3's S8-S9 verdict above with Phase 3B mechanism, not
+just S8-S9 architecture). 800-case re-bench required before promotion.
+
+**Categorisation table update**: the verdict column for `ne_g_floor` should
+read **"Evidence patch — already gated by `(1-fs_confidence)` in FS;
+empirically byte-equal under mic-excess swap. Code retained default-OFF;
+no production change."** The original "MERGE INTO CANONICAL" verdict is
+preserved above as audit-trail context for what was hypothesised pre-bench.
