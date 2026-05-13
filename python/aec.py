@@ -655,6 +655,14 @@ class AecConfig:
     # window. Filters out pitched-but-low-residual frames in clean cases
     # (CTL1 dropped 8.7%→3.7% under 0.05; 5/5 NL still hit).
     e4_nlp_min_residual_rms: float = 0.05
+    # S4.1 tertiary gate: mic_rms_ema / raw_output_rms_ema > threshold.
+    # NE bucket has ratio ≈ 1.00 (filter doesn't cancel because no echo);
+    # NL cohort has ratio 1.05-1.7. Threshold 1.05 cleanly separates:
+    # 5/5 NL still fire, NE aggregate drops 14.31%→0.00%. Heavy-NL cases
+    # (07/B) have low cancel_ratio because NL prevents convergence —
+    # threshold ≥1.10 starts cutting into NL detection.
+    e4_nlp_cancel_ratio_threshold: float = 1.05
+    e4_nlp_cancel_ema_alpha: float = 0.99    # TC ~100 hops = 1 sec @ 10ms hop
 
     # Mode
     mode: AecMode = AecMode.PBFDKF
@@ -4631,7 +4639,9 @@ class SubtractiveNLP:
                  pitch_threshold: float = 0.45,
                  continuity_frames: int = 3,
                  history_len: int = 4,
-                 min_residual_rms: float = 0.05):
+                 min_residual_rms: float = 0.05,
+                 cancellation_ratio_threshold: float = 2.0,
+                 cancellation_ema_alpha: float = 0.99):
         self._sr = int(sample_rate)
         self._hop = int(hop_size)
         win = int(window_ms * sample_rate / 1000)
@@ -4645,6 +4655,14 @@ class SubtractiveNLP:
         self._continuity_frames = int(continuity_frames)
         self._history_len = int(history_len)
         self._min_residual_rms = float(min_residual_rms)
+        # S4.1 cancellation gate — "filter is canceling something" signal.
+        # NE bucket: ratio ≈ 1 (filter doesn't cancel because no echo).
+        # FS converged: ratio > threshold (mic energy reduced by filter).
+        self._cancel_ratio_thr = float(cancellation_ratio_threshold)
+        self._cancel_ema_alpha = float(cancellation_ema_alpha)
+        self._mic_rms_ema = 0.0
+        self._raw_rms_ema = 0.0
+        self._cancel_ratio_last = 0.0
         self._window = np.hanning(self._win_samples).astype(np.float32)
         self._buf = np.zeros(self._win_samples, dtype=np.float32)
         self._buf_pos = 0
@@ -4686,12 +4704,30 @@ class SubtractiveNLP:
         return float(slab[peak_idx]), self._qmin + peak_idx
 
     def process(self, hop_samples: np.ndarray,
-                filter_state: str, far_active: bool) -> float:
+                filter_state: str, far_active: bool,
+                mic_hop_samples: 'Optional[np.ndarray]' = None) -> float:
         self._call_count += 1
         if len(hop_samples) != self._hop:
             self._nl_confidence_last = 0.0
             return 0.0
         self._append_hop(hop_samples.astype(np.float32))
+        # S4.1 cancellation-ratio EMA: track mic_rms / raw_output_rms.
+        # Updated every hop regardless of gating so EMA reflects sustained
+        # filter activity. When NE bucket (no echo to cancel), filter
+        # doesn't reduce mic energy → ratio ≈ 1. When FS converged,
+        # ratio ≫ 1.
+        hop_rms = float(np.sqrt(
+            np.mean(hop_samples.astype(np.float64) ** 2) + 1e-15))
+        if mic_hop_samples is not None:
+            mic_rms = float(np.sqrt(
+                np.mean(mic_hop_samples.astype(np.float64) ** 2) + 1e-15))
+            a = self._cancel_ema_alpha
+            self._mic_rms_ema = a * self._mic_rms_ema + (1.0 - a) * mic_rms
+            self._raw_rms_ema = a * self._raw_rms_ema + (1.0 - a) * hop_rms
+            if self._raw_rms_ema > 1e-9:
+                self._cancel_ratio_last = self._mic_rms_ema / self._raw_rms_ema
+            else:
+                self._cancel_ratio_last = 0.0
         # Gate: allow refined_usable OR coarse_learning — heavy-NL cases
         # never reach refined_usable because the NL itself prevents linear
         # filter convergence. Excluded: idle / startup / diverged /
@@ -4704,9 +4740,14 @@ class SubtractiveNLP:
             return 0.0
         # S3.1 secondary gate: minimum residual RMS on the current hop.
         # Filters out pitched-but-low-residual frames in clean cases.
-        hop_rms = float(np.sqrt(
-            np.mean(hop_samples.astype(np.float64) ** 2) + 1e-15))
         if hop_rms < self._min_residual_rms:
+            self._nl_confidence_last = 0.0
+            return 0.0
+        # S4.1 cancellation-ratio gate: filter must be canceling something
+        # (mic_rms_ema / raw_rms_ema > threshold). NE bucket fails this
+        # because filter has nothing to cancel.
+        if (mic_hop_samples is not None
+                and self._cancel_ratio_last < self._cancel_ratio_thr):
             self._nl_confidence_last = 0.0
             return 0.0
         pitch_strength, pitch_lag = self._compute_pitch_strength()
@@ -5162,6 +5203,10 @@ class AEC:
                 pitch_threshold=getattr(self.config, 'e4_nlp_pitch_threshold', 0.45),
                 continuity_frames=getattr(self.config, 'e4_nlp_continuity_frames', 3),
                 min_residual_rms=getattr(self.config, 'e4_nlp_min_residual_rms', 0.05),
+                cancellation_ratio_threshold=getattr(
+                    self.config, 'e4_nlp_cancel_ratio_threshold', 2.0),
+                cancellation_ema_alpha=getattr(
+                    self.config, 'e4_nlp_cancel_ema_alpha', 0.99),
             )
         # F-E1 — far_active hysteresis state (fast attack / slow release).
         # Once far crosses 1e-4 it stays "active" until 5 consecutive frames
@@ -6484,14 +6529,16 @@ class AEC:
                     # Pure observer: reads the LINEAR residual (raw_output =
                     # mic − linear_echo_estimate, RES input) so the NL
                     # harmonic signature is not masked by RES suppression.
+                    # Also reads mic_hop (near_end) for the S4.1
+                    # cancellation-ratio gate (NE bucket discrimination).
                     # See E4.S1 Pass A finding: production output (post-RES)
-                    # hides NL evidence. Detector self-gates on
-                    # filter_state == 'refined_usable' and far_active.
+                    # hides NL evidence.
                     if self.nl_detector is not None:
                         _nl_conf = self.nl_detector.process(
                             raw_output,
                             filter_state=self._prev_filter_state,
-                            far_active=(far_power > 1e-4))
+                            far_active=(far_power > 1e-4),
+                            mic_hop_samples=near_end)
                         self._diag['nl_confidence'] = _nl_conf
                         self._diag['nl_pitch_strength'] = (
                             self.nl_detector._pitch_strength_last)
