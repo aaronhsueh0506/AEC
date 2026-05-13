@@ -542,6 +542,23 @@ class AecConfig:
     # additive (not retargeting). See docs/v3_12_s6b_verdict.md.
     res_state_driven_epc_dt_cap: bool = False
 
+    # v3.12 S7 (Phase 3B v3 Option α): drop the `NOT epc_active` gate on the
+    # F3.1 v3 mic-excess path so it also fires during EPC-active frames.
+    # Pre-implementation 800-case audit (2026-05-13, docs/v3_12_s7_*) found:
+    #   target slice (filter_converged AND lw_ready AND epc_active) =
+    #     33.97% global, 32-43% per bucket — well above 0.5% floor;
+    #   unified dt_per_bin reduction in FS bins (coh²<0.1) = 67.7% global,
+    #     67-68% per bucket — well above 20% bar.
+    # Mechanism: legacy fallback path uses `(1-coh²)`-based dt_per_bin which
+    # saturates to 1 in FS post-cancellation (coh²→0 → false NE-like
+    # evidence) → over-shapes `nearend_est` → inflates Wiener / softgate
+    # gain → echo leakage. F3.1 v3 mic-excess blend evidence (validated
+    # via P1-Phase-1 AUROC 0.871) replaces the (1-coh²) saturation source.
+    # NE bucket has 0% target frames (filter rarely converges in NE) so
+    # this flag is NE-risk-free by audit. See
+    # docs/v3_12_phase3b_v3_design.md §3.1 / §6.1.
+    res_dt_per_bin_unified: bool = False
+
     # F-E5 — saturation handling extensions (v3.11 Phase 1 Sprint 11-12).
     # Edge case E5: clip & saturation. Current handling has 4 known gaps:
     #   E5-1: ref soft-clipped (saturation_softclip_ref), mic NOT — asymmetric
@@ -1719,7 +1736,8 @@ class ResFilter:
                  use_mic_excess_evidence: bool = False,
                  consume_filter_state: bool = False,
                  unified_gain_floor: bool = False,
-                 state_driven_epc_dt_cap: bool = False):
+                 state_driven_epc_dt_cap: bool = False,
+                 dt_per_bin_unified: bool = False):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -1730,6 +1748,7 @@ class ResFilter:
         self._consume_filter_state = consume_filter_state
         self._unified_gain_floor = unified_gain_floor
         self._state_driven_epc_dt_cap = state_driven_epc_dt_cap
+        self._dt_per_bin_unified = dt_per_bin_unified
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -1844,6 +1863,9 @@ class ResFilter:
 
         # Per-frame diagnostic stats (disabled by default; call enable_stats() to activate)
         self._stats = None
+        # Durable audit counter substrate (Phase 3B v3 S7+, default-OFF zero-cost).
+        # Use enable_audit_counters() to activate; get_audit_counters() to retrieve.
+        self._audit_counters = None
         self._stats_last_enr = 0.0
         self._stats_last_nearend = 0.0
         self._stats_last_res_psd = 0.0
@@ -1954,6 +1976,46 @@ class ResFilter:
         self._stats_last_noise_psd = 0.0
         self._stats_last_spec_pwr = 0.0
         self._stats_last_nfl_lifted = False
+
+    def enable_audit_counters(self):
+        """Enable durable RES audit counter substrate (Phase 3B v3 S7+).
+
+        Counters accumulate across frames within a stream; consumers (eval
+        harness) read via get_audit_counters() at end-of-stream. Zero cost
+        when not enabled.
+
+        S7 (Option α) target: measure mean reduction of `dt_per_bin` legacy
+        vs unified-hypothetical across FS bins (coh² < 0.1) in the
+        `filter_converged AND _lw_ready AND epc_active` slice. See design
+        [docs/v3_12_phase3b_v3_design.md §6.1](../docs/v3_12_phase3b_v3_design.md).
+        """
+        self._audit_counters = {
+            'total_frames': 0,
+            # S7 Option α — dt_per_bin path classification
+            's7_legacy_path_frames': 0,
+            's7_f31v3_path_frames': 0,
+            's7_planb_path_frames': 0,
+            # Legacy-path sub-reasons (sum may exceed s7_legacy_path_frames
+            # because a frame can hit multiple reasons, e.g. not_converged AND
+            # not_lw_ready)
+            's7_legacy_epc_active_frames': 0,
+            's7_legacy_not_converged_frames': 0,
+            's7_legacy_not_lw_ready_frames': 0,
+            's7_legacy_target_other_frames': 0,
+            # Primary S7 target slice: filter_converged AND _lw_ready AND epc_active
+            's7_target_fs_bin_count': 0,
+            's7_target_fs_bin_legacy_sum': 0.0,
+            's7_target_fs_bin_unified_sum': 0.0,
+            # Cross-validation slice: filter_converged AND _lw_ready AND NOT epc_active
+            # (legacy path only reachable when use_mic_excess_evidence=False)
+            's7_alt_fs_bin_count': 0,
+            's7_alt_fs_bin_legacy_sum': 0.0,
+            's7_alt_fs_bin_unified_sum': 0.0,
+        }
+
+    def get_audit_counters(self):
+        """Return audit counter dict (or None if not enabled)."""
+        return self._audit_counters
 
     def get_stage_gains(self):
         """Return dict of per-bin gain vectors captured this frame.
@@ -2185,10 +2247,15 @@ class ResFilter:
             # binary gating on mic/far ratio can't be made FS-only
             # without a label we don't have; the blend alone is the
             # honest cap.
+            # v3.12 S7 (Phase 3B v3 Option α): when `_dt_per_bin_unified` is
+            # True, drop the `NOT epc_active` constraint so the F3.1 v3
+            # mic-excess blend also fires during EPC-active frames. Legacy
+            # fallback at `else:` below remains the path for `not
+            # filter_converged` or `not _lw_ready` regardless of flag.
             if (self._use_mic_excess_evidence
                     and filter_converged
                     and _lw_ready
-                    and not epc_active):
+                    and (self._dt_per_bin_unified or not epc_active)):
                 far_lw = self._residual_est._long_window_far_psd
                 erl_e = float(erl_estimate)
                 excess = np.maximum(self.error_psd - far_lw * erl_e, 0.0)
@@ -2213,6 +2280,65 @@ class ResFilter:
                     np.full(self.n_freqs, effective_dt, dtype=np.float32),
                     1.0 - coh2
                 )
+            # S7 (Phase 3B v3 Option α) fire-rate audit hook. Zero-cost when
+            # `_audit_counters` is None. Read-only; does not mutate dt_per_bin
+            # or any other state. Computes unified-hypothetical dt_per_bin
+            # alongside legacy and aggregates FS-bin (coh²<0.1) sums for
+            # post-stream reduction-percentage analysis.
+            if self._audit_counters is not None:
+                _ac = self._audit_counters
+                _ac['total_frames'] += 1
+                _f31_active = (self._use_mic_excess_evidence
+                               and filter_converged
+                               and _lw_ready
+                               and not epc_active)
+                if _f31_active:
+                    _ac['s7_f31v3_path_frames'] += 1
+                elif self._plan_b_dt_per_bin_gamma:
+                    _ac['s7_planb_path_frames'] += 1
+                else:
+                    _ac['s7_legacy_path_frames'] += 1
+                    if epc_active:
+                        _ac['s7_legacy_epc_active_frames'] += 1
+                    if not filter_converged:
+                        _ac['s7_legacy_not_converged_frames'] += 1
+                    if not _lw_ready:
+                        _ac['s7_legacy_not_lw_ready_frames'] += 1
+                    _target_slice = filter_converged and _lw_ready and epc_active
+                    _alt_slice = (filter_converged and _lw_ready
+                                  and not epc_active)
+                    if _target_slice or _alt_slice:
+                        _far_lw_au = self._residual_est._long_window_far_psd
+                        _erl_e_au = float(erl_estimate)
+                        _excess_au = np.maximum(
+                            self.error_psd - _far_lw_au * _erl_e_au, 0.0,
+                        )
+                        _excess_ratio_au = np.clip(
+                            _excess_au / (self.error_psd + 1e-10), 0.0, 1.0,
+                        ).astype(np.float32)
+                        _legacy_au = (1.0 - coh2).astype(np.float32)
+                        _unified_au = (
+                            _BLEND_F31_MIC_EXCESS * _excess_ratio_au
+                            + (1.0 - _BLEND_F31_MIC_EXCESS) * _legacy_au
+                        )
+                        if effective_dt > 0.5:
+                            _floor_lift_au = float((effective_dt - 0.5) * 2.0)
+                            _unified_au = np.maximum(_unified_au, _floor_lift_au)
+                        _fs_mask_au = coh2 < 0.1
+                        _n_fs_au = int(np.sum(_fs_mask_au))
+                        if _n_fs_au > 0:
+                            _legacy_sum_au = float(np.sum(dt_per_bin[_fs_mask_au]))
+                            _unified_sum_au = float(np.sum(_unified_au[_fs_mask_au]))
+                            if _target_slice:
+                                _ac['s7_target_fs_bin_count'] += _n_fs_au
+                                _ac['s7_target_fs_bin_legacy_sum'] += _legacy_sum_au
+                                _ac['s7_target_fs_bin_unified_sum'] += _unified_sum_au
+                            else:
+                                _ac['s7_alt_fs_bin_count'] += _n_fs_au
+                                _ac['s7_alt_fs_bin_legacy_sum'] += _legacy_sum_au
+                                _ac['s7_alt_fs_bin_unified_sum'] += _unified_sum_au
+                    else:
+                        _ac['s7_legacy_target_other_frames'] += 1
             if is_stationary_dt:
                 dt_per_bin = np.maximum(dt_per_bin, self._stat_dt_mask)
             # v3.8.4: stash for postprocess HF-cap "high bins NE confidence" gate
@@ -4494,6 +4620,7 @@ class AEC:
                 consume_filter_state=self.config.res_consume_filter_state,
                 unified_gain_floor=self.config.res_unified_gain_floor,
                 state_driven_epc_dt_cap=self.config.res_state_driven_epc_dt_cap,
+                dt_per_bin_unified=self.config.res_dt_per_bin_unified,
             )
         else:
             self.res = None
@@ -6660,6 +6787,20 @@ class AEC:
 
     def GetStats(self) -> AecStats:
         return self.get_stats()
+
+    def enable_res_audit(self) -> None:
+        """Enable durable RES audit counter substrate (Phase 3B v3 S7+).
+
+        No-op when RES is disabled (self.res is None).
+        """
+        if self.res is not None:
+            self.res.enable_audit_counters()
+
+    def get_res_audit(self):
+        """Return RES audit counter dict (or None if not enabled / RES disabled)."""
+        if self.res is None:
+            return None
+        return self.res.get_audit_counters()
 
 
 class AecDebugLogger:
