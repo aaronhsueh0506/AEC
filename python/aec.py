@@ -531,6 +531,17 @@ class AecConfig:
     # FS Δecho ≥ -0.02 / DT Δdeg ≥ -0.005 / cohort tail Δecho ≥ -0.05.
     res_unified_gain_floor: bool = False
 
+    # v3.12 Phase 3B (S6b) — state-driven `epc_dt_cap` gate. Default OFF
+    # research substrate. The S6b 800-case fire-rate audit (2026-05-13)
+    # found the legacy gate `epc_active AND effective_dt > 0.35` fires
+    # 0/2,032,022 frames at production thresholds — the cap action is
+    # dead code in BALANCED. Q7 V3 mis-identified `epc_dt_cap` as the FS
+    # leak carrier; real carriers are elsewhere (other caps / dt_per_bin
+    # ENR — re-investigation pending). Flag retained for a future Phase 3C
+    # state-set revision; current `{diverged, suspicious_dt}` set is
+    # additive (not retargeting). See docs/v3_12_s6b_verdict.md.
+    res_state_driven_epc_dt_cap: bool = False
+
     # F-E5 — saturation handling extensions (v3.11 Phase 1 Sprint 11-12).
     # Edge case E5: clip & saturation. Current handling has 4 known gaps:
     #   E5-1: ref soft-clipped (saturation_softclip_ref), mic NOT — asymmetric
@@ -1707,7 +1718,8 @@ class ResFilter:
                  plan_b_dt_per_bin_gamma: bool = False,
                  use_mic_excess_evidence: bool = False,
                  consume_filter_state: bool = False,
-                 unified_gain_floor: bool = False):
+                 unified_gain_floor: bool = False,
+                 state_driven_epc_dt_cap: bool = False):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -1717,6 +1729,7 @@ class ResFilter:
         self._use_mic_excess_evidence = use_mic_excess_evidence
         self._consume_filter_state = consume_filter_state
         self._unified_gain_floor = unified_gain_floor
+        self._state_driven_epc_dt_cap = state_driven_epc_dt_cap
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -2707,7 +2720,14 @@ class ResFilter:
 
         # EPC_DT: echo path change detected AND double-talk active.
         # Gain cap bypasses ENR path (locked ~1.0 by DT nearend protection).
-        epc_dt = epc_active and effective_dt > 0.35
+        # v3.12 S6b research substrate (default OFF): state-driven gate
+        # option. See docs/v3_12_s6b_verdict.md — legacy gate was found
+        # to fire 0% at production thresholds, so the cap is dead code
+        # in BALANCED. Flag retained for future Phase 3C state-set work.
+        if self._state_driven_epc_dt_cap and self._consume_filter_state:
+            epc_dt = filter_state in ('diverged', 'suspicious_dt')
+        else:
+            epc_dt = epc_active and effective_dt > 0.35
 
         eps = 1e-10
         residual_echo_psd = self._stage_residual_model(
@@ -4473,6 +4493,7 @@ class AEC:
                 use_mic_excess_evidence=self.config.use_mic_excess_evidence,
                 consume_filter_state=self.config.res_consume_filter_state,
                 unified_gain_floor=self.config.res_unified_gain_floor,
+                state_driven_epc_dt_cap=self.config.res_state_driven_epc_dt_cap,
             )
         else:
             self.res = None
