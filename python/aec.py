@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.11.0"
+__version__ = "3.11.1"
 
 import os
 import numpy as np
@@ -698,6 +698,14 @@ class AecConfig:
                 # (Phase 1 Sprint 13-14 PASS, F2.2 trap avoided via shadow_advantage > 2.0)
                 diverged_reset_enabled=True,
                 diverged_reset_triple_and=True,
+                # v3.12 S1: B6 shadow_mu state-aware (PASS bucket mean +0.007,
+                # wlAXM0i listen verdict: no audible diff, B6 has more NE detail in spectrogram)
+                shadow_mu_state_aware=True,
+                # v3.12 S2: F-E1 + F-DelayTrack default-ON (NEUTRAL on 800-case bench,
+                # correctness-only for extreme ERL / long-session delay drift).
+                # Cross-coupling audited disjoint from B5/F-E5/diverged_reset.
+                f_e1_enabled=True,
+                f_delaytrack_enabled=True,
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
