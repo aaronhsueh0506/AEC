@@ -27,7 +27,8 @@ def gain_computer(rf, *, residual_echo_psd, eer, coh2, effective_dt,
                   spectral_g_min, eps,
                   erl_estimate: float = 0.01,
                   filter_converged: bool = False,
-                  epc_active: bool = False):
+                  epc_active: bool = False,
+                  filter_state: str = 'idle'):
     """Stage 2: ENR / Wiener / spectral_sub gain compute + EMR + spectral floor lift.
 
     Returns g (post-spectral-floor). Mutates `rf.dominant_ne` / Round 4 / Round 5

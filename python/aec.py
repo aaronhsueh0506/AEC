@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.11.1"
+__version__ = "3.11.2"
 
 import os
 import numpy as np
@@ -506,6 +506,15 @@ class AecConfig:
     # Default OFF — opt-in ablation flag.
     diverged_reset_triple_and: bool = False
     diverged_reset_triple_and_shadow_adv_min: float = 2.0
+
+    # v3.12 Phase 2 (C2 wiring) — filter_state → RES consumer hookup.
+    # Phase 2 wires _prev_filter_state through ResFilter.process() and
+    # _stage_gain_compute as a kwarg. When this flag is False, the kwarg
+    # exists but is ignored (logic guard inside RES). Default OFF preserves
+    # byte-equality with v3.11.x for the steady-state path. Phase 3 flips
+    # this on and adds the actual consumption (gain_floor unification +
+    # per-state ENR tuple).
+    res_consume_filter_state: bool = False
 
     # F-E5 — saturation handling extensions (v3.11 Phase 1 Sprint 11-12).
     # Edge case E5: clip & saturation. Current handling has 4 known gaps:
@@ -1681,7 +1690,8 @@ class ResFilter:
                  hf_cap_conditional: bool = False,
                  hf_cap_metric_threshold: float = 0.30,
                  plan_b_dt_per_bin_gamma: bool = False,
-                 use_mic_excess_evidence: bool = False):
+                 use_mic_excess_evidence: bool = False,
+                 consume_filter_state: bool = False):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -1689,6 +1699,7 @@ class ResFilter:
         self._hf_cap_conditional = hf_cap_conditional
         self._hf_cap_metric_threshold = hf_cap_metric_threshold
         self._use_mic_excess_evidence = use_mic_excess_evidence
+        self._consume_filter_state = consume_filter_state
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -2085,7 +2096,8 @@ class ResFilter:
                               spectral_g_min, eps,
                               erl_estimate: float = 0.01,
                               filter_converged: bool = False,
-                              epc_active: bool = False):
+                              epc_active: bool = False,
+                              filter_state: str = 'idle'):
         """Stage 2: ENR / Wiener / spectral_sub gain compute + EMR + spectral floor lift.
 
         Returns g (post-spectral-floor). Mutates dominant_ne / Round 4 / Round 5
@@ -2095,6 +2107,13 @@ class ResFilter:
         only by the F3.1 mic-excess-evidence branch (default-OFF flag).
         Legacy and P4B paths are byte-identical to the pre-F3.1
         implementation.
+
+        `filter_state` is the v3.12 Phase 2 wiring hook (C2). It receives
+        the previous frame's enum state from FilterConvergenceAnalyzer
+        (idle / startup / diverged / suspicious_dt / refined_usable /
+        coarse_learning). Phase 2 plumbs the parameter only; Phase 3
+        consumes it (gated by self._consume_filter_state) to drive the
+        per-state ENR tuple and gain_floor unification.
         """
         if self.gain_type == "enr" and residual_echo_psd is not None:
             raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
@@ -2548,7 +2567,8 @@ class ResFilter:
                 e2_shadow: float = 0.0,
                 y2: float = 0.0,
                 filter_once_converged: bool = False,
-                aec_state=None) -> np.ndarray:
+                aec_state=None,
+                filter_state: str = 'idle') -> np.ndarray:
         """Process hop-size error signal, return enhanced hop via OLA.
 
         far_spec: far-end frequency spectrum (complex), used for coherence-
@@ -2763,6 +2783,7 @@ class ResFilter:
             erl_estimate=erl_estimate,
             filter_converged=filter_converged,
             epc_active=epc_active,
+            filter_state=filter_state,
         )
         g = self._stage_gain_postprocess(
             g_in=g,
@@ -4404,6 +4425,7 @@ class AEC:
                 hf_cap_metric_threshold=self.config.hf_cap_metric_threshold,
                 plan_b_dt_per_bin_gamma=self.config.plan_b_dt_per_bin_gamma,
                 use_mic_excess_evidence=self.config.use_mic_excess_evidence,
+                consume_filter_state=self.config.res_consume_filter_state,
             )
         else:
             self.res = None
@@ -5789,7 +5811,8 @@ class AEC:
                                                     e2_shadow=float(self.shadow_err_smooth),
                                                     y2=float(far_power),
                                                     filter_once_converged=self._filter_once_converged,
-                                                    aec_state=self._aec_state)
+                                                    aec_state=self._aec_state,
+                                                    filter_state=self._prev_filter_state)
 
                     # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
                     if not self.config.enable_dtd:
