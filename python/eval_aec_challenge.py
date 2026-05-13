@@ -76,11 +76,15 @@ def run_old_aec(mic_path, ref_path, sr):
     return None
 
 
-def estimate_delay(mic, ref, sr, max_delay_ms=250.0):
+def estimate_delay(mic, ref, sr, max_delay_ms=1024.0):
     """Pre-compute delay using full-signal cross-correlation.
 
     Uses the entire signal for maximum accuracy.
     Plain cross-correlation (no whitening) is most reliable for reverberant data.
+
+    max_delay_ms=1024 matches the online F-DelayTrack search window so the
+    pre-align never lands further away than the in-pipeline tracker can
+    correct. Override via env var AEC_MAX_DELAY_MS for A/B / regression work.
     """
     _env_override = os.environ.get('AEC_MAX_DELAY_MS')
     if _env_override is not None:
