@@ -2011,6 +2011,27 @@ class ResFilter:
             's7_alt_fs_bin_count': 0,
             's7_alt_fs_bin_legacy_sum': 0.0,
             's7_alt_fs_bin_unified_sum': 0.0,
+            # S8 (Phase 3B v4) — downstream-clamp audit. Each counter
+            # aggregates over FS bins (coh² < 0.1) across all frames.
+            # Stage 1 4-cap chain (line ~2138/2144/2151/2163): per-cap
+            # binding counts (how often the cap clamped a FS bin) +
+            # reduction sums (sum of log10(pre/post) on those bins).
+            's8_stage1_fs_bin_total': 0,        # total FS bin opportunities
+            's8_cap1_echo_x2_binding': 0,
+            's8_cap1_echo_x2_reduction_sum': 0.0,
+            's8_cap2_err_mult_binding': 0,
+            's8_cap2_err_mult_reduction_sum': 0.0,
+            's8_cap3_dt_suppress_binding': 0,
+            's8_cap3_dt_suppress_reduction_sum': 0.0,
+            's8_cap4_render_ceil_binding': 0,
+            's8_cap4_render_ceil_reduction_sum': 0.0,
+            # Nearend_est floor 4-way binding (line ~2363/2372/2377):
+            # of the four candidate floor sources, which is the MAX
+            # (the actual binding) for each FS bin.
+            's8_nef_raw_count': 0,         # raw_nearend_est * dt_shaped wins
+            's8_nef_noise_floor_count': 0, # noise_floor_psd wins
+            's8_nef_min_ne_count': 0,      # min_ne_from_dt wins
+            's8_nef_ne_physical_count': 0, # ne_physical_floor wins
         }
 
     def get_audit_counters(self):
@@ -2133,14 +2154,39 @@ class ResFilter:
             if self._stats is not None:
                 self._stats_last_res_after_attribute = float(np.mean(residual_echo_psd))
 
+            # S8 audit: FS bin total opportunity count (per-frame, increment once).
+            # Read-only; FS-bin classification (coh² < 0.1) consistent with S7.
+            if self._audit_counters is not None:
+                _ac_s8 = self._audit_counters
+                _fs_mask_s8 = coh2 < 0.1
+                _ac_s8['s8_stage1_fs_bin_total'] += int(np.sum(_fs_mask_s8))
+
             # Cap 1: echo_psd × 2.0 (skipped in render-mode)
             if not self._residual_est.using_render_based:
+                if self._audit_counters is not None:
+                    _cap1_arr = self.echo_psd * 2.0
+                    _bind = _fs_mask_s8 & (residual_echo_psd > _cap1_arr)
+                    _n_bind = int(np.sum(_bind))
+                    if _n_bind > 0:
+                        _ac_s8['s8_cap1_echo_x2_binding'] += _n_bind
+                        _ac_s8['s8_cap1_echo_x2_reduction_sum'] += 10.0 * float(
+                            np.sum(np.log10((residual_echo_psd[_bind] + 1e-30)
+                                            / (_cap1_arr[_bind] + 1e-30))))
                 residual_echo_psd = np.minimum(residual_echo_psd, self.echo_psd * 2.0)
             if self._stats is not None:
                 self._stats_last_res_after_echo_cap = float(np.mean(residual_echo_psd))
 
             # Cap 2: error_psd × (1.5 if render else 1.0)
             err_cap_mult = 1.5 if self._residual_est.using_render_based else 1.0
+            if self._audit_counters is not None:
+                _cap2_arr = self.error_psd * err_cap_mult
+                _bind = _fs_mask_s8 & (residual_echo_psd > _cap2_arr)
+                _n_bind = int(np.sum(_bind))
+                if _n_bind > 0:
+                    _ac_s8['s8_cap2_err_mult_binding'] += _n_bind
+                    _ac_s8['s8_cap2_err_mult_reduction_sum'] += 10.0 * float(
+                        np.sum(np.log10((residual_echo_psd[_bind] + 1e-30)
+                                        / (_cap2_arr[_bind] + 1e-30))))
             residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * err_cap_mult)
             if self._stats is not None:
                 self._stats_last_res_after_error_cap = float(np.mean(residual_echo_psd))
@@ -2148,6 +2194,15 @@ class ResFilter:
             # Cap 3: dt_suppress (skipped in render-mode)
             if not self._residual_est.using_render_based:
                 dt_suppress = np.clip(1.0 - dt_for_fs**2, 0.1, 1.0)
+                if self._audit_counters is not None:
+                    _cap3_arr = self.error_psd * dt_suppress
+                    _bind = _fs_mask_s8 & (residual_echo_psd > _cap3_arr)
+                    _n_bind = int(np.sum(_bind))
+                    if _n_bind > 0:
+                        _ac_s8['s8_cap3_dt_suppress_binding'] += _n_bind
+                        _ac_s8['s8_cap3_dt_suppress_reduction_sum'] += 10.0 * float(
+                            np.sum(np.log10((residual_echo_psd[_bind] + 1e-30)
+                                            / (_cap3_arr[_bind] + 1e-30))))
                 residual_echo_psd = np.minimum(residual_echo_psd, self.error_psd * dt_suppress)
             if self._stats is not None:
                 self._stats_last_res_after_dt_cap = float(np.mean(residual_echo_psd))
@@ -2160,6 +2215,14 @@ class ResFilter:
                     self._stats_last_render_ceil_mean = float(np.mean(render_ceil))
                     self._stats_last_erl_estimate = float(erl_estimate)
                 if not self._residual_est.using_render_based:
+                    if self._audit_counters is not None:
+                        _bind = _fs_mask_s8 & (residual_echo_psd > render_ceil)
+                        _n_bind = int(np.sum(_bind))
+                        if _n_bind > 0:
+                            _ac_s8['s8_cap4_render_ceil_binding'] += _n_bind
+                            _ac_s8['s8_cap4_render_ceil_reduction_sum'] += 10.0 * float(
+                                np.sum(np.log10((residual_echo_psd[_bind] + 1e-30)
+                                                / (render_ceil[_bind] + 1e-30))))
                     residual_echo_psd = np.minimum(residual_echo_psd, render_ceil)
             if self._stats is not None:
                 self._stats_last_res_after_render_ceil = float(np.mean(residual_echo_psd))
@@ -2375,6 +2438,28 @@ class ResFilter:
 
             ne_physical_floor = self.error_psd * 0.05
             nearend_est = np.maximum(nearend_est, ne_physical_floor)
+
+            # S8 audit: nearend_est 4-way binding identification on FS bins.
+            # Of (raw * dt_shaped, noise_floor_psd, min_ne_from_dt,
+            # ne_physical_floor), record which value is the MAX (=binding).
+            if self._audit_counters is not None:
+                _fs_mask_nef = coh2 < 0.1
+                if np.any(_fs_mask_nef):
+                    _v1 = raw_nearend_est * dt_shaped_per_bin
+                    _v2 = np.full_like(_v1, noise_floor_psd)
+                    _v3 = min_ne_from_dt
+                    _v4 = ne_physical_floor
+                    _stack = np.stack([_v1, _v2, _v3, _v4], axis=0)
+                    _winner = np.argmax(_stack, axis=0)
+                    _ac_nef = self._audit_counters
+                    _ac_nef['s8_nef_raw_count'] += int(
+                        np.sum((_winner == 0) & _fs_mask_nef))
+                    _ac_nef['s8_nef_noise_floor_count'] += int(
+                        np.sum((_winner == 1) & _fs_mask_nef))
+                    _ac_nef['s8_nef_min_ne_count'] += int(
+                        np.sum((_winner == 2) & _fs_mask_nef))
+                    _ac_nef['s8_nef_ne_physical_count'] += int(
+                        np.sum((_winner == 3) & _fs_mask_nef))
 
             # Round 4 trace cache (audio-passive)
             self._diag_nearend_est_last = nearend_est
