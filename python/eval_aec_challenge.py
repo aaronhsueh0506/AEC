@@ -82,6 +82,9 @@ def estimate_delay(mic, ref, sr, max_delay_ms=250.0):
     Uses the entire signal for maximum accuracy.
     Plain cross-correlation (no whitening) is most reliable for reverberant data.
     """
+    _env_override = os.environ.get('AEC_MAX_DELAY_MS')
+    if _env_override is not None:
+        max_delay_ms = float(_env_override)
     max_d = int(max_delay_ms * sr / 1000)
     n = min(len(mic), len(ref))
     m = mic[:n].astype(np.float64)
