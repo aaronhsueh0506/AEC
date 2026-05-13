@@ -542,6 +542,23 @@ class AecConfig:
     # additive (not retargeting). See docs/v3_12_s6b_verdict.md.
     res_state_driven_epc_dt_cap: bool = False
 
+    # v3.12 S7 (Phase 3B v3 Option α): drop the `NOT epc_active` gate on the
+    # F3.1 v3 mic-excess path so it also fires during EPC-active frames.
+    # Pre-implementation 800-case audit (2026-05-13, docs/v3_12_s7_*) found:
+    #   target slice (filter_converged AND lw_ready AND epc_active) =
+    #     33.97% global, 32-43% per bucket — well above 0.5% floor;
+    #   unified dt_per_bin reduction in FS bins (coh²<0.1) = 67.7% global,
+    #     67-68% per bucket — well above 20% bar.
+    # Mechanism: legacy fallback path uses `(1-coh²)`-based dt_per_bin which
+    # saturates to 1 in FS post-cancellation (coh²→0 → false NE-like
+    # evidence) → over-shapes `nearend_est` → inflates Wiener / softgate
+    # gain → echo leakage. F3.1 v3 mic-excess blend evidence (validated
+    # via P1-Phase-1 AUROC 0.871) replaces the (1-coh²) saturation source.
+    # NE bucket has 0% target frames (filter rarely converges in NE) so
+    # this flag is NE-risk-free by audit. See
+    # docs/v3_12_phase3b_v3_design.md §3.1 / §6.1.
+    res_dt_per_bin_unified: bool = False
+
     # F-E5 — saturation handling extensions (v3.11 Phase 1 Sprint 11-12).
     # Edge case E5: clip & saturation. Current handling has 4 known gaps:
     #   E5-1: ref soft-clipped (saturation_softclip_ref), mic NOT — asymmetric
@@ -1719,7 +1736,8 @@ class ResFilter:
                  use_mic_excess_evidence: bool = False,
                  consume_filter_state: bool = False,
                  unified_gain_floor: bool = False,
-                 state_driven_epc_dt_cap: bool = False):
+                 state_driven_epc_dt_cap: bool = False,
+                 dt_per_bin_unified: bool = False):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -1730,6 +1748,7 @@ class ResFilter:
         self._consume_filter_state = consume_filter_state
         self._unified_gain_floor = unified_gain_floor
         self._state_driven_epc_dt_cap = state_driven_epc_dt_cap
+        self._dt_per_bin_unified = dt_per_bin_unified
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -2228,10 +2247,15 @@ class ResFilter:
             # binary gating on mic/far ratio can't be made FS-only
             # without a label we don't have; the blend alone is the
             # honest cap.
+            # v3.12 S7 (Phase 3B v3 Option α): when `_dt_per_bin_unified` is
+            # True, drop the `NOT epc_active` constraint so the F3.1 v3
+            # mic-excess blend also fires during EPC-active frames. Legacy
+            # fallback at `else:` below remains the path for `not
+            # filter_converged` or `not _lw_ready` regardless of flag.
             if (self._use_mic_excess_evidence
                     and filter_converged
                     and _lw_ready
-                    and not epc_active):
+                    and (self._dt_per_bin_unified or not epc_active)):
                 far_lw = self._residual_est._long_window_far_psd
                 erl_e = float(erl_estimate)
                 excess = np.maximum(self.error_psd - far_lw * erl_e, 0.0)
@@ -4596,6 +4620,7 @@ class AEC:
                 consume_filter_state=self.config.res_consume_filter_state,
                 unified_gain_floor=self.config.res_unified_gain_floor,
                 state_driven_epc_dt_cap=self.config.res_state_driven_epc_dt_cap,
+                dt_per_bin_unified=self.config.res_dt_per_bin_unified,
             )
         else:
             self.res = None
