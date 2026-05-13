@@ -651,6 +651,10 @@ class AecConfig:
     e4_nlp_pitch_threshold: float = 0.45      # listen-evidence: NL min 0.50, CTL max 0.38
     e4_nlp_continuity_frames: int = 3         # of 4-frame history
     e4_nlp_window_ms: float = 32.0            # analysis window for autocorr
+    # S3.1 secondary gate: minimum linear-residual RMS in the analysis
+    # window. Filters out pitched-but-low-residual frames in clean cases
+    # (CTL1 dropped 8.7%→3.7% under 0.05; 5/5 NL still hit).
+    e4_nlp_min_residual_rms: float = 0.05
 
     # Mode
     mode: AecMode = AecMode.PBFDKF
@@ -4626,7 +4630,8 @@ class SubtractiveNLP:
                  window_ms: float = 32.0,
                  pitch_threshold: float = 0.45,
                  continuity_frames: int = 3,
-                 history_len: int = 4):
+                 history_len: int = 4,
+                 min_residual_rms: float = 0.05):
         self._sr = int(sample_rate)
         self._hop = int(hop_size)
         win = int(window_ms * sample_rate / 1000)
@@ -4639,6 +4644,7 @@ class SubtractiveNLP:
         self._pitch_threshold = float(pitch_threshold)
         self._continuity_frames = int(continuity_frames)
         self._history_len = int(history_len)
+        self._min_residual_rms = float(min_residual_rms)
         self._window = np.hanning(self._win_samples).astype(np.float32)
         self._buf = np.zeros(self._win_samples, dtype=np.float32)
         self._buf_pos = 0
@@ -4695,6 +4701,13 @@ class SubtractiveNLP:
                 or self._buf_filled < self._win_samples):
             self._nl_confidence_last = 0.0
             self._pitch_lag_hist.clear()
+            return 0.0
+        # S3.1 secondary gate: minimum residual RMS on the current hop.
+        # Filters out pitched-but-low-residual frames in clean cases.
+        hop_rms = float(np.sqrt(
+            np.mean(hop_samples.astype(np.float64) ** 2) + 1e-15))
+        if hop_rms < self._min_residual_rms:
+            self._nl_confidence_last = 0.0
             return 0.0
         pitch_strength, pitch_lag = self._compute_pitch_strength()
         self._pitch_strength_last = pitch_strength
@@ -5148,6 +5161,7 @@ class AEC:
                 window_ms=getattr(self.config, 'e4_nlp_window_ms', 32.0),
                 pitch_threshold=getattr(self.config, 'e4_nlp_pitch_threshold', 0.45),
                 continuity_frames=getattr(self.config, 'e4_nlp_continuity_frames', 3),
+                min_residual_rms=getattr(self.config, 'e4_nlp_min_residual_rms', 0.05),
             )
         # F-E1 — far_active hysteresis state (fast attack / slow release).
         # Once far crosses 1e-4 it stays "active" until 5 consecutive frames
