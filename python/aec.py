@@ -641,6 +641,17 @@ class AecConfig:
     delay_fast_path_enabled: bool = True
     delay_fast_par_threshold: float = 40.0           # ~5x normal solid threshold
 
+    # v3.13 E4 — SubtractiveNLP detector (audit-only in S3 per
+    # docs/v3_13_e4_s2_design_lock.md). Voice-band autocorrelation
+    # pitch tracker on post-RES output; outputs nl_confidence per hop
+    # to self._diag, does NOT modify the AEC output. S5+ adds the
+    # suppressor that actually consumes nl_confidence.
+    # Default OFF — must be byte-equal output to baseline.
+    e4_nlp_enabled: bool = False
+    e4_nlp_pitch_threshold: float = 0.45      # listen-evidence: NL min 0.50, CTL max 0.38
+    e4_nlp_continuity_frames: int = 3         # of 4-frame history
+    e4_nlp_window_ms: float = 32.0            # analysis window for autocorr
+
     # Mode
     mode: AecMode = AecMode.PBFDKF
 
@@ -4598,6 +4609,117 @@ class PathChangeRegimeHandler:
         return decision
 
 
+class SubtractiveNLP:
+    """E4 NLP detector — voice-band autocorrelation pitch tracker.
+
+    Audit-only in v3.13 E4.S3 (no output mutation). Per
+    docs/v3_13_e4_s2_design_lock.md: detects mic-side non-linear
+    residual (loudspeaker NL + transmission codec NL) via FFT-based
+    autocorrelation peak in 80-500 Hz fundamental band, gated on
+    filter_state == 'refined_usable' and far_active.
+
+    Outputs per-hop scalar `nl_confidence` ∈ [0, 1]; downstream
+    suppressor (S5+) will consume.
+    """
+
+    def __init__(self, sample_rate: int, hop_size: int,
+                 window_ms: float = 32.0,
+                 pitch_threshold: float = 0.45,
+                 continuity_frames: int = 3,
+                 history_len: int = 4):
+        self._sr = int(sample_rate)
+        self._hop = int(hop_size)
+        win = int(window_ms * sample_rate / 1000)
+        n = 1
+        while n < win:
+            n *= 2
+        self._win_samples = n
+        self._qmin = int(0.002 * sample_rate)
+        self._qmax = int(0.0125 * sample_rate)
+        self._pitch_threshold = float(pitch_threshold)
+        self._continuity_frames = int(continuity_frames)
+        self._history_len = int(history_len)
+        self._window = np.hanning(self._win_samples).astype(np.float32)
+        self._buf = np.zeros(self._win_samples, dtype=np.float32)
+        self._buf_pos = 0
+        self._buf_filled = 0
+        self._pitch_lag_hist = []
+        self._nl_confidence_last = 0.0
+        self._pitch_strength_last = 0.0
+        self._pitch_lag_last = 0
+        self._fire_count = 0
+        self._call_count = 0
+
+    def _append_hop(self, hop_samples: np.ndarray) -> None:
+        n = len(hop_samples)
+        end = self._buf_pos + n
+        if end <= self._win_samples:
+            self._buf[self._buf_pos:end] = hop_samples
+        else:
+            tail = self._win_samples - self._buf_pos
+            self._buf[self._buf_pos:] = hop_samples[:tail]
+            self._buf[:n - tail] = hop_samples[tail:]
+        self._buf_pos = (self._buf_pos + n) % self._win_samples
+        self._buf_filled = min(self._buf_filled + n, self._win_samples)
+
+    def _compute_pitch_strength(self) -> tuple:
+        if self._buf_pos == 0:
+            frame = self._buf
+        else:
+            frame = np.concatenate(
+                (self._buf[self._buf_pos:], self._buf[:self._buf_pos]))
+        x = frame * self._window
+        n2 = 2 * self._win_samples
+        spec = np.fft.rfft(x, n=n2)
+        ac = np.fft.irfft(np.abs(spec) ** 2, n=n2)[:self._win_samples]
+        if ac[0] < 1e-15:
+            return 0.0, 0
+        ac = ac / ac[0]
+        slab = ac[self._qmin: self._qmax + 1]
+        peak_idx = int(np.argmax(slab))
+        return float(slab[peak_idx]), self._qmin + peak_idx
+
+    def process(self, hop_samples: np.ndarray,
+                filter_state: str, far_active: bool) -> float:
+        self._call_count += 1
+        if len(hop_samples) != self._hop:
+            self._nl_confidence_last = 0.0
+            return 0.0
+        self._append_hop(hop_samples.astype(np.float32))
+        # Gate: allow refined_usable OR coarse_learning — heavy-NL cases
+        # never reach refined_usable because the NL itself prevents linear
+        # filter convergence. Excluded: idle / startup / diverged /
+        # suspicious_dt (DT protection — NE voice could mimic pitched NL).
+        if (filter_state not in ('refined_usable', 'coarse_learning')
+                or not far_active
+                or self._buf_filled < self._win_samples):
+            self._nl_confidence_last = 0.0
+            self._pitch_lag_hist.clear()
+            return 0.0
+        pitch_strength, pitch_lag = self._compute_pitch_strength()
+        self._pitch_strength_last = pitch_strength
+        self._pitch_lag_last = pitch_lag
+        is_pitched = pitch_strength >= self._pitch_threshold
+        continuity_passed = False
+        if is_pitched and self._pitch_lag_hist:
+            tol = 0.05 * pitch_lag
+            in_tol = sum(1 for prev in self._pitch_lag_hist
+                         if abs(prev - pitch_lag) <= tol)
+            required = min(self._continuity_frames, len(self._pitch_lag_hist))
+            continuity_passed = in_tol >= required
+        if is_pitched and continuity_passed:
+            x_log = (pitch_strength - self._pitch_threshold) * 4.0
+            nl_confidence = float(1.0 / (1.0 + np.exp(-x_log)))
+            self._fire_count += 1
+        else:
+            nl_confidence = 0.0
+        self._pitch_lag_hist.append(pitch_lag)
+        if len(self._pitch_lag_hist) > self._history_len:
+            self._pitch_lag_hist.pop(0)
+        self._nl_confidence_last = nl_confidence
+        return nl_confidence
+
+
 class AEC:
     """
     Acoustic Echo Cancellation
@@ -5015,6 +5137,18 @@ class AEC:
         # Filter state classifier runs at end of process(); shadow µ schedule
         # at start needs the previous frame's value.
         self._prev_filter_state = 'idle'
+        # v3.13 E4.S3 — SubtractiveNLP detector (audit-only).
+        # Per docs/v3_13_e4_s2_design_lock.md. Outputs nl_confidence per
+        # hop into self._diag; does NOT modify output. Pure observer.
+        self.nl_detector: Optional[SubtractiveNLP] = None
+        if getattr(self.config, 'e4_nlp_enabled', False):
+            self.nl_detector = SubtractiveNLP(
+                sample_rate=self.config.sample_rate,
+                hop_size=self.hop_size,
+                window_ms=getattr(self.config, 'e4_nlp_window_ms', 32.0),
+                pitch_threshold=getattr(self.config, 'e4_nlp_pitch_threshold', 0.45),
+                continuity_frames=getattr(self.config, 'e4_nlp_continuity_frames', 3),
+            )
         # F-E1 — far_active hysteresis state (fast attack / slow release).
         # Once far crosses 1e-4 it stays "active" until 5 consecutive frames
         # below 3e-5. Stabilises ERL update gating across brief power dips.
@@ -6331,6 +6465,24 @@ class AEC:
                                                     filter_once_converged=self._filter_once_converged,
                                                     aec_state=self._aec_state,
                                                     filter_state=self._prev_filter_state)
+
+                    # v3.13 E4.S3 — SubtractiveNLP detector (audit-only).
+                    # Pure observer: reads the LINEAR residual (raw_output =
+                    # mic − linear_echo_estimate, RES input) so the NL
+                    # harmonic signature is not masked by RES suppression.
+                    # See E4.S1 Pass A finding: production output (post-RES)
+                    # hides NL evidence. Detector self-gates on
+                    # filter_state == 'refined_usable' and far_active.
+                    if self.nl_detector is not None:
+                        _nl_conf = self.nl_detector.process(
+                            raw_output,
+                            filter_state=self._prev_filter_state,
+                            far_active=(far_power > 1e-4))
+                        self._diag['nl_confidence'] = _nl_conf
+                        self._diag['nl_pitch_strength'] = (
+                            self.nl_detector._pitch_strength_last)
+                        self._diag['nl_pitch_lag'] = (
+                            self.nl_detector._pitch_lag_last)
 
                     # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
                     if not self.config.enable_dtd:
