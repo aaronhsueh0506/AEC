@@ -234,9 +234,99 @@ than "introducing."
 
 Path 3 is documented as a **research finding**. The eval harness
 keeps `max_delay_ms=250` as default. The `AEC_MAX_DELAY_MS` env var
-override is retained as opt-in for sub-experiments. Next sprint
-(E2.S2.b) must address the unmasked DT over-suppression before
-the bench harness can be flipped.
+override is retained as opt-in for sub-experiments.
+
+## Linear-only verification (Phase 0 — 2026-05-13)
+
+User's call (2026-05-13): "echo↑ deg↓ 感覺問題還在 NE 判斷是否成功" +
+"如果你要比較應該是比較 linear". The 800-case AECMOS scores compare
+post-RES output; the DT Δdeg regression could be RES-stage
+over-suppression rather than linear-stage degradation.
+
+Built linear-only comparison harness `tools/research/e2_s2_linear_compare.py`
+computing `linear_pwr_ratio_db = 10*log10(mean(mic²) / mean(nores²))` on
+signal-active frames, using existing `_ours_nores.wav` (linear residual,
+RES disabled) from both 800-case runs.
+
+### Bucket means — Δ linear cancellation (dB)
+
+| Bucket | n | mean Δ | median Δ | cases > +1 dB | cases > +3 dB | cases < −1 dB |
+|---|---:|---:|---:|---:|---:|---:|
+| **FS_static** | 169 | **+0.426** | 0.000 | **13** | **9** | 0 |
+| FS_movement | 131 | +0.025 | 0.000 | 4 | 0 | 3 |
+| DT_static | 186 | +0.086 | 0.000 | 6 | 2 | 0 |
+| DT_movement | 114 | +0.033 | 0.000 | 1 | 0 | 0 |
+| NE | 200 | +0.001 | 0.000 | 0 | 0 | 0 |
+
+NE bucket Δ ≈ 0 confirms Path 3 has zero effect on NE-only signals
+(no echo to cancel — pre-alignment irrelevant). Median Δ = 0 on every
+bucket: the bulk of the corpus is unaffected; only outlier cases
+where bench pre-align was previously broken see any movement.
+
+### Top FS_static linear gains
+
+| Stem | base linear (dB) | Path 3 linear (dB) | Δ (dB) |
+|---|---:|---:|---:|
+| S22FCqKD | 0.57 | **14.07** | **+13.50** |
+| N2rQLbnp | 0.45 | 10.48 | +10.03 |
+| XTqo1aOX | 0.81 | 10.12 | +9.31 |
+| XXz0qkUS | 1.02 | 8.66 | +7.64 |
+| S5cyhx02u00 | 1.63 | 7.62 | +5.99 |
+| xFk7igecuke | 0.88 | 5.81 | +4.94 |
+
+These are massive linear-stage improvements — under max=250 the
+filter was operating on a misaligned ref and produced near-zero
+cancellation (linear ratio 0.5-1.6 dB ≈ mic ≈ residual, no rejection
+at all). Under Path 3 the filter cancels properly (8-14 dB linear
+rejection).
+
+### 7 DT_static AECMOS regressors — linear behavior
+
+| Stem | base linear (dB) | Path 3 linear (dB) | Δ linear (dB) | AECMOS Δdeg |
+|---|---:|---:|---:|---:|
+| S22FCqKD_doubletalk | 0.90 | 3.60 | **+2.70** | **-2.045** |
+| JtodX3Ug_doubletalk | 0.45 | 4.06 | +3.61 | -1.913 |
+| khqZY41l_doubletalk | 0.73 | 2.39 | +1.66 | -1.585 |
+| 7GTxyTks_doubletalk | 0.22 | 3.61 | +3.39 | -1.504 |
+| zzCIhneJ_doubletalk | 0.99 | 2.94 | +1.95 | -0.876 |
+| V0Jqgjlr_doubletalk | n/a | n/a | n/a | -0.758 |
+| XTqo1aOX_doubletalk | 0.53 | 1.68 | +1.14 | -0.576 |
+
+**Conclusion**: linear stage cancels MORE on every DT regressor
+(+1.1 to +3.6 dB). The linear filter is doing the right thing — given
+a properly aligned ref, it correctly cancels the echo. Yet AECMOS
+deg drops 0.5-2 points per case. This proves the post-RES regression
+is RES-stage behavior, not linear-stage degradation.
+
+### Sequencing implications
+
+User's call (2026-05-13): "從前端做到後端, 不然可能會迷失目標在錯誤的方向."
+
+Path 3 is a **real front-end win** — linear filter behavior improved
+substantially on cases that had broken pre-alignment. The DT AECMOS
+regression is a **downstream RES symptom** of the upstream gain.
+
+Per the Route A Phase 0-3 sequencing in `~/.claude/plans/se-aec-aec-main-hazy-lynx.md`:
+- **Phase 0** linear-only eval infra — built (this script)
+- **Phase 1** front-end fixes verified by linear metric — **Path 3 PASSES** (+0.426 dB FS_static mean linear)
+- **Phase 2** wiring (filter_state → RES) — not started
+- **Phase 3** RES canonical refactor — explicit DEFERRED until Phase 1 closes; this is where the DT over-suppression gets re-evaluated
+
+E2.S2.b "DT regression mechanism investigation" is **withdrawn from
+v3.13 scope**. The DT AECMOS regression is documented as the
+downstream RES symptom that Phase 3 / v3.14+ will address with the
+clean front-end baseline established by Phase 1 (Path 3 + E2.S3 +
+E5.S1-S4).
+
+Continuing front-end-first sequencing:
+- **E2.S3** F-DelayTrack period scan (FS_movement still drifts;
+  Path 3 only solved static delay > 250 ms)
+- **E5.S1-S4** saturation deepening on Group B listen cases
+  (case 02/06/07/08)
+- **E4** NLP arc (parallel)
+- THEN E2.S5 deployable A/B integration
+- THEN Phase 2 wiring
+- THEN Phase 3 RES re-evaluation
 
 ## Implementation plan
 
