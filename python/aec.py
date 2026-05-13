@@ -559,6 +559,21 @@ class AecConfig:
     # docs/v3_12_phase3b_v3_design.md §3.1 / §6.1.
     res_dt_per_bin_unified: bool = False
 
+    # v3.12 S10 — `noise_floor_psd` refinement (Phase 3B v5 follow-up).
+    # S9-A.2 pre-audit data on 800-case (BALANCED, fl=832, seed=0):
+    # baseline `noise_floor_psd = mean(error_psd) * 0.01` wins argmax in
+    # 44% of FS bins (S8 finding). Replacing it with per-bin
+    # `error_psd * 0.005` in FS-confident bins (coh² < 0.1) yields:
+    #   FS_static  release-to-raw   11.53%, mean dB reduction 11.71
+    #   FS_movement release-to-raw  14.25%, mean dB reduction 11.78
+    #   intrusion outside floor baseline = 0% in all buckets
+    # H1 hypothesis: the 23 dB nearend_est magnitude reduction in FS
+    # (from S9-D upper bound) translates to ENR rise → gain drop →
+    # FS leak reduction. This flag tests H1 via 800-case A/B AECMOS.
+    # DT / NE bins (coh² ≥ 0.1) unchanged — keeps NE-side protection
+    # intact. See docs/v3_12_s9_verdict.md §S10 plan.
+    res_noise_floor_refined: bool = False
+
     # F-E5 — saturation handling extensions (v3.11 Phase 1 Sprint 11-12).
     # Edge case E5: clip & saturation. Current handling has 4 known gaps:
     #   E5-1: ref soft-clipped (saturation_softclip_ref), mic NOT — asymmetric
@@ -1737,7 +1752,8 @@ class ResFilter:
                  consume_filter_state: bool = False,
                  unified_gain_floor: bool = False,
                  state_driven_epc_dt_cap: bool = False,
-                 dt_per_bin_unified: bool = False):
+                 dt_per_bin_unified: bool = False,
+                 noise_floor_refined: bool = False):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -1749,6 +1765,7 @@ class ResFilter:
         self._unified_gain_floor = unified_gain_floor
         self._state_driven_epc_dt_cap = state_driven_epc_dt_cap
         self._dt_per_bin_unified = dt_per_bin_unified
+        self._noise_floor_refined = noise_floor_refined
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -2354,7 +2371,18 @@ class ResFilter:
         """
         if self.gain_type == "enr" and residual_echo_psd is not None:
             raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
-            noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
+            if self._noise_floor_refined:
+                # S10: per-bin `error_psd × 0.005` in FS-confident bins
+                # (coh² < 0.1); baseline scalar `mean(error_psd) × 0.01`
+                # in DT/NE. Lowers nearend_est in FS only; DT/NE bins
+                # unchanged. Audit-validated: 0% intrusion in S9-A.2.
+                noise_floor_psd = np.where(
+                    coh2 < 0.1,
+                    self.error_psd * 0.005,
+                    np.mean(self.error_psd) * 0.01,
+                ).astype(self.error_psd.dtype) + 1e-10
+            else:
+                noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
 
             # Per-bin DT indicator: base from coh2 (works for speech far-end).
             # P4B: γ²(k)-primary form removes the frame-scalar floor in the
@@ -4891,6 +4919,7 @@ class AEC:
                 unified_gain_floor=self.config.res_unified_gain_floor,
                 state_driven_epc_dt_cap=self.config.res_state_driven_epc_dt_cap,
                 dt_per_bin_unified=self.config.res_dt_per_bin_unified,
+                noise_floor_refined=self.config.res_noise_floor_refined,
             )
         else:
             self.res = None

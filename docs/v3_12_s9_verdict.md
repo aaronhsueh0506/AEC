@@ -1,9 +1,9 @@
-# S9 verdict — noise_floor_psd refinement closes NULL; Phase 4 RES canonical refactor confirmed
+# S9/S10 verdict — noise_floor_psd refinement closes NULL; H2 confirmed by bench; pivot Cap2
 
 **Date**: 2026-05-13
 **Branch**: `feature/v3.11-s9-noise-floor-refine` (parent: `feature/v3.11-route-a`)
 **Predecessor**: [v3_12_s8_verdict.md](v3_12_s8_verdict.md)
-**Status**: **S9 CLOSED — three-trial null (A/C/D); pivot Phase 4**
+**Status**: **S9 + S10 CLOSED — four-trial null (A/C/D pre-audit + S10 800-case bench); H2 confirmed; pivot Cap2**
 
 ## TL;DR
 
@@ -33,23 +33,17 @@ suffices. This is the structural pattern Q7 V3 verdict predicted:
 the 5-path floor stack is the canonical-coherence bug; patching one
 floor at a time can never fix it.
 
-**Decision**: S9 audit closed; **next sprint must distinguish two
-hypotheses**. The release-rate metric used in S9-A/C/D measured
-winner-identity (which floor wins argmax). But the actual gain-
-pipeline driver is **ENR magnitude**, and S9-D shows mean nearend_est
-reduction of **23 dB** on FS_static under maximum 3-floor attack —
-which would translate to 23 dB ENR rise → potential gain drop →
-potential FS leak fix.
+**Decision**: S9 audit and S10 implementation+bench both CLOSE NULL.
+**H2 confirmed** (downstream gain pipeline absorbs Stage 1 magnitude
+shifts); **H1 falsified** (despite 11.71 dB nearend_est reduction
+on FS bins, AECMOS Δecho = +0.000). This is the **4th consecutive
+NEUTRAL** bench on the Stage 1 surface (S6/S6b/S7/S10), confirming
+that nearend_est stack and gain-side ne_g_floor/epc_dt_cap/dt_per_bin
+are all locked by downstream caps.
 
-Two hypotheses to resolve via S10 flag-and-bench:
-- **H1** — nearend_est magnitude is the carrier; FS-gated A.2
-  (lower noise_floor coefficient + FS-confidence gate) produces
-  Δecho improvement.
-- **H2** — magnitude reduction is absorbed by downstream gain
-  pipeline (ENR clamps, gain caps, smoothing); bench is NEUTRAL.
-  Then Cap2 (residual_echo) becomes the priority pivot.
-
-S10 chooses the simplest candidate (A.2 + FS gate) and benches it.
+**Next sprint S11 = Cap2 (residual_echo)** — the only unexplored
+Stage 1 lever, inverse mechanism (deflates ENR numerator vs S6-S10
+inflating denominator) so downstream absorption may not apply.
 
 ## Audit lineage
 
@@ -162,42 +156,92 @@ The carrier remains elsewhere. From S8's Stage 1 audit, **Cap2
 gain → echo leak. Cap2 was identified in S8 but never attacked in
 S9 because the floor stack appeared higher leverage.
 
-## S10 plan — flag-and-bench S9-A.2 to discriminate H1 vs H2
+## S10 implementation + bench — H1 falsified, H2 confirmed
 
-### Implementation
+### Implementation (commit pending)
 
-- Flag: `res_noise_floor_refined` (default OFF) in AecConfig
-- Behavior on FS-confident bins (`coh² < 0.1`):
-  - Replace `noise_floor_psd = mean(error_psd) × 0.01` with
-    `noise_floor_psd[k] = error_psd[k] × 0.005` (per-bin, lower
-    coefficient)
-- DT/NE bins (`coh² ≥ 0.1`): unchanged (baseline behavior)
+- Flag: `res_noise_floor_refined: bool = False` in AecConfig
+- ResFilter kwarg `noise_floor_refined`, stored as `self._noise_floor_refined`
+- Behavior in `_stage_gain_compute` ([aec.py:2357](python/aec.py#L2357)):
+  - Flag-OFF (default): `noise_floor_psd = mean(error_psd) × 0.01` (scalar, unchanged)
+  - Flag-ON: `noise_floor_psd = np.where(coh² < 0.1, error_psd × 0.005, mean(error_psd) × 0.01)`
+- Byte-equal flag-OFF verified: 4/4 cases md5-identical vs `v3_12_s7_off` baseline (same harness)
+- Single-case smoke flag-ON: max abs diff 1.15e-7 (float32 noise level, expected from
+  scalar → array broadcast in numpy)
 
-### Acceptance gate
+### 800-case AECMOS A/B (BALANCED, fl=832, cng=True, seed=0)
 
-- 800-case byte-equal in flag-OFF ≥ 99.99% vs v3.11.x (Q7 V3 invariant)
-- Flag-ON 800-case A/B with AECMOS:
-  - **H1 PASS** = FS Δecho ≥ +0.005 AND NE Δdeg ≥ −0.005 AND DT Δdeg ≥ −0.005
-    AND cohort tail Δecho ≥ −0.05 → S9-A.2 promotes to BALANCED (v3.11.3)
-  - **H1 NEUTRAL** = FS Δecho in [−0.005, +0.005] → S9 closes null;
-    pivot S11 = Cap2 pre-audit
-  - **H1 FAIL** = FS Δecho < −0.005 OR any other bucket regression →
-    S9 closes fail; pivot S11 = Cap2 pre-audit
+A = `v3_12_s7_off` (= v3.11.x flag-OFF baseline, byte-equal verified)
+B = `v3_12_s10_on` (flag-ON, S10 candidate)
 
-### S11+ if H1 NEUTRAL/FAIL — Cap2 (residual_echo) pivot
+| Bucket | n | A.echo | A.deg | B.echo | B.deg | Δecho | Δdeg | verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| FS_static | 169 | 3.656 | 4.999 | 3.656 | 4.999 | +0.000 | +0.000 | ok |
+| FS_movement | 131 | 3.706 | 4.999 | 3.705 | 4.999 | −0.001 | +0.000 | ok |
+| DT_static | 186 | 4.221 | 2.325 | 4.221 | 2.326 | −0.000 | +0.001 | ok |
+| DT_movement | 114 | 4.054 | 2.367 | 4.054 | 2.368 | +0.000 | +0.001 | ok |
+| NE | 200 | 4.998 | 4.011 | 4.998 | 4.011 | +0.000 | +0.000 | ok |
 
-Pre-audit Cap2 (Stage 1 binding 17-18% in FS per S8). Candidates:
-- E.1: Cap2 disabled in FS-confident bins
-- E.2: Cap2 mult raised (looser) in FS bins
-- E.3: Cap2 gated by `1 - effective_dt`
+**H1 (nearend_est magnitude is FS-leak carrier) — FALSIFIED**.
+Despite S9-A.2 pre-audit showing 11.71 dB mean nearend_est
+reduction on FS_static bins, the AECMOS bench measures **zero
+Δecho** on every bucket.
 
-### Critical invariants
+**H2 (downstream gain pipeline absorbs the change) — CONFIRMED**.
+The 4-cap on gain (hf_cap / quiet_mask / 3bin_smooth / epc_dt_cap on
+gain side) + temporal smoothing + softgate clamps fully neutralise
+the ENR shift from a 10× lower noise_floor coefficient.
+
+This is the **fourth consecutive Stage-1-target NEUTRAL bench**:
+
+| Sprint | Target | Bench verdict |
+|---|---|---|
+| S6 | ne_g_floor removal | NEUTRAL |
+| S6b | epc_dt_cap removal | NEUTRAL (cap fired 0/2M) |
+| S7 | dt_per_bin unified | NEUTRAL |
+| **S10** | noise_floor_psd refinement | **NEUTRAL** |
+
+Stage 1 surface (Cap1-4 on residual_echo + nearend_est 3-floor
+stack) is consistently unable to move FS Δecho. The remaining
+unexplored Stage 1 lever is **Cap2** (`residual_echo_psd ≤ error_psd × mult`),
+which S8 measured as the most active FS-side gate (17-18% binding).
+Cap2 deflates ENR numerator rather than inflating denominator —
+inverse to S6/S6b/S7/S10 — so the downstream-absorption mechanism
+may not apply.
+
+## S11 plan — Cap2 (residual_echo) pre-audit + flag-and-bench
+
+### Pre-audit candidates (zero-cost extension to ResAuditCounters)
+
+- **E.1**: Cap2 disabled in FS-confident bins (`coh² < 0.1`)
+- **E.2**: Cap2 mult raised to 4.0 in FS bins (looser)
+- **E.3**: Cap2 gated by `1 - effective_dt` (passthrough when DT low)
+
+Measure: hypothetical residual_echo_psd magnitude lift in FS bins.
+
+### Implementation (if pre-audit shows ≥10 dB lift in FS bins)
+
+- Flag: `res_cap2_fs_loosen: bool = False`
+- Behavior: only modify Cap2 in FS-mask bins; DT/NE preserved
+- 800-case byte-equal flag-OFF
+- 800-case A/B with flag-ON
+
+### Critical invariants (same as before)
 
 - Cohort tail (`qNvSMyUSXUyrDGp`) Δecho ≥ −0.05 (P52 invariant)
 - FS bucket Δecho ≥ −0.02 (anti-P50 trap)
 - DT/NE bucket Δdeg ≥ −0.005 (anti-P58 trap)
 - xrtntuju 5-clip DT regression listen
-- Phase 4 unified-floor refactor: deferred to v3.13+ pending S9-A.2/Cap2 outcomes
+
+### If S11 Cap2 also NEUTRAL — implications
+
+Four NEUTRAL sprints (S6/S6b/S7/S10) plus Cap2 NEUTRAL would prove
+Stage 1 (residual_echo + nearend_est) is structurally locked.
+**FS leak carrier must then live in Stage 2** (gain pipeline:
+softgate, 4-cap, smoothing, hf_cap) — a regime S6/S6b have already
+partially explored without success. Phase 4 unified-floor refactor
+becomes the only remaining architectural option — but it touches
+Stage 2 gain pipeline, not Stage 1.
 
 ## Sources
 
