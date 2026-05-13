@@ -2032,6 +2032,88 @@ class ResFilter:
             's8_nef_noise_floor_count': 0, # noise_floor_psd wins
             's8_nef_min_ne_count': 0,      # min_ne_from_dt wins
             's8_nef_ne_physical_count': 0, # ne_physical_floor wins
+            # S9 Phase 3B v5 pre-implementation audit — noise_floor_psd
+            # refinement. For FS bins (coh² < 0.1) where the current
+            # baseline winner is noise_floor_psd (s8_nef_noise_floor_count
+            # ≈ 43% global), compute hypothetical winners under two
+            # candidate refinements:
+            #   A.1: scalar × 0.001 (10× lower than baseline 0.01)
+            #   A.2: per-bin error_psd × 0.005 (scalar→per-bin)
+            # `release_to_raw`: bin previously bound by noise_floor now
+            #   bound by raw_nearend_est (good — FS-honest evidence wins).
+            # `shift_to_min_ne`: bin shifts to min_ne_from_dt (neutral —
+            #   carrier shifts from #1 to #2, doesn't reduce overall
+            #   suppression in FS).
+            # `stays_floor`: still bound by noise_floor (new value still
+            #   highest).
+            # `reduction_db_sum`: 10·log10(old_nearend_est /
+            #   new_nearend_est) summed over bins where any candidate
+            #   wins changed — magnitude of the nearend_est drop.
+            's9_a1_release_to_raw': 0,
+            's9_a1_shift_to_min_ne': 0,
+            's9_a1_shift_to_phys': 0,
+            's9_a1_stays_floor': 0,
+            's9_a1_reduction_db_sum': 0.0,
+            's9_a1_reduction_count': 0,
+            's9_a2_release_to_raw': 0,
+            's9_a2_shift_to_min_ne': 0,
+            's9_a2_shift_to_phys': 0,
+            's9_a2_stays_floor': 0,
+            's9_a2_reduction_db_sum': 0.0,
+            's9_a2_reduction_count': 0,
+            # Out-of-FS sanity: bins currently NOT bound by noise_floor
+            # but where A.1 / A.2 would dethrone the current winner
+            # (only possible if candidate noise_floor RISES above winner
+            # — A.2 in high-error_psd bins can do this).
+            's9_a1_intrudes_outside_floor_baseline': 0,
+            's9_a2_intrudes_outside_floor_baseline': 0,
+            # S9-C pre-audit — joint noise_floor + min_ne_from_dt attack.
+            # S9-A finding: A.2 only releases 11.5% of FS floor bins to
+            # raw_NE; 88% shifts to min_ne_from_dt (F3.1 v3 floor =
+            # error_psd * dt_shaped). Joint candidates attack both
+            # floors simultaneously in FS bins:
+            #   C.1: noise_floor → error_psd × 0.005 (=A.2)
+            #         + min_ne_from_dt × 0.1 (10× reduction)
+            #   C.2: noise_floor → error_psd × 0.005 (=A.2)
+            #         + min_ne_from_dt → 0   (eliminated in FS)
+            # `release_to_raw`: FS bin previously bound by ANY floor
+            #   (noise_floor / min_ne_from_dt / ne_physical) now bound
+            #   by raw_nearend_est. This is the real outcome we want —
+            #   FS bins should not be floored.
+            # `still_floor` / `still_min_ne` / `still_phys`: residual
+            #   floor binding under candidate (shows which floors still
+            #   block release).
+            's9c_c1_release_to_raw': 0,
+            's9c_c1_still_floor': 0,
+            's9c_c1_still_min_ne': 0,
+            's9c_c1_still_phys': 0,
+            's9c_c1_reduction_db_sum': 0.0,
+            's9c_c1_reduction_count': 0,
+            's9c_c2_release_to_raw': 0,
+            's9c_c2_still_floor': 0,
+            's9c_c2_still_min_ne': 0,
+            's9c_c2_still_phys': 0,
+            's9c_c2_reduction_db_sum': 0.0,
+            's9c_c2_reduction_count': 0,
+            # FS bins baseline-bound by ANY floor (denominator for
+            # release_pct on the C candidates).
+            's9c_baseline_any_floor_count': 0,
+            # S9-D sanity — attack ALL three nearend_est floors:
+            #   noise_floor → error_psd × 0.005 (A.2)
+            #   min_ne_from_dt → 0
+            #   ne_physical_floor → 0
+            # Stack reduces to [raw_NE * dt_shaped, noise_floor_A2, 0, 0].
+            # Winner can only be 0 (raw) or 1 (tiny noise_floor at
+            # 0.005×error_psd). If raw_NE * dt_shaped >
+            # 0.005×error_psd → release_to_raw; else still_floor.
+            # Goal: prove that the nearend_est stack fully controls FS
+            # release rate (FS release ≥90% confirms no hidden 4th
+            # carrier). Read-only; informs Phase 4 RES canonical
+            # refactor design lock.
+            's9d_release_to_raw': 0,
+            's9d_still_floor': 0,
+            's9d_reduction_db_sum': 0.0,
+            's9d_reduction_count': 0,
         }
 
     def get_audit_counters(self):
@@ -2460,6 +2542,109 @@ class ResFilter:
                         np.sum((_winner == 2) & _fs_mask_nef))
                     _ac_nef['s8_nef_ne_physical_count'] += int(
                         np.sum((_winner == 3) & _fs_mask_nef))
+
+                    # S9 pre-audit: hypothetical noise_floor_psd
+                    # refinements. Reuses _v1/_v3/_v4 and _winner from S8;
+                    # only swaps v2 for each candidate and re-argmaxes.
+                    _v2_a1 = np.full_like(_v1, float(np.mean(self.error_psd)) * 0.001 + 1e-10)
+                    _v2_a2 = self.error_psd.astype(_v1.dtype) * 0.005 + 1e-10
+                    _stack_a1 = np.stack([_v1, _v2_a1, _v3, _v4], axis=0)
+                    _stack_a2 = np.stack([_v1, _v2_a2, _v3, _v4], axis=0)
+                    _winner_a1 = np.argmax(_stack_a1, axis=0)
+                    _winner_a2 = np.argmax(_stack_a2, axis=0)
+                    _baseline_floor = (_winner == 1) & _fs_mask_nef
+                    _baseline_max = _stack.max(axis=0)
+                    for _label, _wA in (('a1', _winner_a1), ('a2', _winner_a2)):
+                        _ac_nef[f's9_{_label}_release_to_raw'] += int(
+                            np.sum(_baseline_floor & (_wA == 0)))
+                        _ac_nef[f's9_{_label}_stays_floor'] += int(
+                            np.sum(_baseline_floor & (_wA == 1)))
+                        _ac_nef[f's9_{_label}_shift_to_min_ne'] += int(
+                            np.sum(_baseline_floor & (_wA == 2)))
+                        _ac_nef[f's9_{_label}_shift_to_phys'] += int(
+                            np.sum(_baseline_floor & (_wA == 3)))
+                        # Bins NOT bound by floor under baseline but whose
+                        # winner CHANGES under the candidate (A.2 can do
+                        # this when error_psd[i] is high enough that
+                        # error_psd[i]*0.005 surpasses the current winner).
+                        _not_floor = _fs_mask_nef & (_winner != 1)
+                        _ac_nef[f's9_{_label}_intrudes_outside_floor_baseline'] += int(
+                            np.sum(_not_floor & (_wA != _winner)))
+                        # Magnitude: 10*log10(baseline_max / candidate_max)
+                        # over bins where any change happened (only positive
+                        # values count — candidate strictly lowers nearend_est).
+                        _stack_X = _stack_a1 if _label == 'a1' else _stack_a2
+                        _cand_max = _stack_X.max(axis=0)
+                        _changed = _fs_mask_nef & (_cand_max < _baseline_max)
+                        _n_changed = int(np.sum(_changed))
+                        if _n_changed > 0:
+                            _ratio = (_baseline_max[_changed] + 1e-30) / (
+                                _cand_max[_changed] + 1e-30)
+                            _ac_nef[f's9_{_label}_reduction_db_sum'] += 10.0 * float(
+                                np.sum(np.log10(_ratio)))
+                            _ac_nef[f's9_{_label}_reduction_count'] += _n_changed
+
+                    # S9-C joint floor attack. Uses A.2 for noise_floor
+                    # (per-bin error_psd * 0.005) and additionally
+                    # scales min_ne_from_dt down in FS bins. Tracks fate
+                    # of ALL baseline-floor-bound FS bins (not just
+                    # noise_floor winners).
+                    _baseline_any_floor = _fs_mask_nef & (_winner != 0)
+                    _n_any_floor = int(np.sum(_baseline_any_floor))
+                    _ac_nef['s9c_baseline_any_floor_count'] += _n_any_floor
+                    if _n_any_floor > 0:
+                        _v3_c1 = _v3 * 0.1                # min_ne × 0.1
+                        _v3_c2 = np.zeros_like(_v3)        # min_ne → 0
+                        _stack_c1 = np.stack(
+                            [_v1, _v2_a2, _v3_c1, _v4], axis=0)
+                        _stack_c2 = np.stack(
+                            [_v1, _v2_a2, _v3_c2, _v4], axis=0)
+                        _winner_c1 = np.argmax(_stack_c1, axis=0)
+                        _winner_c2 = np.argmax(_stack_c2, axis=0)
+                        for _lab, _wC, _stk in (
+                                ('c1', _winner_c1, _stack_c1),
+                                ('c2', _winner_c2, _stack_c2)):
+                            _ac_nef[f's9c_{_lab}_release_to_raw'] += int(
+                                np.sum(_baseline_any_floor & (_wC == 0)))
+                            _ac_nef[f's9c_{_lab}_still_floor'] += int(
+                                np.sum(_baseline_any_floor & (_wC == 1)))
+                            _ac_nef[f's9c_{_lab}_still_min_ne'] += int(
+                                np.sum(_baseline_any_floor & (_wC == 2)))
+                            _ac_nef[f's9c_{_lab}_still_phys'] += int(
+                                np.sum(_baseline_any_floor & (_wC == 3)))
+                            _cand_max_c = _stk.max(axis=0)
+                            _changed_c = _fs_mask_nef & (
+                                _cand_max_c < _baseline_max)
+                            _n_c = int(np.sum(_changed_c))
+                            if _n_c > 0:
+                                _r_c = (_baseline_max[_changed_c] + 1e-30) / (
+                                    _cand_max_c[_changed_c] + 1e-30)
+                                _ac_nef[
+                                    f's9c_{_lab}_reduction_db_sum'
+                                ] += 10.0 * float(np.sum(np.log10(_r_c)))
+                                _ac_nef[
+                                    f's9c_{_lab}_reduction_count'
+                                ] += _n_c
+
+                        # S9-D sanity: attack all three floors. Stack
+                        # = [raw*dt_shaped, error_psd*0.005, 0, 0].
+                        _stack_d = np.stack(
+                            [_v1, _v2_a2, np.zeros_like(_v3),
+                             np.zeros_like(_v4)], axis=0)
+                        _winner_d = np.argmax(_stack_d, axis=0)
+                        _ac_nef['s9d_release_to_raw'] += int(
+                            np.sum(_baseline_any_floor & (_winner_d == 0)))
+                        _ac_nef['s9d_still_floor'] += int(
+                            np.sum(_baseline_any_floor & (_winner_d == 1)))
+                        _cand_max_d = _stack_d.max(axis=0)
+                        _changed_d = _fs_mask_nef & (_cand_max_d < _baseline_max)
+                        _n_d = int(np.sum(_changed_d))
+                        if _n_d > 0:
+                            _r_d = (_baseline_max[_changed_d] + 1e-30) / (
+                                _cand_max_d[_changed_d] + 1e-30)
+                            _ac_nef['s9d_reduction_db_sum'] += 10.0 * float(
+                                np.sum(np.log10(_r_d)))
+                            _ac_nef['s9d_reduction_count'] += _n_d
 
             # Round 4 trace cache (audio-passive)
             self._diag_nearend_est_last = nearend_est
