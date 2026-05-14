@@ -83,6 +83,11 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         trace_delay_est=bool(trace_delay_est_path),
         plan_b_dt_per_bin_gamma=plan_b_dt_per_bin_gamma,
     )
+    # v3.15 §B3: seed CNG for byte-equal sanity across CLI invocations.
+    # Matches eval_aec_challenge.py:325 convention (seed=0 per-case);
+    # without this, CNG (np.random.randn at aec.py:2009-2010) was
+    # non-deterministic and masked code-induced Δ in run-to-run compare.
+    np.random.seed(0)
     aec = AEC(cfg)
 
     mic, sr_mic = sf.read(mic_path)

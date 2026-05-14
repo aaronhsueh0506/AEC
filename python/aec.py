@@ -5504,7 +5504,16 @@ class AEC:
         # B6 — previous-frame filter_state cache for state-aware shadow_mu.
         # Filter state classifier runs at end of process(); shadow µ schedule
         # at start needs the previous frame's value.
-        self._prev_filter_state = 'idle'
+        #
+        # NOTE (v3.15 §B6, 2026-05-15): `_prev_filter_state` is the
+        # INTERNAL P3f-string state machine (values: 'idle', 'startup',
+        # 'diverged', 'suspicious_dt', 'refined_usable', 'coarse_learning').
+        # It is distinct from the PUBLIC `AecFilterState` enum (which
+        # has values like CONVERGED / WARMUP / EPC_RECOVERY) returned by
+        # `get_filter_state()`.  The two state systems serve different
+        # consumers — see B2 docblock at AecStats.filter_state and the
+        # B4 fix at aec.py:6361 for the load-bearing distinction.
+        self._prev_filter_state: str = 'idle'
         # v3.13 E4.S3 — SubtractiveNLP detector (audit-only).
         # Per docs/v3_13_e4_s2_design_lock.md. Outputs nl_confidence per
         # hop into self._diag; does NOT modify output. Pure observer.
