@@ -167,6 +167,25 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'use_mic_excess_evidence' not in config_overrides):
         config_overrides['use_mic_excess_evidence'] = (
             os.environ['AEC_USE_MIC_EXCESS'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.14 Arc-R Sprint S1 — per-band ENR threshold wire (default OFF)
+    if ('AEC_RES_PER_BAND_ENR' in os.environ
+            and 'res_per_band_enr' not in config_overrides):
+        config_overrides['res_per_band_enr'] = (
+            os.environ['AEC_RES_PER_BAND_ENR'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.14 Arc-R Sprint S2 — per-band ENR threshold tuple overrides (LF,MF,HF csv)
+    if ('AEC_ENR_T_NE_PB' in os.environ
+            and 'enr_t_ne_per_band' not in config_overrides):
+        _v = os.environ['AEC_ENR_T_NE_PB']
+        config_overrides['enr_t_ne_per_band'] = tuple(float(x) for x in _v.split(','))
+    if ('AEC_ENR_S_NE_PB' in os.environ
+            and 'enr_s_ne_per_band' not in config_overrides):
+        _v = os.environ['AEC_ENR_S_NE_PB']
+        config_overrides['enr_s_ne_per_band'] = tuple(float(x) for x in _v.split(','))
+    # v3.14 Arc-P Sprint S3 — adaptive per-band ERL EMA (default OFF)
+    if ('AEC_F3_1_PER_BAND_ERL' in os.environ
+            and 'f3_1_per_band_erl_adaptive' not in config_overrides):
+        config_overrides['f3_1_per_band_erl_adaptive'] = (
+            os.environ['AEC_F3_1_PER_BAND_ERL'].lower() not in ('0', 'false', 'off', 'no'))
     # F2.1 EPC state reset (default OFF)
     if ('AEC_USE_EPC_RESET' in os.environ
             and 'use_epc_state_reset' not in config_overrides):

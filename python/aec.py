@@ -701,6 +701,80 @@ class AecConfig:
     # separate gated sprint — do not enable until S-orth.A 800-case is run.
     shadow_state_decoupled: bool = False
 
+    # v3.14 Arc-P Sprint 02: adaptive per-band ERL EMA driven by
+    # echo_psd[k] / far_psd[k] (PBFDKF filter output, per-bin).
+    #
+    # Motivation (P.S1 audit, 2026-05-14): scalar erl_estimate=0.3 is a
+    # 7× OVER-estimate in low-coupling rooms (case 04 LF=0.043, MF=0.191,
+    # HF=0.111). This inflates the echo mask in the F3.1-v3 mic-excess
+    # formula → excess_ratio ≈ 0 → dt_per_bin ≈ 0 → echo leaks into
+    # dt_per_bin when it should be identified as FS. Inter-room variance
+    # (11×) >> inter-band variance → a fixed per-band table cannot
+    # generalise; adaptive EMA per band is the canonical solution.
+    #
+    # Design (P.S2):
+    #   3 bands: LF 0–1k Hz, MF 1–4k Hz, HF 4–8k Hz
+    #   Source: per-bin |echo_spec|² / |far_spec|² (PBFDKF output)
+    #   EMA α = 0.99 (TC ≈ 100 frames ≈ 1 s at hop=160/16 kHz, research-
+    #           backed: Jung 2011 §IV.A uses similar TC for echo-path EMA)
+    #   Update gate: filter_state in ('refined_usable', 'coarse_learning')
+    #           AND far_pwr > 1e-4 (same gate as scalar erl_estimate)
+    #           AND raw_dt_ratio < 2.0 AND inst_erl < 1.5 (NE corruption guard)
+    #   Post-EPC cap: per-band min(current, per_band_erl_cap[b]) where
+    #           cap[LF]=0.6, cap[MF]=0.8, cap[HF]=1.0 (conservative, wide)
+    #           (replaces scalar min(current, 0.3) — only active when flag ON)
+    #   Byte-equal proof: when flag=False, per-band arrays are not updated
+    #           and erl_e in F3.1 formula uses float(self._erl_estimate)
+    #           — identical to pre-P.S2 path. No production code path touched.
+    #
+    # Default OFF: byte-equal to baseline when False. P.S3 tune sprint will
+    # optimise α and the per-band clip bounds after P.S2 wiring is verified.
+    f3_1_per_band_erl_adaptive: bool = False
+    # Per-band ERL EMA time constant (α). 0.99 = TC ≈ 100 hops at hop=160.
+    # Slow tracking is intentional: ERL changes only on room/position change.
+    per_band_erl_alpha: float = 0.99
+    # Post-EPC per-band cap values [LF, MF, HF]. Replaces scalar 0.3 cap
+    # (line 6265 / 6304) when flag is ON. Wide conservative values from P.S1
+    # clip_hi recommendations; tighten in P.S3 after seeing 800-case distribution.
+    per_band_erl_cap_lf: float = 0.6
+    per_band_erl_cap_mf: float = 0.8
+    per_band_erl_cap_hf: float = 1.0
+    # Per-band ERL clip bounds (safety floor/ceil on the EMA value itself).
+    per_band_erl_clip_lo: float = 0.005
+    per_band_erl_clip_hi: float = 1.5
+
+    # v3.14 Arc-R Sprint S1: per-band ENR threshold wire.
+    #
+    # Motivation: ENR thresholds `enr_t_ne` / `enr_s_ne` in
+    # `ResFilter._stage_gain_compute` (aec.py:2792-2793) currently use a
+    # `_enr_blend`-driven interpolation between two scalar endpoints
+    # (2.0/1.5 for `t_ne`, 3.0/2.5 for `s_ne`). The blend ramps over
+    # bins 5-10 (~150-300 Hz @ 16kHz/256-fft); bins 11+ asymptote to
+    # the high-band scalar. After P.S3's adaptive per-band ERL (which
+    # already varies LF/MF/HF by ~4× per-room), the downstream ENR
+    # thresholds remain band-flat — this clips P.S3's signal before it
+    # reaches the gain decision.
+    #
+    # Per-bin audit (`project_per_bin_audit_findings.md`) ranks
+    # `enr_t_ne / enr_s_ne` as the #2 per-band candidate (right after
+    # `erl_estimate` which P-revised P.S3 addresses).
+    #
+    # Wire-only sprint (R.S1): default tuple values are uniform =
+    # current high-band scalar (1.5 / 2.5), and the flag is default
+    # OFF. When OFF: legacy `_enr_blend` path is untouched (byte-equal).
+    # When ON: a per-bin array is built once at ResFilter init from the
+    # 3-band tuple (using the same LF 0-1k / MF 1-4k / HF 4-8k split as
+    # P.S3) and substituted at the use site. Tuning happens in R.S2.
+    res_per_band_enr: bool = False
+    # Per-band tuple values [LF, MF, HF] for the NE-side ENR thresholds.
+    # Defaults match the R.S2 sweep winner "block_lf" (DT bucket +0.007 dB
+    # mean Δdeg on 800-case AECMOS; FS regression within -0.02 bar). The
+    # band tilt blocks LF echo (raise threshold) while admitting HF speech
+    # (lower threshold). Mirror-scaled by ~1.67× for the SD-side tuple to
+    # preserve the legacy t:s ratio.
+    enr_t_ne_per_band: tuple = (2.0, 1.5, 1.0)
+    enr_s_ne_per_band: tuple = (3.33, 2.5, 1.67)
+
     # Mode
     mode: AecMode = AecMode.PBFDKF
 
@@ -1843,7 +1917,10 @@ class ResFilter:
                  state_driven_epc_dt_cap: bool = False,
                  dt_per_bin_unified: bool = False,
                  noise_floor_refined: bool = False,
-                 cap2_fs_loosen: bool = False):
+                 cap2_fs_loosen: bool = False,
+                 per_band_enr: bool = False,
+                 enr_t_ne_per_band: tuple = (1.5, 1.5, 1.5),
+                 enr_s_ne_per_band: tuple = (2.5, 2.5, 2.5)):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -1857,6 +1934,9 @@ class ResFilter:
         self._dt_per_bin_unified = dt_per_bin_unified
         self._noise_floor_refined = noise_floor_refined
         self._cap2_fs_loosen = cap2_fs_loosen
+        self._per_band_enr = per_band_enr
+        self._enr_t_ne_per_band_cfg = tuple(enr_t_ne_per_band)
+        self._enr_s_ne_per_band_cfg = tuple(enr_s_ne_per_band)
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -1891,6 +1971,26 @@ class ResFilter:
                 0.0, 1.0 - (f_bins[high] - 3000.0) / 4000.0)
         # C2: ENR blend array
         self._enr_blend = np.clip((np.arange(n_freqs, dtype=np.float32) - 5) / 5, 0, 1)
+        # v3.14 Arc-R Sprint S1: per-band ENR threshold per-bin arrays.
+        # Pre-built once from the LF/MF/HF tuple values using the same band
+        # boundaries (1 kHz / 4 kHz) as P.S3 adaptive per-band ERL EMA so
+        # the two arcs operate on consistent frequency partitions. When
+        # `_per_band_enr=False` (default) these arrays are unused → no
+        # behavioural change → byte-equal to baseline.
+        _b1k = max(1, min(int(round(1000.0 / freq_res)), n_freqs - 2))
+        _b4k = max(_b1k + 1, min(int(round(4000.0 / freq_res)), n_freqs - 1))
+        self._enr_per_band_b1k = _b1k
+        self._enr_per_band_b4k = _b4k
+        _t_lf, _t_mf, _t_hf = self._enr_t_ne_per_band_cfg
+        _s_lf, _s_mf, _s_hf = self._enr_s_ne_per_band_cfg
+        self._enr_t_ne_pb = np.empty(n_freqs, dtype=np.float32)
+        self._enr_t_ne_pb[:_b1k] = float(_t_lf)
+        self._enr_t_ne_pb[_b1k:_b4k] = float(_t_mf)
+        self._enr_t_ne_pb[_b4k:] = float(_t_hf)
+        self._enr_s_ne_pb = np.empty(n_freqs, dtype=np.float32)
+        self._enr_s_ne_pb[:_b1k] = float(_s_lf)
+        self._enr_s_ne_pb[_b1k:_b4k] = float(_s_mf)
+        self._enr_s_ne_pb[_b4k:] = float(_s_hf)
         # C3: frequency bin indices
         self._hf_cap_bin = min(int(500.0 / freq_res), n_freqs - 1)
         # v3.8.4: secondary cap anchor at 2 kHz so vowel formants (1–3 kHz)
@@ -2407,12 +2507,21 @@ class ResFilter:
                 self._stats_last_res_after_dt_cap = float(np.mean(residual_echo_psd))
 
             # Cap 4: render_ceil (skipped in render-mode)
-            if far_spec is not None and far_power > 1e-4 and erl_estimate > 0.0:
+            # v3.14 Arc-P P.S2: when erl_estimate is a per-bin array
+            # (flag=ON path), use its mean as a scalar for the Cap 4 ceiling
+            # factor. The render_ceil is a conservative upper bound on the
+            # residual echo PSD; using mean(per_band) is reasonable since this
+            # cap is broadband. The per-bin ERL is consumed by the F3.1-v3
+            # excess formula in _stage_gain_compute (the primary P.S2 target).
+            _erl_scalar = (float(np.mean(erl_estimate))
+                           if isinstance(erl_estimate, np.ndarray)
+                           else float(erl_estimate))
+            if far_spec is not None and far_power > 1e-4 and _erl_scalar > 0.0:
                 far_psd_k = np.abs(far_spec) ** 2
-                render_ceil = far_psd_k * min(erl_estimate * 2.0, 1.0)
+                render_ceil = far_psd_k * min(_erl_scalar * 2.0, 1.0)
                 if self._stats is not None:
                     self._stats_last_render_ceil_mean = float(np.mean(render_ceil))
-                    self._stats_last_erl_estimate = float(erl_estimate)
+                    self._stats_last_erl_estimate = _erl_scalar
                 if not self._residual_est.using_render_based:
                     if self._audit_counters is not None:
                         _bind = _fs_mask_s8 & (residual_echo_psd > render_ceil)
@@ -2530,7 +2639,15 @@ class ResFilter:
                     and _lw_ready
                     and (self._dt_per_bin_unified or not epc_active)):
                 far_lw = self._residual_est._long_window_far_psd
-                erl_e = float(erl_estimate)
+                # v3.14 Arc-P P.S2: when erl_estimate is a per-bin ndarray
+                # (passed by AEC when f3_1_per_band_erl_adaptive=True), use it
+                # directly (numpy broadcasting handles scalar and array equally).
+                # When erl_estimate is scalar float (default-OFF path), float()
+                # preserves existing behaviour — byte-equal guaranteed.
+                if isinstance(erl_estimate, np.ndarray):
+                    erl_e = erl_estimate  # per-bin array, shape (n_freqs,)
+                else:
+                    erl_e = float(erl_estimate)
                 excess = np.maximum(self.error_psd - far_lw * erl_e, 0.0)
                 excess_ratio = np.clip(
                     excess / (self.error_psd + 1e-10), 0.0, 1.0,
@@ -2784,8 +2901,16 @@ class ResFilter:
             scale = self.enr_scale
             ne_confidence = dt_per_bin
             effective_scale = scale
-            enr_t_ne = (1 - blend) * 2.0 + blend * 1.5
-            enr_s_ne = (1 - blend) * 3.0 + blend * 2.5
+            # v3.14 Arc-R Sprint S1: per-band ENR threshold (default OFF).
+            # When `_per_band_enr=True`, substitute the precomputed per-bin
+            # arrays built from `enr_t_ne_per_band`/`enr_s_ne_per_band` tuples.
+            # Default OFF keeps the legacy `_enr_blend` formula → byte-equal.
+            if self._per_band_enr:
+                enr_t_ne = self._enr_t_ne_pb
+                enr_s_ne = self._enr_s_ne_pb
+            else:
+                enr_t_ne = (1 - blend) * 2.0 + blend * 1.5
+                enr_s_ne = (1 - blend) * 3.0 + blend * 2.5
             enr_t_fs = (1 - blend) * (0.3 * effective_scale) + blend * (0.07 * effective_scale)
             enr_s_fs = (1 - blend) * (0.4 * effective_scale) + blend * (0.1 * effective_scale)
             if effective_dt > 0.4:
@@ -2916,7 +3041,10 @@ class ResFilter:
                     far_lw = self._residual_est._long_window_far_psd
                     err_hb = self.error_psd[self._hf_cap_bin_2k:]
                     far_hb = far_lw[self._hf_cap_bin_2k:]
-                    erl_e = float(erl_estimate)
+                    # v3.14 Arc-P P.S2: HF cap uses scalar ERL (broadband).
+                    erl_e = (float(np.mean(erl_estimate[self._hf_cap_bin_2k:]))
+                             if isinstance(erl_estimate, np.ndarray)
+                             else float(erl_estimate))
                     excess = np.maximum(err_hb - 1.0 * far_hb * erl_e, 0.0)
                     err_hb_mean = float(np.mean(err_hb)) + 1e-10
                     metric = float(np.mean(excess)) / err_hb_mean
@@ -3326,7 +3454,11 @@ class ResFilter:
             )
             if filter_converged and _lw_ready_floor and not epc_active:
                 far_lw = self._residual_est._long_window_far_psd
-                erl_e = float(erl_estimate)
+                # v3.14 Arc-P P.S2: unified_gain_floor uses per-bin ERL when array.
+                if isinstance(erl_estimate, np.ndarray):
+                    erl_e = erl_estimate  # per-bin: broadcast against far_lw
+                else:
+                    erl_e = float(erl_estimate)
                 excess = np.maximum(self.error_psd - far_lw * erl_e, 0.0)
                 excess_ratio = np.clip(
                     excess / (self.error_psd + 1e-10), 0.0, 1.0,
@@ -5174,6 +5306,9 @@ class AEC:
                 dt_per_bin_unified=self.config.res_dt_per_bin_unified,
                 noise_floor_refined=self.config.res_noise_floor_refined,
                 cap2_fs_loosen=self.config.res_cap2_fs_loosen,
+                per_band_enr=self.config.res_per_band_enr,
+                enr_t_ne_per_band=self.config.enr_t_ne_per_band,
+                enr_s_ne_per_band=self.config.enr_s_ne_per_band,
             )
         else:
             self.res = None
@@ -5215,6 +5350,11 @@ class AEC:
         self._epc_render_forced_remaining = 0
         # Dynamic ERL estimate for render-based echo (B4)
         self._erl_estimate = 0.1  # initial -20dB, conservative
+        # v3.14 Arc-P P.S2: adaptive per-band ERL EMA [LF, MF, HF].
+        # Only updated and consumed when f3_1_per_band_erl_adaptive=True.
+        # Initialised to the same 0.1 as scalar _erl_estimate so the first
+        # few frames before any update gate fires produce reasonable values.
+        self._per_band_erl = np.array([0.1, 0.1, 0.1], dtype=np.float64)
         # Double-talk analyzer (owns _dt_from_energy / _dt_from_shadow / _shadow_advantage)
         self._dt_analyzer = DoubleTalkAnalyzer(self.config)
 
@@ -5545,6 +5685,8 @@ class AEC:
         self._dt_analyzer.reset()
         self._epc_render_forced_remaining = 0
         self._erl_estimate = 0.1
+        # v3.14 Arc-P P.S2: reset per-band ERL EMA to initial conservative value.
+        self._per_band_erl[:] = 0.1
 
     def _reset_filter_derived_state(self, reason: str = 'plateau',
                                      preserve_render_ema: bool = True) -> None:
@@ -5639,6 +5781,9 @@ class AEC:
 
         # ERL + EPC-render forced + DT analyzer (all filter-output-derived)
         self._erl_estimate = 0.1
+        # v3.14 Arc-P P.S2: per-band ERL is filter-output-derived (echo_spec /
+        # far_spec from PBFDKF), so reset it together with scalar _erl_estimate.
+        self._per_band_erl[:] = 0.1
         self._epc_render_forced_remaining = 0
         self._dt_analyzer.reset()
         self._stat_dt_hangover = 0
@@ -6398,6 +6543,16 @@ class AEC:
                 self._maybe_mark_diverged('epv')
                 self._epc_render_forced_remaining = self.config.epc_hangover
                 self._erl_estimate = min(self._erl_estimate, 0.3)
+                # v3.14 Arc-P P.S2: when per-band ERL is active, also cap each
+                # per-band EMA to its per-band post-EPC ceiling so a stale
+                # high-coupling EMA doesn't persist across an echo path change.
+                # When flag is OFF this block is skipped → byte-equal preserved.
+                if self.config.f3_1_per_band_erl_adaptive:
+                    _pb_caps = (self.config.per_band_erl_cap_lf,
+                                self.config.per_band_erl_cap_mf,
+                                self.config.per_band_erl_cap_hf)
+                    for _bi, _cap in enumerate(_pb_caps):
+                        self._per_band_erl[_bi] = min(self._per_band_erl[_bi], _cap)
                 if self.config.use_epc_state_reset:
                     self._apply_epc_state_reset('epv')
                 self._f_e3_handle_epc_fire('epv')
@@ -6437,6 +6592,14 @@ class AEC:
                     # Change D: arm RES render-forced + cap stale ERL
                     self._epc_render_forced_remaining = self.config.epc_hangover
                     self._erl_estimate = min(self._erl_estimate, 0.3)
+                    # v3.14 Arc-P P.S2: per-band EPC cap (symmetric with EPV path above).
+                    # Byte-equal when flag is OFF.
+                    if self.config.f3_1_per_band_erl_adaptive:
+                        _pb_caps = (self.config.per_band_erl_cap_lf,
+                                    self.config.per_band_erl_cap_mf,
+                                    self.config.per_band_erl_cap_hf)
+                        for _bi, _cap in enumerate(_pb_caps):
+                            self._per_band_erl[_bi] = min(self._per_band_erl[_bi], _cap)
                     if self.config.use_epc_state_reset:
                         self._apply_epc_state_reset('shadow_rise')
                     self._f_e3_handle_epc_fire('shadow_rise')
@@ -6520,6 +6683,64 @@ class AEC:
                         inst_erl = np.clip(inst_erl_raw, erl_clip_lo, 1.0)
                         alpha_erl = 0.99 if not self._filter_converged else 0.999
                         self._erl_estimate = float(alpha_erl * self._erl_estimate + (1 - alpha_erl) * inst_erl)
+                    # v3.14 Arc-P P.S3: adaptive per-band ERL EMA update.
+                    # SOURCE SIGNAL CORRECTION (P.S3):
+                    #   P.S2 used |echo_spec|²/|far_spec|² (PBFDKF predicted
+                    #   echo divided by far, single-frame complex ratio).
+                    #   Discrepancy: P.S2 gave LF=0.57 vs P.S1 oracle=0.043.
+                    #   Root cause: |W·X|²/|X|² = |Ĥ(k)|² (estimated filter
+                    #   response power), not room ERL.  In FS-converged state
+                    #   PBFDKF W overmodels: ||W||² reflects cumulative energy
+                    #   in the W taps, not the ratio of cancelled-to-total echo.
+                    #   CORRECT source: res.error_psd / far_lw — exactly what
+                    #   P.S1 validated.  In converged FS: error ≈ residual echo
+                    #   ≈ far × ERL_room, so error_psd/far_lw ≈ ERL_room per
+                    #   band.  res.error_psd is an EMA-smoothed per-bin PSD
+                    #   (alpha=0.8 BALANCED) — robust to single-frame noise.
+                    #   far_lw is the long-window far PSD used in F3.1 excess
+                    #   formula — same denominator for consistency.
+                    # GATE (sibling of scalar ERL update, not nested inside):
+                    #   Uses _filter_converged + lw_ready + far_active (the
+                    #   outer erl_update_gate already enforces far_pwr > 1e-4).
+                    #   Does NOT require raw_dt_ratio < 2.0 or inst_erl_raw < 1.5
+                    #   because res.error_psd is EMA-smoothed (robust to single-
+                    #   frame NE contamination) and _filter_converged is the
+                    #   primary reliability gate.  In high-coupling rooms (case
+                    #   08), inst_erl_raw=28 because mic >>> far at the reference
+                    #   level, but error_psd/far_lw correctly tracks the room.
+                    if (self.config.f3_1_per_band_erl_adaptive
+                            and self._filter_converged
+                            and self.res is not None
+                            and self.res._residual_est is not None
+                            and self.res._residual_est._long_window_n_updates > 0):
+                        _err_psd_pb = self.res.error_psd      # EMA per-bin, shape (n_freqs,)
+                        _far_lw_pb = self.res._residual_est._long_window_far_psd
+                        # Band boundaries in bins (16 kHz, fft_size=640 → 257 bins)
+                        # freq_per_bin = sr / fft_size
+                        _fpb = self.config.sample_rate / float(self.config.fft_size)
+                        _bin_1k = max(1, int(round(1000.0 / _fpb)))
+                        _bin_4k = max(_bin_1k + 1, int(round(4000.0 / _fpb)))
+                        _n = _err_psd_pb.shape[0]
+                        _bin_1k = min(_bin_1k, _n - 2)
+                        _bin_4k = min(_bin_4k, _n - 1)
+                        # Per-band mean(error_psd) / mean(far_lw); skip band
+                        # if far energy is negligible (avoids 0-div artefacts).
+                        _alpha_pb = self.config.per_band_erl_alpha
+                        _clip_lo = self.config.per_band_erl_clip_lo
+                        _clip_hi = self.config.per_band_erl_clip_hi
+                        for _bi, (_bs, _be) in enumerate(
+                                ((0, _bin_1k), (_bin_1k, _bin_4k), (_bin_4k, _n))):
+                            if _be <= _bs:
+                                continue
+                            _far_band = float(np.mean(_far_lw_pb[_bs:_be]))
+                            if _far_band < 1e-10:
+                                continue
+                            _inst_pb = float(np.mean(_err_psd_pb[_bs:_be])) / _far_band
+                            _inst_pb = float(np.clip(_inst_pb, _clip_lo, _clip_hi))
+                            self._per_band_erl[_bi] = (
+                                _alpha_pb * self._per_band_erl[_bi]
+                                + (1.0 - _alpha_pb) * _inst_pb
+                            )
 
                 # Pre-filter DT signal (Stage B): mic energy excess over
                 # far × max_ERL. Realistic rooms have ERL ≤ +6 dB (coupling
@@ -6641,6 +6862,26 @@ class AEC:
                                      float(getattr(self, '_dt_from_shadow', 0.0)))
                     shadow_dt = 0.08 * _shadow_dt if self.epc_active else _shadow_dt
 
+                    # v3.14 Arc-P P.S2: when f3_1_per_band_erl_adaptive=True,
+                    # pass a per-bin ERL array to ResFilter so the F3.1-v3
+                    # mic-excess formula uses per-band adaptive estimates
+                    # instead of the scalar _erl_estimate.  The per-bin array
+                    # is built from _per_band_erl[LF, MF, HF] by broadcasting
+                    # each band's value to the corresponding bin range.  This
+                    # is identical to erl_estimate=scalar when the flag is OFF
+                    # (scalar float path) → byte-equal guaranteed.
+                    if self.config.f3_1_per_band_erl_adaptive and hasattr(self, '_per_band_erl'):
+                        _fpb2 = self.config.sample_rate / float(self.config.fft_size)
+                        _nf2 = self.res.n_freqs
+                        _b1k2 = max(1, min(int(round(1000.0 / _fpb2)), _nf2 - 2))
+                        _b4k2 = max(_b1k2 + 1, min(int(round(4000.0 / _fpb2)), _nf2 - 1))
+                        _erl_pb = np.empty(_nf2, dtype=np.float32)
+                        _erl_pb[:_b1k2] = float(self._per_band_erl[0])
+                        _erl_pb[_b1k2:_b4k2] = float(self._per_band_erl[1])
+                        _erl_pb[_b4k2:] = float(self._per_band_erl[2])
+                        _erl_arg = _erl_pb
+                    else:
+                        _erl_arg = self._erl_estimate
                     final_output = self.res.process(raw_output, eff_echo_spec,
                                                     far_power, self.filter.far_spec,
                                                     filter_converged=self._filter_converged,
@@ -6652,7 +6893,7 @@ class AEC:
                                                     saturation_level=self._saturation_level,
                                                     epc_active=self.epc_active,
                                                     shadow_dt=shadow_dt,
-                                                    erl_estimate=self._erl_estimate,
+                                                    erl_estimate=_erl_arg,
                                                     e2_main=float(self.main_err_smooth),
                                                     e2_shadow=float(self.shadow_err_smooth),
                                                     y2=float(far_power),
@@ -6800,6 +7041,11 @@ class AEC:
             self._diag['dt_from_energy'] = self._dt_from_energy
             self._diag['dt_from_shadow'] = getattr(self, '_dt_from_shadow', 0.0)
             self._diag['erl_estimate'] = self._erl_estimate
+            # v3.14 Arc-P P.S2: expose per-band ERL EMA values for auditing.
+            # Zero-cost when flag OFF (array always exists but values stay 0.1).
+            self._diag['per_band_erl_lf'] = float(self._per_band_erl[0])
+            self._diag['per_band_erl_mf'] = float(self._per_band_erl[1])
+            self._diag['per_band_erl_hf'] = float(self._per_band_erl[2])
             self._diag['epc_active'] = self.epc_active
             self._diag['saturation_level'] = self._saturation_level
             self._diag['erle_windowed'] = float(erle_windowed) if 'erle_windowed' in locals() else 0.0
