@@ -674,15 +674,25 @@ class AecConfig:
     # S-orth.A — shadow state decoupling (v3.14 Arc S-orth Sprint A).
     # Motivation: Riccati equation forces dual PBFDKF shadows to track each
     # other (Switchboard AEC3 2026 deep dive). Q×3.5 damps but does not
-    # break the coupling — shadow _error_psd, R, _copy_err_baseline, and
-    # _simple_mu_holdoff all follow the same signal path, making shadow a
-    # "damped echo of main" rather than orthogonal evidence.
+    # break the coupling — shadow _error_psd and R follow the same signal
+    # path as main's, making shadow a "damped echo of main" rather than
+    # orthogonal evidence.
     #
-    # Full decoupling gives shadow its own:
+    # Shipped decoupling (v3.14 Arc S-orth.A):
     #   _shadow_error_psd       per-bin EMA (shadow's own observation of error PSD)
     #   _shadow_R               shadow's Kalman R (written into shadow_filter.R each frame)
+    #
+    # RESERVED (declared but not wired — future arc scope, not v3.15):
     #   _shadow_copy_err_baseline shadow's view of "best error in stable FS"
-    #   _shadow_mu_holdoff      shadow's own mu-holdoff counter (independent of main)
+    #                           — would require PathChangeRegimeHandler redesign
+    #                           to track main and shadow baselines separately
+    #                           (currently min(main_err, shadow_err) feeds a
+    #                           single _copy_err_baseline).
+    #   _shadow_mu_holdoff      shadow's own mu-holdoff counter — would require
+    #                           a parallel _shadow_simple_mu_ratio mechanism
+    #                           gating shadow's mu independently from main.
+    # B5 (v3.15 §1.0.S2, 2026-05-14): doc aligned with actual implementation;
+    # init/reset for _shadow_mu_holdoff kept harmless for future wiring.
     #
     # Safety regularization: Option B (quiescent re-sync). When the filter is
     # in steady-state FS (far_power > 1e-4 AND filter_state=='refined_usable'
@@ -905,8 +915,10 @@ class AecConfig:
                 mu_holdoff_no_reset=True,
                 # v3.11 B5: symmetric Yang 2017 R-reset on shadow filter (Phase 1 Sprint 1-2 PASS)
                 shadow_r_reset_enabled=True,
-                # v3.14 S-orth.A: decouple shadow's Kalman state from main's
-                # (_error_psd / R / _copy_err_baseline / mu_holdoff / internal counters).
+                # v3.14 S-orth.A: decouple shadow's Kalman _error_psd + R
+                # from main's (B5/§1.0.S2: only these two are actually wired
+                # in v3.14; _copy_err_baseline / mu_holdoff remain coupled
+                # and are reserved for a future shadow-decoupling arc).
                 # 800-case GREEN PASS (commit 8089974): all 5 buckets within bar,
                 # cohort tail qNvSMyU Δecho +0.0036, state correlation drops
                 # main vs shadow 0.99 → 0.47 on DT_static (target 0.5-0.7 hit).
