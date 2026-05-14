@@ -831,6 +831,14 @@ class AecConfig:
                 mu_holdoff_no_reset=True,
                 # v3.11 B5: symmetric Yang 2017 R-reset on shadow filter (Phase 1 Sprint 1-2 PASS)
                 shadow_r_reset_enabled=True,
+                # v3.14 S-orth.A: decouple shadow's Kalman state from main's
+                # (_error_psd / R / _copy_err_baseline / mu_holdoff / internal counters).
+                # 800-case GREEN PASS (commit 8089974): all 5 buckets within bar,
+                # cohort tail qNvSMyU Δecho +0.0036, state correlation drops
+                # main vs shadow 0.99 → 0.47 on DT_static (target 0.5-0.7 hit).
+                # First mechanism across 5+ shadow-retirement attempts that
+                # produces genuinely independent shadow Kalman state.
+                shadow_state_decoupled=True,
                 # v3.11 F-E5: saturation handling extensions (Phase 1 Sprint 11-12 PASS)
                 f_e5_enabled=True,
                 # v3.11 diverged_reset: triple-AND gate unblocks dead code safely
