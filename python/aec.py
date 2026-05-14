@@ -6479,47 +6479,64 @@ class AEC:
                         inst_erl = np.clip(inst_erl_raw, erl_clip_lo, 1.0)
                         alpha_erl = 0.99 if not self._filter_converged else 0.999
                         self._erl_estimate = float(alpha_erl * self._erl_estimate + (1 - alpha_erl) * inst_erl)
-                        # v3.14 Arc-P P.S2: adaptive per-band ERL EMA update.
-                        # Gate: same raw_dt_ratio / inst_erl_raw guards as scalar,
-                        # PLUS filter_state in ('refined_usable', 'coarse_learning')
-                        # so we only learn from frames where filter output is
-                        # meaningful (avoids polluting the EMA during startup or
-                        # diverged states where echo_spec is unreliable).
-                        # Source: per-bin |echo_spec|² / |far_spec|² from PBFDKF.
-                        # Aggregated per band via mean (robust to single-bin outliers).
-                        if (self.config.f3_1_per_band_erl_adaptive
-                                and self._prev_filter_state in (
-                                    'refined_usable', 'coarse_learning')
-                                and hasattr(self.filter, 'echo_spec')
-                                and hasattr(self.filter, 'far_spec')):
-                            _echo_psd_pb = np.abs(self.filter.echo_spec) ** 2
-                            _far_psd_pb = np.abs(self.filter.far_spec) ** 2
-                            # Band boundaries in bins (16 kHz, fft_size=640 → 257 bins)
-                            # freq_per_bin = sr / fft_size
-                            _fpb = self.config.sample_rate / float(self.config.fft_size)
-                            _bin_1k = max(1, int(round(1000.0 / _fpb)))
-                            _bin_4k = max(_bin_1k + 1, int(round(4000.0 / _fpb)))
-                            _n = _echo_psd_pb.shape[0]
-                            _bin_1k = min(_bin_1k, _n - 2)
-                            _bin_4k = min(_bin_4k, _n - 1)
-                            # Per-band mean(echo_psd) / mean(far_psd); skip band
-                            # if far energy is negligible (avoids 0-div artefacts).
-                            _alpha_pb = self.config.per_band_erl_alpha
-                            _clip_lo = self.config.per_band_erl_clip_lo
-                            _clip_hi = self.config.per_band_erl_clip_hi
-                            for _bi, (_bs, _be) in enumerate(
-                                    ((0, _bin_1k), (_bin_1k, _bin_4k), (_bin_4k, _n))):
-                                if _be <= _bs:
-                                    continue
-                                _far_band = float(np.mean(_far_psd_pb[_bs:_be]))
-                                if _far_band < 1e-12:
-                                    continue
-                                _inst_pb = float(np.mean(_echo_psd_pb[_bs:_be])) / _far_band
-                                _inst_pb = float(np.clip(_inst_pb, _clip_lo, _clip_hi))
-                                self._per_band_erl[_bi] = (
-                                    _alpha_pb * self._per_band_erl[_bi]
-                                    + (1.0 - _alpha_pb) * _inst_pb
-                                )
+                    # v3.14 Arc-P P.S3: adaptive per-band ERL EMA update.
+                    # SOURCE SIGNAL CORRECTION (P.S3):
+                    #   P.S2 used |echo_spec|²/|far_spec|² (PBFDKF predicted
+                    #   echo divided by far, single-frame complex ratio).
+                    #   Discrepancy: P.S2 gave LF=0.57 vs P.S1 oracle=0.043.
+                    #   Root cause: |W·X|²/|X|² = |Ĥ(k)|² (estimated filter
+                    #   response power), not room ERL.  In FS-converged state
+                    #   PBFDKF W overmodels: ||W||² reflects cumulative energy
+                    #   in the W taps, not the ratio of cancelled-to-total echo.
+                    #   CORRECT source: res.error_psd / far_lw — exactly what
+                    #   P.S1 validated.  In converged FS: error ≈ residual echo
+                    #   ≈ far × ERL_room, so error_psd/far_lw ≈ ERL_room per
+                    #   band.  res.error_psd is an EMA-smoothed per-bin PSD
+                    #   (alpha=0.8 BALANCED) — robust to single-frame noise.
+                    #   far_lw is the long-window far PSD used in F3.1 excess
+                    #   formula — same denominator for consistency.
+                    # GATE (sibling of scalar ERL update, not nested inside):
+                    #   Uses _filter_converged + lw_ready + far_active (the
+                    #   outer erl_update_gate already enforces far_pwr > 1e-4).
+                    #   Does NOT require raw_dt_ratio < 2.0 or inst_erl_raw < 1.5
+                    #   because res.error_psd is EMA-smoothed (robust to single-
+                    #   frame NE contamination) and _filter_converged is the
+                    #   primary reliability gate.  In high-coupling rooms (case
+                    #   08), inst_erl_raw=28 because mic >>> far at the reference
+                    #   level, but error_psd/far_lw correctly tracks the room.
+                    if (self.config.f3_1_per_band_erl_adaptive
+                            and self._filter_converged
+                            and self.res is not None
+                            and self.res._residual_est is not None
+                            and self.res._residual_est._long_window_n_updates > 0):
+                        _err_psd_pb = self.res.error_psd      # EMA per-bin, shape (n_freqs,)
+                        _far_lw_pb = self.res._residual_est._long_window_far_psd
+                        # Band boundaries in bins (16 kHz, fft_size=640 → 257 bins)
+                        # freq_per_bin = sr / fft_size
+                        _fpb = self.config.sample_rate / float(self.config.fft_size)
+                        _bin_1k = max(1, int(round(1000.0 / _fpb)))
+                        _bin_4k = max(_bin_1k + 1, int(round(4000.0 / _fpb)))
+                        _n = _err_psd_pb.shape[0]
+                        _bin_1k = min(_bin_1k, _n - 2)
+                        _bin_4k = min(_bin_4k, _n - 1)
+                        # Per-band mean(error_psd) / mean(far_lw); skip band
+                        # if far energy is negligible (avoids 0-div artefacts).
+                        _alpha_pb = self.config.per_band_erl_alpha
+                        _clip_lo = self.config.per_band_erl_clip_lo
+                        _clip_hi = self.config.per_band_erl_clip_hi
+                        for _bi, (_bs, _be) in enumerate(
+                                ((0, _bin_1k), (_bin_1k, _bin_4k), (_bin_4k, _n))):
+                            if _be <= _bs:
+                                continue
+                            _far_band = float(np.mean(_far_lw_pb[_bs:_be]))
+                            if _far_band < 1e-10:
+                                continue
+                            _inst_pb = float(np.mean(_err_psd_pb[_bs:_be])) / _far_band
+                            _inst_pb = float(np.clip(_inst_pb, _clip_lo, _clip_hi))
+                            self._per_band_erl[_bi] = (
+                                _alpha_pb * self._per_band_erl[_bi]
+                                + (1.0 - _alpha_pb) * _inst_pb
+                            )
 
                 # Pre-filter DT signal (Stage B): mic energy excess over
                 # far × max_ERL. Realistic rooms have ERL ≤ +6 dB (coupling
