@@ -225,6 +225,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'diverged_reset_triple_and' not in config_overrides):
         config_overrides['diverged_reset_triple_and'] = (
             os.environ['AEC_DIVERGED_RESET_TRIPLE'].lower() not in ('0', 'false', 'off', 'no'))
+    # S-orth.A: decoupled shadow Kalman state (default OFF)
+    if ('AEC_SHADOW_DECOUPLED' in os.environ
+            and 'shadow_state_decoupled' not in config_overrides):
+        config_overrides['shadow_state_decoupled'] = (
+            os.environ['AEC_SHADOW_DECOUPLED'].lower() not in ('0', 'false', 'off', 'no'))
     # P1 Phase 2: conditional HF cap + threshold env vars
     if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
         config_overrides['hf_cap_conditional'] = (
