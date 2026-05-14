@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.13.0"
+__version__ = "3.14.0-s-orth-a"
 
 import os
 import numpy as np
@@ -663,6 +663,36 @@ class AecConfig:
     # threshold ≥1.10 starts cutting into NL detection.
     e4_nlp_cancel_ratio_threshold: float = 1.05
     e4_nlp_cancel_ema_alpha: float = 0.99    # TC ~100 hops = 1 sec @ 10ms hop
+
+    # S-orth.A — shadow state decoupling (v3.14 Arc S-orth Sprint A).
+    # Motivation: Riccati equation forces dual PBFDKF shadows to track each
+    # other (Switchboard AEC3 2026 deep dive). Q×3.5 damps but does not
+    # break the coupling — shadow _error_psd, R, _copy_err_baseline, and
+    # _simple_mu_holdoff all follow the same signal path, making shadow a
+    # "damped echo of main" rather than orthogonal evidence.
+    #
+    # Full decoupling gives shadow its own:
+    #   _shadow_error_psd       per-bin EMA (shadow's own observation of error PSD)
+    #   _shadow_R               shadow's Kalman R (written into shadow_filter.R each frame)
+    #   _shadow_copy_err_baseline shadow's view of "best error in stable FS"
+    #   _shadow_mu_holdoff      shadow's own mu-holdoff counter (independent of main)
+    #
+    # Safety regularization: Option B (quiescent re-sync). When the filter is
+    # in steady-state FS (far_power > 1e-4 AND filter_state=='refined_usable'
+    # AND shadow_error_psd > 3× main_error_psd OR < 0.33× main_error_psd),
+    # shadow _error_psd is gently nudged toward main by a 10% blend per frame.
+    # This caps divergence without breaking orthogonality on dynamic paths.
+    # Rationale for Option B over Option A (hard ±50% cap):
+    #   - Hard cap can mask true signal divergence during rapid echo-path change
+    #   - Quiescent re-sync fires only when the filter IS converged, so it
+    #     cannot corrupt the scenario where orthogonal evidence most matters
+    #     (the non-stationary path precisely when filter is NOT converged).
+    #
+    # When OFF (default): behaviour is byte-equal to baseline (all F2.3/B5/F2.4
+    # partial-decoupling paths remain active as before). When ON: full decoupling
+    # + quiescent safety regularization. S-orth.B (L1 regularization) is a
+    # separate gated sprint — do not enable until S-orth.A 800-case is run.
+    shadow_state_decoupled: bool = False
 
     # Mode
     mode: AecMode = AecMode.PBFDKF
@@ -5231,6 +5261,16 @@ class AEC:
         self._p3h_reset_cooldown_remaining = 0
         self._p3h_reset_count = 0           # diagnostic: reset fires this run
 
+        # S-orth.A — shadow decoupled state (initialised here regardless of flag;
+        # only *used* when shadow_state_decoupled=True so flag-OFF is byte-equal).
+        # These are initialised to the same values as PBFDKF.__init__ so that
+        # after enabling the flag the first frame starts from the same state.
+        _n_freqs = (self.filter.n_freqs
+                    if hasattr(self.filter, 'n_freqs') else 1)
+        self._shadow_error_psd = np.ones(_n_freqs, dtype=np.float32) * 1e-2
+        self._shadow_R = np.ones(_n_freqs, dtype=np.float32) * 1e-2
+        self._shadow_mu_holdoff = 0   # independent of main's _simple_mu_holdoff
+
         # Windowed decaying ERLE accumulator for erle_factor (TC ≈ 10s)
         self._erle_window_near = 1e-10
         self._erle_window_err = 1e-10
@@ -5381,6 +5421,13 @@ class AEC:
         self._inst_erle_smooth = 1.0
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0
+        # S-orth.A: reset shadow decoupled state on full AEC.reset()
+        if hasattr(self, '_shadow_error_psd'):
+            self._shadow_error_psd.fill(1e-2)
+        if hasattr(self, '_shadow_R'):
+            self._shadow_R.fill(1e-2)
+        if hasattr(self, '_shadow_mu_holdoff'):
+            self._shadow_mu_holdoff = 0
         self._warmup_frames = self.config.warmup_frames
         self._warmup_far_active = False
         # v3.8.1: clear lazy-getattr diagnostic counters so cross-case batch
@@ -5623,6 +5670,15 @@ class AEC:
                      ('filter_w_norm', 0.0), ('shadow_w_norm', 0.0),
                      ('copy_err_baseline', 1e-6)):
             self._diag[k] = v
+
+        # S-orth.A: reset shadow decoupled state on derived-state reset
+        # (same as filter taps reset — shadow's observation history restarts).
+        if hasattr(self, '_shadow_error_psd'):
+            self._shadow_error_psd.fill(1e-2)
+        if hasattr(self, '_shadow_R'):
+            self._shadow_R.fill(1e-2)
+        if hasattr(self, '_shadow_mu_holdoff'):
+            self._shadow_mu_holdoff = 0
 
         # Re-arm warmup so the second-pass training starts with high mu.
         # Boost Q on both filters (high-Q convergence mode).
@@ -6090,6 +6146,61 @@ class AEC:
                 else:
                     shadow_mu_scale = 1.0 if (far_excited and saturation_safe) else 0.1
                 self.shadow_filter.process(near_end, far_end, shadow_mu_scale)
+
+                # S-orth.A: after shadow processes, overwrite shadow's _error_psd
+                # and R with the independently-tracked decoupled state when the
+                # flag is ON.  This breaks the Riccati coupling: each filter now
+                # accumulates its own observation-noise estimate from its own
+                # residual stream rather than sharing the same EMA accumulator.
+                #
+                # When flag OFF: shadow_filter._error_psd / .R are set by the
+                # shadow's own _update_weights call (existing behaviour).  We do
+                # NOT touch them, so the path is byte-equal to baseline.
+                if (self.config.shadow_state_decoupled
+                        and isinstance(self.shadow_filter, PBFDKF)):
+                    # --- Decoupled _error_psd update ---
+                    # Use the same EMA formula as PBFDKF._update_weights but from
+                    # shadow's own error_spec (already computed by shadow's process()).
+                    shadow_err_spec = getattr(self.shadow_filter, 'error_spec', None)
+                    if shadow_err_spec is not None:
+                        _alpha_r = self.shadow_filter._alpha_r  # 0.95
+                        _shadow_err_psd_inst = np.abs(shadow_err_spec) ** 2
+                        self._shadow_error_psd = (
+                            _alpha_r * self._shadow_error_psd
+                            + (1.0 - _alpha_r) * _shadow_err_psd_inst
+                        )
+                        self._shadow_R = np.maximum(
+                            self._shadow_error_psd, self.shadow_filter.delta)
+                        # Quiescent safety regularization (Option B):
+                        # When filter is converged and shadow _error_psd has drifted
+                        # more than 3× away from main's in either direction, nudge
+                        # shadow back by 10% blend per frame.  Fires only in steady
+                        # FS (refined_usable + far_excited) so it cannot corrupt the
+                        # non-stationary path where orthogonality matters most.
+                        _is_quiescent = (
+                            far_excited
+                            and hasattr(self.filter, '_error_psd')
+                            and getattr(self, '_prev_filter_state', 'idle')
+                                in ('refined_usable', 'converged')
+                        )
+                        if _is_quiescent:
+                            _main_psd = self.filter._error_psd  # current main
+                            _ratio = self._shadow_error_psd / (
+                                _main_psd + np.float32(1e-10))
+                            _needs_nudge = np.any(_ratio > 3.0) or np.any(
+                                _ratio < 0.333)
+                            if _needs_nudge:
+                                # 10% blend toward main per quiescent frame
+                                self._shadow_error_psd = (
+                                    np.float32(0.9) * self._shadow_error_psd
+                                    + np.float32(0.1) * _main_psd)
+                                self._shadow_R = np.maximum(
+                                    self._shadow_error_psd,
+                                    self.shadow_filter.delta)
+                        # Write back into shadow_filter so subsequent Kalman
+                        # gain K uses the decoupled R.
+                        self.shadow_filter._error_psd = self._shadow_error_psd
+                        self.shadow_filter.R = self._shadow_R
 
                 main_err = self.filter.get_error_energy()
                 shadow_err = self.shadow_filter.get_error_energy()
