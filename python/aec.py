@@ -785,6 +785,37 @@ class AecConfig:
     enr_t_ne_per_band: tuple = (2.0, 1.5, 1.0)
     enr_s_ne_per_band: tuple = (3.33, 2.5, 1.67)
 
+    # v3.15 §1.6 — Arc F: per-band Kalman Q schedule (default OFF, byte-equal).
+    #
+    # Motivation: §1.1 audit found worst-DT cases stuck in `coarse_learning`
+    # 40-99% — Kalman filter does not converge fast enough.  Echo paths
+    # change MUCH faster in HF (room reverb, mic placement, gain shifts)
+    # than LF (acoustic coupling stable).  Current uniform Q (1.5e-3 across
+    # all bins on BALANCED) treats LF/HF identically, leaving HF
+    # convergence under-driven.
+    #
+    # Mechanism: scale `kalman_q_high` and `kalman_q_low` per band:
+    #   LF  (0-1 kHz):   slower (e.g. ×0.5)  → keep stable
+    #   MF  (1-4 kHz):   baseline (×1.0)
+    #   HF  (4-8 kHz):   faster (e.g. ×2.0)  → faster re-lock
+    # Band boundaries match Arc P / Arc R (1k / 4k splits).
+    #
+    # Flag-OFF default: byte-equal to v3.14.  When ON: Q_high / Q_low arrays
+    # tilted at AEC.__init__ time; subsequent _update_weights paths
+    # (Q modulation, far-activity gating, P-floor coupled to Q_high) all
+    # benefit from the tilted profile.
+    #
+    # §0.6 asymmetric metric rule (linear-filter arc):
+    #   nores Δdeg < 0 → automatic FAIL (NE damage permanent)
+    #   nores Δecho < 0 → SOFT, allowed if 800-case full-pipeline
+    #     AECMOS Δecho ≥ -0.020 (RES recovers)
+    #
+    # Hard bar: nores listen on cohort tail + 5 movement + 5 transient-
+    # onset cases shows audible HF re-lock improvement on ≥ 2 channels;
+    # 800-case full-pipeline AECMOS DT Δdeg ≥ -0.005, FS Δecho ≥ -0.020.
+    kalman_q_per_band: bool = False
+    kalman_q_band_scales: tuple = (0.5, 1.0, 2.0)  # (LF, MF, HF) on Q_high/Q_low
+
     # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal flag-OFF).
     #
     # Motivation: §1.1 audit on 25 worst-DT cases (by Δdeg vs v3.10.5
@@ -5279,6 +5310,24 @@ class AEC:
                 self.filter.Q_high[:] = self.config.kalman_q_high
                 self.filter.Q_low[:]  = self.config.kalman_q_low
                 self.filter.Q[:] = self.config.kalman_q_high
+                # v3.15 §1.6 Arc F: per-band Q schedule (default OFF).
+                # Tilt Q_high/Q_low across LF/MF/HF bands using same band
+                # boundaries (1k / 4k Hz) as Arc P / Arc R.  When OFF, the
+                # uniform fill above stands → byte-equal to v3.14.
+                if self.config.kalman_q_per_band:
+                    _freq_res = self.config.sample_rate / self.config.block_size if self.config.block_size > 0 else self.config.sample_rate / (2 * (self.filter.n_freqs - 1))
+                    _b1k = max(1, min(int(round(1000.0 / _freq_res)),
+                                       self.filter.n_freqs - 2))
+                    _b4k = max(_b1k + 1, min(int(round(4000.0 / _freq_res)),
+                                              self.filter.n_freqs - 1))
+                    _lf, _mf, _hf = self.config.kalman_q_band_scales
+                    _scale = np.ones(self.filter.n_freqs, dtype=np.float32)
+                    _scale[:_b1k] = float(_lf)
+                    _scale[_b1k:_b4k] = float(_mf)
+                    _scale[_b4k:] = float(_hf)
+                    self.filter.Q_high *= _scale
+                    self.filter.Q_low  *= _scale
+                    self.filter.Q[:] = self.filter.Q_high
                 # P53 Step 0: enable innovation-audit hook from config.
                 self.filter._enable_p53_trace = bool(
                     getattr(self.config, 'trace_p53_innovation', False))

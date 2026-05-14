@@ -254,6 +254,16 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'dt_ne_compression_fix' not in config_overrides):
         config_overrides['dt_ne_compression_fix'] = (
             os.environ['AEC_DT_NE_COMPRESSION_FIX'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.15 §1.6 Arc F: per-band Kalman Q (default OFF)
+    if ('AEC_KALMAN_Q_PER_BAND' in os.environ
+            and 'kalman_q_per_band' not in config_overrides):
+        config_overrides['kalman_q_per_band'] = (
+            os.environ['AEC_KALMAN_Q_PER_BAND'].lower() not in ('0', 'false', 'off', 'no'))
+    # Per-band Q scales: comma-separated LF,MF,HF (e.g. "0.5,1.0,2.0")
+    if ('AEC_KALMAN_Q_BAND_SCALES' in os.environ
+            and 'kalman_q_band_scales' not in config_overrides):
+        config_overrides['kalman_q_band_scales'] = tuple(
+            float(x) for x in os.environ['AEC_KALMAN_Q_BAND_SCALES'].split(','))
     # State-scale override: comma-separated state=scale pairs, e.g.
     #   "coarse_learning=2.0,refined_usable=1.0"
     if ('AEC_DT_NE_STATE_SCALE' in os.environ
