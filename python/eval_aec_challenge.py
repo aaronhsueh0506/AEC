@@ -211,6 +211,15 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'f_e5_enabled' not in config_overrides):
         config_overrides['f_e5_enabled'] = (
             os.environ['AEC_F_E5'].lower() not in ('0', 'false', 'off', 'no'))
+    # E5.S2 — F-E5 main_mu saturation gate threshold (v3.13 E5 acoustic NL
+    # protection). Default 0.5 was calibrated for digital clip; E5.S1 audit
+    # shows acoustic NL keeps _saturation_level in [0, 0.09] band. Lower the
+    # threshold so main_mu freeze + shadow_rise mask fire on acoustic-NL
+    # frames. Same threshold gates both downstream actions (line 6017 / 6285).
+    if ('AEC_F_E5_MAIN_MU_THRESHOLD' in os.environ
+            and 'f_e5_main_mu_sat_threshold' not in config_overrides):
+        config_overrides['f_e5_main_mu_sat_threshold'] = float(
+            os.environ['AEC_F_E5_MAIN_MU_THRESHOLD'])
     # diverged_reset triple-AND gate (v3.11 Phase 1 Sprint 13-14)
     if ('AEC_DIVERGED_RESET_TRIPLE' in os.environ
             and 'diverged_reset_triple_and' not in config_overrides):
