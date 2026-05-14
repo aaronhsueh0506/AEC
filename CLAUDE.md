@@ -131,8 +131,31 @@ target 100% exact).
 
 ## Branch model
 
-`main` carries the production-graded code (Phase A Path 3 merged 2026-05-12,
-tag `p52-phase-a-closed-path3`). Feature branches stay file-disjoint per
+`main` carries the production-graded code. Current `__version__` is **3.13.0**
+(v3.13 arc closure 2026-05-14, tagged `v3.13.0`). The version-bump path
+since the May 12 P52 Path 3 merge:
+
+- `p52-phase-a-closed-path3` (2026-05-12) — Phase A merge baseline.
+- `v3.10.6` — F3.1 v3 / F2.3 / F2.4 promoted (xrtntuju 5-clip arc closed).
+- `v3.11.0` / `v3.11.1` / `v3.11.2` — Phase 1 promotions
+  (B5 / B6 / F-E1 / F-DelayTrack / F-E5 / diverged_reset triple-AND).
+- v3.12 — Stage 1 RES exhaustion (5 NEUTRAL closures, no version bump).
+- `v3.13.0` (2026-05-14) — v3.13 arc closure: E2 Path 3 SHIPPED
+  (FS_static Δecho +0.107); E4 NLP + E5 Saturation closed CANNOT SHIP
+  (substrate retained for v3.14); Phase 3 RES audit done.
+
+See [CHANGELOG.md](CHANGELOG.md) for full per-version detail.
+
+**Active branches (post v3.13.0):**
+
+- `feature/v3.14-volterra` — v3.14 Volterra non-linear inverse arc.
+  S1 cohort baseline + S2 detector wiring (E5.S3 mic-lpb gate +
+  nl_confidence ensemble) + S3.0 joint Hammerstein feasibility PASS
+  (+2.99 dB mean ERLE on 5/5 NL). Detector substrate is default-OFF
+  → byte-equal to BALANCED until S3.1 wires the polynomial preprocessor.
+  Design lock: [docs/v3_14_volterra_design_lock.md](docs/v3_14_volterra_design_lock.md).
+
+Feature branches stay file-disjoint per
 [design lock §6.4](docs/p52_design_lock_v1.1.md): `feature/p52-phase-a-shadow`
 touches shadow/PathChangeRegimeHandler only; `feature/p52-phase-b-refactor`
 touches `python/res_refactored/` only. The C port (`c_impl/`) follows Python

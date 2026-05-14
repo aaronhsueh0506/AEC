@@ -464,3 +464,279 @@ Compared to v3.0.2:
 **Conclusion**: v3.8.1 is the AEC3-architectural-alignment endpoint via
 floor cleanup. Further DT_movement deg improvement requires new primitives
 (R3 phase coherence / R7 masking / NN postfilter), not floor tuning.
+
+---
+
+## v3.10.4 — DelayEstimator high-PAR fast-path (P3 arc closure)
+
+DelayEstimator forced `n_updates >= 3` even when PAR was overwhelmingly
+above the solid threshold; P3 trace showed this cost ~1 s of unnecessary
+blind window on 80% of bench cases.
+
+`delay_fast_path_enabled = True` promotes `is_solid` at `n_updates >= 2`
+when (a) PAR >= 40 (5× normal solid threshold) and (b) the same lag is
+reported for two consecutive estimates. Both guards together rule out
+single-frame spurious peaks.
+
+- 800-case AECMOS: bit-identical to baseline `n_updates>=3` path.
+- 0 wrong locks across 800.
+- Median TTFS drops 4.09 → 3.57 s on 59% of cases.
+
+P3 sub-investigations (P3a–P3h) ran in parallel; only the fast-path
+shipped. The remaining diagnostic surfaces (`main_err_ratio`,
+`shadow_err_ratio`, `p3f_shadow_advantage`, `erle_slope_db_per_s`,
+`filter_state`, `usable_linear`, etc.) are retained as zero-cost trace
+fields consumed by R9+.
+
+---
+
+## v3.10.5 — bench reference baseline
+
+Snapshot of the 800-case BALANCED bench result that all v3.11+ work
+A/Bs against. Captured in `results/v3_10_5_main/scores.json`.
+
+| bucket | n | echo | deg |
+|---|---:|---:|---:|
+| FS_static | 169 | 3.646 | 4.999 |
+| FS_movement | 131 | 3.705 | 4.999 |
+| DT_static | 186 | 4.221 | 2.323 |
+| DT_movement | 114 | 4.053 | 2.368 |
+| NE | 200 | 4.998 | 4.011 |
+
+No production-affecting code change in v3.10.5 itself; the version is
+the canonical reference label. (The `__version__` bump from 3.10.4 →
+3.10.5 captured the post-merge state of the baseline scaffolding.)
+
+---
+
+## v3.10.6 — three xrtntuju 5-clip arc fixes promoted (2026-05-12)
+
+xrtntuju 5-clip cohort (DT clips where production AEC was audibly
+damaging NE speech) was the regression cohort that drove R9. Three
+independently-validated fixes promoted into BALANCED:
+
+1. **F3.1 v3** (mic-excess gate + dt_per_bin blend) — replaces the
+   saturating `(1 − coh²)` NE evidence on FS with physical mic-energy
+   excess. Architectural finding: `(1 − coh²)` saturates near 1 in FS
+   post-cancellation (decorrelated residual reads as "NE-like"),
+   creating systematic over-protection. F3.1 v3 breaks the saturation
+   pathology; AUROC 0.871.
+2. **F2.3** (`epc_r_reset_enabled`) — Yang 2017 R-reset on EPC for the
+   main filter (single-filter scope; B5 in v3.11.0 extends to shadow).
+3. **F2.4** (`mu_holdoff_no_reset`) — release-counter form of
+   `_simple_mu_holdoff`; prevents marginal-DT counter resets.
+
+Also closed in R9: F2.1 / F2.2 v1+v2 / F1.2 (CLOSED FAIL); F1.1 (no
+effect); F1.3 / F2.5 (analytically dead). See R9 in
+[SUMMARY.md](SUMMARY.md) for details.
+
+---
+
+## v3.11.0 / 3.11.1 / 3.11.2 — Phase 1 promotions (2026-05-13)
+
+R10 ran the 24-sprint plan
+(`~/.claude/plans/se-aec-aec-main-hazy-lynx.md`) Phase 1 (front-end
+fixes, linear-only verification). Each fix isolated behind its own
+flag; promoted only after 800-case + listen pass.
+
+### v3.11.0 — B5 + F-E5 + diverged_reset triple-AND
+
+- **B5** (`shadow_r_reset_enabled`) — symmetric R-reset on EPC (extends
+  v3.10.6 F2.3 to shadow filter's `_error_psd` + `R`). Yang 2017 pattern.
+- **F-E5** (`f_e5_enabled`) — saturation 4-fix bundle:
+  - mic soft-clip when `sat_mic > 0.3`
+  - main mu sat-gate (freezes at `sat_level > 0.5`)
+  - error_psd fast-attack reset on sat → clean transition
+  - shadow_rise mask during saturation
+  - sKXucFp4 single-case top: +0.348 dB Δecho.
+- **diverged_reset** (`diverged_reset_enabled` + `diverged_reset_triple_and`)
+  — triple-AND gate (streak + shadow_advantage > 2.0 + filter_state ==
+  diverged) avoids the F2.2 EMA trap (which closed FAIL with 17 reg / 8
+  imp; raising threshold reduced fire frequency but each false fire was
+  more destructive).
+
+5 buckets verdict OK; Δ < 0.001 dB vs v3.10.6; cohort tail qNvSMyU
++0.010 linear preserved.
+
+### v3.11.1 — B6
+
+- **B6** (`shadow_mu_state_aware`) — 4-band shadow µ with
+  `suspicious_dt → 0.5`. Replaces binary cut. Bucket-mean +0.007;
+  wlAXM0i listen verified indistinguishable from baseline.
+
+### v3.11.2 — F-E1 + F-DelayTrack
+
+- **F-E1** (`f_e1_enabled`) — ERL clip range extension `[1e-5, 1.0]`
+  + far_active hysteresis (fast attack / slow release).
+  - 800-case NEUTRAL bench mean; addresses extreme-ERL listen edge cases.
+- **F-DelayTrack** (`f_delaytrack_enabled`) — continuous EMA-variance
+  delay reliability (replaces hard cut at `confidence ≥ 0.5`).
+  Switchboard AEC3 pattern.
+  - 800-case NEUTRAL bench mean.
+
+### Architectural finding from Phase 1
+
+**800-case bench mean is too coarse a measurement** for cohort-tail
+protection. Phase 1 wins are NEUTRAL on bench mean, MEASURABLE on
+cohort-tail listen / single-case top. The bench is necessary but not
+sufficient. This is the core lesson that justifies retaining the
+xrtntuju 5-clip cohort (since v3.10.6) and the qNvSMyU FS_static
+cohort tail (P52 catastrophe-defence) as listen-side regression gates.
+
+The catastrophe-defence layering principle: cohort tail has multiple
+independent triggers (saturation, EPC, shadow rise, diverged streak);
+each Phase 1 fix slots into one trigger class without disturbing
+others. The `PathChangeRegimeHandler` 6-gate AND stays untouched
+(P52 invariant).
+
+---
+
+## v3.12.x — Stage 1 RES exhaustion (NEUTRAL closure, no version bump)
+
+R11 = Phase 3 of the hazy-lynx plan: RES canonical refactor
+(gain_floor unification, 4-cap ranked priority, per-state ENR tuple).
+The Q7 V3 hypothesis: "9-stage + 4-cap is 8 patches accumulated;
+canonical coherence broken" predicted that consolidating the 5
+gain_floor paths into one canonical floor would surface a measurable
+bench Δ.
+
+5 NEUTRAL closures (S6 / S6b / S7 / S10 / S11) — Δ ≈ ±0.001 on every
+bucket. Q3 / Q6 / Q7 RES architectural hypotheses fully falsified.
+**Stage 1 RES surface is at local optimum**.
+
+The remaining bench opportunity is NOT in RES policy but in the
+upstream linear filter quality (delay coverage, NL handling,
+saturation). Worst-FS 8-case listen (2026-05-13) confirmed: 8/8 cases
+listen-flagged for filter-side surfaces (E1 / E2 / E4 / E5), NOT RES
+algorithmic surfaces. v3.12 GA closes at v3.11.x ceiling (no
+`__version__` bump for v3.12).
+
+References: [docs/v3_12_s6_s11_stage1_locked.md](v3_12_s6_s11_stage1_locked.md),
+[docs/v3_12_s7_verdict.md](v3_12_s7_verdict.md).
+
+---
+
+## v3.13.0 — v3.13 arc closure (2026-05-14)
+
+Worst-FS 8-case listen redirected work from RES algorithm to
+filter-side. v3.13 plan opened 5 arcs in parallel (E2 + E4 + E5 in
+v3.13 scope; F-HFR + E1 deferred to v3.14).
+
+### Single production change shipped: E2 Path 3
+
+`eval_aec_challenge.py` `estimate_delay()` default `max_delay_ms` 250 →
+1024 ms. Closes 6/8 worst-FS listen cases that had residual delay
+1200–10000 samples (75–625 ms) AFTER GCC-PHAT pre-alignment.
+
+| bucket | Δecho vs v3.11.x | Δdeg vs v3.11.x |
+|---|---:|---:|
+| FS_static | **+0.107** | 0 |
+| FS_movement | +0.018 | 0 |
+| DT_static | +0.014 | **−0.050** (accepted) |
+| DT_movement | +0.005 | **−0.025** (accepted) |
+| NE | 0 | −0.002 |
+
+DT bucket Δdeg is **acceptable RES unmasking** trade-off — E2 collapses
+long delay echo into the linear filter's coverage; the RES no longer
+has to polish that residual, surfacing a small DT NE-residual that was
+previously masked by the unsuppressed echo. Deferred to v3.14+
+per-state ENR refactor.
+
+### Two arcs closed CANNOT SHIP
+
+- **E4 NLP arc** (12 sprints S1 → S6b): SubtractiveNLP detector
+  validated (5/5 NL cohort listen, 0% NE FP after S4.1
+  cancellation-ratio gate). Suppressor (harmonic-pinned σ=50 Hz
+  Gaussian mask, g_min ∈ {−12, −18, −24, −30} dB sweep) PROVABLY
+  ATTENUATES (voice formants disappear at −30 dB) but **NO AUDIBLE NL
+  REDUCTION at any aggression level**. Closure mechanism: multiplicative
+  spectral mask `m[k,t] · Y[k,t]` only modulates amplitude; cannot
+  change phase. Real NL ("爆掉" / "無線電") is dominantly phase
+  distortion + time-domain transients — unreachable by any amplitude
+  mask family. Detector preserved (default-OFF) as v3.14 substrate.
+- **E5 Saturation deepening arc** (4 variants S2 / S3 / S4a / S4b):
+  All on the FS-vs-DT trade-off line, slope ~0.5 dB DT loss per +1 dB
+  FS gain. All FAIL DT Δdeg ≥ −0.005 hard bar by 4 – 10×. Closure
+  mechanism: amplitude-layer detector cannot distinguish FS-NL frames
+  (acoustic NL) from DT high-echo frames; same correlation signature
+  in 0.7–0.95 mic-peak band fires on both. Detector preserved as v3.14
+  substrate; filter-protection actions retired.
+
+### Phase 3 RES gain_floor 5-path audit
+
+Empirical fire-rate audit confirmed Q7 V3 fragmentation hypothesis is
+FALSE (`ne_g_floor` is universal baseline 88–99% all buckets, not the
+main FS leak carrier). `epc_dt_cap` fires 0/800 (DEAD CODE).
+Canonical refactor surface SMALL (1 path removable, 1 absorbable);
+expected AECMOS delta ~ 0. S6–S7 (refactor) deprioritized; S8–S9
+(4-cap audit + per-state ENR) deferred to v3.14+.
+
+### v3.13 closure summary
+
+Single production change (E2 Path 3, +0.107 dB FS_static); two arcs
+closed CANNOT SHIP at the physics ceiling of amplitude-mask
+suppression; RES audit confirmed Stage 1 surface saturated. v3.14
+opens with **Volterra non-linear inverse filter** as primary new arc.
+
+References: [docs/v3_13_arc_closure.md](v3_13_arc_closure.md),
+[CHANGELOG.md](../CHANGELOG.md).
+
+### Aggregate v3.10.5 → v3.13.0 (vs pre-v3.11 baseline)
+
+Computed from `results/v3_10_5_main/scores.json` vs
+`results/v3_14_baseline/scores.json` (rendered on v3.13 closure HEAD;
+v3.14 detector substrate is default-OFF so render = pure v3.13
+behaviour).
+
+| bucket | Δecho | Δdeg |
+|---|---:|---:|
+| FS_static | **+0.107** | 0 |
+| FS_movement | +0.018 | 0 |
+| DT_static | +0.014 | **−0.050** |
+| DT_movement | +0.005 | **−0.025** |
+| NE | 0 | −0.002 |
+
+**Net**: FS bucket improved (Δecho +0.107 / +0.018), DT bucket
+trade-off (echo micro-up, deg micro-down within bar), NE unchanged.
+Cohort tail listen materially improved (E2 Path 3 closes 6/8 worst-FS
+listen edge cases; xrtntuju 5-clip 0 reg / 2 imp). Phase 1 promotions
+contributed micro-effects on bench mean (NEUTRAL by design); the
+load-bearing bench Δ comes from E2 Path 3.
+
+---
+
+## v3.14 (in-progress on `feature/v3.14-volterra`, started 2026-05-14)
+
+Volterra non-linear inverse filter arc — canonical breakthrough path
+for 爆掉 / 無線電 perceptual NL that the v3.13 amplitude-mask family
+provably cannot reach. Design rationale: a linear FIR consuming the
+polynomially-warped reference basis IS phase-aware (the convolution
+preserves phase response). Multiplicative output-side masks only
+modulate magnitude, which is why E4/E5 hit the physics wall.
+
+Snapshot as of 2026-05-14:
+
+- **S1 cohort baseline**: 11-case bundle locked (5 NL cohort from
+  E4.S1 listen-validated + 3 NE controls + 3 DT controls).
+- **S2 detector wiring**: E5.S3 mic-lpb correlation gate ported as
+  default-OFF; ensemble `nl_confidence_ensemble = max(E4, E5)`.
+  Audit: 5/5 NL fire (E4 covers Type 2 codec NL where E5 misses;
+  E5 strong on Type 1 loudspeaker), 0/3 NE, 0.14–6.19% DT residual
+  leak (E4 pitch tracker on NE speech harmonics; S3.1 wiring will
+  gate adaptation, not just enable).
+- **S3.0 polynomial feasibility**: joint Hammerstein 3rd-order
+  Wiener-Hopf LS upper bound +1.65 to +4.87 dB ΔERLE on 5/5 NL
+  (mean +2.99 dB). Cascade-PBFDKF lower bound was 0.12 to 0.26 dB
+  (misleading because pass-1 conflates linear convergence error with
+  NL-explainable structure). Joint LS sensitivity check on DT controls
+  shows +1-2 dB headroom too — that is LS overfitting NE speech, NOT
+  real polynomial NL — production wiring MUST gate adaptation on
+  detector + filter_state to avoid P50-pattern NE damage.
+- **Remaining**: S3.1 (`VolterraPreprocessor` class wiring) → S4
+  (5-cohort listen gate) → S5/S5.5 (FLAF/Hermite alt basis,
+  conditional; S3.0 PASS likely SKIPS) → S6–S10 (800-case A/B,
+  per-band variant, C-port, ship).
+
+References: [docs/v3_14_volterra_design_lock.md](v3_14_volterra_design_lock.md),
+[docs/v3_14_s2_audit.md](v3_14_s2_audit.md),
+[docs/v3_14_s3_0_verdict.md](v3_14_s3_0_verdict.md).
