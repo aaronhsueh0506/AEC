@@ -21,7 +21,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from aec import AecConfig, PathChangeRegimeHandler, RegimeHandlerDecision
+from aec import AecConfig, PathChangeRegimeHandler, RegimeHandlerDecision, PBFDKF
 from aec_p52_regime_classifier import (
     AcousticRegime, AcousticRegimeClassifier, RegimeClassification,
 )
@@ -221,6 +221,96 @@ class RegimeClassifierTests(unittest.TestCase):
         r = clf.classify(mic, lpb)
         self.assertEqual(r.regime, AcousticRegime.STABLE)
         self.assertLess(r.deciles_used, clf.MIN_DECILES_WITH_FAR)
+
+
+# --- B1: PBFDKF.reset() P-override cleanup (v3.14 housekeeping) -----------
+
+class PBFDKFResetTests(unittest.TestCase):
+    """B1 fix verification: reset() must unconditionally clear dynamic
+    P-override attrs regardless of countdown state (B1, LOW-MED severity).
+
+    The _p_max_override / _p_max_override_frames / _p_floor_beta /
+    _p_floor_beta_frames attrs are dynamically injected as instance attributes
+    when an EPC or regime event arms the P-override.  The countdown logic
+    decrements _frames and deletes it (plus resets base attr to default) when
+    the countdown expires.  reset() must clear all four attrs unconditionally
+    so that a reset mid-countdown leaves no stale state that a subsequent
+    process() would inherit.
+    """
+
+    def _make_filter(self):
+        """Minimal PBFDKF: block_size=64 (hop=32), 4 partitions."""
+        return PBFDKF(block_size=64, n_partitions=4)
+
+    def test_reset_on_fresh_filter_is_clean(self):
+        """reset() on a just-constructed filter: attrs absent before and after."""
+        filt = self._make_filter()
+        for attr in ('_p_max_override', '_p_max_override_frames',
+                     '_p_floor_beta', '_p_floor_beta_frames'):
+            self.assertFalse(hasattr(filt, attr), f'{attr} present on fresh filter')
+        filt.reset()
+        for attr in ('_p_max_override', '_p_max_override_frames',
+                     '_p_floor_beta', '_p_floor_beta_frames'):
+            self.assertFalse(hasattr(filt, attr), f'{attr} present after reset on fresh filter')
+
+    def test_reset_during_active_p_override_clears_all_four_attrs(self):
+        """B1 core: reset() called mid-countdown removes all 4 dynamic attrs."""
+        filt = self._make_filter()
+        # Arm a P-override exactly as the EPC trigger does (see aec.py lines 5633-5635)
+        filt._p_max_override = 1.0
+        filt._p_max_override_frames = 30
+        filt._p_floor_beta = 1.0
+        filt._p_floor_beta_frames = 30
+        # Sanity: all four present
+        for attr in ('_p_max_override', '_p_max_override_frames',
+                     '_p_floor_beta', '_p_floor_beta_frames'):
+            self.assertTrue(hasattr(filt, attr), f'{attr} not set before reset')
+        # reset() must clear unconditionally
+        filt.reset()
+        for attr in ('_p_max_override', '_p_max_override_frames',
+                     '_p_floor_beta', '_p_floor_beta_frames'):
+            self.assertFalse(hasattr(filt, attr),
+                             f'B1: {attr} still present after reset during active countdown')
+
+    def test_reset_after_countdown_expires_base_attr_also_cleared(self):
+        """When countdown expires, base attr is set to default (0.5) but still
+        exists as an instance attribute; reset() must remove it."""
+        filt = self._make_filter()
+        # Simulate post-countdown state: _frames deleted, base attr at default
+        filt._p_max_override = 0.5   # countdown expired → reset to default value
+        # _p_max_override_frames intentionally absent (expired countdown)
+        self.assertTrue(hasattr(filt, '_p_max_override'))
+        self.assertFalse(hasattr(filt, '_p_max_override_frames'))
+        filt.reset()
+        self.assertFalse(hasattr(filt, '_p_max_override'),
+                         'B1: _p_max_override still present after reset (post-countdown residue)')
+
+    def test_second_reset_is_idempotent(self):
+        """Two consecutive reset() calls must not raise and must leave no attrs."""
+        filt = self._make_filter()
+        filt._p_max_override = 1.0
+        filt._p_max_override_frames = 15
+        filt._p_floor_beta = 1.0
+        filt._p_floor_beta_frames = 15
+        filt.reset()
+        filt.reset()  # second reset — must not raise AttributeError
+        for attr in ('_p_max_override', '_p_max_override_frames',
+                     '_p_floor_beta', '_p_floor_beta_frames'):
+            self.assertFalse(hasattr(filt, attr),
+                             f'{attr} present after double reset')
+
+    def test_getattr_fallback_works_after_reset(self):
+        """After reset() removes dynamic attrs, getattr(..., default) returns default."""
+        filt = self._make_filter()
+        filt._p_max_override = 1.0
+        filt._p_max_override_frames = 20
+        filt.reset()
+        p_max = getattr(filt, '_p_max_override', 0.5)
+        self.assertAlmostEqual(p_max, 0.5,
+                               msg='getattr fallback should return 0.5 after reset cleared attr')
+        p_frames = getattr(filt, '_p_max_override_frames', 0)
+        self.assertEqual(p_frames, 0,
+                         msg='getattr fallback should return 0 after reset cleared attr')
 
 
 # --- Anti-loophole guard ---------------------------------------------------

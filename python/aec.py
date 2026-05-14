@@ -78,7 +78,14 @@ class AecStats:
     time_s: float           # Elapsed audio time (seconds)
 
     # ── Filter state ──────────────────────────────────────────────────────────
-    filter_state: AecFilterState
+    # B2 note: filter_state is the *public* priority-ranked Kalman state
+    # returned by get_filter_state() (AecFilterState enum).  This is distinct
+    # from the internal P3f diagnostic string stored in _diag['filter_state']
+    # / _prev_filter_state (values: 'idle', 'startup', 'diverged',
+    # 'suspicious_dt', 'refined_usable', 'coarse_learning') which is a
+    # separate finer-grained state machine used only inside the filter-state
+    # computation block.  The two must never be confused.
+    filter_state: AecFilterState  # public enum; use .value for string form
     filter_converged: bool
     filter_once_converged: bool  # True if converged at least once since reset
     warmup_remaining: int        # Frames remaining in warmup (0 when complete)
@@ -1398,10 +1405,19 @@ class PBFDKF(PBFDAF):
         self.R.fill(1e-2)
         self._error_psd.fill(1e-2)
         self.Q[:] = self.Q_high
+        # B1 fix: unconditional cleanup of dynamic P-override attrs.
+        # Using try/except is safer than hasattr+delattr: if reset() is called
+        # mid-countdown the _frames attr exists and is deleted; if called when
+        # only the base attr remains (countdown just expired) it is also deleted;
+        # if called on a freshly-constructed filter (no attr) it silently skips.
+        # This prevents any case where a second reset() re-inherits a stale
+        # countdown that the first reset() partially cleared.
         for attr in ('_p_max_override', '_p_max_override_frames',
                      '_p_floor_beta', '_p_floor_beta_frames'):
-            if hasattr(self, attr):
+            try:
                 delattr(self, attr)
+            except AttributeError:
+                pass
 
     def _update_weights(self, curr_p: int, mu_scale):
         """Frequency-Domain Kalman Filter weight update."""
@@ -7262,7 +7278,16 @@ class AEC:
         return max(conf_div, conf_coh)
 
     def get_filter_state(self) -> AecFilterState:
-        """Return the highest-priority active filter state."""
+        """Return the highest-priority active filter state as AecFilterState enum.
+
+        B2 note: This is the *public* API state (7 values: WARMUP, DIVERGED,
+        EPC_RECOVERY, DT_ACTIVE, STATIONARY_FAR, CONVERGED, CONVERGING).
+        It is distinct from the internal P3f diagnostic string stored in
+        _diag['filter_state'] / _prev_filter_state which uses a different
+        vocabulary ('idle', 'startup', 'diverged', 'suspicious_dt',
+        'refined_usable', 'coarse_learning') and is only used inside the
+        filter-state computation block and shadow-mu scheduling.
+        """
         if self._warmup_frames > 0:
             return AecFilterState.WARMUP
         if self._divergence_indicator > 0.6:
