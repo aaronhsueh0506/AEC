@@ -913,6 +913,18 @@ class AecConfig:
                 # First mechanism across 5+ shadow-retirement attempts that
                 # produces genuinely independent shadow Kalman state.
                 shadow_state_decoupled=True,
+                # v3.14 Arc-P P.S3: adaptive per-band ERL EMA driven by
+                # error_psd / far_lw (Option B source signal). Replaces
+                # scalar erl_estimate=0.3 (7× over-estimate in low-coupling
+                # rooms) with 3-band LF/MF/HF EMA (α=0.99).
+                f3_1_per_band_erl_adaptive=True,
+                # v3.14 Arc-R R.S2: per-band ENR thresholds with block_lf
+                # tilt (raise LF, lower HF). DT bucket +0.007 dB mean Δdeg
+                # on 800-case; FS regression within -0.02 bar. 7-case
+                # xrtntuju listen verification 2026-05-14: NE not damaged,
+                # FS not audibly leaking. Paired with f3_1_per_band_erl_adaptive
+                # for end-to-end per-band gate.
+                res_per_band_enr=True,
                 # v3.11 F-E5: saturation handling extensions (Phase 1 Sprint 11-12 PASS)
                 f_e5_enabled=True,
                 # v3.11 diverged_reset: triple-AND gate unblocks dead code safely
