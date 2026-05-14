@@ -52,3 +52,6 @@ parity_resfilter*.bin
 parity_pbfdkf_c.bin
 python/parity_pbfdkf_c.bin
 experiments/*/output/
+
+# Listen output dirs (audio for offline verification; not committed)
+listen/
