@@ -249,6 +249,28 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'shadow_state_decoupled' not in config_overrides):
         config_overrides['shadow_state_decoupled'] = (
             os.environ['AEC_SHADOW_DECOUPLED'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.15 §1.2: DT-NE compression fix (default OFF)
+    if ('AEC_DT_NE_COMPRESSION_FIX' in os.environ
+            and 'dt_ne_compression_fix' not in config_overrides):
+        config_overrides['dt_ne_compression_fix'] = (
+            os.environ['AEC_DT_NE_COMPRESSION_FIX'].lower() not in ('0', 'false', 'off', 'no'))
+    # State-scale override: comma-separated state=scale pairs, e.g.
+    #   "coarse_learning=2.0,refined_usable=1.0"
+    if ('AEC_DT_NE_STATE_SCALE' in os.environ
+            and 'dt_ne_state_scale' not in config_overrides):
+        _ss = {}
+        for pair in os.environ['AEC_DT_NE_STATE_SCALE'].split(','):
+            k, _, v = pair.partition('=')
+            _ss[k.strip()] = float(v)
+        config_overrides['dt_ne_state_scale'] = _ss
+    if ('AEC_DT_NE_PER_BIN_THRESH' in os.environ
+            and 'dt_ne_per_bin_thresh' not in config_overrides):
+        config_overrides['dt_ne_per_bin_thresh'] = float(
+            os.environ['AEC_DT_NE_PER_BIN_THRESH'])
+    if ('AEC_DT_NE_PER_BIN_SCALE' in os.environ
+            and 'dt_ne_per_bin_scale' not in config_overrides):
+        config_overrides['dt_ne_per_bin_scale'] = float(
+            os.environ['AEC_DT_NE_PER_BIN_SCALE'])
     # P1 Phase 2: conditional HF cap + threshold env vars
     if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
         config_overrides['hf_cap_conditional'] = (

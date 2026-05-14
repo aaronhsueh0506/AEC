@@ -20,7 +20,7 @@ __version__ = "3.14.0-s-orth-a"
 import os
 import numpy as np
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 from enum import Enum
 import argparse
@@ -784,6 +784,57 @@ class AecConfig:
     # preserve the legacy t:s ratio.
     enr_t_ne_per_band: tuple = (2.0, 1.5, 1.0)
     enr_s_ne_per_band: tuple = (3.33, 2.5, 1.67)
+
+    # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal flag-OFF).
+    #
+    # Motivation: §1.1 audit on 25 worst-DT cases (by Δdeg vs v3.10.5
+    # pre-E2) found that worst-DT cases spend 40-99% of frames in
+    # `coarse_learning` state (filter never converges), so the linear-
+    # filter `residual_echo_psd` is INFLATED throughout the case. The
+    # ENR gate `enr = residual_echo_psd / nearend_est` therefore over-fires
+    # and softgate stage S0 outputs voice-band mean gain of 0.254
+    # (≈ -11.9 dB) on NE-evidence frames. F3.1-v3 mic-excess
+    # (`dt_per_bin`) fires correctly at 1.0 on these frames but is
+    # additive evidence that cannot override the inflated-residual ENR.
+    #
+    # Two complementary mechanisms (both gated by `dt_ne_compression_fix`):
+    #
+    # (a) Per-state ENR scalar:
+    #     Multiply enr_t_ne / enr_s_ne by `_state_scale` based on the
+    #     internal P3f filter_state. `refined_usable` is FORCED to 1.0
+    #     (byte-equal to v3.13.x BALANCED steady path). Pre-convergence
+    #     states (idle/startup/coarse_learning/diverged) get a
+    #     larger scale to relax the gate when residual_echo_psd is known
+    #     to be inflated. `suspicious_dt` stays at 1.0 (already protected
+    #     by upstream DTD).
+    #
+    # (b) Per-bin dt_per_bin override:
+    #     On bins where `dt_per_bin > dt_ne_per_bin_thresh` (per-bin
+    #     mic-excess evidence says "strong NE"), additionally multiply
+    #     enr_t_ne / enr_s_ne by `dt_ne_per_bin_scale`. This surgical
+    #     override preserves NE syllables on bins where mic-excess is
+    #     decisive, regardless of state.
+    #
+    # Flag-OFF default: byte-equal to v3.14 BALANCED. ON in §1.2.S4
+    # 800-case A/B + listen verify; ship target = DT bucket Δdeg ≥
+    # +0.020 dB (40% of E2 Path 3 debt), cohort tail Δecho ≥ -0.05,
+    # FS Δecho ≥ -0.02.
+    dt_ne_compression_fix: bool = False
+    # Multiplicative scale on enr_t_ne / enr_s_ne per state. `refined_usable`
+    # MUST be 1.0 to preserve steady-state byte-equal with v3.13 BALANCED.
+    dt_ne_state_scale: dict = field(default_factory=lambda: {
+        'idle':            2.0,
+        'startup':         2.0,
+        'coarse_learning': 2.0,
+        'refined_usable':  1.0,
+        'diverged':        2.0,
+        'suspicious_dt':   1.0,
+    })
+    # Per-bin threshold for the dt_per_bin override gate.
+    dt_ne_per_bin_thresh: float = 0.5
+    # Multiplicative scale applied to enr_t_ne / enr_s_ne on bins where
+    # dt_per_bin > dt_ne_per_bin_thresh.  Stacks with state_scale.
+    dt_ne_per_bin_scale: float = 2.0
 
     # Mode
     mode: AecMode = AecMode.PBFDKF
@@ -1944,7 +1995,11 @@ class ResFilter:
                  cap2_fs_loosen: bool = False,
                  per_band_enr: bool = False,
                  enr_t_ne_per_band: tuple = (1.5, 1.5, 1.5),
-                 enr_s_ne_per_band: tuple = (2.5, 2.5, 2.5)):
+                 enr_s_ne_per_band: tuple = (2.5, 2.5, 2.5),
+                 dt_ne_compression_fix: bool = False,
+                 dt_ne_state_scale: dict = None,
+                 dt_ne_per_bin_thresh: float = 0.5,
+                 dt_ne_per_bin_scale: float = 2.0):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -1961,6 +2016,18 @@ class ResFilter:
         self._per_band_enr = per_band_enr
         self._enr_t_ne_per_band_cfg = tuple(enr_t_ne_per_band)
         self._enr_s_ne_per_band_cfg = tuple(enr_s_ne_per_band)
+        # v3.15 §1.2 — DT-NE compression fix flags (default OFF byte-equal).
+        self._dt_ne_compression_fix = dt_ne_compression_fix
+        self._dt_ne_state_scale = dt_ne_state_scale if dt_ne_state_scale is not None else {
+            'idle':            2.0,
+            'startup':         2.0,
+            'coarse_learning': 2.0,
+            'refined_usable':  1.0,
+            'diverged':        2.0,
+            'suspicious_dt':   1.0,
+        }
+        self._dt_ne_per_bin_thresh = float(dt_ne_per_bin_thresh)
+        self._dt_ne_per_bin_scale = float(dt_ne_per_bin_scale)
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -2941,6 +3008,31 @@ class ResFilter:
                 dt_enr_relax = 1.0 + (effective_dt - 0.4) / 0.6 * 0.5
                 enr_t_ne = enr_t_ne * dt_enr_relax
                 enr_s_ne = enr_s_ne * dt_enr_relax
+            # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal).
+            # Apply per-state scale then per-bin dt_per_bin override to
+            # enr_t_ne / enr_s_ne.  refined_usable state-scale must be 1.0
+            # to preserve byte-equal with v3.13 steady BALANCED path.
+            if self._dt_ne_compression_fix:
+                _state_scale = self._dt_ne_state_scale.get(
+                    filter_state, 1.0)
+                if _state_scale != 1.0:
+                    enr_t_ne = enr_t_ne * _state_scale
+                    enr_s_ne = enr_s_ne * _state_scale
+                _bin_scale = self._dt_ne_per_bin_scale
+                if _bin_scale != 1.0:
+                    _mask = (dt_per_bin > self._dt_ne_per_bin_thresh)
+                    if np.any(_mask):
+                        # Broadcast scalar enr_t_ne / enr_s_ne to per-bin if needed.
+                        if np.ndim(enr_t_ne) == 0:
+                            enr_t_ne = np.full_like(dt_per_bin, float(enr_t_ne))
+                        else:
+                            enr_t_ne = np.asarray(enr_t_ne, dtype=np.float32).copy()
+                        if np.ndim(enr_s_ne) == 0:
+                            enr_s_ne = np.full_like(dt_per_bin, float(enr_s_ne))
+                        else:
+                            enr_s_ne = np.asarray(enr_s_ne, dtype=np.float32).copy()
+                        enr_t_ne[_mask] = enr_t_ne[_mask] * _bin_scale
+                        enr_s_ne[_mask] = enr_s_ne[_mask] * _bin_scale
             enr_t = ne_confidence * enr_t_ne + (1 - ne_confidence) * enr_t_fs
             enr_s = ne_confidence * enr_s_ne + (1 - ne_confidence) * enr_s_fs
             min_gate_width = 0.2
@@ -5333,6 +5425,10 @@ class AEC:
                 per_band_enr=self.config.res_per_band_enr,
                 enr_t_ne_per_band=self.config.enr_t_ne_per_band,
                 enr_s_ne_per_band=self.config.enr_s_ne_per_band,
+                dt_ne_compression_fix=self.config.dt_ne_compression_fix,
+                dt_ne_state_scale=self.config.dt_ne_state_scale,
+                dt_ne_per_bin_thresh=self.config.dt_ne_per_bin_thresh,
+                dt_ne_per_bin_scale=self.config.dt_ne_per_bin_scale,
             )
         else:
             self.res = None
