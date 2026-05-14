@@ -6358,11 +6358,15 @@ class AEC:
                         # shadow back by 10% blend per frame.  Fires only in steady
                         # FS (refined_usable + far_excited) so it cannot corrupt the
                         # non-stationary path where orthogonality matters most.
+                        # B4 fix (2026-05-14): drop dead 'converged' branch — that
+                        # string belongs to AecFilterState enum, not the internal
+                        # P3f state machine (lines 7180-7199), which only sets
+                        # 'refined_usable' for steady FS.
                         _is_quiescent = (
                             far_excited
                             and hasattr(self.filter, '_error_psd')
                             and getattr(self, '_prev_filter_state', 'idle')
-                                in ('refined_usable', 'converged')
+                                == 'refined_usable'
                         )
                         if _is_quiescent:
                             _main_psd = self.filter._error_psd  # current main
