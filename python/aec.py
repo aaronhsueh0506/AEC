@@ -706,6 +706,35 @@ class AecConfig:
     per_band_erl_clip_lo: float = 0.005
     per_band_erl_clip_hi: float = 1.5
 
+    # v3.14 Arc-R Sprint S1: per-band ENR threshold wire.
+    #
+    # Motivation: ENR thresholds `enr_t_ne` / `enr_s_ne` in
+    # `ResFilter._stage_gain_compute` (aec.py:2792-2793) currently use a
+    # `_enr_blend`-driven interpolation between two scalar endpoints
+    # (2.0/1.5 for `t_ne`, 3.0/2.5 for `s_ne`). The blend ramps over
+    # bins 5-10 (~150-300 Hz @ 16kHz/256-fft); bins 11+ asymptote to
+    # the high-band scalar. After P.S3's adaptive per-band ERL (which
+    # already varies LF/MF/HF by ~4× per-room), the downstream ENR
+    # thresholds remain band-flat — this clips P.S3's signal before it
+    # reaches the gain decision.
+    #
+    # Per-bin audit (`project_per_bin_audit_findings.md`) ranks
+    # `enr_t_ne / enr_s_ne` as the #2 per-band candidate (right after
+    # `erl_estimate` which P-revised P.S3 addresses).
+    #
+    # Wire-only sprint (R.S1): default tuple values are uniform =
+    # current high-band scalar (1.5 / 2.5), and the flag is default
+    # OFF. When OFF: legacy `_enr_blend` path is untouched (byte-equal).
+    # When ON: a per-bin array is built once at ResFilter init from the
+    # 3-band tuple (using the same LF 0-1k / MF 1-4k / HF 4-8k split as
+    # P.S3) and substituted at the use site. Tuning happens in R.S2.
+    res_per_band_enr: bool = False
+    # Per-band tuple values [LF, MF, HF] for the NE-side ENR thresholds.
+    # Defaults match the post-blend asymptote (bins 11+) of the legacy
+    # blend formula; flag-OFF/-ON differ only in bins 0-10 (DC-300 Hz).
+    enr_t_ne_per_band: tuple = (1.5, 1.5, 1.5)
+    enr_s_ne_per_band: tuple = (2.5, 2.5, 2.5)
+
     # Mode
     mode: AecMode = AecMode.PBFDKF
 
@@ -1831,7 +1860,10 @@ class ResFilter:
                  state_driven_epc_dt_cap: bool = False,
                  dt_per_bin_unified: bool = False,
                  noise_floor_refined: bool = False,
-                 cap2_fs_loosen: bool = False):
+                 cap2_fs_loosen: bool = False,
+                 per_band_enr: bool = False,
+                 enr_t_ne_per_band: tuple = (1.5, 1.5, 1.5),
+                 enr_s_ne_per_band: tuple = (2.5, 2.5, 2.5)):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -1845,6 +1877,9 @@ class ResFilter:
         self._dt_per_bin_unified = dt_per_bin_unified
         self._noise_floor_refined = noise_floor_refined
         self._cap2_fs_loosen = cap2_fs_loosen
+        self._per_band_enr = per_band_enr
+        self._enr_t_ne_per_band_cfg = tuple(enr_t_ne_per_band)
+        self._enr_s_ne_per_band_cfg = tuple(enr_s_ne_per_band)
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -1879,6 +1914,26 @@ class ResFilter:
                 0.0, 1.0 - (f_bins[high] - 3000.0) / 4000.0)
         # C2: ENR blend array
         self._enr_blend = np.clip((np.arange(n_freqs, dtype=np.float32) - 5) / 5, 0, 1)
+        # v3.14 Arc-R Sprint S1: per-band ENR threshold per-bin arrays.
+        # Pre-built once from the LF/MF/HF tuple values using the same band
+        # boundaries (1 kHz / 4 kHz) as P.S3 adaptive per-band ERL EMA so
+        # the two arcs operate on consistent frequency partitions. When
+        # `_per_band_enr=False` (default) these arrays are unused → no
+        # behavioural change → byte-equal to baseline.
+        _b1k = max(1, min(int(round(1000.0 / freq_res)), n_freqs - 2))
+        _b4k = max(_b1k + 1, min(int(round(4000.0 / freq_res)), n_freqs - 1))
+        self._enr_per_band_b1k = _b1k
+        self._enr_per_band_b4k = _b4k
+        _t_lf, _t_mf, _t_hf = self._enr_t_ne_per_band_cfg
+        _s_lf, _s_mf, _s_hf = self._enr_s_ne_per_band_cfg
+        self._enr_t_ne_pb = np.empty(n_freqs, dtype=np.float32)
+        self._enr_t_ne_pb[:_b1k] = float(_t_lf)
+        self._enr_t_ne_pb[_b1k:_b4k] = float(_t_mf)
+        self._enr_t_ne_pb[_b4k:] = float(_t_hf)
+        self._enr_s_ne_pb = np.empty(n_freqs, dtype=np.float32)
+        self._enr_s_ne_pb[:_b1k] = float(_s_lf)
+        self._enr_s_ne_pb[_b1k:_b4k] = float(_s_mf)
+        self._enr_s_ne_pb[_b4k:] = float(_s_hf)
         # C3: frequency bin indices
         self._hf_cap_bin = min(int(500.0 / freq_res), n_freqs - 1)
         # v3.8.4: secondary cap anchor at 2 kHz so vowel formants (1–3 kHz)
@@ -2789,8 +2844,16 @@ class ResFilter:
             scale = self.enr_scale
             ne_confidence = dt_per_bin
             effective_scale = scale
-            enr_t_ne = (1 - blend) * 2.0 + blend * 1.5
-            enr_s_ne = (1 - blend) * 3.0 + blend * 2.5
+            # v3.14 Arc-R Sprint S1: per-band ENR threshold (default OFF).
+            # When `_per_band_enr=True`, substitute the precomputed per-bin
+            # arrays built from `enr_t_ne_per_band`/`enr_s_ne_per_band` tuples.
+            # Default OFF keeps the legacy `_enr_blend` formula → byte-equal.
+            if self._per_band_enr:
+                enr_t_ne = self._enr_t_ne_pb
+                enr_s_ne = self._enr_s_ne_pb
+            else:
+                enr_t_ne = (1 - blend) * 2.0 + blend * 1.5
+                enr_s_ne = (1 - blend) * 3.0 + blend * 2.5
             enr_t_fs = (1 - blend) * (0.3 * effective_scale) + blend * (0.07 * effective_scale)
             enr_s_fs = (1 - blend) * (0.4 * effective_scale) + blend * (0.1 * effective_scale)
             if effective_dt > 0.4:
@@ -5186,6 +5249,9 @@ class AEC:
                 dt_per_bin_unified=self.config.res_dt_per_bin_unified,
                 noise_floor_refined=self.config.res_noise_floor_refined,
                 cap2_fs_loosen=self.config.res_cap2_fs_loosen,
+                per_band_enr=self.config.res_per_band_enr,
+                enr_t_ne_per_band=self.config.enr_t_ne_per_band,
+                enr_s_ne_per_band=self.config.enr_s_ne_per_band,
             )
         else:
             self.res = None

@@ -167,6 +167,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'use_mic_excess_evidence' not in config_overrides):
         config_overrides['use_mic_excess_evidence'] = (
             os.environ['AEC_USE_MIC_EXCESS'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.14 Arc-R Sprint S1 — per-band ENR threshold wire (default OFF)
+    if ('AEC_RES_PER_BAND_ENR' in os.environ
+            and 'res_per_band_enr' not in config_overrides):
+        config_overrides['res_per_band_enr'] = (
+            os.environ['AEC_RES_PER_BAND_ENR'].lower() not in ('0', 'false', 'off', 'no'))
     # F2.1 EPC state reset (default OFF)
     if ('AEC_USE_EPC_RESET' in os.environ
             and 'use_epc_state_reset' not in config_overrides):

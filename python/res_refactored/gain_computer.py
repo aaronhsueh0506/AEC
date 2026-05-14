@@ -122,8 +122,15 @@ def gain_computer(rf, *, residual_echo_psd, eer, coh2, effective_dt,
         scale = rf.enr_scale
         ne_confidence = dt_per_bin
         effective_scale = scale
-        enr_t_ne = (1 - blend) * 2.0 + blend * 1.5
-        enr_s_ne = (1 - blend) * 3.0 + blend * 2.5
+        # v3.14 Arc-R Sprint S1: per-band ENR threshold (default OFF).
+        # Mirrors aec.py:2792-2802 wire so the refactored stage stays
+        # byte-equal to the legacy ResFilter._stage_gain_compute.
+        if rf._per_band_enr:
+            enr_t_ne = rf._enr_t_ne_pb
+            enr_s_ne = rf._enr_s_ne_pb
+        else:
+            enr_t_ne = (1 - blend) * 2.0 + blend * 1.5
+            enr_s_ne = (1 - blend) * 3.0 + blend * 2.5
         enr_t_fs = (1 - blend) * (0.3 * effective_scale) + blend * (0.07 * effective_scale)
         enr_s_fs = (1 - blend) * (0.4 * effective_scale) + blend * (0.1 * effective_scale)
         if effective_dt > 0.4:
