@@ -730,10 +730,13 @@ class AecConfig:
     # P.S3) and substituted at the use site. Tuning happens in R.S2.
     res_per_band_enr: bool = False
     # Per-band tuple values [LF, MF, HF] for the NE-side ENR thresholds.
-    # Defaults match the post-blend asymptote (bins 11+) of the legacy
-    # blend formula; flag-OFF/-ON differ only in bins 0-10 (DC-300 Hz).
-    enr_t_ne_per_band: tuple = (1.5, 1.5, 1.5)
-    enr_s_ne_per_band: tuple = (2.5, 2.5, 2.5)
+    # Defaults match the R.S2 sweep winner "block_lf" (DT bucket +0.007 dB
+    # mean Δdeg on 800-case AECMOS; FS regression within -0.02 bar). The
+    # band tilt blocks LF echo (raise threshold) while admitting HF speech
+    # (lower threshold). Mirror-scaled by ~1.67× for the SD-side tuple to
+    # preserve the legacy t:s ratio.
+    enr_t_ne_per_band: tuple = (2.0, 1.5, 1.0)
+    enr_s_ne_per_band: tuple = (3.33, 2.5, 1.67)
 
     # Mode
     mode: AecMode = AecMode.PBFDKF
