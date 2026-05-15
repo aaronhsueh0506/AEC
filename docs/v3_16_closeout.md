@@ -1,7 +1,7 @@
 # v3.16 closeout summary (2026-05-15)
 
-**Status**: NATURAL CLOSEOUT — recommend transition to v3.17.
-**Branch**: `feature/v3.16` (8 commits past v3.15.0).
+**Status**: DEFINITIVE CLOSEOUT — all audit-able candidates closed.
+**Branch**: `feature/v3.16` (10 commits past v3.15.0; updated 2026-05-15 post C4).
 **Push status**: NOT PUSHED, NOT MERGED — pending §0.7 user authorisation.
 **Plan reference**: `~/.claude/plans/se-aec-aec-main-hazy-lynx.md` §10.
 
@@ -24,7 +24,7 @@ as v3.13 (E4/E5/Volterra closures), v3.14 (Arc H closure), and v3.15
 
 ---
 
-## 2. v3.16 commits on `feature/v3.16` (8 commits past `9f70add` v3.15 merge)
+## 2. v3.16 commits on `feature/v3.16` (10 commits past `9f70add` v3.15 merge)
 
 | # | Commit | Sprint | Description |
 |---|---|---|---|
@@ -36,6 +36,8 @@ as v3.13 (E4/E5/Volterra closures), v3.14 (Arc H closure), and v3.15
 | 6 | `d181e17` | v3.16-A | Phase 1.5 force_render OR-in CLOSED CANNOT SHIP — logically subsumed by `not filter_converged` (qNvSMyU byte-identical, lever fires 0/2686) |
 | 7 | `d04ba60` | C3 | Phase 2 4-cap stacking audit CLOSED — NOT stacking-driven (99.87% stack=0 on voice band) |
 | 8 | `6ba0378` | C9 audit | Phase 4 reverb-aware audit CLOSED — TRIGGER UNDESIGNED (Pearson r fails to separate pcb1N from CTRL; 5-8 sprint LOE needed) |
+| 9 | `e42a8a6` | v3.16 closeout summary | Initial closeout summary doc |
+| 10 | `35800af` | C4 audit | Phase 2 noise_floor / CNG audit CLOSED — H4 REFUTED (nfl_dom = 0% all buckets; noise_floor is NE-protection floor not compression source) |
 
 **Production change**: only commit `d90efdc` (C1 dead-code removal).
 The other 7 commits are audit substrate, closure docs, and plan doc
@@ -45,7 +47,7 @@ revisions. **No new algorithm features ship in v3.16.**
 
 ## 3. Candidate disposition tally
 
-### 3.1 Disposed (9 / 15)
+### 3.1 Disposed (10 / 15)
 
 | ID | Phase | Outcome | Commit |
 |---|---|---|---|
@@ -57,15 +59,15 @@ revisions. **No new algorithm features ship in v3.16.**
 | C6 | 1 | ✓ CLOSED H2 (audit, no delay arc) | `ac7320e` |
 | v3.16-A | 1.5 | ✓ CLOSED CANNOT SHIP (subsume) | `d181e17` |
 | C3 | 2 | ✓ CLOSED (NOT stacking-driven) | `d04ba60` |
+| C4 | 2 | ✓ CLOSED (H4 REFUTED; noise_floor is NE-protection floor) | `35800af` |
 | C9 | 4 | ✓ CLOSED → v3.17 C9.v2 (trigger undesigned) | `6ba0378` |
 
-### 3.2 Remaining (6 / 15)
+### 3.2 Remaining (5 / 15) — all non-audit-able
 
 | ID | Phase | Status | Likely outcome |
 |---|---|---|---|
 | C5 | 1.6 | DEFERRED | Architectural; ZERO AECMOS Δ; defer to v3.17 if C2 implementation can isolate ENR write surface |
 | C2 | 2 | candidate | Likely CLOSED — same family as v3.15 §1.2 / Arc D (FS-vs-DT wall confirmed by §1.2 closure, FS Δecho -0.077 to -0.395 dB) |
-| C4 | 2 | candidate | LOW priority; unaudited; possibly worth 1-sprint audit-first |
 | v3.16-B | 3 | candidate | Gated on C2; if C2 closes, v3.16-B is blocked |
 | C7 | 4 | candidate | Was CLOSED in v3.15 §1.5b; retry needs new detector primitive (depends on C6 outcome — none) |
 | C8 | 4 | candidate | LOW priority; partial-decay alt for Arc G (Arc G already CLOSED v3.15) |
@@ -127,37 +129,30 @@ explicitly out of scope per `feedback_no_nn_mention`.
 
 ---
 
-## 5. Recommended next steps
+## 5. Recommended next steps (post C4 closure update 2026-05-15)
 
-### 5.1 Option A: Complete v3.16 by auditing C4 (1 sprint), then closeout
+### 5.1 Option A: Closeout v3.16 + transition to v3.17 planning  [RECOMMENDED]
 
-C4 (noise_floor / CNG interaction) is the only remaining unaudited
-candidate. Audit-first sprint would either close C4 quickly or
-identify a final v3.16 mechanism. If C4 closes, **definitive v3.16
-closeout**.
+All 5 audit-able candidates closed (C6 / v3.16-A / C3 / C4 / C9). The
+remaining 5 (C5 / C2 / v3.16-B / C7 / C8) are NOT audit-first
+candidates — they would require multi-sprint mechanism investment with
+high closure risk per the cumulative pattern. v3.17 planning with
+focused candidates delivers more value than continuing v3.16.
 
-### 5.2 Option B: Closeout v3.16 immediately + transition to v3.17 planning
-
-5/6 remaining candidates have likely-closure indicators. C4 is LOW
-priority per plan. Investing the audit sprint + writeup may not change
-the cycle outcome. Skip ahead to v3.17 planning (C9.v2 + DelayEst
-movement-rate + per §1.7 retained candidates).
-
-### 5.3 Option C: Open C2 mechanism despite §1.2 wall warning
+### 5.2 Option B: Open C2 mechanism despite §1.2 wall warning
 
 C2 was the primary Phase 2 target. Even though §1.2 / Arc D family
 showed the FS-vs-DT wall, C2's per-state × per-band variant might
 find a narrow window. 3-sprint investment (without C5 if ENR write
-surface can be isolated). RISK: closure pattern suggests this also
-hits the wall.
+surface can be isolated). RISK: closure pattern strongly suggests
+this also hits the wall (3-sprint cost for likely-closure outcome).
 
-### 5.4 Recommended: Option B (closeout + v3.17 planning)
+### 5.3 Recommended: Option A (closeout + v3.17 planning)
 
 Per §0.4 negative-result acceptance + the cumulative closure pattern,
 v3.16 has delivered maximum value from audit-first cycles. C4 audit
-is unlikely to surface a viable mechanism (it targets noise_floor /
-CNG, downstream of RES — typically smoothing, not attenuation). C2
-risks hitting the same wall as §1.2. The right call is **closeout
+**confirmed REFUTED** (this update; nfl_dom 0% across all buckets).
+C2 risks hitting the same wall as §1.2. The right call is **closeout
 v3.16 + transition to v3.17 planning** with focused candidates:
 
 #### v3.17 candidate seed list (preliminary)
