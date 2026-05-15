@@ -135,6 +135,11 @@ class AecStats:
     echo_psd_mean_db: float  # Mean residual echo PSD estimate (dB)
     error_psd_mean_db: float # Mean error PSD (dB)
 
+    # v3.15 §1.5 Arc T — cohort tail real-time detector signal (default
+    # False when arc_t_cohort_detector OFF). Placed at end of dataclass
+    # to satisfy "default-args-after-non-default" rule.
+    cohort_tail_T: bool = False
+
 
 @dataclass
 class AecResContext:
@@ -7316,6 +7321,18 @@ class AEC:
                     if getattr(self, '_epc_render_forced_remaining', 0) > 0:
                         self._epc_render_forced_remaining -= 1
                         self.res._using_render_based = True
+                    # v3.15 §1.5.S2 Arc T — RES preempt mode (H1+H2 stack):
+                    # When cohort_tail_T asserts AND arc_t_res_preempt_mode
+                    # enabled, force RES into render-based echo estimate
+                    # (H2: same defence the EPC render-forced path uses) AND
+                    # boost over_sub by arc_t_over_sub_boost (H1: stronger
+                    # spectral attenuation across all bins). Default OFF;
+                    # byte-equal flag-OFF preserved by the gate.
+                    if (self.config.arc_t_res_preempt_mode
+                            and getattr(self, '_arc_t_cohort_tail_signal', False)):
+                        self.res._using_render_based = True
+                        effective_over_sub = effective_over_sub * float(
+                            self.config.arc_t_over_sub_boost)
                     self.res.over_sub = effective_over_sub
 
                     # DT conservative residual scaling: 1.0→0.5 as dt goes 0→0.8
@@ -8151,6 +8168,7 @@ class AEC:
             divergence=self._divergence_indicator,
             epc_active=self.epc_active,
             epv_ratio=d.get('epv_gain_ratio', 1.0),
+            cohort_tail_T=bool(getattr(self, '_arc_t_cohort_tail_signal', False)),
             mu_scale=d.get('mu_scale', 1.0),
             filter_w_norm=d.get('filter_w_norm', 0.0),
             shadow_w_norm=d.get('shadow_w_norm', 0.0),
