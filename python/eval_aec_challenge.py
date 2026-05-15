@@ -264,6 +264,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'kalman_q_band_scales' not in config_overrides):
         config_overrides['kalman_q_band_scales'] = tuple(
             float(x) for x in os.environ['AEC_KALMAN_Q_BAND_SCALES'].split(','))
+    # v3.15 §1.4 Arc M: EPC-gated per-band Q boost (default OFF)
+    if ('AEC_ARC_M_EPC_GATED' in os.environ
+            and 'arc_m_epc_gated' not in config_overrides):
+        config_overrides['arc_m_epc_gated'] = (
+            os.environ['AEC_ARC_M_EPC_GATED'].lower() not in ('0', 'false', 'off', 'no'))
     # State-scale override: comma-separated state=scale pairs, e.g.
     #   "coarse_learning=2.0,refined_usable=1.0"
     if ('AEC_DT_NE_STATE_SCALE' in os.environ

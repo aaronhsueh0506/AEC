@@ -816,6 +816,34 @@ class AecConfig:
     kalman_q_per_band: bool = False
     kalman_q_band_scales: tuple = (0.5, 1.0, 2.0)  # (LF, MF, HF) on Q_high/Q_low
 
+    # v3.15 §1.4 Arc M — movement-aware adaptive Q boost (default OFF).
+    #
+    # Motivation: Arc F (uniform-time per-band Q tilt) closed CANNOT SHIP
+    # because steady-state HF Q boost violates cohort tail (-0.067 Δecho
+    # on qNvSMyU vs -0.05 bar) — cohort tail is HF-stability-sensitive.
+    # The canonical fix is to apply per-band Q tilt ONLY during transient
+    # adaptation events (EPC fires, movement detector triggers), reverting
+    # to uniform baseline Q at steady state.
+    #
+    # Mechanism (Arc M v1, EPC-gated): when EPC detector raises Q via
+    # `Q = Q_high.copy()` (existing infrastructure at line ~6035 / 6305 /
+    # 6631 / 6659), apply Arc F's per-band scale on top — only for the
+    # duration of `_p_max_override_frames` (30 frame countdown).  After
+    # countdown, Q decays back via the per-frame `q_scale` modulation that
+    # uses `mu_mean`.  Steady-state Q stays uniform (baseline) — cohort
+    # tail safe.
+    #
+    # Requires: `kalman_q_per_band=True` and `kalman_q_band_scales` set.
+    # When `arc_m_epc_gated=True`, the per-band tilt at AEC.__init__ time
+    # is REPLACED with this gated variant — Q_high is left uniform (cohort
+    # tail safe), but the per-band tilt is applied transiently by the EPC
+    # rising-edge handlers and decays back via q_scale.
+    #
+    # §0.6 metric: linear-filter primary (nores listen).  HARD: nores Δdeg
+    # ≥ 0; SOFT: nores Δecho ≥ -0.020 (RES rescue).  HARD: full-pipeline
+    # AECMOS DT Δdeg ≥ -0.005, FS Δecho ≥ -0.020, cohort tail ≥ -0.05.
+    arc_m_epc_gated: bool = False
+
     # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal flag-OFF).
     #
     # Motivation: §1.1 audit on 25 worst-DT cases (by Δdeg vs v3.10.5
@@ -5139,6 +5167,28 @@ class AEC:
     # Used by _maybe_mark_diverged() to skip mark_diverged calls per-source.
     _epc_no_reset_sources: frozenset = frozenset()
 
+    def _arc_m_q_boost(self, filt) -> None:
+        """v3.15 §1.4 Arc M: set Q = Q_high.copy(), optionally per-band-tilted.
+
+        When Arc M is enabled (`arc_m_epc_gated=True` in cfg + `kalman_q_per_band`
+        also True so the band scale was stored), the EPC rising-edge Q
+        boost gets a per-band scale applied to the freshly-copied Q array.
+        After `_p_max_override_frames` countdown, q_scale modulation in
+        `_update_weights` decays Q back toward baseline behavior — but Q
+        itself stays at the tilted value until the next time something
+        explicitly resets it.
+
+        When the flag is OFF or `_arc_m_band_scale` was never stored,
+        behaviour is identical to legacy `filt.Q = filt.Q_high.copy()`
+        (byte-equal).
+        """
+        if not hasattr(filt, 'Q_high'):
+            return
+        filt.Q = filt.Q_high.copy()
+        _scale = getattr(filt, '_arc_m_band_scale', None)
+        if _scale is not None:
+            filt.Q = filt.Q * _scale
+
     def _maybe_mark_diverged(self, source: str) -> None:
         if source not in self._epc_no_reset_sources:
             self._convergence.mark_diverged()
@@ -5315,7 +5365,7 @@ class AEC:
                 # boundaries (1k / 4k Hz) as Arc P / Arc R.  When OFF, the
                 # uniform fill above stands → byte-equal to v3.14.
                 if self.config.kalman_q_per_band:
-                    _freq_res = self.config.sample_rate / self.config.block_size if self.config.block_size > 0 else self.config.sample_rate / (2 * (self.filter.n_freqs - 1))
+                    _freq_res = self.config.sample_rate / (2 * (self.filter.n_freqs - 1))
                     _b1k = max(1, min(int(round(1000.0 / _freq_res)),
                                        self.filter.n_freqs - 2))
                     _b4k = max(_b1k + 1, min(int(round(4000.0 / _freq_res)),
@@ -5325,9 +5375,16 @@ class AEC:
                     _scale[:_b1k] = float(_lf)
                     _scale[_b1k:_b4k] = float(_mf)
                     _scale[_b4k:] = float(_hf)
-                    self.filter.Q_high *= _scale
-                    self.filter.Q_low  *= _scale
-                    self.filter.Q[:] = self.filter.Q_high
+                    if self.config.arc_m_epc_gated:
+                        # Arc M: keep baseline Q uniform (cohort tail safe);
+                        # store the per-band scale for transient application
+                        # at EPC rising edges. Default Q_high stays uniform.
+                        self.filter._arc_m_band_scale = _scale
+                    else:
+                        # Arc F (standalone, time-invariant): apply tilt now.
+                        self.filter.Q_high *= _scale
+                        self.filter.Q_low  *= _scale
+                        self.filter.Q[:] = self.filter.Q_high
                 # P53 Step 0: enable innovation-audit hook from config.
                 self.filter._enable_p53_trace = bool(
                     getattr(self.config, 'trace_p53_innovation', False))
@@ -6032,7 +6089,7 @@ class AEC:
         for filt in [self.filter, self.shadow_filter]:
             if filt is not None and hasattr(filt, 'Q'):
                 if hasattr(filt, 'Q_high'):
-                    filt.Q = filt.Q_high.copy()
+                    self._arc_m_q_boost(filt)
                 if hasattr(filt, '_p_max_override'):
                     filt._p_max_override = 1.0
                     filt._p_max_override_frames = 30
@@ -6301,7 +6358,7 @@ class AEC:
                         self._epc_det.force_delay()
                         for filt in [self.filter, self.shadow_filter]:
                             if filt is not None and hasattr(filt, 'Q'):
-                                filt.Q = filt.Q_high.copy()
+                                self._arc_m_q_boost(filt)
                                 filt._p_max_override = 1.0
                                 filt._p_max_override_frames = 30
                         self._maybe_mark_diverged('delay_shift')
@@ -6627,7 +6684,7 @@ class AEC:
                 )
                 if shadow_decision.boost_q:
                     if hasattr(self.filter, 'Q') and hasattr(self.filter, 'Q_high'):
-                        self.filter.Q = self.filter.Q_high.copy()
+                        self._arc_m_q_boost(self.filter)
                         self.filter._p_max_override = 1.0
                         self.filter._p_max_override_frames = 20
                     # F2.3: Yang 2017 R-reset — over-estimated R from a prior DT
@@ -6717,7 +6774,7 @@ class AEC:
             if epv_event.fired and not _epv_suppressed:
                 for filt in [self.filter, self.shadow_filter]:
                     if filt and hasattr(filt, 'Q'):
-                        filt.Q = filt.Q_high.copy()
+                        self._arc_m_q_boost(filt)
                         filt._p_max_override = 1.0
                         filt._p_max_override_frames = 30
                         filt._p_floor_beta = 1.0
@@ -6762,7 +6819,7 @@ class AEC:
                         self.dtd_coherence.confidence *= 0.3
                     for filt in [self.filter, self.shadow_filter]:
                         if filt and hasattr(filt, 'Q'):
-                            filt.Q = filt.Q_high.copy()
+                            self._arc_m_q_boost(filt)
                     self._maybe_mark_diverged('shadow_rise')
                     # P_MAX relax + P_floor raise: force filter to abandon stale path estimate
                     for filt in [self.filter, self.shadow_filter]:
