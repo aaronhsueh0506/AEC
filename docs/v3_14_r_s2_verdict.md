@@ -55,7 +55,19 @@ to that baseline.
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `block_lf` | -0.001 | -0.007 | -0.009 | +0.007 | +0.007 | +0.007 | PASS |
 | `uniform`  | -0.000 | -0.004 | -0.006 | +0.002 | +0.001 | +0.002 | PASS (~byte-equal as expected) |
-| `admit_hf` | — | — | — | — | — | — | not scored (R.S2.1) |
+| `admit_hf` | -0.000 | -0.007 | +0.002 | -0.003 | -0.012 | -0.008 | DT violation (control, expected) |
+
+### R.S2.1 admit_hf control result (2026-05-14)
+
+admit_hf scored as control to confirm R.S2 winner direction. Result:
+- **DT axis cleanly mirrors** block_lf: block_lf gain +0.007/+0.007 ↔ admit_hf loss -0.003/-0.012
+- **FS_movement mirrors**: block_lf -0.009 ↔ admit_hf +0.002
+- **FS_static does NOT mirror**: both block_lf and admit_hf regress -0.007 → intrinsic mechanism cost, not band-tilt direction sensitivity
+- Cohort tail qNvSMyU Δecho +0.029 (defensive PASS)
+
+DT_movement -0.012 violates -0.005 bar as expected (admit_hf is control, not ship candidate).
+
+**Conclusion**: R.S2 `block_lf` winner direction CONFIRMED on DT axis. FS_static intrinsic cost is per-band ENR mechanism overhead, not direction-dependent. block_lf maintains BALANCED default.
 
 Cohort tail (`qNvSMyU...`) per-case Δecho not separately extracted in
 this run; bucket-mean FS regression of -0.007/-0.009 is well within the
