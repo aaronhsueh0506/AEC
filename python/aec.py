@@ -1141,6 +1141,14 @@ class AecConfig:
                 # Cross-coupling audited disjoint from B5/F-E5/diverged_reset.
                 f_e1_enabled=True,
                 f_delaytrack_enabled=True,
+                # v3.15 §10.S0b: cohort tail real-time detector promoted to
+                # default ON. Signal-only substrate — RES preempt path
+                # (arc_t_res_preempt_mode) and arc_m gate (arc_m_t_gated_enabled)
+                # both stay default OFF, so detector ON is byte-equal on audio
+                # output (only AecStats.cohort_tail_T becomes informative).
+                # Enables §1.7 RES audit and v3.16 Phase 3-4 candidates to
+                # consume the signal without per-bench env-flag flipping.
+                arc_t_cohort_detector=True,
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
