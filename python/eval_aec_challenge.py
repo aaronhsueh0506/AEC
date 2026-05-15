@@ -280,10 +280,10 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         config_overrides['arc_m_epc_gated'] = (
             os.environ['AEC_ARC_M_EPC_GATED'].lower() not in ('0', 'false', 'off', 'no'))
     # v3.15 §1.5b Arc M.v3: T-gated rescue retry of Arc M V1 (default OFF)
-    if ('AEC_ARC_M_V3_T_GATED_ENABLED' in os.environ
-            and 'arc_m_v3_t_gated_enabled' not in config_overrides):
-        config_overrides['arc_m_v3_t_gated_enabled'] = (
-            os.environ['AEC_ARC_M_V3_T_GATED_ENABLED'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_ARC_M_T_GATED_ENABLED' in os.environ
+            and 'arc_m_t_gated_enabled' not in config_overrides):
+        config_overrides['arc_m_t_gated_enabled'] = (
+            os.environ['AEC_ARC_M_T_GATED_ENABLED'].lower() not in ('0', 'false', 'off', 'no'))
     # v3.15 §1.4 Arc G: per-band W reset on detected gain-change drift (default OFF)
     if ('AEC_ARC_G_PER_BAND_W_RESET' in os.environ
             and 'arc_g_per_band_w_reset' not in config_overrides):

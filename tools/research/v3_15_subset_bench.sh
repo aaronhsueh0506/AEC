@@ -12,7 +12,7 @@
 # Examples:
 #   tools/research/v3_15_subset_bench.sh /tmp/v3_15_baseline/
 #   tools/research/v3_15_subset_bench.sh /tmp/v3_15_arc_m_v3_on/ \
-#       'AEC_ARC_M_V3_T_GATED_ENABLED=1'
+#       'AEC_ARC_M_T_GATED_ENABLED=1'
 #   tools/research/v3_15_subset_bench.sh /tmp/v3_15_arc_t_on/ \
 #       'AEC_ARC_T_COHORT_DETECTOR=1 AEC_ARC_T_RES_PREEMPT_MODE=1'
 #
@@ -21,7 +21,7 @@ set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <output_dir> [extra_env]" >&2
-    echo "  e.g. $0 /tmp/v3_15_arc_m_v3_on/ 'AEC_ARC_M_V3_T_GATED_ENABLED=1'" >&2
+    echo "  e.g. $0 /tmp/v3_15_arc_m_t_gated_on/ 'AEC_ARC_M_T_GATED_ENABLED=1'" >&2
     exit 1
 fi
 

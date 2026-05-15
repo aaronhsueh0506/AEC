@@ -852,7 +852,7 @@ class AecConfig:
     # v3.15 §1.5b Arc M.v3 — T-gated rescue retry (default OFF, additive on
     # top of arc_m_epc_gated). When BOTH this flag AND arc_t_cohort_detector
     # are ON, every _arc_m_q_boost(filt) invocation is wrapped with a gate:
-    #   if not (arc_m_v3_t_gated_enabled AND _arc_t_cohort_tail_signal):
+    #   if not (arc_m_t_gated_enabled AND _arc_t_cohort_tail_signal):
     #       _arc_m_q_boost(filt)
     # so the per-band Q tilt is suppressed during cohort-tail-signal-asserted
     # windows. Hypothesis: V1's +0.023 DT_movement Δdeg win came from
@@ -863,7 +863,7 @@ class AecConfig:
     # Reads `self._arc_t_cohort_tail_signal` (Arc T S1 detector signal).
     # Default-OFF (Arc T flag OFF) holds the field at False every frame,
     # so this gate is byte-equal no-op until BOTH flags ON.
-    arc_m_v3_t_gated_enabled: bool = False
+    arc_m_t_gated_enabled: bool = False
 
     # v3.15 §1.4 Arc G — per-band W reset on detected gain-change drift
     # (default OFF). Mechanism orthogonal to Arc F/M Q-modification trade-off:
@@ -6222,7 +6222,7 @@ class AEC:
         for filt in [self.filter, self.shadow_filter]:
             if filt is not None and hasattr(filt, 'Q'):
                 if hasattr(filt, 'Q_high'):
-                    if not (self.config.arc_m_v3_t_gated_enabled
+                    if not (self.config.arc_m_t_gated_enabled
                             and getattr(self, '_arc_t_cohort_tail_signal', False)):
                         self._arc_m_q_boost(filt)
                 if hasattr(filt, '_p_max_override'):
@@ -6493,7 +6493,7 @@ class AEC:
                         self._epc_det.force_delay()
                         for filt in [self.filter, self.shadow_filter]:
                             if filt is not None and hasattr(filt, 'Q'):
-                                if not (self.config.arc_m_v3_t_gated_enabled
+                                if not (self.config.arc_m_t_gated_enabled
                                         and getattr(self, '_arc_t_cohort_tail_signal', False)):
                                     self._arc_m_q_boost(filt)
                                 filt._p_max_override = 1.0
@@ -6821,7 +6821,7 @@ class AEC:
                 )
                 if shadow_decision.boost_q:
                     if hasattr(self.filter, 'Q') and hasattr(self.filter, 'Q_high'):
-                        if not (self.config.arc_m_v3_t_gated_enabled
+                        if not (self.config.arc_m_t_gated_enabled
                                 and getattr(self, '_arc_t_cohort_tail_signal', False)):
                             self._arc_m_q_boost(self.filter)
                         self.filter._p_max_override = 1.0
@@ -6913,7 +6913,7 @@ class AEC:
             if epv_event.fired and not _epv_suppressed:
                 for filt in [self.filter, self.shadow_filter]:
                     if filt and hasattr(filt, 'Q'):
-                        if not (self.config.arc_m_v3_t_gated_enabled
+                        if not (self.config.arc_m_t_gated_enabled
                                 and getattr(self, '_arc_t_cohort_tail_signal', False)):
                             self._arc_m_q_boost(filt)
                         filt._p_max_override = 1.0
@@ -6960,7 +6960,7 @@ class AEC:
                         self.dtd_coherence.confidence *= 0.3
                     for filt in [self.filter, self.shadow_filter]:
                         if filt and hasattr(filt, 'Q'):
-                            if not (self.config.arc_m_v3_t_gated_enabled
+                            if not (self.config.arc_m_t_gated_enabled
                                     and getattr(self, '_arc_t_cohort_tail_signal', False)):
                                 self._arc_m_q_boost(filt)
                     self._maybe_mark_diverged('shadow_rise')

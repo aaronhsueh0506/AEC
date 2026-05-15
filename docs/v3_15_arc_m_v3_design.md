@@ -4,7 +4,7 @@
 **Branch**: `feature/v3.15-arc-m-v3` (to be created **after** §1.5 Arc T merges
 into `feature/v3.15`; rebase ordering enforced by §0.7).
 **Sprint**: §1.5b.S1 (impl + 5-case byte-equal) and §1.5b.S2 (800-case A/B + verdict).
-**Substrate retained on close**: `arc_m_v3_t_gated_enabled` flag (default OFF) on
+**Substrate retained on close**: `arc_m_t_gated_enabled` flag (default OFF) on
 top of Arc M V1 substrate (`arc_m_epc_gated` + `_arc_m_q_boost`) and Arc T
 substrate (`arc_t_cohort_detector` + `_arc_t_cohort_tail_signal`).
 
@@ -107,12 +107,12 @@ self._arc_m_q_boost(filt)
 with
 
 ```python
-if not (self.config.arc_m_v3_t_gated_enabled
+if not (self.config.arc_m_t_gated_enabled
         and self._arc_t_cohort_tail_signal):
     self._arc_m_q_boost(filt)
 ```
 
-Reading: when `arc_m_v3_t_gated_enabled` is OFF, the gate is bypassed
+Reading: when `arc_m_t_gated_enabled` is OFF, the gate is bypassed
 and behaviour is byte-equal to current Arc M V1. When the flag is ON,
 the per-band Q tilt is suppressed during cohort-tail-signal-asserted
 windows; uniform Q baseline (`Q = Q_high.copy()`) is also suppressed in
@@ -140,10 +140,10 @@ filter-derived reset ([aec.py:6104](../python/aec.py#L6104)). Updated only
 when `arc_t_cohort_detector=True AND erl_update_gate AND inst_erl_raw < 1.5
 AND _long_window_n_updates >= 100` ([aec.py:7086-7148](../python/aec.py#L7086-L7148)).
 **Default-OFF (Arc T flag OFF) holds the field at `False` for every
-frame**, so the §1.5b gate `(arc_m_v3_t_gated_enabled AND _arc_t_cohort_tail_signal)`
+frame**, so the §1.5b gate `(arc_m_t_gated_enabled AND _arc_t_cohort_tail_signal)`
 evaluates to `False` for every frame and Arc M V1 behaviour is
 byte-equal preserved. This is the intended dual-flag composition: §1.5b
-is a no-op until BOTH `arc_m_v3_t_gated_enabled=True` AND
+is a no-op until BOTH `arc_m_t_gated_enabled=True` AND
 `arc_t_cohort_detector=True`.
 
 ### 1-frame latency contract
@@ -199,7 +199,7 @@ byte-equal sanity test.
 | R2 | T detector FN (cohort tail event missed) | S1 validation: 5/5 TAIL fire + 3 CTRL no-fire passed; threshold T_HI=18.5 dB has 0.5 dB margin to nearest CTRL max | If FN occurs on a previously unseen cohort-tail-class case, that case retains V1's full damage; 800-case bench detects this in cohort-tail bucket aggregate |
 | R3 | T detector FP (non-tail EPC window asserted as cohort tail) | S1 validation: NE-corruption gate (`inst_erl_raw < 1.5`) eliminated DT_static FP on `NN7yhG2X`; FP rate on 3 CTRL = 0/3 | Each FP suppresses one Q boost in a non-tail EPC window → loss of V1 win on those windows. Bounded by S3 acceptance bar (FP rate ≤ 5% on non-tail cohort) → H2 retention ≥ 95% × V1 win ≈ +0.022 dB still passes ≥ +0.020 |
 | R4 | FS_movement Δecho damage is NOT actually inside cohort-tail-T windows | Inferred from V1 closure: V1 FS_movement damage came from the same EPC-window-=-cohort-tail-window mechanism as cohort tail damage. If FS_movement damage is orthogonal to cohort_tail_T, H3 fails | §0.4 kill criterion fires; close arc with post-mortem. Probability est. low (V1+V2 closure analysis explicitly identified the SAME mechanism for FS_movement and cohort tail) |
-| R5 | Arc T S2 RES preempt mode (`arc_t_res_preempt_mode=True`) interacts with §1.5b gate | §1.5b enables ONLY `arc_m_v3_t_gated_enabled`; `arc_t_res_preempt_mode` stays default OFF. RES preempt and Q gate are read-disjoint: Q gate reads `_arc_t_cohort_tail_signal`, RES preempt reads same signal at L7268 → orthogonal write paths | None if §1.5b S2 keeps `arc_t_res_preempt_mode=False`; explicit in S2 config |
+| R5 | Arc T S2 RES preempt mode (`arc_t_res_preempt_mode=True`) interacts with §1.5b gate | §1.5b enables ONLY `arc_m_t_gated_enabled`; `arc_t_res_preempt_mode` stays default OFF. RES preempt and Q gate are read-disjoint: Q gate reads `_arc_t_cohort_tail_signal`, RES preempt reads same signal at L7268 → orthogonal write paths | None if §1.5b S2 keeps `arc_t_res_preempt_mode=False`; explicit in S2 config |
 
 ## Sprint plan
 
@@ -207,12 +207,12 @@ byte-equal sanity test.
 
 **Scope**: code change only.
 
-1. Add `arc_m_v3_t_gated_enabled: bool = False` to `AecConfig`
+1. Add `arc_m_t_gated_enabled: bool = False` to `AecConfig`
    (after the existing `arc_m_epc_gated` field at
    [aec.py:850](../python/aec.py#L850)).
 2. Wrap each of the 5 `_arc_m_q_boost(filt)` / `_arc_m_q_boost(self.filter)`
    calls (lines 6177, 6446, 6772, 6862, 6907) with the gate expression.
-3. Add `AEC_ARC_M_V3_T_GATED_ENABLED` env override in
+3. Add `AEC_ARC_M_T_GATED_ENABLED` env override in
    `python/eval_aec_challenge.py` immediately after the existing
    `AEC_ARC_M_EPC_GATED` block at
    [eval_aec_challenge.py:268-271](../python/eval_aec_challenge.py#L268-L271).
@@ -225,7 +225,7 @@ byte-equal sanity test.
   1 FS_static + 1 FS_movement, all OUTSIDE the cohort tail bucket and
   the Arc T 8-case validation set.
 - Default-OFF byte-equal MUST hold for ALL 4 flag combinations:
-  `(arc_m_epc_gated, arc_m_v3_t_gated_enabled) ∈ {OFF/OFF}` vs baseline.
+  `(arc_m_epc_gated, arc_m_t_gated_enabled) ∈ {OFF/OFF}` vs baseline.
   (Other 3 combinations are tested in S2.)
 
 If S1 byte-equal fails → fix wiring (no behaviour decision).
@@ -236,7 +236,7 @@ If S1 byte-equal fails → fix wiring (no behaviour decision).
 
 Configuration matrix:
 
-| ID | `arc_m_epc_gated` | `arc_m_v3_t_gated_enabled` | `arc_t_cohort_detector` | `arc_t_res_preempt_mode` | Notes |
+| ID | `arc_m_epc_gated` | `arc_m_t_gated_enabled` | `arc_t_cohort_detector` | `arc_t_res_preempt_mode` | Notes |
 |---|---|---|---|---|---|
 | C0 | OFF | OFF | OFF | OFF | Baseline (= `results/v3_14_baseline/scores.json`) |
 | C1 | ON | OFF | OFF | OFF | Arc M V1 reproduction (sanity vs `docs/v3_15_arc_m_closure.md` V1 row) |
@@ -255,7 +255,7 @@ no foul" note in post-mortem.
 If S2 PASS, write verdict doc `docs/v3_15_arc_m_v3_verdict.md`,
 merge `feature/v3.15-arc-m-v3` into `feature/v3.15`, update §1.5b row
 in v3.15 plan to PROMOTED. Defer the productionisation flip
-(`balanced` preset gets `arc_m_v3_t_gated_enabled=True` + Arc T flags
+(`balanced` preset gets `arc_m_t_gated_enabled=True` + Arc T flags
 ON) to the v3.15 closeout sprint per §0.7.
 
 If S2 FAIL, write closure post-mortem `docs/v3_15_arc_m_v3_closure.md`,
@@ -266,11 +266,11 @@ by future Arc T-tier discriminators or NN-classifier-gated arcs).
 ## Files to modify
 
 - `python/aec.py` (≈ +12 lines):
-  - 1 config flag `arc_m_v3_t_gated_enabled: bool = False` after line 850.
+  - 1 config flag `arc_m_t_gated_enabled: bool = False` after line 850.
   - 5 gate-wrap insertions at lines 6177, 6446, 6772, 6862, 6907 (each
     +1 line of `if not (... and ...):` and +1 line of indentation).
 - `python/eval_aec_challenge.py` (≈ +4 lines):
-  - 1 env override block `AEC_ARC_M_V3_T_GATED_ENABLED` after line 271.
+  - 1 env override block `AEC_ARC_M_T_GATED_ENABLED` after line 271.
 - `docs/v3_15_arc_m_v3_design.md` (this file, new).
 - `docs/v3_15_arc_m_v3_verdict.md` (new on S2 PASS) **OR**
   `docs/v3_15_arc_m_v3_closure.md` (new on S2 FAIL per §0.4).
@@ -286,7 +286,7 @@ Python-first convention.
 > write closure post-mortem documenting which bar broke.
 
 "Permanently" here means: the §1.5b additive flag
-`arc_m_v3_t_gated_enabled` joins `arc_m_epc_gated` as default-OFF
+`arc_m_t_gated_enabled` joins `arc_m_epc_gated` as default-OFF
 research substrate; the Arc M arc closes for v3.15 with no further
 sprints. Future v3.16+ retries are out of v3.15 scope and require a
 new design lock + re-authorisation.
