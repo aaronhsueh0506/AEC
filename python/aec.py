@@ -7381,12 +7381,17 @@ class AEC:
                     is_stationary_dt = False  # EPC error spike is from filter divergence, not speech
 
                 dt_indicator = np.clip(raw_dt, 0.0, 0.8)
-                # NOTE: dt_reduction → effective_over_sub is dead code when
-                # gain_type="enr" (all presets). over_sub is only read by
-                # wiener/spectral_sub paths. Kept for backward compat if
-                # gain_type is ever changed.
-                dt_reduction = self.config.res_dt_reduction * dt_indicator
-                effective_over_sub = max(base_over_sub - dt_reduction, 0.5)
+                # v3.17 A.1.1: over_sub chain (dt_reduction → effective_over_sub
+                # → self.res.over_sub) is dead in ENR mode. `self.res.over_sub`
+                # only read by gain_type ∈ {'wiener', 'spectral_sub'} branches in
+                # ResFilter._stage_gain_compute (lines 3244, 3249, 3251); all 5
+                # presets use gain_type='enr'. Skip per-frame computation +
+                # assignment in ENR mode to eliminate wasted ops; preserve
+                # wiener/spectral_sub behaviour if gain_type ever changes.
+                _over_sub_live = self.config.res_gain_type != 'enr'
+                if _over_sub_live:
+                    dt_reduction = self.config.res_dt_reduction * dt_indicator
+                    effective_over_sub = max(base_over_sub - dt_reduction, 0.5)
 
                 # Divergence indicator EMA (delegated to FilterConvergenceAnalyzer)
                 self._convergence.update_divergence(self.near_power, self.raw_error_power)
@@ -7414,9 +7419,14 @@ class AEC:
                     if (self.config.arc_t_res_preempt_mode
                             and getattr(self, '_arc_t_cohort_tail_signal', False)):
                         self.res._using_render_based = True
-                        effective_over_sub = effective_over_sub * float(
-                            self.config.arc_t_over_sub_boost)
-                    self.res.over_sub = effective_over_sub
+                        # arc_t_over_sub_boost is part of the dead over_sub chain
+                        # in ENR mode (Arc T S2 H1 closure); v3.16-A `force_render`
+                        # OR-in is the alive path for ENR.
+                        if _over_sub_live:
+                            effective_over_sub = effective_over_sub * float(
+                                self.config.arc_t_over_sub_boost)
+                    if _over_sub_live:
+                        self.res.over_sub = effective_over_sub
 
                     # DT conservative residual scaling: 1.0→0.5 as dt goes 0→0.8
                     dt_residual_scale = 1.0 - 0.5 * float(np.clip(dt_indicator, 0.0, 0.8) / 0.8)
