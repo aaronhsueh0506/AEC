@@ -2313,6 +2313,11 @@ class ResFilter:
         self._stats_last_using_render = False
         self._stats_last_ne_g_floor = 0.0
         self._stats_last_spectral_g_min = 0.0
+        # v3.16 C1c: pre-max captures so audits read pre-floor surface.
+        self._stats_pre_max_spectral_g_min = 0.0
+        self._stats_pre_max_spectral_g_min_max = 0.0
+        self._stats_ne_g_floor_max = 0.0
+        self._stats_ne_g_floor_any_bin_fired = False
         self._stats_last_gain_before_floor = 1.0
         self._stats_last_gain_after_floor = 1.0
         self._stats_last_gain_after_smoothing = 1.0
@@ -2406,6 +2411,11 @@ class ResFilter:
         self._stats_last_using_render = False
         self._stats_last_ne_g_floor = 0.0
         self._stats_last_spectral_g_min = 0.0
+        # v3.16 C1c: pre-max captures so audits read pre-floor surface.
+        self._stats_pre_max_spectral_g_min = 0.0
+        self._stats_pre_max_spectral_g_min_max = 0.0
+        self._stats_ne_g_floor_max = 0.0
+        self._stats_ne_g_floor_any_bin_fired = False
         self._stats_last_gain_before_floor = 1.0
         self._stats_last_gain_after_floor = 1.0
         self._stats_last_gain_after_smoothing = 1.0
@@ -3732,6 +3742,19 @@ class ResFilter:
         ne_g_min_ceil = 10 ** (self.ne_protect_db / 20)
         ne_g_floor = effective_g_min + (ne_g_min_ceil - effective_g_min) * ne_protection
         ne_g_floor = np.maximum(ne_g_floor, effective_g_min)
+        # v3.16 C1c — capture pre-floor spectral_g_min so audits can detect
+        # ne_g_floor binding fires (any-bin) by comparing pre-floor vs ne_g_floor.
+        # The legacy `_stats_last_spectral_g_min` writes the post-max value
+        # below; reading it against ne_g_floor (as v3.15 audit did) is
+        # mathematically False because post-max >= ne_g_floor element-wise.
+        # Computed unconditionally (cheap; needed by audit hook even when
+        # `self._stats is None`).
+        self._stats_pre_max_spectral_g_min = float(np.mean(spectral_g_min))
+        self._stats_pre_max_spectral_g_min_max = float(np.max(spectral_g_min))
+        self._stats_ne_g_floor_max = float(np.max(ne_g_floor))
+        self._stats_ne_g_floor_any_bin_fired = bool(
+            np.any(ne_g_floor > spectral_g_min + 1e-7)
+        )
         spectral_g_min = np.maximum(spectral_g_min, ne_g_floor)
 
         # startup_dt conditions: trigger when DT active + filter not converged
