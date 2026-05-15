@@ -278,6 +278,27 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'arc_g_drift_ratio' not in config_overrides):
         config_overrides['arc_g_drift_ratio'] = float(
             os.environ['AEC_ARC_G_DRIFT_RATIO'])
+    # v3.15 §1.5 Arc T: cohort tail real-time detector + RES preempt (default OFF)
+    for _flag, _key, _is_bool in (
+        ('AEC_ARC_T_COHORT_DETECTOR', 'arc_t_cohort_detector', True),
+        ('AEC_ARC_T_RES_PREEMPT_MODE', 'arc_t_res_preempt_mode', True),
+        ('AEC_ARC_T_INST_ALPHA', 'arc_t_inst_alpha', False),
+        ('AEC_ARC_T_WINDOW_FRAMES', 'arc_t_window_frames', False),
+        ('AEC_ARC_T_THRESHOLD_HI_DB', 'arc_t_threshold_hi_db', False),
+        ('AEC_ARC_T_THRESHOLD_LO_DB', 'arc_t_threshold_lo_db', False),
+        ('AEC_ARC_T_HYSTERESIS_FRAMES', 'arc_t_hysteresis_frames', False),
+        ('AEC_ARC_T_OVER_SUB_BOOST', 'arc_t_over_sub_boost', False),
+    ):
+        if _flag in os.environ and _key not in config_overrides:
+            _v = os.environ[_flag]
+            if _is_bool:
+                config_overrides[_key] = _v.lower() not in ('0', 'false', 'off', 'no')
+            else:
+                # int for window/hysteresis frames; float for alpha/db/boost
+                if _key in ('arc_t_window_frames', 'arc_t_hysteresis_frames'):
+                    config_overrides[_key] = int(_v)
+                else:
+                    config_overrides[_key] = float(_v)
     # State-scale override: comma-separated state=scale pairs, e.g.
     #   "coarse_learning=2.0,refined_usable=1.0"
     if ('AEC_DT_NE_STATE_SCALE' in os.environ
