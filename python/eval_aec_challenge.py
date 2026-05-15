@@ -24,6 +24,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aec import AEC, AecConfig, AecMode
 
 _ENABLE_CNG = False  # global CNG flag, set by --cng CLI arg
+_CASES_LIST = None   # Tier-1 subset stem set; None = full 800-case rendering
+
+
+def _filter_mic_files(mic_files, tag):
+    """Restrict mic_files to stems in _CASES_LIST (no-op when None)."""
+    if _CASES_LIST is None:
+        return mic_files
+    keep = [f for f in mic_files if f[:-len('_mic.wav')] in _CASES_LIST]
+    print(f'[cases-list] {tag}: {len(keep)}/{len(mic_files)} matched', file=sys.stderr)
+    return keep
 
 # Try PESQ
 try:
@@ -249,6 +259,78 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'shadow_state_decoupled' not in config_overrides):
         config_overrides['shadow_state_decoupled'] = (
             os.environ['AEC_SHADOW_DECOUPLED'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.15 §1.2: DT-NE compression fix (default OFF)
+    if ('AEC_DT_NE_COMPRESSION_FIX' in os.environ
+            and 'dt_ne_compression_fix' not in config_overrides):
+        config_overrides['dt_ne_compression_fix'] = (
+            os.environ['AEC_DT_NE_COMPRESSION_FIX'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.15 §1.6 Arc F: per-band Kalman Q (default OFF)
+    if ('AEC_KALMAN_Q_PER_BAND' in os.environ
+            and 'kalman_q_per_band' not in config_overrides):
+        config_overrides['kalman_q_per_band'] = (
+            os.environ['AEC_KALMAN_Q_PER_BAND'].lower() not in ('0', 'false', 'off', 'no'))
+    # Per-band Q scales: comma-separated LF,MF,HF (e.g. "0.5,1.0,2.0")
+    if ('AEC_KALMAN_Q_BAND_SCALES' in os.environ
+            and 'kalman_q_band_scales' not in config_overrides):
+        config_overrides['kalman_q_band_scales'] = tuple(
+            float(x) for x in os.environ['AEC_KALMAN_Q_BAND_SCALES'].split(','))
+    # v3.15 §1.4 Arc M: EPC-gated per-band Q boost (default OFF)
+    if ('AEC_ARC_M_EPC_GATED' in os.environ
+            and 'arc_m_epc_gated' not in config_overrides):
+        config_overrides['arc_m_epc_gated'] = (
+            os.environ['AEC_ARC_M_EPC_GATED'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.15 §1.5b Arc M.v3: T-gated rescue retry of Arc M V1 (default OFF)
+    if ('AEC_ARC_M_T_GATED_ENABLED' in os.environ
+            and 'arc_m_t_gated_enabled' not in config_overrides):
+        config_overrides['arc_m_t_gated_enabled'] = (
+            os.environ['AEC_ARC_M_T_GATED_ENABLED'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.15 §1.4 Arc G: per-band W reset on detected gain-change drift (default OFF)
+    if ('AEC_ARC_G_PER_BAND_W_RESET' in os.environ
+            and 'arc_g_per_band_w_reset' not in config_overrides):
+        config_overrides['arc_g_per_band_w_reset'] = (
+            os.environ['AEC_ARC_G_PER_BAND_W_RESET'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_ARC_G_DRIFT_RATIO' in os.environ
+            and 'arc_g_drift_ratio' not in config_overrides):
+        config_overrides['arc_g_drift_ratio'] = float(
+            os.environ['AEC_ARC_G_DRIFT_RATIO'])
+    # v3.15 §1.5 Arc T: cohort tail real-time detector + RES preempt (default OFF)
+    for _flag, _key, _is_bool in (
+        ('AEC_ARC_T_COHORT_DETECTOR', 'arc_t_cohort_detector', True),
+        ('AEC_ARC_T_RES_PREEMPT_MODE', 'arc_t_res_preempt_mode', True),
+        ('AEC_ARC_T_INST_ALPHA', 'arc_t_inst_alpha', False),
+        ('AEC_ARC_T_WINDOW_FRAMES', 'arc_t_window_frames', False),
+        ('AEC_ARC_T_THRESHOLD_HI_DB', 'arc_t_threshold_hi_db', False),
+        ('AEC_ARC_T_THRESHOLD_LO_DB', 'arc_t_threshold_lo_db', False),
+        ('AEC_ARC_T_HYSTERESIS_FRAMES', 'arc_t_hysteresis_frames', False),
+        ('AEC_ARC_T_OVER_SUB_BOOST', 'arc_t_over_sub_boost', False),
+    ):
+        if _flag in os.environ and _key not in config_overrides:
+            _v = os.environ[_flag]
+            if _is_bool:
+                config_overrides[_key] = _v.lower() not in ('0', 'false', 'off', 'no')
+            else:
+                # int for window/hysteresis frames; float for alpha/db/boost
+                if _key in ('arc_t_window_frames', 'arc_t_hysteresis_frames'):
+                    config_overrides[_key] = int(_v)
+                else:
+                    config_overrides[_key] = float(_v)
+    # State-scale override: comma-separated state=scale pairs, e.g.
+    #   "coarse_learning=2.0,refined_usable=1.0"
+    if ('AEC_DT_NE_STATE_SCALE' in os.environ
+            and 'dt_ne_state_scale' not in config_overrides):
+        _ss = {}
+        for pair in os.environ['AEC_DT_NE_STATE_SCALE'].split(','):
+            k, _, v = pair.partition('=')
+            _ss[k.strip()] = float(v)
+        config_overrides['dt_ne_state_scale'] = _ss
+    if ('AEC_DT_NE_PER_BIN_THRESH' in os.environ
+            and 'dt_ne_per_bin_thresh' not in config_overrides):
+        config_overrides['dt_ne_per_bin_thresh'] = float(
+            os.environ['AEC_DT_NE_PER_BIN_THRESH'])
+    if ('AEC_DT_NE_PER_BIN_SCALE' in os.environ
+            and 'dt_ne_per_bin_scale' not in config_overrides):
+        config_overrides['dt_ne_per_bin_scale'] = float(
+            os.environ['AEC_DT_NE_PER_BIN_SCALE'])
     # P1 Phase 2: conditional HF cap + threshold env vars
     if 'AEC_HF_CAP_CONDITIONAL' in os.environ and 'hf_cap_conditional' not in config_overrides:
         config_overrides['hf_cap_conditional'] = (
@@ -405,7 +487,7 @@ def compute_pesq(ref, deg, sr):
         return None
 
 
-def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, do_old_aec=False):
+def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, do_old_aec=False, chunk_idx=0, n_chunks=1):
     """Evaluate farend_singletalk with ERLE."""
     sc_dir = os.path.join(base_dir, 'farend_singletalk')
     if not os.path.isdir(sc_dir):
@@ -415,6 +497,9 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
     # Find all mic files (including _with_movement_ variants)
     mic_files = sorted([f for f in os.listdir(sc_dir)
                         if '_farend_singletalk' in f and f.endswith('_mic.wav')])
+    mic_files = _filter_mic_files(mic_files, 'farend_singletalk')
+    if n_chunks > 1:
+        mic_files = mic_files[chunk_idx::n_chunks]
     if not mic_files:
         print("No farend_singletalk files found")
         return
@@ -521,7 +606,7 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
     print(summary)
 
 
-def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, do_old_aec=False):
+def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, do_old_aec=False, chunk_idx=0, n_chunks=1):
     """Evaluate nearend_singletalk with SDR (near-end preservation)."""
     sc_dir = os.path.join(base_dir, 'nearend_singletalk')
     if not os.path.isdir(sc_dir):
@@ -530,6 +615,9 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
 
     mic_files = sorted([f for f in os.listdir(sc_dir)
                         if '_nearend_singletalk' in f and f.endswith('_mic.wav')])
+    mic_files = _filter_mic_files(mic_files, 'nearend_singletalk')
+    if n_chunks > 1:
+        mic_files = mic_files[chunk_idx::n_chunks]
     if not mic_files:
         print("No nearend_singletalk files found")
         return
@@ -636,7 +724,7 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
     print(summary)
 
 
-def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, do_old_aec=False):
+def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, do_old_aec=False, chunk_idx=0, n_chunks=1):
     """Evaluate doubletalk with ERLE (real recordings from clean test set)."""
     sc_dir = os.path.join(base_dir, 'doubletalk')
     if not os.path.isdir(sc_dir):
@@ -646,6 +734,9 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
     # Find all mic files (including _with_movement_ variants)
     mic_files = sorted([f for f in os.listdir(sc_dir)
                         if '_doubletalk' in f and f.endswith('_mic.wav')])
+    mic_files = _filter_mic_files(mic_files, 'doubletalk')
+    if n_chunks > 1:
+        mic_files = mic_files[chunk_idx::n_chunks]
     if not mic_files:
         print("No doubletalk files found")
         return
@@ -762,35 +853,50 @@ def _run_eval_captured(func, *args, **kwargs):
 
 def _run_scenario(scenario_args):
     """Worker function for parallel execution (must be top-level for pickling)."""
-    func_name, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, enable_cng = scenario_args
-    # Propagate CNG flag to subprocess (global is lost across ProcessPoolExecutor fork)
-    global _ENABLE_CNG
+    func_name, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, enable_cng, cases_list, chunk_idx, n_chunks = scenario_args
+    # Propagate flags to subprocess (globals are lost across ProcessPoolExecutor fork)
+    global _ENABLE_CNG, _CASES_LIST
     _ENABLE_CNG = enable_cng
+    _CASES_LIST = cases_list
     func = {'fs': eval_farend_singletalk,
             'ne': eval_nearend_singletalk,
             'dt': eval_doubletalk}[func_name]
-    return func_name, _run_eval_captured(func, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=preset, do_old_aec=do_old_aec)
+    return (func_name, chunk_idx,
+            _run_eval_captured(func, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir,
+                               preset=preset, do_old_aec=do_old_aec,
+                               chunk_idx=chunk_idx, n_chunks=n_chunks))
 
 
-def run_scenarios(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, parallel=False, do_old_aec=False):
-    """Run all three scenarios, optionally in parallel."""
-    scenarios = [
-        ('fs', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG),
-        ('ne', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG),
-        ('dt', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG),
-    ]
+def run_scenarios(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, parallel=False, do_old_aec=False, workers=6):
+    """Run all three scenarios, optionally in parallel.
+
+    `workers` controls per-case parallelism: when parallel=True, scenarios
+    are sliced into n_chunks = max(1, workers // 3) chunks each, giving
+    `n_chunks * 3` worker processes. Default workers=6 → 2 chunks per
+    scenario → 6 concurrent processes (M-series 6-P-core throughput).
+    """
+    n_chunks = max(1, workers // 3)
+    scenarios = []
+    for sc in ('fs', 'ne', 'dt'):
+        for ck in range(n_chunks):
+            scenarios.append((sc, base_dir, fl, do_speex, do_aec3, do_aec3_linear,
+                              out_dir, preset, do_old_aec, _ENABLE_CNG, _CASES_LIST,
+                              ck, n_chunks))
 
     if parallel:
         results = {}
-        with ProcessPoolExecutor(max_workers=3) as pool:
-            futures = {pool.submit(_run_scenario, s): s[0] for s in scenarios}
+        max_w = max(workers, 3)
+        with ProcessPoolExecutor(max_workers=max_w) as pool:
+            futures = {pool.submit(_run_scenario, s): (s[0], s[12]) for s in scenarios}
             for future in as_completed(futures):
-                name, output = future.result()
-                results[name] = output
-        # Print in order: fs → ne → dt
+                name, ck, output = future.result()
+                results.setdefault(name, {})[ck] = output
+        # Print in order: fs → ne → dt, chunk 0 → chunk N-1
         for key in ['fs', 'ne', 'dt']:
-            if key in results and results[key]:
-                print(results[key], end='')
+            if key in results:
+                for ck in sorted(results[key].keys()):
+                    if results[key][ck]:
+                        print(results[key][ck], end='')
     else:
         eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=preset, do_old_aec=do_old_aec)
         eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=preset, do_old_aec=do_old_aec)
@@ -815,10 +921,25 @@ def main():
     parser.add_argument('--gain-type', choices=['wiener', 'enr', 'spectral_sub'],
                         default=None, help='Override RES gain type')
     parser.add_argument('--cng', action='store_true', help='Enable comfort noise generation')
+    parser.add_argument('--cases-list', default=None,
+                        help='Stem-list file (one stem per line, # comments). '
+                             'When present, restricts rendering to listed cases; '
+                             'omitted = full 800-case rendering.')
+    parser.add_argument('--workers', type=int, default=6,
+                        help='Number of parallel worker processes (default 6). '
+                             'Each scenario is sliced into max(1, workers//3) chunks. '
+                             'M-series CPU recommendation: 6 (≈ P-core count) for '
+                             'best wall-time without thermal throttling.')
     args = parser.parse_args()
 
-    global _ENABLE_CNG
+    global _ENABLE_CNG, _CASES_LIST
     _ENABLE_CNG = args.cng
+    if args.cases_list:
+        with open(args.cases_list) as fh:
+            _CASES_LIST = {ln.strip() for ln in fh
+                           if ln.strip() and not ln.lstrip().startswith('#')}
+        print(f'[cases-list] loaded {len(_CASES_LIST)} stems from {args.cases_list}',
+              file=sys.stderr)
 
     base_dir = os.path.abspath(args.dataset_dir)
     out_dir = args.output_dir or os.path.join(base_dir, 'output')
@@ -851,11 +972,11 @@ def main():
             print(f"  PRESET: {p.value.upper()}")
             print(f"{'#'*60}")
             run_scenarios(base_dir, args.filter, do_speex, do_aec3, do_aec3_linear, preset_dir,
-                          preset=p, parallel=args.parallel, do_old_aec=do_old_aec)
+                          preset=p, parallel=args.parallel, do_old_aec=do_old_aec, workers=args.workers)
     else:
         preset = AecPreset(args.preset) if args.preset else None
         run_scenarios(base_dir, args.filter, do_speex, do_aec3, do_aec3_linear, out_dir,
-                      preset=preset, parallel=args.parallel, do_old_aec=do_old_aec)
+                      preset=preset, parallel=args.parallel, do_old_aec=do_old_aec, workers=args.workers)
 
     print(f"\nOutput saved to {out_dir}")
 

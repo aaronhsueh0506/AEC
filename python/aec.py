@@ -15,12 +15,12 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.14.0-s-orth-a"
+__version__ = "3.15.0"
 
 import os
 import numpy as np
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 from enum import Enum
 import argparse
@@ -134,6 +134,11 @@ class AecStats:
     res_using_render: bool   # True = render-based echo estimate active
     echo_psd_mean_db: float  # Mean residual echo PSD estimate (dB)
     error_psd_mean_db: float # Mean error PSD (dB)
+
+    # v3.15 §1.5 Arc T — cohort tail real-time detector signal (default
+    # False when arc_t_cohort_detector OFF). Placed at end of dataclass
+    # to satisfy "default-args-after-non-default" rule.
+    cohort_tail_T: bool = False
 
 
 @dataclass
@@ -674,15 +679,25 @@ class AecConfig:
     # S-orth.A — shadow state decoupling (v3.14 Arc S-orth Sprint A).
     # Motivation: Riccati equation forces dual PBFDKF shadows to track each
     # other (Switchboard AEC3 2026 deep dive). Q×3.5 damps but does not
-    # break the coupling — shadow _error_psd, R, _copy_err_baseline, and
-    # _simple_mu_holdoff all follow the same signal path, making shadow a
-    # "damped echo of main" rather than orthogonal evidence.
+    # break the coupling — shadow _error_psd and R follow the same signal
+    # path as main's, making shadow a "damped echo of main" rather than
+    # orthogonal evidence.
     #
-    # Full decoupling gives shadow its own:
+    # Shipped decoupling (v3.14 Arc S-orth.A):
     #   _shadow_error_psd       per-bin EMA (shadow's own observation of error PSD)
     #   _shadow_R               shadow's Kalman R (written into shadow_filter.R each frame)
+    #
+    # RESERVED (declared but not wired — future arc scope, not v3.15):
     #   _shadow_copy_err_baseline shadow's view of "best error in stable FS"
-    #   _shadow_mu_holdoff      shadow's own mu-holdoff counter (independent of main)
+    #                           — would require PathChangeRegimeHandler redesign
+    #                           to track main and shadow baselines separately
+    #                           (currently min(main_err, shadow_err) feeds a
+    #                           single _copy_err_baseline).
+    #   _shadow_mu_holdoff      shadow's own mu-holdoff counter — would require
+    #                           a parallel _shadow_simple_mu_ratio mechanism
+    #                           gating shadow's mu independently from main.
+    # B5 (v3.15 §1.0.S2, 2026-05-14): doc aligned with actual implementation;
+    # init/reset for _shadow_mu_holdoff kept harmless for future wiring.
     #
     # Safety regularization: Option B (quiescent re-sync). When the filter is
     # in steady-state FS (far_power > 1e-4 AND filter_state=='refined_usable'
@@ -774,6 +789,191 @@ class AecConfig:
     # preserve the legacy t:s ratio.
     enr_t_ne_per_band: tuple = (2.0, 1.5, 1.0)
     enr_s_ne_per_band: tuple = (3.33, 2.5, 1.67)
+
+    # v3.15 §1.6 — Arc F: per-band Kalman Q schedule (default OFF, byte-equal).
+    #
+    # Motivation: §1.1 audit found worst-DT cases stuck in `coarse_learning`
+    # 40-99% — Kalman filter does not converge fast enough.  Echo paths
+    # change MUCH faster in HF (room reverb, mic placement, gain shifts)
+    # than LF (acoustic coupling stable).  Current uniform Q (1.5e-3 across
+    # all bins on BALANCED) treats LF/HF identically, leaving HF
+    # convergence under-driven.
+    #
+    # Mechanism: scale `kalman_q_high` and `kalman_q_low` per band:
+    #   LF  (0-1 kHz):   slower (e.g. ×0.5)  → keep stable
+    #   MF  (1-4 kHz):   baseline (×1.0)
+    #   HF  (4-8 kHz):   faster (e.g. ×2.0)  → faster re-lock
+    # Band boundaries match Arc P / Arc R (1k / 4k splits).
+    #
+    # Flag-OFF default: byte-equal to v3.14.  When ON: Q_high / Q_low arrays
+    # tilted at AEC.__init__ time; subsequent _update_weights paths
+    # (Q modulation, far-activity gating, P-floor coupled to Q_high) all
+    # benefit from the tilted profile.
+    #
+    # §0.6 asymmetric metric rule (linear-filter arc):
+    #   nores Δdeg < 0 → automatic FAIL (NE damage permanent)
+    #   nores Δecho < 0 → SOFT, allowed if 800-case full-pipeline
+    #     AECMOS Δecho ≥ -0.020 (RES recovers)
+    #
+    # Hard bar: nores listen on cohort tail + 5 movement + 5 transient-
+    # onset cases shows audible HF re-lock improvement on ≥ 2 channels;
+    # 800-case full-pipeline AECMOS DT Δdeg ≥ -0.005, FS Δecho ≥ -0.020.
+    kalman_q_per_band: bool = False
+    kalman_q_band_scales: tuple = (0.5, 1.0, 2.0)  # (LF, MF, HF) on Q_high/Q_low
+
+    # v3.15 §1.4 Arc M — movement-aware adaptive Q boost (default OFF).
+    #
+    # Motivation: Arc F (uniform-time per-band Q tilt) closed CANNOT SHIP
+    # because steady-state HF Q boost violates cohort tail (-0.067 Δecho
+    # on qNvSMyU vs -0.05 bar) — cohort tail is HF-stability-sensitive.
+    # The canonical fix is to apply per-band Q tilt ONLY during transient
+    # adaptation events (EPC fires, movement detector triggers), reverting
+    # to uniform baseline Q at steady state.
+    #
+    # Mechanism (Arc M v1, EPC-gated): when EPC detector raises Q via
+    # `Q = Q_high.copy()` (existing infrastructure at line ~6035 / 6305 /
+    # 6631 / 6659), apply Arc F's per-band scale on top — only for the
+    # duration of `_p_max_override_frames` (30 frame countdown).  After
+    # countdown, Q decays back via the per-frame `q_scale` modulation that
+    # uses `mu_mean`.  Steady-state Q stays uniform (baseline) — cohort
+    # tail safe.
+    #
+    # Requires: `kalman_q_per_band=True` and `kalman_q_band_scales` set.
+    # When `arc_m_epc_gated=True`, the per-band tilt at AEC.__init__ time
+    # is REPLACED with this gated variant — Q_high is left uniform (cohort
+    # tail safe), but the per-band tilt is applied transiently by the EPC
+    # rising-edge handlers and decays back via q_scale.
+    #
+    # §0.6 metric: linear-filter primary (nores listen).  HARD: nores Δdeg
+    # ≥ 0; SOFT: nores Δecho ≥ -0.020 (RES rescue).  HARD: full-pipeline
+    # AECMOS DT Δdeg ≥ -0.005, FS Δecho ≥ -0.020, cohort tail ≥ -0.05.
+    arc_m_epc_gated: bool = False
+
+    # v3.15 §1.5b Arc M.v3 — T-gated rescue retry (default OFF, additive on
+    # top of arc_m_epc_gated). When BOTH this flag AND arc_t_cohort_detector
+    # are ON, every _arc_m_q_boost(filt) invocation is wrapped with a gate:
+    #   if not (arc_m_t_gated_enabled AND _arc_t_cohort_tail_signal):
+    #       _arc_m_q_boost(filt)
+    # so the per-band Q tilt is suppressed during cohort-tail-signal-asserted
+    # windows. Hypothesis: V1's +0.023 DT_movement Δdeg win came from
+    # non-cohort-tail EPC windows; V1's FS_movement / cohort tail damage
+    # came from cohort-tail EPC windows. T-gating excludes the catastrophe
+    # windows while preserving the convergence-recovery wins.
+    #
+    # Reads `self._arc_t_cohort_tail_signal` (Arc T S1 detector signal).
+    # Default-OFF (Arc T flag OFF) holds the field at False every frame,
+    # so this gate is byte-equal no-op until BOTH flags ON.
+    arc_m_t_gated_enabled: bool = False
+
+    # v3.15 §1.4 Arc G — per-band W reset on detected gain-change drift
+    # (default OFF). Mechanism orthogonal to Arc F/M Q-modification trade-off:
+    # Arc G targets sudden mic-gain or path discontinuities by zeroing only
+    # the affected band's filter weights, leaving steady-state stability of
+    # the unaffected bands intact.
+    #
+    # Detector: maintain a fast per-band ERL EMA (alpha = arc_g_fast_alpha)
+    # alongside Arc P's slow per-band ERL.  When ratio max/min > arc_g_drift_ratio
+    # on band b AND PathChangeRegimeHandler is NOT currently asserting EPC
+    # (avoids double-handling cohort tail catastrophe; PathChangeRegimeHandler
+    # is load-bearing on cohort tail per `feedback_aec_code_review_accuracy`),
+    # zero W[:, bin_range_for_band_b] and cooldown the band for
+    # arc_g_cooldown_frames frames.
+    #
+    # Requires `f3_1_per_band_erl_adaptive=True` (consumes Arc P infrastructure).
+    #
+    # §0.6 metric: linear-filter primary (nores listen on 5 gain-change cases).
+    # HARD: cohort tail Δecho ≥ -0.05 (must NOT damage catastrophe defence);
+    # full-pipeline DT Δdeg ≥ -0.005, FS Δecho ≥ -0.020.
+    arc_g_per_band_w_reset: bool = False
+    arc_g_fast_alpha: float = 0.85
+    arc_g_drift_ratio: float = 4.0
+    arc_g_cooldown_frames: int = 100
+
+    # v3.15 §1.5 Arc T — cohort tail real-time detector (default OFF).
+    # Computes a per-frame ERL_decile_std proxy = max-over-bands of
+    # 10·log10(rolling_max / rolling_min) on EMA-smoothed per-band proxy
+    # ERL = mean(res.error_psd[band]) / mean(_long_window_far_psd[band]).
+    # Asserts cohort_tail_T when proxy >= arc_t_threshold_hi_db; releases
+    # via hysteresis at arc_t_threshold_lo_db over arc_t_hysteresis_frames.
+    # Source signal is UN-GATED on _filter_converged because the canonical
+    # cohort tail case (qNvSMyU) NEVER reaches refined_usable, so the
+    # converged-only per-band ERL block is silent there.
+    #
+    # Dual role:
+    #   1. RES preempt — when arc_t_res_preempt_mode=True AND cohort_tail_T
+    #      asserts, force render-based mode + boost over_sub by
+    #      arc_t_over_sub_boost (H1+H2 stack per design doc §2.3).
+    #   2. §1.5b Arc M.v3 upstream gate — _arc_m_q_boost reads
+    #      self._arc_t_cohort_tail_signal and skips per-band Q boost during
+    #      the asserted window (rescues Arc M V1 from cohort tail wall).
+    #
+    # §0.6 metric channel: HYBRID (AECMOS primary, nores secondary).
+    # Hard bar: cohort tail Δecho ≥ +0.030, FP rate ≤ 5%.
+    arc_t_cohort_detector: bool = False
+    arc_t_res_preempt_mode: bool = False
+    arc_t_inst_alpha: float = 0.85
+    arc_t_window_frames: int = 64
+    # T_HI calibrated 2026-05-15 from 8-case S1 validation: TAIL min max_db
+    # = 19.15 (Hp5g1asacUCt5rJVLO1FuQ_doubletalk_with_movement); CTRL DT
+    # mis-adaptation max = 18.01 (NN7yhG2XTEqq46X8X0yLfA_doubletalk).
+    # 18.5 dB is the optimal separator (~0.5 dB margin both sides).
+    arc_t_threshold_hi_db: float = 18.5
+    # T_LO sets hysteresis hold band; widened from 10 → 13 to reduce long-tail
+    # holds on legitimate post-catastrophe-recovery frames.
+    arc_t_threshold_lo_db: float = 13.0
+    arc_t_hysteresis_frames: int = 200
+    arc_t_over_sub_boost: float = 1.3
+
+    # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal flag-OFF).
+    #
+    # Motivation: §1.1 audit on 25 worst-DT cases (by Δdeg vs v3.10.5
+    # pre-E2) found that worst-DT cases spend 40-99% of frames in
+    # `coarse_learning` state (filter never converges), so the linear-
+    # filter `residual_echo_psd` is INFLATED throughout the case. The
+    # ENR gate `enr = residual_echo_psd / nearend_est` therefore over-fires
+    # and softgate stage S0 outputs voice-band mean gain of 0.254
+    # (≈ -11.9 dB) on NE-evidence frames. F3.1-v3 mic-excess
+    # (`dt_per_bin`) fires correctly at 1.0 on these frames but is
+    # additive evidence that cannot override the inflated-residual ENR.
+    #
+    # Two complementary mechanisms (both gated by `dt_ne_compression_fix`):
+    #
+    # (a) Per-state ENR scalar:
+    #     Multiply enr_t_ne / enr_s_ne by `_state_scale` based on the
+    #     internal P3f filter_state. `refined_usable` is FORCED to 1.0
+    #     (byte-equal to v3.13.x BALANCED steady path). Pre-convergence
+    #     states (idle/startup/coarse_learning/diverged) get a
+    #     larger scale to relax the gate when residual_echo_psd is known
+    #     to be inflated. `suspicious_dt` stays at 1.0 (already protected
+    #     by upstream DTD).
+    #
+    # (b) Per-bin dt_per_bin override:
+    #     On bins where `dt_per_bin > dt_ne_per_bin_thresh` (per-bin
+    #     mic-excess evidence says "strong NE"), additionally multiply
+    #     enr_t_ne / enr_s_ne by `dt_ne_per_bin_scale`. This surgical
+    #     override preserves NE syllables on bins where mic-excess is
+    #     decisive, regardless of state.
+    #
+    # Flag-OFF default: byte-equal to v3.14 BALANCED. ON in §1.2.S4
+    # 800-case A/B + listen verify; ship target = DT bucket Δdeg ≥
+    # +0.020 dB (40% of E2 Path 3 debt), cohort tail Δecho ≥ -0.05,
+    # FS Δecho ≥ -0.02.
+    dt_ne_compression_fix: bool = False
+    # Multiplicative scale on enr_t_ne / enr_s_ne per state. `refined_usable`
+    # MUST be 1.0 to preserve steady-state byte-equal with v3.13 BALANCED.
+    dt_ne_state_scale: dict = field(default_factory=lambda: {
+        'idle':            2.0,
+        'startup':         2.0,
+        'coarse_learning': 2.0,
+        'refined_usable':  1.0,
+        'diverged':        2.0,
+        'suspicious_dt':   1.0,
+    })
+    # Per-bin threshold for the dt_per_bin override gate.
+    dt_ne_per_bin_thresh: float = 0.5
+    # Multiplicative scale applied to enr_t_ne / enr_s_ne on bins where
+    # dt_per_bin > dt_ne_per_bin_thresh.  Stacks with state_scale.
+    dt_ne_per_bin_scale: float = 2.0
 
     # Mode
     mode: AecMode = AecMode.PBFDKF
@@ -905,8 +1105,10 @@ class AecConfig:
                 mu_holdoff_no_reset=True,
                 # v3.11 B5: symmetric Yang 2017 R-reset on shadow filter (Phase 1 Sprint 1-2 PASS)
                 shadow_r_reset_enabled=True,
-                # v3.14 S-orth.A: decouple shadow's Kalman state from main's
-                # (_error_psd / R / _copy_err_baseline / mu_holdoff / internal counters).
+                # v3.14 S-orth.A: decouple shadow's Kalman _error_psd + R
+                # from main's (B5/§1.0.S2: only these two are actually wired
+                # in v3.14; _copy_err_baseline / mu_holdoff remain coupled
+                # and are reserved for a future shadow-decoupling arc).
                 # 800-case GREEN PASS (commit 8089974): all 5 buckets within bar,
                 # cohort tail qNvSMyU Δecho +0.0036, state correlation drops
                 # main vs shadow 0.99 → 0.47 on DT_static (target 0.5-0.7 hit).
@@ -939,6 +1141,14 @@ class AecConfig:
                 # Cross-coupling audited disjoint from B5/F-E5/diverged_reset.
                 f_e1_enabled=True,
                 f_delaytrack_enabled=True,
+                # v3.15 §10.S0b: cohort tail real-time detector promoted to
+                # default ON. Signal-only substrate — RES preempt path
+                # (arc_t_res_preempt_mode) and arc_m gate (arc_m_t_gated_enabled)
+                # both stay default OFF, so detector ON is byte-equal on audio
+                # output (only AecStats.cohort_tail_T becomes informative).
+                # Enables §1.7 RES audit and v3.16 Phase 3-4 candidates to
+                # consume the signal without per-bench env-flag flipping.
+                arc_t_cohort_detector=True,
             )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
@@ -1932,7 +2142,11 @@ class ResFilter:
                  cap2_fs_loosen: bool = False,
                  per_band_enr: bool = False,
                  enr_t_ne_per_band: tuple = (1.5, 1.5, 1.5),
-                 enr_s_ne_per_band: tuple = (2.5, 2.5, 2.5)):
+                 enr_s_ne_per_band: tuple = (2.5, 2.5, 2.5),
+                 dt_ne_compression_fix: bool = False,
+                 dt_ne_state_scale: dict = None,
+                 dt_ne_per_bin_thresh: float = 0.5,
+                 dt_ne_per_bin_scale: float = 2.0):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -1949,6 +2163,18 @@ class ResFilter:
         self._per_band_enr = per_band_enr
         self._enr_t_ne_per_band_cfg = tuple(enr_t_ne_per_band)
         self._enr_s_ne_per_band_cfg = tuple(enr_s_ne_per_band)
+        # v3.15 §1.2 — DT-NE compression fix flags (default OFF byte-equal).
+        self._dt_ne_compression_fix = dt_ne_compression_fix
+        self._dt_ne_state_scale = dt_ne_state_scale if dt_ne_state_scale is not None else {
+            'idle':            2.0,
+            'startup':         2.0,
+            'coarse_learning': 2.0,
+            'refined_usable':  1.0,
+            'diverged':        2.0,
+            'suspicious_dt':   1.0,
+        }
+        self._dt_ne_per_bin_thresh = float(dt_ne_per_bin_thresh)
+        self._dt_ne_per_bin_scale = float(dt_ne_per_bin_scale)
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -2929,6 +3155,31 @@ class ResFilter:
                 dt_enr_relax = 1.0 + (effective_dt - 0.4) / 0.6 * 0.5
                 enr_t_ne = enr_t_ne * dt_enr_relax
                 enr_s_ne = enr_s_ne * dt_enr_relax
+            # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal).
+            # Apply per-state scale then per-bin dt_per_bin override to
+            # enr_t_ne / enr_s_ne.  refined_usable state-scale must be 1.0
+            # to preserve byte-equal with v3.13 steady BALANCED path.
+            if self._dt_ne_compression_fix:
+                _state_scale = self._dt_ne_state_scale.get(
+                    filter_state, 1.0)
+                if _state_scale != 1.0:
+                    enr_t_ne = enr_t_ne * _state_scale
+                    enr_s_ne = enr_s_ne * _state_scale
+                _bin_scale = self._dt_ne_per_bin_scale
+                if _bin_scale != 1.0:
+                    _mask = (dt_per_bin > self._dt_ne_per_bin_thresh)
+                    if np.any(_mask):
+                        # Broadcast scalar enr_t_ne / enr_s_ne to per-bin if needed.
+                        if np.ndim(enr_t_ne) == 0:
+                            enr_t_ne = np.full_like(dt_per_bin, float(enr_t_ne))
+                        else:
+                            enr_t_ne = np.asarray(enr_t_ne, dtype=np.float32).copy()
+                        if np.ndim(enr_s_ne) == 0:
+                            enr_s_ne = np.full_like(dt_per_bin, float(enr_s_ne))
+                        else:
+                            enr_s_ne = np.asarray(enr_s_ne, dtype=np.float32).copy()
+                        enr_t_ne[_mask] = enr_t_ne[_mask] * _bin_scale
+                        enr_s_ne[_mask] = enr_s_ne[_mask] * _bin_scale
             enr_t = ne_confidence * enr_t_ne + (1 - ne_confidence) * enr_t_fs
             enr_s = ne_confidence * enr_s_ne + (1 - ne_confidence) * enr_s_fs
             min_gate_width = 0.2
@@ -5004,6 +5255,28 @@ class AEC:
     # Used by _maybe_mark_diverged() to skip mark_diverged calls per-source.
     _epc_no_reset_sources: frozenset = frozenset()
 
+    def _arc_m_q_boost(self, filt) -> None:
+        """v3.15 §1.4 Arc M: set Q = Q_high.copy(), optionally per-band-tilted.
+
+        When Arc M is enabled (`arc_m_epc_gated=True` in cfg + `kalman_q_per_band`
+        also True so the band scale was stored), the EPC rising-edge Q
+        boost gets a per-band scale applied to the freshly-copied Q array.
+        After `_p_max_override_frames` countdown, q_scale modulation in
+        `_update_weights` decays Q back toward baseline behavior — but Q
+        itself stays at the tilted value until the next time something
+        explicitly resets it.
+
+        When the flag is OFF or `_arc_m_band_scale` was never stored,
+        behaviour is identical to legacy `filt.Q = filt.Q_high.copy()`
+        (byte-equal).
+        """
+        if not hasattr(filt, 'Q_high'):
+            return
+        filt.Q = filt.Q_high.copy()
+        _scale = getattr(filt, '_arc_m_band_scale', None)
+        if _scale is not None:
+            filt.Q = filt.Q * _scale
+
     def _maybe_mark_diverged(self, source: str) -> None:
         if source not in self._epc_no_reset_sources:
             self._convergence.mark_diverged()
@@ -5175,6 +5448,31 @@ class AEC:
                 self.filter.Q_high[:] = self.config.kalman_q_high
                 self.filter.Q_low[:]  = self.config.kalman_q_low
                 self.filter.Q[:] = self.config.kalman_q_high
+                # v3.15 §1.6 Arc F: per-band Q schedule (default OFF).
+                # Tilt Q_high/Q_low across LF/MF/HF bands using same band
+                # boundaries (1k / 4k Hz) as Arc P / Arc R.  When OFF, the
+                # uniform fill above stands → byte-equal to v3.14.
+                if self.config.kalman_q_per_band:
+                    _freq_res = self.config.sample_rate / (2 * (self.filter.n_freqs - 1))
+                    _b1k = max(1, min(int(round(1000.0 / _freq_res)),
+                                       self.filter.n_freqs - 2))
+                    _b4k = max(_b1k + 1, min(int(round(4000.0 / _freq_res)),
+                                              self.filter.n_freqs - 1))
+                    _lf, _mf, _hf = self.config.kalman_q_band_scales
+                    _scale = np.ones(self.filter.n_freqs, dtype=np.float32)
+                    _scale[:_b1k] = float(_lf)
+                    _scale[_b1k:_b4k] = float(_mf)
+                    _scale[_b4k:] = float(_hf)
+                    if self.config.arc_m_epc_gated:
+                        # Arc M: keep baseline Q uniform (cohort tail safe);
+                        # store the per-band scale for transient application
+                        # at EPC rising edges. Default Q_high stays uniform.
+                        self.filter._arc_m_band_scale = _scale
+                    else:
+                        # Arc F (standalone, time-invariant): apply tilt now.
+                        self.filter.Q_high *= _scale
+                        self.filter.Q_low  *= _scale
+                        self.filter.Q[:] = self.filter.Q_high
                 # P53 Step 0: enable innovation-audit hook from config.
                 self.filter._enable_p53_trace = bool(
                     getattr(self.config, 'trace_p53_innovation', False))
@@ -5321,6 +5619,10 @@ class AEC:
                 per_band_enr=self.config.res_per_band_enr,
                 enr_t_ne_per_band=self.config.enr_t_ne_per_band,
                 enr_s_ne_per_band=self.config.enr_s_ne_per_band,
+                dt_ne_compression_fix=self.config.dt_ne_compression_fix,
+                dt_ne_state_scale=self.config.dt_ne_state_scale,
+                dt_ne_per_bin_thresh=self.config.dt_ne_per_bin_thresh,
+                dt_ne_per_bin_scale=self.config.dt_ne_per_bin_scale,
             )
         else:
             self.res = None
@@ -5367,6 +5669,36 @@ class AEC:
         # Initialised to the same 0.1 as scalar _erl_estimate so the first
         # few frames before any update gate fires produce reasonable values.
         self._per_band_erl = np.array([0.1, 0.1, 0.1], dtype=np.float64)
+        # v3.15 §1.4 Arc G — fast per-band ERL EMA for drift detection
+        # (default-OFF; only updated/consumed when arc_g_per_band_w_reset=True).
+        self._per_band_erl_fast = np.array([0.1, 0.1, 0.1], dtype=np.float64)
+        # Per-band cooldown counter (frames remaining where reset is suppressed
+        # after a fire on that band).
+        self._arc_g_cooldown = np.zeros(3, dtype=np.int32)
+        # Diagnostic counter — total Arc G fires per band over the stream.
+        self._arc_g_fire_count = np.zeros(3, dtype=np.int64)
+        # v3.15 §1.5 Arc T — cohort tail real-time detector state.
+        # All fields stay at init until arc_t_cohort_detector=True; default
+        # OFF byte-equal sanity preserved by the outer flag gate at the
+        # proxy compute block (after the per-band ERL update loop).
+        # _W is sized at init time from arc_t_window_frames so 3 ring buffers
+        # can be allocated lazily — we size them here using a default to keep
+        # __init__ simple; size matches config.arc_t_window_frames.
+        _arc_t_W = int(self.config.arc_t_window_frames)
+        self._arc_t_inst_pb_smooth = np.array([0.1, 0.1, 0.1], dtype=np.float64)
+        self._arc_t_window_max = np.array([1e-10, 1e-10, 1e-10], dtype=np.float64)
+        self._arc_t_window_min = np.array([1e10, 1e10, 1e10], dtype=np.float64)
+        self._arc_t_window_buf = [
+            deque(maxlen=_arc_t_W),
+            deque(maxlen=_arc_t_W),
+            deque(maxlen=_arc_t_W),
+        ]
+        self._arc_t_cohort_tail_signal = False
+        self._arc_t_hys_remaining = 0
+        self._arc_t_proxy_db_last = 0.0
+        # Cumulative diagnostic; only cleared by full AEC.reset(). Mirrors
+        # Arc G's _arc_g_fire_count diagnostic surface.
+        self._arc_t_fire_count = 0
         # Double-talk analyzer (owns _dt_from_energy / _dt_from_shadow / _shadow_advantage)
         self._dt_analyzer = DoubleTalkAnalyzer(self.config)
 
@@ -5396,7 +5728,16 @@ class AEC:
         # B6 — previous-frame filter_state cache for state-aware shadow_mu.
         # Filter state classifier runs at end of process(); shadow µ schedule
         # at start needs the previous frame's value.
-        self._prev_filter_state = 'idle'
+        #
+        # NOTE (v3.15 §B6, 2026-05-15): `_prev_filter_state` is the
+        # INTERNAL P3f-string state machine (values: 'idle', 'startup',
+        # 'diverged', 'suspicious_dt', 'refined_usable', 'coarse_learning').
+        # It is distinct from the PUBLIC `AecFilterState` enum (which
+        # has values like CONVERGED / WARMUP / EPC_RECOVERY) returned by
+        # `get_filter_state()`.  The two state systems serve different
+        # consumers — see B2 docblock at AecStats.filter_state and the
+        # B4 fix at aec.py:6361 for the load-bearing distinction.
+        self._prev_filter_state: str = 'idle'
         # v3.13 E4.S3 — SubtractiveNLP detector (audit-only).
         # Per docs/v3_13_e4_s2_design_lock.md. Outputs nl_confidence per
         # hop into self._diag; does NOT modify output. Pure observer.
@@ -5699,6 +6040,17 @@ class AEC:
         self._erl_estimate = 0.1
         # v3.14 Arc-P P.S2: reset per-band ERL EMA to initial conservative value.
         self._per_band_erl[:] = 0.1
+        # v3.15 §1.5 Arc T — clear detector state (full reset; cumulative
+        # _arc_t_fire_count IS cleared here per the AEC.reset() contract).
+        self._arc_t_inst_pb_smooth[:] = 0.1
+        self._arc_t_window_max[:] = 1e-10
+        self._arc_t_window_min[:] = 1e10
+        for _q in self._arc_t_window_buf:
+            _q.clear()
+        self._arc_t_cohort_tail_signal = False
+        self._arc_t_hys_remaining = 0
+        self._arc_t_proxy_db_last = 0.0
+        self._arc_t_fire_count = 0
 
     def _reset_filter_derived_state(self, reason: str = 'plateau',
                                      preserve_render_ema: bool = True) -> None:
@@ -5796,6 +6148,18 @@ class AEC:
         # v3.14 Arc-P P.S2: per-band ERL is filter-output-derived (echo_spec /
         # far_spec from PBFDKF), so reset it together with scalar _erl_estimate.
         self._per_band_erl[:] = 0.1
+        # v3.15 §1.5 Arc T — proxy state is filter-output-derived (reads
+        # res.error_psd which is filter-output-derived); reset alongside
+        # per-band ERL.  Cumulative fire counter is PRESERVED on partial
+        # reset (only AEC.reset() clears it).
+        self._arc_t_inst_pb_smooth[:] = 0.1
+        self._arc_t_window_max[:] = 1e-10
+        self._arc_t_window_min[:] = 1e10
+        for _q in self._arc_t_window_buf:
+            _q.clear()
+        self._arc_t_cohort_tail_signal = False
+        self._arc_t_hys_remaining = 0
+        self._arc_t_proxy_db_last = 0.0
         self._epc_render_forced_remaining = 0
         self._dt_analyzer.reset()
         self._stat_dt_hangover = 0
@@ -5866,7 +6230,9 @@ class AEC:
         for filt in [self.filter, self.shadow_filter]:
             if filt is not None and hasattr(filt, 'Q'):
                 if hasattr(filt, 'Q_high'):
-                    filt.Q = filt.Q_high.copy()
+                    if not (self.config.arc_m_t_gated_enabled
+                            and getattr(self, '_arc_t_cohort_tail_signal', False)):
+                        self._arc_m_q_boost(filt)
                 if hasattr(filt, '_p_max_override'):
                     filt._p_max_override = 1.0
                     filt._p_max_override_frames = 30
@@ -6135,7 +6501,9 @@ class AEC:
                         self._epc_det.force_delay()
                         for filt in [self.filter, self.shadow_filter]:
                             if filt is not None and hasattr(filt, 'Q'):
-                                filt.Q = filt.Q_high.copy()
+                                if not (self.config.arc_m_t_gated_enabled
+                                        and getattr(self, '_arc_t_cohort_tail_signal', False)):
+                                    self._arc_m_q_boost(filt)
                                 filt._p_max_override = 1.0
                                 filt._p_max_override_frames = 30
                         self._maybe_mark_diverged('delay_shift')
@@ -6358,11 +6726,15 @@ class AEC:
                         # shadow back by 10% blend per frame.  Fires only in steady
                         # FS (refined_usable + far_excited) so it cannot corrupt the
                         # non-stationary path where orthogonality matters most.
+                        # B4 fix (2026-05-14): drop dead 'converged' branch — that
+                        # string belongs to AecFilterState enum, not the internal
+                        # P3f state machine (lines 7180-7199), which only sets
+                        # 'refined_usable' for steady FS.
                         _is_quiescent = (
                             far_excited
                             and hasattr(self.filter, '_error_psd')
                             and getattr(self, '_prev_filter_state', 'idle')
-                                in ('refined_usable', 'converged')
+                                == 'refined_usable'
                         )
                         if _is_quiescent:
                             _main_psd = self.filter._error_psd  # current main
@@ -6457,7 +6829,9 @@ class AEC:
                 )
                 if shadow_decision.boost_q:
                     if hasattr(self.filter, 'Q') and hasattr(self.filter, 'Q_high'):
-                        self.filter.Q = self.filter.Q_high.copy()
+                        if not (self.config.arc_m_t_gated_enabled
+                                and getattr(self, '_arc_t_cohort_tail_signal', False)):
+                            self._arc_m_q_boost(self.filter)
                         self.filter._p_max_override = 1.0
                         self.filter._p_max_override_frames = 20
                     # F2.3: Yang 2017 R-reset — over-estimated R from a prior DT
@@ -6547,7 +6921,9 @@ class AEC:
             if epv_event.fired and not _epv_suppressed:
                 for filt in [self.filter, self.shadow_filter]:
                     if filt and hasattr(filt, 'Q'):
-                        filt.Q = filt.Q_high.copy()
+                        if not (self.config.arc_m_t_gated_enabled
+                                and getattr(self, '_arc_t_cohort_tail_signal', False)):
+                            self._arc_m_q_boost(filt)
                         filt._p_max_override = 1.0
                         filt._p_max_override_frames = 30
                         filt._p_floor_beta = 1.0
@@ -6592,7 +6968,9 @@ class AEC:
                         self.dtd_coherence.confidence *= 0.3
                     for filt in [self.filter, self.shadow_filter]:
                         if filt and hasattr(filt, 'Q'):
-                            filt.Q = filt.Q_high.copy()
+                            if not (self.config.arc_m_t_gated_enabled
+                                    and getattr(self, '_arc_t_cohort_tail_signal', False)):
+                                self._arc_m_q_boost(filt)
                     self._maybe_mark_diverged('shadow_rise')
                     # P_MAX relax + P_floor raise: force filter to abandon stale path estimate
                     for filt in [self.filter, self.shadow_filter]:
@@ -6740,6 +7118,17 @@ class AEC:
                         _alpha_pb = self.config.per_band_erl_alpha
                         _clip_lo = self.config.per_band_erl_clip_lo
                         _clip_hi = self.config.per_band_erl_clip_hi
+                        # Arc G — fast EMA + drift detector + per-band W reset.
+                        _arc_g_on = self.config.arc_g_per_band_w_reset
+                        _arc_g_alpha = self.config.arc_g_fast_alpha
+                        _arc_g_ratio = self.config.arc_g_drift_ratio
+                        _arc_g_cool = self.config.arc_g_cooldown_frames
+                        _arc_g_epc_quiet = (self._epc_render_forced_remaining <= 0)
+                        # Decrement cooldown counters each per-band-update frame.
+                        if _arc_g_on:
+                            for _bi in range(3):
+                                if self._arc_g_cooldown[_bi] > 0:
+                                    self._arc_g_cooldown[_bi] -= 1
                         for _bi, (_bs, _be) in enumerate(
                                 ((0, _bin_1k), (_bin_1k, _bin_4k), (_bin_4k, _n))):
                             if _be <= _bs:
@@ -6753,6 +7142,108 @@ class AEC:
                                 _alpha_pb * self._per_band_erl[_bi]
                                 + (1.0 - _alpha_pb) * _inst_pb
                             )
+                            if _arc_g_on:
+                                self._per_band_erl_fast[_bi] = (
+                                    _arc_g_alpha * self._per_band_erl_fast[_bi]
+                                    + (1.0 - _arc_g_alpha) * _inst_pb
+                                )
+                                _slow = self._per_band_erl[_bi]
+                                _fast = self._per_band_erl_fast[_bi]
+                                if (_arc_g_epc_quiet
+                                        and self._arc_g_cooldown[_bi] == 0
+                                        and _slow > 1e-6 and _fast > 1e-6):
+                                    _ratio = max(_fast, _slow) / min(_fast, _slow)
+                                    if _ratio >= _arc_g_ratio:
+                                        # Drift detected — zero band's W weights
+                                        # in main filter, cooldown the band.
+                                        if hasattr(self.filter, 'W'):
+                                            self.filter.W[:, _bs:_be] = 0.0
+                                        self._arc_g_cooldown[_bi] = _arc_g_cool
+                                        self._arc_g_fire_count[_bi] += 1
+                                        # Snap fast EMA to slow so the next
+                                        # frame doesn't immediately re-fire.
+                                        self._per_band_erl_fast[_bi] = _slow
+
+                # v3.15 §1.5 Arc T — cohort tail real-time detector. Computes
+                # a per-frame ERL_decile_std proxy = max-over-bands of
+                # 10·log10(rolling_max / rolling_min) on EMA-smoothed per-band
+                # proxy ERL = mean(res.error_psd[band]) / mean(_long_window
+                # _far_psd[band]).  UN-GATED on _filter_converged so it fires
+                # on cohort tail (qNvSMyU class) where the converged-only
+                # per-band ERL block above is silent.  Default OFF byte-equal.
+                # See docs/v3_15_arc_t_s1_design.md for derivation.
+                #
+                # NE-corruption gate (S1 calibration 2026-05-15): on DT cases
+                # NE speech inflates error_psd → proxy false-fires. Skip when
+                # inst_erl_raw = mic_pwr/far_pwr >= 1.5 ("mic ≥ 1.5× far" =
+                # NE-dominant frame, same rule scalar ERL update at line
+                # ~6953 uses). Cohort tail (qNvSMyU class) has mic ≈
+                # small_ERL × far → inst_erl_raw ≈ 0.3-0.7 < 1.5 ✓, so this
+                # gate does NOT block cohort tail.
+                _arc_t_inst_erl_raw = mic_pwr / max(far_pwr, 1e-10)
+                if (self.config.arc_t_cohort_detector
+                        and erl_update_gate
+                        and _arc_t_inst_erl_raw < 1.5
+                        and self.res is not None
+                        and self.res._residual_est is not None
+                        and self.res._residual_est._long_window_n_updates >= 100):
+                    _err_psd_pb_t = self.res.error_psd
+                    _far_lw_pb_t = self.res._residual_est._long_window_far_psd
+                    _fpb_t = self.config.sample_rate / float(self.config.fft_size)
+                    _b1k_t = max(1, int(round(1000.0 / _fpb_t)))
+                    _b4k_t = max(_b1k_t + 1, int(round(4000.0 / _fpb_t)))
+                    _n_t = _err_psd_pb_t.shape[0]
+                    _b1k_t = min(_b1k_t, _n_t - 2)
+                    _b4k_t = min(_b4k_t, _n_t - 1)
+                    _alpha_inst_t = self.config.arc_t_inst_alpha
+                    _clip_lo_t = self.config.per_band_erl_clip_lo
+                    _clip_hi_t = self.config.per_band_erl_clip_hi
+                    _ratio_db_max = -1e6
+                    _min_window_fill = 32  # half a window
+                    for _bi_t, (_bs_t, _be_t) in enumerate(
+                            ((0, _b1k_t), (_b1k_t, _b4k_t), (_b4k_t, _n_t))):
+                        if _be_t <= _bs_t:
+                            continue
+                        _far_band_t = float(np.mean(_far_lw_pb_t[_bs_t:_be_t]))
+                        if _far_band_t < 1e-10:
+                            continue
+                        _inst_pb_t = float(np.mean(_err_psd_pb_t[_bs_t:_be_t])) / _far_band_t
+                        _inst_pb_t = float(np.clip(_inst_pb_t, _clip_lo_t, _clip_hi_t))
+                        # Smooth.
+                        self._arc_t_inst_pb_smooth[_bi_t] = (
+                            _alpha_inst_t * self._arc_t_inst_pb_smooth[_bi_t]
+                            + (1.0 - _alpha_inst_t) * _inst_pb_t
+                        )
+                        _v_t = self._arc_t_inst_pb_smooth[_bi_t]
+                        # Rolling window: ring buffer + np.max/min (W = 64).
+                        _ring_t = self._arc_t_window_buf[_bi_t]
+                        _ring_t.append(_v_t)
+                        if len(_ring_t) >= _min_window_fill:
+                            _arr_t = np.asarray(_ring_t, dtype=np.float64)
+                            _wmax_t = float(np.max(_arr_t))
+                            _wmin_t = max(float(np.min(_arr_t)), 1e-10)
+                            self._arc_t_window_max[_bi_t] = _wmax_t
+                            self._arc_t_window_min[_bi_t] = _wmin_t
+                            _ratio_db_t = 10.0 * np.log10(_wmax_t / _wmin_t)
+                            if _ratio_db_t > _ratio_db_max:
+                                _ratio_db_max = _ratio_db_t
+                    # Hysteresis state machine.
+                    if _ratio_db_max >= self.config.arc_t_threshold_hi_db:
+                        self._arc_t_cohort_tail_signal = True
+                        self._arc_t_hys_remaining = self.config.arc_t_hysteresis_frames
+                    elif (self._arc_t_hys_remaining > 0
+                            and _ratio_db_max >= self.config.arc_t_threshold_lo_db):
+                        self._arc_t_cohort_tail_signal = True
+                        self._arc_t_hys_remaining -= 1
+                    else:
+                        self._arc_t_cohort_tail_signal = False
+                        if self._arc_t_hys_remaining > 0:
+                            self._arc_t_hys_remaining -= 1
+                    self._arc_t_proxy_db_last = (
+                        float(_ratio_db_max) if _ratio_db_max > -1e5 else 0.0
+                    )
+                    if self._arc_t_cohort_tail_signal:
+                        self._arc_t_fire_count += 1
 
                 # Pre-filter DT signal (Stage B): mic energy excess over
                 # far × max_ERL. Realistic rooms have ERL ≤ +6 dB (coupling
@@ -6864,6 +7355,18 @@ class AEC:
                     if getattr(self, '_epc_render_forced_remaining', 0) > 0:
                         self._epc_render_forced_remaining -= 1
                         self.res._using_render_based = True
+                    # v3.15 §1.5.S2 Arc T — RES preempt mode (H1+H2 stack):
+                    # When cohort_tail_T asserts AND arc_t_res_preempt_mode
+                    # enabled, force RES into render-based echo estimate
+                    # (H2: same defence the EPC render-forced path uses) AND
+                    # boost over_sub by arc_t_over_sub_boost (H1: stronger
+                    # spectral attenuation across all bins). Default OFF;
+                    # byte-equal flag-OFF preserved by the gate.
+                    if (self.config.arc_t_res_preempt_mode
+                            and getattr(self, '_arc_t_cohort_tail_signal', False)):
+                        self.res._using_render_based = True
+                        effective_over_sub = effective_over_sub * float(
+                            self.config.arc_t_over_sub_boost)
                     self.res.over_sub = effective_over_sub
 
                     # DT conservative residual scaling: 1.0→0.5 as dt goes 0→0.8
@@ -7699,6 +8202,7 @@ class AEC:
             divergence=self._divergence_indicator,
             epc_active=self.epc_active,
             epv_ratio=d.get('epv_gain_ratio', 1.0),
+            cohort_tail_T=bool(getattr(self, '_arc_t_cohort_tail_signal', False)),
             mu_scale=d.get('mu_scale', 1.0),
             filter_w_norm=d.get('filter_w_norm', 0.0),
             shadow_w_norm=d.get('shadow_w_norm', 0.0),

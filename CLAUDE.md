@@ -131,8 +131,8 @@ target 100% exact).
 
 ## Branch model
 
-`main` carries the production-graded code. Current `__version__` is **3.13.0**
-(v3.13 arc closure 2026-05-14, tagged `v3.13.0`). The version-bump path
+`main` carries the production-graded code. Current `__version__` is **3.15.0**
+(v3.15 arc closeout 2026-05-15, tagged `v3.15.0`). The version-bump path
 since the May 12 P52 Path 3 merge:
 
 - `p52-phase-a-closed-path3` (2026-05-12) — Phase A merge baseline.
@@ -143,17 +143,27 @@ since the May 12 P52 Path 3 merge:
 - `v3.13.0` (2026-05-14) — v3.13 arc closure: E2 Path 3 SHIPPED
   (FS_static Δecho +0.107); E4 NLP + E5 Saturation closed CANNOT SHIP
   (substrate retained for v3.14); Phase 3 RES audit done.
+- `v3.14.0` (2026-05-14) — Arc P (per-band ERL EMA) + Arc R (per-band
+  ENR `block_lf` tilt) + Arc S-orth.A (decoupled shadow Kalman state)
+  promoted to BALANCED. Arc H (Huber loss) closed CANNOT SHIP. B1 + B2
+  housekeeping shipped.
+- `v3.15.0` (2026-05-15) — Arc T cohort tail real-time detector
+  promoted to BALANCED default ON (byte-equal on audio). Six candidate
+  arcs CLOSED CANNOT SHIP (§1.2 / Arc M V1+V2 / Arc G / Arc T S2 wiring
+  / Arc M.v3 / Arc F). 13 v3.16 candidates ranked; v3.16 RES refactor
+  arc authorised pending kickoff.
 
 See [CHANGELOG.md](CHANGELOG.md) for full per-version detail.
 
-**Active branches (post v3.13.0):**
+**Active branches (post v3.15.0):**
 
-- `feature/v3.14-volterra` — v3.14 Volterra non-linear inverse arc.
-  S1 cohort baseline + S2 detector wiring (E5.S3 mic-lpb gate +
-  nl_confidence ensemble) + S3.0 joint Hammerstein feasibility PASS
-  (+2.99 dB mean ERLE on 5/5 NL). Detector substrate is default-OFF
-  → byte-equal to BALANCED until S3.1 wires the polynomial preprocessor.
-  Design lock: [docs/v3_14_volterra_design_lock.md](docs/v3_14_volterra_design_lock.md).
+- `main` — production HEAD at v3.15.0.
+- `feature/static-memory` — NR / AEC static-memory pipeline (long-lived).
+- `feature/v3.16` — v3.16 RES refactor arc kickoff branch (created at
+  v3.15.0 merge). Phase 0 housekeeping (HK-1 + HK-2 + C1 + C1b) +
+  Phase 1 foundation (C5 per-state RES interface + C6 DelayEst audit).
+  See [docs/v3_15_res_audit_and_refactor_plan.md](docs/v3_15_res_audit_and_refactor_plan.md)
+  for the candidate inventory + Phase 0-4 dependency graph.
 
 Feature branches stay file-disjoint per
 [design lock §6.4](docs/p52_design_lock_v1.1.md): `feature/p52-phase-a-shadow`
