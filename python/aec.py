@@ -913,6 +913,18 @@ class AecConfig:
     arc_t_hysteresis_frames: int = 200
     arc_t_over_sub_boost: float = 1.3
 
+    # v3.16-A — Arc T S2 H2 fix (`force_render` OR-in). Original Arc T
+    # S2 wired `self.res._using_render_based = True` from AEC level when
+    # `_arc_t_cohort_tail_signal` asserted, but `compute_residual_echo`
+    # state machine (`ResidualEchoEstimator.attribute_legacy`)
+    # overwrites that field 1 line later via the local `want_render`
+    # decision (closure: docs/v3_15_arc_t_s2_wiring_closure.md).
+    # Fix: OR cohort_tail_T INTO the `force_render` decision INSIDE
+    # `attribute_legacy` so the render-based path engages from within
+    # the state machine. Default OFF → byte-equal flag-OFF; predicted
+    # +0.030 cohort tail Δecho when ON. See plan §10 v3.16-A.
+    arc_t_force_render_or_in: bool = False
+
     # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal flag-OFF).
     #
     # Motivation: §1.1 audit on 25 worst-DT cases (by Δdeg vs v3.10.5
@@ -4531,6 +4543,12 @@ class ResidualEchoEstimator:
         self._last_linear_residual_psd_mean = 0.0
         self._last_render_residual_psd_mean = 0.0
         self._last_render_blend = 0.0
+        # v3.16-A — Arc T S2 H2 force_render OR-in. AEC mutates
+        # `_arc_t_cohort_tail_signal` per frame before `attribute_legacy`
+        # runs; `_arc_t_force_render_or_in_enabled` is wired from
+        # AecConfig at AEC.__init__ and stays constant after.
+        self._arc_t_cohort_tail_signal = False
+        self._arc_t_force_render_or_in_enabled = False
 
     def reset(self, preserve_long_window_ema: bool = False) -> None:
         """Clear residual-echo estimator state.
@@ -4620,10 +4638,16 @@ class ResidualEchoEstimator:
                 effective_threshold = switching_threshold + hysteresis
             else:
                 effective_threshold = switching_threshold
+            # v3.16-A — OR cohort_tail_T into force_render. AEC mutates
+            # `_arc_t_cohort_tail_signal` per frame before this method
+            # runs (see AEC.process). When the enable flag is OFF (the
+            # default), the OR-in term is always False → byte-equal.
             force_render = (
                 epc_active
                 or saturation_level > 0.5
                 or not filter_converged
+                or (self._arc_t_force_render_or_in_enabled
+                    and self._arc_t_cohort_tail_signal)
             )
             want_render = (erle_factor < effective_threshold) or force_render
             if want_render and not self._using_render_based:
@@ -5636,6 +5660,12 @@ class AEC:
                 dt_ne_per_bin_thresh=self.config.dt_ne_per_bin_thresh,
                 dt_ne_per_bin_scale=self.config.dt_ne_per_bin_scale,
             )
+            # v3.16-A — wire force_render OR-in enable flag onto the
+            # ResidualEchoEstimator. Reading happens inside
+            # `attribute_legacy`; default OFF preserves byte-equal.
+            if self.res._residual_est is not None:
+                self.res._residual_est._arc_t_force_render_or_in_enabled = bool(
+                    self.config.arc_t_force_render_or_in)
         else:
             self.res = None
 
@@ -7362,6 +7392,13 @@ class AEC:
                 self._convergence.update_divergence(self.near_power, self.raw_error_power)
 
                 if self.res:
+                    # v3.16-A — propagate cohort_tail_T signal to RES
+                    # residual estimator. Read by `force_render` OR-in
+                    # inside `ResidualEchoEstimator.attribute_legacy`;
+                    # byte-equal when `arc_t_force_render_or_in=False`.
+                    if self.res._residual_est is not None:
+                        self.res._residual_est._arc_t_cohort_tail_signal = bool(
+                            getattr(self, '_arc_t_cohort_tail_signal', False))
                     # Change D: during EPC render-forced window, force RES
                     # into render-based echo estimate (unreliable filter W).
                     if getattr(self, '_epc_render_forced_remaining', 0) > 0:
