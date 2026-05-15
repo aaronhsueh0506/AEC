@@ -844,6 +844,30 @@ class AecConfig:
     # AECMOS DT Δdeg ≥ -0.005, FS Δecho ≥ -0.020, cohort tail ≥ -0.05.
     arc_m_epc_gated: bool = False
 
+    # v3.15 §1.4 Arc G — per-band W reset on detected gain-change drift
+    # (default OFF). Mechanism orthogonal to Arc F/M Q-modification trade-off:
+    # Arc G targets sudden mic-gain or path discontinuities by zeroing only
+    # the affected band's filter weights, leaving steady-state stability of
+    # the unaffected bands intact.
+    #
+    # Detector: maintain a fast per-band ERL EMA (alpha = arc_g_fast_alpha)
+    # alongside Arc P's slow per-band ERL.  When ratio max/min > arc_g_drift_ratio
+    # on band b AND PathChangeRegimeHandler is NOT currently asserting EPC
+    # (avoids double-handling cohort tail catastrophe; PathChangeRegimeHandler
+    # is load-bearing on cohort tail per `feedback_aec_code_review_accuracy`),
+    # zero W[:, bin_range_for_band_b] and cooldown the band for
+    # arc_g_cooldown_frames frames.
+    #
+    # Requires `f3_1_per_band_erl_adaptive=True` (consumes Arc P infrastructure).
+    #
+    # §0.6 metric: linear-filter primary (nores listen on 5 gain-change cases).
+    # HARD: cohort tail Δecho ≥ -0.05 (must NOT damage catastrophe defence);
+    # full-pipeline DT Δdeg ≥ -0.005, FS Δecho ≥ -0.020.
+    arc_g_per_band_w_reset: bool = False
+    arc_g_fast_alpha: float = 0.85
+    arc_g_drift_ratio: float = 4.0
+    arc_g_cooldown_frames: int = 100
+
     # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal flag-OFF).
     #
     # Motivation: §1.1 audit on 25 worst-DT cases (by Δdeg vs v3.10.5
@@ -5581,6 +5605,14 @@ class AEC:
         # Initialised to the same 0.1 as scalar _erl_estimate so the first
         # few frames before any update gate fires produce reasonable values.
         self._per_band_erl = np.array([0.1, 0.1, 0.1], dtype=np.float64)
+        # v3.15 §1.4 Arc G — fast per-band ERL EMA for drift detection
+        # (default-OFF; only updated/consumed when arc_g_per_band_w_reset=True).
+        self._per_band_erl_fast = np.array([0.1, 0.1, 0.1], dtype=np.float64)
+        # Per-band cooldown counter (frames remaining where reset is suppressed
+        # after a fire on that band).
+        self._arc_g_cooldown = np.zeros(3, dtype=np.int32)
+        # Diagnostic counter — total Arc G fires per band over the stream.
+        self._arc_g_fire_count = np.zeros(3, dtype=np.int64)
         # Double-talk analyzer (owns _dt_from_energy / _dt_from_shadow / _shadow_advantage)
         self._dt_analyzer = DoubleTalkAnalyzer(self.config)
 
@@ -6967,6 +6999,17 @@ class AEC:
                         _alpha_pb = self.config.per_band_erl_alpha
                         _clip_lo = self.config.per_band_erl_clip_lo
                         _clip_hi = self.config.per_band_erl_clip_hi
+                        # Arc G — fast EMA + drift detector + per-band W reset.
+                        _arc_g_on = self.config.arc_g_per_band_w_reset
+                        _arc_g_alpha = self.config.arc_g_fast_alpha
+                        _arc_g_ratio = self.config.arc_g_drift_ratio
+                        _arc_g_cool = self.config.arc_g_cooldown_frames
+                        _arc_g_epc_quiet = (self._epc_render_forced_remaining <= 0)
+                        # Decrement cooldown counters each per-band-update frame.
+                        if _arc_g_on:
+                            for _bi in range(3):
+                                if self._arc_g_cooldown[_bi] > 0:
+                                    self._arc_g_cooldown[_bi] -= 1
                         for _bi, (_bs, _be) in enumerate(
                                 ((0, _bin_1k), (_bin_1k, _bin_4k), (_bin_4k, _n))):
                             if _be <= _bs:
@@ -6980,6 +7023,27 @@ class AEC:
                                 _alpha_pb * self._per_band_erl[_bi]
                                 + (1.0 - _alpha_pb) * _inst_pb
                             )
+                            if _arc_g_on:
+                                self._per_band_erl_fast[_bi] = (
+                                    _arc_g_alpha * self._per_band_erl_fast[_bi]
+                                    + (1.0 - _arc_g_alpha) * _inst_pb
+                                )
+                                _slow = self._per_band_erl[_bi]
+                                _fast = self._per_band_erl_fast[_bi]
+                                if (_arc_g_epc_quiet
+                                        and self._arc_g_cooldown[_bi] == 0
+                                        and _slow > 1e-6 and _fast > 1e-6):
+                                    _ratio = max(_fast, _slow) / min(_fast, _slow)
+                                    if _ratio >= _arc_g_ratio:
+                                        # Drift detected — zero band's W weights
+                                        # in main filter, cooldown the band.
+                                        if hasattr(self.filter, 'W'):
+                                            self.filter.W[:, _bs:_be] = 0.0
+                                        self._arc_g_cooldown[_bi] = _arc_g_cool
+                                        self._arc_g_fire_count[_bi] += 1
+                                        # Snap fast EMA to slow so the next
+                                        # frame doesn't immediately re-fire.
+                                        self._per_band_erl_fast[_bi] = _slow
 
                 # Pre-filter DT signal (Stage B): mic energy excess over
                 # far × max_ERL. Realistic rooms have ERL ≤ +6 dB (coupling

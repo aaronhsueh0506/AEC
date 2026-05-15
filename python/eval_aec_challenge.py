@@ -269,6 +269,15 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'arc_m_epc_gated' not in config_overrides):
         config_overrides['arc_m_epc_gated'] = (
             os.environ['AEC_ARC_M_EPC_GATED'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.15 §1.4 Arc G: per-band W reset on detected gain-change drift (default OFF)
+    if ('AEC_ARC_G_PER_BAND_W_RESET' in os.environ
+            and 'arc_g_per_band_w_reset' not in config_overrides):
+        config_overrides['arc_g_per_band_w_reset'] = (
+            os.environ['AEC_ARC_G_PER_BAND_W_RESET'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_ARC_G_DRIFT_RATIO' in os.environ
+            and 'arc_g_drift_ratio' not in config_overrides):
+        config_overrides['arc_g_drift_ratio'] = float(
+            os.environ['AEC_ARC_G_DRIFT_RATIO'])
     # State-scale override: comma-separated state=scale pairs, e.g.
     #   "coarse_learning=2.0,refined_usable=1.0"
     if ('AEC_DT_NE_STATE_SCALE' in os.environ
