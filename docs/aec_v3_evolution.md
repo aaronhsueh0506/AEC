@@ -705,38 +705,129 @@ load-bearing bench Δ comes from E2 Path 3.
 
 ---
 
-## v3.14 (in-progress on `feature/v3.14-volterra`, started 2026-05-14)
+## v3.14 (closed 2026-05-14)
 
-Volterra non-linear inverse filter arc — canonical breakthrough path
-for 爆掉 / 無線電 perceptual NL that the v3.13 amplitude-mask family
-provably cannot reach. Design rationale: a linear FIR consuming the
-polynomially-warped reference basis IS phase-aware (the convolution
-preserves phase response). Multiplicative output-side masks only
-modulate magnitude, which is why E4/E5 hit the physics wall.
+Three production changes shipped to BALANCED:
 
-Snapshot as of 2026-05-14:
+1. **Arc P** (`9162d78`) — adaptive per-band ERL EMA. Replaces scalar
+   `erl_estimate=0.3` (7× over-estimate in low-coupling rooms) with
+   3-band LF/MF/HF EMA (α=0.99) driven by `error_psd / far_lw`
+   (Option B source signal). Flag `f3_1_per_band_erl_adaptive=True`.
+2. **Arc R** (`5e3e96b`) — per-band ENR thresholds with `block_lf`
+   tilt (raise LF, lower HF). DT bucket +0.007 dB mean Δdeg on
+   800-case; FS regression within −0.02 bar. Paired with Arc P for
+   end-to-end per-band gate. Flag `res_per_band_enr=True`.
+3. **Arc S-orth.A** (`8089974` + `f08ddbf`) — decouple shadow's
+   Kalman `_error_psd` + `R` from main's. **First mechanism in 5+
+   shadow-retirement attempts that produces genuinely independent
+   shadow Kalman state** — state correlation drops main vs shadow
+   0.99 → 0.47 on DT_static (target 0.5–0.7 hit). 800-case GREEN
+   PASS; cohort tail `qNvSMyU` Δecho +0.0036. Includes Option B
+   quiescent re-sync safety regularization (10% blend toward main
+   when 3× drift in steady FS). Flag `shadow_state_decoupled=True`.
 
-- **S1 cohort baseline**: 11-case bundle locked (5 NL cohort from
-  E4.S1 listen-validated + 3 NE controls + 3 DT controls).
-- **S2 detector wiring**: E5.S3 mic-lpb correlation gate ported as
-  default-OFF; ensemble `nl_confidence_ensemble = max(E4, E5)`.
-  Audit: 5/5 NL fire (E4 covers Type 2 codec NL where E5 misses;
-  E5 strong on Type 1 loudspeaker), 0/3 NE, 0.14–6.19% DT residual
-  leak (E4 pitch tracker on NE speech harmonics; S3.1 wiring will
-  gate adaptation, not just enable).
-- **S3.0 polynomial feasibility**: joint Hammerstein 3rd-order
-  Wiener-Hopf LS upper bound +1.65 to +4.87 dB ΔERLE on 5/5 NL
-  (mean +2.99 dB). Cascade-PBFDKF lower bound was 0.12 to 0.26 dB
-  (misleading because pass-1 conflates linear convergence error with
-  NL-explainable structure). Joint LS sensitivity check on DT controls
-  shows +1-2 dB headroom too — that is LS overfitting NE speech, NOT
-  real polynomial NL — production wiring MUST gate adaptation on
-  detector + filter_state to avoid P50-pattern NE damage.
-- **Remaining**: S3.1 (`VolterraPreprocessor` class wiring) → S4
-  (5-cohort listen gate) → S5/S5.5 (FLAF/Hermite alt basis,
-  conditional; S3.0 PASS likely SKIPS) → S6–S10 (800-case A/B,
-  per-band variant, C-port, ship).
+Plus housekeeping (`5fbceb0`): B1 (`PBFDKF.reset()` cleanup) + B2
+(`AecStats.filter_state` enum/string contract aligned).
+
+### v3.14 closed CANNOT SHIP arcs
+
+- **Arc H Huber loss**: real listen mic saturation = bounded NL
+  residual floor (model mismatch), NOT impulsive gradient spike.
+  Same physics wall as v3.13 E4/E5. Substrate
+  [`tools/research/v3_14_h_s1_huber_proto.py`](v3_14_h_s1_huber_proto.py).
+- **Arc D filter-state-aware RES policy**: per-state ENR tuples shipped
+  on `feature/v3.14-arc-d` (HEAD `0218906`). 800-case bench Δ ≈ 0 on
+  aggregate; only `suspicious_dt + diverged` states differentiate
+  (rarely fire in production). Deferred to v3.15 then v3.16 C2
+  candidate.
+- **Arc S-orth.B L1-regularized shadow weight**: bucket means within
+  hard abort bars BUT two new large per-case FS outliers (`0KjzXA3g…`
+  FS_static Δecho −1.557; `KSN5Jrzo…` FS_movement Δecho −0.704). NOT
+  promoted; substrate retained for potential v3.16 retry.
+
+### v3.14 Volterra arc (research, not shipped as v3.14)
+
+`feature/v3.14-volterra` carried the Volterra non-linear inverse arc
+(S1 cohort + S2 detector + S3.0 joint Hammerstein feasibility PASS,
++2.99 dB mean ERLE on 5/5 NL). Branch was deleted in v3.15 closeout
+cleanup; design lock + S2 audit + S3.0 verdict docs preserved under
+[`docs/v3_14_volterra_*.md`](.). Volterra remains v3.16 Track 2
+roadmap candidate (re-authorisation required if reopened).
 
 References: [docs/v3_14_volterra_design_lock.md](v3_14_volterra_design_lock.md),
 [docs/v3_14_s2_audit.md](v3_14_s2_audit.md),
-[docs/v3_14_s3_0_verdict.md](v3_14_s3_0_verdict.md).
+[docs/v3_14_s3_0_verdict.md](v3_14_s3_0_verdict.md),
+[docs/v3_14_p_s3_verdict.md](v3_14_p_s3_verdict.md),
+[docs/v3_14_r_s2_verdict.md](v3_14_r_s2_verdict.md),
+[docs/v3_14_s_orth_a_s2_verdict.md](v3_14_s_orth_a_s2_verdict.md),
+[docs/v3_14_h_s1_verdict.md](v3_14_h_s1_verdict.md),
+[docs/v3_14_s_orth_b_s2_verdict.md](v3_14_s_orth_b_s2_verdict.md).
+
+---
+
+## v3.15 (closed 2026-05-15)
+
+**Headline**: Zero ship-able algorithm changes; one preset default flip
+(Arc T cohort tail real-time detector → BALANCED default ON,
+byte-equal on audio output). Six candidate arcs CLOSED CANNOT SHIP
+after exhausting their structural ceilings. Six default-OFF substrate
+flags retained for v3.16 retry. v3.16 RES refactor plan authored with
+13 ranked candidates.
+
+### What shipped to BALANCED
+
+- **§10.S0b Arc T cohort tail detector default ON** (`5bb2fa8`):
+  populates `AecStats.cohort_tail_T` per-frame and writes
+  `self._arc_t_cohort_tail_signal` field. All 7 consumers require
+  additional default-OFF flags, so detector ON is byte-equal on audio
+  output (5/5 sanity case, atol=0.0). Why: enables v3.16 RES refactor
+  consumers (Phase 3 v3.16-A / v3.16-B) without per-bench env flag.
+- Bug fixes: B4 quiescent re-sync `'converged'` dead-branch removal;
+  B5 `_shadow_copy_err_baseline` doc-aligned-to-impl as RESERVED;
+  B9 bench tooling `--workers` + per-scenario chunk-split (j=6
+  default, 2× speedup); naming: `arc_m_v3_t_gated_enabled` →
+  `arc_m_t_gated_enabled` (drop numeric version suffix from live
+  config).
+
+### v3.15 closed CANNOT SHIP arcs (6 total, all substrate-retained)
+
+| Arc | Why closed |
+|---|---|
+| §1.2 DT-NE compression fix | FS-vs-DT wall (same family as v3.13 E5); FS Δecho 3.8–10× over bar |
+| §1.4 Arc M V1+V2 (per-band Q boost) | EPC ⊃ cohort tail catastrophe windows; V1 FS_movement −0.027 / V2 cohort tail −0.053 |
+| §1.4 Arc G (per-band W reset) | Destructive zero-out; ERLE Δ=−1.48 dB / 0/5 audible improvement |
+| §1.5 Arc T S2 RES preempt wiring | H1 dead code (BALANCED uses enr path; over_sub only for wiener) + H2 overwritten by RES state machine |
+| §1.5b Arc M.v3 (T-gated rescue) | Impulsive q_boost vs persistent cohort_tail_T timing/scope mismatch; 4/5 fires at signal=False; 1/5 on shadow filter |
+| §1.6 Arc F (per-band Kalman Q schedule) | Cohort tail damage |
+
+### §1.7 RES audit headline finding (substrate shift)
+
+60-case directional audit: `ne_g_floor` fire-rate **0.93 → 0.000 on
+DT** (v3.14 Arc P + R raise `spectral_g_min` enough that the
+`max(spectral_g_min, ne_g_floor)` comparison never picks `ne_g_floor`).
+v3.13 verdict's "universal baseline floor" no longer holds on v3.15
+substrate. Adds NEW v3.16 candidate **C1b** (`ne_g_floor` removal)
+alongside C1 (`epc_dt_cap` removal — still 0/all-buckets, doubly
+dead).
+
+### v3.16 plan (13 candidates, 5 phases, 21–30 sprints)
+
+Authored at [`docs/v3_15_res_audit_and_refactor_plan.md`](v3_15_res_audit_and_refactor_plan.md).
+Hard bar PASS: 13 candidates with measurable success criteria, 5 with
+predicted Δ ≥ +0.005 (top: v3.16-A force_render OR-in +0.030 cohort
+tail; v3.16-B ENR-path lift +0.020; C2/C4/C3 +0.005~+0.015 DT bucket).
+**C6 DelayEst audit** is critical gate — 5 movement-related v3.15
+closures share echo-path-changing substrate where DelayEst tracks; if
+audit confirms upstream cause for ≥ 30 % of wall magnitudes, Phase 3-4
+ROI estimates change.
+
+### Inherited debt carried to v3.16
+
+v3.13 E2 Path 3 DT debt (DT_static −0.050, DT_movement −0.025) remains
+unrecoverable in v3.15 production. Closure target moves to v3.16 RES
+refactor (C2 / C4 / C3 totalling +0.005 to +0.040 predicted DT bucket
+recovery).
+
+References: [docs/v3_15_closeout_verdict_pack.md](v3_15_closeout_verdict_pack.md)
+(top-level), [docs/v3_15_*.md](.) (all 15 v3.15 verdict / closure /
+design docs).

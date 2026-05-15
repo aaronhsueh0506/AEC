@@ -15,7 +15,7 @@ Usage:
     python aec.py mic.wav ref.wav output.wav [--mode nlms|fdaf|pbfdaf|pbfdkf] [--enable-res]
 """
 
-__version__ = "3.14.0-s-orth-a"
+__version__ = "3.15.0"
 
 import os
 import numpy as np
