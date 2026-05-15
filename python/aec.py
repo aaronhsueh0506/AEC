@@ -246,8 +246,12 @@ class AecConfig:
 
     # v3.17 B.1 — Movement-rate DelayEst (default OFF). When EPC is active or
     # in hangover, override DelayEstimator's `_period_samples` to a faster
-    # cadence (`delay_est_period_s_fast`, default 0.25 s = 2× production rate).
-    # Otherwise restore baseline `delay_est_period_s` (0.5 s).
+    # cadence (`delay_est_period_s_fast`, default 0.25 s = 2× production rate)
+    # AND reduce the cross-spectrum EMA alpha to `delay_est_alpha_fast`
+    # (default 0.2 vs production 0.6) so the EMA tracks the new echo path
+    # faster. Polling alone is insufficient — the EMA itself must converge
+    # faster for delay estimates to actually move during movement events.
+    # Restore baseline period + alpha when EPC quiet.
     #
     # Origin: v3.16 C6 audit case `0I0XMl3M` showed estimated_delay jumps
     # 1230 → 4132 → 4369 → 2 during fast movement, ERLE p5_bad −49 dB. Filter
@@ -260,6 +264,7 @@ class AecConfig:
     # SOFT: 60-case AECMOS bucket means stable.
     mov_rate_delay_est_enabled: bool = False
     delay_est_period_s_fast: float = 0.25
+    delay_est_alpha_fast: float = 0.2
 
     # High-pass filter (DC blocker + low-freq removal)
     enable_highpass: bool = True
@@ -6504,10 +6509,11 @@ class AEC:
             # is_solid was True but current_delay was already set.
             if (self.delay_est is not None
                     and self._delay_active):
-                # v3.17 B.1: dynamically override DelayEst period under EPC
-                # (motion proxy). When EPC active or in hangover, switch to
-                # fast cadence; otherwise restore baseline. Read-modify-write
-                # the int field — DelayEstimator compares against this on
+                # v3.17 B.1: dynamically override DelayEst period + EMA alpha
+                # under EPC (motion proxy). When EPC active or in hangover,
+                # switch to fast cadence + faster EMA so the cross-spectrum
+                # tracks the new echo path; restore baseline otherwise.
+                # Read-modify-write the fields — DelayEstimator reads on
                 # every accumulate() call.
                 if self.config.mov_rate_delay_est_enabled:
                     _epc_motion = (self.epc_active
@@ -6517,11 +6523,15 @@ class AEC:
                             self.config.delay_est_period_s_fast
                             * self.config.sample_rate
                         )
+                        self.delay_est._alpha = float(
+                            self.config.delay_est_alpha_fast
+                        )
                     else:
                         self.delay_est._period_samples = int(
                             self.config.delay_est_period_s
                             * self.config.sample_rate
                         )
+                        self.delay_est._alpha = 0.6
                 self.delay_est.accumulate(near_end, far_end)
                 new_delay = self.delay_est.estimated_delay
                 _delay_eligible = (new_delay >= 0
