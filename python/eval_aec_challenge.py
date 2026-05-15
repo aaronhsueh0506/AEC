@@ -303,6 +303,8 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         ('AEC_ARC_T_THRESHOLD_LO_DB', 'arc_t_threshold_lo_db', False),
         ('AEC_ARC_T_HYSTERESIS_FRAMES', 'arc_t_hysteresis_frames', False),
         ('AEC_ARC_T_OVER_SUB_BOOST', 'arc_t_over_sub_boost', False),
+        # v3.16-A — force_render OR-in (Arc T S2 H2 fix). Default OFF.
+        ('AEC_ARC_T_FORCE_RENDER_OR_IN', 'arc_t_force_render_or_in', True),
     ):
         if _flag in os.environ and _key not in config_overrides:
             _v = os.environ[_flag]

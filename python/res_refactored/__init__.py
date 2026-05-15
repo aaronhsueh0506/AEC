@@ -7,7 +7,7 @@ Public surface:
   NoiseFloorResult       output of Module 5 (final synth output)
 
   residual_estimator     Module 1 — residual echo PSD + reverb tail
-  gain_computer          Module 2 — softgate_emr + spectral_floor + epc_dt_cap
+  gain_computer          Module 2 — softgate_emr + spectral_floor
   spectral_shaper        Module 3 — quiet_mask + 3bin_smooth + hf_cap + pre_temporal trace
   temporal_smoother      Module 4 — EMA + drop/rise rate limit
   noise_floor_cng        Module 5 — adaptive noise PSD + lift + CNG + OLA synth

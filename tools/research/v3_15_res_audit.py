@@ -210,22 +210,40 @@ def _ne_g_floor_fired(res):
     """Detect ne_g_floor fire on this frame.
 
     ne_g_floor is folded INTO spectral_g_min before _stage_gain_compute (line
-    ~3696: `spectral_g_min = max(spectral_g_min, ne_g_floor)`), so it does NOT
-    show up as a separate stage in get_stage_gains(). We derive its fire
-    indicator by reading the cached scalars `_stats_last_ne_g_floor` and
-    `_stats_last_spectral_g_min` (set during stage 02). Fired iff
-    ne_g_floor > spectral_g_min_pre_floor (i.e. ne_g_floor was the binding
-    raise). NOTE: this is a frame-level binary (any bin), not per-bin —
-    matches v3.13 verdict's definition.
+    ~3735: `spectral_g_min = max(spectral_g_min, ne_g_floor)`), so it does NOT
+    show up as a separate stage in get_stage_gains().
+
+    v3.16 C1c — switched to per-bin any-fire detector exposed by
+    ResFilter (`_stats_ne_g_floor_any_bin_fired`). v3.15 audit (this script
+    pre-fix) used scalar means against `_stats_last_spectral_g_min`, but
+    that field is the POST-max value (written after the np.maximum raise
+    in aec.py:_stage_gain_compute), so post_max >= ne_g_floor element-wise
+    → mean comparison was mathematically False regardless of actual fire
+    activity. C1c added pre-max snapshots + the per-bin any-fire flag so
+    the audit reaches the pre-floor surface correctly.
+
+    Falls back to scalar pre-max comparison if per-bin flag is missing
+    (older AEC builds), so the audit script keeps a usable signal during
+    transitional reads.
 
     Returns (fired:bool, gain_delta:float).
     """
+    any_fired = getattr(res, '_stats_ne_g_floor_any_bin_fired', None)
+    if any_fired is not None:
+        delta = max(
+            float(getattr(res, '_stats_ne_g_floor_max', 0.0))
+            - float(getattr(res, '_stats_pre_max_spectral_g_min_max', 0.0)),
+            0.0,
+        ) if any_fired else 0.0
+        return (bool(any_fired), float(delta))
+    # Fallback for older builds without C1c: compare ne_g_floor mean vs
+    # pre-max spectral_g_min mean if available; else skip.
     ne_g  = float(getattr(res, '_stats_last_ne_g_floor', 0.0))
-    sp_g  = float(getattr(res, '_stats_last_spectral_g_min', 0.0))
-    if ne_g <= 0.0 and sp_g <= 0.0:
+    sp_g_pre = float(getattr(res, '_stats_pre_max_spectral_g_min', 0.0))
+    if ne_g <= 0.0 and sp_g_pre <= 0.0:
         return (False, 0.0)
-    fired = ne_g > sp_g + 1e-7
-    delta = max(ne_g - sp_g, 0.0) if fired else 0.0
+    fired = ne_g > sp_g_pre + 1e-7
+    delta = max(ne_g - sp_g_pre, 0.0) if fired else 0.0
     return (fired, float(delta))
 
 

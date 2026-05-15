@@ -1,6 +1,8 @@
 # v3.15 §1.7 — RES audit and v3.16 refactor plan
 
-**Status**: POPULATED — 12 v3.16 candidates ranked; user-gated authorisation
+**Status**: POPULATED — 15 v3.16 candidates ranked (HK-1 / C1 / C1c
+DONE on `feature/v3.16` Phase 0; HK-2 reframed; C1b reclassified;
+remaining 10 pending sprint authorisation); user-gated authorisation
 per §0.7 closeout merge.
 
 **Date**: 2026-05-15 (populated)
@@ -70,117 +72,135 @@ post-process); §1.7 audit establishes its first-pass baseline.
 
 ---
 
-## 3. Findings (60-case directional subset)
+## 3. Findings (800-case post-C1c, 2026-05-15)
 
-Audit run on the first 60 cases of the AEC Challenge corpus on v3.15
-closeout substrate (`feature/v3.15-arc-g` HEAD `5bb2fa8` —
+Audit run on full 800-case AEC Challenge corpus on `feature/v3.16`
+HEAD `37a46b2` (post-C1c audit-script fix +
 `arc_t_cohort_detector=True` BALANCED default; all other v3.15
 substrate flags default OFF). Outputs:
-`/tmp/v3_15_res_audit/{audit.json,summary.csv,per_case/*.json}`. Run
-time 70 sec on `-j 6`.
-
-> **CRITICAL SAMPLE BIAS**: The `v3_15_res_audit.py --n-cases 60` flag
-> takes alphabetical-first cases from the corpus loader, and the loader
-> happens to enumerate `doubletalk/` first. Result: **60 / 60 cases are
-> DT (40 static + 20 movement); 0 FS / 0 NE / 0 cohort_tail**. Findings
-> below are reliable for DT bucket; FS / NE / cohort_tail rows in
-> summary.csv are all zero-frames-counted (not zero-fire-rate). Full
-> 800-case audit at the v3.16 phase entry is mandatory before promoting
-> any candidate to a sprint (per `feedback_aec_code_review_accuracy`).
-> The audit script needs the `--cases-list` flag added in v3.16
-> housekeeping (currently only supports `--n-cases`).
+`/tmp/v3_16_audit_full/{audit.json,summary.csv,per_case/*.json}`.
+Run time 641 sec (10.7 min) on `-j 6` chunk-split.
 
 ### 3.1 `spectral_floor`
 
 - **Method**: pre = `01_softgate_emr`, post = `02_spectral_floor`.
-- **v3.15 fire-rate**: DT_static 0.5144 / DT_movement 0.4699; mean
-  delta when fired ≈ 0.013-0.015.
-- **Diff vs v3.13 (DT)**: DT_static −0.010 (0.5240 → 0.5144);
-  DT_movement −0.059 (0.5290 → 0.4699). DT_movement drop is the most
-  visible substrate shift.
-- **Cohort tail (qNvSMyU)**: not in 60-case sample; re-audit on
-  800-case required.
-- **Determination**: KEEP. DT firing pattern unchanged in topology;
-  drop in DT_movement is moderate. Cohort-tail load-bearing role
-  remains the canonical defence (v3.13 baseline 97.4 %; reaffirmed by
-  v3.12 P58 Phase 2 closure when removing it).
+- **v3.15 fire-rate (800-case)**: FS_static 0.900 / FS_movement
+  0.870 / DT_static 0.525 / DT_movement 0.518 / NE 0.093 /
+  cohort_tail 0.974 / GLOBAL 0.598; mean delta when fired
+  ≈ 0.011-0.032.
+- **Diff vs v3.13**: FS_static +0.006 / FS_movement −0.011 /
+  DT_static +0.001 / DT_movement −0.011 / NE −0.004 / cohort_tail
+  −0.000 — all within ±0.015, **substrate stable**.
+- **Determination**: KEEP. Cohort-tail load-bearing role
+  reaffirmed (0.974 fire-rate, identical to v3.13 baseline; v3.12
+  P58 Phase 2 confirmed criticality when attempting removal).
 
-### 3.2 `ne_g_floor` — **SUBSTRATE SHIFT: dead on v3.15 substrate**
+### 3.2 `ne_g_floor` — RECOVERED post-C1c [2026-05-15]
 
-- **Method**: inferred via `_ne_g_floor_fired(res)` checking
-  `_stats_last_ne_g_floor > _stats_last_spectral_g_min + 1e-7`.
-- **v3.15 fire-rate**: **0.0000 on ALL measured buckets (DT_static,
-  DT_movement, GLOBAL)** — 0 / 150 792 frames on DT_static, 0 / 74 049
-  on DT_movement.
-- **Diff vs v3.13 (DT)**: −0.934 on DT_static (0.934 → 0.000);
-  −0.933 on DT_movement (0.933 → 0.000). v3.13 verdict's "universal
-  baseline floor" finding **NO LONGER HOLDS** on v3.15 substrate.
-- **Mechanism**: v3.14 Arc P (adaptive per-band ERL) + Arc R (per-band
-  ENR `block_lf` tilt) raise `spectral_g_min` enough that the
-  `max(spectral_g_min, ne_g_floor)` comparison **never picks
-  `ne_g_floor`**. `ne_g_floor` is now structurally dominated by the
-  per-band ENR-driven floor.
-- **Determination**: STRONG CANDIDATE FOR REMOVAL. Pending 800-case
-  re-audit confirming the same on FS / NE / cohort_tail. If confirmed,
-  remove as a delete-only candidate alongside `epc_dt_cap` (see
-  **NEW v3.16 candidate** in §4 — listed as part of Candidate C1
-  scope expansion, or as a separate C1b).
+- **Original audit bug** (now fixed): `_stats_last_spectral_g_min` was
+  written at [`python/aec.py:3742`](../python/aec.py#L3742) **AFTER**
+  the `spectral_g_min = np.maximum(spectral_g_min, ne_g_floor)` raise.
+  The audit read the POST-max value → `mean(post_max) >= mean(ne_g_floor)`
+  by construction → comparison was mathematically False in production
+  cases → reported 0 fires regardless of actual activity.
+- **C1c fix shipped commit `37a46b2`** — un-gated pre-max diag fields
+  added to `ResFilter`, audit script consumes per-bin any-fire flag
+  (`_stats_ne_g_floor_any_bin_fired`).
+- **Recovered fire-rates** (800-case full corpus, post-fix):
+
+| Bucket | C1c fire-rate | v3.13 baseline | Diff |
+|---|---:|---:|---:|
+| FS_static | 0.867 | 0.880 | −0.013 |
+| FS_movement | 0.856 | 0.867 | −0.011 |
+| DT_static | 0.930 | 0.934 | −0.004 |
+| DT_movement | 0.924 | 0.933 | −0.009 |
+| NE | 0.999 | 0.999 | +0.000 |
+| cohort_tail (qNvSMyU) | 0.764 | 0.750 | +0.014 |
+| GLOBAL | 0.913 | n/a | — |
+
+  Substrate drift ≤ ±0.014 vs v3.13 baseline across all buckets;
+  mechanism is **load-bearing on every bucket** — universal NE-floor
+  on NE (0.999 fire-rate ≡ always-fire as expected) and ~90 % on FS
+  / DT. Cohort tail slightly UP (+0.014) post v3.14 substrate.
+- **Empirical falsification of removal hypothesis**: full removal
+  patch on `feature/v3.16` (deleted `ne_evidence`, `ne_protection`,
+  `ne_g_min_ceil`, `ne_g_floor`, `np.maximum` raise) broke 4/5
+  byte-equal sanity (`_ours.wav`). 5/5 PASS on `_ours_nores.wav`
+  confirms the divergence is RES-side, not linear-filter side.
+- **Substrate**: removal patch preserved at `git stash@{0}` titled
+  "v3.16 C1b ne_g_floor full removal — REVERTED: audit script
+  measurement bug …".
+- **Determination**: KEEP. ne_g_floor is **load-bearing universal
+  NE-protection floor**. C1b reclassified to retain (see §4 C1b
+  candidate); per-band refactor folded into C2 scope (Phase 2).
 
 ### 3.3 `epc_dt_cap`
 
 - **Method**: pre = `02_spectral_floor`, post = `03_epc_dt_cap`.
-- **v3.15 fire-rate**: **0.0000 on all measured buckets** (DT_static,
-  DT_movement). Matches v3.13 baseline 0/800.
+- **v3.15 fire-rate (800-case re-audit)**: **0.0000 on ALL buckets**
+  including `cohort_tail 0/2686` — 0 / 2 032 022 frames globally.
+  Matches v3.13 baseline 0/800.
 - **Diff vs v3.13**: +0.0000 — no change.
 - **Determination**: REMOVE — ship as v3.16 candidate **C1**
   (delete-only, byte-equal-verified). Dead on both v3.13 and v3.15
-  substrates.
+  substrates. **5/5 byte-equal sanity PASS** on (FS_static, FS_movement,
+  DT_static, NE, pcb1Nh0Z) for both `_ours.wav` and `_ours_nores.wav`.
 
 ### 3.4 `quiet_mask`
 
 - **Method**: pre = `03_epc_dt_cap`, post = `04_quiet_mask`.
-- **v3.15 fire-rate**: DT_static 0.3010 / DT_movement 0.3125; mean
-  delta when fired ≈ 0.85.
-- **Diff vs v3.13 (DT)**: +0.003 DT_static, +0.006 DT_movement —
-  effectively unchanged.
-- **Determination**: KEEP. Physical noise gate, stable across
-  substrate.
+- **v3.15 fire-rate (800-case)**: FS_static 0.524 / FS_movement
+  0.542 / DT_static 0.311 / DT_movement 0.341 / NE 0.060 /
+  cohort_tail 0.627 / GLOBAL 0.364; mean delta when fired ≈ 0.86.
+- **Diff vs v3.13**: FS_static +0.015 / FS_movement +0.047 /
+  DT_static +0.013 / DT_movement +0.034 / NE +0.000 / cohort_tail
+  **−0.052** (0.679 → 0.627). Cohort-tail drop is the **most
+  visible substrate shift in this audit** — quiet_mask defends
+  cohort tail less aggressively post v3.14 substrate.
+- **Determination**: KEEP. Stable on FS / DT / NE; cohort_tail
+  drop is mechanism-orthogonal (Arc T detector now provides cohort
+  tail signal independently). Substrate shift noted for **C3**
+  candidate (4-cap reorder needs to evaluate quiet_mask /
+  spectral_floor interaction on cohort tail).
 
 ### 3.5 `hf_cap`
 
 - **Method**: pre = `05_3bin_smooth`, post = `06_hf_cap`. Three
   sub-modes (conditional / plan_a_2k / v3.8.3-strict); summary.csv
   does not split by sub-mode.
-- **v3.15 fire-rate (FIRST baseline)**: DT_static 0.3537 / DT_movement
-  0.3359; mean delta when fired ≈ 0.052-0.074.
-- **Diff vs v3.13**: no baseline (newly measured).
-- **Determination**: KEEP. Sub-mode dead-branch audit deferred to v3.16
-  candidate **C3** (Stage-1 4-cap chain ordering).
+- **v3.15 fire-rate (800-case, FIRST baseline)**: FS_static 0.602 /
+  FS_movement 0.613 / DT_static 0.361 / DT_movement 0.374 / NE
+  0.019 / cohort_tail 0.649 / GLOBAL 0.409; mean delta when fired
+  ≈ 0.034-0.118 (NE Δ highest 0.118).
+- **Diff vs v3.13**: no baseline (newly measured 800-case).
+- **Determination**: KEEP. **Load-bearing on cohort_tail (0.649)**
+  — FS bias intuitive (HF echo unmask). Sub-mode dead-branch audit
+  deferred to v3.16 candidate **C3** (Stage-1 4-cap chain
+  ordering).
 
-### 3.6 Cross-path observations
+### 3.6 Cross-path observations (post-C1c, 800-case)
 
-- **`ne_g_floor` substrate shift is the headline finding**: v3.14 Arc
-  P + R + S-orth.A made it structurally dead on DT. Adds a NEW
-  delete-only candidate to the v3.16 Phase 0 list.
-- v3.15 substrate does NOT change `spectral_floor` / `quiet_mask`
-  load-bearing topology on DT bucket. Reaffirms v3.13 finding that
-  `spectral_floor` is the cohort-tail defence (pending 800-case
-  re-audit on cohort_tail bucket).
-- `epc_dt_cap` is doubly dead (v3.13 + v3.15). C1 removal is safe.
-- DT-NE compression mechanism is NOT inside this audit's floor
+- **`ne_g_floor` reclassified KEEP** (was C1b removal candidate).
+  Real fire-rate 0.913 GLOBAL across all buckets, ≤ ±0.014 drift vs
+  v3.13. NE bucket fires 0.999 (universal floor as designed).
+  Per-band refactor folded into C2 scope.
+- **`spectral_floor` cohort-tail load-bearing reaffirmed** (cohort
+  tail 0.974, identical to v3.13).
+- **`quiet_mask` cohort-tail substrate shift detected** (−0.052 from
+  v3.13 0.679 → 0.627). Other buckets stable. Note for C3 candidate
+  evaluation.
+- **`hf_cap` first 800-case baseline established** — load-bearing on
+  cohort_tail (0.649) and FS (0.602+); informs C3 ordering audit.
+- **`epc_dt_cap` doubly dead** (v3.13 + v3.15 = 0/2,032,022). C1
+  removal safe and shipped (commit `d90efdc`).
+- **DT-NE compression mechanism** is NOT inside this audit's floor
   topology. §1.2 audit ([`v3_15_dt_ne_audit.md`](v3_15_dt_ne_audit.md))
   traced compression to ENR per-state × per-band — v3.16 candidate
   **C2** addresses that surface.
-- 60-case DT-only sample limits coverage. The audit's substrate-shift
-  finding on `ne_g_floor` may not hold on FS / NE / cohort_tail
-  (e.g., NE bucket in v3.13 fired `ne_g_floor` 99.9 % — if it stays
-  high on NE, the floor is NOT dead globally and the removal candidate
-  must be NE-aware). 800-case re-audit at v3.16 Phase 0 entry is the
-  gate for C1b (`ne_g_floor` removal).
 
 ---
 
-## 4. v3.16 refactor candidates (13 candidates, 5 phases)
+## 4. v3.16 refactor candidates (15 candidates, 5 phases)
 
 Each candidate has a measurable success criterion (per hard bar §6).
 Candidates are ranked within phases by ROI; phase ordering enforces
@@ -188,81 +208,140 @@ dependency.
 
 ### Phase 0 — Housekeeping (parallel-safe; runs before everything else)
 
-#### Candidate HK-1: B3 fix — `run_one_case.py` CNG seed
-- **Origin**: v3.15 §10.S3 deferred to v3.16.
-- **Mechanism**: `python/run_one_case.py` instantiates `AEC(cfg)` without
-  `np.random.seed(...)`. Add `np.random.seed(0)` (or 42 — match
-  `eval_aec_challenge.py` per `seed=0` convention) before AEC
-  instantiation.
-- **Predicted AECMOS Δ**: 0.000 (research tooling fix; no production
-  bench impact).
-- **Implementation LOE**: S (≤ 1 sprint, ≤ 5 LOC).
-- **Cohort-tail risk**: none.
-- **Measurable success**: `run_one_case.py` produces byte-identical
-  output across re-invocations on the same case. Attach a 5-case
-  determinism test.
-- **Predicted byte-equal cost**: byte-equal on production bench
-  (`eval_aec_challenge.py` already seeds correctly); only research
-  tool's behaviour changes.
-- **Prior art**: documented in v3.15 plan §2 B3 punch-list entry.
+#### Candidate HK-1: B3 fix — `run_one_case.py` CNG seed [DONE]
+- **Status (2026-05-15)**: SHIPPED in v3.15 Phase D commit `ea8d320`
+  (alongside B6 `_prev_filter_state` doc). v3.15 §10.S3 sprint marker
+  superseded — fix actually landed during v3.15 housekeeping window
+  before v3.16 plan was authored. v3.16 Phase 0 inherits no further
+  work for HK-1.
+- **Implementation**: [`python/run_one_case.py:90`](../python/run_one_case.py#L90)
+  adds `np.random.seed(0)` before `AEC(cfg)` to match
+  `eval_aec_challenge.py:325` convention.
+- **Verified**: 800-case production bench unaffected (eval script seeds
+  per-case independently); CLI re-invocations of `run_one_case.py` on the
+  same case now produce byte-identical output.
 
-#### Candidate HK-2: §1.8 pcb1N mic_dynamic_margin patch
-- **Origin**: v3.15 §10.S5 deferred to v3.16.
-- **Mechanism**: Single-case audible artefact (`pcb1N` listen case)
-  driven by mic_dynamic_margin clipping at startup. Apply targeted
-  patch as documented in plan §1.8.
-- **Predicted AECMOS Δ**: 0.000 mean (single case; bucket-mean
-  invisible).
-- **Implementation LOE**: S (≤ 1 sprint).
-- **Cohort-tail risk**: low — must verify cohort-tail (`qNvSMyU`)
-  unchanged on 800-case bench post-fix.
-- **Measurable success**: pcb1N listen confirms patch resolves audible
-  artefact AND 800-case AECMOS no regression (DT Δdeg ≥ −0.005, FS
-  Δecho ≥ −0.020).
-- **Predicted byte-equal cost**: minor drift on `pcb1N`; byte-equal on
-  the other 799 cases.
+#### Candidate HK-2: pcb1N artefact characterization [REFRAMED, 2026-05-15]
+- **Origin**: v3.15 §10.S5 deferred to v3.16 as "mic_dynamic_margin
+  patch". Listen-driven 2026-05-15 investigation **falsifies the
+  original mechanism hypothesis** — pcb1N has NO clipping (mic peak
+  -2.58 dBFS, online sat 0.000) and no startup margin issue.
+- **Actual artefact (per user listen 2026-05-15)**: AEC output
+  retains nearly the entire mic spectrum — filter / RES barely act on
+  this case. Four contributing causes identified:
+  1. **Static delay ~2000 samples (~125 ms @16k) > fl=832 (52 ms)**.
+     If pre-align mis-resolves OR online tracker disagrees, the filter
+     trains on mis-aligned mic/lpb pairs and never converges.
+     mic-lpb cross-correlation `r = 0.071` (FS should be > 0.5)
+     consistent with this.
+  2. **Mic input characterised as "school PA speaker, low quality"** —
+     loudspeaker introduces NL distortion in the echo path; echo is
+     not a linear function of lpb. v3.13 E4 + E5 + v3.14 Volterra
+     closures established this DSP-only ceiling.
+  3. **LPB has "chained" spectral regions with audible boundary
+     pops, not visible in time-domain** — codec / encoding artefacts
+     in the reference signal itself (transient discontinuities the
+     filter cannot model).
+  4. **Mic level / gain unstable 80k–150k samples (5–9.4 s)** —
+     suggests source-side AGC or ambient gain swings during the
+     clip, defeating the steady-state assumptions in the per-band
+     ERL EMA and shadow Q-damping (v3.14 Arc P / S-orth.A).
+  5. **Mic HF energy not present in farend** — HF spectrum carries
+     ambient / mic-intrinsic noise / HF reverb tail beyond the
+     speaker output. F3.1 `mic-excess = mic - far*ERL` reads this
+     HF surplus as NE evidence, raises `dt_per_bin`, lifts the per-bin
+     gate, and lets HF echo + noise pass through the RES gain. This
+     is the spectral-floor / quiet_mask substrate-shift surface
+     (audit §3.4–3.5) feeding the audible "未處理頻譜" pattern.
+- **Why HK-2 quick-patch path closed**: no single-knob fix addresses
+  all three causes. Deeper mechanism (reverb-aware RES override OR
+  delay-aware filter mode OR NL-detector-driven gain boost) requires
+  audit + design + 800-case bench, exceeding "≤ 1 sprint" budget.
+- **v3.16 disposition**:
+  1. **HK-2 closed per §0.4** — original mechanism hypothesis
+     falsified, no quick patch ships.
+  2. **pcb1N promoted to v3.16 C6 (DelayEst audit) priority listen
+     case** — case-1 of `delay > fl AND low cross-correlation` cohort
+     that drives the C6 investigation.
+  3. **NEW candidate C9 proposed for v3.16 Phase 4** (gated on C6
+     outcome): `reverb_aware_res_override` — when mic-lpb r is
+     persistently low + far_power high, switch RES to aggressive mode
+     (override ENR thresholds with FS-bias). LOE M (detector + RES
+     policy + 800-case to avoid NE/DT false-trigger).
+- **Listen pack preserved**: `/tmp/v3_16_hk2_pcb1n_listen/` (mic +
+  lpb + ours + ours_nores) for C6 audit reuse.
 
-#### Candidate C1: `epc_dt_cap` dead-code removal
-- **Origin**: v3.13 Phase 3 audit (fire-rate 0/800); reaffirmed by §1.7
-  §3.3.
-- **Mechanism**: Delete `if epc_dt: g = min(g, EPC_DT_GAIN_CAP)` block
-  + `_stage_gains['03_epc_dt_cap']` capture wrapper at
-  [`python/aec.py`](../python/aec.py) (lines ≈ 3199-3204; line numbers
-  may have drifted post v3.14 Arc P/R + v3.15 Arc T merges, re-locate
-  before edit per §0.1 rule 1).
-- **Predicted AECMOS Δ**: 0.000 (byte-equal — fire-rate 0 on subset).
-- **Implementation LOE**: S (≤ 20 LOC delete + capture-key cleanup).
-- **Cohort-tail risk**: none.
-- **Measurable success**: 800-case sample-level byte-equal (`atol=1e-6,
-  rtol=1e-5`) AND `_stage_gains` dict no longer carries the deprecated
-  key.
-- **Predicted byte-equal cost**: byte-equal.
+#### Candidate C1: `epc_dt_cap` dead-code removal [DONE]
+- **Status (2026-05-15)**: SHIPPED on `feature/v3.16` — full mechanism
+  removal (cap action + state-driven flag substrate + gate
+  computation). 5/5 byte-equal sanity PASS (FS_static, FS_movement,
+  DT_static, NE, pcb1Nh0Z) for both `_ours.wav` and `_ours_nores.wav`.
+  800-case re-audit confirms 0/2,032,022 frame fire-rate across ALL
+  buckets including cohort_tail.
+- **Files changed**:
+  - [`python/aec.py`](../python/aec.py): removed
+    `res_state_driven_epc_dt_cap` config field, constructor param +
+    self-attr, gate computation block, cap action, `epc_dt` postprocess
+    signature param, call-site keyword arg, ResFilter wire-through.
+    `_diag_round5_stages[2]` + `_stage_gains['03_epc_dt_cap']` writes
+    preserved as aliases of stage 02 for diagnostic backward compat
+    (P52 9-slot contract).
+  - [`python/res_refactored/spectral_shaper.py`](../python/res_refactored/spectral_shaper.py):
+    mirrored signature + cap removal for byte-equal vs legacy.
+  - [`python/res_refactored/gain_computer.py`](../python/res_refactored/gain_computer.py)
+    + [`__init__.py`](../python/res_refactored/__init__.py): updated
+    docstring scope notes to reflect removal.
+- **Net LOC change**: ~30 LOC delete + ~12 LOC doc/comment update.
 
-#### Candidate C1b: `ne_g_floor` removal — NEW (substrate-shift discovery)
-- **Origin**: §1.7 §3.2 audit found fire-rate **0.0000 on DT_static +
-  DT_movement** (v3.13 baseline 0.93 on both). v3.14 Arc P + R raise
-  `spectral_g_min` enough that `ne_g_floor` never wins the
-  `max(spectral_g_min, ne_g_floor)` comparison.
-- **Mechanism**: Delete the `spectral_g_min = max(spectral_g_min,
-  ne_g_floor)` raise at [`python/aec.py`](../python/aec.py) line
-  ≈ 3696 + remove `ne_g_floor` config field + remove the cached scalar
-  `_stats_last_ne_g_floor` (used only by `_ne_g_floor_fired()` audit
-  hook).
-- **Predicted AECMOS Δ**: 0.000 on DT (byte-equal — fire-rate 0). FS
-  / NE / cohort_tail TBD by 800-case re-audit at v3.16 Phase 0 entry.
-- **Implementation LOE**: S (≤ 30 LOC delete + capture cleanup).
-- **Cohort-tail risk**: low — v3.13 cohort_tail ne_g_floor fire-rate
-  was 0.750 (lower than other buckets); needs re-audit on v3.15
-  substrate before removal commits. If still > 5 % on cohort_tail,
-  promote to C2 (per-state × per-band table) instead of C1b.
-- **Measurable success**: full 800-case fire-rate audit confirms ≤ 5 %
-  on every bucket including cohort_tail AND 800-case sample-level
-  byte-equal verification post-removal.
-- **Predicted byte-equal cost**: byte-equal IF the gate condition
-  holds; non-byte-equal is the trigger to ABORT removal and escalate
-  to C2.
-- **Gate**: 800-case re-audit (uses C6 prerequisite tooling — extend
-  audit script to take `--cases-list` flag).
+#### Candidate C1b: `ne_g_floor` removal — RECLASSIFIED RETAIN [2026-05-15]
+- **Original hypothesis**: ne_g_floor is dead code (audit reported
+  0/2,032,022 fires). FALSIFIED.
+- **C1c verdict** (after audit-script fix shipped 37a46b2): real
+  fire-rate matches v3.13 baseline (~0.93–0.97 on DT buckets),
+  ne_g_floor is the **universal NE-protection spectral floor** still
+  load-bearing on DT frames. Empirical confirmation: full removal
+  patch broke 4/5 byte-equal sanity (`_ours.wav`).
+- **Status**: REMOVED-FROM-DELETE-CANDIDATE-LIST. Substrate
+  preserved at `git stash@{0}` for reference; do NOT pop unless
+  pursuing per-band refactor (see below).
+- **Reclassification options for v3.16**:
+  1. **Subsume into C2** (preferred) — C2 ENR per-state × per-band
+     refactor naturally exposes the per-bin gate that ne_g_floor
+     currently provides as a scalar; ne_g_floor becomes a per-band
+     ceiling inside C2's table. NO standalone C1b sprint.
+  2. **Standalone per-band ne_g_floor refactor** (alternative if C2
+     hits scope creep) — split ne_g_floor scalar into 3-band
+     vector, tune per-band thresholds. Independent of C2 but
+     duplicates effort.
+  3. **Subsume into C9** (long-tail) — if reverb-aware RES override
+     needs ne_g_floor as a sub-mechanism, C9 lifts it; not the
+     primary path.
+- **Recommended disposition**: option 1 (subsume into C2). C1b
+  closed as standalone candidate in Phase 0; reopened as part of C2
+  scope in Phase 2.
+- **Implementation LOE**: 0 standalone (folded into C2's M scope).
+
+#### Candidate C1c: fix `ne_g_floor` audit-script measurement bug [DONE 2026-05-15]
+- **Status**: SHIPPED on `feature/v3.16` commit `37a46b2`. Audit
+  bug fixed via path (a) — un-gated pre-max diag fields added to
+  `ResFilter`, audit script consumes per-bin any-fire flag.
+- **Files changed**:
+  - [`python/aec.py`](../python/aec.py): added 4 pre-max diag fields
+    (`_stats_pre_max_spectral_g_min`,
+    `_stats_pre_max_spectral_g_min_max`, `_stats_ne_g_floor_max`,
+    `_stats_ne_g_floor_any_bin_fired`) computed unconditionally
+    at line 3752 BEFORE the `np.maximum` raise.
+  - [`tools/research/v3_15_res_audit.py`](../tools/research/v3_15_res_audit.py):
+    `_ne_g_floor_fired()` prefers per-bin flag, falls back to scalar
+    pre-max comparison on older builds.
+- **Recovered fire-rates** (5-case directional, post-fix):
+  ne_g_floor DT_static 0.969 / DT_movement 0.974 / GLOBAL 0.971 —
+  matches v3.13 baseline (0.934 / 0.933) within +0.04 substrate
+  drift expected from v3.14 Arc P + R + S-orth.A.
+- **Byte-equal**: 10/10 PASS on 5-case sanity (ours + nores). No
+  production behaviour shift — only diag-field captures + audit-
+  script read path changed.
+- **Unblocks**: C1b reclassification (see below).
 
 ### Phase 1 — Foundation (BLOCKS Phase 2-4; can run in parallel within phase)
 
@@ -346,7 +425,8 @@ dependency.
   regression > −0.020.
 - **Gates on**: C5 (modular interface).
 - **Subsumes**: §1.3 Arc D merge re-evaluation (D's `coarse_learning`
-  tuple becomes part of C2's table).
+  tuple becomes part of C2's table); C1b ne_g_floor reclassification
+  (per-band ne_g_floor becomes part of C2's table per §C1b option 1).
 
 #### Candidate C3: Stage-1 4-cap chain ordering audit + reorder
 - **Origin**: v3.13 Phase 3 cosmetic refactor deferred + §1.1 DT-NE
@@ -462,6 +542,42 @@ dependency.
 - **Priority**: LOW within Phase 4 (Arc G's audible debt is smaller
   than Arc M's).
 
+#### Candidate C9: Reverb-aware RES override — NEW [Phase 4, from HK-2 reframing]
+- **Origin**: HK-2 reframed 2026-05-15. pcb1N listen analysis
+  surfaced four contributing causes (heavy reverb / delay > fl /
+  PA-quality NL / lpb codec NL / mic gain instability / HF mic
+  energy not in farend). None is patchable by a single knob; the
+  filter / RES "barely act" surface is structural — when echo path
+  is heavily reverberant, the linear filter's `fl=832` (52 ms) tail
+  is shorter than room reverb (~125 ms+), and the F3.1 mic-excess
+  evidence path mis-reads HF reverb as NE.
+- **Mechanism**: Detect persistently low mic-lpb cross-correlation
+  (`r < 0.15` over a sliding window with `far_power > threshold`)
+  → switch RES to FS-aggressive mode for the duration: tighten
+  `enr_t_ne / enr_s_ne` toward FS values, lift `effective_scale`,
+  optionally cap dt_per_bin at HF bins. Override times out after
+  K frames of `r > 0.3` or `far_power < threshold`.
+- **Predicted AECMOS Δ**: TBD — pcb1N audible improvement is the
+  primary success target; cohort-wide AECMOS may move ±0 because
+  the affected case fraction is small.
+- **Implementation LOE**: M-L (2-3 sprints — detector calibration
+  on pcb1N + 3-5 reverb-heavy cohort cases; RES override wire;
+  800-case A/B for FS / DT false-trigger guard).
+- **Cohort-tail risk**: LOW — cohort_tail mechanism is
+  movement-driven (path change detected by ERL_decile_std),
+  orthogonal to persistent-reverb detector. Both can fire
+  independently without conflict.
+- **Measurable success**: pcb1N audible filter / RES action
+  improvement (user listen) AND cohort tail Δecho ≥ −0.05 AND
+  FS Δecho ≥ −0.020 AND DT Δdeg ≥ −0.005 AND NE Δdeg ≥ −0.005.
+- **Gates on**: C6 (DelayEst audit may resolve cause #1 first; if
+  pcb1N's primary issue is delay tracking, C9 mechanism scope
+  shrinks to NL + reverb-only).
+- **Listen pack**: `/tmp/v3_16_hk2_pcb1n_listen/` (mic + lpb + ours
+  + ours_nores) preserved for C9 design + tuning.
+- **Priority**: LOW-MED (single-case audible debt, but case is
+  characteristic of a real-world subset — PA-speaker meeting rooms).
+
 ---
 
 ## 5. Recommendation — v3.16 arc authorisation
@@ -486,14 +602,19 @@ dependency.
 arc** per the decision matrix. ≥ 3 satisfied → user merge + v3.16
 authorisation pending §0.7 closeout review.
 
+**Single-case audible candidates (not in Δ ranking)**: C9 reverb-aware
+RES override (HK-2 reframed) — primary success metric is pcb1N
+audible improvement, not cohort AECMOS Δ.
+
 ### v3.16 phase ordering
 
 ```
 Phase 0 (parallel-safe; before everything else)
-├── HK-1  B3 fix (run_one_case.py CNG seed)
-├── HK-2  pcb1N mic_dynamic_margin patch
-├── C1    epc_dt_cap dead-code removal (ZERO Δ)
-└── C1b   ne_g_floor removal (NEW — substrate-shift; gated on 800-case re-audit)
+├── HK-1  B3 fix (run_one_case.py CNG seed)                  [DONE ea8d320]
+├── HK-2  pcb1N artefact characterization                     [REFRAMED → C6 + C9]
+├── C1    epc_dt_cap dead-code removal (ZERO Δ)               [DONE d90efdc]
+├── C1b   ne_g_floor removal — RECLASSIFIED retain/refactor   [substrate stash@{0}; defer to C2 / C9]
+└── C1c   audit ne_g_floor measurement bug fix                [DONE 37a46b2]
 
 Phase 1 (BLOCKS Phase 2-4)
 ├── C5    Per-state RES interface modularisation [architectural]
@@ -502,7 +623,7 @@ Phase 1 (BLOCKS Phase 2-4)
         └── if movement closures = mechanism walls → Phase 3-4 proceeds independently
 
 Phase 2 (gated on C5)
-├── C2    ENR per-state × per-band refactor (含 Arc D merge re-eval)
+├── C2    ENR per-state × per-band refactor (含 Arc D merge re-eval; subsumes C1b's ne_g_floor question)
 ├── C3    Stage-1 4-cap chain ordering audit + reorder
 └── C4    noise_floor / CNG interaction refactor
 
@@ -512,19 +633,20 @@ Phase 3 (gated on C6 outcome + Arc T detector default ON [DONE v3.15 §10.S0b])
 
 Phase 4 (gated on C6 + Phase 3)
 ├── C7    Arc M.v3 retry (α / β / γ — needs new detector primitive from C6 OR new dispatch from Phase 3)
-└── C8    Arc G non-destructive partial W decay (independent within phase, LOW priority)
+├── C8    Arc G non-destructive partial W decay (independent within phase, LOW priority)
+└── C9    Reverb-aware RES override (NEW from HK-2; gated on C6 — pcb1N audible target)
 ```
 
 ### v3.16 sprint estimate
 
-| Phase | Sprints |
-|---|---|
-| 0 housekeeping | 3 – 4 (HK-1 + HK-2 + C1 + C1b) |
-| 1 foundation | 4 – 5 (C5 architectural; C6 independent audit) |
-| 2 RES refactor | 6 – 9 (3 candidates × 2 – 3 sprints each) |
-| 3 Arc T consumers | 4 – 6 |
-| 4 Arc M / G retry (if opened) | 4 – 6 |
-| **TOTAL** | **21 – 30 sprints** |
+| Phase | Sprints | Status |
+|---|---|---|
+| 0 housekeeping | 0 (HK-1 + HK-2 + C1 + C1c DONE; C1b reclassified to C2 surface) | ~50 % done at v3.15 closeout |
+| 1 foundation | 4 – 5 (C5 architectural; C6 independent audit) | pending |
+| 2 RES refactor | 6 – 9 (3 candidates × 2 – 3 sprints each) | gated on C5 |
+| 3 Arc T consumers | 4 – 6 | gated on C6 |
+| 4 Arc M / G / C9 (if opened) | 6 – 9 (C7 4-6 + C8 2-3 + C9 2-3) | gated on C6 + Phase 3 |
+| **TOTAL** | **20 – 29 sprints** | |
 
 ### Cohort-tail risk register (require explicit `qNvSMyU` regression check before authorisation)
 
@@ -541,7 +663,7 @@ Phase 4 (gated on C6 + Phase 3)
 
 | Bar | Status |
 |---|---|
-| ≥ 5 refactor candidates listed | **PASS** (13 candidates including new C1b from substrate-shift discovery) |
+| ≥ 5 refactor candidates listed | **PASS** (15 candidates: HK-1 / HK-2 / C1 / C1b / C1c / C5 / C6 / C2 / C3 / C4 / v3.16-A / v3.16-B / C7 / C8 / C9) |
 | Each candidate has measurable success criterion | **PASS** (template applied to all 12) |
 | ≥ 3 candidates with predicted Δ ≥ +0.005 → authorise v3.16 | **PASS** (5: v3.16-A / v3.16-B / C2 / C4 / C3) |
 | Else → declare RES architecture stable, close §1.7, no v3.16 | n/a |
@@ -573,10 +695,11 @@ authorised, conditional on user §0.7 closeout review.
 
 ## 8. Open items / follow-ups
 
-- **Audit on full 800-case at v3.16 phase entry**: 60-case Tier 1
-  fire-rate values in §3 are directional; promotion to v3.16 sprint
-  requires re-audit on full 800 cases per
-  `feedback_aec_code_review_accuracy`.
+- **Audit on full 800-case** [DONE 2026-05-15]: post-C1c full audit
+  ran on `feature/v3.16` HEAD `37a46b2`. Outputs at
+  `/tmp/v3_16_audit_full/{audit.json,summary.csv,per_case/*.json}`.
+  §3 numbers above are 800-case authoritative. v3.16 phase-entry
+  re-audit no longer needed unless substrate changes.
 - **C6 audit re-orders Phase 3-4**: outcome of C6 DelayEst audit may
   invalidate v3.16-A / v3.16-B / C7 ROI estimates. Run C6 audit first
   in Phase 1 sequencing.

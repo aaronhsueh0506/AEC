@@ -543,17 +543,6 @@ class AecConfig:
     # FS Δecho ≥ -0.02 / DT Δdeg ≥ -0.005 / cohort tail Δecho ≥ -0.05.
     res_unified_gain_floor: bool = False
 
-    # v3.12 Phase 3B (S6b) — state-driven `epc_dt_cap` gate. Default OFF
-    # research substrate. The S6b 800-case fire-rate audit (2026-05-13)
-    # found the legacy gate `epc_active AND effective_dt > 0.35` fires
-    # 0/2,032,022 frames at production thresholds — the cap action is
-    # dead code in BALANCED. Q7 V3 mis-identified `epc_dt_cap` as the FS
-    # leak carrier; real carriers are elsewhere (other caps / dt_per_bin
-    # ENR — re-investigation pending). Flag retained for a future Phase 3C
-    # state-set revision; current `{diverged, suspicious_dt}` set is
-    # additive (not retargeting). See docs/v3_12_s6b_verdict.md.
-    res_state_driven_epc_dt_cap: bool = False
-
     # v3.12 S7 (Phase 3B v3 Option α): drop the `NOT epc_active` gate on the
     # F3.1 v3 mic-excess path so it also fires during EPC-active frames.
     # Pre-implementation 800-case audit (2026-05-13, docs/v3_12_s7_*) found:
@@ -923,6 +912,18 @@ class AecConfig:
     arc_t_threshold_lo_db: float = 13.0
     arc_t_hysteresis_frames: int = 200
     arc_t_over_sub_boost: float = 1.3
+
+    # v3.16-A — Arc T S2 H2 fix (`force_render` OR-in). Original Arc T
+    # S2 wired `self.res._using_render_based = True` from AEC level when
+    # `_arc_t_cohort_tail_signal` asserted, but `compute_residual_echo`
+    # state machine (`ResidualEchoEstimator.attribute_legacy`)
+    # overwrites that field 1 line later via the local `want_render`
+    # decision (closure: docs/v3_15_arc_t_s2_wiring_closure.md).
+    # Fix: OR cohort_tail_T INTO the `force_render` decision INSIDE
+    # `attribute_legacy` so the render-based path engages from within
+    # the state machine. Default OFF → byte-equal flag-OFF; predicted
+    # +0.030 cohort tail Δecho when ON. See plan §10 v3.16-A.
+    arc_t_force_render_or_in: bool = False
 
     # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal flag-OFF).
     #
@@ -2136,7 +2137,6 @@ class ResFilter:
                  use_mic_excess_evidence: bool = False,
                  consume_filter_state: bool = False,
                  unified_gain_floor: bool = False,
-                 state_driven_epc_dt_cap: bool = False,
                  dt_per_bin_unified: bool = False,
                  noise_floor_refined: bool = False,
                  cap2_fs_loosen: bool = False,
@@ -2156,7 +2156,6 @@ class ResFilter:
         self._use_mic_excess_evidence = use_mic_excess_evidence
         self._consume_filter_state = consume_filter_state
         self._unified_gain_floor = unified_gain_floor
-        self._state_driven_epc_dt_cap = state_driven_epc_dt_cap
         self._dt_per_bin_unified = dt_per_bin_unified
         self._noise_floor_refined = noise_floor_refined
         self._cap2_fs_loosen = cap2_fs_loosen
@@ -2248,9 +2247,13 @@ class ResFilter:
         self._diag_residual_echo_psd_last = np.zeros(n_freqs, dtype=np.float32)
         self._diag_round4 = {}
         # Round 5: per-stage gain means (voice-band), audio-passive.
-        # Indices: 0=softgate_emr, 1=spectral_floor, 2=epc_dt_cap, 3=quiet_mask,
-        #          4=3bin_smooth, 5=hf_cap, 6=pre_temporal, 7=post_temporal,
-        #          8=after_noise_lift (final gain_smooth)
+        # Indices: 0=softgate_emr, 1=spectral_floor, 2=epc_dt_cap_legacy,
+        #          3=quiet_mask, 4=3bin_smooth, 5=hf_cap, 6=pre_temporal,
+        #          7=post_temporal, 8=after_noise_lift (final gain_smooth)
+        # Slot 2 is preserved post v3.16 C1 epc_dt_cap removal as an alias
+        # of slot 1 (cap action removed because fire-rate was 0/800 in
+        # v3.13 + v3.14 audits). 9-slot layout retained for diag-consumer
+        # backward compat (P52 Phase B refactor expects fixed shape).
         self._diag_round5_stages = np.zeros(9, dtype=np.float32)
 
         # Per-bin gain capture (full vectors, opt-in via capture_stages)
@@ -2322,6 +2325,11 @@ class ResFilter:
         self._stats_last_using_render = False
         self._stats_last_ne_g_floor = 0.0
         self._stats_last_spectral_g_min = 0.0
+        # v3.16 C1c: pre-max captures so audits read pre-floor surface.
+        self._stats_pre_max_spectral_g_min = 0.0
+        self._stats_pre_max_spectral_g_min_max = 0.0
+        self._stats_ne_g_floor_max = 0.0
+        self._stats_ne_g_floor_any_bin_fired = False
         self._stats_last_gain_before_floor = 1.0
         self._stats_last_gain_after_floor = 1.0
         self._stats_last_gain_after_smoothing = 1.0
@@ -2415,6 +2423,11 @@ class ResFilter:
         self._stats_last_using_render = False
         self._stats_last_ne_g_floor = 0.0
         self._stats_last_spectral_g_min = 0.0
+        # v3.16 C1c: pre-max captures so audits read pre-floor surface.
+        self._stats_pre_max_spectral_g_min = 0.0
+        self._stats_pre_max_spectral_g_min_max = 0.0
+        self._stats_ne_g_floor_max = 0.0
+        self._stats_ne_g_floor_any_bin_fired = False
         self._stats_last_gain_before_floor = 1.0
         self._stats_last_gain_after_floor = 1.0
         self._stats_last_gain_after_smoothing = 1.0
@@ -2573,6 +2586,9 @@ class ResFilter:
         Keys: '01_softgate_emr', '02_spectral_floor', '03_epc_dt_cap',
         '04_quiet_mask', '05_3bin_smooth', '06_hf_cap', '07_pre_temporal',
         '08_post_temporal'. Vectors are np.float32 length n_freqs.
+        Note: '03_epc_dt_cap' is post v3.16 C1 an alias of
+        '02_spectral_floor' (cap action removed; key retained for audit
+        script backward compat).
         """
         return self._stage_gains
 
@@ -3235,18 +3251,20 @@ class ResFilter:
             g = np.maximum(1.0 - self.over_sub * eer, spectral_g_min)
         return g
 
-    def _stage_gain_postprocess(self, *, g_in, epc_dt, quiet_mask, far_power,
+    def _stage_gain_postprocess(self, *, g_in, quiet_mask, far_power,
                                   effective_dt, is_stationary_dt, divergence,
                                   erl_estimate=0.01):
-        """Stage 3: EPC_DT cap, quiet mask, 3-bin smooth, HF cap, divergence override.
+        """Stage 3: quiet mask, 3-bin smooth, HF cap, divergence override.
 
-        Returns updated g (post-divergence-override). Mutates _diag_round5_stages[2..6].
+        Returns updated g (post-divergence-override). Mutates
+        _diag_round5_stages[2..6]. Slot 2 is preserved as alias of slot 1
+        post v3.16 C1 (epc_dt_cap removed; cap action fired 0/800 in
+        v3.13 + v3.14 audits).
         """
         g = g_in
-        # EPC_DT gain cap: echo path changed + DT → cap gain to force minimum echo suppression.
-        if epc_dt:
-            EPC_DT_GAIN_CAP = 0.85
-            g = np.minimum(g, EPC_DT_GAIN_CAP)
+        # v3.16 C1 — epc_dt_cap removed (zero fire-rate). Slot 03 / stage 2
+        # are preserved as aliases of stage 02 for diagnostic backward compat
+        # (audit scripts + P52 res_refactored expect 9-slot _diag_round5_stages).
         if getattr(self, '_capture_stages', False):
             self._stage_gains['03_epc_dt_cap'] = g.copy()
         self._diag_round5_stages[2] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
@@ -3633,16 +3651,11 @@ class ResFilter:
         effective_dt = max(float(dt_for_fs), float(shadow_dt))
         self._last_effective_dt = effective_dt
 
-        # EPC_DT: echo path change detected AND double-talk active.
-        # Gain cap bypasses ENR path (locked ~1.0 by DT nearend protection).
-        # v3.12 S6b research substrate (default OFF): state-driven gate
-        # option. See docs/v3_12_s6b_verdict.md — legacy gate was found
-        # to fire 0% at production thresholds, so the cap is dead code
-        # in BALANCED. Flag retained for future Phase 3C state-set work.
-        if self._state_driven_epc_dt_cap and self._consume_filter_state:
-            epc_dt = filter_state in ('diverged', 'suspicious_dt')
-        else:
-            epc_dt = epc_active and effective_dt > 0.35
+        # v3.16 C1 — epc_dt gate computation removed. The legacy gate
+        # `epc_active AND effective_dt > 0.35` fired 0/2,032,022 frames
+        # in v3.13 + v3.14 audits; the corresponding 0.85 gain cap in
+        # _stage_gain_postprocess was confirmed dead code. State-driven
+        # variant retired with the cap action.
 
         eps = 1e-10
         residual_echo_psd = self._stage_residual_model(
@@ -3741,6 +3754,19 @@ class ResFilter:
         ne_g_min_ceil = 10 ** (self.ne_protect_db / 20)
         ne_g_floor = effective_g_min + (ne_g_min_ceil - effective_g_min) * ne_protection
         ne_g_floor = np.maximum(ne_g_floor, effective_g_min)
+        # v3.16 C1c — capture pre-floor spectral_g_min so audits can detect
+        # ne_g_floor binding fires (any-bin) by comparing pre-floor vs ne_g_floor.
+        # The legacy `_stats_last_spectral_g_min` writes the post-max value
+        # below; reading it against ne_g_floor (as v3.15 audit did) is
+        # mathematically False because post-max >= ne_g_floor element-wise.
+        # Computed unconditionally (cheap; needed by audit hook even when
+        # `self._stats is None`).
+        self._stats_pre_max_spectral_g_min = float(np.mean(spectral_g_min))
+        self._stats_pre_max_spectral_g_min_max = float(np.max(spectral_g_min))
+        self._stats_ne_g_floor_max = float(np.max(ne_g_floor))
+        self._stats_ne_g_floor_any_bin_fired = bool(
+            np.any(ne_g_floor > spectral_g_min + 1e-7)
+        )
         spectral_g_min = np.maximum(spectral_g_min, ne_g_floor)
 
         # startup_dt conditions: trigger when DT active + filter not converged
@@ -3772,7 +3798,6 @@ class ResFilter:
         )
         g = self._stage_gain_postprocess(
             g_in=g,
-            epc_dt=epc_dt,
             quiet_mask=quiet_mask,
             far_power=far_power,
             effective_dt=effective_dt,
@@ -4518,6 +4543,12 @@ class ResidualEchoEstimator:
         self._last_linear_residual_psd_mean = 0.0
         self._last_render_residual_psd_mean = 0.0
         self._last_render_blend = 0.0
+        # v3.16-A — Arc T S2 H2 force_render OR-in. AEC mutates
+        # `_arc_t_cohort_tail_signal` per frame before `attribute_legacy`
+        # runs; `_arc_t_force_render_or_in_enabled` is wired from
+        # AecConfig at AEC.__init__ and stays constant after.
+        self._arc_t_cohort_tail_signal = False
+        self._arc_t_force_render_or_in_enabled = False
 
     def reset(self, preserve_long_window_ema: bool = False) -> None:
         """Clear residual-echo estimator state.
@@ -4607,10 +4638,16 @@ class ResidualEchoEstimator:
                 effective_threshold = switching_threshold + hysteresis
             else:
                 effective_threshold = switching_threshold
+            # v3.16-A — OR cohort_tail_T into force_render. AEC mutates
+            # `_arc_t_cohort_tail_signal` per frame before this method
+            # runs (see AEC.process). When the enable flag is OFF (the
+            # default), the OR-in term is always False → byte-equal.
             force_render = (
                 epc_active
                 or saturation_level > 0.5
                 or not filter_converged
+                or (self._arc_t_force_render_or_in_enabled
+                    and self._arc_t_cohort_tail_signal)
             )
             want_render = (erle_factor < effective_threshold) or force_render
             if want_render and not self._using_render_based:
@@ -5612,7 +5649,6 @@ class AEC:
                 use_mic_excess_evidence=self.config.use_mic_excess_evidence,
                 consume_filter_state=self.config.res_consume_filter_state,
                 unified_gain_floor=self.config.res_unified_gain_floor,
-                state_driven_epc_dt_cap=self.config.res_state_driven_epc_dt_cap,
                 dt_per_bin_unified=self.config.res_dt_per_bin_unified,
                 noise_floor_refined=self.config.res_noise_floor_refined,
                 cap2_fs_loosen=self.config.res_cap2_fs_loosen,
@@ -5624,6 +5660,12 @@ class AEC:
                 dt_ne_per_bin_thresh=self.config.dt_ne_per_bin_thresh,
                 dt_ne_per_bin_scale=self.config.dt_ne_per_bin_scale,
             )
+            # v3.16-A — wire force_render OR-in enable flag onto the
+            # ResidualEchoEstimator. Reading happens inside
+            # `attribute_legacy`; default OFF preserves byte-equal.
+            if self.res._residual_est is not None:
+                self.res._residual_est._arc_t_force_render_or_in_enabled = bool(
+                    self.config.arc_t_force_render_or_in)
         else:
             self.res = None
 
@@ -7350,6 +7392,13 @@ class AEC:
                 self._convergence.update_divergence(self.near_power, self.raw_error_power)
 
                 if self.res:
+                    # v3.16-A — propagate cohort_tail_T signal to RES
+                    # residual estimator. Read by `force_render` OR-in
+                    # inside `ResidualEchoEstimator.attribute_legacy`;
+                    # byte-equal when `arc_t_force_render_or_in=False`.
+                    if self.res._residual_est is not None:
+                        self.res._residual_est._arc_t_cohort_tail_signal = bool(
+                            getattr(self, '_arc_t_cohort_tail_signal', False))
                     # Change D: during EPC render-forced window, force RES
                     # into render-based echo estimate (unreliable filter W).
                     if getattr(self, '_epc_render_forced_remaining', 0) > 0:
