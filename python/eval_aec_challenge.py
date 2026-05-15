@@ -24,6 +24,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aec import AEC, AecConfig, AecMode
 
 _ENABLE_CNG = False  # global CNG flag, set by --cng CLI arg
+_CASES_LIST = None   # Tier-1 subset stem set; None = full 800-case rendering
+
+
+def _filter_mic_files(mic_files, tag):
+    """Restrict mic_files to stems in _CASES_LIST (no-op when None)."""
+    if _CASES_LIST is None:
+        return mic_files
+    keep = [f for f in mic_files if f[:-len('_mic.wav')] in _CASES_LIST]
+    print(f'[cases-list] {tag}: {len(keep)}/{len(mic_files)} matched', file=sys.stderr)
+    return keep
 
 # Try PESQ
 try:
@@ -482,6 +492,7 @@ def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_
     # Find all mic files (including _with_movement_ variants)
     mic_files = sorted([f for f in os.listdir(sc_dir)
                         if '_farend_singletalk' in f and f.endswith('_mic.wav')])
+    mic_files = _filter_mic_files(mic_files, 'farend_singletalk')
     if not mic_files:
         print("No farend_singletalk files found")
         return
@@ -597,6 +608,7 @@ def eval_nearend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out
 
     mic_files = sorted([f for f in os.listdir(sc_dir)
                         if '_nearend_singletalk' in f and f.endswith('_mic.wav')])
+    mic_files = _filter_mic_files(mic_files, 'nearend_singletalk')
     if not mic_files:
         print("No nearend_singletalk files found")
         return
@@ -713,6 +725,7 @@ def eval_doubletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, pr
     # Find all mic files (including _with_movement_ variants)
     mic_files = sorted([f for f in os.listdir(sc_dir)
                         if '_doubletalk' in f and f.endswith('_mic.wav')])
+    mic_files = _filter_mic_files(mic_files, 'doubletalk')
     if not mic_files:
         print("No doubletalk files found")
         return
@@ -829,10 +842,11 @@ def _run_eval_captured(func, *args, **kwargs):
 
 def _run_scenario(scenario_args):
     """Worker function for parallel execution (must be top-level for pickling)."""
-    func_name, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, enable_cng = scenario_args
-    # Propagate CNG flag to subprocess (global is lost across ProcessPoolExecutor fork)
-    global _ENABLE_CNG
+    func_name, base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, enable_cng, cases_list = scenario_args
+    # Propagate flags to subprocess (globals are lost across ProcessPoolExecutor fork)
+    global _ENABLE_CNG, _CASES_LIST
     _ENABLE_CNG = enable_cng
+    _CASES_LIST = cases_list
     func = {'fs': eval_farend_singletalk,
             'ne': eval_nearend_singletalk,
             'dt': eval_doubletalk}[func_name]
@@ -842,9 +856,9 @@ def _run_scenario(scenario_args):
 def run_scenarios(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, parallel=False, do_old_aec=False):
     """Run all three scenarios, optionally in parallel."""
     scenarios = [
-        ('fs', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG),
-        ('ne', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG),
-        ('dt', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG),
+        ('fs', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG, _CASES_LIST),
+        ('ne', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG, _CASES_LIST),
+        ('dt', base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset, do_old_aec, _ENABLE_CNG, _CASES_LIST),
     ]
 
     if parallel:
@@ -882,10 +896,20 @@ def main():
     parser.add_argument('--gain-type', choices=['wiener', 'enr', 'spectral_sub'],
                         default=None, help='Override RES gain type')
     parser.add_argument('--cng', action='store_true', help='Enable comfort noise generation')
+    parser.add_argument('--cases-list', default=None,
+                        help='Stem-list file (one stem per line, # comments). '
+                             'When present, restricts rendering to listed cases; '
+                             'omitted = full 800-case rendering.')
     args = parser.parse_args()
 
-    global _ENABLE_CNG
+    global _ENABLE_CNG, _CASES_LIST
     _ENABLE_CNG = args.cng
+    if args.cases_list:
+        with open(args.cases_list) as fh:
+            _CASES_LIST = {ln.strip() for ln in fh
+                           if ln.strip() and not ln.lstrip().startswith('#')}
+        print(f'[cases-list] loaded {len(_CASES_LIST)} stems from {args.cases_list}',
+              file=sys.stderr)
 
     base_dir = os.path.abspath(args.dataset_dir)
     out_dir = args.output_dir or os.path.join(base_dir, 'output')
