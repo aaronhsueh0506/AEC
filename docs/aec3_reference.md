@@ -1033,25 +1033,45 @@ changes**. Merge-by-merge, one diffable change at a time.
 
 ## 9. Known limitations of this analysis
 
-### 9.1 Not fetched (should fetch before acting on corresponding gaps)
+### 9.1 Fetch status
 
+**v3.18 Phase 0.1 update (2026-05-15)**: complete AEC3 source tree
+pinned at commit `9310b29acd` under
+[docs/aec3_extracts/src/aec3/](aec3_extracts/src/aec3/) (127 files,
+1.0 MB). All formerly-unfetched modules are now available locally.
+Per-module read status:
+
+**Phase 0.2 read (RES gain pipeline)** — see [docs/aec3_residual_pipeline_mapping.md](aec3_residual_pipeline_mapping.md):
+- ✓ `suppression_gain.cc` — read 2026-05-15
+- ✓ `residual_echo_estimator.cc` — read 2026-05-15
+
+**Phase 0.3 read (NE detectors, Gap #15 revisit)** — see [docs/aec3_subband_ne_detector_mapping.md](aec3_subband_ne_detector_mapping.md):
+- ✓ `subband_nearend_detector.cc` — read 2026-05-15
+- ✓ `dominant_nearend_detector.cc` — read 2026-05-15
+
+**Phase 0.4 read (reverb)** — see [docs/aec3_reverb_mapping.md](aec3_reverb_mapping.md):
+- ✓ `reverb_model.cc` — read 2026-05-15
+- ✓ `reverb_decay_estimator.cc` — read 2026-05-15
+
+**Available locally but not yet read** (Phase A/B/C will read on-demand):
 - `echo_canceller3_config.cc` — config defaults (e.g.
   `coarse_reset_hangover_blocks` actual value, all referenced
-  "configurable, default tbd" in this doc).
-- `suppression_gain.cc` — RES counterpart.
-- `residual_echo_estimator.cc` — residual echo estimate.
+  "configurable, default tbd" in this doc). Phase 0.6 read if hard-bar
+  tuning needs defaults.
 - `stationarity_estimator.cc` — render stationarity (our Gap #14
-  counterpart).
-- `subband_nearend_detector.cc`, `dominant_nearend_detector.cc` —
-  DTD counterparts (Gap #15).
-- `reverb_model.cc`, `reverb_decay_estimator.cc` — reverb.
-- `matched_filter.cc` — delay estimation internals.
-- `render_signal_analyzer.cc` — render signal analysis.
-- `signal_dependent_erle_estimator.cc` — ERLE details (mentioned
-  by `erle_estimator.cc` Reset).
-- Second half of `adaptive_fir_filter.cc` — implementations of
-  `SetFilter`, `ScaleFilter`, `Reset` (method signatures in .h
-  captured in §2.1 table; implementations not inspected).
+  counterpart). Read on-demand if Phase D needs stationarity input.
+- `matched_filter.cc` — delay estimation internals. NOT needed (v3.16
+  C6 audit H2 closed DelayEst arc).
+- `render_signal_analyzer.cc` — render signal analysis. Phase A.5 read
+  if shadow NLMS tuning needs render-side context.
+- `signal_dependent_erle_estimator.cc` — ERLE details. Phase D read
+  if D-α subband detector wires through ERLE.
+- Second half of `adaptive_fir_filter.cc` — `SetFilter`, `ScaleFilter`,
+  `Reset` implementations. **Phase B will read** (ScaleFilter port).
+- `aec_state.cc` second half — `UsableLinearEstimate` /
+  `GetReverbFrequencyResponse` / `GetResidualEchoScaling`
+  implementations. **Phase C will read**.
+- `filter_analyzer.cc` second half — Phase C C.1 will read.
 
 ### 9.2 Inferences made without full source
 
@@ -1130,8 +1150,84 @@ Fetched and analysed in this doc:
 
 ---
 
-## 11. Changelog
+## 11. RES-side gap table (v3.18 Phase 0 audit, 2026-05-15)
 
+Compiled from Phase 0.2-0.4 module reads. The v3.13-v3.17 15-gap table
+(§5) focuses on linear-filter / shadow / EPC machinery. This table
+focuses on **post-linear (RES) machinery** that the prior table only
+sampled (Gaps #9 + #15).
+
+| RES Gap # | AEC3 mechanism | Our analogue | Per-bin? | Severity | Phase |
+|---|---|---|---|---|---|
+| R1 | `ResidualEchoEstimator` (separate 2-module pipeline) | `ResFilter` monolith (9 stages) | both per-bin | LOW — convention difference | n/a |
+| R2 | `nearend_params_` ↔ `normal_params_` 2-way per-bin mask swap | scalar `effective_dt` floor lift | swap is per-bin | **HIGH** — primary NE HF protection mechanism | D-β (Phase D core) |
+| R3 | `DominantNearendDetector` LF-only binary + hysteresis | broadband `dt_indicator` + `shadow_dt` → scalar `effective_dt` | scalar | MEDIUM | partial replacement of D-α |
+| R4 | `SubbandNearendDetector` HF-quiet-when-voiced cue (echo-agnostic) | none | per-band cue | **HIGH** — only non-residual NE detector | D-α |
+| R5 | `WeightEchoForAudibility` 3-band echo weighting | `block_lf` 3-band ENR tilt (v3.14 Arc R) | per-band | NONE — equivalent | shipped v3.14 |
+| R6 | `X2_noise_floor[k]` minimum-statistics tracker | none | per-bin | MEDIUM — likely matters for pcb1N FS quiet | D-aux1 |
+| R7 | `LimitHighFrequencyGains` 20-28 avg → bins ≥29 cap | `hf_cap` ([_stage_gain_postprocess](../python/aec.py#L3181)) | per-bin | MEDIUM — different rule; audit before port | C-aux audit |
+| R8 | `LimitLowFrequencyGains` 3-bin equalize (gain[0]=gain[1]=min(gain[1],gain[2])) | none | per-bin | LOW | optional D-aux |
+| R9 | `ReverbModel` per-bin EMA tail addition | none | per-bin | MEDIUM — pcb1N FS_static specific | v3.19 backlog |
+| R10 | `ReverbDecayEstimator` adaptive T60 via filter regression | none (audit-only flags) | scalar input | MEDIUM | v3.19 backlog |
+| R11 | `EarlyReverbLengthEstimator` 9-section overlap regression | none | scalar input | LOW — only meaningful with R9 + R10 | v3.19 backlog |
+| R12 | `reverb_decay` mild ↔ adaptive switch on NE state | none | scalar | LOW — depends on R9 | v3.19 backlog |
+| R13 | `UsableLinearEstimate` multi-gate (startup 0.4s + reset 0.2s + convergence_seen + !transparent) | `_filter_converged` (single bool) + `usable_linear_estimate` (half-built) | scalar | HIGH — Gap #9 in §5 | C |
+| R14 | `R2` vs `R2_unbounded` dual estimate (NE detector sees unbounded) | not exposed | per-bin × 2 | MEDIUM — Phase D wiring | D dependency |
+| R15 | `SaturatedEcho` Y2-passthrough | ad-hoc in `_stage_gain_compute` | per-bin | NONE | n/a |
+| R16 | `GetResidualEchoScaling` stationarity-driven per-bin scaling | none (we have `_is_stationary_far` only as input gate) | per-bin | LOW — depends on R9/R10 stationarity logic first | v3.19 backlog |
+| R17 | `LowNoiseRenderDetector` (block-level X² magnitude check) | `_far_power` gating equivalent | scalar | NONE | n/a |
+| R18 | `EchoGeneratingPower` gated-max over render window | `_far_psd_smoothed` simpler EMA | per-bin | NONE — ours arguably more stable | n/a |
+| R19 | `UpperBandsGain` scalar > 8 kHz | N/A (mono 16 kHz single-band) | — | NONE | n/a |
+| R20 | `MovingAverageSpectrum` nearend smoother (configurable blocks) | implicit through per-frame consumption | per-bin | NONE | n/a |
+
+### 11.1 Severity legend
+
+- **HIGH** — structural difference, mapped to a concrete user-facing
+  symptom (DT debt, NE HF damage, cohort tail catastrophe). Worth porting.
+- **MEDIUM** — code-level difference, may improve specific cohorts.
+  Port if Phase D capacity allows; otherwise v3.19+.
+- **LOW** — small mechanism, cheap to add but limited expected value.
+  Bundle with related changes.
+- **NONE** — we already have equivalent OR mechanism is irrelevant
+  (e.g. multi-channel-only).
+
+### 11.2 Phase D scope condensation
+
+From R1-R20:
+- **D-α** (subband detector): R4 standalone. 1-2 sprints.
+- **D-β** (two-way per-bin mask swap): R2 + R14. 4-6 sprints.
+- **D-γ** (D-α + D-β + D-aux1): R2 + R4 + R6 + R14. 7-10 sprints.
+
+Phase D **WILL NOT** port R9/R10/R11/R12/R16 (reverb arc) — deferred
+to v3.19. Phase D **WILL NOT** port R7 differently from what we have
+— audit-only sprint added to Phase C.
+
+### 11.3 v3.17 substrate fold-in
+
+| Substrate | Phase D D-γ consumes? |
+|---|---|
+| v3.17 B.2 `reverb_decay_estimate` audit flag | No — reverb scope is v3.19+ |
+| v3.17 C.1 14-flag BALANCED-only finding | Yes — Phase E promotion sprint can include the new D-γ flags after Phase D ships |
+| v3.13 E2 Path 3 DT debt (DT_static -0.050) | Targeted by D-β — recovery hard bar Δdeg ≥ +0.005 |
+| 0I0XMl3M cohort tail | Partially — D-α subband detector may stabilize NE state on this case |
+| xrtntuju 5-clip DT NE positive windows | Targeted by D-β nearend_params per-bin HF relaxation |
+
+### 11.4 Decision for Phase 0.6
+
+Recommendation: **Phase D OPEN at D-γ scope** (R2 + R4 + R6 + R14, 7-10
+sprints). Hard bar per v3.18 plan §Phase D. Kill criterion = NE Δdeg <
++0.003 OR DT Δdeg < +0.003.
+
+---
+
+## 12. Changelog
+
+- 2026-05-15 (v3.18 Phase 0.5): §9.1 fetch list refreshed — Phase 0.1
+  cloned full AEC3 tree to `docs/aec3_extracts/src/aec3/` (commit
+  `9310b29acd`). Phase 0.2 / 0.3 / 0.4 module reads complete, mapped to
+  3 new docs: `aec3_residual_pipeline_mapping.md`,
+  `aec3_subband_ne_detector_mapping.md`, `aec3_reverb_mapping.md`.
+  New §11 RES-side gap table compiled (20-row R1-R20).
 - 2026-04-22 (initial): first version. 6 core AEC3 modules
   analysed from earlier context + 8 more fetched this session
   (adaptive_fir_filter.h, erle_estimator.{h,cc}, erl_estimator.cc,
@@ -1142,7 +1238,7 @@ Fetched and analysed in this doc:
 
 ---
 
-## 3. WebRTC AEC2 (legacy) vs AEC3 differences
+## 13. WebRTC AEC2 (legacy) vs AEC3 differences
 
 # Ours balanced vs WebRTC AEC2 — 差距分析報告
 

@@ -1,0 +1,6 @@
+# Phase 0 fetched sources are reference snapshots — text only OK to commit
+# but huge derived files like compiled output, .d, .o etc are ignored.
+*.o
+*.d
+*.a
+*.so

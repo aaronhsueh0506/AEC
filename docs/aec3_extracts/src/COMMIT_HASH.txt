@@ -1,0 +1,11 @@
+9310b29acd9e0985ab65f454959122336e3b7e78
+Source: https://webrtc.googlesource.com/src/+/refs/heads/main
+Fetched: 2026-05-15 (v3.18 Phase 0.1)
+Pin reason: aligns with docs/aec3_reference.md (2026-04-22) which also references refs/heads/main.
+
+Layout:
+  src/aec3/  — all AEC3 source (.cc + .h), unittests removed
+  src/COMMIT_HASH.txt — this file
+
+To verify file matches WebRTC at this commit:
+  curl -sS "https://webrtc.googlesource.com/src/+/9310b29acd/modules/audio_processing/aec3/<file>?format=TEXT" | base64 -d

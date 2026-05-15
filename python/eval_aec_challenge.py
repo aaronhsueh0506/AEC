@@ -308,17 +308,45 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         # v3.17 B.1 — Movement-rate DelayEst (EPC-gated period override).
         ('AEC_MOV_RATE_DELAY_EST', 'mov_rate_delay_est_enabled', True),
         ('AEC_DELAY_EST_PERIOD_S_FAST', 'delay_est_period_s_fast', False),
+        # v3.18 Phase D.1 — Subband NE detector substrate (R4).
+        ('AEC_SUBBAND_NE_DETECT', 'subband_ne_detect_enabled', True),
+        # v3.18 Phase D.3 — Mask shape swap (R2; needs D.1 ON to take effect).
+        ('AEC_MASK_PROFILE_SWAP', 'res_mask_profile_swap_enabled', True),
+        # D.5 sweep — gate `effective_dt` threshold for NE-profile activation.
+        ('AEC_MASK_NE_GATE_DT', 'res_mask_ne_gate_dt', False),
+        # D-Path-D — asymmetric per-bin overlay tuning.
+        ('AEC_MASK_FS_OVERLAY_COH2', 'res_mask_fs_overlay_coh2_min', False),
+        ('AEC_MASK_FS_OVERLAY_DT_MAX', 'res_mask_fs_overlay_dt_max', False),
+        # v3.18 Phase B1 — Dominant NE detector
+        ('AEC_DOMINANT_NE_DETECT', 'dominant_ne_detect_enabled', True),
+        ('AEC_DOMINANT_NE_ENR_THRESHOLD', 'dominant_ne_enr_threshold', False),
+        ('AEC_DOMINANT_NE_SNR_THRESHOLD', 'dominant_ne_snr_threshold', False),
+        # v3.18 Phase F.1/F.3 — AEC3-aligned event classification + asymmetric reset
+        ('AEC_EVENT_CLASSIFICATION', 'aec_event_classification_enabled', True),
     ):
         if _flag in os.environ and _key not in config_overrides:
             _v = os.environ[_flag]
             if _is_bool:
                 config_overrides[_key] = _v.lower() not in ('0', 'false', 'off', 'no')
             else:
-                # int for window/hysteresis frames; float for alpha/db/boost
-                if _key in ('arc_t_window_frames', 'arc_t_hysteresis_frames'):
-                    config_overrides[_key] = int(_v)
-                else:
-                    config_overrides[_key] = float(_v)
+                config_overrides[_key] = float(_v)
+
+    # D.5 anchor sweep — comma-separated 3-tuple "enr_t,enr_s,emr_t"
+    for _flag, _key in (
+        ('AEC_RES_MASK_NORMAL_LF', 'res_mask_normal_lf'),
+        ('AEC_RES_MASK_NORMAL_HF', 'res_mask_normal_hf'),
+        ('AEC_RES_MASK_NEAREND_LF', 'res_mask_nearend_lf'),
+        ('AEC_RES_MASK_NEAREND_HF', 'res_mask_nearend_hf'),
+    ):
+        if _flag in os.environ and _key not in config_overrides:
+            config_overrides[_key] = tuple(
+                float(x) for x in os.environ[_flag].split(','))
+
+    # D-Path-D — mask swap mode ('binary' or 'asymmetric')
+    if ('AEC_MASK_SWAP_MODE' in os.environ
+            and 'res_mask_swap_mode' not in config_overrides):
+        config_overrides['res_mask_swap_mode'] = os.environ['AEC_MASK_SWAP_MODE'].lower()
+
     # State-scale override: comma-separated state=scale pairs, e.g.
     #   "coarse_learning=2.0,refined_usable=1.0"
     if ('AEC_DT_NE_STATE_SCALE' in os.environ

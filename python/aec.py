@@ -998,6 +998,119 @@ class AecConfig:
     # dt_per_bin > dt_ne_per_bin_thresh.  Stacks with state_scale.
     dt_ne_per_bin_scale: float = 2.0
 
+    # v3.18 Phase D.1 — Subband NE detector substrate (R4, default OFF).
+    #
+    # Ports AEC3 `SubbandNearendDetector` (88-line module). Detects
+    # nearend speech by structural cue:
+    #   sub1 (HF region) quiet  AND  sub2 (voice band) loud
+    # i.e. `ne_pow_sub1 < threshold * ne_pow_sub2`  AND  `ne_pow_sub1 >
+    # snr_threshold * noise_pow_sub1`.
+    #
+    # Unlike `DominantNearendDetector` it does NOT consume residual echo;
+    # it is purely a structural NE detection (resilient when residual
+    # estimate is unreliable, e.g. cohort tail).
+    #
+    # Default-OFF: byte-equal flag-OFF; state remains constant False.
+    # Phase D.1 wires audit-only state `self.res._subband_ne_state`;
+    # Phase D.3 consumes it for 2-way mask profile swap.
+    #
+    # Default bin indices for fs=16k, n_freqs=513 (frame=832 → fft=1024):
+    #   sub1 = bins 192-320 (~3-5 kHz; speech HF "breath" region)
+    #   sub2 = bins  32-128 (~500 Hz-2 kHz; voice band)
+    # Final tuning in Phase D.5.
+    subband_ne_detect_enabled: bool = False
+    subband_ne_sub1_low: int = 192
+    subband_ne_sub1_high: int = 320
+    subband_ne_sub2_low: int = 32
+    subband_ne_sub2_high: int = 128
+    subband_ne_threshold: float = 0.5
+    subband_ne_snr_threshold: float = 30.0
+
+    # v3.18 Phase D.2 — Mask profile substrate (R2 — per-bin AEC3-style
+    # 2-profile masking threshold tables, default OFF).
+    #
+    # Builds two per-bin lookup tables `_normal_mask_profile[k]` and
+    # `_nearend_mask_profile[k]` at ResFilter init, each holding
+    # (enr_transparent[k], enr_suppress[k], emr_transparent[k]).
+    # Interpolation is linear LF→HF across `[res_mask_last_lf_band ..
+    # res_mask_first_hf_band]` mirroring AEC3 `GainParameters::SetConfig`
+    # ([suppression_gain.cc:487](../docs/aec3_extracts/src/aec3/suppression_gain.cc)).
+    #
+    # Anchor defaults ported verbatim from
+    # `api/audio/echo_canceller3_config.h` @ commit 9310b29acd:
+    #   normal.mask_lf:  (enr_t=0.3,  enr_s=0.4, emr_t=0.3)
+    #   normal.mask_hf:  (enr_t=0.07, enr_s=0.1, emr_t=0.3)
+    #   nearend.mask_lf: (enr_t=1.09, enr_s=1.1, emr_t=0.3)
+    #   nearend.mask_hf: (enr_t=0.1,  enr_s=0.3, emr_t=0.3)
+    # Band defaults scaled from AEC3 65-bin (last_lf=5, first_hf=8 =
+    # 625 Hz / 1000 Hz @ fs=16k fft=128) to our 257-bin (20 / 32 @
+    # fs=16k fft=512, 31.25 Hz/bin). RES `block_size` = `filter.fft_size`
+    # which is 512 for the standard BALANCED + fl=832 config (per
+    # python/aec.py:5639 wiring).
+    #
+    # Phase D.2 substrate: tables built when flag ON; not consumed yet.
+    # Phase D.3 wires `_stage_gain_compute` to use these tables via
+    # AEC3 `GainToNoAudibleEcho` per-bin formula.
+    #
+    # The NE↔normal swap key is `_subband_ne_state` (D.1 substrate) AND
+    # `effective_dt > 0.3` (echo-aware gate; matches AEC3
+    # `DominantNearendDetector` AND-combine). Wired in D.3.
+    res_mask_profile_swap_enabled: bool = False
+    res_mask_last_lf_band: int = 20
+    res_mask_first_hf_band: int = 32
+    res_mask_normal_lf: tuple = (0.3, 0.4, 0.3)
+    res_mask_normal_hf: tuple = (0.07, 0.1, 0.3)
+    res_mask_nearend_lf: tuple = (1.09, 1.1, 0.3)
+    res_mask_nearend_hf: tuple = (0.1, 0.3, 0.3)
+    # NE-profile activation gate threshold. Profile swaps to `nearend`
+    # only when `_subband_ne_state AND effective_dt > res_mask_ne_gate_dt`.
+    # 0.3 default (initial D.3 wire) gave −0.140 DT Δdeg / 0 NE Δdeg on
+    # 60-case → too loose. D.5 sweeps stricter values.
+    res_mask_ne_gate_dt: float = 0.3
+    # v3.18 D-Path-D — Asymmetric per-bin overlay mode.
+    # 'binary': D.3 atomic swap (entire profile swaps on subband NE state).
+    # 'asymmetric': legacy `ne_confidence × interp` runs first, then
+    # `normal_profile` overlays on FS-confident bins (coh² high AND
+    # effective_dt low AND NOT subband_ne_state). Preserves the D.3
+    # FS_static Δecho +0.258 win on confident-FS bins while keeping
+    # the legacy ne_confidence floor lift on DT/NE bins.
+    res_mask_swap_mode: str = 'binary'
+    res_mask_fs_overlay_coh2_min: float = 0.85
+    res_mask_fs_overlay_dt_max: float = 0.2
+
+    # v3.18 Phase B1 — Dominant NE detector port (AEC3 default detector).
+    # Direct port of `DominantNearendDetector` from
+    # docs/aec3_extracts/src/aec3/dominant_nearend_detector.cc.
+    # Echo-aware (uses residual_echo_psd) + hysteresis (trigger counter +
+    # hold duration + fast-exit on strong echo). Default OFF.
+    #
+    # LF band default for fs=16k fft=512 (31.25 Hz/bin): bins 4-60 maps
+    # to 125-1875 Hz, matching AEC3 65-bin bins 1-15 (125-1875 Hz @
+    # fft=128).
+    #
+    # When `dominant_ne_detect_enabled=True` AND `subband_ne_detect_enabled=True`,
+    # the per-frame combined NE state is OR-aggregated:
+    # `ne_combined = subband_ne_state OR dominant_ne_state`. Path-D
+    # asymmetric mode and D.3 binary mode both read `_ne_combined`.
+    dominant_ne_detect_enabled: bool = False
+    dominant_ne_lf_low: int = 4
+    dominant_ne_lf_high: int = 60
+    # Defaults from AEC3 echo_canceller3_config.h. Field trials override
+    # to 0.5 (Sensitive) or 0.75 (VerySensitive).
+    dominant_ne_enr_threshold: float = 0.25
+    dominant_ne_enr_exit_threshold: float = 10.0
+    dominant_ne_snr_threshold: float = 30.0
+    dominant_ne_trigger_threshold: int = 12
+    dominant_ne_hold_duration: int = 50
+
+    # v3.18 Phase F.1 — AEC3-aligned echo-path event classification.
+    # When True, every EpcEvent fired by EchoPathChangeDetector is classified
+    # into the AEC3 3-tuple `(gain_change, delay_change, clock_drift)` and
+    # stored in `_classified_event`. Trace-only in F.1 — no consumer logic
+    # changes; asymmetric cascade reset wired in F.2+. Default OFF preserves
+    # byte-equal output.
+    aec_event_classification_enabled: bool = False
+
     # Mode
     mode: AecMode = AecMode.PBFDKF
 
@@ -2168,7 +2281,33 @@ class ResFilter:
                  dt_ne_compression_fix: bool = False,
                  dt_ne_state_scale: dict = None,
                  dt_ne_per_bin_thresh: float = 0.5,
-                 dt_ne_per_bin_scale: float = 2.0):
+                 dt_ne_per_bin_scale: float = 2.0,
+                 subband_ne_detect_enabled: bool = False,
+                 subband_ne_sub1_low: int = 192,
+                 subband_ne_sub1_high: int = 320,
+                 subband_ne_sub2_low: int = 32,
+                 subband_ne_sub2_high: int = 128,
+                 subband_ne_threshold: float = 0.5,
+                 subband_ne_snr_threshold: float = 30.0,
+                 res_mask_profile_swap_enabled: bool = False,
+                 res_mask_last_lf_band: int = 20,
+                 res_mask_first_hf_band: int = 32,
+                 res_mask_normal_lf: tuple = (0.3, 0.4, 0.3),
+                 res_mask_normal_hf: tuple = (0.07, 0.1, 0.3),
+                 res_mask_nearend_lf: tuple = (1.09, 1.1, 0.3),
+                 res_mask_nearend_hf: tuple = (0.1, 0.3, 0.3),
+                 res_mask_ne_gate_dt: float = 0.3,
+                 res_mask_swap_mode: str = 'binary',
+                 res_mask_fs_overlay_coh2_min: float = 0.85,
+                 res_mask_fs_overlay_dt_max: float = 0.2,
+                 dominant_ne_detect_enabled: bool = False,
+                 dominant_ne_lf_low: int = 4,
+                 dominant_ne_lf_high: int = 60,
+                 dominant_ne_enr_threshold: float = 0.25,
+                 dominant_ne_enr_exit_threshold: float = 10.0,
+                 dominant_ne_snr_threshold: float = 30.0,
+                 dominant_ne_trigger_threshold: int = 12,
+                 dominant_ne_hold_duration: int = 50):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -2196,6 +2335,51 @@ class ResFilter:
         }
         self._dt_ne_per_bin_thresh = float(dt_ne_per_bin_thresh)
         self._dt_ne_per_bin_scale = float(dt_ne_per_bin_scale)
+        # v3.18 Phase D.1 — Subband NE detector substrate
+        self._subband_ne_detect_enabled = bool(subband_ne_detect_enabled)
+        self._subband_ne_sub1_low = int(subband_ne_sub1_low)
+        self._subband_ne_sub1_high = int(subband_ne_sub1_high)
+        self._subband_ne_sub2_low = int(subband_ne_sub2_low)
+        self._subband_ne_sub2_high = int(subband_ne_sub2_high)
+        self._subband_ne_threshold = float(subband_ne_threshold)
+        self._subband_ne_snr_threshold = float(subband_ne_snr_threshold)
+        self._subband_ne_state = False
+        # v3.18 Phase D.2 — Mask profile substrate
+        self._mask_profile_swap_enabled = bool(res_mask_profile_swap_enabled)
+        self._mask_last_lf_band = int(res_mask_last_lf_band)
+        self._mask_first_hf_band = int(res_mask_first_hf_band)
+        self._mask_anchors = {
+            'normal_lf':  tuple(res_mask_normal_lf),
+            'normal_hf':  tuple(res_mask_normal_hf),
+            'nearend_lf': tuple(res_mask_nearend_lf),
+            'nearend_hf': tuple(res_mask_nearend_hf),
+        }
+        # `_normal_mask_profile` / `_nearend_mask_profile` built lazily in
+        # `_build_mask_profiles()`. Each holds 3 per-bin arrays:
+        #   (enr_transparent[k], enr_suppress[k], emr_transparent[k])
+        # Built once after `self.n_freqs` is known; cached as np.ndarray.
+        self._normal_mask_profile = None
+        self._nearend_mask_profile = None
+        self._mask_ne_gate_dt = float(res_mask_ne_gate_dt)
+        self._mask_swap_mode = str(res_mask_swap_mode)
+        self._mask_fs_overlay_coh2_min = float(res_mask_fs_overlay_coh2_min)
+        self._mask_fs_overlay_dt_max = float(res_mask_fs_overlay_dt_max)
+        self._diag_mask_profile_nearend = False  # last-frame audit cache
+        self._diag_mask_fs_overlay_fraction = 0.0  # last-frame audit: % of bins overlaid
+        # v3.18 Phase B1 — Dominant NE detector (AEC3 default detector port).
+        self._dominant_ne_detect_enabled = bool(dominant_ne_detect_enabled)
+        self._dominant_ne_lf_low = int(dominant_ne_lf_low)
+        self._dominant_ne_lf_high = int(dominant_ne_lf_high)
+        self._dominant_ne_enr_threshold = float(dominant_ne_enr_threshold)
+        self._dominant_ne_enr_exit_threshold = float(dominant_ne_enr_exit_threshold)
+        self._dominant_ne_snr_threshold = float(dominant_ne_snr_threshold)
+        self._dominant_ne_trigger_threshold = int(dominant_ne_trigger_threshold)
+        self._dominant_ne_hold_duration = int(dominant_ne_hold_duration)
+        self._dominant_ne_state = False
+        self._dominant_ne_trigger_counter = 0
+        self._dominant_ne_hold_counter = 0
+        # Combined NE state (subband OR dominant). Updated each frame.
+        self._ne_combined_state = False
         self.block_size = block_size          # FFT size (power of 2)
         self.sample_rate = sample_rate        # Hz, used for freq → bin conversion
         self.frame_size = frame_size if frame_size > 0 else block_size  # WOLA frame
@@ -2365,9 +2549,52 @@ class ResFilter:
         # Default mode='legacy' → bit-exact parity. Phase B2 ablation flips to 'split'.
         self._residual_est = ResidualEchoEstimator(n_freqs, mode='legacy')
 
+        # v3.18 Phase D.2 — build per-bin mask profiles once after n_freqs known.
+        self._build_mask_profiles()
+
         # E1: call reset() to initialize all runtime scalar state
         # from a single source of truth (avoids init/reset divergence)
         self.reset()
+
+    def _build_mask_profiles(self):
+        """Build per-bin `enr_transparent / enr_suppress / emr_transparent`
+        tables for `normal` and `nearend` mask profiles.
+
+        Linear LF→HF interpolation across `[last_lf_band .. first_hf_band]`
+        mirroring AEC3 `GainParameters::SetConfig`
+        (suppression_gain.cc:487). When flag-OFF the tables are still
+        built (cheap, ~6 KB total) so D.3 can flip the consumer on at
+        runtime without re-init.
+        """
+        n_freqs = self.n_freqs
+        last_lf = max(0, min(self._mask_last_lf_band, n_freqs - 2))
+        first_hf = max(last_lf + 1, min(self._mask_first_hf_band, n_freqs - 1))
+
+        # Per-bin interpolation weight: 0 in LF, 1 in HF, linear in between.
+        a = np.empty(n_freqs, dtype=np.float32)
+        a[:last_lf + 1] = 0.0
+        a[first_hf:] = 1.0
+        if first_hf > last_lf + 1:
+            tr = first_hf - last_lf  # transition span
+            for k in range(last_lf + 1, first_hf):
+                a[k] = float(k - last_lf) / float(tr)
+
+        def _profile(lf_tuple, hf_tuple):
+            lf_t, lf_s, lf_emr = lf_tuple
+            hf_t, hf_s, hf_emr = hf_tuple
+            enr_t = (1 - a) * float(lf_t) + a * float(hf_t)
+            enr_s = (1 - a) * float(lf_s) + a * float(hf_s)
+            emr_t = (1 - a) * float(lf_emr) + a * float(hf_emr)
+            return (enr_t.astype(np.float32),
+                    enr_s.astype(np.float32),
+                    emr_t.astype(np.float32))
+
+        self._normal_mask_profile = _profile(
+            self._mask_anchors['normal_lf'],
+            self._mask_anchors['normal_hf'])
+        self._nearend_mask_profile = _profile(
+            self._mask_anchors['nearend_lf'],
+            self._mask_anchors['nearend_hf'])
 
     def reset(self, preserve_long_window_ema: bool = False):
         """Reset all runtime state. Arrays are .fill(0), scalars are set.
@@ -2406,6 +2633,13 @@ class ResFilter:
         self._diag_error_psd_mean = 0.0
         self._filter_erle_est.reset()
         self._fb_erle_est.reset()
+        # v3.18 Phase D.1 — Subband NE detector state
+        self._subband_ne_state = False
+        # v3.18 Phase B1 — Dominant NE detector state + hysteresis counters
+        self._dominant_ne_state = False
+        self._dominant_ne_trigger_counter = 0
+        self._dominant_ne_hold_counter = 0
+        self._ne_combined_state = False
 
     def enable_stats(self):
         """Enable per-frame DT statistics collection (zero cost when disabled)."""
@@ -2683,6 +2917,23 @@ class ResFilter:
             self.near_psd_idx = (self.near_psd_idx + 1) % 4
             self.near_psd = np.mean(self.near_psd_buf, axis=0)
 
+            # v3.18 Phase D.1 — Subband NE detector (audit-only when default-OFF).
+            # Mirror of AEC3 `SubbandNearendDetector::Update`. Uses smoothed
+            # near_psd (4-frame avg above) + prev-frame noise_psd (1-frame lag
+            # acceptable for audit substrate). Default-OFF: state stays False.
+            if self._subband_ne_detect_enabled:
+                _s1l = self._subband_ne_sub1_low
+                _s1h = min(self._subband_ne_sub1_high, self.n_freqs - 1)
+                _s2l = self._subband_ne_sub2_low
+                _s2h = min(self._subband_ne_sub2_high, self.n_freqs - 1)
+                _noise_pow_sub1 = float(np.mean(self.noise_psd[_s1l:_s1h + 1])) + 1e-10
+                _ne_pow_sub1 = float(np.mean(self.near_psd[_s1l:_s1h + 1]))
+                _ne_pow_sub2 = float(np.mean(self.near_psd[_s2l:_s2h + 1])) + 1e-10
+                self._subband_ne_state = bool(
+                    _ne_pow_sub1 < self._subband_ne_threshold * _ne_pow_sub2
+                    and _ne_pow_sub1 > self._subband_ne_snr_threshold * _noise_pow_sub1
+                )
+
             # Stage 1+2 of residual echo attribution: delegated to ResidualEchoEstimator.
             residual_echo_psd = self._residual_est.attribute(
                 echo_psd=self.echo_psd, error_psd=self.error_psd,
@@ -2694,6 +2945,41 @@ class ResFilter:
                 filter_erle=self._filter_erle_est, fb_erle=self._fb_erle_est,
                 aec_state=aec_state,
             )
+
+            # v3.18 Phase B1 — Dominant NE detector (AEC3 default port).
+            # Echo-aware (uses residual_echo_psd just computed) +
+            # hysteresis (trigger_counter + hold_counter + fast-exit).
+            # Direct port of dominant_nearend_detector.cc Update().
+            # Default-OFF: state and counters frozen.
+            if self._dominant_ne_detect_enabled:
+                _lf_lo = self._dominant_ne_lf_low
+                _lf_hi = min(self._dominant_ne_lf_high, self.n_freqs - 1)
+                _ne_sum = float(np.sum(self.near_psd[_lf_lo:_lf_hi + 1]))
+                _echo_sum = float(np.sum(residual_echo_psd[_lf_lo:_lf_hi + 1]))
+                _noise_sum = float(np.sum(self.noise_psd[_lf_lo:_lf_hi + 1])) + 1e-10
+                _trig_cond = (
+                    _echo_sum < self._dominant_ne_enr_threshold * _ne_sum
+                    and _ne_sum > self._dominant_ne_snr_threshold * _noise_sum
+                )
+                if _trig_cond:
+                    self._dominant_ne_trigger_counter += 1
+                    if self._dominant_ne_trigger_counter >= self._dominant_ne_trigger_threshold:
+                        self._dominant_ne_hold_counter = self._dominant_ne_hold_duration
+                        self._dominant_ne_trigger_counter = self._dominant_ne_trigger_threshold
+                else:
+                    self._dominant_ne_trigger_counter = max(
+                        0, self._dominant_ne_trigger_counter - 1)
+                # Fast-exit on strong echo
+                if (_echo_sum > self._dominant_ne_enr_exit_threshold * _ne_sum
+                        and _echo_sum > self._dominant_ne_snr_threshold * _noise_sum):
+                    self._dominant_ne_hold_counter = 0
+                self._dominant_ne_hold_counter = max(
+                    0, self._dominant_ne_hold_counter - 1)
+                self._dominant_ne_state = self._dominant_ne_hold_counter > 0
+            # Combined NE state: OR-aggregate active detectors. When both
+            # disabled, stays False (substrate inert).
+            self._ne_combined_state = bool(
+                self._subband_ne_state or self._dominant_ne_state)
 
             # Nonlinear echo mode: harmonics from speaker distortion
             if saturation_level > 0.3:
@@ -3173,6 +3459,16 @@ class ResFilter:
 
             enr = residual_echo_psd / (nearend_est + 1e-10)
 
+            # v3.18 Phase D.3 / D-Path-D — Mask profile pathway.
+            # Step 1 (always): compute legacy `enr_t / enr_s` via the
+            # `ne_confidence × ne_anchor + (1-ne_confidence) × fs_anchor`
+            # continuous interpolation. Includes per_band_enr (v3.14 Arc R)
+            # and dt_ne_compression_fix (v3.15 §1.2). Byte-equal preserved.
+            # Step 2 (D.3 / D-Path-D, gated): override / overlay with AEC3
+            # `normal` / `nearend` profile tables based on swap mode.
+            _emr_transparent_pb = None  # set when AEC3 path overlays (per-bin); legacy uses scalar 0.3
+
+            # --- Step 1: legacy compute (always runs) ---
             blend = self._enr_blend
             scale = self.enr_scale
             ne_confidence = dt_per_bin
@@ -3220,6 +3516,57 @@ class ResFilter:
                         enr_s_ne[_mask] = enr_s_ne[_mask] * _bin_scale
             enr_t = ne_confidence * enr_t_ne + (1 - ne_confidence) * enr_t_fs
             enr_s = ne_confidence * enr_s_ne + (1 - ne_confidence) * enr_s_fs
+
+            # --- Step 2 (gated): mask profile override / overlay ---
+            if self._mask_profile_swap_enabled:
+                if self._mask_swap_mode == 'asymmetric':
+                    # D-Path-D (per-frame 3-state): FS-confident → use
+                    # AEC3 `normal_profile` (all bins; recovers D.3 FS_static
+                    # +0.258 Δecho); NE-confident → AEC3 `nearend_profile`;
+                    # uncertain/DT → keep legacy `ne_confidence` interp.
+                    # Avoids D.3 DT regression by NOT applying normal_profile
+                    # when NE detector(s) failed to identify DT-NE segments.
+                    # B1 (combined): uses _ne_combined_state (subband OR
+                    # dominant). Dominant detector is echo-aware + hysteresis,
+                    # complements subband's structural cue.
+                    _is_fs = (
+                        float(effective_dt) < self._mask_fs_overlay_dt_max
+                        and not self._ne_combined_state
+                    )
+                    _is_ne = bool(
+                        self._ne_combined_state
+                        and float(effective_dt) > self._mask_ne_gate_dt)
+                    if _is_fs:
+                        _profile = self._normal_mask_profile
+                        enr_t = _profile[0]
+                        enr_s = _profile[1]
+                        _emr_transparent_pb = _profile[2]
+                        self._diag_mask_profile_nearend = False
+                        self._diag_mask_fs_overlay_fraction = 1.0
+                    elif _is_ne:
+                        _profile = self._nearend_mask_profile
+                        enr_t = _profile[0]
+                        enr_s = _profile[1]
+                        _emr_transparent_pb = _profile[2]
+                        self._diag_mask_profile_nearend = True
+                        self._diag_mask_fs_overlay_fraction = 0.0
+                    else:
+                        # Uncertain — keep legacy enr_t / enr_s from Step 1
+                        self._diag_mask_profile_nearend = False
+                        self._diag_mask_fs_overlay_fraction = 0.0
+                else:
+                    # D.3 binary: atomic swap between nearend/normal profile
+                    # based on combined NE state AND echo-aware gate.
+                    _use_nearend = bool(
+                        self._ne_combined_state
+                        and float(effective_dt) > self._mask_ne_gate_dt)
+                    _profile = (self._nearend_mask_profile if _use_nearend
+                                else self._normal_mask_profile)
+                    enr_t = _profile[0]
+                    enr_s = _profile[1]
+                    _emr_transparent_pb = _profile[2]
+                    self._diag_mask_profile_nearend = _use_nearend
+                    self._diag_mask_fs_overlay_fraction = 0.0
             min_gate_width = 0.2
             enr_s_safe = np.maximum(enr_s, enr_t + min_gate_width)
 
@@ -3227,11 +3574,14 @@ class ResFilter:
                          np.clip((enr_s_safe - enr) / (enr_s_safe - enr_t + eps), 0.0, 1.0),
                          1.0)
 
-            # EMR: AEC3-style noise masking
+            # EMR: AEC3-style noise masking. AEC3 uses per-bin emr_transparent
+            # from the swapped profile; legacy path uses scalar 0.3.
             if np.sum(self.noise_psd) > 0:
                 emr = residual_echo_psd / (self.noise_psd + 1e-10)
-                emr_transparent = 0.3
-                g_emr = np.clip(emr_transparent / (emr + 1e-10), 0.0, 1.0)
+                if _emr_transparent_pb is not None:
+                    g_emr = np.clip(_emr_transparent_pb / (emr + 1e-10), 0.0, 1.0)
+                else:
+                    g_emr = np.clip(0.3 / (emr + 1e-10), 0.0, 1.0)
                 g = np.maximum(g, g_emr)
 
             if self._stats is not None:
@@ -4818,6 +5168,71 @@ class AecState:
                 and not self._epc.active)
 
 
+class AecEventType:
+    """AEC3-aligned echo-path event constants.
+
+    Mirrors `webrtc::EchoPathVariability::DelayAdjustment` taxonomy
+    (echo_path_variability.h):
+      DELAY_NONE          — no delay adjustment
+      DELAY_BUFFER_FLUSH  — render-buffer flush; alignment recovery in-flight
+      DELAY_NEW_DETECTED  — new alignment found by delay estimator
+
+    F.1 maps our existing source strings:
+      EpcEvent.source='delay'        → DELAY_NEW_DETECTED
+      EpcEvent.source='epv'          → gain_change=True
+      EpcEvent.source='shadow_rise'  → gain_change=True
+
+    Buffer-flush and clock_drift have no current detector — reserved for
+    Phase F.3+ / Delay-revisit / v3.19+.
+    """
+    DELAY_NONE = 'none'
+    DELAY_BUFFER_FLUSH = 'buffer_flush'
+    DELAY_NEW_DETECTED = 'new_detected'
+
+
+@dataclass
+class AecEvent:
+    """One-frame classified echo-path event (AEC3-aligned 3-tuple).
+
+    Mirrors `webrtc::EchoPathVariability` (echo_path_variability.h):
+      gain_change    — amplitude/level change. AEC3 response: ERLE-only soft
+                       reset (subtractor.HandleEchoPathChange gain-only path
+                       + aec_state ERLE reset(false)).
+      delay_change   — temporal alignment change (3-way enum). AEC3 response:
+                       full cascade reset (filter weights, gains, partition,
+                       filter_analyzer, transparent, ERLE, ERL, FQA).
+      clock_drift    — render/capture clock skew. AEC3 response: no direct
+                       reset; downstream consumers gated.
+
+    Phase F.1 wires classification only; consumers in F.2+ implement the
+    asymmetric reset cascade. Until then, `_classified_event` is trace-only
+    when the gating flag is ON, no-op when OFF.
+    """
+    gain_change: bool = False
+    delay_change: str = AecEventType.DELAY_NONE
+    clock_drift: bool = False
+
+    @property
+    def audio_path_changed(self) -> bool:
+        return self.gain_change or self.delay_change != AecEventType.DELAY_NONE
+
+
+def classify_epc_event(epc_event: 'EpcEvent') -> AecEvent:
+    """Phase F.1 classifier — map our 3-source EpcEvent to AEC3 AecEvent.
+
+    Pure function, no state. Returns empty AecEvent (no-op) when the
+    EpcEvent didn't fire. Callers should pass every EpcEvent regardless
+    of `fired`, so the classification result follows trigger ordering.
+    """
+    if not epc_event.fired:
+        return AecEvent()
+    if epc_event.source == 'delay':
+        return AecEvent(delay_change=AecEventType.DELAY_NEW_DETECTED)
+    if epc_event.source in ('epv', 'shadow_rise'):
+        return AecEvent(gain_change=True)
+    return AecEvent()
+
+
 @dataclass
 class EpcEvent:
     """One-frame EPC trigger result.
@@ -5397,6 +5812,66 @@ class AEC:
             self._f2_1_reset_counts = {'epv': 0, 'shadow_rise': 0}
         self._f2_1_reset_counts[source] = self._f2_1_reset_counts.get(source, 0) + 1
 
+    def _handle_gain_change_soft(self, source: str) -> None:
+        """v3.18 Phase F.2 — AEC3-aligned soft reset for gain_change events.
+
+        Mirrors `webrtc::Subtractor::HandleEchoPathChange` gain-only branch
+        (subtractor.cc:170-174): only `refined_gains_->HandleEchoPathChange()`
+        runs, i.e. the adaptive step-size gain receives a boost so the
+        filter re-tracks faster — filter weights / partition / coarse
+        filter / aec_state ERLE all preserved.
+
+        Our equivalent: Q-boost on main + shadow (preserves weights);
+        no Kalman P relax, no filter-derived-state reset, no ERL cap.
+
+        Wired by F.3 behind `aec_event_classification_enabled` for
+        EpcEvent.source ∈ {'epv', 'shadow_rise'}.
+        """
+        for filt in [self.filter, self.shadow_filter]:
+            if filt is not None and hasattr(filt, 'Q'):
+                if not (self.config.arc_m_t_gated_enabled
+                        and getattr(self, '_arc_t_cohort_tail_signal', False)):
+                    self._arc_m_q_boost(filt)
+        self._f_e3_handle_epc_fire(source)
+
+    def _handle_delay_change_full(self, source: str) -> None:
+        """v3.18 Phase F.2 — AEC3-aligned full reset for delay_change events.
+
+        Mirrors `webrtc::Subtractor::HandleEchoPathChange` delay branch
+        (subtractor.cc:148-168 `full_reset`): filter weights zeroed
+        (refined + coarse), refined/coarse gains reset to initial,
+        partition size reset to initial. Plus aec_state full cascade
+        in aec_state.cc.
+
+        Our equivalent: Q-boost + Kalman P relax (30 frames) + Kalman
+        P-floor lift (30 frames) + ERL cap + filter-derived-state reset
+        + EPC render forced. Matches today's `delay_shift` site exactly.
+
+        Wired by F.3 behind `aec_event_classification_enabled` for
+        EpcEvent.source == 'delay'.
+        """
+        for filt in [self.filter, self.shadow_filter]:
+            if filt is not None and hasattr(filt, 'Q'):
+                if not (self.config.arc_m_t_gated_enabled
+                        and getattr(self, '_arc_t_cohort_tail_signal', False)):
+                    self._arc_m_q_boost(filt)
+                filt._p_max_override = 1.0
+                filt._p_max_override_frames = 30
+                filt._p_floor_beta = 1.0
+                filt._p_floor_beta_frames = 30
+        self._maybe_mark_diverged(source)
+        self._epc_render_forced_remaining = self.config.epc_hangover
+        self._erl_estimate = min(self._erl_estimate, 0.3)
+        if self.config.f3_1_per_band_erl_adaptive:
+            _pb_caps = (self.config.per_band_erl_cap_lf,
+                        self.config.per_band_erl_cap_mf,
+                        self.config.per_band_erl_cap_hf)
+            for _bi, _cap in enumerate(_pb_caps):
+                self._per_band_erl[_bi] = min(self._per_band_erl[_bi], _cap)
+        if self.config.use_epc_state_reset:
+            self._apply_epc_state_reset(source)
+        self._f_e3_handle_epc_fire(source)
+
     # ── EPC-state delegations (state lives in self._epc_det) ─────────────────
     @property
     def epc_active(self) -> bool: return self._epc_det.active
@@ -5681,6 +6156,32 @@ class AEC:
                 dt_ne_state_scale=self.config.dt_ne_state_scale,
                 dt_ne_per_bin_thresh=self.config.dt_ne_per_bin_thresh,
                 dt_ne_per_bin_scale=self.config.dt_ne_per_bin_scale,
+                subband_ne_detect_enabled=self.config.subband_ne_detect_enabled,
+                subband_ne_sub1_low=self.config.subband_ne_sub1_low,
+                subband_ne_sub1_high=self.config.subband_ne_sub1_high,
+                subband_ne_sub2_low=self.config.subband_ne_sub2_low,
+                subband_ne_sub2_high=self.config.subband_ne_sub2_high,
+                subband_ne_threshold=self.config.subband_ne_threshold,
+                subband_ne_snr_threshold=self.config.subband_ne_snr_threshold,
+                res_mask_profile_swap_enabled=self.config.res_mask_profile_swap_enabled,
+                res_mask_last_lf_band=self.config.res_mask_last_lf_band,
+                res_mask_first_hf_band=self.config.res_mask_first_hf_band,
+                res_mask_normal_lf=self.config.res_mask_normal_lf,
+                res_mask_normal_hf=self.config.res_mask_normal_hf,
+                res_mask_nearend_lf=self.config.res_mask_nearend_lf,
+                res_mask_nearend_hf=self.config.res_mask_nearend_hf,
+                res_mask_ne_gate_dt=self.config.res_mask_ne_gate_dt,
+                res_mask_swap_mode=self.config.res_mask_swap_mode,
+                res_mask_fs_overlay_coh2_min=self.config.res_mask_fs_overlay_coh2_min,
+                res_mask_fs_overlay_dt_max=self.config.res_mask_fs_overlay_dt_max,
+                dominant_ne_detect_enabled=self.config.dominant_ne_detect_enabled,
+                dominant_ne_lf_low=self.config.dominant_ne_lf_low,
+                dominant_ne_lf_high=self.config.dominant_ne_lf_high,
+                dominant_ne_enr_threshold=self.config.dominant_ne_enr_threshold,
+                dominant_ne_enr_exit_threshold=self.config.dominant_ne_enr_exit_threshold,
+                dominant_ne_snr_threshold=self.config.dominant_ne_snr_threshold,
+                dominant_ne_trigger_threshold=self.config.dominant_ne_trigger_threshold,
+                dominant_ne_hold_duration=self.config.dominant_ne_hold_duration,
             )
             # v3.16-A — wire force_render OR-in enable flag onto the
             # ResidualEchoEstimator. Reading happens inside
@@ -5716,6 +6217,10 @@ class AEC:
 
         # Echo path change detector (owns active/hangover/EPV-EMAs/prev_total_err)
         self._epc_det = EchoPathChangeDetector(self.config)
+        # v3.18 Phase F.1 — latest classified AEC3-aligned event (trace-only
+        # in F.1; consumers wired in F.2+). Empty AecEvent when classification
+        # flag is OFF or no event fired this frame.
+        self._classified_event = AecEvent()
 
         # #4: Confidence memory decay
         self.prev_dtd_conf = 0.0
@@ -6585,7 +7090,10 @@ class AEC:
                         # against state that no longer matches.
                         self._reset_filter_derived_state(reason='delay_shift',
                                                          preserve_render_ema=True)
-                        self._epc_det.force_delay()
+                        _delay_event = self._epc_det.force_delay()
+                        # v3.18 Phase F.1 — classify delay-shift event.
+                        if self.config.aec_event_classification_enabled:
+                            self._classified_event = classify_epc_event(_delay_event)
                         for filt in [self.filter, self.shadow_filter]:
                             if filt is not None and hasattr(filt, 'Q'):
                                 if not (self.config.arc_m_t_gated_enabled
@@ -7006,31 +7514,44 @@ class AEC:
             self._diag['epv_event_raw'] = _epv_raw
             self._diag['epv_event_suppressed'] = _epv_suppressed
             if epv_event.fired and not _epv_suppressed:
-                for filt in [self.filter, self.shadow_filter]:
-                    if filt and hasattr(filt, 'Q'):
-                        if not (self.config.arc_m_t_gated_enabled
-                                and getattr(self, '_arc_t_cohort_tail_signal', False)):
-                            self._arc_m_q_boost(filt)
-                        filt._p_max_override = 1.0
-                        filt._p_max_override_frames = 30
-                        filt._p_floor_beta = 1.0
-                        filt._p_floor_beta_frames = 30
-                self._maybe_mark_diverged('epv')
-                self._epc_render_forced_remaining = self.config.epc_hangover
-                self._erl_estimate = min(self._erl_estimate, 0.3)
-                # v3.14 Arc-P P.S2: when per-band ERL is active, also cap each
-                # per-band EMA to its per-band post-EPC ceiling so a stale
-                # high-coupling EMA doesn't persist across an echo path change.
-                # When flag is OFF this block is skipped → byte-equal preserved.
-                if self.config.f3_1_per_band_erl_adaptive:
-                    _pb_caps = (self.config.per_band_erl_cap_lf,
-                                self.config.per_band_erl_cap_mf,
-                                self.config.per_band_erl_cap_hf)
-                    for _bi, _cap in enumerate(_pb_caps):
-                        self._per_band_erl[_bi] = min(self._per_band_erl[_bi], _cap)
-                if self.config.use_epc_state_reset:
-                    self._apply_epc_state_reset('epv')
-                self._f_e3_handle_epc_fire('epv')
+                if self.config.aec_event_classification_enabled:
+                    # v3.18 Phase F.3 — AEC3-aligned: EPV is gain_change → soft
+                    # reset only (Q-boost on refined/coarse step-size). Skips
+                    # Kalman P relax, ERL cap, state reset; mirrors AEC3
+                    # subtractor.cc:170-174 (only refined_gains->HEPC runs).
+                    self._handle_gain_change_soft('epv')
+                else:
+                    for filt in [self.filter, self.shadow_filter]:
+                        if filt and hasattr(filt, 'Q'):
+                            if not (self.config.arc_m_t_gated_enabled
+                                    and getattr(self, '_arc_t_cohort_tail_signal', False)):
+                                self._arc_m_q_boost(filt)
+                            filt._p_max_override = 1.0
+                            filt._p_max_override_frames = 30
+                            filt._p_floor_beta = 1.0
+                            filt._p_floor_beta_frames = 30
+                    self._maybe_mark_diverged('epv')
+                    self._epc_render_forced_remaining = self.config.epc_hangover
+                    self._erl_estimate = min(self._erl_estimate, 0.3)
+                    # v3.14 Arc-P P.S2: when per-band ERL is active, also cap each
+                    # per-band EMA to its per-band post-EPC ceiling so a stale
+                    # high-coupling EMA doesn't persist across an echo path change.
+                    # When flag is OFF this block is skipped → byte-equal preserved.
+                    if self.config.f3_1_per_band_erl_adaptive:
+                        _pb_caps = (self.config.per_band_erl_cap_lf,
+                                    self.config.per_band_erl_cap_mf,
+                                    self.config.per_band_erl_cap_hf)
+                        for _bi, _cap in enumerate(_pb_caps):
+                            self._per_band_erl[_bi] = min(self._per_band_erl[_bi], _cap)
+                    if self.config.use_epc_state_reset:
+                        self._apply_epc_state_reset('epv')
+                    self._f_e3_handle_epc_fire('epv')
+
+            # v3.18 Phase F.1 — AEC3 event classification (trace-only; no
+            # consumer logic in F.1, so byte-equal preserved when flag OFF).
+            if self.config.aec_event_classification_enabled:
+                _evt = epv_event if epv_event.fired and not _epv_suppressed else EpcEvent()
+                self._classified_event = classify_epc_event(_evt)
 
             # Echo path change: shadow-error rise (delegated to EchoPathChangeDetector).
             # Update + hangover tick are inside the original (shadow_filter, filter_converged)
@@ -7051,39 +7572,53 @@ class AEC:
                         and rise_event.fired):
                     rise_event = type(rise_event)(fired=False, source=rise_event.source)
                 if rise_event.fired:
-                    if self.dtd_coherence:
-                        self.dtd_coherence.confidence *= 0.3
-                    for filt in [self.filter, self.shadow_filter]:
-                        if filt and hasattr(filt, 'Q'):
-                            if not (self.config.arc_m_t_gated_enabled
-                                    and getattr(self, '_arc_t_cohort_tail_signal', False)):
-                                self._arc_m_q_boost(filt)
-                    self._maybe_mark_diverged('shadow_rise')
-                    # P_MAX relax + P_floor raise: force filter to abandon stale path estimate
-                    for filt in [self.filter, self.shadow_filter]:
-                        if filt:
-                            filt._p_max_override = 1.0
-                            filt._p_max_override_frames = 30
-                            filt._p_floor_beta = 1.0
-                            filt._p_floor_beta_frames = 30
-                    # Change D: arm RES render-forced + cap stale ERL
-                    self._epc_render_forced_remaining = self.config.epc_hangover
-                    self._erl_estimate = min(self._erl_estimate, 0.3)
-                    # v3.14 Arc-P P.S2: per-band EPC cap (symmetric with EPV path above).
-                    # Byte-equal when flag is OFF.
-                    if self.config.f3_1_per_band_erl_adaptive:
-                        _pb_caps = (self.config.per_band_erl_cap_lf,
-                                    self.config.per_band_erl_cap_mf,
-                                    self.config.per_band_erl_cap_hf)
-                        for _bi, _cap in enumerate(_pb_caps):
-                            self._per_band_erl[_bi] = min(self._per_band_erl[_bi], _cap)
-                    if self.config.use_epc_state_reset:
-                        self._apply_epc_state_reset('shadow_rise')
-                    self._f_e3_handle_epc_fire('shadow_rise')
+                    if self.config.aec_event_classification_enabled:
+                        # v3.18 Phase F.3 — AEC3-aligned: shadow_rise is a
+                        # gain_change proxy (both errors rising signals filter
+                        # mistracking, not delay mis-alignment) → soft reset
+                        # only. DTD confidence dampening retained because it
+                        # protects the per-frame DT signal regardless of
+                        # which reset path runs.
+                        if self.dtd_coherence:
+                            self.dtd_coherence.confidence *= 0.3
+                        self._handle_gain_change_soft('shadow_rise')
+                    else:
+                        if self.dtd_coherence:
+                            self.dtd_coherence.confidence *= 0.3
+                        for filt in [self.filter, self.shadow_filter]:
+                            if filt and hasattr(filt, 'Q'):
+                                if not (self.config.arc_m_t_gated_enabled
+                                        and getattr(self, '_arc_t_cohort_tail_signal', False)):
+                                    self._arc_m_q_boost(filt)
+                        self._maybe_mark_diverged('shadow_rise')
+                        # P_MAX relax + P_floor raise: force filter to abandon stale path estimate
+                        for filt in [self.filter, self.shadow_filter]:
+                            if filt:
+                                filt._p_max_override = 1.0
+                                filt._p_max_override_frames = 30
+                                filt._p_floor_beta = 1.0
+                                filt._p_floor_beta_frames = 30
+                        # Change D: arm RES render-forced + cap stale ERL
+                        self._epc_render_forced_remaining = self.config.epc_hangover
+                        self._erl_estimate = min(self._erl_estimate, 0.3)
+                        # v3.14 Arc-P P.S2: per-band EPC cap (symmetric with EPV path above).
+                        # Byte-equal when flag is OFF.
+                        if self.config.f3_1_per_band_erl_adaptive:
+                            _pb_caps = (self.config.per_band_erl_cap_lf,
+                                        self.config.per_band_erl_cap_mf,
+                                        self.config.per_band_erl_cap_hf)
+                            for _bi, _cap in enumerate(_pb_caps):
+                                self._per_band_erl[_bi] = min(self._per_band_erl[_bi], _cap)
+                        if self.config.use_epc_state_reset:
+                            self._apply_epc_state_reset('shadow_rise')
+                        self._f_e3_handle_epc_fire('shadow_rise')
                 else:
                     # Hangover tick — only when shadow_rise did NOT fire (preserves
                     # original if/elif/else structure exactly).
                     self._epc_det.tick_hangover()
+                # v3.18 Phase F.1 — classify shadow_rise event (post-mask).
+                if self.config.aec_event_classification_enabled and rise_event.fired:
+                    self._classified_event = classify_epc_event(rise_event)
 
             # WebRTC-style: no output switching. Main filter output is always used.
             # (Shadow filter drives divergence detection + Q boost + pause, not output selection.)
