@@ -5,16 +5,13 @@ free function operating on a ResFilter-shaped state container `rf`. Logic is
 copied byte-for-byte (no numerical reordering, no algebra simplification, no
 threshold change) per anti-loophole §5.5.
 
-Scope note (deviation from v1.1 §3.3 logical mapping): §3.3 places
-`epc_dt_cap` (diag index [2]) in Module 2. In legacy code `epc_dt_cap` lives
-inside `_stage_gain_postprocess` as its first operation. To preserve byte-equal
-under the subclass-and-delegate pattern (no orchestrator signature change),
-`epc_dt_cap` is left physically in Module 3's `_stage_gain_postprocess`. The
-§3.3 logical mapping is honored at the time-ordered sequence level (`g`
-flows from `gain_compute` → `epc_dt_cap` → ... unchanged); the code-locality
-shift to Module 2 is deferred to the post-five-extraction `ResState` migration
-pass (§3.4), at which point the orchestrator owns frame ingestion and module
-boundaries are fully under refactor control.
+Scope note (post v3.16 C1): the `epc_dt_cap` cap action was removed
+because v3.13 + v3.14 audits showed 0/2,032,022 frame fire-rate. Diag
+slot [2] is preserved as alias of [1] for backward compat with
+`_diag_round5_stages` consumers (audit scripts, P52 9-slot contract).
+Pre-removal the cap action lived in `_stage_gain_postprocess` (Module 3);
+v1.1 §3.3 had targeted Module 2 placement, but the relocation was deferred
+along with the removal.
 """
 
 from __future__ import annotations

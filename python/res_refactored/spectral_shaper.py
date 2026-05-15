@@ -4,10 +4,11 @@ Verbatim extraction of `ResFilter._stage_gain_postprocess` (aec.py:1973-2101)
 into a free function operating on a ResFilter-shaped state container `rf`.
 Logic copied byte-for-byte per anti-loophole §5.5.
 
-Scope note: per Module 2 verdict, `epc_dt_cap` (diag [2]) physically remains
-in this module (Module 3) rather than moving to Module 2, to preserve
-byte-equal under the subclass-and-delegate pattern. Logical §3.3 mapping
-is honored at the time-ordered sequence level.
+v3.16 C1 update: `epc_dt_cap` cap action removed (parallel removal in legacy
+`ResFilter._stage_gain_postprocess`). Slot 03 / diag stage 2 preserved as
+aliases of stage 02 for diagnostic backward compat. Byte-equal vs legacy
+preserved because the cap action fired 0/2,032,022 frames in v3.13 + v3.14
+audits.
 """
 
 from __future__ import annotations
@@ -15,17 +16,17 @@ from __future__ import annotations
 import numpy as np
 
 
-def spectral_shaper(rf, *, g_in, epc_dt, quiet_mask, far_power,
+def spectral_shaper(rf, *, g_in, quiet_mask, far_power,
                     effective_dt, is_stationary_dt, divergence,
                     erl_estimate=0.01):
-    """Stage 3: EPC_DT cap, quiet mask, 3-bin smooth, HF cap, divergence override.
+    """Stage 3: quiet mask, 3-bin smooth, HF cap, divergence override.
 
-    Returns updated g (post-divergence-override). Mutates `rf._diag_round5_stages[2..6]`.
+    Returns updated g (post-divergence-override). Mutates
+    `rf._diag_round5_stages[2..6]`. Slot 2 is preserved as alias of slot 1
+    post v3.16 C1 (epc_dt_cap removed).
     """
     g = g_in
-    if epc_dt:
-        EPC_DT_GAIN_CAP = 0.85
-        g = np.minimum(g, EPC_DT_GAIN_CAP)
+    # v3.16 C1 — epc_dt_cap removed. Slot 03 / stage 2 alias of stage 02.
     if getattr(rf, '_capture_stages', False):
         rf._stage_gains['03_epc_dt_cap'] = g.copy()
     rf._diag_round5_stages[2] = float(np.mean(g[rf._voice_band_idx])) if rf._voice_band_idx.size > 0 else 0.0

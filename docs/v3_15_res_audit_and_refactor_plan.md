@@ -105,36 +105,41 @@ time 70 sec on `-j 6`.
   remains the canonical defence (v3.13 baseline 97.4 %; reaffirmed by
   v3.12 P58 Phase 2 closure when removing it).
 
-### 3.2 `ne_g_floor` — **SUBSTRATE SHIFT: dead on v3.15 substrate**
+### 3.2 `ne_g_floor` — **SUBSTRATE SHIFT: dead on v3.15 substrate (800-case CONFIRMED)**
 
 - **Method**: inferred via `_ne_g_floor_fired(res)` checking
   `_stats_last_ne_g_floor > _stats_last_spectral_g_min + 1e-7`.
-- **v3.15 fire-rate**: **0.0000 on ALL measured buckets (DT_static,
-  DT_movement, GLOBAL)** — 0 / 150 792 frames on DT_static, 0 / 74 049
-  on DT_movement.
-- **Diff vs v3.13 (DT)**: −0.934 on DT_static (0.934 → 0.000);
-  −0.933 on DT_movement (0.933 → 0.000). v3.13 verdict's "universal
-  baseline floor" finding **NO LONGER HOLDS** on v3.15 substrate.
+- **v3.15 fire-rate (800-case re-audit, 2026-05-15, j=6, 10.9 min)**:
+  **0.0000 on ALL buckets** — `FS_static 0/385294`, `FS_movement
+  0/295122`, `DT_static 0/701736`, `DT_movement 0/424351`,
+  `NE 0/222833`, **`cohort_tail 0/2686`** — universal zero.
+- **Diff vs v3.13**: −0.880 FS_static, −0.867 FS_movement,
+  −0.934 DT_static, −0.933 DT_movement, **−0.999 NE** (was 99.9 %!),
+  **−0.750 cohort_tail**. v3.13 verdict's "universal baseline floor"
+  finding **NO LONGER HOLDS** on any v3.15 bucket including the most
+  defensive surfaces (NE-only and cohort_tail).
 - **Mechanism**: v3.14 Arc P (adaptive per-band ERL) + Arc R (per-band
   ENR `block_lf` tilt) raise `spectral_g_min` enough that the
   `max(spectral_g_min, ne_g_floor)` comparison **never picks
   `ne_g_floor`**. `ne_g_floor` is now structurally dominated by the
-  per-band ENR-driven floor.
-- **Determination**: STRONG CANDIDATE FOR REMOVAL. Pending 800-case
-  re-audit confirming the same on FS / NE / cohort_tail. If confirmed,
-  remove as a delete-only candidate alongside `epc_dt_cap` (see
-  **NEW v3.16 candidate** in §4 — listed as part of Candidate C1
-  scope expansion, or as a separate C1b).
+  per-band ENR-driven floor across the entire 800-case corpus.
+- **Determination**: REMOVE — ship as v3.16 candidate **C1b**
+  (delete-only, byte-equal-verified). 800-case re-audit cohort_tail
+  hard bar (≤ 5 % per §6) easily met (0.0 %).
+- **Audit artefact**: [`/tmp/v3_16_res_audit_c1b/audit.json`](file:///tmp/v3_16_res_audit_c1b/audit.json)
+  + `summary.csv` (10.9 min @ j=6).
 
 ### 3.3 `epc_dt_cap`
 
 - **Method**: pre = `02_spectral_floor`, post = `03_epc_dt_cap`.
-- **v3.15 fire-rate**: **0.0000 on all measured buckets** (DT_static,
-  DT_movement). Matches v3.13 baseline 0/800.
+- **v3.15 fire-rate (800-case re-audit)**: **0.0000 on ALL buckets**
+  including `cohort_tail 0/2686` — 0 / 2 032 022 frames globally.
+  Matches v3.13 baseline 0/800.
 - **Diff vs v3.13**: +0.0000 — no change.
 - **Determination**: REMOVE — ship as v3.16 candidate **C1**
   (delete-only, byte-equal-verified). Dead on both v3.13 and v3.15
-  substrates.
+  substrates. **5/5 byte-equal sanity PASS** on (FS_static, FS_movement,
+  DT_static, NE, pcb1Nh0Z) for both `_ours.wav` and `_ours_nores.wav`.
 
 ### 3.4 `quiet_mask`
 
@@ -159,24 +164,20 @@ time 70 sec on `-j 6`.
 
 ### 3.6 Cross-path observations
 
-- **`ne_g_floor` substrate shift is the headline finding**: v3.14 Arc
-  P + R + S-orth.A made it structurally dead on DT. Adds a NEW
-  delete-only candidate to the v3.16 Phase 0 list.
-- v3.15 substrate does NOT change `spectral_floor` / `quiet_mask`
-  load-bearing topology on DT bucket. Reaffirms v3.13 finding that
-  `spectral_floor` is the cohort-tail defence (pending 800-case
-  re-audit on cohort_tail bucket).
+- **`ne_g_floor` substrate shift is the headline finding (800-case
+  CONFIRMED)**: v3.14 Arc P + R + S-orth.A made it structurally dead
+  on EVERY bucket including the most defensive surfaces (NE 99.9 % →
+  0 %, cohort_tail 75 % → 0 %). C1b is delete-only safe globally.
+- v3.15 substrate reaffirms `spectral_floor` cohort-tail load-bearing
+  role (cohort_tail fire-rate 0.974, mean Δgain 0.0107) — **must keep**.
+- `quiet_mask` load-bearing on cohort_tail (0.627, mean Δgain 0.972)
+  and FS / DT — **must keep**.
+- `hf_cap` cohort_tail fire-rate 0.649 — **must keep**.
 - `epc_dt_cap` is doubly dead (v3.13 + v3.15). C1 removal is safe.
 - DT-NE compression mechanism is NOT inside this audit's floor
   topology. §1.2 audit ([`v3_15_dt_ne_audit.md`](v3_15_dt_ne_audit.md))
   traced compression to ENR per-state × per-band — v3.16 candidate
   **C2** addresses that surface.
-- 60-case DT-only sample limits coverage. The audit's substrate-shift
-  finding on `ne_g_floor` may not hold on FS / NE / cohort_tail
-  (e.g., NE bucket in v3.13 fired `ne_g_floor` 99.9 % — if it stays
-  high on NE, the floor is NOT dead globally and the removal candidate
-  must be NE-aware). 800-case re-audit at v3.16 Phase 0 entry is the
-  gate for C1b (`ne_g_floor` removal).
 
 ---
 
@@ -188,23 +189,18 @@ dependency.
 
 ### Phase 0 — Housekeeping (parallel-safe; runs before everything else)
 
-#### Candidate HK-1: B3 fix — `run_one_case.py` CNG seed
-- **Origin**: v3.15 §10.S3 deferred to v3.16.
-- **Mechanism**: `python/run_one_case.py` instantiates `AEC(cfg)` without
-  `np.random.seed(...)`. Add `np.random.seed(0)` (or 42 — match
-  `eval_aec_challenge.py` per `seed=0` convention) before AEC
-  instantiation.
-- **Predicted AECMOS Δ**: 0.000 (research tooling fix; no production
-  bench impact).
-- **Implementation LOE**: S (≤ 1 sprint, ≤ 5 LOC).
-- **Cohort-tail risk**: none.
-- **Measurable success**: `run_one_case.py` produces byte-identical
-  output across re-invocations on the same case. Attach a 5-case
-  determinism test.
-- **Predicted byte-equal cost**: byte-equal on production bench
-  (`eval_aec_challenge.py` already seeds correctly); only research
-  tool's behaviour changes.
-- **Prior art**: documented in v3.15 plan §2 B3 punch-list entry.
+#### Candidate HK-1: B3 fix — `run_one_case.py` CNG seed [DONE]
+- **Status (2026-05-15)**: SHIPPED in v3.15 Phase D commit `ea8d320`
+  (alongside B6 `_prev_filter_state` doc). v3.15 §10.S3 sprint marker
+  superseded — fix actually landed during v3.15 housekeeping window
+  before v3.16 plan was authored. v3.16 Phase 0 inherits no further
+  work for HK-1.
+- **Implementation**: [`python/run_one_case.py:90`](../python/run_one_case.py#L90)
+  adds `np.random.seed(0)` before `AEC(cfg)` to match
+  `eval_aec_challenge.py:325` convention.
+- **Verified**: 800-case production bench unaffected (eval script seeds
+  per-case independently); CLI re-invocations of `run_one_case.py` on the
+  same case now produce byte-identical output.
 
 #### Candidate HK-2: §1.8 pcb1N mic_dynamic_margin patch
 - **Origin**: v3.15 §10.S5 deferred to v3.16.
@@ -222,47 +218,49 @@ dependency.
 - **Predicted byte-equal cost**: minor drift on `pcb1N`; byte-equal on
   the other 799 cases.
 
-#### Candidate C1: `epc_dt_cap` dead-code removal
-- **Origin**: v3.13 Phase 3 audit (fire-rate 0/800); reaffirmed by §1.7
-  §3.3.
-- **Mechanism**: Delete `if epc_dt: g = min(g, EPC_DT_GAIN_CAP)` block
-  + `_stage_gains['03_epc_dt_cap']` capture wrapper at
-  [`python/aec.py`](../python/aec.py) (lines ≈ 3199-3204; line numbers
-  may have drifted post v3.14 Arc P/R + v3.15 Arc T merges, re-locate
-  before edit per §0.1 rule 1).
-- **Predicted AECMOS Δ**: 0.000 (byte-equal — fire-rate 0 on subset).
-- **Implementation LOE**: S (≤ 20 LOC delete + capture-key cleanup).
-- **Cohort-tail risk**: none.
-- **Measurable success**: 800-case sample-level byte-equal (`atol=1e-6,
-  rtol=1e-5`) AND `_stage_gains` dict no longer carries the deprecated
-  key.
-- **Predicted byte-equal cost**: byte-equal.
+#### Candidate C1: `epc_dt_cap` dead-code removal [DONE]
+- **Status (2026-05-15)**: SHIPPED on `feature/v3.16` — full mechanism
+  removal (cap action + state-driven flag substrate + gate
+  computation). 5/5 byte-equal sanity PASS (FS_static, FS_movement,
+  DT_static, NE, pcb1Nh0Z) for both `_ours.wav` and `_ours_nores.wav`.
+  800-case re-audit confirms 0/2,032,022 frame fire-rate across ALL
+  buckets including cohort_tail.
+- **Files changed**:
+  - [`python/aec.py`](../python/aec.py): removed
+    `res_state_driven_epc_dt_cap` config field, constructor param +
+    self-attr, gate computation block, cap action, `epc_dt` postprocess
+    signature param, call-site keyword arg, ResFilter wire-through.
+    `_diag_round5_stages[2]` + `_stage_gains['03_epc_dt_cap']` writes
+    preserved as aliases of stage 02 for diagnostic backward compat
+    (P52 9-slot contract).
+  - [`python/res_refactored/spectral_shaper.py`](../python/res_refactored/spectral_shaper.py):
+    mirrored signature + cap removal for byte-equal vs legacy.
+  - [`python/res_refactored/gain_computer.py`](../python/res_refactored/gain_computer.py)
+    + [`__init__.py`](../python/res_refactored/__init__.py): updated
+    docstring scope notes to reflect removal.
+- **Net LOC change**: ~30 LOC delete + ~12 LOC doc/comment update.
 
-#### Candidate C1b: `ne_g_floor` removal — NEW (substrate-shift discovery)
+#### Candidate C1b: `ne_g_floor` removal — substrate-shift discovery [READY]
 - **Origin**: §1.7 §3.2 audit found fire-rate **0.0000 on DT_static +
-  DT_movement** (v3.13 baseline 0.93 on both). v3.14 Arc P + R raise
-  `spectral_g_min` enough that `ne_g_floor` never wins the
+  DT_movement** (v3.13 baseline 0.93 on both). v3.14 Arc P + R + S-orth.A
+  raise `spectral_g_min` enough that `ne_g_floor` never wins the
   `max(spectral_g_min, ne_g_floor)` comparison.
+- **800-case re-audit (2026-05-15, j=6, 10.9 min)**: gate PASSED.
+  Fire-rate `0.0000` on every bucket including FS_static, FS_movement,
+  NE (was 99.9 % in v3.13), and cohort_tail (was 75 % in v3.13).
+  Removal byte-equal-safe globally.
 - **Mechanism**: Delete the `spectral_g_min = max(spectral_g_min,
-  ne_g_floor)` raise at [`python/aec.py`](../python/aec.py) line
-  ≈ 3696 + remove `ne_g_floor` config field + remove the cached scalar
-  `_stats_last_ne_g_floor` (used only by `_ne_g_floor_fired()` audit
-  hook).
-- **Predicted AECMOS Δ**: 0.000 on DT (byte-equal — fire-rate 0). FS
-  / NE / cohort_tail TBD by 800-case re-audit at v3.16 Phase 0 entry.
-- **Implementation LOE**: S (≤ 30 LOC delete + capture cleanup).
-- **Cohort-tail risk**: low — v3.13 cohort_tail ne_g_floor fire-rate
-  was 0.750 (lower than other buckets); needs re-audit on v3.15
-  substrate before removal commits. If still > 5 % on cohort_tail,
-  promote to C2 (per-state × per-band table) instead of C1b.
-- **Measurable success**: full 800-case fire-rate audit confirms ≤ 5 %
-  on every bucket including cohort_tail AND 800-case sample-level
-  byte-equal verification post-removal.
-- **Predicted byte-equal cost**: byte-equal IF the gate condition
-  holds; non-byte-equal is the trigger to ABORT removal and escalate
-  to C2.
-- **Gate**: 800-case re-audit (uses C6 prerequisite tooling — extend
-  audit script to take `--cases-list` flag).
+  ne_g_floor)` raise + remove the per-frame computation of `ne_g_floor`
+  + remove the cached scalar `_stats_last_ne_g_floor` (used only by
+  `_ne_g_floor_fired()` audit hook). Preserve any stats sums that
+  external tooling reads for backward compat (zero-fill is OK since
+  fire-rate is structurally 0).
+- **Implementation LOE**: S (≤ 30 LOC delete + stats cleanup).
+- **Cohort-tail risk**: NONE (audit-confirmed 0/2686 frames).
+- **Measurable success**: 800-case sample-level byte-equal post-removal
+  (`atol=1e-6, rtol=1e-5`) AND `_diag_audit` consumers see no NaN /
+  KeyError for `_stats_last_ne_g_floor` field.
+- **Predicted byte-equal cost**: byte-equal (fire-rate already 0).
 
 ### Phase 1 — Foundation (BLOCKS Phase 2-4; can run in parallel within phase)
 
