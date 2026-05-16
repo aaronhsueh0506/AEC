@@ -249,6 +249,20 @@ class AecConfig:
     # (Option B, AEC3-aligned default).
     filter_misadjustment_scale_p: bool = False
 
+    # v3.19 Phase 3 — B FilterMisadjustment retry per Phase 3.1 design.
+    # When True: gate switches from `_prev_filter_state == 'refined_usable'`
+    # (~0-38% coverage in v3.18) to `fq_usable AND reset_done` (52-86%
+    # coverage from C.B substrate); threshold switches from
+    # `< filter_misadjustment_threshold` (legacy 0.5) to
+    # `< filter_misadjustment_threshold_phase3` (default 2.0, calibrated
+    # for our `_erl_estimate` budget semantics where smoothed clusters
+    # at 10-42× vs AEC3's clustering near 1.0). Requires C.A+C.B+C.C
+    # all ON for AecState back-ref. Default-OFF: byte-equal.
+    # Design: docs/v3_19_phase3_1_b_retry_design.md.
+    filter_misadjustment_use_fq_usable: bool = False
+    filter_misadjustment_reset_done_frames: int = 20
+    filter_misadjustment_threshold_phase3: float = 2.0
+
     # v3.18 Phase C.A — FilterAnalyzer audit-only port (AEC3-aligned).
     # When True: instantiates FilterAnalyzer on init; per frame, IFFTs
     # main filter W → time domain → HP 600 Hz → peak detection →
@@ -6564,6 +6578,11 @@ class AEC:
             self._misadjustment_stable_count = 0
             self._misadjustment_hangover_remaining = 0
             self._misadjustment_fire_count = 0
+            # v3.19 Phase 3 — reset_done counter for fq_usable gate.
+            # Increments per frame when no recent reset event; reset to
+            # 0 on epc_active / main_paused / leakage_diverged_fired.
+            # Used only when filter_misadjustment_use_fq_usable=True.
+            self._misadjustment_reset_done_count = 0
 
         # v3.18 Phase C.A — FilterAnalyzer (audit-only). Lazy-init guards
         # both module import and instantiation so flag-OFF stays byte-equal.
