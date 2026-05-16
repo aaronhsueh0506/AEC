@@ -8,8 +8,13 @@ Single-channel AEC (1 mic + 1 ref reference signal). Two implementations of the
 **same algorithm** that must produce **bit-equal output** within numerical
 tolerance:
 
-- `python/aec.py` — algorithm reference, ~4500 lines, single file. Where new
-  algorithm work happens first.
+- `python/aec.py` — 53-line top-level shim (post-v3.19 R.11 refactor) that
+  re-exports every public symbol so `from aec import AEC, AecConfig, ...`
+  keeps working. Algorithm itself lives under `python/modules/`.
+- `python/modules/` — 17 algorithm modules + 4 audit/research siblings
+  (filter_analyzer, filter_quality, p52_regime_classifier, res_refactored).
+  Module-by-module map: [docs/refactor_modules_layout.md](docs/refactor_modules_layout.md).
+  Where new algorithm work happens first.
 - `c_impl/` — production C port. Mirrors the Python class structure
   (`PBFDKF`, `ShadowFilter`, `ResFilter`, etc.). Built with
   `-ffp-contract=off` mandatory.
@@ -85,23 +90,23 @@ ref ─► HPF ─► Saturation ─► DelayEst+RingBuf ─► PBFDKF ─► er
 
 Tight coupling lives in two places:
 
-1. **`PBFDKF` + `ShadowFilter` + `PathChangeRegimeHandler`** ([aec.py:1026](python/aec.py#L1026), [aec.py:3577](python/aec.py#L3577) and surrounds) — the shadow filter and main filter exchange state via a regime handler that fires `boost_q` / `reverse_copy` / `main_paused` decisions. **Was previously named `ShadowCopyController`**; renamed under P52 Path 3 (see [docs/p52_phase_a_verdict.md](docs/p52_phase_a_verdict.md)). The handler is **load-bearing on the cohort tail** (~7/800 cases); do not remove or bypass it.
+1. **`PBFDKF` + `ShadowFilter` + `PathChangeRegimeHandler`** — the shadow filter and main filter exchange state via a regime handler that fires `boost_q` / `reverse_copy` / `main_paused` decisions. PBFDKF lives in [python/modules/filters.py](python/modules/filters.py); PathChangeRegimeHandler in [python/modules/epc.py](python/modules/epc.py). **Was previously named `ShadowCopyController`**; renamed under P52 Path 3 (see [docs/p52_phase_a_verdict.md](docs/p52_phase_a_verdict.md)). The handler is **load-bearing on the cohort tail** (~7/800 cases); do not remove or bypass it.
 
-2. **`ResFilter.process()` 9-stage pipeline** ([aec.py:1390](python/aec.py#L1390) ff.) — residual model → gain compute (softgate_emr / spectral_floor) → gain postprocess (epc_dt_cap / quiet_mask / 3bin_smooth / hf_cap / pre_temporal) → temporal smoothing → noise floor + CNG. State threads through ~25 `self.*` fields per frame. The P52 Phase B refactor extracts each stage into [python/res_refactored/](python/res_refactored/) (subclass-and-delegate pattern; see [docs/p52_phase_b_module_1_verdict.md](docs/p52_phase_b_module_1_verdict.md)).
+2. **`ResFilter.process()` 9-stage pipeline** — residual model → gain compute (softgate_emr / spectral_floor) → gain postprocess (epc_dt_cap / quiet_mask / 3bin_smooth / hf_cap / pre_temporal) → temporal smoothing → noise floor + CNG. Lives in [python/modules/res_filter.py](python/modules/res_filter.py). State threads through ~25 `self.*` fields per frame. **R.9.1 split**: `ResFilter` is the base; `ResFilterEnr` (production default for all 5 BALANCED+ presets) overrides `_stage_gain_compute` to skip the `gain_type` dispatcher; `ResFilterWiener` is the legacy fallback that owns the `over_sub` scalar. The P52 Phase B refactor extracts each stage into [python/modules/res_refactored/](python/modules/res_refactored/) (subclass-and-delegate pattern; see [docs/p52_phase_b_module_1_verdict.md](docs/p52_phase_b_module_1_verdict.md)).
 
 ### `AecConfig` and presets
 
 Five operating points (`MILD`/`SOFT`/`BALANCED`/`AGGRESSIVE`/`MAXIMUM`) defined
-in [aec.py:146-365](python/aec.py#L146). **Presets are co-tuned** — every knob
+in [python/modules/config.py](python/modules/config.py) (search for `from_preset`). **Presets are co-tuned** — every knob
 inside a preset is anchored against the 800-case AECMOS bench. Don't tweak
 individual RES knobs; switch presets or design a new one with a full
 800-case re-bench.
 
 ### Diagnostic surfaces (do not remove)
 
-- `AecStats` / `get_stats()` ([aec.py:62-123](python/aec.py#L62) + 4344) — per-frame audio-passive trace consumed by `run_one_case.py` plots and external research tooling.
+- `AecStats` / `get_stats()` ([python/modules/dataclasses.py](python/modules/dataclasses.py) + the AEC method in [python/modules/orchestrator.py](python/modules/orchestrator.py)) — per-frame audio-passive trace consumed by `run_one_case.py` plots and external research tooling.
 - `AecResContext` — exposes `echo_spec` / per-bin Kalman state so the linear stage can feed an external (or NN) post-filter; `AecConfig.return_res_context = True` switches `aec.process()` return type to `(out, AecResContext)`.
-- `_diag_round5_stages` ([aec.py:1488-1491](python/aec.py#L1488)) — 9-slot voice-band gain trace for RES per-stage inspection.
+- `_diag_round5_stages` ([python/modules/res_filter.py](python/modules/res_filter.py)) — 9-slot voice-band gain trace for RES per-stage inspection.
 - `trace_p52_regime_handler` flag (default-OFF) — per-frame regime handler trace; classifier in `python/aec_p52_regime_classifier.py` is analysis-only (enforced by `python/test_p52_regime.py::AntiLoopholeTests`).
 
 ### Active refactor: P52 Phase B
