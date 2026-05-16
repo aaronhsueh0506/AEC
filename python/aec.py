@@ -277,6 +277,11 @@ class AecConfig:
     # High-pass filter (DC blocker + low-freq removal)
     enable_highpass: bool = True
     highpass_cutoff_hz: float = 80.0    # Cutoff freq: removes DC, 50/60Hz hum, rumble
+    # Reference-path HPF — default OFF to align with WebRTC AEC3 (which gates
+    # the equivalent `high_pass_filter_echo_reference` behind the
+    # `WebRTC-Aec3HighPassFilterEchoReference` field trial; off by default).
+    # Mic-path HPF (`enable_highpass`) stays on, matching APM default.
+    enable_highpass_ref: bool = False
 
     # Saturation / non-linear echo handling
     enable_saturation_detect: bool = True
@@ -2384,7 +2389,10 @@ class AEC:
         # High-pass filter (DC blocker + low-freq removal)
         if self.config.enable_highpass:
             self._hp_mic = HighPassFilter(self.config.highpass_cutoff_hz, self.config.sample_rate)
-            self._hp_ref = HighPassFilter(self.config.highpass_cutoff_hz, self.config.sample_rate)
+            if self.config.enable_highpass_ref:
+                self._hp_ref = HighPassFilter(self.config.highpass_cutoff_hz, self.config.sample_rate)
+            else:
+                self._hp_ref = None
         else:
             self._hp_mic = None
             self._hp_ref = None
@@ -2577,6 +2585,7 @@ class AEC:
         # _conv_counter is owned by self._convergence (reset above)
         if self._hp_mic is not None:
             self._hp_mic.reset()
+        if self._hp_ref is not None:
             self._hp_ref.reset()
         if self._sat_detector_ref is not None:
             self._sat_detector_ref.reset()
@@ -2972,6 +2981,7 @@ class AEC:
         # High-pass filter: remove DC + low-freq noise
         if self._hp_mic is not None:
             near_end = self._hp_mic.process(near_end.copy())
+        if self._hp_ref is not None:
             far_end = self._hp_ref.process(far_end.copy())
 
         # Saturation detection + soft-clip reference
