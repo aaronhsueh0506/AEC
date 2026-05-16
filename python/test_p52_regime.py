@@ -22,7 +22,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from aec import AecConfig, PathChangeRegimeHandler, RegimeHandlerDecision, PBFDKF
-from aec_p52_regime_classifier import (
+from modules.p52_regime_classifier import (
     AcousticRegime, AcousticRegimeClassifier, RegimeClassification,
 )
 
@@ -324,6 +324,7 @@ class AntiLoopholeTests(unittest.TestCase):
             src = f.read()
         for forbidden in (
             'aec_p52_regime_classifier',
+            'modules.p52_regime_classifier',
             'AcousticRegimeClassifier',
             'AcousticRegime',
             'RegimeClassification',

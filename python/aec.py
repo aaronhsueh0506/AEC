@@ -6438,7 +6438,7 @@ class AEC:
         # RES (only for frequency-domain modes)
         if self.config.enable_res and self.config.mode in _FREQ_MODES:
             if self.config.use_res_refactored:
-                from res_refactored.res_filter_refactored import ResFilterRefactored
+                from modules.res_refactored.res_filter_refactored import ResFilterRefactored
                 _ResCls = ResFilterRefactored
             else:
                 _ResCls = ResFilter
@@ -6590,7 +6590,7 @@ class AEC:
         if self.config.filter_analyzer_enabled:
             global _FilterAnalyzer
             if _FilterAnalyzer is None:
-                from aec_filter_analyzer import FilterAnalyzer as _FA
+                from modules.filter_analyzer import FilterAnalyzer as _FA
                 _FilterAnalyzer = _FA
             self._filter_analyzer = _FilterAnalyzer(
                 sample_rate=self.config.sample_rate)
@@ -6601,7 +6601,7 @@ class AEC:
         if self.config.filter_quality_enabled:
             global _FilteringQualityAnalyzer
             if _FilteringQualityAnalyzer is None:
-                from aec_filter_quality import FilteringQualityAnalyzer as _FQA
+                from modules.filter_quality import FilteringQualityAnalyzer as _FQA
                 _FilteringQualityAnalyzer = _FQA
             self._filter_quality = _FilteringQualityAnalyzer()
         # Per-frame helper: set True inside any EPC fire site this frame.
