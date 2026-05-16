@@ -2015,8 +2015,12 @@ class AEC:
             if self.config.use_res_refactored:
                 from modules.res_refactored.res_filter_refactored import ResFilterRefactored
                 _ResCls = ResFilterRefactored
+            elif self.config.res_gain_type == "enr":
+                from modules.res_filter import ResFilterEnr
+                _ResCls = ResFilterEnr
             else:
-                _ResCls = ResFilter
+                from modules.res_filter import ResFilterWiener
+                _ResCls = ResFilterWiener
             self.res = _ResCls(
                 block_size=self.filter.fft_size,
                 n_freqs=self.filter.n_freqs,

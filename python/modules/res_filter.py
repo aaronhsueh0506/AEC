@@ -946,485 +946,523 @@ class ResFilter:
         consumes it (gated by self._consume_filter_state) to drive the
         per-state ENR tuple and gain_floor unification.
         """
+        # R.9.1: dispatcher to gain-type-specific helper. ENR is the production
+        # path (all 5 BALANCED+ presets); wiener / spectral_sub are stubs that
+        # own the legacy `self.over_sub` scalar (never read by enr).
         if self.gain_type == "enr" and residual_echo_psd is not None:
-            raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
-            if self._noise_floor_refined:
-                # S10: per-bin `error_psd × 0.005` in FS-confident bins
-                # (coh² < 0.1); baseline scalar `mean(error_psd) × 0.01`
-                # in DT/NE. Lowers nearend_est in FS only; DT/NE bins
-                # unchanged. Audit-validated: 0% intrusion in S9-A.2.
-                noise_floor_psd = np.where(
-                    coh2 < 0.1,
-                    self.error_psd * 0.005,
-                    np.mean(self.error_psd) * 0.01,
-                ).astype(self.error_psd.dtype) + 1e-10
-            else:
-                noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
-
-            # Per-bin DT indicator: base from coh2 (works for speech far-end).
-            # P4B: γ²(k)-primary form removes the frame-scalar floor in the
-            # ambiguous DTD regime (effective_dt 0.2–0.5) so per-bin γ²
-            # discrimination survives instead of being clamped uniformly to
-            # the frame value. effective_dt only contributes a soft floor
-            # when it crosses 0.5 (DTD strongly evidences NE).
-            # F3.1: per-bin mic-energy excess metric. Reuses the P1-Phase-1
-            # validated `max(error_psd − far_lw·ERL_est, 0) / error_psd`
-            # ratio (AUROC 0.871 in HF-cap gate) as the *primary* per-bin
-            # NE evidence — replaces `(1 - coh2)` which saturates to 1 in
-            # FS post-cancellation. Gated on `filter_converged` AND
-            # long-window initialised so `erl_estimate` and `far_lw` are
-            # reliable; falls through to the P4B / legacy path otherwise.
-            _lw_ready = (
-                self._residual_est is not None
-                and self._residual_est._long_window_n_updates > 0
+            return self._gain_compute_enr(
+                residual_echo_psd=residual_echo_psd,
+                eer=eer,
+                coh2=coh2,
+                effective_dt=effective_dt,
+                is_stationary_dt=is_stationary_dt,
+                far_power=far_power,
+                filter_once_converged=filter_once_converged,
+                spectral_g_min=spectral_g_min,
+                eps=eps,
+                erl_estimate=erl_estimate,
+                filter_converged=filter_converged,
+                epc_active=epc_active,
+                filter_state=filter_state,
+                aec_state=aec_state,
             )
-            # F3.1 v3 (2026-05-12): blend with legacy `(1 - coh2)`
-            # (weight=0.7 F3.1, 0.3 legacy) to soften HF over-
-            # suppression in high-coupling rooms where erl_estimate
-            # underestimates true ERL (Lsa5Wpw / wr54weK pattern:
-            # mic/far 0.83/0.55, true ERL ~0.68/0.30 but erl_estimate
-            # capped to 0.3 after EPC). Pure F3.1 over-attributes NE
-            # → over-suppresses → spectral imbalance hurts AECMOS
-            # even though total echo drops. Blend leaves F3.1 as the
-            # dominant signal but caps its swing.
-            #
-            # The earlier v3 attempt also tried a `mic_pwr <= 2·far·erl`
-            # envelope gate to block Regime-2 (pG9Bikvr non-echo
-            # content). It correctly blocked the FS-noise case but
-            # also blocked legitimate DT cases where mic naturally
-            # exceeds expected echo (i2BU43nm). Adding `OR effective_dt
-            # >= 0.2` softened the FS protection back out. Conclusion:
-            # binary gating on mic/far ratio can't be made FS-only
-            # without a label we don't have; the blend alone is the
-            # honest cap.
-            # v3.12 S7 (Phase 3B v3 Option α): when `_dt_per_bin_unified` is
-            # True, drop the `NOT epc_active` constraint so the F3.1 v3
-            # mic-excess blend also fires during EPC-active frames. Legacy
-            # fallback at `else:` below remains the path for `not
-            # filter_converged` or `not _lw_ready` regardless of flag.
-            # v3.19 Phase 1 Branch G1 — when c_e_branch_dt_per_bin_use_fq_usable
-            # is ON, the F3.1 v3 mic-excess gate uses fq_usable instead of
-            # filter_converged. Default-OFF: byte-equal to legacy.
-            _fc_g1 = filter_converged
-            if (self._c_e_branch_dt_per_bin_use_fq_usable
-                    and aec_state is not None
-                    and getattr(aec_state, '_aec_ref', None) is not None):
-                _fc_g1 = aec_state.fq_usable()
-            if (self._use_mic_excess_evidence
-                    and _fc_g1
-                    and _lw_ready
-                    and (self._dt_per_bin_unified or not epc_active)):
-                far_lw = self._residual_est._long_window_far_psd
-                # v3.14 Arc-P P.S2: when erl_estimate is a per-bin ndarray
-                # (passed by AEC when f3_1_per_band_erl_adaptive=True), use it
-                # directly (numpy broadcasting handles scalar and array equally).
-                # When erl_estimate is scalar float (default-OFF path), float()
-                # preserves existing behaviour — byte-equal guaranteed.
-                if isinstance(erl_estimate, np.ndarray):
-                    erl_e = erl_estimate  # per-bin array, shape (n_freqs,)
-                else:
-                    erl_e = float(erl_estimate)
-                excess = np.maximum(self.error_psd - far_lw * erl_e, 0.0)
-                excess_ratio = np.clip(
-                    excess / (self.error_psd + 1e-10), 0.0, 1.0,
-                ).astype(np.float32)
-                # Blend with legacy `(1 - coh2)` to soften the over-attribution
-                # under erl_estimate underestimation (Regime-3 mitigation).
-                legacy = 1.0 - coh2
-                dt_per_bin = (_BLEND_F31_MIC_EXCESS * excess_ratio
-                              + (1.0 - _BLEND_F31_MIC_EXCESS) * legacy)
-                if effective_dt > 0.5:
-                    floor_lift = float((effective_dt - 0.5) * 2.0)
-                    dt_per_bin = np.maximum(dt_per_bin, floor_lift)
+        return self._gain_compute_wiener_legacy(
+            residual_echo_psd=residual_echo_psd,
+            eer=eer,
+            spectral_g_min=spectral_g_min,
+            eps=eps,
+        )
+
+    def _gain_compute_enr(self, *, residual_echo_psd, eer, coh2,
+                          effective_dt, is_stationary_dt, far_power,
+                          filter_once_converged, spectral_g_min, eps,
+                          erl_estimate=0.01, filter_converged=False,
+                          epc_active=False, filter_state='idle',
+                          aec_state=None):
+        """ENR-branch gain computation (production path)."""
+        raw_nearend_est = np.maximum(self.error_psd - residual_echo_psd, 0.0)
+        if self._noise_floor_refined:
+            # S10: per-bin `error_psd × 0.005` in FS-confident bins
+            # (coh² < 0.1); baseline scalar `mean(error_psd) × 0.01`
+            # in DT/NE. Lowers nearend_est in FS only; DT/NE bins
+            # unchanged. Audit-validated: 0% intrusion in S9-A.2.
+            noise_floor_psd = np.where(
+                coh2 < 0.1,
+                self.error_psd * 0.005,
+                np.mean(self.error_psd) * 0.01,
+            ).astype(self.error_psd.dtype) + 1e-10
+        else:
+            noise_floor_psd = np.mean(self.error_psd) * 0.01 + 1e-10
+
+        # Per-bin DT indicator: base from coh2 (works for speech far-end).
+        # P4B: γ²(k)-primary form removes the frame-scalar floor in the
+        # ambiguous DTD regime (effective_dt 0.2–0.5) so per-bin γ²
+        # discrimination survives instead of being clamped uniformly to
+        # the frame value. effective_dt only contributes a soft floor
+        # when it crosses 0.5 (DTD strongly evidences NE).
+        # F3.1: per-bin mic-energy excess metric. Reuses the P1-Phase-1
+        # validated `max(error_psd − far_lw·ERL_est, 0) / error_psd`
+        # ratio (AUROC 0.871 in HF-cap gate) as the *primary* per-bin
+        # NE evidence — replaces `(1 - coh2)` which saturates to 1 in
+        # FS post-cancellation. Gated on `filter_converged` AND
+        # long-window initialised so `erl_estimate` and `far_lw` are
+        # reliable; falls through to the P4B / legacy path otherwise.
+        _lw_ready = (
+            self._residual_est is not None
+            and self._residual_est._long_window_n_updates > 0
+        )
+        # F3.1 v3 (2026-05-12): blend with legacy `(1 - coh2)`
+        # (weight=0.7 F3.1, 0.3 legacy) to soften HF over-
+        # suppression in high-coupling rooms where erl_estimate
+        # underestimates true ERL (Lsa5Wpw / wr54weK pattern:
+        # mic/far 0.83/0.55, true ERL ~0.68/0.30 but erl_estimate
+        # capped to 0.3 after EPC). Pure F3.1 over-attributes NE
+        # → over-suppresses → spectral imbalance hurts AECMOS
+        # even though total echo drops. Blend leaves F3.1 as the
+        # dominant signal but caps its swing.
+        #
+        # The earlier v3 attempt also tried a `mic_pwr <= 2·far·erl`
+        # envelope gate to block Regime-2 (pG9Bikvr non-echo
+        # content). It correctly blocked the FS-noise case but
+        # also blocked legitimate DT cases where mic naturally
+        # exceeds expected echo (i2BU43nm). Adding `OR effective_dt
+        # >= 0.2` softened the FS protection back out. Conclusion:
+        # binary gating on mic/far ratio can't be made FS-only
+        # without a label we don't have; the blend alone is the
+        # honest cap.
+        # v3.12 S7 (Phase 3B v3 Option α): when `_dt_per_bin_unified` is
+        # True, drop the `NOT epc_active` constraint so the F3.1 v3
+        # mic-excess blend also fires during EPC-active frames. Legacy
+        # fallback at `else:` below remains the path for `not
+        # filter_converged` or `not _lw_ready` regardless of flag.
+        # v3.19 Phase 1 Branch G1 — when c_e_branch_dt_per_bin_use_fq_usable
+        # is ON, the F3.1 v3 mic-excess gate uses fq_usable instead of
+        # filter_converged. Default-OFF: byte-equal to legacy.
+        _fc_g1 = filter_converged
+        if (self._c_e_branch_dt_per_bin_use_fq_usable
+                and aec_state is not None
+                and getattr(aec_state, '_aec_ref', None) is not None):
+            _fc_g1 = aec_state.fq_usable()
+        if (self._use_mic_excess_evidence
+                and _fc_g1
+                and _lw_ready
+                and (self._dt_per_bin_unified or not epc_active)):
+            far_lw = self._residual_est._long_window_far_psd
+            # v3.14 Arc-P P.S2: when erl_estimate is a per-bin ndarray
+            # (passed by AEC when f3_1_per_band_erl_adaptive=True), use it
+            # directly (numpy broadcasting handles scalar and array equally).
+            # When erl_estimate is scalar float (default-OFF path), float()
+            # preserves existing behaviour — byte-equal guaranteed.
+            if isinstance(erl_estimate, np.ndarray):
+                erl_e = erl_estimate  # per-bin array, shape (n_freqs,)
+            else:
+                erl_e = float(erl_estimate)
+            excess = np.maximum(self.error_psd - far_lw * erl_e, 0.0)
+            excess_ratio = np.clip(
+                excess / (self.error_psd + 1e-10), 0.0, 1.0,
+            ).astype(np.float32)
+            # Blend with legacy `(1 - coh2)` to soften the over-attribution
+            # under erl_estimate underestimation (Regime-3 mitigation).
+            legacy = 1.0 - coh2
+            dt_per_bin = (_BLEND_F31_MIC_EXCESS * excess_ratio
+                          + (1.0 - _BLEND_F31_MIC_EXCESS) * legacy)
+            if effective_dt > 0.5:
+                floor_lift = float((effective_dt - 0.5) * 2.0)
+                dt_per_bin = np.maximum(dt_per_bin, floor_lift)
+        elif self._plan_b_dt_per_bin_gamma:
+            dt_per_bin = (1.0 - coh2).astype(np.float32)
+            if effective_dt > 0.5:
+                floor_lift = float((effective_dt - 0.5) * 2.0)
+                dt_per_bin = np.maximum(dt_per_bin, floor_lift)
+        else:
+            dt_per_bin = np.maximum(
+                np.full(self.n_freqs, effective_dt, dtype=np.float32),
+                1.0 - coh2
+            )
+        # S7 (Phase 3B v3 Option α) fire-rate audit hook. Zero-cost when
+        # `_audit_counters` is None. Read-only; does not mutate dt_per_bin
+        # or any other state. Computes unified-hypothetical dt_per_bin
+        # alongside legacy and aggregates FS-bin (coh²<0.1) sums for
+        # post-stream reduction-percentage analysis.
+        if self._audit_counters is not None:
+            _ac = self._audit_counters
+            _ac['total_frames'] += 1
+            _f31_active = (self._use_mic_excess_evidence
+                           and filter_converged
+                           and _lw_ready
+                           and not epc_active)
+            if _f31_active:
+                _ac['s7_f31v3_path_frames'] += 1
             elif self._plan_b_dt_per_bin_gamma:
-                dt_per_bin = (1.0 - coh2).astype(np.float32)
-                if effective_dt > 0.5:
-                    floor_lift = float((effective_dt - 0.5) * 2.0)
-                    dt_per_bin = np.maximum(dt_per_bin, floor_lift)
+                _ac['s7_planb_path_frames'] += 1
             else:
-                dt_per_bin = np.maximum(
-                    np.full(self.n_freqs, effective_dt, dtype=np.float32),
-                    1.0 - coh2
-                )
-            # S7 (Phase 3B v3 Option α) fire-rate audit hook. Zero-cost when
-            # `_audit_counters` is None. Read-only; does not mutate dt_per_bin
-            # or any other state. Computes unified-hypothetical dt_per_bin
-            # alongside legacy and aggregates FS-bin (coh²<0.1) sums for
-            # post-stream reduction-percentage analysis.
-            if self._audit_counters is not None:
-                _ac = self._audit_counters
-                _ac['total_frames'] += 1
-                _f31_active = (self._use_mic_excess_evidence
-                               and filter_converged
-                               and _lw_ready
-                               and not epc_active)
-                if _f31_active:
-                    _ac['s7_f31v3_path_frames'] += 1
-                elif self._plan_b_dt_per_bin_gamma:
-                    _ac['s7_planb_path_frames'] += 1
-                else:
-                    _ac['s7_legacy_path_frames'] += 1
-                    if epc_active:
-                        _ac['s7_legacy_epc_active_frames'] += 1
-                    if not filter_converged:
-                        _ac['s7_legacy_not_converged_frames'] += 1
-                    if not _lw_ready:
-                        _ac['s7_legacy_not_lw_ready_frames'] += 1
-                    _target_slice = filter_converged and _lw_ready and epc_active
-                    _alt_slice = (filter_converged and _lw_ready
-                                  and not epc_active)
-                    if _target_slice or _alt_slice:
-                        _far_lw_au = self._residual_est._long_window_far_psd
-                        _erl_e_au = float(erl_estimate)
-                        _excess_au = np.maximum(
-                            self.error_psd - _far_lw_au * _erl_e_au, 0.0,
-                        )
-                        _excess_ratio_au = np.clip(
-                            _excess_au / (self.error_psd + 1e-10), 0.0, 1.0,
-                        ).astype(np.float32)
-                        _legacy_au = (1.0 - coh2).astype(np.float32)
-                        _unified_au = (
-                            _BLEND_F31_MIC_EXCESS * _excess_ratio_au
-                            + (1.0 - _BLEND_F31_MIC_EXCESS) * _legacy_au
-                        )
-                        if effective_dt > 0.5:
-                            _floor_lift_au = float((effective_dt - 0.5) * 2.0)
-                            _unified_au = np.maximum(_unified_au, _floor_lift_au)
-                        _fs_mask_au = coh2 < 0.1
-                        _n_fs_au = int(np.sum(_fs_mask_au))
-                        if _n_fs_au > 0:
-                            _legacy_sum_au = float(np.sum(dt_per_bin[_fs_mask_au]))
-                            _unified_sum_au = float(np.sum(_unified_au[_fs_mask_au]))
-                            if _target_slice:
-                                _ac['s7_target_fs_bin_count'] += _n_fs_au
-                                _ac['s7_target_fs_bin_legacy_sum'] += _legacy_sum_au
-                                _ac['s7_target_fs_bin_unified_sum'] += _unified_sum_au
-                            else:
-                                _ac['s7_alt_fs_bin_count'] += _n_fs_au
-                                _ac['s7_alt_fs_bin_legacy_sum'] += _legacy_sum_au
-                                _ac['s7_alt_fs_bin_unified_sum'] += _unified_sum_au
-                    else:
-                        _ac['s7_legacy_target_other_frames'] += 1
-            if is_stationary_dt:
-                dt_per_bin = np.maximum(dt_per_bin, self._stat_dt_mask)
-            # v3.8.4: stash for postprocess HF-cap "high bins NE confidence" gate
-            self._dt_per_bin_last = dt_per_bin
-
-            # P4B diag (zero-cost; means over small slices). Captures the
-            # symptom this plan diagnoses: dt_per_bin and 1-coh2 both
-            # saturate ~1.0 in DT and FS post-cancel.
-            _hf_2k = self._hf_cap_bin_2k
-            self._p4b_dt_per_bin_mean = float(np.mean(dt_per_bin))
-            self._p4b_dt_per_bin_hf_mean = (
-                float(np.mean(dt_per_bin[_hf_2k:]))
-                if dt_per_bin.shape[0] > _hf_2k else 0.0
-            )
-            self._p4b_coh2_hf_mean = (
-                float(np.mean(coh2[_hf_2k:])) if coh2.shape[0] > _hf_2k else 0.0
-            )
-            self._p4b_effective_dt = float(effective_dt)
-            self._p4b_is_stationary_dt = int(is_stationary_dt)
-
-            dt_shaped_per_bin = dt_per_bin ** 1.1
-            nearend_est = np.maximum(raw_nearend_est * dt_shaped_per_bin, noise_floor_psd)
-
-            min_ne_from_dt = self.error_psd * dt_shaped_per_bin
-            _startup_dt_cond = (effective_dt > 0.35 and far_power > 1e-4
-                                and not filter_once_converged)
-            if _startup_dt_cond and self.startup_dt_min_ne_scale != 1.0:
-                min_ne_from_dt = min_ne_from_dt * self.startup_dt_min_ne_scale
-            if self._residual_est.using_render_based:
-                min_ne_from_dt = min_ne_from_dt * getattr(self, 'render_min_ne_factor', 0.5)
-            nearend_est = np.maximum(nearend_est, min_ne_from_dt)
-            if self._stats is not None:
-                self._stats_last_min_ne = float(np.mean(min_ne_from_dt))
-
-            ne_physical_floor = self.error_psd * 0.05
-            nearend_est = np.maximum(nearend_est, ne_physical_floor)
-
-            # S8 audit: nearend_est 4-way binding identification on FS bins.
-            # Of (raw * dt_shaped, noise_floor_psd, min_ne_from_dt,
-            # ne_physical_floor), record which value is the MAX (=binding).
-            if self._audit_counters is not None:
-                _fs_mask_nef = coh2 < 0.1
-                if np.any(_fs_mask_nef):
-                    _v1 = raw_nearend_est * dt_shaped_per_bin
-                    _v2 = np.full_like(_v1, noise_floor_psd)
-                    _v3 = min_ne_from_dt
-                    _v4 = ne_physical_floor
-                    _stack = np.stack([_v1, _v2, _v3, _v4], axis=0)
-                    _winner = np.argmax(_stack, axis=0)
-                    _ac_nef = self._audit_counters
-                    _ac_nef['s8_nef_raw_count'] += int(
-                        np.sum((_winner == 0) & _fs_mask_nef))
-                    _ac_nef['s8_nef_noise_floor_count'] += int(
-                        np.sum((_winner == 1) & _fs_mask_nef))
-                    _ac_nef['s8_nef_min_ne_count'] += int(
-                        np.sum((_winner == 2) & _fs_mask_nef))
-                    _ac_nef['s8_nef_ne_physical_count'] += int(
-                        np.sum((_winner == 3) & _fs_mask_nef))
-
-                    # S9 pre-audit: hypothetical noise_floor_psd
-                    # refinements. Reuses _v1/_v3/_v4 and _winner from S8;
-                    # only swaps v2 for each candidate and re-argmaxes.
-                    _v2_a1 = np.full_like(_v1, float(np.mean(self.error_psd)) * 0.001 + 1e-10)
-                    _v2_a2 = self.error_psd.astype(_v1.dtype) * 0.005 + 1e-10
-                    _stack_a1 = np.stack([_v1, _v2_a1, _v3, _v4], axis=0)
-                    _stack_a2 = np.stack([_v1, _v2_a2, _v3, _v4], axis=0)
-                    _winner_a1 = np.argmax(_stack_a1, axis=0)
-                    _winner_a2 = np.argmax(_stack_a2, axis=0)
-                    _baseline_floor = (_winner == 1) & _fs_mask_nef
-                    _baseline_max = _stack.max(axis=0)
-                    for _label, _wA in (('a1', _winner_a1), ('a2', _winner_a2)):
-                        _ac_nef[f's9_{_label}_release_to_raw'] += int(
-                            np.sum(_baseline_floor & (_wA == 0)))
-                        _ac_nef[f's9_{_label}_stays_floor'] += int(
-                            np.sum(_baseline_floor & (_wA == 1)))
-                        _ac_nef[f's9_{_label}_shift_to_min_ne'] += int(
-                            np.sum(_baseline_floor & (_wA == 2)))
-                        _ac_nef[f's9_{_label}_shift_to_phys'] += int(
-                            np.sum(_baseline_floor & (_wA == 3)))
-                        # Bins NOT bound by floor under baseline but whose
-                        # winner CHANGES under the candidate (A.2 can do
-                        # this when error_psd[i] is high enough that
-                        # error_psd[i]*0.005 surpasses the current winner).
-                        _not_floor = _fs_mask_nef & (_winner != 1)
-                        _ac_nef[f's9_{_label}_intrudes_outside_floor_baseline'] += int(
-                            np.sum(_not_floor & (_wA != _winner)))
-                        # Magnitude: 10*log10(baseline_max / candidate_max)
-                        # over bins where any change happened (only positive
-                        # values count — candidate strictly lowers nearend_est).
-                        _stack_X = _stack_a1 if _label == 'a1' else _stack_a2
-                        _cand_max = _stack_X.max(axis=0)
-                        _changed = _fs_mask_nef & (_cand_max < _baseline_max)
-                        _n_changed = int(np.sum(_changed))
-                        if _n_changed > 0:
-                            _ratio = (_baseline_max[_changed] + 1e-30) / (
-                                _cand_max[_changed] + 1e-30)
-                            _ac_nef[f's9_{_label}_reduction_db_sum'] += 10.0 * float(
-                                np.sum(np.log10(_ratio)))
-                            _ac_nef[f's9_{_label}_reduction_count'] += _n_changed
-
-                    # S9-C joint floor attack. Uses A.2 for noise_floor
-                    # (per-bin error_psd * 0.005) and additionally
-                    # scales min_ne_from_dt down in FS bins. Tracks fate
-                    # of ALL baseline-floor-bound FS bins (not just
-                    # noise_floor winners).
-                    _baseline_any_floor = _fs_mask_nef & (_winner != 0)
-                    _n_any_floor = int(np.sum(_baseline_any_floor))
-                    _ac_nef['s9c_baseline_any_floor_count'] += _n_any_floor
-                    if _n_any_floor > 0:
-                        _v3_c1 = _v3 * 0.1                # min_ne × 0.1
-                        _v3_c2 = np.zeros_like(_v3)        # min_ne → 0
-                        _stack_c1 = np.stack(
-                            [_v1, _v2_a2, _v3_c1, _v4], axis=0)
-                        _stack_c2 = np.stack(
-                            [_v1, _v2_a2, _v3_c2, _v4], axis=0)
-                        _winner_c1 = np.argmax(_stack_c1, axis=0)
-                        _winner_c2 = np.argmax(_stack_c2, axis=0)
-                        for _lab, _wC, _stk in (
-                                ('c1', _winner_c1, _stack_c1),
-                                ('c2', _winner_c2, _stack_c2)):
-                            _ac_nef[f's9c_{_lab}_release_to_raw'] += int(
-                                np.sum(_baseline_any_floor & (_wC == 0)))
-                            _ac_nef[f's9c_{_lab}_still_floor'] += int(
-                                np.sum(_baseline_any_floor & (_wC == 1)))
-                            _ac_nef[f's9c_{_lab}_still_min_ne'] += int(
-                                np.sum(_baseline_any_floor & (_wC == 2)))
-                            _ac_nef[f's9c_{_lab}_still_phys'] += int(
-                                np.sum(_baseline_any_floor & (_wC == 3)))
-                            _cand_max_c = _stk.max(axis=0)
-                            _changed_c = _fs_mask_nef & (
-                                _cand_max_c < _baseline_max)
-                            _n_c = int(np.sum(_changed_c))
-                            if _n_c > 0:
-                                _r_c = (_baseline_max[_changed_c] + 1e-30) / (
-                                    _cand_max_c[_changed_c] + 1e-30)
-                                _ac_nef[
-                                    f's9c_{_lab}_reduction_db_sum'
-                                ] += 10.0 * float(np.sum(np.log10(_r_c)))
-                                _ac_nef[
-                                    f's9c_{_lab}_reduction_count'
-                                ] += _n_c
-
-                        # S9-D sanity: attack all three floors. Stack
-                        # = [raw*dt_shaped, error_psd*0.005, 0, 0].
-                        _stack_d = np.stack(
-                            [_v1, _v2_a2, np.zeros_like(_v3),
-                             np.zeros_like(_v4)], axis=0)
-                        _winner_d = np.argmax(_stack_d, axis=0)
-                        _ac_nef['s9d_release_to_raw'] += int(
-                            np.sum(_baseline_any_floor & (_winner_d == 0)))
-                        _ac_nef['s9d_still_floor'] += int(
-                            np.sum(_baseline_any_floor & (_winner_d == 1)))
-                        _cand_max_d = _stack_d.max(axis=0)
-                        _changed_d = _fs_mask_nef & (_cand_max_d < _baseline_max)
-                        _n_d = int(np.sum(_changed_d))
-                        if _n_d > 0:
-                            _r_d = (_baseline_max[_changed_d] + 1e-30) / (
-                                _cand_max_d[_changed_d] + 1e-30)
-                            _ac_nef['s9d_reduction_db_sum'] += 10.0 * float(
-                                np.sum(np.log10(_r_d)))
-                            _ac_nef['s9d_reduction_count'] += _n_d
-
-            # Round 4 trace cache (audio-passive)
-            self._diag_nearend_est_last = nearend_est
-            self._diag_residual_echo_psd_last = residual_echo_psd
-
-            enr = residual_echo_psd / (nearend_est + 1e-10)
-
-            # v3.18 Phase D.3 / D-Path-D — Mask profile pathway.
-            # Step 1 (always): compute legacy `enr_t / enr_s` via the
-            # `ne_confidence × ne_anchor + (1-ne_confidence) × fs_anchor`
-            # continuous interpolation. Includes per_band_enr (v3.14 Arc R)
-            # and dt_ne_compression_fix (v3.15 §1.2). Byte-equal preserved.
-            # Step 2 (D.3 / D-Path-D, gated): override / overlay with AEC3
-            # `normal` / `nearend` profile tables based on swap mode.
-            _emr_transparent_pb = None  # set when AEC3 path overlays (per-bin); legacy uses scalar 0.3
-
-            # --- Step 1: legacy compute (always runs) ---
-            blend = self._enr_blend
-            scale = self.enr_scale
-            ne_confidence = dt_per_bin
-            effective_scale = scale
-            # v3.14 Arc-R Sprint S1: per-band ENR threshold (default OFF).
-            # When `_per_band_enr=True`, substitute the precomputed per-bin
-            # arrays built from `enr_t_ne_per_band`/`enr_s_ne_per_band` tuples.
-            # Default OFF keeps the legacy `_enr_blend` formula → byte-equal.
-            if self._per_band_enr:
-                enr_t_ne = self._enr_t_ne_pb
-                enr_s_ne = self._enr_s_ne_pb
-            else:
-                enr_t_ne = (1 - blend) * 2.0 + blend * 1.5
-                enr_s_ne = (1 - blend) * 3.0 + blend * 2.5
-            enr_t_fs = (1 - blend) * (0.3 * effective_scale) + blend * (0.07 * effective_scale)
-            enr_s_fs = (1 - blend) * (0.4 * effective_scale) + blend * (0.1 * effective_scale)
-            if effective_dt > 0.4:
-                dt_enr_relax = 1.0 + (effective_dt - 0.4) / 0.6 * 0.5
-                enr_t_ne = enr_t_ne * dt_enr_relax
-                enr_s_ne = enr_s_ne * dt_enr_relax
-            # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal).
-            # Apply per-state scale then per-bin dt_per_bin override to
-            # enr_t_ne / enr_s_ne.  refined_usable state-scale must be 1.0
-            # to preserve byte-equal with v3.13 steady BALANCED path.
-            if self._dt_ne_compression_fix:
-                _state_scale = self._dt_ne_state_scale.get(
-                    filter_state, 1.0)
-                if _state_scale != 1.0:
-                    enr_t_ne = enr_t_ne * _state_scale
-                    enr_s_ne = enr_s_ne * _state_scale
-                _bin_scale = self._dt_ne_per_bin_scale
-                if _bin_scale != 1.0:
-                    _mask = (dt_per_bin > self._dt_ne_per_bin_thresh)
-                    if np.any(_mask):
-                        # Broadcast scalar enr_t_ne / enr_s_ne to per-bin if needed.
-                        if np.ndim(enr_t_ne) == 0:
-                            enr_t_ne = np.full_like(dt_per_bin, float(enr_t_ne))
-                        else:
-                            enr_t_ne = np.asarray(enr_t_ne, dtype=np.float32).copy()
-                        if np.ndim(enr_s_ne) == 0:
-                            enr_s_ne = np.full_like(dt_per_bin, float(enr_s_ne))
-                        else:
-                            enr_s_ne = np.asarray(enr_s_ne, dtype=np.float32).copy()
-                        enr_t_ne[_mask] = enr_t_ne[_mask] * _bin_scale
-                        enr_s_ne[_mask] = enr_s_ne[_mask] * _bin_scale
-            enr_t = ne_confidence * enr_t_ne + (1 - ne_confidence) * enr_t_fs
-            enr_s = ne_confidence * enr_s_ne + (1 - ne_confidence) * enr_s_fs
-
-            # --- Step 2 (gated): mask profile override / overlay ---
-            if self._mask_profile_swap_enabled:
-                if self._mask_swap_mode == 'asymmetric':
-                    # D-Path-D (per-frame 3-state): FS-confident → use
-                    # AEC3 `normal_profile` (all bins; recovers D.3 FS_static
-                    # +0.258 Δecho); NE-confident → AEC3 `nearend_profile`;
-                    # uncertain/DT → keep legacy `ne_confidence` interp.
-                    # Avoids D.3 DT regression by NOT applying normal_profile
-                    # when NE detector(s) failed to identify DT-NE segments.
-                    # B1 (combined): uses _ne_combined_state (subband OR
-                    # dominant). Dominant detector is echo-aware + hysteresis,
-                    # complements subband's structural cue.
-                    _is_fs = (
-                        float(effective_dt) < self._mask_fs_overlay_dt_max
-                        and not self._ne_combined_state
+                _ac['s7_legacy_path_frames'] += 1
+                if epc_active:
+                    _ac['s7_legacy_epc_active_frames'] += 1
+                if not filter_converged:
+                    _ac['s7_legacy_not_converged_frames'] += 1
+                if not _lw_ready:
+                    _ac['s7_legacy_not_lw_ready_frames'] += 1
+                _target_slice = filter_converged and _lw_ready and epc_active
+                _alt_slice = (filter_converged and _lw_ready
+                              and not epc_active)
+                if _target_slice or _alt_slice:
+                    _far_lw_au = self._residual_est._long_window_far_psd
+                    _erl_e_au = float(erl_estimate)
+                    _excess_au = np.maximum(
+                        self.error_psd - _far_lw_au * _erl_e_au, 0.0,
                     )
-                    _is_ne = bool(
-                        self._ne_combined_state
-                        and float(effective_dt) > self._mask_ne_gate_dt)
-                    if _is_fs:
-                        _profile = self._normal_mask_profile
-                        enr_t = _profile[0]
-                        enr_s = _profile[1]
-                        _emr_transparent_pb = _profile[2]
-                        self._diag_mask_profile_nearend = False
-                        self._diag_mask_fs_overlay_fraction = 1.0
-                    elif _is_ne:
-                        _profile = self._nearend_mask_profile
-                        enr_t = _profile[0]
-                        enr_s = _profile[1]
-                        _emr_transparent_pb = _profile[2]
-                        self._diag_mask_profile_nearend = True
-                        self._diag_mask_fs_overlay_fraction = 0.0
-                    else:
-                        # Uncertain — keep legacy enr_t / enr_s from Step 1
-                        self._diag_mask_profile_nearend = False
-                        self._diag_mask_fs_overlay_fraction = 0.0
+                    _excess_ratio_au = np.clip(
+                        _excess_au / (self.error_psd + 1e-10), 0.0, 1.0,
+                    ).astype(np.float32)
+                    _legacy_au = (1.0 - coh2).astype(np.float32)
+                    _unified_au = (
+                        _BLEND_F31_MIC_EXCESS * _excess_ratio_au
+                        + (1.0 - _BLEND_F31_MIC_EXCESS) * _legacy_au
+                    )
+                    if effective_dt > 0.5:
+                        _floor_lift_au = float((effective_dt - 0.5) * 2.0)
+                        _unified_au = np.maximum(_unified_au, _floor_lift_au)
+                    _fs_mask_au = coh2 < 0.1
+                    _n_fs_au = int(np.sum(_fs_mask_au))
+                    if _n_fs_au > 0:
+                        _legacy_sum_au = float(np.sum(dt_per_bin[_fs_mask_au]))
+                        _unified_sum_au = float(np.sum(_unified_au[_fs_mask_au]))
+                        if _target_slice:
+                            _ac['s7_target_fs_bin_count'] += _n_fs_au
+                            _ac['s7_target_fs_bin_legacy_sum'] += _legacy_sum_au
+                            _ac['s7_target_fs_bin_unified_sum'] += _unified_sum_au
+                        else:
+                            _ac['s7_alt_fs_bin_count'] += _n_fs_au
+                            _ac['s7_alt_fs_bin_legacy_sum'] += _legacy_sum_au
+                            _ac['s7_alt_fs_bin_unified_sum'] += _unified_sum_au
                 else:
-                    # D.3 binary: atomic swap between nearend/normal profile
-                    # based on combined NE state AND echo-aware gate.
-                    _use_nearend = bool(
-                        self._ne_combined_state
-                        and float(effective_dt) > self._mask_ne_gate_dt)
-                    _profile = (self._nearend_mask_profile if _use_nearend
-                                else self._normal_mask_profile)
+                    _ac['s7_legacy_target_other_frames'] += 1
+        if is_stationary_dt:
+            dt_per_bin = np.maximum(dt_per_bin, self._stat_dt_mask)
+        # v3.8.4: stash for postprocess HF-cap "high bins NE confidence" gate
+        self._dt_per_bin_last = dt_per_bin
+
+        # P4B diag (zero-cost; means over small slices). Captures the
+        # symptom this plan diagnoses: dt_per_bin and 1-coh2 both
+        # saturate ~1.0 in DT and FS post-cancel.
+        _hf_2k = self._hf_cap_bin_2k
+        self._p4b_dt_per_bin_mean = float(np.mean(dt_per_bin))
+        self._p4b_dt_per_bin_hf_mean = (
+            float(np.mean(dt_per_bin[_hf_2k:]))
+            if dt_per_bin.shape[0] > _hf_2k else 0.0
+        )
+        self._p4b_coh2_hf_mean = (
+            float(np.mean(coh2[_hf_2k:])) if coh2.shape[0] > _hf_2k else 0.0
+        )
+        self._p4b_effective_dt = float(effective_dt)
+        self._p4b_is_stationary_dt = int(is_stationary_dt)
+
+        dt_shaped_per_bin = dt_per_bin ** 1.1
+        nearend_est = np.maximum(raw_nearend_est * dt_shaped_per_bin, noise_floor_psd)
+
+        min_ne_from_dt = self.error_psd * dt_shaped_per_bin
+        _startup_dt_cond = (effective_dt > 0.35 and far_power > 1e-4
+                            and not filter_once_converged)
+        if _startup_dt_cond and self.startup_dt_min_ne_scale != 1.0:
+            min_ne_from_dt = min_ne_from_dt * self.startup_dt_min_ne_scale
+        if self._residual_est.using_render_based:
+            min_ne_from_dt = min_ne_from_dt * getattr(self, 'render_min_ne_factor', 0.5)
+        nearend_est = np.maximum(nearend_est, min_ne_from_dt)
+        if self._stats is not None:
+            self._stats_last_min_ne = float(np.mean(min_ne_from_dt))
+
+        ne_physical_floor = self.error_psd * 0.05
+        nearend_est = np.maximum(nearend_est, ne_physical_floor)
+
+        # S8 audit: nearend_est 4-way binding identification on FS bins.
+        # Of (raw * dt_shaped, noise_floor_psd, min_ne_from_dt,
+        # ne_physical_floor), record which value is the MAX (=binding).
+        if self._audit_counters is not None:
+            _fs_mask_nef = coh2 < 0.1
+            if np.any(_fs_mask_nef):
+                _v1 = raw_nearend_est * dt_shaped_per_bin
+                _v2 = np.full_like(_v1, noise_floor_psd)
+                _v3 = min_ne_from_dt
+                _v4 = ne_physical_floor
+                _stack = np.stack([_v1, _v2, _v3, _v4], axis=0)
+                _winner = np.argmax(_stack, axis=0)
+                _ac_nef = self._audit_counters
+                _ac_nef['s8_nef_raw_count'] += int(
+                    np.sum((_winner == 0) & _fs_mask_nef))
+                _ac_nef['s8_nef_noise_floor_count'] += int(
+                    np.sum((_winner == 1) & _fs_mask_nef))
+                _ac_nef['s8_nef_min_ne_count'] += int(
+                    np.sum((_winner == 2) & _fs_mask_nef))
+                _ac_nef['s8_nef_ne_physical_count'] += int(
+                    np.sum((_winner == 3) & _fs_mask_nef))
+
+                # S9 pre-audit: hypothetical noise_floor_psd
+                # refinements. Reuses _v1/_v3/_v4 and _winner from S8;
+                # only swaps v2 for each candidate and re-argmaxes.
+                _v2_a1 = np.full_like(_v1, float(np.mean(self.error_psd)) * 0.001 + 1e-10)
+                _v2_a2 = self.error_psd.astype(_v1.dtype) * 0.005 + 1e-10
+                _stack_a1 = np.stack([_v1, _v2_a1, _v3, _v4], axis=0)
+                _stack_a2 = np.stack([_v1, _v2_a2, _v3, _v4], axis=0)
+                _winner_a1 = np.argmax(_stack_a1, axis=0)
+                _winner_a2 = np.argmax(_stack_a2, axis=0)
+                _baseline_floor = (_winner == 1) & _fs_mask_nef
+                _baseline_max = _stack.max(axis=0)
+                for _label, _wA in (('a1', _winner_a1), ('a2', _winner_a2)):
+                    _ac_nef[f's9_{_label}_release_to_raw'] += int(
+                        np.sum(_baseline_floor & (_wA == 0)))
+                    _ac_nef[f's9_{_label}_stays_floor'] += int(
+                        np.sum(_baseline_floor & (_wA == 1)))
+                    _ac_nef[f's9_{_label}_shift_to_min_ne'] += int(
+                        np.sum(_baseline_floor & (_wA == 2)))
+                    _ac_nef[f's9_{_label}_shift_to_phys'] += int(
+                        np.sum(_baseline_floor & (_wA == 3)))
+                    # Bins NOT bound by floor under baseline but whose
+                    # winner CHANGES under the candidate (A.2 can do
+                    # this when error_psd[i] is high enough that
+                    # error_psd[i]*0.005 surpasses the current winner).
+                    _not_floor = _fs_mask_nef & (_winner != 1)
+                    _ac_nef[f's9_{_label}_intrudes_outside_floor_baseline'] += int(
+                        np.sum(_not_floor & (_wA != _winner)))
+                    # Magnitude: 10*log10(baseline_max / candidate_max)
+                    # over bins where any change happened (only positive
+                    # values count — candidate strictly lowers nearend_est).
+                    _stack_X = _stack_a1 if _label == 'a1' else _stack_a2
+                    _cand_max = _stack_X.max(axis=0)
+                    _changed = _fs_mask_nef & (_cand_max < _baseline_max)
+                    _n_changed = int(np.sum(_changed))
+                    if _n_changed > 0:
+                        _ratio = (_baseline_max[_changed] + 1e-30) / (
+                            _cand_max[_changed] + 1e-30)
+                        _ac_nef[f's9_{_label}_reduction_db_sum'] += 10.0 * float(
+                            np.sum(np.log10(_ratio)))
+                        _ac_nef[f's9_{_label}_reduction_count'] += _n_changed
+
+                # S9-C joint floor attack. Uses A.2 for noise_floor
+                # (per-bin error_psd * 0.005) and additionally
+                # scales min_ne_from_dt down in FS bins. Tracks fate
+                # of ALL baseline-floor-bound FS bins (not just
+                # noise_floor winners).
+                _baseline_any_floor = _fs_mask_nef & (_winner != 0)
+                _n_any_floor = int(np.sum(_baseline_any_floor))
+                _ac_nef['s9c_baseline_any_floor_count'] += _n_any_floor
+                if _n_any_floor > 0:
+                    _v3_c1 = _v3 * 0.1                # min_ne × 0.1
+                    _v3_c2 = np.zeros_like(_v3)        # min_ne → 0
+                    _stack_c1 = np.stack(
+                        [_v1, _v2_a2, _v3_c1, _v4], axis=0)
+                    _stack_c2 = np.stack(
+                        [_v1, _v2_a2, _v3_c2, _v4], axis=0)
+                    _winner_c1 = np.argmax(_stack_c1, axis=0)
+                    _winner_c2 = np.argmax(_stack_c2, axis=0)
+                    for _lab, _wC, _stk in (
+                            ('c1', _winner_c1, _stack_c1),
+                            ('c2', _winner_c2, _stack_c2)):
+                        _ac_nef[f's9c_{_lab}_release_to_raw'] += int(
+                            np.sum(_baseline_any_floor & (_wC == 0)))
+                        _ac_nef[f's9c_{_lab}_still_floor'] += int(
+                            np.sum(_baseline_any_floor & (_wC == 1)))
+                        _ac_nef[f's9c_{_lab}_still_min_ne'] += int(
+                            np.sum(_baseline_any_floor & (_wC == 2)))
+                        _ac_nef[f's9c_{_lab}_still_phys'] += int(
+                            np.sum(_baseline_any_floor & (_wC == 3)))
+                        _cand_max_c = _stk.max(axis=0)
+                        _changed_c = _fs_mask_nef & (
+                            _cand_max_c < _baseline_max)
+                        _n_c = int(np.sum(_changed_c))
+                        if _n_c > 0:
+                            _r_c = (_baseline_max[_changed_c] + 1e-30) / (
+                                _cand_max_c[_changed_c] + 1e-30)
+                            _ac_nef[
+                                f's9c_{_lab}_reduction_db_sum'
+                            ] += 10.0 * float(np.sum(np.log10(_r_c)))
+                            _ac_nef[
+                                f's9c_{_lab}_reduction_count'
+                            ] += _n_c
+
+                    # S9-D sanity: attack all three floors. Stack
+                    # = [raw*dt_shaped, error_psd*0.005, 0, 0].
+                    _stack_d = np.stack(
+                        [_v1, _v2_a2, np.zeros_like(_v3),
+                         np.zeros_like(_v4)], axis=0)
+                    _winner_d = np.argmax(_stack_d, axis=0)
+                    _ac_nef['s9d_release_to_raw'] += int(
+                        np.sum(_baseline_any_floor & (_winner_d == 0)))
+                    _ac_nef['s9d_still_floor'] += int(
+                        np.sum(_baseline_any_floor & (_winner_d == 1)))
+                    _cand_max_d = _stack_d.max(axis=0)
+                    _changed_d = _fs_mask_nef & (_cand_max_d < _baseline_max)
+                    _n_d = int(np.sum(_changed_d))
+                    if _n_d > 0:
+                        _r_d = (_baseline_max[_changed_d] + 1e-30) / (
+                            _cand_max_d[_changed_d] + 1e-30)
+                        _ac_nef['s9d_reduction_db_sum'] += 10.0 * float(
+                            np.sum(np.log10(_r_d)))
+                        _ac_nef['s9d_reduction_count'] += _n_d
+
+        # Round 4 trace cache (audio-passive)
+        self._diag_nearend_est_last = nearend_est
+        self._diag_residual_echo_psd_last = residual_echo_psd
+
+        enr = residual_echo_psd / (nearend_est + 1e-10)
+
+        # v3.18 Phase D.3 / D-Path-D — Mask profile pathway.
+        # Step 1 (always): compute legacy `enr_t / enr_s` via the
+        # `ne_confidence × ne_anchor + (1-ne_confidence) × fs_anchor`
+        # continuous interpolation. Includes per_band_enr (v3.14 Arc R)
+        # and dt_ne_compression_fix (v3.15 §1.2). Byte-equal preserved.
+        # Step 2 (D.3 / D-Path-D, gated): override / overlay with AEC3
+        # `normal` / `nearend` profile tables based on swap mode.
+        _emr_transparent_pb = None  # set when AEC3 path overlays (per-bin); legacy uses scalar 0.3
+
+        # --- Step 1: legacy compute (always runs) ---
+        blend = self._enr_blend
+        scale = self.enr_scale
+        ne_confidence = dt_per_bin
+        effective_scale = scale
+        # v3.14 Arc-R Sprint S1: per-band ENR threshold (default OFF).
+        # When `_per_band_enr=True`, substitute the precomputed per-bin
+        # arrays built from `enr_t_ne_per_band`/`enr_s_ne_per_band` tuples.
+        # Default OFF keeps the legacy `_enr_blend` formula → byte-equal.
+        if self._per_band_enr:
+            enr_t_ne = self._enr_t_ne_pb
+            enr_s_ne = self._enr_s_ne_pb
+        else:
+            enr_t_ne = (1 - blend) * 2.0 + blend * 1.5
+            enr_s_ne = (1 - blend) * 3.0 + blend * 2.5
+        enr_t_fs = (1 - blend) * (0.3 * effective_scale) + blend * (0.07 * effective_scale)
+        enr_s_fs = (1 - blend) * (0.4 * effective_scale) + blend * (0.1 * effective_scale)
+        if effective_dt > 0.4:
+            dt_enr_relax = 1.0 + (effective_dt - 0.4) / 0.6 * 0.5
+            enr_t_ne = enr_t_ne * dt_enr_relax
+            enr_s_ne = enr_s_ne * dt_enr_relax
+        # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal).
+        # Apply per-state scale then per-bin dt_per_bin override to
+        # enr_t_ne / enr_s_ne.  refined_usable state-scale must be 1.0
+        # to preserve byte-equal with v3.13 steady BALANCED path.
+        if self._dt_ne_compression_fix:
+            _state_scale = self._dt_ne_state_scale.get(
+                filter_state, 1.0)
+            if _state_scale != 1.0:
+                enr_t_ne = enr_t_ne * _state_scale
+                enr_s_ne = enr_s_ne * _state_scale
+            _bin_scale = self._dt_ne_per_bin_scale
+            if _bin_scale != 1.0:
+                _mask = (dt_per_bin > self._dt_ne_per_bin_thresh)
+                if np.any(_mask):
+                    # Broadcast scalar enr_t_ne / enr_s_ne to per-bin if needed.
+                    if np.ndim(enr_t_ne) == 0:
+                        enr_t_ne = np.full_like(dt_per_bin, float(enr_t_ne))
+                    else:
+                        enr_t_ne = np.asarray(enr_t_ne, dtype=np.float32).copy()
+                    if np.ndim(enr_s_ne) == 0:
+                        enr_s_ne = np.full_like(dt_per_bin, float(enr_s_ne))
+                    else:
+                        enr_s_ne = np.asarray(enr_s_ne, dtype=np.float32).copy()
+                    enr_t_ne[_mask] = enr_t_ne[_mask] * _bin_scale
+                    enr_s_ne[_mask] = enr_s_ne[_mask] * _bin_scale
+        enr_t = ne_confidence * enr_t_ne + (1 - ne_confidence) * enr_t_fs
+        enr_s = ne_confidence * enr_s_ne + (1 - ne_confidence) * enr_s_fs
+
+        # --- Step 2 (gated): mask profile override / overlay ---
+        if self._mask_profile_swap_enabled:
+            if self._mask_swap_mode == 'asymmetric':
+                # D-Path-D (per-frame 3-state): FS-confident → use
+                # AEC3 `normal_profile` (all bins; recovers D.3 FS_static
+                # +0.258 Δecho); NE-confident → AEC3 `nearend_profile`;
+                # uncertain/DT → keep legacy `ne_confidence` interp.
+                # Avoids D.3 DT regression by NOT applying normal_profile
+                # when NE detector(s) failed to identify DT-NE segments.
+                # B1 (combined): uses _ne_combined_state (subband OR
+                # dominant). Dominant detector is echo-aware + hysteresis,
+                # complements subband's structural cue.
+                _is_fs = (
+                    float(effective_dt) < self._mask_fs_overlay_dt_max
+                    and not self._ne_combined_state
+                )
+                _is_ne = bool(
+                    self._ne_combined_state
+                    and float(effective_dt) > self._mask_ne_gate_dt)
+                if _is_fs:
+                    _profile = self._normal_mask_profile
                     enr_t = _profile[0]
                     enr_s = _profile[1]
                     _emr_transparent_pb = _profile[2]
-                    self._diag_mask_profile_nearend = _use_nearend
+                    self._diag_mask_profile_nearend = False
+                    self._diag_mask_fs_overlay_fraction = 1.0
+                elif _is_ne:
+                    _profile = self._nearend_mask_profile
+                    enr_t = _profile[0]
+                    enr_s = _profile[1]
+                    _emr_transparent_pb = _profile[2]
+                    self._diag_mask_profile_nearend = True
                     self._diag_mask_fs_overlay_fraction = 0.0
-            min_gate_width = 0.2
-            enr_s_safe = np.maximum(enr_s, enr_t + min_gate_width)
-
-            g = np.where(enr > enr_t,
-                         np.clip((enr_s_safe - enr) / (enr_s_safe - enr_t + eps), 0.0, 1.0),
-                         1.0)
-
-            # EMR: AEC3-style noise masking. AEC3 uses per-bin emr_transparent
-            # from the swapped profile; legacy path uses scalar 0.3.
-            if np.sum(self.noise_psd) > 0:
-                emr = residual_echo_psd / (self.noise_psd + 1e-10)
-                if _emr_transparent_pb is not None:
-                    g_emr = np.clip(_emr_transparent_pb / (emr + 1e-10), 0.0, 1.0)
                 else:
-                    g_emr = np.clip(0.3 / (emr + 1e-10), 0.0, 1.0)
-                g = np.maximum(g, g_emr)
+                    # Uncertain — keep legacy enr_t / enr_s from Step 1
+                    self._diag_mask_profile_nearend = False
+                    self._diag_mask_fs_overlay_fraction = 0.0
+            else:
+                # D.3 binary: atomic swap between nearend/normal profile
+                # based on combined NE state AND echo-aware gate.
+                _use_nearend = bool(
+                    self._ne_combined_state
+                    and float(effective_dt) > self._mask_ne_gate_dt)
+                _profile = (self._nearend_mask_profile if _use_nearend
+                            else self._normal_mask_profile)
+                enr_t = _profile[0]
+                enr_s = _profile[1]
+                _emr_transparent_pb = _profile[2]
+                self._diag_mask_profile_nearend = _use_nearend
+                self._diag_mask_fs_overlay_fraction = 0.0
+        min_gate_width = 0.2
+        enr_s_safe = np.maximum(enr_s, enr_t + min_gate_width)
 
-            if self._stats is not None:
-                self._stats_last_gain_before_floor = float(np.mean(g))
-            if getattr(self, '_capture_stages', False):
-                self._stage_gains = {'01_softgate_emr': g.copy()}
-            self._diag_round5_stages[0] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
-            g = np.maximum(g, spectral_g_min)
-            if self._stats is not None:
-                self._stats_last_gain_after_floor = float(np.mean(g))
-            if getattr(self, '_capture_stages', False):
-                self._stage_gains['02_spectral_floor'] = g.copy()
-            self._diag_round5_stages[1] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+        g = np.where(enr > enr_t,
+                     np.clip((enr_s_safe - enr) / (enr_s_safe - enr_t + eps), 0.0, 1.0),
+                     1.0)
 
-            if self._stats is not None:
-                self._stats_last_enr = float(np.mean(enr))
-                self._stats_last_nearend = float(np.mean(nearend_est))
-                self._stats_last_res_psd = float(np.mean(residual_echo_psd))
+        # EMR: AEC3-style noise masking. AEC3 uses per-bin emr_transparent
+        # from the swapped profile; legacy path uses scalar 0.3.
+        if np.sum(self.noise_psd) > 0:
+            emr = residual_echo_psd / (self.noise_psd + 1e-10)
+            if _emr_transparent_pb is not None:
+                g_emr = np.clip(_emr_transparent_pb / (emr + 1e-10), 0.0, 1.0)
+            else:
+                g_emr = np.clip(0.3 / (emr + 1e-10), 0.0, 1.0)
+            g = np.maximum(g, g_emr)
 
-            # Phase 0 trace: dominant_nearend_like raw signal (frame-level)
-            _ne_mean = float(np.mean(nearend_est))
-            _res_mean = float(np.mean(residual_echo_psd))
-            _noise_mean = float(np.mean(self.noise_psd)) + 1e-10
-            self._diag_dominant_nearend_raw = bool(
-                _ne_mean > 3.0 * _res_mean
-                and _ne_mean > 5.0 * _noise_mean
-            )
+        if self._stats is not None:
+            self._stats_last_gain_before_floor = float(np.mean(g))
+        if getattr(self, '_capture_stages', False):
+            self._stage_gains = {'01_softgate_emr': g.copy()}
+        self._diag_round5_stages[0] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
+        g = np.maximum(g, spectral_g_min)
+        if self._stats is not None:
+            self._stats_last_gain_after_floor = float(np.mean(g))
+        if getattr(self, '_capture_stages', False):
+            self._stage_gains['02_spectral_floor'] = g.copy()
+        self._diag_round5_stages[1] = float(np.mean(g[self._voice_band_idx])) if self._voice_band_idx.size > 0 else 0.0
 
-        elif self.gain_type == "wiener" and residual_echo_psd is not None:
+        if self._stats is not None:
+            self._stats_last_enr = float(np.mean(enr))
+            self._stats_last_nearend = float(np.mean(nearend_est))
+            self._stats_last_res_psd = float(np.mean(residual_echo_psd))
+
+        # Phase 0 trace: dominant_nearend_like raw signal (frame-level)
+        _ne_mean = float(np.mean(nearend_est))
+        _res_mean = float(np.mean(residual_echo_psd))
+        _noise_mean = float(np.mean(self.noise_psd)) + 1e-10
+        self._diag_dominant_nearend_raw = bool(
+            _ne_mean > 3.0 * _res_mean
+            and _ne_mean > 5.0 * _noise_mean
+        )
+
+        return g
+
+    def _gain_compute_wiener_legacy(self, *, residual_echo_psd, eer,
+                                    spectral_g_min, eps):
+        """Wiener / spectral_sub fallback. Owns `self.over_sub` scalar."""
+        if self.gain_type == "wiener" and residual_echo_psd is not None:
             noise_floor_psd = np.mean(self.error_psd) * 0.01 + eps
             nearend_est = np.maximum(self.error_psd - residual_echo_psd, noise_floor_psd)
             beta = self.over_sub
@@ -2123,3 +2161,55 @@ class ResFilter:
         }
 
         return output.astype(np.float32)
+
+
+class ResFilterEnr(ResFilter):
+    """ENR-branch ResFilter — production default for all 5 BALANCED+ presets.
+
+    Overrides ``_stage_gain_compute`` to call the ENR helper directly,
+    bypassing the legacy gain-type dispatcher in ``ResFilter``. The
+    ``self.over_sub`` scalar is inherited but never read by this path
+    (ENR computes per-bin over-subtraction dynamically from
+    ``res_over_sub_base + res_over_sub_scale * erle_factor`` inside
+    ``AEC._compute_mu_scale``, not from the constructor scalar).
+    """
+
+    def _stage_gain_compute(self, *, residual_echo_psd, eer, coh2,
+                              effective_dt, is_stationary_dt, far_power,
+                              filter_once_converged, spectral_g_min, eps,
+                              erl_estimate=0.01, filter_converged=False,
+                              epc_active=False, filter_state='idle',
+                              aec_state=None):
+        if residual_echo_psd is None:
+            return self._gain_compute_wiener_legacy(
+                residual_echo_psd=residual_echo_psd, eer=eer,
+                spectral_g_min=spectral_g_min, eps=eps,
+            )
+        return self._gain_compute_enr(
+            residual_echo_psd=residual_echo_psd, eer=eer, coh2=coh2,
+            effective_dt=effective_dt, is_stationary_dt=is_stationary_dt,
+            far_power=far_power, filter_once_converged=filter_once_converged,
+            spectral_g_min=spectral_g_min, eps=eps,
+            erl_estimate=erl_estimate, filter_converged=filter_converged,
+            epc_active=epc_active, filter_state=filter_state,
+            aec_state=aec_state,
+        )
+
+
+class ResFilterWiener(ResFilter):
+    """Wiener / spectral_sub fallback ResFilter.
+
+    Owns the ``self.over_sub`` scalar (``config.res_over_sub``, default 3.0).
+    Not used by any BALANCED+ preset; retained for legacy / experimentation.
+    """
+
+    def _stage_gain_compute(self, *, residual_echo_psd, eer, coh2,
+                              effective_dt, is_stationary_dt, far_power,
+                              filter_once_converged, spectral_g_min, eps,
+                              erl_estimate=0.01, filter_converged=False,
+                              epc_active=False, filter_state='idle',
+                              aec_state=None):
+        return self._gain_compute_wiener_legacy(
+            residual_echo_psd=residual_echo_psd, eer=eer,
+            spectral_g_min=spectral_g_min, eps=eps,
+        )
