@@ -18,6 +18,12 @@ import numpy as np
 from .residual_estimator import ResidualEchoEstimator
 from .erle import FilterErleEstimator, FullbandErleEstimator
 
+# F3.1-v3 blend weight (mic-excess-ratio vs legacy 1-coh²). Production
+# default 0.7 — keeps mic-excess as dominant signal while capping its
+# swing under ERL underestimation. Mirrors the constant in
+# modules.orchestrator (consumed there by AEC's per-band wiring).
+_BLEND_F31_MIC_EXCESS = 0.7
+
 
 class ResFilter:
     """
