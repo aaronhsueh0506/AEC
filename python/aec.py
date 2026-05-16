@@ -270,6 +270,24 @@ class AecConfig:
     # No behaviour change; verification gate at C.C.2.
     aec_state_enabled: bool = False
 
+    # v3.18 Phase C.D-α — leakage_diverged Q-bifurcation trigger
+    # (AEC3-aligned). Fires when fq_usable says "filter is trustworthy"
+    # but shadow contradicts (shadow_advantage > threshold). On fire:
+    # _arc_m_q_boost on refined filter + arms hangover. Requires C.A +
+    # C.B + C.C all ON for AecState back-ref to read fq_usable.
+    # Design lock: docs/v3_18_c_d1_leakage_diverged_design.md.
+    leakage_diverged_enabled: bool = False
+    leakage_diverged_threshold: float = 2.0   # shadow_advantage ratio
+    leakage_diverged_hangover_frames: int = 100
+
+    # v3.18 Phase C.E — RES filter_converged → fq_usable migration.
+    # Surgical first migration: AEC passes fq_usable to RES.process()
+    # instead of _filter_converged when flag is ON. Tests Phase C.D-α
+    # closeout hypothesis 3 (RES gating bottleneck). Requires C.A+C.B+C.C
+    # all ON for the back-ref to fq_usable substrate.
+    # Design: docs/v3_18_c_e1_consumer_migration_design.md.
+    c_e_res_use_fq_usable: bool = False
+
     # Coherence DTD absolute energy floor
     dtd_coh_abs_floor: float = 1e-6     # #8: Absolute error energy floor
 
@@ -6093,6 +6111,34 @@ class AEC:
             self.config.filter_misadjustment_hangover_frames)
         self._misadjustment_fire_count += 1
 
+    # v3.18 Phase C.D-α — leakage_diverged Q-bifurcation trigger.
+    def _check_leakage_diverged(self) -> bool:
+        """AEC3-aligned leakage_diverged: refined claims usable but
+        coarse contradicts → re-learn refined via Q-boost.
+        """
+        if not self.config.leakage_diverged_enabled:
+            return False
+        if self._leakage_diverged_hangover > 0:
+            self._leakage_diverged_hangover -= 1
+            return False
+        if self.epc_active or self._regime_handler.main_paused:
+            return False
+        # Need AecState back-ref AND C.B fq_usable substrate to gate.
+        if (self._aec_state is None
+                or getattr(self._aec_state, '_aec_ref', None) is None):
+            return False
+        if not self._aec_state.fq_usable():
+            return False
+        sh_adv = float(getattr(self._dt_analyzer, 'shadow_advantage', 1.0))
+        return sh_adv >= self.config.leakage_diverged_threshold
+
+    def _apply_leakage_diverged(self) -> None:
+        """Q-boost refined filter on leakage_diverged fire; arm hangover."""
+        self._arc_m_q_boost(self.filter)
+        self._leakage_diverged_hangover = (
+            self.config.leakage_diverged_hangover_frames)
+        self._leakage_diverged_fire_count += 1
+
     # ── EPC-state delegations (state lives in self._epc_det) ─────────────────
     @property
     def epc_active(self) -> bool: return self._epc_det.active
@@ -6493,6 +6539,11 @@ class AEC:
         # methods (consistent_estimate, fq_usable, etc.) can read from
         # C.A/C.B substrate. The actual wiring happens after AecState
         # construction below (search marker 'AecState back-ref').
+
+        # v3.18 Phase C.D-α — leakage_diverged state.
+        if self.config.leakage_diverged_enabled:
+            self._leakage_diverged_hangover = 0
+            self._leakage_diverged_fire_count = 0
 
         # #4: Confidence memory decay
         self.prev_dtd_conf = 0.0
@@ -7947,6 +7998,17 @@ class AEC:
             self._update_misadjustment_estimator()
             self._check_and_apply_misadjustment_scale()
 
+            # v3.18 Phase C.D-α — leakage_diverged check. 5th independent
+            # Q-boost trigger; fires when fq_usable says refined is good
+            # but shadow_advantage says otherwise. Skipped flag-OFF.
+            if self.config.leakage_diverged_enabled:
+                if self._check_leakage_diverged():
+                    self._apply_leakage_diverged()
+                    self._epc_reset_fired_this_frame = True
+                    self._diag['leakage_diverged_fired'] = True
+                else:
+                    self._diag['leakage_diverged_fired'] = False
+
             # v3.18 Phase C.A — FilterAnalyzer audit-only update. Reads main
             # filter W → time-domain impulse → HP-filter → peak detection +
             # consistency check. Outputs exposed via _diag only; no consumer
@@ -8403,9 +8465,20 @@ class AEC:
                         _erl_arg = _erl_pb
                     else:
                         _erl_arg = self._erl_estimate
+                    # v3.18 Phase C.E — RES filter_converged migration.
+                    # Flag-OFF: pass legacy _filter_converged (byte-equal).
+                    # Flag-ON: pass fq_usable (multi-gate, 52-86% FS/DT
+                    # coverage vs ~5% legacy). Substitution only when
+                    # AecState back-ref + C.B substrate both available.
+                    if (self.config.c_e_res_use_fq_usable
+                            and self._aec_state is not None
+                            and getattr(self._aec_state, '_aec_ref', None) is not None):
+                        _ce_fc_arg = self._aec_state.fq_usable()
+                    else:
+                        _ce_fc_arg = self._filter_converged
                     final_output = self.res.process(raw_output, eff_echo_spec,
                                                     far_power, self.filter.far_spec,
-                                                    filter_converged=self._filter_converged,
+                                                    filter_converged=_ce_fc_arg,
                                                     erle_factor=erle_factor,
                                                     dt_indicator=float(dt_indicator),
                                                     near_spec=self.filter.near_spec,

@@ -336,6 +336,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         ('AEC_FILTER_QUALITY', 'filter_quality_enabled', True),
         # v3.18 Phase C.C — AecState ADT facade
         ('AEC_AEC_STATE', 'aec_state_enabled', True),
+        # v3.18 Phase C.D-α — leakage_diverged Q-bifurcation
+        ('AEC_LEAKAGE_DIVERGED', 'leakage_diverged_enabled', True),
+        ('AEC_LEAKAGE_DIVERGED_THRESHOLD', 'leakage_diverged_threshold', False),
+        # v3.18 Phase C.E — RES filter_converged → fq_usable migration
+        ('AEC_C_E_RES_FQ_USABLE', 'c_e_res_use_fq_usable', True),
     ):
         if _flag in os.environ and _key not in config_overrides:
             _v = os.environ[_flag]

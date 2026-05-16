@@ -36,7 +36,25 @@ Phase C   ⏳ IN PROGRESS — user chose Path 1 (full Phase C) 2026-05-16
               FilteringQualityAnalyzer multi-gate; pre-bench + 60-case PASS
               fq_usable covers 52-86% on FS/DT vs 4-9% _filter_converged
               qNvSMyU 96.3% usable; Phase B retry now viable as C.D follow-up
-            C.C AUTHORISED — AecState ADT next
+            C.C COMPLETE — AecState extension (back-ref pattern)
+              5/5 byte-equal flag-OFF + audit-only invariant PASS
+              Existing AecState class extended with C.A/C.B-aware methods
+            C.D-α CLOSED CANNOT SHIP — docs/v3_18_c_d_alpha_closeout.md
+              PRIMARY DT_static Δdeg = +0.000 (need ≥+0.010) → FAIL
+              Trigger fires but downstream RES doesn't react. Substrate
+              retained. Re-ordering: pivot to C.E surgical migration.
+            C.E CLOSED CANNOT SHIP — docs/v3_18_c_e_closeout.md
+              First non-silent behaviour change. Massive Pareto trade-off:
+              DT_static Δdeg +0.214 PASS; FS_static Δecho -0.151 FAIL;
+              single-case Δdeg up to +1.200; 18 worst-case breaches.
+              Hypothesis 3 STRONGLY CONFIRMED — RES is the AECMOS-dominant
+              consumer; whole-arg migration too aggressive. Substrate
+              retained; 3 follow-up paths in closeout for v3.19+.
+            **Phase C executable scope EXHAUSTED for v3.18 cycle.**
+
+v3.18 CYCLE CLOSEOUT — docs/v3_18_cycle_closeout.md (2026-05-16)
+  0 algorithm changes; 8 default-OFF substrate arcs ship.
+  Awaiting §0.7 user merge auth (Option A: tag v3.18.0 recommended).
 Phase E   PENDING (4-6 sprints) — Substrate flag promotion
 ```
 
