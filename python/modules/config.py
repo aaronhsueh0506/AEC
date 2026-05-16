@@ -222,11 +222,15 @@ class AecConfig:
     # High-pass filter (DC blocker + low-freq removal)
     enable_highpass: bool = True
     highpass_cutoff_hz: float = 80.0    # Cutoff freq: removes DC, 50/60Hz hum, rumble
-    # Reference-path HPF — default OFF to align with WebRTC AEC3 (which gates
-    # the equivalent `high_pass_filter_echo_reference` behind the
-    # `WebRTC-Aec3HighPassFilterEchoReference` field trial; off by default).
-    # Mic-path HPF (`enable_highpass`) stays on, matching APM default.
-    enable_highpass_ref: bool = False
+    # Reference-path HPF — kept default ON. v3.19 attempted AEC3-aligned
+    # default OFF (commit ab44842) but 800-case AECMOS verdict (CANNOT SHIP,
+    # see docs/v3_19_hpf_ref_flip_verdict.md): FS echo gain (+0.017 to +0.022)
+    # paired with DT_movement Δdeg −0.034 (~7× worst-case −0.005 hard bar).
+    # Pareto trade-off as the user predicted — AEC3's HPF-on-ref protects DT
+    # NE preservation by limiting low-freq ref energy reaching the filter.
+    # Flag retained for ablation; revisit after Item 2 RES re-audit if RES
+    # gains the ability to handle low-freq ref energy without DT damage.
+    enable_highpass_ref: bool = True
 
     # Saturation / non-linear echo handling
     enable_saturation_detect: bool = True
