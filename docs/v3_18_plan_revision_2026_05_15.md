@@ -15,12 +15,28 @@ Phase D   ✗ CLOSED 2026-05-16 — CANNOT SHIP; substrate retained
             See docs/v3_18_d_gamma_closeout.md
 Phase F   ✗ CLOSED 2026-05-16 — CANNOT SHIP; substrate retained
             See docs/v3_18_f_closeout.md
-Phase A   ⏳ STARTING — Shadow NLMS conversion (6-10 sprints)
-            A.1 design sprint next (doc only; final decision point)
-Phase B   PENDING — Filter misadjustment ScaleFilter (5-7 sprints)
-            Parallel sub-branch with A per §0.2 file-disjointness
-Phase C   PENDING (EXPANDED 9-12 sprints) — FQA + AecState centralised ADT
-            Gated on A+B PASS
+Phase A   ✗ CLOSED 2026-05-16 — CANNOT SHIP; substrate retained
+            See docs/v3_18_a_closeout.md
+            A.7 60-case bench: PRIMARY FAIL (qNvSMyU Δecho -0.0011);
+            4 worst-case breaches. Bucket means OK but mixed.
+            3-of-3 AEC3-port arcs (D-γ + F + A) now CLOSED.
+Phase B   ✗ CLOSED 2026-05-16 — CANNOT SHIP; substrate retained
+            See docs/v3_18_b_closeout.md
+            B.4 fire-rate gate FAIL (0 fires across 61 cases).
+            Root cause: _erl_estimate semantics + refined_usable
+            coverage are co-design gaps. Phase C unblocks.
+            4-of-4 AEC3-port arcs (D-γ + F + A + B) now CLOSED.
+Phase C   ⏳ IN PROGRESS — user chose Path 1 (full Phase C) 2026-05-16
+            C.1 design lock — docs/v3_18_c1_aec_state_design.md
+            C.A COMPLETE — docs/v3_18_c_a_verdict.md
+              FilterAnalyzer audit-only port; pre-bench + 60-case gates PASS
+              consistent_estimate covers 60-93% per bucket vs 0-9% _filter_converged
+              Critical: qNvSMyU cohort tail 54.5% consistent (was 0% converged)
+            C.B COMPLETE — docs/v3_18_c_b_verdict.md
+              FilteringQualityAnalyzer multi-gate; pre-bench + 60-case PASS
+              fq_usable covers 52-86% on FS/DT vs 4-9% _filter_converged
+              qNvSMyU 96.3% usable; Phase B retry now viable as C.D follow-up
+            C.C AUTHORISED — AecState ADT next
 Phase E   PENDING (4-6 sprints) — Substrate flag promotion
 ```
 

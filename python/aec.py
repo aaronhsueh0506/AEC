@@ -25,6 +25,10 @@ from typing import List, Optional, Tuple
 from enum import Enum
 import argparse
 import soundfile as sf
+# v3.18 Phase C.A — FilterAnalyzer audit-only port. Lazy-imported inside
+# AEC.__init__ so flag-OFF AEC instances don't pay scipy.signal import cost.
+_FilterAnalyzer = None  # populated on first flag-ON construction
+_FilteringQualityAnalyzer = None  # populated on first C.B flag-ON construction
 
 
 class AecMode(Enum):
@@ -210,6 +214,61 @@ class AecConfig:
     shadow_q_ratio: float = 3.0        # Shadow Q = main Q × ratio (FDKF mode)
     shadow_dtd_advantage_scale: float = 3.0  # Shadow DTD: (advantage-offset)/scale → DT confidence
     shadow_dtd_offset: float = 1.5           # Shadow DTD: advantage must exceed this to signal DT
+
+    # v3.18 Phase A.2 — shadow filter adaptation class (AEC3 alignment).
+    # False (default): shadow uses same class as main (PBFDKF in BALANCED).
+    # True: shadow uses PBFDAF (NLMS). Restores structural orthogonality
+    #       between shadow and main update direction in high-signal regime
+    #       where Kalman gain saturates (X·P·X* >> R → K → 1/X*).
+    #       Design lock: docs/v3_18_a1_shadow_nlms_design.md.
+    shadow_class_nlms: bool = False
+    # NLMS step-size for shadow. Only consumed when shadow_class_nlms=True.
+    # AEC3 coarse-filter μ default is 0.5. A.5 tunes via {0.3, 0.5, 0.7} grid.
+    shadow_mu_nlms: float = 0.5
+
+    # v3.18 Phase B.2 — Filter misadjustment estimator + ScaleFilter
+    # (AEC3 Gap #5/#13). Design lock: docs/v3_18_b1_misadjustment_design.md.
+    # Tracks long-term echo/error ratio drift; rescales main filter W when
+    # systematic under-modelling is detected. Flag-OFF: byte-equal (no
+    # estimator updates, no scale action). Flag-ON: estimator + trigger
+    # + scale_filter all active.
+    filter_misadjustment_enabled: bool = False
+    # Asymmetric EMA for misadjustment smoothing (slow up, fast down).
+    filter_misadjustment_alpha_up: float = 0.99
+    filter_misadjustment_alpha_dn: float = 0.95
+    # Threshold: smoothed ratio < this → under-modelling → trigger.
+    filter_misadjustment_threshold: float = 0.5
+    # Hangover frames between consecutive ScaleFilter fires.
+    filter_misadjustment_hangover_frames: int = 100
+    # Stability gate: refined_usable + no EPC must hold this many frames.
+    filter_misadjustment_stable_frames: int = 30
+    # Scale clamp (conservative — AEC3 doesn't clamp; we do for safety).
+    filter_misadjustment_scale_min: float = 0.5
+    filter_misadjustment_scale_max: float = 2.0
+    # If True: also scale Kalman P by scale² (Option A); else P untouched
+    # (Option B, AEC3-aligned default).
+    filter_misadjustment_scale_p: bool = False
+
+    # v3.18 Phase C.A — FilterAnalyzer audit-only port (AEC3-aligned).
+    # When True: instantiates FilterAnalyzer on init; per frame, IFFTs
+    # main filter W → time domain → HP 600 Hz → peak detection →
+    # `consistent_estimate` boolean. Output exposed via _diag['filter_
+    # analyzer_*'] only; no consumer changes behaviour. Pre-bench gate
+    # at C.A.3 decides whether to advance to C.B.
+    filter_analyzer_enabled: bool = False
+
+    # v3.18 Phase C.B — FilteringQualityAnalyzer audit-only port.
+    # Multi-gate usable_linear_estimate combining startup_timer +
+    # reset_timer + convergence_seen + not_transparent (far_active_recent).
+    # Output exposed via _diag['fq_*'] only; no consumer changes
+    # behaviour. Pre-bench gate at C.B.3 decides whether to advance to C.C.
+    filter_quality_enabled: bool = False
+
+    # v3.18 Phase C.C — AecState ADT facade (AEC3-aligned read-only).
+    # Wraps C.A + C.B + legacy state behind a single AecState class.
+    # Initially read-only; consumer migration deferred to C.E.
+    # No behaviour change; verification gate at C.C.2.
+    aec_state_enabled: bool = False
 
     # Coherence DTD absolute energy floor
     dtd_coh_abs_floor: float = 1e-6     # #8: Absolute error energy floor
@@ -1832,6 +1891,16 @@ class PBFDAF:
     def copy_weights_from(self, src: 'PBFDAF'):
         self.W[:] = src.W
 
+    def scale_filter(self, scale: float) -> None:
+        """v3.18 Phase B.3 — AEC3-aligned multiplicative W rescale.
+
+        Multiplies every partition's W by `scale` in-place. Mirrors
+        AEC3 subtractor.cc ScaleFilter action used by
+        FilterMisadjustmentEstimator to correct long-term W magnitude
+        drift. PBFDKF overrides to optionally rescale Kalman P as well.
+        """
+        self.W *= np.complex64(scale)
+
 
 class PBFDKF(PBFDAF):
     """
@@ -2035,6 +2104,18 @@ class PBFDKF(PBFDAF):
         # copy); our PBFDKF shadow needs this protection.
         # After W copy, P may temporarily mismatch W but Kalman self-corrects
         # within a few frames.
+
+    def scale_filter(self, scale: float, scale_p: bool = False) -> None:
+        """v3.18 Phase B.3 — multiplicative W rescale with optional P scale.
+
+        AEC3 default (scale_p=False): scale W only; Kalman gain
+        K = P·X*/(X·P·X* + R) self-corrects within a few frames.
+        Option A (scale_p=True): also scale P by scale² (Kalman-canonical
+        variance scaling). Set via config.filter_misadjustment_scale_p.
+        """
+        super().scale_filter(scale)
+        if scale_p:
+            self.P *= float(scale) ** 2
 
 
 # Backward compatibility alias
@@ -5115,6 +5196,10 @@ class AecState:
         self._epc = epc_det
         self._regime = regime_handler
         self._dtd_coh = dtd_coherence_getter
+        # v3.18 Phase C.C — optional back-ref to AEC for C.A/C.B access.
+        # Set by AEC.__init__ when aec_state_enabled=True. When None,
+        # AEC3-aligned methods below fall back to legacy semantics.
+        self._aec_ref = None
 
     # ── Render activity ──────────────────────────────────────────────────────
     @property
@@ -5154,14 +5239,77 @@ class AecState:
     @property
     def shadow_advantage(self) -> float: return self._dt.shadow_advantage
 
+    # ── v3.18 Phase C.C — AEC3-aligned extensions ───────────────────────
+    # These read from C.A/C.B substrate when AEC back-ref is wired and
+    # the flags are enabled; else fall back to legacy semantics.
+
+    def consistent_estimate(self) -> bool:
+        """C.A FilterAnalyzer: filter impulse-response shape stable?
+
+        Returns False when C.A is unavailable (legacy AEC).
+        """
+        a = self._aec_ref
+        if a is None or getattr(a, '_filter_analyzer', None) is None:
+            return False
+        return bool(a._filter_analyzer.consistent_estimate)
+
+    def fq_usable(self) -> bool:
+        """C.B multi-gate usable. Falls back to legacy converged when C.B off."""
+        a = self._aec_ref
+        if a is None or getattr(a, '_filter_quality', None) is None:
+            return bool(self._conv.converged)
+        return bool(a._filter_quality.usable)
+
+    def active_render(self) -> bool:
+        """AEC3-aligned: far signal currently active.
+
+        When C.B is on, uses far_active_recent (windowed); else live render flag.
+        """
+        a = self._aec_ref
+        if a is not None and getattr(a, '_filter_quality', None) is not None:
+            return bool(a._filter_quality.far_active_recent)
+        return bool(self._render.is_active)
+
+    def transparent_mode_active(self) -> bool:
+        """AEC3-aligned: no echo to cancel right now (pass mic through)."""
+        a = self._aec_ref
+        if a is not None and getattr(a, '_filter_quality', None) is not None:
+            return not bool(a._filter_quality.far_active_recent)
+        return False
+
+    def saturated_capture(self) -> bool:
+        a = self._aec_ref
+        if a is None:
+            return False
+        return float(a._saturation_level) > 0.3
+
+    def erl_estimate(self) -> float:
+        a = self._aec_ref
+        return float(a._erl_estimate) if a is not None else 0.0
+
+    def aec3_snapshot(self) -> dict:
+        """Per-frame snapshot of AEC3-aligned methods (for trace + audit)."""
+        return {
+            'usable_linear': bool(self.usable_linear_estimate),
+            'fq_usable': self.fq_usable(),
+            'consistent_estimate': self.consistent_estimate(),
+            'active_render': self.active_render(),
+            'transparent_mode': self.transparent_mode_active(),
+            'saturated_capture': self.saturated_capture(),
+            'epc_active': bool(self.epc_active),
+            'filter_converged': bool(self.filter_converged),
+            'erl_estimate': self.erl_estimate(),
+        }
+
     # ── Aggregated decisions (Phase B consumers) ─────────────────────────────
     @property
     def usable_linear_estimate(self) -> bool:
         """Can the main filter's echo estimate be trusted as residual-echo source?
 
-        AEC3-style: requires once-converged + currently-converged + not in EPC recovery.
-        When False, Phase B's residual echo estimator should fall back to
-        render-window-based attribution.
+        Legacy semantics (preserved for byte-equal): once-converged +
+        currently-converged + not in EPC recovery. v3.18 Phase C.E migrates
+        consumers to `fq_usable()` instead (multi-gate AEC3 semantic) once
+        the flag promotion path is approved.
         """
         return (self._conv.once_converged
                 and self._conv.converged
@@ -5855,10 +6003,15 @@ class AEC:
                 if not (self.config.arc_m_t_gated_enabled
                         and getattr(self, '_arc_t_cohort_tail_signal', False)):
                     self._arc_m_q_boost(filt)
-                filt._p_max_override = 1.0
-                filt._p_max_override_frames = 30
-                filt._p_floor_beta = 1.0
-                filt._p_floor_beta_frames = 30
+                # Kalman P-override attrs are PBFDKF-only. When
+                # shadow_class_nlms=True, the shadow filter is PBFDAF and
+                # has no Kalman state — skip the P-override block on it.
+                # Guard is filter-type, not flag: keeps PBFDKF byte-equal.
+                if isinstance(filt, PBFDKF):
+                    filt._p_max_override = 1.0
+                    filt._p_max_override_frames = 30
+                    filt._p_floor_beta = 1.0
+                    filt._p_floor_beta_frames = 30
         self._maybe_mark_diverged(source)
         self._epc_render_forced_remaining = self.config.epc_hangover
         self._erl_estimate = min(self._erl_estimate, 0.3)
@@ -5871,6 +6024,74 @@ class AEC:
         if self.config.use_epc_state_reset:
             self._apply_epc_state_reset(source)
         self._f_e3_handle_epc_fire(source)
+
+    # v3.18 Phase B.2/B.3 — Filter misadjustment estimator + ScaleFilter wiring.
+    def _update_misadjustment_estimator(self) -> None:
+        """Asymmetric EMA on filter_scale_ratio = echo_psd / (far_psd × ERL).
+
+        Tracks long-term W magnitude drift. Slow-up / fast-down EMA biases
+        the smoothed value toward sustained under-modelling, not transients.
+        Skipped when far is silent (no observation signal).
+        """
+        if not self.config.filter_misadjustment_enabled:
+            return
+        if self.filter is None or not hasattr(self.filter, 'echo_spec'):
+            return
+        _fp_echo = float(np.mean(np.abs(self.filter.echo_spec) ** 2))
+        _fp_far  = float(np.mean(np.abs(self.filter.far_spec) ** 2))
+        if _fp_far < 1e-10:
+            return
+        raw_ratio = _fp_echo / (_fp_far * float(self._erl_estimate) + 1e-12)
+        if raw_ratio < self._misadjustment_smoothed:
+            alpha = self.config.filter_misadjustment_alpha_up
+        else:
+            alpha = self.config.filter_misadjustment_alpha_dn
+        self._misadjustment_smoothed = (
+            alpha * self._misadjustment_smoothed
+            + (1.0 - alpha) * raw_ratio
+        )
+
+    def _check_and_apply_misadjustment_scale(self) -> None:
+        """Trigger gate + ScaleFilter fire per AEC3 IsAdjustmentNeeded.
+
+        Gates: filter converged AND refined_usable AND not epc_active AND
+        not main_paused AND stable_count ≥ threshold AND hangover == 0.
+        On fire: scale = clamp(1.0 / smoothed, scale_min, scale_max);
+        filter.scale_filter(scale, scale_p); smoothed→1.0; arm hangover.
+        """
+        if not self.config.filter_misadjustment_enabled:
+            return
+        if self._misadjustment_hangover_remaining > 0:
+            self._misadjustment_hangover_remaining -= 1
+            return
+        stable = (
+            self._filter_converged
+            and getattr(self, '_prev_filter_state', '') == 'refined_usable'
+            and not self.epc_active
+            and not self._regime_handler.main_paused
+        )
+        if not stable:
+            self._misadjustment_stable_count = 0
+            return
+        self._misadjustment_stable_count += 1
+        if self._misadjustment_stable_count < self.config.filter_misadjustment_stable_frames:
+            return
+        if self._misadjustment_smoothed >= self.config.filter_misadjustment_threshold:
+            return
+        # Fire: rescale W (and optionally P).
+        proposed_scale = 1.0 / max(self._misadjustment_smoothed, 1e-6)
+        scale = max(self.config.filter_misadjustment_scale_min,
+                    min(self.config.filter_misadjustment_scale_max,
+                        proposed_scale))
+        if isinstance(self.filter, PBFDKF):
+            self.filter.scale_filter(scale,
+                scale_p=self.config.filter_misadjustment_scale_p)
+        else:
+            self.filter.scale_filter(scale)
+        self._misadjustment_smoothed = 1.0
+        self._misadjustment_hangover_remaining = (
+            self.config.filter_misadjustment_hangover_frames)
+        self._misadjustment_fire_count += 1
 
     # ── EPC-state delegations (state lives in self._epc_det) ─────────────────
     @property
@@ -6200,8 +6421,16 @@ class AEC:
         if (self.config.enable_shadow and
                 self.config.mode in _FREQ_MODES
                 and hasattr(self.filter, 'W')):
-            shadow_mu = self.config.mu * self.config.shadow_mu_ratio
-            self.shadow_filter = FilterClass(
+            # v3.18 Phase A.2 — shadow class selection.
+            # Flag-OFF (default): shadow uses same class as main (PBFDKF in
+            # BALANCED). Flag-ON: shadow uses PBFDAF (NLMS), AEC3-aligned.
+            if self.config.shadow_class_nlms:
+                ShadowClass = PBFDAF
+                shadow_mu = self.config.shadow_mu_nlms
+            else:
+                ShadowClass = FilterClass
+                shadow_mu = self.config.mu * self.config.shadow_mu_ratio
+            self.shadow_filter = ShadowClass(
                 block_size=self.filter.block_size,
                 n_partitions=self.filter.n_partitions,
                 mu=shadow_mu,
@@ -6209,7 +6438,9 @@ class AEC:
                 hop_size=self.filter.hop_size
             )
             self.shadow_filter.enable_td_constraint = self.config.enable_td_constraint
-            # PBFDKF shadow: higher Q via ratio for faster tracking
+            # PBFDKF shadow: higher Q via ratio for faster tracking.
+            # When shadow_class_nlms=True the shadow is PBFDAF (no Q state),
+            # so this scaling is skipped — guard is filter-type, not flag.
             if isinstance(self.shadow_filter, PBFDKF):
                 self.shadow_filter.Q_high = self.filter.Q_high * self.config.shadow_q_ratio
                 self.shadow_filter.Q_low  = self.filter.Q_low  * self.config.shadow_q_ratio
@@ -6221,6 +6452,47 @@ class AEC:
         # in F.1; consumers wired in F.2+). Empty AecEvent when classification
         # flag is OFF or no event fired this frame.
         self._classified_event = AecEvent()
+
+        # v3.18 Phase B.2 — Filter misadjustment estimator state.
+        # Lazy-init only when flag is enabled so flag-OFF stays byte-equal
+        # (these attrs simply don't exist on baseline-config AEC instances).
+        if self.config.filter_misadjustment_enabled:
+            self._misadjustment_smoothed = 1.0
+            self._misadjustment_stable_count = 0
+            self._misadjustment_hangover_remaining = 0
+            self._misadjustment_fire_count = 0
+
+        # v3.18 Phase C.A — FilterAnalyzer (audit-only). Lazy-init guards
+        # both module import and instantiation so flag-OFF stays byte-equal.
+        self._filter_analyzer = None
+        if self.config.filter_analyzer_enabled:
+            global _FilterAnalyzer
+            if _FilterAnalyzer is None:
+                from aec_filter_analyzer import FilterAnalyzer as _FA
+                _FilterAnalyzer = _FA
+            self._filter_analyzer = _FilterAnalyzer(
+                sample_rate=self.config.sample_rate)
+
+        # v3.18 Phase C.B — FilteringQualityAnalyzer (audit-only). Same
+        # lazy-init pattern as C.A.
+        self._filter_quality = None
+        if self.config.filter_quality_enabled:
+            global _FilteringQualityAnalyzer
+            if _FilteringQualityAnalyzer is None:
+                from aec_filter_quality import FilteringQualityAnalyzer as _FQA
+                _FilteringQualityAnalyzer = _FQA
+            self._filter_quality = _FilteringQualityAnalyzer()
+        # Per-frame helper: set True inside any EPC fire site this frame.
+        # Read by FilteringQualityAnalyzer; ignored when flag is OFF.
+        self._epc_reset_fired_this_frame = False
+
+        # v3.18 Phase C.C — AecState extension. The existing AecState class
+        # (defined above) is constructed later in __init__ with detector
+        # references. When aec_state_enabled=True, we set a back-ref to
+        # this AEC on the already-constructed AecState so AEC3-aligned
+        # methods (consistent_estimate, fq_usable, etc.) can read from
+        # C.A/C.B substrate. The actual wiring happens after AecState
+        # construction below (search marker 'AecState back-ref').
 
         # #4: Confidence memory decay
         self.prev_dtd_conf = 0.0
@@ -6452,6 +6724,13 @@ class AEC:
             dtd_coherence_getter=lambda: (
                 self.dtd_coherence.confidence if self.dtd_coherence else 0.0),
         )
+        # v3.18 Phase C.C — AecState back-ref. Marker: AecState back-ref.
+        # When aec_state_enabled=True, AecState's AEC3-aligned methods
+        # (consistent_estimate, fq_usable, active_render, etc.) read
+        # from C.A/C.B substrate via this back-ref. When False, methods
+        # fall back to legacy semantics — no behaviour change.
+        if self.config.aec_state_enabled:
+            self._aec_state._aec_ref = self
         self._far_power_ema = 0.0           # TC≈50ms for GetStats()
         self._mic_power_ema = 0.0
         self._frame_count = 0               # frames since reset()
@@ -6512,6 +6791,13 @@ class AEC:
             self._shadow_error_psd.fill(1e-2)
         if hasattr(self, '_shadow_R'):
             self._shadow_R.fill(1e-2)
+        # v3.18 Phase C.A — FilterAnalyzer state reset on full AEC reset.
+        if getattr(self, '_filter_analyzer', None) is not None:
+            self._filter_analyzer.reset()
+        # v3.18 Phase C.B — FilteringQualityAnalyzer state reset.
+        if getattr(self, '_filter_quality', None) is not None:
+            self._filter_quality.reset()
+        self._epc_reset_fired_this_frame = False
         if hasattr(self, '_shadow_mu_holdoff'):
             self._shadow_mu_holdoff = 0
         self._warmup_frames = self.config.warmup_frames
@@ -6972,6 +7258,11 @@ class AEC:
         self._simple_mu_ratio = alpha * self._simple_mu_ratio + (1 - alpha) * ratio
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
+        # v3.18 Phase C.B — reset per-frame EPC-fired helper. Set True by
+        # any EPC fire site (delay_shift / EPV / shadow_rise) below.
+        # Read by FilteringQualityAnalyzer; safe no-op when flag is OFF.
+        self._epc_reset_fired_this_frame = False
+
         # High-pass filter: remove DC + low-freq noise
         if self._hp_mic is not None:
             near_end = self._hp_mic.process(near_end.copy())
@@ -7099,9 +7390,13 @@ class AEC:
                                 if not (self.config.arc_m_t_gated_enabled
                                         and getattr(self, '_arc_t_cohort_tail_signal', False)):
                                     self._arc_m_q_boost(filt)
-                                filt._p_max_override = 1.0
-                                filt._p_max_override_frames = 30
+                                # PBFDKF-only Kalman P-override (NLMS shadow
+                                # has no P state — skip cleanly).
+                                if isinstance(filt, PBFDKF):
+                                    filt._p_max_override = 1.0
+                                    filt._p_max_override_frames = 30
                         self._maybe_mark_diverged('delay_shift')
+                        self._epc_reset_fired_this_frame = True   # C.B FQA signal
                     else:
                         self._pending_delay = new_delay
                         self._pending_delay_ttl = 3
@@ -7438,11 +7733,22 @@ class AEC:
                     # B5: symmetric R-reset on shadow filter — without it, the
                     # K-handicapped shadow (stale R from same DT period) feeds
                     # a wrong-K W into main on the next reverse_copy event,
-                    # undoing F2.3's fast-recovery benefit.
-                    if self.config.shadow_r_reset_enabled and self.shadow_filter is not None:
+                    # undoing F2.3's fast-recovery benefit. PBFDKF-only state
+                    # (NLMS shadow under shadow_class_nlms=True has no R / no
+                    # _error_psd → skip cleanly).
+                    if (self.config.shadow_r_reset_enabled
+                            and isinstance(self.shadow_filter, PBFDKF)):
                         self.shadow_filter._error_psd.fill(1e-2)
                         self.shadow_filter.R.fill(1e-2)
-                if shadow_decision.reverse_copy:
+                # v3.18 Phase A.3 (corrected 2026-05-16) — AEC3 has no W
+                # copy between refined/coarse filters. The reverse_copy
+                # mechanism exists today because PBFDKF shadow has P-memory
+                # and can get stuck in a wrong basin (sending misleading
+                # `shadow_advantage`). NLMS shadow has no P-memory and
+                # re-adapts from its own residual; W copy becomes a no-op
+                # at best and a perturbation at worst. Skip under flag-ON.
+                if (shadow_decision.reverse_copy
+                        and not self.config.shadow_class_nlms):
                     # Sync shadow back to main when main is clearly better.
                     self.shadow_filter.copy_weights_from(self.filter)
                     self.shadow_err_smooth = self.main_err_smooth
@@ -7514,6 +7820,7 @@ class AEC:
             self._diag['epv_event_raw'] = _epv_raw
             self._diag['epv_event_suppressed'] = _epv_suppressed
             if epv_event.fired and not _epv_suppressed:
+                self._epc_reset_fired_this_frame = True   # C.B FQA signal
                 if self.config.aec_event_classification_enabled:
                     # v3.18 Phase F.3 — AEC3-aligned: EPV is gain_change → soft
                     # reset only (Q-boost on refined/coarse step-size). Skips
@@ -7526,10 +7833,12 @@ class AEC:
                             if not (self.config.arc_m_t_gated_enabled
                                     and getattr(self, '_arc_t_cohort_tail_signal', False)):
                                 self._arc_m_q_boost(filt)
-                            filt._p_max_override = 1.0
-                            filt._p_max_override_frames = 30
-                            filt._p_floor_beta = 1.0
-                            filt._p_floor_beta_frames = 30
+                            # PBFDKF-only Kalman P-override (NLMS shadow skip).
+                            if isinstance(filt, PBFDKF):
+                                filt._p_max_override = 1.0
+                                filt._p_max_override_frames = 30
+                                filt._p_floor_beta = 1.0
+                                filt._p_floor_beta_frames = 30
                     self._maybe_mark_diverged('epv')
                     self._epc_render_forced_remaining = self.config.epc_hangover
                     self._erl_estimate = min(self._erl_estimate, 0.3)
@@ -7572,6 +7881,7 @@ class AEC:
                         and rise_event.fired):
                     rise_event = type(rise_event)(fired=False, source=rise_event.source)
                 if rise_event.fired:
+                    self._epc_reset_fired_this_frame = True   # C.B FQA signal
                     if self.config.aec_event_classification_enabled:
                         # v3.18 Phase F.3 — AEC3-aligned: shadow_rise is a
                         # gain_change proxy (both errors rising signals filter
@@ -7591,9 +7901,10 @@ class AEC:
                                         and getattr(self, '_arc_t_cohort_tail_signal', False)):
                                     self._arc_m_q_boost(filt)
                         self._maybe_mark_diverged('shadow_rise')
-                        # P_MAX relax + P_floor raise: force filter to abandon stale path estimate
+                        # P_MAX relax + P_floor raise: force filter to abandon
+                        # stale path estimate. PBFDKF-only (NLMS shadow skip).
                         for filt in [self.filter, self.shadow_filter]:
-                            if filt:
+                            if filt and isinstance(filt, PBFDKF):
                                 filt._p_max_override = 1.0
                                 filt._p_max_override_frames = 30
                                 filt._p_floor_beta = 1.0
@@ -7626,6 +7937,62 @@ class AEC:
             # final_output starts from raw_output; RES modifies final_output only
             self._last_raw_output = raw_output  # save for diagnostic (time-domain echo power)
             final_output = raw_output.copy()
+
+            # v3.18 Phase B.2/B.3 — FilterMisadjustmentEstimator + ScaleFilter
+            # update. Estimator tracks long-term echo/render ratio; trigger
+            # fires scale_filter when stable convergence + persistent under-
+            # modelling. Both methods return immediately when flag is OFF
+            # (byte-equal preserved). Scale action affects subsequent frames
+            # only; current frame's raw_output already computed.
+            self._update_misadjustment_estimator()
+            self._check_and_apply_misadjustment_scale()
+
+            # v3.18 Phase C.A — FilterAnalyzer audit-only update. Reads main
+            # filter W → time-domain impulse → HP-filter → peak detection +
+            # consistency check. Outputs exposed via _diag only; no consumer
+            # changes behaviour. Skipped when flag OFF (byte-equal preserved).
+            if (self._filter_analyzer is not None
+                    and self.filter is not None
+                    and hasattr(self.filter, 'W')):
+                _W_sum = self.filter.W.sum(axis=0)
+                _w_time = np.fft.irfft(_W_sum, self.filter.fft_size).astype(np.float32)
+                self._filter_analyzer.update(_w_time)
+                self._diag['filter_analyzer_consistent'] = bool(
+                    self._filter_analyzer.consistent_estimate)
+                self._diag['filter_analyzer_peak_index'] = int(
+                    self._filter_analyzer.peak_index)
+                self._diag['filter_analyzer_max_gain'] = float(
+                    self._filter_analyzer.max_echo_path_gain)
+
+            # v3.18 Phase C.B — FilteringQualityAnalyzer audit-only update.
+            # Multi-gate usable_linear_estimate; outputs to _diag['fq_*'].
+            # convergence_signal prefers FilterAnalyzer.consistent_estimate
+            # (AEC3-aligned semantic) when C.A is available; else falls
+            # back to legacy _filter_converged.
+            if self._filter_quality is not None:
+                _fq_far_active = bool(np.mean(far_end ** 2) > 1e-4)
+                if self._filter_analyzer is not None:
+                    _fq_conv_signal = bool(self._filter_analyzer.consistent_estimate)
+                else:
+                    _fq_conv_signal = bool(self._filter_converged)
+                self._filter_quality.update(
+                    far_active=_fq_far_active,
+                    epc_reset_fired=bool(self._epc_reset_fired_this_frame),
+                    convergence_signal=_fq_conv_signal)
+                self._diag['fq_usable'] = bool(self._filter_quality.usable)
+                self._diag['fq_startup_done'] = bool(self._filter_quality.startup_done)
+                self._diag['fq_reset_done'] = bool(self._filter_quality.reset_done)
+                self._diag['fq_convergence_seen'] = bool(
+                    self._filter_quality.convergence_seen)
+                self._diag['fq_far_active_recent'] = bool(
+                    self._filter_quality.far_active_recent)
+
+            # v3.18 Phase C.C — AecState AEC3-aligned snapshot (audit-only).
+            # Only emit when aec_state_enabled (back-ref set) — legacy AEC
+            # config skips trace to keep diag dict structure unchanged.
+            if (self.config.aec_state_enabled
+                    and getattr(self._aec_state, '_aec_ref', None) is not None):
+                self._diag['aec_state_snapshot'] = self._aec_state.aec3_snapshot()
 
             # RES post-filter using OLA + sqrt-Hann (skip for buffered FDAF)
             if (self.res or self.config.return_res_context) and self._freq_near_queue is None:

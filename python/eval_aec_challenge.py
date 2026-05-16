@@ -323,6 +323,19 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         ('AEC_DOMINANT_NE_SNR_THRESHOLD', 'dominant_ne_snr_threshold', False),
         # v3.18 Phase F.1/F.3 — AEC3-aligned event classification + asymmetric reset
         ('AEC_EVENT_CLASSIFICATION', 'aec_event_classification_enabled', True),
+        # v3.18 Phase A.2 — shadow class swap (PBFDKF → PBFDAF/NLMS, AEC3-aligned)
+        ('AEC_SHADOW_NLMS', 'shadow_class_nlms', True),
+        ('AEC_SHADOW_MU_NLMS', 'shadow_mu_nlms', False),
+        # v3.18 Phase B.2/B.3 — FilterMisadjustmentEstimator + ScaleFilter
+        ('AEC_FILTER_MISADJUSTMENT', 'filter_misadjustment_enabled', True),
+        ('AEC_FILTER_MISADJUSTMENT_THRESHOLD', 'filter_misadjustment_threshold', False),
+        ('AEC_FILTER_MISADJUSTMENT_SCALE_P', 'filter_misadjustment_scale_p', True),
+        # v3.18 Phase C.A — FilterAnalyzer audit-only port
+        ('AEC_FILTER_ANALYZER', 'filter_analyzer_enabled', True),
+        # v3.18 Phase C.B — FilteringQualityAnalyzer audit-only port
+        ('AEC_FILTER_QUALITY', 'filter_quality_enabled', True),
+        # v3.18 Phase C.C — AecState ADT facade
+        ('AEC_AEC_STATE', 'aec_state_enabled', True),
     ):
         if _flag in os.environ and _key not in config_overrides:
             _v = os.environ[_flag]
