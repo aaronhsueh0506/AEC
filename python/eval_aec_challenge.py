@@ -341,6 +341,10 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         ('AEC_LEAKAGE_DIVERGED_THRESHOLD', 'leakage_diverged_threshold', False),
         # v3.18 Phase C.E — RES filter_converged → fq_usable migration
         ('AEC_C_E_RES_FQ_USABLE', 'c_e_res_use_fq_usable', True),
+        # v3.19 Phase 1 — per-RES-branch C.E migration ablation flags
+        ('AEC_C_E_BRANCH_FORCE_RENDER_FQ_USABLE', 'c_e_branch_force_render_use_fq_usable', True),
+        ('AEC_C_E_BRANCH_DT_PER_BIN_FQ_USABLE', 'c_e_branch_dt_per_bin_use_fq_usable', True),
+        ('AEC_C_E_BRANCH_COH2_EMA_FQ_USABLE', 'c_e_branch_coh2_ema_use_fq_usable', True),
     ):
         if _flag in os.environ and _key not in config_overrides:
             _v = os.environ[_flag]

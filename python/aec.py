@@ -288,6 +288,17 @@ class AecConfig:
     # Design: docs/v3_18_c_e1_consumer_migration_design.md.
     c_e_res_use_fq_usable: bool = False
 
+    # v3.19 Phase 1 — per-RES-branch C.E migration. Per-branch ablation
+    # of the v3.18 C.E whole-arg switch; identifies which RES branches
+    # benefit from fq_usable (AEC3-aligned multi-gate) vs hurt from it.
+    # All default OFF; byte-equal to v3.18 production. Each flag toggles
+    # ONE branch from `_filter_converged` semantics to `fq_usable`.
+    # Branches inventoried in docs/v3_19_phase1_1a_resfilter_branch_inventory.md.
+    # Design lock: docs/v3_19_phase1_2_per_branch_flag_design.md.
+    c_e_branch_force_render_use_fq_usable: bool = False
+    c_e_branch_dt_per_bin_use_fq_usable: bool = False
+    c_e_branch_coh2_ema_use_fq_usable: bool = False
+
     # Coherence DTD absolute energy floor
     dtd_coh_abs_floor: float = 1e-6     # #8: Absolute error energy floor
 
@@ -2406,7 +2417,9 @@ class ResFilter:
                  dominant_ne_enr_exit_threshold: float = 10.0,
                  dominant_ne_snr_threshold: float = 30.0,
                  dominant_ne_trigger_threshold: int = 12,
-                 dominant_ne_hold_duration: int = 50):
+                 dominant_ne_hold_duration: int = 50,
+                 c_e_branch_dt_per_bin_use_fq_usable: bool = False,
+                 c_e_branch_coh2_ema_use_fq_usable: bool = False):
         self._plan_a_kernel_tight = plan_a_kernel_tight
         self._plan_b_dt_per_bin_gamma = plan_b_dt_per_bin_gamma
         self._plan_a_hf_cap_2k = plan_a_hf_cap_2k
@@ -2417,6 +2430,11 @@ class ResFilter:
         self._consume_filter_state = consume_filter_state
         self._unified_gain_floor = unified_gain_floor
         self._dt_per_bin_unified = dt_per_bin_unified
+        # v3.19 Phase 1 — per-RES-branch C.E migration flags. G1 + P1
+        # live in ResFilter; R1 lives in ResidualEchoEstimator (wired
+        # separately via AEC.__init__).
+        self._c_e_branch_dt_per_bin_use_fq_usable = c_e_branch_dt_per_bin_use_fq_usable
+        self._c_e_branch_coh2_ema_use_fq_usable = c_e_branch_coh2_ema_use_fq_usable
         self._noise_floor_refined = noise_floor_refined
         self._cap2_fs_loosen = cap2_fs_loosen
         self._per_band_enr = per_band_enr
@@ -3221,7 +3239,8 @@ class ResFilter:
                               erl_estimate: float = 0.01,
                               filter_converged: bool = False,
                               epc_active: bool = False,
-                              filter_state: str = 'idle'):
+                              filter_state: str = 'idle',
+                              aec_state=None):
         """Stage 2: ENR / Wiener / spectral_sub gain compute + EMR + spectral floor lift.
 
         Returns g (post-spectral-floor). Mutates dominant_ne / Round 4 / Round 5
@@ -3295,8 +3314,16 @@ class ResFilter:
             # mic-excess blend also fires during EPC-active frames. Legacy
             # fallback at `else:` below remains the path for `not
             # filter_converged` or `not _lw_ready` regardless of flag.
+            # v3.19 Phase 1 Branch G1 — when c_e_branch_dt_per_bin_use_fq_usable
+            # is ON, the F3.1 v3 mic-excess gate uses fq_usable instead of
+            # filter_converged. Default-OFF: byte-equal to legacy.
+            _fc_g1 = filter_converged
+            if (self._c_e_branch_dt_per_bin_use_fq_usable
+                    and aec_state is not None
+                    and getattr(aec_state, '_aec_ref', None) is not None):
+                _fc_g1 = aec_state.fq_usable()
             if (self._use_mic_excess_evidence
-                    and filter_converged
+                    and _fc_g1
                     and _lw_ready
                     and (self._dt_per_bin_unified or not epc_active)):
                 far_lw = self._residual_est._long_window_far_psd
@@ -4057,7 +4084,16 @@ class ResFilter:
             # Asymmetric EMA: fast drop (DT protection) / slow rise (stable tracking)
             # After convergence: rise slower → coh2 more stable near 1.0 in echo-only
             # _coh2_smooth initialized in __init__ and cleared in reset()
-            if filter_converged:
+            #
+            # v3.19 Phase 1 Branch P1 — when c_e_branch_coh2_ema_use_fq_usable
+            # is ON, the asymmetric tuning gate uses fq_usable instead of
+            # filter_converged. Default-OFF: byte-equal to legacy.
+            _fc_p1 = filter_converged
+            if (self._c_e_branch_coh2_ema_use_fq_usable
+                    and aec_state is not None
+                    and getattr(aec_state, '_aec_ref', None) is not None):
+                _fc_p1 = aec_state.fq_usable()
+            if _fc_p1:
                 a_coh_rise = 0.90   # TC≈160ms, stable echo-only tracking
                 a_coh_drop = 0.50   # TC≈25ms, fast DT protection
             else:
@@ -4266,6 +4302,7 @@ class ResFilter:
             filter_converged=filter_converged,
             epc_active=epc_active,
             filter_state=filter_state,
+            aec_state=aec_state,
         )
         g = self._stage_gain_postprocess(
             g_in=g,
@@ -5020,6 +5057,10 @@ class ResidualEchoEstimator:
         # AecConfig at AEC.__init__ and stays constant after.
         self._arc_t_cohort_tail_signal = False
         self._arc_t_force_render_or_in_enabled = False
+        # v3.19 Phase 1 Branch R1 — wired from AecConfig via AEC.__init__.
+        # When True, R1 force_render OR uses fq_usable instead of
+        # filter_converged (default-OFF byte-equal).
+        self._c_e_branch_force_render_use_fq_usable = False
 
     def reset(self, preserve_long_window_ema: bool = False) -> None:
         """Clear residual-echo estimator state.
@@ -5052,14 +5093,14 @@ class ResidualEchoEstimator:
                 filter_erle=kw['filter_erle'], fb_erle=kw['fb_erle'],
                 aec_state=aec_state,
             )
-        return self.attribute_legacy(**kw)
+        return self.attribute_legacy(aec_state=aec_state, **kw)
 
     def attribute_legacy(self, *, echo_psd: np.ndarray, error_psd: np.ndarray,
                          coh2: np.ndarray, far_spec, far_power: float,
                          erle_factor: float, dt_for_fs: float, far_activity: float,
                          epc_active: bool, saturation_level: float,
                          filter_converged: bool, erl_estimate: float,
-                         filter_erle, fb_erle) -> np.ndarray:
+                         filter_erle, fb_erle, aec_state=None) -> np.ndarray:
         """Stage 1 (ERLE-blended linear) + Stage 2 (render-based switch).
 
         Bit-exact port of ResFilter.process() residual-echo block from v2.8.1
@@ -5113,10 +5154,20 @@ class ResidualEchoEstimator:
             # `_arc_t_cohort_tail_signal` per frame before this method
             # runs (see AEC.process). When the enable flag is OFF (the
             # default), the OR-in term is always False → byte-equal.
+            #
+            # v3.19 Phase 1 Branch R1 — when c_e_branch_force_render_use_fq_usable
+            # is ON, the `not filter_converged` clause uses fq_usable
+            # (AEC3-aligned UsableLinearEstimate semantic) instead.
+            # Default-OFF: byte-equal to legacy.
+            _fc_r1 = filter_converged
+            if (self._c_e_branch_force_render_use_fq_usable
+                    and aec_state is not None
+                    and getattr(aec_state, '_aec_ref', None) is not None):
+                _fc_r1 = aec_state.fq_usable()
             force_render = (
                 epc_active
                 or saturation_level > 0.5
-                or not filter_converged
+                or not _fc_r1
                 or (self._arc_t_force_render_or_in_enabled
                     and self._arc_t_cohort_tail_signal)
             )
@@ -6449,6 +6500,8 @@ class AEC:
                 dominant_ne_snr_threshold=self.config.dominant_ne_snr_threshold,
                 dominant_ne_trigger_threshold=self.config.dominant_ne_trigger_threshold,
                 dominant_ne_hold_duration=self.config.dominant_ne_hold_duration,
+                c_e_branch_dt_per_bin_use_fq_usable=self.config.c_e_branch_dt_per_bin_use_fq_usable,
+                c_e_branch_coh2_ema_use_fq_usable=self.config.c_e_branch_coh2_ema_use_fq_usable,
             )
             # v3.16-A — wire force_render OR-in enable flag onto the
             # ResidualEchoEstimator. Reading happens inside
@@ -6456,6 +6509,10 @@ class AEC:
             if self.res._residual_est is not None:
                 self.res._residual_est._arc_t_force_render_or_in_enabled = bool(
                     self.config.arc_t_force_render_or_in)
+                # v3.19 Phase 1 Branch R1 — wire flag onto ResidualEchoEstimator
+                # (R1 lives inside attribute_legacy, not ResFilter). Default-OFF.
+                self.res._residual_est._c_e_branch_force_render_use_fq_usable = bool(
+                    self.config.c_e_branch_force_render_use_fq_usable)
         else:
             self.res = None
 
