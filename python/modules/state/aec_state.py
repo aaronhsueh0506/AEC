@@ -25,6 +25,7 @@ from typing import Optional
 import numpy as np
 
 from ._constants import HOPS_PER_SECOND
+from .erle_estimator import ErleEstimator
 from .filter_delay import FilterDelay
 from .filter_quality import FilteringQualityAnalyzer
 from .initial_state import InitialState
@@ -52,6 +53,11 @@ class AecStateConfig:
     delay_headroom_samples: int = 32
     num_capture_channels: int = 1
     echo_can_saturate: bool = True
+    n_bins: int = 257
+    erle_startup_hops: int = 200    # AEC3 2*kNumBlocksPerSecond -> our 2*100 hops
+    erle_min: float = 1.0           # AEC3 default
+    erle_max_l: float = 4.0
+    erle_max_h: float = 1.5
 
 
 class AecState:
@@ -72,11 +78,17 @@ class AecState:
             use_linear_filter=self._config.use_linear_filter
         )
         self._saturation_detector = SaturationDetector()
-        # STUBS — Phase 3.2-3.4 will replace.
-        self._erle_unbounded = np.ones(257, dtype=np.float32)  # ~ no suppression boost
-        self._erl = np.ones(257, dtype=np.float32) * 1e-3
+        self._erle_estimator = ErleEstimator(
+            startup_phase_length_hops=self._config.erle_startup_hops,
+            n_bins=self._config.n_bins,
+            min_erle=self._config.erle_min,
+            max_erle_l=self._config.erle_max_l,
+            max_erle_h=self._config.erle_max_h,
+        )
+        # STUBS — Phase 3.3-3.4 will replace.
+        self._erl = np.ones(self._config.n_bins, dtype=np.float32) * 1e-3
         self._reverb_decay = 0.0  # zero reverb tail until ReverbModelEstimator lands
-        self._reverb_frequency_response = np.zeros(257, dtype=np.float32)
+        self._reverb_frequency_response = np.zeros(self._config.n_bins, dtype=np.float32)
         self._transparent_mode_active = False
         # Counters tracked at this level (not in helpers).
         self._strong_not_saturated_render_blocks = 0
@@ -120,9 +132,14 @@ class AecState:
         # STUB — returns zeros until ReverbModelEstimator lands.
         return self._reverb_frequency_response
 
+    def erle(self, onset_compensated: bool = False) -> np.ndarray:
+        return self._erle_estimator.erle(onset_compensated)
+
     def erle_unbounded(self) -> np.ndarray:
-        # STUB — returns ones (= 0 dB suppression boost) until ErleEstimator lands.
-        return self._erle_unbounded
+        return self._erle_estimator.erle_unbounded()
+
+    def fullband_erle_log2(self) -> float:
+        return self._erle_estimator.fullband_erle_log2()
 
     def erl(self) -> np.ndarray:
         return self._erl
@@ -139,9 +156,8 @@ class AecState:
         if variability.delay_change is not DelayAdjustment.NONE:
             self._full_reset()
         elif variability.gain_change:
-            # ERLE-only reset (no full reset; preserves convergence flags).
-            # Phase 3.2 will replace this stub call.
-            pass
+            # ERLE-only reset on gain change (mirrors aec_state.cc:165-167).
+            self._erle_estimator.reset(delay_change=False)
 
     def update(
         self,
@@ -189,8 +205,17 @@ class AecState:
         if active_render and not self._capture_signal_saturation:
             self._strong_not_saturated_render_blocks += 1
 
-        # 4. STUB: erle / erl / reverb / echo_audibility updates here.
-        #    Phase 3.2-3.4 commits will fill these in.
+        # 4a. ERLE (transition-triggered soft reset BEFORE update — matches
+        #     aec_state.cc:244-246; clears non-delay-change state).
+        if self._initial_state.transition_triggered():
+            self._erle_estimator.reset(delay_change=False)
+        self._erle_estimator.update(
+            x2=render_psd,
+            y2=capture_psd,
+            e2=error_psd,
+            converged_filter=any_filter_converged,
+        )
+        # 4b. STUB: erl / reverb / echo_audibility updates. Phase 3.3-3.4 fill.
 
         # 5. Saturation detector.
         if self._config.echo_can_saturate and render_block is not None:
@@ -230,5 +255,5 @@ class AecState:
         self._initial_state.reset()
         self._filter_quality.reset()
         self._capture_signal_saturation = False
-        # Phase 3.2: erle_estimator.reset(True), erl_estimator.reset().
-        # Phase 3.3: transparent_state.reset().
+        self._erle_estimator.reset(delay_change=True)
+        # Phase 3.3: erl_estimator.reset(), transparent_state.reset().
