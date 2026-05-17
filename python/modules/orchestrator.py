@@ -395,6 +395,12 @@ class AEC:
             self.delay_est = None
             self._delay_active = False
 
+        # Default-init mode-divergent attributes so every code path that
+        # reads `self._dtd_fft_size` (set inside the FDAF-buffering block)
+        # also works for PBFDKF/PBFDAF/SUBBAND/LMS/TIME. Was a latent
+        # AttributeError surfaced by CLI smoke on BALANCED.
+        self._dtd_fft_size = 0
+
         # Create adaptive filter based on mode
         if self.config.mode in _FREQ_MODES:
             if self.config.mode == AecMode.FDAF:
