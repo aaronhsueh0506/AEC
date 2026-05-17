@@ -674,6 +674,8 @@ class AEC:
         self._aec3_state = None
         self._aec3_ree = None
         self._aec3_sg = None
+        self._aec3_ola_buf = None
+        self._aec3_synth_window = None
         if getattr(self.config, 'use_aec3_residual', False) and self.filter is not None:
             from .state import AecState as _Aec3State, AecStateConfig as _Aec3StateConfig
             from .residual import ResidualEchoEstimator, SuppressionGain
@@ -681,6 +683,11 @@ class AEC:
             self._aec3_state = _Aec3State(_Aec3StateConfig(n_bins=n_bins))
             self._aec3_ree = ResidualEchoEstimator(n_bins=n_bins)
             self._aec3_sg = SuppressionGain(n_bins=n_bins)
+            # Synthesis OLA: sqrt-Hann analysis * sqrt-Hann synthesis = Hann,
+            # which sums to 1 across 50%-overlap hops (perfect reconstruction).
+            bs = int(self.filter.block_size)
+            self._aec3_synth_window = np.sqrt(np.hanning(bs)).astype(np.float32)
+            self._aec3_ola_buf = np.zeros(bs, dtype=np.float32)
 
         # Shadow filter (dual-filter, frequency-domain modes only)
         # Can be used alone (≈ WebRTC/SpeexDSP) or with DTD (dual protection)
@@ -3611,12 +3618,22 @@ class AEC:
             clock_drift=False,
         )
 
-        # Apply gain to error spectrum, IFFT, OLA window [hop:block].
+        # Apply gain in spectrum domain, IFFT to fft_size=512, take the
+        # block_size=320 region that holds the analysis window, then
+        # synth-window + OLA. error_spec_windowed was built from
+        # near_buffer[:block_size] * sqrt-Hann analysis (zero-padded to
+        # fft_size). Multiplying it by sqrt-Hann synthesis and accumulating
+        # at 50% overlap gives Hann-summed perfect reconstruction.
         e_out_spec = error_spec * gain.astype(error_spec.dtype, copy=False)
-        e_out_time = np.fft.irfft(e_out_spec, n=self.filter.fft_size).astype(np.float32)
-        hop = self.filter.hop_size
+        e_out_full = np.fft.irfft(e_out_spec, n=self.filter.fft_size).astype(np.float32)
         bs = self.filter.block_size
-        return e_out_time[hop:bs].astype(np.float32)
+        hop = self.filter.hop_size
+        windowed = e_out_full[:bs] * self._aec3_synth_window
+        self._aec3_ola_buf += windowed
+        out = self._aec3_ola_buf[:hop].copy()
+        self._aec3_ola_buf[:-hop] = self._aec3_ola_buf[hop:]
+        self._aec3_ola_buf[-hop:] = 0.0
+        return out.astype(np.float32)
 
     def enable_res_audit(self) -> None:
         """Enable durable RES audit counter substrate (Phase 3B v3 S7+).
