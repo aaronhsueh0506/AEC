@@ -11,6 +11,7 @@ from .residual_echo_estimator import (
     EpStrengthConfig,
     ResidualEchoEstimator,
 )
+from .suppression_filter import apply_suppression
 from .suppression_gain import (
     DominantNearendConfig,
     EchoAudibilityConfig,
@@ -32,4 +33,5 @@ __all__ = [
     "SuppressionGain",
     "SuppressorConfig",
     "SuppressorTuning",
+    "apply_suppression",
 ]
