@@ -30,7 +30,7 @@ from modules.preprocessing import HighPassFilter, SaturationDetector  # noqa: F4
 from modules.erle import (  # noqa: F401
     FilterErleEstimator, FullbandErleEstimator, compute_erle_confidence,
 )
-from modules.delay import DelayEstimator  # noqa: F401
+from modules.legacy_delay import DelayEstimator  # noqa: F401
 from modules.filters import NlmsFilter, PBFDAF, PBFDKF  # noqa: F401
 from modules.detectors import (  # noqa: F401
     RenderActivityDetector, FilterConvergenceAnalyzer,
@@ -40,7 +40,7 @@ from modules.dtd import DtdEstimator  # noqa: F401
 from modules.epc import (  # noqa: F401
     classify_epc_event, EchoPathChangeDetector, PathChangeRegimeHandler,
 )
-from modules.state import AecState  # noqa: F401
+from modules.legacy_state import AecState  # noqa: F401
 from modules.residual_estimator import ResidualEchoEstimator  # noqa: F401
 from modules.res_filter import ResFilter, ResFilterEnr, ResFilterWiener  # noqa: F401
 from modules.nlp import SubtractiveNLP  # noqa: F401

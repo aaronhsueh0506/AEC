@@ -54,6 +54,11 @@ class AecConfig:
     # 800-case byte-equal verified (Task B.4). Default-OFF until a future
     # phase retires the legacy methods.
     use_res_refactored: bool = False
+    # v3.21 — bypass the legacy 9-stage ResFilter and route the post-linear
+    # path through the AEC3-aligned chain (AecState + ResidualEchoEstimator +
+    # SuppressionGain in python/modules/{state,residual}). Default OFF for
+    # the cycle until the 63-case bench verdict (Phase 4.5 → 5).
+    use_aec3_residual: bool = False
 
     # Shadow filter (dual-filter divergence control, frequency-domain modes only)
     enable_shadow: bool = True

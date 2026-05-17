@@ -32,7 +32,7 @@ from .dataclasses import (
     AecStats, AecResContext, RenderActivityState, FilterConvergenceState,
     RegimeHandlerDecision, AecEventType, AecEvent, EpcEvent,
 )
-from .delay import DelayEstimator
+from .legacy_delay import DelayEstimator
 from .erle import (
     FilterErleEstimator, FullbandErleEstimator, compute_erle_confidence,
 )
@@ -47,7 +47,7 @@ from .epc import (
     classify_epc_event, EchoPathChangeDetector, PathChangeRegimeHandler,
 )
 from .residual_estimator import ResidualEchoEstimator
-from .state import AecState
+from .legacy_state import AecState
 from .res_filter import ResFilter, ResFilterEnr, ResFilterWiener
 from .config import AecConfig
 from .nlp import SubtractiveNLP
@@ -665,6 +665,22 @@ class AEC:
                     self.config.c_e_branch_force_render_use_fq_usable)
         else:
             self.res = None
+
+        # v3.21 AEC3-aligned post-stage chain (gated by config.use_aec3_residual).
+        # When ON, the legacy self.res.process() call in process() is bypassed and
+        # the AecState + ResidualEchoEstimator + SuppressionGain chain runs
+        # instead. The linear filter (PBFDKF) still produces error spectrum which
+        # the AEC3 chain consumes.
+        self._aec3_state = None
+        self._aec3_ree = None
+        self._aec3_sg = None
+        if getattr(self.config, 'use_aec3_residual', False) and self.filter is not None:
+            from .state import AecState as _Aec3State, AecStateConfig as _Aec3StateConfig
+            from .residual import ResidualEchoEstimator, SuppressionGain
+            n_bins = int(self.filter.n_freqs)
+            self._aec3_state = _Aec3State(_Aec3StateConfig(n_bins=n_bins))
+            self._aec3_ree = ResidualEchoEstimator(n_bins=n_bins)
+            self._aec3_sg = SuppressionGain(n_bins=n_bins)
 
         # Shadow filter (dual-filter, frequency-domain modes only)
         # Can be used alone (≈ WebRTC/SpeexDSP) or with DTD (dual protection)
@@ -2693,7 +2709,10 @@ class AEC:
                         _ce_fc_arg = self._aec_state.fq_usable()
                     else:
                         _ce_fc_arg = self._filter_converged
-                    final_output = self.res.process(raw_output, eff_echo_spec,
+                    if self._aec3_state is not None:
+                        final_output = self._aec3_post(raw_output, near_end, far_end)
+                    else:
+                        final_output = self.res.process(raw_output, eff_echo_spec,
                                                     far_power, self.filter.far_spec,
                                                     filter_converged=_ce_fc_arg,
                                                     erle_factor=erle_factor,
@@ -3525,6 +3544,79 @@ class AEC:
 
     def GetStats(self) -> AecStats:
         return self.get_stats()
+
+    def _aec3_post(self, raw_output: np.ndarray, near_end: np.ndarray,
+                   far_end: np.ndarray) -> np.ndarray:
+        """v3.21 AEC3-aligned post-stage: bypass legacy ResFilter and run
+        AecState + ResidualEchoEstimator + SuppressionGain.
+
+        Takes the linear-filter time-domain residual ``raw_output`` (length =
+        hop_size) and returns the suppressed time-domain hop. Per-bin
+        suppression gain comes from the AEC3 chain operating on PBFDKF
+        spectra; the gain is applied to ``filter.error_spec_windowed`` and
+        the result IFFT'd back to time domain over [hop_size:block_size].
+        """
+        from .filter import build_filter_state_bridge
+
+        n_bins = self.filter.n_freqs
+        # PSDs from PBFDKF spectra (current frame).
+        near_psd = (np.abs(self.filter.near_spec) ** 2).astype(np.float32)
+        far_psd = (np.abs(self.filter.far_spec) ** 2).astype(np.float32)
+        echo_psd = (np.abs(self.filter.echo_spec) ** 2).astype(np.float32)
+        error_spec = self.filter.error_spec_windowed
+        error_psd = (np.abs(error_spec) ** 2).astype(np.float32)
+        far_pwr = float(np.mean(far_end ** 2))
+
+        # Build per-hop filter-state snapshot for AecState.
+        bridge = build_filter_state_bridge(
+            filter_converged=bool(self._filter_converged),
+            pbfdkf=self.filter,
+            regime_handler=self._regime_handler,
+            mu_final=float(getattr(self, '_last_mu_scale_diag', 1.0)),
+            external_delay_samples=int(self._current_delay) if self._delay_active else -1,
+            shadow_filter=self.shadow_filter,
+        )
+        self._aec3_state.update_capture_saturation(self._saturation_level > 0.5)
+        self._aec3_state.update(
+            bridge=bridge,
+            external_delay=None,  # delay sample value is in self._current_delay; AecState uses for gating only
+            render_psd=far_psd,
+            capture_psd=near_psd,
+            error_psd=error_psd,
+            echo_psd=echo_psd,
+            active_render=(far_pwr > 1e-4),
+            render_block=far_end,
+        )
+
+        dominant_ne = self._aec3_sg.is_dominant_nearend()
+        r2, r2_unb = self._aec3_ree.estimate(
+            aec_state=self._aec3_state,
+            render_psd=far_psd,
+            capture_psd=near_psd,
+            s2_linear=echo_psd,
+            dominant_nearend=dominant_ne,
+        )
+
+        # AEC3 contract (echo_remover.cc:452):
+        #   nearend_spectrum = UsableLinearEstimate() ? E² : Y²
+        nearend_pwr = error_psd if self._aec3_state.usable_linear_estimate() else near_psd
+        comfort_noise = np.zeros(n_bins, dtype=np.float32)  # CNG deferred
+        gain = self._aec3_sg.get_gain(
+            aec_state=self._aec3_state,
+            nearend_spectrum=nearend_pwr,
+            residual_echo_spectrum=r2,
+            residual_echo_spectrum_unbounded=r2_unb,
+            comfort_noise_spectrum=comfort_noise,
+            render_block=far_end,
+            clock_drift=False,
+        )
+
+        # Apply gain to error spectrum, IFFT, OLA window [hop:block].
+        e_out_spec = error_spec * gain.astype(error_spec.dtype, copy=False)
+        e_out_time = np.fft.irfft(e_out_spec, n=self.filter.fft_size).astype(np.float32)
+        hop = self.filter.hop_size
+        bs = self.filter.block_size
+        return e_out_time[hop:bs].astype(np.float32)
 
     def enable_res_audit(self) -> None:
         """Enable durable RES audit counter substrate (Phase 3B v3 S7+).
