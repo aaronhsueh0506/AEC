@@ -8,16 +8,22 @@ Phase 3.2-3.4: fill the stubs.
 Phase 3.5: orchestrator wiring + standalone smoke.
 """
 from .aec_state import AecState, AecStateConfig
+from .erl_estimator import ErlEstimator
+from .erle_estimator import ErleEstimator
 from .filter_delay import FilterDelay
 from .filter_quality import FilteringQualityAnalyzer
 from .initial_state import InitialState
 from .saturation_detector import SaturationDetector
+from .transparent_mode import TransparentMode
 
 __all__ = [
     "AecState",
     "AecStateConfig",
+    "ErlEstimator",
+    "ErleEstimator",
     "FilterDelay",
     "FilteringQualityAnalyzer",
     "InitialState",
     "SaturationDetector",
+    "TransparentMode",
 ]

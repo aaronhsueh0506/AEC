@@ -25,11 +25,13 @@ from typing import Optional
 import numpy as np
 
 from ._constants import HOPS_PER_SECOND
+from .erl_estimator import ErlEstimator
 from .erle_estimator import ErleEstimator
 from .filter_delay import FilterDelay
 from .filter_quality import FilteringQualityAnalyzer
 from .initial_state import InitialState
 from .saturation_detector import SaturationDetector
+from .transparent_mode import TransparentMode
 from ..delay.delay_types import (
     DelayAdjustment,
     DelayEstimate,
@@ -58,6 +60,9 @@ class AecStateConfig:
     erle_min: float = 1.0           # AEC3 default
     erle_max_l: float = 4.0
     erle_max_h: float = 1.5
+    erl_startup_hops: int = 200
+    enable_transparent_mode: bool = True
+    transparent_linear_and_stable: bool = False
 
 
 class AecState:
@@ -85,11 +90,18 @@ class AecState:
             max_erle_l=self._config.erle_max_l,
             max_erle_h=self._config.erle_max_h,
         )
-        # STUBS — Phase 3.3-3.4 will replace.
-        self._erl = np.ones(self._config.n_bins, dtype=np.float32) * 1e-3
+        self._erl_estimator = ErlEstimator(
+            startup_phase_length_hops=self._config.erl_startup_hops,
+            n_bins=self._config.n_bins,
+        )
+        self._transparent_mode = (
+            TransparentMode(linear_and_stable_echo_path=self._config.transparent_linear_and_stable)
+            if self._config.enable_transparent_mode
+            else None
+        )
+        # STUBS — Phase 3.4 will replace.
         self._reverb_decay = 0.0  # zero reverb tail until ReverbModelEstimator lands
         self._reverb_frequency_response = np.zeros(self._config.n_bins, dtype=np.float32)
-        self._transparent_mode_active = False
         # Counters tracked at this level (not in helpers).
         self._strong_not_saturated_render_blocks = 0
         self._blocks_with_active_render = 0
@@ -113,7 +125,7 @@ class AecState:
         return self._capture_signal_saturation
 
     def transparent_mode_active(self) -> bool:
-        return self._transparent_mode_active
+        return self._transparent_mode is not None and self._transparent_mode.active()
 
     def transition_triggered(self) -> bool:
         return self._initial_state.transition_triggered()
@@ -142,7 +154,10 @@ class AecState:
         return self._erle_estimator.fullband_erle_log2()
 
     def erl(self) -> np.ndarray:
-        return self._erl
+        return self._erl_estimator.erl()
+
+    def erl_time_domain(self) -> float:
+        return self._erl_estimator.erl_time_domain()
 
     def external_delay_blocks(self) -> Optional[DelayEstimate]:
         return self._delay_state.external_delay_blocks()
@@ -215,7 +230,13 @@ class AecState:
             e2=error_psd,
             converged_filter=any_filter_converged,
         )
-        # 4b. STUB: erl / reverb / echo_audibility updates. Phase 3.3-3.4 fill.
+        # 4b. ERL update.
+        self._erl_estimator.update(
+            render_psd=render_psd,
+            capture_psd=capture_psd,
+            converged_filter=any_filter_converged,
+        )
+        # 4c. STUB: reverb / echo_audibility. Phase 3.4 fills.
 
         # 5. Saturation detector.
         if self._config.echo_can_saturate and render_block is not None:
@@ -231,14 +252,31 @@ class AecState:
         # 6. InitialState (uses post-saturation flag).
         self._initial_state.update(active_render, self._capture_signal_saturation)
 
-        # 7. TransparentMode update STUB. Phase 3.3 fills.
-        self._transparent_mode_active = False
+        # 7. TransparentMode update (Legacy variant; HMM not ported).
+        if self._transparent_mode is not None:
+            # Proxies for the two AEC3 signals we don't yet derive:
+            #   any_filter_consistent ~ filter is converged AND we have a delay estimate.
+            #   all_filters_diverged ~ filter NOT converged AND divergence_indicator high.
+            any_filter_consistent = (
+                any_filter_converged and external_delay is not None
+            )
+            all_filters_diverged = (
+                (not any_filter_converged) and bridge.divergence_indicator > 1.0
+            )
+            self._transparent_mode.update(
+                filter_delay_blocks=self.min_direct_path_filter_delay(),
+                any_filter_consistent=any_filter_consistent,
+                any_filter_converged=any_filter_converged,
+                all_filters_diverged=all_filters_diverged,
+                active_render=active_render,
+                saturated_capture=self._capture_signal_saturation,
+            )
 
         # 8. FilteringQualityAnalyzer (last; reads TM + convergence flags
         #    set above).
         self._filter_quality.update(
             active_render=active_render,
-            transparent_mode=self._transparent_mode_active,
+            transparent_mode=self.transparent_mode_active(),
             saturated_capture=self._capture_signal_saturation,
             external_delay=external_delay,
             any_filter_converged=any_filter_converged,
@@ -256,4 +294,6 @@ class AecState:
         self._filter_quality.reset()
         self._capture_signal_saturation = False
         self._erle_estimator.reset(delay_change=True)
-        # Phase 3.3: erl_estimator.reset(), transparent_state.reset().
+        self._erl_estimator.reset()
+        if self._transparent_mode is not None:
+            self._transparent_mode.reset()
