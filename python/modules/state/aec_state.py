@@ -1,0 +1,234 @@
+"""AecState — top-level AEC3 state machine.
+
+Mirrors docs/aec3_extracts/src/aec3/aec_state.{cc,h}.
+
+The state machine wraps 5 small helpers (InitialState, FilterDelay,
+FilteringQualityAnalyzer, SaturationDetector, TransparentMode) plus
+the heavyweight ERLE / ERL / Reverb estimators. Per-frame
+``update()`` runs the helpers in STRICT order matching
+aec_state.cc:189-291 (order matters because FilteringQualityAnalyzer
+reads convergence flags computed earlier in the same call).
+
+Phase 3.1 status: helpers in this file are live; ERLE / ERL /
+TransparentMode / ReverbModelEstimator are STUBBED (return
+sensible defaults). Subsequent Phase 3.2-3.4 commits fill them in.
+
+``handle_echo_path_change(EchoPathVariability)`` is called BEFORE
+``update()`` whenever the delay subsystem (Phase 1) reports a
+delay change. Routes through to AEC3-defined full-reset on
+``kBufferFlush`` / ``kNewDetectedDelay``, ERLE-only reset on
+``gain_change``.
+"""
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+
+from ._constants import HOPS_PER_SECOND
+from .filter_delay import FilterDelay
+from .filter_quality import FilteringQualityAnalyzer
+from .initial_state import InitialState
+from .saturation_detector import SaturationDetector
+from ..delay.delay_types import (
+    DelayAdjustment,
+    DelayEstimate,
+    EchoPathVariability,
+)
+from ..filter.filter_state_bridge import FilterStateBridge
+
+
+_CONSERVATIVE_INITIAL_HOPS = int(1.5 * HOPS_PER_SECOND)  # AEC3 1.5*250 -> 150 hops
+_FAST_INITIAL_HOPS = int(0.8 * HOPS_PER_SECOND)           # AEC3 0.8*250 -> 80 hops
+_ACTIVE_RENDER_BLOCKS = 200  # AEC3 verbatim (~800 ms at AEC3 rate -> we tick per hop so 200 hops = 2 s; acceptable)
+
+
+@dataclass
+class AecStateConfig:
+    """Knobs sourced from AEC3 EchoCanceller3Config slices we actually use."""
+
+    use_linear_filter: bool = True
+    conservative_initial_phase: bool = False
+    initial_state_seconds: float = 2.5
+    delay_headroom_samples: int = 32
+    num_capture_channels: int = 1
+    echo_can_saturate: bool = True
+
+
+class AecState:
+    """Per-frame AEC3 state machine. Single source of truth for
+    ``usable_linear_estimate()``."""
+
+    def __init__(self, config: Optional[AecStateConfig] = None) -> None:
+        self._config = config or AecStateConfig()
+        self._initial_state = InitialState(
+            conservative_initial_phase=self._config.conservative_initial_phase,
+            initial_state_seconds=self._config.initial_state_seconds,
+        )
+        self._delay_state = FilterDelay(
+            delay_headroom_samples=self._config.delay_headroom_samples,
+            num_capture_channels=self._config.num_capture_channels,
+        )
+        self._filter_quality = FilteringQualityAnalyzer(
+            use_linear_filter=self._config.use_linear_filter
+        )
+        self._saturation_detector = SaturationDetector()
+        # STUBS — Phase 3.2-3.4 will replace.
+        self._erle_unbounded = np.ones(257, dtype=np.float32)  # ~ no suppression boost
+        self._erl = np.ones(257, dtype=np.float32) * 1e-3
+        self._reverb_decay = 0.0  # zero reverb tail until ReverbModelEstimator lands
+        self._reverb_frequency_response = np.zeros(257, dtype=np.float32)
+        self._transparent_mode_active = False
+        # Counters tracked at this level (not in helpers).
+        self._strong_not_saturated_render_blocks = 0
+        self._blocks_with_active_render = 0
+        self._capture_signal_saturation = False
+
+    # ---------------------------------------------------------- public queries
+
+    def usable_linear_estimate(self) -> bool:
+        return (
+            self._filter_quality.linear_filter_usable()
+            and self._config.use_linear_filter
+        )
+
+    def active_render(self) -> bool:
+        return self._blocks_with_active_render > _ACTIVE_RENDER_BLOCKS
+
+    def saturated_echo(self) -> bool:
+        return self._saturation_detector.saturated_echo()
+
+    def saturated_capture(self) -> bool:
+        return self._capture_signal_saturation
+
+    def transparent_mode_active(self) -> bool:
+        return self._transparent_mode_active
+
+    def transition_triggered(self) -> bool:
+        return self._initial_state.transition_triggered()
+
+    def initial_state_active(self) -> bool:
+        return self._initial_state.initial_state_active()
+
+    def min_direct_path_filter_delay(self) -> int:
+        return self._delay_state.min_direct_path_filter_delay()
+
+    def reverb_decay(self, mild: bool = False) -> float:
+        # STUB — returns 0 (no reverb tail) until ReverbModelEstimator lands.
+        return self._reverb_decay if not mild else self._reverb_decay * 0.5
+
+    def get_reverb_frequency_response(self) -> np.ndarray:
+        # STUB — returns zeros until ReverbModelEstimator lands.
+        return self._reverb_frequency_response
+
+    def erle_unbounded(self) -> np.ndarray:
+        # STUB — returns ones (= 0 dB suppression boost) until ErleEstimator lands.
+        return self._erle_unbounded
+
+    def erl(self) -> np.ndarray:
+        return self._erl
+
+    def external_delay_blocks(self) -> Optional[DelayEstimate]:
+        return self._delay_state.external_delay_blocks()
+
+    # ------------------------------------------------------------- mutators
+
+    def update_capture_saturation(self, saturated: bool) -> None:
+        self._capture_signal_saturation = bool(saturated)
+
+    def handle_echo_path_change(self, variability: EchoPathVariability) -> None:
+        if variability.delay_change is not DelayAdjustment.NONE:
+            self._full_reset()
+        elif variability.gain_change:
+            # ERLE-only reset (no full reset; preserves convergence flags).
+            # Phase 3.2 will replace this stub call.
+            pass
+
+    def update(
+        self,
+        *,
+        bridge: FilterStateBridge,
+        external_delay: Optional[DelayEstimate],
+        render_psd: np.ndarray,
+        capture_psd: np.ndarray,
+        error_psd: np.ndarray,
+        echo_psd: np.ndarray,
+        active_render: bool,
+        subtractor_s_refined_max_abs: float = 0.0,
+        subtractor_s_coarse_max_abs: float = 0.0,
+        echo_path_gain: float = 1.0,
+        render_block: Optional[np.ndarray] = None,
+    ) -> None:
+        """Per-frame state update. Strict order matches aec_state.cc:189-291.
+
+        Inputs:
+          - ``bridge``: FilterStateBridge snapshot from Phase 2.
+          - ``external_delay``: from RenderDelayController (Phase 1); None
+            if no estimate has crossed the COARSE threshold yet.
+          - ``render_psd`` / ``capture_psd`` / ``error_psd`` / ``echo_psd``:
+            single-channel kFftLengthBy2Plus1 spectra in linear power units.
+            (Phase 3.2 ERLE / ERL will consume these.)
+          - ``active_render``: precomputed (orchestrator-side) far-end
+            active-frame flag.
+          - subtractor max-abs values + echo_path_gain + render_block:
+            inputs to SaturationDetector.
+        """
+        # 1. Filter quality + convergence pass (reads any_filter_converged
+        #    from bridge; this is the AEC3 SubtractorOutputAnalyzer surface).
+        any_filter_converged = bridge.filter_converged
+
+        # 2. FilterDelay update (analyzer delays not yet ported; pass None).
+        self._delay_state.update(
+            analyzer_filter_delay_estimates_blocks=None,
+            external_delay=external_delay,
+            blocks_with_proper_filter_adaptation=self._strong_not_saturated_render_blocks,
+        )
+
+        # 3. active_render + saturation block counters.
+        if active_render:
+            self._blocks_with_active_render += 1
+        if active_render and not self._capture_signal_saturation:
+            self._strong_not_saturated_render_blocks += 1
+
+        # 4. STUB: erle / erl / reverb / echo_audibility updates here.
+        #    Phase 3.2-3.4 commits will fill these in.
+
+        # 5. Saturation detector.
+        if self._config.echo_can_saturate and render_block is not None:
+            self._saturation_detector.update(
+                render_block=render_block,
+                saturated_capture=self._capture_signal_saturation,
+                usable_linear_estimate=self.usable_linear_estimate(),
+                subtractor_s_refined_max_abs=subtractor_s_refined_max_abs,
+                subtractor_s_coarse_max_abs=subtractor_s_coarse_max_abs,
+                echo_path_gain=echo_path_gain,
+            )
+
+        # 6. InitialState (uses post-saturation flag).
+        self._initial_state.update(active_render, self._capture_signal_saturation)
+
+        # 7. TransparentMode update STUB. Phase 3.3 fills.
+        self._transparent_mode_active = False
+
+        # 8. FilteringQualityAnalyzer (last; reads TM + convergence flags
+        #    set above).
+        self._filter_quality.update(
+            active_render=active_render,
+            transparent_mode=self._transparent_mode_active,
+            saturated_capture=self._capture_signal_saturation,
+            external_delay=external_delay,
+            any_filter_converged=any_filter_converged,
+        )
+
+    # -------------------------------------------------------------- helpers
+
+    def _full_reset(self) -> None:
+        """Handle a path-change event — reset everything except external
+        delay (which is the trigger source itself). Mirrors
+        ``aec_state.cc:145-157``."""
+        self._strong_not_saturated_render_blocks = 0
+        self._blocks_with_active_render = 0
+        self._initial_state.reset()
+        self._filter_quality.reset()
+        self._capture_signal_saturation = False
+        # Phase 3.2: erle_estimator.reset(True), erl_estimator.reset().
+        # Phase 3.3: transparent_state.reset().
