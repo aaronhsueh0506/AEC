@@ -10,7 +10,9 @@ from .residual_echo_estimator import (
     EchoModelConfig,
     EpStrengthConfig,
     ResidualEchoEstimator,
+    ReverbConfig,
 )
+from .reverb_model import ReverbModel
 from .suppression_filter import apply_suppression
 from .suppression_gain import (
     DominantNearendConfig,
@@ -30,6 +32,8 @@ __all__ = [
     "HighFrequencySuppressionConfig",
     "MaskTuning",
     "ResidualEchoEstimator",
+    "ReverbConfig",
+    "ReverbModel",
     "SuppressionGain",
     "SuppressorConfig",
     "SuppressorTuning",

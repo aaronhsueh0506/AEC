@@ -159,6 +159,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     # CNG override from global flag
     if _ENABLE_CNG and 'enable_cng' not in config_overrides:
         config_overrides['enable_cng'] = True
+    # v3.21 — bypass legacy ResFilter and run AEC3 chain instead.
+    if ('AEC_USE_AEC3_RESIDUAL' in os.environ
+            and 'use_aec3_residual' not in config_overrides):
+        config_overrides['use_aec3_residual'] = (
+            os.environ['AEC_USE_AEC3_RESIDUAL'].lower() not in ('0', 'false', 'off', 'no'))
     # P1.0 Plan A attribution: env vars to selectively revert sub-changes
     for _flag, _env in [
         ('plan_a_kernel_tight', 'AEC_PLAN_A_KERNEL'),

@@ -680,7 +680,17 @@ class AEC:
             from .state import AecState as _Aec3State, AecStateConfig as _Aec3StateConfig
             from .residual import ResidualEchoEstimator, SuppressionGain
             n_bins = int(self.filter.n_freqs)
-            self._aec3_state = _Aec3State(_Aec3StateConfig(n_bins=n_bins))
+            # TransparentMode requires AEC3's SubtractorOutputAnalyzer (not yet
+            # ported) to feed a per-frame "any_filter_converged" pulse. Our
+            # legacy FilterConvergenceAnalyzer is a hard 10-frame >5 dB ERLE
+            # latch which permanently sits at False on hard cases like 9xjhi;
+            # that makes TM falsely activate after 6s of strong render -> kills
+            # usable_linear -> R^2 collapses to nonlinear path forever. Disable
+            # TM until the proper analyzer ports.
+            self._aec3_state = _Aec3State(_Aec3StateConfig(
+                n_bins=n_bins,
+                enable_transparent_mode=False,
+            ))
             self._aec3_ree = ResidualEchoEstimator(n_bins=n_bins)
             self._aec3_sg = SuppressionGain(n_bins=n_bins)
             # Synthesis OLA: sqrt-Hann analysis * sqrt-Hann synthesis = Hann,
@@ -3566,13 +3576,25 @@ class AEC:
         from .filter import build_filter_state_bridge
 
         n_bins = self.filter.n_freqs
-        # PSDs from PBFDKF spectra (current frame).
-        near_psd = (np.abs(self.filter.near_spec) ** 2).astype(np.float32)
-        far_psd = (np.abs(self.filter.far_spec) ** 2).astype(np.float32)
-        echo_psd = (np.abs(self.filter.echo_spec) ** 2).astype(np.float32)
+        # AEC3 reference is tuned for int16-magnitude PSDs (samples in
+        # ~[-32768, 32767]); soundfile gives us float in [-1, 1] so all
+        # absolute thresholds (noise_gate_power, min_noise_floor_power,
+        # min_echo_power, audibility floor_power) are 32768^2 ~= 1.07e9
+        # too large relative to our PSDs. Worst symptom: `_get_min_gain`
+        # computes `min_echo_power / R^2` ~= 64/11 -> clamped to 1.0 ->
+        # no suppression. Scale PSDs UP to the AEC3 magnitude convention
+        # before they enter ResidualEchoEstimator + SuppressionGain.
+        # Gain is a ratio so the scale cancels at apply time.
+        _PSD_SCALE = (32768.0) ** 2  # int16 max^2
+        near_psd = (np.abs(self.filter.near_spec) ** 2 * _PSD_SCALE).astype(np.float32)
+        far_psd = (np.abs(self.filter.far_spec) ** 2 * _PSD_SCALE).astype(np.float32)
+        echo_psd = (np.abs(self.filter.echo_spec) ** 2 * _PSD_SCALE).astype(np.float32)
         error_spec = self.filter.error_spec_windowed
-        error_psd = (np.abs(error_spec) ** 2).astype(np.float32)
+        error_psd = (np.abs(error_spec) ** 2 * _PSD_SCALE).astype(np.float32)
         far_pwr = float(np.mean(far_end ** 2))
+        # Render block is read by LowNoiseRenderDetector + SaturationDetector
+        # using AEC3 absolute thresholds; rescale to int16 amplitude.
+        render_block_scaled = (far_end * 32768.0).astype(np.float32)
 
         # Build per-hop filter-state snapshot for AecState.
         bridge = build_filter_state_bridge(
@@ -3583,16 +3605,28 @@ class AEC:
             external_delay_samples=int(self._current_delay) if self._delay_active else -1,
             shadow_filter=self.shadow_filter,
         )
+        # Build external_delay estimate from legacy delay tracker. AecState's
+        # FilterQuality 4-gate AND requires external_delay OR convergence_seen
+        # before usable_linear flips True (aec_state.cc:filter_quality.py:58).
+        # Without this, the linear branch never engages and we permanently sit
+        # in the conservative nonlinear path (R^2 = X^2 * 0.014^2).
+        from .delay.delay_types import DelayEstimate, DelayQuality
+        if self._delay_active and self._current_delay >= 0:
+            ext_delay = DelayEstimate(
+                quality=DelayQuality.REFINED, delay=int(self._current_delay)
+            )
+        else:
+            ext_delay = None
         self._aec3_state.update_capture_saturation(self._saturation_level > 0.5)
         self._aec3_state.update(
             bridge=bridge,
-            external_delay=None,  # delay sample value is in self._current_delay; AecState uses for gating only
+            external_delay=ext_delay,
             render_psd=far_psd,
             capture_psd=near_psd,
             error_psd=error_psd,
             echo_psd=echo_psd,
             active_render=(far_pwr > 1e-4),
-            render_block=far_end,
+            render_block=render_block_scaled,
         )
 
         dominant_ne = self._aec3_sg.is_dominant_nearend()
@@ -3614,7 +3648,7 @@ class AEC:
             residual_echo_spectrum=r2,
             residual_echo_spectrum_unbounded=r2_unb,
             comfort_noise_spectrum=comfort_noise,
-            render_block=far_end,
+            render_block=render_block_scaled,
             clock_drift=False,
         )
 
