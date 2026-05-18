@@ -68,10 +68,18 @@ def per_block_rate_to_per_hop(per_block_rate: float,
 # These are the canonical float-scale values used across Phase B/C ports.
 # At non-default hop_size, derive at runtime via blocks_to_hops() etc.
 
-# H_error refresh (refined_filter_update_gain.cc:128-138)
-H_ERROR_INIT_FLOAT = psd_int16_to_float(10000.0)       # 9.31e-6
-H_ERROR_FLOOR_FLOAT = psd_int16_to_float(1e-3)         # 9.31e-13
-H_ERROR_CEIL_FLOAT = psd_int16_to_float(1e2)           # 9.31e-8
+# H_error refresh (refined_filter_update_gain.cc:128-138).
+# AEC3 H_error is a Kalman-like internal scalar that is dimensionally
+# self-consistent with X²/E² in AEC3's own scale. Because the AEC3 formula
+# `mu = H_error / (0.5×H_error×X² + n×E²)` and `K = mu × conj(X)` produce
+# a `K × E` update that is dimensionally `(H_error/X²) × X × E` — i.e. it
+# depends on the ratio H_error/(X²) NOT on H_error alone — the same
+# numeric H_error value yields equivalent K × E behaviour at any audio
+# scale (the X²/E² in the denominator AND the X in K scale together).
+# So we keep AEC3's H_error constants UN-SCALED in float audio land.
+H_ERROR_INIT_FLOAT = 10000.0
+H_ERROR_FLOOR_FLOAT = 1e-3
+H_ERROR_CEIL_FLOAT = 1e2
 
 # Per-block rates (default 10 ms hop equivalent)
 LEAKAGE_CONVERGED_PER_HOP_DEFAULT = per_block_rate_to_per_hop(1e-3, 160, 16000)  # 2.5e-3

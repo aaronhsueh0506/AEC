@@ -282,6 +282,37 @@ class PBFDKF(PBFDAF):
         # Set externally by orchestrator; None disables masking.
         self._render_signal_analyzer = None
 
+        # v3.21 Phase B.2 — AEC3 H_error per-bin state + leakage refresh.
+        # H_error replaces our P matrix as the primary Kalman-like state in
+        # the K compute (refined_filter_update_gain.cc:104-138). P stays as
+        # a parallel field for backwards-compat (PathChangeRegimeHandler
+        # overrides / diagnostic), but the K applied to W comes from
+        # H_error when use_aec3_h_error=True (default). orchestrator sets
+        # _e2_coarse_for_refresh, _disallow_leakage_diverged, _erl_per_bin
+        # per hop to feed the always-on refresh formula.
+        from . import aec3_scale as _aec3_scale
+        self.H_error_per_bin = np.full(
+            self.n_freqs, _aec3_scale.H_ERROR_INIT_FLOAT, dtype=np.float32
+        )
+        self._h_error_floor = np.float32(_aec3_scale.H_ERROR_FLOOR_FLOAT)
+        self._h_error_ceil = np.float32(_aec3_scale.H_ERROR_CEIL_FLOAT)
+        self._leakage_converged = np.float32(
+            _aec3_scale.LEAKAGE_CONVERGED_PER_HOP_DEFAULT
+        )
+        self._leakage_diverged = np.float32(
+            _aec3_scale.LEAKAGE_DIVERGED_PER_HOP_DEFAULT
+        )
+        # Updated per hop by orchestrator (scalar sums for now; per-bin
+        # comparison can be added in a follow-up).
+        self._e2_coarse_for_refresh = 0.0
+        self._disallow_leakage_diverged = False
+        # ERL per bin (lazy init to 0.1 = -10 dB nominal; orchestrator
+        # overwrites once its ERL estimator has a real value).
+        self._erl_per_bin = np.full(self.n_freqs, 0.1, dtype=np.float32)
+        # Master switch: use AEC3 H_error path (True, default) vs legacy
+        # P-based denominator (False, diagnostic only).
+        self._use_aec3_h_error = True
+
         # GPT Phase 1 debug trace (off by default, zero overhead).
         # When enabled, accumulates per-frame stats to verify hypothesis:
         # "DT 期間 mu_scale 壓低但 P 仍因 K_optimal 快下降 → DT 結束後 P 偏低 → recovery 慢"
@@ -345,6 +376,13 @@ class PBFDKF(PBFDAF):
         error_psd = np.abs(self.error_spec) ** 2
         self._error_psd = self._alpha_r * self._error_psd + (1 - self._alpha_r) * error_psd
         self.R = np.maximum(self._error_psd, self.delta)
+
+        # v3.21 Phase B.2 — AEC3 H_error path. Computes per-bin Kalman gain
+        # via H_error rather than the legacy partition-summed P denominator.
+        # Mirrors refined_filter_update_gain.cc:104-138.
+        if self._use_aec3_h_error:
+            self._update_weights_aec3(curr_p, mu_scale_arr, error_psd)
+            return
 
         # Adaptive R: scale by mu_scale to break R-deadlock
         mu_mean = float(np.mean(mu_scale_arr))
@@ -471,6 +509,77 @@ class PBFDKF(PBFDAF):
                 'far_power_mean': float(np.mean(self.power)),
                 'error_power_mean': float(np.mean(self._error_psd)),
             })
+
+    def _update_weights_aec3(self, curr_p: int, mu_scale_arr: np.ndarray,
+                              error_psd: np.ndarray) -> None:
+        """AEC3-aligned per-bin Kalman gain via H_error.
+
+        Mirrors RefinedFilterUpdateGain::Compute in
+        docs/aec3_extracts/src/aec3/refined_filter_update_gain.cc:104-138.
+
+        Per-bin gain:
+          mu[k] = H_error[k] / (0.5 × H_error[k] × X²[k]
+                              + n_partitions × E²_refined[k])
+        Applied to all partitions with their respective conj(X_buf[p]).
+
+        H_error decay:
+          H_error[k] -= 0.5 × mu[k] × X²[k] × H_error[k]
+
+        Always-on refresh:
+          if E²_refined_sum <= E²_coarse_sum OR disallow_leakage_diverged:
+              H_error[k] += leakage_converged × erl[k]
+          else:
+              H_error[k] += leakage_diverged   × erl[k]
+          H_error[k] = clamp(H_error[k], floor, ceil)
+        """
+        # X² for AEC3 formula. AEC3 uses the delay-aligned partition's |X|²;
+        # we approximate with the LATEST partition (curr_p), which is the
+        # newest hop of render. The matched-filter delay (Phase A.1) drives
+        # ring-buffer alignment upstream, so curr_p is already aligned.
+        X_latest = self.X_buf[curr_p]
+        X2_latest = (np.abs(X_latest) ** 2).astype(np.float32)
+        delta32 = np.float32(self.delta)
+        n_part = np.float32(self.n_partitions)
+        # mu[k] (AEC3 formula). E² uses the smoothed error_psd estimator
+        # (same as legacy R tracking) for stability — matches AEC3 which
+        # also uses a smoothed estimate, not raw |E|².
+        denom_aec3 = (
+            np.float32(0.5) * self.H_error_per_bin * X2_latest
+            + n_part * self._error_psd
+            + delta32
+        )
+        mu_aec3 = (self.H_error_per_bin / denom_aec3).astype(np.float32)
+
+        # W update — per partition, use the per-bin mu × conj(X[p]):
+        for p in range(self.n_partitions):
+            p_idx = (curr_p - p) % self.n_partitions
+            X = self.X_buf[p_idx]
+            K = mu_aec3 * np.conj(X)             # per-bin AEC3 K
+            K_scaled = K * mu_scale_arr          # apply DT scale
+            self.W[p] += K_scaled * self.error_spec
+            # Time-domain constraint (raised cosine fade).
+            if self.enable_td_constraint:
+                w_time = np.fft.irfft(self.W[p], self.fft_size).astype(np.float32)
+                w_time *= self._td_window
+                self.W[p] = np.fft.rfft(w_time).astype(np.complex64)
+
+        # H_error decay (per-bin, refined_filter_update_gain.cc:105).
+        # Only updated when W was actually adapted (gates checked upstream).
+        self.H_error_per_bin -= (
+            np.float32(0.5) * mu_aec3 * X2_latest * self.H_error_per_bin
+        )
+
+        # Always-on H_error refresh (cc:128-138).
+        e2_ref_sum = float(np.sum(self._error_psd))
+        e2_coa_sum = float(self._e2_coarse_for_refresh)
+        use_converged = (
+            e2_ref_sum <= e2_coa_sum or self._disallow_leakage_diverged
+        )
+        leakage = self._leakage_converged if use_converged else self._leakage_diverged
+        self.H_error_per_bin = self.H_error_per_bin + leakage * self._erl_per_bin
+        # Clamp to AEC3 floor / ceil (float-scaled).
+        np.clip(self.H_error_per_bin, self._h_error_floor, self._h_error_ceil,
+                out=self.H_error_per_bin)
 
     def copy_weights_from(self, src: 'PBFDAF'):
         self.W[:] = src.W

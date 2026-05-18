@@ -1972,11 +1972,31 @@ class AEC:
                 # arm a 16-hop hangover during which coarse cannot adapt and
                 # the refined filter's H_error refresh stays on the
                 # leakage_converged branch (set via filter._disallow_leakage_diverged
-                # which Phase B.2 will consume).
+                # which Phase B.2 consumes).
                 if (hasattr(self.filter, 'error_spec')
                         and hasattr(self.shadow_filter, 'error_spec')):
                     _e2_ref = float(np.sum(np.abs(self.filter.error_spec) ** 2))
                     _e2_coa = float(np.sum(np.abs(self.shadow_filter.error_spec) ** 2))
+                    # v3.21 Phase B.2 — feed E²_coarse + per-bin ERL to the
+                    # refined filter's H_error refresh formula.
+                    self.filter._e2_coarse_for_refresh = _e2_coa
+                    if hasattr(self, '_per_band_erl') and self._per_band_erl is not None:
+                        # Broadcast 3-band ERL to per-bin: low / mid / high
+                        # third partitioning across n_freqs.
+                        _per_band = np.asarray(self._per_band_erl, dtype=np.float32)
+                        _nf = self.filter.n_freqs
+                        _b = _nf // 3
+                        _erl_pb = np.empty(_nf, dtype=np.float32)
+                        _erl_pb[:_b] = _per_band[0]
+                        _erl_pb[_b:2 * _b] = _per_band[1]
+                        _erl_pb[2 * _b:] = _per_band[2]
+                        self.filter._erl_per_bin = _erl_pb
+                    elif hasattr(self, '_erl_estimate'):
+                        # Fallback: scalar ERL broadcast to all bins.
+                        self.filter._erl_per_bin = np.full(
+                            self.filter.n_freqs, float(self._erl_estimate),
+                            dtype=np.float32,
+                        )
                     # AEC3 cc:264-307 uses per-bin E²_refined < E²_coarse;
                     # we use scalar with a 0.5× safety margin so the
                     # trigger requires refined to be DECISIVELY better
