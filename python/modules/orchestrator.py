@@ -273,9 +273,15 @@ class AEC:
         if self._misadjustment_hangover_remaining > 0:
             self._misadjustment_hangover_remaining -= 1
             return
+        # v3.21 Phase B.5: AEC3-aligned always-on gate. Drop the
+        # `refined_usable` requirement that v3.18 B.3 added — AEC3's
+        # IsAdjustmentNeeded fires whenever the ratio is below threshold
+        # regardless of AecState (subtractor.cc:239-249). The remaining
+        # guards (epc_active / main_paused / converged) prevent firing
+        # during transients where the ratio is dominated by misalignment
+        # rather than steady-state under-modelling.
         stable = (
             self._filter_converged
-            and getattr(self, '_prev_filter_state', '') == 'refined_usable'
             and not self.epc_active
             and not self._regime_handler.main_paused
         )

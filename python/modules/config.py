@@ -86,10 +86,10 @@ class AecConfig:
     # v3.18 Phase B.2 — Filter misadjustment estimator + ScaleFilter
     # (AEC3 Gap #5/#13). Design lock: docs/v3_18_b1_misadjustment_design.md.
     # Tracks long-term echo/error ratio drift; rescales main filter W when
-    # systematic under-modelling is detected. Flag-OFF: byte-equal (no
-    # estimator updates, no scale action). Flag-ON: estimator + trigger
-    # + scale_filter all active.
-    filter_misadjustment_enabled: bool = False
+    # systematic under-modelling is detected.
+    # v3.21 Phase B.5: DEFAULT TRUE. Gate also loosened in orchestrator to
+    # drop the `refined_usable` requirement → matches AEC3 IsAdjustmentNeeded.
+    filter_misadjustment_enabled: bool = True
     # Asymmetric EMA for misadjustment smoothing (slow up, fast down).
     filter_misadjustment_alpha_up: float = 0.99
     filter_misadjustment_alpha_dn: float = 0.95
