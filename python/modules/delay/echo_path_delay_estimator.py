@@ -50,12 +50,21 @@ class EchoPathDelayEstimator:
         num_filters: int = 5,
         window_size_sub_blocks: int = 32,
         alignment_shift_sub_blocks: int = 24,
-        excitation_limit: float = 150.0,
+        # v3.21 Phase A.1: AEC3 default 150 is int16 amplitude. Float-scale
+        # equivalent is 150/32768 = 4.578e-3.
+        excitation_limit: float = 150.0 / 32768.0,
         smoothing_fast: float = 0.7,
         smoothing_slow: float = 0.1,
         matching_filter_threshold: float = 0.3,
         delay_headroom_samples: int = 32,
         thresholds: Optional[DelaySelectionThresholds] = None,
+        detect_pre_echo: bool = False,  # v3.21 Phase A.2: ported but OFF
+        # Pre-echo aggregator overrides highest-peak with pre_echo_candidate
+        # unconditionally (AEC3 cc:94). For cases WITHOUT a real pre-echo,
+        # _compute_pre_echo_lag walks accumulated_error down to ~bin 0,
+        # producing wildly wrong delays. AEC3 defaults this OFF for the same
+        # reason. Enable via config when stress-testing pre-echo-heavy
+        # datasets (e.g. headphone/multi-mic recordings).
     ) -> None:
         self._capture_decimator = Decimator(_DOWN_SAMPLING_FACTOR)
         self._render_decimator = Decimator(_DOWN_SAMPLING_FACTOR)
@@ -75,13 +84,14 @@ class EchoPathDelayEstimator:
             smoothing_fast=smoothing_fast,
             smoothing_slow=smoothing_slow,
             matching_filter_threshold=matching_filter_threshold,
-            detect_pre_echo=False,
+            detect_pre_echo=detect_pre_echo,
         )
         self._aggregator = MatchedFilterLagAggregator(
             max_filter_lag=self._matched_filter.get_max_filter_lag(),
             thresholds=thresholds,
             delay_headroom_samples=delay_headroom_samples,
             down_sampling_factor=_DOWN_SAMPLING_FACTOR,
+            detect_pre_echo=detect_pre_echo,
         )
         self._clockdrift = ClockdriftDetector()
         self._old_aggregated_lag: Optional[DelayEstimate] = None

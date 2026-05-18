@@ -1100,12 +1100,33 @@ class AecConfig:
                 self.filter_length = self.sample_rate * 64 // 1000  # 64ms
             else:
                 self.filter_length = self.sample_rate * 52 // 1000  # 52ms (was 32ms)
+        # 50% overlap invariant: frame_size = 2 * hop_size. Enforced because the
+        # whole STFT analysis/synthesis chain (sqrt-Hann ana × Hann syn) relies
+        # on it. hop_size and fft_size can vary; this ratio cannot.
+        if self.frame_size != 2 * self.hop_size:
+            raise ValueError(
+                f"50% overlap invariant violated: frame_size={self.frame_size} "
+                f"must equal 2 * hop_size={self.hop_size}"
+            )
 
     @property
     def fft_size(self) -> int:
         # Next power of 2 >= frame_size (= frame_size when frame_size is power of 2)
         n = self.frame_size
         return 1 << (n - 1).bit_length()
+
+    @property
+    def n_partitions(self) -> int:
+        # Filter is partitioned in hop_size-sized blocks. AEC3 default at 16 kHz
+        # is 13 partitions × 64 samples = 832-sample filter; ours at hop=160 is
+        # 6 partitions × 160 = 960-sample filter (filter_length 832 rounded up).
+        return (self.filter_length + self.hop_size - 1) // self.hop_size
+
+    @property
+    def psd_scale(self) -> float:
+        # Float[-1,1] → int16² conversion factor. Used to lift our float PSDs to
+        # match the AEC3-domain thresholds in `aec3_scale.py`.
+        return 32768.0 ** 2
 
     @classmethod
     def from_preset(cls, preset: 'AecPreset', **kwargs) -> 'AecConfig':

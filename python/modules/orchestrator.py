@@ -32,7 +32,7 @@ from .dataclasses import (
     AecStats, AecResContext, RenderActivityState, FilterConvergenceState,
     RegimeHandlerDecision, AecEventType, AecEvent, EpcEvent,
 )
-from .legacy_delay import DelayEstimator
+from .delay.legacy_compat import LegacyDelayShim as DelayEstimator
 from .erle import (
     FilterErleEstimator, FullbandErleEstimator, compute_erle_confidence,
 )
@@ -371,8 +371,15 @@ class AEC:
                 self.delay_est = None
                 self._current_delay = self.config.fixed_delay_samples
             else:
+                # v3.21 Phase A.1: swap legacy GCC-PHAT for AEC3-aligned
+                # RenderDelayController (matched filter bank + histogram
+                # aggregator + clockdrift). LegacyDelayShim exposes the
+                # legacy attribute surface so existing call sites continue
+                # working unchanged.
                 self.delay_est = DelayEstimator(
                     sample_rate=self.config.sample_rate,
+                    hop_size=self.config.hop_size,
+                    # Legacy kwargs accepted as no-op for call-site compat:
                     max_delay_ms=self.config.max_delay_ms,
                     init_seconds=self.config.delay_est_init_s,
                     period_seconds=self.config.delay_est_period_s,

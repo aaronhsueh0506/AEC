@@ -34,7 +34,9 @@ class LagEstimate:
 # AEC3 matched_filter.cc:43 — subsample rate for accumulated error.
 _ACCUMULATED_ERROR_SUBSAMPLE_RATE = 4
 _PRE_ECHO_UPDATES_TO_REPORT = 50
-_SATURATION_LIMIT = 32000.0
+# v3.21 Phase A.1: AEC3 saturation guard is 32000 in int16 amplitude scale.
+# We operate on float[-1, 1], so the equivalent threshold is 32000/32768.
+_SATURATION_LIMIT = 32000.0 / 32768.0   # 0.9766
 
 
 def max_square_peak_index(h: np.ndarray) -> int:
