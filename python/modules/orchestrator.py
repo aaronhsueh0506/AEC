@@ -726,6 +726,35 @@ class AEC:
             self._aec3_noise_psd = np.zeros(n_bins, dtype=np.float32)
             self._aec3_smooth_cn_gain = np.zeros(n_bins, dtype=np.float32)
             self._aec3_noise_initialized = False
+            pass  # AEC3 chain init scope
+
+        # v3.21 Phase C.3 — StationarityEstimator (always-on, both presets).
+        # Detects per-bin stationary render (constant hum / fan / line noise).
+        # Two consumers:
+        #   1. _aec3_post: zeros R² on stationary bands (use_aec3_residual=True)
+        #   2. filter.process: skips W update when block-stationary (both
+        #      presets) so PBFDKF doesn't learn mic-as-echo coupling against
+        #      uncorrelated stationary noise (E0l0 / wJVP NE outliers).
+        # Init is preset-agnostic so BALANCED also benefits from the W-gate.
+        from .state.stationarity_estimator import StationarityEstimator as _StatEst
+        if self.filter is not None and hasattr(self.filter, 'n_freqs'):
+            self._aec3_stationarity = _StatEst(
+                n_freqs=int(self.filter.n_freqs),
+                hop_samples=int(getattr(self.config, 'hop_size', 160)),
+                sample_rate=int(getattr(self.config, 'sample_rate', 16000)),
+            )
+        else:
+            self._aec3_stationarity = None
+        # AEC3 IsRenderTooLow threshold (echo_audibility.cc:112) — peak
+        # amplitude of 10 in int16 = 10/32768 = 3.05e-4 in float[-1,1].
+        self._aec3_non_zero_render_seen = False
+        self._AEC3_RENDER_PEAK_FLOOR = 10.0 / 32768.0
+        # AEC3 filter_has_had_time_to_converge = strong_not_saturated_render
+        # blocks >= 0.8 × kNumBlocksPerSecond (aec_state.cc:111-113).
+        self._aec3_stationarity_active_hops = 0
+        _hop_st = int(getattr(self.config, 'hop_size', 160))
+        _sr_st = int(getattr(self.config, 'sample_rate', 16000))
+        self._aec3_stationarity_converge_hops = int(round(0.8 * _sr_st / _hop_st))
 
         # v3.21 Phase B.3 + B.4 — RenderSignalAnalyzer + startup gates.
         # RSA tracks per-bin narrow-band tonal regions in the render history
@@ -1929,9 +1958,50 @@ class AEC:
                         self.filter._poor_excitation_counter += 1
                     self.filter._saturated_capture = (self._saturation_level > 0.5)
 
+                # v3.21 Phase C.3 / B+D — push stationary-block flag onto
+                # the filter so PBFDKF skips W update on broadband stationary
+                # render. Uses STALE flag (computed at end of previous hop)
+                # — for stationary signals by definition the flag doesn't
+                # flip between hops, so 1-hop latency is harmless. RSA
+                # (B.3 / B.4) covers tonal peaks; this gate covers broadband
+                # stationary noise (RSA poor_signal_excitation 0% on E0l0
+                # hum-only case but stationarity flag 100%).
+                _stat_flag = bool(getattr(self, '_block_stationary_for_next_hop', False))
+                self.filter._block_stationary = _stat_flag
+                if self.shadow_filter is not None:
+                    self.shadow_filter._block_stationary = _stat_flag
+
                 # WebRTC-style: freeze main filter weights when shadow detected divergence
                 main_mu = 0.0 if self._regime_handler.main_paused else mu_scale
                 raw_output = self.filter.process(near_end, far_end, main_mu)
+
+                # v3.21 Phase C.3 — refresh StationarityEstimator using the
+                # post-filter render PSD. Computes the flag used by the next
+                # hop's filter.process gate (see `_block_stationary_for_next_hop`
+                # push above). Same update is mirrored inside _aec3_post for
+                # the residual chain; this one is for the W-gate path.
+                if (self._aec3_stationarity is not None
+                        and hasattr(self.filter, 'far_spec')
+                        and self.filter.far_spec is not None):
+                    if not self._aec3_non_zero_render_seen:
+                        if float(np.max(np.abs(far_end))) >= self._AEC3_RENDER_PEAK_FLOOR:
+                            self._aec3_non_zero_render_seen = True
+                    if self._aec3_non_zero_render_seen:
+                        _far_psd_st = (np.abs(self.filter.far_spec) ** 2).astype(np.float32)
+                        self._aec3_stationarity.update_noise_estimator(_far_psd_st)
+                        self._aec3_stationarity.update_stationarity_flags(_far_psd_st)
+                        self._aec3_stationarity_active_hops += 1
+                    # Latch flag for next hop's filter.process gate. Require
+                    # post-converge (≥800 ms active render) so the noise floor
+                    # estimate is reliable before we trust the stationary flag.
+                    _converged_enough = (
+                        self._aec3_stationarity_active_hops
+                        >= self._aec3_stationarity_converge_hops
+                    )
+                    self._block_stationary_for_next_hop = bool(
+                        _converged_enough
+                        and self._aec3_stationarity.is_block_stationary()
+                    )
 
             # Shadow filter with DTD protection (#1) and bidirectional copy (#6)
             if self.shadow_filter is not None and self._freq_near_queue is None:
@@ -3838,35 +3908,50 @@ class AEC:
             render_block=render_block_scaled,
         )
 
-        # AEC3 refined_filter_update_gain.cc:128-138 — H_error refresh.
-        # Conditionally bump main filter's P (per-partition Kalman covariance)
-        # by `factor * erl` at bins where main filter is doing better than
-        # shadow (E²_refined ≤ E²_coarse). This keeps Kalman gain alive
-        # against monotonic P collapse from `P -= 0.5 * mu * X² * P`.
-        # Our PBFDKF has only a static P_floor; AEC3's conditional dynamic
-        # refresh is the missing piece on hard cases (9xjhi etc.) where P
-        # at high-coupling bins collapses before filter fully learns.
-        if (self.shadow_filter is not None
-                and hasattr(self.shadow_filter, 'error_spec')
-                and hasattr(self.filter, 'P')):
-            e2_ref_per_bin = np.abs(self.filter.error_spec) ** 2
-            e2_coa_per_bin = np.abs(self.shadow_filter.error_spec) ** 2
-            erl_pb = self._aec3_state.erl()  # per-bin
-            # AEC3 leakage_converged default 0.005, leakage_diverged 0.5.
-            refresh_amt = np.where(
-                e2_ref_per_bin <= e2_coa_per_bin,
-                0.005 * erl_pb,    # refined better -> small refresh
-                0.5 * erl_pb,      # refined worse -> big refresh (recovery)
-            ).astype(np.float32)
-            # Apply uniformly across all partitions (no per-partition erl).
-            for _p in range(self.filter.n_partitions):
-                self.filter.P[_p] += refresh_amt
-            # AEC3 error_floor=1e-4 / error_ceil=1e2 in their internal scale.
-            # Our P starts at 0.01 and the per-update K = P*X*/denom is
-            # well-bounded by denom, so just clip to safe range.
-            np.clip(self.filter.P, 1e-4, 1e2, out=self.filter.P)
+        # v3.21 Phase C.3 — stationarity is updated ONCE per hop in the
+        # process loop (right after filter.process) so both the W-gate (see
+        # `_block_stationary_for_next_hop`) and the residual scaling here
+        # see consistent state. Read the converge flag from the shared
+        # counter; the per-hop update lives upstream.
+        _filter_converged_enough = (
+            self._aec3_stationarity_active_hops
+            >= self._aec3_stationarity_converge_hops
+        )
 
         dominant_ne = self._aec3_sg.is_dominant_nearend()
+
+        # v3.21 Phase C.4 — adaptive reverb decay + tail freq response.
+        # Lazy-bind the decay estimator on first use (needs n_partitions and
+        # hop_size from the filter, only available post __init__).
+        self._aec3_ree.attach_reverb_decay_estimator(
+            n_partitions=int(self.filter.n_partitions),
+            hop_size=int(self.filter.hop_size),
+        )
+        # Per-partition |W|² spectra. self.filter.W shape (n_partitions, n_freqs)
+        # complex; |W|² is the AEC3-equivalent "frequency_response" matrix.
+        _w_mag2 = (np.abs(self.filter.W) ** 2).astype(np.float32)
+        # Delay in partitions: integer floor of sample-delay / hop_size. -1
+        # signals "no usable delay" (estimator skips update).
+        _delay_blocks = (int(self._current_delay) // int(self.filter.hop_size)
+                         if (self._delay_active and self._current_delay >= 0)
+                         else -1)
+        # Filter quality proxy: AEC3 uses FilterAnalyzer.consistent_estimate
+        # (a stable per-bin convergence score). We don't have that yet; use
+        # the per-frame convergence signal we already compute in this scope
+        # as a 0/1 indicator, gated by the stationarity-aware "filter has had
+        # time to converge" so we don't feed false-positive quality before
+        # warmup completes.
+        _filter_q = (1.0 if (_aec3_converged and _filter_converged_enough)
+                     else None)
+        _stationary_block = self._aec3_stationarity.is_block_stationary()
+        self._aec3_ree.update_reverb_models(
+            frequency_response=_w_mag2,
+            filter_delay_blocks=_delay_blocks,
+            filter_quality=_filter_q,
+            usable_linear_filter=self._aec3_state.usable_linear_estimate(),
+            stationary_block=_stationary_block,
+        )
+
         r2, r2_unb = self._aec3_ree.estimate(
             aec_state=self._aec3_state,
             render_psd=far_psd,
@@ -3874,6 +3959,19 @@ class AEC:
             s2_linear=echo_psd,
             dominant_nearend=dominant_ne,
         )
+
+        # v3.21 Phase C.3 (back half) — Stationarity-driven R² scaling
+        # (residual_echo_estimator.cc:303-313). Zero R²/R²_unbounded on
+        # stationary bands once the filter has had time to converge so the
+        # suppression gain doesn't damp nearend speech on cases with a
+        # constant background hum on the far-end (E0l0 / wJVP outliers).
+        if _filter_converged_enough:
+            _stationary_mask = self._aec3_stationarity.band_stationary_mask()
+            if np.any(_stationary_mask):
+                r2 = np.where(_stationary_mask, 0.0, r2).astype(np.float32)
+                r2_unb = np.where(
+                    _stationary_mask, 0.0, r2_unb
+                ).astype(np.float32)
 
         # AEC3 contract (echo_remover.cc:452):
         #   nearend_spectrum = UsableLinearEstimate() ? E² : Y²

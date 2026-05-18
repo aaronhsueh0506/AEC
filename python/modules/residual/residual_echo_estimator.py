@@ -26,6 +26,8 @@ import numpy as np
 
 from ..state.aec_state import AecState
 from .reverb_model import ReverbModel
+from .reverb_decay_estimator import ReverbDecayEstimator
+from .reverb_frequency_response import ReverbFrequencyResponse
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,14 @@ class ReverbConfig:
     decay: float = 0.85
     mild_decay_scale: float = 0.5
     enabled: bool = True
+    # v3.21 Phase C.4 — adaptive decay + frequency response.
+    # When `use_adaptive_decay = True`, ReverbDecayEstimator is consulted per
+    # hop with the latest filter taps and the returned scalar replaces the
+    # static `decay` above. `use_freq_response` swaps the S²/X² coupling
+    # approximation for ReverbFrequencyResponse-produced tail_response.
+    use_adaptive_decay: bool = True
+    use_freq_response: bool = True
+    conservative_tail_freq_response: bool = False
 
 
 _TRANSPARENT_MODE_GAIN = 0.01  # AEC3 kDefaultTransparentModeGain verbatim
@@ -113,11 +123,74 @@ class ResidualEchoEstimator:
         )
         self._render_history_idx = 0
         self._render_history_initialised = False
+        # v3.21 Phase C.4 — adaptive reverb decay + tail freq response.
+        # Both are LAZY-bound; orchestrator calls `attach_reverb_estimators`
+        # at the first hop where it knows `n_partitions` and `hop_size`.
+        self._reverb_decay_est: Optional[ReverbDecayEstimator] = None
+        self._reverb_freq_resp: Optional[ReverbFrequencyResponse] = None
+        if self._reverb_cfg.use_freq_response:
+            self._reverb_freq_resp = ReverbFrequencyResponse(
+                n_freqs=self._n_bins,
+                use_conservative_tail_frequency_response=(
+                    self._reverb_cfg.conservative_tail_freq_response
+                ),
+            )
+
+    def attach_reverb_decay_estimator(self, n_partitions: int,
+                                      hop_size: int) -> None:
+        """One-time bind of the adaptive decay estimator. No-op if
+        ``use_adaptive_decay`` is False or estimator already bound."""
+        if not self._reverb_cfg.use_adaptive_decay:
+            return
+        if self._reverb_decay_est is not None:
+            return
+        self._reverb_decay_est = ReverbDecayEstimator(
+            n_partitions=int(n_partitions),
+            hop_size=int(hop_size),
+            default_decay=float(self._reverb_cfg.decay),
+            mild_decay=(float(self._reverb_cfg.decay)
+                        * float(self._reverb_cfg.mild_decay_scale)),
+            use_adaptive=True,
+        )
+
+    def update_reverb_models(self,
+                             *,
+                             frequency_response: np.ndarray,
+                             filter_delay_blocks: int,
+                             filter_quality: Optional[float],
+                             usable_linear_filter: bool,
+                             stationary_block: bool) -> None:
+        """Per-hop refresh of adaptive decay + tail-freq response.
+
+        ``frequency_response`` shape ``(n_partitions, n_freqs)`` float32 with
+        per-partition |W|² entries. The orchestrator computes this once and
+        feeds it to both sub-estimators (avoids a duplicate FFT walk).
+        """
+        if self._reverb_decay_est is not None:
+            partition_energies = frequency_response.sum(axis=1).astype(np.float32)
+            self._reverb_decay_est.update(
+                partition_energies=partition_energies,
+                filter_quality=filter_quality,
+                filter_delay_blocks=int(filter_delay_blocks),
+                usable_linear_filter=bool(usable_linear_filter),
+                stationary_signal=bool(stationary_block),
+            )
+        if self._reverb_freq_resp is not None:
+            self._reverb_freq_resp.update(
+                frequency_response=frequency_response,
+                filter_delay_blocks=int(filter_delay_blocks),
+                linear_filter_quality=filter_quality,
+                stationary_block=bool(stationary_block),
+            )
 
     def reset(self) -> None:
         self._x2_noise_floor.fill(self._echo_model.min_noise_floor_power)
         self._x2_noise_floor_counter.fill(self._echo_model.noise_floor_hold)
         self._reverb_model.reset()
+        if self._reverb_decay_est is not None:
+            self._reverb_decay_est.reset()
+        if self._reverb_freq_resp is not None:
+            self._reverb_freq_resp.reset()
 
     def estimate(
         self,
@@ -265,29 +338,39 @@ class ResidualEchoEstimator:
         return float(g * g)
 
     def _reverb_decay(self, dominant_nearend: bool) -> float:
-        """AecState.ReverbDecay(mild=dominant_nearend) — until ReverbDecayEstimator
-        is ported, use config-level fixed decay scaled down during nearend."""
+        """``aec_state.ReverbDecay(mild=dominant_nearend)``.
+
+        v3.21 Phase C.4: when the adaptive estimator is bound + active, query
+        it. Otherwise fall back to the static config decay × mild_decay_scale.
+        """
         if not self._reverb_cfg.enabled:
             return 0.0
-        d = float(self._reverb_cfg.decay)
-        if dominant_nearend:
-            d *= float(self._reverb_cfg.mild_decay_scale)
-        return d
+        if self._reverb_decay_est is not None:
+            d = self._reverb_decay_est.decay(mild=dominant_nearend)
+        else:
+            d = float(self._reverb_cfg.decay)
+            if dominant_nearend:
+                d *= float(self._reverb_cfg.mild_decay_scale)
+        return float(d)
 
     def _update_reverb_linear(
         self, render_psd: np.ndarray, s2_linear: np.ndarray, dominant_nearend: bool
     ) -> None:
-        """Linear-mode reverb update (AEC3 cc:390-392). Per-bin
-        ``power_spectrum_scaling = filter_freq_response[k]``. We approximate
-        the filter freq-response by current-frame coupling
-        ``S²[k] / max(X²[k], ε)``: where the filter currently sees strong
-        coupling, the reverb tail at that bin is also strong."""
+        """Linear-mode reverb update (AEC3 cc:390-392).
+
+        v3.21 Phase C.4: when ``ReverbFrequencyResponse`` is bound, use its
+        ``tail_response`` (canonical AEC3 mechanism) as the per-bin scaling.
+        Otherwise fall back to current-frame coupling ``S²/X²`` (legacy
+        approximation that misses bins where the filter learned coupling but
+        the current frame has no render energy).
+        """
         decay = self._reverb_decay(dominant_nearend)
         if decay <= 0.0:
             return
-        # Per-bin coupling, clamped to ep_strength.default_gain² as upper
-        # bound to keep stable when X² is tiny.
-        gain_cap = (self._default_gain_late * self._default_gain_late) * 4.0
-        scaling = s2_linear / np.maximum(render_psd, 1e-10)
-        np.minimum(scaling, gain_cap, out=scaling)
+        if self._reverb_freq_resp is not None:
+            scaling = self._reverb_freq_resp.tail_response.astype(np.float32)
+        else:
+            gain_cap = (self._default_gain_late * self._default_gain_late) * 4.0
+            scaling = s2_linear / np.maximum(render_psd, 1e-10)
+            np.minimum(scaling, gain_cap, out=scaling)
         self._reverb_model.update(render_psd, scaling, decay)

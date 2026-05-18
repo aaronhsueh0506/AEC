@@ -210,6 +210,13 @@ class PBFDAF:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
         if not np.any(mu_scale_arr > 0):
             return
+        # v3.21 Phase C.3+B/D extension — stationary-far gate (see PBFDKF
+        # version for full rationale). Shadow NLMS also skips W update when
+        # the StationarityEstimator flags the block as stationary; spurious
+        # mic-as-echo coupling from broadband stationary noise damages
+        # nearend equally in NLMS path.
+        if getattr(self, '_block_stationary', False):
+            return
         # Per-bin local floor: allows low-energy mid-freq bins higher effective mu
         local_floor = self.power * 0.01 + self.delta        # per-bin 1% floor
         global_floor = np.mean(self.power) * 0.001 + self.delta  # global extreme floor
@@ -360,6 +367,19 @@ class PBFDKF(PBFDAF):
         if (self._call_counter <= self.n_partitions
                 or self._poor_excitation_counter < self.n_partitions
                 or self._saturated_capture):
+            return
+
+        # v3.21 Phase C.3+B/D extension — stationary-far gate. When the
+        # render-path StationarityEstimator flags the current block as
+        # stationary (constant background hum / fan / line noise), any
+        # filter adaptation against it produces spurious mic-as-echo
+        # coupling because the noise has no causal correlation with the
+        # nearend signal. RSA's `poor_signal_excitation` covers tonal
+        # peaks but not broadband stationary noise (RSA narrow-band counter
+        # 0% on E0l0 hum case); StationarityEstimator (B.3 / Phase C.3 noise
+        # tracker) catches that gap. When set, the orchestrator pushes
+        # `_block_stationary = True` before `_update_weights` runs.
+        if getattr(self, '_block_stationary', False):
             return
 
         # v3.21 Phase B.3 — RenderSignalAnalyzer narrow-band mask. Zeros mu

@@ -118,3 +118,17 @@ LAG_HISTOGRAM_WINDOW = 250
 MATCHED_FILTER_NUM_FILTERS = 5
 MATCHED_FILTER_ALIGNMENT_SHIFT_SUB_BLOCKS = 24
 MATCHED_FILTER_WINDOW_SUB_BLOCKS = 32
+
+# StationarityEstimator (stationarity_estimator.cc).
+# kMinNoisePower (int16²) is a numerical floor on the per-bin noise estimate
+# so the long-ratio test (acum_power / noise) is well-defined when the actual
+# noise spectrum is near zero.
+STATIONARITY_MIN_NOISE_POWER_FLOAT = psd_int16_to_float(10.0)  # 9.31e-9
+STATIONARITY_THR_RATIO = 10.0           # unitless; acum_power < 10 × noise → stationary
+STATIONARITY_BLOCK_FRACTION = 0.75      # unitless; >75% bands stationary → block stationary
+STATIONARITY_HANGOVER_HOPS_DEFAULT = blocks_to_hops(12, 160, 16000)        # 5
+STATIONARITY_AVG_INIT_HOPS_DEFAULT = blocks_to_hops(20, 160, 16000)        # 8
+STATIONARITY_INITIAL_PHASE_HOPS_DEFAULT = blocks_to_hops(500, 160, 16000)  # 200
+STATIONARITY_WINDOW_HOPS_DEFAULT = blocks_to_hops(13, 160, 16000)          # 5
+STATIONARITY_ALPHA = 0.004              # unitless (long-term smoothing)
+STATIONARITY_ALPHA_INIT = 0.04          # unitless (warmup smoothing)
