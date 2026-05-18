@@ -1956,7 +1956,55 @@ class AEC:
                         shadow_mu_scale = 1.0
                 else:
                     shadow_mu_scale = 1.0 if (far_excited and saturation_safe) else 0.1
+                # v3.21 Phase B.6 — coarse-reset hangover. When the
+                # poor_coarse_filter_counter has fired (set by the post-
+                # process step below), freeze the coarse update for
+                # COARSE_RESET_HANGOVER_HOPS so it can't immediately re-
+                # drift after being reset to refined's weights.
+                if getattr(self, '_coarse_reset_hangover', 0) > 0:
+                    shadow_mu_scale = 0.0
                 self.shadow_filter.process(near_end, far_end, shadow_mu_scale)
+
+                # v3.21 Phase B.6 — poor_coarse_filter_counter + coarse-reset.
+                # Mirrors AEC3 subtractor.cc:264-307. When the refined filter
+                # has been beating the coarse filter for ≥5 consecutive hops
+                # (E²_refined < E²_coarse), reset coarse ← copy(refined) and
+                # arm a 16-hop hangover during which coarse cannot adapt and
+                # the refined filter's H_error refresh stays on the
+                # leakage_converged branch (set via filter._disallow_leakage_diverged
+                # which Phase B.2 will consume).
+                if (hasattr(self.filter, 'error_spec')
+                        and hasattr(self.shadow_filter, 'error_spec')):
+                    _e2_ref = float(np.sum(np.abs(self.filter.error_spec) ** 2))
+                    _e2_coa = float(np.sum(np.abs(self.shadow_filter.error_spec) ** 2))
+                    # AEC3 cc:264-307 uses per-bin E²_refined < E²_coarse;
+                    # we use scalar with a 0.5× safety margin so the
+                    # trigger requires refined to be DECISIVELY better
+                    # (not just slightly better in aggregate). This
+                    # prevents thrashing on cases where refined and coarse
+                    # alternate winning by small amounts (e.g. WqEY DTm).
+                    if _e2_ref < 0.5 * _e2_coa:
+                        self._poor_coarse_counter = getattr(
+                            self, '_poor_coarse_counter', 0) + 1
+                    else:
+                        self._poor_coarse_counter = 0
+                    if self._poor_coarse_counter >= 5:
+                        # Copy refined → coarse + arm hangover.
+                        try:
+                            self.shadow_filter.copy_weights_from(self.filter)
+                        except (AttributeError, TypeError):
+                            # PBFDKF / PBFDAF compat: copy via W slice.
+                            self.shadow_filter.W[:] = self.filter.W
+                        from . import aec3_scale as _aec3_scale
+                        self._coarse_reset_hangover = _aec3_scale.blocks_to_hops(
+                            40, self.config.hop_size, self.config.sample_rate
+                        )
+                        self._poor_coarse_counter = 0
+                    if getattr(self, '_coarse_reset_hangover', 0) > 0:
+                        self._coarse_reset_hangover -= 1
+                        self.filter._disallow_leakage_diverged = True
+                    else:
+                        self.filter._disallow_leakage_diverged = False
 
                 # S-orth.A: after shadow processes, overwrite shadow's _error_psd
                 # and R with the independently-tracked decoupled state when the
