@@ -363,10 +363,16 @@ class PBFDKF(PBFDAF):
         # short-circuit out of the W update when any gate fires. R / Q / P
         # accounting still happens via the cold-init values; the filter just
         # doesn't accumulate gradient updates during the protected window.
+        # NOTE: when gates fire, AEC3 still runs the H_error REFRESH at
+        # the bottom of Compute() (lines 128-138). We mirror that by calling
+        # `_h_error_refresh()` before any early return so H_error stays
+        # in steady state during the gated window.
         self._call_counter += 1
         if (self._call_counter <= self.n_partitions
                 or self._poor_excitation_counter < self.n_partitions
                 or self._saturated_capture):
+            if self._use_aec3_h_error:
+                self._h_error_refresh()
             return
 
         # v3.21 Phase C.3+B/D extension — stationary-far gate. When the
@@ -380,6 +386,8 @@ class PBFDKF(PBFDAF):
         # tracker) catches that gap. When set, the orchestrator pushes
         # `_block_stationary = True` before `_update_weights` runs.
         if getattr(self, '_block_stationary', False):
+            if self._use_aec3_h_error:
+                self._h_error_refresh()
             return
 
         # v3.21 Phase B.3 — RenderSignalAnalyzer narrow-band mask. Zeros mu
@@ -570,6 +578,17 @@ class PBFDKF(PBFDAF):
         )
         mu_aec3 = (self.H_error_per_bin / denom_aec3).astype(np.float32)
 
+        # v3.21 NE-outlier fix — per-bin noise_gate
+        # (refined_filter_update_gain.cc:104-111). AEC3 zeros mu on bins
+        # where X² < `noise_gate`. Our port was missing this gate, which
+        # let mu explode on weak-far bins (low denom + un-scaled H_error)
+        # and the W update slowly learned mic-as-echo coupling against
+        # uncorrelated NE-dominant signals. Adding the per-bin gate is
+        # the canonical AEC3 protection.
+        from . import aec3_scale as _aec3_scale
+        _noise_gate = np.float32(_aec3_scale.NOISE_GATE_POWER_FLOAT)
+        mu_aec3 = np.where(X2_latest >= _noise_gate, mu_aec3, np.float32(0.0))
+
         # W update — per partition, use the per-bin mu × conj(X[p]):
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
@@ -583,34 +602,39 @@ class PBFDKF(PBFDAF):
                 w_time *= self._td_window
                 self.W[p] = np.fft.rfft(w_time).astype(np.complex64)
 
-        # H_error decay (per-bin, refined_filter_update_gain.cc:105).
-        # Only updated when W was actually adapted (gates checked upstream).
+        # H_error decay (per-bin, refined_filter_update_gain.cc:116-119).
+        # AEC3 places this decay INSIDE the active-update `else` block — it
+        # only runs when W was actually adapted. The refresh below runs
+        # ALWAYS, including the gated/stationary path (callers route to
+        # `_h_error_refresh()` and return).
         self.H_error_per_bin -= (
             np.float32(0.5) * mu_aec3 * X2_latest * self.H_error_per_bin
         )
 
-        # Always-on H_error refresh (cc:128-138). Gated on far-end activity
-        # — AEC3's gate flow (subtractor.cc + saturated/poor_excitation
-        # already handled upstream) implies the refined update gain runs
-        # only on active render hops. We replicate this explicitly: when
-        # the latest hop's render power is below the far-activity floor
-        # (matches the `far_hop_energy > 1e-4` gate that already guards
-        # `_update_weights`), skip the refresh so H_error doesn't ramp to
-        # ceil on long NE-only silences and poison the filter once render
-        # resumes.
-        _far_power_proxy = float(np.mean(X2_latest))
-        if _far_power_proxy > 1e-4:
-            e2_ref_sum = float(np.sum(self._error_psd))
-            e2_coa_sum = float(self._e2_coarse_for_refresh)
-            use_converged = (
-                e2_ref_sum <= e2_coa_sum or self._disallow_leakage_diverged
-            )
-            leakage = (self._leakage_converged if use_converged
-                       else self._leakage_diverged)
-            self.H_error_per_bin = (
-                self.H_error_per_bin + leakage * self._erl_per_bin
-            )
-        # Clamp to AEC3 floor / ceil regardless (cheap, keeps invariant).
+        # Always-on H_error refresh + clamp (cc:128-138). Identical to the
+        # standalone `_h_error_refresh` path; inlined here for the active
+        # branch so we don't re-iterate the array.
+        self._h_error_refresh()
+
+    def _h_error_refresh(self) -> None:
+        """AEC3-aligned H_error leakage refresh + clamp.
+
+        Mirrors lines 128-138 of refined_filter_update_gain.cc. Runs on
+        every hop — both when the W-update gates fire (gated/stationary
+        path returns early after calling this) and after the active
+        decay step. Keeps H_error trending toward steady state and away
+        from the init value during the startup window.
+        """
+        e2_ref_sum = float(np.sum(self._error_psd))
+        e2_coa_sum = float(self._e2_coarse_for_refresh)
+        use_converged = (
+            e2_ref_sum <= e2_coa_sum or self._disallow_leakage_diverged
+        )
+        leakage = (self._leakage_converged if use_converged
+                   else self._leakage_diverged)
+        self.H_error_per_bin = (
+            self.H_error_per_bin + leakage * self._erl_per_bin
+        )
         np.clip(self.H_error_per_bin, self._h_error_floor, self._h_error_ceil,
                 out=self.H_error_per_bin)
 

@@ -70,13 +70,15 @@ def per_block_rate_to_per_hop(per_block_rate: float,
 
 # H_error refresh (refined_filter_update_gain.cc:128-138).
 # AEC3 H_error is a Kalman-like internal scalar that is dimensionally
-# self-consistent with X²/E² in AEC3's own scale. Because the AEC3 formula
-# `mu = H_error / (0.5×H_error×X² + n×E²)` and `K = mu × conj(X)` produce
-# a `K × E` update that is dimensionally `(H_error/X²) × X × E` — i.e. it
-# depends on the ratio H_error/(X²) NOT on H_error alone — the same
-# numeric H_error value yields equivalent K × E behaviour at any audio
-# scale (the X²/E² in the denominator AND the X in K scale together).
-# So we keep AEC3's H_error constants UN-SCALED in float audio land.
+# self-consistent with X²/E² in AEC3's own scale. Empirically verified
+# (v3.21 2026-05-18 63-case bench): rescaling H by 1/PSD_SCALE collapses
+# learning (FS 3.804 → 2.311, ERLE drops from ~10 dB to ~2 dB) because mu
+# loses 6 orders of magnitude and K·E per call drops below numerical
+# noise. The 0.5·H·X² + n·E² denominator IS dimensionally invariant: in
+# int16 0.5·10000·1e6 = 5e9 dominates and mu ≈ 2e-6; in float[-1,1]
+# 0.5·10000·1e-4 = 0.5 dominates and mu ≈ 20000 — but K = mu·X scales
+# inversely with X, so K·E = (H·X·E)/(0.5·H·X² + n·E²) is identical in
+# both representations. Keep AEC3's constants UN-SCALED in float audio.
 H_ERROR_INIT_FLOAT = 10000.0
 H_ERROR_FLOOR_FLOAT = 1e-3
 H_ERROR_CEIL_FLOAT = 1e2
