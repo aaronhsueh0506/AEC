@@ -971,7 +971,8 @@ def main():
     parser.add_argument('--aec3', action='store_true', help='Also run WebRTC AEC3')
     parser.add_argument('--aec3-linear', action='store_true', help='Also run WebRTC AEC3 linear-only')
     parser.add_argument('--old-aec', action='store_true', help='Also run WebRTC old AEC (AEC2)')
-    parser.add_argument('--preset', choices=['mild', 'soft', 'balanced', 'aggressive', 'maximum'],
+    parser.add_argument('--preset', choices=['mild', 'soft', 'balanced', 'balanced_aec3',
+                                              'aggressive', 'maximum'],
                         default=None, help='AEC preset (default: no preset)')
     parser.add_argument('--all-presets', action='store_true',
                         help='Run all 3 presets and compare')

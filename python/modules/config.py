@@ -1275,6 +1275,41 @@ class AecConfig:
                 # consume the signal without per-bench env-flag flipping.
                 arc_t_cohort_detector=True,
             )
+        elif preset == AecPreset.BALANCED_AEC3:
+            # v3.21 Phase C.5: AEC3 residual chain (_aec3_post) as production
+            # path. Linear-filter side inherits all Phase B changes already
+            # in BALANCED (PBFDKF H_error / coarse NLMS / RSA / hangover /
+            # FilterMisadjust). Residual differences vs BALANCED:
+            #   - use_aec3_residual = True : routes final_output through
+            #     _aec3_post (AecState + ResidualEchoEstimator + SuppressionGain
+            #     + Phase C.1 CNG + Phase C.2 EchoGenPwr window walk).
+            #   - Everything else inherits BALANCED so the bench A/B is
+            #     "AEC3 residual chain ON vs OFF" with no other variables.
+            defaults = dict(
+                # RES v2 (legacy ResFilter knobs — used as fallback if
+                # _aec3_post is bypassed; ResFilter still constructed.)
+                res_echo_method="direct",
+                res_gain_type="enr",
+                res_enable_reverb=True,
+                res_reverb_decay=0.85,
+                res_reverb_gain=1.6,
+                res_alpha_echo_psd=0.5,
+                res_alpha_error_psd=0.6,
+                res_enr_scale=0.85,
+                res_g_min_db=-55.0,
+                res_over_sub_base=5.0,
+                res_over_sub_scale=9.0,
+                res_dt_reduction=2.5,
+                res_spectral_floor_db=-35.0,
+                res_ne_protect_db=-25.0,
+                # AEC3 residual chain (the key knob)
+                use_aec3_residual=True,
+                enable_cng=True,
+                shadow_q_ratio=3.5,
+                shadow_mu_min=0.5,
+                warmup_frames=100,
+                kalman_q_high=1e-3,
+            )
         elif preset == AecPreset.AGGRESSIVE:
             defaults = dict(
                 # RES v2
