@@ -569,15 +569,28 @@ class PBFDKF(PBFDAF):
             np.float32(0.5) * mu_aec3 * X2_latest * self.H_error_per_bin
         )
 
-        # Always-on H_error refresh (cc:128-138).
-        e2_ref_sum = float(np.sum(self._error_psd))
-        e2_coa_sum = float(self._e2_coarse_for_refresh)
-        use_converged = (
-            e2_ref_sum <= e2_coa_sum or self._disallow_leakage_diverged
-        )
-        leakage = self._leakage_converged if use_converged else self._leakage_diverged
-        self.H_error_per_bin = self.H_error_per_bin + leakage * self._erl_per_bin
-        # Clamp to AEC3 floor / ceil (float-scaled).
+        # Always-on H_error refresh (cc:128-138). Gated on far-end activity
+        # — AEC3's gate flow (subtractor.cc + saturated/poor_excitation
+        # already handled upstream) implies the refined update gain runs
+        # only on active render hops. We replicate this explicitly: when
+        # the latest hop's render power is below the far-activity floor
+        # (matches the `far_hop_energy > 1e-4` gate that already guards
+        # `_update_weights`), skip the refresh so H_error doesn't ramp to
+        # ceil on long NE-only silences and poison the filter once render
+        # resumes.
+        _far_power_proxy = float(np.mean(X2_latest))
+        if _far_power_proxy > 1e-4:
+            e2_ref_sum = float(np.sum(self._error_psd))
+            e2_coa_sum = float(self._e2_coarse_for_refresh)
+            use_converged = (
+                e2_ref_sum <= e2_coa_sum or self._disallow_leakage_diverged
+            )
+            leakage = (self._leakage_converged if use_converged
+                       else self._leakage_diverged)
+            self.H_error_per_bin = (
+                self.H_error_per_bin + leakage * self._erl_per_bin
+            )
+        # Clamp to AEC3 floor / ceil regardless (cheap, keeps invariant).
         np.clip(self.H_error_per_bin, self._h_error_floor, self._h_error_ceil,
                 out=self.H_error_per_bin)
 

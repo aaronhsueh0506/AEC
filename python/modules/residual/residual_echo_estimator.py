@@ -98,6 +98,21 @@ class ResidualEchoEstimator:
             self._n_bins, echo_model.noise_floor_hold, dtype=np.int32
         )
         self._reverb_model = ReverbModel(n_bins=self._n_bins)
+        # v3.21 Phase C.2 — EchoGeneratingPower window walk. AEC3 walks the
+        # render history `[delay - pre, delay + post + 1)` and takes the
+        # element-wise max for each bin. Defaults: pre=0, post=1 (2 blocks).
+        # We use a small ring buffer of recent render PSDs and take max over
+        # the last `_render_history_size` hops.
+        self._render_pre_window_size = 0
+        self._render_post_window_size = 1
+        self._render_history_size = (
+            self._render_pre_window_size + self._render_post_window_size + 1
+        )
+        self._render_history = np.zeros(
+            (self._render_history_size, self._n_bins), dtype=np.float32
+        )
+        self._render_history_idx = 0
+        self._render_history_initialised = False
 
     def reset(self) -> None:
         self._x2_noise_floor.fill(self._echo_model.min_noise_floor_power)
@@ -164,12 +179,23 @@ class ResidualEchoEstimator:
                 r2[:] = capture_psd
                 r2_unbounded[:] = capture_psd
             else:
-                # Take current-frame render PSD as X². AEC3 walks a window of
-                # render history at the filter-delay alignment; we use current
-                # frame since our orchestrator hands us the already
-                # delay-aligned render. EchoGeneratingPower window port can
-                # come later if needed.
-                x2 = np.asarray(render_psd, dtype=np.float32).copy()
+                # v3.21 Phase C.2 — EchoGeneratingPower window walk
+                # (residual_echo_estimator.cc:133-165). Maintain a ring
+                # buffer of the last `_render_history_size` render PSDs;
+                # use the element-wise max across the window so transient
+                # render peaks within the post-window aren't missed by the
+                # current-hop snapshot. Lazy-init: until the buffer fills,
+                # all slots replicate the first observation.
+                _rp = np.asarray(render_psd, dtype=np.float32)
+                if not self._render_history_initialised:
+                    self._render_history[:] = _rp
+                    self._render_history_initialised = True
+                else:
+                    self._render_history[self._render_history_idx] = _rp
+                    self._render_history_idx = (
+                        self._render_history_idx + 1
+                    ) % self._render_history_size
+                x2 = np.max(self._render_history, axis=0).copy()
                 if not aec_state.transparent_mode_active():
                     # AEC3 cc:121-129 noise gate.
                     mask = self._echo_model.noise_gate_power > x2
