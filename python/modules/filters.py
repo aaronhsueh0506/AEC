@@ -266,6 +266,22 @@ class PBFDKF(PBFDAF):
         self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
         self._alpha_r = 0.95   # faster R tracking for DT protection
 
+        # v3.21 Phase B.4 — AEC3 startup / poor-excitation / saturation gates
+        # (refined_filter_update_gain.cc:96-99). The orchestrator sets
+        # `_saturated_capture` from its saturation detector and
+        # `_poor_excitation_counter` from RenderSignalAnalyzer; we maintain
+        # `_call_counter` here. While ANY of the gates fires, the weight
+        # update is skipped (no G applied; H_error / P state still evolves
+        # via the existing decay path).
+        self._call_counter = 0
+        # Initialised to POOR_EXCITATION_COUNTER_INITIAL_HOPS via aec3_scale;
+        # orchestrator overrides per-config hop_size at construction time.
+        self._poor_excitation_counter = 400
+        self._saturated_capture = False
+        # v3.21 Phase B.3 — RenderSignalAnalyzer for per-bin narrow-band mask.
+        # Set externally by orchestrator; None disables masking.
+        self._render_signal_analyzer = None
+
         # GPT Phase 1 debug trace (off by default, zero overhead).
         # When enabled, accumulates per-frame stats to verify hypothesis:
         # "DT 期間 mu_scale 壓低但 P 仍因 K_optimal 快下降 → DT 結束後 P 偏低 → recovery 慢"
@@ -303,6 +319,27 @@ class PBFDKF(PBFDAF):
         mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
         if mu_scale_arr.ndim == 0:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
+
+        # v3.21 Phase B.4 — AEC3 startup / poor-excitation / saturation gates
+        # (refined_filter_update_gain.cc:96-99). Tick the call counter and
+        # short-circuit out of the W update when any gate fires. R / Q / P
+        # accounting still happens via the cold-init values; the filter just
+        # doesn't accumulate gradient updates during the protected window.
+        self._call_counter += 1
+        if (self._call_counter <= self.n_partitions
+                or self._poor_excitation_counter < self.n_partitions
+                or self._saturated_capture):
+            return
+
+        # v3.21 Phase B.3 — RenderSignalAnalyzer narrow-band mask. Zeros mu
+        # for ±2 bins around any frequency that has sustained > 5 frames of
+        # tonal X²[k] > 3 × max(neighbors) condition. Mask is applied as a
+        # pre-multiplier on mu_scale_arr so the existing K_scaled = K_optimal
+        # × mu_scale_arr path naturally zeroes those bins' W update.
+        if self._render_signal_analyzer is not None:
+            rsa_mask = np.ones(self.n_freqs, dtype=np.float32)
+            self._render_signal_analyzer.mask_regions_around_narrow_bands(rsa_mask)
+            mu_scale_arr = (mu_scale_arr * rsa_mask).astype(np.float32)
 
         # Update measurement noise estimate from error PSD
         error_psd = np.abs(self.error_spec) ** 2

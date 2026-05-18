@@ -715,6 +715,30 @@ class AEC:
             self._aec3_synth_window = np.sqrt(np.hanning(bs)).astype(np.float32)
             self._aec3_ola_buf = np.zeros(bs, dtype=np.float32)
 
+        # v3.21 Phase B.3 + B.4 — RenderSignalAnalyzer + startup gates.
+        # RSA tracks per-bin narrow-band tonal regions in the render history
+        # and produces (a) a per-bin mask for refined-filter gain compute
+        # and (b) a poor_signal_excitation flag that freezes the W update
+        # entirely. Mirrors AEC3 render_signal_analyzer.cc. The matched
+        # filter delay (Phase A.1) gives us delay-aligned X² access for the
+        # detector; we use the current-frame |far|² as a first-order proxy
+        # while the delay is locking in.
+        from .render.render_signal_analyzer import RenderSignalAnalyzer as _RSA
+        from . import aec3_scale as _aec3_scale
+        if hasattr(self.filter, 'n_freqs') and hasattr(self.filter, 'n_partitions'):
+            self._render_signal_analyzer = _RSA(
+                n_freqs=self.filter.n_freqs,
+                strong_peak_freeze_duration=self.filter.n_partitions,
+            )
+            # Wire RSA into refined filter for the per-bin mask + initialise
+            # its startup counter from the hop-scaled default.
+            self.filter._render_signal_analyzer = self._render_signal_analyzer
+            self.filter._poor_excitation_counter = _aec3_scale.blocks_to_hops(
+                1000, self.config.hop_size, self.config.sample_rate
+            )
+        else:
+            self._render_signal_analyzer = None
+
         # Shadow filter (dual-filter, frequency-domain modes only)
         # Can be used alone (≈ WebRTC/SpeexDSP) or with DTD (dual protection)
         self.shadow_filter = None
@@ -1873,6 +1897,26 @@ class AEC:
                 raw_output = self._freq_out_buf[r:r+hop].copy()
                 self._freq_out_read = r + hop
             else:
+                # v3.21 Phase B.3 + B.4 — update RenderSignalAnalyzer + push
+                # gates onto the refined filter BEFORE the W update fires.
+                # Use the current far_end + |far_spec|² as the delay-aligned
+                # render proxy (matched-filter delay drives ring-buffer
+                # alignment upstream, so far_end here is already aligned).
+                if self._render_signal_analyzer is not None:
+                    if hasattr(self.filter, 'far_spec') and self.filter.far_spec is not None:
+                        _rsa_psd = (np.abs(self.filter.far_spec) ** 2).astype(np.float32)
+                    else:
+                        _rsa_psd = None
+                    self._render_signal_analyzer.update(_rsa_psd, far_end)
+                    # Update PoorSignalExcitation counter: counter resets to 0
+                    # when poor_signal_excitation fires, else increments. Once
+                    # counter ≥ n_partitions the filter resumes W update.
+                    if self._render_signal_analyzer.poor_signal_excitation():
+                        self.filter._poor_excitation_counter = 0
+                    else:
+                        self.filter._poor_excitation_counter += 1
+                    self.filter._saturated_capture = (self._saturation_level > 0.5)
+
                 # WebRTC-style: freeze main filter weights when shadow detected divergence
                 main_mu = 0.0 if self._regime_handler.main_paused else mu_scale
                 raw_output = self.filter.process(near_end, far_end, main_mu)
