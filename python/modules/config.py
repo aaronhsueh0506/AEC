@@ -72,14 +72,15 @@ class AecConfig:
     shadow_dtd_offset: float = 1.5           # Shadow DTD: advantage must exceed this to signal DT
 
     # v3.18 Phase A.2 — shadow filter adaptation class (AEC3 alignment).
-    # False (default): shadow uses same class as main (PBFDKF in BALANCED).
-    # True: shadow uses PBFDAF (NLMS). Restores structural orthogonality
-    #       between shadow and main update direction in high-signal regime
-    #       where Kalman gain saturates (X·P·X* >> R → K → 1/X*).
-    #       Design lock: docs/v3_18_a1_shadow_nlms_design.md.
-    shadow_class_nlms: bool = False
+    # v3.21 Phase B.1: DEFAULT TRUE. The shadow now plays the AEC3 coarse-
+    # filter role (fast NLMS adapter parallel to refined Kalman). Phase B.6
+    # adds the poor_coarse_filter_counter + coarse-reset hangover that
+    # consumes this dual-filter structure. Set False only for legacy A/B.
+    # Design lock: docs/v3_18_a1_shadow_nlms_design.md +
+    # ~/.claude/plans/se-aec-aec-main-hazy-lynx.md §Phase B.
+    shadow_class_nlms: bool = True
     # NLMS step-size for shadow. Only consumed when shadow_class_nlms=True.
-    # AEC3 coarse-filter μ default is 0.5. A.5 tunes via {0.3, 0.5, 0.7} grid.
+    # AEC3 coarse-filter μ default is 0.5.
     shadow_mu_nlms: float = 0.5
 
     # v3.18 Phase B.2 — Filter misadjustment estimator + ScaleFilter
