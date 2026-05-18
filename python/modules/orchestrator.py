@@ -1051,6 +1051,14 @@ class AEC:
 
         # Output limiter: smoothed gain to avoid frame-boundary clicking
         self._limiter_gain = 1.0
+        # v3.21 NE fix — when routing through the AEC3 chain, `_aec3_post`
+        # output is OLA-lagged by 1 hop, so comparing same-frame near_peak
+        # to out_peak miscalibrates the limiter (it fires on speech-silence
+        # transitions where loud OLA reconstruction lands in a quiet hop).
+        # Buffer one hop of mic so the limiter compares against the SOURCE
+        # frame for `final_output`, not the current frame. Sized lazily on
+        # first use.
+        self._limiter_near_lag = None
 
         # High-pass filter (DC blocker + low-freq removal)
         if self.config.enable_highpass:
@@ -3420,7 +3428,22 @@ class AEC:
 
         # Output limiter: final_output should never exceed mic amplitude.
         # Uses smoothed gain to avoid frame-boundary clicking artifacts.
-        near_peak = np.max(np.abs(near_end))
+        # v3.21 fix — the AEC3 chain's `_aec3_post` output has a 1-hop OLA
+        # delay relative to the live `near_end` we compare against. To keep
+        # the limiter useful (it suppresses real echo overshoots on DT)
+        # without falsely attenuating NE (the OLA-lag misaligned compare
+        # fired on every speech-silence transition, mean limiter gain 0.79
+        # on NE-only wJVPo), use the PREVIOUS hop's mic as the comparison
+        # source when routing through the AEC3 chain. That mic was the
+        # actual source of the OLA reconstruction now in `final_output`.
+        if getattr(self.config, 'use_aec3_residual', False):
+            if self._limiter_near_lag is None:
+                self._limiter_near_lag = np.zeros_like(near_end)
+            near_for_limiter = self._limiter_near_lag
+            self._limiter_near_lag = near_end.copy()
+        else:
+            near_for_limiter = near_end
+        near_peak = np.max(np.abs(near_for_limiter))
         out_peak = np.max(np.abs(final_output))
         if out_peak > near_peak > 1e-6:
             target_gain = near_peak / out_peak
