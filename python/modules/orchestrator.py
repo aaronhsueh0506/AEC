@@ -676,6 +676,15 @@ class AEC:
         self._aec3_sg = None
         self._aec3_ola_buf = None
         self._aec3_synth_window = None
+        # Pending EchoPathVariability accumulated by legacy event detectors
+        # (EPV / shadow_rise / delay subsystem) and consumed at next
+        # _aec3_post call (BEFORE aec_state.update() per AEC3 contract).
+        # AEC3 dispatch pattern mirrored from echo_remover.cc; detection
+        # source is our legacy stack because AEC3 has no internal
+        # gain_change detector (its gain_change comes from external
+        # level_change input on EchoCanceller3::ProcessCapture).
+        self._aec3_pending_gain_change = False
+        self._aec3_pending_delay_change = None  # None = no event; else DelayAdjustment
         if getattr(self.config, 'use_aec3_residual', False) and self.filter is not None:
             from .state import AecState as _Aec3State, AecStateConfig as _Aec3StateConfig
             from .residual import ResidualEchoEstimator, SuppressionGain
@@ -1698,6 +1707,11 @@ class AEC:
                                     filt._p_max_override_frames = 30
                         self._maybe_mark_diverged('delay_shift')
                         self._epc_reset_fired_this_frame = True   # C.B FQA signal
+                        # AEC3-pattern dispatch (echo_remover.cc): queue
+                        # delay_change for next _aec3_post -> AecState runs
+                        # full reset cascade.
+                        from .delay.delay_types import DelayAdjustment as _DA
+                        self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
                     else:
                         self._pending_delay = new_delay
                         self._pending_delay_ttl = 3
@@ -2122,6 +2136,13 @@ class AEC:
             self._diag['epv_event_suppressed'] = _epv_suppressed
             if epv_event.fired and not _epv_suppressed:
                 self._epc_reset_fired_this_frame = True   # C.B FQA signal
+                # AEC3-pattern dispatch (echo_remover.cc): EPV = gain_change;
+                # queue for next _aec3_post call -> AecState.handle_echo_path_change
+                # resets ERLE. Detection source is legacy EPV; AEC3 has no
+                # internal gain_change detector. Independent of legacy
+                # aec_event_classification_enabled flag (which only gates the
+                # legacy soft/full reset branch dispatch, not AEC3 chain).
+                self._aec3_pending_gain_change = True
                 if self.config.aec_event_classification_enabled:
                     # v3.18 Phase F.3 — AEC3-aligned: EPV is gain_change → soft
                     # reset only (Q-boost on refined/coarse step-size). Skips
@@ -2183,6 +2204,9 @@ class AEC:
                     rise_event = type(rise_event)(fired=False, source=rise_event.source)
                 if rise_event.fired:
                     self._epc_reset_fired_this_frame = True   # C.B FQA signal
+                    # AEC3-pattern dispatch: shadow_rise = gain_change proxy.
+                    # Queue independent of legacy flag.
+                    self._aec3_pending_gain_change = True
                     if self.config.aec_event_classification_enabled:
                         # v3.18 Phase F.3 — AEC3-aligned: shadow_rise is a
                         # gain_change proxy (both errors rising signals filter
@@ -3653,6 +3677,24 @@ class AEC:
             )
         else:
             ext_delay = None
+        # AEC3 contract: HandleEchoPathChange MUST be called BEFORE Update()
+        # (aec_state.cc:148). Consume pending variability accumulated by the
+        # legacy event detectors (EPV / shadow_rise / delay) since the last
+        # _aec3_post call.
+        from .delay.delay_types import DelayAdjustment, EchoPathVariability
+        if (self._aec3_pending_gain_change
+                or self._aec3_pending_delay_change is not None):
+            variability = EchoPathVariability(
+                gain_change=bool(self._aec3_pending_gain_change),
+                delay_change=(self._aec3_pending_delay_change
+                              if self._aec3_pending_delay_change is not None
+                              else DelayAdjustment.NONE),
+                clock_drift=False,
+            )
+            self._aec3_state.handle_echo_path_change(variability)
+            self._aec3_pending_gain_change = False
+            self._aec3_pending_delay_change = None
+
         self._aec3_state.update_capture_saturation(self._saturation_level > 0.5)
         self._aec3_state.update(
             bridge=bridge,
