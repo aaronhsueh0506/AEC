@@ -3605,16 +3605,31 @@ class AEC:
         # replaces the legacy 10-frame >5 dB ERLE latch (which never fires on
         # hard cases like 9xjhi, leaving SubbandErleEstimator stuck at min_erle
         # = 1.0 -> R²=S²/1 -> SuppressionGain doesn't see correct echo strength).
+        # Time-domain energy compare (mirrors AEC3 subtractor_output.cc which
+        # uses sum(y[i]² over kBlockSize=64 samples). We sum over hop=160).
+        # Threshold = 50²·64 / 32768² × (160/64) ≈ 3.73e-4 to scale-equivalent
+        # in float[-1,1] over our hop. Refined = main filter raw_output. Coarse
+        # filter's time-domain residual is shadow's near_buffer[-hop:] minus
+        # shadow's echo_time — we approximate via shadow.error_spec by inverse
+        # FFT, but cheaper to use spectrum energies (Parseval-equivalent for
+        # the ratio, only threshold needs adjustment).
         _y2_time = float(np.sum(near_end.astype(np.float64) ** 2))
         _e2_refined = float(np.sum(raw_output.astype(np.float64) ** 2))
-        _y2_threshold = 1.49e-4  # 50² · 64 in float[-1,1] scale
+        _y2_threshold = 3.73e-4  # 50²·64 / 32768² · (160/64)
         _refined_conv = _e2_refined < 0.5 * _y2_time and _y2_time > _y2_threshold
+        # Shadow filter coarse convergence: convert shadow's error_spec to
+        # time-domain energy via Parseval. For rfft of length-fft signal:
+        # sum(|X[k]|² for k=0..N/2) / N ≈ sum(x[n]² for n=0..N-1) / 2.
         _coarse_conv = False
-        if self.shadow_filter is not None:
-            _shadow_err = getattr(self.shadow_filter, '_last_residual_time', None)
-            if _shadow_err is not None:
-                _e2_coarse = float(np.sum(_shadow_err.astype(np.float64) ** 2))
-                _coarse_conv = _e2_coarse < 0.05 * _y2_time and _y2_time > _y2_threshold
+        if self.shadow_filter is not None and hasattr(self.shadow_filter, 'error_spec'):
+            # Parseval-mapped: full-spectrum sum (mirror+reflect 257 bins to 512)
+            # ÷ fft_size gives time-domain energy over the fft_size window.
+            _e_spec = self.shadow_filter.error_spec
+            _e2_coarse = float(
+                (2 * np.sum(np.abs(_e_spec[1:-1]) ** 2) + np.abs(_e_spec[0]) ** 2 + np.abs(_e_spec[-1]) ** 2)
+                / self.filter.fft_size
+            )
+            _coarse_conv = _e2_coarse < 0.05 * _y2_time and _y2_time > _y2_threshold
         _aec3_converged = _refined_conv or _coarse_conv
 
         # Build per-hop filter-state snapshot for AecState.
@@ -3649,6 +3664,34 @@ class AEC:
             active_render=(far_pwr > 1e-4),
             render_block=render_block_scaled,
         )
+
+        # AEC3 refined_filter_update_gain.cc:128-138 — H_error refresh.
+        # Conditionally bump main filter's P (per-partition Kalman covariance)
+        # by `factor * erl` at bins where main filter is doing better than
+        # shadow (E²_refined ≤ E²_coarse). This keeps Kalman gain alive
+        # against monotonic P collapse from `P -= 0.5 * mu * X² * P`.
+        # Our PBFDKF has only a static P_floor; AEC3's conditional dynamic
+        # refresh is the missing piece on hard cases (9xjhi etc.) where P
+        # at high-coupling bins collapses before filter fully learns.
+        if (self.shadow_filter is not None
+                and hasattr(self.shadow_filter, 'error_spec')
+                and hasattr(self.filter, 'P')):
+            e2_ref_per_bin = np.abs(self.filter.error_spec) ** 2
+            e2_coa_per_bin = np.abs(self.shadow_filter.error_spec) ** 2
+            erl_pb = self._aec3_state.erl()  # per-bin
+            # AEC3 leakage_converged default 0.005, leakage_diverged 0.5.
+            refresh_amt = np.where(
+                e2_ref_per_bin <= e2_coa_per_bin,
+                0.005 * erl_pb,    # refined better -> small refresh
+                0.5 * erl_pb,      # refined worse -> big refresh (recovery)
+            ).astype(np.float32)
+            # Apply uniformly across all partitions (no per-partition erl).
+            for _p in range(self.filter.n_partitions):
+                self.filter.P[_p] += refresh_amt
+            # AEC3 error_floor=1e-4 / error_ceil=1e2 in their internal scale.
+            # Our P starts at 0.01 and the per-update K = P*X*/denom is
+            # well-bounded by denom, so just clip to safe range.
+            np.clip(self.filter.P, 1e-4, 1e2, out=self.filter.P)
 
         dominant_ne = self._aec3_sg.is_dominant_nearend()
         r2, r2_unb = self._aec3_ree.estimate(

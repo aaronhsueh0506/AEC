@@ -20,6 +20,7 @@ default config.echo_audibility.use_stationarity_properties = False so
 this branch is inactive in default configs.
 """
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -111,8 +112,17 @@ class ResidualEchoEstimator:
         capture_psd: np.ndarray,   # Y²
         s2_linear: np.ndarray,     # |H·X|² from PBFDKF
         dominant_nearend: bool,
+        filter_freq_response: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Returns ``(R2, R2_unbounded)``."""
+        """Returns ``(R2, R2_unbounded)``.
+
+        ``filter_freq_response``: per-bin filter response magnitude² (sum of
+        |W[p]|² over partitions, then PSD-scaled to match render_psd scale).
+        Used as ``power_spectrum_scaling`` for the linear-mode reverb update
+        (AEC3 cc:391-392 ``GetReverbFrequencyResponse``). Falls back to
+        per-frame S²/X² coupling when None — that fallback misses bins where
+        the filter learned coupling but current frame has no render energy.
+        """
         # Step 1: update stationary render noise floor.
         self._update_render_noise_power(render_psd)
 
