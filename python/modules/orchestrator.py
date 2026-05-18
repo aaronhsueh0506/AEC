@@ -3596,9 +3596,30 @@ class AEC:
         # using AEC3 absolute thresholds; rescale to int16 amplitude.
         render_block_scaled = (far_end * 32768.0).astype(np.float32)
 
+        # Compute AEC3-style per-frame convergence (subtractor_output_analyzer.cc):
+        #   refined_converged = e²_refined < 0.5 * y² AND y² > kConvergenceThreshold
+        #   coarse_converged  = e²_coarse  < 0.05 * y² AND y² > kConvergenceThreshold
+        #   any_filter_converged = refined OR coarse
+        # AEC3 uses int16 power thresholds (50²·64=160000); in our float[-1,1]
+        # space that's (50/32768)²·64 ≈ 1.49e-4. This permissive per-frame rule
+        # replaces the legacy 10-frame >5 dB ERLE latch (which never fires on
+        # hard cases like 9xjhi, leaving SubbandErleEstimator stuck at min_erle
+        # = 1.0 -> R²=S²/1 -> SuppressionGain doesn't see correct echo strength).
+        _y2_time = float(np.sum(near_end.astype(np.float64) ** 2))
+        _e2_refined = float(np.sum(raw_output.astype(np.float64) ** 2))
+        _y2_threshold = 1.49e-4  # 50² · 64 in float[-1,1] scale
+        _refined_conv = _e2_refined < 0.5 * _y2_time and _y2_time > _y2_threshold
+        _coarse_conv = False
+        if self.shadow_filter is not None:
+            _shadow_err = getattr(self.shadow_filter, '_last_residual_time', None)
+            if _shadow_err is not None:
+                _e2_coarse = float(np.sum(_shadow_err.astype(np.float64) ** 2))
+                _coarse_conv = _e2_coarse < 0.05 * _y2_time and _y2_time > _y2_threshold
+        _aec3_converged = _refined_conv or _coarse_conv
+
         # Build per-hop filter-state snapshot for AecState.
         bridge = build_filter_state_bridge(
-            filter_converged=bool(self._filter_converged),
+            filter_converged=_aec3_converged,
             pbfdkf=self.filter,
             regime_handler=self._regime_handler,
             mu_final=float(getattr(self, '_last_mu_scale_diag', 1.0)),
