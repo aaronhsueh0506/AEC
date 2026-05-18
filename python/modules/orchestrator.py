@@ -720,6 +720,12 @@ class AEC:
             bs = int(self.filter.block_size)
             self._aec3_synth_window = np.sqrt(np.hanning(bs)).astype(np.float32)
             self._aec3_ola_buf = np.zeros(bs, dtype=np.float32)
+            # v3.21 Phase C.1 — CNG state for `_aec3_post`. Mirrors the
+            # production legacy CNG (res_refactored/noise_floor_cng.py:55-62):
+            # per-bin noise PSD EMA + per-bin target CN gain smoothing.
+            self._aec3_noise_psd = np.zeros(n_bins, dtype=np.float32)
+            self._aec3_smooth_cn_gain = np.zeros(n_bins, dtype=np.float32)
+            self._aec3_noise_initialized = False
 
         # v3.21 Phase B.3 + B.4 — RenderSignalAnalyzer + startup gates.
         # RSA tracks per-bin narrow-band tonal regions in the render history
@@ -3872,7 +3878,25 @@ class AEC:
         # AEC3 contract (echo_remover.cc:452):
         #   nearend_spectrum = UsableLinearEstimate() ? E² : Y²
         nearend_pwr = error_psd if self._aec3_state.usable_linear_estimate() else near_psd
-        comfort_noise = np.zeros(n_bins, dtype=np.float32)  # CNG deferred
+        # v3.21 Phase C.1 — comfort-noise spectrum derived from per-bin noise
+        # floor EMA (mirrors res_refactored/noise_floor_cng.py:23-31). Lazy
+        # init at first frame; update only when DT is quiet (legacy
+        # is_learning_safe condition is approximated here by `dominant_ne is
+        # False AND error magnitude rises slower than noise estimate`).
+        if not self._aec3_noise_initialized:
+            self._aec3_noise_psd = error_psd.copy() + 1e-8
+            self._aec3_noise_initialized = True
+        _is_learning_safe = (not dominant_ne) and (far_pwr < 1e-4)
+        _alpha_n = np.where(
+            error_psd > self._aec3_noise_psd,
+            0.998 if _is_learning_safe else 1.0,  # slow up (or freeze on DT)
+            0.98,                                 # fast down to track silence
+        )
+        self._aec3_noise_psd = (
+            _alpha_n * self._aec3_noise_psd
+            + (1.0 - _alpha_n) * error_psd
+        ).astype(np.float32)
+        comfort_noise = self._aec3_noise_psd
         gain = self._aec3_sg.get_gain(
             aec_state=self._aec3_state,
             nearend_spectrum=nearend_pwr,
@@ -3890,6 +3914,32 @@ class AEC:
         # fft_size). Multiplying it by sqrt-Hann synthesis and accumulating
         # at 50% overlap gives Hann-summed perfect reconstruction.
         e_out_spec = error_spec * gain.astype(error_spec.dtype, copy=False)
+
+        # v3.21 Phase C.1 — CNG injection. Add Gaussian noise shaped by the
+        # tracked noise_psd, scaled by smooth_cn_gain = 0.8 EMA of
+        # sqrt(max(1 - G², 0)) × 0.4. Mirrors legacy CNG formula. Skip when
+        # CNG is disabled in config or noise_psd has not been observed yet
+        # (lazy-init guard, same as legacy).
+        if (getattr(self.config, 'enable_cng', False)
+                and float(np.sum(self._aec3_noise_psd)) > 1e-7):
+            _target_cn_gain = (
+                np.sqrt(np.maximum(1.0 - gain.astype(np.float32) ** 2, 0.0)) * 0.4
+            )
+            self._aec3_smooth_cn_gain = (
+                0.8 * self._aec3_smooth_cn_gain + 0.2 * _target_cn_gain
+            ).astype(np.float32)
+            # noise_psd is in float-scale × _PSD_SCALE (we lifted it earlier);
+            # convert back to amplitude std by dividing by sqrt(_PSD_SCALE).
+            _noise_std = np.sqrt(
+                self._aec3_noise_psd / 2.0 / _PSD_SCALE
+            ).astype(np.float32)
+            _cng_re = np.random.randn(n_bins).astype(np.float32) * _noise_std
+            _cng_im = np.random.randn(n_bins).astype(np.float32) * _noise_std
+            _cng_spec = (
+                self._aec3_smooth_cn_gain * (_cng_re + 1j * _cng_im)
+            ).astype(np.complex64)
+            e_out_spec = e_out_spec + _cng_spec
+
         e_out_full = np.fft.irfft(e_out_spec, n=self.filter.fft_size).astype(np.float32)
         bs = self.filter.block_size
         hop = self.filter.hop_size
