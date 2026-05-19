@@ -447,6 +447,12 @@ class AEC:
                 self.filter._enable_p53_trace = bool(
                     getattr(self.config, 'trace_p53_innovation', False))
 
+                # v3.21.1 — AEC3 cc:128-138 per-bin H_error refresh enable.
+                # When False (default): legacy scalar path → byte-equal.
+                # When True: per-bin instantaneous E²_refined vs E²_coarse.
+                self.filter._use_per_bin_h_error_refresh = bool(
+                    getattr(self.config, 'use_per_bin_h_error_refresh', False))
+
             # FDAF buffering (when internal_hop > external hop)
             if self.config.mode == AecMode.FDAF and self._internal_hop > self._hop_size:
                 # Buffer large enough for accumulation (internal_hop + one extra external hop)
@@ -1819,10 +1825,17 @@ class AEC:
                 if (hasattr(self.filter, 'error_spec')
                         and hasattr(self.shadow_filter, 'error_spec')):
                     _e2_ref = float(np.sum(np.abs(self.filter.error_spec) ** 2))
-                    _e2_coa = float(np.sum(np.abs(self.shadow_filter.error_spec) ** 2))
+                    _e2_coa_per_bin = (
+                        np.abs(self.shadow_filter.error_spec) ** 2
+                    ).astype(np.float32)
+                    _e2_coa = float(np.sum(_e2_coa_per_bin))
                     # v3.21 Phase B.2 — feed E²_coarse + per-bin ERL to the
                     # refined filter's H_error refresh formula.
+                    # v3.21.1 — also publish per-bin coarse for AEC3
+                    # cc:128-138 per-bin compare path (consumed only when
+                    # filter._use_per_bin_h_error_refresh = True).
                     self.filter._e2_coarse_for_refresh = _e2_coa
+                    self.filter._e2_coarse_per_bin = _e2_coa_per_bin
                     if hasattr(self, '_per_band_erl') and self._per_band_erl is not None:
                         # Broadcast 3-band ERL to per-bin: low / mid / high
                         # third partitioning across n_freqs.

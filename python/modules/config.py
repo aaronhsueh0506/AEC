@@ -177,6 +177,16 @@ class AecConfig:
     delay_est_period_s_fast: float = 0.25
     delay_est_alpha_fast: float = 0.2
 
+    # v3.21.1 — AEC3 cc:128-138 per-bin H_error refresh.
+    # When False (default → byte-equal preserved): legacy scalar compare
+    # `np.sum(_error_psd) ≤ _e2_coarse_for_refresh` selects a single
+    # leakage_converged/diverged factor for all 513 bins.
+    # When True: per-bin instantaneous compare `|error_spec[k]|² ≤
+    # |shadow.error_spec[k]|²` selects per-bin leakage. Addresses Codex
+    # F2 staleness — refresh uses fresh per-frame E²_refined (not
+    # smoothed self._error_psd which can be stale on early-return paths).
+    use_per_bin_h_error_refresh: bool = False
+
     # High-pass filter (DC blocker + low-freq removal)
     enable_highpass: bool = True
     highpass_cutoff_hz: float = 80.0    # Cutoff freq: removes DC, 50/60Hz hum, rumble
