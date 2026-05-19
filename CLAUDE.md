@@ -95,12 +95,16 @@ There is no project-wide pytest collection.
 ### Pipeline (v3.21)
 
 ```
-mic ─► HPF ───────────────────────────────────────────────────────────────►
-ref ─► HPF ─► Saturation ─► DelayEst+RingBuf ─► PBFDKF ─► error ─► AEC3 post ─► out
-                                                  │                      │
-                                          Shadow filter (Q×3.5)   AecState + ResidualEchoEstimator
-                                          + PathChangeRegimeHandler + SuppressionGain + CNG (OLA)
+mic ─► HPF ──────────────────────────────────────────────────────────►
+ref ─────► Saturation ─► DelayEst+RingBuf ─► PBFDKF ─► error ─► AEC3 post ─► out
+                                               │                       │
+                                       Shadow filter (Q×3.5)   AecState + ResidualEchoEstimator
+                                       + PathChangeRegimeHandler + SuppressionGain + CNG (OLA)
 ```
+
+HPF runs on the mic path only. The ref-path HPF was retired (default
+OFF) after the v3.19 ref-flip verdict; downstream `Saturation` /
+`EchoPathDelayEstimator` consume the raw reference.
 
 The v3.21 pipeline retires the legacy 9-stage `ResFilter` chain. Its
 replacement is `AEC._aec3_post` in [python/modules/orchestrator.py](python/modules/orchestrator.py),
@@ -129,7 +133,8 @@ that fires `boost_q` / `reverse_copy` / `main_paused` decisions. PBFDKF
 lives in [python/modules/filters.py](python/modules/filters.py);
 PathChangeRegimeHandler in [python/modules/epc.py](python/modules/epc.py).
 **Was previously named `ShadowCopyController`** (renamed under P52
-Path 3, see `docs/archive/p52_phase_a_verdict.md`). The handler is
+Path 3 of the v3.10.6 cycle — kept the audio path identical, added
+the regime-classifier anti-loophole test). The handler is
 **load-bearing on the cohort tail** (~7/800 cases); do not remove or
 bypass it.
 
@@ -174,6 +179,7 @@ EchoEstimator + SuppressionGain + CNG). Single production preset:
 `BALANCED`. See [CHANGELOG.md](CHANGELOG.md) for full per-version
 detail.
 
-Closed-arc verdicts and design docs live under
-[docs/archive/](docs/archive/); the active reference set at `docs/`
-root holds only the canonical pipeline + algorithm documentation.
+The active reference set at `docs/` root holds the canonical pipeline +
+algorithm documentation; closed-arc verdict / design docs from prior
+cycles were retired in the v3.21 cleanup (see [CHANGELOG.md](CHANGELOG.md)
+for the per-round delta).

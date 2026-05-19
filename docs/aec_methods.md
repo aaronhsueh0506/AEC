@@ -13,11 +13,11 @@ for the side-by-side comparison with v3.10.5 and the WebRTC AEC3 reference.
 | Companion doc | Purpose |
 |---|---|
 | [`aec_algorithm_guide.html`](aec_algorithm_guide.html) | Presentation overview |
+| [`architecture_v3_10_5_vs_v3_21_vs_aec3.html`](architecture_v3_10_5_vs_v3_21_vs_aec3.html) | v3.10.5 vs v3.21 vs WebRTC AEC3 comparison |
 | [`c_user_and_integration_guide.md`](c_user_and_integration_guide.md) | C API, integration, streaming contract |
 | [`refactor_modules_layout.md`](refactor_modules_layout.md) | Module map |
 | [`pbfdkf_shadow_intro.md`](pbfdkf_shadow_intro.md) | PBFDKF + shadow design |
 | [`dtd_design.md`](dtd_design.md) | DTD algorithm |
-| [`aec3_reference.md`](aec3_reference.md) | WebRTC AEC3 substrate notes |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Version history |
 
 ---
@@ -25,12 +25,12 @@ for the side-by-side comparison with v3.10.5 and the WebRTC AEC3 reference.
 ## 1. Pipeline overview
 
 ```
-mic ─► HPF (mic-path, ON) ─────────────────────────────────────────────────────────►
-ref ─► HPF (ref, OFF) ─► Saturation ─► EchoPathDelayEstimator ─► RingBuf ─┐
-                                       (matched filter +                  │
-                                        lag aggregator +                  ▼
-                                        clock-drift detector)        PBFDKF refined
-                                                                     filter (Kalman)
+mic ─► HPF ────────────────────────────────────────────────────────────────────────►
+ref ──────► Saturation ─► EchoPathDelayEstimator ─► RingBuf ─────────────┐
+                          (matched filter +                              │
+                           lag aggregator +                              ▼
+                           clock-drift detector)                    PBFDKF refined
+                                                                    filter (Kalman)
                                                                           │
                                                                   Shadow filter (PBFDAF/NLMS,
                                                                   μ = 0.5) + PathChange-
@@ -90,12 +90,14 @@ All benchmarking tooling (`eval_aec_challenge.py`, `check_byte_equal.py`,
 
 ### 2.1 HPF (high-pass filter)
 
-80 Hz IIR Butterworth-style, one section per channel. Defaults locked
+80 Hz IIR Butterworth-style on the mic path only. Defaults locked
 post-v3.20:
 
 * Mic-path HPF: **ON** (suppresses DC + sub-bass before delay alignment).
-* Reference HPF: **OFF** (room measurement showed reference HPF caused
-  -0.04 nores deg with no echo gain — kept off).
+* Reference HPF: **OFF / bypassed** — the ref-path HPF was retired
+  after the v3.19 HPF-flip verdict showed −0.04 nores deg with no echo
+  gain; the pipeline now feeds the raw reference straight into
+  `Saturation` → `EchoPathDelayEstimator`.
 
 `HighPassFilter` lives in `modules/preprocessing.py`; mirrors C
 `high_pass_filter.{h,c}`.
@@ -339,7 +341,7 @@ classifier never modifies audio.
 | DT_movement  |  114 |     4.215 |    2.371 |
 | NE           |  200 |     4.998 |    4.052 |
 
-Reference points (`aec3_reference.md`):
+Reference points (AEC2 / AEC3 anchors from the AEC Challenge corpus):
 
 * **AEC2 reference** — FS / DT echo unknown (closed corpus); DT static
   deg 2.39; DT movement deg 2.39; NE deg 4.10.

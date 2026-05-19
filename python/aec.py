@@ -39,7 +39,7 @@ from modules.dtd import DtdEstimator  # noqa: F401
 from modules.epc import (  # noqa: F401
     classify_epc_event, EchoPathChangeDetector, PathChangeRegimeHandler,
 )
-from modules.residual_estimator import ResidualEchoEstimator  # noqa: F401
+from modules.residual import ResidualEchoEstimator  # noqa: F401
 from modules.nlp import SubtractiveNLP  # noqa: F401
 from modules.debug_logger import AecDebugLogger  # noqa: F401
 from modules.orchestrator import AEC, process_wav_files, main  # noqa: F401

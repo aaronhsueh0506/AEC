@@ -377,16 +377,14 @@ AEC/
 │   ├── test/modules/                # per-module test harnesses (dev tooling)
 │   └── Makefile
 ├── docs/
-│   ├── CHANGELOG.md
-│   ├── SUMMARY.md                       # R1–R16 research log (canonical)
-│   ├── aec_methods.md                   # canonical algorithm reference
-│   ├── aec_algorithm_guide.html         # HTML snapshot; canonical = aec_methods.md
-│   ├── aec_v3_evolution.md              # historical v3.0–v3.4 design notes
-│   ├── aec3_reference.md                # WebRTC AEC3 comparison notes
+│   ├── aec_methods.md                   # canonical algorithm spec (v3.21)
+│   ├── aec_algorithm_guide.html         # presentation overview (v3.21)
+│   ├── architecture_v3_10_5_vs_v3_21_vs_aec3.html  # three-way architecture comparison
+│   ├── refactor_modules_layout.md       # current module map (v3.21)
 │   ├── pbfdkf_shadow_intro.md
 │   ├── dtd_design.md
 │   ├── c_user_and_integration_guide.md  # canonical C CLI / API / integration guide
-│   └── archive/                         # superseded specs / change logs
+│   └── bench/v3_21_3aadd2d_baseline/    # 800-case AECMOS anchor + 25-case byte-equal reference
 ├── bin/                             # optional WebRTC benchmark helpers
 │   ├── aec3_cli, aec3_linear_cli, old_aec_cli
 └── wav/                             # test audio

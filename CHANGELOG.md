@@ -128,13 +128,9 @@ Canonical doc set at `docs/` root collapsed from 66 → 11:
 - `pbfdkf_shadow_intro.md` / `dtd_design.md` (canonical algorithm refs).
 - `c_user_and_integration_guide.md` (C API + integration).
 - `refactor_modules_layout.md` (current module map; v3.21 rewrite).
-- `aec3_reference.md` + `aec3_residual_pipeline_mapping.md` +
-  `aec3_reverb_mapping.md` + `aec3_subband_ne_detector_mapping.md`
-  (WebRTC AEC3 reference + mappings).
-
-`docs/archive/` keeps 5 era-closeout summaries (P52 Phase A renaming
-context + v3.15 + v3.16 + v3.17 + v3.18 cycle closeouts); 130+ per-arc
-verdict / design docs deleted (R11 + R13).
+`docs/archive/` retired entirely — 130+ per-arc verdict / design docs
+deleted across R11 / R13 / the docs-trim that landed alongside Phase
+D-2. The historical record lives in this CHANGELOG and in git history.
 
 ---
 

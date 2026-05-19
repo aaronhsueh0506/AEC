@@ -48,7 +48,6 @@ v3.10.5 → v3.21 → AEC3 cross-comparison see
   <a href="aec_methods.md">aec_methods.md</a> &nbsp;·&nbsp;
   <a href="pbfdkf_shadow_intro.md">pbfdkf_shadow_intro.md</a> &nbsp;·&nbsp;
   <a href="dtd_design.md">dtd_design.md</a> &nbsp;·&nbsp;
-  <a href="aec3_reference.md">aec3_reference.md</a> &nbsp;·&nbsp;
   <a href="refactor_modules_layout.md">refactor_modules_layout.md</a> &nbsp;·&nbsp;
   <a href="c_user_and_integration_guide.md">C integration</a>
 </p>
@@ -62,11 +61,11 @@ single production post-filter. Single preset: <code>BALANCED</code>.
 <h2>1. Block diagram</h2>
 
 <div class="ascii">
-mic ─► HPF (mic, ON) ───────────────────────────────────────────────────────────────────►
-ref ─► HPF (ref, OFF) ─► Saturation ─► EchoPathDelayEstimator ─► RingBuf ─┐
-                                       (matched filter +                  │
-                                        lag aggregator +                  ▼
-                                        clock-drift detector)        PBFDKF refined
+mic ─► HPF ─────────────────────────────────────────────────────────────────────────────►
+ref ──────► Saturation ─► EchoPathDelayEstimator ─► RingBuf ─────────────┐
+                          (matched filter +                              │
+                           lag aggregator +                              ▼
+                           clock-drift detector)                    PBFDKF refined
                                                                      filter (Kalman)
                                                                           │
                                                                  Shadow filter (PBFDAF/NLMS,
@@ -273,10 +272,6 @@ cd c_impl &amp;&amp; make
     <tr><td><a href="architecture_v3_10_5_vs_v3_21_vs_aec3.html"><code>architecture_v3_10_5_vs_v3_21_vs_aec3.html</code></a></td><td>v3.10.5 vs v3.21 vs WebRTC AEC3 architecture comparison.</td></tr>
     <tr><td><a href="pbfdkf_shadow_intro.md"><code>pbfdkf_shadow_intro.md</code></a></td><td>PBFDKF + shadow filter design.</td></tr>
     <tr><td><a href="dtd_design.md"><code>dtd_design.md</code></a></td><td>DTD algorithm reference.</td></tr>
-    <tr><td><a href="aec3_reference.md"><code>aec3_reference.md</code></a></td><td>WebRTC AEC3 substrate notes.</td></tr>
-    <tr><td><a href="aec3_residual_pipeline_mapping.md"><code>aec3_residual_pipeline_mapping.md</code></a></td><td>AEC3 residual pipeline ↔ v3.21 module mapping.</td></tr>
-    <tr><td><a href="aec3_reverb_mapping.md"><code>aec3_reverb_mapping.md</code></a></td><td>AEC3 reverb model ↔ v3.21 mapping.</td></tr>
-    <tr><td><a href="aec3_subband_ne_detector_mapping.md"><code>aec3_subband_ne_detector_mapping.md</code></a></td><td>AEC3 subband NE detector ↔ v3.21 mapping.</td></tr>
     <tr><td><a href="refactor_modules_layout.md"><code>refactor_modules_layout.md</code></a></td><td>Current module map.</td></tr>
     <tr><td><a href="c_user_and_integration_guide.md"><code>c_user_and_integration_guide.md</code></a></td><td>C API, build, integration rules, streaming contract.</td></tr>
     <tr><td><a href="../CHANGELOG.md"><code>../CHANGELOG.md</code></a></td><td>Version-by-version change history.</td></tr>

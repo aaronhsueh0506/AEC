@@ -46,7 +46,6 @@ from .detectors import (
 from .epc import (
     classify_epc_event, EchoPathChangeDetector, PathChangeRegimeHandler,
 )
-from .residual_estimator import ResidualEchoEstimator
 from .config import AecConfig
 from .nlp import SubtractiveNLP
 from .debug_logger import AecDebugLogger
