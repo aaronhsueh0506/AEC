@@ -679,11 +679,10 @@ class AEC:
         else:
             self.res = None
 
-        # v3.21 AEC3-aligned post-stage chain (gated by config.use_aec3_residual).
-        # When ON, the legacy self.res.process() call in process() is bypassed and
-        # the AecState + ResidualEchoEstimator + SuppressionGain chain runs
-        # instead. The linear filter (PBFDKF) still produces error spectrum which
-        # the AEC3 chain consumes.
+        # v3.21 AEC3-aligned post-stage chain. The linear filter (PBFDKF)
+        # produces an error spectrum which the AEC3 chain (AecState +
+        # ResidualEchoEstimator + SuppressionGain + CNG) consumes; the
+        # legacy self.res.process() call is bypassed in process().
         self._aec3_state = None
         self._aec3_ree = None
         self._aec3_sg = None
@@ -698,7 +697,7 @@ class AEC:
         # level_change input on EchoCanceller3::ProcessCapture).
         self._aec3_pending_gain_change = False
         self._aec3_pending_delay_change = None  # None = no event; else DelayAdjustment
-        if getattr(self.config, 'use_aec3_residual', False) and self.filter is not None:
+        if self.filter is not None:
             from .state import AecState as _Aec3State, AecStateConfig as _Aec3StateConfig
             from .residual import ResidualEchoEstimator, SuppressionGain
             n_bins = int(self.filter.n_freqs)
@@ -728,14 +727,13 @@ class AEC:
             self._aec3_noise_initialized = False
             pass  # AEC3 chain init scope
 
-        # v3.21 Phase C.3 — StationarityEstimator (always-on, both presets).
+        # v3.21 Phase C.3 — StationarityEstimator.
         # Detects per-bin stationary render (constant hum / fan / line noise).
         # Two consumers:
-        #   1. _aec3_post: zeros R² on stationary bands (use_aec3_residual=True)
-        #   2. filter.process: skips W update when block-stationary (both
-        #      presets) so PBFDKF doesn't learn mic-as-echo coupling against
+        #   1. _aec3_post: zeros R² on stationary bands.
+        #   2. filter.process: skips W update when block-stationary so
+        #      PBFDKF doesn't learn mic-as-echo coupling against
         #      uncorrelated stationary noise (E0l0 / wJVP NE outliers).
-        # Init is preset-agnostic so BALANCED also benefits from the W-gate.
         from .state.stationarity_estimator import StationarityEstimator as _StatEst
         if self.filter is not None and hasattr(self.filter, 'n_freqs'):
             self._aec3_stationarity = _StatEst(
@@ -3436,13 +3434,10 @@ class AEC:
         # on NE-only wJVPo), use the PREVIOUS hop's mic as the comparison
         # source when routing through the AEC3 chain. That mic was the
         # actual source of the OLA reconstruction now in `final_output`.
-        if getattr(self.config, 'use_aec3_residual', False):
-            if self._limiter_near_lag is None:
-                self._limiter_near_lag = np.zeros_like(near_end)
-            near_for_limiter = self._limiter_near_lag
-            self._limiter_near_lag = near_end.copy()
-        else:
-            near_for_limiter = near_end
+        if self._limiter_near_lag is None:
+            self._limiter_near_lag = np.zeros_like(near_end)
+        near_for_limiter = self._limiter_near_lag
+        self._limiter_near_lag = near_end.copy()
         near_peak = np.max(np.abs(near_for_limiter))
         out_peak = np.max(np.abs(final_output))
         if out_peak > near_peak > 1e-6:

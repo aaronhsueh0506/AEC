@@ -54,11 +54,6 @@ class AecConfig:
     # 800-case byte-equal verified (Task B.4). Default-OFF until a future
     # phase retires the legacy methods.
     use_res_refactored: bool = False
-    # v3.21 — bypass the legacy 9-stage ResFilter and route the post-linear
-    # path through the AEC3-aligned chain (AecState + ResidualEchoEstimator +
-    # SuppressionGain in python/modules/{state,residual}). Default OFF for
-    # the cycle until the 63-case bench verdict (Phase 4.5 → 5).
-    use_aec3_residual: bool = False
 
     # Shadow filter (dual-filter divergence control, frequency-domain modes only)
     enable_shadow: bool = True
@@ -1133,9 +1128,8 @@ class AecConfig:
     def from_preset(cls, preset: 'AecPreset', **kwargs) -> 'AecConfig':
         """Create config from preset with optional overrides.
 
-        Single preset: BALANCED — v3.21 production AEC3 residual chain
-        (`use_aec3_residual=True` routes final_output through `_aec3_post`:
-        AecState + ResidualEchoEstimator + SuppressionGain + CNG).
+        Single preset: BALANCED — routes final_output through `_aec3_post`
+        (AecState + ResidualEchoEstimator + SuppressionGain + CNG).
         """
         if isinstance(preset, str):
             preset = AecPreset(preset)
@@ -1157,8 +1151,6 @@ class AecConfig:
                 res_dt_reduction=2.5,
                 res_spectral_floor_db=-35.0,
                 res_ne_protect_db=-25.0,
-                # AEC3 residual chain (the key knob)
-                use_aec3_residual=True,
                 enable_cng=True,
                 shadow_q_ratio=3.5,
                 shadow_mu_min=0.5,
