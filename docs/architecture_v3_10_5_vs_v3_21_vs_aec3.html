@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>AEC v3.10.5 vs v3.21 vs WebRTC AEC3 — architecture flowcharts</title>
+<title>AEC v3.10.4 vs v3.21 vs WebRTC AEC3 — architecture flowcharts</title>
 <style>
   :root {
     --bg: #f7f8fb;
@@ -106,7 +106,7 @@
 <div class="wrap">
 
 <h1>AEC architecture flowcharts</h1>
-<p class="sub">v3.10.5 → v3.21 → WebRTC AEC3 reference · release 2026-05-19 · same input/output, three different post-filter architectures.</p>
+<p class="sub">v3.10.4 → v3.21 → WebRTC AEC3 reference · release 2026-05-19 · same input/output, three different post-filter architectures.</p>
 
 <div style="background: var(--card-bg); border-radius: 12px; padding: 16px 20px; margin: 0 0 22px;">
   <h2 style="margin: 0 0 12px; font-size: 16px; color: var(--accent);">Color legend</h2>
@@ -116,17 +116,17 @@
     <div class="item"><span class="sw filter"></span> <strong>Linear filter</strong> — refined Kalman PBFDKF + shadow filter</div>
     <div class="item"><span class="sw post"></span> <strong>Post-filter (carried over)</strong> — 9-stage ResFilter (legacy) or EchoRemover (AEC3)</div>
     <div class="item"><span class="sw new"></span> <strong>New in v3.21</strong> — AEC3-aligned port that replaces legacy substrate</div>
-    <div class="item"><span class="sw gone"></span> <strong>Retired in v3.21</strong> — present in v3.10.5, removed from production</div>
+    <div class="item"><span class="sw gone"></span> <strong>Retired in v3.21</strong> — present in v3.10.4, removed from production</div>
   </div>
-  <p class="small-note" style="margin: 12px 0 0;">Reading guide: any <span style="background: var(--new); border: 1.5px solid var(--new-stroke); padding: 1px 5px; border-radius: 2px;">yellow</span> block in v3.21 is something we ported from AEC3 since v3.10.5. Match v3.21's <span style="background: var(--new); border: 1.5px solid var(--new-stroke); padding: 1px 5px; border-radius: 2px;">yellow</span> blocks against AEC3's same-name blocks (<span style="background: var(--post); border: 1.5px solid var(--post-stroke); padding: 1px 5px; border-radius: 2px;">green</span> / <span style="background: var(--filter); border: 1.5px solid var(--filter-stroke); padding: 1px 5px; border-radius: 2px;">orange</span>) to see what we share with AEC3 and what's still v3.21-specific.</p>
+  <p class="small-note" style="margin: 12px 0 0;">Reading guide: any <span style="background: var(--new); border: 1.5px solid var(--new-stroke); padding: 1px 5px; border-radius: 2px;">yellow</span> block in v3.21 is something we ported from AEC3 since v3.10.4. Match v3.21's <span style="background: var(--new); border: 1.5px solid var(--new-stroke); padding: 1px 5px; border-radius: 2px;">yellow</span> blocks against AEC3's same-name blocks (<span style="background: var(--post); border: 1.5px solid var(--post-stroke); padding: 1px 5px; border-radius: 2px;">green</span> / <span style="background: var(--filter); border: 1.5px solid var(--filter-stroke); padding: 1px 5px; border-radius: 2px;">orange</span>) to see what we share with AEC3 and what's still v3.21-specific.</p>
 </div>
 
 
 <!-- ════════════════════════════════════════════════════════════════
-     v3.10.5 — legacy 9-stage ResFilter
+     v3.10.4 — legacy 9-stage ResFilter
      ════════════════════════════════════════════════════════════════ -->
 <section class="arch legacy">
-  <h2>v3.10.5 — legacy</h2>
+  <h2>v3.10.4 — legacy</h2>
   <p class="when">Production 2026-05-05 → 2026-05-16</p>
   <p class="desc">Five tuning presets (MILD / SOFT / BALANCED / AGGRESSIVE / MAXIMUM). Custom 9-stage <code>ResFilter</code> post-filter. ~40 RES knobs co-tuned per preset.</p>
 
@@ -230,7 +230,7 @@
 
   <div class="issues">
     <div class="card bad">
-      <h3>✗ Drawbacks of v3.10.5 — why we moved on</h3>
+      <h3>✗ Drawbacks of v3.10.4 — why we moved on</h3>
       <ul>
         <li><strong>9-stage ResFilter is Pareto-locked.</strong> Across v3.12 → v3.15 we ran 60+ ablations (S1–S11, F-E1 through F-E5, Arc M/G/F/T, Arc P/R/S-orth.A); the chain is at a ceiling — every ratio win on one bucket (FS / DT / NE) costs another bucket. Closed CANNOT-SHIP in batches.</li>
         <li><strong>5-preset menu is co-tuned trap.</strong> Each preset wires ~40 RES knobs (over_sub_base / scale / dt_reduction / mask_*, etc.) that interact; touching a knob outside a full 800-case re-bench breaks the others. <span class="tag">menu bloat</span></li>
@@ -354,7 +354,7 @@
 
   <div class="issues cols-2">
     <div class="card good">
-      <h3>✓ What v3.21 fixed vs v3.10.5</h3>
+      <h3>✓ What v3.21 fixed vs v3.10.4</h3>
       <ul>
         <li><strong>Retired the 9-stage ResFilter</strong> → AEC3-aligned <code>_aec3_post</code> chain (StationarityEstimator + AecState + ResidualEchoEstimator + SuppressionGain + CNG + OLA). DT/NE deg now beats AEC3 reference by ≥ 0.52 / 0.60.</li>
         <li><strong>Single <code>BALANCED</code> preset.</strong> 5 overrides only. No co-tuning trap.</li>
@@ -576,27 +576,27 @@
      Score panel
      ════════════════════════════════════════════════════════════════ -->
 <div class="scores">
-  <h2>800-case AECMOS — v3.21 BALANCED baseline</h2>
+  <h2>800-case AECMOS — v3.10.4 vs v3.21 vs AEC2 vs AEC3</h2>
+  <p class="small-note" style="margin: 0 0 10px;">Blind-test bucket means, static + movement aggregated (n = 300 FS / 300 DT / 200 NE). Higher = better on both axes. FS deg + NE echo are universally saturated (~5.0) and omitted.</p>
   <table>
     <thead>
       <tr>
-        <th>Bucket</th>
-        <th>n</th>
-        <th class="num">echo ↑</th>
-        <th class="num">deg ↑</th>
-        <th class="num">vs AEC3 ref<br>(deg)</th>
-        <th class="num">vs AEC2 ref<br>(deg)</th>
+        <th>Version</th>
+        <th class="num">FS echo ↑</th>
+        <th class="num">DT echo ↑</th>
+        <th class="num">DT deg ↑</th>
+        <th class="num">NE deg ↑</th>
       </tr>
     </thead>
     <tbody>
-      <tr><td>FS_static</td>   <td>169</td><td class="num">3.729</td><td class="num">4.999</td><td class="num tie">—</td><td class="num tie">—</td></tr>
-      <tr><td>FS_movement</td> <td>131</td><td class="num">3.626</td><td class="num">4.999</td><td class="num tie">—</td><td class="num tie">—</td></tr>
-      <tr><td>DT_static</td>   <td>186</td><td class="num">4.237</td><td class="num">2.387</td><td class="num win">+0.537</td><td class="num">−0.003</td></tr>
-      <tr><td>DT_movement</td> <td>114</td><td class="num">4.215</td><td class="num">2.371</td><td class="num win">+0.521</td><td class="num">−0.019</td></tr>
-      <tr><td>NE</td>          <td>200</td><td class="num">4.998</td><td class="num">4.052</td><td class="num win">+0.602</td><td class="num">−0.048</td></tr>
+      <tr><td>v3.10.4 <span style="color: var(--muted); font-size: 12px;">(GitHub main · legacy ResFilter)</span></td><td class="num">3.281</td><td class="num">3.946</td><td class="num win">2.810</td><td class="num">3.985</td></tr>
+      <tr><td><strong>v3.21 (this release · AEC3-aligned)</strong></td><td class="num">3.684</td><td class="num">4.229</td><td class="num">2.381</td><td class="num">4.052</td></tr>
+      <tr><td>AEC2 reference</td><td class="num">3.48</td><td class="num">4.26</td><td class="num">2.39</td><td class="num win">4.10</td></tr>
+      <tr><td>AEC3 reference</td><td class="num win">3.88</td><td class="num win">4.54</td><td class="num">1.85</td><td class="num">3.45</td></tr>
     </tbody>
   </table>
-  <p class="small-note">v3.21 beats AEC3 reference on every DT/NE deg bucket by 0.52 / 0.52 / 0.60; near-parity (~0) with AEC2. Anchor: <code>docs/bench/v3_21_3aadd2d_baseline/balanced_aec3_result.md</code>.</p>
+  <p class="small-note">v3.10.4 row uses the legacy <code>balanced</code> preset rendered at <code>3aadd2d</code> as algorithmic proxy — same 9-stage ResFilter chain GitHub main ships. v3.21 row is the post-cleanup <code>BALANCED</code> preset (= <code>balanced_aec3</code> @ 3aadd2d). Anchor data: <code>docs/bench/v3_21_3aadd2d_baseline/</code>. Highlighted cell = column winner.</p>
+  <p class="small-note">v3.21 vs v3.10.4: <strong>+0.40 FS echo, +0.28 DT echo</strong>, −0.43 DT deg, +0.07 NE deg. vs AEC2: matches within ~0.05 on every bucket except FS echo (+0.20 lead). vs AEC3: trades echo (−0.20 FS / −0.31 DT) for preservation (+0.53 DT deg / +0.60 NE deg).</p>
 </div>
 
 
