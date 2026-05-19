@@ -2871,149 +2871,51 @@ class AEC:
                     is_stationary_dt = False  # EPC error spike is from filter divergence, not speech
 
                 dt_indicator = np.clip(raw_dt, 0.0, 0.8)
-                # v3.17 A.1.1: over_sub chain (dt_reduction → effective_over_sub
-                # → self.res.over_sub) is dead in ENR mode. `self.res.over_sub`
-                # only read by gain_type ∈ {'wiener', 'spectral_sub'} branches in
-                # ResFilter._stage_gain_compute (lines 3244, 3249, 3251); all 5
-                # presets use gain_type='enr'. Skip per-frame computation +
-                # assignment in ENR mode to eliminate wasted ops; preserve
-                # wiener/spectral_sub behaviour if gain_type ever changes.
-                _over_sub_live = self.config.res_gain_type != 'enr'
-                if _over_sub_live:
-                    dt_reduction = self.config.res_dt_reduction * dt_indicator
-                    effective_over_sub = max(base_over_sub - dt_reduction, 0.5)
 
                 # Divergence indicator EMA (delegated to FilterConvergenceAnalyzer)
                 self._convergence.update_divergence(self.near_power, self.raw_error_power)
 
-                if self.res:
-                    # v3.16-A — propagate cohort_tail_T signal to RES
-                    # residual estimator. Read by `force_render` OR-in
-                    # inside `ResidualEchoEstimator.attribute_legacy`;
-                    # byte-equal when `arc_t_force_render_or_in=False`.
-                    if self.res._residual_est is not None:
-                        self.res._residual_est._arc_t_cohort_tail_signal = bool(
-                            getattr(self, '_arc_t_cohort_tail_signal', False))
-                    # Change D: during EPC render-forced window, force RES
-                    # into render-based echo estimate (unreliable filter W).
-                    if getattr(self, '_epc_render_forced_remaining', 0) > 0:
-                        self._epc_render_forced_remaining -= 1
-                        self.res._using_render_based = True
-                    # v3.15 §1.5.S2 Arc T — RES preempt mode (H1+H2 stack):
-                    # When cohort_tail_T asserts AND arc_t_res_preempt_mode
-                    # enabled, force RES into render-based echo estimate
-                    # (H2: same defence the EPC render-forced path uses) AND
-                    # boost over_sub by arc_t_over_sub_boost (H1: stronger
-                    # spectral attenuation across all bins). Default OFF;
-                    # byte-equal flag-OFF preserved by the gate.
-                    if (self.config.arc_t_res_preempt_mode
-                            and getattr(self, '_arc_t_cohort_tail_signal', False)):
-                        self.res._using_render_based = True
-                        # arc_t_over_sub_boost is part of the dead over_sub chain
-                        # in ENR mode (Arc T S2 H1 closure); v3.16-A `force_render`
-                        # OR-in is the alive path for ENR.
-                        if _over_sub_live:
-                            effective_over_sub = effective_over_sub * float(
-                                self.config.arc_t_over_sub_boost)
-                    if _over_sub_live:
-                        self.res.over_sub = effective_over_sub
+                final_output = self._aec3_post(raw_output, near_end, far_end)
 
-                    # DT conservative residual scaling: 1.0→0.5 as dt goes 0→0.8
-                    dt_residual_scale = 1.0 - 0.5 * float(np.clip(dt_indicator, 0.0, 0.8) / 0.8)
-                    eff_echo_spec = self.filter.echo_spec * dt_residual_scale
+                # v3.13 E4.S3 — SubtractiveNLP detector (audit-only).
+                # Pure observer: reads the LINEAR residual (raw_output =
+                # mic − linear_echo_estimate, RES input) so the NL
+                # harmonic signature is not masked by RES suppression.
+                # Also reads mic_hop (near_end) for the S4.1
+                # cancellation-ratio gate (NE bucket discrimination).
+                # See E4.S1 Pass A finding: production output (post-RES)
+                # hides NL evidence.
+                if self.nl_detector is not None:
+                    _nl_conf = self.nl_detector.process(
+                        raw_output,
+                        filter_state=self._prev_filter_state,
+                        far_active=(far_power > 1e-4),
+                        mic_hop_samples=near_end)
+                    self._diag['nl_confidence'] = _nl_conf
+                    self._diag['nl_pitch_strength'] = (
+                        self.nl_detector._pitch_strength_last)
+                    self._diag['nl_pitch_lag'] = (
+                        self.nl_detector._pitch_lag_last)
 
-                    _shadow_dt = max(float(self._dt_from_energy),
-                                     float(getattr(self, '_dt_from_shadow', 0.0)))
-                    shadow_dt = 0.08 * _shadow_dt if self.epc_active else _shadow_dt
-
-                    # v3.14 Arc-P P.S2: when f3_1_per_band_erl_adaptive=True,
-                    # pass a per-bin ERL array to ResFilter so the F3.1-v3
-                    # mic-excess formula uses per-band adaptive estimates
-                    # instead of the scalar _erl_estimate.  The per-bin array
-                    # is built from _per_band_erl[LF, MF, HF] by broadcasting
-                    # each band's value to the corresponding bin range.  This
-                    # is identical to erl_estimate=scalar when the flag is OFF
-                    # (scalar float path) → byte-equal guaranteed.
-                    if self.config.f3_1_per_band_erl_adaptive and hasattr(self, '_per_band_erl'):
-                        _fpb2 = self.config.sample_rate / float(self.config.fft_size)
-                        _nf2 = self.res.n_freqs
-                        _b1k2 = max(1, min(int(round(1000.0 / _fpb2)), _nf2 - 2))
-                        _b4k2 = max(_b1k2 + 1, min(int(round(4000.0 / _fpb2)), _nf2 - 1))
-                        _erl_pb = np.empty(_nf2, dtype=np.float32)
-                        _erl_pb[:_b1k2] = float(self._per_band_erl[0])
-                        _erl_pb[_b1k2:_b4k2] = float(self._per_band_erl[1])
-                        _erl_pb[_b4k2:] = float(self._per_band_erl[2])
-                        _erl_arg = _erl_pb
+                # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
+                if not self.config.enable_dtd:
+                    if self._filter_converged:
+                        per_bin_eer = self.res.echo_psd / (self.res.error_psd + 1e-10)
+                        per_bin_eer = np.clip(per_bin_eer, 0.0, 1.0)
+                        mu_min = self.config.shadow_mu_min
+                        self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
+                        self._simple_mu_ratio = float(np.mean(per_bin_eer))
+                        # Stationary DT: only freeze when speech actually
+                        # detected (jump_ratio + hangover). _is_stationary_far
+                        # alone fires on 32% of normal speech far-end frames,
+                        # which would crush filter convergence on plain FS.
+                        if is_stationary_dt:
+                            self._per_bin_mu_scale[:] = mu_min
+                            self._simple_mu_ratio = mu_min
                     else:
-                        _erl_arg = self._erl_estimate
-                    # v3.18 Phase C.E — RES filter_converged migration.
-                    # Flag-OFF: pass legacy _filter_converged (byte-equal).
-                    # Flag-ON: pass fq_usable (multi-gate, 52-86% FS/DT
-                    # coverage vs ~5% legacy). Substitution only when
-                    # AecState back-ref + C.B substrate both available.
-                    if (self.config.c_e_res_use_fq_usable
-                            and self._aec_state is not None
-                            and getattr(self._aec_state, '_aec_ref', None) is not None):
-                        _ce_fc_arg = self._aec_state.fq_usable()
-                    else:
-                        _ce_fc_arg = self._filter_converged
-                    final_output = self._aec3_post(raw_output, near_end, far_end)
-
-                    # v3.13 E4.S3 — SubtractiveNLP detector (audit-only).
-                    # Pure observer: reads the LINEAR residual (raw_output =
-                    # mic − linear_echo_estimate, RES input) so the NL
-                    # harmonic signature is not masked by RES suppression.
-                    # Also reads mic_hop (near_end) for the S4.1
-                    # cancellation-ratio gate (NE bucket discrimination).
-                    # See E4.S1 Pass A finding: production output (post-RES)
-                    # hides NL evidence.
-                    if self.nl_detector is not None:
-                        _nl_conf = self.nl_detector.process(
-                            raw_output,
-                            filter_state=self._prev_filter_state,
-                            far_active=(far_power > 1e-4),
-                            mic_hop_samples=near_end)
-                        self._diag['nl_confidence'] = _nl_conf
-                        self._diag['nl_pitch_strength'] = (
-                            self.nl_detector._pitch_strength_last)
-                        self._diag['nl_pitch_lag'] = (
-                            self.nl_detector._pitch_lag_last)
-
-                    # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
-                    if not self.config.enable_dtd:
-                        if self._filter_converged:
-                            per_bin_eer = self.res.echo_psd / (self.res.error_psd + 1e-10)
-                            per_bin_eer = np.clip(per_bin_eer, 0.0, 1.0)
-                            mu_min = self.config.shadow_mu_min
-                            self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
-                            self._simple_mu_ratio = float(np.mean(per_bin_eer))
-                            # Stationary DT: only freeze when speech actually
-                            # detected (jump_ratio + hangover). _is_stationary_far
-                            # alone fires on 32% of normal speech far-end frames,
-                            # which would crush filter convergence on plain FS.
-                            if is_stationary_dt:
-                                self._per_bin_mu_scale[:] = mu_min
-                                self._simple_mu_ratio = mu_min
-                        else:
-                            # Pre-convergence: no per_bin, let ratio track DT naturally
-                            self._per_bin_mu_scale = None
-                            self._update_simple_mu_ratio(raw_output, far_end)
-
-                if self.config.return_res_context and not self.res:
-                    _res_context = AecResContext(
-                        raw_output=raw_output.copy(),
-                        echo_spec=self.filter.echo_spec.copy(),
-                        far_power=far_power,
-                        far_spec=self.filter.far_spec.copy(),
-                        near_spec=self.filter.near_spec.copy(),
-                        filter_converged=self._filter_converged,
-                        erle_factor=float(erle_factor),
-                        dt_indicator=float(dt_indicator),
-                        divergence=float(self._divergence_indicator),
-                        over_sub=float(effective_over_sub),
-                        saturation_level=float(self._saturation_level),
-                        erl_estimate=float(self._erl_estimate),
-                    )
+                        # Pre-convergence: no per_bin, let ratio track DT naturally
+                        self._per_bin_mu_scale = None
+                        self._update_simple_mu_ratio(raw_output, far_end)
 
             # C-parity fix: when RES is disabled, _update_simple_mu_ratio is never
             # called in PBFDKF path. C always calls update_simple_mu_ratio regardless.
@@ -3115,7 +3017,7 @@ class AEC:
             _epv_ratio = (self._epv_gain_fast / (self._epv_gain_slow + 1e-10)
                           if self._epv_gain_slow > 1e-12 else 1.0)
             self._diag['epv_gain_ratio'] = float(_epv_ratio)
-            self._diag['dt_residual_scale'] = float(dt_residual_scale) if 'dt_residual_scale' in locals() else 1.0
+            self._diag['dt_residual_scale'] = 1.0
             self._diag['filter_w_norm'] = float(np.linalg.norm(self.filter.W)) if hasattr(self.filter, 'W') else 0.0
             self._diag['shadow_w_norm'] = (float(np.linalg.norm(self.shadow_filter.W))
                                             if self.shadow_filter and hasattr(self.shadow_filter, 'W') else 0.0)
