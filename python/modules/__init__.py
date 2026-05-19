@@ -14,7 +14,8 @@ Layout (target, populated incrementally during refactor R.1 → R.11):
 * ``preprocessing``    — `HighPassFilter`, `SaturationDetector`
 * ``erle``             — `FilterErleEstimator`, `FullbandErleEstimator`,
                          `compute_erle_confidence`
-* ``delay``            — `DelayEstimator`
+* ``delay/``           — AEC3-aligned `EchoPathDelayEstimator` +
+                         `LegacyDelayShim` (`DelayEstimator` re-export)
 * ``filters``          — `NlmsFilter`, `PBFDAF`, `PBFDKF`
 * ``detectors``        — `RenderActivityDetector`,
                          `FilterConvergenceAnalyzer`, `DoubleTalkAnalyzer`,

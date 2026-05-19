@@ -29,7 +29,7 @@ from modules.preprocessing import HighPassFilter, SaturationDetector  # noqa: F4
 from modules.erle import (  # noqa: F401
     FilterErleEstimator, FullbandErleEstimator, compute_erle_confidence,
 )
-from modules.legacy_delay import DelayEstimator  # noqa: F401
+from modules.delay.legacy_compat import LegacyDelayShim as DelayEstimator  # noqa: F401
 from modules.filters import NlmsFilter, PBFDAF, PBFDKF  # noqa: F401
 from modules.detectors import (  # noqa: F401
     RenderActivityDetector, FilterConvergenceAnalyzer,
