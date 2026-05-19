@@ -58,16 +58,6 @@ class ResidualEchoEstimator:
         self._last_linear_residual_psd_mean = 0.0
         self._last_render_residual_psd_mean = 0.0
         self._last_render_blend = 0.0
-        # v3.16-A — Arc T S2 H2 force_render OR-in. AEC mutates
-        # `_arc_t_cohort_tail_signal` per frame before `attribute_legacy`
-        # runs; `_arc_t_force_render_or_in_enabled` is wired from
-        # AecConfig at AEC.__init__ and stays constant after.
-        self._arc_t_cohort_tail_signal = False
-        self._arc_t_force_render_or_in_enabled = False
-        # v3.19 Phase 1 Branch R1 — wired from AecConfig via AEC.__init__.
-        # When True, R1 force_render OR uses fq_usable instead of
-        # filter_converged (default-OFF byte-equal).
-        self._c_e_branch_force_render_use_fq_usable = False
 
     def reset(self, preserve_long_window_ema: bool = False) -> None:
         """Clear residual-echo estimator state.
@@ -157,26 +147,10 @@ class ResidualEchoEstimator:
                 effective_threshold = switching_threshold + hysteresis
             else:
                 effective_threshold = switching_threshold
-            # v3.16-A — OR cohort_tail_T into force_render. AEC mutates
-            # `_arc_t_cohort_tail_signal` per frame before this method
-            # runs (see AEC.process). When the enable flag is OFF (the
-            # default), the OR-in term is always False → byte-equal.
-            #
-            # v3.19 Phase 1 Branch R1 — when c_e_branch_force_render_use_fq_usable
-            # is ON, the `not filter_converged` clause uses fq_usable
-            # (AEC3-aligned UsableLinearEstimate semantic) instead.
-            # Default-OFF: byte-equal to legacy.
-            _fc_r1 = filter_converged
-            if (self._c_e_branch_force_render_use_fq_usable
-                    and aec_state is not None
-                    and getattr(aec_state, '_aec_ref', None) is not None):
-                _fc_r1 = aec_state.fq_usable()
             force_render = (
                 epc_active
                 or saturation_level > 0.5
-                or not _fc_r1
-                or (self._arc_t_force_render_or_in_enabled
-                    and self._arc_t_cohort_tail_signal)
+                or not filter_converged
             )
             want_render = (erle_factor < effective_threshold) or force_render
             if want_render and not self._using_render_based:

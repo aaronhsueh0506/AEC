@@ -172,30 +172,6 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     if 'AEC_PLAN_B' in os.environ and 'plan_b_dt_per_bin_gamma' not in config_overrides:
         config_overrides['plan_b_dt_per_bin_gamma'] = (
             os.environ['AEC_PLAN_B'].lower() not in ('0', 'false', 'off', 'no'))
-    # F3.1 per-bin mic-energy excess evidence (default OFF)
-    if ('AEC_USE_MIC_EXCESS' in os.environ
-            and 'use_mic_excess_evidence' not in config_overrides):
-        config_overrides['use_mic_excess_evidence'] = (
-            os.environ['AEC_USE_MIC_EXCESS'].lower() not in ('0', 'false', 'off', 'no'))
-    # v3.14 Arc-R Sprint S1 — per-band ENR threshold wire (default OFF)
-    if ('AEC_RES_PER_BAND_ENR' in os.environ
-            and 'res_per_band_enr' not in config_overrides):
-        config_overrides['res_per_band_enr'] = (
-            os.environ['AEC_RES_PER_BAND_ENR'].lower() not in ('0', 'false', 'off', 'no'))
-    # v3.14 Arc-R Sprint S2 — per-band ENR threshold tuple overrides (LF,MF,HF csv)
-    if ('AEC_ENR_T_NE_PB' in os.environ
-            and 'enr_t_ne_per_band' not in config_overrides):
-        _v = os.environ['AEC_ENR_T_NE_PB']
-        config_overrides['enr_t_ne_per_band'] = tuple(float(x) for x in _v.split(','))
-    if ('AEC_ENR_S_NE_PB' in os.environ
-            and 'enr_s_ne_per_band' not in config_overrides):
-        _v = os.environ['AEC_ENR_S_NE_PB']
-        config_overrides['enr_s_ne_per_band'] = tuple(float(x) for x in _v.split(','))
-    # v3.14 Arc-P Sprint S3 — adaptive per-band ERL EMA (default OFF)
-    if ('AEC_F3_1_PER_BAND_ERL' in os.environ
-            and 'f3_1_per_band_erl_adaptive' not in config_overrides):
-        config_overrides['f3_1_per_band_erl_adaptive'] = (
-            os.environ['AEC_F3_1_PER_BAND_ERL'].lower() not in ('0', 'false', 'off', 'no'))
     # F2.1 EPC state reset (default OFF)
     if ('AEC_USE_EPC_RESET' in os.environ
             and 'use_epc_state_reset' not in config_overrides):
@@ -279,32 +255,8 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'arc_m_epc_gated' not in config_overrides):
         config_overrides['arc_m_epc_gated'] = (
             os.environ['AEC_ARC_M_EPC_GATED'].lower() not in ('0', 'false', 'off', 'no'))
-    # v3.15 §1.5b Arc M.v3: T-gated rescue retry of Arc M V1 (default OFF)
-    if ('AEC_ARC_M_T_GATED_ENABLED' in os.environ
-            and 'arc_m_t_gated_enabled' not in config_overrides):
-        config_overrides['arc_m_t_gated_enabled'] = (
-            os.environ['AEC_ARC_M_T_GATED_ENABLED'].lower() not in ('0', 'false', 'off', 'no'))
-    # v3.15 §1.4 Arc G: per-band W reset on detected gain-change drift (default OFF)
-    if ('AEC_ARC_G_PER_BAND_W_RESET' in os.environ
-            and 'arc_g_per_band_w_reset' not in config_overrides):
-        config_overrides['arc_g_per_band_w_reset'] = (
-            os.environ['AEC_ARC_G_PER_BAND_W_RESET'].lower() not in ('0', 'false', 'off', 'no'))
-    if ('AEC_ARC_G_DRIFT_RATIO' in os.environ
-            and 'arc_g_drift_ratio' not in config_overrides):
-        config_overrides['arc_g_drift_ratio'] = float(
-            os.environ['AEC_ARC_G_DRIFT_RATIO'])
-    # v3.15 §1.5 Arc T: cohort tail real-time detector + RES preempt (default OFF)
+    # Remaining env-var hooks for substrate flags still in AecConfig.
     for _flag, _key, _is_bool in (
-        ('AEC_ARC_T_COHORT_DETECTOR', 'arc_t_cohort_detector', True),
-        ('AEC_ARC_T_RES_PREEMPT_MODE', 'arc_t_res_preempt_mode', True),
-        ('AEC_ARC_T_INST_ALPHA', 'arc_t_inst_alpha', False),
-        ('AEC_ARC_T_WINDOW_FRAMES', 'arc_t_window_frames', False),
-        ('AEC_ARC_T_THRESHOLD_HI_DB', 'arc_t_threshold_hi_db', False),
-        ('AEC_ARC_T_THRESHOLD_LO_DB', 'arc_t_threshold_lo_db', False),
-        ('AEC_ARC_T_HYSTERESIS_FRAMES', 'arc_t_hysteresis_frames', False),
-        ('AEC_ARC_T_OVER_SUB_BOOST', 'arc_t_over_sub_boost', False),
-        # v3.16-A — force_render OR-in (Arc T S2 H2 fix). Default OFF.
-        ('AEC_ARC_T_FORCE_RENDER_OR_IN', 'arc_t_force_render_or_in', True),
         # v3.17 B.1 — Movement-rate DelayEst (EPC-gated period override).
         ('AEC_MOV_RATE_DELAY_EST', 'mov_rate_delay_est_enabled', True),
         ('AEC_DELAY_EST_PERIOD_S_FAST', 'delay_est_period_s_fast', False),
@@ -332,19 +284,6 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         ('AEC_FILTER_MISADJUSTMENT_SCALE_P', 'filter_misadjustment_scale_p', True),
         # v3.18 Phase C.A — FilterAnalyzer audit-only port
         ('AEC_FILTER_ANALYZER', 'filter_analyzer_enabled', True),
-        # v3.18 Phase C.B — FilteringQualityAnalyzer audit-only port
-        ('AEC_FILTER_QUALITY', 'filter_quality_enabled', True),
-        # v3.18 Phase C.C — AecState ADT facade
-        ('AEC_AEC_STATE', 'aec_state_enabled', True),
-        # v3.18 Phase C.D-α — leakage_diverged Q-bifurcation
-        ('AEC_LEAKAGE_DIVERGED', 'leakage_diverged_enabled', True),
-        ('AEC_LEAKAGE_DIVERGED_THRESHOLD', 'leakage_diverged_threshold', False),
-        # v3.18 Phase C.E — RES filter_converged → fq_usable migration
-        ('AEC_C_E_RES_FQ_USABLE', 'c_e_res_use_fq_usable', True),
-        # v3.19 Phase 1 — per-RES-branch C.E migration ablation flags
-        ('AEC_C_E_BRANCH_FORCE_RENDER_FQ_USABLE', 'c_e_branch_force_render_use_fq_usable', True),
-        ('AEC_C_E_BRANCH_DT_PER_BIN_FQ_USABLE', 'c_e_branch_dt_per_bin_use_fq_usable', True),
-        ('AEC_C_E_BRANCH_COH2_EMA_FQ_USABLE', 'c_e_branch_coh2_ema_use_fq_usable', True),
     ):
         if _flag in os.environ and _key not in config_overrides:
             _v = os.environ[_flag]

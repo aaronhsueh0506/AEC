@@ -184,9 +184,7 @@ class AEC:
         """
         for filt in [self.filter, self.shadow_filter]:
             if filt is not None and hasattr(filt, 'Q'):
-                if not (self.config.arc_m_t_gated_enabled
-                        and getattr(self, '_arc_t_cohort_tail_signal', False)):
-                    self._arc_m_q_boost(filt)
+                self._arc_m_q_boost(filt)
         self._f_e3_handle_epc_fire(source)
 
     def _handle_delay_change_full(self, source: str) -> None:
@@ -207,9 +205,7 @@ class AEC:
         """
         for filt in [self.filter, self.shadow_filter]:
             if filt is not None and hasattr(filt, 'Q'):
-                if not (self.config.arc_m_t_gated_enabled
-                        and getattr(self, '_arc_t_cohort_tail_signal', False)):
-                    self._arc_m_q_boost(filt)
+                self._arc_m_q_boost(filt)
                 # Kalman P-override attrs are PBFDKF-only. When
                 # shadow_class_nlms=True, the shadow filter is PBFDAF and
                 # has no Kalman state — skip the P-override block on it.
@@ -222,12 +218,6 @@ class AEC:
         self._maybe_mark_diverged(source)
         self._epc_render_forced_remaining = self.config.epc_hangover
         self._erl_estimate = min(self._erl_estimate, 0.3)
-        if self.config.f3_1_per_band_erl_adaptive:
-            _pb_caps = (self.config.per_band_erl_cap_lf,
-                        self.config.per_band_erl_cap_mf,
-                        self.config.per_band_erl_cap_hf)
-            for _bi, _cap in enumerate(_pb_caps):
-                self._per_band_erl[_bi] = min(self._per_band_erl[_bi], _cap)
         if self.config.use_epc_state_reset:
             self._apply_epc_state_reset(source)
         self._f_e3_handle_epc_fire(source)
@@ -305,34 +295,6 @@ class AEC:
         self._misadjustment_hangover_remaining = (
             self.config.filter_misadjustment_hangover_frames)
         self._misadjustment_fire_count += 1
-
-    # v3.18 Phase C.D-α — leakage_diverged Q-bifurcation trigger.
-    def _check_leakage_diverged(self) -> bool:
-        """AEC3-aligned leakage_diverged: refined claims usable but
-        coarse contradicts → re-learn refined via Q-boost.
-        """
-        if not self.config.leakage_diverged_enabled:
-            return False
-        if self._leakage_diverged_hangover > 0:
-            self._leakage_diverged_hangover -= 1
-            return False
-        if self.epc_active or self._regime_handler.main_paused:
-            return False
-        # Phase C.B fq_usable gate. Default-OFF preset never reaches here
-        # (leakage_diverged_enabled=False); when caller turns it on, the
-        # decision delegates to the filter quality analyzer directly.
-        if (getattr(self, '_filter_quality', None) is None
-                or not self._filter_quality.usable):
-            return False
-        sh_adv = float(getattr(self._dt_analyzer, 'shadow_advantage', 1.0))
-        return sh_adv >= self.config.leakage_diverged_threshold
-
-    def _apply_leakage_diverged(self) -> None:
-        """Q-boost refined filter on leakage_diverged fire; arm hangover."""
-        self._arc_m_q_boost(self.filter)
-        self._leakage_diverged_hangover = (
-            self.config.leakage_diverged_hangover_frames)
-        self._leakage_diverged_fire_count += 1
 
     # ── EPC-state delegations (state lives in self._epc_det) ─────────────────
     @property
@@ -760,19 +722,6 @@ class AEC:
         # Per-frame helper: set True inside any EPC fire site this frame.
         # Read by FilteringQualityAnalyzer; ignored when flag is OFF.
         self._epc_reset_fired_this_frame = False
-
-        # v3.18 Phase C.C — AecState extension. The existing AecState class
-        # (defined above) is constructed later in __init__ with detector
-        # references. When aec_state_enabled=True, we set a back-ref to
-        # this AEC on the already-constructed AecState so AEC3-aligned
-        # methods (consistent_estimate, fq_usable, etc.) can read from
-        # C.A/C.B substrate. The actual wiring happens after AecState
-        # construction below (search marker 'AecState back-ref').
-
-        # v3.18 Phase C.D-α — leakage_diverged state.
-        if self.config.leakage_diverged_enabled:
-            self._leakage_diverged_hangover = 0
-            self._leakage_diverged_fire_count = 0
 
         # #4: Confidence memory decay
         self.prev_dtd_conf = 0.0
@@ -1302,9 +1251,7 @@ class AEC:
         for filt in [self.filter, self.shadow_filter]:
             if filt is not None and hasattr(filt, 'Q'):
                 if hasattr(filt, 'Q_high'):
-                    if not (self.config.arc_m_t_gated_enabled
-                            and getattr(self, '_arc_t_cohort_tail_signal', False)):
-                        self._arc_m_q_boost(filt)
+                    self._arc_m_q_boost(filt)
                 if hasattr(filt, '_p_max_override'):
                     filt._p_max_override = 1.0
                     filt._p_max_override_frames = 30
@@ -1605,9 +1552,7 @@ class AEC:
                             self._classified_event = classify_epc_event(_delay_event)
                         for filt in [self.filter, self.shadow_filter]:
                             if filt is not None and hasattr(filt, 'Q'):
-                                if not (self.config.arc_m_t_gated_enabled
-                                        and getattr(self, '_arc_t_cohort_tail_signal', False)):
-                                    self._arc_m_q_boost(filt)
+                                self._arc_m_q_boost(filt)
                                 # PBFDKF-only Kalman P-override (NLMS shadow
                                 # has no P state — skip cleanly).
                                 if isinstance(filt, PBFDKF):
@@ -2058,9 +2003,7 @@ class AEC:
                 )
                 if shadow_decision.boost_q:
                     if hasattr(self.filter, 'Q') and hasattr(self.filter, 'Q_high'):
-                        if not (self.config.arc_m_t_gated_enabled
-                                and getattr(self, '_arc_t_cohort_tail_signal', False)):
-                            self._arc_m_q_boost(self.filter)
+                        self._arc_m_q_boost(self.filter)
                         self.filter._p_max_override = 1.0
                         self.filter._p_max_override_frames = 20
                     # F2.3: Yang 2017 R-reset — over-estimated R from a prior DT
@@ -2176,9 +2119,7 @@ class AEC:
                 else:
                     for filt in [self.filter, self.shadow_filter]:
                         if filt and hasattr(filt, 'Q'):
-                            if not (self.config.arc_m_t_gated_enabled
-                                    and getattr(self, '_arc_t_cohort_tail_signal', False)):
-                                self._arc_m_q_boost(filt)
+                            self._arc_m_q_boost(filt)
                             # PBFDKF-only Kalman P-override (NLMS shadow skip).
                             if isinstance(filt, PBFDKF):
                                 filt._p_max_override = 1.0
@@ -2188,16 +2129,6 @@ class AEC:
                     self._maybe_mark_diverged('epv')
                     self._epc_render_forced_remaining = self.config.epc_hangover
                     self._erl_estimate = min(self._erl_estimate, 0.3)
-                    # v3.14 Arc-P P.S2: when per-band ERL is active, also cap each
-                    # per-band EMA to its per-band post-EPC ceiling so a stale
-                    # high-coupling EMA doesn't persist across an echo path change.
-                    # When flag is OFF this block is skipped → byte-equal preserved.
-                    if self.config.f3_1_per_band_erl_adaptive:
-                        _pb_caps = (self.config.per_band_erl_cap_lf,
-                                    self.config.per_band_erl_cap_mf,
-                                    self.config.per_band_erl_cap_hf)
-                        for _bi, _cap in enumerate(_pb_caps):
-                            self._per_band_erl[_bi] = min(self._per_band_erl[_bi], _cap)
                     if self.config.use_epc_state_reset:
                         self._apply_epc_state_reset('epv')
                     self._f_e3_handle_epc_fire('epv')
@@ -2246,9 +2177,7 @@ class AEC:
                             self.dtd_coherence.confidence *= 0.3
                         for filt in [self.filter, self.shadow_filter]:
                             if filt and hasattr(filt, 'Q'):
-                                if not (self.config.arc_m_t_gated_enabled
-                                        and getattr(self, '_arc_t_cohort_tail_signal', False)):
-                                    self._arc_m_q_boost(filt)
+                                self._arc_m_q_boost(filt)
                         self._maybe_mark_diverged('shadow_rise')
                         # P_MAX relax + P_floor raise: force filter to abandon
                         # stale path estimate. PBFDKF-only (NLMS shadow skip).
@@ -2261,14 +2190,6 @@ class AEC:
                         # Change D: arm RES render-forced + cap stale ERL
                         self._epc_render_forced_remaining = self.config.epc_hangover
                         self._erl_estimate = min(self._erl_estimate, 0.3)
-                        # v3.14 Arc-P P.S2: per-band EPC cap (symmetric with EPV path above).
-                        # Byte-equal when flag is OFF.
-                        if self.config.f3_1_per_band_erl_adaptive:
-                            _pb_caps = (self.config.per_band_erl_cap_lf,
-                                        self.config.per_band_erl_cap_mf,
-                                        self.config.per_band_erl_cap_hf)
-                            for _bi, _cap in enumerate(_pb_caps):
-                                self._per_band_erl[_bi] = min(self._per_band_erl[_bi], _cap)
                         if self.config.use_epc_state_reset:
                             self._apply_epc_state_reset('shadow_rise')
                         self._f_e3_handle_epc_fire('shadow_rise')
@@ -2295,17 +2216,6 @@ class AEC:
             # only; current frame's raw_output already computed.
             self._update_misadjustment_estimator()
             self._check_and_apply_misadjustment_scale()
-
-            # v3.18 Phase C.D-α — leakage_diverged check. 5th independent
-            # Q-boost trigger; fires when fq_usable says refined is good
-            # but shadow_advantage says otherwise. Skipped flag-OFF.
-            if self.config.leakage_diverged_enabled:
-                if self._check_leakage_diverged():
-                    self._apply_leakage_diverged()
-                    self._epc_reset_fired_this_frame = True
-                    self._diag['leakage_diverged_fired'] = True
-                else:
-                    self._diag['leakage_diverged_fired'] = False
 
             # v3.18 Phase C.A — FilterAnalyzer audit-only update. Reads main
             # filter W → time-domain impulse → HP-filter → peak detection +
@@ -3231,7 +3141,7 @@ class AEC:
             divergence=self._divergence_indicator,
             epc_active=self.epc_active,
             epv_ratio=d.get('epv_gain_ratio', 1.0),
-            cohort_tail_T=bool(getattr(self, '_arc_t_cohort_tail_signal', False)),
+            cohort_tail_T=False,
             mu_scale=d.get('mu_scale', 1.0),
             filter_w_norm=d.get('filter_w_norm', 0.0),
             shadow_w_norm=d.get('shadow_w_norm', 0.0),

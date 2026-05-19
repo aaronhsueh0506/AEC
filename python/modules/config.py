@@ -122,41 +122,6 @@ class AecConfig:
     # behaviour. Pre-bench gate at C.B.3 decides whether to advance to C.C.
     filter_quality_enabled: bool = False
 
-    # v3.18 Phase C.C — AecState ADT facade (AEC3-aligned read-only).
-    # Wraps C.A + C.B + legacy state behind a single AecState class.
-    # Initially read-only; consumer migration deferred to C.E.
-    # No behaviour change; verification gate at C.C.2.
-    aec_state_enabled: bool = False
-
-    # v3.18 Phase C.D-α — leakage_diverged Q-bifurcation trigger
-    # (AEC3-aligned). Fires when fq_usable says "filter is trustworthy"
-    # but shadow contradicts (shadow_advantage > threshold). On fire:
-    # _arc_m_q_boost on refined filter + arms hangover. Requires C.A +
-    # C.B + C.C all ON for AecState back-ref to read fq_usable.
-    # Design lock: docs/v3_18_c_d1_leakage_diverged_design.md.
-    leakage_diverged_enabled: bool = False
-    leakage_diverged_threshold: float = 2.0   # shadow_advantage ratio
-    leakage_diverged_hangover_frames: int = 100
-
-    # v3.18 Phase C.E — RES filter_converged → fq_usable migration.
-    # Surgical first migration: AEC passes fq_usable to RES.process()
-    # instead of _filter_converged when flag is ON. Tests Phase C.D-α
-    # closeout hypothesis 3 (RES gating bottleneck). Requires C.A+C.B+C.C
-    # all ON for the back-ref to fq_usable substrate.
-    # Design: docs/v3_18_c_e1_consumer_migration_design.md.
-    c_e_res_use_fq_usable: bool = False
-
-    # v3.19 Phase 1 — per-RES-branch C.E migration. Per-branch ablation
-    # of the v3.18 C.E whole-arg switch; identifies which RES branches
-    # benefit from fq_usable (AEC3-aligned multi-gate) vs hurt from it.
-    # All default OFF; byte-equal to v3.18 production. Each flag toggles
-    # ONE branch from `_filter_converged` semantics to `fq_usable`.
-    # Branches inventoried in docs/v3_19_phase1_1a_resfilter_branch_inventory.md.
-    # Design lock: docs/v3_19_phase1_2_per_branch_flag_design.md.
-    c_e_branch_force_render_use_fq_usable: bool = False
-    c_e_branch_dt_per_bin_use_fq_usable: bool = False
-    c_e_branch_coh2_ema_use_fq_usable: bool = False
-
     # Coherence DTD absolute energy floor
     dtd_coh_abs_floor: float = 1e-6     # #8: Absolute error energy floor
 
@@ -268,22 +233,6 @@ class AecConfig:
     # (effective_dt 0.2–0.5) so per-bin γ²(k) discrimination survives.
     plan_b_dt_per_bin_gamma: bool = False
 
-    # F3.1 — per-bin mic-energy excess evidence (default OFF; A/B candidate).
-    # Replaces the `(1 - coh2)` term in dt_per_bin with the validated
-    # `max(error_psd - far_lw·ERL_est, 0) / error_psd` per-bin metric.
-    # `(1 - coh2)` saturates to 1 in FS post-cancellation (echo cancelled →
-    # residual decorrelated → low coh2 → "NE-like"), an acknowledged
-    # dead-code symptom flagged in the HF-cap comment at ~line 2060. The
-    # excess-ratio metric is mic-energy-based, immune to that saturation,
-    # and was validated in P1 Phase 1 with AUROC 0.871 (FS-vs-NE+DT_positive)
-    # for the HF-cap gate; F3.1 extends the same metric per-bin to the
-    # primary dt_per_bin axis. Gated on `filter_converged AND
-    # _long_window_n_updates > 0` so the metric is only used when
-    # `erl_estimate` and `far_lw` are reliable; falls back to the legacy
-    # path (γ² primary OR coh2 primary) otherwise. Requires
-    # `res_echo_method="direct"` (the balanced default) since
-    # `_long_window_far_psd` is only maintained on that path.
-    use_mic_excess_evidence: bool = False
 
     # F2.1 — reset stale upstream state on EPC fire (default OFF).
     # The shipped EPC path (EPV at aec.py:~5107 and shadow_rise at
@@ -646,48 +595,6 @@ class AecConfig:
     # separate gated sprint — do not enable until S-orth.A 800-case is run.
     shadow_state_decoupled: bool = False
 
-    # v3.14 Arc-P Sprint 02: adaptive per-band ERL EMA driven by
-    # echo_psd[k] / far_psd[k] (PBFDKF filter output, per-bin).
-    #
-    # Motivation (P.S1 audit, 2026-05-14): scalar erl_estimate=0.3 is a
-    # 7× OVER-estimate in low-coupling rooms (case 04 LF=0.043, MF=0.191,
-    # HF=0.111). This inflates the echo mask in the F3.1-v3 mic-excess
-    # formula → excess_ratio ≈ 0 → dt_per_bin ≈ 0 → echo leaks into
-    # dt_per_bin when it should be identified as FS. Inter-room variance
-    # (11×) >> inter-band variance → a fixed per-band table cannot
-    # generalise; adaptive EMA per band is the canonical solution.
-    #
-    # Design (P.S2):
-    #   3 bands: LF 0–1k Hz, MF 1–4k Hz, HF 4–8k Hz
-    #   Source: per-bin |echo_spec|² / |far_spec|² (PBFDKF output)
-    #   EMA α = 0.99 (TC ≈ 100 frames ≈ 1 s at hop=160/16 kHz, research-
-    #           backed: Jung 2011 §IV.A uses similar TC for echo-path EMA)
-    #   Update gate: filter_state in ('refined_usable', 'coarse_learning')
-    #           AND far_pwr > 1e-4 (same gate as scalar erl_estimate)
-    #           AND raw_dt_ratio < 2.0 AND inst_erl < 1.5 (NE corruption guard)
-    #   Post-EPC cap: per-band min(current, per_band_erl_cap[b]) where
-    #           cap[LF]=0.6, cap[MF]=0.8, cap[HF]=1.0 (conservative, wide)
-    #           (replaces scalar min(current, 0.3) — only active when flag ON)
-    #   Byte-equal proof: when flag=False, per-band arrays are not updated
-    #           and erl_e in F3.1 formula uses float(self._erl_estimate)
-    #           — identical to pre-P.S2 path. No production code path touched.
-    #
-    # Default OFF: byte-equal to baseline when False. P.S3 tune sprint will
-    # optimise α and the per-band clip bounds after P.S2 wiring is verified.
-    f3_1_per_band_erl_adaptive: bool = False
-    # Per-band ERL EMA time constant (α). 0.99 = TC ≈ 100 hops at hop=160.
-    # Slow tracking is intentional: ERL changes only on room/position change.
-    per_band_erl_alpha: float = 0.99
-    # Post-EPC per-band cap values [LF, MF, HF]. Replaces scalar 0.3 cap
-    # (line 6265 / 6304) when flag is ON. Wide conservative values from P.S1
-    # clip_hi recommendations; tighten in P.S3 after seeing 800-case distribution.
-    per_band_erl_cap_lf: float = 0.6
-    per_band_erl_cap_mf: float = 0.8
-    per_band_erl_cap_hf: float = 1.0
-    # Per-band ERL clip bounds (safety floor/ceil on the EMA value itself).
-    per_band_erl_clip_lo: float = 0.005
-    per_band_erl_clip_hi: float = 1.5
-
     # v3.14 Arc-R Sprint S1: per-band ENR threshold wire.
     #
     # Motivation: ENR thresholds `enr_t_ne` / `enr_s_ne` in
@@ -778,93 +685,6 @@ class AecConfig:
     # ≥ 0; SOFT: nores Δecho ≥ -0.020 (RES rescue).  HARD: full-pipeline
     # AECMOS DT Δdeg ≥ -0.005, FS Δecho ≥ -0.020, cohort tail ≥ -0.05.
     arc_m_epc_gated: bool = False
-
-    # v3.15 §1.5b Arc M.v3 — T-gated rescue retry (default OFF, additive on
-    # top of arc_m_epc_gated). When BOTH this flag AND arc_t_cohort_detector
-    # are ON, every _arc_m_q_boost(filt) invocation is wrapped with a gate:
-    #   if not (arc_m_t_gated_enabled AND _arc_t_cohort_tail_signal):
-    #       _arc_m_q_boost(filt)
-    # so the per-band Q tilt is suppressed during cohort-tail-signal-asserted
-    # windows. Hypothesis: V1's +0.023 DT_movement Δdeg win came from
-    # non-cohort-tail EPC windows; V1's FS_movement / cohort tail damage
-    # came from cohort-tail EPC windows. T-gating excludes the catastrophe
-    # windows while preserving the convergence-recovery wins.
-    #
-    # Reads `self._arc_t_cohort_tail_signal` (Arc T S1 detector signal).
-    # Default-OFF (Arc T flag OFF) holds the field at False every frame,
-    # so this gate is byte-equal no-op until BOTH flags ON.
-    arc_m_t_gated_enabled: bool = False
-
-    # v3.15 §1.4 Arc G — per-band W reset on detected gain-change drift
-    # (default OFF). Mechanism orthogonal to Arc F/M Q-modification trade-off:
-    # Arc G targets sudden mic-gain or path discontinuities by zeroing only
-    # the affected band's filter weights, leaving steady-state stability of
-    # the unaffected bands intact.
-    #
-    # Detector: maintain a fast per-band ERL EMA (alpha = arc_g_fast_alpha)
-    # alongside Arc P's slow per-band ERL.  When ratio max/min > arc_g_drift_ratio
-    # on band b AND PathChangeRegimeHandler is NOT currently asserting EPC
-    # (avoids double-handling cohort tail catastrophe; PathChangeRegimeHandler
-    # is load-bearing on cohort tail per `feedback_aec_code_review_accuracy`),
-    # zero W[:, bin_range_for_band_b] and cooldown the band for
-    # arc_g_cooldown_frames frames.
-    #
-    # Requires `f3_1_per_band_erl_adaptive=True` (consumes Arc P infrastructure).
-    #
-    # §0.6 metric: linear-filter primary (nores listen on 5 gain-change cases).
-    # HARD: cohort tail Δecho ≥ -0.05 (must NOT damage catastrophe defence);
-    # full-pipeline DT Δdeg ≥ -0.005, FS Δecho ≥ -0.020.
-    arc_g_per_band_w_reset: bool = False
-    arc_g_fast_alpha: float = 0.85
-    arc_g_drift_ratio: float = 4.0
-    arc_g_cooldown_frames: int = 100
-
-    # v3.15 §1.5 Arc T — cohort tail real-time detector (default OFF).
-    # Computes a per-frame ERL_decile_std proxy = max-over-bands of
-    # 10·log10(rolling_max / rolling_min) on EMA-smoothed per-band proxy
-    # ERL = mean(res.error_psd[band]) / mean(_long_window_far_psd[band]).
-    # Asserts cohort_tail_T when proxy >= arc_t_threshold_hi_db; releases
-    # via hysteresis at arc_t_threshold_lo_db over arc_t_hysteresis_frames.
-    # Source signal is UN-GATED on _filter_converged because the canonical
-    # cohort tail case (qNvSMyU) NEVER reaches refined_usable, so the
-    # converged-only per-band ERL block is silent there.
-    #
-    # Dual role:
-    #   1. RES preempt — when arc_t_res_preempt_mode=True AND cohort_tail_T
-    #      asserts, force render-based mode + boost over_sub by
-    #      arc_t_over_sub_boost (H1+H2 stack per design doc §2.3).
-    #   2. §1.5b Arc M.v3 upstream gate — _arc_m_q_boost reads
-    #      self._arc_t_cohort_tail_signal and skips per-band Q boost during
-    #      the asserted window (rescues Arc M V1 from cohort tail wall).
-    #
-    # §0.6 metric channel: HYBRID (AECMOS primary, nores secondary).
-    # Hard bar: cohort tail Δecho ≥ +0.030, FP rate ≤ 5%.
-    arc_t_cohort_detector: bool = False
-    arc_t_res_preempt_mode: bool = False
-    arc_t_inst_alpha: float = 0.85
-    arc_t_window_frames: int = 64
-    # T_HI calibrated 2026-05-15 from 8-case S1 validation: TAIL min max_db
-    # = 19.15 (Hp5g1asacUCt5rJVLO1FuQ_doubletalk_with_movement); CTRL DT
-    # mis-adaptation max = 18.01 (NN7yhG2XTEqq46X8X0yLfA_doubletalk).
-    # 18.5 dB is the optimal separator (~0.5 dB margin both sides).
-    arc_t_threshold_hi_db: float = 18.5
-    # T_LO sets hysteresis hold band; widened from 10 → 13 to reduce long-tail
-    # holds on legitimate post-catastrophe-recovery frames.
-    arc_t_threshold_lo_db: float = 13.0
-    arc_t_hysteresis_frames: int = 200
-    arc_t_over_sub_boost: float = 1.3
-
-    # v3.16-A — Arc T S2 H2 fix (`force_render` OR-in). Original Arc T
-    # S2 wired `self.res._using_render_based = True` from AEC level when
-    # `_arc_t_cohort_tail_signal` asserted, but `compute_residual_echo`
-    # state machine (`ResidualEchoEstimator.attribute_legacy`)
-    # overwrites that field 1 line later via the local `want_render`
-    # decision (closure: docs/v3_15_arc_t_s2_wiring_closure.md).
-    # Fix: OR cohort_tail_T INTO the `force_render` decision INSIDE
-    # `attribute_legacy` so the render-based path engages from within
-    # the state machine. Default OFF → byte-equal flag-OFF; predicted
-    # +0.030 cohort tail Δecho when ON. See plan §10 v3.16-A.
-    arc_t_force_render_or_in: bool = False
 
     # v3.15 §1.2 — DT-NE compression fix (default OFF, byte-equal flag-OFF).
     #
