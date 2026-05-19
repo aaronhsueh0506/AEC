@@ -34,8 +34,7 @@ from aec import AEC, AecConfig, AecMode, AecPreset
 
 
 PRESET_MAP = {
-    'balanced':      AecPreset.BALANCED,
-    'balanced_aec3': AecPreset.BALANCED_AEC3,
+    'balanced': AecPreset.BALANCED,
 }
 
 

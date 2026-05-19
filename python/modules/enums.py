@@ -23,8 +23,7 @@ _PB_MODES = (AecMode.PBFDAF, AecMode.PBFDKF, AecMode.SUBBAND)
 
 
 class AecPreset(Enum):
-    BALANCED = "balanced"       # Legacy ResFilter 9-stage chain (deprecated; pending removal)
-    BALANCED_AEC3 = "balanced_aec3"  # v3.21 production: AEC3 residual chain
+    BALANCED = "balanced"       # v3.21 production: AEC3 residual chain
 
 
 class AecFilterState(Enum):

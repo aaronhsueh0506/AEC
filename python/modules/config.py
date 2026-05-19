@@ -1133,100 +1133,13 @@ class AecConfig:
     def from_preset(cls, preset: 'AecPreset', **kwargs) -> 'AecConfig':
         """Create config from preset with optional overrides.
 
-        Presets:
-          BALANCED:      Legacy ResFilter 9-stage chain (deprecated; pending removal)
-          BALANCED_AEC3: v3.21 production — AEC3 residual chain
+        Single preset: BALANCED — v3.21 production AEC3 residual chain
+        (`use_aec3_residual=True` routes final_output through `_aec3_post`:
+        AecState + ResidualEchoEstimator + SuppressionGain + CNG).
         """
         if isinstance(preset, str):
             preset = AecPreset(preset)
         if preset == AecPreset.BALANCED:
-            defaults = dict(
-                # RES v2
-                res_echo_method="direct",
-                res_gain_type="enr",
-                res_enable_reverb=True,
-                res_reverb_decay=0.85,    # v3.3: TC ~130ms (was 50ms); RT60-typical
-                res_reverb_gain=1.6,      # v3.3: bump (was 1.4); DT gate weakened separately
-                res_alpha_echo_psd=0.4,
-                res_alpha_error_psd=0.5,
-                res_enr_scale=0.85,
-                # RES suppression (balanced echo/speech trade-off)
-                res_g_min_db=-55.0,
-                res_over_sub_base=5.0,
-                res_over_sub_scale=9.0,
-                res_dt_reduction=2.5,
-                res_spectral_floor_db=-38.0,
-                res_ne_protect_db=-16.0,
-                # v2.7 E6: min-stat noise floor + CNG fill suppression gap
-                enable_cng=True,
-                shadow_q_ratio=3.5,
-                # Adaptive filter
-                shadow_mu_min=0.6,
-                warmup_frames=80,
-                kalman_q_high=1e-3,
-                # F3.1-v3: per-bin mic-energy excess NE evidence (GREEN-PASS, 800-case)
-                use_mic_excess_evidence=True,
-                # F2.3: Yang 2017 R-reset on EPC — net 0.3× improvement ratio (800-case PASS)
-                epc_r_reset_enabled=True,
-                # F2.4: mu holdoff only armed on fresh onset — net 0.9× (800-case PASS)
-                mu_holdoff_no_reset=True,
-                # v3.11 B5: symmetric Yang 2017 R-reset on shadow filter (Phase 1 Sprint 1-2 PASS)
-                shadow_r_reset_enabled=True,
-                # v3.14 S-orth.A: decouple shadow's Kalman _error_psd + R
-                # from main's (B5/§1.0.S2: only these two are actually wired
-                # in v3.14; _copy_err_baseline / mu_holdoff remain coupled
-                # and are reserved for a future shadow-decoupling arc).
-                # 800-case GREEN PASS (commit 8089974): all 5 buckets within bar,
-                # cohort tail qNvSMyU Δecho +0.0036, state correlation drops
-                # main vs shadow 0.99 → 0.47 on DT_static (target 0.5-0.7 hit).
-                # First mechanism across 5+ shadow-retirement attempts that
-                # produces genuinely independent shadow Kalman state.
-                shadow_state_decoupled=True,
-                # v3.14 Arc-P P.S3: adaptive per-band ERL EMA driven by
-                # error_psd / far_lw (Option B source signal). Replaces
-                # scalar erl_estimate=0.3 (7× over-estimate in low-coupling
-                # rooms) with 3-band LF/MF/HF EMA (α=0.99).
-                f3_1_per_band_erl_adaptive=True,
-                # v3.14 Arc-R R.S2: per-band ENR thresholds with block_lf
-                # tilt (raise LF, lower HF). DT bucket +0.007 dB mean Δdeg
-                # on 800-case; FS regression within -0.02 bar. 7-case
-                # xrtntuju listen verification 2026-05-14: NE not damaged,
-                # FS not audibly leaking. Paired with f3_1_per_band_erl_adaptive
-                # for end-to-end per-band gate.
-                res_per_band_enr=True,
-                # v3.11 F-E5: saturation handling extensions (Phase 1 Sprint 11-12 PASS)
-                f_e5_enabled=True,
-                # v3.11 diverged_reset: triple-AND gate unblocks dead code safely
-                # (Phase 1 Sprint 13-14 PASS, F2.2 trap avoided via shadow_advantage > 2.0)
-                diverged_reset_enabled=True,
-                diverged_reset_triple_and=True,
-                # v3.12 S1: B6 shadow_mu state-aware (PASS bucket mean +0.007,
-                # wlAXM0i listen verdict: no audible diff, B6 has more NE detail in spectrogram)
-                shadow_mu_state_aware=True,
-                # v3.12 S2: F-E1 + F-DelayTrack default-ON (NEUTRAL on 800-case bench,
-                # correctness-only for extreme ERL / long-session delay drift).
-                # Cross-coupling audited disjoint from B5/F-E5/diverged_reset.
-                f_e1_enabled=True,
-                f_delaytrack_enabled=True,
-                # v3.15 §10.S0b: cohort tail real-time detector promoted to
-                # default ON. Signal-only substrate — RES preempt path
-                # (arc_t_res_preempt_mode) and arc_m gate (arc_m_t_gated_enabled)
-                # both stay default OFF, so detector ON is byte-equal on audio
-                # output (only AecStats.cohort_tail_T becomes informative).
-                # Enables §1.7 RES audit and v3.16 Phase 3-4 candidates to
-                # consume the signal without per-bench env-flag flipping.
-                arc_t_cohort_detector=True,
-            )
-        elif preset == AecPreset.BALANCED_AEC3:
-            # v3.21 Phase C.5: AEC3 residual chain (_aec3_post) as production
-            # path. Linear-filter side inherits all Phase B changes already
-            # in BALANCED (PBFDKF H_error / coarse NLMS / RSA / hangover /
-            # FilterMisadjust). Residual differences vs BALANCED:
-            #   - use_aec3_residual = True : routes final_output through
-            #     _aec3_post (AecState + ResidualEchoEstimator + SuppressionGain
-            #     + Phase C.1 CNG + Phase C.2 EchoGenPwr window walk).
-            #   - Everything else inherits BALANCED so the bench A/B is
-            #     "AEC3 residual chain ON vs OFF" with no other variables.
             defaults = dict(
                 # RES v2 (legacy ResFilter knobs — used as fallback if
                 # _aec3_post is bypassed; ResFilter still constructed.)

@@ -4225,7 +4225,7 @@ Examples:
                         help='Enable comfort noise generation in RES (default: from preset, else off)')
     parser.add_argument('--no-td-constraint', action='store_true',
                         help='Disable time-domain constraint on filter weights (diagnostic)')
-    parser.add_argument('--preset', choices=['balanced', 'balanced_aec3'],
+    parser.add_argument('--preset', choices=['balanced'],
                         help='Use preset config (overrides RES/adaptive params)')
     parser.add_argument('--no-shadow', action='store_true', help='Disable shadow filter')
     parser.add_argument('--no-highpass', action='store_true', help='Disable high-pass filter')

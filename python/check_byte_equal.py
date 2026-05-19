@@ -28,8 +28,8 @@ EVAL_SCRIPT = os.path.join(ROOT, 'python/eval_aec_challenge.py')
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--preset', default='balanced_aec3',
-                   help='Preset to use (switch to "balanced" once renamed)')
+    p.add_argument('--preset', default='balanced',
+                   help='Preset name (single preset post-Round-2 cleanup)')
     args = p.parse_args()
 
     with open(REFERENCE) as f:
