@@ -1133,71 +1133,13 @@ class AecConfig:
     def from_preset(cls, preset: 'AecPreset', **kwargs) -> 'AecConfig':
         """Create config from preset with optional overrides.
 
-        Presets (echo suppression strength):
-          MILD:       Best near-end preservation, lightest echo suppression
-          BALANCED:   Balanced echo suppression and near-end quality (default)
-          AGGRESSIVE: Stronger echo suppression, moderate near-end degradation
-          MAXIMUM:    Maximum echo suppression, significant near-end impact
+        Presets:
+          BALANCED:      Legacy ResFilter 9-stage chain (deprecated; pending removal)
+          BALANCED_AEC3: v3.21 production — AEC3 residual chain
         """
         if isinstance(preset, str):
             preset = AecPreset(preset)
-        if preset == AecPreset.MILD:
-            # v3.8.3: shifted one slot lighter — minimum-touch RES for
-            # quiet/light-echo cases where NE intelligibility trumps echo
-            # cleanup. Former v3.8.2 MILD values now live in SOFT.
-            defaults = dict(
-                # RES v2
-                res_echo_method="direct",
-                res_gain_type="enr",
-                res_enable_reverb=True,
-                res_reverb_decay=0.45,
-                res_reverb_gain=0.4,
-                res_alpha_echo_psd=0.6,
-                res_alpha_error_psd=0.6,
-                res_enr_scale=1.15,
-                # RES suppression (ultra-light)
-                res_g_min_db=-25.0,
-                res_over_sub_base=1.5,
-                res_over_sub_scale=2.5,
-                res_dt_reduction=4.5,
-                res_spectral_floor_db=-18.0,
-                res_ne_protect_db=-7.0,
-                enable_cng=True,
-                shadow_q_ratio=3.0,
-                # Adaptive filter
-                shadow_mu_min=0.5,
-                warmup_frames=80,
-                kalman_q_high=1.5e-3,
-            )
-        elif preset == AecPreset.SOFT:
-            # = former v3.8.2 MILD. Shifted one slot to make room for an
-            # even lighter MILD; preserved for users who liked the v3.8.2
-            # MILD positioning (light RES with audible echo cleanup).
-            defaults = dict(
-                # RES v2
-                res_echo_method="direct",
-                res_gain_type="enr",
-                res_enable_reverb=True,
-                res_reverb_decay=0.6,
-                res_reverb_gain=0.8,
-                res_alpha_echo_psd=0.5,
-                res_alpha_error_psd=0.6,
-                res_enr_scale=1.0,
-                # RES suppression
-                res_g_min_db=-35.0,
-                res_over_sub_base=2.5,
-                res_over_sub_scale=4.0,
-                res_dt_reduction=3.5,
-                res_spectral_floor_db=-25.0,
-                res_ne_protect_db=-10.0,
-                enable_cng=True,
-                shadow_q_ratio=3.0,
-                # Adaptive filter
-                shadow_mu_min=0.5,
-                warmup_frames=80,
-                kalman_q_high=1.5e-3,
-            )
-        elif preset == AecPreset.BALANCED:
+        if preset == AecPreset.BALANCED:
             defaults = dict(
                 # RES v2
                 res_echo_method="direct",
@@ -1309,56 +1251,6 @@ class AecConfig:
                 shadow_mu_min=0.5,
                 warmup_frames=100,
                 kalman_q_high=1e-3,
-            )
-        elif preset == AecPreset.AGGRESSIVE:
-            defaults = dict(
-                # RES v2
-                res_echo_method="direct",
-                res_gain_type="enr",
-                res_enable_reverb=True,
-                res_reverb_decay=0.7,
-                res_reverb_gain=2.0,
-                res_alpha_echo_psd=0.3,
-                res_alpha_error_psd=0.4,
-                res_enr_scale=0.7,
-                # RES suppression (stronger echo suppression)
-                res_g_min_db=-65.0,
-                res_over_sub_base=7.0,
-                res_over_sub_scale=12.0,
-                res_dt_reduction=1.5,
-                res_spectral_floor_db=-45.0,
-                res_ne_protect_db=-22.0,
-                enable_cng=True,
-                shadow_q_ratio=4.0,
-                # Adaptive filter
-                shadow_mu_min=0.7,
-                warmup_frames=80,
-                kalman_q_high=7e-4,
-            )
-        elif preset == AecPreset.MAXIMUM:
-            defaults = dict(
-                # RES v2
-                res_echo_method="direct",
-                res_gain_type="enr",
-                res_enable_reverb=True,
-                res_reverb_decay=0.8,
-                res_reverb_gain=3.0,
-                res_alpha_echo_psd=0.2,
-                res_alpha_error_psd=0.3,
-                res_enr_scale=0.5,
-                # RES suppression (maximum, significant near-end impact)
-                res_g_min_db=-72.0,
-                res_over_sub_base=10.0,
-                res_over_sub_scale=15.0,
-                res_dt_reduction=0.5,
-                res_spectral_floor_db=-55.0,
-                res_ne_protect_db=-30.0,
-                enable_cng=True,
-                shadow_q_ratio=5.0,
-                # Adaptive filter
-                shadow_mu_min=0.9,
-                warmup_frames=100,
-                kalman_q_high=7e-4,
             )
         else:
             defaults = {}

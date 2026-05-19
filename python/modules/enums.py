@@ -23,12 +23,8 @@ _PB_MODES = (AecMode.PBFDAF, AecMode.PBFDKF, AecMode.SUBBAND)
 
 
 class AecPreset(Enum):
-    MILD = "mild"               # Lightest echo suppression, best near-end preservation
-    SOFT = "soft"               # Between MILD and BALANCED — gentler RES for music / sensitive NE
-    BALANCED = "balanced"       # Balanced echo suppression and near-end quality (default)
-    BALANCED_AEC3 = "balanced_aec3"  # v3.21 Phase C.5: BALANCED + AEC3 residual chain
-    AGGRESSIVE = "aggressive"   # Stronger echo suppression, moderate near-end impact
-    MAXIMUM = "maximum"         # Maximum echo suppression, significant near-end impact
+    BALANCED = "balanced"       # Legacy ResFilter 9-stage chain (deprecated; pending removal)
+    BALANCED_AEC3 = "balanced_aec3"  # v3.21 production: AEC3 residual chain
 
 
 class AecFilterState(Enum):
