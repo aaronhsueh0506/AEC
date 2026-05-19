@@ -2427,9 +2427,6 @@ class AEC:
                 # render-based is now useful at low ERLE → smoother blend.
                 erle_factor = np.clip(erle_for_factor / 10.0, 0.0, 1.0)
                 self._erle_factor_prev = float(erle_factor)
-                base_over_sub = self.config.res_over_sub_base + self.config.res_over_sub_scale * erle_factor
-                # Saturation boost: non-linear echo needs more suppression
-                base_over_sub += self._saturation_level * self.config.saturation_over_sub_boost
                 # DT protection
                 far_pwr = np.mean(far_end ** 2) + 1e-10
                 mic_pwr = np.mean(near_end ** 2) + 1e-10

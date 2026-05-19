@@ -42,19 +42,11 @@ class AecConfig:
     dtd_coh_hangover: int = 3            # Coherence DTD hangover blocks (shorter than Geigel)
     dtd_coh_release: float = 0.1         # Coherence confidence release rate (faster recovery)
 
-    # RES parameters
+    # RES parameters (v3.21: legacy ResFilter retired; only enable_res +
+    # enable_cng + enable_td_constraint remain as gates).
     enable_res: bool = True
-    res_g_min_db: float = -25.0
-    res_over_sub: float = 3.0
-    res_alpha: float = 0.8
-    enable_cng: bool = False           # Comfort noise generation in RES (off by default)
+    enable_cng: bool = False           # Comfort noise generation in AEC3 post (off by default)
     enable_td_constraint: bool = True  # Time-domain constraint on filter weights
-    # P52 Phase B: route RES through `ResFilterRefactored` (subclass that
-    # delegates each `_stage_*` to a free function in `python/res_refactored/`).
-    # 800-case byte-equal verified (Task B.4). Default-OFF until a future
-    # phase retires the legacy methods.
-    use_res_refactored: bool = False
-
     # Shadow filter (dual-filter divergence control, frequency-domain modes only)
     enable_shadow: bool = True
     shadow_mu_ratio: float = 1.0
@@ -236,43 +228,7 @@ class AecConfig:
     # Saturation / non-linear echo handling
     enable_saturation_detect: bool = True
     saturation_threshold: float = 0.95       # |sample| > threshold → clipping
-    saturation_over_sub_boost: float = 3.0   # Extra over_sub during saturation
     saturation_softclip_ref: bool = True     # Soft-clip reference for better filter modeling
-
-    # RES dynamic over_sub formula: base + scale × erle_factor - dt_reduction × dt_indicator
-    res_over_sub_base: float = 2.5           # Unconverged over_sub base
-    res_over_sub_scale: float = 4.0          # Scale with erle_factor (converged adds this)
-    res_dt_reduction: float = 3.5            # DT reduction coefficient
-
-    # RES anti-blackout
-    res_max_drop_db_per_frame: float = 6.0   # Max gain drop per frame (dB)
-    res_max_rise_db_per_frame: float = 6.0   # Max gain rise per frame (dB)
-    res_spectral_floor: bool = True          # Spectral-shape-preserving gain floor
-    res_spectral_floor_db: float = -25.0     # Floor relative to spectral envelope
-    res_ne_protect_db: float = -10.0         # Per-bin near-end protection ceiling (dB)
-
-    # RES v2: direct echo estimation + Wiener gain + reverb tail
-    res_echo_method: str = "direct"           # "coherence" (legacy) or "direct" (use filter echo est)
-    res_gain_type: str = "enr"               # "spectral_sub" (legacy) / "wiener" / "enr"
-    res_enable_reverb: bool = False          # Reverb tail model
-    res_reverb_decay: float = 0.5            # Exponential decay rate
-    res_reverb_gain: float = 1.0             # Reverb contribution scale
-    res_alpha_echo_psd: float = 0.7          # Echo PSD smoothing (overridable per preset)
-    res_alpha_error_psd: float = 0.8         # Error PSD smoothing (overridable per preset)
-    res_enr_scale: float = 1.0              # ENR threshold scale (1.0=AEC3 defaults, <1=more aggressive)
-    startup_dt_min_ne_scale: float = 1.0   # Scale min_ne_from_dt when startup_dt (not once_converged); 0.0=disable floor
-    startup_dt_gain_floor: float = 1.0    # Cap spectral_g_min during startup_dt (not filter_converged); 1.0=no effect
-    startup_dt_noise_floor_scale: float = 1.0  # Scale noise_floor_gain during startup_dt; 0.0=bypass, 1.0=normal
-    startup_dt_mu_min: float = 0.0            # Floor mu_scale during startup_dt; 0.0=no override
-
-    # Diagnostic: when True, ResFilter populates per-bin gain vectors at each
-    # post-processing stage (read via res.get_stage_gains()). Hot-path cost is
-    # one numpy copy per stage per frame; off by default.
-    capture_stages: bool = False
-
-    # P1 Phase 1: trace high-band NE evidence metrics into self._diag.
-    # Off by default — purely instrumentation, no behaviour change.
-    trace_high_band_metrics: bool = False
 
     # P3b: per-call DelayEstimator instrumentation. When True, every call
     # to DelayEstimator.accumulate() appends one diagnostic row (input
@@ -1135,22 +1091,6 @@ class AecConfig:
             preset = AecPreset(preset)
         if preset == AecPreset.BALANCED:
             defaults = dict(
-                # RES v2 (legacy ResFilter knobs — used as fallback if
-                # _aec3_post is bypassed; ResFilter still constructed.)
-                res_echo_method="direct",
-                res_gain_type="enr",
-                res_enable_reverb=True,
-                res_reverb_decay=0.85,
-                res_reverb_gain=1.6,
-                res_alpha_echo_psd=0.5,
-                res_alpha_error_psd=0.6,
-                res_enr_scale=0.85,
-                res_g_min_db=-55.0,
-                res_over_sub_base=5.0,
-                res_over_sub_scale=9.0,
-                res_dt_reduction=2.5,
-                res_spectral_floor_db=-35.0,
-                res_ne_protect_db=-25.0,
                 enable_cng=True,
                 shadow_q_ratio=3.5,
                 shadow_mu_min=0.5,
