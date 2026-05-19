@@ -16,6 +16,128 @@ when verdict requires it.
 
 ---
 
+## [3.21.0] — 2026-05-19 — Retire legacy ResFilter; AEC3 chain becomes the production post-filter
+
+**Headline**: v3.21 ships the AEC3-aligned `_aec3_post` chain
+(`AecState` + `ResidualEchoEstimator` + `SuppressionGain` + per-bin
+comfort noise + sqrt-Hann OLA synthesis) as the single production
+post-filter. The legacy 9-stage `ResFilter` chain (~2 200 LOC) is
+deleted. The 5-preset menu collapses to a single `BALANCED` preset
+(other 4 deleted in R1; the legacy BALANCED was retired in R2).
+Cumulative cleanup: −5 565 Python LOC + −32 341 docs lines across
+16 commits, byte-equal verified at every step (25-case representative
+sample, 5 per bucket at echo percentiles 0/25/50/75/100).
+
+### Architecture change
+
+Production post-filter migration:
+
+```
+v3.10.5 — v3.20:                     v3.21:
+  ResFilter 9-stage chain ─►           _aec3_post() chain ─►
+    stage 1 residual_echo_psd            StationarityEstimator
+    stage 2 softgate_emr                 AecState (read-only ADT over
+    stage 3 epc_dt_cap                     12 sub-analyzers)
+    stage 4 quiet_mask                   ResidualEchoEstimator
+    stage 5 3bin_smooth                    (linear / render-based
+    stage 6 hf_cap                          + ReverbModel tail)
+    stage 7 pre_temporal                 SuppressionGain
+    stage 8 temporal smoothing             (Wiener + over-estimation)
+    stage 9 noise floor + CNG            Comfort noise generator
+                                         sqrt-Hann synthesis OLA
+```
+
+The AEC3 chain was developed in stages from v3.18 (Phase C.C AecState
+substrate) through v3.20 (Phase A.1 delay subsystem + Phase B PBFDKF
+wiring + Phase C residual). v3.21 promotes it from substrate to
+production by retiring ResFilter and the `use_aec3_residual` flag.
+
+Reference comparison: [docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html).
+
+### Bench scores (800-case AEC Challenge, BALANCED)
+
+| Bucket       |    n |  echo (↑) |  deg (↑) | vs AEC3 ref deg | vs AEC2 ref deg |
+|--------------|-----:|----------:|---------:|----------------:|----------------:|
+| FS_static    |  169 |     3.729 |    4.999 | — | — |
+| FS_movement  |  131 |     3.626 |    4.999 | — | — |
+| DT_static    |  186 |     4.237 |    2.387 | **+0.537** | −0.003 |
+| DT_movement  |  114 |     4.215 |    2.371 | **+0.521** | −0.019 |
+| NE           |  200 |     4.998 |    4.052 | **+0.602** | −0.048 |
+
+Anchor scores at [docs/bench/v3_21_3aadd2d_baseline/](docs/bench/v3_21_3aadd2d_baseline/README.md).
+
+### Cleanup rounds (in order)
+
+| Round | Commit | Summary | Net LOC |
+|---|---|---|---:|
+| Phase A | a24d154 | Baseline + 25-case byte-equal harness + 800-case anchor | +8 684 (test infra) |
+| R1 | c07d428 | Delete MILD / SOFT / AGGRESSIVE / MAXIMUM presets | −117 |
+| R2 | 6267de0 | Drop legacy BALANCED → rename `BALANCED_AEC3` → `BALANCED` | −89 |
+| R3 | 97509c3 | Remove `use_aec3_residual` flag + 2 runtime gates + env hook | −18 |
+| R4 | 28ef604 | Collapse if-AEC3 / else-ResFilter to single `_aec3_post` call site | −20 |
+| R5 | ceb9ead | Prune dead local-var prep + dead `self.res` state writes | −98 |
+| R6 | b63dcbd | Drop dead `_residual_est` readers + Arc G + Arc T blocks | −194 |
+| R7 | 0532c57 + 651ccdd | Delete ResFilter chain | −3 302 |
+| R8 | 8b51007 | Retire `legacy_state.py` + delete `diagnose_gcc_phat.py` | −624 |
+| R9 | c677725 | Delete `legacy_delay.py` | −282 |
+| R10a | 1f0bb7f | Drop legacy ResFilter config knobs | −63 |
+| R10b-1 | 2176a11 | arc_g / arc_t dead state init + reset paths | −54 |
+| R10b-2 + R10c | 9d92334 | Drop dead substrate flags + readers + env hooks | −357 |
+| R11 | 09ad7a9 | Archive sweep | (renames) |
+| R12 | df793ce | Drop python module orphans | −347 |
+| R13 | 75dddf7 | Aggressive `docs/` + `docs/archive/` prune | −32 341 |
+| Phase D-1 / D-3 | f60b6a5 + (this commit) | Doc + version bump + v3.21 rewrites | — |
+
+### Closed substrate retired
+
+- v3.14 Arc P + Arc R + Arc S-orth.A.
+- v3.15 Arc M v1+v2+v3 / Arc G / Arc T.
+- v3.18 Phase C.C AecState facade / C.D-α leakage_diverged / C.E + C.E
+  branch ablations / D-γ retried mask shape swap.
+- P52 Phase B subclass-and-delegate ResFilter refactor.
+- P53 / P55 / P58 dual-filter / dual-PBFDKF / AEC3-pattern RES
+  restructure (closed CANNOT-SHIP on 800-case during their respective
+  cycles; substrate retained as research log until R13 doc cleanup).
+
+Shipped substrate retained:
+
+- v3.18 Phase A.2 shadow NLMS coarse filter (default ON).
+- v3.18 Phase B.2 / B.3 FilterMisadjustmentEstimator + ScaleFilter
+  (default ON v3.21).
+- v3.18 Phase C.A FilterAnalyzer (audit-only).
+- v3.18 Phase F.1 / F.3 AEC3 event classification + asymmetric reset.
+
+### Tests + tooling
+
+- `python/check_byte_equal.py` — 25-case representative byte-equal
+  harness. Reference at `docs/bench/v3_21_3aadd2d_baseline/byte_equal_
+  reference.json`. Must report `=== 25/25 PASS, 0 FAIL ===` before any
+  commit that touches Python outside docs.
+- `python/test_f3_1_mic_excess.py` retired with ResFilter (R7).
+- `python/test_p52_regime.py` retained — enforces the
+  `AcousticRegimeClassifier` anti-loophole contract.
+- `python/diagnose_gcc_phat.py` retired (R8) — research-only.
+
+### Docs
+
+Canonical doc set at `docs/` root collapsed from 66 → 11:
+
+- `aec_methods.md` (v3.21 rewrite — algorithm spec).
+- `aec_algorithm_guide.html` (v3.21 rewrite — presentation overview).
+- `architecture_v3_10_5_vs_v3_21_vs_aec3.html` (NEW — comparison).
+- `pbfdkf_shadow_intro.md` / `dtd_design.md` (canonical algorithm refs).
+- `c_user_and_integration_guide.md` (C API + integration).
+- `refactor_modules_layout.md` (current module map; v3.21 rewrite).
+- `aec3_reference.md` + `aec3_residual_pipeline_mapping.md` +
+  `aec3_reverb_mapping.md` + `aec3_subband_ne_detector_mapping.md`
+  (WebRTC AEC3 reference + mappings).
+
+`docs/archive/` keeps 5 era-closeout summaries (P52 Phase A renaming
+context + v3.15 + v3.16 + v3.17 + v3.18 cycle closeouts); 130+ per-arc
+verdict / design docs deleted (R11 + R13).
+
+---
+
 ## [3.15.0] — 2026-05-15 — v3.15 arc closeout (Arc T detector default ON)
 
 **Headline**: Zero ship-able algorithm changes; one preset default flip

@@ -1,122 +1,139 @@
-# `python/modules/` layout — v3.19 R.0–R.12 refactor
+# `python/modules/` layout (v3.21.0)
 
-**Cycle**: 2026-05-16, 13 commits on `feature/v3.18-aec3-fetch`.
-**Outcome**: `python/aec.py` shrank from **9,660 lines → 53-line shim**.
-17 algorithm modules now live under `python/modules/`.
+**Refactor lineage**: the v3.19 R.0–R.12 cycle (2026-05-16) split the
+monolithic 9 660-line `python/aec.py` into a 52-line shim plus 17
+algorithm modules under `python/modules/`. The v3.21 cleanup cycle
+(2026-05-19) then retired the legacy `ResFilter` chain and reorganised
+the post-filter into AEC3-aligned subpackages.
 
-## Module map
-
-| Module                            | Source rows | Purpose                                                              | Mirrors C-side       |
-| --------------------------------- | -----------:| -------------------------------------------------------------------- | -------------------- |
-| `enums.py`                        |          92 | `AecMode` / `AecPreset` / `AecFilterState` / `_FREQ_MODES` / `_PB_MODES` | —                |
-| `dataclasses.py`                  |         186 | `AecStats` / `AecResContext` / `RenderActivityState` / `FilterConvergenceState` / `RegimeHandlerDecision` / `AecEventType` / `AecEvent` / `EpcEvent` | — |
-| `preprocessing.py`                |         124 | `HighPassFilter` (80 Hz IIR) + `SaturationDetector`                  | preprocessing.{h,c}  |
-| `erle.py`                         |         103 | `FilterErleEstimator` + `FullbandErleEstimator` + `compute_erle_confidence` | erle.{h,c}    |
-| `delay.py`                        |         283 | `DelayEstimator` (GCC-PHAT)                                          | delay.{h,c}          |
-| `filters.py`                      |         461 | `NlmsFilter` + `PBFDAF` + `PBFDKF`                                   | filters.{h,c}        |
-| `dtd.py`                          |         211 | `DtdEstimator` (own file, mirrors c_impl/dtd.{h,c})                  | dtd.{h,c}            |
-| `detectors.py`                    |         342 | `RenderActivityDetector` + `FilterConvergenceAnalyzer` + `DoubleTalkAnalyzer` + `FilterPlateauDetector` | detectors.{h,c} |
-| `epc.py`                          |         311 | `classify_epc_event` + `EchoPathChangeDetector` + `PathChangeRegimeHandler` (formerly ShadowCopyController, P52 Phase A) | epc.{h,c} |
-| `state.py`                        |         151 | `AecState` (WebRTC AEC3 ADT facade; back-ref via runtime injection)  | state.{h,c}          |
-| `residual_estimator.py`           |         247 | `ResidualEchoEstimator` (per-bin residual PSD, 2 modes)              | residual_estimator.{h,c} |
-| `res_filter.py`                   |       2,170 | `ResFilter` base + `ResFilterEnr` (production) + `ResFilterWiener` (R.9.1 split) | res_filter.{h,c} |
-| `nlp.py`                          |         164 | `SubtractiveNLP` (default-OFF v3.13 E4 substrate)                    | (research-only)      |
-| `debug_logger.py`                 |          54 | `AecDebugLogger` (`--diag` console)                                  | (research-only)      |
-| `config.py`                       |       1,294 | `AecConfig` + 5-preset `from_preset()`                               | aec_config.{h,c}     |
-| `orchestrator.py`                 |       3,747 | `AEC` engine + `process_wav_files` + `main()` + `_BLEND_F31_MIC_EXCESS` | aec.{h,c}        |
-| `__init__.py`                     |          16 | Package docstring + intended layout doc                              | —                    |
-
-Plus 4 modules **migrated `git mv`** (R.2):
-
-| Module                            | Origin                                   | Purpose                          |
-| --------------------------------- | ---------------------------------------- | -------------------------------- |
-| `filter_analyzer.py`              | `python/aec_filter_analyzer.py`          | v3.18 Phase C.A (audit-only)     |
-| `filter_quality.py`               | `python/aec_filter_quality.py`           | v3.18 Phase C.B (audit-only)     |
-| `p52_regime_classifier.py`        | `python/aec_p52_regime_classifier.py`    | P52 acoustic-regime classifier   |
-| `res_refactored/`                 | `python/res_refactored/`                 | P52 Phase B subclass-and-delegate |
-
-## Class hierarchy: ResFilter family (R.9.1)
+## Layout
 
 ```
-ResFilter                  ← base; hosts 5 stages + dispatcher
-├── ResFilterEnr           ← production default (BALANCED+ presets);
-│                            overrides _stage_gain_compute → _gain_compute_enr
-└── ResFilterWiener        ← legacy fallback; owns self.over_sub scalar;
-                              overrides _stage_gain_compute → _gain_compute_wiener_legacy
+python/
+├── aec.py                       # top-level shim re-exporting public symbols
+├── eval_aec_challenge.py        # 800-case AEC Challenge render driver
+├── bench_aecmos.py              # AECMOS scoring driver
+├── check_byte_equal.py          # 25-case byte-equal regression harness
+├── run_one_case.py              # single-case dev tool (5-panel diagnostic PNG)
+├── run_e2e_parity.py            # Python ↔ C parity driver
+├── batch_c_eval.py              # C binary batch driver
+├── test_p52_regime.py           # pytest for the regime classifier anti-loophole contract
+└── modules/
+    ├── __init__.py
+    ├── _rates.py                # block / FFT / hop / ms helpers (AEC3 rescale)
+    ├── aec3_scale.py            # AEC3 ↔ our-hop conversion helpers
+    ├── config.py                # AecConfig dataclass + from_preset (BALANCED)
+    ├── dataclasses.py           # AecStats / AecResContext / per-frame state tuples
+    ├── debug_logger.py          # --diag console logger
+    ├── enums.py                 # AecMode / AecPreset / AecFilterState
+    ├── orchestrator.py          # AEC engine class + process_wav_files + main()
+    ├── preprocessing.py         # HighPassFilter + SaturationDetector
+    ├── erle.py                  # FilterErleEstimator + FullbandErleEstimator
+    ├── filters.py               # NlmsFilter + PBFDAF + PBFDKF
+    ├── dtd.py                   # DtdEstimator
+    ├── detectors.py             # RenderActivityDetector + FilterConvergenceAnalyzer + DoubleTalkAnalyzer + FilterPlateauDetector
+    ├── epc.py                   # EchoPathChangeDetector + PathChangeRegimeHandler + classify_epc_event
+    ├── nlp.py                   # SubtractiveNLP (v3.13 E4 substrate, default-OFF)
+    ├── filter_analyzer.py       # FilterAnalyzer (impulse-response shape, audit-only)
+    ├── p52_regime_classifier.py # AcousticRegimeClassifier (analysis-only)
+    ├── residual_estimator.py    # ResidualEchoEstimator (legacy compatibility seam)
+    ├── delay/                   # AEC3-aligned delay estimation subpackage
+    │   ├── echo_path_delay_estimator.py
+    │   ├── matched_filter.py
+    │   ├── lag_aggregator.py
+    │   ├── clockdrift_detector.py
+    │   ├── downsampled_ring.py
+    │   ├── render_delay_controller.py
+    │   ├── delay_types.py
+    │   └── legacy_compat.py     # LegacyDelayShim — exposes legacy DelayEstimator API
+    ├── filter/                  # filter subpackage (state bridge)
+    │   └── filter_state_bridge.py
+    ├── render/                  # render-side analysis subpackage
+    │   └── render_signal_analyzer.py
+    ├── residual/                # AEC3-aligned residual + suppression subpackage
+    │   ├── residual_echo_estimator.py
+    │   ├── reverb_model.py
+    │   ├── reverb_decay_estimator.py
+    │   ├── reverb_frequency_response.py
+    │   ├── suppression_gain.py
+    │   └── suppression_filter.py
+    └── state/                   # AEC3-aligned AecState ADT + 12 sub-analyzers
+        ├── aec_state.py
+        ├── _constants.py
+        ├── erl_estimator.py
+        ├── erle_estimator.py
+        ├── filter_analyzer.py
+        ├── filter_delay.py
+        ├── filter_quality.py
+        ├── fullband_erle.py
+        ├── initial_state.py
+        ├── saturation_detector.py
+        ├── stationarity_estimator.py
+        ├── subband_erle.py
+        └── transparent_mode.py
 ```
 
-Selection in `orchestrator.AEC.__init__` line 2019:
-```python
-elif self.config.res_gain_type == "enr":
-    _ResCls = ResFilterEnr
-else:
-    _ResCls = ResFilterWiener
-```
+## Module purpose (one line each)
 
-Rationale (per user 2026-05-16): `over_sub` config field is consumed
-only by wiener / spectral_sub branches; ENR path uses dynamic
-over-subtraction computed in `AEC._compute_mu_scale` instead. Class
-split makes ownership explicit so future `over_sub` tweaks can't
-appear to apply to ENR when they don't.
+| Module | Purpose |
+|---|---|
+| `aec.py` | Top-level shim re-exporting public symbols. `__version__ = "3.21.0"`. |
+| `modules/config.py` | `AecConfig` dataclass + `from_preset(BALANCED)`. |
+| `modules/orchestrator.py` | `AEC` engine class + `_aec3_post` + `process_wav_files` + `main`. |
+| `modules/enums.py` | `AecMode` / `AecPreset` / `AecFilterState`. |
+| `modules/dataclasses.py` | `AecStats` / `AecResContext` / per-frame state tuples. |
+| `modules/preprocessing.py` | `HighPassFilter` (80 Hz IIR) + `SaturationDetector`. |
+| `modules/filters.py` | `NlmsFilter` + `PBFDAF` (NLMS shadow) + `PBFDKF` (Kalman refined). |
+| `modules/dtd.py` | `DtdEstimator` (DTD coherence + energy detector). |
+| `modules/detectors.py` | `RenderActivityDetector` + `FilterConvergenceAnalyzer` + `DoubleTalkAnalyzer` + `FilterPlateauDetector`. |
+| `modules/epc.py` | `EchoPathChangeDetector` + `PathChangeRegimeHandler` (formerly `ShadowCopyController`) + `classify_epc_event`. |
+| `modules/erle.py` | `FilterErleEstimator` + `FullbandErleEstimator`. |
+| `modules/nlp.py` | `SubtractiveNLP` (v3.13 E4 substrate). |
+| `modules/filter_analyzer.py` | `FilterAnalyzer` (audit-only filter impulse-response port). |
+| `modules/p52_regime_classifier.py` | `AcousticRegimeClassifier` (analysis-only). |
+| `modules/residual_estimator.py` | Legacy `ResidualEchoEstimator` (compatibility seam). |
+| `modules/delay/` | AEC3-aligned `EchoPathDelayEstimator` + matched filter / lag aggregator / clockdrift detector / render-delay controller + `LegacyDelayShim`. |
+| `modules/filter/filter_state_bridge.py` | Read-only seam exposing refined-filter spectra / convergence state to the AEC3 post-filter. |
+| `modules/render/render_signal_analyzer.py` | Per-bin narrowband-tonal mask + `poor_signal_excitation` gate. |
+| `modules/residual/` | AEC3-aligned `ResidualEchoEstimator` (new) + `SuppressionGain` + `SuppressionFilter` + `ReverbModel` + `ReverbDecayEstimator` + `ReverbFrequencyResponse`. |
+| `modules/state/` | `AecState` ADT + 12 sub-analyzers (FilterAnalyzer, FilteringQualityAnalyzer, SubbandErleEstimator, ErleEstimator, ErlEstimator, FullbandErleEstimator, SaturationDetector, InitialState, TransparentMode, StationarityEstimator, FilterDelay). |
+| `modules/_rates.py` + `modules/aec3_scale.py` | Block / FFT / hop / ms helpers + AEC3 ↔ our-hop conversion. |
+
+## v3.21 deletions
+
+The v3.21 cleanup cycle deleted the following modules:
+
+| Path | Reason |
+|---|---|
+| `python/modules/res_filter.py` (2 221 LOC) | Legacy 9-stage `ResFilter` chain, retired in R7. |
+| `python/modules/res_refactored/` (8 files, 697 LOC) | P52 Phase B subclass-and-delegate scaffold; never promoted. |
+| `python/modules/legacy_state.py` (156 LOC) | Legacy `AecState` aggregator; superseded by `modules/state/aec_state.py`. |
+| `python/modules/legacy_delay.py` (280 LOC) | Legacy GCC-PHAT `DelayEstimator`; superseded by `modules/delay/`. |
+| `python/modules/filter_quality.py` (top-level orphan) | Superseded by `modules/state/filter_quality.py`. |
+| `python/test_f3_1_mic_excess.py` | Tested `ResFilter._stage_gain_compute` mic-excess branch; gone with ResFilter. |
+| `python/diagnose_gcc_phat.py` | Research-only GCC-PHAT diagnostic tool, not on production path. |
+
+Net Python LOC delta v3.10.5 → v3.21.0: **~−5 500** (mostly ResFilter
+retirement; dead substrate / config flag sweep accounts for the rest).
 
 ## Backward compat
 
-`python/aec.py` is now a 53-line shim that re-exports every public
-symbol. All 6 caller sites continue to work unchanged:
+`python/aec.py` re-exports every public symbol so existing callers can
+keep using `from aec import AEC, AecConfig, AecMode, AecPreset, PBFDKF,
+PathChangeRegimeHandler, DelayEstimator, ResidualEchoEstimator, ...`
+unchanged. The `DelayEstimator` re-export now points at
+`modules.delay.legacy_compat.LegacyDelayShim`, which wraps the AEC3
+`EchoPathDelayEstimator` with the historical `accumulate()` API.
 
-* `python/eval_aec_challenge.py`
-* `python/run_one_case.py`
-* `python/run_e2e_parity.py`
-* `python/test_p52_regime.py`
-* `python/test_f3_1_mic_excess.py`
-* `python/modules/res_refactored/res_filter_refactored.py`
+CLI entry point preserved via `if __name__ == "__main__": main()` in the
+shim, forwarding to `modules.orchestrator.main`.
 
-CLI entry point preserved via `if __name__ == "__main__": main()` in
-the shim, which forwards to `modules.orchestrator.main`.
+## Mirrored C-side
 
-## Algorithm change bundled in cycle
-
-Beyond pure refactor, **one algorithm-affecting commit** (`ab44842`)
-ships in this cycle:
-
-* **`feat(hpf) — align ref-path HPF default with AEC3`** —
-  `enable_highpass_ref` config field added, defaulting to **False**.
-  Mirrors WebRTC AEC3 behaviour where `high_pass_filter_echo_reference`
-  is field-trial-gated (default OFF). Mic-path HPF (`enable_highpass`)
-  unchanged. Breaks byte-equal vs the R.0 baseline by intent — the
-  R.0c baseline (rendered at commit `ab44842`) becomes the new
-  reference for R.10–R.12 byte-equal verification. AECMOS impact
-  pending 800-case audit.
-
-## Verification per sprint
-
-| Sprint  | Commit    | aec.py rows | Validation                                  |
-| ------- | --------- | -----------:| ------------------------------------------- |
-| R.0     | (HEAD~13) |       9,660 | Baseline; 5-case md5 captured at `/tmp/r0_post` |
-| R.1     | `2569140` |       9,660 | 5/5 byte-equal; `python/modules/__init__.py` only |
-| R.2     | `51e6664` |       9,660 | 5/5 byte-equal; 4 already-separated modules `git mv`'d |
-| R.3     | `4c54107` |       9,365 | 5/5 byte-equal; enums + dataclasses extracted |
-| R.4     | `ebcd073` |       8,907 | 5/5 byte-equal; preprocessing + erle + delay |
-| R.5     | `2fb5785` |       8,557 | 5/5 byte-equal; filters (NLMS / PBFDAF / PBFDKF) |
-| R.6     | `b54af5d` |       8,018 | 5/5 byte-equal; detectors + dtd             |
-| R.7     | `d27a30a` |       7,718 | 5/5 byte-equal; epc family                  |
-| R.8     | `ac51d32` |       7,340 | 5/5 byte-equal; state + residual_estimator  |
-| R.9     | `61dc2f3` |       5,235 | 5/5 byte-equal; ResFilter (largest)         |
-| R.9.1   | `ed95a0a` |       5,249 | 5/5 byte-equal; ResFilterEnr / ResFilterWiener split |
-| HPF     | `ab44842` |       5,249 | **NOT byte-equal**; new R.0c baseline at `/tmp/r0c_post` |
-| R.10    | `983b710` |       3,770 | 5/5 byte-equal vs R.0c; AecConfig + NLP + DebugLogger |
-| R.11    | `b516231` |          53 | 5/5 byte-equal vs R.0c; AEC orchestrator + shim |
-| R.12 fix| `025af8a` |          53 | 5/5 byte-equal vs R.0c; `_BLEND_F31_MIC_EXCESS` constant |
-
-## Known pre-existing bugs surfaced (NOT refactor regressions)
-
-* **CLI crash on PBFDKF**: `python3 python/aec.py mic.wav ref.wav out.wav --preset balanced --enable-res --cng` raises `AttributeError: '_dtd_fft_size'` from `_reset_filter_derived_state` (orchestrator.py:1285). Reproduces against the original aec.py at commit `2d90721` (R.0 baseline) — the `_dtd_fft_size` attribute is initialised only inside the `if mode == AecMode.FDAF` branch (orchestrator.py:485 / :494); PBFDKF / LMS / TIME paths never set it. The standard `eval_aec_challenge.py` path (used for 800-case bench) does NOT trigger this — chunked processing avoids the `delay_first` reset. File as v3.20 housekeeping.
-
-## Post-refactor next steps
-
-* Resume Phase 3 (B FilterMisadjustment retry) — wire trigger to
-  `fq_usable + reset_done`, threshold `<2.0`, fire-rate gate, 60-case
-  A/B, 800-case ship gate.
-* AECMOS audit of HPF ref-default flip on the in-progress 800-case
-  R.0c baseline render.
-* Optional: file `_dtd_fft_size` PBFDKF init bug as v3.20 cleanup.
+The C port under `c_impl/` mirrors the Python class structure
+(`PBFDKF`, `ShadowFilter`, `HighPassFilter`, etc.). v3.21 retired the
+`res_filter.{h,c}` files on the Python side; the C port retains the
+legacy ResFilter for the in-flight C cycle and will be re-aligned to
+the AEC3 chain in a separate v3.21.x C-port arc. See
+[`c_user_and_integration_guide.md`](c_user_and_integration_guide.md)
+for the C integration contract.

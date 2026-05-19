@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AEC architecture: v3.10.5 vs v3.21 vs WebRTC AEC3</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --fg: #1f1f1f;
+    --muted: #666;
+    --accent: #0070d0;
+    --row-bg: #fff;
+    --row-alt: #f4f4f6;
+    --border: #d8d8dc;
+    --highlight: #fff7c2;
+    --code-bg: #f2f2f4;
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         background: var(--bg); color: var(--fg); max-width: 1280px; margin: 24px auto; padding: 0 16px; }
+  h1 { font-size: 24px; border-bottom: 2px solid var(--accent); padding-bottom: 6px; }
+  h2 { font-size: 18px; margin-top: 28px; color: var(--accent); }
+  h3 { font-size: 15px; margin-top: 22px; color: #444; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0 16px; }
+  th, td { border: 1px solid var(--border); padding: 6px 9px; vertical-align: top; text-align: left; }
+  th { background: var(--accent); color: #fff; font-weight: 600; }
+  tr:nth-child(even) td { background: var(--row-alt); }
+  tr:nth-child(odd) td { background: var(--row-bg); }
+  td.highlight { background: var(--highlight) !important; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; font-family: "SF Mono", Menlo, monospace; font-size: 12.5px; }
+  pre { background: var(--code-bg); padding: 10px; border-radius: 6px; overflow-x: auto; font-family: "SF Mono", Menlo, monospace; font-size: 12.5px; line-height: 1.4; }
+  .ascii { font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; white-space: pre; line-height: 1.35; background: var(--code-bg); padding: 10px; border-radius: 6px; overflow-x: auto; }
+  .legend { font-size: 12px; color: var(--muted); margin: -4px 0 12px; }
+  .note { background: #fff8d0; border-left: 4px solid #d8c800; padding: 8px 12px; font-size: 13px; margin: 12px 0; }
+  .ok { color: #2a7a2a; font-weight: 600; }
+  .gone { color: #a62a2a; font-weight: 600; }
+  .new { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>AEC architecture comparison — v3.10.5 vs v3.21 vs WebRTC AEC3</h1>
+<p class="legend">Generated for the v3.21.0 release (2026-05-19). Anchors: v3.10.5 was the last
+release before the AEC3 fetch cycle (Phase A.1 delay subsystem onwards); v3.21 is the current
+production release; WebRTC AEC3 is the canonical reference architecture (Chromium
+<code>modules/audio_processing/aec3/</code>).</p>
+
+<div class="note">
+The v3.21 release is the first to ship the AEC3-aligned residual path as the <em>only</em>
+post-filter. v3.10.5 — v3.20 ran the legacy 9-stage <code>ResFilter</code> as the production
+post-filter while the AEC3 chain (state / residual / filter / render subpackages) was being
+built up behind the <code>use_aec3_residual</code> flag. v3.21 retires the legacy chain, drops
+the flag, and ships <code>BALANCED</code> as the single production preset.
+</div>
+
+<h2>1. Pipeline overview</h2>
+
+<h3>v3.10.5 — legacy 9-stage ResFilter post-filter</h3>
+<div class="ascii">
+   mic ───────────────► HPF ────────────────────────────────────────────────────────►
+   ref ─► HPF ─► Saturation ─► DelayEst (GCC-PHAT) ─► RingBuf ─► PBFDKF ─► error ─┐
+                                                                       │          │
+                                                              Shadow filter (Q×3.5)
+                                                              + ShadowCopyController│
+                                                                                   ▼
+                                                                       ResFilter 9-stage
+                                                                       ├─ stage 1 residual_echo_psd attribution + 4 caps
+                                                                       ├─ stage 2 softgate_emr / spectral_floor (gain compute)
+                                                                       ├─ stage 3 epc_dt_cap (gain postprocess)
+                                                                       ├─ stage 4 quiet_mask (gain postprocess)
+                                                                       ├─ stage 5 3bin_smooth (gain postprocess)
+                                                                       ├─ stage 6 hf_cap (gain postprocess)
+                                                                       ├─ stage 7 pre_temporal
+                                                                       ├─ stage 8 temporal smoothing
+                                                                       └─ stage 9 noise floor + CNG
+                                                                                   │
+                                                                                   ▼
+                                                                                  out
+</div>
+
+<h3>v3.21 — AEC3-aligned _aec3_post</h3>
+<div class="ascii">
+   mic ───────────────► HPF ────────────────────────────────────────────────────────────────►
+   ref ─► HPF ─► Saturation ─► EchoPathDelayEstimator ─► RingBuf ─► PBFDKF ─► error ─┐
+                              (matched filter + lag                     │           │
+                               aggregator + clock-drift)        Shadow filter (Q×3.5)
+                                                                + PathChangeRegimeHandler
+                                                                + RenderSignalAnalyzer
+                                                                       │           ▼
+                                                                       │   AEC3 _aec3_post
+                                                                       │   ├─ StationarityEstimator
+                                                                       │   ├─ AecState (read-only ADT
+                                                                       │   │     over 5 detectors + 5
+                                                                       │   │     AEC3 sub-analyzers)
+                                                                       │   ├─ ResidualEchoEstimator
+                                                                       │   │     (per-bin echo PSD,
+                                                                       │   │     ERLE-divide refinement)
+                                                                       │   ├─ SuppressionGain
+                                                                       │   │     (Wiener-style, AEC3
+                                                                       │   │     suppressor coefficients)
+                                                                       │   └─ CNG (per-bin noise PSD
+                                                                       │         EMA + smoothed cn gain)
+                                                                       │         + sqrt-Hann synth OLA
+                                                                       │           │
+                                                                       │           ▼
+                                                                       │          out
+                                                                       └─ raw error → _ours_nores.wav
+                                                                          (enable_res=False bypass)
+</div>
+
+<h3>WebRTC AEC3 — canonical reference</h3>
+<div class="ascii">
+   mic ──► CaptureBufferer ──► EchoCanceller3 ──► EchoSubtractor ──► error ──► EchoRemover ──► out
+                                       │                  │                         │
+                                       ├──── render queue: │                  PostFilter (suppressor):
+                                       │     RenderBuffer  │                  ├─ NearendDetector
+                                       │     + matched     │                  ├─ ResidualEchoEstimator
+                                       │     filter delay  │                  │   (with reverb tail model)
+                                       │                   │                  ├─ ErleEstimator
+                                       │                   │                  │   (sub-band Erle EMA)
+                                       │                   │                  ├─ SuppressionGain
+                                       │                   │                  │   (Wiener + over-estimation)
+                                       │                   │                  ├─ ComfortNoiseGenerator
+                                       │                   │                  └─ TransparentMode
+                                       │                   │
+                                       │           refined filter (Kalman PBFDKF)
+                                       │           + coarse filter (NLMS adaptive)
+                                       │           + ShadowFilter via Subtractor::HandleEchoPathChange
+                                       │
+                                       └──── AecState (read-only seam over 11 sub-analyzers:
+                                             FilterAnalyzer / FilteringQualityAnalyzer /
+                                             SubtractorOutputAnalyzer / StationarityEstimator /
+                                             ErlEstimator / ErleEstimator / FullBandErleEstimator /
+                                             InitialState / SaturationDetector / TransparentMode /
+                                             EchoAudibility)
+</div>
+
+<h2>2. Module map</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:22%">Module / class</th>
+      <th style="width:26%">v3.10.5 location</th>
+      <th style="width:26%">v3.21 location</th>
+      <th style="width:26%">WebRTC AEC3 mirror</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>HPF (80 Hz IIR)</td><td><code>aec.py</code> inline</td><td><code>modules/preprocessing.py</code></td><td><code>high_pass_filter.cc</code></td></tr>
+    <tr><td>Saturation detector</td><td><code>aec.py</code> inline</td><td><code>modules/preprocessing.py</code></td><td><code>saturation_detector.cc</code></td></tr>
+    <tr><td>Delay estimator</td><td><code>aec.py</code> GCC-PHAT</td><td><code>modules/delay/echo_path_delay_estimator.py</code> + <code>matched_filter.py</code> + <code>lag_aggregator.py</code> + <code>clockdrift_detector.py</code> + <code>downsampled_ring.py</code> + <code>render_delay_controller.py</code> + <code>legacy_compat.py</code></td><td><code>echo_path_delay_estimator.cc</code> + <code>matched_filter.cc</code> + <code>render_delay_controller.cc</code></td></tr>
+    <tr><td>Refined filter (Kalman)</td><td><code>aec.py</code> PBFDKF</td><td><code>modules/filters.py</code> PBFDKF + <code>modules/filter/filter_state_bridge.py</code></td><td><code>refined_filter.cc</code> + <code>adaptive_fir_filter.cc</code></td></tr>
+    <tr><td>Coarse / shadow filter</td><td><code>aec.py</code> PBFDKF clone + <code>ShadowCopyController</code></td><td><code>modules/filters.py</code> PBFDKF/PBFDAF + <code>modules/epc.py PathChangeRegimeHandler</code></td><td><code>coarse_filter.cc</code> + <code>subtractor.cc HandleEchoPathChange</code></td></tr>
+    <tr><td>Render signal analyzer</td><td>(absent)</td><td class="highlight"><code>modules/render/render_signal_analyzer.py</code></td><td><code>render_signal_analyzer.cc</code></td></tr>
+    <tr><td>Residual echo estimator</td><td><code>aec.py</code> inline within ResFilter</td><td><code>modules/residual/residual_echo_estimator.py</code> (NEW) + legacy <code>modules/residual_estimator.py</code> (kept as compatibility seam)</td><td><code>residual_echo_estimator.cc</code></td></tr>
+    <tr><td>Suppression gain</td><td>(absent — ResFilter gain stages)</td><td class="highlight"><code>modules/residual/suppression_gain.py</code> + <code>suppression_filter.py</code></td><td><code>suppression_gain.cc</code> + <code>suppression_filter.cc</code></td></tr>
+    <tr><td>Reverb model</td><td>RES stage 1 reverb tail</td><td class="highlight"><code>modules/residual/reverb_model.py</code> + <code>reverb_decay_estimator.py</code> + <code>reverb_frequency_response.py</code></td><td><code>reverb_model.cc</code> + <code>reverb_decay_estimator.cc</code></td></tr>
+    <tr><td>AecState (read-only ADT)</td><td>(absent)</td><td class="highlight"><code>modules/state/aec_state.py</code> + 12 sub-analyzers under <code>modules/state/</code></td><td><code>aec_state.cc</code> + sub-analyzer files</td></tr>
+    <tr><td>FilterAnalyzer / FilteringQuality</td><td>(absent)</td><td class="highlight"><code>modules/filter_analyzer.py</code> + <code>modules/state/filter_quality.py</code></td><td><code>filter_analyzer.cc</code> + <code>filtering_quality_analyzer.cc</code></td></tr>
+    <tr><td>StationarityEstimator</td><td>(absent)</td><td class="highlight"><code>modules/state/stationarity_estimator.py</code></td><td><code>stationarity_estimator.cc</code></td></tr>
+    <tr><td>ErleEstimator (sub-band)</td><td><code>aec.py</code> fullband only</td><td class="highlight"><code>modules/state/subband_erle.py</code> + <code>fullband_erle.py</code> + <code>erl_estimator.py</code></td><td><code>subband_erle_estimator.cc</code> + <code>fullband_erle_estimator.cc</code> + <code>erl_estimator.cc</code></td></tr>
+    <tr><td>Comfort noise</td><td>RES stage 9</td><td>Inline in <code>_aec3_post</code> (per-bin EMA + target gain)</td><td><code>comfort_noise_generator.cc</code></td></tr>
+    <tr><td>Post-filter pipeline</td><td><code>ResFilter</code> 9-stage</td><td class="highlight"><code>AEC._aec3_post()</code> (orchestrator)</td><td><code>echo_remover.cc</code></td></tr>
+    <tr><td>RES tests</td><td>—</td><td><code>test_p52_regime.py</code> (regime classifier anti-loophole)</td><td>(C++ gtest tree under <code>aec3/test/</code>)</td></tr>
+  </tbody>
+</table>
+
+<h2>3. Configuration surface (BALANCED preset)</h2>
+
+<h3>v3.10.5</h3>
+<p>Five operating points (<code>MILD</code> / <code>SOFT</code> / <code>BALANCED</code> / <code>AGGRESSIVE</code> / <code>MAXIMUM</code>),
+each with ~40 RES knobs co-tuned per preset (over-sub base / scale, ENR thresholds, spectral floor,
+gain rate caps, NE-protect thresholds, mask profiles, etc.) plus shared kalman / delay / DTD knobs.</p>
+
+<h3>v3.21</h3>
+<p>Single production preset <code>BALANCED</code>. The legacy 5-preset table and ~40 RES knobs are
+deleted; the AEC3 post-filter is hard-tuned per <code>AecStateConfig</code> defaults
+(<code>modules/state/aec_state.py</code>). The five overrides that remain on a live consumer:
+<code>enable_cng</code>, <code>shadow_q_ratio</code>, <code>shadow_mu_min</code>, <code>warmup_frames</code>,
+<code>kalman_q_high</code>. Everything else uses dataclass defaults.</p>
+
+<h3>WebRTC AEC3</h3>
+<p>Single config struct (<code>EchoCanceller3Config</code>) with ~150 fields exposed through
+<code>echo_canceller3_config_json.cc</code>. The Chromium build wires Field Trials to override
+specific fields per platform / scenario; there is no preset enum. v3.21's pattern matches AEC3
+in spirit — one default tuning, no preset menu.</p>
+
+<h2>4. What changed v3.10.5 → v3.21</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:25%">Area</th>
+      <th>What v3.10.5 had</th>
+      <th>What v3.21 has</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="new">Post-filter</span></td>
+      <td><code>ResFilter</code> 9-stage residual echo suppressor (2 200 LOC); per-bin gain
+          assembled from coh², ENR, spectral mask, quiet mask, HF cap, etc.</td>
+      <td><code>_aec3_post</code> calls <code>AecState</code> + <code>ResidualEchoEstimator</code>
+          + <code>SuppressionGain</code> + per-bin CNG; AEC3 Wiener gain on a 2-path residual
+          echo PSD estimate.</td>
+    </tr>
+    <tr>
+      <td><span class="new">Delay estimator</span></td>
+      <td>GCC-PHAT with 1024 ms max delay (v3.10.4 widening); fixed accumulation period.</td>
+      <td>AEC3-aligned <code>EchoPathDelayEstimator</code> (matched filter + lag aggregator
+          over 13-second window) + clock-drift detector + render delay controller. Legacy
+          <code>DelayEstimator</code> public name kept as a shim around the new estimator.</td>
+    </tr>
+    <tr>
+      <td><span class="new">Filter convergence ADT</span></td>
+      <td>Local <code>FilterConvergenceAnalyzer</code> 10-frame ERLE latch.</td>
+      <td>FilterConvergenceAnalyzer retained for backward-compat; <code>AecState</code> +
+          <code>FilteringQualityAnalyzer</code> + <code>InitialState</code> +
+          <code>FilterAnalyzer</code> provide the AEC3-aligned multi-gate decision used by
+          the AEC3 chain.</td>
+    </tr>
+    <tr>
+      <td><span class="new">Render-signal mask</span></td>
+      <td>Absent — refined filter learned against narrowband tonal renders the same as
+          broadband.</td>
+      <td><code>RenderSignalAnalyzer</code> identifies narrowband tonal regions in the
+          render history and (a) produces a per-bin freeze mask for refined-filter gain
+          compute and (b) gates the W update via <code>poor_signal_excitation</code>.</td>
+    </tr>
+    <tr>
+      <td><span class="new">Reverb tail</span></td>
+      <td>Inline 1-tap exponential decay in <code>ResFilter._stage_1</code>.</td>
+      <td>AEC3 <code>ReverbModel</code> + decay estimator + frequency response wired into
+          <code>ResidualEchoEstimator</code>; tracks per-bin reverb energy across the
+          impulse response tail.</td>
+    </tr>
+    <tr>
+      <td><span class="new">Sub-band ERLE</span></td>
+      <td>Fullband only.</td>
+      <td><code>SubbandErleEstimator</code> per-band EMA (AEC3-style) drives the
+          SuppressionGain ERLE-divide refinement.</td>
+    </tr>
+    <tr>
+      <td><span class="gone">Five-preset menu</span></td>
+      <td><code>MILD</code> / <code>SOFT</code> / <code>BALANCED</code> / <code>AGGRESSIVE</code> /
+          <code>MAXIMUM</code>.</td>
+      <td>Single <code>BALANCED</code> preset; v3.21 cleanup R1 deleted the others.</td>
+    </tr>
+    <tr>
+      <td><span class="gone">~40 RES knobs</span></td>
+      <td><code>res_g_min_db</code>, <code>res_over_sub_base / scale</code>,
+          <code>res_dt_reduction</code>, <code>res_echo_method</code>,
+          <code>res_gain_type</code>, <code>res_enable_reverb</code>,
+          <code>res_alpha_echo_psd / error_psd</code>, <code>res_enr_scale</code>,
+          <code>res_mask_*</code>, etc.</td>
+      <td>Deleted (R10a). AEC3 chain has its own tuning under
+          <code>AecStateConfig</code> / <code>SuppressionGainConfig</code>.</td>
+    </tr>
+    <tr>
+      <td><span class="gone">Arc G / Arc T substrate</span></td>
+      <td>(absent — these arcs were added v3.14 / v3.15)</td>
+      <td>Tried v3.14 / v3.15, closed CANNOT-SHIP, retired with the post-filter loop.
+          Removed in v3.21 cleanup R6 / R10b.</td>
+    </tr>
+    <tr>
+      <td><span class="gone">Per-band ERL EMA (Arc P)</span></td>
+      <td>(absent)</td>
+      <td>v3.14 Arc P P.S2 EMA + v3.15 Arc G drift detector retired in R6 / R10b.
+          The constant <code>[0.1, 0.1, 0.1]</code> broadcast into
+          <code>filter._erl_per_bin</code> is the only remaining trace.</td>
+    </tr>
+    <tr>
+      <td><span class="gone">v3.18 Phase C / D / F substrate</span></td>
+      <td>(absent)</td>
+      <td>Audit-only AecState ADT + FilterAnalyzer + FilteringQualityAnalyzer +
+          subband-NE detector + AEC3 event classification + mask profile swap shipped
+          as substrate during v3.18; closed CANNOT-SHIP; flags retired in R10b-2 / R10c.</td>
+    </tr>
+    <tr>
+      <td>HPF defaults</td>
+      <td>Both HPF ON.</td>
+      <td>Far-end (ref) HPF=OFF, mic-path HPF=ON. Locked by user directive after the
+          v3.19 HPF-flip verdict.</td>
+    </tr>
+    <tr>
+      <td>Shadow filter class</td>
+      <td>PBFDKF clone (same class as main).</td>
+      <td>NLMS (<code>PBFDAF</code>) by default — v3.21 Phase B.1 promoted
+          <code>shadow_class_nlms=True</code>; AEC3-aligned coarse filter role.</td>
+    </tr>
+    <tr>
+      <td>Filter misadjustment estimator</td>
+      <td>(absent)</td>
+      <td>v3.21 Phase B.5 <code>filter_misadjustment_enabled=True</code> default ON;
+          long-term echo/error ratio drift triggers ScaleFilter rescale of main W.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>5. Cleanup metrics (v3.21 release)</h2>
+
+<table>
+  <thead>
+    <tr><th>Round</th><th>Commit</th><th>Summary</th><th>Net LOC</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Phase A</td><td>a24d154</td><td>Baseline + byte-equal harness</td><td>+8 684 (test infra)</td></tr>
+    <tr><td>R1</td><td>c07d428</td><td>Delete MILD / SOFT / AGGRESSIVE / MAXIMUM presets</td><td>−117</td></tr>
+    <tr><td>R2</td><td>6267de0</td><td>Drop legacy BALANCED → rename BALANCED_AEC3 → BALANCED</td><td>−89</td></tr>
+    <tr><td>R3</td><td>97509c3</td><td>Remove <code>use_aec3_residual</code> flag + 2 runtime gates + env hook</td><td>−18</td></tr>
+    <tr><td>R4</td><td>28ef604</td><td>Collapse if-AEC3 / else-ResFilter to single <code>_aec3_post</code></td><td>−20</td></tr>
+    <tr><td>R5</td><td>ceb9ead</td><td>Prune dead local-var prep + dead <code>self.res</code> state writes</td><td>−98</td></tr>
+    <tr><td>R6</td><td>b63dcbd</td><td>Drop dead <code>_residual_est</code> readers + Arc G + Arc T blocks</td><td>−194</td></tr>
+    <tr><td>R7</td><td>0532c57 + 651ccdd</td><td>Delete ResFilter chain + re-exports + tests + run_one_case gain dump</td><td>−3 302</td></tr>
+    <tr><td>R8</td><td>8b51007</td><td>Retire legacy_state.py + outside-script audit (delete diagnose_gcc_phat)</td><td>−624</td></tr>
+    <tr><td>R9</td><td>c677725</td><td>Delete legacy_delay.py; aec.py DelayEstimator re-export redirected</td><td>−282</td></tr>
+    <tr><td>R10a</td><td>1f0bb7f</td><td>Legacy ResFilter config knobs (saturation_over_sub_boost / res_over_sub_* / res_dt_reduction / res_*)</td><td>−63</td></tr>
+    <tr><td>R10b-1</td><td>2176a11</td><td>arc_g / arc_t dead state init + reset paths</td><td>−54</td></tr>
+    <tr><td>R10b-2 + R10c</td><td>9d92334</td><td>Drop dead substrate flags + readers (aec_state / leakage_diverged / c_e_branch / arc_g / arc_t / per_band_erl / f3_1_per_band_erl_adaptive / use_mic_excess_evidence)</td><td>−357</td></tr>
+    <tr><td>R11</td><td>09ad7a9</td><td>Archive sweep — move closed-arc verdict / design docs</td><td>(file renames)</td></tr>
+    <tr><td>R12</td><td>df793ce</td><td>Drop python module orphans (filter_quality / state/filter_analyzer / state/subtractor_output_analyzer)</td><td>−347</td></tr>
+    <tr><td>R13</td><td>75dddf7</td><td>docs/ + docs/archive/ aggressive prune (143 files / 32.3k lines)</td><td>−32 341</td></tr>
+    <tr><td><b>Net (Python only)</b></td><td>—</td><td>—</td><td class="highlight"><b>−5 565 Python LOC</b></td></tr>
+  </tbody>
+</table>
+
+<p style="font-size:12px; color:var(--muted);">Cleanup runs preserve byte-equal output on the
+25-case representative sample (5 cases per bucket at echo percentiles 0/25/50/75/100). Reference at
+<code>docs/bench/v3_21_3aadd2d_baseline/byte_equal_reference.json</code>; harness
+<code>python/check_byte_equal.py</code>.</p>
+
+</body>
+</html>
