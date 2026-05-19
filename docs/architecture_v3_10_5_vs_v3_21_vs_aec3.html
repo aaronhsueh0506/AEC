@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>AEC v3.10.5 vs v3.21 vs WebRTC AEC3 — architecture at a glance</title>
+<title>AEC v3.10.5 vs v3.21 vs WebRTC AEC3 — architecture flowcharts</title>
 <style>
   :root {
     --bg: #f7f8fb;
@@ -14,193 +14,567 @@
     --reference: #5b3aa6;
     --border: #d5d9e0;
     --card-bg: #ffffff;
-    --change-bg: #fff9d8;
-    --change-border: #d8c000;
+    --frontend: #e9f3ff;
+    --frontend-stroke: #6ea4d9;
+    --filter: #fef0e3;
+    --filter-stroke: #d9985a;
+    --post: #e8f5ec;
+    --post-stroke: #6ab98c;
+    --new: #fff7c2;
+    --new-stroke: #c9b400;
+    --gone: #fbe3e3;
+    --gone-stroke: #c47878;
   }
   * { box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-         background: var(--bg); color: var(--fg); margin: 0; padding: 32px 24px; line-height: 1.55; }
-  .wrap { max-width: 1380px; margin: 0 auto; }
-  h1 { font-size: 28px; margin: 0 0 4px; }
-  .sub { color: var(--muted); font-size: 14px; margin: 0 0 28px; }
+         background: var(--bg); color: var(--fg); margin: 0; padding: 28px 24px; line-height: 1.55; }
+  .wrap { max-width: 1300px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13.5px; margin: 0 0 26px; }
 
-  /* Headline cards */
-  .headline { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 0 0 32px; }
-  .headline .h-card { background: var(--card-bg); border-radius: 10px; padding: 14px 18px; border-top: 4px solid; }
-  .headline .h-card.legacy { border-color: var(--legacy); }
-  .headline .h-card.release { border-color: var(--release); }
-  .headline .h-card.reference { border-color: var(--reference); }
-  .headline h2 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
-  .headline .who { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
-  .headline .what { font-size: 13.5px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; margin: 0 0 20px; }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .sw { width: 16px; height: 12px; border-radius: 2px; border: 1.5px solid; }
+  .legend .sw.frontend { background: var(--frontend); border-color: var(--frontend-stroke); }
+  .legend .sw.filter   { background: var(--filter);   border-color: var(--filter-stroke); }
+  .legend .sw.post     { background: var(--post);     border-color: var(--post-stroke); }
+  .legend .sw.new      { background: var(--new);      border-color: var(--new-stroke); }
+  .legend .sw.gone     { background: var(--gone);     border-color: var(--gone-stroke); }
 
-  /* Pipeline columns */
-  .pipelines { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 0 0 36px; }
-  .col { background: var(--card-bg); border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
-  .col h2 { margin: 0 0 4px; font-size: 16px; padding-bottom: 8px; border-bottom: 2px solid; }
-  .col.legacy h2 { color: var(--legacy); border-color: var(--legacy); }
-  .col.release h2 { color: var(--release); border-color: var(--release); }
-  .col.reference h2 { color: var(--reference); border-color: var(--reference); }
-  .col .label { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 12px 0 6px; }
+  .arch { background: var(--card-bg); border-radius: 12px; padding: 18px 20px 24px; margin-bottom: 22px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+  .arch h2 { font-size: 18px; margin: 0 0 4px; padding-bottom: 6px; border-bottom: 3px solid; }
+  .arch.legacy h2    { color: var(--legacy);    border-color: var(--legacy); }
+  .arch.release h2   { color: var(--release);   border-color: var(--release); }
+  .arch.reference h2 { color: var(--reference); border-color: var(--reference); }
+  .arch .when { font-size: 12px; color: var(--muted); margin: 0 0 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .arch .desc { font-size: 13.5px; margin: 0 0 12px; }
+  .arch svg { display: block; width: 100%; height: auto; max-width: 1240px; margin: 0 auto; }
 
-  /* Block stages */
-  .stage { font-size: 13px; padding: 8px 11px; border-radius: 6px; margin: 5px 0; border: 1px solid var(--border); background: #fafbfd; }
-  .stage strong { display: block; font-size: 13.5px; }
-  .stage small { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
-  .stage.frontend { background: #e9f3ff; border-color: #b3d4f5; }
-  .stage.filter { background: #fef0e3; border-color: #f5c994; }
-  .stage.post { background: #e8f5ec; border-color: #a8d6b6; }
-  .stage.dead { background: #fbe3e3; border-color: #e7a8a8; text-decoration: line-through; color: var(--muted); }
-  .stage.new { background: #fff9d8; border-color: #d8c000; }
-  .arrow { text-align: center; font-size: 16px; color: var(--muted); margin: 2px 0; }
-
-  /* Side-tag */
-  .side { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 10px; vertical-align: middle; margin-left: 6px; }
-  .side.gone { background: #fbe3e3; color: var(--legacy); }
-  .side.kept { background: #e9f3ff; color: var(--accent); }
-  .side.new { background: #fff9d8; color: #7e6b00; }
-
-  /* Score table */
-  .scores { background: var(--card-bg); border-radius: 10px; padding: 18px; margin: 0 0 28px; }
+  .scores { background: var(--card-bg); border-radius: 12px; padding: 18px; margin: 0 0 22px; }
   .scores h2 { margin: 0 0 12px; font-size: 17px; color: var(--accent); }
-  .scores table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
-  .scores th, .scores td { border-bottom: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+  .scores table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .scores th, .scores td { border-bottom: 1px solid var(--border); padding: 7px 12px; text-align: left; }
   .scores th { background: #f0f2f5; }
   .scores td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .scores td.win { color: var(--release); font-weight: 600; }
   .scores td.tie { color: var(--muted); }
 
-  /* Side-by-side mini grid */
-  .delta { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 0 0 28px; }
-  .delta .panel { background: var(--card-bg); border-radius: 10px; padding: 16px; }
-  .delta h2 { font-size: 15.5px; margin: 0 0 10px; color: var(--accent); }
-  .delta ul { margin: 0; padding-left: 18px; font-size: 13.5px; }
-  .delta li { margin: 4px 0; }
-
-  /* Footer LOC card */
-  .loc { background: var(--card-bg); border-radius: 10px; padding: 18px; margin: 0 0 36px; }
-  .loc h2 { margin: 0 0 12px; font-size: 17px; color: var(--accent); }
-  .loc-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
-  .loc-card { background: #f7f8fb; border-radius: 8px; padding: 10px 14px; }
-  .loc-card .big { font-size: 22px; font-weight: 700; color: var(--release); font-variant-numeric: tabular-nums; }
-  .loc-card .small { font-size: 11.5px; color: var(--muted); }
-
-  details { margin: 6px 0; }
-  summary { cursor: pointer; font-size: 13px; color: var(--accent); }
+  details { background: var(--card-bg); border-radius: 12px; padding: 16px 20px; margin: 0 0 22px; }
+  summary { cursor: pointer; font-size: 15px; color: var(--accent); font-weight: 600; }
   summary:hover { text-decoration: underline; }
-  .small-note { font-size: 12px; color: var(--muted); margin-top: 18px; }
+  details table { margin-top: 12px; width: 100%; border-collapse: collapse; font-size: 13px; }
+  details th, details td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+  details th { background: #f0f2f5; }
+  details td.r { text-align: right; }
+
+  .small-note { font-size: 12px; color: var(--muted); margin-top: 12px; }
   code { background: #f0f2f5; padding: 1px 5px; border-radius: 3px; font-family: "SF Mono", Menlo, monospace; font-size: 12.5px; }
+
+  .issues { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 20px 0 0; }
+  .issues.cols-2 { grid-template-columns: 1fr 1fr; }
+  .issues.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .card { border-radius: 8px; padding: 12px 14px; border-left: 4px solid; font-size: 13px; background: #fafbfd; }
+  .card.bad { border-color: #c43a3a; background: #fdf2f2; }
+  .card.good { border-color: var(--release); background: #f1f9f4; }
+  .card.warn { border-color: #c8a000; background: #fcf8e3; }
+  .card.note { border-color: var(--accent); background: #f0f6fc; }
+  .card h3 { margin: 0 0 6px; font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 3px 0; }
+  .card .tag { font-size: 10.5px; padding: 1px 6px; border-radius: 8px; background: rgba(0,0,0,0.06); color: var(--muted); margin-left: 6px; }
+  .roadmap { background: var(--card-bg); border-radius: 12px; padding: 18px 20px; margin: 0 0 22px; }
+  .roadmap h2 { margin: 0 0 6px; font-size: 18px; color: var(--accent); }
+  .roadmap .sub { font-size: 13px; margin: 0 0 14px; }
+  .roadmap-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  /* SVG box base styles applied via attributes */
+  .box-fe   { fill: var(--frontend); stroke: var(--frontend-stroke); }
+  .box-filt { fill: var(--filter);   stroke: var(--filter-stroke); }
+  .box-post { fill: var(--post);     stroke: var(--post-stroke); }
+  .box-new  { fill: var(--new);      stroke: var(--new-stroke); }
+  .box-gone { fill: var(--gone);     stroke: var(--gone-stroke); }
+  .label-title { font: 600 13px -apple-system, "Segoe UI", sans-serif; fill: #1d1f24; }
+  .label-sub   { font: 400 11px -apple-system, "Segoe UI", sans-serif; fill: #5b6471; }
+  .label-edge  { font: 600 11px "SF Mono", Menlo, monospace; fill: #5b6471; }
+  .label-stage { font: 600 11px -apple-system, "Segoe UI", sans-serif; fill: #5b6471; text-transform: uppercase; letter-spacing: 0.07em; }
+  .edge { stroke: #97a0ad; stroke-width: 1.6; fill: none; }
+  .edge.dashed { stroke-dasharray: 5 4; }
+  .edge-arrow { fill: #97a0ad; }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<h1>AEC architecture at a glance</h1>
-<p class="sub">v3.10.5 → v3.21 → WebRTC AEC3 reference · release 2026-05-19</p>
+<h1>AEC architecture flowcharts</h1>
+<p class="sub">v3.10.5 → v3.21 → WebRTC AEC3 reference · release 2026-05-19 · same input/output, three different post-filter architectures.</p>
 
-<!-- Headline cards -->
-<div class="headline">
-  <div class="h-card legacy">
-    <div class="who">PRODUCTION 2026-05-05 → 2026-05-16</div>
-    <h2>v3.10.5 (legacy)</h2>
-    <p class="what">Custom 9-stage ResFilter post-filter. Five tuning presets (MILD / SOFT / BALANCED / AGGRESSIVE / MAXIMUM), ~40 RES knobs co-tuned per preset.</p>
+<div style="background: var(--card-bg); border-radius: 12px; padding: 16px 20px; margin: 0 0 22px;">
+  <h2 style="margin: 0 0 12px; font-size: 16px; color: var(--accent);">Color legend</h2>
+  <p style="font-size: 13.5px; margin: 0 0 12px;">Color codes the role of each block <strong>relative to the v3.21 release</strong>. The block-class colors are <em>identical across all three flowcharts</em> so the same module always looks the same.</p>
+  <div class="legend">
+    <div class="item"><span class="sw frontend"></span> <strong>Front-end</strong> — HPF / saturation / delay (unchanged across versions)</div>
+    <div class="item"><span class="sw filter"></span> <strong>Linear filter</strong> — refined Kalman PBFDKF + shadow filter</div>
+    <div class="item"><span class="sw post"></span> <strong>Post-filter (carried over)</strong> — 9-stage ResFilter (legacy) or EchoRemover (AEC3)</div>
+    <div class="item"><span class="sw new"></span> <strong>New in v3.21</strong> — AEC3-aligned port that replaces legacy substrate</div>
+    <div class="item"><span class="sw gone"></span> <strong>Retired in v3.21</strong> — present in v3.10.5, removed from production</div>
   </div>
-  <div class="h-card release">
-    <div class="who">PRODUCTION 2026-05-19</div>
-    <h2>v3.21.0 (this release)</h2>
-    <p class="what">AEC3-aligned <code>_aec3_post</code> chain replaces ResFilter. Single <code>BALANCED</code> preset, 5 overrides only.</p>
+  <p class="small-note" style="margin: 12px 0 0;">Reading guide: any <span style="background: var(--new); border: 1.5px solid var(--new-stroke); padding: 1px 5px; border-radius: 2px;">yellow</span> block in v3.21 is something we ported from AEC3 since v3.10.5. Match v3.21's <span style="background: var(--new); border: 1.5px solid var(--new-stroke); padding: 1px 5px; border-radius: 2px;">yellow</span> blocks against AEC3's same-name blocks (<span style="background: var(--post); border: 1.5px solid var(--post-stroke); padding: 1px 5px; border-radius: 2px;">green</span> / <span style="background: var(--filter); border: 1.5px solid var(--filter-stroke); padding: 1px 5px; border-radius: 2px;">orange</span>) to see what we share with AEC3 and what's still v3.21-specific.</p>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════════
+     v3.10.5 — legacy 9-stage ResFilter
+     ════════════════════════════════════════════════════════════════ -->
+<section class="arch legacy">
+  <h2>v3.10.5 — legacy</h2>
+  <p class="when">Production 2026-05-05 → 2026-05-16</p>
+  <p class="desc">Five tuning presets (MILD / SOFT / BALANCED / AGGRESSIVE / MAXIMUM). Custom 9-stage <code>ResFilter</code> post-filter. ~40 RES knobs co-tuned per preset.</p>
+
+  <svg viewBox="0 0 1240 780" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="ar-1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+        <path d="M0,0 L9,5 L0,10 Z" class="edge-arrow"/>
+      </marker>
+    </defs>
+
+    <!-- Stage labels (left rail) -->
+    <text x="20" y="50"  class="label-stage">Input</text>
+    <text x="20" y="140" class="label-stage">Front-end</text>
+    <text x="20" y="300" class="label-stage">Linear filter</text>
+    <text x="20" y="500" class="label-stage">Post-filter (9-stage ResFilter)</text>
+    <line x1="135" y1="35" x2="135" y2="760" class="edge dashed"/>
+
+    <!-- Input -->
+    <rect x="280" y="20" width="160" height="46" rx="8" class="box-fe"/>
+    <text x="360" y="48" text-anchor="middle" class="label-title">mic</text>
+    <rect x="640" y="20" width="160" height="46" rx="8" class="box-fe"/>
+    <text x="720" y="48" text-anchor="middle" class="label-title">ref</text>
+
+    <!-- HPF (both paths) -->
+    <line x1="360" y1="66" x2="360" y2="105" class="edge" marker-end="url(#ar-1)"/>
+    <line x1="720" y1="66" x2="720" y2="105" class="edge" marker-end="url(#ar-1)"/>
+    <rect x="280" y="110" width="160" height="50" rx="8" class="box-fe"/>
+    <text x="360" y="133" text-anchor="middle" class="label-title">HPF (mic)</text>
+    <text x="360" y="151" text-anchor="middle" class="label-sub">80 Hz IIR</text>
+    <rect x="640" y="110" width="160" height="50" rx="8" class="box-fe"/>
+    <text x="720" y="133" text-anchor="middle" class="label-title">HPF (ref)</text>
+    <text x="720" y="151" text-anchor="middle" class="label-sub">80 Hz IIR</text>
+
+    <!-- Saturation (ref only) -->
+    <line x1="720" y1="160" x2="720" y2="195" class="edge" marker-end="url(#ar-1)"/>
+    <rect x="640" y="200" width="160" height="50" rx="8" class="box-fe"/>
+    <text x="720" y="223" text-anchor="middle" class="label-title">Saturation</text>
+    <text x="720" y="241" text-anchor="middle" class="label-sub">clip + soft-clip</text>
+
+    <!-- DelayEst -->
+    <line x1="720" y1="250" x2="720" y2="285" class="edge" marker-end="url(#ar-1)"/>
+    <rect x="620" y="290" width="200" height="50" rx="8" class="box-fe"/>
+    <text x="720" y="313" text-anchor="middle" class="label-title">DelayEst (GCC-PHAT)</text>
+    <text x="720" y="331" text-anchor="middle" class="label-sub">±1024 ms range</text>
+
+    <!-- PBFDKF refined -->
+    <line x1="360" y1="160" x2="360" y2="385" class="edge" marker-end="url(#ar-1)"/>
+    <line x1="720" y1="340" x2="720" y2="385" class="edge" marker-end="url(#ar-1)"/>
+    <line x1="360" y1="415" x2="540" y2="415" class="edge"/>
+    <rect x="540" y="390" width="200" height="60" rx="8" class="box-filt"/>
+    <text x="640" y="416" text-anchor="middle" class="label-title">PBFDKF refined filter</text>
+    <text x="640" y="434" text-anchor="middle" class="label-sub">Kalman · fft=128 · partitions=13</text>
+
+    <!-- Shadow filter -->
+    <line x1="640" y1="450" x2="640" y2="475" class="edge" marker-end="url(#ar-1)" stroke-dasharray="3,3"/>
+    <rect x="540" y="480" width="200" height="50" rx="8" class="box-filt"/>
+    <text x="640" y="503" text-anchor="middle" class="label-title">Shadow PBFDKF</text>
+    <text x="640" y="521" text-anchor="middle" class="label-sub">Q × 3.5 + ShadowCopyController</text>
+
+    <!-- Error -->
+    <line x1="900" y1="420" x2="940" y2="420" class="edge"/>
+    <text x="940" y="415" class="label-edge">e[k]</text>
+    <line x1="980" y1="420" x2="1100" y2="420" class="edge"/>
+    <line x1="640" y1="450" x2="640" y2="455" class="edge" stroke-dasharray="3,3"/>
+    <line x1="740" y1="420" x2="900" y2="420" class="edge" marker-end="url(#ar-1)"/>
+
+    <!-- 9-stage ResFilter chain (right column, vertical) -->
+    <line x1="1040" y1="450" x2="1040" y2="495" class="edge" marker-end="url(#ar-1)"/>
+    <rect x="940" y="500" width="200" height="36" rx="6" class="box-post"/>
+    <text x="1040" y="523" text-anchor="middle" class="label-title">1. Residual echo PSD + 4 caps</text>
+    <line x1="1040" y1="536" x2="1040" y2="544" class="edge"/>
+    <rect x="940" y="546" width="200" height="32" rx="6" class="box-post"/>
+    <text x="1040" y="566" text-anchor="middle" class="label-title">2. Softgate / spectral floor</text>
+    <line x1="1040" y1="578" x2="1040" y2="586" class="edge"/>
+    <rect x="940" y="588" width="200" height="30" rx="6" class="box-post"/>
+    <text x="1040" y="607" text-anchor="middle" class="label-title">3. EPC-DT cap</text>
+    <line x1="1040" y1="618" x2="1040" y2="624" class="edge"/>
+    <rect x="940" y="626" width="200" height="28" rx="6" class="box-post"/>
+    <text x="1040" y="644" text-anchor="middle" class="label-title">4. Quiet-mask</text>
+    <line x1="1040" y1="654" x2="1040" y2="660" class="edge"/>
+    <rect x="940" y="662" width="200" height="28" rx="6" class="box-post"/>
+    <text x="1040" y="680" text-anchor="middle" class="label-title">5. 3-bin smoothing</text>
+    <line x1="1040" y1="690" x2="1040" y2="696" class="edge"/>
+    <rect x="940" y="698" width="200" height="28" rx="6" class="box-post"/>
+    <text x="1040" y="716" text-anchor="middle" class="label-title">6. HF cap</text>
+
+    <!-- post-filter row 7-9 (folded onto the same column to keep height) -->
+    <rect x="700" y="698" width="200" height="28" rx="6" class="box-post"/>
+    <text x="800" y="716" text-anchor="middle" class="label-title">9. Noise floor + CNG</text>
+    <rect x="700" y="662" width="200" height="28" rx="6" class="box-post"/>
+    <text x="800" y="680" text-anchor="middle" class="label-title">8. Temporal smoothing</text>
+    <rect x="700" y="626" width="200" height="28" rx="6" class="box-post"/>
+    <text x="800" y="644" text-anchor="middle" class="label-title">7. Pre-temporal</text>
+    <line x1="940" y1="640" x2="900" y2="640" class="edge" marker-end="url(#ar-1)"/>
+
+    <!-- Output -->
+    <line x1="800" y1="726" x2="800" y2="744" class="edge" marker-end="url(#ar-1)"/>
+    <rect x="720" y="746" width="160" height="32" rx="8" class="box-fe"/>
+    <text x="800" y="767" text-anchor="middle" class="label-title">out</text>
+  </svg>
+
+  <div class="issues">
+    <div class="card bad">
+      <h3>✗ Drawbacks of v3.10.5 — why we moved on</h3>
+      <ul>
+        <li><strong>9-stage ResFilter is Pareto-locked.</strong> Across v3.12 → v3.15 we ran 60+ ablations (S1–S11, F-E1 through F-E5, Arc M/G/F/T, Arc P/R/S-orth.A); the chain is at a ceiling — every ratio win on one bucket (FS / DT / NE) costs another bucket. Closed CANNOT-SHIP in batches.</li>
+        <li><strong>5-preset menu is co-tuned trap.</strong> Each preset wires ~40 RES knobs (over_sub_base / scale / dt_reduction / mask_*, etc.) that interact; touching a knob outside a full 800-case re-bench breaks the others. <span class="tag">menu bloat</span></li>
+        <li><strong>GCC-PHAT DelayEst is brittle.</strong> 1024 ms search range but no clock-drift detection; cohort-tail cases (qNvSMyU class, ~7/800) fall outside and the filter never converges. <span class="tag">tail-7</span></li>
+        <li><strong>No render-side analysis.</strong> Narrowband tonal renders (hum / fan / line noise) cause the refined filter to learn mic-as-echo, killing NE buckets (E0l0 / wJVP class).</li>
+        <li><strong>Reverb tail collapsed into stage 1.</strong> One-tap exponential decay is a poor proxy for actual room reverb impulse responses.</li>
+        <li><strong>No sub-band ERLE.</strong> Fullband-only ERLE drives the suppressor; can't selectively trust the filter in some bands while distrusting in others.</li>
+        <li><strong>Filter convergence detector is a hard 10-frame &gt; 5 dB ERLE latch.</strong> Permanently False on hard cases (9xjhi class) → R² collapses to nonlinear forever.</li>
+      </ul>
+    </div>
   </div>
-  <div class="h-card reference">
-    <div class="who">REFERENCE</div>
-    <h2>WebRTC AEC3</h2>
-    <p class="what">Chromium <code>modules/audio_processing/aec3/</code>. No preset menu; single Config struct with Field-Trial overrides.</p>
+</section>
+
+
+<!-- ════════════════════════════════════════════════════════════════
+     v3.21 — this release
+     ════════════════════════════════════════════════════════════════ -->
+<section class="arch release">
+  <h2>v3.21.0 — this release</h2>
+  <p class="when">Production from 2026-05-19</p>
+  <p class="desc">Single <code>BALANCED</code> preset (5 overrides). Reference-path HPF retired. AEC3-aligned <code>_aec3_post</code> chain (StationarityEstimator + AecState + ResidualEchoEstimator + SuppressionGain + comfort noise + OLA) replaces the 9-stage ResFilter.</p>
+
+  <svg viewBox="0 0 1240 760" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="ar-2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+        <path d="M0,0 L9,5 L0,10 Z" class="edge-arrow"/>
+      </marker>
+    </defs>
+
+    <!-- Stage labels (left rail) -->
+    <text x="20" y="50"  class="label-stage">Input</text>
+    <text x="20" y="140" class="label-stage">Front-end</text>
+    <text x="20" y="300" class="label-stage">Linear filter</text>
+    <text x="20" y="500" class="label-stage">Post-filter (_aec3_post)</text>
+    <line x1="135" y1="35" x2="135" y2="740" class="edge dashed"/>
+
+    <!-- Input -->
+    <rect x="280" y="20" width="160" height="46" rx="8" class="box-fe"/>
+    <text x="360" y="48" text-anchor="middle" class="label-title">mic</text>
+    <rect x="640" y="20" width="160" height="46" rx="8" class="box-fe"/>
+    <text x="720" y="48" text-anchor="middle" class="label-title">ref</text>
+
+    <!-- HPF only on mic path -->
+    <line x1="360" y1="66" x2="360" y2="105" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="280" y="110" width="160" height="50" rx="8" class="box-fe"/>
+    <text x="360" y="133" text-anchor="middle" class="label-title">HPF (mic)</text>
+    <text x="360" y="151" text-anchor="middle" class="label-sub">80 Hz IIR · ref retired</text>
+
+    <!-- Saturation (ref only) -->
+    <line x1="720" y1="66" x2="720" y2="195" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="640" y="200" width="160" height="50" rx="8" class="box-fe"/>
+    <text x="720" y="223" text-anchor="middle" class="label-title">Saturation</text>
+    <text x="720" y="241" text-anchor="middle" class="label-sub">clip + soft-clip</text>
+
+    <!-- EchoPathDelayEstimator (new) -->
+    <line x1="720" y1="250" x2="720" y2="285" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="600" y="290" width="240" height="60" rx="8" class="box-new"/>
+    <text x="720" y="313" text-anchor="middle" class="label-title">EchoPathDelayEstimator</text>
+    <text x="720" y="332" text-anchor="middle" class="label-sub">matched filter + lag aggregator</text>
+    <text x="720" y="346" text-anchor="middle" class="label-sub">+ clock-drift detector</text>
+
+    <!-- PBFDKF refined -->
+    <line x1="360" y1="160" x2="360" y2="395" class="edge" marker-end="url(#ar-2)"/>
+    <line x1="720" y1="350" x2="720" y2="395" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="540" y="400" width="200" height="60" rx="8" class="box-filt"/>
+    <text x="640" y="426" text-anchor="middle" class="label-title">PBFDKF refined filter</text>
+    <text x="640" y="444" text-anchor="middle" class="label-sub">Kalman · fft=128 · partitions=13</text>
+
+    <!-- Shadow NLMS (new class) -->
+    <line x1="640" y1="460" x2="640" y2="475" class="edge dashed" marker-end="url(#ar-2)"/>
+    <rect x="540" y="480" width="200" height="50" rx="8" class="box-new"/>
+    <text x="640" y="503" text-anchor="middle" class="label-title">Shadow PBFDAF (NLMS)</text>
+    <text x="640" y="521" text-anchor="middle" class="label-sub">μ = 0.5 · PathChangeRegimeHandler</text>
+
+    <!-- RenderSignalAnalyzer (new substrate that feeds the refined filter) -->
+    <rect x="820" y="400" width="200" height="60" rx="8" class="box-new"/>
+    <text x="920" y="426" text-anchor="middle" class="label-title">RenderSignalAnalyzer</text>
+    <text x="920" y="444" text-anchor="middle" class="label-sub">per-bin tonal mask</text>
+    <text x="920" y="456" text-anchor="middle" class="label-sub">+ poor-excitation freeze</text>
+    <path d="M 820 430 L 745 430" class="edge" marker-end="url(#ar-2)" stroke-dasharray="5,3"/>
+
+    <!-- error e[k] -->
+    <line x1="640" y1="460" x2="640" y2="540" class="edge" stroke-dasharray="3,3"/>
+    <line x1="640" y1="540" x2="200" y2="540" class="edge"/>
+    <text x="700" y="478" class="label-edge">e[k]</text>
+
+    <!-- AEC3 post-filter — vertical chain from left -->
+    <line x1="200" y1="540" x2="200" y2="555" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="80" y="560" width="240" height="32" rx="6" class="box-new"/>
+    <text x="200" y="580" text-anchor="middle" class="label-title">StationarityEstimator</text>
+    <line x1="200" y1="592" x2="200" y2="600" class="edge"/>
+    <rect x="80" y="602" width="240" height="32" rx="6" class="box-new"/>
+    <text x="200" y="622" text-anchor="middle" class="label-title">AecState (12 sub-analyzers)</text>
+    <line x1="200" y1="634" x2="200" y2="642" class="edge"/>
+    <rect x="80" y="644" width="240" height="32" rx="6" class="box-new"/>
+    <text x="200" y="664" text-anchor="middle" class="label-title">ResidualEchoEstimator</text>
+    <line x1="200" y1="676" x2="200" y2="684" class="edge"/>
+    <rect x="80" y="686" width="240" height="32" rx="6" class="box-new"/>
+    <text x="200" y="706" text-anchor="middle" class="label-title">SuppressionGain (Wiener)</text>
+
+    <!-- second column of post-filter -->
+    <line x1="320" y1="576" x2="360" y2="576" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="360" y="560" width="240" height="32" rx="6" class="box-new"/>
+    <text x="480" y="580" text-anchor="middle" class="label-title">Comfort noise (CNG)</text>
+    <line x1="600" y1="576" x2="640" y2="576" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="640" y="560" width="240" height="32" rx="6" class="box-new"/>
+    <text x="760" y="580" text-anchor="middle" class="label-title">sqrt-Hann OLA synthesis</text>
+
+    <!-- output -->
+    <line x1="760" y1="592" x2="760" y2="616" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="680" y="620" width="160" height="32" rx="8" class="box-fe"/>
+    <text x="760" y="641" text-anchor="middle" class="label-title">out</text>
+
+    <!-- _ours_nores tap (enable_res=False bypass) -->
+    <line x1="640" y1="540" x2="1100" y2="540" class="edge"/>
+    <line x1="1100" y1="540" x2="1100" y2="616" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="1010" y="620" width="200" height="48" rx="8" class="box-fe"/>
+    <text x="1110" y="640" text-anchor="middle" class="label-title">_ours_nores.wav</text>
+    <text x="1110" y="656" text-anchor="middle" class="label-sub">(enable_res=False bypass)</text>
+  </svg>
+
+  <div class="issues cols-2">
+    <div class="card good">
+      <h3>✓ What v3.21 fixed vs v3.10.5</h3>
+      <ul>
+        <li><strong>Retired the 9-stage ResFilter</strong> → AEC3-aligned <code>_aec3_post</code> chain (StationarityEstimator + AecState + ResidualEchoEstimator + SuppressionGain + CNG + OLA). DT/NE deg now beats AEC3 reference by ≥ 0.52 / 0.60.</li>
+        <li><strong>Single <code>BALANCED</code> preset.</strong> 5 overrides only. No co-tuning trap.</li>
+        <li><strong>AEC3-aligned delay subsystem</strong> — matched filter + lag aggregator + clock-drift detector + render-delay controller (replaces GCC-PHAT).</li>
+        <li><strong>RenderSignalAnalyzer</strong> — per-bin tonal mask + <code>poor_signal_excitation</code> freezes the refined filter on bad render frames (fixes E0l0 / wJVP class NE outliers).</li>
+        <li><strong>AecState ADT</strong> over 12 sub-analyzers → multi-gate <code>usable_linear_estimate</code> replaces the brittle 10-frame ERLE latch.</li>
+        <li><strong>Sub-band ERLE</strong> drives SuppressionGain ERLE-divide refinement, AEC3-style.</li>
+        <li><strong>ReverbModel</strong> — per-bin tail across the impulse response (decay + frequency response), replacing the one-tap exponential.</li>
+        <li><strong>Shadow filter switched to NLMS (PBFDAF)</strong> — AEC3 coarse-filter role; faster tracker that survives echo path changes.</li>
+        <li><strong>FilterMisadjustmentEstimator + ScaleFilter</strong> — long-term echo/error drift triggers W rescale.</li>
+        <li><strong>Reference-path HPF retired</strong> (v3.19 verdict): −0.04 nores deg with no echo gain.</li>
+        <li><strong>Byte-equal regression gate</strong> — 25 representative cases (5 / bucket at echo percentiles 0/25/50/75/100), md5-compared per cleanup commit.</li>
+        <li><strong>~5 500 Python LOC removed</strong>, ~32 k doc lines pruned, 0 algorithm-output regression.</li>
+      </ul>
+    </div>
+
+    <div class="card warn">
+      <h3>⚠ Known issues / gaps still in v3.21</h3>
+      <ul>
+        <li><strong>TransparentMode disabled.</strong> Our <code>AecStateConfig.enable_transparent_mode = False</code>: requires AEC3's <code>SubtractorOutputAnalyzer</code> to feed a per-frame <code>any_filter_converged</code> pulse; legacy <code>FilterConvergenceAnalyzer</code> stays at False on hard cases like 9xjhi, so TM would falsely activate after ~6 s of strong render and kill <code>usable_linear</code>. Port pending. <span class="tag">v3.21+ TODO</span></li>
+        <li><strong>C port lag.</strong> The C implementation at <code>c_impl/</code> still ships the legacy ResFilter chain. v3.21.x C-port arc needs to mirror Python's AEC3 chain. <span class="tag">c_impl debt</span></li>
+        <li><strong>Substrate flags partially retained.</strong> R10 follow-up deferred: <code>arc_m_t_gated_enabled</code> gates were removed but a few unused config fields remain in scope-creep edge cases (e.g. <code>use_diverged_streak_ema</code>, <code>epc_r_reset_enabled</code>, <code>plan_b_dt_per_bin_gamma</code>). Default-OFF; no audio impact. <span class="tag">tech debt</span></li>
+        <li><strong>OLA delay accounting.</strong> The AEC3 chain has a ~64-sample (4 ms) algorithmic delay from sqrt-Hann OLA. <em>Already fixed</em> in v3.21 anchor commit <code>3aadd2d</code> (lag-corrected output limiter), but consumers downstream of <code>aec.process()</code> should be aware of the per-frame latency. <span class="tag">documented</span></li>
+        <li><strong>Volterra NL inverse filter not started.</strong> v3.13 E5 closure identified non-linear (loudspeaker distortion) as the remaining FS/DT ceiling; v3.14+ Volterra arc designed but not implemented.</li>
+        <li><strong>NN joint NR + RES + Dereverb arc not started.</strong> Out of scope for v3.21 (DSP-only release per project memory).</li>
+        <li><strong><code>p52_regime_classifier.py</code> only used in tests.</strong> Module ships but is consumed only by <code>test_p52_regime.py</code>; if you don't need the regime trace, drop both. <span class="tag">audit</span></li>
+        <li><strong>Legacy <code>FilterConvergenceAnalyzer</code> still wired.</strong> AecState uses the AEC3-aligned multi-gate, but the legacy 10-frame ERLE latch object is still maintained on <code>self._convergence</code> for backward-compat property reads.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════════════════════
+     WebRTC AEC3 reference
+     ════════════════════════════════════════════════════════════════ -->
+<section class="arch reference">
+  <h2>WebRTC AEC3 — reference</h2>
+  <p class="when">Chromium <code>modules/audio_processing/aec3/</code></p>
+  <p class="desc">No preset menu — single <code>EchoCanceller3Config</code> struct with Field-Trial overrides. The canonical reference our <code>_aec3_post</code> chain mirrors.</p>
+
+  <svg viewBox="0 0 1240 720" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="ar-3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+        <path d="M0,0 L9,5 L0,10 Z" class="edge-arrow"/>
+      </marker>
+    </defs>
+
+    <text x="20" y="50"  class="label-stage">Input</text>
+    <text x="20" y="140" class="label-stage">Front-end</text>
+    <text x="20" y="300" class="label-stage">EchoSubtractor</text>
+    <text x="20" y="500" class="label-stage">EchoRemover (post-filter)</text>
+    <line x1="135" y1="35" x2="135" y2="700" class="edge dashed"/>
+
+    <!-- Input -->
+    <rect x="280" y="20" width="160" height="46" rx="8" class="box-fe"/>
+    <text x="360" y="48" text-anchor="middle" class="label-title">mic</text>
+    <rect x="640" y="20" width="160" height="46" rx="8" class="box-fe"/>
+    <text x="720" y="48" text-anchor="middle" class="label-title">ref</text>
+
+    <!-- HPF (mic; ref via Field Trial) -->
+    <line x1="360" y1="66" x2="360" y2="105" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="280" y="110" width="160" height="50" rx="8" class="box-fe"/>
+    <text x="360" y="133" text-anchor="middle" class="label-title">HPF (mic)</text>
+    <text x="360" y="151" text-anchor="middle" class="label-sub">ref via Field Trial</text>
+
+    <!-- Saturation -->
+    <line x1="720" y1="66" x2="720" y2="195" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="640" y="200" width="160" height="50" rx="8" class="box-fe"/>
+    <text x="720" y="223" text-anchor="middle" class="label-title">SaturationDetector</text>
+
+    <!-- EchoPathDelayEstimator -->
+    <line x1="720" y1="250" x2="720" y2="285" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="600" y="290" width="240" height="60" rx="8" class="box-fe"/>
+    <text x="720" y="313" text-anchor="middle" class="label-title">EchoPathDelayEstimator</text>
+    <text x="720" y="332" text-anchor="middle" class="label-sub">matched filter + lag aggregator</text>
+    <text x="720" y="346" text-anchor="middle" class="label-sub">+ clock-drift detector</text>
+
+    <!-- Refined adaptive filter -->
+    <line x1="360" y1="160" x2="360" y2="395" class="edge" marker-end="url(#ar-3)"/>
+    <line x1="720" y1="350" x2="720" y2="395" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="540" y="400" width="200" height="60" rx="8" class="box-filt"/>
+    <text x="640" y="426" text-anchor="middle" class="label-title">Refined adaptive filter</text>
+    <text x="640" y="444" text-anchor="middle" class="label-sub">Kalman block-partitioned FD</text>
+
+    <!-- Coarse adaptive filter -->
+    <line x1="640" y1="460" x2="640" y2="475" class="edge dashed" marker-end="url(#ar-3)"/>
+    <rect x="540" y="480" width="200" height="50" rx="8" class="box-filt"/>
+    <text x="640" y="503" text-anchor="middle" class="label-title">Coarse adaptive filter</text>
+    <text x="640" y="521" text-anchor="middle" class="label-sub">NLMS shadow</text>
+
+    <!-- RenderSignalAnalyzer -->
+    <rect x="820" y="400" width="200" height="60" rx="8" class="box-filt"/>
+    <text x="920" y="426" text-anchor="middle" class="label-title">RenderSignalAnalyzer</text>
+    <text x="920" y="444" text-anchor="middle" class="label-sub">tonal mask + poor-excitation</text>
+    <path d="M 820 430 L 745 430" class="edge" marker-end="url(#ar-3)" stroke-dasharray="5,3"/>
+
+    <!-- error -->
+    <line x1="640" y1="460" x2="640" y2="540" class="edge" stroke-dasharray="3,3"/>
+    <line x1="640" y1="540" x2="200" y2="540" class="edge"/>
+    <text x="700" y="478" class="label-edge">e[k]</text>
+
+    <!-- EchoRemover chain -->
+    <line x1="200" y1="540" x2="200" y2="555" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="80" y="560" width="240" height="30" rx="6" class="box-post"/>
+    <text x="200" y="579" text-anchor="middle" class="label-title">NearendDetector</text>
+    <line x1="200" y1="590" x2="200" y2="596" class="edge"/>
+    <rect x="80" y="598" width="240" height="30" rx="6" class="box-post"/>
+    <text x="200" y="617" text-anchor="middle" class="label-title">AecState (11 sub-analyzers)</text>
+    <line x1="200" y1="628" x2="200" y2="634" class="edge"/>
+    <rect x="80" y="636" width="240" height="30" rx="6" class="box-post"/>
+    <text x="200" y="655" text-anchor="middle" class="label-title">ResidualEchoEstimator (+ ReverbModel)</text>
+
+    <line x1="320" y1="575" x2="360" y2="575" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="360" y="560" width="240" height="30" rx="6" class="box-post"/>
+    <text x="480" y="579" text-anchor="middle" class="label-title">ErleEstimator (sub-band)</text>
+    <line x1="480" y1="590" x2="480" y2="596" class="edge"/>
+    <rect x="360" y="598" width="240" height="30" rx="6" class="box-post"/>
+    <text x="480" y="617" text-anchor="middle" class="label-title">SuppressionGain</text>
+    <line x1="480" y1="628" x2="480" y2="634" class="edge"/>
+    <rect x="360" y="636" width="240" height="30" rx="6" class="box-post"/>
+    <text x="480" y="655" text-anchor="middle" class="label-title">ComfortNoiseGenerator</text>
+
+    <line x1="600" y1="575" x2="640" y2="575" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="640" y="560" width="240" height="30" rx="6" class="box-post"/>
+    <text x="760" y="579" text-anchor="middle" class="label-title">TransparentMode</text>
+
+    <!-- output -->
+    <line x1="760" y1="590" x2="760" y2="620" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="680" y="624" width="160" height="32" rx="8" class="box-fe"/>
+    <text x="760" y="645" text-anchor="middle" class="label-title">out</text>
+  </svg>
+
+  <div class="issues">
+    <div class="card warn">
+      <h3>⚠ Known issues / quirks in WebRTC AEC3 itself</h3>
+      <ul>
+        <li><strong>TransparentMode false-activation.</strong> After ~6 s of strong render with no near-end speech, the SubtractorOutputAnalyzer / FilterAnalyzer combo declares the room transparent and the suppressor passes mic through — even when echo is still present. Documented inside the C++ code (<code>aec_state.cc</code> comments); WebRTC ships it default-ON anyway because it helps the common Chromium use-case. Our v3.21 disables it (see v3.21 issues card above).</li>
+        <li><strong>Strict refined-filter convergence detector.</strong> <code>FilterAnalyzer::Update</code> requires 10 consecutive blocks &gt; 5 dB ERLE to assert <code>consistent_estimate</code>. On hard cases (deep DT or low-coupling rooms with reverb), this never asserts → AecState&apos;s downstream gates are stuck in their fallback paths. Known WebRTC limitation, no upstream fix.</li>
+        <li><strong>Sub-band ERLE EMA can lock high during heavy DT.</strong> The asymmetric EMA biases towards higher ERLE; in heavy DT segments the per-band ERLE estimate stays optimistic and SuppressionGain over-suppresses NE.</li>
+        <li><strong>Reverb decay estimator is loosely identified.</strong> The decay coefficient comes from a one-tap fit to <code>echo_path_estimate</code> tail; real rooms have multi-rate decay (early reflections vs late tail) that the model collapses.</li>
+        <li><strong>OLA in <code>suppression_filter.cc</code> is mathematically clean.</strong> kFftLength=128, hop=64 (kFftLengthBy2), sqrt-Hanning analysis × sqrt-Hanning synthesis = Hann at 50 % overlap → sum-to-one reconstruction. Standard textbook setup — <em>no known OLA-specific defect</em>. The 64-sample (4 ms) algorithmic delay it introduces is inherent to the design, not a bug.</li>
+        <li><strong>Coarse filter (NLMS shadow) has no gain control.</strong> μ is fixed at 0.5 (kCoarseFilterStepSize). On near-end-heavy frames the coarse filter can drift faster than the refined filter; AEC3 mitigates with <code>poor_coarse_filter_counter</code> but the trigger is conservative.</li>
+        <li><strong>EchoPathChange detection is energy-based.</strong> <code>EchoPathChangeDetector</code> looks at far-energy step changes; can&apos;t distinguish a real path change from a microphone gain change (handset → speakerphone). Mostly benign because the response is the same (filter reset) but the event log conflates them.</li>
+        <li><strong>EchoCanceller3Config is a 150-field struct.</strong> Field-Trial overrides spread across Chromium make production tuning hard to audit; no preset menu (unlike our pre-v3.21 design — though we just retired ours too).</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════════════════════
+     v3.21 vs AEC3 — where we DIFFER today
+     ════════════════════════════════════════════════════════════════ -->
+<div class="roadmap">
+  <h2>v3.21 vs WebRTC AEC3 — current alignment + remaining gaps</h2>
+  <p class="sub">v3.21 ships an <strong>AEC3-aligned but not bit-equal</strong> port. Same block-level structure, mostly the same algorithm, but several detail choices differ. The closer this list gets to empty, the closer we are to a 1:1 port.</p>
+
+  <div class="roadmap-grid">
+
+    <div class="card good">
+      <h3>✓ Already aligned with AEC3</h3>
+      <ul>
+        <li>Block / FFT / hop rates (64 / 128 / 64).</li>
+        <li>Refined Kalman filter + NLMS coarse-filter pairing.</li>
+        <li><code>EchoPathDelayEstimator</code> — matched filter + lag aggregator + clock-drift.</li>
+        <li><code>RenderSignalAnalyzer</code> — narrowband tonal mask + <code>poor_signal_excitation</code>.</li>
+        <li><code>AecState</code> ADT seam over sub-analyzers (we have 12, AEC3 has 11 — close).</li>
+        <li><code>ResidualEchoEstimator</code> linear / render-based 2-path + <code>ReverbModel</code> tail.</li>
+        <li><code>SuppressionGain</code> Wiener + over-estimation.</li>
+        <li><code>ComfortNoiseGenerator</code> = per-bin PSD EMA × <code>sqrt(1 − G²)</code>.</li>
+        <li><code>SuppressionFilter</code> OLA with sqrt-Hann analysis × sqrt-Hann synthesis.</li>
+        <li><code>StationarityEstimator</code> + <code>FilterAnalyzer</code> + <code>FilteringQualityAnalyzer</code>.</li>
+      </ul>
+    </div>
+
+    <div class="card warn">
+      <h3>⚠ Where v3.21 still differs from AEC3</h3>
+      <ul>
+        <li><strong>No TransparentMode.</strong> AEC3 has it (default ON in Chromium); we disabled because we lack <code>SubtractorOutputAnalyzer</code> — see future work below.</li>
+        <li><strong>No <code>NearendDetector</code>.</strong> AEC3&apos;s subband NE detector feeds SuppressionGain mode switching; our v3.18 D.1 substrate closed CANNOT-SHIP, so we don&apos;t have an equivalent live consumer.</li>
+        <li><strong>No EchoAudibility module.</strong> AEC3 computes per-bin audibility from JND-weighted PSD ratios; we use a simpler spectral floor.</li>
+        <li><strong>SuppressionGain over-estimation differs.</strong> AEC3 has a four-mode <code>HighFrequencySuppressionConfig</code> + <code>DominantNearendConfig</code> with mode-switched coefficients; ours has a smaller subset and the high-frequency mode tuning is not fully aligned.</li>
+        <li><strong>Reverb decay estimator is partial.</strong> We have <code>ReverbDecayEstimator</code> + <code>ReverbFrequencyResponse</code> but the estimation gate is simpler than AEC3&apos;s adaptive tail-length controller.</li>
+        <li><strong>FilterMisadjustmentEstimator is ours.</strong> AEC3 has a different ScaleFilter design (per-block scale ratios); we use a single fullband ratio with asymmetric EMA. Same goal, different math.</li>
+        <li><strong>PathChangeRegimeHandler is ours.</strong> AEC3 handles echo-path-change via <code>Subtractor::HandleEchoPathChange</code> + AecState&apos;s <code>full_reset</code> cascade. Our regime handler bundles those decisions with shadow-copy logic that AEC3 doesn&apos;t have.</li>
+        <li><strong>Coarse-filter step size.</strong> AEC3 uses 0.5; we expose <code>shadow_mu_nlms</code> defaulting to 0.5 but our coarse-filter freeze logic (<code>poor_coarse_filter_counter</code>) is partial.</li>
+      </ul>
+    </div>
+
+    <div class="card note">
+      <h3>→ v3.21+ port targets (would shrink the diff)</h3>
+      <ul>
+        <li><strong>Port <code>SubtractorOutputAnalyzer</code></strong> → enable TransparentMode safely on hard cases like 9xjhi. Highest priority — currently disabled gate caps DT/NE on a small but visible tail of cases. <span class="tag">v3.22</span></li>
+        <li><strong>Port <code>NearendDetector</code> + mode-switched SuppressionGain.</strong> Pair with retry of the v3.18 D.1 subband-NE substrate that closed CANNOT-SHIP — the new wiring goes through SuppressionGain directly instead of ResFilter. <span class="tag">v3.22</span></li>
+        <li><strong>Port <code>EchoAudibility</code>.</strong> JND-weighted per-bin gain floor; should improve NE-heavy buckets without echo regression. <span class="tag">v3.22</span></li>
+        <li><strong>Align SuppressionGain over-estimation.</strong> Bring the 4-mode HighFrequency + DominantNearend tuning into our <code>suppression_gain.py</code>. <span class="tag">v3.22</span></li>
+        <li><strong>Mirror ScaleFilter exactly.</strong> Per-block scale ratios + AEC3 stability gate; retire our asymmetric-EMA version. <span class="tag">v3.22+</span></li>
+      </ul>
+    </div>
+
+    <div class="card note">
+      <h3>→ Future arcs (beyond AEC3 alignment)</h3>
+      <ul>
+        <li><strong>C port catch-up.</strong> Mirror Python&apos;s AEC3 chain into <code>c_impl/</code>: <code>state/</code> ADT + <code>residual/</code> chain + <code>delay/</code> subsystem. Mandatory before any production C-side ship. <span class="tag">c_impl debt</span></li>
+        <li><strong>R10 follow-up.</strong> Remaining dead config flags (~10 fields) + dead helpers in <code>config.py</code> / <code>dataclasses.py</code> / <code>detectors.py</code>. Small but visible cleanup. <span class="tag">tech debt</span></li>
+        <li><strong>Volterra non-linear inverse filter.</strong> Designed in v3.14 Volterra design lock; primary lever for the remaining FS / DT echo ceiling (loudspeaker non-linearity). Multi-month arc. <span class="tag">v3.22+</span></li>
+        <li><strong>NN joint NR + RES + Dereverb.</strong> Out of scope for v3.21 (DSP-only release). Separate arc.</li>
+        <li><strong>Pruning of <code>FilterConvergenceAnalyzer</code> legacy seam.</strong> AecState&apos;s multi-gate replaces it; the legacy object is still wired for backward-compat property reads.</li>
+        <li><strong>Audit / retire <code>p52_regime_classifier.py</code>.</strong> Only consumed by <code>test_p52_regime.py</code>; if the regime trace isn&apos;t needed for production, drop both.</li>
+      </ul>
+    </div>
+
   </div>
 </div>
 
-<!-- Pipeline visualization -->
-<div class="pipelines">
 
-  <!-- v3.10.5 column -->
-  <div class="col legacy">
-    <h2>v3.10.5 — legacy</h2>
-
-    <div class="label">Front-end</div>
-    <div class="stage frontend"><strong>HPF (mic + ref)</strong><small>80 Hz IIR on both paths</small></div>
-    <div class="arrow">↓</div>
-    <div class="stage frontend"><strong>Saturation</strong><small>clip detection + soft-clip</small></div>
-    <div class="arrow">↓</div>
-    <div class="stage frontend"><strong>DelayEst (GCC-PHAT)</strong><small>1024 ms range</small></div>
-
-    <div class="label">Linear filter</div>
-    <div class="stage filter"><strong>PBFDKF refined</strong><small>Kalman, fft=128, partitions=13</small></div>
-    <div class="stage filter"><strong>Shadow PBFDKF</strong><small>Q × 3.5 (same class as main)</small><br><small>+ ShadowCopyController</small></div>
-
-    <div class="label">Post-filter (9-stage ResFilter)</div>
-    <div class="stage post"><strong>1. Residual echo PSD + 4 caps</strong></div>
-    <div class="stage post"><strong>2. Softgate / spectral floor</strong></div>
-    <div class="stage post"><strong>3. EPC-DT cap</strong></div>
-    <div class="stage post"><strong>4. Quiet-mask</strong></div>
-    <div class="stage post"><strong>5. 3-bin smoothing</strong></div>
-    <div class="stage post"><strong>6. HF cap</strong></div>
-    <div class="stage post"><strong>7. Pre-temporal</strong></div>
-    <div class="stage post"><strong>8. Temporal smoothing</strong></div>
-    <div class="stage post"><strong>9. Noise floor + CNG</strong></div>
-  </div>
-
-  <!-- v3.21 column -->
-  <div class="col release">
-    <h2>v3.21.0 — this release</h2>
-
-    <div class="label">Front-end</div>
-    <div class="stage frontend"><strong>HPF (mic only)</strong><small>ref HPF retired (v3.19 verdict)</small></div>
-    <div class="arrow">↓</div>
-    <div class="stage frontend"><strong>Saturation</strong><small>clip detection + soft-clip</small></div>
-    <div class="arrow">↓</div>
-    <div class="stage frontend new"><strong>EchoPathDelayEstimator</strong><small>AEC3-aligned: matched filter + lag aggregator + clock-drift</small></div>
-
-    <div class="label">Linear filter</div>
-    <div class="stage filter"><strong>PBFDKF refined</strong><small>Kalman, fft=128, partitions=13</small></div>
-    <div class="stage filter new"><strong>Shadow PBFDAF (NLMS)</strong><small>μ = 0.5, AEC3 coarse-filter role</small><br><small>+ PathChangeRegimeHandler</small></div>
-    <div class="stage filter new"><strong>RenderSignalAnalyzer</strong><small>per-bin tonal mask + poor-excitation freeze</small></div>
-
-    <div class="label">Post-filter (AEC3 _aec3_post)</div>
-    <div class="stage post new"><strong>StationarityEstimator</strong><small>per-bin CV gate, zeros R² + freezes W</small></div>
-    <div class="stage post new"><strong>AecState</strong><small>read-only ADT over 12 sub-analyzers</small></div>
-    <div class="stage post new"><strong>ResidualEchoEstimator</strong><small>linear / render-based + reverb tail</small></div>
-    <div class="stage post new"><strong>SuppressionGain</strong><small>Wiener G(k) + over-estimation</small></div>
-    <div class="stage post new"><strong>Comfort noise</strong><small>per-bin PSD EMA · sqrt(1−G²)</small></div>
-    <div class="stage post new"><strong>OLA synthesis</strong><small>sqrt-Hann × sqrt-Hann = Hann</small></div>
-  </div>
-
-  <!-- AEC3 column -->
-  <div class="col reference">
-    <h2>WebRTC AEC3 — reference</h2>
-
-    <div class="label">Front-end</div>
-    <div class="stage frontend"><strong>HPF (mic; ref via Field Trial)</strong></div>
-    <div class="arrow">↓</div>
-    <div class="stage frontend"><strong>Saturation detector</strong></div>
-    <div class="arrow">↓</div>
-    <div class="stage frontend"><strong>EchoPathDelayEstimator</strong><small>matched filter + lag aggregator + clock-drift</small></div>
-
-    <div class="label">Linear filter (EchoSubtractor)</div>
-    <div class="stage filter"><strong>Refined adaptive filter</strong><small>Kalman block partitioned FD</small></div>
-    <div class="stage filter"><strong>Coarse adaptive filter</strong><small>NLMS shadow</small></div>
-    <div class="stage filter"><strong>RenderSignalAnalyzer</strong></div>
-
-    <div class="label">Post-filter (EchoRemover)</div>
-    <div class="stage post"><strong>NearendDetector</strong></div>
-    <div class="stage post"><strong>AecState</strong><small>read-only ADT over 11 sub-analyzers</small></div>
-    <div class="stage post"><strong>ResidualEchoEstimator</strong><small>+ ReverbModel</small></div>
-    <div class="stage post"><strong>ErleEstimator (sub-band)</strong></div>
-    <div class="stage post"><strong>SuppressionGain</strong></div>
-    <div class="stage post"><strong>ComfortNoiseGenerator</strong></div>
-    <div class="stage post"><strong>TransparentMode</strong></div>
-  </div>
-
-</div>
-
-<!-- Score panel -->
+<!-- ════════════════════════════════════════════════════════════════
+     Score panel
+     ════════════════════════════════════════════════════════════════ -->
 <div class="scores">
   <h2>800-case AECMOS — v3.21 BALANCED baseline</h2>
   <table>
@@ -222,82 +596,38 @@
       <tr><td>NE</td>          <td>200</td><td class="num">4.998</td><td class="num">4.052</td><td class="num win">+0.602</td><td class="num">−0.048</td></tr>
     </tbody>
   </table>
-  <p class="small-note">v3.21 beats AEC3 reference on every DT/NE deg bucket; near-parity (~0) with
-  AEC2. Anchor: <code>docs/bench/v3_21_3aadd2d_baseline/balanced_aec3_result.md</code>.</p>
+  <p class="small-note">v3.21 beats AEC3 reference on every DT/NE deg bucket by 0.52 / 0.52 / 0.60; near-parity (~0) with AEC2. Anchor: <code>docs/bench/v3_21_3aadd2d_baseline/balanced_aec3_result.md</code>.</p>
 </div>
 
-<!-- Delta panels -->
-<div class="delta">
 
-  <div class="panel">
-    <h2>What's gone (v3.10.5 → v3.21)</h2>
-    <ul>
-      <li><strong>ResFilter 9-stage chain</strong> — 2 200 LOC, retired in R7. <span class="side gone">−2 200</span></li>
-      <li><strong>Preset menu</strong> — MILD / SOFT / AGGRESSIVE / MAXIMUM gone; only <code>BALANCED</code> ships. <span class="side gone">−210</span></li>
-      <li><strong>~40 RES knobs</strong> — <code>res_g_min_db / res_over_sub_* / res_dt_reduction / res_echo_method / res_gain_type / res_alpha_* / res_mask_*</code> deleted. <span class="side gone">−300</span></li>
-      <li><strong>Reference HPF</strong> — bypass by default since v3.19 ref-flip verdict.</li>
-      <li><strong>Arc P / Arc G / Arc T substrate</strong> — per-band ERL EMA + drift-detect + cohort-tail detector — retired R6 + R10b.</li>
-      <li><strong>v3.18 Phase C / D / F substrate</strong> — AecState facade / leakage_diverged / branch ablations / mask shape swap / NE detector substrate — retired R8 + R10c.</li>
-      <li><strong>~130 verdict / design docs</strong> from v3.11 → v3.20 closed-arc record — moved to summary form (R11 + R13). <span class="side gone">−32 k lines</span></li>
-    </ul>
-  </div>
-
-  <div class="panel">
-    <h2>What's new (v3.10.5 → v3.21)</h2>
-    <ul>
-      <li><strong>AEC3-aligned post-filter</strong> — <code>_aec3_post()</code> = StationarityEstimator + AecState + ResidualEchoEstimator + SuppressionGain + CNG + OLA. <span class="side new">single path</span></li>
-      <li><strong>AEC3 delay subsystem</strong> — matched filter + lag aggregator + clock-drift detector + render-delay controller (replaces GCC-PHAT).</li>
-      <li><strong>AecState ADT</strong> — read-only seam over 12 sub-analyzers (FilterAnalyzer / FilteringQualityAnalyzer / SubbandErleEstimator / StationarityEstimator / etc.).</li>
-      <li><strong>RenderSignalAnalyzer</strong> — per-bin narrowband tonal mask + poor-excitation freeze.</li>
-      <li><strong>ReverbModel</strong> — explicit reverb tail in residual estimate.</li>
-      <li><strong>Sub-band ERLE</strong> — per-band EMA drives SuppressionGain ERLE-divide.</li>
-      <li><strong>Shadow NLMS</strong> — coarse filter = PBFDAF (NLMS), default ON since v3.21 Phase B.1.</li>
-      <li><strong>FilterMisadjustmentEstimator + ScaleFilter</strong> — long-term echo/error ratio drift → rescale W. Default ON since v3.21 Phase B.5.</li>
-    </ul>
-  </div>
-
-</div>
-
-<!-- LOC cleanup card -->
-<div class="loc">
-  <h2>v3.21 cleanup arc — net delta</h2>
-  <div class="loc-grid">
-    <div class="loc-card"><div class="big">16</div><div class="small">commits on <code>feature/v3.21-aec3-clean</code></div></div>
-    <div class="loc-card"><div class="big">−5 565</div><div class="small">Python LOC<br>(post-baseline)</div></div>
-    <div class="loc-card"><div class="big">−32 341</div><div class="small">doc lines<br>(R11 + R13 archive sweep)</div></div>
-    <div class="loc-card"><div class="big">25 / 25</div><div class="small">byte-equal PASS<br>(every round)</div></div>
-  </div>
-  <details style="margin-top:12px;">
-    <summary>Per-round cleanup table</summary>
-    <table style="margin-top:10px; width: 100%; border-collapse: collapse; font-size: 13px;">
-      <thead><tr style="background:#f0f2f5;">
-        <th style="border-bottom:1px solid var(--border); padding: 6px 9px; text-align: left;">Round</th>
-        <th style="border-bottom:1px solid var(--border); padding: 6px 9px; text-align: left;">Commit</th>
-        <th style="border-bottom:1px solid var(--border); padding: 6px 9px; text-align: left;">Summary</th>
-        <th style="border-bottom:1px solid var(--border); padding: 6px 9px; text-align: right;">Net LOC</th>
-      </tr></thead>
-      <tbody>
-      <tr><td style="padding:5px 9px;">Phase A</td><td><code>a24d154</code></td><td>baseline + 25-case byte-equal harness</td><td style="text-align:right;">+8 684 (test infra)</td></tr>
-      <tr><td style="padding:5px 9px;">R1</td><td><code>c07d428</code></td><td>delete MILD/SOFT/AGGRESSIVE/MAXIMUM presets</td><td style="text-align:right;">−117</td></tr>
-      <tr><td style="padding:5px 9px;">R2</td><td><code>6267de0</code></td><td>drop legacy BALANCED · rename BALANCED_AEC3 → BALANCED</td><td style="text-align:right;">−89</td></tr>
-      <tr><td style="padding:5px 9px;">R3</td><td><code>97509c3</code></td><td>remove <code>use_aec3_residual</code> flag + 2 gates</td><td style="text-align:right;">−18</td></tr>
-      <tr><td style="padding:5px 9px;">R4</td><td><code>28ef604</code></td><td>collapse if-AEC3 / else-ResFilter → single <code>_aec3_post</code> call</td><td style="text-align:right;">−20</td></tr>
-      <tr><td style="padding:5px 9px;">R5</td><td><code>ceb9ead</code></td><td>prune dead local-var prep + dead <code>self.res</code> state writes</td><td style="text-align:right;">−98</td></tr>
-      <tr><td style="padding:5px 9px;">R6</td><td><code>b63dcbd</code></td><td>drop dead <code>_residual_est</code> readers + Arc G/Arc T blocks</td><td style="text-align:right;">−194</td></tr>
-      <tr><td style="padding:5px 9px;">R7</td><td><code>0532c57 + 651ccdd</code></td><td>delete ResFilter chain</td><td style="text-align:right;">−3 302</td></tr>
-      <tr><td style="padding:5px 9px;">R8</td><td><code>8b51007</code></td><td>retire <code>legacy_state.py</code> + delete <code>diagnose_gcc_phat.py</code></td><td style="text-align:right;">−624</td></tr>
-      <tr><td style="padding:5px 9px;">R9</td><td><code>c677725</code></td><td>delete <code>legacy_delay.py</code></td><td style="text-align:right;">−282</td></tr>
-      <tr><td style="padding:5px 9px;">R10a</td><td><code>1f0bb7f</code></td><td>drop legacy ResFilter config knobs</td><td style="text-align:right;">−63</td></tr>
-      <tr><td style="padding:5px 9px;">R10b-1</td><td><code>2176a11</code></td><td>arc_g / arc_t dead state init+reset</td><td style="text-align:right;">−54</td></tr>
-      <tr><td style="padding:5px 9px;">R10b-2 + R10c</td><td><code>9d92334</code></td><td>drop dead substrate flags + readers + env hooks</td><td style="text-align:right;">−357</td></tr>
-      <tr><td style="padding:5px 9px;">R11</td><td><code>09ad7a9</code></td><td>archive sweep (move closed-arc verdict / design docs)</td><td style="text-align:right;">renames</td></tr>
-      <tr><td style="padding:5px 9px;">R12</td><td><code>df793ce</code></td><td>drop python module orphans</td><td style="text-align:right;">−347</td></tr>
-      <tr><td style="padding:5px 9px;">R13</td><td><code>75dddf7</code></td><td>aggressive docs/ + docs/archive/ prune</td><td style="text-align:right;">−32 341 docs</td></tr>
-      <tr><td style="padding:5px 9px;">Phase D-1/D-2/D-3</td><td><code>f60b6a5 + 902677a</code></td><td>doc rewrite + version bump + CHANGELOG entry</td><td style="text-align:right;">—</td></tr>
-      </tbody>
-    </table>
-  </details>
-</div>
+<!-- Cleanup card -->
+<details>
+  <summary>v3.21 cleanup arc — 18 commits, byte-equal 25/25 PASS each round</summary>
+  <table>
+    <thead><tr><th>Round</th><th>Commit</th><th>Summary</th><th class="r">Net LOC</th></tr></thead>
+    <tbody>
+      <tr><td>Phase A</td><td><code>a24d154</code></td><td>baseline + 25-case byte-equal harness + 800-case anchor</td><td class="r">+8 684 test infra</td></tr>
+      <tr><td>R1</td><td><code>c07d428</code></td><td>delete MILD / SOFT / AGGRESSIVE / MAXIMUM presets</td><td class="r">−117</td></tr>
+      <tr><td>R2</td><td><code>6267de0</code></td><td>drop legacy BALANCED · rename BALANCED_AEC3 → BALANCED</td><td class="r">−89</td></tr>
+      <tr><td>R3</td><td><code>97509c3</code></td><td>remove <code>use_aec3_residual</code> flag + 2 gates</td><td class="r">−18</td></tr>
+      <tr><td>R4</td><td><code>28ef604</code></td><td>collapse if-AEC3 / else-ResFilter → single <code>_aec3_post</code> call</td><td class="r">−20</td></tr>
+      <tr><td>R5</td><td><code>ceb9ead</code></td><td>prune dead local-var prep + dead <code>self.res</code> state writes</td><td class="r">−98</td></tr>
+      <tr><td>R6</td><td><code>b63dcbd</code></td><td>drop dead <code>_residual_est</code> readers + Arc G/Arc T blocks</td><td class="r">−194</td></tr>
+      <tr><td>R7</td><td><code>0532c57 + 651ccdd</code></td><td>delete ResFilter chain (res_filter.py + res_refactored/)</td><td class="r">−3 302</td></tr>
+      <tr><td>R8</td><td><code>8b51007</code></td><td>retire legacy_state.py + delete diagnose_gcc_phat.py</td><td class="r">−624</td></tr>
+      <tr><td>R9</td><td><code>c677725</code></td><td>delete legacy_delay.py</td><td class="r">−282</td></tr>
+      <tr><td>R10a</td><td><code>1f0bb7f</code></td><td>drop legacy ResFilter config knobs</td><td class="r">−63</td></tr>
+      <tr><td>R10b-1</td><td><code>2176a11</code></td><td>arc_g / arc_t dead state init + reset paths</td><td class="r">−54</td></tr>
+      <tr><td>R10b-2 + R10c</td><td><code>9d92334</code></td><td>drop dead substrate flags + readers + env hooks</td><td class="r">−357</td></tr>
+      <tr><td>R11</td><td><code>09ad7a9</code></td><td>archive sweep (move closed-arc verdict / design docs)</td><td class="r">renames</td></tr>
+      <tr><td>R12</td><td><code>df793ce</code></td><td>drop python module orphans (filter_quality / state substrates)</td><td class="r">−347</td></tr>
+      <tr><td>R13</td><td><code>75dddf7</code></td><td>aggressive docs/ + docs/archive/ prune (143 files)</td><td class="r">−32 341 docs</td></tr>
+      <tr><td>Phase D-1/D-3</td><td><code>f60b6a5</code></td><td>doc + <code>__version__</code> bump 3.15.0 → 3.21.0</td><td class="r">—</td></tr>
+      <tr><td>R14/R15/R16 + D-2</td><td><code>902677a</code></td><td>aec_methods + aec_algorithm_guide + architecture HTML + refactor_modules_layout + CHANGELOG</td><td class="r">—</td></tr>
+      <tr><td>R14b + R17 + R18</td><td><code>041988d</code></td><td>visual architecture HTML + docs trim + legacy residual_estimator removal</td><td class="r">−4 981 (incl. docs)</td></tr>
+    </tbody>
+  </table>
+</details>
 
 <p class="small-note">Generated 2026-05-19 · companion docs:
 <a href="aec_methods.md">aec_methods.md</a> ·
