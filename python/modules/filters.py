@@ -8,7 +8,7 @@ Extracted from ``aec.py`` during refactor R.5. Three filter classes:
 
 Self-contained: depends only on numpy + collections.deque + typing.
 """
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 from collections import deque
@@ -309,9 +309,15 @@ class PBFDKF(PBFDAF):
         self._leakage_diverged = np.float32(
             _aec3_scale.LEAKAGE_DIVERGED_PER_HOP_DEFAULT
         )
-        # Updated per hop by orchestrator (scalar sums for now; per-bin
-        # comparison can be added in a follow-up).
+        # Updated per hop by orchestrator. v3.21.1: per-bin support added.
+        # Scalar `_e2_coarse_for_refresh` is the legacy sum used by the
+        # OFF-default scalar path. Per-bin `_e2_coarse_per_bin` is the
+        # instantaneous coarse error PSD published per hop, consumed by
+        # the AEC3 cc:128-138 per-bin path when
+        # `_use_per_bin_h_error_refresh = True`.
         self._e2_coarse_for_refresh = 0.0
+        self._e2_coarse_per_bin: Optional[np.ndarray] = None
+        self._use_per_bin_h_error_refresh: bool = False
         self._disallow_leakage_diverged = False
         # ERL per bin (lazy init to 0.1 = -10 dB nominal; orchestrator
         # overwrites once its ERL estimator has a real value).
@@ -624,17 +630,42 @@ class PBFDKF(PBFDAF):
         path returns early after calling this) and after the active
         decay step. Keeps H_error trending toward steady state and away
         from the init value during the startup window.
+
+        v3.21.1: per-bin path added behind ``_use_per_bin_h_error_refresh``
+        flag. AEC3 cc:128-138 uses per-bin instantaneous E²_refined vs
+        E²_coarse compare. Legacy scalar path stays as default OFF for
+        byte-equal preservation. Per-bin path uses fresh ``|self.error_spec|²``
+        for refined (addresses Codex F2 staleness on early-return paths
+        where the smoothed ``self._error_psd`` is from a prior frame).
         """
-        e2_ref_sum = float(np.sum(self._error_psd))
-        e2_coa_sum = float(self._e2_coarse_for_refresh)
-        use_converged = (
-            e2_ref_sum <= e2_coa_sum or self._disallow_leakage_diverged
-        )
-        leakage = (self._leakage_converged if use_converged
-                   else self._leakage_diverged)
-        self.H_error_per_bin = (
-            self.H_error_per_bin + leakage * self._erl_per_bin
-        )
+        if (self._use_per_bin_h_error_refresh
+                and self._e2_coarse_per_bin is not None):
+            # AEC3 cc:128-138 per-bin path. Compute instantaneous
+            # per-bin E²_refined from the current frame's filter error.
+            e2_refined_per_bin = (np.abs(self.error_spec) ** 2).astype(np.float32)
+            use_converged_mask = (
+                e2_refined_per_bin <= self._e2_coarse_per_bin
+            ) | self._disallow_leakage_diverged
+            leakage_arr = np.where(
+                use_converged_mask,
+                self._leakage_converged,
+                self._leakage_diverged,
+            ).astype(np.float32)
+            self.H_error_per_bin = (
+                self.H_error_per_bin + leakage_arr * self._erl_per_bin
+            )
+        else:
+            # Legacy scalar path (default → byte-equal preserved).
+            e2_ref_sum = float(np.sum(self._error_psd))
+            e2_coa_sum = float(self._e2_coarse_for_refresh)
+            use_converged = (
+                e2_ref_sum <= e2_coa_sum or self._disallow_leakage_diverged
+            )
+            leakage = (self._leakage_converged if use_converged
+                       else self._leakage_diverged)
+            self.H_error_per_bin = (
+                self.H_error_per_bin + leakage * self._erl_per_bin
+            )
         np.clip(self.H_error_per_bin, self._h_error_floor, self._h_error_ceil,
                 out=self.H_error_per_bin)
 
