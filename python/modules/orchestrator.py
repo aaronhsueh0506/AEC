@@ -1219,8 +1219,6 @@ class AEC:
             self.dtd_divergence.reset()
         if self.dtd_coherence:
             self.dtd_coherence.reset()
-        if self.res:
-            self.res.reset()
         if self._freq_near_queue is not None:
             self._freq_near_queue.fill(0)
             self._freq_far_queue.fill(0)
@@ -1424,12 +1422,6 @@ class AEC:
         self._frames_since_last_epc = 10**9
         self._frames_since_last_f_e3_w_reset = 10**9
         self._f_e5_prev_sat_level = 0.0
-
-        # RES — clears its echo_psd / error_psd / noise_psd / gain_smooth /
-        # render state. Long-window far-PSD EMA is preserved when
-        # preserve_render_ema=True (input-side context, see docstring).
-        if self.res is not None:
-            self.res.reset(preserve_long_window_ema=preserve_render_ema)
 
         # Diagnostic dict — would otherwise show stale ERLE / DT signals
         for k, v in (('erle_inst', 0.0), ('mu_scale', 1.0), ('far_activity', 0.0),
@@ -2514,8 +2506,10 @@ class AEC:
                     and getattr(self._aec_state, '_aec_ref', None) is not None):
                 self._diag['aec_state_snapshot'] = self._aec_state.aec3_snapshot()
 
-            # RES post-filter using OLA + sqrt-Hann (skip for buffered FDAF)
-            if (self.res or self.config.return_res_context) and self._freq_near_queue is None:
+            # AEC3 post-filter using OLA + sqrt-Hann (skip for buffered FDAF).
+            # enable_res gates suppression so eval_aec_challenge's no-RES
+            # comparison run still emits the linear residual.
+            if (self.config.enable_res or self.config.return_res_context) and self._freq_near_queue is None:
                 far_power = np.mean(far_end ** 2)
                 # Dynamic over_sub: moderate base, scale with convergence.
                 # Windowed decaying ERLE (TC ≈ 10s) replaces irreversible
@@ -2703,14 +2697,16 @@ class AEC:
                     self._diag['nl_pitch_lag'] = (
                         self.nl_detector._pitch_lag_last)
 
-                # Update per-bin mu_scale AFTER RES (echo_psd is now current frame)
+                # Update per-bin mu_scale AFTER RES. echo_psd/error_psd were
+                # only written from ResFilter.process() (dead since R4) → both
+                # were permanently zero, so per_bin_eer was always np.zeros and
+                # _per_bin_mu_scale was a fresh mu_min*ones array per frame.
                 if not self.config.enable_dtd:
                     if self._filter_converged:
-                        per_bin_eer = self.res.echo_psd / (self.res.error_psd + 1e-10)
-                        per_bin_eer = np.clip(per_bin_eer, 0.0, 1.0)
                         mu_min = self.config.shadow_mu_min
-                        self._per_bin_mu_scale = (mu_min + (1.0 - mu_min) * per_bin_eer).astype(np.float32)
-                        self._simple_mu_ratio = float(np.mean(per_bin_eer))
+                        self._per_bin_mu_scale = np.full(
+                            self.filter.n_freqs, mu_min, dtype=np.float32)
+                        self._simple_mu_ratio = 0.0
                         # Stationary DT: only freeze when speech actually
                         # detected (jump_ratio + hangover). _is_stationary_far
                         # alone fires on 32% of normal speech far-end frames,
@@ -2723,86 +2719,40 @@ class AEC:
                         self._per_bin_mu_scale = None
                         self._update_simple_mu_ratio(raw_output, far_end)
 
-            # C-parity fix: when RES is disabled, _update_simple_mu_ratio is never
-            # called in PBFDKF path. C always calls update_simple_mu_ratio regardless.
-            # Add call here when RES is not active (avoids double-update when RES is on).
-            if not self.res and not self.config.enable_dtd and not self._filter_converged:
+            # C-parity fix: when RES is disabled, _update_simple_mu_ratio is
+            # never called in PBFDKF path. C always calls update_simple_mu_ratio
+            # regardless. Add call here when RES is off (avoids double-update
+            # when RES is on).
+            if (not self.config.enable_res
+                    and not self.config.enable_dtd
+                    and not self._filter_converged):
                 self._update_simple_mu_ratio(raw_output, far_end)
 
-            # Update diagnostics
-            if self.res and hasattr(self.res, '_diag_gain_mean'):
-                self._diag['res_gain_mean'] = self.res._diag_gain_mean
-                self._diag['res_gain_min'] = self.res._diag_gain_min
-                self._diag['effective_g_min'] = self.res._diag_effective_g_min
-                self._diag['far_activity'] = self.res._diag_far_activity
-                self._diag['echo_psd_mean'] = self.res._diag_echo_psd_mean
-                self._diag['error_psd_mean'] = self.res._diag_error_psd_mean
-            if self.res is not None and hasattr(self.res, '_p4b_dt_per_bin_mean'):
-                self._diag['p4b_dt_per_bin_mean'] = float(self.res._p4b_dt_per_bin_mean)
-                self._diag['p4b_dt_per_bin_hf_mean'] = float(self.res._p4b_dt_per_bin_hf_mean)
-                self._diag['p4b_coh2_hf_mean'] = float(self.res._p4b_coh2_hf_mean)
-                self._diag['p4b_effective_dt'] = float(self.res._p4b_effective_dt)
-                self._diag['p4b_is_stationary_dt'] = int(self.res._p4b_is_stationary_dt)
-                self._diag['p4b_gain_hf_mean'] = float(self.res._p4b_gain_hf_mean)
-                self._diag['p4b_res_echo_hf_mean_db'] = float(self.res._p4b_res_echo_hf_mean_db)
+            # Update diagnostics. ResFilter._diag_* fields were only written
+            # from process() (dead since R4) → all consumers saw __init__
+            # defaults forever. Hardcoded here so the diag dict structure is
+            # preserved without depending on self.res existing.
+            self._diag['res_gain_mean'] = 1.0
+            self._diag['res_gain_min'] = 1.0
+            self._diag['effective_g_min'] = 1.0
+            self._diag['far_activity'] = 0.0
+            self._diag['echo_psd_mean'] = 0.0
+            self._diag['error_psd_mean'] = 0.0
+            self._diag['p4b_dt_per_bin_mean'] = 0.0
+            self._diag['p4b_dt_per_bin_hf_mean'] = 0.0
+            self._diag['p4b_coh2_hf_mean'] = 0.0
+            self._diag['p4b_effective_dt'] = 0.0
+            self._diag['p4b_is_stationary_dt'] = 0
+            self._diag['p4b_gain_hf_mean'] = 1.0
+            self._diag['p4b_res_echo_hf_mean_db'] = -120.0
             self._diag['erle_inst'] = self.get_erle_instant()
-
-            # P1 Phase 1: high-band NE evidence metrics (trace-only).
-            # Computes 3 candidate metrics from post-attribution residual
-            # error_psd[2k:], far_lw, and mic near_psd. NO behaviour change.
-            if self.config.trace_high_band_metrics and self.res is not None:
-                try:
-                    err_psd = self.res.error_psd
-                    near_psd = self.res.near_psd
-                    far_lw = self.res._residual_est._long_window_far_psd
-                    n_freqs = err_psd.shape[0]
-                    sr = self.config.sample_rate
-                    fft_sz = self.config.fft_size
-                    bin_2k = int(round(2000.0 * fft_sz / sr))
-                    bin_2k = max(1, min(bin_2k, n_freqs - 2))
-                    err_hb = err_psd[bin_2k:]
-                    far_hb = far_lw[bin_2k:]
-                    near_hb = near_psd[bin_2k:]
-                    erl_e = float(self._erl_estimate)
-                    err_hb_mean = float(np.mean(err_hb)) + 1e-10
-                    # m_excess_ratio for α ∈ {0.5, 1.0, 2.0}
-                    for alpha, key in ((0.5, 'm_excess_ratio_a05'),
-                                        (1.0, 'm_excess_ratio_a10'),
-                                        (2.0, 'm_excess_ratio_a20')):
-                        excess = np.maximum(err_hb - alpha * far_hb * erl_e, 0.0)
-                        self._diag[key] = float(np.mean(excess)) / err_hb_mean
-                    # m_modulation: high-band mic envelope CV^2 over 32-frame window
-                    cur_pwr = float(np.mean(near_hb))
-                    self._hb_mic_pwr_ring[self._hb_mic_pwr_idx] = cur_pwr
-                    self._hb_mic_pwr_idx = (self._hb_mic_pwr_idx + 1) % 32
-                    if self._hb_mic_pwr_n < 32:
-                        self._hb_mic_pwr_n += 1
-                    win = self._hb_mic_pwr_ring[:self._hb_mic_pwr_n]
-                    win_mean = float(np.mean(win))
-                    win_var = float(np.var(win))
-                    self._diag['m_modulation'] = win_var / (win_mean ** 2 + 1e-10)
-                    # m_spectral_flatness on err_hb (Wiener entropy)
-                    err_hb_safe = err_hb + 1e-10
-                    log_geo = float(np.mean(np.log(err_hb_safe)))
-                    arith = float(np.mean(err_hb_safe)) + 1e-10
-                    self._diag['m_spectral_flatness'] = float(np.exp(log_geo)) / arith
-                    # Aux: bin index used (for sanity / debug)
-                    self._diag['m_bin_2k'] = int(bin_2k)
-                except Exception as _e:
-                    # Never break release path — trace is best-effort.
-                    self._diag['m_excess_ratio_a05'] = 0.0
-                    self._diag['m_excess_ratio_a10'] = 0.0
-                    self._diag['m_excess_ratio_a20'] = 0.0
-                    self._diag['m_modulation'] = 0.0
-                    self._diag['m_spectral_flatness'] = 0.0
 
             mu_val = mu_scale
             self._diag['mu_scale'] = float(np.mean(mu_val)) if isinstance(mu_val, np.ndarray) else float(mu_val)
             self._diag['converged'] = self._filter_converged
             self._diag['erle_factor'] = float(erle_factor) if 'erle_factor' in locals() else 0.0
             self._diag['divergence'] = self._divergence_indicator
-            # G4: expanded diagnostics
-            self._diag['using_render_based'] = bool(getattr(self.res, '_using_render_based', False)) if self.res else False
+            self._diag['using_render_based'] = False
             self._diag['shadow_advantage'] = getattr(self, '_shadow_advantage', 1.0)
             self._diag['dt_from_energy'] = self._dt_from_energy
             self._diag['dt_from_shadow'] = getattr(self, '_dt_from_shadow', 0.0)
@@ -2984,22 +2934,6 @@ class AEC:
             self._diag['p3f_main_err_baseline'] = float(self._p3f_main_err_baseline)
             # B6 — cache for next-frame shadow_mu state-aware schedule.
             self._prev_filter_state = _filter_state
-
-            # P3g Phase 0 — dry-run residual source audit. Linear residual
-            # (Stage-1 ERLE-blended) is computed every frame; render-based
-            # residual is computed only when the legacy switch hits Stage-2
-            # (`using_render_based` is True). Comparing the two tells us
-            # how much the render override is changing the residual the
-            # post-filter sees, per state class. No behaviour change.
-            if self.res is not None and hasattr(self.res, '_residual_est'):
-                _est = self.res._residual_est
-                _lin = float(getattr(_est, '_last_linear_residual_psd_mean', 0.0))
-                _ren = float(getattr(_est, '_last_render_residual_psd_mean', 0.0))
-                self._diag['residual_psd_linear'] = _lin
-                self._diag['residual_psd_render'] = _ren
-                self._diag['residual_render_blend'] = float(
-                    getattr(_est, '_last_render_blend', 0.0))
-            # ---- end P3f trace ----
 
             # ---- P3h sustained-diverged filter reset (default off) ----
             # Decrement cooldown every frame. Fire reset only when
@@ -3214,7 +3148,7 @@ class AEC:
             and _epc_hangover < 1
         )
         # dominant_nearend with hold counter + initial-state gate
-        _ne_raw = bool(getattr(self.res, '_diag_dominant_nearend_raw', False)) if self.res else False
+        _ne_raw = False
         _hold = getattr(self, '_dominant_nearend_hold', 0)
         if _ne_raw and not _initial_state_active:
             _hold = 5
@@ -3275,22 +3209,14 @@ class AEC:
         self._diag['raw_dt_pre_epc'] = float(getattr(self, '_round3_raw_dt_pre_epc', 0.0))
         # ── end Round 3 trace ──
 
-        # ── Round 4 trace: per-bin RES diagnostics (audio-passive) ──
-        if self.res is not None:
-            for _k, _v in getattr(self.res, '_diag_round4', {}).items():
-                self._diag[_k] = _v
-        # ── end Round 4 trace ──
-
-        # ── Round 5 trace: per-stage gain means (voice-band, audio-passive) ──
-        if self.res is not None:
-            _r5_stages = getattr(self.res, '_diag_round5_stages', None)
-            if _r5_stages is not None:
-                _R5_NAMES = ('softgate_emr', 'spectral_floor', 'epc_dt_cap',
-                             'quiet_mask', '3bin_smooth', 'hf_cap',
-                             'pre_temporal', 'post_temporal', 'after_noise_lift')
-                for _i, _n in enumerate(_R5_NAMES):
-                    self._diag[f'g_stage_{_n}_voice'] = float(_r5_stages[_i])
-        # ── end Round 5 trace ──
+        # Round 5 trace: 9 per-stage gain slots. Legacy ResFilter._stage_*
+        # wrote per-frame voice-band means; AEC3 chain doesn't use this trace,
+        # so the slots are constant zero (preserved here to keep the diag dict
+        # structure stable for external consumers).
+        for _n in ('softgate_emr', 'spectral_floor', 'epc_dt_cap',
+                   'quiet_mask', '3bin_smooth', 'hf_cap',
+                   'pre_temporal', 'post_temporal', 'after_noise_lift'):
+            self._diag[f'g_stage_{_n}_voice'] = 0.0
 
         # ── Round 7 trace: filter trajectory + transition events (audio-passive) ──
         if not hasattr(self, '_r7_prev_delay'):
@@ -3755,18 +3681,11 @@ class AEC:
         return out.astype(np.float32)
 
     def enable_res_audit(self) -> None:
-        """Enable durable RES audit counter substrate (Phase 3B v3 S7+).
-
-        No-op when RES is disabled (self.res is None).
-        """
-        if self.res is not None:
-            self.res.enable_audit_counters()
+        """No-op shim (legacy RES audit infrastructure retired with ResFilter)."""
 
     def get_res_audit(self):
-        """Return RES audit counter dict (or None if not enabled / RES disabled)."""
-        if self.res is None:
-            return None
-        return self.res.get_audit_counters()
+        """No-op shim (legacy RES audit infrastructure retired with ResFilter)."""
+        return None
 
 
 def process_wav_files(mic_path: str, ref_path: str, out_path: str,
