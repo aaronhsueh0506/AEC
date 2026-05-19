@@ -785,41 +785,10 @@ class AEC:
         self._epc_render_forced_remaining = 0
         # Dynamic ERL estimate for render-based echo (B4)
         self._erl_estimate = 0.1  # initial -20dB, conservative
-        # v3.14 Arc-P P.S2: adaptive per-band ERL EMA [LF, MF, HF].
-        # Only updated and consumed when f3_1_per_band_erl_adaptive=True.
-        # Initialised to the same 0.1 as scalar _erl_estimate so the first
-        # few frames before any update gate fires produce reasonable values.
+        # Per-band ERL EMA broadcast to filter._erl_per_bin. Stays at uniform
+        # 0.1 in v3.21 (the Arc G EMA update that would mutate this lived in
+        # the post-filter loop that was retired with ResFilter).
         self._per_band_erl = np.array([0.1, 0.1, 0.1], dtype=np.float64)
-        # v3.15 §1.4 Arc G — fast per-band ERL EMA for drift detection
-        # (default-OFF; only updated/consumed when arc_g_per_band_w_reset=True).
-        self._per_band_erl_fast = np.array([0.1, 0.1, 0.1], dtype=np.float64)
-        # Per-band cooldown counter (frames remaining where reset is suppressed
-        # after a fire on that band).
-        self._arc_g_cooldown = np.zeros(3, dtype=np.int32)
-        # Diagnostic counter — total Arc G fires per band over the stream.
-        self._arc_g_fire_count = np.zeros(3, dtype=np.int64)
-        # v3.15 §1.5 Arc T — cohort tail real-time detector state.
-        # All fields stay at init until arc_t_cohort_detector=True; default
-        # OFF byte-equal sanity preserved by the outer flag gate at the
-        # proxy compute block (after the per-band ERL update loop).
-        # _W is sized at init time from arc_t_window_frames so 3 ring buffers
-        # can be allocated lazily — we size them here using a default to keep
-        # __init__ simple; size matches config.arc_t_window_frames.
-        _arc_t_W = int(self.config.arc_t_window_frames)
-        self._arc_t_inst_pb_smooth = np.array([0.1, 0.1, 0.1], dtype=np.float64)
-        self._arc_t_window_max = np.array([1e-10, 1e-10, 1e-10], dtype=np.float64)
-        self._arc_t_window_min = np.array([1e10, 1e10, 1e10], dtype=np.float64)
-        self._arc_t_window_buf = [
-            deque(maxlen=_arc_t_W),
-            deque(maxlen=_arc_t_W),
-            deque(maxlen=_arc_t_W),
-        ]
-        self._arc_t_cohort_tail_signal = False
-        self._arc_t_hys_remaining = 0
-        self._arc_t_proxy_db_last = 0.0
-        # Cumulative diagnostic; only cleared by full AEC.reset(). Mirrors
-        # Arc G's _arc_g_fire_count diagnostic surface.
-        self._arc_t_fire_count = 0
         # Double-talk analyzer (owns _dt_from_energy / _dt_from_shadow / _shadow_advantage)
         self._dt_analyzer = DoubleTalkAnalyzer(self.config)
 
@@ -1170,19 +1139,8 @@ class AEC:
         self._dt_analyzer.reset()
         self._epc_render_forced_remaining = 0
         self._erl_estimate = 0.1
-        # v3.14 Arc-P P.S2: reset per-band ERL EMA to initial conservative value.
+        # Reset per-band ERL EMA to initial conservative value.
         self._per_band_erl[:] = 0.1
-        # v3.15 §1.5 Arc T — clear detector state (full reset; cumulative
-        # _arc_t_fire_count IS cleared here per the AEC.reset() contract).
-        self._arc_t_inst_pb_smooth[:] = 0.1
-        self._arc_t_window_max[:] = 1e-10
-        self._arc_t_window_min[:] = 1e10
-        for _q in self._arc_t_window_buf:
-            _q.clear()
-        self._arc_t_cohort_tail_signal = False
-        self._arc_t_hys_remaining = 0
-        self._arc_t_proxy_db_last = 0.0
-        self._arc_t_fire_count = 0
 
     def _reset_filter_derived_state(self, reason: str = 'plateau',
                                      preserve_render_ema: bool = True) -> None:
@@ -1280,18 +1238,6 @@ class AEC:
         # v3.14 Arc-P P.S2: per-band ERL is filter-output-derived (echo_spec /
         # far_spec from PBFDKF), so reset it together with scalar _erl_estimate.
         self._per_band_erl[:] = 0.1
-        # v3.15 §1.5 Arc T — proxy state is filter-output-derived (reads
-        # res.error_psd which is filter-output-derived); reset alongside
-        # per-band ERL.  Cumulative fire counter is PRESERVED on partial
-        # reset (only AEC.reset() clears it).
-        self._arc_t_inst_pb_smooth[:] = 0.1
-        self._arc_t_window_max[:] = 1e-10
-        self._arc_t_window_min[:] = 1e10
-        for _q in self._arc_t_window_buf:
-            _q.clear()
-        self._arc_t_cohort_tail_signal = False
-        self._arc_t_hys_remaining = 0
-        self._arc_t_proxy_db_last = 0.0
         self._epc_render_forced_remaining = 0
         self._dt_analyzer.reset()
         self._stat_dt_hangover = 0
