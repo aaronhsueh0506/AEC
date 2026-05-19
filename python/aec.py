@@ -2,16 +2,15 @@
 
 The algorithm itself lives under ``python/modules/``:
 
-* ``modules.config`` — AecConfig + 5 presets
+* ``modules.config`` — AecConfig + single BALANCED preset
 * ``modules.orchestrator`` — AEC engine class + process_wav_files + main
-* ``modules.res_filter`` — ResFilter + ResFilterEnr (production) + ResFilterWiener
 * ``modules.{enums, dataclasses, delay, erle, preprocessing, filters,
-  detectors, dtd, epc, state, residual_estimator, nlp, debug_logger}``
-  — leaf modules
+  detectors, dtd, epc, state, residual, residual_estimator, render, filter,
+  nlp, debug_logger}`` — leaf modules
 
 This file re-exports every public symbol so existing callers can keep
-``from aec import AEC, AecConfig, AecMode, AecPreset, ResFilter,
-PBFDKF, PathChangeRegimeHandler, RegimeHandlerDecision, ...`` unchanged.
+``from aec import AEC, AecConfig, AecMode, AecPreset, PBFDKF,
+PathChangeRegimeHandler, RegimeHandlerDecision, ...`` unchanged.
 
 CLI entry point: ``python3 python/aec.py mic.wav ref.wav out.wav --preset balanced``
 """
@@ -42,7 +41,6 @@ from modules.epc import (  # noqa: F401
 )
 from modules.legacy_state import AecState  # noqa: F401
 from modules.residual_estimator import ResidualEchoEstimator  # noqa: F401
-from modules.res_filter import ResFilter, ResFilterEnr, ResFilterWiener  # noqa: F401
 from modules.nlp import SubtractiveNLP  # noqa: F401
 from modules.debug_logger import AecDebugLogger  # noqa: F401
 from modules.orchestrator import AEC, process_wav_files, main  # noqa: F401

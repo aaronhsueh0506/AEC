@@ -24,14 +24,12 @@ Layout (target, populated incrementally during refactor R.1 → R.11):
                          `classify_epc_event`
 * ``state``            — `AecState`
 * ``residual_estimator`` — `ResidualEchoEstimator`
-* ``res_filter``       — `ResFilter`
 * ``nlp``              — `SubtractiveNLP`
 * ``debug_logger``     — `AecDebugLogger`
 * ``orchestrator``     — `AEC`, `process_wav_files`, `main`
 * ``filter_analyzer``  — `FilterAnalyzer` (audit-only, v3.18 Phase C.A)
 * ``filter_quality``   — `FilteringQualityAnalyzer` (v3.18 Phase C.B)
 * ``p52_regime_classifier`` — `AcousticRegimeClassifier` (analysis-only)
-* ``res_refactored/``  — P52 Phase B subclass-and-delegate scaffold
 
 The shim at ``python/aec.py`` re-exports every public symbol from this
 package for backward compat with existing callers

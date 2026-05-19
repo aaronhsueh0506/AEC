@@ -42,8 +42,7 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             filter_length=832, enable_cng=True, enable_res=True,
             sample_rate=16000, write_wav=True,
             mic_pad=0, ref_pad=0,
-            diag_csv_path=None, gain_dump_path=None,
-            trace_high_band_metrics=False,
+            diag_csv_path=None,
             trace_aec_state=False,
             diverged_reset=False,
             diverged_reset_streak_frames=50,
@@ -56,13 +55,9 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
     (use to absorb a static delay larger than max_delay_ms). Output WAV is
     stripped of the leading max(mic_pad, ref_pad) samples.
 
-    diag_csv_path: write per-frame AecStats rows for filter / DTD / RES
-    trajectory analysis.
-
-    gain_dump_path: write per-frame ResFilter stage-gain vectors as .npz
-    (requires capture_stages=True, set automatically when this flag is set).
+    diag_csv_path: write per-frame AecStats rows for filter / DTD trajectory
+    analysis.
     """
-    capture = gain_dump_path is not None
     cfg = AecConfig.from_preset(
         PRESET_MAP[preset],
         sample_rate=sample_rate,
@@ -71,8 +66,6 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         enable_res=enable_res,
         enable_cng=enable_cng,
         enable_shadow=True,
-        capture_stages=capture,
-        trace_high_band_metrics=trace_high_band_metrics,
         diverged_reset_enabled=diverged_reset,
         diverged_reset_streak_frames=diverged_reset_streak_frames,
         diverged_reset_cooldown_frames=diverged_reset_cooldown_frames,
@@ -106,10 +99,6 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
     out = np.zeros(n, dtype=np.float32)
     erle_log = []
     diag_rows = []
-    stage_keys = ('01_softgate_emr', '02_spectral_floor', '03_epc_dt_cap',
-                  '04_quiet_mask', '05_3bin_smooth', '06_hf_cap',
-                  '07_pre_temporal', '08_post_temporal')
-    stage_acc = {k: [] for k in stage_keys} if capture else None
     pos = 0
     while pos + hop <= n:
         block = aec.process(mic[pos:pos + hop], ref[pos:pos + hop])
@@ -168,13 +157,6 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                     float(d.get('p4b_res_echo_hf_mean_db', -120.0)),
                 ])
             diag_rows.append(tuple(row))
-        if capture and aec.res is not None:
-            sg = aec.res.get_stage_gains()
-            for k in stage_keys:
-                v = sg.get(k)
-                stage_acc[k].append(v.copy() if v is not None
-                                    else np.zeros(aec.res.n_freqs,
-                                                  dtype=np.float32))
         pos += hop
 
     pad_strip = max(mic_pad, ref_pad)
@@ -224,11 +206,6 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             w = _csv.DictWriter(fp, fieldnames=keys)
             w.writeheader()
             w.writerows(rows)
-
-    if gain_dump_path is not None and stage_acc is not None:
-        np.savez(gain_dump_path,
-                 **{k: np.asarray(v, dtype=np.float32)
-                    for k, v in stage_acc.items()})
 
     return mic_trim, ref_trim, out_trim, np.asarray(erle_log), sample_rate
 
@@ -455,10 +432,6 @@ def main():
                    help='prepend N zero samples to ref before processing')
     p.add_argument('--diag-csv',
                    help='write per-frame AecStats trajectory CSV here')
-    p.add_argument('--res-gain-dump',
-                   help='write per-frame ResFilter stage gains as .npz here')
-    p.add_argument('--trace-high-band-metrics', action='store_true',
-                   help='P1 Phase 1: include high-band NE evidence metrics in --diag-csv')
     p.add_argument('--trace-aec-state', action='store_true',
                    help='P3f Phase 1: include Mini AecState fields '
                         '(main_err_ratio, shadow_err_ratio, shadow_advantage, '
@@ -491,8 +464,6 @@ def main():
         sample_rate=args.sample_rate,
         mic_pad=args.mic_pad, ref_pad=args.ref_pad,
         diag_csv_path=args.diag_csv,
-        gain_dump_path=args.res_gain_dump,
-        trace_high_band_metrics=args.trace_high_band_metrics,
         trace_aec_state=args.trace_aec_state,
         diverged_reset=args.diverged_reset,
         diverged_reset_streak_frames=args.diverged_reset_streak,

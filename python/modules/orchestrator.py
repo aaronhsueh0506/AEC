@@ -48,7 +48,6 @@ from .epc import (
 )
 from .residual_estimator import ResidualEchoEstimator
 from .legacy_state import AecState
-from .res_filter import ResFilter, ResFilterEnr, ResFilterWiener
 from .config import AecConfig
 from .nlp import SubtractiveNLP
 from .debug_logger import AecDebugLogger
@@ -580,94 +579,11 @@ class AEC:
             self.dtd_divergence = None
             self.dtd_coherence = None
 
-        # RES (only for frequency-domain modes)
-        if self.config.enable_res and self.config.mode in _FREQ_MODES:
-            if self.config.use_res_refactored:
-                from modules.res_refactored.res_filter_refactored import ResFilterRefactored
-                _ResCls = ResFilterRefactored
-            elif self.config.res_gain_type == "enr":
-                from modules.res_filter import ResFilterEnr
-                _ResCls = ResFilterEnr
-            else:
-                from modules.res_filter import ResFilterWiener
-                _ResCls = ResFilterWiener
-            self.res = _ResCls(
-                block_size=self.filter.fft_size,
-                n_freqs=self.filter.n_freqs,
-                g_min_db=self.config.res_g_min_db,
-                over_sub=self.config.res_over_sub,
-                alpha=self.config.res_alpha,
-                enable_cng=self.config.enable_cng,
-                max_drop_db_per_frame=self.config.res_max_drop_db_per_frame,
-                max_rise_db_per_frame=self.config.res_max_rise_db_per_frame,
-                enable_spectral_floor=self.config.res_spectral_floor,
-                spectral_floor_db=self.config.res_spectral_floor_db,
-                ne_protect_db=self.config.res_ne_protect_db,
-                frame_size=self.config.frame_size,
-                hop_size=self.config.hop_size,
-                echo_method=self.config.res_echo_method,
-                gain_type=self.config.res_gain_type,
-                enable_reverb=self.config.res_enable_reverb,
-                reverb_decay=self.config.res_reverb_decay,
-                reverb_gain=self.config.res_reverb_gain,
-                alpha_echo_psd=self.config.res_alpha_echo_psd,
-                alpha_error_psd=self.config.res_alpha_error_psd,
-                enr_scale=self.config.res_enr_scale,
-                startup_dt_min_ne_scale=self.config.startup_dt_min_ne_scale,
-                startup_dt_gain_floor=self.config.startup_dt_gain_floor,
-                startup_dt_noise_floor_scale=self.config.startup_dt_noise_floor_scale,
-                sample_rate=self.config.sample_rate,
-                capture_stages=self.config.capture_stages,
-                plan_a_kernel_tight=self.config.plan_a_kernel_tight,
-                plan_a_hf_cap_2k=self.config.plan_a_hf_cap_2k,
-                plan_a_stat_mask_7k=self.config.plan_a_stat_mask_7k,
-                hf_cap_conditional=self.config.hf_cap_conditional,
-                hf_cap_metric_threshold=self.config.hf_cap_metric_threshold,
-                plan_b_dt_per_bin_gamma=self.config.plan_b_dt_per_bin_gamma,
-                use_mic_excess_evidence=self.config.use_mic_excess_evidence,
-                consume_filter_state=self.config.res_consume_filter_state,
-                unified_gain_floor=self.config.res_unified_gain_floor,
-                dt_per_bin_unified=self.config.res_dt_per_bin_unified,
-                noise_floor_refined=self.config.res_noise_floor_refined,
-                cap2_fs_loosen=self.config.res_cap2_fs_loosen,
-                per_band_enr=self.config.res_per_band_enr,
-                enr_t_ne_per_band=self.config.enr_t_ne_per_band,
-                enr_s_ne_per_band=self.config.enr_s_ne_per_band,
-                dt_ne_compression_fix=self.config.dt_ne_compression_fix,
-                dt_ne_state_scale=self.config.dt_ne_state_scale,
-                dt_ne_per_bin_thresh=self.config.dt_ne_per_bin_thresh,
-                dt_ne_per_bin_scale=self.config.dt_ne_per_bin_scale,
-                subband_ne_detect_enabled=self.config.subband_ne_detect_enabled,
-                subband_ne_sub1_low=self.config.subband_ne_sub1_low,
-                subband_ne_sub1_high=self.config.subband_ne_sub1_high,
-                subband_ne_sub2_low=self.config.subband_ne_sub2_low,
-                subband_ne_sub2_high=self.config.subband_ne_sub2_high,
-                subband_ne_threshold=self.config.subband_ne_threshold,
-                subband_ne_snr_threshold=self.config.subband_ne_snr_threshold,
-                res_mask_profile_swap_enabled=self.config.res_mask_profile_swap_enabled,
-                res_mask_last_lf_band=self.config.res_mask_last_lf_band,
-                res_mask_first_hf_band=self.config.res_mask_first_hf_band,
-                res_mask_normal_lf=self.config.res_mask_normal_lf,
-                res_mask_normal_hf=self.config.res_mask_normal_hf,
-                res_mask_nearend_lf=self.config.res_mask_nearend_lf,
-                res_mask_nearend_hf=self.config.res_mask_nearend_hf,
-                res_mask_ne_gate_dt=self.config.res_mask_ne_gate_dt,
-                res_mask_swap_mode=self.config.res_mask_swap_mode,
-                res_mask_fs_overlay_coh2_min=self.config.res_mask_fs_overlay_coh2_min,
-                res_mask_fs_overlay_dt_max=self.config.res_mask_fs_overlay_dt_max,
-                dominant_ne_detect_enabled=self.config.dominant_ne_detect_enabled,
-                dominant_ne_lf_low=self.config.dominant_ne_lf_low,
-                dominant_ne_lf_high=self.config.dominant_ne_lf_high,
-                dominant_ne_enr_threshold=self.config.dominant_ne_enr_threshold,
-                dominant_ne_enr_exit_threshold=self.config.dominant_ne_enr_exit_threshold,
-                dominant_ne_snr_threshold=self.config.dominant_ne_snr_threshold,
-                dominant_ne_trigger_threshold=self.config.dominant_ne_trigger_threshold,
-                dominant_ne_hold_duration=self.config.dominant_ne_hold_duration,
-                c_e_branch_dt_per_bin_use_fq_usable=self.config.c_e_branch_dt_per_bin_use_fq_usable,
-                c_e_branch_coh2_ema_use_fq_usable=self.config.c_e_branch_coh2_ema_use_fq_usable,
-            )
-        else:
-            self.res = None
+        # Legacy ResFilter retired in v3.21. The AEC3 chain (modules/state +
+        # modules/residual + modules/filter + modules/render) replaces the
+        # 9-stage ResFilter pipeline. self.res preserved as None so any
+        # external caller still introspecting AEC.res sees a stable None.
+        self.res = None
 
         # v3.21 AEC3-aligned post-stage chain. The linear filter (PBFDKF)
         # produces an error spectrum which the AEC3 chain (AecState +
