@@ -666,16 +666,6 @@ class AEC:
                 c_e_branch_dt_per_bin_use_fq_usable=self.config.c_e_branch_dt_per_bin_use_fq_usable,
                 c_e_branch_coh2_ema_use_fq_usable=self.config.c_e_branch_coh2_ema_use_fq_usable,
             )
-            # v3.16-A — wire force_render OR-in enable flag onto the
-            # ResidualEchoEstimator. Reading happens inside
-            # `attribute_legacy`; default OFF preserves byte-equal.
-            if self.res._residual_est is not None:
-                self.res._residual_est._arc_t_force_render_or_in_enabled = bool(
-                    self.config.arc_t_force_render_or_in)
-                # v3.19 Phase 1 Branch R1 — wire flag onto ResidualEchoEstimator
-                # (R1 lives inside attribute_legacy, not ResFilter). Default-OFF.
-                self.res._residual_est._c_e_branch_force_render_use_fq_usable = bool(
-                    self.config.c_e_branch_force_render_use_fq_usable)
         else:
             self.res = None
 
@@ -1879,25 +1869,12 @@ class AEC:
             self._diag['dt_advisory_active'] = bool(self._dt_advisory_hold_remaining > 0)
             self._diag['dt_advisory_hit'] = bool(_adv_hit)
 
-        # startup_dt mu floor: raise mu_scale during startup_dt so filter can converge despite DT
-        # Uses previous frame's effective_dt from ResFilter (1-frame lag, acceptable)
-        if self.config.startup_dt_mu_min > 0.0 and self.res is not None:
-            _far_now = float(np.mean(far_end ** 2))
-            _eff_dt = getattr(self.res, '_last_effective_dt', 0.0)
-            if _eff_dt > 0.35 and _far_now > 1e-4 and not self._filter_once_converged:
-                if isinstance(mu_scale, np.ndarray):
-                    mu_scale = np.maximum(mu_scale, self.config.startup_dt_mu_min)
-                else:
-                    mu_scale = max(float(mu_scale), self.config.startup_dt_mu_min)
-
         # Mic clipping emergency: freeze filter and clamp RES output to floor.
         # Hard clipping turns mic into square waves; filter would learn garbage.
         if self._sat_detector_mic is not None:
             mic_clip = self._sat_detector_mic.saturation_level
             if mic_clip > 0.8:
                 mu_scale = 0.0
-                if self.res:
-                    self.res.gain_smooth[:] = self.res.g_min
         # F-E5 / E5-2: extended main mu sat-gate. Match shadow's threshold
         # (saturation_safe = sat < 0.5) so main filter does not keep learning
         # on a clipped reference signal while shadow is already paused.
@@ -2605,177 +2582,6 @@ class AEC:
                         inst_erl = np.clip(inst_erl_raw, erl_clip_lo, 1.0)
                         alpha_erl = 0.99 if not self._filter_converged else 0.999
                         self._erl_estimate = float(alpha_erl * self._erl_estimate + (1 - alpha_erl) * inst_erl)
-                    # v3.14 Arc-P P.S3: adaptive per-band ERL EMA update.
-                    # SOURCE SIGNAL CORRECTION (P.S3):
-                    #   P.S2 used |echo_spec|²/|far_spec|² (PBFDKF predicted
-                    #   echo divided by far, single-frame complex ratio).
-                    #   Discrepancy: P.S2 gave LF=0.57 vs P.S1 oracle=0.043.
-                    #   Root cause: |W·X|²/|X|² = |Ĥ(k)|² (estimated filter
-                    #   response power), not room ERL.  In FS-converged state
-                    #   PBFDKF W overmodels: ||W||² reflects cumulative energy
-                    #   in the W taps, not the ratio of cancelled-to-total echo.
-                    #   CORRECT source: res.error_psd / far_lw — exactly what
-                    #   P.S1 validated.  In converged FS: error ≈ residual echo
-                    #   ≈ far × ERL_room, so error_psd/far_lw ≈ ERL_room per
-                    #   band.  res.error_psd is an EMA-smoothed per-bin PSD
-                    #   (alpha=0.8 BALANCED) — robust to single-frame noise.
-                    #   far_lw is the long-window far PSD used in F3.1 excess
-                    #   formula — same denominator for consistency.
-                    # GATE (sibling of scalar ERL update, not nested inside):
-                    #   Uses _filter_converged + lw_ready + far_active (the
-                    #   outer erl_update_gate already enforces far_pwr > 1e-4).
-                    #   Does NOT require raw_dt_ratio < 2.0 or inst_erl_raw < 1.5
-                    #   because res.error_psd is EMA-smoothed (robust to single-
-                    #   frame NE contamination) and _filter_converged is the
-                    #   primary reliability gate.  In high-coupling rooms (case
-                    #   08), inst_erl_raw=28 because mic >>> far at the reference
-                    #   level, but error_psd/far_lw correctly tracks the room.
-                    if (self.config.f3_1_per_band_erl_adaptive
-                            and self._filter_converged
-                            and self.res is not None
-                            and self.res._residual_est is not None
-                            and self.res._residual_est._long_window_n_updates > 0):
-                        _err_psd_pb = self.res.error_psd      # EMA per-bin, shape (n_freqs,)
-                        _far_lw_pb = self.res._residual_est._long_window_far_psd
-                        # Band boundaries in bins (16 kHz, fft_size=640 → 257 bins)
-                        # freq_per_bin = sr / fft_size
-                        _fpb = self.config.sample_rate / float(self.config.fft_size)
-                        _bin_1k = max(1, int(round(1000.0 / _fpb)))
-                        _bin_4k = max(_bin_1k + 1, int(round(4000.0 / _fpb)))
-                        _n = _err_psd_pb.shape[0]
-                        _bin_1k = min(_bin_1k, _n - 2)
-                        _bin_4k = min(_bin_4k, _n - 1)
-                        # Per-band mean(error_psd) / mean(far_lw); skip band
-                        # if far energy is negligible (avoids 0-div artefacts).
-                        _alpha_pb = self.config.per_band_erl_alpha
-                        _clip_lo = self.config.per_band_erl_clip_lo
-                        _clip_hi = self.config.per_band_erl_clip_hi
-                        # Arc G — fast EMA + drift detector + per-band W reset.
-                        _arc_g_on = self.config.arc_g_per_band_w_reset
-                        _arc_g_alpha = self.config.arc_g_fast_alpha
-                        _arc_g_ratio = self.config.arc_g_drift_ratio
-                        _arc_g_cool = self.config.arc_g_cooldown_frames
-                        _arc_g_epc_quiet = (self._epc_render_forced_remaining <= 0)
-                        # Decrement cooldown counters each per-band-update frame.
-                        if _arc_g_on:
-                            for _bi in range(3):
-                                if self._arc_g_cooldown[_bi] > 0:
-                                    self._arc_g_cooldown[_bi] -= 1
-                        for _bi, (_bs, _be) in enumerate(
-                                ((0, _bin_1k), (_bin_1k, _bin_4k), (_bin_4k, _n))):
-                            if _be <= _bs:
-                                continue
-                            _far_band = float(np.mean(_far_lw_pb[_bs:_be]))
-                            if _far_band < 1e-10:
-                                continue
-                            _inst_pb = float(np.mean(_err_psd_pb[_bs:_be])) / _far_band
-                            _inst_pb = float(np.clip(_inst_pb, _clip_lo, _clip_hi))
-                            self._per_band_erl[_bi] = (
-                                _alpha_pb * self._per_band_erl[_bi]
-                                + (1.0 - _alpha_pb) * _inst_pb
-                            )
-                            if _arc_g_on:
-                                self._per_band_erl_fast[_bi] = (
-                                    _arc_g_alpha * self._per_band_erl_fast[_bi]
-                                    + (1.0 - _arc_g_alpha) * _inst_pb
-                                )
-                                _slow = self._per_band_erl[_bi]
-                                _fast = self._per_band_erl_fast[_bi]
-                                if (_arc_g_epc_quiet
-                                        and self._arc_g_cooldown[_bi] == 0
-                                        and _slow > 1e-6 and _fast > 1e-6):
-                                    _ratio = max(_fast, _slow) / min(_fast, _slow)
-                                    if _ratio >= _arc_g_ratio:
-                                        # Drift detected — zero band's W weights
-                                        # in main filter, cooldown the band.
-                                        if hasattr(self.filter, 'W'):
-                                            self.filter.W[:, _bs:_be] = 0.0
-                                        self._arc_g_cooldown[_bi] = _arc_g_cool
-                                        self._arc_g_fire_count[_bi] += 1
-                                        # Snap fast EMA to slow so the next
-                                        # frame doesn't immediately re-fire.
-                                        self._per_band_erl_fast[_bi] = _slow
-
-                # v3.15 §1.5 Arc T — cohort tail real-time detector. Computes
-                # a per-frame ERL_decile_std proxy = max-over-bands of
-                # 10·log10(rolling_max / rolling_min) on EMA-smoothed per-band
-                # proxy ERL = mean(res.error_psd[band]) / mean(_long_window
-                # _far_psd[band]).  UN-GATED on _filter_converged so it fires
-                # on cohort tail (qNvSMyU class) where the converged-only
-                # per-band ERL block above is silent.  Default OFF byte-equal.
-                # See docs/v3_15_arc_t_s1_design.md for derivation.
-                #
-                # NE-corruption gate (S1 calibration 2026-05-15): on DT cases
-                # NE speech inflates error_psd → proxy false-fires. Skip when
-                # inst_erl_raw = mic_pwr/far_pwr >= 1.5 ("mic ≥ 1.5× far" =
-                # NE-dominant frame, same rule scalar ERL update at line
-                # ~6953 uses). Cohort tail (qNvSMyU class) has mic ≈
-                # small_ERL × far → inst_erl_raw ≈ 0.3-0.7 < 1.5 ✓, so this
-                # gate does NOT block cohort tail.
-                _arc_t_inst_erl_raw = mic_pwr / max(far_pwr, 1e-10)
-                if (self.config.arc_t_cohort_detector
-                        and erl_update_gate
-                        and _arc_t_inst_erl_raw < 1.5
-                        and self.res is not None
-                        and self.res._residual_est is not None
-                        and self.res._residual_est._long_window_n_updates >= 100):
-                    _err_psd_pb_t = self.res.error_psd
-                    _far_lw_pb_t = self.res._residual_est._long_window_far_psd
-                    _fpb_t = self.config.sample_rate / float(self.config.fft_size)
-                    _b1k_t = max(1, int(round(1000.0 / _fpb_t)))
-                    _b4k_t = max(_b1k_t + 1, int(round(4000.0 / _fpb_t)))
-                    _n_t = _err_psd_pb_t.shape[0]
-                    _b1k_t = min(_b1k_t, _n_t - 2)
-                    _b4k_t = min(_b4k_t, _n_t - 1)
-                    _alpha_inst_t = self.config.arc_t_inst_alpha
-                    _clip_lo_t = self.config.per_band_erl_clip_lo
-                    _clip_hi_t = self.config.per_band_erl_clip_hi
-                    _ratio_db_max = -1e6
-                    _min_window_fill = 32  # half a window
-                    for _bi_t, (_bs_t, _be_t) in enumerate(
-                            ((0, _b1k_t), (_b1k_t, _b4k_t), (_b4k_t, _n_t))):
-                        if _be_t <= _bs_t:
-                            continue
-                        _far_band_t = float(np.mean(_far_lw_pb_t[_bs_t:_be_t]))
-                        if _far_band_t < 1e-10:
-                            continue
-                        _inst_pb_t = float(np.mean(_err_psd_pb_t[_bs_t:_be_t])) / _far_band_t
-                        _inst_pb_t = float(np.clip(_inst_pb_t, _clip_lo_t, _clip_hi_t))
-                        # Smooth.
-                        self._arc_t_inst_pb_smooth[_bi_t] = (
-                            _alpha_inst_t * self._arc_t_inst_pb_smooth[_bi_t]
-                            + (1.0 - _alpha_inst_t) * _inst_pb_t
-                        )
-                        _v_t = self._arc_t_inst_pb_smooth[_bi_t]
-                        # Rolling window: ring buffer + np.max/min (W = 64).
-                        _ring_t = self._arc_t_window_buf[_bi_t]
-                        _ring_t.append(_v_t)
-                        if len(_ring_t) >= _min_window_fill:
-                            _arr_t = np.asarray(_ring_t, dtype=np.float64)
-                            _wmax_t = float(np.max(_arr_t))
-                            _wmin_t = max(float(np.min(_arr_t)), 1e-10)
-                            self._arc_t_window_max[_bi_t] = _wmax_t
-                            self._arc_t_window_min[_bi_t] = _wmin_t
-                            _ratio_db_t = 10.0 * np.log10(_wmax_t / _wmin_t)
-                            if _ratio_db_t > _ratio_db_max:
-                                _ratio_db_max = _ratio_db_t
-                    # Hysteresis state machine.
-                    if _ratio_db_max >= self.config.arc_t_threshold_hi_db:
-                        self._arc_t_cohort_tail_signal = True
-                        self._arc_t_hys_remaining = self.config.arc_t_hysteresis_frames
-                    elif (self._arc_t_hys_remaining > 0
-                            and _ratio_db_max >= self.config.arc_t_threshold_lo_db):
-                        self._arc_t_cohort_tail_signal = True
-                        self._arc_t_hys_remaining -= 1
-                    else:
-                        self._arc_t_cohort_tail_signal = False
-                        if self._arc_t_hys_remaining > 0:
-                            self._arc_t_hys_remaining -= 1
-                    self._arc_t_proxy_db_last = (
-                        float(_ratio_db_max) if _ratio_db_max > -1e5 else 0.0
-                    )
-                    if self._arc_t_cohort_tail_signal:
-                        self._arc_t_fire_count += 1
 
                 # Pre-filter DT signal (Stage B): mic energy excess over
                 # far × max_ERL. Realistic rooms have ERL ≤ +6 dB (coupling
