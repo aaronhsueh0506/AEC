@@ -2957,27 +2957,7 @@ class AEC:
                         _ce_fc_arg = self._aec_state.fq_usable()
                     else:
                         _ce_fc_arg = self._filter_converged
-                    if self._aec3_state is not None:
-                        final_output = self._aec3_post(raw_output, near_end, far_end)
-                    else:
-                        final_output = self.res.process(raw_output, eff_echo_spec,
-                                                    far_power, self.filter.far_spec,
-                                                    filter_converged=_ce_fc_arg,
-                                                    erle_factor=erle_factor,
-                                                    dt_indicator=float(dt_indicator),
-                                                    near_spec=self.filter.near_spec,
-                                                    divergence=self._divergence_indicator,
-                                                    is_stationary_dt=is_stationary_dt,
-                                                    saturation_level=self._saturation_level,
-                                                    epc_active=self.epc_active,
-                                                    shadow_dt=shadow_dt,
-                                                    erl_estimate=_erl_arg,
-                                                    e2_main=float(self.main_err_smooth),
-                                                    e2_shadow=float(self.shadow_err_smooth),
-                                                    y2=float(far_power),
-                                                    filter_once_converged=self._filter_once_converged,
-                                                    aec_state=self._aec_state,
-                                                    filter_state=self._prev_filter_state)
+                    final_output = self._aec3_post(raw_output, near_end, far_end)
 
                     # v3.13 E4.S3 — SubtractiveNLP detector (audit-only).
                     # Pure observer: reads the LINEAR residual (raw_output =
