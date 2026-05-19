@@ -47,7 +47,6 @@ from .epc import (
     classify_epc_event, EchoPathChangeDetector, PathChangeRegimeHandler,
 )
 from .residual_estimator import ResidualEchoEstimator
-from .legacy_state import AecState
 from .config import AecConfig
 from .nlp import SubtractiveNLP
 from .debug_logger import AecDebugLogger
@@ -319,11 +318,11 @@ class AEC:
             return False
         if self.epc_active or self._regime_handler.main_paused:
             return False
-        # Need AecState back-ref AND C.B fq_usable substrate to gate.
-        if (self._aec_state is None
-                or getattr(self._aec_state, '_aec_ref', None) is None):
-            return False
-        if not self._aec_state.fq_usable():
+        # Phase C.B fq_usable gate. Default-OFF preset never reaches here
+        # (leakage_diverged_enabled=False); when caller turns it on, the
+        # decision delegates to the filter quality analyzer directly.
+        if (getattr(self, '_filter_quality', None) is None
+                or not self._filter_quality.usable):
             return False
         sh_adv = float(getattr(self._dt_analyzer, 'shadow_advantage', 1.0))
         return sh_adv >= self.config.leakage_diverged_threshold
@@ -1005,24 +1004,11 @@ class AEC:
         )
         self._last_raw_output: Optional[np.ndarray] = None   # raw filter output before RES (diagnostic)
         # EchoPathVariability EMAs moved into EchoPathChangeDetector (self._epc_det)
-        # AecState aggregator: WebRTC-style read-only seam over the 5 detectors.
-        # Phase B consumes this to decide linear vs nonlinear residual-echo path.
-        self._aec_state = AecState(
-            render_activity=self._render_activity,
-            convergence=self._convergence,
-            dt_analyzer=self._dt_analyzer,
-            epc_det=self._epc_det,
-            regime_handler=self._regime_handler,
-            dtd_coherence_getter=lambda: (
-                self.dtd_coherence.confidence if self.dtd_coherence else 0.0),
-        )
-        # v3.18 Phase C.C — AecState back-ref. Marker: AecState back-ref.
-        # When aec_state_enabled=True, AecState's AEC3-aligned methods
-        # (consistent_estimate, fq_usable, active_render, etc.) read
-        # from C.A/C.B substrate via this back-ref. When False, methods
-        # fall back to legacy semantics — no behaviour change.
-        if self.config.aec_state_enabled:
-            self._aec_state._aec_ref = self
+        # Legacy AecState aggregator (modules.legacy_state.AecState) retired in
+        # v3.21 — its 5-detector facade is fully replaced by direct property
+        # access on AEC (self._filter_converged / self.epc_active / etc.) and
+        # by the AEC3 chain's own AecState (modules.state.aec_state.AecState,
+        # bound to self._aec3_state below).
         self._far_power_ema = 0.0           # TC≈50ms for GetStats()
         self._mic_power_ema = 0.0
         self._frame_count = 0               # frames since reset()
@@ -2415,13 +2401,6 @@ class AEC:
                 self._diag['fq_far_active_recent'] = bool(
                     self._filter_quality.far_active_recent)
 
-            # v3.18 Phase C.C — AecState AEC3-aligned snapshot (audit-only).
-            # Only emit when aec_state_enabled (back-ref set) — legacy AEC
-            # config skips trace to keep diag dict structure unchanged.
-            if (self.config.aec_state_enabled
-                    and getattr(self._aec_state, '_aec_ref', None) is not None):
-                self._diag['aec_state_snapshot'] = self._aec_state.aec3_snapshot()
-
             # AEC3 post-filter using OLA + sqrt-Hann (skip for buffered FDAF).
             # enable_res gates suppression so eval_aec_challenge's no-RES
             # comparison run still emits the linear residual.
@@ -3056,7 +3035,9 @@ class AEC:
         )
         _initial_transition_triggered = bool(just_converged)
         _epc_hangover = self._epc_det.hangover_count if hasattr(self, '_epc_det') else 0
-        _usable_v1 = self._aec_state.usable_linear_estimate
+        _usable_v1 = (self._filter_once_converged
+                       and self._filter_converged
+                       and not self.epc_active)
         _usable_v2 = (
             _usable_v1
             and self._frame_count > self.config.warmup_frames + 30
@@ -3075,7 +3056,7 @@ class AEC:
         # ERLE reset taxonomy (label only, do not actually reset)
         if _initial_transition_triggered:
             _erle_reset_signal = 1   # startup-tail
-        elif self._aec_state.epc_active:
+        elif self.epc_active:
             _erle_reset_signal = 2   # EPC
         elif self._convergence.divergence > 0.5:
             _erle_reset_signal = 3   # divergence-spike
