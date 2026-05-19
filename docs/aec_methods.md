@@ -1,15 +1,24 @@
-# AEC Algorithm Methods (v3.10.4)
+# AEC Algorithm Methods (v3.10.4 reference)
 
-**Version**: v3.10.4 release · Python `aec.py` `__version__ = "3.10.4"`
-(C port v3.10.4 follows). Audio behavior changed cumulatively from
-v3.8.3 → v3.10.4: v3.8.4 Plan A HF preservation (smoothing kernel +
+**Note (v3.21.0 release)**: this document captures the v3.10.4 deep
+algorithm reference. The current release is **v3.21.0** (2026-05-19),
+which retires the legacy `ResFilter` 9-stage chain documented below
+in favour of `AEC._aec3_post` (AecState + ResidualEchoEstimator +
+SuppressionGain + CNG, AEC3-aligned). Module references like
+`python/modules/res_filter.py` no longer exist in v3.21 — see
+[../CHANGELOG.md](../CHANGELOG.md) for the migration and
+[refactor_modules_layout.md](refactor_modules_layout.md) for the
+current module layout. The PBFDKF / shadow filter / DelayEstimator /
+DTD / detector sections remain accurate; the RES post-filter section
+is preserved as historical reference.
+
+**Version**: v3.10.4 reference. Python `aec.py` `__version__ = "3.21.0"`.
+Cumulative trail: v3.8.4 Plan A HF preservation (smoothing kernel +
 HF cap anchor), v3.10.0 delay + recovery state machine (max_delay 512,
 plateau detector, long-window EMA, mu-scale delay-confidence ceiling),
 v3.10.1 long-window EMA refinements, v3.10.2–v3.10.3 Codex review
-fixes (shared `_reset_filter_derived_state` helper, near-power EMA
-reset, plateau-detector hygiene, `_pending_delay` TTL), v3.10.4
-widens `max_delay_ms` 512 → 1024 + CLI preset-vs-flag fix
-(`BooleanOptionalAction`, default=None). See CHANGELOG.
+fixes, v3.10.4 widens `max_delay_ms` 512 → 1024. See
+[../CHANGELOG.md](../CHANGELOG.md) for the full v3.10.4 → v3.21.0 path.
 
 This document is the **deep algorithm specification**. For other angles:
 

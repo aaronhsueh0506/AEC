@@ -4,7 +4,7 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v3.10.4 (2026-05-05) — Python `aec.py` `__version__ = "3.10.4"`. C port v3.10.4 follows.
+**Release**: v3.21.0 (2026-05-19) — Python `aec.py` `__version__ = "3.21.0"`. C port lag follows. The v3.21 release retires the legacy `ResFilter` 9-stage chain in favour of the AEC3-aligned `_aec3_post` (AecState + ResidualEchoEstimator + SuppressionGain + CNG). Single production preset: `BALANCED`. The 5-preset table below is the historical v3.10.4 snapshot and is preserved for reference; v3.21 baseline scores live in [docs/bench/v3_21_3aadd2d_baseline/](docs/bench/v3_21_3aadd2d_baseline/README.md).
 
 ---
 
