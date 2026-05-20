@@ -1126,8 +1126,15 @@ class AEC:
         # ResidualEchoEstimator / SuppressionGain / CNG / OLA across.
         self._reset_aec3_post()
 
-    def _reset_aec3_post(self) -> None:
-        """Clear all `_aec3_post` chain state. Called from `reset()`.
+    def _reset_aec3_post(self, *, preserve_render_side: bool = False) -> None:
+        """Clear `_aec3_post` chain state.
+
+        Called from:
+        - `reset()`: preserve_render_side=False (full clear).
+        - `_reset_filter_derived_state()`: preserve_render_side=True
+          (keep render-stationarity context across filter recovery;
+          consistent with the helper's "preserved: input-side context"
+          semantics — render activity is input-side).
 
         AecState and SuppressionGain don't expose `reset()` so we recreate
         them; ResidualEchoEstimator and StationarityEstimator do, so we
@@ -1138,6 +1145,7 @@ class AEC:
         from .state import AecState as _Aec3State, AecStateConfig as _Aec3StateConfig
         from .residual import ResidualEchoEstimator, SuppressionGain
         n_bins = self._aec3_n_bins
+        # Filter-output-derived state (always cleared):
         self._aec3_state = _Aec3State(_Aec3StateConfig(
             n_bins=n_bins,
             enable_transparent_mode=False,
@@ -1152,10 +1160,13 @@ class AEC:
         self._aec3_noise_psd.fill(0)
         self._aec3_smooth_cn_gain.fill(0)
         self._aec3_noise_initialized = False
-        if self._aec3_stationarity is not None:
-            self._aec3_stationarity.reset()
-        self._aec3_non_zero_render_seen = False
-        self._aec3_stationarity_active_hops = 0
+        if not preserve_render_side:
+            # Render-side context (cleared on full reset, preserved on
+            # filter-derived recovery):
+            if self._aec3_stationarity is not None:
+                self._aec3_stationarity.reset()
+            self._aec3_non_zero_render_seen = False
+            self._aec3_stationarity_active_hops = 0
 
     def _reset_filter_derived_state(self, reason: str = 'plateau',
                                      preserve_render_ema: bool = True) -> None:
@@ -1183,10 +1194,13 @@ class AEC:
             • _hp_mic / _hp_ref            — input-side HPF
             • _sat_detector_*              — input-side
             • _render_activity             — input-side
-            • RES long-window far-PSD EMA — input-side (when
-              preserve_render_ema=True; default). The EMA is updated every
-              far-active frame regardless of mode, so its accumulated
-              long-term render spectrum is independent of the bad taps.
+            • _aec3_stationarity + _aec3_non_zero_render_seen +
+              _aec3_stationarity_active_hops — render-side AEC3 trackers,
+              input-side (preserve_render_side=True).
+            • preserve_render_ema=True (default): legacy long-window
+              far-PSD EMA path; the EMA is updated every far-active
+              frame regardless of mode, so its accumulated long-term
+              render spectrum is independent of the bad taps.
               Discarding it forces the freshly reset filter through 100
               frames of pre-warmup-fallback all over again.
 
@@ -1198,11 +1212,15 @@ class AEC:
             • _dt_analyzer (energy / shadow DT histories)
             • _erle_window_* / _inst_erle_smooth / _erle_factor_prev
             • _simple_mu_ratio / _simple_mu_holdoff / _per_bin_mu_scale
-            • _epc_render_forced_remaining / _erl_estimate
+            • _epc_render_forced_remaining / _erl_estimate / _per_band_erl
             • prev_dtd_conf
             • DTD divergence + coherence smoothed PSDs
-            • RES post-filter state (gain_smooth / echo_psd / noise_psd /
-              gates). Long-window far-PSD EMA optionally preserved.
+            • AEC3 post chain (_aec3_state / _aec3_ree / _aec3_sg recreated;
+              _aec3_ola_buf / noise_psd / smooth_cn_gain zero-filled;
+              _aec3_pending_* + _aec3_noise_initialized cleared) — all
+              derived from the poisoned filter output, must clear so the
+              freshly reset filter doesn't see stale residual / ERLE / R²
+              estimates.
             • shadow_frame_count + _regime_handler
             • Diagnostic _diag dict (would otherwise show stale stats)
         """
@@ -1311,6 +1329,10 @@ class AEC:
             self._shadow_R.fill(1e-2)
         if hasattr(self, '_shadow_mu_holdoff'):
             self._shadow_mu_holdoff = 0
+
+        # v3.21.3 Codex #2 — clear AEC3 post chain (filter-output-derived);
+        # preserve render-side stationarity tracker per the input-side rule.
+        self._reset_aec3_post(preserve_render_side=True)
 
         # Re-arm warmup so the second-pass training starts with high mu.
         # Boost Q on both filters (high-Q convergence mode).
