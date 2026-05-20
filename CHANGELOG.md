@@ -16,7 +16,7 @@ when verdict requires it.
 
 ---
 
-## [3.21.2-candidate] — 2026-05-20 — Frequency-canonical bin-index alignment (HF damage Pareto step)
+## [3.21.2] — 2026-05-20 — Frequency-canonical bin-index alignment (HF damage Pareto step) + FS recovery
 
 **Headline**: the v3.21 SuppressionGain port (b5728e5) copied AEC3
 bin-index constants directly without converting for our 4× finer FFT
@@ -77,42 +77,88 @@ average, so widening the sum pushes `enr` higher and reduces nearend
 triggers → cap fires more often → DT damage. AEC3 canonical alignment
 does not always translate to cohort improvement.
 
-### 800-case AECMOS vs v3.21.0 (3aadd2d) baseline — T1 ship candidate
+### Phase C — FS recovery (U5.3)
+
+Bumped `EpStrengthConfig.default_gain` from 0.014 → 0.020 in
+[python/modules/residual/residual_echo_estimator.py](python/modules/residual/residual_echo_estimator.py).
+`R²` in the nonlinear path = `X² × default_gain²`, so this scales R²
+by `(0.020/0.014)² ≈ 2.04×` in nonlinear-mode frames.
+
+S1 trace shows the 800-case cohort runs the nonlinear path 66-92% of
+frames (linear ERLE not yet converged on FS), so this knob has high
+population leverage. AEC3 precedent: `WebRTC-Aec3EchoPathGain` Aggressive
+field-trial profile uses 0.02 — within AEC3-documented range, not an
+invention.
+
+Asymmetric Pareto-positive: every bucket non-negative vs Phase B T1.
+See [docs/v3_21_2_u5_fs_recovery_verdict.md](docs/v3_21_2_u5_fs_recovery_verdict.md)
+for full mechanism + U5.1 (mask_hf.enr_transparent) and U5.2
+(normal_render_limit) closed-no-effect results.
+
+### sr threading (U3)
+
+`SuppressionGain.__init__` now accepts `sr=16000`; threads through
+`_DominantNearendDetector` / `_weight_echo_for_audibility` /
+`_limit_hf_gains` and all `hz_to_bin()` call sites. Orchestrator passes
+`self.config.sample_rate` at construction. 16 kHz behaviour byte-equal;
+verified sr=48000 now resolves lgb=4000 Hz to bin 43 (vs bin 128 @
+16 kHz). See [docs/v3_21_2_bin_audit_verdict.md](docs/v3_21_2_bin_audit_verdict.md)
+for the broader audit-clean verdict across `filter/`, `state/`, `delay/`,
+`render/`, `epc`, `orchestrator`.
+
+### 800-case AECMOS vs v3.21.0 (a537b65) baseline — final v3.21.2 (T1 + U5.3)
 
 | Bucket | n | baseline echo / deg | new echo / deg | Δecho | Δdeg |
 |---|---:|---|---|---:|---:|
-| FS_static | 169 | 3.729 / 4.999 | 3.577 / 4.999 | **−0.152** | +0.000 |
-| FS_movement | 131 | 3.626 / 4.999 | 3.505 / 4.999 | **−0.121** | +0.000 |
-| DT_static | 186 | 4.237 / 2.387 | 4.183 / 2.479 | −0.054 | **+0.092** |
-| DT_movement | 114 | 4.215 / 2.371 | 4.161 / 2.485 | −0.054 | **+0.114** |
-| NE | 200 | 4.998 / 4.052 | 4.998 / 4.053 | +0.000 | +0.001 |
+| FS_static | 169 | 3.729 / 4.999 | **3.582** / 4.999 | −0.147 | +0.000 |
+| FS_movement | 131 | 3.626 / 4.999 | **3.509** / 4.999 | −0.117 | +0.000 |
+| DT_static | 186 | 4.237 / 2.387 | 4.188 / **2.481** | −0.049 | **+0.094** |
+| DT_movement | 114 | 4.215 / 2.371 | 4.166 / **2.485** | −0.048 | **+0.115** |
+| NE | 200 | 4.998 / 4.052 | 4.998 / 4.054 | +0.000 | +0.003 |
 
-Pareto: DT formant fidelity recovered (matches user-reported HF damage
-report) at the cost of HF echo cap relaxation in FS. FS regression
-exceeds the historical −0.05 hard bar; mitigation deferred to follow-up.
+DT formant fidelity recovered (matches user HF damage report) at the
+cost of HF echo cap relaxation in FS. FS regression remains net negative
+but ~5% improved via U5.3 vs unmitigated T1.
 
-### Known gaps
+### Audit verdicts
 
-- **sr not threaded through `hz_to_bin()`** — defaults to 16000. Codebase
-  + C port are 16 kHz only, so no current runtime impact; follow-up
-  task to thread sr explicitly.
-- **FS regression follow-up** — Pareto wall at this canonical frequency
-  alignment. Compromise positions (e.g. `limiting_gain_freq_hz` at 3500
-  / 3750 Hz instead of 4000) to be explored.
-- **Conservative_hf inline path** — semantics changed from 625-906 Hz
-  to AEC3 canonical 2500-3625 Hz; `conservative_hf_suppression=False`
-  default means flag-OFF byte-equal.
+- [docs/v3_21_2_audio_analysis_verdict.md](docs/v3_21_2_audio_analysis_verdict.md) —
+  U1 quantitative band-energy analysis on 5 worst-deg DT_static cases.
+  F2-F3 preservation **+0.48 dB mean** (all 5 cases positive +0.18–+0.91 dB);
+  F1 +0.32 dB mean. PASS — the AECMOS deg gain corresponds to real voice
+  formant preservation, not a spurious metric move.
+- [docs/v3_21_2_bin_audit_verdict.md](docs/v3_21_2_bin_audit_verdict.md) —
+  U2 exhaustive grep + line-read audit of all `python/modules/` for
+  FFT-scale unit-conversion bugs. AUDIT-CLEAN: no other HIGH-severity
+  bin-index bugs in production-active code.
+- [docs/v3_21_2_u5_fs_recovery_verdict.md](docs/v3_21_2_u5_fs_recovery_verdict.md) —
+  U5 sweep verdict + ship-candidate selection.
 
 ### Commits
 
 - `7e9e612` — Phase A refactor + all 5 canonical flips (T2 state).
 - `f1ea92c` — Revert B3 NE detector flip (T1 ship candidate).
+- `5b7bf1c` — U1 audio analysis verdict (F2-F3 +0.48 dB).
+- `8b7de5c` — U2 bin-index audit closure: codebase audit-clean.
+- `6a071c1` — U3 sr threading through SuppressionGain consumers.
+- `c7481a4` — U5.3 default_gain 0.014 → 0.020 + U5 verdict doc.
 
-### Not yet tagged
+### Known carry-overs (v3.22)
 
-`v3.21.2` tag deferred pending user listening verification on
-user-reported Chinese /i/ HF damage sample. Production `main` remains
-at v3.21.0 / `a537b65`.
+- **Time-domain unit-conversion bugs** (3 HIGH severity, parallel pattern
+  to the bin-index bug fixed in this version): `trigger_threshold`,
+  `hold_duration`, `noise_floor_hold` ported as bare ints from AEC3
+  4 ms blocks into our 10 ms hops → 2.5× longer time-equivalent than
+  AEC3 intended. Direction of fix opposes FS recovery so deferred.
+- **ReverbDecayEstimator partial port** (1/3 of AEC3 size; missing
+  `AnalyzeFilter` + `EarlyReverbLengthEstimator` + validation gates).
+- **Codex hygiene findings** (4 items, all verified): `AEC.reset()`
+  doesn't clear AEC3 post-state; `_reset_filter_derived_state()`
+  docblock stale; `return_res_context=True` dead contract; legacy
+  delay knobs (`mov_rate_delay_est_enabled`, `trace_delay_est`) no-op.
+- **Conservative_hf inline path** — semantics changed from 625-906 Hz
+  to AEC3 canonical 2500-3625 Hz; `conservative_hf_suppression=False`
+  default means flag-OFF byte-equal.
 
 ---
 

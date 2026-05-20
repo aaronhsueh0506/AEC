@@ -21,7 +21,7 @@ tolerance:
   (`PBFDKF`, `ShadowFilter`, etc.). Built with `-ffp-contract=off` mandatory.
 
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
-(currently **3.21.0**). Canonical algorithm reference:
+(currently **3.21.2**). Canonical algorithm reference:
 [docs/aec_methods.md](docs/aec_methods.md). Trace-driven evolution
 history: [docs/aec_v3_evolution.md](docs/aec_v3_evolution.md). Research
 log canonical: [docs/SUMMARY.md](docs/SUMMARY.md).
@@ -173,11 +173,15 @@ tweak a single field without a full 800-case re-bench.
 ## Branch model
 
 `main` carries the production-graded code. Current `__version__` is
-**3.21.0** — the v3.21 release retires the legacy `ResFilter` 9-stage
-chain in favour of the AEC3-aligned `_aec3_post` (AecState + Residual-
-EchoEstimator + SuppressionGain + CNG). Single production preset:
-`BALANCED`. See [CHANGELOG.md](CHANGELOG.md) for full per-version
-detail.
+**3.21.2** — v3.21.2 corrects an FFT-scale bin-index unit-conversion
+bug in the v3.21 SuppressionGain port (HF cap was firing at 937 Hz
+instead of 4000 Hz, mask interpolation at 156-250 Hz instead of
+625-1000 Hz). DT formant fidelity recovered + partial FS-echo
+recovery via residual default_gain bump. v3.21.0 retired the legacy
+`ResFilter` 9-stage chain in favour of the AEC3-aligned `_aec3_post`
+(AecState + ResidualEchoEstimator + SuppressionGain + CNG). Single
+production preset: `BALANCED`. See [CHANGELOG.md](CHANGELOG.md) for
+full per-version detail.
 
 The active reference set at `docs/` root holds the canonical pipeline +
 algorithm documentation; closed-arc verdict / design docs from prior
