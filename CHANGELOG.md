@@ -16,6 +16,159 @@ when verdict requires it.
 
 ---
 
+## [3.21.4] — 2026-05-21 — Audit cycle (4 v3.21.2 carry-overs closed; structural ms-based refactor)
+
+**Headline**: research / audit cycle. All 4 v3.21.2 carry-overs from
+the original plan adjudicated; 0 production code changes shipped. One
+structural refactor (ms-based time-domain config). Byte-equal at
+default config vs v3.21.3.
+
+### V4 — Time-domain unit-conversion "bugs" CLOSED NOT-A-BUG
+
+The v3.21.2 plan flagged 3 HIGH-severity "time-domain unit-conversion
+bugs" parallel to the bin-index bug fixed in v3.21.2:
+`DominantNearendConfig.trigger_threshold=12`, `hold_duration=50`,
+`EchoModelConfig.noise_floor_hold=50` — bare-value ports from AEC3
+(4 ms blocks) into our 10 ms hops, giving 2.5× longer wall-clock than
+AEC3 intended.
+
+V4.1 (`trigger_threshold` 12 → 5 = `blocks_to_hops` canonical) tested
+empirically: bench result was **both directions worse** (FS_static
+echo −0.021 / FS_movement −0.027 / DT_static deg −0.027 / DT_movement
+deg −0.007). Strict regression, not Pareto.
+
+User redirect: physical-meaning analysis (not wall-clock) is the
+correct yardstick. AEC3 source inspection
+([dominant_nearend_detector.cc](docs/aec3_extracts/src/aec3/dominant_nearend_detector.cc) +
+[residual_echo_estimator.cc:340-358](docs/aec3_extracts/src/aec3/residual_echo_estimator.cc#L340))
+confirmed each counter measures a different physical quantity:
+
+- `trigger_threshold`: statistical hysteresis depth (+1/−1 random walk)
+  — depends on per-sample ENR estimator noise floor, NOT wall-clock.
+- `hold_duration`: NE-state dwell — part wall-clock (phoneme) + part
+  downstream NE-gain behaviour coupling.
+- `noise_floor_hold`: room-noise adapt rate — wall-clock, but quiet-
+  room cohort favours slower adapt (= less false-positive on speech
+  transients).
+
+Existing values (12 / 50 / 50) kept as empirically-validated cohort
+tuning. Verdict: [docs/v3_21_4_time_domain_audit_verdict.md](docs/v3_21_4_time_domain_audit_verdict.md).
+
+#### Companion structural refactor: ms-based time-domain config
+
+Renamed bare-int counter fields to ms-based fields so wall-clock
+semantics auto-scale with hop_size at construction:
+- `DominantNearendConfig.hold_duration_ms: int = 500` (was
+  `hold_duration: int = 50` hops)
+- `EchoModelConfig.noise_floor_hold_ms: int = 500` (was
+  `noise_floor_hold: int = 50` hops)
+- `trigger_threshold` kept as samples (dimensionless statistical
+  hysteresis, NOT wall-clock-anchored).
+
+`_DominantNearendDetector` + `ResidualEchoEstimator` now derive their
+hop counts via `ms_to_hops()` at construction. `SuppressionGain` +
+`ResidualEchoEstimator` accept `hop_size` alongside `sr` (the existing
+v3.21.2 U3 sr threading). At 16k/10ms default, derived values are
+50 / 50 — **byte-equal preserved**.
+
+### U4.A — Per-bin H_error refresh retest CLOSED FAIL
+
+Cherry-picked v3.21.1's per-bin H_error refresh substrate (commit
+`d4e266e` → `12297ed`) onto canonical state and flipped flag to True.
+
+Bucket means within ±0.007 dB (essentially flat), BUT cohort tail is
+bad:
+- 82 / 800 (10%) cases Δecho < −0.05
+- 54 / 800 (7%) cases Δdeg < −0.05
+- Worst single-case Δdeg **−0.437** (`LHsrJBRGnUKiMC2m` DT_static)
+
+Same Pareto-damage pattern as v3.21.1 original verdict — bucket means
+hide per-case damage. Root cause unchanged: AEC3 per-bin leakage
+formula needs companion `ScaleFilter` + `FilterMisadjustment`
+stabilisers we don't have aligned.
+
+`use_per_bin_h_error_refresh: bool = False` (default OFF restored).
+Substrate code retained as dormant research path for v3.22+.
+Verdict: [docs/v3_21_4_u4a_per_bin_h_error_retest_verdict.md](docs/v3_21_4_u4a_per_bin_h_error_retest_verdict.md).
+
+### U4.B — B3 `lf_endpoint_hz` intermediate values CLOSED FAIL
+
+Tested intermediate values between baseline (500 Hz) and B3-failed
+(2000 Hz): 1000 Hz (U4.B1) and 1500 Hz (U4.B2). Both regress
+monotonically:
+
+| Variant | DT_st Δdeg | FS_st Δecho | Cohort tail |
+|---|---:|---:|---:|
+| 500 Hz baseline | 0 | 0 | 0 |
+| **1000 Hz** | **−0.012** | **−0.007** | 21 echo + 19 deg |
+| **1500 Hz** | **−0.015** | **−0.008** | 26 echo + 22 deg |
+| 2000 Hz (B3) | −0.016 | −0.012 | (similar) |
+
+Mechanism re-confirmed: 500-2000 Hz band on this cohort carries more
+echo than voice on average. Wider LF sum → ENR rises → fewer NE
+triggers → DT speech sees less protection.
+
+`lf_endpoint_hz = 500.0` confirmed cohort-empirical sweet spot. B3
+fully closed across all tested intermediate values.
+Verdict: [docs/v3_21_4_u4b_b3_intermediate_verdict.md](docs/v3_21_4_u4b_b3_intermediate_verdict.md).
+
+### ReverbDecayEstimator — CLOSED NOT-PORTING
+
+Audit across 4 representative cases shows our simpler 139-LOC port
+NEVER adapts the decay value: stays at `default_decay=0.85` on all
+2188-4307 frame cases. Four contributing factors:
+
+1. **Architectural granularity mismatch** — `n_partitions=6` with
+   `K_EARLY_REVERB_MIN_SIZE_BLOCKS=3` leaves only 0-2 data points for
+   the slope regression on typical delays. AEC3 has 13 (64-sample)
+   blocks for the same filter; partition-level port is fundamentally
+   too coarse.
+2. Upstream gates (`FilteringQualityAnalyzer` 4-gate AND +
+   `StationarityEstimator`) intermittently block.
+3. Codex #2 recreate-on-recovery (v3.21.3) wipes estimator state on
+   `_reset_filter_derived_state` events.
+4. Even when gates open, regression has too few data points to produce
+   stable slope.
+
+Full AEC3 port (270 LOC: `AnalyzeFilter` + `EarlyReverbLengthEstimator`
++ `LateReverbLinearRegressor` + validation gates) wouldn't change
+observable behavior without first addressing factors (2) + (3). The
+constant `0.85` IS the operating reverb value (= non-adaptive fallback)
+across all v3.21.x cycles.
+
+v3.22+ prerequisites for re-attempting port: loosen upstream gates +
+move estimator state to render-side preservation. Verdict:
+[docs/v3_21_4_reverb_decay_audit_verdict.md](docs/v3_21_4_reverb_decay_audit_verdict.md).
+
+### 800-case AECMOS
+
+No production change vs v3.21.3. Default-config byte-equal preserved.
+Cumulative numbers vs v3.21.0 baseline unchanged from v3.21.3.
+
+### Commits
+
+- `d7698cd` — V4 time-domain audit CLOSED NOT-A-BUG.
+- `12297ed` — v3.21.1 per-bin H_error substrate cherry-pick (default OFF).
+- `0446287` — U4.A retest CLOSED FAIL + ms-based config refactor.
+- `a80f5a0` — U4.B B3 intermediate values CLOSED FAIL.
+- `136ee4c` — ReverbDecayEstimator audit CLOSED NOT-PORTING.
+
+### Carry-over status after v3.21.4
+
+All 4 v3.21.2 plan carry-overs now adjudicated:
+
+| Item | Status |
+|---|---|
+| Time-domain unit-conversion bugs | CLOSED NOT-A-BUG (kept empirical values + ms refactor) |
+| Per-bin H_error refresh retest | CLOSED FAIL (substrate dormant for v3.22+) |
+| B3 intermediate values | CLOSED FAIL (500 Hz confirmed) |
+| ReverbDecayEstimator full port | CLOSED NOT-PORTING (dormant in our pipeline; v3.22+ prerequisites needed) |
+
+v3.22+ open work documented in each verdict; not blocking current
+production.
+
+---
+
 ## [3.21.3] — 2026-05-20 — Codex hygiene cycle (reset() AEC3 post-state + return_res_context + dead-knob removal)
 
 **Headline**: 4 hygiene findings from Codex review of v3.21.2, all

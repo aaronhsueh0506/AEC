@@ -21,7 +21,7 @@ tolerance:
   (`PBFDKF`, `ShadowFilter`, etc.). Built with `-ffp-contract=off` mandatory.
 
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
-(currently **3.21.3**). Canonical algorithm reference:
+(currently **3.21.4**). Canonical algorithm reference:
 [docs/aec_methods.md](docs/aec_methods.md). Trace-driven evolution
 history: [docs/aec_v3_evolution.md](docs/aec_v3_evolution.md). Research
 log canonical: [docs/SUMMARY.md](docs/SUMMARY.md).
@@ -173,15 +173,16 @@ tweak a single field without a full 800-case re-bench.
 ## Branch model
 
 `main` carries the production-graded code. Current `__version__` is
-**3.21.3** — v3.21.3 is a Codex hygiene cycle: fixes AEC.reset() not
-clearing AEC3 post-state, propagates the same fix into
-`_reset_filter_derived_state` (plateau/delay_first/recovery paths),
-implements the documented `return_res_context=True` contract, and
-removes provably-dead legacy delay knobs. v3.21.2 corrected an
-FFT-scale bin-index unit-conversion bug in the v3.21 SuppressionGain
-port (HF cap was firing at 937 Hz instead of 4000 Hz, mask
-interpolation at 156-250 Hz instead of 625-1000 Hz). v3.21.0 retired
-the legacy `ResFilter` 9-stage chain in favour of the AEC3-aligned
+**3.21.4** — v3.21.4 is an audit / structural-refactor cycle:
+closes 4 carry-overs from v3.21.2's plan (time-domain unit-conversion
+"bugs" NOT-A-BUG; per-bin H_error refresh retest FAIL on canonical
+state; B3 lf_endpoint intermediate values FAIL; ReverbDecayEstimator
+NOT-PORTING — estimator dormant in our pipeline). Includes a
+structural ms-based config refactor for `hold_duration_ms` /
+`noise_floor_hold_ms`. No production code change (byte-equal at default
+vs v3.21.3). v3.21.3 was the Codex hygiene cycle. v3.21.2 corrected
+the FFT-scale bin-index unit-conversion bug. v3.21.0 retired the
+legacy `ResFilter` 9-stage chain in favour of the AEC3-aligned
 `_aec3_post` (AecState + ResidualEchoEstimator + SuppressionGain +
 CNG). Single production preset: `BALANCED`. See
 [CHANGELOG.md](CHANGELOG.md) for full per-version detail.
