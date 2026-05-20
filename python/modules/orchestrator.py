@@ -566,6 +566,10 @@ class AEC:
         if self.filter is not None:
             from .state import AecState as _Aec3State, AecStateConfig as _Aec3StateConfig
             from .residual import ResidualEchoEstimator, SuppressionGain
+            from .residual.suppression_gain import (
+                SuppressorConfig, SubbandNearendConfig, _SubbandRegion,
+            )
+            import os
             n_bins = int(self.filter.n_freqs)
             # TransparentMode requires AEC3's SubtractorOutputAnalyzer (not yet
             # ported) to feed a per-frame "any_filter_converged" pulse. Our
@@ -579,7 +583,25 @@ class AEC:
                 enable_transparent_mode=False,
             ))
             self._aec3_ree = ResidualEchoEstimator(n_bins=n_bins)
-            self._aec3_sg = SuppressionGain(n_bins=n_bins)
+            # v3.21.2 S2 P3: SubbandNearendDetector experiment via env vars
+            # (so byte-equal at default + easy iteration). Set
+            # AEC_USE_SUBBAND_NE=1 to enable. Subband bounds + thresholds
+            # tunable via AEC_SUBBAND_NE_S1_LO etc. for fast trace cycles.
+            _sg_config = SuppressorConfig()
+            if os.environ.get('AEC_USE_SUBBAND_NE', '0') == '1':
+                _sg_config.use_subband_nearend_detection = True
+                _sg_config.subband_nearend_detection = SubbandNearendConfig(
+                    nearend_average_blocks=int(os.environ.get('AEC_SUBBAND_NE_AVG', '8')),
+                    subband1=_SubbandRegion(
+                        low=int(os.environ.get('AEC_SUBBAND_NE_S1_LO', '1')),
+                        high=int(os.environ.get('AEC_SUBBAND_NE_S1_HI', '5'))),
+                    subband2=_SubbandRegion(
+                        low=int(os.environ.get('AEC_SUBBAND_NE_S2_LO', '48')),
+                        high=int(os.environ.get('AEC_SUBBAND_NE_S2_HI', '96'))),
+                    nearend_threshold=float(os.environ.get('AEC_SUBBAND_NE_THR', '1.0')),
+                    snr_threshold=float(os.environ.get('AEC_SUBBAND_NE_SNR', '10.0')),
+                )
+            self._aec3_sg = SuppressionGain(n_bins=n_bins, config=_sg_config)
             # Synthesis OLA: sqrt-Hann analysis * sqrt-Hann synthesis = Hann,
             # which sums to 1 across 50%-overlap hops (perfect reconstruction).
             bs = int(self.filter.block_size)
@@ -934,6 +956,12 @@ class AEC:
         # when self.config.trace_p52_regime_handler is True (default False
         # → list stays empty → zero memory overhead).
         self._regime_trace_rows = []
+
+        # v3.21.2 S1: per-frame HF damage causal chain trace. Only appended
+        # to when self.config.trace_hf_chain is True (default False → zero
+        # overhead, byte-equal preserved). Captures convergence -> ERLE ->
+        # R² -> DominantNearendDetector -> HF cap -> gain.
+        self._hf_chain_trace = []
 
         # ERLE (raw = filter-only, final = post-RES)
         self.near_power = 0.0
@@ -3385,6 +3413,61 @@ class AEC:
             render_block=render_block_scaled,
             clock_drift=False,
         )
+
+        # v3.21.2 S1 — HF damage causal chain trace. Flag-gated; default OFF
+        # → zero overhead (no append, no compute) and byte-equal preserved.
+        # Captures the 5-link chain end-to-end in one row per frame.
+        if self.config.trace_hf_chain:
+            _erle_arr = self._aec3_state.erle()
+            _s2_sum = float(np.sum(echo_psd)) + 1e-30
+            _r2_sum = float(np.sum(r2))
+            _det = self._aec3_sg._dominant_nearend
+            _ne_lf = float(np.sum(nearend_pwr[:16]))
+            _echo_lf = float(np.sum(r2[:16]))
+            _noise_lf = float(np.sum(comfort_noise[:16]))
+            _hf_cap_fired = (
+                (not _det.is_nearend_state())
+                or bool(self._aec3_sg._config.conservative_hf_suppression)
+            )
+            _n_bins_local = int(gain.size)
+            def _gi(arr, idx):
+                return float(arr[idx]) if arr.size > idx else 0.0
+            self._hf_chain_trace.append({
+                'frame': int(self._frame_count),
+                # Link 1+2 — convergence signal source (bridge.filter_converged)
+                'aec3_converged': bool(_aec3_converged),
+                'refined_conv': bool(_refined_conv),
+                'coarse_conv': bool(_coarse_conv),
+                'y2_time': float(_y2_time),
+                'e2_refined': float(_e2_refined),
+                'e2_coarse': float(locals().get('_e2_coarse', 0.0)),
+                # Link 3 — ERLE
+                'erle_5': _gi(_erle_arr, 5),
+                'erle_30': _gi(_erle_arr, 30),
+                'erle_100': _gi(_erle_arr, 100),
+                'usable_linear': bool(self._aec3_state.usable_linear_estimate()),
+                # Link 4 — Residual echo R²
+                'r2_5': _gi(r2, 5),
+                'r2_30': _gi(r2, 30),
+                'r2_100': _gi(r2, 100),
+                'r2_to_s2_ratio': _r2_sum / _s2_sum,
+                # Link 5 — DT detector internals
+                'ne_sum_lf': _ne_lf,
+                'echo_sum_lf': _echo_lf,
+                'enr': _echo_lf / (_ne_lf + 1.0),
+                'snr': _ne_lf / (_noise_lf + 1.0),
+                'trigger_counter': int(getattr(_det, '_trigger_counter', 0)),
+                'hold_counter': int(getattr(_det, '_hold_counter', 0)),
+                'is_nearend_state': bool(_det.is_nearend_state()),
+                # HF cap gate + per-bin gain output samples
+                'hf_cap_fired': bool(_hf_cap_fired),
+                'gain_5': _gi(gain, 5),
+                'gain_30': _gi(gain, 30),
+                'gain_50': _gi(gain, 50),
+                'gain_100': _gi(gain, 100),
+                'gain_200': _gi(gain, 200),
+                'gain_n_bins': _n_bins_local,
+            })
 
         # Apply gain in spectrum domain, IFFT to fft_size=512, take the
         # block_size=320 region that holds the analysis window, then

@@ -48,7 +48,8 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             diverged_reset_streak_frames=50,
             diverged_reset_cooldown_frames=400,
             trace_delay_est_path=None,
-            plan_b_dt_per_bin_gamma=False):
+            plan_b_dt_per_bin_gamma=False,
+            trace_hf_chain_path=None):
     """Process one case; return (mic, ref, out, erle_per_frame, sample_rate).
 
     mic_pad / ref_pad: prepend N zero samples to mic / ref before processing
@@ -71,6 +72,7 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         diverged_reset_cooldown_frames=diverged_reset_cooldown_frames,
         trace_delay_est=bool(trace_delay_est_path),
         plan_b_dt_per_bin_gamma=plan_b_dt_per_bin_gamma,
+        trace_hf_chain=bool(trace_hf_chain_path),
     )
     # v3.15 §B3: seed CNG for byte-equal sanity across CLI invocations.
     # Matches eval_aec_challenge.py:325 convention (seed=0 per-case);
@@ -206,6 +208,17 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             w = _csv.DictWriter(fp, fieldnames=keys)
             w.writeheader()
             w.writerows(rows)
+
+    # v3.21.2 S1: HF causal chain trace CSV dump
+    if trace_hf_chain_path and getattr(aec, '_hf_chain_trace', None):
+        import csv as _csv
+        rows = aec._hf_chain_trace
+        keys = list(rows[0].keys())
+        with open(trace_hf_chain_path, 'w', newline='') as fp:
+            w = _csv.DictWriter(fp, fieldnames=keys)
+            w.writeheader()
+            w.writerows(rows)
+        print(f"  hf_chain trace -> {trace_hf_chain_path} ({len(rows)} frames)")
 
     return mic_trim, ref_trim, out_trim, np.asarray(erle_log), sample_rate
 
@@ -447,6 +460,10 @@ def main():
     p.add_argument('--plan-b', action='store_true',
                    help='P4B: γ²(k)-primary dt_per_bin (γ=1-coh2 with soft '
                         'floor lift only when effective_dt > 0.5; off by default)')
+    p.add_argument('--trace-hf-chain',
+                   help='v3.21.2 S1: write per-frame HF damage causal chain '
+                        'trace CSV here (convergence -> ERLE -> R² -> '
+                        'DominantNearendDetector -> HF cap gate -> gain)')
     args = p.parse_args()
 
     if args.demo:
@@ -470,6 +487,7 @@ def main():
         diverged_reset_cooldown_frames=args.diverged_reset_cooldown,
         trace_delay_est_path=args.trace_delay_est,
         plan_b_dt_per_bin_gamma=args.plan_b,
+        trace_hf_chain_path=args.trace_hf_chain,
     )
     print(f'wrote {args.out} ({len(out)} samples, {len(out) / sr:.2f}s)',
           file=sys.stderr)

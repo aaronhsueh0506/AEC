@@ -85,6 +85,35 @@ class DominantNearendConfig:
     use_unbounded_echo_spectrum: bool = True
 
 
+@dataclass(frozen=True)
+class _SubbandRegion:
+    low: int = 1
+    high: int = 1
+
+
+@dataclass(frozen=True)
+class SubbandNearendConfig:
+    """AEC3 SubbandNearendDetection — mirrors
+    docs/aec3_extracts/src/aec3/subband_nearend_detector.h:47 +
+    .cc:73-83. AEC3 ships no-op defaults (all 1s); production callers
+    must override subband bounds + thresholds to make this useful.
+
+    The detector triggers nearend state when, in any channel:
+       nearend_power[subband1] < nearend_threshold * nearend_power[subband2]
+       AND nearend_power[subband1] > snr_threshold * noise_power[subband1]
+
+    Intuition: subband1 is a "baseline" region (typically LF below pitch);
+    subband2 is a "target" region (e.g., MF/HF where speech formants sit).
+    When the baseline is much weaker than the target AND above noise,
+    that's a speech-like spectral signature with formants present.
+    """
+    nearend_average_blocks: int = 1
+    subband1: _SubbandRegion = field(default_factory=_SubbandRegion)
+    subband2: _SubbandRegion = field(default_factory=_SubbandRegion)
+    nearend_threshold: float = 1.0
+    snr_threshold: float = 1.0
+
+
 @dataclass
 class SuppressorConfig:
     last_lf_band: int = 5
@@ -102,6 +131,9 @@ class SuppressorConfig:
     )
     dominant_nearend_detection: DominantNearendConfig = field(
         default_factory=DominantNearendConfig
+    )
+    subband_nearend_detection: SubbandNearendConfig = field(
+        default_factory=SubbandNearendConfig
     )
     use_subband_nearend_detection: bool = False
 
@@ -278,6 +310,67 @@ class _DominantNearendDetector:
             self._nearend_state = False
 
 
+class _SubbandNearendDetector:
+    """AEC3 SubbandNearendDetector (single-channel collapse).
+
+    Mirrors docs/aec3_extracts/src/aec3/subband_nearend_detector.cc.
+    Polymorphic alternative to _DominantNearendDetector — same
+    is_nearend_state() interface, different detection algorithm.
+
+    Algorithm:
+       smoothed_nearend = MovingAverageSpectrum(nearend_spectrum)
+       subband1_pwr = mean(smoothed_nearend[subband1.low : subband1.high+1])
+       subband2_pwr = mean(smoothed_nearend[subband2.low : subband2.high+1])
+       noise_pwr    = mean(comfort_noise[subband1.low : subband1.high+1])
+       nearend_state = (subband1_pwr < threshold * subband2_pwr) AND
+                       (subband1_pwr > snr * noise_pwr)
+
+    Detects speech-like spectral signature: when subband1 (typically LF
+    baseline) is weaker than subband2 (typically formant region) AND
+    above noise floor, NE state triggers. AEC3 cc:50-72 stateless per
+    frame (no hold/trigger counters — the smoothing IS the temporal
+    integration).
+    """
+
+    def __init__(self, cfg: SubbandNearendConfig, n_bins: int) -> None:
+        self._cfg = cfg
+        self._n_bins = int(n_bins)
+        self._smoother = _MovingAverageSpectrum(
+            n_bins=self._n_bins, n_blocks=cfg.nearend_average_blocks
+        )
+        self._nearend_state = False
+        self._one_over_subband1_len = 1.0 / max(1, cfg.subband1.high - cfg.subband1.low + 1)
+        self._one_over_subband2_len = 1.0 / max(1, cfg.subband2.high - cfg.subband2.low + 1)
+
+    def set_config(self, cfg: SubbandNearendConfig) -> None:
+        self._cfg = cfg
+        self._smoother.update_memory_length(cfg.nearend_average_blocks)
+        self._one_over_subband1_len = 1.0 / max(1, cfg.subband1.high - cfg.subband1.low + 1)
+        self._one_over_subband2_len = 1.0 / max(1, cfg.subband2.high - cfg.subband2.low + 1)
+
+    def is_nearend_state(self) -> bool:
+        return self._nearend_state
+
+    def update(
+        self,
+        nearend_spectrum: np.ndarray,
+        residual_echo: np.ndarray,  # unused (AEC3 cc:36 marks it /*unused*/)
+        comfort_noise: np.ndarray,
+        initial_state: bool,        # unused (AEC3 cc:39 marks it /*unused*/)
+    ) -> None:
+        c = self._cfg
+        smoothed = self._smoother.average(nearend_spectrum)
+        s1_low, s1_high = c.subband1.low, c.subband1.high
+        s2_low, s2_high = c.subband2.low, c.subband2.high
+        noise_pwr = float(np.sum(comfort_noise[s1_low:s1_high + 1])) * self._one_over_subband1_len
+        ne_s1_pwr = float(np.sum(smoothed[s1_low:s1_high + 1])) * self._one_over_subband1_len
+        ne_s2_pwr = float(np.sum(smoothed[s2_low:s2_high + 1])) * self._one_over_subband2_len
+        self._nearend_state = (
+            ne_s1_pwr < c.nearend_threshold * ne_s2_pwr
+            and ne_s1_pwr > c.snr_threshold * noise_pwr
+        )
+
+
 # -------------------------------------------------------- top-level class
 
 class SuppressionGain:
@@ -294,7 +387,18 @@ class SuppressionGain:
         self._nearend_smoother = _MovingAverageSpectrum(
             n_bins=self._n_bins, n_blocks=self._config.nearend_average_blocks
         )
-        self._dominant_nearend = _DominantNearendDetector(self._config.dominant_nearend_detection)
+        # Polymorphic NearendDetector — mirrors AEC3
+        # suppression_gain.cc:373-378 (use_subband_nearend_detection flag
+        # picks ONE detector at construction; both expose identical
+        # is_nearend_state() interface to the gain compute path).
+        if self._config.use_subband_nearend_detection:
+            self._dominant_nearend = _SubbandNearendDetector(
+                self._config.subband_nearend_detection, n_bins=self._n_bins
+            )
+        else:
+            self._dominant_nearend = _DominantNearendDetector(
+                self._config.dominant_nearend_detection
+            )
         self._initial_state = True
         self._nearend_enr_tr, self._nearend_enr_su, self._nearend_emr_tr = _build_gain_params(
             self._n_bins, self._config.last_lf_band, self._config.first_hf_band,

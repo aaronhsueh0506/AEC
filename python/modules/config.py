@@ -218,6 +218,14 @@ class AecConfig:
     # See docs/p53_design_lock.md §2.
     trace_p53_innovation: bool = False
 
+    # v3.21.2 S1 — HF damage causal chain trace. Captures per-frame the
+    # 5-link chain that the HF damage hypothesis runs through:
+    # convergence signal -> ERLE -> R^2 -> DominantNearendDetector ->
+    # HF cap gate -> per-bin gain output. Recorded at the end of _aec3_post
+    # into AEC._hf_chain_trace (list of dicts). Default False — zero
+    # overhead and byte-equal preserving. Read-only observer.
+    trace_hf_chain: bool = False
+
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
     # release behaviour. Setting False reverts the corresponding sub-change
     # to the v3.8.3 baseline behaviour, used for isolating each Plan A
