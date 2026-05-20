@@ -257,9 +257,6 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             os.environ['AEC_ARC_M_EPC_GATED'].lower() not in ('0', 'false', 'off', 'no'))
     # Remaining env-var hooks for substrate flags still in AecConfig.
     for _flag, _key, _is_bool in (
-        # v3.17 B.1 — Movement-rate DelayEst (EPC-gated period override).
-        ('AEC_MOV_RATE_DELAY_EST', 'mov_rate_delay_est_enabled', True),
-        ('AEC_DELAY_EST_PERIOD_S_FAST', 'delay_est_period_s_fast', False),
         # v3.18 Phase D.1 — Subband NE detector substrate (R4).
         ('AEC_SUBBAND_NE_DETECT', 'subband_ne_detect_enabled', True),
         # v3.18 Phase D.3 — Mask shape swap (R2; needs D.1 ON to take effect).

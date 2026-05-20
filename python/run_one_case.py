@@ -47,7 +47,6 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             diverged_reset=False,
             diverged_reset_streak_frames=50,
             diverged_reset_cooldown_frames=400,
-            trace_delay_est_path=None,
             plan_b_dt_per_bin_gamma=False,
             trace_hf_chain_path=None):
     """Process one case; return (mic, ref, out, erle_per_frame, sample_rate).
@@ -70,7 +69,6 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         diverged_reset_enabled=diverged_reset,
         diverged_reset_streak_frames=diverged_reset_streak_frames,
         diverged_reset_cooldown_frames=diverged_reset_cooldown_frames,
-        trace_delay_est=bool(trace_delay_est_path),
         plan_b_dt_per_bin_gamma=plan_b_dt_per_bin_gamma,
         trace_hf_chain=bool(trace_hf_chain_path),
     )
@@ -198,16 +196,6 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             w = csv.writer(fp)
             w.writerow(header)
             w.writerows(diag_rows)
-
-    if trace_delay_est_path and aec.delay_est is not None \
-            and getattr(aec.delay_est, '_trace_rows', None):
-        import csv as _csv
-        rows = aec.delay_est._trace_rows
-        keys = list(rows[0].keys())
-        with open(trace_delay_est_path, 'w', newline='') as fp:
-            w = _csv.DictWriter(fp, fieldnames=keys)
-            w.writeheader()
-            w.writerows(rows)
 
     # v3.21.2 S1: HF causal chain trace CSV dump
     if trace_hf_chain_path and getattr(aec, '_hf_chain_trace', None):
@@ -455,8 +443,6 @@ def main():
                    help='P3h: frames of sustained diverged before reset (default 50)')
     p.add_argument('--diverged-reset-cooldown', type=int, default=400,
                    help='P3h: cooldown frames after a reset (default 400)')
-    p.add_argument('--trace-delay-est',
-                   help='P3c: write per-accumulate DelayEstimator trace CSV here')
     p.add_argument('--plan-b', action='store_true',
                    help='P4B: γ²(k)-primary dt_per_bin (γ=1-coh2 with soft '
                         'floor lift only when effective_dt > 0.5; off by default)')
@@ -485,7 +471,6 @@ def main():
         diverged_reset=args.diverged_reset,
         diverged_reset_streak_frames=args.diverged_reset_streak,
         diverged_reset_cooldown_frames=args.diverged_reset_cooldown,
-        trace_delay_est_path=args.trace_delay_est,
         plan_b_dt_per_bin_gamma=args.plan_b,
         trace_hf_chain_path=args.trace_hf_chain,
     )

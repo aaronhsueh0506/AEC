@@ -350,7 +350,6 @@ class AEC:
                     period_seconds=self.config.delay_est_period_s,
                     par_low_threshold=self.config.delay_par_low_threshold,
                     par_solid_threshold=self.config.delay_par_solid_threshold,
-                    trace=getattr(self.config, "trace_delay_est", False),
                     fast_path_enabled=getattr(self.config,
                                               "delay_fast_path_enabled", False),
                     fast_par_threshold=getattr(self.config,
@@ -1558,29 +1557,6 @@ class AEC:
             # is_solid was True but current_delay was already set.
             if (self.delay_est is not None
                     and self._delay_active):
-                # v3.17 B.1: dynamically override DelayEst period + EMA alpha
-                # under EPC (motion proxy). When EPC active or in hangover,
-                # switch to fast cadence + faster EMA so the cross-spectrum
-                # tracks the new echo path; restore baseline otherwise.
-                # Read-modify-write the fields — DelayEstimator reads on
-                # every accumulate() call.
-                if self.config.mov_rate_delay_est_enabled:
-                    _epc_motion = (self.epc_active
-                                   or self._epc_det.hangover_count > 0)
-                    if _epc_motion:
-                        self.delay_est._period_samples = int(
-                            self.config.delay_est_period_s_fast
-                            * self.config.sample_rate
-                        )
-                        self.delay_est._alpha = float(
-                            self.config.delay_est_alpha_fast
-                        )
-                    else:
-                        self.delay_est._period_samples = int(
-                            self.config.delay_est_period_s
-                            * self.config.sample_rate
-                        )
-                        self.delay_est._alpha = 0.6
                 self.delay_est.accumulate(near_end, far_end)
                 new_delay = self.delay_est.estimated_delay
                 _delay_eligible = (new_delay >= 0

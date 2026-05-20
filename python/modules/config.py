@@ -155,28 +155,6 @@ class AecConfig:
     delay_par_low_threshold: float = 5.0     # PAR < this → low confidence
     delay_par_solid_threshold: float = 8.0   # PAR > this → high confidence
 
-    # v3.17 B.1 — Movement-rate DelayEst (default OFF). When EPC is active or
-    # in hangover, override DelayEstimator's `_period_samples` to a faster
-    # cadence (`delay_est_period_s_fast`, default 0.25 s = 2× production rate)
-    # AND reduce the cross-spectrum EMA alpha to `delay_est_alpha_fast`
-    # (default 0.2 vs production 0.6) so the EMA tracks the new echo path
-    # faster. Polling alone is insufficient — the EMA itself must converge
-    # faster for delay estimates to actually move during movement events.
-    # Restore baseline period + alpha when EPC quiet.
-    #
-    # Origin: v3.16 C6 audit case `0I0XMl3M` showed estimated_delay jumps
-    # 1230 → 4132 → 4369 → 2 during fast movement, ERLE p5_bad −49 dB. Filter
-    # trained on stale alignment generates 50 dB of artefact. EPC is the
-    # cleanest in-production motion proxy (already fires on echo path
-    # change events that trigger force_delay() chain).
-    #
-    # §0.6 metric channel: LINEAR-FILTER PRIMARY (nores listen on 0I0XMl3M
-    # + cohort tail regression guard). HARD: cohort tail Δecho ≥ -0.05;
-    # SOFT: 60-case AECMOS bucket means stable.
-    mov_rate_delay_est_enabled: bool = False
-    delay_est_period_s_fast: float = 0.25
-    delay_est_alpha_fast: float = 0.2
-
     # High-pass filter (DC blocker + low-freq removal)
     enable_highpass: bool = True
     highpass_cutoff_hz: float = 80.0    # Cutoff freq: removes DC, 50/60Hz hum, rumble
@@ -194,14 +172,6 @@ class AecConfig:
     enable_saturation_detect: bool = True
     saturation_threshold: float = 0.95       # |sample| > threshold → clipping
     saturation_softclip_ref: bool = True     # Soft-clip reference for better filter modeling
-
-    # P3b: per-call DelayEstimator instrumentation. When True, every call
-    # to DelayEstimator.accumulate() appends one diagnostic row (input
-    # power, top-3 peaks of the running EMA cross-spectrum, state flags)
-    # to a list accessible at AEC.delay_est._trace_rows. Off by default —
-    # zero overhead and no behaviour change in the released v3.10.4 path.
-    trace_delay_est: bool = False
-    trace_delay_est_path: str = ""  # if non-empty, CSV is flushed here at AEC destruction or via dump method
 
     # P52 A.0R.2: per-frame regime handler observability. When True, AEC
     # records one row per frame into AEC._regime_trace_rows with the handler
