@@ -46,7 +46,12 @@ class EchoModelConfig:
 class EpStrengthConfig:
     """Subset of AEC3 ``EchoCanceller3Config::EpStrength``."""
 
-    default_gain: float = 0.014  # gain_amplitude; squared inside GetEchoPathGain
+    # U5.3: default_gain 0.014 -> 0.020 (gain_amplitude; squared in GetEchoPathGain).
+    # Scales nonlinear-mode R² up (R² = X² × default_gain²), which raises ENR
+    # so more bins fire suppression in HF where linear filter cancellation
+    # makes raw residual_echo low. Targets the FS_echo regression caused by
+    # canonical lgb=4000 Hz cap relaxing the 937-4000 Hz band.
+    default_gain: float = 0.020
     bounded_erl: bool = False
     erle_onset_compensation_in_dominant_nearend: bool = False
 
