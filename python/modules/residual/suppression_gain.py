@@ -26,6 +26,8 @@ from typing import Optional
 
 import numpy as np
 
+from ..freq_utils import hz_to_bin
+
 
 # --------------------------------------------------------------- AEC3 defaults
 
@@ -59,8 +61,13 @@ _DEFAULT_NORMAL_TUNING = SuppressorTuning(
 
 @dataclass(frozen=True)
 class HighFrequencySuppressionConfig:
-    limiting_gain_band: int = 30
-    bands_in_limiting_gain: int = 5
+    # AEC3 ships lgb=30 / biq=5 against its kFftLength=128 (125 Hz/bin),
+    # giving a 3750-4375 Hz anchor zone above F3 of voiced speech.
+    # Expressed in Hz so the values scale correctly to any fft_size.
+    # biq test: 156.25 Hz = 5 bins (count-preserved) vs 625 Hz = 20 bins
+    # (freq-width-canonical).
+    limiting_gain_freq_hz: float = 4000.0
+    limiting_gain_width_hz: float = 156.25
 
 
 @dataclass(frozen=True)
@@ -72,6 +79,11 @@ class EchoAudibilityConfig:
     low_render_limit: float = 4.0 * 64.0     # min_echo_power when render quiet
     normal_render_limit: float = 64.0
     use_stationarity_properties: bool = False
+    # Audibility-weighting band boundaries. Phase A defaults preserve the
+    # previous hardcoded bin 3/7 split at fft_size=512 (~94 / 219 Hz);
+    # AEC3 canonical bands at fft_size=128 cover 0-375 / 375-875 / 875+ Hz.
+    lf_band_end_hz: float = 93.75
+    mf_band_end_hz: float = 218.75
 
 
 @dataclass(frozen=True)
@@ -83,6 +95,11 @@ class DominantNearendConfig:
     trigger_threshold: int = 12
     use_during_initial_phase: bool = True
     use_unbounded_echo_spectrum: bool = True
+    # LF-only sum endpoint for nearend detection. AEC3 canonical value is
+    # 2000 Hz (covers up to F2 of voiced speech). The pre-refactor port
+    # hardcoded `min(16, n)` which silently landed at 500 Hz @ fft_size=512,
+    # so the detector only saw F0/F1 — missed F2-dominant voice (Chinese /i/).
+    lf_endpoint_hz: float = 2000.0
 
 
 @dataclass(frozen=True)
@@ -116,11 +133,17 @@ class SubbandNearendConfig:
 
 @dataclass
 class SuppressorConfig:
-    last_lf_band: int = 5
-    first_hf_band: int = 8
+    # LF<->HF mask coefficient interpolation boundaries. AEC3 canonical
+    # values @ fft_size=128 are last_lf=5 (625 Hz) / first_hf=8 (1000 Hz),
+    # meaning F0 lives in the LF-mask zone, F1 lives in the interpolation
+    # zone, and F2+ live in the HF-mask zone. The pre-refactor port had
+    # bin 5/8 hardcoded which silently landed at 156/250 Hz @ fft_size=512,
+    # mis-applying aggressive mask_hf to every formant.
+    last_lf_freq_hz: float = 625.0
+    first_hf_freq_hz: float = 1000.0
     nearend_tuning: SuppressorTuning = field(default_factory=lambda: _DEFAULT_NEAREND_TUNING)
     normal_tuning: SuppressorTuning = field(default_factory=lambda: _DEFAULT_NORMAL_TUNING)
-    last_lf_smoothing_band: int = 5
+    last_lf_smoothing_freq_hz: float = 625.0
     last_permanent_lf_smoothing_band: int = 0
     lf_smoothing_during_initial_phase: bool = True
     conservative_hf_suppression: bool = False
@@ -224,9 +247,11 @@ def _weight_echo_for_audibility(
         out[begin:end] = result
 
     n = out.size
-    weigh(cfg.floor_power * cfg.audibility_threshold_lf, 0, min(3, n))
-    weigh(cfg.floor_power * cfg.audibility_threshold_mf, 3, min(7, n))
-    weigh(cfg.floor_power * cfg.audibility_threshold_hf, 7, n)
+    lf_end = min(hz_to_bin(cfg.lf_band_end_hz, n), n)
+    mf_end = min(hz_to_bin(cfg.mf_band_end_hz, n), n)
+    weigh(cfg.floor_power * cfg.audibility_threshold_lf, 0, lf_end)
+    weigh(cfg.floor_power * cfg.audibility_threshold_mf, lf_end, mf_end)
+    weigh(cfg.floor_power * cfg.audibility_threshold_hf, mf_end, n)
 
 
 def _limit_lf_gains(gain: np.ndarray) -> None:
@@ -241,17 +266,26 @@ def _limit_hf_gains(
     gain: np.ndarray,
 ) -> None:
     """Mirrors LimitHighFrequencyGains (suppression_gain.cc:44-85)."""
-    lgb = cfg.limiting_gain_band
-    biq = cfg.bands_in_limiting_gain
-    if biq > 0 and lgb + biq <= gain.size:
+    n_bins = gain.size
+    lgb = hz_to_bin(cfg.limiting_gain_freq_hz, n_bins)
+    biq = max(1, hz_to_bin(cfg.limiting_gain_width_hz, n_bins))
+    if biq > 0 and lgb + biq <= n_bins:
         min_upper_gain = float(np.min(gain[lgb : lgb + biq]))
         np.minimum(gain[lgb + 1 :], min_upper_gain, out=gain[lgb + 1 :])
-    if gain.size >= 2:
+    if n_bins >= 2:
         gain[-1] = gain[-2]
-    if conservative_hf and gain.size > 29:
-        n_avg = 29 - 20
-        hf_gain_bound = float(np.mean(gain[20:29]))
-        np.minimum(gain[29:], hf_gain_bound, out=gain[29:])
+    if conservative_hf:
+        # AEC3 conservative_hf path. Previous Python port hardcoded bins
+        # 20/29 from AEC3 (fft=128, 2500-3625 Hz) without unit conversion,
+        # silently landing at 625-906 Hz @ fft=512. Express the AEC3
+        # canonical 2500-3625 Hz so the band scales with fft_size.
+        # Note: conservative_hf_suppression defaults False, so the flag-OFF
+        # path is byte-equal regardless.
+        cons_lo = hz_to_bin(2500.0, n_bins)
+        cons_hi = hz_to_bin(3625.0, n_bins)
+        if n_bins > cons_hi and cons_hi > cons_lo:
+            hf_gain_bound = float(np.mean(gain[cons_lo:cons_hi]))
+            np.minimum(gain[cons_hi:], hf_gain_bound, out=gain[cons_hi:])
 
 
 # ----------------------------------------- Dominant nearend (ported here)
@@ -285,8 +319,11 @@ class _DominantNearendDetector:
             self._hold_counter = 0
             self._nearend_state = False
             return
-        # LF-only sum (first 16 bins) per AEC3.
-        lf_end = min(16, nearend_spectrum.size)
+        # LF-only sum for nearend detection. Endpoint comes from
+        # cfg.lf_endpoint_hz (Phase A default 500 Hz preserves the previous
+        # hardcoded bin 16 @ fft=512; Phase B flips to AEC3 canonical 2000 Hz).
+        n_bins = nearend_spectrum.size
+        lf_end = min(hz_to_bin(c.lf_endpoint_hz, n_bins), n_bins)
         ne_sum = float(np.sum(nearend_spectrum[:lf_end]))
         echo_sum = float(np.sum(residual_echo[:lf_end]))
         noise_sum = float(np.sum(comfort_noise[:lf_end]))
@@ -400,12 +437,18 @@ class SuppressionGain:
                 self._config.dominant_nearend_detection
             )
         self._initial_state = True
+        # Resolve freq-based config to bin indices once at construction.
+        self._last_lf_band = hz_to_bin(self._config.last_lf_freq_hz, self._n_bins)
+        self._first_hf_band = hz_to_bin(self._config.first_hf_freq_hz, self._n_bins)
+        self._last_lf_smoothing_band = hz_to_bin(
+            self._config.last_lf_smoothing_freq_hz, self._n_bins
+        )
         self._nearend_enr_tr, self._nearend_enr_su, self._nearend_emr_tr = _build_gain_params(
-            self._n_bins, self._config.last_lf_band, self._config.first_hf_band,
+            self._n_bins, self._last_lf_band, self._first_hf_band,
             self._config.nearend_tuning,
         )
         self._normal_enr_tr, self._normal_enr_su, self._normal_emr_tr = _build_gain_params(
-            self._n_bins, self._config.last_lf_band, self._config.first_hf_band,
+            self._n_bins, self._last_lf_band, self._first_hf_band,
             self._config.normal_tuning,
         )
 
@@ -540,7 +583,7 @@ class SuppressionGain:
                 if is_ne
                 else self._config.normal_tuning.max_dec_factor_lf
             )
-            end = min(self._config.last_lf_smoothing_band + 1, self._n_bins)
+            end = min(self._last_lf_smoothing_band + 1, self._n_bins)
             permanent = self._config.last_permanent_lf_smoothing_band
             for k in range(end):
                 if last_nearend[k] > last_echo[k] or k <= permanent:
