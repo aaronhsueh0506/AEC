@@ -16,6 +16,139 @@ when verdict requires it.
 
 ---
 
+## [3.21.3] — 2026-05-20 — Codex hygiene cycle (reset() AEC3 post-state + return_res_context + dead-knob removal)
+
+**Headline**: 4 hygiene findings from Codex review of v3.21.2, all
+fixed and confirmed correct. Three are pure correctness improvements
+(reset path completeness + documented contract implementation); one
+is dead-code removal. One fix (Codex #2) produces a measurable Pareto
+shift on the 800-case bench — accepted as honest correction of a
+previously-illusory FS_echo advantage.
+
+### Codex #1 (HIGH) — `AEC.reset()` clears AEC3 post-state
+
+Pre-fix: `AEC.reset()` body initialised the v3.21 AEC3-aligned
+post-stage fields (`_aec3_state` / `_aec3_ree` / `_aec3_sg` / OLA buf /
+noise PSD / CN gain / pending events / stationarity tracker) in
+`__init__` but never touched them on reset(). Re-using an AEC instance
+across utterances carried previous-stream post-filter state into the
+next stream.
+
+Fix:
+- Store `n_bins` + the env-var-driven `_sg_config` as instance
+  attributes so reset can rebuild the post chain with the same config.
+- Add `_reset_aec3_post()` helper. AecState + SuppressionGain don't
+  expose in-place `reset()` so they're recreated; ResidualEchoEstimator
+  and StationarityEstimator do, so they're called. Numpy buffers
+  zero-filled, counters cleared.
+- `reset()` body invokes `self._reset_aec3_post()` at the end.
+
+Test coverage: 5 new unit tests in [python/test_aec_reset.py](python/test_aec_reset.py),
+all PASS.
+
+### Codex #2 (MED) — `_reset_filter_derived_state()` clears AEC3 post chain
+
+Pre-fix: helper cleared the legacy ResFilter post-state (gain_smooth /
+echo_psd / noise_psd / gates) but v3.21.0 retired ResFilter. The
+helper was never updated to clear the AEC3 post chain. Result: on
+delay_first / delay_shift / p3h_diverged recovery, the filter taps
+reset to zero but the AEC3 post chain kept its prior ERLE / R² / ERL
+estimates — applying confident suppression logic on the noisy output
+of a freshly-reset (un-trained) filter.
+
+Fix:
+- Update docblock to drop the stale ResFilter reference and add the
+  AEC3 post chain to the CLEARED list (`_aec3_stationarity` +
+  render-side counters in PRESERVED — render activity is input-side).
+- Add `preserve_render_side` kwarg to `_reset_aec3_post()` so the same
+  helper covers both AEC.reset() (full clear) and
+  `_reset_filter_derived_state()` (preserve render-side).
+- Invoke `self._reset_aec3_post(preserve_render_side=True)` in the
+  helper body.
+
+### Codex #3 (MED) — implement `return_res_context=True` contract
+
+Pre-fix: `AecConfig.return_res_context=True` was documented (CLAUDE.md
+"Diagnostic surfaces") to switch `process()` return type from
+`ndarray` to `(output, AecResContext)`, but `_res_context` was always
+`None` so the documented contract never fired. Dead surface.
+
+Fix: when `config.return_res_context=True` and the AEC3 chain ran,
+populate `_res_context = AecResContext(...)` from in-scope state
+(raw_output / echo_spec / far_spec / near_spec / far_power / converged
+flag / erle_factor / dt_indicator / divergence / over_sub /
+saturation / erl_estimate). The end-of-`process()` existing branch
+`if _res_context is not None: return (result, _res_context)` now
+fires, satisfying the documented contract.
+
+Default path (`return_res_context=False`) byte-equal to v3.21.2 HEAD
+on 25-case byte-equal sample.
+
+Test coverage: 2 new unit tests, both PASS.
+
+### Codex #4 (MED) — remove dead legacy delay knobs
+
+Two AecConfig fields became silent no-ops when v3.21 replaced the
+legacy DelayEstimator with `LegacyDelayShim` wrapping the AEC3
+estimator:
+
+(1) `mov_rate_delay_est_enabled` + `delay_est_period_s_fast` +
+    `delay_est_alpha_fast` — orchestrator wrote to
+    `LegacyDelayShim._period_samples` / `_alpha` under EPC motion. The
+    shim documents these as "no-op compat attributes"; its
+    `accumulate()` doesn't read them. Pure dead writes.
+
+(2) `trace_delay_est` + `trace_delay_est_path` — passed as `trace=`
+    kwarg into `LegacyDelayShim`, which collected it into
+    `_legacy_kwargs` and never consumed it. Documented to populate
+    `aec.delay_est._trace_rows`, but the AEC3 estimator doesn't expose
+    any such surface; the `--trace-delay-est` CLI flag was a silent
+    no-op.
+
+Removed: 5 config fields, the 17-line dead conditional in
+orchestrator, 2 env var hooks in eval, 5 reference sites in
+run_one_case. Byte-equal preserved (removed code was provably dead).
+
+### 800-case AECMOS vs v3.21.2 baseline
+
+| Bucket | Δecho | Δdeg | Note |
+|---|---:|---:|---|
+| FS_static | **−0.050** | +0.000 | Pareto cost of Codex #2 (was illusion) |
+| FS_movement | **−0.037** | +0.000 | Pareto cost of Codex #2 (was illusion) |
+| DT_static | −0.028 | **+0.025** | Pareto gain of Codex #2 (speech recovered) |
+| DT_movement | −0.032 | **+0.026** | Pareto gain of Codex #2 (speech recovered) |
+| NE | +0.000 | +0.000 | flat |
+
+Mechanism (Pareto attribution): Codex #1 / #3 / #4 are not exercised
+on a fresh-instance-per-case bench so contribute no delta. Codex #2
+is the source. Pre-Codex #2 (buggy): on filter recovery, AEC3 post
+chain held stale ERLE / R² → applied confident-suppression logic to
+noisy untrained-filter output → over-suppressed FS_echo (good metric)
+but also over-suppressed DT speech (bad metric). Post-Codex #2
+(correct): post chain resets alongside filter → no fake confidence →
+suppression backs off until filter retrains → less FS_echo gain, more
+DT speech preserved. Pareto shift reveals the bug was extracting
+illusory FS_echo at DT_deg cost.
+
+### Cumulative 800-case AECMOS vs v3.21.0 baseline (a537b65)
+
+| Bucket | Δecho | Δdeg |
+|---|---:|---:|
+| FS_static | −0.197 | +0.000 |
+| FS_movement | −0.154 | +0.000 |
+| DT_static | −0.077 | **+0.119** |
+| DT_movement | −0.080 | **+0.141** |
+| NE | +0.000 | +0.003 |
+
+### Commits
+
+- `81a5103` — Codex #1 AEC.reset() AEC3 post-state.
+- `b2491a8` — Codex #2 _reset_filter_derived_state() AEC3 post chain.
+- `80da109` — Codex #3 return_res_context contract.
+- `fd2cfcd` — Codex #4 dead legacy delay knobs removed.
+
+---
+
 ## [3.21.2] — 2026-05-20 — Frequency-canonical bin-index alignment (HF damage Pareto step) + FS recovery
 
 **Headline**: the v3.21 SuppressionGain port (b5728e5) copied AEC3
