@@ -601,7 +601,9 @@ class AEC:
                     nearend_threshold=float(os.environ.get('AEC_SUBBAND_NE_THR', '1.0')),
                     snr_threshold=float(os.environ.get('AEC_SUBBAND_NE_SNR', '10.0')),
                 )
-            self._aec3_sg = SuppressionGain(n_bins=n_bins, config=_sg_config)
+            self._aec3_sg = SuppressionGain(
+                n_bins=n_bins, config=_sg_config, sr=self.config.sample_rate
+            )
             # Synthesis OLA: sqrt-Hann analysis * sqrt-Hann synthesis = Hann,
             # which sums to 1 across 50%-overlap hops (perfect reconstruction).
             bs = int(self.filter.block_size)

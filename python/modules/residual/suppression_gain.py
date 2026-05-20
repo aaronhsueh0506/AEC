@@ -228,7 +228,8 @@ def _build_gain_params(
 
 
 def _weight_echo_for_audibility(
-    cfg: EchoAudibilityConfig, echo: np.ndarray, out: np.ndarray
+    cfg: EchoAudibilityConfig, echo: np.ndarray, out: np.ndarray,
+    sr: int = 16000,
 ) -> None:
     """Mirrors WeightEchoForAudibility (suppression_gain.cc:88-121).
 
@@ -251,8 +252,8 @@ def _weight_echo_for_audibility(
         out[begin:end] = result
 
     n = out.size
-    lf_end = min(hz_to_bin(cfg.lf_band_end_hz, n), n)
-    mf_end = min(hz_to_bin(cfg.mf_band_end_hz, n), n)
+    lf_end = min(hz_to_bin(cfg.lf_band_end_hz, n, sr), n)
+    mf_end = min(hz_to_bin(cfg.mf_band_end_hz, n, sr), n)
     weigh(cfg.floor_power * cfg.audibility_threshold_lf, 0, lf_end)
     weigh(cfg.floor_power * cfg.audibility_threshold_mf, lf_end, mf_end)
     weigh(cfg.floor_power * cfg.audibility_threshold_hf, mf_end, n)
@@ -268,11 +269,12 @@ def _limit_hf_gains(
     cfg: HighFrequencySuppressionConfig,
     conservative_hf: bool,
     gain: np.ndarray,
+    sr: int = 16000,
 ) -> None:
     """Mirrors LimitHighFrequencyGains (suppression_gain.cc:44-85)."""
     n_bins = gain.size
-    lgb = hz_to_bin(cfg.limiting_gain_freq_hz, n_bins)
-    biq = max(1, hz_to_bin(cfg.limiting_gain_width_hz, n_bins))
+    lgb = hz_to_bin(cfg.limiting_gain_freq_hz, n_bins, sr)
+    biq = max(1, hz_to_bin(cfg.limiting_gain_width_hz, n_bins, sr))
     if biq > 0 and lgb + biq <= n_bins:
         min_upper_gain = float(np.min(gain[lgb : lgb + biq]))
         np.minimum(gain[lgb + 1 :], min_upper_gain, out=gain[lgb + 1 :])
@@ -285,8 +287,8 @@ def _limit_hf_gains(
         # canonical 2500-3625 Hz so the band scales with fft_size.
         # Note: conservative_hf_suppression defaults False, so the flag-OFF
         # path is byte-equal regardless.
-        cons_lo = hz_to_bin(2500.0, n_bins)
-        cons_hi = hz_to_bin(3625.0, n_bins)
+        cons_lo = hz_to_bin(2500.0, n_bins, sr)
+        cons_hi = hz_to_bin(3625.0, n_bins, sr)
         if n_bins > cons_hi and cons_hi > cons_lo:
             hf_gain_bound = float(np.mean(gain[cons_lo:cons_hi]))
             np.minimum(gain[cons_hi:], hf_gain_bound, out=gain[cons_hi:])
@@ -298,8 +300,9 @@ class _DominantNearendDetector:
     """AEC3 DominantNearendDetector (single-channel collapse).
     Mirrors docs/aec3_extracts/src/aec3/dominant_nearend_detector.cc."""
 
-    def __init__(self, cfg: DominantNearendConfig) -> None:
+    def __init__(self, cfg: DominantNearendConfig, sr: int = 16000) -> None:
         self._cfg = cfg
+        self._sr = int(sr)
         self._trigger_counter = 0
         self._hold_counter = 0
         self._nearend_state = False
@@ -327,7 +330,7 @@ class _DominantNearendDetector:
         # cfg.lf_endpoint_hz (Phase A default 500 Hz preserves the previous
         # hardcoded bin 16 @ fft=512; Phase B flips to AEC3 canonical 2000 Hz).
         n_bins = nearend_spectrum.size
-        lf_end = min(hz_to_bin(c.lf_endpoint_hz, n_bins), n_bins)
+        lf_end = min(hz_to_bin(c.lf_endpoint_hz, n_bins, self._sr), n_bins)
         ne_sum = float(np.sum(nearend_spectrum[:lf_end]))
         echo_sum = float(np.sum(residual_echo[:lf_end]))
         noise_sum = float(np.sum(comfort_noise[:lf_end]))
@@ -373,9 +376,10 @@ class _SubbandNearendDetector:
     integration).
     """
 
-    def __init__(self, cfg: SubbandNearendConfig, n_bins: int) -> None:
+    def __init__(self, cfg: SubbandNearendConfig, n_bins: int, sr: int = 16000) -> None:
         self._cfg = cfg
         self._n_bins = int(n_bins)
+        self._sr = int(sr)
         self._smoother = _MovingAverageSpectrum(
             n_bins=self._n_bins, n_blocks=cfg.nearend_average_blocks
         )
@@ -417,8 +421,10 @@ class _SubbandNearendDetector:
 class SuppressionGain:
     """Single-channel single-band SuppressionGain."""
 
-    def __init__(self, *, n_bins: int = 257, config: Optional[SuppressorConfig] = None) -> None:
+    def __init__(self, *, n_bins: int = 257, config: Optional[SuppressorConfig] = None,
+                 sr: int = 16000) -> None:
         self._n_bins = int(n_bins)
+        self._sr = int(sr)
         self._config = config or SuppressorConfig()
         self._echo_audibility = EchoAudibilityConfig()
         self._last_gain = np.ones(self._n_bins, dtype=np.float32)
@@ -434,18 +440,18 @@ class SuppressionGain:
         # is_nearend_state() interface to the gain compute path).
         if self._config.use_subband_nearend_detection:
             self._dominant_nearend = _SubbandNearendDetector(
-                self._config.subband_nearend_detection, n_bins=self._n_bins
+                self._config.subband_nearend_detection, n_bins=self._n_bins, sr=self._sr
             )
         else:
             self._dominant_nearend = _DominantNearendDetector(
-                self._config.dominant_nearend_detection
+                self._config.dominant_nearend_detection, sr=self._sr
             )
         self._initial_state = True
         # Resolve freq-based config to bin indices once at construction.
-        self._last_lf_band = hz_to_bin(self._config.last_lf_freq_hz, self._n_bins)
-        self._first_hf_band = hz_to_bin(self._config.first_hf_freq_hz, self._n_bins)
+        self._last_lf_band = hz_to_bin(self._config.last_lf_freq_hz, self._n_bins, self._sr)
+        self._first_hf_band = hz_to_bin(self._config.first_hf_freq_hz, self._n_bins, self._sr)
         self._last_lf_smoothing_band = hz_to_bin(
-            self._config.last_lf_smoothing_freq_hz, self._n_bins
+            self._config.last_lf_smoothing_freq_hz, self._n_bins, self._sr
         )
         self._nearend_enr_tr, self._nearend_enr_su, self._nearend_emr_tr = _build_gain_params(
             self._n_bins, self._last_lf_band, self._first_hf_band,
@@ -515,7 +521,7 @@ class SuppressionGain:
         nearend = self._nearend_smoother.average(suppressor_input)
         # Step 3: weighted residual (audibility downweight).
         weighted_residual = np.empty(self._n_bins, dtype=np.float32)
-        _weight_echo_for_audibility(self._echo_audibility, residual_echo, weighted_residual)
+        _weight_echo_for_audibility(self._echo_audibility, residual_echo, weighted_residual, self._sr)
         # Step 4: min gain envelope.
         min_gain = self._get_min_gain(
             weighted_residual, self._last_nearend, self._last_echo,
@@ -536,6 +542,7 @@ class SuppressionGain:
                 self._config.high_frequency_suppression,
                 self._config.conservative_hf_suppression,
                 G,
+                self._sr,
             )
         # Stash for next hop.
         self._last_gain[:] = G
