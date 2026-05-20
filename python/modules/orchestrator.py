@@ -604,6 +604,8 @@ class AEC:
             self._aec3_sg = SuppressionGain(
                 n_bins=n_bins, config=_sg_config, sr=self.config.sample_rate
             )
+            self._aec3_n_bins = n_bins
+            self._aec3_sg_config = _sg_config
             # Synthesis OLA: sqrt-Hann analysis * sqrt-Hann synthesis = Hann,
             # which sums to 1 across 50%-overlap hops (perfect reconstruction).
             bs = int(self.filter.block_size)
@@ -1119,6 +1121,41 @@ class AEC:
         self._erl_estimate = 0.1
         # Reset per-band ERL EMA to initial conservative value.
         self._per_band_erl[:] = 0.1
+        # v3.21.3 Codex #1 — clear AEC3 post-state so cross-stream reuse
+        # of an AEC instance doesn't carry previous-utterance AecState /
+        # ResidualEchoEstimator / SuppressionGain / CNG / OLA across.
+        self._reset_aec3_post()
+
+    def _reset_aec3_post(self) -> None:
+        """Clear all `_aec3_post` chain state. Called from `reset()`.
+
+        AecState and SuppressionGain don't expose `reset()` so we recreate
+        them; ResidualEchoEstimator and StationarityEstimator do, so we
+        call them. Numpy buffers + scalar counters are cleared in place.
+        """
+        if self._aec3_state is None:
+            return  # AEC3 chain wasn't initialised (no filter)
+        from .state import AecState as _Aec3State, AecStateConfig as _Aec3StateConfig
+        from .residual import ResidualEchoEstimator, SuppressionGain
+        n_bins = self._aec3_n_bins
+        self._aec3_state = _Aec3State(_Aec3StateConfig(
+            n_bins=n_bins,
+            enable_transparent_mode=False,
+        ))
+        self._aec3_ree = ResidualEchoEstimator(n_bins=n_bins)
+        self._aec3_sg = SuppressionGain(
+            n_bins=n_bins, config=self._aec3_sg_config, sr=self.config.sample_rate
+        )
+        self._aec3_ola_buf.fill(0)
+        self._aec3_pending_gain_change = False
+        self._aec3_pending_delay_change = None
+        self._aec3_noise_psd.fill(0)
+        self._aec3_smooth_cn_gain.fill(0)
+        self._aec3_noise_initialized = False
+        if self._aec3_stationarity is not None:
+            self._aec3_stationarity.reset()
+        self._aec3_non_zero_render_seen = False
+        self._aec3_stationarity_active_hops = 0
 
     def _reset_filter_derived_state(self, reason: str = 'plateau',
                                      preserve_render_ema: bool = True) -> None:
