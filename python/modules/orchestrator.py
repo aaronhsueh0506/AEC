@@ -587,7 +587,11 @@ class AEC:
                 n_bins=n_bins,
                 enable_transparent_mode=False,
             ))
-            self._aec3_ree = ResidualEchoEstimator(n_bins=n_bins)
+            self._aec3_ree = ResidualEchoEstimator(
+                n_bins=n_bins,
+                sr=self.config.sample_rate,
+                hop_size=self.config.hop_size,
+            )
             # v3.21.2 S2 P3: SubbandNearendDetector experiment via env vars
             # (so byte-equal at default + easy iteration). Set
             # AEC_USE_SUBBAND_NE=1 to enable. Subband bounds + thresholds
@@ -607,7 +611,10 @@ class AEC:
                     snr_threshold=float(os.environ.get('AEC_SUBBAND_NE_SNR', '10.0')),
                 )
             self._aec3_sg = SuppressionGain(
-                n_bins=n_bins, config=_sg_config, sr=self.config.sample_rate
+                n_bins=n_bins,
+                config=_sg_config,
+                sr=self.config.sample_rate,
+                hop_size=self.config.hop_size,
             )
             self._aec3_n_bins = n_bins
             self._aec3_sg_config = _sg_config
@@ -1155,9 +1162,16 @@ class AEC:
             n_bins=n_bins,
             enable_transparent_mode=False,
         ))
-        self._aec3_ree = ResidualEchoEstimator(n_bins=n_bins)
+        self._aec3_ree = ResidualEchoEstimator(
+            n_bins=n_bins,
+            sr=self.config.sample_rate,
+            hop_size=self.config.hop_size,
+        )
         self._aec3_sg = SuppressionGain(
-            n_bins=n_bins, config=self._aec3_sg_config, sr=self.config.sample_rate
+            n_bins=n_bins,
+            config=self._aec3_sg_config,
+            sr=self.config.sample_rate,
+            hop_size=self.config.hop_size,
         )
         self._aec3_ola_buf.fill(0)
         self._aec3_pending_gain_change = False

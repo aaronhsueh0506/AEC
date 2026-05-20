@@ -159,10 +159,13 @@ class AecConfig:
     # When False (default → byte-equal preserved): legacy scalar compare
     # `np.sum(_error_psd) ≤ _e2_coarse_for_refresh` selects a single
     # leakage_converged/diverged factor for all 513 bins.
-    # When True: per-bin instantaneous compare `|error_spec[k]|² ≤
-    # |shadow.error_spec[k]|²` selects per-bin leakage. Addresses Codex
-    # F2 staleness — refresh uses fresh per-frame E²_refined (not
-    # smoothed self._error_psd which can be stale on early-return paths).
+    # When True: per-bin instantaneous compare selects per-bin leakage.
+    # v3.21.4 U4.A retest on canonical state: bucket means neutral
+    # (±0.007 dB) BUT cohort tail bad (82 echo + 54 deg per-case
+    # regressions > 0.05; worst Δdeg −0.437 on LHsrJBRGn). Same Pareto
+    # damage as v3.21.1 (HARD-FAIL on cohort). Substrate retained as
+    # dormant code; needs AEC3 ScaleFilter + FilterMisadjustment
+    # alignment before this can ship.
     use_per_bin_h_error_refresh: bool = False
 
     # High-pass filter (DC blocker + low-freq removal)

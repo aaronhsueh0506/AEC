@@ -91,7 +91,30 @@ class DominantNearendConfig:
     enr_threshold: float = 0.25
     enr_exit_threshold: float = 10.0
     snr_threshold: float = 30.0
-    hold_duration: int = 50
+    # hold_duration_ms — minimum NE-state dwell, wall-clock milliseconds.
+    # PHYSICAL MEANING: speech-phoneme stability (wall-clock) + downstream
+    # NE-vs-non-NE gain-rule coupling.
+    # 500 ms = ~2.5 phonemes; empirically co-tuned on our 800-case cohort
+    # with the v3.21 SuppressionGain mask shapes. Stored as ms so the
+    # derived hop count auto-scales with hop_size at SuppressionGain
+    # construction (ms_to_hops(500, 160, 16000) = 50 hops at our default).
+    # SCALING: wall-clock derivation captures the phoneme part; minor
+    # re-tune may still be needed at very different hop sizes due to
+    # behavioural coupling with downstream gain rule.
+    # See docs/v3_21_4_time_domain_audit_verdict.md.
+    hold_duration_ms: int = 500
+    # trigger_threshold — net-positive evidence depth (+1/-1 random walk)
+    # before NE state triggers. DIMENSIONLESS sample count.
+    # PHYSICAL MEANING: statistical hysteresis depth — NOT wall-clock.
+    # Depends on per-sample ENR estimator noise floor (set by our PBFDKF +
+    # ENR pipeline, not by AEC3's matched-filter + refined). Wall-clock
+    # derivation (blocks_to_hops or ms_to_hops) is WRONG here.
+    # Empirical: v3.21.4 V4.1 tested 12 -> 5 (= blocks_to_hops(12,160,16k))
+    # and BOTH FS+DT regressed — too few samples to reject estimator noise.
+    # SCALING: do NOT auto-derive from hop_size or wall-clock. Re-tune
+    # empirically if upstream filter / ENR estimator noise profile changes.
+    # 12 samples = 120 ms only at hop=160/sr=16k.
+    # See docs/v3_21_4_time_domain_audit_verdict.md.
     trigger_threshold: int = 12
     use_during_initial_phase: bool = True
     use_unbounded_echo_spectrum: bool = True
@@ -300,15 +323,31 @@ class _DominantNearendDetector:
     """AEC3 DominantNearendDetector (single-channel collapse).
     Mirrors docs/aec3_extracts/src/aec3/dominant_nearend_detector.cc."""
 
-    def __init__(self, cfg: DominantNearendConfig, sr: int = 16000) -> None:
+    def __init__(
+        self,
+        cfg: DominantNearendConfig,
+        sr: int = 16000,
+        hop_size: int = 160,
+    ) -> None:
         self._cfg = cfg
         self._sr = int(sr)
+        self._hop_size = int(hop_size)
+        # Derive wall-clock hops from cfg.hold_duration_ms at construction;
+        # value is read every update() call so per-frame cost is O(1).
+        from .. import aec3_scale as _aec3_scale
+        self._hold_duration_hops = _aec3_scale.ms_to_hops(
+            cfg.hold_duration_ms, self._hop_size, self._sr
+        )
         self._trigger_counter = 0
         self._hold_counter = 0
         self._nearend_state = False
 
     def set_config(self, cfg: DominantNearendConfig) -> None:
         self._cfg = cfg
+        from .. import aec3_scale as _aec3_scale
+        self._hold_duration_hops = _aec3_scale.ms_to_hops(
+            cfg.hold_duration_ms, self._hop_size, self._sr
+        )
 
     def is_nearend_state(self) -> bool:
         return self._nearend_state
@@ -343,7 +382,7 @@ class _DominantNearendDetector:
             self._trigger_counter = max(self._trigger_counter - 1, 0)
         if self._trigger_counter >= c.trigger_threshold:
             self._nearend_state = True
-            self._hold_counter = c.hold_duration
+            self._hold_counter = self._hold_duration_hops
         elif enr > c.enr_exit_threshold:
             self._nearend_state = False
             self._hold_counter = 0
@@ -422,9 +461,10 @@ class SuppressionGain:
     """Single-channel single-band SuppressionGain."""
 
     def __init__(self, *, n_bins: int = 257, config: Optional[SuppressorConfig] = None,
-                 sr: int = 16000) -> None:
+                 sr: int = 16000, hop_size: int = 160) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
+        self._hop_size = int(hop_size)
         self._config = config or SuppressorConfig()
         self._echo_audibility = EchoAudibilityConfig()
         self._last_gain = np.ones(self._n_bins, dtype=np.float32)
@@ -444,7 +484,9 @@ class SuppressionGain:
             )
         else:
             self._dominant_nearend = _DominantNearendDetector(
-                self._config.dominant_nearend_detection, sr=self._sr
+                self._config.dominant_nearend_detection,
+                sr=self._sr,
+                hop_size=self._hop_size,
             )
         self._initial_state = True
         # Resolve freq-based config to bin indices once at construction.

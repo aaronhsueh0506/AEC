@@ -34,7 +34,14 @@ from .reverb_frequency_response import ReverbFrequencyResponse
 class EchoModelConfig:
     """Subset of AEC3 ``EchoCanceller3Config::EchoModel`` we use."""
 
-    noise_floor_hold: int = 50
+    # noise_floor_hold_ms — delay before allowing minimum-statistics noise
+    # floor to creep upward by 1.1x. PURE WALL-CLOCK semantics (room noise
+    # drift). Stored as ms so the derived hop count auto-scales with
+    # hop_size at ResidualEchoEstimator construction
+    # (ms_to_hops(500, 160, 16000) = 50 hops at default 16k/10ms).
+    # Quiet-room cohort favours slower adapt-up (=less false positive on
+    # speech transients). See docs/v3_21_4_time_domain_audit_verdict.md.
+    noise_floor_hold_ms: int = 500
     min_noise_floor_power: float = 1638400.0  # AEC3 default (= 16²·6400)
     noise_gate_power: float = 27509562.0       # AEC3 default
     noise_gate_slope: float = 0.3
@@ -94,11 +101,21 @@ class ResidualEchoEstimator:
         echo_model: EchoModelConfig = EchoModelConfig(),
         ep_strength: EpStrengthConfig = EpStrengthConfig(),
         reverb: ReverbConfig = ReverbConfig(),
+        sr: int = 16000,
+        hop_size: int = 160,
     ) -> None:
         self._n_bins = int(n_bins)
         self._echo_model = echo_model
         self._ep_strength = ep_strength
         self._reverb_cfg = reverb
+        self._sr = int(sr)
+        self._hop_size = int(hop_size)
+        # Derive wall-clock hops from cfg.noise_floor_hold_ms once at init
+        # (echo_model is frozen so the value is stable).
+        from .. import aec3_scale as _aec3_scale
+        self._noise_floor_hold_hops = _aec3_scale.ms_to_hops(
+            echo_model.noise_floor_hold_ms, self._hop_size, self._sr
+        )
         self._tm_gain_early = _TRANSPARENT_MODE_GAIN
         self._tm_gain_late = _TRANSPARENT_MODE_GAIN
         self._default_gain_early = float(ep_strength.default_gain)
@@ -110,7 +127,7 @@ class ResidualEchoEstimator:
             self._n_bins, echo_model.min_noise_floor_power, dtype=np.float32
         )
         self._x2_noise_floor_counter = np.full(
-            self._n_bins, echo_model.noise_floor_hold, dtype=np.int32
+            self._n_bins, self._noise_floor_hold_hops, dtype=np.int32
         )
         self._reverb_model = ReverbModel(n_bins=self._n_bins)
         # v3.21 Phase C.2 — EchoGeneratingPower window walk. AEC3 walks the
@@ -190,7 +207,7 @@ class ResidualEchoEstimator:
 
     def reset(self) -> None:
         self._x2_noise_floor.fill(self._echo_model.min_noise_floor_power)
-        self._x2_noise_floor_counter.fill(self._echo_model.noise_floor_hold)
+        self._x2_noise_floor_counter.fill(self._noise_floor_hold_hops)
         self._reverb_model.reset()
         if self._reverb_decay_est is not None:
             self._reverb_decay_est.reset()
@@ -318,7 +335,7 @@ class ResidualEchoEstimator:
         self._x2_noise_floor_counter[mask_down] = 0
         # Increase: bins past the hold counter ramp up 10% / step (clamped to min).
         not_down = ~mask_down
-        hold = self._echo_model.noise_floor_hold
+        hold = self._noise_floor_hold_hops
         ramp_mask = not_down & (self._x2_noise_floor_counter >= hold)
         if ramp_mask.any():
             self._x2_noise_floor[ramp_mask] = np.maximum(
