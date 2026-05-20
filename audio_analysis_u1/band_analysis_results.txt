@@ -1,0 +1,42 @@
+================================================================================
+U1 audio analysis — per-band energy preservation, baseline vs T1
+(active frames = top 50% mic-energy; preservation ratio = output_E / mic_E)
+================================================================================
+
+## QK70KpLuZ0O43BBSWEZvHg  (baseline AECMOS deg=1.249)
+  LF       [   0- 300 Hz]  mic_E=2.42e+00  base_ratio=0.893  t1_ratio=0.900  T1/base=+1.008x  delta=+0.03dB
+  F1       [ 300-1000 Hz]  mic_E=1.08e+01  base_ratio=0.909  t1_ratio=0.923  T1/base=+1.015x  delta=+0.07dB
+  F2-F3    [1000-4000 Hz]  mic_E=1.78e+00  base_ratio=0.227  t1_ratio=0.242  T1/base=+1.066x  delta=+0.28dB
+  HF       [4000-8000 Hz]  mic_E=2.25e-01  base_ratio=0.733  t1_ratio=0.859  T1/base=+1.173x  delta=+0.69dB
+
+## sYQK1rJlwU2XCy20n0Sx9g  (baseline AECMOS deg=1.272)
+  LF       [   0- 300 Hz]  mic_E=1.06e+01  base_ratio=0.531  t1_ratio=0.540  T1/base=+1.017x  delta=+0.07dB
+  F1       [ 300-1000 Hz]  mic_E=1.90e+01  base_ratio=0.909  t1_ratio=0.921  T1/base=+1.012x  delta=+0.05dB
+  F2-F3    [1000-4000 Hz]  mic_E=1.37e+00  base_ratio=0.793  t1_ratio=0.902  T1/base=+1.138x  delta=+0.56dB
+  HF       [4000-8000 Hz]  mic_E=5.01e-02  base_ratio=0.629  t1_ratio=0.602  T1/base=+0.957x  delta=-0.19dB
+
+## yc5bFUGsR0GSfiGwTTpRWg  (baseline AECMOS deg=1.308)
+  LF       [   0- 300 Hz]  mic_E=1.13e-01  base_ratio=0.477  t1_ratio=0.496  T1/base=+1.040x  delta=+0.17dB
+  F1       [ 300-1000 Hz]  mic_E=3.95e-01  base_ratio=0.196  t1_ratio=0.235  T1/base=+1.196x  delta=+0.78dB
+  F2-F3    [1000-4000 Hz]  mic_E=4.95e-01  base_ratio=0.028  t1_ratio=0.034  T1/base=+1.233x  delta=+0.91dB
+  HF       [4000-8000 Hz]  mic_E=1.41e-02  base_ratio=0.041  t1_ratio=0.039  T1/base=+0.955x  delta=-0.20dB
+
+## QkRkwwFKVEar0WtcuvJsZg  (baseline AECMOS deg=1.309)
+  LF       [   0- 300 Hz]  mic_E=3.80e+01  base_ratio=0.105  t1_ratio=0.111  T1/base=+1.055x  delta=+0.23dB
+  F1       [ 300-1000 Hz]  mic_E=1.01e+01  base_ratio=0.178  t1_ratio=0.207  T1/base=+1.163x  delta=+0.66dB
+  F2-F3    [1000-4000 Hz]  mic_E=2.72e-01  base_ratio=0.421  t1_ratio=0.469  T1/base=+1.114x  delta=+0.47dB
+  HF       [4000-8000 Hz]  mic_E=5.05e-03  base_ratio=0.172  t1_ratio=0.160  T1/base=+0.929x  delta=-0.32dB
+
+## SgKY30fjT0G8e3kQL0RHSQ  (baseline AECMOS deg=1.331)
+  LF       [   0- 300 Hz]  mic_E=9.92e+00  base_ratio=0.519  t1_ratio=0.535  T1/base=+1.032x  delta=+0.14dB
+  F1       [ 300-1000 Hz]  mic_E=1.18e+01  base_ratio=0.828  t1_ratio=0.842  T1/base=+1.016x  delta=+0.07dB
+  F2-F3    [1000-4000 Hz]  mic_E=1.28e+00  base_ratio=0.896  t1_ratio=0.935  T1/base=+1.043x  delta=+0.18dB
+  HF       [4000-8000 Hz]  mic_E=1.19e-01  base_ratio=0.760  t1_ratio=0.874  T1/base=+1.150x  delta=+0.61dB
+
+================================================================================
+Summary — mean Δ(preservation, dB) across 5 cases by band
+================================================================================
+  LF      : mean = +0.13 dB  (min +0.03 / max +0.23)
+  F1      : mean = +0.32 dB  (min +0.05 / max +0.78)
+  F2-F3   : mean = +0.48 dB  (min +0.18 / max +0.91)
+  HF      : mean = +0.12 dB  (min -0.32 / max +0.69)

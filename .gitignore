@@ -60,3 +60,6 @@ listen/
 
 # AEC3 reference source extracts (Phase 0 fetch; reference-only, not part of our codebase)
 docs/aec3_extracts/
+
+# v3.21.2 U1 audio analysis WAVs (regenerable from script; not source)
+audio_analysis_u1/*.wav
