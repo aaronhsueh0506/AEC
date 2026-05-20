@@ -16,6 +16,106 @@ when verdict requires it.
 
 ---
 
+## [3.21.2-candidate] — 2026-05-20 — Frequency-canonical bin-index alignment (HF damage Pareto step)
+
+**Headline**: the v3.21 SuppressionGain port (b5728e5) copied AEC3
+bin-index constants directly without converting for our 4× finer FFT
+(AEC3 uses fft=128 / 125 Hz per bin; we run fft=512 / 31.25 Hz per
+bin). Every HF-processing knob therefore landed at 1/4 of the intended
+frequency — most damaging, the HF cap (`limiting_gain_band`) started
+at **937 Hz instead of 3750 Hz**, slicing F2/F3 of voiced speech and
+producing the user-reported Chinese /i/-vowel distortion ("低頻還在,
+400 Hz 以上就被砍").
+
+### Phase A — refactor (mechanism only)
+
+Refactor 4 `SuppressionGain` config dataclasses from bin-index `int`
+fields to frequency `float` fields, derive bins at use-site so values
+auto-scale with `fft_size`:
+
+- New [`python/modules/freq_utils.py`](python/modules/freq_utils.py):
+  `hz_to_bin(hz, n_bins, sr=16000)` / `bin_to_hz(bin, n_bins, sr=16000)`.
+  `fft_size` derived from `n_bins` so callers only thread the spectrum
+  array, not FFT size separately.
+- `HighFrequencySuppressionConfig`: `limiting_gain_band` →
+  `limiting_gain_freq_hz`; `bands_in_limiting_gain` →
+  `limiting_gain_width_hz`.
+- `SuppressorConfig`: `last_lf_band` / `first_hf_band` /
+  `last_lf_smoothing_band` → `*_freq_hz`.
+- `EchoAudibilityConfig`: add `lf_band_end_hz` / `mf_band_end_hz`
+  (audibility weighting band split; previously hardcoded bin 3 / 7).
+- `DominantNearendConfig`: add `lf_endpoint_hz` (LF sum window for
+  nearend detection; previously hardcoded `min(16, n)`).
+- Consumers (`_limit_hf_gains` / `_weight_echo_for_audibility` /
+  `_DominantNearendDetector.update` / `SuppressionGain.__init__`)
+  resolve bins via `hz_to_bin()` against the input spectrum size.
+
+Smoke-test confirmed all freq defaults reverse-compute to the
+pre-refactor bin values (Phase A is mechanically byte-equal-at-init).
+[P52 regime tests](python/test_p52_regime.py) 18/18 PASS.
+
+### Phase B — flip to AEC3 frequency-canonical (ship candidate)
+
+After Pareto sweep across each unit-conversion knob, ship candidate
+applies four of five flips; one was reverted as cohort-pareto-regressing:
+
+| Knob | Old (bin / freq @ fft=512) | New (freq / bin) | Status |
+|---|---|---|---|
+| HF cap `lgb` | bin 30 / 937 Hz | **4000 Hz / bin 128** | SHIP |
+| HF cap `biq` | 5 bins / 156 Hz | 156 Hz / 5 bins | SHIP (count-preserved; biq=625 Hz tested wash) |
+| Mask `last_lf` | bin 5 / 156 Hz | **625 Hz / bin 20** | SHIP |
+| Mask `first_hf` | bin 8 / 250 Hz | **1000 Hz / bin 32** | SHIP |
+| Mask `last_lf_smoothing` | bin 5 / 156 Hz | **625 Hz / bin 20** | SHIP |
+| NE detector `lf_endpoint` | bin 16 / 500 Hz | (kept 500 Hz) | **REVERT** — see below |
+| `conservative_hf` inline | bins 20/29 / 625-906 Hz | 2500-3625 Hz | inline (flag-OFF, no-op) |
+
+NE detector LF endpoint flip (500 → 2000 Hz, = AEC3 canonical bin 64)
+was tested as T2 and regressed both DT and FS on the 800-case cohort
+(DT_static deg −0.016 vs T1, FS_static echo −0.012). Cause: on this
+cohort, the 500-2000 Hz band carries more echo than voice energy on
+average, so widening the sum pushes `enr` higher and reduces nearend
+triggers → cap fires more often → DT damage. AEC3 canonical alignment
+does not always translate to cohort improvement.
+
+### 800-case AECMOS vs v3.21.0 (3aadd2d) baseline — T1 ship candidate
+
+| Bucket | n | baseline echo / deg | new echo / deg | Δecho | Δdeg |
+|---|---:|---|---|---:|---:|
+| FS_static | 169 | 3.729 / 4.999 | 3.577 / 4.999 | **−0.152** | +0.000 |
+| FS_movement | 131 | 3.626 / 4.999 | 3.505 / 4.999 | **−0.121** | +0.000 |
+| DT_static | 186 | 4.237 / 2.387 | 4.183 / 2.479 | −0.054 | **+0.092** |
+| DT_movement | 114 | 4.215 / 2.371 | 4.161 / 2.485 | −0.054 | **+0.114** |
+| NE | 200 | 4.998 / 4.052 | 4.998 / 4.053 | +0.000 | +0.001 |
+
+Pareto: DT formant fidelity recovered (matches user-reported HF damage
+report) at the cost of HF echo cap relaxation in FS. FS regression
+exceeds the historical −0.05 hard bar; mitigation deferred to follow-up.
+
+### Known gaps
+
+- **sr not threaded through `hz_to_bin()`** — defaults to 16000. Codebase
+  + C port are 16 kHz only, so no current runtime impact; follow-up
+  task to thread sr explicitly.
+- **FS regression follow-up** — Pareto wall at this canonical frequency
+  alignment. Compromise positions (e.g. `limiting_gain_freq_hz` at 3500
+  / 3750 Hz instead of 4000) to be explored.
+- **Conservative_hf inline path** — semantics changed from 625-906 Hz
+  to AEC3 canonical 2500-3625 Hz; `conservative_hf_suppression=False`
+  default means flag-OFF byte-equal.
+
+### Commits
+
+- `7e9e612` — Phase A refactor + all 5 canonical flips (T2 state).
+- `f1ea92c` — Revert B3 NE detector flip (T1 ship candidate).
+
+### Not yet tagged
+
+`v3.21.2` tag deferred pending user listening verification on
+user-reported Chinese /i/ HF damage sample. Production `main` remains
+at v3.21.0 / `a537b65`.
+
+---
+
 ## [3.21.0] — 2026-05-19 — Retire legacy ResFilter; AEC3 chain becomes the production post-filter
 
 **Headline**: v3.21 ships the AEC3-aligned `_aec3_post` chain
