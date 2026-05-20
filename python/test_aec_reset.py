@@ -121,5 +121,61 @@ class Aec3PostResetTests(unittest.TestCase):
         _run_some_frames(self.aec, n_frames=10)
 
 
+class ReturnResContextTests(unittest.TestCase):
+    """v3.21.3 Codex #3 — `return_res_context=True` contract.
+
+    Before v3.21.3: `_res_context` was always None so the documented
+    `(output, AecResContext)` return type never fired — only `ndarray`
+    came back regardless of the config flag.
+    """
+
+    def setUp(self) -> None:
+        self.cfg = AecConfig()
+        self.cfg.return_res_context = True
+        np.random.seed(42)
+        self.aec = AEC(self.cfg)
+
+    def test_default_returns_ndarray_only(self) -> None:
+        """With return_res_context=False, process() returns ndarray
+        (regression guard)."""
+        cfg = AecConfig()
+        np.random.seed(42)
+        aec = AEC(cfg)
+        rng = np.random.default_rng(0)
+        block = int(aec.config.hop_size)
+        out = aec.process(
+            rng.standard_normal(block).astype(np.float32) * 0.1,
+            rng.standard_normal(block).astype(np.float32) * 0.1,
+        )
+        self.assertIsInstance(out, np.ndarray)
+
+    def test_flag_returns_tuple(self) -> None:
+        """With return_res_context=True, process() returns (output,
+        AecResContext)."""
+        from aec import AecResContext
+        rng = np.random.default_rng(0)
+        block = int(self.aec.config.hop_size)
+        # First frame may not trigger _aec3_post (warmup); run a few.
+        result = None
+        for _ in range(5):
+            result = self.aec.process(
+                rng.standard_normal(block).astype(np.float32) * 0.1,
+                rng.standard_normal(block).astype(np.float32) * 0.1,
+            )
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        out, ctx = result
+        self.assertIsInstance(out, np.ndarray)
+        self.assertIsInstance(ctx, AecResContext)
+        # echo_spec / far_spec / near_spec are complex arrays.
+        self.assertTrue(np.iscomplexobj(ctx.echo_spec))
+        self.assertTrue(np.iscomplexobj(ctx.far_spec))
+        self.assertTrue(np.iscomplexobj(ctx.near_spec))
+        # Scalars are typed as Python float / bool.
+        self.assertIsInstance(ctx.far_power, float)
+        self.assertIsInstance(ctx.filter_converged, bool)
+        self.assertIsInstance(ctx.erle_factor, float)
+
+
 if __name__ == '__main__':
     unittest.main()

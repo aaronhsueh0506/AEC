@@ -2513,6 +2513,36 @@ class AEC:
 
                 final_output = self._aec3_post(raw_output, near_end, far_end)
 
+                # v3.21.3 Codex #3 — populate AecResContext when caller
+                # requested it. Returns to a research / NN-integration
+                # surface (CLAUDE.md "Diagnostic surfaces"). Cheap enough
+                # to build every frame the flag is set; gated by config
+                # so the default production path stays untouched.
+                if self.config.return_res_context:
+                    _res_context = AecResContext(
+                        raw_output=raw_output.astype(np.float32, copy=True),
+                        echo_spec=np.asarray(
+                            getattr(self.filter, 'echo_spec', np.zeros(1)),
+                            dtype=np.complex64,
+                        ).copy(),
+                        far_power=float(far_power),
+                        far_spec=np.asarray(
+                            getattr(self.filter, 'far_spec', np.zeros(1)),
+                            dtype=np.complex64,
+                        ).copy(),
+                        near_spec=np.asarray(
+                            getattr(self.filter, 'near_spec', np.zeros(1)),
+                            dtype=np.complex64,
+                        ).copy(),
+                        filter_converged=bool(self._convergence.converged),
+                        erle_factor=float(self._diag.get('erle_factor', 0.0)),
+                        dt_indicator=float(dt_indicator),
+                        divergence=float(self._diag.get('divergence', 0.0)),
+                        over_sub=float(self._diag.get('mu_scale', 1.0)),
+                        saturation_level=float(self._saturation_level),
+                        erl_estimate=float(self._erl_estimate),
+                    )
+
                 # v3.13 E4.S3 — SubtractiveNLP detector (audit-only).
                 # Pure observer: reads the LINEAR residual (raw_output =
                 # mic − linear_echo_estimate, RES input) so the NL
