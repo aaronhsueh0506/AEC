@@ -143,7 +143,7 @@ but ~5% improved via U5.3 vs unmitigated T1.
 - `6a071c1` — U3 sr threading through SuppressionGain consumers.
 - `c7481a4` — U5.3 default_gain 0.014 → 0.020 + U5 verdict doc.
 
-### Known carry-overs (v3.22)
+### Known carry-overs (v3.21.3+; same AEC3-alignment arc)
 
 - **Time-domain unit-conversion bugs** (3 HIGH severity, parallel pattern
   to the bin-index bug fixed in this version): `trigger_threshold`,

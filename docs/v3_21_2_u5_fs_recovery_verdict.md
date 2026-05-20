@@ -144,14 +144,15 @@ merge-to-main + tag — all gated on explicit user authorization).
 
 ## Non-shipping carry-overs surfaced during U5
 
-Documented separately in the v3.21.2 plan and tracked for v3.22:
+Documented separately in the v3.21.2 plan and tracked for v3.21.3+ (same
+AEC3-alignment arc as v3.21.2):
 
 - **Time-domain unit-conversion bugs** (3 HIGH): `trigger_threshold=12`,
   `hold_duration=50`, `noise_floor_hold=50` — ported as bare ints from
   AEC3 4 ms blocks into our 10 ms hops, giving 2.5× longer time-equivalents
   than AEC3 intended. Scaling DOWN to correct values opposes FS recovery
   direction (more NE triggers → less suppression → FS_echo worse) — so
-  this is a CORRECTNESS fix not a Pareto fix; ship in a dedicated v3.22
+  this is a CORRECTNESS fix not a Pareto fix; ship in a dedicated v3.21.3+
   audit.
 - **ReverbDecayEstimator partial port** (1/3 of AEC3 size; missing
   `AnalyzeFilter` + `EarlyReverbLengthEstimator` + validation gates).
