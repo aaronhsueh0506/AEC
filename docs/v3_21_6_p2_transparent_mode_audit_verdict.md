@@ -97,17 +97,17 @@ This is **not** "our TransparentMode is wrong" — the port is verbatim. It's "A
 
 ## Final verdict
 
-✅ **CLOSED — intentionally incompatible.**
+✅ **CLOSED — AEC3 transparent-mode parity intentionally incompatible with current PBFDKF signal characteristics.** Production default remains OFF.
 
 - Production state unchanged: `transparent_mode_enabled` default False; AecState's TM subsystem remains dormant.
-- Parity substrate (config flag, env hook, hop-unit constants) shipped as dormant fidelity-correctness improvements.
-- v3.22 Sprint G.2 will revisit with concrete trigger-criteria tightening (e.g., gate the "6s strong-render-without-convergence" branch on `any_filter_consistent` being non-zero at least once, or replace it with a PBFDKF-aware divergence indicator).
+- Parity substrate (config flag, env hook, hop-unit constants) shipped as dormant fidelity-correctness improvements — usable as substrate for any future PBFDKF-specific criterion, NOT as a step toward AEC3 parity restoration.
+- v3.22 Sprint G.2 may design a **PBFDKF-specific** transparent-mode criterion (e.g., gate on a Kalman-state-derived "filter has had time to converge" indicator instead of AEC3's `any_filter_consistent` + 6-second `strong_not_saturated_render_blocks` heuristic). G.2 **MUST NOT claim AEC3 parity** — its design must be documented as intentional divergence with PBFDKF-architecture-specific rationale.
 
 ### Citation back to plan triage policy
 
-This verdict places item (A) into **Bucket 2 (trace-gated → v3.22 Sprint G.2)** per the [plan's AEC3 Parity Gap Triage Policy](#) — moved from "Bucket 1 must-fix-in-v3.21.6" because cohort evidence demonstrated intentional incompatibility.
+This verdict places item (A) into **Bucket 2 (trace-gated → v3.22 Sprint G.2 as intentional divergence)** per the [plan's AEC3 Parity Gap Triage Policy](#). The PARITY classification for transparent-mode is permanently retired by this verdict; v3.22 G.2 inherits the file/flag/trace substrate but must reframe its design as divergence.
 
 ### Known follow-ups for v3.22 G.2
 
-- Decide whether to ship a "TM-with-tightened-criteria" candidate or to **delete the subsystem** entirely from our port (and corresponding `FilteringQualityAnalyzer.transparent_mode` parameter wiring).
-- If candidate path: trace fields are already in place (`transparent_mode_active`); G.0 cohort trace can re-use the env hook.
+- Either ship a **PBFDKF-specific TM-replacement criterion** (labelled as intentional divergence), or **delete the subsystem** entirely from our port (and the corresponding `FilteringQualityAnalyzer.transparent_mode` parameter wiring), or **keep it dormant indefinitely** as a closed-AEC3-divergence-by-design.
+- If candidate path: trace fields already in place (`transparent_mode_active`); G.0 cohort trace can re-use `AEC_TRANSPARENT_MODE` env hook. The 3 corrected hop-unit constants are dormant-correct and ready for the new criterion to reuse / replace.
