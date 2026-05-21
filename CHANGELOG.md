@@ -16,6 +16,61 @@ when verdict requires it.
 
 ---
 
+## [unreleased] — 2026-05-21 — v3.22 cycle: no-shippable-change optimization audit + /simplify cleanup
+
+**Headline**: **No production behavior change.** v3.21.6 remains the current shipping algorithm baseline. `__version__` stays at `3.21.6`; no v3.22 tag; no merge of v3.22 research substrate to main as algorithm.
+
+This entry documents two pieces of work that produced byte-equal-only output on `feature/v3_22_optimization`:
+
+1. **v3.22 algorithm candidates closed no-leverage** — Sprints E (NE-presence augmentation), D (hybrid residual / nonlinear HF floor), G.1/H.3 (ERLE clamp widening), and F (reverb tail dead-fallback) all reached cohort-sanity-FAIL or trace-gate-FAIL verdicts. Structurally, every v3.22 candidate operates downstream of the v3.21.6 P4 stationarity-zeroing safety-net, and none can substitute or augment it without producing damage on the cohort cases the safety-net currently protects. Future direction (next plan, if any): upstream detector-layer repair (PBFDKF-aware NE detector / stationary-far detector) — NOT residual-layer or HF-cap tuning. Cycle close: [`docs/v3_22_cycle_close.md`](docs/v3_22_cycle_close.md). Feedback memory captures the rejection criteria: `memory/feedback_no_residual_fallback_or_hf_cap_tuning.md`.
+
+2. **/simplify cleanup (Tier 1 + Tier 2)** — ~90 LOC removed across `orchestrator.py` / `config.py` / `filters.py`. Verified byte-equal: 24/24 cases match v3.21.6 anchor at [`docs/bench/v3_21_6_baseline/check_byte_equal_anchor.txt`](docs/bench/v3_21_6_baseline/check_byte_equal_anchor.txt). Full audit (82 findings tiered by risk) at [`docs/v3_22_simplify_audit.md`](docs/v3_22_simplify_audit.md).
+
+### Dormant research substrate left on feature branch (NOT in production)
+
+These default-OFF flags + state are kept in tree for future revisits if upstream detector repair makes them safe; **none are shippable algorithm candidates today**:
+- `AecConfig.transparent_mode_enabled` (v3.21.6 P2 carry-over)
+- `AecConfig.e_stat_aware_ne_proxy_enabled` + `e_stat_aware_ne_proxy_threshold` (v3.22 Sprint E)
+- `AecConfig.reverb_tail_dead_fallback_enabled` + `_threshold_frames` + `_fallback_strength` (v3.22 Sprint F)
+- 6 new `trace_hf_chain` fields (G.0 evidence substrate)
+- Env hooks `AEC_STAT_NE_PROXY{,_THR}` + `AEC_REVERB_DEAD_{FALLBACK,THR,STRENGTH}` (research A/B utility only)
+
+### /simplify cleanup applied
+
+**Removed** (verified zero external consumers across `SE/AEC/`, `SE/Audio_ALG/` integration, and bench configs):
+
+- `orchestrator.py`: unused imports (`List`, `Tuple`, `_PB_MODES`, `RenderActivityState`, `FilterConvergenceState`, `RegimeHandlerDecision`, `AecEventType`); shadowed `import os` inside `AEC.__init__`; dead method `_handle_delay_change_full()` (defined but never called anywhere); redundant `isinstance(mu_scale, np.ndarray)` block where both branches were identical due to numpy broadcast.
+- `orchestrator.py` write-only state: `self.final_error_power` + `final_error_power_sum` (init/reset across 8 sites + per-frame update; verified never read); `self._stat_far_hangover` (3 reset paths, never read); `self.confidence_history` (deque + per-frame append, never read); `self._misadjustment_fire_count` (init + increment, never read); `self._misadjustment_reset_done_count` (init + 5-line comment block, never read).
+- `config.py`: unused imports (`typing.Optional`, `typing.List`, `numpy as np`); dead v3.19 Phase 3.1 misadjustment flags `filter_misadjustment_use_fq_usable` + `filter_misadjustment_reset_done_frames` + `filter_misadjustment_threshold_phase3` (plus 11-line design-doc-only comment block; verified zero external consumers).
+- `filters.py`: unused `from collections import deque`; backward-compat alias `SubbandNlms = PBFDKF` (verified never imported).
+
+**Deferred** (documented in audit; NOT applied):
+
+- Tier 3 — 18 dead `AecConfig` flags from retired v3.12/14/15/18 ResFilter cycles (~150 LOC opportunity); needs explicit bench-team verification that no external A/B toggles these env hooks.
+- Tier 3 also includes 2 sources-of-truth duplications (`subband_ne_detect_enabled` vs `SuppressorConfig.subband_nearend_detection`; `dominant_ne_detect_enabled` vs `SuppressorConfig.dominant_nearend_detection`).
+- Tier 3 includes DEPRECATED-ALIAS `aec3_post_stationarity_zero_enabled` (v3.21.6 P3) — planned removal in a dedicated future cycle.
+- Tier 4 — 124-line legacy P-Kalman branch in `filters.py:440-563` under permanently-True `_use_aec3_h_error` (verify before delete).
+- Tier 5/6 — closed-cycle name leakage (`_round3_*`, `_p3f_*`, `_p4b_*` etc.) and structural extractions (`_default_diag_dict()`, `_init_*()` split, `process()` sub-method breakdown).
+
+C port note: `c_impl/src/aec.c` and `c_impl/include/aec.h` still carry the same write-only state (`final_error_power` / `_sum`). The C port has independent state from the Python port; bit-equal output is the contract, not bit-equal internal state. C-side cleanup is a separate cycle. The byte-equal harness validates Python WAV output, not C internals.
+
+### v3.22 algorithm candidate verdicts (all closed)
+
+| Sprint | Outcome | Verdict |
+|---|---|---|
+| **E** NE-presence augmentation at SuppressionGain gain-policy level | CLOSED no-leverage | [`docs/v3_22_e_ne_proxy_verdict.md`](docs/v3_22_e_ne_proxy_verdict.md) — proxy fires on right frames but can't substitute R²-level zeroing |
+| **D** hybrid residual / nonlinear HF floor | CLOSED no-leverage | [`docs/v3_22_g0_triage_verdict.md`](docs/v3_22_g0_triage_verdict.md) — P1 already calibrated S²/X² in HF; median 25-200× above gate |
+| **G.1 / H.3** ERLE clamp widening | CLOSED marginal-no-leverage | [`docs/v3_22_g0_triage_verdict.md`](docs/v3_22_g0_triage_verdict.md) — 1/4 FS cases; FS-unfavorable direction |
+| **F** reverb tail dead-fallback (render-power R²/R²_unb injection) | CLOSED no-leverage | [`docs/v3_22_f_reverb_dead_fallback_verdict.md`](docs/v3_22_f_reverb_dead_fallback_verdict.md) — catalyst works (Δg100 −0.16/−0.18) but DT damage 61-69 cata frames untunable even at strength=0.05 |
+
+### Verification
+
+- **Byte-equal**: 24/24 cases match v3.21.6 anchor (`docs/bench/v3_21_6_baseline/check_byte_equal_anchor.txt`) after Tier 1 + Tier 2 cleanup
+- **External consumer search**: zero matches across `SE/AEC/` and `SE/Audio_ALG/` integration repo for any removed flag / state / method / alias (only matches are in the audit doc itself documenting the removal)
+- **Audio_ALG integration**: no code outside `lib/aec/` submodule reads any removed Python attribute; the submodule itself is pinned at `2d2f449` (pre-v3.19 monolithic era — frozen)
+
+---
+
 ## [3.21.6] — 2026-05-21 — AEC3 Parity Completion (Sprint P1 ships; Sprints P2 / P4 closed intentionally-incompatible; Sprint P3 byte-equal structural)
 
 **Headline**: 1 production change shipped — **Sprint P1 AEC3 FilterAnalyzer port** (single-channel verbatim port of [`docs/aec3_extracts/src/aec3/filter_analyzer.cc`](docs/aec3_extracts/src/aec3/filter_analyzer.cc), `~250 LOC`, owned by `AecState`; default-True). The port produces a non-zero direct-path delay scalar that AEC3's reverb-tail update consumes — indirectly closes v3.21.5 Sprint C's reverb-tail blocker. Cumulative 800-case bench Pareto-positive vs v3.21.5: FS_static **+0.059** / FS_movement **+0.036** / DT buckets within ±0.01 / NE flat.
