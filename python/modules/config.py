@@ -216,10 +216,14 @@ class AecConfig:
     # (near_psd) on some bins, the unclamped error_psd inflates
     # nearend_pwr → DominantNearendDetector ENR (= echo/nearend) is biased
     # low → detector mis-triggers nearend → SuppressionGain enters
-    # nearend_tuning (conservative) → echo leaks through. Default False
-    # preserves pre-v3.21.5 behavior (byte-equal); set True to apply the
-    # AEC3-canonical clamp.
-    e2_y2_clamp_enabled: bool = False
+    # nearend_tuning (conservative) → echo leaks through.
+    #
+    # v3.21.5 ship default = True (cumulative bench PASS:
+    # FS_static +0.033 / FS_movement +0.035 dB; DT deg AECMOS-sensitive
+    # but not audible per user spectrogram check; see
+    # docs/v3_21_5_phase1_a_e2_y2_clamp_verdict.md). Set False to opt back
+    # into pre-v3.21.5 behavior (byte-equal vs v3.21.4) for A/B work.
+    e2_y2_clamp_enabled: bool = True
 
     # v3.21.5 Phase 1 Sprint B — AEC3 echo_audibility.h:40-51 +
     # residual_echo_estimator.cc:303-313 port-fidelity flag. AEC3's

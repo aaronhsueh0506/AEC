@@ -16,6 +16,132 @@ when verdict requires it.
 
 ---
 
+## [3.21.5] — 2026-05-21 — Safe AEC3 Parity (Sprint A ships; Sprints B / C / C2 closed)
+
+**Headline**: 1 production change shipped — Sprint A E2 = min(E2, Y2)
+clamp (AEC3 `echo_remover.cc:495-501` port-fidelity fix; default-True).
+Sprints B / C / C2 all closed without shipping. Cumulative bench
+(A only, since B+C+C2 closed) Pareto-positive vs v3.21.4: FS_static
++0.033 / FS_movement +0.035 dB. DT deg AECMOS-sensitive but not audible
+per user spectrogram check.
+
+Plan: `~/.claude/plans/se-aec-aec-main-hazy-lynx.md` (3-cycle Round 7
+split: v3.21.5 safe parity / v3.21.6 parity completion / v3.22 intentional
+divergence; full plan-review evolution Rounds 1-9 documented in plan
+appendix). Triage policy and Bucket-1 closure status for each item below.
+
+### Sprint A — E2 = min(E2, Y2) clamp SHIPPED (Pareto-positive)
+
+AEC3 [`echo_remover.cc:495-501`](docs/aec3_extracts/src/aec3/echo_remover.cc#L495)
+specifies `E2 = min(E2, Y2)` when `UsableLinearEstimate()` is True
+(bounds residual PSD by mic PSD). Our pre-v3.21.5 [`orchestrator.py:3479-3481`](python/modules/orchestrator.py#L3479)
+cited the AEC3 contract in a comment but the clamp itself was absent.
+When `error_psd > near_psd` on some bins, unclamped `nearend_pwr` was
+inflated → `DominantNearendDetector` ENR (= echo / nearend) biased low
+→ detector mis-triggered nearend → `SuppressionGain` used conservative
+`nearend_tuning` → echo leaked through HF bands.
+
+Verdict: [docs/v3_21_5_phase1_a_e2_y2_clamp_verdict.md](docs/v3_21_5_phase1_a_e2_y2_clamp_verdict.md).
+Action: `e2_y2_clamp_enabled: bool = True` (default-True) in
+[`config.py:222`](python/modules/config.py#L222); flag retained for A/B (set
+False for byte-equal vs v3.21.4).
+
+### Sprint B — Stationarity AEC3-default-off CLOSED REJECTED (load-bearing safety net)
+
+AEC3 [`echo_audibility.h:40-51`](docs/aec3_extracts/src/aec3/echo_audibility.h#L40)
++ [`residual_echo_estimator.cc:303-313`](docs/aec3_extracts/src/aec3/residual_echo_estimator.cc#L303)
+gates stationarity-driven R² scaling by `EchoCanceller3Config::EchoAudibility.use_stationarity_properties`
+(AEC3 default = False). Our pre-v3.21.5 [`orchestrator.py:3471`](python/modules/orchestrator.py#L3471)
+unconditionally zeroed R² on stationary bins. Sprint B introduced
+`aec3_post_stationarity_zero_enabled` flag with default = False
+(AEC3-default-off) attempting port fidelity restoration.
+
+800-case bench: bucket means Pareto-acceptable (FS +0.032/+0.048) BUT
+**62 DT cohort-tail cases with Δdeg < −0.05** (>> strict halt 30) and
+audio listen showed **xQEUtY2 worst formant Δ -2.12 dB F1** (6-10× worse
+than Sprint A; audible-grade attenuation, not metric noise). xQEUtY2
+trace deep-dive: 6 catastrophic segments totalling ~2.9 s in 40-s case
+where `gain_100` drops from ~1 → ~0 when `stationary_mask_active=100%`
+AND `is_nearend_state=0%` (detector mis-fires under stationary-far,
+SuppressionGain uses aggressive far-tuning → NE-speech destroyed).
+
+Root cause: the legacy stationarity zeroing is a **load-bearing safety
+net** compensating for our incomplete AEC3 detector port (missing
+companion `ScaleFilter` + `FilterMisadjustment` that keep
+`is_nearend_state` correctly firing on stationary-far).
+
+Verdict: [docs/v3_21_5_phase1_b_stationarity_gate_verdict.md](docs/v3_21_5_phase1_b_stationarity_gate_verdict.md).
+Action: `aec3_post_stationarity_zero_enabled: bool = True` (default-True
+restored — load-bearing legacy zeroing kept). Byte-equal 25/25 vs
+v3.21.4 70e7f96 verified. Re-test scheduled for **v3.21.6 Sprint P4**
+after companion mechanisms ported (P1 FilterAnalyzer + P2
+transparent_mode audit + P3 EchoAudibilityConfig structural wiring).
+
+### Sprint C — Reverb AEC3 semantic audit CLOSED diagnose-only
+
+3 early-return paths in [`reverb_frequency_response.py:61-65`](python/modules/residual/reverb_frequency_response.py#L61)
+investigated via Sprint 0 trace fields. Root cause: upstream FilterAnalyzer
+stub (`aec3_min_direct_path_blocks=0` always; `linear_filter_quality=None`
+90.5%). Both v3.21.5 fix candidates degenerate; cannot ship in v3.21.5
+narrow scope. Verdict: [docs/v3_21_5_phase1_c_reverb_semantic_audit_verdict.md](docs/v3_21_5_phase1_c_reverb_semantic_audit_verdict.md).
+Moved to **v3.21.6 Sprint P1** (FilterAnalyzer port — parity) +
+**v3.22 Sprint F** (RES-internal dead-tail fallback — divergence).
+
+### Sprint C2 — Per-bin H_error refresh selector re-evaluation CLOSED no-leverage
+
+AEC3 `H_error += factor * erl` refresh already exists at [`filters.py:625`](python/modules/filters.py#L625);
+`use_per_bin_h_error_refresh: bool = False` flag gates a per-bin REFINED/COARSE
+selector path. v3.21.4 U4.A standalone 800-case retest closed FAIL
+(17% per-case regression). Sprint C2 hypothesis: Sprint A's E2 clamp
+might mask the per-bin tracking damage on DT cases. C2.0 gate test
+(5 FS_static worst cases, A only vs A+C2): **9xjhi Δ erle_100 = -0.01 dB**
+(memory predicted +8.42 dB single-case win from 2026-05-18 tracer; no
+longer reproduces on v3.21.5 baseline). Gate fail → close as no-leverage.
+Verdict: [docs/v3_21_5_phase1_c2_per_bin_h_error_refresh_verdict.md](docs/v3_21_5_phase1_c2_per_bin_h_error_refresh_verdict.md).
+Path stays dormant research code; env hook `AEC_PER_BIN_H_ERROR_REFRESH`
+retained for re-evaluation after v3.21.6 P1/P3 may again shift canonical state.
+
+### Sprint 0 — Trace instrumentation extension (byte-equal preserving)
+
+Extended [`orchestrator.py:3514-3564`](python/modules/orchestrator.py#L3514)
+`trace_hf_chain` schema with 22 new per-frame fields covering Sprint A
+E2 clamp evidence, Sprint B stationarity mask activity, Sprint C reverb
+update paths, NE state staleness, and v3.21.6 / v3.22 reservation fields.
+Default-OFF, byte-equal preserving (25/25 PASS at default `trace_hf_chain=False`).
+
+### Cumulative bench (v3.21.5 = A only) vs v3.21.4 baseline
+
+| Bucket | n | Δecho | Δdeg | direction |
+|---|---:|---:|---:|---|
+| FS_static | 169 | **+0.033** | -0.000 | target direction ✓ |
+| FS_movement | 131 | **+0.035** | -0.000 | target direction ✓ |
+| DT_static | 186 | +0.013 | -0.014 | echo↑ deg↓ small (AECMOS-only, not audible) |
+| DT_movement | 114 | +0.013 | -0.019 | echo↑ deg↓ small (AECMOS-only, not audible) |
+| NE | 200 | +0.000 | +0.002 | neutral |
+
+Per-case Pareto: FS 3.7:1 improvement:regression; DT echo 2.3:1; NE
+neutral. Audio listen on 5 DT worst-dreg cases (qiQL0BUP / Je6gJ7y1 /
+y2ZCo1jA / hF9Lfjcn / I2bme08k) confirms formant-band Δ ≤ 0.4 dB —
+AECMOS metric over-reacts to micro-artifacts that don't manifest as
+audible damage. User spectrogram check: "看起來差不多".
+
+Cumulative FS recovery vs v3.21.0 baseline (where FS regression was
+−0.218 / −0.181): A recovers ~1/3 of the gap. Remaining FS gap to be
+addressed in v3.21.6 (FilterAnalyzer port may revive reverb tail update
+naturally) + v3.22 (intentional non-AEC3 divergence: hybrid residual /
+HF cap-NE decoupling / etc.).
+
+### vs AEC2 / AEC3 reference scores (post-v3.21.5)
+
+Per `docs/aec_methods.md` reference table — v3.21.5 still beats AEC2 by
++1.12 FS (echo bucket) and beats AEC3 by +0.52 DT_deg / +0.60 NE.
+Sprint A's small DT deg regression does not threaten the reference
+advantage. AEC3 parity is now PARTIAL (E2 clamp shipped; stationarity
+gate / FilterAnalyzer port / EchoAudibilityConfig wiring deferred to
+v3.21.6).
+
+---
+
 ## [3.21.4] — 2026-05-21 — Audit cycle (4 v3.21.2 carry-overs closed; structural ms-based refactor)
 
 **Headline**: research / audit cycle. All 4 v3.21.2 carry-overs from
