@@ -611,6 +611,13 @@ class AEC:
                 use_stationarity_properties=bool(
                     self.config.aec3_post_stationarity_zero_enabled),
             )
+            # v3.22 Sprint E.1 — propagate stat-aware NE proxy flag +
+            # threshold into SuppressorConfig (consumed inside
+            # SuppressionGain._ne_state_for_gain_rules).
+            _sg_config.stat_aware_ne_proxy_enabled = bool(
+                self.config.e_stat_aware_ne_proxy_enabled)
+            _sg_config.stat_aware_ne_proxy_threshold = float(
+                self.config.e_stat_aware_ne_proxy_threshold)
             if os.environ.get('AEC_USE_SUBBAND_NE', '0') == '1':
                 _sg_config.use_subband_nearend_detection = True
                 _sg_config.subband_nearend_detection = SubbandNearendConfig(
@@ -3513,9 +3520,13 @@ class AEC:
         # in at init.
         _use_stationarity = bool(
             self._aec3_sg_config.echo_audibility.use_stationarity_properties)
+        # v3.22 Sprint E.1 — the stat-aware NE proxy in SuppressionGain
+        # also needs the mask when its flag is ON (regardless of zeroing
+        # gate state or warmup).
         _need_stationary_mask = (
             self.config.trace_hf_chain
             or (_use_stationarity and _filter_converged_enough)
+            or bool(self.config.e_stat_aware_ne_proxy_enabled)
         )
         _stationary_mask = (
             self._aec3_stationarity.band_stationary_mask()
@@ -3564,6 +3575,10 @@ class AEC:
             + (1.0 - _alpha_n) * error_psd
         ).astype(np.float32)
         comfort_noise = self._aec3_noise_psd
+        # v3.22 Sprint E.1 — feed per-bin stationary mask to SuppressionGain
+        # for its NE-presence proxy. Reuses _stationary_mask computed above
+        # for the existing zeroing block (no extra compute). Default OFF:
+        # SuppressionGain ignores the kwarg, behavior unchanged.
         gain = self._aec3_sg.get_gain(
             aec_state=self._aec3_state,
             nearend_spectrum=nearend_pwr,
@@ -3572,6 +3587,7 @@ class AEC:
             comfort_noise_spectrum=comfort_noise,
             render_block=render_block_scaled,
             clock_drift=False,
+            stationary_mask=_stationary_mask,
         )
 
         # v3.21.2 S1 — HF damage causal chain trace. Flag-gated; default OFF

@@ -100,6 +100,12 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
     if 'AEC_TRANSPARENT_MODE' in os.environ:
         cfg.transparent_mode_enabled = (
             os.environ['AEC_TRANSPARENT_MODE'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.22 Sprint E.1 — stat-aware NE proxy at SuppressionGain consumers.
+    if 'AEC_STAT_NE_PROXY' in os.environ:
+        cfg.e_stat_aware_ne_proxy_enabled = (
+            os.environ['AEC_STAT_NE_PROXY'].lower() not in ('0', 'false', 'off', 'no'))
+    if 'AEC_STAT_NE_PROXY_THR' in os.environ:
+        cfg.e_stat_aware_ne_proxy_threshold = float(os.environ['AEC_STAT_NE_PROXY_THR'])
     # v3.15 §B3: seed CNG for byte-equal sanity across CLI invocations.
     # Matches eval_aec_challenge.py:325 convention (seed=0 per-case);
     # without this, CNG (np.random.randn at aec.py:2009-2010) was

@@ -119,6 +119,21 @@ class AecConfig:
     # Indirectly closes v3.21.5 Sprint C reverb-tail blocker.
     filter_analyzer_enabled: bool = True
 
+    # v3.22 Sprint E.1 — NE-presence augmentation using stationary mask
+    # (PBFDKF-port intentional divergence; NOT AEC3 parity). When True,
+    # SuppressionGain's 4 gain-policy consumer sites (HF cap gate,
+    # max-inc selector, LF-smoothing dec selector, ENR-EMR tuning selector)
+    # read an augmented NE-presence proxy:
+    #   is_nearend_state() OR (stat_mask_frac > stat_aware_ne_proxy_threshold)
+    # where stat_mask_frac is the fraction of bins flagged stationary by
+    # _aec3_stationarity.band_stationary_mask(). Designed to cover the
+    # DominantNearendDetector failure region on stationary-far conditions
+    # (v3.21.6 P4 root cause). Default-OFF preserves v3.21.6 byte-equal.
+    # Detector hysteresis untouched; public is_dominant_nearend() unchanged.
+    # See docs/v3_22_e0_hf_cap_ne_cross_tab_verdict.md.
+    e_stat_aware_ne_proxy_enabled: bool = False
+    e_stat_aware_ne_proxy_threshold: float = 0.10  # 10% bins masked
+
     # v3.21.6 Sprint P2 — Re-enable AEC3 Legacy TransparentMode (was
     # hard-disabled in orchestrator with stale rationale citing legacy
     # 10-frame ERLE latch; that latch was retired in v3.21 by the
