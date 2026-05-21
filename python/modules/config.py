@@ -269,6 +269,14 @@ class AecConfig:
     # Re-test scheduled for v3.21.6 P4 AFTER companion mechanisms ported
     # (P1 FilterAnalyzer + P2 transparent_mode audit + P3 EchoAudibility
     # config wiring); see ~/.claude/plans/se-aec-aec-main-hazy-lynx.md.
+    #
+    # v3.21.6 Sprint P3 — DEPRECATED ALIAS. Canonical control point now
+    # lives at ``SuppressorConfig.echo_audibility.use_stationarity_properties``
+    # (mirrors AEC3 ``EchoCanceller3Config::EchoAudibility``). The value
+    # here is propagated into the nested field at orchestrator init; the
+    # top-level alias will be removed entirely in v3.22 Sprint I cleanup
+    # after P4 verdict ships. Env hook ``AEC_STATIONARITY_ZERO`` still
+    # works via this alias.
     aec3_post_stationarity_zero_enabled: bool = True
 
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4

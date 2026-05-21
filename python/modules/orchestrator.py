@@ -574,6 +574,7 @@ class AEC:
             from .residual import ResidualEchoEstimator, SuppressionGain
             from .residual.suppression_gain import (
                 SuppressorConfig, SubbandNearendConfig, _SubbandRegion,
+                EchoAudibilityConfig,
             )
             import os
             n_bins = int(self.filter.n_freqs)
@@ -597,6 +598,19 @@ class AEC:
             # AEC_USE_SUBBAND_NE=1 to enable. Subband bounds + thresholds
             # tunable via AEC_SUBBAND_NE_S1_LO etc. for fast trace cycles.
             _sg_config = SuppressorConfig()
+            # v3.21.6 Sprint P3 — propagate top-level (deprecated) AecConfig
+            # flag into the canonical SuppressorConfig.echo_audibility slice.
+            # The orchestrator's stationarity zeroing block consumes the
+            # nested field; the top-level flag remains as a backwards-compat
+            # alias until v3.22 Sprint I cleanup (after P4 verdict ships).
+            # EchoAudibilityConfig is frozen — use dataclasses.replace to
+            # override one field while preserving every other AEC3 default.
+            import dataclasses as _dc
+            _sg_config.echo_audibility = _dc.replace(
+                _sg_config.echo_audibility,
+                use_stationarity_properties=bool(
+                    self.config.aec3_post_stationarity_zero_enabled),
+            )
             if os.environ.get('AEC_USE_SUBBAND_NE', '0') == '1':
                 _sg_config.use_subband_nearend_detection = True
                 _sg_config.subband_nearend_detection = SubbandNearendConfig(
@@ -3491,15 +3505,17 @@ class AEC:
         # v3.21.5 Phase 1 Sprint 0: refactored to compute the mask once
         # (used by both the gate AND trace_hf_chain stationarity evidence
         # fields).
-        # v3.21.5 Phase 1 Sprint B: gate the zeroing on
-        # `aec3_post_stationarity_zero_enabled` config flag (default False
-        # mirrors AEC3 EchoAudibility.use_stationarity_properties default).
-        # This restores AEC3 port fidelity — the pre-v3.21.5 unconditional
-        # zeroing was a config-bypass bug per Codex Finding 2.
+        # v3.21.5 Phase 1 Sprint B: gate the zeroing on a config flag
+        # (legacy: AecConfig.aec3_post_stationarity_zero_enabled, now
+        # deprecated alias). v3.21.6 Sprint P3: canonical control point
+        # is SuppressorConfig.echo_audibility.use_stationarity_properties
+        # (AEC3 architecture parity); the top-level alias is propagated
+        # in at init.
+        _use_stationarity = bool(
+            self._aec3_sg_config.echo_audibility.use_stationarity_properties)
         _need_stationary_mask = (
             self.config.trace_hf_chain
-            or (self.config.aec3_post_stationarity_zero_enabled
-                and _filter_converged_enough)
+            or (_use_stationarity and _filter_converged_enough)
         )
         _stationary_mask = (
             self._aec3_stationarity.band_stationary_mask()
@@ -3508,7 +3524,7 @@ class AEC:
         if self.config.trace_hf_chain:
             _r2_pre_mask_sum = float(np.sum(r2))
             _r2_unb_pre_mask_sum = float(np.sum(r2_unb))
-        if (self.config.aec3_post_stationarity_zero_enabled
+        if (_use_stationarity
                 and _filter_converged_enough
                 and _stationary_mask is not None
                 and np.any(_stationary_mask)):

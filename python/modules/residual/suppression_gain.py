@@ -186,6 +186,17 @@ class SuppressorConfig:
         default_factory=SubbandNearendConfig
     )
     use_subband_nearend_detection: bool = False
+    # v3.21.6 Sprint P3 — AEC3 EchoAudibility config wiring. The
+    # EchoAudibilityConfig dataclass (declared above this class) already
+    # carries audibility_threshold_lf/mf/hf + render-floor knobs consumed
+    # by SuppressionGain's ``_weight_echo_for_audibility``. P3 promotes
+    # it to a SuppressorConfig field so external code (orchestrator) can
+    # override ``use_stationarity_properties``. The orchestrator's
+    # stationarity zeroing block reads this field — top-level
+    # ``AecConfig.aec3_post_stationarity_zero_enabled`` is a deprecated
+    # alias propagated into ``echo_audibility.use_stationarity_properties``
+    # at init time.
+    echo_audibility: EchoAudibilityConfig = field(default_factory=EchoAudibilityConfig)
 
 
 # --------------------------------------------------------- helper components
@@ -466,7 +477,9 @@ class SuppressionGain:
         self._sr = int(sr)
         self._hop_size = int(hop_size)
         self._config = config or SuppressorConfig()
-        self._echo_audibility = EchoAudibilityConfig()
+        # v3.21.6 Sprint P3 — read echo_audibility from SuppressorConfig
+        # (was a hardcoded local default instance pre-P3).
+        self._echo_audibility = self._config.echo_audibility
         self._last_gain = np.ones(self._n_bins, dtype=np.float32)
         self._last_nearend = np.zeros(self._n_bins, dtype=np.float32)
         self._last_echo = np.zeros(self._n_bins, dtype=np.float32)
