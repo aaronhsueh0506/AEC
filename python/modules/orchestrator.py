@@ -650,6 +650,13 @@ class AEC:
             self._aec3_noise_psd = np.zeros(n_bins, dtype=np.float32)
             self._aec3_smooth_cn_gain = np.zeros(n_bins, dtype=np.float32)
             self._aec3_noise_initialized = False
+            # v3.22 Sprint F — Reverb tail dead-streak counter. Counts
+            # consecutive frames where the residual_echo_estimator's reverb
+            # frequency response tail is non-positive (i.e. no late
+            # reflection mass available). Drives the dead-fallback path
+            # when `reverb_tail_dead_fallback_enabled` is True and the
+            # streak exceeds `reverb_tail_dead_threshold_frames`.
+            self._reverb_tail_dead_counter = 0
             pass  # AEC3 chain init scope
 
         # v3.21 Phase C.3 — StationarityEstimator.
@@ -3503,6 +3510,47 @@ class AEC:
             dominant_nearend=dominant_ne,
         )
 
+        # v3.22 Sprint F — Reverb tail dead-streak tracking + fallback.
+        # Always update the counter (single source of truth for both the
+        # production fallback path and the trace_hf_chain audit field).
+        # `_reverb_fr` is the residual-echo-estimator's tracked frequency
+        # response; its `.tail_response` is the per-bin late-reflection
+        # mass. AEC3 estimator can fail to update under specific filter /
+        # delay / stationarity preconditions; on cohort tail (LN18k5r8 /
+        # s90M7MOT) that produces a permanent zero tail and an unprotected
+        # FS HF echo channel. Tail-dead = max(tail_response) <= 0.
+        _reverb_fr_now = getattr(self._aec3_ree, '_reverb_freq_resp', None)
+        _reverb_tail_max_now = 0.0
+        if (_reverb_fr_now is not None
+                and hasattr(_reverb_fr_now, 'tail_response')):
+            _reverb_tail_max_now = float(
+                np.max(_reverb_fr_now.tail_response))
+        if _reverb_tail_max_now <= 0.0:
+            self._reverb_tail_dead_counter = int(
+                self._reverb_tail_dead_counter) + 1
+        else:
+            self._reverb_tail_dead_counter = 0
+        # Fallback injection into BOTH R² and R²_unb. SuppressionGain's
+        # `_lower_band_gain` reads R² (residual_echo_spectrum) for the
+        # gain computation; R²_unb only feeds DominantNearendDetector's
+        # ENR. Adding to r2_unb only would leave the gain rule unmoved
+        # (cohort sanity gate (a) showed Δg100 mean = 0.0 on LN18k5r8
+        # when injecting r2_unb only). AEC3's own reverb_tail mass goes
+        # to both bounded and unbounded R² (residual_echo_estimator.cc).
+        # Conservative: scale rendering power by `strength`; mimics
+        # ~strength fraction of unsuppressed late reverb. Placed before
+        # the stationarity zeroing block so the zeroing can still protect
+        # stationary-far NE-presence regions from double-suppression.
+        # Default OFF preserves byte-equal.
+        if (self.config.reverb_tail_dead_fallback_enabled
+                and self._reverb_tail_dead_counter
+                >= int(self.config.reverb_tail_dead_threshold_frames)):
+            _fallback_strength = float(
+                self.config.reverb_tail_dead_fallback_strength)
+            _fallback_mass = (far_psd * _fallback_strength).astype(np.float32)
+            r2 = (r2 + _fallback_mass).astype(np.float32)
+            r2_unb = (r2_unb + _fallback_mass).astype(np.float32)
+
         # v3.21 Phase C.3 (back half) — Stationarity-driven R² scaling
         # (residual_echo_estimator.cc:303-313). Zero R²/R²_unbounded on
         # stationary bands once the filter has had time to converge so the
@@ -3689,16 +3737,13 @@ class AEC:
                 _erle_hf_at_max_frac = float(np.mean(
                     _erle_hf_seg < _erle_unb_hf_seg * 0.99
                 ))
-            # Reverb-tail dead-streak counter (consecutive frames where
-            # `reverb_freq_resp_tail_max` is non-positive). Lazy-init; lives
-            # on self because the trace block only fires when trace_hf_chain
-            # is True, but the counter must persist across frames inside
-            # that trace session.
-            if _reverb_tail_max <= 0.0:
-                self._reverb_tail_dead_counter = int(
-                    getattr(self, '_reverb_tail_dead_counter', 0)) + 1
-            else:
-                self._reverb_tail_dead_counter = 0
+            # Reverb-tail dead-streak counter — single source of truth in
+            # the always-on Sprint F block above. The trace block just
+            # reads the persisted counter and the local `_reverb_tail_max`
+            # value (which is computed both here for the trace fields and
+            # in the Sprint F block for the production path; the two
+            # computations agree because they read the same
+            # _reverb_freq_resp object on the same frame).
             _reverb_tail_dead_frames = int(self._reverb_tail_dead_counter)
             self._hf_chain_trace.append({
                 'frame': int(self._frame_count),

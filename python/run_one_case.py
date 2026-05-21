@@ -106,6 +106,14 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             os.environ['AEC_STAT_NE_PROXY'].lower() not in ('0', 'false', 'off', 'no'))
     if 'AEC_STAT_NE_PROXY_THR' in os.environ:
         cfg.e_stat_aware_ne_proxy_threshold = float(os.environ['AEC_STAT_NE_PROXY_THR'])
+    # v3.22 Sprint F — reverb tail dead-fallback (default OFF).
+    if 'AEC_REVERB_DEAD_FALLBACK' in os.environ:
+        cfg.reverb_tail_dead_fallback_enabled = (
+            os.environ['AEC_REVERB_DEAD_FALLBACK'].lower() not in ('0', 'false', 'off', 'no'))
+    if 'AEC_REVERB_DEAD_THR' in os.environ:
+        cfg.reverb_tail_dead_threshold_frames = int(os.environ['AEC_REVERB_DEAD_THR'])
+    if 'AEC_REVERB_DEAD_STRENGTH' in os.environ:
+        cfg.reverb_tail_dead_fallback_strength = float(os.environ['AEC_REVERB_DEAD_STRENGTH'])
     # v3.15 §B3: seed CNG for byte-equal sanity across CLI invocations.
     # Matches eval_aec_challenge.py:325 convention (seed=0 per-case);
     # without this, CNG (np.random.randn at aec.py:2009-2010) was

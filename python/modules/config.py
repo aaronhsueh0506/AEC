@@ -134,6 +134,22 @@ class AecConfig:
     e_stat_aware_ne_proxy_enabled: bool = False
     e_stat_aware_ne_proxy_threshold: float = 0.10  # 10% bins masked
 
+    # v3.22 Sprint F — Reverb tail dead-fallback (intentional divergence
+    # from AEC3; AEC3 has no equivalent safety net). When the residual-echo
+    # estimator's reverb frequency response can't update for an extended
+    # streak (FilterAnalyzer preconditions fail on some FS cases — e.g.
+    # LN18k5r8 100% tail-dead through entire case, s90M7MOT 73.5%), inject
+    # a conservative late-reflection mass into R²_unb so SuppressionGain
+    # still sees the late-tail echo presence. Fires only when the dead
+    # streak >= reverb_tail_dead_threshold_frames. Strength is multiplied
+    # into render_psd as `render_psd * strength`, mimicking ~strength
+    # fraction of unsuppressed reverb tail. Conservative initial defaults;
+    # 800-case bench drives ship/reject. Default OFF preserves byte-equal.
+    # See docs/v3_22_g0_triage_verdict.md (F PROCEED 2/8 cohort signal).
+    reverb_tail_dead_fallback_enabled: bool = False
+    reverb_tail_dead_threshold_frames: int = 50      # 500 ms at 10 ms hop
+    reverb_tail_dead_fallback_strength: float = 0.25  # conservative
+
     # v3.21.6 Sprint P2 — Re-enable AEC3 Legacy TransparentMode (was
     # hard-disabled in orchestrator with stale rationale citing legacy
     # 10-frame ERLE latch; that latch was retired in v3.21 by the
