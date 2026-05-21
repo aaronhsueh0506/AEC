@@ -219,6 +219,13 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'use_per_bin_h_error_refresh' not in config_overrides):
         config_overrides['use_per_bin_h_error_refresh'] = (
             os.environ['AEC_PER_BIN_H_ERROR_REFRESH'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.6 Sprint P1 — AEC3 FilterAnalyzer port. Drives non-zero
+    # min_direct_path_filter_delay in AecState; unblocks reverb tail
+    # update (Sprint C diagnose cause) for the cohort.
+    if ('AEC_FILTER_ANALYZER' in os.environ
+            and 'filter_analyzer_enabled' not in config_overrides):
+        config_overrides['filter_analyzer_enabled'] = (
+            os.environ['AEC_FILTER_ANALYZER'].lower() not in ('0', 'false', 'off', 'no'))
     # F-E1 — ERL clip + far_active hysteresis (v3.11 Phase 1 Sprint 5-6)
     if ('AEC_F_E1' in os.environ
             and 'f_e1_enabled' not in config_overrides):
