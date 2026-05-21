@@ -107,13 +107,17 @@ class AecConfig:
     filter_misadjustment_reset_done_frames: int = 20
     filter_misadjustment_threshold_phase3: float = 2.0
 
-    # v3.18 Phase C.A — FilterAnalyzer audit-only port (AEC3-aligned).
-    # When True: instantiates FilterAnalyzer on init; per frame, IFFTs
-    # main filter W → time domain → HP 600 Hz → peak detection →
-    # `consistent_estimate` boolean. Output exposed via _diag['filter_
-    # analyzer_*'] only; no consumer changes behaviour. Pre-bench gate
-    # at C.A.3 decides whether to advance to C.B.
-    filter_analyzer_enabled: bool = False
+    # v3.21.6 Sprint P1 — FilterAnalyzer port (AEC3 filter_analyzer.cc).
+    # When True: AecState owns single-channel FilterAnalyzer; per frame
+    # IFFTs PBFDAF partitions → 3-tap 600 Hz HPF → region-sweep peak
+    # detection → ConsistentFilterDetector. Output routes through
+    # FilterDelay.update (analyzer_filter_delay_estimates_blocks) and
+    # TransparentMode.update (any_filter_consistent); orchestrator
+    # consumes aec_state.min_direct_path_filter_delay() for reverb
+    # update _delay_blocks. 800-case bench: FS_static Δecho +0.059 /
+    # FS_movement +0.036 vs v3.21.5; DT buckets within ±0.01; NE flat.
+    # Indirectly closes v3.21.5 Sprint C reverb-tail blocker.
+    filter_analyzer_enabled: bool = True
 
     # v3.18 Phase C.B — FilteringQualityAnalyzer audit-only port.
     # Multi-gate usable_linear_estimate combining startup_timer +
