@@ -15,10 +15,11 @@ from collections import deque
 from typing import List, Optional, Tuple
 import soundfile as sf
 
-# Lazy holders for v3.18 Phase C.A / C.B audit modules; populated on
-# first flag-ON construction so flag-OFF AEC instances skip the scipy
-# import cost.
-_FilterAnalyzer = None
+# Lazy holder for v3.18 Phase C.B FilteringQualityAnalyzer audit module;
+# populated on first flag-ON construction so flag-OFF AEC instances skip
+# the scipy import cost. (v3.18 Phase C.A FilterAnalyzer stub was retired
+# in v3.21.6 P1 — the AEC3 port now lives in modules/state/filter_analyzer.py
+# and is owned by AecState.)
 _FilteringQualityAnalyzer = None
 
 # F3.1-v3 blend weight (mic-excess-ratio vs legacy 1-coh²) — kept here
@@ -573,19 +574,19 @@ class AEC:
             from .residual import ResidualEchoEstimator, SuppressionGain
             from .residual.suppression_gain import (
                 SuppressorConfig, SubbandNearendConfig, _SubbandRegion,
+                EchoAudibilityConfig,
             )
             import os
             n_bins = int(self.filter.n_freqs)
-            # TransparentMode requires AEC3's SubtractorOutputAnalyzer (not yet
-            # ported) to feed a per-frame "any_filter_converged" pulse. Our
-            # legacy FilterConvergenceAnalyzer is a hard 10-frame >5 dB ERLE
-            # latch which permanently sits at False on hard cases like 9xjhi;
-            # that makes TM falsely activate after 6s of strong render -> kills
-            # usable_linear -> R^2 collapses to nonlinear path forever. Disable
-            # TM until the proper analyzer ports.
+            # v3.21.6 Sprint P2: TransparentMode gating now follows
+            # AecConfig.transparent_mode_enabled (default False until cohort
+            # verify; original disable rationale cited the legacy 10-frame
+            # ERLE latch, retired by the AEC3-style per-frame e²<0.5·y²
+            # gate now computed in _aec3_post).
             self._aec3_state = _Aec3State(_Aec3StateConfig(
                 n_bins=n_bins,
-                enable_transparent_mode=False,
+                enable_transparent_mode=bool(self.config.transparent_mode_enabled),
+                enable_filter_analyzer=bool(self.config.filter_analyzer_enabled),
             ))
             self._aec3_ree = ResidualEchoEstimator(
                 n_bins=n_bins,
@@ -597,6 +598,19 @@ class AEC:
             # AEC_USE_SUBBAND_NE=1 to enable. Subband bounds + thresholds
             # tunable via AEC_SUBBAND_NE_S1_LO etc. for fast trace cycles.
             _sg_config = SuppressorConfig()
+            # v3.21.6 Sprint P3 — propagate top-level (deprecated) AecConfig
+            # flag into the canonical SuppressorConfig.echo_audibility slice.
+            # The orchestrator's stationarity zeroing block consumes the
+            # nested field; the top-level flag remains as a backwards-compat
+            # alias until v3.22 Sprint I cleanup (after P4 verdict ships).
+            # EchoAudibilityConfig is frozen — use dataclasses.replace to
+            # override one field while preserving every other AEC3 default.
+            import dataclasses as _dc
+            _sg_config.echo_audibility = _dc.replace(
+                _sg_config.echo_audibility,
+                use_stationarity_properties=bool(
+                    self.config.aec3_post_stationarity_zero_enabled),
+            )
             if os.environ.get('AEC_USE_SUBBAND_NE', '0') == '1':
                 _sg_config.use_subband_nearend_detection = True
                 _sg_config.subband_nearend_detection = SubbandNearendConfig(
@@ -736,16 +750,12 @@ class AEC:
             # Used only when filter_misadjustment_use_fq_usable=True.
             self._misadjustment_reset_done_count = 0
 
-        # v3.18 Phase C.A — FilterAnalyzer (audit-only). Lazy-init guards
-        # both module import and instantiation so flag-OFF stays byte-equal.
-        self._filter_analyzer = None
-        if self.config.filter_analyzer_enabled:
-            global _FilterAnalyzer
-            if _FilterAnalyzer is None:
-                from modules.filter_analyzer import FilterAnalyzer as _FA
-                _FilterAnalyzer = _FA
-            self._filter_analyzer = _FilterAnalyzer(
-                sample_rate=self.config.sample_rate)
+        # FilterAnalyzer ownership lives on AecState (v3.21.6 Sprint P1; see
+        # python/modules/state/filter_analyzer.py). The orchestrator now
+        # exposes the analyzer state via ``self._aec3_state`` rather than a
+        # parallel instance. The previous v3.18 Phase C.A audit-only stub at
+        # ``modules/filter_analyzer.py`` was retired in this port.
+        self._filter_analyzer = None  # retained name for legacy diag readers
 
         # v3.18 Phase C.B — FilteringQualityAnalyzer (audit-only). Same
         # lazy-init pattern as C.A.
@@ -1030,9 +1040,8 @@ class AEC:
             self._shadow_error_psd.fill(1e-2)
         if hasattr(self, '_shadow_R'):
             self._shadow_R.fill(1e-2)
-        # v3.18 Phase C.A — FilterAnalyzer state reset on full AEC reset.
-        if getattr(self, '_filter_analyzer', None) is not None:
-            self._filter_analyzer.reset()
+        # FilterAnalyzer reset is handled by AecState._full_reset (the
+        # analyzer is owned by AecState as of v3.21.6 P1).
         # v3.18 Phase C.B — FilteringQualityAnalyzer state reset.
         if getattr(self, '_filter_quality', None) is not None:
             self._filter_quality.reset()
@@ -1160,7 +1169,8 @@ class AEC:
         # Filter-output-derived state (always cleared):
         self._aec3_state = _Aec3State(_Aec3StateConfig(
             n_bins=n_bins,
-            enable_transparent_mode=False,
+            enable_transparent_mode=bool(self.config.transparent_mode_enabled),
+            enable_filter_analyzer=bool(self.config.filter_analyzer_enabled),
         ))
         self._aec3_ree = ResidualEchoEstimator(
             n_bins=n_bins,
@@ -2308,32 +2318,34 @@ class AEC:
             self._update_misadjustment_estimator()
             self._check_and_apply_misadjustment_scale()
 
-            # v3.18 Phase C.A — FilterAnalyzer audit-only update. Reads main
-            # filter W → time-domain impulse → HP-filter → peak detection +
-            # consistency check. Outputs exposed via _diag only; no consumer
-            # changes behaviour. Skipped when flag OFF (byte-equal preserved).
-            if (self._filter_analyzer is not None
-                    and self.filter is not None
-                    and hasattr(self.filter, 'W')):
-                _W_sum = self.filter.W.sum(axis=0)
-                _w_time = np.fft.irfft(_W_sum, self.filter.fft_size).astype(np.float32)
-                self._filter_analyzer.update(_w_time)
+            # FilterAnalyzer diag surface (v3.21.6 Sprint P1). The analyzer
+            # is updated inside AecState.update (which runs later in this
+            # hop); the queries below read the previous frame's state when
+            # the flag is on. Default-OFF: AecState owns no analyzer, the
+            # queries return defaults, no diag entries are written.
+            if self.config.filter_analyzer_enabled:
                 self._diag['filter_analyzer_consistent'] = bool(
-                    self._filter_analyzer.consistent_estimate)
+                    self._aec3_state.filter_analyzer_consistent())
                 self._diag['filter_analyzer_peak_index'] = int(
-                    self._filter_analyzer.peak_index)
+                    self._aec3_state.filter_analyzer_peak_index())
                 self._diag['filter_analyzer_max_gain'] = float(
-                    self._filter_analyzer.max_echo_path_gain)
+                    self._aec3_state.filter_analyzer_max_echo_path_gain())
+
+            # v3.21.6 Sprint P2 — trace TransparentMode activation rate.
+            if self.config.transparent_mode_enabled:
+                self._diag['transparent_mode_active'] = bool(
+                    self._aec3_state.transparent_mode_active())
 
             # v3.18 Phase C.B — FilteringQualityAnalyzer audit-only update.
             # Multi-gate usable_linear_estimate; outputs to _diag['fq_*'].
             # convergence_signal prefers FilterAnalyzer.consistent_estimate
-            # (AEC3-aligned semantic) when C.A is available; else falls
-            # back to legacy _filter_converged.
+            # (AEC3-aligned semantic) when available; else falls back to
+            # legacy _filter_converged.
             if self._filter_quality is not None:
                 _fq_far_active = bool(np.mean(far_end ** 2) > 1e-4)
-                if self._filter_analyzer is not None:
-                    _fq_conv_signal = bool(self._filter_analyzer.consistent_estimate)
+                if self.config.filter_analyzer_enabled:
+                    _fq_conv_signal = bool(
+                        self._aec3_state.filter_analyzer_consistent())
                 else:
                     _fq_conv_signal = bool(self._filter_converged)
                 self._filter_quality.update(
@@ -3400,6 +3412,16 @@ class AEC:
             self._aec3_pending_delay_change = None
 
         self._aec3_state.update_capture_saturation(self._saturation_level > 0.5)
+        # v3.21.6 Sprint P1 — feed AEC3 FilterAnalyzer the full time-domain
+        # impulse response. Default-OFF: AecState ignores the kwarg, no
+        # IFFT cost paid.
+        _filter_taps_full = (
+            self.filter.get_time_domain_filter()
+            if (self.config.filter_analyzer_enabled
+                and self.filter is not None
+                and hasattr(self.filter, 'get_time_domain_filter'))
+            else None
+        )
         self._aec3_state.update(
             bridge=bridge,
             external_delay=ext_delay,
@@ -3409,6 +3431,7 @@ class AEC:
             echo_psd=echo_psd,
             active_render=(far_pwr > 1e-4),
             render_block=render_block_scaled,
+            filter_taps_full=_filter_taps_full,
         )
 
         # v3.21 Phase C.3 — stationarity is updated ONCE per hop in the
@@ -3435,9 +3458,19 @@ class AEC:
         _w_mag2 = (np.abs(self.filter.W) ** 2).astype(np.float32)
         # Delay in partitions: integer floor of sample-delay / hop_size. -1
         # signals "no usable delay" (estimator skips update).
-        _delay_blocks = (int(self._current_delay) // int(self.filter.hop_size)
-                         if (self._delay_active and self._current_delay >= 0)
-                         else -1)
+        # v3.21.6 Sprint P1 — when FilterAnalyzer is on, source the delay
+        # from AecState.min_direct_path_filter_delay() (AEC3
+        # aec_state.cc:232 path) so the analyzer's peak detection
+        # actually drives reverb update. 0 is the AEC3 "headroom guess"
+        # default during pre-convergence and is treated as a valid block
+        # index by the reverb estimator (matches AEC3 verbatim).
+        # Falls back to legacy _current_delay // hop_size when OFF.
+        if self.config.filter_analyzer_enabled:
+            _delay_blocks = int(self._aec3_state.min_direct_path_filter_delay())
+        else:
+            _delay_blocks = (int(self._current_delay) // int(self.filter.hop_size)
+                             if (self._delay_active and self._current_delay >= 0)
+                             else -1)
         # Filter quality proxy: AEC3 uses FilterAnalyzer.consistent_estimate
         # (a stable per-bin convergence score). We don't have that yet; use
         # the per-frame convergence signal we already compute in this scope
@@ -3472,15 +3505,17 @@ class AEC:
         # v3.21.5 Phase 1 Sprint 0: refactored to compute the mask once
         # (used by both the gate AND trace_hf_chain stationarity evidence
         # fields).
-        # v3.21.5 Phase 1 Sprint B: gate the zeroing on
-        # `aec3_post_stationarity_zero_enabled` config flag (default False
-        # mirrors AEC3 EchoAudibility.use_stationarity_properties default).
-        # This restores AEC3 port fidelity — the pre-v3.21.5 unconditional
-        # zeroing was a config-bypass bug per Codex Finding 2.
+        # v3.21.5 Phase 1 Sprint B: gate the zeroing on a config flag
+        # (legacy: AecConfig.aec3_post_stationarity_zero_enabled, now
+        # deprecated alias). v3.21.6 Sprint P3: canonical control point
+        # is SuppressorConfig.echo_audibility.use_stationarity_properties
+        # (AEC3 architecture parity); the top-level alias is propagated
+        # in at init.
+        _use_stationarity = bool(
+            self._aec3_sg_config.echo_audibility.use_stationarity_properties)
         _need_stationary_mask = (
             self.config.trace_hf_chain
-            or (self.config.aec3_post_stationarity_zero_enabled
-                and _filter_converged_enough)
+            or (_use_stationarity and _filter_converged_enough)
         )
         _stationary_mask = (
             self._aec3_stationarity.band_stationary_mask()
@@ -3489,7 +3524,7 @@ class AEC:
         if self.config.trace_hf_chain:
             _r2_pre_mask_sum = float(np.sum(r2))
             _r2_unb_pre_mask_sum = float(np.sum(r2_unb))
-        if (self.config.aec3_post_stationarity_zero_enabled
+        if (_use_stationarity
                 and _filter_converged_enough
                 and _stationary_mask is not None
                 and np.any(_stationary_mask)):
@@ -3676,6 +3711,18 @@ class AEC:
                 'reverb_filter_q_present': bool(_filter_q is not None),
                 'reverb_update_called': True,
                 'aec3_min_direct_path_blocks': _aec3_dpd,
+                # v3.21.6 Sprint P1 — FilterAnalyzer state. Zero when the
+                # analyzer flag is OFF; non-zero indicates the AEC3
+                # peak/consistency port is producing fresh signals.
+                'filter_analyzer_consistent': bool(
+                    self._aec3_state.filter_analyzer_consistent()),
+                'filter_analyzer_peak_index': int(
+                    self._aec3_state.filter_analyzer_peak_index()),
+                'filter_analyzer_max_gain': float(
+                    self._aec3_state.filter_analyzer_max_echo_path_gain()),
+                # v3.21.6 Sprint P2 — TransparentMode activation rate.
+                'transparent_mode_active': bool(
+                    self._aec3_state.transparent_mode_active()),
                 # Bug 4 — NE state staleness REE-vs-SG (REE uses pre-gain NE
                 # state at orchestrator:3424; SG detector updates inside
                 # get_gain at suppression_gain.py:534 — on transition frames

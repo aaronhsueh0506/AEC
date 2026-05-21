@@ -27,6 +27,7 @@ import numpy as np
 from ._constants import HOPS_PER_SECOND
 from .erl_estimator import ErlEstimator
 from .erle_estimator import ErleEstimator
+from .filter_analyzer import FilterAnalyzer
 from .filter_delay import FilterDelay
 from .filter_quality import FilteringQualityAnalyzer
 from .initial_state import InitialState
@@ -63,6 +64,11 @@ class AecStateConfig:
     erl_startup_hops: int = 200
     enable_transparent_mode: bool = True
     transparent_linear_and_stable: bool = False
+    # v3.21.6 Sprint P1 — full AEC3 FilterAnalyzer port. When True, feeds
+    # per-channel filter delays into FilterDelay (instead of leaving the
+    # analyzer kwarg None) and exposes any_filter_consistent /
+    # max_echo_path_gain. Default OFF preserves v3.21.5 byte-equal.
+    enable_filter_analyzer: bool = False
 
 
 class AecState:
@@ -98,6 +104,9 @@ class AecState:
             TransparentMode(linear_and_stable_echo_path=self._config.transparent_linear_and_stable)
             if self._config.enable_transparent_mode
             else None
+        )
+        self._filter_analyzer: Optional[FilterAnalyzer] = (
+            FilterAnalyzer() if self._config.enable_filter_analyzer else None
         )
         # STUBS — Phase 3.4 will replace.
         self._reverb_decay = 0.0  # zero reverb tail until ReverbModelEstimator lands
@@ -162,6 +171,20 @@ class AecState:
     def external_delay_blocks(self) -> Optional[DelayEstimate]:
         return self._delay_state.external_delay_blocks()
 
+    def filter_analyzer_consistent(self) -> bool:
+        return (self._filter_analyzer is not None
+                and self._filter_analyzer.any_filter_consistent())
+
+    def filter_analyzer_peak_index(self) -> int:
+        if self._filter_analyzer is None:
+            return -1
+        return self._filter_analyzer.peak_index()
+
+    def filter_analyzer_max_echo_path_gain(self) -> float:
+        if self._filter_analyzer is None:
+            return 0.0
+        return self._filter_analyzer.max_echo_path_gain()
+
     # ------------------------------------------------------------- mutators
 
     def update_capture_saturation(self, saturated: bool) -> None:
@@ -188,6 +211,7 @@ class AecState:
         subtractor_s_coarse_max_abs: float = 0.0,
         echo_path_gain: float = 1.0,
         render_block: Optional[np.ndarray] = None,
+        filter_taps_full: Optional[np.ndarray] = None,
     ) -> None:
         """Per-frame state update. Strict order matches aec_state.cc:189-291.
 
@@ -202,14 +226,26 @@ class AecState:
             active-frame flag.
           - subtractor max-abs values + echo_path_gain + render_block:
             inputs to SaturationDetector.
+          - ``filter_taps_full``: full time-domain impulse response of the
+            adaptive filter (concatenated partitions). Required when
+            ``enable_filter_analyzer`` is True; ignored otherwise.
         """
         # 1. Filter quality + convergence pass (reads any_filter_converged
         #    from bridge; this is the AEC3 SubtractorOutputAnalyzer surface).
         any_filter_converged = bridge.filter_converged
 
-        # 2. FilterDelay update (analyzer delays not yet ported; pass None).
+        # 1b. FilterAnalyzer (aec_state.cc:199-200). Runs BEFORE FilterDelay
+        # so the analyzer's per-channel delays are fresh on the same frame.
+        analyzer_delays: Optional[list[int]] = None
+        if (self._filter_analyzer is not None
+                and filter_taps_full is not None
+                and render_block is not None):
+            self._filter_analyzer.update(filter_taps_full, render_block)
+            analyzer_delays = self._filter_analyzer.filter_delays_blocks()
+
+        # 2. FilterDelay update (aec_state.cc:203-206).
         self._delay_state.update(
-            analyzer_filter_delay_estimates_blocks=None,
+            analyzer_filter_delay_estimates_blocks=analyzer_delays,
             external_delay=external_delay,
             blocks_with_proper_filter_adaptation=self._strong_not_saturated_render_blocks,
         )
@@ -254,12 +290,15 @@ class AecState:
 
         # 7. TransparentMode update (Legacy variant; HMM not ported).
         if self._transparent_mode is not None:
-            # Proxies for the two AEC3 signals we don't yet derive:
-            #   any_filter_consistent ~ filter is converged AND we have a delay estimate.
-            #   all_filters_diverged ~ filter NOT converged AND divergence_indicator high.
-            any_filter_consistent = (
-                any_filter_converged and external_delay is not None
-            )
+            # AEC3 derives any_filter_consistent from FilterAnalyzer
+            # (aec_state.cc:271); fall back to the legacy proxy when the
+            # analyzer is disabled.
+            if self._filter_analyzer is not None:
+                any_filter_consistent = self._filter_analyzer.any_filter_consistent()
+            else:
+                any_filter_consistent = (
+                    any_filter_converged and external_delay is not None
+                )
             all_filters_diverged = (
                 (not any_filter_converged) and bridge.divergence_indicator > 1.0
             )
@@ -297,3 +336,5 @@ class AecState:
         self._erl_estimator.reset()
         if self._transparent_mode is not None:
             self._transparent_mode.reset()
+        if self._filter_analyzer is not None:
+            self._filter_analyzer.reset()

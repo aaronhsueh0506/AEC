@@ -89,6 +89,17 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
     if 'AEC_PER_BIN_H_ERROR_REFRESH' in os.environ:
         cfg.use_per_bin_h_error_refresh = (
             os.environ['AEC_PER_BIN_H_ERROR_REFRESH'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.6 Sprint P1 — AEC3 FilterAnalyzer port. When True, AecState
+    # instantiates FilterAnalyzer and feeds analyzer delays into FilterDelay
+    # (instead of None), making min_direct_path_filter_delay non-zero so
+    # reverb update gate can fire on cohort tail cases.
+    if 'AEC_FILTER_ANALYZER' in os.environ:
+        cfg.filter_analyzer_enabled = (
+            os.environ['AEC_FILTER_ANALYZER'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.6 Sprint P2 — re-enable AEC3 Legacy TransparentMode.
+    if 'AEC_TRANSPARENT_MODE' in os.environ:
+        cfg.transparent_mode_enabled = (
+            os.environ['AEC_TRANSPARENT_MODE'].lower() not in ('0', 'false', 'off', 'no'))
     # v3.15 §B3: seed CNG for byte-equal sanity across CLI invocations.
     # Matches eval_aec_challenge.py:325 convention (seed=0 per-case);
     # without this, CNG (np.random.randn at aec.py:2009-2010) was

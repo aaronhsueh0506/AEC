@@ -235,6 +235,24 @@ class PBFDAF:
     def get_error_energy(self) -> float:
         return float(np.sum(np.abs(self.error_spec) ** 2))
 
+    def get_time_domain_filter(self) -> np.ndarray:
+        """Concatenate partitions to a single time-domain impulse response.
+
+        Each PBFDAF partition stores the IR contribution at frame-lag ``p``;
+        IFFT'ing ``W[p]`` and taking the first ``hop_size`` samples gives
+        that partition's TD slice. Concatenated length is
+        ``n_partitions * hop_size`` samples (covers the full adaptive
+        filter span).
+
+        Consumed by AEC3-aligned FilterAnalyzer for peak/consistency
+        analysis.
+        """
+        full = np.zeros(self.n_partitions * self.hop_size, dtype=np.float32)
+        for p in range(self.n_partitions):
+            w_time = np.fft.irfft(self.W[p], self.fft_size).astype(np.float32)
+            full[p * self.hop_size:(p + 1) * self.hop_size] = w_time[:self.hop_size]
+        return full
+
     def copy_weights_from(self, src: 'PBFDAF'):
         self.W[:] = src.W
 

@@ -16,6 +16,91 @@ when verdict requires it.
 
 ---
 
+## [3.21.6] — 2026-05-21 — AEC3 Parity Completion (Sprint P1 ships; Sprints P2 / P4 closed intentionally-incompatible; Sprint P3 byte-equal structural)
+
+**Headline**: 1 production change shipped — **Sprint P1 AEC3 FilterAnalyzer port** (single-channel verbatim port of [`docs/aec3_extracts/src/aec3/filter_analyzer.cc`](docs/aec3_extracts/src/aec3/filter_analyzer.cc), `~250 LOC`, owned by `AecState`; default-True). The port produces a non-zero direct-path delay scalar that AEC3's reverb-tail update consumes — indirectly closes v3.21.5 Sprint C's reverb-tail blocker. Cumulative 800-case bench Pareto-positive vs v3.21.5: FS_static **+0.059** / FS_movement **+0.036** / DT buckets within ±0.01 / NE flat.
+
+Sprints P2 / P4 closed as **intentionally-incompatible with our PBFDKF architecture** — both AEC3 parity items are permanently retired (TransparentMode + AEC3-default-off stationarity); any v3.22+ revisit must be labelled as PBFDKF-specific divergence, NOT AEC3 parity restoration. Sprint P3 ships byte-equal structural parity (canonical control surface for `use_stationarity_properties` now lives at `SuppressorConfig.echo_audibility`, with top-level `aec3_post_stationarity_zero_enabled` retained as deprecated alias).
+
+Cycle close: [`docs/v3_21_6_cycle_close.md`](docs/v3_21_6_cycle_close.md). v3.22 entry gate (AEC3 parity baseline locked): **MET** — every Bucket-1 item has a closed verdict.
+
+### Sprint P1 — FilterAnalyzer port SHIPPED (Pareto-positive)
+
+AEC3 [`filter_analyzer.cc`](docs/aec3_extracts/src/aec3/filter_analyzer.cc) produces `FilterDelaysBlocks()` (per-channel direct-path delay) + `ConsistentFilterDetector` (peak-stability gate for `any_filter_consistent`). Pre-v3.21.6, our [`python/modules/state/filter_delay.py:57-60`](python/modules/state/filter_delay.py#L57) received `analyzer_filter_delay_estimates_blocks=None` always (FilterAnalyzer was a v3.18 audit-only stub at `python/modules/filter_analyzer.py`, since deleted) → `min_direct_path_filter_delay()` returned 0 → reverb-tail update never fired on cohort-tail cases. This was the root cause v3.21.5 Sprint C diagnosed but couldn't fix in the v3.21.5 narrow scope.
+
+P1 ships a full single-channel port (block units translated AEC3 `kBlockSize=64` 4ms → our `HOP_SAMPLES=160` 10ms; convergence hold 5s = 500 hops; consistency hold 1.5s = 150 hops). The new `state/filter_analyzer.py` (~250 LOC) covers `ConsistentFilterDetector` + 3-tap 600Hz HPF + region-sweep peak finder + state machine, verbatim against the AEC3 source. `AecState` owns the analyzer; `PBFDAF.get_time_domain_filter()` (new ~10 LOC IFFT concat helper) feeds the time-domain impulse response per hop. Reverb-update `_delay_blocks` switches from legacy `_current_delay // hop_size` to `aec_state.min_direct_path_filter_delay()`. The v3.18 Phase C.A audit-only stub (incompatible API) is deleted.
+
+Verified default-OFF byte-equal preserved (25/25 PASS vs v3.21.5 anchor) before flipping default True. 800-case bench Pareto-positive on FS without DT damage. Verdict: [`docs/v3_21_6_p1_filter_analyzer_verdict.md`](docs/v3_21_6_p1_filter_analyzer_verdict.md).
+
+Known limitation (not blocking ship): `fa_consistent=0%` on the LN18k5r8 cohort case — PBFDKF's Kalman peak position is noisier than AEC3's NLMS-stable envelope, so the 1.5s peak-stability detector rarely fires. Effect: `UpdateFilterGain` falls back to running-max path; `TransparentMode.any_filter_consistent` stays False (irrelevant — TM disabled by P2). Does not affect `filter_delays_blocks()` output (P1's primary deliverable). Documented as the PBFDKF-vs-AEC3 architectural-incompatibility note that motivated P2's parity closure.
+
+### Sprint P2 — TransparentMode audit CLOSED intentionally-incompatible
+
+4 mismatch findings vs AEC3 source ([`transparent_mode.cc`](docs/aec3_extracts/src/aec3/transparent_mode.cc) Legacy variant + [`aec_state.cc:189-325`](docs/aec3_extracts/src/aec3/aec_state.cc#L189) Update flow):
+
+- (A) `enable_transparent_mode=False` hard-coded in orchestrator with stale rationale citing the v3.20 legacy 10-frame ERLE latch (already retired in v3.21 by the per-frame e²<0.5·y² gate in `_aec3_post`)
+- (B) 3 block-unit constants in `transparent_mode.py` left at AEC3 4ms-block values with a misleading "blocks not hops -> stays N" comment; actually wall-clock durations
+- (C) `any_coarse_filter_converged` not threaded into `TransparentMode.update` (Legacy ignores; HMM variant not ported)
+- (D) `all_filters_diverged` derived from `bridge.divergence_indicator > 1.0` proxy (vs AEC3 SubtractorOutputAnalyzer)
+
+P2.0 cohort 3-case trace (LN18k5r8 / s90M7MOT / 9xjhi + 2 others) with `AEC_TRANSPARENT_MODE=1` showed LN18k5r8 fires TM 23.1% @ fa_consistent=0% — the exact PBFDKF-vs-AEC3 cohort-tail false-activation pattern P1's verdict had already documented for FilterAnalyzer. Per [plan's strict P2.1 protocol option 3](`~/.claude/plans/se-aec-aec-main-hazy-lynx.md`), this is sufficient cohort evidence to close as intentionally-incompatible without a full 800-case bench.
+
+Per-mismatch verdicts:
+- A → intentionally-incompatible (production stays `transparent_mode_enabled=False`)
+- B → **fixed dormant** (`_SANE_FILTER_DELAY_BLOCKS=5` → `_SANE_FILTER_DELAY_HOPS=2`; `_DIVERGED_SEQ_BOUND=60` → `_DIVERGED_SEQ_BOUND_HOPS=24`; `_NUM_CONVERGED_BLOCKS_HIGH=50` → `_NUM_CONVERGED_BLOCKS_HIGH_HOPS=20`; parity correctness with zero current behavior impact)
+- C → aligned no-op
+- D → aligned via different source signal
+
+Parity substrate (config flag, `AEC_TRANSPARENT_MODE` env hook, 3 corrected constants, trace field) shipped dormant as v3.22 G.2 substrate. **v3.22 G.2 must be PBFDKF-specific divergence (e.g., Kalman-state-derived "no echo path" criterion / delete subsystem / keep dormant) — must NOT claim AEC3 parity restoration.** Verdict: [`docs/v3_21_6_p2_transparent_mode_audit_verdict.md`](docs/v3_21_6_p2_transparent_mode_audit_verdict.md). Discipline rule recorded as feedback memory.
+
+### Sprint P3 — EchoAudibilityConfig structural wiring SHIPPED (byte-equal)
+
+Promoted existing `EchoAudibilityConfig` dataclass (already had AEC3 audibility thresholds + render-floor knobs + use_stationarity_properties + band boundaries) from `SuppressionGain.__init__`-internal local instance to `SuppressorConfig.echo_audibility` field. Orchestrator's stationarity zeroing block at `_aec3_post:3500-3520` (two consumer sites) now reads canonical `self._aec3_sg_config.echo_audibility.use_stationarity_properties`; top-level `AecConfig.aec3_post_stationarity_zero_enabled` retained as DEPRECATED ALIAS propagated via `dataclasses.replace` at orchestrator init (the existing dataclass is `frozen=True`).
+
+Mid-implementation pitfall caught immediately: an initial duplicate `EchoAudibilityConfig` definition clobbered the existing rich one's fields; AttributeError on smoke-render flagged it → reverted to use the existing dataclass. Single-case md5 identical pre/post at default-True; env override `AEC_STATIONARITY_ZERO=0` still produces differing output (alias path verified working).
+
+Removal of the deprecated alias is deferred to v3.22 Sprint I cleanup (after P4 verdict). Per P4 outcome (below), the recommendation is to **keep** the alias as a research toggle indefinitely. Verdict: [`docs/v3_21_6_p3_echo_audibility_wiring_verdict.md`](docs/v3_21_6_p3_echo_audibility_wiring_verdict.md).
+
+### Sprint P4 — Stationarity default-off re-test CLOSED intentionally-incompatible
+
+Re-tested the v3.21.5 Sprint B hypothesis: that P1 FilterAnalyzer + P2 TransparentMode audit + P3 EchoAudibilityConfig wiring may have rescued `_DominantNearendDetector.is_nearend_state()` firing under stationary-far conditions, making AEC3-default-off (`use_stationarity_properties=False`) safe to flip on our cohort.
+
+P4.0 cohort 3-case re-trace (Sprint B's worst 3: WcK0OrF / wVYSGV / xQEUtY2) on post-P1+P2+P3 baseline with user-set strict 3-criterion gate. **All 3 criteria FAIL**:
+
+| Criterion | Result |
+|---|---|
+| Catastrophic gain drops (Δgain_100 < -0.3) disappear | ✗ 233 / 235 / 424 frames per case (Sprint B baseline was ~280 on xQEUtY2) |
+| `is_nearend_state` rate notably improves | ✗ **ΔNE = +0.0 on all 3 cases** — xQEUtY2 stays at 7.0% vs Sprint B's 7.2% baseline |
+| Formant damage (1-4 kHz Δ dB) eliminated | ✗ HF Δ -0.94 dB on xQEUtY2 (still audible) |
+
+Root cause: P1 / P2 / P3 paths don't feed into the `_DominantNearendDetector` ENR/SNR decision. The Sprint B safety-net evidence (stationarity zeroing compensates for the incomplete detector port — AEC3 has ScaleFilter / FilterMisadjustmentEstimator companions we don't port) holds on the post-P1+P2+P3 baseline. Hypothesis falsified by direct trace evidence.
+
+Per user directive ("若 P4.0 fail，直接 close P4 intentionally-incompatible，v3.21.6 保留 zeroing default True"), **no 800-case bench run**. Production stays `aec3_post_stationarity_zero_enabled = True` permanently for our PBFDKF + RES port. AEC3-default-off `use_stationarity_properties=False` retired as Bucket-3 closed-DSP decision. Any v3.22+ revisit (e.g., port the missing AEC3 ScaleFilter / FilterMisadjustmentEstimator companions, or replace the detector with a PBFDKF-Kalman-aware NE detector) must be labelled as PBFDKF-specific divergence, NOT AEC3 parity restoration. Verdict: [`docs/v3_21_6_p4_stationarity_retest_verdict.md`](docs/v3_21_6_p4_stationarity_retest_verdict.md).
+
+### Cumulative bench
+
+Standard 800-case render (j9, no env overrides — exercise defaults) against `docs/bench/v3_21_5_baseline/scores.json`:
+
+| Bucket | n | echo Δ | deg Δ | verdict |
+|---|---:|---:|---:|---|
+| FS_static | 169 | **+0.059** | -0.000 | ok |
+| FS_movement | 131 | **+0.036** | -0.000 | ok |
+| DT_static | 186 | +0.029 | -0.009 | ok |
+| DT_movement | 114 | +0.016 | +0.008 | ok |
+| NE | 200 | +0.000 | -0.001 | ok |
+
+Per-case distribution (Δ < -0.05 / Δ > +0.05 threshold): FS_static 17r/68i echo; FS_movement 15r/39i echo; DT_static 11r/48i echo + 51r/56i deg (balanced); DT_movement 7r/23i echo + 17r/29i deg (net positive); NE flat. Identical to per-sprint P1.3 results (P2/P3/P4 don't change algorithmic ship state).
+
+### vs AEC2 / AEC3 reference scores (post-v3.21.6)
+
+Per `docs/aec_methods.md`: v3.21.5 already beat AEC2 by +1.12 FS and beat AEC3 by +0.52 DT_deg / +0.60 NE. v3.21.6 widens the AEC2 FS_static advantage to ~+1.18 (+0.059 on top of +1.12); DT_deg / NE advantage over AEC3 unchanged. AEC3 parity is **structurally complete**: every Bucket-1 item has a closed verdict (shipped / no-leverage / intentionally-incompatible). The two intentionally-incompatible closures (TransparentMode + stationarity-default-off) document permanent PBFDKF-architecture-specific deviations that v3.22+ would only re-open as labeled divergence designs.
+
+### Discipline rules established
+
+- [`feedback_no_parity_claim_for_divergence`](../../../.claude/projects/-Users-mingyu-Desktop-novatek-SE/memory/feedback_no_parity_claim_for_divergence.md): when AEC3 parity closes as intentionally-incompatible, successor design in a later cycle (e.g., v3.22 G.2 after v3.21.6 P2) must be labelled as intentional divergence with PBFDKF-specific rationale — must NOT claim AEC3 parity restoration. Mirror-image of the Round-7 "no parity smuggling into v3.22" anti-pattern.
+
+---
+
 ## [3.21.5] — 2026-05-21 — Safe AEC3 Parity (Sprint A ships; Sprints B / C / C2 closed)
 
 **Headline**: 1 production change shipped — Sprint A E2 = min(E2, Y2)

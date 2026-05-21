@@ -107,13 +107,28 @@ class AecConfig:
     filter_misadjustment_reset_done_frames: int = 20
     filter_misadjustment_threshold_phase3: float = 2.0
 
-    # v3.18 Phase C.A — FilterAnalyzer audit-only port (AEC3-aligned).
-    # When True: instantiates FilterAnalyzer on init; per frame, IFFTs
-    # main filter W → time domain → HP 600 Hz → peak detection →
-    # `consistent_estimate` boolean. Output exposed via _diag['filter_
-    # analyzer_*'] only; no consumer changes behaviour. Pre-bench gate
-    # at C.A.3 decides whether to advance to C.B.
-    filter_analyzer_enabled: bool = False
+    # v3.21.6 Sprint P1 — FilterAnalyzer port (AEC3 filter_analyzer.cc).
+    # When True: AecState owns single-channel FilterAnalyzer; per frame
+    # IFFTs PBFDAF partitions → 3-tap 600 Hz HPF → region-sweep peak
+    # detection → ConsistentFilterDetector. Output routes through
+    # FilterDelay.update (analyzer_filter_delay_estimates_blocks) and
+    # TransparentMode.update (any_filter_consistent); orchestrator
+    # consumes aec_state.min_direct_path_filter_delay() for reverb
+    # update _delay_blocks. 800-case bench: FS_static Δecho +0.059 /
+    # FS_movement +0.036 vs v3.21.5; DT buckets within ±0.01; NE flat.
+    # Indirectly closes v3.21.5 Sprint C reverb-tail blocker.
+    filter_analyzer_enabled: bool = True
+
+    # v3.21.6 Sprint P2 — Re-enable AEC3 Legacy TransparentMode (was
+    # hard-disabled in orchestrator with stale rationale citing legacy
+    # 10-frame ERLE latch; that latch was retired in v3.21 by the
+    # per-frame e²<0.5·y² gate in _aec3_post). When True: AecState
+    # instantiates LegacyTransparentMode + threads any_filter_consistent
+    # from P1's FilterAnalyzer. P2 also corrects 3 block-unit constants
+    # in transparent_mode.py that were left at AEC3's 4ms-block values
+    # (now 2.5x'd to match our 10ms-hop wall-clock semantics). Default
+    # OFF preserves v3.21.5 byte-equal anchor until cohort verify.
+    transparent_mode_enabled: bool = False
 
     # v3.18 Phase C.B — FilteringQualityAnalyzer audit-only port.
     # Multi-gate usable_linear_estimate combining startup_timer +
@@ -254,6 +269,14 @@ class AecConfig:
     # Re-test scheduled for v3.21.6 P4 AFTER companion mechanisms ported
     # (P1 FilterAnalyzer + P2 transparent_mode audit + P3 EchoAudibility
     # config wiring); see ~/.claude/plans/se-aec-aec-main-hazy-lynx.md.
+    #
+    # v3.21.6 Sprint P3 — DEPRECATED ALIAS. Canonical control point now
+    # lives at ``SuppressorConfig.echo_audibility.use_stationarity_properties``
+    # (mirrors AEC3 ``EchoCanceller3Config::EchoAudibility``). The value
+    # here is propagated into the nested field at orchestrator init; the
+    # top-level alias will be removed entirely in v3.22 Sprint I cleanup
+    # after P4 verdict ships. Env hook ``AEC_STATIONARITY_ZERO`` still
+    # works via this alias.
     aec3_post_stationarity_zero_enabled: bool = True
 
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
