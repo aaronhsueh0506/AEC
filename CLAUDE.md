@@ -21,7 +21,7 @@ tolerance:
   (`PBFDKF`, `ShadowFilter`, etc.). Built with `-ffp-contract=off` mandatory.
 
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
-(currently **3.21.4**). Canonical algorithm reference:
+(currently **3.21.5**). Canonical algorithm reference:
 [docs/aec_methods.md](docs/aec_methods.md). Trace-driven evolution
 history: [docs/aec_v3_evolution.md](docs/aec_v3_evolution.md). Research
 log canonical: [docs/SUMMARY.md](docs/SUMMARY.md).
@@ -173,18 +173,23 @@ tweak a single field without a full 800-case re-bench.
 ## Branch model
 
 `main` carries the production-graded code. Current `__version__` is
-**3.21.4** — v3.21.4 is an audit / structural-refactor cycle:
-closes 4 carry-overs from v3.21.2's plan (time-domain unit-conversion
-"bugs" NOT-A-BUG; per-bin H_error refresh retest FAIL on canonical
-state; B3 lf_endpoint intermediate values FAIL; ReverbDecayEstimator
-NOT-PORTING — estimator dormant in our pipeline). Includes a
-structural ms-based config refactor for `hold_duration_ms` /
-`noise_floor_hold_ms`. No production code change (byte-equal at default
-vs v3.21.3). v3.21.3 was the Codex hygiene cycle. v3.21.2 corrected
-the FFT-scale bin-index unit-conversion bug. v3.21.0 retired the
-legacy `ResFilter` 9-stage chain in favour of the AEC3-aligned
-`_aec3_post` (AecState + ResidualEchoEstimator + SuppressionGain +
-CNG). Single production preset: `BALANCED`. See
+**3.21.5** — v3.21.5 is the **Safe AEC3 Parity** cycle (first of a
+3-cycle arc: v3.21.5 safe parity / v3.21.6 parity completion / v3.22
+intentional divergence). Ships **Sprint A E2 = min(E2, Y2) clamp**
+(AEC3 `echo_remover.cc:495-501` port-fidelity fix; default-True
+`e2_y2_clamp_enabled` in `python/modules/config.py`). FS_static +0.033
+/ FS_movement +0.035 dB vs v3.21.4 baseline; DT deg AECMOS-sensitive
+but not audible (user spectrogram check). Sprints B / C / C2 all
+closed without shipping (B: load-bearing safety-net evidence rejects
+AEC3-default-off stationarity for the current incomplete detector
+port; C: reverb update blocked by FilterAnalyzer stub upstream; C2:
+per-bin H_error refresh selector — 9xjhi memory single-case win
+doesn't reproduce on v3.21.5 baseline). Re-tests scheduled for v3.21.6
+P1-P4. v3.21.4 was the audit cycle. v3.21.3 was the Codex hygiene
+cycle. v3.21.2 corrected the FFT-scale bin-index unit-conversion bug.
+v3.21.0 retired the legacy `ResFilter` 9-stage chain in favour of the
+AEC3-aligned `_aec3_post` (AecState + ResidualEchoEstimator +
+SuppressionGain + CNG). Single production preset: `BALANCED`. See
 [CHANGELOG.md](CHANGELOG.md) for full per-version detail.
 
 The active reference set at `docs/` root holds the canonical pipeline +

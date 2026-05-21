@@ -3468,17 +3468,48 @@ class AEC:
         # stationary bands once the filter has had time to converge so the
         # suppression gain doesn't damp nearend speech on cases with a
         # constant background hum on the far-end (E0l0 / wJVP outliers).
-        if _filter_converged_enough:
-            _stationary_mask = self._aec3_stationarity.band_stationary_mask()
-            if np.any(_stationary_mask):
-                r2 = np.where(_stationary_mask, 0.0, r2).astype(np.float32)
-                r2_unb = np.where(
-                    _stationary_mask, 0.0, r2_unb
-                ).astype(np.float32)
+        #
+        # v3.21.5 Phase 1 Sprint 0: refactored to compute the mask once
+        # (used by both the gate AND trace_hf_chain stationarity evidence
+        # fields).
+        # v3.21.5 Phase 1 Sprint B: gate the zeroing on
+        # `aec3_post_stationarity_zero_enabled` config flag (default False
+        # mirrors AEC3 EchoAudibility.use_stationarity_properties default).
+        # This restores AEC3 port fidelity — the pre-v3.21.5 unconditional
+        # zeroing was a config-bypass bug per Codex Finding 2.
+        _need_stationary_mask = (
+            self.config.trace_hf_chain
+            or (self.config.aec3_post_stationarity_zero_enabled
+                and _filter_converged_enough)
+        )
+        _stationary_mask = (
+            self._aec3_stationarity.band_stationary_mask()
+            if _need_stationary_mask else None
+        )
+        if self.config.trace_hf_chain:
+            _r2_pre_mask_sum = float(np.sum(r2))
+            _r2_unb_pre_mask_sum = float(np.sum(r2_unb))
+        if (self.config.aec3_post_stationarity_zero_enabled
+                and _filter_converged_enough
+                and _stationary_mask is not None
+                and np.any(_stationary_mask)):
+            r2 = np.where(_stationary_mask, 0.0, r2).astype(np.float32)
+            r2_unb = np.where(
+                _stationary_mask, 0.0, r2_unb
+            ).astype(np.float32)
 
         # AEC3 contract (echo_remover.cc:452):
         #   nearend_spectrum = UsableLinearEstimate() ? E² : Y²
-        nearend_pwr = error_psd if self._aec3_state.usable_linear_estimate() else near_psd
+        # v3.21.5 Phase 1 Sprint A — apply AEC3 echo_remover.cc:495-501
+        # clamp `E2 = min(E2, Y2)` when usable_linear is True, gated by
+        # `e2_y2_clamp_enabled` (default False = pre-v3.21.5 byte-equal).
+        if self._aec3_state.usable_linear_estimate():
+            if self.config.e2_y2_clamp_enabled:
+                nearend_pwr = np.minimum(error_psd, near_psd).astype(np.float32)
+            else:
+                nearend_pwr = error_psd
+        else:
+            nearend_pwr = near_psd
         # v3.21 Phase C.1 — comfort-noise spectrum derived from per-bin noise
         # floor EMA (mirrors res_refactored/noise_floor_cng.py:23-31). Lazy
         # init at first frame; update only when DT is quiet (legacy
@@ -3511,6 +3542,15 @@ class AEC:
         # v3.21.2 S1 — HF damage causal chain trace. Flag-gated; default OFF
         # → zero overhead (no append, no compute) and byte-equal preserved.
         # Captures the 5-link chain end-to-end in one row per frame.
+        #
+        # v3.21.5 Phase 1 Sprint 0: extended with port-fidelity evidence
+        # fields for Sprint A (E2 clamp / echo_remover.cc:495), Sprint B
+        # (stationarity gate / echo_audibility.h:40 + residual_echo_estimator.cc:303),
+        # Sprint C (reverb tail audit / reverb_frequency_response.py:61-65),
+        # and NE state staleness (REE input vs SG detector update boundary).
+        # Phase 2 trace fields (ERLE clamp, transparent mode, bounded/unbounded
+        # detector sim, min_gain ceiling, LF smoothing) deferred to Phase 2
+        # start per Phase boundary discipline.
         if self.config.trace_hf_chain:
             _erle_arr = self._aec3_state.erle()
             _s2_sum = float(np.sum(echo_psd)) + 1e-30
@@ -3526,6 +3566,54 @@ class AEC:
             _n_bins_local = int(gain.size)
             def _gi(arr, idx):
                 return float(arr[idx]) if arr.size > idx else 0.0
+            # === v3.21.5 Phase 1 Sprint 0 — Sprint A: E2 clamp evidence ===
+            # error_psd and near_psd both shape (n_bins,) float32; pre-clamp
+            # in current code (no min(E2, Y2) applied — that IS the Sprint A
+            # candidate fix per Codex Finding 1).
+            _e2_y2_mask = error_psd > near_psd
+            _e2_y2_frac = float(np.mean(_e2_y2_mask))
+            _e2_y2_frac_hf = (float(np.mean(_e2_y2_mask[32:]))
+                              if _e2_y2_mask.size > 32 else 0.0)
+            _e2_excess_db = 0.0
+            if np.any(_e2_y2_mask):
+                _e2_excess_db = float(10.0 * np.log10(
+                    max(float(np.mean(error_psd[_e2_y2_mask])), 1e-30) /
+                    max(float(np.mean(near_psd[_e2_y2_mask])), 1e-30)
+                ))
+            _usable_linear_now = bool(self._aec3_state.usable_linear_estimate())
+            _nearend_pwr_inflated = bool(np.any(_e2_y2_mask) and _usable_linear_now)
+            # === Sprint B: Stationarity gate evidence ===
+            _stat_mask_fired_frac = (
+                float(np.mean(_stationary_mask))
+                if _stationary_mask is not None else 0.0
+            )
+            _stat_mask_active = bool(
+                _filter_converged_enough
+                and _stationary_mask is not None
+                and np.any(_stationary_mask)
+            )
+            _r2_post_mask_sum_now = float(np.sum(r2))
+            _r2_unb_post_mask_sum_now = float(np.sum(r2_unb))
+            _r2_kill_ratio = (
+                (_r2_pre_mask_sum - _r2_post_mask_sum_now)
+                / max(_r2_pre_mask_sum, 1e-30)
+            )
+            # === Sprint C: Reverb tail audit ===
+            _reverb_fr = getattr(self._aec3_ree, '_reverb_freq_resp', None)
+            _reverb_fallback_active = (_reverb_fr is None)
+            _reverb_tail_max = 0.0
+            if _reverb_fr is not None and hasattr(_reverb_fr, 'tail_response'):
+                _reverb_tail_max = float(np.max(_reverb_fr.tail_response))
+            _n_partitions = int(getattr(self.filter, 'n_partitions', 0))
+            _reverb_delay_within = bool(0 <= _delay_blocks < _n_partitions)
+            # AEC3 canonical direct-path delay source (already exists at
+            # aec_state.py:136; orchestrator currently uses current_delay //
+            # hop_size — this trace quantifies the semantic mismatch).
+            _aec3_dpd = int(self._aec3_state.min_direct_path_filter_delay())
+            # === Bug 4: NE state staleness REE-vs-SG ===
+            _ne_after_gain = bool(_det.is_nearend_state())
+            _ne_prev_for_ree = bool(dominant_ne)
+            _ne_state_changed = (_ne_after_gain != _ne_prev_for_ree)
             self._hf_chain_trace.append({
                 'frame': int(self._frame_count),
                 # Link 1+2 — convergence signal source (bridge.filter_converged)
@@ -3539,7 +3627,7 @@ class AEC:
                 'erle_5': _gi(_erle_arr, 5),
                 'erle_30': _gi(_erle_arr, 30),
                 'erle_100': _gi(_erle_arr, 100),
-                'usable_linear': bool(self._aec3_state.usable_linear_estimate()),
+                'usable_linear': _usable_linear_now,
                 # Link 4 — Residual echo R²
                 'r2_5': _gi(r2, 5),
                 'r2_30': _gi(r2, 30),
@@ -3561,6 +3649,40 @@ class AEC:
                 'gain_100': _gi(gain, 100),
                 'gain_200': _gi(gain, 200),
                 'gain_n_bins': _n_bins_local,
+                # === v3.21.5 Phase 1 Sprint 0 extensions ===
+                # Sprint A — E2 clamp evidence (AEC3 echo_remover.cc:495-501)
+                'e2_gt_y2_frac': _e2_y2_frac,
+                'e2_gt_y2_frac_hf': _e2_y2_frac_hf,
+                'e2_excess_db_mean': _e2_excess_db,
+                'nearend_pwr_inflated': _nearend_pwr_inflated,
+                # Sprint B — Stationarity gate evidence (AEC3 echo_audibility.h:40
+                # + residual_echo_estimator.cc:303 config-gated by
+                # use_stationarity_properties; our orchestrator bypasses gate)
+                'stationary_mask_fired_frac': _stat_mask_fired_frac,
+                'stationary_mask_active': _stat_mask_active,
+                'r2_pre_mask_sum': _r2_pre_mask_sum,
+                'r2_post_mask_sum': _r2_post_mask_sum_now,
+                'r2_unb_pre_mask_sum': _r2_unb_pre_mask_sum,
+                'r2_unb_post_mask_sum': _r2_unb_post_mask_sum_now,
+                'r2_mask_kill_ratio': _r2_kill_ratio,
+                # Sprint C — Reverb tail update audit (3 early-return paths in
+                # reverb_frequency_response.py:61-65; aec3_min_direct_path is
+                # the canonical AEC3 source for direct-path delay)
+                'reverb_fallback_active': _reverb_fallback_active,
+                'reverb_freq_resp_tail_max': _reverb_tail_max,
+                'reverb_delay_blocks': int(_delay_blocks),
+                'reverb_delay_within_partitions': _reverb_delay_within,
+                'reverb_stationary_block': bool(_stationary_block),
+                'reverb_filter_q_present': bool(_filter_q is not None),
+                'reverb_update_called': True,
+                'aec3_min_direct_path_blocks': _aec3_dpd,
+                # Bug 4 — NE state staleness REE-vs-SG (REE uses pre-gain NE
+                # state at orchestrator:3424; SG detector updates inside
+                # get_gain at suppression_gain.py:534 — on transition frames
+                # the two chains see inconsistent NE state)
+                'dominant_ne_prev_for_ree': _ne_prev_for_ree,
+                'dominant_ne_after_gain': _ne_after_gain,
+                'dominant_ne_state_changed_this_frame': _ne_state_changed,
             })
 
         # Apply gain in spectrum domain, IFFT to fft_size=512, take the

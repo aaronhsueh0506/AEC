@@ -196,6 +196,29 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'shadow_mu_state_aware' not in config_overrides):
         config_overrides['shadow_mu_state_aware'] = (
             os.environ['AEC_SHADOW_MU_STATE'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.5 Phase 1 Sprint A — AEC3 echo_remover.cc:495-501 E2=min(E2,Y2) clamp
+    if ('AEC_E2_Y2_CLAMP' in os.environ
+            and 'e2_y2_clamp_enabled' not in config_overrides):
+        config_overrides['e2_y2_clamp_enabled'] = (
+            os.environ['AEC_E2_Y2_CLAMP'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.5 Sprint B (CLOSED rejected; default-True restored).
+    # See docs/v3_21_5_phase1_b_stationarity_gate_verdict.md and the config
+    # field comment in config.py:237 for the load-bearing safety-net evidence
+    # (60+ DT cohort-tail cases, xQEUtY2 worst -0.602 deg). Set =0 to opt
+    # into AEC3-default-off research; v3.21.6 P4 will re-test after companion
+    # mechanisms ship.
+    if ('AEC_STATIONARITY_ZERO' in os.environ
+            and 'aec3_post_stationarity_zero_enabled' not in config_overrides):
+        config_overrides['aec3_post_stationarity_zero_enabled'] = (
+            os.environ['AEC_STATIONARITY_ZERO'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.5 Sprint C2 — per-bin H_error refresh selector path.
+    # Existing AEC3-aligned code at filters.py:625 + use_per_bin_h_error_refresh
+    # flag (config.py:169, default False). C2 re-evaluates the selector ON TOP
+    # OF Sprint A only baseline; standalone v3.21.4 U4.A retest CLOSED FAIL.
+    if ('AEC_PER_BIN_H_ERROR_REFRESH' in os.environ
+            and 'use_per_bin_h_error_refresh' not in config_overrides):
+        config_overrides['use_per_bin_h_error_refresh'] = (
+            os.environ['AEC_PER_BIN_H_ERROR_REFRESH'].lower() not in ('0', 'false', 'off', 'no'))
     # F-E1 — ERL clip + far_active hysteresis (v3.11 Phase 1 Sprint 5-6)
     if ('AEC_F_E1' in os.environ
             and 'f_e1_enabled' not in config_overrides):

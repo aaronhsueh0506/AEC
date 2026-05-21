@@ -209,6 +209,53 @@ class AecConfig:
     # overhead and byte-equal preserving. Read-only observer.
     trace_hf_chain: bool = False
 
+    # v3.21.5 Phase 1 Sprint A — AEC3 echo_remover.cc:495-501 port-fidelity
+    # fix. Restores the canonical E2 = min(E2, Y2) clamp before passing
+    # nearend_spectrum into SuppressionGain. When usable_linear_estimate()
+    # is True and PBFDKF residual (error_psd) exceeds mic spectrum
+    # (near_psd) on some bins, the unclamped error_psd inflates
+    # nearend_pwr → DominantNearendDetector ENR (= echo/nearend) is biased
+    # low → detector mis-triggers nearend → SuppressionGain enters
+    # nearend_tuning (conservative) → echo leaks through.
+    #
+    # v3.21.5 ship default = True (cumulative bench PASS:
+    # FS_static +0.033 / FS_movement +0.035 dB; DT deg AECMOS-sensitive
+    # but not audible per user spectrogram check; see
+    # docs/v3_21_5_phase1_a_e2_y2_clamp_verdict.md). Set False to opt back
+    # into pre-v3.21.5 behavior (byte-equal vs v3.21.4) for A/B work.
+    e2_y2_clamp_enabled: bool = True
+
+    # v3.21.5 Phase 1 Sprint B — AEC3 echo_audibility.h:40-51 +
+    # residual_echo_estimator.cc:303-313 port-fidelity flag. AEC3's
+    # stationarity-driven R² scaling (0/1 per bin) is gated by
+    # aec_state.UseStationarityProperties(), which reads
+    # `EchoCanceller3Config::EchoAudibility.use_stationarity_properties`
+    # (AEC3 default = false). Our pre-v3.21.5 orchestrator unconditionally
+    # zeroed R² on stationary bins whenever the filter had converged,
+    # ignoring the config.
+    #
+    # v3.21.5 Sprint B verdict (CLOSED 2026-05-21, rejected for v3.21.5):
+    # Setting default=False (= AEC3 default) gave bucket means
+    # FS_static +0.032 / FS_movement +0.048 dB BUT 60+ DT cohort-tail cases
+    # with 1-2 dB formant attenuation (xQEUtY2 worst: 6 catastrophic
+    # segments, 2.8s of full NE-speech suppression in a 40s case, deg
+    # -0.602; full evidence in
+    # docs/v3_21_5_phase1_b_stationarity_gate_verdict.md).
+    #
+    # Root cause: the stationarity zeroing is a load-bearing safety net
+    # compensating for our incomplete AEC3 port (missing companion
+    # ScaleFilter / FilterMisadjustment that AEC3 uses to keep
+    # `is_nearend_state` correctly firing under stationary-far conditions).
+    # Without the zeroing, detector mis-fires NE → far-tuning gain → NE
+    # speech destroyed on cohort tail.
+    #
+    # Default TRUE KEEPS the legacy zeroing (load-bearing for cohort tail).
+    # Set False to opt into AEC3-faithful behavior (research / A-B only).
+    # Re-test scheduled for v3.21.6 P4 AFTER companion mechanisms ported
+    # (P1 FilterAnalyzer + P2 transparent_mode audit + P3 EchoAudibility
+    # config wiring); see ~/.claude/plans/se-aec-aec-main-hazy-lynx.md.
+    aec3_post_stationarity_zero_enabled: bool = True
+
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
     # release behaviour. Setting False reverts the corresponding sub-change
     # to the v3.8.3 baseline behaviour, used for isolating each Plan A
