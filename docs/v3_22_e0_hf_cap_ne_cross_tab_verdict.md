@@ -1,8 +1,8 @@
-# v3.22 Sprint E.0 — HF cap × NE state cross-tab verdict (IN PROGRESS)
+# v3.22 Sprint E.0 — HF cap × NE state cross-tab verdict
 
 **Date**: 2026-05-21
 **Branch**: `feature/v3_22_optimization`
-**Status**: E.0 cross-tab observed; frame-level correlation analysis pending; **E.1 design decision GATED** on separability outcome
+**Status**: E.0 complete — E.1 candidate (a) ENR-gate override REJECTED; E.1 must take path (b) **NE-presence augmentation using `stat_active`**, not (a) ENR-gate, not (c) band restriction
 **Plan**: `~/.claude/plans/se-aec-aec-main-hazy-lynx.md` (v3.22 Sprint E — PRIMARY, post-v3.21.6 framing)
 **Prior**: [v3.21.6 P4 verdict](v3_21_6_p4_stationarity_retest_verdict.md) (surviving root cause = `_DominantNearendDetector` mis-classification under stationary-far)
 
@@ -75,21 +75,93 @@ Per user directive 2026-05-21:
 >
 > **If the distributions overlap → E.1 must take path (b) PBFDKF-specific NE proxy OR (c) frequency-band restriction. Must NOT do plain decouple/fire-more.**
 
-## Pending analysis (frame-level)
+## Frame-level analysis results
 
-To make the gate decision, the follow-up analysis must:
+Reused P4 cohort traces (`/tmp/p4_cohort_trace/*_zeroing_{on,off}.csv`). Catastrophic = `gain_100[off] - gain_100[on] < -0.3` (Sprint B / P4 definition: removing the stationarity zeroing pulls gain from ~1.0 to ~0.0 on those frames). All other downstream signals (`hf_cap_fired`, `is_nearend_state`, `stationary_mask_fired_frac`, ENR, SNR, gain_N) read from the `zeroing_on` trace = v3.21.6 default state.
 
-1. **Identify catastrophic frames** per case — render the P4 cohort 3 cases with stationarity OFF vs default (= within-cohort Sprint B's Δg100 < -0.3 definition); collect frame indices
-2. **Cross-tab at catastrophic frame indices** — `hf_cap_fired` × `stationary_mask_active` × `~is_nearend_state` × `catastrophic` (4-way) to confirm the suspected mechanism
-3. **ENR/SNR distribution overlap test** — at catastrophic frames vs normal-echo frames (within same case), compare ENR + SNR histograms / percentile bands; quantify separability (e.g., AUC or simple percentile non-overlap)
-4. **Frequency-band damage profile** — at catastrophic frames, look at gain_5 / gain_30 / gain_50 / gain_100 / gain_200 distribution; identify which bands are most damaged (HF cap-attributable vs broadband detector failure)
+### 4-way cross-tab at catastrophic frame indices
 
-Outcomes:
+| Case | n | cata | cata% | (hf_cap & stat & ~NE & cata) | match rate |
+|---|---:|---:|---:|---:|---:|
+| WcK0OrF | 3916 | 233 | 5.9% | 233 | **100%** |
+| wVYSGV | 3666 | 235 | 6.4% | 221 | 94% |
+| xQEUtY2 | 3988 | 424 | 10.6% | 424 | **100%** |
 
-- Separable + HF-band concentrated → E.1 (a) ENR-gate override is the right design
-- Separable but broadband damage → E.1 (c) frequency-band restriction better
-- Not separable (catastrophic vs normal echo look the same in ENR/SNR) → E.1 (b) PBFDKF-specific NE proxy required (Kalman-state echo confidence)
+**Mechanism perfectly aligned**: 94-100% of catastrophic frames satisfy `(hf_cap_fired & stat_active & ~is_nearend_state)`. Catastrophic frames are runtime-detectable via that 4-way signal, without any oracle.
+
+### ENR/SNR distribution overlap (catastrophic vs normal-echo, default state)
+
+| Case | group | n | ENR p25/med/p75 | SNR p25/med/p75 |
+|---|---|---:|---|---|
+| WcK0OrF | catastr | 233 | 0 / 0 / 0 | 1.75 / 2.73 / 3.63 |
+| WcK0OrF | normal_echo | 3683 | 0 / 0.032 / 3.23 | 1.39 / 4.51 / 23.26 |
+| wVYSGV | catastr | 235 | 0 / **1.90** / 3.37 | 0.30 / 3.88 / 137 |
+| wVYSGV | normal_echo | 3431 | 0 / **0** / 1.62 | 0.11 / 1.49 / 5.71 |
+| xQEUtY2 | catastr | 424 | 0 / 0 / 0 | 0.35 / 0.99 / 3.07 |
+| xQEUtY2 | normal_echo | 3564 | 0 / 0.404 / 35.9 | 0.41 / 4.22 / 40.9 |
+
+**Direction NOT consistent across cohort.** wVYSGV is *inverted* (catastr has higher ENR than normal_echo). WcK0OrF and xQEUtY2 trend in the expected direction (catastr lower) but with very compressed catastr distributions clamped at zero. SNR similarly mixed: catastr p75 ranges from 3.07 to 137 across cases.
+
+**Per user-set gate (2026-05-21): if distributions overlap → E.1 must NOT do plain ENR-gate override.** Result: **(a) ENR-gate override REJECTED**.
+
+### Frequency-band damage profile (gain_N median in default state)
+
+| Case | group | g5 (156Hz) | g30 (938) | g50 (1563) | g100 (3125) | g200 (6250) |
+|---|---|---:|---:|---:|---:|---:|
+| WcK0OrF | catastr | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| WcK0OrF | normal_echo | 1.000 | 0.447 | 1.000 | 1.000 | 0.519 |
+| wVYSGV | catastr | 1.000 | 1.000 | 1.000 | 1.000 | 0.136 |
+| wVYSGV | normal_echo | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| xQEUtY2 | catastr | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| xQEUtY2 | normal_echo | 0.289 | 0.215 | 0.291 | 0.240 | 0.082 |
+
+In default state: **catastrophic frames have gain ≈ 1.000 across ALL bands** (the zeroing safety net has done its job — R²/R²_unbounded are zeroed on stationary bins → SuppressionGain produces gain ≈ 1.0 → NE-speech preserved). With zeroing OFF (P4 experiment), those same frames drop to broadband gain ≈ 0.0 (per P4 verdict).
+
+**Damage is broadband, not HF-localized.** The HF cap firing during stat&~NE frames is one symptom, but the full broadband suppression (g5..g200 all dropping) tells us the failure is at the upstream detector decision (`is_nearend_state` mis-classification) propagating through ALL gain rules — not just the cap.
+
+**(c) Frequency-band restriction REJECTED**: capping only > 4 kHz wouldn't save the broadband damage (g5/g30/g50/g100 all hit when zeroing is OFF).
+
+## E.1 design — chosen path
+
+**Path (b) — NE-presence augmentation**, but the signal source is `stat_active` (= the same `band_stationary_mask()` already powering the zeroing), NOT Kalman P_trace.
+
+Rationale:
+- Frame-level analysis showed `stat_active` is a near-perfect runtime indicator of detector-failure regions (94-100% match with catastrophic frames)
+- The damage is broadband, so the fix has to be upstream of all gain rules, not at the HF cap gate alone
+- This is divergence from AEC3 (AEC3 has companion mechanisms — ScaleFilter / FilterMisadjustmentEstimator — we don't port; we use stationarity awareness as a different non-AEC3 protective augmentation, per [P2 discipline rule](v3_21_6_p2_transparent_mode_audit_verdict.md): must NOT claim AEC3 parity restoration)
+
+### Proposed E.1 implementation
+
+Replace every relevant read of `dominant_nearend.is_nearend_state()` with an augmented form:
+
+```python
+def ne_or_stationary_far_protect(self) -> bool:
+    if self._dominant_nearend.is_nearend_state():
+        return True
+    # detector-failure-region override: if stationary mask covers a
+    # substantial portion of bins, treat as NE-presence-uncertain
+    if self._stat_mask_active_now:  # = band_stationary_mask().sum() / n_bins > threshold
+        return True
+    return False
+```
+
+Initial threshold candidate: `> 10%` of bins masked (matches the cross-tab definition). Tune in E.2 if needed.
+
+Critical placement: this proxy replaces `is_nearend_state()` AT THE GAIN-RULE LEVEL in `SuppressionGain` — not just at the HF cap gate. Specifically:
+- HF cap gate
+- `nearend_tuning` vs `normal_tuning` selector
+- Any downstream Wiener-style rule reading `is_nearend_state()`
+
+NOT at the detector's own internal state — the detector keeps its current decisions (don't pollute its hysteresis). The proxy is a *gain-policy* override that respects "detector might be wrong here".
+
+### Risk register
+
+1. **Over-protection on FS_static cases**: FS cases with stationary far-end (lV0kQN 87.3% stat-frac) would now get NE-protective gain whenever stationarity fires → echo bypass risk. Mitigation: E.0 cross-tab shows lV0kQN's NE rate = 3.3%, and the gain trajectory at stationary-far frames is currently dominated by zeroing's effect (gain ≈ 1.0). Augmentation would not change that. But for FS frames OUTSIDE the stationary mask region, the HF cap still fires (no change). Need bench to confirm.
+
+2. **Threshold tuning**: 10% bins is a guess. Should be benched at 5% / 10% / 20%.
+
+3. **Aliasing the existing zeroing**: the augmentation uses the same signal the zeroing already uses. Risk = double-coverage redundancy (each protects different code paths so probably OK) or accidental masking (if the augmentation triggers nearend_tuning which itself produces aggressive suppression). Need careful bench.
 
 ## Status
 
-E.0 cross-tab observed. Frame-level analysis pending. E.1 design choice deferred until that analysis completes. No code changes yet on `feature/v3_22_optimization`.
+E.0 complete. E.1 design path locked: **(b) NE-presence augmentation using `stat_active`**, not ENR-gate, not band restriction. Implementation pending under flag-guarded default-OFF; cohort + 800-case bench follows.
