@@ -119,6 +119,17 @@ class AecConfig:
     # Indirectly closes v3.21.5 Sprint C reverb-tail blocker.
     filter_analyzer_enabled: bool = True
 
+    # v3.21.6 Sprint P2 — Re-enable AEC3 Legacy TransparentMode (was
+    # hard-disabled in orchestrator with stale rationale citing legacy
+    # 10-frame ERLE latch; that latch was retired in v3.21 by the
+    # per-frame e²<0.5·y² gate in _aec3_post). When True: AecState
+    # instantiates LegacyTransparentMode + threads any_filter_consistent
+    # from P1's FilterAnalyzer. P2 also corrects 3 block-unit constants
+    # in transparent_mode.py that were left at AEC3's 4ms-block values
+    # (now 2.5x'd to match our 10ms-hop wall-clock semantics). Default
+    # OFF preserves v3.21.5 byte-equal anchor until cohort verify.
+    transparent_mode_enabled: bool = False
+
     # v3.18 Phase C.B — FilteringQualityAnalyzer audit-only port.
     # Multi-gate usable_linear_estimate combining startup_timer +
     # reset_timer + convergence_seen + not_transparent (far_active_recent).

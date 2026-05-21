@@ -15,20 +15,27 @@ Rate notes (AEC3 N * kNumBlocksPerSecond -> our N * HOPS_PER_SECOND):
   - 20 s non-converged seq bound           -> 2000 hops
   - 60 s active-non-converged seq bound    -> 6000 hops
   - 6  s strong-render-without-converge    -> 600  hops
+
+P2 correction (2026-05-21): three constants below were left at AEC3's
+4ms-block values with a "blocks not hops -> stays N" comment that
+misidentified them as block-count semantics. They are wall-clock
+durations expressed as block counts; the equivalent in our 10ms hops
+is the AEC3 value / 2.5. Pre-P2 the threshold gap was dormant because
+``enable_transparent_mode=False`` skipped the subsystem entirely.
 """
 from ._constants import HOPS_PER_SECOND
 
 
 _CONVERGED_INIT = 10_000              # large init counter (AEC3 kBlocksSinceConvergencedFilterInit)
 _CONSISTENT_INIT = 10_000             # AEC3 kBlocksSinceConsistentEstimateInit
-_SANE_FILTER_DELAY_BLOCKS = 5         # AEC3 "filter_delay_blocks < 5"; blocks not hops -> stays 5
+_SANE_FILTER_DELAY_HOPS = 2           # AEC3 "filter_delay_blocks < 5"; 5*4ms = 20ms -> 2 hops
 _SANE_FILTER_RECENT_INIT_HOPS = 5 * HOPS_PER_SECOND   # 5 s -> 500 hops
 _SANE_FILTER_RECENT_ACTIVE_HOPS = 30 * HOPS_PER_SECOND  # 30 s -> 3000 hops
 _NON_CONVERGED_SEQ_BOUND_HOPS = 20 * HOPS_PER_SECOND  # 20 s -> 2000 hops
 _ACTIVE_NON_CONVERGED_HOPS = 60 * HOPS_PER_SECOND     # 60 s -> 6000 hops
 _STRONG_RENDER_HOPS = 6 * HOPS_PER_SECOND             # 6 s -> 600 hops
-_DIVERGED_SEQ_BOUND = 60                              # blocks not hops -> stays 60
-_NUM_CONVERGED_BLOCKS_HIGH = 50                       # blocks not hops -> stays 50
+_DIVERGED_SEQ_BOUND_HOPS = 24                         # AEC3 60 blocks * 4ms = 240ms -> 24 hops
+_NUM_CONVERGED_BLOCKS_HIGH_HOPS = 20                  # AEC3 50 blocks * 4ms = 200ms -> 20 hops
 
 
 class TransparentMode:
@@ -78,7 +85,7 @@ class TransparentMode:
         if active_render and not saturated_capture:
             self._strong_not_saturated_render_blocks += 1
 
-        if any_filter_consistent and filter_delay_blocks < _SANE_FILTER_DELAY_BLOCKS:
+        if any_filter_consistent and filter_delay_blocks < _SANE_FILTER_DELAY_HOPS:
             self._sane_filter_observed = True
             self._active_blocks_since_sane_filter = 0
         elif active_render:
@@ -109,12 +116,12 @@ class TransparentMode:
             self._diverged_sequence_size = 0
         else:
             self._diverged_sequence_size += 1
-            if self._diverged_sequence_size >= _DIVERGED_SEQ_BOUND:
+            if self._diverged_sequence_size >= _DIVERGED_SEQ_BOUND_HOPS:
                 self._non_converged_sequence_size = _CONVERGED_INIT
 
         if self._active_non_converged_sequence_size > _ACTIVE_NON_CONVERGED_HOPS:
             self._finite_erl_recently_detected = False
-        if self._num_converged_blocks > _NUM_CONVERGED_BLOCKS_HIGH:
+        if self._num_converged_blocks > _NUM_CONVERGED_BLOCKS_HIGH_HOPS:
             self._finite_erl_recently_detected = True
 
         if self._finite_erl_recently_detected:

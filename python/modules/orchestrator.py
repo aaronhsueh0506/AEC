@@ -577,16 +577,14 @@ class AEC:
             )
             import os
             n_bins = int(self.filter.n_freqs)
-            # TransparentMode requires AEC3's SubtractorOutputAnalyzer (not yet
-            # ported) to feed a per-frame "any_filter_converged" pulse. Our
-            # legacy FilterConvergenceAnalyzer is a hard 10-frame >5 dB ERLE
-            # latch which permanently sits at False on hard cases like 9xjhi;
-            # that makes TM falsely activate after 6s of strong render -> kills
-            # usable_linear -> R^2 collapses to nonlinear path forever. Disable
-            # TM until the proper analyzer ports.
+            # v3.21.6 Sprint P2: TransparentMode gating now follows
+            # AecConfig.transparent_mode_enabled (default False until cohort
+            # verify; original disable rationale cited the legacy 10-frame
+            # ERLE latch, retired by the AEC3-style per-frame e²<0.5·y²
+            # gate now computed in _aec3_post).
             self._aec3_state = _Aec3State(_Aec3StateConfig(
                 n_bins=n_bins,
-                enable_transparent_mode=False,
+                enable_transparent_mode=bool(self.config.transparent_mode_enabled),
                 enable_filter_analyzer=bool(self.config.filter_analyzer_enabled),
             ))
             self._aec3_ree = ResidualEchoEstimator(
@@ -1157,7 +1155,7 @@ class AEC:
         # Filter-output-derived state (always cleared):
         self._aec3_state = _Aec3State(_Aec3StateConfig(
             n_bins=n_bins,
-            enable_transparent_mode=False,
+            enable_transparent_mode=bool(self.config.transparent_mode_enabled),
             enable_filter_analyzer=bool(self.config.filter_analyzer_enabled),
         ))
         self._aec3_ree = ResidualEchoEstimator(
@@ -2318,6 +2316,11 @@ class AEC:
                     self._aec3_state.filter_analyzer_peak_index())
                 self._diag['filter_analyzer_max_gain'] = float(
                     self._aec3_state.filter_analyzer_max_echo_path_gain())
+
+            # v3.21.6 Sprint P2 — trace TransparentMode activation rate.
+            if self.config.transparent_mode_enabled:
+                self._diag['transparent_mode_active'] = bool(
+                    self._aec3_state.transparent_mode_active())
 
             # v3.18 Phase C.B — FilteringQualityAnalyzer audit-only update.
             # Multi-gate usable_linear_estimate; outputs to _diag['fq_*'].
@@ -3701,6 +3704,9 @@ class AEC:
                     self._aec3_state.filter_analyzer_peak_index()),
                 'filter_analyzer_max_gain': float(
                     self._aec3_state.filter_analyzer_max_echo_path_gain()),
+                # v3.21.6 Sprint P2 — TransparentMode activation rate.
+                'transparent_mode_active': bool(
+                    self._aec3_state.transparent_mode_active()),
                 # Bug 4 — NE state staleness REE-vs-SG (REE uses pre-gain NE
                 # state at orchestrator:3424; SG detector updates inside
                 # get_gain at suppression_gain.py:534 — on transition frames

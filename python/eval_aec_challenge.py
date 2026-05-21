@@ -311,6 +311,8 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         ('AEC_FILTER_MISADJUSTMENT_SCALE_P', 'filter_misadjustment_scale_p', True),
         # v3.18 Phase C.A — FilterAnalyzer audit-only port
         ('AEC_FILTER_ANALYZER', 'filter_analyzer_enabled', True),
+        # v3.21.6 Sprint P2 — AEC3 Legacy TransparentMode re-enable
+        ('AEC_TRANSPARENT_MODE', 'transparent_mode_enabled', True),
     ):
         if _flag in os.environ and _key not in config_overrides:
             _v = os.environ[_flag]
