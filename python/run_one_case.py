@@ -77,10 +77,18 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
     if 'AEC_E2_Y2_CLAMP' in os.environ:
         cfg.e2_y2_clamp_enabled = (
             os.environ['AEC_E2_Y2_CLAMP'].lower() not in ('0', 'false', 'off', 'no'))
-    # v3.21.5 Phase 1 Sprint B — AEC3 stationarity zero gate.
+    # v3.21.5 Sprint B (CLOSED rejected; default=True restored).
+    # Set AEC_STATIONARITY_ZERO=0 to opt into AEC3-default-off research.
     if 'AEC_STATIONARITY_ZERO' in os.environ:
         cfg.aec3_post_stationarity_zero_enabled = (
             os.environ['AEC_STATIONARITY_ZERO'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.5 Sprint C2 — per-bin H_error refresh selector path
+    # (existing code at filters.py:625 + use_per_bin_h_error_refresh flag).
+    # C2 re-evaluates this selector on top of Sprint A only baseline;
+    # the standalone v3.21.4 U4.A retest CLOSED FAIL on v3.21.3 baseline.
+    if 'AEC_PER_BIN_H_ERROR_REFRESH' in os.environ:
+        cfg.use_per_bin_h_error_refresh = (
+            os.environ['AEC_PER_BIN_H_ERROR_REFRESH'].lower() not in ('0', 'false', 'off', 'no'))
     # v3.15 §B3: seed CNG for byte-equal sanity across CLI invocations.
     # Matches eval_aec_challenge.py:325 convention (seed=0 per-case);
     # without this, CNG (np.random.randn at aec.py:2009-2010) was

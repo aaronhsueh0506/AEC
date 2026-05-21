@@ -222,19 +222,35 @@ class AecConfig:
     e2_y2_clamp_enabled: bool = False
 
     # v3.21.5 Phase 1 Sprint B — AEC3 echo_audibility.h:40-51 +
-    # residual_echo_estimator.cc:303-313 port-fidelity fix. AEC3's
+    # residual_echo_estimator.cc:303-313 port-fidelity flag. AEC3's
     # stationarity-driven R² scaling (0/1 per bin) is gated by
     # aec_state.UseStationarityProperties(), which reads
     # `EchoCanceller3Config::EchoAudibility.use_stationarity_properties`
-    # (AEC3 default = false). Our pre-fix orchestrator unconditionally
+    # (AEC3 default = false). Our pre-v3.21.5 orchestrator unconditionally
     # zeroed R² on stationary bins whenever the filter had converged,
-    # ignoring the config — this killed 41% of R² on average across FS
-    # worst-5 cohort (median 0 / 90pct 1.00 — bimodal). Default False here
-    # mirrors AEC3 default (DISABLES the zeroing), restoring port fidelity.
-    # NOTE: default False CHANGES behavior vs pre-v3.21.5 — byte-equal
-    # broken vs v3.21.4 at default is EXPECTED. Set True to opt back into
-    # the (buggy) pre-fix behavior for A/B comparison or regression bisect.
-    aec3_post_stationarity_zero_enabled: bool = False
+    # ignoring the config.
+    #
+    # v3.21.5 Sprint B verdict (CLOSED 2026-05-21, rejected for v3.21.5):
+    # Setting default=False (= AEC3 default) gave bucket means
+    # FS_static +0.032 / FS_movement +0.048 dB BUT 60+ DT cohort-tail cases
+    # with 1-2 dB formant attenuation (xQEUtY2 worst: 6 catastrophic
+    # segments, 2.8s of full NE-speech suppression in a 40s case, deg
+    # -0.602; full evidence in
+    # docs/v3_21_5_phase1_b_stationarity_gate_verdict.md).
+    #
+    # Root cause: the stationarity zeroing is a load-bearing safety net
+    # compensating for our incomplete AEC3 port (missing companion
+    # ScaleFilter / FilterMisadjustment that AEC3 uses to keep
+    # `is_nearend_state` correctly firing under stationary-far conditions).
+    # Without the zeroing, detector mis-fires NE → far-tuning gain → NE
+    # speech destroyed on cohort tail.
+    #
+    # Default TRUE KEEPS the legacy zeroing (load-bearing for cohort tail).
+    # Set False to opt into AEC3-faithful behavior (research / A-B only).
+    # Re-test scheduled for v3.21.6 P4 AFTER companion mechanisms ported
+    # (P1 FilterAnalyzer + P2 transparent_mode audit + P3 EchoAudibility
+    # config wiring); see ~/.claude/plans/se-aec-aec-main-hazy-lynx.md.
+    aec3_post_stationarity_zero_enabled: bool = True
 
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
     # release behaviour. Setting False reverts the corresponding sub-change
