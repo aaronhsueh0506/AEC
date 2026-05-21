@@ -72,6 +72,11 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         plan_b_dt_per_bin_gamma=plan_b_dt_per_bin_gamma,
         trace_hf_chain=bool(trace_hf_chain_path),
     )
+    # v3.21.5 Phase 1 Sprint A — AEC3 echo_remover.cc:495-501 clamp opt-in
+    # via env var (mirrors eval_aec_challenge.py convention).
+    if 'AEC_E2_Y2_CLAMP' in os.environ:
+        cfg.e2_y2_clamp_enabled = (
+            os.environ['AEC_E2_Y2_CLAMP'].lower() not in ('0', 'false', 'off', 'no'))
     # v3.15 §B3: seed CNG for byte-equal sanity across CLI invocations.
     # Matches eval_aec_challenge.py:325 convention (seed=0 per-case);
     # without this, CNG (np.random.randn at aec.py:2009-2010) was

@@ -3495,7 +3495,16 @@ class AEC:
 
         # AEC3 contract (echo_remover.cc:452):
         #   nearend_spectrum = UsableLinearEstimate() ? E² : Y²
-        nearend_pwr = error_psd if self._aec3_state.usable_linear_estimate() else near_psd
+        # v3.21.5 Phase 1 Sprint A — apply AEC3 echo_remover.cc:495-501
+        # clamp `E2 = min(E2, Y2)` when usable_linear is True, gated by
+        # `e2_y2_clamp_enabled` (default False = pre-v3.21.5 byte-equal).
+        if self._aec3_state.usable_linear_estimate():
+            if self.config.e2_y2_clamp_enabled:
+                nearend_pwr = np.minimum(error_psd, near_psd).astype(np.float32)
+            else:
+                nearend_pwr = error_psd
+        else:
+            nearend_pwr = near_psd
         # v3.21 Phase C.1 — comfort-noise spectrum derived from per-bin noise
         # floor EMA (mirrors res_refactored/noise_floor_cng.py:23-31). Lazy
         # init at first frame; update only when DT is quiet (legacy

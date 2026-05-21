@@ -196,6 +196,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'shadow_mu_state_aware' not in config_overrides):
         config_overrides['shadow_mu_state_aware'] = (
             os.environ['AEC_SHADOW_MU_STATE'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.5 Phase 1 Sprint A — AEC3 echo_remover.cc:495-501 E2=min(E2,Y2) clamp
+    if ('AEC_E2_Y2_CLAMP' in os.environ
+            and 'e2_y2_clamp_enabled' not in config_overrides):
+        config_overrides['e2_y2_clamp_enabled'] = (
+            os.environ['AEC_E2_Y2_CLAMP'].lower() not in ('0', 'false', 'off', 'no'))
     # F-E1 — ERL clip + far_active hysteresis (v3.11 Phase 1 Sprint 5-6)
     if ('AEC_F_E1' in os.environ
             and 'f_e1_enabled' not in config_overrides):

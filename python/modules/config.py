@@ -209,6 +209,18 @@ class AecConfig:
     # overhead and byte-equal preserving. Read-only observer.
     trace_hf_chain: bool = False
 
+    # v3.21.5 Phase 1 Sprint A — AEC3 echo_remover.cc:495-501 port-fidelity
+    # fix. Restores the canonical E2 = min(E2, Y2) clamp before passing
+    # nearend_spectrum into SuppressionGain. When usable_linear_estimate()
+    # is True and PBFDKF residual (error_psd) exceeds mic spectrum
+    # (near_psd) on some bins, the unclamped error_psd inflates
+    # nearend_pwr → DominantNearendDetector ENR (= echo/nearend) is biased
+    # low → detector mis-triggers nearend → SuppressionGain enters
+    # nearend_tuning (conservative) → echo leaks through. Default False
+    # preserves pre-v3.21.5 behavior (byte-equal); set True to apply the
+    # AEC3-canonical clamp.
+    e2_y2_clamp_enabled: bool = False
+
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
     # release behaviour. Setting False reverts the corresponding sub-change
     # to the v3.8.3 baseline behaviour, used for isolating each Plan A
