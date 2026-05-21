@@ -7,8 +7,6 @@ AGGRESSIVE / MAXIMUM presets.
 Self-contained: numpy + dataclasses + modules.enums.
 """
 from dataclasses import dataclass, field
-from typing import Optional, List
-import numpy as np
 
 from .enums import AecMode, AecPreset
 
@@ -92,20 +90,6 @@ class AecConfig:
     # If True: also scale Kalman P by scale² (Option A); else P untouched
     # (Option B, AEC3-aligned default).
     filter_misadjustment_scale_p: bool = False
-
-    # v3.19 Phase 3 — B FilterMisadjustment retry per Phase 3.1 design.
-    # When True: gate switches from `_prev_filter_state == 'refined_usable'`
-    # (~0-38% coverage in v3.18) to `fq_usable AND reset_done` (52-86%
-    # coverage from C.B substrate); threshold switches from
-    # `< filter_misadjustment_threshold` (legacy 0.5) to
-    # `< filter_misadjustment_threshold_phase3` (default 2.0, calibrated
-    # for our `_erl_estimate` budget semantics where smoothed clusters
-    # at 10-42× vs AEC3's clustering near 1.0). Requires C.A+C.B+C.C
-    # all ON for AecState back-ref. Default-OFF: byte-equal.
-    # Design: docs/v3_19_phase3_1_b_retry_design.md.
-    filter_misadjustment_use_fq_usable: bool = False
-    filter_misadjustment_reset_done_frames: int = 20
-    filter_misadjustment_threshold_phase3: float = 2.0
 
     # v3.21.6 Sprint P1 — FilterAnalyzer port (AEC3 filter_analyzer.cc).
     # When True: AecState owns single-channel FilterAnalyzer; per frame

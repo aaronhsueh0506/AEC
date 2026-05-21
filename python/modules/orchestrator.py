@@ -12,7 +12,7 @@ import os
 import argparse
 import numpy as np
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import Optional
 import soundfile as sf
 
 # Lazy holder for v3.18 Phase C.B FilteringQualityAnalyzer audit module;
@@ -27,11 +27,10 @@ _FilteringQualityAnalyzer = None
 _BLEND_F31_MIC_EXCESS = 0.7
 
 from .enums import (
-    AecMode, AecPreset, AecFilterState, _FREQ_MODES, _PB_MODES,
+    AecMode, AecPreset, AecFilterState, _FREQ_MODES,
 )
 from .dataclasses import (
-    AecStats, AecResContext, RenderActivityState, FilterConvergenceState,
-    RegimeHandlerDecision, AecEventType, AecEvent, EpcEvent,
+    AecStats, AecResContext, AecEvent, EpcEvent,
 )
 from .delay.legacy_compat import LegacyDelayShim as DelayEstimator
 from .erle import (
@@ -187,41 +186,6 @@ class AEC:
                 self._arc_m_q_boost(filt)
         self._f_e3_handle_epc_fire(source)
 
-    def _handle_delay_change_full(self, source: str) -> None:
-        """v3.18 Phase F.2 — AEC3-aligned full reset for delay_change events.
-
-        Mirrors `webrtc::Subtractor::HandleEchoPathChange` delay branch
-        (subtractor.cc:148-168 `full_reset`): filter weights zeroed
-        (refined + coarse), refined/coarse gains reset to initial,
-        partition size reset to initial. Plus aec_state full cascade
-        in aec_state.cc.
-
-        Our equivalent: Q-boost + Kalman P relax (30 frames) + Kalman
-        P-floor lift (30 frames) + ERL cap + filter-derived-state reset
-        + EPC render forced. Matches today's `delay_shift` site exactly.
-
-        Wired by F.3 behind `aec_event_classification_enabled` for
-        EpcEvent.source == 'delay'.
-        """
-        for filt in [self.filter, self.shadow_filter]:
-            if filt is not None and hasattr(filt, 'Q'):
-                self._arc_m_q_boost(filt)
-                # Kalman P-override attrs are PBFDKF-only. When
-                # shadow_class_nlms=True, the shadow filter is PBFDAF and
-                # has no Kalman state — skip the P-override block on it.
-                # Guard is filter-type, not flag: keeps PBFDKF byte-equal.
-                if isinstance(filt, PBFDKF):
-                    filt._p_max_override = 1.0
-                    filt._p_max_override_frames = 30
-                    filt._p_floor_beta = 1.0
-                    filt._p_floor_beta_frames = 30
-        self._maybe_mark_diverged(source)
-        self._epc_render_forced_remaining = self.config.epc_hangover
-        self._erl_estimate = min(self._erl_estimate, 0.3)
-        if self.config.use_epc_state_reset:
-            self._apply_epc_state_reset(source)
-        self._f_e3_handle_epc_fire(source)
-
     # v3.18 Phase B.2/B.3 — Filter misadjustment estimator + ScaleFilter wiring.
     def _update_misadjustment_estimator(self) -> None:
         """Asymmetric EMA on filter_scale_ratio = echo_psd / (far_psd × ERL).
@@ -294,7 +258,6 @@ class AEC:
         self._misadjustment_smoothed = 1.0
         self._misadjustment_hangover_remaining = (
             self.config.filter_misadjustment_hangover_frames)
-        self._misadjustment_fire_count += 1
 
     # ── EPC-state delegations (state lives in self._epc_det) ─────────────────
     @property
@@ -576,7 +539,6 @@ class AEC:
                 SuppressorConfig, SubbandNearendConfig, _SubbandRegion,
                 EchoAudibilityConfig,
             )
-            import os
             n_bins = int(self.filter.n_freqs)
             # v3.21.6 Sprint P2: TransparentMode gating now follows
             # AecConfig.transparent_mode_enabled (default False until cohort
@@ -757,12 +719,6 @@ class AEC:
             self._misadjustment_smoothed = 1.0
             self._misadjustment_stable_count = 0
             self._misadjustment_hangover_remaining = 0
-            self._misadjustment_fire_count = 0
-            # v3.19 Phase 3 — reset_done counter for fq_usable gate.
-            # Increments per frame when no recent reset event; reset to
-            # 0 on epc_active / main_paused / leakage_diverged_fired.
-            # Used only when filter_misadjustment_use_fq_usable=True.
-            self._misadjustment_reset_done_count = 0
 
         # FilterAnalyzer ownership lives on AecState (v3.21.6 Sprint P1; see
         # python/modules/state/filter_analyzer.py). The orchestrator now
@@ -964,7 +920,6 @@ class AEC:
 
         # Far-end activity + stationarity detector (extracted from inline EMA logic)
         self._render_activity = RenderActivityDetector()
-        self._stat_far_hangover = 0
         self._inst_erle_smooth = 1.0
         self._wn_err_baseline = 1e-8
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
@@ -1003,21 +958,16 @@ class AEC:
         # R² -> DominantNearendDetector -> HF cap -> gain.
         self._hf_chain_trace = []
 
-        # ERLE (raw = filter-only, final = post-RES)
+        # ERLE (raw = filter-only)
         self.near_power = 0.0
         self.error_power = 0.0  # backward compat alias for raw
         self.raw_error_power = 0.0
-        self.final_error_power = 0.0
         self.alpha = 0.95
         # Cumulative ERLE (full-segment average)
         self.near_power_sum = 0.0
         self.error_power_sum = 0.0  # backward compat alias for raw
         self.raw_error_power_sum = 0.0
-        self.final_error_power_sum = 0.0
         # _conv_counter moved to FilterConvergenceAnalyzer (self._convergence)
-
-        # DTD confidence history (one entry per process() call)
-        self.confidence_history = deque(maxlen=1000)
 
     def reset(self):
         self.filter.reset()
@@ -1115,11 +1065,9 @@ class AEC:
         self.near_power = 0.0
         self.error_power = 0.0
         self.raw_error_power = 0.0
-        self.final_error_power = 0.0
         self.near_power_sum = 0.0
         self.error_power_sum = 0.0
         self.raw_error_power_sum = 0.0
-        self.final_error_power_sum = 0.0
         # v3.10.3 — clear cross-case lazy state
         if hasattr(self, '_pending_delay'):
             del self._pending_delay
@@ -1138,7 +1086,6 @@ class AEC:
             self._sat_detector_mic.reset()
         self._saturation_level = 0.0
         self._render_activity.reset()
-        self._stat_far_hangover = 0
         self._inst_erle_smooth = 1.0
         self._wn_err_baseline = 1e-8
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
@@ -1285,10 +1232,8 @@ class AEC:
         self.shadow_err_smooth = 0.0
         self.error_power = 0.0
         self.raw_error_power = 0.0
-        self.final_error_power = 0.0
         self.error_power_sum = 0.0
         self.raw_error_power_sum = 0.0
-        self.final_error_power_sum = 0.0
         # v3.10.3 — near_power EMA must be reset alongside error_power, otherwise
         # get_erle_inst() = near_power / error_power transiently spikes (stale
         # mic EMA / fresh tiny error) and could mis-trigger early convergence.
@@ -1317,7 +1262,6 @@ class AEC:
         self._epc_render_forced_remaining = 0
         self._dt_analyzer.reset()
         self._stat_dt_hangover = 0
-        self._stat_far_hangover = 0
 
         # Coherence DTD's accumulated err/far PSDs (live in _dtd_acc_*)
         if self._dtd_fft_size > 0:
@@ -1754,11 +1698,7 @@ class AEC:
             elif self._dt_advisory_hold_remaining > 0:
                 self._dt_advisory_hold_remaining -= 1
             if self._dt_advisory_hold_remaining > 0:
-                _f = float(self.config.dt_advisory_mu_factor)
-                if isinstance(mu_scale, np.ndarray):
-                    mu_scale = mu_scale * _f
-                else:
-                    mu_scale = mu_scale * _f
+                mu_scale = mu_scale * float(self.config.dt_advisory_mu_factor)
             self._diag['dt_advisory_active'] = bool(self._dt_advisory_hold_remaining > 0)
             self._diag['dt_advisory_hit'] = bool(_adv_hit)
 
@@ -2968,14 +2908,13 @@ class AEC:
         self._limiter_gain = alpha_lim * self._limiter_gain + (1 - alpha_lim) * target_gain
         final_output *= self._limiter_gain
 
-        # ERLE: track raw (filter-only) and final (post-RES) separately
+        # ERLE: track raw (filter-only). Final (post-RES) tracking retired
+        # in cleanup audit — final_error_power / _sum were write-only.
         for i in range(len(near_end)):
             self.near_power = self.alpha * self.near_power + (1 - self.alpha) * near_end[i] ** 2
             self.raw_error_power = self.alpha * self.raw_error_power + (1 - self.alpha) * raw_output[i] ** 2
-            self.final_error_power = self.alpha * self.final_error_power + (1 - self.alpha) * final_output[i] ** 2
         self.near_power_sum += np.sum(near_end ** 2)
         self.raw_error_power_sum += np.sum(raw_output ** 2)
-        self.final_error_power_sum += np.sum(final_output ** 2)
         # Backward compat: error_power = raw (for convergence detection / inst ERLE)
         self.error_power = self.raw_error_power
         self.error_power_sum = self.raw_error_power_sum
@@ -3156,9 +3095,6 @@ class AEC:
         except (NameError, AttributeError):
             pass
         # ── end Round 7 trace ──
-
-        # Record DTD confidence for plotting
-        self.confidence_history.append(self.get_dtd_confidence())
 
         result = final_output.astype(np.float32)
         if _res_context is not None:
