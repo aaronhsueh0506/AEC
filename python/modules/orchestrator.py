@@ -3665,6 +3665,41 @@ class AEC:
             _ne_after_gain = bool(_det.is_nearend_state())
             _ne_prev_for_ree = bool(dominant_ne)
             _ne_state_changed = (_ne_after_gain != _ne_prev_for_ree)
+            # === v3.22 G.0 — D / F / G.1 / H.3 unified triage fields ===
+            # HF region matches existing _e2_y2_frac_hf convention (bin >= 32
+            # = ~1 kHz at 16 kHz SR, 257-bin spectrum). Read-only computes;
+            # all derived from variables already in scope.
+            _hf_start = 32
+            _s2_hf_mean = (float(np.mean(echo_psd[_hf_start:]))
+                           if echo_psd.size > _hf_start else 0.0)
+            _render_hf_mean = (float(np.mean(far_psd[_hf_start:]))
+                               if far_psd.size > _hf_start else 0.0)
+            _s2_to_x2_ratio_hf = _s2_hf_mean / max(_render_hf_mean, 1e-30)
+            # ERLE clamp detection: compare clamped vs unbounded ERLE; if
+            # clamped < unbounded (modulo float rounding) the cap fired.
+            _erle_unb = self._aec3_state.erle_unbounded()
+            _erle_hf_seg = (_erle_arr[_hf_start:]
+                            if _erle_arr.size > _hf_start else np.array([]))
+            _erle_unb_hf_seg = (_erle_unb[_hf_start:]
+                                if _erle_unb.size > _hf_start else np.array([]))
+            _erle_hf_mean = (float(np.mean(_erle_hf_seg))
+                             if _erle_hf_seg.size else 0.0)
+            _erle_hf_at_max_frac = 0.0
+            if _erle_hf_seg.size and _erle_unb_hf_seg.size:
+                _erle_hf_at_max_frac = float(np.mean(
+                    _erle_hf_seg < _erle_unb_hf_seg * 0.99
+                ))
+            # Reverb-tail dead-streak counter (consecutive frames where
+            # `reverb_freq_resp_tail_max` is non-positive). Lazy-init; lives
+            # on self because the trace block only fires when trace_hf_chain
+            # is True, but the counter must persist across frames inside
+            # that trace session.
+            if _reverb_tail_max <= 0.0:
+                self._reverb_tail_dead_counter = int(
+                    getattr(self, '_reverb_tail_dead_counter', 0)) + 1
+            else:
+                self._reverb_tail_dead_counter = 0
+            _reverb_tail_dead_frames = int(self._reverb_tail_dead_counter)
             self._hf_chain_trace.append({
                 'frame': int(self._frame_count),
                 # Link 1+2 — convergence signal source (bridge.filter_converged)
@@ -3746,6 +3781,20 @@ class AEC:
                 'dominant_ne_prev_for_ree': _ne_prev_for_ree,
                 'dominant_ne_after_gain': _ne_after_gain,
                 'dominant_ne_state_changed_this_frame': _ne_state_changed,
+                # === v3.22 G.0 triage fields ===
+                # D — hybrid residual / nonlinear HF floor gate
+                's2_hf_mean': _s2_hf_mean,
+                'render_hf_mean': _render_hf_mean,
+                's2_to_x2_ratio_hf': _s2_to_x2_ratio_hf,
+                # G.1 / H.3 — ERLE clamp widening gate (detects "ERLE clamp
+                # is binding HF bins"; signal source is clamped vs unbounded
+                # ERLE diff)
+                'erle_hf_mean': _erle_hf_mean,
+                'erle_hf_at_max_frac': _erle_hf_at_max_frac,
+                # F — reverb tail dead fallback gate (consecutive frames
+                # with reverb_freq_resp_tail_max <= 0 → cap-driven dead-tail
+                # state that the AEC3 estimator can't escape unaided)
+                'reverb_tail_dead_frames': _reverb_tail_dead_frames,
             })
 
         # Apply gain in spectrum domain, IFFT to fft_size=512, take the
