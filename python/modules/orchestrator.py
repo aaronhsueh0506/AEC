@@ -3471,12 +3471,16 @@ class AEC:
         #
         # v3.21.5 Phase 1 Sprint 0: refactored to compute the mask once
         # (used by both the gate AND trace_hf_chain stationarity evidence
-        # fields). At default trace_hf_chain=False, mask is only computed
-        # when _filter_converged_enough (same as pre-refactor) → byte-equal
-        # preserved. The extra `_stationary_mask is not None` guard in the
-        # gate is a no-op whenever _filter_converged_enough is True.
+        # fields).
+        # v3.21.5 Phase 1 Sprint B: gate the zeroing on
+        # `aec3_post_stationarity_zero_enabled` config flag (default False
+        # mirrors AEC3 EchoAudibility.use_stationarity_properties default).
+        # This restores AEC3 port fidelity — the pre-v3.21.5 unconditional
+        # zeroing was a config-bypass bug per Codex Finding 2.
         _need_stationary_mask = (
-            self.config.trace_hf_chain or _filter_converged_enough
+            self.config.trace_hf_chain
+            or (self.config.aec3_post_stationarity_zero_enabled
+                and _filter_converged_enough)
         )
         _stationary_mask = (
             self._aec3_stationarity.band_stationary_mask()
@@ -3485,7 +3489,8 @@ class AEC:
         if self.config.trace_hf_chain:
             _r2_pre_mask_sum = float(np.sum(r2))
             _r2_unb_pre_mask_sum = float(np.sum(r2_unb))
-        if (_filter_converged_enough
+        if (self.config.aec3_post_stationarity_zero_enabled
+                and _filter_converged_enough
                 and _stationary_mask is not None
                 and np.any(_stationary_mask)):
             r2 = np.where(_stationary_mask, 0.0, r2).astype(np.float32)

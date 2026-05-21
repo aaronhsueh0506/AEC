@@ -201,6 +201,13 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'e2_y2_clamp_enabled' not in config_overrides):
         config_overrides['e2_y2_clamp_enabled'] = (
             os.environ['AEC_E2_Y2_CLAMP'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.5 Phase 1 Sprint B — AEC3 echo_audibility config gate restore.
+    # Default False (= AEC3 default) DISABLES the post-warmup stationarity
+    # zeroing; set True to opt back into pre-v3.21.5 buggy behavior (for A/B).
+    if ('AEC_STATIONARITY_ZERO' in os.environ
+            and 'aec3_post_stationarity_zero_enabled' not in config_overrides):
+        config_overrides['aec3_post_stationarity_zero_enabled'] = (
+            os.environ['AEC_STATIONARITY_ZERO'].lower() not in ('0', 'false', 'off', 'no'))
     # F-E1 — ERL clip + far_active hysteresis (v3.11 Phase 1 Sprint 5-6)
     if ('AEC_F_E1' in os.environ
             and 'f_e1_enabled' not in config_overrides):

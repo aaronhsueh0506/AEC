@@ -77,6 +77,10 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
     if 'AEC_E2_Y2_CLAMP' in os.environ:
         cfg.e2_y2_clamp_enabled = (
             os.environ['AEC_E2_Y2_CLAMP'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.5 Phase 1 Sprint B — AEC3 stationarity zero gate.
+    if 'AEC_STATIONARITY_ZERO' in os.environ:
+        cfg.aec3_post_stationarity_zero_enabled = (
+            os.environ['AEC_STATIONARITY_ZERO'].lower() not in ('0', 'false', 'off', 'no'))
     # v3.15 §B3: seed CNG for byte-equal sanity across CLI invocations.
     # Matches eval_aec_challenge.py:325 convention (seed=0 per-case);
     # without this, CNG (np.random.randn at aec.py:2009-2010) was

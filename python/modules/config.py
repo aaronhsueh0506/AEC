@@ -221,6 +221,21 @@ class AecConfig:
     # AEC3-canonical clamp.
     e2_y2_clamp_enabled: bool = False
 
+    # v3.21.5 Phase 1 Sprint B — AEC3 echo_audibility.h:40-51 +
+    # residual_echo_estimator.cc:303-313 port-fidelity fix. AEC3's
+    # stationarity-driven R² scaling (0/1 per bin) is gated by
+    # aec_state.UseStationarityProperties(), which reads
+    # `EchoCanceller3Config::EchoAudibility.use_stationarity_properties`
+    # (AEC3 default = false). Our pre-fix orchestrator unconditionally
+    # zeroed R² on stationary bins whenever the filter had converged,
+    # ignoring the config — this killed 41% of R² on average across FS
+    # worst-5 cohort (median 0 / 90pct 1.00 — bimodal). Default False here
+    # mirrors AEC3 default (DISABLES the zeroing), restoring port fidelity.
+    # NOTE: default False CHANGES behavior vs pre-v3.21.5 — byte-equal
+    # broken vs v3.21.4 at default is EXPECTED. Set True to opt back into
+    # the (buggy) pre-fix behavior for A/B comparison or regression bisect.
+    aec3_post_stationarity_zero_enabled: bool = False
+
     # P1.0 Plan A internal attribution toggles. Default True keeps v3.10.4
     # release behaviour. Setting False reverts the corresponding sub-change
     # to the v3.8.3 baseline behaviour, used for isolating each Plan A
