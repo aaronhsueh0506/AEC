@@ -7,8 +7,6 @@ AGGRESSIVE / MAXIMUM presets.
 Self-contained: numpy + dataclasses + modules.enums.
 """
 from dataclasses import dataclass, field
-from typing import Optional, List
-import numpy as np
 
 from .enums import AecMode, AecPreset
 
@@ -93,20 +91,6 @@ class AecConfig:
     # (Option B, AEC3-aligned default).
     filter_misadjustment_scale_p: bool = False
 
-    # v3.19 Phase 3 — B FilterMisadjustment retry per Phase 3.1 design.
-    # When True: gate switches from `_prev_filter_state == 'refined_usable'`
-    # (~0-38% coverage in v3.18) to `fq_usable AND reset_done` (52-86%
-    # coverage from C.B substrate); threshold switches from
-    # `< filter_misadjustment_threshold` (legacy 0.5) to
-    # `< filter_misadjustment_threshold_phase3` (default 2.0, calibrated
-    # for our `_erl_estimate` budget semantics where smoothed clusters
-    # at 10-42× vs AEC3's clustering near 1.0). Requires C.A+C.B+C.C
-    # all ON for AecState back-ref. Default-OFF: byte-equal.
-    # Design: docs/v3_19_phase3_1_b_retry_design.md.
-    filter_misadjustment_use_fq_usable: bool = False
-    filter_misadjustment_reset_done_frames: int = 20
-    filter_misadjustment_threshold_phase3: float = 2.0
-
     # v3.21.6 Sprint P1 — FilterAnalyzer port (AEC3 filter_analyzer.cc).
     # When True: AecState owns single-channel FilterAnalyzer; per frame
     # IFFTs PBFDAF partitions → 3-tap 600 Hz HPF → region-sweep peak
@@ -118,6 +102,37 @@ class AecConfig:
     # FS_movement +0.036 vs v3.21.5; DT buckets within ±0.01; NE flat.
     # Indirectly closes v3.21.5 Sprint C reverb-tail blocker.
     filter_analyzer_enabled: bool = True
+
+    # v3.22 Sprint E.1 — NE-presence augmentation using stationary mask
+    # (PBFDKF-port intentional divergence; NOT AEC3 parity). When True,
+    # SuppressionGain's 4 gain-policy consumer sites (HF cap gate,
+    # max-inc selector, LF-smoothing dec selector, ENR-EMR tuning selector)
+    # read an augmented NE-presence proxy:
+    #   is_nearend_state() OR (stat_mask_frac > stat_aware_ne_proxy_threshold)
+    # where stat_mask_frac is the fraction of bins flagged stationary by
+    # _aec3_stationarity.band_stationary_mask(). Designed to cover the
+    # DominantNearendDetector failure region on stationary-far conditions
+    # (v3.21.6 P4 root cause). Default-OFF preserves v3.21.6 byte-equal.
+    # Detector hysteresis untouched; public is_dominant_nearend() unchanged.
+    # See docs/v3_22_e0_hf_cap_ne_cross_tab_verdict.md.
+    e_stat_aware_ne_proxy_enabled: bool = False
+    e_stat_aware_ne_proxy_threshold: float = 0.10  # 10% bins masked
+
+    # v3.22 Sprint F — Reverb tail dead-fallback (intentional divergence
+    # from AEC3; AEC3 has no equivalent safety net). When the residual-echo
+    # estimator's reverb frequency response can't update for an extended
+    # streak (FilterAnalyzer preconditions fail on some FS cases — e.g.
+    # LN18k5r8 100% tail-dead through entire case, s90M7MOT 73.5%), inject
+    # a conservative late-reflection mass into R²_unb so SuppressionGain
+    # still sees the late-tail echo presence. Fires only when the dead
+    # streak >= reverb_tail_dead_threshold_frames. Strength is multiplied
+    # into render_psd as `render_psd * strength`, mimicking ~strength
+    # fraction of unsuppressed reverb tail. Conservative initial defaults;
+    # 800-case bench drives ship/reject. Default OFF preserves byte-equal.
+    # See docs/v3_22_g0_triage_verdict.md (F PROCEED 2/8 cohort signal).
+    reverb_tail_dead_fallback_enabled: bool = False
+    reverb_tail_dead_threshold_frames: int = 50      # 500 ms at 10 ms hop
+    reverb_tail_dead_fallback_strength: float = 0.25  # conservative
 
     # v3.21.6 Sprint P2 — Re-enable AEC3 Legacy TransparentMode (was
     # hard-disabled in orchestrator with stale rationale citing legacy

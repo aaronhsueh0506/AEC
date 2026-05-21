@@ -12,7 +12,7 @@ import os
 import argparse
 import numpy as np
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import Optional
 import soundfile as sf
 
 # Lazy holder for v3.18 Phase C.B FilteringQualityAnalyzer audit module;
@@ -27,11 +27,10 @@ _FilteringQualityAnalyzer = None
 _BLEND_F31_MIC_EXCESS = 0.7
 
 from .enums import (
-    AecMode, AecPreset, AecFilterState, _FREQ_MODES, _PB_MODES,
+    AecMode, AecPreset, AecFilterState, _FREQ_MODES,
 )
 from .dataclasses import (
-    AecStats, AecResContext, RenderActivityState, FilterConvergenceState,
-    RegimeHandlerDecision, AecEventType, AecEvent, EpcEvent,
+    AecStats, AecResContext, AecEvent, EpcEvent,
 )
 from .delay.legacy_compat import LegacyDelayShim as DelayEstimator
 from .erle import (
@@ -187,41 +186,6 @@ class AEC:
                 self._arc_m_q_boost(filt)
         self._f_e3_handle_epc_fire(source)
 
-    def _handle_delay_change_full(self, source: str) -> None:
-        """v3.18 Phase F.2 — AEC3-aligned full reset for delay_change events.
-
-        Mirrors `webrtc::Subtractor::HandleEchoPathChange` delay branch
-        (subtractor.cc:148-168 `full_reset`): filter weights zeroed
-        (refined + coarse), refined/coarse gains reset to initial,
-        partition size reset to initial. Plus aec_state full cascade
-        in aec_state.cc.
-
-        Our equivalent: Q-boost + Kalman P relax (30 frames) + Kalman
-        P-floor lift (30 frames) + ERL cap + filter-derived-state reset
-        + EPC render forced. Matches today's `delay_shift` site exactly.
-
-        Wired by F.3 behind `aec_event_classification_enabled` for
-        EpcEvent.source == 'delay'.
-        """
-        for filt in [self.filter, self.shadow_filter]:
-            if filt is not None and hasattr(filt, 'Q'):
-                self._arc_m_q_boost(filt)
-                # Kalman P-override attrs are PBFDKF-only. When
-                # shadow_class_nlms=True, the shadow filter is PBFDAF and
-                # has no Kalman state — skip the P-override block on it.
-                # Guard is filter-type, not flag: keeps PBFDKF byte-equal.
-                if isinstance(filt, PBFDKF):
-                    filt._p_max_override = 1.0
-                    filt._p_max_override_frames = 30
-                    filt._p_floor_beta = 1.0
-                    filt._p_floor_beta_frames = 30
-        self._maybe_mark_diverged(source)
-        self._epc_render_forced_remaining = self.config.epc_hangover
-        self._erl_estimate = min(self._erl_estimate, 0.3)
-        if self.config.use_epc_state_reset:
-            self._apply_epc_state_reset(source)
-        self._f_e3_handle_epc_fire(source)
-
     # v3.18 Phase B.2/B.3 — Filter misadjustment estimator + ScaleFilter wiring.
     def _update_misadjustment_estimator(self) -> None:
         """Asymmetric EMA on filter_scale_ratio = echo_psd / (far_psd × ERL).
@@ -294,7 +258,6 @@ class AEC:
         self._misadjustment_smoothed = 1.0
         self._misadjustment_hangover_remaining = (
             self.config.filter_misadjustment_hangover_frames)
-        self._misadjustment_fire_count += 1
 
     # ── EPC-state delegations (state lives in self._epc_det) ─────────────────
     @property
@@ -576,7 +539,6 @@ class AEC:
                 SuppressorConfig, SubbandNearendConfig, _SubbandRegion,
                 EchoAudibilityConfig,
             )
-            import os
             n_bins = int(self.filter.n_freqs)
             # v3.21.6 Sprint P2: TransparentMode gating now follows
             # AecConfig.transparent_mode_enabled (default False until cohort
@@ -611,6 +573,13 @@ class AEC:
                 use_stationarity_properties=bool(
                     self.config.aec3_post_stationarity_zero_enabled),
             )
+            # v3.22 Sprint E.1 — propagate stat-aware NE proxy flag +
+            # threshold into SuppressorConfig (consumed inside
+            # SuppressionGain._ne_state_for_gain_rules).
+            _sg_config.stat_aware_ne_proxy_enabled = bool(
+                self.config.e_stat_aware_ne_proxy_enabled)
+            _sg_config.stat_aware_ne_proxy_threshold = float(
+                self.config.e_stat_aware_ne_proxy_threshold)
             if os.environ.get('AEC_USE_SUBBAND_NE', '0') == '1':
                 _sg_config.use_subband_nearend_detection = True
                 _sg_config.subband_nearend_detection = SubbandNearendConfig(
@@ -643,6 +612,13 @@ class AEC:
             self._aec3_noise_psd = np.zeros(n_bins, dtype=np.float32)
             self._aec3_smooth_cn_gain = np.zeros(n_bins, dtype=np.float32)
             self._aec3_noise_initialized = False
+            # v3.22 Sprint F — Reverb tail dead-streak counter. Counts
+            # consecutive frames where the residual_echo_estimator's reverb
+            # frequency response tail is non-positive (i.e. no late
+            # reflection mass available). Drives the dead-fallback path
+            # when `reverb_tail_dead_fallback_enabled` is True and the
+            # streak exceeds `reverb_tail_dead_threshold_frames`.
+            self._reverb_tail_dead_counter = 0
             pass  # AEC3 chain init scope
 
         # v3.21 Phase C.3 — StationarityEstimator.
@@ -743,12 +719,6 @@ class AEC:
             self._misadjustment_smoothed = 1.0
             self._misadjustment_stable_count = 0
             self._misadjustment_hangover_remaining = 0
-            self._misadjustment_fire_count = 0
-            # v3.19 Phase 3 — reset_done counter for fq_usable gate.
-            # Increments per frame when no recent reset event; reset to
-            # 0 on epc_active / main_paused / leakage_diverged_fired.
-            # Used only when filter_misadjustment_use_fq_usable=True.
-            self._misadjustment_reset_done_count = 0
 
         # FilterAnalyzer ownership lives on AecState (v3.21.6 Sprint P1; see
         # python/modules/state/filter_analyzer.py). The orchestrator now
@@ -950,7 +920,6 @@ class AEC:
 
         # Far-end activity + stationarity detector (extracted from inline EMA logic)
         self._render_activity = RenderActivityDetector()
-        self._stat_far_hangover = 0
         self._inst_erle_smooth = 1.0
         self._wn_err_baseline = 1e-8
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
@@ -989,21 +958,16 @@ class AEC:
         # R² -> DominantNearendDetector -> HF cap -> gain.
         self._hf_chain_trace = []
 
-        # ERLE (raw = filter-only, final = post-RES)
+        # ERLE (raw = filter-only)
         self.near_power = 0.0
         self.error_power = 0.0  # backward compat alias for raw
         self.raw_error_power = 0.0
-        self.final_error_power = 0.0
         self.alpha = 0.95
         # Cumulative ERLE (full-segment average)
         self.near_power_sum = 0.0
         self.error_power_sum = 0.0  # backward compat alias for raw
         self.raw_error_power_sum = 0.0
-        self.final_error_power_sum = 0.0
         # _conv_counter moved to FilterConvergenceAnalyzer (self._convergence)
-
-        # DTD confidence history (one entry per process() call)
-        self.confidence_history = deque(maxlen=1000)
 
     def reset(self):
         self.filter.reset()
@@ -1101,11 +1065,9 @@ class AEC:
         self.near_power = 0.0
         self.error_power = 0.0
         self.raw_error_power = 0.0
-        self.final_error_power = 0.0
         self.near_power_sum = 0.0
         self.error_power_sum = 0.0
         self.raw_error_power_sum = 0.0
-        self.final_error_power_sum = 0.0
         # v3.10.3 — clear cross-case lazy state
         if hasattr(self, '_pending_delay'):
             del self._pending_delay
@@ -1124,7 +1086,6 @@ class AEC:
             self._sat_detector_mic.reset()
         self._saturation_level = 0.0
         self._render_activity.reset()
-        self._stat_far_hangover = 0
         self._inst_erle_smooth = 1.0
         self._wn_err_baseline = 1e-8
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
@@ -1271,10 +1232,8 @@ class AEC:
         self.shadow_err_smooth = 0.0
         self.error_power = 0.0
         self.raw_error_power = 0.0
-        self.final_error_power = 0.0
         self.error_power_sum = 0.0
         self.raw_error_power_sum = 0.0
-        self.final_error_power_sum = 0.0
         # v3.10.3 — near_power EMA must be reset alongside error_power, otherwise
         # get_erle_inst() = near_power / error_power transiently spikes (stale
         # mic EMA / fresh tiny error) and could mis-trigger early convergence.
@@ -1303,7 +1262,6 @@ class AEC:
         self._epc_render_forced_remaining = 0
         self._dt_analyzer.reset()
         self._stat_dt_hangover = 0
-        self._stat_far_hangover = 0
 
         # Coherence DTD's accumulated err/far PSDs (live in _dtd_acc_*)
         if self._dtd_fft_size > 0:
@@ -1740,11 +1698,7 @@ class AEC:
             elif self._dt_advisory_hold_remaining > 0:
                 self._dt_advisory_hold_remaining -= 1
             if self._dt_advisory_hold_remaining > 0:
-                _f = float(self.config.dt_advisory_mu_factor)
-                if isinstance(mu_scale, np.ndarray):
-                    mu_scale = mu_scale * _f
-                else:
-                    mu_scale = mu_scale * _f
+                mu_scale = mu_scale * float(self.config.dt_advisory_mu_factor)
             self._diag['dt_advisory_active'] = bool(self._dt_advisory_hold_remaining > 0)
             self._diag['dt_advisory_hit'] = bool(_adv_hit)
 
@@ -2954,14 +2908,13 @@ class AEC:
         self._limiter_gain = alpha_lim * self._limiter_gain + (1 - alpha_lim) * target_gain
         final_output *= self._limiter_gain
 
-        # ERLE: track raw (filter-only) and final (post-RES) separately
+        # ERLE: track raw (filter-only). Final (post-RES) tracking retired
+        # in cleanup audit — final_error_power / _sum were write-only.
         for i in range(len(near_end)):
             self.near_power = self.alpha * self.near_power + (1 - self.alpha) * near_end[i] ** 2
             self.raw_error_power = self.alpha * self.raw_error_power + (1 - self.alpha) * raw_output[i] ** 2
-            self.final_error_power = self.alpha * self.final_error_power + (1 - self.alpha) * final_output[i] ** 2
         self.near_power_sum += np.sum(near_end ** 2)
         self.raw_error_power_sum += np.sum(raw_output ** 2)
-        self.final_error_power_sum += np.sum(final_output ** 2)
         # Backward compat: error_power = raw (for convergence detection / inst ERLE)
         self.error_power = self.raw_error_power
         self.error_power_sum = self.raw_error_power_sum
@@ -3142,9 +3095,6 @@ class AEC:
         except (NameError, AttributeError):
             pass
         # ── end Round 7 trace ──
-
-        # Record DTD confidence for plotting
-        self.confidence_history.append(self.get_dtd_confidence())
 
         result = final_output.astype(np.float32)
         if _res_context is not None:
@@ -3496,6 +3446,47 @@ class AEC:
             dominant_nearend=dominant_ne,
         )
 
+        # v3.22 Sprint F — Reverb tail dead-streak tracking + fallback.
+        # Always update the counter (single source of truth for both the
+        # production fallback path and the trace_hf_chain audit field).
+        # `_reverb_fr` is the residual-echo-estimator's tracked frequency
+        # response; its `.tail_response` is the per-bin late-reflection
+        # mass. AEC3 estimator can fail to update under specific filter /
+        # delay / stationarity preconditions; on cohort tail (LN18k5r8 /
+        # s90M7MOT) that produces a permanent zero tail and an unprotected
+        # FS HF echo channel. Tail-dead = max(tail_response) <= 0.
+        _reverb_fr_now = getattr(self._aec3_ree, '_reverb_freq_resp', None)
+        _reverb_tail_max_now = 0.0
+        if (_reverb_fr_now is not None
+                and hasattr(_reverb_fr_now, 'tail_response')):
+            _reverb_tail_max_now = float(
+                np.max(_reverb_fr_now.tail_response))
+        if _reverb_tail_max_now <= 0.0:
+            self._reverb_tail_dead_counter = int(
+                self._reverb_tail_dead_counter) + 1
+        else:
+            self._reverb_tail_dead_counter = 0
+        # Fallback injection into BOTH R² and R²_unb. SuppressionGain's
+        # `_lower_band_gain` reads R² (residual_echo_spectrum) for the
+        # gain computation; R²_unb only feeds DominantNearendDetector's
+        # ENR. Adding to r2_unb only would leave the gain rule unmoved
+        # (cohort sanity gate (a) showed Δg100 mean = 0.0 on LN18k5r8
+        # when injecting r2_unb only). AEC3's own reverb_tail mass goes
+        # to both bounded and unbounded R² (residual_echo_estimator.cc).
+        # Conservative: scale rendering power by `strength`; mimics
+        # ~strength fraction of unsuppressed late reverb. Placed before
+        # the stationarity zeroing block so the zeroing can still protect
+        # stationary-far NE-presence regions from double-suppression.
+        # Default OFF preserves byte-equal.
+        if (self.config.reverb_tail_dead_fallback_enabled
+                and self._reverb_tail_dead_counter
+                >= int(self.config.reverb_tail_dead_threshold_frames)):
+            _fallback_strength = float(
+                self.config.reverb_tail_dead_fallback_strength)
+            _fallback_mass = (far_psd * _fallback_strength).astype(np.float32)
+            r2 = (r2 + _fallback_mass).astype(np.float32)
+            r2_unb = (r2_unb + _fallback_mass).astype(np.float32)
+
         # v3.21 Phase C.3 (back half) — Stationarity-driven R² scaling
         # (residual_echo_estimator.cc:303-313). Zero R²/R²_unbounded on
         # stationary bands once the filter has had time to converge so the
@@ -3513,9 +3504,13 @@ class AEC:
         # in at init.
         _use_stationarity = bool(
             self._aec3_sg_config.echo_audibility.use_stationarity_properties)
+        # v3.22 Sprint E.1 — the stat-aware NE proxy in SuppressionGain
+        # also needs the mask when its flag is ON (regardless of zeroing
+        # gate state or warmup).
         _need_stationary_mask = (
             self.config.trace_hf_chain
             or (_use_stationarity and _filter_converged_enough)
+            or bool(self.config.e_stat_aware_ne_proxy_enabled)
         )
         _stationary_mask = (
             self._aec3_stationarity.band_stationary_mask()
@@ -3564,6 +3559,10 @@ class AEC:
             + (1.0 - _alpha_n) * error_psd
         ).astype(np.float32)
         comfort_noise = self._aec3_noise_psd
+        # v3.22 Sprint E.1 — feed per-bin stationary mask to SuppressionGain
+        # for its NE-presence proxy. Reuses _stationary_mask computed above
+        # for the existing zeroing block (no extra compute). Default OFF:
+        # SuppressionGain ignores the kwarg, behavior unchanged.
         gain = self._aec3_sg.get_gain(
             aec_state=self._aec3_state,
             nearend_spectrum=nearend_pwr,
@@ -3572,6 +3571,7 @@ class AEC:
             comfort_noise_spectrum=comfort_noise,
             render_block=render_block_scaled,
             clock_drift=False,
+            stationary_mask=_stationary_mask,
         )
 
         # v3.21.2 S1 — HF damage causal chain trace. Flag-gated; default OFF
@@ -3649,6 +3649,38 @@ class AEC:
             _ne_after_gain = bool(_det.is_nearend_state())
             _ne_prev_for_ree = bool(dominant_ne)
             _ne_state_changed = (_ne_after_gain != _ne_prev_for_ree)
+            # === v3.22 G.0 — D / F / G.1 / H.3 unified triage fields ===
+            # HF region matches existing _e2_y2_frac_hf convention (bin >= 32
+            # = ~1 kHz at 16 kHz SR, 257-bin spectrum). Read-only computes;
+            # all derived from variables already in scope.
+            _hf_start = 32
+            _s2_hf_mean = (float(np.mean(echo_psd[_hf_start:]))
+                           if echo_psd.size > _hf_start else 0.0)
+            _render_hf_mean = (float(np.mean(far_psd[_hf_start:]))
+                               if far_psd.size > _hf_start else 0.0)
+            _s2_to_x2_ratio_hf = _s2_hf_mean / max(_render_hf_mean, 1e-30)
+            # ERLE clamp detection: compare clamped vs unbounded ERLE; if
+            # clamped < unbounded (modulo float rounding) the cap fired.
+            _erle_unb = self._aec3_state.erle_unbounded()
+            _erle_hf_seg = (_erle_arr[_hf_start:]
+                            if _erle_arr.size > _hf_start else np.array([]))
+            _erle_unb_hf_seg = (_erle_unb[_hf_start:]
+                                if _erle_unb.size > _hf_start else np.array([]))
+            _erle_hf_mean = (float(np.mean(_erle_hf_seg))
+                             if _erle_hf_seg.size else 0.0)
+            _erle_hf_at_max_frac = 0.0
+            if _erle_hf_seg.size and _erle_unb_hf_seg.size:
+                _erle_hf_at_max_frac = float(np.mean(
+                    _erle_hf_seg < _erle_unb_hf_seg * 0.99
+                ))
+            # Reverb-tail dead-streak counter — single source of truth in
+            # the always-on Sprint F block above. The trace block just
+            # reads the persisted counter and the local `_reverb_tail_max`
+            # value (which is computed both here for the trace fields and
+            # in the Sprint F block for the production path; the two
+            # computations agree because they read the same
+            # _reverb_freq_resp object on the same frame).
+            _reverb_tail_dead_frames = int(self._reverb_tail_dead_counter)
             self._hf_chain_trace.append({
                 'frame': int(self._frame_count),
                 # Link 1+2 — convergence signal source (bridge.filter_converged)
@@ -3730,6 +3762,20 @@ class AEC:
                 'dominant_ne_prev_for_ree': _ne_prev_for_ree,
                 'dominant_ne_after_gain': _ne_after_gain,
                 'dominant_ne_state_changed_this_frame': _ne_state_changed,
+                # === v3.22 G.0 triage fields ===
+                # D — hybrid residual / nonlinear HF floor gate
+                's2_hf_mean': _s2_hf_mean,
+                'render_hf_mean': _render_hf_mean,
+                's2_to_x2_ratio_hf': _s2_to_x2_ratio_hf,
+                # G.1 / H.3 — ERLE clamp widening gate (detects "ERLE clamp
+                # is binding HF bins"; signal source is clamped vs unbounded
+                # ERLE diff)
+                'erle_hf_mean': _erle_hf_mean,
+                'erle_hf_at_max_frac': _erle_hf_at_max_frac,
+                # F — reverb tail dead fallback gate (consecutive frames
+                # with reverb_freq_resp_tail_max <= 0 → cap-driven dead-tail
+                # state that the AEC3 estimator can't escape unaided)
+                'reverb_tail_dead_frames': _reverb_tail_dead_frames,
             })
 
         # Apply gain in spectrum domain, IFFT to fft_size=512, take the

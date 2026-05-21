@@ -186,6 +186,11 @@ class SuppressorConfig:
         default_factory=SubbandNearendConfig
     )
     use_subband_nearend_detection: bool = False
+    # v3.22 Sprint E.1 — stationary-mask-aware NE-presence proxy at
+    # gain-policy consumer sites. See AecConfig.e_stat_aware_ne_proxy_*
+    # for full context; propagated from AecConfig at orchestrator init.
+    stat_aware_ne_proxy_enabled: bool = False
+    stat_aware_ne_proxy_threshold: float = 0.10
     # v3.21.6 Sprint P3 — AEC3 EchoAudibility config wiring. The
     # EchoAudibilityConfig dataclass (declared above this class) already
     # carries audibility_threshold_lf/mf/hf + render-floor knobs consumed
@@ -483,6 +488,10 @@ class SuppressionGain:
         self._last_gain = np.ones(self._n_bins, dtype=np.float32)
         self._last_nearend = np.zeros(self._n_bins, dtype=np.float32)
         self._last_echo = np.zeros(self._n_bins, dtype=np.float32)
+        # v3.22 Sprint E.1 — stationary-mask fraction (0.0..1.0); updated
+        # by ``get_gain`` from the orchestrator-supplied per-bin mask.
+        # Read only via _ne_state_for_gain_rules; no-op when proxy flag OFF.
+        self._stat_mask_frac: float = 0.0
         self._low_render = _LowNoiseRenderDetector()
         self._nearend_smoother = _MovingAverageSpectrum(
             n_bins=self._n_bins, n_blocks=self._config.nearend_average_blocks
@@ -521,7 +530,22 @@ class SuppressionGain:
         self._initial_state = bool(state)
 
     def is_dominant_nearend(self) -> bool:
+        # Public API to orchestrator: returns RAW detector state.
+        # The Sprint E.1 stat-aware proxy is INTERNAL to gain-policy
+        # decisions and intentionally does NOT propagate here (per directive
+        # "proxy 僅限 SuppressionGain gain-policy consumer sites").
         return self._dominant_nearend.is_nearend_state()
+
+    def _ne_state_for_gain_rules(self) -> bool:
+        """v3.22 Sprint E.1 — augmented NE-presence used by gain-policy
+        consumer sites. Returns ``is_nearend_state()`` unmodified when
+        the proxy flag is OFF, preserving byte-equal behavior."""
+        ne = self._dominant_nearend.is_nearend_state()
+        if not self._config.stat_aware_ne_proxy_enabled:
+            return ne
+        if ne:
+            return True
+        return self._stat_mask_frac > self._config.stat_aware_ne_proxy_threshold
 
     # --- API consumed by orchestrator -----------------------------------------
 
@@ -535,8 +559,16 @@ class SuppressionGain:
         comfort_noise_spectrum: np.ndarray,  # CNG power
         render_block: np.ndarray,            # time-domain render (for LowNoiseRender)
         clock_drift: bool,
+        stationary_mask: Optional[np.ndarray] = None,  # E.1: per-bin bool from band_stationary_mask()
     ) -> np.ndarray:
         """Returns low-band suppression GAIN (amplitude domain, sqrt'd; per-bin)."""
+        # Sprint E.1 — capture stationary-mask fraction for the
+        # _ne_state_for_gain_rules() proxy. No-op when flag is OFF.
+        if stationary_mask is not None:
+            sm = np.asarray(stationary_mask, dtype=bool)
+            self._stat_mask_frac = float(sm.mean()) if sm.size > 0 else 0.0
+        else:
+            self._stat_mask_frac = 0.0
         # Dominant nearend update using unbounded-echo spectrum when configured
         # (AEC3 cc:410-413).
         echo_for_det = (
@@ -589,7 +621,7 @@ class SuppressionGain:
         # Step 7: LF + HF limiters.
         _limit_lf_gains(G)
         if (
-            (not self._dominant_nearend.is_nearend_state())
+            (not self._ne_state_for_gain_rules())
             or clock_drift
             or self._config.conservative_hf_suppression
         ):
@@ -607,7 +639,7 @@ class SuppressionGain:
         return np.sqrt(np.maximum(G, 0.0)).astype(np.float32)
 
     def _get_max_gain(self, floor_first_increase: float) -> np.ndarray:
-        is_ne = self._dominant_nearend.is_nearend_state()
+        is_ne = self._ne_state_for_gain_rules()
         inc = (
             self._config.nearend_tuning.max_inc_factor
             if is_ne
@@ -643,7 +675,7 @@ class SuppressionGain:
         # LF smoothing band — make sure low frequencies don't drop too quickly
         # after strong nearend.
         if not self._initial_state or self._config.lf_smoothing_during_initial_phase:
-            is_ne = self._dominant_nearend.is_nearend_state()
+            is_ne = self._ne_state_for_gain_rules()
             dec = (
                 self._config.nearend_tuning.max_dec_factor_lf
                 if is_ne
@@ -660,7 +692,7 @@ class SuppressionGain:
     def _gain_to_no_audible_echo(
         self, nearend: np.ndarray, echo: np.ndarray, masker: np.ndarray
     ) -> np.ndarray:
-        is_ne = self._dominant_nearend.is_nearend_state()
+        is_ne = self._ne_state_for_gain_rules()
         enr_tr = self._nearend_enr_tr if is_ne else self._normal_enr_tr
         enr_su = self._nearend_enr_su if is_ne else self._normal_enr_su
         emr_tr = self._nearend_emr_tr if is_ne else self._normal_emr_tr

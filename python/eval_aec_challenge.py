@@ -313,6 +313,13 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         ('AEC_FILTER_ANALYZER', 'filter_analyzer_enabled', True),
         # v3.21.6 Sprint P2 — AEC3 Legacy TransparentMode re-enable
         ('AEC_TRANSPARENT_MODE', 'transparent_mode_enabled', True),
+        # v3.22 Sprint E.1 — stat-aware NE proxy at SuppressionGain consumers
+        ('AEC_STAT_NE_PROXY', 'e_stat_aware_ne_proxy_enabled', True),
+        ('AEC_STAT_NE_PROXY_THR', 'e_stat_aware_ne_proxy_threshold', False),
+        # v3.22 Sprint F — reverb tail dead-fallback
+        ('AEC_REVERB_DEAD_FALLBACK', 'reverb_tail_dead_fallback_enabled', True),
+        ('AEC_REVERB_DEAD_THR', 'reverb_tail_dead_threshold_frames', False),
+        ('AEC_REVERB_DEAD_STRENGTH', 'reverb_tail_dead_fallback_strength', False),
     ):
         if _flag in os.environ and _key not in config_overrides:
             _v = os.environ[_flag]

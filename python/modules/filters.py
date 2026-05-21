@@ -11,7 +11,6 @@ Self-contained: depends only on numpy + collections.deque + typing.
 from typing import Optional, Tuple
 
 import numpy as np
-from collections import deque
 
 
 class NlmsFilter:
@@ -708,7 +707,3 @@ class PBFDKF(PBFDAF):
         super().scale_filter(scale)
         if scale_p:
             self.P *= float(scale) ** 2
-
-
-# Backward compatibility alias
-SubbandNlms = PBFDKF
