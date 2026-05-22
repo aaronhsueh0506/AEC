@@ -22,11 +22,21 @@ Ablation matrix (12 by default):
 
   -- W-update-control audit ablations (2026-05-22 mandate) --
 
-  A_no_hpf                — DISABLE BOTH HPFs. Original user mandate said
-                            "apply mic HPF to ref" but verified config
-                            shows ref HPF is ALREADY ON (4a41675 revert);
-                            symmetric-HPF premise falsified. A_no_hpf
-                            instead removes HPF as a variable.
+  HPF_ON_OFF              — enable_highpass=True / enable_highpass_ref
+                            =False. AEC3-like / docs-aligned state.
+                            HPF policy is UNRESOLVED: code-on-main
+                            (config.py:212) has ref HPF True; docs
+                            (aec_methods.md / CLAUDE.md / architecture
+                            HTML) all say ref HPF retired (OFF); the
+                            verdict commit 4a41675 says CANNOT SHIP at
+                            OFF, but the un-revert 6e273b6 (authored 1h
+                            later) was never merged. Not labelling
+                            either as "intended"; runs A/B/C decide
+                            empirically.
+  HPF_OFF_OFF             — DISABLE BOTH HPFs. Control only — not a
+                            shipping candidate; isolates HPF chain as
+                            a variable.
+  (A0_baseline ≡ HPF_ON_ON, the current v3.21.6 code baseline.)
   B_freeze_lf_mu          — per-bin mu, zero LF bins (0-500 Hz); W_lf
                             stays at its current value but no new
                             adaptation
@@ -489,7 +499,9 @@ ABLATIONS = {
     'A4_fixed_delay':      (None, lambda a, l: _patch_fixed_delay(a, l)),
     'A5_no_pbfdkf_update': (None, _patch_no_pbfdkf_update),
     'A6_no_sat':           (None, _patch_no_sat),
-    'A_no_hpf':            (lambda cfg: (
+    'HPF_ON_OFF':          (lambda cfg: setattr(
+                                cfg, 'enable_highpass_ref', False), None),
+    'HPF_OFF_OFF':         (lambda cfg: (
                                 setattr(cfg, 'enable_highpass', False),
                                 setattr(cfg, 'enable_highpass_ref', False),
                             ), None),
@@ -674,8 +686,9 @@ def main():
     ap.add_argument('--ablations',
                     default='A0_baseline,A1_freeze_adapt,A2_no_shadow,'
                             'A3_no_reset,A4_fixed_delay,A5_no_pbfdkf_update,'
-                            'A6_no_sat,A_no_hpf,B_freeze_lf_mu,'
-                            'C_zero_echo_lf,D_raw_e2,E_avg_x2,F_perbin_refresh')
+                            'A6_no_sat,HPF_ON_OFF,HPF_OFF_OFF,'
+                            'B_freeze_lf_mu,C_zero_echo_lf,D_raw_e2,'
+                            'E_avg_x2,F_perbin_refresh')
     ap.add_argument('--write-wav', action='store_true')
     ap.add_argument('--movement', action='store_true')
     ap.add_argument('--pre-align', action='store_true')
@@ -736,8 +749,10 @@ def main():
         row = [s.get(k, 0.0) / (base.get(k, 0.0) or 1e-12) for k in keys]
         print(f"{name:<22s} " + ' '.join(f"{v:>8.3f}" for v in row))
     print('  (A1/A5: sanity — filter inactive → mic passthrough → ~0.003)')
-    print('  (A_no_hpf: ORIGINAL user mandate "same HPF on ref" was no-op; '
-          'verified config has ref HPF ON. Redefined as "BOTH HPF OFF".)')
+    print('  (HPF policy UNRESOLVED — A0 ≡ HPF_ON_ON is code-on-main state;')
+    print('   HPF_ON_OFF is AEC3-like + docs-aligned; HPF_OFF_OFF is control.')
+    print('   Compare A0 vs HPF_ON_OFF for ref-HPF flip evidence. Verdict on')
+    print('   shipping default requires DT/echo eval beyond this nores trace.)')
 
     print('\n[TABLE 2] gate counts per ablation '
           '(call=cold-start; pe=poor-exc; sat=saturated_capture; stat=block_stationary)')
