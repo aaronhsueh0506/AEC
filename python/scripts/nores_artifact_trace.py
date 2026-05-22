@@ -478,9 +478,80 @@ def main():
             'diff_table': table,
         }, f, indent=2)
     print(f'\n  summary.json written → {summary_path}')
-    print('  diff table (vs A0_baseline):')
+
+    # ---- Transcription-friendly report ---------------------------------
+    # Designed so the user can read the lines back to Claude verbatim in
+    # chat. NO file transfer required.
+    print('\n' + '=' * 64)
+    print(f'NORES ARTIFACT REPORT — stem={args.stem}  v{__version__}')
+    print('=' * 64)
+    print('\n[TABLE 1] extra_psd ratio vs A0_baseline (1.000 = no effect)')
+    print(f"{'ablation':<22s} {'total':>8s} {'max':>8s} {'p99':>8s} "
+          f"{'lf':>8s} {'mf':>8s}")
     for row in table:
-        print('   ', row)
+        name = row['ablation']
+        if name == 'A0_baseline':
+            print(f"{name:<22s} {1.000:>8.3f} {1.000:>8.3f} {1.000:>8.3f} "
+                  f"{1.000:>8.3f} {1.000:>8.3f}   [reference]")
+        else:
+            print(f"{name:<22s} "
+                  f"{row.get('extra_psd_sum_total_ratio_vs_base', 0):>8.3f} "
+                  f"{row.get('extra_psd_sum_max_ratio_vs_base', 0):>8.3f} "
+                  f"{row.get('extra_psd_sum_p99_ratio_vs_base', 0):>8.3f} "
+                  f"{row.get('extra_lf_total_ratio_vs_base', 0):>8.3f} "
+                  f"{row.get('extra_mf_total_ratio_vs_base', 0):>8.3f}")
+    print('  (A1/A5 are sanity baselines — filter inactive → mic passthrough;')
+    print('   they SHOULD drop to ~0.003. Diagnostic ablations: A2/A3/A4/A6.)')
+
+    print('\n[TABLE 2] event counts per ablation')
+    print(f"{'ablation':<22s} {'rev_cp':>7s} {'boost_q':>8s} {'pause_f':>8s} "
+          f"{'epc_f':>7s} {'sat_mx':>7s} {'sk_rst':>7s} {'sk_dly':>7s}")
+    for name, s in all_summaries.items():
+        print(f"{name:<22s} "
+              f"{s.get('reverse_copy_count', 0):>7d} "
+              f"{s.get('boost_q_count', 0):>8d} "
+              f"{s.get('main_paused_frames_count', 0):>8d} "
+              f"{s.get('epc_active_frames_count', 0):>7d} "
+              f"{s.get('saturation_max', 0):>7.3f} "
+              f"{len(s.get('skipped_resets', [])):>7d} "
+              f"{s.get('suppressed_delay_updates_count', 0):>7d}")
+
+    print('\n[TABLE 3] A3 skipped-reset timeline (frame, reason)')
+    a3 = all_summaries.get('A3_no_reset', {})
+    sk = a3.get('skipped_resets', [])
+    if sk:
+        for evt in sk[:20]:
+            print(f"  f={evt['frame']:>5d}  reason={evt['reason']}")
+        if len(sk) > 20:
+            print(f"  ... and {len(sk) - 20} more")
+    else:
+        print('  (no resets skipped — reset events did not fire on this case)')
+
+    print('\n[TABLE 4] Top-3 PSD-excess frames + ±2 event window per ablation')
+    for name, s in all_summaries.items():
+        tops = s.get('top_frames', [])[:3]
+        if not tops:
+            continue
+        print(f'  {name}:')
+        for t in tops:
+            ev = t.get('event_window', [])
+            mid = len(ev) // 2
+            ev_compact = ev[max(0, mid - 2): mid + 3]
+            print(f"    psd_f={t['psd_frame']:>5d}  extra_sum={t['extra_sum']:>10.2f}  "
+                  f"lf={t['extra_lf']:>10.2f}  mf={t['extra_mf']:>10.2f}")
+            for e in ev_compact:
+                print(f"      f={e['f']:>5d} mu={e['mu']:.3f} pause={e['pause']} "
+                      f"rev={e['rev']} boost={e['boost']} sat={e['sat']:.2f} "
+                      f"epc={e['epc']} conv={e['conv']} "
+                      f"hmean={e['h_mean']:.4e} pmean={e['p_mean']:.4e} "
+                      f"wnorm={e['w_norm']:.3f}")
+    print('\n' + '=' * 64)
+    print('READ-BACK INSTRUCTIONS:')
+    print('  Type [TABLE 1] verbatim back to Claude as the minimum.')
+    print('  Then [TABLE 2] and [TABLE 3] (if non-empty).')
+    print('  [TABLE 4] only for the ablation whose TABLE 1 ratio deviates')
+    print('  most from 1.000 — that pinpoints the artifact event.')
+    print('=' * 64)
 
 
 if __name__ == '__main__':
