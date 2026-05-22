@@ -201,6 +201,16 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'e2_y2_clamp_enabled' not in config_overrides):
         config_overrides['e2_y2_clamp_enabled'] = (
             os.environ['AEC_E2_Y2_CLAMP'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.6 nores artifact debug 2026-05-22 — ref HPF policy A/B.
+    # Code-on-main default is enable_highpass_ref=True (4a41675 revert
+    # CANNOT SHIP at OFF per DT_movement Δdeg). User-directed intended
+    # policy 2026-05-22 = mic ON / ref OFF; production gate requires
+    # 800-case AECMOS A/B (this env var controls the A/B). Default
+    # unset → config default → byte-equal preserved.
+    if ('AEC_HPF_REF' in os.environ
+            and 'enable_highpass_ref' not in config_overrides):
+        config_overrides['enable_highpass_ref'] = (
+            os.environ['AEC_HPF_REF'].lower() not in ('0', 'false', 'off', 'no'))
     # v3.21.5 Sprint B (CLOSED rejected; default-True restored).
     # See docs/v3_21_5_phase1_b_stationarity_gate_verdict.md and the config
     # field comment in config.py:237 for the load-bearing safety-net evidence
