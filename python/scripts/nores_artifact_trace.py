@@ -1,25 +1,62 @@
-"""Trace + ablation harness for the v3.21.6 nores artifact debug.
+"""Trace + ablation harness for the v3.21.6 nores LF artifact debug.
 
-Renders a single (mic, ref) case 7 times under different ablations and
-captures per-frame nores−mic delta energy + event timestamps. Output is
-JSON-only (no audio leakage) so the user can run on an internal case and
-return only the summary.
+Runs the same (mic, ref) case under N ablations, capturing per-frame
+per-band (LF/MF/HF) PBFDKF W-update-control state. Designed for
+single-case W-update-control audit per the 2026-05-22 mandate, where:
+  - nores tap = `aec.filter.process(...)` output (PBFDKF refined-error,
+    pre-`_aec3_post`); verified at orchestrator.py:1792
+  - artifact concentrates in LF band; suspected mu_lf overshoot when
+    `denom_aec3 ≈ delta` because X²_lf / _error_psd_lf are both small
 
-All ablations are READ-ONLY in the sense that they patch the *live* AEC
-instance for the duration of the run; no module code is modified. Run
-with `enable_res=False` so the output IS the PBFDKF refined error (the
-"nores" tap point the artifact lives in).
+Output is JSON-only + terminal tables. No audio leakage required to
+return results.
+
+Ablation matrix (12 by default):
+  A0 baseline             — no patch, reference
+  A1 freeze_adapt         — main_mu=0 (sanity)
+  A2 no_shadow            — enable_shadow=False
+  A3 no_reset             — _reset_filter_derived_state → no-op
+  A4 fixed_delay          — delay_est freezes after first acquisition
+  A5 no_pbfdkf_update     — _update_weights{_aec3} → no-op (sanity)
+  A6 no_sat               — _saturation_level clamped to 0
+
+  -- W-update-control audit ablations (2026-05-22 mandate) --
+
+  A_no_hpf                — DISABLE BOTH HPFs. Original user mandate said
+                            "apply mic HPF to ref" but verified config
+                            shows ref HPF is ALREADY ON (4a41675 revert);
+                            symmetric-HPF premise falsified. A_no_hpf
+                            instead removes HPF as a variable.
+  B_freeze_lf_mu          — per-bin mu, zero LF bins (0-500 Hz); W_lf
+                            stays at its current value but no new
+                            adaptation
+  C_zero_echo_lf          — zero echo_spec[lf_bins] before iFFT; W
+                            adapts normally but output has no LF echo
+                            subtraction (isolates update problem vs
+                            output problem)
+  D_raw_e2                — denom_aec3 uses raw |error_spec|² instead
+                            of smoothed _error_psd
+  E_avg_x2                — denom_aec3 uses partition-summed |X_buf|²
+                            instead of X_latest only (probes AEC3
+                            divergence #2: X²_latest vs delay-aligned)
+  F_perbin_refresh        — cfg.use_per_bin_h_error_refresh=True;
+                            switches H_error refresh from scalar
+                            E2_ref_sum vs E2_coarse_sum compare to
+                            per-bin E2_refined[k] vs E2_coarse[k]
+                            compare (probes AEC3 divergence #1)
+
+Per-band bin layout (PBFDKF fft_size=512, fs=16000 → 31.25 Hz/bin):
+  LF   0-500 Hz   bins  0-16   (17 bins)
+  MF 700-3000 Hz  bins 22-96   (75 bins)
+  HF >3000 Hz     bins 96-256  (161 bins)
 
 Usage:
   python3 python/scripts/nores_artifact_trace.py \\
       --mic /path/to/mic.wav --ref /path/to/ref.wav \\
-      --stem CASE_NAME --out out_nores_artifact_debug/ \\
-      [--ablations A0,A1,A2,A3,A4,A5,A6] [--write-wav]
-
-Output:
-  out_nores_artifact_debug/<stem>/summary.json   ← return this to me
-  out_nores_artifact_debug/<stem>/<ablation>.json
-  out_nores_artifact_debug/<stem>/<ablation>_nores.wav   (only if --write-wav)
+      --stem CASE_NAME \\
+      [--ablations A0,B_freeze_lf_mu,...] \\
+      [--movement] [--pre-align] [--write-wav] \\
+      [--clusters 175-179,665-677]
 """
 from __future__ import annotations
 
@@ -27,8 +64,8 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import asdict, dataclass, field
+from typing import Callable, Optional
 
 import numpy as np
 import soundfile as sf
@@ -39,141 +76,285 @@ sys.path.insert(0, os.path.join(REPO, 'python'))
 from aec import AEC, AecConfig, __version__   # noqa: E402
 
 BLOCK = 160          # 10 ms hop @ 16 kHz
-FFT_PSD = 512        # 32 ms analysis window for nores/mic PSD diff
-HOP_PSD = BLOCK      # frame-aligned with AEC processing
+FFT_PBFDKF = 512     # PBFDKF fft_size (block_size=320, next pow2=512)
+N_FREQS = FFT_PBFDKF // 2 + 1   # 257
 SR = 16000
 
-# Tonal-grid suspect band 700-3000 Hz (audible "電子音/破音"). LF band 0-500 Hz
-# tracks the steady-LF red stripe.
-BIN_LF_HI = int(np.ceil(500.0 / (SR / FFT_PSD)))     # ~16
-BIN_MF_LO = int(np.floor(700.0 / (SR / FFT_PSD)))    # ~22
-BIN_MF_HI = int(np.ceil(3000.0 / (SR / FFT_PSD)))    # ~96
+# Band bin indices (LF/MF/HF). PBFDKF fft_size matches my STFT FFT_PSD so
+# the same bin indices apply both to PBFDKF state and to the nores/mic
+# STFT PSD comparison.
+BIN_LF_HI = int(np.ceil(500.0 / (SR / FFT_PBFDKF)))     # 16
+BIN_MF_LO = int(np.floor(700.0 / (SR / FFT_PBFDKF)))    # 22
+BIN_MF_HI = int(np.ceil(3000.0 / (SR / FFT_PBFDKF)))    # 96
+BIN_HF_LO = BIN_MF_HI                                    # 96
+BIN_HF_HI = N_FREQS - 1                                  # 256
+
+LF_SLICE = slice(0, BIN_LF_HI + 1)
+MF_SLICE = slice(BIN_MF_LO, BIN_MF_HI + 1)
+HF_SLICE = slice(BIN_HF_LO, BIN_HF_HI + 1)
 
 TOP_N = 20
+DEFAULT_CLUSTERS = '175-179,665-677'
+
+# AEC3 noise gate threshold (read from module — keep in sync with code).
+from modules.aec3_scale import NOISE_GATE_POWER_FLOAT   # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Per-frame snapshot (kept compact)
+# ---------------------------------------------------------------------------
 
 
 @dataclass
-class FrameSnapshot:
-    """Per-AEC-block snapshot captured immediately after process()."""
-    frame: int
-    mu_scale: float
-    main_paused: int
-    boost_q: int
-    reverse_copy: int
-    saturation_level: float
-    epc_active: int
-    converged: int
-    h_error_mean: float
-    h_error_max: float
-    p_mean: float
-    w_norm: float
-    raw_err_pwr: float
+class FrameSnap:
+    """Per-AEC-block snapshot. All band-aggregate values are sum or mean
+    over bins in band (LF/MF/HF) — see _band_aggregate() below."""
+    frame: int = 0
+    # Orchestrator-level diag
+    mu_scale: float = 0.0
+    main_paused: int = 0
+    reverse_copy: int = 0
+    boost_q: int = 0
+    saturation_level: float = 0.0
+    epc_active: int = 0
+    converged: int = 0
+    # PBFDKF W-update-control gates (scalar)
+    call_counter: int = 0
+    poor_exc_counter: int = 0
+    saturated_capture: int = 0
+    block_stationary: int = 0
+    # Per-band fields (LF/MF/HF) — see Per-band schema
+    # Naming: <metric>_<band>; metric in
+    # {x2, mic, err, echo, h, denom, mu, mu_scale_arr, W_before, W_after,
+    #  dW, ng_hit}
+    x2_lf: float = 0.0
+    x2_mf: float = 0.0
+    x2_hf: float = 0.0
+    mic_lf: float = 0.0
+    mic_mf: float = 0.0
+    mic_hf: float = 0.0
+    err_lf: float = 0.0
+    err_mf: float = 0.0
+    err_hf: float = 0.0
+    echo_lf: float = 0.0
+    echo_mf: float = 0.0
+    echo_hf: float = 0.0
+    h_lf: float = 0.0
+    h_mf: float = 0.0
+    h_hf: float = 0.0
+    denom_lf: float = 0.0
+    denom_mf: float = 0.0
+    denom_hf: float = 0.0
+    mu_lf: float = 0.0
+    mu_mf: float = 0.0
+    mu_hf: float = 0.0
+    mu_scale_arr_lf: float = 0.0
+    mu_scale_arr_mf: float = 0.0
+    mu_scale_arr_hf: float = 0.0
+    W_before_lf: float = 0.0
+    W_before_mf: float = 0.0
+    W_before_hf: float = 0.0
+    W_after_lf: float = 0.0
+    W_after_mf: float = 0.0
+    W_after_hf: float = 0.0
+    dW_lf: float = 0.0
+    dW_mf: float = 0.0
+    dW_hf: float = 0.0
+    ng_hit_lf: int = 0   # count of bins where X²<noise_gate (gate fires)
+    ng_hit_mf: int = 0
+    ng_hit_hf: int = 0
+
+
+def _band_sum(arr: np.ndarray, sl: slice) -> float:
+    return float(np.sum(arr[sl]))
+
+
+def _band_mean(arr: np.ndarray, sl: slice) -> float:
+    return float(np.mean(arr[sl]))
+
+
+def _w_band_energy(W: np.ndarray, sl: slice) -> float:
+    """Sum |W|² over all partitions, summed over bins in band."""
+    return float(np.sum(np.abs(W[:, sl]) ** 2))
 
 
 # ---------------------------------------------------------------------------
-# Ablation hooks
+# Process-time hook factory — wraps filter.process to capture state
 # ---------------------------------------------------------------------------
 
 
-def _patch_freeze_mu(aec: AEC) -> Callable[[], None]:
-    """A1: freeze adaptation — force main_mu = 0 every frame.
+def install_w_probe(aec: AEC, snaps: list[FrameSnap]) -> Callable[[], None]:
+    """Wrap aec.filter.process to record FrameSnap entries.
 
-    Wraps `aec.filter.process(near, far, mu_scale)` to override the third
-    argument to 0.0. Cheaper than chasing the orchestrator's mu_scale
-    branches (`_compute_mu_scale` vs `_get_simple_mu_scale` vs P3e advisory
-    multiplier vs main_paused). All filter-internal bookkeeping (Kalman
-    update path / H_error refresh leakage) still runs but the NLMS step
-    contribution is zeroed via mu_scale=0.
+    Captures W BEFORE process (so dW is true delta), and reads PBFDKF
+    state AFTER process for H_error / spectra / error_psd. mu_aec3 and
+    denom_aec3 are recomputed at snapshot time using H_BEFORE (since
+    they were computed PRE-decay inside _update_weights_aec3).
     """
     orig = aec.filter.process
+    n_part = aec.filter.n_partitions
+    delta32 = np.float32(aec.filter.delta)
 
-    def patched(near_end, far_end, mu_scale=1.0):
-        return orig(near_end, far_end, 0.0)
+    def wrapped(near_end, far_end, mu_scale=1.0):
+        # Snapshot W BEFORE adapting this hop
+        W_before = aec.filter.W.copy()
+        H_before = aec.filter.H_error_per_bin.copy()
+        out = orig(near_end, far_end, mu_scale)
+        # POST-state: spectra (latest hop), _error_psd (post-EMA update),
+        # W (after adaptation), H_error_per_bin (after decay + refresh)
+        far_spec = aec.filter.far_spec
+        near_spec = aec.filter.near_spec
+        error_spec = aec.filter.error_spec
+        echo_spec = aec.filter.echo_spec
+        X2 = (np.abs(far_spec) ** 2).astype(np.float32)
+        mic2 = (np.abs(near_spec) ** 2).astype(np.float32)
+        err2 = (np.abs(error_spec) ** 2).astype(np.float32)
+        echo2 = (np.abs(echo_spec) ** 2).astype(np.float32)
+        err_psd_post = aec.filter._error_psd  # smoothed, post-update
+        # Reproduce the mu/denom that drove THIS hop's update:
+        # denom uses H_before (pre-decay) and err_psd_post (matches the
+        # update site which writes _error_psd then immediately uses it).
+        denom = (
+            np.float32(0.5) * H_before * X2
+            + np.float32(n_part) * err_psd_post
+            + delta32
+        )
+        mu = H_before / np.maximum(denom, np.float32(1e-30))
+        # noise gate
+        ng_hit_mask = X2 < np.float32(NOISE_GATE_POWER_FLOAT)
+        mu_post_gate = np.where(ng_hit_mask, np.float32(0.0), mu)
+        # mu_scale_arr — orchestrator-side scalar/array fed to filter.process
+        mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
+        if mu_scale_arr.ndim == 0:
+            mu_scale_arr = np.full(N_FREQS, float(mu_scale_arr),
+                                   dtype=np.float32)
+
+        d = aec._diag
+        snap = FrameSnap(
+            frame=len(snaps),
+            mu_scale=float(d.get('mu_scale', 0.0)),
+            main_paused=int(bool(d.get('main_paused', False))),
+            reverse_copy=0,   # set below
+            boost_q=0,        # set below
+            saturation_level=float(d.get('saturation_level', 0.0)),
+            epc_active=int(bool(d.get('epc_active', False))),
+            converged=int(bool(d.get('converged', False))),
+            call_counter=int(getattr(aec.filter, '_call_counter', 0)),
+            poor_exc_counter=int(getattr(aec.filter,
+                                         '_poor_excitation_counter', 0)),
+            saturated_capture=int(bool(getattr(aec.filter,
+                                               '_saturated_capture', False))),
+            block_stationary=int(bool(getattr(aec.filter,
+                                              '_block_stationary', False))),
+            x2_lf=_band_sum(X2, LF_SLICE),
+            x2_mf=_band_sum(X2, MF_SLICE),
+            x2_hf=_band_sum(X2, HF_SLICE),
+            mic_lf=_band_sum(mic2, LF_SLICE),
+            mic_mf=_band_sum(mic2, MF_SLICE),
+            mic_hf=_band_sum(mic2, HF_SLICE),
+            err_lf=_band_sum(err2, LF_SLICE),
+            err_mf=_band_sum(err2, MF_SLICE),
+            err_hf=_band_sum(err2, HF_SLICE),
+            echo_lf=_band_sum(echo2, LF_SLICE),
+            echo_mf=_band_sum(echo2, MF_SLICE),
+            echo_hf=_band_sum(echo2, HF_SLICE),
+            h_lf=_band_mean(H_before, LF_SLICE),
+            h_mf=_band_mean(H_before, MF_SLICE),
+            h_hf=_band_mean(H_before, HF_SLICE),
+            denom_lf=_band_mean(denom, LF_SLICE),
+            denom_mf=_band_mean(denom, MF_SLICE),
+            denom_hf=_band_mean(denom, HF_SLICE),
+            mu_lf=_band_mean(mu_post_gate, LF_SLICE),
+            mu_mf=_band_mean(mu_post_gate, MF_SLICE),
+            mu_hf=_band_mean(mu_post_gate, HF_SLICE),
+            mu_scale_arr_lf=_band_mean(mu_scale_arr, LF_SLICE),
+            mu_scale_arr_mf=_band_mean(mu_scale_arr, MF_SLICE),
+            mu_scale_arr_hf=_band_mean(mu_scale_arr, HF_SLICE),
+            W_before_lf=_w_band_energy(W_before, LF_SLICE),
+            W_before_mf=_w_band_energy(W_before, MF_SLICE),
+            W_before_hf=_w_band_energy(W_before, HF_SLICE),
+            W_after_lf=_w_band_energy(aec.filter.W, LF_SLICE),
+            W_after_mf=_w_band_energy(aec.filter.W, MF_SLICE),
+            W_after_hf=_w_band_energy(aec.filter.W, HF_SLICE),
+            dW_lf=_w_band_energy(aec.filter.W - W_before, LF_SLICE),
+            dW_mf=_w_band_energy(aec.filter.W - W_before, MF_SLICE),
+            dW_hf=_w_band_energy(aec.filter.W - W_before, HF_SLICE),
+            ng_hit_lf=int(np.sum(ng_hit_mask[LF_SLICE])),
+            ng_hit_mf=int(np.sum(ng_hit_mask[MF_SLICE])),
+            ng_hit_hf=int(np.sum(ng_hit_mask[HF_SLICE])),
+        )
+        # regime handler decisions
+        rh = aec._regime_handler
+        if getattr(rh, '_last_decision_reverse_copy', False):
+            snap.reverse_copy = 1
+        snaps.append(snap)
+        return out
+
+    aec.filter.process = wrapped
+    return lambda: setattr(aec.filter, 'process', orig)
+
+
+# ---------------------------------------------------------------------------
+# Ablation hooks (in addition to W-probe wrap, which always runs)
+# ---------------------------------------------------------------------------
+
+
+def _patch_freeze_mu(aec):
+    """A1: filter.process called with mu_scale=0 (override 3rd arg)."""
+    orig = aec.filter.process
+
+    def patched(near, far, mu_scale=1.0):
+        return orig(near, far, 0.0)
     aec.filter.process = patched
     return lambda: setattr(aec.filter, 'process', orig)
 
 
-def _patch_no_reset(aec: AEC, log: list) -> Callable[[], None]:
-    """A3: drop all _reset_filter_derived_state events.
-
-    Captures the reason + frame each reset would have fired but does NOT
-    perform the reset. Use the captured timeline to align ablation diffs.
-    """
+def _patch_no_reset(aec, log):
     orig = aec._reset_filter_derived_state
 
-    def patched(reason: str = 'plateau', preserve_render_ema: bool = True):
+    def patched(reason='plateau', preserve_render_ema=True):
         log.append(('skipped_reset', getattr(aec, '_frame_idx_trace', -1), reason))
-        return  # no-op
     aec._reset_filter_derived_state = patched
     return lambda: setattr(aec, '_reset_filter_derived_state', orig)
 
 
-def _patch_no_pbfdkf_update(aec: AEC) -> Callable[[], None]:
-    """A5: PBFDKF Kalman/NLMS weight update off entirely.
-
-    Main filter coefficients, H_error, P stay at whatever they were post
-    warm-up. Echo estimate from `self.W @ X_buf` still flows. Shadow path
-    is untouched (A2 covers that).
-    """
+def _patch_no_pbfdkf_update(aec):
     if not hasattr(aec.filter, '_update_weights_aec3'):
         return lambda: None
-    orig_aec3 = aec.filter._update_weights_aec3
-    orig_nlms = aec.filter._update_weights
-
-    def patched_aec3(*args, **kwargs):
-        return
-    def patched_nlms(*args, **kwargs):
-        return
-    aec.filter._update_weights_aec3 = patched_aec3
-    aec.filter._update_weights = patched_nlms
+    orig_a = aec.filter._update_weights_aec3
+    orig_n = aec.filter._update_weights
+    aec.filter._update_weights_aec3 = lambda *a, **k: None
+    aec.filter._update_weights = lambda *a, **k: None
 
     def restore():
-        aec.filter._update_weights_aec3 = orig_aec3
-        aec.filter._update_weights = orig_nlms
+        aec.filter._update_weights_aec3 = orig_a
+        aec.filter._update_weights = orig_n
     return restore
 
 
-def _patch_fixed_delay(aec: AEC, log: list) -> Callable[[], None]:
-    """A4: freeze delay estimator — block any delay adjustments.
-
-    delay_first / delay_shift paths in orchestrator call
-    `_reset_filter_derived_state(reason='delay_first'|'delay_shift')`. We
-    monkey-patch the delay estimator's accumulate() to always report
-    no change after the first acquisition.
-    """
+def _patch_fixed_delay(aec, log):
     if not hasattr(aec, 'delay_est') or aec.delay_est is None:
         return lambda: None
     de = aec.delay_est
-    if not hasattr(de, 'accumulate'):
-        return lambda: None
     orig = de.accumulate
-    state = {'first_done': False, 'frozen_delay': None}
+    state = {'first_done': False, 'frozen': None}
 
     def patched(*args, **kwargs):
         out = orig(*args, **kwargs)
         if not state['first_done'] and getattr(de, 'is_solid', False):
             state['first_done'] = True
-            state['frozen_delay'] = de.estimated_delay
-            return out  # let the first solid detection through
-        if state['first_done']:
+            state['frozen'] = de.estimated_delay
+        elif state['first_done']:
             try:
-                de._estimated_delay = state['frozen_delay']
+                de._estimated_delay = state['frozen']
             except Exception:
                 pass
-            log.append(('suppressed_delay_update',
-                        getattr(aec, '_frame_idx_trace', -1)))
+            log.append(('suppressed_delay', getattr(aec, '_frame_idx_trace', -1)))
         return out
     de.accumulate = patched
     return lambda: setattr(de, 'accumulate', orig)
 
 
-def _patch_no_sat(aec: AEC) -> Callable[[], None]:
-    """A6: short-circuit saturation gating — clamp _saturation_level=0.
-
-    Disables soft-clip + main_mu freeze + shadow_rise EPC false-trip paths
-    that key off _saturation_level. Saturation detector still runs but its
-    output is overwritten to 0 right after _compute_mu_scale.
-    """
+def _patch_no_sat(aec):
     orig = aec.process
 
     def patched(*args, **kwargs):
@@ -184,65 +365,162 @@ def _patch_no_sat(aec: AEC) -> Callable[[], None]:
     return lambda: setattr(aec, 'process', orig)
 
 
-def _patch_no_shadow_decisions(cfg: AecConfig) -> None:
-    """A2: kill shadow path via config (no monkey-patch needed).
+# ---- W-update-control audit ablations -----------------------------------
 
-    enable_shadow=False removes the shadow filter entirely; regime handler
-    boost_q / reverse_copy / pause_main decisions all return False
-    (handler.update() short-circuits when shadow_err is the init sentinel).
+
+def _patch_freeze_lf_mu(aec):
+    """B: per-bin mu_scale, zero LF bins. Wrap filter.process and
+    convert scalar mu_scale to per-bin array with LF zeroed."""
+    orig = aec.filter.process
+
+    def patched(near, far, mu_scale=1.0):
+        arr = np.asarray(mu_scale, dtype=np.float32)
+        if arr.ndim == 0:
+            arr = np.full(N_FREQS, float(arr), dtype=np.float32)
+        else:
+            arr = arr.copy()
+        arr[LF_SLICE] = 0.0
+        return orig(near, far, arr)
+    aec.filter.process = patched
+    return lambda: setattr(aec.filter, 'process', orig)
+
+
+def _patch_zero_echo_lf(aec):
+    """C: zero echo_spec[lf_bins] before iFFT.
+
+    W is allowed to adapt as usual (so future frames see W_lf updates),
+    but output is recomputed with echo_spec[lf]=0 → no LF echo subtraction
+    → if artifact is in nores LF, it should reduce.
     """
-    cfg.enable_shadow = False
+    orig = aec.filter.process
+    flt = aec.filter
+
+    def patched(near, far, mu_scale=1.0):
+        # Run process normally — W adapts, echo_spec is populated
+        _ = orig(near, far, mu_scale)
+        # Recompute output with LF zeroed in echo_spec
+        es = flt.echo_spec.copy()
+        es[LF_SLICE] = 0.0
+        echo_time = np.fft.irfft(es, flt.fft_size).astype(np.float32)
+        new_out = flt.near_buffer[-flt.hop_size:] - \
+            echo_time[flt.hop_size:flt.block_size]
+        # Update error_spec for downstream (so next frame's _error_psd is
+        # consistent). The next-frame _update_weights_aec3 reads
+        # self.error_spec; if we leave it as the original (W-adapted)
+        # error, _error_psd will EMA that, which is fine — we're only
+        # changing the OUTPUT sample stream, not the internal state.
+        return new_out.astype(np.float32)
+    aec.filter.process = patched
+    return lambda: setattr(aec.filter, 'process', orig)
+
+
+def _patch_raw_e2(aec):
+    """D: denom_aec3 uses raw |error_spec|² instead of smoothed _error_psd.
+
+    Wrap _update_weights_aec3 to temporarily replace self._error_psd with
+    the passed-in `error_psd` (which is raw |error_spec|² computed in
+    _update_weights at line 427). Restore after.
+    """
+    if not hasattr(aec.filter, '_update_weights_aec3'):
+        return lambda: None
+    orig = aec.filter._update_weights_aec3
+
+    def patched(curr_p, mu_scale_arr, error_psd):
+        saved = aec.filter._error_psd
+        aec.filter._error_psd = error_psd   # use raw |E|² this call
+        try:
+            return orig(curr_p, mu_scale_arr, error_psd)
+        finally:
+            aec.filter._error_psd = saved
+    aec.filter._update_weights_aec3 = patched
+    return lambda: setattr(aec.filter, '_update_weights_aec3', orig)
+
+
+def _patch_avg_x2(aec):
+    """E: denom + noise_gate use partition-summed |X|² instead of X_latest.
+
+    Replace _update_weights_aec3 with a custom version that uses
+    sum(|X_buf|², axis=0) for denom + noise gate, but per-partition X
+    for K (W update direction unchanged).
+    """
+    flt = aec.filter
+    if not hasattr(flt, '_update_weights_aec3'):
+        return lambda: None
+    orig = flt._update_weights_aec3
+    delta32 = np.float32(flt.delta)
+    n_part = np.float32(flt.n_partitions)
+    h_floor = flt._h_error_floor
+    h_ceil = flt._h_error_ceil
+    noise_gate = np.float32(NOISE_GATE_POWER_FLOAT)
+
+    def patched(curr_p, mu_scale_arr, error_psd):
+        X2_for_denom = np.sum(np.abs(flt.X_buf) ** 2, axis=0).astype(np.float32)
+        denom = (np.float32(0.5) * flt.H_error_per_bin * X2_for_denom
+                 + n_part * flt._error_psd + delta32)
+        mu = (flt.H_error_per_bin / np.maximum(denom, np.float32(1e-30))
+              ).astype(np.float32)
+        mu = np.where(X2_for_denom >= noise_gate, mu, np.float32(0.0))
+        for p in range(flt.n_partitions):
+            p_idx = (curr_p - p) % flt.n_partitions
+            X = flt.X_buf[p_idx]
+            K = mu * np.conj(X)
+            K_scaled = K * mu_scale_arr
+            flt.W[p] += K_scaled * flt.error_spec
+            if flt.enable_td_constraint:
+                w_time = np.fft.irfft(flt.W[p], flt.fft_size).astype(np.float32)
+                w_time *= flt._td_window
+                flt.W[p] = np.fft.rfft(w_time).astype(np.complex64)
+        flt.H_error_per_bin -= (
+            np.float32(0.5) * mu * X2_for_denom * flt.H_error_per_bin
+        )
+        flt._h_error_refresh()
+    flt._update_weights_aec3 = patched
+    return lambda: setattr(flt, '_update_weights_aec3', orig)
+
+
+# Ablation table: name → (cfg_mutate, hook_fn)
+# cfg_mutate is applied BEFORE AEC construction; hook_fn after.
+ABLATIONS = {
+    'A0_baseline':         (None, None),
+    'A1_freeze_adapt':     (None, _patch_freeze_mu),
+    'A2_no_shadow':        (lambda cfg: setattr(cfg, 'enable_shadow', False),
+                            None),
+    'A3_no_reset':         (None, lambda a, l: _patch_no_reset(a, l)),
+    'A4_fixed_delay':      (None, lambda a, l: _patch_fixed_delay(a, l)),
+    'A5_no_pbfdkf_update': (None, _patch_no_pbfdkf_update),
+    'A6_no_sat':           (None, _patch_no_sat),
+    'A_no_hpf':            (lambda cfg: (
+                                setattr(cfg, 'enable_highpass', False),
+                                setattr(cfg, 'enable_highpass_ref', False),
+                            ), None),
+    'B_freeze_lf_mu':      (None, _patch_freeze_lf_mu),
+    'C_zero_echo_lf':      (None, _patch_zero_echo_lf),
+    'D_raw_e2':            (None, _patch_raw_e2),
+    'E_avg_x2':            (None, _patch_avg_x2),
+    'F_perbin_refresh':    (lambda cfg: setattr(
+                                cfg, 'use_per_bin_h_error_refresh', True), None),
+}
 
 
 # ---------------------------------------------------------------------------
-# Per-frame snapshot helper
-# ---------------------------------------------------------------------------
-
-
-def _snapshot(aec: AEC, frame: int) -> FrameSnapshot:
-    d = aec._diag
-    H = aec.filter.H_error_per_bin if hasattr(aec.filter, 'H_error_per_bin') else None
-    P = aec.filter.P if hasattr(aec.filter, 'P') else None
-    return FrameSnapshot(
-        frame=frame,
-        mu_scale=float(d.get('mu_scale', 0.0)),
-        main_paused=int(bool(d.get('main_paused', False))),
-        boost_q=int(d.get('boost_q_fired_ema', 0) > 0)
-            if 'boost_q_fired_ema' in d else 0,
-        reverse_copy=0,  # captured by listener below
-        saturation_level=float(d.get('saturation_level', 0.0)),
-        epc_active=int(bool(d.get('epc_active', False))),
-        converged=int(bool(d.get('converged', False))),
-        h_error_mean=float(np.mean(H)) if H is not None else 0.0,
-        h_error_max=float(np.max(H)) if H is not None else 0.0,
-        p_mean=float(np.mean(P)) if P is not None else 0.0,
-        w_norm=float(d.get('filter_w_norm', 0.0)),
-        raw_err_pwr=float(getattr(aec, 'raw_error_power', 0.0)),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Render driver
+# Driver
 # ---------------------------------------------------------------------------
 
 
 def _stft_psd(x: np.ndarray) -> np.ndarray:
-    """Hann-windowed STFT magnitude squared, shape (n_frames, n_bins)."""
-    win = np.hanning(FFT_PSD).astype(np.float32)
+    """Hann-windowed STFT |·|², shape (n_frames, n_bins). Frame-aligned
+    with AEC hops (hop=BLOCK)."""
+    win = np.hanning(FFT_PBFDKF).astype(np.float32)
     n = len(x)
-    n_frames = max(0, (n - FFT_PSD) // HOP_PSD + 1)
-    out = np.empty((n_frames, FFT_PSD // 2 + 1), dtype=np.float32)
+    n_frames = max(0, (n - FFT_PBFDKF) // BLOCK + 1)
+    out = np.empty((n_frames, N_FREQS), dtype=np.float32)
     for i in range(n_frames):
-        seg = x[i * HOP_PSD: i * HOP_PSD + FFT_PSD] * win
+        seg = x[i * BLOCK: i * BLOCK + FFT_PBFDKF] * win
         out[i] = np.abs(np.fft.rfft(seg)) ** 2
     return out
 
 
-def run_one(name: str, mic: np.ndarray, ref: np.ndarray,
-            patch_fn: Callable[[AEC, AecConfig, list], list],
-            out_dir: str, write_wav: bool,
-            movement: bool = False, no_shadow: bool = False) -> dict:
-    """Render `(mic, ref)` once under ablation `name`. Return summary dict."""
+def _build_cfg(movement: bool):
     np.random.seed(42)
     cfg = AecConfig.from_preset('balanced')
     cfg.enable_res = False
@@ -252,155 +530,139 @@ def run_one(name: str, mic: np.ndarray, ref: np.ndarray,
         cfg.enable_delay_est = True
         cfg.delay_est_period_s = 0.25
         cfg.delay_est_init_s = 0.2
-    if no_shadow:
-        cfg.enable_shadow = False
+    return cfg
 
-    extra_events: list = []
+
+def run_one(name: str, mic: np.ndarray, ref: np.ndarray,
+            out_dir: str, write_wav: bool, movement: bool,
+            clusters: list[tuple[int, int]]) -> dict:
+    cfg_mut, hook_fn = ABLATIONS[name]
+    cfg = _build_cfg(movement)
+    if cfg_mut is not None:
+        cfg_mut(cfg)
     aec = AEC(cfg)
     aec._frame_idx_trace = 0
-    restores = patch_fn(aec, cfg, extra_events)
 
-    n = min(len(mic), len(ref))
-    n = (n // BLOCK) * BLOCK
+    snaps: list[FrameSnap] = []
+    extra_events: list = []
+    restores = [install_w_probe(aec, snaps)]
+    if hook_fn is not None:
+        try:
+            restores.append(hook_fn(aec, extra_events))
+        except TypeError:
+            restores.append(hook_fn(aec))
+
+    n = (min(len(mic), len(ref)) // BLOCK) * BLOCK
     mic = mic[:n].astype(np.float32, copy=False)
     ref = ref[:n].astype(np.float32, copy=False)
     out = np.zeros(n, dtype=np.float32)
-
-    snaps: list[FrameSnapshot] = []
-    reverse_copy_frames: list[int] = []
-    boost_q_frames: list[int] = []
-    main_paused_frames: list[int] = []
-
-    n_blocks = n // BLOCK
-    for i in range(n_blocks):
+    for i in range(n // BLOCK):
         s = i * BLOCK
         aec._frame_idx_trace = i
         out[s:s + BLOCK] = aec.process(mic[s:s + BLOCK], ref[s:s + BLOCK])
-        snap = _snapshot(aec, i)
-        # Catch single-frame regime-handler events from the orchestrator's
-        # diag block (line 2109 group). reverse_copy_fired is in the per-
-        # frame trace dict only when the trace flag is on; for now read
-        # the regime handler directly.
-        rh = aec._regime_handler
-        if getattr(rh, '_last_decision_reverse_copy', False):
-            reverse_copy_frames.append(i)
-            snap.reverse_copy = 1
-        if snap.main_paused:
-            main_paused_frames.append(i)
-        snaps.append(snap)
 
-    for restore in (restores if isinstance(restores, list) else [restores]):
+    for r in restores:
         try:
-            restore()
+            r()
         except Exception:
             pass
 
-    # --- PSD diff ---------------------------------------------------------
+    # PSD diff
     mic_psd = _stft_psd(mic)
     nores_psd = _stft_psd(out)
     extra = np.maximum(nores_psd - mic_psd, 0.0)
     n_psd = extra.shape[0]
+    extra_lf = extra[:, LF_SLICE].sum(axis=1)
+    extra_mf = extra[:, MF_SLICE].sum(axis=1)
+    extra_hf = extra[:, HF_SLICE].sum(axis=1)
     extra_sum = extra.sum(axis=1)
-    extra_lf = extra[:, :BIN_LF_HI + 1].sum(axis=1)
-    extra_mf = extra[:, BIN_MF_LO:BIN_MF_HI + 1].sum(axis=1)
-    top_idx = np.argsort(extra_sum)[-TOP_N:][::-1].tolist()
-    # Per-frame neighborhood event lookup
-    top_frames = []
-    for fi in top_idx:
-        # Map STFT frame to AEC block (1:1 hop=160)
-        ai = min(fi, len(snaps) - 1)
-        ev_window = []
-        for j in range(max(0, ai - 5), min(len(snaps), ai + 6)):
-            s = snaps[j]
-            ev_window.append({
-                'f': s.frame,
-                'mu': round(s.mu_scale, 4),
-                'pause': s.main_paused,
-                'rev': s.reverse_copy,
-                'boost': s.boost_q,
-                'sat': round(s.saturation_level, 3),
-                'epc': s.epc_active,
-                'conv': s.converged,
-                'h_mean': round(s.h_error_mean, 6),
-                'p_mean': round(s.p_mean, 6),
-                'w_norm': round(s.w_norm, 4),
-            })
-        top_frames.append({
-            'psd_frame': int(fi),
-            'extra_sum': float(extra_sum[fi]),
-            'extra_lf': float(extra_lf[fi]),
-            'extra_mf': float(extra_mf[fi]),
-            'event_window': ev_window,
-        })
 
-    # Reset events (A3 only; otherwise will be empty). Other ablations may
-    # log 2-tuples so be defensive about the shape.
-    resets = []
-    delay_suppressed = []
-    for evt in extra_events:
-        if not isinstance(evt, tuple) or not evt:
+    # Cluster aggregates
+    cluster_rows = []
+    for lo, hi in clusters:
+        m_slice = slice(max(0, lo), min(len(snaps), hi + 1))
+        if m_slice.start >= m_slice.stop:
             continue
-        if evt[0] == 'skipped_reset' and len(evt) >= 3:
-            resets.append({'frame': int(evt[1]), 'reason': evt[2]})
-        elif evt[0] == 'suppressed_delay_update' and len(evt) >= 2:
-            delay_suppressed.append(int(evt[1]))
+        ps_slice = slice(max(0, lo), min(n_psd, hi + 1))
+        # per-band W/H/mu/denom: mean over cluster frames
+        cluster_snaps = snaps[m_slice]
+        if not cluster_snaps:
+            continue
+        def avg(field):
+            return float(np.mean([getattr(s, field) for s in cluster_snaps]))
+        def total(arr):
+            return float(arr[ps_slice].sum()) if ps_slice.stop > ps_slice.start else 0.0
+
+        cluster_rows.append({
+            'frames': f'{lo}-{hi}',
+            'n_frames_in_cluster': len(cluster_snaps),
+            # PSD extras
+            'extra_lf_sum': total(extra_lf),
+            'extra_mf_sum': total(extra_mf),
+            'extra_hf_sum': total(extra_hf),
+            # Per-band W energy means
+            'W_lf_after_mean': avg('W_after_lf'),
+            'W_mf_after_mean': avg('W_after_mf'),
+            'W_hf_after_mean': avg('W_after_hf'),
+            'dW_lf_mean': avg('dW_lf'),
+            'dW_mf_mean': avg('dW_mf'),
+            'dW_hf_mean': avg('dW_hf'),
+            # PBFDKF drive means
+            'x2_lf_mean': avg('x2_lf'),
+            'x2_mf_mean': avg('x2_mf'),
+            'x2_hf_mean': avg('x2_hf'),
+            'mic_lf_mean': avg('mic_lf'),
+            'mic_mf_mean': avg('mic_mf'),
+            'err_lf_mean': avg('err_lf'),
+            'err_mf_mean': avg('err_mf'),
+            'echo_lf_mean': avg('echo_lf'),
+            'echo_mf_mean': avg('echo_mf'),
+            'h_lf_mean': avg('h_lf'),
+            'h_mf_mean': avg('h_mf'),
+            'denom_lf_mean': avg('denom_lf'),
+            'denom_mf_mean': avg('denom_mf'),
+            'mu_lf_mean': avg('mu_lf'),
+            'mu_mf_mean': avg('mu_mf'),
+            'mu_scale_arr_lf_mean': avg('mu_scale_arr_lf'),
+            'ng_hit_lf_mean': avg('ng_hit_lf'),
+            'ng_hit_mf_mean': avg('ng_hit_mf'),
+            # Gates
+            'main_paused_count': int(sum(s.main_paused for s in cluster_snaps)),
+            'reverse_copy_count': int(sum(s.reverse_copy for s in cluster_snaps)),
+            'saturated_capture_count':
+                int(sum(s.saturated_capture for s in cluster_snaps)),
+            'block_stationary_count':
+                int(sum(s.block_stationary for s in cluster_snaps)),
+        })
 
     summary = {
         'ablation': name,
         'version': __version__,
         'n_samples': int(n),
-        'n_blocks': int(n_blocks),
+        'n_blocks': int(n // BLOCK),
         'n_psd_frames': int(n_psd),
         'sample_rate': SR,
-        'fft_psd': FFT_PSD,
-        'hop_psd': HOP_PSD,
-        'extra_psd_sum_total': float(extra_sum.sum()),
-        'extra_psd_sum_max': float(extra_sum.max() if n_psd else 0.0),
-        'extra_psd_sum_p99': float(np.percentile(extra_sum, 99)) if n_psd else 0.0,
-        'extra_psd_sum_mean': float(extra_sum.mean()) if n_psd else 0.0,
+        'fft_size': FFT_PBFDKF,
+        'noise_gate_power': float(NOISE_GATE_POWER_FLOAT),
+        'extra_sum_total': float(extra_sum.sum()),
+        'extra_sum_max': float(extra_sum.max() if n_psd else 0.0),
+        'extra_sum_p99': float(np.percentile(extra_sum, 99)) if n_psd else 0.0,
         'extra_lf_total': float(extra_lf.sum()),
         'extra_mf_total': float(extra_mf.sum()),
-        'reverse_copy_count': len(reverse_copy_frames),
-        'boost_q_count': sum(s.boost_q for s in snaps),
-        'main_paused_frames_count': len(main_paused_frames),
-        'epc_active_frames_count': sum(s.epc_active for s in snaps),
-        'saturation_max': max((s.saturation_level for s in snaps), default=0.0),
-        'sample_w_norm_first': snaps[0].w_norm if snaps else 0.0,
-        'sample_w_norm_last': snaps[-1].w_norm if snaps else 0.0,
-        'sample_h_error_mean_first': snaps[0].h_error_mean if snaps else 0.0,
-        'sample_h_error_mean_last': snaps[-1].h_error_mean if snaps else 0.0,
-        'reverse_copy_frames_sample': reverse_copy_frames[:50],
-        'main_paused_runs_sample': main_paused_frames[:50],
-        'skipped_resets': resets[:50],
-        'suppressed_delay_updates_count': len(delay_suppressed),
-        'top_frames': top_frames,
+        'extra_hf_total': float(extra_hf.sum()),
+        'cluster_rows': cluster_rows,
+        'extra_events_count': len(extra_events),
+        'skipped_resets': [
+            {'frame': e[1], 'reason': e[2]} for e in extra_events
+            if e[0] == 'skipped_reset' and len(e) >= 3
+        ][:50],
     }
-
-    json_path = os.path.join(out_dir, f'{name}.json')
-    with open(json_path, 'w') as f:
+    with open(os.path.join(out_dir, f'{name}.json'), 'w') as f:
         json.dump(summary, f, indent=2)
     if write_wav:
         sf.write(os.path.join(out_dir, f'{name}_nores.wav'),
                  out.astype(np.float32), SR)
     return summary
-
-
-ABLATIONS: dict[str, Callable[[AEC, AecConfig, list], list]] = {
-    'A0_baseline':
-        lambda aec, cfg, log: [],
-    'A1_freeze_adapt':
-        lambda aec, cfg, log: [_patch_freeze_mu(aec)],
-    'A2_no_shadow':
-        lambda aec, cfg, log: [],   # cfg already mutated pre-init below
-    'A3_no_reset':
-        lambda aec, cfg, log: [_patch_no_reset(aec, log)],
-    'A4_fixed_delay':
-        lambda aec, cfg, log: [_patch_fixed_delay(aec, log)],
-    'A5_no_pbfdkf_update':
-        lambda aec, cfg, log: [_patch_no_pbfdkf_update(aec)],
-    'A6_no_sat':
-        lambda aec, cfg, log: [_patch_no_sat(aec)],
-}
 
 
 def main():
@@ -411,21 +673,29 @@ def main():
     ap.add_argument('--out', default='out_nores_artifact_debug')
     ap.add_argument('--ablations',
                     default='A0_baseline,A1_freeze_adapt,A2_no_shadow,'
-                            'A3_no_reset,A4_fixed_delay,A5_no_pbfdkf_update,A6_no_sat')
-    ap.add_argument('--write-wav', action='store_true',
-                    help='Save nores wav per ablation locally (gitignored).')
-    ap.add_argument('--movement', action='store_true',
-                    help='Enable online delay estimation (movement cases).')
-    ap.add_argument('--pre-align', action='store_true',
-                    help='Pre-align ref to mic via xcorr before AEC (matches '
-                         'eval_aec_challenge.py default).')
+                            'A3_no_reset,A4_fixed_delay,A5_no_pbfdkf_update,'
+                            'A6_no_sat,A_no_hpf,B_freeze_lf_mu,'
+                            'C_zero_echo_lf,D_raw_e2,E_avg_x2,F_perbin_refresh')
+    ap.add_argument('--write-wav', action='store_true')
+    ap.add_argument('--movement', action='store_true')
+    ap.add_argument('--pre-align', action='store_true')
+    ap.add_argument('--clusters', default=DEFAULT_CLUSTERS,
+                    help='Cluster frame ranges (e.g., "175-179,665-677")')
     args = ap.parse_args()
+
+    clusters: list[tuple[int, int]] = []
+    for c in args.clusters.split(','):
+        c = c.strip()
+        if not c:
+            continue
+        lo, hi = c.split('-')
+        clusters.append((int(lo), int(hi)))
 
     mic, sr_mic = sf.read(args.mic)
     ref, sr_ref = sf.read(args.ref)
     if mic.ndim > 1: mic = mic[:, 0]
     if ref.ndim > 1: ref = ref[:, 0]
-    assert sr_mic == SR == sr_ref, f'expected {SR} Hz, got mic={sr_mic} ref={sr_ref}'
+    assert sr_mic == SR == sr_ref, f'expected {SR} Hz'
 
     if args.pre_align:
         from eval_aec_challenge import estimate_delay
@@ -439,119 +709,106 @@ def main():
 
     out_dir = os.path.join(args.out, args.stem)
     os.makedirs(out_dir, exist_ok=True)
-
-    all_summaries = {}
+    all_summ = {}
     for name in args.ablations.split(','):
         name = name.strip()
         if name not in ABLATIONS:
-            print(f'  WARNING: unknown ablation {name!r}, skipped')
-            continue
+            print(f'  WARNING: unknown ablation {name!r}, skipped'); continue
         print(f'  rendering {name} ...')
-        # A2 needs the cfg mutated BEFORE AEC() construction; run_one
-        # builds a fresh cfg per call. Wrap the patch_fn to also mutate cfg.
-        patch_fn = ABLATIONS[name]
-        no_shadow = (name == 'A2_no_shadow')
-        summary = run_one(name, mic, ref, patch_fn, out_dir, args.write_wav,
-                          movement=args.movement, no_shadow=no_shadow)
-        all_summaries[name] = summary
+        all_summ[name] = run_one(name, mic, ref, out_dir, args.write_wav,
+                                 args.movement, clusters)
 
-    # Diff table vs baseline (if present)
-    base = all_summaries.get('A0_baseline')
-    table = []
-    keys = ('extra_psd_sum_total', 'extra_psd_sum_max',
-            'extra_psd_sum_p99', 'extra_lf_total', 'extra_mf_total')
-    for name, s in all_summaries.items():
-        row = {'ablation': name}
-        for k in keys:
-            v = s.get(k)
-            row[k] = round(v, 6) if isinstance(v, float) else v
-            if base and name != 'A0_baseline':
-                b = base.get(k, 0.0) or 1e-12
-                row[k + '_ratio_vs_base'] = round((v or 0) / b, 4)
-        table.append(row)
+    base = all_summ.get('A0_baseline')
+    # ---- transcription report --------------------------------------------
+    print('\n' + '=' * 72)
+    print(f'NORES W-UPDATE-CONTROL AUDIT — stem={args.stem}  v{__version__}')
+    print('=' * 72)
+    print('\n[TABLE 1] extra_psd ratio vs A0_baseline (1.000 = no effect)')
+    print(f"{'ablation':<22s} {'total':>8s} {'max':>8s} {'p99':>8s} "
+          f"{'lf':>8s} {'mf':>8s} {'hf':>8s}")
+    keys = ('extra_sum_total', 'extra_sum_max', 'extra_sum_p99',
+            'extra_lf_total', 'extra_mf_total', 'extra_hf_total')
+    for name, s in all_summ.items():
+        if name == 'A0_baseline':
+            print(f"{name:<22s} " + ' '.join(f"{1.000:>8.3f}" for _ in keys)
+                  + '   [ref]')
+            continue
+        row = [s.get(k, 0.0) / (base.get(k, 0.0) or 1e-12) for k in keys]
+        print(f"{name:<22s} " + ' '.join(f"{v:>8.3f}" for v in row))
+    print('  (A1/A5: sanity — filter inactive → mic passthrough → ~0.003)')
+    print('  (A_no_hpf: ORIGINAL user mandate "same HPF on ref" was no-op; '
+          'verified config has ref HPF ON. Redefined as "BOTH HPF OFF".)')
 
-    summary_path = os.path.join(out_dir, 'summary.json')
-    with open(summary_path, 'w') as f:
+    print('\n[TABLE 2] gate counts per ablation '
+          '(call=cold-start; pe=poor-exc; sat=saturated_capture; stat=block_stationary)')
+    print(f"{'ablation':<22s} {'pause':>7s} {'revcp':>7s} "
+          f"{'call_min':>9s} {'pe_min':>7s} {'sat_sum':>8s} {'stat_sum':>9s}")
+    # We need to aggregate from snaps for these. Since we discarded snaps
+    # after run_one, fall back to event count proxies + per-cluster gates.
+    for name, s in all_summ.items():
+        # Take aggregate from cluster_rows (sum of gate counts across clusters);
+        # for full-run gate stats we'd need to keep snaps — skipped to keep
+        # JSON compact. Cluster-level is the relevant audit anyway.
+        clrows = s.get('cluster_rows', [])
+        pause = sum(r.get('main_paused_count', 0) for r in clrows)
+        rev = sum(r.get('reverse_copy_count', 0) for r in clrows)
+        sat = sum(r.get('saturated_capture_count', 0) for r in clrows)
+        stat = sum(r.get('block_stationary_count', 0) for r in clrows)
+        print(f"{name:<22s} {pause:>7d} {rev:>7d} "
+              f"{'-':>9s} {'-':>7s} {sat:>8d} {stat:>9d}")
+
+    if clusters:
+        for ci, (lo, hi) in enumerate(clusters):
+            print(f'\n[TABLE 3.{ci+1}] cluster f={lo}-{hi} per-band aggregates '
+                  '(mean across cluster frames; energy = Σ|·|² per band)')
+            print(f"{'ablation':<22s} {'eLF':>10s} {'eMF':>10s} {'eHF':>10s} "
+                  f"{'x2LF':>10s} {'micLF':>10s} {'errLF':>10s} {'echoLF':>10s} "
+                  f"{'hLF':>10s} {'denomLF':>10s} {'muLF':>10s} "
+                  f"{'WafterLF':>10s} {'dWLF':>10s} {'ngLF':>6s}")
+            for name, s in all_summ.items():
+                clrows = s.get('cluster_rows', [])
+                if ci >= len(clrows):
+                    continue
+                r = clrows[ci]
+                print(f"{name:<22s} "
+                      f"{r['extra_lf_sum']:>10.2f} "
+                      f"{r['extra_mf_sum']:>10.2f} "
+                      f"{r['extra_hf_sum']:>10.2f} "
+                      f"{r['x2_lf_mean']:>10.4f} "
+                      f"{r['mic_lf_mean']:>10.4f} "
+                      f"{r['err_lf_mean']:>10.4f} "
+                      f"{r['echo_lf_mean']:>10.4f} "
+                      f"{r['h_lf_mean']:>10.4f} "
+                      f"{r['denom_lf_mean']:>10.4f} "
+                      f"{r['mu_lf_mean']:>10.4f} "
+                      f"{r['W_lf_after_mean']:>10.4f} "
+                      f"{r['dW_lf_mean']:>10.4f} "
+                      f"{r['ng_hit_lf_mean']:>6.1f}")
+
+    sk = all_summ.get('A3_no_reset', {}).get('skipped_resets', [])
+    if sk:
+        print('\n[TABLE 4] A3 skipped-reset timeline')
+        for evt in sk[:15]:
+            print(f"  f={evt['frame']:>5d}  reason={evt['reason']}")
+
+    summ_path = os.path.join(out_dir, 'summary.json')
+    with open(summ_path, 'w') as f:
         json.dump({
             'stem': args.stem,
             'version': __version__,
-            'diff_table': table,
+            'clusters': args.clusters,
+            'all_summaries': all_summ,
         }, f, indent=2)
-    print(f'\n  summary.json written → {summary_path}')
+    print(f'\n  summary.json → {summ_path}')
 
-    # ---- Transcription-friendly report ---------------------------------
-    # Designed so the user can read the lines back to Claude verbatim in
-    # chat. NO file transfer required.
-    print('\n' + '=' * 64)
-    print(f'NORES ARTIFACT REPORT — stem={args.stem}  v{__version__}')
-    print('=' * 64)
-    print('\n[TABLE 1] extra_psd ratio vs A0_baseline (1.000 = no effect)')
-    print(f"{'ablation':<22s} {'total':>8s} {'max':>8s} {'p99':>8s} "
-          f"{'lf':>8s} {'mf':>8s}")
-    for row in table:
-        name = row['ablation']
-        if name == 'A0_baseline':
-            print(f"{name:<22s} {1.000:>8.3f} {1.000:>8.3f} {1.000:>8.3f} "
-                  f"{1.000:>8.3f} {1.000:>8.3f}   [reference]")
-        else:
-            print(f"{name:<22s} "
-                  f"{row.get('extra_psd_sum_total_ratio_vs_base', 0):>8.3f} "
-                  f"{row.get('extra_psd_sum_max_ratio_vs_base', 0):>8.3f} "
-                  f"{row.get('extra_psd_sum_p99_ratio_vs_base', 0):>8.3f} "
-                  f"{row.get('extra_lf_total_ratio_vs_base', 0):>8.3f} "
-                  f"{row.get('extra_mf_total_ratio_vs_base', 0):>8.3f}")
-    print('  (A1/A5 are sanity baselines — filter inactive → mic passthrough;')
-    print('   they SHOULD drop to ~0.003. Diagnostic ablations: A2/A3/A4/A6.)')
-
-    print('\n[TABLE 2] event counts per ablation')
-    print(f"{'ablation':<22s} {'rev_cp':>7s} {'boost_q':>8s} {'pause_f':>8s} "
-          f"{'epc_f':>7s} {'sat_mx':>7s} {'sk_rst':>7s} {'sk_dly':>7s}")
-    for name, s in all_summaries.items():
-        print(f"{name:<22s} "
-              f"{s.get('reverse_copy_count', 0):>7d} "
-              f"{s.get('boost_q_count', 0):>8d} "
-              f"{s.get('main_paused_frames_count', 0):>8d} "
-              f"{s.get('epc_active_frames_count', 0):>7d} "
-              f"{s.get('saturation_max', 0):>7.3f} "
-              f"{len(s.get('skipped_resets', [])):>7d} "
-              f"{s.get('suppressed_delay_updates_count', 0):>7d}")
-
-    print('\n[TABLE 3] A3 skipped-reset timeline (frame, reason)')
-    a3 = all_summaries.get('A3_no_reset', {})
-    sk = a3.get('skipped_resets', [])
-    if sk:
-        for evt in sk[:20]:
-            print(f"  f={evt['frame']:>5d}  reason={evt['reason']}")
-        if len(sk) > 20:
-            print(f"  ... and {len(sk) - 20} more")
-    else:
-        print('  (no resets skipped — reset events did not fire on this case)')
-
-    print('\n[TABLE 4] Top-3 PSD-excess frames + ±2 event window per ablation')
-    for name, s in all_summaries.items():
-        tops = s.get('top_frames', [])[:3]
-        if not tops:
-            continue
-        print(f'  {name}:')
-        for t in tops:
-            ev = t.get('event_window', [])
-            mid = len(ev) // 2
-            ev_compact = ev[max(0, mid - 2): mid + 3]
-            print(f"    psd_f={t['psd_frame']:>5d}  extra_sum={t['extra_sum']:>10.2f}  "
-                  f"lf={t['extra_lf']:>10.2f}  mf={t['extra_mf']:>10.2f}")
-            for e in ev_compact:
-                print(f"      f={e['f']:>5d} mu={e['mu']:.3f} pause={e['pause']} "
-                      f"rev={e['rev']} boost={e['boost']} sat={e['sat']:.2f} "
-                      f"epc={e['epc']} conv={e['conv']} "
-                      f"hmean={e['h_mean']:.4e} pmean={e['p_mean']:.4e} "
-                      f"wnorm={e['w_norm']:.3f}")
-    print('\n' + '=' * 64)
-    print('READ-BACK INSTRUCTIONS:')
-    print('  Type [TABLE 1] verbatim back to Claude as the minimum.')
-    print('  Then [TABLE 2] and [TABLE 3] (if non-empty).')
-    print('  [TABLE 4] only for the ablation whose TABLE 1 ratio deviates')
-    print('  most from 1.000 — that pinpoints the artifact event.')
-    print('=' * 64)
+    print('\n' + '=' * 72)
+    print('READ-BACK INSTRUCTIONS')
+    print('  Minimum: TABLE 1 (12 rows × 7 cols).')
+    print('  Strongly preferred: TABLE 3.1 + TABLE 3.2 (12 rows × 13 cols each)')
+    print('  — these are the per-cluster per-band aggregates that pin')
+    print('  the W-update-control mechanism.')
+    print('  Optional: TABLE 2 + TABLE 4 if any anomaly is visible.')
+    print('=' * 72)
 
 
 if __name__ == '__main__':
