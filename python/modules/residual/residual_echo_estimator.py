@@ -19,15 +19,22 @@ UseStationarityProperties NOT yet wired (echo_audibility port deferred);
 default config.echo_audibility.use_stationarity_properties = False so
 this branch is inactive in default configs.
 """
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
 from ..state.aec_state import AecState
+from .. import aec3_scale as _aec3_scale
 from .reverb_model import ReverbModel
 from .reverb_decay_estimator import ReverbDecayEstimator
 from .reverb_frequency_response import ReverbFrequencyResponse
+
+# Delay-centered render buffer depth.  Must cover max(filter_delay_blocks) +
+# post_blocks + 1.  filter_delay_blocks is bounded by n_partitions (default 5
+# for 832-sample filter at 160-sample hop), so 16 gives 3× headroom.
+_DELAY_BUF_SIZE = 16
 
 
 @dataclass(frozen=True)
@@ -103,6 +110,8 @@ class ResidualEchoEstimator:
         reverb: ReverbConfig = ReverbConfig(),
         sr: int = 16000,
         hop_size: int = 160,
+        use_aec3_residual_noise_gate: bool = False,
+        use_aec3_echo_gen_window: bool = False,
     ) -> None:
         self._n_bins = int(n_bins)
         self._echo_model = echo_model
@@ -110,9 +119,12 @@ class ResidualEchoEstimator:
         self._reverb_cfg = reverb
         self._sr = int(sr)
         self._hop_size = int(hop_size)
+        # R0.2: corrected residual noise gate (27509.42 int16² vs buggy 27509562).
+        self._use_aec3_residual_noise_gate = bool(use_aec3_residual_noise_gate)
+        # R0.3: corrected EchoGeneratingPower render pre-window (pre=1 vs default pre=0).
+        self._use_aec3_echo_gen_window = bool(use_aec3_echo_gen_window)
         # Derive wall-clock hops from cfg.noise_floor_hold_ms once at init
         # (echo_model is frozen so the value is stable).
-        from .. import aec3_scale as _aec3_scale
         self._noise_floor_hold_hops = _aec3_scale.ms_to_hops(
             echo_model.noise_floor_hold_ms, self._hop_size, self._sr
         )
@@ -132,10 +144,10 @@ class ResidualEchoEstimator:
         self._reverb_model = ReverbModel(n_bins=self._n_bins)
         # v3.21 Phase C.2 — EchoGeneratingPower window walk. AEC3 walks the
         # render history `[delay - pre, delay + post + 1)` and takes the
-        # element-wise max for each bin. Defaults: pre=0, post=1 (2 blocks).
-        # We use a small ring buffer of recent render PSDs and take max over
-        # the last `_render_history_size` hops.
-        self._render_pre_window_size = 0
+        # element-wise max for each bin.
+        # Default: pre=0, post=1 (2 blocks). AEC3 default: pre=1, post=1 (3 blocks).
+        # R0.3: use_aec3_echo_gen_window=True sets pre=1 for AEC3 parity.
+        self._render_pre_window_size = 1 if self._use_aec3_echo_gen_window else 0
         self._render_post_window_size = 1
         self._render_history_size = (
             self._render_pre_window_size + self._render_post_window_size + 1
@@ -145,6 +157,14 @@ class ResidualEchoEstimator:
         )
         self._render_history_idx = 0
         self._render_history_initialised = False
+        # R0.3 strict AEC3 EchoGeneratingPower: delay-centered render buffer.
+        # Index 0 = most recent frame, index k = k hops ago.
+        # Used only when _use_aec3_echo_gen_window=True.
+        self._delay_render_buf: deque = deque(maxlen=_DELAY_BUF_SIZE)
+        # Diagnostics for last estimate() call (readable by orchestrator trace).
+        self._last_echo_gen_delay_blocks: int = 0
+        self._last_echo_gen_idx_start: int = 0
+        self._last_echo_gen_idx_stop: int = 0
         # v3.21 Phase C.4 — adaptive reverb decay + tail freq response.
         # Both are LAZY-bound; orchestrator calls `attach_reverb_estimators`
         # at the first hop where it knows `n_partitions` and `hop_size`.
@@ -223,6 +243,7 @@ class ResidualEchoEstimator:
         s2_linear: np.ndarray,     # |H·X|² from PBFDKF
         dominant_nearend: bool,
         filter_freq_response: Optional[np.ndarray] = None,
+        filter_delay_blocks: int = 0,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Returns ``(R2, R2_unbounded)``.
 
@@ -275,30 +296,49 @@ class ResidualEchoEstimator:
                 r2_unbounded[:] = capture_psd
             else:
                 # v3.21 Phase C.2 — EchoGeneratingPower window walk
-                # (residual_echo_estimator.cc:133-165). Maintain a ring
-                # buffer of the last `_render_history_size` render PSDs;
-                # use the element-wise max across the window so transient
-                # render peaks within the post-window aren't missed by the
-                # current-hop snapshot. Lazy-init: until the buffer fills,
-                # all slots replicate the first observation.
+                # (residual_echo_estimator.cc:133-165).
                 _rp = np.asarray(render_psd, dtype=np.float32)
-                if not self._render_history_initialised:
-                    self._render_history[:] = _rp
-                    self._render_history_initialised = True
+                if self._use_aec3_echo_gen_window:
+                    # R0.3 strict AEC3: delay-centered window.
+                    # idx_start = max(0, delay-pre), idx_stop = delay+post.
+                    # Deque index 0 = current frame, k = k hops ago.
+                    self._delay_render_buf.appendleft(_rp)
+                    _delay = max(0, int(filter_delay_blocks))
+                    _pre  = self._render_pre_window_size   # 1
+                    _post = self._render_post_window_size  # 1
+                    _idx_start = max(0, _delay - _pre)
+                    _idx_stop  = min(len(self._delay_render_buf) - 1,
+                                     _delay + _post)
+                    self._last_echo_gen_delay_blocks = _delay
+                    self._last_echo_gen_idx_start    = _idx_start
+                    self._last_echo_gen_idx_stop     = _idx_stop
+                    _slices = [self._delay_render_buf[i]
+                               for i in range(_idx_start, _idx_stop + 1)]
+                    x2 = (np.maximum.reduce(_slices).copy()
+                          if len(_slices) > 1 else _slices[0].copy())
                 else:
-                    self._render_history[self._render_history_idx] = _rp
-                    self._render_history_idx = (
-                        self._render_history_idx + 1
-                    ) % self._render_history_size
-                x2 = np.max(self._render_history, axis=0).copy()
+                    # Legacy: recent-N ring buffer (default-OFF path).
+                    if not self._render_history_initialised:
+                        self._render_history[:] = _rp
+                        self._render_history_initialised = True
+                    else:
+                        self._render_history[self._render_history_idx] = _rp
+                        self._render_history_idx = (
+                            self._render_history_idx + 1
+                        ) % self._render_history_size
+                    x2 = np.max(self._render_history, axis=0).copy()
                 if not aec_state.transparent_mode_active():
                     # AEC3 cc:121-129 noise gate.
-                    mask = self._echo_model.noise_gate_power > x2
+                    # R0.2: use corrected 27509.42 (int16²) instead of buggy 27509562.
+                    _ng = (_aec3_scale.RESIDUAL_NOISE_GATE_POWER
+                           if self._use_aec3_residual_noise_gate
+                           else self._echo_model.noise_gate_power)
+                    mask = _ng > x2
                     x2[mask] = np.maximum(
                         0.0,
                         x2[mask]
                         - self._echo_model.noise_gate_slope
-                        * (self._echo_model.noise_gate_power - x2[mask]),
+                        * (_ng - x2[mask]),
                     )
                 # Subtract stationary noise (AEC3 cc:284-288).
                 x2 -= self._echo_model.stationary_gate_slope * self._x2_noise_floor

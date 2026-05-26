@@ -511,6 +511,9 @@ class SuppressionGain:
                 hop_size=self._hop_size,
             )
         self._initial_state = True
+        # Gain attribution snapshot — populated each frame in _lower_band_gain.
+        # Read by orchestrator trace_hf_chain; no audio path effect.
+        self._last_lower_band_snap: dict = {}
         # Resolve freq-based config to bin indices once at construction.
         self._last_lf_band = hz_to_bin(self._config.last_lf_freq_hz, self._n_bins, self._sr)
         self._first_hf_band = hz_to_bin(self._config.first_hf_freq_hz, self._n_bins, self._sr)
@@ -615,16 +618,17 @@ class SuppressionGain:
             low_noise_render, aec_state.saturated_echo(),
         )
         # Step 5: GainToNoAudibleEcho (the heart).
-        G = self._gain_to_no_audible_echo(nearend, weighted_residual, comfort_noise)
+        G_raw = self._gain_to_no_audible_echo(nearend, weighted_residual, comfort_noise)
         # Step 6: clip into [min, max].
-        G = np.clip(G, min_gain, max_gain)
+        G = np.clip(G_raw, min_gain, max_gain)
         # Step 7: LF + HF limiters.
         _limit_lf_gains(G)
-        if (
+        _hf_lim_applied = (
             (not self._ne_state_for_gain_rules())
             or clock_drift
             or self._config.conservative_hf_suppression
-        ):
+        )
+        if _hf_lim_applied:
             _limit_hf_gains(
                 self._config.high_frequency_suppression,
                 self._config.conservative_hf_suppression,
@@ -635,6 +639,39 @@ class SuppressionGain:
         self._last_gain[:] = G
         self._last_nearend[:] = nearend
         self._last_echo[:] = weighted_residual
+        # D — gain attribution snap (trace_hf_chain reads; no audio effect).
+        def _sb(a, k): return float(a[k]) if a.size > k else 0.0
+        def _reason(raw, mn, mx, final):
+            if raw < mn: return 'min'
+            if raw > mx: return 'max'
+            clipped = min(max(raw, mn), mx)
+            return 'lim' if abs(final - clipped) > 1e-6 else 'G'
+        # R0.5 per-band reason histogram (diagnostic; no audio effect).
+        # Bands match R0 audit defs: LF=0:7, MF=7:65, HF=65+
+        _r_min = G_raw < min_gain
+        _r_max = G_raw > max_gain
+        _G_cl  = np.clip(G_raw, min_gain, max_gain)
+        _r_lim = np.abs(G - _G_cl) > 1e-6
+        _r_G   = ~_r_min & ~_r_max & ~_r_lim
+        def _bf(m, sl): return float(m[sl].mean()) if m[sl].size > 0 else 0.0
+        _LF, _MF, _HF = slice(0, 7), slice(7, 65), slice(65, None)
+        self._last_lower_band_snap = {
+            'min_gain_5': _sb(min_gain, 5), 'min_gain_100': _sb(min_gain, 100),
+            'max_gain_5': _sb(max_gain, 5), 'max_gain_100': _sb(max_gain, 100),
+            'G_pre_clip_5': _sb(G_raw, 5), 'G_pre_clip_100': _sb(G_raw, 100),
+            'gain_reason_5': _reason(_sb(G_raw, 5), _sb(min_gain, 5), _sb(max_gain, 5), _sb(G, 5)),
+            'gain_reason_100': _reason(_sb(G_raw, 100), _sb(min_gain, 100), _sb(max_gain, 100), _sb(G, 100)),
+            'gain_reason_200': _reason(_sb(G_raw, 200), _sb(min_gain, 200), _sb(max_gain, 200), _sb(G, 200)),
+            'hf_lim_applied': _hf_lim_applied,
+            # R0.5 per-band fractions
+            'reason_G_lf':   _bf(_r_G,   _LF), 'reason_G_mf':   _bf(_r_G,   _MF), 'reason_G_hf':   _bf(_r_G,   _HF),
+            'reason_min_lf': _bf(_r_min, _LF), 'reason_min_mf': _bf(_r_min, _MF), 'reason_min_hf': _bf(_r_min, _HF),
+            'reason_lim_lf': _bf(_r_lim, _LF), 'reason_lim_mf': _bf(_r_lim, _MF), 'reason_lim_hf': _bf(_r_lim, _HF),
+            # per-band raw R² (before audibility weighting; for regression root-cause)
+            'r2_lf_mean': float(np.mean(residual_echo[_LF])),
+            'r2_mf_mean': float(np.mean(residual_echo[_MF])),
+            'r2_hf_mean': float(np.mean(residual_echo[_HF])),
+        }
         # Step 8: sqrt to amplitude domain.
         return np.sqrt(np.maximum(G, 0.0)).astype(np.float32)
 

@@ -48,7 +48,7 @@ becomes the sole rendering path.
 | `balanced_result.md` | Bucket-mean summary + worst-20 per bucket for `balanced` |
 | `balanced_aec3_scores.json` | Per-case AECMOS scores for `balanced_aec3` (800 cases) |
 | `balanced_aec3_result.md` | Bucket-mean summary + worst-20 per bucket for `balanced_aec3` |
-| `byte_equal_reference.json` | md5 of `_ours.wav` + `_ours_nores.wav` for 25 representative cases (5 per bucket, sorted by echo at 0 / 25% / 50% / 75% / 100% percentile within each bucket) — the anchor for `python/check_byte_equal.py` |
+| `byte_equal_reference.json` | md5 of `_ours.wav` + `_ours_nores.wav` for 25 representative cases (5 per bucket, sorted by echo at 0 / 25% / 50% / 75% / 100% percentile within each bucket) — the anchor for `python/check_byte_equal.py`. **Updated 2026-05-26**: hashes regenerated with `use_partition_summed_x2_for_h_error_gain=False` (the v3.21 closure default; prior JSON had accidentally used True from v3.21.20 ALL-ON experiment). |
 
 ## Reproducing this baseline
 

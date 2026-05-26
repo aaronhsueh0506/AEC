@@ -3,161 +3,161 @@
     "bucket": "FS_static",
     "echo": 1.9289,
     "deg": 5.0,
-    "md5_ours": "b9c4aad9d28c23ef",
-    "md5_ours_nores": "ac60e762eaa51926"
+    "md5_ours": "d3a157949ca06676",
+    "md5_ours_nores": "8c96f307877e8086"
   },
   "TcuegeGKL06ysmFP0RxjyQ_farend_singletalk": {
     "bucket": "FS_static",
     "echo": 3.4136,
     "deg": 5.0,
-    "md5_ours": "8a0463bc9806556e",
-    "md5_ours_nores": "220061a6b86a7f10"
+    "md5_ours": "8b28a4c563311c53",
+    "md5_ours_nores": "401f6f6c8c513915"
   },
   "qiQL0BUPxk0YtpnP7JGfNg_farend_singletalk": {
     "bucket": "FS_static",
     "echo": 3.7931,
     "deg": 4.9998,
-    "md5_ours": "db0efb2b2a14a679",
-    "md5_ours_nores": "4b9e9031f51591fc"
+    "md5_ours": "06f3702c609e44c8",
+    "md5_ours_nores": "ae7db92f754c57b3"
   },
   "zOiK6oSHp0ib3nHvzLKbRQ_farend_singletalk": {
     "bucket": "FS_static",
     "echo": 4.1559,
     "deg": 4.9992,
-    "md5_ours": "41df88ae0a2d33a0",
-    "md5_ours_nores": "2692a8148bf402ed"
+    "md5_ours": "ae0e89e5a09ea5d5",
+    "md5_ours_nores": "1dc14a028801c0d8"
   },
   "u0X5XB2KzEGduXtfWfjGDw_farend_singletalk": {
     "bucket": "FS_static",
     "echo": 4.4824,
     "deg": 4.9987,
-    "md5_ours": "e606e2063152c902",
-    "md5_ours_nores": "b7ad25e0a9f8c08c"
+    "md5_ours": "31810cddb5934640",
+    "md5_ours_nores": "7db57e9374fdc174"
   },
   "IrQvqOTCmEWMXn9k2ICtRQ_farend_singletalk_with_movement": {
     "bucket": "FS_movement",
     "echo": 2.0337,
     "deg": 5.0,
-    "md5_ours": "4341e1d3528bc676",
-    "md5_ours_nores": "05b372fa9d1b6b33"
+    "md5_ours": "5e085c0720458fdb",
+    "md5_ours_nores": "f94fa35915807d4f"
   },
   "XuguA1uJAE0bWT0xXRDdeA_farend_singletalk_with_movement": {
     "bucket": "FS_movement",
     "echo": 3.2812,
     "deg": 4.9999,
-    "md5_ours": "d854902c8637b25d",
-    "md5_ours_nores": "e34b5bef98ddb8a7"
+    "md5_ours": "583e7d6d76e8c108",
+    "md5_ours_nores": "9b9911de727f416e"
   },
   "V6Mw0Ti8RUSkzvMGB4WGiw_farend_singletalk_with_movement": {
     "bucket": "FS_movement",
     "echo": 3.6984,
     "deg": 4.9996,
-    "md5_ours": "cac9d4294839a5b9",
-    "md5_ours_nores": "a42949275b43b1a1"
+    "md5_ours": "afb6b3eb16d26dcd",
+    "md5_ours_nores": "8c85261d3d5cd321"
   },
   "MkSLte0FTkqybGcLTwA3Tw_farend_singletalk_with_movement": {
     "bucket": "FS_movement",
     "echo": 4.0355,
     "deg": 4.9979,
-    "md5_ours": "c89eb99b9344c756",
-    "md5_ours_nores": "dbcd8d749e68bc45"
+    "md5_ours": "967fe31cf14b5908",
+    "md5_ours_nores": "ffa0e2ecfeceda39"
   },
   "jtYTdZm3lUmFVNibJWq8YQ_farend_singletalk_with_movement": {
     "bucket": "FS_movement",
     "echo": 4.5098,
     "deg": 4.9988,
-    "md5_ours": "b4a58663319993fe",
-    "md5_ours_nores": "82c2259512d8c0fa"
+    "md5_ours": "bb86dc6ac6badaf9",
+    "md5_ours_nores": "0152462efc4be0ab"
   },
   "wWeNtFK0dEG9Wub40bB15A_doubletalk": {
     "bucket": "DT_static",
     "echo": 2.4744,
     "deg": 3.3254,
-    "md5_ours": "4eaa32b8a2fefcc6",
-    "md5_ours_nores": "b0bf0d9640891668"
+    "md5_ours": "a74a6de34df4d9f5",
+    "md5_ours_nores": "e6d8c8d009c8ccf1"
   },
   "Hp5g1asacUCt5rJVLO1FuQ_doubletalk": {
     "bucket": "DT_static",
     "echo": 4.0668,
     "deg": 2.0581,
-    "md5_ours": "cf544b3a2061ddc1",
-    "md5_ours_nores": "ff0ee6eb1abf894b"
+    "md5_ours": "dc6b6191512728e7",
+    "md5_ours_nores": "0e07f22df4e195d0"
   },
   "j0awp3hXrkCSqhR748U3iQ_doubletalk": {
     "bucket": "DT_static",
     "echo": 4.3139,
     "deg": 2.2198,
-    "md5_ours": "985431cccba4b003",
-    "md5_ours_nores": "250d839d2ef09567"
+    "md5_ours": "0ecfc8f03e0f120c",
+    "md5_ours_nores": "5afd9a7205bb8fcd"
   },
   "KgZ0y2EQJ0a4jvtsznBrvw_doubletalk": {
     "bucket": "DT_static",
     "echo": 4.4972,
     "deg": 3.9677,
-    "md5_ours": "4b7ea4a46c5f4eca",
-    "md5_ours_nores": "fd0fd9df7cdc7e2c"
+    "md5_ours": "faf9af406fd7a045",
+    "md5_ours_nores": "cf0bcf8035e1291d"
   },
   "UmlD9X38NECNoJKm0oyf4w_doubletalk": {
     "bucket": "DT_static",
     "echo": 4.895,
     "deg": 2.0526,
-    "md5_ours": "ad539b45a5cf588b",
-    "md5_ours_nores": "90d038847833f6c5"
+    "md5_ours": "dc46fb3ccc56d9e0",
+    "md5_ours_nores": "c4f39ad0fb435156"
   },
   "i2BU43nmM00qbI1MKr2njQ_doubletalk_with_movement": {
     "bucket": "DT_movement",
     "echo": 2.7457,
     "deg": 3.7886,
-    "md5_ours": "e3cb92a4159bdf54",
-    "md5_ours_nores": "ce03680a6e4cbf74"
+    "md5_ours": "6b8d6d4c59758680",
+    "md5_ours_nores": "503ba03d7173b2f4"
   },
   "JjCzlhn3gEiBQvfJtPNJ9A_doubletalk_with_movement": {
     "bucket": "DT_movement",
     "echo": 3.9752,
     "deg": 2.1863,
-    "md5_ours": "b17e1a73faefcd32",
-    "md5_ours_nores": "9fad6b15c041c4a3"
+    "md5_ours": "f675b333053bd708",
+    "md5_ours_nores": "67358210a8adef8f"
   },
   "XzmU8Bbs70WtSj0koaWIzw_doubletalk_with_movement": {
     "bucket": "DT_movement",
     "echo": 4.3276,
     "deg": 2.3748,
-    "md5_ours": "0245963da128fe55",
-    "md5_ours_nores": "39a60afe748df21c"
+    "md5_ours": "da3a7ec4f4d7a1f4",
+    "md5_ours_nores": "41985e9b0146486e"
   },
   "WcK0OrF6ukW03fViPXTQjQ_doubletalk_with_movement": {
     "bucket": "DT_movement",
     "echo": 4.491,
     "deg": 1.5804,
-    "md5_ours": "d94cb51f6a88a569",
-    "md5_ours_nores": "f6a1bcca9ddc418b"
+    "md5_ours": "7764758065e632fe",
+    "md5_ours_nores": "0ed3c1e0e9385086"
   },
   "XTqo1aOXDEiqyWTFK99I5Q_doubletalk_with_movement": {
     "bucket": "DT_movement",
     "echo": 4.8103,
     "deg": 2.0988,
-    "md5_ours": "b3e4418e5cd480f3",
-    "md5_ours_nores": "be622a2ee42fd9df"
+    "md5_ours": "85976ea789d79449",
+    "md5_ours_nores": "d61cdc032727d5e6"
   },
   "Tgtk8jp1zkqmKzsmdrKt0g_nearend_singletalk": {
     "bucket": "NE",
     "echo": 4.9869,
     "deg": 4.4539,
-    "md5_ours": "044be487a053fd01",
+    "md5_ours": "183b175d3356e772",
     "md5_ours_nores": "fa041aab1ac5bc53"
   },
   "9lXkNx4OdECUiz3R8wozmA_nearend_singletalk": {
     "bucket": "NE",
     "echo": 4.9972,
     "deg": 4.4061,
-    "md5_ours": "b1abefd8252ef121",
+    "md5_ours": "5803c1f7e264abdc",
     "md5_ours_nores": "6d96db865110d336"
   },
   "PZ7V0SfxUkem4IalTp1YgA_nearend_singletalk": {
     "bucket": "NE",
     "echo": 4.9982,
     "deg": 4.225,
-    "md5_ours": "d823173b23372323",
+    "md5_ours": "22c8c45bb655b0b3",
     "md5_ours_nores": "5d14415cf0308813"
   },
   "NY3kZioAm0KwR45wIVe2Sg_nearend_singletalk": {
@@ -171,7 +171,7 @@
     "bucket": "NE",
     "echo": 5.0,
     "deg": 4.0803,
-    "md5_ours": "10543c8236eed13c",
-    "md5_ours_nores": "9e47e07f299de808"
+    "md5_ours": "60e601f5678436e3",
+    "md5_ours_nores": "f835db0ae477b557"
   }
 }

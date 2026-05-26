@@ -13,7 +13,7 @@ Self-contained: numpy + modules.dataclasses.
 """
 import numpy as np
 
-from .dataclasses import AecEvent, EpcEvent, RegimeHandlerDecision
+from .dataclasses import AecEvent, AecEventType, EpcEvent, RegimeHandlerDecision
 
 
 def classify_epc_event(epc_event: 'EpcEvent') -> AecEvent:

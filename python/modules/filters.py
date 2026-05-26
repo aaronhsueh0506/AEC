@@ -131,6 +131,35 @@ class PBFDAF:
             np.hanning(self.block_size)).astype(np.float32)
         self.error_spec_windowed = np.zeros(self.n_freqs, dtype=np.complex64)
 
+        # v3.21.14 — PBFDAF shadow NLMS AEC3 protection alignment flags
+        # (default OFF preserves v3.21.6 baseline byte-equal). Set externally
+        # by orchestrator from AecConfig. AEC3 reference:
+        # docs/aec3_extracts/src/aec3/coarse_filter_update_gain.cc:34-82.
+        # A.1: mu denom uses partition-summed X² = Σ_p |X_buf[p]|² (cc:64-72).
+        self._use_partition_summed_x2_for_shadow_mu: bool = False
+        # A.2: noise_gate hard zero — mu=0 where X² < NOISE_GATE_POWER_FLOAT (cc:67-71).
+        self._use_aec3_noise_gate_for_shadow: bool = False
+        # A.3: poor_excitation + startup gate — return when poor_excitation_counter
+        # < n_partitions OR call_counter <= n_partitions (cc:51-61).
+        self._use_poor_excitation_gate_for_shadow: bool = False
+        # A.4: narrowband mask — RenderSignalAnalyzer.mask_regions_around_narrow_bands (cc:75).
+        self._use_narrowband_mask_for_shadow: bool = False
+        # A.5: saturation gate — early return when _saturated_capture (cc:56-57).
+        self._use_saturation_gate_for_shadow: bool = False
+        # v3.21.14 A.3 / A.4 supporting state (default values harmless under
+        # flag-OFF; orchestrator overrides on shadow construction). Defined on
+        # PBFDAF so subclass PBFDKF inherits the same state attributes; PBFDKF
+        # __init__ already re-assigns these to its own AEC3-derived defaults.
+        self._call_counter = 0
+        self._poor_excitation_counter = 0  # safe init; orchestrator sets to hop-scaled 1000-block default
+        self._render_signal_analyzer = None
+        self._saturated_capture = False
+        # Variant H Gate 0 — per-frame C1-C5 gate-fire trace. Empty dict when all
+        # C1-C5 flags are OFF (byte-equal preserved). Reset each hop in process();
+        # populated in _update_weights only when a C1-C5 flag is ON. Read-only by
+        # orchestrator _hf_chain_trace; never affects audio output.
+        self._c1c5_trace: dict = {}
+
     def reset(self):
         self.W.fill(0)
         self.X_buf.fill(0)
@@ -139,6 +168,28 @@ class PBFDAF:
         self.power.fill(0)
         self.partition_idx = 0
         self.error_spec_windowed.fill(0)
+
+    def handle_echo_path_change(self, delay_change: bool = True,
+                                  gain_change: bool = False,
+                                  zero_filter: bool = False) -> None:
+        """Port AEC3 CoarseFilterUpdateGain::HandleEchoPathChange counter reset
+        (M3: not-gain_change → poor_excitation_counter = INITIAL + call_counter = 0).
+        AEC3 Subtractor::HandleEchoPathChange dispatches to both refined + coarse.
+
+        NOTE on zero_filter: W.fill(0) is NOT AEC3 ZeroFilter parity.
+        AEC3 AdaptiveFirFilter::ZeroFilter(current_size, max_size) zeroes only
+        partitions in [current..max). In steady state (current=max=13) this is a
+        NO-OP — W is fully preserved. W.fill(0) is a default-OFF ablation flag
+        (non-AEC3 behaviour); it is NOT listed as a v3.21 strict alignment candidate.
+        """
+        from . import aec3_scale as _aec3_scale
+        if delay_change and zero_filter:
+            self.W.fill(0)
+        if not gain_change:
+            self._poor_excitation_counter = int(
+                _aec3_scale.POOR_EXCITATION_COUNTER_INITIAL_HOPS_DEFAULT
+            )
+            self._call_counter = 0
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray,
                 mu_scale=1.0) -> np.ndarray:
@@ -195,6 +246,7 @@ class PBFDAF:
         self.error_spec_windowed = near_spec_win - self.echo_spec
 
         # Update weights — gate on far-end activity
+        self._c1c5_trace = {}   # reset each hop; empty when far-inactive or flags OFF
         far_hop_energy = np.sum(far_end ** 2) / hop
         if far_hop_energy > 1e-4:  # ~ -40 dBFS, unified with far_active threshold
             self._update_weights(curr_p, mu_scale)
@@ -209,6 +261,26 @@ class PBFDAF:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
         if not np.any(mu_scale_arr > 0):
             return
+        # v3.21.14 A.5 — AEC3 coarse_filter_update_gain.cc:56-57 saturation gate.
+        # `saturated_capture_signal → return`. Default-OFF preserves v3.21.6
+        # behaviour (shadow updates regardless of mic saturation).
+        if (self._use_saturation_gate_for_shadow
+                and getattr(self, '_saturated_capture', False)):
+            self._c1c5_trace['A5_sat_skip'] = True
+            return
+        # v3.21.14 A.3 — AEC3 coarse_filter_update_gain.cc:51-61 call_counter +
+        # poor_excitation startup gate. `if poor_signal_excitation_counter_ <
+        # size_partitions OR call_counter_ <= size_partitions → return`.
+        # Counter increment is gated on the flag so default-OFF leaves the
+        # counter untouched and produces byte-equal output.
+        if self._use_poor_excitation_gate_for_shadow:
+            self._call_counter += 1
+            if (self._call_counter <= self.n_partitions
+                    or self._poor_excitation_counter < self.n_partitions):
+                self._c1c5_trace['A3_poor_exc_skip'] = True
+                self._c1c5_trace['A3_call_ctr'] = self._call_counter
+                self._c1c5_trace['A3_exc_ctr'] = self._poor_excitation_counter
+                return
         # v3.21 Phase C.3+B/D extension — stationary-far gate (see PBFDKF
         # version for full rationale). Shadow NLMS also skips W update when
         # the StationarityEstimator flags the block as stationary; spurious
@@ -216,11 +288,56 @@ class PBFDAF:
         # nearend equally in NLMS path.
         if getattr(self, '_block_stationary', False):
             return
+        # v3.21.14 A.4 — AEC3 coarse_filter_update_gain.cc:75
+        # `render_signal_analyzer.MaskRegionsAroundNarrowBands(&mu)`. Apply the
+        # narrowband mask as a pre-multiplier on mu_scale_arr so any subsequent
+        # mu_eff = mu * mu_scale_arr inherits the mask. Default-OFF preserves
+        # baseline behaviour (no mask).
+        if (self._use_narrowband_mask_for_shadow
+                and self._render_signal_analyzer is not None):
+            rsa_mask = np.ones(self.n_freqs, dtype=np.float32)
+            self._render_signal_analyzer.mask_regions_around_narrow_bands(rsa_mask)
+            mu_scale_arr = (mu_scale_arr * rsa_mask).astype(np.float32)
+            self._c1c5_trace['A4_mask_frac'] = float(np.mean(rsa_mask < 0.5))
         # Per-bin local floor: allows low-energy mid-freq bins higher effective mu
         local_floor = self.power * 0.01 + self.delta        # per-bin 1% floor
         global_floor = np.mean(self.power) * 0.001 + self.delta  # global extreme floor
         power_floor = np.maximum(self.power, np.maximum(local_floor, global_floor))
-        mu_eff = (self.mu * mu_scale_arr) / (power_floor * self.n_partitions + self.delta)
+        # v3.21.14 A.1 — AEC3 coarse_filter_update_gain.cc:64-72 mu denominator
+        # uses partition-summed X² = Σ_p |X_buf[p]|² from the current frame
+        # (no smoothing). Default-OFF preserves v3.21.6 EMA-smoothed
+        # `power_floor × n_partitions` denominator. ON matches AEC3 SpectralSum
+        # source semantic so shadow transient response aligns with AEC3 coarse.
+        if self._use_partition_summed_x2_for_shadow_mu:
+            x2_partition_sum = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
+            denom = x2_partition_sum + self.delta
+            self._c1c5_trace['A1_x2_active'] = True
+        else:
+            denom = power_floor * self.n_partitions + self.delta
+        mu_eff = (self.mu * mu_scale_arr) / denom
+        # v3.21.14 A.2 — AEC3 coarse_filter_update_gain.cc:67-71 noise_gate
+        # hard zero. AEC3 sets `mu[k] = 0` where `X²[k] < noise_gate`. X²
+        # source = SpectralSum (matches A.1) regardless of A.1 flag, since
+        # this is the AEC3-semantic X² for gate purposes. Default-OFF
+        # preserves v3.21.6 floor-only behaviour (no hard zero).
+        # T1.2 (2026-05-26): uses FILTER_NOISE_GATE_POWER_FLOAT (20075344 int16²
+        # = 0.01870) — the AEC3 coarse filter gate constant confirmed from
+        # echo_canceller3_config.cc:99. The prior NOISE_GATE_POWER_FLOAT (27509562
+        # = 0.02562) was incorrectly ported from the suppression path.
+        if self._use_aec3_noise_gate_for_shadow:
+            from . import aec3_scale as _aec3_scale
+            x2_for_gate = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
+            _ng_thr = np.float32(_aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT)
+            mu_eff = np.where(
+                x2_for_gate >= _ng_thr,
+                mu_eff,
+                np.float32(0.0),
+            ).astype(np.float32)
+            self._c1c5_trace['A2_noise_gate_zero_frac'] = float(
+                np.mean(x2_for_gate < _ng_thr))
+        # Record effective mu distribution for sub-ladder attribution trace.
+        self._c1c5_trace['mu_eff_mean'] = float(np.mean(mu_eff))
+        self._c1c5_trace['mu_eff_max'] = float(np.max(mu_eff))
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
             grad = self.error_spec * np.conj(self.X_buf[p_idx])
@@ -335,6 +452,29 @@ class PBFDKF(PBFDAF):
         self._e2_coarse_for_refresh = 0.0
         self._e2_coarse_per_bin: Optional[np.ndarray] = None
         self._use_per_bin_h_error_refresh: bool = False
+        # v3.21.6 nores LF artifact debug 2026-05-22 — AEC3
+        # `RefinedFilterUpdateGain::Compute` partition-summed X² parity.
+        # OFF (default): X²_latest = |X_buf[curr_p]|² in denom / noise_gate
+        # / H_error decay (byte-equal preserved).
+        # ON: Σ_p |X_buf[p]|² (matches AEC3 render_buffer.SpectralSum).
+        # W update partition direction unchanged either way.
+        self._use_partition_summed_x2_for_h_error_gain: bool = False
+        # v3.21.20 Phase C Fix B — startup hops before switching from single-
+        # partition to partition-sum X². 500 hops = 5 s @ hop=160/sr=16000.
+        # Orchestrator overrides from config field.
+        self._partition_sum_x2_startup_hops: int = 500
+        # v3.21.12 RefinedFilterUpdateGain input-parity audit 2026-05-22 — AEC3
+        # `RefinedFilterUpdateGain::Compute` (refined_filter_update_gain.cc:103-107)
+        # uses current-block `E2_refined[k]` = `SubtractorOutput.E2_refined` =
+        # per-bin spectrum of THIS block's e_refined (instantaneous, no
+        # smoothing). Our default uses `self._error_psd` (0.95 EMA of
+        # |error_spec|², ~200 ms time constant).
+        # OFF (default): smoothed `_error_psd` (byte-equal preserved).
+        # ON: current-block `|self.error_spec|²` in the `n_part × E²` term of
+        # the mu denominator (per-bin, no smoothing).
+        # W update direction unchanged. See
+        # docs/v3_21_12_refined_filter_update_gain_input_parity_plan.md.
+        self._use_current_e2_refined_in_h_error_denominator: bool = False
         self._disallow_leakage_diverged = False
         # ERL per bin (lazy init to 0.1 = -10 dB nominal; orchestrator
         # overwrites once its ERL estimator has a real value).
@@ -342,6 +482,10 @@ class PBFDKF(PBFDAF):
         # Master switch: use AEC3 H_error path (True, default) vs legacy
         # P-based denominator (False, diagnostic only).
         self._use_aec3_h_error = True
+        # R0.1 — refined filter noise gate constant. Default False → byte-equal
+        # (NOISE_GATE_POWER_FLOAT=0.02562). True → FILTER_NOISE_GATE_POWER_FLOAT=0.01870.
+        # Wired by orchestrator from config.use_aec3_filter_noise_gate_power.
+        self._use_aec3_filter_noise_gate_power: bool = False
 
         # GPT Phase 1 debug trace (off by default, zero overhead).
         # When enabled, accumulates per-frame stats to verify hypothesis:
@@ -354,6 +498,34 @@ class PBFDKF(PBFDAF):
         # capturing the Kalman innovation orthogonality components.
         self._enable_p53_trace = False
         self._p53_innovation_trace = []  # list of dicts of np.ndarray
+
+    def handle_echo_path_change(self, delay_change: bool = True,
+                                 gain_change: bool = False,
+                                 zero_filter: bool = False) -> None:
+        """Port AEC3 RefinedFilterUpdateGain::HandleEchoPathChange
+        (refined_filter_update_gain.cc:53-68): H_error reset to kHErrorInitial=10000
+        on delay_change, counter reset via super() (CoarseFilterUpdateGain M3).
+
+        NOTE: super() calls W.fill(0) only when zero_filter=True. That path is a
+        default-OFF ablation, NOT AEC3 parity — AEC3 ZeroFilter(current=13, max=13)
+        is a steady-state no-op (zeroes partitions in [current..max) = empty set).
+
+        - delay_change: H_error = kHErrorInitial (10000) — high uncertainty
+          so mu starts large; filter aggressively re-tracks new path.
+
+        Without H_error reset, post-EPC the filter retains stale H_error
+        (small, post-convergence) and full partition-sum X² mu denominator
+        → mu stays small → can't re-track movement → DT damage accumulates
+        (wVYS movement-W-shift bug, evidence in v3.21.20 Phase A+C trace).
+        """
+        from . import aec3_scale as _aec3_scale
+        super().handle_echo_path_change(
+            delay_change=delay_change,
+            gain_change=gain_change,
+            zero_filter=zero_filter,
+        )
+        if delay_change:
+            self.H_error_per_bin.fill(np.float32(_aec3_scale.H_ERROR_INIT_FLOAT))
 
     def reset(self):
         super().reset()
@@ -583,36 +755,72 @@ class PBFDKF(PBFDAF):
               H_error[k] += leakage_diverged   × erl[k]
           H_error[k] = clamp(H_error[k], floor, ceil)
         """
-        # X² for AEC3 formula. AEC3 uses the delay-aligned partition's |X|²;
-        # we approximate with the LATEST partition (curr_p), which is the
-        # newest hop of render. The matched-filter delay (Phase A.1) drives
-        # ring-buffer alignment upstream, so curr_p is already aligned.
+        # X² for AEC3 formula. AEC3 uses the partition-summed render power
+        # `X²[k] = Σ_p |X_buf[p][k]|²` (render_buffer.cc::SpectralSum) inside
+        # RefinedFilterUpdateGain::Compute. Our default port substitutes
+        # `X²_latest = |X_buf[curr_p]|²` (newest hop only), which under-states
+        # the render energy when the impulse response spans multiple
+        # partitions. The summed branch ships behind
+        # `_use_partition_summed_x2_for_h_error_gain` (default False →
+        # byte-equal vs v3.21.6 baseline).
         X_latest = self.X_buf[curr_p]
-        X2_latest = (np.abs(X_latest) ** 2).astype(np.float32)
+        if self._use_partition_summed_x2_for_h_error_gain:
+            # v3.21.20 Phase C Fix B — hybrid startup window.
+            # AEC3 partition-sum X² gives "stable but slow" convergence
+            # (mu effectively divided by n_partitions in early H_error-
+            # dominated phase). On our pipeline that was tuned around fast
+            # single-partition convergence, this starves the refined filter
+            # for the first ~5s (filter_w_norm ratio 0.032-0.288 vs single-
+            # partition baseline; trace evidence Phase A nVUnxqHLr).
+            # Hybrid: use single-partition X² during startup (fast initial
+            # convergence matches v3.21.6 behaviour), switch to partition-
+            # sum after `_partition_sum_x2_startup_hops` (AEC3 steady-state
+            # stability). 500 hops = 5 s @ hop=160/sr=16000.
+            if self._call_counter > self._partition_sum_x2_startup_hops:
+                X2 = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
+            else:
+                X2 = (np.abs(X_latest) ** 2).astype(np.float32)
+        else:
+            X2 = (np.abs(X_latest) ** 2).astype(np.float32)
         delta32 = np.float32(self.delta)
         n_part = np.float32(self.n_partitions)
-        # mu[k] (AEC3 formula). E² uses the smoothed error_psd estimator
-        # (same as legacy R tracking) for stability — matches AEC3 which
-        # also uses a smoothed estimate, not raw |E|².
+        # mu[k] (AEC3 formula `mu = H_error / (0.5·H_error·X² + n·E²)`).
+        # E² source is controlled by `_use_current_e2_refined_in_h_error_denominator`
+        # (v3.21.12). OFF: smoothed `_error_psd` (legacy). ON: current-block
+        # `|error_spec|²` per-bin matching AEC3 `SubtractorOutput.E2_refined`.
+        # Comment correction: the previous "AEC3 also uses a smoothed
+        # estimate" assertion was WRONG — AEC3 uses the current SubtractorOutput
+        # E²_refined directly (refined_filter_update_gain.cc:106).
+        if self._use_current_e2_refined_in_h_error_denominator:
+            e2_refined_current = (np.abs(self.error_spec) ** 2).astype(np.float32)
+        else:
+            e2_refined_current = self._error_psd
         denom_aec3 = (
-            np.float32(0.5) * self.H_error_per_bin * X2_latest
-            + n_part * self._error_psd
+            np.float32(0.5) * self.H_error_per_bin * X2
+            + n_part * e2_refined_current
             + delta32
         )
         mu_aec3 = (self.H_error_per_bin / denom_aec3).astype(np.float32)
 
         # v3.21 NE-outlier fix — per-bin noise_gate
         # (refined_filter_update_gain.cc:104-111). AEC3 zeros mu on bins
-        # where X² < `noise_gate`. Our port was missing this gate, which
-        # let mu explode on weak-far bins (low denom + un-scaled H_error)
-        # and the W update slowly learned mic-as-echo coupling against
-        # uncorrelated NE-dominant signals. Adding the per-bin gate is
-        # the canonical AEC3 protection.
+        # where X² < `noise_gate`. The gate consumes the same X² the
+        # denominator does — partition-summed when the flag is ON.
+        # R0.1: use_aec3_filter_noise_gate_power selects the correct AEC3
+        # filter gate constant (0.01870 from 20075344 int16²) vs the legacy
+        # default (0.02562 from 27509562, ported from suppression path).
         from . import aec3_scale as _aec3_scale
-        _noise_gate = np.float32(_aec3_scale.NOISE_GATE_POWER_FLOAT)
-        mu_aec3 = np.where(X2_latest >= _noise_gate, mu_aec3, np.float32(0.0))
+        _noise_gate = np.float32(
+            _aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT
+            if self._use_aec3_filter_noise_gate_power
+            else _aec3_scale.NOISE_GATE_POWER_FLOAT
+        )
+        mu_aec3 = np.where(X2 >= _noise_gate, mu_aec3, np.float32(0.0))
 
-        # W update — per partition, use the per-bin mu × conj(X[p]):
+        # W update — per partition, use the per-bin mu × conj(X[p]).
+        # Direction is per-partition irrespective of the X² source flag
+        # (matches AEC3: gain is computed once on summed X², then applied
+        # to each partition with its own conj(X)).
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
             X = self.X_buf[p_idx]
@@ -629,9 +837,10 @@ class PBFDKF(PBFDAF):
         # AEC3 places this decay INSIDE the active-update `else` block — it
         # only runs when W was actually adapted. The refresh below runs
         # ALWAYS, including the gated/stationary path (callers route to
-        # `_h_error_refresh()` and return).
+        # `_h_error_refresh()` and return). Decay uses the same X² as the
+        # denominator above (partition-summed when the flag is ON).
         self.H_error_per_bin -= (
-            np.float32(0.5) * mu_aec3 * X2_latest * self.H_error_per_bin
+            np.float32(0.5) * mu_aec3 * X2 * self.H_error_per_bin
         )
 
         # Always-on H_error refresh + clamp (cc:128-138). Identical to the

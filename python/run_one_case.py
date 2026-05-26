@@ -44,10 +44,6 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             mic_pad=0, ref_pad=0,
             diag_csv_path=None,
             trace_aec_state=False,
-            diverged_reset=False,
-            diverged_reset_streak_frames=50,
-            diverged_reset_cooldown_frames=400,
-            plan_b_dt_per_bin_gamma=False,
             trace_hf_chain_path=None):
     """Process one case; return (mic, ref, out, erle_per_frame, sample_rate).
 
@@ -66,54 +62,32 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         enable_res=enable_res,
         enable_cng=enable_cng,
         enable_shadow=True,
-        diverged_reset_enabled=diverged_reset,
-        diverged_reset_streak_frames=diverged_reset_streak_frames,
-        diverged_reset_cooldown_frames=diverged_reset_cooldown_frames,
-        plan_b_dt_per_bin_gamma=plan_b_dt_per_bin_gamma,
         trace_hf_chain=bool(trace_hf_chain_path),
     )
-    # v3.21.5 Phase 1 Sprint A — AEC3 echo_remover.cc:495-501 clamp opt-in
-    # via env var (mirrors eval_aec_challenge.py convention).
-    if 'AEC_E2_Y2_CLAMP' in os.environ:
-        cfg.e2_y2_clamp_enabled = (
-            os.environ['AEC_E2_Y2_CLAMP'].lower() not in ('0', 'false', 'off', 'no'))
-    # v3.21.5 Sprint B (CLOSED rejected; default=True restored).
-    # Set AEC_STATIONARITY_ZERO=0 to opt into AEC3-default-off research.
-    if 'AEC_STATIONARITY_ZERO' in os.environ:
-        cfg.aec3_post_stationarity_zero_enabled = (
-            os.environ['AEC_STATIONARITY_ZERO'].lower() not in ('0', 'false', 'off', 'no'))
-    # v3.21.5 Sprint C2 — per-bin H_error refresh selector path
-    # (existing code at filters.py:625 + use_per_bin_h_error_refresh flag).
-    # C2 re-evaluates this selector on top of Sprint A only baseline;
-    # the standalone v3.21.4 U4.A retest CLOSED FAIL on v3.21.3 baseline.
-    if 'AEC_PER_BIN_H_ERROR_REFRESH' in os.environ:
-        cfg.use_per_bin_h_error_refresh = (
-            os.environ['AEC_PER_BIN_H_ERROR_REFRESH'].lower() not in ('0', 'false', 'off', 'no'))
-    # v3.21.6 Sprint P1 — AEC3 FilterAnalyzer port. When True, AecState
-    # instantiates FilterAnalyzer and feeds analyzer delays into FilterDelay
-    # (instead of None), making min_direct_path_filter_delay non-zero so
-    # reverb update gate can fire on cohort tail cases.
+
+    # v3.21 M_full_delay composition — all 13 AEC3 alignment flags ON
+    cfg.use_partition_summed_x2_for_h_error_gain         = True  # Bundle A
+    cfg.use_current_e2_refined_in_h_error_denominator    = True  # Bundle A
+    cfg.use_per_bin_h_error_refresh                      = True  # Bundle A
+    cfg.use_aec3_h_error_ceil                            = True  # Bundle A
+    cfg.use_aec3_filter_noise_gate_power                 = True  # Bundle A / R0.1
+    cfg.use_partition_summed_x2_for_shadow_mu            = True  # Bundle B
+    cfg.use_aec3_noise_gate_for_shadow                   = True  # Bundle B
+    cfg.use_poor_excitation_gate_for_shadow              = True  # Bundle B
+    cfg.use_narrowband_mask_for_shadow                   = True  # Bundle B
+    cfg.use_saturation_gate_for_shadow                   = True  # Bundle B
+    cfg.use_refined_output_selection_for_linear_path     = True  # Bundle C (URO)
+    cfg.form_linear_filter_crossfade_enabled             = True  # Bundle C
+    cfg.use_full_delay_change_chain                      = True  # Bundle D
+
+    # Research / debug overrides via env vars (none alter production behavior
+    # unless explicitly set).
     if 'AEC_FILTER_ANALYZER' in os.environ:
         cfg.filter_analyzer_enabled = (
             os.environ['AEC_FILTER_ANALYZER'].lower() not in ('0', 'false', 'off', 'no'))
-    # v3.21.6 Sprint P2 — re-enable AEC3 Legacy TransparentMode.
     if 'AEC_TRANSPARENT_MODE' in os.environ:
         cfg.transparent_mode_enabled = (
             os.environ['AEC_TRANSPARENT_MODE'].lower() not in ('0', 'false', 'off', 'no'))
-    # v3.22 Sprint E.1 — stat-aware NE proxy at SuppressionGain consumers.
-    if 'AEC_STAT_NE_PROXY' in os.environ:
-        cfg.e_stat_aware_ne_proxy_enabled = (
-            os.environ['AEC_STAT_NE_PROXY'].lower() not in ('0', 'false', 'off', 'no'))
-    if 'AEC_STAT_NE_PROXY_THR' in os.environ:
-        cfg.e_stat_aware_ne_proxy_threshold = float(os.environ['AEC_STAT_NE_PROXY_THR'])
-    # v3.22 Sprint F — reverb tail dead-fallback (default OFF).
-    if 'AEC_REVERB_DEAD_FALLBACK' in os.environ:
-        cfg.reverb_tail_dead_fallback_enabled = (
-            os.environ['AEC_REVERB_DEAD_FALLBACK'].lower() not in ('0', 'false', 'off', 'no'))
-    if 'AEC_REVERB_DEAD_THR' in os.environ:
-        cfg.reverb_tail_dead_threshold_frames = int(os.environ['AEC_REVERB_DEAD_THR'])
-    if 'AEC_REVERB_DEAD_STRENGTH' in os.environ:
-        cfg.reverb_tail_dead_fallback_strength = float(os.environ['AEC_REVERB_DEAD_STRENGTH'])
     # v3.15 §B3: seed CNG for byte-equal sanity across CLI invocations.
     # Matches eval_aec_challenge.py:325 convention (seed=0 per-case);
     # without this, CNG (np.random.randn at aec.py:2009-2010) was
@@ -160,16 +134,7 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                 s.delay_samples, s.delay_ms,
                 int(s.res_using_render),
             ]
-            if trace_high_band_metrics:
-                d = aec._diag
-                row.extend([
-                    d.get('m_excess_ratio_a05', 0.0),
-                    d.get('m_excess_ratio_a10', 0.0),
-                    d.get('m_excess_ratio_a20', 0.0),
-                    d.get('m_modulation', 0.0),
-                    d.get('m_spectral_flatness', 0.0),
-                ])
-            # P3e advisory + mu_scale always-on diag (cheap)
+            # always-on diag fields
             d = aec._diag
             row.extend([
                 int(d.get('dt_advisory_active', False)),
@@ -219,9 +184,6 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
                   'res_gain_db', 'echo_psd_db', 'err_psd_db',
                   'delay_samp', 'delay_ms',
                   'using_render']
-        if trace_high_band_metrics:
-            header.extend(['m_excess_a05', 'm_excess_a10', 'm_excess_a20',
-                           'm_modulation', 'm_spectral_flatness'])
         header.extend(['dt_adv_active', 'dt_adv_hit', 'mu_scale'])
         if trace_aec_state:
             header.extend(['main_err_ratio', 'shadow_err_ratio',
@@ -479,15 +441,6 @@ def main():
                    help='P3f Phase 1: include Mini AecState fields '
                         '(main_err_ratio, shadow_err_ratio, shadow_advantage, '
                         'erle_slope, post_reset_age, filter_state, usable_linear)')
-    p.add_argument('--diverged-reset', action='store_true',
-                   help='P3h: reset filter on sustained diverged (off by default)')
-    p.add_argument('--diverged-reset-streak', type=int, default=50,
-                   help='P3h: frames of sustained diverged before reset (default 50)')
-    p.add_argument('--diverged-reset-cooldown', type=int, default=400,
-                   help='P3h: cooldown frames after a reset (default 400)')
-    p.add_argument('--plan-b', action='store_true',
-                   help='P4B: γ²(k)-primary dt_per_bin (γ=1-coh2 with soft '
-                        'floor lift only when effective_dt > 0.5; off by default)')
     p.add_argument('--trace-hf-chain',
                    help='v3.21.2 S1: write per-frame HF damage causal chain '
                         'trace CSV here (convergence -> ERLE -> R² -> '
@@ -510,10 +463,6 @@ def main():
         mic_pad=args.mic_pad, ref_pad=args.ref_pad,
         diag_csv_path=args.diag_csv,
         trace_aec_state=args.trace_aec_state,
-        diverged_reset=args.diverged_reset,
-        diverged_reset_streak_frames=args.diverged_reset_streak,
-        diverged_reset_cooldown_frames=args.diverged_reset_cooldown,
-        plan_b_dt_per_bin_gamma=args.plan_b,
         trace_hf_chain_path=args.trace_hf_chain,
     )
     print(f'wrote {args.out} ({len(out)} samples, {len(out) / sr:.2f}s)',

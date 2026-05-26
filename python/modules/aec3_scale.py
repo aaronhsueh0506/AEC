@@ -82,13 +82,59 @@ def per_block_rate_to_per_hop(per_block_rate: float,
 H_ERROR_INIT_FLOAT = 10000.0
 H_ERROR_FLOOR_FLOAT = 1e-3
 H_ERROR_CEIL_FLOAT = 1e2
+# AEC3 production ceiling (refined_filter_update_gain.cc kHErrorCeiling = 2.0).
+# Python default uses 100.0 (H_ERROR_CEIL_FLOAT) from the int16-scaled
+# constant derivation; AEC3's float-domain target is 2.0.
+# Consumed only when config.use_aec3_h_error_ceil = True (default OFF).
+H_ERROR_CEIL_AEC3_FLOAT = 2.0
 
 # Per-block rates (default 10 ms hop equivalent)
 LEAKAGE_CONVERGED_PER_HOP_DEFAULT = per_block_rate_to_per_hop(1e-3, 160, 16000)  # 2.5e-3
 LEAKAGE_DIVERGED_PER_HOP_DEFAULT = per_block_rate_to_per_hop(1e-1, 160, 16000)   # 2.5e-1
 
-# Suppression / residual thresholds
-NOISE_GATE_POWER_FLOAT = psd_int16_to_float(27509562.0)  # 0.0256
+# AEC3 transient-profile (refined_initial config) leakage rates — per 10 ms hop.
+# Applied by AEC3 SetConfig(refined_initial) after any EPC trigger for 2.5 s.
+# Source: AecState::InitialState (aec_state.cc) + FilterConfig refined_initial defaults.
+LEAKAGE_CONVERGED_TRANSIENT_PER_HOP = per_block_rate_to_per_hop(5e-3, 160, 16000)  # 1.25e-2
+LEAKAGE_DIVERGED_TRANSIENT_PER_HOP  = per_block_rate_to_per_hop(5e-1, 160, 16000)  # 1.25
+
+# Gate 0 Variant D1_corrected: AEC3 SetConfig(refined_initial) leakage rates (corrected 2026-05-26).
+# Source: echo_canceller3_config.h FilterConfig refined_initial (lines 102-107):
+#   refined_initial.leakage_converged = 0.005f  (vs 0.00005 normal refined → 100×)
+#   refined_initial.leakage_diverged  = 0.5f    (vs 0.05 normal refined → 10×)
+#   refined_initial.error_floor       = 0.001f  (SAME as normal refined — no change)
+# Per-hop equivalent: identical to TRANSIENT_PER_HOP (both derived from refined_initial).
+# Prior values (0.025/0.25) were wrong (sourced from 0.01/0.1 not 0.005/0.5 — WITHDRAWN).
+LEAKAGE_CONVERGED_SETCONFIG_INITIAL = LEAKAGE_CONVERGED_TRANSIENT_PER_HOP  # 0.0125
+LEAKAGE_DIVERGED_SETCONFIG_INITIAL  = LEAKAGE_DIVERGED_TRANSIENT_PER_HOP   # 1.25
+
+# Filter noise gate — weight-update path only (filter_update gate, NOT suppression)
+# AEC3 echo_canceller3_config.cc:97-100:
+#   RefinedConfiguration refined  = {..., .noise_gate = 20075344.f};
+#   CoarseConfiguration  coarse   = {..., .noise_gate = 20075344.f};
+# Both refined AND coarse use 20075344 (int16²). Gate: mu[k]=0 where X²[k] < noise_gate.
+# FFT-size note: AEC3 uses FFT=128 (64-bin SpectralSum); Python uses FFT=512 (257 bins).
+# The int16²→float conversion is applied as-is; hop/FFT/window differences may affect
+# the effective gate sensitivity — verify via trace (A2_zero_frac_LF/MF/HF) rather
+# than assuming strict parity. The constant origin (20075344) is authoritative.
+FILTER_NOISE_GATE_POWER_FLOAT = psd_int16_to_float(20075344.0)  # 0.01870 — AEC3 filter gate (both refined+coarse)
+
+# Legacy constant: 27509562 was incorrectly ported from AEC3 echo_model (suppression
+# path) into the filter weight-update gate. Retained as-is for default-OFF behaviour;
+# flag-gated paths use FILTER_NOISE_GATE_POWER_FLOAT above.
+# AEC3 echo_model.noise_gate_power = 27509.42f is in int16² scale (same as SpectrumBuffer /
+# far_psd which is scaled by _PSD_SCALE=32768² before entering ResidualEchoEstimator).
+# Python default 27509562.0 is 1000× too large: fires gate for amplitude < 5245 int16
+# (0.16 float), while AEC3 only fires for amplitude < 166 int16 (0.005 float).
+NOISE_GATE_POWER_FLOAT = psd_int16_to_float(27509562.0)  # 0.02562 — DO NOT use for filter gate
+
+# Corrected residual echo model noise gate (echo_model.noise_gate_power path).
+# Source: echo_canceller3_config.h EchoModel::noise_gate_power = 27509.42f.
+# Unit: int16² scale (same as far_psd = float_spec² × 32768²). No psd_int16_to_float.
+# Consumed only when config.use_aec3_residual_noise_gate = True (default OFF).
+# R0.2 gap: Python default (27509562) is 1000× too large — non-linear path X2 gated
+# for nearly all render signals, leaving R2 = reverb-only (direct echo path zeroed).
+RESIDUAL_NOISE_GATE_POWER = 27509.42  # int16² scale — AEC3 echo_model.noise_gate_power verbatim
 NORMAL_RENDER_LIMIT_FLOAT = psd_int16_to_float(64.0)     # 5.96e-8
 LOW_RENDER_LIMIT_FLOAT = psd_int16_to_float(256.0)       # 2.38e-7
 FLOOR_POWER_FLOAT = psd_int16_to_float(128.0)            # 1.19e-7

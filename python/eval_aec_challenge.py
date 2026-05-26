@@ -229,6 +229,121 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             and 'use_per_bin_h_error_refresh' not in config_overrides):
         config_overrides['use_per_bin_h_error_refresh'] = (
             os.environ['AEC_PER_BIN_H_ERROR_REFRESH'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.6 nores LF artifact debug 2026-05-22 — AEC3
+    # RefinedFilterUpdateGain partition-summed X² parity.
+    # See config.py field docstring + filters.py::PBFDKF._update_weights_aec3.
+    # Default unset → config default False → byte-equal preserved.
+    if ('AEC_PARTITION_SUMMED_X2' in os.environ
+            and 'use_partition_summed_x2_for_h_error_gain' not in config_overrides):
+        config_overrides['use_partition_summed_x2_for_h_error_gain'] = (
+            os.environ['AEC_PARTITION_SUMMED_X2'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.8 AEC3 UseRefinedOutput + FormLinearFilterOutput parity
+    # (`AEC_USE_REFINED_OUTPUT_SELECTION=1`). Default unset → config default
+    # False → byte-equal preserved.
+    if ('AEC_USE_REFINED_OUTPUT_SELECTION' in os.environ
+            and 'use_refined_output_selection_for_linear_path' not in config_overrides):
+        config_overrides['use_refined_output_selection_for_linear_path'] = (
+            os.environ['AEC_USE_REFINED_OUTPUT_SELECTION'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.9 AEC3 SubtractorOutput::ComputeMetrics coarse-e² time-domain
+    # block-window parity (`AEC_COARSE_E2_TD_PARITY=1`). Default unset →
+    # config default False → byte-equal preserved.
+    if ('AEC_COARSE_E2_TD_PARITY' in os.environ
+            and 'use_coarse_e2_time_domain_parity' not in config_overrides):
+        config_overrides['use_coarse_e2_time_domain_parity'] = (
+            os.environ['AEC_COARSE_E2_TD_PARITY'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.10 — AEC3 FilterMisadjustment direction parity (#3a).
+    # `AEC_AEC3_MISADJ_TRACE=1` enables read-only accumulator (default-OFF
+    # trace path; legacy behaviour preserved). `AEC_AEC3_MISADJ_PARITY=1`
+    # routes the fire decision through the AEC3-parity path (legacy
+    # bypassed). When parity is ON the trace also populates by side-effect.
+    # See [docs/v3_21_10_misadjustment_direction_audit.md](docs/v3_21_10_misadjustment_direction_audit.md).
+    if ('AEC_AEC3_MISADJ_TRACE' in os.environ
+            and 'aec3_misadj_trace_enabled' not in config_overrides):
+        config_overrides['aec3_misadj_trace_enabled'] = (
+            os.environ['AEC_AEC3_MISADJ_TRACE'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_AEC3_MISADJ_PARITY' in os.environ
+            and 'use_aec3_filter_misadjustment_parity' not in config_overrides):
+        config_overrides['use_aec3_filter_misadjustment_parity'] = (
+            os.environ['AEC_AEC3_MISADJ_PARITY'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.11 — AEC3 SubtractorOutputAnalyzer coarse_filter_converged_relaxed
+    # signal (#1d). `AEC_COARSE_RELAXED=1` enables read-only audit trace
+    # (default OFF preserves byte-equal). The signal has no consumer in the
+    # current production pipeline (Legacy TransparentMode ignores it and
+    # transparent_mode_enabled defaults False); flag exists for trace +
+    # future HMM TransparentMode wiring.
+    if ('AEC_COARSE_RELAXED' in os.environ
+            and 'coarse_filter_converged_relaxed_enabled' not in config_overrides):
+        config_overrides['coarse_filter_converged_relaxed_enabled'] = (
+            os.environ['AEC_COARSE_RELAXED'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.12 — RefinedFilterUpdateGain input-parity audit (C variant flag).
+    # `AEC_CURRENT_E2_REFINED_DENOM=1` swaps the smoothed `_error_psd` term in
+    # the mu denominator for current-block `|error_spec|²` (AEC3
+    # SubtractorOutput.E²_refined semantics, refined_filter_update_gain.cc:106).
+    # Default unset → config default False → byte-equal preserved.
+    if ('AEC_CURRENT_E2_REFINED_DENOM' in os.environ
+            and 'use_current_e2_refined_in_h_error_denominator' not in config_overrides):
+        config_overrides['use_current_e2_refined_in_h_error_denominator'] = (
+            os.environ['AEC_CURRENT_E2_REFINED_DENOM'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.13 — AEC3 echo_remover.cc:475 UseLinearFilterOutput Y-vs-E
+    # final-output selection parity. `AEC_USE_LINEAR_OUTPUT_SELECT=1` enables
+    # the AEC3 branch: when `usable_linear_estimate=False`, apply gain to
+    # capture spectrum Y instead of linear residual E. Default unset → config
+    # default False → byte-equal preserved.
+    if ('AEC_USE_LINEAR_OUTPUT_SELECT' in os.environ
+            and 'use_linear_filter_output_selection_for_final_output' not in config_overrides):
+        config_overrides['use_linear_filter_output_selection_for_final_output'] = (
+            os.environ['AEC_USE_LINEAR_OUTPUT_SELECT'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.14 — PBFDAF shadow NLMS AEC3 protection alignment. All five
+    # protection flags (A.1 partition-sum X² mu denom / A.2 noise_gate hard
+    # zero / A.3 poor_excitation + call_counter startup / A.4 narrowband mask
+    # / A.5 saturation gate) default-OFF preserve v3.21.6 byte-equal. AEC3
+    # reference: docs/aec3_extracts/src/aec3/coarse_filter_update_gain.cc:34-82.
+    if ('AEC_SHADOW_PARTITION_X2' in os.environ
+            and 'use_partition_summed_x2_for_shadow_mu' not in config_overrides):
+        config_overrides['use_partition_summed_x2_for_shadow_mu'] = (
+            os.environ['AEC_SHADOW_PARTITION_X2'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_SHADOW_NOISE_GATE' in os.environ
+            and 'use_aec3_noise_gate_for_shadow' not in config_overrides):
+        config_overrides['use_aec3_noise_gate_for_shadow'] = (
+            os.environ['AEC_SHADOW_NOISE_GATE'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_SHADOW_SATURATION_GATE' in os.environ
+            and 'use_saturation_gate_for_shadow' not in config_overrides):
+        config_overrides['use_saturation_gate_for_shadow'] = (
+            os.environ['AEC_SHADOW_SATURATION_GATE'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_SHADOW_POOR_EXCITATION' in os.environ
+            and 'use_poor_excitation_gate_for_shadow' not in config_overrides):
+        config_overrides['use_poor_excitation_gate_for_shadow'] = (
+            os.environ['AEC_SHADOW_POOR_EXCITATION'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_SHADOW_NARROWBAND_MASK' in os.environ
+            and 'use_narrowband_mask_for_shadow' not in config_overrides):
+        config_overrides['use_narrowband_mask_for_shadow'] = (
+            os.environ['AEC_SHADOW_NARROWBAND_MASK'].lower() not in ('0', 'false', 'off', 'no'))
+    # v3.21.17 — SignalDependentErleEstimator section count.
+    # 0 = OFF (default, byte-equal). 1 = degenerate (parity proof). >= 2 = active.
+    if ('AEC_SIGNAL_DEPENDENT_ERLE' in os.environ
+            and 'signal_dependent_erle_sections' not in config_overrides):
+        config_overrides['signal_dependent_erle_sections'] = int(
+            os.environ['AEC_SIGNAL_DEPENDENT_ERLE'])
+    # v3.21.6 nores LF artifact debug 2026-05-22 — usable_linear gate-3
+    # ablation knobs ([[project-usable-linear-gate3-latch-bug]]).
+    # All default-OFF (legacy AEC3 4-gate AND verbatim). Set to non-zero
+    # / True for state-bug ablation runs.
+    if ('AEC_USABLE_LINEAR_CONV_HOPS' in os.environ
+            and 'usable_linear_convergence_hops_required' not in config_overrides):
+        config_overrides['usable_linear_convergence_hops_required'] = int(
+            os.environ['AEC_USABLE_LINEAR_CONV_HOPS'])
+    if ('AEC_USABLE_LINEAR_FA_AND' in os.environ
+            and 'usable_linear_require_filter_analyzer_consistent' not in config_overrides):
+        config_overrides['usable_linear_require_filter_analyzer_consistent'] = (
+            os.environ['AEC_USABLE_LINEAR_FA_AND'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_USABLE_LINEAR_NO_EXTDELAY' in os.environ
+            and 'usable_linear_disable_external_delay_shortcut' not in config_overrides):
+        config_overrides['usable_linear_disable_external_delay_shortcut'] = (
+            os.environ['AEC_USABLE_LINEAR_NO_EXTDELAY'].lower() not in ('0', 'false', 'off', 'no'))
+    if ('AEC_USABLE_LINEAR_TRUSTED_EXTDELAY' in os.environ
+            and 'usable_linear_trusted_external_delay_only' not in config_overrides):
+        config_overrides['usable_linear_trusted_external_delay_only'] = (
+            os.environ['AEC_USABLE_LINEAR_TRUSTED_EXTDELAY'].lower() not in ('0', 'false', 'off', 'no'))
     # v3.21.6 Sprint P1 — AEC3 FilterAnalyzer port. Drives non-zero
     # min_direct_path_filter_delay in AecState; unblocks reverb tail
     # update (Sprint C diagnose cause) for the cohort.

@@ -70,6 +70,21 @@ class AecStateConfig:
     # max_echo_path_gain. Default OFF preserves v3.21.5 byte-equal.
     enable_filter_analyzer: bool = False
 
+    # v3.21.6 nores LF artifact debug 2026-05-22 — usable_linear gate-3
+    # ablation knobs (default-OFF = AEC3 legacy behaviour). See
+    # [[project-usable-linear-gate3-latch-bug]] memory + filter_quality.py
+    # docstring for the rationale.
+    usable_linear_convergence_hops_required: int = 0
+    usable_linear_require_filter_analyzer_consistent: bool = False
+    usable_linear_disable_external_delay_shortcut: bool = False
+
+    # v3.21.17 SignalDependentErleEstimator port (2026-05-23). Default 0 = OFF
+    # (SDE not instantiated, byte-equal v3.21.6 preserved). See AecConfig
+    # field docstring for activation semantics.
+    signal_dependent_erle_sections: int = 0
+    sde_num_blocks: int = 13
+    sde_delay_headroom_blocks: int = 0
+
 
 class AecState:
     """Per-frame AEC3 state machine. Single source of truth for
@@ -86,7 +101,13 @@ class AecState:
             num_capture_channels=self._config.num_capture_channels,
         )
         self._filter_quality = FilteringQualityAnalyzer(
-            use_linear_filter=self._config.use_linear_filter
+            use_linear_filter=self._config.use_linear_filter,
+            convergence_hops_required=int(
+                self._config.usable_linear_convergence_hops_required),
+            require_filter_analyzer_consistent=bool(
+                self._config.usable_linear_require_filter_analyzer_consistent),
+            disable_external_delay_shortcut=bool(
+                self._config.usable_linear_disable_external_delay_shortcut),
         )
         self._saturation_detector = SaturationDetector()
         self._erle_estimator = ErleEstimator(
@@ -95,6 +116,11 @@ class AecState:
             min_erle=self._config.erle_min,
             max_erle_l=self._config.erle_max_l,
             max_erle_h=self._config.erle_max_h,
+            signal_dependent_erle_sections=int(getattr(
+                self._config, 'signal_dependent_erle_sections', 0)),
+            sde_num_blocks=int(getattr(self._config, 'sde_num_blocks', 13)),
+            sde_delay_headroom_blocks=int(getattr(
+                self._config, 'sde_delay_headroom_blocks', 0)),
         )
         self._erl_estimator = ErlEstimator(
             startup_phase_length_hops=self._config.erl_startup_hops,
@@ -212,6 +238,9 @@ class AecState:
         echo_path_gain: float = 1.0,
         render_block: Optional[np.ndarray] = None,
         filter_taps_full: Optional[np.ndarray] = None,
+        # v3.21.17 — SDE inputs (per-partition |W|² and X²). None when SDE OFF.
+        sde_filter_freq_response: Optional[np.ndarray] = None,
+        sde_x2_history: Optional[np.ndarray] = None,
     ) -> None:
         """Per-frame state update. Strict order matches aec_state.cc:189-291.
 
@@ -265,6 +294,8 @@ class AecState:
             y2=capture_psd,
             e2=error_psd,
             converged_filter=any_filter_converged,
+            filter_freq_response=sde_filter_freq_response,
+            x2_history=sde_x2_history,
         )
         # 4b. ERL update.
         self._erl_estimator.update(
@@ -312,13 +343,16 @@ class AecState:
             )
 
         # 8. FilteringQualityAnalyzer (last; reads TM + convergence flags
-        #    set above).
+        #    set above). filter_analyzer_consistent is consumed by the
+        #    optional v3.21.6 gate-3 AND knob; default-OFF preserves the
+        #    AEC3 legacy 4-gate AND verbatim.
         self._filter_quality.update(
             active_render=active_render,
             transparent_mode=self.transparent_mode_active(),
             saturated_capture=self._capture_signal_saturation,
             external_delay=external_delay,
             any_filter_converged=any_filter_converged,
+            filter_analyzer_consistent=self.filter_analyzer_consistent(),
         )
 
     # -------------------------------------------------------------- helpers

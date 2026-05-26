@@ -91,6 +91,64 @@ class AecConfig:
     # (Option B, AEC3-aligned default).
     filter_misadjustment_scale_p: bool = False
 
+    # v3.21.10 nores+stress audit 2026-05-22 — AEC3
+    # `Subtractor::FilterMisadjustmentEstimator` direction parity (#3a).
+    # The legacy v3.18 estimator above measures `echo_psd / (far_psd × ERL)`
+    # and fires when it stays < 0.5 (echo estimate UNDER-modelling vs ERL
+    # prediction → GROW W). AEC3 measures `e2_refined / y2` (post-filter
+    # error vs mic energy, both TIME-domain block sum-of-squares over
+    # n_blocks_=4 AEC3 blocks ≈ 16 ms) and fires when inv_misadjustment_ > 10
+    # (post-filter error LARGER than mic → SHRINK W). These detect opposite
+    # failure modes; v3.23 G.0 A.1 INFORMATIVE_NULL (legacy fired 0/20188) is
+    # silence on the under-modelling failure mode — says nothing about
+    # AEC3-style over-adaptation/divergence. v3.21.7 partition_summed_x2
+    # Cat C stress cluster shows refined PBFDKF locally diverging
+    # (UseRefinedOutput cond2 firing 37 % on XRTnTUjU) → this is exactly
+    # what AEC3 estimator targets. See [docs/v3_21_10_misadjustment_direction_audit.md](docs/v3_21_10_misadjustment_direction_audit.md).
+    #
+    # Two-step rollout:
+    #   1. `aec3_misadj_trace_enabled` (default OFF) — when ON, computes
+    #      AEC3 inv_misadjustment in parallel with legacy. NO behaviour
+    #      change. Populates `self._aec3_misadj_trace` counter dict so
+    #      offline scripts can inspect frames where AEC3 would fire vs
+    #      where legacy did. Byte-equal preserved by gating inside the
+    #      legacy methods (legacy path runs first, AEC3 trace logged after
+    #      with no side-effect).
+    #   2. `use_aec3_filter_misadjustment_parity` (default OFF) — when ON,
+    #      legacy path is BYPASSED and replaced by AEC3-parity update +
+    #      fire (e² / y² accumulator, > 10 trigger, 2 / sqrt scale, SHRINK
+    #      W). The outer state gates (`epc_active` / `main_paused` /
+    #      `_filter_converged` / `hangover`) are retained as transient
+    #      guards (AEC3 doesn't have them; we keep to match v3.18 B.5
+    #      framing). `scale_p` config still respected (default False,
+    #      AEC3-aligned — W only, no P).
+    #
+    # `aec3_misadj_parity_n_hops`: how many hops to accumulate before
+    # checking the trigger. AEC3 uses n_blocks_=4 of kBlockSize=64 samples
+    # (256 samples = 16 ms at 16 kHz). We use n_hops × hop_size; with the
+    # default hop=160, n_hops=2 covers 320 samples = 20 ms wall-clock —
+    # closest integer match to AEC3's 16 ms.
+    aec3_misadj_trace_enabled: bool = False
+    use_aec3_filter_misadjustment_parity: bool = False
+    aec3_misadj_parity_n_hops: int = 2
+
+    # v3.21.11 — AEC3 SubtractorOutputAnalyzer `coarse_filter_converged_relaxed`
+    # downstream signal parity (#1d). AEC3
+    # `subtractor_output_analyzer.cc:50-51` publishes a second coarse-convergence
+    # signal with looser thresholds (`e2_coarse < 0.3·y2 AND y2 > 20²·kBlockSize`,
+    # vs strict `< 0.05·y2 AND > 50²·kBlockSize`). Only consumer in AEC3 is the
+    # HMM `TransparentModeImpl` (transparent_mode.cc:53-100) which uses it as
+    # the `any_coarse_filter_converged` observation in its 2-state HMM.
+    # Our port uses `LegacyTransparentModeImpl` (Legacy variant ignores the
+    # relaxed signal, per transparent_mode.cc:150 `bool /*any_coarse_filter_converged*/`)
+    # AND `transparent_mode_enabled` defaults False — so the relaxed signal
+    # has NO consumer in our current pipeline. This flag exposes it as
+    # audit-only trace + diagnostic field; behaviour-impact requires both
+    # porting the HMM variant AND enabling transparent_mode_enabled, neither
+    # of which is in v3.21.x scope. Default OFF preserves byte-equal.
+    # See [docs/v3_21_11_coarse_relaxed_signal_audit.md].
+    coarse_filter_converged_relaxed_enabled: bool = False
+
     # v3.21.6 Sprint P1 — FilterAnalyzer port (AEC3 filter_analyzer.cc).
     # When True: AecState owns single-channel FilterAnalyzer; per frame
     # IFFTs PBFDAF partitions → 3-tap 600 Hz HPF → region-sweep peak
@@ -198,6 +256,437 @@ class AecConfig:
     # alignment before this can ship.
     use_per_bin_h_error_refresh: bool = False
 
+    # v3.21 sub-ladder audit — AEC3 H_error ceiling parity.
+    # AEC3 `refined_filter_update_gain.cc` uses `kHErrorCeiling = 2.0` in
+    # float[-1,1] audio. Python's `H_ERROR_CEIL_FLOAT = 1e2` traces back to
+    # the int16-scaled derivation and is 50× higher. xFk7igec and jtYTdZm3
+    # show 40+ % of steady-state frames saturating at 100.0 (excl50 metric),
+    # meaning the Python ceiling is actually live. When True: swap the per-hop
+    # clip in `_h_error_refresh` from 100.0 → 2.0 (AEC3 target). Default OFF
+    # preserves byte-equal to v3.21.6 baseline.
+    use_aec3_h_error_ceil: bool = False
+
+    # v3.21.6 nores LF artifact debug 2026-05-22 — AEC3
+    # `Subtractor::Process → render_buffer.SpectralSum →
+    # RefinedFilterUpdateGain::Compute` parity. AEC3 passes the
+    # partition-summed render power `X²[k] = Σ_p |X_buf[p][k]|²`
+    # (`render_buffer.cc::SpectralSum`) into `RefinedFilterUpdateGain`,
+    # where it is consumed in THREE places:
+    #   1. denominator `0.5·H_error·X² + n_part·E²_refined`
+    #      (refined_filter_update_gain.cc:113-115),
+    #   2. per-bin noise gate `X² >= noise_gate` (cc:104-111),
+    #   3. H_error decay `H_error -= 0.5·mu·X²·H_error` (cc:116-119).
+    # Our port currently uses `X²_latest = |X_buf[curr_p]|²` (latest hop
+    # only), which under-states the true render energy per bin → denom
+    # can be too small on LF bins where energy is spread across history
+    # → mu blows up → W_lf grows wrong-phase. Switching to summed X²
+    # tracks the canonical AEC3 update equation.
+    # W update direction stays per-partition `conj(X_buf[p])` — only
+    # the per-bin `mu` and decay use the summed X², matching AEC3.
+    # Default False keeps v3.21.6 baseline byte-equal. Independent of
+    # `use_per_bin_h_error_refresh` and raw-E² ablations.
+    # NOTE: was temporarily set True during v3.21.20 ALL-ON experiments;
+    # reverted to False for v3.21 closure (requires fresh 12-case + 800-case).
+    use_partition_summed_x2_for_h_error_gain: bool = False
+
+    # R0.1 — PBFDKF refined filter weight-update noise gate constant correction.
+    # AEC3 `refined_filter_update_gain.cc` and `echo_canceller3_config.h` use
+    # noise_gate = 20075344 (int16²) for BOTH refined and coarse filter weight-update
+    # gates → FILTER_NOISE_GATE_POWER_FLOAT = psd_int16_to_float(20075344) = 0.01870.
+    # Our default uses NOISE_GATE_POWER_FLOAT = psd_int16_to_float(27509562) = 0.02562,
+    # ported from AEC3's echo_model suppression path (not the filter weight-update path).
+    # This makes our gate 1.37× too tight: bins where AEC3 would update W are hard-zeroed.
+    # OFF (default): NOISE_GATE_POWER_FLOAT (0.02562) — byte-equal to v3.21.6 baseline.
+    # ON: FILTER_NOISE_GATE_POWER_FLOAT (0.01870) — AEC3 refined filter gate parity.
+    # Scope: PBFDKF refined filter _update_weights_aec3 only. Does NOT affect
+    # residual echo model noise gate path (R0.2, separate audit — different constant).
+    # Classification: Class B (wrong constant from suppression path used in filter gate).
+    use_aec3_filter_noise_gate_power: bool = False
+
+    # R0.2 — Residual echo model noise gate constant correction.
+    # AEC3 echo_model.noise_gate_power = 27509.42f (int16² scale). Python default
+    # 27509562.0 is 1000× too large: non-linear path R2 direct-path echo always
+    # zeroed (gate fires for amplitude < 5245 int16 vs AEC3's 166 int16). Affects
+    # xFk7 DT_mvmt and any case where usable_linear_estimate() = False.
+    # Classification: Class B (wrong constant — Python copied suppression-path value
+    # that happened to be 1000× larger than the correct echo-model threshold).
+    use_aec3_residual_noise_gate: bool = False
+
+    # R0.3 — EchoGeneratingPower render pre-window size correction.
+    # AEC3 echo_model.render_pre_window_size = 1, render_post_window_size = 1
+    # (residual_echo_estimator.cc:80-86). Python default: pre=0, post=1 (2 blocks).
+    # AEC3 uses 3 blocks (delay-1 to delay+1) for max over render history.
+    # Classification: Class A (AEC3 parity gap — window size mismatch).
+    use_aec3_echo_gen_power_window: bool = False
+
+    # R0.4 — ERLE inst linear quality for reverb model update (continuous 0→1).
+    # AEC3 fullband_erle_estimator.cc::UpdateQualityEstimate computes a continuous
+    # quality = (erle_log2 - min) / (max - min) with EMA alpha=0.07. This drives
+    # reverb_model_estimator update step: new_smoothing = quality * 0.2.
+    # Python default: binary 1.0 (converged) or None (skip update).
+    # Classification: Class A (AEC3 parity gap — binary vs continuous quality).
+    use_aec3_erle_reverb_quality: bool = False
+
+    # v3.21.20 Phase D — AEC3 RefinedFilterUpdateGain::HandleEchoPathChange port
+    # (refined_filter_update_gain.cc:53-68). On EPC fire, reset filter H_error
+    # to kHErrorInitial (10000) + call_counter to 0 + poor_excitation_counter
+    # to 1000-blocks. Re-triggers Fix B startup window so post-EPC re-adaptation
+    # uses conservative single-partition X² (avoiding wVYS-style movement-W-
+    # shift accumulation under partition-sum X²). Default True since this is
+    # AEC3-verbatim alignment.
+    use_aec3_handle_echo_path_change: bool = True
+
+    # v3.21.20 Phase E — AEC3 Subtractor::HandleEchoPathChange dispatcher parity
+    # (subtractor.cc:HandleEchoPathChange). When set, the orchestrator EPC fire
+    # sites call `handle_echo_path_change()` on the shadow PBFDAF in addition
+    # to the refined PBFDKF, AND both call paths set W = 0 on delay_change
+    # (port of AdaptiveFirFilter::ZeroFilter, adaptive_fir_filter.cc:ZeroFilter,
+    # invoked by AdaptiveFirFilter::HandleEchoPathChange when variability is a
+    # delay change). Without this flag, Phase D resets only refined-side
+    # H_error / counters but leaves W intact (filter retains a partially-stale
+    # impulse-response estimate) and the shadow filter receives no EPC signal.
+    # Default OFF because W.fill(0) is destructive and may interact with the
+    # load-bearing PathChangeRegimeHandler (main_paused / reverse_copy / boost_q)
+    # on cohort tail (~7/800 cases). Needs 12-case + 800-case validation before
+    # any default flip. M2 (filter W=0) + M3 (shadow handler wiring) atomic.
+    use_aec3_zero_filter_on_epc: bool = False
+
+    # v3.21.20 Phase F — AEC3 EchoPathVariability classification parity
+    # (subtractor.cc:HandleEchoPathChange + RefinedFilterUpdateGain). AEC3
+    # `EchoPathVariability` has two orthogonal fields:
+    #   - delay_change != kNone  → calls AdaptiveFirFilter::ZeroFilter (W=0)
+    #                              AND RefinedFilterUpdateGain H_error reset
+    #   - !gain_change           → RefinedFilterUpdateGain counter reset
+    # Real delay change events (delay_first / delay_shift in our pipeline)
+    # set delay_change != kNone. Gain change events (EPV — gain ratio detector)
+    # set gain_change=True only. Shadow_rise is OUR synthetic "filter
+    # mistracking" detector with no AEC3 equivalent; treated as gain_change
+    # under AEC3 semantics.
+    # Phase D's wiring passes `delay_change=True` at EPV+shadow_rise sites,
+    # which is a classification bug — those events are NOT delay changes per
+    # AEC3 semantics. Combined with use_aec3_zero_filter_on_epc=True, this
+    # bug fires W=0 on gain_change/mistracking events → 60ms blank window +
+    # explosive recovery cascade (root cause of Phase E 12-case regression,
+    # nVUnxqHLr -0.510, jtYTdZm -0.300; trace evidence in v3.21.20 Phase E
+    # Round 2).
+    # When this flag is ON:
+    # - EPV site:           delay_change=False, gain_change=True (no-op handler)
+    # - shadow_rise site:   delay_change=False, gain_change=True (no-op handler)
+    # - delay_first site:   ADD handle_echo_path_change(delay_change=True, gain_change=False)
+    # - delay_shift site:   ADD same
+    # M2 (W=0) only fires on real delay change events under correct
+    # classification. Default OFF preserves Phase D wiring (since removing
+    # H_error reset at EPV+shadow_rise loses the +0.155 jtYTdZm gain Phase D
+    # was providing). Must validate on 12-case before any default flip.
+    use_aec3_epc_classification: bool = False
+
+    # v3.21.20 Phase G — isolation experiment. Decouple AecState `gain_change`
+    # dispatch from EPV + shadow_rise sites. Architecture audit 2026-05-24
+    # found Phase D's load-bearing benefit is filter-side H_error reset only;
+    # `_aec3_pending_gain_change = True` at EPV + shadow_rise queues
+    # `_aec3_state.handle_echo_path_change(gain_change=True)` which calls
+    # `erle_estimator.reset(False)`. The 3-case trace shows `erle_reset_signal`
+    # fires identically in A_off and F_off → AecState side is decorative on
+    # these synthetic PBFDKF events. When this flag is ON, the orchestrator
+    # SKIPS setting `_aec3_pending_gain_change` at EPV and shadow_rise sites
+    # ONLY. Filter-side `filter.handle_echo_path_change` and the legacy
+    # companion machinery (boost_q / p_override / ERL cap / mark_diverged /
+    # f_e3 / _apply_epc_state_reset) are UNCHANGED. delay_first / delay_shift
+    # sites are UNCHANGED (they still queue `_aec3_pending_delay_change`).
+    # This is an isolation experiment, NOT a ship candidate. Default OFF.
+    skip_aec3_gain_change_dispatch_at_epv_shadow_rise: bool = False
+
+    # v3.21 Q1 parity — true-delay transient leakage response (2026-05-25).
+    # AEC3 applies SetConfig(refined_initial) on ALL four EPC trigger classes,
+    # giving a 2.5 s transient leakage burst (5e-3/block converged, 5e-1/block
+    # diverged) after ANY EPC event. Our production only resets H_error on EPV /
+    # shadow_rise (Phase D wiring); delay_first / delay_shift get NO leakage
+    # response. This flag adds an AEC3-like transient leakage override on REAL
+    # delay events (delay_first / delay_shift) only — NOT on EPV / shadow_rise.
+    # No H_error hard-reset (that remains EPV/SR-only). Default OFF: byte-equal.
+    # Design: docs/v3_21_q1_true_delay_transient_design.md
+    use_q1_true_delay_transient_leakage: bool = False
+    q1_tdt_transient_hops: int = 250   # 2.5 s at hop=160/sr=16000 (AEC3 initial_state_seconds)
+    q1_tdt_smoothing_hops: int = 100   # 1 s smooth back to elevated steady (AEC3 config_change_duration)
+    q1_tdt_lc_factor: float = 5.0      # multiplier on lc_steady; 5.0 = AEC3 ported default (Phase 2.1 R1 candidate)
+    q1_tdt_ld_factor: float = 5.0      # multiplier on ld_steady; 5.0 = AEC3 ported default
+    # Phase 3.1 re-entry guard: terminate Q1 when a non-delay EPC event (EPV or
+    # shadow_rise) fires while Q1 is active. Restores cached steady leakage
+    # same-hop so the SR/EPV post-hangover Kalman explosion sees the same lc
+    # in both ON and OFF variants. Default OFF: byte-equal to Variant C baseline.
+    use_q1_terminate_on_non_delay_epc: bool = False
+
+    # v3.21 A.1 — full delay-change chain port (2026-05-25).
+    # Implements AEC3's complete echo-path-change cascade for real delay events
+    # (delay_first / delay_shift) only. EPV / shadow_rise / gain_change excluded.
+    # Under flag ON:
+    #   - Steps 3-4: H_error=kHErrorInitial (10000) + poor_excitation/call_counter
+    #     reset on refined (PBFDKF) and shadow (PBFDAF) filters
+    #   - AecState._full_reset queued for delay_first (fixes production gap;
+    #     delay_shift already wired via _aec3_pending_delay_change)
+    #   - Step 9: suppression_gain.set_initial_state(True) on delay_change;
+    #             set_initial_state(False) on TransitionTriggered
+    # Default OFF: byte-equal to production baseline.
+    # Design: docs/v3_21_a1_delay_change_chain_design.md §4
+    # Gate 0 verdict: docs/v3_21_a1_gate0_trace_verdict.md
+    use_full_delay_change_chain: bool = False
+
+    # Gate 0 Variant C — plateau suppression within post-delay initial chain window.
+    # When ON (and use_full_delay_change_chain=True): FilterPlateauDetector is
+    # suppressed from firing while aec3_state.initial_state_active() is True AND
+    # once_converged is False. Plateau fires normally outside that window.
+    # Gate fails if initial_state exits before plateau grace window completes (wVYSGVTT:
+    # initial_state exits frame 454, plateau would fire frame 462 — 8 frames gap).
+    # Classification: Python functional adaptation — NOT a strict AEC3 port.
+    # AEC3 has no FilterPlateauDetector; this prevents the Python-only plateau
+    # from interfering with the initial convergence window after delay_first.
+    # Default OFF: byte-equal; zero effect unless use_full_delay_change_chain=True.
+    use_full_delay_plateau_suppression: bool = False
+
+    # Gate 0 Variant C2 — plateau suppression with fixed-hop counter from delay event.
+    # When ON (and use_full_delay_change_chain=True): FilterPlateauDetector is
+    # suppressed for plateau_suppression_fixed_hops after delay_first / delay_shift,
+    # regardless of initial_state_active() window. Once once_converged latches, suppression
+    # is released early. Addresses the 8-frame gap failure of Variant C.
+    # Classification: Python functional adaptation — NOT a strict AEC3 port.
+    # Default OFF: byte-equal; zero effect unless use_full_delay_change_chain=True.
+    use_full_delay_plateau_suppression_fixed_hops: bool = False
+    plateau_suppression_fixed_hops: int = 500   # 500 hops = 5 s @ 16 kHz/hop=160
+
+    # Gate 0 Variant D1_corrected — SetConfig(refined_initial) leakage-only port.
+    # When ON (and use_full_delay_change_chain=True): switches PBFDKF H_error leakage
+    # rates to the AEC3 'initial' profile on delay_first, then restores normal rates
+    # on ExitInitialState (TransitionTriggered). No W.fill(0) — consistent with AEC3
+    # ZeroFilter being a no-op in steady state (current=max=13).
+    # Classification: Partial AEC3 alignment — leakage switch only (Category A partial).
+    # D2 (full AEC3 initial chain) is documented in v3_21_m_full_delay_d2_design.md
+    # but NOT yet implemented; D1_corrected FAIL does NOT close D2.
+    # Correct AEC3 source values (echo_canceller3_config.h lines 102-107):
+    #   refined_initial.leakage_converged = 0.005f per block → 0.0125 per 10ms hop (5× default)
+    #   refined_initial.leakage_diverged  = 0.5f  per block → 1.25  per 10ms hop (5× default)
+    #   refined_initial.error_floor       = 0.001f (SAME as normal refined — no change)
+    # Prior comment showed 0.01/0.1 per block — those were WRONG source values (WITHDRAWN).
+    # Constants aliased to LEAKAGE_CONVERGED/DIVERGED_SETCONFIG_INITIAL in aec3_scale.py.
+    # Default OFF: byte-equal; zero effect unless use_full_delay_change_chain=True.
+    use_full_delay_setconfig_initial: bool = False
+
+    # v3.21.12 RefinedFilterUpdateGain input-parity audit 2026-05-22 — AEC3
+    # `RefinedFilterUpdateGain::Compute` (refined_filter_update_gain.cc:103-107)
+    # `mu[k] = H_error[k] / (0.5·H_error[k]·X²[k] + size_partitions · E²_refined[k])`.
+    # `E²_refined` is the CURRENT-block `SubtractorOutput.E2_refined` = per-bin
+    # `|FFT(e_refined_time_domain)|²` for THIS hop — instantaneous, no smoothing
+    # (subtractor.cc:252-257 ZeroPaddedFft + Spectrum). Our default substitutes
+    # `self._error_psd` (0.95 EMA, 95-hop time constant ≈ 200 ms). The smoothing
+    # lags refined-filter divergence transients, making the denominator track
+    # stale residual amplitude during fast-changing regimes (echo path change,
+    # double-talk onset, partition_summed_x2 cohort tail).
+    # OFF (default): smoothed `_error_psd` in the `n_part · E²` term →
+    # byte-equal v3.21.6 baseline.
+    # ON: current-block per-bin `|self.error_spec|²` in the same term →
+    # matches AEC3 SubtractorOutput.E2_refined semantically.
+    # W direction unchanged. Companion to (NOT stacked with by default)
+    # `use_partition_summed_x2_for_h_error_gain`; A/B/C/D variant matrix in
+    # docs/v3_21_12_refined_filter_update_gain_input_parity_plan.md.
+    use_current_e2_refined_in_h_error_denominator: bool = False
+
+    # v3.21.13 — AEC3 echo_remover.cc:475 `UseLinearFilterOutput` Y-vs-E
+    # final-output selection parity. AEC3 selects between linear residual `E`
+    # and capture spectrum `Y` as input to `SuppressionFilter.ApplyGain`:
+    #
+    #     const auto& Y_fft = aec_state_.UseLinearFilterOutput() ? E : Y;
+    #     suppression_filter_.ApplyGain(..., Y_fft, ...);
+    #
+    # `UseLinearFilterOutput()` returns `filter_quality_state_.LinearFilterUsable()
+    # && config_.filter.use_linear_filter` — semantically equal to our
+    # `_aec3_state.usable_linear_estimate()` when `use_linear_filter` is True
+    # (default in AEC3 and our pipeline).
+    #
+    # Y is `WindowedPaddedFft(y_post_hpf, y_old, sqrt-Hann)` — same windowing
+    # / OLA buffer scheme as E. Our equivalent is
+    # `filter.error_spec_windowed + filter.echo_spec` (recomposes
+    # `rfft(near_buffer[:block_size] × sqrt-Hann, fft_size)` by reversing
+    # `error_spec_windowed = near_spec_win - echo_spec` from PBFDKF.process).
+    #
+    # Our default ALWAYS applies gain to the linear residual `error_spec`,
+    # even when `usable_linear_estimate() == False`. This is the v3.21.x
+    # production parity gap — when the linear filter is unusable (e.g.
+    # pre-convergence, transient, transparent mode), AEC3 falls back to
+    # gain-suppressed mic instead of gain-suppressed residual.
+    #
+    # OFF (default): byte-equal v3.21.6 — always use `error_spec`.
+    # ON: per-hop branch on `usable_linear_estimate()`:
+    #   True  → `out_base = error_spec` (current behaviour)
+    #   False → `out_base = filter.error_spec_windowed + filter.echo_spec` (= Y)
+    # Same `gain` applied to either base. Same OLA / synthesis-window path.
+    # Does NOT touch v3.21.8 UseRefinedOutput (per-frame coarse-vs-refined
+    # within the linear branch); v3.21.13 selects the entire linear vs
+    # capture base. The two flags address different AEC3 mechanisms.
+    use_linear_filter_output_selection_for_final_output: bool = False
+
+    # v3.21.8 AEC3 UseRefinedOutput + FormLinearFilterOutput parity
+    # (2026-05-22). AEC3 `echo_remover.cc:112-147` selects per-frame
+    # between the refined-filter linear residual (`e_refined`) and the
+    # coarse-filter linear residual (`e_coarse`) so that a diverged
+    # refined filter (or moments where the coarse filter is cleaner)
+    # does not cascade into AecState / FilterQuality / SuppressionGain.
+    # Our prior pipeline propagated the refined `raw_output`
+    # unconditionally, which Gate 2 of the v3.21.7 partition_summed_x2
+    # 800-case verdict identified as the primary root-cause candidate
+    # for the DT no-clean-convergence stress cluster.
+    #
+    # Predicate (echo_remover.cc:112):
+    #   (1) use coarse when e2_coarse < 0.9·e2_refined AND y2 > 30²·N
+    #       AND (s2_refined > 60²·N OR s2_coarse > 60²·N)
+    #   (2) use coarse when refined diverged: e2_coarse < e2_refined
+    #       AND y2 < e2_refined
+    #   default: use refined.
+    # Transition (echo_remover.cc:134): sample-by-sample linear
+    # crossfade between previous-selected and current-selected output.
+    # Default False keeps v3.21.6 baseline byte-equal. See
+    # [[project-aec3-use-refined-output-missing]] memory and
+    # `docs/v3_21_7_gate2_verdict.md` for full trace evidence.
+    use_refined_output_selection_for_linear_path: bool = False
+
+    # v3.21 alignment — FormLinearFilterOutput 30-sample SignalTransition
+    # parity (2026-05-26). AEC3 echo_remover.cc:134 / signal_transition.cc
+    # crossfades between the previously-selected and current-selected
+    # time-domain error over the first kTransitionBlock=30 samples using
+    # a (k+1)/(kT+1) ramp, then copies the new selection for the remaining
+    # kBlockSize-30 samples. When False (default): existing hop-level binary
+    # spectral switch (byte-equal to v3.21.6 baseline). Requires
+    # `use_refined_output_selection_for_linear_path=True` to have any
+    # effect (crossfade is a no-op when selection never changes).
+    form_linear_filter_crossfade_enabled: bool = False
+
+    # v3.21.9 AEC3 SubtractorOutput::ComputeMetrics parity for coarse e²
+    # block-window consistency (2026-05-22). AEC3
+    # `subtractor_output.cc:38-48` computes
+    #   e2_coarse = sum(e_coarse[n]² for n in range(kBlockSize))
+    # i.e. a time-domain block sum-of-squares over kBlockSize samples,
+    # matching the same window as y2 (also block-summed). Our
+    # `_aec3_post` convergence check previously reconstructed e2_coarse
+    # via Parseval over fft_size = 512 samples while y2 was summed
+    # over hop = 160 — a 3.2× window mismatch. The 5% AEC3-intended
+    # coarse_conv threshold became an effective 1.6% threshold,
+    # making `coarse_conv` fire ~3× less than AEC3 intends.
+    #
+    # When True, `_aec3_post` reads `self._last_shadow_output_time`
+    # (captured at the shadow.process() call in `process()`) and
+    # computes e2_coarse = sum(shadow_output_time²) over hop, which
+    # is dimensionally consistent with y2 = sum(near_end²) over hop.
+    # Default False keeps v3.21.6 baseline byte-equal. Pure formula
+    # fix; independent from `use_refined_output_selection_for_linear_path`
+    # (no shadow convergence precondition needed; the block-window
+    # consistency is mathematically deterministic). See
+    # `docs/v3_21_7_gate2_verdict.md` finding #1c.
+    use_coarse_e2_time_domain_parity: bool = False
+
+    # v3.21.14 — PBFDAF shadow NLMS AEC3 protection alignment (2026-05-23).
+    # AEC3 `CoarseFilterUpdateGain::Compute` (coarse_filter_update_gain.cc:34-82)
+    # defines 5 protection mechanisms for the coarse NLMS filter that PBFDKF
+    # main has all ported but PBFDAF shadow has NONE. Shadow update directly
+    # affects `any_filter_converged` → `convergence_seen` latch → Cat C trap on
+    # no-clean-convergence stress cases (XRTnTUjU / MYrVxVEM / nVUnxqHLr).
+    # Each flag is an independent AEC3-verbatim port behind a default-OFF guard;
+    # full plan in `~/.claude/plans/se-aec-aec-main-hazy-lynx.md`.
+    #
+    # A.1: mu denominator uses partition-summed X² = Σ_p |X_buf[p]|² (current
+    #      frame, no smoothing). Matches AEC3 `mu[k] = rate / X²[k]` where X²
+    #      comes from `render_buffer.SpectralSum` (coarse_filter_update_gain.cc:68).
+    #      Our default is EMA-smoothed power × n_partitions (α=0.9, ~10-hop lag);
+    #      ON gives shadow the same transient response as AEC3 coarse.
+    use_partition_summed_x2_for_shadow_mu: bool = False
+    # A.2: noise_gate hard-zero. AEC3 sets `mu[k] = 0` when `X²[k] < noise_gate`
+    #      (coarse_filter_update_gain.cc:67-71) using the AEC3 coarse filter
+    #      constant (aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT = 0.01870,
+    #      from 20075344 int16²). T1.2 fix: prior code used NOISE_GATE_POWER_FLOAT
+    #      (27509562 = 0.02562) from suppression path — now corrected.
+    #      Our default uses local_floor + global_floor as denominator lower bounds
+    #      — never sets mu to zero. ON matches AEC3 hard-gate semantics.
+    use_aec3_noise_gate_for_shadow: bool = False
+    # A.3: poor_signal_excitation + call_counter startup gate. AEC3 returns
+    #      early when `++poor_signal_excitation_counter_ < size_partitions ||
+    #      call_counter_ <= size_partitions` (cc:51-61). Our PBFDAF shadow
+    #      has NO such counters; PBFDKF main has both. ON adds the counters to
+    #      shadow + orchestrator wires them from RenderSignalAnalyzer.
+    use_poor_excitation_gate_for_shadow: bool = False
+    # A.4: narrowband mask. AEC3 calls
+    #      `render_signal_analyzer.MaskRegionsAroundNarrowBands(&mu)` (cc:75)
+    #      to zero mu in tonal regions. Our PBFDAF shadow has no
+    #      `_render_signal_analyzer` reference; PBFDKF main has it
+    #      (filters.py:307, applied filters.py:440-443). ON wires the same
+    #      single-instance RSA to shadow and applies the mask.
+    use_narrowband_mask_for_shadow: bool = False
+    # A.5: saturation gate. AEC3 returns early when `saturated_capture_signal`
+    #      (cc:56-57). Our PBFDAF reads `self._saturated_capture` set by
+    #      orchestrator line 2014 but does not gate on it; PBFDKF main does
+    #      (filters.py:414-418). ON adds the gate to PBFDAF._update_weights.
+    use_saturation_gate_for_shadow: bool = False
+
+    # v3.21.17 — SignalDependentErleEstimator port (2026-05-23). AEC3
+    # `signal_dependent_erle_estimator.{cc,h}` divides the linear filter
+    # into sections (non-linear partitioning where lower sections have
+    # finer resolution) and tracks per-section per-subband ERLE
+    # refinement. 6 subbands (~125-1000 / 1000-2000 / 2000-3000 /
+    # 3000-4000 / 4000-6000 / 6000-8000 Hz).
+    #
+    # `signal_dependent_erle_sections` (default 0 = OFF — SDE not instantiated,
+    # byte-equal preserved). When 1: SDE runs but degenerate (single section
+    # = no refinement, clamps to per-subband max_erle). When >= 2: per-section
+    # ERLE refinement active. AEC3 ships with `num_sections=1` in production
+    # (degenerate); higher values are field-trial / multi-channel configs.
+    signal_dependent_erle_sections: int = 0
+    # SDE per-filter-section block budget. Defaults match our PBFDKF main
+    # filter at preset BALANCED (n_partitions=13 for filter_length=832).
+    sde_num_blocks: int = 13
+    sde_delay_headroom_blocks: int = 0
+
+    # v3.21.6 nores LF artifact debug 2026-05-22 — usable_linear gate-3
+    # ablation knobs. See `python/modules/state/filter_quality.py`
+    # docstring + [[project-usable-linear-gate3-latch-bug]] memory.
+    # Default-OFF preserves AEC3 legacy 4-gate AND verbatim.
+    #
+    # Bug: gate 3 = `external_delay OR convergence_seen` is too
+    # permissive on no-clean-convergence stress cases (XRTnTUjU_DT_static).
+    # `convergence_seen` is a binary latch that fires after a single hop
+    # of `any_filter_converged` and never resets. Under partition_summed_x2
+    # ON, brief 20% refined-convergence on the stress case latches gate 3
+    # → usable_linear True 96.6% of utterance → over-suppression.
+    #
+    # Three independent knobs (combinations allowed):
+    #   - `usable_linear_convergence_hops_required`: int (default 0 =
+    #     legacy binary latch). When > 0, gate 3 requires the counter
+    #     `_convergence_hops_counter ≥ N` instead of "ever fired once".
+    #   - `usable_linear_require_filter_analyzer_consistent`: bool. When
+    #     True, gate 3 is AND-ed with `filter_analyzer_consistent()`. No
+    #     effect when FilterAnalyzer is disabled (passes False AND).
+    #   - `usable_linear_disable_external_delay_shortcut`: bool. When
+    #     True, the `external_delay is not None` branch of gate 3 is
+    #     dropped — convergence is the ONLY way to satisfy gate 3.
+    usable_linear_convergence_hops_required: int = 0
+    usable_linear_require_filter_analyzer_consistent: bool = False
+    usable_linear_disable_external_delay_shortcut: bool = False
+
+    # v3.21.6 nores LF artifact debug 2026-05-22 — trusted external_delay
+    # ablation ([[project-usable-linear-gate3-latch-bug]] follow-up). The
+    # orchestrator currently constructs the AEC3 `external_delay`
+    # DelayEstimate from legacy `_current_delay` whenever
+    # `_delay_active=True`, hardcoding quality=REFINED. On no-clean-
+    # convergence stress cases (XRTnTUjU_DT_static) the legacy delay
+    # tracker latches a delay and never reports None, so the AEC3 gate-3
+    # `external_delay is not None` branch is permanently satisfied — even
+    # when the actual xcorr confidence has dropped. This semantic
+    # mismatch (our "external_delay always present" vs AEC3's "external
+    # delay only when an authoritative source reports one") is what makes
+    # usable_linear permissive on stress cases.
+    #
+    # When True: orchestrator emits ext_delay only when
+    #   - fixed_delay_samples >= 0 (explicit configured delay), OR
+    #   - delay_est.is_solid (xcorr PAR currently >= solid threshold).
+    # Otherwise ext_delay = None — let FilterAnalyzer / convergence path
+    # decide. Independent of the other gate-3 knobs above.
+    usable_linear_trusted_external_delay_only: bool = False
+
     # High-pass filter (DC blocker + low-freq removal)
     enable_highpass: bool = True
     highpass_cutoff_hz: float = 80.0    # Cutoff freq: removes DC, 50/60Hz hum, rumble
@@ -209,12 +698,28 @@ class AecConfig:
     # NE preservation by limiting low-freq ref energy reaching the filter.
     # Flag retained for ablation; revisit after Item 2 RES re-audit if RES
     # gains the ability to handle low-freq ref energy without DT damage.
-    enable_highpass_ref: bool = True
+    #
+    # 2026-05-16 user-locked: default = False (ref HPF OFF). See
+    # `project_aec_hpf_lock.md` memory. Mic-path HPF remains ON. Bench
+    # `AEC_HPF_REF=0` env override is now no-op (matches default); any
+    # research that needs ref HPF ON must opt-in explicitly via the env or
+    # config kwarg.
+    enable_highpass_ref: bool = False
 
     # Saturation / non-linear echo handling
     enable_saturation_detect: bool = True
     saturation_threshold: float = 0.95       # |sample| > threshold → clipping
     saturation_softclip_ref: bool = True     # Soft-clip reference for better filter modeling
+
+    # v3.21 alignment — SaturationDetector subtractor output inputs
+    # (2026-05-26). AEC3 SaturationDetector::Update receives
+    # subtractor_output.s_refined_max_abs and s_coarse_max_abs (echo
+    # estimates: near - e). The orchestrator always passes 0.0 (default
+    # kwarg). When True: compute s_refined = near_end − e_refined and
+    # s_coarse = near_end − e_coarse time-domain max-abs and feed them to
+    # AecState.update(). Trace-only audit until behavioral impact confirmed.
+    # Default False: byte-equal to v3.21.6 baseline.
+    saturation_subtractor_inputs_enabled: bool = False
 
     # P52 A.0R.2: per-frame regime handler observability. When True, AEC
     # records one row per frame into AEC._regime_trace_rows with the handler
