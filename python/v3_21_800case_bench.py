@@ -358,7 +358,7 @@ def _write_report(results: List[dict], be_ok: bool) -> None:
         delta = mfull - m0
         if metric == 'deg' and delta < -0.20:
             prod_catastrophics.append((r['stem'], bucket, delta))
-        if metric == 'echo' and delta > +0.20:
+        if metric == 'echo' and delta < -0.20:  # echo drops = worse suppression = regression
             prod_catastrophics.append((r['stem'], bucket, delta))
 
     # Alignment check (vs AEC3 ref, 12 known cases)
@@ -390,10 +390,10 @@ def _write_report(results: List[dict], be_ok: bool) -> None:
         key=lambda x: x[3]
     )
 
-    # FS_static cases regressing vs M0 (echo gets worse)
-    fs_regressions = [(s, m0, mf, d) for s, m0, mf, d in fs_static_sorted if d > 0.05]
-    # FS_static cases with large improvement (possible cond1 firing well)
-    fs_large_improve = [(s, m0, mf, d) for s, m0, mf, d in fs_static_sorted if d < -0.50]
+    # FS_static regressions: echo drops (d < -0.05, less suppression = worse)
+    fs_regressions = [(s, m0, mf, d) for s, m0, mf, d in fs_static_sorted if d < -0.05]
+    # FS_static large improvements: echo rises significantly (d > 0.50)
+    fs_large_improve = [(s, m0, mf, d) for s, m0, mf, d in fs_static_sorted if d > 0.50]
 
     # --- Build report text ---
     lines = []
@@ -442,13 +442,9 @@ def _write_report(results: List[dict], be_ok: bool) -> None:
             lines.append(f'| {bkt} | {metric} | 0 | — | — | — | — |')
             continue
         arr = np.array(d_list)
-        # For echo: positive Δ = regression; for deg: negative Δ = regression
-        if metric == 'echo':
-            worst = float(np.max(arr))   # most positive = worst regression
-            best  = float(np.min(arr))   # most negative = best improvement
-        else:
-            worst = float(np.min(arr))   # most negative = worst regression
-            best  = float(np.max(arr))   # most positive = best improvement
+        # Both echo and deg: higher = better (AECMOS convention). Negative Δ = regression.
+        worst = float(np.min(arr))   # most negative = worst regression
+        best  = float(np.max(arr))   # most positive = best improvement
         sign = '+' if float(np.mean(arr)) >= 0 else ''
         lines.append(
             f'| {bkt} | {metric} | {len(d_list)} '
@@ -469,11 +465,8 @@ def _write_report(results: List[dict], be_ok: bool) -> None:
         ]
         if not cases_bkt:
             continue
-        # Sort by worst regression
-        if metric == 'echo':
-            cases_sorted = sorted(cases_bkt, key=lambda x: -(x[2] - x[1]))  # highest Δ first
-        else:
-            cases_sorted = sorted(cases_bkt, key=lambda x: (x[2] - x[1]))   # most negative first
+        # Sort by worst regression: most negative Δ first (both echo and deg — higher is better)
+        cases_sorted = sorted(cases_bkt, key=lambda x: (x[2] - x[1]))
         top5 = cases_sorted[:5]
         lines.append(f'**{bkt}** (metric={metric}):')
         lines.append('| Case | M0 | M_full | Δ |')
@@ -484,7 +477,7 @@ def _write_report(results: List[dict], be_ok: bool) -> None:
 
     # Catastrophic cases (production: vs M0)
     lines.append('### Catastrophic Cases (vs M0)\n')
-    lines.append('> DT Δdeg < −0.20  OR  FS Δecho > +0.20 vs M0\n')
+    lines.append('> DT Δdeg < −0.20  OR  FS Δecho < −0.20 vs M0  (both metrics: higher = better)\n')
     if not prod_catastrophics:
         lines.append('**None** — no production catastrophics.\n')
     else:
@@ -575,21 +568,21 @@ def _write_report(results: List[dict], be_ok: bool) -> None:
                      f'Δvs_AEC3={mfull_echo-aec3_echo:+.3f} '
                      f'(AEC3={aec3_echo:.3f})\n')
 
-    lines.append(f'**FS_static regressions vs M0** (Δecho > +0.05): '
+    lines.append(f'**FS_static regressions vs M0** (Δecho < −0.05, echo drops = worse): '
                  f'{len(fs_regressions)} case(s)\n')
     if fs_regressions:
         lines.append('| Case | M0_echo | M_full_echo | Δ |')
         lines.append('|------|---------|-------------|---|')
-        for stem, m0, mf, d in sorted(fs_regressions, key=lambda x: -x[3])[:20]:
+        for stem, m0, mf, d in fs_regressions[:20]:
             lines.append(f'| `{stem[:50]}` | {m0:.3f} | {mf:.3f} | {d:+.3f} |')
         lines.append('')
 
-    lines.append(f'**FS_static large improvements vs M0** (Δecho < −0.50): '
+    lines.append(f'**FS_static large improvements vs M0** (Δecho > +0.50): '
                  f'{len(fs_large_improve)} case(s)\n')
     if fs_large_improve:
         lines.append('| Case | M0_echo | M_full_echo | Δ |')
         lines.append('|------|---------|-------------|---|')
-        for stem, m0, mf, d in fs_large_improve[:10]:
+        for stem, m0, mf, d in sorted(fs_large_improve, key=lambda x: -x[3])[:10]:
             lines.append(f'| `{stem[:50]}` | {m0:.3f} | {mf:.3f} | {d:+.3f} |')
         lines.append('')
 
