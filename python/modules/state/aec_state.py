@@ -172,11 +172,17 @@ class AecState:
         return self._delay_state.min_direct_path_filter_delay()
 
     def reverb_decay(self, mild: bool = False) -> float:
-        # STUB — returns 0 (no reverb tail) until ReverbModelEstimator lands.
+        # DEAD CODE — no production caller. ResidualEchoEstimator owns its
+        # own ReverbDecayEstimator and reads via self._reverb_decay_est.decay(mild).
+        # Kept as part of AEC3 public API surface for future architectural
+        # refactor (move estimator ownership to AecState per AEC3 layout).
         return self._reverb_decay if not mild else self._reverb_decay * 0.5
 
     def get_reverb_frequency_response(self) -> np.ndarray:
-        # STUB — returns zeros until ReverbModelEstimator lands.
+        # DEAD CODE — no production caller. ResidualEchoEstimator owns its
+        # own ReverbFrequencyResponse and reads via self._reverb_freq_resp.tail_response.
+        # Kept as part of AEC3 public API surface for future architectural
+        # refactor.
         return self._reverb_frequency_response
 
     def erle(self, onset_compensated: bool = False) -> np.ndarray:

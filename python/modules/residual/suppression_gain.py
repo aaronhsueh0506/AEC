@@ -122,15 +122,18 @@ class DominantNearendConfig:
     trigger_threshold: int = 12
     use_during_initial_phase: bool = True
     use_unbounded_echo_spectrum: bool = True
-    # LF-only sum endpoint for nearend detection. AEC3 canonical is 2000 Hz
-    # (covers up to F2). On the AEC Challenge 800-case cohort, raising from
-    # 500 -> 2000 Hz regressed DT_static deg by 0.016 and FS_static echo
-    # by 0.012 (T2 vs T1 bench, see v3.21.2 ship commit). Cause: the
-    # 500-2000 Hz band carries more echo than voice energy on this cohort,
-    # so a wider sum pushes enr higher and reduces nearend triggers. Hold
-    # at 500 Hz (= bin 16 @ fft_size=512) where the existing tuning is
-    # empirically load-bearing.
-    lf_endpoint_hz: float = 500.0
+    # LF-only sum endpoint for nearend detection. AEC3 canonical 2000 Hz
+    # (= bin 16 exclusive @ fft=128 = `spectrum.begin()+16` in
+    # dominant_nearend_detector.cc:43-44). Covers F0+F1+F2 — speech
+    # formant peak band.
+    # NOTE on v3.21.2 regression: prior 500→2000 Hz test regressed on
+    # 800-case (DT_static deg −0.016, FS_static echo −0.012) but that
+    # was BEFORE the bin 0 (DC) skip fix (Phase 2 2026-05-27). DC
+    # contamination inflated ne_sum at LF, so widening to 2000 Hz pushed
+    # ENR in the wrong direction. With bin 1+ slice (AEC3 parity), the
+    # regression mechanism is gone.
+    # Default flipped 500 → 2000 Hz 2026-05-27 for AEC3 strict alignment.
+    lf_endpoint_hz: float = 2000.0
 
 
 @dataclass(frozen=True)

@@ -8,16 +8,21 @@ Single-channel port. Computes R² (residual echo power²) per-bin from:
                 with noise gate + stationary subtraction.
   - Saturated echo override: R² = Y² (capture power) in either path.
 
-Reverb addition NOT YET WIRED — Phase 3.4 ports ReverbModelEstimator
-which produces ``aec_state.get_reverb_frequency_response()`` (currently
-returns zeros, so AddReverb is a no-op). Once reverb lands the chain is
-unchanged here; AecState just starts returning non-zero reverb.
+Reverb addition WIRED — ReverbDecayEstimator + ReverbFrequencyResponse
+are owned by this class (bound lazily via attach_reverb_decay_estimator
+at first hop). estimate() reads decay/tail directly from the bound
+instances. aec_state.reverb_decay() / get_reverb_frequency_response()
+are now dead code (no production caller); kept on AecState surface for
+future architectural refactor where ownership moves to AecState per
+AEC3 layout.
 
 NeuralResidualEchoEstimator NOT ported (off by default in AEC3 config).
 
-UseStationarityProperties NOT yet wired (echo_audibility port deferred);
-default config.echo_audibility.use_stationarity_properties = False so
-this branch is inactive in default configs.
+UseStationarityProperties WIRED — stationary-band R² zeroing happens in
+the orchestrator post-estimate (orchestrator.py ~line 4636); gated by
+``aec3_post_stationarity_zero_enabled`` (default True via the legacy
+alias which is now the canonical control point). EchoAudibility class
+wrapper not yet ported; functional behaviour is in place inline.
 """
 from collections import deque
 from dataclasses import dataclass
