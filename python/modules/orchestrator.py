@@ -781,19 +781,6 @@ class AEC:
         # Double-talk analyzer (owns _dt_from_energy / _dt_from_shadow / _shadow_advantage)
         self._dt_analyzer = DoubleTalkAnalyzer(self.config)
 
-        # FilterPlateauDetector (Python-only safety net) was retired under
-        # the v3.21 strict AEC3 alignment cycle. Attribute preserved as
-        # None for legacy diag readers.
-        self._plateau_detector = None
-
-        # P3e — DT advisory gate state. Hold counter is in samples so we
-        # can convert dt_advisory_hold_ms once. Diag fields exposed via _diag.
-        self._dt_advisory_hold_remaining = 0  # frames; decremented per process()
-        _hop = self._hop_size if hasattr(self, '_hop_size') else (
-            self.config.hop_size if self.config.hop_size > 0 else self.config.frame_size // 2)
-        self._dt_advisory_hold_frames = max(
-            1, int(self.config.dt_advisory_hold_ms * self.config.sample_rate / 1000.0 / max(1, _hop)))
-
         # P3f — Mini AecState trace (no behaviour change). post_reset_age_frames
         # is incremented per process() and zeroed by _reset_filter_derived_state.
         # erle_inst ring buffer kept for slope estimation (~500 ms window at
@@ -1076,11 +1063,6 @@ class AEC:
         self.prev_dtd_conf = 0.0
         self._dtd_conf_holdoff = 0
         self._convergence.reset()
-        # v3.10.0: clear plateau-detector counters on AEC reset
-        if getattr(self, '_plateau_detector', None) is not None:
-            self._plateau_detector.reset()
-        # P3e: clear DT advisory hold
-        self._dt_advisory_hold_remaining = 0
         self._erle_window_near = 1e-10
         self._erle_window_err = 1e-10
         self._erle_factor_prev = 0.0
@@ -1285,7 +1267,6 @@ class AEC:
             • _frame_count                 — elapsed time
             • delay_est + _current_delay   — delay alignment lives upstream
             • _ref_ring (delay buffer)     — far history is valid
-            • _plateau_detector            — its own attempts counter
             • _far_power_ema / _mic_power_ema  — input-side
             • _hp_mic / _hp_ref            — input-side HPF
             • _sat_detector_*              — input-side
@@ -1763,14 +1744,6 @@ class AEC:
             mu_scale = self._compute_mu_scale()
         else:
             mu_scale = self._get_simple_mu_scale()
-
-        # P3e — DT advisory gate. Routes shadow/energy DTD evidence into
-        # mu reduction even when enable_dtd=False. The 7GT P3d trace
-        # showed dt_shadow median 0.51 / dt_energy median 0.24 in the
-        # post-alignment back half but the composite gate driving mu
-        # never fired, so the filter learnt against NE-contaminated error.
-        # Hit-then-hold hysteresis avoids per-frame flicker.
-        # dt_advisory_enabled removed (default-OFF NOSHIP knob, never shipped).
 
         # Mic clipping emergency: freeze filter and clamp RES output to floor.
         # Hard clipping turns mic into square waves; filter would learn garbage.
@@ -2709,60 +2682,6 @@ class AEC:
                 if filt and hasattr(filt, 'Q_low'):
                     filt.Q = filt.Q_low.copy()
 
-        # v3.10.0 — filter plateau detection + one-shot recovery.
-        # Dispatched here (not in DT analyzer or convergence analyzer)
-        # because it needs both signals: convergence flag + DT pattern
-        # signature. Recovery action below is intentionally heavy (resets
-        # filter taps + shadow + RES + EPC mark_diverged) — it's only
-        # triggered when the filter has been stuck below ERLE convergence
-        # threshold for a sustained time despite far-end activity.
-        _far_now = float(np.mean(far_end ** 2))
-        _far_active_now = _far_now > 1e-4
-        # Use the same windowed-ERLE expression as the diag pipeline above.
-        _erle_win_db = float(10.0 * np.log10(
-            (self._erle_window_near + 1e-10)
-            / (self._erle_window_err + 1e-10)))
-        _dt_signal_now = (float(self._dt_from_shadow) > 0.3
-                          or float(self._dt_from_energy) > 0.3)
-        # Variant C: suppress plateau while aec3_state.initial_state_active().
-        # Fails when initial_state exits before plateau grace window closes (8-frame gap).
-        _plateau_chain_suppressed = (
-            bool(getattr(self.config, 'use_full_delay_change_chain', False))
-            and bool(getattr(self.config, 'use_full_delay_plateau_suppression', False))
-            and self._aec3_state.initial_state_active()
-            and not self._filter_once_converged
-        )
-        # Variant C2: suppress plateau for a fixed hop count after delay_first/shift.
-        # Avoids the initial_state window timing dependency that caused C to fail.
-        # Once once_converged latches, suppression is released early.
-        if not _plateau_chain_suppressed:
-            _c2_hops = int(getattr(self.config, 'plateau_suppression_fixed_hops', 500))
-            _c2_trigger = self._full_delay_chain_trigger_frame
-            _plateau_chain_suppressed = (
-                bool(getattr(self.config, 'use_full_delay_change_chain', False))
-                and bool(getattr(self.config,
-                                 'use_full_delay_plateau_suppression_fixed_hops', False))
-                and _c2_trigger >= 0
-                and (int(self._frame_count) - _c2_trigger) < _c2_hops
-                and not self._filter_once_converged
-            )
-        if (self._plateau_detector is not None
-                and not _plateau_chain_suppressed
-                and self._plateau_detector.update(
-                    far_active=_far_active_now,
-                    dt_signal_present=_dt_signal_now,
-                    erle_windowed_db=_erle_win_db,
-                    once_converged=self._filter_once_converged,
-                )):
-            # Plateau confirmed — full derived-state reset. Shared helper
-            # with delay_first acquisition (Codex finding: both paths reset
-            # filter taps, both should clear downstream state the same way).
-            # preserve_render_ema=True keeps the long-window far-PSD EMA
-            # alive across recovery — it's input-side context and the
-            # freshly reset filter wants it ready immediately for fallback.
-            self._reset_filter_derived_state(reason='plateau',
-                                              preserve_render_ema=True)
-
         # ── Phase 0 trace-only AEC3 state diagnostics (read-only; do not gate audio) ──
         _initial_state_active = (
             (not self._filter_once_converged)
@@ -3469,24 +3388,10 @@ class AEC:
         self._diag['aec3_transition_triggered'] = bool(_a1_transition_triggered)
         self._diag['usable_linear_estimate'] = bool(
             self._aec3_state.usable_linear_estimate())
-        # A.1 Step 9: set_initial_state(False) on TransitionTriggered (echo_remover.cc:418-420).
-        if (bool(getattr(self.config, 'use_full_delay_change_chain', False))
-                and _a1_transition_triggered
-                and self._aec3_sg is not None):
+        # AEC3 echo_remover.cc:418-420 — set_initial_state(False) on TransitionTriggered.
+        if _a1_transition_triggered and self._aec3_sg is not None:
             self._aec3_sg.set_initial_state(False)
             self._diag['a1_set_initial_state'] = 'off'
-        # Gate 0 Variant D1: restore normal leakage on ExitInitialState (TransitionTriggered).
-        # Mirrors AEC3 Subtractor::ExitInitialState() → refined/coarse_gains.SetConfig(normal).
-        if (bool(getattr(self.config, 'use_full_delay_change_chain', False))
-                and bool(getattr(self.config, 'use_full_delay_setconfig_initial', False))
-                and _a1_transition_triggered):
-            from . import aec3_scale as _aec3sc
-            _nc_lc = np.float32(_aec3sc.LEAKAGE_CONVERGED_PER_HOP_DEFAULT)
-            _nc_ld = np.float32(_aec3sc.LEAKAGE_DIVERGED_PER_HOP_DEFAULT)
-            for _filt in (self.filter, self.shadow_filter):
-                if _filt is not None and hasattr(_filt, '_leakage_converged'):
-                    _filt._leakage_converged = _nc_lc
-                    _filt._leakage_diverged = _nc_ld
         # H_error mean trace for Gate 0 validation.
         if (self.filter is not None
                 and hasattr(self.filter, 'H_error_per_bin')):
