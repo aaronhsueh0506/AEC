@@ -280,10 +280,8 @@ class AEC:
                     period_seconds=self.config.delay_est_period_s,
                     par_low_threshold=self.config.delay_par_low_threshold,
                     par_solid_threshold=self.config.delay_par_solid_threshold,
-                    fast_path_enabled=getattr(self.config,
-                                              "delay_fast_path_enabled", False),
-                    fast_par_threshold=getattr(self.config,
-                                               "delay_fast_par_threshold", 40.0),
+                    fast_path_enabled=True,
+                    fast_par_threshold=40.0,
                 )
                 self._current_delay = -1  # -1 = not yet estimated
             # Reference ring buffer for delay compensation
@@ -556,7 +554,7 @@ class AEC:
             self._aec3_n2 = np.full(n_bins, 1.0e6, dtype=np.float32)
             self._aec3_n2_initial = np.zeros(n_bins, dtype=np.float32)
             self._aec3_n2_counter = 0
-            _dbfs = float(getattr(self.config, 'comfort_noise_floor_dbfs', -96.03406))
+            _dbfs = float(self.config.comfort_noise_floor_dbfs)
             self._aec3_noise_floor_int16sq = float(
                 64.0 * (10.0 ** ((90.30899869919436 + _dbfs) * 0.1))
             )
@@ -605,8 +603,8 @@ class AEC:
         if self.filter is not None and hasattr(self.filter, 'n_freqs'):
             self._aec3_stationarity = _StatEst(
                 n_freqs=int(self.filter.n_freqs),
-                hop_samples=int(getattr(self.config, 'hop_size', 160)),
-                sample_rate=int(getattr(self.config, 'sample_rate', 16000)),
+                hop_samples=int(self.config.hop_size),
+                sample_rate=int(self.config.sample_rate),
             )
         else:
             self._aec3_stationarity = None
@@ -617,8 +615,8 @@ class AEC:
         # AEC3 filter_has_had_time_to_converge = strong_not_saturated_render
         # blocks >= 0.8 × kNumBlocksPerSecond (aec_state.cc:111-113).
         self._aec3_stationarity_active_hops = 0
-        _hop_st = int(getattr(self.config, 'hop_size', 160))
-        _sr_st = int(getattr(self.config, 'sample_rate', 16000))
+        _hop_st = int(self.config.hop_size)
+        _sr_st = int(self.config.sample_rate)
         self._aec3_stationarity_converge_hops = int(round(0.8 * _sr_st / _hop_st))
 
         # v3.21 Phase B.3 + B.4 — RenderSignalAnalyzer + startup gates.
@@ -889,7 +887,7 @@ class AEC:
         self.shadow_frame_count = 0
         self._regime_handler = PathChangeRegimeHandler(
             self.config,
-            gate_mode=getattr(self.config, 'regime_gate_mode', 'energy'),
+            gate_mode='energy',
         )
         self._last_raw_output: Optional[np.ndarray] = None   # raw filter output before RES (diagnostic)
 
@@ -3055,67 +3053,46 @@ class AEC:
         # selection is hop-aligned here; downstream time-domain crossfade is
         # implicit in sqrt-Hann + OLA).
         self._refined_filter_output_last_selected = bool(use_refined)
-        # Default spectral selection (binary switch; byte-equal baseline).
-        if use_refined:
-            selected_esw = self.filter.error_spec_windowed
-            selected_echo_spec = self.filter.echo_spec
-        else:
-            # near_spec_windowed = filter.error_spec_windowed + filter.echo_spec
-            # coarse error_spec_windowed = near_spec_windowed - shadow.echo_spec
-            selected_esw = (
-                self.filter.error_spec_windowed
-                + self.filter.echo_spec
-                - self.shadow_filter.echo_spec
-            ).astype(np.complex64)
-            selected_echo_spec = self.shadow_filter.echo_spec
-        _form_transition_active = False
-        _form_transition_energy_delta = 0.0
-        # v3.21 alignment A — FormLinearFilterOutput 30-sample SignalTransition
-        # + WindowedPaddedFft FFT memory (AEC3 signal_transition.cc +
-        # echo_remover.cc:134). When flag ON, always uses windowed-FFT path
-        # regardless of whether selection changed.
+        # FormLinearFilterOutput 30-sample SignalTransition + WindowedPaddedFft
+        # FFT memory (AEC3 signal_transition.cc + echo_remover.cc:134).
         # AEC3 from/to semantics: both evaluated on CURRENT block — from_time
-        # uses the PREVIOUS selector, to_time uses the CURRENT selector. This
-        # is NOT the previous hop's output; it is the current-block output of
-        # whichever filter was chosen last frame.
-        # Default-OFF: byte-equal to binary switch above.
-        if getattr(self.config, 'form_linear_filter_crossfade_enabled', False):
-            from_time = (e_refined_time if self._form_last_selection
-                         else e_coarse_time)
-            to_time = e_refined_time if use_refined else e_coarse_time
-            _form_transition_active = (self._form_last_selection != use_refined)
-            if _form_transition_active:
-                _kT = 30  # kTransitionBlock (AEC3 constant)
-                _k = np.arange(_kT, dtype=np.float32) + 1.0
-                _s = _k / (_kT + 1.0)  # ramp ∈ (1/31, 30/31)
-                e_form = np.empty(hop, dtype=np.float32)
-                e_form[:_kT] = ((1.0 - _s) * from_time[:_kT]
-                                + _s * to_time[:_kT])
-                e_form[_kT:] = to_time[_kT:]
-            else:
-                e_form = to_time.copy()
-            # WindowedPaddedFft([e_old_ | e_form] × sqrt_hann, fft_size).
-            # e_old_ = AEC3 FFT memory (previous formed output); zeros on first
-            # frame matching AEC3 constructor initialisation.
-            _e_old = (self._form_prev_output_time
-                      if self._form_prev_output_time is not None
-                      else np.zeros(hop, dtype=np.float32))
-            _e_block = np.concatenate([_e_old, e_form])
-            _e_block_win = _e_block * self.filter._sqrt_hann_analysis
-            selected_esw = np.fft.rfft(
-                _e_block_win, self.filter.fft_size
-            ).astype(np.complex64)
-            _near_spec_win = (
-                self.filter.error_spec_windowed + self.filter.echo_spec
-            ).astype(np.complex64)
-            selected_echo_spec = (_near_spec_win - selected_esw).astype(np.complex64)
-            _form_transition_energy_delta = (
-                float(np.sum(np.abs(selected_esw) ** 2))
-                - float(np.sum(np.abs(self.filter.error_spec_windowed) ** 2))
-            )
-            # Update AEC3 FFT memory and selection latch.
-            self._form_prev_output_time = e_form
-            self._form_last_selection = use_refined
+        # uses the PREVIOUS selector, to_time uses the CURRENT selector.
+        from_time = (e_refined_time if self._form_last_selection
+                     else e_coarse_time)
+        to_time = e_refined_time if use_refined else e_coarse_time
+        _form_transition_active = (self._form_last_selection != use_refined)
+        if _form_transition_active:
+            _kT = 30  # kTransitionBlock (AEC3 constant)
+            _k = np.arange(_kT, dtype=np.float32) + 1.0
+            _s = _k / (_kT + 1.0)  # ramp ∈ (1/31, 30/31)
+            e_form = np.empty(hop, dtype=np.float32)
+            e_form[:_kT] = ((1.0 - _s) * from_time[:_kT]
+                            + _s * to_time[:_kT])
+            e_form[_kT:] = to_time[_kT:]
+        else:
+            e_form = to_time.copy()
+        # WindowedPaddedFft([e_old_ | e_form] × sqrt_hann, fft_size).
+        # e_old_ = AEC3 FFT memory (previous formed output); zeros on first
+        # frame matching AEC3 constructor initialisation.
+        _e_old = (self._form_prev_output_time
+                  if self._form_prev_output_time is not None
+                  else np.zeros(hop, dtype=np.float32))
+        _e_block = np.concatenate([_e_old, e_form])
+        _e_block_win = _e_block * self.filter._sqrt_hann_analysis
+        selected_esw = np.fft.rfft(
+            _e_block_win, self.filter.fft_size
+        ).astype(np.complex64)
+        _near_spec_win = (
+            self.filter.error_spec_windowed + self.filter.echo_spec
+        ).astype(np.complex64)
+        selected_echo_spec = (_near_spec_win - selected_esw).astype(np.complex64)
+        _form_transition_energy_delta = (
+            float(np.sum(np.abs(selected_esw) ** 2))
+            - float(np.sum(np.abs(self.filter.error_spec_windowed) ** 2))
+        )
+        # Update AEC3 FFT memory and selection latch.
+        self._form_prev_output_time = e_form
+        self._form_last_selection = use_refined
         self._last_uro_frame_trace = {
             'fire': not use_refined,
             'cond1': cond_coarse_cleaner,
@@ -3163,8 +3140,7 @@ class AEC:
         # When ON and a shadow output is available, the per-frame predicate
         # picks the cleaner of refined/coarse and routes that to RES +
         # SuppressionGain via error_spec / echo_psd.
-        if (self.config.use_refined_output_selection_for_linear_path
-                and self.shadow_filter is not None
+        if (self.shadow_filter is not None
                 and self._last_shadow_output_time is not None):
             _sel_esw, _sel_echo_spec = self._aec3_select_linear_filter_output(
                 e_refined_time=raw_output, near_end_block=near_end,
@@ -3257,7 +3233,7 @@ class AEC:
             self.delay_est is not None
             and getattr(self.delay_est, 'is_solid', False)
         )
-        _fixed_delay_active = (int(getattr(self.config, 'fixed_delay_samples', -1)) >= 0)
+        _fixed_delay_active = (int(self.config.fixed_delay_samples) >= 0)
         if not _ext_delay_present:
             _ext_delay_source = 'none'
         elif _fixed_delay_active:
@@ -3365,13 +3341,7 @@ class AEC:
         # actually drives reverb update. 0 is the AEC3 "headroom guess"
         # default during pre-convergence and is treated as a valid block
         # index by the reverb estimator (matches AEC3 verbatim).
-        # Falls back to legacy _current_delay // hop_size when OFF.
-        if self.config.filter_analyzer_enabled:
-            _delay_blocks = int(self._aec3_state.min_direct_path_filter_delay())
-        else:
-            _delay_blocks = (int(self._current_delay) // int(self.filter.hop_size)
-                             if (self._delay_active and self._current_delay >= 0)
-                             else -1)
+        _delay_blocks = int(self._aec3_state.min_direct_path_filter_delay())
         # Filter quality proxy for reverb model update.
         # Default (binary): 1.0 if converged, else None (skip update).
         # Binary reverb-update quality (use_aec3_erle_reverb_quality NOSHIP).
@@ -3598,7 +3568,7 @@ class AEC:
         # there is only the lowest band, so the AEC3-strict scaling is 1.0.
         # No per-frame smoothing on noise_gain (sf.cc has none either).
         # DC and Nyquist bins are zeroed per cng.cc:111-112.
-        if getattr(self.config, 'enable_cng', False):
+        if self.config.enable_cng:
             # LCG random index generation (cng.cc:69-81). AEC3 generates
             # kFftLengthBy2 − 1 indices for bins 1..kFftLengthBy2 − 1; at our
             # fft_size this is n_bins − 2.
