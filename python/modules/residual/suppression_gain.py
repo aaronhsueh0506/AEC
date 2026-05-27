@@ -90,11 +90,15 @@ class EchoAudibilityConfig:
     low_render_limit: float = 4.0 * 64.0     # min_echo_power when render quiet
     normal_render_limit: float = 64.0
     use_stationarity_properties: bool = False
-    # Audibility-weighting band boundaries. Phase A defaults preserve the
-    # previous hardcoded bin 3/7 split at fft_size=512 (~94 / 219 Hz);
-    # AEC3 canonical bands at fft_size=128 cover 0-375 / 375-875 / 875+ Hz.
-    lf_band_end_hz: float = 93.75
-    mf_band_end_hz: float = 218.75
+    # Audibility-weighting band boundaries — AEC3 strict.
+    # AEC3 `WeightEchoForAudibility` (suppression_gain.cc:108-120) hardcodes
+    # bin spans 0-3 / 3-7 / 7-end at fft=128 → 0/375/875 Hz. Scaling by
+    # frequency keeps the same physical bands at our fft=512.
+    # All three audibility_threshold_* default to 10.0, so band boundaries
+    # are behaviour-neutral at default but become load-bearing as soon as
+    # per-band thresholds diverge.
+    lf_band_end_hz: float = 375.0
+    mf_band_end_hz: float = 875.0
 
 
 @dataclass(frozen=True)
@@ -403,10 +407,8 @@ class _DominantNearendDetector:
             with `+1.0` floor (which biased ENR/SNR at low signal levels).
         """
         c = self._cfg
-        # LF-only sum endpoint. Endpoint comes from cfg.lf_endpoint_hz (Phase A
-        # default 500 Hz preserves the previous hardcoded bin 16 @ fft=512).
-        # AEC3 canonical endpoint is bin 16 (exclusive) at fft=128 = 2000 Hz;
-        # endpoint upgrade tracked separately due to 800-case tuning history.
+        # LF-only sum endpoint from cfg.lf_endpoint_hz (AEC3 canonical 2000 Hz,
+        # bin 16 exclusive at fft=128 — see dominant_nearend_detector.cc:43-44).
         n_bins = nearend_spectrum.size
         lf_end = min(hz_to_bin(c.lf_endpoint_hz, n_bins, self._sr), n_bins)
         # AEC3 cc:43 — `begin()+1` skips DC (bin 0). Python prior version
