@@ -114,31 +114,8 @@ class AEC:
         self._round3_div_counts[source] = self._round3_div_counts.get(source, 0) + 1
         self._round3_last_div_source = source
 
-    def _f_e3_handle_epc_fire(self, source: str) -> None:
-        """No-op (consecutive-EPC handler retired; counter still kept live)."""
-        self._frames_since_last_epc = 0
+    # Filter misadjustment estimator + ScaleFilter wiring (AEC3 parity).
 
-    def _handle_gain_change_soft(self, source: str) -> None:
-        """v3.18 Phase F.2 — AEC3-aligned soft reset for gain_change events.
-
-        Mirrors `webrtc::Subtractor::HandleEchoPathChange` gain-only branch
-        (subtractor.cc:170-174): only `refined_gains_->HandleEchoPathChange()`
-        runs, i.e. the adaptive step-size gain receives a boost so the
-        filter re-tracks faster — filter weights / partition / coarse
-        filter / aec_state ERLE all preserved.
-
-        Our equivalent: Q-boost on main + shadow (preserves weights);
-        no Kalman P relax, no filter-derived-state reset, no ERL cap.
-
-        Wired by F.3 behind `aec_event_classification_enabled` for
-        EpcEvent.source ∈ {'epv', 'shadow_rise'}.
-        """
-        for filt in [self.filter, self.shadow_filter]:
-            if filt is not None and hasattr(filt, 'Q'):
-                self._arc_m_q_boost(filt)
-        self._f_e3_handle_epc_fire(source)
-
-    # v3.18 Phase B.2/B.3 — Filter misadjustment estimator + ScaleFilter wiring.
     def _update_misadjustment_estimator(
         self,
         near_end_hpf: Optional[np.ndarray] = None,
@@ -804,21 +781,6 @@ class AEC:
         # consumers — see B2 docblock at AecStats.filter_state and the
         # B4 fix at aec.py:6361 for the load-bearing distinction.
         self._prev_filter_state: str = 'idle'
-        # F-E1 — far_active hysteresis state (fast attack / slow release).
-        # Once far crosses 1e-4 it stays "active" until 5 consecutive frames
-        # below 3e-5. Stabilises ERL update gating across brief power dips.
-        self._f_e1_far_active = False
-        self._f_e1_far_release_count = 0
-        # F-DelayTrack — recent delay-estimate history for variance check.
-        # Bounded deque; appended only when delay_est emits a valid estimate.
-        self._delay_history = deque(maxlen=8)
-        # F-E3 — consecutive-EPC tracking. Counters reset on respective fires;
-        # large initial value means "never fired".
-        self._frames_since_last_epc = 10**9
-        self._frames_since_last_f_e3_w_reset = 10**9
-        # F-E5 — saturation hysteresis: track previous frame's sat level so
-        # we can fast-attack reset _error_psd on the sat → clean transition.
-        self._f_e5_prev_sat_level = 0.0
         # F2.2 EMA tracker — always maintained (cheap), only consumed by P3h
         # reset gate when `use_diverged_streak_ema` is True.
         self._p3f_diverged_streak_ema = 0.0
@@ -1371,12 +1333,6 @@ class AEC:
         self._p3f_diverged_streak = 0
         self._p3f_diverged_streak_ema = 0.0
         self._prev_filter_state = 'idle'
-        self._f_e1_far_active = False
-        self._f_e1_far_release_count = 0
-        self._delay_history.clear()
-        self._frames_since_last_epc = 10**9
-        self._frames_since_last_f_e3_w_reset = 10**9
-        self._f_e5_prev_sat_level = 0.0
 
         # Diagnostic dict — would otherwise show stale ERLE / DT signals
         for k, v in (('erle_inst', 0.0), ('mu_scale', 1.0), ('far_activity', 0.0),
@@ -1590,8 +1546,6 @@ class AEC:
             self._saturation_level = max(sat_ref, sat_mic * 0.5)
             if self.config.saturation_softclip_ref and sat_ref > 0.1:
                 far_end = SaturationDetector.soft_clip(far_end.copy())
-            # f_e5_enabled extensions removed (default-OFF NOSHIP knob).
-            self._f_e5_prev_sat_level = float(self._saturation_level)
 
         # Delay estimation + reference alignment
         if self._delay_active:
@@ -1992,22 +1946,13 @@ class AEC:
                 # Phase C1: optional coherence+delay gate inputs (default gate_mode='energy'
                 # ignores them, so legacy behavior parity-preserved).
                 _dt_coh = self.dtd_coherence.confidence if self.dtd_coherence else 0.0
-                # v3.10.1: shadow-copy gate raised from any-confidence to ≥0.5.
-                # Shadow→main copy permanently overwrites filter taps; should
-                # only allow it when delay alignment is at least mid-confidence
-                # (PAR halfway between par_low and par_solid).
-                # F-DelayTrack: track delay estimate stability via variance.
-                # Append valid estimates to bounded history; when enabled,
-                # gate reliability on variance < 4 samples AND confidence >=
-                # 0.3 (relaxed minimum since variance is the primary signal).
-                if (self.delay_est is not None
-                        and self.delay_est.estimated_delay >= 0):
-                    self._delay_history.append(int(self.delay_est.estimated_delay))
+                # Shadow→main copy gate: require delay alignment at least
+                # mid-confidence (PAR halfway between par_low and par_solid),
+                # since shadow-copy permanently overwrites filter taps.
                 _delay_reliable = (
                     self.delay_est is not None
                     and self.delay_est.confidence >= 0.5
                 )
-                # P52 A.0R.2 trace removed (default-OFF dev knob).
 
                 shadow_decision = self._regime_handler.update(
                     shadow_frame_count=self.shadow_frame_count,
@@ -2031,14 +1976,6 @@ class AEC:
                 # NLMS shadow and is intentionally not invoked.
 
                 # P52 regime trace removed (default-OFF dev knob).
-
-            # F-E3: increment "frames since last EPC" counters once per frame,
-            # before EPC detection so that fire-then-reset-to-0 logic in the
-            # helper observes the correct count when consecutive EPC fires.
-            if self._frames_since_last_epc < 10**9:
-                self._frames_since_last_epc += 1
-            if self._frames_since_last_f_e3_w_reset < 10**9:
-                self._frames_since_last_f_e3_w_reset += 1
 
             # EchoPathVariability: gain-change detection (delegated to EchoPathChangeDetector)
             epv_event = self._epc_det.update_epv(
@@ -2087,7 +2024,6 @@ class AEC:
                 self._maybe_mark_diverged('epv')
                 self._epc_render_forced_remaining = self.config.epc_hangover
                 self._erl_estimate = min(self._erl_estimate, 0.3)
-                self._f_e3_handle_epc_fire('epv')
 
             # Echo path change: shadow-error rise (delegated to EchoPathChangeDetector).
             # Update + hangover tick are inside the original (shadow_filter, filter_converged)
@@ -2125,7 +2061,6 @@ class AEC:
                             filt._p_floor_beta_frames = 30
                     self._epc_render_forced_remaining = self.config.epc_hangover
                     self._erl_estimate = min(self._erl_estimate, 0.3)
-                    self._f_e3_handle_epc_fire('shadow_rise')
                 else:
                     # Hangover tick — only when shadow_rise did NOT fire.
                     self._epc_det.tick_hangover()
