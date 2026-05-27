@@ -236,7 +236,6 @@ class AecConfig:
         'res_mask_profile_swap_enabled',
         'dominant_ne_detect_enabled',
         'aec_event_classification_enabled',
-        'e4_nlp_enabled',
     })
     _LEGACY_HARDCODE_DEFAULTS = {
         # int / numeric constants for dev-time flags whose call sites use
@@ -293,12 +292,6 @@ class AecConfig:
         'res_mask_swap_mode': 'binary',
         'res_mask_fs_overlay_coh2_min': 0.85,
         'res_mask_fs_overlay_dt_max': 0.2,
-        'e4_nlp_pitch_threshold': 0.45,
-        'e4_nlp_continuity_frames': 3,
-        'e4_nlp_window_ms': 32.0,
-        'e4_nlp_min_residual_rms': 0.05,
-        'e4_nlp_cancel_ratio_threshold': 1.05,
-        'e4_nlp_cancel_ema_alpha': 0.99,
         'enr_t_ne_per_band': (2.0, 1.5, 1.0),
         'enr_s_ne_per_band': (3.33, 2.5, 1.67),
         'kalman_q_band_scales': (0.5, 1.0, 2.0),

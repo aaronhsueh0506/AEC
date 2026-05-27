@@ -47,7 +47,6 @@ from .epc import (
     classify_epc_event, EchoPathChangeDetector, PathChangeRegimeHandler,
 )
 from .config import AecConfig
-from .nlp import SubtractiveNLP
 from .debug_logger import AecDebugLogger
 
 
@@ -839,23 +838,6 @@ class AEC:
         # consumers — see B2 docblock at AecStats.filter_state and the
         # B4 fix at aec.py:6361 for the load-bearing distinction.
         self._prev_filter_state: str = 'idle'
-        # v3.13 E4.S3 — SubtractiveNLP detector (audit-only).
-        # Per docs/v3_13_e4_s2_design_lock.md. Outputs nl_confidence per
-        # hop into self._diag; does NOT modify output. Pure observer.
-        self.nl_detector: Optional[SubtractiveNLP] = None
-        if getattr(self.config, 'e4_nlp_enabled', False):
-            self.nl_detector = SubtractiveNLP(
-                sample_rate=self.config.sample_rate,
-                hop_size=self.hop_size,
-                window_ms=getattr(self.config, 'e4_nlp_window_ms', 32.0),
-                pitch_threshold=getattr(self.config, 'e4_nlp_pitch_threshold', 0.45),
-                continuity_frames=getattr(self.config, 'e4_nlp_continuity_frames', 3),
-                min_residual_rms=getattr(self.config, 'e4_nlp_min_residual_rms', 0.05),
-                cancellation_ratio_threshold=getattr(
-                    self.config, 'e4_nlp_cancel_ratio_threshold', 2.0),
-                cancellation_ema_alpha=getattr(
-                    self.config, 'e4_nlp_cancel_ema_alpha', 0.99),
-            )
         # F-E1 — far_active hysteresis state (fast attack / slow release).
         # Once far crosses 1e-4 it stays "active" until 5 consecutive frames
         # below 3e-5. Stabilises ERL update gating across brief power dips.
@@ -2400,26 +2382,6 @@ class AEC:
                         saturation_level=float(self._saturation_level),
                         erl_estimate=float(self._erl_estimate),
                     )
-
-                # v3.13 E4.S3 — SubtractiveNLP detector (audit-only).
-                # Pure observer: reads the LINEAR residual (raw_output =
-                # mic − linear_echo_estimate, RES input) so the NL
-                # harmonic signature is not masked by RES suppression.
-                # Also reads mic_hop (near_end) for the S4.1
-                # cancellation-ratio gate (NE bucket discrimination).
-                # See E4.S1 Pass A finding: production output (post-RES)
-                # hides NL evidence.
-                if self.nl_detector is not None:
-                    _nl_conf = self.nl_detector.process(
-                        raw_output,
-                        filter_state=self._prev_filter_state,
-                        far_active=(far_power > 1e-4),
-                        mic_hop_samples=near_end)
-                    self._diag['nl_confidence'] = _nl_conf
-                    self._diag['nl_pitch_strength'] = (
-                        self.nl_detector._pitch_strength_last)
-                    self._diag['nl_pitch_lag'] = (
-                        self.nl_detector._pitch_lag_last)
 
                 # Update per-bin mu_scale AFTER RES. echo_psd/error_psd were
                 # only written from ResFilter.process() (dead since R4) → both

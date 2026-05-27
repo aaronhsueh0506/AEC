@@ -6,7 +6,7 @@ The algorithm itself lives under ``python/modules/``:
 * ``modules.orchestrator`` — AEC engine class + process_wav_files + main
 * ``modules.{enums, dataclasses, delay, erle, preprocessing, filters,
   detectors, dtd, epc, state, residual, residual_estimator, render, filter,
-  nlp, debug_logger}`` — leaf modules
+  debug_logger}`` — leaf modules
 
 This file re-exports every public symbol so existing callers can keep
 ``from aec import AEC, AecConfig, AecMode, AecPreset, PBFDKF,
@@ -40,7 +40,6 @@ from modules.epc import (  # noqa: F401
     classify_epc_event, EchoPathChangeDetector, PathChangeRegimeHandler,
 )
 from modules.residual import ResidualEchoEstimator  # noqa: F401
-from modules.nlp import SubtractiveNLP  # noqa: F401
 from modules.debug_logger import AecDebugLogger  # noqa: F401
 from modules.orchestrator import AEC, process_wav_files, main  # noqa: F401
 
