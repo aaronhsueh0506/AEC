@@ -65,12 +65,16 @@ class EchoModelConfig:
 class EpStrengthConfig:
     """Subset of AEC3 ``EchoCanceller3Config::EpStrength``."""
 
-    # U5.3: default_gain 0.014 -> 0.020 (gain_amplitude; squared in GetEchoPathGain).
-    # Scales nonlinear-mode R² up (R² = X² × default_gain²), which raises ENR
-    # so more bins fire suppression in HF where linear filter cancellation
-    # makes raw residual_echo low. Targets the FS_echo regression caused by
-    # canonical lgb=4000 Hz cap relaxing the 937-4000 Hz band.
-    default_gain: float = 0.020
+    # AEC3 echo_canceller3_config.h:EpStrength.default_gain = 1.0f.
+    # Squared in GetEchoPathGain → R² = X² × default_gain² = X² in nonlinear
+    # mode (UsableLinearEstimate=False, i.e. during startup convergence).
+    # Dimensionless ratio (PSD × PSD), no hop/int16 scaling needed.
+    # Prior Python defaults (0.014 / 0.020) were cohort-tuned WORKAROUNDS,
+    # not AEC3 port values — they massively under-estimated R² (2500×) in
+    # nonlinear mode → opening-farend leaks through during convergence
+    # window (~400 ms usable_linear gate + ~2 s ERLE warmup). Restored to
+    # AEC3 strict default 2026-05-27.
+    default_gain: float = 1.0
     bounded_erl: bool = False
     erle_onset_compensation_in_dominant_nearend: bool = False
 
