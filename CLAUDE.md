@@ -13,18 +13,17 @@ tolerance:
   lives under `python/modules/`.
 - `python/modules/` — algorithm modules organised into the AEC3-aligned
   chain (`state/`, `residual/`, `filter/`, `render/`, `delay/`) plus the
-  legacy shared infrastructure (`filters`, `epc`, `detectors`, `dtd`,
-  `preprocessing`, `nlp`, `erle`, `dataclasses`, `config`, `orchestrator`,
-  `debug_logger`, `residual_estimator`). Module-by-module map:
-  [docs/refactor_modules_layout.md](docs/refactor_modules_layout.md).
+  shared infrastructure (`filters`, `epc`, `detectors`, `dtd`,
+  `preprocessing`, `erle`, `dataclasses`, `config`, `orchestrator`,
+  `debug_logger`).
 - `c_impl/` — production C port. Mirrors the Python class structure
   (`PBFDKF`, `ShadowFilter`, etc.). Built with `-ffp-contract=off` mandatory.
 
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
-(currently **3.21.5**). Canonical algorithm reference:
-[docs/aec_methods.md](docs/aec_methods.md). Trace-driven evolution
-history: [docs/aec_v3_evolution.md](docs/aec_v3_evolution.md). Research
-log canonical: [docs/SUMMARY.md](docs/SUMMARY.md).
+(currently **3.21.6.1**). Canonical algorithm reference:
+[docs/aec_methods.md](docs/aec_methods.md). Architecture diagram
+across legacy / current / AEC3 reference:
+[docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html).
 
 ## Common commands
 
@@ -157,42 +156,21 @@ tweak a single field without a full 800-case re-bench.
   linear stage can feed an external (or NN) post-filter;
   `AecConfig.return_res_context = True` switches `aec.process()` return
   type to `(out, AecResContext)`.
-- `trace_p52_regime_handler` flag (default-OFF) — per-frame regime
-  handler trace; classifier in
-  [python/modules/p52_regime_classifier.py](python/modules/p52_regime_classifier.py)
-  is analysis-only (enforced by
-  [python/test_p52_regime.py](python/test_p52_regime.py)::AntiLoopholeTests).
-
 ## Conventions
 
 - Audio dataset (800 cases): `wav/aec_challenge_blind/{doubletalk,farend_singletalk,nearend_singletalk}/<stem>_{mic,lpb}.wav`.
-- Per-case CNG determinism: `np.random.seed(42)` before each `AEC(cfg)` instantiation.
+- Per-case CNG determinism: `np.random.seed(0)` before each `AEC(cfg)` instantiation (see `eval_aec_challenge.py:run_ours`).
 - HPF defaults locked: far-end (ref) HPF=OFF, mic-path HPF=ON.
 - macOS: use `python3` (not `python`); kiss_fft symlink in `c_impl/lib/kiss_fft` → `../../../lib/nr/c_impl/lib/kiss_fft` in the Audio_ALG integration repo.
 
 ## Branch model
 
 `main` carries the production-graded code. Current `__version__` is
-**3.21.5** — v3.21.5 is the **Safe AEC3 Parity** cycle (first of a
-3-cycle arc: v3.21.5 safe parity / v3.21.6 parity completion / v3.22
-intentional divergence). Ships **Sprint A E2 = min(E2, Y2) clamp**
-(AEC3 `echo_remover.cc:495-501` port-fidelity fix; default-True
-`e2_y2_clamp_enabled` in `python/modules/config.py`). FS_static +0.033
-/ FS_movement +0.035 dB vs v3.21.4 baseline; DT deg AECMOS-sensitive
-but not audible (user spectrogram check). Sprints B / C / C2 all
-closed without shipping (B: load-bearing safety-net evidence rejects
-AEC3-default-off stationarity for the current incomplete detector
-port; C: reverb update blocked by FilterAnalyzer stub upstream; C2:
-per-bin H_error refresh selector — 9xjhi memory single-case win
-doesn't reproduce on v3.21.5 baseline). Re-tests scheduled for v3.21.6
-P1-P4. v3.21.4 was the audit cycle. v3.21.3 was the Codex hygiene
-cycle. v3.21.2 corrected the FFT-scale bin-index unit-conversion bug.
-v3.21.0 retired the legacy `ResFilter` 9-stage chain in favour of the
-AEC3-aligned `_aec3_post` (AecState + ResidualEchoEstimator +
-SuppressionGain + CNG). Single production preset: `BALANCED`. See
-[CHANGELOG.md](CHANGELOG.md) for full per-version detail.
-
-The active reference set at `docs/` root holds the canonical pipeline +
-algorithm documentation; closed-arc verdict / design docs from prior
-cycles were retired in the v3.21 cleanup (see [CHANGELOG.md](CHANGELOG.md)
-for the per-round delta).
+**3.21.6.1** — adds the AEC3 alignment completion (10 strict-port fixes
+for the nores LF artifact + painted-black HF bugs) on top of v3.21.6,
+followed by a full release cleanup (config 1547→160 lines, orchestrator
+5487→3632, removed all dev-time substrate flags and trace dicts).
+Byte-equal vs the alignment-complete intermediate (`cd73f4e`) verified
+across the cleanup arc. See [CHANGELOG.md](CHANGELOG.md) for per-version
+detail and [docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html)
+for the architectural before/after.

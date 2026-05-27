@@ -573,6 +573,84 @@
 
 
 <!-- ════════════════════════════════════════════════════════════════
+     v3.21.6 → v3.21.6-alignment (the nores / HF-deficit fix arc)
+     ════════════════════════════════════════════════════════════════ -->
+<div class="arch release">
+  <h2>v3.21.6 → v3.21.6-alignment — two production-blocking bugs fixed</h2>
+  <p class="when">Cycle 2026-05-22 → 2026-05-27 · 10 alignment commits, byte-equal broken intentionally · followed by 12 cleanup commits (audio-zero)</p>
+  <p class="desc">The v3.21.6 baseline shipped with two user-audible defects on the internal DT cohort:
+    a low-band <strong>nores artifact</strong> (linear filter over-estimating echo in 0–500 Hz, producing a grid/fan pattern in the residual)
+    and a high-band <strong>painted-black HF</strong> (residual chain over-suppressing &gt; 4 kHz during DT, ratio of reverb-to-direct R² spiking to 10⁶).
+    The alignment cycle traced both to AEC3-port fidelity gaps and shipped 10 strict-AEC3 fixes; the cleanup cycle then removed all dev-time substrate without touching audio output.</p>
+
+  <div class="roadmap-grid">
+
+    <div class="card warn">
+      <h3>Bug 1 — nores LF artifact (linear-filter over-estimation)</h3>
+      <p style="margin: 0 0 8px;"><strong>Symptom:</strong> ours_nores.wav showed periodic LF energy bursts on FS_static cases (e.g. <code>9xjhi…_farend_singletalk</code>) — the linear filter was over-predicting echo in 0–500 Hz, so the residual carried inverted-phase energy instead of cancelling cleanly.</p>
+      <p style="margin: 0 0 8px;"><strong>Root cause (PBFDKF refined-filter weight-update parity):</strong></p>
+      <ul>
+        <li><code>RefinedFilterUpdateGain</code> denominator used <code>X²_latest</code> (current hop only) instead of AEC3's <code>SpectralSum = Σₚ|X_buf[p]|²</code> → LF bins where energy is spread across history got under-estimated denom → μ blew up → W grew with wrong phase.</li>
+        <li>Per-bin H_error refresh missing (AEC3 <code>cc:128-138</code>) — scalar fullband leakage couldn't disambiguate per-bin filter health.</li>
+        <li>H_error ceiling clipped to 100 (legacy int16-derived) vs AEC3's <code>kHErrorCeiling = 2.0</code> in float — 40 %+ of steady-state frames saturated against the wrong ceiling.</li>
+        <li>Refined-filter noise gate constant was <code>27509562</code> (suppression-path value) instead of AEC3's filter-update <code>20075344</code> → 1.37× too-tight gate, bins where AEC3 would update W were hard-zeroed.</li>
+        <li>μ denominator's <code>n_part·E²</code> term used smoothed <code>_error_psd</code> (α = 0.95, ~200 ms lag) instead of AEC3's instantaneous <code>|error_spec|²</code>.</li>
+      </ul>
+      <p style="margin: 0;"><strong>Fixes shipped:</strong> 5 default-ON flags (<code>use_partition_summed_x2_for_h_error_gain</code>, <code>use_per_bin_h_error_refresh</code>, <code>use_aec3_h_error_ceil</code>, <code>use_aec3_filter_noise_gate_power</code>, <code>use_current_e2_refined_in_h_error_denominator</code>) + matching shadow PBFDAF parity (A.1–A.5) + AEC3-strict EPC handling chain. Now all hard-coded; legacy branches deleted in cleanup.</p>
+    </div>
+
+    <div class="card warn">
+      <h3>Bug 2 — painted-black HF (residual chain over-suppression)</h3>
+      <p style="margin: 0 0 8px;"><strong>Symptom:</strong> on the internal DT case, &gt; 4 kHz bins showed <code>gain_hf_median &lt; 0.1</code> (painted black on the spectrogram) for 24.3 % of frames; reverb-to-direct R² ratio median was 6.2 with p95 = 170, max 1.2×10⁴. Symptoms read as &quot;HF deficit&quot; — speech sounded thin / muffled during DT.</p>
+      <p style="margin: 0 0 8px;"><strong>Root cause (residual reverb chain + back-end alignment):</strong></p>
+      <ul>
+        <li><strong>Reverb-render-history bug:</strong> <code>ReverbModel</code> was being fed the <em>current</em> render PSD instead of the render block from <em>N + 1 partitions ago</em> (AEC3 <code>residual_echo_estimator.cc:367-376</code> reads the delayed slot). Direct-path R² and reverb-tail R² were therefore being computed from the same time-aligned render → reverb mass got double-counted against direct in HF bins where direct &gt; 0.</li>
+        <li><strong>RFR neighbour window:</strong> our <code>ReverbFrequencyResponse</code> used a ±4-bin neighbour max (matching AEC3's physical 125 Hz width at fft = 128). At our fft = 512 (31.25 Hz/bin), ±4 bins = 125 Hz × 4 / 4 = wider in spectral resolution. Sparse HF energy got spread across the wider window → HF reverb inflated.</li>
+        <li><strong>ReverbConfig defaults:</strong> <code>decay = 0.85</code>, <code>mild_decay_scale = 0.5</code>, <code>use_adaptive_decay = True</code> diverged from AEC3 production defaults (0.83 / 1.0 / False per <code>ep_strength.default_len = 0.83</code>).</li>
+        <li><strong>Audibility band boundaries:</strong> v3.21.5 used 94 Hz / 219 Hz LF / MF anchors (legacy from a 65-bin port). AEC3 production at fft = 128 uses 375 Hz / 875 Hz — directly transferable to our 257-bin grid.</li>
+        <li><strong>HF cap anchor:</strong> 4000 Hz cap was clamping bins WIDER than AEC3's 2000 Hz, 1-bin (31.25 Hz, not 125 Hz) anchor → wide-band HF damping on DT.</li>
+        <li><strong>Comfort noise generator:</strong> legacy CN used <code>error_psd</code> as noise source + a 0.4 fixed scale on the lowest band; AEC3 uses raw mic Y² + sqrt(1 − G²) with no 0.4 scale + an LCG + LUT phase generator → audible HF colour mismatch during NE-only stretches.</li>
+        <li><strong>Stationarity window:</strong> hard-coded 13 AEC3 blocks = 52 ms; at our 10 ms hop this should be 5 hops, but the literal-port treated it as 13 hops = 130 ms. Same for hangover (12 → should be 5).</li>
+        <li><strong>OLA synthesis window:</strong> numpy <code>np.hanning</code> denom is N − 1; MATLAB-canonical Hann uses N, producing slightly mismatched overlap-add (visible in spectrogram tile boundaries).</li>
+      </ul>
+      <p style="margin: 0;"><strong>Fixes shipped (10 commits):</strong> reverb history ring buffer; ±4-bin → strict ±1-bin neighbour max; AEC3-strict ReverbConfig defaults; audibility band rescale (375 / 875 Hz); HF cap anchor 2000 Hz with 1-bin width; AEC3-strict 3-state N2 estimator + sqrt(1 − G²) + LCG/LUT CNG; MATLAB-canonical sqrt-Hann OLA; stationarity window auto-rescales via <code>blocks_to_hops()</code>; <code>detect_pre_echo</code> default <code>True</code> (AEC3 strict); <code>FilterPlateauDetector</code> moved to opt-in (Python-only safety net, no AEC3 equivalent).</p>
+    </div>
+
+    <div class="card good">
+      <h3>Cohort DT case progression (internal test)</h3>
+      <table style="width: 100%; font-size: 13px;">
+        <thead>
+          <tr><th style="text-align: left;">Metric</th><th class="num">v3.21.6 baseline</th><th class="num">+ reverb chain fix</th><th class="num">+ full alignment</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Painted-black HF fraction (<code>gain_hf_median &lt; 0.1</code>)</td><td class="num">24.3 %</td><td class="num">15.1 %</td><td class="num win">14.0 %</td></tr>
+          <tr><td>Healthy frames</td><td class="num">60 %</td><td class="num">75 %</td><td class="num win">76.3 %</td></tr>
+          <tr><td>Rev/direct R² ratio (median)</td><td class="num">6.2</td><td class="num">0.13</td><td class="num win">0.081</td></tr>
+          <tr><td>Rev/direct R² ratio (p95)</td><td class="num">~10⁴</td><td class="num">170</td><td class="num win">170</td></tr>
+        </tbody>
+      </table>
+      <p style="margin: 8px 0 0;">Residual 14 % painted-black + 12 % non-healthy fall into the <em>AEC3-inherent</em> regime — the AEC3 binary itself fails the same threshold on DT_movement cases in the cohort (cross-checked via <code>bin/aec3_cli</code>). Beyond this point is v3.22 beyond-AEC3 optimisation, not alignment work.</p>
+    </div>
+
+    <div class="card note">
+      <h3>Cleanup arc (12 commits, audio-zero)</h3>
+      <p style="margin: 0 0 8px;">After alignment shipped, a release cleanup deleted dev-time substrate. Byte-equal vs alignment-complete HEAD (<code>cd73f4e</code>) verified at every commit (10/10 md5 PASS):</p>
+      <ul>
+        <li><strong>Config</strong>: 1547 → 160 lines (−90 %). Linear-filter parametric tuning (<code>mu</code>, <code>kalman_q_high</code>, <code>shadow_*</code>, <code>filter_misadjustment_*</code>) marked INTERNAL; AEC3-alignment flags hard-coded into call sites; NOSHIP / ablation / trace flags deleted entirely.</li>
+        <li><strong>Orchestrator</strong>: 5487 → 3632 lines (−34 %). Removed Q1 transient leakage, F-E1/E3/E5/DelayTrack helpers, DT advisory + diverged-reset chains, kalman_q_per_band + Arc M tilts, all per-frame trace dicts (<code>_hf_chain_trace</code>, <code>_uro_trace</code> etc.).</li>
+        <li><strong>Filters</strong>: 1062 → 1020 lines. Shadow PBFDAF protection (A.1–A.5) hard-coded True.</li>
+        <li><strong>Modules deleted</strong>: <code>state/transparent_mode.py</code>, <code>state/signal_dependent_erle.py</code>, <code>nlp.py</code> (SubtractiveNLP closed CANNOT-SHIP).</li>
+        <li><strong>Eval driver</strong>: <code>eval_aec_challenge.py</code> stripped of ~50 dev env-var hooks (default invocation unaffected; surviving env vars: <code>AEC_GAIN_TYPE</code>, <code>AEC_MODE</code>, <code>AEC_MAX_DELAY_MS</code>).</li>
+        <li><strong>Docs</strong>: 110 v3.21/v3.22 trace + verdict files removed; only architecture / methods / algorithm / changelog kept.</li>
+      </ul>
+      <p style="margin: 0;"><strong>Zero audio impact verified: 10 / 10 md5 match <code>cd73f4e</code> baseline on 5-case sample (FS_static, FS_movement, DT_static, DT_movement, NE).</strong></p>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════════
      Score panel
      ════════════════════════════════════════════════════════════════ -->
 <div class="scores">
@@ -629,11 +707,11 @@
   </table>
 </details>
 
-<p class="small-note">Generated 2026-05-19 · companion docs:
+<p class="small-note">Updated 2026-05-27 (v3.21.6-alignment + release cleanup) · companion docs:
 <a href="aec_methods.md">aec_methods.md</a> ·
 <a href="aec_algorithm_guide.html">aec_algorithm_guide.html</a> ·
-<a href="refactor_modules_layout.md">refactor_modules_layout.md</a> ·
-<a href="../CHANGELOG.md">CHANGELOG.md</a></p>
+<a href="../CHANGELOG.md">CHANGELOG.md</a> ·
+<a href="c_user_and_integration_guide.md">c_user_and_integration_guide.md</a></p>
 
 </div>
 </body>
