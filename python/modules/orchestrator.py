@@ -506,10 +506,7 @@ class AEC:
         if self.filter is not None:
             from .state import AecState as _Aec3State, AecStateConfig as _Aec3StateConfig
             from .residual import ResidualEchoEstimator, SuppressionGain
-            from .residual.suppression_gain import (
-                SuppressorConfig, SubbandNearendConfig, _SubbandRegion,
-                EchoAudibilityConfig,
-            )
+            from .residual.suppression_gain import SuppressorConfig
             n_bins = int(self.filter.n_freqs)
             # AEC3-aligned AecState: TransparentMode disabled (cohort-verify
             # never reached), FilterAnalyzer enabled (shipped P1 default).
@@ -525,12 +522,7 @@ class AEC:
                 use_aec3_residual_noise_gate=True,
                 use_aec3_echo_gen_window=True,
             )
-            # v3.21.2 S2 P3: SubbandNearendDetector experiment via env vars
-            # (so byte-equal at default + easy iteration). Set
-            # AEC_USE_SUBBAND_NE=1 to enable. Subband bounds + thresholds
-            # tunable via AEC_SUBBAND_NE_S1_LO etc. for fast trace cycles.
             _sg_config = SuppressorConfig()
-            # v3.21.6 Sprint P3 — propagate top-level (deprecated) AecConfig
             # Stationarity zeroing is the shipped production default
             # (load-bearing safety net on cohort tail). Override the AEC3
             # default EchoAudibilityConfig (use_stationarity_properties=False)
@@ -540,19 +532,6 @@ class AEC:
                 _sg_config.echo_audibility,
                 use_stationarity_properties=True,
             )
-            if os.environ.get('AEC_USE_SUBBAND_NE', '0') == '1':
-                _sg_config.use_subband_nearend_detection = True
-                _sg_config.subband_nearend_detection = SubbandNearendConfig(
-                    nearend_average_blocks=int(os.environ.get('AEC_SUBBAND_NE_AVG', '8')),
-                    subband1=_SubbandRegion(
-                        low=int(os.environ.get('AEC_SUBBAND_NE_S1_LO', '1')),
-                        high=int(os.environ.get('AEC_SUBBAND_NE_S1_HI', '5'))),
-                    subband2=_SubbandRegion(
-                        low=int(os.environ.get('AEC_SUBBAND_NE_S2_LO', '48')),
-                        high=int(os.environ.get('AEC_SUBBAND_NE_S2_HI', '96'))),
-                    nearend_threshold=float(os.environ.get('AEC_SUBBAND_NE_THR', '1.0')),
-                    snr_threshold=float(os.environ.get('AEC_SUBBAND_NE_SNR', '10.0')),
-                )
             self._aec3_sg = SuppressionGain(
                 n_bins=n_bins,
                 config=_sg_config,

@@ -147,35 +147,6 @@ class DominantNearendConfig:
     lf_endpoint_hz: float = 2000.0
 
 
-@dataclass(frozen=True)
-class _SubbandRegion:
-    low: int = 1
-    high: int = 1
-
-
-@dataclass(frozen=True)
-class SubbandNearendConfig:
-    """AEC3 SubbandNearendDetection — mirrors
-    docs/aec3_extracts/src/aec3/subband_nearend_detector.h:47 +
-    .cc:73-83. AEC3 ships no-op defaults (all 1s); production callers
-    must override subband bounds + thresholds to make this useful.
-
-    The detector triggers nearend state when, in any channel:
-       nearend_power[subband1] < nearend_threshold * nearend_power[subband2]
-       AND nearend_power[subband1] > snr_threshold * noise_power[subband1]
-
-    Intuition: subband1 is a "baseline" region (typically LF below pitch);
-    subband2 is a "target" region (e.g., MF/HF where speech formants sit).
-    When the baseline is much weaker than the target AND above noise,
-    that's a speech-like spectral signature with formants present.
-    """
-    nearend_average_blocks: int = 1
-    subband1: _SubbandRegion = field(default_factory=_SubbandRegion)
-    subband2: _SubbandRegion = field(default_factory=_SubbandRegion)
-    nearend_threshold: float = 1.0
-    snr_threshold: float = 1.0
-
-
 @dataclass
 class SuppressorConfig:
     # LF<->HF mask coefficient interpolation boundaries. AEC3 canonical
@@ -200,25 +171,14 @@ class SuppressorConfig:
     dominant_nearend_detection: DominantNearendConfig = field(
         default_factory=DominantNearendConfig
     )
-    subband_nearend_detection: SubbandNearendConfig = field(
-        default_factory=SubbandNearendConfig
-    )
-    use_subband_nearend_detection: bool = False
-    # v3.22 Sprint E.1 — stationary-mask-aware NE-presence proxy at
-    # gain-policy consumer sites. See AecConfig.e_stat_aware_ne_proxy_*
-    # for full context; propagated from AecConfig at orchestrator init.
+    # Stationary-mask-aware NE-presence proxy at gain-policy consumer sites.
     stat_aware_ne_proxy_enabled: bool = False
     stat_aware_ne_proxy_threshold: float = 0.10
-    # v3.21.6 Sprint P3 — AEC3 EchoAudibility config wiring. The
-    # EchoAudibilityConfig dataclass (declared above this class) already
-    # carries audibility_threshold_lf/mf/hf + render-floor knobs consumed
-    # by SuppressionGain's ``_weight_echo_for_audibility``. P3 promotes
-    # it to a SuppressorConfig field so external code (orchestrator) can
-    # override ``use_stationarity_properties``. The orchestrator's
-    # stationarity zeroing block reads this field — top-level
-    # ``AecConfig.aec3_post_stationarity_zero_enabled`` is a deprecated
-    # alias propagated into ``echo_audibility.use_stationarity_properties``
-    # at init time.
+    # AEC3 EchoAudibility config wiring. EchoAudibilityConfig carries
+    # audibility_threshold_lf/mf/hf + render-floor knobs consumed by
+    # SuppressionGain's ``_weight_echo_for_audibility``. The orchestrator
+    # overrides ``use_stationarity_properties`` so its zeroing block fires
+    # (load-bearing safety net on cohort tail).
     echo_audibility: EchoAudibilityConfig = field(default_factory=EchoAudibilityConfig)
 
 
@@ -444,80 +404,6 @@ class _DominantNearendDetector:
         self._nearend_state = self._hold_counter > 0
 
 
-class _SubbandNearendDetector:
-    """AEC3 SubbandNearendDetector (single-channel collapse).
-
-    Mirrors docs/aec3_extracts/src/aec3/subband_nearend_detector.cc.
-    Polymorphic alternative to _DominantNearendDetector — same
-    is_nearend_state() interface, different detection algorithm.
-
-    Algorithm:
-       smoothed_nearend = MovingAverageSpectrum(nearend_spectrum)
-       subband1_pwr = mean(smoothed_nearend[subband1.low : subband1.high+1])
-       subband2_pwr = mean(smoothed_nearend[subband2.low : subband2.high+1])
-       noise_pwr    = mean(comfort_noise[subband1.low : subband1.high+1])
-       nearend_state = (subband1_pwr < threshold * subband2_pwr) AND
-                       (subband1_pwr > snr * noise_pwr)
-
-    Detects speech-like spectral signature: when subband1 (typically LF
-    baseline) is weaker than subband2 (typically formant region) AND
-    above noise floor, NE state triggers. AEC3 cc:50-72 stateless per
-    frame (no hold/trigger counters — the smoothing IS the temporal
-    integration).
-    """
-
-    def __init__(self, cfg: SubbandNearendConfig, n_bins: int,
-                 sr: int = 16000, hop_size: int = 160) -> None:
-        self._cfg = cfg
-        self._n_bins = int(n_bins)
-        self._sr = int(sr)
-        self._hop_size = int(hop_size)
-        # AEC3 `nearend_average_blocks` is in 4 ms-block units; wall-clock
-        # rescale to our hop so the moving-average physical window matches.
-        from .. import aec3_scale as _aec3_scale
-        self._n_smooth_hops = _aec3_scale.blocks_to_hops(
-            cfg.nearend_average_blocks, self._hop_size, self._sr
-        )
-        self._smoother = _MovingAverageSpectrum(
-            n_bins=self._n_bins, n_blocks=self._n_smooth_hops
-        )
-        self._nearend_state = False
-        self._one_over_subband1_len = 1.0 / max(1, cfg.subband1.high - cfg.subband1.low + 1)
-        self._one_over_subband2_len = 1.0 / max(1, cfg.subband2.high - cfg.subband2.low + 1)
-
-    def set_config(self, cfg: SubbandNearendConfig) -> None:
-        self._cfg = cfg
-        from .. import aec3_scale as _aec3_scale
-        self._n_smooth_hops = _aec3_scale.blocks_to_hops(
-            cfg.nearend_average_blocks, self._hop_size, self._sr
-        )
-        self._smoother.update_memory_length(self._n_smooth_hops)
-        self._one_over_subband1_len = 1.0 / max(1, cfg.subband1.high - cfg.subband1.low + 1)
-        self._one_over_subband2_len = 1.0 / max(1, cfg.subband2.high - cfg.subband2.low + 1)
-
-    def is_nearend_state(self) -> bool:
-        return self._nearend_state
-
-    def update(
-        self,
-        nearend_spectrum: np.ndarray,
-        residual_echo: np.ndarray,  # unused (AEC3 cc:36 marks it /*unused*/)
-        comfort_noise: np.ndarray,
-        initial_state: bool,        # unused (AEC3 cc:39 marks it /*unused*/)
-    ) -> None:
-        c = self._cfg
-        smoothed = self._smoother.average(nearend_spectrum)
-        s1_low, s1_high = c.subband1.low, c.subband1.high
-        s2_low, s2_high = c.subband2.low, c.subband2.high
-        noise_pwr = float(np.sum(comfort_noise[s1_low:s1_high + 1])) * self._one_over_subband1_len
-        ne_s1_pwr = float(np.sum(smoothed[s1_low:s1_high + 1])) * self._one_over_subband1_len
-        ne_s2_pwr = float(np.sum(smoothed[s2_low:s2_high + 1])) * self._one_over_subband2_len
-        self._nearend_state = (
-            ne_s1_pwr < c.nearend_threshold * ne_s2_pwr
-            and ne_s1_pwr > c.snr_threshold * noise_pwr
-        )
-
-
 # -------------------------------------------------------- top-level class
 
 class SuppressionGain:
@@ -549,21 +435,12 @@ class SuppressionGain:
         self._nearend_smoother = _MovingAverageSpectrum(
             n_bins=self._n_bins, n_blocks=_n_smooth_hops
         )
-        # Polymorphic NearendDetector — mirrors AEC3
-        # suppression_gain.cc:373-378 (use_subband_nearend_detection flag
-        # picks ONE detector at construction; both expose identical
-        # is_nearend_state() interface to the gain compute path).
-        if self._config.use_subband_nearend_detection:
-            self._dominant_nearend = _SubbandNearendDetector(
-                self._config.subband_nearend_detection,
-                n_bins=self._n_bins, sr=self._sr, hop_size=self._hop_size,
-            )
-        else:
-            self._dominant_nearend = _DominantNearendDetector(
-                self._config.dominant_nearend_detection,
-                sr=self._sr,
-                hop_size=self._hop_size,
-            )
+        # NearendDetector — mirrors AEC3 suppression_gain.cc:373-378.
+        self._dominant_nearend = _DominantNearendDetector(
+            self._config.dominant_nearend_detection,
+            sr=self._sr,
+            hop_size=self._hop_size,
+        )
         self._initial_state = True
         # Gain attribution snapshot — populated each frame in _lower_band_gain.
         # Read by orchestrator trace_hf_chain; no audio path effect.
