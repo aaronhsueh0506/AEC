@@ -81,16 +81,28 @@ def per_block_rate_to_per_hop(per_block_rate: float,
 # both representations. Keep AEC3's constants UN-SCALED in float audio.
 H_ERROR_INIT_FLOAT = 10000.0
 H_ERROR_FLOOR_FLOAT = 1e-3
-H_ERROR_CEIL_FLOAT = 1e2
+# AEC3 ceiling (refined_filter_update_gain.cc kHErrorCeiling = 2.0 in
+# echo_canceller3_config.h:96 refined.error_ceil). Aligned to AEC3 2026-05-27;
+# prior Python 100.0 was inflated and let H_error dominate mu denom, blocking
+# recovery from over-estimation states.
+H_ERROR_CEIL_FLOAT = 2.0
 # AEC3 production ceiling (refined_filter_update_gain.cc kHErrorCeiling = 2.0).
-# Python default uses 100.0 (H_ERROR_CEIL_FLOAT) from the int16-scaled
-# constant derivation; AEC3's float-domain target is 2.0.
-# Consumed only when config.use_aec3_h_error_ceil = True (default OFF).
+# Retained for back-compat with any consumer referencing this name; now
+# numerically identical to H_ERROR_CEIL_FLOAT after the 2026-05-27 alignment.
 H_ERROR_CEIL_AEC3_FLOAT = 2.0
 
-# Per-block rates (default 10 ms hop equivalent)
-LEAKAGE_CONVERGED_PER_HOP_DEFAULT = per_block_rate_to_per_hop(1e-3, 160, 16000)  # 2.5e-3
-LEAKAGE_DIVERGED_PER_HOP_DEFAULT = per_block_rate_to_per_hop(1e-1, 160, 16000)   # 2.5e-1
+# AEC3 steady refined config (echo_canceller3_config.h:92-97):
+#   refined.leakage_converged = 0.00005 per AEC3 block
+#   refined.leakage_diverged  = 0.05    per AEC3 block
+# Per-hop at hop=160 / sr=16000: multiply by 160/64 = 2.5
+#   converged = 0.00005 × 2.5 = 1.25e-4
+#   diverged  = 0.05    × 2.5 = 0.125
+# Earlier defaults (1e-3 / 1e-1 base) produced 2.5e-3 / 2.5e-1 — 20× / 2× too soft
+# (closer to AEC3 INITIAL profile 0.005 / 0.5). Soft leakage keeps H_error
+# inflated → mu stays large → filter over-adapts → linear-filter over-estimation
+# artifact in weak-echo cases (FS quiet-mic). Aligned to AEC3 steady 2026-05-27.
+LEAKAGE_CONVERGED_PER_HOP_DEFAULT = per_block_rate_to_per_hop(5e-5, 160, 16000)  # 1.25e-4
+LEAKAGE_DIVERGED_PER_HOP_DEFAULT = per_block_rate_to_per_hop(5e-2, 160, 16000)   # 0.125
 
 # AEC3 transient-profile (refined_initial config) leakage rates — per 10 ms hop.
 # Applied by AEC3 SetConfig(refined_initial) after any EPC trigger for 2.5 s.

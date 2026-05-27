@@ -321,10 +321,108 @@ Focus: shadow NLMS convergence quality when cond1 routes to shadow. Primary find
 ## H. Reference
 
 - AEC3 source: `docs/aec3_extracts/src/aec3/echo_remover.cc` (UseRefinedOutput lines 112-133)
-- AEC3 source: `docs/aec3_extracts/src/aec3/subtractor.cc` (ComputeMetrics)
+- AEC3 source: `docs/aec3_extracts/src/aec3/subtractor.cc` (ComputeMetrics; poor_coarse_filter_counters_ lines 264-307)
 - Python implementation: `python/modules/orchestrator.py` `_aec3_select_linear_filter_output` (~line 3947)
 - AEC3 behavioral reference script: `python/v3_21_aec3_reference_aecmos.py`
 - Targeted frame trace: `python/v3_21_uro_signal_flow_trace.py`
 - 12-case verdict: `docs/v3_21_full_composition_12case_verdict.md`
 
 **AEC3 reference NOT RUN for internal state inspection** — only output AECMOS scored. AEC3 cond1/cond2 fire rates on these cases are unknown (binary not instrumented). Source parity verified by code audit; behavioral parity by output comparison only.
+
+---
+
+## I. Poor-coarse rescue copy interaction (2026-05-27)
+
+> **Correction**: the "coarse_conv = 0%" framing used in §I.2 / §I.3 / §I.5 below was
+> a diagnostic-script bug (missing int16²→float² scale + wrong ratio bar). AEC3-correct
+> re-audit (`docs/v3_21_coarse_conv_definition_audit.md`): shadow PBFDAF reaches AEC3
+> **RELAXED** bar (`r < 0.3`) on 9xjhi at **11.2%** (M_full_delay) / **12.2%** (M_full_rescue)
+> of frames; STRICT bar 0% / 0%. Re-state: shadow does meet the relaxed convergence bar
+> but does not catch up to refined when refined is genuinely better. The §G4 architectural-
+> ceiling conclusion still stands — rescue copies do not close the 9xjhi 1.088 dB extra
+> echo gap regardless of convergence-metric calibration; AECMOS was scored on actual
+> audio output. Codebase-wide scale audit found NO equivalent bug in production code
+> (`docs/v3_21_int16_hop_scale_codebase_audit.md`).
+
+The §G4 hypothesis that "fixing shadow convergence would close the 9xjhi extra gap" was
+direct-tested via `use_aec3_poor_coarse_rescue_copy` (AEC3 `subtractor.cc:264-307` strict
+port: condition `e2_refined < e2_coarse`, 5-block threshold = 2 hops @ hop=160, 25-block
+hangover = 10 hops, plus Gap C E_refined override on copy_fired hops). Full audit:
+`docs/v3_21_poor_coarse_rescue_attribution.md`.
+
+### I.1 Result: rescue does NOT close 9xjhi Cat3
+
+Per-case AECMOS Δ (M_full_rescue − M_full_delay, 12-case run 2026-05-27):
+
+| Case | bucket | metric | Δ | URO routing shift | coarse_conv |
+|------|--------|--------|---|--------------------|-------------|
+| MYrVxVEM | DT_static | deg | **−0.431** | cond2 −6.8pp, use_coarse −7.4% (→ refined) | 0% → 0% |
+| qNvSMyUS | FS_static | echo | **−0.216** | cond2 −3.5pp, use_coarse −3.2% | 0% → 0% |
+| 9xjhi | FS_static | echo | **−0.112** | cond1 +12.9pp, use_coarse +9.7% (→ coarse) | 0% → 0% |
+| xFk7 | DT_mvmt | deg | **+0.195** | cond2 −19.2pp, use_coarse −15.7% (→ refined) | 0% → 0% |
+
+### I.2 URO routing mechanism
+
+Rescue alters cond1/cond2 fire rates without changing the underlying coarse convergence:
+
+- **xFk7 WIN (cond2 −19.2pp)**: rescue + Gap C keeps shadow aligned with refined during DT
+  movement; URO stops misclassifying refined as diverged; less unnecessary suppression on NE.
+  This is exactly AEC3's design intent. The mechanism *works as documented* on this case.
+
+- **9xjhi LOSS (cond1 +12.9pp)**: rescue temporarily makes coarse `e2` look small relative
+  to refined `e2`, firing cond1 more often. URO routes to coarse 56.6% (was 46.9%) — but
+  `e2_coarse` on those coarse-selected frames *rises* from 7.66 to 9.88 (+29%). Routing
+  shifts toward a worse path. Cat3 extra gap of 1.088 dB on M_full_delay is NOT closed.
+
+- **MYrVxVEM LOSS (DT_static −0.431)**: rescue cuts cond2 from 23.3% to 16.5%. `usable_linear`
+  ticks UP (95.6% → 96.8%) because the cond2-driven "shadow looks bad" signal is gone.
+  The SuppressionGain consumer then receives `error_psd` clamped to min(error_psd,
+  near_psd) on more frames — over-suppresses NE during sustained DT. This is the dominant
+  negative.
+
+- **qNvSMyUS LOSS (FS_static −0.216)**: frequent rescue (9.6% copy_fire) perturbs the
+  refined filter's H_error refresh path via `disallow_leakage_diverged` hangover;
+  FS-static convergence trajectory is disturbed.
+
+### I.3 What this tells us about §G4
+
+§G4 ("shadow NLMS convergence quality when cond1 routes to shadow") cannot be fixed by W
+copy + E_refined update alone:
+
+- **The copy is correct.** Rescue copies refined W into shadow, then drives the same-hop
+  shadow update with E_refined (Gap C). AEC3-exact.
+- **Shadow re-diverges immediately.** Across all 4 cases × both variants, `coarse_conv`
+  stays at 0% — the shadow PBFDAF NLMS gain family (effective adaptation cadence ~0.62×
+  AEC3 per §G4 corrected analysis) cannot hold a converged W under steady FS-static
+  excitation, regardless of starting point.
+- **The 9xjhi Cat3 ceiling is therefore architectural**: hop=160 + partition-depth
+  structural quantisation + shadow gain family. Strict AEC3 alignment cannot close it.
+
+### I.4 Implications for §G4 next-step framing
+
+The previous §G4 entry suggested partition-depth-normalised cadence ~0.62× AEC3 as the
+mechanism behind the 9xjhi extra gap. The Gap C rescue audit confirms that **mechanism but
+also confirms there is no safe v3.21 strict-port fix**: even when rescue forcibly resets
+shadow to refined every 100 ms, the shadow re-diverges before contributing to coarse
+quality.
+
+Any further closure attempt belongs in v3.22 beyond-AEC3 optimization — e.g.
+convergence-qualified rescue (only fire when refined is FS-stable), FS-only rescue, or
+shadow-gain-family redesign (n=6 partitions with re-tuned mu). These are **NOT v3.21
+alignment items**.
+
+**Updated §G4 policy** (supersedes the earlier "currently classified as hop=160 /
+partition-depth structural limitation, with no safe strict-port v3.21 candidate identified
+yet" line): the v3.21 strict-port surface is **exhausted** for this gap; the architectural
+ceiling stands. v3.22 may revisit.
+
+### I.5 Sanity audit gates (Gap C 12-case FAIL)
+
+For the record, this verdict rests on a confirmed-not-bug result:
+
+- **Threshold/time semantics**: PASS. AEC3 20 ms trigger / 100 ms hangover both match.
+  Sole gap = 10 ms hop vs 4 ms block decision-point granularity (irreducible).
+- **E_refined override correctness**: PASS. Single `complete_update()` per frame.
+  Deferred state cleared. Byte-equal flag-OFF: 25/25.
+
+Full audit: `docs/v3_21_poor_coarse_rescue_attribution.md`.

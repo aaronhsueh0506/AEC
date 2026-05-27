@@ -159,6 +159,18 @@ class PBFDAF:
         # populated in _update_weights only when a C1-C5 flag is ON. Read-only by
         # orchestrator _hf_chain_trace; never affects audio output.
         self._c1c5_trace: dict = {}
+        # Gap C (poor_coarse rescue copy E_refined override) — deferred-update
+        # support. When process(..., defer_update=True) is called, the FFT /
+        # echo / error_spec computation runs as usual but the W update +
+        # partition_idx advance are deferred until complete_update() is called.
+        # This lets the orchestrator inject E_refined as the gradient source on
+        # the rescue fire hop (AEC3 subtractor.cc:302-304). Default-OFF preserves
+        # byte-equal: process() runs the W update inline and these flags stay
+        # False / unread.
+        self._deferred_update_pending: bool = False
+        self._deferred_curr_p: int = 0
+        self._deferred_mu_scale = 1.0
+        self._deferred_far_hop_energy: float = 0.0
 
     def reset(self):
         self.W.fill(0)
@@ -192,8 +204,16 @@ class PBFDAF:
             self._call_counter = 0
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray,
-                mu_scale=1.0) -> np.ndarray:
-        """Process hop_size samples. mu_scale: scalar or per-bin array [n_freqs]."""
+                mu_scale=1.0, defer_update: bool = False) -> np.ndarray:
+        """Process hop_size samples. mu_scale: scalar or per-bin array [n_freqs].
+
+        defer_update: when True, skip the W update + partition_idx advance and
+            stash the inputs so the caller can drive both via complete_update()
+            with an optional error_override. Used by the orchestrator's Gap C
+            wiring (AEC3 poor_coarse rescue copy uses E_refined for the same-hop
+            coarse update; subtractor.cc:302-304). Default-OFF preserves
+            byte-equal vs the v3.21.6 inline path.
+        """
         hop = self.hop_size
 
         # Shift buffers (overlap-save)
@@ -248,14 +268,52 @@ class PBFDAF:
         # Update weights — gate on far-end activity
         self._c1c5_trace = {}   # reset each hop; empty when far-inactive or flags OFF
         far_hop_energy = np.sum(far_end ** 2) / hop
+
+        if defer_update:
+            # Gap C wiring: stash the inputs so complete_update() can apply the
+            # W update (optionally with an error_override) and then advance
+            # partition_idx. partition_idx is NOT advanced here — keep the
+            # update window aligned with curr_p across both phases.
+            self._deferred_update_pending = True
+            self._deferred_curr_p = curr_p
+            self._deferred_mu_scale = mu_scale
+            self._deferred_far_hop_energy = float(far_hop_energy)
+            return output.astype(np.float32)
+
         if far_hop_energy > 1e-4:  # ~ -40 dBFS, unified with far_active threshold
             self._update_weights(curr_p, mu_scale)
 
         self.partition_idx = (self.partition_idx + 1) % self.n_partitions
         return output.astype(np.float32)
 
-    def _update_weights(self, curr_p: int, mu_scale):
-        """NLMS weight update."""
+    def complete_update(self, error_override: Optional[np.ndarray] = None) -> None:
+        """Drive the W update that was deferred by process(defer_update=True).
+
+        error_override: optional complex per-bin spec (shape [n_freqs]) to use
+            as the gradient source instead of self.error_spec. Wires AEC3
+            poor_coarse rescue copy's same-hop E_refined coarse update path
+            (subtractor.cc:302-304). When None, behaves identically to the
+            inline update in process().
+        """
+        if not self._deferred_update_pending:
+            return
+        if self._deferred_far_hop_energy > 1e-4:
+            self._update_weights(
+                self._deferred_curr_p,
+                self._deferred_mu_scale,
+                error_override=error_override,
+            )
+        self.partition_idx = (self.partition_idx + 1) % self.n_partitions
+        self._deferred_update_pending = False
+
+    def _update_weights(self, curr_p: int, mu_scale,
+                        error_override: Optional[np.ndarray] = None):
+        """NLMS weight update.
+
+        error_override: optional complex per-bin spec (shape [n_freqs]) that
+            replaces self.error_spec as the gradient source. Default None
+            preserves byte-equal vs v3.21.6 baseline.
+        """
         mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
         if mu_scale_arr.ndim == 0:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
@@ -338,9 +396,15 @@ class PBFDAF:
         # Record effective mu distribution for sub-ladder attribution trace.
         self._c1c5_trace['mu_eff_mean'] = float(np.mean(mu_eff))
         self._c1c5_trace['mu_eff_max'] = float(np.max(mu_eff))
+        # Gap C: error_override (when provided) substitutes for self.error_spec
+        # as the gradient source. AEC3 subtractor.cc:302-304 — on poor_coarse
+        # rescue fire, coarse update consumes E_refined for the fire hop.
+        _err_grad = (
+            error_override if error_override is not None else self.error_spec
+        )
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
-            grad = self.error_spec * np.conj(self.X_buf[p_idx])
+            grad = _err_grad * np.conj(self.X_buf[p_idx])
             self.W[p] += mu_eff * grad
             # Time-domain constraint: fade out non-causal part (raised cosine)
             if self.enable_td_constraint:
@@ -451,18 +515,18 @@ class PBFDKF(PBFDAF):
         # `_use_per_bin_h_error_refresh = True`.
         self._e2_coarse_for_refresh = 0.0
         self._e2_coarse_per_bin: Optional[np.ndarray] = None
-        self._use_per_bin_h_error_refresh: bool = False
+        self._use_per_bin_h_error_refresh: bool = True
         # v3.21.6 nores LF artifact debug 2026-05-22 — AEC3
         # `RefinedFilterUpdateGain::Compute` partition-summed X² parity.
         # OFF (default): X²_latest = |X_buf[curr_p]|² in denom / noise_gate
         # / H_error decay (byte-equal preserved).
         # ON: Σ_p |X_buf[p]|² (matches AEC3 render_buffer.SpectralSum).
         # W update partition direction unchanged either way.
-        self._use_partition_summed_x2_for_h_error_gain: bool = False
+        self._use_partition_summed_x2_for_h_error_gain: bool = True
         # v3.21.20 Phase C Fix B — startup hops before switching from single-
         # partition to partition-sum X². 500 hops = 5 s @ hop=160/sr=16000.
         # Orchestrator overrides from config field.
-        self._partition_sum_x2_startup_hops: int = 500
+        self._partition_sum_x2_startup_hops: int = 0
         # v3.21.12 RefinedFilterUpdateGain input-parity audit 2026-05-22 — AEC3
         # `RefinedFilterUpdateGain::Compute` (refined_filter_update_gain.cc:103-107)
         # uses current-block `E2_refined[k]` = `SubtractorOutput.E2_refined` =
@@ -474,7 +538,7 @@ class PBFDKF(PBFDAF):
         # the mu denominator (per-bin, no smoothing).
         # W update direction unchanged. See
         # docs/v3_21_12_refined_filter_update_gain_input_parity_plan.md.
-        self._use_current_e2_refined_in_h_error_denominator: bool = False
+        self._use_current_e2_refined_in_h_error_denominator: bool = True
         self._disallow_leakage_diverged = False
         # ERL per bin (lazy init to 0.1 = -10 dB nominal; orchestrator
         # overwrites once its ERL estimator has a real value).
@@ -485,7 +549,7 @@ class PBFDKF(PBFDAF):
         # R0.1 — refined filter noise gate constant. Default False → byte-equal
         # (NOISE_GATE_POWER_FLOAT=0.02562). True → FILTER_NOISE_GATE_POWER_FLOAT=0.01870.
         # Wired by orchestrator from config.use_aec3_filter_noise_gate_power.
-        self._use_aec3_filter_noise_gate_power: bool = False
+        self._use_aec3_filter_noise_gate_power: bool = True
 
         # GPT Phase 1 debug trace (off by default, zero overhead).
         # When enabled, accumulates per-frame stats to verify hypothesis:
@@ -547,8 +611,15 @@ class PBFDKF(PBFDAF):
             except AttributeError:
                 pass
 
-    def _update_weights(self, curr_p: int, mu_scale):
-        """Frequency-Domain Kalman Filter weight update."""
+    def _update_weights(self, curr_p: int, mu_scale,
+                        error_override: Optional[np.ndarray] = None):
+        """Frequency-Domain Kalman Filter weight update.
+
+        error_override: optional per-bin complex spec replacing self.error_spec
+            as the gradient source. Default None preserves byte-equal. Used by
+            Gap C wiring when PBFDKF happens to be the shadow class (rare;
+            production shadow is PBFDAF).
+        """
         mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
         if mu_scale_arr.ndim == 0:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
@@ -604,7 +675,8 @@ class PBFDKF(PBFDAF):
         # via H_error rather than the legacy partition-summed P denominator.
         # Mirrors refined_filter_update_gain.cc:104-138.
         if self._use_aec3_h_error:
-            self._update_weights_aec3(curr_p, mu_scale_arr, error_psd)
+            self._update_weights_aec3(curr_p, mu_scale_arr, error_psd,
+                                      error_override=error_override)
             return
 
         # Adaptive R: scale by mu_scale to break R-deadlock
@@ -677,6 +749,11 @@ class PBFDKF(PBFDAF):
             p_before_acc = []
             p_after_acc = []
 
+        # Gap C: error_override (when provided) substitutes for self.error_spec
+        # as the gradient source in the W += K_scaled * err line below.
+        _err_grad = (
+            error_override if error_override is not None else self.error_spec
+        )
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
             X = self.X_buf[p_idx]
@@ -686,7 +763,7 @@ class PBFDKF(PBFDAF):
             # Bug 2 fix: separate K for weights (scaled) and P update (unscaled)
             K_scaled = K_optimal * mu_scale_arr
 
-            self.W[p] += K_scaled * self.error_spec
+            self.W[p] += K_scaled * _err_grad
 
             # PR-G1 (v3.7 candidate, GPT Phase 1): blended KX for P update.
             # KX trace 2026-04-30 confirmed hypothesis on DT_st bucket: when
@@ -734,7 +811,8 @@ class PBFDKF(PBFDAF):
             })
 
     def _update_weights_aec3(self, curr_p: int, mu_scale_arr: np.ndarray,
-                              error_psd: np.ndarray) -> None:
+                              error_psd: np.ndarray,
+                              error_override: Optional[np.ndarray] = None) -> None:
         """AEC3-aligned per-bin Kalman gain via H_error.
 
         Mirrors RefinedFilterUpdateGain::Compute in
@@ -821,12 +899,17 @@ class PBFDKF(PBFDAF):
         # Direction is per-partition irrespective of the X² source flag
         # (matches AEC3: gain is computed once on summed X², then applied
         # to each partition with its own conj(X)).
+        # Gap C: error_override (when provided) substitutes for self.error_spec
+        # as the gradient source.
+        _err_grad = (
+            error_override if error_override is not None else self.error_spec
+        )
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
             X = self.X_buf[p_idx]
             K = mu_aec3 * np.conj(X)             # per-bin AEC3 K
             K_scaled = K * mu_scale_arr          # apply DT scale
-            self.W[p] += K_scaled * self.error_spec
+            self.W[p] += K_scaled * _err_grad
             # Time-domain constraint (raised cosine fade).
             if self.enable_td_constraint:
                 w_time = np.fft.irfft(self.W[p], self.fft_size).astype(np.float32)
@@ -872,6 +955,9 @@ class PBFDKF(PBFDAF):
             use_converged_mask = (
                 e2_refined_per_bin <= self._e2_coarse_per_bin
             ) | self._disallow_leakage_diverged
+            # Diag (2026-05-27): fraction of bins taking the diverged-leakage
+            # branch this hop. Stashed for the orchestrator _hf_chain_trace.
+            self._last_leakage_div_frac = float(np.mean(~use_converged_mask))
             leakage_arr = np.where(
                 use_converged_mask,
                 self._leakage_converged,
@@ -887,6 +973,8 @@ class PBFDKF(PBFDAF):
             use_converged = (
                 e2_ref_sum <= e2_coa_sum or self._disallow_leakage_diverged
             )
+            # Diag (2026-05-27): scalar path is all-or-nothing, so frac is 0 or 1.
+            self._last_leakage_div_frac = 0.0 if use_converged else 1.0
             leakage = (self._leakage_converged if use_converged
                        else self._leakage_diverged)
             self.H_error_per_bin = (

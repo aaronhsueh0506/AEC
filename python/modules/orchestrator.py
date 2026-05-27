@@ -2334,14 +2334,27 @@ class AEC:
                 # process step below), freeze the coarse update for
                 # COARSE_RESET_HANGOVER_HOPS so it can't immediately re-
                 # drift after being reset to refined's weights.
-                if getattr(self, '_coarse_reset_hangover', 0) > 0:
+                if (getattr(self, '_coarse_reset_hangover', 0) > 0
+                        and not getattr(
+                            self.config,
+                            'use_aec3_poor_coarse_rescue_copy', False)):
+                    # AEC3-exact (use_aec3_poor_coarse_rescue_copy ON): shadow
+                    # adapts normally during hangover; only refined gets the
+                    # disallow_leakage_diverged constraint (subtractor.cc:264-265).
                     shadow_mu_scale = 0.0
                 # v3.21.8 — capture shadow filter time-domain residual (the
                 # AEC3 `e_coarse` analog) for UseRefinedOutput parity in
                 # `_aec3_post`. Capture is always safe (no behavior change);
                 # the cached value is only read when the parity flag is ON.
+                # Gap C wiring (use_aec3_poor_coarse_rescue_copy=True): defer
+                # the shadow W update + partition_idx advance so we can drive
+                # it with E_refined on the rescue fire hop (subtractor.cc:302-304).
+                # Flag OFF: inline update (byte-equal vs v3.21.6).
+                _rescue_aec3 = getattr(
+                    self.config, 'use_aec3_poor_coarse_rescue_copy', False)
                 self._last_shadow_output_time = self.shadow_filter.process(
-                    near_end, far_end, shadow_mu_scale)
+                    near_end, far_end, shadow_mu_scale,
+                    defer_update=_rescue_aec3)
 
                 # v3.21 Phase B.6 — poor_coarse_filter_counter + coarse-reset.
                 # Mirrors AEC3 subtractor.cc:264-307. When the refined filter
@@ -2382,34 +2395,101 @@ class AEC:
                             self.filter.n_freqs, float(self._erl_estimate),
                             dtype=np.float32,
                         )
-                    # AEC3 cc:264-307 uses per-bin E²_refined < E²_coarse;
-                    # we use scalar with a 0.5× safety margin so the
-                    # trigger requires refined to be DECISIVELY better
-                    # (not just slightly better in aggregate). This
-                    # prevents thrashing on cases where refined and coarse
-                    # alternate winning by small amounts (e.g. WqEY DTm).
-                    if _e2_ref < 0.5 * _e2_coa:
+                    # AEC3 cc:264-307 poor_coarse rescue copy.
+                    # Default: scalar E² with 0.5× safety margin (prevents
+                    #   thrashing e.g. WqEY DTm), 5-hop threshold, 16-hop
+                    #   hangover with shadow frozen.
+                    # use_aec3_poor_coarse_rescue_copy ON = AEC3-exact:
+                    #   condition: strict e2_refined < e2_coarse, no margin
+                    #     (subtractor.cc:288-289)
+                    #   threshold: ceil(5×64/hop_size) = 2 hops
+                    #     (subtractor.cc:292, 5 AEC3 kBlockSize=64 blocks)
+                    #   hangover:  ceil(25×64/hop_size) = 10 hops; shadow
+                    #     adapts normally; only refined gets
+                    #     disallow_leakage_diverged (subtractor.cc:264-265)
+                    #     coarse_reset_hangover_blocks=25 (config.h:114)
+                    # Gap C — same-hop E_refined override (NOW IMPLEMENTED):
+                    #   shadow.process() above ran with defer_update=_rescue_aec3
+                    #   so the W update + partition_idx advance are still
+                    #   pending. After the copy decision below we call
+                    #   complete_update(error_override=E_refined) on fire
+                    #   hops, or complete_update(None) otherwise. AEC3 drives
+                    #   coarse update with E_refined on fire hop
+                    #   (subtractor.cc:302-304).
+                    # _rescue_aec3 hoisted above (line 2349) for defer_update.
+                    if _rescue_aec3:
+                        # AEC3-exact: strict less-than (subtractor.cc:288-289).
+                        _cond_fire = bool(_e2_ref < _e2_coa)
+                        # 5 AEC3 blocks × kBlockSize(64) / hop_size.
+                        _threshold_hops = max(1, round(5 * 64 / self.config.hop_size))
+                    else:
+                        _cond_fire = bool(_e2_ref < 0.5 * _e2_coa)
+                        _threshold_hops = 5
+                    if _cond_fire:
                         self._poor_coarse_counter = getattr(
                             self, '_poor_coarse_counter', 0) + 1
                     else:
                         self._poor_coarse_counter = 0
-                    if self._poor_coarse_counter >= 5:
-                        # Copy refined → coarse + arm hangover.
+                    _copy_fired = False
+                    if self._poor_coarse_counter >= _threshold_hops:
+                        # Rescue: copy refined W → shadow/coarse W + arm hangover.
+                        _copy_fired = True
                         try:
                             self.shadow_filter.copy_weights_from(self.filter)
                         except (AttributeError, TypeError):
-                            # PBFDKF / PBFDAF compat: copy via W slice.
                             self.shadow_filter.W[:] = self.filter.W
                         from . import aec3_scale as _aec3_scale
-                        self._coarse_reset_hangover = _aec3_scale.blocks_to_hops(
-                            40, self.config.hop_size, self.config.sample_rate
-                        )
+                        if _rescue_aec3:
+                            # coarse_reset_hangover_blocks=25 (config.h:114)
+                            # = ceil(25×64/hop_size) = 10 Python hops.
+                            _hangover_hops = max(
+                                1, round(25 * 64 / self.config.hop_size))
+                        else:
+                            _hangover_hops = _aec3_scale.blocks_to_hops(
+                                40, self.config.hop_size, self.config.sample_rate)
+                        self._coarse_reset_hangover = _hangover_hops
                         self._poor_coarse_counter = 0
                     if getattr(self, '_coarse_reset_hangover', 0) > 0:
                         self._coarse_reset_hangover -= 1
                         self.filter._disallow_leakage_diverged = True
                     else:
                         self.filter._disallow_leakage_diverged = False
+                    # Gap C drive: flush the deferred shadow W update. On the
+                    # rescue fire hop, AEC3 subtractor.cc:302-304 runs the
+                    # coarse update with E_refined (not E_coarse) for fast
+                    # catchup. Off-fire hops update normally with the cached
+                    # E_coarse (self.error_spec). Flag-OFF: no-op (process()
+                    # already updated W inline).
+                    _e_refined_override = False
+                    if _rescue_aec3:
+                        if _copy_fired:
+                            self.shadow_filter.complete_update(
+                                error_override=self.filter.error_spec.copy())
+                            _e_refined_override = True
+                        else:
+                            self.shadow_filter.complete_update(
+                                error_override=None)
+                    # Gate0 trace — per-hop rescue copy diagnostics.
+                    self._poor_coarse_trace = {
+                        'counter': getattr(self, '_poor_coarse_counter', 0),
+                        'threshold_hops': _threshold_hops,
+                        'cond_fire': _cond_fire,
+                        'copy_fired': _copy_fired,
+                        'e2_ref': float(_e2_ref),
+                        'e2_coa': float(_e2_coa),
+                        'hangover_rem': getattr(self, '_coarse_reset_hangover', 0),
+                        'rescue_aec3': _rescue_aec3,
+                        'e_refined_override': _e_refined_override,
+                    }
+
+                # Gap C safety flush: if rescue block did not run (atypical
+                # filter class without error_spec attr) but shadow.process()
+                # deferred its update, flush now with no override to keep W
+                # state coherent and partition_idx advanced.
+                if (_rescue_aec3
+                        and getattr(self.shadow_filter,
+                                    '_deferred_update_pending', False)):
+                    self.shadow_filter.complete_update(error_override=None)
 
                 # v3.21 Q1 — true-delay transient leakage override.
                 # Arms on delay_first / delay_shift only; EPV/shadow_rise path unchanged.
@@ -2590,13 +2670,16 @@ class AEC:
                             and isinstance(self.shadow_filter, PBFDKF)):
                         self.shadow_filter._error_psd.fill(1e-2)
                         self.shadow_filter.R.fill(1e-2)
-                # v3.18 Phase A.3 (corrected 2026-05-16) — AEC3 has no W
-                # copy between refined/coarse filters. The reverse_copy
-                # mechanism exists today because PBFDKF shadow has P-memory
-                # and can get stuck in a wrong basin (sending misleading
-                # `shadow_advantage`). NLMS shadow has no P-memory and
-                # re-adapts from its own residual; W copy becomes a no-op
-                # at best and a perturbation at worst. Skip under flag-ON.
+                # v3.18 Phase A.3 (corrected 2026-05-16) — AEC3 has no
+                # reverse (shadow→main) W copy. Correction: AEC3 DOES have
+                # a refined→coarse rescue copy (subtractor.cc:300-301); that
+                # is ported as the poor_coarse counter block above — a
+                # different direction. The reverse_copy mechanism below exists
+                # because PBFDKF shadow has P-memory and can get stuck in a
+                # wrong basin (sending misleading `shadow_advantage`). NLMS
+                # shadow has no P-memory and re-adapts from its own residual;
+                # W copy becomes a no-op at best and a perturbation at worst.
+                # Skip under flag-ON.
                 if (shadow_decision.reverse_copy
                         and not self.config.shadow_class_nlms):
                     # Sync shadow back to main when main is clearly better.
@@ -4876,6 +4959,52 @@ class AEC:
                 # gain_reason: 'min' | 'max' | 'G' | 'lim' (which constraint bound).
                 # hf_lim_applied: whether HF limiter ran this frame.
                 **getattr(self._aec3_sg, '_last_lower_band_snap', {}),
+                # === E — poor_coarse rescue copy Gate0 trace ===
+                # Fields from _poor_coarse_trace set in shadow update block.
+                **{f'pc_{k}': v for k, v in
+                   getattr(self, '_poor_coarse_trace', {}).items()},
+                # === AEC3-parity alignment diag (added 2026-05-27 after default flips) ===
+                # Refined filter H_error state — diagnose mu denominator behavior
+                'h_error_mean': float(np.mean(self.filter.H_error_per_bin))
+                    if hasattr(self.filter, 'H_error_per_bin') else 0.0,
+                'h_error_p5': float(np.percentile(self.filter.H_error_per_bin, 5))
+                    if hasattr(self.filter, 'H_error_per_bin') else 0.0,
+                'h_error_p95': float(np.percentile(self.filter.H_error_per_bin, 95))
+                    if hasattr(self.filter, 'H_error_per_bin') else 0.0,
+                'h_error_at_ceil_frac': float(np.mean(
+                    self.filter.H_error_per_bin >= self.filter._h_error_ceil * 0.99
+                )) if hasattr(self.filter, 'H_error_per_bin') else 0.0,
+                # Leakage selection — which branch of the refresh formula fired (per-bin)
+                'leakage_div_frac': float(getattr(self.filter, '_last_leakage_div_frac', 0.0))
+                    if hasattr(self, 'filter') else 0.0,
+                # Filter misadjustment parity tracker (AEC3 ScaleFilter mechanism)
+                'misadj_inv': float(self._aec3_misadj_trace.get('inv_last', 0.0))
+                    if hasattr(self, '_aec3_misadj_trace') else 0.0,
+                'misadj_overhang': int(getattr(self, '_aec3_misadj_overhang', 0)),
+                'misadj_scale_fired': bool(self._aec3_misadj_trace.get('aec3_fire_count', 0)
+                    > getattr(self, '_aec3_misadj_prev_fire_count', 0))
+                    if hasattr(self, '_aec3_misadj_trace') else False,
+                # Shadow PBFDAF gate fires (Bundle B — coarse parity gates)
+                'shadow_a3_skip': bool(self.shadow_filter._c1c5_trace.get('A3_poor_exc_skip', False))
+                    if self.shadow_filter is not None and hasattr(self.shadow_filter, '_c1c5_trace')
+                    else False,
+                'shadow_a5_skip': bool(self.shadow_filter._c1c5_trace.get('A5_sat_skip', False))
+                    if self.shadow_filter is not None and hasattr(self.shadow_filter, '_c1c5_trace')
+                    else False,
+                'shadow_a2_zero_frac': float(self.shadow_filter._c1c5_trace.get('A2_noise_gate_zero_frac', 0.0))
+                    if self.shadow_filter is not None and hasattr(self.shadow_filter, '_c1c5_trace')
+                    else 0.0,
+                'shadow_a4_mask_frac': float(self.shadow_filter._c1c5_trace.get('A4_mask_frac', 0.0))
+                    if self.shadow_filter is not None and hasattr(self.shadow_filter, '_c1c5_trace')
+                    else 0.0,
+                'shadow_mu_eff_mean': float(self.shadow_filter._c1c5_trace.get('mu_eff_mean', 0.0))
+                    if self.shadow_filter is not None and hasattr(self.shadow_filter, '_c1c5_trace')
+                    else 0.0,
+                # Refined filter W L2 norm (record explicitly even though H_error covers mu denom)
+                'refined_w_norm': float(np.linalg.norm(self.filter.W))
+                    if hasattr(self.filter, 'W') else 0.0,
+                # NOTE: 'shadow_w_norm' already emitted above under Variant H Gate 0
+                # diag (line ~4923); not duplicated here to keep dict key unique.
             })
 
         # Apply gain in spectrum domain, IFFT to fft_size=512, take the
