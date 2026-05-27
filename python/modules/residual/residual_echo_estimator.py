@@ -103,9 +103,11 @@ class ReverbConfig:
     # approximation for ReverbFrequencyResponse-produced tail_response.
     use_adaptive_decay: bool = True
     use_freq_response: bool = True
-    # AEC3 echo_canceller3_config.h:139 default = true. Clamps tail to raw
-    # partition response (cap on per-bin |H_partition|²) so reverb tail does
-    # not over-amplify when partition variance is high. Aligned 2026-05-27.
+    # AEC3 echo_canceller3_config.h:139 default = true. AEC3 strict semantic:
+    # `tail_response[k] = max(tail, raw_tail_partition)` per bin, then
+    # neighbour-max smoothing. Restored 2026-05-27 after ReverbFrequencyResponse
+    # got fft-resolution-aware windows (raw_tail pre-smoothed over ±125 Hz
+    # before the max; neighbour-max window also widened to ±125 Hz).
     conservative_tail_freq_response: bool = True
 
 
@@ -193,6 +195,7 @@ class ResidualEchoEstimator:
                 use_conservative_tail_frequency_response=(
                     self._reverb_cfg.conservative_tail_freq_response
                 ),
+                sr=self._sr,  # for fft-resolution-aware neighbour-max window
             )
 
     def attach_reverb_decay_estimator(self, n_partitions: int,
