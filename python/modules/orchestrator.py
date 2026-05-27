@@ -5130,6 +5130,43 @@ class AEC:
                     if hasattr(self, 'filter') else 0,
                 # NOTE: 'shadow_w_norm' already emitted above under Variant H Gate 0
                 # diag (line ~4923); not duplicated here to keep dict key unique.
+                # === HF paint-black diagnostic (2026-05-27) ===
+                # Identifies which mechanism crushed HF gain on this frame.
+                #
+                # R² path indicator (REE._last_r2_path):
+                #   'linear'     → R² = S²/ERLE + reverb (ERLE-bounded)
+                #   'nonlinear'  → R² = X²·EpStrength.default_gain² + reverb
+                #                   (default_gain raised 0.020→1.0; check inflation)
+                #   'saturated'  → R² = Y² (max suppression by design)
+                'r2_path': getattr(self._aec3_ree, '_last_r2_path', 'unset'),
+                'r2_direct_hf_median': float(np.median(
+                    getattr(self._aec3_ree, '_last_r2_direct_component',
+                            np.zeros(_n_bins_local))[65:]))
+                    if _n_bins_local > 65 else 0.0,
+                'r2_reverb_hf_median': float(np.median(
+                    getattr(self._aec3_ree, '_last_r2_reverb_component',
+                            np.zeros(_n_bins_local))[65:]))
+                    if _n_bins_local > 65 else 0.0,
+                # CNG state — has N2 converged yet?
+                'cng_n2_counter': int(getattr(self, '_aec3_n2_counter', 0)),
+                'cng_n2_initial_active': bool(
+                    getattr(self, '_aec3_n2_counter', 0)
+                    < getattr(self, '_aec3_cng_n2_initial_duration_hops', 1e9)
+                ),
+                'cng_n2_hf_median': float(np.median(
+                    getattr(self, '_aec3_n2', np.zeros(_n_bins_local))[65:]))
+                    if (_n_bins_local > 65 and hasattr(self, '_aec3_n2'))
+                    else 0.0,
+                # CN injection energy contribution at HF (sqrt(1-G²)·sqrt(N2/PSD_SCALE))
+                # — what would actually be added to E_spec at HF this frame.
+                # If this is tiny while G_hf is small → spectral hole stays unfilled
+                # → user perceives "painted black" rather than "noisy".
+                'cn_inject_amplitude_hf_median': float(np.median(
+                    np.sqrt(np.maximum(1.0 - gain[65:].astype(np.float32) ** 2, 0.0))
+                    * np.sqrt(np.maximum(
+                        getattr(self, '_aec3_n2', np.zeros(_n_bins_local))[65:]
+                        / (32768.0 ** 2), 0.0))
+                )) if _n_bins_local > 65 and hasattr(self, '_aec3_n2') else 0.0,
             })
 
         # Apply gain in spectrum domain, IFFT to fft_size=512, take the

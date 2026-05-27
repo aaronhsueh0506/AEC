@@ -656,6 +656,12 @@ class SuppressionGain:
         G_raw = self._gain_to_no_audible_echo(nearend, weighted_residual, comfort_noise)
         # Step 6: clip into [min, max].
         G = np.clip(G_raw, min_gain, max_gain)
+        # Snapshot pre-HF-limiter G + ENR/EMR for paint-black diagnostic.
+        # No audio effect; consumers via _last_lower_band_snap.
+        with np.errstate(divide='ignore', invalid='ignore'):
+            _enr_diag = np.divide(weighted_residual, nearend + 1.0)
+            _emr_diag = np.divide(weighted_residual, comfort_noise + 1.0)
+        _G_pre_hf_lim = G.copy()
         # Step 7: LF + HF limiters.
         _limit_lf_gains(G)
         _hf_lim_applied = (
@@ -706,6 +712,46 @@ class SuppressionGain:
             'r2_lf_mean': float(np.mean(residual_echo[_LF])),
             'r2_mf_mean': float(np.mean(residual_echo[_MF])),
             'r2_hf_mean': float(np.mean(residual_echo[_HF])),
+            # === HF paint-black diagnostic (no audio effect) ===
+            # Per-band gain distribution AFTER HF cap propagation.
+            'gain_lf_median': float(np.median(G[_LF])),
+            'gain_mf_median': float(np.median(G[_MF])),
+            'gain_hf_median': float(np.median(G[_HF])),
+            'gain_hf_p5':     float(np.percentile(G[_HF], 5)),
+            'gain_hf_min':    float(np.min(G[_HF])),
+            # Pre-HF-cap snapshot — distinguishes (a) HF cap anchor crushing
+            # everything above 2 kHz from (b) underlying R² inflation. Equal
+            # pre+post in HF → not the HF anchor. Big gap → anchor is the cause.
+            'gain_hf_median_pre_hf_lim': float(np.median(_G_pre_hf_lim[_HF])),
+            'gain_hf_p5_pre_hf_lim':     float(np.percentile(_G_pre_hf_lim[_HF], 5)),
+            # HF anchor location + value. Used to identify which single bin
+            # crushed the rest (lgb = freq → bin at SR/2 / N).
+            'hf_anchor_lgb_bin': int(
+                round(
+                    self._config.high_frequency_suppression.limiting_gain_freq_hz
+                    * 2 * (self._n_bins - 1)
+                    / float(self._sr)
+                )
+            ),
+            'hf_anchor_value_pre_hf_lim': float(_G_pre_hf_lim[
+                min(
+                    self._n_bins - 1,
+                    int(round(
+                        self._config.high_frequency_suppression.limiting_gain_freq_hz
+                        * 2 * (self._n_bins - 1) / float(self._sr)
+                    ))
+                )
+            ]),
+            # ENR/EMR HF medians (post-audibility-weight, pre-clip).
+            # ENR = R² / (Y² + 1). Large → 'echo dominates' branch of
+            # gain_to_no_audible_echo fires → G drops linearly with ENR.
+            # EMR = R² / (CN + 1). Large → 'echo above masker' → G ≈ emr_tr/emr.
+            'enr_hf_median': float(np.median(_enr_diag[_HF])),
+            'emr_hf_median': float(np.median(_emr_diag[_HF])),
+            'enr_tr_hf_median': float(np.median(
+                (self._nearend_enr_tr if self._ne_state_for_gain_rules() else self._normal_enr_tr)[_HF])),
+            'emr_tr_hf_median': float(np.median(
+                (self._nearend_emr_tr if self._ne_state_for_gain_rules() else self._normal_emr_tr)[_HF])),
         }
         # Step 8: sqrt to amplitude domain.
         return np.sqrt(np.maximum(G, 0.0)).astype(np.float32)

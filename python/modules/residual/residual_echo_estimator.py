@@ -184,6 +184,10 @@ class ResidualEchoEstimator:
         self._last_echo_gen_delay_blocks: int = 0
         self._last_echo_gen_idx_start: int = 0
         self._last_echo_gen_idx_stop: int = 0
+        # HF paint-black diag — which R² path executed + components.
+        self._last_r2_path: str = 'unset'
+        self._last_r2_direct_component = np.zeros(self._n_bins, dtype=np.float32)
+        self._last_r2_reverb_component = np.zeros(self._n_bins, dtype=np.float32)
         # v3.21 Phase C.4 — adaptive reverb decay + tail freq response.
         # Both are LAZY-bound; orchestrator calls `attach_reverb_estimators`
         # at the first hop where it knows `n_partitions` and `hop_size`.
@@ -283,6 +287,16 @@ class ResidualEchoEstimator:
         usable = aec_state.usable_linear_estimate()
         saturated = aec_state.saturated_echo()
 
+        # Diagnostic — records which R² path executed this frame so
+        # downstream paint-black trace can attribute HF gain drops.
+        # No audio effect.
+        if saturated:
+            self._last_r2_path = 'saturated'
+        else:
+            self._last_r2_path = 'linear' if usable else 'nonlinear'
+        self._last_r2_reverb_component = np.zeros(self._n_bins, dtype=np.float32)
+        self._last_r2_direct_component = np.zeros(self._n_bins, dtype=np.float32)
+
         if usable:
             if saturated:
                 r2[:] = capture_psd
@@ -305,6 +319,10 @@ class ResidualEchoEstimator:
                 render_psd, s2_linear, dominant_nearend
             )
             reverb = self._reverb_model.reverb
+            self._last_r2_direct_component = r2.copy()
+            self._last_r2_reverb_component = np.asarray(
+                reverb, dtype=np.float32
+            ).copy()
             r2 += reverb
             r2_unbounded += reverb
         else:
@@ -379,6 +397,10 @@ class ResidualEchoEstimator:
                     render_psd, scaling=ep_late, decay=decay
                 )
                 reverb = self._reverb_model.reverb
+                self._last_r2_direct_component = r2.copy()
+                self._last_r2_reverb_component = np.asarray(
+                    reverb, dtype=np.float32
+                ).copy()
                 r2 += reverb
                 r2_unbounded += reverb
 
