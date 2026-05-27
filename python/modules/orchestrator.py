@@ -137,7 +137,6 @@ class AEC:
         self._aec3_misadj_e2_acum += e2_block
         self._aec3_misadj_y2_acum += y2_block
         self._aec3_misadj_n_acum += 1
-        self._aec3_misadj_trace['frames_total'] += 1
         n_hops_target = 2  # AEC3 n_blocks_=4 × 4ms ≈ 2 × 10ms hops
         if self._aec3_misadj_n_acum < n_hops_target:
             return
@@ -149,7 +148,6 @@ class AEC:
         y2_threshold = (200.0 ** 2) * total_samples / int16_sq
         e2_overhang_threshold = (7500.0 ** 2) * total_samples / int16_sq
         if self._aec3_misadj_y2_acum > y2_threshold:
-            self._aec3_misadj_trace['windows_evaluated'] += 1
             update = self._aec3_misadj_e2_acum / max(self._aec3_misadj_y2_acum, 1e-20)
             if self._aec3_misadj_e2_acum > e2_overhang_threshold:
                 self._aec3_misadj_overhang = 4
@@ -158,11 +156,6 @@ class AEC:
             # AEC3 asymmetric gate: EMA only on decreasing or sustained-high.
             if (update < self._aec3_misadj_inv) or (self._aec3_misadj_overhang > 0):
                 self._aec3_misadj_inv += 0.1 * (update - self._aec3_misadj_inv)
-            self._aec3_misadj_trace['inv_last'] = float(self._aec3_misadj_inv)
-            if self._aec3_misadj_inv > self._aec3_misadj_trace['inv_max']:
-                self._aec3_misadj_trace['inv_max'] = float(self._aec3_misadj_inv)
-            if self._aec3_misadj_inv > 10.0:
-                self._aec3_misadj_trace['aec3_would_fire'] += 1
         # Reset window accumulators (AEC3 zeroes after each n_blocks window
         # regardless of whether trigger fired).
         self._aec3_misadj_e2_acum = 0.0
@@ -219,7 +212,6 @@ class AEC:
         self._aec3_misadj_overhang = 0
         self._misadjustment_hangover_remaining = (
             self.config.filter_misadjustment_hangover_frames)
-        self._aec3_misadj_trace['aec3_active_fire'] += 1
 
     # ── EPC-state delegations (state lives in self._epc_det) ─────────────────
     @property
@@ -755,13 +747,6 @@ class AEC:
         # returned by `get_filter_state()`. The two state systems serve
         # different consumers — see B2 docblock at AecStats.filter_state.
         self._prev_filter_state: str = 'idle'
-        # F2.2 EMA tracker — always maintained (cheap), only consumed by P3h
-        # reset gate when `use_diverged_streak_ema` is True.
-        self._p3f_diverged_streak_ema = 0.0
-        # P3h — sustained-diverged reset cooldown. Decremented per frame;
-        # reset action gated on cooldown == 0.
-        self._p3h_reset_cooldown_remaining = 0
-        self._p3h_reset_count = 0           # diagnostic: reset fires this run
 
         # S-orth.A — shadow decoupled state (initialised here regardless of flag;
         # only *used* when shadow_state_decoupled=True so flag-OFF is byte-equal).
@@ -882,47 +867,16 @@ class AEC:
         #   previous frame's URO decision (True = refined).
         self._form_prev_output_time: Optional[np.ndarray] = None
         self._form_last_selection: bool = True  # True = refined
-        self._uro_trace = {
-            'frames_total': 0,
-            'use_refined': 0,
-            'use_coarse': 0,
-            'cond1_fired': 0,  # coarse-cleaner branch
-            'cond2_fired': 0,  # refined-diverged branch
-        }
 
-        # AEC3 FilterMisadjustment direction parity state. Accumulator
-        # mirrors AEC3 `Subtractor::FilterMisadjustmentEstimator`
+        # AEC3 FilterMisadjustmentEstimator accumulator state.
+        # Mirrors `Subtractor::FilterMisadjustmentEstimator`
         # (subtractor.h:99-128 + subtractor.cc:336-358).
         self._aec3_misadj_e2_acum: float = 0.0
         self._aec3_misadj_y2_acum: float = 0.0
         self._aec3_misadj_n_acum: int = 0
         self._aec3_misadj_inv: float = 0.0
         self._aec3_misadj_overhang: int = 0
-        self._aec3_misadj_trace = {
-            'frames_total': 0,
-            'windows_evaluated': 0,    # accumulator windows that hit energy floor
-            'aec3_would_fire': 0,      # `inv > 10` evaluations (trace mode)
-            'legacy_did_fire': 0,      # legacy ScaleFilter applications
-            'aec3_active_fire': 0,     # parity path ScaleFilter applications
-            'inv_max': 0.0,            # peak inv_misadjustment observed
-            'inv_last': 0.0,           # most recent inv (per window)
-        }
 
-        # AEC3 coarse_filter_converged_relaxed signal trace.
-        self._coarse_relaxed_trace = {
-            'frames_total': 0,
-            'strict_fire': 0,         # _coarse_conv (existing strict signal)
-            'relaxed_fire': 0,        # _coarse_conv_relaxed (new signal)
-            'relaxed_only_fire': 0,   # relaxed True AND strict False
-            'both_fire': 0,           # relaxed True AND strict True
-            'strict_only_fire': 0,    # impossible by definition; tracked for sanity
-        }
-
-        # AEC3 UseLinearFilterOutput Y-vs-E parity trace counter.
-        self._linear_filter_output_trace = {
-            'frames_total': 0,
-            'frames_use_capture': 0,   # frames where usable_linear=False → Y
-        }
         # EchoPathVariability EMAs moved into EchoPathChangeDetector
         # (self._epc_det). Legacy AecState aggregator
         # (modules.legacy_state.AecState) retired — its 5-detector facade
@@ -933,18 +887,6 @@ class AEC:
         self._far_power_ema = 0.0           # TC≈50ms for GetStats()
         self._mic_power_ema = 0.0
         self._frame_count = 0               # frames since reset()
-        self._full_delay_chain_trigger_frame = -1  # C2: frame of last delay_first/shift
-
-        # P52 A.0R.2: per-frame regime handler trace rows. Only appended to
-        # when self.config.trace_p52_regime_handler is True (default False
-        # → list stays empty → zero memory overhead).
-        self._regime_trace_rows = []
-
-        # Per-frame HF damage causal chain trace (audit-only, never
-        # populated under current production gating; preserved for legacy
-        # diag readers).
-        self._hf_chain_trace = []
-        self._last_uro_frame_trace: dict = {}
 
         # ERLE (raw = filter-only)
         self.near_power = 0.0
@@ -1052,7 +994,6 @@ class AEC:
         self._far_power_ema = 0.0
         self._mic_power_ema = 0.0
         self._frame_count = 0
-        self._full_delay_chain_trigger_frame = -1
         if self.dtd_divergence:
             self.dtd_divergence.reset()
         if self.dtd_coherence:
@@ -1292,7 +1233,6 @@ class AEC:
         self._p3f_refined_latched = False
         self._p3f_main_err_baseline = 0.0
         self._p3f_diverged_streak = 0
-        self._p3f_diverged_streak_ema = 0.0
         self._prev_filter_state = 'idle'
 
         # Diagnostic dict — would otherwise show stale ERLE / DT signals
@@ -1553,7 +1493,6 @@ class AEC:
                             delay_change=True, gain_change=False, zero_filter=False)
                     from .delay.delay_types import DelayAdjustment as _DA
                     self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
-                    self._full_delay_chain_trigger_frame = int(self._frame_count)
 
                 # Age out _pending_delay so a stale pending value cannot
                 # pair with a later rogue estimate hours after it was set.
@@ -1614,7 +1553,6 @@ class AEC:
                                             'handle_echo_path_change')):
                             self.shadow_filter.handle_echo_path_change(
                                 delay_change=True, gain_change=False, zero_filter=False)
-                        self._full_delay_chain_trigger_frame = int(self._frame_count)
                     else:
                         self._pending_delay = new_delay
                         self._pending_delay_ttl = 3
@@ -2819,31 +2757,6 @@ class AEC:
         np.savez(path, **cols)
         return n_frames
 
-    def dump_regime_trace(self, path: str) -> int:
-        """P52 A.0R.2: dump captured per-frame regime trace rows to .npz.
-
-        Returns the number of rows written. No-op (returns 0) if the flag was
-        off and the buffer is empty. Audio-passive: dump only reads the
-        already-populated `_regime_trace_rows` list.
-
-        Columns (one array per key, shape (n_frames,) with dtype matching the
-        first row's value type):
-          frame, boost_q_fired, reverse_copy_fired, main_paused_fired,
-          w_l2_before, w_l2_after, q_max_before, q_max_after,
-          shadow_w_l2_before, shadow_w_l2_after,
-          erle_main_before, erle_main_after,
-          copy_counter, copy_err_baseline
-        """
-        rows = self._regime_trace_rows
-        if not rows:
-            return 0
-        cols = {}
-        for k in rows[0].keys():
-            cols[k] = np.array([r[k] for r in rows])
-        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-        np.savez(path, **cols)
-        return len(rows)
-
     def is_dtd_active(self) -> bool:
         return self.get_dtd_confidence() > 0.5
 
@@ -2993,16 +2906,6 @@ class AEC:
         )
         cond_refined_diverged = e2_coarse < e2_refined and y2 < e2_refined
         use_refined = not (cond_coarse_cleaner or cond_refined_diverged)
-        # Debug counters (cheap; used by post-bench analysis scripts).
-        self._uro_trace['frames_total'] += 1
-        if use_refined:
-            self._uro_trace['use_refined'] += 1
-        else:
-            self._uro_trace['use_coarse'] += 1
-        if cond_coarse_cleaner:
-            self._uro_trace['cond1_fired'] += 1
-        if cond_refined_diverged:
-            self._uro_trace['cond2_fired'] += 1
         # Update hysteresis state (kept for parity with AEC3 even though
         # selection is hop-aligned here; downstream time-domain crossfade is
         # implicit in sqrt-Hann + OLA).
@@ -3040,29 +2943,9 @@ class AEC:
             self.filter.error_spec_windowed + self.filter.echo_spec
         ).astype(np.complex64)
         selected_echo_spec = (_near_spec_win - selected_esw).astype(np.complex64)
-        _form_transition_energy_delta = (
-            float(np.sum(np.abs(selected_esw) ** 2))
-            - float(np.sum(np.abs(self.filter.error_spec_windowed) ** 2))
-        )
         # Update AEC3 FFT memory and selection latch.
         self._form_prev_output_time = e_form
         self._form_last_selection = use_refined
-        self._last_uro_frame_trace = {
-            'fire': not use_refined,
-            'cond1': cond_coarse_cleaner,
-            'cond2': cond_refined_diverged,
-            'path': 'refined' if use_refined else 'coarse',
-            'e2_refined': e2_refined,
-            'e2_coarse': e2_coarse,
-            'y2': y2,
-            'e2_ratio': e2_coarse / (e2_refined + 1e-30),
-            'y2_over_thr30': y2 > thr_30,
-            's2_refined': s2_refined,
-            's2_coarse': s2_coarse,
-            's2_over_thr60': s2_refined > thr_60 or s2_coarse > thr_60,
-            'form_transition_active': _form_transition_active,
-            'form_transition_energy_delta': _form_transition_energy_delta,
-        }
         return selected_esw, selected_echo_spec
 
     def _aec3_post(self, raw_output: np.ndarray, near_end: np.ndarray,
@@ -3101,10 +2984,6 @@ class AEC:
         else:
             _sel_esw = self.filter.error_spec_windowed
             _sel_echo_spec = self.filter.echo_spec
-            self._last_uro_frame_trace = {
-                'fire': False, 'cond1': False, 'cond2': False,
-                'path': 'refined', 's2_refined': 0.0, 's2_coarse': 0.0,
-            }
         near_psd = (np.abs(self.filter.near_spec) ** 2 * _PSD_SCALE).astype(np.float32)
         far_psd = (np.abs(self.filter.far_spec) ** 2 * _PSD_SCALE).astype(np.float32)
         echo_psd = (np.abs(_sel_echo_spec) ** 2 * _PSD_SCALE).astype(np.float32)
