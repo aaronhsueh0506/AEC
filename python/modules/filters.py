@@ -172,6 +172,16 @@ class PBFDAF:
         self._deferred_mu_scale = 1.0
         self._deferred_far_hop_energy: float = 0.0
 
+        # AEC3 InitialState (aec_state.cc:336-353) — counted in process() so
+        # both PBFDAF (shadow) and PBFDKF (refined, subclass) share the
+        # counter. Only PBFDKF._h_error_refresh consumes _initial_state_active
+        # to switch leakage source. PBFDAF carries the attrs as benign state.
+        self._initial_state_active: bool = True
+        self._initial_state_active_render_hops: int = 0
+        self._initial_state_threshold_hops: int = 250
+        self._initial_state_far_energy_floor: float = 1e-4
+        self._last_initial_state_active: bool = True
+
     def reset(self):
         self.W.fill(0)
         self.X_buf.fill(0)
@@ -268,6 +278,16 @@ class PBFDAF:
         # Update weights — gate on far-end activity
         self._c1c5_trace = {}   # reset each hop; empty when far-inactive or flags OFF
         far_hop_energy = np.sum(far_end ** 2) / hop
+
+        # AEC3 InitialState tracking: count active render hops, exit initial
+        # state after 250 active hops (2.5 s @ hop=160/sr=16000).
+        if (self._initial_state_active
+                and far_hop_energy > self._initial_state_far_energy_floor):
+            self._initial_state_active_render_hops += 1
+            if (self._initial_state_active_render_hops
+                    >= self._initial_state_threshold_hops):
+                self._initial_state_active = False
+        self._last_initial_state_active = self._initial_state_active
 
         if defer_update:
             # Gap C wiring: stash the inputs so complete_update() can apply the
@@ -550,6 +570,22 @@ class PBFDKF(PBFDAF):
         # (NOISE_GATE_POWER_FLOAT=0.02562). True → FILTER_NOISE_GATE_POWER_FLOAT=0.01870.
         # Wired by orchestrator from config.use_aec3_filter_noise_gate_power.
         self._use_aec3_filter_noise_gate_power: bool = True
+
+        # AEC3 refined_initial profile — first 2.5 s of active render uses
+        # aggressive leakage (100×/10× steady) so the filter converges fast
+        # at session start. Source: AecState::InitialState (aec_state.cc:336-353)
+        # + FilterConfig refined_initial (echo_canceller3_config.h:102-113).
+        # AEC3 threshold: 2.5 s × kNumBlocksPerSecond (250) = 625 active blocks.
+        # hop=160/sr=16000 equivalent: 2.5 s × 100 hops/s = 250 active hops.
+        # _h_error_refresh() consults _initial_state_active to pick the leakage
+        # source. Counter only increments on active far render (energy gate
+        # = 1e-4, same threshold the W update uses).
+        self._initial_state_active: bool = True
+        self._initial_state_active_render_hops: int = 0
+        self._initial_state_threshold_hops: int = 250
+        self._initial_state_far_energy_floor: float = 1e-4
+        # Diag — last frame's initial_state_active value (for trace).
+        self._last_initial_state_active: bool = True
 
         # GPT Phase 1 debug trace (off by default, zero overhead).
         # When enabled, accumulates per-frame stats to verify hypothesis:
@@ -947,6 +983,18 @@ class PBFDKF(PBFDAF):
         for refined (addresses Codex F2 staleness on early-return paths
         where the smoothed ``self._error_psd`` is from a prior frame).
         """
+        # AEC3 InitialState (aec_state.cc:336-353) — during the first 2.5 s of
+        # active render, switch to refined_initial leakage (100×/10× steady)
+        # so the filter converges fast. Source: FilterConfig refined_initial
+        # (echo_canceller3_config.h:102-107).
+        if self._initial_state_active:
+            from . import aec3_scale as _aec3_scale
+            _lc_eff = np.float32(_aec3_scale.LEAKAGE_CONVERGED_TRANSIENT_PER_HOP)
+            _ld_eff = np.float32(_aec3_scale.LEAKAGE_DIVERGED_TRANSIENT_PER_HOP)
+        else:
+            _lc_eff = self._leakage_converged
+            _ld_eff = self._leakage_diverged
+
         if (self._use_per_bin_h_error_refresh
                 and self._e2_coarse_per_bin is not None):
             # AEC3 cc:128-138 per-bin path. Compute instantaneous
@@ -960,8 +1008,8 @@ class PBFDKF(PBFDAF):
             self._last_leakage_div_frac = float(np.mean(~use_converged_mask))
             leakage_arr = np.where(
                 use_converged_mask,
-                self._leakage_converged,
-                self._leakage_diverged,
+                _lc_eff,
+                _ld_eff,
             ).astype(np.float32)
             self.H_error_per_bin = (
                 self.H_error_per_bin + leakage_arr * self._erl_per_bin
@@ -975,8 +1023,7 @@ class PBFDKF(PBFDAF):
             )
             # Diag (2026-05-27): scalar path is all-or-nothing, so frac is 0 or 1.
             self._last_leakage_div_frac = 0.0 if use_converged else 1.0
-            leakage = (self._leakage_converged if use_converged
-                       else self._leakage_diverged)
+            leakage = _lc_eff if use_converged else _ld_eff
             self.H_error_per_bin = (
                 self.H_error_per_bin + leakage * self._erl_per_bin
             )

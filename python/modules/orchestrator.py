@@ -5003,6 +5003,14 @@ class AEC:
                 # Refined filter W L2 norm (record explicitly even though H_error covers mu denom)
                 'refined_w_norm': float(np.linalg.norm(self.filter.W))
                     if hasattr(self.filter, 'W') else 0.0,
+                # AEC3 refined_initial profile — first 2.5 s of active render
+                # forces transient leakage (100×/10× steady) for faster startup
+                # convergence. Counter is in PBFDKF.process(). See
+                # aec_state.cc:336-353 + refined_initial config.
+                'initial_state_active': bool(getattr(self.filter, '_last_initial_state_active', False))
+                    if hasattr(self, 'filter') else False,
+                'initial_state_render_hops': int(getattr(self.filter, '_initial_state_active_render_hops', 0))
+                    if hasattr(self, 'filter') else 0,
                 # NOTE: 'shadow_w_norm' already emitted above under Variant H Gate 0
                 # diag (line ~4923); not duplicated here to keep dict key unique.
             })
