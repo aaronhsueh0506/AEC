@@ -1068,7 +1068,13 @@ class AEC:
         # v3.10.0 — filter plateau detector (one-shot recovery for
         # DT-from-frame-0 cases where main filter learned NE leak in the
         # first ~100 frames and is now stuck below convergence threshold).
-        self._plateau_detector = FilterPlateauDetector()
+        # v3.21 strict AEC3 alignment: gated by enable_plateau_detector
+        # (default OFF). AEC3 has no equivalent mechanism; opt-in only.
+        self._plateau_detector = (
+            FilterPlateauDetector()
+            if getattr(self.config, 'enable_plateau_detector', False)
+            else None
+        )
 
         # P3e — DT advisory gate state. Hold counter is in samples so we
         # can convert dt_advisory_hold_ms once. Diag fields exposed via _diag.
@@ -1378,7 +1384,7 @@ class AEC:
         self._dtd_conf_holdoff = 0
         self._convergence.reset()
         # v3.10.0: clear plateau-detector counters on AEC reset
-        if hasattr(self, '_plateau_detector'):
+        if getattr(self, '_plateau_detector', None) is not None:
             self._plateau_detector.reset()
         # P3e: clear DT advisory hold
         self._dt_advisory_hold_remaining = 0
@@ -3714,12 +3720,14 @@ class AEC:
                 and (int(self._frame_count) - _c2_trigger) < _c2_hops
                 and not self._filter_once_converged
             )
-        if not _plateau_chain_suppressed and self._plateau_detector.update(
-            far_active=_far_active_now,
-            dt_signal_present=_dt_signal_now,
-            erle_windowed_db=_erle_win_db,
-            once_converged=self._filter_once_converged,
-        ):
+        if (self._plateau_detector is not None
+                and not _plateau_chain_suppressed
+                and self._plateau_detector.update(
+                    far_active=_far_active_now,
+                    dt_signal_present=_dt_signal_now,
+                    erle_windowed_db=_erle_win_db,
+                    once_converged=self._filter_once_converged,
+                )):
             # Plateau confirmed — full derived-state reset. Shared helper
             # with delay_first acquisition (Codex finding: both paths reset
             # filter taps, both should clear downstream state the same way).

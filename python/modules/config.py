@@ -441,6 +441,15 @@ class AecConfig:
     # Gate 0 verdict: docs/v3_21_a1_gate0_trace_verdict.md
     use_full_delay_change_chain: bool = True
 
+    # FilterPlateauDetector master switch — Python-only safety net (one-shot
+    # recovery for DT-from-frame-0 cases where main filter learned NE leak in
+    # the first ~100 frames). NO AEC3 EQUIVALENT — AEC3 keeps adapting through
+    # NLMS instead of resetting. Default OFF for strict v3.21 AEC3 alignment;
+    # opt-in for cases where the Python safety net is load-bearing (memory:
+    # wVYSGVTT_DT_movement edge case where filter would stay stuck without it).
+    # When OFF: plateau-suppression flags below become dead code.
+    enable_plateau_detector: bool = False
+
     # Gate 0 Variant C — plateau suppression within post-delay initial chain window.
     # When ON (and use_full_delay_change_chain=True): FilterPlateauDetector is
     # suppressed from firing while aec3_state.initial_state_active() is True AND

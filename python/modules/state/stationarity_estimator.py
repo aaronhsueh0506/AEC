@@ -100,10 +100,11 @@ class StationarityEstimator:
     def __init__(self, n_freqs: int, hop_samples: int = 160,
                  sample_rate: int = 16000) -> None:
         self.n_freqs = int(n_freqs)
-        # Stationarity tunables (default 16 kHz / 10 ms; if a non-default
-        # hop_size is used the helpers in aec3_scale handle re-derivation).
-        self._window_hops = STATIONARITY_WINDOW_HOPS_DEFAULT
-        self._hangover_hops = STATIONARITY_HANGOVER_HOPS_DEFAULT
+        # Stationarity tunables auto-rescaled from AEC3 block counts to our
+        # hop count via aec3_scale helpers so any hop/sr stays AEC3 strict.
+        from .. import aec3_scale as _aec3_scale
+        self._window_hops = _aec3_scale.blocks_to_hops(13, hop_samples, sample_rate)
+        self._hangover_hops = _aec3_scale.blocks_to_hops(12, hop_samples, sample_rate)
         self.noise = _NoiseSpectrum(
             n_freqs=self.n_freqs,
             min_noise_power=STATIONARITY_MIN_NOISE_POWER_FLOAT,

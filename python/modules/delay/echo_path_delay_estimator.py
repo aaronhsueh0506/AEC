@@ -58,13 +58,12 @@ class EchoPathDelayEstimator:
         matching_filter_threshold: float = 0.3,
         delay_headroom_samples: int = 32,
         thresholds: Optional[DelaySelectionThresholds] = None,
-        detect_pre_echo: bool = False,  # v3.21 Phase A.2: ported but OFF
-        # Pre-echo aggregator overrides highest-peak with pre_echo_candidate
-        # unconditionally (AEC3 cc:94). For cases WITHOUT a real pre-echo,
-        # _compute_pre_echo_lag walks accumulated_error down to ~bin 0,
-        # producing wildly wrong delays. AEC3 defaults this OFF for the same
-        # reason. Enable via config when stress-testing pre-echo-heavy
-        # datasets (e.g. headphone/multi-mic recordings).
+        detect_pre_echo: bool = True,   # AEC3 strict default
+        # AEC3 default: true (echo_canceller3_config.h:73). PreEchoLagAggregator
+        # may override highest-peak with pre_echo_candidate when accumulated_error
+        # shows a leading peak. On cases WITHOUT real pre-echo this can produce
+        # noisy delay estimates; if that becomes load-bearing for our cohort,
+        # add a v3.22-tracked config toggle rather than diverging from AEC3.
     ) -> None:
         self._capture_decimator = Decimator(_DOWN_SAMPLING_FACTOR)
         self._render_decimator = Decimator(_DOWN_SAMPLING_FACTOR)
