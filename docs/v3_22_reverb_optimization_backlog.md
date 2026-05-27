@@ -111,6 +111,26 @@ mechanism (e.g. mean-window centered on the bin instead of max-window
 
 ---
 
+## SuppressionGain tuning that diverges from AEC3 strict (revisit in v3.22)
+
+### F. DominantNearendDetector.hold_duration_ms = 500 (AEC3 default: 200)
+
+Our default is 500 ms; AEC3 `hold_duration` = 50 blocks × 4 ms = 200 ms.
+Comment in `suppression_gain.py:DominantNearendConfig.hold_duration_ms`
+notes the 500 ms was "empirically co-tuned on our 800-case cohort with
+the v3.21 SuppressionGain mask shapes". 2.5× longer NE-state dwell
+means the gain rule stays in nearend mode longer after the last NE
+trigger — keeps mask thresholds gentle (preserves NE speech) at the
+cost of slower fall-back to normal mode when echo returns.
+
+Status: intentional v3.21 tuning, NOT a port bug. Re-evaluate at v3.22:
+- Try AEC3-strict 200 ms + nearend_tuning thresholds tightened to
+  compensate (matched-magnitude trade) on 800-case
+- Or document the 500 ms as a permanent tuning divergence with the
+  measured FS/DT bench delta vs 200 ms
+
+---
+
 ## Evaluation methodology
 
 Use `python/run_one_case.py --trace-hf-chain` for per-frame attribution

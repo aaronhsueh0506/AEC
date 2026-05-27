@@ -466,12 +466,20 @@ class _SubbandNearendDetector:
     integration).
     """
 
-    def __init__(self, cfg: SubbandNearendConfig, n_bins: int, sr: int = 16000) -> None:
+    def __init__(self, cfg: SubbandNearendConfig, n_bins: int,
+                 sr: int = 16000, hop_size: int = 160) -> None:
         self._cfg = cfg
         self._n_bins = int(n_bins)
         self._sr = int(sr)
+        self._hop_size = int(hop_size)
+        # AEC3 `nearend_average_blocks` is in 4 ms-block units; wall-clock
+        # rescale to our hop so the moving-average physical window matches.
+        from .. import aec3_scale as _aec3_scale
+        self._n_smooth_hops = _aec3_scale.blocks_to_hops(
+            cfg.nearend_average_blocks, self._hop_size, self._sr
+        )
         self._smoother = _MovingAverageSpectrum(
-            n_bins=self._n_bins, n_blocks=cfg.nearend_average_blocks
+            n_bins=self._n_bins, n_blocks=self._n_smooth_hops
         )
         self._nearend_state = False
         self._one_over_subband1_len = 1.0 / max(1, cfg.subband1.high - cfg.subband1.low + 1)
@@ -479,7 +487,11 @@ class _SubbandNearendDetector:
 
     def set_config(self, cfg: SubbandNearendConfig) -> None:
         self._cfg = cfg
-        self._smoother.update_memory_length(cfg.nearend_average_blocks)
+        from .. import aec3_scale as _aec3_scale
+        self._n_smooth_hops = _aec3_scale.blocks_to_hops(
+            cfg.nearend_average_blocks, self._hop_size, self._sr
+        )
+        self._smoother.update_memory_length(self._n_smooth_hops)
         self._one_over_subband1_len = 1.0 / max(1, cfg.subband1.high - cfg.subband1.low + 1)
         self._one_over_subband2_len = 1.0 / max(1, cfg.subband2.high - cfg.subband2.low + 1)
 
@@ -528,8 +540,14 @@ class SuppressionGain:
         # Read only via _ne_state_for_gain_rules; no-op when proxy flag OFF.
         self._stat_mask_frac: float = 0.0
         self._low_render = _LowNoiseRenderDetector()
+        # AEC3 `nearend_average_blocks` is in 4 ms blocks; wall-clock rescale
+        # to our hop_size so the moving-average window physically matches.
+        from .. import aec3_scale as _aec3_scale
+        _n_smooth_hops = _aec3_scale.blocks_to_hops(
+            self._config.nearend_average_blocks, self._hop_size, self._sr
+        )
         self._nearend_smoother = _MovingAverageSpectrum(
-            n_bins=self._n_bins, n_blocks=self._config.nearend_average_blocks
+            n_bins=self._n_bins, n_blocks=_n_smooth_hops
         )
         # Polymorphic NearendDetector — mirrors AEC3
         # suppression_gain.cc:373-378 (use_subband_nearend_detection flag
@@ -537,7 +555,8 @@ class SuppressionGain:
         # is_nearend_state() interface to the gain compute path).
         if self._config.use_subband_nearend_detection:
             self._dominant_nearend = _SubbandNearendDetector(
-                self._config.subband_nearend_detection, n_bins=self._n_bins, sr=self._sr
+                self._config.subband_nearend_detection,
+                n_bins=self._n_bins, sr=self._sr, hop_size=self._hop_size,
             )
         else:
             self._dominant_nearend = _DominantNearendDetector(
