@@ -131,21 +131,19 @@ class PBFDAF:
             np.hanning(self.block_size)).astype(np.float32)
         self.error_spec_windowed = np.zeros(self.n_freqs, dtype=np.complex64)
 
-        # v3.21.14 — PBFDAF shadow NLMS AEC3 protection alignment flags
-        # (default OFF preserves v3.21.6 baseline byte-equal). Set externally
-        # by orchestrator from AecConfig. AEC3 reference:
+        # AEC3 CoarseFilterUpdateGain protection flags (all shipped True).
         # docs/aec3_extracts/src/aec3/coarse_filter_update_gain.cc:34-82.
         # A.1: mu denom uses partition-summed X² = Σ_p |X_buf[p]|² (cc:64-72).
-        self._use_partition_summed_x2_for_shadow_mu: bool = False
         # A.2: noise_gate hard zero — mu=0 where X² < NOISE_GATE_POWER_FLOAT (cc:67-71).
-        self._use_aec3_noise_gate_for_shadow: bool = False
         # A.3: poor_excitation + startup gate — return when poor_excitation_counter
-        # < n_partitions OR call_counter <= n_partitions (cc:51-61).
-        self._use_poor_excitation_gate_for_shadow: bool = False
+        #      < n_partitions OR call_counter <= n_partitions (cc:51-61).
         # A.4: narrowband mask — RenderSignalAnalyzer.mask_regions_around_narrow_bands (cc:75).
-        self._use_narrowband_mask_for_shadow: bool = False
         # A.5: saturation gate — early return when _saturated_capture (cc:56-57).
-        self._use_saturation_gate_for_shadow: bool = False
+        self._use_partition_summed_x2_for_shadow_mu: bool = True
+        self._use_aec3_noise_gate_for_shadow: bool = True
+        self._use_poor_excitation_gate_for_shadow: bool = True
+        self._use_narrowband_mask_for_shadow: bool = True
+        self._use_saturation_gate_for_shadow: bool = True
         # v3.21.14 A.3 / A.4 supporting state (default values harmless under
         # flag-OFF; orchestrator overrides on shadow construction). Defined on
         # PBFDAF so subclass PBFDKF inherits the same state attributes; PBFDKF

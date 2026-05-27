@@ -2214,18 +2214,13 @@ class AEC:
                 near_end_hpf=near_end, raw_output=raw_output)
             self._check_and_apply_misadjustment_scale()
 
-            # FilterAnalyzer diag surface (v3.21.6 Sprint P1). The analyzer
-            # is updated inside AecState.update (which runs later in this
-            # hop); the queries below read the previous frame's state when
-            # the flag is on. Default-OFF: AecState owns no analyzer, the
-            # queries return defaults, no diag entries are written.
-            if self.config.filter_analyzer_enabled:
-                self._diag['filter_analyzer_consistent'] = bool(
-                    self._aec3_state.filter_analyzer_consistent())
-                self._diag['filter_analyzer_peak_index'] = int(
-                    self._aec3_state.filter_analyzer_peak_index())
-                self._diag['filter_analyzer_max_gain'] = float(
-                    self._aec3_state.filter_analyzer_max_echo_path_gain())
+            # FilterAnalyzer diag surface (always populated; AEC3 P1 default).
+            self._diag['filter_analyzer_consistent'] = bool(
+                self._aec3_state.filter_analyzer_consistent())
+            self._diag['filter_analyzer_peak_index'] = int(
+                self._aec3_state.filter_analyzer_peak_index())
+            self._diag['filter_analyzer_max_gain'] = float(
+                self._aec3_state.filter_analyzer_max_echo_path_gain())
 
             # TransparentMode + FilteringQualityAnalyzer audit ports retired.
 
@@ -2578,15 +2573,7 @@ class AEC:
                 self._p3f_diverged_streak += 1
             else:
                 self._p3f_diverged_streak = 0
-            # F2.2 — EMA-smoothed streak. Single-frame dips don't fully reset
-            # the evidence (legacy hard counter does). Always tracked; only
-            # consumed by P3h reset gate when `use_diverged_streak_ema` flag
-            # is True. α=0.95 by default → TC ≈ 20 frames ≈ 200 ms at hop=160.
-            _alpha_dse = float(self.config.diverged_streak_ema_alpha)
-            self._p3f_diverged_streak_ema = (
-                _alpha_dse * self._p3f_diverged_streak_ema
-                + (1.0 - _alpha_dse) * (1.0 if _diverged_hit_this_frame else 0.0)
-            )
+            # F2.2 EMA-smoothed streak removed (P3h reset gate retired).
 
             # Pre-compute suspicious_dt criteria (used both in the flag
             # below and to gate refined_usable): NE evidence AND
@@ -3513,8 +3500,7 @@ class AEC:
         # IFFT cost paid.
         _filter_taps_full = (
             self.filter.get_time_domain_filter()
-            if (self.config.filter_analyzer_enabled
-                and self.filter is not None
+            if (self.filter is not None
                 and hasattr(self.filter, 'get_time_domain_filter'))
             else None
         )
@@ -3607,19 +3593,9 @@ class AEC:
                              else -1)
         # Filter quality proxy for reverb model update.
         # Default (binary): 1.0 if converged, else None (skip update).
-        # R0.4 (use_aec3_erle_reverb_quality=True): continuous [0,1] quality
-        # from FullBandErleEstimator::ErleInstantaneous (AEC3 parity port).
-        # Quality = (erle_log2 - min_log2) / (max_log2 - min_log2) with EMA.
+        # Binary reverb-update quality (use_aec3_erle_reverb_quality NOSHIP).
         _converged_for_reverb = bool(_aec3_converged and _filter_converged_enough)
-        if getattr(self.config, 'use_aec3_erle_reverb_quality', False):
-            _filter_q = self._update_erle_inst_quality(
-                near_psd=near_psd,
-                echo_psd=echo_psd,
-                far_psd=far_psd,
-                converged=_converged_for_reverb,
-            )
-        else:
-            _filter_q = 1.0 if _converged_for_reverb else None
+        _filter_q = 1.0 if _converged_for_reverb else None
         _stationary_block = self._aec3_stationarity.is_block_stationary()
         self._aec3_ree.update_reverb_models(
             frequency_response=_w_mag2,
