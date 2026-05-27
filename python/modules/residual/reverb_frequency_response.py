@@ -23,8 +23,8 @@ conservative max and the neighbour-max windows to ±125 Hz physical width
 HF tail response (sparse HF energy gets spread across the wider window),
 which the residual_echo_estimator then accumulates into ``reverb_model``,
 producing rev/dir ratios up to 1e6 and crushing G_hf during DT — the
-"painted black HF" artifact. v3.21 reverts to AEC3 strict literals.
-The fft-aware expansion is a beyond-AEC3 optimisation candidate → v3.22.
+"painted black HF" artifact. Uses AEC3 strict literals here; the
+fft-aware expansion would be a beyond-AEC3 optimisation candidate.
 """
 from __future__ import annotations
 

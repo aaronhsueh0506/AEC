@@ -1,8 +1,7 @@
 """AEC enums (mode / preset / filter state).
 
-Extracted from `aec.py` during refactor R.3. Pure value types — no
-runtime dependencies on other modules. Imported by ``aec.py`` and by
-sibling modules under ``python.modules``.
+Pure value types — no runtime dependencies on other modules. Imported
+by ``aec.py`` and by sibling modules under ``python.modules``.
 """
 from enum import Enum
 
@@ -23,7 +22,7 @@ _PB_MODES = (AecMode.PBFDAF, AecMode.PBFDKF, AecMode.SUBBAND)
 
 
 class AecPreset(Enum):
-    BALANCED = "balanced"       # v3.21 production: AEC3 residual chain
+    BALANCED = "balanced"       # production: AEC3 residual chain
 
 
 class AecFilterState(Enum):

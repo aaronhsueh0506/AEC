@@ -124,7 +124,7 @@ def per_block_growth_to_per_hop(per_block_multiplier: float,
 # H_error refresh (refined_filter_update_gain.cc:128-138).
 # AEC3 H_error is a Kalman-like internal scalar that is dimensionally
 # self-consistent with X²/E² in AEC3's own scale. Empirically verified
-# (v3.21 2026-05-18 63-case bench): rescaling H by 1/PSD_SCALE collapses
+# on 63-case bench: rescaling H by 1/PSD_SCALE collapses
 # learning (FS 3.804 → 2.311, ERLE drops from ~10 dB to ~2 dB) because mu
 # loses 6 orders of magnitude and K·E per call drops below numerical
 # noise. The 0.5·H·X² + n·E² denominator IS dimensionally invariant: in

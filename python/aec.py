@@ -16,7 +16,7 @@ CLI entry point: ``python3 python/aec.py mic.wav ref.wav out.wav --preset balanc
 """
 __version__ = "3.21.6"
 
-# v3.19 refactor R.3-R.11 — algorithm classes live under python/modules/.
+# Algorithm classes live under python/modules/.
 from modules.enums import (  # noqa: F401
     AecMode, AecPreset, AecFilterState,
 )

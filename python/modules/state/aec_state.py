@@ -214,7 +214,7 @@ class AecState:
         echo_path_gain: float = 1.0,
         render_block: Optional[np.ndarray] = None,
         filter_taps_full: Optional[np.ndarray] = None,
-        # v3.21.17 — SDE inputs (per-partition |W|² and X²). None when SDE OFF.
+        # SDE inputs (per-partition |W|² and X²). None when SDE OFF.
         sde_filter_freq_response: Optional[np.ndarray] = None,
         sde_x2_history: Optional[np.ndarray] = None,
     ) -> None:
@@ -320,8 +320,7 @@ class AecState:
 
         # 8. FilteringQualityAnalyzer (last; reads TM + convergence flags
         #    set above). filter_analyzer_consistent is consumed by the
-        #    optional v3.21.6 gate-3 AND knob; default-OFF preserves the
-        #    AEC3 legacy 4-gate AND verbatim.
+        #    optional gate-3 AND knob.
         self._filter_quality.update(
             active_render=active_render,
             transparent_mode=self.transparent_mode_active(),

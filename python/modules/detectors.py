@@ -217,8 +217,8 @@ class DoubleTalkAnalyzer:
 
 
 class FilterPlateauDetector:
-    """v3.10.0 — detect filter stuck at bad-convergence plateau and trigger
-    a one-shot recovery (taps reset + re-warmup).
+    """Detect filter stuck at bad-convergence plateau and trigger a
+    one-shot recovery (taps reset + re-warmup).
 
     Motivation
     ----------
@@ -226,9 +226,8 @@ class FilterPlateauDetector:
     to learn NE leak in the first ~100 frames. Once these poisoned taps
     are encoded, even a perfect DTD downstream only prevents *further*
     learning — the existing taps stay wrong, ERLE stays low (~4 dB),
-    coherence DTD never recovers (the positive-feedback trap that the
-    v3.9.x DTD fix addresses upstream of mu_scale, but not at the tap
-    level).
+    coherence DTD never recovers (the positive-feedback trap that
+    upstream DTD fixes mu_scale, but not at the tap level).
 
     Trigger conditions (all must hold for `consecutive_required` frames)
     ------------------------------------------------------------------
@@ -318,7 +317,7 @@ class FilterPlateauDetector:
         far_ratio = self._far_active_count / max(1, self._frame_count)
         dt_ratio = self._dt_signal_count / max(1, self._frame_count)
 
-        # v3.10.3 — require current frame to also show DT presence, otherwise
+        # Require current frame to also show DT presence, otherwise
         # session-level cumulative dt_ratio could remain >threshold long after
         # the DT-from-zero stretch ended and trigger plateau recovery during
         # pure FS segments (where ERLE-low + far-active alone are not pathological).
@@ -337,11 +336,10 @@ class FilterPlateauDetector:
         if self._consecutive_match < self.CONSECUTIVE_REQUIRED:
             return False
 
-        # Fire — recovery action.
-        # v3.10.3 (H3) — also reset cumulative far/dt counters so the next
-        # evaluation window judges post-reset behaviour, not the bad-startup
-        # history that caused this fire. _attempts and _last_reset_frame
-        # remain session-level (we still want MAX_ATTEMPTS to bound retries).
+        # Fire — recovery action. Reset cumulative far/dt counters so the
+        # next evaluation window judges post-reset behaviour, not the
+        # bad-startup history that caused this fire. _attempts and
+        # _last_reset_frame remain session-level (MAX_ATTEMPTS bounds retries).
         self._consecutive_match = 0
         self._attempts += 1
         self._cooldown_remaining = self.POST_RESET_GRACE_FRAMES

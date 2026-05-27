@@ -50,8 +50,8 @@ class EchoPathDelayEstimator:
         num_filters: int = 5,
         window_size_sub_blocks: int = 32,
         alignment_shift_sub_blocks: int = 24,
-        # v3.21 Phase A.1: AEC3 default 150 is int16 amplitude. Float-scale
-        # equivalent is 150/32768 = 4.578e-3.
+        # AEC3 default 150 is int16 amplitude. Float-scale equivalent
+        # is 150/32768 = 4.578e-3.
         excitation_limit: float = 150.0 / 32768.0,
         smoothing_fast: float = 0.7,
         smoothing_slow: float = 0.1,
@@ -59,11 +59,12 @@ class EchoPathDelayEstimator:
         delay_headroom_samples: int = 32,
         thresholds: Optional[DelaySelectionThresholds] = None,
         detect_pre_echo: bool = True,   # AEC3 strict default
-        # AEC3 default: true (echo_canceller3_config.h:73). PreEchoLagAggregator
-        # may override highest-peak with pre_echo_candidate when accumulated_error
-        # shows a leading peak. On cases WITHOUT real pre-echo this can produce
-        # noisy delay estimates; if that becomes load-bearing for our cohort,
-        # add a v3.22-tracked config toggle rather than diverging from AEC3.
+        # AEC3 default: true (echo_canceller3_config.h:73).
+        # PreEchoLagAggregator may override highest-peak with
+        # pre_echo_candidate when accumulated_error shows a leading peak.
+        # On cases WITHOUT real pre-echo this can produce noisy delay
+        # estimates; add a config toggle if it becomes load-bearing for
+        # our cohort rather than diverging from AEC3.
     ) -> None:
         self._capture_decimator = Decimator(_DOWN_SAMPLING_FACTOR)
         self._render_decimator = Decimator(_DOWN_SAMPLING_FACTOR)

@@ -110,13 +110,12 @@ class DominantNearendConfig:
     # PHYSICAL MEANING: speech-phoneme stability (wall-clock) + downstream
     # NE-vs-non-NE gain-rule coupling.
     # 500 ms = ~2.5 phonemes; empirically co-tuned on our 800-case cohort
-    # with the v3.21 SuppressionGain mask shapes. Stored as ms so the
-    # derived hop count auto-scales with hop_size at SuppressionGain
-    # construction (ms_to_hops(500, 160, 16000) = 50 hops at our default).
-    # SCALING: wall-clock derivation captures the phoneme part; minor
-    # re-tune may still be needed at very different hop sizes due to
-    # behavioural coupling with downstream gain rule.
-    # See docs/v3_21_4_time_domain_audit_verdict.md.
+    # with the SuppressionGain mask shapes. Stored as ms so the derived
+    # hop count auto-scales with hop_size at SuppressionGain construction
+    # (ms_to_hops(500, 160, 16000) = 50 hops at our default). SCALING:
+    # wall-clock derivation captures the phoneme part; minor re-tune may
+    # still be needed at very different hop sizes due to behavioural
+    # coupling with downstream gain rule.
     hold_duration_ms: int = 500
     # trigger_threshold — net-positive evidence depth (+1/-1 random walk)
     # before NE state triggers. DIMENSIONLESS sample count.
@@ -124,12 +123,11 @@ class DominantNearendConfig:
     # Depends on per-sample ENR estimator noise floor (set by our PBFDKF +
     # ENR pipeline, not by AEC3's matched-filter + refined). Wall-clock
     # derivation (blocks_to_hops or ms_to_hops) is WRONG here.
-    # Empirical: v3.21.4 V4.1 tested 12 -> 5 (= blocks_to_hops(12,160,16k))
-    # and BOTH FS+DT regressed — too few samples to reject estimator noise.
-    # SCALING: do NOT auto-derive from hop_size or wall-clock. Re-tune
-    # empirically if upstream filter / ENR estimator noise profile changes.
+    # Empirical: 12 → 5 (= blocks_to_hops(12,160,16k)) regressed both
+    # FS+DT — too few samples to reject estimator noise. SCALING: do
+    # NOT auto-derive from hop_size or wall-clock. Re-tune empirically
+    # if upstream filter / ENR estimator noise profile changes.
     # 12 samples = 120 ms only at hop=160/sr=16k.
-    # See docs/v3_21_4_time_domain_audit_verdict.md.
     trigger_threshold: int = 12
     use_during_initial_phase: bool = True
     use_unbounded_echo_spectrum: bool = True
@@ -137,13 +135,10 @@ class DominantNearendConfig:
     # (= bin 16 exclusive @ fft=128 = `spectrum.begin()+16` in
     # dominant_nearend_detector.cc:43-44). Covers F0+F1+F2 — speech
     # formant peak band.
-    # NOTE on v3.21.2 regression: prior 500→2000 Hz test regressed on
-    # 800-case (DT_static deg −0.016, FS_static echo −0.012) but that
-    # was BEFORE the bin 0 (DC) skip fix (Phase 2 2026-05-27). DC
-    # contamination inflated ne_sum at LF, so widening to 2000 Hz pushed
-    # ENR in the wrong direction. With bin 1+ slice (AEC3 parity), the
-    # regression mechanism is gone.
-    # Default flipped 500 → 2000 Hz 2026-05-27 for AEC3 strict alignment.
+    # Earlier widening to 2000 Hz regressed bench because of DC
+    # contamination inflating ne_sum at LF; with bin 1+ slice (AEC3
+    # parity) the regression mechanism is gone, and 2000 Hz matches
+    # AEC3 strict alignment.
     lf_endpoint_hz: float = 2000.0
 
 
@@ -415,15 +410,15 @@ class SuppressionGain:
         self._sr = int(sr)
         self._hop_size = int(hop_size)
         self._config = config or SuppressorConfig()
-        # v3.21.6 Sprint P3 — read echo_audibility from SuppressorConfig
-        # (was a hardcoded local default instance pre-P3).
+        # echo_audibility lives on SuppressorConfig so orchestrator can
+        # override use_stationarity_properties.
         self._echo_audibility = self._config.echo_audibility
         self._last_gain = np.ones(self._n_bins, dtype=np.float32)
         self._last_nearend = np.zeros(self._n_bins, dtype=np.float32)
         self._last_echo = np.zeros(self._n_bins, dtype=np.float32)
-        # v3.22 Sprint E.1 — stationary-mask fraction (0.0..1.0); updated
-        # by ``get_gain`` from the orchestrator-supplied per-bin mask.
-        # Read only via _ne_state_for_gain_rules; no-op when proxy flag OFF.
+        # Stationary-mask fraction (0.0..1.0); updated by ``get_gain``
+        # from the orchestrator-supplied per-bin mask. Read only via
+        # _ne_state_for_gain_rules; no-op when proxy flag OFF.
         self._stat_mask_frac: float = 0.0
         self._low_render = _LowNoiseRenderDetector()
         # AEC3 `nearend_average_blocks` is in 4 ms blocks; wall-clock rescale
@@ -464,16 +459,15 @@ class SuppressionGain:
         self._initial_state = bool(state)
 
     def is_dominant_nearend(self) -> bool:
-        # Public API to orchestrator: returns RAW detector state.
-        # The Sprint E.1 stat-aware proxy is INTERNAL to gain-policy
-        # decisions and intentionally does NOT propagate here (per directive
-        # "proxy 僅限 SuppressionGain gain-policy consumer sites").
+        # Public API to orchestrator: returns RAW detector state. The
+        # stat-aware proxy is INTERNAL to gain-policy decisions and
+        # intentionally does NOT propagate here.
         return self._dominant_nearend.is_nearend_state()
 
     def _ne_state_for_gain_rules(self) -> bool:
-        """v3.22 Sprint E.1 — augmented NE-presence used by gain-policy
-        consumer sites. Returns ``is_nearend_state()`` unmodified when
-        the proxy flag is OFF, preserving byte-equal behavior."""
+        """Augmented NE-presence used by gain-policy consumer sites.
+        Returns ``is_nearend_state()`` unmodified when the proxy flag is
+        OFF."""
         ne = self._dominant_nearend.is_nearend_state()
         if not self._config.stat_aware_ne_proxy_enabled:
             return ne

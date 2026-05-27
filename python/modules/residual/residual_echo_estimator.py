@@ -51,8 +51,8 @@ class EchoModelConfig:
     # drift). Stored as ms so the derived hop count auto-scales with
     # hop_size at ResidualEchoEstimator construction
     # (ms_to_hops(500, 160, 16000) = 50 hops at default 16k/10ms).
-    # Quiet-room cohort favours slower adapt-up (=less false positive on
-    # speech transients). See docs/v3_21_4_time_domain_audit_verdict.md.
+    # Quiet-room cohort favours slower adapt-up (=less false positive
+    # on speech transients).
     noise_floor_hold_ms: int = 500
     min_noise_floor_power: float = 1638400.0  # AEC3 default (= 16²·6400)
     noise_gate_power: float = 27509562.0       # AEC3 default
@@ -94,18 +94,18 @@ class ReverbConfig:
 
     ``mild_decay_scale = 1.0`` keeps mild_decay == decay (AEC3 strict —
     default_len == nearend_len). The legacy 0.5 Python value was a
-    Python-only acceleration during dominant_nearend — flagged for v3.22.
+    Python-only acceleration during dominant_nearend.
     """
 
     decay: float = 0.83
     mild_decay_scale: float = 1.0
     enabled: bool = True
-    # v3.21 Phase C.4 — adaptive decay + frequency response.
     # ``use_adaptive_decay = False`` is AEC3-strict default
-    # (default_len = 0.83 > 0 → AEC3 disables the estimator). The estimator
-    # is retained as a default-OFF v3.22 candidate.
+    # (default_len = 0.83 > 0 → AEC3 disables the estimator). The
+    # estimator is retained as a default-OFF candidate.
     # ``use_freq_response`` swaps the S²/X² coupling approximation for
-    # ReverbFrequencyResponse-produced tail_response (AEC3-strict linear path).
+    # ReverbFrequencyResponse-produced tail_response (AEC3-strict
+    # linear path).
     use_adaptive_decay: bool = False
     use_freq_response: bool = True
     # AEC3 echo_canceller3_config.h:139 default = true. AEC3 strict semantic:
@@ -166,11 +166,9 @@ class ResidualEchoEstimator:
             self._n_bins, self._noise_floor_hold_hops, dtype=np.int32
         )
         self._reverb_model = ReverbModel(n_bins=self._n_bins)
-        # v3.21 Phase C.2 — EchoGeneratingPower window walk. AEC3 walks the
-        # render history `[delay - pre, delay + post + 1)` and takes the
-        # element-wise max for each bin.
-        # Default: pre=0, post=1 (2 blocks). AEC3 default: pre=1, post=1 (3 blocks).
-        # R0.3: use_aec3_echo_gen_window=True sets pre=1 for AEC3 parity.
+        # EchoGeneratingPower window walk. AEC3 walks the render history
+        # `[delay - pre, delay + post + 1)` and takes the element-wise
+        # max for each bin. AEC3 default pre=1, post=1 (3 blocks).
         self._render_pre_window_size = 1 if self._use_aec3_echo_gen_window else 0
         self._render_post_window_size = 1
         self._render_history_size = (
@@ -199,9 +197,9 @@ class ResidualEchoEstimator:
         self._last_r2_path: str = 'unset'
         self._last_r2_direct_component = np.zeros(self._n_bins, dtype=np.float32)
         self._last_r2_reverb_component = np.zeros(self._n_bins, dtype=np.float32)
-        # v3.21 Phase C.4 — adaptive reverb decay + tail freq response.
-        # Both are LAZY-bound; orchestrator calls `attach_reverb_estimators`
-        # at the first hop where it knows `n_partitions` and `hop_size`.
+        # Adaptive reverb decay + tail freq response. Both are LAZY-bound;
+        # orchestrator calls `attach_reverb_estimators` at the first hop
+        # where it knows `n_partitions` and `hop_size`.
         self._reverb_decay_est: Optional[ReverbDecayEstimator] = None
         self._reverb_freq_resp: Optional[ReverbFrequencyResponse] = None
         if self._reverb_cfg.use_freq_response:
@@ -353,7 +351,7 @@ class ResidualEchoEstimator:
                 r2[:] = capture_psd
                 r2_unbounded[:] = capture_psd
             else:
-                # v3.21 Phase C.2 — EchoGeneratingPower window walk
+                # EchoGeneratingPower window walk
                 # (residual_echo_estimator.cc:133-165).
                 _rp = np.asarray(render_psd, dtype=np.float32)
                 if self._use_aec3_echo_gen_window:
@@ -472,8 +470,8 @@ class ResidualEchoEstimator:
     def _reverb_decay(self, dominant_nearend: bool) -> float:
         """``aec_state.ReverbDecay(mild=dominant_nearend)``.
 
-        v3.21 Phase C.4: when the adaptive estimator is bound + active, query
-        it. Otherwise fall back to the static config decay × mild_decay_scale.
+        When the adaptive estimator is bound + active, query it.
+        Otherwise fall back to the static config decay × mild_decay_scale.
         """
         if not self._reverb_cfg.enabled:
             return 0.0
@@ -503,9 +501,9 @@ class ResidualEchoEstimator:
         filter's direct-path coupling is sparse. The HF "painted black"
         artifact during DT is a direct consequence.
 
-        v3.21 Phase C.4: when ``ReverbFrequencyResponse`` is bound, use its
-        ``tail_response`` (canonical AEC3 mechanism) as the per-bin scaling.
-        Otherwise fall back to current-frame coupling ``S²/X²``.
+        When ``ReverbFrequencyResponse`` is bound, use its
+        ``tail_response`` (canonical AEC3 mechanism) as the per-bin
+        scaling. Otherwise fall back to current-frame coupling ``S²/X²``.
         """
         decay = self._reverb_decay(dominant_nearend)
         if decay <= 0.0:

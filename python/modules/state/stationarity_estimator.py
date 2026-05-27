@@ -7,7 +7,7 @@ When the render signal is stationary (e.g. a constant background hum on the
 far-end), the residual echo estimator should report ~0 echo contribution for
 those bins so the suppression gain doesn't spuriously damp nearend speech.
 
-NE-outlier root cause (v3.21 Phase C debug): cases like
+NE-outlier root cause: cases like
 `E0l0WVPQjEi6AmtbvfSYLA_nearend_singletalk` and
 `wJVPo4lexUK40x0nuK0KWg_nearend_singletalk` have a constant ~0.009 RMS hum
 on the lpb track; without stationarity awareness, the AEC3-port residual

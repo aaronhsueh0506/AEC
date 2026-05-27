@@ -1,8 +1,7 @@
 """AEC3-aligned delay subsystem (matched_filter + lag_aggregator + clockdrift
 + echo_path_delay_estimator + render_delay_controller).
 
-Replaces ``python/modules/delay.py`` (GCC-PHAT) for v3.21 onward; the
-legacy module stays in tree until Phase 5 legacy delete.
+Replaces the legacy GCC-PHAT ``python/modules/delay.py`` shim.
 
 Entry point: ``RenderDelayController(...)``. Per-hop call:
 

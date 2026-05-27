@@ -144,10 +144,10 @@ class PBFDAF:
         self._use_poor_excitation_gate_for_shadow: bool = True
         self._use_narrowband_mask_for_shadow: bool = True
         self._use_saturation_gate_for_shadow: bool = True
-        # v3.21.14 A.3 / A.4 supporting state (default values harmless under
-        # flag-OFF; orchestrator overrides on shadow construction). Defined on
-        # PBFDAF so subclass PBFDKF inherits the same state attributes; PBFDKF
-        # __init__ already re-assigns these to its own AEC3-derived defaults.
+        # Shared shadow-gate supporting state (orchestrator overrides on
+        # shadow construction). Defined on PBFDAF so subclass PBFDKF
+        # inherits the same state attributes; PBFDKF __init__ re-assigns
+        # these to its own AEC3-derived defaults.
         self._call_counter = 0
         self._poor_excitation_counter = 0  # safe init; orchestrator sets to hop-scaled 1000-block default
         self._render_signal_analyzer = None
@@ -198,9 +198,8 @@ class PBFDAF:
 
         NOTE on zero_filter: W.fill(0) is NOT AEC3 ZeroFilter parity.
         AEC3 AdaptiveFirFilter::ZeroFilter(current_size, max_size) zeroes only
-        partitions in [current..max). In steady state (current=max=13) this is a
-        NO-OP — W is fully preserved. W.fill(0) is a default-OFF ablation flag
-        (non-AEC3 behaviour); it is NOT listed as a v3.21 strict alignment candidate.
+        partitions in [current..max). In steady state (current=max=13) this
+        is a NO-OP — W is fully preserved. W.fill(0) is a non-AEC3 ablation.
         """
         from . import aec3_scale as _aec3_scale
         if delay_change and zero_filter:
@@ -220,7 +219,7 @@ class PBFDAF:
             with an optional error_override. Used by the orchestrator's Gap C
             wiring (AEC3 poor_coarse rescue copy uses E_refined for the same-hop
             coarse update; subtractor.cc:302-304). Default-OFF preserves
-            byte-equal vs the v3.21.6 inline path.
+            byte-equal vs the inline path.
         """
         hop = self.hop_size
 
@@ -329,26 +328,22 @@ class PBFDAF:
         """NLMS weight update.
 
         error_override: optional complex per-bin spec (shape [n_freqs]) that
-            replaces self.error_spec as the gradient source. Default None
-            preserves byte-equal vs v3.21.6 baseline.
+            replaces self.error_spec as the gradient source.
         """
         mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
         if mu_scale_arr.ndim == 0:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
         if not np.any(mu_scale_arr > 0):
             return
-        # v3.21.14 A.5 — AEC3 coarse_filter_update_gain.cc:56-57 saturation gate.
-        # `saturated_capture_signal → return`. Default-OFF preserves v3.21.6
-        # behaviour (shadow updates regardless of mic saturation).
+        # AEC3 coarse_filter_update_gain.cc:56-57 saturation gate.
+        # `saturated_capture_signal → return`.
         if (self._use_saturation_gate_for_shadow
                 and getattr(self, '_saturated_capture', False)):
             self._c1c5_trace['A5_sat_skip'] = True
             return
-        # v3.21.14 A.3 — AEC3 coarse_filter_update_gain.cc:51-61 call_counter +
+        # AEC3 coarse_filter_update_gain.cc:51-61 call_counter +
         # poor_excitation startup gate. `if poor_signal_excitation_counter_ <
         # size_partitions OR call_counter_ <= size_partitions → return`.
-        # Counter increment is gated on the flag so default-OFF leaves the
-        # counter untouched and produces byte-equal output.
         if self._use_poor_excitation_gate_for_shadow:
             self._call_counter += 1
             if (self._call_counter <= self.n_partitions
@@ -357,18 +352,16 @@ class PBFDAF:
                 self._c1c5_trace['A3_call_ctr'] = self._call_counter
                 self._c1c5_trace['A3_exc_ctr'] = self._poor_excitation_counter
                 return
-        # v3.21 Phase C.3+B/D extension — stationary-far gate (see PBFDKF
-        # version for full rationale). Shadow NLMS also skips W update when
-        # the StationarityEstimator flags the block as stationary; spurious
-        # mic-as-echo coupling from broadband stationary noise damages
-        # nearend equally in NLMS path.
+        # Stationary-far gate (see PBFDKF version for full rationale). Shadow
+        # NLMS also skips W update when the StationarityEstimator flags the
+        # block as stationary; spurious mic-as-echo coupling from broadband
+        # stationary noise damages nearend equally in NLMS path.
         if getattr(self, '_block_stationary', False):
             return
-        # v3.21.14 A.4 — AEC3 coarse_filter_update_gain.cc:75
-        # `render_signal_analyzer.MaskRegionsAroundNarrowBands(&mu)`. Apply the
-        # narrowband mask as a pre-multiplier on mu_scale_arr so any subsequent
-        # mu_eff = mu * mu_scale_arr inherits the mask. Default-OFF preserves
-        # baseline behaviour (no mask).
+        # AEC3 coarse_filter_update_gain.cc:75
+        # `render_signal_analyzer.MaskRegionsAroundNarrowBands(&mu)`. Apply
+        # the narrowband mask as a pre-multiplier on mu_scale_arr so any
+        # subsequent mu_eff = mu * mu_scale_arr inherits the mask.
         if (self._use_narrowband_mask_for_shadow
                 and self._render_signal_analyzer is not None):
             rsa_mask = np.ones(self.n_freqs, dtype=np.float32)
@@ -379,11 +372,9 @@ class PBFDAF:
         local_floor = self.power * 0.01 + self.delta        # per-bin 1% floor
         global_floor = np.mean(self.power) * 0.001 + self.delta  # global extreme floor
         power_floor = np.maximum(self.power, np.maximum(local_floor, global_floor))
-        # v3.21.14 A.1 — AEC3 coarse_filter_update_gain.cc:64-72 mu denominator
-        # uses partition-summed X² = Σ_p |X_buf[p]|² from the current frame
-        # (no smoothing). Default-OFF preserves v3.21.6 EMA-smoothed
-        # `power_floor × n_partitions` denominator. ON matches AEC3 SpectralSum
-        # source semantic so shadow transient response aligns with AEC3 coarse.
+        # AEC3 coarse_filter_update_gain.cc:64-72 mu denominator uses
+        # partition-summed X² = Σ_p |X_buf[p]|² from the current frame
+        # (no smoothing). Matches AEC3 SpectralSum source semantic.
         if self._use_partition_summed_x2_for_shadow_mu:
             x2_partition_sum = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
             denom = x2_partition_sum + self.delta
@@ -400,15 +391,12 @@ class PBFDAF:
                              if self._initial_state_active
                              else np.float32(1.0))
         mu_eff = (self.mu * mu_initial_boost * mu_scale_arr) / denom
-        # v3.21.14 A.2 — AEC3 coarse_filter_update_gain.cc:67-71 noise_gate
-        # hard zero. AEC3 sets `mu[k] = 0` where `X²[k] < noise_gate`. X²
-        # source = SpectralSum (matches A.1) regardless of A.1 flag, since
-        # this is the AEC3-semantic X² for gate purposes. Default-OFF
-        # preserves v3.21.6 floor-only behaviour (no hard zero).
-        # T1.2 (2026-05-26): uses FILTER_NOISE_GATE_POWER_FLOAT (20075344 int16²
-        # = 0.01870) — the AEC3 coarse filter gate constant confirmed from
-        # echo_canceller3_config.cc:99. The prior NOISE_GATE_POWER_FLOAT (27509562
-        # = 0.02562) was incorrectly ported from the suppression path.
+        # AEC3 coarse_filter_update_gain.cc:67-71 noise_gate hard zero.
+        # AEC3 sets `mu[k] = 0` where `X²[k] < noise_gate`. X² source =
+        # SpectralSum. Uses FILTER_NOISE_GATE_POWER_FLOAT (20075344 int16²
+        # = 0.01870) — the AEC3 coarse filter gate constant from
+        # echo_canceller3_config.cc:99 (the suppression-path
+        # NOISE_GATE_POWER_FLOAT 27509562 = 0.02562 is a different constant).
         if self._use_aec3_noise_gate_for_shadow:
             from . import aec3_scale as _aec3_scale
             x2_for_gate = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
@@ -464,12 +452,12 @@ class PBFDAF:
         self.W[:] = src.W
 
     def scale_filter(self, scale: float) -> None:
-        """v3.18 Phase B.3 — AEC3-aligned multiplicative W rescale.
+        """AEC3-aligned multiplicative W rescale.
 
-        Multiplies every partition's W by `scale` in-place. Mirrors
-        AEC3 subtractor.cc ScaleFilter action used by
-        FilterMisadjustmentEstimator to correct long-term W magnitude
-        drift. PBFDKF overrides to optionally rescale Kalman P as well.
+        Multiplies every partition's W by `scale` in-place. Mirrors AEC3
+        subtractor.cc ScaleFilter action used by FilterMisadjustmentEstimator
+        to correct long-term W magnitude drift. PBFDKF overrides to
+        optionally rescale Kalman P as well.
         """
         self.W *= np.complex64(scale)
 
@@ -498,8 +486,8 @@ class PBFDKF(PBFDAF):
         self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
         self._alpha_r = 0.95   # faster R tracking for DT protection
 
-        # v3.21 Phase B.4 — AEC3 startup / poor-excitation / saturation gates
-        # (refined_filter_update_gain.cc:96-99). The orchestrator sets
+        # AEC3 startup / poor-excitation / saturation gates
+        # (refined_filter_update_gain.cc:96-99). Orchestrator sets
         # `_saturated_capture` from its saturation detector and
         # `_poor_excitation_counter` from RenderSignalAnalyzer; we maintain
         # `_call_counter` here. While ANY of the gates fires, the weight
@@ -510,18 +498,17 @@ class PBFDKF(PBFDAF):
         # orchestrator overrides per-config hop_size at construction time.
         self._poor_excitation_counter = 400
         self._saturated_capture = False
-        # v3.21 Phase B.3 — RenderSignalAnalyzer for per-bin narrow-band mask.
+        # RenderSignalAnalyzer for per-bin narrow-band mask.
         # Set externally by orchestrator; None disables masking.
         self._render_signal_analyzer = None
 
-        # v3.21 Phase B.2 — AEC3 H_error per-bin state + leakage refresh.
-        # H_error replaces our P matrix as the primary Kalman-like state in
-        # the K compute (refined_filter_update_gain.cc:104-138). P stays as
-        # a parallel field for backwards-compat (PathChangeRegimeHandler
-        # overrides / diagnostic), but the K applied to W comes from
-        # H_error when use_aec3_h_error=True (default). orchestrator sets
-        # _e2_coarse_for_refresh, _disallow_leakage_diverged, _erl_per_bin
-        # per hop to feed the always-on refresh formula.
+        # AEC3 H_error per-bin state + leakage refresh. H_error replaces our
+        # P matrix as the primary Kalman-like state in the K compute
+        # (refined_filter_update_gain.cc:104-138). P stays as a parallel
+        # field for backwards-compat (PathChangeRegimeHandler overrides /
+        # diagnostic), but the K applied to W comes from H_error.
+        # Orchestrator sets _e2_coarse_for_refresh, _disallow_leakage_diverged,
+        # _erl_per_bin per hop to feed the always-on refresh formula.
         from . import aec3_scale as _aec3_scale
         self.H_error_per_bin = np.full(
             self.n_freqs, _aec3_scale.H_ERROR_INIT_FLOAT, dtype=np.float32
@@ -534,37 +521,28 @@ class PBFDKF(PBFDAF):
         self._leakage_diverged = np.float32(
             _aec3_scale.LEAKAGE_DIVERGED_PER_HOP_DEFAULT
         )
-        # Updated per hop by orchestrator. v3.21.1: per-bin support added.
-        # Scalar `_e2_coarse_for_refresh` is the legacy sum used by the
-        # OFF-default scalar path. Per-bin `_e2_coarse_per_bin` is the
-        # instantaneous coarse error PSD published per hop, consumed by
-        # the AEC3 cc:128-138 per-bin path when
-        # `_use_per_bin_h_error_refresh = True`.
+        # Updated per hop by orchestrator. Per-bin `_e2_coarse_per_bin` is
+        # the instantaneous coarse error PSD published per hop, consumed by
+        # the AEC3 cc:128-138 per-bin path. Scalar `_e2_coarse_for_refresh`
+        # is the legacy sum kept for backwards-compat.
         self._e2_coarse_for_refresh = 0.0
         self._e2_coarse_per_bin: Optional[np.ndarray] = None
         self._use_per_bin_h_error_refresh: bool = True
-        # v3.21.6 nores LF artifact debug 2026-05-22 — AEC3
-        # `RefinedFilterUpdateGain::Compute` partition-summed X² parity.
-        # OFF (default): X²_latest = |X_buf[curr_p]|² in denom / noise_gate
-        # / H_error decay (byte-equal preserved).
-        # ON: Σ_p |X_buf[p]|² (matches AEC3 render_buffer.SpectralSum).
-        # W update partition direction unchanged either way.
+        # AEC3 `RefinedFilterUpdateGain::Compute` partition-summed X² parity.
+        # ON: Σ_p |X_buf[p]|² (matches AEC3 render_buffer.SpectralSum) in
+        # denom / noise_gate / H_error decay. W update partition direction
+        # unchanged.
         self._use_partition_summed_x2_for_h_error_gain: bool = True
-        # v3.21.20 Phase C Fix B — startup hops before switching from single-
-        # partition to partition-sum X². 500 hops = 5 s @ hop=160/sr=16000.
-        # Orchestrator overrides from config field.
+        # Startup hops before switching from single-partition to
+        # partition-sum X². 500 hops = 5 s @ hop=160/sr=16000. Orchestrator
+        # overrides from config field.
         self._partition_sum_x2_startup_hops: int = 0
-        # v3.21.12 RefinedFilterUpdateGain input-parity audit 2026-05-22 — AEC3
-        # `RefinedFilterUpdateGain::Compute` (refined_filter_update_gain.cc:103-107)
-        # uses current-block `E2_refined[k]` = `SubtractorOutput.E2_refined` =
-        # per-bin spectrum of THIS block's e_refined (instantaneous, no
-        # smoothing). Our default uses `self._error_psd` (0.95 EMA of
-        # |error_spec|², ~200 ms time constant).
-        # OFF (default): smoothed `_error_psd` (byte-equal preserved).
-        # ON: current-block `|self.error_spec|²` in the `n_part × E²` term of
-        # the mu denominator (per-bin, no smoothing).
-        # W update direction unchanged. See
-        # docs/v3_21_12_refined_filter_update_gain_input_parity_plan.md.
+        # AEC3 `RefinedFilterUpdateGain::Compute`
+        # (refined_filter_update_gain.cc:103-107) uses current-block
+        # `E2_refined[k]` = `SubtractorOutput.E2_refined` = per-bin
+        # spectrum of THIS block's e_refined (instantaneous, no smoothing)
+        # in the `n_part × E²` term of the mu denominator. W update
+        # partition direction unchanged.
         self._use_current_e2_refined_in_h_error_denominator: bool = True
         self._disallow_leakage_diverged = False
         # ERL per bin (lazy init to 0.1 = -10 dB nominal; orchestrator
@@ -573,9 +551,10 @@ class PBFDKF(PBFDAF):
         # Master switch: use AEC3 H_error path (True, default) vs legacy
         # P-based denominator (False, diagnostic only).
         self._use_aec3_h_error = True
-        # R0.1 — refined filter noise gate constant. Default False → byte-equal
-        # (NOISE_GATE_POWER_FLOAT=0.02562). True → FILTER_NOISE_GATE_POWER_FLOAT=0.01870.
-        # Wired by orchestrator from config.use_aec3_filter_noise_gate_power.
+        # Refined filter noise gate constant — uses AEC3
+        # FILTER_NOISE_GATE_POWER_FLOAT=0.01870
+        # (echo_canceller3_config.cc:99). The suppression-path
+        # NOISE_GATE_POWER_FLOAT=0.02562 is a different constant.
         self._use_aec3_filter_noise_gate_power: bool = True
 
         # AEC3 refined_initial profile — first 2.5 s of active render uses
@@ -622,8 +601,7 @@ class PBFDKF(PBFDAF):
 
         Without H_error reset, post-EPC the filter retains stale H_error
         (small, post-convergence) and full partition-sum X² mu denominator
-        → mu stays small → can't re-track movement → DT damage accumulates
-        (wVYS movement-W-shift bug, evidence in v3.21.20 Phase A+C trace).
+        → mu stays small → can't re-track movement → DT damage accumulates.
         """
         from . import aec3_scale as _aec3_scale
         super().handle_echo_path_change(
@@ -667,7 +645,7 @@ class PBFDKF(PBFDAF):
         if mu_scale_arr.ndim == 0:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
 
-        # v3.21 Phase B.4 — AEC3 startup / poor-excitation / saturation gates
+        # AEC3 startup / poor-excitation / saturation gates
         # (refined_filter_update_gain.cc:96-99). Tick the call counter and
         # short-circuit out of the W update when any gate fires. R / Q / P
         # accounting still happens via the cold-init values; the filter just
@@ -684,26 +662,26 @@ class PBFDKF(PBFDAF):
                 self._h_error_refresh()
             return
 
-        # v3.21 Phase C.3+B/D extension — stationary-far gate. When the
-        # render-path StationarityEstimator flags the current block as
-        # stationary (constant background hum / fan / line noise), any
-        # filter adaptation against it produces spurious mic-as-echo
-        # coupling because the noise has no causal correlation with the
-        # nearend signal. RSA's `poor_signal_excitation` covers tonal
-        # peaks but not broadband stationary noise (RSA narrow-band counter
-        # 0% on E0l0 hum case); StationarityEstimator (B.3 / Phase C.3 noise
-        # tracker) catches that gap. When set, the orchestrator pushes
+        # Stationary-far gate. When the render-path StationarityEstimator
+        # flags the current block as stationary (constant background hum /
+        # fan / line noise), any filter adaptation against it produces
+        # spurious mic-as-echo coupling because the noise has no causal
+        # correlation with the nearend signal. RSA's `poor_signal_excitation`
+        # covers tonal peaks but not broadband stationary noise (RSA
+        # narrow-band counter 0% on E0l0 hum case); StationarityEstimator
+        # catches that gap. When set, the orchestrator pushes
         # `_block_stationary = True` before `_update_weights` runs.
         if getattr(self, '_block_stationary', False):
             if self._use_aec3_h_error:
                 self._h_error_refresh()
             return
 
-        # v3.21 Phase B.3 — RenderSignalAnalyzer narrow-band mask. Zeros mu
-        # for ±2 bins around any frequency that has sustained > 5 frames of
-        # tonal X²[k] > 3 × max(neighbors) condition. Mask is applied as a
-        # pre-multiplier on mu_scale_arr so the existing K_scaled = K_optimal
-        # × mu_scale_arr path naturally zeroes those bins' W update.
+        # RenderSignalAnalyzer narrow-band mask. Zeros mu for ±2 bins
+        # around any frequency that has sustained > 5 frames of tonal
+        # X²[k] > 3 × max(neighbors) condition. Mask is applied as a
+        # pre-multiplier on mu_scale_arr so the existing
+        # K_scaled = K_optimal × mu_scale_arr path naturally zeroes
+        # those bins' W update.
         if self._render_signal_analyzer is not None:
             rsa_mask = np.ones(self.n_freqs, dtype=np.float32)
             self._render_signal_analyzer.mask_regions_around_narrow_bands(rsa_mask)
@@ -714,8 +692,8 @@ class PBFDKF(PBFDAF):
         self._error_psd = self._alpha_r * self._error_psd + (1 - self._alpha_r) * error_psd
         self.R = np.maximum(self._error_psd, self.delta)
 
-        # v3.21 Phase B.2 — AEC3 H_error path. Computes per-bin Kalman gain
-        # via H_error rather than the legacy partition-summed P denominator.
+        # AEC3 H_error path. Computes per-bin Kalman gain via H_error
+        # rather than the legacy partition-summed P denominator.
         # Mirrors refined_filter_update_gain.cc:104-138.
         if self._use_aec3_h_error:
             self._update_weights_aec3(curr_p, mu_scale_arr, error_psd,
@@ -808,15 +786,14 @@ class PBFDKF(PBFDAF):
 
             self.W[p] += K_scaled * _err_grad
 
-            # PR-G1 (v3.7 candidate, GPT Phase 1): blended KX for P update.
-            # KX trace 2026-04-30 confirmed hypothesis on DT_st bucket: when
-            # mu_scale=0 (full DT freeze), W stays put but P drops 72% per
-            # cycle via K_optimal — P 與 W 不一致，DT 結束後 K 偏低、recovery 慢.
-            # Blend KX_optimal (current) with KX_scaled (W-consistent) by
-            # mu_mean: FS (mu=1) → 100% optimal, DT (mu=0) → 100% scaled,
-            # smooth transition between. Avoids both extremes' regression
-            # risk (full KX_optimal: P over-confident in DT; full KX_scaled:
-            # P over-cautious in steady state with weak far / per-bin gating).
+            # Blended KX for P update. When mu_scale=0 (full DT freeze),
+            # W stays put but P drops ~72%/cycle via K_optimal, leaving P
+            # inconsistent with W and slowing post-DT recovery. Blend
+            # KX_optimal with KX_scaled by mu_mean: FS (mu=1) → 100% optimal,
+            # DT (mu=0) → 100% scaled, smooth transition between. Avoids
+            # both extremes' regression risk (full KX_optimal: P
+            # over-confident in DT; full KX_scaled: P over-cautious in
+            # steady state with weak far / per-bin gating).
             KX_optimal = np.real(K_optimal * X).astype(np.float32)
             KX_scaled = np.real(K_scaled * X).astype(np.float32)
             mu_mean_f32 = np.float32(mu_mean)
@@ -877,26 +854,17 @@ class PBFDKF(PBFDAF):
           H_error[k] = clamp(H_error[k], floor, ceil)
         """
         # X² for AEC3 formula. AEC3 uses the partition-summed render power
-        # `X²[k] = Σ_p |X_buf[p][k]|²` (render_buffer.cc::SpectralSum) inside
-        # RefinedFilterUpdateGain::Compute. Our default port substitutes
-        # `X²_latest = |X_buf[curr_p]|²` (newest hop only), which under-states
-        # the render energy when the impulse response spans multiple
-        # partitions. The summed branch ships behind
-        # `_use_partition_summed_x2_for_h_error_gain` (default False →
-        # byte-equal vs v3.21.6 baseline).
+        # `X²[k] = Σ_p |X_buf[p][k]|²` (render_buffer.cc::SpectralSum)
+        # inside RefinedFilterUpdateGain::Compute.
         X_latest = self.X_buf[curr_p]
         if self._use_partition_summed_x2_for_h_error_gain:
-            # v3.21.20 Phase C Fix B — hybrid startup window.
-            # AEC3 partition-sum X² gives "stable but slow" convergence
-            # (mu effectively divided by n_partitions in early H_error-
-            # dominated phase). On our pipeline that was tuned around fast
-            # single-partition convergence, this starves the refined filter
-            # for the first ~5s (filter_w_norm ratio 0.032-0.288 vs single-
-            # partition baseline; trace evidence Phase A nVUnxqHLr).
-            # Hybrid: use single-partition X² during startup (fast initial
-            # convergence matches v3.21.6 behaviour), switch to partition-
-            # sum after `_partition_sum_x2_startup_hops` (AEC3 steady-state
-            # stability). 500 hops = 5 s @ hop=160/sr=16000.
+            # Hybrid startup: partition-sum X² gives "stable but slow"
+            # convergence (mu effectively divided by n_partitions in early
+            # H_error-dominated phase) which starves the refined filter for
+            # the first ~5s. Use single-partition X² during startup (fast
+            # initial convergence), switch to partition-sum after
+            # `_partition_sum_x2_startup_hops` for AEC3 steady-state
+            # stability. 500 hops = 5 s @ hop=160/sr=16000.
             if self._call_counter > self._partition_sum_x2_startup_hops:
                 X2 = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
             else:
@@ -906,12 +874,8 @@ class PBFDKF(PBFDAF):
         delta32 = np.float32(self.delta)
         n_part = np.float32(self.n_partitions)
         # mu[k] (AEC3 formula `mu = H_error / (0.5·H_error·X² + n·E²)`).
-        # E² source is controlled by `_use_current_e2_refined_in_h_error_denominator`
-        # (v3.21.12). OFF: smoothed `_error_psd` (legacy). ON: current-block
-        # `|error_spec|²` per-bin matching AEC3 `SubtractorOutput.E2_refined`.
-        # Comment correction: the previous "AEC3 also uses a smoothed
-        # estimate" assertion was WRONG — AEC3 uses the current SubtractorOutput
-        # E²_refined directly (refined_filter_update_gain.cc:106).
+        # E² source: current-block `|error_spec|²` per-bin matching AEC3
+        # `SubtractorOutput.E2_refined` (refined_filter_update_gain.cc:106).
         if self._use_current_e2_refined_in_h_error_denominator:
             e2_refined_current = (np.abs(self.error_spec) ** 2).astype(np.float32)
         else:
@@ -923,13 +887,11 @@ class PBFDKF(PBFDAF):
         )
         mu_aec3 = (self.H_error_per_bin / denom_aec3).astype(np.float32)
 
-        # v3.21 NE-outlier fix — per-bin noise_gate
-        # (refined_filter_update_gain.cc:104-111). AEC3 zeros mu on bins
-        # where X² < `noise_gate`. The gate consumes the same X² the
-        # denominator does — partition-summed when the flag is ON.
-        # R0.1: use_aec3_filter_noise_gate_power selects the correct AEC3
-        # filter gate constant (0.01870 from 20075344 int16²) vs the legacy
-        # default (0.02562 from 27509562, ported from suppression path).
+        # Per-bin noise_gate (refined_filter_update_gain.cc:104-111).
+        # AEC3 zeros mu on bins where X² < `noise_gate`. The gate consumes
+        # the same X² the denominator does. AEC3 filter-gate constant is
+        # FILTER_NOISE_GATE_POWER_FLOAT (0.01870), distinct from the
+        # suppression-path NOISE_GATE_POWER_FLOAT (0.02562).
         from . import aec3_scale as _aec3_scale
         _noise_gate = np.float32(
             _aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT
@@ -983,12 +945,10 @@ class PBFDKF(PBFDAF):
         decay step. Keeps H_error trending toward steady state and away
         from the init value during the startup window.
 
-        v3.21.1: per-bin path added behind ``_use_per_bin_h_error_refresh``
-        flag. AEC3 cc:128-138 uses per-bin instantaneous E²_refined vs
-        E²_coarse compare. Legacy scalar path stays as default OFF for
-        byte-equal preservation. Per-bin path uses fresh ``|self.error_spec|²``
-        for refined (addresses Codex F2 staleness on early-return paths
-        where the smoothed ``self._error_psd`` is from a prior frame).
+        Per-bin path: AEC3 cc:128-138 uses per-bin instantaneous E²_refined
+        vs E²_coarse compare. Uses fresh ``|self.error_spec|²`` for refined
+        (smoothed ``self._error_psd`` would be stale on early-return paths).
+        Legacy scalar path retained behind ``_use_per_bin_h_error_refresh``.
         """
         # AEC3 InitialState (aec_state.cc:336-353) — during the first 2.5 s of
         # active render, switch to refined_initial leakage (100×/10× steady)
@@ -1048,12 +1008,12 @@ class PBFDKF(PBFDAF):
         # within a few frames.
 
     def scale_filter(self, scale: float, scale_p: bool = False) -> None:
-        """v3.18 Phase B.3 — multiplicative W rescale with optional P scale.
+        """Multiplicative W rescale with optional P scale.
 
         AEC3 default (scale_p=False): scale W only; Kalman gain
         K = P·X*/(X·P·X* + R) self-corrects within a few frames.
-        Option A (scale_p=True): also scale P by scale² (Kalman-canonical
-        variance scaling). Set via config.filter_misadjustment_scale_p.
+        scale_p=True also scales P by scale² (Kalman-canonical variance
+        scaling). Set via config.filter_misadjustment_scale_p.
         """
         super().scale_filter(scale)
         if scale_p:

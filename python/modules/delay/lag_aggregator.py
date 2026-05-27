@@ -7,7 +7,7 @@ aggregator is called per-block (4 ms) → 250 estimates ≈ 1 s of memory.
 In our port the aggregator is called per inner block (4 ms via the
 EchoPathDelayEstimator outer→inner adapter), so 250 stays verbatim.
 
-v3.21 Phase A.2: PreEchoLagAggregator ported. AEC3
+PreEchoLagAggregator ported from AEC3
 matched_filter_lag_aggregator.cc:130-189. When enabled (``detect_pre_echo=True``
 on the matched filter AND constructor flag ``detect_pre_echo=True``), the
 aggregator runs a SECOND histogram on the pre-echo lag (earlier reflection
@@ -174,7 +174,7 @@ class MatchedFilterLagAggregator:
     thresholds. ``ReliableDelayFound()`` latches True once the converged
     threshold has ever been crossed; cleared only by hard reset.
 
-    v3.21 Phase A.2: ``detect_pre_echo`` enables the PreEchoLagAggregator
+    ``detect_pre_echo`` enables the PreEchoLagAggregator
     (matched_filter_lag_aggregator.cc:73-99). When active, the reported
     delay switches from highest-peak candidate to pre-echo candidate.
     """

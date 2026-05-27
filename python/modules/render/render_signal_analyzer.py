@@ -1,7 +1,7 @@
 """Render signal analyzer — verbatim port of AEC3
 docs/aec3_extracts/src/aec3/render_signal_analyzer.{cc,h}.
 
-v3.21 Phase B.3. Used by the refined / coarse filter gain compute to:
+Used by the refined / coarse filter gain compute to:
 
 1. Detect narrow-band (tonal) render regions and zero the corresponding mu
    bins via ``mask_regions_around_narrow_bands(mu)`` (AEC3 cc:143-159).

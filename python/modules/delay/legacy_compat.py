@@ -1,5 +1,5 @@
 """Compatibility shim: exposes legacy DelayEstimator API on top of the
-AEC3-aligned EchoPathDelayEstimator. v3.21 Phase A.1.
+AEC3-aligned EchoPathDelayEstimator.
 
 Drop-in replacement for ``legacy_delay.DelayEstimator`` at orchestrator.py:374.
 The orchestrator has ~30 call sites referencing ``self.delay_est`` via the
@@ -18,8 +18,8 @@ Design notes:
     inside the estimator).
   * Confidence mapping: None→0.0, COARSE→0.5, REFINED→1.0 — matches the
     orchestrator's ≥0.3 / ≥0.5 / is_solid gates.
-  * The legacy v3.17 B.1 EPC fast-cadence path writes ``._period_samples``
-    and ``._alpha``; AEC3 matched filter is always-on per 4 ms inner block,
+  * The legacy EPC fast-cadence path writes ``._period_samples`` and
+    ``._alpha``; AEC3 matched filter is always-on per 4 ms inner block,
     so these are accepted as no-op compat attributes.
   * ``latest_variability`` synthesises ``EchoPathVariability`` from the
     delay change for future migrations that want the AEC3-native event.
@@ -46,8 +46,7 @@ class LegacyDelayShim:
         self._latest_variability: Optional[EchoPathVariability] = None
         self._pending_flush = False
 
-        # v3.17 B.1 EPC fast-cadence writes these (orchestrator.py:1628-1640).
-        # No-op compat attributes.
+        # Legacy EPC fast-cadence writes these. No-op compat attributes.
         self._period_samples = 0
         self._alpha = 0.6
 

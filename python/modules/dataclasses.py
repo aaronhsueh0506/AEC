@@ -81,9 +81,8 @@ class AecStats:
     echo_psd_mean_db: float  # Mean residual echo PSD estimate (dB)
     error_psd_mean_db: float # Mean error PSD (dB)
 
-    # v3.15 §1.5 Arc T — cohort tail real-time detector signal (default
-    # False when arc_t_cohort_detector OFF). Placed at end of dataclass
-    # to satisfy "default-args-after-non-default" rule.
+    # Arc T cohort tail real-time detector signal. Placed at end of
+    # dataclass to satisfy "default-args-after-non-default" rule.
     cohort_tail_T: bool = False
 
 
@@ -155,8 +154,7 @@ class AecEventType:
       EpcEvent.source='epv'          → gain_change=True
       EpcEvent.source='shadow_rise'  → gain_change=True
 
-    Buffer-flush and clock_drift have no current detector — reserved for
-    Phase F.3+ / Delay-revisit / v3.19+.
+    Buffer-flush and clock_drift have no current detector.
     """
     DELAY_NONE = 'none'
     DELAY_BUFFER_FLUSH = 'buffer_flush'
