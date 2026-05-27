@@ -67,17 +67,18 @@ _DEFAULT_NORMAL_TUNING = SuppressorTuning(
 class HighFrequencySuppressionConfig:
     # AEC3 echo_canceller3_config.h:HighFrequencySuppression production defaults:
     #   limiting_gain_band = 16   → 2000 Hz @ kFftLength=128 (125 Hz/bin)
-    #   bands_in_limiting_gain = 1 → 125 Hz width @ kFftLength=128
-    # Expressed in Hz so they scale correctly to any fft_size.
-    # Prior Python config (4000 Hz / 156 Hz width) was a TUNING value with
-    # an incorrect "AEC3 ships lgb=30/biq=5" comment — actual AEC3 source
-    # ships 16/1. Anchoring at 4 kHz lands in voice-quiet F4 region so the
-    # single-band MIN is near-zero in DT → propagated to all 4-8 kHz bins →
-    # "HF black block" voice damage. AEC3 strict 2 kHz anchor lands on
-    # F2/F3 formant peaks → MIN stays moderate during voice → no damage.
-    # Restored to AEC3 strict 2026-05-27.
+    #   bands_in_limiting_gain = 1 → single resolution cell (1 bin count)
+    # Anchor freq: expressed in Hz so it scales correctly to any fft_size.
+    # Anchor width: AEC3's `bands_in_limiting_gain` is a BIN COUNT (single
+    # spectral cell), not a freq width. At higher fft resolution the same
+    # 125 Hz freq band covers 4 bins, and MIN over 4 bins finds deeper
+    # spectral nulls than MIN over 1 bin → "HF black block" propagation.
+    # Use 1-bin width (= 31.25 Hz @ our fft=512) to match AEC3's strict
+    # single-cell semantic. Prior 125 Hz freq-width interpretation made
+    # the cap 4× more aggressive at our fft resolution.
+    # Restored to AEC3 strict single-cell 2026-05-27.
     limiting_gain_freq_hz: float = 2000.0
-    limiting_gain_width_hz: float = 125.0
+    limiting_gain_width_hz: float = 31.25
 
 
 @dataclass(frozen=True)
