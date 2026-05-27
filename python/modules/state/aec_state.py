@@ -32,7 +32,6 @@ from .filter_delay import FilterDelay
 from .filter_quality import FilteringQualityAnalyzer
 from .initial_state import InitialState
 from .saturation_detector import SaturationDetector
-from .transparent_mode import TransparentMode
 from ..delay.delay_types import (
     DelayAdjustment,
     DelayEstimate,
@@ -62,28 +61,13 @@ class AecStateConfig:
     erle_max_l: float = 4.0
     erle_max_h: float = 1.5
     erl_startup_hops: int = 200
-    enable_transparent_mode: bool = True
+    # TransparentMode is permanently disabled in production (legacy
+    # 10-frame ERLE latch was retired); kwarg preserved as no-op for
+    # AEC3-spec API compatibility.
+    enable_transparent_mode: bool = False
     transparent_linear_and_stable: bool = False
-    # v3.21.6 Sprint P1 — full AEC3 FilterAnalyzer port. When True, feeds
-    # per-channel filter delays into FilterDelay (instead of leaving the
-    # analyzer kwarg None) and exposes any_filter_consistent /
-    # max_echo_path_gain. Default OFF preserves v3.21.5 byte-equal.
-    enable_filter_analyzer: bool = False
-
-    # v3.21.6 nores LF artifact debug 2026-05-22 — usable_linear gate-3
-    # ablation knobs (default-OFF = AEC3 legacy behaviour). See
-    # [[project-usable-linear-gate3-latch-bug]] memory + filter_quality.py
-    # docstring for the rationale.
-    usable_linear_convergence_hops_required: int = 0
-    usable_linear_require_filter_analyzer_consistent: bool = False
-    usable_linear_disable_external_delay_shortcut: bool = False
-
-    # v3.21.17 SignalDependentErleEstimator port (2026-05-23). Default 0 = OFF
-    # (SDE not instantiated, byte-equal v3.21.6 preserved). See AecConfig
-    # field docstring for activation semantics.
-    signal_dependent_erle_sections: int = 0
-    sde_num_blocks: int = 13
-    sde_delay_headroom_blocks: int = 0
+    # AEC3 FilterAnalyzer port is shipped on; legacy off-path retired.
+    enable_filter_analyzer: bool = True
 
 
 class AecState:
@@ -102,12 +86,6 @@ class AecState:
         )
         self._filter_quality = FilteringQualityAnalyzer(
             use_linear_filter=self._config.use_linear_filter,
-            convergence_hops_required=int(
-                self._config.usable_linear_convergence_hops_required),
-            require_filter_analyzer_consistent=bool(
-                self._config.usable_linear_require_filter_analyzer_consistent),
-            disable_external_delay_shortcut=bool(
-                self._config.usable_linear_disable_external_delay_shortcut),
         )
         self._saturation_detector = SaturationDetector()
         self._erle_estimator = ErleEstimator(
@@ -116,21 +94,13 @@ class AecState:
             min_erle=self._config.erle_min,
             max_erle_l=self._config.erle_max_l,
             max_erle_h=self._config.erle_max_h,
-            signal_dependent_erle_sections=int(getattr(
-                self._config, 'signal_dependent_erle_sections', 0)),
-            sde_num_blocks=int(getattr(self._config, 'sde_num_blocks', 13)),
-            sde_delay_headroom_blocks=int(getattr(
-                self._config, 'sde_delay_headroom_blocks', 0)),
         )
         self._erl_estimator = ErlEstimator(
             startup_phase_length_hops=self._config.erl_startup_hops,
             n_bins=self._config.n_bins,
         )
-        self._transparent_mode = (
-            TransparentMode(linear_and_stable_echo_path=self._config.transparent_linear_and_stable)
-            if self._config.enable_transparent_mode
-            else None
-        )
+        # TransparentMode permanently disabled in production.
+        self._transparent_mode = None
         self._filter_analyzer: Optional[FilterAnalyzer] = (
             FilterAnalyzer() if self._config.enable_filter_analyzer else None
         )

@@ -41,7 +41,7 @@ from .filters import NlmsFilter, PBFDAF, PBFDKF
 from .dtd import DtdEstimator
 from .detectors import (
     RenderActivityDetector, FilterConvergenceAnalyzer,
-    DoubleTalkAnalyzer, FilterPlateauDetector,
+    DoubleTalkAnalyzer,
 )
 from .epc import (
     classify_epc_event, EchoPathChangeDetector, PathChangeRegimeHandler,
@@ -696,40 +696,19 @@ class AEC:
                 EchoAudibilityConfig,
             )
             n_bins = int(self.filter.n_freqs)
-            # v3.21.6 Sprint P2: TransparentMode gating now follows
-            # AecConfig.transparent_mode_enabled (default False until cohort
-            # verify; original disable rationale cited the legacy 10-frame
-            # ERLE latch, retired by the AEC3-style per-frame e²<0.5·y²
-            # gate now computed in _aec3_post).
+            # AEC3-aligned AecState: TransparentMode disabled (cohort-verify
+            # never reached), FilterAnalyzer enabled (shipped P1 default).
             self._aec3_state = _Aec3State(_Aec3StateConfig(
                 n_bins=n_bins,
-                enable_transparent_mode=bool(self.config.transparent_mode_enabled),
-                enable_filter_analyzer=bool(self.config.filter_analyzer_enabled),
-                # v3.21.6 nores LF artifact debug 2026-05-22 — usable_linear
-                # gate-3 ablation knobs (default-OFF byte-equal).
-                usable_linear_convergence_hops_required=int(getattr(
-                    self.config, 'usable_linear_convergence_hops_required', 0)),
-                usable_linear_require_filter_analyzer_consistent=bool(getattr(
-                    self.config, 'usable_linear_require_filter_analyzer_consistent', False)),
-                usable_linear_disable_external_delay_shortcut=bool(getattr(
-                    self.config, 'usable_linear_disable_external_delay_shortcut', False)),
-                # v3.21.17 SDE — default 0 = OFF preserves byte-equal
-                signal_dependent_erle_sections=int(getattr(
-                    self.config, 'signal_dependent_erle_sections', 0)),
-                sde_num_blocks=int(getattr(
-                    self.config, 'sde_num_blocks',
-                    getattr(self.filter, 'n_partitions', 13))),
-                sde_delay_headroom_blocks=int(getattr(
-                    self.config, 'sde_delay_headroom_blocks', 0)),
+                enable_transparent_mode=False,
+                enable_filter_analyzer=True,
             ))
             self._aec3_ree = ResidualEchoEstimator(
                 n_bins=n_bins,
                 sr=self.config.sample_rate,
                 hop_size=self.config.hop_size,
-                use_aec3_residual_noise_gate=bool(getattr(
-                    self.config, 'use_aec3_residual_noise_gate', False)),
-                use_aec3_echo_gen_window=bool(getattr(
-                    self.config, 'use_aec3_echo_gen_power_window', False)),
+                use_aec3_residual_noise_gate=True,
+                use_aec3_echo_gen_window=True,
             )
             # v3.21.2 S2 P3: SubbandNearendDetector experiment via env vars
             # (so byte-equal at default + easy iteration). Set
@@ -1065,16 +1044,10 @@ class AEC:
         # Double-talk analyzer (owns _dt_from_energy / _dt_from_shadow / _shadow_advantage)
         self._dt_analyzer = DoubleTalkAnalyzer(self.config)
 
-        # v3.10.0 — filter plateau detector (one-shot recovery for
-        # DT-from-frame-0 cases where main filter learned NE leak in the
-        # first ~100 frames and is now stuck below convergence threshold).
-        # v3.21 strict AEC3 alignment: gated by enable_plateau_detector
-        # (default OFF). AEC3 has no equivalent mechanism; opt-in only.
-        self._plateau_detector = (
-            FilterPlateauDetector()
-            if getattr(self.config, 'enable_plateau_detector', False)
-            else None
-        )
+        # FilterPlateauDetector (Python-only safety net) was retired under
+        # the v3.21 strict AEC3 alignment cycle. Attribute preserved as
+        # None for legacy diag readers.
+        self._plateau_detector = None
 
         # P3e — DT advisory gate state. Hold counter is in samples so we
         # can convert dt_advisory_hold_ms once. Diag fields exposed via _diag.
@@ -1535,31 +1508,15 @@ class AEC:
         # Filter-output-derived state (always cleared):
         self._aec3_state = _Aec3State(_Aec3StateConfig(
             n_bins=n_bins,
-            enable_transparent_mode=bool(self.config.transparent_mode_enabled),
-            enable_filter_analyzer=bool(self.config.filter_analyzer_enabled),
-            usable_linear_convergence_hops_required=int(getattr(
-                self.config, 'usable_linear_convergence_hops_required', 0)),
-            usable_linear_require_filter_analyzer_consistent=bool(getattr(
-                self.config, 'usable_linear_require_filter_analyzer_consistent', False)),
-            usable_linear_disable_external_delay_shortcut=bool(getattr(
-                self.config, 'usable_linear_disable_external_delay_shortcut', False)),
-            # v3.21.17 SDE — default 0 = OFF preserves byte-equal
-            signal_dependent_erle_sections=int(getattr(
-                self.config, 'signal_dependent_erle_sections', 0)),
-            sde_num_blocks=int(getattr(
-                self.config, 'sde_num_blocks',
-                getattr(self.filter, 'n_partitions', 13))),
-            sde_delay_headroom_blocks=int(getattr(
-                self.config, 'sde_delay_headroom_blocks', 0)),
+            enable_transparent_mode=False,
+            enable_filter_analyzer=True,
         ))
         self._aec3_ree = ResidualEchoEstimator(
             n_bins=n_bins,
             sr=self.config.sample_rate,
             hop_size=self.config.hop_size,
-            use_aec3_residual_noise_gate=bool(getattr(
-                self.config, 'use_aec3_residual_noise_gate', False)),
-            use_aec3_echo_gen_window=bool(getattr(
-                self.config, 'use_aec3_echo_gen_power_window', False)),
+            use_aec3_residual_noise_gate=True,
+            use_aec3_echo_gen_window=True,
         )
         self._aec3_sg = SuppressionGain(
             n_bins=n_bins,
@@ -4486,31 +4443,8 @@ class AEC:
                 and hasattr(self.filter, 'get_time_domain_filter'))
             else None
         )
-        # v3.21.17 — feed AEC3 SignalDependentErleEstimator per-partition
-        # |W|² and X² history when SDE is enabled. Default OFF: SDE
-        # not instantiated, kwargs ignored, no compute cost.
-        _sde_W2 = None
-        _sde_X2 = None
-        if int(getattr(self.config, 'signal_dependent_erle_sections', 0)) > 0 \
-                and self.filter is not None and hasattr(self.filter, 'W'):
-            _sde_W2 = (np.abs(self.filter.W) ** 2).astype(np.float32)
-            _sde_X2 = (np.abs(self.filter.X_buf) ** 2).astype(np.float32)
-        # v3.21 alignment C — SaturationDetector subtractor output max-abs.
-        # AEC3 SaturationDetector::Update receives s_refined_max_abs and
-        # s_coarse_max_abs (echo estimates: near_time − e_time). The orchestrator
-        # previously always passed 0.0 (default kwarg). Gated by config flag;
-        # default-OFF preserves byte-equal. raw_output = e_refined_time (param).
-        if getattr(self.config, 'saturation_subtractor_inputs_enabled', False):
-            _s_refined_time = near_end - raw_output
-            _s_refined_max_abs = float(np.max(np.abs(_s_refined_time)))
-            _s_coarse_max_abs = (
-                float(np.max(np.abs(near_end - self._last_shadow_output_time)))
-                if self._last_shadow_output_time is not None
-                else _s_refined_max_abs
-            )
-        else:
-            _s_refined_max_abs = 0.0
-            _s_coarse_max_abs = 0.0
+        # SaturationDetector subtractor output max-abs (retired flag — kept
+        # at 0.0 for AEC3 contract; SDE retired).
         self._aec3_state.update(
             bridge=bridge,
             external_delay=ext_delay,
@@ -4521,10 +4455,10 @@ class AEC:
             active_render=(far_pwr > 1e-4),
             render_block=render_block_scaled,
             filter_taps_full=_filter_taps_full,
-            sde_filter_freq_response=_sde_W2,
-            sde_x2_history=_sde_X2,
-            subtractor_s_refined_max_abs=_s_refined_max_abs,
-            subtractor_s_coarse_max_abs=_s_coarse_max_abs,
+            sde_filter_freq_response=None,
+            sde_x2_history=None,
+            subtractor_s_refined_max_abs=0.0,
+            subtractor_s_coarse_max_abs=0.0,
         )
         # A.1 trace: AecState-derived initial_state + transition edge (Gate 0).
         _a1_aec3_initial_state = self._aec3_state.initial_state_active()
