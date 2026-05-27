@@ -81,27 +81,32 @@ class EpStrengthConfig:
 
 @dataclass(frozen=True)
 class ReverbConfig:
-    """Fixed reverb tail until ReverbDecayEstimator + ReverbFrequencyResponse
-    are ported. ``decay`` is per-hop multiplier; with our 10 ms hop:
+    """AEC3-strict reverb tail. Mirrors ``EchoCanceller3Config.ep_strength``:
 
-      decay = 0.85 -> -10 dB tail in ~13 hops (~130 ms; reasonable indoor)
-      decay = 0.70 -> -10 dB tail in ~6 hops  (~60 ms; small room)
-      decay = 0.95 -> -10 dB tail in ~45 hops (~450 ms; very reverberant)
+      AEC3 default: default_len = nearend_len = 0.83  (h:134-135)
+      ReverbDecayEstimator uses default_len for steady decay, nearend_len for
+      mild decay. With default_len > 0, AEC3 disables adaptive estimation and
+      returns the static value (use_adaptive_echo_decay_ flag in
+      reverb_decay_estimator.cc:92 = (default_len < 0)).
 
-    ``mild_decay_scale`` is multiplied with decay when DominantNearend (matches
-    AEC3 ``ReverbDecay(/*mild=*/true)``: shorter reverb during nearend talk
-    so we don't over-suppress nearend speech tail).
+    Per-hop multiplier at our 10 ms hop:
+      decay = 0.83 -> -10 dB tail in ~12 hops (~120 ms; typical indoor)
+
+    ``mild_decay_scale = 1.0`` keeps mild_decay == decay (AEC3 strict —
+    default_len == nearend_len). The legacy 0.5 Python value was a
+    Python-only acceleration during dominant_nearend — flagged for v3.22.
     """
 
-    decay: float = 0.85
-    mild_decay_scale: float = 0.5
+    decay: float = 0.83
+    mild_decay_scale: float = 1.0
     enabled: bool = True
     # v3.21 Phase C.4 — adaptive decay + frequency response.
-    # When `use_adaptive_decay = True`, ReverbDecayEstimator is consulted per
-    # hop with the latest filter taps and the returned scalar replaces the
-    # static `decay` above. `use_freq_response` swaps the S²/X² coupling
-    # approximation for ReverbFrequencyResponse-produced tail_response.
-    use_adaptive_decay: bool = True
+    # ``use_adaptive_decay = False`` is AEC3-strict default
+    # (default_len = 0.83 > 0 → AEC3 disables the estimator). The estimator
+    # is retained as a default-OFF v3.22 candidate.
+    # ``use_freq_response`` swaps the S²/X² coupling approximation for
+    # ReverbFrequencyResponse-produced tail_response (AEC3-strict linear path).
+    use_adaptive_decay: bool = False
     use_freq_response: bool = True
     # AEC3 echo_canceller3_config.h:139 default = true. AEC3 strict semantic:
     # `tail_response[k] = max(tail, raw_tail_partition)` per bin, then
@@ -180,6 +185,12 @@ class ResidualEchoEstimator:
         # Index 0 = most recent frame, index k = k hops ago.
         # Used only when _use_aec3_echo_gen_window=True.
         self._delay_render_buf: deque = deque(maxlen=_DELAY_BUF_SIZE)
+        # AEC3 strict reverb render history (residual_echo_estimator.cc:367-376).
+        # Reverb model is fed render from `FilterLengthBlocks() + 1` blocks ago
+        # (linear path) or `MinDirectPathFilterDelay() + 1` blocks ago (nonlinear).
+        # Index 0 = current frame (after push), index k = k hops ago. Sized to
+        # cover the largest plausible filter length + headroom.
+        self._reverb_render_history: deque = deque(maxlen=_DELAY_BUF_SIZE)
         # Diagnostics for last estimate() call (readable by orchestrator trace).
         self._last_echo_gen_delay_blocks: int = 0
         self._last_echo_gen_idx_start: int = 0
@@ -199,7 +210,6 @@ class ResidualEchoEstimator:
                 use_conservative_tail_frequency_response=(
                     self._reverb_cfg.conservative_tail_freq_response
                 ),
-                sr=self._sr,  # for fft-resolution-aware neighbour-max window
             )
 
     def attach_reverb_decay_estimator(self, n_partitions: int,
@@ -268,6 +278,7 @@ class ResidualEchoEstimator:
         dominant_nearend: bool,
         filter_freq_response: Optional[np.ndarray] = None,
         filter_delay_blocks: int = 0,
+        filter_length_blocks: int = 0,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Returns ``(R2, R2_unbounded)``.
 
@@ -280,6 +291,14 @@ class ResidualEchoEstimator:
         """
         # Step 1: update stationary render noise floor.
         self._update_render_noise_power(render_psd)
+
+        # AEC3 strict reverb history: push current render to ring buffer so
+        # reverb update can read N+1 blocks ago (mirrors AEC3
+        # render_buffer.Spectrum(first_reverb_partition), cc:367-376).
+        # Index 0 = current frame after appendleft.
+        self._reverb_render_history.appendleft(
+            np.asarray(render_psd, dtype=np.float32).copy()
+        )
 
         r2 = np.empty(self._n_bins, dtype=np.float32)
         r2_unbounded = np.empty(self._n_bins, dtype=np.float32)
@@ -316,7 +335,8 @@ class ResidualEchoEstimator:
             # current-frame per-bin coupling S²/X² (clipped to avoid
             # noise blow-up where X² is tiny).
             self._update_reverb_linear(
-                render_psd, s2_linear, dominant_nearend
+                render_psd, s2_linear, dominant_nearend,
+                filter_length_blocks,
             )
             reverb = self._reverb_model.reverb
             self._last_r2_direct_component = r2.copy()
@@ -393,9 +413,17 @@ class ResidualEchoEstimator:
                     aec_state, gain_for_early_reflections=False
                 )
                 decay = self._reverb_decay(dominant_nearend)
-                self._reverb_model.update_no_freq_shaping(
-                    render_psd, scaling=ep_late, decay=decay
-                )
+                # AEC3 nonlinear reverb update reads render from
+                # MinDirectPathFilterDelay() + 1 blocks ago (cc:370).
+                _nl_offset = max(0, int(filter_delay_blocks)) + 1
+                if _nl_offset < len(self._reverb_render_history):
+                    delayed_render = self._reverb_render_history[_nl_offset]
+                else:
+                    delayed_render = None
+                if delayed_render is not None:
+                    self._reverb_model.update_no_freq_shaping(
+                        delayed_render, scaling=ep_late, decay=decay
+                    )
                 reverb = self._reverb_model.reverb
                 self._last_r2_direct_component = r2.copy()
                 self._last_r2_reverb_component = np.asarray(
@@ -458,23 +486,39 @@ class ResidualEchoEstimator:
         return float(d)
 
     def _update_reverb_linear(
-        self, render_psd: np.ndarray, s2_linear: np.ndarray, dominant_nearend: bool
+        self, render_psd: np.ndarray, s2_linear: np.ndarray,
+        dominant_nearend: bool, filter_length_blocks: int,
     ) -> None:
         """Linear-mode reverb update (AEC3 cc:390-392).
 
+        AEC3 strict (cc:367-376): the render power fed to the reverb model
+        is from ``FilterLengthBlocks() + 1`` blocks ago — i.e. render whose
+        echo arrives AFTER the linear filter's tap coverage and therefore
+        constitutes the late reverberant tail the linear filter cannot model.
+
+        Using the current frame's render here (the prior Python behaviour)
+        double-counts: the linear filter is already cancelling that energy's
+        direct echo via the S²/ERLE path, then reverb_model re-injects it
+        as "tail" → R² grossly over-estimated, especially at HF where the
+        filter's direct-path coupling is sparse. The HF "painted black"
+        artifact during DT is a direct consequence.
+
         v3.21 Phase C.4: when ``ReverbFrequencyResponse`` is bound, use its
         ``tail_response`` (canonical AEC3 mechanism) as the per-bin scaling.
-        Otherwise fall back to current-frame coupling ``S²/X²`` (legacy
-        approximation that misses bins where the filter learned coupling but
-        the current frame has no render energy).
+        Otherwise fall back to current-frame coupling ``S²/X²``.
         """
         decay = self._reverb_decay(dominant_nearend)
         if decay <= 0.0:
             return
+        # AEC3 cc:367-368: linear path uses FilterLengthBlocks() + 1.
+        _offset = max(0, int(filter_length_blocks)) + 1
+        if _offset >= len(self._reverb_render_history):
+            return  # buffer not warm yet — AEC3 RenderBuffer returns zeros
+        delayed_render = self._reverb_render_history[_offset]
         if self._reverb_freq_resp is not None:
             scaling = self._reverb_freq_resp.tail_response.astype(np.float32)
         else:
             gain_cap = (self._default_gain_late * self._default_gain_late) * 4.0
             scaling = s2_linear / np.maximum(render_psd, 1e-10)
             np.minimum(scaling, gain_cap, out=scaling)
-        self._reverb_model.update(render_psd, scaling, decay)
+        self._reverb_model.update(delayed_render, scaling, decay)

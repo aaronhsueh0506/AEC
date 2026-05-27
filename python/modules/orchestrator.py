@@ -4619,6 +4619,7 @@ class AEC:
             s2_linear=echo_psd,
             dominant_nearend=dominant_ne,
             filter_delay_blocks=_delay_blocks,
+            filter_length_blocks=int(getattr(self.filter, 'n_partitions', 0)),
         )
 
         # v3.22 Sprint F — Reverb tail dead-streak tracking + fallback.
