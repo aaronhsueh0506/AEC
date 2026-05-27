@@ -392,7 +392,16 @@ class PBFDAF:
             self._c1c5_trace['A1_x2_active'] = True
         else:
             denom = power_floor * self.n_partitions + self.delta
-        mu_eff = (self.mu * mu_scale_arr) / denom
+        # AEC3 coarse_initial.rate = 0.95 vs coarse.rate = 0.7 — 35% faster
+        # learning during the first 2.5 s of active render. Boost self.mu by
+        # the same ratio while _initial_state_active is True so URO has a
+        # converged coarse path to route to at startup.
+        # Source: echo_canceller3_config.h:108 (coarse_initial) +
+        # echo_canceller3_config.cc:295 (coarse_initial.rate = 0.95f).
+        mu_initial_boost = (np.float32(0.95 / 0.7)
+                             if self._initial_state_active
+                             else np.float32(1.0))
+        mu_eff = (self.mu * mu_initial_boost * mu_scale_arr) / denom
         # v3.21.14 A.2 — AEC3 coarse_filter_update_gain.cc:67-71 noise_gate
         # hard zero. AEC3 sets `mu[k] = 0` where `X²[k] < noise_gate`. X²
         # source = SpectralSum (matches A.1) regardless of A.1 flag, since
