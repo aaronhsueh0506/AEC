@@ -2,7 +2,8 @@
 
 Pre-v3.21.3 bug: AEC.reset() body initialised the AEC3-aligned post-stage
 fields (`_aec3_state` / `_aec3_ree` / `_aec3_sg` / `_aec3_ola_buf` /
-`_aec3_noise_psd` / `_aec3_noise_initialized` / `_aec3_smooth_cn_gain` /
+CNG state (`_aec3_n2` / `_aec3_n2_initial` / `_aec3_y2_smoothed` /
+`_aec3_n2_counter` / `_aec3_cng_seed` / `_aec3_noise_initialized`) /
 `_aec3_pending_*` / `_aec3_stationarity` + counters) in `__init__` but
 never touched them on reset(). Re-using an AEC instance across utterances
 carried previous-stream post-filter state into the next stream.
@@ -50,16 +51,16 @@ class Aec3PostResetTests(unittest.TestCase):
         self.assertFalse(self.aec._aec3_noise_initialized)
 
     def test_aec3_noise_initialized_flips_after_frames(self) -> None:
-        """Run frames -> noise PSD initialises -> flag True."""
+        """Run frames -> Y2_smoothed initialises -> flag True."""
         _run_some_frames(self.aec, n_frames=30)
         # CNG init typically fires within tens of frames once render is
         # non-zero; even if not, OLA buf will hold residual samples.
         ola_has_history = np.any(self.aec._aec3_ola_buf != 0)
-        psd_has_history = np.any(self.aec._aec3_noise_psd != 0)
+        y2_has_history = np.any(self.aec._aec3_y2_smoothed != 0)
         self.assertTrue(
             self.aec._aec3_noise_initialized
             or ola_has_history
-            or psd_has_history,
+            or y2_has_history,
             'Expected AEC3 post-state to accumulate some history after frames',
         )
 
@@ -79,14 +80,21 @@ class Aec3PostResetTests(unittest.TestCase):
         self.assertIsNot(self.aec._aec3_ree, old_ree)
         self.assertIsNot(self.aec._aec3_sg, old_sg)
 
-        # CNG state cleared.
+        # CNG state cleared (AEC3-strict — mirrors ComfortNoiseGenerator ctor).
         self.assertFalse(self.aec._aec3_noise_initialized)
+        self.assertEqual(self.aec._aec3_n2_counter, 0)
+        self.assertEqual(self.aec._aec3_cng_seed, 42)
         np.testing.assert_array_equal(
-            self.aec._aec3_noise_psd, np.zeros_like(self.aec._aec3_noise_psd)
+            self.aec._aec3_y2_smoothed,
+            np.zeros_like(self.aec._aec3_y2_smoothed),
         )
         np.testing.assert_array_equal(
-            self.aec._aec3_smooth_cn_gain,
-            np.zeros_like(self.aec._aec3_smooth_cn_gain),
+            self.aec._aec3_n2_initial,
+            np.zeros_like(self.aec._aec3_n2_initial),
+        )
+        np.testing.assert_array_equal(
+            self.aec._aec3_n2,
+            np.full_like(self.aec._aec3_n2, 1.0e6),
         )
 
         # OLA buffer cleared.

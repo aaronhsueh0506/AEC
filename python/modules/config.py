@@ -44,6 +44,11 @@ class AecConfig:
     # enable_cng + enable_td_constraint remain as gates).
     enable_res: bool = True
     enable_cng: bool = False           # Comfort noise generation in AEC3 post (off by default)
+    # AEC3 EchoCanceller3Config::ComfortNoise.noise_floor_dbfs (api/audio/
+    # echo_canceller3_config.h:180). Background noise floor for the CNG N2
+    # estimate; convert via GetNoiseFloorFactor (comfort_noise_generator.cc:43-46)
+    # → 64·10^((90.309+dbfs)/10) in int16² PSD.
+    comfort_noise_floor_dbfs: float = -96.03406
     enable_td_constraint: bool = True  # Time-domain constraint on filter weights
     # Shadow filter (dual-filter divergence control, frequency-domain modes only)
     enable_shadow: bool = True

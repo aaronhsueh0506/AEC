@@ -779,15 +779,43 @@ class AEC:
             self._aec3_sg_config = _sg_config
             # Synthesis OLA: sqrt-Hann analysis * sqrt-Hann synthesis = Hann,
             # which sums to 1 across 50%-overlap hops (perfect reconstruction).
+            # AEC3 strict — MATLAB-canonical Hann (denom = N, not N-1 as
+            # numpy.hanning uses). Matches the suppression_filter.cc:32-64
+            # `kSqrtHanning` table exactly. The numpy-default off-by-one
+            # produced ~0.5% OLA gain drift at frame boundaries.
             bs = int(self.filter.block_size)
-            self._aec3_synth_window = np.sqrt(np.hanning(bs)).astype(np.float32)
+            _idx = np.arange(bs, dtype=np.float64)
+            self._aec3_synth_window = np.sqrt(
+                0.5 * (1.0 - np.cos(2.0 * np.pi * _idx / float(bs)))
+            ).astype(np.float32)
             self._aec3_ola_buf = np.zeros(bs, dtype=np.float32)
-            # v3.21 Phase C.1 — CNG state for `_aec3_post`. Mirrors the
-            # production legacy CNG (res_refactored/noise_floor_cng.py:55-62):
-            # per-bin noise PSD EMA + per-bin target CN gain smoothing.
-            self._aec3_noise_psd = np.zeros(n_bins, dtype=np.float32)
-            self._aec3_smooth_cn_gain = np.zeros(n_bins, dtype=np.float32)
+            # v3.21 AEC3-align: strict port of ComfortNoiseGenerator
+            # (comfort_noise_generator.cc:131-218).
+            #   Y2_smoothed — per-bin Y² EMA (α=0.1, cc:162-164)
+            #   N2          — background noise spectrum estimate (init 1.0e6 int16² per cc:146)
+            #   N2_initial  — transient estimate over first 1000 frames (cc:138, 178-191)
+            #   N2_counter  — frame count; reaches 1000 → N2_initial released
+            #   noise_floor — GetNoiseFloorFactor(dbfs) in int16² (cc:43-46)
+            #   cng_seed    — LCG state for random phase (init 42 per cc:135)
+            # All arrays in int16² PSD scale (same as near_psd / error_psd
+            # via _PSD_SCALE = 32768²).
+            self._aec3_y2_smoothed = np.zeros(n_bins, dtype=np.float32)
+            self._aec3_n2 = np.full(n_bins, 1.0e6, dtype=np.float32)
+            self._aec3_n2_initial = np.zeros(n_bins, dtype=np.float32)
+            self._aec3_n2_counter = 0
+            _dbfs = float(getattr(self.config, 'comfort_noise_floor_dbfs', -96.03406))
+            self._aec3_noise_floor_int16sq = float(
+                64.0 * (10.0 ** ((90.30899869919436 + _dbfs) * 0.1))
+            )
+            self._aec3_cng_seed = 42
             self._aec3_noise_initialized = False
+            # sqrt(2)·sin(2π i/32) LUT — matches kSqrt2Sin in
+            # comfort_noise_generator.cc:51-58 (sqrt(2) baked in to compensate
+            # for OLA cross-fade power loss when CN frames are uncorrelated).
+            _lut_idx = np.arange(32, dtype=np.float64)
+            self._aec3_sqrt2_sin_lut = (
+                np.sqrt(2.0) * np.sin(2.0 * np.pi * _lut_idx / 32.0)
+            ).astype(np.float32)
             # v3.22 Sprint F — Reverb tail dead-streak counter. Counts
             # consecutive frames where the residual_echo_estimator's reverb
             # frequency response tail is non-positive (i.e. no late
@@ -1509,8 +1537,12 @@ class AEC:
         self._aec3_pending_delay_change = None
         self._form_prev_output_time = None
         self._form_last_selection = True
-        self._aec3_noise_psd.fill(0)
-        self._aec3_smooth_cn_gain.fill(0)
+        # AEC3-strict CNG state reset (mirrors ComfortNoiseGenerator ctor).
+        self._aec3_y2_smoothed.fill(0.0)
+        self._aec3_n2.fill(1.0e6)
+        self._aec3_n2_initial.fill(0.0)
+        self._aec3_n2_counter = 0
+        self._aec3_cng_seed = 42
         self._aec3_noise_initialized = False
         if not preserve_render_side:
             # Render-side context (cleared on full reset, preserved on
@@ -4654,25 +4686,69 @@ class AEC:
                 nearend_pwr = error_psd
         else:
             nearend_pwr = near_psd
-        # v3.21 Phase C.1 — comfort-noise spectrum derived from per-bin noise
-        # floor EMA (mirrors res_refactored/noise_floor_cng.py:23-31). Lazy
-        # init at first frame; update only when DT is quiet (legacy
-        # is_learning_safe condition is approximated here by `dominant_ne is
-        # False AND error magnitude rises slower than noise estimate`).
+        # v3.21 AEC3-align: strict port of ComfortNoiseGenerator::Compute
+        # (comfort_noise_generator.cc:152-218). Source signal is the raw
+        # capture PSD (near_psd = |Y|² · _PSD_SCALE in int16²), NOT the
+        # post-filter residual — AEC3 estimates background noise from the
+        # microphone spectrum so SuppressionGain's NE/SNR ratios share the
+        # same noise reference as the CN injection downstream.
+        _saturated_capture = (self._saturation_level > 0.5)
         if not self._aec3_noise_initialized:
-            self._aec3_noise_psd = error_psd.copy() + 1e-8
+            self._aec3_y2_smoothed = near_psd.copy().astype(np.float32)
             self._aec3_noise_initialized = True
-        _is_learning_safe = (not dominant_ne) and (far_pwr < 1e-4)
-        _alpha_n = np.where(
-            error_psd > self._aec3_noise_psd,
-            0.998 if _is_learning_safe else 1.0,  # slow up (or freeze on DT)
-            0.98,                                 # fast down to track silence
+
+        if not _saturated_capture:
+            # Y2_smoothed EMA (cc:162-164): a += 0.1·(b - a)
+            self._aec3_y2_smoothed = (
+                self._aec3_y2_smoothed + 0.1 * (near_psd - self._aec3_y2_smoothed)
+            ).astype(np.float32)
+
+            # N2 update after 50 frames (cc:167-176). When Y2_smoothed < N2:
+            # (0.9·Y2_smoothed + 0.1·N2)·1.0002 (track down fast + slow up).
+            # Else: N2 · 1.0002 (slow up only).
+            if self._aec3_n2_counter > 50:
+                _below = self._aec3_y2_smoothed < self._aec3_n2
+                _track = (
+                    0.9 * self._aec3_y2_smoothed + 0.1 * self._aec3_n2
+                ) * 1.0002
+                _up = self._aec3_n2 * 1.0002
+                self._aec3_n2 = np.where(_below, _track, _up).astype(np.float32)
+
+            # N2_initial transient (cc:178-191): only active for first 1000
+            # frames. On frame 1000 release (no update; use N2 from that
+            # frame onward). Update rule: N2_initial[k] = (N2 > N2_initial)
+            # ? N2_initial + 0.001·(N2 - N2_initial) : N2.
+            if self._aec3_n2_counter < 1000:
+                self._aec3_n2_counter += 1
+                if self._aec3_n2_counter < 1000:
+                    _above = self._aec3_n2 > self._aec3_n2_initial
+                    _slow = self._aec3_n2_initial + 0.001 * (
+                        self._aec3_n2 - self._aec3_n2_initial
+                    )
+                    self._aec3_n2_initial = np.where(
+                        _above, _slow, self._aec3_n2
+                    ).astype(np.float32)
+
+            # Clamp to noise floor (cc:193-202). Both N2 and N2_initial
+            # (while still active) lifted to the dbfs-derived int16² floor.
+            np.maximum(
+                self._aec3_n2, self._aec3_noise_floor_int16sq,
+                out=self._aec3_n2,
+            )
+            if self._aec3_n2_counter < 1000:
+                np.maximum(
+                    self._aec3_n2_initial,
+                    self._aec3_noise_floor_int16sq,
+                    out=self._aec3_n2_initial,
+                )
+
+        # Pick N2 to use (cc:206) — N2_initial during first 1000 frames,
+        # then N2. Consumed by both SuppressionGain (as comfort_noise_spectrum
+        # for ENR/SNR ratios) AND the time-domain CN injection downstream.
+        comfort_noise = (
+            self._aec3_n2_initial if self._aec3_n2_counter < 1000
+            else self._aec3_n2
         )
-        self._aec3_noise_psd = (
-            _alpha_n * self._aec3_noise_psd
-            + (1.0 - _alpha_n) * error_psd
-        ).astype(np.float32)
-        comfort_noise = self._aec3_noise_psd
         # v3.22 Sprint E.1 — feed per-bin stationary mask to SuppressionGain
         # for its NE-presence proxy. Reuses _stationary_mask computed above
         # for the existing zeroing block (no extra compute). Default OFF:
@@ -5047,29 +5123,52 @@ class AEC:
         else:
             e_out_spec = error_spec * gain.astype(error_spec.dtype, copy=False)
 
-        # v3.21 Phase C.1 — CNG injection. Add Gaussian noise shaped by the
-        # tracked noise_psd, scaled by smooth_cn_gain = 0.8 EMA of
-        # sqrt(max(1 - G², 0)) × 0.4. Mirrors legacy CNG formula. Skip when
-        # CNG is disabled in config or noise_psd has not been observed yet
-        # (lazy-init guard, same as legacy).
-        if (getattr(self.config, 'enable_cng', False)
-                and float(np.sum(self._aec3_noise_psd)) > 1e-7):
-            _target_cn_gain = (
-                np.sqrt(np.maximum(1.0 - gain.astype(np.float32) ** 2, 0.0)) * 0.4
-            )
-            self._aec3_smooth_cn_gain = (
-                0.8 * self._aec3_smooth_cn_gain + 0.2 * _target_cn_gain
+        # v3.21 AEC3-align: strict CNG injection — port of
+        # GenerateRandomSinTableIndices + GenerateComfortNoise
+        # (comfort_noise_generator.cc:61-127) and ApplyGain
+        # (suppression_filter.cc:88-122).
+        #
+        #   noise_gain[k] = sqrt(1 − G[k]²)          (sf.cc:99-103)
+        #   CN_re[k]      = sqrt(N2[k]) · sqrt(2)·sin(re_idx[k-1])   (cng.cc:120)
+        #   CN_im[k]      = sqrt(N2[k]) · sqrt(2)·sin(im_idx[k-1])   (cng.cc:121)
+        #   E[k]         += noise_gain[k] · CN[k]   (sf.cc:120-121)
+        #
+        # AEC3 only applies the 0.4× scaling to UPPER bands at sr > 16k (the
+        # `high_bands_noise_scaling` constant in sf.cc:105-106). At sr=16k
+        # there is only the lowest band, so the AEC3-strict scaling is 1.0.
+        # No per-frame smoothing on noise_gain (sf.cc has none either).
+        # DC and Nyquist bins are zeroed per cng.cc:111-112.
+        if getattr(self.config, 'enable_cng', False):
+            # LCG random index generation (cng.cc:69-81). AEC3 generates
+            # kFftLengthBy2 − 1 indices for bins 1..kFftLengthBy2 − 1; at our
+            # fft_size this is n_bins − 2.
+            _n_random = n_bins - 2
+            _seed = int(self._aec3_cng_seed)
+            _re_idx = np.empty(_n_random, dtype=np.int32)
+            _im_idx = np.empty(_n_random, dtype=np.int32)
+            for _k in range(_n_random):
+                _seed = (_seed * 69069 + 1) & 0x7FFFFFFF
+                _ix = _seed >> 26   # top 5 bits, 0..31
+                _re_idx[_k] = _ix
+                _im_idx[_k] = (_ix + 8) & 31
+            self._aec3_cng_seed = _seed
+
+            # N2 is in int16² PSD scale; CN amplitudes need to live in
+            # float-spec scale to match e_out_spec, so divide by _PSD_SCALE
+            # before sqrt.
+            _N_float = np.sqrt(
+                np.maximum(comfort_noise / _PSD_SCALE, 0.0)
             ).astype(np.float32)
-            # noise_psd is in float-scale × _PSD_SCALE (we lifted it earlier);
-            # convert back to amplitude std by dividing by sqrt(_PSD_SCALE).
-            _noise_std = np.sqrt(
-                self._aec3_noise_psd / 2.0 / _PSD_SCALE
+            _cn_re = np.zeros(n_bins, dtype=np.float32)
+            _cn_im = np.zeros(n_bins, dtype=np.float32)
+            _cn_re[1:-1] = _N_float[1:-1] * self._aec3_sqrt2_sin_lut[_re_idx]
+            _cn_im[1:-1] = _N_float[1:-1] * self._aec3_sqrt2_sin_lut[_im_idx]
+
+            _noise_gain = np.sqrt(
+                np.maximum(1.0 - gain.astype(np.float32) ** 2, 0.0)
             ).astype(np.float32)
-            _cng_re = np.random.randn(n_bins).astype(np.float32) * _noise_std
-            _cng_im = np.random.randn(n_bins).astype(np.float32) * _noise_std
-            _cng_spec = (
-                self._aec3_smooth_cn_gain * (_cng_re + 1j * _cng_im)
-            ).astype(np.complex64)
+
+            _cng_spec = (_noise_gain * (_cn_re + 1j * _cn_im)).astype(np.complex64)
             e_out_spec = e_out_spec + _cng_spec
 
         e_out_full = np.fft.irfft(e_out_spec, n=self.filter.fft_size).astype(np.float32)
