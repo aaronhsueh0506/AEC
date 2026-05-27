@@ -313,14 +313,16 @@ class AecConfig:
     # xFk7 DT_mvmt and any case where usable_linear_estimate() = False.
     # Classification: Class B (wrong constant — Python copied suppression-path value
     # that happened to be 1000× larger than the correct echo-model threshold).
-    use_aec3_residual_noise_gate: bool = False
+    # Default flipped True 2026-05-27 for AEC3 alignment.
+    use_aec3_residual_noise_gate: bool = True
 
     # R0.3 — EchoGeneratingPower render pre-window size correction.
     # AEC3 echo_model.render_pre_window_size = 1, render_post_window_size = 1
     # (residual_echo_estimator.cc:80-86). Python default: pre=0, post=1 (2 blocks).
     # AEC3 uses 3 blocks (delay-1 to delay+1) for max over render history.
     # Classification: Class A (AEC3 parity gap — window size mismatch).
-    use_aec3_echo_gen_power_window: bool = False
+    # Default flipped True 2026-05-27 for AEC3 alignment.
+    use_aec3_echo_gen_power_window: bool = True
 
     # R0.4 — ERLE inst linear quality for reverb model update (continuous 0→1).
     # AEC3 fullband_erle_estimator.cc::UpdateQualityEstimate computes a continuous

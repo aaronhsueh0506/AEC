@@ -46,12 +46,16 @@ class SuppressorTuning:
     max_dec_factor_lf: float = 0.25
 
 
-# AEC3 defaults pulled from echo_canceller3_config.h. nearend_tuning has
-# higher mask_lf transparent thresholds (more permissive when nearend
-# detected); normal_tuning is the echo-aggressive default.
+# AEC3 production defaults pulled from echo_canceller3_config.h:
+#   normal_tuning   = (mask_lf=(0.3, 0.4, 0.3),  mask_hf=(0.07, 0.1, 0.3))
+#   nearend_tuning  = (mask_lf=(1.09, 1.1, 0.3), mask_hf=(0.1, 0.3, 0.3))
+# Tuple order: (enr_transparent, enr_suppress, emr_transparent).
+# Earlier port had nearend_tuning hardcoded to (0.4,0.4,0.4) placeholder
+# values — 2.7-4× looser than AEC3 → nearend-state gain rules suppressed
+# much less aggressively than design intent. Aligned 2026-05-27.
 _DEFAULT_NEAREND_TUNING = SuppressorTuning(
-    mask_lf=MaskTuning(0.4, 0.4, 0.4),
-    mask_hf=MaskTuning(0.4, 0.4, 0.4),
+    mask_lf=MaskTuning(1.09, 1.1, 0.3),
+    mask_hf=MaskTuning(0.1, 0.3, 0.3),
 )
 _DEFAULT_NORMAL_TUNING = SuppressorTuning(
     mask_lf=MaskTuning(0.3, 0.4, 0.3),
@@ -375,38 +379,57 @@ class _DominantNearendDetector:
         comfort_noise: np.ndarray,
         initial_state: bool,
     ) -> None:
+        """AEC3 port — dominant_nearend_detector.cc:32-76.
+
+        Three independent blocks per frame (trigger / early-exit / hold-decrement);
+        do NOT fold them into an if/elif chain. AEC3-parity highlights:
+          - LF energy sum skips bin 0 (DC) — AEC3 `begin()+1` (cc:43).
+          - Trigger gated by `(!initial_state || use_during_initial_phase)`
+            inline; do NOT early-return, hold counter must still decrement.
+          - Exit check has noise floor clause: `echo > exit_thr*ne AND
+            echo > snr_thr*noise` (cc:67-68) — Python prior version omitted
+            the noise clause.
+          - Threshold form is multiplicative (`echo < thr*ne`), not divisive
+            with `+1.0` floor (which biased ENR/SNR at low signal levels).
+        """
         c = self._cfg
-        if initial_state and not c.use_during_initial_phase:
-            self._trigger_counter = 0
-            self._hold_counter = 0
-            self._nearend_state = False
-            return
-        # LF-only sum for nearend detection. Endpoint comes from
-        # cfg.lf_endpoint_hz (Phase A default 500 Hz preserves the previous
-        # hardcoded bin 16 @ fft=512; Phase B flips to AEC3 canonical 2000 Hz).
+        # LF-only sum endpoint. Endpoint comes from cfg.lf_endpoint_hz (Phase A
+        # default 500 Hz preserves the previous hardcoded bin 16 @ fft=512).
+        # AEC3 canonical endpoint is bin 16 (exclusive) at fft=128 = 2000 Hz;
+        # endpoint upgrade tracked separately due to 800-case tuning history.
         n_bins = nearend_spectrum.size
         lf_end = min(hz_to_bin(c.lf_endpoint_hz, n_bins, self._sr), n_bins)
-        ne_sum = float(np.sum(nearend_spectrum[:lf_end]))
-        echo_sum = float(np.sum(residual_echo[:lf_end]))
-        noise_sum = float(np.sum(comfort_noise[:lf_end]))
-        enr = echo_sum / (ne_sum + 1.0)
-        snr = ne_sum / (noise_sum + 1.0)
-        # Trigger and hold dynamics.
-        if enr < c.enr_threshold and snr > c.snr_threshold:
-            self._trigger_counter = min(self._trigger_counter + 1, c.trigger_threshold)
+        # AEC3 cc:43 — `begin()+1` skips DC (bin 0). Python prior version
+        # included bin 0 → DC contamination biased echo_sum / ne_sum.
+        ne_sum = float(np.sum(nearend_spectrum[1:lf_end]))
+        echo_sum = float(np.sum(residual_echo[1:lf_end]))
+        noise_sum = float(np.sum(comfort_noise[1:lf_end]))
+
+        # Block 1 — Trigger (AEC3 cc:51-64). Multiplicative form, no `+1.0`
+        # division floor. initial_state gates the trigger inline, NOT via
+        # early-return (hold counter must still decrement below).
+        trigger_active = (
+            (not initial_state or c.use_during_initial_phase)
+            and echo_sum < c.enr_threshold * ne_sum
+            and ne_sum > c.snr_threshold * noise_sum
+        )
+        if trigger_active:
+            self._trigger_counter += 1
+            if self._trigger_counter >= c.trigger_threshold:
+                self._hold_counter = self._hold_duration_hops
+                self._trigger_counter = c.trigger_threshold
         else:
-            self._trigger_counter = max(self._trigger_counter - 1, 0)
-        if self._trigger_counter >= c.trigger_threshold:
-            self._nearend_state = True
-            self._hold_counter = self._hold_duration_hops
-        elif enr > c.enr_exit_threshold:
-            self._nearend_state = False
+            self._trigger_counter = max(0, self._trigger_counter - 1)
+
+        # Block 2 — Early exit at strong echo (AEC3 cc:67-70). Both clauses
+        # required; prior Python version omitted the noise-floor clause.
+        if (echo_sum > c.enr_exit_threshold * ne_sum
+                and echo_sum > c.snr_threshold * noise_sum):
             self._hold_counter = 0
-        elif self._hold_counter > 0:
-            self._hold_counter -= 1
-            self._nearend_state = True
-        else:
-            self._nearend_state = False
+
+        # Block 3 — Unconditional hold decrement + state (AEC3 cc:72-74).
+        self._hold_counter = max(0, self._hold_counter - 1)
+        self._nearend_state = self._hold_counter > 0
 
 
 class _SubbandNearendDetector:

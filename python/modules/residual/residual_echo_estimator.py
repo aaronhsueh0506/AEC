@@ -94,7 +94,10 @@ class ReverbConfig:
     # approximation for ReverbFrequencyResponse-produced tail_response.
     use_adaptive_decay: bool = True
     use_freq_response: bool = True
-    conservative_tail_freq_response: bool = False
+    # AEC3 echo_canceller3_config.h:139 default = true. Clamps tail to raw
+    # partition response (cap on per-bin |H_partition|²) so reverb tail does
+    # not over-amplify when partition variance is high. Aligned 2026-05-27.
+    conservative_tail_freq_response: bool = True
 
 
 _TRANSPARENT_MODE_GAIN = 0.01  # AEC3 kDefaultTransparentModeGain verbatim
@@ -110,8 +113,13 @@ class ResidualEchoEstimator:
         reverb: ReverbConfig = ReverbConfig(),
         sr: int = 16000,
         hop_size: int = 160,
-        use_aec3_residual_noise_gate: bool = False,
-        use_aec3_echo_gen_window: bool = False,
+        # R0.2: use corrected residual noise gate constant (27509.42 int16²)
+        # vs buggy 27509562 (1000× too large — see aec3_scale.py:134-149).
+        # Default flipped to True 2026-05-27 for AEC3 alignment.
+        use_aec3_residual_noise_gate: bool = True,
+        # R0.3: AEC3 EchoGeneratingPower delay-centered window (pre=1, post=1)
+        # vs legacy ring buffer (pre=0). Default flipped to True 2026-05-27.
+        use_aec3_echo_gen_window: bool = True,
     ) -> None:
         self._n_bins = int(n_bins)
         self._echo_model = echo_model
