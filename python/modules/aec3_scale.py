@@ -58,10 +58,63 @@ def per_block_rate_to_per_hop(per_block_rate: float,
 
     AEC3 fires per 4 ms; we fire per hop. To match per-second injection:
         per_hop = per_block * (hop_seconds / block_seconds)
+
+    LINEAR approximation — valid for *small* rates (≪ 1) where the per-second
+    sum is the relevant invariant (leakage decay, noise injection). For EMA
+    alphas (esp. ≥ 0.05) use ``per_block_ema_alpha_to_per_hop`` instead so the
+    lag-decay envelope matches in wall-clock time.
     """
     block_seconds = AEC3_BLOCK_SAMPLES_16K / 16000.0
     hop_seconds = hop_samples / float(sample_rate)
     return per_block_rate * (hop_seconds / block_seconds)
+
+
+def per_block_ema_alpha_to_per_hop(per_block_alpha: float,
+                                   hop_samples: int,
+                                   sample_rate: int) -> float:
+    """Convert an AEC3 per-block EMA alpha (new-sample weight) to a per-hop
+    alpha that gives the *same wall-clock lag-decay envelope*.
+
+    AEC3 EMA: ``x ← (1-α)·x + α·new`` so the lag retention per AEC3 block is
+    ``(1-α)``. Wall-clock equivalence over T seconds requires::
+
+        (1 - α_per_block)^(T·n_blocks_per_sec) = (1 - α_per_hop)^(T·n_hops_per_sec)
+
+    Solving for our per-hop alpha::
+
+        α_per_hop = 1 − (1 − α_per_block)^(hop_seconds / block_seconds)
+
+    Use for any AEC3 constant whose semantic is "fraction of old state forgotten
+    per frame". The exact (exponential) form is required when α is non-small —
+    the linear ``per_block_rate_to_per_hop`` approximation breaks down because
+    α ≥ 1 has no EMA meaning.
+    """
+    if per_block_alpha <= 0.0:
+        return 0.0
+    if per_block_alpha >= 1.0:
+        return 1.0
+    block_seconds = AEC3_BLOCK_SAMPLES_16K / 16000.0
+    hop_seconds = hop_samples / float(sample_rate)
+    return 1.0 - (1.0 - per_block_alpha) ** (hop_seconds / block_seconds)
+
+
+def per_block_growth_to_per_hop(per_block_multiplier: float,
+                                hop_samples: int,
+                                sample_rate: int) -> float:
+    """Convert an AEC3 per-block *multiplicative* growth factor to per-hop.
+
+    AEC3 update: ``x ← x · g`` per block, so after T seconds the total growth
+    is ``g^(T·n_blocks_per_sec)``. Wall-clock equivalence::
+
+        g_per_hop = g_per_block ^ (hop_seconds / block_seconds)
+
+    Use for per-frame multiplicative growth such as the CNG N2 slow-up
+    factor 1.0002 (cc:172-174). For small δ where g = 1+δ, this is numerically
+    equivalent to ``1 + per_block_rate_to_per_hop(δ, ...)``.
+    """
+    block_seconds = AEC3_BLOCK_SAMPLES_16K / 16000.0
+    hop_seconds = hop_samples / float(sample_rate)
+    return per_block_multiplier ** (hop_seconds / block_seconds)
 
 
 # ── Pre-converted AEC3 constants (16 kHz, hop_size 160 reference) ──

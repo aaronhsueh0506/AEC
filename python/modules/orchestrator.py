@@ -791,14 +791,27 @@ class AEC:
             self._aec3_ola_buf = np.zeros(bs, dtype=np.float32)
             # v3.21 AEC3-align: strict port of ComfortNoiseGenerator
             # (comfort_noise_generator.cc:131-218).
-            #   Y2_smoothed — per-bin Y² EMA (α=0.1, cc:162-164)
+            #   Y2_smoothed — per-bin Y² EMA (α=0.1 per AEC3 block, cc:162-164)
             #   N2          — background noise spectrum estimate (init 1.0e6 int16² per cc:146)
             #   N2_initial  — transient estimate over first 1000 frames (cc:138, 178-191)
-            #   N2_counter  — frame count; reaches 1000 → N2_initial released
+            #   N2_counter  — frame count; reaches threshold → N2_initial released
             #   noise_floor — GetNoiseFloorFactor(dbfs) in int16² (cc:43-46)
             #   cng_seed    — LCG state for random phase (init 42 per cc:135)
             # All arrays in int16² PSD scale (same as near_psd / error_psd
             # via _PSD_SCALE = 32768²).
+            #
+            # WALL-CLOCK PARITY: every per-frame constant below is rescaled
+            # from AEC3's 4 ms-block reference to our hop_size via the
+            # aec3_scale helpers so the lag-decay envelopes, transient
+            # durations, and slow-up growth match in real time regardless of
+            # our hop/sr choice. AEC3 literals are kept in the source comment.
+            from .aec3_scale import (
+                blocks_to_hops as _blocks_to_hops,
+                per_block_ema_alpha_to_per_hop as _ema_to_hop,
+                per_block_growth_to_per_hop as _growth_to_hop,
+            )
+            _hop = int(self.config.hop_size)
+            _sr = int(self.config.sample_rate)
             self._aec3_y2_smoothed = np.zeros(n_bins, dtype=np.float32)
             self._aec3_n2 = np.full(n_bins, 1.0e6, dtype=np.float32)
             self._aec3_n2_initial = np.zeros(n_bins, dtype=np.float32)
@@ -809,6 +822,22 @@ class AEC:
             )
             self._aec3_cng_seed = 42
             self._aec3_noise_initialized = False
+            # Rescaled time-domain constants (AEC3 literal → per-hop):
+            #   AEC3                              | per-hop at hop=160, sr=16k
+            #   ---------------------------------- | ---------------------------
+            #   Y2_smoothed α = 0.1 (cc:162-164)  | ≈ 0.232 (exact EMA rescale)
+            #   N2 track-down freshness 0.9       | ≈ 0.997
+            #   N2 slow-up 1.0002 (cc:172-174)    | ≈ 1.0005
+            #   N2_initial slow-up α = 0.001      | ≈ 0.0025
+            #   N2 update onset = 50 blocks       | 20 hops (200 ms)
+            #   N2_initial transient = 1000 blks  | 400 hops (4 s)
+            self._aec3_cng_y2_alpha = float(_ema_to_hop(0.1, _hop, _sr))
+            self._aec3_cng_n2_track_freshness = float(_ema_to_hop(0.9, _hop, _sr))
+            self._aec3_cng_n2_track_retention = 1.0 - self._aec3_cng_n2_track_freshness
+            self._aec3_cng_n2_slow_up = float(_growth_to_hop(1.0002, _hop, _sr))
+            self._aec3_cng_n2_initial_alpha = float(_ema_to_hop(0.001, _hop, _sr))
+            self._aec3_cng_n2_update_onset_hops = int(_blocks_to_hops(50, _hop, _sr))
+            self._aec3_cng_n2_initial_duration_hops = int(_blocks_to_hops(1000, _hop, _sr))
             # sqrt(2)·sin(2π i/32) LUT — matches kSqrt2Sin in
             # comfort_noise_generator.cc:51-58 (sqrt(2) baked in to compensate
             # for OLA cross-fade power loss when CN frames are uncorrelated).
@@ -4698,31 +4727,42 @@ class AEC:
             self._aec3_noise_initialized = True
 
         if not _saturated_capture:
-            # Y2_smoothed EMA (cc:162-164): a += 0.1·(b - a)
+            # Y2_smoothed EMA (cc:162-164): a += α·(b - a). α is the
+            # wall-clock-equivalent per-hop rescale of AEC3's per-block 0.1.
+            _y2_alpha = self._aec3_cng_y2_alpha
             self._aec3_y2_smoothed = (
-                self._aec3_y2_smoothed + 0.1 * (near_psd - self._aec3_y2_smoothed)
+                self._aec3_y2_smoothed
+                + _y2_alpha * (near_psd - self._aec3_y2_smoothed)
             ).astype(np.float32)
 
-            # N2 update after 50 frames (cc:167-176). When Y2_smoothed < N2:
-            # (0.9·Y2_smoothed + 0.1·N2)·1.0002 (track down fast + slow up).
-            # Else: N2 · 1.0002 (slow up only).
-            if self._aec3_n2_counter > 50:
+            # N2 update after warm-up (cc:167-176). When Y2_smoothed < N2:
+            # (fresh·Y2_smoothed + retention·N2) · slow_up (track down fast
+            # + slow up). Else: N2 · slow_up (slow up only). Both the EMA
+            # blend and the multiplicative growth are wall-clock rescales
+            # of AEC3's per-block 0.9/0.1 + 1.0002 literals.
+            if self._aec3_n2_counter > self._aec3_cng_n2_update_onset_hops:
                 _below = self._aec3_y2_smoothed < self._aec3_n2
+                _fresh = self._aec3_cng_n2_track_freshness
+                _retain = self._aec3_cng_n2_track_retention
+                _g = self._aec3_cng_n2_slow_up
                 _track = (
-                    0.9 * self._aec3_y2_smoothed + 0.1 * self._aec3_n2
-                ) * 1.0002
-                _up = self._aec3_n2 * 1.0002
+                    _fresh * self._aec3_y2_smoothed + _retain * self._aec3_n2
+                ) * _g
+                _up = self._aec3_n2 * _g
                 self._aec3_n2 = np.where(_below, _track, _up).astype(np.float32)
 
-            # N2_initial transient (cc:178-191): only active for first 1000
-            # frames. On frame 1000 release (no update; use N2 from that
-            # frame onward). Update rule: N2_initial[k] = (N2 > N2_initial)
-            # ? N2_initial + 0.001·(N2 - N2_initial) : N2.
-            if self._aec3_n2_counter < 1000:
+            # N2_initial transient (cc:178-191): only active during the
+            # rescaled-1000-block transient window. On release frame (no
+            # update; switch to N2 from this point onward). Update rule:
+            # N2_initial[k] = (N2 > N2_initial) ? N2_initial + α·(N2 -
+            # N2_initial) : N2 — α is wall-clock rescale of AEC3's 0.001.
+            _dur = self._aec3_cng_n2_initial_duration_hops
+            if self._aec3_n2_counter < _dur:
                 self._aec3_n2_counter += 1
-                if self._aec3_n2_counter < 1000:
+                if self._aec3_n2_counter < _dur:
                     _above = self._aec3_n2 > self._aec3_n2_initial
-                    _slow = self._aec3_n2_initial + 0.001 * (
+                    _ia = self._aec3_cng_n2_initial_alpha
+                    _slow = self._aec3_n2_initial + _ia * (
                         self._aec3_n2 - self._aec3_n2_initial
                     )
                     self._aec3_n2_initial = np.where(
@@ -4735,18 +4775,19 @@ class AEC:
                 self._aec3_n2, self._aec3_noise_floor_int16sq,
                 out=self._aec3_n2,
             )
-            if self._aec3_n2_counter < 1000:
+            if self._aec3_n2_counter < _dur:
                 np.maximum(
                     self._aec3_n2_initial,
                     self._aec3_noise_floor_int16sq,
                     out=self._aec3_n2_initial,
                 )
 
-        # Pick N2 to use (cc:206) — N2_initial during first 1000 frames,
+        # Pick N2 to use (cc:206) — N2_initial during the transient window,
         # then N2. Consumed by both SuppressionGain (as comfort_noise_spectrum
         # for ENR/SNR ratios) AND the time-domain CN injection downstream.
         comfort_noise = (
-            self._aec3_n2_initial if self._aec3_n2_counter < 1000
+            self._aec3_n2_initial
+            if self._aec3_n2_counter < self._aec3_cng_n2_initial_duration_hops
             else self._aec3_n2
         )
         # v3.22 Sprint E.1 — feed per-bin stationary mask to SuppressionGain
