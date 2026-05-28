@@ -27,9 +27,10 @@ listed as OFF flags because they have no config flag, just absence.
 
 ### Tier A — entire modules not yet ported (AEC3 production has)
 
+> **2026-05-28 correction**: Earlier draft listed `DominantNearendDetector` as a Tier A gap. **That was wrong** — it is already ported (lives inline at `python/modules/residual/suppression_gain.py:311` as `_DominantNearendDetector`), AEC3-strict parameters (enr=0.25 / exit=10 / snr=30 / trigger=12 / nearend_tuning lf=(1.09,1.1,0.3) hf=(0.1,0.3,0.3)), owned by `SuppressionGain`, drives 2-mode (normal/nearend) gain shape per frame. The only deviation from AEC3 strict is `hold_duration_ms=500` (vs AEC3 200) — intentional v3.21 tuning per [[feedback-aec-target-aec2-aec3]]. v3.21.7 Phase 1 attempt extracted the detector to a separate module (architecture refactor) but 12-case bench showed near-zero behaviour change vs v3.21.6.1, confirming the detector was already doing its job. **The −0.46 DT deg / −0.30 NE deg debt is therefore NOT a "detector absent" gap — it lives downstream.**
+
 | # | Module | AEC3 source | What it does | Why we don't have it |
 |---|---|---|---|---|
-| 1 | `DominantNearendDetector` | `dominant_nearend_detector.{cc,h}` | ENR-based NE detector with hysteresis; feeds SuppressionGain mode switch (normal ↔ nearend ↔ dominant_nearend) | substrate fields were declared in earlier cycles, deleted during release cleanup; no production consumer |
 | 2 | `EchoAudibility` (full) | `echo_audibility.{cc,h}` | JND-weighted per-bin audibility; gates SuppressionGain per-bin floor | only `aec3_post_stationarity_zero_enabled` (binary) ported; full JND-weighted scaling missing |
 | 3 | `SubtractorOutputAnalyzer` (full signal set) | `subtractor_output_analyzer.cc` | Emits `saturated / diverged / converged / no_excitation` to AecState + TransparentMode | only `converged` ported |
 | 4 | `TransparentMode` HMM variant | `transparent_mode.cc:53-100` | 2-state HMM detects "echo absent" → bypass SuppressionGain | only `LegacyTransparentMode` substrate; default OFF; HMM variant never started |
@@ -76,33 +77,45 @@ listed as OFF flags because they have no config flag, just absence.
 Ordered by **deg-debt recovery × implementation cost**. Each phase has
 its own bench gate (12-case + 800-case) before next phase starts.
 
-### Phase 1 — `v3.21.7` — DominantNearendDetector + mode-switched SuppressionGain
+### Phase 1 — `v3.21.7` — **REPLAN PENDING** (original DominantNearendDetector plan invalidated 2026-05-28)
 
-**Items**: Tier A #1 + Tier B #7
+**Original plan**: port `DominantNearendDetector` + mode-switched
+SuppressionGain. **Invalidated** by 12-case dry-run showing the
+detector is already ported and firing — near-zero behaviour change
+from architecture refactor.
 
-**Why first**: directly addresses the −0.46 DT / −0.30 NE deg debt by
-restoring AEC3's mode-switched gain shape. Substrate was prototyped in
-v3.18 D.1 — parameter space known.
+**Replan options pending diagnostic evidence**:
 
-**Tasks**:
-1. Port `DominantNearendDetector` from
-   `docs/aec3_extracts/src/aec3/dominant_nearend_detector.{cc,h}` —
-   ENR threshold + exit threshold + SNR threshold + trigger counter +
-   hold duration. Defaults from `echo_canceller3_config.h`.
-2. Wire output to `SuppressionGain` mode selection.
-3. Port 4-mode `HighFrequencySuppressionConfig` + `DominantNearendConfig`
-   per-band tuning tables.
-4. Implement mode-conditional gain computation (normal / nearend /
-   dominant_nearend).
+A. **`SuppressionGain` mask shape tuning** — `nearend_tuning` is
+   AEC3-strict (lf=(1.09,1.1,0.3) hf=(0.1,0.3,0.3)), but our PBFDKF
+   refined-filter chain is MORE aggressive than AEC3's NLMS refined
+   in steady state. Same mask shape against stronger residual could
+   produce harder suppression. Candidate: per-band re-tuning of
+   `nearend_tuning.mask_hf` to recover HF preservation, OR `mask_hf`
+   conditional on `is_dominant_nearend()`.
 
-**Bench gate**:
-- 12-case AECMOS: DT/NE deg must recover ≥ +0.15 vs v3.21.6.1; FS echo
-  must not regress > 0.05.
-- 800-case: full Pareto comparison vs v3.21.6.1 + AEC2 + AEC3 reference.
+B. **`use_linear_filter_output_selection_for_final_output`** (Tier C
+   #11 in this doc) — currently OFF because `convergence_seen` is
+   binary latch. If contaminated `usable_linear` causes us to feed
+   over-aggressive linear residual to SuppressionGain instead of
+   capture spectrum Y, that explains the HF wipe during NE. Fix:
+   redesign `convergence_seen` to counter-based gate, ship the flag.
 
-**Expected delta**: DT/NE deg **+0.2~0.4**, FS/DT echo within ±0.05.
+C. **EchoAudibility full port** (Tier A #2) — JND-weighted per-bin
+   floor. HF psychoacoustic threshold is looser than LF; full
+   audibility port would naturally protect HF gain shape. This is a
+   bigger module port but directly targets the painted-black-HF
+   symptom.
 
-**Estimated**: 1–2 weeks.
+**Diagnostic gate** (REQUIRED before any v3.21.7 implementation):
+trace the user-supplied internal HF-painted-black case with current
+v3.21.6.1 to identify which mechanism kills HF. Candidate signals to
+record per frame: `is_dominant_nearend()` fire rate, `gain_hf` median,
+`r2 / r2_unbounded` LF/MF/HF, `usable_linear_estimate`, HF cap fire
+rate, stationarity flag fraction in HF bins. Without trace evidence
+the next implementation pick is guessing.
+
+### Phase 2 — `v3.21.8` — SubtractorOutputAnalyzer + TransparentMode HMM (unchanged)
 
 ### Phase 2 — `v3.21.8` — SubtractorOutputAnalyzer + TransparentMode HMM
 
