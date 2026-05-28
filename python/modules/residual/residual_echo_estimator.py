@@ -208,6 +208,13 @@ class ResidualEchoEstimator:
         self._last_r2_path: str = 'unset'
         self._last_r2_direct_component = np.zeros(self._n_bins, dtype=np.float32)
         self._last_r2_reverb_component = np.zeros(self._n_bins, dtype=np.float32)
+        # Kill-stage R² decomposition: capture the inputs to R²_direct so
+        # the tracer can attribute inflation to S²_linear vs ERLE divisor
+        # vs reverb tail. All read-only (no audio path effect).
+        self._last_s2_linear = np.zeros(self._n_bins, dtype=np.float32)
+        self._last_erle_per_bin = np.zeros(self._n_bins, dtype=np.float32)
+        self._last_tail_response = np.zeros(self._n_bins, dtype=np.float32)
+        self._last_average_decay: float = 0.0
         # Adaptive reverb decay + tail freq response. Both are LAZY-bound;
         # orchestrator calls `attach_reverb_estimators` at the first hop
         # where it knows `n_partitions` and `hop_size`.
@@ -334,6 +341,10 @@ class ResidualEchoEstimator:
             self._last_r2_path = 'linear' if usable else 'nonlinear'
         self._last_r2_reverb_component = np.zeros(self._n_bins, dtype=np.float32)
         self._last_r2_direct_component = np.zeros(self._n_bins, dtype=np.float32)
+        # Kill-stage diag — capture S²_linear input + ERLE divisor (linear
+        # path only; reset to zeros at entry so nonlinear hops report 0).
+        self._last_s2_linear = np.asarray(s2_linear, dtype=np.float32).copy()
+        self._last_erle_per_bin = np.zeros(self._n_bins, dtype=np.float32)
 
         if usable:
             if saturated:
@@ -345,6 +356,10 @@ class ResidualEchoEstimator:
                 )
                 erle = aec_state.erle(onset_compensated)
                 erle_unb = aec_state.erle_unbounded()
+                # Kill-stage diag — stash the ERLE that became the divisor.
+                self._last_erle_per_bin = np.asarray(
+                    erle, dtype=np.float32
+                ).copy()
                 # AEC3 cc:91-105 — R² = S²_linear / ERLE per-bin.
                 r2[:] = s2_linear / np.maximum(erle, 1e-30)
                 r2_unbounded[:] = s2_linear / np.maximum(erle_unb, 1e-30)
@@ -450,6 +465,19 @@ class ResidualEchoEstimator:
                 ).copy()
                 r2 += reverb
                 r2_unbounded += reverb
+
+        # Kill-stage diag — snapshot reverb-freq-resp state at end of hop
+        # so the tracer can attribute reverb inflation (tail_response is
+        # the per-bin tail shape; average_decay is the scalar damping).
+        if self._reverb_freq_resp is not None:
+            _tail = getattr(self._reverb_freq_resp, 'tail_response', None)
+            if _tail is not None:
+                self._last_tail_response = np.asarray(
+                    _tail, dtype=np.float32
+                ).copy()
+            self._last_average_decay = float(
+                getattr(self._reverb_freq_resp, 'average_decay', 0.0)
+            )
 
         return r2, r2_unbounded
 

@@ -507,6 +507,14 @@ class SuppressionGain:
         # Gain attribution snapshot — populated each frame in _lower_band_gain.
         # Read by orchestrator trace_hf_chain; no audio path effect.
         self._last_lower_band_snap: dict = {}
+        # Kill-stage diag stashes — set in _gain_to_no_audible_echo each hop.
+        # Initialised to zeros so first-frame snap access is safe before the
+        # first call. No audio effect.
+        self._last_g_lin = np.zeros(self._n_bins, dtype=np.float32)
+        self._last_g_emr = np.zeros(self._n_bins, dtype=np.float32)
+        self._last_fire_mask = np.zeros(self._n_bins, dtype=bool)
+        self._last_enr_raw = np.zeros(self._n_bins, dtype=np.float32)
+        self._last_emr_raw = np.zeros(self._n_bins, dtype=np.float32)
         # Resolve freq-based config to bin indices once at construction.
         self._last_lf_band = hz_to_bin(self._config.last_lf_freq_hz, self._n_bins, self._sr)
         self._first_hf_band = hz_to_bin(self._config.first_hf_freq_hz, self._n_bins, self._sr)
@@ -653,6 +661,41 @@ class SuppressionGain:
         _r_G   = ~_r_min & ~_r_max & ~_r_lim
         def _bf(m, sl): return float(m[sl].mean()) if m[sl].size > 0 else 0.0
         _LF, _MF, _HF = slice(0, 7), slice(7, 65), slice(65, None)
+        # Kill-stage attribution: which term won inside _gain_to_no_audible_echo,
+        # how often min_gain clip / audibility downweight actually fired, what
+        # the effective audibility threshold was. Stashed values come from
+        # _gain_to_no_audible_echo / _weight_echo_for_audibility (recomputed
+        # from residual_echo vs weighted_residual). No audio effect.
+        _g_lin = self._last_g_lin
+        _g_emr = self._last_g_emr
+        _fire = self._last_fire_mask
+        _g_emr_wins = _fire & (_g_emr > _g_lin)
+        _min_clip_fired = G_raw < min_gain
+        # Audibility weight ratio: weight = weighted/residual_echo where
+        # residual_echo > 0. Bins with weight < 1 were downweighted by
+        # WeightEchoForAudibility. Use a strict-positive guard to keep
+        # silent bins from skewing the fraction.
+        _ea_cfg = self._echo_audibility
+        _audibility_threshold_hf_eff = float(
+            _ea_cfg.floor_power * _ea_cfg.audibility_threshold_hf
+        )
+        with np.errstate(divide='ignore', invalid='ignore'):
+            _aud_ratio = np.where(
+                residual_echo > 1e-30,
+                weighted_residual / residual_echo,
+                1.0,
+            )
+        _aud_lt1 = (residual_echo > 1e-30) & (_aud_ratio < 0.999)
+        # 10·log10 of the per-bin reduction; clip empty/silent bins.
+        with np.errstate(divide='ignore', invalid='ignore'):
+            _aud_db_hf = np.where(
+                (residual_echo[_HF] > 1e-30) & (weighted_residual[_HF] > 1e-30),
+                10.0 * np.log10(
+                    np.maximum(weighted_residual[_HF], 1e-30)
+                    / np.maximum(residual_echo[_HF], 1e-30)
+                ),
+                0.0,
+            )
         self._last_lower_band_snap = {
             'min_gain_5': _sb(min_gain, 5), 'min_gain_100': _sb(min_gain, 100),
             'max_gain_5': _sb(max_gain, 5), 'max_gain_100': _sb(max_gain, 100),
@@ -709,6 +752,33 @@ class SuppressionGain:
                 (self._nearend_enr_tr if self._ne_state_for_gain_rules() else self._normal_enr_tr)[_HF])),
             'emr_tr_hf_median': float(np.median(
                 (self._nearend_emr_tr if self._ne_state_for_gain_rules() else self._normal_emr_tr)[_HF])),
+            # === Kill-stage attribution (HF + MF cross-check) ===
+            # g_lin / g_emr per-bin medians at HF — which term inside
+            # GainToNoAudibleEcho dominates. g_emr_wins_frac tells whether
+            # the EMR-bypass clause (emr_tr/emr) is the killer at HF.
+            'g_lin_hf_median': float(np.median(_g_lin[_HF])),
+            'g_emr_hf_median': float(np.median(_g_emr[_HF])),
+            'g_lin_mf_median': float(np.median(_g_lin[_MF])),
+            'g_emr_mf_median': float(np.median(_g_emr[_MF])),
+            'g_emr_wins_frac_hf': float(_g_emr_wins[_HF].mean()) if _HF.start < self._n_bins else 0.0,
+            'g_emr_wins_frac_mf': float(_g_emr_wins[_MF].mean()),
+            # Outer gate fire fraction — fraction of HF bins where
+            # (enr > enr_tr AND emr > emr_tr); when 0, GainToNoAudibleEcho
+            # leaves G=1.0 untouched at HF (cap / smoothing must be culprit).
+            'gate_fire_frac_hf': float(_fire[_HF].mean()) if _HF.start < self._n_bins else 0.0,
+            # min_gain actual values at HF (NOT post-clip; the protection
+            # floor itself) and how often G_raw < min_gain (clip fired).
+            'min_gain_hf_median': float(np.median(min_gain[_HF])),
+            'min_gain_hf_p95': float(np.percentile(min_gain[_HF], 95)),
+            'min_gain_clipped_frac_hf': float(_min_clip_fired[_HF].mean()),
+            # low_noise_render bool consumed this hop (selects
+            # low_render_limit vs normal_render_limit in _get_min_gain).
+            'low_noise_render_active': bool(low_noise_render),
+            # Audibility downweight effectiveness — how often weight < 1
+            # and the band-mean dB reduction.
+            'audibility_weight_lt1_frac_hf': float(_aud_lt1[_HF].mean()),
+            'audibility_threshold_eff_hf': _audibility_threshold_hf_eff,
+            'weighted_residual_reduction_db_hf_median': float(np.median(_aud_db_hf)),
         }
         # Step 8: sqrt to amplitude domain.
         return np.sqrt(np.maximum(G, 0.0)).astype(np.float32)
@@ -780,4 +850,12 @@ class SuppressionGain:
             g_emr = emr_tr / np.maximum(emr, 1e-30)
             g_eff = np.maximum(g_lin, g_emr)
         g = np.where(fire, g_eff, g)
+        # Kill-stage diag: stash the two competing terms + fire mask + raw
+        # ENR/EMR so _lower_band_gain can attribute which term won per bin.
+        # No audio effect (read-only consumer via _last_lower_band_snap).
+        self._last_g_lin = g_lin.astype(np.float32, copy=True)
+        self._last_g_emr = g_emr.astype(np.float32, copy=True)
+        self._last_fire_mask = fire.copy()
+        self._last_enr_raw = enr.astype(np.float32, copy=True)
+        self._last_emr_raw = emr.astype(np.float32, copy=True)
         return g.astype(np.float32)
