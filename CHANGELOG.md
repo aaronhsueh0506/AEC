@@ -16,6 +16,59 @@ when verdict requires it.
 
 ---
 
+## [3.21.6.2] — 2026-05-28 — AEC3 alignment audit + 4 shipped items
+
+**Headline**: Full audit of the `docs/v3_21_alignment_roadmap.md` "still missing"
+list against the actual codebase. 80 % of the listed items turned out to be
+already-aligned, no-consumer additions, or no-op in our `current=max=13`
+steady state. The audit closes 4 items that genuinely needed shipping; the
+remaining gaps either require an architecture redesign (Tier C #11
+`convergence_seen` latch) or carry too much risk to ship inside v3.21.x
+without a dedicated design lock (Tier A #2 `IsRenderTooLow` /
+`use_stationarity_properties = false`). `__version__` bumped to 3.21.6.2.
+
+### Audit findings
+
+| Roadmap item | Status after audit |
+|---|---|
+| Tier A #2 EchoAudibility config defaults | Already AEC3-strict (`floor_power = 2·64`, `audibility_threshold_{lf,mf,hf} = 10.0`, `low_render_limit = 4·64`, `normal_render_limit = 64.0`). Orchestrator override `use_stationarity_properties = True` retained as load-bearing safety net (AEC3 default is `false`; flipping is a Phase-2 design item, not shipped). `IsRenderTooLow` + `non_zero_render_seen_` latch NOT shipped — would change stationarity-noise-floor update timing on every frame; too high-risk for an unbenched bundle. |
+| Tier A #3 SubtractorOutputAnalyzer | Strict AEC3 surface has only 3 signals (`any_filter_converged`, `any_coarse_filter_converged`, `all_filters_diverged`). `any_filter_converged` already wired (`bridge.filter_converged`). **Shipped**: added `any_coarse_filter_converged` (relaxed predicate `e²_c < 0.3·y²` with `kConvergenceThresholdLowLevel = 20²·hop`) and `all_filters_diverged` (`min(e²_r, e²_c) > 1.5·y²` with `30²·hop` threshold) to `FilterStateBridge`. No production consumer today (TransparentMode HMM is retired); zero-impact additive surface for Phase 2 HMM port. |
+| Tier A #5 FullBandErleEstimator | Already fully ported (`python/modules/state/fullband_erle.py`) and wired via `ErleEstimator.update()`. **Shipped**: removed duplicate inline `_update_erle_inst_quality` from `orchestrator.py` (dead code — the `use_aec3_erle_reverb_quality` flag was retired in v3.21.6.1 cleanup). |
+| Tier B #8 `poor_coarse_filter_counter` hangover | **Shipped, behavioural change**. Two physical-meaning corrections vs the pre-audit code: (a) trigger threshold `_threshold_hops` was 5 hops = 50 ms wall-clock; AEC3 strict `< 5` blocks = 20 ms → `blocks_to_hops(5, 160, 16k) = 2 hops`; (b) hangover was 40 AEC3 blocks (16 hops, 160 ms); AEC3 strict `coarse_reset_hangover_blocks = 25` → 10 hops, 100 ms. Also dropped the non-AEC3 `shadow_mu_scale = 0.0` freeze during hangover (AEC3 keeps coarse adapting, only the refined filter disallows `leakage_diverged` — see `subtractor.cc:264-307`). 0.5× safety margin on the trigger predicate retained (the strict `e²_r < e²_c` rule was 12-case Pareto-FAIL — `docs/v3_21_poor_coarse_rescue_12case_verdict.md`). |
+| Tier C #9 `use_aec3_zero_filter_on_epc` | **Shipped (documentation port)**. Added `PBFDAF.zero_filter_partitions(old, new)` mirroring AEC3 `AdaptiveFirFilter::ZeroFilter(old, new, &H_)` (`adaptive_fir_filter.cc:460-472`). Steady-state semantics: `current_size = max_size = 13` → call is a no-op. Existing call sites (all `zero_filter=False`) unchanged. Documented `W.fill(0)` branch as PBFDKF-specific divergence not parity. |
+| Tier C #10 `use_aec3_epc_classification` | No-op (depended on #9 redesign). |
+| Tier A #1 DominantNearendDetector | (rescinded 2026-05-28) — already ported inline at `suppression_gain.py:311`. |
+| Tier A #4 TransparentMode HMM | Deferred to Phase 2 with `SubtractorOutputAnalyzer` (consumer of new bridge signals). |
+| Tier A #6 ScaleFilter (exact) | Out of scope for this audit — retiring `FilterMisadjustmentEstimator` requires its own ablation arc. |
+| Tier B #7 4-mode HF tuning | Out of scope — needs separate per-band re-tune cycle. |
+| Tier C #11 `convergence_seen` latch redesign | Architecture work; not in this audit. |
+
+### Byte-equal verification (single-case smoke)
+
+Cohort case `0I0XMl3M0ECO0U1N0cJvpg_doubletalk` (~42 s DT_static).
+- Tier A #5 dedup + Tier A #3 additive + Tier C #9 doc port (alone): md5 `b898fc57f094db6da10891b0f606240a` — **byte-equal vs v3.21.6.1 baseline**.
+- All four shipped items: md5 changes (Tier B #8 hangover is the only behavioural delta; expected).
+
+### Physical-meaning alignment (user directive 2026-05-28)
+
+All AEC3 wall-clock conversions audited under hop=160 / block=320 / fft=512:
+- `coarse_reset_hangover_blocks = 25` → 100 ms → `blocks_to_hops(25, 160, 16k) = 10 hops`.
+- `poor_coarse_filter_counter < 5` blocks → 20 ms → `blocks_to_hops(5, 160, 16k) = 2 hops`.
+- `kBlocksToHoldErle = 100` → 400 ms → `int(0.4 × HOPS_PER_SECOND) = 40 hops`.
+- y² thresholds (`50² / 20² / 30²` × kBlockSize) → scaled by `hop/block = 160/64 = 2.5×` for our hop sums.
+
+### Files
+
+- `python/aec.py`: `__version__ = "3.21.6.2"`
+- `python/modules/filter/filter_state_bridge.py`: `FilterStateBridge` adds `any_coarse_filter_converged` + `all_filters_diverged`; `build_filter_state_bridge()` accepts both.
+- `python/modules/orchestrator.py`: computes relaxed coarse / strict diverged signals next to the existing strict-converged block; threads into bridge; removes inline R0.4 dead code; corrects poor_coarse hangover physical-meaning + drops shadow-freeze divergence.
+- `python/modules/state/aec_state.py`: TransparentMode branch sources `all_filters_diverged` from bridge (falls back to legacy heuristic for back-compat).
+- `python/modules/filters.py`: adds `PBFDAF.zero_filter_partitions(old, new)`; documents `W.fill(0)` ablation surface.
+- `CLAUDE.md`: version bumped.
+- `docs/v3_21_alignment_roadmap.md`: updated with audit verdict per item.
+
+---
+
 ## [3.21.6.1] — 2026-05-27 — AEC3 alignment completion (nores artifact + HF deficit fixes) + release cleanup
 
 **Headline**: Two production-blocking defects fixed on the v3.21.6 baseline, then full release cleanup (config / orchestrator / dev-trace removal). `__version__` bumped to 3.21.6.1.

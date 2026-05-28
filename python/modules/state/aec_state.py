@@ -306,7 +306,11 @@ class AecState:
                 any_filter_consistent = (
                     any_filter_converged and external_delay is not None
                 )
-            all_filters_diverged = (
+            # AEC3-strict SubtractorOutputAnalyzer divergence signal from
+            # bridge. Falls back to the legacy heuristic when the orchestrator
+            # has not populated it (back-compat for external callers that
+            # build a minimal bridge).
+            all_filters_diverged = bridge.all_filters_diverged or (
                 (not any_filter_converged) and bridge.divergence_indicator > 1.0
             )
             self._transparent_mode.update(

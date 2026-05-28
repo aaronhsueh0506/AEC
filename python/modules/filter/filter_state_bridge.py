@@ -70,6 +70,22 @@ class FilterStateBridge:
     feeding render alignment). -1 if no delay estimate yet. AecState
     routes this into AEC3 ``FilterDelay`` state."""
 
+    any_coarse_filter_converged: bool = False
+    """SubtractorOutputAnalyzer relaxed coarse predicate
+    (subtractor_output_analyzer.cc:50-51):
+        e2_coarse < 0.3 * y2 AND y2 > kConvergenceThresholdLowLevel (20²·hop).
+    Computed by orchestrator; consumed only when TransparentMode HMM is
+    active (currently retired in production). Additive: zero-impact when
+    no consumer is wired."""
+
+    all_filters_diverged: bool = False
+    """SubtractorOutputAnalyzer strict divergence predicate
+    (subtractor_output_analyzer.cc:53):
+        min(e2_refined, e2_coarse) > 1.5 * y2 AND y2 > 30²·hop.
+    Replaces the legacy ``divergence_indicator > 1.0`` heuristic for
+    TransparentMode consumers. Additive: zero-impact when no consumer is
+    wired (TransparentMode HMM is retired in production)."""
+
 
 def build_filter_state_bridge(
     *,
@@ -79,6 +95,8 @@ def build_filter_state_bridge(
     mu_final: float,
     external_delay_samples: int,
     shadow_filter: Optional[object] = None,
+    any_coarse_filter_converged: bool = False,
+    all_filters_diverged: bool = False,
 ) -> FilterStateBridge:
     """Snapshot the linear-filter family into a FilterStateBridge.
 
@@ -132,4 +150,6 @@ def build_filter_state_bridge(
         main_paused=bool(getattr(regime_handler, "main_paused", False)),
         mu_final=float(mu_final),
         external_delay_samples=int(external_delay_samples),
+        any_coarse_filter_converged=bool(any_coarse_filter_converged),
+        all_filters_diverged=bool(all_filters_diverged),
     )

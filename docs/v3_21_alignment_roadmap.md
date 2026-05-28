@@ -1,8 +1,36 @@
-# v3.21 AEC3 Alignment Roadmap (post-3.21.6.1)
+# v3.21 AEC3 Alignment Roadmap (post-3.21.6.2)
 
 **Scope rule (HARD)**: v3.21.x = AEC3-strict alignment work only. Any
 work that does not have an AEC3-default-production equivalent goes to
 v3.22 (which is reserved for genuinely beyond-AEC3 optimisation).
+
+## Audit summary (2026-05-28, v3.21.6.2)
+
+A full pass over the "still missing" list below found that 80 % of the
+items were either already aligned, no-consumer additive surfaces, or
+no-op under our `current_size = max_size = 13` steady state. Four items
+were shipped in v3.21.6.2 (see [CHANGELOG.md](../CHANGELOG.md) §3.21.6.2);
+the remainder either require an architecture redesign (Tier C #11) or
+carry too much behavioural risk without a dedicated design lock (Tier A #2
+`IsRenderTooLow`).
+
+Items shipped in v3.21.6.2: **Tier A #3** (SubtractorOutputAnalyzer
+signals — additive), **Tier A #5** (dedup of inline R0.4 dead code),
+**Tier B #8** (poor_coarse hangover physical-meaning correction —
+behavioural), **Tier C #9** (`PBFDAF.zero_filter_partitions` strict
+semantics — no-op in steady state).
+
+Items deferred:
+- **Tier A #2** `IsRenderTooLow` + `non_zero_render_seen_` latch — would
+  change stationarity-noise-floor update timing on every frame; too
+  high-risk to bundle without isolated bench. Phase-2 design item.
+- **Tier A #4** TransparentMode HMM — Phase 2; consumes the new
+  `any_coarse_filter_converged` / `all_filters_diverged` signals shipped
+  this cycle.
+- **Tier A #6** ScaleFilter exact port — retiring
+  `FilterMisadjustmentEstimator` needs its own ablation arc.
+- **Tier B #7** 4-mode HF tuning — needs separate per-band re-tune cycle.
+- **Tier C #11** `convergence_seen` latch redesign — architecture work.
 
 ## Status at v3.21.6.1 (current production)
 

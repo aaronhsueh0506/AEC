@@ -695,19 +695,6 @@ class AEC:
         self._filter_quality = None
         self._epc_reset_fired_this_frame = False
 
-        # R0.4 — ERLE inst linear quality state (ports FullBandErleEstimator::
-        # ErleInstantaneous from fullband_erle_estimator.cc). Tracks rolling
-        # 6-point ERLE to produce a continuous quality [0,1] for reverb model.
-        # Only active when config.use_aec3_erle_reverb_quality = True.
-        self._erle_inst_y2_acum = 0.0
-        self._erle_inst_e2_acum = 0.0
-        self._erle_inst_num_points = 0
-        self._erle_inst_erle_log2: float = 0.0
-        self._erle_inst_max_log2: float = -10.0   # AEC3: -10 (= -30 dB)
-        self._erle_inst_min_log2: float = 33.0    # AEC3: 33 (= 100 dB)
-        self._erle_inst_quality: float = 0.0      # EMA-smoothed quality [0,1]
-        self._erle_inst_hold_ctr: int = 0
-
         # #4: Confidence memory decay
         self.prev_dtd_conf = 0.0
         self._dtd_conf_holdoff = 0  # F2.5: frames remaining in hold phase
@@ -944,15 +931,6 @@ class AEC:
         if getattr(self, '_filter_quality', None) is not None:
             self._filter_quality.reset()
         self._epc_reset_fired_this_frame = False
-        # R0.4 — reset ERLE inst quality state.
-        self._erle_inst_y2_acum = 0.0
-        self._erle_inst_e2_acum = 0.0
-        self._erle_inst_num_points = 0
-        self._erle_inst_erle_log2 = 0.0
-        self._erle_inst_max_log2 = -10.0
-        self._erle_inst_min_log2 = 33.0
-        self._erle_inst_quality = 0.0
-        self._erle_inst_hold_ctr = 0
         if hasattr(self, '_shadow_mu_holdoff'):
             self._shadow_mu_holdoff = 0
         self._warmup_frames = self.config.warmup_frames
@@ -1731,13 +1709,13 @@ class AEC:
                 far_excited = np.mean(far_end ** 2) > 1e-4
                 saturation_safe = self._saturation_level < 0.5
                 shadow_mu_scale = 1.0 if (far_excited and saturation_safe) else 0.1
-                # Coarse-reset hangover. When the poor_coarse_filter_counter
-                # has fired (set by the post-process step below), freeze
-                # the coarse update for COARSE_RESET_HANGOVER_HOPS so it
-                # can't immediately re-drift after being reset to refined's
-                # weights.
-                if getattr(self, '_coarse_reset_hangover', 0) > 0:
-                    shadow_mu_scale = 0.0
+                # AEC3 strict (subtractor.cc:264-307): during the
+                # coarse_filter_reset_hangover window, the coarse filter
+                # KEEPS updating (with E_refined as gradient source), and
+                # the refined gain disallows the leakage_diverged branch.
+                # AEC3 does NOT freeze the coarse adaptation here. The
+                # `shadow_mu_scale = 0.0` freeze was a pre-alignment
+                # divergence — retired 2026-05-28.
                 # Capture shadow filter time-domain residual for
                 # UseRefinedOutput parity in `_aec3_post`.
                 self._last_shadow_output_time = self.shadow_filter.process(
@@ -1781,11 +1759,20 @@ class AEC:
                             self.filter.n_freqs, float(self._erl_estimate),
                             dtype=np.float32,
                         )
-                    # AEC3 cc:264-307 poor_coarse rescue copy (shipped default:
-                    # scalar E² with 0.5× safety margin to prevent thrashing,
-                    # 5-hop threshold, 16-hop hangover with shadow frozen).
+                    # AEC3 cc:264-307 poor_coarse rescue copy. Physical-meaning
+                    # alignment for OUR hop=160 (vs AEC3 kBlockSize=64):
+                    #   trigger threshold: AEC3 `counter < 5` blocks = 20 ms
+                    #     wall-clock → blocks_to_hops(5, 160, 16k) = 2 hops
+                    #   hangover: AEC3 `coarse_reset_hangover_blocks = 25`
+                    #     = 100 ms → blocks_to_hops(25, 160, 16k) = 10 hops
+                    # Trigger predicate KEEPS the 0.5× safety margin (the
+                    # strict AEC3 `e2_refined < e2_coarse` rule was shown
+                    # 12-case Pareto-FAIL; see
+                    # docs/v3_21_poor_coarse_rescue_12case_verdict.md).
+                    from . import aec3_scale as _aec3_scale
                     _cond_fire = bool(_e2_ref < 0.5 * _e2_coa)
-                    _threshold_hops = 5
+                    _threshold_hops = _aec3_scale.blocks_to_hops(
+                        5, self.config.hop_size, self.config.sample_rate)
                     if _cond_fire:
                         self._poor_coarse_counter = getattr(
                             self, '_poor_coarse_counter', 0) + 1
@@ -1797,9 +1784,8 @@ class AEC:
                             self.shadow_filter.copy_weights_from(self.filter)
                         except (AttributeError, TypeError):
                             self.shadow_filter.W[:] = self.filter.W
-                        from . import aec3_scale as _aec3_scale
                         self._coarse_reset_hangover = _aec3_scale.blocks_to_hops(
-                            40, self.config.hop_size, self.config.sample_rate)
+                            25, self.config.hop_size, self.config.sample_rate)
                         self._poor_coarse_counter = 0
                     if getattr(self, '_coarse_reset_hangover', 0) > 0:
                         self._coarse_reset_hangover -= 1
@@ -2659,80 +2645,6 @@ class AEC:
             return 0.0
         return 10 * np.log10((self.near_power + eps) / (self.error_power + eps))
 
-    def _update_erle_inst_quality(
-        self,
-        near_psd: np.ndarray,
-        echo_psd: np.ndarray,
-        far_psd: np.ndarray,
-        converged: bool,
-    ) -> 'Optional[float]':
-        """R0.4: Port of FullBandErleEstimator::ErleInstantaneous (fullband_erle_estimator.cc).
-
-        Computes a continuous quality estimate [0,1] from rolling 6-hop ERLE:
-          quality = (erle_log2 - min_log2) / (max_log2 - min_log2)
-        with instant-up / EMA-down smoothing (alpha=0.07, AEC3 verbatim).
-
-        Render energy gate: kX2BandEnergyThreshold=44015068 int16² per bin × 257 bins.
-        Only accumulates when converged AND render energy above threshold.
-
-        Returns None when quality accumulator not yet populated (equivalent to
-        binary None = skip reverb model update). Otherwise returns quality [0,1].
-        """
-        import math as _math
-
-        _POINTS_TO_ACCUMULATE = 6         # kPointsToAccumulate in AEC3
-        _BLOCKS_TO_HOLD = 40              # kBlocksToHoldErle=100 AEC3 blocks ≈ 40 Python hops
-        _X2_THRESHOLD = 44015068.0 * 257  # int16² per-bin threshold × n_bins
-        _ALPHA = 0.07                     # EMA forget factor (downward)
-
-        far_x2_sum = float(np.sum(far_psd))
-        if converged and far_x2_sum > _X2_THRESHOLD:
-            y2_sum = float(np.sum(near_psd))
-            e2_sum = float(np.sum(echo_psd))
-            self._erle_inst_y2_acum += y2_sum
-            self._erle_inst_e2_acum += e2_sum
-            self._erle_inst_num_points += 1
-
-            if self._erle_inst_num_points >= _POINTS_TO_ACCUMULATE:
-                if self._erle_inst_e2_acum > 0.0:
-                    ratio = self._erle_inst_y2_acum / self._erle_inst_e2_acum
-                    erle_log2 = _math.log2(max(ratio, 1e-10))
-                    self._erle_inst_erle_log2 = erle_log2
-
-                    # UpdateMaxMin: decay max down, min up; then clamp to current value.
-                    self._erle_inst_max_log2 -= 0.0004
-                    self._erle_inst_max_log2 = max(self._erle_inst_max_log2, erle_log2)
-                    self._erle_inst_min_log2 += 0.0004
-                    self._erle_inst_min_log2 = min(self._erle_inst_min_log2, erle_log2)
-
-                    # UpdateQualityEstimate: normalize + EMA.
-                    if self._erle_inst_max_log2 > self._erle_inst_min_log2:
-                        q = ((erle_log2 - self._erle_inst_min_log2)
-                             / (self._erle_inst_max_log2 - self._erle_inst_min_log2))
-                    else:
-                        q = 0.0
-                    if q > self._erle_inst_quality:
-                        self._erle_inst_quality = q         # instant upward
-                    else:
-                        self._erle_inst_quality += _ALPHA * (q - self._erle_inst_quality)
-
-                    self._erle_inst_hold_ctr = _BLOCKS_TO_HOLD
-
-                self._erle_inst_num_points = 0
-                self._erle_inst_y2_acum = 0.0
-                self._erle_inst_e2_acum = 0.0
-
-        self._erle_inst_hold_ctr -= 1
-        if self._erle_inst_hold_ctr == 0:
-            # ResetAccumulators: quality → 0, accumulators cleared.
-            self._erle_inst_quality = 0.0
-            self._erle_inst_num_points = 0
-            self._erle_inst_y2_acum = 0.0
-            self._erle_inst_e2_acum = 0.0
-
-        q_out = max(0.0, min(1.0, self._erle_inst_quality))
-        return q_out if q_out > 0.0 else None
-
     def dump_p53_trace(self, path: str) -> int:
         """P53 Step 0: dump captured per-frame innovation-audit rows to .npz.
 
@@ -3014,26 +2926,35 @@ class AEC:
         _y2_time = float(np.sum(near_end.astype(np.float64) ** 2))
         _e2_refined = float(np.sum(raw_output.astype(np.float64) ** 2))
         _y2_threshold = 3.73e-4  # 50²·64 / 32768² · (160/64)
+        # Relaxed gate uses lower-level convergence threshold 20²·hop
+        # (kConvergenceThresholdLowLevel in subtractor_output_analyzer.cc:45).
+        _y2_threshold_low = _y2_threshold * (20.0 / 50.0) ** 2  # = 5.97e-5
+        # Strict diverged gate: y² > 30²·hop (subtractor_output_analyzer.cc:53).
+        _y2_threshold_diverged = _y2_threshold * (30.0 / 50.0) ** 2  # = 1.34e-4
         _refined_conv = _e2_refined < 0.5 * _y2_time and _y2_time > _y2_threshold
         # Shadow filter coarse convergence: convert shadow's error_spec to
         # time-domain energy via Parseval. For rfft of length-fft signal:
         # sum(|X[k]|² for k=0..N/2) / N ≈ sum(x[n]² for n=0..N-1) / 2.
         _coarse_conv = False
+        _coarse_conv_relaxed = False
+        _e2_coarse = 0.0
         if self.shadow_filter is not None:
             # Parseval-mapped: full-spectrum sum ÷ fft_size gives time-domain
-            # energy over the fft_size window. (use_coarse_e2_time_domain_parity
-            # variant retired as no-op; coarse_filter_converged_relaxed signal
-            # retired — TransparentMode consumer removed.)
+            # energy over the fft_size window.
             if hasattr(self.shadow_filter, 'error_spec'):
                 _e_spec = self.shadow_filter.error_spec
                 _e2_coarse = float(
                     (2 * np.sum(np.abs(_e_spec[1:-1]) ** 2) + np.abs(_e_spec[0]) ** 2 + np.abs(_e_spec[-1]) ** 2)
                     / self.filter.fft_size
                 )
-            else:
-                _e2_coarse = 0.0
             _coarse_conv = _e2_coarse < 0.05 * _y2_time and _y2_time > _y2_threshold
+            _coarse_conv_relaxed = _e2_coarse < 0.3 * _y2_time and _y2_time > _y2_threshold_low
         _aec3_converged = _refined_conv or _coarse_conv
+        # Strict AEC3 SubtractorOutputAnalyzer all_filters_diverged
+        # (subtractor_output_analyzer.cc:53). Additive surface for the future
+        # TransparentMode HMM consumer; no behavioural effect today.
+        _min_e2 = min(_e2_refined, _e2_coarse) if self.shadow_filter is not None else _e2_refined
+        _all_diverged = _min_e2 > 1.5 * _y2_time and _y2_time > _y2_threshold_diverged
 
         # Build per-hop filter-state snapshot for AecState.
         bridge = build_filter_state_bridge(
@@ -3043,6 +2964,8 @@ class AEC:
             mu_final=float(getattr(self, '_last_mu_scale_diag', 1.0)),
             external_delay_samples=int(self._current_delay) if self._delay_active else -1,
             shadow_filter=self.shadow_filter,
+            any_coarse_filter_converged=_coarse_conv_relaxed,
+            all_filters_diverged=_all_diverged,
         )
         # Build external_delay estimate from legacy delay tracker. AecState's
         # FilterQuality 4-gate AND requires external_delay OR convergence_seen

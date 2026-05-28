@@ -189,6 +189,29 @@ class PBFDAF:
         self.partition_idx = 0
         self.error_spec_windowed.fill(0)
 
+    def zero_filter_partitions(self, old_size: int, new_size: int) -> None:
+        """AEC3-strict port of ``AdaptiveFirFilter::ZeroFilter(old, new, &H_)``
+        (adaptive_fir_filter.cc:460-472).
+
+        Zeroes filter partitions in the half-open range [old_size, new_size).
+        In AEC3 production where ``current_size == max_size == 13`` (steady
+        state), the only call site is ``HandleEchoPathChange()`` which passes
+        ``(current_size, max_size)`` — i.e. (13, 13) — making this a no-op.
+        The non-trivial behaviour only fires during initial partition-size
+        growth (12→13) or after ``SetSizePartitions`` shrinks ``current_size``.
+
+        We never grow partitions in v3.21.x (fixed 13-partition filter), so
+        this is a documented strict-port surface that is never expected to
+        zero any partition during a single-session run. Provided for AEC3
+        contract alignment and for future architecture work where partition
+        count may become dynamic.
+        """
+        old = max(0, int(old_size))
+        new = min(int(new_size), self.W.shape[0])
+        if old >= new:
+            return
+        self.W[old:new].fill(0)
+
     def handle_echo_path_change(self, delay_change: bool = True,
                                   gain_change: bool = False,
                                   zero_filter: bool = False) -> None:
@@ -196,10 +219,16 @@ class PBFDAF:
         (M3: not-gain_change → poor_excitation_counter = INITIAL + call_counter = 0).
         AEC3 Subtractor::HandleEchoPathChange dispatches to both refined + coarse.
 
-        NOTE on zero_filter: W.fill(0) is NOT AEC3 ZeroFilter parity.
-        AEC3 AdaptiveFirFilter::ZeroFilter(current_size, max_size) zeroes only
-        partitions in [current..max). In steady state (current=max=13) this
-        is a NO-OP — W is fully preserved. W.fill(0) is a non-AEC3 ablation.
+        NOTE on zero_filter (non-AEC3 ablation path):
+        AEC3 ``AdaptiveFirFilter::HandleEchoPathChange`` calls
+        ``ZeroFilter(current_size_partitions_, max_size_partitions_, &H_)``,
+        which in steady state (current=max=13) is a NO-OP — W is fully
+        preserved across delay events. ``W.fill(0)`` here clears ALL
+        partitions, which is strictly more aggressive than AEC3.
+        ``zero_filter`` defaults to False at every orchestrator call site,
+        so this branch is dormant in production. The AEC3-strict semantics
+        live in ``zero_filter_partitions()`` above; the legacy aggressive
+        path is retained behind ``zero_filter=True`` for ablation only.
         """
         from . import aec3_scale as _aec3_scale
         if delay_change and zero_filter:
