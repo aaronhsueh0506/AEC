@@ -70,7 +70,34 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
 
     diag = dict(getattr(aec, "_diag", {}))
 
-    return {
+    # Pull SuppressionGain's internal `_last_lower_band_snap` if present.
+    # These fields distinguish HF cap propagation from underlying R²
+    # inflation, and identify which gain rule fired in HF (min_gain /
+    # limiting_gain / pass-through). They are the smoking gun for HF
+    # painted-black root cause.
+    sg_snap = getattr(sg, "_last_lower_band_snap", {}) or {} if sg is not None else {}
+
+    # Pull ResidualEchoEstimator's direct vs reverb R² split. Tells us
+    # whether RES inflation comes from the direct path (S²/ERLE) or the
+    # AddReverb tail mass accumulator.
+    ree = getattr(aec, "_aec3_ree", None)
+    r2_direct = (ree._last_r2_direct_component
+                 if ree is not None
+                 and hasattr(ree, "_last_r2_direct_component")
+                 else np.zeros(n_bins, dtype=np.float32))
+    r2_reverb = (ree._last_r2_reverb_component
+                 if ree is not None
+                 and hasattr(ree, "_last_r2_reverb_component")
+                 else np.zeros(n_bins, dtype=np.float32))
+    r2_path = (ree._last_r2_path if ree is not None
+               and hasattr(ree, "_last_r2_path") else "unset")
+    # Reverb model state (tail energy proxy)
+    reverb_fr = getattr(ree, "_reverb_freq_resp", None) if ree is not None else None
+    tail_max = (float(np.max(reverb_fr.tail_response))
+                if reverb_fr is not None
+                and hasattr(reverb_fr, "tail_response") else 0.0)
+
+    snap = {
         "gain": gain,
         "gain_lf_med": float(np.median(gain[:lf_end])),
         "gain_mf_med": float(np.median(gain[lf_end:mf_end])),
@@ -95,6 +122,38 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
         "echo_psd_hf": _band_median(echo_psd, mf_end, n_bins),
         "far_psd_mean": float(np.mean(far_psd)),
     }
+    # SG internals — HF wipe root cause attribution
+    snap.update({
+        # gain just before HF cap propagation (distinguishes anchor vs R²)
+        "sg_gain_hf_med_pre_hf_lim": float(sg_snap.get("gain_hf_median_pre_hf_lim", 1.0)),
+        "sg_gain_hf_med_post":       float(sg_snap.get("gain_hf_median", 1.0)),
+        # Per-band fractions of gain bins that landed on min/lim gate
+        "sg_reason_min_hf": float(sg_snap.get("reason_min_hf", 0.0)),
+        "sg_reason_lim_hf": float(sg_snap.get("reason_lim_hf", 0.0)),
+        "sg_reason_min_mf": float(sg_snap.get("reason_min_mf", 0.0)),
+        "sg_reason_lim_mf": float(sg_snap.get("reason_lim_mf", 0.0)),
+        # ENR/EMR HF medians (post-audibility weight, pre-clip)
+        "sg_enr_hf": float(sg_snap.get("enr_hf_median", 0.0)),
+        "sg_emr_hf": float(sg_snap.get("emr_hf_median", 0.0)),
+        "sg_enr_tr_hf": float(sg_snap.get("enr_tr_hf_median", 1.0)),
+        "sg_emr_tr_hf": float(sg_snap.get("emr_tr_hf_median", 1.0)),
+        # Raw R² in HF (BEFORE audibility weighting) — is R² inflated?
+        "sg_r2_hf_mean": float(sg_snap.get("r2_hf_mean", 0.0)),
+        "sg_r2_mf_mean": float(sg_snap.get("r2_mf_mean", 0.0)),
+        "sg_r2_lf_mean": float(sg_snap.get("r2_lf_mean", 0.0)),
+        # HF cap anchor bin + its pre-cap gain value
+        "sg_hf_anchor_value": float(sg_snap.get("hf_anchor_value_pre_hf_lim", 1.0)),
+        "sg_hf_lim_applied": float(sg_snap.get("hf_lim_applied", 0.0)),
+        # ResidualEchoEstimator R² breakdown
+        "r2_direct_hf": _band_median(r2_direct, mf_end, n_bins),
+        "r2_reverb_hf": _band_median(r2_reverb, mf_end, n_bins),
+        "r2_direct_mf": _band_median(r2_direct, lf_end, mf_end),
+        "r2_reverb_mf": _band_median(r2_reverb, lf_end, mf_end),
+        "reverb_tail_max": tail_max,
+        "r2_path_linear": 1.0 if r2_path == "linear" else 0.0,
+        "r2_path_nonlinear": 1.0 if r2_path == "nonlinear" else 0.0,
+    })
+    return snap
 
 
 def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
@@ -307,6 +366,67 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
             arr_db = 10 * np.log10(cols[k][symptom_mask] + 1e-12)
             print(f"    {k} (dB): "
                   f"mean={arr_db.mean():+6.2f}  median={np.median(arr_db):+6.2f}")
+        # --- SG internal attribution at symptom (where does the wipe come from?) ---
+        print(f"  SuppressionGain internals at symptom:")
+        pre = cols["sg_gain_hf_med_pre_hf_lim"][symptom_mask]
+        post = cols["sg_gain_hf_med_post"][symptom_mask]
+        print(f"    gain_hf_med pre-HF-cap : "
+              f"mean={pre.mean():.3f}  median={np.median(pre):.3f}  "
+              f"min={pre.min():.3f}")
+        print(f"    gain_hf_med post-HF-cap: "
+              f"mean={post.mean():.3f}  median={np.median(post):.3f}  "
+              f"min={post.min():.3f}")
+        cap_drop = pre - post
+        print(f"    HF-cap drop (pre-post) : "
+              f"mean={cap_drop.mean():.3f}  max={cap_drop.max():.3f}  "
+              f"← if large, HF cap anchor crushed HF; if ~0, R² inflated")
+        print(f"    hf_anchor_value pre-cap: "
+              f"mean={cols['sg_hf_anchor_value'][symptom_mask].mean():.3f}  "
+              f"min={cols['sg_hf_anchor_value'][symptom_mask].min():.3f}  "
+              f"← if low, single-bin null at ~2 kHz wipes whole HF")
+        print(f"    hf_lim_applied fraction: "
+              f"{cols['sg_hf_lim_applied'][symptom_mask].mean() * 100:5.1f}%")
+        print(f"    reason_min HF / MF     : "
+              f"{cols['sg_reason_min_hf'][symptom_mask].mean() * 100:5.1f}% / "
+              f"{cols['sg_reason_min_mf'][symptom_mask].mean() * 100:5.1f}%  "
+              f"← high = audibility floor (min_gain) fires; needs EchoAudibility port")
+        print(f"    reason_lim HF / MF     : "
+              f"{cols['sg_reason_lim_hf'][symptom_mask].mean() * 100:5.1f}% / "
+              f"{cols['sg_reason_lim_mf'][symptom_mask].mean() * 100:5.1f}%  "
+              f"← high = HF cap / smoothing limited")
+        print(f"    ENR HF (R²/Y²)         : "
+              f"mean={cols['sg_enr_hf'][symptom_mask].mean():.3f}  "
+              f"median={np.median(cols['sg_enr_hf'][symptom_mask]):.3f}  "
+              f"← if >>1, R² inflated above near; SG kills HF")
+        print(f"    EMR HF (R²/CN)         : "
+              f"mean={cols['sg_emr_hf'][symptom_mask].mean():.3f}  "
+              f"median={np.median(cols['sg_emr_hf'][symptom_mask]):.3f}")
+        print(f"    enr_target HF (tuning) : "
+              f"{cols['sg_enr_tr_hf'][symptom_mask].mean():.3f}  "
+              f"← nearend_tuning HF target")
+        r2_hf_db = 10 * np.log10(cols["sg_r2_hf_mean"][symptom_mask] + 1e-12)
+        print(f"    R² HF mean (RES out, dB): "
+              f"mean={r2_hf_db.mean():+6.2f}  "
+              f"median={np.median(r2_hf_db):+6.2f}  "
+              f"← compare to echo_psd_hf for RES inflation magnitude")
+        # RES direct vs reverb breakdown
+        rd_hf = cols["r2_direct_hf"][symptom_mask]
+        rv_hf = cols["r2_reverb_hf"][symptom_mask]
+        rd_db = 10 * np.log10(rd_hf + 1e-12)
+        rv_db = 10 * np.log10(rv_hf + 1e-12)
+        print(f"  RES R² breakdown at symptom (HF):")
+        print(f"    R²_direct (S²/ERLE) dB : mean={rd_db.mean():+6.2f}  "
+              f"median={np.median(rd_db):+6.2f}")
+        print(f"    R²_reverb (AddReverb) dB: mean={rv_db.mean():+6.2f}  "
+              f"median={np.median(rv_db):+6.2f}")
+        with np.errstate(divide='ignore', invalid='ignore'):
+            reverb_share = rv_hf / np.maximum(rd_hf + rv_hf, 1e-30)
+        print(f"    reverb / (direct+reverb): "
+              f"mean={reverb_share.mean() * 100:5.1f}%  "
+              f"← if >50%, AddReverb dominates R² (reverb model inflation)")
+        print(f"    reverb tail_max         : mean={cols['reverb_tail_max'][symptom_mask].mean():.3e}")
+        print(f"    R² path: linear={cols['r2_path_linear'][symptom_mask].mean() * 100:5.1f}%  "
+              f"nonlinear={cols['r2_path_nonlinear'][symptom_mask].mean() * 100:5.1f}%")
     print()
 
     # ---------- Time-binned timeline (2-second windows) ----------
@@ -334,38 +454,59 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
     print()
 
     # ---------- Narrative ----------
-    print("--- Narrative ---")
+    print("--- Narrative (SG-internal attribution) ---")
     if n_sym == 0:
-        print("  No HF wipe during NE-active frames in this trace. The")
-        print("  symptom you observed earlier may already be fixed by")
-        print("  v3.21.6.2, OR this case does not exercise it. Suggest")
-        print("  trying a different case if the user case still shows the")
-        print("  symptom on the spectrogram.")
+        print("  No HF wipe during NE-active frames in this trace.")
     else:
-        dne_during_sym = cols['dominant_nearend'][symptom_mask].mean()
-        ul_during_sym = cols['usable_linear'][symptom_mask].mean()
-        print(f"  HF-wipe fires on {n_sym}/{n_hops} hops "
-              f"({n_sym / n_hops * 100:.1f}%) of which {dne_during_sym * 100:.0f}% "
-              f"are flagged dominant_nearend and {ul_during_sym * 100:.0f}% are "
-              f"flagged usable_linear.")
-        if dne_during_sym < 0.5:
-            print("  → Candidate A: DNE FAILS to fire on >50% of symptom")
-            print("    frames. Detector not catching this NE pattern; or")
-            print("    Phase-2 SubtractorOutputAnalyzer + TransparentMode")
-            print("    HMM may help bypass SG.")
-        elif ul_during_sym > 0.5:
-            print("  → Candidate B: DNE is firing AND usable_linear is")
-            print("    True during the wipe — SuppressionGain consumes")
-            print("    linear residual (over-aggressive). convergence_seen")
-            print("    latch redesign (Tier C #11) or")
-            print("    use_linear_filter_output_selection_for_final_output")
-            print("    expected to recover HF.")
+        pre = cols["sg_gain_hf_med_pre_hf_lim"][symptom_mask]
+        post = cols["sg_gain_hf_med_post"][symptom_mask]
+        cap_drop_mean = float((pre - post).mean())
+        enr_hf_med = float(np.median(cols["sg_enr_hf"][symptom_mask]))
+        r2_hf_mean = float(cols["sg_r2_hf_mean"][symptom_mask].mean())
+        echo_hf_mean = float(cols["echo_psd_hf"][symptom_mask].mean())
+        r2_over_echo = r2_hf_mean / max(echo_hf_mean * (32768.0 ** 2), 1e-12)
+        reason_min_hf = float(cols["sg_reason_min_hf"][symptom_mask].mean())
+        reason_lim_hf = float(cols["sg_reason_lim_hf"][symptom_mask].mean())
+        dne_during_sym = float(cols['dominant_nearend'][symptom_mask].mean())
+        ul_during_sym = float(cols['usable_linear'][symptom_mask].mean())
+        print(f"  HF wipe at SYMPTOM frames ({n_sym} hops):")
+        print(f"    pre-HF-cap gain median  : {np.median(pre):.3f}")
+        print(f"    post-HF-cap gain median : {np.median(post):.3f}")
+        print(f"    HF-cap drop (pre-post)  : mean={cap_drop_mean:.3f}")
+        print(f"    R²_HF / echo_psd_HF     : {r2_over_echo:.2f}  "
+              f"(>>1 = RES inflated above filter echo estimate)")
+        print(f"    ENR HF median           : {enr_hf_med:.3f}  "
+              f"(>1 = R² above near; SG kills)")
+        print(f"    reason_min HF fraction  : {reason_min_hf * 100:.0f}%")
+        print(f"    reason_lim HF fraction  : {reason_lim_hf * 100:.0f}%")
+        print()
+        # Attribution
+        if cap_drop_mean > 0.3 and float(np.median(pre)) > 0.5:
+            print("  ROOT: HF cap anchor at ~2 kHz. Pre-cap HF gain is healthy")
+            print("  but a single bin at the anchor is wiped → propagates to all HF.")
+            print("  Check sg_hf_anchor_value: if low, that bin's R² is anomalous.")
+            print("  Fix vector: anchor bin selection / window broadening.")
+        elif enr_hf_med > 1.0 or r2_over_echo > 5.0:
+            print("  ROOT: R² inflated FAR above the linear filter's echo estimate.")
+            print(f"  R² / echo_psd ratio ≈ {r2_over_echo:.1f}x — RES is generating")
+            print("  echo PSD much larger than S²_linear/ERLE alone. Suspect:")
+            print("  (a) reverb model AddReverb() inflated by accumulated tail mass,")
+            print("  (b) use_stationarity_properties=True scaling boosting R²,")
+            print("  (c) ERLE per-bin floor=1 + small s2_linear → R²≈s2 then reverb")
+            print("      pile-on inflates it. Diff vs AEC3 here.")
+        elif reason_min_hf > 0.5:
+            print("  ROOT: audibility min_gain floor fires on >50% of HF bins.")
+            print("  EchoAudibility full per-bin JND port (Tier A #2) expected to fix.")
         else:
-            print("  → Candidate C: DNE fires but usable_linear is False,")
-            print("    so SG sees the capture spectrum yet still wipes HF.")
-            print("    Likely the audibility-threshold path or HF cap;")
-            print("    EchoAudibility full per-bin JND port (Tier A #2)")
-            print("    expected to recover HF.")
+            if dne_during_sym > 0.5 and ul_during_sym > 0.5:
+                print(f"  Mixed: DNE={dne_during_sym * 100:.0f}% / UL={ul_during_sym * 100:.0f}%")
+                print("  but SG internals don't point at a single dominant gate.")
+                print("  Check the SYMPTOM detail block above — `enr_hf` value tells")
+                print("  whether RES is producing reasonable R²; pre/post cap delta")
+                print("  tells whether HF cap is the propagator.")
+            else:
+                print("  No clear single-gate attribution. Possibly upstream filter")
+                print("  divergence; share the full block above for case-specific read.")
     print("=" * 72)
 
 
