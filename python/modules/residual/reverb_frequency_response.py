@@ -43,11 +43,35 @@ class ReverbFrequencyResponse:
     """
 
     def __init__(self, n_freqs: int,
-                 use_conservative_tail_frequency_response: bool = False) -> None:
+                 use_conservative_tail_frequency_response: bool = False,
+                 *,
+                 sr: int = 16000,
+                 hop_size: int = 160,
+                 use_wallclock_smoothing: bool = False) -> None:
         self._n_freqs = int(n_freqs)
         self._use_conservative = bool(use_conservative_tail_frequency_response)
         self._average_decay: float = 0.0
         self._tail_response = np.zeros(self._n_freqs, dtype=np.float32)
+        # AEC3 reverb_frequency_response.cc:88 applies α=0.2·quality per
+        # kBlockSize=64 sample block (= 4 ms @ 16 kHz). Our pipeline calls
+        # update() per hop_size (= 10 ms @ hop=160), so a verbatim 0.2 is
+        # 2.5× slower in wall-clock — average_decay sticks to stale FS
+        # values when entering DT2, inflating tail_response and crushing
+        # HF gain ("painted-black" symptom after far-end-single-talk).
+        # Wall-clock-equivalent per-hop α derived via
+        # per_block_ema_alpha_to_per_hop(0.2, hop, sr) ≈ 0.428 at hop=160.
+        # Default-OFF preserves byte-equal; flag-ON enables the strict
+        # AEC3 wall-clock envelope.
+        self._sr = int(sr)
+        self._hop_size = int(hop_size)
+        self._use_wallclock_smoothing = bool(use_wallclock_smoothing)
+        if self._use_wallclock_smoothing:
+            from .. import aec3_scale as _aec3_scale
+            self._smoothing_base = _aec3_scale.per_block_ema_alpha_to_per_hop(
+                0.2, self._hop_size, self._sr
+            )
+        else:
+            self._smoothing_base = 0.2
 
     @property
     def tail_response(self) -> np.ndarray:
@@ -90,8 +114,10 @@ class ReverbFrequencyResponse:
             tail_energy = float(np.sum(freq_resp_tail[1:]))
             average_decay = tail_energy / direct_energy
 
-        # EMA smoothing (cc:88-89): α = 0.2 · linear_filter_quality.
-        smoothing = 0.2 * float(linear_filter_quality)
+        # EMA smoothing (cc:88-89): α = 0.2 · linear_filter_quality (per
+        # AEC3 4 ms block). Wall-clock variant rescales the base alpha so
+        # the per-hop envelope matches AEC3's per-block envelope.
+        smoothing = self._smoothing_base * float(linear_filter_quality)
         self._average_decay += smoothing * (average_decay - self._average_decay)
 
         # Per-bin tail = direct × scalar decay (cc:91-93).

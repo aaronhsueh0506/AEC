@@ -143,6 +143,10 @@ class ResidualEchoEstimator:
         # R0.3: AEC3 EchoGeneratingPower delay-centered window (pre=1, post=1)
         # vs legacy ring buffer (pre=0). Default flipped to True 2026-05-27.
         use_aec3_echo_gen_window: bool = True,
+        # ReverbFrequencyResponse EMA wall-clock alignment.
+        # AEC3 applies α=0.2·quality per 4 ms block; our verbatim port
+        # applied per 10 ms hop (2.5× too slow). Default OFF for byte-equal.
+        use_aec3_wallclock_reverb_smoothing: bool = False,
     ) -> None:
         self._n_bins = int(n_bins)
         self._echo_model = echo_model
@@ -215,6 +219,9 @@ class ResidualEchoEstimator:
                 use_conservative_tail_frequency_response=(
                     self._reverb_cfg.conservative_tail_freq_response
                 ),
+                sr=self._sr,
+                hop_size=self._hop_size,
+                use_wallclock_smoothing=bool(use_aec3_wallclock_reverb_smoothing),
             )
 
     def attach_reverb_decay_estimator(self, n_partitions: int,

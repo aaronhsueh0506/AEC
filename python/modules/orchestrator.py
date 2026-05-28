@@ -483,6 +483,10 @@ class AEC:
                 hop_size=self.config.hop_size,
                 use_aec3_residual_noise_gate=True,
                 use_aec3_echo_gen_window=True,
+                use_aec3_wallclock_reverb_smoothing=bool(
+                    getattr(self.config,
+                            "use_aec3_wallclock_reverb_smoothing", False)
+                ),
             )
             _sg_config = SuppressorConfig()
             # Stationarity zeroing is the shipped production default

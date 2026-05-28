@@ -193,7 +193,8 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
 def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
                mode: str = "pbfdkf", preset: str = "balanced",
                enable_res: bool = True, cng: bool = True,
-               wallclock_dne_trigger: bool = False) -> None:
+               wallclock_dne_trigger: bool = False,
+               wallclock_reverb_smoothing: bool = False) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     mic, sr_mic = sf.read(mic_path, dtype="float32")
@@ -216,6 +217,8 @@ def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
     cfg.sample_rate = sr
     if wallclock_dne_trigger:
         cfg.use_aec3_wallclock_dne_trigger_threshold = True
+    if wallclock_reverb_smoothing:
+        cfg.use_aec3_wallclock_reverb_smoothing = True
 
     aec = AEC(cfg)
     hop = cfg.hop_size
@@ -753,12 +756,17 @@ def main() -> None:
                    help="AEC3-strict: derive DNE trigger_threshold from "
                         "trigger_threshold_ms (48 ms = 5 hops) instead of "
                         "legacy hop-count 12 (= 120 ms)")
+    p.add_argument("--wallclock-reverb-smoothing", action="store_true",
+                   help="AEC3-strict: ReverbFrequencyResponse EMA α=0.2 "
+                        "applied per AEC3 4 ms block (= 0.428 per 10 ms hop) "
+                        "instead of legacy 0.2 per hop (2.5× too slow)")
     args = p.parse_args()
 
     trace_case(args.mic, args.lpb, args.output_dir,
                mode=args.mode, preset=args.preset,
                enable_res=not args.no_res, cng=not args.no_cng,
-               wallclock_dne_trigger=args.wallclock_dne_trigger)
+               wallclock_dne_trigger=args.wallclock_dne_trigger,
+               wallclock_reverb_smoothing=args.wallclock_reverb_smoothing)
 
 
 if __name__ == "__main__":

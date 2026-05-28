@@ -53,6 +53,13 @@ class AecConfig:
     # trigger_threshold (48 ms = 5 hops at hop=160/sr=16k, vs legacy
     # 12 hops = 120 ms = 2.5× AEC3). Default OFF for byte-equal.
     use_aec3_wallclock_dne_trigger_threshold: bool = False
+    # AEC3-strict wall-clock alignment of ReverbFrequencyResponse EMA
+    # smoothing α (0.2·quality per AEC3 4 ms block → per-hop equivalent
+    # 0.428·quality at hop=160). Verbatim 0.2 per hop is 2.5× too slow,
+    # making average_decay stick to stale FS values when entering DT2 →
+    # tail_response stays inflated → SG wipes HF ("painted-black" after
+    # far-end-single-talk). Default OFF for byte-equal.
+    use_aec3_wallclock_reverb_smoothing: bool = False
 
     # ── Shadow filter (dual-filter divergence control) ──────────────────
     enable_shadow: bool = True
