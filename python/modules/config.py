@@ -95,6 +95,38 @@ class AecConfig:
     # byte-equal; toggled per-case via tracer during validation.
     use_aec3_fft_density_scaled_psd_floors: bool = False
 
+    # ── v3.22 future work: HF minimum-gain floor during NE-dominant ─────
+    # NOT AEC3-strict (AEC3 SG's min_gain = render_limit / R² has the same
+    # structural weakness — when R² is huge at HF bins where filter spuriously
+    # outputs S²_linear during NE-only periods, min_gain → 0 and HF is
+    # painted-black). v3.21 AEC3 surface is exhausted for this symptom.
+    #
+    # SPEC (when flag ON):
+    #   When the SG dominant-nearend detector says NE-state is active, force
+    #   ``min_gain[k] >= 10^(hf_min_gain_floor_during_dne_db / 10)`` for all
+    #   HF bins (k >= first_hf_band ≈ 1000 Hz @ fft=512). This caps total
+    #   HF suppression at the configured dB-floor regardless of the linear
+    #   R² estimate. Final amplitude floor = sqrt(power floor).
+    #
+    # WHY -15 dB:
+    #   Current symptom (568_EVB DT→FS→DT2 at 6.5-7.0 s) has gain_HF ≈ -35 dB
+    #   median during NE-active periods → audible "painted-black"/"大魔王"
+    #   robot artefact on Mandarin "/sì/" fricative HF + formant valleys.
+    #   −15 dB floor lifts gain ≥ 0.178 amplitude (= 0.0316 power) which keeps
+    #   the NE voice fully audible while still allowing ~5× HF attenuation
+    #   when light residual echo bleeds through NE periods.
+    #
+    # GATING:
+    #   Only fires when ``_ne_state_for_gain_rules()`` is True (i.e., DNE
+    #   detector currently in NE-state). When DNE=False (echo-dominant
+    #   moments), SG's full dynamic range is preserved — no impact on
+    #   echo-cancellation aggressiveness during FS or DT-echo-loud periods.
+    #
+    # Default OFF for v3.21.x byte-equal; intended to flip ON in v3.22 after
+    # multi-case verification (incl. confirming no FS-echo regression).
+    hf_min_gain_floor_during_dne_enabled: bool = False
+    hf_min_gain_floor_during_dne_db: float = -15.0
+
     # ── Shadow filter (dual-filter divergence control) ──────────────────
     enable_shadow: bool = True
     shadow_mu_ratio: float = 1.0

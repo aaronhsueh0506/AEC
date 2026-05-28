@@ -547,6 +547,14 @@ class AEC:
                 sr=self.config.sample_rate,
                 hop_size=self.config.hop_size,
                 use_wallclock_block_energy_threshold=_use_fft_dens,
+                hf_min_gain_floor_during_dne_enabled=bool(
+                    getattr(self.config,
+                            "hf_min_gain_floor_during_dne_enabled", False)
+                ),
+                hf_min_gain_floor_during_dne_db=float(
+                    getattr(self.config,
+                            "hf_min_gain_floor_during_dne_db", -15.0)
+                ),
             )
             self._aec3_n_bins = n_bins
             self._aec3_sg_config = _sg_config
@@ -1148,6 +1156,14 @@ class AEC:
             sr=self.config.sample_rate,
             hop_size=self.config.hop_size,
             use_wallclock_block_energy_threshold=_use_fft_dens_reset,
+            hf_min_gain_floor_during_dne_enabled=bool(
+                getattr(self.config,
+                        "hf_min_gain_floor_during_dne_enabled", False)
+            ),
+            hf_min_gain_floor_during_dne_db=float(
+                getattr(self.config,
+                        "hf_min_gain_floor_during_dne_db", -15.0)
+            ),
         )
         self._aec3_ola_buf.fill(0)
         self._aec3_pending_gain_change = False

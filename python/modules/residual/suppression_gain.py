@@ -467,7 +467,9 @@ class SuppressionGain:
 
     def __init__(self, *, n_bins: int = 257, config: Optional[SuppressorConfig] = None,
                  sr: int = 16000, hop_size: int = 160,
-                 use_wallclock_block_energy_threshold: bool = False) -> None:
+                 use_wallclock_block_energy_threshold: bool = False,
+                 hf_min_gain_floor_during_dne_enabled: bool = False,
+                 hf_min_gain_floor_during_dne_db: float = -15.0) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
         self._hop_size = int(hop_size)
@@ -515,6 +517,15 @@ class SuppressionGain:
         self._last_fire_mask = np.zeros(self._n_bins, dtype=bool)
         self._last_enr_raw = np.zeros(self._n_bins, dtype=np.float32)
         self._last_emr_raw = np.zeros(self._n_bins, dtype=np.float32)
+        # v3.22 candidate (default OFF): HF minimum-gain floor during DNE.
+        # See AecConfig.hf_min_gain_floor_during_dne_* for full spec.
+        # Precomputed power-domain floor = 10^(threshold_db / 10).
+        self._hf_min_gain_floor_during_dne_enabled = bool(
+            hf_min_gain_floor_during_dne_enabled
+        )
+        self._hf_min_gain_floor_during_dne_power = float(
+            10.0 ** (float(hf_min_gain_floor_during_dne_db) / 10.0)
+        )
         # Resolve freq-based config to bin indices once at construction.
         self._last_lf_band = hz_to_bin(self._config.last_lf_freq_hz, self._n_bins, self._sr)
         self._first_hf_band = hz_to_bin(self._config.first_hf_freq_hz, self._n_bins, self._sr)
@@ -832,6 +843,27 @@ class SuppressionGain:
                 if last_nearend[k] > last_echo[k] or k <= permanent:
                     min_gain[k] = max(min_gain[k], self._last_gain[k] * dec)
                     min_gain[k] = min(min_gain[k], 1.0)
+        # v3.22 candidate (default OFF): HF minimum-gain floor during DNE.
+        # When the dominant-nearend detector indicates NE-state, force a
+        # power-domain floor on all HF bins (k >= first_hf_band). The
+        # AEC3-strict `render_limit / R²` formula collapses min_gain → 0
+        # when R² is huge at HF bins where the filter spuriously outputs
+        # large S²_linear during NE-only periods, causing audible
+        # painted-black HF (formant valleys + fricatives). This explicit
+        # power floor caps total HF suppression at the configured dB-floor.
+        # Gated on DNE so SG's full dynamic range is preserved when echo
+        # is genuinely dominant (FS / DT-echo-loud) — no impact on echo
+        # cancellation aggressiveness outside NE-dominant moments.
+        if (self._hf_min_gain_floor_during_dne_enabled
+                and self._ne_state_for_gain_rules()
+                and self._first_hf_band < self._n_bins):
+            hf_slice = slice(self._first_hf_band, self._n_bins)
+            np.maximum(
+                min_gain[hf_slice],
+                self._hf_min_gain_floor_during_dne_power,
+                out=min_gain[hf_slice],
+            )
+            np.minimum(min_gain, 1.0, out=min_gain)
         return min_gain.astype(np.float32)
 
     def _gain_to_no_audible_echo(

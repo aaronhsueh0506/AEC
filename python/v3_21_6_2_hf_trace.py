@@ -257,7 +257,9 @@ def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
                wallclock_reverb_smoothing: bool = False,
                just_reset_gate: bool = False,
                reset_res_on_rescue: bool = False,
-               fft_density_scaled_floors: bool = False) -> None:
+               fft_density_scaled_floors: bool = False,
+               hf_min_gain_floor_during_dne: bool = False,
+               hf_min_gain_floor_during_dne_db: float = -15.0) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     mic, sr_mic = sf.read(mic_path, dtype="float32")
@@ -288,6 +290,9 @@ def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
         cfg.use_aec3_reset_res_on_rescue_edge = True
     if fft_density_scaled_floors:
         cfg.use_aec3_fft_density_scaled_psd_floors = True
+    if hf_min_gain_floor_during_dne:
+        cfg.hf_min_gain_floor_during_dne_enabled = True
+        cfg.hf_min_gain_floor_during_dne_db = float(hf_min_gain_floor_during_dne_db)
 
     aec = AEC(cfg)
     hop = cfg.hop_size
@@ -928,6 +933,17 @@ def main() -> None:
                         "hop/64 (2.5× at hop=160). AEC3 verbatim is sized "
                         "for fft=128; without scaling per-bin floors are "
                         "4× too low → HF underprotection (painted-black)")
+    p.add_argument("--hf-min-gain-floor-during-dne", action="store_true",
+                   help="v3.22 candidate (NOT AEC3-strict): floor HF "
+                        "min_gain to a fixed power level when the DNE "
+                        "detector indicates NE-dominant. Caps total HF "
+                        "suppression at the --hf-floor-db threshold to "
+                        "prevent painted-black HF on NE-only fricatives + "
+                        "formant valleys. Default-OFF for v3.21 byte-equal.")
+    p.add_argument("--hf-floor-db", type=float, default=-15.0,
+                   help="Power-domain dB floor for "
+                        "--hf-min-gain-floor-during-dne (default: -15.0 → "
+                        "0.178 amplitude = 0.0316 power)")
     args = p.parse_args()
 
     trace_case(args.mic, args.lpb, args.output_dir,
@@ -937,7 +953,9 @@ def main() -> None:
                wallclock_reverb_smoothing=args.wallclock_reverb_smoothing,
                just_reset_gate=args.just_reset_gate,
                reset_res_on_rescue=args.reset_res_on_rescue,
-               fft_density_scaled_floors=args.fft_density_scaled_floors)
+               fft_density_scaled_floors=args.fft_density_scaled_floors,
+               hf_min_gain_floor_during_dne=args.hf_min_gain_floor_during_dne,
+               hf_min_gain_floor_during_dne_db=args.hf_floor_db)
 
 
 if __name__ == "__main__":
