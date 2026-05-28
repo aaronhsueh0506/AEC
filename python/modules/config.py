@@ -127,6 +127,46 @@ class AecConfig:
     hf_min_gain_floor_during_dne_enabled: bool = False
     hf_min_gain_floor_during_dne_db: float = -15.0
 
+    # ── v3.22 future work: LF filter-failure R² injection (NOT AEC3-strict) ─
+    # AEC3 itself has no per-bin mechanism to detect "linear filter is
+    # clearly failing at this bin AND ref signal has strong content here";
+    # AEC3 accepts some LF echo bleed during DT to protect NE F0.
+    #
+    # This v3.22 candidate adds per-bin R² injection when the linear
+    # cancellation is ~0 dB (filter useless) AND the DNE detector says
+    # NE-dominant. Without injection, R²_direct = S²_linear / ERLE
+    # underestimates → SG sees low ENR → gate doesn't fire → ref bleeds.
+    # With injection: R² is lifted to a configured fraction of near_psd,
+    # which makes ENR cross the nearend-tuning gate threshold (enr_tr_lf
+    # = 1.09 by AEC3 spec) so SG suppresses naturally.
+    #
+    # SPEC (when flag ON, per-bin in [lf_low_hz, lf_high_hz] band):
+    #   trigger: DNE is in NE-state
+    #            AND error_psd[k] >= cancel_ratio × near_psd[k]
+    #   action : R²[k] = max(R²[k], inject_factor × near_psd[k])
+    #
+    # OBSERVED CASE (568_EVB 6.5-7.0 s seg1):
+    #   200-500 Hz: ref content +32 dB vs mic +30 dB (ref louder than mic,
+    #   continuous DT speech overlap). Linear filter cancellation = -1.12
+    #   dB (filter does nothing). User describes audible "two-pitch" /
+    #   chorus effect from ref F0 + NE F0 overlapping at 200-500 Hz.
+    #
+    # TRADE-OFFS:
+    #   - During NE-only (no ref): near_psd modest, but error_psd is
+    #     basically the NE itself = near_psd → trigger fires → R² inject
+    #     creates false suppression. Mitigation: gate also requires
+    #     far_psd > silence_floor (configurable).
+    #   - During FS-only (no NE): DNE=False → gate inactive.
+    #   - During DT with strong echo + light NE: SG already suppresses
+    #     via the standard path → trigger usually doesn't fire (error
+    #     much smaller than near after good cancellation).
+    enable_lf_filter_failure_r2_injection: bool = False
+    lf_filter_failure_lf_low_hz: float = 200.0
+    lf_filter_failure_lf_high_hz: float = 500.0
+    lf_filter_failure_cancel_ratio: float = 0.9
+    lf_filter_failure_r2_inject_factor: float = 1.2
+    lf_filter_failure_min_far_psd_db: float = -40.0
+
     # ── Shadow filter (dual-filter divergence control) ──────────────────
     enable_shadow: bool = True
     shadow_mu_ratio: float = 1.0

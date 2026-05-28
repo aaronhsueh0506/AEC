@@ -259,7 +259,10 @@ def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
                reset_res_on_rescue: bool = False,
                fft_density_scaled_floors: bool = False,
                hf_min_gain_floor_during_dne: bool = False,
-               hf_min_gain_floor_during_dne_db: float = -15.0) -> None:
+               hf_min_gain_floor_during_dne_db: float = -15.0,
+               lf_filter_failure_r2_injection: bool = False,
+               lf_filter_failure_inject_factor: float = 1.2,
+               lf_filter_failure_cancel_ratio: float = 0.9) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     mic, sr_mic = sf.read(mic_path, dtype="float32")
@@ -293,6 +296,10 @@ def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
     if hf_min_gain_floor_during_dne:
         cfg.hf_min_gain_floor_during_dne_enabled = True
         cfg.hf_min_gain_floor_during_dne_db = float(hf_min_gain_floor_during_dne_db)
+    if lf_filter_failure_r2_injection:
+        cfg.enable_lf_filter_failure_r2_injection = True
+        cfg.lf_filter_failure_r2_inject_factor = float(lf_filter_failure_inject_factor)
+        cfg.lf_filter_failure_cancel_ratio = float(lf_filter_failure_cancel_ratio)
 
     aec = AEC(cfg)
     hop = cfg.hop_size
@@ -944,6 +951,19 @@ def main() -> None:
                    help="Power-domain dB floor for "
                         "--hf-min-gain-floor-during-dne (default: -15.0 → "
                         "0.178 amplitude = 0.0316 power)")
+    p.add_argument("--lf-filter-failure-r2-injection", action="store_true",
+                   help="v3.22 candidate (NOT AEC3-strict): inject R²[k] = "
+                        "inject_factor × near_psd[k] at LF bins where the "
+                        "linear filter cancellation is ~0 dB (filter "
+                        "useless) AND DNE says NE-dominant. Forces SG to "
+                        "see ENR above the gate threshold and suppress LF "
+                        "ref-bleed. Targets the 'two-pitch'/'重音' symptom.")
+    p.add_argument("--lf-inject-factor", type=float, default=1.2,
+                   help="R² inject factor for --lf-filter-failure-r2-injection "
+                        "(default 1.2 = R²[k] >= 1.2 × near_psd[k] = +0.8 dB)")
+    p.add_argument("--lf-cancel-ratio", type=float, default=0.9,
+                   help="Cancellation-failure threshold "
+                        "(default 0.9 = trigger when error_psd >= 0.9 × near_psd)")
     args = p.parse_args()
 
     trace_case(args.mic, args.lpb, args.output_dir,
@@ -955,7 +975,10 @@ def main() -> None:
                reset_res_on_rescue=args.reset_res_on_rescue,
                fft_density_scaled_floors=args.fft_density_scaled_floors,
                hf_min_gain_floor_during_dne=args.hf_min_gain_floor_during_dne,
-               hf_min_gain_floor_during_dne_db=args.hf_floor_db)
+               hf_min_gain_floor_during_dne_db=args.hf_floor_db,
+               lf_filter_failure_r2_injection=args.lf_filter_failure_r2_injection,
+               lf_filter_failure_inject_factor=args.lf_inject_factor,
+               lf_filter_failure_cancel_ratio=args.lf_cancel_ratio)
 
 
 if __name__ == "__main__":

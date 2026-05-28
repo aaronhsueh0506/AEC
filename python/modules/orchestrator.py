@@ -3308,6 +3308,52 @@ class AEC:
                 _stationary_mask, 0.0, r2_unb
             ).astype(np.float32)
 
+        # v3.22 candidate B (default OFF): LF filter-failure R² injection.
+        # Detects the symptom "linear filter cancellation ≈ 0 dB at LF AND
+        # DNE says NE-dominant" — a structural blind-spot that AEC3 itself
+        # doesn't address (it accepts LF echo bleed during DT to protect NE
+        # F0). When the per-bin condition fires, lift R²[k] to a fraction
+        # of near_psd[k] so SG's standard ENR/EMR gate (with AEC3-spec
+        # enr_tr_lf=1.09 nearend tuning) crosses the trigger threshold and
+        # suppresses naturally. See AecConfig.enable_lf_filter_failure_r2_*
+        # block for full spec.
+        if (getattr(self.config,
+                    "enable_lf_filter_failure_r2_injection", False)
+                and self._aec3_sg.is_dominant_nearend()):
+            from .residual.suppression_gain import hz_to_bin as _hz_to_bin
+            _lf_lo = _hz_to_bin(
+                float(getattr(self.config,
+                              "lf_filter_failure_lf_low_hz", 200.0)),
+                self._aec3_n_bins, self.config.sample_rate)
+            _lf_hi = _hz_to_bin(
+                float(getattr(self.config,
+                              "lf_filter_failure_lf_high_hz", 500.0)),
+                self._aec3_n_bins, self.config.sample_rate)
+            _lf_hi = min(_lf_hi, self._aec3_n_bins)
+            if _lf_hi > _lf_lo:
+                _cancel_ratio = float(getattr(self.config,
+                                              "lf_filter_failure_cancel_ratio",
+                                              0.9))
+                _inject_factor = float(getattr(self.config,
+                                               "lf_filter_failure_r2_inject_factor",
+                                               1.2))
+                _min_far_db = float(getattr(self.config,
+                                            "lf_filter_failure_min_far_psd_db",
+                                            -40.0))
+                _min_far_lin = 10.0 ** (_min_far_db / 10.0)
+                _sl = slice(_lf_lo, _lf_hi)
+                # Linear filter failure: residual is ≈ mic (no cancellation).
+                _filter_failed = error_psd[_sl] >= _cancel_ratio * near_psd[_sl]
+                # Ref must actually have content (avoid lifting R² when ref
+                # is silent and error≈near is just NE through inactive ref).
+                _ref_present = far_psd[_sl] > _min_far_lin
+                _inject_mask = _filter_failed & _ref_present
+                if _inject_mask.any():
+                    _r2_inject = _inject_factor * near_psd[_sl]
+                    _candidate = np.where(_inject_mask, _r2_inject, r2[_sl])
+                    np.maximum(r2[_sl], _candidate, out=r2[_sl])
+                    np.maximum(r2_unb[_sl], _candidate, out=r2_unb[_sl])
+
         # AEC3 contract (echo_remover.cc:452):
         #   nearend_spectrum = UsableLinearEstimate() ? E² : Y²
         # AEC3 echo_remover.cc:495-501 clamp E² = min(E², Y²) when usable_linear.
