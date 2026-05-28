@@ -162,21 +162,211 @@ def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
     out_wav = os.path.join(output_dir, "out.wav")
     sf.write(out_wav, out, sr)
 
-    # Console summary
-    print(f"version={cols.get('version', getattr(aec_module, '__version__', 'unknown'))}")
-    print(f"sr={sr}, hop={hop}, n_hops={n_hops}, duration={n_hops * hop / sr:.2f}s")
-    print(f"gain_lf_med: avg={cols['gain_lf_med'].mean():.3f}  "
-          f"min={cols['gain_lf_med'].min():.3f}")
-    print(f"gain_mf_med: avg={cols['gain_mf_med'].mean():.3f}  "
-          f"min={cols['gain_mf_med'].min():.3f}")
-    print(f"gain_hf_med: avg={cols['gain_hf_med'].mean():.3f}  "
-          f"min={cols['gain_hf_med'].min():.3f}")
-    print(f"dominant_nearend: {cols['dominant_nearend'].mean() * 100:.1f}% frames")
-    print(f"usable_linear:    {cols['usable_linear'].mean() * 100:.1f}% frames")
-    print(f"filter_converged: {cols['filter_converged'].mean() * 100:.1f}% frames")
-    print(f"poor_coarse fires (counter reached threshold): "
-          f"{(np.diff((cols['coarse_reset_hangover'] > 0).astype(int)) > 0).sum()}")
-    print(f"\nWrote:\n  {npz_path}\n  {png_path}\n  {out_wav}")
+    # Rich stdout report — designed to be copy/pasteable when the trace
+    # files cannot be transferred out.
+    _print_console_report(cols, mic, out, sr=sr, hop=hop, n_hops=n_hops,
+                          mic_path=mic_path, lpb_path=lpb_path)
+    print(f"\nLocal files (optional, for your own inspection):")
+    print(f"  npz: {npz_path}")
+    print(f"  png: {png_path}")
+    print(f"  wav: {out_wav}")
+
+
+def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
+                          *, sr: int, hop: int, n_hops: int,
+                          mic_path: str, lpb_path: str) -> None:
+    """Stdout-only summary — designed for environments where binary trace
+    files cannot leave the host. Everything below is copy/pasteable as
+    plain text and is sufficient to diagnose HF-painted-black symptoms
+    without the PNG / NPZ outputs."""
+
+    def _pct(x: np.ndarray) -> str:
+        return f"{x.astype(bool).mean() * 100:5.1f}%"
+
+    def _stats(x: np.ndarray) -> str:
+        return (f"mean={x.mean():.3f}  min={x.min():.3f}  "
+                f"p5={np.percentile(x, 5):.3f}  "
+                f"p25={np.percentile(x, 25):.3f}  "
+                f"p50={np.percentile(x, 50):.3f}  "
+                f"p75={np.percentile(x, 75):.3f}")
+
+    def _db(x: float) -> float:
+        return 10 * np.log10(max(x, 1e-12))
+
+    print("=" * 72)
+    print(f"  v3.21.6.2 HF-painted-black trace — stdout report")
+    print("=" * 72)
+    print(f"mic       : {mic_path}")
+    print(f"lpb       : {lpb_path}")
+    print(f"version   : {getattr(aec_module, '__version__', 'unknown')}")
+    print(f"sr={sr} Hz  hop={hop}  n_hops={n_hops}  "
+          f"duration={n_hops * hop / sr:.2f}s")
+    print()
+
+    # ---------- Overall per-band gain stats ----------
+    print("--- Overall gain medians ---")
+    for band in ("lf", "mf", "hf"):
+        print(f"  gain_{band}_med:  " + _stats(cols[f"gain_{band}_med"]))
+    print()
+
+    # ---------- Flag fractions ----------
+    print("--- Flag fractions (whole file) ---")
+    print(f"  filter_converged       : {_pct(cols['filter_converged'])}")
+    print(f"  usable_linear          : {_pct(cols['usable_linear'])}")
+    print(f"  dominant_nearend       : {_pct(cols['dominant_nearend'])}")
+    print(f"  transparent_mode       : {_pct(cols['transparent_mode'])}")
+    print(f"  coarse_reset_hangover>0: {_pct(cols['coarse_reset_hangover'] > 0)}")
+    fires = int(np.sum(np.diff(
+        (cols["coarse_reset_hangover"] > 0).astype(int)) > 0))
+    print(f"  poor_coarse rescue fires (rising edges): {fires}")
+    print()
+
+    # ---------- NE-active segments ----------
+    win = 1600  # 100 ms @ 16 kHz
+    sub = 400
+    n_samples = n_hops * hop
+    mic_trim = mic[:n_samples]
+    n_chunks = (n_samples - win) // sub + 1
+    chunk_db = np.empty(n_chunks)
+    for i in range(n_chunks):
+        chunk_db[i] = _db(np.mean(mic_trim[i * sub:i * sub + win] ** 2))
+    ne_chunks_mask = chunk_db > -25.0  # mic-power active threshold
+    # Map back to hops: a hop is NE-active if any covering chunk fires.
+    ne_hop_mask = np.zeros(n_hops, dtype=bool)
+    for i in np.where(ne_chunks_mask)[0]:
+        sample_start = i * sub
+        sample_end = sample_start + win
+        hop_start = sample_start // hop
+        hop_end = min(n_hops, (sample_end + hop - 1) // hop)
+        ne_hop_mask[hop_start:hop_end] = True
+    n_ne = int(ne_hop_mask.sum())
+    print(f"--- NE-active segments (mic > -25 dBFS / 100 ms) ---")
+    print(f"  {n_ne} hops ({n_ne / max(1, n_hops) * 100:.1f}% of file, "
+          f"{n_ne * hop / sr:.2f}s)")
+    if n_ne > 0:
+        for band in ("lf", "mf", "hf"):
+            sub_arr = cols[f"gain_{band}_med"][ne_hop_mask]
+            print(f"  gain_{band}_med (NE only):  " + _stats(sub_arr))
+        print(f"  filter_converged (NE only): "
+              f"{_pct(cols['filter_converged'][ne_hop_mask])}")
+        print(f"  usable_linear    (NE only): "
+              f"{_pct(cols['usable_linear'][ne_hop_mask])}")
+        print(f"  dominant_nearend (NE only): "
+              f"{_pct(cols['dominant_nearend'][ne_hop_mask])}")
+        print(f"  poor_coarse hangover (NE only): "
+              f"{_pct(cols['coarse_reset_hangover'][ne_hop_mask] > 0)}")
+    print()
+
+    # ---------- HF-wipe events ----------
+    wipe_mask = cols["gain_hf_med"] < 0.3
+    n_wipe = int(wipe_mask.sum())
+    print(f"--- HF wipe events (gain_hf_med < 0.3) ---")
+    print(f"  {n_wipe} hops ({n_wipe / max(1, n_hops) * 100:.1f}% of file, "
+          f"{n_wipe * hop / sr:.2f}s)")
+    if n_wipe > 0:
+        print(f"  Of those wipe-active hops:")
+        print(f"    NE-active (mic loud): "
+              f"{_pct(ne_hop_mask[wipe_mask])}")
+        print(f"    dominant_nearend    : "
+              f"{_pct(cols['dominant_nearend'][wipe_mask])}")
+        print(f"    usable_linear       : "
+              f"{_pct(cols['usable_linear'][wipe_mask])}")
+        print(f"    filter_converged    : "
+              f"{_pct(cols['filter_converged'][wipe_mask])}")
+        print(f"    transparent_mode    : "
+              f"{_pct(cols['transparent_mode'][wipe_mask])}")
+        print(f"    coarse_reset_hangover>0: "
+              f"{_pct(cols['coarse_reset_hangover'][wipe_mask] > 0)}")
+        # PSD medians at wipe (dB scale)
+        for k in ("near_psd_hf", "echo_psd_hf", "error_psd_hf"):
+            arr_db = 10 * np.log10(cols[k][wipe_mask] + 1e-12)
+            print(f"    {k} (dB): "
+                  f"mean={arr_db.mean():+6.2f}  min={arr_db.min():+6.2f}  "
+                  f"max={arr_db.max():+6.2f}")
+    print()
+
+    # ---------- NE-active AND HF wiped (the actual symptom) ----------
+    symptom_mask = ne_hop_mask & wipe_mask
+    n_sym = int(symptom_mask.sum())
+    print(f"--- SYMPTOM frames: NE-active AND HF wiped ---")
+    print(f"  {n_sym} hops ({n_sym / max(1, n_hops) * 100:.1f}% of file, "
+          f"{n_sym * hop / sr:.2f}s)")
+    if n_sym > 0:
+        print(f"  During the symptom:")
+        print(f"    dominant_nearend     : "
+              f"{_pct(cols['dominant_nearend'][symptom_mask])}  "
+              f"← if low, DNE missed the NE → Candidate A or no-detector gap")
+        print(f"    usable_linear        : "
+              f"{_pct(cols['usable_linear'][symptom_mask])}  "
+              f"← if high during DNE, linear residual fed to SG → Candidate B")
+        print(f"    filter_converged     : "
+              f"{_pct(cols['filter_converged'][symptom_mask])}")
+        print(f"    poor_coarse hangover>0: "
+              f"{_pct(cols['coarse_reset_hangover'][symptom_mask] > 0)}")
+        for k in ("near_psd_hf", "echo_psd_hf", "error_psd_hf"):
+            arr_db = 10 * np.log10(cols[k][symptom_mask] + 1e-12)
+            print(f"    {k} (dB): "
+                  f"mean={arr_db.mean():+6.2f}  median={np.median(arr_db):+6.2f}")
+    print()
+
+    # ---------- Time-binned timeline (2-second windows) ----------
+    print("--- 2-second windows (gain medians + flag fractions) ---")
+    print("    t(s)   |  LF /  MF /  HF  | DNE   UL    CONV | poor_cnt  hov")
+    win_hops = int(2.0 * sr / hop)
+    for w_start in range(0, n_hops, win_hops):
+        w_end = min(n_hops, w_start + win_hops)
+        sl = slice(w_start, w_end)
+        if w_end - w_start < 5:
+            continue
+        t = w_start * hop / sr
+        gl = cols["gain_lf_med"][sl].mean()
+        gm = cols["gain_mf_med"][sl].mean()
+        gh = cols["gain_hf_med"][sl].mean()
+        d  = cols["dominant_nearend"][sl].mean() * 100
+        u  = cols["usable_linear"][sl].mean() * 100
+        cv = cols["filter_converged"][sl].mean() * 100
+        pc_max = int(cols["poor_coarse_counter"][sl].max())
+        hov = (cols["coarse_reset_hangover"][sl] > 0).mean() * 100
+        print(f"  {t:5.1f}-{t + 2.0:5.1f}  "
+              f"| {gl:.2f} / {gm:.2f} / {gh:.2f}  "
+              f"| {d:4.0f}%  {u:4.0f}%  {cv:4.0f}%  "
+              f"| {pc_max:3d}        {hov:3.0f}%")
+    print()
+
+    # ---------- Narrative ----------
+    print("--- Narrative ---")
+    if n_sym == 0:
+        print("  No HF wipe during NE-active frames in this trace. The")
+        print("  symptom you observed earlier may already be fixed by")
+        print("  v3.21.6.2, OR this case does not exercise it. Suggest")
+        print("  trying a different case if the user case still shows the")
+        print("  symptom on the spectrogram.")
+    else:
+        dne_during_sym = cols['dominant_nearend'][symptom_mask].mean()
+        ul_during_sym = cols['usable_linear'][symptom_mask].mean()
+        print(f"  HF-wipe fires on {n_sym}/{n_hops} hops "
+              f"({n_sym / n_hops * 100:.1f}%) of which {dne_during_sym * 100:.0f}% "
+              f"are flagged dominant_nearend and {ul_during_sym * 100:.0f}% are "
+              f"flagged usable_linear.")
+        if dne_during_sym < 0.5:
+            print("  → Candidate A: DNE FAILS to fire on >50% of symptom")
+            print("    frames. Detector not catching this NE pattern; or")
+            print("    Phase-2 SubtractorOutputAnalyzer + TransparentMode")
+            print("    HMM may help bypass SG.")
+        elif ul_during_sym > 0.5:
+            print("  → Candidate B: DNE is firing AND usable_linear is")
+            print("    True during the wipe — SuppressionGain consumes")
+            print("    linear residual (over-aggressive). convergence_seen")
+            print("    latch redesign (Tier C #11) or")
+            print("    use_linear_filter_output_selection_for_final_output")
+            print("    expected to recover HF.")
+        else:
+            print("  → Candidate C: DNE fires but usable_linear is False,")
+            print("    so SG sees the capture spectrum yet still wipes HF.")
+            print("    Likely the audibility-threshold path or HF cap;")
+            print("    EchoAudibility full per-bin JND port (Tier A #2)")
+            print("    expected to recover HF.")
+    print("=" * 72)
 
 
 def _plot(npz_path: str, png_path: str, *, sr: int, hop: int, n_bins: int) -> None:
