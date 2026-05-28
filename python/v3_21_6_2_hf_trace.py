@@ -446,10 +446,11 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
               f"nonlinear={cols['r2_path_nonlinear'][symptom_mask].mean() * 100:5.1f}%")
     print()
 
-    # ---------- Time-binned timeline (2-second windows) ----------
-    print("--- 2-second windows (gain medians + flag fractions) ---")
+    # ---------- Time-binned timeline (1-second windows) ----------
+    print("--- 1-second windows (gain medians + flag fractions) ---")
     print("    t(s)   |  LF /  MF /  HF  | DNE   UL    CONV | poor_cnt  hov")
-    win_hops = int(2.0 * sr / hop)
+    win_sec = 1.0
+    win_hops = int(win_sec * sr / hop)
     for w_start in range(0, n_hops, win_hops):
         w_end = min(n_hops, w_start + win_hops)
         sl = slice(w_start, w_end)
@@ -464,7 +465,7 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
         cv = cols["filter_converged"][sl].mean() * 100
         pc_max = int(cols["poor_coarse_counter"][sl].max())
         hov = (cols["coarse_reset_hangover"][sl] > 0).mean() * 100
-        print(f"  {t:5.1f}-{t + 2.0:5.1f}  "
+        print(f"  {t:5.1f}-{t + win_sec:5.1f}  "
               f"| {gl:.2f} / {gm:.2f} / {gh:.2f}  "
               f"| {d:4.0f}%  {u:4.0f}%  {cv:4.0f}%  "
               f"| {pc_max:3d}        {hov:3.0f}%")
