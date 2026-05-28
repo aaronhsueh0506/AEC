@@ -16,6 +16,68 @@ when verdict requires it.
 
 ---
 
+## [3.21.6.4] — 2026-05-28 — physical-meaning fix: ReverbModel decay wall-clock alignment
+
+**Headline**: v3.21.6.3 trace on user's case (568_EVB_online) reduced
+reverb share 64.4 % → 51.2 % via the FullBandErleEstimator hold wire-up,
+but the 6.2-7 s severe-wipe segment still showed gain_hf=0.49 unchanged
+because the gap between convergence events exceeded the 400 ms hold and
+quality dropped to None. Re-audit of `ReverbModel::UpdateReverb` revealed
+the actual physical-meaning bug: `decay = 0.83` is the AEC3 per-block
+(4 ms / 64-sample) multiplier, but our pipeline calls the same update
+once per 10 ms / 160-sample hop. Applied verbatim, our wall-clock T_60
+was 371 ms vs AEC3's 148 ms — **2.5× too long**. When the filter is
+unconverged and `tail_response` is held stale, this inflated the steady-
+state reverb mass by ~2.2× via `reverb_ss = injection / (1 - decay)`
+(5.88 × at 0.83 per hop vs 2.66 × at the corrected 0.624 per hop).
+
+### Fix
+
+`python/modules/residual/residual_echo_estimator.py` `_reverb_decay()`:
+apply wall-clock alignment to both static-config decay and adaptive
+estimator output:
+```python
+_AEC3_BLOCK_SAMPLES = 64
+if self._hop_size != _AEC3_BLOCK_SAMPLES:
+    d = d ** (self._hop_size / _AEC3_BLOCK_SAMPLES)
+```
+At our hop=160 this is `0.83 ** 2.5 ≈ 0.624`. The ratio is computed
+from `_hop_size` at runtime so the conversion auto-scales if hop_size
+ever changes.
+
+`python/modules/residual/residual_echo_estimator.py` `ReverbConfig`
+docstring updated: `decay = 0.83` is now correctly noted as the AEC3
+per-block constant with per-hop derivation documented at the call site.
+
+### Verification (demo case 0I0XMl3M DT_static)
+
+v3.21.6.3 (hold wire-up only) → v3.21.6.4 (decay wall-clock fix):
+- `ENR HF median` (R²/Y²): **0.945 → 0.741** (−21.6 %)
+- `ENR HF mean`:           **1.457 → 1.073** (−26.4 %)
+- `R²_reverb median`:      **+58.13 dB → +52.32 dB** (−5.8 dB)
+- `reverb share`:          **51.2 % → 21.7 %** (−29.5 pp)
+- `hf_lim_applied`:        **30.6 % → 8.4 %**
+- `gain_hf_med` post-cap:  **0.036 → 0.075** (+0.039)
+
+### What this doesn't fix
+
+The wall-clock-aligned decay reduces R²_reverb steady-state but FS
+echo cancellation strength is also reduced proportionally (faster
+decay = less tail mass at steady-state to suppress real reverb).
+Trade-off needs 800-case bench to confirm cohort-level Pareto. The
+shipped change is AEC3-strict physical alignment — not tuning —
+so it stays default-ON without flag.
+
+### Files
+
+- `python/aec.py`: `__version__ = "3.21.6.4"`
+- `python/modules/residual/residual_echo_estimator.py`: `_reverb_decay()`
+  wall-clock alignment + `ReverbConfig` docstring
+- `CLAUDE.md`: version bump
+- `CHANGELOG.md`: this entry
+
+---
+
 ## [3.21.6.3] — 2026-05-28 — strict AEC3 wire-up: FullBandErleEstimator → ReverbFrequencyResponse
 
 **Headline**: HF-painted-black per-frame trace on the user's internal case

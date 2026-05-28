@@ -20,7 +20,7 @@ tolerance:
   (`PBFDKF`, `ShadowFilter`, etc.). Built with `-ffp-contract=off` mandatory.
 
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
-(currently **3.21.6.3**). Canonical algorithm reference:
+(currently **3.21.6.4**). Canonical algorithm reference:
 [docs/aec_methods.md](docs/aec_methods.md). Architecture diagram
 across legacy / current / AEC3 reference:
 [docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html).
@@ -166,7 +166,7 @@ tweak a single field without a full 800-case re-bench.
 ## Branch model
 
 `main` carries the production-graded code. Current `__version__` is
-**3.21.6.3** — adds the AEC3 alignment completion (10 strict-port fixes
+**3.21.6.4** — adds the AEC3 alignment completion (10 strict-port fixes
 for the nores LF artifact + painted-black HF bugs) on top of v3.21.6,
 followed by a full release cleanup (config 1547→160 lines, orchestrator
 5487→3632, removed all dev-time substrate flags and trace dicts).

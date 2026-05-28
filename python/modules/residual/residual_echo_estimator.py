@@ -89,8 +89,15 @@ class ReverbConfig:
       returns the static value (use_adaptive_echo_decay_ flag in
       reverb_decay_estimator.cc:92 = (default_len < 0)).
 
-    Per-hop multiplier at our 10 ms hop:
-      decay = 0.83 -> -10 dB tail in ~12 hops (~120 ms; typical indoor)
+    ``decay = 0.83`` is the AEC3 per-block (4 ms) multiplier. The
+    physical wall-clock T_60 at AEC3 = ``log(0.001)/log(0.83)*4ms``
+    ≈ 148 ms — typical echo-path (mic→speaker→mic) reverberation.
+    Per-hop conversion at our 10 ms hop is applied at call site in
+    ``ResidualEchoEstimator._reverb_decay()``:
+        d_per_hop = 0.83 ** (hop_size / 64)  ≈ 0.624 at hop=160
+    Using 0.83 verbatim per-hop would give T_60 ≈ 371 ms (2.5× too
+    long), inflating R²_reverb steady-state by 2.2× when scaling is
+    held stale during sustained NE without filter convergence.
 
     ``mild_decay_scale = 1.0`` keeps mild_decay == decay (AEC3 strict —
     default_len == nearend_len). The legacy 0.5 Python value was a
@@ -468,10 +475,24 @@ class ResidualEchoEstimator:
         return float(g * g)
 
     def _reverb_decay(self, dominant_nearend: bool) -> float:
-        """``aec_state.ReverbDecay(mild=dominant_nearend)``.
+        """``aec_state.ReverbDecay(mild=dominant_nearend)`` with wall-clock
+        rate alignment to AEC3.
 
-        When the adaptive estimator is bound + active, query it.
-        Otherwise fall back to the static config decay × mild_decay_scale.
+        When the adaptive estimator is bound + active, query it. Otherwise
+        fall back to the static config decay × mild_decay_scale.
+
+        AEC3 spec uses ``decay`` as the per-block (4 ms / 64-sample)
+        multiplier in ``reverb_[k] = (reverb_[k] + injection) * decay``
+        applied per ``ReverbModel::UpdateReverb`` call. Our pipeline calls
+        the same update once per hop (10 ms / 160-sample), so the AEC3
+        constant 0.83 applied verbatim would decay 2.5× slower in
+        wall-clock — inflating R²_reverb steady-state when the filter is
+        unconverged and the scaling input is held stale.
+
+        Wall-clock alignment: ``d_per_hop = d_aec3 ** (hop / 64)``.
+        At hop=160 this is ``0.83 ** 2.5 ≈ 0.624``. The conversion is
+        applied to BOTH static-config decay and the adaptive estimator
+        output, since both feed the same per-hop ReverbModel.update call.
         """
         if not self._reverb_cfg.enabled:
             return 0.0
@@ -481,6 +502,10 @@ class ResidualEchoEstimator:
             d = float(self._reverb_cfg.decay)
             if dominant_nearend:
                 d *= float(self._reverb_cfg.mild_decay_scale)
+        # Wall-clock alignment vs AEC3 kBlockSize=64.
+        _AEC3_BLOCK_SAMPLES = 64
+        if self._hop_size != _AEC3_BLOCK_SAMPLES:
+            d = float(d) ** (self._hop_size / _AEC3_BLOCK_SAMPLES)
         return float(d)
 
     def _update_reverb_linear(
