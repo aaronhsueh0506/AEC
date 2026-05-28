@@ -49,6 +49,10 @@ class AecConfig:
     # AEC3 comfort-noise floor (dBFS). Float[-1,1] PSD scale.
     comfort_noise_floor_dbfs: float = -96.03406
     enable_td_constraint: bool = True
+    # AEC3-strict wall-clock alignment of DominantNearendDetector
+    # trigger_threshold (48 ms = 5 hops at hop=160/sr=16k, vs legacy
+    # 12 hops = 120 ms = 2.5× AEC3). Default OFF for byte-equal.
+    use_aec3_wallclock_dne_trigger_threshold: bool = False
 
     # ── Shadow filter (dual-filter divergence control) ──────────────────
     enable_shadow: bool = True

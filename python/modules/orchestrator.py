@@ -494,6 +494,11 @@ class AEC:
                 _sg_config.echo_audibility,
                 use_stationarity_properties=True,
             )
+            if getattr(self.config, "use_aec3_wallclock_dne_trigger_threshold", False):
+                _sg_config.dominant_nearend_detection = _dc.replace(
+                    _sg_config.dominant_nearend_detection,
+                    use_wallclock_trigger_threshold=True,
+                )
             self._aec3_sg = SuppressionGain(
                 n_bins=n_bins,
                 config=_sg_config,

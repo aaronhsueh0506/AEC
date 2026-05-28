@@ -118,17 +118,21 @@ class DominantNearendConfig:
     # coupling with downstream gain rule.
     hold_duration_ms: int = 500
     # trigger_threshold — net-positive evidence depth (+1/-1 random walk)
-    # before NE state triggers. DIMENSIONLESS sample count.
-    # PHYSICAL MEANING: statistical hysteresis depth — NOT wall-clock.
-    # Depends on per-sample ENR estimator noise floor (set by our PBFDKF +
-    # ENR pipeline, not by AEC3's matched-filter + refined). Wall-clock
-    # derivation (blocks_to_hops or ms_to_hops) is WRONG here.
-    # Empirical: 12 → 5 (= blocks_to_hops(12,160,16k)) regressed both
-    # FS+DT — too few samples to reject estimator noise. SCALING: do
-    # NOT auto-derive from hop_size or wall-clock. Re-tune empirically
-    # if upstream filter / ENR estimator noise profile changes.
-    # 12 samples = 120 ms only at hop=160/sr=16k.
+    # before NE state triggers.
+    # AEC3 (echo_canceller3_config.h:234) stores this as a BLOCK COUNT
+    # at kBlockSize=64 (= 4 ms wall-clock @ 16 kHz); the value 12 there
+    # means 48 ms of consecutive +1 evidence. The legacy Python comment
+    # claimed this was dimensionless and that 12→5 regressed both FS+DT,
+    # but the regression context did NOT also shorten hold_duration
+    # proportionally, so trigger-fast + hold-still-2.5×-AEC3 created
+    # sticky false-positives. Strict AEC3 wall-clock alignment uses
+    # `trigger_threshold_ms = 48` at hop=160/sr=16k → 5 hops (via
+    # ms_to_hops), gated by `use_wallclock_trigger_threshold` to keep
+    # byte-equal default. `trigger_threshold` (12) remains the legacy
+    # hop-count path used when the flag is OFF.
     trigger_threshold: int = 12
+    trigger_threshold_ms: int = 48
+    use_wallclock_trigger_threshold: bool = False
     use_during_initial_phase: bool = True
     use_unbounded_echo_spectrum: bool = True
     # LF-only sum endpoint for nearend detection. AEC3 canonical 2000 Hz
@@ -327,6 +331,7 @@ class _DominantNearendDetector:
         self._hold_duration_hops = _aec3_scale.ms_to_hops(
             cfg.hold_duration_ms, self._hop_size, self._sr
         )
+        self._trigger_threshold_hops = self._derive_trigger_threshold(cfg)
         self._trigger_counter = 0
         self._hold_counter = 0
         self._nearend_state = False
@@ -334,12 +339,26 @@ class _DominantNearendDetector:
         # tracer to attribute DNE blind-spots. No audio path effect.
         self._last_update_snap: dict = {}
 
+    def _derive_trigger_threshold(self, cfg: DominantNearendConfig) -> int:
+        """AEC3-strict wall-clock alignment is opt-in via
+        ``cfg.use_wallclock_trigger_threshold``. OFF → legacy hop-count
+        path (``cfg.trigger_threshold``). ON → ``ms_to_hops`` of the
+        wall-clock spec, matching AEC3's `trigger_threshold * kBlockSize / sr`.
+        """
+        if cfg.use_wallclock_trigger_threshold:
+            from .. import aec3_scale as _aec3_scale
+            return _aec3_scale.ms_to_hops(
+                cfg.trigger_threshold_ms, self._hop_size, self._sr
+            )
+        return int(cfg.trigger_threshold)
+
     def set_config(self, cfg: DominantNearendConfig) -> None:
         self._cfg = cfg
         from .. import aec3_scale as _aec3_scale
         self._hold_duration_hops = _aec3_scale.ms_to_hops(
             cfg.hold_duration_ms, self._hop_size, self._sr
         )
+        self._trigger_threshold_hops = self._derive_trigger_threshold(cfg)
 
     def is_nearend_state(self) -> bool:
         return self._nearend_state
@@ -384,9 +403,9 @@ class _DominantNearendDetector:
         trigger_active = trigger_initial_gate and trigger_enr_pass and trigger_snr_pass
         if trigger_active:
             self._trigger_counter += 1
-            if self._trigger_counter >= c.trigger_threshold:
+            if self._trigger_counter >= self._trigger_threshold_hops:
                 self._hold_counter = self._hold_duration_hops
-                self._trigger_counter = c.trigger_threshold
+                self._trigger_counter = self._trigger_threshold_hops
         else:
             self._trigger_counter = max(0, self._trigger_counter - 1)
 
@@ -421,6 +440,8 @@ class _DominantNearendDetector:
             "early_exit_fired": bool(early_exit),
             "hold_counter": int(self._hold_counter),
             "hold_duration_hops": int(self._hold_duration_hops),
+            "trigger_threshold_hops": int(self._trigger_threshold_hops),
+            "use_wallclock_trigger_threshold": bool(c.use_wallclock_trigger_threshold),
             "nearend_state": bool(self._nearend_state),
             "initial_state": bool(initial_state),
         }

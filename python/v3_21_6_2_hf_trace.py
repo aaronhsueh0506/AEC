@@ -183,6 +183,8 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
         "dne_trigger_counter": float(dne_snap.get("trigger_counter", 0)),
         "dne_hold_counter": float(dne_snap.get("hold_counter", 0)),
         "dne_hold_duration_hops": float(dne_snap.get("hold_duration_hops", 0)),
+        "dne_trigger_threshold_hops": float(dne_snap.get("trigger_threshold_hops", 0)),
+        "dne_use_wallclock_trigger": 1.0 if dne_snap.get("use_wallclock_trigger_threshold") else 0.0,
         "dne_initial_state": 1.0 if dne_snap.get("initial_state") else 0.0,
     })
     return snap
@@ -190,7 +192,8 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
 
 def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
                mode: str = "pbfdkf", preset: str = "balanced",
-               enable_res: bool = True, cng: bool = True) -> None:
+               enable_res: bool = True, cng: bool = True,
+               wallclock_dne_trigger: bool = False) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     mic, sr_mic = sf.read(mic_path, dtype="float32")
@@ -211,6 +214,8 @@ def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
     cfg.enable_res = bool(enable_res)
     cfg.enable_cng = bool(cng)
     cfg.sample_rate = sr
+    if wallclock_dne_trigger:
+        cfg.use_aec3_wallclock_dne_trigger_threshold = True
 
     aec = AEC(cfg)
     hop = cfg.hop_size
@@ -500,6 +505,11 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
               f"mean={cols['dne_hold_counter'][symptom_mask].mean():.1f}  "
               f"max={cols['dne_hold_counter'][symptom_mask].max():.0f}  "
               f"(hold_duration_hops={cols['dne_hold_duration_hops'][symptom_mask].max():.0f})")
+        wallclock_on = bool(cols['dne_use_wallclock_trigger'][symptom_mask].max())
+        tt_hops = int(cols['dne_trigger_threshold_hops'][symptom_mask].max())
+        print(f"    trigger_threshold_hops : {tt_hops}  "
+              f"(use_wallclock_trigger={wallclock_on}; "
+              f"AEC3-strict at hop=160/sr=16k = 5)")
         print(f"    initial_state          : "
               f"{cols['dne_initial_state'][symptom_mask].mean() * 100:5.1f}%  "
               f"← if high, trigger may be gated off")
@@ -739,11 +749,16 @@ def main() -> None:
     p.add_argument("--preset", default="balanced", help="aec preset (default: balanced)")
     p.add_argument("--no-res", action="store_true", help="disable residual chain")
     p.add_argument("--no-cng", action="store_true", help="disable CNG")
+    p.add_argument("--wallclock-dne-trigger", action="store_true",
+                   help="AEC3-strict: derive DNE trigger_threshold from "
+                        "trigger_threshold_ms (48 ms = 5 hops) instead of "
+                        "legacy hop-count 12 (= 120 ms)")
     args = p.parse_args()
 
     trace_case(args.mic, args.lpb, args.output_dir,
                mode=args.mode, preset=args.preset,
-               enable_res=not args.no_res, cng=not args.no_cng)
+               enable_res=not args.no_res, cng=not args.no_cng,
+               wallclock_dne_trigger=args.wallclock_dne_trigger)
 
 
 if __name__ == "__main__":
