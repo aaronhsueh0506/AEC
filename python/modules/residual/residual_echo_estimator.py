@@ -291,6 +291,7 @@ class ResidualEchoEstimator:
         filter_freq_response: Optional[np.ndarray] = None,
         filter_delay_blocks: int = 0,
         filter_length_blocks: int = 0,
+        force_nonlinear_path: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Returns ``(R2, R2_unbounded)``.
 
@@ -316,6 +317,12 @@ class ResidualEchoEstimator:
         r2_unbounded = np.empty(self._n_bins, dtype=np.float32)
 
         usable = aec_state.usable_linear_estimate()
+        # AEC3 JustResetEchoPath override (use_aec3_just_reset_gate_on_linear_path):
+        # caller signals that the linear residual is untrustworthy this
+        # frame (e.g. coarse-rescue hangover active) and the nonlinear
+        # estimator should run instead.
+        if force_nonlinear_path:
+            usable = False
         saturated = aec_state.saturated_echo()
 
         # Diagnostic — records which R² path executed this frame so

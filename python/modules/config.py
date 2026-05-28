@@ -60,6 +60,21 @@ class AecConfig:
     # tail_response stays inflated → SG wipes HF ("painted-black" after
     # far-end-single-talk). Default OFF for byte-equal.
     use_aec3_wallclock_reverb_smoothing: bool = False
+    # AEC3-strict ``JustResetEchoPath`` linear-path gate. While the
+    # poor-coarse rescue hangover counter is non-zero (= our analogue of
+    # AEC3's recent-reset event), force the RES + SG path to behave as if
+    # ``usable_linear_estimate == False``: nearend reference reverts to
+    # raw Y² and R² goes through the nonlinear path (R² = X² · default_gain²).
+    # Without this, after a rescue copy the linear residual + stale
+    # ERLE/reverb continue flowing into SG for ~100 ms, inflating R² and
+    # crushing HF gain.
+    use_aec3_just_reset_gate_on_linear_path: bool = False
+    # AEC3-strict ResidualEchoEstimator reset on the rising edge of a
+    # rescue-arming event. Mirrors AEC3 ``ResidualEchoEstimator::Reset()``
+    # being called via ``EchoRemoverImpl::HandleEchoPathChange``: clears
+    # ReverbModel state, ReverbFrequencyResponse, x2_noise_floor counter.
+    # Without this, stale FS-period reverb tail persists into DT2.
+    use_aec3_reset_res_on_rescue_edge: bool = False
 
     # ── Shadow filter (dual-filter divergence control) ──────────────────
     enable_shadow: bool = True

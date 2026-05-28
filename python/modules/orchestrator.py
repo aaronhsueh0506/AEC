@@ -1796,6 +1796,21 @@ class AEC:
                         self._coarse_reset_hangover = _aec3_scale.blocks_to_hops(
                             25, self.config.hop_size, self.config.sample_rate)
                         self._poor_coarse_counter = 0
+                        # AEC3-strict ResidualEchoEstimator reset on the
+                        # rescue rising edge (mirrors EchoRemoverImpl::
+                        # HandleEchoPathChange → ResidualEchoEstimator::Reset).
+                        # Clears ReverbModel, ReverbFrequencyResponse,
+                        # x2_noise_floor counter so stale FS tail does not
+                        # bleed into DT2.
+                        if getattr(self.config,
+                                   "use_aec3_reset_res_on_rescue_edge",
+                                   False) and self._aec3_ree is not None:
+                            self._aec3_ree.reset()
+                            self._diag['aec3_reset_res_on_rescue_edge_fired'] = (
+                                self._diag.get(
+                                    'aec3_reset_res_on_rescue_edge_fired', 0
+                                ) + 1
+                            )
                     if getattr(self, '_coarse_reset_hangover', 0) > 0:
                         self._coarse_reset_hangover -= 1
                         self.filter._disallow_leakage_diverged = True
@@ -3113,11 +3128,27 @@ class AEC:
         # tail. Replaced 2026-05-28 (Tier A #5 consumer wire-up).
         _filter_q = self._aec3_state.get_inst_linear_quality_estimate()
         _stationary_block = self._aec3_stationarity.is_block_stationary()
+        # AEC3 JustResetEchoPath analogue: during the poor-coarse rescue
+        # hangover the linear residual is untrustworthy (stale ERLE +
+        # stale reverb tail from the pre-rescue regime). Override the
+        # usable_linear path so RES routes through nonlinear (R²=X²·g²)
+        # and SG sees raw Y² as nearend reference. Flag-gated default-OFF.
+        _just_reset_active = (
+            getattr(self.config,
+                    "use_aec3_just_reset_gate_on_linear_path", False)
+            and int(getattr(self, "_coarse_reset_hangover", 0)) > 0
+        )
+        self._aec3_just_reset_active = bool(_just_reset_active)
+        _effective_usable_linear = bool(
+            self._aec3_state.usable_linear_estimate() and not _just_reset_active
+        )
+        self._diag['aec3_just_reset_active'] = bool(_just_reset_active)
+        self._diag['aec3_effective_usable_linear'] = _effective_usable_linear
         self._aec3_ree.update_reverb_models(
             frequency_response=_w_mag2,
             filter_delay_blocks=_delay_blocks,
             filter_quality=_filter_q,
-            usable_linear_filter=self._aec3_state.usable_linear_estimate(),
+            usable_linear_filter=_effective_usable_linear,
             stationary_block=_stationary_block,
         )
 
@@ -3129,6 +3160,7 @@ class AEC:
             dominant_nearend=dominant_ne,
             filter_delay_blocks=_delay_blocks,
             filter_length_blocks=int(getattr(self.filter, 'n_partitions', 0)),
+            force_nonlinear_path=_just_reset_active,
         )
 
         # Reverb tail dead-streak tracking. `_reverb_fr` is the
@@ -3190,7 +3222,11 @@ class AEC:
         # AEC3 contract (echo_remover.cc:452):
         #   nearend_spectrum = UsableLinearEstimate() ? E² : Y²
         # AEC3 echo_remover.cc:495-501 clamp E² = min(E², Y²) when usable_linear.
-        if self._aec3_state.usable_linear_estimate():
+        # JustResetEchoPath override: while the just-reset gate is active
+        # treat usable_linear as False so SG's nearend ref is raw Y² (not
+        # the linear residual which may still carry stale-ERLE artefacts).
+        if (self._aec3_state.usable_linear_estimate()
+                and not getattr(self, "_aec3_just_reset_active", False)):
             nearend_pwr = np.minimum(error_psd, near_psd).astype(np.float32)
         else:
             nearend_pwr = near_psd

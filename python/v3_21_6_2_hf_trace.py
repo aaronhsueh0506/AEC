@@ -121,6 +121,8 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
         "filter_converged": bool(diag.get("converged", False)),
         "poor_coarse_counter": int(getattr(aec, "_poor_coarse_counter", 0)),
         "coarse_reset_hangover": int(getattr(aec, "_coarse_reset_hangover", 0)),
+        "aec3_just_reset_active": 1.0 if getattr(
+            aec, "_aec3_just_reset_active", False) else 0.0,
         "res_gain_mean": float(diag.get("res_gain_mean", 1.0)),
         "res_gain_min": float(diag.get("res_gain_min", 1.0)),
         "saturation_level": float(getattr(aec, "_saturation_level", 0.0)),
@@ -194,7 +196,9 @@ def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
                mode: str = "pbfdkf", preset: str = "balanced",
                enable_res: bool = True, cng: bool = True,
                wallclock_dne_trigger: bool = False,
-               wallclock_reverb_smoothing: bool = False) -> None:
+               wallclock_reverb_smoothing: bool = False,
+               just_reset_gate: bool = False,
+               reset_res_on_rescue: bool = False) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     mic, sr_mic = sf.read(mic_path, dtype="float32")
@@ -219,6 +223,10 @@ def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
         cfg.use_aec3_wallclock_dne_trigger_threshold = True
     if wallclock_reverb_smoothing:
         cfg.use_aec3_wallclock_reverb_smoothing = True
+    if just_reset_gate:
+        cfg.use_aec3_just_reset_gate_on_linear_path = True
+    if reset_res_on_rescue:
+        cfg.use_aec3_reset_res_on_rescue_edge = True
 
     aec = AEC(cfg)
     hop = cfg.hop_size
@@ -549,10 +557,29 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
                   f"median={np.median(cols['gain_hf_med'][dne_off_mask]):.3f}")
     print()
 
+    # ---------- Just-reset gate summary ----------
+    jr_frac = float(cols["aec3_just_reset_active"].mean())
+    if jr_frac > 0:
+        sym_jr = float(cols["aec3_just_reset_active"][symptom_mask].mean()
+                       if n_sym > 0 else 0.0)
+        print(f"--- AEC3 just-reset gate ---")
+        print(f"  active fraction (whole file): {jr_frac * 100:5.1f}%")
+        print(f"  active fraction at symptom : {sym_jr * 100:5.1f}%  "
+              f"← if high, gate intercepts the wipe window")
+        if n_sym > 0:
+            jr_mask = symptom_mask & (cols["aec3_just_reset_active"] > 0)
+            jr_n = int(jr_mask.sum())
+            if jr_n > 0:
+                print(f"  symptom AND just_reset active: {jr_n} hops")
+                print(f"    gain_hf_med under gate     : "
+                      f"mean={cols['gain_hf_med'][jr_mask].mean():.3f}  "
+                      f"median={np.median(cols['gain_hf_med'][jr_mask]):.3f}")
+        print()
+
     # ---------- Time-binned timeline (0.5-second windows) ----------
     print("--- 0.5-second windows (gain medians + flag fractions + DNE inputs) ---")
     print("    t(s)   |  LF /  MF /  HF  | DNE  UL  CONV | "
-          "ENR%/SNR% hold | poor_cnt hov")
+          "ENR%/SNR% hold | poor_cnt hov  JR%")
     win_sec = 0.5
     win_hops = int(win_sec * sr / hop)
     for w_start in range(0, n_hops, win_hops):
@@ -575,11 +602,12 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
         enr_pass = cols["dne_trigger_enr_pass"][sl].mean() * 100
         snr_pass = cols["dne_trigger_snr_pass"][sl].mean() * 100
         hold_med = float(np.median(cols["dne_hold_counter"][sl]))
+        jr = cols["aec3_just_reset_active"][sl].mean() * 100
         print(f"  {t:5.1f}-{t + win_sec:5.1f}  "
               f"| {gl:.2f} / {gm:.2f} / {gh:.2f}  "
               f"| {d:3.0f}% {u:3.0f}% {cv:3.0f}% "
               f"| {enr_pass:3.0f}%/{snr_pass:3.0f}% h={hold_med:3.0f} "
-              f"| {pc_max:3d}     {hov:3.0f}%")
+              f"| {pc_max:3d}     {hov:3.0f}% {jr:4.0f}%")
     print()
 
     # ---------- Narrative ----------
@@ -760,13 +788,23 @@ def main() -> None:
                    help="AEC3-strict: ReverbFrequencyResponse EMA α=0.2 "
                         "applied per AEC3 4 ms block (= 0.428 per 10 ms hop) "
                         "instead of legacy 0.2 per hop (2.5× too slow)")
+    p.add_argument("--just-reset-gate", action="store_true",
+                   help="AEC3 JustResetEchoPath analogue: while coarse-rescue "
+                        "hangover > 0, force usable_linear=False so RES uses "
+                        "nonlinear path (R²=X²·g²) and SG uses raw Y² nearend")
+    p.add_argument("--reset-res-on-rescue", action="store_true",
+                   help="AEC3-strict: call ResidualEchoEstimator.reset() on "
+                        "the poor-coarse-rescue rising edge (clears ReverbModel, "
+                        "ReverbFrequencyResponse, x2_noise_floor counters)")
     args = p.parse_args()
 
     trace_case(args.mic, args.lpb, args.output_dir,
                mode=args.mode, preset=args.preset,
                enable_res=not args.no_res, cng=not args.no_cng,
                wallclock_dne_trigger=args.wallclock_dne_trigger,
-               wallclock_reverb_smoothing=args.wallclock_reverb_smoothing)
+               wallclock_reverb_smoothing=args.wallclock_reverb_smoothing,
+               just_reset_gate=args.just_reset_gate,
+               reset_res_on_rescue=args.reset_res_on_rescue)
 
 
 if __name__ == "__main__":
