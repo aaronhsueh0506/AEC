@@ -16,6 +16,61 @@ when verdict requires it.
 
 ---
 
+## [3.21.6.3] — 2026-05-28 — strict AEC3 wire-up: FullBandErleEstimator → ReverbFrequencyResponse
+
+**Headline**: HF-painted-black per-frame trace on the user's internal case
+(568_EVB_online) attributed the symptom to inflated R²_reverb (64.4 %
+share, +56.6 dB int16²) — the reverb tail held STALE from a brief early
+convergence and never refreshed during sustained NE. Root cause is a
+v3.21 port wire-up gap: `ReverbFrequencyResponse.Update()` was fed a
+binary `1.0 if converged else None` filter quality proxy instead of the
+AEC3-strict continuous estimate from `FullBandErleEstimator`. AEC3 keeps
+quality alive for ~400 ms past per-frame convergence via the hold
+counter, extending the reverb refresh window so the tail tracks the
+current filter state instead of freezing.
+
+### Fix
+
+`python/modules/state/aec_state.py`: add
+`get_inst_linear_quality_estimate()` accessor sourcing per-frame quality
+from `ErleEstimator._fullband.get_inst_linear_quality_estimate()`. AEC3
+strict path: `aec_state.cc:286-289` →
+`reverb_model_estimator.cc:58-66` → `reverb_frequency_response.cc:88`.
+
+`python/modules/orchestrator.py` (`_aec3_post`): replace
+```python
+_converged_for_reverb = bool(_aec3_converged and _filter_converged_enough)
+_filter_q = 1.0 if _converged_for_reverb else None
+```
+with
+```python
+_filter_q = self._aec3_state.get_inst_linear_quality_estimate()
+```
+
+`python/v3_21_6_2_hf_trace.py`: expose continuous `filter_quality` in the
+per-frame snapshot + Flag-fractions block so the 400 ms hold can be
+verified directly.
+
+### Verification (single-case smoke, 0I0XMl3M DT_static)
+
+- `filter_quality` alive **13.6 %** of frames vs `filter_converged` only
+  **2.0 %** — hold extends live-window 6.8×, exactly the AEC3 behaviour.
+- `R²_reverb (HF)` at SYMPTOM: **+58.00 dB → +52.11 dB** (−5.9 dB).
+- Per-band gain at 4-6 s window: LF/MF/HF **0.81 / 0.56 / 0.66 → 0.88 /
+  0.63 / 0.68**.
+
+### What this doesn't fix
+
+Changes WHEN reverb update fires (extends 400 ms hold) but not HOW the
+tail is recomputed during sustained no-convergence. On cases where the
+PBFDKF never converges for > 400 ms quality goes None and the tail
+freezes. If the symptom persists, escalation candidates:
+- shorten reverb decay via `ep_strength.nearend_len < default_len`
+  (AEC3 has both at 0.83 by default);
+- explicit stale-reverb suppression gate at the `AddReverb` call site.
+
+---
+
 ## [3.21.6.2] — 2026-05-28 — AEC3 alignment audit + 4 shipped items
 
 **Headline**: Full audit of the `docs/v3_21_alignment_roadmap.md` "still missing"

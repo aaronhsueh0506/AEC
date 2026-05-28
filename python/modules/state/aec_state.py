@@ -164,6 +164,21 @@ class AecState:
     def fullband_erle_log2(self) -> float:
         return self._erle_estimator.fullband_erle_log2()
 
+    def get_inst_linear_quality_estimate(self) -> Optional[float]:
+        """AEC3-strict ``erle_estimator_.GetInstLinearQualityEstimates()``
+        (fullband_erle_estimator.h:55). Continuous [0, 1] from the rolling
+        ERLE max/min normalisation, with a ~400 ms hold counter after the
+        last convergence-driven update. Returns None until the accumulator
+        has accumulated 6 converged points OR after the hold expires.
+
+        Consumed by ``ResidualEchoEstimator`` reverb update as the
+        ``linear_filter_quality`` smoothing factor (cc:286-289). The hold
+        counter keeps the reverb tail refresh window alive for ~400 ms
+        beyond per-frame convergence — load-bearing on cases where the
+        filter converges briefly then NE dominates, otherwise the tail
+        gets frozen at the last update's value and inflates R²."""
+        return self._erle_estimator.get_inst_linear_quality_estimate()
+
     def erl(self) -> np.ndarray:
         return self._erl_estimator.erl()
 

@@ -3094,9 +3094,15 @@ class AEC:
         # default during pre-convergence and is treated as a valid block
         # index by the reverb estimator (matches AEC3 verbatim).
         _delay_blocks = int(self._aec3_state.min_direct_path_filter_delay())
-        # Filter quality proxy for reverb model update.
-        _converged_for_reverb = bool(_aec3_converged and _filter_converged_enough)
-        _filter_q = 1.0 if _converged_for_reverb else None
+        # AEC3-strict ``linear_filter_quality`` from FullBandErleEstimator
+        # (aec_state.cc:286-289 → reverb_model_estimator.cc:58-66 →
+        # reverb_frequency_response.cc:88). Continuous [0, 1] with a ~400 ms
+        # hold after the last convergence, so the reverb tail refresh window
+        # stays alive past per-frame convergence loss. The previous binary
+        # ``1.0 if converged else None`` proxy froze the tail immediately
+        # when the filter lost convergence, inflating R²_reverb on cohort
+        # tail. Replaced 2026-05-28 (Tier A #5 consumer wire-up).
+        _filter_q = self._aec3_state.get_inst_linear_quality_estimate()
         _stationary_block = self._aec3_stationarity.is_block_stationary()
         self._aec3_ree.update_reverb_models(
             frequency_response=_w_mag2,

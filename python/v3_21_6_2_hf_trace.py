@@ -97,11 +97,17 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
                 if reverb_fr is not None
                 and hasattr(reverb_fr, "tail_response") else 0.0)
 
+    # AEC3-strict continuous filter quality (FullBandErleEstimator). None
+    # during warmup or after the hold counter (~400 ms) expires.
+    flq = (state.get_inst_linear_quality_estimate()
+           if state is not None
+           and hasattr(state, "get_inst_linear_quality_estimate") else None)
     snap = {
         "gain": gain,
         "gain_lf_med": float(np.median(gain[:lf_end])),
         "gain_mf_med": float(np.median(gain[lf_end:mf_end])),
         "gain_hf_med": float(np.median(gain[mf_end:])),
+        "filter_quality": float(flq) if flq is not None else -1.0,  # -1 sentinel = None
         "dominant_nearend": bool(sg.is_dominant_nearend()) if sg is not None else False,
         "usable_linear": bool(state.usable_linear_estimate()) if state is not None else False,
         "transparent_mode": bool(state.transparent_mode_active()) if state is not None else False,
@@ -278,6 +284,17 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
     fires = int(np.sum(np.diff(
         (cols["coarse_reset_hangover"] > 0).astype(int)) > 0))
     print(f"  poor_coarse rescue fires (rising edges): {fires}")
+    # AEC3-strict continuous filter_quality (FullBandErleEstimator hold ~400 ms)
+    fq = cols.get("filter_quality")
+    if fq is not None:
+        fq_none_frac = (fq < 0).mean()
+        fq_live = fq[fq >= 0]
+        if fq_live.size > 0:
+            print(f"  filter_quality (AEC3 continuous): "
+                  f"alive {(1 - fq_none_frac) * 100:.1f}% of frames  "
+                  f"alive-mean={fq_live.mean():.3f}  alive-max={fq_live.max():.3f}")
+        else:
+            print(f"  filter_quality (AEC3 continuous): None throughout file")
     print()
 
     # ---------- NE-active segments ----------
