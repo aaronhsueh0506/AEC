@@ -43,8 +43,7 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             sample_rate=16000, write_wav=True,
             mic_pad=0, ref_pad=0,
             diag_csv_path=None,
-            trace_aec_state=False,
-            trace_hf_chain_path=None):
+            trace_aec_state=False):
     """Process one case; return (mic, ref, out, erle_per_frame, sample_rate).
 
     mic_pad / ref_pad: prepend N zero samples to mic / ref before processing
@@ -62,36 +61,8 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
         enable_res=enable_res,
         enable_cng=enable_cng,
         enable_shadow=True,
-        trace_hf_chain=bool(trace_hf_chain_path),
     )
-
-    # v3.21 M_full_delay composition — all 13 AEC3 alignment flags ON
-    cfg.use_partition_summed_x2_for_h_error_gain         = True  # Bundle A
-    cfg.use_current_e2_refined_in_h_error_denominator    = True  # Bundle A
-    cfg.use_per_bin_h_error_refresh                      = True  # Bundle A
-    cfg.use_aec3_h_error_ceil                            = True  # Bundle A
-    cfg.use_aec3_filter_noise_gate_power                 = True  # Bundle A / R0.1
-    cfg.use_partition_summed_x2_for_shadow_mu            = True  # Bundle B
-    cfg.use_aec3_noise_gate_for_shadow                   = True  # Bundle B
-    cfg.use_poor_excitation_gate_for_shadow              = True  # Bundle B
-    cfg.use_narrowband_mask_for_shadow                   = True  # Bundle B
-    cfg.use_saturation_gate_for_shadow                   = True  # Bundle B
-    cfg.use_refined_output_selection_for_linear_path     = True  # Bundle C (URO)
-    cfg.form_linear_filter_crossfade_enabled             = True  # Bundle C
-    cfg.use_full_delay_change_chain                      = True  # Bundle D
-
-    # Research / debug overrides via env vars (none alter production behavior
-    # unless explicitly set).
-    if 'AEC_FILTER_ANALYZER' in os.environ:
-        cfg.filter_analyzer_enabled = (
-            os.environ['AEC_FILTER_ANALYZER'].lower() not in ('0', 'false', 'off', 'no'))
-    if 'AEC_TRANSPARENT_MODE' in os.environ:
-        cfg.transparent_mode_enabled = (
-            os.environ['AEC_TRANSPARENT_MODE'].lower() not in ('0', 'false', 'off', 'no'))
-    # v3.15 §B3: seed CNG for byte-equal sanity across CLI invocations.
-    # Matches eval_aec_challenge.py:325 convention (seed=0 per-case);
-    # without this, CNG (np.random.randn at aec.py:2009-2010) was
-    # non-deterministic and masked code-induced Δ in run-to-run compare.
+    # Per-case CNG determinism (matches eval_aec_challenge.py convention).
     np.random.seed(0)
     aec = AEC(cfg)
 
@@ -200,17 +171,6 @@ def run_aec(mic_path, ref_path, out_path, *, preset='balanced',
             w = csv.writer(fp)
             w.writerow(header)
             w.writerows(diag_rows)
-
-    # v3.21.2 S1: HF causal chain trace CSV dump
-    if trace_hf_chain_path and getattr(aec, '_hf_chain_trace', None):
-        import csv as _csv
-        rows = aec._hf_chain_trace
-        keys = list(rows[0].keys())
-        with open(trace_hf_chain_path, 'w', newline='') as fp:
-            w = _csv.DictWriter(fp, fieldnames=keys)
-            w.writeheader()
-            w.writerows(rows)
-        print(f"  hf_chain trace -> {trace_hf_chain_path} ({len(rows)} frames)")
 
     return mic_trim, ref_trim, out_trim, np.asarray(erle_log), sample_rate
 
@@ -438,13 +398,9 @@ def main():
     p.add_argument('--diag-csv',
                    help='write per-frame AecStats trajectory CSV here')
     p.add_argument('--trace-aec-state', action='store_true',
-                   help='P3f Phase 1: include Mini AecState fields '
-                        '(main_err_ratio, shadow_err_ratio, shadow_advantage, '
-                        'erle_slope, post_reset_age, filter_state, usable_linear)')
-    p.add_argument('--trace-hf-chain',
-                   help='v3.21.2 S1: write per-frame HF damage causal chain '
-                        'trace CSV here (convergence -> ERLE -> R² -> '
-                        'DominantNearendDetector -> HF cap gate -> gain)')
+                   help='per-frame AecState fields (main_err_ratio, '
+                        'shadow_err_ratio, shadow_advantage, erle_slope, '
+                        'post_reset_age, filter_state, usable_linear)')
     args = p.parse_args()
 
     if args.demo:
@@ -463,7 +419,6 @@ def main():
         mic_pad=args.mic_pad, ref_pad=args.ref_pad,
         diag_csv_path=args.diag_csv,
         trace_aec_state=args.trace_aec_state,
-        trace_hf_chain_path=args.trace_hf_chain,
     )
     print(f'wrote {args.out} ({len(out)} samples, {len(out) / sr:.2f}s)',
           file=sys.stderr)
