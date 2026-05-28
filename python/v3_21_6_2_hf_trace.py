@@ -100,6 +100,7 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
         _low_render = getattr(sg, "_low_render", None)
         if _low_render is not None:
             low_render_threshold_eff = float(getattr(_low_render, "_threshold", 0.0))
+    ree = getattr(aec, "_aec3_ree", None)
     if ree is not None:
         _em_cfg = getattr(ree, "_echo_model", None)
         if _em_cfg is not None:
@@ -108,7 +109,6 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
     # Pull ResidualEchoEstimator's direct vs reverb R² split. Tells us
     # whether RES inflation comes from the direct path (S²/ERLE) or the
     # AddReverb tail mass accumulator.
-    ree = getattr(aec, "_aec3_ree", None)
     r2_direct = (ree._last_r2_direct_component
                  if ree is not None
                  and hasattr(ree, "_last_r2_direct_component")
