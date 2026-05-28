@@ -83,6 +83,27 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
         dne = getattr(sg, "_dominant_nearend", None)
         if dne is not None:
             dne_snap = getattr(dne, "_last_update_snap", {}) or {}
+    # FFT-density flag verification: capture the runtime values of the
+    # flag-gated floor constants so we can confirm scaling took effect.
+    cn_floor_eff = float(getattr(aec, "_aec3_noise_floor_int16sq", 0.0))
+    audibility_floor_power_eff = 0.0
+    low_render_limit_eff = 0.0
+    normal_render_limit_eff = 0.0
+    min_noise_floor_eff = 0.0
+    low_render_threshold_eff = 0.0
+    if sg is not None:
+        _ea_cfg = getattr(sg, "_echo_audibility", None)
+        if _ea_cfg is not None:
+            audibility_floor_power_eff = float(getattr(_ea_cfg, "floor_power", 0.0))
+            low_render_limit_eff = float(getattr(_ea_cfg, "low_render_limit", 0.0))
+            normal_render_limit_eff = float(getattr(_ea_cfg, "normal_render_limit", 0.0))
+        _low_render = getattr(sg, "_low_render", None)
+        if _low_render is not None:
+            low_render_threshold_eff = float(getattr(_low_render, "_threshold", 0.0))
+    if ree is not None:
+        _em_cfg = getattr(ree, "_echo_model", None)
+        if _em_cfg is not None:
+            min_noise_floor_eff = float(getattr(_em_cfg, "min_noise_floor_power", 0.0))
 
     # Pull ResidualEchoEstimator's direct vs reverb R² split. Tells us
     # whether RES inflation comes from the direct path (S²/ERLE) or the
@@ -188,6 +209,14 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
         "dne_trigger_threshold_hops": float(dne_snap.get("trigger_threshold_hops", 0)),
         "dne_use_wallclock_trigger": 1.0 if dne_snap.get("use_wallclock_trigger_threshold") else 0.0,
         "dne_initial_state": 1.0 if dne_snap.get("initial_state") else 0.0,
+        # FFT-density flag verification — values flag-OFF vs flag-ON
+        # confirm scaling actually applied.
+        "cn_floor_int16sq": cn_floor_eff,
+        "audibility_floor_power": audibility_floor_power_eff,
+        "low_render_limit": low_render_limit_eff,
+        "normal_render_limit": normal_render_limit_eff,
+        "min_noise_floor_power": min_noise_floor_eff,
+        "low_render_threshold": low_render_threshold_eff,
     })
     return snap
 
@@ -198,7 +227,8 @@ def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
                wallclock_dne_trigger: bool = False,
                wallclock_reverb_smoothing: bool = False,
                just_reset_gate: bool = False,
-               reset_res_on_rescue: bool = False) -> None:
+               reset_res_on_rescue: bool = False,
+               fft_density_scaled_floors: bool = False) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     mic, sr_mic = sf.read(mic_path, dtype="float32")
@@ -227,6 +257,8 @@ def trace_case(mic_path: str, lpb_path: str, output_dir: str, *,
         cfg.use_aec3_just_reset_gate_on_linear_path = True
     if reset_res_on_rescue:
         cfg.use_aec3_reset_res_on_rescue_edge = True
+    if fft_density_scaled_floors:
+        cfg.use_aec3_fft_density_scaled_psd_floors = True
 
     aec = AEC(cfg)
     hop = cfg.hop_size
@@ -557,6 +589,28 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
                   f"median={np.median(cols['gain_hf_med'][dne_off_mask]):.3f}")
     print()
 
+    # ---------- FFT-density-scaled PSD floors (verification block) ----------
+    # Reports the runtime values of the flag-gated floor constants. If
+    # use_aec3_fft_density_scaled_psd_floors is OFF, expect the AEC3
+    # verbatim values (cn=17.127, audibility floor_power=128, low_render=256,
+    # normal_render=64, low_render_threshold=160000, min_noise_floor=1638400).
+    # If ON at fft=512/hop=160, expect cn ≈ 68.5, floor_power=512, low_render=1024,
+    # normal_render=256, low_render_threshold=400000, min_noise_floor=6553600.
+    print("--- FFT-density floor verification (last-hop values) ---")
+    print(f"  CN noise floor (int16²)         : {cols['cn_floor_int16sq'][-1]:12.2f}  "
+          f"(AEC3 verbatim 17.127; scaled 68.51 at fft=512)")
+    print(f"  Audibility floor_power          : {cols['audibility_floor_power'][-1]:12.2f}  "
+          f"(verbatim 128; scaled 512)")
+    print(f"  Audibility low_render_limit     : {cols['low_render_limit'][-1]:12.2f}  "
+          f"(verbatim 256; scaled 1024)")
+    print(f"  Audibility normal_render_limit  : {cols['normal_render_limit'][-1]:12.2f}  "
+          f"(verbatim 64; scaled 256)")
+    print(f"  EchoModel min_noise_floor_power : {cols['min_noise_floor_power'][-1]:12.2f}  "
+          f"(verbatim 1638400; scaled 6553600)")
+    print(f"  LowNoiseRender threshold        : {cols['low_render_threshold'][-1]:12.2f}  "
+          f"(verbatim 160000; scaled 400000 at hop=160)")
+    print()
+
     # ---------- Just-reset gate summary ----------
     jr_frac = float(cols["aec3_just_reset_active"].mean())
     if jr_frac > 0:
@@ -796,6 +850,15 @@ def main() -> None:
                    help="AEC3-strict: call ResidualEchoEstimator.reset() on "
                         "the poor-coarse-rescue rising edge (clears ReverbModel, "
                         "ReverbFrequencyResponse, x2_noise_floor counters)")
+    p.add_argument("--fft-density-scaled-floors", action="store_true",
+                   help="AEC3-strict: scale per-bin PSD floor constants "
+                        "(CN noise floor, EchoAudibility floor_power / "
+                        "low_render_limit / normal_render_limit, EchoModel "
+                        "min_noise_floor_power) by fft_size/2/64 (4× at "
+                        "fft=512); _LowNoiseRenderDetector threshold by "
+                        "hop/64 (2.5× at hop=160). AEC3 verbatim is sized "
+                        "for fft=128; without scaling per-bin floors are "
+                        "4× too low → HF underprotection (painted-black)")
     args = p.parse_args()
 
     trace_case(args.mic, args.lpb, args.output_dir,
@@ -804,7 +867,8 @@ def main() -> None:
                wallclock_dne_trigger=args.wallclock_dne_trigger,
                wallclock_reverb_smoothing=args.wallclock_reverb_smoothing,
                just_reset_gate=args.just_reset_gate,
-               reset_res_on_rescue=args.reset_res_on_rescue)
+               reset_res_on_rescue=args.reset_res_on_rescue,
+               fft_density_scaled_floors=args.fft_density_scaled_floors)
 
 
 if __name__ == "__main__":

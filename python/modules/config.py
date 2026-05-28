@@ -75,6 +75,25 @@ class AecConfig:
     # ReverbModel state, ReverbFrequencyResponse, x2_noise_floor counter.
     # Without this, stale FS-period reverb tail persists into DT2.
     use_aec3_reset_res_on_rescue_edge: bool = False
+    # AEC3-strict fft-density rescale of per-bin PSD floor constants.
+    # AEC3 hardcodes 64 = kFftLengthBy2 in:
+    #   * ComfortNoiseGenerator::GetNoiseFloorFactor (CN noise floor base)
+    #   * EchoAudibilityConfig.floor_power (= 2 × 64)
+    #   * EchoAudibilityConfig.low_render_limit (= 4 × 64)
+    #   * EchoAudibilityConfig.normal_render_limit (= 64)
+    #   * EchoModelConfig.min_noise_floor_power (1638400 = AEC3 fft scale)
+    # Plus _LowNoiseRenderDetector's `50² × kBlockSize = 160000`
+    # time-domain energy threshold (scales with hop, not fft).
+    # Verbatim ports keep AEC3 numerics, which at our fft=512 (vs 128)
+    # leave per-bin floors 4× too low — WeightEchoForAudibility never
+    # downweights weak HF echo, GetMinGain's protection floor is too
+    # low, EMR-bypass never fires → formant valleys / broadband HF
+    # fricatives get painted-black even when filter+linear-path output
+    # is clean. Flag ON applies fft_density_scale(..., fft_size) (4×)
+    # to the five fft-density constants and block_energy_scale(...,
+    # hop_size) (2.5×) to LowNoiseRender threshold. Default OFF for
+    # byte-equal; toggled per-case via tracer during validation.
+    use_aec3_fft_density_scaled_psd_floors: bool = False
 
     # ── Shadow filter (dual-filter divergence control) ──────────────────
     enable_shadow: bool = True

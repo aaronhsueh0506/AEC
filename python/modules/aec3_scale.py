@@ -20,6 +20,17 @@ PSD_SCALE_INV = 1.0 / PSD_SCALE   # 9.31e-10
 AEC3_BLOCK_SAMPLES_16K = 64       # AEC3 kBlockSize at 16 kHz
 AEC3_BLOCK_MS = 4.0               # 64 / 16000 * 1000
 
+# AEC3 single-side FFT bin count for per-bin PSD constants. AEC3's
+# aec3_common.h fixes ``kFftLengthBy2 = 64`` (and ``kFftLength = 128``).
+# Many of AEC3's per-bin PSD floor constants encode this 64 implicitly
+# (e.g. comfort_noise_generator.cc:46 ``return 64.f * powf(...)`` for the
+# WGN-matching CN floor). At our hop=160 / fft=512 we run at
+# ``kFftLengthBy2_ours = 256`` → 4× more bins per Hz → per-bin |X[k]|² for
+# the same physical signal is intrinsically 4× larger. Floor constants
+# that scale with FFT length must be scaled by ``fft/2 / 64 = 4`` to
+# preserve per-bin physical meaning.
+AEC3_FFT_LENGTH_BY_2 = 64
+
 
 def psd_int16_to_float(value: float) -> float:
     """Convert an AEC3 PSD-scale constant (int16²) to our float[-1,1] PSD scale."""
@@ -96,6 +107,45 @@ def per_block_ema_alpha_to_per_hop(per_block_alpha: float,
     block_seconds = AEC3_BLOCK_SAMPLES_16K / 16000.0
     hop_seconds = hop_samples / float(sample_rate)
     return 1.0 - (1.0 - per_block_alpha) ** (hop_seconds / block_seconds)
+
+
+def fft_density_scale(value_int16sq: float, fft_size: int) -> float:
+    """Scale an AEC3 per-bin PSD constant from AEC3's kFftLengthBy2=64 to
+    our fft_size/2.
+
+    AEC3's per-bin |X[k]|² PSD floor constants (CN noise floor,
+    EchoAudibilityConfig floor_power / *_render_limit, EchoModel
+    min_noise_floor_power, ...) are sized for AEC3's FFT length 128 →
+    65 bins. At our fft=512 → 257 bins, per-bin PSD for the same
+    physical signal is intrinsically (fft_ours / 2) / 64 = 4× larger.
+    Floors that were calibrated against AEC3's per-bin scale must be
+    scaled by the same ratio to keep equivalent per-bin protection.
+
+    Example:
+        fft_density_scale(64.0, fft_size=512) → 256.0     (CN floor base)
+        fft_density_scale(128.0, fft_size=512) → 512.0    (floor_power)
+        fft_density_scale(1638400.0, fft_size=512) → 6553600.0
+    """
+    if fft_size <= 0:
+        raise ValueError(f"fft_size must be positive, got {fft_size}")
+    return value_int16sq * ((fft_size // 2) / AEC3_FFT_LENGTH_BY_2)
+
+
+def block_energy_scale(value_int16sq: float, hop_samples: int) -> float:
+    """Scale an AEC3 per-block time-domain energy threshold from
+    kBlockSize=64 samples to our hop_samples.
+
+    Used for ``sum(x[n]² for n in 0..N-1)`` style thresholds such as
+    ``_LowNoiseRenderDetector``'s `50² × kBlockSize = 160000`. At our
+    hop=160 the same physical RMS produces 2.5× more total energy per
+    frame; the threshold must scale by the same wall-clock ratio.
+
+    Example:
+        block_energy_scale(160000.0, hop_samples=160) → 400000.0
+    """
+    if hop_samples <= 0:
+        raise ValueError(f"hop_samples must be positive, got {hop_samples}")
+    return value_int16sq * (hop_samples / AEC3_BLOCK_SAMPLES_16K)
 
 
 def per_block_growth_to_per_hop(per_block_multiplier: float,

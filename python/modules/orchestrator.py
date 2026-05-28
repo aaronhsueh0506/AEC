@@ -477,8 +477,31 @@ class AEC:
                 enable_transparent_mode=False,
                 enable_filter_analyzer=True,
             ))
+            # FFT-density-scaled PSD floors (AEC3 alignment).
+            # AEC3 hardcodes kFftLengthBy2=64 in floor constants for
+            # EchoModelConfig / EchoAudibilityConfig. At our fft=512 these
+            # need 4× scaling; at hop=160 _LowNoiseRenderDetector threshold
+            # needs 2.5× scaling. Single flag covers all six.
+            _use_fft_dens = bool(getattr(
+                self.config,
+                "use_aec3_fft_density_scaled_psd_floors", False
+            ))
+            import dataclasses as _dc
+            from .residual.residual_echo_estimator import EchoModelConfig
+            from .residual.suppression_gain import EchoAudibilityConfig
+            _ff_for_floors = float(self.filter.fft_size) if hasattr(self.filter, "fft_size") else 512.0
+            from . import aec3_scale as _aec3_scale_floors
+            if _use_fft_dens:
+                _echo_model_cfg = EchoModelConfig(
+                    min_noise_floor_power=_aec3_scale_floors.fft_density_scale(
+                        EchoModelConfig().min_noise_floor_power, int(_ff_for_floors)
+                    ),
+                )
+            else:
+                _echo_model_cfg = EchoModelConfig()
             self._aec3_ree = ResidualEchoEstimator(
                 n_bins=n_bins,
+                echo_model=_echo_model_cfg,
                 sr=self.config.sample_rate,
                 hop_size=self.config.hop_size,
                 use_aec3_residual_noise_gate=True,
@@ -493,10 +516,25 @@ class AEC:
             # (load-bearing safety net on cohort tail). Override the AEC3
             # default EchoAudibilityConfig (use_stationarity_properties=False)
             # so the orchestrator's zeroing block fires.
-            import dataclasses as _dc
+            _ea_kwargs = dict(use_stationarity_properties=True)
+            if _use_fft_dens:
+                # AEC3 floor_power=2×64, low_render_limit=4×64,
+                # normal_render_limit=64 — all fft-density-dependent.
+                _ea_default = EchoAudibilityConfig()
+                _ea_kwargs.update(dict(
+                    floor_power=_aec3_scale_floors.fft_density_scale(
+                        _ea_default.floor_power, int(_ff_for_floors)
+                    ),
+                    low_render_limit=_aec3_scale_floors.fft_density_scale(
+                        _ea_default.low_render_limit, int(_ff_for_floors)
+                    ),
+                    normal_render_limit=_aec3_scale_floors.fft_density_scale(
+                        _ea_default.normal_render_limit, int(_ff_for_floors)
+                    ),
+                ))
             _sg_config.echo_audibility = _dc.replace(
                 _sg_config.echo_audibility,
-                use_stationarity_properties=True,
+                **_ea_kwargs,
             )
             if getattr(self.config, "use_aec3_wallclock_dne_trigger_threshold", False):
                 _sg_config.dominant_nearend_detection = _dc.replace(
@@ -508,6 +546,7 @@ class AEC:
                 config=_sg_config,
                 sr=self.config.sample_rate,
                 hop_size=self.config.hop_size,
+                use_wallclock_block_energy_threshold=_use_fft_dens,
             )
             self._aec3_n_bins = n_bins
             self._aec3_sg_config = _sg_config
@@ -551,8 +590,19 @@ class AEC:
             self._aec3_n2_initial = np.zeros(n_bins, dtype=np.float32)
             self._aec3_n2_counter = 0
             _dbfs = float(self.config.comfort_noise_floor_dbfs)
+            # AEC3 comfort_noise_generator.cc:46 GetNoiseFloorFactor hardcodes
+            # 64.f = kFftLengthBy2. For WGN with σ², per-bin |X[k]|² scales
+            # with FFT length; at our fft=512 the equivalent constant is
+            # fft_size/2 = 256. Flag-gated to preserve byte-equal default.
+            _ff = float(self.filter.fft_size) if hasattr(self.filter, "fft_size") else 512.0
+            _cn_floor_factor = (
+                _ff / 2.0
+                if getattr(self.config,
+                           "use_aec3_fft_density_scaled_psd_floors", False)
+                else 64.0
+            )
             self._aec3_noise_floor_int16sq = float(
-                64.0 * (10.0 ** ((90.30899869919436 + _dbfs) * 0.1))
+                _cn_floor_factor * (10.0 ** ((90.30899869919436 + _dbfs) * 0.1))
             )
             self._aec3_cng_seed = 42
             self._aec3_noise_initialized = False
@@ -1063,18 +1113,41 @@ class AEC:
             enable_transparent_mode=False,
             enable_filter_analyzer=True,
         ))
+        # Re-derive fft-density-scaled echo_model so a mid-stream reset
+        # still honours the use_aec3_fft_density_scaled_psd_floors flag.
+        _use_fft_dens_reset = bool(getattr(
+            self.config,
+            "use_aec3_fft_density_scaled_psd_floors", False
+        ))
+        from .residual.residual_echo_estimator import EchoModelConfig
+        from . import aec3_scale as _aec3_scale_floors
+        _ff_for_floors_reset = float(self.filter.fft_size) if hasattr(self.filter, "fft_size") else 512.0
+        if _use_fft_dens_reset:
+            _echo_model_cfg_reset = EchoModelConfig(
+                min_noise_floor_power=_aec3_scale_floors.fft_density_scale(
+                    EchoModelConfig().min_noise_floor_power, int(_ff_for_floors_reset)
+                ),
+            )
+        else:
+            _echo_model_cfg_reset = EchoModelConfig()
         self._aec3_ree = ResidualEchoEstimator(
             n_bins=n_bins,
+            echo_model=_echo_model_cfg_reset,
             sr=self.config.sample_rate,
             hop_size=self.config.hop_size,
             use_aec3_residual_noise_gate=True,
             use_aec3_echo_gen_window=True,
+            use_aec3_wallclock_reverb_smoothing=bool(
+                getattr(self.config,
+                        "use_aec3_wallclock_reverb_smoothing", False)
+            ),
         )
         self._aec3_sg = SuppressionGain(
             n_bins=n_bins,
             config=self._aec3_sg_config,
             sr=self.config.sample_rate,
             hop_size=self.config.hop_size,
+            use_wallclock_block_energy_threshold=_use_fft_dens_reset,
         )
         self._aec3_ola_buf.fill(0)
         self._aec3_pending_gain_change = False

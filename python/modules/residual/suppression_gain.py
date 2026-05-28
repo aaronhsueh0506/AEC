@@ -204,10 +204,24 @@ class _MovingAverageSpectrum:
 
 
 class _LowNoiseRenderDetector:
-    """Mirrors LowNoiseRenderDetector (suppression_gain.cc:461-478)."""
+    """Mirrors LowNoiseRenderDetector (suppression_gain.cc:461-478).
 
-    def __init__(self) -> None:
+    AEC3 uses ``threshold = 50² × kBlockSize = 160000`` for a 4 ms (64
+    sample) block. At our 10 ms hop the same physical RMS produces 2.5×
+    more energy per frame; ``use_wallclock_block_energy_threshold=True``
+    rescales the threshold via ``block_energy_scale`` so the detector
+    fires at the same wall-clock render level as AEC3."""
+
+    def __init__(self, *, hop_samples: int = 64,
+                 use_wallclock_block_energy_threshold: bool = False) -> None:
         self._average_power = 32768.0 * 32768.0
+        if use_wallclock_block_energy_threshold:
+            from .. import aec3_scale as _aec3_scale
+            self._threshold = float(
+                _aec3_scale.block_energy_scale(50.0 * 50.0 * 64.0, hop_samples)
+            )
+        else:
+            self._threshold = 50.0 * 50.0 * 64.0
 
     def detect(self, render_block: np.ndarray) -> bool:
         if render_block.size == 0:
@@ -215,8 +229,7 @@ class _LowNoiseRenderDetector:
         x2 = render_block.astype(np.float64) ** 2
         x2_sum = float(np.sum(x2))
         x2_max = float(np.max(x2))
-        threshold = 50.0 * 50.0 * 64.0
-        low_noise = self._average_power < threshold and x2_max < 3.0 * self._average_power
+        low_noise = self._average_power < self._threshold and x2_max < 3.0 * self._average_power
         self._average_power = self._average_power * 0.9 + x2_sum * 0.1
         return bool(low_noise)
 
@@ -453,7 +466,8 @@ class SuppressionGain:
     """Single-channel single-band SuppressionGain."""
 
     def __init__(self, *, n_bins: int = 257, config: Optional[SuppressorConfig] = None,
-                 sr: int = 16000, hop_size: int = 160) -> None:
+                 sr: int = 16000, hop_size: int = 160,
+                 use_wallclock_block_energy_threshold: bool = False) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
         self._hop_size = int(hop_size)
@@ -468,7 +482,12 @@ class SuppressionGain:
         # from the orchestrator-supplied per-bin mask. Read only via
         # _ne_state_for_gain_rules; no-op when proxy flag OFF.
         self._stat_mask_frac: float = 0.0
-        self._low_render = _LowNoiseRenderDetector()
+        self._low_render = _LowNoiseRenderDetector(
+            hop_samples=self._hop_size,
+            use_wallclock_block_energy_threshold=bool(
+                use_wallclock_block_energy_threshold
+            ),
+        )
         # AEC3 `nearend_average_blocks` is in 4 ms blocks; wall-clock rescale
         # to our hop_size so the moving-average window physically matches.
         from .. import aec3_scale as _aec3_scale
