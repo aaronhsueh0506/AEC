@@ -76,12 +76,78 @@ After alignment shipped, dev-time substrate was removed. **Byte-equal vs `cd73f4
 - **Docs**: 110 v3.21/v3.22 trace + verdict files removed. Kept: `aec_methods.md`, `aec_algorithm_guide.html`, `architecture_v3_10_5_vs_v3_21_vs_aec3.html`, `c_user_and_integration_guide.md`, `dtd_design.md`, `pbfdkf_shadow_intro.md`, `linear_filter_evolution.svg`, `aec3_extracts/`.
 - **Misc**: renamed `aec_filter_evolution.svg` → `linear_filter_evolution.svg` (clearer scope vs the residual / post-filter SVGs). Removed `python/check_byte_equal.py` (anchored to deleted baseline JSON).
 
+### AEC3 alignment audit — what shipped, what didn't, why
+
+**22 / 22 should-be-ON flags shipped (hard-coded into call sites)**: `use_aec3_filter_misadjustment_parity`, `use_per_bin_h_error_refresh`, `use_aec3_h_error_ceil`, `use_partition_summed_x2_for_h_error_gain`, `use_aec3_filter_noise_gate_power`, `use_aec3_residual_noise_gate`, `use_aec3_echo_gen_power_window`, `use_aec3_handle_echo_path_change`, `use_full_delay_change_chain`, `use_current_e2_refined_in_h_error_denominator`, `use_refined_output_selection_for_linear_path`, `form_linear_filter_crossfade_enabled`, `use_partition_summed_x2_for_shadow_mu`, `use_aec3_noise_gate_for_shadow`, `use_poor_excitation_gate_for_shadow`, `use_narrowband_mask_for_shadow`, `use_saturation_gate_for_shadow`, `filter_misadjustment_enabled`, `filter_analyzer_enabled`, `e2_y2_clamp_enabled`, `aec3_post_stationarity_zero_enabled`, `shadow_class_nlms`.
+
+**6 NOT shipped** (each with documented reason for future re-evaluation):
+
+| AEC3 flag | Reason NOT shipped | Next-step gate |
+|---|---|---|
+| `use_aec3_erle_reverb_quality` | Requires `FullBandErleEstimator` port (continuous quality 0→1 for reverb model). Substrate gap. | Port FullBandErleEstimator first, then re-test. |
+| `use_aec3_zero_filter_on_epc` | `W.fill(0)` on EPC destructive on cohort tail (~7/800 cases); `PathChangeRegimeHandler` is load-bearing replacement. | Needs PBFDKF-aware EPC handler redesign before any flip. |
+| `use_aec3_epc_classification` | Depends on `use_aec3_zero_filter_on_epc`; both fail Pareto together. | Re-evaluate jointly after zero_filter dependency clears. |
+| `use_coarse_e2_time_domain_parity` | Confirmed 24/24 byte-equal no-op (threshold-bound dormant). | Document-only; not a real divergence. |
+| `use_aec3_poor_coarse_rescue_copy` | 12-case Pareto FAIL: xFk7 +0.195 / MYrVxVEM −0.431 / qNvSMyUS −0.216 / 9xjhi −0.112. Conditional gating belongs in v3.22 beyond-AEC3, not strict alignment. | Defer to v3.22. |
+| `use_linear_filter_output_selection_for_final_output` | `usable_linear` latch contaminates Y-vs-E selection on cohort tail. | Needs `convergence_seen` latch redesign first. |
+
+### Commit ledger
+
+**Alignment phase** (10 commits — `219ee2a..cd73f4e` — audio intentionally changed):
+
+| Hash | Subject |
+|---|---|
+| `219ee2a` | HF cap anchor 4000 Hz → 2000 Hz (root cause of DT HF black block) |
+| `795549b` | HF cap anchor width 125 Hz → 31.25 Hz (strict 1-bin semantic) |
+| `8aafe61` | reverb_freq_response fft-resolution-aware smoothing (reverted in `a44dd6d`) |
+| `9d77c3b` | audibility band boundaries 94/219 Hz → 375/875 Hz |
+| `1650153` | strict CNG + OLA window port (back-end alignment) |
+| `e7db416` | CNG constants auto-rescale by hop/sr (wall-clock parity) |
+| `1209fa0` | HF paint-black attribution fields in `_hf_chain_trace` (diag only) |
+| `a44dd6d` | reverb chain alignment (paint-black HF root cause — 3 reverb bugs) |
+| `d311b24` | `nearend_average_blocks` wall-clock rescale |
+| `cd73f4e` | 3 alignment fixes from Bundle/Plateau/Stat/Delay audit |
+
+**Cleanup phase** (13 commits — `1b11933..14b3327` — audio zero-impact, byte-equal verified each step):
+
+| Hash | Subject |
+|---|---|
+| `1b11933` | remove v3.21/v3.22 dev trace docs + scripts (140 files, −55 416 lines) |
+| `55872db` | collapse AecConfig dev-time substrate flags (~85 fields) |
+| `11d7525` | remove orchestrator dead flag branches |
+| `88e84fa` | hard-code shipped flags in filters.py + final orchestrator pass |
+| `5cd93bc` | remove SubtractiveNLP module (closed CANNOT-SHIP substrate) |
+| `2b59d05` | remove SubbandNearendDetector linear-filter mode |
+| `4e945fd` | remove plateau detector + DT advisory dead branches |
+| `092da0a` | delete F-E1/E3/E5/DelayTrack dead state + helpers |
+| `8139418` | remove AecConfig `__getattr__` legacy-flag shim |
+| `587955b` | strip version-history archaeology comments |
+| `53759e1` | drop write-only diagnostic state + dead trace dicts |
+| `0035dd8` | strip dev-time env-var hooks in eval_aec_challenge + rename evolution svg |
+| `14b3327` | v3.21.6.1 release: docs + version bump |
+
 ### Verification
 
-- **Byte-equal**: 10/10 MD5 match `cd73f4e` baseline on 5-case sample (NE / FS_static / FS_movement / DT_static / DT_movement).
+- **Byte-equal**: 10/10 MD5 match `cd73f4e` baseline on 5-case sample (NE / FS_static / FS_movement / DT_static / DT_movement) after the full 13-commit cleanup phase.
 - **Sanity tests**: 25/25 pass (`test_p52_regime.py` 18 + `test_aec_reset.py` 7).
-- **AEC3 alignment audit**: 22/22 should-be-ON flags shipped. 6 NOT shipped, each with documented reason (`use_aec3_zero_filter_on_epc` destructive on cohort tail; `use_aec3_poor_coarse_rescue_copy` 12-case Pareto FAIL; `use_aec3_erle_reverb_quality` requires FullBandErleEstimator port; etc.).
-- **800-case AECMOS**: pending (after user approval).
+- **800-case AECMOS** (preset `BALANCED`, fl=832, `--cng`, 4 workers; raw data in `results/v3_21_6_1_release/scores.json`):
+
+  | Bucket | n | echo (↑) | deg (↑) |
+  |---|---:|---:|---:|
+  | FS_static | 169 | 3.917 | 4.999 |
+  | FS_movement | 131 | 3.814 | 4.999 |
+  | DT_static | 186 | 4.543 | 1.916 |
+  | DT_movement | 114 | 4.437 | 1.942 |
+  | NE | 200 | 4.998 | 3.750 |
+
+  vs v3.21.0 baseline (architecture doc reference, `3aadd2d`): FS echo +0.19 / DT echo +0.27 / DT deg −0.46 / NE deg −0.30. Pareto trade — stronger echo cancellation, weaker preservation. Per `feedback_aecmos_pareto_comparison.md`: deg-only comparison invalid; matched-magnitude or full-Pareto evaluation required before any reference comparison. Internal listen-test verification pending.
+
+### Branch / remote operations
+
+- `cleanup/v3_21_6_release` work branch deleted locally after merge into target.
+- `debug/v3_21_6_nores_artifact` renamed → `v3_21_release` (force-pushed to origin, old remote ref deleted).
+- `feature/v3_23` deleted locally (v3.23 cycle closed, no production output).
+- Remote `refs/heads` final state: `main` (unchanged), `v3.16` (legacy), `v3_21_release` (HEAD = `14b3327`).
 
 ---
 
