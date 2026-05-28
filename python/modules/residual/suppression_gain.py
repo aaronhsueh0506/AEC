@@ -330,6 +330,9 @@ class _DominantNearendDetector:
         self._trigger_counter = 0
         self._hold_counter = 0
         self._nearend_state = False
+        # Per-frame diagnostic snapshot — populated in update(); read by
+        # tracer to attribute DNE blind-spots. No audio path effect.
+        self._last_update_snap: dict = {}
 
     def set_config(self, cfg: DominantNearendConfig) -> None:
         self._cfg = cfg
@@ -375,11 +378,10 @@ class _DominantNearendDetector:
         # Block 1 — Trigger (AEC3 cc:51-64). Multiplicative form, no `+1.0`
         # division floor. initial_state gates the trigger inline, NOT via
         # early-return (hold counter must still decrement below).
-        trigger_active = (
-            (not initial_state or c.use_during_initial_phase)
-            and echo_sum < c.enr_threshold * ne_sum
-            and ne_sum > c.snr_threshold * noise_sum
-        )
+        trigger_initial_gate = (not initial_state or c.use_during_initial_phase)
+        trigger_enr_pass = echo_sum < c.enr_threshold * ne_sum
+        trigger_snr_pass = ne_sum > c.snr_threshold * noise_sum
+        trigger_active = trigger_initial_gate and trigger_enr_pass and trigger_snr_pass
         if trigger_active:
             self._trigger_counter += 1
             if self._trigger_counter >= c.trigger_threshold:
@@ -390,13 +392,38 @@ class _DominantNearendDetector:
 
         # Block 2 — Early exit at strong echo (AEC3 cc:67-70). Both clauses
         # required; prior Python version omitted the noise-floor clause.
-        if (echo_sum > c.enr_exit_threshold * ne_sum
-                and echo_sum > c.snr_threshold * noise_sum):
+        early_exit = (echo_sum > c.enr_exit_threshold * ne_sum
+                      and echo_sum > c.snr_threshold * noise_sum)
+        if early_exit:
             self._hold_counter = 0
 
         # Block 3 — Unconditional hold decrement + state (AEC3 cc:72-74).
         self._hold_counter = max(0, self._hold_counter - 1)
         self._nearend_state = self._hold_counter > 0
+
+        # Diagnostic snapshot (no audio effect). Ratios use +1.0 floor on
+        # denominator for stable logging even when ne_sum/noise_sum=0; the
+        # actual trigger uses raw multiplicative form (no floor).
+        self._last_update_snap = {
+            "ne_sum_lf": ne_sum,
+            "echo_sum_lf": echo_sum,
+            "noise_sum_lf": noise_sum,
+            "enr": echo_sum / (ne_sum + 1.0),
+            "snr": ne_sum / (noise_sum + 1.0),
+            "enr_threshold": float(c.enr_threshold),
+            "enr_exit_threshold": float(c.enr_exit_threshold),
+            "snr_threshold": float(c.snr_threshold),
+            "trigger_enr_pass": bool(trigger_enr_pass),
+            "trigger_snr_pass": bool(trigger_snr_pass),
+            "trigger_initial_gate": bool(trigger_initial_gate),
+            "trigger_active": bool(trigger_active),
+            "trigger_counter": int(self._trigger_counter),
+            "early_exit_fired": bool(early_exit),
+            "hold_counter": int(self._hold_counter),
+            "hold_duration_hops": int(self._hold_duration_hops),
+            "nearend_state": bool(self._nearend_state),
+            "initial_state": bool(initial_state),
+        }
 
 
 # -------------------------------------------------------- top-level class

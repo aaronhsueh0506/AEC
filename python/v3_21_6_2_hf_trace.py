@@ -76,6 +76,13 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
     # limiting_gain / pass-through). They are the smoking gun for HF
     # painted-black root cause.
     sg_snap = getattr(sg, "_last_lower_band_snap", {}) or {} if sg is not None else {}
+    # DNE detector internals — attribute frames where DNE didn't fire even
+    # though mic was loud (e.g. 6.5-7.0 window with HF=0.01 + DNE=0%).
+    dne_snap = {}
+    if sg is not None:
+        dne = getattr(sg, "_dominant_nearend", None)
+        if dne is not None:
+            dne_snap = getattr(dne, "_last_update_snap", {}) or {}
 
     # Pull ResidualEchoEstimator's direct vs reverb R² split. Tells us
     # whether RES inflation comes from the direct path (S²/ERLE) or the
@@ -158,6 +165,25 @@ def _snapshot(aec: AEC, n_bins: int, sr: int) -> dict:
         "reverb_tail_max": tail_max,
         "r2_path_linear": 1.0 if r2_path == "linear" else 0.0,
         "r2_path_nonlinear": 1.0 if r2_path == "nonlinear" else 0.0,
+        # DNE detector internals (LF-only [bin 1, 2 kHz)). All numeric
+        # so they aggregate cleanly across windows. -1.0 sentinels when
+        # detector absent (shouldn't happen in production paths).
+        "dne_enr": float(dne_snap.get("enr", -1.0)),
+        "dne_snr": float(dne_snap.get("snr", -1.0)),
+        "dne_enr_threshold": float(dne_snap.get("enr_threshold", -1.0)),
+        "dne_enr_exit_threshold": float(dne_snap.get("enr_exit_threshold", -1.0)),
+        "dne_snr_threshold": float(dne_snap.get("snr_threshold", -1.0)),
+        "dne_ne_sum_lf": float(dne_snap.get("ne_sum_lf", 0.0)),
+        "dne_echo_sum_lf": float(dne_snap.get("echo_sum_lf", 0.0)),
+        "dne_noise_sum_lf": float(dne_snap.get("noise_sum_lf", 0.0)),
+        "dne_trigger_enr_pass": 1.0 if dne_snap.get("trigger_enr_pass") else 0.0,
+        "dne_trigger_snr_pass": 1.0 if dne_snap.get("trigger_snr_pass") else 0.0,
+        "dne_trigger_active": 1.0 if dne_snap.get("trigger_active") else 0.0,
+        "dne_early_exit_fired": 1.0 if dne_snap.get("early_exit_fired") else 0.0,
+        "dne_trigger_counter": float(dne_snap.get("trigger_counter", 0)),
+        "dne_hold_counter": float(dne_snap.get("hold_counter", 0)),
+        "dne_hold_duration_hops": float(dne_snap.get("hold_duration_hops", 0)),
+        "dne_initial_state": 1.0 if dne_snap.get("initial_state") else 0.0,
     })
     return snap
 
@@ -444,11 +470,76 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
         print(f"    reverb tail_max         : mean={cols['reverb_tail_max'][symptom_mask].mean():.3e}")
         print(f"    R² path: linear={cols['r2_path_linear'][symptom_mask].mean() * 100:5.1f}%  "
               f"nonlinear={cols['r2_path_nonlinear'][symptom_mask].mean() * 100:5.1f}%")
+        # --- DNE detector attribution (LF-only metric, drives gain policy globally) ---
+        # Why didn't DNE fire? Each clause must pass (multiplicative form):
+        #   trigger_active = initial_gate AND (echo_sum < enr_thr * ne_sum)
+        #                                  AND (ne_sum > snr_thr * noise_sum)
+        # ENR/SNR ratios reported with +1.0 floor for stable logging.
+        print(f"  DNE detector attribution at symptom (LF-only [bin 1, 2 kHz)):")
+        print(f"    ENR ratio (echo/ne+1)  : "
+              f"mean={cols['dne_enr'][symptom_mask].mean():.3f}  "
+              f"median={np.median(cols['dne_enr'][symptom_mask]):.3f}  "
+              f"thr={cols['dne_enr_threshold'][symptom_mask].mean():.3f}  "
+              f"← trigger needs ENR < thr")
+        print(f"    SNR ratio (ne/noise+1) : "
+              f"mean={cols['dne_snr'][symptom_mask].mean():.3f}  "
+              f"median={np.median(cols['dne_snr'][symptom_mask]):.3f}  "
+              f"thr={cols['dne_snr_threshold'][symptom_mask].mean():.3f}  "
+              f"← trigger needs SNR > thr")
+        print(f"    trigger_enr_pass       : "
+              f"{cols['dne_trigger_enr_pass'][symptom_mask].mean() * 100:5.1f}%")
+        print(f"    trigger_snr_pass       : "
+              f"{cols['dne_trigger_snr_pass'][symptom_mask].mean() * 100:5.1f}%")
+        print(f"    trigger_active (both)  : "
+              f"{cols['dne_trigger_active'][symptom_mask].mean() * 100:5.1f}%  "
+              f"← if 0, neither raw clause ever passed")
+        print(f"    early_exit_fired       : "
+              f"{cols['dne_early_exit_fired'][symptom_mask].mean() * 100:5.1f}%  "
+              f"← if high, strong echo killed hold counter")
+        print(f"    hold_counter mean/max  : "
+              f"mean={cols['dne_hold_counter'][symptom_mask].mean():.1f}  "
+              f"max={cols['dne_hold_counter'][symptom_mask].max():.0f}  "
+              f"(hold_duration_hops={cols['dne_hold_duration_hops'][symptom_mask].max():.0f})")
+        print(f"    initial_state          : "
+              f"{cols['dne_initial_state'][symptom_mask].mean() * 100:5.1f}%  "
+              f"← if high, trigger may be gated off")
+        # Per-frame LF sums (raw inputs) — for sanity-checking units
+        ne_sum = cols['dne_ne_sum_lf'][symptom_mask]
+        echo_sum = cols['dne_echo_sum_lf'][symptom_mask]
+        noise_sum = cols['dne_noise_sum_lf'][symptom_mask]
+        print(f"    LF sums (ne / echo / noise): "
+              f"ne_mean={ne_sum.mean():.3e}  echo_mean={echo_sum.mean():.3e}  "
+              f"noise_mean={noise_sum.mean():.3e}")
+        # SUBSET: NE-active loud-mic AND DNE didn't fire — the actual blind spot
+        # (e.g. 6.5-7.0 window where mic loud but DNE=0% so SG full-suppress)
+        dne_off_mask = symptom_mask & (~cols['dominant_nearend'].astype(bool))
+        n_blind = int(dne_off_mask.sum())
+        if n_blind > 0:
+            print(f"  DNE BLIND-SPOT subset (symptom AND DNE=False): "
+                  f"{n_blind} hops ({n_blind / max(1, n_hops) * 100:.1f}% of file)")
+            print(f"    ENR ratio              : "
+                  f"mean={cols['dne_enr'][dne_off_mask].mean():.3f}  "
+                  f"median={np.median(cols['dne_enr'][dne_off_mask]):.3f}")
+            print(f"    SNR ratio              : "
+                  f"mean={cols['dne_snr'][dne_off_mask].mean():.3f}  "
+                  f"median={np.median(cols['dne_snr'][dne_off_mask]):.3f}")
+            print(f"    trigger_enr_pass       : "
+                  f"{cols['dne_trigger_enr_pass'][dne_off_mask].mean() * 100:5.1f}%  "
+                  f"← if low, ENR clause blocks")
+            print(f"    trigger_snr_pass       : "
+                  f"{cols['dne_trigger_snr_pass'][dne_off_mask].mean() * 100:5.1f}%  "
+                  f"← if low, SNR (mic vs CNG) clause blocks")
+            print(f"    early_exit_fired       : "
+                  f"{cols['dne_early_exit_fired'][dne_off_mask].mean() * 100:5.1f}%")
+            print(f"    gain_hf_med at blind   : "
+                  f"mean={cols['gain_hf_med'][dne_off_mask].mean():.3f}  "
+                  f"median={np.median(cols['gain_hf_med'][dne_off_mask]):.3f}")
     print()
 
     # ---------- Time-binned timeline (0.5-second windows) ----------
-    print("--- 0.5-second windows (gain medians + flag fractions) ---")
-    print("    t(s)   |  LF /  MF /  HF  | DNE   UL    CONV | poor_cnt  hov")
+    print("--- 0.5-second windows (gain medians + flag fractions + DNE inputs) ---")
+    print("    t(s)   |  LF /  MF /  HF  | DNE  UL  CONV | "
+          "ENR%/SNR% hold | poor_cnt hov")
     win_sec = 0.5
     win_hops = int(win_sec * sr / hop)
     for w_start in range(0, n_hops, win_hops):
@@ -465,10 +556,17 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
         cv = cols["filter_converged"][sl].mean() * 100
         pc_max = int(cols["poor_coarse_counter"][sl].max())
         hov = (cols["coarse_reset_hangover"][sl] > 0).mean() * 100
+        # DNE-clause pass rates per window: ENRpass = (echo < enr_thr * ne)
+        # frames %, SNRpass = (ne > snr_thr * noise) frames %. Together
+        # they say which clause blocked DNE in the window where DNE=0%.
+        enr_pass = cols["dne_trigger_enr_pass"][sl].mean() * 100
+        snr_pass = cols["dne_trigger_snr_pass"][sl].mean() * 100
+        hold_med = float(np.median(cols["dne_hold_counter"][sl]))
         print(f"  {t:5.1f}-{t + win_sec:5.1f}  "
               f"| {gl:.2f} / {gm:.2f} / {gh:.2f}  "
-              f"| {d:4.0f}%  {u:4.0f}%  {cv:4.0f}%  "
-              f"| {pc_max:3d}        {hov:3.0f}%")
+              f"| {d:3.0f}% {u:3.0f}% {cv:3.0f}% "
+              f"| {enr_pass:3.0f}%/{snr_pass:3.0f}% h={hold_med:3.0f} "
+              f"| {pc_max:3d}     {hov:3.0f}%")
     print()
 
     # ---------- Narrative ----------
