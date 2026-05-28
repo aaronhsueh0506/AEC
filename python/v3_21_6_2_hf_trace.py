@@ -446,10 +446,10 @@ def _print_console_report(cols: dict, mic: np.ndarray, out: np.ndarray,
               f"nonlinear={cols['r2_path_nonlinear'][symptom_mask].mean() * 100:5.1f}%")
     print()
 
-    # ---------- Time-binned timeline (1-second windows) ----------
-    print("--- 1-second windows (gain medians + flag fractions) ---")
+    # ---------- Time-binned timeline (0.5-second windows) ----------
+    print("--- 0.5-second windows (gain medians + flag fractions) ---")
     print("    t(s)   |  LF /  MF /  HF  | DNE   UL    CONV | poor_cnt  hov")
-    win_sec = 1.0
+    win_sec = 0.5
     win_hops = int(win_sec * sr / hop)
     for w_start in range(0, n_hops, win_hops):
         w_end = min(n_hops, w_start + win_hops)
