@@ -79,8 +79,49 @@ production behaviour change — byte-equal preserved** (12-case `_ours` +
   literals (config-level cleanup complete; deeper leaf-branch removal is an
   optional follow-up).
 
+### Canonical 800-case scorecard (shipped version, this entry)
+
+Rendered via `eval_aec_challenge` (per-case `np.random.seed(0)`, ref pre-aligned
+by `estimate_delay`, max_delay 1024 ms) and scored with
+`model/Run_1663915512_Stage_0.onnx` (FastAECMOS). Cross-checked against the
+in-memory Tier-C `V0_prod` to within ±0.011 echo / ±0.002 deg (CNG-seed margin
+only — confirms the two render paths agree). Full per-bucket worst-20:
+`results/v3_21_close/result.md`.
+
+| Bucket | n | echo (↑) | deg (↑) |
+|---|---:|---:|---:|
+| FS_static | 169 | 3.491 | 4.999 |
+| FS_movement | 131 | 3.351 | 5.000 |
+| DT_static | 186 | 4.371 | 2.059 |
+| DT_movement | 114 | 4.247 | 2.159 |
+| NE | 200 | 4.998 | 3.941 |
+
+Collapsed across movement (FS/DT each = static + movement, case-weighted from
+the same `scores.json`):
+
+| Bucket | n | echo (↑) | deg (↑) |
+|---|--:|--:|--:|
+| FS | 300 | 3.429 | 4.999 |
+| DT | 300 | 4.324 | 2.097 |
+| NE | 200 | 4.998 | 3.941 |
+
+### Repo housekeeping (this entry)
+
+Removed closed-arc cruft: `docs/v3_21_6_2_trace.md` (superseded 3-case trace),
+`docs/v3_21_close_handoff.md` (AI-continuity, folded into project memory + this
+entry), `python/v3_21_tierc_validation_bench.py` (its V1–V5 variants toggle
+now-inlined flags → no longer runnable; verdict captured in the validation
+report). Also pruned ~1.2 GB of stale render output (`out_python/`,
+`out_v3_21_800case/`, stale `results/` subdirs, `listen_ab/`). Kept
+`python/v3_21_6_2_hf_trace.py` as the painted-black HF reference tracer for v3.22
+Arc 2 (per the new diagnostics-discipline directive in `docs/v3_22_plan.md`:
+future diagnostics fold into modules as flag-gated instrumentation, not
+standalone trace scripts). `run_one_case.py` re-verified on current code
+(deterministic; differs from the 800-bench only by the bench's ref pre-align).
+
 Evidence: `docs/v3_21_tierc_validation_report.md`,
-`docs/v3_21_close_handoff.md`. v3.22 roadmap: `docs/v3_22_plan.md`.
+`docs/v3_21_800case_bench_report.md`, `docs/v3_21_alignment_roadmap.md`.
+v3.22 roadmap: `docs/v3_22_plan.md`.
 
 ---
 

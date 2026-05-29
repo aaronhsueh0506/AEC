@@ -18,6 +18,14 @@
   Reference points are **absolute: beat AEC2 + beat AEC3 deg** — not yesterday's baseline.
 - **Dev discipline**: every candidate behind a default-OFF flag (byte-equal preserved)
   until an isolated 800-case A/B passes; never batch.
+- **Diagnostics discipline (user directive 2026-05-29)**: do NOT spawn new standalone
+  trace scripts (the `v3_21_*_trace.py` pattern). Fold diagnostics directly into the
+  modules as **flag-gated, observer-pattern instrumentation** (a debug/trace flag on the
+  relevant config or module, populating `_last_*` snapshot attrs read on demand) so the
+  diag lives next to the code it measures and stays in sync as the code evolves.
+  `python/v3_21_6_2_hf_trace.py` is kept as the painted-black HF reference tracer; when
+  Arc 2 starts, migrate its useful probes into in-code flags rather than extending the
+  script (it still references 6 now-inlined v3.21 flags as no-ops).
 
 ---
 
