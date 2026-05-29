@@ -52,7 +52,14 @@ class FastAECMOS:
         self.hop_fraction = 0.5
         self.hidden_size = (4, 1, 64)
         self.max_len = 20
-        self.session = ort.InferenceSession(model_path)
+        # Cap ONNX to 1 thread/instance so N bench workers map 1:1 onto cores
+        # (uncapped, each session spawns ~ncores intra-op threads → heavy
+        # oversubscription — the reason plain --workers 9 doesn't speed up).
+        # Thread count does NOT affect deterministic inference output.
+        _so = ort.SessionOptions()
+        _so.intra_op_num_threads = 1
+        _so.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(model_path, sess_options=_so)
         self.input_name = self.session.get_inputs()[0].name
 
     def _mel(self, x):

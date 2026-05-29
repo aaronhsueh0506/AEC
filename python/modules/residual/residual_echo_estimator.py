@@ -232,9 +232,17 @@ class ResidualEchoEstimator:
             )
 
     def attach_reverb_decay_estimator(self, n_partitions: int,
-                                      hop_size: int) -> None:
+                                      hop_size: int,
+                                      use_aec3_block_energy: bool = False) -> None:
         """One-time bind of the adaptive decay estimator. No-op if
-        ``use_adaptive_decay`` is False or estimator already bound."""
+        ``use_adaptive_decay`` is False or estimator already bound.
+
+        ``use_aec3_block_energy``: when True, the estimator runs the full
+        AEC3-strict `reverb_decay_estimator.cc` algorithm on the
+        time-domain impulse response (BlockEnergyAverage / Peak +
+        EarlyReverbLengthEstimator + LateReverbLinearRegressor). When
+        False, the legacy partition-energy linear regression path is used.
+        """
         if not self._reverb_cfg.use_adaptive_decay:
             return
         if self._reverb_decay_est is not None:
@@ -246,6 +254,7 @@ class ResidualEchoEstimator:
             mild_decay=(float(self._reverb_cfg.decay)
                         * float(self._reverb_cfg.mild_decay_scale)),
             use_adaptive=True,
+            use_aec3_block_energy=bool(use_aec3_block_energy),
         )
 
     def update_reverb_models(self,
@@ -254,17 +263,23 @@ class ResidualEchoEstimator:
                              filter_delay_blocks: int,
                              filter_quality: Optional[float],
                              usable_linear_filter: bool,
-                             stationary_block: bool) -> None:
+                             stationary_block: bool,
+                             time_domain_filter: Optional[np.ndarray] = None) -> None:
         """Per-hop refresh of adaptive decay + tail-freq response.
 
         ``frequency_response`` shape ``(n_partitions, n_freqs)`` float32 with
         per-partition |W|² entries. The orchestrator computes this once and
         feeds it to both sub-estimators (avoids a duplicate FFT walk).
+
+        ``time_domain_filter``: concatenated TD impulse response. Required
+        when the decay estimator was constructed with
+        ``use_aec3_block_energy=True``; ignored otherwise.
         """
         if self._reverb_decay_est is not None:
             partition_energies = frequency_response.sum(axis=1).astype(np.float32)
             self._reverb_decay_est.update(
                 partition_energies=partition_energies,
+                time_domain_filter=time_domain_filter,
                 filter_quality=filter_quality,
                 filter_delay_blocks=int(filter_delay_blocks),
                 usable_linear_filter=bool(usable_linear_filter),

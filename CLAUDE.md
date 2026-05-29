@@ -60,14 +60,18 @@ aren't comparable to prior verdicts.
 ### Byte-equal regression harness (post-cleanup gate)
 
 ```bash
-# Sample 25 cases (5 per bucket at echo percentiles 0/25/50/75/100), render,
-# md5 _ours.wav and _ours_nores.wav, compare to v3.21 anchor.
-python3 python/check_byte_equal.py
-# Must report `=== 25/25 PASS, 0 FAIL ===` before any commit that touches
+# Snapshot a representative case set (DT/FS/NE + movement), render, md5
+# _ours.wav + _ours_nores.wav. Capture a baseline BEFORE editing, then
+# --check AFTER; a behaviour-neutral cleanup must report N/N PASS.
+python3 python/v3_21_byte_equal_check.py --save /tmp/be_baseline.json
+# ... make edits ...
+python3 python/v3_21_byte_equal_check.py --check /tmp/be_baseline.json
+# Must report `=== N/N PASS, 0 FAIL ===` before any commit that touches
 # code outside docs.
 ```
 
-Reference at [docs/bench/v3_21_3aadd2d_baseline/](docs/bench/v3_21_3aadd2d_baseline/).
+The baseline is captured on demand (no committed anchor dir); the gate
+proves a cleanup did not change the output bytes.
 
 ### C build & run
 
@@ -97,7 +101,7 @@ There is no project-wide pytest collection.
 mic ─► HPF ──────────────────────────────────────────────────────────►
 ref ─────► Saturation ─► DelayEst+RingBuf ─► PBFDKF ─► error ─► AEC3 post ─► out
                                                │                       │
-                                       Shadow filter (Q×3.5)   AecState + ResidualEchoEstimator
+                                       Shadow filter (PBFDAF/NLMS) AecState + ResidualEchoEstimator
                                        + PathChangeRegimeHandler + SuppressionGain + CNG (OLA)
 ```
 
@@ -141,8 +145,8 @@ bypass it.
 
 Single production preset: `BALANCED`. Defined in
 [python/modules/config.py](python/modules/config.py) (`from_preset`).
-The five 800-case AECMOS-tuned overrides are `enable_cng`,
-`shadow_q_ratio`, `shadow_mu_min`, `warmup_frames`, `kalman_q_high`;
+The four 800-case AECMOS-tuned overrides are `enable_cng`,
+`shadow_mu_min`, `warmup_frames`, `kalman_q_high`;
 everything else uses dataclass defaults. **Knobs are co-tuned** — don't
 tweak a single field without a full 800-case re-bench.
 
@@ -167,10 +171,25 @@ tweak a single field without a full 800-case re-bench.
 
 `main` carries the production-graded code. Current `__version__` is
 **3.21.6.4** — adds the AEC3 alignment completion (10 strict-port fixes
-for the nores LF artifact + painted-black HF bugs) on top of v3.21.6,
-followed by a full release cleanup (config 1547→160 lines, orchestrator
-5487→3632, removed all dev-time substrate flags and trace dicts).
-Byte-equal vs the alignment-complete intermediate (`cd73f4e`) verified
-across the cleanup arc. See [CHANGELOG.md](CHANGELOG.md) for per-version
-detail and [docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html)
+for the nores LF artifact + painted-black HF bugs) on top of v3.21.6.
+
+The **v3.21 CLOSE** (branch `v3_21_release`, byte-equal, no algorithm
+change — see CHANGELOG `[Unreleased]`) finalised the arc: a hop/fft
+conversion audit + 800-case Tier-C validation adjudicated every
+"physical-meaning conversion" flag (matched-magnitude AECMOS Pareto),
+then hard-coded the surviving default-True alignment flags into their
+call sites and deleted all NOSHIP / temp substrate. Net effect on the
+two large files: **config 412→230, filters 1057→863** (legacy
+P-denominator Kalman body removed; 10 always-True refined/shadow
+AEC3-parity flags inlined), orchestrator construction/`_aec3_post`
+branches collapsed. Also removed the unused alternate filter line
+(`NlmsFilter` + `AecMode.LMS`/`NLMS`) and the dead `erle.py`
+back-compat re-export. `active_render` 5.96e-4 is now documented as an
+empirically-tuned threshold (the strict-AEC3 9.31e-6 validated as a
+regression) — the only flag whose "alignment" label changed.
+
+Byte-equal verified across the cleanup arc (`_ours` + `_ours_nores`
+md5, all buckets incl. movement). See [CHANGELOG.md](CHANGELOG.md) for
+per-version detail and
+[docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html)
 for the architectural before/after.

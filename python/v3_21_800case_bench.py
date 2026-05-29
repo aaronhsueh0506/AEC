@@ -80,39 +80,23 @@ V3_21_6_SCORES = {
     '014AzuqPZku2004NbTTmcA_nearend_singletalk':              ('deg', 4.355),
 }
 
-# 13-flag composition manifest — explicit, no default drift
+# C1/C3/C4/C6 wall-clock-alignment A/B manifest (2026-05-29).
+# NOTE: label 'M_full_delay' is kept for _case_task/report compatibility but
+# here means "C1-C6 wall-clock candidate" (NOT the old composition ladder).
+#   M0           = all four flags OFF == plain BALANCED (byte-equal anchor)
+#   M_full_delay = all four flags ON  (the candidate)
 CONFIG_MANIFEST = {
     'M0': {
-        'use_partition_summed_x2_for_h_error_gain':         False,  # Bundle A
-        'use_current_e2_refined_in_h_error_denominator':    False,  # Bundle A
-        'use_per_bin_h_error_refresh':                      False,  # Bundle A
-        'use_aec3_h_error_ceil':                            False,  # Bundle A
-        'use_aec3_filter_noise_gate_power':                 False,  # Bundle A / R0.1
-        'use_partition_summed_x2_for_shadow_mu':            False,  # Bundle B
-        'use_aec3_noise_gate_for_shadow':                   False,  # Bundle B (T1.2 constant)
-        'use_poor_excitation_gate_for_shadow':              False,  # Bundle B
-        'use_narrowband_mask_for_shadow':                   False,  # Bundle B
-        'use_saturation_gate_for_shadow':                   False,  # Bundle B
-        'use_refined_output_selection_for_linear_path':     False,  # Bundle C (URO)
-        'form_linear_filter_crossfade_enabled':             False,  # Bundle C
-        'use_full_delay_change_chain':                      False,  # Bundle D
-        'transparent_mode_enabled':                         False,  # explicitly OFF
+        'use_aec3_wallclock_subband_erle_smoothing':       False,  # C1
+        'use_aec3_wallclock_fullband_erle_smoothing':      False,  # C3
+        'use_aec3_wallclock_low_noise_render_iir':         False,  # C4
+        'use_aec3_active_render_threshold_shadow_epc':     False,  # C6
     },
     'M_full_delay': {
-        'use_partition_summed_x2_for_h_error_gain':         True,
-        'use_current_e2_refined_in_h_error_denominator':    True,
-        'use_per_bin_h_error_refresh':                      True,
-        'use_aec3_h_error_ceil':                            True,
-        'use_aec3_filter_noise_gate_power':                 True,
-        'use_partition_summed_x2_for_shadow_mu':            True,
-        'use_aec3_noise_gate_for_shadow':                   True,
-        'use_poor_excitation_gate_for_shadow':              True,
-        'use_narrowband_mask_for_shadow':                   True,
-        'use_saturation_gate_for_shadow':                   True,
-        'use_refined_output_selection_for_linear_path':     True,
-        'form_linear_filter_crossfade_enabled':             True,
-        'use_full_delay_change_chain':                      True,
-        'transparent_mode_enabled':                         False,
+        'use_aec3_wallclock_subband_erle_smoothing':       True,   # C1
+        'use_aec3_wallclock_fullband_erle_smoothing':      True,   # C3
+        'use_aec3_wallclock_low_noise_render_iir':         True,   # C4
+        'use_aec3_active_render_threshold_shadow_epc':     True,   # C6
     },
 }
 
@@ -240,8 +224,14 @@ def _case_task(args: tuple) -> dict:
 
     for label in ('M0', 'M_full_delay'):
         out = _render(mic, ref_a, label, is_movement=is_mvmt, enable_res=True)
-        # Score: lpb=ref (original), mic=mic, enh=out
-        echo, deg = scorer.score(wavtype, ref, mic, out)
+        # Score: lpb=ref (original), mic=mic, enh=out.  Equalize lengths first:
+        # _render truncates `out` to a hop multiple, so it is a few samples
+        # shorter than ref/mic.  For clips < 20s (which skip the seg truncation
+        # inside score()), that residual mismatch breaks np.stack in the mel
+        # path — the cause of the 105 NE-bucket "all input arrays must have the
+        # same shape" failures on the 2026-05-29 run.
+        m = min(len(ref), len(mic), len(out))
+        echo, deg = scorer.score(wavtype, ref[:m], mic[:m], out[:m])
         result[f'{label}_echo'] = float(echo)
         result[f'{label}_deg']  = float(deg)
 
@@ -397,34 +387,25 @@ def _write_report(results: List[dict], be_ok: bool) -> None:
 
     # --- Build report text ---
     lines = []
-    lines.append('# v3.21 800-case Benchmark Report — M_full_delay vs M0\n')
-    lines.append(f'**Date**: 2026-05-27  ')
+    lines.append('# v3.21 800-case Benchmark Report — C1-C6 wall-clock alignment '
+                 '(M_full_delay = all-ON) vs M0 (all-OFF == plain BALANCED)\n')
+    lines.append(f'**Date**: 2026-05-29  ')
     lines.append(f'**Cases**: {len(results)}/800  ')
-    lines.append(f'**Config**: preset=balanced / filter=832 / cng / workers=4\n')
+    lines.append(f'**Config**: preset=balanced / filter=832 (52ms) / cng / hop=160 '
+                 f'(workers-count does not affect scores)\n')
     lines.append(f'**Byte-equal precheck** (M0 vs plain BALANCED): '
                  f'{"PASS ✓" if be_ok else "**FAIL**"}\n')
 
-    # Flag manifest
+    # Flag manifest — C1/C3/C4/C6 wall-clock EMA/IIR alignment.
+    # Iterate the actual manifest keys so this can never desync from CONFIG_MANIFEST.
     lines.append('## Flag Composition\n')
+    lines.append('> C1/C3/C4/C6 wall-clock EMA/IIR alignment flags '
+                 '(per-4ms-block AEC3 constants → per-10ms-hop).\n')
     lines.append('| Flag | M0 | M_full_delay |')
     lines.append('|------|-----|--------------|')
-    for flag in [
-        'use_partition_summed_x2_for_h_error_gain',
-        'use_current_e2_refined_in_h_error_denominator',
-        'use_per_bin_h_error_refresh',
-        'use_aec3_h_error_ceil',
-        'use_aec3_filter_noise_gate_power',
-        'use_partition_summed_x2_for_shadow_mu',
-        'use_aec3_noise_gate_for_shadow',
-        'use_poor_excitation_gate_for_shadow',
-        'use_narrowband_mask_for_shadow',
-        'use_saturation_gate_for_shadow',
-        'use_refined_output_selection_for_linear_path',
-        'form_linear_filter_crossfade_enabled',
-        'use_full_delay_change_chain',
-    ]:
-        m0v  = 'OFF' if not CONFIG_MANIFEST['M0'][flag] else 'ON'
-        mfv  = 'ON'  if CONFIG_MANIFEST['M_full_delay'][flag] else 'OFF'
+    for flag in CONFIG_MANIFEST['M0']:
+        m0v = 'ON' if CONFIG_MANIFEST['M0'][flag] else 'OFF'
+        mfv = 'ON' if CONFIG_MANIFEST['M_full_delay'][flag] else 'OFF'
         lines.append(f'| `{flag}` | {m0v} | {mfv} |')
     lines.append('')
 

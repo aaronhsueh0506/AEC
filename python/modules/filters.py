@@ -1,8 +1,7 @@
 """Adaptive filter primitives.
 
-Extracted from ``aec.py`` during refactor R.5. Three filter classes:
+Extracted from ``aec.py`` during refactor R.5. Two filter classes:
 
-* ``NlmsFilter`` — time-domain NLMS, sample-by-sample (legacy LMS line)
 * ``PBFDAF`` — Partitioned Block FDAF (NLMS adaptation in freq domain)
 * ``PBFDKF`` — Partitioned Block FDKF (Kalman extension of PBFDAF)
 
@@ -11,67 +10,6 @@ Self-contained: depends only on numpy + collections.deque + typing.
 from typing import Optional, Tuple
 
 import numpy as np
-
-
-class NlmsFilter:
-    """Time-domain NLMS Adaptive Filter"""
-
-    def __init__(self, filter_length: int, mu: float = 0.3,
-                 delta: float = 1e-8,
-                 normalize: bool = True):
-        self.filter_length = filter_length
-        self.mu = mu
-        self.delta = delta
-        self.normalize = normalize
-        self.weights = np.zeros(filter_length, dtype=np.float32)
-        self.ref_buffer = np.zeros(filter_length, dtype=np.float32)
-        self.power_sum = 0.0
-        self.clear_history = False
-        self.max_w_norm = 1.5  # Weight norm constraint (prevents explosion during double-talk)
-
-    def reset(self):
-        self.weights.fill(0)
-        self.ref_buffer.fill(0)
-        self.power_sum = 0.0
-
-    def process_sample(self, near_end: float, far_end: float,
-                       mu_scale: float = 1.0) -> Tuple[float, float]:
-        oldest = self.ref_buffer[-1]
-        self.power_sum = max(0, self.power_sum - oldest * oldest + far_end * far_end)
-        self.ref_buffer[1:] = self.ref_buffer[:-1]
-        self.ref_buffer[0] = far_end
-        echo_est = np.dot(self.weights, self.ref_buffer)
-        error = near_end - echo_est
-
-        if mu_scale > 0 and self.power_sum > self.delta * self.filter_length:
-            if self.normalize:
-                mu_eff = (self.mu * mu_scale) / (self.power_sum + self.delta)
-            else:
-                mu_eff = self.mu * mu_scale
-            self.weights += mu_eff * error * self.ref_buffer
-
-        return error, echo_est
-
-    def process_block(self, near_end: np.ndarray, far_end: np.ndarray,
-                      mu_scale: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
-        # Optionally clear history (no carry-over between blocks)
-        if self.clear_history:
-            self.ref_buffer.fill(0)
-            self.power_sum = 0.0
-
-        n = len(near_end)
-        output = np.zeros(n, dtype=np.float32)
-        echo_est = np.zeros(n, dtype=np.float32)
-        for i in range(n):
-            output[i], echo_est[i] = self.process_sample(
-                near_end[i], far_end[i], mu_scale)
-
-        # Weight norm constraint: prevent explosion during double-talk
-        w_norm = np.linalg.norm(self.weights)
-        if w_norm > self.max_w_norm:
-            self.weights *= self.max_w_norm / w_norm
-
-        return output, echo_est
 
 
 class PBFDAF:
@@ -131,19 +69,10 @@ class PBFDAF:
             np.hanning(self.block_size)).astype(np.float32)
         self.error_spec_windowed = np.zeros(self.n_freqs, dtype=np.complex64)
 
-        # AEC3 CoarseFilterUpdateGain protection flags (all shipped True).
-        # docs/aec3_extracts/src/aec3/coarse_filter_update_gain.cc:34-82.
-        # A.1: mu denom uses partition-summed X² = Σ_p |X_buf[p]|² (cc:64-72).
-        # A.2: noise_gate hard zero — mu=0 where X² < NOISE_GATE_POWER_FLOAT (cc:67-71).
-        # A.3: poor_excitation + startup gate — return when poor_excitation_counter
-        #      < n_partitions OR call_counter <= n_partitions (cc:51-61).
-        # A.4: narrowband mask — RenderSignalAnalyzer.mask_regions_around_narrow_bands (cc:75).
-        # A.5: saturation gate — early return when _saturated_capture (cc:56-57).
-        self._use_partition_summed_x2_for_shadow_mu: bool = True
-        self._use_aec3_noise_gate_for_shadow: bool = True
-        self._use_poor_excitation_gate_for_shadow: bool = True
-        self._use_narrowband_mask_for_shadow: bool = True
-        self._use_saturation_gate_for_shadow: bool = True
+        # AEC3 CoarseFilterUpdateGain protection (coarse_filter_update_gain.cc
+        # :34-82) is applied unconditionally in _update_weights: partition-summed
+        # X² mu denom + noise gate (cc:64-72), poor-excitation/startup gate
+        # (cc:51-61), narrowband mask (cc:75), saturation gate (cc:56-57).
         # Shared shadow-gate supporting state (orchestrator overrides on
         # shadow construction). Defined on PBFDAF so subclass PBFDKF
         # inherits the same state attributes; PBFDKF __init__ re-assigns
@@ -289,6 +218,14 @@ class PBFDAF:
         # Error (take valid region for output)
         output = self.near_buffer[-hop:] - echo_time[self.hop_size:self.block_size]
 
+        # AEC3 SubtractorOutput.s_*_max_abs (subtractor_output.cc).
+        # Time-domain peak of the echo-predictor output on the valid hop —
+        # consumed by SaturationDetector via AecState.update. Computed per
+        # hop regardless of flags; the cost is one np.max on hop_size floats.
+        self._last_s_max_abs: float = float(
+            np.max(np.abs(echo_time[self.hop_size:self.block_size]))
+        )
+
         # Error spectrum (zero-pad to fft_size, valid region at [hop, block_size))
         error_time = np.zeros(self.fft_size, dtype=np.float32)
         error_time[self.hop_size:self.block_size] = output
@@ -366,21 +303,19 @@ class PBFDAF:
             return
         # AEC3 coarse_filter_update_gain.cc:56-57 saturation gate.
         # `saturated_capture_signal → return`.
-        if (self._use_saturation_gate_for_shadow
-                and getattr(self, '_saturated_capture', False)):
+        if getattr(self, '_saturated_capture', False):
             self._c1c5_trace['A5_sat_skip'] = True
             return
         # AEC3 coarse_filter_update_gain.cc:51-61 call_counter +
         # poor_excitation startup gate. `if poor_signal_excitation_counter_ <
         # size_partitions OR call_counter_ <= size_partitions → return`.
-        if self._use_poor_excitation_gate_for_shadow:
-            self._call_counter += 1
-            if (self._call_counter <= self.n_partitions
-                    or self._poor_excitation_counter < self.n_partitions):
-                self._c1c5_trace['A3_poor_exc_skip'] = True
-                self._c1c5_trace['A3_call_ctr'] = self._call_counter
-                self._c1c5_trace['A3_exc_ctr'] = self._poor_excitation_counter
-                return
+        self._call_counter += 1
+        if (self._call_counter <= self.n_partitions
+                or self._poor_excitation_counter < self.n_partitions):
+            self._c1c5_trace['A3_poor_exc_skip'] = True
+            self._c1c5_trace['A3_call_ctr'] = self._call_counter
+            self._c1c5_trace['A3_exc_ctr'] = self._poor_excitation_counter
+            return
         # Stationary-far gate (see PBFDKF version for full rationale). Shadow
         # NLMS also skips W update when the StationarityEstimator flags the
         # block as stationary; spurious mic-as-echo coupling from broadband
@@ -391,25 +326,17 @@ class PBFDAF:
         # `render_signal_analyzer.MaskRegionsAroundNarrowBands(&mu)`. Apply
         # the narrowband mask as a pre-multiplier on mu_scale_arr so any
         # subsequent mu_eff = mu * mu_scale_arr inherits the mask.
-        if (self._use_narrowband_mask_for_shadow
-                and self._render_signal_analyzer is not None):
+        if self._render_signal_analyzer is not None:
             rsa_mask = np.ones(self.n_freqs, dtype=np.float32)
             self._render_signal_analyzer.mask_regions_around_narrow_bands(rsa_mask)
             mu_scale_arr = (mu_scale_arr * rsa_mask).astype(np.float32)
             self._c1c5_trace['A4_mask_frac'] = float(np.mean(rsa_mask < 0.5))
-        # Per-bin local floor: allows low-energy mid-freq bins higher effective mu
-        local_floor = self.power * 0.01 + self.delta        # per-bin 1% floor
-        global_floor = np.mean(self.power) * 0.001 + self.delta  # global extreme floor
-        power_floor = np.maximum(self.power, np.maximum(local_floor, global_floor))
         # AEC3 coarse_filter_update_gain.cc:64-72 mu denominator uses
         # partition-summed X² = Σ_p |X_buf[p]|² from the current frame
         # (no smoothing). Matches AEC3 SpectralSum source semantic.
-        if self._use_partition_summed_x2_for_shadow_mu:
-            x2_partition_sum = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
-            denom = x2_partition_sum + self.delta
-            self._c1c5_trace['A1_x2_active'] = True
-        else:
-            denom = power_floor * self.n_partitions + self.delta
+        x2_partition_sum = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
+        denom = x2_partition_sum + self.delta
+        self._c1c5_trace['A1_x2_active'] = True
         # AEC3 coarse_initial.rate = 0.95 vs coarse.rate = 0.7 — 35% faster
         # learning during the first 2.5 s of active render. Boost self.mu by
         # the same ratio while _initial_state_active is True so URO has a
@@ -426,17 +353,16 @@ class PBFDAF:
         # = 0.01870) — the AEC3 coarse filter gate constant from
         # echo_canceller3_config.cc:99 (the suppression-path
         # NOISE_GATE_POWER_FLOAT 27509562 = 0.02562 is a different constant).
-        if self._use_aec3_noise_gate_for_shadow:
-            from . import aec3_scale as _aec3_scale
-            x2_for_gate = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
-            _ng_thr = np.float32(_aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT)
-            mu_eff = np.where(
-                x2_for_gate >= _ng_thr,
-                mu_eff,
-                np.float32(0.0),
-            ).astype(np.float32)
-            self._c1c5_trace['A2_noise_gate_zero_frac'] = float(
-                np.mean(x2_for_gate < _ng_thr))
+        from . import aec3_scale as _aec3_scale
+        x2_for_gate = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
+        _ng_thr = np.float32(_aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT)
+        mu_eff = np.where(
+            x2_for_gate >= _ng_thr,
+            mu_eff,
+            np.float32(0.0),
+        ).astype(np.float32)
+        self._c1c5_trace['A2_noise_gate_zero_frac'] = float(
+            np.mean(x2_for_gate < _ng_thr))
         # Record effective mu distribution for sub-ladder attribution trace.
         self._c1c5_trace['mu_eff_mean'] = float(np.mean(mu_eff))
         self._c1c5_trace['mu_eff_max'] = float(np.max(mu_eff))
@@ -556,35 +482,14 @@ class PBFDKF(PBFDAF):
         # is the legacy sum kept for backwards-compat.
         self._e2_coarse_for_refresh = 0.0
         self._e2_coarse_per_bin: Optional[np.ndarray] = None
-        self._use_per_bin_h_error_refresh: bool = True
-        # AEC3 `RefinedFilterUpdateGain::Compute` partition-summed X² parity.
-        # ON: Σ_p |X_buf[p]|² (matches AEC3 render_buffer.SpectralSum) in
-        # denom / noise_gate / H_error decay. W update partition direction
-        # unchanged.
-        self._use_partition_summed_x2_for_h_error_gain: bool = True
-        # Startup hops before switching from single-partition to
-        # partition-sum X². 500 hops = 5 s @ hop=160/sr=16000. Orchestrator
-        # overrides from config field.
+        # Hybrid-startup threshold: hops before switching single-partition →
+        # partition-sum X² in _update_weights_aec3 (0 = partition-sum from the
+        # first active-update hop).
         self._partition_sum_x2_startup_hops: int = 0
-        # AEC3 `RefinedFilterUpdateGain::Compute`
-        # (refined_filter_update_gain.cc:103-107) uses current-block
-        # `E2_refined[k]` = `SubtractorOutput.E2_refined` = per-bin
-        # spectrum of THIS block's e_refined (instantaneous, no smoothing)
-        # in the `n_part × E²` term of the mu denominator. W update
-        # partition direction unchanged.
-        self._use_current_e2_refined_in_h_error_denominator: bool = True
         self._disallow_leakage_diverged = False
         # ERL per bin (lazy init to 0.1 = -10 dB nominal; orchestrator
         # overwrites once its ERL estimator has a real value).
         self._erl_per_bin = np.full(self.n_freqs, 0.1, dtype=np.float32)
-        # Master switch: use AEC3 H_error path (True, default) vs legacy
-        # P-based denominator (False, diagnostic only).
-        self._use_aec3_h_error = True
-        # Refined filter noise gate constant — uses AEC3
-        # FILTER_NOISE_GATE_POWER_FLOAT=0.01870
-        # (echo_canceller3_config.cc:99). The suppression-path
-        # NOISE_GATE_POWER_FLOAT=0.02562 is a different constant.
-        self._use_aec3_filter_noise_gate_power: bool = True
 
         # AEC3 refined_initial profile — first 2.5 s of active render uses
         # aggressive leakage (100×/10× steady) so the filter converges fast
@@ -602,17 +507,10 @@ class PBFDKF(PBFDAF):
         # Diag — last frame's initial_state_active value (for trace).
         self._last_initial_state_active: bool = True
 
-        # GPT Phase 1 debug trace (off by default, zero overhead).
-        # When enabled, accumulates per-frame stats to verify hypothesis:
-        # "DT 期間 mu_scale 壓低但 P 仍因 K_optimal 快下降 → DT 結束後 P 偏低 → recovery 慢"
-        self._enable_kx_trace = False
-        self._kx_trace = []  # list of dicts, one per call to _update_weights
-
-        # P53 Step 0 innovation-audit hook (default OFF, zero overhead).
-        # When enabled, _update_weights appends per-frame per-bin arrays
-        # capturing the Kalman innovation orthogonality components.
-        self._enable_p53_trace = False
-        self._p53_innovation_trace = []  # list of dicts of np.ndarray
+        # P53 innovation-audit buffer — read by the orchestrator P53 diag via
+        # getattr; its only populator was the retired legacy Kalman path, so it
+        # now stays empty (kept for the diag's getattr contract).
+        self._p53_innovation_trace = []
 
     def handle_echo_path_change(self, delay_change: bool = True,
                                  gain_change: bool = False,
@@ -687,8 +585,7 @@ class PBFDKF(PBFDAF):
         if (self._call_counter <= self.n_partitions
                 or self._poor_excitation_counter < self.n_partitions
                 or self._saturated_capture):
-            if self._use_aec3_h_error:
-                self._h_error_refresh()
+            self._h_error_refresh()
             return
 
         # Stationary-far gate. When the render-path StationarityEstimator
@@ -701,8 +598,7 @@ class PBFDKF(PBFDAF):
         # catches that gap. When set, the orchestrator pushes
         # `_block_stationary = True` before `_update_weights` runs.
         if getattr(self, '_block_stationary', False):
-            if self._use_aec3_h_error:
-                self._h_error_refresh()
+            self._h_error_refresh()
             return
 
         # RenderSignalAnalyzer narrow-band mask. Zeros mu for ±2 bins
@@ -721,143 +617,12 @@ class PBFDKF(PBFDAF):
         self._error_psd = self._alpha_r * self._error_psd + (1 - self._alpha_r) * error_psd
         self.R = np.maximum(self._error_psd, self.delta)
 
-        # AEC3 H_error path. Computes per-bin Kalman gain via H_error
-        # rather than the legacy partition-summed P denominator.
-        # Mirrors refined_filter_update_gain.cc:104-138.
-        if self._use_aec3_h_error:
-            self._update_weights_aec3(curr_p, mu_scale_arr, error_psd,
-                                      error_override=error_override)
-            return
-
-        # Adaptive R: scale by mu_scale to break R-deadlock
-        mu_mean = float(np.mean(mu_scale_arr))
-        R_scale = 0.1 + 0.9 * (1.0 - mu_mean)
-        self.R = self.R * R_scale
-
-        # Q modulation: reduce Q during DT (Kalman-specific, not in NLMS)
-        q_scale = 0.1 + 0.9 * mu_mean  # FS: 1.0, strong DT: 0.1
-        Q_modulated = self.Q * q_scale
-
-        # Per-bin far-end activity mask
-        far_power_smooth = self.power
-        far_activity_mask = far_power_smooth > (np.mean(far_power_smooth) * 0.01 + 1e-6)
-        Q_floor = Q_modulated * 0.05
-        Q_gated = np.where(far_activity_mask, Q_modulated, Q_floor)
-
-        # P_MAX: overridable during EPC for faster re-convergence
-        p_max = getattr(self, '_p_max_override', 0.5)
-        if hasattr(self, '_p_max_override_frames'):
-            self._p_max_override_frames -= 1
-            if self._p_max_override_frames <= 0:
-                self._p_max_override = 0.5
-                del self._p_max_override_frames
-
-        # P-floor: prevent P from collapsing to delta after long convergence
-        # (which kills Kalman gain on movement). EPC sets beta=1.0 transiently
-        # to force full re-tracking; steady state uses beta=0.1.
-        beta = getattr(self, '_p_floor_beta', 0.1)
-        if hasattr(self, '_p_floor_beta_frames'):
-            self._p_floor_beta_frames -= 1
-            if self._p_floor_beta_frames <= 0:
-                self._p_floor_beta = 0.1
-                del self._p_floor_beta_frames
-        P_floor = self.Q_high * beta
-
-        # Global denominator: sum over ALL partitions (correct Kalman theory)
-        # C-parity fix: cast delta to float32 to prevent denominator from
-        # promoting to float64, which cascades K_optimal to complex128 and
-        # causes divergence from C's float32-only arithmetic.
-        total_echo_var = np.zeros(self.n_freqs, dtype=np.float32)
-        for p in range(self.n_partitions):
-            p_idx = (curr_p - p) % self.n_partitions
-            X = self.X_buf[p_idx]
-            total_echo_var += self.P[p] * (np.abs(X) ** 2)
-        denominator = total_echo_var + self.R + np.float32(self.delta)
-
-        # P53 Step 0: per-frame innovation-audit capture (default OFF).
-        # Stores per-bin arrays needed to compute r = C_obs / C_exp offline.
-        if self._enable_p53_trace:
-            P_diag = np.zeros(self.n_freqs, dtype=np.float32)
-            far_psd_sum = np.zeros(self.n_freqs, dtype=np.float32)
-            for _p in range(self.n_partitions):
-                _pi = (curr_p - _p) % self.n_partitions
-                P_diag += self.P[_p]
-                far_psd_sum += np.abs(self.X_buf[_pi]) ** 2
-            self._p53_innovation_trace.append({
-                'innovation_power': error_psd.astype(np.float32).copy(),
-                'R': self.R.astype(np.float32).copy(),
-                'total_echo_var': total_echo_var.astype(np.float32).copy(),
-                'denominator': denominator.astype(np.float32).copy(),
-                'P_diag': P_diag,
-                'far_psd': far_psd_sum,
-            })
-
-        # GPT Phase 1 trace: per-partition KX_optimal vs KX_scaled accumulator.
-        if self._enable_kx_trace:
-            kx_opt_acc = []
-            kx_scaled_acc = []
-            p_before_acc = []
-            p_after_acc = []
-
-        # Gap C: error_override (when provided) substitutes for self.error_spec
-        # as the gradient source in the W += K_scaled * err line below.
-        _err_grad = (
-            error_override if error_override is not None else self.error_spec
-        )
-        for p in range(self.n_partitions):
-            p_idx = (curr_p - p) % self.n_partitions
-            X = self.X_buf[p_idx]
-
-            K_optimal = (self.P[p] * np.conj(X)) / denominator
-
-            # Bug 2 fix: separate K for weights (scaled) and P update (unscaled)
-            K_scaled = K_optimal * mu_scale_arr
-
-            self.W[p] += K_scaled * _err_grad
-
-            # Blended KX for P update. When mu_scale=0 (full DT freeze),
-            # W stays put but P drops ~72%/cycle via K_optimal, leaving P
-            # inconsistent with W and slowing post-DT recovery. Blend
-            # KX_optimal with KX_scaled by mu_mean: FS (mu=1) → 100% optimal,
-            # DT (mu=0) → 100% scaled, smooth transition between. Avoids
-            # both extremes' regression risk (full KX_optimal: P
-            # over-confident in DT; full KX_scaled: P over-cautious in
-            # steady state with weak far / per-bin gating).
-            KX_optimal = np.real(K_optimal * X).astype(np.float32)
-            KX_scaled = np.real(K_scaled * X).astype(np.float32)
-            mu_mean_f32 = np.float32(mu_mean)
-            KX = mu_mean_f32 * KX_optimal + (np.float32(1.0) - mu_mean_f32) * KX_scaled
-            if self._enable_kx_trace:
-                kx_opt_acc.append(float(np.mean(KX_optimal)))
-                kx_scaled_acc.append(float(np.mean(KX_scaled)))
-                p_before_acc.append(float(np.mean(self.P[p])))
-            self.P[p] = np.minimum(
-                np.maximum((np.float32(1.0) - KX) * self.P[p] + Q_gated, P_floor),
-                p_max
-            )
-            if self._enable_kx_trace:
-                p_after_acc.append(float(np.mean(self.P[p])))
-
-            # Time-domain constraint (raised cosine fade)
-            if self.enable_td_constraint:
-                w_time = np.fft.irfft(self.W[p], self.fft_size).astype(np.float32)
-                w_time *= self._td_window
-                self.W[p] = np.fft.rfft(w_time).astype(np.complex64)
-
-        if self._enable_kx_trace:
-            self._kx_trace.append({
-                'mu_mean': float(np.mean(mu_scale_arr)),
-                'kx_opt_mean': float(np.mean(kx_opt_acc)),
-                'kx_scaled_mean': float(np.mean(kx_scaled_acc)),
-                'p_before_mean': float(np.mean(p_before_acc)),
-                'p_after_mean': float(np.mean(p_after_acc)),
-                'p_p10': float(np.percentile([np.percentile(self.P[p], 10) for p in range(self.n_partitions)], 50)),
-                'p_p50': float(np.median([np.median(self.P[p]) for p in range(self.n_partitions)])),
-                'p_p90': float(np.percentile([np.percentile(self.P[p], 90) for p in range(self.n_partitions)], 50)),
-                'q_gated_mean': float(np.mean(Q_gated)),
-                'far_power_mean': float(np.mean(self.power)),
-                'error_power_mean': float(np.mean(self._error_psd)),
-            })
+        # AEC3 H_error path: per-bin Kalman gain via H_error (not the legacy
+        # partition-summed P denominator). Mirrors refined_filter_update_gain.cc
+        # :104-138. (The legacy P-denominator Kalman body it replaced was a
+        # default-OFF path — retired with the v3.21 close.)
+        self._update_weights_aec3(curr_p, mu_scale_arr, error_psd,
+                                  error_override=error_override)
 
     def _update_weights_aec3(self, curr_p: int, mu_scale_arr: np.ndarray,
                               error_psd: np.ndarray,
@@ -886,18 +651,12 @@ class PBFDKF(PBFDAF):
         # `X²[k] = Σ_p |X_buf[p][k]|²` (render_buffer.cc::SpectralSum)
         # inside RefinedFilterUpdateGain::Compute.
         X_latest = self.X_buf[curr_p]
-        if self._use_partition_summed_x2_for_h_error_gain:
-            # Hybrid startup: partition-sum X² gives "stable but slow"
-            # convergence (mu effectively divided by n_partitions in early
-            # H_error-dominated phase) which starves the refined filter for
-            # the first ~5s. Use single-partition X² during startup (fast
-            # initial convergence), switch to partition-sum after
-            # `_partition_sum_x2_startup_hops` for AEC3 steady-state
-            # stability. 500 hops = 5 s @ hop=160/sr=16000.
-            if self._call_counter > self._partition_sum_x2_startup_hops:
-                X2 = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
-            else:
-                X2 = (np.abs(X_latest) ** 2).astype(np.float32)
+        # Hybrid startup: partition-sum X² is "stable but slow" (mu effectively
+        # divided by n_partitions in the early H_error-dominated phase), so use
+        # single-partition X² for the first ~5 s (500 hops @ hop=160/sr=16000)
+        # for fast initial convergence, then partition-sum for steady state.
+        if self._call_counter > self._partition_sum_x2_startup_hops:
+            X2 = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
         else:
             X2 = (np.abs(X_latest) ** 2).astype(np.float32)
         delta32 = np.float32(self.delta)
@@ -905,10 +664,7 @@ class PBFDKF(PBFDAF):
         # mu[k] (AEC3 formula `mu = H_error / (0.5·H_error·X² + n·E²)`).
         # E² source: current-block `|error_spec|²` per-bin matching AEC3
         # `SubtractorOutput.E2_refined` (refined_filter_update_gain.cc:106).
-        if self._use_current_e2_refined_in_h_error_denominator:
-            e2_refined_current = (np.abs(self.error_spec) ** 2).astype(np.float32)
-        else:
-            e2_refined_current = self._error_psd
+        e2_refined_current = (np.abs(self.error_spec) ** 2).astype(np.float32)
         denom_aec3 = (
             np.float32(0.5) * self.H_error_per_bin * X2
             + n_part * e2_refined_current
@@ -922,11 +678,7 @@ class PBFDKF(PBFDAF):
         # FILTER_NOISE_GATE_POWER_FLOAT (0.01870), distinct from the
         # suppression-path NOISE_GATE_POWER_FLOAT (0.02562).
         from . import aec3_scale as _aec3_scale
-        _noise_gate = np.float32(
-            _aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT
-            if self._use_aec3_filter_noise_gate_power
-            else _aec3_scale.NOISE_GATE_POWER_FLOAT
-        )
+        _noise_gate = np.float32(_aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT)
         mu_aec3 = np.where(X2 >= _noise_gate, mu_aec3, np.float32(0.0))
 
         # W update — per partition, use the per-bin mu × conj(X[p]).
@@ -977,7 +729,8 @@ class PBFDKF(PBFDAF):
         Per-bin path: AEC3 cc:128-138 uses per-bin instantaneous E²_refined
         vs E²_coarse compare. Uses fresh ``|self.error_spec|²`` for refined
         (smoothed ``self._error_psd`` would be stale on early-return paths).
-        Legacy scalar path retained behind ``_use_per_bin_h_error_refresh``.
+        The scalar fallback runs only before the orchestrator publishes the
+        first per-bin ``_e2_coarse_per_bin``.
         """
         # AEC3 InitialState (aec_state.cc:336-353) — during the first 2.5 s of
         # active render, switch to refined_initial leakage (100×/10× steady)
@@ -991,8 +744,7 @@ class PBFDKF(PBFDAF):
             _lc_eff = self._leakage_converged
             _ld_eff = self._leakage_diverged
 
-        if (self._use_per_bin_h_error_refresh
-                and self._e2_coarse_per_bin is not None):
+        if self._e2_coarse_per_bin is not None:
             # AEC3 cc:128-138 per-bin path. Compute instantaneous
             # per-bin E²_refined from the current frame's filter error.
             e2_refined_per_bin = (np.abs(self.error_spec) ** 2).astype(np.float32)

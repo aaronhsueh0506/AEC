@@ -42,7 +42,9 @@ from ..filter.filter_state_bridge import FilterStateBridge
 
 _CONSERVATIVE_INITIAL_HOPS = int(1.5 * HOPS_PER_SECOND)  # AEC3 1.5*250 -> 150 hops
 _FAST_INITIAL_HOPS = int(0.8 * HOPS_PER_SECOND)           # AEC3 0.8*250 -> 80 hops
-_ACTIVE_RENDER_BLOCKS = 200  # AEC3 verbatim (~800 ms at AEC3 rate -> we tick per hop so 200 hops = 2 s; acceptable)
+_ACTIVE_RENDER_BLOCKS = 80   # AEC3 200 blocks × 4 ms = 800 ms wall-clock
+                             # = blocks_to_hops(200, 160, 16000) = 80 hops.
+                             # Legacy 200-hops-verbatim was 2 s (2.5× too slow).
 
 
 @dataclass
@@ -61,6 +63,12 @@ class AecStateConfig:
     erle_max_l: float = 4.0
     erle_max_h: float = 1.5
     erl_startup_hops: int = 200
+    # Wall-clock ERLE EMA smoothing alignment (default OFF; flags threaded from
+    # AecConfig). hop_size/sample_rate feed the per_block→per_hop conversion.
+    hop_size: int = 160
+    sample_rate: int = 16000
+    subband_wallclock_smoothing: bool = False
+    fullband_wallclock_smoothing: bool = False
     # TransparentMode is permanently disabled in production (legacy
     # 10-frame ERLE latch was retired); kwarg preserved as no-op for
     # AEC3-spec API compatibility.
@@ -94,6 +102,10 @@ class AecState:
             min_erle=self._config.erle_min,
             max_erle_l=self._config.erle_max_l,
             max_erle_h=self._config.erle_max_h,
+            subband_wallclock_smoothing=self._config.subband_wallclock_smoothing,
+            fullband_wallclock_smoothing=self._config.fullband_wallclock_smoothing,
+            hop_size=self._config.hop_size,
+            sample_rate=self._config.sample_rate,
         )
         self._erl_estimator = ErlEstimator(
             startup_phase_length_hops=self._config.erl_startup_hops,
@@ -232,6 +244,11 @@ class AecState:
         # SDE inputs (per-partition |W|² and X²). None when SDE OFF.
         sde_filter_freq_response: Optional[np.ndarray] = None,
         sde_x2_history: Optional[np.ndarray] = None,
+        # AEC3-strict X²_reverb for ErleEstimator only (aec_state.cc:229-250).
+        # When provided, the SubbandErleEstimator consumes X²+reverb_tail
+        # instead of bare render_psd. ErlEstimator + SaturationDetector
+        # keep using render_psd.
+        x2_reverb_for_erle: Optional[np.ndarray] = None,
     ) -> None:
         """Per-frame state update. Strict order matches aec_state.cc:189-291.
 
@@ -281,7 +298,7 @@ class AecState:
         if self._initial_state.transition_triggered():
             self._erle_estimator.reset(delay_change=False)
         self._erle_estimator.update(
-            x2=render_psd,
+            x2=x2_reverb_for_erle if x2_reverb_for_erle is not None else render_psd,
             y2=capture_psd,
             e2=error_psd,
             converged_filter=any_filter_converged,
@@ -296,7 +313,12 @@ class AecState:
         )
         # 4c. STUB: reverb / echo_audibility. Phase 3.4 fills.
 
-        # 5. Saturation detector.
+        # 5. Saturation detector. AEC3 strict: echo_path_gain from FilterAnalyzer
+        # (aec_state.cc:258-260) — when analyzer is present and ran this hop,
+        # prefer its current MaxEchoPathGain() over the caller-supplied default.
+        _epg = echo_path_gain
+        if self._filter_analyzer is not None:
+            _epg = float(self._filter_analyzer.max_echo_path_gain())
         if self._config.echo_can_saturate and render_block is not None:
             self._saturation_detector.update(
                 render_block=render_block,
@@ -304,7 +326,7 @@ class AecState:
                 usable_linear_estimate=self.usable_linear_estimate(),
                 subtractor_s_refined_max_abs=subtractor_s_refined_max_abs,
                 subtractor_s_coarse_max_abs=subtractor_s_coarse_max_abs,
-                echo_path_gain=echo_path_gain,
+                echo_path_gain=_epg,
             )
 
         # 6. InitialState (uses post-saturation flag).

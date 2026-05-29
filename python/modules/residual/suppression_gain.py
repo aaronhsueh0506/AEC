@@ -116,6 +116,12 @@ class DominantNearendConfig:
     # wall-clock derivation captures the phoneme part; minor re-tune may
     # still be needed at very different hop sizes due to behavioural
     # coupling with downstream gain rule.
+    # v3.22 candidate: AEC3 strict 200 ms (= 50 blocks @ 4 ms = 20 hops
+    # @ 10 ms) may be re-evaluable once use_aec3_wallclock_gain_ratchet
+    # is shipped ON, since the original 500 ms co-tune compensated in
+    # part for the 2.5× slower wall-clock gain recovery. Not v3.21.x
+    # alignment (the 500 ms is an intentional divergence, not a port
+    # bug); listed here so the dependency is visible to future tuners.
     hold_duration_ms: int = 500
     # trigger_threshold — net-positive evidence depth (+1/-1 random walk)
     # before NE state triggers.
@@ -212,8 +218,9 @@ class _LowNoiseRenderDetector:
     rescales the threshold via ``block_energy_scale`` so the detector
     fires at the same wall-clock render level as AEC3."""
 
-    def __init__(self, *, hop_samples: int = 64,
-                 use_wallclock_block_energy_threshold: bool = False) -> None:
+    def __init__(self, *, hop_samples: int = 64, sample_rate: int = 16000,
+                 use_wallclock_block_energy_threshold: bool = False,
+                 use_wallclock_iir: bool = False) -> None:
         self._average_power = 32768.0 * 32768.0
         if use_wallclock_block_energy_threshold:
             from .. import aec3_scale as _aec3_scale
@@ -222,6 +229,20 @@ class _LowNoiseRenderDetector:
             )
         else:
             self._threshold = 50.0 * 50.0 * 64.0
+        # AEC3 power IIR (average_power = 0.9·avg + 0.1·x2) is per-4ms-block;
+        # verbatim per-hop the detector reacts 2.5× slower. Convert the decay
+        # when ON; weight = 1 − decay preserves the convex combination.
+        if use_wallclock_iir:
+            from .. import aec3_scale as _aec3_scale
+            self._iir_decay = float(
+                _aec3_scale.per_block_growth_to_per_hop(0.9, hop_samples, sample_rate)
+            )
+            self._iir_weight = 1.0 - self._iir_decay
+        else:
+            # Literal 0.1 (NOT 1.0-0.9, which is 0.0999…9) to keep the OFF
+            # path bit-identical to the original `* 0.9 + x2_sum * 0.1`.
+            self._iir_decay = 0.9
+            self._iir_weight = 0.1
 
     def detect(self, render_block: np.ndarray) -> bool:
         if render_block.size == 0:
@@ -230,7 +251,7 @@ class _LowNoiseRenderDetector:
         x2_sum = float(np.sum(x2))
         x2_max = float(np.max(x2))
         low_noise = self._average_power < self._threshold and x2_max < 3.0 * self._average_power
-        self._average_power = self._average_power * 0.9 + x2_sum * 0.1
+        self._average_power = self._average_power * self._iir_decay + x2_sum * self._iir_weight
         return bool(low_noise)
 
 
@@ -468,6 +489,8 @@ class SuppressionGain:
     def __init__(self, *, n_bins: int = 257, config: Optional[SuppressorConfig] = None,
                  sr: int = 16000, hop_size: int = 160,
                  use_wallclock_block_energy_threshold: bool = False,
+                 use_wallclock_gain_ratchet: bool = False,
+                 use_wallclock_low_noise_render_iir: bool = False,
                  hf_min_gain_floor_during_dne_enabled: bool = False,
                  hf_min_gain_floor_during_dne_db: float = -15.0) -> None:
         self._n_bins = int(n_bins)
@@ -486,9 +509,11 @@ class SuppressionGain:
         self._stat_mask_frac: float = 0.0
         self._low_render = _LowNoiseRenderDetector(
             hop_samples=self._hop_size,
+            sample_rate=self._sr,
             use_wallclock_block_energy_threshold=bool(
                 use_wallclock_block_energy_threshold
             ),
+            use_wallclock_iir=bool(use_wallclock_low_noise_render_iir),
         )
         # AEC3 `nearend_average_blocks` is in 4 ms blocks; wall-clock rescale
         # to our hop_size so the moving-average window physically matches.
@@ -540,6 +565,29 @@ class SuppressionGain:
             self._n_bins, self._last_lf_band, self._first_hf_band,
             self._config.normal_tuning,
         )
+        # AEC3 GetMaxGain / GetMinGain LF-smoothing block apply the tuning
+        # ratchet multipliers once per LowerBandGain call (= once per 4 ms
+        # block in AEC3). At our 10 ms hop, applying the raw constant once
+        # per call recovers gain 2.5× slower wall-clock. When the flag is
+        # ON, scale each tuning's inc/dec by per_block_growth_to_per_hop
+        # so a single per-hop application matches the per-block AEC3 rate.
+        # Flag OFF: cached values == raw config values (byte-equal).
+        if use_wallclock_gain_ratchet:
+            _hop = self._hop_size
+            _sr = self._sr
+            self._max_inc_nearend = float(_aec3_scale.per_block_growth_to_per_hop(
+                self._config.nearend_tuning.max_inc_factor, _hop, _sr))
+            self._max_inc_normal = float(_aec3_scale.per_block_growth_to_per_hop(
+                self._config.normal_tuning.max_inc_factor, _hop, _sr))
+            self._max_dec_lf_nearend = float(_aec3_scale.per_block_growth_to_per_hop(
+                self._config.nearend_tuning.max_dec_factor_lf, _hop, _sr))
+            self._max_dec_lf_normal = float(_aec3_scale.per_block_growth_to_per_hop(
+                self._config.normal_tuning.max_dec_factor_lf, _hop, _sr))
+        else:
+            self._max_inc_nearend = float(self._config.nearend_tuning.max_inc_factor)
+            self._max_inc_normal = float(self._config.normal_tuning.max_inc_factor)
+            self._max_dec_lf_nearend = float(self._config.nearend_tuning.max_dec_factor_lf)
+            self._max_dec_lf_normal = float(self._config.normal_tuning.max_dec_factor_lf)
 
     def set_initial_state(self, state: bool) -> None:
         self._initial_state = bool(state)
@@ -796,11 +844,7 @@ class SuppressionGain:
 
     def _get_max_gain(self, floor_first_increase: float) -> np.ndarray:
         is_ne = self._ne_state_for_gain_rules()
-        inc = (
-            self._config.nearend_tuning.max_inc_factor
-            if is_ne
-            else self._config.normal_tuning.max_inc_factor
-        )
+        inc = self._max_inc_nearend if is_ne else self._max_inc_normal
         max_gain = np.minimum(
             np.maximum(self._last_gain * inc, floor_first_increase), 1.0
         )
@@ -832,11 +876,7 @@ class SuppressionGain:
         # after strong nearend.
         if not self._initial_state or self._config.lf_smoothing_during_initial_phase:
             is_ne = self._ne_state_for_gain_rules()
-            dec = (
-                self._config.nearend_tuning.max_dec_factor_lf
-                if is_ne
-                else self._config.normal_tuning.max_dec_factor_lf
-            )
+            dec = self._max_dec_lf_nearend if is_ne else self._max_dec_lf_normal
             end = min(self._last_lf_smoothing_band + 1, self._n_bins)
             permanent = self._config.last_permanent_lf_smoothing_band
             for k in range(end):

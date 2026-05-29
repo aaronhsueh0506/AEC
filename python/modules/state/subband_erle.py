@@ -44,12 +44,30 @@ class SubbandErleEstimator:
         max_erle_h: float = 1.5,
         use_onset_detection: bool = True,
         use_min_erle_during_onsets: bool = True,
+        wallclock_smoothing: bool = False,
+        hop_size: int = 160,
+        sample_rate: int = 16000,
     ) -> None:
         self._n_bins = int(n_bins)
         self._min_erle = float(min_erle)
         self._max_erle = _set_max_erle_bands(self._n_bins, max_erle_l, max_erle_h)
         self._use_onset_detection = bool(use_onset_detection)
         self._use_min_erle_during_onsets = bool(use_min_erle_during_onsets)
+        # AEC3 subband EMA constants are per-4ms-block; our update fires per
+        # hop (2.5× wider window). When ON, convert so ERLE tracks + recovers
+        # at AEC3 wall-clock rate (config use_aec3_wallclock_subband_erle_smoothing).
+        if wallclock_smoothing:
+            from ..aec3_scale import (
+                per_block_ema_alpha_to_per_hop as _ema,
+                per_block_growth_to_per_hop as _grow,
+            )
+            self._alpha_up = float(_ema(0.05, hop_size, sample_rate))
+            self._alpha_down = float(_ema(0.1, hop_size, sample_rate))
+            self._onset_release_decay = float(_grow(0.97, hop_size, sample_rate))
+        else:
+            self._alpha_up = 0.05
+            self._alpha_down = 0.1
+            self._onset_release_decay = 0.97
         self._erle = np.full(self._n_bins, self._min_erle, dtype=np.float32)
         self._erle_onset_compensated = np.full(self._n_bins, self._min_erle, dtype=np.float32)
         self._erle_unbounded = np.full(self._n_bins, self._min_erle, dtype=np.float32)
@@ -185,13 +203,12 @@ class SubbandErleEstimator:
                 _UNBOUNDED_ERLE_MAX,
             )
 
-    @staticmethod
     def _smoothed_update(
-        prev: float, new_val: float, low_render: bool, min_v: float, max_v: float
+        self, prev: float, new_val: float, low_render: bool, min_v: float, max_v: float
     ) -> float:
-        alpha = 0.05
+        alpha = self._alpha_up
         if new_val < prev:
-            alpha = 0.0 if low_render else 0.1
+            alpha = 0.0 if low_render else self._alpha_down
         v = prev + alpha * (new_val - prev)
         return float(np.clip(v, min_v, max_v))
 
@@ -204,7 +221,7 @@ class SubbandErleEstimator:
                 if self._erle_onset_compensated[k] > self._erle_during_onsets[k]:
                     self._erle_onset_compensated[k] = max(
                         self._erle_during_onsets[k],
-                        0.97 * self._erle_onset_compensated[k],
+                        self._onset_release_decay * self._erle_onset_compensated[k],
                     )
                 if self._hold_counters[k] <= 0:
                     self._coming_onset[k] = True

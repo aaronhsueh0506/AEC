@@ -16,6 +16,74 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-05-29 — v3.21 CLOSE: conversion audit + Tier-C verdict + alignment-flag inlining (byte-equal)
+
+**Headline**: closes the v3.21 AEC3-alignment arc. A deep audit of every
+hop/fft "physical-meaning conversion" flag found two shipped `default-True`
+flags were mislabelled "AEC3-strict" but actually mis-derived, and two were
+unvalidated gray-zone conversions. The 800-case **Tier-C validation**
+(`docs/v3_21_tierc_validation_report.md`) adjudicated each via the
+matched-magnitude AECMOS Pareto, then all surviving alignment flags were
+inlined into their call sites and all NOSHIP substrate removed. **No
+production behaviour change — byte-equal preserved** (12-case `_ours` +
+`_ours_nores` md5 gate, all buckets incl. movement).
+
+### Tier-C validation verdict (800-case, isolated per flag)
+
+- **`active_render` correction → REVERTED.** The arithmetically-correct AEC3
+  value (`100²/32768² = 9.31e-6`, mean-correct vs the shipped `5.96e-4` which
+  kept AEC3's block-SUM ×64 against our per-sample mean) **regressed** FS echo
+  −0.033 mean + 25 catastrophic cases (worst −1.431). Production keeps
+  `5.96e-4`, **relabelled as an empirically-tuned threshold, NOT strict
+  alignment**; re-tuning for our hop/fft deferred to v3.22 Arc 4.
+- **`fft_density` floor scaling → KEPT (inert).** 4× vs 1× ≈ 0.000 across all
+  buckets. The shipped factor is `(fft/2)/64 = 4×`; the true per-bin energy
+  basis is the real frame `2×hop = 320 → (2×hop)/64 = 5×` (broadband; 25×
+  tonal). The 4× is a single-constant approximation that is AECMOS-insensitive;
+  derivation comment corrected, signal-adaptive floor deferred to v3.22 Arc 3.
+- **`reverb_smoothing` (EMA-α 0.2→0.428) → KEPT converted.** Reverb is an
+  envelope/decay tracker (preserve wall-clock τ is the aligned choice), same
+  class as `dne_trigger` — not a ratio estimator like the C1-C3 ERLE EMAs.
+  Inert on AECMOS (0.000); keeping it preserves byte-equal.
+- **`dne_trigger` (evidence count 12→5 hops) → KEPT converted.** Reverting
+  tanked DT deg (−0.065/−0.075 + 51 catastrophic, 47 of them DT) for an FS
+  echo gain — a losing matched-magnitude trade. The conversion is a correct
+  genuine-temporal (trigger-latency) alignment.
+- **Combined "honest-alignment" config (V5) → REJECTED** (DT deg −0.062 + 49
+  catastrophic) — validation prevented shipping a DT regression.
+- Earlier **C1-C6 wall-clock-EMA bundle → NO-SHIP** (FS echo down / illusory DT
+  lift); root cause: ratio estimators (ERLE) want preserve-count, not
+  preserve-seconds.
+
+### Release cleanup (byte-equal)
+
+- **`config.py` 412 → 230 lines.** Removed all 16 AEC3-alignment / NOSHIP /
+  temp config flags. The 9 shipped `default-True` alignment flags are now
+  hard-coded into their `orchestrator.py` / `filters.py` call sites; the
+  C1/C3/C4/C6 + `just_reset` (CLOSED −8 dB) + `block_energy` (dormant) + the
+  temp `active_render_threshold_aec3_corrected` validation flag are deleted.
+- **`filters.py` 1057 → 863 lines.** Collapsed PBFDKF `_update_weights`: the
+  legacy P-denominator Kalman body (default-OFF, 131 lines) is removed and the
+  10 always-True refined/shadow AEC3-parity flags (`_use_aec3_h_error`,
+  partition-summed X², current-E²-refined, per-bin H_error refresh, filter
+  noise gate; the five PBFDAF coarse-filter gates) are inlined. Orphaned
+  kx/p53 trace scaffolds removed.
+- **`orchestrator.py`**: init + reset construction paths collapsed (fft-density
+  if/else, dne `_dc.replace`, gain-ratchet, reverb), `_aec3_post` flag branches
+  inlined (x2-reverb-for-ERLE, subtractor-max-abs, active_render → single
+  value, just_reset retired, block_energy dropped). `epc.py` C6 gate → legacy
+  1e-4.
+- Satellite estimators (`state/subband_erle`, `state/fullband_erle`,
+  `residual/suppression_gain`, `residual/reverb_frequency_response`) retain
+  their internal parameterisation, now driven by hard-coded orchestrator
+  literals (config-level cleanup complete; deeper leaf-branch removal is an
+  optional follow-up).
+
+Evidence: `docs/v3_21_tierc_validation_report.md`,
+`docs/v3_21_close_handoff.md`. v3.22 roadmap: `docs/v3_22_plan.md`.
+
+---
+
 ## [3.21.6.4] — 2026-05-28 — physical-meaning fix: ReverbModel decay wall-clock alignment
 
 **Headline**: v3.21.6.3 trace on user's case (568_EVB_online) reduced

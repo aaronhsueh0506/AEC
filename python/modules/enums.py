@@ -7,8 +7,6 @@ from enum import Enum
 
 
 class AecMode(Enum):
-    LMS = "lms"         # Time-domain LMS (no normalization, simplest)
-    NLMS = "nlms"       # Time-domain NLMS (sample-by-sample)
     FDAF = "fdaf"       # Frequency-domain Adaptive Filter (single block, n_partitions=1)
     PBFDAF = "pbfdaf"   # Partitioned Block FDAF (NLMS adaptation)
     PBFDKF = "pbfdkf"   # Partitioned Block FDKF (Kalman adaptation, recommended)

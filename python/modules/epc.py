@@ -241,7 +241,11 @@ class PathChangeRegimeHandler:
             return decision
 
         threshold = self.config.shadow_copy_threshold
-        far_active = far_pwr > 1e-4
+        # EPC/regime far_active gate uses the legacy active_render threshold
+        # (1e-4); routing the AecState 5.96e-4 here was the C6 NOSHIP probe
+        # (use_aec3_active_render_threshold_shadow_epc) — retired.
+        _far_thr = 1e-4
+        far_active = far_pwr > _far_thr
 
         err_sum = main_err_smooth + shadow_err_smooth + 1e-10
         err_balance = abs(main_err_smooth - shadow_err_smooth) / err_sum

@@ -16,34 +16,19 @@ from typing import Optional
 import soundfile as sf
 
 # Lazy holder for FilteringQualityAnalyzer audit module; populated on
-# first flag-ON construction so flag-OFF AEC instances skip the scipy
-# import cost.
-_FilteringQualityAnalyzer = None
-
-# F3.1 blend weight (mic-excess-ratio vs legacy 1-coh²) — kept here
-# because the dt_per_bin path lives inside AEC.
-_BLEND_F31_MIC_EXCESS = 0.7
-
 from .enums import (
     AecMode, AecPreset, AecFilterState, _FREQ_MODES,
 )
-from .dataclasses import (
-    AecStats, AecResContext, AecEvent, EpcEvent,
-)
+from .dataclasses import AecStats, AecResContext
 from .delay.legacy_compat import LegacyDelayShim as DelayEstimator
-from .erle import (
-    FilterErleEstimator, FullbandErleEstimator, compute_erle_confidence,
-)
 from .preprocessing import HighPassFilter, SaturationDetector
-from .filters import NlmsFilter, PBFDAF, PBFDKF
+from .filters import PBFDAF, PBFDKF
 from .dtd import DtdEstimator
 from .detectors import (
     RenderActivityDetector, FilterConvergenceAnalyzer,
     DoubleTalkAnalyzer,
 )
-from .epc import (
-    classify_epc_event, EchoPathChangeDetector, PathChangeRegimeHandler,
-)
+from .epc import EchoPathChangeDetector, PathChangeRegimeHandler
 from .config import AecConfig
 from .debug_logger import AecDebugLogger
 
@@ -162,10 +147,6 @@ class AEC:
         self._aec3_misadj_y2_acum = 0.0
         self._aec3_misadj_n_acum = 0
 
-    def _check_and_apply_misadjustment_scale(self) -> None:
-        """Route to AEC3-parity fire path (legacy path retired)."""
-        self._fire_aec3_misadj_scale()
-
     def _fire_aec3_misadj_scale(self) -> None:
         """AEC3-parity fire path: shrink W when inv_misadjustment_ > 10.
 
@@ -225,8 +206,6 @@ class AEC:
 
     # Per-mode optimal mu defaults (tuned on fileid_0/1/2)
     _MODE_DEFAULT_MU = {
-        AecMode.LMS: 0.02,
-        AecMode.NLMS: 0.4,
         AecMode.FDAF: 0.3,
         AecMode.PBFDAF: 0.5,
         AecMode.PBFDKF: 0.5,
@@ -283,7 +262,7 @@ class AEC:
 
         # Default-init mode-divergent attributes so every code path that
         # reads `self._dtd_fft_size` (set inside the FDAF-buffering block)
-        # also works for PBFDKF/PBFDAF/SUBBAND/LMS/TIME. Was a latent
+        # also works for PBFDKF/PBFDAF/SUBBAND. Was a latent
         # AttributeError surfaced by CLI smoke on BALANCED.
         self._dtd_fft_size = 0
 
@@ -327,23 +306,13 @@ class AEC:
             self._hop_size = self.config.hop_size
             self._n_partitions = n_partitions
 
-            # PBFDKF: apply config Q_high/Q_low
+            # PBFDKF: apply config Q_high/Q_low. AEC3-alignment flags
+            # (per-bin H_error refresh, partition-summed X², current-frame
+            # E², H_error ceil, filter noise gate) are PBFDKF defaults.
             if isinstance(self.filter, PBFDKF):
                 self.filter.Q_high[:] = self.config.kalman_q_high
                 self.filter.Q_low[:]  = self.config.kalman_q_low
                 self.filter.Q[:] = self.config.kalman_q_high
-                # AEC3-alignment flags shipped True: per-bin H_error refresh,
-                # partition-summed X², current-frame E²_refined, AEC3 H_error
-                # ceiling, AEC3 filter noise gate.
-                self.filter._use_per_bin_h_error_refresh = True
-                self.filter._use_partition_summed_x2_for_h_error_gain = True
-                self.filter._use_current_e2_refined_in_h_error_denominator = True
-                from . import aec3_scale as _aec3_scale
-                self.filter._h_error_ceil = np.float32(
-                    _aec3_scale.H_ERROR_CEIL_AEC3_FLOAT)
-                self.filter._use_aec3_filter_noise_gate_power = True
-                # P53 innovation-audit hook (research only — default OFF).
-                self.filter._enable_p53_trace = False
 
             # FDAF buffering (when internal_hop > external hop)
             if self.config.mode == AecMode.FDAF and self._internal_hop > self._hop_size:
@@ -368,32 +337,8 @@ class AEC:
             else:
                 self._freq_near_queue = None
                 self._dtd_fft_size = 0
-        elif self.config.mode == AecMode.LMS:
-            # LMS: Time-domain, no normalization
-            self.filter = NlmsFilter(
-                filter_length=self.config.filter_length,
-                mu=self.config.mu,
-                delta=self.config.delta,
-                normalize=False
-            )
-            self.filter.clear_history = self.config.clear_filter_history
-            self._hop_size = self.config.hop_size
-            self._internal_hop = self.config.hop_size
-            self._n_partitions = 0
-            self._freq_near_queue = None
         else:
-            # TIME: Time-domain NLMS
-            self.filter = NlmsFilter(
-                filter_length=self.config.filter_length,
-                mu=self.config.mu,
-                delta=self.config.delta,
-                normalize=True
-            )
-            self.filter.clear_history = self.config.clear_filter_history
-            self._hop_size = self.config.hop_size
-            self._internal_hop = self.config.hop_size
-            self._n_partitions = 0
-            self._freq_near_queue = None
+            raise ValueError(f"unsupported AEC mode: {self.config.mode!r}")
 
         # DTD: frequency-domain modes only (divergence + coherence dual detector)
         # LMS/NLMS have no effective DTD — all methods (Geigel, NCC, coherence,
@@ -476,29 +421,31 @@ class AEC:
                 n_bins=n_bins,
                 enable_transparent_mode=False,
                 enable_filter_analyzer=True,
+                hop_size=int(self.config.hop_size),
+                sample_rate=int(self.config.sample_rate),
+                subband_wallclock_smoothing=False,
+                fullband_wallclock_smoothing=False,
             ))
-            # FFT-density-scaled PSD floors (AEC3 alignment).
-            # AEC3 hardcodes kFftLengthBy2=64 in floor constants for
-            # EchoModelConfig / EchoAudibilityConfig. At our fft=512 these
-            # need 4× scaling; at hop=160 _LowNoiseRenderDetector threshold
-            # needs 2.5× scaling. Single flag covers all six.
-            _use_fft_dens = bool(getattr(
-                self.config,
-                "use_aec3_fft_density_scaled_psd_floors", False
-            ))
+            # FFT-density-scaled PSD floors (AEC3 alignment, v3.21-shipped).
+            # AEC3 hardcodes kFftLengthBy2=64 in EchoModelConfig /
+            # EchoAudibilityConfig floor constants; at our fft=512 the per-bin
+            # floors are rescaled by fft_size/2 / 64, and the
+            # _LowNoiseRenderDetector block-energy threshold by hop/64.
+            # NOTE: per-bin |X|² energy actually tracks the real frame =
+            # block_size = 2×hop = 320 (= 5× vs AEC3's 64), not fft_size = 512
+            # (= 4×); the 4× is a single-constant approximation that is
+            # AECMOS-insensitive (Tier-C 2026-05-29: 4× vs 1× ≈ 0.000). A
+            # signal-adaptive per-bin floor is deferred to v3.22 Arc 3.
             import dataclasses as _dc
             from .residual.residual_echo_estimator import EchoModelConfig
             from .residual.suppression_gain import EchoAudibilityConfig
             _ff_for_floors = float(self.filter.fft_size) if hasattr(self.filter, "fft_size") else 512.0
             from . import aec3_scale as _aec3_scale_floors
-            if _use_fft_dens:
-                _echo_model_cfg = EchoModelConfig(
-                    min_noise_floor_power=_aec3_scale_floors.fft_density_scale(
-                        EchoModelConfig().min_noise_floor_power, int(_ff_for_floors)
-                    ),
-                )
-            else:
-                _echo_model_cfg = EchoModelConfig()
+            _echo_model_cfg = EchoModelConfig(
+                min_noise_floor_power=_aec3_scale_floors.fft_density_scale(
+                    EchoModelConfig().min_noise_floor_power, int(_ff_for_floors)
+                ),
+            )
             self._aec3_ree = ResidualEchoEstimator(
                 n_bins=n_bins,
                 echo_model=_echo_model_cfg,
@@ -506,47 +453,41 @@ class AEC:
                 hop_size=self.config.hop_size,
                 use_aec3_residual_noise_gate=True,
                 use_aec3_echo_gen_window=True,
-                use_aec3_wallclock_reverb_smoothing=bool(
-                    getattr(self.config,
-                            "use_aec3_wallclock_reverb_smoothing", False)
-                ),
+                use_aec3_wallclock_reverb_smoothing=True,
             )
             _sg_config = SuppressorConfig()
             # Stationarity zeroing is the shipped production default
             # (load-bearing safety net on cohort tail). Override the AEC3
             # default EchoAudibilityConfig (use_stationarity_properties=False)
             # so the orchestrator's zeroing block fires.
-            _ea_kwargs = dict(use_stationarity_properties=True)
-            if _use_fft_dens:
-                # AEC3 floor_power=2×64, low_render_limit=4×64,
-                # normal_render_limit=64 — all fft-density-dependent.
-                _ea_default = EchoAudibilityConfig()
-                _ea_kwargs.update(dict(
-                    floor_power=_aec3_scale_floors.fft_density_scale(
-                        _ea_default.floor_power, int(_ff_for_floors)
-                    ),
-                    low_render_limit=_aec3_scale_floors.fft_density_scale(
-                        _ea_default.low_render_limit, int(_ff_for_floors)
-                    ),
-                    normal_render_limit=_aec3_scale_floors.fft_density_scale(
-                        _ea_default.normal_render_limit, int(_ff_for_floors)
-                    ),
-                ))
+            # AEC3 floor_power=2×64, low_render_limit=4×64, normal_render_limit=64
+            # are fft-density-scaled (see EchoModelConfig note above).
+            _ea_default = EchoAudibilityConfig()
             _sg_config.echo_audibility = _dc.replace(
                 _sg_config.echo_audibility,
-                **_ea_kwargs,
+                use_stationarity_properties=True,
+                floor_power=_aec3_scale_floors.fft_density_scale(
+                    _ea_default.floor_power, int(_ff_for_floors)
+                ),
+                low_render_limit=_aec3_scale_floors.fft_density_scale(
+                    _ea_default.low_render_limit, int(_ff_for_floors)
+                ),
+                normal_render_limit=_aec3_scale_floors.fft_density_scale(
+                    _ea_default.normal_render_limit, int(_ff_for_floors)
+                ),
             )
-            if getattr(self.config, "use_aec3_wallclock_dne_trigger_threshold", False):
-                _sg_config.dominant_nearend_detection = _dc.replace(
-                    _sg_config.dominant_nearend_detection,
-                    use_wallclock_trigger_threshold=True,
-                )
+            _sg_config.dominant_nearend_detection = _dc.replace(
+                _sg_config.dominant_nearend_detection,
+                use_wallclock_trigger_threshold=True,
+            )
             self._aec3_sg = SuppressionGain(
                 n_bins=n_bins,
                 config=_sg_config,
                 sr=self.config.sample_rate,
                 hop_size=self.config.hop_size,
-                use_wallclock_block_energy_threshold=_use_fft_dens,
+                use_wallclock_block_energy_threshold=True,
+                use_wallclock_gain_ratchet=True,
+                use_wallclock_low_noise_render_iir=False,
                 hf_min_gain_floor_during_dne_enabled=bool(
                     getattr(self.config,
                             "hf_min_gain_floor_during_dne_enabled", False)
@@ -558,6 +499,15 @@ class AEC:
             )
             self._aec3_n_bins = n_bins
             self._aec3_sg_config = _sg_config
+            # AEC3 `aec_state.cc:229-234` ComputeAvgRenderReverb owns a
+            # dedicated ReverbModel separate from the residual-echo path's
+            # reverb model. The semantics differ — this one always uses
+            # `mild=false` decay (steady AEC3 default_len) and accumulates
+            # tail from `X²[delay+1]` (one block past the direct-path
+            # coverage of the linear filter). Output = `X²[delay] + tail`
+            # fed only to SubbandErleEstimator.
+            from .residual.reverb_model import ReverbModel as _AvgReverbModel
+            self._aec3_avg_render_reverb = _AvgReverbModel(n_bins=n_bins)
             # Synthesis OLA: sqrt-Hann analysis * sqrt-Hann synthesis = Hann,
             # which sums to 1 across 50%-overlap hops (perfect reconstruction).
             # AEC3 strict — MATLAB-canonical Hann (denom = N, not N-1 as
@@ -599,16 +549,10 @@ class AEC:
             self._aec3_n2_counter = 0
             _dbfs = float(self.config.comfort_noise_floor_dbfs)
             # AEC3 comfort_noise_generator.cc:46 GetNoiseFloorFactor hardcodes
-            # 64.f = kFftLengthBy2. For WGN with σ², per-bin |X[k]|² scales
-            # with FFT length; at our fft=512 the equivalent constant is
-            # fft_size/2 = 256. Flag-gated to preserve byte-equal default.
+            # 64.f = kFftLengthBy2; per-bin |X[k]|² scales with frame length,
+            # so at our fft=512 the equivalent constant is fft_size/2 = 256.
             _ff = float(self.filter.fft_size) if hasattr(self.filter, "fft_size") else 512.0
-            _cn_floor_factor = (
-                _ff / 2.0
-                if getattr(self.config,
-                           "use_aec3_fft_density_scaled_psd_floors", False)
-                else 64.0
-            )
+            _cn_floor_factor = _ff / 2.0
             self._aec3_noise_floor_int16sq = float(
                 _cn_floor_factor * (10.0 ** ((90.30899869919436 + _dbfs) * 0.1))
             )
@@ -713,23 +657,9 @@ class AEC:
                 hop_size=self.filter.hop_size
             )
             self.shadow_filter.enable_td_constraint = self.config.enable_td_constraint
-            # PBFDKF shadow: higher Q via ratio for faster tracking.
-            # PBFDAF shadow has no Q state — skip cleanly.
-            if isinstance(self.shadow_filter, PBFDKF):
-                self.shadow_filter.Q_high = self.filter.Q_high * self.config.shadow_q_ratio
-                self.shadow_filter.Q_low  = self.filter.Q_low  * self.config.shadow_q_ratio
-                self.shadow_filter.Q      = self.shadow_filter.Q_high.copy()
-                # AEC3-parity flags shipped True (Kalman path).
-                self.shadow_filter._use_partition_summed_x2_for_h_error_gain = True
-                self.shadow_filter._use_current_e2_refined_in_h_error_denominator = True
-            # PBFDAF shadow NLMS protection flags shipped True (AEC3
-            # CoarseFilterUpdateGain protection mechanisms). PBFDKF
-            # Kalman path ignores them.
-            self.shadow_filter._use_partition_summed_x2_for_shadow_mu = True
-            self.shadow_filter._use_aec3_noise_gate_for_shadow = True
-            self.shadow_filter._use_saturation_gate_for_shadow = True
-            self.shadow_filter._use_poor_excitation_gate_for_shadow = True
-            self.shadow_filter._use_narrowband_mask_for_shadow = True
+            # PBFDAF shadow AEC3 CoarseFilterUpdateGain protection flags
+            # (partition-summed X², noise gate, saturation, poor-excitation,
+            # narrowband mask) are PBFDAF defaults.
             # Wire RSA + poor_excitation counter to shadow. RSA is
             # single-instance per pipeline; shadow reads the same
             # narrowband / poor-excitation state. The counter init
@@ -744,11 +674,8 @@ class AEC:
 
         # Echo path change detector (owns active/hangover/EPV-EMAs/prev_total_err)
         self._epc_det = EchoPathChangeDetector(self.config)
-        # Trace-only classified AEC3-aligned event placeholder.
-        self._classified_event = AecEvent()
 
         # Misadjustment estimator state (always live in production).
-        self._misadjustment_smoothed = 1.0
         self._misadjustment_stable_count = 0
         self._misadjustment_hangover_remaining = 0
 
@@ -756,10 +683,6 @@ class AEC:
         # python/modules/state/filter_analyzer.py). The orchestrator now
         # exposes the analyzer state via ``self._aec3_state`` rather than a
         # parallel instance.
-        self._filter_analyzer = None  # retained name for legacy diag readers
-        # FilteringQualityAnalyzer audit port retired; AecState owns the
-        # canonical analyzer.
-        self._filter_quality = None
         self._epc_reset_fired_this_frame = False
 
         # #4: Confidence memory decay
@@ -987,19 +910,12 @@ class AEC:
         self._inst_erle_smooth = 1.0
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0
-        # S-orth.A: reset shadow decoupled state on full AEC.reset()
-        if hasattr(self, '_shadow_error_psd'):
-            self._shadow_error_psd.fill(1e-2)
-        if hasattr(self, '_shadow_R'):
-            self._shadow_R.fill(1e-2)
-        # FilterAnalyzer reset is handled by AecState._full_reset (the
-        # analyzer is owned by AecState).
-        # FilteringQualityAnalyzer state reset.
-        if getattr(self, '_filter_quality', None) is not None:
-            self._filter_quality.reset()
+        # Reset shadow decoupled state on full AEC.reset(); FilterAnalyzer
+        # reset is owned by AecState._full_reset.
+        self._shadow_error_psd.fill(1e-2)
+        self._shadow_R.fill(1e-2)
         self._epc_reset_fired_this_frame = False
-        if hasattr(self, '_shadow_mu_holdoff'):
-            self._shadow_mu_holdoff = 0
+        self._shadow_mu_holdoff = 0
         self._warmup_frames = self.config.warmup_frames
         self._warmup_far_active = False
         # Clear lazy-getattr diagnostic counters so cross-case batch
@@ -1120,24 +1036,21 @@ class AEC:
             n_bins=n_bins,
             enable_transparent_mode=False,
             enable_filter_analyzer=True,
+            hop_size=int(self.config.hop_size),
+            sample_rate=int(self.config.sample_rate),
+            subband_wallclock_smoothing=False,
+            fullband_wallclock_smoothing=False,
         ))
-        # Re-derive fft-density-scaled echo_model so a mid-stream reset
-        # still honours the use_aec3_fft_density_scaled_psd_floors flag.
-        _use_fft_dens_reset = bool(getattr(
-            self.config,
-            "use_aec3_fft_density_scaled_psd_floors", False
-        ))
+        # Re-derive fft-density-scaled echo_model so a mid-stream reset keeps
+        # the same per-bin PSD floors as init (see __init__ note).
         from .residual.residual_echo_estimator import EchoModelConfig
         from . import aec3_scale as _aec3_scale_floors
         _ff_for_floors_reset = float(self.filter.fft_size) if hasattr(self.filter, "fft_size") else 512.0
-        if _use_fft_dens_reset:
-            _echo_model_cfg_reset = EchoModelConfig(
-                min_noise_floor_power=_aec3_scale_floors.fft_density_scale(
-                    EchoModelConfig().min_noise_floor_power, int(_ff_for_floors_reset)
-                ),
-            )
-        else:
-            _echo_model_cfg_reset = EchoModelConfig()
+        _echo_model_cfg_reset = EchoModelConfig(
+            min_noise_floor_power=_aec3_scale_floors.fft_density_scale(
+                EchoModelConfig().min_noise_floor_power, int(_ff_for_floors_reset)
+            ),
+        )
         self._aec3_ree = ResidualEchoEstimator(
             n_bins=n_bins,
             echo_model=_echo_model_cfg_reset,
@@ -1145,17 +1058,16 @@ class AEC:
             hop_size=self.config.hop_size,
             use_aec3_residual_noise_gate=True,
             use_aec3_echo_gen_window=True,
-            use_aec3_wallclock_reverb_smoothing=bool(
-                getattr(self.config,
-                        "use_aec3_wallclock_reverb_smoothing", False)
-            ),
+            use_aec3_wallclock_reverb_smoothing=True,
         )
         self._aec3_sg = SuppressionGain(
             n_bins=n_bins,
             config=self._aec3_sg_config,
             sr=self.config.sample_rate,
             hop_size=self.config.hop_size,
-            use_wallclock_block_energy_threshold=_use_fft_dens_reset,
+            use_wallclock_block_energy_threshold=True,
+            use_wallclock_gain_ratchet=True,
+            use_wallclock_low_noise_render_iir=False,
             hf_min_gain_floor_during_dne_enabled=bool(
                 getattr(self.config,
                         "hf_min_gain_floor_during_dne_enabled", False)
@@ -1170,6 +1082,10 @@ class AEC:
         self._aec3_pending_delay_change = None
         self._form_prev_output_time = None
         self._form_last_selection = True
+        # AvgRenderReverb tail reset (matches AEC3 reverb_model_.Reset() during
+        # echo path change handling).
+        if hasattr(self, "_aec3_avg_render_reverb"):
+            self._aec3_avg_render_reverb.reset()
         # AEC3-strict CNG state reset (mirrors ComfortNoiseGenerator ctor).
         self._aec3_y2_smoothed.fill(0.0)
         self._aec3_n2.fill(1.0e6)
@@ -1328,14 +1244,11 @@ class AEC:
                      ('copy_err_baseline', 1e-6)):
             self._diag[k] = v
 
-        # S-orth.A: reset shadow decoupled state on derived-state reset
-        # (same as filter taps reset — shadow's observation history restarts).
-        if hasattr(self, '_shadow_error_psd'):
-            self._shadow_error_psd.fill(1e-2)
-        if hasattr(self, '_shadow_R'):
-            self._shadow_R.fill(1e-2)
-        if hasattr(self, '_shadow_mu_holdoff'):
-            self._shadow_mu_holdoff = 0
+        # Reset shadow decoupled state on derived-state reset (shadow's
+        # observation history restarts together with filter taps).
+        self._shadow_error_psd.fill(1e-2)
+        self._shadow_R.fill(1e-2)
+        self._shadow_mu_holdoff = 0
 
         # Clear AEC3 post chain (filter-output-derived); preserve
         # render-side stationarity tracker per the input-side rule.
@@ -1795,16 +1708,21 @@ class AEC:
             # Shadow filter with DTD protection (#1) and bidirectional copy (#6)
             if self.shadow_filter is not None and self._freq_near_queue is None:
                 self.shadow_frame_count += 1
-                # Shadow is a true background filter: always adapts at full
-                # speed. Kalman's Q_high × shadow_q_ratio keeps P alive even
-                # when shadow learns DT speech, so it re-converges within
-                # ~100-200 frames after DT ends. The copy gate (FS baseline
-                # tracking) is the sole defense against poisoning main.
+                # Shadow is a true background filter (PBFDAF/NLMS): always
+                # adapts at full speed and re-converges from its own residual
+                # after DT ends (no Kalman P-state; the prior PBFDKF-shadow Q
+                # boost was retired when the shadow switched to NLMS). The copy
+                # gate (FS baseline tracking) is the sole defense against
+                # poisoning main.
                 # Gate shadow update: skip adaptation when far-end is too
                 # weak (poor excitation) or speaker is saturating (nonlinear
                 # distortion makes error unreliable). Cf. AEC3's
                 # PoorSignalExcitation() gate on main_filter_update_gain.
-                far_excited = np.mean(far_end ** 2) > 1e-4
+                # Shadow adaptation gate uses the legacy active_render threshold
+                # (1e-4); routing the AecState 5.96e-4 here too was the C6 NOSHIP
+                # probe (use_aec3_active_render_threshold_shadow_epc) — retired.
+                _far_thr_shadow = 1e-4
+                far_excited = np.mean(far_end ** 2) > _far_thr_shadow
                 saturation_safe = self._saturation_level < 0.5
                 shadow_mu_scale = 1.0 if (far_excited and saturation_safe) else 0.1
                 # AEC3 strict (subtractor.cc:264-307): during the
@@ -1835,28 +1753,16 @@ class AEC:
                     ).astype(np.float32)
                     _e2_coa = float(np.sum(_e2_coa_per_bin))
                     # Feed E²_coarse + per-bin ERL to the refined filter's
-                    # H_error refresh formula. Publish per-bin coarse for
-                    # AEC3 cc:128-138 per-bin compare path (consumed when
-                    # filter._use_per_bin_h_error_refresh = True).
+                    # H_error refresh formula. Publish per-bin coarse for the
+                    # AEC3 cc:128-138 per-bin compare path.
                     self.filter._e2_coarse_for_refresh = _e2_coa
                     self.filter._e2_coarse_per_bin = _e2_coa_per_bin
-                    if hasattr(self, '_per_band_erl') and self._per_band_erl is not None:
-                        # Broadcast 3-band ERL to per-bin: low / mid / high
-                        # third partitioning across n_freqs.
-                        _per_band = np.asarray(self._per_band_erl, dtype=np.float32)
-                        _nf = self.filter.n_freqs
-                        _b = _nf // 3
-                        _erl_pb = np.empty(_nf, dtype=np.float32)
-                        _erl_pb[:_b] = _per_band[0]
-                        _erl_pb[_b:2 * _b] = _per_band[1]
-                        _erl_pb[2 * _b:] = _per_band[2]
-                        self.filter._erl_per_bin = _erl_pb
-                    elif hasattr(self, '_erl_estimate'):
-                        # Fallback: scalar ERL broadcast to all bins.
-                        self.filter._erl_per_bin = np.full(
-                            self.filter.n_freqs, float(self._erl_estimate),
-                            dtype=np.float32,
-                        )
+                    # AEC3 ErlComputer (adaptive_fir_filter_erl.cc): erl[k] =
+                    # Σ_p |W_p[k]|² — the filter's own per-bin echo-return-loss,
+                    # fed to RefinedFilterUpdateGain's H_error leakage refresh.
+                    self.filter._erl_per_bin = (
+                        np.abs(self.filter.W) ** 2
+                    ).sum(axis=0).astype(np.float32)
                     # AEC3 cc:264-307 poor_coarse rescue copy. Physical-meaning
                     # alignment for OUR hop=160 (vs AEC3 kBlockSize=64):
                     #   trigger threshold: AEC3 `counter < 5` blocks = 20 ms
@@ -1891,9 +1797,11 @@ class AEC:
                         # Clears ReverbModel, ReverbFrequencyResponse,
                         # x2_noise_floor counter so stale FS tail does not
                         # bleed into DT2.
-                        if getattr(self.config,
-                                   "use_aec3_reset_res_on_rescue_edge",
-                                   False) and self._aec3_ree is not None:
+                        # AEC3 ResidualEchoEstimator::Reset on the rescue rising
+                        # edge (mirrors EchoRemoverImpl::HandleEchoPathChange):
+                        # clears ReverbModel / ReverbFrequencyResponse / x2 noise
+                        # floor so stale FS tail does not bleed into DT2.
+                        if self._aec3_ree is not None:
                             self._aec3_ree.reset()
                             self._diag['aec3_reset_res_on_rescue_edge_fired'] = (
                                 self._diag.get(
@@ -2071,7 +1979,7 @@ class AEC:
             # raw_output already computed.
             self._update_misadjustment_estimator(
                 near_end_hpf=near_end, raw_output=raw_output)
-            self._check_and_apply_misadjustment_scale()
+            self._fire_aec3_misadj_scale()
 
             # FilterAnalyzer diag surface (always populated; AEC3 P1 default).
             self._diag['filter_analyzer_consistent'] = bool(
@@ -2316,9 +2224,9 @@ class AEC:
             self._diag['erle_factor'] = float(erle_factor) if 'erle_factor' in locals() else 0.0
             self._diag['divergence'] = self._divergence_indicator
             self._diag['using_render_based'] = False
-            self._diag['shadow_advantage'] = getattr(self, '_shadow_advantage', 1.0)
+            self._diag['shadow_advantage'] = self._shadow_advantage
             self._diag['dt_from_energy'] = self._dt_from_energy
-            self._diag['dt_from_shadow'] = getattr(self, '_dt_from_shadow', 0.0)
+            self._diag['dt_from_shadow'] = self._dt_from_shadow
             self._diag['erl_estimate'] = self._erl_estimate
             # Expose per-band ERL EMA values for auditing.
             self._diag['per_band_erl_lf'] = float(self._per_band_erl[0])
@@ -2329,7 +2237,7 @@ class AEC:
             self._diag['erle_windowed'] = float(erle_windowed) if 'erle_windowed' in locals() else 0.0
             # DT / filter debug fields
             self._diag['dt_indicator'] = float(dt_indicator) if 'dt_indicator' in locals() else 0.0
-            self._diag['main_err_smooth'] = float(getattr(self, 'main_err_smooth', 0.0))
+            self._diag['main_err_smooth'] = float(self.main_err_smooth)
             self._diag['shadow_err_smooth'] = float(getattr(self, 'shadow_err_smooth', 0.0))
             self._diag['main_paused'] = bool(self._regime_handler.main_paused)
             _epv_ratio = (self._epv_gain_fast / (self._epv_gain_slow + 1e-10)
@@ -2419,8 +2327,8 @@ class AEC:
             # All three must be present — a single shadow_advantage spike
             # (FS-early shadow lead) does NOT qualify.
             _ne_evidence = (
-                float(getattr(self, '_dt_from_energy', 0.0)) > 0.3
-                or float(getattr(self, '_dt_from_shadow', 0.0)) > 0.5
+                float(self._dt_from_energy) > 0.3
+                or float(self._dt_from_shadow) > 0.5
             )
             _main_err_jump = (
                 self._p3f_main_err_baseline > 1e-6
@@ -2612,7 +2520,7 @@ class AEC:
             or self._frame_count < (self.config.warmup_frames + 50)
         )
         _initial_transition_triggered = bool(just_converged)
-        _epc_hangover = self._epc_det.hangover_count if hasattr(self, '_epc_det') else 0
+        _epc_hangover = self._epc_det.hangover_count
         _usable_v1 = (self._filter_once_converged
                        and self._filter_converged
                        and not self.epc_active)
@@ -2678,7 +2586,7 @@ class AEC:
         except Exception:
             self._diag['filter_scale_ratio'] = 1.0
         # Inst ERLE smooth (read from ResFilter; lives there, not on AEC).
-        self._diag['inst_erle_smooth'] = float(getattr(self, '_inst_erle_smooth', 0.0))
+        self._diag['inst_erle_smooth'] = float(self._inst_erle_smooth)
         # Pre-EPC DT for D3 design: if we ZEROED raw_dt due to EPC, this records the
         # value we WOULD have had. Set in process() before the EPC zero (search marker).
         self._diag['raw_dt_pre_epc'] = float(getattr(self, '_round3_raw_dt_pre_epc', 0.0))
@@ -3074,7 +2982,7 @@ class AEC:
             filter_converged=_aec3_converged,
             pbfdkf=self.filter,
             regime_handler=self._regime_handler,
-            mu_final=float(getattr(self, '_last_mu_scale_diag', 1.0)),
+            mu_final=1.0,
             external_delay_samples=int(self._current_delay) if self._delay_active else -1,
             shadow_filter=self.shadow_filter,
             any_coarse_filter_converged=_coarse_conv_relaxed,
@@ -3141,8 +3049,64 @@ class AEC:
                 and hasattr(self.filter, 'get_time_domain_filter'))
             else None
         )
-        # SaturationDetector subtractor output max-abs (retired flag — kept
-        # at 0.0 for AEC3 contract; SDE retired).
+        # AEC3-strict ComputeAvgRenderReverb (aec_state.cc:47-99 +
+        # callsite cc:229-250). Produces a delay-aligned, reverb-augmented
+        # X² spectrum that is consumed ONLY by SubbandErleEstimator.
+        # ErlEstimator + SaturationDetector keep using bare render_psd.
+        #
+        # Strict port:
+        #   - X²[delay]: render PSD at the direct-path partition
+        #   - separate ReverbModel (_aec3_avg_render_reverb) with mild=false
+        #     (steady decay) — independent state from REE's reverb_model
+        #   - reverb_model updated with X²[delay+1] (one partition past
+        #     direct-path coverage) per call before reading reverb
+        #   - output[k] = X²[delay][k] + reverb_model.reverb[k]
+        # AEC3 aec_state.cc ComputeAvgRenderReverb: feed the ERLE estimator
+        # X²[delay] + previous-frame reverb so reverb-tail bins keep updating
+        # ERLE. Uses an independent ReverbModel from the residual path.
+        _x2_reverb_for_erle = None
+        _ree = getattr(self, "_aec3_ree", None)
+        _avg = getattr(self, "_aec3_avg_render_reverb", None)
+        if (_ree is not None and _avg is not None
+                and hasattr(self.filter, "X_buf")
+                and hasattr(self.filter, "partition_idx")):
+            _n_part = self.filter.n_partitions
+            # After filter.process() the partition_idx points to the
+            # NEXT write slot; the most recent X² lives at partition_idx-1.
+            _curr_p = (self.filter.partition_idx - 1) % _n_part
+            _delay = int(self._aec3_state.min_direct_path_filter_delay())
+            _delay = max(0, min(_delay, _n_part - 1))
+            _delay_idx = (_curr_p - _delay) % _n_part
+            _past_idx = (_curr_p - _delay - 1) % _n_part
+            _x2_at_delay = (np.abs(self.filter.X_buf[_delay_idx])
+                            ** 2).astype(np.float32)
+            _x2_past = (np.abs(self.filter.X_buf[_past_idx])
+                        ** 2).astype(np.float32)
+            # AEC3 ComputeAvgRenderReverb passes mild=false (steady) decay.
+            _decay_steady = _ree._reverb_decay(dominant_nearend=False)
+            _avg.update_no_freq_shaping(
+                _x2_past, scaling=1.0, decay=_decay_steady,
+            )
+            _x2_reverb_for_erle = (
+                _x2_at_delay + _avg.reverb
+            ).astype(np.float32)
+        # SaturationDetector subtractor output max-abs: AEC3-strict reads
+        # the time-domain echo-predictor peak from refined + shadow filters
+        # (SubtractorOutput.s_*_max_abs). Default-OFF preserves byte-equal;
+        # ON wires the real `_last_s_max_abs` cached in PBFDAF.process.
+        # AEC3 aec_state.cc SaturationDetector reads the time-domain echo-
+        # predictor peak (SubtractorOutput.s_*_max_abs) from refined + shadow.
+        _s_ref_max = float(getattr(self.filter, "_last_s_max_abs", 0.0))
+        _s_coa_max = (float(getattr(self.shadow_filter, "_last_s_max_abs", 0.0))
+                      if self.shadow_filter is not None else 0.0)
+        # active_render threshold = 100²×64/32768² ≈ 5.96e-4 (AEC3 aec_state.cc
+        # active_render_limit²×kBlockSize). NOTE: this keeps AEC3's block-SUM ×64
+        # against our per-sample MEAN far_pwr; the mean-correct AEC3-equivalent is
+        # 100²/32768² ≈ 9.31e-6, but Tier-C (2026-05-29) validated 9.31e-6 as a
+        # net regression (FS echo −0.033 + 25 catastrophic cases), so 5.96e-4 is
+        # the empirically-tuned production value, NOT a strict alignment. Re-tuning
+        # for our hop/fft is deferred to v3.22 Arc 4.
+        _ar_thr = 5.96e-4
         self._aec3_state.update(
             bridge=bridge,
             external_delay=ext_delay,
@@ -3150,13 +3114,14 @@ class AEC:
             capture_psd=near_psd,
             error_psd=error_psd,
             echo_psd=echo_psd,
-            active_render=(far_pwr > 1e-4),
+            active_render=(far_pwr > _ar_thr),
             render_block=render_block_scaled,
             filter_taps_full=_filter_taps_full,
             sde_filter_freq_response=None,
             sde_x2_history=None,
-            subtractor_s_refined_max_abs=0.0,
-            subtractor_s_coarse_max_abs=0.0,
+            subtractor_s_refined_max_abs=_s_ref_max,
+            subtractor_s_coarse_max_abs=_s_coa_max,
+            x2_reverb_for_erle=_x2_reverb_for_erle,
         )
         # A.1 trace: AecState-derived initial_state + transition edge (Gate 0).
         _a1_aec3_initial_state = self._aec3_state.initial_state_active()
@@ -3195,6 +3160,7 @@ class AEC:
         self._aec3_ree.attach_reverb_decay_estimator(
             n_partitions=int(self.filter.n_partitions),
             hop_size=int(self.filter.hop_size),
+            use_aec3_block_energy=False,
         )
         # Per-partition |W|² spectra. self.filter.W shape (n_partitions, n_freqs)
         # complex; |W|² is the AEC3-equivalent "frequency_response" matrix.
@@ -3217,28 +3183,26 @@ class AEC:
         # tail. Replaced 2026-05-28 (Tier A #5 consumer wire-up).
         _filter_q = self._aec3_state.get_inst_linear_quality_estimate()
         _stationary_block = self._aec3_stationarity.is_block_stationary()
-        # AEC3 JustResetEchoPath analogue: during the poor-coarse rescue
-        # hangover the linear residual is untrustworthy (stale ERLE +
-        # stale reverb tail from the pre-rescue regime). Override the
-        # usable_linear path so RES routes through nonlinear (R²=X²·g²)
-        # and SG sees raw Y² as nearend reference. Flag-gated default-OFF.
-        _just_reset_active = (
-            getattr(self.config,
-                    "use_aec3_just_reset_gate_on_linear_path", False)
-            and int(getattr(self, "_coarse_reset_hangover", 0)) > 0
-        )
-        self._aec3_just_reset_active = bool(_just_reset_active)
-        _effective_usable_linear = bool(
-            self._aec3_state.usable_linear_estimate() and not _just_reset_active
-        )
-        self._diag['aec3_just_reset_active'] = bool(_just_reset_active)
+        # JustResetEchoPath linear-path override (use_aec3_just_reset_gate_on_
+        # linear_path) was a default-OFF NOSHIP probe (CLOSED −8 dB; the
+        # nonlinear R²=X²·g² hangover crushed HF) — retired.
+        _just_reset_active = False
+        self._aec3_just_reset_active = False
+        _effective_usable_linear = bool(self._aec3_state.usable_linear_estimate())
+        self._diag['aec3_just_reset_active'] = False
         self._diag['aec3_effective_usable_linear'] = _effective_usable_linear
+        # ReverbDecayEstimator runs on partition-summed |W|² (the shipped path).
+        # The TD-impulse-response BlockEnergy variant
+        # (use_aec3_block_energy_for_reverb_decay) was a dormant default-OFF item
+        # — retired; no TD filter is passed.
+        _td_filter_for_decay = None
         self._aec3_ree.update_reverb_models(
             frequency_response=_w_mag2,
             filter_delay_blocks=_delay_blocks,
             filter_quality=_filter_q,
             usable_linear_filter=_effective_usable_linear,
             stationary_block=_stationary_block,
+            time_domain_filter=_td_filter_for_decay,
         )
 
         r2, r2_unb = self._aec3_ree.estimate(
@@ -3652,8 +3616,8 @@ Examples:
     parser.add_argument('--mu', type=float, default=0.3, help='Step size (default: 0.3)')
     parser.add_argument('--filter', type=int, default=0,
                         help='Filter length in samples (default: mode-dependent)')
-    parser.add_argument('--mode', choices=['lms', 'nlms', 'fdaf', 'pbfdaf', 'pbfdkf', 'subband'],
-                        default='nlms', help='Filter mode (default: nlms)')
+    parser.add_argument('--mode', choices=['fdaf', 'pbfdaf', 'pbfdkf', 'subband'],
+                        default='pbfdkf', help='Filter mode (default: pbfdkf)')
     parser.add_argument('--enable-dtd', action='store_true',
                         help='Enable DTD (default: off, shadow filter provides DT protection)')
     # Use BooleanOptionalAction with default=None so the CLI only
@@ -3686,8 +3650,6 @@ Examples:
 
     # Map mode string to enum
     mode_map = {
-        'lms': AecMode.LMS,
-        'nlms': AecMode.NLMS,
         'fdaf': AecMode.FDAF,
         'pbfdaf': AecMode.PBFDAF,
         'pbfdkf': AecMode.PBFDKF,
@@ -3698,10 +3660,8 @@ Examples:
 
     # Mode-dependent default step size
     mu = args.mu
-    if args.mode == 'lms' and args.mu == 0.3:
-        mu = 0.01  # LMS needs much smaller step size
-    elif args.mode == 'fdaf' and args.mu == 0.3:
-        mu = 0.1   # FDAFsingle-block: smaller mu to avoid overshoot
+    if args.mode == 'fdaf' and args.mu == 0.3:
+        mu = 0.1   # FDAF single-block: smaller mu to avoid overshoot
 
     # filter_length default: auto (-1) or user-specified
     filter_length = args.filter

@@ -36,9 +36,11 @@ class _ErleInstantaneous:
         *,
         clamp_quality_to_zero: bool = True,
         clamp_quality_to_one: bool = True,
+        quality_alpha: float = 0.07,
     ) -> None:
         self._clamp_zero = bool(clamp_quality_to_zero)
         self._clamp_one = bool(clamp_quality_to_one)
+        self._quality_alpha = float(quality_alpha)
         self._erle_log2: Optional[float] = None
         self._inst_quality_estimate = 0.0
         self._max_erle_log2 = -10.0
@@ -98,7 +100,7 @@ class _ErleInstantaneous:
         self._min_erle_log2 = min(self._min_erle_log2, self._erle_log2)
 
     def _update_quality_estimate(self) -> None:
-        alpha = 0.07
+        alpha = self._quality_alpha
         quality = 0.0
         if self._max_erle_log2 > self._min_erle_log2:
             quality = (self._erle_log2 - self._min_erle_log2) / (
@@ -113,12 +115,25 @@ class _ErleInstantaneous:
 class FullBandErleEstimator:
     """Single-channel fullband ERLE in log2 units (FullbandErleLog2)."""
 
-    def __init__(self, *, min_erle: float = 1.0, max_erle_l: float = 4.0) -> None:
+    def __init__(self, *, min_erle: float = 1.0, max_erle_l: float = 4.0,
+                 wallclock_smoothing: bool = False, hop_size: int = 160,
+                 sample_rate: int = 16000) -> None:
+        # AEC3 fullband EMAs (quality 0.07, erle_time_domain 0.05) are
+        # per-4ms-block; both fire on the 6-point accumulation here (per hop),
+        # 2.5× slower in wall-clock. Convert when ON (config
+        # use_aec3_wallclock_fullband_erle_smoothing). 0.0004 envelope left verbatim.
+        if wallclock_smoothing:
+            from ..aec3_scale import per_block_ema_alpha_to_per_hop as _ema
+            _q_alpha = float(_ema(0.07, hop_size, sample_rate))
+            self._td_alpha = float(_ema(0.05, hop_size, sample_rate))
+        else:
+            _q_alpha = 0.07
+            self._td_alpha = 0.05
         self._min_erle_log2 = _fast_log2(min_erle + _EPSILON)
         self._max_erle_lf_log2 = _fast_log2(max_erle_l + _EPSILON)
         self._hold_counter_inst_erle = 0
         self._erle_time_domain_log2 = self._min_erle_log2
-        self._instantaneous_erle = _ErleInstantaneous()
+        self._instantaneous_erle = _ErleInstantaneous(quality_alpha=_q_alpha)
         self._linear_filter_quality: Optional[float] = None
         self.reset()
 
@@ -143,7 +158,7 @@ class FullBandErleEstimator:
                 e2_sum = float(np.sum(e2))
                 if self._instantaneous_erle.update(y2_sum, e2_sum):
                     self._hold_counter_inst_erle = _BLOCKS_TO_HOLD_ERLE
-                    self._erle_time_domain_log2 += 0.05 * (
+                    self._erle_time_domain_log2 += self._td_alpha * (
                         self._instantaneous_erle.get_inst_erle_log2()
                         - self._erle_time_domain_log2
                     )

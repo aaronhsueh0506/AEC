@@ -8,11 +8,9 @@ Layout:
                          `AecEvent`, `EpcEvent`
 * ``config``           — `AecConfig` and ``from_preset()`` classmethod
 * ``preprocessing``    — `HighPassFilter`, `SaturationDetector`
-* ``erle``             — `FilterErleEstimator`, `FullbandErleEstimator`,
-                         `compute_erle_confidence`
 * ``delay/``           — AEC3-aligned `EchoPathDelayEstimator` +
                          `LegacyDelayShim` (`DelayEstimator` re-export)
-* ``filters``          — `NlmsFilter`, `PBFDAF`, `PBFDKF`
+* ``filters``          — `PBFDAF`, `PBFDKF`
 * ``detectors``        — `RenderActivityDetector`,
                          `FilterConvergenceAnalyzer`, `DoubleTalkAnalyzer`,
                          `FilterPlateauDetector`
