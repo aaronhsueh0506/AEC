@@ -2250,7 +2250,8 @@ class AEC:
             self._diag['res_gain_mean'] = 1.0
             self._diag['res_gain_min'] = 1.0
             self._diag['effective_g_min'] = 1.0
-            self._diag['far_activity'] = 0.0
+            # far_activity is written in _aec3_post (after active_render gate);
+            # do NOT overwrite here — this block runs after _aec3_post.
             self._diag['echo_psd_mean'] = 0.0
             self._diag['error_psd_mean'] = 0.0
             self._diag['p4b_dt_per_bin_mean'] = 0.0
@@ -3172,6 +3173,8 @@ class AEC:
         # the empirically-tuned production value, NOT a strict alignment. Re-tuning
         # for our hop/fft is deferred to v3.22 Arc 4.
         _ar_thr = 5.96e-4
+        _active_render_this_frame = bool(far_pwr > _ar_thr)
+        self._diag['far_activity'] = 1.0 if _active_render_this_frame else 0.0
         self._aec3_state.update(
             bridge=bridge,
             external_delay=ext_delay,
@@ -3179,7 +3182,7 @@ class AEC:
             capture_psd=near_psd,
             error_psd=error_psd,
             echo_psd=echo_psd,
-            active_render=(far_pwr > _ar_thr),
+            active_render=_active_render_this_frame,
             render_block=render_block_scaled,
             filter_taps_full=_filter_taps_full,
             sde_filter_freq_response=None,
