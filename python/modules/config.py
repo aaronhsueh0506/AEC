@@ -82,6 +82,46 @@ class AecConfig:
     hf_min_gain_floor_during_dne_enabled: bool = False
     hf_min_gain_floor_during_dne_db: float = -15.0
 
+    # ── v3.22 D2: SER-based gain floor (nearend preservation without DT detector) ──
+    # SER (Signal-to-Echo Ratio) floor in power domain, inserted after Wiener-gain
+    # clip in SuppressionGain._lower_band_gain.
+    #
+    # MECHANISM:
+    #   G_ser_floor[k] = nearend[k] / (nearend[k] + weighted_residual[k] + 1.0)
+    #   G[k]           = max(G_wiener[k], G_ser_floor[k] * ser_floor_strength)
+    #
+    # SELF-CONSISTENT (no external DT detector needed):
+    #   FS (nearend ≈ 0):  G_ser_floor → 0   → floor → 0   → echo suppression unaffected
+    #   DT (nearend >> echo): G_ser_floor → 1 → floor high  → nearend preserved
+    #   NE (nearend >> 0, echo ≈ 0): G_ser_floor → 1        → pass-through preserved
+    #
+    # WHY ser_floor_strength=0.5 default:
+    #   Full floor (strength=1.0) = Speex MMSE-STSA SPP behaviour. 0.5 blends
+    #   halfway between Wiener and SPP-like — empirical starting point for A/B.
+    #
+    # Default OFF for byte-equal; intended to bench with AEC_SER_FLOOR=1.
+    ser_floor_enabled: bool = False
+    ser_floor_strength: float = 0.5
+
+    # ── v3.22 D3: Soft nearend tuning blend (sigmoid ENR interpolation) ──
+    # Replaces the binary DNE is_ne switch in _gain_to_no_audible_echo with a
+    # continuous sigmoid weight derived from the LF-band ENR sum (same 1-2kHz
+    # band as DominantNearendDetector). ne_weight smoothly transitions from
+    # nearend_tuning (ne_weight→1) to normal_tuning (ne_weight→0) as ENR rises.
+    #
+    # ne_weight = sigmoid((enr_threshold - enr_lf) / softness)
+    # enr_tr = ne_weight * nearend_enr_tr + (1-ne_weight) * normal_enr_tr
+    #
+    # enr_threshold=0.25: DNE-canonical pivot (0.25 = echo < 0.25×ne → nearend dominant).
+    # softness=0.25: ENR range over which the transition occurs (±1 std = 0-0.5 ENR).
+    #
+    # DEFAULT ON (v3.22, 2026-05-30) — 800-case verdict: FS echo +0.042 avg
+    # (縮小 FS_movement −0.080 gap vs AEC2 → −0.036); DT deg −0.040 but
+    # +0.107/+0.230 buffer over AEC3 ship target. All ship targets met.
+    soft_nearend_blend_enabled: bool = True
+    soft_nearend_blend_enr_threshold: float = 0.25
+    soft_nearend_blend_softness: float = 0.25
+
     # ── v3.22 BUG FIX: ERLE render-activity x2 PSD-scale (revives reverb) ──
     # The render power fed to the ERLE estimators (ComputeAvgRenderReverb's
     # `_x2_reverb_for_erle` = |X_buf|² + avg_reverb, orchestrator ~3091) is in

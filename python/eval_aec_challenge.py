@@ -200,6 +200,16 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     _hf_min_env = os.environ.get('AEC_HF_MIN_GAIN')
     if _hf_min_env in ('0', '1') and 'hf_min_gain_floor_during_dne_enabled' not in config_overrides:
         config_overrides['hf_min_gain_floor_during_dne_enabled'] = (_hf_min_env == '1')
+    # ser_floor (v3.22 D2): SER-based gain floor — nearend preservation without DT detector.
+    # AEC_SER_FLOOR=1 → ser_floor_enabled=True (strength defaults to 0.5).
+    _ser_floor_env = os.environ.get('AEC_SER_FLOOR')
+    if _ser_floor_env in ('0', '1') and 'ser_floor_enabled' not in config_overrides:
+        config_overrides['ser_floor_enabled'] = (_ser_floor_env == '1')
+    # soft_nearend_blend (v3.22 D3): sigmoid ENR interpolation replaces binary DNE switch.
+    # AEC_SOFT_NE_BLEND=1 → soft_nearend_blend_enabled=True.
+    _soft_ne_env = os.environ.get('AEC_SOFT_NE_BLEND')
+    if _soft_ne_env in ('0', '1') and 'soft_nearend_blend_enabled' not in config_overrides:
+        config_overrides['soft_nearend_blend_enabled'] = (_soft_ne_env == '1')
     # AEC_MODE=PBFDAF for filter-class comparison (default PBFDKF)
     _mode_env = os.environ.get('AEC_MODE', 'PBFDKF').upper()
     _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF

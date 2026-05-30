@@ -515,7 +515,12 @@ class SuppressionGain:
                  use_wallclock_gain_ratchet: bool = False,
                  use_wallclock_low_noise_render_iir: bool = False,
                  hf_min_gain_floor_during_dne_enabled: bool = False,
-                 hf_min_gain_floor_during_dne_db: float = -15.0) -> None:
+                 hf_min_gain_floor_during_dne_db: float = -15.0,
+                 ser_floor_enabled: bool = False,
+                 ser_floor_strength: float = 0.5,
+                 soft_nearend_blend_enabled: bool = False,
+                 soft_nearend_blend_enr_threshold: float = 0.25,
+                 soft_nearend_blend_softness: float = 0.25) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
         self._hop_size = int(hop_size)
@@ -574,6 +579,19 @@ class SuppressionGain:
         self._hf_min_gain_floor_during_dne_power = float(
             10.0 ** (float(hf_min_gain_floor_during_dne_db) / 10.0)
         )
+        # v3.22 D2: SER-based gain floor (default OFF).
+        # See AecConfig.ser_floor_* for full spec.
+        self._ser_floor_enabled = bool(ser_floor_enabled)
+        self._ser_floor_strength = float(ser_floor_strength)
+        # v3.22 D3: Soft nearend tuning blend (default OFF).
+        # Replaces binary DNE is_ne switch with sigmoid LF-ENR weight.
+        # ne_weight = sigmoid((enr_threshold - enr_lf) / softness)
+        # enr_tr = ne_weight * nearend_enr_tr + (1-ne_weight) * normal_enr_tr
+        self._soft_ne_blend_enabled = bool(soft_nearend_blend_enabled)
+        self._soft_ne_blend_enr_thr = float(soft_nearend_blend_enr_threshold)
+        self._soft_ne_blend_softness = max(float(soft_nearend_blend_softness), 1e-6)
+        # LF endpoint bin for D3 ENR sum (AEC3-canonical 2000 Hz, same as DNE).
+        self._dne_lf_end = min(hz_to_bin(2000.0, self._n_bins, self._sr), self._n_bins)
         # Resolve freq-based config to bin indices once at construction.
         self._last_lf_band = hz_to_bin(self._config.last_lf_freq_hz, self._n_bins, self._sr)
         self._first_hf_band = hz_to_bin(self._config.first_hf_freq_hz, self._n_bins, self._sr)
@@ -703,6 +721,14 @@ class SuppressionGain:
         G_raw = self._gain_to_no_audible_echo(nearend, weighted_residual, comfort_noise)
         # Step 6: clip into [min, max].
         G = np.clip(G_raw, min_gain, max_gain)
+        # D2: SER-based gain floor (power domain, per-bin).
+        # G_ser_floor = nearend / (nearend + weighted_residual + 1.0)
+        # Self-consistent: no external DT detector needed.
+        # FS (nearend≈0): floor→0, echo suppression unaffected.
+        # DT (nearend>>echo): floor→high, nearend preserved (Speex-like).
+        if self._ser_floor_enabled:
+            G_ser_floor = nearend / (nearend + weighted_residual + 1.0)
+            np.maximum(G, G_ser_floor * self._ser_floor_strength, out=G)
         # Snapshot pre-HF-limiter G + ENR/EMR for paint-black diagnostic.
         # No audio effect; consumers via _last_lower_band_snap.
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -933,9 +959,29 @@ class SuppressionGain:
         self, nearend: np.ndarray, echo: np.ndarray, masker: np.ndarray
     ) -> np.ndarray:
         is_ne = self._ne_state_for_gain_rules()
-        enr_tr = self._nearend_enr_tr if is_ne else self._normal_enr_tr
-        enr_su = self._nearend_enr_su if is_ne else self._normal_enr_su
-        emr_tr = self._nearend_emr_tr if is_ne else self._normal_emr_tr
+        if self._soft_ne_blend_enabled:
+            # D3: sigmoid LF-ENR weight blends nearend_tuning ↔ normal_tuning.
+            # ne_weight → 1.0 when nearend dominates (low ENR) → nearend_tuning.
+            # ne_weight → 0.0 when echo dominates (high ENR) → normal_tuning.
+            ne_lf = float(np.sum(nearend[1:self._dne_lf_end]))
+            echo_lf = float(np.sum(echo[1:self._dne_lf_end]))
+            enr_lf = echo_lf / (ne_lf + 1.0)
+            _sig_arg = np.clip(
+                (enr_lf - self._soft_ne_blend_enr_thr) / self._soft_ne_blend_softness,
+                -50.0, 50.0,
+            )
+            ne_weight = 1.0 / (1.0 + np.exp(_sig_arg))
+            ne_w = float(ne_weight)
+            enr_tr = (ne_w * self._nearend_enr_tr
+                      + (1.0 - ne_w) * self._normal_enr_tr).astype(np.float32)
+            enr_su = (ne_w * self._nearend_enr_su
+                      + (1.0 - ne_w) * self._normal_enr_su).astype(np.float32)
+            emr_tr = (ne_w * self._nearend_emr_tr
+                      + (1.0 - ne_w) * self._normal_emr_tr).astype(np.float32)
+        else:
+            enr_tr = self._nearend_enr_tr if is_ne else self._normal_enr_tr
+            enr_su = self._nearend_enr_su if is_ne else self._normal_enr_su
+            emr_tr = self._nearend_emr_tr if is_ne else self._normal_emr_tr
         enr = echo / (nearend + 1.0)
         emr = echo / (masker + 1.0)
         g = np.ones(self._n_bins, dtype=np.float32)

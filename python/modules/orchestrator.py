@@ -506,6 +506,21 @@ class AEC:
                     getattr(self.config,
                             "hf_min_gain_floor_during_dne_db", -15.0)
                 ),
+                ser_floor_enabled=bool(
+                    getattr(self.config, "ser_floor_enabled", False)
+                ),
+                ser_floor_strength=float(
+                    getattr(self.config, "ser_floor_strength", 0.5)
+                ),
+                soft_nearend_blend_enabled=bool(
+                    getattr(self.config, "soft_nearend_blend_enabled", False)
+                ),
+                soft_nearend_blend_enr_threshold=float(
+                    getattr(self.config, "soft_nearend_blend_enr_threshold", 0.25)
+                ),
+                soft_nearend_blend_softness=float(
+                    getattr(self.config, "soft_nearend_blend_softness", 0.25)
+                ),
             )
             self._aec3_n_bins = n_bins
             self._aec3_sg_config = _sg_config
@@ -1089,6 +1104,21 @@ class AEC:
             hf_min_gain_floor_during_dne_db=float(
                 getattr(self.config,
                         "hf_min_gain_floor_during_dne_db", -15.0)
+            ),
+            ser_floor_enabled=bool(
+                getattr(self.config, "ser_floor_enabled", False)
+            ),
+            ser_floor_strength=float(
+                getattr(self.config, "ser_floor_strength", 0.5)
+            ),
+            soft_nearend_blend_enabled=bool(
+                getattr(self.config, "soft_nearend_blend_enabled", False)
+            ),
+            soft_nearend_blend_enr_threshold=float(
+                getattr(self.config, "soft_nearend_blend_enr_threshold", 0.25)
+            ),
+            soft_nearend_blend_softness=float(
+                getattr(self.config, "soft_nearend_blend_softness", 0.25)
             ),
         )
         self._aec3_ola_buf.fill(0)
