@@ -159,6 +159,47 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     # CNG override from global flag
     if _ENABLE_CNG and 'enable_cng' not in config_overrides:
         config_overrides['enable_cng'] = True
+    # v3.22: ERLE render-x2 PSD-scale fix (revives reverb model) — DEFAULT ON.
+    # AEC_ERLE_X2_SCALE=0 forces OFF to reproduce the pre-revival baseline.
+    _x2env = os.environ.get('AEC_ERLE_X2_SCALE')
+    if _x2env in ('0', '1') and 'erle_render_x2_psd_scale' not in config_overrides:
+        config_overrides['erle_render_x2_psd_scale'] = (_x2env == '1')
+    _rts = os.environ.get('AEC_REVERB_TAIL_STRENGTH')
+    if _rts is not None and 'reverb_tail_strength' not in config_overrides:
+        config_overrides['reverb_tail_strength'] = float(_rts)
+    # v3.22 E1: windowed Y2 for ERLE Y2/E2 coordinate consistency (DEFAULT ON).
+    # AEC_ERLE_Y2_WIN=0 forces OFF to reproduce the pre-E1 (old) baseline.
+    _e1env = os.environ.get('AEC_ERLE_Y2_WIN')
+    if _e1env in ('0', '1') and 'erle_windowed_capture_psd' not in config_overrides:
+        config_overrides['erle_windowed_capture_psd'] = (_e1env == '1')
+    # v3.22 E2: output base = raw capture Y when linear filter unusable (DEFAULT ON).
+    # AEC_OUT_CAPTURE_UNUSABLE=0 forces OFF.
+    _e2env = os.environ.get('AEC_OUT_CAPTURE_UNUSABLE')
+    if _e2env in ('0', '1') and 'output_capture_when_linear_unusable' not in config_overrides:
+        config_overrides['output_capture_when_linear_unusable'] = (_e2env == '1')
+    # B2 (v3.22): dne_loud_nearend_enr_relax_enabled — W4 re-audit flag.
+    # AEC_DNE_LOUD_NE=1 → True (relax ENR threshold for moderate DT).
+    _dne_loud_env = os.environ.get('AEC_DNE_LOUD_NE')
+    if _dne_loud_env in ('0', '1') and 'dne_loud_nearend_enr_relax_enabled' not in config_overrides:
+        config_overrides['dne_loud_nearend_enr_relax_enabled'] = (_dne_loud_env == '1')
+    # B5 (v3.22): enable_lf_filter_failure_r2_injection — candidate-B re-audit.
+    # AEC_LF_R2_INJECT=1 → True (inject R² for LF filter-failure frames).
+    _lf_r2_env = os.environ.get('AEC_LF_R2_INJECT')
+    if _lf_r2_env in ('0', '1') and 'enable_lf_filter_failure_r2_injection' not in config_overrides:
+        config_overrides['enable_lf_filter_failure_r2_injection'] = (_lf_r2_env == '1')
+    # W1' (v3.22): erle_startup_follows_convergence — drop fixed session-startup
+    # ERLE gate; update as soon as converged_filter=True. Fixes ERLE/usable_linear
+    # desync that causes near-end over-suppression at session start + after EPC.
+    # AEC_ERLE_STARTUP_CONV=1 → True.
+    _erle_startup_env = os.environ.get('AEC_ERLE_STARTUP_CONV')
+    if _erle_startup_env in ('0', '1') and 'erle_startup_follows_convergence' not in config_overrides:
+        config_overrides['erle_startup_follows_convergence'] = (_erle_startup_env == '1')
+    # hf_min_gain (v3.22): HF gain floor (−15 dB) during DNE active. Protects
+    # NE HF formants when filter hasn't converged at HF.
+    # AEC_HF_MIN_GAIN=1 → True.
+    _hf_min_env = os.environ.get('AEC_HF_MIN_GAIN')
+    if _hf_min_env in ('0', '1') and 'hf_min_gain_floor_during_dne_enabled' not in config_overrides:
+        config_overrides['hf_min_gain_floor_during_dne_enabled'] = (_hf_min_env == '1')
     # AEC_MODE=PBFDAF for filter-class comparison (default PBFDKF)
     _mode_env = os.environ.get('AEC_MODE', 'PBFDKF').upper()
     _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF

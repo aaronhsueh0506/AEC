@@ -425,6 +425,8 @@ class AEC:
                 sample_rate=int(self.config.sample_rate),
                 subband_wallclock_smoothing=False,
                 fullband_wallclock_smoothing=False,
+                erle_startup_follows_convergence=bool(
+                    getattr(self.config, 'erle_startup_follows_convergence', False)),
             ))
             # FFT-density-scaled PSD floors (AEC3 alignment, v3.21-shipped).
             # AEC3 hardcodes kFftLengthBy2=64 in EchoModelConfig /
@@ -455,6 +457,8 @@ class AEC:
                 use_aec3_echo_gen_window=True,
                 use_aec3_wallclock_reverb_smoothing=True,
             )
+            self._aec3_ree._reverb_tail_strength = float(
+                getattr(self.config, "reverb_tail_strength", 1.0))
             _sg_config = SuppressorConfig()
             # Stationarity zeroing is the shipped production default
             # (load-bearing safety net on cohort tail). Override the AEC3
@@ -479,6 +483,12 @@ class AEC:
             _sg_config.dominant_nearend_detection = _dc.replace(
                 _sg_config.dominant_nearend_detection,
                 use_wallclock_trigger_threshold=True,
+                loud_nearend_enr_relax_enabled=bool(getattr(
+                    self.config, 'dne_loud_nearend_enr_relax_enabled', False)),
+                loud_nearend_snr_factor=float(getattr(
+                    self.config, 'dne_loud_nearend_snr_factor', 3.0)),
+                loud_nearend_enr_threshold=float(getattr(
+                    self.config, 'dne_loud_nearend_enr_threshold', 0.75)),
             )
             self._aec3_sg = SuppressionGain(
                 n_bins=n_bins,
@@ -1040,6 +1050,8 @@ class AEC:
             sample_rate=int(self.config.sample_rate),
             subband_wallclock_smoothing=False,
             fullband_wallclock_smoothing=False,
+            erle_startup_follows_convergence=bool(
+                getattr(self.config, 'erle_startup_follows_convergence', False)),
         ))
         # Re-derive fft-density-scaled echo_model so a mid-stream reset keeps
         # the same per-bin PSD floors as init (see __init__ note).
@@ -1060,6 +1072,8 @@ class AEC:
             use_aec3_echo_gen_window=True,
             use_aec3_wallclock_reverb_smoothing=True,
         )
+        self._aec3_ree._reverb_tail_strength = float(
+            getattr(self.config, "reverb_tail_strength", 1.0))
         self._aec3_sg = SuppressionGain(
             n_bins=n_bins,
             config=self._aec3_sg_config,
@@ -2922,6 +2936,17 @@ class AEC:
         echo_psd = (np.abs(_sel_echo_spec) ** 2 * _PSD_SCALE).astype(np.float32)
         error_spec = _sel_esw
         error_psd = (np.abs(error_spec) ** 2 * _PSD_SCALE).astype(np.float32)
+        # E1: windowed Y2 for ERLE Y2/E2 coordinate consistency (config-gated,
+        # ERLE-estimator only). E2 (error_psd) is windowed (_sel_esw); pair it
+        # with a windowed Y2 = |near_spec_win|², where near_spec_win =
+        # error_spec_windowed + echo_spec (same windowed-capture reconstruction
+        # the selection path uses above). None (default) → ERLE keeps near_psd.
+        _capture_psd_erle = None
+        if getattr(self.config, "erle_windowed_capture_psd", False):
+            _near_spec_win = (self.filter.error_spec_windowed
+                              + self.filter.echo_spec).astype(np.complex64)
+            _capture_psd_erle = (np.abs(_near_spec_win) ** 2
+                                 * _PSD_SCALE).astype(np.float32)
         far_pwr = float(np.mean(far_end ** 2))
         # Render block is read by LowNoiseRenderDetector + SaturationDetector
         # using AEC3 absolute thresholds; rescale to int16 amplitude.
@@ -3090,6 +3115,16 @@ class AEC:
             _x2_reverb_for_erle = (
                 _x2_at_delay + _avg.reverb
             ).astype(np.float32)
+            # v3.22 BUG FIX (default OFF): scale the ERLE render-activity x2
+            # to the int16² PSD convention so FullBandErle/SubbandErle's
+            # `_X2_BAND_ENERGY_THRESHOLD` gate (calibrated for that scale, as
+            # is far_psd/capture_psd/error_psd) can actually fire. Without it
+            # the gate never crosses → linear_filter_quality stays None →
+            # reverb model dead. See AecConfig.erle_render_x2_psd_scale.
+            if getattr(self.config, "erle_render_x2_psd_scale", False):
+                _x2_reverb_for_erle = (
+                    _x2_reverb_for_erle * _PSD_SCALE
+                ).astype(np.float32)
         # SaturationDetector subtractor output max-abs: AEC3-strict reads
         # the time-domain echo-predictor peak from refined + shadow filters
         # (SubtractorOutput.s_*_max_abs). Default-OFF preserves byte-equal;
@@ -3122,6 +3157,7 @@ class AEC:
             subtractor_s_refined_max_abs=_s_ref_max,
             subtractor_s_coarse_max_abs=_s_coa_max,
             x2_reverb_for_erle=_x2_reverb_for_erle,
+            capture_psd_erle=_capture_psd_erle,
         )
         # A.1 trace: AecState-derived initial_state + transition edge (Gate 0).
         _a1_aec3_initial_state = self._aec3_state.initial_state_active()
@@ -3427,8 +3463,37 @@ class AEC:
         # fft_size). Multiplying it by sqrt-Hann synthesis and accumulating
         # at 50% overlap gives Hann-summed perfect reconstruction.
         #
-        # Apply gain to the linear residual.
-        e_out_spec = error_spec * gain.astype(error_spec.dtype, copy=False)
+        # Apply gain to the linear residual (E2: switch to raw capture Y when the
+        # linear filter is unusable, matching AEC3 echo_remover.cc:475
+        # Y_fft = UseLinearFilterOutput() ? E : Y). Y = near_spec_win =
+        # error_spec + _sel_echo_spec (windowed capture). Default OFF → always E.
+        _out_base = error_spec
+        if (getattr(self.config, "output_capture_when_linear_unusable", False)
+                and not _effective_usable_linear):
+            _y_base = (error_spec + _sel_echo_spec).astype(error_spec.dtype,
+                                                           copy=False)
+            # Surgical guard (v3.22, 2026-05-30): fall back to the capture Y ONLY
+            # when the residual is genuinely worse than the mic (diverged
+            # over-output, |E|>|Y|). Trace verdict: the usable_linear gate opens
+            # 44-100% of frames, but |E|>|Y| fires <1% of unusable frames
+            # (E ≈ 0.15·Y typically) — the over-output pathology is GENUINELY rare
+            # on this corpus (Y-reconstruction + gate both verified correct; not a
+            # port bug or threshold mismatch). Shipped default-ON as a correctness
+            # guard: never harmful (≈0 on 800-case), bounds the rare diverged frame.
+            # Frame-level (matches AEC3 per-block UseLinearFilterOutput).
+            #
+            # Why AECMOS ≈ 0.000 (not a failure): gain does NOT collapse to 0 when
+            # usable_linear=False — the only gain=0 path is saturated_echo=True
+            # (SaturationDetector, orthogonal). When filter diverges and E→Y switch
+            # fires, gain is still the normal audibility-floor value (~0.1–1.0
+            # amplitude). The net wash arises because: switching from corrupted-E to
+            # raw-Y removes echo suppression contribution of the linear filter at the
+            # same time it removes the residual noise — two effects cancel. The port
+            # is correct; the ≈0 improvement is the expected algorithm tradeoff.
+            if (float(np.sum(np.abs(error_spec) ** 2))
+                    > float(np.sum(np.abs(_y_base) ** 2))):
+                _out_base = _y_base
+        e_out_spec = _out_base * gain.astype(error_spec.dtype, copy=False)
 
         # Strict CNG injection — port of GenerateRandomSinTableIndices +
         # GenerateComfortNoise (comfort_noise_generator.cc:61-127) and

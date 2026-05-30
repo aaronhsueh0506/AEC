@@ -69,6 +69,9 @@ class AecStateConfig:
     sample_rate: int = 16000
     subband_wallclock_smoothing: bool = False
     fullband_wallclock_smoothing: bool = False
+    # v3.22 W1': ERLE startup gate follows convergence (drop fixed session
+    # startup window; update as soon as converged_filter is True). Default OFF.
+    erle_startup_follows_convergence: bool = False
     # TransparentMode is permanently disabled in production (legacy
     # 10-frame ERLE latch was retired); kwarg preserved as no-op for
     # AEC3-spec API compatibility.
@@ -104,6 +107,7 @@ class AecState:
             max_erle_h=self._config.erle_max_h,
             subband_wallclock_smoothing=self._config.subband_wallclock_smoothing,
             fullband_wallclock_smoothing=self._config.fullband_wallclock_smoothing,
+            startup_follows_convergence=self._config.erle_startup_follows_convergence,
             hop_size=self._config.hop_size,
             sample_rate=self._config.sample_rate,
         )
@@ -249,6 +253,11 @@ class AecState:
         # instead of bare render_psd. ErlEstimator + SaturationDetector
         # keep using render_psd.
         x2_reverb_for_erle: Optional[np.ndarray] = None,
+        # E1: windowed Y2 (capture PSD) for the ErleEstimator ONLY, so ERLE's
+        # Y2/E2 share the sqrt-Hann coordinate (E2/error_psd is already windowed).
+        # When None (default), ERLE uses the rectangular capture_psd. ErlEstimator
+        # + saturation keep capture_psd.
+        capture_psd_erle: Optional[np.ndarray] = None,
     ) -> None:
         """Per-frame state update. Strict order matches aec_state.cc:189-291.
 
@@ -299,7 +308,7 @@ class AecState:
             self._erle_estimator.reset(delay_change=False)
         self._erle_estimator.update(
             x2=x2_reverb_for_erle if x2_reverb_for_erle is not None else render_psd,
-            y2=capture_psd,
+            y2=capture_psd_erle if capture_psd_erle is not None else capture_psd,
             e2=error_psd,
             converged_filter=any_filter_converged,
             filter_freq_response=sde_filter_freq_response,

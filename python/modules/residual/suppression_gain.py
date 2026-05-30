@@ -141,6 +141,19 @@ class DominantNearendConfig:
     use_wallclock_trigger_threshold: bool = False
     use_during_initial_phase: bool = True
     use_unbounded_echo_spectrum: bool = True
+    # v3.22 W4 — relax the ENR trigger when the near-end overwhelmingly
+    # dominates the noise floor. During DT the NE-inflated error keeps ERLE
+    # low so R² (echo_sum) ≈ ne_sum (enr 0.64–1.39) → the standard ENR test
+    # (echo < enr_threshold·ne, 0.25) vetoes NE-state even though SNR passes
+    # 240×–100000×, so the near-end is wiped. When ON and the near-end is
+    # `loud` (ne_sum > loud_nearend_snr_factor · snr_threshold · noise_sum),
+    # the ENR trigger uses `loud_nearend_enr_threshold` (0.75) instead. The
+    # early_exit (echo > enr_exit_threshold·ne) guard is untouched. FS is
+    # self-guarded: there the "near-end" estimate IS residual echo so enr ≈ 1.
+    # Default OFF for byte-equal. See AecConfig.dne_loud_nearend_* for spec.
+    loud_nearend_enr_relax_enabled: bool = False
+    loud_nearend_snr_factor: float = 3.0
+    loud_nearend_enr_threshold: float = 0.75
     # LF-only sum endpoint for nearend detection. AEC3 canonical 2000 Hz
     # (= bin 16 exclusive @ fft=128 = `spectrum.begin()+16` in
     # dominant_nearend_detector.cc:43-44). Covers F0+F1+F2 — speech
@@ -432,7 +445,15 @@ class _DominantNearendDetector:
         # division floor. initial_state gates the trigger inline, NOT via
         # early-return (hold counter must still decrement below).
         trigger_initial_gate = (not initial_state or c.use_during_initial_phase)
-        trigger_enr_pass = echo_sum < c.enr_threshold * ne_sum
+        # W4: relax the ENR trigger threshold when the near-end overwhelmingly
+        # dominates the noise floor (loud, clearly-present NE). No-op when the
+        # flag is OFF (eff_enr_thr == enr_threshold → byte-equal).
+        loud_nearend = (
+            c.loud_nearend_enr_relax_enabled
+            and ne_sum > c.loud_nearend_snr_factor * c.snr_threshold * noise_sum
+        )
+        eff_enr_thr = c.loud_nearend_enr_threshold if loud_nearend else c.enr_threshold
+        trigger_enr_pass = echo_sum < eff_enr_thr * ne_sum
         trigger_snr_pass = ne_sum > c.snr_threshold * noise_sum
         trigger_active = trigger_initial_gate and trigger_enr_pass and trigger_snr_pass
         if trigger_active:
@@ -464,6 +485,8 @@ class _DominantNearendDetector:
             "enr": echo_sum / (ne_sum + 1.0),
             "snr": ne_sum / (noise_sum + 1.0),
             "enr_threshold": float(c.enr_threshold),
+            "loud_nearend": bool(loud_nearend),
+            "eff_enr_thr": float(eff_enr_thr),
             "enr_exit_threshold": float(c.enr_exit_threshold),
             "snr_threshold": float(c.snr_threshold),
             "trigger_enr_pass": bool(trigger_enr_pass),

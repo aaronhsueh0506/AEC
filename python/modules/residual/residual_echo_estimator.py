@@ -152,6 +152,9 @@ class ResidualEchoEstimator:
         self._echo_model = echo_model
         self._ep_strength = ep_strength
         self._reverb_cfg = reverb
+        # v3.22: reverb-tail R² conservativeness scale (set by the orchestrator
+        # from AecConfig.reverb_tail_strength). 1.0 = unchanged. See config.
+        self._reverb_tail_strength = 1.0
         self._sr = int(sr)
         self._hop_size = int(hop_size)
         # R0.2: corrected residual noise gate (27509.42 int16² vs buggy 27509562).
@@ -387,7 +390,7 @@ class ResidualEchoEstimator:
                 render_psd, s2_linear, dominant_nearend,
                 filter_length_blocks,
             )
-            reverb = self._reverb_model.reverb
+            reverb = self._reverb_model.reverb * self._reverb_tail_strength
             self._last_r2_direct_component = r2.copy()
             self._last_r2_reverb_component = np.asarray(
                 reverb, dtype=np.float32
@@ -473,7 +476,7 @@ class ResidualEchoEstimator:
                     self._reverb_model.update_no_freq_shaping(
                         delayed_render, scaling=ep_late, decay=decay
                     )
-                reverb = self._reverb_model.reverb
+                reverb = self._reverb_model.reverb * self._reverb_tail_strength
                 self._last_r2_direct_component = r2.copy()
                 self._last_r2_reverb_component = np.asarray(
                     reverb, dtype=np.float32

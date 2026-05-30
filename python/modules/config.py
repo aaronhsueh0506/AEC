@@ -82,6 +82,125 @@ class AecConfig:
     hf_min_gain_floor_during_dne_enabled: bool = False
     hf_min_gain_floor_during_dne_db: float = -15.0
 
+    # ── v3.22 BUG FIX: ERLE render-activity x2 PSD-scale (revives reverb) ──
+    # The render power fed to the ERLE estimators (ComputeAvgRenderReverb's
+    # `_x2_reverb_for_erle` = |X_buf|² + avg_reverb, orchestrator ~3091) is in
+    # the RAW |far_spec|² scale, but FullBandErle/SubbandErle's render-activity
+    # gate `_X2_BAND_ENERGY_THRESHOLD = 4.4e7` is an AEC3 int16²-convention
+    # constant. far_psd / capture_psd / error_psd are all scaled ×_PSD_SCALE
+    # (32768²) for that convention; `_x2_reverb_for_erle` was NOT — so the gate
+    # sits ~6-7 orders of magnitude too high, x2_sum never crosses it
+    # (measured 0% on aec_record AND every cohort FS case), FullBandErle never
+    # accumulates → `linear_filter_quality` stays None forever →
+    # ReverbFrequencyResponse skips its update → reverb tail = 0 → the
+    # late-reverb / far-offset echo tail is never suppressed (far-offset
+    # residual leaks 15-22 dB vs AEC3; reverb model is DEAD across all cases).
+    # When ON, scale `_x2_reverb_for_erle` by _PSD_SCALE to match far_psd and
+    # the threshold. Validated revival on aec_record: quality 0→32%, reverb
+    # tail 0→73%, far-offset −18→−30 dB. DEFAULT ON (v3.22, 2026-05-30) —
+    # reverb-revival bug fix. 800-case on the E1-ON baseline: FS echo +0.07
+    # (deg held), DT echo +0.03 / deg −0.02 (affordable — post-fix DT deg 1.99
+    # still beats AEC3's 1.86, and A1 near-protection recovers it). The shelved
+    # buggy-baseline verdict (DT −0.05) was the re-audit's first payoff: cost
+    # halved on the corrected baseline. AEC_ERLE_X2_SCALE=0 forces OFF.
+    erle_render_x2_psd_scale: bool = True
+
+    # v3.22: reverb-tail conservativeness (only meaningful when the reverb model
+    # is revived via erle_render_x2_psd_scale). Scales the additive reverb-tail
+    # R² contribution. 1.0 = full AEC3 reverb output; <1.0 = more conservative.
+    # The revived reverb's 800-case DT-deg cost (−0.04/−0.05) was traced to this
+    # additive reverb-tail R² over-suppressing near in double-talk; FS far-only
+    # gain is pure (no near). This knob tunes the FS-gain ↔ DT-cost Pareto.
+    reverb_tail_strength: float = 1.0
+
+    # ── v3.22 E1: ERLE Y2/E2 coordinate consistency (windowed capture PSD) ──
+    # AEC3 forms BOTH Y2 (capture power) and E2 (residual power) from the same
+    # WindowedPaddedFft (sqrt-Hann; echo_remover.cc:445). Our E2 (error_psd) is
+    # windowed (_sel_esw) but Y2 (capture_psd = |filter.near_spec|²) is the RAW
+    # rectangular overlap-save FFT (filters.py:192) — a mixed coordinate. The
+    # sqrt-Hann window drops E2's energy ~½ vs a rectangular E2, so ERLE = Y2/E2
+    # (rect / windowed) is inflated ~3 dB → the linear-path R² = s2_linear / ERLE
+    # is UNDER-estimated → far-only echo leaks. When ON, feed the ERLE estimator
+    # a windowed Y2 (near_spec_win = error_spec_windowed + echo_spec, the same
+    # windowed-capture reconstruction the selection path uses at
+    # orchestrator:2889) so Y2/E2 share the sqrt-Hann coordinate. ERLE-estimator
+    # ONLY (ERL / saturation keep the rectangular capture_psd). SOFT-nores
+    # (post-filter). DEFAULT ON (v3.22, 2026-05-30) — confirmed correctness fix.
+    # The clamps this ERLE feeds (1.0/4.0/1.5) are AEC3-canonical
+    # (echo_canceller3_config.h:123-125), built for the CONSISTENT coordinate, so
+    # the mixed rect/Hann ERLE was the bug (no orphaned clamp-tune to re-derive).
+    # 800-case e1-vs-e0: FS echo +0.08 (deg held), DT echo +0.04, NE deg +0.00;
+    # DT deg −0.05 = removal of the accidental near-protection the inflated ERLE
+    # provided → to be recovered by EXPLICIT DT near-protection (Track A), not by
+    # reverting this fix. AEC_ERLE_Y2_WIN=0 forces OFF (reproduces old baseline).
+    erle_windowed_capture_psd: bool = True
+
+    # ── v3.22 E2: output base = raw capture Y when the linear filter is unusable ─
+    # AEC3 (echo_remover.cc:475) forms the output from `UseLinearFilterOutput()
+    # ? E : Y` — when the linear filter is NOT usable it applies the suppression
+    # gain to the RAW windowed capture Y, not the (diverged/unreliable) linear
+    # residual E. `UseLinearFilterOutput() == UsableLinearEstimate()` (aec_state.h
+    # :54-63, identical bodies). We always emit `error_spec(E) × gain` (orchestrator
+    # ~3467); on diverged frames (E > Y, e.g. the negative-ERLE cases) that
+    # suppresses a residual louder than the mic. When ON and usable_linear is
+    # False, switch the output base to Y = near_spec_win (= error_spec +
+    # _sel_echo_spec, the windowed capture) — but ONLY when frame |E|² > |Y|²
+    # (genuine over-output). The blanket switch (no |E|>|Y| guard) re-leaked echo
+    # on unusable-but-cancelling frames → 800-case FS echo −0.023; the guard aims
+    # to keep the DT/NE deg gains (+0.013/+0.014) without that regress. SOFT-nores
+    # (gain unchanged). VERDICT (2026-05-30): guarded version ≈ 0.000 on 800-case
+    # AECMOS — NOT because the gate rarely fires, but because perceptual effect is
+    # neutral. Gate/fire trace: usable_linear=False opens 30.8% of frames overall;
+    # |E|>|Y| fires 34.5% of those (10.6% of all frames); FS_movement highest
+    # (41% fire rate). 800-case ≈0 because during movement/divergence suppressor
+    # gain is already near-zero → Y×gain ≈ E×gain ≈ 0 either way. But E2 is a
+    # CORRECT AEC3 port (Y-reconstruction verified, gate signal correct, not a
+    # threshold/input mismatch) and protects against genuine over-output on
+    # diverged frames. DEFAULT ON per user directive: correct port → ship ON.
+    # AEC_OUT_CAPTURE_UNUSABLE=0 forces OFF.
+    output_capture_when_linear_unusable: bool = True
+
+    # ── v3.22 W1': ERLE startup gate follows convergence (NE over-suppression) ─
+    # The ERLE estimator is frozen at min_erle for a fixed 200-hop session
+    # startup window (and re-armed on every delay-change), while usable_linear
+    # opens earlier (~40 active-render hops + convergence_seen). In that desync
+    # window the linear residual path runs R² = s2_linear / min_erle = s2_linear
+    # (undivided) → min_gain collapses → near-end over-suppressed in the first
+    # ~2 s and after each path change. When ON, ErleEstimator drops the fixed
+    # session-startup gate and updates as soon as `converged_filter` is True
+    # (Subband/FullBand already self-gate on convergence), so ERLE-readiness
+    # tracks the same convergence signal usable_linear uses. SOFT-nores
+    # (post-filter; no linear-adaptation change). Default OFF for byte-equal.
+    erle_startup_follows_convergence: bool = False
+
+    # ── v3.22 W4: DNE ENR-relax when near-end is loud vs noise (DT NE protect) ─
+    # The dominant-nearend (DNE) detector only declares NE-state when the
+    # residual-echo estimate is small vs the near-end (echo_sum <
+    # enr_threshold·ne_sum, enr_threshold=0.25). During doubletalk the near-end
+    # leaks into the filter error, so ERLE reads low (1.0–2.1) and R² =
+    # s2_linear/ERLE stays large → echo_sum ≈ ne_sum (measured enr 0.64–1.39) →
+    # the ENR test fails 76% → NE-state fires only ~45% of NE-present collapse
+    # hops → the suppressor uses its aggressive `_normal_*` tuning and wipes the
+    # near-end (gain → 0.00–0.016, −36 dB) even though the near-end is
+    # 240×–100000× above the noise floor (the SNR trigger passes overwhelmingly).
+    #
+    # SPEC (when flag ON): when the near-end overwhelmingly dominates the noise
+    # floor (ne_sum > snr_factor · snr_threshold · noise_sum, i.e. far past the
+    # SNR-trigger bar), relax the ENR trigger threshold from enr_threshold (0.25)
+    # to `enr_threshold` below (0.75). A clearly-present loud near-end is not
+    # abandoned just because the NE-inflated echo estimate looks large. AEC3's
+    # `early_exit` (echo > enr_exit_threshold·ne, =10×) is preserved as the
+    # genuine-echo-dominance guard. FS is self-guarded: in far-end-only the
+    # "near-end" estimate IS residual echo so enr ≈ 1 > 0.75 → no false NE-state.
+    #
+    # Beyond-AEC3 (AEC3's DNE is deliberately echo-protective during DT); aligns
+    # with the PRIMARY=near-end / SECONDARY=echo priority. Cost: some DT echo
+    # leak — matched-magnitude 800-case Pareto is the arbiter. SOFT-nores
+    # (post-filter detector → gain tuning only). Default OFF for byte-equal.
+    dne_loud_nearend_enr_relax_enabled: bool = False
+    dne_loud_nearend_snr_factor: float = 3.0
+    dne_loud_nearend_enr_threshold: float = 0.75
+
     # ── v3.22 future work: LF filter-failure R² injection (NOT AEC3-strict) ─
     # AEC3 itself has no per-bin mechanism to detect "linear filter is
     # clearly failing at this bin AND ref signal has strong content here";

@@ -26,10 +26,12 @@ class ErleEstimator:
         use_onset_detection: bool = True,
         subband_wallclock_smoothing: bool = False,
         fullband_wallclock_smoothing: bool = False,
+        startup_follows_convergence: bool = False,
         hop_size: int = 160,
         sample_rate: int = 16000,
     ) -> None:
         self._startup_hops = int(startup_phase_length_hops)
+        self._startup_follows_convergence = bool(startup_follows_convergence)
         self._fullband = FullBandErleEstimator(
             min_erle=min_erle, max_erle_l=max_erle_l,
             wallclock_smoothing=fullband_wallclock_smoothing,
@@ -66,7 +68,13 @@ class ErleEstimator:
         x2_history: Optional[np.ndarray] = None,
     ) -> None:
         self._blocks_since_reset += 1
-        if self._blocks_since_reset < self._startup_hops:
+        # W1' (startup_follows_convergence): when ON, skip the fixed session
+        # startup gate and update as soon as the filter is converged — the
+        # sub-estimators already early-return when converged_filter=False, so
+        # ERLE-readiness tracks the same convergence signal usable_linear uses
+        # instead of an independent 200-hop clock that desyncs from it.
+        if (not self._startup_follows_convergence
+                and self._blocks_since_reset < self._startup_hops):
             return
         self._subband.update(x2=x2, y2=y2, e2=e2, converged_filter=converged_filter)
         self._fullband.update(x2=x2, y2=y2, e2=e2, converged_filter=converged_filter)
