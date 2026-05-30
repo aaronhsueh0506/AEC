@@ -122,6 +122,20 @@ class AecConfig:
     soft_nearend_blend_enr_threshold: float = 0.25
     soft_nearend_blend_softness: float = 0.25
 
+    # ── v3.22 L1: Kuech-Kellermann second-order nonlinear residual ──
+    # Adds quadratic render PSD term to the nonlinear R² path to capture
+    # loudspeaker harmonic / intermodulation distortion echo.
+    # Only fires when usable_linear=False (filter not converged) — the
+    # primary failure mode for FS worst cases (pcb1Nh0Z gap −1.22, 9xjhiFb −1.30 vs AEC3).
+    #
+    # FORMULA: R²_nl = nl_alpha × x2² / 1.07e7
+    #   1.07e7 = -20dBFS per-bin in int16² units (calibration reference).
+    #   nl_alpha=0.1 → 10% addition at -20dBFS, grows quadratically louder.
+    #
+    # Default OFF for byte-equal; bench with AEC_NL_ALPHA=0.1 (or other values).
+    nl_r2_enabled: bool = False
+    nl_r2_alpha: float = 0.1
+
     # ── v3.22 BUG FIX: ERLE render-activity x2 PSD-scale (revives reverb) ──
     # The render power fed to the ERLE estimators (ComputeAvgRenderReverb's
     # `_x2_reverb_for_erle` = |X_buf|² + avg_reverb, orchestrator ~3091) is in

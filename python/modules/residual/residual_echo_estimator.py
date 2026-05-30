@@ -147,6 +147,10 @@ class ResidualEchoEstimator:
         # AEC3 applies α=0.2·quality per 4 ms block; our verbatim port
         # applied per 10 ms hop (2.5× too slow). Default OFF for byte-equal.
         use_aec3_wallclock_reverb_smoothing: bool = False,
+        # L1: Kuech-Kellermann second-order nonlinear residual (default OFF).
+        # See AecConfig.nl_r2_* for full spec.
+        nl_r2_enabled: bool = False,
+        nl_r2_alpha: float = 0.1,
     ) -> None:
         self._n_bins = int(n_bins)
         self._echo_model = echo_model
@@ -223,6 +227,14 @@ class ResidualEchoEstimator:
         # where it knows `n_partitions` and `hop_size`.
         self._reverb_decay_est: Optional[ReverbDecayEstimator] = None
         self._reverb_freq_resp: Optional[ReverbFrequencyResponse] = None
+        # L1: Kuech-Kellermann second-order nonlinear residual (default OFF).
+        # R²_nl = nl_alpha × x2² / _NL_NORM_POWER, added to nonlinear path only.
+        # _NL_NORM_POWER ≈ -20 dBFS per-bin in int16² units:
+        #   RMS=0.1 float → mean_energy = 0.01 → ×32768² → 1.07e7 per bin.
+        # At -20dBFS: r2_nl ≈ nl_alpha × r2 (linear); grows quadratically louder.
+        self._nl_r2_enabled = bool(nl_r2_enabled)
+        self._nl_r2_alpha = float(nl_r2_alpha)
+        self._nl_norm_power = 1.07e7  # float, int16² units, -20dBFS reference
         if self._reverb_cfg.use_freq_response:
             self._reverb_freq_resp = ReverbFrequencyResponse(
                 n_freqs=self._n_bins,
@@ -455,6 +467,16 @@ class ResidualEchoEstimator:
                 np.maximum(x2, 0.0, out=x2)
                 r2[:] = x2 * echo_path_gain
                 r2_unbounded[:] = x2 * echo_path_gain
+                # L1: Kuech-Kellermann second-order nonlinear residual.
+                # Adds quadratic render PSD term to capture loudspeaker
+                # harmonic / intermodulation distortion echo.
+                # Only in nonlinear path (filter not converged): linear path
+                # already captures the true residual via S²/ERLE.
+                if self._nl_r2_enabled and self._nl_r2_alpha > 0.0:
+                    r2_nl = (self._nl_r2_alpha
+                             * x2 ** 2 / self._nl_norm_power).astype(np.float32)
+                    r2 += r2_nl
+                    r2_unbounded += r2_nl
             # AEC3 cc:294-300 — UpdateReverb(kNonLinear) + AddReverb.
             if (
                 self._echo_model.model_reverb_in_nonlinear_mode

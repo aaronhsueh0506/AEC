@@ -210,6 +210,17 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     _soft_ne_env = os.environ.get('AEC_SOFT_NE_BLEND')
     if _soft_ne_env in ('0', '1') and 'soft_nearend_blend_enabled' not in config_overrides:
         config_overrides['soft_nearend_blend_enabled'] = (_soft_ne_env == '1')
+    # nl_r2 (v3.22 L1): Kuech-Kellermann nonlinear R² addition.
+    # AEC_NL_ALPHA=<float> → nl_r2_enabled=True, nl_r2_alpha=<float>.
+    # AEC_NL_ALPHA=0 → disabled. AEC_NL_ALPHA=0.1 → default alpha.
+    _nl_alpha_env = os.environ.get('AEC_NL_ALPHA')
+    if _nl_alpha_env is not None and 'nl_r2_enabled' not in config_overrides:
+        try:
+            _nl_alpha_val = float(_nl_alpha_env)
+            config_overrides['nl_r2_enabled'] = (_nl_alpha_val > 0.0)
+            config_overrides['nl_r2_alpha'] = _nl_alpha_val
+        except ValueError:
+            pass
     # AEC_MODE=PBFDAF for filter-class comparison (default PBFDKF)
     _mode_env = os.environ.get('AEC_MODE', 'PBFDKF').upper()
     _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF
