@@ -132,8 +132,11 @@ class AecConfig:
     #   1.07e7 = -20dBFS per-bin in int16² units (calibration reference).
     #   nl_alpha=0.1 → 10% addition at -20dBFS, grows quadratically louder.
     #
-    # Default OFF for byte-equal; bench with AEC_NL_ALPHA=0.1 (or other values).
-    nl_r2_enabled: bool = False
+    # DEFAULT ON (v3.22, 2026-05-31) — 800-case vs d3 baseline:
+    # FS echo +0.079/+0.106 (FS_movement 3.483→3.589, beats AEC2 3.519 by +0.070).
+    # DT deg −0.027/−0.031 (still +0.08/+0.20 above AEC3 ship target).
+    # NE deg −0.029 (still +0.45 above AEC3). All ship targets met.
+    nl_r2_enabled: bool = True
     nl_r2_alpha: float = 0.1
 
     # ── v3.22 BUG FIX: ERLE render-activity x2 PSD-scale (revives reverb) ──
