@@ -16,10 +16,10 @@ from typing import Optional
 import numpy as np
 
 from ._constants import HOPS_PER_SECOND
-
+from .. import aec3_scale as _aec3_scale
 
 _EPSILON = 1e-3
-_X2_BAND_ENERGY_THRESHOLD = 44015068.0
+_AEC3_X2_BAND_ENERGY_THRESHOLD = 44015068.0  # AEC3 source value — scaled per hop in __init__
 _POINTS_TO_ACCUMULATE = 6
 _BLOCKS_TO_HOLD_ERLE = int(0.4 * HOPS_PER_SECOND)  # AEC3 100 blocks (~400 ms) -> 40 hops
 
@@ -129,6 +129,9 @@ class FullBandErleEstimator:
         else:
             _q_alpha = 0.07
             self._td_alpha = 0.05
+        self._x2_band_energy_threshold = _aec3_scale.per_bin_psd_threshold(
+            _AEC3_X2_BAND_ENERGY_THRESHOLD, hop_size
+        )
         self._min_erle_log2 = _fast_log2(min_erle + _EPSILON)
         self._max_erle_lf_log2 = _fast_log2(max_erle_l + _EPSILON)
         self._hold_counter_inst_erle = 0
@@ -153,7 +156,7 @@ class FullBandErleEstimator:
     ) -> None:
         if converged_filter:
             x2_sum = float(np.sum(x2))
-            if x2_sum > _X2_BAND_ENERGY_THRESHOLD * x2.size:
+            if x2_sum > self._x2_band_energy_threshold * x2.size:
                 y2_sum = float(np.sum(y2))
                 e2_sum = float(np.sum(e2))
                 if self._instantaneous_erle.update(y2_sum, e2_sum):

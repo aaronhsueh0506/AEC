@@ -11,18 +11,20 @@ Rate notes:
 import numpy as np
 
 from ._constants import HOPS_PER_SECOND
-
+from .. import aec3_scale as _aec3_scale
 
 _MIN_ERL = 0.01
 _MAX_ERL = 1000.0
-_X2_MIN = 44015068.0  # AEC3 "WGN of power -46 dBFS" verbatim
+_AEC3_X2_MIN = 44015068.0  # AEC3 source value — scaled per hop in __init__
 _HOLD_HOPS = int(4.0 * HOPS_PER_SECOND)  # AEC3 1000 blocks (~4 s) -> 400 hops
 
 
 class ErlEstimator:
-    def __init__(self, *, startup_phase_length_hops: int = 200, n_bins: int = 257) -> None:
+    def __init__(self, *, startup_phase_length_hops: int = 200, n_bins: int = 257,
+                 hop_size: int = 160) -> None:
         self._startup_hops = int(startup_phase_length_hops)
         self._n_bins = int(n_bins)
+        self._x2_min = _aec3_scale.per_bin_psd_threshold(_AEC3_X2_MIN, hop_size)
         self._erl = np.full(self._n_bins, _MAX_ERL, dtype=np.float32)
         # hold_counters_ is sized kFftLengthBy2Minus1 in AEC3; align here.
         self._hold_counters = np.zeros(self._n_bins - 2, dtype=np.int32)
@@ -47,7 +49,7 @@ class ErlEstimator:
         y2 = capture_psd
         # Per-bin minimum-statistics update for k=1..n_bins-2.
         for k in range(1, self._n_bins - 1):
-            if x2[k] > _X2_MIN:
+            if x2[k] > self._x2_min:
                 new_erl = y2[k] / x2[k]
                 if new_erl < self._erl[k]:
                     self._hold_counters[k - 1] = _HOLD_HOPS
@@ -64,7 +66,7 @@ class ErlEstimator:
         self._erl[-1] = self._erl[-2]
         # Fullband ERL.
         x2_sum = float(np.sum(x2))
-        if x2_sum > _X2_MIN * x2.size:
+        if x2_sum > self._x2_min * x2.size:
             y2_sum = float(np.sum(y2))
             new_erl = y2_sum / x2_sum
             if new_erl < self._erl_time_domain:

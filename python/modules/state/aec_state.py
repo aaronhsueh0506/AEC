@@ -72,6 +72,9 @@ class AecStateConfig:
     # v3.22 W1': ERLE startup gate follows convergence (drop fixed session
     # startup window; update as soon as converged_filter is True). Default OFF.
     erle_startup_follows_convergence: bool = False
+    # v3.22 C: E²/Y² per-bin ERLE gate. Default OFF.
+    erle_e2y2_gate_enabled: bool = False
+    erle_e2y2_gate_threshold: float = 0.5
     # TransparentMode is permanently disabled in production (legacy
     # 10-frame ERLE latch was retired); kwarg preserved as no-op for
     # AEC3-spec API compatibility.
@@ -110,10 +113,13 @@ class AecState:
             startup_follows_convergence=self._config.erle_startup_follows_convergence,
             hop_size=self._config.hop_size,
             sample_rate=self._config.sample_rate,
+            e2y2_gate_enabled=self._config.erle_e2y2_gate_enabled,
+            e2y2_gate_threshold=self._config.erle_e2y2_gate_threshold,
         )
         self._erl_estimator = ErlEstimator(
             startup_phase_length_hops=self._config.erl_startup_hops,
             n_bins=self._config.n_bins,
+            hop_size=self._config.hop_size,
         )
         # TransparentMode permanently disabled in production.
         self._transparent_mode = None

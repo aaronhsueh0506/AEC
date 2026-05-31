@@ -228,13 +228,17 @@ class ResidualEchoEstimator:
         self._reverb_decay_est: Optional[ReverbDecayEstimator] = None
         self._reverb_freq_resp: Optional[ReverbFrequencyResponse] = None
         # L1: Kuech-Kellermann second-order nonlinear residual (default OFF).
-        # R²_nl = nl_alpha × x2² / _NL_NORM_POWER, added to nonlinear path only.
-        # _NL_NORM_POWER ≈ -20 dBFS per-bin in int16² units:
-        #   RMS=0.1 float → mean_energy = 0.01 → ×32768² → 1.07e7 per bin.
-        # At -20dBFS: r2_nl ≈ nl_alpha × r2 (linear); grows quadratically louder.
+        # R²_nl = nl_alpha × x2² / _nl_norm_power, added to nonlinear path only.
+        # _nl_norm_power scales with frame_size (2×hop_size) to preserve the
+        # r2_nl/r2_linear ratio as hop_size changes — calibrated at hop=160
+        # (empirically gives +0.079/+0.106 FS echo improvement).
         self._nl_r2_enabled = bool(nl_r2_enabled)
         self._nl_r2_alpha = float(nl_r2_alpha)
-        self._nl_norm_power = 1.07e7  # float, int16² units, -20dBFS reference
+        self._nl_norm_power = float(_aec3_scale.nl_r2_norm_power(self._hop_size))
+        # Per-bin residual noise gate — AEC3 27509.42 int16² scaled to our frame.
+        self._noise_gate_power = float(
+            _aec3_scale.per_bin_psd_threshold(27509.42, self._hop_size)
+        )
         if self._reverb_cfg.use_freq_response:
             self._reverb_freq_resp = ReverbFrequencyResponse(
                 n_freqs=self._n_bins,
@@ -452,7 +456,7 @@ class ResidualEchoEstimator:
                 if not aec_state.transparent_mode_active():
                     # AEC3 cc:121-129 noise gate.
                     # R0.2: use corrected 27509.42 (int16²) instead of buggy 27509562.
-                    _ng = (_aec3_scale.RESIDUAL_NOISE_GATE_POWER
+                    _ng = (self._noise_gate_power
                            if self._use_aec3_residual_noise_gate
                            else self._echo_model.noise_gate_power)
                     mask = _ng > x2

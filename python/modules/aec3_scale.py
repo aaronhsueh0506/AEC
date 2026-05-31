@@ -131,6 +131,54 @@ def fft_density_scale(value_int16sq: float, fft_size: int) -> float:
     return value_int16sq * ((fft_size // 2) / AEC3_FFT_LENGTH_BY_2)
 
 
+def per_bin_psd_threshold(calibrated_value: float, hop_size: int,
+                          ref_hop: int = 160) -> float:
+    """Scale a per-bin X² threshold proportionally with frame size.
+
+    Our frame = 2 × hop_size actual samples (50% OLA). Per-bin FFT power
+    ∝ frame_size for broadband signals, so thresholds should scale linearly
+    with hop_size to preserve the same signal-level gate semantics.
+
+    ``calibrated_value`` is the desired threshold at ``ref_hop`` (default 160).
+    Callers pass the current empirically-calibrated constant; the function
+    returns the equivalent value for any other hop_size.
+
+    Use for per-bin X² energy floors: kX2BandEnergyThreshold (44015068 at hop=160),
+    ErlEstimator _X2_MIN (same), and residual noise_gate_power (27509.42 at hop=160).
+
+    NOTE: AEC3 uses 64-sample blocks (FFT=128). The calibrated values at hop=160
+    are 5× smaller than AEC3's raw constants due to our larger frame (320 vs 64).
+    This is a known discrepancy, documented, and preserved here to maintain
+    existing bench parity. A future correction pass can pass the AEC3 raw value
+    with ref_hop=32 to get AEC3-aligned behaviour.
+
+    Example:
+        per_bin_psd_threshold(44015068.0, hop_size=160)  → 44015068.0  (no-op)
+        per_bin_psd_threshold(44015068.0, hop_size=320)  → 88030136.0
+        per_bin_psd_threshold(44015068.0, hop_size=80)   → 22007534.0
+    """
+    if hop_size <= 0:
+        raise ValueError(f"hop_size must be positive, got {hop_size}")
+    return calibrated_value * hop_size / ref_hop
+
+
+def nl_r2_norm_power(hop_size: int, _ref_hop: int = 160) -> float:
+    """Normalisation power for the L1 Kuech-Kellermann nonlinear R² term.
+
+    The formula ``r2_nl = alpha × x2² / norm`` is calibrated at hop=160
+    where norm=1.07e7 gives +0.079/+0.106 FS echo improvement (empirical).
+    Scales linearly with hop_size to preserve the r2_nl/r2_linear ratio
+    when hop changes (per-bin x2 ∝ frame_size = 2×hop for same signal).
+
+    Example:
+        nl_r2_norm_power(160) → 1.07e7   (exact — existing calibration preserved)
+        nl_r2_norm_power(320) → 2.14e7   (halves L1 aggressiveness at hop=320)
+        nl_r2_norm_power(80)  → 5.35e6   (doubles L1 aggressiveness at hop=80)
+    """
+    _calibrated_at_ref = 1.07e7  # empirically tuned at hop=160; do not change
+    return _calibrated_at_ref * hop_size / _ref_hop
+
+
 def block_energy_scale(value_int16sq: float, hop_samples: int) -> float:
     """Scale an AEC3 per-block time-domain energy threshold from
     kBlockSize=64 samples to our hop_samples.
