@@ -29,6 +29,8 @@ class ErleEstimator:
         startup_follows_convergence: bool = False,
         hop_size: int = 160,
         sample_rate: int = 16000,
+        e2y2_gate_enabled: bool = False,
+        e2y2_gate_threshold: float = 0.5,
     ) -> None:
         self._startup_hops = int(startup_phase_length_hops)
         self._startup_follows_convergence = bool(startup_follows_convergence)
@@ -46,6 +48,8 @@ class ErleEstimator:
             wallclock_smoothing=subband_wallclock_smoothing,
             hop_size=hop_size,
             sample_rate=sample_rate,
+            e2y2_gate_enabled=e2y2_gate_enabled,
+            e2y2_gate_threshold=e2y2_gate_threshold,
         )
         self._blocks_since_reset = 0
 
@@ -66,6 +70,8 @@ class ErleEstimator:
         # caller-side API compatibility.
         filter_freq_response: Optional[np.ndarray] = None,
         x2_history: Optional[np.ndarray] = None,
+        # C': pre-computed coherence gate (bool array). None = disabled.
+        coh_gate_mask: Optional[np.ndarray] = None,
     ) -> None:
         self._blocks_since_reset += 1
         # W1' (startup_follows_convergence): when ON, skip the fixed session
@@ -76,7 +82,8 @@ class ErleEstimator:
         if (not self._startup_follows_convergence
                 and self._blocks_since_reset < self._startup_hops):
             return
-        self._subband.update(x2=x2, y2=y2, e2=e2, converged_filter=converged_filter)
+        self._subband.update(x2=x2, y2=y2, e2=e2, converged_filter=converged_filter,
+                             coh_gate_mask=coh_gate_mask)
         self._fullband.update(x2=x2, y2=y2, e2=e2, converged_filter=converged_filter)
 
     def erle(self, onset_compensated: bool) -> np.ndarray:

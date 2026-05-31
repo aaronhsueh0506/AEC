@@ -109,9 +109,10 @@ class SubbandErleEstimator:
         y2: np.ndarray,
         e2: np.ndarray,
         converged_filter: bool,
+        coh_gate_mask: np.ndarray = None,  # C': coherence gate (bool, len=n_bins)
     ) -> None:
         self._update_accumulated_spectra(x2, y2, e2, converged_filter)
-        self._update_bands(converged_filter)
+        self._update_bands(converged_filter, coh_gate_mask=coh_gate_mask)
         if self._use_onset_detection:
             self._decrease_erle_per_band_for_low_render_signals()
         # Mirror first / last bin (AEC3 cc:100-109).
@@ -160,7 +161,8 @@ class SubbandErleEstimator:
         self._low_render_energy |= x2 < self._x2_band_energy_threshold
         self._num_points += 1
 
-    def _update_bands(self, converged_filter: bool) -> None:
+    def _update_bands(self, converged_filter: bool,
+                      coh_gate_mask: np.ndarray = None) -> None:
         if not converged_filter:
             return
         if self._num_points != _POINTS_TO_ACCUMULATE:
@@ -182,6 +184,12 @@ class SubbandErleEstimator:
             with np.errstate(divide='ignore', invalid='ignore'):
                 e2y2 = self._e2_acc[mid] / np.maximum(self._y2_acc[mid], 1e-30)
             is_erle_updated[mid] &= (e2y2 <= self._e2y2_gate_threshold)
+        # C': Coherence gate — freeze ERLE for bins where Γ²(Ŷ, Y) < threshold.
+        # coh_gate_mask[k]=True means ERLE update allowed (coherence high enough).
+        # In DT: nearend decorrelates Y from Ŷ → Γ² drops → False → freeze.
+        # Unlike E²/Y² gate, this does NOT use E (error) → no circular dependency.
+        if coh_gate_mask is not None:
+            is_erle_updated[mid] &= coh_gate_mask[mid]
         # Onset detection: when bin sees "high enough" render AND was in
         # coming_onset state, transition out and hold for a window.
         if self._use_onset_detection:

@@ -82,6 +82,37 @@ class AecConfig:
     hf_min_gain_floor_during_dne_enabled: bool = False
     hf_min_gain_floor_during_dne_db: float = -15.0
 
+    # ── v3.22 C: E²/Y² per-bin ERLE gate (doubletalk contamination protection) ──
+    # Prevents nearend speech from pulling ERLE down during doubletalk by freezing
+    # per-bin ERLE updates when accumulated E²(k)/Y²(k) exceeds the threshold.
+    #
+    # MECHANISM:
+    #   In FS (echo being cancelled): E² << Y² → ratio low → update proceeds.
+    #   In DT (nearend inflates error): E² → Y² → ratio rises → freeze ERLE for that bin.
+    #   Frozen ERLE holds at pre-DT value → R² = S²/ERLE stays bounded → Wiener gain stable.
+    #
+    # THRESHOLD=0.5: E² > 0.5×Y² → nearend contributes ≥ 50% of error energy → unreliable.
+    # Per-bin: only contaminated bins are frozen; unaffected bins update normally.
+    #
+    # Advantage over all gain-floor approaches (W4/D1/D5): operates at R² source,
+    # not at gain output → no FS false positive from nearend detection signals.
+    #
+    # Default OFF for byte-equal; bench with AEC_ERLE_E2Y2_GATE=1.
+    erle_e2y2_gate_enabled: bool = False
+    erle_e2y2_gate_threshold: float = 0.5
+
+    # ── v3.22 C': Coherence-based ERLE gate (Γ²_ŶY) ──
+    # Gate SubbandErle updates per-bin when Γ²(Ŷ, Y) < threshold.
+    # Ŷ = echo estimate (echo_spec), Y = capture (near_spec); both complex.
+    # In DT: nearend decorrelates Y from Ŷ → Γ² drops → freeze ERLE.
+    # Avoids circular dependency of E²/Y² gate (E is contaminated by nearend).
+    # In FS converged: Y ≈ Ŷ → Γ² ≈ 1 → ERLE updates normally.
+    # erle_coh_gate_alpha: EMA rate for cross-PSD tracking (0.05 ≈ 200ms).
+    # Bench with AEC_ERLE_COH_GATE=<threshold>.
+    erle_coh_gate_enabled: bool = True   # v3.22 C' shipped: +0.014 FS_static echo
+    erle_coh_gate_threshold: float = 0.5
+    erle_coh_gate_alpha: float = 0.05
+
     # ── v3.22 D2: SER-based gain floor (nearend preservation without DT detector) ──
     # SER (Signal-to-Echo Ratio) floor in power domain, inserted after Wiener-gain
     # clip in SuppressionGain._lower_band_gain.

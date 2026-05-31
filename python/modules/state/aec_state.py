@@ -264,6 +264,10 @@ class AecState:
         # When None (default), ERLE uses the rectangular capture_psd. ErlEstimator
         # + saturation keep capture_psd.
         capture_psd_erle: Optional[np.ndarray] = None,
+        # C': pre-computed per-bin coherence gate mask (bool array, len=n_bins).
+        # True = ERLE update allowed; False = freeze (nearend detected via Γ²_ŶY).
+        # None when gate is disabled (byte-equal path).
+        erle_coh_gate_mask: Optional[np.ndarray] = None,
     ) -> None:
         """Per-frame state update. Strict order matches aec_state.cc:189-291.
 
@@ -319,6 +323,7 @@ class AecState:
             converged_filter=any_filter_converged,
             filter_freq_response=sde_filter_freq_response,
             x2_history=sde_x2_history,
+            coh_gate_mask=erle_coh_gate_mask,
         )
         # 4b. ERL update.
         self._erl_estimator.update(

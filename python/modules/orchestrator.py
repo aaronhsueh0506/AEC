@@ -427,6 +427,10 @@ class AEC:
                 fullband_wallclock_smoothing=False,
                 erle_startup_follows_convergence=bool(
                     getattr(self.config, 'erle_startup_follows_convergence', False)),
+                erle_e2y2_gate_enabled=bool(
+                    getattr(self.config, 'erle_e2y2_gate_enabled', False)),
+                erle_e2y2_gate_threshold=float(
+                    getattr(self.config, 'erle_e2y2_gate_threshold', 0.5)),
             ))
             # FFT-density-scaled PSD floors (AEC3 alignment, v3.21-shipped).
             # AEC3 hardcodes kFftLengthBy2=64 in EchoModelConfig /
@@ -772,6 +776,12 @@ class AEC:
         self._erle_window_near = 1e-10
         self._erle_window_err = 1e-10
         self._erle_factor_prev = 0.0  # Previous frame's erle_factor for shadow DTD weight
+
+        # C': Coherence-based ERLE gate — per-bin Γ²(Ŷ, Y) EMA state.
+        # Tracks cross-power Ŷ×Y* (complex) + auto-powers |Ŷ|² and |Y|².
+        self._coh_erle_sye = np.zeros(_n_freqs, dtype=np.complex64)
+        self._coh_erle_syy = np.full(_n_freqs, 1e-30, dtype=np.float64)
+        self._coh_erle_see = np.full(_n_freqs, 1e-30, dtype=np.float64)
 
         # Smoothed inst ERLE for dt_indicator correction (~3 frame / 30ms)
         self._inst_erle_smooth = 1.0
@@ -3191,6 +3201,30 @@ class AEC:
         _ar_thr = 5.96e-4
         _active_render_this_frame = bool(far_pwr > _ar_thr)
         self._diag['far_activity'] = 1.0 if _active_render_this_frame else 0.0
+        # C': Coherence-based ERLE gate — compute Γ²(Ŷ, Y) per bin.
+        # echo_spec = Ŷ (filter echo estimate, delay-compensated).
+        # near_spec = Y (capture microphone).
+        # Nearend speech N is uncorrelated with Ŷ → when DT active,
+        # Y = Ŷ_true + N → |<Ŷ, Y*>| decreases → Γ² drops → gate closes.
+        _coh_gate_mask: Optional[np.ndarray] = None
+        if self.config.erle_coh_gate_enabled or True:  # always update EMA
+            _echo_c = self.filter.echo_spec.astype(np.complex64)
+            _near_c = self.filter.near_spec.astype(np.complex64)
+            _a = float(self.config.erle_coh_gate_alpha)
+            self._coh_erle_sye = (
+                (1.0 - _a) * self._coh_erle_sye + _a * (_echo_c * np.conj(_near_c))
+            )
+            self._coh_erle_syy = (
+                (1.0 - _a) * self._coh_erle_syy + _a * np.abs(_echo_c) ** 2
+            )
+            self._coh_erle_see = (
+                (1.0 - _a) * self._coh_erle_see + _a * np.abs(_near_c) ** 2
+            )
+            if self.config.erle_coh_gate_enabled:
+                _gamma2 = (np.abs(self._coh_erle_sye) ** 2
+                           / np.maximum(self._coh_erle_syy * self._coh_erle_see,
+                                        1e-30)).astype(np.float32)
+                _coh_gate_mask = (_gamma2 >= self.config.erle_coh_gate_threshold)
         self._aec3_state.update(
             bridge=bridge,
             external_delay=ext_delay,
@@ -3207,6 +3241,7 @@ class AEC:
             subtractor_s_coarse_max_abs=_s_coa_max,
             x2_reverb_for_erle=_x2_reverb_for_erle,
             capture_psd_erle=_capture_psd_erle,
+            erle_coh_gate_mask=_coh_gate_mask,
         )
         # A.1 trace: AecState-derived initial_state + transition edge (Gate 0).
         _a1_aec3_initial_state = self._aec3_state.initial_state_active()

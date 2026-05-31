@@ -220,6 +220,33 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             config_overrides['d5_ne_floor_strength'] = _d5_val
         except ValueError:
             pass
+    # erle_e2y2_gate (v3.22 C): per-bin E²/Y² ERLE gate against DT contamination.
+    # AEC_ERLE_E2Y2_GATE=<float> → erle_e2y2_gate_enabled=True, threshold=<float>.
+    _e2y2_env = os.environ.get('AEC_ERLE_E2Y2_GATE')
+    if _e2y2_env is not None and 'erle_e2y2_gate_enabled' not in config_overrides:
+        try:
+            _e2y2_val = float(_e2y2_env)
+            config_overrides['erle_e2y2_gate_enabled'] = (_e2y2_val > 0.0)
+            config_overrides['erle_e2y2_gate_threshold'] = _e2y2_val if _e2y2_val <= 1.0 else 0.5
+        except ValueError:
+            pass
+    # erle_coh_gate (v3.22 C'): coherence-based ERLE gate Γ²(Ŷ, Y).
+    # AEC_ERLE_COH_GATE=<float>        → enable gate, threshold=<float>
+    # AEC_ERLE_COH_GATE_ALPHA=<float>  → override EMA alpha (default 0.05)
+    _coh_env = os.environ.get('AEC_ERLE_COH_GATE')
+    if _coh_env is not None and 'erle_coh_gate_enabled' not in config_overrides:
+        try:
+            _coh_val = float(_coh_env)
+            config_overrides['erle_coh_gate_enabled'] = (_coh_val > 0.0)
+            config_overrides['erle_coh_gate_threshold'] = _coh_val if _coh_val <= 1.0 else 0.5
+        except ValueError:
+            pass
+    _coh_alpha_env = os.environ.get('AEC_ERLE_COH_GATE_ALPHA')
+    if _coh_alpha_env is not None and 'erle_coh_gate_alpha' not in config_overrides:
+        try:
+            config_overrides['erle_coh_gate_alpha'] = float(_coh_alpha_env)
+        except ValueError:
+            pass
     # nl_r2 (v3.22 L1): Kuech-Kellermann nonlinear R² addition.
     # AEC_NL_ALPHA=<float> → nl_r2_enabled=True, nl_r2_alpha=<float>.
     # AEC_NL_ALPHA=0 → disabled. AEC_NL_ALPHA=0.1 → default alpha.
