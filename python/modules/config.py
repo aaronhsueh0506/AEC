@@ -122,6 +122,24 @@ class AecConfig:
     soft_nearend_blend_enr_threshold: float = 0.25
     soft_nearend_blend_softness: float = 0.25
 
+    # ── v3.22 D5: ne_weight gain floor (Speex SPP-proxy for DT nearend protection) ──
+    # Direct Speex MMSE-STSA analogue: uses D3's ne_weight as SPP proxy to apply
+    # a gain lower bound that prevents near-end over-suppression in doubletalk.
+    #
+    # G_floor = ne_weight × floor_strength; G = max(G_wiener, G_floor)
+    # ne_weight = sigmoid((enr_threshold - enr_lf) / softness) [shared with D3]
+    #
+    # FS (ENR high → ne_weight→0): floor→0, full echo suppression preserved.
+    # DT (ENR low → ne_weight→1): floor=floor_strength, nearend protected.
+    # Unlike D2 (failed): no dependence on R² accuracy — uses ENR directly.
+    #
+    # floor_strength=0.3: power-domain floor → amplitude = sqrt(0.3) ≈ 0.55 (−5.2dB).
+    # Maximum suppression in pure NE-dominant frame = 14.7 dB (preserves voice audibility).
+    #
+    # Default OFF for byte-equal; bench with AEC_D5_FLOOR=<strength>.
+    d5_ne_floor_enabled: bool = False
+    d5_ne_floor_strength: float = 0.3
+
     # ── v3.22 L1: Kuech-Kellermann second-order nonlinear residual ──
     # Adds quadratic render PSD term to the nonlinear R² path to capture
     # loudspeaker harmonic / intermodulation distortion echo.

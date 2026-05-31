@@ -520,7 +520,9 @@ class SuppressionGain:
                  ser_floor_strength: float = 0.5,
                  soft_nearend_blend_enabled: bool = False,
                  soft_nearend_blend_enr_threshold: float = 0.25,
-                 soft_nearend_blend_softness: float = 0.25) -> None:
+                 soft_nearend_blend_softness: float = 0.25,
+                 d5_ne_floor_enabled: bool = False,
+                 d5_ne_floor_strength: float = 0.3) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
         self._hop_size = int(hop_size)
@@ -590,8 +592,15 @@ class SuppressionGain:
         self._soft_ne_blend_enabled = bool(soft_nearend_blend_enabled)
         self._soft_ne_blend_enr_thr = float(soft_nearend_blend_enr_threshold)
         self._soft_ne_blend_softness = max(float(soft_nearend_blend_softness), 1e-6)
-        # LF endpoint bin for D3 ENR sum (AEC3-canonical 2000 Hz, same as DNE).
+        # LF endpoint bin for D3/D5 ENR sum (AEC3-canonical 2000 Hz, same as DNE).
         self._dne_lf_end = min(hz_to_bin(2000.0, self._n_bins, self._sr), self._n_bins)
+        # v3.22 D5: ne_weight gain floor (Speex SPP-proxy, default OFF).
+        # G_floor = ne_weight × floor_strength; G = max(G_wiener, G_floor).
+        # FS (ENR high → ne_weight→0): floor→0, full echo suppression preserved.
+        # DT (ENR low → ne_weight→1): floor=floor_strength, nearend protected.
+        # Shares ne_weight computation with D3 (same sigmoid, same LF endpoint).
+        self._d5_ne_floor_enabled = bool(d5_ne_floor_enabled)
+        self._d5_ne_floor_strength = float(d5_ne_floor_strength)
         # Resolve freq-based config to bin indices once at construction.
         self._last_lf_band = hz_to_bin(self._config.last_lf_freq_hz, self._n_bins, self._sr)
         self._first_hf_band = hz_to_bin(self._config.first_hf_freq_hz, self._n_bins, self._sr)
@@ -721,13 +730,14 @@ class SuppressionGain:
         G_raw = self._gain_to_no_audible_echo(nearend, weighted_residual, comfort_noise)
         # Step 6: clip into [min, max].
         G = np.clip(G_raw, min_gain, max_gain)
-        # D2: SER-based gain floor (power domain, per-bin).
-        # G_ser_floor = nearend / (nearend + weighted_residual + 1.0)
-        # Self-consistent: no external DT detector needed.
-        # FS (nearend≈0): floor→0, echo suppression unaffected.
-        # DT (nearend>>echo): floor→high, nearend preserved (Speex-like).
+        # D2 v2: SER-based gain floor (power domain, per-bin).
+        # nearend_true = max(0, Y² − R²) isolates true speech from echo.
+        # G_ser_floor = nearend_true / (nearend + 1.0)
+        # FS (Y² ≈ R²): nearend_true ≈ 0 → floor ≈ 0 → echo suppression unaffected.
+        # DT (speech >> echo): nearend_true ≈ Y² → floor high → nearend preserved.
         if self._ser_floor_enabled:
-            G_ser_floor = nearend / (nearend + weighted_residual + 1.0)
+            nearend_true = np.maximum(0.0, nearend - weighted_residual)
+            G_ser_floor = nearend_true / (nearend + 1.0)
             np.maximum(G, G_ser_floor * self._ser_floor_strength, out=G)
         # Snapshot pre-HF-limiter G + ENR/EMR for paint-black diagnostic.
         # No audio effect; consumers via _last_lower_band_snap.
@@ -959,10 +969,11 @@ class SuppressionGain:
         self, nearend: np.ndarray, echo: np.ndarray, masker: np.ndarray
     ) -> np.ndarray:
         is_ne = self._ne_state_for_gain_rules()
-        if self._soft_ne_blend_enabled:
-            # D3: sigmoid LF-ENR weight blends nearend_tuning ↔ normal_tuning.
-            # ne_weight → 1.0 when nearend dominates (low ENR) → nearend_tuning.
-            # ne_weight → 0.0 when echo dominates (high ENR) → normal_tuning.
+
+        # Compute sigmoid LF-ENR weight if needed by D3 or D5.
+        # ne_weight → 1 when nearend dominates (low ENR), → 0 when echo dominates.
+        ne_w = 0.0
+        if self._soft_ne_blend_enabled or self._d5_ne_floor_enabled:
             ne_lf = float(np.sum(nearend[1:self._dne_lf_end]))
             echo_lf = float(np.sum(echo[1:self._dne_lf_end]))
             enr_lf = echo_lf / (ne_lf + 1.0)
@@ -970,8 +981,10 @@ class SuppressionGain:
                 (enr_lf - self._soft_ne_blend_enr_thr) / self._soft_ne_blend_softness,
                 -50.0, 50.0,
             )
-            ne_weight = 1.0 / (1.0 + np.exp(_sig_arg))
-            ne_w = float(ne_weight)
+            ne_w = float(1.0 / (1.0 + np.exp(_sig_arg)))
+
+        if self._soft_ne_blend_enabled:
+            # D3: blend nearend_tuning ↔ normal_tuning via ne_w.
             enr_tr = (ne_w * self._nearend_enr_tr
                       + (1.0 - ne_w) * self._normal_enr_tr).astype(np.float32)
             enr_su = (ne_w * self._nearend_enr_su
@@ -991,6 +1004,12 @@ class SuppressionGain:
             g_emr = emr_tr / np.maximum(emr, 1e-30)
             g_eff = np.maximum(g_lin, g_emr)
         g = np.where(fire, g_eff, g)
+        # D5: ne_weight gain floor (Speex SPP-proxy).
+        # G_floor = ne_w × floor_strength; G = max(G_wiener, G_floor).
+        # FS (ne_w→0): floor→0, echo suppression unaffected.
+        # DT (ne_w→1): floor=floor_strength, nearend preserved.
+        if self._d5_ne_floor_enabled and ne_w > 0.0:
+            np.maximum(g, ne_w * self._d5_ne_floor_strength, out=g)
         # Kill-stage diag: stash the two competing terms + fire mask + raw
         # ENR/EMR so _lower_band_gain can attribute which term won per bin.
         # No audio effect (read-only consumer via _last_lower_band_snap).

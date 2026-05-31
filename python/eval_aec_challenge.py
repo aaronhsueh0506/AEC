@@ -210,6 +210,16 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     _soft_ne_env = os.environ.get('AEC_SOFT_NE_BLEND')
     if _soft_ne_env in ('0', '1') and 'soft_nearend_blend_enabled' not in config_overrides:
         config_overrides['soft_nearend_blend_enabled'] = (_soft_ne_env == '1')
+    # d5_ne_floor (v3.22 D5): ne_weight gain floor, Speex SPP-proxy.
+    # AEC_D5_FLOOR=<float> → d5_ne_floor_enabled=True, d5_ne_floor_strength=<float>.
+    _d5_env = os.environ.get('AEC_D5_FLOOR')
+    if _d5_env is not None and 'd5_ne_floor_enabled' not in config_overrides:
+        try:
+            _d5_val = float(_d5_env)
+            config_overrides['d5_ne_floor_enabled'] = (_d5_val > 0.0)
+            config_overrides['d5_ne_floor_strength'] = _d5_val
+        except ValueError:
+            pass
     # nl_r2 (v3.22 L1): Kuech-Kellermann nonlinear R² addition.
     # AEC_NL_ALPHA=<float> → nl_r2_enabled=True, nl_r2_alpha=<float>.
     # AEC_NL_ALPHA=0 → disabled. AEC_NL_ALPHA=0.1 → default alpha.

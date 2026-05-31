@@ -523,6 +523,12 @@ class AEC:
                 soft_nearend_blend_softness=float(
                     getattr(self.config, "soft_nearend_blend_softness", 0.25)
                 ),
+                d5_ne_floor_enabled=bool(
+                    getattr(self.config, "d5_ne_floor_enabled", False)
+                ),
+                d5_ne_floor_strength=float(
+                    getattr(self.config, "d5_ne_floor_strength", 0.3)
+                ),
             )
             self._aec3_n_bins = n_bins
             self._aec3_sg_config = _sg_config
@@ -1123,6 +1129,12 @@ class AEC:
             ),
             soft_nearend_blend_softness=float(
                 getattr(self.config, "soft_nearend_blend_softness", 0.25)
+            ),
+            d5_ne_floor_enabled=bool(
+                getattr(self.config, "d5_ne_floor_enabled", False)
+            ),
+            d5_ne_floor_strength=float(
+                getattr(self.config, "d5_ne_floor_strength", 0.3)
             ),
         )
         self._aec3_ola_buf.fill(0)
