@@ -423,8 +423,8 @@ class AEC:
                 enable_filter_analyzer=True,
                 hop_size=int(self.config.hop_size),
                 sample_rate=int(self.config.sample_rate),
-                subband_wallclock_smoothing=False,
-                fullband_wallclock_smoothing=False,
+                subband_wallclock_smoothing=(__import__('os').environ.get('AEC_ERLE_WALLCLOCK') is not None),
+                fullband_wallclock_smoothing=(__import__('os').environ.get('AEC_ERLE_WALLCLOCK') is not None),
                 erle_startup_follows_convergence=bool(
                     getattr(self.config, 'erle_startup_follows_convergence', False)),
                 erle_e2y2_gate_enabled=bool(
@@ -532,6 +532,12 @@ class AEC:
                 ),
                 d5_ne_floor_strength=float(
                     getattr(self.config, "d5_ne_floor_strength", 0.3)
+                ),
+                coh_gain_floor_enabled=bool(
+                    getattr(self.config, "coh_gain_floor_enabled", False)
+                ),
+                coh_gain_floor_strength=float(
+                    getattr(self.config, "coh_gain_floor_strength", 0.5)
                 ),
             )
             self._aec3_n_bins = n_bins
@@ -782,6 +788,14 @@ class AEC:
         self._coh_erle_sye = np.zeros(_n_freqs, dtype=np.complex64)
         self._coh_erle_syy = np.full(_n_freqs, 1e-30, dtype=np.float64)
         self._coh_erle_see = np.full(_n_freqs, 1e-30, dtype=np.float64)
+        # Layer1: per-bin Γ²_ŶY for the coherence gain floor (None until computed).
+        self._coh_gamma2_for_floor = None
+
+        # B: Emura 2017 cross-PSD R² — EMA of E×X_delayed* and |X_delayed|².
+        # Sex = EMA[error_spec × conj(X_delayed)]: nearend averages out → echo-only.
+        # R2_emura = |Sex|²/Sxx × PSD_SCALE (int16² per-bin residual echo estimate).
+        self._emura_sex = np.zeros(_n_freqs, dtype=np.complex64)
+        self._emura_sxx = np.full(_n_freqs, 1e-30, dtype=np.float64)
 
         # Smoothed inst ERLE for dt_indicator correction (~3 frame / 30ms)
         self._inst_erle_smooth = 1.0
@@ -1081,8 +1095,8 @@ class AEC:
             enable_filter_analyzer=True,
             hop_size=int(self.config.hop_size),
             sample_rate=int(self.config.sample_rate),
-            subband_wallclock_smoothing=False,
-            fullband_wallclock_smoothing=False,
+            subband_wallclock_smoothing=(__import__('os').environ.get('AEC_ERLE_WALLCLOCK') is not None),
+            fullband_wallclock_smoothing=(__import__('os').environ.get('AEC_ERLE_WALLCLOCK') is not None),
             erle_startup_follows_convergence=bool(
                 getattr(self.config, 'erle_startup_follows_convergence', False)),
         ))
@@ -1145,6 +1159,12 @@ class AEC:
             ),
             d5_ne_floor_strength=float(
                 getattr(self.config, "d5_ne_floor_strength", 0.3)
+            ),
+            coh_gain_floor_enabled=bool(
+                getattr(self.config, "coh_gain_floor_enabled", False)
+            ),
+            coh_gain_floor_strength=float(
+                getattr(self.config, "coh_gain_floor_strength", 0.5)
             ),
         )
         self._aec3_ola_buf.fill(0)
@@ -3220,11 +3240,15 @@ class AEC:
             self._coh_erle_see = (
                 (1.0 - _a) * self._coh_erle_see + _a * np.abs(_near_c) ** 2
             )
-            if self.config.erle_coh_gate_enabled:
+            if self.config.erle_coh_gate_enabled or self.config.coh_gain_floor_enabled:
                 _gamma2 = (np.abs(self._coh_erle_sye) ** 2
                            / np.maximum(self._coh_erle_syy * self._coh_erle_see,
                                         1e-30)).astype(np.float32)
-                _coh_gate_mask = (_gamma2 >= self.config.erle_coh_gate_threshold)
+                if self.config.erle_coh_gate_enabled:
+                    _coh_gate_mask = (_gamma2 >= self.config.erle_coh_gate_threshold)
+                # Layer1: stash per-bin Γ²_ŶY for the suppressor coherence floor.
+                if self.config.coh_gain_floor_enabled:
+                    self._coh_gamma2_for_floor = _gamma2
         self._aec3_state.update(
             bridge=bridge,
             external_delay=ext_delay,
@@ -3325,6 +3349,29 @@ class AEC:
             time_domain_filter=_td_filter_for_decay,
         )
 
+        # B v2: cross-PSD R² using echo_spec (Ŷ) instead of X_buf[delay_p].
+        # B v1 FAILED: X_buf[delay_p] had delay alignment issues in PBFDKF
+        #   overlap-save → R2_emura ≈ 0 during far-end active → echo leaked.
+        #   Audio proof: +8.2 dB output at second 8 correlated with lpb active.
+        # B v2 FIX: use echo_spec (= Ŷ = H̃×X, already delay-compensated by filter).
+        #   nearend ⊥ echo_spec (since nearend ⊥ X and echo_spec = H̃×X) → EMA averages out.
+        #   No manual delay alignment needed → no alignment bug.
+        # error_spec = E (filter output error), echo_spec = Ŷ (filter echo estimate).
+        _r2_emura: Optional[np.ndarray] = None
+        if True:  # always update EMA (config gate on output only)
+            _echo_c = self.filter.echo_spec.astype(np.complex64)   # Ŷ — delay-compensated
+            _err_c = self.filter.error_spec.astype(np.complex64)   # E
+            _a_em = float(self.config.emura_r2_alpha)
+            self._emura_sex = ((1.0 - _a_em) * self._emura_sex
+                               + _a_em * (_err_c * np.conj(_echo_c)))
+            self._emura_sxx = ((1.0 - _a_em) * self._emura_sxx
+                               + _a_em * np.abs(_echo_c) ** 2)
+            if self.config.emura_r2_enabled:
+                _r2_emura = (
+                    np.abs(self._emura_sex) ** 2
+                    / np.maximum(self._emura_sxx, 1e-30)
+                    * _PSD_SCALE
+                ).astype(np.float32)
         r2, r2_unb = self._aec3_ree.estimate(
             aec_state=self._aec3_state,
             render_psd=far_psd,
@@ -3334,6 +3381,8 @@ class AEC:
             filter_delay_blocks=_delay_blocks,
             filter_length_blocks=int(getattr(self.filter, 'n_partitions', 0)),
             force_nonlinear_path=_just_reset_active,
+            r2_emura=_r2_emura,
+            emura_r2_blend=float(self.config.emura_r2_blend),
         )
 
         # Reverb tail dead-streak tracking. `_reverb_fr` is the
@@ -3536,6 +3585,8 @@ class AEC:
             render_block=render_block_scaled,
             clock_drift=False,
             stationary_mask=_stationary_mask,
+            coh_gamma2=(self._coh_gamma2_for_floor
+                        if self.config.coh_gain_floor_enabled else None),
         )
 
         # trace_hf_chain audit trace removed (default-OFF dev knob).

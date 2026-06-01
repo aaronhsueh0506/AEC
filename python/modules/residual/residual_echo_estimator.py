@@ -333,6 +333,10 @@ class ResidualEchoEstimator:
         filter_delay_blocks: int = 0,
         filter_length_blocks: int = 0,
         force_nonlinear_path: bool = False,
+        # B: Emura 2017 cross-PSD R² (nearend-robust per-bin estimate, int16² units).
+        # When provided, blended with ERLE-based R² in the linear path.
+        r2_emura: Optional[np.ndarray] = None,
+        emura_r2_blend: float = 0.5,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Returns ``(R2, R2_unbounded)``.
 
@@ -397,6 +401,14 @@ class ResidualEchoEstimator:
                 # AEC3 cc:91-105 — R² = S²_linear / ERLE per-bin.
                 r2[:] = s2_linear / np.maximum(erle, 1e-30)
                 r2_unbounded[:] = s2_linear / np.maximum(erle_unb, 1e-30)
+                # B: Emura 2017 blend — replace fraction of ERLE-based R² with
+                # cross-PSD estimate (nearend-robust: E[nearend×X*]→0 in EMA).
+                # In DT: R2_emura << R2_erle (nearend excluded) → gain higher
+                # → nearend preserved. In FS: comparable → no echo regression.
+                if r2_emura is not None and emura_r2_blend > 0.0:
+                    _b = float(emura_r2_blend)
+                    r2[:] = (1.0 - _b) * r2 + _b * r2_emura
+                    r2_unbounded[:] = (1.0 - _b) * r2_unbounded + _b * r2_emura
             # AEC3 cc:257-260 — UpdateReverb(kLinear) + AddReverb.
             # Linear scaling uses per-bin filter freq-response. Without
             # the full ReverbFrequencyResponse port, approximate by the

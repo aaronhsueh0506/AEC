@@ -356,6 +356,13 @@ class PBFDAF:
         from . import aec3_scale as _aec3_scale
         x2_for_gate = (np.abs(self.X_buf) ** 2).sum(axis=0).astype(np.float32)
         _ng_thr = np.float32(_aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT)
+        # EXPERIMENT (A-1, env-gated default 1.0): scale the filter noise gate.
+        # Suspected bug: this gate is missing the fft_density ×4 factor the
+        # residual-path floors get. AEC_FILTER_NG_SCALE<1 gates fewer bins.
+        import os as _os
+        _ngs = _os.environ.get('AEC_FILTER_NG_SCALE')
+        if _ngs:
+            _ng_thr = np.float32(_aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT * float(_ngs))
         mu_eff = np.where(
             x2_for_gate >= _ng_thr,
             mu_eff,
@@ -679,6 +686,10 @@ class PBFDKF(PBFDAF):
         # suppression-path NOISE_GATE_POWER_FLOAT (0.02562).
         from . import aec3_scale as _aec3_scale
         _noise_gate = np.float32(_aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT)
+        import os as _os
+        _ngs = _os.environ.get('AEC_FILTER_NG_SCALE')
+        if _ngs:
+            _noise_gate = np.float32(_aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT * float(_ngs))
         mu_aec3 = np.where(X2 >= _noise_gate, mu_aec3, np.float32(0.0))
 
         # W update — per partition, use the per-bin mu × conj(X[p]).

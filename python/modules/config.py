@@ -113,6 +113,32 @@ class AecConfig:
     erle_coh_gate_threshold: float = 0.5
     erle_coh_gate_alpha: float = 0.05
 
+    # ── v3.22 Layer1: Coherence gain floor (AEC2 NLP-inspired) ──
+    # Per-bin gain floor from Γ²(Ŷ, Y): G_floor = sqrt(max(0, 1-Γ²))·strength.
+    # 1-Γ² = nearend power fraction at mic = near/(echo+near) (X⊥nearend).
+    # FS (converged OR not): Ŷ=H̃X, Y=HX both ∝ X → Coh=1 → 1-Γ²→0 → floor→0
+    #   → NO echo suppression impact, NO FS-unconverged false positive.
+    # DT: nearend N adds X-uncorrelated component → Γ² drops → floor rises
+    #   → nearend preserved. This is AEC2's cohxd-gated NLP relaxation,
+    #   delay-compensated for free (Ŷ already time-aligned to Y).
+    # Reuses the C' Γ²_ŶY EMA (erle_coh_gate_alpha). Default OFF.
+    # Bench with AEC_COH_FLOOR=<strength>.
+    coh_gain_floor_enabled: bool = False
+    coh_gain_floor_strength: float = 0.5
+
+    # ── v3.22 B: Emura 2017 cross-PSD R² (nearend-robust residual estimate) ──
+    # Replaces R²_linear = S²/ERLE (contaminated in DT) with a blend that
+    # uses the cross-spectrum between E (error) and X_delayed (reference).
+    # Since nearend is uncorrelated with X, E[nearend × X*] → 0 over frames,
+    # so Sex = EMA[E × X*] tracks ONLY the echo component of E — immune to DT.
+    # R2_emura[k] = |Sex[k]|² / Sxx[k] × PSD_SCALE  (per-bin, int16² units)
+    # Blend: R2_final = (1-blend) × R2_erle + blend × R2_emura  (linear path)
+    # emura_r2_alpha: EMA rate for cross-PSD (0.1 ≈ 100ms at hop=160).
+    # Bench with AEC_EMURA_R2=<blend>.
+    emura_r2_enabled: bool = False
+    emura_r2_alpha: float = 0.1
+    emura_r2_blend: float = 0.5
+
     # ── v3.22 D2: SER-based gain floor (nearend preservation without DT detector) ──
     # SER (Signal-to-Echo Ratio) floor in power domain, inserted after Wiener-gain
     # clip in SuppressionGain._lower_band_gain.

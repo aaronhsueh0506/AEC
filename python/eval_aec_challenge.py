@@ -258,6 +258,26 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             config_overrides['nl_r2_alpha'] = _nl_alpha_val
         except ValueError:
             pass
+    # emura_r2 (v3.22 B): cross-PSD R² (Emura 2017), nearend-robust.
+    # AEC_EMURA_R2=<blend> → emura_r2_enabled=True, blend=<float 0-1>.
+    _emura_env = os.environ.get('AEC_EMURA_R2')
+    if _emura_env is not None and 'emura_r2_enabled' not in config_overrides:
+        try:
+            _emura_val = float(_emura_env)
+            config_overrides['emura_r2_enabled'] = (_emura_val > 0.0)
+            config_overrides['emura_r2_blend'] = min(max(_emura_val, 0.0), 1.0)
+        except ValueError:
+            pass
+    # coh_gain_floor (v3.22 Layer1): AEC2 NLP-inspired coherence gain floor.
+    # AEC_COH_FLOOR=<strength> → coh_gain_floor_enabled=True, strength=<float>.
+    _cohfl_env = os.environ.get('AEC_COH_FLOOR')
+    if _cohfl_env is not None and 'coh_gain_floor_enabled' not in config_overrides:
+        try:
+            _cohfl_val = float(_cohfl_env)
+            config_overrides['coh_gain_floor_enabled'] = (_cohfl_val > 0.0)
+            config_overrides['coh_gain_floor_strength'] = _cohfl_val
+        except ValueError:
+            pass
     # AEC_MODE=PBFDAF for filter-class comparison (default PBFDKF)
     _mode_env = os.environ.get('AEC_MODE', 'PBFDKF').upper()
     _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF

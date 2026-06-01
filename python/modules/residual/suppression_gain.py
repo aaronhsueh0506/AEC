@@ -522,7 +522,9 @@ class SuppressionGain:
                  soft_nearend_blend_enr_threshold: float = 0.25,
                  soft_nearend_blend_softness: float = 0.25,
                  d5_ne_floor_enabled: bool = False,
-                 d5_ne_floor_strength: float = 0.3) -> None:
+                 d5_ne_floor_strength: float = 0.3,
+                 coh_gain_floor_enabled: bool = False,
+                 coh_gain_floor_strength: float = 0.5) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
         self._hop_size = int(hop_size)
@@ -601,6 +603,8 @@ class SuppressionGain:
         # Shares ne_weight computation with D3 (same sigmoid, same LF endpoint).
         self._d5_ne_floor_enabled = bool(d5_ne_floor_enabled)
         self._d5_ne_floor_strength = float(d5_ne_floor_strength)
+        self._coh_gain_floor_enabled = bool(coh_gain_floor_enabled)
+        self._coh_gain_floor_strength = float(coh_gain_floor_strength)
         # Resolve freq-based config to bin indices once at construction.
         self._last_lf_band = hz_to_bin(self._config.last_lf_freq_hz, self._n_bins, self._sr)
         self._first_hf_band = hz_to_bin(self._config.first_hf_freq_hz, self._n_bins, self._sr)
@@ -672,6 +676,7 @@ class SuppressionGain:
         render_block: np.ndarray,            # time-domain render (for LowNoiseRender)
         clock_drift: bool,
         stationary_mask: Optional[np.ndarray] = None,  # E.1: per-bin bool from band_stationary_mask()
+        coh_gamma2: Optional[np.ndarray] = None,  # Layer1: per-bin Γ²_ŶY for coh gain floor
     ) -> np.ndarray:
         """Returns low-band suppression GAIN (amplitude domain, sqrt'd; per-bin)."""
         # Sprint E.1 — capture stationary-mask fraction for the
@@ -692,6 +697,23 @@ class SuppressionGain:
             nearend_spectrum, echo_for_det, comfort_noise_spectrum, self._initial_state
         )
         low_noise_render = self._low_render.detect(render_block)
+        # Split-floor (env-gated): far-end activity decides which min-gain floor
+        # applies. Far silent (NE scenario) → stronger floor lifts NE deg at
+        # zero echo cost (no echo to leak). Far active (FS/DT) → gentler floor.
+        # Split-floor far-active LATCH. Must fire from the FIRST far-active
+        # frame (NOT aec_state.active_render(), which needs 80 cumulative
+        # blocks ≈800ms → leaks the strong NE floor through the FS/DT cold-
+        # start where echo is highest). render_block is int16-scaled (×32768):
+        # FS far p99 ≥2e7, NE far max ≤~7e4 → threshold 1e6 separates with 10×
+        # margin (1e6 int16-MS = mean(far²)>9.3e-4 ≈ the orchestrator's own
+        # 5.96e-4 instantaneous far-active criterion). Once latched, stays for
+        # the recording (reset per AEC instance), so FS/DT use the gentler floor
+        # throughout and only pure-NE (far never active) stays on the strong floor.
+        _rb = np.asarray(render_block, dtype=np.float64)
+        self._far_active_latched = (
+            getattr(self, '_far_active_latched', False)
+            or float(np.mean(_rb * _rb)) > 1.0e6)
+        self._far_active_for_floor = self._far_active_latched
         gain = self._lower_band_gain(
             aec_state=aec_state,
             low_noise_render=low_noise_render,
@@ -699,6 +721,7 @@ class SuppressionGain:
             residual_echo=residual_echo_spectrum,
             comfort_noise=comfort_noise_spectrum,
             clock_drift=clock_drift,
+            coh_gamma2=coh_gamma2,
         )
         return gain
 
@@ -713,6 +736,7 @@ class SuppressionGain:
         residual_echo: np.ndarray,
         comfort_noise: np.ndarray,
         clock_drift: bool,
+        coh_gamma2: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         # Step 1: max gain envelope from last_gain.
         max_gain = self._get_max_gain(self._config.floor_first_increase)
@@ -739,6 +763,16 @@ class SuppressionGain:
             nearend_true = np.maximum(0.0, nearend - weighted_residual)
             G_ser_floor = nearend_true / (nearend + 1.0)
             np.maximum(G, G_ser_floor * self._ser_floor_strength, out=G)
+        # Layer1: coherence gain floor (AEC2 NLP-inspired).
+        # G_floor = sqrt(max(0, 1-Γ²_ŶY))·strength = nearend-amplitude fraction.
+        # FS (Ŷ,Y both ∝ X): Γ²→1 → floor→0 → echo suppression unaffected.
+        # DT (nearend N ⊥ X adds to Y): Γ² drops → floor rises → nearend preserved.
+        # No FS-unconverged false positive: filter error doesn't decorrelate Ŷ,Y.
+        if (self._coh_gain_floor_enabled and coh_gamma2 is not None
+                and coh_gamma2.shape[0] == G.shape[0]):
+            _g2 = np.clip(coh_gamma2.astype(np.float32), 0.0, 1.0)
+            G_coh_floor = np.sqrt(1.0 - _g2) * self._coh_gain_floor_strength
+            np.maximum(G, G_coh_floor, out=G)
         # Snapshot pre-HF-limiter G + ENR/EMR for paint-black diagnostic.
         # No audio effect; consumers via _last_lower_band_snap.
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -938,8 +972,14 @@ class SuppressionGain:
             dec = self._max_dec_lf_nearend if is_ne else self._max_dec_lf_normal
             end = min(self._last_lf_smoothing_band + 1, self._n_bins)
             permanent = self._config.last_permanent_lf_smoothing_band
+            # EXPERIMENT (B-1, env-gated): the guard `last_nearend>last_echo`
+            # fails during ERLE contamination (R²=last_echo inflated by nearend
+            # → guard False exactly when NE present → LF release floor withheld).
+            # AEC_LF_GUARD=1 applies the LF release floor unconditionally in-band.
+            import os as _os
+            _lfg_always = bool(_os.environ.get('AEC_LF_GUARD'))
             for k in range(end):
-                if last_nearend[k] > last_echo[k] or k <= permanent:
+                if _lfg_always or last_nearend[k] > last_echo[k] or k <= permanent:
                     min_gain[k] = max(min_gain[k], self._last_gain[k] * dec)
                     min_gain[k] = min(min_gain[k], 1.0)
         # v3.22 candidate (default OFF): HF minimum-gain floor during DNE.
@@ -963,6 +1003,24 @@ class SuppressionGain:
                 out=min_gain[hf_slice],
             )
             np.minimum(min_gain, 1.0, out=min_gain)
+        # EXPERIMENT (env-gated, default OFF): split min-gain floor.
+        # AEC_GLOBAL_MINGAIN_DB = far-active amplitude-dB floor (e.g. -22):
+        #   caps deepest RES gain-collapse in DT (ERLE contamination → R² spike)
+        #   while keeping FS echo above AEC2.
+        # AEC_NE_FLOOR_DB = far-SILENT amplitude-dB floor (stronger, e.g. -12):
+        #   lifts NE deg at zero echo cost (far silent → no echo to leak).
+        import os as _os
+        _gmg = _os.environ.get('AEC_GLOBAL_MINGAIN_DB')
+        _ne = _os.environ.get('AEC_NE_FLOOR_DB')
+        if _gmg or _ne:
+            _far_active = getattr(self, '_far_active_for_floor', True)
+            if _far_active:
+                _db = _gmg
+            else:
+                _db = _ne if _ne is not None else _gmg
+            if _db:
+                np.maximum(min_gain, 10.0 ** (float(_db) / 10.0), out=min_gain)
+                np.minimum(min_gain, 1.0, out=min_gain)
         return min_gain.astype(np.float32)
 
     def _gain_to_no_audible_echo(
