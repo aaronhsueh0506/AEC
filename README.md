@@ -4,7 +4,7 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v3.21.0 (2026-05-19) — Python `aec.py` `__version__ = "3.21.0"`. C port lag follows. The v3.21 release retires the legacy `ResFilter` 9-stage chain in favour of the AEC3-aligned `_aec3_post` (AecState + ResidualEchoEstimator + SuppressionGain + CNG). Single production preset: `BALANCED`. The 5-preset table below is the historical v3.10.4 snapshot and is preserved for reference; v3.21 baseline scores live in [docs/bench/v3_21_3aadd2d_baseline/](docs/bench/v3_21_3aadd2d_baseline/README.md).
+**Release**: v3.22.0 (2026-06-01) — Python `aec.py` `__version__ = "3.22.0"`. C port lag follows. v3.22.0 ships the **split min-gain floor** (DT/NE near-end preservation, default ON) on top of the v3.22 default-ON stack (E1+x2+E2+D3+L1+C′) and the v3.21 AEC3-aligned `_aec3_post` (AecState + ResidualEchoEstimator + SuppressionGain + CNG). It is the only configuration meeting all four ship thresholds (FS echo >3.5, DT echo >4, DT deg >2.2, NE deg ≥4) — see [CHANGELOG.md](CHANGELOG.md) `[3.22.0]`. Single production preset: `BALANCED`. The 5-preset table below is the historical v3.10.4 snapshot, preserved for reference.
 
 ---
 
@@ -80,7 +80,7 @@ Per-bucket breakdown:
   baseline is the locked-in cost of Plan A's smoothing kernel
   change — see CHANGELOG for details and known trade-offs.
 
-Algorithm version history → [docs/CHANGELOG.md](docs/CHANGELOG.md).
+Algorithm version history → [CHANGELOG.md](CHANGELOG.md).
 Trace-driven evolution (v3.0–v3.4 design rationale) → [docs/aec_v3_evolution.md](docs/aec_v3_evolution.md).
 HF preservation research → [docs/research_log_v3.9.x_HF_preservation.md](docs/research_log_v3.9.x_HF_preservation.md).
 

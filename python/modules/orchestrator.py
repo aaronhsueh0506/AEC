@@ -423,8 +423,8 @@ class AEC:
                 enable_filter_analyzer=True,
                 hop_size=int(self.config.hop_size),
                 sample_rate=int(self.config.sample_rate),
-                subband_wallclock_smoothing=(__import__('os').environ.get('AEC_ERLE_WALLCLOCK') is not None),
-                fullband_wallclock_smoothing=(__import__('os').environ.get('AEC_ERLE_WALLCLOCK') is not None),
+                subband_wallclock_smoothing=False,
+                fullband_wallclock_smoothing=False,
                 erle_startup_follows_convergence=bool(
                     getattr(self.config, 'erle_startup_follows_convergence', False)),
                 erle_e2y2_gate_enabled=bool(
@@ -538,6 +538,18 @@ class AEC:
                 ),
                 coh_gain_floor_strength=float(
                     getattr(self.config, "coh_gain_floor_strength", 0.5)
+                ),
+                split_floor_enabled=bool(
+                    getattr(self.config, "min_gain_split_floor_enabled", True)
+                ),
+                split_floor_far_active_db=float(
+                    getattr(self.config, "min_gain_floor_far_active_db", -22.0)
+                ),
+                split_floor_far_silent_db=float(
+                    getattr(self.config, "min_gain_floor_far_silent_db", -12.0)
+                ),
+                split_floor_latch_power=float(
+                    getattr(self.config, "min_gain_far_latch_power", 1.0e6)
                 ),
             )
             self._aec3_n_bins = n_bins
@@ -1095,8 +1107,8 @@ class AEC:
             enable_filter_analyzer=True,
             hop_size=int(self.config.hop_size),
             sample_rate=int(self.config.sample_rate),
-            subband_wallclock_smoothing=(__import__('os').environ.get('AEC_ERLE_WALLCLOCK') is not None),
-            fullband_wallclock_smoothing=(__import__('os').environ.get('AEC_ERLE_WALLCLOCK') is not None),
+            subband_wallclock_smoothing=False,
+            fullband_wallclock_smoothing=False,
             erle_startup_follows_convergence=bool(
                 getattr(self.config, 'erle_startup_follows_convergence', False)),
         ))
@@ -1165,6 +1177,18 @@ class AEC:
             ),
             coh_gain_floor_strength=float(
                 getattr(self.config, "coh_gain_floor_strength", 0.5)
+            ),
+            split_floor_enabled=bool(
+                getattr(self.config, "min_gain_split_floor_enabled", True)
+            ),
+            split_floor_far_active_db=float(
+                getattr(self.config, "min_gain_floor_far_active_db", -22.0)
+            ),
+            split_floor_far_silent_db=float(
+                getattr(self.config, "min_gain_floor_far_silent_db", -12.0)
+            ),
+            split_floor_latch_power=float(
+                getattr(self.config, "min_gain_far_latch_power", 1.0e6)
             ),
         )
         self._aec3_ola_buf.fill(0)

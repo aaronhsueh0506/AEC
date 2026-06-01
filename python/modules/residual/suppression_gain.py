@@ -524,11 +524,22 @@ class SuppressionGain:
                  d5_ne_floor_enabled: bool = False,
                  d5_ne_floor_strength: float = 0.3,
                  coh_gain_floor_enabled: bool = False,
-                 coh_gain_floor_strength: float = 0.5) -> None:
+                 coh_gain_floor_strength: float = 0.5,
+                 split_floor_enabled: bool = True,
+                 split_floor_far_active_db: float = -22.0,
+                 split_floor_far_silent_db: float = -12.0,
+                 split_floor_latch_power: float = 1.0e6) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
         self._hop_size = int(hop_size)
         self._config = config or SuppressorConfig()
+        # v3.22 split min-gain floor (default ON). Precompute power-domain
+        # floors from amplitude-dB; see AecConfig.min_gain_split_floor_* .
+        self._split_floor_enabled = bool(split_floor_enabled)
+        self._split_floor_far_active = float(10.0 ** (split_floor_far_active_db / 10.0))
+        self._split_floor_far_silent = float(10.0 ** (split_floor_far_silent_db / 10.0))
+        self._split_floor_latch_power = float(split_floor_latch_power)
+        self._far_active_latched = False
         # echo_audibility lives on SuppressorConfig so orchestrator can
         # override use_stationarity_properties.
         self._echo_audibility = self._config.echo_audibility
@@ -697,23 +708,20 @@ class SuppressionGain:
             nearend_spectrum, echo_for_det, comfort_noise_spectrum, self._initial_state
         )
         low_noise_render = self._low_render.detect(render_block)
-        # Split-floor (env-gated): far-end activity decides which min-gain floor
-        # applies. Far silent (NE scenario) → stronger floor lifts NE deg at
-        # zero echo cost (no echo to leak). Far active (FS/DT) → gentler floor.
-        # Split-floor far-active LATCH. Must fire from the FIRST far-active
-        # frame (NOT aec_state.active_render(), which needs 80 cumulative
-        # blocks ≈800ms → leaks the strong NE floor through the FS/DT cold-
-        # start where echo is highest). render_block is int16-scaled (×32768):
-        # FS far p99 ≥2e7, NE far max ≤~7e4 → threshold 1e6 separates with 10×
-        # margin (1e6 int16-MS = mean(far²)>9.3e-4 ≈ the orchestrator's own
-        # 5.96e-4 instantaneous far-active criterion). Once latched, stays for
-        # the recording (reset per AEC instance), so FS/DT use the gentler floor
-        # throughout and only pure-NE (far never active) stays on the strong floor.
-        _rb = np.asarray(render_block, dtype=np.float64)
-        self._far_active_latched = (
-            getattr(self, '_far_active_latched', False)
-            or float(np.mean(_rb * _rb)) > 1.0e6)
-        self._far_active_for_floor = self._far_active_latched
+        # Split min-gain floor: per-recording far-active LATCH (applied in
+        # _get_min_gain; see AecConfig.min_gain_split_floor_*). Latch fires from
+        # the FIRST far-active frame on instantaneous render energy — NOT
+        # aec_state.active_render(), which needs ~800ms to assert and would leak
+        # the strong NE floor through the FS/DT cold-start where echo is highest.
+        # render_block is int16-scaled (×32768): FS far p99 ≥2e7 vs NE far max
+        # ≤~7e4, so latch_power separates with ~10× margin. Once latched it
+        # stays for the recording (reset per AEC instance), so FS/DT use the
+        # gentler floor throughout; only pure-NE (far never active) keeps the
+        # strong floor.
+        if self._split_floor_enabled and not self._far_active_latched:
+            _rb = np.asarray(render_block, dtype=np.float64)
+            if float(np.mean(_rb * _rb)) > self._split_floor_latch_power:
+                self._far_active_latched = True
         gain = self._lower_band_gain(
             aec_state=aec_state,
             low_noise_render=low_noise_render,
@@ -972,14 +980,8 @@ class SuppressionGain:
             dec = self._max_dec_lf_nearend if is_ne else self._max_dec_lf_normal
             end = min(self._last_lf_smoothing_band + 1, self._n_bins)
             permanent = self._config.last_permanent_lf_smoothing_band
-            # EXPERIMENT (B-1, env-gated): the guard `last_nearend>last_echo`
-            # fails during ERLE contamination (R²=last_echo inflated by nearend
-            # → guard False exactly when NE present → LF release floor withheld).
-            # AEC_LF_GUARD=1 applies the LF release floor unconditionally in-band.
-            import os as _os
-            _lfg_always = bool(_os.environ.get('AEC_LF_GUARD'))
             for k in range(end):
-                if _lfg_always or last_nearend[k] > last_echo[k] or k <= permanent:
+                if last_nearend[k] > last_echo[k] or k <= permanent:
                     min_gain[k] = max(min_gain[k], self._last_gain[k] * dec)
                     min_gain[k] = min(min_gain[k], 1.0)
         # v3.22 candidate (default OFF): HF minimum-gain floor during DNE.
@@ -1003,24 +1005,17 @@ class SuppressionGain:
                 out=min_gain[hf_slice],
             )
             np.minimum(min_gain, 1.0, out=min_gain)
-        # EXPERIMENT (env-gated, default OFF): split min-gain floor.
-        # AEC_GLOBAL_MINGAIN_DB = far-active amplitude-dB floor (e.g. -22):
-        #   caps deepest RES gain-collapse in DT (ERLE contamination → R² spike)
-        #   while keeping FS echo above AEC2.
-        # AEC_NE_FLOOR_DB = far-SILENT amplitude-dB floor (stronger, e.g. -12):
-        #   lifts NE deg at zero echo cost (far silent → no echo to leak).
-        import os as _os
-        _gmg = _os.environ.get('AEC_GLOBAL_MINGAIN_DB')
-        _ne = _os.environ.get('AEC_NE_FLOOR_DB')
-        if _gmg or _ne:
-            _far_active = getattr(self, '_far_active_for_floor', True)
-            if _far_active:
-                _db = _gmg
-            else:
-                _db = _ne if _ne is not None else _gmg
-            if _db:
-                np.maximum(min_gain, 10.0 ** (float(_db) / 10.0), out=min_gain)
-                np.minimum(min_gain, 1.0, out=min_gain)
+        # Split min-gain floor (default ON): cap the deepest suppression to
+        # stop the AEC3 floor (min_echo_power / R²) collapsing to ~0 in DT when
+        # ERLE contamination spikes R². far-active (FS/DT) uses the gentler
+        # floor; pure-NE (far never latched active) uses the stronger floor —
+        # which lifts NE nearend at zero echo cost. See AecConfig and the
+        # far-active latch in get_gain.
+        if self._split_floor_enabled:
+            floor = (self._split_floor_far_active if self._far_active_latched
+                     else self._split_floor_far_silent)
+            np.maximum(min_gain, floor, out=min_gain)
+            np.minimum(min_gain, 1.0, out=min_gain)
         return min_gain.astype(np.float32)
 
     def _gain_to_no_audible_echo(

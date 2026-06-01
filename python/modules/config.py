@@ -126,6 +126,28 @@ class AecConfig:
     coh_gain_floor_enabled: bool = False
     coh_gain_floor_strength: float = 0.5
 
+    # ── v3.22 split min-gain floor (DEFAULT ON) ─────────────────────────────
+    # The AEC3 min-gain floor (min_echo_power / R²) collapses to ~0 in DT when
+    # ERLE contamination inflates R² — the structural cause of nearend over-
+    # suppression (RES cuts nearend up to -8dB; audio-localised). A flat power-
+    # domain floor caps the deepest suppression. We split it by far-end activity:
+    #   • far-active (FS/DT): -22 dB  — caps DT gain-collapse while FS deep echo
+    #     suppression below ~-40 dB (perceptually inaudible) is the only loss,
+    #     so FS echo stays > AEC2.
+    #   • far-silent (pure NE): -12 dB — lifts NE nearend at ZERO echo cost
+    #     (no echo present to leak).
+    # Routing uses a per-recording LATCH on instantaneous far energy
+    # (mean(render_block²) > latch_power, render_block int16-scaled ×32768; the
+    # threshold ≈ the orchestrator's own far-active criterion). Latches from the
+    # first far frame so FS/DT use the gentler floor throughout (no cold-start
+    # leak); only recordings where far is never active stay on the strong floor.
+    # 800-case: FS echo 3.520 / DT echo 4.042 / DT deg 2.226 / NE deg 4.047
+    # (all four ship thresholds met). Floors are amplitude-domain dB.
+    min_gain_split_floor_enabled: bool = True
+    min_gain_floor_far_active_db: float = -22.0
+    min_gain_floor_far_silent_db: float = -12.0
+    min_gain_far_latch_power: float = 1.0e6
+
     # ── v3.22 B: Emura 2017 cross-PSD R² (nearend-robust residual estimate) ──
     # Replaces R²_linear = S²/ERLE (contaminated in DT) with a blend that
     # uses the cross-spectrum between E (error) and X_delayed (reference).

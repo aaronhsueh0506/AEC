@@ -1,9 +1,10 @@
-# AEC Algorithm Methods (v3.21.0)
+# AEC Algorithm Methods (v3.22.0)
 
-**Release**: v3.21.0 (2026-05-19). Python `aec.py` `__version__ = "3.21.0"`.
+**Release**: v3.22.0 (2026-06-01). Python `aec.py` `__version__ = "3.22.0"`.
 C port lag behind Python; the C structure mirrors Python class boundaries.
+v3.22.0 adds the split min-gain floor (§3.4) on top of the v3.21 pipeline.
 
-This document is the deep algorithm specification for the v3.21 production
+This document is the deep algorithm specification for the production
 pipeline. The v3.21 release retires the legacy 9-stage `ResFilter`
 post-filter in favour of an AEC3-aligned chain
 (`AecState` + `ResidualEchoEstimator` + `SuppressionGain` + CNG). See
@@ -262,6 +263,34 @@ S²(k) = mic PSD when usable_linear_estimate
 with α a frame-state-dependent over-estimation factor. The gain is then
 band-limited (HF cap), temporally smoothed (asymmetric attack / release),
 and floored by a per-bin spectral-floor mask.
+
+**Split min-gain floor (v3.22.0, default ON).** The AEC3 min-gain floor
+`min_gain = min_echo_power / R²` collapses to ~0 in double-talk: near-end
+inflates the error → ERLE drops → R² spikes → the floor that should protect
+near-end vanishes exactly when near-end is present (RES over-suppresses
+near-end up to −8 dB; the linear filter only cuts −1.4..−2.9 dB). A
+coherence double-talk discriminator was proven unworkable (single-lag X–Y
+coherence cannot separate reverberant FS from DT). The fix is a power-domain
+floor on the deepest suppression, **split by far-end activity**:
+
+```
+min_gain(k) = max( min_echo_power / R²(k),  floor )
+floor = 10^(-22/10)  if far-active (FS/DT)   # caps DT gain-collapse; only
+                                             #   FS cost is deep echo <-40dB
+                                             #   (inaudible) → FS echo > AEC2
+      = 10^(-12/10)  if far-silent (pure NE) # lifts NE near-end, zero echo
+                                             #   cost (no echo to leak)
+```
+
+Routing uses a per-recording **latch** on instantaneous far energy
+(`mean(render_block²) > 1e6`, render int16-scaled — ≈ the orchestrator's own
+far-active criterion). It latches from the first far frame so FS/DT use the
+gentler floor throughout (no cold-start leak); only recordings where far is
+never active keep the strong floor. Config (`AecConfig`):
+`min_gain_split_floor_enabled`, `min_gain_floor_far_active_db` (−22),
+`min_gain_floor_far_silent_db` (−12), `min_gain_far_latch_power` (1e6).
+800-case: FS echo 3.520 / DT echo 4.042 / DT deg 2.226 / NE deg 4.047
+(all four ship thresholds; the only config to pass all four).
 
 ### 3.5 Comfort noise (CNG)
 

@@ -16,6 +16,60 @@ when verdict requires it.
 
 ---
 
+## [3.22.0] — 2026-06-01 — v3.22: split min-gain floor (DT/NE nearend preservation)
+
+**Headline**: ships the split min-gain floor into BALANCED (default ON), the
+first production change of the v3.22 arc. Closes the DT/NE nearend
+over-suppression gap while holding echo above AEC2 — the only configuration
+that meets all four ship thresholds simultaneously.
+
+**Root cause (audio-localised)**: in doubletalk the RES Wiener gain over-
+suppresses near-end by up to −8 dB (the linear filter only cuts −1.4..−2.9 dB).
+Mechanism: near-end inflates the error → ERLE drops → R² spikes → the AEC3
+min-gain floor `min_echo_power / R²` collapses to ~0, exactly when near-end is
+present. A coherence-based double-talk discriminator was proven unworkable
+(single-lag X–Y coherence cannot separate reverberant FS from DT — offline
+oracle + audio). The working lever is a Pareto floor on the deepest suppression.
+
+**Mechanism**: power-domain min-gain floor split by far-end activity —
+* far-active (FS/DT): −22 dB. Caps the DT gain-collapse; the only FS cost is
+  deep echo suppression below ~−40 dB (already inaudible), so FS echo stays
+  above AEC2.
+* far-silent (pure NE): −12 dB. Lifts NE near-end at zero echo cost (no echo
+  present to leak).
+Routing uses a per-recording latch on instantaneous far energy
+(`mean(render_block²) > 1e6`, render int16-scaled; ≈ the orchestrator's own
+far-active criterion). Latches from the first far frame so FS/DT use the gentler
+floor throughout (no cold-start leak); only recordings where far is never active
+keep the strong floor. Config: `min_gain_split_floor_enabled` (default True),
+`min_gain_floor_far_active_db` (−22), `min_gain_floor_far_silent_db` (−12),
+`min_gain_far_latch_power` (1e6) in [config.py](python/modules/config.py);
+applied in [suppression_gain.py](python/modules/residual/suppression_gain.py)
+`_get_min_gain` / `get_gain`.
+
+**800-case (combined FS=300 / DT=300 / NE=200, vs cp_05 default-ON stack
+E1+x2+E2+D3+L1+C′)**:
+
+| metric | cp_05 | v3.22.0 | AEC2 | AEC3 | threshold |
+|---|---|---|---|---|---|
+| FS echo  | 3.726 | 3.520 | 3.484 | 3.875 | > 3.5 ✓ |
+| DT echo  | 4.461 | 4.042 | 4.262 | 4.538 | > 4.0 ✓ |
+| DT deg   | 1.952 | 2.226 | 2.389 | 1.850 | > 2.2 ✓ |
+| NE deg   | 3.906 | 4.047 | 4.098 | 3.454 | ≥ 4.0 ✓ |
+
+Only configuration to meet all four (AEC2 3/4, AEC3 2/4). vs v3.21 baseline:
+FS echo +0.09, DT deg +0.13, NE deg +0.11. Audio-validated: DT near-end
+recovered +1.9..7.8 dB with no echo leak in far-silent gaps; NE +1..4 dB.
+
+**Audit by-products** (no production change): refuted via data two "critical"
+claims — PBFDKF H_error step-size collapse (H_error spans 1e-3..2.0 during
+movement = correct Kalman behaviour) and a delay-histogram movement latency
+(the worst FS_movement case has zero mid-case delay shifts). The one verified
+unused lever is the reverb accumulator's ~2.9× steady-state under-weight,
+deferred as an approach-AEC3-echo stretch (echo↑/deg↓).
+
+---
+
 ## [Unreleased] — 2026-05-29 — v3.21 CLOSE: conversion audit + Tier-C verdict + alignment-flag inlining (byte-equal)
 
 **Headline**: closes the v3.21 AEC3-alignment arc. A deep audit of every
