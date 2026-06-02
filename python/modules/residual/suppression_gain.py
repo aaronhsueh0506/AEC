@@ -522,7 +522,8 @@ class SuppressionGain:
                  cohxd_floor_release_enabled: bool = False,
                  cohxd_floor_release_db: float = -45.0,
                  cohxd_gamma_lo: float = 0.5,
-                 cohxd_gamma_hi: float = 0.85) -> None:
+                 cohxd_gamma_hi: float = 0.85,
+                 cohxd_nearend_spp_gate_enabled: bool = False) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
         self._hop_size = int(hop_size)
@@ -542,8 +543,12 @@ class SuppressionGain:
         self._cohxd_release_floor = float(10.0 ** (cohxd_floor_release_db / 10.0))
         self._cohxd_gamma_lo = float(cohxd_gamma_lo)
         self._cohxd_gamma_hi = float(cohxd_gamma_hi)
+        # cohxd near-gate: scale the release by (1 - p_ne) so the floor is only
+        # released where near-end is absent (the DT frontier-mover).
+        self._cohxd_nearend_spp_gate_enabled = bool(cohxd_nearend_spp_gate_enabled)
         # Set per-hop by get_gain from the orchestrator-supplied Γ²(X,Y).
         self._coh_xy_gamma2: Optional[np.ndarray] = None
+        self._nearend_p_ne: Optional[np.ndarray] = None
         # echo_audibility lives on SuppressorConfig so orchestrator can
         # override use_stationarity_properties.
         self._echo_audibility = self._config.echo_audibility
@@ -693,6 +698,7 @@ class SuppressionGain:
         stationary_mask: Optional[np.ndarray] = None,  # E.1: per-bin bool from band_stationary_mask()
         coh_gamma2: Optional[np.ndarray] = None,  # Layer1: per-bin Γ²_ŶY for coh gain floor
         coh_xy_gamma2: Optional[np.ndarray] = None,  # cohxd: per-bin Γ²(X,Y) for floor release
+        nearend_p_ne: Optional[np.ndarray] = None,  # per-bin near-end SPP for the cohxd near-gate
     ) -> np.ndarray:
         """Returns low-band suppression GAIN (amplitude domain, sqrt'd; per-bin)."""
         # Sprint E.1 — capture stationary-mask fraction for the
@@ -705,6 +711,9 @@ class SuppressionGain:
         # cohxd: stash per-bin Γ²(X,Y) for the selective floor release in
         # _get_min_gain (only consumed when cohxd_floor_release_enabled).
         self._coh_xy_gamma2 = coh_xy_gamma2
+        # Per-bin near-end SPP for the cohxd near-gate (only consumed when
+        # cohxd_nearend_spp_gate_enabled).
+        self._nearend_p_ne = nearend_p_ne
         # Dominant nearend update using unbounded-echo spectrum when configured
         # (AEC3 cc:410-413).
         echo_for_det = (
@@ -1038,6 +1047,16 @@ class SuppressionGain:
                     / max(self._cohxd_gamma_hi - self._cohxd_gamma_lo, 1e-6),
                     0.0, 1.0,
                 )
+                # Near-gate: only release where near-end is absent. Scale the
+                # release interpolation by (1 - p_ne) so a high near-end SPP
+                # collapses t→0 (keep base_floor, protect near), while p_ne≈0
+                # (echo-only) leaves the full release (cancel echo). Errors are
+                # safe-direction: an over-high p_ne only withholds release
+                # (never raises the floor above base) → worst case = no cohxd.
+                if (self._cohxd_nearend_spp_gate_enabled
+                        and self._nearend_p_ne is not None):
+                    p_ne = np.asarray(self._nearend_p_ne, dtype=np.float64)
+                    t = t * (1.0 - np.clip(p_ne, 0.0, 1.0))
                 _log_base = np.log(base_floor)
                 _log_rel = np.log(self._cohxd_release_floor)
                 floor_perbin = np.exp(

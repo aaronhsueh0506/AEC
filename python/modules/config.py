@@ -178,6 +178,33 @@ class AecConfig:
     cohxd_gamma_hi: float = 0.85
     cohxd_alpha: float = 0.05
 
+    # ── per-bin near-end speech-presence probability (NearendSpp) ──
+    # DT both-axes frontier-mover. Tracks, per bin, the minimum over a window of
+    # the residual-to-reference power ratio |E|²/|X|² (the residual echo-path
+    # transfer); a near-end onset spikes that ratio above the tracked floor while
+    # a reverb-tail far-end stays at the floor (it is still explained by X). Maps
+    # the dB spike through a sigmoid to p_ne[k] ∈ [0,1]. Uses the reliable
+    # reference X (not Ŷ/ERLE) and multi-frame minima, so it separates near-end
+    # from reverb-tail — the wall that closed every single-lag coherence route —
+    # and works on under-converged hard cases. Default OFF research substrate;
+    # consumers (near-gated cohxd, general floor modulation) read p_ne.
+    #   spike_thr_db/soft_db : sigmoid centre/softness, dB of ratio above floor
+    #   minima_subwindow     : MCRA sub-window D in frames (floor spans [D,2D))
+    #   alpha                : EMA rate for |E|² / |X|² smoothing
+    # Slow time constants are load-bearing: near-end talk-spurts are sustained
+    # (~seconds) while far-only residual-echo fluctuations + R² lag are fast, so
+    # heavy smoothing (alpha≈0.02 ≈500 ms) + a long minima window (≈2 s) averages
+    # out the echo transients but keeps the near-end. Fast constants (0.2/60)
+    # fail the Step-0 audio-proof — far-only echo spikes read as near-end.
+    nearend_spp_enabled: bool = False
+    nearend_spp_alpha: float = 0.02
+    nearend_spp_minima_subwindow: int = 200
+    nearend_spp_spike_thr_db: float = 5.0
+    nearend_spp_spike_soft_db: float = 2.0
+    # cohxd near-gate: scale the cohxd floor RELEASE by (1 - p_ne) so the floor
+    # is only released where near-end is absent. Requires both cohxd and SPP on.
+    cohxd_nearend_spp_gate_enabled: bool = False
+
     # ── linear-filter cold-start DEADLOCK breaker (PBFDKF Kalman gain) ──
     # mu = H_error/(0.5·H_error·X² + n·E²); H_error refreshed by
     # `H_error += leakage × Σ|W|²`. Σ|W|² is ~0 before the filter adapts, so on

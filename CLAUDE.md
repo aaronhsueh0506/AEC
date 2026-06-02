@@ -185,6 +185,15 @@ min-gain floor + default-ON stack (E1+x2+E2+D3+L1+C′), and the v3.21.6.4
 AEC3-alignment completion. See CHANGELOG `[3.22.2]` and
 [docs/v3_22.md](docs/v3_22.md) for the full flag-campaign evidence.
 
+On top of 3.22.2, a **byte-equal hygiene pass** (CHANGELOG `[Unreleased]`,
+`__version__` unchanged): Track A `SuppressionGain`-ctor dedup, Track B
+retired 6 dud default-OFF flags (`AecConfig` 109 fields), Track C added the
+default-OFF per-bin near-end SPP substrate (`NearendSpp` +
+[python/spp_step0_diag.py](python/spp_step0_diag.py)) for the DT frontier —
+**NULL verdict** (near-gated cohxd lands on the plain-cohxd Pareto line; the
+per-bin near-mask hits the voice-on-voice bin-overlap wall, [docs/v3_22.md](docs/v3_22.md)
+§7). All three byte-equal-verified; production behaviour unchanged.
+
 The **v3.21 CLOSE** (branch `v3_21_release`, byte-equal, no algorithm
 change — see CHANGELOG `[Unreleased]`) finalised the arc: a hop/fft
 conversion audit + 800-case Tier-C validation adjudicated every

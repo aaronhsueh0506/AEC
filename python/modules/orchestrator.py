@@ -498,6 +498,22 @@ class AEC:
             self._aec3_sg = SuppressionGain(**self._build_sg_kwargs(n_bins, _sg_config))
             self._aec3_n_bins = n_bins
             self._aec3_sg_config = _sg_config
+            # Per-bin near-end SPP (default-OFF DT frontier-mover substrate).
+            if getattr(self.config, "nearend_spp_enabled", False):
+                from .residual.nearend_spp import NearendSpp
+                self._nearend_spp = NearendSpp(
+                    n_bins,
+                    alpha=float(getattr(self.config, "nearend_spp_alpha", 0.2)),
+                    minima_subwindow=int(
+                        getattr(self.config, "nearend_spp_minima_subwindow", 60)),
+                    spike_thr_db=float(
+                        getattr(self.config, "nearend_spp_spike_thr_db", 5.0)),
+                    spike_soft_db=float(
+                        getattr(self.config, "nearend_spp_spike_soft_db", 2.0)),
+                )
+            else:
+                self._nearend_spp = None
+            self._nearend_p_ne = None
             # AEC3 `aec_state.cc:229-234` ComputeAvgRenderReverb owns a
             # dedicated ReverbModel separate from the residual-echo path's
             # reverb model. The semantics differ — this one always uses
@@ -1072,6 +1088,8 @@ class AEC:
                 getattr(cfg, "cohxd_floor_release_db", -45.0)),
             cohxd_gamma_lo=float(getattr(cfg, "cohxd_gamma_lo", 0.5)),
             cohxd_gamma_hi=float(getattr(cfg, "cohxd_gamma_hi", 0.85)),
+            cohxd_nearend_spp_gate_enabled=bool(
+                getattr(cfg, "cohxd_nearend_spp_gate_enabled", False)),
         )
 
     def _reset_aec3_post(self, *, preserve_render_side: bool = False) -> None:
@@ -1126,6 +1144,9 @@ class AEC:
             getattr(self.config, "reverb_tail_strength", 1.0))
         self._aec3_sg = SuppressionGain(
             **self._build_sg_kwargs(n_bins, self._aec3_sg_config))
+        if getattr(self, "_nearend_spp", None) is not None:
+            self._nearend_spp.reset()
+        self._nearend_p_ne = None
         self._aec3_ola_buf.fill(0)
         self._aec3_pending_gain_change = False
         self._aec3_pending_delay_change = None
@@ -3355,6 +3376,15 @@ class AEC:
             force_nonlinear_path=_just_reset_active,
         )
 
+        # Per-bin near-end SPP: p_ne[k] from minima tracking of |E|²/R², where
+        # R² is the RES's reverb/echo-path-aware residual-echo estimate (so the
+        # far-only baseline is ≈1 and a near-end onset spikes the ratio). Gated
+        # on far-end activity. Default-OFF substrate; stored for diagnostics and
+        # the cohxd near-gate consumer.
+        if self._nearend_spp is not None:
+            self._nearend_p_ne = self._nearend_spp.update(
+                error_psd, r2, bool(self._render_activity.is_active))
+
         # Reverb tail dead-streak tracking. `_reverb_fr` is the
         # residual-echo-estimator's tracked frequency response; its
         # `.tail_response` is the per-bin late-reflection mass. AEC3
@@ -3513,6 +3543,10 @@ class AEC:
                         if self.config.coh_gain_floor_enabled else None),
             coh_xy_gamma2=(self._coh_xy_gamma2
                            if self.config.cohxd_floor_release_enabled else None),
+            nearend_p_ne=(self._nearend_p_ne
+                          if getattr(self.config,
+                                     "cohxd_nearend_spp_gate_enabled", False)
+                          else None),
         )
 
         # trace_hf_chain audit trace removed (default-OFF dev knob).

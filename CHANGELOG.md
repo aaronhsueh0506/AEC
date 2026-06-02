@@ -56,6 +56,29 @@ Behaviour-neutral cleanup on top of 3.22.2. `__version__` stays **3.22.2**
   `AEC_*` env hooks in `eval_aec_challenge.py` were removed too. AecConfig: 103
   fields.
 
+- **per-bin near-end SPP substrate** (Track C, default-OFF): added
+  `NearendSpp` ([python/modules/residual/nearend_spp.py](python/modules/residual/nearend_spp.py))
+  — an IMCRA-style per-bin near-end speech-presence probability built on
+  minima tracking of the residual-to-reference power ratio `|E|²/R²` (uses the
+  reliable reference, not Ŷ/ERLE; multi-frame minima separate a near-end onset
+  from a reverb-tail far-end, the wall every single-lag-coherence discriminator
+  hit). Wired as a default-OFF DT frontier-mover: an optional near-gate scales
+  the cohxd floor *release* by `(1 − p_ne)` so the floor is only released where
+  near-end is absent. Adds 6 default-`False`/conservative `AecConfig` fields
+  (`nearend_spp_*`, `cohxd_nearend_spp_gate_enabled`; now 109). All paths
+  guarded by the flags → production byte-equal (14/14, all buckets). Ships the
+  diagnostic harness [python/spp_step0_diag.py](python/spp_step0_diag.py)
+  (synthetic-DT audio-proof). **Verdict: NULL — the near-gate does NOT move the
+  DT frontier.** Step-0 audio-proof passes only with slow time constants
+  (`alpha=0.02`, `minima_subwindow=200`); with those, the 800-case A/B (cohxd
+  vs near-gated cohxd at `thr=5` and `thr=11` vs C_pb28) lands both near-gate
+  points *on the plain-cohxd Pareto line* (matched-deg Δ ≤ ±0.012). Root cause:
+  in real double-talk near-end and echo occupy the *same bins*, so a per-bin
+  near-mask cannot release echo-only suppression without also touching near-end
+  — confirms the voice-on-voice bin-overlap wall (consistent with the prior
+  coherence-discriminator closures). Kept as default-OFF research substrate;
+  full reasoning in [docs/v3_22.md](docs/v3_22.md).
+
 ## [3.22.2] — 2026-06-02 — BALANCED: per-bin near-end blend + far-active floor −28
 
 **Headline**: BALANCED ships `soft_nearend_blend_per_bin=True` + lowers
