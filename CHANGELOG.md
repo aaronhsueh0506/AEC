@@ -16,6 +16,21 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — code hygiene (byte-equal, no algorithm change)
+
+Behaviour-neutral cleanup on top of 3.22.2. `__version__` stays **3.22.2**
+(no production behaviour change). Each commit byte-equal-verified
+(`_ours` + `_ours_nores`, incl. movement bucket) before landing.
+
+- **orchestrator dedup** (Track A): extracted `_build_sg_kwargs()` so the
+  `SuppressionGain` ctor — previously copied verbatim across `__init__` and
+  `_reset_aec3_post` (the two blocks were identical except the
+  `SuppressorConfig`) — is built in one place (~140 duplicated lines → 2 call
+  sites). Collapsed the always-true `erle_coh_gate_enabled or True` Γ²(Ŷ,Y) EMA
+  guard to its real consumer set (`erle_coh_gate_enabled or
+  coh_gain_floor_enabled`); the accumulators feed nothing else, so the EMA is
+  skipped when neither consumer is on. 14/14 byte-identical.
+
 ## [3.22.2] — 2026-06-02 — BALANCED: per-bin near-end blend + far-active floor −28
 
 **Headline**: BALANCED ships `soft_nearend_blend_per_bin=True` + lowers

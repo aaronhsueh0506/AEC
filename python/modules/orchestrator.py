@@ -503,73 +503,7 @@ class AEC:
                 loud_nearend_enr_threshold=float(getattr(
                     self.config, 'dne_loud_nearend_enr_threshold', 0.75)),
             )
-            self._aec3_sg = SuppressionGain(
-                n_bins=n_bins,
-                config=_sg_config,
-                sr=self.config.sample_rate,
-                hop_size=self.config.hop_size,
-                use_wallclock_block_energy_threshold=True,
-                use_wallclock_gain_ratchet=True,
-                use_wallclock_low_noise_render_iir=bool(getattr(self.config, 'use_wallclock_low_noise_render_iir', False)),
-                hf_min_gain_floor_during_dne_enabled=bool(
-                    getattr(self.config,
-                            "hf_min_gain_floor_during_dne_enabled", False)
-                ),
-                hf_min_gain_floor_during_dne_db=float(
-                    getattr(self.config,
-                            "hf_min_gain_floor_during_dne_db", -15.0)
-                ),
-                ser_floor_enabled=bool(
-                    getattr(self.config, "ser_floor_enabled", False)
-                ),
-                ser_floor_strength=float(
-                    getattr(self.config, "ser_floor_strength", 0.5)
-                ),
-                soft_nearend_blend_enabled=bool(
-                    getattr(self.config, "soft_nearend_blend_enabled", False)
-                ),
-                soft_nearend_blend_enr_threshold=float(
-                    getattr(self.config, "soft_nearend_blend_enr_threshold", 0.25)
-                ),
-                soft_nearend_blend_softness=float(
-                    getattr(self.config, "soft_nearend_blend_softness", 0.25)
-                ),
-                soft_nearend_blend_per_bin=bool(
-                    getattr(self.config, "soft_nearend_blend_per_bin", False)
-                ),
-                d5_ne_floor_enabled=bool(
-                    getattr(self.config, "d5_ne_floor_enabled", False)
-                ),
-                d5_ne_floor_strength=float(
-                    getattr(self.config, "d5_ne_floor_strength", 0.3)
-                ),
-                coh_gain_floor_enabled=bool(
-                    getattr(self.config, "coh_gain_floor_enabled", False)
-                ),
-                coh_gain_floor_strength=float(
-                    getattr(self.config, "coh_gain_floor_strength", 0.5)
-                ),
-                split_floor_enabled=bool(
-                    getattr(self.config, "min_gain_split_floor_enabled", True)
-                ),
-                split_floor_far_active_db=float(
-                    getattr(self.config, "min_gain_floor_far_active_db", -22.0)
-                ),
-                split_floor_far_silent_db=float(
-                    getattr(self.config, "min_gain_floor_far_silent_db", -12.0)
-                ),
-                split_floor_latch_power=float(
-                    getattr(self.config, "min_gain_far_latch_power", 1.0e6)
-                ),
-                cohxd_floor_release_enabled=bool(
-                    getattr(self.config, "cohxd_floor_release_enabled", False)
-                ),
-                cohxd_floor_release_db=float(
-                    getattr(self.config, "cohxd_floor_release_db", -45.0)
-                ),
-                cohxd_gamma_lo=float(getattr(self.config, "cohxd_gamma_lo", 0.5)),
-                cohxd_gamma_hi=float(getattr(self.config, "cohxd_gamma_hi", 0.85)),
-            )
+            self._aec3_sg = SuppressionGain(**self._build_sg_kwargs(n_bins, _sg_config))
             self._aec3_n_bins = n_bins
             self._aec3_sg_config = _sg_config
             # AEC3 `aec_state.cc:229-234` ComputeAvgRenderReverb owns a
@@ -1107,6 +1041,57 @@ class AEC:
         # / SuppressionGain / CNG / OLA across.
         self._reset_aec3_post()
 
+    def _build_sg_kwargs(self, n_bins, sg_config):
+        """Common SuppressionGain ctor kwargs shared by `__init__` and
+        `_reset_aec3_post`. Only the SuppressorConfig differs between the two
+        sites (init builds it fresh; reset reuses the stored
+        `self._aec3_sg_config`), so it is passed in."""
+        cfg = self.config
+        return dict(
+            n_bins=n_bins,
+            config=sg_config,
+            sr=cfg.sample_rate,
+            hop_size=cfg.hop_size,
+            use_wallclock_block_energy_threshold=True,
+            use_wallclock_gain_ratchet=True,
+            use_wallclock_low_noise_render_iir=bool(
+                getattr(cfg, 'use_wallclock_low_noise_render_iir', False)),
+            hf_min_gain_floor_during_dne_enabled=bool(
+                getattr(cfg, "hf_min_gain_floor_during_dne_enabled", False)),
+            hf_min_gain_floor_during_dne_db=float(
+                getattr(cfg, "hf_min_gain_floor_during_dne_db", -15.0)),
+            ser_floor_enabled=bool(getattr(cfg, "ser_floor_enabled", False)),
+            ser_floor_strength=float(getattr(cfg, "ser_floor_strength", 0.5)),
+            soft_nearend_blend_enabled=bool(
+                getattr(cfg, "soft_nearend_blend_enabled", False)),
+            soft_nearend_blend_enr_threshold=float(
+                getattr(cfg, "soft_nearend_blend_enr_threshold", 0.25)),
+            soft_nearend_blend_softness=float(
+                getattr(cfg, "soft_nearend_blend_softness", 0.25)),
+            soft_nearend_blend_per_bin=bool(
+                getattr(cfg, "soft_nearend_blend_per_bin", False)),
+            d5_ne_floor_enabled=bool(getattr(cfg, "d5_ne_floor_enabled", False)),
+            d5_ne_floor_strength=float(getattr(cfg, "d5_ne_floor_strength", 0.3)),
+            coh_gain_floor_enabled=bool(
+                getattr(cfg, "coh_gain_floor_enabled", False)),
+            coh_gain_floor_strength=float(
+                getattr(cfg, "coh_gain_floor_strength", 0.5)),
+            split_floor_enabled=bool(
+                getattr(cfg, "min_gain_split_floor_enabled", True)),
+            split_floor_far_active_db=float(
+                getattr(cfg, "min_gain_floor_far_active_db", -22.0)),
+            split_floor_far_silent_db=float(
+                getattr(cfg, "min_gain_floor_far_silent_db", -12.0)),
+            split_floor_latch_power=float(
+                getattr(cfg, "min_gain_far_latch_power", 1.0e6)),
+            cohxd_floor_release_enabled=bool(
+                getattr(cfg, "cohxd_floor_release_enabled", False)),
+            cohxd_floor_release_db=float(
+                getattr(cfg, "cohxd_floor_release_db", -45.0)),
+            cohxd_gamma_lo=float(getattr(cfg, "cohxd_gamma_lo", 0.5)),
+            cohxd_gamma_hi=float(getattr(cfg, "cohxd_gamma_hi", 0.85)),
+        )
+
     def _reset_aec3_post(self, *, preserve_render_side: bool = False) -> None:
         """Clear `_aec3_post` chain state.
 
@@ -1162,72 +1147,7 @@ class AEC:
         self._aec3_ree._reverb_tail_strength = float(
             getattr(self.config, "reverb_tail_strength", 1.0))
         self._aec3_sg = SuppressionGain(
-            n_bins=n_bins,
-            config=self._aec3_sg_config,
-            sr=self.config.sample_rate,
-            hop_size=self.config.hop_size,
-            use_wallclock_block_energy_threshold=True,
-            use_wallclock_gain_ratchet=True,
-            use_wallclock_low_noise_render_iir=bool(getattr(self.config, 'use_wallclock_low_noise_render_iir', False)),
-            hf_min_gain_floor_during_dne_enabled=bool(
-                getattr(self.config,
-                        "hf_min_gain_floor_during_dne_enabled", False)
-            ),
-            hf_min_gain_floor_during_dne_db=float(
-                getattr(self.config,
-                        "hf_min_gain_floor_during_dne_db", -15.0)
-            ),
-            ser_floor_enabled=bool(
-                getattr(self.config, "ser_floor_enabled", False)
-            ),
-            ser_floor_strength=float(
-                getattr(self.config, "ser_floor_strength", 0.5)
-            ),
-            soft_nearend_blend_enabled=bool(
-                getattr(self.config, "soft_nearend_blend_enabled", False)
-            ),
-            soft_nearend_blend_enr_threshold=float(
-                getattr(self.config, "soft_nearend_blend_enr_threshold", 0.25)
-            ),
-            soft_nearend_blend_softness=float(
-                getattr(self.config, "soft_nearend_blend_softness", 0.25)
-            ),
-            soft_nearend_blend_per_bin=bool(
-                getattr(self.config, "soft_nearend_blend_per_bin", False)
-            ),
-            d5_ne_floor_enabled=bool(
-                getattr(self.config, "d5_ne_floor_enabled", False)
-            ),
-            d5_ne_floor_strength=float(
-                getattr(self.config, "d5_ne_floor_strength", 0.3)
-            ),
-            coh_gain_floor_enabled=bool(
-                getattr(self.config, "coh_gain_floor_enabled", False)
-            ),
-            coh_gain_floor_strength=float(
-                getattr(self.config, "coh_gain_floor_strength", 0.5)
-            ),
-            split_floor_enabled=bool(
-                getattr(self.config, "min_gain_split_floor_enabled", True)
-            ),
-            split_floor_far_active_db=float(
-                getattr(self.config, "min_gain_floor_far_active_db", -22.0)
-            ),
-            split_floor_far_silent_db=float(
-                getattr(self.config, "min_gain_floor_far_silent_db", -12.0)
-            ),
-            split_floor_latch_power=float(
-                getattr(self.config, "min_gain_far_latch_power", 1.0e6)
-            ),
-            cohxd_floor_release_enabled=bool(
-                getattr(self.config, "cohxd_floor_release_enabled", False)
-            ),
-            cohxd_floor_release_db=float(
-                getattr(self.config, "cohxd_floor_release_db", -45.0)
-            ),
-            cohxd_gamma_lo=float(getattr(self.config, "cohxd_gamma_lo", 0.5)),
-            cohxd_gamma_hi=float(getattr(self.config, "cohxd_gamma_hi", 0.85)),
-        )
+            **self._build_sg_kwargs(n_bins, self._aec3_sg_config))
         self._aec3_ola_buf.fill(0)
         self._aec3_pending_gain_change = False
         self._aec3_pending_delay_change = None
@@ -3303,7 +3223,10 @@ class AEC:
         # Nearend speech N is uncorrelated with Ŷ → when DT active,
         # Y = Ŷ_true + N → |<Ŷ, Y*>| decreases → Γ² drops → gate closes.
         _coh_gate_mask: Optional[np.ndarray] = None
-        if self.config.erle_coh_gate_enabled or True:  # always update EMA
+        # Γ²(Ŷ,Y) EMA — the accumulators feed only `_gamma2`, which is consumed
+        # only by the ERLE gate or the coherence gain floor, so skip the whole
+        # block when neither is enabled (byte-equal: the state is dead otherwise).
+        if self.config.erle_coh_gate_enabled or self.config.coh_gain_floor_enabled:
             _echo_c = self.filter.echo_spec.astype(np.complex64)
             _near_c = self.filter.near_spec.astype(np.complex64)
             _a = float(self.config.erle_coh_gate_alpha)
@@ -3316,15 +3239,14 @@ class AEC:
             self._coh_erle_see = (
                 (1.0 - _a) * self._coh_erle_see + _a * np.abs(_near_c) ** 2
             )
-            if self.config.erle_coh_gate_enabled or self.config.coh_gain_floor_enabled:
-                _gamma2 = (np.abs(self._coh_erle_sye) ** 2
-                           / np.maximum(self._coh_erle_syy * self._coh_erle_see,
-                                        1e-30)).astype(np.float32)
-                if self.config.erle_coh_gate_enabled:
-                    _coh_gate_mask = (_gamma2 >= self.config.erle_coh_gate_threshold)
-                # Layer1: stash per-bin Γ²_ŶY for the suppressor coherence floor.
-                if self.config.coh_gain_floor_enabled:
-                    self._coh_gamma2_for_floor = _gamma2
+            _gamma2 = (np.abs(self._coh_erle_sye) ** 2
+                       / np.maximum(self._coh_erle_syy * self._coh_erle_see,
+                                    1e-30)).astype(np.float32)
+            if self.config.erle_coh_gate_enabled:
+                _coh_gate_mask = (_gamma2 >= self.config.erle_coh_gate_threshold)
+            # Layer1: stash per-bin Γ²_ŶY for the suppressor coherence floor.
+            if self.config.coh_gain_floor_enabled:
+                self._coh_gamma2_for_floor = _gamma2
         # cohxd: per-bin Γ²(X, Y) — reference-vs-mic coherence for the selective
         # floor release. X = far_spec (delay-aligned reference; bulk delay
         # removed upstream so it is time-aligned to the mic frame), Y = near_spec
