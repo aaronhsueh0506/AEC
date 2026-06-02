@@ -521,6 +521,7 @@ class SuppressionGain:
                  soft_nearend_blend_enabled: bool = False,
                  soft_nearend_blend_enr_threshold: float = 0.25,
                  soft_nearend_blend_softness: float = 0.25,
+                 soft_nearend_blend_per_bin: bool = False,
                  d5_ne_floor_enabled: bool = False,
                  d5_ne_floor_strength: float = 0.3,
                  coh_gain_floor_enabled: bool = False,
@@ -617,6 +618,7 @@ class SuppressionGain:
         # ne_weight = sigmoid((enr_threshold - enr_lf) / softness)
         # enr_tr = ne_weight * nearend_enr_tr + (1-ne_weight) * normal_enr_tr
         self._soft_ne_blend_enabled = bool(soft_nearend_blend_enabled)
+        self._soft_ne_blend_per_bin = bool(soft_nearend_blend_per_bin)
         self._soft_ne_blend_enr_thr = float(soft_nearend_blend_enr_threshold)
         self._soft_ne_blend_softness = max(float(soft_nearend_blend_softness), 1e-6)
         # LF endpoint bin for D3/D5 ENR sum (AEC3-canonical 2000 Hz, same as DNE).
@@ -1079,12 +1081,25 @@ class SuppressionGain:
 
         if self._soft_ne_blend_enabled:
             # D3: blend nearend_tuning ↔ normal_tuning via ne_w.
-            enr_tr = (ne_w * self._nearend_enr_tr
-                      + (1.0 - ne_w) * self._normal_enr_tr).astype(np.float32)
-            enr_su = (ne_w * self._nearend_enr_su
-                      + (1.0 - ne_w) * self._normal_enr_su).astype(np.float32)
-            emr_tr = (ne_w * self._nearend_emr_tr
-                      + (1.0 - ne_w) * self._normal_emr_tr).astype(np.float32)
+            # P5: per-bin ne_w from per-bin ENR (echo[k]/nearend[k]) →
+            # frequency-selective near-end protection. Falls back to the scalar
+            # broadband-LF ne_w when off (byte-equal).
+            if self._soft_ne_blend_per_bin:
+                _enr_bin = echo / (nearend + 1.0)
+                _sig_bin = np.clip(
+                    (_enr_bin - self._soft_ne_blend_enr_thr)
+                    / self._soft_ne_blend_softness,
+                    -50.0, 50.0,
+                )
+                ne_wb = (1.0 / (1.0 + np.exp(_sig_bin))).astype(np.float32)
+            else:
+                ne_wb = ne_w
+            enr_tr = (ne_wb * self._nearend_enr_tr
+                      + (1.0 - ne_wb) * self._normal_enr_tr).astype(np.float32)
+            enr_su = (ne_wb * self._nearend_enr_su
+                      + (1.0 - ne_wb) * self._normal_enr_su).astype(np.float32)
+            emr_tr = (ne_wb * self._nearend_emr_tr
+                      + (1.0 - ne_wb) * self._normal_emr_tr).astype(np.float32)
         else:
             enr_tr = self._nearend_enr_tr if is_ne else self._normal_enr_tr
             enr_su = self._nearend_enr_su if is_ne else self._normal_enr_su

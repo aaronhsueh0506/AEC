@@ -16,6 +16,38 @@ when verdict requires it.
 
 ---
 
+## [3.22.2] — 2026-06-02 — BALANCED: per-bin near-end blend + far-active floor −28
+
+**Headline**: BALANCED ships `soft_nearend_blend_per_bin=True` + lowers
+`min_gain_floor_far_active_db` −22 → −28 dB. The per-bin near-end blend derives
+a PER-BIN `ne_w` from per-bin ENR (echo[k]/nearend[k]) so the suppression-gain
+tuning is frequency-selective: near-dominant bins keep `nearend_tuning`
+(gentle), echo-dominant bins use `normal_tuning` (aggressive). This lets the
+deeper −28 floor cancel more echo without the broadband DT near-end cost.
+
+**800-case (movement-agnostic) vs the −22 baseline (A)**:
+- DT echo 4.042 → **4.155** (+0.113); DT deg 2.227 → 2.183 (−0.044, in-bar).
+- FS echo 3.529 → 3.549; NE deg 4.047 (flat). All four ship bars met.
+- per-bin recovers ~+0.058 DT deg vs the floor-alone −28 point (frequency-
+  selective near protection); verified byte-identical to the
+  `AEC_SOFT_NE_PER_BIN=1 AEC_FAR_ACTIVE_FLOOR_DB=-28` A/B render.
+- vs refs: DT echo now 4.155 (AEC2 4.262 / AEC3 4.538); DT deg 2.183 beats
+  AEC3 (1.850), below AEC2 (2.389).
+
+`far_active_floor_db` is the documented single-knob preset axis (weak −18 /
+strong −28+); per-bin blend is the base. Full default-OFF flag-campaign
+evidence (incl. the cohxd reference-coherence echo lever, deferred for its
+DT-deg root cause) in [docs/v3_22.md](docs/v3_22.md).
+
+Repo hygiene this version: consolidated the v3.21/v3.22 docs into single
+`docs/v3_21.md` / `docs/v3_22.md`; removed unused tooling
+(`ab_compare.py`, `v3_21_6_2_hf_trace.py`, `oracle_linear_erle.py`,
+`v3_21_800case_bench.py`, `v3_21_800case_report_from_json.py`,
+`v3_21_byte_equal_check.py`); byte-equal check is now eval + `cmp` (see
+CLAUDE.md).
+
+---
+
 ## [3.22.1] — 2026-06-02 — P4: delay-acquire phantom-mislock guard (default ON)
 
 **Headline**: ships `delay_acquire_protect_converged` into BALANCED (default

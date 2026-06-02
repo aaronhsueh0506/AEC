@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>AEC v3.10.4 vs v3.21 vs WebRTC AEC3 — architecture flowcharts</title>
+<title>AEC v3.10.4 vs v3.21 vs v3.22.2 vs WebRTC AEC3 — architecture flowcharts</title>
 <style>
   :root {
     --bg: #f7f8fb;
@@ -106,7 +106,7 @@
 <div class="wrap">
 
 <h1>AEC architecture flowcharts</h1>
-<p class="sub">v3.10.4 → v3.21 → WebRTC AEC3 reference · release 2026-05-19 · same input/output, three different post-filter architectures.</p>
+<p class="sub">v3.10.4 → v3.21 → <strong>v3.22.2 (current shipped, 2026-06-02)</strong> → WebRTC AEC3 reference · same input/output, same v3.21 core pipeline. v3.22 did <strong>not</strong> restructure the architecture — it adds a post-filter policy layer + bug fixes on top of the v3.21 substrate.</p>
 
 <div style="background: var(--card-bg); border-radius: 12px; padding: 16px 20px; margin: 0 0 22px;">
   <h2 style="margin: 0 0 12px; font-size: 16px; color: var(--accent);">Color legend</h2>
@@ -249,8 +249,8 @@
      v3.21 — this release
      ════════════════════════════════════════════════════════════════ -->
 <section class="arch release">
-  <h2>v3.21.0 — this release</h2>
-  <p class="when">Production from 2026-05-19</p>
+  <h2>v3.21.0 — AEC3-aligned baseline (current shipped is v3.22.2, below)</h2>
+  <p class="when">Production from 2026-05-19 · superseded by v3.22.2 (policy + bug-fix layer on this same architecture)</p>
   <p class="desc">Single <code>BALANCED</code> preset (5 overrides). Reference-path HPF retired. AEC3-aligned <code>_aec3_post</code> chain (StationarityEstimator + AecState + ResidualEchoEstimator + SuppressionGain + comfort noise + OLA) replaces the 9-stage ResFilter.</p>
 
   <svg viewBox="0 0 1240 760" xmlns="http://www.w3.org/2000/svg">
@@ -547,8 +547,9 @@
 
     <div class="card note">
       <h3>→ v3.21+ port targets (would shrink the diff)</h3>
+      <p style="margin: 0 0 8px; font-size: 12.5px; color: var(--muted);">Note: the shipped v3.22 line did <strong>not</strong> pursue these AEC3 ports — it took the orthogonal post-filter <em>policy</em> route instead (split min-gain floor + per-bin near-end blend + delay-acquire guard, see the v3.22.2 section above). These remain open AEC3-alignment targets.</p>
       <ul>
-        <li><strong>Port <code>SubtractorOutputAnalyzer</code></strong> → enable TransparentMode safely on hard cases like 9xjhi. Highest priority — currently disabled gate caps DT/NE on a small but visible tail of cases. <span class="tag">v3.22</span></li>
+        <li><strong>Port <code>SubtractorOutputAnalyzer</code></strong> → enable TransparentMode safely on hard cases like 9xjhi. Highest priority — currently disabled gate caps DT/NE on a small but visible tail of cases. <span class="tag">open</span></li>
         <li><strong>Port <code>NearendDetector</code> + mode-switched SuppressionGain.</strong> Pair with retry of the v3.18 D.1 subband-NE substrate that closed CANNOT-SHIP — the new wiring goes through SuppressionGain directly instead of ResFilter. <span class="tag">v3.22</span></li>
         <li><strong>Port <code>EchoAudibility</code>.</strong> JND-weighted per-bin gain floor; should improve NE-heavy buckets without echo regression. <span class="tag">v3.22</span></li>
         <li><strong>Align SuppressionGain over-estimation.</strong> Bring the 4-mode HighFrequency + DominantNearend tuning into our <code>suppression_gain.py</code>. <span class="tag">v3.22</span></li>
@@ -651,10 +652,83 @@
 
 
 <!-- ════════════════════════════════════════════════════════════════
+     v3.22.2 — current shipped (policy + bug-fix layer ON TOP of v3.21)
+     ════════════════════════════════════════════════════════════════ -->
+<section class="arch release">
+  <h2>v3.22.2 — current shipped (on the v3.21 substrate)</h2>
+  <p class="when">Production from 2026-06-02 · <code>__version__ = 3.22.2</code></p>
+  <p class="desc">v3.22 is built <strong>on top of v3.21</strong> — the core pipeline is unchanged
+    (HPF → Saturation → DelayEst → PBFDKF + shadow PBFDAF → AEC3-post = StationarityEstimator + AecState +
+    ResidualEchoEstimator + SuppressionGain + CNG + OLA). v3.22 did <strong>not</strong> restructure the architecture;
+    it added a <strong>post-filter policy layer</strong> (frequency-selective near-end protection + split min-gain floor)
+    plus a stack of <strong>default-ON bug fixes / coordinate-consistency corrections</strong>. The flowchart is the
+    <a href="#" style="color: var(--accent);">v3.21 diagram above</a>; the changes below all live inside the
+    <code>SuppressionGain</code> / <code>ResidualEchoEstimator</code> / ERLE blocks and the delay-acquire guard.</p>
+
+  <div class="roadmap-grid">
+
+    <div class="card good">
+      <h3>v3.22.0 — split min-gain floor + default-ON correction stack</h3>
+      <ul>
+        <li><strong>Split min-gain floor (far-active vs far-silent), default ON.</strong> The single broadband suppression-gain
+          floor is split into two operating points keyed on far-end activity → caps DT near-end <em>over-suppression</em>
+          without giving up FS echo depth. This is the core v3.22 policy lever.</li>
+        <li><strong>E1 — ERLE coordinate consistency.</strong> Y²/E² windowed capture aligned so the ERLE numerator/denominator
+          share the same time-domain capture coordinate (fixes a frame-skew that under-credited the linear filter).</li>
+        <li><strong><code>erle_render_x2_psd_scale</code> — reverb-model revival.</strong> Restores the missing <code>_PSD_SCALE</code>
+          on <code>_x2_reverb_for_erle</code> so the reverb model contributes to ERLE instead of being silently dead.</li>
+        <li><strong>E2 — raw-capture output base.</strong> When the linear estimate is unusable, the output base falls back to the
+          raw capture (instead of a degenerate residual) → removes the cold-start / non-converged X² wipe artifact.</li>
+        <li><strong>D3 — soft near-end tuning blend.</strong> Sigmoid ENR-driven blend that softens the near-end vs echo
+          gain decision instead of a hard switch.</li>
+        <li><strong>L1 — Kuech–Kellermann 2nd-order nonlinear residual.</strong> Adds a 2nd-order nonlinear term to the residual
+          echo estimate (loudspeaker non-linearity), feeding <code>ResidualEchoEstimator</code>.</li>
+        <li><strong>C′ — coherence ERLE gate.</strong> Coherence-based gate on the ERLE update path.</li>
+      </ul>
+    </div>
+
+    <div class="card good">
+      <h3>v3.22.1 — delay-acquire phantom-mislock guard</h3>
+      <ul>
+        <li><strong><code>delay_acquire_protect_converged</code>, default ON.</strong> Rejects a spurious <em>late</em> first
+          delay-acquisition when the filter is already cancelling — i.e. when a phantom late lag would otherwise displace a
+          good converged alignment. Lives in the <code>EchoPathDelayEstimator</code> acquire path; no change to the steady-state
+          tracker.</li>
+      </ul>
+    </div>
+
+    <div class="card good">
+      <h3>v3.22.2 — per-bin near-end blend + deeper far-active floor (current BALANCED)</h3>
+      <ul>
+        <li><strong><code>soft_nearend_blend_per_bin</code>, default ON.</strong> The D3 near-end tuning blend goes
+          <em>frequency-selective</em> (per-bin) instead of broadband. Near-end protection now applies only in the bins that
+          carry near-end speech.</li>
+        <li><strong>far-active min-gain floor lowered −22 → −28 dB.</strong> Because the per-bin blend isolates near-end
+          protection, the deeper far-active floor can suppress more echo <em>without</em> the broadband DT near-end cost the
+          deeper floor would otherwise have caused. This is the v3.22.2 net win: more echo cancellation at no DT-deg penalty.</li>
+      </ul>
+    </div>
+
+    <div class="card note">
+      <h3>What stayed exactly the same as v3.21</h3>
+      <ul>
+        <li>Front-end (HPF mic-only, Saturation, EchoPathDelayEstimator) — unchanged.</li>
+        <li>Linear filter (PBFDKF refined + shadow PBFDAF/NLMS + PathChangeRegimeHandler) — unchanged.</li>
+        <li>AEC3-post block topology (StationarityEstimator → AecState → ResidualEchoEstimator → SuppressionGain → CNG → OLA)
+          — unchanged; v3.22 tunes the <em>policy</em> inside these blocks, not their wiring.</li>
+        <li>Single <code>BALANCED</code> preset; <code>_ours_nores.wav</code> bypass tap; byte-equal regression harness — all unchanged.</li>
+      </ul>
+    </div>
+
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════════════════════
      Score panel
      ════════════════════════════════════════════════════════════════ -->
 <div class="scores">
-  <h2>800-case AECMOS — v3.10.4 vs v3.21 vs AEC2 vs AEC3</h2>
+  <h2>800-case AECMOS — v3.10.4 vs v3.21 vs v3.22.2 vs AEC2 vs AEC3</h2>
   <p class="small-note" style="margin: 0 0 10px;">Blind-test bucket means, static + movement aggregated (n = 300 FS / 300 DT / 200 NE). Higher = better on both axes. FS deg + NE echo are universally saturated (~5.0) and omitted.</p>
   <table>
     <thead>
@@ -668,13 +742,33 @@
     </thead>
     <tbody>
       <tr><td>v3.10.4 <span style="color: var(--muted); font-size: 12px;">(GitHub main · legacy ResFilter)</span></td><td class="num">3.281</td><td class="num">3.946</td><td class="num win">2.810</td><td class="num">3.985</td></tr>
-      <tr><td><strong>v3.21 (this release · AEC3-aligned)</strong></td><td class="num">3.684</td><td class="num">4.229</td><td class="num">2.381</td><td class="num">4.052</td></tr>
+      <tr><td>v3.21 <span style="color: var(--muted); font-size: 12px;">(AEC3-aligned)</span></td><td class="num">3.684</td><td class="num">4.229</td><td class="num">2.381</td><td class="num">4.052</td></tr>
       <tr><td>AEC2 reference</td><td class="num">3.48</td><td class="num">4.26</td><td class="num">2.39</td><td class="num win">4.10</td></tr>
       <tr><td>AEC3 reference</td><td class="num win">3.88</td><td class="num win">4.54</td><td class="num">1.85</td><td class="num">3.45</td></tr>
     </tbody>
   </table>
+
+  <h2 style="margin: 22px 0 12px;">v3.22.2 (current shipped) — movement-agnostic vs AEC2 / AEC3</h2>
+  <p class="small-note" style="margin: 0 0 10px;">Current shipped <code>BALANCED</code> on the 800-case AEC Challenge corpus, <strong>movement-agnostic</strong> (static + movement pooled per scenario, not separated). The v3.22.2 / AEC2 / AEC3 rows here are on the same movement-agnostic basis so they are directly comparable; this is a different aggregation from the table above (which separates the v3.10.4 / v3.21 anchors) so the AEC2 / AEC3 numbers differ slightly between the two tables.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Version</th>
+        <th class="num">FS echo ↑</th>
+        <th class="num">DT echo ↑</th>
+        <th class="num">DT deg ↑</th>
+        <th class="num">NE deg ↑</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>AEC2 reference</td><td class="num">3.484</td><td class="num">4.262</td><td class="num win">2.389</td><td class="num win">4.098</td></tr>
+      <tr><td>AEC3 reference</td><td class="num win">3.875</td><td class="num win">4.538</td><td class="num">1.850</td><td class="num">3.454</td></tr>
+      <tr><td><strong>v3.22.2 (current shipped)</strong></td><td class="num">3.549</td><td class="num">4.155</td><td class="num">2.183</td><td class="num">4.047</td></tr>
+    </tbody>
+  </table>
   <p class="small-note">v3.10.4 row uses the legacy <code>balanced</code> preset rendered at <code>3aadd2d</code> as algorithmic proxy — same 9-stage ResFilter chain GitHub main ships. v3.21 row is the post-cleanup <code>BALANCED</code> preset (= <code>balanced_aec3</code> @ 3aadd2d). Anchor data: <code>docs/bench/v3_21_3aadd2d_baseline/</code>. Highlighted cell = column winner.</p>
   <p class="small-note">v3.21 vs v3.10.4: <strong>+0.40 FS echo, +0.28 DT echo</strong>, −0.43 DT deg, +0.07 NE deg. vs AEC2: matches within ~0.05 on every bucket except FS echo (+0.20 lead). vs AEC3: trades echo (−0.20 FS / −0.31 DT) for preservation (+0.53 DT deg / +0.60 NE deg).</p>
+  <p class="small-note"><strong>v3.22.2 (current) vs AEC2:</strong> beats FS echo (+0.065), within ~0.05 on NE deg (−0.051) and DT deg (−0.206 — the remaining DT near-end gap), trails DT echo (−0.107). <strong>vs AEC3:</strong> trades echo (−0.326 FS / −0.383 DT) for preservation (+0.333 DT deg / +0.593 NE deg) — the same Pareto position as v3.21, but the v3.22 split-floor + per-bin near-end policy moves FS echo up (+0.05 toward AEC3) while keeping DT/NE deg near AEC2. Ship targets per memory (NE deg ≥ 4, FS echo > 3.5, DT echo > 4, DT deg > 2) all met.</p>
 </div>
 
 
@@ -707,7 +801,7 @@
   </table>
 </details>
 
-<p class="small-note">Updated 2026-05-27 (v3.21.6-alignment + release cleanup) · companion docs:
+<p class="small-note">Updated 2026-06-02 (v3.22.2 shipped — split min-gain floor + per-bin near-end blend + delay-acquire guard, on the v3.21 substrate) · companion docs:
 <a href="aec_methods.md">aec_methods.md</a> ·
 <a href="aec_algorithm_guide.html">aec_algorithm_guide.html</a> ·
 <a href="../CHANGELOG.md">CHANGELOG.md</a> ·

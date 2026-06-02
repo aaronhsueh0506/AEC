@@ -224,6 +224,11 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     _soft_ne_env = os.environ.get('AEC_SOFT_NE_BLEND')
     if _soft_ne_env in ('0', '1') and 'soft_nearend_blend_enabled' not in config_overrides:
         config_overrides['soft_nearend_blend_enabled'] = (_soft_ne_env == '1')
+    # P5: per-bin near-end blend (frequency-selective protection).
+    # AEC_SOFT_NE_PER_BIN=1 → soft_nearend_blend_per_bin=True.
+    _soft_ne_pb_env = os.environ.get('AEC_SOFT_NE_PER_BIN')
+    if _soft_ne_pb_env in ('0', '1') and 'soft_nearend_blend_per_bin' not in config_overrides:
+        config_overrides['soft_nearend_blend_per_bin'] = (_soft_ne_pb_env == '1')
     # d5_ne_floor (v3.22 D5): ne_weight gain floor, Speex SPP-proxy.
     # AEC_D5_FLOOR=<float> → d5_ne_floor_enabled=True, d5_ne_floor_strength=<float>.
     _d5_env = os.environ.get('AEC_D5_FLOOR')
@@ -331,6 +336,30 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
                 config_overrides['cohxd_gamma_hi'] = _hi
         except ValueError:
             pass
+    # Generic flag-override hook (campaign substrate testing). Any AecConfig
+    # field not already set by an explicit hook above can be driven via
+    # AEC_CFG_OVERRIDE="field1=val1;field2=val2". Values parse as
+    # true/false→bool, then int, then float, else str. Explicit hooks win.
+    _cfg_ovr_env = os.environ.get('AEC_CFG_OVERRIDE')
+    if _cfg_ovr_env:
+        for _kv in _cfg_ovr_env.split(';'):
+            _kv = _kv.strip()
+            if not _kv or '=' not in _kv:
+                continue
+            _k, _v = (s.strip() for s in _kv.split('=', 1))
+            if _k in config_overrides:
+                continue
+            _vl = _v.lower()
+            if _vl in ('true', 'false'):
+                config_overrides[_k] = (_vl == 'true')
+            else:
+                try:
+                    config_overrides[_k] = int(_v)
+                except ValueError:
+                    try:
+                        config_overrides[_k] = float(_v)
+                    except ValueError:
+                        config_overrides[_k] = _v
     # AEC_MODE=PBFDAF for filter-class comparison (default PBFDKF)
     _mode_env = os.environ.get('AEC_MODE', 'PBFDKF').upper()
     _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF

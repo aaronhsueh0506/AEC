@@ -20,7 +20,7 @@ tolerance:
   (`PBFDKF`, `ShadowFilter`, etc.). Built with `-ffp-contract=off` mandatory.
 
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
-(currently **3.22.1**). Canonical algorithm reference:
+(currently **3.22.2**). Canonical algorithm reference:
 [docs/aec_methods.md](docs/aec_methods.md). Architecture diagram
 across legacy / current / AEC3 reference:
 [docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html).
@@ -57,21 +57,25 @@ python3 python/bench_aecmos.py out_python/ results/ --baseline /path/to/baseline
 regression check, A/B, and audit. Deviating from it produces results that
 aren't comparable to prior verdicts.
 
-### Byte-equal regression harness (post-cleanup gate)
+### Byte-equal regression check (post-cleanup gate)
+
+A behaviour-neutral cleanup must produce byte-identical output. Render a
+small case set before and after the edit and compare with `cmp`:
 
 ```bash
-# Snapshot a representative case set (DT/FS/NE + movement), render, md5
-# _ours.wav + _ours_nores.wav. Capture a baseline BEFORE editing, then
-# --check AFTER; a behaviour-neutral cleanup must report N/N PASS.
-python3 python/v3_21_byte_equal_check.py --save /tmp/be_baseline.json
+# BEFORE editing: render a baseline (any small dir of mic/lpb cases)
+python3 python/eval_aec_challenge.py wav/<subset>/ --preset balanced \
+    --filter 832 --cng --parallel -o /tmp/be_before/ --workers 4
 # ... make edits ...
-python3 python/v3_21_byte_equal_check.py --check /tmp/be_baseline.json
-# Must report `=== N/N PASS, 0 FAIL ===` before any commit that touches
-# code outside docs.
+python3 python/eval_aec_challenge.py wav/<subset>/ --preset balanced \
+    --filter 832 --cng --parallel -o /tmp/be_after/ --workers 4
+# _ours.wav must all be byte-identical:
+for f in /tmp/be_after/*_ours.wav; do \
+  cmp -s "$f" "/tmp/be_before/$(basename "$f")" \
+    && echo "MATCH $(basename "$f")" || echo "DIFFER $(basename "$f")"; done
 ```
 
-The baseline is captured on demand (no committed anchor dir); the gate
-proves a cleanup did not change the output bytes.
+All MATCH before any commit that touches code outside docs.
 
 ### C build & run
 
@@ -170,11 +174,16 @@ tweak a single field without a full 800-case re-bench.
 ## Branch model
 
 `main` carries the production-graded code. Current `__version__` is
-**3.22.1** — adds the P4 delay-acquire phantom-mislock guard
-(`delay_acquire_protect_converged`, default ON) on top of the v3.22 split
-min-gain floor (DT/NE near-end preservation), the v3.22 default-ON stack
-(E1+x2+E2+D3+L1+C′) and the v3.21.6.4 AEC3-alignment completion. See
-CHANGELOG `[3.22.1]` / `[3.22.0]`.
+**3.22.2** — sets the BALANCED preset to per-bin near-end blend
+(`soft_nearend_blend_per_bin`, default ON) + far-active min-gain floor
+−28 dB (`min_gain_floor_far_active_db`): the per-bin frequency-selective
+near-end protection lets the deeper floor cancel more echo (DT echo +0.113
+vs the −22 baseline) at only −0.044 DT deg, all four ship bars met. The
+`far_active_floor_db` is the single-knob preset axis (weak −18 / strong
+−28+). Built on the v3.22.1 P4 delay-acquire guard, the v3.22.0 split
+min-gain floor + default-ON stack (E1+x2+E2+D3+L1+C′), and the v3.21.6.4
+AEC3-alignment completion. See CHANGELOG `[3.22.2]` and
+[docs/v3_22.md](docs/v3_22.md) for the full flag-campaign evidence.
 
 The **v3.21 CLOSE** (branch `v3_21_release`, byte-equal, no algorithm
 change — see CHANGELOG `[Unreleased]`) finalised the arc: a hop/fft

@@ -131,9 +131,10 @@ class AecConfig:
     # ERLE contamination inflates R² — the structural cause of nearend over-
     # suppression (RES cuts nearend up to -8dB; audio-localised). A flat power-
     # domain floor caps the deepest suppression. We split it by far-end activity:
-    #   • far-active (FS/DT): -22 dB  — caps DT gain-collapse while FS deep echo
-    #     suppression below ~-40 dB (perceptually inaudible) is the only loss,
-    #     so FS echo stays > AEC2.
+    #   • far-active (FS/DT): -28 dB  — deeper far-active suppression for more echo
+    #     cancellation; the per-bin near-blend (soft_nearend_blend_per_bin, ON)
+    #     protects near-end frequency-selectively so the deeper floor does not
+    #     over-cut near in DT.
     #   • far-silent (pure NE): -12 dB — lifts NE nearend at ZERO echo cost
     #     (no echo present to leak).
     # Routing uses a per-recording LATCH on instantaneous far energy
@@ -141,10 +142,13 @@ class AecConfig:
     # threshold ≈ the orchestrator's own far-active criterion). Latches from the
     # first far frame so FS/DT use the gentler floor throughout (no cold-start
     # leak); only recordings where far is never active stay on the strong floor.
-    # 800-case: FS echo 3.520 / DT echo 4.042 / DT deg 2.226 / NE deg 4.047
-    # (all four ship thresholds met). Floors are amplitude-domain dB.
+    # 800-case (v3.22.2, far_active -28 + per-bin blend, movement-agnostic):
+    #   FS echo 3.549 / DT echo 4.155 / DT deg 2.183 / NE deg 4.047 (all 4 ship
+    #   bars met; DT echo +0.113 vs the -22 baseline at -0.044 DT deg). The
+    #   far_active floor is the documented preset knob (weak -18 / strong -28+);
+    #   floors are amplitude-domain dB.
     min_gain_split_floor_enabled: bool = True
-    min_gain_floor_far_active_db: float = -22.0
+    min_gain_floor_far_active_db: float = -28.0
     min_gain_floor_far_silent_db: float = -12.0
     min_gain_far_latch_power: float = 1.0e6
 
@@ -245,6 +249,17 @@ class AecConfig:
     soft_nearend_blend_enabled: bool = True
     soft_nearend_blend_enr_threshold: float = 0.25
     soft_nearend_blend_softness: float = 0.25
+    # Per-bin near-end blend (v3.22 P5): replace the scalar broadband-LF ne_w with
+    # a PER-BIN ne_w from per-bin ENR (echo[k]/nearend[k]). Bins where near-end
+    # dominates blend toward nearend_tuning (gentle, preserve near), echo-dominant
+    # bins toward normal_tuning (aggressive, suppress echo) — frequency-selective
+    # near-end protection that lets the far-active floor drop without the broadband
+    # DT near-end cost. DEFAULT ON (v3.22.2): paired with far_active -28 it
+    # recovers ~+0.058 DT deg vs the floor-alone -28 point (frequency-selective
+    # near protection), so the deeper floor's echo gain costs only -0.044 DT deg
+    # net vs the -22 baseline (all 4 ship bars met). AEC_SOFT_NE_PER_BIN=0 forces
+    # OFF (reproduces the scalar-blend baseline).
+    soft_nearend_blend_per_bin: bool = True
 
     # ── v3.22 D5: ne_weight gain floor (Speex SPP-proxy for DT nearend protection) ──
     # Direct Speex MMSE-STSA analogue: uses D3's ne_weight as SPP proxy to apply
