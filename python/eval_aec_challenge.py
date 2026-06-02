@@ -194,6 +194,20 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     _erle_startup_env = os.environ.get('AEC_ERLE_STARTUP_CONV')
     if _erle_startup_env in ('0', '1') and 'erle_startup_follows_convergence' not in config_overrides:
         config_overrides['erle_startup_follows_convergence'] = (_erle_startup_env == '1')
+    # ISOLATED test of SubbandErle wall-clock EMA (prior 800-case only tested it
+    # bundled in M_full_delay). AEC_SUBBAND_WALLCLOCK=1 → ON.
+    _sbwc_env = os.environ.get('AEC_SUBBAND_WALLCLOCK')
+    if _sbwc_env in ('0', '1') and 'subband_wallclock_smoothing' not in config_overrides:
+        config_overrides['subband_wallclock_smoothing'] = (_sbwc_env == '1')
+    _fbwc_env = os.environ.get('AEC_FULLBAND_WALLCLOCK')
+    if _fbwc_env in ('0', '1') and 'fullband_wallclock_smoothing' not in config_overrides:
+        config_overrides['fullband_wallclock_smoothing'] = (_fbwc_env == '1')
+    _lniir_env = os.environ.get('AEC_LOWNOISE_IIR')
+    if _lniir_env in ('0', '1') and 'use_wallclock_low_noise_render_iir' not in config_overrides:
+        config_overrides['use_wallclock_low_noise_render_iir'] = (_lniir_env == '1')
+    _dprot_env = os.environ.get('AEC_DELAY_PROTECT')
+    if _dprot_env in ('0', '1') and 'delay_acquire_protect_converged' not in config_overrides:
+        config_overrides['delay_acquire_protect_converged'] = (_dprot_env == '1')
     # hf_min_gain (v3.22): HF gain floor (−15 dB) during DNE active. Protects
     # NE HF formants when filter hasn't converged at HF.
     # AEC_HF_MIN_GAIN=1 → True.
@@ -276,6 +290,45 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             _cohfl_val = float(_cohfl_env)
             config_overrides['coh_gain_floor_enabled'] = (_cohfl_val > 0.0)
             config_overrides['coh_gain_floor_strength'] = _cohfl_val
+        except ValueError:
+            pass
+    # far_active split-floor sweep (v3.22 3-preset operating-point scan).
+    # AEC_FAR_ACTIVE_FLOOR_DB=<amplitude dB> → min_gain_floor_far_active_db.
+    # TEMP sweep hook — proven the dominant DT/FS echo↔deg residual knob.
+    _faf_env = os.environ.get('AEC_FAR_ACTIVE_FLOOR_DB')
+    if _faf_env is not None and 'min_gain_floor_far_active_db' not in config_overrides:
+        try:
+            config_overrides['min_gain_floor_far_active_db'] = float(_faf_env)
+        except ValueError:
+            pass
+    # linear-filter cold-start deadlock breaker.
+    # AEC_ERL_REFRESH_FLOOR=<float> → h_error_refresh_erl_floor.
+    # AEC_HERROR_FLOOR=<float>      → h_error_floor_override.
+    _erlf_env = os.environ.get('AEC_ERL_REFRESH_FLOOR')
+    if _erlf_env is not None and 'h_error_refresh_erl_floor' not in config_overrides:
+        try:
+            config_overrides['h_error_refresh_erl_floor'] = float(_erlf_env)
+        except ValueError:
+            pass
+    _hef_env = os.environ.get('AEC_HERROR_FLOOR')
+    if _hef_env is not None and 'h_error_floor_override' not in config_overrides:
+        try:
+            config_overrides['h_error_floor_override'] = float(_hef_env)
+        except ValueError:
+            pass
+    # cohxd selective floor release (per-bin Γ²(X,Y) reference coherence).
+    # AEC_COHXD_RELEASE=<release_db> → cohxd_floor_release_enabled=True, release
+    # floor = <release_db>. Optional AEC_COHXD_GAMMA="lo,hi" overrides the band.
+    _cohxd_env = os.environ.get('AEC_COHXD_RELEASE')
+    if _cohxd_env is not None and 'cohxd_floor_release_enabled' not in config_overrides:
+        try:
+            config_overrides['cohxd_floor_release_enabled'] = True
+            config_overrides['cohxd_floor_release_db'] = float(_cohxd_env)
+            _cohxd_g = os.environ.get('AEC_COHXD_GAMMA')
+            if _cohxd_g is not None:
+                _lo, _hi = (float(x) for x in _cohxd_g.split(','))
+                config_overrides['cohxd_gamma_lo'] = _lo
+                config_overrides['cohxd_gamma_hi'] = _hi
         except ValueError:
             pass
     # AEC_MODE=PBFDAF for filter-class comparison (default PBFDKF)

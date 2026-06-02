@@ -20,7 +20,7 @@ tolerance:
   (`PBFDKF`, `ShadowFilter`, etc.). Built with `-ffp-contract=off` mandatory.
 
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
-(currently **3.22.0**). Canonical algorithm reference:
+(currently **3.22.1**). Canonical algorithm reference:
 [docs/aec_methods.md](docs/aec_methods.md). Architecture diagram
 across legacy / current / AEC3 reference:
 [docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html).
@@ -170,10 +170,11 @@ tweak a single field without a full 800-case re-bench.
 ## Branch model
 
 `main` carries the production-graded code. Current `__version__` is
-**3.22.0** — ships the v3.22 split min-gain floor (DT/NE near-end
-preservation, default ON) on top of the v3.22 default-ON stack
+**3.22.1** — adds the P4 delay-acquire phantom-mislock guard
+(`delay_acquire_protect_converged`, default ON) on top of the v3.22 split
+min-gain floor (DT/NE near-end preservation), the v3.22 default-ON stack
 (E1+x2+E2+D3+L1+C′) and the v3.21.6.4 AEC3-alignment completion. See
-CHANGELOG `[3.22.0]`.
+CHANGELOG `[3.22.1]` / `[3.22.0]`.
 
 The **v3.21 CLOSE** (branch `v3_21_release`, byte-equal, no algorithm
 change — see CHANGELOG `[Unreleased]`) finalised the arc: a hop/fft

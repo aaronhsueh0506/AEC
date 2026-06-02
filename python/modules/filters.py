@@ -490,6 +490,14 @@ class PBFDKF(PBFDAF):
         # ERL per bin (lazy init to 0.1 = -10 dB nominal; orchestrator
         # overwrites once its ERL estimator has a real value).
         self._erl_per_bin = np.full(self.n_freqs, 0.1, dtype=np.float32)
+        # Cold-start DEADLOCK breaker (default 0 = OFF, byte-equal preserved).
+        # The H_error leakage refresh is `H_error += leakage × erl`, where
+        # erl = Σ_p|W_p|² (the filter's own weight energy). On hard echo paths
+        # the filter can't bootstrap: W≈0 → refresh≈0 → H_error decays to floor
+        # → mu dies → W stays ≈0 (self-reinforcing). Flooring the refresh erl
+        # keeps a minimum refresh so mu survives cold-start; self-fades once
+        # Σ|W|² grows past the floor (no effect on already-adapted bins).
+        self._h_error_refresh_erl_floor = np.float32(0.0)
 
         # AEC3 refined_initial profile — first 2.5 s of active render uses
         # aggressive leakage (100×/10× steady) so the filter converges fast
@@ -759,8 +767,13 @@ class PBFDKF(PBFDAF):
                 _lc_eff,
                 _ld_eff,
             ).astype(np.float32)
+            _erl_eff = (
+                np.maximum(self._erl_per_bin, self._h_error_refresh_erl_floor)
+                if self._h_error_refresh_erl_floor > 0.0
+                else self._erl_per_bin
+            )
             self.H_error_per_bin = (
-                self.H_error_per_bin + leakage_arr * self._erl_per_bin
+                self.H_error_per_bin + leakage_arr * _erl_eff
             )
         else:
             # Legacy scalar path (default → byte-equal preserved).

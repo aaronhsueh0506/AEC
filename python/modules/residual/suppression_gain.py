@@ -528,7 +528,11 @@ class SuppressionGain:
                  split_floor_enabled: bool = True,
                  split_floor_far_active_db: float = -22.0,
                  split_floor_far_silent_db: float = -12.0,
-                 split_floor_latch_power: float = 1.0e6) -> None:
+                 split_floor_latch_power: float = 1.0e6,
+                 cohxd_floor_release_enabled: bool = False,
+                 cohxd_floor_release_db: float = -45.0,
+                 cohxd_gamma_lo: float = 0.5,
+                 cohxd_gamma_hi: float = 0.85) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
         self._hop_size = int(hop_size)
@@ -540,6 +544,16 @@ class SuppressionGain:
         self._split_floor_far_silent = float(10.0 ** (split_floor_far_silent_db / 10.0))
         self._split_floor_latch_power = float(split_floor_latch_power)
         self._far_active_latched = False
+        # v3.22 cohxd selective floor release (delay-aligned reference Γ²(X,Y)).
+        # Per-bin RELEASE of the split floor on confidently-echo bins; uses the
+        # AEC3 R²-adaptive min_gain underneath where Γ² is high. ASYMMETRIC:
+        # only lowers the floor, never raises it. See AecConfig.cohxd_*.
+        self._cohxd_floor_release_enabled = bool(cohxd_floor_release_enabled)
+        self._cohxd_release_floor = float(10.0 ** (cohxd_floor_release_db / 10.0))
+        self._cohxd_gamma_lo = float(cohxd_gamma_lo)
+        self._cohxd_gamma_hi = float(cohxd_gamma_hi)
+        # Set per-hop by get_gain from the orchestrator-supplied Γ²(X,Y).
+        self._coh_xy_gamma2: Optional[np.ndarray] = None
         # echo_audibility lives on SuppressorConfig so orchestrator can
         # override use_stationarity_properties.
         self._echo_audibility = self._config.echo_audibility
@@ -688,6 +702,7 @@ class SuppressionGain:
         clock_drift: bool,
         stationary_mask: Optional[np.ndarray] = None,  # E.1: per-bin bool from band_stationary_mask()
         coh_gamma2: Optional[np.ndarray] = None,  # Layer1: per-bin Γ²_ŶY for coh gain floor
+        coh_xy_gamma2: Optional[np.ndarray] = None,  # cohxd: per-bin Γ²(X,Y) for floor release
     ) -> np.ndarray:
         """Returns low-band suppression GAIN (amplitude domain, sqrt'd; per-bin)."""
         # Sprint E.1 — capture stationary-mask fraction for the
@@ -697,6 +712,9 @@ class SuppressionGain:
             self._stat_mask_frac = float(sm.mean()) if sm.size > 0 else 0.0
         else:
             self._stat_mask_frac = 0.0
+        # cohxd: stash per-bin Γ²(X,Y) for the selective floor release in
+        # _get_min_gain (only consumed when cohxd_floor_release_enabled).
+        self._coh_xy_gamma2 = coh_xy_gamma2
         # Dominant nearend update using unbounded-echo spectrum when configured
         # (AEC3 cc:410-413).
         echo_for_det = (
@@ -1012,9 +1030,32 @@ class SuppressionGain:
         # which lifts NE nearend at zero echo cost. See AecConfig and the
         # far-active latch in get_gain.
         if self._split_floor_enabled:
-            floor = (self._split_floor_far_active if self._far_active_latched
-                     else self._split_floor_far_silent)
-            np.maximum(min_gain, floor, out=min_gain)
+            base_floor = (self._split_floor_far_active if self._far_active_latched
+                          else self._split_floor_far_silent)
+            if (self._cohxd_floor_release_enabled and self._far_active_latched
+                    and self._coh_xy_gamma2 is not None):
+                # cohxd per-bin floor RELEASE: where the residual is confidently
+                # echo by reference coherence Γ²(X,Y), lower the floor toward
+                # release_floor so the AEC3 R²-adaptive min_gain (min_echo_power
+                # / R², computed above) can suppress deep like AEC3 (DT echo↑).
+                # Low Γ² (nearend, uncorrelated with X) keeps base_floor
+                # (deg held). Log-domain lerp over [gamma_lo, gamma_hi].
+                # ASYMMETRIC: release_floor < base_floor, so this only LOWERS the
+                # floor (never raises) → worst case = current behaviour.
+                g2 = np.asarray(self._coh_xy_gamma2, dtype=np.float64)
+                t = np.clip(
+                    (g2 - self._cohxd_gamma_lo)
+                    / max(self._cohxd_gamma_hi - self._cohxd_gamma_lo, 1e-6),
+                    0.0, 1.0,
+                )
+                _log_base = np.log(base_floor)
+                _log_rel = np.log(self._cohxd_release_floor)
+                floor_perbin = np.exp(
+                    _log_base + t * (_log_rel - _log_base)
+                ).astype(np.float32)
+                np.maximum(min_gain, floor_perbin, out=min_gain)
+            else:
+                np.maximum(min_gain, base_floor, out=min_gain)
             np.minimum(min_gain, 1.0, out=min_gain)
         return min_gain.astype(np.float32)
 

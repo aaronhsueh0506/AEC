@@ -148,6 +148,51 @@ class AecConfig:
     min_gain_floor_far_silent_db: float = -12.0
     min_gain_far_latch_power: float = 1.0e6
 
+    # ── v3.22 cohxd selective floor release (delay-aligned reference Γ²(X,Y)) ──
+    # The constant split floor (above) masks the AEC3 R²-adaptive min_gain on
+    # echo-dominant DT bins (proven: floor caps 0.3–2.9 dB of suppression the
+    # AEC3 formula wants). This RELEASES the floor per-bin where the residual is
+    # confidently echo by REFERENCE coherence: Γ²(X,Y), X=far_spec (delay-aligned
+    # reference, bulk delay removed upstream), Y=near_spec (mic). High Γ² ⟹ echo
+    # correlates with reference ⟹ suppress like AEC3 (echo↑). Low Γ² ⟹ nearend
+    # (uncorrelated with X) ⟹ keep protective floor (deg held). Convergence-
+    # robust — uses X not Ŷ/ERLE, so it works on the 100%-nonlinear hard DT
+    # cases where the linear filter never converges (unlike the closed Γ²(Ŷ,Y)
+    # Layer1, which measured filter quality). ASYMMETRIC: only LOWERS the floor
+    # on high-Γ² bins, never raises it → worst case = current behaviour (no
+    # regression). Only active in the far-active latched state.
+    #   release_db : floor target for fully-confident-echo bins (Γ²≥gamma_hi)
+    #   gamma_lo/hi: Γ² interpolation band (log-domain lerp between the split
+    #                floor and release_db)
+    #   alpha      : EMA rate for the cross/auto-PSD coherence tracking
+    # Conservative defaults (high gamma_hi): downstream MMSE-OMLSA amplifies any
+    # nearend over-suppression, so release only on strong echo confidence.
+    # Bench with AEC_COHXD_RELEASE=<release_db>.
+    cohxd_floor_release_enabled: bool = False
+    cohxd_floor_release_db: float = -45.0
+    cohxd_gamma_lo: float = 0.5
+    cohxd_gamma_hi: float = 0.85
+    cohxd_alpha: float = 0.05
+
+    # ── linear-filter cold-start DEADLOCK breaker (PBFDKF Kalman gain) ──
+    # mu = H_error/(0.5·H_error·X² + n·E²); H_error refreshed by
+    # `H_error += leakage × Σ|W|²`. Σ|W|² is ~0 before the filter adapts, so on
+    # hard echo paths the refresh can't bootstrap: W≈0 → refresh≈0 → H_error
+    # decays to floor → mu dies → W stays ≈0 (self-reinforcing deadlock). Survey:
+    # 67% of FS (no-DT!) cases never converge, mean ERLE 0.14 dB — the linear
+    # filter is broadly idle and the nonlinear RES+floor carries echo, which is
+    # the root of the DT-echo Pareto wall.
+    #   h_error_refresh_erl_floor: floor on the erl(=Σ|W|²) used in the refresh
+    #     so a minimum refresh survives cold-start; self-fades once Σ|W|² grows
+    #     past it (no effect on already-adapted bins). 0 = OFF.
+    #   h_error_floor_override: raise the H_error clamp floor (default 1e-3) to
+    #     guarantee a minimum Kalman gain. 0 = use default. Higher = more
+    #     adaptation but less steady-state stability.
+    # Both default OFF (byte-equal). Bench with AEC_ERL_REFRESH_FLOOR /
+    # AEC_HERROR_FLOOR.
+    h_error_refresh_erl_floor: float = 0.0
+    h_error_floor_override: float = 0.0
+
     # ── v3.22 B: Emura 2017 cross-PSD R² (nearend-robust residual estimate) ──
     # Replaces R²_linear = S²/ERLE (contaminated in DT) with a blend that
     # uses the cross-spectrum between E (error) and X_delayed (reference).
@@ -326,6 +371,33 @@ class AecConfig:
     # tracks the same convergence signal usable_linear uses. SOFT-nores
     # (post-filter; no linear-adaptation change). Default OFF for byte-equal.
     erle_startup_follows_convergence: bool = False
+
+    # Re-exposed test knob (was inlined to hardcoded-False in v3.21 CLOSE).
+    # Converts AEC3 per-4ms-block SubbandErle EMA alphas to per-hop wall-clock
+    # equivalents (else AEC3's 0.05/0.1 run at our 60ms cadence → ERLE tracks
+    # ~2.5× slower). Prior 800-case test only flipped this BUNDLED with 3 other
+    # wall-clock flags (M_full_delay); its isolated effect was never measured.
+    # Default OFF for byte-equal.
+    subband_wallclock_smoothing: bool = False
+
+    # Re-exposed test knobs (inlined to hardcoded-False in v3.21 CLOSE) for
+    # ISOLATED re-test of the M_full_delay bundle (the bundle's DT-deg gain was
+    # never attributed to a specific flag). Default OFF for byte-equal.
+    fullband_wallclock_smoothing: bool = False
+    use_wallclock_low_noise_render_iir: bool = False
+
+    # P4 fix [DEFAULT ON, 2026-06-02]: protect a working alignment from a spurious
+    # late first-acquisition. When the linear filter is already cancelling
+    # (>2.5 dB windowed ERLE) at the current alignment, reject Path-A delay
+    # acquisition (which would reset the filter + apply a spurious large shift).
+    # Recovers FS-echo on ~4% of cases the bench pre-align + in-pipeline
+    # matched-filter conflict was destroying (3–7.5 dB). 800-case (vs splitcfg):
+    # 26 cases changed, net Σecho +2.85 / Σdeg +0.28; biggest wins kZogUfYc +2.06,
+    # Xv7jH2 +1.51; the FS/DT "casualties" are AECMOS movement-quirk echo-score
+    # redistribution (audio-verified: removes echo, not near-end). Harmless in
+    # production (no GCC pre-align → cold filter ERLE≈0 → guard never blocks a
+    # legitimate cold acquisition); the gain is a bench-measurement artifact fix.
+    delay_acquire_protect_converged: bool = True
 
     # ── v3.22 W4: DNE ENR-relax when near-end is loud vs noise (DT NE protect) ─
     # The dominant-nearend (DNE) detector only declares NE-state when the

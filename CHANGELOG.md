@@ -16,6 +16,51 @@ when verdict requires it.
 
 ---
 
+## [3.22.1] — 2026-06-02 — P4: delay-acquire phantom-mislock guard (default ON)
+
+**Headline**: ships `delay_acquire_protect_converged` into BALANCED (default
+ON). Guards the Path-A first delay acquisition: when the linear filter is
+already cancelling (>2.5 dB windowed ERLE) at the current alignment, a "solid"
+late acquisition is rejected (it would reset the filter + apply a spurious large
+shift). Verdict: [docs/v3_22_1_p4_delay_protect_verdict.md](docs/v3_22_1_p4_delay_protect_verdict.md).
+
+**Root cause (audio-localised)**: the bench pre-aligns the reference (GCC-PHAT)
+*and then* the in-pipeline AEC3 matched filter runs — a double-alignment. On
+weak/nonlinear-echo FS+DT-movement cases the matched-filter correlation surface
+is flat, so it latches a noise peak (e.g. kZogUfYc +96 ms, 9xjhi +188 ms) at
+confidence 1.0, double-shifts the reference, and ERLE collapses to ~0 for the
+rest of the case. Production (raw ref, matched-filter-only) does not hit this
+(it locks the true 16–32 ms delay); the guard is therefore harmless in
+production and recovers a bench-measurement artifact.
+
+**800-case (vs splitcfg baseline)**: 26 cases changed, net **Σecho +2.85 /
+Σdeg +0.28**; biggest wins kZogUfYc +2.06, Xv7jH2 +1.51 (FS_movement echo);
+genuine DT_movement deg wins waxU01 +0.236, w0QrMw +0.193. The FS/DT echo
+"casualties" (wlAXM0iD −0.36, W0zK3dv0 −0.32, JtodX −0.17) are **audio-verified
+AECMOS movement-quirks** — coherence(mic,far)=0.6 echo-dominant regions where
+the fix removes *echo* (not near-end); near-only frames are byte-identical. Net
+positive, no genuine regression. Bucket-level effect is small (FS_movement echo
+3.480→3.502) — a clean win but not an AEC3-gap lever.
+
+**Also landed (default-OFF research substrate, byte-equal — for v3.23)**:
+re-exposed `subband_wallclock_smoothing` / `fullband_wallclock_smoothing` /
+`use_wallclock_low_noise_render_iir` (M_full_delay bundle isolation knobs),
+`h_error_refresh_erl_floor` / `h_error_floor_override` (cold-start deadlock
+probes), and the `cohxd_*` selective floor-release scaffolding. All gated on
+default-False/0.0 → output unchanged with flags off (verified vs baseline to
+within int16 storage rounding). New diagnostic tool `oracle_linear_erle.py`
+(LS-optimal achievable-linear-ERLE ceiling, sanity-validated).
+
+**Phase 0 re-audit conclusion (motivating context)**: the linear filter is *not*
+under-converging — on the worst FS cases it reaches/beats its LS-optimal 60 ms
+ceiling (median under-convergence −1.0 dB); the linear→ERLE→RES handoff is
+correct (usable_linear 87–97%) and RES does not over-suppress near-end. The
+genuine FS echo gap to AEC3 (~0.32) is 47% nonlinear loudspeaker distortion
+(LS-optimal linear leaves it at 0.09 dB — audio-verified) + ~43% RES suppression
+depth (a gain-floor Pareto trade). Our back-end is a faithful AEC3 port (AEC3 is
+itself pure-DSP NLRES with no nonlinear filter). The only beat-AEC3 lever is a
+Hammerstein/power-filter PSD term (v3.23 candidate).
+
 ## [3.22.0] — 2026-06-01 — v3.22: split min-gain floor (DT/NE nearend preservation)
 
 **Headline**: ships the split min-gain floor into BALANCED (default ON), the

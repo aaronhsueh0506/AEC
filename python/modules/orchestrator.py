@@ -313,6 +313,13 @@ class AEC:
                 self.filter.Q_high[:] = self.config.kalman_q_high
                 self.filter.Q_low[:]  = self.config.kalman_q_low
                 self.filter.Q[:] = self.config.kalman_q_high
+                # Cold-start deadlock breaker (default 0/none = byte-equal).
+                self.filter._h_error_refresh_erl_floor = np.float32(
+                    getattr(self.config, "h_error_refresh_erl_floor", 0.0)
+                )
+                _hef_ovr = float(getattr(self.config, "h_error_floor_override", 0.0))
+                if _hef_ovr > 0.0:
+                    self.filter._h_error_floor = np.float32(_hef_ovr)
 
             # FDAF buffering (when internal_hop > external hop)
             if self.config.mode == AecMode.FDAF and self._internal_hop > self._hop_size:
@@ -423,8 +430,8 @@ class AEC:
                 enable_filter_analyzer=True,
                 hop_size=int(self.config.hop_size),
                 sample_rate=int(self.config.sample_rate),
-                subband_wallclock_smoothing=False,
-                fullband_wallclock_smoothing=False,
+                subband_wallclock_smoothing=bool(getattr(self.config, 'subband_wallclock_smoothing', False)),
+                fullband_wallclock_smoothing=bool(getattr(self.config, 'fullband_wallclock_smoothing', False)),
                 erle_startup_follows_convergence=bool(
                     getattr(self.config, 'erle_startup_follows_convergence', False)),
                 erle_e2y2_gate_enabled=bool(
@@ -503,7 +510,7 @@ class AEC:
                 hop_size=self.config.hop_size,
                 use_wallclock_block_energy_threshold=True,
                 use_wallclock_gain_ratchet=True,
-                use_wallclock_low_noise_render_iir=False,
+                use_wallclock_low_noise_render_iir=bool(getattr(self.config, 'use_wallclock_low_noise_render_iir', False)),
                 hf_min_gain_floor_during_dne_enabled=bool(
                     getattr(self.config,
                             "hf_min_gain_floor_during_dne_enabled", False)
@@ -551,6 +558,14 @@ class AEC:
                 split_floor_latch_power=float(
                     getattr(self.config, "min_gain_far_latch_power", 1.0e6)
                 ),
+                cohxd_floor_release_enabled=bool(
+                    getattr(self.config, "cohxd_floor_release_enabled", False)
+                ),
+                cohxd_floor_release_db=float(
+                    getattr(self.config, "cohxd_floor_release_db", -45.0)
+                ),
+                cohxd_gamma_lo=float(getattr(self.config, "cohxd_gamma_lo", 0.5)),
+                cohxd_gamma_hi=float(getattr(self.config, "cohxd_gamma_hi", 0.85)),
             )
             self._aec3_n_bins = n_bins
             self._aec3_sg_config = _sg_config
@@ -802,6 +817,14 @@ class AEC:
         self._coh_erle_see = np.full(_n_freqs, 1e-30, dtype=np.float64)
         # Layer1: per-bin Γ²_ŶY for the coherence gain floor (None until computed).
         self._coh_gamma2_for_floor = None
+        # cohxd: per-bin Γ²(X, Y) EMA state — X=far_spec (delay-aligned
+        # reference), Y=near_spec (mic). Reference-based ⟹ convergence-robust
+        # echo-presence discriminator for the selective floor release. Distinct
+        # from the C' Γ²(Ŷ,Y) above (which measures filter quality, not nearend).
+        self._coh_xy_sxy = np.zeros(_n_freqs, dtype=np.complex64)
+        self._coh_xy_sxx = np.full(_n_freqs, 1e-30, dtype=np.float64)
+        self._coh_xy_syy = np.full(_n_freqs, 1e-30, dtype=np.float64)
+        self._coh_xy_gamma2 = None
 
         # B: Emura 2017 cross-PSD R² — EMA of E×X_delayed* and |X_delayed|².
         # Sex = EMA[error_spec × conj(X_delayed)]: nearend averages out → echo-only.
@@ -1107,8 +1130,8 @@ class AEC:
             enable_filter_analyzer=True,
             hop_size=int(self.config.hop_size),
             sample_rate=int(self.config.sample_rate),
-            subband_wallclock_smoothing=False,
-            fullband_wallclock_smoothing=False,
+            subband_wallclock_smoothing=bool(getattr(self.config, 'subband_wallclock_smoothing', False)),
+            fullband_wallclock_smoothing=bool(getattr(self.config, 'fullband_wallclock_smoothing', False)),
             erle_startup_follows_convergence=bool(
                 getattr(self.config, 'erle_startup_follows_convergence', False)),
         ))
@@ -1142,7 +1165,7 @@ class AEC:
             hop_size=self.config.hop_size,
             use_wallclock_block_energy_threshold=True,
             use_wallclock_gain_ratchet=True,
-            use_wallclock_low_noise_render_iir=False,
+            use_wallclock_low_noise_render_iir=bool(getattr(self.config, 'use_wallclock_low_noise_render_iir', False)),
             hf_min_gain_floor_during_dne_enabled=bool(
                 getattr(self.config,
                         "hf_min_gain_floor_during_dne_enabled", False)
@@ -1190,6 +1213,14 @@ class AEC:
             split_floor_latch_power=float(
                 getattr(self.config, "min_gain_far_latch_power", 1.0e6)
             ),
+            cohxd_floor_release_enabled=bool(
+                getattr(self.config, "cohxd_floor_release_enabled", False)
+            ),
+            cohxd_floor_release_db=float(
+                getattr(self.config, "cohxd_floor_release_db", -45.0)
+            ),
+            cohxd_gamma_lo=float(getattr(self.config, "cohxd_gamma_lo", 0.5)),
+            cohxd_gamma_hi=float(getattr(self.config, "cohxd_gamma_hi", 0.85)),
         )
         self._aec3_ola_buf.fill(0)
         self._aec3_pending_gain_change = False
@@ -1569,9 +1600,24 @@ class AEC:
 
                 # Path A: first delay acquisition. Heavy action (resets filter
                 # taps + downstream derived state). Demands solid PAR.
+                # Guard: if the filter is ALREADY cancelling well at the current
+                # (no in-pipeline-delay) alignment, a first-acquisition reset is
+                # destructive — the "solid" estimate is a spurious large lag
+                # (bench pre-align leaves residual ~0; matched filter latches
+                # noise). In production a misaligned filter shows ~0 dB ERLE, so
+                # this never blocks a legitimate cold acquisition. Robust signal
+                # = WINDOWED ERLE (decays, so a real path change that stops
+                # cancellation lifts the guard and re-acquisition proceeds —
+                # unlike cumulative). The inst-ERLE EMA is too noisy (dips to
+                # ~1 dB between far-active bursts) and the 10-frame latch too
+                # strict (breaks on those dips).
+                _already_cancelling = (
+                    bool(getattr(self.config, 'delay_acquire_protect_converged', False))
+                    and float(self._diag.get('erle_windowed', 0.0)) > 2.5)  # dB
                 if (_delay_eligible
                         and self._current_delay < 0
-                        and self.delay_est.is_solid):
+                        and self.delay_est.is_solid
+                        and not _already_cancelling):
                     self._current_delay = new_delay
                     # Reset filter taps + ALL filter-output-derived state
                     # (main_err_smooth / DTD / EPC / ERLE / mu / RES). The
@@ -3273,6 +3319,28 @@ class AEC:
                 # Layer1: stash per-bin Γ²_ŶY for the suppressor coherence floor.
                 if self.config.coh_gain_floor_enabled:
                     self._coh_gamma2_for_floor = _gamma2
+        # cohxd: per-bin Γ²(X, Y) — reference-vs-mic coherence for the selective
+        # floor release. X = far_spec (delay-aligned reference; bulk delay
+        # removed upstream so it is time-aligned to the mic frame), Y = near_spec
+        # (mic). High Γ² ⟹ residual correlates with the reference ⟹ confidently
+        # echo ⟹ release floor. Low Γ² ⟹ nearend (X-uncorrelated) ⟹ keep floor.
+        if self.config.cohxd_floor_release_enabled:
+            _far_c = self.filter.far_spec.astype(np.complex64)
+            _near_c2 = self.filter.near_spec.astype(np.complex64)
+            _ax = float(self.config.cohxd_alpha)
+            self._coh_xy_sxy = (
+                (1.0 - _ax) * self._coh_xy_sxy + _ax * (_far_c * np.conj(_near_c2))
+            )
+            self._coh_xy_sxx = (
+                (1.0 - _ax) * self._coh_xy_sxx + _ax * np.abs(_far_c) ** 2
+            )
+            self._coh_xy_syy = (
+                (1.0 - _ax) * self._coh_xy_syy + _ax * np.abs(_near_c2) ** 2
+            )
+            self._coh_xy_gamma2 = (
+                np.abs(self._coh_xy_sxy) ** 2
+                / np.maximum(self._coh_xy_sxx * self._coh_xy_syy, 1e-30)
+            ).astype(np.float32)
         self._aec3_state.update(
             bridge=bridge,
             external_delay=ext_delay,
@@ -3611,6 +3679,8 @@ class AEC:
             stationary_mask=_stationary_mask,
             coh_gamma2=(self._coh_gamma2_for_floor
                         if self.config.coh_gain_floor_enabled else None),
+            coh_xy_gamma2=(self._coh_xy_gamma2
+                           if self.config.cohxd_floor_release_enabled else None),
         )
 
         # trace_hf_chain audit trace removed (default-OFF dev knob).
