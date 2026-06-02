@@ -197,19 +197,6 @@ class AecConfig:
     h_error_refresh_erl_floor: float = 0.0
     h_error_floor_override: float = 0.0
 
-    # ── v3.22 B: Emura 2017 cross-PSD R² (nearend-robust residual estimate) ──
-    # Replaces R²_linear = S²/ERLE (contaminated in DT) with a blend that
-    # uses the cross-spectrum between E (error) and X_delayed (reference).
-    # Since nearend is uncorrelated with X, E[nearend × X*] → 0 over frames,
-    # so Sex = EMA[E × X*] tracks ONLY the echo component of E — immune to DT.
-    # R2_emura[k] = |Sex[k]|² / Sxx[k] × PSD_SCALE  (per-bin, int16² units)
-    # Blend: R2_final = (1-blend) × R2_erle + blend × R2_emura  (linear path)
-    # emura_r2_alpha: EMA rate for cross-PSD (0.1 ≈ 100ms at hop=160).
-    # Bench with AEC_EMURA_R2=<blend>.
-    emura_r2_enabled: bool = False
-    emura_r2_alpha: float = 0.1
-    emura_r2_blend: float = 0.5
-
     # ── v3.22 D2: SER-based gain floor (nearend preservation without DT detector) ──
     # SER (Signal-to-Echo Ratio) floor in power domain, inserted after Wiener-gain
     # clip in SuppressionGain._lower_band_gain.
@@ -374,33 +361,6 @@ class AecConfig:
     # AEC_OUT_CAPTURE_UNUSABLE=0 forces OFF.
     output_capture_when_linear_unusable: bool = True
 
-    # ── v3.22 W1': ERLE startup gate follows convergence (NE over-suppression) ─
-    # The ERLE estimator is frozen at min_erle for a fixed 200-hop session
-    # startup window (and re-armed on every delay-change), while usable_linear
-    # opens earlier (~40 active-render hops + convergence_seen). In that desync
-    # window the linear residual path runs R² = s2_linear / min_erle = s2_linear
-    # (undivided) → min_gain collapses → near-end over-suppressed in the first
-    # ~2 s and after each path change. When ON, ErleEstimator drops the fixed
-    # session-startup gate and updates as soon as `converged_filter` is True
-    # (Subband/FullBand already self-gate on convergence), so ERLE-readiness
-    # tracks the same convergence signal usable_linear uses. SOFT-nores
-    # (post-filter; no linear-adaptation change). Default OFF for byte-equal.
-    erle_startup_follows_convergence: bool = False
-
-    # Re-exposed test knob (was inlined to hardcoded-False in v3.21 CLOSE).
-    # Converts AEC3 per-4ms-block SubbandErle EMA alphas to per-hop wall-clock
-    # equivalents (else AEC3's 0.05/0.1 run at our 60ms cadence → ERLE tracks
-    # ~2.5× slower). Prior 800-case test only flipped this BUNDLED with 3 other
-    # wall-clock flags (M_full_delay); its isolated effect was never measured.
-    # Default OFF for byte-equal.
-    subband_wallclock_smoothing: bool = False
-
-    # Re-exposed test knobs (inlined to hardcoded-False in v3.21 CLOSE) for
-    # ISOLATED re-test of the M_full_delay bundle (the bundle's DT-deg gain was
-    # never attributed to a specific flag). Default OFF for byte-equal.
-    fullband_wallclock_smoothing: bool = False
-    use_wallclock_low_noise_render_iir: bool = False
-
     # P4 fix [DEFAULT ON, 2026-06-02]: protect a working alignment from a spurious
     # late first-acquisition. When the linear filter is already cancelling
     # (>2.5 dB windowed ERLE) at the current alignment, reject Path-A delay
@@ -442,46 +402,6 @@ class AecConfig:
     dne_loud_nearend_snr_factor: float = 3.0
     dne_loud_nearend_enr_threshold: float = 0.75
 
-    # ── v3.22 future work: LF filter-failure R² injection (NOT AEC3-strict) ─
-    # AEC3 itself has no per-bin mechanism to detect "linear filter is
-    # clearly failing at this bin AND ref signal has strong content here";
-    # AEC3 accepts some LF echo bleed during DT to protect NE F0.
-    #
-    # This v3.22 candidate adds per-bin R² injection when the linear
-    # cancellation is ~0 dB (filter useless) AND the DNE detector says
-    # NE-dominant. Without injection, R²_direct = S²_linear / ERLE
-    # underestimates → SG sees low ENR → gate doesn't fire → ref bleeds.
-    # With injection: R² is lifted to a configured fraction of near_psd,
-    # which makes ENR cross the nearend-tuning gate threshold (enr_tr_lf
-    # = 1.09 by AEC3 spec) so SG suppresses naturally.
-    #
-    # SPEC (when flag ON, per-bin in [lf_low_hz, lf_high_hz] band):
-    #   trigger: DNE is in NE-state
-    #            AND error_psd[k] >= cancel_ratio × near_psd[k]
-    #   action : R²[k] = max(R²[k], inject_factor × near_psd[k])
-    #
-    # OBSERVED CASE (568_EVB 6.5-7.0 s seg1):
-    #   200-500 Hz: ref content +32 dB vs mic +30 dB (ref louder than mic,
-    #   continuous DT speech overlap). Linear filter cancellation = -1.12
-    #   dB (filter does nothing). User describes audible "two-pitch" /
-    #   chorus effect from ref F0 + NE F0 overlapping at 200-500 Hz.
-    #
-    # TRADE-OFFS:
-    #   - During NE-only (no ref): near_psd modest, but error_psd is
-    #     basically the NE itself = near_psd → trigger fires → R² inject
-    #     creates false suppression. Mitigation: gate also requires
-    #     far_psd > silence_floor (configurable).
-    #   - During FS-only (no NE): DNE=False → gate inactive.
-    #   - During DT with strong echo + light NE: SG already suppresses
-    #     via the standard path → trigger usually doesn't fire (error
-    #     much smaller than near after good cancellation).
-    enable_lf_filter_failure_r2_injection: bool = False
-    lf_filter_failure_lf_low_hz: float = 200.0
-    lf_filter_failure_lf_high_hz: float = 500.0
-    lf_filter_failure_cancel_ratio: float = 0.9
-    lf_filter_failure_r2_inject_factor: float = 1.2
-    lf_filter_failure_min_far_psd_db: float = -40.0
-
     # ── Shadow filter (dual-filter divergence control) ──────────────────
     enable_shadow: bool = True
     shadow_mu_ratio: float = 1.0
@@ -503,7 +423,6 @@ class AecConfig:
     filter_misadjustment_stable_frames: int = 30
     filter_misadjustment_scale_min: float = 0.5
     filter_misadjustment_scale_max: float = 2.0
-    filter_misadjustment_scale_p: bool = False
 
     # ── PBFDKF (Kalman) ─────────────────────────────────────────────────
     use_kalman: bool = True

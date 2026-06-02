@@ -182,29 +182,6 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     _dne_loud_env = os.environ.get('AEC_DNE_LOUD_NE')
     if _dne_loud_env in ('0', '1') and 'dne_loud_nearend_enr_relax_enabled' not in config_overrides:
         config_overrides['dne_loud_nearend_enr_relax_enabled'] = (_dne_loud_env == '1')
-    # B5 (v3.22): enable_lf_filter_failure_r2_injection — candidate-B re-audit.
-    # AEC_LF_R2_INJECT=1 → True (inject R² for LF filter-failure frames).
-    _lf_r2_env = os.environ.get('AEC_LF_R2_INJECT')
-    if _lf_r2_env in ('0', '1') and 'enable_lf_filter_failure_r2_injection' not in config_overrides:
-        config_overrides['enable_lf_filter_failure_r2_injection'] = (_lf_r2_env == '1')
-    # W1' (v3.22): erle_startup_follows_convergence — drop fixed session-startup
-    # ERLE gate; update as soon as converged_filter=True. Fixes ERLE/usable_linear
-    # desync that causes near-end over-suppression at session start + after EPC.
-    # AEC_ERLE_STARTUP_CONV=1 → True.
-    _erle_startup_env = os.environ.get('AEC_ERLE_STARTUP_CONV')
-    if _erle_startup_env in ('0', '1') and 'erle_startup_follows_convergence' not in config_overrides:
-        config_overrides['erle_startup_follows_convergence'] = (_erle_startup_env == '1')
-    # ISOLATED test of SubbandErle wall-clock EMA (prior 800-case only tested it
-    # bundled in M_full_delay). AEC_SUBBAND_WALLCLOCK=1 → ON.
-    _sbwc_env = os.environ.get('AEC_SUBBAND_WALLCLOCK')
-    if _sbwc_env in ('0', '1') and 'subband_wallclock_smoothing' not in config_overrides:
-        config_overrides['subband_wallclock_smoothing'] = (_sbwc_env == '1')
-    _fbwc_env = os.environ.get('AEC_FULLBAND_WALLCLOCK')
-    if _fbwc_env in ('0', '1') and 'fullband_wallclock_smoothing' not in config_overrides:
-        config_overrides['fullband_wallclock_smoothing'] = (_fbwc_env == '1')
-    _lniir_env = os.environ.get('AEC_LOWNOISE_IIR')
-    if _lniir_env in ('0', '1') and 'use_wallclock_low_noise_render_iir' not in config_overrides:
-        config_overrides['use_wallclock_low_noise_render_iir'] = (_lniir_env == '1')
     _dprot_env = os.environ.get('AEC_DELAY_PROTECT')
     if _dprot_env in ('0', '1') and 'delay_acquire_protect_converged' not in config_overrides:
         config_overrides['delay_acquire_protect_converged'] = (_dprot_env == '1')
@@ -275,16 +252,6 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             _nl_alpha_val = float(_nl_alpha_env)
             config_overrides['nl_r2_enabled'] = (_nl_alpha_val > 0.0)
             config_overrides['nl_r2_alpha'] = _nl_alpha_val
-        except ValueError:
-            pass
-    # emura_r2 (v3.22 B): cross-PSD R² (Emura 2017), nearend-robust.
-    # AEC_EMURA_R2=<blend> → emura_r2_enabled=True, blend=<float 0-1>.
-    _emura_env = os.environ.get('AEC_EMURA_R2')
-    if _emura_env is not None and 'emura_r2_enabled' not in config_overrides:
-        try:
-            _emura_val = float(_emura_env)
-            config_overrides['emura_r2_enabled'] = (_emura_val > 0.0)
-            config_overrides['emura_r2_blend'] = min(max(_emura_val, 0.0), 1.0)
         except ValueError:
             pass
     # coh_gain_floor (v3.22 Layer1): AEC2 NLP-inspired coherence gain floor.

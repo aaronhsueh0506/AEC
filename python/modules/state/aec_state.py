@@ -63,15 +63,9 @@ class AecStateConfig:
     erle_max_l: float = 4.0
     erle_max_h: float = 1.5
     erl_startup_hops: int = 200
-    # Wall-clock ERLE EMA smoothing alignment (default OFF; flags threaded from
-    # AecConfig). hop_size/sample_rate feed the per_block→per_hop conversion.
+    # hop_size/sample_rate feed the per_block→per_hop conversion.
     hop_size: int = 160
     sample_rate: int = 16000
-    subband_wallclock_smoothing: bool = False
-    fullband_wallclock_smoothing: bool = False
-    # v3.22 W1': ERLE startup gate follows convergence (drop fixed session
-    # startup window; update as soon as converged_filter is True). Default OFF.
-    erle_startup_follows_convergence: bool = False
     # v3.22 C: E²/Y² per-bin ERLE gate. Default OFF.
     erle_e2y2_gate_enabled: bool = False
     erle_e2y2_gate_threshold: float = 0.5
@@ -108,11 +102,7 @@ class AecState:
             min_erle=self._config.erle_min,
             max_erle_l=self._config.erle_max_l,
             max_erle_h=self._config.erle_max_h,
-            subband_wallclock_smoothing=self._config.subband_wallclock_smoothing,
-            fullband_wallclock_smoothing=self._config.fullband_wallclock_smoothing,
-            startup_follows_convergence=self._config.erle_startup_follows_convergence,
             hop_size=self._config.hop_size,
-            sample_rate=self._config.sample_rate,
             e2y2_gate_enabled=self._config.erle_e2y2_gate_enabled,
             e2y2_gate_threshold=self._config.erle_e2y2_gate_threshold,
         )
@@ -126,9 +116,6 @@ class AecState:
         self._filter_analyzer: Optional[FilterAnalyzer] = (
             FilterAnalyzer() if self._config.enable_filter_analyzer else None
         )
-        # STUBS — Phase 3.4 will replace.
-        self._reverb_decay = 0.0  # zero reverb tail until ReverbModelEstimator lands
-        self._reverb_frequency_response = np.zeros(self._config.n_bins, dtype=np.float32)
         # Counters tracked at this level (not in helpers).
         self._strong_not_saturated_render_blocks = 0
         self._blocks_with_active_render = 0
@@ -162,20 +149,6 @@ class AecState:
 
     def min_direct_path_filter_delay(self) -> int:
         return self._delay_state.min_direct_path_filter_delay()
-
-    def reverb_decay(self, mild: bool = False) -> float:
-        # DEAD CODE — no production caller. ResidualEchoEstimator owns its
-        # own ReverbDecayEstimator and reads via self._reverb_decay_est.decay(mild).
-        # Kept as part of AEC3 public API surface for future architectural
-        # refactor (move estimator ownership to AecState per AEC3 layout).
-        return self._reverb_decay if not mild else self._reverb_decay * 0.5
-
-    def get_reverb_frequency_response(self) -> np.ndarray:
-        # DEAD CODE — no production caller. ResidualEchoEstimator owns its
-        # own ReverbFrequencyResponse and reads via self._reverb_freq_resp.tail_response.
-        # Kept as part of AEC3 public API surface for future architectural
-        # refactor.
-        return self._reverb_frequency_response
 
     def erle(self, onset_compensated: bool = False) -> np.ndarray:
         return self._erle_estimator.erle(onset_compensated)

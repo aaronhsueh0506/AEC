@@ -116,19 +116,12 @@ class FullBandErleEstimator:
     """Single-channel fullband ERLE in log2 units (FullbandErleLog2)."""
 
     def __init__(self, *, min_erle: float = 1.0, max_erle_l: float = 4.0,
-                 wallclock_smoothing: bool = False, hop_size: int = 160,
-                 sample_rate: int = 16000) -> None:
-        # AEC3 fullband EMAs (quality 0.07, erle_time_domain 0.05) are
-        # per-4ms-block; both fire on the 6-point accumulation here (per hop),
-        # 2.5× slower in wall-clock. Convert when ON (config
-        # use_aec3_wallclock_fullband_erle_smoothing). 0.0004 envelope left verbatim.
-        if wallclock_smoothing:
-            from ..aec3_scale import per_block_ema_alpha_to_per_hop as _ema
-            _q_alpha = float(_ema(0.07, hop_size, sample_rate))
-            self._td_alpha = float(_ema(0.05, hop_size, sample_rate))
-        else:
-            _q_alpha = 0.07
-            self._td_alpha = 0.05
+                 hop_size: int = 160) -> None:
+        # AEC3 fullband EMAs (quality 0.07, erle_time_domain 0.05) per-4ms-block;
+        # both fire on the 6-point accumulation here (per hop). 0.0004 envelope
+        # left verbatim.
+        _q_alpha = 0.07
+        self._td_alpha = 0.05
         self._x2_band_energy_threshold = _aec3_scale.per_bin_psd_threshold(
             _AEC3_X2_BAND_ENERGY_THRESHOLD, hop_size
         )

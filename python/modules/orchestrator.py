@@ -182,11 +182,7 @@ class AEC:
         scale = max(self.config.filter_misadjustment_scale_min,
                     min(self.config.filter_misadjustment_scale_max,
                         scale_raw))
-        if isinstance(self.filter, PBFDKF):
-            self.filter.scale_filter(scale,
-                scale_p=self.config.filter_misadjustment_scale_p)
-        else:
-            self.filter.scale_filter(scale)
+        self.filter.scale_filter(scale)
         # AEC3 Reset zeros e2/y2/n/inv/overhang. We already zero e2/y2/n
         # per window; here we also zero inv + overhang as AEC3 does.
         self._aec3_misadj_inv = 0.0
@@ -430,10 +426,6 @@ class AEC:
                 enable_filter_analyzer=True,
                 hop_size=int(self.config.hop_size),
                 sample_rate=int(self.config.sample_rate),
-                subband_wallclock_smoothing=bool(getattr(self.config, 'subband_wallclock_smoothing', False)),
-                fullband_wallclock_smoothing=bool(getattr(self.config, 'fullband_wallclock_smoothing', False)),
-                erle_startup_follows_convergence=bool(
-                    getattr(self.config, 'erle_startup_follows_convergence', False)),
                 erle_e2y2_gate_enabled=bool(
                     getattr(self.config, 'erle_e2y2_gate_enabled', False)),
                 erle_e2y2_gate_threshold=float(
@@ -763,12 +755,6 @@ class AEC:
         self._coh_xy_syy = np.full(_n_freqs, 1e-30, dtype=np.float64)
         self._coh_xy_gamma2 = None
 
-        # B: Emura 2017 cross-PSD R² — EMA of E×X_delayed* and |X_delayed|².
-        # Sex = EMA[error_spec × conj(X_delayed)]: nearend averages out → echo-only.
-        # R2_emura = |Sex|²/Sxx × PSD_SCALE (int16² per-bin residual echo estimate).
-        self._emura_sex = np.zeros(_n_freqs, dtype=np.complex64)
-        self._emura_sxx = np.full(_n_freqs, 1e-30, dtype=np.float64)
-
         # Smoothed inst ERLE for dt_indicator correction (~3 frame / 30ms)
         self._inst_erle_smooth = 1.0
 
@@ -1034,8 +1020,6 @@ class AEC:
         self._dt_analyzer.reset()
         self._epc_render_forced_remaining = 0
         self._erl_estimate = 0.1
-        # Reset per-band ERL EMA to initial conservative value.
-        self._per_band_erl[:] = 0.1
         # Clear AEC3 post-state so cross-stream reuse of an AEC instance
         # doesn't carry previous-utterance AecState / ResidualEchoEstimator
         # / SuppressionGain / CNG / OLA across.
@@ -1054,8 +1038,6 @@ class AEC:
             hop_size=cfg.hop_size,
             use_wallclock_block_energy_threshold=True,
             use_wallclock_gain_ratchet=True,
-            use_wallclock_low_noise_render_iir=bool(
-                getattr(cfg, 'use_wallclock_low_noise_render_iir', False)),
             hf_min_gain_floor_during_dne_enabled=bool(
                 getattr(cfg, "hf_min_gain_floor_during_dne_enabled", False)),
             hf_min_gain_floor_during_dne_db=float(
@@ -1118,10 +1100,6 @@ class AEC:
             enable_filter_analyzer=True,
             hop_size=int(self.config.hop_size),
             sample_rate=int(self.config.sample_rate),
-            subband_wallclock_smoothing=bool(getattr(self.config, 'subband_wallclock_smoothing', False)),
-            fullband_wallclock_smoothing=bool(getattr(self.config, 'fullband_wallclock_smoothing', False)),
-            erle_startup_follows_convergence=bool(
-                getattr(self.config, 'erle_startup_follows_convergence', False)),
         ))
         # Re-derive fft-density-scaled echo_model so a mid-stream reset keeps
         # the same per-bin PSD floors as init (see __init__ note).
@@ -1270,9 +1248,6 @@ class AEC:
 
         # ERL + EPC-render forced + DT analyzer (all filter-output-derived)
         self._erl_estimate = 0.1
-        # Per-band ERL is filter-output-derived (echo_spec / far_spec
-        # from PBFDKF), so reset it together with scalar _erl_estimate.
-        self._per_band_erl[:] = 0.1
         self._epc_render_forced_remaining = 0
         self._dt_analyzer.reset()
         self._stat_dt_hangover = 0
@@ -3369,29 +3344,6 @@ class AEC:
             time_domain_filter=_td_filter_for_decay,
         )
 
-        # B v2: cross-PSD R² using echo_spec (Ŷ) instead of X_buf[delay_p].
-        # B v1 FAILED: X_buf[delay_p] had delay alignment issues in PBFDKF
-        #   overlap-save → R2_emura ≈ 0 during far-end active → echo leaked.
-        #   Audio proof: +8.2 dB output at second 8 correlated with lpb active.
-        # B v2 FIX: use echo_spec (= Ŷ = H̃×X, already delay-compensated by filter).
-        #   nearend ⊥ echo_spec (since nearend ⊥ X and echo_spec = H̃×X) → EMA averages out.
-        #   No manual delay alignment needed → no alignment bug.
-        # error_spec = E (filter output error), echo_spec = Ŷ (filter echo estimate).
-        _r2_emura: Optional[np.ndarray] = None
-        if True:  # always update EMA (config gate on output only)
-            _echo_c = self.filter.echo_spec.astype(np.complex64)   # Ŷ — delay-compensated
-            _err_c = self.filter.error_spec.astype(np.complex64)   # E
-            _a_em = float(self.config.emura_r2_alpha)
-            self._emura_sex = ((1.0 - _a_em) * self._emura_sex
-                               + _a_em * (_err_c * np.conj(_echo_c)))
-            self._emura_sxx = ((1.0 - _a_em) * self._emura_sxx
-                               + _a_em * np.abs(_echo_c) ** 2)
-            if self.config.emura_r2_enabled:
-                _r2_emura = (
-                    np.abs(self._emura_sex) ** 2
-                    / np.maximum(self._emura_sxx, 1e-30)
-                    * _PSD_SCALE
-                ).astype(np.float32)
         r2, r2_unb = self._aec3_ree.estimate(
             aec_state=self._aec3_state,
             render_psd=far_psd,
@@ -3401,8 +3353,6 @@ class AEC:
             filter_delay_blocks=_delay_blocks,
             filter_length_blocks=int(getattr(self.filter, 'n_partitions', 0)),
             force_nonlinear_path=_just_reset_active,
-            r2_emura=_r2_emura,
-            emura_r2_blend=float(self.config.emura_r2_blend),
         )
 
         # Reverb tail dead-streak tracking. `_reverb_fr` is the
@@ -3460,52 +3410,6 @@ class AEC:
             r2_unb = np.where(
                 _stationary_mask, 0.0, r2_unb
             ).astype(np.float32)
-
-        # v3.22 candidate B (default OFF): LF filter-failure R² injection.
-        # Detects the symptom "linear filter cancellation ≈ 0 dB at LF AND
-        # DNE says NE-dominant" — a structural blind-spot that AEC3 itself
-        # doesn't address (it accepts LF echo bleed during DT to protect NE
-        # F0). When the per-bin condition fires, lift R²[k] to a fraction
-        # of near_psd[k] so SG's standard ENR/EMR gate (with AEC3-spec
-        # enr_tr_lf=1.09 nearend tuning) crosses the trigger threshold and
-        # suppresses naturally. See AecConfig.enable_lf_filter_failure_r2_*
-        # block for full spec.
-        if (getattr(self.config,
-                    "enable_lf_filter_failure_r2_injection", False)
-                and self._aec3_sg.is_dominant_nearend()):
-            from .residual.suppression_gain import hz_to_bin as _hz_to_bin
-            _lf_lo = _hz_to_bin(
-                float(getattr(self.config,
-                              "lf_filter_failure_lf_low_hz", 200.0)),
-                self._aec3_n_bins, self.config.sample_rate)
-            _lf_hi = _hz_to_bin(
-                float(getattr(self.config,
-                              "lf_filter_failure_lf_high_hz", 500.0)),
-                self._aec3_n_bins, self.config.sample_rate)
-            _lf_hi = min(_lf_hi, self._aec3_n_bins)
-            if _lf_hi > _lf_lo:
-                _cancel_ratio = float(getattr(self.config,
-                                              "lf_filter_failure_cancel_ratio",
-                                              0.9))
-                _inject_factor = float(getattr(self.config,
-                                               "lf_filter_failure_r2_inject_factor",
-                                               1.2))
-                _min_far_db = float(getattr(self.config,
-                                            "lf_filter_failure_min_far_psd_db",
-                                            -40.0))
-                _min_far_lin = 10.0 ** (_min_far_db / 10.0)
-                _sl = slice(_lf_lo, _lf_hi)
-                # Linear filter failure: residual is ≈ mic (no cancellation).
-                _filter_failed = error_psd[_sl] >= _cancel_ratio * near_psd[_sl]
-                # Ref must actually have content (avoid lifting R² when ref
-                # is silent and error≈near is just NE through inactive ref).
-                _ref_present = far_psd[_sl] > _min_far_lin
-                _inject_mask = _filter_failed & _ref_present
-                if _inject_mask.any():
-                    _r2_inject = _inject_factor * near_psd[_sl]
-                    _candidate = np.where(_inject_mask, _r2_inject, r2[_sl])
-                    np.maximum(r2[_sl], _candidate, out=r2[_sl])
-                    np.maximum(r2_unb[_sl], _candidate, out=r2_unb[_sl])
 
         # AEC3 contract (echo_remover.cc:452):
         #   nearend_spectrum = UsableLinearEstimate() ? E² : Y²

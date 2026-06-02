@@ -44,9 +44,7 @@ class SubbandErleEstimator:
         max_erle_h: float = 1.5,
         use_onset_detection: bool = True,
         use_min_erle_during_onsets: bool = True,
-        wallclock_smoothing: bool = False,
         hop_size: int = 160,
-        sample_rate: int = 16000,
         e2y2_gate_enabled: bool = False,
         e2y2_gate_threshold: float = 0.5,
     ) -> None:
@@ -55,21 +53,10 @@ class SubbandErleEstimator:
         self._max_erle = _set_max_erle_bands(self._n_bins, max_erle_l, max_erle_h)
         self._use_onset_detection = bool(use_onset_detection)
         self._use_min_erle_during_onsets = bool(use_min_erle_during_onsets)
-        # AEC3 subband EMA constants are per-4ms-block; our update fires per
-        # hop (2.5× wider window). When ON, convert so ERLE tracks + recovers
-        # at AEC3 wall-clock rate (config use_aec3_wallclock_subband_erle_smoothing).
-        if wallclock_smoothing:
-            from ..aec3_scale import (
-                per_block_ema_alpha_to_per_hop as _ema,
-                per_block_growth_to_per_hop as _grow,
-            )
-            self._alpha_up = float(_ema(0.05, hop_size, sample_rate))
-            self._alpha_down = float(_ema(0.1, hop_size, sample_rate))
-            self._onset_release_decay = float(_grow(0.97, hop_size, sample_rate))
-        else:
-            self._alpha_up = 0.05
-            self._alpha_down = 0.1
-            self._onset_release_decay = 0.97
+        # AEC3 subband EMA constants are per-4ms-block; our update fires per hop.
+        self._alpha_up = 0.05
+        self._alpha_down = 0.1
+        self._onset_release_decay = 0.97
         self._erle = np.full(self._n_bins, self._min_erle, dtype=np.float32)
         self._erle_onset_compensated = np.full(self._n_bins, self._min_erle, dtype=np.float32)
         self._erle_unbounded = np.full(self._n_bins, self._min_erle, dtype=np.float32)

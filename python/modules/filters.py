@@ -801,14 +801,10 @@ class PBFDKF(PBFDAF):
         # After W copy, P may temporarily mismatch W but Kalman self-corrects
         # within a few frames.
 
-    def scale_filter(self, scale: float, scale_p: bool = False) -> None:
-        """Multiplicative W rescale with optional P scale.
+    def scale_filter(self, scale: float) -> None:
+        """Multiplicative W rescale.
 
-        AEC3 default (scale_p=False): scale W only; Kalman gain
+        AEC3 default: scale W only; Kalman gain
         K = P·X*/(X·P·X* + R) self-corrects within a few frames.
-        scale_p=True also scales P by scale² (Kalman-canonical variance
-        scaling). Set via config.filter_misadjustment_scale_p.
         """
         super().scale_filter(scale)
-        if scale_p:
-            self.P *= float(scale) ** 2

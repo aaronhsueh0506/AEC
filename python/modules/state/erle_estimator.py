@@ -24,20 +24,14 @@ class ErleEstimator:
         max_erle_l: float = 4.0,
         max_erle_h: float = 1.5,
         use_onset_detection: bool = True,
-        subband_wallclock_smoothing: bool = False,
-        fullband_wallclock_smoothing: bool = False,
-        startup_follows_convergence: bool = False,
         hop_size: int = 160,
-        sample_rate: int = 16000,
         e2y2_gate_enabled: bool = False,
         e2y2_gate_threshold: float = 0.5,
     ) -> None:
         self._startup_hops = int(startup_phase_length_hops)
-        self._startup_follows_convergence = bool(startup_follows_convergence)
         self._fullband = FullBandErleEstimator(
             min_erle=min_erle, max_erle_l=max_erle_l,
-            wallclock_smoothing=fullband_wallclock_smoothing,
-            hop_size=hop_size, sample_rate=sample_rate,
+            hop_size=hop_size,
         )
         self._subband = SubbandErleEstimator(
             n_bins=n_bins,
@@ -45,9 +39,7 @@ class ErleEstimator:
             max_erle_l=max_erle_l,
             max_erle_h=max_erle_h,
             use_onset_detection=use_onset_detection,
-            wallclock_smoothing=subband_wallclock_smoothing,
             hop_size=hop_size,
-            sample_rate=sample_rate,
             e2y2_gate_enabled=e2y2_gate_enabled,
             e2y2_gate_threshold=e2y2_gate_threshold,
         )
@@ -74,13 +66,7 @@ class ErleEstimator:
         coh_gate_mask: Optional[np.ndarray] = None,
     ) -> None:
         self._blocks_since_reset += 1
-        # W1' (startup_follows_convergence): when ON, skip the fixed session
-        # startup gate and update as soon as the filter is converged — the
-        # sub-estimators already early-return when converged_filter=False, so
-        # ERLE-readiness tracks the same convergence signal usable_linear uses
-        # instead of an independent 200-hop clock that desyncs from it.
-        if (not self._startup_follows_convergence
-                and self._blocks_since_reset < self._startup_hops):
+        if self._blocks_since_reset < self._startup_hops:
             return
         self._subband.update(x2=x2, y2=y2, e2=e2, converged_filter=converged_filter,
                              coh_gate_mask=coh_gate_mask)

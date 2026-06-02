@@ -31,6 +31,31 @@ Behaviour-neutral cleanup on top of 3.22.2. `__version__` stays **3.22.2**
   coh_gain_floor_enabled`); the accumulators feed nothing else, so the EMA is
   skipped when neither consumer is on. 14/14 byte-identical.
 
+- **dead-flag retire** (Track B): removed 6 closed/dud default-OFF flags + their
+  gated code, plus 2 inert/dead items. Production stays byte-equal (all
+  default-OFF; the OFF/default code path was preserved verbatim in every case)
+  — 14/14 byte-identical. Removed flags + footprint:
+  - `emura_r2_enabled` / `_alpha` / `_blend` — the cross-PSD R² EMA block +
+    the `r2_emura`/`emura_r2_blend` blend branch in `ResidualEchoEstimator`.
+  - `subband_wallclock_smoothing` / `fullband_wallclock_smoothing` — the per-hop
+    ERLE-alpha rescaling branches in `subband_erle` / `fullband_erle` (kept the
+    AEC3 per-block default alphas); also dropped the now-unused `sample_rate`
+    plumbing into those estimators.
+  - `use_wallclock_low_noise_render_iir` — the `_LowNoiseRenderDetector` IIR
+    rescaling branch in `suppression_gain` (kept the literal 0.9 decay).
+  - `erle_startup_follows_convergence` (W1') — the convergence-following startup
+    branch in `erle_estimator` (kept the fixed-200-hop AEC3-strict gate).
+  - `enable_lf_filter_failure_r2_injection` + 5 companions (lfinj) — the
+    post-residual LF R²-injection block.
+  - `filter_misadjustment_scale_p` — the `scale_p` P-scaling branch in `PBFDKF`
+    (verified no caller passes True; the orchestrator `isinstance` if/else
+    collapsed to one `scale_filter` call).
+  Inert/dead: the two `_per_band_erl[:] = 0.1` resets (array is only ever
+  `[0.1,0.1,0.1]`; init + 3 diagnostic reads kept), and the unused
+  `AecState.reverb_decay()` / `get_reverb_frequency_response()` stubs. Their
+  `AEC_*` env hooks in `eval_aec_challenge.py` were removed too. AecConfig: 103
+  fields.
+
 ## [3.22.2] — 2026-06-02 — BALANCED: per-bin near-end blend + far-active floor −28
 
 **Headline**: BALANCED ships `soft_nearend_blend_per_bin=True` + lowers

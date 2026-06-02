@@ -232,8 +232,7 @@ class _LowNoiseRenderDetector:
     fires at the same wall-clock render level as AEC3."""
 
     def __init__(self, *, hop_samples: int = 64, sample_rate: int = 16000,
-                 use_wallclock_block_energy_threshold: bool = False,
-                 use_wallclock_iir: bool = False) -> None:
+                 use_wallclock_block_energy_threshold: bool = False) -> None:
         self._average_power = 32768.0 * 32768.0
         if use_wallclock_block_energy_threshold:
             from .. import aec3_scale as _aec3_scale
@@ -242,20 +241,11 @@ class _LowNoiseRenderDetector:
             )
         else:
             self._threshold = 50.0 * 50.0 * 64.0
-        # AEC3 power IIR (average_power = 0.9·avg + 0.1·x2) is per-4ms-block;
-        # verbatim per-hop the detector reacts 2.5× slower. Convert the decay
-        # when ON; weight = 1 − decay preserves the convex combination.
-        if use_wallclock_iir:
-            from .. import aec3_scale as _aec3_scale
-            self._iir_decay = float(
-                _aec3_scale.per_block_growth_to_per_hop(0.9, hop_samples, sample_rate)
-            )
-            self._iir_weight = 1.0 - self._iir_decay
-        else:
-            # Literal 0.1 (NOT 1.0-0.9, which is 0.0999…9) to keep the OFF
-            # path bit-identical to the original `* 0.9 + x2_sum * 0.1`.
-            self._iir_decay = 0.9
-            self._iir_weight = 0.1
+        # AEC3 power IIR (average_power = 0.9·avg + 0.1·x2) per-4ms-block.
+        # Literal 0.1 (NOT 1.0-0.9, which is 0.0999…9) keeps the math
+        # bit-identical to the original `* 0.9 + x2_sum * 0.1`.
+        self._iir_decay = 0.9
+        self._iir_weight = 0.1
 
     def detect(self, render_block: np.ndarray) -> bool:
         if render_block.size == 0:
@@ -513,7 +503,6 @@ class SuppressionGain:
                  sr: int = 16000, hop_size: int = 160,
                  use_wallclock_block_energy_threshold: bool = False,
                  use_wallclock_gain_ratchet: bool = False,
-                 use_wallclock_low_noise_render_iir: bool = False,
                  hf_min_gain_floor_during_dne_enabled: bool = False,
                  hf_min_gain_floor_during_dne_db: float = -15.0,
                  ser_floor_enabled: bool = False,
@@ -571,7 +560,6 @@ class SuppressionGain:
             use_wallclock_block_energy_threshold=bool(
                 use_wallclock_block_energy_threshold
             ),
-            use_wallclock_iir=bool(use_wallclock_low_noise_render_iir),
         )
         # AEC3 `nearend_average_blocks` is in 4 ms blocks; wall-clock rescale
         # to our hop_size so the moving-average window physically matches.
