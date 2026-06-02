@@ -755,21 +755,12 @@ class AEC:
         self._erle_window_err = 1e-10
         self._erle_factor_prev = 0.0  # Previous frame's erle_factor for shadow DTD weight
 
-        # C': Coherence-based ERLE gate — per-bin Γ²(Ŷ, Y) EMA state.
-        # Tracks cross-power Ŷ×Y* (complex) + auto-powers |Ŷ|² and |Y|².
-        self._coh_erle_sye = np.zeros(_n_freqs, dtype=np.complex64)
-        self._coh_erle_syy = np.full(_n_freqs, 1e-30, dtype=np.float64)
-        self._coh_erle_see = np.full(_n_freqs, 1e-30, dtype=np.float64)
-        # Layer1: per-bin Γ²_ŶY for the coherence gain floor (None until computed).
-        self._coh_gamma2_for_floor = None
-        # cohxd: per-bin Γ²(X, Y) EMA state — X=far_spec (delay-aligned
-        # reference), Y=near_spec (mic). Reference-based ⟹ convergence-robust
-        # echo-presence discriminator for the selective floor release. Distinct
-        # from the C' Γ²(Ŷ,Y) above (which measures filter quality, not nearend).
-        self._coh_xy_sxy = np.zeros(_n_freqs, dtype=np.complex64)
-        self._coh_xy_sxx = np.full(_n_freqs, 1e-30, dtype=np.float64)
-        self._coh_xy_syy = np.full(_n_freqs, 1e-30, dtype=np.float64)
-        self._coh_xy_gamma2 = None
+        # C': Coherence-based ERLE gate Γ²(Ŷ,Y) + cohxd Γ²(X,Y) EMA state.
+        # Initialized here; cleared on every reset via the same helper
+        # (`_reset_aec3_post` → `_reset_coherence_state`). erle_coh_gate is
+        # default-ON, so a stale Γ² surviving a path change / cross-case reuse
+        # would mis-gate ERLE — see the helper docstring.
+        self._reset_coherence_state()
 
         # Smoothed inst ERLE for dt_indicator correction (~3 frame / 30ms)
         self._inst_erle_smooth = 1.0
@@ -1092,6 +1083,33 @@ class AEC:
                 getattr(cfg, "cohxd_nearend_spp_gate_enabled", False)),
         )
 
+    def _reset_coherence_state(self) -> None:
+        """Initialize / clear the per-bin coherence-gate EMA accumulators.
+
+        Two independent Γ² trackers live here:
+          * C′ ERLE-gate Γ²(Ŷ,Y): `_coh_erle_sye/_syy/_see` + `_coh_gamma2_for_floor`
+            — measures filter quality; gates ERLE (`erle_coh_gate`, default ON).
+          * cohxd floor-release Γ²(X,Y): `_coh_xy_sxy/_sxx/_syy` + `_coh_xy_gamma2`
+            — reference-based echo-presence discriminator (X=far, Y=mic).
+
+        Both are EMAs with NO other reset path. A mid-stream echo-path change /
+        delay reset / cross-case reuse must clear them, or the stale Γ² keeps
+        gating ERLE (`R²=S²/ERLE`) and the cohxd release against the *old* path.
+        The single funnel for this state: `__init__` calls it to initialize, and
+        `_reset_aec3_post` (which `reset()` and `_reset_filter_derived_state()`
+        already route through) calls it to clear — one call site each, no
+        double-reset / missed-reset.
+        """
+        n = int(self.filter.n_freqs) if hasattr(self.filter, 'n_freqs') else 1
+        self._coh_erle_sye = np.zeros(n, dtype=np.complex64)
+        self._coh_erle_syy = np.full(n, 1e-30, dtype=np.float64)
+        self._coh_erle_see = np.full(n, 1e-30, dtype=np.float64)
+        self._coh_gamma2_for_floor = None
+        self._coh_xy_sxy = np.zeros(n, dtype=np.complex64)
+        self._coh_xy_sxx = np.full(n, 1e-30, dtype=np.float64)
+        self._coh_xy_syy = np.full(n, 1e-30, dtype=np.float64)
+        self._coh_xy_gamma2 = None
+
     def _reset_aec3_post(self, *, preserve_render_side: bool = False) -> None:
         """Clear `_aec3_post` chain state.
 
@@ -1118,6 +1136,14 @@ class AEC:
             enable_filter_analyzer=True,
             hop_size=int(self.config.hop_size),
             sample_rate=int(self.config.sample_rate),
+            # P0.5: carry the erle_e2y2_gate_* config across reset too (the init
+            # AecStateConfig sets them; this rebuild omitted them). Default-OFF →
+            # production byte-equal; without it an env-set gate was silently
+            # dropped after any mid-stream reset.
+            erle_e2y2_gate_enabled=bool(
+                getattr(self.config, 'erle_e2y2_gate_enabled', False)),
+            erle_e2y2_gate_threshold=float(
+                getattr(self.config, 'erle_e2y2_gate_threshold', 0.5)),
         ))
         # Re-derive fft-density-scaled echo_model so a mid-stream reset keeps
         # the same per-bin PSD floors as init (see __init__ note).
@@ -1147,6 +1173,10 @@ class AEC:
         if getattr(self, "_nearend_spp", None) is not None:
             self._nearend_spp.reset()
         self._nearend_p_ne = None
+        # C′/cohxd coherence-gate EMAs are filter-output-derived → always
+        # cleared (a stale Γ² would mis-gate ERLE / cohxd against the old path,
+        # incl. on the filter-derived recovery path where the taps were wiped).
+        self._reset_coherence_state()
         self._aec3_ola_buf.fill(0)
         self._aec3_pending_gain_change = False
         self._aec3_pending_delay_change = None
@@ -3458,6 +3488,13 @@ class AEC:
         # post-filter residual — AEC3 estimates background noise from the
         # microphone spectrum so SuppressionGain's NE/SNR ratios share
         # the same noise reference as the CN injection downstream.
+        # NB (P0.2b, gated): AEC3 actually feeds CNG the unclamped
+        # `usable ? E² : Y²` (echo_remover.cc:452/482). Switching to that lowers
+        # the CN floor on usable frames → less near-end masking → DT deg +0.009
+        # (101>49 improvers) but the FS-echo AECMOS drops ~0.045 (a CN-texture
+        # reshape artifact: real FS output energy is equal/quieter) and breaks
+        # the FS_movement>3.5 bar. Kept as a documented CN-floor DT-deg lever for
+        # the frontier phase, NOT default behaviour.
         _saturated_capture = (self._saturation_level > 0.5)
         if not self._aec3_noise_initialized:
             self._aec3_y2_smoothed = near_psd.copy().astype(np.float32)

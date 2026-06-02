@@ -20,7 +20,7 @@ tolerance:
   (`PBFDKF`, `ShadowFilter`, etc.). Built with `-ffp-contract=off` mandatory.
 
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
-(currently **3.22.2**). Canonical algorithm reference:
+(currently **3.22.3**). Canonical algorithm reference:
 [docs/aec_methods.md](docs/aec_methods.md). Architecture diagram
 across legacy / current / AEC3 reference:
 [docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html).
@@ -173,8 +173,7 @@ tweak a single field without a full 800-case re-bench.
 
 ## Branch model
 
-`main` carries the production-graded code. Current `__version__` is
-**3.22.2** — sets the BALANCED preset to per-bin near-end blend
+`main` carries the production-graded code. The **3.22.2** BALANCED preset
 (`soft_nearend_blend_per_bin`, default ON) + far-active min-gain floor
 −28 dB (`min_gain_floor_far_active_db`): the per-bin frequency-selective
 near-end protection lets the deeper floor cancel more echo (DT echo +0.113
@@ -193,6 +192,16 @@ default-OFF per-bin near-end SPP substrate (`NearendSpp` +
 **NULL verdict** (near-gated cohxd lands on the plain-cohxd Pareto line; the
 per-bin near-mask hits the voice-on-voice bin-overlap wall, [docs/v3_22.md](docs/v3_22.md)
 §7). All three byte-equal-verified; production behaviour unchanged.
+
+On top of that, **3.22.3** (CHANGELOG `[3.22.3]`) ships the surviving
+**isolated parity/correctness candidates** from the Codex source audit:
+**P0.1** coherence-gate EMA reset hygiene, **P0.4** analysis-window canonical
+sqrt-Hann (true perfect reconstruction), **P0.5** `erle_e2y2_gate_*` preserved
+across reset. Output changes vs 3.22.2 but **AECMOS-neutral** (≤0.002 all
+buckets). Three parity candidates were **gated** (P0.2a windowed SG-nearend,
+P0.2b CNG source, P0.3 C′ selected/windowed) — the audit's "contaminates R²"
+framing was refuted (R² is decoupled from `near_psd`); P0.2b is kept documented
+in-code as a CN-floor DT-deg lever for the frontier. See [docs/v3_22.md](docs/v3_22.md) §8.
 
 The **v3.21 CLOSE** (branch `v3_21_release`, byte-equal, no algorithm
 change — see CHANGELOG `[Unreleased]`) finalised the arc: a hop/fft

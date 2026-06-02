@@ -16,6 +16,66 @@ when verdict requires it.
 
 ---
 
+## [3.22.3] — 2026-06-03 — isolated parity/correctness candidates (P0 audit; AECMOS-neutral)
+
+Adjudicated the Codex source-audit findings as **isolated parity/correctness
+candidates** — each its own 800-case A/B + per-case **energy audio-proof**, gated
+if it regressed or only reshaped without benefit ([[feedback_aec_code_review_accuracy]],
+[[feedback_audio_proof_required]]). Output changes vs 3.22.2 (NOT byte-equal) but
+the surviving set is **AECMOS-neutral** (all buckets ≤0.002 vs C_pb28).
+`__version__` 3.22.2 → 3.22.3 (BALANCED output changed; no metric movement).
+
+**Headline finding:** the audit's "substrate-correctness bugs that contaminate R²"
+framing was **refuted**. Only two were genuine correctness fixes (reset hygiene +
+window consistency), both metric-neutral. The rest are suppressor domain/tuning
+*parity* changes — R² is largely decoupled from `near_psd` (R²=S²/ERLE on 92–94 %
+of frames; ERLE already windowed via E1 default-ON; `capture_psd`→R² only in the
+~6–8 % saturated branch). A recurring lesson: **AECMOS penalises spectral *reshape*
+even when real residual-echo energy is equal or lower** — only per-case energy
+audio-proof separated artifact from real regression.
+
+**KEPT (shipped into BALANCED, AECMOS-neutral):**
+- **P0.1 — coherence-gate EMA reset.** `_coh_erle_*` / `_coh_gamma2_for_floor` /
+  `_coh_xy_*` were created only in `__init__` and never cleared on reset, so a
+  mid-stream path-change / delay reset / cross-case instance reuse kept a stale
+  Γ²(Ŷ,Y) gating the (default-ON) ERLE coherence gate. Extracted
+  `_reset_coherence_state()`; `__init__` initialises and `_reset_aec3_post`
+  clears through it (one funnel). 800-case: 1/800 changed (a DT_movement reset
+  case), Δ≈0, −103 dB localized to the reset point; `_ours_nores` byte-identical.
+  Latent in the bench (fresh `AEC` per case) but real in production streaming.
+- **P0.4 — analysis window canonical sqrt-Hann.** Analysis was
+  `sqrt(np.hanning(N))` (denom N−1) while synthesis is canonical periodic
+  sqrt-Hann (denom N); the mismatch left **0.248 % OLA gain drift** at frame
+  edges. Aligning analysis to the canonical form gives **true perfect
+  reconstruction** (max|OLA-gain−1| 4e-16). 800-case AECMOS-neutral (0 cases
+  |Δ|>0.1; worst case energy-neutral); `_ours_nores` byte-identical (the linear
+  residual uses the rectangular `error_spec`, not the windowed path).
+- **P0.5 — `erle_e2y2_gate_*` carried across reset.** The `_reset_aec3_post`
+  `AecStateConfig` rebuild omitted the two gate params the `__init__` config
+  sets; default-OFF so production is byte-equal, but an env-enabled gate was
+  silently dropped after any mid-stream reset. Now preserved.
+
+**GATED (reverted; documented, not shipped):**
+- **P0.2a — windowed SG-nearend + CNG Y².** AEC3 windows Y² everywhere, but
+  feeding the windowed nearend into the per-bin Wiener gain (against a rect-domain
+  R²) **reshapes** the residual spectrum: AECMOS FS echo −0.04 (breaks
+  FS_movement>3.5) while **159/167 FS regressors are quieter-or-equal in real
+  energy** (mean −0.21 dB). No real benefit, ship-bar cost → gated.
+- **P0.2b — CNG source `usable ? E² : Y²`** (AEC3 echo_remover.cc:452/482, the
+  unclamped selected nearend, not raw Y²). Lowers the comfort-noise floor on
+  usable frames → **genuine DT deg +0.009** (101>49 improvers; less near-end
+  masking) but FS echo −0.045 (a CN-texture reshape artifact; real FS energy
+  equal) breaks FS_movement. Gated, but kept **documented in-code as a CN-floor
+  DT-deg lever** for the frontier phase (3-line change to revive).
+- **P0.3 — C′ Γ²(Ŷ,Y) selected/windowed** (vs refined/rect). The only candidate
+  that was a **real** regression, not an artifact: 37/64 FS regressors genuinely
+  **louder** (+0.25 dB more residual echo), worst −0.36, zero benefit → gated.
+- **P0.2c — windowed `capture_psd`** (→ RES R² / AecState). Dropped: structurally
+  inert on the FS path (R²=S²/ERLE; ERLE already windowed; capture_psd→R² only in
+  the ~6–8 % saturated branch).
+
+Full evidence + the FS-regression diagnostic workflow: [docs/v3_22.md](docs/v3_22.md) §8.
+
 ## [Unreleased] — code hygiene (byte-equal, no algorithm change)
 
 Behaviour-neutral cleanup on top of 3.22.2. `__version__` stays **3.22.2**

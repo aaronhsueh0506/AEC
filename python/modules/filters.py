@@ -64,9 +64,18 @@ class PBFDAF:
         self.far_spec = np.zeros(self.n_freqs, dtype=np.complex64)
 
         # Windowed error spectrum for RES analysis (sqrt-Hann, same variance
-        # as OLA spec but time-aligned with far_spec/echo_spec for coherence)
+        # as OLA spec but time-aligned with far_spec/echo_spec for coherence).
+        # P0.4: canonical periodic sqrt-Hann (denom = N), MATCHING the synthesis
+        # window (orchestrator `_aec3_synth_window`). analysis × synthesis =
+        # periodic Hann, which sums to 1 across 50%-overlap hops → true perfect
+        # reconstruction (verified max|OLA-gain−1|=4e-16). numpy.hanning uses
+        # denom N−1, which left ~0.25% OLA gain drift at frame boundaries (an
+        # analysis/synthesis window mismatch — the synthesis side was already
+        # canonical; this aligns the analysis side).
+        _idx = np.arange(self.block_size, dtype=np.float64)
         self._sqrt_hann_analysis = np.sqrt(
-            np.hanning(self.block_size)).astype(np.float32)
+            0.5 * (1.0 - np.cos(2.0 * np.pi * _idx / float(self.block_size)))
+        ).astype(np.float32)
         self.error_spec_windowed = np.zeros(self.n_freqs, dtype=np.complex64)
 
         # AEC3 CoarseFilterUpdateGain protection (coarse_filter_update_gain.cc
