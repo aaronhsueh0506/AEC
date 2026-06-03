@@ -1,18 +1,33 @@
-/* pbfdkf.h — 1:1 port of python/aec.py PBFDAF (lines 584-739) and
- * PBFDKF (lines 741-910).
+/* pbfdkf.h — C port of python/modules/filters.py PBFDAF + PBFDKF (v3.22).
  *
  * Partitioned Block Frequency-Domain Adaptive Filter with overlap-save.
- * PBFDAF = NLMS update; PBFDKF = Kalman gain (P/Q/R) per-bin update with
- * v3.7 G1 KX-blended P-update (aec.py:856-868).
+ *   PBFDAF — NLMS update (shadow / coarse filter).
+ *   PBFDKF — v3.21/v3.22 redesign: per-bin AEC3 H_error Kalman gain + leakage
+ *            refresh (refined_filter_update_gain.cc:104-138). REPLACES the old
+ *            v3.10 P-denominator Kalman body. The legacy P/Q/R fields are gone.
  *
- * Design rules:
- *   - All array dtypes mirror Python (np.complex64 ⇒ Complex; np.float32
- *     ⇒ float). EMA scalars (mu_mean, etc.) computed in fp64 then cast to
- *     fp32 to match Python's `np.float32(mu_mean)` step.
- *   - One struct per Python class. PBFDKF embeds a PBFDAF as `base` —
- *     this matches Python inheritance functionally without C++.
- *   - All buffers heap-allocated at create; size derived from hop_size /
- *     n_partitions (User Fix 6: no [160] magic numbers).
+ * v3.10 → v3.22 PBFDKF change (the crux of this port):
+ *   OLD (v3.10): K = P·conj(X) / (Σ_p P·|X|² + R + δ), with R-EMA, Q-modulation,
+ *                P-Riccati update (1-KX)·P + Q, KX-blend, P_floor/p_max clamps.
+ *   NEW (v3.22): per-bin H_error state. mu[k] = H_error / (0.5·H_error·X² +
+ *                n·E²_refined + δ); W[p] += mu·conj(X[p])·mu_scale·error_spec;
+ *                H_error -= 0.5·mu·X²·H_error (decay, active branch only);
+ *                always-on refresh H_error += leakage·erl, clamp[floor,ceil].
+ *                leakage = converged/diverged chosen per-bin by E²_ref≤E²_coa,
+ *                transient (initial_state) profile for first 250 active hops.
+ *
+ * Design rules (parity):
+ *   - All array dtypes mirror Python: np.complex64 ⇒ Complex; np.float32 ⇒
+ *     float. The FFT primitive (fft_pocketfft.c, vendored numpy pocketfft) is
+ *     now BIT-EXACT vs np.fft. FFT-derived arrays here are still rtol<1e-4 (NOT
+ *     bit-exact), but the residual is pbfdkf's own fp32 accumulator drift, not
+ *     the FFT. The H_error / mu / leakage-refresh ARITHMETIC is exact
+ *     given identical inputs, but its inputs (|error_spec|², |X|²) come THROUGH
+ *     the FFT, so H_error / error_psd / R inherit the ≤1-ULP FFT drift too —
+ *     they are rtol-bounded, NOT bit-exact. Only the integer control state
+ *     (call_counter / partition_idx / initial_state) is bit-exact.
+ *   - One struct per Python class. PBFDKF embeds a PBFDAF as `base`.
+ *   - Built with -ffp-contract=off (Makefile) — no FMA fusion.
  */
 #ifndef AEC_PBFDKF_H
 #define AEC_PBFDKF_H
@@ -36,7 +51,7 @@ typedef struct PBFDAF {
     int     enable_td_constraint;
 
     float*  td_window;         /* [fft_size] */
-    float*  sqrt_hann;         /* [block_size] */
+    float*  sqrt_hann;         /* [block_size] sqrt-Hann analysis window */
 
     /* W [n_partitions][n_freqs] complex64 */
     Complex* W;
@@ -53,6 +68,24 @@ typedef struct PBFDAF {
     Complex* error_spec;       /* [n_freqs] */
     Complex* far_spec;         /* [n_freqs] */
     Complex* error_spec_windowed; /* [n_freqs] */
+
+    /* AEC3 SubtractorOutput.s_*_max_abs — time-domain peak of the echo
+     * predictor on the valid hop (max|echo_time[hop:block]|). Recomputed every
+     * frontend pass; consumed by AecState SaturationDetector. */
+    float   last_s_max_abs;
+
+    /* AEC3 CoarseFilterUpdateGain startup / poor-excitation / saturation gates */
+    long    call_counter;
+    long    poor_excitation_counter;
+    int     saturated_capture;
+    int     block_stationary;
+
+    /* AEC3 InitialState tracking (shared field; only PBFDKF consumes it). */
+    int     initial_state_active;
+    long    initial_state_active_render_hops;
+    long    initial_state_threshold_hops;
+    float   initial_state_far_energy_floor;
+    int     last_initial_state_active;
 
     /* FFT scratch (private) */
     FftHandle* fft;
@@ -71,8 +104,8 @@ void   pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
 void pbfdaf_free(PBFDAF* p);
 void pbfdaf_reset(PBFDAF* p);
 
-/* mu_scale: NULL ⇒ scalar 1.0; else array of n_freqs fp32. Returns nothing
- * (output written to `output`, length hop_size). */
+/* mu_scale: NULL ⇒ scalar; else per-bin array of n_freqs fp32. Output written
+ * to `output` (length hop_size). */
 void pbfdaf_process(PBFDAF* p,
                        const float* near_end, const float* far_end,
                        const float* mu_scale,   /* NULL or [n_freqs] */
@@ -81,27 +114,41 @@ void pbfdaf_process(PBFDAF* p,
 
 void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src);
 
-/* ── PBFDKF (Kalman) ─────────────────────────────────────────── */
+/* ── PBFDKF (per-bin H_error Kalman) ────────────────────────────── */
 
 typedef struct PBFDKF {
     PBFDAF base;
 
-    /* Per-partition per-bin error covariance [n_partitions][n_freqs] */
-    float* P;
-    /* Process noise [n_freqs] */
-    float* Q_high;             /* 1e-4 init */
-    float* Q_low;              /* 1e-5 init */
+    /* Process noise [n_freqs] — kept as benign config state (orchestrator sets
+     * Q_high/Q_low/Q at construction); NOT consumed by the H_error update. */
+    float* Q_high;             /* config kalman_q_high */
+    float* Q_low;              /* config kalman_q_low */
     float* Q;
-    /* Measurement noise [n_freqs] */
+    /* Measurement-noise EMA [n_freqs] (error_psd EMA + R = max(error_psd,δ)).
+     * R is computed in the active path but no longer feeds the H_error gain;
+     * retained because the Python class still maintains it per hop. */
     float* R;
     float* error_psd;
     float  alpha_r;            /* 0.95 */
 
-    /* Transient overrides (PR-G2 / EPC); 0 / -1 sentinels */
-    float p_max_override;        /* default 0.5 */
-    int   p_max_override_frames; /* < 0 means unset */
-    float p_floor_beta;          /* default 0.1 */
-    int   p_floor_beta_frames;   /* < 0 means unset */
+    /* === v3.22 AEC3 H_error per-bin state =========================== */
+    float* H_error_per_bin;    /* [n_freqs], init 10000 */
+    float  h_error_floor;      /* 1e-3 */
+    float  h_error_ceil;       /* 2.0 */
+    float  leakage_converged;  /* 1.25e-4 steady */
+    float  leakage_diverged;   /* 0.125  steady */
+    float  leakage_converged_transient;  /* 0.0125 (initial_state) */
+    float  leakage_diverged_transient;   /* 1.25   (initial_state) */
+
+    /* Per-hop orchestrator-set inputs to the refresh formula. */
+    float* e2_coarse_per_bin;  /* [n_freqs] or NULL (then scalar fallback) */
+    int    e2_coarse_per_bin_valid;
+    float  e2_coarse_for_refresh;   /* scalar fallback */
+    float* erl_per_bin;        /* [n_freqs] = Σ_p|W_p|² (orchestrator-set) */
+    int    disallow_leakage_diverged;
+    float  h_error_refresh_erl_floor;   /* 0.0 = OFF */
+
+    long   partition_sum_x2_startup_hops;  /* 0 = partition-sum from hop 1 */
 
     int is_static;               /* 1 = state placed in caller buffer */
 } PBFDKF;
@@ -114,14 +161,33 @@ void   pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                            float mu, float delta, int hop_size);
 void pbfdkf_free(PBFDKF* p);
 void pbfdkf_reset(PBFDKF* p);
-/* PBFDKF process = PBFDAF process with overridden _update_weights. */
+
+/* mu_scale: NULL ⇒ scalar broadcast; else per-bin [n_freqs] fp32 (already
+ * post-RSA-mask, matching the array the Python _update_weights_aec3 receives). */
 void pbfdkf_process(PBFDKF* p,
                        const float* near_end, const float* far_end,
                        const float* mu_scale,
                        float        mu_scale_scalar,
                        float*       output);
-/* W copy only (P/Q/R untouched). */
+
+/* AEC3 RefinedFilterUpdateGain::HandleEchoPathChange — H_error reset to init
+ * on delay_change + CoarseFilterUpdateGain counter reset. */
+void pbfdkf_handle_echo_path_change(PBFDKF* p, int delay_change, int gain_change);
+
+/* W copy only (H_error / R untouched). */
 void pbfdkf_copy_weights_from(PBFDKF* dst, const PBFDKF* src);
+
+/* float(np.sum(np.abs(error_spec)**2)) — bit-exact (cmag2_np + pairwise). */
+double pbfdaf_get_error_energy(const PBFDAF* p);
+double pbfdkf_get_error_energy(const PBFDKF* p);
+
+/* get_time_domain_filter: concat per-partition irfft(W[p])[:hop] →
+ * out[n_partitions × hop_size] (caller-owned). Mirrors filters.py:397. */
+void pbfdaf_get_time_domain_filter(PBFDAF* p, float* out);
+
+/* scale_filter: W *= (float32)scale (in place, all partitions). */
+void pbfdaf_scale_filter(PBFDAF* p, float scale);
+void pbfdkf_scale_filter(PBFDKF* p, float scale);
 
 #ifdef __cplusplus
 }

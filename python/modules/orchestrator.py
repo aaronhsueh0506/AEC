@@ -3787,7 +3787,9 @@ def process_wav_files(mic_path: str, ref_path: str, out_path: str,
     print(f"  Max ERLE: {max_erle:.1f} dB")
     print(f"  DTD active frames: {dtd_frames} ({100 * dtd_frames * hop_size / max(processed, 1):.1f}%)")
 
-    sf.write(out_path, output, mic_sr)
+    # fp32 PCM (parity-friendly: byte-comparable to the C aec_wav default,
+    # and lossless vs the int16 default soundfile would pick for .wav).
+    sf.write(out_path, output, mic_sr, subtype='FLOAT')
     print(f"\nOutput written to: {out_path}")
 
 

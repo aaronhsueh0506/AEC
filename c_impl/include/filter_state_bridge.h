@@ -11,8 +11,8 @@
  * Parity-relevant computations (numpy 1.26 -> C, -ffp-contract=off):
  *   1. filter_taps = np.fft.irfft(W[0], fft_size).astype(np.float32)
  *        - numpy irfft of a complex64 input computes in float64 (pocketfft),
- *          then .astype(float32) truncates. The fp64 radix-2 fft_inverse from
- *          fft_fp64.c is bit-identical to pocketfft for power-of-2 sizes.
+ *          then .astype(float32) truncates. fft_inverse (fft_pocketfft.c) wraps
+ *          the vendored numpy-1.26.4 pocketfft, so it is BIT-EXACT vs np.fft.irfft.
  *   2. p_trace = float(np.mean(P))      [P is float32]
  *        - np.mean over a float32 array = float32 PAIRWISE sum / n (in f32),
  *          then float() widens to fp64.

@@ -19,28 +19,22 @@ static void print_usage(const char* prog) {
     fprintf(stderr,
         "Usage: %s <mic.wav> <ref.wav> <out.wav> [options]\n\n"
         "Options:\n"
-        "  --preset {mild|soft|balanced|aggressive|maximum}   default: balanced\n"
-        "  --cng                          Enable comfort noise (default: off)\n"
+        "  --preset {gentle|balanced|aggressive}   default: balanced\n"
+        "  --cng                          Enable comfort noise\n"
         "  --no-cng                       Explicitly disable CNG\n"
         "  --no-delay-est                 Disable online delay estimation\n"
         "  --no-res                       Disable residual echo suppressor\n"
         "  --no-shadow                    Disable shadow filter\n"
         "  --no-hpf                       Disable 80Hz high-pass\n"
-        "  --filter-length-ms <float>     default: 52.0\n"
-        "  --reverb-decay <float>         override preset reverb decay\n"
-        "  --reverb-gain <float>          override preset reverb gain\n"
         "  --debug-level <0..3>           0=off, 1=summary, 2=per-frame, 3=full\n"
-        "  --debug-log <path>             redirect log to file (default stderr)\n"
-        "  --static-mem                   use static-memory init path (no heap; for embedded)\n",
+        "  --debug-log <path>             redirect log to file (default stderr)\n",
         prog);
 }
 
 static int parse_preset(const char* s, AecPreset* out) {
-    if (!strcmp(s, "mild"))       { *out = AEC_PRESET_MILD;       return 0; }
-    if (!strcmp(s, "soft"))       { *out = AEC_PRESET_SOFT;       return 0; }
+    if (!strcmp(s, "gentle"))     { *out = AEC_PRESET_GENTLE;     return 0; }
     if (!strcmp(s, "balanced"))   { *out = AEC_PRESET_BALANCED;   return 0; }
     if (!strcmp(s, "aggressive")) { *out = AEC_PRESET_AGGRESSIVE; return 0; }
-    if (!strcmp(s, "maximum"))    { *out = AEC_PRESET_MAXIMUM;    return 0; }
     return -1;
 }
 
@@ -53,18 +47,15 @@ int main(int argc, char* argv[]) {
     AecPreset preset = AEC_PRESET_BALANCED;
     int explicit_cng = -1;
     int no_delay_est = 0, no_res = 0, no_shadow = 0, no_hpf = 0;
-    float filter_length_ms = -1.0f;
-    float reverb_decay_ovr = -1.0f, reverb_gain_ovr = -1.0f;
     int debug_level = 0;
     const char* debug_log = NULL;
-    int use_static_mem = 0;
 
     for (int i = 4; i < argc; ++i) {
         const char* arg = argv[i];
         if (!strcmp(arg, "--preset") && i + 1 < argc) {
             if (parse_preset(argv[++i], &preset) != 0) {
                 fprintf(stderr, "ERROR: unknown preset '%s'. "
-                                "Valid: mild|balanced|aggressive|maximum\n", argv[i]);
+                                "Valid: gentle|balanced|aggressive\n", argv[i]);
                 return 2;
             }
         } else if (!strcmp(arg, "--cng"))           explicit_cng = 1;
@@ -73,17 +64,10 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(arg, "--no-res"))          no_res = 1;
         else if (!strcmp(arg, "--no-shadow"))       no_shadow = 1;
         else if (!strcmp(arg, "--no-hpf"))          no_hpf = 1;
-        else if (!strcmp(arg, "--filter-length-ms") && i + 1 < argc)
-            filter_length_ms = (float)atof(argv[++i]);
-        else if (!strcmp(arg, "--reverb-decay") && i + 1 < argc)
-            reverb_decay_ovr = (float)atof(argv[++i]);
-        else if (!strcmp(arg, "--reverb-gain") && i + 1 < argc)
-            reverb_gain_ovr = (float)atof(argv[++i]);
         else if (!strcmp(arg, "--debug-level") && i + 1 < argc)
             debug_level = atoi(argv[++i]);
         else if (!strcmp(arg, "--debug-log") && i + 1 < argc)
             debug_log = argv[++i];
-        else if (!strcmp(arg, "--static-mem")) use_static_mem = 1;
         else {
             fprintf(stderr, "ERROR: unknown option '%s'\n", arg);
             return 2;
@@ -103,14 +87,9 @@ int main(int argc, char* argv[]) {
     aec_config_from_preset(&cfg, preset, sr);
     if (explicit_cng >= 0) cfg.enable_cng = explicit_cng;
     if (no_delay_est) cfg.enable_delay_est = 0;
-    if (no_res)       cfg.enable_residual_filter = 0;
-    if (no_shadow)    cfg.enable_shadow_filter = 0;
+    if (no_res)       cfg.enable_res = 0;
+    if (no_shadow)    cfg.enable_shadow = 0;
     if (no_hpf)       cfg.enable_highpass = 0;
-    if (filter_length_ms > 0) cfg.filter_length_ms = filter_length_ms;
-    if (reverb_decay_ovr > 0) cfg.res_reverb_decay = reverb_decay_ovr;
-    if (reverb_gain_ovr  > 0) cfg.res_reverb_gain  = reverb_gain_ovr;
-    cfg.debug_level    = debug_level;
-    cfg.debug_log_path = debug_log;
 
     aec_debug_set_level(debug_level);
     if (debug_log) {
@@ -119,19 +98,7 @@ int main(int argc, char* argv[]) {
     }
 
     Aec aec;
-    void* static_pool = NULL;
-    if (use_static_mem) {
-        size_t pool_bytes = aec_get_mem_size(&cfg);
-        fprintf(stderr, "static-mem: pool=%zu bytes (%.1f KB)\n",
-                pool_bytes, pool_bytes / 1024.0);
-        static_pool = aligned_alloc(16, (pool_bytes + 15) & ~(size_t)15);
-        if (!static_pool || aec_init(&aec, static_pool, pool_bytes, &cfg) != 0) {
-            fprintf(stderr, "ERROR: aec_init failed\n");
-            return 4;
-        }
-    } else {
-        aec_create(&aec, &cfg);
-    }
+    aec_create(&aec, &cfg);
     int hop = aec_hop_size(&aec);
     aec_debug_set_frame(0, hop, sr);
 
@@ -159,16 +126,13 @@ int main(int argc, char* argv[]) {
 
     fprintf(stderr, "Processed %d frames @ hop=%d sr=%d preset=%s cng=%d delay_est=%d\n",
             frame_idx, hop, sr,
-            preset == AEC_PRESET_MILD ? "mild" :
-            preset == AEC_PRESET_SOFT ? "soft" :
-            preset == AEC_PRESET_BALANCED ? "balanced" :
-            preset == AEC_PRESET_AGGRESSIVE ? "aggressive" : "maximum",
+            preset == AEC_PRESET_GENTLE ? "gentle" :
+            preset == AEC_PRESET_BALANCED ? "balanced" : "aggressive",
             cfg.enable_cng, cfg.enable_delay_est);
 
     free(mic); free(ref); free(out);
     wav_close_write(ww);
     wav_close_read(mr); wav_close_read(rr);
     aec_destroy(&aec);
-    if (static_pool) free(static_pool);
     return 0;
 }

@@ -96,6 +96,10 @@ void suppression_gain_set_initial_state(SuppressionGain *sg, int state) {
     sg->initial_state = state ? 1 : 0;
 }
 
+int suppression_gain_is_dominant_nearend(const SuppressionGain *sg) {
+    return sg->dne_nearend_state ? 1 : 0;
+}
+
 /* _ne_state_for_gain_rules — returns raw DNE state unless the stat-aware
  * proxy is enabled (OFF in balanced). */
 static int ne_state_for_gain_rules(const SuppressionGain *sg) {

@@ -40,7 +40,8 @@
  *     scalar).
  *   - CNG LCG: seed (int) recurrence (seed*69069+1) & 0x7FFFFFFF, ix = seed>>26
  *     (0..31), im = (ix+8)&31. uint32 arithmetic reproduces it exactly.
- *   - irfft via fft_fp64.c (numpy irfft 1/N normalization, fp64 internal).
+ *   - irfft via fft_pocketfft.c (vendored numpy pocketfft; BIT-EXACT vs
+ *     np.fft.irfft, 1/N normalization, fp64 internal).
  *   - synth window = block_size sqrt-Hann (MATLAB-canonical denom N), provided
  *     by the caller (orchestrator builds it once).
  *
@@ -55,9 +56,24 @@
 #include "fft_wrapper.h"     /* Complex, FftHandle */
 #include "reverb_model.h"    /* avg-render-reverb */
 
+/* The full-orchestration driver (aec3_post_run) needs the sub-module structs. */
+#include "aec_state.h"
+#include "residual_echo_estimator.h"
+#include "suppression_gain.h"
+#include "stationarity_estimator.h"
+#include "linear_filter_output.h"
+#include "filter_state_bridge.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* numpy complex64 |z| (scaled-hypot with a FUSED multiply-add). Equals the `m`
+ * inside cmag2_np; `np.abs(c64)`. Used wherever the .py writes np.abs(c64). */
+float cabs_np(float re, float im);
+
+/* numpy-1.26-bit-exact pairwise float32 sum (exposed for the run driver). */
+float aec3_post_pairwise_sum_f32(const float *a, size_t n);
 
 /* Driver config + wall-clock-rescaled CNG constants (orchestrator computes
  * these at construction; pass them verbatim). */
@@ -212,6 +228,162 @@ void aec3_post_process(Aec3Post *p,
                        int usable_linear,
                        const float *gain,
                        float *out);
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Stage functions — the six pieces aec3_post_process is decomposed into. The
+ * full-orchestration driver (aec3_post_run) calls these interleaved with the
+ * sub-module calls in the exact order of AEC._aec3_post. aec3_post_process
+ * calls them in sequence so the driver-only parity test stays byte-equal.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/* Stage 1-2: near/far/echo/error PSDs + (E1) capture_psd_erle. */
+void aec3_post_compute_psds(Aec3Post *p, const Aec3PostAbs *mag);
+
+/* Stage 3: avg-render-reverb → p->x2_reverb_for_erle (only when x2_present). */
+void aec3_post_compute_x2_reverb(Aec3Post *p, int x2_present,
+                                 const float *x2_at_delay, const float *x2_past,
+                                 double decay_steady);
+
+/* Stage 4: coherence Γ²(Ŷ,Y) EMA → p->coh_gate_mask (when erle_coh_gate). */
+void aec3_post_compute_coherence(Aec3Post *p,
+                                 const Complex *echo_spec_for_coh,
+                                 const Complex *near_spec,
+                                 const Aec3PostAbs *mag);
+
+/* Stage 5: CNG N2 tracking → p->comfort_noise. */
+void aec3_post_compute_comfort_noise(Aec3Post *p, int saturated_capture);
+
+/* Stage 6: E2 output-base select + gain apply + CNG inject + irfft + OLA. */
+void aec3_post_apply_output(Aec3Post *p,
+                            const Complex *error_spec,
+                            const Complex *echo_spec_sel,
+                            const Aec3PostAbs *mag,
+                            int usable_linear,
+                            const float *gain,
+                            float *out);
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * aec3_post_run — the FULL orchestration of AEC._aec3_post. Unlike
+ * aec3_post_process (which takes the sub-module results gain/usable_linear as
+ * INPUTS), this drives AecState + ResidualEchoEstimator + SuppressionGain +
+ * StationarityEstimator + LinearFilterSelect itself, reproducing every line of
+ * the Python method bit-exactly end-to-end.
+ *
+ * The caller owns + constructs all the sub-module objects (exactly as the
+ * orchestrator's __init__ does, captured by the golden); aec3_post_run only
+ * wires the per-hop call sequence. Stationarity is updated UPSTREAM (in the
+ * process loop, not here): the caller must have advanced it for this hop before
+ * the call, and supplies the active-hops / converge-hops counters.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/* DelayAdjustment enum (delay/delay_types.py): NONE/BUFFER_FLUSH/NEW_DETECTED. */
+#define AEC3_DELAY_ADJ_NONE          0
+#define AEC3_DELAY_ADJ_BUFFER_FLUSH  1
+#define AEC3_DELAY_ADJ_NEW_DETECTED  2
+
+/* DelayQuality.REFINED (delay/delay_types.py). */
+#define AEC3_DELAY_QUALITY_REFINED   2
+
+/* All per-hop inputs aec3_post_run reads, plus the persistent objects it
+ * drives. A struct keeps the signature manageable. Pointers are caller-owned.*/
+typedef struct {
+    /* ── linear-filter spectra (PBFDKF main), length n_freqs ────────────── */
+    const Complex *near_spec;            /* filter.near_spec               */
+    const Complex *far_spec;             /* filter.far_spec                */
+    const Complex *echo_spec;            /* filter.echo_spec               */
+    const Complex *error_spec_windowed;  /* filter.error_spec_windowed     */
+    const Complex *W0;                   /* filter.W[0] (bridge irfft)     */
+    const Complex *W_all;                /* filter.W flat (n_part×n_freqs) */
+    const Complex *X_buf;                /* filter.X_buf flat (n_part×nf)  */
+    const float   *sqrt_hann;            /* filter._sqrt_hann_analysis     */
+    const float   *kalman_P;             /* filter Kalman P (bridge div);
+                                          * NULL/0 → divergence_indicator 0 */
+    size_t         kalman_P_len;
+    int            partition_idx;        /* filter.partition_idx           */
+    int            n_partitions;         /* filter.n_partitions            */
+    const float   *filter_taps_full;     /* get_time_domain_filter(); NULL */
+    int            filter_taps_full_len;
+
+    /* ── shadow filter ──────────────────────────────────────────────────── */
+    int            shadow_present;       /* shadow_filter is not None      */
+    const Complex *shadow_error_spec;    /* shadow.error_spec (coarse e2)  */
+    const float   *last_shadow_output_time; /* _last_shadow_output_time;
+                                             * NULL → not available        */
+    double         s_ref_max;            /* filter._last_s_max_abs         */
+    double         s_coa_max;            /* shadow._last_s_max_abs (or 0)  */
+    double         main_error_energy;    /* bridge e_ratio numerator/denom */
+    double         shadow_error_energy;
+
+    /* ── args ───────────────────────────────────────────────────────────── */
+    const float   *raw_output;           /* [hop]  e_refined_time          */
+    const float   *near_end;             /* [hop]                          */
+    const float   *far_end;              /* [hop]                          */
+
+    /* ── delay tracker / saturation / pending EPV flags ─────────────────── */
+    int            current_delay;        /* int(self._current_delay)       */
+    int            delay_active;         /* self._delay_active             */
+    double         saturation_level;     /* self._saturation_level         */
+    int            pending_gain_change;  /* _aec3_pending_gain_change (in) */
+    int            pending_delay_change; /* _aec3_pending_delay_change:
+                                          *  -1 == None, else DelayAdjustment */
+
+    /* ── stationarity read state (updated upstream) ─────────────────────── */
+    int            stationarity_active_hops;
+    int            stationarity_converge_hops;
+
+    /* ── config flags ───────────────────────────────────────────────────── */
+    int            erle_coh_gate_enabled;
+    int            coh_gain_floor_enabled;
+    int            cohxd_floor_release_enabled;
+    int            use_stationarity_properties; /* sg echo_audibility flag */
+    double         active_render_threshold;     /* _ar_thr = 5.96e-4       */
+} Aec3PostRunIn;
+
+/* Sub-module object bundle the driver wires. All caller-owned + constructed. */
+typedef struct {
+    AecState              *state;
+    ResidualEchoEstimator *ree;
+    SuppressionGain       *sg;
+    StationarityEstimator *stationarity;
+    LinearFilterSelect    *lfs;
+    FftHandle             *fft;          /* sized fft_size (bridge irfft)  */
+} Aec3PostRunObj;
+
+/* Scratch buffers the driver needs (caller-owned, sized to the geometry). */
+typedef struct {
+    Complex *sel_esw;            /* [n_freqs] selected error_spec_windowed */
+    Complex *sel_echo;           /* [n_freqs] selected echo_spec           */
+    Complex *nsw_e1;             /* [n_freqs] esw_orig + echo_orig (E1)    */
+    Complex *ybase;              /* [n_freqs] sel_esw + sel_echo (E2 guard)*/
+    float   *abs_near;           /* [n_freqs] magnitude buffers …          */
+    float   *abs_far;
+    float   *abs_sel_echo;
+    float   *abs_error;
+    float   *abs_echo_coh;
+    float   *abs_nsw_e1;
+    float   *abs_ybase;
+    float   *x2_at_delay;        /* [n_freqs] */
+    float   *x2_past;            /* [n_freqs] */
+    float   *w_mag2;             /* [n_part × n_freqs] frequency_response  */
+    float   *render_block_scaled;/* [hop] far_end × 32768                  */
+    float   *bridge_taps;        /* [fft_size] filter_state_bridge taps    */
+    float   *r2;                 /* [n_freqs] */
+    float   *r2_unb;             /* [n_freqs] */
+    float   *nearend_pwr;        /* [n_freqs] */
+    unsigned char *stat_mask;    /* [n_freqs] band_stationary_mask         */
+} Aec3PostRunScratch;
+
+/* Process one hop end-to-end. `out[hop]` is written. Returns 0 on success.
+ * The pending EPV flags in `in` are consumed (the caller's mirror is cleared
+ * via the returned values): *out_pending_gain_change / *out_pending_delay_change
+ * receive the post-call state (cleared to 0 / -1 when an event fired). */
+int aec3_post_run(Aec3Post *p,
+                  const Aec3PostRunIn *in,
+                  const Aec3PostRunObj *obj,
+                  Aec3PostRunScratch *sc,
+                  float *out,
+                  int *out_pending_gain_change,
+                  int *out_pending_delay_change);
 
 #ifdef __cplusplus
 }

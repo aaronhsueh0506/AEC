@@ -4,8 +4,8 @@
  * multi-frame sequence with evolving filter state. WS5 Phase 5.2 gate.
  *
  * Build (from c_impl/):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude \
- *       src/filter_state_bridge.c src/fft_fp64.c \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/pocketfft \
+ *       src/filter_state_bridge.c src/fft_pocketfft.c lib/pocketfft/pocketfft.c \
  *       test/parity_filter_state_bridge.c -lm -o /tmp/p_fsb
  *   python3 ../python/diag/gen_filter_state_bridge_golden.py /tmp/fsb_golden.bin
  *   /tmp/p_fsb /tmp/fsb_golden.bin

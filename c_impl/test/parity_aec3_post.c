@@ -7,23 +7,22 @@
  * mid-stream reset). WS5 gate.
  *
  * VERDICT: every stage the DRIVER OWNS is asserted bit-exact (hard PASS/FAIL),
- * INCLUDING the post gain-apply + CNG-injection e_out_spec — the driver's fully
- * assembled spectral output. The only thing between e_out_spec and out[hop] is
- * the shared fft_fp64.c irfft + the OLA add. out[hop] is bit-exact on all
- * steady-state hops; a <=1-ULP residual (~1e-17) remains on the cold-start
- * first hop of each case, where fft_fp64.c's radix-2 c2c irfft diverges from
- * numpy pocketfft on near-silent inputs. This is the project-wide FFT-primitive
- * limitation (pbfdkf.c header: C<->Python FFT gate is rtol<1e-4), NOT a driver
- * bug — e_out_spec matches with 0 mismatches every hop. The test PASSES on the
- * driver assertions + the bounded irfft-ULP residual; it FAILS hard on any
- * driver-stage mismatch or an out[hop] diff above the irfft-ULP tolerance.
+ * INCLUDING the post gain-apply + CNG-injection e_out_spec AND the final
+ * out[hop]. The only thing between e_out_spec and out[hop] is the irfft + the
+ * OLA add. With the vendored numpy-1.26.4 pocketfft backend (fft_pocketfft.c +
+ * lib/pocketfft/pocketfft.c) the irfft is BIT-EXACT vs np.fft.irfft, so out[hop]
+ * now matches with 0 mismatches on every hop — including the cold-start
+ * near-silent frames that previously left a <=1-ULP residual (~1e-17) under the
+ * legacy fft_fp64.c radix-2 irfft. The test FAILS hard on ANY mismatch.
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
  *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/include \
+ *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/lib/pocketfft \
  *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/aec3_post.c \
  *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/reverb_model.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/fft_fp64.c \
+ *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/fft_pocketfft.c \
+ *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/lib/pocketfft/pocketfft.c \
  *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/test/parity_aec3_post.c \
  *       -lm -o /tmp/p_post
  *   python3 .../python/diag/gen_aec3_post_golden.py /tmp/aec3_post_golden.bin
@@ -317,7 +316,9 @@ int main(int argc, char **argv) {
     /* DRIVER verdict: every stage the driver OWNS must be bit-exact. The
      * pre-irfft e_out_spec (post gain-apply + CNG injection) is the driver's
      * full assembled output; the only thing between it and out[hop] is the
-     * shared fft_fp64.c irfft + the OLA add. */
+     * irfft + the OLA add. With the vendored pocketfft backend the irfft is
+     * bit-exact, so out[hop] is expected to be exactly 0 mismatches (the
+     * <=1-ULP fallback branch below is legacy fft_fp64.c only). */
     {
         int driver = a_psd.mism + a_cpe.mism + a_x2r.mism + a_cgm.mism
                    + a_cn.mism + a_eout.mism;

@@ -191,6 +191,11 @@ static double ree_reverb_decay(const ResidualEchoEstimator *r,
     return d;
 }
 
+double ree_reverb_decay_value(const ResidualEchoEstimator *r,
+                              int dominant_nearend) {
+    return ree_reverb_decay(r, dominant_nearend);
+}
+
 /* _update_reverb_linear (cc:390-392). */
 static void ree_update_reverb_linear(ResidualEchoEstimator *r,
                                      const float *render_psd,

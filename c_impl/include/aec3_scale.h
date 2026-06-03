@@ -40,6 +40,18 @@ double aec3_per_block_growth_to_per_hop(double per_block_multiplier, int hop_sam
 #define AEC3_H_ERROR_FLOOR_FLOAT  1.0e-3
 #define AEC3_H_ERROR_CEIL_FLOAT   2.0
 
+/* AEC3 refined leakage rates, per-hop (per_block_rate_to_per_hop(rate,160,16k)
+ * = rate × (160/16000)/(64/16000) = rate × 2.5). Steady + transient (initial-
+ * state) profiles. Defined by their computing expression so they fold bit-
+ * identically to the python aec3_scale.py module-level constants. */
+#define AEC3_LEAKAGE_CONVERGED_PER_HOP            (5.0e-5 * 2.5)   /* 1.25e-4 */
+#define AEC3_LEAKAGE_DIVERGED_PER_HOP             (5.0e-2 * 2.5)   /* 0.125   */
+#define AEC3_LEAKAGE_CONVERGED_TRANSIENT_PER_HOP  (5.0e-3 * 2.5)   /* 0.0125  */
+#define AEC3_LEAKAGE_DIVERGED_TRANSIENT_PER_HOP   (5.0e-1 * 2.5)   /* 1.25    */
+
+/* POOR_EXCITATION_COUNTER_INITIAL_HOPS_DEFAULT = blocks_to_hops(1000,160,16k) = 400 */
+#define AEC3_POOR_EXC_COUNTER_INITIAL_HOPS  400
+
 /* Unitless (same on both sides) */
 #define AEC3_MAX_ERLE_LF  4.0
 #define AEC3_MAX_ERLE_HF  1.5

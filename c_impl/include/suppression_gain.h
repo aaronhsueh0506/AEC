@@ -160,6 +160,11 @@ void suppression_gain_init(SuppressionGain *sg,
 
 void suppression_gain_set_initial_state(SuppressionGain *sg, int state);
 
+/* is_dominant_nearend — returns the RAW DominantNearendDetector hold state
+ * (== _dominant_nearend.is_nearend_state()). The orchestrator reads this BEFORE
+ * get_gain (one-hop lag: it reflects the previous hop's get_gain update). */
+int suppression_gain_is_dominant_nearend(const SuppressionGain *sg);
+
 /* One hop. Inputs are the f32 spectra (n_bins) + the f32 render block
  * (hop_size). Returns the gain pointer (== sg->gain). */
 const float *suppression_gain_get_gain(

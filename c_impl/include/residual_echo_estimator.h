@@ -140,6 +140,13 @@ void ree_init(ResidualEchoEstimator *r,
 
 void ree_reset(ResidualEchoEstimator *r);
 
+/* Public wrapper for _reverb_decay(dominant_nearend) (static config path):
+ * decay = reverb_decay (× mild_decay_scale if dominant_nearend), then
+ * pow(decay, hop/64) when hop != 64. Returns 0 when reverb disabled. Used by
+ * the orchestrator's avg-render-reverb step (decay_steady = dominant=False). */
+double ree_reverb_decay_value(const ResidualEchoEstimator *r,
+                              int dominant_nearend);
+
 /* update_reverb_models — refreshes the bound ReverbFrequencyResponse.
  * (The adaptive ReverbDecayEstimator is not bound in the production path, so
  *  only the freq-resp branch is ported.)
