@@ -495,8 +495,7 @@ class AecConfig:
     # ── High-pass filtering ─────────────────────────────────────────────
     enable_highpass: bool = True
     highpass_cutoff_hz: float = 80.0
-    # Reference-path HPF is locked OFF (mic-path HPF remains ON).
-    enable_highpass_ref: bool = False
+    # Reference-path HPF was retired (v3.19); mic-path HPF remains ON.
 
     # ── Saturation / non-linear echo handling ───────────────────────────
     enable_saturation_detect: bool = True

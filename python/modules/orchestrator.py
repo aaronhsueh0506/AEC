@@ -819,13 +819,10 @@ class AEC:
         # High-pass filter (DC blocker + low-freq removal)
         if self.config.enable_highpass:
             self._hp_mic = HighPassFilter(self.config.highpass_cutoff_hz, self.config.sample_rate)
-            if self.config.enable_highpass_ref:
-                self._hp_ref = HighPassFilter(self.config.highpass_cutoff_hz, self.config.sample_rate)
-            else:
-                self._hp_ref = None
         else:
             self._hp_mic = None
-            self._hp_ref = None
+        # Reference-path HPF retired (v3.19); mic-path HPF only.
+        self._hp_ref = None
 
         # Saturation detector (non-linear echo handling)
         if self.config.enable_saturation_detect:
@@ -838,7 +835,6 @@ class AEC:
 
         # Far-end activity + stationarity detector (extracted from inline EMA logic)
         self._render_activity = RenderActivityDetector()
-        self._inst_erle_smooth = 1.0
         self._wn_err_baseline = 1e-8
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
 
@@ -1011,8 +1007,6 @@ class AEC:
         # _conv_counter is owned by self._convergence (reset above)
         if self._hp_mic is not None:
             self._hp_mic.reset()
-        if self._hp_ref is not None:
-            self._hp_ref.reset()
         if self._sat_detector_ref is not None:
             self._sat_detector_ref.reset()
             self._sat_detector_mic.reset()
@@ -1533,11 +1527,9 @@ class AEC:
         # FilteringQualityAnalyzer.
         self._epc_reset_fired_this_frame = False
 
-        # High-pass filter: remove DC + low-freq noise
+        # High-pass filter: remove DC + low-freq noise (mic path only)
         if self._hp_mic is not None:
             near_end = self._hp_mic.process(near_end.copy())
-        if self._hp_ref is not None:
-            far_end = self._hp_ref.process(far_end.copy())
 
         # Saturation detection + soft-clip reference
         if self._sat_detector_ref is not None:
