@@ -37,7 +37,7 @@
 <body>
 
 <h1>AEC v3.22 — algorithm guide</h1>
-<p class="legend">Presentation overview for the v3.22.0 release (2026-06-01); adds the split min-gain floor (DT/NE near-end preservation, default ON) on top of v3.21. For the deep
+<p class="legend">Presentation overview for the v3.22.4 release (2026-06-03); adds three Pareto presets (gentle/balanced/aggressive) on the min-gain-floor strength axis, on top of the v3.22.0 split min-gain floor and v3.21 chain. For the deep
 algorithm specification see <a href="aec_methods.md"><code>aec_methods.md</code></a>; for the
 v3.10.5 → v3.21 → AEC3 cross-comparison see
 <a href="architecture_v3_10_5_vs_v3_21_vs_aec3.html"><code>architecture_v3_10_5_vs_v3_21_vs_aec3.html</code></a>.</p>
@@ -55,7 +55,7 @@ v3.10.5 → v3.21 → AEC3 cross-comparison see
 <div class="note">
 v3.21 retires the legacy 9-stage <code>ResFilter</code> post-filter and ships the AEC3-aligned
 <code>_aec3_post</code> chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) as the
-single production post-filter. Single preset: <code>BALANCED</code>.
+single production post-filter. Presets (v3.22.4): <code>gentle</code> / <code>balanced</code> / <code>aggressive</code> (balanced = production).
 </div>
 
 <h2>1. Block diagram</h2>
@@ -178,8 +178,13 @@ gain (+0.10 vs v3.10.4 anchor).</p>
 
 <h2>5. Configuration surface</h2>
 
-<p>v3.21 ships a <em>single</em> production preset (<code>AecPreset.BALANCED</code>). The
-override surface in <code>AecConfig.from_preset</code> is intentionally narrow (5 keys):</p>
+<p>v3.22.4 ships <em>three</em> presets — <code>gentle</code> / <code>balanced</code> /
+<code>aggressive</code> — sharing one tuned base; <code>balanced</code> is the production
+point (all four ship bars met). <code>gentle</code> and <code>aggressive</code> are
+deliberate <strong>Pareto operating points</strong> differing from balanced in exactly one
+field, <code>min_gain_floor_far_active_db</code> (the far-active min-gain floor: gentle −20 /
+balanced −28 / aggressive −38 dB) — gentle = near-priority, aggressive = echo-priority. The
+shared override surface in <code>AecConfig.from_preset</code> is intentionally narrow:</p>
 
 <pre>cfg = AecConfig.from_preset(AecPreset.BALANCED)
 # equivalent to:

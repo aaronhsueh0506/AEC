@@ -16,6 +16,48 @@ when verdict requires it.
 
 ---
 
+## [3.22.4] — 2026-06-03 — three Pareto presets + finalization hygiene
+
+Finalization of the v3.22 DSP arc. The DT-deg gap vs AEC2 is now a **proven
+single-channel DSP Pareto wall** — a `coh_gain_floor` sweep showed even the
+weakest strength (0.25) trades +1.22 DT-deg for breaking all four echo bars
+(FS_static −0.39 / FS_movement −0.30 / DT −0.40…0.50). There is no free DT-deg
+DSP win; the honest response is to **expose the trade as a strength axis** rather
+than hide it. BALANCED is **byte-equal** to 3.22.3 (`__version__` bump is for the
+new presets + hygiene, not a BALANCED behaviour change).
+
+**Three Pareto presets on a single residual-echo strength knob**
+(`min_gain_floor_far_active_db`, the far-active min-gain floor):
+
+| preset | floor | NE deg | DT_s e/d | DT_m e/d | FS_s echo | FS_m echo |
+|---|---|---|---|---|---|---|
+| **gentle** | −20 dB | 4.052 | 4.004/2.305 | 3.893/2.387 | 3.433 | 3.388 |
+| **balanced** | −28 dB | 4.047 | 4.201/2.156 | 4.082/2.228 | 3.576 | 3.512 |
+| **aggressive** | −38 dB | 4.046 | 4.370/2.049 | 4.249/2.117 | 3.664 | 3.590 |
+
+- `gentle` (near-priority): DT_static deg **2.305 == AEC2 (2.304)**; NE held ≥4;
+  FS echo deliberately below balanced's 3.5 bar (above the ≥3.2 sanity floor) — the
+  accepted near-preservation Pareto trade.
+- `aggressive` (echo-priority): **beats AEC2 on DT echo (4.370>4.331) and FS echo
+  (3.664>3.457)**, deg still >2.0 and well above AEC3; NE held.
+- Monotonic ±10 dB spread; gentle/aggressive differ from balanced **only** in the
+  floor (verified). `--preset gentle` byte-identical to `AEC_FAR_ACTIVE_FLOOR_DB=-20`.
+  Audio: gentle retains more residual than aggressive in 6/6 DT cases.
+- Bench: full-800 `preset / fl=832 / cng`. Pareto-matched per [[feedback_aecmos_pareto_comparison]].
+
+**Hygiene (byte-equal, 48/48 `_ours` + `_ours_nores`):**
+- Retired the `enable_highpass_ref` dead flag + its 3 orchestrator branches
+  (ref-path HPF was retired in v3.19; `_hp_ref` always None).
+- Deduplicated a redundant `_inst_erle_smooth` `__init__` assignment.
+- Removed scratch (`cmp_cohf_sweep.py` + 2.4 GB of stale render dirs).
+- **Deferred:** DTD subsystem removal (dead-but-gated; safe excision entangles
+  `_compute_mu_scale` + the post-NlmsFilter LMS branch — reserved for a dedicated
+  isolated change, not a cleanup pass).
+
+**Diagnostics:** confirmed the per-frame trace surface
+`run_one_case.py --diag-csv [--trace-aec-state]` (45-col CSV: ERLE/gain/R²/ENR/
+dt-conf/delay/convergence/usable_linear) — the schema the C port mirrors.
+
 ## [3.22.3] — 2026-06-03 — isolated parity/correctness candidates (P0 audit; AECMOS-neutral)
 
 Adjudicated the Codex source-audit findings as **isolated parity/correctness

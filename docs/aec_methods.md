@@ -58,22 +58,34 @@ ref ──────► Saturation ─► EchoPathDelayEstimator ─► RingBu
                                                                          out
 ```
 
-### Single production preset
+### Presets — one production point + two Pareto operating points (v3.22.4)
 
-`AecPreset.BALANCED` is the only shipped preset (R1 / R2 deleted MILD /
-SOFT / AGGRESSIVE / MAXIMUM / legacy BALANCED). Override surface in
-`AecConfig.from_preset` is intentionally narrow (5 keys):
+`AecPreset.BALANCED` is the production preset (all four ship bars met; R1 / R2
+deleted the legacy MILD / SOFT / AGGRESSIVE / MAXIMUM 40-knob menu). It shares a
+narrow tuned base with the two new strength presets:
 
 ```python
-AecConfig.from_preset(AecPreset.BALANCED)  # equivalent to:
+AecConfig.from_preset(AecPreset.BALANCED)  # base, equivalent to:
 AecConfig(
     enable_cng=True,        # comfort-noise generator on
-    shadow_q_ratio=3.5,     # shadow Q is 3.5× refined Q (PBFDKF only)
     shadow_mu_min=0.5,      # shadow / DT mu floor
     warmup_frames=100,      # forced-high-mu startup window
     kalman_q_high=1e-3,     # PBFDKF Q_high convergence speed
 )
 ```
+
+`gentle` and `aggressive` are deliberate **Pareto operating points** that differ
+from `balanced` in exactly one field — `min_gain_floor_far_active_db`, the
+far-active min-gain floor (the single residual-echo strength knob):
+
+| preset | floor | character |
+|---|---|---|
+| `gentle` | −20 dB | near-priority — more near kept, more echo leak (DT_static deg ≈ AEC2; FS echo below balanced's 3.5 bar by design) |
+| `balanced` | −28 dB | production — all four ship bars met |
+| `aggressive` | −38 dB | echo-priority — beats AEC2 on DT+FS echo, deg >2.0 and above AEC3 |
+
+The DT-deg-vs-echo trade is a proven single-channel DSP Pareto wall; the strength
+axis exposes it honestly. See CHANGELOG `[3.22.4]` for the full-800 numbers.
 
 Everything else uses `AecConfig` dataclass defaults; the AEC3 chain has
 its own tuning embedded in `AecStateConfig` / `SuppressionGainConfig`
@@ -287,7 +299,8 @@ Routing uses a per-recording **latch** on instantaneous far energy
 far-active criterion). It latches from the first far frame so FS/DT use the
 gentler floor throughout (no cold-start leak); only recordings where far is
 never active keep the strong floor. Config (`AecConfig`):
-`min_gain_split_floor_enabled`, `min_gain_floor_far_active_db` (−22),
+`min_gain_split_floor_enabled`, `min_gain_floor_far_active_db` (balanced −28;
+gentle −20 / aggressive −38 — the v3.22.4 preset strength knob),
 `min_gain_floor_far_silent_db` (−12), `min_gain_far_latch_power` (1e6).
 800-case: FS echo 3.520 / DT echo 4.042 / DT deg 2.226 / NE deg 4.047
 (all four ship thresholds; the only config to pass all four).
