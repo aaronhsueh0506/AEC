@@ -34,6 +34,39 @@ int  aec_debug_level(void);
 void aec_debug_logf(const char* module, const char* fmt, ...)
     __attribute__((format(printf, 2, 3)));
 
+/* ── Per-frame structured trace ("logr") ──────────────────────────────────────
+ * A separate, runtime-gated CSV stream that captures the post-filter internals
+ * once per hop (mirrors the Python per-frame diagnostic schema). Independent of
+ * the level-gated AEC_DEBUG_LOG path above: it is enabled solely by handing a
+ * non-NULL FILE* to aec_debug_set_trace(), so when no trace file is set the
+ * hot path pays nothing (a single NULL-pointer test).
+ *
+ * Schema (one row per hop):
+ *   frame,delay,far_active,saturated_echo,usable_linear,dominant_nearend,
+ *   filter_converged,fullband_erle,erle_mean,r2_mean,gain_mean,
+ *   comfort_noise_mean,near_pwr,raw_err_pwr,limiter_gain
+ */
+typedef struct AecDebugTraceRow {
+    int    delay;               /* min_direct_path_filter_delay (blocks)      */
+    int    far_active;          /* active_render                              */
+    int    saturated_echo;      /* aec_state.saturated_echo()                 */
+    int    usable_linear;       /* aec_state.usable_linear_estimate()         */
+    int    dominant_nearend;    /* suppression_gain dominant-nearend          */
+    int    filter_converged;    /* AEC3 per-frame aec3_converged              */
+    double fullband_erle;       /* aec_state.fullband_erle_log2()             */
+    double erle_mean;           /* mean of per-bin subband ERLE               */
+    double r2_mean;             /* mean of per-bin residual-echo R^2          */
+    double gain_mean;           /* mean of per-bin SuppressionGain output     */
+    double comfort_noise_mean;  /* mean of per-bin comfort-noise PSD          */
+    double near_pwr;            /* near-power EMA                             */
+    double raw_err_pwr;         /* raw-error-power EMA                        */
+    double limiter_gain;        /* OLA output limiter gain                    */
+} AecDebugTraceRow;
+
+void aec_debug_set_trace(FILE* fp);  /* NULL → trace off (default)            */
+int  aec_debug_trace_active(void);   /* 1 when a trace file is set            */
+void aec_debug_trace_row(const AecDebugTraceRow* row);  /* emit one CSV row   */
+
 /* Compile-time gate. In NDEBUG release builds the call site collapses to
  * nothing — no string literal is emitted, no branch is generated. */
 #if defined(AEC_DEBUG) && !defined(NDEBUG)

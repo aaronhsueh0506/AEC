@@ -97,6 +97,9 @@ void aec3_post_init(Aec3Post *p, const Aec3PostConfig *cfg,
                     float *comfort_noise, float *nf,
                     Complex *e_out_spec, float *e_out_full) {
     p->cfg = *cfg;
+    p->trace.aec3_converged = 0;
+    p->trace.far_active = 0;
+    p->trace.gain_mean = 0.0;
     p->fft = fft;
     p->synth_window = synth_window;
     p->sqrt2_sin_lut = sqrt2_sin_lut;
@@ -523,6 +526,7 @@ int aec3_post_run(Aec3Post *p,
                                   && (y2_time > y2_thr_low);
         }
         aec3_converged = refined_conv || coarse_conv;
+        p->trace.aec3_converged = aec3_converged;   /* audio-passive trace stash */
         min_e2 = in->shadow_present
                  ? (e2_refined < e2_coarse ? e2_refined : e2_coarse)
                  : e2_refined;
@@ -627,6 +631,7 @@ int aec3_post_run(Aec3Post *p,
                                                       (size_t)hop) / (float)hop;
                 double far_pwr = (double)far_mean_f32;
                 int active_render = (far_pwr > in->active_render_threshold);
+                p->trace.far_active = active_render;   /* audio-passive trace stash */
                 int x2r_present_state =
                     (in->X_buf != NULL && n_part > 0);
                 aec_state_update(obj->state,
@@ -754,6 +759,13 @@ int aec3_post_run(Aec3Post *p,
                                     obj->sg, sc->nearend_pwr, sc->r2, sc->r2_unb,
                                     p->comfort_noise, sc->render_block_scaled,
                                     /*clock_drift=*/0, sat_echo);
+
+                                /* audio-passive trace stash: mean per-bin gain. */
+                                {
+                                    double gsum = 0.0;
+                                    for (k = 0; k < nb; ++k) gsum += (double)gain[k];
+                                    p->trace.gain_mean = (nb > 0) ? gsum / nb : 0.0;
+                                }
 
                                 /* ── Step 21: apply_output (3606-3689) ──────── */
                                 aec3_post_apply_output(p, sc->sel_esw,

@@ -105,9 +105,23 @@ typedef struct {
     double noise_floor_int16sq;              /* GetNoiseFloorFactor(dbfs) */
 } Aec3PostConfig;
 
+/* Audio-passive per-hop trace capture. The three scalars below are decided
+ * inside aec3_post_run as locals (not otherwise persisted); the driver stashes
+ * them here so the per-frame "logr" trace can read them after the call. All
+ * other trace columns are re-readable via the AecState / SuppressionGain
+ * accessors. Zeroed in aec3_post_init; writing it has no effect on output. */
+typedef struct {
+    int    aec3_converged;   /* AEC3 per-frame convergence (refined||coarse) */
+    int    far_active;       /* active_render (far_pwr > threshold)         */
+    double gain_mean;        /* mean of the SuppressionGain output array     */
+} Aec3PostTrace;
+
 /* Mutable driver state. All per-bin arrays are caller-owned. */
 typedef struct {
     Aec3PostConfig cfg;
+
+    /* audio-passive trace stash (see Aec3PostTrace) */
+    Aec3PostTrace trace;
 
     /* synthesis window (block_size) + sqrt(2)·sin LUT (32), caller-owned,
      * read-only after init. */

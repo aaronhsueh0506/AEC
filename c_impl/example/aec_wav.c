@@ -27,7 +27,8 @@ static void print_usage(const char* prog) {
         "  --no-shadow                    Disable shadow filter\n"
         "  --no-hpf                       Disable 80Hz high-pass\n"
         "  --debug-level <0..3>           0=off, 1=summary, 2=per-frame, 3=full\n"
-        "  --debug-log <path>             redirect log to file (default stderr)\n",
+        "  --debug-log <path>             redirect log to file (default stderr)\n"
+        "  --debug-trace <path>           per-frame CSV trace (logr) of post-filter state\n",
         prog);
 }
 
@@ -49,6 +50,7 @@ int main(int argc, char* argv[]) {
     int no_delay_est = 0, no_res = 0, no_shadow = 0, no_hpf = 0;
     int debug_level = 0;
     const char* debug_log = NULL;
+    const char* debug_trace = NULL;
 
     for (int i = 4; i < argc; ++i) {
         const char* arg = argv[i];
@@ -68,6 +70,8 @@ int main(int argc, char* argv[]) {
             debug_level = atoi(argv[++i]);
         else if (!strcmp(arg, "--debug-log") && i + 1 < argc)
             debug_log = argv[++i];
+        else if (!strcmp(arg, "--debug-trace") && i + 1 < argc)
+            debug_trace = argv[++i];
         else {
             fprintf(stderr, "ERROR: unknown option '%s'\n", arg);
             return 2;
@@ -95,6 +99,12 @@ int main(int argc, char* argv[]) {
     if (debug_log) {
         FILE* fp = fopen(debug_log, "w");
         if (fp) aec_debug_set_log(fp);
+    }
+    FILE* trace_fp = NULL;
+    if (debug_trace) {
+        trace_fp = fopen(debug_trace, "w");
+        if (trace_fp) aec_debug_set_trace(trace_fp);
+        else fprintf(stderr, "WARN: cannot open trace file '%s'\n", debug_trace);
     }
 
     Aec aec;
@@ -134,5 +144,6 @@ int main(int argc, char* argv[]) {
     wav_close_write(ww);
     wav_close_read(mr); wav_close_read(rr);
     aec_destroy(&aec);
+    if (trace_fp) { aec_debug_set_trace(NULL); fclose(trace_fp); }
     return 0;
 }

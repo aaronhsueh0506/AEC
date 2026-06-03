@@ -10,6 +10,7 @@
  * baked from the live Python instance (include/aec3_balanced_config.h).
  */
 #include "aec.h"
+#include "aec_debug.h"
 #include "aec3_balanced_config.h"
 #include "aec3_scale.h"
 #include <stdint.h>
@@ -1352,6 +1353,40 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
     /* cache erle_windowed for next frame's Path-A guard. */
     if (a->cfg.enable_res) a->last_erle_windowed = erle_windowed;
+
+    /* ── per-frame structured trace ("logr"). Audio-passive, read-only: only
+     *    runs when --debug-trace set a CSV file. Zero hot-path cost otherwise
+     *    (single NULL test). Reads the post-filter internals — the three not
+     *    otherwise persisted (aec3_converged / far_active / gain_mean) were
+     *    stashed on a->post.trace during aec3_post_run; everything else is
+     *    re-read here from the AEC3 sub-module accessors. */
+    if (a->cfg.enable_res && aec_debug_trace_active()) {
+        int Kk = a->n_freqs;
+        AecDebugTraceRow tr;
+        double esum = 0.0, r2sum = 0.0, cnsum = 0.0;
+        const float *erle = aec_state_erle(&a->a3_state, /*onset=*/1);
+        int kk;
+        for (kk = 0; kk < Kk; ++kk) {
+            esum  += (double)erle[kk];
+            r2sum += (double)a->a3_sc.r2[kk];
+            cnsum += (double)a->post.comfort_noise[kk];
+        }
+        tr.delay            = aec_state_min_direct_path_filter_delay(&a->a3_state);
+        tr.far_active       = a->post.trace.far_active;
+        tr.saturated_echo   = aec_state_saturated_echo(&a->a3_state);
+        tr.usable_linear    = aec_state_usable_linear_estimate(&a->a3_state);
+        tr.dominant_nearend = suppression_gain_is_dominant_nearend(&a->a3_sg);
+        tr.filter_converged = a->post.trace.aec3_converged;
+        tr.fullband_erle    = aec_state_fullband_erle_log2(&a->a3_state);
+        tr.erle_mean        = (Kk > 0) ? esum  / Kk : 0.0;
+        tr.r2_mean          = (Kk > 0) ? r2sum / Kk : 0.0;
+        tr.gain_mean        = a->post.trace.gain_mean;
+        tr.comfort_noise_mean = (Kk > 0) ? cnsum / Kk : 0.0;
+        tr.near_pwr         = a->near_power;
+        tr.raw_err_pwr      = a->raw_error_power;
+        tr.limiter_gain     = a->limiter_gain;
+        aec_debug_trace_row(&tr);
+    }
 
     /* 21. emit. */
     memcpy(out, a->final_out, (size_t)hop * sizeof(float));
