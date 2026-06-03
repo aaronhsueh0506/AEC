@@ -430,6 +430,12 @@ class AEC:
                     getattr(self.config, 'erle_e2y2_gate_enabled', False)),
                 erle_e2y2_gate_threshold=float(
                     getattr(self.config, 'erle_e2y2_gate_threshold', 0.5)),
+                erle_gate_subtractor_converged=bool(
+                    getattr(self.config, 'erle_gate_subtractor_converged', False)),
+                erle_gate_subtractor_threshold=float(
+                    getattr(self.config, 'erle_gate_subtractor_threshold', 0.5)),
+                erle_gate_subtractor_y2_floor=float(
+                    getattr(self.config, 'erle_gate_subtractor_y2_floor', 1.0e6)),
             ))
             # FFT-density-scaled PSD floors (AEC3 alignment, v3.21-shipped).
             # AEC3 hardcodes kFftLengthBy2=64 in EchoModelConfig /
@@ -1144,6 +1150,12 @@ class AEC:
                 getattr(self.config, 'erle_e2y2_gate_enabled', False)),
             erle_e2y2_gate_threshold=float(
                 getattr(self.config, 'erle_e2y2_gate_threshold', 0.5)),
+            erle_gate_subtractor_converged=bool(
+                getattr(self.config, 'erle_gate_subtractor_converged', False)),
+            erle_gate_subtractor_threshold=float(
+                getattr(self.config, 'erle_gate_subtractor_threshold', 0.5)),
+            erle_gate_subtractor_y2_floor=float(
+                getattr(self.config, 'erle_gate_subtractor_y2_floor', 1.0e6)),
         ))
         # Re-derive fft-density-scaled echo_model so a mid-stream reset keeps
         # the same per-bin PSD floors as init (see __init__ note).

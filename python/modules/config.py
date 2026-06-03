@@ -101,6 +101,25 @@ class AecConfig:
     erle_e2y2_gate_enabled: bool = False
     erle_e2y2_gate_threshold: float = 0.5
 
+    # ── ERLE update gate = AEC3 per-frame SubtractorOutputAnalyzer rule ──
+    # The ERLE estimator's update is gated by `converged_filter`. We have been
+    # sourcing that from the legacy FilterConvergenceAnalyzer latch (10
+    # consecutive far-active frames with inst-ERLE>5 dB) which is near-
+    # contaminated and almost NEVER latches in double-talk (~5% of frames) →
+    # ERLE frozen at min=1.0 → R²=S²/ERLE=S² inflated → ENR ramp over-suppresses
+    # near-end. AEC3 instead gates on a PER-FRAME rule (subtractor_output_analyzer.cc:46):
+    #   converged = (e2_refined < 0.5·y2) OR (e2_coarse < 0.05·y2),  y2 > floor
+    # which fires on every echo-dominant frame so ERLE earns credit (then holds
+    # via the accumulator's converged-gating through near-loud frames). When ON,
+    # source the ERLE update gate from this per-frame e2<thr·y2 rule (refined-only;
+    # coarse term omitted — main filter error is `error_psd`). Default OFF for
+    # byte-equal; bench with AEC_ERLE_SUBCONV=<thr>.
+    erle_gate_subtractor_converged: bool = False
+    erle_gate_subtractor_threshold: float = 0.5
+    # y2 floor (our capture_psd-sum scale) below which a frame can't count as
+    # converged (avoids crediting silence). Calibrated empirically.
+    erle_gate_subtractor_y2_floor: float = 1.0e6
+
     # ── v3.22 C': Coherence-based ERLE gate (Γ²_ŶY) ──
     # Gate SubbandErle updates per-bin when Γ²(Ŷ, Y) < threshold.
     # Ŷ = echo estimate (echo_spec), Y = capture (near_spec); both complex.

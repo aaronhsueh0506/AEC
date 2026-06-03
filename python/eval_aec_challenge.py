@@ -226,6 +226,20 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             config_overrides['erle_e2y2_gate_threshold'] = _e2y2_val if _e2y2_val <= 1.0 else 0.5
         except ValueError:
             pass
+    # erle_gate_subtractor (L1b): ERLE update gate = AEC3 per-frame e2<thr·y2
+    # rule instead of the legacy convergence latch (fixes ERLE-pinned-at-1 in DT).
+    # AEC_ERLE_SUBCONV=<thr> → enable, threshold=<thr>. AEC_ERLE_SUBCONV_FLOOR=<y2floor>.
+    _subc_env = os.environ.get('AEC_ERLE_SUBCONV')
+    if _subc_env is not None and 'erle_gate_subtractor_converged' not in config_overrides:
+        try:
+            _subc_val = float(_subc_env)
+            config_overrides['erle_gate_subtractor_converged'] = (_subc_val > 0.0)
+            config_overrides['erle_gate_subtractor_threshold'] = _subc_val if _subc_val <= 1.0 else 0.5
+            _subc_floor = os.environ.get('AEC_ERLE_SUBCONV_FLOOR')
+            if _subc_floor is not None:
+                config_overrides['erle_gate_subtractor_y2_floor'] = float(_subc_floor)
+        except ValueError:
+            pass
     # erle_coh_gate (v3.22 C'): coherence-based ERLE gate Γ²(Ŷ, Y).
     # AEC_ERLE_COH_GATE=<float>        → enable gate, threshold=<float>
     # AEC_ERLE_COH_GATE_ALPHA=<float>  → override EMA alpha (default 0.05)
