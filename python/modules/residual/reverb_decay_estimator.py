@@ -412,23 +412,29 @@ class ReverbDecayEstimator:
         if not self._estimation_region_identified:
             self._estimation_region_candidate_size += 1
 
+        # AEC3 cc:250-263: inside the late region accumulate BOTH the
+        # late-decay regressor and the early-length estimator; before it,
+        # early only. The late regressor is Reset() in _estimate_decay to
+        # exactly ``size_late_reverb * kFftLengthBy2`` points and the late
+        # region spans exactly that many blocks*samples, so accumulation is
+        # called exactly N times by construction — AEC3 has NO
+        # ``estimate_available()`` gate here, so neither do we.
         if idx <= self._late_reverb_end:
-            in_late = idx >= self._late_reverb_start
-            for h2_k in h2:
-                h2_log2 = math.log2(float(h2_k) + 1e-10)
-                if in_late and self._late_reverb_decay_estimator.estimate_available() is False:
-                    # AEC3 accumulates into late_reverb regressor when in
-                    # the late region (between late_reverb_start and end).
+            if idx >= self._late_reverb_start:
+                for h2_k in h2:
+                    h2_log2 = math.log2(float(h2_k) + 1e-10)
                     self._late_reverb_decay_estimator.accumulate(h2_log2)
-                if self._early_reverb_estimator is not None:
-                    self._early_reverb_estimator.accumulate(
-                        h2_log2, self._smoothing_constant
-                    )
-                # If we exited "in_late", still accumulate early-only.
-                # AEC3 logic: when in late region, BOTH accumulate; else only early.
-                if not in_late and self._early_reverb_estimator is not None:
-                    # already handled above; no-op here for clarity
-                    pass
+                    if self._early_reverb_estimator is not None:
+                        self._early_reverb_estimator.accumulate(
+                            h2_log2, self._smoothing_constant
+                        )
+            else:
+                for h2_k in h2:
+                    h2_log2 = math.log2(float(h2_k) + 1e-10)
+                    if self._early_reverb_estimator is not None:
+                        self._early_reverb_estimator.accumulate(
+                            h2_log2, self._smoothing_constant
+                        )
 
     def _estimate_decay(self, td_filter: np.ndarray, peak_block: int) -> None:
         """AEC3 cc:162-224."""
