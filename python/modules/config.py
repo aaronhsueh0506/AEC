@@ -538,17 +538,35 @@ class AecConfig:
 
     @classmethod
     def from_preset(cls, preset: 'AecPreset', **kwargs) -> 'AecConfig':
-        """BALANCED preset (the only shipping preset)."""
+        """Three Pareto operating points on the residual-echo strength axis.
+
+        All presets share the same AEC3 post-filter chain + the 800-case-tuned
+        base (CNG, shadow/Kalman warmup). They differ ONLY on
+        ``min_gain_floor_far_active_db`` — the far-active residual-gain floor
+        that trades echo suppression against near-end preservation:
+
+          gentle      near-priority  (higher floor → more near kept, more echo leak)
+          balanced    −28 dB         the shipped all-four-bars-met operating point
+          aggressive  echo-priority  (deeper floor → more echo killed, more near loss)
+
+        gentle/aggressive deliberately sit off the balanced ship-bar set
+        (Pareto picks), not within it — the DT-deg vs echo trade is a proven
+        single-channel DSP wall, so a strength axis is the honest way to expose it.
+        """
         if isinstance(preset, str):
             preset = AecPreset(preset)
-        if preset == AecPreset.BALANCED:
-            defaults = dict(
-                enable_cng=True,
-                shadow_mu_min=0.5,
-                warmup_frames=100,
-                kalman_q_high=1e-3,
-            )
-        else:
-            defaults = {}
+        base = dict(
+            enable_cng=True,
+            shadow_mu_min=0.5,
+            warmup_frames=100,
+            kalman_q_high=1e-3,
+        )
+        # Strength axis: far-active min-gain floor (dataclass default −28 = balanced).
+        strength = {
+            AecPreset.GENTLE:     dict(min_gain_floor_far_active_db=-20.0),
+            AecPreset.BALANCED:   dict(),
+            AecPreset.AGGRESSIVE: dict(min_gain_floor_far_active_db=-38.0),
+        }
+        defaults = {**base, **strength.get(preset, {})}
         defaults.update(kwargs)
         return cls(**defaults)

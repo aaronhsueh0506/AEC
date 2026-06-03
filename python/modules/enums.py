@@ -20,7 +20,9 @@ _PB_MODES = (AecMode.PBFDAF, AecMode.PBFDKF, AecMode.SUBBAND)
 
 
 class AecPreset(Enum):
-    BALANCED = "balanced"       # production: AEC3 residual chain
+    GENTLE     = "gentle"       # near-priority: more near-end kept, more echo leak
+    BALANCED   = "balanced"     # production: all four ship bars met (AEC3 residual chain)
+    AGGRESSIVE = "aggressive"   # echo-priority: deeper suppression, more near-end loss
 
 
 class AecFilterState(Enum):
