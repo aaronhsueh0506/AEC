@@ -58,6 +58,23 @@ new presets + hygiene, not a BALANCED behaviour change).
 `run_one_case.py --diag-csv [--trace-aec-state]` (45-col CSV: ERLE/gain/R²/ENR/
 dt-conf/delay/convergence/usable_linear) — the schema the C port mirrors.
 
+**C port — end-to-end BIT-EXACT to `python/aec.py`.** The `c_impl/` production
+port now matches the Python reference byte-for-byte: per-hop golden 0 mismatches
+over the full doubletalk case (linear residual + final output), all three
+presets; full CLI `wav→wav` 0/669920 fp32 sample mismatches. The v3.10 pipeline
+(legacy 9-stage `ResFilter` + GCC-PHAT/PAR delay + P-denominator Kalman) was
+rewritten to the v3.22 AEC3 chain: vendored numpy pocketfft FFT, PBFDKF per-bin
+H_error filter, AEC3 matched-filter delay (`delay_aec3`), FormLinearFilterOutput,
+the full `_aec3_post` orchestration (`aec3_post_run`: AecState + ResidualEcho­
+Estimator + SuppressionGain + CNG/OLA), and the 21-step `aec_process`. Bit-exactness
+required matching three numpy-on-arm64 idioms (`np.abs(c64)**2` = SIMD
+scaled-hypot-FMA squared, complex64×complex64 multiply uses FMA, EMA `(1-α)` is a
+double subtraction cast to f32) — `-ffp-contract=off` is mandatory. Per-module
+golden tests (`test/parity_*.c`); end-to-end gate `test/parity_aec_e2e.c`. A
+heap-free **static-memory** pool variant (`aec_init`/`aec_get_mem_size`,
+byte-equal, 422 816 B @ hop=160) lives on `feature/static-memory`. Opt-in
+per-frame CSV trace via `aec_wav --debug-trace <path>` (audio-passive).
+
 ## [3.22.3] — 2026-06-03 — isolated parity/correctness candidates (P0 audit; AECMOS-neutral)
 
 Adjudicated the Codex source-audit findings as **isolated parity/correctness
