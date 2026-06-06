@@ -23,6 +23,13 @@
 #define AEC_DA_BUFFER_FLUSH  1
 #define AEC_DA_NEW_DETECTED  2
 
+/* Streaming render/capture call-jitter FIFO budget (milliseconds). Converted
+ * to a whole number of hops at create time. 320 ms comfortably covers audio
+ * callback scheduling jitter / block-size mismatches without wasting memory
+ * (320 ms @ 16 kHz = 5120 samples ≈ 20 KB). NOT the echo delay (that is the
+ * downstream ref_ring, delay_buffer_ms). */
+#define AEC_STREAM_FIFO_MS 320
+
 /* ───────────────────────── config ──────────────────────────────────────── */
 
 void aec_config_defaults(AecConfig* cfg, int sr) {
@@ -363,6 +370,24 @@ int aec_create(Aec* a, const AecConfig* cfg) {
         a->current_delay = 0;
     }
 
+    /* Streaming render-hop FIFO (async render/capture decoupling). Allocated
+     * unconditionally; only exercised by the streaming API. Capacity is a
+     * render/capture CALL-jitter budget in ms (independent of hop size and of
+     * the echo delay, which the downstream ref_ring handles), converted to a
+     * whole number of hops for the current hop_size / sample_rate. */
+    {
+        const int fifo_ms = AEC_STREAM_FIFO_MS;
+        int cap = (fifo_ms * cfg->sample_rate / 1000 + a->hop_size - 1)
+                  / a->hop_size;            /* ceil(fifo_ms / hop_ms) */
+        if (cap < 2) cap = 2;               /* need ≥2 to buffer any skew */
+        a->fifo_cap_hops = cap;
+    }
+    a->render_fifo = (float*)calloc((size_t)a->fifo_cap_hops * a->hop_size,
+                                    sizeof(float));
+    a->fifo_count = 0; a->fifo_read = 0; a->fifo_write = 0;
+    a->render_call_count = 0; a->capture_call_count = 0;
+    a->last_buffering_event = AEC_BUF_NONE;
+
     /* Main filter (PBFDKF). */
     pbfdkf_init(&a->main_filter, blk, n_parts, cfg->mu, cfg->delta, hop);
     for (int k = 0; k < K; ++k) {
@@ -694,6 +719,7 @@ int    aec_init(Aec* a, void* mem, size_t mem_size, const AecConfig* cfg) {
 void aec_destroy(Aec* a) {
     if (!a || a->is_static) return;
     if (a->has_delay) free(a->ref_ring);
+    free(a->render_fifo);
     pbfdkf_free(&a->main_filter);
     if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
     free(a->rsa_counters);
@@ -719,6 +745,12 @@ void aec_reset(Aec* a) {
         a->current_delay = -1; a->pending_delay = -1; a->has_pending = 0;
         a->pending_delay_ttl = 0;
     }
+    if (a->render_fifo)
+        memset(a->render_fifo, 0,
+               (size_t)a->fifo_cap_hops * a->hop_size * sizeof(float));
+    a->fifo_count = 0; a->fifo_read = 0; a->fifo_write = 0;
+    a->render_call_count = 0; a->capture_call_count = 0;
+    a->last_buffering_event = AEC_BUF_NONE;
     pbfdkf_reset(&a->main_filter);
     if (a->has_shadow) pbfdaf_reset(&a->shadow_filter);
     render_activity_reset(&a->render_activity);
@@ -1391,6 +1423,56 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* 21. emit. */
     memcpy(out, a->final_out, (size_t)hop * sizeof(float));
     a->frame_count++;
+}
+
+/* ── Streaming API ────────────────────────────────────────────────────────
+ * Render-hop FIFO wrapper over the bit-exact aec_process() engine. In lockstep
+ * (one analyze_render then one process_capture) the FIFO is pass-through
+ * (count 1→0, no event) so the engine sees exactly the same (mic,ref) it would
+ * via aec_process() → byte-identical output. Only real async jitter exercises
+ * the underrun/overrun paths. */
+AecBufferingEvent aec_analyze_render(Aec* a, const float* ref) {
+    const int hop = a->hop_size;
+    a->render_call_count++;
+    AecBufferingEvent ev = AEC_BUF_NONE;
+    if (a->fifo_count >= a->fifo_cap_hops) {
+        /* Overrun: render piled up past capacity — drop the oldest hop. */
+        a->fifo_read = (a->fifo_read + 1) % a->fifo_cap_hops;
+        a->fifo_count--;
+        ev = AEC_BUF_RENDER_OVERRUN;
+    }
+    memcpy(a->render_fifo + (size_t)a->fifo_write * hop, ref,
+           (size_t)hop * sizeof(float));
+    a->fifo_write = (a->fifo_write + 1) % a->fifo_cap_hops;
+    a->fifo_count++;
+    return ev;
+}
+
+AecBufferingEvent aec_process_capture(Aec* a, const float* mic, float* out) {
+    const int hop = a->hop_size;
+    a->capture_call_count++;
+    AecBufferingEvent ev = AEC_BUF_NONE;
+    const float* ref;
+    if (a->fifo_count > 0) {
+        ref = a->render_fifo + (size_t)a->fifo_read * hop;
+        a->fifo_read = (a->fifo_read + 1) % a->fifo_cap_hops;
+        a->fifo_count--;
+    } else {
+        /* Underrun: capture ran ahead of render. Process with a silent render
+         * hop (no echo to cancel this hop) and signal the caller. Reuse the
+         * (unconsumed) read slot as scratch — fifo_read is NOT advanced. */
+        float* slot = a->render_fifo + (size_t)a->fifo_read * hop;
+        memset(slot, 0, (size_t)hop * sizeof(float));
+        ref = slot;
+        ev = AEC_BUF_RENDER_UNDERRUN;
+    }
+    aec_process(a, mic, ref, out);
+    a->last_buffering_event = (int)ev;
+    return ev;
+}
+
+AecBufferingEvent aec_last_buffering_event(const Aec* a) {
+    return (AecBufferingEvent)a->last_buffering_event;
 }
 
 void aec_get_res_context(const Aec* a, AecResContext* ctx) {

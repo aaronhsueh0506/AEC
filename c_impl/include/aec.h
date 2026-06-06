@@ -85,6 +85,15 @@ void aec_config_defaults(AecConfig* cfg, int sample_rate);
 void aec_config_from_preset(AecConfig* cfg, AecPreset preset, int sample_rate);
 
 /* ── opaque-ish context ────────────────────────────────────────────────── */
+/* Streaming render/capture buffering events (mirror AEC3
+ * render_delay_buffer.h:28 BufferingEvent). Returned by the streaming API. */
+typedef enum AecBufferingEvent {
+    AEC_BUF_NONE = 0,
+    AEC_BUF_RENDER_UNDERRUN,   /* capture ran ahead — no buffered render */
+    AEC_BUF_RENDER_OVERRUN,    /* render piled up past the FIFO — oldest dropped */
+    AEC_BUF_API_SKEW           /* render/capture call alternation anomaly (diag) */
+} AecBufferingEvent;
+
 typedef struct Aec {
     AecConfig cfg;
 
@@ -185,6 +194,19 @@ typedef struct Aec {
     Complex* W_all;            /* [n_partitions × n_freqs] flat snapshot */
     Complex* X_buf_all;        /* [n_partitions × n_freqs] flat snapshot */
 
+    /* ── streaming render-hop FIFO (async render/capture decoupling) ──
+     * Only exercised by the streaming API (aec_analyze_render /
+     * aec_process_capture). The lockstep aec_process() bypasses it entirely,
+     * so offline byte-exact parity with Python is untouched. In lockstep use
+     * (one analyze_render then one process_capture) the FIFO is pass-through
+     * (count 1→0, no event) → identical output to aec_process(). */
+    float* render_fifo;        /* [fifo_cap_hops × hop_size] ring of render hops */
+    int    fifo_cap_hops;      /* capacity in hops */
+    int    fifo_count;         /* buffered render hops not yet consumed */
+    int    fifo_read, fifo_write;
+    long   render_call_count, capture_call_count;
+    int    last_buffering_event;   /* AecBufferingEvent of the last capture step */
+
     int is_static;
 } Aec;
 
@@ -196,8 +218,27 @@ void aec_reset(Aec* a);
 size_t aec_get_mem_size(const AecConfig* cfg);
 int    aec_init(Aec* a, void* mem, size_t mem_size, const AecConfig* cfg);
 
-/* Process exactly hop_size samples. */
+/* Process exactly hop_size samples — OFFLINE / lockstep path. Byte-exact to
+ * Python aec.py. Render and capture supplied together. */
 void aec_process(Aec* a, const float* mic, const float* ref, float* out);
+
+/* ── Streaming API (real-time async render/capture) ───────────────────────
+ * For deployments where the far-end (render) and mic (capture) arrive on
+ * separate calls / threads and not necessarily 1:1. aec_analyze_render()
+ * buffers a render hop; aec_process_capture() consumes the delay-aligned
+ * render and produces output. Both return the buffering event observed.
+ *
+ * Lockstep equivalence: calling aec_analyze_render(ref) immediately followed
+ * by aec_process_capture(mic, out) yields byte-identical output to
+ * aec_process(mic, ref, out) — the FIFO is pass-through and no event fires.
+ *
+ * Underrun (capture with empty FIFO): processed with a silent render hop and
+ * AEC_BUF_RENDER_UNDERRUN returned. Overrun (render past FIFO capacity): the
+ * oldest buffered hop is dropped and AEC_BUF_RENDER_OVERRUN returned. */
+AecBufferingEvent aec_analyze_render(Aec* a, const float* ref);
+AecBufferingEvent aec_process_capture(Aec* a, const float* mic, float* out);
+/* Last buffering event from the most recent aec_process_capture(). */
+AecBufferingEvent aec_last_buffering_event(const Aec* a);
 
 int  aec_hop_size(const Aec* a);
 
