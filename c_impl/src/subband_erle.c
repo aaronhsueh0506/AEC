@@ -29,8 +29,7 @@ static void set_max_erle_bands(float *arr, int n_bins,
 void subband_erle_init(SubbandErle *s, int n_bins,
                        float min_erle, float max_erle_l, float max_erle_h,
                        int use_onset_detection, int use_min_erle_during_onsets,
-                       int hop_size, int e2y2_gate_enabled,
-                       float e2y2_gate_threshold,
+                       int hop_size,
                        float *max_erle_st, float *erle_st, float *erle_oc_st,
                        float *erle_unb_st, float *erle_during_st,
                        unsigned char *coming_onset_st, int32_t *hold_st,
@@ -43,8 +42,6 @@ void subband_erle_init(SubbandErle *s, int n_bins,
     s->alpha_up = 0.05;
     s->alpha_down = 0.1;
     s->onset_release_decay = 0.97;
-    s->e2y2_gate_enabled = e2y2_gate_enabled ? 1 : 0;
-    s->e2y2_gate_threshold = e2y2_gate_threshold;
     /* _x2_band_energy_threshold = per_bin_psd_threshold(44015068.0, hop_size)
      * (ref_hop=160), a float64 scalar. */
     s->x2_band_energy_threshold =
@@ -161,12 +158,6 @@ static void update_bands(SubbandErle *s, int converged_filter,
             is_updated = 0;
         }
 
-        /* E2/Y2 gate: is_updated &= (e2_acc/max(y2_acc,1e-30) <= thr). */
-        if (s->e2y2_gate_enabled && is_updated) {
-            float ydenom = s->y2_acc[k] > 1e-30f ? s->y2_acc[k] : 1e-30f;
-            float e2y2 = e2a / ydenom;                  /* f32 */
-            if (!(e2y2 <= s->e2y2_gate_threshold)) is_updated = 0;
-        }
         /* Coherence gate: is_updated &= coh_gate_mask[k]. */
         if (coh_gate_mask != NULL && is_updated) {
             if (!coh_gate_mask[k]) is_updated = 0;

@@ -1,7 +1,7 @@
 /* aec.c — top-level v3.22 AEC orchestration (AEC3 post-filter chain).
  *
  * Faithful C port of python/modules/orchestrator.py AEC.process() audio path
- * for the BALANCED preset (mode=PBFDKF, enable_dtd=False, enable_res=True,
+ * for the BALANCED preset (mode=PBFDKF, enable_res=True,
  * enable_cng=True). The post-stage is driven by aec3_post_run() (bit-exact full
  * _aec3_post orchestration). See aec.h for scope.
  *
@@ -54,7 +54,6 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->epc_total_rise = 1.5f;
     cfg->epc_delta_threshold = 0.3f;
     cfg->epc_mu_floor = 0.5f;
-    cfg->dtd_mu_min_ratio = 0.05f;
     cfg->max_delay_ms = 1024.0f;
     cfg->delay_buffer_ms = 2048.0f;
     cfg->delay_est_init_s = 0.3f;
@@ -591,13 +590,6 @@ int aec_create(Aec* a, const AecConfig* cfg) {
         scfg.dne_lf_endpoint_bin = AEC3B_SG_DNE_LF_ENDPOINT_BIN;
         scfg.dne_trigger_threshold_hops = AEC3B_SG_TRIGGER_THRESHOLD_HOPS;
         scfg.dne_hold_duration_hops = AEC3B_SG_HOLD_DURATION_HOPS;
-        scfg.dne_loud_relax_enabled = 0;
-        scfg.dne_loud_snr_factor = 3.0;
-        scfg.dne_loud_enr_threshold = 0.75;
-        scfg.ser_floor_enabled = 0; scfg.ser_floor_strength = 0.5f;
-        scfg.coh_gain_floor_enabled = 0; scfg.coh_gain_floor_strength = 0.5f;
-        scfg.d5_ne_floor_enabled = 0; scfg.d5_ne_floor_strength = 0.3f;
-        scfg.hf_min_gain_floor_dne_enabled = 0; scfg.hf_min_gain_floor_dne_power = 0.0;
         scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10;
         stun.nearend_enr_tr = AEC3B_SG_NEAREND_ENR_TR;
         stun.nearend_enr_su = AEC3B_SG_NEAREND_ENR_SU;
@@ -939,7 +931,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     a->warmup_far_active = ra.warmup_active;
     double far_pwr_global = ra.far_pwr;
 
-    /* 5. mu_scale (simple variable mu; enable_dtd=False). */
+    /* 5. mu_scale (simple variable mu, Valin 2007 RER-inspired). */
     int mu_is_array = 0;
     double mu_scalar = get_simple_mu_scale(a, &mu_is_array);
 
@@ -1190,7 +1182,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         doubletalk_update_energy_dt(&a->dt_analyzer, ra.is_active,
                                     far_pwr, mic_pwr, a->erl_estimate);
 
-        /* base DT confidence (no DTD). */
+        /* base DT confidence (simple energy-ratio estimate). */
         double simple_dt = 1.0 - far_pwr / (mic_pwr + far_pwr);
         double raw_dt = a->dt_analyzer.dt_from_energy;
         double sd_half = simple_dt * 0.5;
@@ -1225,7 +1217,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             a->wn_err_baseline = 0.995 * a->wn_err_baseline + 0.005 * raw_err_pwr;
         }
 
-        /* inst_erle correction (no-DTD). */
+        /* inst_erle correction. */
         double inst_erle_fast_raw = mic_pwr / raw_err_pwr;
         a->inst_erle_smooth = 0.7 * a->inst_erle_smooth + 0.3 * inst_erle_fast_raw;
         if (a->inst_erle_smooth > 2.0) {
@@ -1296,8 +1288,6 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             in.stationarity_active_hops = a->stationarity_active_hops;
             in.stationarity_converge_hops = a->stationarity_converge_hops;
             in.erle_coh_gate_enabled = AEC3B_ERLE_COH_GATE_ENABLED;
-            in.coh_gain_floor_enabled = AEC3B_COH_GAIN_FLOOR_ENABLED;
-            in.cohxd_floor_release_enabled = AEC3B_COHXD_FLOOR_RELEASE_ENABLED;
             in.use_stationarity_properties = AEC3B_USE_STATIONARITY_PROPERTIES;
             in.active_render_threshold = AEC3B_ACTIVE_RENDER_THRESHOLD;
 

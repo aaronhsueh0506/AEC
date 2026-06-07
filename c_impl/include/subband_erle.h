@@ -61,8 +61,6 @@ typedef struct {
     double alpha_up;          /* 0.05 (Python float) */
     double alpha_down;        /* 0.1  (Python float) */
     double onset_release_decay; /* 0.97 (Python float) */
-    int    e2y2_gate_enabled;
-    float  e2y2_gate_threshold; /* 0.5 */
     double x2_band_energy_threshold; /* float64 scalar (per_bin_psd_threshold) */
 
     /* per-bin state (caller-owned, length n_bins) */
@@ -88,14 +86,12 @@ typedef struct {
  * hop_size is used only to scale the x2 band-energy threshold
  * (per_bin_psd_threshold, ref_hop=160). Mirrors the Python __init__ defaults:
  *   min_erle=1.0, max_erle_l=4.0, max_erle_h=1.5,
- *   use_onset_detection=1, use_min_erle_during_onsets=1,
- *   e2y2_gate_enabled=0, e2y2_gate_threshold=0.5.
+ *   use_onset_detection=1, use_min_erle_during_onsets=1.
  */
 void subband_erle_init(SubbandErle *s, int n_bins,
                        float min_erle, float max_erle_l, float max_erle_h,
                        int use_onset_detection, int use_min_erle_during_onsets,
-                       int hop_size, int e2y2_gate_enabled,
-                       float e2y2_gate_threshold,
+                       int hop_size,
                        float *max_erle_st, float *erle_st, float *erle_oc_st,
                        float *erle_unb_st, float *erle_during_st,
                        unsigned char *coming_onset_st, int32_t *hold_st,

@@ -57,7 +57,7 @@ int main(int argc, char **argv) {
     FILE *f = fopen(path, "rb");
     int hdr_g[5];
     int n_bins, fft_size, block_size, hop, n_part;
-    int flag_i[8];
+    int flag_i[6];
     int cnt_i[4];
     double cng_d[9];
     float *synth_window, *sqrt2_lut;
@@ -84,7 +84,7 @@ int main(int argc, char **argv) {
     if (!rd(f, hdr_g, sizeof(int) * 5)) { fprintf(stderr, "hdr_g\n"); return 2; }
     n_bins = hdr_g[0]; fft_size = hdr_g[1]; block_size = hdr_g[2];
     hop = hdr_g[3]; n_part = hdr_g[4];
-    if (!rd(f, flag_i, sizeof(int) * 8)) { fprintf(stderr, "flags\n"); return 2; }
+    if (!rd(f, flag_i, sizeof(int) * 6)) { fprintf(stderr, "flags\n"); return 2; }
     if (!rd(f, cnt_i, sizeof(int) * 4)) { fprintf(stderr, "cnts\n"); return 2; }
     if (!rd(f, cng_d, sizeof(double) * 9)) { fprintf(stderr, "cng_d\n"); return 2; }
 
@@ -125,10 +125,10 @@ int main(int argc, char **argv) {
     cfg.n_bins = n_bins; cfg.fft_size = fft_size;
     cfg.block_size = block_size; cfg.hop_size = hop;
     cfg.erle_coh_gate_enabled = flag_i[0];
-    cfg.erle_windowed_capture_psd = flag_i[3];
-    cfg.erle_render_x2_psd_scale = flag_i[4];
-    cfg.output_capture_when_linear_unusable = flag_i[5];
-    cfg.enable_cng = flag_i[6];
+    cfg.erle_windowed_capture_psd = flag_i[1];
+    cfg.erle_render_x2_psd_scale = flag_i[2];
+    cfg.output_capture_when_linear_unusable = flag_i[3];
+    cfg.enable_cng = flag_i[4];
     cfg.cng_n2_update_onset_hops = cnt_i[0];
     cfg.cng_n2_initial_duration_hops = cnt_i[1];
     cfg.cng_y2_alpha = cng_d[0];
@@ -265,13 +265,6 @@ int main(int argc, char **argv) {
     scfg.dne_use_during_initial_phase = sg_dne_i[0];
     scfg.dne_use_unbounded_echo = sg_dne_i[1];
     scfg.dne_lf_endpoint_bin = sg_dne_i[2];
-    scfg.dne_loud_relax_enabled = 0;
-    scfg.dne_loud_snr_factor = 3.0;
-    scfg.dne_loud_enr_threshold = 0.75;
-    scfg.ser_floor_enabled = 0; scfg.ser_floor_strength = 0.5f;
-    scfg.coh_gain_floor_enabled = 0; scfg.coh_gain_floor_strength = 0.5f;
-    scfg.d5_ne_floor_enabled = 0; scfg.d5_ne_floor_strength = 0.3f;
-    scfg.hf_min_gain_floor_dne_enabled = 0; scfg.hf_min_gain_floor_dne_power = 0.0;
     scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10;
     stun.nearend_enr_tr = t_ne_enr_tr; stun.nearend_enr_su = t_ne_enr_su;
     stun.nearend_emr_tr = t_ne_emr_tr; stun.normal_enr_tr = t_no_enr_tr;
@@ -426,9 +419,7 @@ int main(int argc, char **argv) {
         in.stationarity_active_hops = pend_i[2];
         in.stationarity_converge_hops = cnt_i[2];
         in.erle_coh_gate_enabled = flag_i[0];
-        in.coh_gain_floor_enabled = flag_i[1];
-        in.cohxd_floor_release_enabled = flag_i[2];
-        in.use_stationarity_properties = flag_i[7];
+        in.use_stationarity_properties = flag_i[5];
         in.active_render_threshold = cng_d[8];
 
         /* Sanity vs the C-side pending mirror (Python clears them post-event;

@@ -85,20 +85,7 @@ typedef struct {
     int    dne_lf_endpoint_bin;
     int    dne_trigger_threshold_hops;
     int    dne_hold_duration_hops;
-    /* W4 loud-nearend ENR relax (default OFF) */
-    int    dne_loud_relax_enabled;               /* bool */
-    double dne_loud_snr_factor;
-    double dne_loud_enr_threshold;
 
-    /* default-OFF levers */
-    int    ser_floor_enabled;                    /* bool */
-    float  ser_floor_strength;
-    int    coh_gain_floor_enabled;               /* bool (always None feed) */
-    float  coh_gain_floor_strength;
-    int    d5_ne_floor_enabled;                  /* bool */
-    float  d5_ne_floor_strength;
-    int    hf_min_gain_floor_dne_enabled;        /* bool */
-    double hf_min_gain_floor_dne_power;
     int    stat_aware_ne_proxy_enabled;          /* bool */
     double stat_aware_ne_proxy_threshold;
 } SuppressionGainConfig;

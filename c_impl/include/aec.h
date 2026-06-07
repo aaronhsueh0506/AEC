@@ -2,14 +2,13 @@
  *
  * Wires the bit-exact v3.22 modules into one frame-level aec_process() that
  * mirrors python/modules/orchestrator.py AEC.process for the BALANCED preset
- * (mode=PBFDKF, enable_dtd=False → simple variable-mu, enable_res=True,
+ * (mode=PBFDKF, simple variable-mu, enable_res=True,
  * enable_cng per preset). The post-stage is driven entirely by aec3_post_run
  * (the bit-exact full _aec3_post orchestration); this file ports the AUDIO
  * PATH of process() around it.
  *
  * Out of scope for this cutover:
  *   - AecMode != PBFDKF (NLMS / buffered FDAF queue)
- *   - DTD detectors (BALANCED has enable_dtd=False)
  *   - get_stats / debug logger / capture_stages / pure-diagnostic _diag stashes
  *   - aec_init (static-memory pool) — TODO on the static-memory branch; only
  *     the malloc path (aec_create) is implemented here.
@@ -58,7 +57,6 @@ typedef struct AecConfig {
     float  epc_total_rise;         /* 1.5  */
     float  epc_delta_threshold;    /* 0.3  */
     float  epc_mu_floor;           /* 0.5  */
-    float  dtd_mu_min_ratio;       /* 0.05 */
     float  max_delay_ms;           /* 1024 */
     float  delay_buffer_ms;        /* 2048 */
     float  delay_est_init_s;       /* 0.3  */

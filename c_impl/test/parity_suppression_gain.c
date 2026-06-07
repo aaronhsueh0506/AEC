@@ -142,17 +142,6 @@ int main(int argc, char **argv) {
         cfg.dne_use_during_initial_phase = dne_i[0];
         cfg.dne_use_unbounded_echo = dne_i[1];
         cfg.dne_lf_endpoint_bin = dne_i[2];
-        cfg.dne_loud_relax_enabled = 0;
-        cfg.dne_loud_snr_factor = 3.0;
-        cfg.dne_loud_enr_threshold = 0.75;
-        cfg.ser_floor_enabled = 0;
-        cfg.ser_floor_strength = 0.5f;
-        cfg.coh_gain_floor_enabled = 0;
-        cfg.coh_gain_floor_strength = 0.5f;
-        cfg.d5_ne_floor_enabled = 0;
-        cfg.d5_ne_floor_strength = 0.3f;
-        cfg.hf_min_gain_floor_dne_enabled = 0;
-        cfg.hf_min_gain_floor_dne_power = 0.0;
         cfg.stat_aware_ne_proxy_enabled = 0;
         cfg.stat_aware_ne_proxy_threshold = 0.10;
 

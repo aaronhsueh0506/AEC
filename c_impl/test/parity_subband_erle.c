@@ -46,14 +46,14 @@ int main(int argc, char **argv) {
 
     for (vi = 0; vi < n_variants; ++vi) {
         int n_bins, n_frames;
-        int use_onset, use_min_during, e2y2_gate, coh_active;
-        float cfg_f[4];     /* max_erle_l, max_erle_h, min_erle, e2y2_thr */
+        int use_onset, use_min_during, coh_active;
+        float cfg_f[3];     /* max_erle_l, max_erle_h, min_erle */
         double x2_thr;
         int i, k;
 
         if (!rd(f, &n_bins, 4) || !rd(f, &n_frames, 4) ||
             !rd(f, &use_onset, 4) || !rd(f, &use_min_during, 4) ||
-            !rd(f, &e2y2_gate, 4) || !rd(f, &coh_active, 4) ||
+            !rd(f, &coh_active, 4) ||
             !rd(f, cfg_f, sizeof(cfg_f)) || !rd(f, &x2_thr, 8)) {
             fprintf(stderr, "short read variant %d header\n", vi); return 2;
         }
@@ -91,7 +91,6 @@ int main(int argc, char **argv) {
             subband_erle_init(&s, n_bins,
                               cfg_f[2] /*min_erle*/, cfg_f[0] /*l*/, cfg_f[1] /*h*/,
                               use_onset, use_min_during, 160 /*hop*/,
-                              e2y2_gate, cfg_f[3] /*e2y2_thr*/,
                               max_erle_st, erle_st, erle_oc_st, erle_unb_st,
                               erle_dur_st, coming_st, hold_st,
                               y2acc_st, e2acc_st, low_st);

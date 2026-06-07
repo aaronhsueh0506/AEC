@@ -613,13 +613,10 @@ int aec3_post_run(Aec3Post *p,
             }
 
             /* ── Step 10: coherence Γ²(Ŷ,Y) (3259-3279) ──────────────────── */
-            if (in->erle_coh_gate_enabled || in->coh_gain_floor_enabled) {
+            if (in->erle_coh_gate_enabled) {
                 aec3_post_compute_coherence(p, in->echo_spec, in->near_spec,
                                             &mag);
             }
-            /* cohxd (3285-3301): default OFF in balanced — not implemented as a
-             * live path here (coh_xy_gamma2 would feed SG which the C SG does
-             * not consume). The flag is honoured: when OFF nothing happens. */
 
             /* ── Step 11: aec_state.update (3302-3319) ───────────────────── */
             {
@@ -707,8 +704,6 @@ int aec3_post_run(Aec3Post *p,
                                      delay_blocks, n_part,
                                      /*force_nonlinear=*/0,
                                      sc->r2, sc->r2_unb);
-
-                        /* ── Step 16: nearend_spp — default OFF (skip) ─────── */
 
                         /* ── Step 17: stationarity R² zeroing (3462-3476) ──── */
                         {

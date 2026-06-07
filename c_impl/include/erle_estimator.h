@@ -42,15 +42,13 @@ typedef struct {
  *   hold                                                           : int32_t
  *
  * Sub-estimator kwargs match the Python ErleEstimator ctor defaults:
- *   use_onset_detection=1, use_min_erle_during_onsets=1.
- * e2y2 gate flags are forwarded to the SubbandErle only (fullband has none). */
+ *   use_onset_detection=1, use_min_erle_during_onsets=1. */
 void erle_estimator_init(ErleEstimator *e,
                          int startup_phase_length_hops,
                          int n_bins,
                          float min_erle, float max_erle_l, float max_erle_h,
                          int use_onset_detection,
                          int hop_size,
-                         int e2y2_gate_enabled, float e2y2_gate_threshold,
                          float *max_erle_st, float *erle_st, float *erle_oc_st,
                          float *erle_unb_st, float *erle_during_st,
                          unsigned char *coming_onset_st, int32_t *hold_st,

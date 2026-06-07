@@ -19,8 +19,6 @@
  *   4a. if initial_state.transition_triggered():
  *           erle.reset(delay_change=False)
  *       erle_converged = any_filter_converged
- *         (optional subtractor gate behind erle_gate_subtractor_converged;
- *          golden runs default OFF)
  *       erle.update(x2 = x2_reverb_for_erle or render_psd,
  *                   y2 = capture_psd_erle or capture_psd,
  *                   e2 = error_psd, converged=erle_converged,
@@ -54,12 +52,9 @@
  *     step 7 skipped, filter_quality always sees transparent_mode=0.
  *   - enable_filter_analyzer=True → step 1b runs; analyzer drives step-2
  *     delays AND step-5 echo_path_gain.
- *   - erle_gate_subtractor_converged / erle_e2y2_gate default OFF →
- *     erle_converged == any_filter_converged (no np.sum path).
  *
- * PARITY: no new float math at this layer beyond the optional subtractor-gate
- * np.sum (which the golden does not exercise, gate OFF). All counters are
- * integer/bool. The bit-exact surface is delegated to the sub-modules.
+ * PARITY: no new float math at this layer. All counters are integer/bool.
+ * The bit-exact surface is delegated to the sub-modules.
  */
 #ifndef AEC_STATE_H
 #define AEC_STATE_H
@@ -94,13 +89,6 @@ typedef struct {
     int    erl_startup_hops;           /* default 200 */
     int    hop_size;                   /* default 160 */
     int    sample_rate;                /* default 16000 (unused at this layer) */
-    int    erle_e2y2_gate_enabled;     /* default 0 */
-    double erle_e2y2_gate_threshold;   /* default 0.5 */
-    /* AEC3 per-frame subtractor convergence gate for ERLE. Default OFF (golden
-     * path). When ON, erle_converged = (e2sum < thr*y2sum && y2sum > floor). */
-    int    erle_gate_subtractor_converged;     /* default 0 */
-    double erle_gate_subtractor_threshold;     /* default 0.5 */
-    double erle_gate_subtractor_y2_floor;      /* default 1.0e6 */
     int    enable_filter_analyzer;     /* default 1 (BALANCED) */
     int    filter_taps_size;           /* full impulse-response length (FilterAnalyzer) */
 } AecStateConfig;

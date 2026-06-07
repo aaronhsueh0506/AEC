@@ -3,9 +3,6 @@
  * strict update() order. */
 #include "aec_state.h"
 
-/* f32_pairwise_sum (subtractor gate, default OFF) is declared in
- * erl_estimator.h (pulled in via aec_state.h). */
-
 /* DelayAdjustment enum (delay_types.py): NONE=0, BUFFER_FLUSH=1,
  * NEW_DETECTED_DELAY=2. */
 #define AEC_DELAY_ADJ_NONE 0
@@ -25,11 +22,6 @@ void aec_state_config_defaults(AecStateConfig *cfg) {
     cfg->erl_startup_hops = 200;
     cfg->hop_size = 160;
     cfg->sample_rate = 16000;
-    cfg->erle_e2y2_gate_enabled = 0;
-    cfg->erle_e2y2_gate_threshold = 0.5;
-    cfg->erle_gate_subtractor_converged = 0;
-    cfg->erle_gate_subtractor_threshold = 0.5;
-    cfg->erle_gate_subtractor_y2_floor = 1.0e6;
     cfg->enable_filter_analyzer = 1;
     cfg->filter_taps_size = 960;  /* hop=160 -> fft=512 -> 6 part * 160 = 960 */
 }
@@ -52,8 +44,6 @@ void aec_state_init(AecState *s, const AecStateConfig *cfg,
                         (float)cfg->erle_min, (float)cfg->erle_max_l,
                         (float)cfg->erle_max_h,
                         /*use_onset_detection=*/1, cfg->hop_size,
-                        cfg->erle_e2y2_gate_enabled,
-                        (float)cfg->erle_e2y2_gate_threshold,
                         st->erle_max, st->erle, st->erle_oc, st->erle_unb,
                         st->erle_during, st->erle_coming_onset, st->erle_hold,
                         st->erle_y2_acc, st->erle_e2_acc, st->erle_low_render);
@@ -234,19 +224,6 @@ void aec_state_update(AecState *s,
         erle_estimator_reset(&s->erle_estimator, /*delay_change=*/0);
     }
     int erle_converged = any_filter_converged;
-    if (s->cfg.erle_gate_subtractor_converged) {
-        /* float(np.sum(...)) over a float32 array == numpy pairwise sum in
-         * float32, then widened to double. Both branches pick the f32 array
-         * the Python selects (capture_psd_erle when present, else capture_psd).
-         * Default OFF — the golden never exercises this branch. */
-        const float *y2_src = (capture_psd_erle != NULL)
-                              ? capture_psd_erle : capture_psd;
-        double y2sum = (double)f32_pairwise_sum(y2_src, (size_t)s->cfg.n_bins);
-        double e2sum = (double)f32_pairwise_sum(error_psd, (size_t)s->cfg.n_bins);
-        erle_converged = (e2sum < s->cfg.erle_gate_subtractor_threshold * y2sum
-                          && y2sum > s->cfg.erle_gate_subtractor_y2_floor)
-                         ? 1 : 0;
-    }
     {
         const float *x2_in = (x2_reverb_for_erle != NULL)
                              ? x2_reverb_for_erle : render_psd;

@@ -347,8 +347,6 @@ typedef struct {
 
     /* ── config flags ───────────────────────────────────────────────────── */
     int            erle_coh_gate_enabled;
-    int            coh_gain_floor_enabled;
-    int            cohxd_floor_release_enabled;
     int            use_stationarity_properties; /* sg echo_audibility flag */
     double         active_render_threshold;     /* _ar_thr = 5.96e-4       */
 } Aec3PostRunIn;

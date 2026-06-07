@@ -139,11 +139,7 @@ static void dominant_nearend_update(SuppressionGain *sg, const float *nearend,
     double echo_sum = (double)f32_sum_slice(echo, 1, lf);
     double noise_sum = (double)f32_sum_slice(cn, 1, lf);
     int trigger_initial_gate = (!initial_state) || c->dne_use_during_initial_phase;
-    int loud_nearend = c->dne_loud_relax_enabled
-        && (ne_sum > c->dne_loud_snr_factor * c->dne_snr_threshold * noise_sum);
-    double eff_enr_thr = loud_nearend ? c->dne_loud_enr_threshold
-                                      : c->dne_enr_threshold;
-    int trigger_enr_pass = echo_sum < eff_enr_thr * ne_sum;
+    int trigger_enr_pass = echo_sum < c->dne_enr_threshold * ne_sum;
     int trigger_snr_pass = ne_sum > c->dne_snr_threshold * noise_sum;
     int trigger_active = trigger_initial_gate && trigger_enr_pass
                          && trigger_snr_pass;
@@ -295,17 +291,7 @@ static void get_min_gain(SuppressionGain *sg, const float *weighted_residual,
             }
         }
     }
-    /* HF min-gain floor during DNE (default OFF) */
-    if (c->hf_min_gain_floor_dne_enabled && ne_state_for_gain_rules(sg)
-            && c->first_hf_band < n) {
-        float floor_f = (float)c->hf_min_gain_floor_dne_power;
-        for (k = c->first_hf_band; k < n; ++k) {
-            if (out[k] < floor_f) out[k] = floor_f;  /* np.maximum f32 */
-        }
-        for (k = 0; k < n; ++k) if (out[k] > 1.0f) out[k] = 1.0f;
-    }
-    /* Split min-gain floor (default ON). cohxd release is OFF in balanced
-     * (coh_xy_gamma2 always None) -> the simple base_floor branch. */
+    /* Split min-gain floor (default ON). */
     if (c->split_floor_enabled) {
         float base_floor = (float)(sg->far_active_latched
                                    ? c->split_floor_far_active
@@ -327,7 +313,7 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
     int k;
     float ne_w = 0.0f;                          /* scalar LF ne_weight */
     const float *enr_tr_tab, *enr_su_tab, *emr_tr_tab;
-    int have_scalar_blend_inputs = c->soft_blend_enabled || c->d5_ne_floor_enabled;
+    int have_scalar_blend_inputs = c->soft_blend_enabled;
 
     if (have_scalar_blend_inputs) {
         /* ne_lf / echo_lf : f32 pairwise sum over [1:dne_lf_end], cast f64 */
@@ -397,12 +383,6 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
             g = g_lin > g_emr ? g_lin : g_emr;   /* np.maximum f32 */
         }
         out[k] = g;
-    }
-
-    /* D5 ne_weight gain floor (default OFF) */
-    if (c->d5_ne_floor_enabled && ne_w > 0.0f) {
-        float fl = ne_w * c->d5_ne_floor_strength;
-        for (k = 0; k < n; ++k) if (out[k] < fl) out[k] = fl;  /* np.maximum f32 */
     }
 }
 
@@ -497,7 +477,6 @@ const float *suppression_gain_get_gain(
         if (v > hi) v = hi;
         sg->gain[k] = v;
     }
-    /* SER floor (OFF), coh gain floor (OFF, coh_gamma2 None) -> skipped. */
 
     /* Step 7: LF + HF limiters */
     limit_lf_gains(sg->gain, n);
