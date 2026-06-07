@@ -271,7 +271,7 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     _mode = AecMode.PBFDAF if _mode_env == 'PBFDAF' else AecMode.PBFDKF
     _use_kalman = (_mode == AecMode.PBFDKF)
     common_kw = dict(sample_rate=sr, mode=_mode,
-                     filter_length=fl, enable_dtd=False,
+                     filter_length=fl,
                      enable_shadow=True, enable_res=enable_res,
                      use_kalman=_use_kalman,
                      **delay_est_kw, **config_overrides)

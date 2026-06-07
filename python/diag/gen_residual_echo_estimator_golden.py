@@ -231,7 +231,7 @@ def run_case(stem, frames):
     try:
         cfg = AecConfig.from_preset(
             'balanced', sample_rate=16000, filter_length=832,
-            mode=AecMode.PBFDKF, enable_dtd=False, enable_shadow=True,
+            mode=AecMode.PBFDKF, enable_shadow=True,
             enable_res=True, use_kalman=True, enable_delay_est=False)
         np.random.seed(0)
         aec = AEC(cfg)

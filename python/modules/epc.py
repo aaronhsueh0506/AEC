@@ -41,7 +41,7 @@ class EchoPathChangeDetector:
         update_shadow_rise(...)  → both filters' errors rising in tandem (post-converged)
 
     Caller applies side effects (Q-boost, P-override, ERL cap, render-forced,
-    mark_diverged, dtd_coherence dampening) by inspecting EpcEvent.source.
+    mark_diverged) by inspecting EpcEvent.source.
 
     Hangover countdown is unified into a single counter; tick_hangover() is
     called once per frame inside the same `(shadow_filter and filter_converged)`

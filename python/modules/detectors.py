@@ -155,9 +155,8 @@ class DoubleTalkAnalyzer:
         _dt_from_shadow   : (shadow_advantage − offset) / scale, smoothed 70/30.
         _shadow_advantage : main_err / shadow_err (raw, no EMA).
 
-    Coherence-based DT lives in DtdEstimator (self.dtd_coherence on AEC) and
-    is read by name from there; this analyzer does not own it but exposes a
-    combined() helper for AecState assembly.
+    Coherence-based double-talk detection was retired; the
+    dt_from_coherence diagnostic is now permanently 0.0.
     """
 
     SHADOW_FRAME_GATE = 50  # match shadow filter warmup

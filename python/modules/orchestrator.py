@@ -23,7 +23,6 @@ from .dataclasses import AecStats, AecResContext
 from .delay.legacy_compat import LegacyDelayShim as DelayEstimator
 from .preprocessing import HighPassFilter, SaturationDetector
 from .filters import PBFDAF, PBFDKF
-from .dtd import DtdEstimator
 from .detectors import (
     RenderActivityDetector, FilterConvergenceAnalyzer,
     DoubleTalkAnalyzer,
@@ -256,12 +255,6 @@ class AEC:
             self.delay_est = None
             self._delay_active = False
 
-        # Default-init mode-divergent attributes so every code path that
-        # reads `self._dtd_fft_size` (set inside the FDAF-buffering block)
-        # also works for PBFDKF/PBFDAF/SUBBAND. Was a latent
-        # AttributeError surfaced by CLI smoke on BALANCED.
-        self._dtd_fft_size = 0
-
         # Create adaptive filter based on mode
         if self.config.mode in _FREQ_MODES:
             if self.config.mode == AecMode.FDAF:
@@ -327,63 +320,10 @@ class AEC:
                 self._freq_out_valid = 0  # valid output samples remaining
                 self._freq_out_read = 0
                 self._freq_queue_write = 0
-                # DTD independent buffer: FL-point FFT with hop=FL/2
-                # Decouples coherence DTD from FDAF's larger block_size
-                fl = self.config.filter_length
-                self._dtd_fft_size = fl
-                self._dtd_hop = fl // 2
-                self._dtd_err_buf = np.zeros(fl, dtype=np.float32)
-                self._dtd_far_buf = np.zeros(fl, dtype=np.float32)
-                self._dtd_acc_err = np.zeros(fl // 2, dtype=np.float32)
-                self._dtd_acc_far = np.zeros(fl // 2, dtype=np.float32)
-                self._dtd_acc_pos = 0
             else:
                 self._freq_near_queue = None
-                self._dtd_fft_size = 0
         else:
             raise ValueError(f"unsupported AEC mode: {self.config.mode!r}")
-
-        # DTD: frequency-domain modes only (divergence + coherence dual detector)
-        # LMS/NLMS have no effective DTD — all methods (Geigel, NCC, coherence,
-        # VSS-NLMS) either don't work for AEC or cause vicious cycles with slow
-        # convergence. Output Limiter provides the safety net instead.
-        if self.config.enable_dtd and self.config.mode in _FREQ_MODES:
-            # Warmup: 50 DTD invocations before coherence starts.
-            # FDAFDTD runs every dtd_hop/hop_size external frames,
-            # so 50 DTD invocations = 50 * dtd_hop/hop_size external frames.
-            warmup = 50
-            self.dtd_divergence = DtdEstimator(
-                mode='divergence',
-                divergence_factor=self.config.dtd_divergence_factor,
-                attack=self.config.dtd_confidence_attack,
-                release=self.config.dtd_confidence_release,
-                warmup_frames=warmup,
-            )
-            # FDAF: FL-point FFT (matches filter length, hop=FL/2)
-            # PBFDAF/PBFDKF: use filter's own spectra (block_size from filter)
-            if self._dtd_fft_size > 0:
-                dtd_block_size = self._dtd_fft_size
-            else:
-                dtd_block_size = self.filter.block_size
-            coh_n_freqs = dtd_block_size // 2 + 1
-            self.dtd_coherence = DtdEstimator(
-                mode='coherence',
-                n_freqs=coh_n_freqs,
-                coh_alpha=self.config.dtd_coh_alpha,
-                coh_high=self.config.dtd_coh_high,
-                coh_low=self.config.dtd_coh_low,
-                coh_energy_floor=self.config.dtd_coh_energy_floor,
-                coh_abs_floor=self.config.dtd_coh_abs_floor,
-                hangover_max=self.config.dtd_coh_hangover,
-                attack=self.config.dtd_confidence_attack,
-                release=self.config.dtd_coh_release,
-                warmup_frames=warmup,
-                sample_rate=self.config.sample_rate,
-                block_size=dtd_block_size,
-            )
-        else:
-            self.dtd_divergence = None
-            self.dtd_coherence = None
 
         # Legacy ResFilter retired. The AEC3 chain (modules/state +
         # modules/residual + modules/filter + modules/render) replaces the
@@ -674,10 +614,6 @@ class AEC:
         # parallel instance.
         self._epc_reset_fired_this_frame = False
 
-        # #4: Confidence memory decay
-        self.prev_dtd_conf = 0.0
-        self._dtd_conf_holdoff = 0  # F2.5: frames remaining in hold phase
-
         # Filter convergence + divergence-indicator (extracted to FilterConvergenceAnalyzer).
         # Backward-compat reads via @property below.
         self._convergence = FilterConvergenceAnalyzer()
@@ -893,8 +829,6 @@ class AEC:
             self._ref_ring_write = 0
             self._ref_ring_filled = 0
         self._epc_det.reset()
-        self.prev_dtd_conf = 0.0
-        self._dtd_conf_holdoff = 0
         self._convergence.reset()
         self._erle_window_near = 1e-10
         self._erle_window_err = 1e-10
@@ -947,10 +881,6 @@ class AEC:
         self._far_power_ema = 0.0
         self._mic_power_ema = 0.0
         self._frame_count = 0
-        if self.dtd_divergence:
-            self.dtd_divergence.reset()
-        if self.dtd_coherence:
-            self.dtd_coherence.reset()
         if self._freq_near_queue is not None:
             self._freq_near_queue.fill(0)
             self._freq_far_queue.fill(0)
@@ -985,12 +915,6 @@ class AEC:
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
         self._limiter_gain = 1.0
         self._per_bin_mu_scale = None
-        if self._dtd_fft_size > 0:
-            self._dtd_acc_pos = 0
-            self._dtd_acc_err.fill(0)
-            self._dtd_acc_far.fill(0)
-            self._dtd_err_buf.fill(0)
-            self._dtd_far_buf.fill(0)
         # Reset DT signals (now owned by DoubleTalkAnalyzer)
         self._dt_analyzer.reset()
         self._epc_render_forced_remaining = 0
@@ -1172,8 +1096,6 @@ class AEC:
             • _erle_window_* / _inst_erle_smooth / _erle_factor_prev
             • _simple_mu_ratio / _simple_mu_holdoff / _per_bin_mu_scale
             • _epc_render_forced_remaining / _erl_estimate / _per_band_erl
-            • prev_dtd_conf
-            • DTD divergence + coherence smoothed PSDs
             • AEC3 post chain (_aec3_state / _aec3_ree / _aec3_sg recreated;
               _aec3_ola_buf / noise_psd / smooth_cn_gain zero-filled;
               _aec3_pending_* + _aec3_noise_initialized cleared) — all
@@ -1188,13 +1110,9 @@ class AEC:
         if self.shadow_filter is not None:
             self.shadow_filter.reset()
 
-        # Filter convergence + EPC + divergence DTD + coherence DTD
+        # Filter convergence + EPC
         self._convergence.reset()
         self._epc_det.reset()
-        if self.dtd_divergence is not None:
-            self.dtd_divergence.reset()
-        if self.dtd_coherence is not None:
-            self.dtd_coherence.reset()
 
         # Filter-output power / smoother / err quantities
         self.main_err_smooth = 0.0
@@ -1217,26 +1135,16 @@ class AEC:
         self._erle_factor_prev = 0.0
         self._inst_erle_smooth = 1.0
 
-        # Mu-scale state (depends on DTD which depends on filter)
+        # Mu-scale state (filter-output-derived)
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0
         self._per_bin_mu_scale = None
-        self.prev_dtd_conf = 0.0
-        self._dtd_conf_holdoff = 0
 
         # ERL + EPC-render forced + DT analyzer (all filter-output-derived)
         self._erl_estimate = 0.1
         self._epc_render_forced_remaining = 0
         self._dt_analyzer.reset()
         self._stat_dt_hangover = 0
-
-        # Coherence DTD's accumulated err/far PSDs (live in _dtd_acc_*)
-        if self._dtd_fft_size > 0:
-            self._dtd_acc_pos = 0
-            self._dtd_acc_err.fill(0)
-            self._dtd_acc_far.fill(0)
-            self._dtd_err_buf.fill(0)
-            self._dtd_far_buf.fill(0)
 
         # Shadow copy controller
         self.shadow_frame_count = 0
@@ -1306,73 +1214,6 @@ class AEC:
     @property
     def hop_size(self) -> int:
         return self._hop_size
-
-    def _compute_mu_scale(self) -> float:
-        """Convert combined DTD confidence to mu_scale [mu_min_ratio, 1.0].
-
-        When delay fallback is active, alignment is unreliable so we must
-        not adapt against absent/bad ref. Return 0 to freeze taps; RES
-        rides its existing render-based path because filter never converges.
-
-        Coherence is primary; divergence is fallback only when coherence
-        inactive. Confidence has memory decay to avoid sudden drops.
-        EPC: mu_scale floor during echo path change.
-
-        Delay-confidence ceiling:
-          When delay-est confidence is low (PAR < par_low_threshold), the
-          filter is learning against a misaligned reference — driving mu
-          high will encode garbage. Cap mu_scale at a delay-confidence-
-          dependent ceiling: low confidence → mu_scale ≤ 0.5; full
-          confidence → no cap (1.0). This mirrors WebRTC AEC3's behavior:
-          AEC3 stays conservative until matched-filter delay is solid.
-        """
-        conf_div = self.dtd_divergence.confidence if self.dtd_divergence else 0.0
-        conf_coh = self.dtd_coherence.confidence if self.dtd_coherence else 0.0
-
-        # #3: Coherence primary, divergence fallback
-        if conf_coh > 0.1:
-            raw_conf = conf_coh
-        else:
-            raw_conf = max(conf_div, conf_coh)
-
-        # #4: Confidence memory decay (avoid sudden drops)
-        conf = max(raw_conf, self.prev_dtd_conf * 0.9)
-        self.prev_dtd_conf = conf
-
-        if conf == 0.0:
-            mu_scale = 1.0
-        else:
-            min_r = self.config.dtd_mu_min_ratio
-            # Before convergence, allow higher mu_min so filter can still learn during DT
-            if not self._filter_converged:
-                min_r = max(min_r, 0.3)
-            mu_scale = 1.0 - conf * (1.0 - min_r)
-
-        # Echo path change: keep mu high so filter can adapt to new path
-        if self.epc_active:
-            mu_scale = max(mu_scale, self.config.epc_mu_floor)
-
-        # Delay-confidence ceiling. Cap mu when delay alignment is
-        # uncertain (avoid learning garbage against misaligned ref).
-        # Skip the ceiling during a post-reset warmup window so the
-        # high-Q boost armed by _reset_filter_derived_state can actually
-        # take effect. Otherwise PAR fluctuating between low/solid
-        # thresholds right after delay acquisition caps mu at ~0.5–0.7
-        # and defeats the warmup re-arm, slowing ERLE rebuild and risking
-        # a wasted second plateau attempt.
-        in_post_reset_warmup = (
-            self._warmup_frames > 0
-            or (self.filter is not None
-                and getattr(self.filter, '_p_max_override_frames', 0) > 0)
-        )
-        if self.delay_est is not None and not in_post_reset_warmup:
-            delay_conf = self.delay_est.confidence
-            if delay_conf < 1.0:
-                # 0.5 ceiling at delay_conf=0, linear interpolate to 1.0
-                delay_ceiling = 0.5 + 0.5 * delay_conf
-                mu_scale = min(mu_scale, delay_ceiling)
-
-        return mu_scale
 
     def _get_simple_mu_scale(self, mu_min: float = None):
         """Get mu_scale from smoothed EER (per-bin array or scalar fallback)."""
@@ -1608,19 +1449,14 @@ class AEC:
                         self._ref_ring[:hop - part1]
                     ])
 
-        # DTD: dual detector (divergence + coherence) for frequency-domain modes
-        # Combined confidence = max(divergence, coherence) → mu_scale
-        # Non-DTD: simple variable mu (Valin 2007 RER-inspired)
+        # Simple variable mu (Valin 2007 RER-inspired) for frequency-domain modes.
 
         # Far-end activity + stationarity (single source of truth for warmup gate,
         # stationary-DT detector, and EPC stationary guard).
         _render = self._render_activity.update(far_end)
         self._warmup_far_active = _render.warmup_active
 
-        if self.config.enable_dtd:
-            mu_scale = self._compute_mu_scale()
-        else:
-            mu_scale = self._get_simple_mu_scale()
+        mu_scale = self._get_simple_mu_scale()
 
         # Mic clipping emergency: freeze filter and clamp RES output to floor.
         # Hard clipping turns mic into square waves; filter would learn garbage.
@@ -1881,8 +1717,8 @@ class AEC:
                 # returns a RegimeHandlerDecision. Filter mutations (Q-boost, reverse
                 # copy) are applied here so the handler stays decision-only.
                 # Phase C1: optional coherence+delay gate inputs (default gate_mode='energy'
-                # ignores them, so legacy behavior parity-preserved).
-                _dt_coh = self.dtd_coherence.confidence if self.dtd_coherence else 0.0
+                # ignores them, so legacy behavior parity-preserved). The former
+                # coherence DTD was retired; dt_from_coherence is always 0.0.
                 # Shadow→main copy gate: require delay alignment at least
                 # mid-confidence (PAR halfway between par_low and par_solid),
                 # since shadow-copy permanently overwrites filter taps.
@@ -1899,7 +1735,7 @@ class AEC:
                     epc_active=self.epc_active,
                     saturation_level=float(self._saturation_level),
                     dt_from_energy=float(self._dt_from_energy),
-                    dt_from_coherence=float(_dt_coh),
+                    dt_from_coherence=0.0,
                     delay_reliable=bool(_delay_reliable),
                 )
                 if shadow_decision.boost_q:
@@ -1983,8 +1819,6 @@ class AEC:
                             and hasattr(self.filter, 'handle_echo_path_change')):
                         self.filter.handle_echo_path_change(
                             delay_change=True, gain_change=False, zero_filter=False)
-                    if self.dtd_coherence:
-                        self.dtd_coherence.confidence *= 0.3
                     for filt in [self.filter, self.shadow_filter]:
                         if filt and hasattr(filt, 'Q'):
                             self._arc_m_q_boost(filt)
@@ -2094,16 +1928,13 @@ class AEC:
                     erl_estimate=self._erl_estimate,
                 )
 
-                # Step 1: base DT confidence
-                if self.config.enable_dtd:
-                    raw_dt = self.get_dtd_confidence()
-                else:
-                    simple_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
-                    # ERL-corrected blend: simple ratio misfires in high-ERL FS
-                    # (mic ≈ echo > far → simple says "DT", ERL-corrected says "FS").
-                    # Take max of ERL-corrected estimate and half the simple ratio
-                    # so true DT (dt_from_energy high) is preserved, false DT is halved.
-                    raw_dt = max(float(self._dt_from_energy), simple_dt * 0.5)
+                # Step 1: base DT confidence (simple energy-ratio estimate)
+                simple_dt = 1.0 - far_pwr / (mic_pwr + far_pwr)
+                # ERL-corrected blend: simple ratio misfires in high-ERL FS
+                # (mic ≈ echo > far → simple says "DT", ERL-corrected says "FS").
+                # Take max of ERL-corrected estimate and half the simple ratio
+                # so true DT (dt_from_energy high) is preserved, false DT is halved.
+                raw_dt = max(float(self._dt_from_energy), simple_dt * 0.5)
 
                 # Stationary DT macro detection (sets flag only, does NOT override raw_dt)
                 is_stationary_dt = False
@@ -2146,19 +1977,18 @@ class AEC:
                     self._wn_err_baseline = (0.995 * self._wn_err_baseline
                                               + 0.005 * raw_err_pwr)
 
-                # inst_erle correction (only no-DTD)
-                if not self.config.enable_dtd:
-                    inst_erle_fast_raw = mic_pwr / raw_err_pwr
-                    self._inst_erle_smooth = (0.7 * self._inst_erle_smooth
-                                              + 0.3 * inst_erle_fast_raw)
-                    if self._inst_erle_smooth > 2.0:
-                        # Cap correction divisor: inst_erle=15 would make
-                        # raw_dt=0.6→0.04, killing DT protection entirely.
-                        # Cap at 4.0 keeps raw_dt=0.6→0.15, preserving
-                        # some DT awareness while still reducing false DT
-                        # in high-coupling FS (original purpose).
-                        erle_for_dt = min(self._inst_erle_smooth, 4.0)
-                        raw_dt /= erle_for_dt
+                # inst_erle correction
+                inst_erle_fast_raw = mic_pwr / raw_err_pwr
+                self._inst_erle_smooth = (0.7 * self._inst_erle_smooth
+                                          + 0.3 * inst_erle_fast_raw)
+                if self._inst_erle_smooth > 2.0:
+                    # Cap correction divisor: inst_erle=15 would make
+                    # raw_dt=0.6→0.04, killing DT protection entirely.
+                    # Cap at 4.0 keeps raw_dt=0.6→0.15, preserving
+                    # some DT awareness while still reducing false DT
+                    # in high-coupling FS (original purpose).
+                    erle_for_dt = min(self._inst_erle_smooth, 4.0)
+                    raw_dt /= erle_for_dt
 
                 # EPC physical gate
                 # Round 3 D3 trace: record raw_dt BEFORE the EPC zero so we can
@@ -2209,30 +2039,28 @@ class AEC:
                 # only written from ResFilter.process() (dead since R4) → both
                 # were permanently zero, so per_bin_eer was always np.zeros and
                 # _per_bin_mu_scale was a fresh mu_min*ones array per frame.
-                if not self.config.enable_dtd:
-                    if self._filter_converged:
-                        mu_min = self.config.shadow_mu_min
-                        self._per_bin_mu_scale = np.full(
-                            self.filter.n_freqs, mu_min, dtype=np.float32)
-                        self._simple_mu_ratio = 0.0
-                        # Stationary DT: only freeze when speech actually
-                        # detected (jump_ratio + hangover). _is_stationary_far
-                        # alone fires on 32% of normal speech far-end frames,
-                        # which would crush filter convergence on plain FS.
-                        if is_stationary_dt:
-                            self._per_bin_mu_scale[:] = mu_min
-                            self._simple_mu_ratio = mu_min
-                    else:
-                        # Pre-convergence: no per_bin, let ratio track DT naturally
-                        self._per_bin_mu_scale = None
-                        self._update_simple_mu_ratio(raw_output, far_end)
+                if self._filter_converged:
+                    mu_min = self.config.shadow_mu_min
+                    self._per_bin_mu_scale = np.full(
+                        self.filter.n_freqs, mu_min, dtype=np.float32)
+                    self._simple_mu_ratio = 0.0
+                    # Stationary DT: only freeze when speech actually
+                    # detected (jump_ratio + hangover). _is_stationary_far
+                    # alone fires on 32% of normal speech far-end frames,
+                    # which would crush filter convergence on plain FS.
+                    if is_stationary_dt:
+                        self._per_bin_mu_scale[:] = mu_min
+                        self._simple_mu_ratio = mu_min
+                else:
+                    # Pre-convergence: no per_bin, let ratio track DT naturally
+                    self._per_bin_mu_scale = None
+                    self._update_simple_mu_ratio(raw_output, far_end)
 
             # C-parity fix: when RES is disabled, _update_simple_mu_ratio is
             # never called in PBFDKF path. C always calls update_simple_mu_ratio
             # regardless. Add call here when RES is off (avoids double-update
             # when RES is on).
             if (not self.config.enable_res
-                    and not self.config.enable_dtd
                     and not self._filter_converged):
                 self._update_simple_mu_ratio(raw_output, far_end)
 
@@ -2453,48 +2281,13 @@ class AEC:
             self._diag['dt_from_zero_count'] = getattr(self, '_dt_from_zero_count', 0)
             self._diag['far_power'] = self._far_power_ema
             self._diag['mic_power'] = self._mic_power_ema
-            self._diag['dt_from_coherence'] = (
-                self.dtd_coherence.confidence if self.dtd_coherence else 0.0)
-
-            # Update DTD detectors for NEXT block
-            # Skip divergence detector before convergence (output>mic is normal
-            # when filter hasn't learned echo path yet, not actual divergence)
-            if self.dtd_divergence and self._filter_converged:
-                self.dtd_divergence.detect_block(near_end, far_end, output=raw_output)
-            if self.dtd_coherence and self._filter_converged:
-                if self._dtd_fft_size > 0:
-                    # FDAFbuffered: accumulate into DTD buffer, run at hop=FL/2
-                    hop = self._hop_size
-                    pos = self._dtd_acc_pos
-                    self._dtd_acc_err[pos:pos+hop] = raw_output
-                    self._dtd_acc_far[pos:pos+hop] = far_end
-                    self._dtd_acc_pos = pos + hop
-                    if self._dtd_acc_pos >= self._dtd_hop:
-                        # Shift main buffer and run DTD
-                        dh = self._dtd_hop
-                        self._dtd_err_buf[:dh] = self._dtd_err_buf[dh:]
-                        self._dtd_err_buf[dh:] = self._dtd_acc_err
-                        self._dtd_far_buf[:dh] = self._dtd_far_buf[dh:]
-                        self._dtd_far_buf[dh:] = self._dtd_acc_far
-                        self._dtd_acc_pos = 0
-                        error_spec = np.fft.rfft(self._dtd_err_buf)
-                        far_spec = np.fft.rfft(self._dtd_far_buf)
-                        self.dtd_coherence.detect_block(
-                            near_end, far_end,
-                            error_spec=error_spec, far_spec=far_spec)
-                else:
-                    # PBFDAF/PBFDKF: use filter's spectra directly (every frame)
-                    self.dtd_coherence.detect_block(
-                        near_end, far_end,
-                        error_spec=self.filter.error_spec,
-                        far_spec=self.filter.far_spec)
+            self._diag['dt_from_coherence'] = 0.0
         else:
-            # LMS/NLMS: use mu_scale from DTD or simple variable mu
+            # LMS/NLMS: simple variable mu
             raw_output, echo_est = self.filter.process_block(near_end, far_end,
                                                               mu_scale=mu_scale)
             final_output = raw_output.copy()
-            if not self.config.enable_dtd:
-                self._update_simple_mu_ratio(raw_output, far_end)
+            self._update_simple_mu_ratio(raw_output, far_end)
 
         # Output limiter: final_output should never exceed mic amplitude.
         # Uses smoothed gain to avoid frame-boundary clicking artifacts.
@@ -2728,17 +2521,6 @@ class AEC:
         np.savez(path, **cols)
         return n_frames
 
-    def is_dtd_active(self) -> bool:
-        return self.get_dtd_confidence() > 0.5
-
-    def get_dtd_confidence(self) -> float:
-        conf_div = self.dtd_divergence.confidence if self.dtd_divergence else 0.0
-        conf_coh = self.dtd_coherence.confidence if self.dtd_coherence else 0.0
-        # #3: Same logic as _compute_mu_scale — coherence primary
-        if conf_coh > 0.1:
-            return conf_coh
-        return max(conf_div, conf_coh)
-
     def get_filter_state(self) -> AecFilterState:
         """Return the highest-priority active filter state as AecFilterState enum.
 
@@ -2788,11 +2570,11 @@ class AEC:
             mu_scale=d.get('mu_scale', 1.0),
             filter_w_norm=d.get('filter_w_norm', 0.0),
             shadow_w_norm=d.get('shadow_w_norm', 0.0),
-            dt_confidence=self.get_dtd_confidence(),
+            dt_confidence=0.0,
             dt_from_energy=self._dt_from_energy,
             dt_from_shadow=self._dt_from_shadow,
             dt_from_coherence=d.get('dt_from_coherence', 0.0),
-            dt_active=self.is_dtd_active(),
+            dt_active=False,
             far_power_db=_db(self._far_power_ema),
             mic_power_db=_db(self._mic_power_ema),
             error_power_db=_db(self.error_power),
@@ -3617,7 +3399,6 @@ def process_wav_files(mic_path: str, ref_path: str, out_path: str,
     print(f"  Mode: {config.mode.value}")
     print(f"  Step size (mu): {config.mu}")
     print(f"  Filter length: {config.filter_length} samples ({1000 * config.filter_length / config.sample_rate:.1f} ms)")
-    print(f"  DTD: {'enabled' if config.enable_dtd else 'disabled'}")
     print(f"  RES: {'enabled' if config.enable_res else 'disabled'}")
     print()
 
@@ -3627,7 +3408,6 @@ def process_wav_files(mic_path: str, ref_path: str, out_path: str,
     output = np.zeros(num_samples, dtype=np.float32)
     processed = 0
     max_erle = 0.0
-    dtd_frames = 0
 
     while processed + hop_size <= num_samples:
         mic_block = mic_data[processed:processed + hop_size]
@@ -3635,9 +3415,6 @@ def process_wav_files(mic_path: str, ref_path: str, out_path: str,
 
         out_block = aec.process(mic_block, ref_block)
         output[processed:processed + hop_size] = out_block
-
-        if aec.is_dtd_active():
-            dtd_frames += 1
 
         erle = aec.get_erle()
         max_erle = max(max_erle, erle)
@@ -3663,7 +3440,6 @@ def process_wav_files(mic_path: str, ref_path: str, out_path: str,
     print(f"\n\nResults:")
     print(f"  Processed samples: {processed}")
     print(f"  Max ERLE: {max_erle:.1f} dB")
-    print(f"  DTD active frames: {dtd_frames} ({100 * dtd_frames * hop_size / max(processed, 1):.1f}%)")
 
     # fp32 PCM (parity-friendly: byte-comparable to the C aec_wav default,
     # and lossless vs the int16 default soundfile would pick for .wav).
@@ -3699,8 +3475,6 @@ Examples:
                         help='Filter length in samples (default: mode-dependent)')
     parser.add_argument('--mode', choices=['fdaf', 'pbfdaf', 'pbfdkf', 'subband'],
                         default='pbfdkf', help='Filter mode (default: pbfdkf)')
-    parser.add_argument('--enable-dtd', action='store_true',
-                        help='Enable DTD (default: off, shadow filter provides DT protection)')
     # Use BooleanOptionalAction with default=None so the CLI only
     # overrides preset values when the user explicitly passes the flag.
     # Otherwise --enable-res / --cng would silently override the
@@ -3753,7 +3527,6 @@ Examples:
         mu=mu,
         filter_length=filter_length,
         mode=aec_mode,
-        enable_dtd=args.enable_dtd,
         enable_td_constraint=not args.no_td_constraint,
         enable_shadow=not args.no_shadow,
         enable_highpass=not args.no_highpass,

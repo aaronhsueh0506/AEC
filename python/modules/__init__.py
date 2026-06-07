@@ -14,7 +14,6 @@ Layout:
 * ``detectors``        — `RenderActivityDetector`,
                          `FilterConvergenceAnalyzer`, `DoubleTalkAnalyzer`,
                          `FilterPlateauDetector`
-* ``dtd``              — `DtdEstimator`
 * ``epc``              — `EchoPathChangeDetector`, `PathChangeRegimeHandler`,
                          `classify_epc_event`
 * ``state``            — `AecState` (+ AEC3-aligned analyzers)

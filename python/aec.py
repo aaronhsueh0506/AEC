@@ -5,7 +5,7 @@ The algorithm itself lives under ``python/modules/``:
 * ``modules.config`` — AecConfig + single BALANCED preset
 * ``modules.orchestrator`` — AEC engine class + process_wav_files + main
 * ``modules.{enums, dataclasses, delay, erle, preprocessing, filters,
-  detectors, dtd, epc, state, residual, residual_estimator, render, filter,
+  detectors, epc, state, residual, residual_estimator, render, filter,
   debug_logger}`` — leaf modules
 
 This file re-exports every public symbol so existing callers can keep
@@ -32,7 +32,6 @@ from modules.detectors import (  # noqa: F401
     RenderActivityDetector, FilterConvergenceAnalyzer,
     DoubleTalkAnalyzer, FilterPlateauDetector,
 )
-from modules.dtd import DtdEstimator  # noqa: F401
 from modules.epc import (  # noqa: F401
     classify_epc_event, EchoPathChangeDetector, PathChangeRegimeHandler,
 )

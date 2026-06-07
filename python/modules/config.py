@@ -27,22 +27,6 @@ class AecConfig:
     mu: float = 0.3                 # Step size
     delta: float = 1e-8             # Regularization
 
-    # ── DTD subsystem (interface, default disabled) ─────────────────────
-    enable_dtd: bool = False
-    dtd_hangover_frames: int = 15
-    dtd_geigel_threshold: float = 0.5
-    dtd_mu_min_ratio: float = 0.05
-    dtd_confidence_attack: float = 0.3
-    dtd_confidence_release: float = 0.05
-    dtd_divergence_factor: float = 1.5
-    dtd_coh_alpha: float = 0.85
-    dtd_coh_high: float = 0.6
-    dtd_coh_low: float = 0.3
-    dtd_coh_energy_floor: float = 0.1
-    dtd_coh_hangover: int = 3
-    dtd_coh_release: float = 0.1
-    dtd_coh_abs_floor: float = 1e-6
-
     # ── Residual / comfort noise ────────────────────────────────────────
     enable_res: bool = True
     enable_cng: bool = False
