@@ -66,3 +66,9 @@ audio_analysis_u1/*.wav
 
 # v3.21 8-case cohort WAVs (local reference corpus; not source)
 wav/v3_21_8_cohort/
+
+# aec3_cli debug dumps (written to CWD when --aec3 bench runs)
+aec3_*-0.dat
+aec3_*-0.wav
+*_1-0.dat
+*_77-0.dat

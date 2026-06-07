@@ -18,7 +18,7 @@ for the side-by-side comparison with v3.10.5 and the WebRTC AEC3 reference.
 | [`c_user_and_integration_guide.md`](c_user_and_integration_guide.md) | C API, integration, streaming contract |
 | [`refactor_modules_layout.md`](refactor_modules_layout.md) | Module map |
 | [`pbfdkf_shadow_intro.md`](pbfdkf_shadow_intro.md) | PBFDKF + shadow design |
-| [`dtd_design.md`](dtd_design.md) | DTD algorithm |
+| [`nn_integration_interface.md`](nn_integration_interface.md) | NN residual/NR/joint swap seams |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Version history |
 
 ---
@@ -183,7 +183,9 @@ filter holds the converged tuning.
 arbitrates between the two filters:
 
 * Fires `boost_q` / `reverse_copy` / `main_paused` decisions per frame
-  based on relative error EMAs, render activity, and DTD state.
+  based on relative error EMAs, render activity, and the shadow-DT
+  signals from `DoubleTalkAnalyzer` (energy-gated; the opt-in DTD detector
+  subsystem was retired in 3.22.5).
 * Load-bearing on ~7/800 cohort-tail cases.
 * Must not be removed or bypassed (see CLAUDE.md).
 

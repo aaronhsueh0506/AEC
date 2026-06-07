@@ -13,7 +13,7 @@ tolerance:
   lives under `python/modules/`.
 - `python/modules/` — algorithm modules organised into the AEC3-aligned
   chain (`state/`, `residual/`, `filter/`, `render/`, `delay/`) plus the
-  shared infrastructure (`filters`, `epc`, `detectors`, `dtd`,
+  shared infrastructure (`filters`, `epc`, `detectors`,
   `preprocessing`, `erle`, `dataclasses`, `config`, `orchestrator`,
   `debug_logger`).
 - `c_impl/` — production C port. Mirrors the Python class structure

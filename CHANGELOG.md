@@ -16,12 +16,23 @@ when verdict requires it.
 
 ---
 
-## [3.22.5] — 2026-06-07 — streaming render/capture C API (BALANCED byte-equal)
+## [3.22.5] — 2026-06-07 — streaming C API + release cleanup (BALANCED byte-equal)
 
-Additive real-time C API + research-arc closures. **BALANCED algorithm unchanged** —
-the `__version__` bump is for the new public API + hygiene, not a BALANCED behaviour
-change (same precedent as 3.22.4). Offline 800-case / Python↔C bit-exact parity
-untouched.
+Streaming C API + dead-code removal + research-arc closures. **BALANCED algorithm
+unchanged** — 800-case AECMOS scores are identical to 3.22.4 (FS_static 3.576 /
+DT_static 4.201·2.156 / NE 4.047); the bump is for the new public API + hygiene.
+Full release summary + 3-way AEC3/Speex comparison:
+[docs/v3_22_5_release.md](docs/v3_22_5_release.md).
+
+**Release cleanup (both impls, bit-exact)**
+- Removed 10 default-OFF research flags (none enabled by any preset) + the opt-in
+  DTD detector subsystem (`dtd.py`/`dtd.c`) + `NearendSpp`: **−1312 lines Python,
+  −423 lines C**. Python byte-equal (27/27 wavs ×3 presets, 25/25 tests); Python↔C
+  **bit-exact** (peak|Δ|=0, ±CNG, all 3 presets); per-module + e2e golden harnesses pass.
+- Python CLI now exposes all three presets (`--preset gentle|balanced|aggressive`).
+- ~25 GB of /tmp build scratch (webrtc checkout, aec3 dumps) cleared; docs curated.
+
+**Streaming render/capture API** ([c_impl/include/aec.h](c_impl/include/aec.h),
 
 **Streaming render/capture API** ([c_impl/include/aec.h](c_impl/include/aec.h),
 [c_impl/src/aec.c](c_impl/src/aec.c); commit `632de7a`)
