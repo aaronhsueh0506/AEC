@@ -16,6 +16,35 @@ when verdict requires it.
 
 ---
 
+## [3.22.5] — 2026-06-07 — streaming render/capture C API (BALANCED byte-equal)
+
+Additive real-time C API + research-arc closures. **BALANCED algorithm unchanged** —
+the `__version__` bump is for the new public API + hygiene, not a BALANCED behaviour
+change (same precedent as 3.22.4). Offline 800-case / Python↔C bit-exact parity
+untouched.
+
+**Streaming render/capture API** ([c_impl/include/aec.h](c_impl/include/aec.h),
+[c_impl/src/aec.c](c_impl/src/aec.c); commit `632de7a`)
+- `aec_analyze_render()` / `aec_process_capture()` decouple far-end (render) and mic
+  (capture) for real-time pipelines where they arrive on separate calls/threads, not
+  necessarily 1:1. A 320 ms render-hop FIFO absorbs call-scheduling jitter (**NOT**
+  echo delay — that stays in `ref_ring`):
+  - underrun (capture w/ empty FIFO) → process with silent render + `AEC_BUF_RENDER_UNDERRUN`
+  - overrun (render past capacity) → drop oldest + `AEC_BUF_RENDER_OVERRUN`
+- Lockstep (one `analyze_render` then one `process_capture`) is FIFO pass-through →
+  **byte-identical to `aec_process()`**. Verified by [c_impl/test/stream_sim.c](c_impl/test/stream_sim.c):
+  lockstep 0/400 hops differ; overrun + underrun detection/recovery PASS.
+
+**Research-arc closure (no production change)**
+- `aec_record` 6–7s breath/fricative closed as **two interleaved Pareto trades, not a
+  single HF bug**: the linear stage already preserves the breath better than Speex
+  (NORES −0.20 vs Speex −1.03; the −4.53 dB cut is 100 % the RES); the audible 4–6k
+  loss is echo-dominated (`near_fr` 0.13, reference-blind); a per-frame near-priority
+  mask separates 1–3k window-averaged but leaks ~12 % of FS far-active frames. BALANCED
+  stays byte-equal; `gentle` is the opt-in speech-preserving operating point, not a fix.
+  See [docs/breath_aec_record_6_7s_closeout_2026_06_07.md](docs/breath_aec_record_6_7s_closeout_2026_06_07.md).
+- Removed stale top-level diag scripts (`diag_enr_trace.py`, `spp_step0_diag.py`).
+
 ## [3.22.4] — 2026-06-03 — three Pareto presets + finalization hygiene
 
 Finalization of the v3.22 DSP arc. The DT-deg gap vs AEC2 is now a **proven
