@@ -3488,8 +3488,10 @@ Examples:
                         help='Enable comfort noise generation in RES (default: from preset, else off)')
     parser.add_argument('--no-td-constraint', action='store_true',
                         help='Disable time-domain constraint on filter weights (diagnostic)')
-    parser.add_argument('--preset', choices=['balanced'],
-                        help='Use preset config (overrides RES/adaptive params)')
+    parser.add_argument('--preset', choices=['gentle', 'balanced', 'aggressive'],
+                        help='Pareto preset: gentle (near-priority) / balanced '
+                             '(shipped) / aggressive (echo-priority). Differ only '
+                             'in the far-active min-gain floor (-20/-28/-38 dB).')
     parser.add_argument('--no-shadow', action='store_true', help='Disable shadow filter')
     parser.add_argument('--no-highpass', action='store_true', help='Disable high-pass filter')
     parser.add_argument('--highpass-cutoff', type=float, default=80.0,
