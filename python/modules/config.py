@@ -50,76 +50,6 @@ class AecConfig:
     comfort_noise_floor_dbfs: float = -96.03406
     enable_td_constraint: bool = True
 
-    # ── v3.22 future work: HF minimum-gain floor during NE-dominant ─────
-    # NOT AEC3-strict (AEC3 SG's min_gain = render_limit / R² has the same
-    # structural weakness — when R² is huge at HF bins where filter spuriously
-    # outputs S²_linear during NE-only periods, min_gain → 0 and HF is
-    # painted-black). v3.21 AEC3 surface is exhausted for this symptom.
-    #
-    # SPEC (when flag ON):
-    #   When the SG dominant-nearend detector says NE-state is active, force
-    #   ``min_gain[k] >= 10^(hf_min_gain_floor_during_dne_db / 10)`` for all
-    #   HF bins (k >= first_hf_band ≈ 1000 Hz @ fft=512). This caps total
-    #   HF suppression at the configured dB-floor regardless of the linear
-    #   R² estimate. Final amplitude floor = sqrt(power floor).
-    #
-    # WHY -15 dB:
-    #   Current symptom (568_EVB DT→FS→DT2 at 6.5-7.0 s) has gain_HF ≈ -35 dB
-    #   median during NE-active periods → audible "painted-black"/"大魔王"
-    #   robot artefact on Mandarin "/sì/" fricative HF + formant valleys.
-    #   −15 dB floor lifts gain ≥ 0.178 amplitude (= 0.0316 power) which keeps
-    #   the NE voice fully audible while still allowing ~5× HF attenuation
-    #   when light residual echo bleeds through NE periods.
-    #
-    # GATING:
-    #   Only fires when ``_ne_state_for_gain_rules()`` is True (i.e., DNE
-    #   detector currently in NE-state). When DNE=False (echo-dominant
-    #   moments), SG's full dynamic range is preserved — no impact on
-    #   echo-cancellation aggressiveness during FS or DT-echo-loud periods.
-    #
-    # Default OFF for v3.21.x byte-equal; intended to flip ON in v3.22 after
-    # multi-case verification (incl. confirming no FS-echo regression).
-    hf_min_gain_floor_during_dne_enabled: bool = False
-    hf_min_gain_floor_during_dne_db: float = -15.0
-
-    # ── v3.22 C: E²/Y² per-bin ERLE gate (doubletalk contamination protection) ──
-    # Prevents nearend speech from pulling ERLE down during doubletalk by freezing
-    # per-bin ERLE updates when accumulated E²(k)/Y²(k) exceeds the threshold.
-    #
-    # MECHANISM:
-    #   In FS (echo being cancelled): E² << Y² → ratio low → update proceeds.
-    #   In DT (nearend inflates error): E² → Y² → ratio rises → freeze ERLE for that bin.
-    #   Frozen ERLE holds at pre-DT value → R² = S²/ERLE stays bounded → Wiener gain stable.
-    #
-    # THRESHOLD=0.5: E² > 0.5×Y² → nearend contributes ≥ 50% of error energy → unreliable.
-    # Per-bin: only contaminated bins are frozen; unaffected bins update normally.
-    #
-    # Advantage over all gain-floor approaches (W4/D1/D5): operates at R² source,
-    # not at gain output → no FS false positive from nearend detection signals.
-    #
-    # Default OFF for byte-equal; bench with AEC_ERLE_E2Y2_GATE=1.
-    erle_e2y2_gate_enabled: bool = False
-    erle_e2y2_gate_threshold: float = 0.5
-
-    # ── ERLE update gate = AEC3 per-frame SubtractorOutputAnalyzer rule ──
-    # The ERLE estimator's update is gated by `converged_filter`. We have been
-    # sourcing that from the legacy FilterConvergenceAnalyzer latch (10
-    # consecutive far-active frames with inst-ERLE>5 dB) which is near-
-    # contaminated and almost NEVER latches in double-talk (~5% of frames) →
-    # ERLE frozen at min=1.0 → R²=S²/ERLE=S² inflated → ENR ramp over-suppresses
-    # near-end. AEC3 instead gates on a PER-FRAME rule (subtractor_output_analyzer.cc:46):
-    #   converged = (e2_refined < 0.5·y2) OR (e2_coarse < 0.05·y2),  y2 > floor
-    # which fires on every echo-dominant frame so ERLE earns credit (then holds
-    # via the accumulator's converged-gating through near-loud frames). When ON,
-    # source the ERLE update gate from this per-frame e2<thr·y2 rule (refined-only;
-    # coarse term omitted — main filter error is `error_psd`). Default OFF for
-    # byte-equal; bench with AEC_ERLE_SUBCONV=<thr>.
-    erle_gate_subtractor_converged: bool = False
-    erle_gate_subtractor_threshold: float = 0.5
-    # y2 floor (our capture_psd-sum scale) below which a frame can't count as
-    # converged (avoids crediting silence). Calibrated empirically.
-    erle_gate_subtractor_y2_floor: float = 1.0e6
-
     # ── v3.22 C': Coherence-based ERLE gate (Γ²_ŶY) ──
     # Gate SubbandErle updates per-bin when Γ²(Ŷ, Y) < threshold.
     # Ŷ = echo estimate (echo_spec), Y = capture (near_spec); both complex.
@@ -131,19 +61,6 @@ class AecConfig:
     erle_coh_gate_enabled: bool = True   # v3.22 C' shipped: +0.014 FS_static echo
     erle_coh_gate_threshold: float = 0.5
     erle_coh_gate_alpha: float = 0.05
-
-    # ── v3.22 Layer1: Coherence gain floor (AEC2 NLP-inspired) ──
-    # Per-bin gain floor from Γ²(Ŷ, Y): G_floor = sqrt(max(0, 1-Γ²))·strength.
-    # 1-Γ² = nearend power fraction at mic = near/(echo+near) (X⊥nearend).
-    # FS (converged OR not): Ŷ=H̃X, Y=HX both ∝ X → Coh=1 → 1-Γ²→0 → floor→0
-    #   → NO echo suppression impact, NO FS-unconverged false positive.
-    # DT: nearend N adds X-uncorrelated component → Γ² drops → floor rises
-    #   → nearend preserved. This is AEC2's cohxd-gated NLP relaxation,
-    #   delay-compensated for free (Ŷ already time-aligned to Y).
-    # Reuses the C' Γ²_ŶY EMA (erle_coh_gate_alpha). Default OFF.
-    # Bench with AEC_COH_FLOOR=<strength>.
-    coh_gain_floor_enabled: bool = False
-    coh_gain_floor_strength: float = 0.5
 
     # ── v3.22 split min-gain floor (DEFAULT ON) ─────────────────────────────
     # The AEC3 min-gain floor (min_echo_power / R²) collapses to ~0 in DT when
@@ -171,59 +88,6 @@ class AecConfig:
     min_gain_floor_far_silent_db: float = -12.0
     min_gain_far_latch_power: float = 1.0e6
 
-    # ── v3.22 cohxd selective floor release (delay-aligned reference Γ²(X,Y)) ──
-    # The constant split floor (above) masks the AEC3 R²-adaptive min_gain on
-    # echo-dominant DT bins (proven: floor caps 0.3–2.9 dB of suppression the
-    # AEC3 formula wants). This RELEASES the floor per-bin where the residual is
-    # confidently echo by REFERENCE coherence: Γ²(X,Y), X=far_spec (delay-aligned
-    # reference, bulk delay removed upstream), Y=near_spec (mic). High Γ² ⟹ echo
-    # correlates with reference ⟹ suppress like AEC3 (echo↑). Low Γ² ⟹ nearend
-    # (uncorrelated with X) ⟹ keep protective floor (deg held). Convergence-
-    # robust — uses X not Ŷ/ERLE, so it works on the 100%-nonlinear hard DT
-    # cases where the linear filter never converges (unlike the closed Γ²(Ŷ,Y)
-    # Layer1, which measured filter quality). ASYMMETRIC: only LOWERS the floor
-    # on high-Γ² bins, never raises it → worst case = current behaviour (no
-    # regression). Only active in the far-active latched state.
-    #   release_db : floor target for fully-confident-echo bins (Γ²≥gamma_hi)
-    #   gamma_lo/hi: Γ² interpolation band (log-domain lerp between the split
-    #                floor and release_db)
-    #   alpha      : EMA rate for the cross/auto-PSD coherence tracking
-    # Conservative defaults (high gamma_hi): downstream MMSE-OMLSA amplifies any
-    # nearend over-suppression, so release only on strong echo confidence.
-    # Bench with AEC_COHXD_RELEASE=<release_db>.
-    cohxd_floor_release_enabled: bool = False
-    cohxd_floor_release_db: float = -45.0
-    cohxd_gamma_lo: float = 0.5
-    cohxd_gamma_hi: float = 0.85
-    cohxd_alpha: float = 0.05
-
-    # ── per-bin near-end speech-presence probability (NearendSpp) ──
-    # DT both-axes frontier-mover. Tracks, per bin, the minimum over a window of
-    # the residual-to-reference power ratio |E|²/|X|² (the residual echo-path
-    # transfer); a near-end onset spikes that ratio above the tracked floor while
-    # a reverb-tail far-end stays at the floor (it is still explained by X). Maps
-    # the dB spike through a sigmoid to p_ne[k] ∈ [0,1]. Uses the reliable
-    # reference X (not Ŷ/ERLE) and multi-frame minima, so it separates near-end
-    # from reverb-tail — the wall that closed every single-lag coherence route —
-    # and works on under-converged hard cases. Default OFF research substrate;
-    # consumers (near-gated cohxd, general floor modulation) read p_ne.
-    #   spike_thr_db/soft_db : sigmoid centre/softness, dB of ratio above floor
-    #   minima_subwindow     : MCRA sub-window D in frames (floor spans [D,2D))
-    #   alpha                : EMA rate for |E|² / |X|² smoothing
-    # Slow time constants are load-bearing: near-end talk-spurts are sustained
-    # (~seconds) while far-only residual-echo fluctuations + R² lag are fast, so
-    # heavy smoothing (alpha≈0.02 ≈500 ms) + a long minima window (≈2 s) averages
-    # out the echo transients but keeps the near-end. Fast constants (0.2/60)
-    # fail the Step-0 audio-proof — far-only echo spikes read as near-end.
-    nearend_spp_enabled: bool = False
-    nearend_spp_alpha: float = 0.02
-    nearend_spp_minima_subwindow: int = 200
-    nearend_spp_spike_thr_db: float = 5.0
-    nearend_spp_spike_soft_db: float = 2.0
-    # cohxd near-gate: scale the cohxd floor RELEASE by (1 - p_ne) so the floor
-    # is only released where near-end is absent. Requires both cohxd and SPP on.
-    cohxd_nearend_spp_gate_enabled: bool = False
-
     # ── linear-filter cold-start DEADLOCK breaker (PBFDKF Kalman gain) ──
     # mu = H_error/(0.5·H_error·X² + n·E²); H_error refreshed by
     # `H_error += leakage × Σ|W|²`. Σ|W|² is ~0 before the filter adapts, so on
@@ -242,27 +106,6 @@ class AecConfig:
     # AEC_HERROR_FLOOR.
     h_error_refresh_erl_floor: float = 0.0
     h_error_floor_override: float = 0.0
-
-    # ── v3.22 D2: SER-based gain floor (nearend preservation without DT detector) ──
-    # SER (Signal-to-Echo Ratio) floor in power domain, inserted after Wiener-gain
-    # clip in SuppressionGain._lower_band_gain.
-    #
-    # MECHANISM:
-    #   G_ser_floor[k] = nearend[k] / (nearend[k] + weighted_residual[k] + 1.0)
-    #   G[k]           = max(G_wiener[k], G_ser_floor[k] * ser_floor_strength)
-    #
-    # SELF-CONSISTENT (no external DT detector needed):
-    #   FS (nearend ≈ 0):  G_ser_floor → 0   → floor → 0   → echo suppression unaffected
-    #   DT (nearend >> echo): G_ser_floor → 1 → floor high  → nearend preserved
-    #   NE (nearend >> 0, echo ≈ 0): G_ser_floor → 1        → pass-through preserved
-    #
-    # WHY ser_floor_strength=0.5 default:
-    #   Full floor (strength=1.0) = Speex MMSE-STSA SPP behaviour. 0.5 blends
-    #   halfway between Wiener and SPP-like — empirical starting point for A/B.
-    #
-    # Default OFF for byte-equal; intended to bench with AEC_SER_FLOOR=1.
-    ser_floor_enabled: bool = False
-    ser_floor_strength: float = 0.5
 
     # ── v3.22 D3: Soft nearend tuning blend (sigmoid ENR interpolation) ──
     # Replaces the binary DNE is_ne switch in _gain_to_no_audible_echo with a
@@ -293,24 +136,6 @@ class AecConfig:
     # net vs the -22 baseline (all 4 ship bars met). AEC_SOFT_NE_PER_BIN=0 forces
     # OFF (reproduces the scalar-blend baseline).
     soft_nearend_blend_per_bin: bool = True
-
-    # ── v3.22 D5: ne_weight gain floor (Speex SPP-proxy for DT nearend protection) ──
-    # Direct Speex MMSE-STSA analogue: uses D3's ne_weight as SPP proxy to apply
-    # a gain lower bound that prevents near-end over-suppression in doubletalk.
-    #
-    # G_floor = ne_weight × floor_strength; G = max(G_wiener, G_floor)
-    # ne_weight = sigmoid((enr_threshold - enr_lf) / softness) [shared with D3]
-    #
-    # FS (ENR high → ne_weight→0): floor→0, full echo suppression preserved.
-    # DT (ENR low → ne_weight→1): floor=floor_strength, nearend protected.
-    # Unlike D2 (failed): no dependence on R² accuracy — uses ENR directly.
-    #
-    # floor_strength=0.3: power-domain floor → amplitude = sqrt(0.3) ≈ 0.55 (−5.2dB).
-    # Maximum suppression in pure NE-dominant frame = 14.7 dB (preserves voice audibility).
-    #
-    # Default OFF for byte-equal; bench with AEC_D5_FLOOR=<strength>.
-    d5_ne_floor_enabled: bool = False
-    d5_ne_floor_strength: float = 0.3
 
     # ── v3.22 L1: Kuech-Kellermann second-order nonlinear residual ──
     # Adds quadratic render PSD term to the nonlinear R² path to capture
@@ -419,34 +244,6 @@ class AecConfig:
     # production (no GCC pre-align → cold filter ERLE≈0 → guard never blocks a
     # legitimate cold acquisition); the gain is a bench-measurement artifact fix.
     delay_acquire_protect_converged: bool = True
-
-    # ── v3.22 W4: DNE ENR-relax when near-end is loud vs noise (DT NE protect) ─
-    # The dominant-nearend (DNE) detector only declares NE-state when the
-    # residual-echo estimate is small vs the near-end (echo_sum <
-    # enr_threshold·ne_sum, enr_threshold=0.25). During doubletalk the near-end
-    # leaks into the filter error, so ERLE reads low (1.0–2.1) and R² =
-    # s2_linear/ERLE stays large → echo_sum ≈ ne_sum (measured enr 0.64–1.39) →
-    # the ENR test fails 76% → NE-state fires only ~45% of NE-present collapse
-    # hops → the suppressor uses its aggressive `_normal_*` tuning and wipes the
-    # near-end (gain → 0.00–0.016, −36 dB) even though the near-end is
-    # 240×–100000× above the noise floor (the SNR trigger passes overwhelmingly).
-    #
-    # SPEC (when flag ON): when the near-end overwhelmingly dominates the noise
-    # floor (ne_sum > snr_factor · snr_threshold · noise_sum, i.e. far past the
-    # SNR-trigger bar), relax the ENR trigger threshold from enr_threshold (0.25)
-    # to `enr_threshold` below (0.75). A clearly-present loud near-end is not
-    # abandoned just because the NE-inflated echo estimate looks large. AEC3's
-    # `early_exit` (echo > enr_exit_threshold·ne, =10×) is preserved as the
-    # genuine-echo-dominance guard. FS is self-guarded: in far-end-only the
-    # "near-end" estimate IS residual echo so enr ≈ 1 > 0.75 → no false NE-state.
-    #
-    # Beyond-AEC3 (AEC3's DNE is deliberately echo-protective during DT); aligns
-    # with the PRIMARY=near-end / SECONDARY=echo priority. Cost: some DT echo
-    # leak — matched-magnitude 800-case Pareto is the arbiter. SOFT-nores
-    # (post-filter detector → gain tuning only). Default OFF for byte-equal.
-    dne_loud_nearend_enr_relax_enabled: bool = False
-    dne_loud_nearend_snr_factor: float = 3.0
-    dne_loud_nearend_enr_threshold: float = 0.75
 
     # ── Shadow filter (dual-filter divergence control) ──────────────────
     enable_shadow: bool = True

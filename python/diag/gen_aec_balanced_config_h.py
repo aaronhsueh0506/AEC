@@ -89,10 +89,6 @@ def main():
     w('/* aec3_post driver flags */\n')
     w('#define AEC3B_ERLE_COH_GATE_ENABLED  %d\n'
       % int(bool(cfg.erle_coh_gate_enabled)))
-    w('#define AEC3B_COH_GAIN_FLOOR_ENABLED %d\n'
-      % int(bool(getattr(cfg, 'coh_gain_floor_enabled', False))))
-    w('#define AEC3B_COHXD_FLOOR_RELEASE_ENABLED %d\n'
-      % int(bool(getattr(cfg, 'cohxd_floor_release_enabled', False))))
     w('#define AEC3B_ERLE_WINDOWED_CAPTURE_PSD %d\n'
       % int(bool(getattr(cfg, 'erle_windowed_capture_psd', False))))
     w('#define AEC3B_ERLE_RENDER_X2_PSD_SCALE %d\n'

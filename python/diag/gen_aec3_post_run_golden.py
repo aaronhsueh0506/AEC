@@ -234,10 +234,6 @@ def main():
                 self.config.erle_coh_gate_threshold)
             consts['erle_coh_gate_enabled'] = int(
                 bool(self.config.erle_coh_gate_enabled))
-            consts['coh_gain_floor_enabled'] = int(
-                bool(getattr(self.config, 'coh_gain_floor_enabled', False)))
-            consts['cohxd_floor_release_enabled'] = int(
-                bool(getattr(self.config, 'cohxd_floor_release_enabled', False)))
             consts['erle_windowed_capture_psd'] = int(
                 bool(getattr(self.config, 'erle_windowed_capture_psd', False)))
             consts['erle_render_x2_psd_scale'] = int(
@@ -356,8 +352,6 @@ def main():
         _w_i32(f, consts['n_bins'], consts['fft_size'], consts['block_size'],
                consts['hop_size'], consts['n_partitions'])
         _w_i32(f, consts['erle_coh_gate_enabled'],
-               consts['coh_gain_floor_enabled'],
-               consts['cohxd_floor_release_enabled'],
                consts['erle_windowed_capture_psd'],
                consts['erle_render_x2_psd_scale'],
                consts['output_capture_when_linear_unusable'],

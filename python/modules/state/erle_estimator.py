@@ -25,8 +25,6 @@ class ErleEstimator:
         max_erle_h: float = 1.5,
         use_onset_detection: bool = True,
         hop_size: int = 160,
-        e2y2_gate_enabled: bool = False,
-        e2y2_gate_threshold: float = 0.5,
     ) -> None:
         self._startup_hops = int(startup_phase_length_hops)
         self._fullband = FullBandErleEstimator(
@@ -40,8 +38,6 @@ class ErleEstimator:
             max_erle_h=max_erle_h,
             use_onset_detection=use_onset_detection,
             hop_size=hop_size,
-            e2y2_gate_enabled=e2y2_gate_enabled,
-            e2y2_gate_threshold=e2y2_gate_threshold,
         )
         self._blocks_since_reset = 0
 

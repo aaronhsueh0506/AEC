@@ -12,7 +12,7 @@ Captured real dtypes (balanced, 16 kHz, hop=160, filter_length=832):
   nearend / R² / R²_unbounded / comfort_noise : float32 (257,)
   render_block                                : float32 (160,)  (int16-scaled)
   saturated_echo / clock_drift                : bool
-  stationary_mask / coh_gamma2 / coh_xy_gamma2 / nearend_p_ne : None
+  stationary_mask                             : None
   output gain                                 : float32 (257,)
 
 The golden does NOT replay through a real AecState in C — the only thing
@@ -142,9 +142,6 @@ def capture_config(self):
         dne_use_during_initial_phase=int(dc.use_during_initial_phase),
         dne_use_unbounded_echo=int(dc.use_unbounded_echo_spectrum),
         dne_lf_endpoint_bin=int(min(hz_to_bin(dc.lf_endpoint_hz, N, sr), N)),
-        dne_loud_relax_enabled=int(dc.loud_nearend_enr_relax_enabled),
-        dne_loud_snr_factor=float(dc.loud_nearend_snr_factor),
-        dne_loud_enr_threshold=float(dc.loud_nearend_enr_threshold),
         conservative_hf=int(self._config.conservative_hf_suppression),
         stat_aware_proxy=int(self._config.stat_aware_ne_proxy_enabled),
         nearend_enr_tr=self._nearend_enr_tr.astype(np.float32).copy(),
@@ -171,8 +168,7 @@ def run_case(repo, mic_path, ref_path, frames, cfg_out):
 
     def patched(self, *, aec_state, nearend_spectrum, residual_echo_spectrum,
                 residual_echo_spectrum_unbounded, comfort_noise_spectrum,
-                render_block, clock_drift, stationary_mask=None,
-                coh_gamma2=None, coh_xy_gamma2=None, nearend_p_ne=None):
+                render_block, clock_drift, stationary_mask=None):
         if not cfg_out:
             cfg_out.update(capture_config(self))
         # The orchestrator RECREATES the SuppressionGain instance on a
@@ -192,17 +188,13 @@ def run_case(repo, mic_path, ref_path, frames, cfg_out):
             residual_echo_spectrum_unbounded=residual_echo_spectrum_unbounded,
             comfort_noise_spectrum=comfort_noise_spectrum,
             render_block=render_block, clock_drift=clock_drift,
-            stationary_mask=stationary_mask, coh_gamma2=coh_gamma2,
-            coh_xy_gamma2=coh_xy_gamma2, nearend_p_ne=nearend_p_ne,
+            stationary_mask=stationary_mask,
         )
         # Sanity: confirm balanced None-ness so the C port can hardwire it.
         # stationary_mask may be bool(257,) on some frames, but it ONLY feeds
         # `_stat_mask_frac`, which is read by `_ne_state_for_gain_rules` ONLY
         # when stat_aware_ne_proxy_enabled (OFF in balanced) -> zero effect on
-        # the gain output. coh_gamma2 / coh_xy_gamma2 / nearend_p_ne gate the
-        # default-OFF coh / cohxd levers and are always None in balanced.
-        assert coh_gamma2 is None and coh_xy_gamma2 is None
-        assert nearend_p_ne is None
+        # the gain output.
         if len(captured) < MAX_FRAMES:
             captured.append((
                 _f32(nearend_spectrum).copy(),

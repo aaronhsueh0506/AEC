@@ -45,8 +45,6 @@ class SubbandErleEstimator:
         use_onset_detection: bool = True,
         use_min_erle_during_onsets: bool = True,
         hop_size: int = 160,
-        e2y2_gate_enabled: bool = False,
-        e2y2_gate_threshold: float = 0.5,
     ) -> None:
         self._n_bins = int(n_bins)
         self._min_erle = float(min_erle)
@@ -68,11 +66,6 @@ class SubbandErleEstimator:
         self._e2_acc = np.zeros(self._n_bins, dtype=np.float32)
         self._low_render_energy = np.zeros(self._n_bins, dtype=bool)
         self._num_points = 0
-        # C: E²/Y² per-bin ERLE gate (default OFF).
-        # Skips ERLE update for bins where accumulated e2/y2 > threshold,
-        # preventing nearend contamination in doubletalk from pulling ERLE down.
-        self._e2y2_gate_enabled = bool(e2y2_gate_enabled)
-        self._e2y2_gate_threshold = float(e2y2_gate_threshold)
         # Per-bin render energy floor — AEC3 kX2BandEnergyThreshold scaled to
         # our frame (2×hop_size actual samples, 50% OLA).
         self._x2_band_energy_threshold = _aec3_scale.per_bin_psd_threshold(
@@ -163,14 +156,6 @@ class SubbandErleEstimator:
             mask, self._y2_acc[mid] / np.maximum(self._e2_acc[mid], 1e-30), 0.0
         )
         is_erle_updated[mid] = mask
-        # C: E²/Y² gate — freeze ERLE for bins where accumulated error energy
-        # exceeds threshold × capture energy (nearend contaminating error in DT).
-        # In FS (echo cancellation working): e2 << y2 → ratio low → not gated.
-        # In DT: nearend inflates e2 toward y2 → ratio high → freeze ERLE update.
-        if self._e2y2_gate_enabled:
-            with np.errstate(divide='ignore', invalid='ignore'):
-                e2y2 = self._e2_acc[mid] / np.maximum(self._y2_acc[mid], 1e-30)
-            is_erle_updated[mid] &= (e2y2 <= self._e2y2_gate_threshold)
         # C': Coherence gate — freeze ERLE for bins where Γ²(Ŷ, Y) < threshold.
         # coh_gate_mask[k]=True means ERLE update allowed (coherence high enough).
         # In DT: nearend decorrelates Y from Ŷ → Γ² drops → False → freeze.

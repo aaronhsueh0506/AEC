@@ -10,10 +10,9 @@ c_impl/test/parity_subband_erle.c replays.
 We emit MULTIPLE config variants back-to-back in one file so the C test can
 exercise:
   - the production config (use_onset_detection=True,
-    use_min_erle_during_onsets=True, e2y2_gate disabled, coh gate active);
+    use_min_erle_during_onsets=True, coh gate active);
   - use_min_erle_during_onsets=False (exercises the _erle_during_onsets
     smoothing branch inside the onset transition);
-  - e2y2_gate_enabled=True (the E2/Y2 freeze gate);
   - coh_gate_mask=None (no coherence gate).
 
 Real captured dtypes (doubletalk case 0I0XMl3M0...):
@@ -28,8 +27,8 @@ Layout (LE):
   int32 n_variants
   per variant:
     int32 n_bins, int32 n_frames
-    int32 use_onset, int32 use_min_during, int32 e2y2_gate, int32 coh_active
-    float32 max_erle_l, float32 max_erle_h, float32 min_erle, float32 e2y2_thr
+    int32 use_onset, int32 use_min_during, int32 coh_active
+    float32 max_erle_l, float32 max_erle_h, float32 min_erle
     float64 x2_band_thr
     n_frames x [ x2[n_bins] f32 | y2[n_bins] f32 | e2[n_bins] f32
                | converged i32 | coh_mask[n_bins] u8 (only if coh_active)
@@ -102,21 +101,20 @@ def make_frame(rng, idx):
     return x2, y2, e2, converged, coh
 
 
-def run_variant(f, *, use_onset, use_min_during, e2y2_gate, coh_active, seed):
+def run_variant(f, *, use_onset, use_min_during, coh_active, seed):
     rng = np.random.RandomState(seed)
     s = SubbandErleEstimator(
         n_bins=N_BINS, min_erle=1.0, max_erle_l=4.0, max_erle_h=1.5,
         use_onset_detection=use_onset,
         use_min_erle_during_onsets=use_min_during,
         hop_size=HOP_SIZE,
-        e2y2_gate_enabled=e2y2_gate, e2y2_gate_threshold=0.5,
     )
 
     np.array([N_BINS, N_FRAMES], dtype=np.int32).tofile(f)
     np.array([1 if use_onset else 0, 1 if use_min_during else 0,
-              1 if e2y2_gate else 0, 1 if coh_active else 0],
+              1 if coh_active else 0],
              dtype=np.int32).tofile(f)
-    np.array([4.0, 1.5, 1.0, 0.5], dtype=np.float32).tofile(f)
+    np.array([4.0, 1.5, 1.0], dtype=np.float32).tofile(f)
     np.array([float(s._x2_band_energy_threshold)], dtype=np.float64).tofile(f)
 
     for i in range(N_FRAMES):
@@ -146,11 +144,10 @@ def run_variant(f, *, use_onset, use_min_during, e2y2_gate, coh_active, seed):
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else '/tmp/se_golden.bin'
     variants = [
-        dict(use_onset=True,  use_min_during=True,  e2y2_gate=False, coh_active=True,  seed=7),
-        dict(use_onset=True,  use_min_during=False, e2y2_gate=False, coh_active=True,  seed=23),
-        dict(use_onset=True,  use_min_during=True,  e2y2_gate=True,  coh_active=True,  seed=41),
-        dict(use_onset=True,  use_min_during=True,  e2y2_gate=False, coh_active=False, seed=59),
-        dict(use_onset=False, use_min_during=True,  e2y2_gate=False, coh_active=True,  seed=83),
+        dict(use_onset=True,  use_min_during=True,  coh_active=True,  seed=7),
+        dict(use_onset=True,  use_min_during=False, coh_active=True,  seed=23),
+        dict(use_onset=True,  use_min_during=True,  coh_active=False, seed=59),
+        dict(use_onset=False, use_min_during=True,  coh_active=True,  seed=83),
     ]
     with open(out, 'wb') as f:
         np.array([len(variants)], dtype=np.int32).tofile(f)

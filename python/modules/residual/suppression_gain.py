@@ -141,19 +141,6 @@ class DominantNearendConfig:
     use_wallclock_trigger_threshold: bool = False
     use_during_initial_phase: bool = True
     use_unbounded_echo_spectrum: bool = True
-    # v3.22 W4 — relax the ENR trigger when the near-end overwhelmingly
-    # dominates the noise floor. During DT the NE-inflated error keeps ERLE
-    # low so R² (echo_sum) ≈ ne_sum (enr 0.64–1.39) → the standard ENR test
-    # (echo < enr_threshold·ne, 0.25) vetoes NE-state even though SNR passes
-    # 240×–100000×, so the near-end is wiped. When ON and the near-end is
-    # `loud` (ne_sum > loud_nearend_snr_factor · snr_threshold · noise_sum),
-    # the ENR trigger uses `loud_nearend_enr_threshold` (0.75) instead. The
-    # early_exit (echo > enr_exit_threshold·ne) guard is untouched. FS is
-    # self-guarded: there the "near-end" estimate IS residual echo so enr ≈ 1.
-    # Default OFF for byte-equal. See AecConfig.dne_loud_nearend_* for spec.
-    loud_nearend_enr_relax_enabled: bool = False
-    loud_nearend_snr_factor: float = 3.0
-    loud_nearend_enr_threshold: float = 0.75
     # LF-only sum endpoint for nearend detection. AEC3 canonical 2000 Hz
     # (= bin 16 exclusive @ fft=128 = `spectrum.begin()+16` in
     # dominant_nearend_detector.cc:43-44). Covers F0+F1+F2 — speech
@@ -435,15 +422,7 @@ class _DominantNearendDetector:
         # division floor. initial_state gates the trigger inline, NOT via
         # early-return (hold counter must still decrement below).
         trigger_initial_gate = (not initial_state or c.use_during_initial_phase)
-        # W4: relax the ENR trigger threshold when the near-end overwhelmingly
-        # dominates the noise floor (loud, clearly-present NE). No-op when the
-        # flag is OFF (eff_enr_thr == enr_threshold → byte-equal).
-        loud_nearend = (
-            c.loud_nearend_enr_relax_enabled
-            and ne_sum > c.loud_nearend_snr_factor * c.snr_threshold * noise_sum
-        )
-        eff_enr_thr = c.loud_nearend_enr_threshold if loud_nearend else c.enr_threshold
-        trigger_enr_pass = echo_sum < eff_enr_thr * ne_sum
+        trigger_enr_pass = echo_sum < c.enr_threshold * ne_sum
         trigger_snr_pass = ne_sum > c.snr_threshold * noise_sum
         trigger_active = trigger_initial_gate and trigger_enr_pass and trigger_snr_pass
         if trigger_active:
@@ -475,8 +454,6 @@ class _DominantNearendDetector:
             "enr": echo_sum / (ne_sum + 1.0),
             "snr": ne_sum / (noise_sum + 1.0),
             "enr_threshold": float(c.enr_threshold),
-            "loud_nearend": bool(loud_nearend),
-            "eff_enr_thr": float(eff_enr_thr),
             "enr_exit_threshold": float(c.enr_exit_threshold),
             "snr_threshold": float(c.snr_threshold),
             "trigger_enr_pass": bool(trigger_enr_pass),
@@ -503,27 +480,14 @@ class SuppressionGain:
                  sr: int = 16000, hop_size: int = 160,
                  use_wallclock_block_energy_threshold: bool = False,
                  use_wallclock_gain_ratchet: bool = False,
-                 hf_min_gain_floor_during_dne_enabled: bool = False,
-                 hf_min_gain_floor_during_dne_db: float = -15.0,
-                 ser_floor_enabled: bool = False,
-                 ser_floor_strength: float = 0.5,
                  soft_nearend_blend_enabled: bool = False,
                  soft_nearend_blend_enr_threshold: float = 0.25,
                  soft_nearend_blend_softness: float = 0.25,
                  soft_nearend_blend_per_bin: bool = False,
-                 d5_ne_floor_enabled: bool = False,
-                 d5_ne_floor_strength: float = 0.3,
-                 coh_gain_floor_enabled: bool = False,
-                 coh_gain_floor_strength: float = 0.5,
                  split_floor_enabled: bool = True,
                  split_floor_far_active_db: float = -22.0,
                  split_floor_far_silent_db: float = -12.0,
-                 split_floor_latch_power: float = 1.0e6,
-                 cohxd_floor_release_enabled: bool = False,
-                 cohxd_floor_release_db: float = -45.0,
-                 cohxd_gamma_lo: float = 0.5,
-                 cohxd_gamma_hi: float = 0.85,
-                 cohxd_nearend_spp_gate_enabled: bool = False) -> None:
+                 split_floor_latch_power: float = 1.0e6) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
         self._hop_size = int(hop_size)
@@ -535,20 +499,6 @@ class SuppressionGain:
         self._split_floor_far_silent = float(10.0 ** (split_floor_far_silent_db / 10.0))
         self._split_floor_latch_power = float(split_floor_latch_power)
         self._far_active_latched = False
-        # v3.22 cohxd selective floor release (delay-aligned reference Γ²(X,Y)).
-        # Per-bin RELEASE of the split floor on confidently-echo bins; uses the
-        # AEC3 R²-adaptive min_gain underneath where Γ² is high. ASYMMETRIC:
-        # only lowers the floor, never raises it. See AecConfig.cohxd_*.
-        self._cohxd_floor_release_enabled = bool(cohxd_floor_release_enabled)
-        self._cohxd_release_floor = float(10.0 ** (cohxd_floor_release_db / 10.0))
-        self._cohxd_gamma_lo = float(cohxd_gamma_lo)
-        self._cohxd_gamma_hi = float(cohxd_gamma_hi)
-        # cohxd near-gate: scale the release by (1 - p_ne) so the floor is only
-        # released where near-end is absent (the DT frontier-mover).
-        self._cohxd_nearend_spp_gate_enabled = bool(cohxd_nearend_spp_gate_enabled)
-        # Set per-hop by get_gain from the orchestrator-supplied Γ²(X,Y).
-        self._coh_xy_gamma2: Optional[np.ndarray] = None
-        self._nearend_p_ne: Optional[np.ndarray] = None
         # echo_audibility lives on SuppressorConfig so orchestrator can
         # override use_stationarity_properties.
         self._echo_audibility = self._config.echo_audibility
@@ -593,20 +543,7 @@ class SuppressionGain:
         self._last_fire_mask = np.zeros(self._n_bins, dtype=bool)
         self._last_enr_raw = np.zeros(self._n_bins, dtype=np.float32)
         self._last_emr_raw = np.zeros(self._n_bins, dtype=np.float32)
-        # v3.22 candidate (default OFF): HF minimum-gain floor during DNE.
-        # See AecConfig.hf_min_gain_floor_during_dne_* for full spec.
-        # Precomputed power-domain floor = 10^(threshold_db / 10).
-        self._hf_min_gain_floor_during_dne_enabled = bool(
-            hf_min_gain_floor_during_dne_enabled
-        )
-        self._hf_min_gain_floor_during_dne_power = float(
-            10.0 ** (float(hf_min_gain_floor_during_dne_db) / 10.0)
-        )
-        # v3.22 D2: SER-based gain floor (default OFF).
-        # See AecConfig.ser_floor_* for full spec.
-        self._ser_floor_enabled = bool(ser_floor_enabled)
-        self._ser_floor_strength = float(ser_floor_strength)
-        # v3.22 D3: Soft nearend tuning blend (default OFF).
+        # v3.22 D3: Soft nearend tuning blend.
         # Replaces binary DNE is_ne switch with sigmoid LF-ENR weight.
         # ne_weight = sigmoid((enr_threshold - enr_lf) / softness)
         # enr_tr = ne_weight * nearend_enr_tr + (1-ne_weight) * normal_enr_tr
@@ -614,17 +551,8 @@ class SuppressionGain:
         self._soft_ne_blend_per_bin = bool(soft_nearend_blend_per_bin)
         self._soft_ne_blend_enr_thr = float(soft_nearend_blend_enr_threshold)
         self._soft_ne_blend_softness = max(float(soft_nearend_blend_softness), 1e-6)
-        # LF endpoint bin for D3/D5 ENR sum (AEC3-canonical 2000 Hz, same as DNE).
+        # LF endpoint bin for D3 ENR sum (AEC3-canonical 2000 Hz, same as DNE).
         self._dne_lf_end = min(hz_to_bin(2000.0, self._n_bins, self._sr), self._n_bins)
-        # v3.22 D5: ne_weight gain floor (Speex SPP-proxy, default OFF).
-        # G_floor = ne_weight × floor_strength; G = max(G_wiener, G_floor).
-        # FS (ENR high → ne_weight→0): floor→0, full echo suppression preserved.
-        # DT (ENR low → ne_weight→1): floor=floor_strength, nearend protected.
-        # Shares ne_weight computation with D3 (same sigmoid, same LF endpoint).
-        self._d5_ne_floor_enabled = bool(d5_ne_floor_enabled)
-        self._d5_ne_floor_strength = float(d5_ne_floor_strength)
-        self._coh_gain_floor_enabled = bool(coh_gain_floor_enabled)
-        self._coh_gain_floor_strength = float(coh_gain_floor_strength)
         # Resolve freq-based config to bin indices once at construction.
         self._last_lf_band = hz_to_bin(self._config.last_lf_freq_hz, self._n_bins, self._sr)
         self._first_hf_band = hz_to_bin(self._config.first_hf_freq_hz, self._n_bins, self._sr)
@@ -696,9 +624,6 @@ class SuppressionGain:
         render_block: np.ndarray,            # time-domain render (for LowNoiseRender)
         clock_drift: bool,
         stationary_mask: Optional[np.ndarray] = None,  # E.1: per-bin bool from band_stationary_mask()
-        coh_gamma2: Optional[np.ndarray] = None,  # Layer1: per-bin Γ²_ŶY for coh gain floor
-        coh_xy_gamma2: Optional[np.ndarray] = None,  # cohxd: per-bin Γ²(X,Y) for floor release
-        nearend_p_ne: Optional[np.ndarray] = None,  # per-bin near-end SPP for the cohxd near-gate
     ) -> np.ndarray:
         """Returns low-band suppression GAIN (amplitude domain, sqrt'd; per-bin)."""
         # Sprint E.1 — capture stationary-mask fraction for the
@@ -708,12 +633,6 @@ class SuppressionGain:
             self._stat_mask_frac = float(sm.mean()) if sm.size > 0 else 0.0
         else:
             self._stat_mask_frac = 0.0
-        # cohxd: stash per-bin Γ²(X,Y) for the selective floor release in
-        # _get_min_gain (only consumed when cohxd_floor_release_enabled).
-        self._coh_xy_gamma2 = coh_xy_gamma2
-        # Per-bin near-end SPP for the cohxd near-gate (only consumed when
-        # cohxd_nearend_spp_gate_enabled).
-        self._nearend_p_ne = nearend_p_ne
         # Dominant nearend update using unbounded-echo spectrum when configured
         # (AEC3 cc:410-413).
         echo_for_det = (
@@ -746,7 +665,6 @@ class SuppressionGain:
             residual_echo=residual_echo_spectrum,
             comfort_noise=comfort_noise_spectrum,
             clock_drift=clock_drift,
-            coh_gamma2=coh_gamma2,
         )
         return gain
 
@@ -761,7 +679,6 @@ class SuppressionGain:
         residual_echo: np.ndarray,
         comfort_noise: np.ndarray,
         clock_drift: bool,
-        coh_gamma2: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         # Step 1: max gain envelope from last_gain.
         max_gain = self._get_max_gain(self._config.floor_first_increase)
@@ -779,25 +696,6 @@ class SuppressionGain:
         G_raw = self._gain_to_no_audible_echo(nearend, weighted_residual, comfort_noise)
         # Step 6: clip into [min, max].
         G = np.clip(G_raw, min_gain, max_gain)
-        # D2 v2: SER-based gain floor (power domain, per-bin).
-        # nearend_true = max(0, Y² − R²) isolates true speech from echo.
-        # G_ser_floor = nearend_true / (nearend + 1.0)
-        # FS (Y² ≈ R²): nearend_true ≈ 0 → floor ≈ 0 → echo suppression unaffected.
-        # DT (speech >> echo): nearend_true ≈ Y² → floor high → nearend preserved.
-        if self._ser_floor_enabled:
-            nearend_true = np.maximum(0.0, nearend - weighted_residual)
-            G_ser_floor = nearend_true / (nearend + 1.0)
-            np.maximum(G, G_ser_floor * self._ser_floor_strength, out=G)
-        # Layer1: coherence gain floor (AEC2 NLP-inspired).
-        # G_floor = sqrt(max(0, 1-Γ²_ŶY))·strength = nearend-amplitude fraction.
-        # FS (Ŷ,Y both ∝ X): Γ²→1 → floor→0 → echo suppression unaffected.
-        # DT (nearend N ⊥ X adds to Y): Γ² drops → floor rises → nearend preserved.
-        # No FS-unconverged false positive: filter error doesn't decorrelate Ŷ,Y.
-        if (self._coh_gain_floor_enabled and coh_gamma2 is not None
-                and coh_gamma2.shape[0] == G.shape[0]):
-            _g2 = np.clip(coh_gamma2.astype(np.float32), 0.0, 1.0)
-            G_coh_floor = np.sqrt(1.0 - _g2) * self._coh_gain_floor_strength
-            np.maximum(G, G_coh_floor, out=G)
         # Snapshot pre-HF-limiter G + ENR/EMR for paint-black diagnostic.
         # No audio effect; consumers via _last_lower_band_snap.
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -1001,27 +899,6 @@ class SuppressionGain:
                 if last_nearend[k] > last_echo[k] or k <= permanent:
                     min_gain[k] = max(min_gain[k], self._last_gain[k] * dec)
                     min_gain[k] = min(min_gain[k], 1.0)
-        # v3.22 candidate (default OFF): HF minimum-gain floor during DNE.
-        # When the dominant-nearend detector indicates NE-state, force a
-        # power-domain floor on all HF bins (k >= first_hf_band). The
-        # AEC3-strict `render_limit / R²` formula collapses min_gain → 0
-        # when R² is huge at HF bins where the filter spuriously outputs
-        # large S²_linear during NE-only periods, causing audible
-        # painted-black HF (formant valleys + fricatives). This explicit
-        # power floor caps total HF suppression at the configured dB-floor.
-        # Gated on DNE so SG's full dynamic range is preserved when echo
-        # is genuinely dominant (FS / DT-echo-loud) — no impact on echo
-        # cancellation aggressiveness outside NE-dominant moments.
-        if (self._hf_min_gain_floor_during_dne_enabled
-                and self._ne_state_for_gain_rules()
-                and self._first_hf_band < self._n_bins):
-            hf_slice = slice(self._first_hf_band, self._n_bins)
-            np.maximum(
-                min_gain[hf_slice],
-                self._hf_min_gain_floor_during_dne_power,
-                out=min_gain[hf_slice],
-            )
-            np.minimum(min_gain, 1.0, out=min_gain)
         # Split min-gain floor (default ON): cap the deepest suppression to
         # stop the AEC3 floor (min_echo_power / R²) collapsing to ~0 in DT when
         # ERLE contamination spikes R². far-active (FS/DT) uses the gentler
@@ -1031,40 +908,7 @@ class SuppressionGain:
         if self._split_floor_enabled:
             base_floor = (self._split_floor_far_active if self._far_active_latched
                           else self._split_floor_far_silent)
-            if (self._cohxd_floor_release_enabled and self._far_active_latched
-                    and self._coh_xy_gamma2 is not None):
-                # cohxd per-bin floor RELEASE: where the residual is confidently
-                # echo by reference coherence Γ²(X,Y), lower the floor toward
-                # release_floor so the AEC3 R²-adaptive min_gain (min_echo_power
-                # / R², computed above) can suppress deep like AEC3 (DT echo↑).
-                # Low Γ² (nearend, uncorrelated with X) keeps base_floor
-                # (deg held). Log-domain lerp over [gamma_lo, gamma_hi].
-                # ASYMMETRIC: release_floor < base_floor, so this only LOWERS the
-                # floor (never raises) → worst case = current behaviour.
-                g2 = np.asarray(self._coh_xy_gamma2, dtype=np.float64)
-                t = np.clip(
-                    (g2 - self._cohxd_gamma_lo)
-                    / max(self._cohxd_gamma_hi - self._cohxd_gamma_lo, 1e-6),
-                    0.0, 1.0,
-                )
-                # Near-gate: only release where near-end is absent. Scale the
-                # release interpolation by (1 - p_ne) so a high near-end SPP
-                # collapses t→0 (keep base_floor, protect near), while p_ne≈0
-                # (echo-only) leaves the full release (cancel echo). Errors are
-                # safe-direction: an over-high p_ne only withholds release
-                # (never raises the floor above base) → worst case = no cohxd.
-                if (self._cohxd_nearend_spp_gate_enabled
-                        and self._nearend_p_ne is not None):
-                    p_ne = np.asarray(self._nearend_p_ne, dtype=np.float64)
-                    t = t * (1.0 - np.clip(p_ne, 0.0, 1.0))
-                _log_base = np.log(base_floor)
-                _log_rel = np.log(self._cohxd_release_floor)
-                floor_perbin = np.exp(
-                    _log_base + t * (_log_rel - _log_base)
-                ).astype(np.float32)
-                np.maximum(min_gain, floor_perbin, out=min_gain)
-            else:
-                np.maximum(min_gain, base_floor, out=min_gain)
+            np.maximum(min_gain, base_floor, out=min_gain)
             np.minimum(min_gain, 1.0, out=min_gain)
         return min_gain.astype(np.float32)
 
@@ -1073,10 +917,10 @@ class SuppressionGain:
     ) -> np.ndarray:
         is_ne = self._ne_state_for_gain_rules()
 
-        # Compute sigmoid LF-ENR weight if needed by D3 or D5.
+        # Compute sigmoid LF-ENR weight if needed by D3.
         # ne_weight → 1 when nearend dominates (low ENR), → 0 when echo dominates.
         ne_w = 0.0
-        if self._soft_ne_blend_enabled or self._d5_ne_floor_enabled:
+        if self._soft_ne_blend_enabled:
             ne_lf = float(np.sum(nearend[1:self._dne_lf_end]))
             echo_lf = float(np.sum(echo[1:self._dne_lf_end]))
             enr_lf = echo_lf / (ne_lf + 1.0)
@@ -1120,12 +964,6 @@ class SuppressionGain:
             g_emr = emr_tr / np.maximum(emr, 1e-30)
             g_eff = np.maximum(g_lin, g_emr)
         g = np.where(fire, g_eff, g)
-        # D5: ne_weight gain floor (Speex SPP-proxy).
-        # G_floor = ne_w × floor_strength; G = max(G_wiener, G_floor).
-        # FS (ne_w→0): floor→0, echo suppression unaffected.
-        # DT (ne_w→1): floor=floor_strength, nearend preserved.
-        if self._d5_ne_floor_enabled and ne_w > 0.0:
-            np.maximum(g, ne_w * self._d5_ne_floor_strength, out=g)
         # Kill-stage diag: stash the two competing terms + fire mask + raw
         # ENR/EMR so _lower_band_gain can attribute which term won per bin.
         # No audio effect (read-only consumer via _last_lower_band_snap).

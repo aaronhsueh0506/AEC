@@ -177,25 +177,9 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     _e2env = os.environ.get('AEC_OUT_CAPTURE_UNUSABLE')
     if _e2env in ('0', '1') and 'output_capture_when_linear_unusable' not in config_overrides:
         config_overrides['output_capture_when_linear_unusable'] = (_e2env == '1')
-    # B2 (v3.22): dne_loud_nearend_enr_relax_enabled — W4 re-audit flag.
-    # AEC_DNE_LOUD_NE=1 → True (relax ENR threshold for moderate DT).
-    _dne_loud_env = os.environ.get('AEC_DNE_LOUD_NE')
-    if _dne_loud_env in ('0', '1') and 'dne_loud_nearend_enr_relax_enabled' not in config_overrides:
-        config_overrides['dne_loud_nearend_enr_relax_enabled'] = (_dne_loud_env == '1')
     _dprot_env = os.environ.get('AEC_DELAY_PROTECT')
     if _dprot_env in ('0', '1') and 'delay_acquire_protect_converged' not in config_overrides:
         config_overrides['delay_acquire_protect_converged'] = (_dprot_env == '1')
-    # hf_min_gain (v3.22): HF gain floor (−15 dB) during DNE active. Protects
-    # NE HF formants when filter hasn't converged at HF.
-    # AEC_HF_MIN_GAIN=1 → True.
-    _hf_min_env = os.environ.get('AEC_HF_MIN_GAIN')
-    if _hf_min_env in ('0', '1') and 'hf_min_gain_floor_during_dne_enabled' not in config_overrides:
-        config_overrides['hf_min_gain_floor_during_dne_enabled'] = (_hf_min_env == '1')
-    # ser_floor (v3.22 D2): SER-based gain floor — nearend preservation without DT detector.
-    # AEC_SER_FLOOR=1 → ser_floor_enabled=True (strength defaults to 0.5).
-    _ser_floor_env = os.environ.get('AEC_SER_FLOOR')
-    if _ser_floor_env in ('0', '1') and 'ser_floor_enabled' not in config_overrides:
-        config_overrides['ser_floor_enabled'] = (_ser_floor_env == '1')
     # soft_nearend_blend (v3.22 D3): sigmoid ENR interpolation replaces binary DNE switch.
     # AEC_SOFT_NE_BLEND=1 → soft_nearend_blend_enabled=True.
     _soft_ne_env = os.environ.get('AEC_SOFT_NE_BLEND')
@@ -206,40 +190,6 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     _soft_ne_pb_env = os.environ.get('AEC_SOFT_NE_PER_BIN')
     if _soft_ne_pb_env in ('0', '1') and 'soft_nearend_blend_per_bin' not in config_overrides:
         config_overrides['soft_nearend_blend_per_bin'] = (_soft_ne_pb_env == '1')
-    # d5_ne_floor (v3.22 D5): ne_weight gain floor, Speex SPP-proxy.
-    # AEC_D5_FLOOR=<float> → d5_ne_floor_enabled=True, d5_ne_floor_strength=<float>.
-    _d5_env = os.environ.get('AEC_D5_FLOOR')
-    if _d5_env is not None and 'd5_ne_floor_enabled' not in config_overrides:
-        try:
-            _d5_val = float(_d5_env)
-            config_overrides['d5_ne_floor_enabled'] = (_d5_val > 0.0)
-            config_overrides['d5_ne_floor_strength'] = _d5_val
-        except ValueError:
-            pass
-    # erle_e2y2_gate (v3.22 C): per-bin E²/Y² ERLE gate against DT contamination.
-    # AEC_ERLE_E2Y2_GATE=<float> → erle_e2y2_gate_enabled=True, threshold=<float>.
-    _e2y2_env = os.environ.get('AEC_ERLE_E2Y2_GATE')
-    if _e2y2_env is not None and 'erle_e2y2_gate_enabled' not in config_overrides:
-        try:
-            _e2y2_val = float(_e2y2_env)
-            config_overrides['erle_e2y2_gate_enabled'] = (_e2y2_val > 0.0)
-            config_overrides['erle_e2y2_gate_threshold'] = _e2y2_val if _e2y2_val <= 1.0 else 0.5
-        except ValueError:
-            pass
-    # erle_gate_subtractor (L1b): ERLE update gate = AEC3 per-frame e2<thr·y2
-    # rule instead of the legacy convergence latch (fixes ERLE-pinned-at-1 in DT).
-    # AEC_ERLE_SUBCONV=<thr> → enable, threshold=<thr>. AEC_ERLE_SUBCONV_FLOOR=<y2floor>.
-    _subc_env = os.environ.get('AEC_ERLE_SUBCONV')
-    if _subc_env is not None and 'erle_gate_subtractor_converged' not in config_overrides:
-        try:
-            _subc_val = float(_subc_env)
-            config_overrides['erle_gate_subtractor_converged'] = (_subc_val > 0.0)
-            config_overrides['erle_gate_subtractor_threshold'] = _subc_val if _subc_val <= 1.0 else 0.5
-            _subc_floor = os.environ.get('AEC_ERLE_SUBCONV_FLOOR')
-            if _subc_floor is not None:
-                config_overrides['erle_gate_subtractor_y2_floor'] = float(_subc_floor)
-        except ValueError:
-            pass
     # erle_coh_gate (v3.22 C'): coherence-based ERLE gate Γ²(Ŷ, Y).
     # AEC_ERLE_COH_GATE=<float>        → enable gate, threshold=<float>
     # AEC_ERLE_COH_GATE_ALPHA=<float>  → override EMA alpha (default 0.05)
@@ -268,16 +218,6 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
             config_overrides['nl_r2_alpha'] = _nl_alpha_val
         except ValueError:
             pass
-    # coh_gain_floor (v3.22 Layer1): AEC2 NLP-inspired coherence gain floor.
-    # AEC_COH_FLOOR=<strength> → coh_gain_floor_enabled=True, strength=<float>.
-    _cohfl_env = os.environ.get('AEC_COH_FLOOR')
-    if _cohfl_env is not None and 'coh_gain_floor_enabled' not in config_overrides:
-        try:
-            _cohfl_val = float(_cohfl_env)
-            config_overrides['coh_gain_floor_enabled'] = (_cohfl_val > 0.0)
-            config_overrides['coh_gain_floor_strength'] = _cohfl_val
-        except ValueError:
-            pass
     # far_active split-floor sweep (v3.22 3-preset operating-point scan).
     # AEC_FAR_ACTIVE_FLOOR_DB=<amplitude dB> → min_gain_floor_far_active_db.
     # TEMP sweep hook — proven the dominant DT/FS echo↔deg residual knob.
@@ -300,21 +240,6 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
     if _hef_env is not None and 'h_error_floor_override' not in config_overrides:
         try:
             config_overrides['h_error_floor_override'] = float(_hef_env)
-        except ValueError:
-            pass
-    # cohxd selective floor release (per-bin Γ²(X,Y) reference coherence).
-    # AEC_COHXD_RELEASE=<release_db> → cohxd_floor_release_enabled=True, release
-    # floor = <release_db>. Optional AEC_COHXD_GAMMA="lo,hi" overrides the band.
-    _cohxd_env = os.environ.get('AEC_COHXD_RELEASE')
-    if _cohxd_env is not None and 'cohxd_floor_release_enabled' not in config_overrides:
-        try:
-            config_overrides['cohxd_floor_release_enabled'] = True
-            config_overrides['cohxd_floor_release_db'] = float(_cohxd_env)
-            _cohxd_g = os.environ.get('AEC_COHXD_GAMMA')
-            if _cohxd_g is not None:
-                _lo, _hi = (float(x) for x in _cohxd_g.split(','))
-                config_overrides['cohxd_gamma_lo'] = _lo
-                config_overrides['cohxd_gamma_hi'] = _hi
         except ValueError:
             pass
     # Generic flag-override hook (campaign substrate testing). Any AecConfig

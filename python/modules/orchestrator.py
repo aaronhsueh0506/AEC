@@ -426,16 +426,6 @@ class AEC:
                 enable_filter_analyzer=True,
                 hop_size=int(self.config.hop_size),
                 sample_rate=int(self.config.sample_rate),
-                erle_e2y2_gate_enabled=bool(
-                    getattr(self.config, 'erle_e2y2_gate_enabled', False)),
-                erle_e2y2_gate_threshold=float(
-                    getattr(self.config, 'erle_e2y2_gate_threshold', 0.5)),
-                erle_gate_subtractor_converged=bool(
-                    getattr(self.config, 'erle_gate_subtractor_converged', False)),
-                erle_gate_subtractor_threshold=float(
-                    getattr(self.config, 'erle_gate_subtractor_threshold', 0.5)),
-                erle_gate_subtractor_y2_floor=float(
-                    getattr(self.config, 'erle_gate_subtractor_y2_floor', 1.0e6)),
             ))
             # FFT-density-scaled PSD floors (AEC3 alignment, v3.21-shipped).
             # AEC3 hardcodes kFftLengthBy2=64 in EchoModelConfig /
@@ -494,32 +484,10 @@ class AEC:
             _sg_config.dominant_nearend_detection = _dc.replace(
                 _sg_config.dominant_nearend_detection,
                 use_wallclock_trigger_threshold=True,
-                loud_nearend_enr_relax_enabled=bool(getattr(
-                    self.config, 'dne_loud_nearend_enr_relax_enabled', False)),
-                loud_nearend_snr_factor=float(getattr(
-                    self.config, 'dne_loud_nearend_snr_factor', 3.0)),
-                loud_nearend_enr_threshold=float(getattr(
-                    self.config, 'dne_loud_nearend_enr_threshold', 0.75)),
             )
             self._aec3_sg = SuppressionGain(**self._build_sg_kwargs(n_bins, _sg_config))
             self._aec3_n_bins = n_bins
             self._aec3_sg_config = _sg_config
-            # Per-bin near-end SPP (default-OFF DT frontier-mover substrate).
-            if getattr(self.config, "nearend_spp_enabled", False):
-                from .residual.nearend_spp import NearendSpp
-                self._nearend_spp = NearendSpp(
-                    n_bins,
-                    alpha=float(getattr(self.config, "nearend_spp_alpha", 0.2)),
-                    minima_subwindow=int(
-                        getattr(self.config, "nearend_spp_minima_subwindow", 60)),
-                    spike_thr_db=float(
-                        getattr(self.config, "nearend_spp_spike_thr_db", 5.0)),
-                    spike_soft_db=float(
-                        getattr(self.config, "nearend_spp_spike_soft_db", 2.0)),
-                )
-            else:
-                self._nearend_spp = None
-            self._nearend_p_ne = None
             # AEC3 `aec_state.cc:229-234` ComputeAvgRenderReverb owns a
             # dedicated ReverbModel separate from the residual-echo path's
             # reverb model. The semantics differ — this one always uses
@@ -1045,12 +1013,6 @@ class AEC:
             hop_size=cfg.hop_size,
             use_wallclock_block_energy_threshold=True,
             use_wallclock_gain_ratchet=True,
-            hf_min_gain_floor_during_dne_enabled=bool(
-                getattr(cfg, "hf_min_gain_floor_during_dne_enabled", False)),
-            hf_min_gain_floor_during_dne_db=float(
-                getattr(cfg, "hf_min_gain_floor_during_dne_db", -15.0)),
-            ser_floor_enabled=bool(getattr(cfg, "ser_floor_enabled", False)),
-            ser_floor_strength=float(getattr(cfg, "ser_floor_strength", 0.5)),
             soft_nearend_blend_enabled=bool(
                 getattr(cfg, "soft_nearend_blend_enabled", False)),
             soft_nearend_blend_enr_threshold=float(
@@ -1059,12 +1021,6 @@ class AEC:
                 getattr(cfg, "soft_nearend_blend_softness", 0.25)),
             soft_nearend_blend_per_bin=bool(
                 getattr(cfg, "soft_nearend_blend_per_bin", False)),
-            d5_ne_floor_enabled=bool(getattr(cfg, "d5_ne_floor_enabled", False)),
-            d5_ne_floor_strength=float(getattr(cfg, "d5_ne_floor_strength", 0.3)),
-            coh_gain_floor_enabled=bool(
-                getattr(cfg, "coh_gain_floor_enabled", False)),
-            coh_gain_floor_strength=float(
-                getattr(cfg, "coh_gain_floor_strength", 0.5)),
             split_floor_enabled=bool(
                 getattr(cfg, "min_gain_split_floor_enabled", True)),
             split_floor_far_active_db=float(
@@ -1073,42 +1029,24 @@ class AEC:
                 getattr(cfg, "min_gain_floor_far_silent_db", -12.0)),
             split_floor_latch_power=float(
                 getattr(cfg, "min_gain_far_latch_power", 1.0e6)),
-            cohxd_floor_release_enabled=bool(
-                getattr(cfg, "cohxd_floor_release_enabled", False)),
-            cohxd_floor_release_db=float(
-                getattr(cfg, "cohxd_floor_release_db", -45.0)),
-            cohxd_gamma_lo=float(getattr(cfg, "cohxd_gamma_lo", 0.5)),
-            cohxd_gamma_hi=float(getattr(cfg, "cohxd_gamma_hi", 0.85)),
-            cohxd_nearend_spp_gate_enabled=bool(
-                getattr(cfg, "cohxd_nearend_spp_gate_enabled", False)),
         )
 
     def _reset_coherence_state(self) -> None:
         """Initialize / clear the per-bin coherence-gate EMA accumulators.
 
-        Two independent Γ² trackers live here:
-          * C′ ERLE-gate Γ²(Ŷ,Y): `_coh_erle_sye/_syy/_see` + `_coh_gamma2_for_floor`
-            — measures filter quality; gates ERLE (`erle_coh_gate`, default ON).
-          * cohxd floor-release Γ²(X,Y): `_coh_xy_sxy/_sxx/_syy` + `_coh_xy_gamma2`
-            — reference-based echo-presence discriminator (X=far, Y=mic).
-
-        Both are EMAs with NO other reset path. A mid-stream echo-path change /
-        delay reset / cross-case reuse must clear them, or the stale Γ² keeps
-        gating ERLE (`R²=S²/ERLE`) and the cohxd release against the *old* path.
-        The single funnel for this state: `__init__` calls it to initialize, and
-        `_reset_aec3_post` (which `reset()` and `_reset_filter_derived_state()`
-        already route through) calls it to clear — one call site each, no
-        double-reset / missed-reset.
+        The C′ ERLE-gate Γ²(Ŷ,Y) tracker (`_coh_erle_sye/_syy/_see`) measures
+        filter quality and gates ERLE (`erle_coh_gate`, default ON). It is an
+        EMA with NO other reset path: a mid-stream echo-path change / delay
+        reset / cross-case reuse must clear it, or the stale Γ² keeps gating
+        ERLE (`R²=S²/ERLE`) against the *old* path. The single funnel for this
+        state: `__init__` calls it to initialize, and `_reset_aec3_post` (which
+        `reset()` and `_reset_filter_derived_state()` already route through)
+        calls it to clear — one call site each, no double-reset / missed-reset.
         """
         n = int(self.filter.n_freqs) if hasattr(self.filter, 'n_freqs') else 1
         self._coh_erle_sye = np.zeros(n, dtype=np.complex64)
         self._coh_erle_syy = np.full(n, 1e-30, dtype=np.float64)
         self._coh_erle_see = np.full(n, 1e-30, dtype=np.float64)
-        self._coh_gamma2_for_floor = None
-        self._coh_xy_sxy = np.zeros(n, dtype=np.complex64)
-        self._coh_xy_sxx = np.full(n, 1e-30, dtype=np.float64)
-        self._coh_xy_syy = np.full(n, 1e-30, dtype=np.float64)
-        self._coh_xy_gamma2 = None
 
     def _reset_aec3_post(self, *, preserve_render_side: bool = False) -> None:
         """Clear `_aec3_post` chain state.
@@ -1136,20 +1074,6 @@ class AEC:
             enable_filter_analyzer=True,
             hop_size=int(self.config.hop_size),
             sample_rate=int(self.config.sample_rate),
-            # P0.5: carry the erle_e2y2_gate_* config across reset too (the init
-            # AecStateConfig sets them; this rebuild omitted them). Default-OFF →
-            # production byte-equal; without it an env-set gate was silently
-            # dropped after any mid-stream reset.
-            erle_e2y2_gate_enabled=bool(
-                getattr(self.config, 'erle_e2y2_gate_enabled', False)),
-            erle_e2y2_gate_threshold=float(
-                getattr(self.config, 'erle_e2y2_gate_threshold', 0.5)),
-            erle_gate_subtractor_converged=bool(
-                getattr(self.config, 'erle_gate_subtractor_converged', False)),
-            erle_gate_subtractor_threshold=float(
-                getattr(self.config, 'erle_gate_subtractor_threshold', 0.5)),
-            erle_gate_subtractor_y2_floor=float(
-                getattr(self.config, 'erle_gate_subtractor_y2_floor', 1.0e6)),
         ))
         # Re-derive fft-density-scaled echo_model so a mid-stream reset keeps
         # the same per-bin PSD floors as init (see __init__ note).
@@ -1176,11 +1100,8 @@ class AEC:
             getattr(self.config, "reverb_tail_strength", 1.0))
         self._aec3_sg = SuppressionGain(
             **self._build_sg_kwargs(n_bins, self._aec3_sg_config))
-        if getattr(self, "_nearend_spp", None) is not None:
-            self._nearend_spp.reset()
-        self._nearend_p_ne = None
-        # C′/cohxd coherence-gate EMAs are filter-output-derived → always
-        # cleared (a stale Γ² would mis-gate ERLE / cohxd against the old path,
+        # C′ coherence-gate EMAs are filter-output-derived → always
+        # cleared (a stale Γ² would mis-gate ERLE against the old path,
         # incl. on the filter-derived recovery path where the taps were wiped).
         self._reset_coherence_state()
         self._aec3_ola_buf.fill(0)
@@ -3254,9 +3175,9 @@ class AEC:
         # Y = Ŷ_true + N → |<Ŷ, Y*>| decreases → Γ² drops → gate closes.
         _coh_gate_mask: Optional[np.ndarray] = None
         # Γ²(Ŷ,Y) EMA — the accumulators feed only `_gamma2`, which is consumed
-        # only by the ERLE gate or the coherence gain floor, so skip the whole
-        # block when neither is enabled (byte-equal: the state is dead otherwise).
-        if self.config.erle_coh_gate_enabled or self.config.coh_gain_floor_enabled:
+        # only by the ERLE gate, so skip the whole block when it is disabled
+        # (byte-equal: the state is dead otherwise).
+        if self.config.erle_coh_gate_enabled:
             _echo_c = self.filter.echo_spec.astype(np.complex64)
             _near_c = self.filter.near_spec.astype(np.complex64)
             _a = float(self.config.erle_coh_gate_alpha)
@@ -3272,33 +3193,7 @@ class AEC:
             _gamma2 = (np.abs(self._coh_erle_sye) ** 2
                        / np.maximum(self._coh_erle_syy * self._coh_erle_see,
                                     1e-30)).astype(np.float32)
-            if self.config.erle_coh_gate_enabled:
-                _coh_gate_mask = (_gamma2 >= self.config.erle_coh_gate_threshold)
-            # Layer1: stash per-bin Γ²_ŶY for the suppressor coherence floor.
-            if self.config.coh_gain_floor_enabled:
-                self._coh_gamma2_for_floor = _gamma2
-        # cohxd: per-bin Γ²(X, Y) — reference-vs-mic coherence for the selective
-        # floor release. X = far_spec (delay-aligned reference; bulk delay
-        # removed upstream so it is time-aligned to the mic frame), Y = near_spec
-        # (mic). High Γ² ⟹ residual correlates with the reference ⟹ confidently
-        # echo ⟹ release floor. Low Γ² ⟹ nearend (X-uncorrelated) ⟹ keep floor.
-        if self.config.cohxd_floor_release_enabled:
-            _far_c = self.filter.far_spec.astype(np.complex64)
-            _near_c2 = self.filter.near_spec.astype(np.complex64)
-            _ax = float(self.config.cohxd_alpha)
-            self._coh_xy_sxy = (
-                (1.0 - _ax) * self._coh_xy_sxy + _ax * (_far_c * np.conj(_near_c2))
-            )
-            self._coh_xy_sxx = (
-                (1.0 - _ax) * self._coh_xy_sxx + _ax * np.abs(_far_c) ** 2
-            )
-            self._coh_xy_syy = (
-                (1.0 - _ax) * self._coh_xy_syy + _ax * np.abs(_near_c2) ** 2
-            )
-            self._coh_xy_gamma2 = (
-                np.abs(self._coh_xy_sxy) ** 2
-                / np.maximum(self._coh_xy_sxx * self._coh_xy_syy, 1e-30)
-            ).astype(np.float32)
+            _coh_gate_mask = (_gamma2 >= self.config.erle_coh_gate_threshold)
         self._aec3_state.update(
             bridge=bridge,
             external_delay=ext_delay,
@@ -3409,15 +3304,6 @@ class AEC:
             filter_length_blocks=int(getattr(self.filter, 'n_partitions', 0)),
             force_nonlinear_path=_just_reset_active,
         )
-
-        # Per-bin near-end SPP: p_ne[k] from minima tracking of |E|²/R², where
-        # R² is the RES's reverb/echo-path-aware residual-echo estimate (so the
-        # far-only baseline is ≈1 and a near-end onset spikes the ratio). Gated
-        # on far-end activity. Default-OFF substrate; stored for diagnostics and
-        # the cohxd near-gate consumer.
-        if self._nearend_spp is not None:
-            self._nearend_p_ne = self._nearend_spp.update(
-                error_psd, r2, bool(self._render_activity.is_active))
 
         # Reverb tail dead-streak tracking. `_reverb_fr` is the
         # residual-echo-estimator's tracked frequency response; its
@@ -3580,14 +3466,6 @@ class AEC:
             render_block=render_block_scaled,
             clock_drift=False,
             stationary_mask=_stationary_mask,
-            coh_gamma2=(self._coh_gamma2_for_floor
-                        if self.config.coh_gain_floor_enabled else None),
-            coh_xy_gamma2=(self._coh_xy_gamma2
-                           if self.config.cohxd_floor_release_enabled else None),
-            nearend_p_ne=(self._nearend_p_ne
-                          if getattr(self.config,
-                                     "cohxd_nearend_spp_gate_enabled", False)
-                          else None),
         )
 
         # trace_hf_chain audit trace removed (default-OFF dev knob).

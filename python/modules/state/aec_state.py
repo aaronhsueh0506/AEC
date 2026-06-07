@@ -66,14 +66,6 @@ class AecStateConfig:
     # hop_size/sample_rate feed the per_block→per_hop conversion.
     hop_size: int = 160
     sample_rate: int = 16000
-    # v3.22 C: E²/Y² per-bin ERLE gate. Default OFF.
-    erle_e2y2_gate_enabled: bool = False
-    erle_e2y2_gate_threshold: float = 0.5
-    # ERLE update gate from AEC3 per-frame SubtractorOutputAnalyzer rule
-    # (e2 < thr·y2, y2 > floor) instead of the legacy convergence latch. OFF.
-    erle_gate_subtractor_converged: bool = False
-    erle_gate_subtractor_threshold: float = 0.5
-    erle_gate_subtractor_y2_floor: float = 1.0e6
     # TransparentMode is permanently disabled in production (legacy
     # 10-frame ERLE latch was retired); kwarg preserved as no-op for
     # AEC3-spec API compatibility.
@@ -108,8 +100,6 @@ class AecState:
             max_erle_l=self._config.erle_max_l,
             max_erle_h=self._config.erle_max_h,
             hop_size=self._config.hop_size,
-            e2y2_gate_enabled=self._config.erle_e2y2_gate_enabled,
-            e2y2_gate_threshold=self._config.erle_e2y2_gate_threshold,
         )
         self._erl_estimator = ErlEstimator(
             startup_phase_length_hops=self._config.erl_startup_hops,
@@ -294,18 +284,7 @@ class AecState:
         #     aec_state.cc:244-246; clears non-delay-change state).
         if self._initial_state.transition_triggered():
             self._erle_estimator.reset(delay_change=False)
-        # ERLE update gate: legacy latch (near-contaminated, ~5% in DT) vs the
-        # AEC3 per-frame SubtractorOutputAnalyzer rule (e2 < thr·y2, y2 > floor)
-        # which fires on every echo-dominant frame so ERLE can earn credit.
         erle_converged = any_filter_converged
-        if self._config.erle_gate_subtractor_converged:
-            _y2sum = float(np.sum(
-                capture_psd_erle if capture_psd_erle is not None else capture_psd))
-            _e2sum = float(np.sum(error_psd))
-            erle_converged = (
-                _e2sum < self._config.erle_gate_subtractor_threshold * _y2sum
-                and _y2sum > self._config.erle_gate_subtractor_y2_floor
-            )
         self._erle_estimator.update(
             x2=x2_reverb_for_erle if x2_reverb_for_erle is not None else render_psd,
             y2=capture_psd_erle if capture_psd_erle is not None else capture_psd,
