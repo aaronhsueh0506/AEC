@@ -46,6 +46,21 @@ Presets (single residual-echo strength axis `min_gain_floor_far_active_db`):
 `usable_linear`, `fullband_erle`, `r2_mean`, `gain_mean`, `comfort_noise_mean`,
 … one row per hop; zero hot-path cost when off).
 
+## Streaming API
+
+`aec_process(mic, ref, out)` is the lockstep 1-hop-in/1-hop-out call. For async
+pipelines where render and capture arrive on separate calls/threads, v3.22.5 adds
+a decoupled pair over a 320 ms render FIFO:
+
+```c
+aec_analyze_render(&a, ref);          /* buffer one render hop */
+aec_process_capture(&a, mic, out);    /* consume + process one mic hop */
+```
+
+Lockstep (`analyze_render` then `process_capture`) is **byte-identical** to
+`aec_process`; underrun/overrun return `AEC_BUF_RENDER_UNDERRUN`/`_OVERRUN`. See
+[guide §10.1.1](../docs/c_user_and_integration_guide.md) and `test/stream_sim.c`.
+
 ## Parity (bit-exact to Python)
 
 The C port is **byte-for-byte identical** to `python/aec.py` end-to-end:

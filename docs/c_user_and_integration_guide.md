@@ -141,7 +141,6 @@ and per-module breakdown:
 | `epc_shadow.h` | `epc_shadow.c` | EchoPathChangeDetector + ShadowCopyController |
 | `residual_echo.h` | `residual_echo.c` | ResidualEchoEstimator |
 | `res_filter.h` | `res_filter.c` | ResFilter (ENR + reverb tail + min-stat noise + CNG, OLA + sqrt-Hann) |
-| `dtd.h` | `dtd.c` | DTD (geigel / divergence / coherence — opt-in) |
 | `aec_debug.h` | `aec_debug.c` | timestamped log infrastructure |
 | — | `fft_fp64.c` | fp64 radix-2 FFT |
 
@@ -346,6 +345,34 @@ There is no look-ahead beyond the current block.
 > fewer samples reads uninitialised memory; feeding more is ignored.
 > The CLI explicitly chunks `for (i = 0; i + hop <= n; i += hop)` and
 > drops any tail shorter than one hop.
+
+### 10.1.1 Decoupled render/capture API (async pipelines) — v3.22.5
+
+For real-time pipelines where the far-end (render) and mic (capture) arrive on
+**separate calls / threads and not necessarily 1:1**, use the decoupled API
+instead of `aec_process`:
+
+```c
+AecBufferingEvent aec_analyze_render(Aec* a, const float* ref);          /* buffer one render hop */
+AecBufferingEvent aec_process_capture(Aec* a, const float* mic, float* out); /* consume + process one mic hop */
+```
+
+A **320 ms render-hop FIFO** absorbs call-scheduling jitter between the two
+streams (this is *not* echo delay — the acoustic delay still lives in the
+ref ring buffer). Both calls still take exactly `hop_size` samples.
+
+- **Lockstep equivalence:** one `aec_analyze_render(ref)` immediately followed by
+  one `aec_process_capture(mic, out)` is **byte-identical to `aec_process(mic,
+  ref, out)`** — the FIFO is pure pass-through in lockstep, so offline/bit-exact
+  parity is unaffected.
+- **Underrun** (capture with empty FIFO): processed with a silent render hop,
+  returns `AEC_BUF_RENDER_UNDERRUN`.
+- **Overrun** (render past FIFO capacity): the oldest buffered hop is dropped,
+  returns `AEC_BUF_RENDER_OVERRUN`.
+
+Check the returned `AecBufferingEvent` (or `aec_last_buffering_event(&aec)`) to
+monitor stream health. Verified by `c_impl/test/stream_sim.c` (lockstep 0/400
+hops differ; underrun + overrun detection/recovery pass).
 
 ### 10.2 Sample-rate auto-derivation
 
