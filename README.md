@@ -4,85 +4,47 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v3.22.0 (2026-06-01) — Python `aec.py` `__version__ = "3.22.0"`. C port lag follows. v3.22.0 ships the **split min-gain floor** (DT/NE near-end preservation, default ON) on top of the v3.22 default-ON stack (E1+x2+E2+D3+L1+C′) and the v3.21 AEC3-aligned `_aec3_post` (AecState + ResidualEchoEstimator + SuppressionGain + CNG). It is the only configuration meeting all four ship thresholds (FS echo >3.5, DT echo >4, DT deg >2.2, NE deg ≥4) — see [CHANGELOG.md](CHANGELOG.md) `[3.22.0]`. Single production preset: `BALANCED`. The 5-preset table below is the historical v3.10.4 snapshot, preserved for reference.
+**Release**: v3.22.5 (2026-06-07) — Python `aec.py` `__version__ = "3.22.5"`; C port bit-exact (peak |Δ| = 0). The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). v3.22.5 is a cleanup + docs release on the byte-equal **3.22.4** algorithm: the DTD subsystem and dead research flags were removed, the Python CLI now exposes all three presets, and a decoupled C streaming render/capture API shipped. Three Pareto presets — `gentle` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.22.5]` and [docs/v3_22_5_release.md](docs/v3_22_5_release.md).
 
 ---
 
 ## Status snapshot
 
-**5-preset operating points** (800-case AECMOS, AEC Challenge Interspeech
-2021, fl=52 ms, cng=True). Aggregated (FS / DT echo = static + movement
-mean):
+**800-case AECMOS — ours vs WebRTC AEC3 vs Speex (MDF)**, standard bench
+`balanced / fl=832 (52 ms) / --cng`, local AECMOS ONNX, full AEC Challenge
+2021 blind corpus (echo↑ deg↑):
 
-| Preset | FS echo↑ | NE deg↑ | DT echo↑ | DT deg↑ |
+| Bucket | n | **ours** echo / deg | AEC3 echo / deg | Speex echo / deg |
 |---|---|---|---|---|
-| **MILD**        | 3.397 | **4.022** | 3.855 | **2.623** |
-| SOFT            | 3.565 | 4.020 | 4.015 | 2.461 |
-| BALANCED ★      | 3.668 | 4.010 | 4.154 | 2.344 |
-| AGGRESSIVE      | 3.686 | 4.006 | 4.178 | 2.319 |
-| MAXIMUM         | **3.746** | 3.993 | **4.218** | 2.265 |
-| WebRTC AEC2     | 3.488 | 4.098 | 4.240 | 2.416 |
+| FS_static   | 169 | 3.576 / 4.999 | 3.821 / 4.999 | 2.847 / 5.000 |
+| FS_movement | 131 | 3.512 / 4.999 | 3.790 / 4.999 | 2.757 / 5.000 |
+| DT_static   | 186 | 4.201 / 2.156 | 4.531 / 1.815 | 3.427 / 3.179 |
+| DT_movement | 114 | 4.082 / 2.228 | 4.456 / 1.816 | 3.272 / 3.301 |
+| NE          | 200 | 4.998 / 4.047 | 4.999 / 3.410 | 4.998 / 4.128 |
 
-Per-bucket breakdown:
+- **Echo cancellation: AEC3 > ours > Speex.** AEC3 cuts the most; Speex is a
+  weak canceller (FS ~2.8, DT ~3.3); ours sits in between (FS ~3.5, DT ~4.1).
+- **Near-end preservation (deg): Speex > ours > AEC3.** AEC3 pays for its echo
+  cancellation with the worst DT deg (1.82) and NE deg (3.41); ours holds the
+  middle and **beats AEC3 on every degradation axis** (DT deg 2.16/2.23 vs 1.82,
+  NE deg 4.05 vs 3.41) while **approaching AEC3 on echo** (FS_movement 3.512 vs
+  3.790, within 0.28). This is the ship target: *approach AEC3 on echo, beat it
+  on deg.* All four ship bars met; **FS_movement 3.512 > 3.5** is the primary gate.
 
-| Preset | FS_st | FS_mv | NE | DT_st echo | DT_st deg | DT_mv echo | DT_mv deg |
-|---|---|---|---|---|---|---|---|
-| **MILD**        | 3.332 | 3.480 | **4.022** | 3.888 | 2.632 | 3.802 | **2.608** |
-| SOFT            | 3.504 | 3.643 | 4.020     | 4.069 | 2.453 | 3.926 | 2.474     |
-| BALANCED ★      | 3.641 | 3.704 | 4.010     | 4.217 | 2.328 | 4.051 | 2.370     |
-| AGGRESSIVE      | 3.676 | 3.699 | 4.006     | 4.242 | 2.297 | 4.073 | 2.355     |
-| MAXIMUM         | **3.748** | **3.743** | 3.993 | **4.285** | **2.240** | **4.109** | 2.307 |
+### Presets — one Pareto knob
 
-> v3.8.3 (2026-05-05) shifted the gentle end of the preset ladder:
-> new MILD is an ultra-light minimum-touch preset (re-bench'd 2026-05-05);
-> SOFT (\*) inherits the former v3.8.2 MILD numbers verbatim (params
-> unchanged); BALANCED+ unchanged from the 2026-05-01 baseline. NE deg
-> ≈ 4.0 is a binding floor of the current architecture — every preset
-> clusters in 3.986–4.022.
+Three presets differ **only** in `min_gain_floor_far_active_db`, the far-active
+residual-gain floor that trades echo suppression against near-end preservation:
 
-### What changed since v3.8.3
+| Preset | floor | character |
+|---|---|---|
+| `gentle`       | −20 dB | near-priority — more near-end kept, more echo leak (FS dips below the 3.5 bar by design) |
+| **`balanced` ★** | −28 dB | **production** — all four ship bars met |
+| `aggressive`   | −38 dB | echo-priority — deeper suppression, more near-end loss (deg stays >2.0, above AEC3) |
 
-- **v3.8.4 — Plan A (HF preservation under DT)**: smoothing kernel
-  `[0.25, 0.5, 0.25] → [0.1, 0.8, 0.1]` (stops low-band echo gain
-  leaking into HF bins, ~10 dB cut measured 4–8 kHz); HF cap anchor
-  500 Hz → 2 kHz (vowel formants 1–3 kHz preserved); DT gate
-  `effective_dt < 0.5 → < 0.3`; cap skipped when high-band shows NE
-  evidence; `_stat_dt_mask` extended 4 → 7 kHz with linear fade.
-- **v3.10.0 — Delay + Recovery (WebRTC AEC3 alignment)**: DelayEstimator
-  `max_delay_ms` 250 → 512 + `confidence` / `is_solid` properties;
-  render ring buffer 1024 ms; two-path delay-acquisition gate
-  (acquisition vs shift), `mu_scale` delay-confidence ceiling;
-  `FilterPlateauDetector` (resets filter taps when ERLE stuck low for
-  50 frames during DT); `ResidualEchoEstimator` long-window far-PSD
-  EMA (alpha=0.993).
-- **v3.10.1 — Long-window EMA refinements**: EMA updates every
-  far-active frame regardless of mode; render-based fallback blends
-  70 % long-window + 30 % instantaneous, warmup-gated.
-- **v3.10.2 — Codex round 2**: split delay gates into truly independent
-  ifs; shared `_reset_filter_derived_state(reason, preserve_render_ema)`
-  helper covers plateau and delay-first reset paths.
-- **v3.10.3 — Codex round 3 + self-trace fixes**: helper now also
-  resets `near_power` EMA (F3); plateau detector uses current-frame
-  `dt_signal_present` (F4); `_pending_delay` cleared on reset (F5);
-  `__version__` bump (F7); `_pending_delay` TTL = 3 cycles (H1);
-  `mu_scale` ceiling skipped during post-reset warmup (H2); plateau
-  detector resets cumulative counters on fire (H3); Path B delay
-  shift now calls helper (M4).
-- **v3.10.4 — Wider delay range + CLI fix**: `max_delay_ms`
-  512 → 1024 (matches WebRTC's older AEC ~1 s far-end history;
-  AEC3's 512 ms misses BT/mobile skew); render buffer 1024 → 2048 ms
-  for headroom. `aec.py` CLI: `--enable-res` / `--cng` use
-  `argparse.BooleanOptionalAction` with `default=None` so preset
-  values are no longer silently overridden when the user doesn't
-  pass the flag (F6).
-- **Bench (BALANCED, 800-case)**: v3.10.4 FS 3.668 / NE 4.010 /
-  DT echo 4.154 / DT deg 2.344. The −0.130 FS regression vs v3.8.3
-  baseline is the locked-in cost of Plan A's smoothing kernel
-  change — see CHANGELOG for details and known trade-offs.
-
-Algorithm version history → [CHANGELOG.md](CHANGELOG.md).
-Trace-driven evolution (v3.0–v3.4 design rationale) → [docs/aec_v3_evolution.md](docs/aec_v3_evolution.md).
-HF preservation research → [docs/research_log_v3.9.x_HF_preservation.md](docs/research_log_v3.9.x_HF_preservation.md).
+`gentle` / `aggressive` are deliberate Pareto operating points on the proven
+single-channel DT-deg-vs-echo wall; all share the same `_aec3_post` chain and
+800-case-tuned base. Full version history → [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -131,7 +93,7 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 | Symptom | Diagnosis & adjustment |
 |---|---|
 | **Residual echo too high (FS / NE)** | 1. With `--no-res`, output should be a clean linear-AEC residual. Echo still dominating → ref signal is wrong, mic-ref delay > filter length, or sample rates differ. 2. `--preset aggressive` or `maximum` for stronger RES (cost: more NE compression). 3. `--filter-length-ms 100` for big rooms / long reverb. |
-| **NE clipped during double-talk** | Lower preset → `--preset soft` first (= former v3.8.2 mild, light RES with audible echo cleanup), then `--preset mild` for minimum-touch RES. Don't tweak individual RES knobs — preset values are co-tuned. |
+| **NE clipped during double-talk** | Lower preset → `--preset gentle` (−20 dB floor, near-priority: keeps more near-end at the cost of more echo leak). Don't tweak individual RES knobs — preset values are co-tuned. |
 | **Slow startup / first-second echo** | Filter convergence needs ≥ 0.5 s of meaningful far energy. Normal adaptive behavior. Consider muting output during application warm-up (e.g. play a "connecting…" cue). |
 | **Echo spikes when device moves** | Echo path changes → EPC fires → ~200 ms re-convergence with brief leak. Usually self-recovers. For frequent movement, increase filter length. |
 | **Output sounds muffled / pumping in NE-only** | Comfort noise mismatch. Try `--cng` (C) / `--enable-cng` (Python) to shape the noise floor; do NOT stack a second CNG layer downstream. |
@@ -148,94 +110,81 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 ```
    mic (near-end)                    ref (far-end)
         │                                  │
-        ▼                                  ▼
-   ┌──────────┐                       ┌──────────┐
-   │  HPF     │                       │  HPF     │   (80 Hz Butterworth, both sides)
-   └────┬─────┘                       └────┬─────┘
+        ▼                                  │   (ref-path HPF OFF since v3.19)
+   ┌──────────┐                            ▼
+   │  HPF     │   (80 Hz, mic only)   ┌──────────────┐
+   └────┬─────┘                       │  Saturation  │   (soft-clip ref)
+        │                             └────┬─────────┘
         │                                  ▼
-        │                           ┌──────────────┐
-        │                           │  Saturation  │   (soft-clip ref)
-        │                           └────┬─────────┘
-        │                                ▼
-        │                           ┌──────────────┐
-        │                           │  Delay est.  │   (GCC-PHAT, periodic)
-        │                           │  + ring buf  │
-        │                           └────┬─────────┘
-        │                                │
-        └────────────┬───────────────────┘
+        │                             ┌──────────────┐
+        │                             │  Delay est.  │   (online EchoPathDelay-
+        │                             │  + ring buf  │    Estimator, periodic)
+        │                             └────┬─────────┘
+        └────────────┬────────────────────┘
                      ▼
               ┌──────────────┐
-              │  PBFDKF      │   per-bin Kalman, two-stage Q,
-              │  main filter │   v3.7.0 G1 KX-blended P-update
+              │  PBFDKF      │   per-bin Kalman, two-stage Q
+              │  main filter │
               └──────┬───────┘
                      │
             ┌────────┴────────┐
             ▼                 ▼
-      ┌────────────┐    ┌──────────────┐
-      │  Shadow    │    │  EPC + Shadow│   (echo-path-change + shadow-copy
-      │  filter    │    │  copy state  │    state machine)
-      │  (Q×3.5)   │    └──────────────┘
-      └────────────┘
+      ┌────────────┐    ┌──────────────────────┐
+      │  Shadow    │    │ PathChangeRegime-     │  (echo-path-change +
+      │  filter    │    │ Handler (EPC state)   │   shadow-copy state machine)
+      └────────────┘    └──────────────────────┘
                      │
-                     ▼
-              ┌──────────────────┐
-              │  ResFilter       │   ENR-mask + reverb tail + min-stat
-              │  (post-filter)   │   noise + CNG, OLA + sqrt-Hann
-              └──────┬───────────┘
-                     ▼
-              ┌──────────────┐
-              │  Limiter     │   smoothed gain clamp
-              └──────┬───────┘
+                     ▼   error spectrum E(f)
+              ┌────────────────────────┐
+              │  AEC3 post-filter      │  _aec3_post: AecState +
+              │  (_aec3_post)          │  ResidualEchoEstimator (per-bin R²)
+              │                        │  + SuppressionGain (ENR/EMR gain)
+              └──────┬─────────────────┘  + CNG, OLA + sqrt-Hann
                      ▼
                 clean output
 ```
 
-Algorithm details → [docs/aec_methods.md](docs/aec_methods.md). PBFDKF/shadow/DTD
-overview → [docs/pbfdkf_shadow_intro.md](docs/pbfdkf_shadow_intro.md). DTD design
-→ [docs/dtd_design.md](docs/dtd_design.md).
+The v3.21 pipeline retired the legacy 9-stage `ResFilter`; the post-filter is
+now `AEC._aec3_post` driving the AEC3-aligned chain (`modules/state`,
+`modules/residual`, `modules/render`, `modules/delay`). Algorithm details →
+[docs/aec_methods.md](docs/aec_methods.md). PBFDKF / shadow overview →
+[docs/pbfdkf_shadow_intro.md](docs/pbfdkf_shadow_intro.md).
 
 ### Future direction — NN post-filter after the linear AEC
 
-The pipeline above is split into a **linear stage** (HPF → saturation →
-delay-est → PBFDKF + shadow) and a **post-filter stage** (ResFilter:
-ENR + spectral floor + reverb tail + CNG). Both stages have stable,
-well-understood interfaces:
+The pipeline splits into a **linear stage** (HPF → saturation → delay-est →
+PBFDKF + shadow) and the **AEC3 post-filter** (`_aec3_post`: ResidualEcho-
+Estimator + SuppressionGain + CNG). Both have stable, freq-domain interfaces,
+so a learned model can replace the post-filter — or the NR + RES jointly —
+without touching the linear AEC or the front/back transform:
 
 ```
-                          linear AEC                  post-filter
-mic ─►───────────────────► [PBFDKF] ──► error ──► [ ResFilter ] ──► out
-                                            │
-                                            └─► (or NN model)
+              linear AEC                          post-filter
+mic ─►──────► [PBFDKF] ──► E(f) ──► [ _aec3_post / SuppressionGain ] ──► out
+                              │
+                              └─► (or NN-residual / NN-NR / NN-joint on E(f))
 ```
 
-The classical RES has hit its score plateau on the AEC Challenge 2021
-blind set (R10–R16 investigations confirmed; see
-[SUMMARY.md](docs/SUMMARY.md)). The next architectural step is to
-**replace or complement ResFilter with a neural post-filter** taking
-the same inputs the classical RES uses today:
+The seam is the per-frame `AecResContext` (set `AecConfig.return_res_context =
+True` → `aec.process()` returns `(linear_out, AecResContext)`). It carries the
+linear error spectrum, the per-frame echo estimate, and the AEC3 suppression
+gain so a downstream stage runs entirely in the frequency domain:
 
-| Input to NN model | Source | Frame |
-|---|---|---|
-| `error` (linear AEC out) | `aec.process()` raw output | hop |
-| `echo_spec` (filter echo estimate) | `AecResContext.echo_spec` | n_freqs complex |
-| `near_spec`, `far_spec` | mic / ref FFT | n_freqs complex |
-| Detector telemetry (ERLE, dt_indicator, divergence, erle_factor, etc.) | `AecStats` / `AecResContext` | scalar/frame |
+| Field | Meaning |
+|---|---|
+| `error_spec` | E(f) — windowed linear AEC error spectrum (the "noisy" input) |
+| `echo_spec` | Ŷ(f) — linear echo estimate (residual-echo reference) |
+| `far_spec`, `near_spec` | X(f), mic spectrum |
+| `res_gain`, `comfort_noise` | the AEC3 SuppressionGain + CNG this frame |
+| `erle_factor`, `dt_indicator`, `divergence`, `over_sub`, `erl_estimate` | per-frame telemetry |
 
-The hooks are already in place:
-
-- **Python**: set `AecConfig.return_res_context = True` and
-  `aec.process()` returns `(linear_out, AecResContext)`. Feed the
-  context into a downstream model and skip the built-in ResFilter
-  with `enable_res = False`.
-- **C**: same plumbing exists in `c_impl/include/aec.h` —
-  `aec_process` can be split into `linear_step` + external RES via
-  exposing `AecResContext` (port from Python is the next step on the
-  Audio_ALG integration repo).
-
-Candidate models (joint NR + RES + dereverb) and the roadmap for the
-NN replacement are in the planning notes; the classical pipeline stays
-in production until the NN reaches parity on near-end preservation
-(NE deg ≥ 4.0).
+This seam is **already exercised** in the
+[Audio_ALG](https://github.com/aaronhsueh0506/Audio_ALG) integration repo, whose
+`AEC(linear) → NR → RES` frequency-domain pipeline reuses the AEC3 gain on the
+post-NR spectrum (`S(f) = E·G_nr·G_res`) — a single FFT/IFFT for the whole
+chain, with each stage independently swappable for a neural model. The classical
+DSP pipeline stays in production / as the deterministic fallback. NN-integration
+contract → [docs/nn_integration_interface.md](docs/nn_integration_interface.md).
 
 ---
 
@@ -290,7 +239,7 @@ cd c_impl
 make
 
 ./bin/aec_wav mic.wav ref.wav out.wav                  # BALANCED preset
-./bin/aec_wav mic.wav ref.wav out.wav --preset maximum
+./bin/aec_wav mic.wav ref.wav out.wav --preset aggressive
 ./bin/aec_wav mic.wav ref.wav out.wav --cng            # enable CNG (default off)
 ./bin/aec_wav mic.wav ref.wav out.wav --no-res         # skip residual filter
 ./bin/aec_wav mic.wav ref.wav out.wav --debug-level 2  # per-frame log
@@ -321,13 +270,11 @@ while has_audio:
 
 Preset trade-off:
 
-| Preset | Echo suppression | NE preservation | Use |
-|---|---|---|---|
-| MILD       | very light | best (minimum-touch) | echo 安靜、demo / 試聽 |
-| SOFT       | light  | very good | 一般通話但 BALANCED 過度壓 NE |
-| BALANCED   | medium | good  | general / default |
-| AGGRESSIVE | strong | minor loss | hands-free, automotive |
-| MAXIMUM    | max    | visible loss | speakerphone / very high echo |
+| Preset | floor | Echo suppression | NE preservation | Use |
+|---|---|---|---|---|
+| `gentle`     | −20 dB | light  | best (near-priority) | NE 過度被壓時、demo / 試聽 |
+| `balanced` ★ | −28 dB | medium | good (all ship bars) | general / production default |
+| `aggressive` | −38 dB | strong | minor loss (echo-priority) | hands-free, speakerphone, high echo |
 
 Full parameter reference → [docs/aec_methods.md §6 (Configuration)](docs/aec_methods.md).
 
@@ -382,7 +329,8 @@ AEC/
 │   ├── architecture_v3_10_5_vs_v3_21_vs_aec3.html  # three-way architecture comparison
 │   ├── refactor_modules_layout.md       # current module map (v3.21)
 │   ├── pbfdkf_shadow_intro.md
-│   ├── dtd_design.md
+│   ├── v3_22_5_release.md                # release summary + 3-way AEC3/Speex comparison
+│   ├── nn_integration_interface.md       # NN residual/NR/joint freq-domain seam
 │   ├── c_user_and_integration_guide.md  # canonical C CLI / API / integration guide
 │   └── bench/v3_21_3aadd2d_baseline/    # 800-case AECMOS anchor + 25-case byte-equal reference
 ├── bin/                             # optional WebRTC benchmark helpers
