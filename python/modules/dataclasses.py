@@ -5,6 +5,7 @@ plain dataclasses or class-level constant containers; no runtime
 behaviour. Depends only on ``modules.enums`` for ``AecFilterState``.
 """
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -101,6 +102,16 @@ class AecResContext:
     over_sub: float              # dynamic over_sub value
     saturation_level: float
     erl_estimate: float = 0.01    # E2: dynamic ERL for external RES render-based
+    # Freq-domain seam for an EXTERNAL residual-echo suppressor applied AFTER NR
+    # (Audio_ALG AEC-linear → NR → RES). These carry the linear stage's own
+    # windowed error spectrum + the AEC3 SuppressionGain it computed this frame,
+    # so the post-NR stage is a pure freq multiply S(f)=error_spec·G_nr·res_gain
+    # (+CNG) — reusing the tuned gain instead of re-deriving it. Populated only
+    # when return_res_context=True; None on the default production path.
+    error_spec: Optional[np.ndarray] = None    # (n_freqs,) complex windowed linear E(f)
+    res_gain: Optional[np.ndarray] = None       # (n_freqs,) real AEC3 suppression gain G_res
+    comfort_noise: Optional[np.ndarray] = None  # (n_freqs,) real CNG power N² (int16²-scaled)
+    r2: Optional[np.ndarray] = None             # (n_freqs,) real residual-echo PSD R² (int16²-scaled)
 
 
 @dataclass

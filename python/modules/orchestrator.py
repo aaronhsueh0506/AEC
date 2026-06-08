@@ -2033,6 +2033,11 @@ class AEC:
                         over_sub=float(self._diag.get('mu_scale', 1.0)),
                         saturation_level=float(self._saturation_level),
                         erl_estimate=float(self._erl_estimate),
+                        # Freq seam for external post-NR RES (set in _aec3_post).
+                        error_spec=getattr(self, '_res_error_spec', None),
+                        res_gain=getattr(self, '_res_gain', None),
+                        comfort_noise=getattr(self, '_res_comfort_noise', None),
+                        r2=getattr(self, '_res_r2', None),
                     )
 
                 # Update per-bin mu_scale AFTER RES. echo_psd/error_psd were
@@ -3249,6 +3254,24 @@ class AEC:
             clock_drift=False,
             stationary_mask=_stationary_mask,
         )
+
+        # Freq-domain seam for an EXTERNAL post-NR residual suppressor
+        # (Audio_ALG AEC-linear → NR → RES). Stash the linear windowed error
+        # spectrum + the gain/CNG computed this frame so the caller can apply
+        # S(f) = error_spec · G_nr · res_gain (+CNG) AFTER NR, reusing this
+        # tuned gain instead of re-deriving it. Only when the caller opted in.
+        if self.config.return_res_context:
+            self._res_error_spec = error_spec.astype(np.complex64, copy=True)
+            self._res_gain = gain.astype(np.float32, copy=True)
+            self._res_comfort_noise = comfort_noise.astype(np.float32, copy=True)
+            # Residual-echo PSD R² (int16²-scaled, same as comfort_noise) — lets an
+            # external NR fold echo into its noise floor for a joint denoise+RES gain.
+            self._res_r2 = np.asarray(r2, dtype=np.float32).copy()
+            # When the internal RES is OFF, emit the TRUE linear residual
+            # (raw_output) — not the suppressed output — so the external RES is
+            # the sole suppressor and "RES after NR" stays a single clean cut.
+            if not self.config.enable_res:
+                return raw_output.astype(np.float32)
 
         # trace_hf_chain audit trace removed (default-OFF dev knob).
 
