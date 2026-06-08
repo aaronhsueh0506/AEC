@@ -38,9 +38,8 @@ non-deterministic state in HPF / saturation / detector accumulators.
 ./bin/aec_wav <mic.wav> <ref.wav> <out.wav>
 
 # Other presets
-./bin/aec_wav mic.wav ref.wav out.wav --preset mild
+./bin/aec_wav mic.wav ref.wav out.wav --preset gentle
 ./bin/aec_wav mic.wav ref.wav out.wav --preset aggressive
-./bin/aec_wav mic.wav ref.wav out.wav --preset maximum
 
 # Toggles
 ./bin/aec_wav mic.wav ref.wav out.wav --cng              # comfort noise (default off)
@@ -63,13 +62,15 @@ fp32 PCM by default; `AEC_FP32_WAV=0` forces 16-bit PCM.
 
 ### Preset selection
 
-| Preset | FS echo suppression | DT NE preservation | Use case |
-|---|---|---|---|
-| **mild** | light | best (minimum-touch RES) | echo 安靜場景、demo / 試聽、想保留近端原始質感 |
-| **soft** | medium | very good (= former v3.8.2 mild) | 一般通話但對 BALANCED 過度壓制有意見 |
-| **balanced** | high | medium | general calls (recommended default) |
-| **aggressive** | very high | medium-low | automotive, noisy environments |
-| **maximum** | extreme | weak | hi-coupling speakerphones, IoT |
+Three presets — they differ **only** in `min_gain_floor_far_active_db`, the
+far-active min-gain floor (the single Pareto knob trading echo suppression
+against near-end preservation):
+
+| Preset | floor | FS echo suppression | DT NE preservation | Use case |
+|---|---|---|---|---|
+| **gentle** | −20 dB | lower (FS dips below 3.5 by design) | best — near-priority | echo 安靜場景、demo / 試聽、想保留近端原始質感 |
+| **balanced** ★ | −28 dB | high (all four ship bars met) | medium | general calls (**recommended default**) |
+| **aggressive** | −38 dB | very high — echo-priority | medium-low (deg still >2.0) | automotive, noisy / hi-coupling speakerphones |
 
 ---
 
@@ -100,9 +101,11 @@ aec_destroy(&aec);
 ```
 
 `aec_process` runs the entire pipeline (HPF → saturation → delay
-estimation → PBFDKF main + shadow → echo-path-change handling → ResFilter
-→ limiter). Disable sub-modules via `cfg.enable_*` flags before
-`aec_create`.
+estimation → PBFDKF main + shadow → echo-path-change handling → AEC3
+post-filter `aec3_post` → limiter). The post-stage is the AEC3-aligned
+chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG, OLA);
+the legacy 9-stage `ResFilter` was retired in v3.21. Disable sub-modules
+via `cfg.enable_*` flags before `aec_create`.
 
 ### 3.2 Heap-free init (static memory pool)
 
@@ -120,7 +123,7 @@ aec_destroy(&aec);   /* no-op for static path; safe for both paths */
 /* caller frees pool itself */
 ```
 
-Both paths produce **bit-identical** output (verified across all 4
+Both paths produce **bit-identical** output (verified across all 3
 presets and FS / DT / NE scenarios). At BALANCED / 16 kHz / 52 ms
 filter / shadow on / RES on / delay-est on the pool is **~700 KB**.
 CLI smoke: `./bin/aec_wav mic ref out --static-mem`. Full design notes
@@ -139,9 +142,10 @@ and per-module breakdown:
 | `erle.h` | `erle.c` | FilterErle + FullbandErle + erle confidence |
 | `detectors.h` | `detectors.c` | RenderActivity + FilterConvergence + DoubleTalkAnalyzer |
 | `epc_shadow.h` | `epc_shadow.c` | EchoPathChangeDetector + ShadowCopyController |
-| `residual_echo.h` | `residual_echo.c` | ResidualEchoEstimator |
-| `res_filter.h` | `res_filter.c` | ResFilter (ENR + reverb tail + min-stat noise + CNG, OLA + sqrt-Hann) |
+| `aec3_post.h` | `aec3_post.c` | **AEC3 post-filter driver** — PSD derivation + coherence-ERLE gate + CNG + OLA (production post-stage) |
+| `aec_state.h` / `residual_echo_estimator.h` / `suppression_gain.h` / `reverb_model.h` | resp. `.c` | post-filter sub-modules: AecState · ResidualEchoEstimator · SuppressionGain (ENR/EMR `GainToNoAudibleEcho`) · ReverbModel |
 | `aec_debug.h` | `aec_debug.c` | timestamped log infrastructure |
+| `res_filter.h` | `res_filter.c` | **legacy** 9-stage ResFilter — retired in v3.21, not in the production path (kept for reference/parity) |
 | — | `fft_fp64.c` | fp64 radix-2 FFT |
 
 ---
@@ -151,8 +155,8 @@ and per-module breakdown:
 These cause correctness failures (not just style issues):
 
 1. **Do not bypass the linear filter and feed mic directly to RES.**
-   ResFilter consumes the linear filter's `echo_spec` as primary echo
-   signal. Without a converged linear estimate, RES has nothing to
+   The AEC3 post-filter consumes the linear filter's `echo_spec` as primary
+   echo signal. Without a converged linear estimate, RES has nothing to
    suppress.
 2. **Do not feed non-`hop_size` blocks.** `aec_process` requires
    exactly `hop_size` samples per call (160 @16k, 480 @48k). Use a ring
@@ -263,14 +267,13 @@ log strings entirely.
    delay > filter length, or SRs differ.
 2. **Delay alignment**: `--no-delay-est` disables the online estimator;
    if leaking, measure actual mic-ref delay and bump `--filter-length-ms`.
-3. **Stronger RES**: `--preset aggressive` or `maximum` (cost: more NE
-   compression).
+3. **Stronger RES**: `--preset aggressive` (cost: more NE compression).
 4. **Longer filter**: `--filter-length-ms 100` for big rooms / long
    reverb.
 
 ### 8.2 NE clipped during double-talk
 
-- **Lower preset**: `--preset balanced` or `mild`.
+- **Lower preset**: `--preset balanced` or `gentle`.
 - Don't tweak individual RES knobs — preset values are co-tuned.
 
 ### 8.3 Slow startup / first-second echo

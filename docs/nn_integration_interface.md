@@ -34,7 +34,7 @@ These are produced every hop by the production linear AEC with zero extra cost (
 ## The three swap points (freq-in → freq-out blocks)
 Each is a pure function on the shared grid; the network replaces the DSP function, nothing else.
 
-### 1. NN-residual (replace `ResFilter` / `SuppressionGain`)
+### 1. NN-residual (replace the AEC3 post-filter `SuppressionGain`)
 - **in:** `E(f)` post-NR (or pre-NR) + `{Ŷ(f), X(f), erle_factor, dt_indicator, far_power, divergence}`
 - **out:** real gain `G_res(f) ∈ [0,1]` (apply `S(f)=G_res·E(f)`) **or** the enhanced complex `S(f)`.
 - DSP baseline it replaces: AEC3 `GainToNoAudibleEcho` (ENR/EMR), `suppression_gain.py`.

@@ -92,7 +92,7 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 
 | Symptom | Diagnosis & adjustment |
 |---|---|
-| **Residual echo too high (FS / NE)** | 1. With `--no-res`, output should be a clean linear-AEC residual. Echo still dominating → ref signal is wrong, mic-ref delay > filter length, or sample rates differ. 2. `--preset aggressive` or `maximum` for stronger RES (cost: more NE compression). 3. `--filter-length-ms 100` for big rooms / long reverb. |
+| **Residual echo too high (FS / NE)** | 1. With `--no-res`, output should be a clean linear-AEC residual. Echo still dominating → ref signal is wrong, mic-ref delay > filter length, or sample rates differ. 2. `--preset aggressive` for stronger RES (cost: more NE compression). 3. `--filter-length-ms 100` for big rooms / long reverb. |
 | **NE clipped during double-talk** | Lower preset → `--preset gentle` (−20 dB floor, near-priority: keeps more near-end at the cost of more echo leak). Don't tweak individual RES knobs — preset values are co-tuned. |
 | **Slow startup / first-second echo** | Filter convergence needs ≥ 0.5 s of meaningful far energy. Normal adaptive behavior. Consider muting output during application warm-up (e.g. play a "connecting…" cue). |
 | **Echo spikes when device moves** | Echo path changes → EPC fires → ~200 ms re-convergence with brief leak. Usually self-recovers. For frequent movement, increase filter length. |
@@ -180,11 +180,13 @@ gain so a downstream stage runs entirely in the frequency domain:
 
 This seam is **already exercised** in the
 [Audio_ALG](https://github.com/aaronhsueh0506/Audio_ALG) integration repo, whose
-`AEC(linear) → NR → RES` frequency-domain pipeline reuses the AEC3 gain on the
-post-NR spectrum (`S(f) = E·G_nr·G_res`) — a single FFT/IFFT for the whole
-chain, with each stage independently swappable for a neural model. The classical
-DSP pipeline stays in production / as the deterministic fallback. NN-integration
-contract → [docs/nn_integration_interface.md](docs/nn_integration_interface.md).
+`AEC(linear) → echo-aware NR → RES` frequency-domain pipeline folds the residual-echo
+PSD `R²` into NR's noise floor (`ξ = S²/(N²+R²)`) so **one** MMSE-LSA gain suppresses
+noise + residual echo per-bin, plus a near-end floor that lifts the gain back toward 1
+where there is no echo — a single FFT/IFFT for the whole chain, each stage independently
+swappable for a neural model. The classical DSP pipeline stays in production / as the
+deterministic fallback. NN-integration contract →
+[docs/nn_integration_interface.md](docs/nn_integration_interface.md).
 
 ---
 
@@ -219,8 +221,8 @@ pip install numpy soundfile matplotlib
 # BALANCED preset, PBFDKF + RES (recommended)
 python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset balanced --enable-res
 
-# Other presets
-python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset {mild|soft|aggressive|maximum} --enable-res
+# Other presets (gentle = near-priority, aggressive = echo-priority)
+python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset {gentle|balanced|aggressive} --enable-res
 
 # CNG on
 python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset balanced --enable-res --cng
@@ -326,7 +328,7 @@ AEC/
 ├── docs/
 │   ├── aec_methods.md                   # canonical algorithm spec (v3.21)
 │   ├── aec_algorithm_guide.html         # presentation overview (v3.21)
-│   ├── architecture_v3_10_5_vs_v3_21_vs_aec3.html  # three-way architecture comparison
+│   ├── architecture_v3_22_5_vs_aec3.html  # current (v3.22.5) vs AEC3 architecture flowcharts
 │   ├── refactor_modules_layout.md       # current module map (v3.21)
 │   ├── pbfdkf_shadow_intro.md
 │   ├── v3_22_5_release.md                # release summary + 3-way AEC3/Speex comparison

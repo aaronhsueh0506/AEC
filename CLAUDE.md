@@ -21,9 +21,9 @@ tolerance:
 
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
 (currently **3.22.5**; BALANCED algorithm byte-equal since 3.22.4 — see CHANGELOG). Canonical algorithm reference:
-[docs/aec_methods.md](docs/aec_methods.md). Architecture diagram
-across legacy / current / AEC3 reference:
-[docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html).
+[docs/aec_methods.md](docs/aec_methods.md). Architecture flowcharts —
+current vs AEC3 reference:
+[docs/architecture_v3_22_5_vs_aec3.html](docs/architecture_v3_22_5_vs_aec3.html).
 
 ## Common commands
 
@@ -235,5 +235,5 @@ regression) — the only flag whose "alignment" label changed.
 Byte-equal verified across the cleanup arc (`_ours` + `_ours_nores`
 md5, all buckets incl. movement). See [CHANGELOG.md](CHANGELOG.md) for
 per-version detail and
-[docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html)
+[docs/architecture_v3_22_5_vs_aec3.html](docs/architecture_v3_22_5_vs_aec3.html)
 for the architectural before/after.

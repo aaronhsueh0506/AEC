@@ -1,20 +1,23 @@
-# AEC Algorithm Methods (v3.22.0)
+# AEC Algorithm Methods (current through v3.22.5)
 
-**Release**: v3.22.0 (2026-06-01). Python `aec.py` `__version__ = "3.22.0"`.
-C port lag behind Python; the C structure mirrors Python class boundaries.
-v3.22.0 adds the split min-gain floor (§3.4) on top of the v3.21 pipeline.
+**Release**: algorithm current through v3.22.5 (2026-06-07); the production
+algorithm is **byte-equal since v3.22.4** (v3.22.5 is a cleanup + docs release —
+DTD subsystem and dead research flags removed, C streaming API added). The
+split min-gain floor (§3.4) was added in v3.22.0 on top of the v3.21 pipeline,
+and the three Pareto presets (gentle/balanced/aggressive) in v3.22.4. C port is
+bit-exact with Python (peak |Δ|=0); the C structure mirrors Python class boundaries.
 
 This document is the deep algorithm specification for the production
 pipeline. The v3.21 release retires the legacy 9-stage `ResFilter`
 post-filter in favour of an AEC3-aligned chain
 (`AecState` + `ResidualEchoEstimator` + `SuppressionGain` + CNG). See
-[architecture_v3_10_5_vs_v3_21_vs_aec3.html](architecture_v3_10_5_vs_v3_21_vs_aec3.html)
-for the side-by-side comparison with v3.10.5 and the WebRTC AEC3 reference.
+[architecture_v3_22_5_vs_aec3.html](architecture_v3_22_5_vs_aec3.html)
+for the side-by-side flowcharts of the current build and the WebRTC AEC3 reference.
 
 | Companion doc | Purpose |
 |---|---|
 | [`aec_algorithm_guide.html`](aec_algorithm_guide.html) | Presentation overview |
-| [`architecture_v3_10_5_vs_v3_21_vs_aec3.html`](architecture_v3_10_5_vs_v3_21_vs_aec3.html) | v3.10.5 vs v3.21 vs WebRTC AEC3 comparison |
+| [`architecture_v3_22_5_vs_aec3.html`](architecture_v3_22_5_vs_aec3.html) | v3.22.5 (current) vs WebRTC AEC3 architecture flowcharts |
 | [`c_user_and_integration_guide.md`](c_user_and_integration_guide.md) | C API, integration, streaming contract |
 | [`refactor_modules_layout.md`](refactor_modules_layout.md) | Module map |
 | [`pbfdkf_shadow_intro.md`](pbfdkf_shadow_intro.md) | PBFDKF + shadow design |

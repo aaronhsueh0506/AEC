@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AEC v3.22.5 vs WebRTC AEC3 — architecture flowcharts</title>
+<style>
+  :root {
+    --bg: #f7f8fb;
+    --fg: #1d1f24;
+    --muted: #5b6471;
+    --accent: #0066cc;
+    --legacy: #c45a3a;
+    --release: #2a8a4f;
+    --reference: #5b3aa6;
+    --border: #d5d9e0;
+    --card-bg: #ffffff;
+    --frontend: #e9f3ff;
+    --frontend-stroke: #6ea4d9;
+    --filter: #fef0e3;
+    --filter-stroke: #d9985a;
+    --post: #e8f5ec;
+    --post-stroke: #6ab98c;
+    --new: #fff7c2;
+    --new-stroke: #c9b400;
+    --gone: #fbe3e3;
+    --gone-stroke: #c47878;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         background: var(--bg); color: var(--fg); margin: 0; padding: 28px 24px; line-height: 1.55; }
+  .wrap { max-width: 1300px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13.5px; margin: 0 0 26px; }
+
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; margin: 0 0 20px; }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .sw { width: 16px; height: 12px; border-radius: 2px; border: 1.5px solid; }
+  .legend .sw.frontend { background: var(--frontend); border-color: var(--frontend-stroke); }
+  .legend .sw.filter   { background: var(--filter);   border-color: var(--filter-stroke); }
+  .legend .sw.post     { background: var(--post);     border-color: var(--post-stroke); }
+  .legend .sw.new      { background: var(--new);      border-color: var(--new-stroke); }
+  .legend .sw.gone     { background: var(--gone);     border-color: var(--gone-stroke); }
+
+  .arch { background: var(--card-bg); border-radius: 12px; padding: 18px 20px 24px; margin-bottom: 22px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+  .arch h2 { font-size: 18px; margin: 0 0 4px; padding-bottom: 6px; border-bottom: 3px solid; }
+  .arch.legacy h2    { color: var(--legacy);    border-color: var(--legacy); }
+  .arch.release h2   { color: var(--release);   border-color: var(--release); }
+  .arch.reference h2 { color: var(--reference); border-color: var(--reference); }
+  .arch .when { font-size: 12px; color: var(--muted); margin: 0 0 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .arch .desc { font-size: 13.5px; margin: 0 0 12px; }
+  .arch svg { display: block; width: 100%; height: auto; max-width: 1240px; margin: 0 auto; }
+
+  .scores { background: var(--card-bg); border-radius: 12px; padding: 18px; margin: 0 0 22px; }
+  .scores h2 { margin: 0 0 12px; font-size: 17px; color: var(--accent); }
+  .scores table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .scores th, .scores td { border-bottom: 1px solid var(--border); padding: 7px 12px; text-align: left; }
+  .scores th { background: #f0f2f5; }
+  .scores td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scores td.win { color: var(--release); font-weight: 600; }
+  .scores td.tie { color: var(--muted); }
+
+  details { background: var(--card-bg); border-radius: 12px; padding: 16px 20px; margin: 0 0 22px; }
+  summary { cursor: pointer; font-size: 15px; color: var(--accent); font-weight: 600; }
+  summary:hover { text-decoration: underline; }
+  details table { margin-top: 12px; width: 100%; border-collapse: collapse; font-size: 13px; }
+  details th, details td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+  details th { background: #f0f2f5; }
+  details td.r { text-align: right; }
+
+  .small-note { font-size: 12px; color: var(--muted); margin-top: 12px; }
+  code { background: #f0f2f5; padding: 1px 5px; border-radius: 3px; font-family: "SF Mono", Menlo, monospace; font-size: 12.5px; }
+
+  .issues { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 20px 0 0; }
+  .issues.cols-2 { grid-template-columns: 1fr 1fr; }
+  .issues.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .card { border-radius: 8px; padding: 12px 14px; border-left: 4px solid; font-size: 13px; background: #fafbfd; }
+  .card.bad { border-color: #c43a3a; background: #fdf2f2; }
+  .card.good { border-color: var(--release); background: #f1f9f4; }
+  .card.warn { border-color: #c8a000; background: #fcf8e3; }
+  .card.note { border-color: var(--accent); background: #f0f6fc; }
+  .card h3 { margin: 0 0 6px; font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 3px 0; }
+  .card .tag { font-size: 10.5px; padding: 1px 6px; border-radius: 8px; background: rgba(0,0,0,0.06); color: var(--muted); margin-left: 6px; }
+  .roadmap { background: var(--card-bg); border-radius: 12px; padding: 18px 20px; margin: 0 0 22px; }
+  .roadmap h2 { margin: 0 0 6px; font-size: 18px; color: var(--accent); }
+  .roadmap .sub { font-size: 13px; margin: 0 0 14px; }
+  .roadmap-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  /* SVG box base styles applied via attributes */
+  .box-fe   { fill: var(--frontend); stroke: var(--frontend-stroke); }
+  .box-filt { fill: var(--filter);   stroke: var(--filter-stroke); }
+  .box-post { fill: var(--post);     stroke: var(--post-stroke); }
+  .box-new  { fill: var(--new);      stroke: var(--new-stroke); }
+  .box-gone { fill: var(--gone);     stroke: var(--gone-stroke); }
+  .label-title { font: 600 13px -apple-system, "Segoe UI", sans-serif; fill: #1d1f24; }
+  .label-sub   { font: 400 11px -apple-system, "Segoe UI", sans-serif; fill: #5b6471; }
+  .label-edge  { font: 600 11px "SF Mono", Menlo, monospace; fill: #5b6471; }
+  .label-stage { font: 600 11px -apple-system, "Segoe UI", sans-serif; fill: #5b6471; text-transform: uppercase; letter-spacing: 0.07em; }
+  .edge { stroke: #97a0ad; stroke-width: 1.6; fill: none; }
+  .edge.dashed { stroke-dasharray: 5 4; }
+  .edge-arrow { fill: #97a0ad; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>AEC architecture flowcharts — v3.22.5 vs WebRTC AEC3</h1>
+<p class="sub"><strong>v3.22.5 (current shipped, 2026-06-07)</strong> vs <strong>WebRTC AEC3 reference</strong> · same input/output.
+v3.22.5 is <strong>byte-equal since v3.22.4</strong> (cleanup + docs release — DTD subsystem and dead research flags removed, decoupled C streaming API added). The production algorithm is the <strong>v3.21 AEC3-aligned <code>_aec3_post</code> core</strong> (PBFDKF + shadow PBFDAF → AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the <strong>v3.22 post-filter policy layer</strong> (split min-gain floor + per-bin near-end protection) and <strong>three Pareto presets</strong> (gentle/balanced/aggressive) on a single floor knob. C port is bit-exact (peak |Δ|=0).</p>
+
+<div style="background: var(--card-bg); border-radius: 12px; padding: 16px 20px; margin: 0 0 22px;">
+  <h2 style="margin: 0 0 12px; font-size: 16px; color: var(--accent);">Color legend</h2>
+  <p style="font-size: 13.5px; margin: 0 0 12px;">The block-class colors are <em>identical across both flowcharts</em> so the same module always looks the same. Match the current build's <span style="background: var(--new); border: 1.5px solid var(--new-stroke); padding: 1px 5px; border-radius: 2px;">yellow</span> AEC3-ported blocks against AEC3's same-name blocks to see what we share and what is still build-specific.</p>
+  <div class="legend">
+    <div class="item"><span class="sw frontend"></span> <strong>Front-end</strong> — HPF / saturation / delay</div>
+    <div class="item"><span class="sw filter"></span> <strong>Linear filter</strong> — refined Kalman PBFDKF + shadow filter</div>
+    <div class="item"><span class="sw post"></span> <strong>Post-filter</strong> — <code>_aec3_post</code> chain (ours) / EchoRemover (AEC3)</div>
+    <div class="item"><span class="sw new"></span> <strong>AEC3-aligned port</strong> — module ported from AEC3 into our <code>_aec3_post</code> core</div>
+  </div>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════════
+     v3.22.5 core architecture (AEC3-aligned, shipped since v3.21)
+     ════════════════════════════════════════════════════════════════ -->
+<section class="arch release">
+  <h2>v3.22.5 — core architecture (AEC3-aligned <code>_aec3_post</code>)</h2>
+  <p class="when">Current shipped · <code>__version__ = 3.22.5</code> · core pipeline unchanged since v3.21 (2026-05-19); the v3.22 policy layer is detailed below this flowchart</p>
+  <p class="desc">Three Pareto presets (gentle/balanced/aggressive, balanced = production) differing only in the far-active min-gain floor. Reference-path HPF retired (mic-only). AEC3-aligned <code>_aec3_post</code> chain (StationarityEstimator + AecState + ResidualEchoEstimator + SuppressionGain + comfort noise + OLA) — the legacy 9-stage ResFilter is retired. C port bit-exact.</p>
+
+  <svg viewBox="0 0 1240 760" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="ar-2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+        <path d="M0,0 L9,5 L0,10 Z" class="edge-arrow"/>
+      </marker>
+    </defs>
+
+    <!-- Stage labels (left rail) -->
+    <text x="20" y="50"  class="label-stage">Input</text>
+    <text x="20" y="140" class="label-stage">Front-end</text>
+    <text x="20" y="300" class="label-stage">Linear filter</text>
+    <text x="20" y="500" class="label-stage">Post-filter (_aec3_post)</text>
+    <line x1="135" y1="35" x2="135" y2="740" class="edge dashed"/>
+
+    <!-- Input -->
+    <rect x="280" y="20" width="160" height="46" rx="8" class="box-fe"/>
+    <text x="360" y="48" text-anchor="middle" class="label-title">mic</text>
+    <rect x="640" y="20" width="160" height="46" rx="8" class="box-fe"/>
+    <text x="720" y="48" text-anchor="middle" class="label-title">ref</text>
+
+    <!-- HPF only on mic path -->
+    <line x1="360" y1="66" x2="360" y2="105" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="280" y="110" width="160" height="50" rx="8" class="box-fe"/>
+    <text x="360" y="133" text-anchor="middle" class="label-title">HPF (mic)</text>
+    <text x="360" y="151" text-anchor="middle" class="label-sub">80 Hz IIR · ref retired</text>
+
+    <!-- Saturation (ref only) -->
+    <line x1="720" y1="66" x2="720" y2="195" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="640" y="200" width="160" height="50" rx="8" class="box-fe"/>
+    <text x="720" y="223" text-anchor="middle" class="label-title">Saturation</text>
+    <text x="720" y="241" text-anchor="middle" class="label-sub">clip + soft-clip</text>
+
+    <!-- EchoPathDelayEstimator (new) -->
+    <line x1="720" y1="250" x2="720" y2="285" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="600" y="290" width="240" height="60" rx="8" class="box-new"/>
+    <text x="720" y="313" text-anchor="middle" class="label-title">EchoPathDelayEstimator</text>
+    <text x="720" y="332" text-anchor="middle" class="label-sub">matched filter + lag aggregator</text>
+    <text x="720" y="346" text-anchor="middle" class="label-sub">+ clock-drift detector</text>
+
+    <!-- PBFDKF refined -->
+    <line x1="360" y1="160" x2="360" y2="395" class="edge" marker-end="url(#ar-2)"/>
+    <line x1="720" y1="350" x2="720" y2="395" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="540" y="400" width="200" height="60" rx="8" class="box-filt"/>
+    <text x="640" y="426" text-anchor="middle" class="label-title">PBFDKF refined filter</text>
+    <text x="640" y="444" text-anchor="middle" class="label-sub">Kalman · fft=128 · partitions=13</text>
+
+    <!-- Shadow NLMS (new class) -->
+    <line x1="640" y1="460" x2="640" y2="475" class="edge dashed" marker-end="url(#ar-2)"/>
+    <rect x="540" y="480" width="200" height="50" rx="8" class="box-new"/>
+    <text x="640" y="503" text-anchor="middle" class="label-title">Shadow PBFDAF (NLMS)</text>
+    <text x="640" y="521" text-anchor="middle" class="label-sub">μ = 0.5 · PathChangeRegimeHandler</text>
+
+    <!-- RenderSignalAnalyzer (new substrate that feeds the refined filter) -->
+    <rect x="820" y="400" width="200" height="60" rx="8" class="box-new"/>
+    <text x="920" y="426" text-anchor="middle" class="label-title">RenderSignalAnalyzer</text>
+    <text x="920" y="444" text-anchor="middle" class="label-sub">per-bin tonal mask</text>
+    <text x="920" y="456" text-anchor="middle" class="label-sub">+ poor-excitation freeze</text>
+    <path d="M 820 430 L 745 430" class="edge" marker-end="url(#ar-2)" stroke-dasharray="5,3"/>
+
+    <!-- error e[k] -->
+    <line x1="640" y1="460" x2="640" y2="540" class="edge" stroke-dasharray="3,3"/>
+    <line x1="640" y1="540" x2="200" y2="540" class="edge"/>
+    <text x="700" y="478" class="label-edge">e[k]</text>
+
+    <!-- AEC3 post-filter — vertical chain from left -->
+    <line x1="200" y1="540" x2="200" y2="555" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="80" y="560" width="240" height="32" rx="6" class="box-new"/>
+    <text x="200" y="580" text-anchor="middle" class="label-title">StationarityEstimator</text>
+    <line x1="200" y1="592" x2="200" y2="600" class="edge"/>
+    <rect x="80" y="602" width="240" height="32" rx="6" class="box-new"/>
+    <text x="200" y="622" text-anchor="middle" class="label-title">AecState (12 sub-analyzers)</text>
+    <line x1="200" y1="634" x2="200" y2="642" class="edge"/>
+    <rect x="80" y="644" width="240" height="32" rx="6" class="box-new"/>
+    <text x="200" y="664" text-anchor="middle" class="label-title">ResidualEchoEstimator</text>
+    <line x1="200" y1="676" x2="200" y2="684" class="edge"/>
+    <rect x="80" y="686" width="240" height="32" rx="6" class="box-new"/>
+    <text x="200" y="706" text-anchor="middle" class="label-title">SuppressionGain (Wiener)</text>
+
+    <!-- second column of post-filter -->
+    <line x1="320" y1="576" x2="360" y2="576" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="360" y="560" width="240" height="32" rx="6" class="box-new"/>
+    <text x="480" y="580" text-anchor="middle" class="label-title">Comfort noise (CNG)</text>
+    <line x1="600" y1="576" x2="640" y2="576" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="640" y="560" width="240" height="32" rx="6" class="box-new"/>
+    <text x="760" y="580" text-anchor="middle" class="label-title">sqrt-Hann OLA synthesis</text>
+
+    <!-- output -->
+    <line x1="760" y1="592" x2="760" y2="616" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="680" y="620" width="160" height="32" rx="8" class="box-fe"/>
+    <text x="760" y="641" text-anchor="middle" class="label-title">out</text>
+
+    <!-- _ours_nores tap (enable_res=False bypass) -->
+    <line x1="640" y1="540" x2="1100" y2="540" class="edge"/>
+    <line x1="1100" y1="540" x2="1100" y2="616" class="edge" marker-end="url(#ar-2)"/>
+    <rect x="1010" y="620" width="200" height="48" rx="8" class="box-fe"/>
+    <text x="1110" y="640" text-anchor="middle" class="label-title">_ours_nores.wav</text>
+    <text x="1110" y="656" text-anchor="middle" class="label-sub">(enable_res=False bypass)</text>
+  </svg>
+
+  <div class="issues cols-2">
+    <div class="card good">
+      <h3>✓ What the current AEC3-aligned pipeline ships</h3>
+      <ul>
+        <li><strong>AEC3-aligned <code>_aec3_post</code> chain</strong> (StationarityEstimator + AecState + ResidualEchoEstimator + SuppressionGain + CNG + OLA) — the legacy 9-stage ResFilter is retired. DT/NE deg beats the AEC3 reference by ≥ 0.33 / 0.59.</li>
+        <li><strong>Three Pareto presets</strong> (gentle/balanced/aggressive) on a single far-active min-gain-floor knob — no co-tuning trap (the old 40-knob 5-preset menu was deleted).</li>
+        <li><strong>AEC3-aligned delay subsystem</strong> — matched filter + lag aggregator + clock-drift detector + render-delay controller (replaces GCC-PHAT).</li>
+        <li><strong>RenderSignalAnalyzer</strong> — per-bin tonal mask + <code>poor_signal_excitation</code> freezes the refined filter on bad render frames (fixes E0l0 / wJVP class NE outliers).</li>
+        <li><strong>AecState ADT</strong> over 12 sub-analyzers → multi-gate <code>usable_linear_estimate</code> replaces the brittle 10-frame ERLE latch.</li>
+        <li><strong>Sub-band ERLE</strong> drives SuppressionGain ERLE-divide refinement, AEC3-style.</li>
+        <li><strong>ReverbModel</strong> — per-bin tail across the impulse response (decay + frequency response), replacing the one-tap exponential.</li>
+        <li><strong>Shadow filter is NLMS (PBFDAF)</strong> — AEC3 coarse-filter role; faster tracker that survives echo path changes.</li>
+        <li><strong>FilterMisadjustmentEstimator + ScaleFilter</strong> — long-term echo/error drift triggers W rescale.</li>
+        <li><strong>v3.22 post-filter policy layer</strong> — split min-gain floor + per-bin near-end protection (detailed below the AEC3 reference).</li>
+        <li><strong>C port bit-exact</strong> (peak |Δ|=0) — the C <code>aec3_post</code> mirrors the Python chain.</li>
+      </ul>
+    </div>
+
+    <div class="card warn">
+      <h3>⚠ Known limitations / gaps</h3>
+      <ul>
+        <li><strong>TransparentMode disabled.</strong> Our <code>AecStateConfig.enable_transparent_mode = False</code>: requires AEC3's <code>SubtractorOutputAnalyzer</code> to feed a per-frame <code>any_filter_converged</code> pulse; legacy <code>FilterConvergenceAnalyzer</code> stays at False on hard cases like 9xjhi, so TM would falsely activate after ~6 s of strong render and kill <code>usable_linear</code>. Port pending. <span class="tag">TODO</span></li>
+        <li><strong>OLA algorithmic delay.</strong> The AEC3 chain has a ~64-sample (4 ms) algorithmic delay from sqrt-Hann OLA, lag-corrected at the output limiter; consumers downstream of <code>aec.process()</code> should be aware of the per-frame latency. <span class="tag">documented</span></li>
+        <li><strong>No dedicated non-linear echo model.</strong> Loudspeaker distortion is the remaining FS/DT ceiling (v3.13 E5 closure); a Volterra / HDRES arc is designed but not implemented — confirmed Pareto-bound for now.</li>
+        <li><strong>NN swap not in the AEC core.</strong> The DSP chain is production / fallback; an <strong>echo-aware joint NR+RES</strong> already runs in the Audio_ALG integration repo (folds R² into NR's noise floor), and each freq block is NN-swappable via <code>AecResContext</code> — but the AEC core itself stays DSP-only.</li>
+        <li><strong>Legacy <code>FilterConvergenceAnalyzer</code> still wired.</strong> AecState uses the AEC3-aligned multi-gate, but the legacy 10-frame ERLE latch object is still maintained on <code>self._convergence</code> for backward-compat property reads.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════════════════════
+     WebRTC AEC3 reference
+     ════════════════════════════════════════════════════════════════ -->
+<section class="arch reference">
+  <h2>WebRTC AEC3 — reference</h2>
+  <p class="when">Chromium <code>modules/audio_processing/aec3/</code></p>
+  <p class="desc">No preset menu — single <code>EchoCanceller3Config</code> struct with Field-Trial overrides. The canonical reference our <code>_aec3_post</code> chain mirrors.</p>
+
+  <svg viewBox="0 0 1240 720" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="ar-3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+        <path d="M0,0 L9,5 L0,10 Z" class="edge-arrow"/>
+      </marker>
+    </defs>
+
+    <text x="20" y="50"  class="label-stage">Input</text>
+    <text x="20" y="140" class="label-stage">Front-end</text>
+    <text x="20" y="300" class="label-stage">EchoSubtractor</text>
+    <text x="20" y="500" class="label-stage">EchoRemover (post-filter)</text>
+    <line x1="135" y1="35" x2="135" y2="700" class="edge dashed"/>
+
+    <!-- Input -->
+    <rect x="280" y="20" width="160" height="46" rx="8" class="box-fe"/>
+    <text x="360" y="48" text-anchor="middle" class="label-title">mic</text>
+    <rect x="640" y="20" width="160" height="46" rx="8" class="box-fe"/>
+    <text x="720" y="48" text-anchor="middle" class="label-title">ref</text>
+
+    <!-- HPF (mic; ref via Field Trial) -->
+    <line x1="360" y1="66" x2="360" y2="105" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="280" y="110" width="160" height="50" rx="8" class="box-fe"/>
+    <text x="360" y="133" text-anchor="middle" class="label-title">HPF (mic)</text>
+    <text x="360" y="151" text-anchor="middle" class="label-sub">ref via Field Trial</text>
+
+    <!-- Saturation -->
+    <line x1="720" y1="66" x2="720" y2="195" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="640" y="200" width="160" height="50" rx="8" class="box-fe"/>
+    <text x="720" y="223" text-anchor="middle" class="label-title">SaturationDetector</text>
+
+    <!-- EchoPathDelayEstimator -->
+    <line x1="720" y1="250" x2="720" y2="285" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="600" y="290" width="240" height="60" rx="8" class="box-fe"/>
+    <text x="720" y="313" text-anchor="middle" class="label-title">EchoPathDelayEstimator</text>
+    <text x="720" y="332" text-anchor="middle" class="label-sub">matched filter + lag aggregator</text>
+    <text x="720" y="346" text-anchor="middle" class="label-sub">+ clock-drift detector</text>
+
+    <!-- Refined adaptive filter -->
+    <line x1="360" y1="160" x2="360" y2="395" class="edge" marker-end="url(#ar-3)"/>
+    <line x1="720" y1="350" x2="720" y2="395" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="540" y="400" width="200" height="60" rx="8" class="box-filt"/>
+    <text x="640" y="426" text-anchor="middle" class="label-title">Refined adaptive filter</text>
+    <text x="640" y="444" text-anchor="middle" class="label-sub">Kalman block-partitioned FD</text>
+
+    <!-- Coarse adaptive filter -->
+    <line x1="640" y1="460" x2="640" y2="475" class="edge dashed" marker-end="url(#ar-3)"/>
+    <rect x="540" y="480" width="200" height="50" rx="8" class="box-filt"/>
+    <text x="640" y="503" text-anchor="middle" class="label-title">Coarse adaptive filter</text>
+    <text x="640" y="521" text-anchor="middle" class="label-sub">NLMS shadow</text>
+
+    <!-- RenderSignalAnalyzer -->
+    <rect x="820" y="400" width="200" height="60" rx="8" class="box-filt"/>
+    <text x="920" y="426" text-anchor="middle" class="label-title">RenderSignalAnalyzer</text>
+    <text x="920" y="444" text-anchor="middle" class="label-sub">tonal mask + poor-excitation</text>
+    <path d="M 820 430 L 745 430" class="edge" marker-end="url(#ar-3)" stroke-dasharray="5,3"/>
+
+    <!-- error -->
+    <line x1="640" y1="460" x2="640" y2="540" class="edge" stroke-dasharray="3,3"/>
+    <line x1="640" y1="540" x2="200" y2="540" class="edge"/>
+    <text x="700" y="478" class="label-edge">e[k]</text>
+
+    <!-- EchoRemover chain -->
+    <line x1="200" y1="540" x2="200" y2="555" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="80" y="560" width="240" height="30" rx="6" class="box-post"/>
+    <text x="200" y="579" text-anchor="middle" class="label-title">NearendDetector</text>
+    <line x1="200" y1="590" x2="200" y2="596" class="edge"/>
+    <rect x="80" y="598" width="240" height="30" rx="6" class="box-post"/>
+    <text x="200" y="617" text-anchor="middle" class="label-title">AecState (11 sub-analyzers)</text>
+    <line x1="200" y1="628" x2="200" y2="634" class="edge"/>
+    <rect x="80" y="636" width="240" height="30" rx="6" class="box-post"/>
+    <text x="200" y="655" text-anchor="middle" class="label-title">ResidualEchoEstimator (+ ReverbModel)</text>
+
+    <line x1="320" y1="575" x2="360" y2="575" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="360" y="560" width="240" height="30" rx="6" class="box-post"/>
+    <text x="480" y="579" text-anchor="middle" class="label-title">ErleEstimator (sub-band)</text>
+    <line x1="480" y1="590" x2="480" y2="596" class="edge"/>
+    <rect x="360" y="598" width="240" height="30" rx="6" class="box-post"/>
+    <text x="480" y="617" text-anchor="middle" class="label-title">SuppressionGain</text>
+    <line x1="480" y1="628" x2="480" y2="634" class="edge"/>
+    <rect x="360" y="636" width="240" height="30" rx="6" class="box-post"/>
+    <text x="480" y="655" text-anchor="middle" class="label-title">ComfortNoiseGenerator</text>
+
+    <line x1="600" y1="575" x2="640" y2="575" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="640" y="560" width="240" height="30" rx="6" class="box-post"/>
+    <text x="760" y="579" text-anchor="middle" class="label-title">TransparentMode</text>
+
+    <!-- output -->
+    <line x1="760" y1="590" x2="760" y2="620" class="edge" marker-end="url(#ar-3)"/>
+    <rect x="680" y="624" width="160" height="32" rx="8" class="box-fe"/>
+    <text x="760" y="645" text-anchor="middle" class="label-title">out</text>
+  </svg>
+
+  <div class="issues">
+    <div class="card warn">
+      <h3>⚠ Known issues / quirks in WebRTC AEC3 itself</h3>
+      <ul>
+        <li><strong>TransparentMode false-activation.</strong> After ~6 s of strong render with no near-end speech, the SubtractorOutputAnalyzer / FilterAnalyzer combo declares the room transparent and the suppressor passes mic through — even when echo is still present. Documented inside the C++ code (<code>aec_state.cc</code> comments); WebRTC ships it default-ON anyway because it helps the common Chromium use-case. Our build disables it (see the limitations card above).</li>
+        <li><strong>Strict refined-filter convergence detector.</strong> <code>FilterAnalyzer::Update</code> requires 10 consecutive blocks &gt; 5 dB ERLE to assert <code>consistent_estimate</code>. On hard cases (deep DT or low-coupling rooms with reverb), this never asserts → AecState&apos;s downstream gates are stuck in their fallback paths. Known WebRTC limitation, no upstream fix.</li>
+        <li><strong>Sub-band ERLE EMA can lock high during heavy DT.</strong> The asymmetric EMA biases towards higher ERLE; in heavy DT segments the per-band ERLE estimate stays optimistic and SuppressionGain over-suppresses NE.</li>
+        <li><strong>Reverb decay estimator is loosely identified.</strong> The decay coefficient comes from a one-tap fit to <code>echo_path_estimate</code> tail; real rooms have multi-rate decay (early reflections vs late tail) that the model collapses.</li>
+        <li><strong>OLA in <code>suppression_filter.cc</code> is mathematically clean.</strong> kFftLength=128, hop=64 (kFftLengthBy2), sqrt-Hanning analysis × sqrt-Hanning synthesis = Hann at 50 % overlap → sum-to-one reconstruction. Standard textbook setup — <em>no known OLA-specific defect</em>. The 64-sample (4 ms) algorithmic delay it introduces is inherent to the design, not a bug.</li>
+        <li><strong>Coarse filter (NLMS shadow) has no gain control.</strong> μ is fixed at 0.5 (kCoarseFilterStepSize). On near-end-heavy frames the coarse filter can drift faster than the refined filter; AEC3 mitigates with <code>poor_coarse_filter_counter</code> but the trigger is conservative.</li>
+        <li><strong>EchoPathChange detection is energy-based.</strong> <code>EchoPathChangeDetector</code> looks at far-energy step changes; can&apos;t distinguish a real path change from a microphone gain change (handset → speakerphone). Mostly benign because the response is the same (filter reset) but the event log conflates them.</li>
+        <li><strong>EchoCanceller3Config is a 150-field struct.</strong> Field-Trial overrides spread across Chromium make production tuning hard to audit; no preset menu (unlike our pre-v3.21 design — though we just retired ours too).</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════════════════════
+     v3.22.5 vs AEC3 — where we DIFFER today
+     ════════════════════════════════════════════════════════════════ -->
+<div class="roadmap">
+  <h2>v3.22.5 vs WebRTC AEC3 — current alignment + remaining gaps</h2>
+  <p class="sub">v3.22.5 ships an <strong>AEC3-aligned but not bit-equal</strong> port. Same block-level structure, mostly the same algorithm, but several detail choices differ. The closer this list gets to empty, the closer we are to a 1:1 port. (On AECMOS we deliberately sit at a different Pareto point — less echo than AEC3, but beating it on every degradation axis; see the score panel.)</p>
+
+  <div class="roadmap-grid">
+
+    <div class="card good">
+      <h3>✓ Already aligned with AEC3</h3>
+      <ul>
+        <li>Block / FFT / hop rates (64 / 128 / 64).</li>
+        <li>Refined Kalman filter + NLMS coarse-filter pairing.</li>
+        <li><code>EchoPathDelayEstimator</code> — matched filter + lag aggregator + clock-drift.</li>
+        <li><code>RenderSignalAnalyzer</code> — narrowband tonal mask + <code>poor_signal_excitation</code>.</li>
+        <li><code>AecState</code> ADT seam over sub-analyzers (we have 12, AEC3 has 11 — close).</li>
+        <li><code>ResidualEchoEstimator</code> linear / render-based 2-path + <code>ReverbModel</code> tail.</li>
+        <li><code>SuppressionGain</code> Wiener + over-estimation.</li>
+        <li><code>ComfortNoiseGenerator</code> = per-bin PSD EMA × <code>sqrt(1 − G²)</code>.</li>
+        <li><code>SuppressionFilter</code> OLA with sqrt-Hann analysis × sqrt-Hann synthesis.</li>
+        <li><code>StationarityEstimator</code> + <code>FilterAnalyzer</code> + <code>FilteringQualityAnalyzer</code>.</li>
+      </ul>
+    </div>
+
+    <div class="card warn">
+      <h3>⚠ Where we still differ from AEC3</h3>
+      <ul>
+        <li><strong>No TransparentMode.</strong> AEC3 has it (default ON in Chromium); we disabled because we lack <code>SubtractorOutputAnalyzer</code> — see future work below.</li>
+        <li><strong>No <code>NearendDetector</code>.</strong> AEC3&apos;s subband NE detector feeds SuppressionGain mode switching; our v3.18 D.1 substrate closed CANNOT-SHIP, so we don&apos;t have an equivalent live consumer.</li>
+        <li><strong>No EchoAudibility module.</strong> AEC3 computes per-bin audibility from JND-weighted PSD ratios; we use a simpler spectral floor.</li>
+        <li><strong>SuppressionGain over-estimation differs.</strong> AEC3 has a four-mode <code>HighFrequencySuppressionConfig</code> + <code>DominantNearendConfig</code> with mode-switched coefficients; ours has a smaller subset and the high-frequency mode tuning is not fully aligned.</li>
+        <li><strong>Reverb decay estimator is partial.</strong> We have <code>ReverbDecayEstimator</code> + <code>ReverbFrequencyResponse</code> but the estimation gate is simpler than AEC3&apos;s adaptive tail-length controller.</li>
+        <li><strong>FilterMisadjustmentEstimator is ours.</strong> AEC3 has a different ScaleFilter design (per-block scale ratios); we use a single fullband ratio with asymmetric EMA. Same goal, different math.</li>
+        <li><strong>PathChangeRegimeHandler is ours.</strong> AEC3 handles echo-path-change via <code>Subtractor::HandleEchoPathChange</code> + AecState&apos;s <code>full_reset</code> cascade. Our regime handler bundles those decisions with shadow-copy logic that AEC3 doesn&apos;t have.</li>
+        <li><strong>Coarse-filter step size.</strong> AEC3 uses 0.5; we expose <code>shadow_mu_nlms</code> defaulting to 0.5 but our coarse-filter freeze logic (<code>poor_coarse_filter_counter</code>) is partial.</li>
+      </ul>
+    </div>
+
+    <div class="card note">
+      <h3>→ AEC3-alignment port targets (would shrink the diff)</h3>
+      <p style="margin: 0 0 8px; font-size: 12.5px; color: var(--muted);">Note: the shipped v3.22 line did <strong>not</strong> pursue these AEC3 ports — it took the orthogonal post-filter <em>policy</em> route instead (split min-gain floor + per-bin near-end protection + delay-acquire guard, see the v3.22 policy section below). These remain open AEC3-alignment targets.</p>
+      <ul>
+        <li><strong>Port <code>SubtractorOutputAnalyzer</code></strong> → enable TransparentMode safely on hard cases like 9xjhi. Highest priority — currently disabled gate caps DT/NE on a small but visible tail of cases. <span class="tag">open</span></li>
+        <li><strong>Port <code>NearendDetector</code> + mode-switched SuppressionGain.</strong> Pair with retry of the v3.18 D.1 subband-NE substrate that closed CANNOT-SHIP — the new wiring goes through SuppressionGain directly instead of ResFilter. <span class="tag">v3.22</span></li>
+        <li><strong>Port <code>EchoAudibility</code>.</strong> JND-weighted per-bin gain floor; should improve NE-heavy buckets without echo regression. <span class="tag">v3.22</span></li>
+        <li><strong>Align SuppressionGain over-estimation.</strong> Bring the 4-mode HighFrequency + DominantNearend tuning into our <code>suppression_gain.py</code>. <span class="tag">v3.22</span></li>
+        <li><strong>Mirror ScaleFilter exactly.</strong> Per-block scale ratios + AEC3 stability gate; retire our asymmetric-EMA version. <span class="tag">v3.22+</span></li>
+      </ul>
+    </div>
+
+    <div class="card note">
+      <h3>→ Future arcs (beyond AEC3 alignment)</h3>
+      <ul>
+        <li><strong>C port catch-up — DONE.</strong> The C <code>c_impl/</code> now mirrors the Python AEC3 chain (<code>aec3_post</code> + state/residual/delay) and is <strong>bit-exact</strong> (peak |Δ|=0). <span class="tag">resolved v3.22.5</span></li>
+        <li><strong>Volterra / HDRES non-linear residual.</strong> Primary lever for the remaining FS / DT echo ceiling (loudspeaker non-linearity); designed but confirmed Pareto-bound on the current corpus. Multi-month arc. <span class="tag">v3.23+</span></li>
+        <li><strong>NN swaps via <code>AecResContext</code>.</strong> An echo-aware joint NR+RES already runs in the Audio_ALG integration repo; each freq block (residual / NR / joint) is NN-swappable on the shared 257-bin grid. The AEC core stays DSP-only / fallback. <span class="tag">integration arc</span></li>
+        <li><strong>Pruning of <code>FilterConvergenceAnalyzer</code> legacy seam.</strong> AecState&apos;s multi-gate replaces it; the legacy object is still wired for backward-compat property reads.</li>
+        <li><strong>Audit / retire <code>p52_regime_classifier.py</code>.</strong> Only consumed by <code>test_p52_regime.py</code>; if the regime trace isn&apos;t needed for production, drop both.</li>
+      </ul>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ════════════════════════════════════════════════════════════════
+     v3.22 post-filter policy layer (inside current v3.22.5)
+     ════════════════════════════════════════════════════════════════ -->
+<section class="arch release">
+  <h2>v3.22 post-filter policy layer (inside current v3.22.5)</h2>
+  <p class="when">Shipped across v3.22.0 → v3.22.5 · current <code>__version__ = 3.22.5</code> (byte-equal since 3.22.4)</p>
+  <p class="desc">v3.22 is built <strong>on top of the v3.21 core</strong> — the pipeline above is unchanged
+    (HPF → Saturation → DelayEst → PBFDKF + shadow PBFDAF → AEC3-post = StationarityEstimator + AecState +
+    ResidualEchoEstimator + SuppressionGain + CNG + OLA). v3.22 did <strong>not</strong> restructure the architecture;
+    it added a <strong>post-filter policy layer</strong> (frequency-selective near-end protection + split min-gain floor)
+    plus a stack of <strong>default-ON bug fixes / coordinate-consistency corrections</strong>. The changes below all live inside the
+    <code>SuppressionGain</code> / <code>ResidualEchoEstimator</code> / ERLE blocks and the delay-acquire guard.</p>
+
+  <div class="roadmap-grid">
+
+    <div class="card good">
+      <h3>v3.22.0 — split min-gain floor + default-ON correction stack</h3>
+      <ul>
+        <li><strong>Split min-gain floor (far-active vs far-silent), default ON.</strong> The single broadband suppression-gain
+          floor is split into two operating points keyed on far-end activity → caps DT near-end <em>over-suppression</em>
+          without giving up FS echo depth. This is the core v3.22 policy lever.</li>
+        <li><strong>E1 — ERLE coordinate consistency.</strong> Y²/E² windowed capture aligned so the ERLE numerator/denominator
+          share the same time-domain capture coordinate (fixes a frame-skew that under-credited the linear filter).</li>
+        <li><strong><code>erle_render_x2_psd_scale</code> — reverb-model revival.</strong> Restores the missing <code>_PSD_SCALE</code>
+          on <code>_x2_reverb_for_erle</code> so the reverb model contributes to ERLE instead of being silently dead.</li>
+        <li><strong>E2 — raw-capture output base.</strong> When the linear estimate is unusable, the output base falls back to the
+          raw capture (instead of a degenerate residual) → removes the cold-start / non-converged X² wipe artifact.</li>
+        <li><strong>D3 — soft near-end tuning blend.</strong> Sigmoid ENR-driven blend that softens the near-end vs echo
+          gain decision instead of a hard switch.</li>
+        <li><strong>L1 — Kuech–Kellermann 2nd-order nonlinear residual.</strong> Adds a 2nd-order nonlinear term to the residual
+          echo estimate (loudspeaker non-linearity), feeding <code>ResidualEchoEstimator</code>.</li>
+        <li><strong>C′ — coherence ERLE gate.</strong> Coherence-based gate on the ERLE update path.</li>
+      </ul>
+    </div>
+
+    <div class="card good">
+      <h3>v3.22.1 — delay-acquire phantom-mislock guard</h3>
+      <ul>
+        <li><strong><code>delay_acquire_protect_converged</code>, default ON.</strong> Rejects a spurious <em>late</em> first
+          delay-acquisition when the filter is already cancelling — i.e. when a phantom late lag would otherwise displace a
+          good converged alignment. Lives in the <code>EchoPathDelayEstimator</code> acquire path; no change to the steady-state
+          tracker.</li>
+      </ul>
+    </div>
+
+    <div class="card good">
+      <h3>v3.22.2 — per-bin near-end blend + deeper far-active floor (current BALANCED)</h3>
+      <ul>
+        <li><strong><code>soft_nearend_blend_per_bin</code>, default ON.</strong> The D3 near-end tuning blend goes
+          <em>frequency-selective</em> (per-bin) instead of broadband. Near-end protection now applies only in the bins that
+          carry near-end speech.</li>
+        <li><strong>far-active min-gain floor lowered −22 → −28 dB.</strong> Because the per-bin blend isolates near-end
+          protection, the deeper far-active floor can suppress more echo <em>without</em> the broadband DT near-end cost the
+          deeper floor would otherwise have caused. This is the v3.22.2 net win: more echo cancellation at no DT-deg penalty.</li>
+      </ul>
+    </div>
+
+    <div class="card note">
+      <h3>What stayed exactly the same as the v3.21 core</h3>
+      <ul>
+        <li>Front-end (HPF mic-only, Saturation, EchoPathDelayEstimator) — unchanged.</li>
+        <li>Linear filter (PBFDKF refined + shadow PBFDAF/NLMS + PathChangeRegimeHandler) — unchanged.</li>
+        <li>AEC3-post block topology (StationarityEstimator → AecState → ResidualEchoEstimator → SuppressionGain → CNG → OLA)
+          — unchanged; v3.22 tunes the <em>policy</em> inside these blocks, not their wiring.</li>
+        <li><code>_ours_nores.wav</code> bypass tap; byte-equal regression harness — unchanged. (The three presets share this exact pipeline; they differ only in the far-active min-gain floor.)</li>
+      </ul>
+    </div>
+
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════════════════════
+     Score panel
+     ════════════════════════════════════════════════════════════════ -->
+<div class="scores">
+  <h2>800-case AECMOS — v3.22.5 (current) vs AEC2 vs AEC3</h2>
+  <p class="small-note" style="margin: 0 0 10px;">Current shipped <code>balanced</code> on the 800-case AEC Challenge blind corpus, <strong>movement-agnostic</strong> (static + movement pooled per scenario; n = 300 FS / 300 DT / 200 NE). Higher = better on both axes; FS deg + NE echo are universally saturated (~5.0) and omitted. v3.22.5 is byte-equal to 3.22.4. Highlighted cell = column winner.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Version</th>
+        <th class="num">FS echo ↑</th>
+        <th class="num">DT echo ↑</th>
+        <th class="num">DT deg ↑</th>
+        <th class="num">NE deg ↑</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>AEC2 reference</td><td class="num">3.484</td><td class="num">4.262</td><td class="num win">2.389</td><td class="num win">4.098</td></tr>
+      <tr><td>AEC3 reference</td><td class="num win">3.875</td><td class="num win">4.538</td><td class="num">1.850</td><td class="num">3.454</td></tr>
+      <tr><td><strong>v3.22.5 (current shipped)</strong></td><td class="num">3.549</td><td class="num">4.155</td><td class="num">2.183</td><td class="num">4.047</td></tr>
+    </tbody>
+  </table>
+  <p class="small-note"><strong>The ship target: approach AEC3 on echo, beat it on every degradation axis.</strong>
+    <strong>vs AEC3</strong> — we trade echo (−0.326 FS / −0.383 DT) for preservation (<strong>+0.333 DT deg / +0.593 NE deg</strong>); AEC3 over-suppresses near-end (DT deg 1.85, NE deg 3.45).
+    <strong>vs AEC2</strong> — we beat FS echo (+0.065), sit within ~0.05 on NE deg (−0.051) and trail DT deg by −0.206 (the remaining DT near-end gap) and DT echo by −0.107.
+    Ship bars (NE deg ≥ 4, FS echo > 3.5, DT echo > 4, DT deg > 2) all met. Full ours / AEC3 / Speex per-bucket table → <a href="../README.md">README.md</a>.</p>
+</div>
+
+
+
+<p class="small-note">Updated 2026-06-07 (v3.22.5 — cleanup + docs release, byte-equal to 3.22.4; C port bit-exact) · companion docs:
+<a href="aec_methods.md">aec_methods.md</a> ·
+<a href="aec_algorithm_guide.html">aec_algorithm_guide.html</a> ·
+<a href="../CHANGELOG.md">CHANGELOG.md</a> ·
+<a href="c_user_and_integration_guide.md">c_user_and_integration_guide.md</a></p>
+
+</div>
+</body>
+</html>
