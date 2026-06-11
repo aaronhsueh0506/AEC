@@ -2096,9 +2096,8 @@ class AEC:
                             locals().get('erle_factor', self._erle_factor_prev)),
                         dt_indicator=float(dt_indicator),
                         divergence=float(self._divergence_indicator),
-                        over_sub=(float(np.mean(mu_scale))
-                                  if isinstance(mu_scale, np.ndarray)
-                                  else float(mu_scale)),
+                        over_sub=float(
+                            locals().get('erle_factor', self._erle_factor_prev)),
                         saturation_level=float(self._saturation_level),
                         erl_estimate=float(self._erl_estimate),
                         # Freq seam for external post-NR RES (set in _aec3_post).
