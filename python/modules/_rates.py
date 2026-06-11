@@ -15,6 +15,7 @@ etc.) MUST be specified in ms — not in "N blocks" — so we don't inherit
 AEC3's 4-ms-block budgeting at our 10-ms hop and end up with 2.5x the
 intended coverage.
 """
+import math
 
 HOP_SAMPLES = 160
 FFT_SIZE = 512
@@ -32,7 +33,7 @@ def aec3_blocks_to_our_hops(n_blocks: int) -> int:
 
 def ms_to_hops(ms: float) -> int:
     """Convert a duration in milliseconds to OUR hop count (ceil)."""
-    return -(-int(ms) // int(HOP_MS))
+    return math.ceil(ms / HOP_MS)
 
 
 def ms_to_aec3_blocks(ms: float) -> int:

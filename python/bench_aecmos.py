@@ -221,23 +221,32 @@ def main():
 
     if args.baseline:
         bl = json.load(open(args.baseline))
-        bl_summary = bl['summary']
+        bl_scores = bl.get('scores', {})
         md.append(f"## Δ vs baseline ({bl.get('label', args.baseline)})")
         md.append('')
-        md.append('| Bucket | Δecho | Δdeg | verdict |')
-        md.append('|---|---:|---:|---|')
+        md.append('| Bucket | n | n_bl | n_common | Δecho | Δdeg | verdict |')
+        md.append('|---|---:|---:|---:|---:|---:|---|')
         for b in bucket_order:
-            if b not in summary or b not in bl_summary:
+            if b not in summary:
                 continue
-            de = summary[b]['echo_mean'] - bl_summary[b]['echo_mean']
-            dd = summary[b]['deg_mean'] - bl_summary[b]['deg_mean']
+            cur_stems = {s: d for s, d in scores.items() if d['bucket'] == b}
+            bl_stems = {s: d for s, d in bl_scores.items() if d.get('bucket') == b}
+            common = sorted(set(cur_stems) & set(bl_stems))
+            n_cur, n_bl = len(cur_stems), len(bl_stems)
+            if not common:
+                md.append(f"| {b} | {n_cur} | {n_bl} | 0 | n/a | n/a | NO COMMON STEMS |")
+                continue
+            de = float(np.mean([cur_stems[s]['echo'] - bl_stems[s]['echo'] for s in common]))
+            dd = float(np.mean([cur_stems[s]['deg'] - bl_stems[s]['deg'] for s in common]))
             verdict = []
-            # Acceptance: FS echo drop ≤ 0.02; NE deg drop ≤ 0.01
             if b in ('FS_static', 'FS_movement') and de < -0.02:
                 verdict.append('FS echo regress')
             if b == 'NE' and dd < -0.01:
                 verdict.append('NE deg regress')
-            md.append(f"| {b} | {de:+.3f} | {dd:+.3f} | {' ; '.join(verdict) or 'ok'} |")
+            if n_cur != n_bl:
+                verdict.append(f'n mismatch {n_cur}≠{n_bl}')
+            md.append(f"| {b} | {n_cur} | {n_bl} | {len(common)} | "
+                      f"{de:+.3f} | {dd:+.3f} | {' ; '.join(verdict) or 'ok'} |")
         md.append('')
 
     # Worst-20 per bucket (sort by deg ascending for DT/NE; echo ascending for FS)

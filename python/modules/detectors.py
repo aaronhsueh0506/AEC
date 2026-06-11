@@ -54,14 +54,16 @@ class RenderActivityDetector:
                 self._env_mean = far_pwr
                 self._env_var = 0.0
                 self._active_prev = True
+                # No variance data yet; don't declare stationarity on first frame.
+                self._is_stationary = False
             else:
                 old_mean = self._env_mean
                 self._env_mean = (self.ALPHA_CV * self._env_mean
                                   + (1 - self.ALPHA_CV) * far_pwr)
                 self._env_var = (self.ALPHA_CV * self._env_var
                                  + (1 - self.ALPHA_CV) * (far_pwr - old_mean) ** 2)
-            far_cv2 = self._env_var / (self._env_mean ** 2 + 1e-10)
-            self._is_stationary = far_cv2 < self.STATIONARY_CV2
+                far_cv2 = self._env_var / (self._env_mean ** 2 + 1e-10)
+                self._is_stationary = far_cv2 < self.STATIONARY_CV2
         else:
             self._active_prev = False
             self._is_stationary = False

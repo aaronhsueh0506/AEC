@@ -56,6 +56,7 @@ def matched_filter_core(
     smoothing: float,
     y: np.ndarray,
     h: np.ndarray,
+    instantaneous_error_out: Optional[np.ndarray] = None,
 ) -> tuple[bool, float]:
     """NLMS matched-filter core operating on a forward-stored ring.
 
@@ -70,11 +71,17 @@ def matched_filter_core(
       - Compute ``e = y[i] - h·x_window``, accumulate ``error_sum``.
       - NLMS update ``h += smoothing * e / x2_sum * x_window`` when
         ``x2_sum > threshold`` and capture isn't saturated.
+
+    If ``instantaneous_error_out`` is provided (length filter_size /
+    _ACCUMULATED_ERROR_SUBSAMPLE_RATE), per-sample e² are accumulated
+    into subsampled bins for pre-echo detection.
     """
     h_size = h.size
     error_sum = 0.0
     filters_updated = False
     sub_block_size = int(y.size)
+    if instantaneous_error_out is not None:
+        instantaneous_error_out.fill(0.0)
     for i in range(sub_block_size):
         start_back = alignment_shift_back + (sub_block_size - 1 - i)
         x_window = render_buffer.gather_back(start_back, h_size)
@@ -84,7 +91,12 @@ def matched_filter_core(
         saturation = (
             float(y[i]) >= _SATURATION_LIMIT or float(y[i]) <= -_SATURATION_LIMIT
         )
-        error_sum += e * e
+        e2 = e * e
+        error_sum += e2
+        if instantaneous_error_out is not None:
+            bin_idx = i // _ACCUMULATED_ERROR_SUBSAMPLE_RATE
+            if bin_idx < instantaneous_error_out.size:
+                instantaneous_error_out[bin_idx] += e2
         if x2_sum > x2_sum_threshold and not saturation:
             alpha = smoothing * e / x2_sum
             h += alpha * x_window
@@ -141,7 +153,7 @@ class MatchedFilter:
         window_size_sub_blocks: int = 32,
         num_filters: int = 5,
         alignment_shift_sub_blocks: int = 24,
-        excitation_limit: float = 150.0,
+        excitation_limit: float = 150.0 / 32768.0,  # float[-1,1] amplitude scale
         smoothing_fast: float = 0.7,
         smoothing_slow: float = 0.1,
         matching_filter_threshold: float = 0.3,
@@ -219,6 +231,9 @@ class MatchedFilter:
         previous_lag_estimate: Optional[int] = None
 
         for n in range(self._num_filters):
+            # Pass instantaneous_error_out for pre-echo tracking when enabled.
+            _ie_out = (self._instantaneous_error
+                       if self._detect_pre_echo else None)
             filters_updated, error_sum = matched_filter_core(
                 render_buffer=render_buffer,
                 alignment_shift_back=alignment_shift,
@@ -226,6 +241,7 @@ class MatchedFilter:
                 smoothing=smoothing,
                 y=capture,
                 h=self._filters[n],
+                instantaneous_error_out=_ie_out,
             )
 
             lag_estimate = max_square_peak_index(self._filters[n])
@@ -254,7 +270,9 @@ class MatchedFilter:
             # Pre-echo path — only fires when detect_pre_echo=True and the
             # same filter remains winner across calls.
             if self._detect_pre_echo and self._last_detected_best_lag_filter == winner_index:
-                if error_sum_anchor > 1.0:
+                # AEC3 gate is in int16-scale (error_sum > 1.0 in Q15²).
+                # float[-1,1] equivalent: 1.0 / 32768² ≈ 9.3e-10.
+                if error_sum_anchor > 1.0 / (32768.0 * 32768.0):
                     _update_accumulated_error(
                         self._instantaneous_error,
                         self._accumulated_error[winner_index],

@@ -294,7 +294,7 @@ NOISE_GATE_POWER_FLOAT = psd_int16_to_float(27509562.0)  # 0.02562 — DO NOT us
 # Corrected residual echo model noise gate (echo_model.noise_gate_power path).
 # Source: echo_canceller3_config.h EchoModel::noise_gate_power = 27509.42f.
 # Unit: int16² scale (same as far_psd = float_spec² × 32768²). No psd_int16_to_float.
-# Consumed only when config.use_aec3_residual_noise_gate = True (default OFF).
+# Always active: hardcoded use_aec3_residual_noise_gate=True at all call sites.
 # R0.2 gap: Python default (27509562) is 1000× too large — non-linear path X2 gated
 # for nearly all render signals, leaving R2 = reverb-only (direct echo path zeroed).
 RESIDUAL_NOISE_GATE_POWER = 27509.42  # int16² scale — AEC3 echo_model.noise_gate_power verbatim

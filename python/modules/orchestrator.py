@@ -397,6 +397,7 @@ class AEC:
                 use_aec3_wallclock_reverb_smoothing=True,
                 nl_r2_enabled=bool(getattr(self.config, "nl_r2_enabled", False)),
                 nl_r2_alpha=float(getattr(self.config, "nl_r2_alpha", 0.1)),
+                use_stationarity_properties=True,
             )
             self._aec3_ree._reverb_tail_strength = float(
                 getattr(self.config, "reverb_tail_strength", 1.0))
@@ -899,7 +900,10 @@ class AEC:
             del self._pending_delay
         for _attr in ('_round3_div_counts', '_round3_last_div_source',
                       '_r7_prev_delay', '_r7_prev_div_counts',
-                      '_dominant_nearend_hold'):
+                      '_dominant_nearend_hold',
+                      '_poor_coarse_counter', '_coarse_reset_hangover',
+                      '_block_stationary_for_next_hop',
+                      '_leakage_div_sustained_counter'):
             if hasattr(self, _attr):
                 delattr(self, _attr)
         # _conv_counter is owned by self._convergence (reset above)
@@ -914,6 +918,7 @@ class AEC:
         self._wn_err_baseline = 1e-8
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
         self._limiter_gain = 1.0
+        self._limiter_near_lag = None
         self._per_bin_mu_scale = None
         # Reset DT signals (now owned by DoubleTalkAnalyzer)
         self._dt_analyzer.reset()
@@ -1019,6 +1024,7 @@ class AEC:
             use_aec3_wallclock_reverb_smoothing=True,
             nl_r2_enabled=bool(getattr(self.config, "nl_r2_enabled", False)),
             nl_r2_alpha=float(getattr(self.config, "nl_r2_alpha", 0.1)),
+            use_stationarity_properties=True,
         )
         self._aec3_ree._reverb_tail_strength = float(
             getattr(self.config, "reverb_tail_strength", 1.0))
@@ -1181,6 +1187,12 @@ class AEC:
         self._shadow_error_psd.fill(1e-2)
         self._shadow_R.fill(1e-2)
         self._shadow_mu_holdoff = 0
+        # Coarse-filter quality counters (lazy-init via getattr in process loop)
+        self._poor_coarse_counter = 0
+        self._coarse_reset_hangover = 0
+        self._leakage_div_sustained_counter = 0
+        self._block_stationary_for_next_hop = False
+        self._limiter_near_lag = None
 
         # Clear AEC3 post chain (filter-output-derived); preserve
         # render-side stationarity tracker per the input-side rule.
@@ -1502,8 +1514,12 @@ class AEC:
                     self._freq_queue_write = leftover
 
                 r = self._freq_out_read
-                raw_output = self._freq_out_buf[r:r+hop].copy()
-                self._freq_out_read = r + hop
+                if r + hop > self._freq_out_valid:
+                    # internal_hop not a multiple of hop; avoid overread
+                    raw_output = np.zeros(hop, dtype=np.float32)
+                else:
+                    raw_output = self._freq_out_buf[r:r+hop].copy()
+                    self._freq_out_read = r + hop
             else:
                 # Update RenderSignalAnalyzer + push gates onto the
                 # refined filter BEFORE the W update fires. Use the current
@@ -1546,6 +1562,27 @@ class AEC:
                 if self.shadow_filter is not None:
                     self.shadow_filter._block_stationary = _stat_flag
 
+                # E15 fix: AEC3 compares E²_refined vs E²_coarse from the SAME
+                # block (subtractor_output). Our prior order ran main first, so
+                # H_error refresh read E²_coarse[t-1] — spurious leakage_diverged
+                # at every onset. Fix: run shadow first, publish _e2_coarse_per_bin,
+                # THEN run main filter so the H_error refresh sees same-hop coarse.
+                _shadow_ran_pre_main = False
+                if self.shadow_filter is not None and self._freq_near_queue is None:
+                    _far_thr_pre = 1e-4
+                    _fe_pre = np.mean(far_end ** 2) > _far_thr_pre
+                    _ss_pre = self._saturation_level < 0.5
+                    _smu_pre = 1.0 if (_fe_pre and _ss_pre) else 0.1
+                    self._last_shadow_output_time = self.shadow_filter.process(
+                        near_end, far_end, _smu_pre)
+                    _shadow_ran_pre_main = True
+                    if hasattr(self.shadow_filter, 'error_spec'):
+                        _e2_coa_pre = (
+                            np.abs(self.shadow_filter.error_spec) ** 2
+                        ).astype(np.float32)
+                        self.filter._e2_coarse_for_refresh = float(np.sum(_e2_coa_pre))
+                        self.filter._e2_coarse_per_bin = _e2_coa_pre
+
                 # WebRTC-style: freeze main filter weights when shadow detected divergence
                 main_mu = 0.0 if self._regime_handler.main_paused else mu_scale
                 raw_output = self.filter.process(near_end, far_end, main_mu)
@@ -1564,7 +1601,10 @@ class AEC:
                     if self._aec3_non_zero_render_seen:
                         _far_psd_st = (np.abs(self.filter.far_spec) ** 2).astype(np.float32)
                         self._aec3_stationarity.update_noise_estimator(_far_psd_st)
-                        self._aec3_stationarity.update_stationarity_flags(_far_psd_st)
+                        self._aec3_stationarity.update_stationarity_flags(
+                            _far_psd_st,
+                            average_reverb=self._aec3_avg_render_reverb.reverb,
+                        )
                         self._aec3_stationarity_active_hops += 1
                     # Latch flag for next hop's filter.process gate. Require
                     # post-converge (≥800 ms active render) so the noise floor
@@ -1607,8 +1647,11 @@ class AEC:
                 # divergence — retired 2026-05-28.
                 # Capture shadow filter time-domain residual for
                 # UseRefinedOutput parity in `_aec3_post`.
-                self._last_shadow_output_time = self.shadow_filter.process(
-                    near_end, far_end, shadow_mu_scale)
+                # E15: shadow already ran pre-main above to publish current-hop
+                # coarse error; skip the duplicate process() call.
+                if not _shadow_ran_pre_main:
+                    self._last_shadow_output_time = self.shadow_filter.process(
+                        near_end, far_end, shadow_mu_scale)
 
                 # poor_coarse_filter_counter + coarse-reset. Mirrors AEC3
                 # subtractor.cc:264-307. When the refined filter has been
@@ -1681,8 +1724,22 @@ class AEC:
                                     'aec3_reset_res_on_rescue_edge_fired', 0
                                 ) + 1
                             )
+                    # Track F: sustained leakage_div gate fires after 5
+                    # consecutive hops (50 ms) with >50% bins on diverged
+                    # leakage — covers the DT-onset window before
+                    # coarse_reset_hangover kicks in (~300 ms later).
+                    _ld_frac = float(getattr(
+                        self.filter, '_last_leakage_div_frac', 0.0))
+                    _ld_ctr = getattr(
+                        self, '_leakage_div_sustained_counter', 0)
+                    _ld_ctr = (min(_ld_ctr + 1, 10) if _ld_frac > 0.5
+                               else max(_ld_ctr - 1, 0))
+                    self._leakage_div_sustained_counter = _ld_ctr
+                    _dt_leakage_gate = (_ld_ctr >= 5)
                     if getattr(self, '_coarse_reset_hangover', 0) > 0:
                         self._coarse_reset_hangover -= 1
+                        self.filter._disallow_leakage_diverged = True
+                    elif _dt_leakage_gate:
                         self.filter._disallow_leakage_diverged = True
                     else:
                         self.filter._disallow_leakage_diverged = False
@@ -1836,6 +1893,11 @@ class AEC:
                 else:
                     # Hangover tick — only when shadow_rise did NOT fire.
                     self._epc_det.tick_hangover()
+
+            # Render-forced remaining countdown: decrements every frame
+            # unconditionally (set to epc_hangover on EPV/shadow_rise events).
+            if self._epc_render_forced_remaining > 0:
+                self._epc_render_forced_remaining -= 1
 
             # WebRTC-style: no output switching. Main filter output is always used.
             # (Shadow filter drives divergence detection + Q boost + pause, not output selection.)
@@ -2027,10 +2089,16 @@ class AEC:
                             dtype=np.complex64,
                         ).copy(),
                         filter_converged=bool(self._convergence.converged),
-                        erle_factor=float(self._diag.get('erle_factor', 0.0)),
+                        # E21 fix: use same-frame local sources instead of diag
+                        # entries (_diag['erle_factor']/_diag['divergence']/_diag['mu_scale'])
+                        # that are written AFTER this context build — one frame stale.
+                        erle_factor=float(
+                            locals().get('erle_factor', self._erle_factor_prev)),
                         dt_indicator=float(dt_indicator),
-                        divergence=float(self._diag.get('divergence', 0.0)),
-                        over_sub=float(self._diag.get('mu_scale', 1.0)),
+                        divergence=float(self._divergence_indicator),
+                        over_sub=(float(np.mean(mu_scale))
+                                  if isinstance(mu_scale, np.ndarray)
+                                  else float(mu_scale)),
                         saturation_level=float(self._saturation_level),
                         erl_estimate=float(self._erl_estimate),
                         # Freq seam for external post-NR RES (set in _aec3_post).
@@ -2059,15 +2127,31 @@ class AEC:
                 else:
                     # Pre-convergence: no per_bin, let ratio track DT naturally
                     self._per_bin_mu_scale = None
-                    self._update_simple_mu_ratio(raw_output, far_end)
+                    # Guard: only call here for the RES path; the non-RES path
+                    # calls _update_simple_mu_ratio below. When enable_res=False
+                    # but return_res_context=True (A_min_pl stage 1), both paths
+                    # would fire without this guard → double update.
+                    if self.config.enable_res:
+                        self._update_simple_mu_ratio(raw_output, far_end)
 
             # C-parity fix: when RES is disabled, _update_simple_mu_ratio is
             # never called in PBFDKF path. C always calls update_simple_mu_ratio
-            # regardless. Add call here when RES is off (avoids double-update
-            # when RES is on).
+            # regardless. Add call here when RES is off.
             if (not self.config.enable_res
                     and not self._filter_converged):
                 self._update_simple_mu_ratio(raw_output, far_end)
+            elif (not self.config.enable_res
+                    and not self.config.return_res_context
+                    and self._filter_converged):
+                # E19 fix: nores path skips the _aec3_post block entirely, so
+                # the converged mu freeze never executes — _per_bin_mu_scale
+                # stays None and _simple_mu_ratio freezes, causing _ours_nores
+                # to adapt at a different rate than production. Mirror the same
+                # clamp so the nores filter trajectory matches.
+                mu_min = self.config.shadow_mu_min
+                self._per_bin_mu_scale = np.full(
+                    self.filter.n_freqs, mu_min, dtype=np.float32)
+                self._simple_mu_ratio = 0.0
 
             # Update diagnostics. ResFilter._diag_* fields were only written
             # from process() (dead since R4) → all consumers saw __init__
@@ -2296,17 +2380,17 @@ class AEC:
 
         # Output limiter: final_output should never exceed mic amplitude.
         # Uses smoothed gain to avoid frame-boundary clicking artifacts.
-        # The AEC3 chain's `_aec3_post` output has a 1-hop OLA delay
-        # relative to the live `near_end` we compare against. To keep the
-        # limiter useful (it suppresses real echo overshoots on DT)
-        # without falsely attenuating NE (the OLA-lag misaligned compare
-        # fired on every speech-silence transition, mean limiter gain
-        # 0.79 on NE-only wJVPo), use the PREVIOUS hop's mic as the
-        # comparison source. That mic was the actual source of the OLA
-        # reconstruction now in `final_output`.
+        # When enable_res=True, `_aec3_post` OLA introduces a 1-hop delay so
+        # final_output corresponds to the PREVIOUS mic frame; compare against the
+        # lagged mic to avoid false onset suppression.
+        # When enable_res=False, _aec3_post is skipped (or early-returns raw_output)
+        # so final_output IS the current hop — use near_end directly.
         if self._limiter_near_lag is None:
             self._limiter_near_lag = np.zeros_like(near_end)
-        near_for_limiter = self._limiter_near_lag
+        if self.config.enable_res:
+            near_for_limiter = self._limiter_near_lag
+        else:
+            near_for_limiter = near_end
         self._limiter_near_lag = near_end.copy()
         near_peak = np.max(np.abs(near_for_limiter))
         out_peak = np.max(np.abs(final_output))
@@ -2740,6 +2824,10 @@ class AEC:
                 e_refined_time=raw_output, near_end_block=near_end,
             )
         else:
+            # No-shadow fallback: use filter's own windowed-error spec + raw echo.
+            # echo_spec = Σ W[p]·X[p]; derived from filter output, not windowed-near
+            # like the shadow path. Equivalent: near_spec_win - error_spec_windowed
+            # = (error_spec_windowed + echo_spec) - error_spec_windowed = echo_spec.
             _sel_esw = self.filter.error_spec_windowed
             _sel_echo_spec = self.filter.echo_spec
         near_psd = (np.abs(self.filter.near_spec) ** 2 * _PSD_SCALE).astype(np.float32)
@@ -2911,7 +2999,7 @@ class AEC:
             # NEXT write slot; the most recent X² lives at partition_idx-1.
             _curr_p = (self.filter.partition_idx - 1) % _n_part
             _delay = int(self._aec3_state.min_direct_path_filter_delay())
-            _delay = max(0, min(_delay, _n_part - 1))
+            _delay = max(0, min(_delay, _n_part - 2))  # -2 keeps _past_idx from wrapping to current
             _delay_idx = (_curr_p - _delay) % _n_part
             _past_idx = (_curr_p - _delay - 1) % _n_part
             _x2_at_delay = (np.abs(self.filter.X_buf[_delay_idx])
@@ -2942,8 +3030,10 @@ class AEC:
         # ON wires the real `_last_s_max_abs` cached in PBFDAF.process.
         # AEC3 aec_state.cc SaturationDetector reads the time-domain echo-
         # predictor peak (SubtractorOutput.s_*_max_abs) from refined + shadow.
-        _s_ref_max = float(getattr(self.filter, "_last_s_max_abs", 0.0))
-        _s_coa_max = (float(getattr(self.shadow_filter, "_last_s_max_abs", 0.0))
+        # SaturationDetector threshold kSaturationThreshold=20000 is in int16-amplitude.
+        # _last_s_max_abs is in float[-1,1]; scale to int16 range for a live comparison.
+        _s_ref_max = float(getattr(self.filter, "_last_s_max_abs", 0.0)) * 32768.0
+        _s_coa_max = ((float(getattr(self.shadow_filter, "_last_s_max_abs", 0.0)) * 32768.0)
                       if self.shadow_filter is not None else 0.0)
         # active_render threshold = 100²×64/32768² ≈ 5.96e-4 (AEC3 aec_state.cc
         # active_render_limit²×kBlockSize). NOTE: this keeps AEC3's block-SUM ×64

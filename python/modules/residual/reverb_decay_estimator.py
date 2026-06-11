@@ -337,6 +337,10 @@ class ReverbDecayEstimator:
         if den == 0.0:
             return
         slope_per_partition = num / den
+        # slope_per_partition is in log2 per partition (our unit = hop = 160 samples).
+        # Divide by hop_size (samples/partition) → log2 per sample.
+        # AEC3 convention: decay stored per-block (4 ms @16kHz = 64 samples); here
+        # per-sample then raised to hop power at apply time: decay_per_hop = decay^hop.
         decay_log2_per_sample = slope_per_partition / max(1, self._hop_size)
         decay_new = float(math.pow(2.0, decay_log2_per_sample))
         decay_new = max(0.97 * self._decay, decay_new)

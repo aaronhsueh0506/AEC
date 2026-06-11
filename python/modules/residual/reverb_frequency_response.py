@@ -129,10 +129,14 @@ class ReverbFrequencyResponse:
             np.maximum(tail, freq_resp_tail, out=tail)
 
         # Neighbour-max smoothing (cc:101-105): ±1 bin avg, indices k=1..N-2.
-        # Strict AEC3 literal — bin-index based, not freq-width based.
+        # AEC3 runs this IN PLACE ascending: at k, tail[k-1] is the already-raised
+        # value from iteration k-1, so a strong peak propagates rightward as a
+        # >=0.5/bin geometric skirt. Vectorized numpy (pre-update both neighbours)
+        # only spreads ±1 bin; the ascending loop is required for parity.
         if self._n_freqs >= 3:
-            avg_neighbour = 0.5 * (tail[:-2] + tail[2:])
-            tail[1:-1] = np.maximum(tail[1:-1], avg_neighbour)
+            n = len(tail)
+            for k in range(1, n - 1):
+                tail[k] = max(tail[k], 0.5 * (tail[k - 1] + tail[k + 1]))
 
         self._tail_response = tail.astype(np.float32)
 

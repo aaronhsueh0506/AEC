@@ -221,6 +221,7 @@ class _LowNoiseRenderDetector:
     def __init__(self, *, hop_samples: int = 64, sample_rate: int = 16000,
                  use_wallclock_block_energy_threshold: bool = False) -> None:
         self._average_power = 32768.0 * 32768.0
+        self._hop_samples = hop_samples  # needed to normalize peak-rejection
         if use_wallclock_block_energy_threshold:
             from .. import aec3_scale as _aec3_scale
             self._threshold = float(
@@ -240,7 +241,11 @@ class _LowNoiseRenderDetector:
         x2 = render_block.astype(np.float64) ** 2
         x2_sum = float(np.sum(x2))
         x2_max = float(np.max(x2))
-        low_noise = self._average_power < self._threshold and x2_max < 3.0 * self._average_power
+        # Normalize average_power to per-sample scale before peak comparison.
+        # AEC3 uses 64-sample blocks; at 160-sample hop, average_power is 2.5×
+        # larger for the same RMS level → peak_rejection is 2.5× too loose.
+        avg_per_sample = self._average_power * (64.0 / self._hop_samples)
+        low_noise = self._average_power < self._threshold and x2_max < 3.0 * avg_per_sample
         self._average_power = self._average_power * self._iir_decay + x2_sum * self._iir_weight
         return bool(low_noise)
 
@@ -299,10 +304,17 @@ def _weight_echo_for_audibility(
     weigh(cfg.floor_power * cfg.audibility_threshold_hf, mf_end, n)
 
 
-def _limit_lf_gains(gain: np.ndarray) -> None:
-    """Mirrors LimitLowFrequencyGains (suppression_gain.cc:38-42)."""
-    if gain.size >= 3:
-        gain[0] = gain[1] = min(gain[1], gain[2])
+def _limit_lf_gains(gain: np.ndarray, sr: int = 16000) -> None:
+    """Mirrors LimitLowFrequencyGains (suppression_gain.cc:38-42).
+
+    AEC3 128-pt FFT: bins 0-1 (0-125 Hz) clamped to gain[2] (250 Hz anchor).
+    Our 512-pt FFT: generalize to clamp all bins below 250 Hz to gain at 250 Hz.
+    """
+    n = gain.size
+    clamp_to = hz_to_bin(250, n, sr)  # 8 for 512-pt @ 16kHz, 2 for AEC3 128-pt
+    if clamp_to < n:
+        anchor = float(gain[clamp_to])
+        np.minimum(gain[:clamp_to], anchor, out=gain[:clamp_to])
 
 
 def _limit_hf_gains(
@@ -695,7 +707,9 @@ class SuppressionGain:
         # Step 5: GainToNoAudibleEcho (the heart).
         G_raw = self._gain_to_no_audible_echo(nearend, weighted_residual, comfort_noise)
         # Step 6: clip into [min, max].
-        G = np.clip(G_raw, min_gain, max_gain)
+        # np.clip inverts priority when min_gain > max_gain (saturated echo path).
+        # Use min/max elementwise so min_gain always wins when the ranges conflict.
+        G = np.maximum(np.minimum(G_raw, max_gain), min_gain)
         # Snapshot pre-HF-limiter G + ENR/EMR for paint-black diagnostic.
         # No audio effect; consumers via _last_lower_band_snap.
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -703,7 +717,7 @@ class SuppressionGain:
             _emr_diag = np.divide(weighted_residual, comfort_noise + 1.0)
         _G_pre_hf_lim = G.copy()
         # Step 7: LF + HF limiters.
-        _limit_lf_gains(G)
+        _limit_lf_gains(G, self._sr)
         _hf_lim_applied = (
             (not self._ne_state_for_gain_rules())
             or clock_drift

@@ -140,6 +140,11 @@ class ResidualEchoEstimator:
         # R0.3: AEC3 EchoGeneratingPower delay-centered window (pre=1, post=1)
         # vs legacy ring buffer (pre=0). Default flipped to True 2026-05-27.
         use_aec3_echo_gen_window: bool = True,
+        # AEC3 UseStationarityProperties gate: when True, skip the nonlinear-path
+        # noise gate (residual_echo_estimator.cc:121-129). AEC3 skips when
+        # stationarity properties are active; our production config sets this True
+        # (orchestrator also enables stationarity zeroing downstream).
+        use_stationarity_properties: bool = False,
         # ReverbFrequencyResponse EMA wall-clock alignment.
         # AEC3 applies α=0.2·quality per 4 ms block; our verbatim port
         # applied per 10 ms hop (2.5× too slow). Default OFF for byte-equal.
@@ -162,6 +167,7 @@ class ResidualEchoEstimator:
         self._use_aec3_residual_noise_gate = bool(use_aec3_residual_noise_gate)
         # R0.3: corrected EchoGeneratingPower render pre-window (pre=1 vs default pre=0).
         self._use_aec3_echo_gen_window = bool(use_aec3_echo_gen_window)
+        self._use_stationarity_properties = bool(use_stationarity_properties)
         # Derive wall-clock hops from cfg.noise_floor_hold_ms once at init
         # (echo_model is frozen so the value is stable).
         self._noise_floor_hold_hops = _aec3_scale.ms_to_hops(
@@ -326,19 +332,12 @@ class ResidualEchoEstimator:
         capture_psd: np.ndarray,   # Y²
         s2_linear: np.ndarray,     # |H·X|² from PBFDKF
         dominant_nearend: bool,
-        filter_freq_response: Optional[np.ndarray] = None,
         filter_delay_blocks: int = 0,
         filter_length_blocks: int = 0,
         force_nonlinear_path: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Returns ``(R2, R2_unbounded)``.
 
-        ``filter_freq_response``: per-bin filter response magnitude² (sum of
-        |W[p]|² over partitions, then PSD-scaled to match render_psd scale).
-        Used as ``power_spectrum_scaling`` for the linear-mode reverb update
-        (AEC3 cc:391-392 ``GetReverbFrequencyResponse``). Falls back to
-        per-frame S²/X² coupling when None — that fallback misses bins where
-        the filter learned coupling but current frame has no render energy.
         """
         # Step 1: update stationary render noise floor.
         self._update_render_noise_power(render_psd)
@@ -347,9 +346,12 @@ class ResidualEchoEstimator:
         # reverb update can read N+1 blocks ago (mirrors AEC3
         # render_buffer.Spectrum(first_reverb_partition), cc:367-376).
         # Index 0 = current frame after appendleft.
-        self._reverb_render_history.appendleft(
-            np.asarray(render_psd, dtype=np.float32).copy()
-        )
+        _rp_current = np.asarray(render_psd, dtype=np.float32).copy()
+        self._reverb_render_history.appendleft(_rp_current)
+        # Delay-render buffer updated every hop so linear→nonlinear transitions
+        # see current render PSD (not a stale value from the last nonlinear hop).
+        if self._use_aec3_echo_gen_window:
+            self._delay_render_buf.appendleft(_rp_current)
 
         r2 = np.empty(self._n_bins, dtype=np.float32)
         r2_unbounded = np.empty(self._n_bins, dtype=np.float32)
@@ -424,8 +426,7 @@ class ResidualEchoEstimator:
                 if self._use_aec3_echo_gen_window:
                     # R0.3 strict AEC3: delay-centered window.
                     # idx_start = max(0, delay-pre), idx_stop = delay+post.
-                    # Deque index 0 = current frame, k = k hops ago.
-                    self._delay_render_buf.appendleft(_rp)
+                    # Deque index 0 = current frame (already appended at top of estimate()).
                     _delay = max(0, int(filter_delay_blocks))
                     _pre  = self._render_pre_window_size   # 1
                     _post = self._render_post_window_size  # 1
@@ -450,8 +451,8 @@ class ResidualEchoEstimator:
                             self._render_history_idx + 1
                         ) % self._render_history_size
                     x2 = np.max(self._render_history, axis=0).copy()
-                if not aec_state.transparent_mode_active():
-                    # AEC3 cc:121-129 noise gate.
+                if not self._use_stationarity_properties:
+                    # AEC3 cc:121-129 noise gate — skipped when UseStationarityProperties=True.
                     # R0.2: use corrected 27509.42 (int16²) instead of buggy 27509562.
                     _ng = (self._noise_gate_power
                            if self._use_aec3_residual_noise_gate

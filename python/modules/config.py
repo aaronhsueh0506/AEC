@@ -23,7 +23,7 @@ class AecConfig:
     sample_rate: int = 16000        # 8000 / 16000 / 48000
     frame_size: int = -1            # Auto: sample_rate * 20ms
     hop_size: int = -1              # Auto: frame_size / 2
-    filter_length: int = -1         # Auto: 32ms (8k/16k) or 64ms (48k)
+    filter_length: int = -1         # Auto: 52ms (<44.1 kHz) or 64ms (≥44.1 kHz)
     mu: float = 0.3                 # Step size
     delta: float = 1e-8             # Regularization
 
@@ -231,7 +231,6 @@ class AecConfig:
 
     # ── Shadow filter (dual-filter divergence control) ──────────────────
     enable_shadow: bool = True
-    shadow_mu_ratio: float = 1.0
     shadow_copy_threshold: float = 0.65
     shadow_err_alpha: float = 0.80
     shadow_mu_min: float = 0.5
@@ -243,9 +242,6 @@ class AecConfig:
 
     # ── Filter misadjustment estimator (AEC3 parity, INTERNAL tuning) ──
     # AEC3 inv_misadjustment over n-hop window; shrinks W on divergence.
-    filter_misadjustment_alpha_up: float = 0.99
-    filter_misadjustment_alpha_dn: float = 0.95
-    filter_misadjustment_threshold: float = 0.5
     filter_misadjustment_hangover_frames: int = 100
     filter_misadjustment_stable_frames: int = 30
     filter_misadjustment_scale_min: float = 0.5
@@ -261,7 +257,6 @@ class AecConfig:
     epc_delta_threshold: float = 0.3
     epc_total_rise: float = 1.5
     epc_hangover: int = 20
-    epc_mu_floor: float = 0.5
 
     # ── Delay estimation (matched-filter + ring buffer) ─────────────────
     enable_delay_est: bool = True

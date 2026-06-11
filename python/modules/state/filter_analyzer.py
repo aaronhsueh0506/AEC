@@ -211,10 +211,11 @@ class FilterAnalyzer:
         if float(seg_sq[seg_amax]) > cur_sq:
             self._peak_index = self._region_start + seg_amax
         self._delay_blocks = self._peak_index // HOP_SAMPLES
-        # UpdateFilterGain (filter_analyzer.cc:142-159). Uses the RAW filter,
-        # not the HPF'd version (matches AEC3 — only peak-finding sees HPF).
+        # UpdateFilterGain (filter_analyzer.cc:131,142-159): AEC3 passes h_highpass_
+        # to UpdateFilterGain and reads filter_time_domain[peak_index] from it,
+        # so the gain is |h_hpf[peak]|, not the raw-filter value.
         sufficient = self._blocks_since_reset > _CONVERGENCE_THRESHOLD_HOPS
-        peak_abs = float(abs(filter_taps[self._peak_index]))
+        peak_abs = float(abs(h[self._peak_index]))
         if sufficient and self._consistent_estimate:
             self._gain = peak_abs
         elif self._gain:

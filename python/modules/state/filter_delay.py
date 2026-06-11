@@ -68,7 +68,7 @@ class FilterDelay:
     def external_delay_reported(self) -> bool:
         return self._external_delay is not None
 
-    def external_delay_blocks(self) -> Optional[DelayEstimate]:
+    def external_delay_samples(self) -> Optional[DelayEstimate]:
         return self._external_delay
 
     def direct_path_filter_delays(self) -> list[int]:

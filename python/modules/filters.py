@@ -35,13 +35,15 @@ class PBFDAF:
         self.alpha_power = 0.9
         self.enable_td_constraint = True  # can be disabled for diagnosis
 
-        # Time-domain constraint window: clean 50% truncation
-        # block_size = 2×hop → truncation at 50%, minimal Gibbs ringing
+        # Time-domain constraint window: 50% truncation with smooth non-causal fade.
+        # Fade is placed in the NON-CAUSAL region [hop:hop+fade_len] so the causal
+        # taps [0:hop] are preserved at 1.0. Prior bug placed the fade at
+        # [hop-fade_len:hop], attenuating the last 40 causal taps → dead zone.
         self._td_window = np.ones(self.fft_size, dtype=np.float32)
         fade_len = self.hop_size // 4  # 40 samples for hop=160
         fade = 0.5 * (1.0 - np.cos(np.pi * np.arange(fade_len) / fade_len))
-        self._td_window[self.hop_size - fade_len:self.hop_size] = fade[::-1].astype(np.float32)
-        self._td_window[self.hop_size:] = 0.0
+        self._td_window[self.hop_size:self.hop_size + fade_len] = fade[::-1].astype(np.float32)
+        self._td_window[self.hop_size + fade_len:] = 0.0
 
         # Filter weights [n_partitions, n_freqs]
         self.W = np.zeros((n_partitions, self.n_freqs), dtype=np.complex64)
@@ -308,6 +310,11 @@ class PBFDAF:
         mu_scale_arr = np.asarray(mu_scale, dtype=np.float32)
         if mu_scale_arr.ndim == 0:
             mu_scale_arr = np.full(self.n_freqs, float(mu_scale_arr), dtype=np.float32)
+        # AEC3 coarse_filter_update_gain.cc:47: `++call_counter_` is unconditional,
+        # before all gates — saturated/zero-mu hops still advance the counter so
+        # the startup window is a fixed wall-clock span (not extended by skips).
+        # PBFDKF orders it the same way (filters.py:601). Move increment first.
+        self._call_counter += 1
         if not np.any(mu_scale_arr > 0):
             return
         # AEC3 coarse_filter_update_gain.cc:56-57 saturation gate.
@@ -318,7 +325,6 @@ class PBFDAF:
         # AEC3 coarse_filter_update_gain.cc:51-61 call_counter +
         # poor_excitation startup gate. `if poor_signal_excitation_counter_ <
         # size_partitions OR call_counter_ <= size_partitions → return`.
-        self._call_counter += 1
         if (self._call_counter <= self.n_partitions
                 or self._poor_excitation_counter < self.n_partitions):
             self._c1c5_trace['A3_poor_exc_skip'] = True
@@ -725,6 +731,10 @@ class PBFDKF(PBFDAF):
         # ALWAYS, including the gated/stationary path (callers route to
         # `_h_error_refresh()` and return). Decay uses the same X² as the
         # denominator above (partition-summed when the flag is ON).
+        # Apply mu_scale_arr (includes RSA narrowband mask + DT scale) so that
+        # masked bins don't have H_error decay while their W is frozen.
+        # Mirror AEC3 cc:113-119 where gain and decay share the same scale.
+        mu_aec3 *= mu_scale_arr
         self.H_error_per_bin -= (
             np.float32(0.5) * mu_aec3 * X2 * self.H_error_per_bin
         )

@@ -175,8 +175,8 @@ class AecState:
     def erl_time_domain(self) -> float:
         return self._erl_estimator.erl_time_domain()
 
-    def external_delay_blocks(self) -> Optional[DelayEstimate]:
-        return self._delay_state.external_delay_blocks()
+    def external_delay_samples(self) -> Optional[DelayEstimate]:
+        return self._delay_state.external_delay_samples()
 
     def filter_analyzer_consistent(self) -> bool:
         return (self._filter_analyzer is not None
