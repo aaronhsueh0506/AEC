@@ -36,6 +36,7 @@ typedef struct {
     int    last_lf_smoothing_band;
     int    last_permanent_lf_smoothing_band;
     int    lf_smoothing_during_initial_phase;   /* bool */
+    int    lf_clamp_bin;                        /* hz_to_bin(250 Hz): 8 @ 16kHz/512-pt */
     int    dne_lf_end;                           /* D3/D5 LF sum endpoint bin */
     int    nearend_smoother_n;                   /* moving-avg window in hops */
 

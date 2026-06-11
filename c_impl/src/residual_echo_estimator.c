@@ -257,9 +257,14 @@ void ree_estimate(ResidualEchoEstimator *r,
     /* Step 1: update stationary render noise floor. */
     ree_update_render_noise_power(r, render_psd);
 
-    /* push current render to the reverb deque (appendleft). */
+    /* push current render to both history deques unconditionally (appendleft).
+     * E10 fix: delay_render_buf was pushed only inside the nonlinear path, so
+     * linear hops left it stale → wrong EchoGeneratingPower on linear→nonlinear
+     * transitions.  Push at the top so every hop keeps both deques current. */
     ree_appendleft(r->reverb_render_history, N, &r->reverb_buf_count,
                    &r->reverb_buf_head, render_psd);
+    ree_appendleft(r->delay_render_buf, N, &r->delay_buf_count,
+                   &r->delay_buf_head, render_psd);
 
     if (force_nonlinear_path) {
         usable = 0;
@@ -314,8 +319,7 @@ void ree_estimate(ResidualEchoEstimator *r,
                 int pre = r->render_pre_window_size;   /* 1 */
                 int post = r->render_post_window_size; /* 1 */
                 int idx_start, idx_stop, i;
-                ree_appendleft(r->delay_render_buf, N, &r->delay_buf_count,
-                               &r->delay_buf_head, render_psd);
+                /* delay_render_buf already pushed at the top of ree_estimate (E10). */
                 idx_start = delay - pre;
                 if (idx_start < 0) idx_start = 0;
                 idx_stop = delay + post;

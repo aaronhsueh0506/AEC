@@ -128,28 +128,15 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
         }
     }
 
-    /* Neighbour-max smoothing (k=1..N-2), all float32.
-     * avg = 0.5*(tail[k-1]+tail[k+1]) computed from the PRE-update tail values
-     * (numpy slices tail[:-2]/tail[2:] before the in-place maximum assign). */
+    /* Neighbour-max smoothing (k=1..N-2), ascending in-place — AEC3 cc:101-105.
+     * AEC3 runs ascending so tail[k-1] is the ALREADY-RAISED value from
+     * iteration k-1; a strong peak propagates rightward as a >=0.5/bin skirt.
+     * Mirror Python fix: `tail[k] = max(tail[k], 0.5*(tail[k-1]+tail[k+1]))`. */
     if (N >= 3) {
-        /* tail[1:-1] = np.maximum(tail[1:-1], 0.5*(tail[:-2]+tail[2:]))
-         * The RHS reads original tail; the LHS write does not feed forward
-         * because numpy evaluates the whole RHS array first. */
         int M = N - 2;
-        /* Build avg into a scratch from originals, then assign. To match numpy
-         * (RHS fully materialised first) we read neighbours from the original
-         * buffer; since we only write indices 1..N-2 and read 0..N-1, and a
-         * left-to-right in-place write of index k would corrupt the read of
-         * index k+1's left-neighbour (k) for index k+1... so we must snapshot
-         * the left neighbour. */
-        float left_prev = tail[0]; /* original tail[k-1] for k=1 */
         for (k = 1; k <= M; ++k) {
-            float orig_k = tail[k];
-            float right = tail[k + 1];
-            float avg = 0.5f * (left_prev + right);
-            float nv = (avg > orig_k) ? avg : orig_k;
-            tail[k] = nv;
-            left_prev = orig_k; /* original (pre-write) value for next k-1 */
+            float avg = 0.5f * (tail[k - 1] + tail[k + 1]);
+            if (avg > tail[k]) tail[k] = avg;
         }
     }
 

@@ -553,6 +553,7 @@ int aec_create(Aec* a, const AecConfig* cfg) {
         scfg.last_lf_smoothing_band = AEC3B_SG_LAST_LF_SMOOTHING_BAND;
         scfg.last_permanent_lf_smoothing_band = AEC3B_SG_LAST_PERMANENT;
         scfg.lf_smoothing_during_initial_phase = AEC3B_SG_LF_SMOOTHING_INITIAL;
+        scfg.lf_clamp_bin = AEC3B_SG_LF_CLAMP_BIN;
         scfg.dne_lf_end = AEC3B_SG_DNE_LF_END;
         scfg.nearend_smoother_n = AEC3B_SG_NEAREND_SMOOTHER_N;
         scfg.aud_lf_end_bin = AEC3B_SG_AUD_LF_END_BIN;
@@ -977,6 +978,38 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     int rsa_mask_active = 0;
     for (int k = 0; k < K; ++k) if (rsa_mask[k] < 1.0f) { rsa_mask_active = 1; break; }
 
+    /* 8.5 E15: shadow runs BEFORE main so main's H_error refresh reads
+     *     same-hop e2_coarse (mirrors orchestrator.py L1576-1590 E15 fix).
+     *     far_excited hoisted here so step 13 (doubletalk_update_shadow_dt) can use it. */
+    int far_excited = 0;
+    if (a->has_shadow) {
+        a->shadow_frame_count++;
+        double far_mean_pre = mean_sq(a->far_hop, hop);
+        far_excited = (far_mean_pre > 1e-4);
+        int saturation_safe_pre = (a->saturation_level < 0.5);
+        float shadow_mu_pre = (far_excited && saturation_safe_pre) ? 1.0f : 0.1f;
+        if (rsa_mask_active) {
+            float mu_buf_pre[8192];
+            for (int k = 0; k < K; ++k) mu_buf_pre[k] = shadow_mu_pre * rsa_mask[k];
+            pbfdaf_process(&a->shadow_filter, a->near_hop, a->far_hop, mu_buf_pre, 0.0f, a->shadow_out);
+        } else {
+            pbfdaf_process(&a->shadow_filter, a->near_hop, a->far_hop, NULL,
+                           shadow_mu_pre, a->shadow_out);
+        }
+        /* Publish current-hop e2_coarse to main_filter BEFORE main runs. */
+        {
+            float e2coa_pre[8192];
+            for (int k = 0; k < K; ++k)
+                e2coa_pre[k] = cmag2_c(a->shadow_filter.error_spec[k].r,
+                                        a->shadow_filter.error_spec[k].i);
+            a->main_filter.e2_coarse_for_refresh =
+                (float)aec3_post_pairwise_sum_f32(e2coa_pre, (size_t)K);
+            for (int k = 0; k < K; ++k)
+                a->main_filter.e2_coarse_per_bin[k] = e2coa_pre[k];
+            a->main_filter.e2_coarse_per_bin_valid = 1;
+        }
+    }
+
     /* 9. MAIN filter. */
     double main_mu_scalar = a->regime.main_paused ? 0.0 : mu_scalar;
     {
@@ -1013,7 +1046,11 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
                 far_psd[k] = cmag2_c(a->main_filter.base.far_spec[k].r,
                                      a->main_filter.base.far_spec[k].i);
             stationarity_estimator_update_noise_estimator(&a->a3_stat, far_psd);
-            stationarity_estimator_update_stationarity_flags(&a->a3_stat, far_psd, NULL);
+            /* E16: pass avg_reverb from previous hop's aec3_post_compute_x2_reverb —
+             * same state Python reads from _aec3_avg_render_reverb.reverb (one-hop stale,
+             * aec3_post_run fires at step 18, AFTER this stationarity refresh). */
+            stationarity_estimator_update_stationarity_flags(&a->a3_stat, far_psd,
+                                                              a->post.avg_reverb.reverb);
             a->stationarity_active_hops += 1;
         }
         /* latch flag for the NEXT hop (applied at step 8 of hop+1). Do NOT
@@ -1024,24 +1061,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             converged_enough && stationarity_estimator_is_block_stationary(&a->a3_stat);
     }
 
-    /* 11. SHADOW filter. The RSA mask is applied to the shadow mu too
-     *     (filters.py:627-629: mu_scale_arr = full(scalar) × mask). */
-    int far_excited = 0;
-    if (a->has_shadow) {
-        a->shadow_frame_count++;
-        double far_mean = mean_sq(a->far_hop, hop);
-        far_excited = (far_mean > 1e-4);
-        int saturation_safe = (a->saturation_level < 0.5);
-        float shadow_mu = (far_excited && saturation_safe) ? 1.0f : 0.1f;
-        if (rsa_mask_active) {
-            float mu_buf[8192];
-            for (int k = 0; k < K; ++k) mu_buf[k] = shadow_mu * rsa_mask[k];
-            pbfdaf_process(&a->shadow_filter, a->near_hop, a->far_hop, mu_buf, 0.0f, a->shadow_out);
-        } else {
-            pbfdaf_process(&a->shadow_filter, a->near_hop, a->far_hop, NULL,
-                           shadow_mu, a->shadow_out);
-        }
-    }
+    /* 11. SHADOW filter — already ran pre-main in step 8.5 (E15 fix). */
 
     /* 12. e2_coarse + erl publish + poor-coarse rescue. */
     if (a->has_shadow) {
@@ -1273,8 +1293,8 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             in.shadow_present = a->has_shadow;
             in.shadow_error_spec = a->has_shadow ? a->shadow_filter.error_spec : NULL;
             in.last_shadow_output_time = a->has_shadow ? a->shadow_out : NULL;
-            in.s_ref_max = (double)a->main_filter.base.last_s_max_abs;
-            in.s_coa_max = a->has_shadow ? (double)a->shadow_filter.last_s_max_abs : 0.0;
+            in.s_ref_max = (double)a->main_filter.base.last_s_max_abs * 32768.0;
+            in.s_coa_max = a->has_shadow ? (double)a->shadow_filter.last_s_max_abs * 32768.0 : 0.0;
             in.main_error_energy = pbfdkf_get_error_energy(&a->main_filter);
             in.shadow_error_energy = a->has_shadow ? pbfdaf_get_error_energy(&a->shadow_filter) : 0.0;
             in.raw_output = a->raw_output;

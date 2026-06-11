@@ -123,8 +123,15 @@ static int low_noise_render_detect(SuppressionGain *sg, const float *rb,
     x2_sum = f64_pairwise_sum(x2, (size_t)hop);
     x2_max = x2[0];
     for (i = 1; i < hop; ++i) if (x2[i] > x2_max) x2_max = x2[i];
-    low_noise = (sg->low_render_avg_power < c->low_render_threshold)
-                && (x2_max < 3.0 * sg->low_render_avg_power);
+    /* Normalize average_power to per-sample before peak comparison.
+     * AEC3 uses 64-sample blocks; at larger hop sizes, average_power is
+     * hop/64 times larger for the same RMS, making the peak-rejection
+     * 2.5x too loose at hop=160.  Mirror Python: avg_per_sample = avg*(64/hop). */
+    {
+        double avg_per_sample = sg->low_render_avg_power * (64.0 / (double)hop);
+        low_noise = (sg->low_render_avg_power < c->low_render_threshold)
+                    && (x2_max < 3.0 * avg_per_sample);
+    }
     sg->low_render_avg_power = sg->low_render_avg_power * 0.9 + x2_sum * 0.1;
     return low_noise ? 1 : 0;
 }
@@ -386,14 +393,15 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
     }
 }
 
-/* _limit_lf_gains */
-static void limit_lf_gains(float *gain, int n) {
-    if (n >= 3) {
-        /* min(gain[1], gain[2]): Python builtin min, compare in double */
-        double g1 = (double)gain[1], g2 = (double)gain[2];
-        double m = g1;
-        if (g2 < g1) m = g2;
-        gain[0] = gain[1] = (float)m;
+/* _limit_lf_gains — mirrors Python: np.minimum(gain[:lf_clamp_bin], gain[lf_clamp_bin]).
+ * E8 fix: AEC3 native fft=128 uses hardcoded bins 0-2 (≤125 Hz); our fft=512 needs
+ * 9 bins (0-250 Hz).  lf_clamp_bin = hz_to_bin(250 Hz) = 8 at 16 kHz / 512-pt. */
+static void limit_lf_gains(float *gain, int n, int lf_clamp_bin) {
+    int k;
+    if (lf_clamp_bin > 0 && lf_clamp_bin < n) {
+        float anchor = gain[lf_clamp_bin];
+        for (k = 0; k < lf_clamp_bin; ++k)
+            if (gain[k] > anchor) gain[k] = anchor;   /* np.minimum */
     }
 }
 
@@ -469,17 +477,19 @@ const float *suppression_gain_get_gain(
     /* Step 5: GainToNoAudibleEcho */
     gain_to_no_audible_echo(sg, sg->nearend, sg->weighted_residual,
                             comfort_noise, sg->g_raw);
-    /* Step 6: clip into [min, max] (np.clip = min(max(x,lo),hi) f32) */
+    /* Step 6: np.maximum(np.minimum(G_raw, max_gain), min_gain).
+     * E7 fix: order is minimum-first then maximum, not np.clip (min(max(x,lo),hi)).
+     * When min_gain > max_gain (saturated-echo recovery), min_gain wins. */
     for (k = 0; k < n; ++k) {
         float v = sg->g_raw[k];
         float lo = sg->min_gain[k], hi = sg->max_gain[k];
-        if (v < lo) v = lo;
-        if (v > hi) v = hi;
+        if (v > hi) v = hi;   /* minimum first */
+        if (v < lo) v = lo;   /* maximum second */
         sg->gain[k] = v;
     }
 
     /* Step 7: LF + HF limiters */
-    limit_lf_gains(sg->gain, n);
+    limit_lf_gains(sg->gain, n, sg->cfg.lf_clamp_bin);
     hf_lim_applied = (!ne_state_for_gain_rules(sg)) || clock_drift
                      || c->conservative_hf;
     if (hf_lim_applied) limit_hf_gains(sg, sg->gain);

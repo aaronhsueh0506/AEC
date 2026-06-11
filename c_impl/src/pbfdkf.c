@@ -98,12 +98,19 @@ static void pbfdaf_compute_sizes(int hop_size, int* out_hop, int* out_blk,
 static void pbfdaf_fill_windows(PBFDAF* p) {
     int fade_len = p->hop_size / 4;
     memset(p->td_window, 0, (size_t)p->fft_size * sizeof(float));
-    for (int i = 0; i < p->hop_size - fade_len; ++i) p->td_window[i] = 1.0f;
+    /* E1 fix: all causal taps [0:hop] preserved at 1.0.  Prior code placed the
+     * descending fade in [hop-fade_len:hop], suppressing the last 40 causal taps
+     * → dead zone in every partition of the 832-tap IR. */
+    for (int i = 0; i < p->hop_size; ++i) p->td_window[i] = 1.0f;
+    /* Non-causal fade [hop:hop+fade_len]: descending from ~1.0 to 0.0. */
     for (int i = 0; i < fade_len; ++i) {
-        double v = 0.5 * (1.0 - cos(M_PI_AEC * (double)(fade_len - 1 - i) / (double)fade_len));
-        p->td_window[p->hop_size - fade_len + i] = (float)v;
+        int idx = p->hop_size + i;
+        if (idx < p->fft_size) {
+            double v = 0.5 * (1.0 - cos(M_PI_AEC * (double)(fade_len - 1 - i) / (double)fade_len));
+            p->td_window[idx] = (float)v;
+        }
     }
-    /* [hop, fft_size) stays 0. */
+    /* [hop+fade_len, fft_size) stays 0. */
     for (int i = 0; i < p->block_size; ++i) {
         double h = 0.5 * (1.0 - cos(2.0 * M_PI_AEC * (double)i / (double)p->block_size));
         p->sqrt_hann[i] = (float)sqrt(h);
@@ -407,8 +414,8 @@ void pbfdaf_process(PBFDAF* p,
         int any_pos = 0;
         for (int k = 0; k < K; ++k) if (mu_arr[k] > 0.0f) { any_pos = 1; break; }
         if (!any_pos) { p->partition_idx = (p->partition_idx + 1) % N; return; }
+        p->call_counter += 1;  /* E22: increment before saturation gate (mirrors AEC3/PBFDKF) */
         if (p->saturated_capture) { p->partition_idx = (p->partition_idx + 1) % N; return; }
-        p->call_counter += 1;
         if (p->call_counter <= N || p->poor_excitation_counter < N) {
             p->partition_idx = (p->partition_idx + 1) % N; return;
         }
@@ -747,6 +754,10 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
         }
     }
 
+    /* E2 fix: scale mu_aec3 by mu_scale_arr before H_error decay so that masked
+     * bins (RSA narrowband mask + DT scale) do not decay while their W is frozen.
+     * Mirrors AEC3 refined_filter_update_gain.cc:113-119. */
+    for (int k = 0; k < K; ++k) mu_aec3[k] *= mu_scale_arr[k];
     /* H_error decay (active branch only): H_error -= 0.5·mu·X²·H_error. */
     for (int k = 0; k < K; ++k)
         p->H_error_per_bin[k] -= 0.5f * mu_aec3[k] * X2[k] * p->H_error_per_bin[k];

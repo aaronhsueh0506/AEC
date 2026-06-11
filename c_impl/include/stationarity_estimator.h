@@ -84,7 +84,8 @@ void stationarity_estimator_update_noise_estimator(StationarityEstimator *s,
                                                    const float *render_psd);
 
 /* update_stationarity_flags — refresh flags using latest render PSD.
- * average_reverb may be NULL (real pipeline always passes None → zeros). */
+ * average_reverb: previous-hop avg_reverb from aec3_post (Aec3Post.avg_reverb.reverb);
+ * NULL treated as zeros. */
 void stationarity_estimator_update_stationarity_flags(StationarityEstimator *s,
                                                       const float *render_psd,
                                                       const float *average_reverb);
