@@ -161,7 +161,7 @@ class DoubleTalkAnalyzer:
     dt_from_coherence diagnostic is now permanently 0.0.
     """
 
-    SHADOW_FRAME_GATE = 50  # match shadow filter warmup
+    SHADOW_FRAME_GATE = 20  # match shadow filter warmup
     ERL_CEILING_FLOOR = 0.01
     SAFETY_MARGIN = 2.0
     DTE_RISE_OLD, DTE_RISE_NEW = 0.3, 0.7
