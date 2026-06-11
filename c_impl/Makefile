@@ -50,6 +50,12 @@ $(OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c
 lib: dirs $(OBJS)
 	ar rcs $(LIB_TARGET) $(OBJS)
 
+# Build Configuration Flags (pass via EXTRA_CFLAGS)
+#
+# USE_STANDARD_MATH - Use standard math library functions (for debugging/parity check)
+#   Default: fast_math.h approximations for expf/sqrtf in hot paths
+#   Example: make EXTRA_CFLAGS="-DUSE_STANDARD_MATH"
+
 debug: CFLAGS += -g -DAEC_DEBUG
 debug: dirs $(TARGET)
 

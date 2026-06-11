@@ -14,6 +14,7 @@
 
 #include <math.h>
 #include <string.h>
+#include "fast_math.h"
 
 /* numpy-1.26-bit-exact pairwise sum over float64 (same tree shape as the f32
  * version in reverb_frequency_response.c, accumulated in double). */
@@ -304,9 +305,11 @@ static void get_min_gain(SuppressionGain *sg, const float *weighted_residual,
                                    ? c->split_floor_far_active
                                    : c->split_floor_far_silent);
         for (k = 0; k < n; ++k) {
-            if (out[k] < base_floor) out[k] = base_floor;  /* np.maximum f32 */
+            float v = out[k];
+            if (v < base_floor) v = base_floor;  /* np.maximum f32 */
+            if (v > 1.0f) v = 1.0f;
+            out[k] = v;
         }
-        for (k = 0; k < n; ++k) if (out[k] > 1.0f) out[k] = 1.0f;
     }
 }
 
@@ -361,7 +364,7 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
                             / c->soft_blend_softness;
                 if (sig < -50.0f) sig = -50.0f;
                 if (sig > 50.0f) sig = 50.0f;
-                ne_wb = (float)(1.0f / (1.0f + expf(sig)));
+                ne_wb = (float)(1.0f / (1.0f + fast_exp(sig)));
             } else {
                 ne_wb = ne_w;
             }
@@ -503,7 +506,7 @@ const float *suppression_gain_get_gain(
     for (k = 0; k < n; ++k) {
         float v = sg->gain[k];
         if (v < 0.0f) v = 0.0f;
-        sg->gain[k] = sqrtf(v);
+        sg->gain[k] = fast_sqrt(v);
     }
     return sg->gain;
 }

@@ -9,6 +9,7 @@
 
 #include <math.h>
 #include <string.h>
+#include "fast_math.h"
 
 #define PSD_SCALE (32768.0 * 32768.0)   /* int16 max^2 (Python _PSD_SCALE) */
 
@@ -317,10 +318,11 @@ void aec3_post_apply_output(Aec3Post *p,
     if (c->enable_cng) {
         int n_random = nb - 2;
         uint32_t seed = p->cng_seed;
+        static const float inv_psd_scale = 1.0f / (float)PSD_SCALE;  /* 2^-30, exact */
         for (k = 0; k < nb; ++k) {
-            float v = (float)(p->comfort_noise[k] / (float)PSD_SCALE);
+            float v = p->comfort_noise[k] * inv_psd_scale;
             if (v < 0.0f) v = 0.0f;
-            p->nf[k] = sqrtf(v);
+            p->nf[k] = fast_sqrt(v);
         }
         for (k = 0; k < n_random; ++k) {
             uint32_t ix;
@@ -336,7 +338,7 @@ void aec3_post_apply_output(Aec3Post *p,
                 float g2 = gain[bin] * gain[bin];
                 float t = 1.0f - g2;
                 if (t < 0.0f) t = 0.0f;
-                ng = sqrtf(t);
+                ng = fast_sqrt(t);
             }
             p->e_out_spec[bin].r += ng * cn_re;
             p->e_out_spec[bin].i += ng * cn_im;
