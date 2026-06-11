@@ -312,6 +312,12 @@ class AEC:
 
             # FDAF buffering (when internal_hop > external hop)
             if self.config.mode == AecMode.FDAF and self._internal_hop > self._hop_size:
+                if self._internal_hop % self._hop_size != 0:
+                    raise ValueError(
+                        f"FDAF internal_hop ({self._internal_hop}) must be an integer multiple "
+                        f"of hop_size ({self._hop_size}); adjust filter_length so that "
+                        f"next_pow2(2*filter_length)//2 is divisible by hop_size"
+                    )
                 # Buffer large enough for accumulation (internal_hop + one extra external hop)
                 buf_size = self._internal_hop + self._hop_size
                 self._freq_near_queue = np.zeros(buf_size, dtype=np.float32)
@@ -2151,6 +2157,32 @@ class AEC:
                 self._per_bin_mu_scale = np.full(
                     self.filter.n_freqs, mu_min, dtype=np.float32)
                 self._simple_mu_ratio = 0.0
+
+            # C2 fix: _ours_nores path (enable_res=False, return_res_context=False)
+            # skips the AEC3 post block so _erl_estimate and _dt_analyzer never
+            # update — nores filter adapts with stale state vs production
+            # (which always runs with return_res_context=True). Mirror the same
+            # ERL/DT update so the nores filter trajectory matches.
+            if (not self.config.enable_res
+                    and not self.config.return_res_context
+                    and self._freq_near_queue is None):
+                _c2_far_pwr = float(np.mean(far_end ** 2)) + 1e-10
+                _c2_mic_pwr = float(np.mean(near_end ** 2)) + 1e-10
+                _c2_err_pwr = float(np.mean(raw_output ** 2)) + 1e-10
+                if _c2_far_pwr > 1e-4:
+                    _c2_dt_ratio = _c2_err_pwr / _c2_far_pwr
+                    _c2_erl_raw = _c2_mic_pwr / _c2_far_pwr
+                    if _c2_dt_ratio < 2.0 and _c2_erl_raw < 1.5:
+                        _c2_inst_erl = float(np.clip(_c2_erl_raw, 0.001, 1.0))
+                        _c2_alpha = 0.99 if not self._filter_converged else 0.999
+                        self._erl_estimate = (_c2_alpha * self._erl_estimate
+                                               + (1.0 - _c2_alpha) * _c2_inst_erl)
+                self._dt_analyzer.update_energy_dt(
+                    far_active=self._render_activity.is_active,
+                    far_pwr=_c2_far_pwr,
+                    mic_pwr=_c2_mic_pwr,
+                    erl_estimate=self._erl_estimate,
+                )
 
             # Update diagnostics. ResFilter._diag_* fields were only written
             # from process() (dead since R4) → all consumers saw __init__
