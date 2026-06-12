@@ -110,10 +110,8 @@ Estimator + SuppressionGain + CNG/OLA), and the 21-step `aec_process`. Bit-exact
 required matching three numpy-on-arm64 idioms (`np.abs(c64)**2` = SIMD
 scaled-hypot-FMA squared, complex64×complex64 multiply uses FMA, EMA `(1-α)` is a
 double subtraction cast to f32) — `-ffp-contract=off` is mandatory. Per-module
-golden tests (`test/parity_*.c`); end-to-end gate `test/parity_aec_e2e.c`. A
-heap-free **static-memory** pool variant (`aec_init`/`aec_get_mem_size`,
-byte-equal, 422 816 B @ hop=160) lives on `feature/static-memory`. Opt-in
-per-frame CSV trace via `aec_wav --debug-trace <path>` (audio-passive).
+golden tests (`test/parity_*.c`); end-to-end gate `test/parity_aec_e2e.c`.
+Opt-in per-frame CSV trace via `aec_wav --debug-trace <path>` (audio-passive).
 
 ## [3.22.3] — 2026-06-03 — isolated parity/correctness candidates (P0 audit; AECMOS-neutral)
 

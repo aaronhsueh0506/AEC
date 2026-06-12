@@ -15,25 +15,6 @@
 extern "C" {
 #endif
 
-/* ---------------------------------------------------------------------------
- * Static memory support (embedded targets — no heap).
- *
- * Each module exposes both a heap-based API (`_create / _destroy`) and a
- * static API (`_get_mem_size / _init / _destroy`). The static API takes a
- * caller-allocated buffer and places all internal state inline using
- * pointer arithmetic with 16-byte alignment.
- *
- * Pattern (apply to every module):
- *
- *     size_t   bytes = MODULE_get_mem_size(config);
- *     void*    buf   = ... obtained from caller's static pool ...
- *     Module*  m     = MODULE_init(buf, bytes, config);
- *     ...
- *     MODULE_destroy(m);   // no-op for static path; safe for both paths
- *
- * `MODULE_get_mem_size` and `MODULE_init` must walk fields in identical
- * order to keep alignment + bytes consistent.
- * --------------------------------------------------------------------------- */
 #ifndef ALIGN16
 #define ALIGN16(x) (((size_t)(x) + 15u) & ~(size_t)15u)
 #endif
@@ -55,20 +36,11 @@ typedef struct FftHandle FftHandle;
  */
 FftHandle* fft_create(int fft_size);
 
-/**
- * Static-memory companions to fft_create.
- *
- *   bytes = fft_get_mem_size(fft_size);
- *   h     = fft_init(buffer, bytes, fft_size);
- *
- * The buffer must be at least `fft_get_mem_size(fft_size)` bytes and
- * 16-byte aligned. Returns NULL if `mem_size` is too small.
- */
 size_t     fft_get_mem_size(int fft_size);
 FftHandle* fft_init(void* mem, size_t mem_size, int fft_size);
 
 /**
- * Destroy FFT handle. No-op when handle was created via fft_init().
+ * Destroy FFT handle.
  */
 void fft_destroy(FftHandle* handle);
 

@@ -8,11 +8,11 @@
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/include \
- *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/lib/pocketfft \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/fft_pocketfft.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/lib/pocketfft/pocketfft.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/test/parity_fft.c \
+ *       -I<path-to-repo>/c_impl/include \
+ *       -I<path-to-repo>/c_impl/lib/pocketfft \
+ *       <path-to-repo>/c_impl/src/fft_pocketfft.c \
+ *       <path-to-repo>/c_impl/lib/pocketfft/pocketfft.c \
+ *       <path-to-repo>/c_impl/test/parity_fft.c \
  *       -lm -o /tmp/p_fft
  *   python3 .../python/diag/gen_fft_golden.py /tmp/fft_golden.bin
  *   /tmp/p_fft /tmp/fft_golden.bin

@@ -4,10 +4,10 @@
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/include \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/subband_erle.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/aec3_scale.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/test/parity_subband_erle.c \
+ *       -I<path-to-repo>/c_impl/include \
+ *       <path-to-repo>/c_impl/src/subband_erle.c \
+ *       <path-to-repo>/c_impl/src/aec3_scale.c \
+ *       <path-to-repo>/c_impl/test/parity_subband_erle.c \
  *       -lm -o /tmp/p_se
  *   python3 .../python/diag/gen_subband_erle_golden.py /tmp/se_golden.bin
  *   /tmp/p_se /tmp/se_golden.bin

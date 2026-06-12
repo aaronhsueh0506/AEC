@@ -5,10 +5,10 @@
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/include \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/suppression_gain.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/reverb_frequency_response.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/test/parity_suppression_gain.c \
+ *       -I<path-to-repo>/c_impl/include \
+ *       <path-to-repo>/c_impl/src/suppression_gain.c \
+ *       <path-to-repo>/c_impl/src/reverb_frequency_response.c \
+ *       <path-to-repo>/c_impl/test/parity_suppression_gain.c \
  *       -lm -o /tmp/p_sg
  *   python3 .../python/diag/gen_suppression_gain_golden.py /tmp/sg_golden.bin
  *   /tmp/p_sg /tmp/sg_golden.bin

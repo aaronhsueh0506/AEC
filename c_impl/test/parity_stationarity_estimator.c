@@ -5,10 +5,10 @@
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/include \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/stationarity_estimator.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/aec3_scale.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/test/parity_stationarity_estimator.c \
+ *       -I<path-to-repo>/c_impl/include \
+ *       <path-to-repo>/c_impl/src/stationarity_estimator.c \
+ *       <path-to-repo>/c_impl/src/aec3_scale.c \
+ *       <path-to-repo>/c_impl/test/parity_stationarity_estimator.c \
  *       -lm -o /tmp/p_stat
  *   python3 .../python/diag/gen_stationarity_estimator_golden.py /tmp/stat_golden.bin
  *   /tmp/p_stat /tmp/stat_golden.bin

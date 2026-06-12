@@ -17,13 +17,13 @@
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/include \
- *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/lib/pocketfft \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/aec3_post.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/reverb_model.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/fft_pocketfft.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/lib/pocketfft/pocketfft.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/test/parity_aec3_post.c \
+ *       -I<path-to-repo>/c_impl/include \
+ *       -I<path-to-repo>/c_impl/lib/pocketfft \
+ *       <path-to-repo>/c_impl/src/aec3_post.c \
+ *       <path-to-repo>/c_impl/src/reverb_model.c \
+ *       <path-to-repo>/c_impl/src/fft_pocketfft.c \
+ *       <path-to-repo>/c_impl/lib/pocketfft/pocketfft.c \
+ *       <path-to-repo>/c_impl/test/parity_aec3_post.c \
  *       -lm -o /tmp/p_post
  *   python3 .../python/diag/gen_aec3_post_golden.py /tmp/aec3_post_golden.bin
  *   /tmp/p_post /tmp/aec3_post_golden.bin

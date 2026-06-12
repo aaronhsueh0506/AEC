@@ -43,7 +43,7 @@ struct FftHandle {
     int          n_freqs;
     rfft_plan_t  plan;        /* pocketfft rfftp plan (heap-owned)            */
     double*      packed;      /* [fft_size] half-complex scratch buffer       */
-    int          is_static;   /* 1 if placed via fft_init (no free in destroy)*/
+    int          pool_owned;  /* 1 if placed in a caller-owned pool (no free in destroy) */
 };
 
 /* --- construction --------------------------------------------------------- */
@@ -52,9 +52,9 @@ FftHandle* fft_create(int fft_size) {
     if (fft_size <= 0 || (fft_size & (fft_size - 1)) != 0) return NULL;
     FftHandle* h = (FftHandle*)calloc(1, sizeof(FftHandle));
     if (!h) return NULL;
-    h->fft_size  = fft_size;
-    h->n_freqs   = fft_size / 2 + 1;
-    h->is_static = 0;
+    h->fft_size   = fft_size;
+    h->n_freqs    = fft_size / 2 + 1;
+    h->pool_owned = 0;
     h->plan   = make_rfftp_plan((size_t)fft_size);
     h->packed = (double*)calloc((size_t)fft_size, sizeof(double));
     if (!h->plan || !h->packed) {
@@ -66,12 +66,6 @@ FftHandle* fft_create(int fft_size) {
     return h;
 }
 
-/* The pocketfft plan + twiddle tables live on the heap (their size is
- * length-dependent and the upstream allocator is malloc-based). For the
- * static-memory path we place the FftHandle + packed scratch inline and let
- * the plan itself remain heap-allocated; fft_destroy frees the plan in both
- * paths but only frees the inline buffers on the heap path. This matches the
- * fft_wrapper.h contract (static path: caller owns the placed buffer). */
 size_t fft_get_mem_size(int fft_size) {
     if (fft_size <= 0 || (fft_size & (fft_size - 1)) != 0) return 0;
     size_t total = 0;
@@ -89,21 +83,21 @@ FftHandle* fft_init(void* mem, size_t mem_size, int fft_size) {
     ptr += ALIGN16(sizeof(FftHandle));
     memset(h, 0, sizeof(FftHandle));
 
-    h->fft_size  = fft_size;
-    h->n_freqs   = fft_size / 2 + 1;
-    h->is_static = 1;
-    h->packed    = (double*)ptr;
+    h->fft_size   = fft_size;
+    h->n_freqs    = fft_size / 2 + 1;
+    h->pool_owned = 1;
+    h->packed     = (double*)ptr;
     memset(h->packed, 0, (size_t)fft_size * sizeof(double));
 
     h->plan = make_rfftp_plan((size_t)fft_size);
-    if (!h->plan) return NULL;   /* plan is the only heap object on this path */
+    if (!h->plan) return NULL;
     return h;
 }
 
 void fft_destroy(FftHandle* h) {
     if (!h) return;
     if (h->plan) destroy_rfftp_plan(h->plan);
-    if (h->is_static) return;        /* static path: caller owns the buffer */
+    if (h->pool_owned) return;   /* pool path: caller owns the buffer */
     free(h->packed);
     free(h);
 }

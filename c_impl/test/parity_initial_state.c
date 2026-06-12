@@ -6,9 +6,9 @@
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/include \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/initial_state.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/test/parity_initial_state.c \
+ *       -I<path-to-repo>/c_impl/include \
+ *       <path-to-repo>/c_impl/src/initial_state.c \
+ *       <path-to-repo>/c_impl/test/parity_initial_state.c \
  *       -o /tmp/p_istate
  *   python3 .../python/diag/gen_initial_state_golden.py /tmp/initial_state_golden.bin
  *   /tmp/p_istate /tmp/initial_state_golden.bin
