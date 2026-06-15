@@ -39,7 +39,6 @@ typedef struct FilterConvergence {
     int    once_converged;
     int    conv_counter;
     double divergence;
-    double erle_smooth_lin;  /* EMA of ERLE linear (alpha=0.7) for convergence check */
 } FilterConvergence;
 
 void filter_convergence_init(FilterConvergence* c);

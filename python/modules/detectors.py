@@ -83,10 +83,8 @@ class RenderActivityDetector:
 class FilterConvergenceAnalyzer:
     """Owns filter-convergence state machine + divergence-indicator EMA.
 
-    Convergence rule: 10 consecutive far-active frames with smoothed ERLE > 5 dB
-    after warmup is exhausted.  The ERLE is EMA-smoothed (alpha=0.7, TC≈3 frames)
-    before the threshold check so that a single mic-silence frame (near_power→0,
-    noisy measurement) does not reset the counter when the filter is well-converged.
+    Convergence rule: 10 consecutive far-active frames with inst-ERLE > 5 dB
+    after warmup is exhausted.
     Divergence rule: post-convergence EMA of (inst-ERLE_linear < 0.63 ↔ ERLE < -2 dB).
 
     External signals (EPC, delay shift, echo-path change) call mark_diverged()
@@ -95,9 +93,6 @@ class FilterConvergenceAnalyzer:
     """
     CONV_ERLE_DB = 5.0
     CONV_FRAMES = 10
-    # EMA smoothing for the convergence ERLE check.  TC ≈ 3 frames → immune to
-    # 1-2 frame mic-silence artifacts; still responsive to genuine divergence.
-    CONV_ERLE_ALPHA = 0.7
     DIV_ERLE_LIN = 0.63
     DIV_ALPHA = 0.9
     DIV_DECAY = 0.95
@@ -107,20 +102,17 @@ class FilterConvergenceAnalyzer:
         self._once_converged = False
         self._conv_counter = 0
         self._divergence = 0.0
-        self._erle_smooth_lin = 1.0   # smoothed ERLE linear (0 dB = uncoverged init)
 
     def reset(self) -> None:
         self._converged = False
         self._once_converged = False
         self._conv_counter = 0
         self._divergence = 0.0
-        self._erle_smooth_lin = 1.0
 
     def mark_diverged(self) -> None:
         """EPC / delay shift / echo-path change: drop convergence, restart counter."""
         self._converged = False
         self._conv_counter = 0
-        self._erle_smooth_lin = 1.0
 
     def update_divergence(self, near_power: float, raw_error_power: float) -> None:
         """Mid-frame divergence indicator EMA (only meaningful post-convergence)."""
@@ -137,11 +129,8 @@ class FilterConvergenceAnalyzer:
         """End-of-frame convergence detection. Returns True on the transition frame."""
         if self._converged or near_power <= 1e-8 or not warmup_done or not far_active:
             return False
-        inst_erle_lin = near_power / (raw_error_power + 1e-10)
-        self._erle_smooth_lin = (self.CONV_ERLE_ALPHA * self._erle_smooth_lin
-                                 + (1.0 - self.CONV_ERLE_ALPHA) * inst_erle_lin)
-        erle_smooth_db = 10.0 * np.log10(self._erle_smooth_lin + 1e-10)
-        if erle_smooth_db > self.CONV_ERLE_DB:
+        inst_erle_db = 10.0 * np.log10(near_power / (raw_error_power + 1e-10))
+        if inst_erle_db > self.CONV_ERLE_DB:
             self._conv_counter += 1
         else:
             self._conv_counter = 0
