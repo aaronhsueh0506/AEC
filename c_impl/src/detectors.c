@@ -89,8 +89,9 @@ RenderActivityResult render_activity_update(RenderActivity* r,
 
 /* ── FilterConvergenceAnalyzer ───────────────────────────────── */
 
-static const double FC_CONV_ERLE_DB = 5.0;
-static const int    FC_CONV_FRAMES  = 10;
+static const double FC_CONV_ERLE_DB    = 5.0;
+static const int    FC_CONV_FRAMES     = 10;
+static const double FC_CONV_ERLE_ALPHA = 0.7;  /* TC≈3 frames; immune to 1-2 frame mic-silence */
 static const double FC_DIV_ERLE_LIN = 0.63;
 static const double FC_DIV_ALPHA    = 0.9;
 static const double FC_DIV_DECAY    = 0.95;
@@ -100,13 +101,15 @@ void filter_convergence_init(FilterConvergence* c) {
     c->once_converged  = 0;
     c->conv_counter    = 0;
     c->divergence      = 0.0;
+    c->erle_smooth_lin = 1.0;
 }
 void filter_convergence_reset(FilterConvergence* c) {
     filter_convergence_init(c);
 }
 void filter_convergence_mark_diverged(FilterConvergence* c) {
-    c->converged    = 0;
-    c->conv_counter = 0;
+    c->converged       = 0;
+    c->conv_counter    = 0;
+    c->erle_smooth_lin = 1.0;
 }
 void filter_convergence_update_divergence(FilterConvergence* c,
                                              double near_power,
@@ -127,9 +130,12 @@ int filter_convergence_update_convergence(FilterConvergence* c,
     if (c->converged || near_power <= 1e-8 || !warmup_done || !far_active) {
         return 0;
     }
-    double inst_erle_db = 10.0 * log10(near_power / (raw_error_power + 1e-10));
-    if (inst_erle_db > FC_CONV_ERLE_DB) c->conv_counter += 1;
-    else                                c->conv_counter  = 0;
+    double inst_erle_lin = near_power / (raw_error_power + 1e-10);
+    c->erle_smooth_lin   = FC_CONV_ERLE_ALPHA * c->erle_smooth_lin
+                         + (1.0 - FC_CONV_ERLE_ALPHA) * inst_erle_lin;
+    double erle_smooth_db = 10.0 * log10(c->erle_smooth_lin + 1e-10);
+    if (erle_smooth_db > FC_CONV_ERLE_DB) c->conv_counter += 1;
+    else                                   c->conv_counter  = 0;
     if (c->conv_counter >= FC_CONV_FRAMES) {
         c->converged       = 1;
         c->once_converged  = 1;
