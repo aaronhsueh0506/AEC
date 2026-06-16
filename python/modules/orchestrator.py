@@ -32,6 +32,14 @@ from .config import AecConfig
 from .debug_logger import AecDebugLogger
 
 
+# Delay (in raw 16k samples) small enough to be absorbed inside the filter
+# taps without a ring-buffer realignment. Used symmetrically by the delay
+# estimator's Path A (first acquisition — skip the destructive reset) and
+# Path B (drift — ignore sub-threshold shifts). 32 samples = 2.0 ms @ 16 kHz.
+# If this boundary is ever re-tuned, both paths move together.
+_DELAY_INTAP_ABSORB_SAMPLES = 32
+
+
 class AEC:
     """
     Acoustic Echo Cancellation
@@ -309,6 +317,12 @@ class AEC:
                 _hef_ovr = float(getattr(self.config, "h_error_floor_override", 0.0))
                 if _hef_ovr > 0.0:
                     self.filter._h_error_floor = np.float32(_hef_ovr)
+                # Valin/Speex-MDF leak-adaptive initial gain (default OFF =
+                # byte-equal). Drives the InitialState W-update with a
+                # leak-estimate step for fast cold-start convergence.
+                self.filter._leak_adaptive_initial_gain = bool(
+                    getattr(self.config, "leak_adaptive_initial_gain", False)
+                )
 
             # FDAF buffering (when internal_hop > external hop)
             if self.config.mode == AecMode.FDAF and self._internal_hop > self._hop_size:
@@ -1354,30 +1368,45 @@ class AEC:
                         and self._current_delay < 0
                         and self.delay_est.is_solid
                         and not _already_cancelling):
-                    self._current_delay = new_delay
-                    # Reset filter taps + ALL filter-output-derived state
-                    # (main_err_smooth / DTD / EPC / ERLE / mu / RES). The
-                    # first ~300 ms was learned against a misaligned ref,
-                    # so its derived state is poisoned the same way as the
-                    # plateau case. Use the shared helper to keep behavior
-                    # consistent across recovery paths.
-                    self._reset_filter_derived_state(reason='delay_first',
-                                                     preserve_render_ema=True)
-                    self._maybe_mark_diverged('delay_first')
-                    # Full delay-change chain (delay_first): H_error
-                    # reset + counter reset on refined and shadow,
-                    # AecState._full_reset via _aec3_pending_delay_change.
-                    if (self.filter is not None
-                            and hasattr(self.filter, 'handle_echo_path_change')):
-                        self.filter.handle_echo_path_change(
-                            delay_change=True, gain_change=False, zero_filter=False)
-                    if (self.shadow_filter is not None
-                            and hasattr(self.shadow_filter,
-                                        'handle_echo_path_change')):
-                        self.shadow_filter.handle_echo_path_change(
-                            delay_change=True, gain_change=False, zero_filter=False)
-                    from .delay.delay_types import DelayAdjustment as _DA
-                    self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
+                    if abs(new_delay) <= _DELAY_INTAP_ABSORB_SAMPLES:
+                        # In-tap-absorbable first acquisition. A delay this
+                        # small (≤ 2.0 ms @ 16k — the same in-tap boundary
+                        # Path B uses below) is already modelled inside the
+                        # filter taps, and the ring buffer applies NO shift
+                        # while _current_delay == 0 (see the `> 0` guard in
+                        # the ring-read below). Recording 0 (not new_delay):
+                        #   • leaves the far signal byte-identical → the
+                        #     already-converged taps stay valid (a reset here
+                        #     wipes ‖W‖² for zero alignment benefit), and
+                        #   • arms Path B (_current_delay >= 0) for genuine
+                        #     future shifts.
+                        # So skip the whole destructive delay_first chain.
+                        self._current_delay = 0
+                    else:
+                        self._current_delay = new_delay
+                        # Reset filter taps + ALL filter-output-derived state
+                        # (main_err_smooth / DTD / EPC / ERLE / mu / RES). The
+                        # first ~300 ms was learned against a misaligned ref,
+                        # so its derived state is poisoned the same way as the
+                        # plateau case. Use the shared helper to keep behavior
+                        # consistent across recovery paths.
+                        self._reset_filter_derived_state(reason='delay_first',
+                                                         preserve_render_ema=True)
+                        self._maybe_mark_diverged('delay_first')
+                        # Full delay-change chain (delay_first): H_error
+                        # reset + counter reset on refined and shadow,
+                        # AecState._full_reset via _aec3_pending_delay_change.
+                        if (self.filter is not None
+                                and hasattr(self.filter, 'handle_echo_path_change')):
+                            self.filter.handle_echo_path_change(
+                                delay_change=True, gain_change=False, zero_filter=False)
+                        if (self.shadow_filter is not None
+                                and hasattr(self.shadow_filter,
+                                            'handle_echo_path_change')):
+                            self.shadow_filter.handle_echo_path_change(
+                                delay_change=True, gain_change=False, zero_filter=False)
+                        from .delay.delay_types import DelayAdjustment as _DA
+                        self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
 
                 # Age out _pending_delay so a stale pending value cannot
                 # pair with a later rogue estimate hours after it was set.
@@ -1397,7 +1426,7 @@ class AEC:
                 if (_delay_eligible
                         and self._current_delay >= 0
                         and self.delay_est.confidence >= 0.5
-                        and abs(new_delay - self._current_delay) > 32):
+                        and abs(new_delay - self._current_delay) > _DELAY_INTAP_ABSORB_SAMPLES):
                     if (hasattr(self, '_pending_delay')
                             and abs(new_delay - self._pending_delay) < 16):
                         self._current_delay = new_delay

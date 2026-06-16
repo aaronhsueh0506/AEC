@@ -535,6 +535,36 @@ class PBFDKF(PBFDAF):
         # now stays empty (kept for the diag's getattr contract).
         self._p53_innovation_trace = []
 
+        # ── Valin/Speex-MDF leak-adaptive initial gain (default OFF) ──────
+        # Optional per-bin learning rate for the InitialState convergence
+        # window. leak_estimate = Pey/Pyy (closed-loop misalignment via the
+        # spectral-flattened |E|²·|Y|² cross-correlation) drives a per-bin
+        # step that is large while misaligned (fast) and small once aligned
+        # (stable) — the mechanism speexdsp uses to converge ~4× faster than
+        # our Kalman gain from cold. Ported from libspeexdsp mdf.c
+        # speex_echo_cancellation() (float path). All PSD state is held at
+        # int16² scale (×PSD_SCALE) so Speex's absolute regularisers (+1, +10,
+        # .0001·Sxx, the Sey² RER floor) keep the magnitude they were tuned for
+        # on int16 PCM; the per-bin step is bridged back to our float-spectra W
+        # update by ×PSD_SCALE. Enabled by the orchestrator from
+        # AecConfig.leak_adaptive_initial_gain; when False none of this state
+        # is touched (byte-equal). float64 internals — int16² PSD products
+        # (See·Syy ~ 1e20) overflow float32 precision.
+        self._leak_adaptive_initial_gain: bool = False
+        self._valin_Eh = np.zeros(self.n_freqs, dtype=np.float64)
+        self._valin_Yh = np.zeros(self.n_freqs, dtype=np.float64)
+        self._valin_Pey: float = 0.0
+        self._valin_Pyy: float = 0.0
+        self._valin_adapted: bool = False
+        self._valin_sum_adapt: float = 0.0
+        self._last_leak_estimate: float = 0.0   # diag
+        # Per-partition adaptation weighting (mdf.c st->prop). Geometric decay
+        # at init concentrates early adaptation on the near-delay partitions
+        # (Σprop ≈ 0.8, so the total per-hop step across all partitions is
+        # normalised, not n_partitions× over-applied); re-derived from the
+        # per-partition filter energy once adapted (mdf_adjust_prop).
+        self._valin_prop = self._valin_prop_init()
+
     def handle_echo_path_change(self, delay_change: bool = True,
                                  gain_change: bool = False,
                                  zero_filter: bool = False) -> None:
@@ -568,6 +598,15 @@ class PBFDKF(PBFDAF):
         self.R.fill(1e-2)
         self._error_psd.fill(1e-2)
         self.Q[:] = self.Q_high
+        # Valin leak-adaptive state (no-op when the gain mode is OFF — the
+        # arrays are never read on the byte-equal Kalman path).
+        self._valin_Eh.fill(0.0)
+        self._valin_Yh.fill(0.0)
+        self._valin_Pey = 0.0
+        self._valin_Pyy = 0.0
+        self._valin_adapted = False
+        self._valin_sum_adapt = 0.0
+        self._valin_prop = self._valin_prop_init()
         # B1 fix: unconditional cleanup of dynamic P-override attrs.
         # Using try/except is safer than hasattr+delattr: if reset() is called
         # mid-countdown the _frames attr exists and is deleted; if called when
@@ -647,6 +686,130 @@ class PBFDKF(PBFDAF):
         self._update_weights_aec3(curr_p, mu_scale_arr, error_psd,
                                   error_override=error_override)
 
+    def _valin_prop_init(self) -> np.ndarray:
+        """Geometric-decay per-partition adaptation weights (mdf.c init).
+
+        prop[0]=.7, prop[i]=prop[i-1]·exp(-2.4/M), then normalised to Σ=0.8.
+        Front-loads adaptation onto the early (near-delay) partitions before
+        the energy-based mdf_adjust_prop takes over post-adaptation.
+        """
+        M = self.n_partitions
+        decay = float(np.exp(-2.4 / M))
+        prop = np.empty(M, dtype=np.float64)
+        prop[0] = 0.7
+        for i in range(1, M):
+            prop[i] = prop[i - 1] * decay
+        prop *= 0.8 / prop.sum()
+        return prop
+
+    def _valin_power1(self, curr_p: int) -> np.ndarray:
+        """Valin/Speex-MDF leak-estimate per-bin step (float-path port of
+        libspeexdsp mdf.c speex_echo_cancellation()).
+
+        Returns a per-bin step array in the SAME units as the Kalman
+        ``mu_aec3`` (1/float-power), ready to drop into the W-update loop in
+        place of ``mu_aec3``. Updates the per-hop leak state (Eh/Yh history,
+        Pey/Pyy EMA, adapted flag, sum_adapt) as a side effect — called only
+        on active-update hops while the gain mode is ON.
+
+        All power spectra are lifted to int16² scale (×PSD_SCALE) so Speex's
+        absolute regularisers keep the magnitude they were tuned for on int16
+        PCM. The returned step is bridged back to our float-spectra W update by
+        the same ×PSD_SCALE factor: power_1 ~ 1/int16² and conj(X_f)·E_f ~
+        float² = int16²/PSD_SCALE, so the W increment needs ×PSD_SCALE to match
+        Speex's scale-invariant update (conj(X_i)·E_i = PSD_SCALE·conj(X_f)·E_f).
+        """
+        from . import aec3_scale as _aec3_scale
+        S = np.float64(_aec3_scale.PSD_SCALE)            # 32768²
+        # Per-bin power spectra at int16² scale (Speex Rf / Yf / Xf).
+        Rf = (np.abs(self.error_spec).astype(np.float64) ** 2) * S
+        Yf = (np.abs(self.echo_spec).astype(np.float64) ** 2) * S
+        Xf = (np.abs(self.X_buf[curr_p]).astype(np.float64) ** 2) * S
+        power_v = self.power.astype(np.float64) * S       # smoothed far, int16²
+
+        # Speex smoothing constants — its frame_size is our hop.
+        fs = float(self.hop_size); sr = 16000.0
+        spec_avg = fs / sr                                # frame_size/sr
+        beta0 = 2.0 * fs / sr
+        beta_max = 0.5 * fs / sr
+        MIN_LEAK = 0.005
+
+        # leak estimate: spectral-flattened |E|²·|Y|² cross-correlation
+        # (mdf.c: Eh/Yh subtract running mean, accumulate Pey/Pyy, then EMA).
+        Eh_c = Rf - self._valin_Eh
+        Yh_c = Yf - self._valin_Yh
+        Pey_raw = float(np.sum(Eh_c * Yh_c))
+        Pyy_raw = float(np.sum(Yh_c * Yh_c))
+        self._valin_Eh = (1.0 - spec_avg) * self._valin_Eh + spec_avg * Rf
+        self._valin_Yh = (1.0 - spec_avg) * self._valin_Yh + spec_avg * Yf
+        Pyy_raw = np.sqrt(Pyy_raw) + 1e-30
+        Pey_raw = Pey_raw / Pyy_raw
+
+        See = float(np.sum(Rf)); Syy = float(np.sum(Yf)); Sxx = float(np.sum(Xf))
+        # Sey = Σ Re(E·conj(Y)) (same int16²/half-spectrum convention as
+        # See/Syy → the Sey²/(See·Syy) RER floor stays a dimensionless ratio).
+        Sey = float(np.sum(
+            self.error_spec.real.astype(np.float64) * self.echo_spec.real.astype(np.float64)
+            + self.error_spec.imag.astype(np.float64) * self.echo_spec.imag.astype(np.float64)
+        )) * S
+
+        alpha = min(beta0 * Syy, beta_max * See) / (See + 1e-30)
+        self._valin_Pey = (1.0 - alpha) * self._valin_Pey + alpha * Pey_raw
+        self._valin_Pyy = (1.0 - alpha) * self._valin_Pyy + alpha * Pyy_raw
+        if self._valin_Pyy < 1.0:
+            self._valin_Pyy = 1.0
+        if self._valin_Pey < MIN_LEAK * self._valin_Pyy:
+            self._valin_Pey = MIN_LEAK * self._valin_Pyy
+        if self._valin_Pey > self._valin_Pyy:
+            self._valin_Pey = self._valin_Pyy
+        leak = self._valin_Pey / self._valin_Pyy          # ∈ [MIN_LEAK, 1]
+        self._last_leak_estimate = float(leak)
+
+        # RER (residual-to-error ratio), clamped [Sey²/(1+See·Syy), 0.5].
+        RER = (0.0001 * Sxx + 3.0 * leak * Syy) / (See + 1e-30)
+        rer_floor = (Sey * Sey) / (1.0 + See * Syy)
+        if RER < rer_floor:
+            RER = rer_floor
+        if RER > 0.5:
+            RER = 0.5
+
+        # adapted flag — Speex flips on once enough not-adapted frames have
+        # accumulated (sum_adapt > M) AND the leak estimate exceeds .03.
+        if (not self._valin_adapted
+                and self._valin_sum_adapt > float(self.n_partitions)
+                and leak > 0.03):
+            self._valin_adapted = True
+
+        # mdf_adjust_prop: once adapted, re-derive the per-partition weights
+        # from each partition's filter energy (√Σ|W_p|²) with a 0.1·max floor
+        # so non-dominant partitions keep adapting, normalised to Σ≈0.99.
+        if self._valin_adapted:
+            e_part = np.sum(np.abs(self.W).astype(np.float64) ** 2, axis=1)
+            prop = np.sqrt(e_part + 1e-30)
+            max_sum = max(float(prop.max()), 1e-30)
+            prop = prop + 0.1 * max_sum
+            self._valin_prop = 0.99 * prop / prop.sum()
+
+        if self._valin_adapted:
+            # Leak-optimal per-bin step (mdf.c adapted branch).
+            r = leak * Yf
+            e = Rf + 1.0
+            r = np.minimum(r, 0.5 * e)
+            r = 0.7 * r + 0.3 * (RER * e)
+            power_1 = r / (e * (power_v + 10.0))
+        else:
+            # Bootstrap: normalised step with a far-energy-gated adapt_rate
+            # (mdf.c not-adapted branch). N=fft_size; gate = N·1000/64.
+            adapt_rate = 0.0
+            if Sxx > self.fft_size * 1000.0 / 64.0:
+                t = min(0.25 * Sxx, 0.25 * See)
+                adapt_rate = t / (See + 1e-30)
+            power_1 = adapt_rate / (power_v + 10.0)
+            self._valin_sum_adapt += adapt_rate
+
+        # Bridge int16² power_1 → float-spectra W-update step (×PSD_SCALE).
+        return (power_1 * S).astype(np.float32)
+
     def _update_weights_aec3(self, curr_p: int, mu_scale_arr: np.ndarray,
                               error_psd: np.ndarray,
                               error_override: Optional[np.ndarray] = None) -> None:
@@ -704,7 +867,22 @@ class PBFDKF(PBFDAF):
         _noise_gate = np.float32(_aec3_scale.FILTER_NOISE_GATE_POWER_FLOAT)
         mu_aec3 = np.where(X2 >= _noise_gate, mu_aec3, np.float32(0.0))
 
-        # W update — per partition, use the per-bin mu × conj(X[p]).
+        # Leak-adaptive initial gain (default OFF). During the InitialState
+        # window, drive the W accumulation with the Valin/Speex-MDF
+        # leak-estimate step instead of the Kalman mu. The H_error decay +
+        # refresh below stay on the mu_aec3 path, so H_error is kept warm and
+        # consistent for a smooth hand-back to the co-tuned Kalman gain once
+        # InitialState ends. When OFF (or post-initial), _w_step IS mu_aec3 →
+        # byte-equal Kalman path.
+        if self._leak_adaptive_initial_gain and self._initial_state_active:
+            _w_step = self._valin_power1(curr_p)
+            _w_step = np.where(X2 >= _noise_gate, _w_step, np.float32(0.0))
+            _prop = self._valin_prop            # per-partition weighting (Valin)
+        else:
+            _w_step = mu_aec3
+            _prop = None
+
+        # W update — per partition, use the per-bin step × conj(X[p]).
         # Direction is per-partition irrespective of the X² source flag
         # (matches AEC3: gain is computed once on summed X², then applied
         # to each partition with its own conj(X)).
@@ -716,7 +894,9 @@ class PBFDKF(PBFDAF):
         for p in range(self.n_partitions):
             p_idx = (curr_p - p) % self.n_partitions
             X = self.X_buf[p_idx]
-            K = mu_aec3 * np.conj(X)             # per-bin AEC3 K
+            K = _w_step * np.conj(X)             # per-bin step (Kalman or Valin)
+            if _prop is not None:               # Valin per-partition weighting
+                K = K * np.float32(_prop[p])
             K_scaled = K * mu_scale_arr          # apply DT scale
             self.W[p] += K_scaled * _err_grad
             # Time-domain constraint (raised cosine fade).

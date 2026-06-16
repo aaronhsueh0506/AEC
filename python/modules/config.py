@@ -253,6 +253,18 @@ class AecConfig:
     kalman_q_low: float = 1e-6
     warmup_frames: int = 80
 
+    # ── Leak-adaptive initial gain (Valin/Speex-MDF, default OFF) ────────
+    # During the AEC3 InitialState window (first ~2.5 s of active render),
+    # drive the main PBFDKF W-update with a Valin/Speex-MDF leak-estimate
+    # per-bin step (leak = Pey/Pyy closed-loop misalignment) instead of the
+    # Kalman H_error gain. speexdsp converges ~4× faster from cold on the same
+    # block rate (15.9 dB vs our ~5 dB early block-ERLE on aec_record). The
+    # Kalman H_error decay + leakage refresh keep running every hop, so
+    # steady state (post-initial) hands back to the co-tuned Kalman gain
+    # unchanged — the DT/NE Pareto wall is untouched. Default OFF = byte-equal
+    # (Valin state never touched; W-update path identical to the Kalman gain).
+    leak_adaptive_initial_gain: bool = False
+
     # ── Echo-path-change detection (requires shadow) ────────────────────
     epc_delta_threshold: float = 0.3
     epc_total_rise: float = 1.5
