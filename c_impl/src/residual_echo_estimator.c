@@ -39,6 +39,7 @@ void ree_init(ResidualEchoEstimator *r,
               double reverb_decay, double reverb_mild_decay_scale,
               int reverb_enabled, double reverb_tail_strength,
               int use_aec3_residual_noise_gate,
+              int use_stationarity_properties,
               int use_aec3_echo_gen_window,
               int nl_r2_enabled, double nl_r2_alpha, double nl_norm_power,
               double residual_noise_gate_power,
@@ -65,6 +66,7 @@ void ree_init(ResidualEchoEstimator *r,
     r->reverb_enabled = reverb_enabled ? 1 : 0;
     r->reverb_tail_strength = reverb_tail_strength;
     r->use_aec3_residual_noise_gate = use_aec3_residual_noise_gate ? 1 : 0;
+    r->use_stationarity_properties = use_stationarity_properties ? 1 : 0;
     r->use_aec3_echo_gen_window = use_aec3_echo_gen_window ? 1 : 0;
     r->nl_r2_enabled = nl_r2_enabled ? 1 : 0;
     r->nl_r2_alpha = nl_r2_alpha;
@@ -374,7 +376,13 @@ void ree_estimate(ResidualEchoEstimator *r,
                     }
                 }
             }
-            if (!transparent_mode) {
+            /* AEC3 cc:121-129 noise gate — SKIPPED when
+             * use_stationarity_properties=True (matches Python
+             * `if not self._use_stationarity_properties:`). Production sets
+             * this True, so the gate does not run; the earlier `transparent_mode`
+             * guard here was a port bug (transparent_mode is always False on
+             * this path, so the gate fired and collapsed x2 to 0). */
+            if (!r->use_stationarity_properties) {
                 /* noise gate (cc:121-129). */
                 float ng = (float)(r->use_aec3_residual_noise_gate
                                    ? r->residual_noise_gate_power

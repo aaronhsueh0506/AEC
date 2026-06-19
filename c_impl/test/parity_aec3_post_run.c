@@ -63,15 +63,15 @@ int main(int argc, char **argv) {
     float *synth_window, *sqrt2_lut;
     int st_i[10];
     double st_d[4];
-    int ree_i[10];
+    int ree_i[11];
     double ree_d[13];
-    double sg_d4[4];
+    double sg_d4[5];
     float sg_ratchet[2];
     int sg_blend_i[2];
     float sg_blend_f[2];
     int sg_bands[11];
     double sg_aud[6];
-    int sg_hf[3];
+    int sg_hf[4];
     double sg_dne_d[3];
     int sg_dne_i[3];
     int n_hops, hi;
@@ -94,10 +94,10 @@ int main(int argc, char **argv) {
 
     if (!rd(f, st_i, sizeof(int) * 10)) { fprintf(stderr, "st_i\n"); return 2; }
     if (!rd(f, st_d, sizeof(double) * 4)) { fprintf(stderr, "st_d\n"); return 2; }
-    if (!rd(f, ree_i, sizeof(int) * 10)) { fprintf(stderr, "ree_i\n"); return 2; }
+    if (!rd(f, ree_i, sizeof(int) * 11)) { fprintf(stderr, "ree_i\n"); return 2; }
     if (!rd(f, ree_d, sizeof(double) * 13)) { fprintf(stderr, "ree_d\n"); return 2; }
 
-    if (!rd(f, sg_d4, sizeof(double) * 4)) { fprintf(stderr, "sg_d4\n"); return 2; }
+    if (!rd(f, sg_d4, sizeof(double) * 5)) { fprintf(stderr, "sg_d4\n"); return 2; }
     if (!rd(f, sg_ratchet, sizeof(sg_ratchet))) { fprintf(stderr, "sg_r\n"); return 2; }
     if (!rd(f, sg_blend_i, sizeof(sg_blend_i))) { fprintf(stderr, "sg_bi\n"); return 2; }
     if (!rd(f, sg_blend_f, sizeof(sg_blend_f))) { fprintf(stderr, "sg_bf\n"); return 2; }
@@ -215,7 +215,7 @@ int main(int argc, char **argv) {
     ResidualEchoEstimator ree;
     ree_init(&ree, n_bins, ree_hop, &em, ree_d[4], ree_d[5], ree_i[2],
              ree_d[6], ree_d[7], ree_i[3], ree_d[8],
-             ree_i[4], ree_i[5], ree_i[6], ree_d[9], ree_d[10],
+             ree_i[4], ree_i[10], ree_i[5], ree_i[6], ree_d[9], ree_d[10],
              ree_d[11], ree_i[7], ree_i[8], ree_i[9], ree_d[12],
              x2_nf, x2_nf_ctr, rm_st, rt_st, rh_st, drd_st, rrd_st,
              ld, lr, ree_scratch);
@@ -245,6 +245,9 @@ int main(int argc, char **argv) {
     scfg.hf_lgb = sg_hf[0];
     scfg.hf_biq = sg_hf[1];
     scfg.conservative_hf = sg_hf[2];
+    scfg.lf_clamp_bin = sg_hf[3];   /* INFRA GAP fix: memset left this 0 →
+                                     * LF gain clamp disabled → bin 6 (and 0-7)
+                                     * unclamped → out divergence from hop 82. */
     scfg.max_inc_normal = sg_ratchet[0];
     scfg.max_inc_nearend = sg_ratchet[0];
     scfg.max_dec_lf_normal = sg_ratchet[1];
@@ -255,6 +258,9 @@ int main(int argc, char **argv) {
     scfg.split_floor_far_active = sg_d4[0];
     scfg.split_floor_far_silent = sg_d4[1];
     scfg.split_floor_latch_power = sg_d4[2];
+    scfg.split_floor_dt = sg_d4[4];   /* INFRA GAP fix: memset left this 0 →
+                                       * DT-protect floor wrong when the per-hop
+                                       * dt_protect_active flag fires (~hop 130). */
     scfg.soft_blend_enabled = sg_blend_i[0];
     scfg.soft_blend_per_bin = sg_blend_i[1];
     scfg.soft_blend_enr_thr = sg_blend_f[0];
@@ -352,11 +358,16 @@ int main(int argc, char **argv) {
         int part_i[3]; int sh_present, lso_present, dly_i[2], pend_i[3];
         double sd4[4], sat_d;
         int tdf_present, tdf_len;
-        int stat_fired, e_usable, ree_reset_before;
+        int stat_fired, e_usable, ree_reset_before, dt_protect_active;
         Aec3PostRunIn in;
 
         if (!rd(f, &ree_reset_before, 4)) { fprintf(stderr, "rrb\n"); return 2; }
         if (ree_reset_before) ree_reset(&ree);
+        /* Per-hop dt_protect_active: the production caller (aec.c) sets this on
+         * the SG before aec3_post_run from dt_aware_res_floor_enabled &
+         * ne_recent_frames (upstream of _aec3_post). Replay the captured value. */
+        if (!rd(f, &dt_protect_active, 4)) { fprintf(stderr, "dtp\n"); return 2; }
+        sg.dt_protect_active = dt_protect_active;
         rd_c64(f, near_spec, n_bins);
         rd_c64(f, far_spec, n_bins);
         rd_c64(f, echo_spec, n_bins);
@@ -391,7 +402,13 @@ int main(int argc, char **argv) {
             for (k = 0; k < n_bins; ++k)
                 far_psd_st[k] = cmag2(far_spec[k].r, far_spec[k].i);
             stationarity_estimator_update_noise_estimator(&stat, far_psd_st);
-            stationarity_estimator_update_stationarity_flags(&stat, far_psd_st, NULL);
+            /* Python passes average_reverb=self._aec3_avg_render_reverb.reverb,
+             * which is the avg-render-reverb state left by the PREVIOUS hop's
+             * aec3_post_run (== post.avg_reverb.reverb here). Feeding NULL
+             * desyncs the stationarity band mask → R² zeroing → out divergence
+             * once the stationarity path engages (~hop 82). */
+            stationarity_estimator_update_stationarity_flags(
+                &stat, far_psd_st, post.avg_reverb.reverb);
             stat_updates++;
         }
 

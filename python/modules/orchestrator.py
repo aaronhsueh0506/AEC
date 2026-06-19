@@ -962,6 +962,8 @@ class AEC:
                 getattr(cfg, "min_gain_floor_far_active_db", -22.0)),
             split_floor_far_silent_db=float(
                 getattr(cfg, "min_gain_floor_far_silent_db", -12.0)),
+            split_floor_dt_db=float(
+                getattr(cfg, "min_gain_floor_dt_db", -20.0)),
             split_floor_latch_power=float(
                 getattr(cfg, "min_gain_far_latch_power", 1.0e6)),
         )
@@ -1307,6 +1309,32 @@ class AEC:
         # FilteringQualityAnalyzer.
         self._epc_reset_fired_this_frame = False
 
+        # Held "near-end seen recently" gate for DT-aware soft recovery.
+        # Reads the previous frame's DT indicators (attributes), holds for a
+        # window so the soft path covers the recovery tail that overfits
+        # near-end. Pure far-end single-talk never raises the indicator, so
+        # its recoveries stay aggressive (FS echo preserved).
+        # Use dt_from_energy ONLY: it is genuinely ~0 in far-end single-talk
+        # (mic ≈ echo ⇒ mic_pwr − far·ERL ≈ 0), whereas dt_from_shadow
+        # false-fires on FS echo-path changes and would soften FS recoveries.
+        # Require the indicator to stay above threshold for `sustain` frames
+        # before arming: real near-end speech sustains; FS energy transients
+        # are 1-2 frames and must not arm the soft path.
+        _ne_thr = float(getattr(self.config, 'ne_recent_threshold', 0.3))
+        _ne_hold = int(getattr(self.config, 'ne_recent_hold', 150))
+        _ne_sustain = int(getattr(self.config, 'ne_recent_sustain', 3))
+        _ne_ind = float(getattr(self, '_dt_from_energy', 0.0))
+        if _ne_ind > _ne_thr:
+            self._ne_above = getattr(self, '_ne_above', 0) + 1
+        else:
+            self._ne_above = 0
+        if self._ne_above >= _ne_sustain:
+            self._ne_recent_frames = _ne_hold
+        elif getattr(self, '_ne_recent_frames', 0) > 0:
+            self._ne_recent_frames -= 1
+        else:
+            self._ne_recent_frames = 0
+
         # High-pass filter: remove DC + low-freq noise (mic path only)
         if self._hp_mic is not None:
             near_end = self._hp_mic.process(near_end.copy())
@@ -1355,29 +1383,47 @@ class AEC:
                         and self.delay_est.is_solid
                         and not _already_cancelling):
                     self._current_delay = new_delay
-                    # Reset filter taps + ALL filter-output-derived state
-                    # (main_err_smooth / DTD / EPC / ERLE / mu / RES). The
-                    # first ~300 ms was learned against a misaligned ref,
-                    # so its derived state is poisoned the same way as the
-                    # plateau case. Use the shared helper to keep behavior
-                    # consistent across recovery paths.
-                    self._reset_filter_derived_state(reason='delay_first',
-                                                     preserve_render_ema=True)
-                    self._maybe_mark_diverged('delay_first')
-                    # Full delay-change chain (delay_first): H_error
-                    # reset + counter reset on refined and shadow,
-                    # AecState._full_reset via _aec3_pending_delay_change.
-                    if (self.filter is not None
-                            and hasattr(self.filter, 'handle_echo_path_change')):
-                        self.filter.handle_echo_path_change(
-                            delay_change=True, gain_change=False, zero_filter=False)
-                    if (self.shadow_filter is not None
-                            and hasattr(self.shadow_filter,
-                                        'handle_echo_path_change')):
-                        self.shadow_filter.handle_echo_path_change(
-                            delay_change=True, gain_change=False, zero_filter=False)
-                    from .delay.delay_types import DelayAdjustment as _DA
-                    self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
+                    if self.config.dt_aware_recovery_soft and self._ne_recent_frames > 0:
+                        # Experimental soft acquisition: apply the alignment
+                        # (ring offset above) + reset filter excitation counters
+                        # only; keep the filter taps + convergence and let it
+                        # re-adapt at normal step size. No wipe, no mark_diverged,
+                        # no AecState full reset. Avoids the aggressive-recovery
+                        # tail overfitting near-end that arrives after this
+                        # (far-only) acquisition.
+                        if (self.filter is not None
+                                and hasattr(self.filter, 'handle_echo_path_change')):
+                            self.filter.handle_echo_path_change(
+                                delay_change=True, gain_change=False, zero_filter=False)
+                        if (self.shadow_filter is not None
+                                and hasattr(self.shadow_filter,
+                                            'handle_echo_path_change')):
+                            self.shadow_filter.handle_echo_path_change(
+                                delay_change=True, gain_change=False, zero_filter=False)
+                    else:
+                        # Reset filter taps + ALL filter-output-derived state
+                        # (main_err_smooth / DTD / EPC / ERLE / mu / RES). The
+                        # first ~300 ms was learned against a misaligned ref,
+                        # so its derived state is poisoned the same way as the
+                        # plateau case. Use the shared helper to keep behavior
+                        # consistent across recovery paths.
+                        self._reset_filter_derived_state(reason='delay_first',
+                                                         preserve_render_ema=True)
+                        self._maybe_mark_diverged('delay_first')
+                        # Full delay-change chain (delay_first): H_error
+                        # reset + counter reset on refined and shadow,
+                        # AecState._full_reset via _aec3_pending_delay_change.
+                        if (self.filter is not None
+                                and hasattr(self.filter, 'handle_echo_path_change')):
+                            self.filter.handle_echo_path_change(
+                                delay_change=True, gain_change=False, zero_filter=False)
+                        if (self.shadow_filter is not None
+                                and hasattr(self.shadow_filter,
+                                            'handle_echo_path_change')):
+                            self.shadow_filter.handle_echo_path_change(
+                                delay_change=True, gain_change=False, zero_filter=False)
+                        from .delay.delay_types import DelayAdjustment as _DA
+                        self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
 
                 # Age out _pending_delay so a stale pending value cannot
                 # pair with a later rogue estimate hours after it was set.
@@ -1404,40 +1450,55 @@ class AEC:
                         del self._pending_delay
                         if hasattr(self, '_pending_delay_ttl'):
                             del self._pending_delay_ttl
-                        # Filter taps were trained against the old delay
-                        # alignment; treating the shift like Path A (clear
-                        # filter-output-derived state) avoids ~50-100
-                        # frames of poor cancellation while taps re-converge
-                        # against state that no longer matches.
-                        self._reset_filter_derived_state(reason='delay_shift',
-                                                         preserve_render_ema=True)
-                        self._epc_det.force_delay()
-                        for filt in [self.filter, self.shadow_filter]:
-                            if filt is not None and hasattr(filt, 'Q'):
-                                self._arc_m_q_boost(filt)
-                                # PBFDKF-only Kalman P-override (NLMS shadow
-                                # has no P state — skip cleanly).
-                                if isinstance(filt, PBFDKF):
-                                    filt._p_max_override = 1.0
-                                    filt._p_max_override_frames = 30
-                        self._maybe_mark_diverged('delay_shift')
-                        self._epc_reset_fired_this_frame = True   # C.B FQA signal
-                        # AEC3-pattern dispatch (echo_remover.cc): queue
-                        # delay_change for next _aec3_post -> AecState runs
-                        # full reset cascade.
-                        from .delay.delay_types import DelayAdjustment as _DA
-                        self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
-                        # Full delay-change chain (delay_shift):
-                        # Steps 3-4: H_error reset + counter reset. AEC3 parity.
-                        if (self.filter is not None
-                                and hasattr(self.filter, 'handle_echo_path_change')):
-                            self.filter.handle_echo_path_change(
-                                delay_change=True, gain_change=False, zero_filter=False)
-                        if (self.shadow_filter is not None
-                                and hasattr(self.shadow_filter,
-                                            'handle_echo_path_change')):
-                            self.shadow_filter.handle_echo_path_change(
-                                delay_change=True, gain_change=False, zero_filter=False)
+                        if (self.config.dt_aware_recovery_soft
+                                and self._ne_recent_frames > 0):
+                            # Soft realign: the ring read offset is already
+                            # updated above. Keep the converged filter and let
+                            # it re-adapt to the new alignment at its normal
+                            # step size — no tap wipe, no Kalman P-override,
+                            # no q-boost, no mark_diverged. Avoids the
+                            # over-cancel + near-end overfit that the
+                            # aggressive recovery causes when movement re-locks
+                            # repeatedly through double-talk (no-PA DT-deg
+                            # root cause). FS is unaffected (it has no near-end
+                            # to overfit); FS_movement echo is empirically
+                            # equal with/without the reset.
+                            self._epc_reset_fired_this_frame = True
+                        else:
+                            # Filter taps were trained against the old delay
+                            # alignment; treating the shift like Path A (clear
+                            # filter-output-derived state) avoids ~50-100
+                            # frames of poor cancellation while taps re-converge
+                            # against state that no longer matches.
+                            self._reset_filter_derived_state(reason='delay_shift',
+                                                             preserve_render_ema=True)
+                            self._epc_det.force_delay()
+                            for filt in [self.filter, self.shadow_filter]:
+                                if filt is not None and hasattr(filt, 'Q'):
+                                    self._arc_m_q_boost(filt)
+                                    # PBFDKF-only Kalman P-override (NLMS shadow
+                                    # has no P state — skip cleanly).
+                                    if isinstance(filt, PBFDKF):
+                                        filt._p_max_override = 1.0
+                                        filt._p_max_override_frames = 30
+                            self._maybe_mark_diverged('delay_shift')
+                            self._epc_reset_fired_this_frame = True   # C.B FQA signal
+                            # AEC3-pattern dispatch (echo_remover.cc): queue
+                            # delay_change for next _aec3_post -> AecState runs
+                            # full reset cascade.
+                            from .delay.delay_types import DelayAdjustment as _DA
+                            self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
+                            # Full delay-change chain (delay_shift):
+                            # Steps 3-4: H_error reset + counter reset. AEC3 parity.
+                            if (self.filter is not None
+                                    and hasattr(self.filter, 'handle_echo_path_change')):
+                                self.filter.handle_echo_path_change(
+                                    delay_change=True, gain_change=False, zero_filter=False)
+                            if (self.shadow_filter is not None
+                                    and hasattr(self.shadow_filter,
+                                                'handle_echo_path_change')):
+                                self.shadow_filter.handle_echo_path_change(
+                                    delay_change=True, gain_change=False, zero_filter=False)
                     else:
                         self._pending_delay = new_delay
                         self._pending_delay_ttl = 3
@@ -1835,7 +1896,13 @@ class AEC:
                         _epv_suppressed = True
             self._diag['epv_event_raw'] = _epv_raw
             self._diag['epv_event_suppressed'] = _epv_suppressed
-            if epv_event.fired and not _epv_suppressed:
+            if epv_event.fired and not _epv_suppressed and self.config.dt_aware_recovery_soft and self._ne_recent_frames > 0:
+                # Experimental: EPV gain-change recovery is double-talk-blind
+                # (far-power EMA swing only). Skip the aggressive Kalman
+                # re-adapt + mark_diverged + ERLE reset; the converged filter
+                # tracks moderate gain change at its normal step size.
+                self._epc_reset_fired_this_frame = True
+            elif epv_event.fired and not _epv_suppressed:
                 self._epc_reset_fired_this_frame = True   # C.B FQA signal
                 # AEC3-pattern dispatch (echo_remover.cc): EPV = gain_change;
                 # queue for next _aec3_post call -> AecState.handle_echo_path_change
@@ -1871,7 +1938,13 @@ class AEC:
                     shadow_err_smooth=self.shadow_err_smooth,
                     is_stationary=self._render_activity.is_stationary,
                 )
-                if rise_event.fired:
+                if rise_event.fired and self.config.dt_aware_recovery_soft and self._ne_recent_frames > 0:
+                    # Experimental: shadow_rise recovery is double-talk-blind
+                    # (only a far-stationarity guard). Skip the aggressive
+                    # re-adapt + mark_diverged + ERLE reset; its tail overfits
+                    # near-end that arrives after the (far-only) trigger.
+                    self._epc_reset_fired_this_frame = True
+                elif rise_event.fired:
                     self._epc_reset_fired_this_frame = True   # C.B FQA signal
                     self._aec3_pending_gain_change = True
                     # AEC3 RefinedFilterUpdateGain::HandleEchoPathChange —
@@ -3365,6 +3438,12 @@ class AEC:
         # Feed per-bin stationary mask to SuppressionGain for its
         # NE-presence proxy. Reuses _stationary_mask computed above for
         # the existing zeroing block (no extra compute).
+        # DT-gated min-gain floor lift: during double-talk (near recently
+        # present) protect near-end by lifting the RES floor; FS (no near)
+        # keeps the aggressive far_active floor. Default-OFF flag → no-op.
+        self._aec3_sg._dt_protect_active = bool(
+            getattr(self.config, 'dt_aware_res_floor_enabled', False)
+            and getattr(self, '_ne_recent_frames', 0) > 0)
         gain = self._aec3_sg.get_gain(
             aec_state=self._aec3_state,
             nearend_spectrum=nearend_pwr,
@@ -3637,6 +3716,8 @@ Examples:
                              '(shipped) / aggressive (echo-priority). Differ only '
                              'in the far-active min-gain floor (-20/-28/-38 dB).')
     parser.add_argument('--no-shadow', action='store_true', help='Disable shadow filter')
+    parser.add_argument('--no-delay-est', action='store_true',
+                        help='Disable online delay estimation (mirrors C aec_wav --no-delay-est)')
     parser.add_argument('--no-highpass', action='store_true', help='Disable high-pass filter')
     parser.add_argument('--highpass-cutoff', type=float, default=80.0,
                         help='High-pass filter cutoff frequency in Hz (default: 80)')
@@ -3693,6 +3774,8 @@ Examples:
         common_kw['enable_res'] = args.enable_res
     if args.cng is not None:
         common_kw['enable_cng'] = args.cng
+    if args.no_delay_est:
+        common_kw['enable_delay_est'] = False
     if args.preset:
         config = AecConfig.from_preset(args.preset, **common_kw)
     else:

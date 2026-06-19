@@ -46,11 +46,11 @@ int main(int argc, char **argv) {
     int N_BINS = 257, HOP = 160;
 
     /* shared static config */
-    double sf_active, sf_silent, sf_latch, low_render_thr;
+    double sf_active, sf_silent, sf_dt, sf_latch, low_render_thr;
     float ratchet[2];            /* max_inc, max_dec_lf */
     int32_t blend_flags[2];      /* enabled, per_bin */
     float blend_f[2];            /* enr_thr, softness */
-    int32_t ibands[11];
+    int32_t ibands[12];
     double aud_d[6];             /* floor_power, thr_lf/mf/hf, low_render_limit, normal_render_limit */
     int32_t hf_lim[2];           /* lgb, biq */
     double dne_d[4];             /* enr_thr, enr_exit, snr_thr, lf_endpoint_hz */
@@ -60,7 +60,8 @@ int main(int argc, char **argv) {
 
     if (!f) { fprintf(stderr, "cannot open %s\n", path); return 2; }
     if (!rd(f, &n_cases, 4)) { fprintf(stderr, "short read header\n"); return 2; }
-    if (!rd(f, &sf_active, 8) || !rd(f, &sf_silent, 8) || !rd(f, &sf_latch, 8) ||
+    if (!rd(f, &sf_active, 8) || !rd(f, &sf_silent, 8) || !rd(f, &sf_dt, 8) ||
+        !rd(f, &sf_latch, 8) ||
         !rd(f, &low_render_thr, 8) || !rd(f, ratchet, sizeof(ratchet)) ||
         !rd(f, blend_flags, sizeof(blend_flags)) || !rd(f, blend_f, sizeof(blend_f)) ||
         !rd(f, ibands, sizeof(ibands)) || !rd(f, aud_d, sizeof(aud_d)) ||
@@ -113,6 +114,7 @@ int main(int argc, char **argv) {
         cfg.nearend_smoother_n = ibands[8];
         cfg.aud_lf_end_bin = ibands[9];
         cfg.aud_mf_end_bin = ibands[10];
+        cfg.lf_clamp_bin = ibands[11];
         cfg.floor_power = aud_d[0];
         cfg.aud_thr_lf = aud_d[1];
         cfg.aud_thr_mf = aud_d[2];
@@ -131,6 +133,7 @@ int main(int argc, char **argv) {
         cfg.split_floor_enabled = 1;
         cfg.split_floor_far_active = sf_active;
         cfg.split_floor_far_silent = sf_silent;
+        cfg.split_floor_dt = sf_dt;
         cfg.split_floor_latch_power = sf_latch;
         cfg.soft_blend_enabled = blend_flags[0];
         cfg.soft_blend_per_bin = blend_flags[1];
@@ -176,12 +179,12 @@ int main(int argc, char **argv) {
                               g_raw, gain_out, sum_s);
 
         for (i = 0; i < n_frames; ++i) {
-            uint8_t sat, cd, rst, ist;
+            uint8_t sat, cd, rst, ist, dtp;
             const float *got;
             if (!rd(f, ne, (size_t)n_bins * 4) || !rd(f, r2, (size_t)n_bins * 4) ||
                 !rd(f, r2u, (size_t)n_bins * 4) || !rd(f, cn, (size_t)n_bins * 4) ||
                 !rd(f, rb, (size_t)HOP * 4) || !rd(f, &sat, 1) || !rd(f, &cd, 1) ||
-                !rd(f, &rst, 1) || !rd(f, &ist, 1) ||
+                !rd(f, &rst, 1) || !rd(f, &ist, 1) || !rd(f, &dtp, 1) ||
                 !rd(f, e_gain, (size_t)n_bins * 4)) {
                 fprintf(stderr, "short read case %d frame %d\n", ci, i);
                 return 2;
@@ -199,6 +202,9 @@ int main(int argc, char **argv) {
              * (set_initial_state on delay_change / transition); feed the
              * captured value each frame. */
             suppression_gain_set_initial_state(&sg, (int)ist);
+            /* dt_protect_active is set by the orchestrator on the instance
+             * before get_gain (== Python self._dt_protect_active); replay it. */
+            sg.dt_protect_active = (int)dtp;
             got = suppression_gain_get_gain(&sg, ne, r2, r2u, cn, rb,
                                             (int)cd, (int)sat);
             cmp_f32(got, e_gain, n_bins, &total_mism, &max_abs_diff,

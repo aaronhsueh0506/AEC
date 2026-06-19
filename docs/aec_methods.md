@@ -1,11 +1,14 @@
-# AEC Algorithm Methods (current through v3.22.5)
+# AEC Algorithm Methods (current through v3.23.0)
 
-**Release**: algorithm current through v3.22.5 (2026-06-07); the production
-algorithm is **byte-equal since v3.22.4** (v3.22.5 is a cleanup + docs release —
-DTD subsystem and dead research flags removed, C streaming API added). The
-split min-gain floor (§3.4) was added in v3.22.0 on top of the v3.21 pipeline,
-and the three Pareto presets (gentle/balanced/aggressive) in v3.22.4. C port is
-bit-exact with Python (peak |Δ|=0); the C structure mirrors Python class boundaries.
+**Release**: algorithm current through v3.23.0. The split min-gain floor (§3.4)
+was added in v3.22.0 on top of the v3.21 pipeline, the three Pareto presets
+(gentle/balanced/aggressive) in v3.22.4, and the **DT-aware recovery stack**
+(matched-filter pre-echo fix + DT-aware soft recovery + DT-gated RES floor, §2.3
+and §3.4) in v3.23.0 — the work that closed the no-pre-align (production-faithful
+online self-align) delay-acquisition gap. The C port is **bit-exact** with the
+Python reference under `-DUSE_STANDARD_MATH` (every per-module parity test plus
+the end-to-end `parity_aec_e2e` pass with 0 mismatches across all three presets;
+see §7); the C structure mirrors Python class boundaries.
 
 This document is the deep algorithm specification for the production
 pipeline. The v3.21 release retires the legacy 9-stage `ResFilter`
@@ -17,7 +20,7 @@ for the side-by-side flowcharts of the current build and the WebRTC AEC3 referen
 | Companion doc | Purpose |
 |---|---|
 | [`aec_algorithm_guide.html`](aec_algorithm_guide.html) | Presentation overview |
-| [`architecture_v3_22_5_vs_aec3.html`](architecture_v3_22_5_vs_aec3.html) | v3.22.5 (current) vs WebRTC AEC3 architecture flowcharts |
+| [`architecture_v3_22_5_vs_aec3.html`](architecture_v3_22_5_vs_aec3.html) | Architecture flowcharts vs WebRTC AEC3 (the v3.23.0 DT-aware stack is config-only over this pipeline) |
 | [`c_user_and_integration_guide.md`](c_user_and_integration_guide.md) | C API, integration, streaming contract |
 | [`refactor_modules_layout.md`](refactor_modules_layout.md) | Module map |
 | [`pbfdkf_shadow_intro.md`](pbfdkf_shadow_intro.md) | PBFDKF + shadow design |
@@ -100,6 +103,77 @@ Per-case CNG seed: `np.random.seed(42)` before each `AEC(cfg)` instance.
 All benchmarking tooling (`eval_aec_challenge.py`, `check_byte_equal.py`,
 `run_one_case.py`) seeds before instantiation.
 
+### Tunable parameters (`AecConfig`)
+
+The full release surface is `AecConfig` (`modules/config.py`). The three presets
+differ **only** in `min_gain_floor_far_active_db` (gentle −20 / balanced −28 /
+aggressive −38); `from_preset` additionally pins a shared base
+(`enable_cng=True`, `shadow_mu_min=0.5`, `warmup_frames=100`,
+`kalman_q_high=1e-3`). Everything below uses dataclass defaults. Fields are
+grouped by subsystem; **ON**/**OFF** marks the default state of a feature flag.
+
+| Subsystem | Field | Default | Notes |
+|---|---|---|---|
+| System / framing | `sample_rate` | 16000 | 8000/16000/48000 |
+| | `frame_size` / `hop_size` | auto | 20 ms / 10 ms (50 % overlap) |
+| | `filter_length` | auto | 52 ms (<44.1 kHz), 64 ms (≥44.1 kHz) |
+| | `mu` / `delta` | 0.3 / 1e-8 | step size / regularization |
+| Residual / CNG | `enable_res` | **ON** | post-filter master gate (§3.7) |
+| | `enable_cng` | OFF (preset **ON**) | comfort noise (§3.5) |
+| | `comfort_noise_floor_dbfs` | −96.034 | |
+| | `enable_td_constraint` | **ON** | |
+| C′ ERLE coherence gate | `erle_coh_gate_enabled` | **ON** | Γ²(Ŷ,Y) per-bin ERLE freeze |
+| | `erle_coh_gate_threshold` / `_alpha` | 0.5 / 0.05 | |
+| Split min-gain floor (§3.4) | `min_gain_split_floor_enabled` | **ON** | |
+| | `min_gain_floor_far_active_db` | −28 | **preset strength knob** |
+| | `min_gain_floor_far_silent_db` | −12 | pure-NE floor |
+| | `min_gain_far_latch_power` | 1e6 | far-active latch |
+| **DT-aware recovery group** | `dt_aware_recovery_soft` | **ON** | soft (non-destructive) delay/EPC recovery (§2.3) |
+| | `dt_aware_res_floor_enabled` | **ON** | DT-gated RES floor lift (§3.4) |
+| | `min_gain_floor_dt_db` | −20 | floor used in double-talk |
+| | `ne_recent_threshold` | 0.3 | near-recent gate arm threshold |
+| | `ne_recent_hold` | 150 | hold frames after arm |
+| | `ne_recent_sustain` | 3 | frames above threshold to arm |
+| Soft near-end blend | `soft_nearend_blend_enabled` | **ON** | sigmoid ENR tuning blend (D3) |
+| | `soft_nearend_blend_enr_threshold` / `_softness` | 0.25 / 0.25 | |
+| | `soft_nearend_blend_per_bin` | **ON** | per-bin frequency-selective near protection |
+| Nonlinear residual | `nl_r2_enabled` | **ON** | Kuech-Kellermann 2nd-order R² (L1) |
+| | `nl_r2_alpha` | 0.1 | |
+| ERLE coordinate fixes | `erle_render_x2_psd_scale` | **ON** | revives reverb model (PSD-scale bug fix) |
+| | `reverb_tail_strength` | 1.0 | reverb-tail R² scale |
+| | `erle_windowed_capture_psd` | **ON** | E1 Y2/E2 sqrt-Hann coordinate consistency |
+| | `output_capture_when_linear_unusable` | **ON** | E2 output base = Y on diverged frames |
+| Delay-acquire guard | `delay_acquire_protect_converged` | **ON** | reject spurious late acquisition |
+| Cold-start deadlock (OFF) | `h_error_refresh_erl_floor` | 0.0 (**OFF**) | Kalman-gain cold-start breakers |
+| | `h_error_floor_override` | 0.0 (**OFF**) | |
+| Shadow filter | `enable_shadow` | **ON** | PBFDAF/NLMS coarse filter |
+| | `shadow_mu_min` / `shadow_mu_nlms` | 0.5 / 0.5 | |
+| | `shadow_copy_threshold` / `_hysteresis` | 0.65 / 3 | |
+| | `shadow_err_alpha` | 0.80 | |
+| | `shadow_dtd_advantage_scale` / `_offset` | 3.0 / 1.5 | |
+| Misadjustment estimator | `filter_misadjustment_*` | 100 / 30 / 0.5 / 2.0 | hangover / stable / scale min/max |
+| PBFDKF (Kalman) | `use_kalman` | **ON** | |
+| | `kalman_q_high` / `kalman_q_low` | 1e-3 / 1e-6 | |
+| | `warmup_frames` | 80 (preset 100) | forced-high-mu window |
+| EPC | `epc_delta_threshold` / `epc_total_rise` / `epc_hangover` | 0.3 / 1.5 / 20 | |
+| Delay estimation | `enable_delay_est` | **ON** | |
+| | `max_delay_ms` / `delay_buffer_ms` | 1024 / 2048 | |
+| | `delay_est_period_s` / `delay_est_init_s` | 0.5 / 0.3 | |
+| | `delay_par_low_threshold` / `_solid_threshold` | 5.0 / 8.0 | |
+| HPF | `enable_highpass` | **ON** | mic-path only (ref HPF retired) |
+| | `highpass_cutoff_hz` | 80.0 | |
+| Saturation | `enable_saturation_detect` | **ON** | |
+| | `saturation_threshold` | 0.95 | |
+| | `saturation_softclip_ref` | **ON** | |
+| Mode / output | `mode` | `PBFDKF` | |
+| | `return_res_context` | OFF | switches `process()` return type (§4) |
+| | `clear_filter_history` | OFF | |
+
+The **DT-aware recovery group** (the v3.23.0 addition) is the only default-ON
+group whose two halves act in tandem: `dt_aware_recovery_soft` softens the
+delay/EPC recovery (§2.3) and `dt_aware_res_floor_enabled` lifts the RES floor
+(§3.4), both gated on the shared `ne_recent_*` near-recent latch.
+
 ---
 
 ## 2. Front-end blocks
@@ -148,6 +222,57 @@ alias so external callers (`from aec import DelayEstimator`) keep working.
 
 The estimator supports up to 1024 ms of skew (v3.10.4 widening). It feeds
 the refined filter through `RingBuf` (a delay-line on the reference).
+
+#### Pre-echo detection (matched-filter accumulated-error)
+
+`MatchedFilter` (`modules/delay/matched_filter.py`) is a bank of `num_filters=5`
+NLMS cross-correlators over staggered lag windows. The winning lag is normally
+`MaxSquarePeakIndex(h) + n·intra_lag_shift` — the strongest squared tap. AEC3
+additionally tracks a **pre-echo lag** so the reported delay snaps to the true
+echo *onset* rather than the strongest tap (which, with reverb, can sit well
+after onset). `detect_pre_echo` is **default-True** (`echo_path_delay_estimator.py:61`,
+AEC3 strict default `echo_canceller3_config.h:73`): the `PreEchoLagAggregator`
+may override the highest-peak lag with the pre-echo candidate when the
+accumulated-error curve shows a leading peak.
+
+The pre-echo locator (`ComputePreEchoLag`, AEC3 `matched_filter.cc:516-524`)
+walks the per-tap-group **accumulated squared error of the filter PREFIX** and
+returns the earliest group whose prefix already explains the capture (= onset).
+Correctly populating that curve was the load-bearing fix:
+
+```
+# matched_filter_core, lines ~97-108 — per sub-block sample i:
+g      = _ACCUMULATED_ERROR_SUBSAMPLE_RATE          # 4
+prefix = np.cumsum((h * x_window).reshape(-1, g).sum(axis=1))   # Σ h[:G]·x[:G]
+diff   = prefix - y[i]
+instantaneous_error_out[:diff.size] += diff * diff  # prefix-error per tap-group
+```
+
+The **bug this replaced**: the previous code binned the *full-filter* error by
+output-sample index, which left all but the first few bins zero — so the
+accumulated-error curve never developed a leading peak and `ComputePreEchoLag`
+always collapsed the pre-echo lag to ≈0. With `detect_pre_echo=True` overriding
+the highest-peak lag, the reported delay was pulled back toward 0, which broke
+online (no-pre-align) delay acquisition. The cumsum prefix-error binning above
+restores the AEC3 onset locator; the C port carries the same fix.
+
+#### DT-aware soft recovery (`dt_aware_recovery_soft`, default ON)
+
+The delay/EPC recovery triggers (Path A first-acquisition, Path B re-lock, EPV,
+shadow_rise) normally do a **destructive** full reset — clear the filter, set
+Kalman P=1.0, `mark_diverged` — and re-converge from cold. That reset is the
+right move at a true far-only path change, but its aggressive re-convergence
+tail overfits near-end speech that arrives shortly after, and the online
+(no-pre-align) pipeline pays this penalty that offline GCC pre-align never does.
+When `dt_aware_recovery_soft=True` and near-end was seen recently
+(`_ne_recent_frames > 0`, the held gate described in §3.4), those triggers drop
+the full reset and instead **realign softly** — keep the converged filter,
+re-adapt at normal step size (`orchestrator.py:1386,1453,1899,1941`). Far-end
+single-talk never arms the gate, so its recoveries stay aggressive and FS echo
+depth is preserved. No-pre-align 800-case: DT_static deg 1.993→2.016,
+DT_movement 2.071→2.088, FS echo holds >3.5. This is the partner mechanism to
+the DT-gated RES floor (§3.4); together they make up the v3.23.0 DT-aware
+recovery stack that closed the no-pre-align acquisition gap.
 
 ### 2.4 PBFDKF refined filter
 
@@ -292,9 +417,9 @@ floor on the deepest suppression, **split by far-end activity**:
 
 ```
 min_gain(k) = max( min_echo_power / R²(k),  floor )
-floor = 10^(-22/10)  if far-active (FS/DT)   # caps DT gain-collapse; only
-                                             #   FS cost is deep echo <-40dB
-                                             #   (inaudible) → FS echo > AEC2
+floor = 10^(-28/10)  if far-active (FS/DT)   # balanced; deep far-active
+                                             #   suppression for more echo
+                                             #   cancellation → FS echo > AEC2
       = 10^(-12/10)  if far-silent (pure NE) # lifts NE near-end, zero echo
                                              #   cost (no echo to leak)
 ```
@@ -306,9 +431,49 @@ gentler floor throughout (no cold-start leak); only recordings where far is
 never active keep the strong floor. Config (`AecConfig`):
 `min_gain_split_floor_enabled`, `min_gain_floor_far_active_db` (balanced −28;
 gentle −20 / aggressive −38 — the v3.22.4 preset strength knob),
-`min_gain_floor_far_silent_db` (−12), `min_gain_far_latch_power` (1e6).
-800-case: FS echo 3.520 / DT echo 4.042 / DT deg 2.226 / NE deg 4.047
-(all four ship thresholds; the only config to pass all four).
+`min_gain_floor_far_silent_db` (−12), `min_gain_far_latch_power` (1e6). The
+floors are amplitude-domain dB; the orchestrator constructs `SuppressionGain`
+with these as `split_floor_*` (`orchestrator.py:960`). The far-active floor
+above is further lifted in double-talk by the DT-aware floor gating below.
+
+**Double-talk floor protection (DT-aware floor gating, v3.23.0, default ON).**
+The far-active floor (−28 dB) is deliberately aggressive so pure far-end
+single-talk cancels deep echo — but applying that same deep floor *during
+double-talk* over-suppresses near-end. The DT-gated floor lifts the floor from
+`min_gain_floor_far_active_db` (−28 dB) to `min_gain_floor_dt_db` (**−20 dB**)
+*only when near-end is present*, selectively protecting near-end in DT while
+keeping the aggressive far-active floor in pure FS:
+
+```python
+# suppression_gain.py ~928 (_get_min_gain):
+if self._far_active_latched:
+    base_floor = (self._split_floor_dt if self._dt_protect_active   # DT: −20 dB
+                  else self._split_floor_far_active)                # FS: −28 dB
+else:
+    base_floor = self._split_floor_far_silent                       # pure NE: −12 dB
+```
+
+The orchestrator sets `sg._dt_protect_active` immediately before `get_gain`
+(`orchestrator.py:3444`):
+
+```python
+self._aec3_sg._dt_protect_active = bool(
+    self.config.dt_aware_res_floor_enabled        # default True
+    and self._ne_recent_frames > 0)               # near recently present
+```
+
+`_ne_recent_frames` is the held "near-end seen recently" gate (same mechanism
+that arms `dt_aware_recovery_soft`, §2.3): the `_dt_from_energy` indicator
+must stay above `ne_recent_threshold` (0.3) for `ne_recent_sustain` (3) frames
+to arm, then holds for `ne_recent_hold` (150) frames (`orchestrator.py:1323-1336`).
+Far-end single-talk never sustains the indicator, so FS recoveries keep the −28 dB
+floor and FS echo depth is preserved; the energy gate does false-arm a little on
+loud FS echo (the bounded FS cost). Config (`AecConfig`):
+`dt_aware_res_floor_enabled`, `min_gain_floor_dt_db` (−20),
+`ne_recent_threshold`/`ne_recent_hold`/`ne_recent_sustain`. On the
+no-pre-align baseline (on top of `dt_aware_recovery_soft`): DT_static deg
+2.016→2.074, DT_movement 2.088→2.140 (both exceed the pre-align result), at a
+bounded echo cost (DT echo 4.28→4.22, FS echo 3.59→3.54), all ship bars held.
 
 ### 3.5 Comfort noise (CNG)
 
@@ -375,31 +540,84 @@ classifier never modifies audio.
 
 ---
 
-## 6. Reference scores (v3.21 baseline)
+## 6. Reference scores (current — no pre-alignment)
 
-`docs/bench/v3_21_3aadd2d_baseline/balanced_aec3_result.md` records the
-800-case AECMOS bucket means at the v3.21 anchor commit (`3aadd2d`):
+The numbers below are the **production-faithful** 800-case AECMOS bucket means
+for the **BALANCED** preset with **no pre-alignment** — the delay is acquired
+online by the in-pipeline matched-filter self-align (§2.3), exactly as the
+shipped algorithm runs. This is the only result presentation that reflects
+production: offline GCC pre-align is a benchmark-only crutch and its numbers are
+**not** a current result.
 
-| Bucket       |    n |  echo (↑) |  deg (↑) |
-|--------------|-----:|----------:|---------:|
-| FS_static    |  169 |     3.729 |    4.999 |
-| FS_movement  |  131 |     3.626 |    4.999 |
-| DT_static    |  186 |     4.237 |    2.387 |
-| DT_movement  |  114 |     4.215 |    2.371 |
-| NE           |  200 |     4.998 |    4.052 |
+| Bucket       |  echo (↑) |  deg (↑) |
+|--------------|----------:|---------:|
+| FS_static    |     3.544 |        — |
+| FS_movement  |     3.519 |        — |
+| DT_static    |     4.218 |    2.074 |
+| DT_movement  |     4.114 |    2.140 |
+| NE           |         — |    4.021 |
+
+All four ship bars are met:
+
+* **FS echo > 3.5** — FS_static 3.544, FS_movement 3.519 ✓
+* **DT echo > 4** — DT_static 4.218, DT_movement 4.114 ✓
+* **DT deg > 2.0** — DT_static 2.074, DT_movement 2.140 ✓
+* **NE deg ≥ 4** — NE 4.021 ✓
+
+These reflect the v3.23.0 DT-aware recovery stack (matched-filter pre-echo fix
+§2.3 + `dt_aware_recovery_soft` §2.3 + DT-gated RES floor §3.4), which closed the
+no-pre-align acquisition gap — the DT deg figures (2.074 / 2.140) now exceed what
+the offline pre-align crutch produced.
 
 Reference points (AEC2 / AEC3 anchors from the AEC Challenge corpus):
 
-* **AEC2 reference** — FS / DT echo unknown (closed corpus); DT static
-  deg 2.39; DT movement deg 2.39; NE deg 4.10.
-* **AEC3 reference** — DT static deg 1.85; DT movement deg 1.85;
-  NE deg 3.45.
+* **AEC2 reference** — DT static / movement deg ≈ 2.39; NE deg ≈ 4.10.
+* **AEC3 reference** — DT static / movement deg ≈ 1.85; NE deg ≈ 3.45.
 
-v3.21 beats AEC3 on every DT/NE deg bucket by +0.52 / +0.52 / +0.60 and
-matches AEC2 (~0) on NE / DT deg targets while preserving the v3.10.4
-FS-echo gain (+0.10 vs v3.10.4 anchor).
+BALANCED beats AEC3 on every DT/NE deg bucket and holds all four echo/deg ship
+bars under online self-align.
 
-The full per-case 800-case scores are at
-`docs/bench/v3_21_3aadd2d_baseline/balanced_aec3_scores.json` and act as
-the anchor for the Phase D-4 final-bench verify (must match within
-±0.001 dB before tagging `v3.21.0`).
+> **Historical (pre-align, NOT a current result).** The retired v3.21 anchor
+> (`docs/bench/v3_21_3aadd2d_baseline/`, commit `3aadd2d`) was scored *with*
+> offline GCC pre-alignment, which inflates FS deg to ≈5.0 and shifts the echo
+> means; those numbers are kept only as a historical anchor and must never be
+> presented as a current production result.
+
+---
+
+## 7. Python ↔ C parity
+
+The `c_impl/` port is the production C implementation of the **same algorithm**.
+The verified invariant is: **under `-DUSE_STANDARD_MATH`, the C port is bit-exact
+to the Python reference.** Every per-module parity test (`c_impl/test/parity_*.c`
+— PBFDKF, delay, AecState, ResidualEchoEstimator, SuppressionGain, FFT, the
+ERLE/reverb estimators, etc.) plus the end-to-end `parity_aec_e2e` capstone pass
+with **0 mismatches across all three presets** (balanced / gentle / aggressive),
+over the full ≈4186-hop doubletalk case. `parity_aec_e2e.c` asserts strict
+equality on both `out[hop]` and the linear `raw_output` residual; the module
+tests are logic checks and are built with `-DUSE_STANDARD_MATH`.
+
+### Two math backends
+
+`c_impl/include/fast_math.h` provides two implementations selected at compile
+time:
+
+* **Default (production): `fast_math.h` approximations.** `fast_exp` (LUT +
+  Taylor), `fast_log`/`fast_log10` (IEEE-754 + Taylor), `fast_sqrt`
+  (Newton-Raphson). These introduce a documented **~1e-5 .. 1e-4 tolerance** in
+  the stages that call `exp`/`sqrt` (SuppressionGain Wiener mapping, CNG gain,
+  dB conversions). The **linear / PBFDKF path stays bit-exact even under
+  fast_math** — it uses no `exp`/`sqrt`, so `raw_output` matches Python exactly
+  regardless of backend.
+* **`-DUSE_STANDARD_MATH`: libm.** Swaps the approximations for `expf`/`logf`/
+  `sqrtf` (`fast_math.h:77-84`), recovering **true bit-exactness** end-to-end.
+  This is the build the `parity_*.c` logic tests use (`make
+  EXTRA_CFLAGS="-DUSE_STANDARD_MATH"`).
+
+`-ffp-contract=off` is mandatory in `CFLAGS` on both backends (no fused
+multiply-add reassociation), and the C FFT is pocketfft (fp64-internal) to match
+numpy. The C structure mirrors the Python class boundaries one-to-one (`PBFDKF`,
+`ShadowFilter`, `AecState`, `SuppressionGain`, `EchoPathDelayEstimator`, …), so a
+module parity test isolates any divergence to a single stage. See
+`python/run_e2e_parity.py` (the parity driver) and
+`docs/c_user_and_integration_guide.md` (build + integration).

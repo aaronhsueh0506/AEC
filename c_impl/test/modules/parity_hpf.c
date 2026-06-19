@@ -1,19 +1,26 @@
-/* parity_hpf.c — Wave 1.1 gate.
+/* parity_hpf.c — replay the binary golden from
+ * python/diag/gen_hpf_golden.py through the C Hpf (mic-path high-pass biquad)
+ * and assert bit-exact float32 match + per-frame fp64 state-drift checks.
  *
- * Reads python-dumped hpf_{mic,ref}.npz (input/output/state per frame) via
- * a tiny side-car loader (we don't link libnpy in C — instead the Python
- * test driver writes a flat .bin alongside the .npz with a known layout).
+ * Build (standalone, from anywhere):
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -DUSE_STANDARD_MATH \
+ *       -I<path-to-repo>/c_impl/include \
+ *       <path-to-repo>/c_impl/src/hpf.c \
+ *       <path-to-repo>/c_impl/test/modules/parity_hpf.c \
+ *       -lm -o /tmp/p_hpf
+ *   python3 .../python/diag/gen_hpf_golden.py /tmp/hpf_golden.bin
+ *   /tmp/p_hpf /tmp/hpf_golden.bin
  *
- * To keep this self-contained without bringing in a npz parser, the harness
- * ships its own small float dumper in python/parity_export_hpf.py that
- * writes a .bin we read here. Format:
+ * (hpf.c uses only <math.h> tan/sqrt — no fast_math.h — so -DUSE_STANDARD_MATH
+ * is a no-op here, but is passed for consistency with the parity-test suite.)
  *
+ * Golden format (LE):
  *   header:  int32 n_frames, int32 hop, int32 sample_rate, float64 cutoff_hz
  *   per frame: float64 z1_in, z2_in, z1_out, z2_out,
  *              float32 input[hop], float32 expected_output[hop]
  *
  * Gate: max-abs error across all samples must be 0 (bit-exact, since Python
- * and C use identical fp64 internal arithmetic).
+ * and C use identical fp64 internal arithmetic with f32 output cast).
  */
 #include "hpf.h"
 #include <stdio.h>

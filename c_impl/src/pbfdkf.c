@@ -498,6 +498,7 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
     p->e2_coarse_for_refresh = 0.0f;
     p->disallow_leakage_diverged = 0;
     p->h_error_refresh_erl_floor = 0.0f;
+    p->last_leakage_div_frac = 0.0f;
     p->partition_sum_x2_startup_hops = 0;
     /* AEC3 refined gates (orchestrator overrides poor_excitation per config). */
     p->base.poor_excitation_counter = 400;
@@ -653,11 +654,13 @@ static void pbfdkf_h_error_refresh(PBFDKF* p) {
 
     if (p->e2_coarse_per_bin_valid) {
         /* per-bin path. e2_refined = np.abs(error_spec)**2 (current frame). */
+        int n_div = 0;   /* count of bins on the diverged-leakage branch */
         for (int k = 0; k < K; ++k) {
             float er = b->error_spec[k].r, ei = b->error_spec[k].i;
             float e2_ref = cmag2_np(er, ei);
             int use_conv = (e2_ref <= p->e2_coarse_per_bin[k]) ||
                            p->disallow_leakage_diverged;
+            if (!use_conv) ++n_div;
             float leakage = use_conv ? lc_eff : ld_eff;
             float erl_eff = p->erl_per_bin[k];
             if (p->h_error_refresh_erl_floor > 0.0f) {
@@ -667,6 +670,8 @@ static void pbfdkf_h_error_refresh(PBFDKF* p) {
             }
             p->H_error_per_bin[k] = p->H_error_per_bin[k] + leakage * erl_eff;
         }
+        /* Diag: fraction of bins on diverged-leakage (np.mean(~mask)). */
+        p->last_leakage_div_frac = (float)((double)n_div / (double)K);
     } else {
         /* scalar fallback: e2_ref_sum = float(np.sum(error_psd)) ; e2_coa scalar.
          * (Not exercised in production: orchestrator sets e2_coarse_per_bin
@@ -674,6 +679,8 @@ static void pbfdkf_h_error_refresh(PBFDKF* p) {
         double e2_ref_sum = (double)pairwise_sum_f32(p->error_psd, K);
         double e2_coa_sum = (double)p->e2_coarse_for_refresh;
         int use_conv = (e2_ref_sum <= e2_coa_sum) || p->disallow_leakage_diverged;
+        /* scalar path is all-or-nothing → frac is 0.0 or 1.0. */
+        p->last_leakage_div_frac = use_conv ? 0.0f : 1.0f;
         float leakage = use_conv ? lc_eff : ld_eff;
         for (int k = 0; k < K; ++k)
             p->H_error_per_bin[k] = p->H_error_per_bin[k] +

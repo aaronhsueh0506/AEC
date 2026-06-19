@@ -143,6 +143,7 @@ def run_case(stem, frames):
                 reverb_enabled=1 if self._reverb_cfg.enabled else 0,
                 reverb_tail_strength=float(self._reverb_tail_strength),
                 use_aec3_residual_noise_gate=1 if self._use_aec3_residual_noise_gate else 0,
+                use_stationarity_properties=1 if self._use_stationarity_properties else 0,
                 use_aec3_echo_gen_window=1 if self._use_aec3_echo_gen_window else 0,
                 nl_r2_enabled=1 if self._nl_r2_enabled else 0,
                 nl_r2_alpha=float(self._nl_r2_alpha),
@@ -161,7 +162,7 @@ def run_case(stem, frames):
                         time_domain_filter=time_domain_filter)
 
     def patched_est(self, *, aec_state, render_psd, capture_psd, s2_linear,
-                    dominant_nearend, filter_freq_response=None,
+                    dominant_nearend,
                     filter_delay_blocks=0, filter_length_blocks=0,
                     force_nonlinear_path=False):
         # Capture aec_state-derived values the estimator will read.
@@ -185,7 +186,6 @@ def run_case(stem, frames):
             self, aec_state=aec_state, render_psd=render_psd,
             capture_psd=capture_psd, s2_linear=s2_linear,
             dominant_nearend=dominant_nearend,
-            filter_freq_response=filter_freq_response,
             filter_delay_blocks=filter_delay_blocks,
             filter_length_blocks=filter_length_blocks,
             force_nonlinear_path=force_nonlinear_path)
@@ -290,6 +290,7 @@ def build_synthetic_saturated(cfg):
     ree = ResidualEchoEstimator(
         n_bins=N_BINS, echo_model=em, sr=16000, hop_size=cfg['hop_size'],
         use_aec3_residual_noise_gate=bool(cfg['use_aec3_residual_noise_gate']),
+        use_stationarity_properties=bool(cfg['use_stationarity_properties']),
         use_aec3_echo_gen_window=bool(cfg['use_aec3_echo_gen_window']),
         use_aec3_wallclock_reverb_smoothing=True,
         nl_r2_enabled=bool(cfg['nl_r2_enabled']),
@@ -386,6 +387,7 @@ def main():
         f.write(struct.pack('<i', cfg['reverb_enabled']))
         f.write(struct.pack('<d', cfg['reverb_tail_strength']))
         f.write(struct.pack('<i', cfg['use_aec3_residual_noise_gate']))
+        f.write(struct.pack('<i', cfg['use_stationarity_properties']))
         f.write(struct.pack('<i', cfg['use_aec3_echo_gen_window']))
         f.write(struct.pack('<i', cfg['nl_r2_enabled']))
         f.write(struct.pack('<d', cfg['nl_r2_alpha']))

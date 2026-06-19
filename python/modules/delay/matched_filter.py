@@ -73,8 +73,9 @@ def matched_filter_core(
         ``x2_sum > threshold`` and capture isn't saturated.
 
     If ``instantaneous_error_out`` is provided (length filter_size /
-    _ACCUMULATED_ERROR_SUBSAMPLE_RATE), per-sample e² are accumulated
-    into subsampled bins for pre-echo detection.
+    _ACCUMULATED_ERROR_SUBSAMPLE_RATE), the squared error of the filter
+    PREFIX up to each tap-group is accumulated per bin (AEC3 parity), so
+    ComputePreEchoLag can locate the echo onset.
     """
     h_size = h.size
     error_sum = 0.0
@@ -94,9 +95,17 @@ def matched_filter_core(
         e2 = e * e
         error_sum += e2
         if instantaneous_error_out is not None:
-            bin_idx = i // _ACCUMULATED_ERROR_SUBSAMPLE_RATE
-            if bin_idx < instantaneous_error_out.size:
-                instantaneous_error_out[bin_idx] += e2
+            # AEC3 MatchedFilterCoreWithAccumulatedError (matched_filter.cc:106-139):
+            # accumulate, per filter-tap GROUP of 4, the squared error of the filter
+            # PREFIX up to that group — accumulated_error[j] +=
+            # (Σ h[:g·(j+1)]·x[:g·(j+1)] − y[i])². ComputePreEchoLag then walks back
+            # for the earliest group whose prefix already explains the echo (= onset).
+            # (The previous code binned the FULL-filter error by output-sample index,
+            # leaving all but the first few bins zero → pre-echo always collapsed to 0.)
+            g = _ACCUMULATED_ERROR_SUBSAMPLE_RATE
+            prefix = np.cumsum((h * x_window).reshape(-1, g).sum(axis=1))
+            diff = prefix - float(y[i])
+            instantaneous_error_out[:diff.size] += diff * diff
         if x2_sum > x2_sum_threshold and not saturation:
             alpha = smoothing * e / x2_sum
             h += alpha * x_window
