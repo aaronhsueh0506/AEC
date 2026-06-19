@@ -71,6 +71,17 @@ class AecConfig:
     min_gain_floor_far_active_db: float = -28.0
     min_gain_floor_far_silent_db: float = -12.0
     min_gain_far_latch_power: float = 1.0e6
+    # DT-gated min-gain floor lift (default ON). During double-talk
+    # (far-active latched AND near recently present, _ne_recent_frames>0) use
+    # this higher floor instead of far_active, selectively protecting near-end
+    # in DT while keeping the aggressive far_active floor during FS (no near).
+    # 800-case no-PA validated on top of dt_aware_recovery_soft: DT_static deg
+    # 2.016->2.074, DT_movement 2.088->2.140 (both EXCEED pre-align), at a
+    # bounded echo cost (DT echo 4.28->4.22, FS echo 3.59->3.54, all bars hold).
+    # Energy gate false-arms a little on loud FS echo (hence the FS cost); -20dB
+    # is the operating point that maximises DT deg while holding FS>3.5.
+    dt_aware_res_floor_enabled: bool = True
+    min_gain_floor_dt_db: float = -20.0
 
     # ── linear-filter cold-start DEADLOCK breaker (PBFDKF Kalman gain) ──
     # mu = H_error/(0.5·H_error·X² + n·E²); H_error refreshed by
@@ -267,6 +278,27 @@ class AecConfig:
     fixed_delay_samples: int = -1
     delay_par_low_threshold: float = 5.0
     delay_par_solid_threshold: float = 8.0
+    # DT-aware soft-recovery gate. The delay/EPC recovery triggers
+    # (Path A/B, EPV, shadow_rise) fire at far-only moments but their
+    # aggressive re-convergence tail overfits near-end speech that arrives
+    # shortly after. A held "near-end seen recently" flag lets the soft
+    # (non-destructive) recovery path cover that tail without touching pure
+    # far-end single-talk (which never raises the near-end indicator, so its
+    # recoveries stay aggressive and FS echo depth is preserved).
+    ne_recent_threshold: float = 0.3
+    ne_recent_hold: int = 150
+    ne_recent_sustain: int = 3
+    # Master switch for DT-aware soft recovery. When True, the delay/EPC
+    # recovery triggers (Path A first-acquisition, Path B re-lock, EPV,
+    # shadow_rise) drop their destructive full-reset + Kalman P=1.0 +
+    # mark_diverged and instead realign softly (keep the converged filter,
+    # re-adapt at normal step size) — but ONLY while near-end was seen
+    # recently (held gate). Far-end single-talk never arms the gate, so its
+    # recoveries stay aggressive and FS echo depth is preserved. Default ON:
+    # 800-case no-PA validated — DT_static deg 1.993->2.016, DT_movement
+    # 2.071->2.088, FS echo holds >3.5, all ship bars pass. Recovers the
+    # online-acquisition filter-reset penalty that pre-align never pays.
+    dt_aware_recovery_soft: bool = True
 
     # ── High-pass filtering ─────────────────────────────────────────────
     enable_highpass: bool = True
