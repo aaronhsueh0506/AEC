@@ -121,7 +121,7 @@ typedef struct {
 typedef struct {
     float filters[DA_NUM_FILTERS][DA_FILTER_SIZE];
     float accumulated_error[DA_NUM_FILTERS][DA_ACC_ERR_SIZE];
-    float instantaneous_error[DA_ACC_ERR_SIZE];   /* always 0 (matches Python) */
+    float instantaneous_error[DA_ACC_ERR_SIZE];   /* per-tap-prefix err, last filter (matches Python) */
     int   last_detected_best_lag_filter;
     int   number_pre_echo_updates;
     /* reported lag */
