@@ -69,6 +69,10 @@ typedef struct {
     int    split_floor_enabled;                  /* bool */
     double split_floor_far_active;               /* power */
     double split_floor_far_silent;               /* power */
+    /* DT-gated floor: used in place of far_active when the orchestrator sets
+     * dt_protect_active (double-talk). Default == near far_active so an un-set
+     * flag is behaviourally neutral (mirrors Python _split_floor_dt). */
+    double split_floor_dt;                       /* power */
     double split_floor_latch_power;
 
     /* soft nearend blend (default ON in balanced) */
@@ -112,6 +116,9 @@ typedef struct {
     float *last_echo;           /* [n_bins] */
     double low_render_avg_power;
     int    far_active_latched;  /* bool */
+    int    dt_protect_active;   /* bool — set by orchestrator before get_gain
+                                 * (== Python _dt_protect_active); lifts the
+                                 * floor to split_floor_dt during double-talk. */
     int    initial_state;       /* bool */
     double stat_mask_frac;
 

@@ -147,6 +147,10 @@ typedef struct PBFDKF {
     float* erl_per_bin;        /* [n_freqs] = Σ_p|W_p|² (orchestrator-set) */
     int    disallow_leakage_diverged;
     float  h_error_refresh_erl_floor;   /* 0.0 = OFF */
+    /* Diag: fraction of bins on the diverged-leakage branch in the most
+     * recent H_error refresh (np.mean(~use_converged_mask)). Read by the
+     * orchestrator Track F sustained-leakage gate. */
+    float  last_leakage_div_frac;
 
     long   partition_sum_x2_startup_hops;  /* 0 = partition-sum from hop 1 */
 

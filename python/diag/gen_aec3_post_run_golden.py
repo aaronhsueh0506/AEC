@@ -74,6 +74,7 @@ def capture_sg_config(sg):
         split_floor_far_active=float(sg._split_floor_far_active),
         split_floor_far_silent=float(sg._split_floor_far_silent),
         split_floor_latch_power=float(sg._split_floor_latch_power),
+        split_floor_dt=float(sg._split_floor_dt),
         low_render_threshold=float(sg._low_render._threshold),
         max_inc=float(sg._max_inc_normal),
         max_dec_lf=float(sg._max_dec_lf_normal),
@@ -100,6 +101,7 @@ def capture_sg_config(sg):
         normal_render_limit=float(ea.normal_render_limit),
         hf_lgb=int(hz_to_bin(hf.limiting_gain_freq_hz, N, sr)),
         hf_biq=int(max(1, hz_to_bin(hf.limiting_gain_width_hz, N, sr))),
+        lf_clamp_bin=int(hz_to_bin(250.0, N, sr)),
         dne_enr_threshold=float(dc.enr_threshold),
         dne_enr_exit_threshold=float(dc.enr_exit_threshold),
         dne_snr_threshold=float(dc.snr_threshold),
@@ -154,6 +156,7 @@ def capture_ree_config(ree):
         reverb_enabled=int(ree._reverb_cfg.enabled),
         reverb_tail_strength=float(ree._reverb_tail_strength),
         use_aec3_residual_noise_gate=int(ree._use_aec3_residual_noise_gate),
+        use_stationarity_properties=int(ree._use_stationarity_properties),
         use_aec3_echo_gen_window=int(ree._use_aec3_echo_gen_window),
         nl_r2_enabled=int(ree._nl_r2_enabled),
         nl_r2_alpha=float(ree._nl_r2_alpha),
@@ -317,6 +320,12 @@ def main():
             stat_update_fired=int(bool(self._aec3_non_zero_render_seen)),
         )
         ret = orig_post(self, raw_output, near_end, far_end)
+        # _dt_protect_active is set INSIDE _aec3_post (orchestrator 3444) just
+        # before get_gain, from dt_aware_res_floor_enabled & _ne_recent_frames.
+        # aec3_post_run does NOT compute it (the production caller aec.c sets it
+        # on the SG before the call); capture the value this hop actually used
+        # so the C test can replay it onto sg.dt_protect_active.
+        rec['dt_protect_active'] = int(bool(self._aec3_sg._dt_protect_active))
         rec['out'] = np.asarray(ret, np.float32).copy()
         # usable_linear after update (localisation assertion)
         rec['usable'] = int(bool(self._aec3_state.usable_linear_estimate()))
@@ -383,7 +392,7 @@ def main():
                rc['reverb_enabled'], rc['use_aec3_residual_noise_gate'],
                rc['use_aec3_echo_gen_window'], rc['nl_r2_enabled'],
                rc['noise_floor_hold_hops'], rc['use_freq_response'],
-               rc['reverb_use_conservative'])
+               rc['reverb_use_conservative'], rc['use_stationarity_properties'])
         _w_f64(f, rc['min_noise_floor_power'], rc['noise_gate_power_legacy'],
                rc['noise_gate_slope'], rc['stationary_gate_slope'],
                rc['default_gain'], rc['tm_gain'], rc['reverb_decay'],
@@ -393,7 +402,8 @@ def main():
 
         # ── SuppressionGain config ──
         _w_f64(f, sgc['split_floor_far_active'], sgc['split_floor_far_silent'],
-               sgc['split_floor_latch_power'], sgc['low_render_threshold'])
+               sgc['split_floor_latch_power'], sgc['low_render_threshold'],
+               sgc['split_floor_dt'])
         _w_f32(f, np.array([sgc['max_inc'], sgc['max_dec_lf']], np.float32))
         _w_i32(f, sgc['soft_blend_enabled'], sgc['soft_blend_per_bin'])
         _w_f32(f, np.array([sgc['soft_blend_enr_thr'], sgc['soft_blend_softness']],
@@ -407,7 +417,8 @@ def main():
         _w_f64(f, sgc['floor_power'], sgc['aud_thr_lf'], sgc['aud_thr_mf'],
                sgc['aud_thr_hf'], sgc['low_render_limit'],
                sgc['normal_render_limit'])
-        _w_i32(f, sgc['hf_lgb'], sgc['hf_biq'], sgc['conservative_hf'])
+        _w_i32(f, sgc['hf_lgb'], sgc['hf_biq'], sgc['conservative_hf'],
+               sgc['lf_clamp_bin'])
         _w_f64(f, sgc['dne_enr_threshold'], sgc['dne_enr_exit_threshold'],
                sgc['dne_snr_threshold'])
         _w_i32(f, sgc['dne_use_during_initial_phase'],
@@ -423,6 +434,7 @@ def main():
         _w_i32(f, n_hops)
         for r in rows:
             _w_i32(f, r['ree_reset_before'])
+            _w_i32(f, r['dt_protect_active'])
             _w_c64(f, r['near_spec'])
             _w_c64(f, r['far_spec'])
             _w_c64(f, r['echo_spec'])

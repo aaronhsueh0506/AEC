@@ -63,6 +63,13 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->kalman_q_high = 1e-3f;
     cfg->kalman_q_low = 1e-6f;
     cfg->delay_acquire_protect_converged = 1;
+    /* DT-deg recovery stack (default ON, mirrors Python 16285fd). */
+    cfg->dt_aware_recovery_soft = 1;
+    cfg->dt_aware_res_floor_enabled = 1;
+    cfg->min_gain_floor_dt_db = -20.0f;
+    cfg->ne_recent_threshold = 0.3;   /* f64, matches Python float(0.3) */
+    cfg->ne_recent_hold = 150;
+    cfg->ne_recent_sustain = 3;
     cfg->min_gain_floor_far_active_db = -28.0f;   /* balanced */
     cfg->filter_misadjustment_stable_frames = 30;
     cfg->filter_misadjustment_hangover_frames = 100;
@@ -302,7 +309,9 @@ static void aec3_post_chain_reset(Aec* a) {
                  AEC3B_REE_DEFAULT_GAIN, AEC3B_REE_TM_GAIN, AEC3B_REE_ERLE_ONSET_COMP,
                  AEC3B_REE_REVERB_DECAY, AEC3B_REE_REVERB_MILD_SCALE,
                  AEC3B_REE_REVERB_ENABLED, AEC3B_REE_REVERB_TAIL_STRENGTH,
-                 AEC3B_REE_USE_AEC3_RESIDUAL_NOISE_GATE, AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW,
+                 AEC3B_REE_USE_AEC3_RESIDUAL_NOISE_GATE,
+                 AEC3B_USE_STATIONARITY_PROPERTIES,
+                 AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW,
                  AEC3B_REE_NL_R2_ENABLED, AEC3B_REE_NL_R2_ALPHA, AEC3B_REE_NL_NORM_POWER,
                  AEC3B_REE_RESIDUAL_NOISE_GATE_POWER, AEC3B_REE_NOISE_FLOOR_HOLD_HOPS,
                  AEC3B_REE_USE_FREQ_RESPONSE, AEC3B_REE_REVERB_USE_CONSERVATIVE,
@@ -532,7 +541,9 @@ int aec_create(Aec* a, const AecConfig* cfg) {
                  AEC3B_REE_DEFAULT_GAIN, AEC3B_REE_TM_GAIN, AEC3B_REE_ERLE_ONSET_COMP,
                  AEC3B_REE_REVERB_DECAY, AEC3B_REE_REVERB_MILD_SCALE,
                  AEC3B_REE_REVERB_ENABLED, AEC3B_REE_REVERB_TAIL_STRENGTH,
-                 AEC3B_REE_USE_AEC3_RESIDUAL_NOISE_GATE, AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW,
+                 AEC3B_REE_USE_AEC3_RESIDUAL_NOISE_GATE,
+                 AEC3B_USE_STATIONARITY_PROPERTIES,
+                 AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW,
                  AEC3B_REE_NL_R2_ENABLED, AEC3B_REE_NL_R2_ALPHA, AEC3B_REE_NL_NORM_POWER,
                  AEC3B_REE_RESIDUAL_NOISE_GATE_POWER, AEC3B_REE_NOISE_FLOOR_HOLD_HOPS,
                  AEC3B_REE_USE_FREQ_RESPONSE, AEC3B_REE_REVERB_USE_CONSERVATIVE,
@@ -578,6 +589,10 @@ int aec_create(Aec* a, const AecConfig* cfg) {
         scfg.split_floor_far_active =
             pow(10.0, (double)cfg->min_gain_floor_far_active_db / 10.0);
         scfg.split_floor_far_silent = AEC3B_SG_SPLIT_FLOOR_FAR_SILENT;
+        /* DT-gated floor: 10^(min_gain_floor_dt_db/10) (mirrors Python
+         * split_floor_dt_db -> _split_floor_dt). */
+        scfg.split_floor_dt =
+            pow(10.0, (double)cfg->min_gain_floor_dt_db / 10.0);
         scfg.split_floor_latch_power = AEC3B_SG_SPLIT_FLOOR_LATCH_POWER;
         scfg.soft_blend_enabled = AEC3B_SG_SOFT_BLEND_ENABLED;
         scfg.soft_blend_per_bin = AEC3B_SG_SOFT_BLEND_PER_BIN;
@@ -684,6 +699,7 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     a->frame_count = 0;
     a->poor_coarse_counter = 0;
     a->coarse_reset_hangover = 0;
+    a->leakage_div_sustained_counter = 0;
     a->misadj_e2_acum = 0.0; a->misadj_y2_acum = 0.0; a->misadj_n_acum = 0;
     a->misadj_inv = 0.0; a->misadj_overhang = 0;
     a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
@@ -767,7 +783,9 @@ void aec_reset(Aec* a) {
     a->limiter_gain = 1.0; a->has_limiter_lag = 0;
     a->near_power = 0.0; a->raw_error_power = 0.0;
     a->frame_count = 0;
+    a->ne_above = 0; a->ne_recent_frames = 0;
     a->poor_coarse_counter = 0; a->coarse_reset_hangover = 0;
+    a->leakage_div_sustained_counter = 0;
     a->misadj_e2_acum = 0.0; a->misadj_y2_acum = 0.0; a->misadj_n_acum = 0;
     a->misadj_inv = 0.0; a->misadj_overhang = 0;
     a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
@@ -832,6 +850,28 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* 1. mic HPF (ref HPF OFF). */
     if (a->has_hp) hpf_process(&a->hp_mic, a->near_hop, a->near_hop, hop);
 
+    /* Held "near-end seen recently" gate for DT-aware soft recovery (mirrors
+     * Python orchestrator 16285fd). Reads the PREVIOUS frame's dt_from_energy
+     * (doubletalk_update_energy_dt runs later in this frame, in the RES block),
+     * so the value here is the prior hop's — exactly like Python's _dt_from_energy
+     * property read at the top of process(). dt_from_energy ONLY: it is ~0 in
+     * far-end single-talk (mic ≈ echo), so FS never arms the gate (FS echo depth
+     * preserved). Require `sustain` consecutive frames above threshold before
+     * arming, then hold for `hold` frames. */
+    {
+        double ne_ind = a->dt_analyzer.dt_from_energy;
+        if (ne_ind > a->cfg.ne_recent_threshold)
+            a->ne_above += 1;
+        else
+            a->ne_above = 0;
+        if (a->ne_above >= a->cfg.ne_recent_sustain)
+            a->ne_recent_frames = a->cfg.ne_recent_hold;
+        else if (a->ne_recent_frames > 0)
+            a->ne_recent_frames -= 1;
+        else
+            a->ne_recent_frames = 0;
+    }
+
     /* 2. saturation. */
     double sat_ref = 0.0;
     if (a->has_sat) {
@@ -854,17 +894,32 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         if (eligible && a->current_delay < 0 && delay_aec3_is_solid(&a->delay)
                 && !already_cancelling) {
             a->current_delay = new_delay;
-            aec_reset_filter_derived_state(a);
-            filter_convergence_mark_diverged(&a->convergence);
-            pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
-            /* shadow is PBFDAF: handle_echo_path_change has no PBFDAF variant;
-             * the Python shadow.handle_echo_path_change resets the coarse
-             * counter. Mirror via the PBFDAF counters directly. */
-            if (a->has_shadow) {
-                a->shadow_filter.poor_excitation_counter = AEC3_POOR_EXC_COUNTER_INITIAL_HOPS;
-                a->shadow_filter.call_counter = 0;
+            if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+                /* Soft acquisition (mirrors Python 16285fd): apply the ring
+                 * alignment (current_delay set above) + reset filter excitation
+                 * counters ONLY; keep the converged taps + let them re-adapt at
+                 * normal step size. No tap wipe, no mark_diverged, no AecState
+                 * full reset (no pending_delay_change). Avoids the aggressive-
+                 * recovery tail overfitting near-end that arrives after this
+                 * (far-only) acquisition. */
+                pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
+                if (a->has_shadow) {
+                    a->shadow_filter.poor_excitation_counter = AEC3_POOR_EXC_COUNTER_INITIAL_HOPS;
+                    a->shadow_filter.call_counter = 0;
+                }
+            } else {
+                aec_reset_filter_derived_state(a);
+                filter_convergence_mark_diverged(&a->convergence);
+                pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
+                /* shadow is PBFDAF: handle_echo_path_change has no PBFDAF variant;
+                 * the Python shadow.handle_echo_path_change resets the coarse
+                 * counter. Mirror via the PBFDAF counters directly. */
+                if (a->has_shadow) {
+                    a->shadow_filter.poor_excitation_counter = AEC3_POOR_EXC_COUNTER_INITIAL_HOPS;
+                    a->shadow_filter.call_counter = 0;
+                }
+                a->pending_delay_change = AEC_DA_NEW_DETECTED;
             }
-            a->pending_delay_change = AEC_DA_NEW_DETECTED;
         }
 
         /* pending TTL aging (once per estimation cycle / per hop). */
@@ -880,16 +935,28 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             if (a->has_pending && abs(new_delay - a->pending_delay) < 16) {
                 a->current_delay = new_delay;
                 a->has_pending = 0; a->pending_delay = -1; a->pending_delay_ttl = 0;
-                aec_reset_filter_derived_state(a);
-                epc_force_delay(&a->epc);
-                filter_q_high(&a->main_filter);
-                if (a->has_shadow) {
-                    a->shadow_filter.poor_excitation_counter = AEC3_POOR_EXC_COUNTER_INITIAL_HOPS;
-                    a->shadow_filter.call_counter = 0;
+                if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+                    /* Soft realign (mirrors Python 16285fd): the ring read
+                     * offset is already updated (current_delay above). Keep the
+                     * converged filter, re-adapt at normal step size — no tap
+                     * wipe, no Kalman P-override, no q-boost, no mark_diverged,
+                     * no epc_force_delay, no pending_delay_change. Avoids the
+                     * over-cancel + near-end overfit when movement re-locks
+                     * through double-talk. (Python only sets the dead
+                     * _epc_reset_fired_this_frame FQA flag here — no audio
+                     * effect, not modelled in C.) */
+                } else {
+                    aec_reset_filter_derived_state(a);
+                    epc_force_delay(&a->epc);
+                    filter_q_high(&a->main_filter);
+                    if (a->has_shadow) {
+                        a->shadow_filter.poor_excitation_counter = AEC3_POOR_EXC_COUNTER_INITIAL_HOPS;
+                        a->shadow_filter.call_counter = 0;
+                    }
+                    filter_convergence_mark_diverged(&a->convergence);
+                    pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
+                    a->pending_delay_change = AEC_DA_NEW_DETECTED;
                 }
-                filter_convergence_mark_diverged(&a->convergence);
-                pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
-                a->pending_delay_change = AEC_DA_NEW_DETECTED;
             } else {
                 a->pending_delay = new_delay; a->has_pending = 1; a->pending_delay_ttl = 3;
             }
@@ -1091,8 +1158,23 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             a->poor_coarse_counter = 0;
             ree_reset(&a->a3_ree);          /* REE reset on rescue rising edge. */
         }
+        /* Track F: sustained leakage_div gate. Fires after 5 consecutive hops
+         * (50 ms) with >50% bins on the diverged-leakage branch — covers the
+         * DT-onset window before coarse_reset_hangover kicks in. Mirrors
+         * orchestrator.py _leakage_div_sustained_counter / _dt_leakage_gate. */
+        float ld_frac = a->main_filter.last_leakage_div_frac;
+        if (ld_frac > 0.5f) {
+            if (a->leakage_div_sustained_counter < 10)
+                a->leakage_div_sustained_counter++;
+        } else {
+            if (a->leakage_div_sustained_counter > 0)
+                a->leakage_div_sustained_counter--;
+        }
+        int dt_leakage_gate = (a->leakage_div_sustained_counter >= 5);
         if (a->coarse_reset_hangover > 0) {
             a->coarse_reset_hangover--;
+            a->main_filter.disallow_leakage_diverged = 1;
+        } else if (dt_leakage_gate) {
             a->main_filter.disallow_leakage_diverged = 1;
         } else {
             a->main_filter.disallow_leakage_diverged = 0;
@@ -1121,7 +1203,16 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* 14. EPV trigger. */
     EpcEvent epv = epc_update_epv(&a->epc, far_pwr_global,
                                   a->convergence.converged, a->regime.main_paused);
-    if (epv.fired) {
+    /* (Python's _epv_suppressed weak-filter damping is env-gated, default OFF,
+     * so epv.fired here == fired-and-not-suppressed in the balanced config.) */
+    if (epv.fired && a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+        /* Soft (mirrors Python 16285fd): EPV gain-change recovery is
+         * double-talk-blind (far-power EMA swing only). While near recently
+         * present, skip the aggressive Kalman re-adapt + mark_diverged + ERLE
+         * reset; the converged filter tracks moderate gain change at its normal
+         * step size. (Python only sets the dead _epc_reset_fired_this_frame FQA
+         * flag — no audio effect, not modelled in C.) */
+    } else if (epv.fired) {
         a->pending_gain_change = 1;
         pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
         filter_q_high(&a->main_filter);
@@ -1135,7 +1226,15 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         EpcEvent rise = epc_update_shadow_rise(&a->epc, a->main_err_smooth,
                                                a->shadow_err_smooth,
                                                a->render_activity.is_stationary);
-        if (rise.fired) {
+        if (rise.fired && a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+            /* Soft (mirrors Python 16285fd): shadow_rise recovery is
+             * double-talk-blind (only a far-stationarity guard). While near
+             * recently present, skip the aggressive re-adapt + mark_diverged +
+             * ERLE reset; its tail overfits near-end that arrives after the
+             * (far-only) trigger. No hangover tick (Python ticks only when rise
+             * did NOT fire). (Python only sets the dead _epc_reset_fired_this_frame
+             * FQA flag here — no audio effect, not modelled in C.) */
+        } else if (rise.fired) {
             a->pending_gain_change = 1;
             pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
             filter_q_high(&a->main_filter);
@@ -1308,6 +1407,13 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             Aec3PostRunObj obj;
             obj.state = &a->a3_state; obj.ree = &a->a3_ree; obj.sg = &a->a3_sg;
             obj.stationarity = &a->a3_stat; obj.lfs = &a->a3_lfs; obj.fft = a->post_fft;
+
+            /* DT-gated min-gain floor lift (mirrors Python 16285fd): during
+             * double-talk (near recently present) protect near-end by lifting
+             * the RES floor; FS (no near) keeps the aggressive far_active floor.
+             * Set on the SG just before get_gain (driven inside aec3_post_run). */
+            a->a3_sg.dt_protect_active =
+                (a->cfg.dt_aware_res_floor_enabled && a->ne_recent_frames > 0) ? 1 : 0;
 
             int pgc = a->pending_gain_change, pdc = a->pending_delay_change;
             aec3_post_run(&a->post, &in, &obj, &a->a3_sc, a->final_out, &pgc, &pdc);

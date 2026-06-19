@@ -322,9 +322,11 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     }
     m->delay_blocks = m->peak_index / FA_HOP_SAMPLES;
 
-    /* UpdateFilterGain (filter_analyzer.cc:142-159). Uses the RAW filter. */
+    /* UpdateFilterGain (filter_analyzer.cc:142-159). AEC3 passes h_highpass_ to
+     * UpdateFilterGain and reads filter_time_domain[peak_index] from it, so the
+     * gain is |h_hpf[peak]| (matches filter_analyzer.py update()). */
     sufficient = (m->blocks_since_reset > FA_CONVERGENCE_THRESHOLD_HOPS);
-    peak_abs = fabs((double)filter_taps[m->peak_index]);
+    peak_abs = fabs((double)h[m->peak_index]);
     if (sufficient && m->consistent_estimate) {
         m->gain = peak_abs;
     } else if (m->gain != 0.0) {        /* `elif self._gain:` (truthy) */

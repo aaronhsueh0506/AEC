@@ -236,7 +236,11 @@ def main():
             _n_part = flt.n_partitions
             _curr_p = (flt.partition_idx - 1) % _n_part
             _delay = int(self._aec3_state.min_direct_path_filter_delay())
-            _delay = max(0, min(_delay, _n_part - 1))
+            # MUST match orchestrator's clamp (_n_part - 2); the real method
+            # keeps _past_idx from wrapping to current. Using _n_part - 1 here
+            # made x2_at_delay/x2_past diverge from the captured x2r golden
+            # whenever the clamp was active (delay >= _n_part - 1).
+            _delay = max(0, min(_delay, _n_part - 2))
             _delay_idx = (_curr_p - _delay) % _n_part
             _past_idx = (_curr_p - _delay - 1) % _n_part
             x2_at_delay = (np.abs(flt.X_buf[_delay_idx]) ** 2).astype(

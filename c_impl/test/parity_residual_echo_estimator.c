@@ -33,7 +33,8 @@ int main(int argc, char **argv) {
 
     /* config preamble */
     int hop_size, model_reverb_in_nl, erle_onset_comp, reverb_enabled;
-    int use_aec3_residual_noise_gate, use_aec3_echo_gen_window, nl_r2_enabled;
+    int use_aec3_residual_noise_gate, use_stationarity_properties;
+    int use_aec3_echo_gen_window, nl_r2_enabled;
     int noise_floor_hold_hops, use_freq_response, reverb_use_conservative;
     double min_noise_floor_power, noise_gate_power_legacy, noise_gate_slope;
     double stationary_gate_slope, default_gain, tm_gain, reverb_decay;
@@ -66,6 +67,7 @@ int main(int argc, char **argv) {
     if (!rdi(f, &reverb_enabled)) return 2;
     if (!rdd(f, &reverb_tail_strength)) return 2;
     if (!rdi(f, &use_aec3_residual_noise_gate)) return 2;
+    if (!rdi(f, &use_stationarity_properties)) return 2;
     if (!rdi(f, &use_aec3_echo_gen_window)) return 2;
     if (!rdi(f, &nl_r2_enabled)) return 2;
     if (!rdd(f, &nl_r2_alpha)) return 2;
@@ -120,7 +122,8 @@ int main(int argc, char **argv) {
         ree_init(&ree, n_bins, hop_size, &em, default_gain, tm_gain,
                  erle_onset_comp, reverb_decay, reverb_mild_scale,
                  reverb_enabled, reverb_tail_strength,
-                 use_aec3_residual_noise_gate, use_aec3_echo_gen_window,
+                 use_aec3_residual_noise_gate, use_stationarity_properties,
+                 use_aec3_echo_gen_window,
                  nl_r2_enabled, nl_r2_alpha, nl_norm_power,
                  residual_noise_gate_power, noise_floor_hold_hops,
                  use_freq_response, reverb_use_conservative,
