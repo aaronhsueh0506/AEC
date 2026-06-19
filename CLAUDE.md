@@ -20,7 +20,11 @@ tolerance:
   (`PBFDKF`, `ShadowFilter`, etc.). Built with `-ffp-contract=off` mandatory.
 
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
-(currently **3.22.5**; BALANCED algorithm byte-equal since 3.22.4 — see CHANGELOG). Canonical algorithm reference:
+(currently **3.23.0**; BALANCED changed in 3.23.0 — no-PA matched-filter
+pre-echo fix + DT-deg recovery stack — see CHANGELOG). The Python↔C port is
+**bit-exact under `-DUSE_STANDARD_MATH`** (all module parity tests + end-to-end
+`parity_aec_e2e`, 0 mismatches, 3 presets); production `fast_math.h` is the only
+residual (~1e-5..1e-4 in exp/sqrt stages). Canonical algorithm reference:
 [docs/aec_methods.md](docs/aec_methods.md). Architecture flowcharts —
 current vs AEC3 reference:
 [docs/architecture_v3_22_5_vs_aec3.html](docs/architecture_v3_22_5_vs_aec3.html).

@@ -16,6 +16,50 @@ when verdict requires it.
 
 ---
 
+## [3.23.0] — 2026-06-20 — no-PA delay fix + DT-deg recovery + Python↔C bit-exact completion
+
+The first BALANCED algorithm change since 3.22.x. Two production changes plus a
+Python↔C parity completion. Bench is now reported **without pre-alignment**
+(online matched-filter self-align, production-faithful).
+
+**(1) Matched-filter pre-echo fix (no-PA delay).** The matched-filter
+`accumulated_error` was binned by capture-sample index (`i // 4`), so only bins
+0–3 ever filled and pre-echo always collapsed to ~0. With `detect_pre_echo`
+default-True, that zero pre-echo *overrode* the correct highest-peak delay →
+the no-PA online delay was systematically pulled back toward 0 (pre-align was
+immune, masking the bug). Fixed to the AEC3 cumsum prefix-error form
+(`matched_filter.cc:516-524`). Restores online delay acquisition; FS/DT echo up
+across every bucket. C port `delay_aec3.c` in sync.
+
+**(2) DT-deg recovery stack (default-ON).** Online delay acquisition's
+filter-reset cost lands on double-talk. Two energy-gated levers (`_ne_recent_frames`,
+not coherence): `dt_aware_recovery_soft` (soft acquire-reset — keep the converged
+filter) + `dt_aware_res_floor_enabled` with `min_gain_floor_dt_db=-20` (DT-gated
+RES min-gain floor lift toward near-end protection). DT deg recovered above the
+pre-align reference while all ship bars hold.
+
+No-PA 800-case BALANCED (online self-align): FS_static 3.544 / FS_movement 3.519
+/ DT_static 4.218·2.074 / DT_movement 4.114·2.140 / NE 4.021 — four ship bars met
+(FS echo>3.5, DT echo>4, DT deg>2.0, NE deg>=4).
+
+**(3) Python↔C bit-exact completion.** Every module parity test + the end-to-end
+`parity_aec_e2e` now pass with **0 mismatches under `-DUSE_STANDARD_MATH`** across
+all three presets (4186 hops). Production `fast_math.h` (approximate
+`fast_exp`/`fast_sqrt`) is the only residual (~1e-5..1e-4 in exp/sqrt stages; the
+linear/PBFDKF path stays bit-exact under both backends). The parity tests are
+logic checks — build with `-DUSE_STANDARD_MATH`; that flag yields true bit-exact.
+
+Four real production-C correctness bugs were found and fixed so the C matches the
+validated Python source-of-truth (not test-only): `filter_analyzer` read the gain
+peak from the raw filter taps instead of the high-pass-filtered taps;
+`residual_echo_estimator` gated its nonlinear noise gate on `transparent_mode`
+instead of `use_stationarity_properties` (collapsing nonlinear R² to 0);
+`aec.c` was missing the orchestrator's Track-F sustained-leakage gate in the
+PBFDKF `H_error` refresh (linear output diverged from hop 79); `suppression_gain_init`
+did not zero `dt_protect_active`. Several parity tests/golden-gens also had infra
+gaps (unset `lf_clamp_bin`, missing DT-floor replay, a stale gen kwarg, a missing
+`hpf` golden-gen) — those are test-only and do not affect production.
+
 ## [3.22.5] — 2026-06-07 — streaming C API + release cleanup (BALANCED byte-equal)
 
 Streaming C API + dead-code removal + research-arc closures. **BALANCED algorithm

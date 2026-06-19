@@ -10,26 +10,33 @@ Python reference implementation + C implementation.
 
 ## Status snapshot
 
-**800-case AECMOS — ours vs WebRTC AEC3 vs Speex (MDF)**, standard bench
-`balanced / fl=832 (52 ms) / --cng`, local AECMOS ONNX, full AEC Challenge
-2021 blind corpus (echo↑ deg↑):
+**800-case AECMOS — ours vs WebRTC AEC3 vs Speex (MDF)**, `balanced /
+fl=832 (52 ms) / --cng`, local AECMOS ONNX, full AEC Challenge 2021 blind
+corpus (echo↑ deg↑). **No pre-alignment** — every engine self-aligns online
+(ours via its in-pipeline matched-filter `EchoPathDelayEstimator`; AEC3 via its
+internal `RenderDelayController`; Speex internally), exactly as in production:
 
 | Bucket | n | **ours** echo / deg | AEC3 echo / deg | Speex echo / deg |
 |---|---|---|---|---|
-| FS_static   | 169 | 3.576 / 4.999 | 3.821 / 4.999 | 2.847 / 5.000 |
-| FS_movement | 131 | 3.512 / 4.999 | 3.790 / 4.999 | 2.757 / 5.000 |
-| DT_static   | 186 | 4.201 / 2.156 | 4.531 / 1.815 | 3.427 / 3.179 |
-| DT_movement | 114 | 4.082 / 2.228 | 4.456 / 1.816 | 3.272 / 3.301 |
-| NE          | 200 | 4.998 / 4.047 | 4.999 / 3.410 | 4.998 / 4.128 |
+| FS_static   | 169 | 3.544 / 4.999 | 3.821 / 4.999 | 2.847 / 5.000 |
+| FS_movement | 131 | 3.519 / 4.999 | 3.790 / 4.999 | 2.757 / 5.000 |
+| DT_static   | 186 | 4.218 / 2.074 | 4.531 / 1.815 | 3.427 / 3.179 |
+| DT_movement | 114 | 4.114 / 2.140 | 4.456 / 1.816 | 3.272 / 3.301 |
+| NE          | 200 | 4.998 / 4.021 | 4.999 / 3.410 | 4.998 / 4.128 |
 
 - **Echo cancellation: AEC3 > ours > Speex.** AEC3 cuts the most; Speex is a
-  weak canceller (FS ~2.8, DT ~3.3); ours sits in between (FS ~3.5, DT ~4.1).
+  weak canceller (FS ~2.8, DT ~3.3); ours sits in between (FS ~3.5, DT ~4.2).
 - **Near-end preservation (deg): Speex > ours > AEC3.** AEC3 pays for its echo
   cancellation with the worst DT deg (1.82) and NE deg (3.41); ours holds the
-  middle and **beats AEC3 on every degradation axis** (DT deg 2.16/2.23 vs 1.82,
-  NE deg 4.05 vs 3.41) while **approaching AEC3 on echo** (FS_movement 3.512 vs
-  3.790, within 0.28). This is the ship target: *approach AEC3 on echo, beat it
-  on deg.* All four ship bars met; **FS_movement 3.512 > 3.5** is the primary gate.
+  middle and **beats AEC3 on every degradation axis** (DT deg 2.07/2.14 vs 1.82,
+  NE deg 4.02 vs 3.41) while **approaching AEC3 on echo** (FS_movement 3.519 vs
+  3.790, within 0.27). This is the ship target: *approach AEC3 on echo, beat it
+  on deg.* All four ship bars met; **FS_movement 3.519 > 3.5** is the primary gate.
+- These numbers reflect the v3.23.0 matched-filter pre-echo fix (the delay
+  estimator now holds the true echo-path delay online instead of collapsing
+  toward 0) plus the default-ON DT-deg recovery stack (soft acquire-reset +
+  DT-gated RES floor), which trades a little echo for DT-deg headroom above the
+  pre-align reference while keeping all four ship bars.
 
 ### Presets — one Pareto knob
 
