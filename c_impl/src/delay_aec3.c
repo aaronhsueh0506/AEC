@@ -168,11 +168,16 @@ static void da_ring_gather_back(const DaRing *r, int start_offset, int length, f
 /* Mirrors matched_filter_core(). Returns filters_updated; writes *error_sum. */
 static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
                                   double x2_sum_threshold, float smoothing,
-                                  const float *y, float *h, double *error_sum_out) {
+                                  const float *y, float *h, double *error_sum_out,
+                                  float *instantaneous_error_out) {
     double error_sum = 0.0;
     int filters_updated = 0;
     int i;
     float x_window[DA_FILTER_SIZE];
+    if (instantaneous_error_out) {
+        int k0;
+        for (k0 = 0; k0 < DA_ACC_ERR_SIZE; ++k0) instantaneous_error_out[k0] = 0.0f;
+    }
     for (i = 0; i < DA_SUB_BLOCK_SIZE; ++i) {
         int start_back = alignment_shift_back + (DA_SUB_BLOCK_SIZE - 1 - i);
         double x2_sum, s, e;
@@ -183,6 +188,34 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
         e = (double)y[i] - s;
         saturation = (y[i] >= DA_SATURATION_LIMIT || y[i] <= -DA_SATURATION_LIMIT);
         error_sum += e * e;
+        if (instantaneous_error_out) {
+            /* AEC3 MatchedFilterCoreWithAccumulatedError (matched_filter.cc:106-139):
+             * accumulate, per filter-tap GROUP of 4, the squared error of the filter
+             * PREFIX up to that group: instE[j] += (Σ h[:4(j+1)]·x[:4(j+1)] − y[i])².
+             * ComputePreEchoLag then walks back for the earliest group whose prefix
+             * already explains the echo (= onset). Mirrors numpy exactly: f32 product,
+             * f32 sequential group-sum (.sum over 4), f32 cumsum prefix, then the
+             * (prefix − y[i]) subtraction and the += accumulation in float64.
+             * Uses pre-NLMS-update h (the update below runs after this block). */
+            float prefix = 0.0f;
+            int j;
+            const float *hp = h;
+            const float *xp = x_window;
+            for (j = 0; j < DA_ACC_ERR_SIZE; ++j) {
+                float gs = hp[0] * xp[0];
+                gs = gs + hp[1] * xp[1];
+                gs = gs + hp[2] * xp[2];
+                gs = gs + hp[3] * xp[3];
+                prefix = prefix + gs;
+                {
+                    double d = (double)prefix - (double)y[i];
+                    instantaneous_error_out[j] =
+                        (float)((double)instantaneous_error_out[j] + d * d);
+                }
+                hp += DA_ACCUMULATED_ERROR_SUBSAMPLE_RATE;
+                xp += DA_ACCUMULATED_ERROR_SUBSAMPLE_RATE;
+            }
+        }
         if (x2_sum > x2_sum_threshold && !saturation) {
             /* alpha = smoothing * e / x2_sum  (Python double); then the array
              * op casts alpha to float32 and computes h += f32(alpha)*x in f32. */
@@ -198,8 +231,9 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
     return filters_updated;
 }
 
-/* Mirrors _update_accumulated_error.  instantaneous is all-zero here (Python
- * never writes _instantaneous_error), so norm == 0 every element. */
+/* Mirrors _update_accumulated_error.  `instantaneous` carries the per-tap-prefix
+ * squared error filled by da_matched_filter_core for the last filter in the bank
+ * (matches Python's single shared _instantaneous_error buffer). */
 static void da_update_accumulated_error(const float *instantaneous, float *accumulated,
                                         double one_over_anchor) {
     int k;
@@ -277,7 +311,8 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
         double error_sum;
         int filters_updated, lag_estimate, reliable, lag;
         filters_updated = da_matched_filter_core(ring, alignment_shift, x2_sum_threshold,
-                                                 smoothing, capture, mf->filters[n], &error_sum);
+                                                 smoothing, capture, mf->filters[n], &error_sum,
+                                                 mf->instantaneous_error);
         lag_estimate = da_max_square_peak_index(mf->filters[n], DA_FILTER_SIZE);
         reliable = (lag_estimate > 2
                     && lag_estimate < (DA_FILTER_SIZE - 10)
@@ -306,7 +341,9 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
         mf->reported_pre_echo_lag = mf->winner_lag;
         /* detect_pre_echo path (always enabled in our config). */
         if (mf->last_detected_best_lag_filter == winner_index) {
-            if (error_sum_anchor > 1.0) {
+            /* AEC3 gate is int16-scale (error_sum > 1.0 in Q15²); the float[-1,1]
+             * equivalent is 1.0 / 32768² ≈ 9.3e-10 (matches matched_filter.py). */
+            if (error_sum_anchor > 1.0 / (32768.0 * 32768.0)) {
                 da_update_accumulated_error(mf->instantaneous_error,
                                             mf->accumulated_error[winner_index],
                                             1.0 / error_sum_anchor);
