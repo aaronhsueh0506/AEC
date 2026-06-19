@@ -84,6 +84,7 @@ void suppression_gain_init(SuppressionGain *sg,
     }
     sg->low_render_avg_power = 32768.0 * 32768.0;
     sg->far_active_latched = 0;
+    sg->dt_protect_active = 0;
     sg->initial_state = 1;
     sg->stat_mask_frac = 0.0;
     sg->dne_trigger_counter = 0;
@@ -301,9 +302,16 @@ static void get_min_gain(SuppressionGain *sg, const float *weighted_residual,
     }
     /* Split min-gain floor (default ON). */
     if (c->split_floor_enabled) {
-        float base_floor = (float)(sg->far_active_latched
-                                   ? c->split_floor_far_active
-                                   : c->split_floor_far_silent);
+        double base_floor_d;
+        if (sg->far_active_latched) {
+            /* DT (near recently present) lifts the floor toward near-protection;
+             * FS (far-active, no near) keeps the aggressive far_active floor. */
+            base_floor_d = sg->dt_protect_active ? c->split_floor_dt
+                                                 : c->split_floor_far_active;
+        } else {
+            base_floor_d = c->split_floor_far_silent;
+        }
+        float base_floor = (float)base_floor_d;
         for (k = 0; k < n; ++k) {
             float v = out[k];
             if (v < base_floor) v = base_floor;  /* np.maximum f32 */

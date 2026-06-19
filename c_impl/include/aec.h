@@ -67,6 +67,20 @@ typedef struct AecConfig {
     float  kalman_q_low;           /* 1e-6 */
     int    delay_acquire_protect_converged;   /* 1 */
 
+    /* DT-deg recovery stack (default ON, mirrors Python 16285fd). The
+     * energy-based held near-end gate (_ne_recent_frames) arms two levers
+     * during double-talk only (FS never raises dt_from_energy): */
+    int    dt_aware_recovery_soft;            /* 1 — soft (non-destructive)
+                                               * Path A/B/EPV/shadow_rise realign
+                                               * while near recently present */
+    int    dt_aware_res_floor_enabled;        /* 1 — DT-gated RES min-gain floor */
+    float  min_gain_floor_dt_db;              /* -20.0 — DT floor (dB) */
+    /* ne_recent gate parameters (mirror AecConfig.ne_recent_*). threshold is
+     * f64 to match Python's float(0.3) exactly (0.3f rounds differently). */
+    double ne_recent_threshold;               /* 0.3 */
+    int    ne_recent_hold;                    /* 150 */
+    int    ne_recent_sustain;                 /* 3 */
+
     /* preset strength axis (the ONLY field gentle/balanced/aggressive differ
      * in): SuppressionGain far-active min-gain floor in dB
      * (gentle -20 / balanced -28 / aggressive -38). */
@@ -162,9 +176,17 @@ typedef struct Aec {
     double alpha_pow;
     long   frame_count;
 
+    /* DT-deg recovery: held "near-end seen recently" gate (mirrors Python
+     * _ne_above consecutive-above counter + _ne_recent_frames hold countdown). */
+    int    ne_above;
+    int    ne_recent_frames;
+
     /* poor-coarse rescue (process loop) */
     int    poor_coarse_counter;
     int    coarse_reset_hangover;
+    /* Track F: sustained leakage-diverged gate counter (clamped 0..10).
+     * Mirrors orchestrator._leakage_div_sustained_counter. */
+    int    leakage_div_sustained_counter;
 
     /* FilterMisadjustmentEstimator accumulators */
     double misadj_e2_acum, misadj_y2_acum;

@@ -28,6 +28,7 @@ Config for all three cases is the balanced active path:
 Layout (LE):
   int32   n_cases
   float64 split_floor_far_active_pow, split_floor_far_silent_pow
+  float64 split_floor_dt_pow          (DT-gated floor; orchestrator-set flag)
   float64 split_floor_latch_power
   float64 low_render_threshold              (block_energy_scale 50*50*64)
   float32 max_inc, max_dec_lf               (wallclock ratchet, ne==normal here)
@@ -50,7 +51,8 @@ Layout (LE):
     n_frames x [
       nearend[n_bins] f32 | R2[n_bins] f32 | R2_unb[n_bins] f32
       | CN[n_bins] f32 | render_block[160] f32
-      | saturated_echo u8 | clock_drift u8
+      | saturated_echo u8 | clock_drift u8 | is_reset u8
+      | initial_state u8 | dt_protect u8
       | gain[n_bins] f32   (expected output)
     ]
 
@@ -107,6 +109,7 @@ def capture_config(self):
         n_bins=N,
         split_floor_far_active=float(self._split_floor_far_active),
         split_floor_far_silent=float(self._split_floor_far_silent),
+        split_floor_dt=float(self._split_floor_dt),
         split_floor_latch_power=float(self._split_floor_latch_power),
         low_render_threshold=float(self._low_render._threshold),
         max_inc=float(self._max_inc_normal),         # ne == normal under ratchet
@@ -128,6 +131,11 @@ def capture_config(self):
         nearend_smoother_n=int(self._nearend_smoother._n),
         aud_lf_end_bin=int(min(hz_to_bin(ea.lf_band_end_hz, N, sr), N)),
         aud_mf_end_bin=int(min(hz_to_bin(ea.mf_band_end_hz, N, sr), N)),
+        # LF-gain clamp anchor bin: _limit_lf_gains hardcodes hz_to_bin(250).
+        # Production C sets scfg.lf_clamp_bin = AEC3B_SG_LF_CLAMP_BIN (=8); the
+        # parity test must replay the same value (was an un-set cfg field ->
+        # garbage clamped a wide LF range and corrupted the gain).
+        lf_clamp_bin=int(hz_to_bin(250.0, N, sr)),
         floor_power=float(ea.floor_power),
         aud_thr_lf=float(ea.audibility_threshold_lf),
         aud_thr_mf=float(ea.audibility_threshold_mf),
@@ -182,6 +190,10 @@ def run_case(repo, mic_path, ref_path, frames, cfg_out):
         is_reset = (prev_id[0] is not None and id(self) != prev_id[0])
         prev_id[0] = id(self)
         cur_initial_state = bool(self._initial_state)
+        # DT-gated floor flag: set by the orchestrator on this instance BEFORE
+        # get_gain (== C sg->dt_protect_active). Capture so the C replay can
+        # reproduce the split_floor_dt floor on the same frames.
+        cur_dt_protect = bool(getattr(self, '_dt_protect_active', False))
         gain = orig(
             self, aec_state=aec_state, nearend_spectrum=nearend_spectrum,
             residual_echo_spectrum=residual_echo_spectrum,
@@ -206,6 +218,7 @@ def run_case(repo, mic_path, ref_path, frames, cfg_out):
                 bool(clock_drift),
                 bool(is_reset),
                 cur_initial_state,
+                cur_dt_protect,
                 _f32(gain).copy(),
             ))
         return gain
@@ -242,6 +255,7 @@ def write_header(f, C):
     """
     np.array([len(CASES)], dtype=np.int32).tofile(f)
     np.array([C['split_floor_far_active'], C['split_floor_far_silent'],
+              C['split_floor_dt'],
               C['split_floor_latch_power'], C['low_render_threshold']],
              dtype=np.float64).tofile(f)
     np.array([C['max_inc'], C['max_dec_lf']], dtype=np.float32).tofile(f)
@@ -252,7 +266,8 @@ def write_header(f, C):
     np.array([C['last_lf_band'], C['first_hf_band'], C['last_lf_smoothing_band'],
               C['last_permanent'], C['lf_smoothing_initial'], C['dne_lf_end'],
               C['trigger_threshold_hops'], C['hold_duration_hops'],
-              C['nearend_smoother_n'], C['aud_lf_end_bin'], C['aud_mf_end_bin']],
+              C['nearend_smoother_n'], C['aud_lf_end_bin'], C['aud_mf_end_bin'],
+              C['lf_clamp_bin']],
              dtype=np.int32).tofile(f)
     np.array([C['floor_power'], C['aud_thr_lf'], C['aud_thr_mf'],
               C['aud_thr_hf'], C['low_render_limit'], C['normal_render_limit']],
@@ -290,7 +305,7 @@ def main():
         write_header(f, captured_cfg)
         for name, frames in case_frames:
             np.array([N_BINS, len(frames)], dtype=np.int32).tofile(f)
-            for (ne, r2, r2u, cn, rb, sat, cd, rst, ist, gain) in frames:
+            for (ne, r2, r2u, cn, rb, sat, cd, rst, ist, dtp, gain) in frames:
                 ne.tofile(f)
                 r2.tofile(f)
                 r2u.tofile(f)
@@ -300,6 +315,7 @@ def main():
                 np.array([1 if cd else 0], dtype=np.uint8).tofile(f)
                 np.array([1 if rst else 0], dtype=np.uint8).tofile(f)
                 np.array([1 if ist else 0], dtype=np.uint8).tofile(f)
+                np.array([1 if dtp else 0], dtype=np.uint8).tofile(f)
                 gain.tofile(f)
     total = sum(len(fr) for _, fr in case_frames)
     print(f"wrote {out}  ({len(CASES)} cases, {total} total frames, "

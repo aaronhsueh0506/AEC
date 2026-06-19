@@ -59,6 +59,10 @@ typedef struct {
     int    hop_size;                /* 160 */
     double reverb_tail_strength;    /* 1.0 */
     int    use_aec3_residual_noise_gate; /* True */
+    int    use_stationarity_properties;  /* True in production — when set, the
+                                          * nonlinear-path residual noise gate
+                                          * (cc:121-129) is SKIPPED (mirrors
+                                          * Python `not _use_stationarity_properties`). */
     int    use_aec3_echo_gen_window;     /* True */
     int    nl_r2_enabled;           /* True */
     double nl_r2_alpha;             /* 0.1 */
@@ -125,6 +129,7 @@ void ree_init(ResidualEchoEstimator *r,
               double reverb_decay, double reverb_mild_decay_scale,
               int reverb_enabled, double reverb_tail_strength,
               int use_aec3_residual_noise_gate,
+              int use_stationarity_properties,
               int use_aec3_echo_gen_window,
               int nl_r2_enabled, double nl_r2_alpha, double nl_norm_power,
               double residual_noise_gate_power,
