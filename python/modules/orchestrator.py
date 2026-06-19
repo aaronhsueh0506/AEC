@@ -3716,6 +3716,8 @@ Examples:
                              '(shipped) / aggressive (echo-priority). Differ only '
                              'in the far-active min-gain floor (-20/-28/-38 dB).')
     parser.add_argument('--no-shadow', action='store_true', help='Disable shadow filter')
+    parser.add_argument('--no-delay-est', action='store_true',
+                        help='Disable online delay estimation (mirrors C aec_wav --no-delay-est)')
     parser.add_argument('--no-highpass', action='store_true', help='Disable high-pass filter')
     parser.add_argument('--highpass-cutoff', type=float, default=80.0,
                         help='High-pass filter cutoff frequency in Hz (default: 80)')
@@ -3772,6 +3774,8 @@ Examples:
         common_kw['enable_res'] = args.enable_res
     if args.cng is not None:
         common_kw['enable_cng'] = args.cng
+    if args.no_delay_est:
+        common_kw['enable_delay_est'] = False
     if args.preset:
         config = AecConfig.from_preset(args.preset, **common_kw)
     else:
