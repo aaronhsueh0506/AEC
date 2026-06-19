@@ -136,21 +136,28 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
              is_movement=False, **config_overrides):
     n = min(len(mic), len(ref))
 
-    # Always pre-align with global delay
-    delay = estimate_delay(mic, ref, sr)
-    if delay > 0 and delay < n:
-        ref_aligned = np.zeros(n, dtype=np.float32)
-        ref_aligned[delay:] = ref[:n - delay]
-    else:
+    if os.environ.get('NO_PREALIGN'):
+        # Realistic mode (matches production + AEC3/Speex, which get raw ref):
+        # NO offline pre-align crutch — the in-pipeline matched-filter
+        # EchoPathDelayEstimator self-aligns online to the true delay. Online
+        # delay-est ON for ALL files (config defaults: period 0.5s / init 0.3s).
         ref_aligned = ref[:n]
-
-    # Movement files: also enable online delay estimation for tracking changes
-    if is_movement:
-        delay_est_kw = dict(enable_delay_est=True,
-                            delay_est_period_s=0.25,
-                            delay_est_init_s=0.2)
+        delay_est_kw = dict(enable_delay_est=True)
     else:
-        delay_est_kw = dict(enable_delay_est=False)
+        # Legacy bench: offline GCC-PHAT pre-align (default; reproduces prior
+        # pre-align verdicts). Online delay-est only on movement files.
+        delay = estimate_delay(mic, ref, sr)
+        if delay > 0 and delay < n:
+            ref_aligned = np.zeros(n, dtype=np.float32)
+            ref_aligned[delay:] = ref[:n - delay]
+        else:
+            ref_aligned = ref[:n]
+        if is_movement:
+            delay_est_kw = dict(enable_delay_est=True,
+                                delay_est_period_s=0.25,
+                                delay_est_init_s=0.2)
+        else:
+            delay_est_kw = dict(enable_delay_est=False)
 
     # Allow CLI override of gain type via env var or config_overrides
     env_gain_type = os.environ.get('AEC_GAIN_TYPE')
