@@ -499,6 +499,7 @@ class SuppressionGain:
                  split_floor_enabled: bool = True,
                  split_floor_far_active_db: float = -22.0,
                  split_floor_far_silent_db: float = -12.0,
+                 split_floor_dt_db: float = -20.0,
                  split_floor_latch_power: float = 1.0e6) -> None:
         self._n_bins = int(n_bins)
         self._sr = int(sr)
@@ -509,6 +510,11 @@ class SuppressionGain:
         self._split_floor_enabled = bool(split_floor_enabled)
         self._split_floor_far_active = float(10.0 ** (split_floor_far_active_db / 10.0))
         self._split_floor_far_silent = float(10.0 ** (split_floor_far_silent_db / 10.0))
+        # DT-gated floor: used in place of far_active when the orchestrator sets
+        # _dt_protect_active (double-talk). Default == near far_active so an
+        # un-set flag is behaviourally neutral.
+        self._split_floor_dt = float(10.0 ** (split_floor_dt_db / 10.0))
+        self._dt_protect_active = False
         self._split_floor_latch_power = float(split_floor_latch_power)
         self._far_active_latched = False
         # echo_audibility lives on SuppressorConfig so orchestrator can
@@ -920,8 +926,13 @@ class SuppressionGain:
         # which lifts NE nearend at zero echo cost. See AecConfig and the
         # far-active latch in get_gain.
         if self._split_floor_enabled:
-            base_floor = (self._split_floor_far_active if self._far_active_latched
-                          else self._split_floor_far_silent)
+            if self._far_active_latched:
+                # DT (near recently present) lifts the floor toward near-protection;
+                # FS (far-active, no near) keeps the aggressive far_active floor.
+                base_floor = (self._split_floor_dt if self._dt_protect_active
+                              else self._split_floor_far_active)
+            else:
+                base_floor = self._split_floor_far_silent
             np.maximum(min_gain, base_floor, out=min_gain)
             np.minimum(min_gain, 1.0, out=min_gain)
         return min_gain.astype(np.float32)
