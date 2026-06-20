@@ -6,7 +6,7 @@ suppression. Targets full-duplex hands-free use cases (phone, smart
 speaker, conferencing, automotive).
 
 > Algorithm reference → [aec_methods.md](aec_methods.md)
-> Changelog → [CHANGELOG.md](CHANGELOG.md)
+> Changelog → [../CHANGELOG.md](../CHANGELOG.md)
 
 ---
 
@@ -139,14 +139,11 @@ and per-module breakdown:
 | `saturation.h` | `saturation.c` | clip detection + ref-side soft-clip |
 | `delay_est.h` | `delay_est.c` | GCC-PHAT delay estimation |
 | `pbfdkf.h` | `pbfdkf.c` | PBFDAF base + PBFDKF (G1 KX-blended P-update) |
-| `erle.h` | `erle.c` | FilterErle + FullbandErle + erle confidence |
 | `detectors.h` | `detectors.c` | RenderActivity + FilterConvergence + DoubleTalkAnalyzer |
 | `epc_shadow.h` | `epc_shadow.c` | EchoPathChangeDetector + ShadowCopyController |
 | `aec3_post.h` | `aec3_post.c` | **AEC3 post-filter driver** — PSD derivation + coherence-ERLE gate + CNG + OLA (production post-stage) |
 | `aec_state.h` / `residual_echo_estimator.h` / `suppression_gain.h` / `reverb_model.h` | resp. `.c` | post-filter sub-modules: AecState · ResidualEchoEstimator · SuppressionGain (ENR/EMR `GainToNoAudibleEcho`) · ReverbModel |
 | `aec_debug.h` | `aec_debug.c` | timestamped log infrastructure |
-| `res_filter.h` | `res_filter.c` | **legacy** 9-stage ResFilter — retired in v3.21, not in the production path (kept for reference/parity) |
-| — | `fft_fp64.c` | fp64 radix-2 FFT |
 
 ---
 
@@ -198,7 +195,7 @@ These cause correctness failures (not just style issues):
 | | |
 |---|---|
 | Reference correct | `ref` must be the playback loopback of what reaches the speaker |
-| Delay aligned | `mic - ref` delay must fit within `filter_length`. Online delay estimation handles this if delay < `max_delay_ms` (default 250 ms) |
+| Delay aligned | `mic - ref` delay must fit within `filter_length`. Online delay estimation handles this if delay < `max_delay_ms` (default 1024 ms) |
 | Sync mic and ref | same SR, time-aligned start. Drift will tank ERLE |
 | Sufficient far energy | silent / near-silent ref will not drive convergence |
 
@@ -394,7 +391,7 @@ rest is automatic:
 | RES bin resolution | sr / blk | sr / blk | sr / blk | ✓ |
 | `filter_length_ms` (default) | 52 | 52 | 52 (note 1) | ✗ user override |
 | `highpass_cutoff_hz` (80) | same | same | same | ✗ Hz, auto-correct |
-| `max_delay_ms` (250) | same | same | same | ✗ ms |
+| `max_delay_ms` (1024) | same | same | same | ✗ ms |
 | `saturation_threshold` (0.95) | same | same | same | ✗ amplitude |
 
 > Note 1 — Python reference uses 64 ms at SR ≥ 44.1 kHz to capture

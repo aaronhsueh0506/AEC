@@ -5,7 +5,7 @@ C implementation of the AEC algorithm. Top-level orchestration in
 
 > **User & integration guide** → [../docs/c_user_and_integration_guide.md](../docs/c_user_and_integration_guide.md)
 > Algorithm reference → [../docs/aec_methods.md](../docs/aec_methods.md)
-> Changelog → [../docs/CHANGELOG.md](../docs/CHANGELOG.md)
+> Changelog → [../CHANGELOG.md](../CHANGELOG.md)
 
 ## Layout
 
@@ -63,10 +63,13 @@ Lockstep (`analyze_render` then `process_capture`) is **byte-identical** to
 
 ## Parity (bit-exact to Python)
 
-The C port is **byte-for-byte identical** to `python/aec.py` end-to-end:
-per-hop golden 0 mismatches over the full doubletalk case (linear residual +
-final output), all three presets; full CLI `wav→wav` 0/669920 fp32 sample
-mismatches. Each sub-module has a standalone golden test
+The C port is **bit-exact to `python/aec.py`** end-to-end **under
+`-DUSE_STANDARD_MATH`**: per-hop golden 0 mismatches over the full doubletalk
+case (linear residual + final output), all three presets; full CLI `wav→wav`
+0/669920 fp32 sample mismatches. (The default production build uses
+`fast_math.h` — approximate `exp`/`sqrt` — which leaves a documented
+~1e-5..1e-4 residual in the RES exp/sqrt stages; the linear/PBFDKF path is
+bit-exact under both backends.) Each sub-module has a standalone golden test
 (`test/parity_*.c` ⟷ `python/diag/gen_*_golden.py`); the FFT is numpy's
 vendored pocketfft (`lib/pocketfft/`). End-to-end gate:
 `test/parity_aec_e2e.c`. See

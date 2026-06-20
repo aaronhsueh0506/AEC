@@ -4,7 +4,7 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v3.22.5 (2026-06-07) — Python `aec.py` `__version__ = "3.22.5"`; C port bit-exact (peak |Δ| = 0). The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). v3.22.5 is a cleanup + docs release on the byte-equal **3.22.4** algorithm: the DTD subsystem and dead research flags were removed, the Python CLI now exposes all three presets, and a decoupled C streaming render/capture API shipped. Three Pareto presets — `gentle` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.22.5]` and [docs/v3_22_5_release.md](docs/v3_22_5_release.md).
+**Release**: v3.23.0 (2026-06-20) — Python `aec.py` `__version__ = "3.23.0"`; Python↔C **bit-exact under `-DUSE_STANDARD_MATH`** (per-hop golden 0 mismatches, full CLI 0/669920 fp32 across all three presets; production `fast_math.h` leaves a documented ~1e-5..1e-4 exp/sqrt residual). The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the no-pre-align (no-PA) online-delay path — the matched-filter pre-echo `accumulated_error` binning bug (`i//4` → AEC3 cumsum prefix-error) that had collapsed pre-echo to 0 and corrupted no-PA delay estimation — and ships a default-ON DT-deg recovery stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`, `min_gain_floor_dt_db = −20`); 4 production-C port bugs were also fixed. Three Pareto presets — `gentle` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.23.0]`.
 
 ---
 
@@ -335,8 +335,7 @@ AEC/
 ├── docs/
 │   ├── aec_methods.md                   # canonical algorithm spec (v3.21)
 │   ├── aec_algorithm_guide.html         # presentation overview (v3.21)
-│   ├── architecture_v3_22_5_vs_aec3.html  # current (v3.22.5) vs AEC3 architecture flowcharts
-│   ├── refactor_modules_layout.md       # current module map (v3.21)
+│   ├── architecture_v3_22_5_vs_aec3.html  # v3.22.5-pipeline vs AEC3 flowcharts (3.23.0 = config-only delta)
 │   ├── pbfdkf_shadow_intro.md
 │   ├── v3_22_5_release.md                # release summary + 3-way AEC3/Speex comparison
 │   ├── nn_integration_interface.md       # NN residual/NR/joint freq-domain seam
