@@ -6,8 +6,8 @@
  * with no compounding.
  *
  * Build (from c_impl/):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/pocketfft \
- *       src/pbfdkf.c src/fft_pocketfft.c lib/pocketfft/pocketfft.c \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
+ *       src/pbfdkf.c src/fft_wrapper.c lib/kiss_fft/kiss_fft.c \
  *       src/aec3_scale.c test/parity_pbfdkf_loc.c -lm -o /tmp/p_loc
  *   /tmp/p_loc /tmp/pbfdkf_golden.bin
  */

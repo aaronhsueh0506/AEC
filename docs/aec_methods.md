@@ -5,10 +5,11 @@ was added in v3.22.0 on top of the v3.21 pipeline, the three Pareto presets
 (gentle/balanced/aggressive) in v3.22.4, and the **DT-aware recovery stack**
 (matched-filter pre-echo fix + DT-aware soft recovery + DT-gated RES floor, §2.3
 and §3.4) in v3.23.0 — the work that closed the no-pre-align (production-faithful
-online self-align) delay-acquisition gap. The C port is **bit-exact** with the
-Python reference under `-DUSE_STANDARD_MATH` (every per-module parity test plus
-the end-to-end `parity_aec_e2e` pass with 0 mismatches across all three presets;
-see §7); the C structure mirrors Python class boundaries.
+online self-align) delay-acquisition gap. The C port's **non-FFT logic is
+bit-exact** with the Python reference (verified under `-DUSE_STANDARD_MATH`); the
+production FFT backend is **KISS FFT (float32)**, so the end-to-end C output
+aligns with Python to ~float32 precision (correlation 0.99999958, ≈ −60 dB,
+inaudible — not 0/0; see §7). The C structure mirrors Python class boundaries.
 
 This document is the deep algorithm specification for the production
 pipeline. The v3.21 release retires the legacy 9-stage `ResFilter`
@@ -587,31 +588,40 @@ bars under online self-align.
 ## 7. Python ↔ C parity
 
 The `c_impl/` port is the production C implementation of the **same algorithm**.
-The verified invariant is: **under `-DUSE_STANDARD_MATH`, the C port is bit-exact
-to the Python reference.** Every per-module parity test (`c_impl/test/parity_*.c`
-— PBFDKF, delay, AecState, ResidualEchoEstimator, SuppressionGain, FFT, the
-ERLE/reverb estimators, etc.) plus the end-to-end `parity_aec_e2e` capstone pass
-with **0 mismatches across all three presets** (balanced / gentle / aggressive),
-over the full ≈4186-hop doubletalk case. `parity_aec_e2e.c` asserts strict
-equality on both `out[hop]` and the linear `raw_output` residual; the module
-tests are logic checks and are built with `-DUSE_STANDARD_MATH`.
+The **non-FFT C logic is bit-exact** to the Python reference — verified at
+v3.23.0 under `-DUSE_STANDARD_MATH` with a numpy-precision FFT: every per-module
+parity test (`c_impl/test/parity_*.c` — PBFDKF, delay, AecState,
+ResidualEchoEstimator, SuppressionGain, the ERLE/reverb estimators, etc.) plus
+the end-to-end `parity_aec_e2e` passed with 0 mismatches across all three
+presets over the full ≈4186-hop doubletalk case.
 
-### Two math backends
+The **production FFT backend is KISS FFT (float32)** (vendored `lib/kiss_fft/`;
+NE10 ARM-NEON opt-in via `make NE10_DIR=...`), which is NOT bit-exact to numpy's
+fp64 `np.fft`. Because PBFDKF and the post-filter are frequency-domain, this
+float32 FFT difference propagates through the whole pipeline, so the **end-to-end
+C output aligns with Python to ~float32 precision, NOT 0/0**: correlation
+0.99999958, RMS error ≈ −60 dB below signal, per-sample max ~6e-3 (inaudible).
+`parity_aec_e2e.c` now asserts the linear `raw_output` and final `out[hop]` stay
+within a **2e-2 float32 tolerance** (not strict equality) and is the
+authoritative gate. The per-module FFT-path tests' strict 0/0 checks were
+written against the removed pocketfft backend; converting them to per-module
+float32 tolerances is a follow-on.
+
+### Math backends
 
 `c_impl/include/fast_math.h` provides two implementations selected at compile
-time:
+time (orthogonal to the FFT-backend choice above):
 
 * **Default (production): `fast_math.h` approximations.** `fast_exp` (LUT +
   Taylor), `fast_log`/`fast_log10` (IEEE-754 + Taylor), `fast_sqrt`
-  (Newton-Raphson). These introduce a documented **~1e-5 .. 1e-4 tolerance** in
-  the stages that call `exp`/`sqrt` (SuppressionGain Wiener mapping, CNG gain,
-  dB conversions). The **linear / PBFDKF path stays bit-exact even under
-  fast_math** — it uses no `exp`/`sqrt`, so `raw_output` matches Python exactly
-  regardless of backend.
+  (Newton-Raphson). These add a documented **~1e-5 .. 1e-4 tolerance** in the
+  stages that call `exp`/`sqrt` (SuppressionGain Wiener mapping, CNG gain, dB
+  conversions) — on top of the float32-FFT tolerance above.
 * **`-DUSE_STANDARD_MATH`: libm.** Swaps the approximations for `expf`/`logf`/
-  `sqrtf` (`fast_math.h:77-84`), recovering **true bit-exactness** end-to-end.
-  This is the build the `parity_*.c` logic tests use (`make
-  EXTRA_CFLAGS="-DUSE_STANDARD_MATH"`).
+  `sqrtf` (`fast_math.h:77-84`) — this isolates the non-FFT logic for the parity
+  logic checks. With the KISS FFT it does NOT recover end-to-end 0/0 (the
+  float32 FFT difference remains); the historical numpy-bit-exact gate used the
+  pocketfft backend (since removed).
 
 `-ffp-contract=off` is mandatory in `CFLAGS` on both backends (no fused
 multiply-add reassociation), and the C FFT is pocketfft (fp64-internal) to match

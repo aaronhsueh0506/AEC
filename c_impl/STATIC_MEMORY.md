@@ -67,7 +67,7 @@ so the size computation matches the placement.
 | `res_filter`              | `res_filter_init` | `res_filter_get_mem_size` + `res_filter_init_static` |
 | `delay_est`               | `delay_est_init` | `delay_est_get_mem_size` + `delay_est_init_static` |
 | `filter_erle` (inside res_filter) | `filter_erle_init` | `filter_erle_get_mem_size` + `filter_erle_init_static` |
-| `fft_pocketfft`           | `fft_create` | `fft_get_mem_size` + `fft_init` |
+| `fft_wrapper` (KISS, fully in-pool) | `fft_create` | `fft_get_mem_size` + `fft_init` |
 | `hpf`, `saturation`, `detectors`, `epc_shadow`, `residual_echo`, `aec_debug` | value-typed (no heap) | n/a |
 
 Sub-modules with heap allocations are wired internally by `aec_init` —

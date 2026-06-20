@@ -1,21 +1,30 @@
 /* parity_aec_e2e.c — replay the END-TO-END golden from
  * python/diag/gen_aec_e2e_golden.py through the FULL top-level C aec_process
- * (aec_create(balanced) → per-hop aec_process) and assert out[hop] BIT-EXACT
- * (0 mismatches) across the whole doubletalk case (~4186 hops).
+ * (aec_create(balanced) → per-hop aec_process) and assert out[hop] matches
+ * Python within the float32-FFT tolerance over the whole doubletalk case
+ * (~4186 hops).
  *
- * This is the v3.22 C-cutover capstone gate: any divergence is in the aec.c
- * orchestration wiring (every sub-module is already bit-exact).
+ * NOTE: with the KISS FFT backend (float32) the FFT is NOT bit-exact to numpy's
+ * fp64 np.fft, so the end-to-end output differs by ~float32 precision
+ * (measured: RMS Δ ≈ -60 dB below signal, correlation 0.99999958, per-sample
+ * max ~6e-3 over 4186 recursive hops — inaudible). The non-FFT C logic stays
+ * bit-exact; only the FFT layer carries this documented tolerance. PASS = both
+ * the linear and final output stay under TOL_E2E.
  *
- * Build (standalone, from c_impl/; res_filter/delay_est/residual_echo are the
- * retired v3.10 modules — excluded so their stale symbols don't link):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/pocketfft \
- *       $(find src -name '*.c' ! -name 'res_filter.c' ! -name 'delay_est.c' \
- *             ! -name 'residual_echo.c') \
- *       lib/pocketfft/pocketfft.c test/parity_aec_e2e.c -lm -o /tmp/p_e2e
+ * Build (standalone, from c_impl/; delay_est is the retired v3.10 module and
+ * fft_wrapper_ne10.c needs the NE10 lib — both excluded):
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
+ *       $(find src -name '*.c' ! -name 'delay_est.c' ! -name 'fft_wrapper_ne10.c') \
+ *       lib/kiss_fft/kiss_fft.c test/parity_aec_e2e.c -lm -o /tmp/p_e2e
  *   python3 ../python/diag/gen_aec_e2e_golden.py /tmp/aec_e2e_golden.bin [preset]
  *   /tmp/p_e2e /tmp/aec_e2e_golden.bin [preset]      # preset: balanced|gentle|aggressive
  */
 #include "aec.h"
+
+/* Max allowed |C - Python| per sample. Measured float32-FFT e2e max ≈ 6e-3
+ * across all presets; 2e-2 gives ~3x headroom for signal variation while still
+ * catching real FFT/scaling regressions (which diverge by >0.1). */
+#define TOL_E2E 2.0e-2
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,7 +98,11 @@ int main(int argc, char **argv) {
     aec_destroy(&aec);
     free(mic); free(ref); free(exp); free(exp_raw); free(out);
 
-    if (mism == 0) { printf(">>> PASS (bit-exact end-to-end)\n"); return 0; }
-    printf(">>> FAIL\n");
+    if (raw_maxd < TOL_E2E && maxd < TOL_E2E) {
+        printf(">>> PASS (within float32 FFT tolerance %.0e; linear max=%.3e out max=%.3e)\n",
+               TOL_E2E, raw_maxd, maxd);
+        return 0;
+    }
+    printf(">>> FAIL (exceeds float32 FFT tolerance %.0e)\n", TOL_E2E);
     return 1;
 }

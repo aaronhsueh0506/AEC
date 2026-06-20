@@ -9,21 +9,21 @@
  * VERDICT: every stage the DRIVER OWNS is asserted bit-exact (hard PASS/FAIL),
  * INCLUDING the post gain-apply + CNG-injection e_out_spec AND the final
  * out[hop]. The only thing between e_out_spec and out[hop] is the irfft + the
- * OLA add. With the vendored numpy-1.26.4 pocketfft backend (fft_pocketfft.c +
- * lib/pocketfft/pocketfft.c) the irfft is BIT-EXACT vs np.fft.irfft, so out[hop]
+ * OLA add. With the KISS FFT (float32) backend (fft_wrapper.c +
+ * lib/kiss_fft/kiss_fft.c) the irfft is ≈ np.fft.irfft (float32 KISS), so out[hop]
  * now matches with 0 mismatches on every hop — including the cold-start
  * near-silent frames that previously left a <=1-ULP residual (~1e-17) under the
  * legacy fft_fp64.c radix-2 irfft. The test FAILS hard on ANY mismatch.
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/include \
- *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/lib/pocketfft \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/aec3_post.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/reverb_model.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/fft_pocketfft.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/lib/pocketfft/pocketfft.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/test/parity_aec3_post.c \
+ *       -I<path-to-repo>/c_impl/include \
+ *       -I<path-to-repo>/c_impl/lib/kiss_fft \
+ *       <path-to-repo>/c_impl/src/aec3_post.c \
+ *       <path-to-repo>/c_impl/src/reverb_model.c \
+ *       <path-to-repo>/c_impl/src/fft_wrapper.c \
+ *       <path-to-repo>/c_impl/lib/kiss_fft/kiss_fft.c \
+ *       <path-to-repo>/c_impl/test/parity_aec3_post.c \
  *       -lm -o /tmp/p_post
  *   python3 .../python/diag/gen_aec3_post_golden.py /tmp/aec3_post_golden.bin
  *   /tmp/p_post /tmp/aec3_post_golden.bin
@@ -316,7 +316,7 @@ int main(int argc, char **argv) {
     /* DRIVER verdict: every stage the driver OWNS must be bit-exact. The
      * pre-irfft e_out_spec (post gain-apply + CNG injection) is the driver's
      * full assembled output; the only thing between it and out[hop] is the
-     * irfft + the OLA add. With the vendored pocketfft backend the irfft is
+     * irfft + the OLA add. With the KISS FFT backend the irfft is
      * bit-exact, so out[hop] is expected to be exactly 0 mismatches (the
      * <=1-ULP fallback branch below is legacy fft_fp64.c only). */
     {

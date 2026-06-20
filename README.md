@@ -4,7 +4,7 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v3.23.0 (2026-06-20) — Python `aec.py` `__version__ = "3.23.0"`; Python↔C **bit-exact under `-DUSE_STANDARD_MATH`** (per-hop golden 0 mismatches, full CLI 0/669920 fp32 across all three presets; production `fast_math.h` leaves a documented ~1e-5..1e-4 exp/sqrt residual). The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the no-pre-align (no-PA) online-delay path — the matched-filter pre-echo `accumulated_error` binning bug (`i//4` → AEC3 cumsum prefix-error) that had collapsed pre-echo to 0 and corrupted no-PA delay estimation — and ships a default-ON DT-deg recovery stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`, `min_gain_floor_dt_db = −20`); 4 production-C port bugs were also fixed. Three Pareto presets — `gentle` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.23.0]`.
+**Release**: v3.23.0 (2026-06-20) — Python `aec.py` `__version__ = "3.23.0"`; Python↔C **non-FFT logic bit-exact** (verified under `-DUSE_STANDARD_MATH`); the production **FFT backend is KISS FFT (float32)** (NE10 opt-in via `make NE10_DIR=...`), so end-to-end C aligns with Python to ~float32 precision (correlation 0.99999958, RMS error ≈ −60 dB below signal, inaudible — not 0/0). The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the no-pre-align (no-PA) online-delay path — the matched-filter pre-echo `accumulated_error` binning bug (`i//4` → AEC3 cumsum prefix-error) that had collapsed pre-echo to 0 and corrupted no-PA delay estimation — and ships a default-ON DT-deg recovery stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`, `min_gain_floor_dt_db = −20`); 4 production-C port bugs were also fixed. Three Pareto presets — `gentle` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.23.0]`.
 
 ---
 
@@ -75,7 +75,7 @@ single-channel DT-deg-vs-echo wall; all share the same `_aec3_post` chain and
 | Memory (main+shadow filter)        | ~200 KB |
 | Memory (incl. RES + delay est.)    | ~280 KB |
 | Compute / frame                    | 4 × 512-FFT + Kalman update (257 bins × 6 partitions) |
-| FFT                                | fp64 radix-2 (matches numpy pocketfft fp64-internal precision) |
+| FFT                                | KISS FFT (float32; NE10 ARM-NEON opt-in) — ~float32 precision vs numpy `np.fft` |
 
 ### Known limitations (cases this AEC cannot fully solve)
 
