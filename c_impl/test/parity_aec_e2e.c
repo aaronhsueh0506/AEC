@@ -11,10 +11,10 @@
  * bit-exact; only the FFT layer carries this documented tolerance. PASS = both
  * the linear and final output stay under TOL_E2E.
  *
- * Build (standalone, from c_impl/; delay_est is the retired v3.10 module and
- * fft_wrapper_ne10.c needs the NE10 lib — both excluded):
+ * Build (standalone, from c_impl/; fft_wrapper_ne10.c needs the NE10 lib, so it
+ * is excluded):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
- *       $(find src -name '*.c' ! -name 'delay_est.c' ! -name 'fft_wrapper_ne10.c') \
+ *       $(find src -name '*.c' ! -name 'fft_wrapper_ne10.c') \
  *       lib/kiss_fft/kiss_fft.c test/parity_aec_e2e.c -lm -o /tmp/p_e2e
  *   python3 ../python/diag/gen_aec_e2e_golden.py /tmp/aec_e2e_golden.bin [preset]
  *   /tmp/p_e2e /tmp/aec_e2e_golden.bin [preset]      # preset: balanced|gentle|aggressive

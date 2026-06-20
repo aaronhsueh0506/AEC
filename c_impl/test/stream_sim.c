@@ -12,8 +12,7 @@
  *
  * Build (from c_impl/):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
- *       $(find src -name '*.c' ! -name 'res_filter.c' ! -name 'delay_est.c' \
- *             ! -name 'residual_echo.c') \
+ *       $(find src -name '*.c' ! -name 'fft_wrapper_ne10.c') \
  *       lib/kiss_fft/kiss_fft.c test/stream_sim.c -lm -o /tmp/stream_sim
  *   /tmp/stream_sim
  */
