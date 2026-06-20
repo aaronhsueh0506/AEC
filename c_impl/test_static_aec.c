@@ -1,9 +1,10 @@
 /* test_static_aec.c — verify aec_init() (static) produces byte-equal output
  * to aec_create() (dynamic) on the same input.
  *
- * Build:
- *   gcc -O2 -ffp-contract=off -std=c99 -Iinclude -Iexample -Ilib/pocketfft \
- *       test_static_aec.c obj/[!t]*.o -lm -o bin/test_static_aec
+ * Build (standalone, KISS FFT backend; fft_wrapper_ne10.c is NE10-only):
+ *   gcc -O2 -ffp-contract=off -std=c99 -Iinclude -Iexample -Ilib/kiss_fft \
+ *       test_static_aec.c $(find src -name '*.c' ! -name 'fft_wrapper_ne10.c') \
+ *       lib/kiss_fft/kiss_fft.c -lm -o bin/test_static_aec
  * Run:
  *   ./bin/test_static_aec mic.wav ref.wav
  */

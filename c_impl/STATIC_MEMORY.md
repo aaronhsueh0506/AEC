@@ -99,29 +99,35 @@ top-level `aec_get_mem_size` / `aec_init`.
 
 ## Verification
 
-The CLI binary supports a `--static-mem` flag for quick comparison:
+`test_static_aec.c` runs the same input through both `aec_create` (heap) and
+`aec_init` (static pool) and asserts every output sample is byte-equal:
 
 ```bash
-./bin/aec_wav mic.wav ref.wav out_heap.wav --preset balanced
-./bin/aec_wav mic.wav ref.wav out_static.wav --preset balanced --static-mem
-md5 out_heap.wav out_static.wav        # must match
+gcc -O2 -ffp-contract=off -std=c99 -Iinclude -Iexample -Ilib/kiss_fft \
+    test_static_aec.c $(find src -name '*.c' ! -name 'fft_wrapper_ne10.c') \
+    lib/kiss_fft/kiss_fft.c -lm -o bin/test_static_aec
+./bin/test_static_aec mic.wav ref.wav
+# → Pool: 525760 bytes (513.4 KB), frames: N
+#   PASS: all <2*N> samples byte-equal (static == dynamic)
 ```
 
-The two paths produce **bit-identical output** across all four presets
-and all three scenarios (FS / DT / NE) on the AEC Challenge dataset.
+The two paths produce **bit-identical output** across all presets and all three
+scenarios (FS / DT / NE). The `aec_wav` CLI itself is heap-only — it does not
+expose a `--static-mem` flag; `test_static_aec.c` is the static-path harness.
 
 ## Debug logging
 
 Built-in hooks fire on `_init` / `_destroy` (compile-gated by
 `-DAEC_DEBUG`, runtime-gated by `--debug-level`):
 
-```bash
-make debug                                                  # builds with -DAEC_DEBUG
-./bin/aec_wav mic.wav ref.wav out.wav --static-mem --debug-level 1
-# stderr:
+The static-path pool log is emitted by `aec_init` / `aec_destroy` when compiled
+with `-DAEC_DEBUG` and run at a non-zero debug level. The `aec_wav` CLI is
+heap-only (`aec_create`), so to see the static-path lines a harness must call
+`aec_init` directly and raise the debug level; the format is:
+
+```text
 # [AEC][t= 0.000s][f=    0][Init] static-mem pool=525760 bytes (513.4 KB) sr=16000 hop=160 preset_q=0.001 cng=0
-# Processed N frames ...
-# [AEC][t= 21.75s][f= 2175][Init] destroy: static path (no free; caller owns pool)
+# [AEC][t= ...   ][f= ... ][Init] destroy: static path (no free; caller owns pool)
 ```
 
 Release builds (`make` without `debug`) strip log strings entirely;
