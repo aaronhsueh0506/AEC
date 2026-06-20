@@ -11,10 +11,10 @@
  *      processes (silent render), and normal operation resumes afterwards.
  *
  * Build (from c_impl/):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/pocketfft \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
  *       $(find src -name '*.c' ! -name 'res_filter.c' ! -name 'delay_est.c' \
  *             ! -name 'residual_echo.c') \
- *       lib/pocketfft/pocketfft.c test/stream_sim.c -lm -o /tmp/stream_sim
+ *       lib/kiss_fft/kiss_fft.c test/stream_sim.c -lm -o /tmp/stream_sim
  *   /tmp/stream_sim
  */
 #include "aec.h"

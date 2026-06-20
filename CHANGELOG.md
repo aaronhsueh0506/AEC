@@ -16,6 +16,26 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-06-20 — C FFT backend: pocketfft → KISS (NR-shared, float32)
+
+**C-only change; Python reference + `__version__` (3.23.0) unchanged.** The C FFT
+backend is swapped from the vendored numpy pocketfft (fp64, numpy-bit-exact) to
+**KISS FFT (float32)** — vendored `c_impl/lib/kiss_fft/`, shared with the NR repo
+— with **NE10 (ARM NEON) opt-in** via `make NE10_DIR=...` (mirrors NR's
+Makefile). The KISS static-memory path is fully heap-free (cfg placed in the
+caller pool via `kiss_fft_alloc`).
+
+Consequence: C↔Python parity drops from strict 0/0 to **float32 precision** (KISS
+float32 ≠ numpy fp64 `np.fft`). Measured end-to-end (kiss-C vs Python, balanced
+doubletalk): **correlation 0.99999958, RMS error ≈ −60 dB below signal,
+per-sample max ~6e-3** over 4186 recursive hops — inaudible, NR's shipped
+alignment standard. The **non-FFT C logic remains bit-exact** (the v3.23.0
+verification stands); only the FFT layer carries float32 tolerance.
+`parity_aec_e2e.c` now asserts a 2e-2 float32 tolerance instead of 0/0;
+`fft_pocketfft.c` + `lib/pocketfft/` removed.
+
+---
+
 ## [3.23.0] — 2026-06-20 — no-PA delay fix + DT-deg recovery + Python↔C bit-exact completion
 
 The first BALANCED algorithm change since 3.22.x. Two production changes plus a

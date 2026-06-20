@@ -1,5 +1,5 @@
 /* parity_fft.c — replay python/diag/gen_fft_golden.py through the C FFT wrapper
- * (fft_pocketfft.c, backed by the vendored numpy 1.26.4 pocketfft) and report
+ * (fft_wrapper.c, backed by the vendored KISS FFT (float32)) and report
  * the BIT-EXACT mismatch count vs numpy's np.fft.rfft / np.fft.irfft at n=512.
  *
  * The decisive question: is the mismatch count 0? If yes, the C<->Python FFT is
@@ -9,9 +9,9 @@
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
  *       -I<path-to-repo>/c_impl/include \
- *       -I<path-to-repo>/c_impl/lib/pocketfft \
- *       <path-to-repo>/c_impl/src/fft_pocketfft.c \
- *       <path-to-repo>/c_impl/lib/pocketfft/pocketfft.c \
+ *       -I<path-to-repo>/c_impl/lib/kiss_fft \
+ *       <path-to-repo>/c_impl/src/fft_wrapper.c \
+ *       <path-to-repo>/c_impl/lib/kiss_fft/kiss_fft.c \
  *       <path-to-repo>/c_impl/test/parity_fft.c \
  *       -lm -o /tmp/p_fft
  *   python3 .../python/diag/gen_fft_golden.py /tmp/fft_golden.bin

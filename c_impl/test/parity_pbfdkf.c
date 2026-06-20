@@ -12,11 +12,11 @@
  *      im=fma(a,d, b*c). Applied to the echo MAC (W·X) and the W update
  *      (K_scaled·error_spec).
  *   3. the EMA coeff (1-α) is a double subtraction cast to f32, not 1.0f-αf.
- * The FFT primitive is the vendored numpy pocketfft (parity_fft.c: 0/0).
+ * The FFT primitive is the vendored KISS FFT (float32) (parity_fft.c: float32 tolerance).
  *
  * Build (from c_impl/), STANDALONE (do NOT link aec.c — old API):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/pocketfft \
- *       src/pbfdkf.c src/fft_pocketfft.c lib/pocketfft/pocketfft.c \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
+ *       src/pbfdkf.c src/fft_wrapper.c lib/kiss_fft/kiss_fft.c \
  *       src/aec3_scale.c test/parity_pbfdkf.c -lm -o /tmp/p_pbfdkf
  *   python3 python/diag/gen_pbfdkf_golden.py /tmp/pbfdkf_golden.bin
  *   /tmp/p_pbfdkf /tmp/pbfdkf_golden.bin

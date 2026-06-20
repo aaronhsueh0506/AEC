@@ -5,13 +5,13 @@
  * selected_echo_spec across every captured hop of the DT case.
  *
  * Bit-exactness holds because the only non-trivial op is the rfft of
- * [e_old|e_form]·sqrt_hann (vendored bit-exact pocketfft), the e2/y2/s2 sums are
+ * [e_old|e_form]·sqrt_hann (vendored KISS FFT (float32)), the e2/y2/s2 sums are
  * np.sum-pairwise in f64, and the crossfade ramp + complex add/sub are
  * reproduced op-for-op in matching dtype (see linear_filter_output.c).
  *
  * Build (from c_impl/), STANDALONE (do NOT link aec.c):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/pocketfft \
- *       src/linear_filter_output.c src/fft_pocketfft.c lib/pocketfft/pocketfft.c \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
+ *       src/linear_filter_output.c src/fft_wrapper.c lib/kiss_fft/kiss_fft.c \
  *       test/parity_linear_filter_select.c -lm -o /tmp/p_lfs
  *   python3 python/diag/gen_linear_filter_select_golden.py /tmp/lfs_golden.bin
  *   /tmp/p_lfs /tmp/lfs_golden.bin

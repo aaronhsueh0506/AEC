@@ -61,20 +61,25 @@ Lockstep (`analyze_render` then `process_capture`) is **byte-identical** to
 `aec_process`; underrun/overrun return `AEC_BUF_RENDER_UNDERRUN`/`_OVERRUN`. See
 [guide §10.1.1](../docs/c_user_and_integration_guide.md) and `test/stream_sim.c`.
 
-## Parity (bit-exact to Python)
+## Parity (float32-precision to Python)
 
-The C port is **bit-exact to `python/aec.py`** end-to-end **under
-`-DUSE_STANDARD_MATH`**: per-hop golden 0 mismatches over the full doubletalk
-case (linear residual + final output), all three presets; full CLI `wav→wav`
-0/669920 fp32 sample mismatches. (The default production build uses
-`fast_math.h` — approximate `exp`/`sqrt` — which leaves a documented
-~1e-5..1e-4 residual in the RES exp/sqrt stages; the linear/PBFDKF path is
-bit-exact under both backends.) Each sub-module has a standalone golden test
-(`test/parity_*.c` ⟷ `python/diag/gen_*_golden.py`); the FFT is numpy's
-vendored pocketfft (`lib/pocketfft/`). End-to-end gate:
-`test/parity_aec_e2e.c`. See
-[../memory parity rules] and `docs/` for the numpy→C bit-exact idioms
-(`np.abs(c64)**2` = scaled-hypot-FMA, complex×complex FMA, EMA double-coeff).
+The C port's **non-FFT logic is bit-exact** to `python/aec.py` (verified at
+v3.23.0 under `-DUSE_STANDARD_MATH` with a numpy-precision FFT). The production
+**FFT backend is KISS FFT (float32)** — vendored `lib/kiss_fft/`, with NE10
+(ARM NEON) opt-in via `make NE10_DIR=...` — which differs from numpy's fp64
+`np.fft` by float32 precision. So the **end-to-end C output aligns with Python
+to ~float32 precision, NOT 0/0**: correlation 0.99999958, RMS error ≈ −60 dB
+below signal, per-sample max ~6e-3 over 4186 recursive hops (inaudible). The
+default `fast_math.h` (approximate `exp`/`sqrt`) adds a further ~1e-5..1e-4 in
+the RES stages. Each sub-module has a standalone golden test
+(`test/parity_*.c` ⟷ `python/diag/gen_*_golden.py`); the FFT-path module tests'
+strict 0/0 checks were written against the (now-removed) pocketfft backend and
+no longer pass exactly under KISS, so the **authoritative gate is the
+tolerance-based end-to-end test**: `test/parity_aec_e2e.c` asserts the output
+stays within a 2e-2 float32 tolerance. (Per-module FFT-path tolerance conversion
+is a follow-on.) See [../memory parity rules] and
+`docs/` for the numpy→C idioms (`np.abs(c64)**2` = scaled-hypot-FMA,
+complex×complex FMA, EMA double-coeff).
 
 Full CLI options, C API reference, integration rules, runtime resource
 notes, and validation steps:

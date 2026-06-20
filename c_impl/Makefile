@@ -2,7 +2,7 @@
 
 CC      = gcc
 CFLAGS  = -Wall -Wextra -O2 -ffp-contract=off -std=c99
-CFLAGS += -I./include -I./example -I./lib/pocketfft
+CFLAGS += -I./include -I./example
 CFLAGS += $(EXTRA_CFLAGS)
 LDFLAGS = -lm
 
@@ -12,17 +12,29 @@ EXAMPLE_DIR = example
 OBJ_DIR     = obj
 BIN_DIR     = bin
 
-# All algorithm sources (auto-detected — drop a new file in src/ to add it).
-# fft_pocketfft.c is the FFT backend; it links the vendored numpy 1.26.4
-# pocketfft core (lib/pocketfft/pocketfft.c) for BIT-EXACT np.fft parity.
-SRCS = $(wildcard $(SRC_DIR)/*.c)
-OBJS = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
+# Algorithm sources (auto-detected — drop a new file in src/ to add it).
+# The FFT backend is selected at build time (below) and excluded from the
+# wildcard so exactly one backend compiles.
+ALL_SRCS = $(wildcard $(SRC_DIR)/*.c)
+SRCS = $(filter-out $(SRC_DIR)/fft_wrapper.c $(SRC_DIR)/fft_wrapper_ne10.c,$(ALL_SRCS))
 
-# Vendored third-party FFT core (kept out of src/ so it is not auto-detected
-# as an algorithm module; built explicitly with its own rule).
-LIB_SRCS = $(LIB_DIR)/pocketfft/pocketfft.c
-LIB_OBJS = $(OBJ_DIR)/pocketfft.o
-OBJS    += $(LIB_OBJS)
+# FFT backend selection. KISS/NE10 compute in float32 -> ~1e-5 vs numpy's fp64
+# np.fft (a documented tolerance; the non-FFT C logic stays bit-exact to Python).
+#   default          -> KISS FFT  (portable, vendored lib/kiss_fft)
+#   make NE10_DIR=... -> NE10 R2C/C2R (ARM NEON; caller supplies the Ne10 lib)
+ifdef NE10_DIR
+  SRCS    += $(SRC_DIR)/fft_wrapper_ne10.c
+  CFLAGS  += -I$(NE10_DIR)/inc
+  LDFLAGS += -L$(NE10_DIR)/lib -lNE10
+  LIB_OBJS =
+else
+  SRCS    += $(SRC_DIR)/fft_wrapper.c
+  CFLAGS  += -I./lib/kiss_fft
+  LIB_OBJS = $(OBJ_DIR)/kiss_fft.o
+endif
+
+OBJS  = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
+OBJS += $(LIB_OBJS)
 
 EXAMPLE_SRCS = $(EXAMPLE_DIR)/aec_wav.c
 EXAMPLE_OBJS = $(patsubst $(EXAMPLE_DIR)/%.c,$(OBJ_DIR)/%.o,$(EXAMPLE_SRCS))
@@ -41,7 +53,7 @@ $(TARGET): $(OBJS) $(EXAMPLE_OBJS)
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(OBJ_DIR)/pocketfft.o: $(LIB_DIR)/pocketfft/pocketfft.c
+$(OBJ_DIR)/kiss_fft.o: $(LIB_DIR)/kiss_fft/kiss_fft.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c
