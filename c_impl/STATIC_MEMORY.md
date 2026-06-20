@@ -89,10 +89,10 @@ slices those from the pool too:
   `ReverbModel`, `LinearFilterSelect`, and the run / hop scratch
 
 > The legacy `res_filter` / `filter_erle` / `residual_echo` (pre-AEC3 v3.10
-> residual suppressor) were removed in the ResFilter cleanup and no longer
-> exist. `delay_est.c` (the retired v3.10 delay module) still ships but is
-> **not wired** — production delay is the value-typed `DelayAec3` above, so
-> `delay_est_get_mem_size` / `delay_est_init_static` are dead.
+> residual suppressor) and `delay_est` (the retired v3.10 delay module,
+> superseded by the value-typed `DelayAec3` above) have all been removed and no
+> longer exist — their unused `*_get_mem_size` / `*_init_static` symbols are
+> gone with them.
 
 Sub-modules are wired internally by `aec_init` — your code only ever calls the
 top-level `aec_get_mem_size` / `aec_init`.
