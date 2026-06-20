@@ -1,10 +1,14 @@
 /* parity_fft.c — replay python/diag/gen_fft_golden.py through the C FFT wrapper
- * (fft_wrapper.c, backed by the vendored KISS FFT (float32)) and report
- * the BIT-EXACT mismatch count vs numpy's np.fft.rfft / np.fft.irfft at n=512.
+ * (fft_wrapper.c, backed by the vendored KISS FFT (float32)) and check the
+ * worst absolute diff vs numpy's np.fft.rfft / np.fft.irfft at n=512 stays
+ * within the documented float32 FFT tolerance.
  *
- * The decisive question: is the mismatch count 0? If yes, the C<->Python FFT is
- * bit-exact and the whole AEC pipeline can be bit-exact. Comparison is exact on
- * the stored 32-bit values (complex64 for rfft, float32 for irfft) — no rtol.
+ * KISS computes in float32, so it does NOT match numpy's fp64 np.fft bit-for-bit
+ * (the mismatch COUNT is large — most values differ in the low bits). The
+ * decisive question is the MAGNITUDE: measured fwd max ~1.6e-5, inv max ~4.8e-7,
+ * both far under FFT_TOL. A real FFT/scaling regression diverges by O(0.1), so
+ * the tolerance still catches it. (Under the retired pocketfft backend this was
+ * a strict 0/0 bit-exact check; KISS trades that for the float32 tolerance.)
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
@@ -23,6 +27,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+/* Max allowed |C - numpy| per value. Measured KISS-float32 worst case is
+ * fwd ~1.6e-5 / inv ~4.8e-7; 1e-4 brackets it with headroom while still
+ * catching real regressions (O(0.1)). */
+#define FFT_TOL 1.0e-4
 
 static int rd(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
 
@@ -116,9 +125,12 @@ int main(int argc, char **argv) {
     if (ia.mism) printf("  (maxabs=%.3e  maxulp=%ld)", ia.maxabs, ia.maxulp);
     printf("\n");
 
-    int ok = (fa.mism == 0 && ia.mism == 0);
-    printf(">>> %s: C<->Python FFT is %sBIT-EXACT\n",
-           ok ? "PASS" : "FAIL", ok ? "" : "NOT ");
+    /* Gate on the worst absolute diff, not the mismatch count: KISS float32
+     * differs from numpy fp64 in the low bits on most values, but the magnitude
+     * stays within FFT_TOL. maxabs is 0 when every value is exactly equal. */
+    int ok = (fa.maxabs < FFT_TOL && ia.maxabs < FFT_TOL);
+    printf(">>> %s: C<->Python FFT within %.0e (fwd max=%.3e  inv max=%.3e)\n",
+           ok ? "PASS" : "FAIL", (double)FFT_TOL, fa.maxabs, ia.maxabs);
 
     free(x); free(yo); free(Xc); free(Xg); free(Xin); free(Xinf); free(yg);
     fft_destroy(h);

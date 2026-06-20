@@ -1,13 +1,15 @@
 /* parity_aec3_post_run.c — replay the binary golden from
  * python/diag/gen_aec3_post_run_golden.py through the FULL-orchestration C
- * driver (aec3_post_run) and assert out[hop] BIT-EXACT (0 mismatches) across
- * the whole doubletalk case (~4186 hops). Also asserts usable_linear per hop
- * for localisation.
+ * driver (aec3_post_run) and check out[hop] within the float32 FFT tolerance
+ * (the full recursive run accumulates KISS float32 drift — measured worst
+ * ~1.6e-4) across the whole doubletalk case (~4186 hops). usable_linear is a
+ * boolean ERLE gate and is asserted BIT-EXACT per hop.
  *
  * This is the integration-core gate: aec3_post_run drives AecState +
  * ResidualEchoEstimator + SuppressionGain + StationarityEstimator +
  * LinearFilterSelect itself (gain / usable_linear / r2 are NOT injected), so a
- * mismatch in ANY sub-module call sequence shows up here.
+ * mismatch in ANY sub-module call sequence shows up here. (Under the retired
+ * pocketfft backend out[hop] was bit-exact too.)
  *
  * Build (standalone):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
@@ -32,6 +34,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* out[hop] = full recursive post-filter output: KISS float32 FFT drift
+ * accumulated over ~4186 hops, measured worst ~1.6e-4. 2e-2 matches the
+ * project-wide e2e gate (parity_aec_e2e.c) and catches real O(0.1) regressions. */
+#define OUT_TOL 2.0e-2
 
 static int rd(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
 
@@ -472,10 +479,19 @@ int main(int argc, char **argv) {
     printf("  >>> out[hop]  mism=%ld (max=%.3e first_hop=%d)\n",
            out_mism, out_maxd, first_out_hop);
 
-    if (out_mism == 0 && usable_mism == 0) {
-        printf(">>> PASS (bit-exact end-to-end, incl. out[hop] + usable_linear)\n");
+    /* usable_linear is a discrete boolean gate (derived from ERLE) and stays
+     * BIT-EXACT under KISS. out[hop] is the full recursive post-filter output,
+     * so it carries the float32 FFT drift accumulated over the run (measured
+     * worst ~1.6e-4). Gate usable_linear bit-exact, out[hop] within OUT_TOL;
+     * a real end-to-end regression diverges by O(0.1). */
+    if (usable_mism == 0 && out_maxd < OUT_TOL) {
+        printf(">>> PASS (usable_linear bit-exact; out[hop] within %.0e, max=%.3e)\n",
+               (double)OUT_TOL, out_maxd);
         return 0;
     }
-    printf(">>> FAIL\n");
+    if (usable_mism)
+        printf(">>> FAIL (usable_linear not bit-exact)\n");
+    else
+        printf(">>> FAIL (out[hop] exceeds float32 FFT tolerance %.0e)\n", (double)OUT_TOL);
     return 1;
 }

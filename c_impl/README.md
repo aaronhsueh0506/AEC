@@ -72,12 +72,18 @@ to ~float32 precision, NOT 0/0**: correlation 0.99999958, RMS error ≈ −60 dB
 below signal, per-sample max ~6e-3 over 4186 recursive hops (inaudible). The
 default `fast_math.h` (approximate `exp`/`sqrt`) adds a further ~1e-5..1e-4 in
 the RES stages. Each sub-module has a standalone golden test
-(`test/parity_*.c` ⟷ `python/diag/gen_*_golden.py`); the FFT-path module tests'
-strict 0/0 checks were written against the (now-removed) pocketfft backend and
-no longer pass exactly under KISS, so the **authoritative gate is the
-tolerance-based end-to-end test**: `test/parity_aec_e2e.c` asserts the output
-stays within a 2e-2 float32 tolerance. (Per-module FFT-path tolerance conversion
-is a follow-on.) See [../memory parity rules] and
+(`test/parity_*.c` ⟷ `python/diag/gen_*_golden.py`). The FFT-path module tests'
+strict 0/0 checks (written against the now-removed pocketfft backend) have been
+converted to the KISS float32 reality: non-FFT and integer/boolean control state
+stays asserted **bit-exact**, while FFT-derived values are gated within a small
+tolerance (`parity_fft`/`parity_linear_filter_select`/`parity_filter_state_bridge`/
+`parity_aec3_post` 1e-4; recursive outputs `parity_pbfdkf`/`parity_aec3_post_run`
+2e-2). The one exception is `parity_pbfdkf`'s internal Kalman state (W/H_error/…),
+which diverges chaotically through the recursive loop and is reported
+diagnostic-only — the gated quantities there are the integer control state and
+the linear output. The **authoritative end-to-end gate** is
+`test/parity_aec_e2e.c` (output within 2e-2 float32 tolerance).
+See [../memory parity rules] and
 `docs/` for the numpy→C idioms (`np.abs(c64)**2` = scaled-hypot-FMA,
 complex×complex FMA, EMA double-coeff).
 

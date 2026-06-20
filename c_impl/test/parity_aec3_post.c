@@ -6,14 +6,15 @@
  * across the full DT/FS/NE run (startup + the n2_initial transient + a
  * mid-stream reset). WS5 gate.
  *
- * VERDICT: every stage the DRIVER OWNS is asserted bit-exact (hard PASS/FAIL),
- * INCLUDING the post gain-apply + CNG-injection e_out_spec AND the final
- * out[hop]. The only thing between e_out_spec and out[hop] is the irfft + the
- * OLA add. With the KISS FFT (float32) backend (fft_wrapper.c +
- * lib/kiss_fft/kiss_fft.c) the irfft is ≈ np.fft.irfft (float32 KISS), so out[hop]
- * now matches with 0 mismatches on every hop — including the cold-start
- * near-silent frames that previously left a <=1-ULP residual (~1e-17) under the
- * legacy fft_fp64.c radix-2 irfft. The test FAILS hard on ANY mismatch.
+ * VERDICT: the NON-FFT stages the DRIVER OWNS (PSDs / E1 capture_psd_erle /
+ * x2_reverb_for_erle / coh_gate_mask / comfort_noise — all replayed from the
+ * golden or OLA-only, no signal FFT) are asserted BIT-EXACT (hard PASS/FAIL).
+ * The two FFT-derived outputs — the pre-irfft e_out_spec (carries the
+ * windowed-error rfft) and the final out[hop] (adds the irfft + OLA) — drift at
+ * ULP scale under the KISS float32 backend (fft_wrapper.c + lib/kiss_fft/
+ * kiss_fft.c): measured e_out_spec max ~1.2e-7, out max ~6e-8. They are gated
+ * within POST_TOL, not bit-for-bit. (Under the retired pocketfft backend both
+ * were bit-exact.) A real driver regression diverges by O(0.1), well above tol.
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
@@ -34,6 +35,10 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+/* FFT-derived e_out_spec/out drift: KISS float32 vs numpy fp64, measured
+ * worst ~1.2e-7. 1e-4 brackets it; a real driver regression is O(0.1). */
+#define POST_TOL 1.0e-4
 
 static int rd(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
 
@@ -313,35 +318,27 @@ int main(int argc, char **argv) {
     printf("  >>> out[hop]              mism=%d (max=%.3e first=%d)\n",
            a_out.mism, a_out.maxd, a_out.first);
 
-    /* DRIVER verdict: every stage the driver OWNS must be bit-exact. The
-     * pre-irfft e_out_spec (post gain-apply + CNG injection) is the driver's
-     * full assembled output; the only thing between it and out[hop] is the
-     * irfft + the OLA add. With the KISS FFT backend the irfft is
-     * bit-exact, so out[hop] is expected to be exactly 0 mismatches (the
-     * <=1-ULP fallback branch below is legacy fft_fp64.c only). */
+    /* DRIVER verdict: the NON-FFT stages the driver owns must be bit-exact (they
+     * are replayed from the golden / OLA-only, no signal FFT). e_out_spec is
+     * EXCLUDED here — it carries the windowed-error rfft and is gated by
+     * tolerance below. */
     {
-        int driver = a_psd.mism + a_cpe.mism + a_x2r.mism + a_cgm.mism
-                   + a_cn.mism + a_eout.mism;
+        int driver = a_psd.mism + a_cpe.mism + a_x2r.mism + a_cgm.mism + a_cn.mism;
         if (driver) {
-            printf(">>> FAIL (driver-stage mismatch)\n");
+            printf(">>> FAIL (non-FFT driver stage not bit-exact)\n");
             return 1;
         }
     }
-    if (a_out.mism == 0) {
-        printf(">>> PASS (bit-exact, incl. out[hop])\n");
+    /* e_out_spec (pre-irfft) and out[hop] (post-irfft + OLA) carry the float32
+     * FFT, so they drift at ULP scale under KISS (measured e_out_spec ~1.2e-7,
+     * out ~6e-8). Gate within POST_TOL; a real regression diverges by O(0.1). */
+    if (a_eout.maxd < POST_TOL && a_out.maxd < POST_TOL) {
+        printf(">>> PASS (non-FFT driver bit-exact; e_out_spec/out within %.0e: "
+               "e_out_spec max=%.3e out max=%.3e)\n",
+               (double)POST_TOL, a_eout.maxd, a_out.maxd);
         return 0;
     }
-    /* out[hop] residual is the shared fft_fp64.c irfft's <=1-ULP difference vs
-     * numpy pocketfft (radix-2 c2c rounding), confined to near-silent cold-start
-     * frames. The project-wide C<->Python FFT gate is rtol<1e-4 (see pbfdkf.c
-     * header); these diffs are ~2e-17 absolute. The DRIVER itself is bit-exact:
-     * e_out_spec (pre-irfft) matches with 0 mismatches across every hop. */
-    if (a_out.maxd < 1.0e-12) {
-        printf(">>> PASS (driver bit-exact; out[hop] has a known fft_fp64.c "
-               "irfft <=1-ULP residual, max=%.3e on cold-start frames only)\n",
-               a_out.maxd);
-        return 0;
-    }
-    printf(">>> FAIL (out[hop] residual exceeds the irfft-ULP tolerance)\n");
+    printf(">>> FAIL (e_out_spec/out exceed float32 FFT tolerance %.0e)\n",
+           (double)POST_TOL);
     return 1;
 }

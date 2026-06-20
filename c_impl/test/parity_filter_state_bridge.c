@@ -1,7 +1,14 @@
 /* parity_filter_state_bridge.c — replay the binary golden from
  * python/diag/gen_filter_state_bridge_golden.py through the C
- * filter_state_bridge and assert exact (bit-for-bit) match across a
- * multi-frame sequence with evolving filter state. WS5 Phase 5.2 gate.
+ * filter_state_bridge across a multi-frame sequence with evolving filter state.
+ * WS5 Phase 5.2 gate.
+ *
+ * All control fields (regime / filter_converged / main_paused / mu_final /
+ * external_delay / any_coarse / all_div / divergence_indicator) are replayed
+ * from golden inputs and stay BIT-EXACT. The one FFT-derived output —
+ * filter_taps = irfft(W0) — drifts by the KISS float32 FFT tolerance
+ * (measured worst ~3e-8), so it is gated within FSB_TAPS_TOL, not bit-for-bit.
+ * (Under the retired pocketfft backend filter_taps was bit-exact too.)
  *
  * Build (from c_impl/):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
@@ -15,6 +22,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+
+/* filter_taps = irfft(W0): KISS float32 vs numpy fp64, measured worst ~3e-8. */
+#define FSB_TAPS_TOL 1.0e-4
 
 static int rd(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
 
@@ -92,7 +102,7 @@ int main(int argc, char **argv) {
                 if (br.filter_taps[k] != exp_taps[k]) {
                     double d = fabs((double)br.filter_taps[k] - (double)exp_taps[k]);
                     if (d > max_abs_diff) max_abs_diff = d;
-                    mism++;
+                    if (d > FSB_TAPS_TOL) mism++;  /* irfft float32-FFT drift below tol is OK */
                 }
             }
         }
@@ -118,7 +128,8 @@ int main(int argc, char **argv) {
            "p_len=%d, mismatches=%d, max_abs_diff=%g\n",
            n_frames, fft_size, n_freqs, p_len, mism, max_abs_diff);
     if (mism) { printf(">>> FAIL\n"); return 1; }
-    printf(">>> PASS (bit-exact)\n");
+    printf(">>> PASS (control fields bit-exact; filter_taps within %.0e, max=%g)\n",
+           (double)FSB_TAPS_TOL, max_abs_diff);
     return 0;
 
 shortread:

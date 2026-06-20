@@ -1,13 +1,16 @@
 /* parity_linear_filter_select.c — replay the REAL-pipeline binary golden from
  * python/diag/gen_linear_filter_select_golden.py through the C
- * LinearFilterSelect port (AEC._aec3_select_linear_filter_output) and assert
- * BIT-EXACT (0 mismatches, uint32 bit-pattern compare) on both selected_esw and
- * selected_echo_spec across every captured hop of the DT case.
+ * LinearFilterSelect port (AEC._aec3_select_linear_filter_output) and check
+ * both selected_esw and selected_echo_spec match within the float32 FFT
+ * tolerance across every captured hop of the DT case.
  *
- * Bit-exactness holds because the only non-trivial op is the rfft of
- * [e_old|e_form]·sqrt_hann (vendored KISS FFT (float32)), the e2/y2/s2 sums are
- * np.sum-pairwise in f64, and the crossfade ramp + complex add/sub are
- * reproduced op-for-op in matching dtype (see linear_filter_output.c).
+ * This is a per-hop REPLAY (inputs fed from the golden each hop), so the only
+ * source of drift is the single rfft of [e_old|e_form]·sqrt_hann (vendored
+ * KISS FFT, float32) — one FFT deep, no recursion. The e2/y2/s2 sums are
+ * np.sum-pairwise in f64 and the crossfade ramp + complex add/sub are reproduced
+ * op-for-op in matching dtype (see linear_filter_output.c), so the divergence is
+ * ULP-scale, not algorithmic. (Under the retired pocketfft backend this was a
+ * strict 0/0 bit-pattern check; KISS trades that for the float32 tolerance.)
  *
  * Build (from c_impl/), STANDALONE (do NOT link aec.c):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
@@ -23,15 +26,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
+
+/* selected_esw/echo carry one rfft of windowed error; KISS float32 vs numpy
+ * fp64 drifts at ULP scale. 1e-4 brackets it; a real regression is O(0.1). */
+#define LFS_TOL 1.0e-4
 
 static int rd(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
 
-/* bit-exact float compare via uint32 bit pattern */
-static int fbits_ne(float a, float b) {
-    uint32_t ua, ub;
-    memcpy(&ua, &a, 4);
-    memcpy(&ub, &b, 4);
-    return ua != ub;
+/* |got-exp| > tol ?  (always updates *maxd so the worst diff is reported) */
+static int tol_exceed(float got, float exp, double tol, double *maxd) {
+    double d = fabs((double)got - (double)exp);
+    if (d > *maxd) *maxd = d;
+    return d > tol;
 }
 
 int main(int argc, char **argv) {
@@ -70,6 +77,7 @@ int main(int argc, char **argv) {
     Complex *got_echo  = malloc((size_t)K * sizeof(Complex));
 
     long mism_esw = 0, mism_echo = 0, total = 0;
+    double maxd_esw = 0.0, maxd_echo = 0.0;
     int first_bad_hop = -1;
 
     for (int h = 0; h < n_hops; ++h) {
@@ -95,10 +103,11 @@ int main(int argc, char **argv) {
 
         for (int k = 0; k < K; ++k) {
             int bad = 0;
-            if (fbits_ne(got_esw[k].r, exp_esw[k].r) ||
-                fbits_ne(got_esw[k].i, exp_esw[k].i)) { mism_esw++; bad = 1; }
-            if (fbits_ne(got_echo[k].r, exp_echo[k].r) ||
-                fbits_ne(got_echo[k].i, exp_echo[k].i)) { mism_echo++; bad = 1; }
+            /* bitwise | (not ||) so both r and i always update maxd */
+            if (tol_exceed(got_esw[k].r, exp_esw[k].r, LFS_TOL, &maxd_esw) |
+                tol_exceed(got_esw[k].i, exp_esw[k].i, LFS_TOL, &maxd_esw)) { mism_esw++; bad = 1; }
+            if (tol_exceed(got_echo[k].r, exp_echo[k].r, LFS_TOL, &maxd_echo) |
+                tol_exceed(got_echo[k].i, exp_echo[k].i, LFS_TOL, &maxd_echo)) { mism_echo++; bad = 1; }
             if (bad && first_bad_hop < 0) first_bad_hop = h;
         }
         total += K;
@@ -107,14 +116,15 @@ int main(int argc, char **argv) {
 
     printf("linear_filter_select parity: %d hops, %d bins, %ld complex points\n",
            n_hops, K, total);
-    printf("  selected_esw  mismatches=%ld\n", mism_esw);
-    printf("  selected_echo mismatches=%ld\n", mism_echo);
+    printf("  selected_esw  tol-exceed=%ld (max=%.3e)\n", mism_esw, maxd_esw);
+    printf("  selected_echo tol-exceed=%ld (max=%.3e)\n", mism_echo, maxd_echo);
     if (mism_esw || mism_echo) {
         printf("  first diverging hop=%d\n", first_bad_hop);
-        printf(">>> FAIL\n");
+        printf(">>> FAIL (exceeds float32 FFT tolerance %.0e)\n", (double)LFS_TOL);
         return 1;
     }
-    printf(">>> PASS (bit-exact)\n");
+    printf(">>> PASS (within float32 FFT tolerance %.0e; esw max=%.3e echo max=%.3e)\n",
+           (double)LFS_TOL, maxd_esw, maxd_echo);
 
     linear_filter_select_free(&s);
     fft_destroy(fft);
