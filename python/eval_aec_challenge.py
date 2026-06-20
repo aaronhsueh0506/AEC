@@ -35,9 +35,9 @@ def _filter_mic_files(mic_files, tag):
     print(f'[cases-list] {tag}: {len(keep)}/{len(mic_files)} matched', file=sys.stderr)
     return keep
 
-# Try PESQ
+# PESQ availability probe (optional; AECMOS/DNSMOS are the scoring backends)
 try:
-    from pesq import pesq as pesq_fn
+    import pesq  # noqa: F401
     HAS_PESQ = True
 except ImportError:
     HAS_PESQ = False
@@ -381,18 +381,6 @@ def compute_sdr(mic, output):
 def _is_movement(filename):
     """Check if a filename is a movement case."""
     return '_with_movement_' in filename
-
-
-def compute_pesq(ref, deg, sr):
-    if not HAS_PESQ:
-        return None
-    n = min(len(ref), len(deg))
-    ref, deg = ref[:n], deg[:n]
-    mode = 'wb' if sr >= 16000 else 'nb'
-    try:
-        return pesq_fn(sr, ref, deg, mode)
-    except:
-        return None
 
 
 def eval_farend_singletalk(base_dir, fl, do_speex, do_aec3, do_aec3_linear, out_dir, preset=None, do_old_aec=False, chunk_idx=0, n_chunks=1):

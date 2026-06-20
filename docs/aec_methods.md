@@ -22,7 +22,6 @@ for the side-by-side flowcharts of the current build and the WebRTC AEC3 referen
 | [`aec_algorithm_guide.html`](aec_algorithm_guide.html) | Presentation overview |
 | [`architecture_v3_22_5_vs_aec3.html`](architecture_v3_22_5_vs_aec3.html) | Architecture flowcharts vs WebRTC AEC3 (the v3.23.0 DT-aware stack is config-only over this pipeline) |
 | [`c_user_and_integration_guide.md`](c_user_and_integration_guide.md) | C API, integration, streaming contract |
-| [`refactor_modules_layout.md`](refactor_modules_layout.md) | Module map |
 | [`pbfdkf_shadow_intro.md`](pbfdkf_shadow_intro.md) | PBFDKF + shadow design |
 | [`nn_integration_interface.md`](nn_integration_interface.md) | NN residual/NR/joint swap seams |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Version history |
