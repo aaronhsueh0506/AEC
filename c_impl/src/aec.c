@@ -992,7 +992,9 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
                  AEC3B_REE_DEFAULT_GAIN, AEC3B_REE_TM_GAIN, AEC3B_REE_ERLE_ONSET_COMP,
                  AEC3B_REE_REVERB_DECAY, AEC3B_REE_REVERB_MILD_SCALE,
                  AEC3B_REE_REVERB_ENABLED, AEC3B_REE_REVERB_TAIL_STRENGTH,
-                 AEC3B_REE_USE_AEC3_RESIDUAL_NOISE_GATE, AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW,
+                 AEC3B_REE_USE_AEC3_RESIDUAL_NOISE_GATE,
+                 AEC3B_USE_STATIONARITY_PROPERTIES,
+                 AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW,
                  AEC3B_REE_NL_R2_ENABLED, AEC3B_REE_NL_R2_ALPHA, AEC3B_REE_NL_NORM_POWER,
                  AEC3B_REE_RESIDUAL_NOISE_GATE_POWER, AEC3B_REE_NOISE_FLOOR_HOLD_HOPS,
                  AEC3B_REE_USE_FREQ_RESPONSE, AEC3B_REE_REVERB_USE_CONSERVATIVE,
@@ -1033,6 +1035,9 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         scfg.split_floor_far_active =
             pow(10.0, (double)cfg->min_gain_floor_far_active_db / 10.0);
         scfg.split_floor_far_silent = AEC3B_SG_SPLIT_FLOOR_FAR_SILENT;
+        /* DT-gated floor: 10^(min_gain_floor_dt_db/10) (mirrors aec_create). */
+        scfg.split_floor_dt =
+            pow(10.0, (double)cfg->min_gain_floor_dt_db / 10.0);
         scfg.split_floor_latch_power = AEC3B_SG_SPLIT_FLOOR_LATCH_POWER;
         scfg.soft_blend_enabled = AEC3B_SG_SOFT_BLEND_ENABLED;
         scfg.soft_blend_per_bin = AEC3B_SG_SOFT_BLEND_PER_BIN;
