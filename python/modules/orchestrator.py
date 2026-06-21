@@ -593,6 +593,10 @@ class AEC:
                 hop_size=self.filter.hop_size
             )
             self.shadow_filter.enable_td_constraint = self.config.enable_td_constraint
+            # FFT dedup: the shadow's near_spec / error_spec_windowed are never
+            # read by any consumer (only its error_spec/echo_spec are). Skip
+            # computing them in the shadow — byte-equal, saves 2 FFTs/hop.
+            self.shadow_filter._lightweight = True
             # PBFDAF shadow AEC3 CoarseFilterUpdateGain protection flags
             # (partition-summed X², noise gate, saturation, poor-excitation,
             # narrowband mask) are PBFDAF defaults.
@@ -1652,7 +1656,13 @@ class AEC:
 
                 # WebRTC-style: freeze main filter weights when shadow detected divergence
                 main_mu = 0.0 if self._regime_handler.main_paused else mu_scale
-                raw_output = self.filter.process(near_end, far_end, main_mu)
+                # FFT dedup: the shadow ran pre-main on the SAME far_end with an
+                # identical far_buffer (lockstep shift + paired reset), so reuse
+                # its far_spec instead of recomputing — byte-equal, saves 1 FFT/hop.
+                raw_output = self.filter.process(
+                    near_end, far_end, main_mu,
+                    precomputed_far_spec=(
+                        self.shadow_filter.far_spec if _shadow_ran_pre_main else None))
 
                 # Refresh StationarityEstimator using the post-filter
                 # render PSD. Computes the flag used by the next hop's

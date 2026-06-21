@@ -92,7 +92,7 @@ complex×complex FMA, EMA double-coeff).
 For embedded targets, build one pool and place the whole instance in it:
 
 ```c
-size_t bytes = aec_get_mem_size(&cfg);     /* balanced: 525760 B @ hop=160 */
+size_t bytes = aec_get_mem_size(&cfg);     /* balanced: 525776 B @ hop=160 */
 void*  pool  = your_static_alloc(bytes);   /* 16-byte aligned */
 Aec a; aec_init(&a, pool, bytes, &cfg);    /* byte-equal to aec_create */
 ```

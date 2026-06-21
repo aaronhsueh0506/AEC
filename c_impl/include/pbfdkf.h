@@ -69,6 +69,15 @@ typedef struct PBFDAF {
     Complex* far_spec;         /* [n_freqs] */
     Complex* error_spec_windowed; /* [n_freqs] */
 
+    /* FFT dedup (main+shadow share an identical far_buffer: lockstep shift +
+     * paired reset). When the caller already computed far_spec this hop (the
+     * shadow runs pre-main), it points it here so the frontend reuses it instead
+     * of a redundant rfft; one-shot (cleared after use). `lightweight` (set on
+     * the shadow) skips near_spec + error_spec_windowed, which no consumer reads.
+     * Both are byte-equal. Borrowed pointer — not pool-owned. */
+    const Complex* precomputed_far_spec;
+    int      lightweight;
+
     /* AEC3 SubtractorOutput.s_*_max_abs — time-domain peak of the echo
      * predictor on the valid hop (max|echo_time[hop:block]|). Recomputed every
      * frontend pass; consumed by AecState SaturationDetector. */
