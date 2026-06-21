@@ -180,7 +180,8 @@ class PBFDAF:
             self._call_counter = 0
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray,
-                mu_scale=1.0, defer_update: bool = False) -> np.ndarray:
+                mu_scale=1.0, defer_update: bool = False,
+                precomputed_far_spec=None) -> np.ndarray:
         """Process hop_size samples. mu_scale: scalar or per-bin array [n_freqs].
 
         defer_update: when True, skip the W update + partition_idx advance and
@@ -200,9 +201,18 @@ class PBFDAF:
         self.far_buffer[-hop:] = far_end
 
         # FFT (zero-pad block_size buffer to fft_size, cast to float32 precision)
-        near_spec = np.fft.rfft(self.near_buffer, self.fft_size).astype(np.complex64)
-        far_spec = np.fft.rfft(self.far_buffer, self.fft_size).astype(np.complex64)
-        self.near_spec = near_spec  # expose for RES overlap-save
+        # near_spec is only consumed by the main filter (coherence DTD / RES
+        # overlap-save); the shadow's copy is never read, so skip it in
+        # lightweight (shadow) mode — byte-equal, one fewer FFT/hop.
+        if not getattr(self, '_lightweight', False):
+            self.near_spec = np.fft.rfft(self.near_buffer, self.fft_size).astype(np.complex64)
+        # far_spec is identical between main + shadow (same far_buffer: lockstep
+        # shift + paired reset). When the caller already computed it (shadow runs
+        # pre-main), reuse it instead of a redundant rfft — byte-equal.
+        if precomputed_far_spec is not None:
+            far_spec = precomputed_far_spec
+        else:
+            far_spec = np.fft.rfft(self.far_buffer, self.fft_size).astype(np.complex64)
         self.far_spec = far_spec  # expose for coherence DTD
 
         # Store far-end spectrum
@@ -244,10 +254,13 @@ class PBFDAF:
 
         # Windowed error spec for RES analysis: near_buffer × sqrt-Hann − echo_spec.
         # Same time alignment as far_spec/echo_spec, but with sqrt-Hann variance
-        # (low inter-frame noise). Used for coherence/PSD/ENR in ResFilter.
-        near_win = self.near_buffer[:self.block_size] * self._sqrt_hann_analysis
-        near_spec_win = np.fft.rfft(near_win, self.fft_size).astype(np.complex64)
-        self.error_spec_windowed = near_spec_win - self.echo_spec
+        # (low inter-frame noise). Used for coherence/PSD/ENR in ResFilter — main
+        # filter only; the shadow's error_spec_windowed is never read, so skip it
+        # in lightweight (shadow) mode — byte-equal, one fewer FFT/hop.
+        if not getattr(self, '_lightweight', False):
+            near_win = self.near_buffer[:self.block_size] * self._sqrt_hann_analysis
+            near_spec_win = np.fft.rfft(near_win, self.fft_size).astype(np.complex64)
+            self.error_spec_windowed = near_spec_win - self.echo_spec
 
         # Update weights — gate on far-end activity
         self._c1c5_trace = {}   # reset each hop; empty when far-inactive or flags OFF

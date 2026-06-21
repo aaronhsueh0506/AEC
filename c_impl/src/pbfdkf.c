@@ -134,6 +134,8 @@ static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu, float del
     p->initial_state_far_energy_floor = 1e-4f;
     p->last_initial_state_active = 1;
     p->last_s_max_abs = 0.0f;
+    p->lightweight = 0;
+    p->precomputed_far_spec = NULL;
 }
 
 static void pbfdaf_zero_state(PBFDAF* p) {
@@ -302,8 +304,19 @@ static double pbfdaf_frontend(PBFDAF* p,
     memmove(p->far_buffer, p->far_buffer + hop, (size_t)(blk - hop) * sizeof(float));
     memcpy(p->far_buffer + (blk - hop), far_end, (size_t)hop * sizeof(float));
 
-    rfft_padded(p, p->near_buffer, blk, p->near_spec);
-    rfft_padded(p, p->far_buffer,  blk, p->far_spec);
+    /* near_spec: consumed by the main filter only; the shadow's copy is never
+     * read, so skip it in lightweight (shadow) mode — byte-equal. */
+    if (!p->lightweight)
+        rfft_padded(p, p->near_buffer, blk, p->near_spec);
+    /* far_spec: identical between main + shadow (same far_buffer). When the
+     * caller already computed it (shadow runs pre-main), reuse it instead of a
+     * redundant rfft — byte-equal. One-shot. */
+    if (p->precomputed_far_spec != NULL) {
+        memcpy(p->far_spec, p->precomputed_far_spec, (size_t)K * sizeof(Complex));
+        p->precomputed_far_spec = NULL;
+    } else {
+        rfft_padded(p, p->far_buffer, blk, p->far_spec);
+    }
 
     int curr_p = p->partition_idx;
     *out_curr_p = curr_p;
@@ -366,13 +379,17 @@ static double pbfdaf_frontend(PBFDAF* p,
     for (int i = 0; i < hop; ++i) p->time_scratch[hop + i] = output[i];
     fft_forward(p->fft, p->time_scratch, p->error_spec);
 
-    /* windowed near (sqrt-Hann × near_buffer) − echo_spec */
-    for (int i = 0; i < blk; ++i)
-        p->time_scratch[i] = p->near_buffer[i] * p->sqrt_hann[i];
-    rfft_padded(p, p->time_scratch, blk, p->spec_scratch);
-    for (int k = 0; k < K; ++k) {
-        p->error_spec_windowed[k].r = p->spec_scratch[k].r - p->echo_spec[k].r;
-        p->error_spec_windowed[k].i = p->spec_scratch[k].i - p->echo_spec[k].i;
+    /* windowed near (sqrt-Hann × near_buffer) − echo_spec. RES analysis = main
+     * filter only; the shadow's error_spec_windowed is never read, so skip it in
+     * lightweight (shadow) mode — byte-equal. */
+    if (!p->lightweight) {
+        for (int i = 0; i < blk; ++i)
+            p->time_scratch[i] = p->near_buffer[i] * p->sqrt_hann[i];
+        rfft_padded(p, p->time_scratch, blk, p->spec_scratch);
+        for (int k = 0; k < K; ++k) {
+            p->error_spec_windowed[k].r = p->spec_scratch[k].r - p->echo_spec[k].r;
+            p->error_spec_windowed[k].i = p->spec_scratch[k].i - p->echo_spec[k].i;
+        }
     }
 
     /* far_hop_energy = np.sum(far_end**2) / hop. Reproduce np.sum (pairwise f32)

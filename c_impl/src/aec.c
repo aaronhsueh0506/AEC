@@ -413,6 +413,9 @@ int aec_create(Aec* a, const AecConfig* cfg) {
                     cfg->delta, hop);
         a->shadow_filter.poor_excitation_counter = poor_init;
         a->shadow_filter.saturated_capture = 0;
+        /* FFT dedup: the shadow's near_spec / error_spec_windowed are never read
+         * — skip computing them (byte-equal, 2 fewer FFTs/hop). */
+        a->shadow_filter.lightweight = 1;
         a->has_shadow = 1;
     }
 
@@ -1072,6 +1075,11 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     }
 
     /* 9. MAIN filter. */
+    /* FFT dedup: the shadow ran pre-main on the SAME far_hop with an identical
+     * far_buffer (lockstep shift + paired reset), so reuse its far_spec instead
+     * of recomputing — byte-equal, saves 1 FFT/hop. One-shot (frontend clears). */
+    a->main_filter.base.precomputed_far_spec =
+        a->has_shadow ? a->shadow_filter.far_spec : NULL;
     double main_mu_scalar = a->regime.main_paused ? 0.0 : mu_scalar;
     {
         float mu_buf[8192];
