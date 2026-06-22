@@ -292,6 +292,7 @@ class AEC:
                 hop_size=self._internal_hop
             )
             self.filter.enable_td_constraint = self.config.enable_td_constraint
+            self.filter._constraint_round_robin = self.config.constraint_round_robin
             self._hop_size = self.config.hop_size
             self._n_partitions = n_partitions
 
@@ -593,6 +594,7 @@ class AEC:
                 hop_size=self.filter.hop_size
             )
             self.shadow_filter.enable_td_constraint = self.config.enable_td_constraint
+            self.shadow_filter._constraint_round_robin = self.config.constraint_round_robin
             # FFT dedup: the shadow's near_spec / error_spec_windowed are never
             # read by any consumer (only its error_spec/echo_spec are). Skip
             # computing them in the shadow — byte-equal, saves 2 FFTs/hop.

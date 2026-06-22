@@ -33,6 +33,18 @@ class AecConfig:
     # AEC3 comfort-noise floor (dBFS). Float[-1,1] PSD scale.
     comfort_noise_floor_dbfs: float = -96.03406
     enable_td_constraint: bool = True
+    # AEC3 round-robin TD constraint (DEFAULT ON) — constrain ONE filter
+    # partition per hop (cycling) instead of all partitions every hop
+    # (adaptive_fir_filter.cc:686-689). Cuts the per-hop constraint FFTs
+    # ~n_partitions× (≈58% of the integrated-path per-hop FFTs). Our old
+    # all-partitions-every-hop was OVER-constraining (the float32 irfft/rfft
+    # round-trip + boundary window repeatedly nibbled freshly-adapted taps),
+    # so this also DEEPENS linear convergence → +echo. 800-case no-PA validated
+    # (vs full-constraint): echo up every far-active bucket (FS +0.055/+0.073,
+    # DT +0.043/+0.055) at −0.031 DT deg; the DT cost is neutralised by the
+    # min_gain_floor_dt_db −20→−16 re-tune below (round-robin freed FS-echo
+    # headroom to spend on DT near-protection). Propagated to main + shadow.
+    constraint_round_robin: bool = True
 
     # ── v3.22 C': Coherence-based ERLE gate (Γ²_ŶY) ──
     # Gate SubbandErle updates per-bin when Γ²(Ŷ, Y) < threshold.
@@ -78,10 +90,15 @@ class AecConfig:
     # 800-case no-PA validated on top of dt_aware_recovery_soft: DT_static deg
     # 2.016->2.074, DT_movement 2.088->2.140 (both EXCEED pre-align), at a
     # bounded echo cost (DT echo 4.28->4.22, FS echo 3.59->3.54, all bars hold).
-    # Energy gate false-arms a little on loud FS echo (hence the FS cost); -20dB
-    # is the operating point that maximises DT deg while holding FS>3.5.
+    # Energy gate false-arms a little on loud FS echo (hence the FS cost).
+    # Re-tuned -20->-16 alongside constraint_round_robin: round-robin's deeper
+    # linear convergence lifts FS echo, freeing headroom to raise this DT-only
+    # floor and neutralise round-robin's −0.031 DT-deg cost. 800-case no-PA
+    # validated (round-robin + this −16): vs full-constraint baseline, DT deg
+    # back to baseline (DT_static +0.002, DT_movement −0.004) while echo stays
+    # up everywhere (FS +0.029/+0.022, DT +0.014/+0.027), all four bars hold.
     dt_aware_res_floor_enabled: bool = True
-    min_gain_floor_dt_db: float = -20.0
+    min_gain_floor_dt_db: float = -16.0
 
     # ── linear-filter cold-start DEADLOCK breaker (PBFDKF Kalman gain) ──
     # mu = H_error/(0.5·H_error·X² + n·E²); H_error refreshed by

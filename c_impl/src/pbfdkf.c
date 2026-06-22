@@ -136,6 +136,8 @@ static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu, float del
     p->last_s_max_abs = 0.0f;
     p->lightweight = 0;
     p->precomputed_far_spec = NULL;
+    p->constraint_round_robin = 0;
+    p->partition_to_constrain = 0;
 }
 
 static void pbfdaf_zero_state(PBFDAF* p) {
@@ -474,12 +476,15 @@ void pbfdaf_process(PBFDAF* p,
                 Wp[k].r += mu_eff[k] * gr;
                 Wp[k].i += mu_eff[k] * gi;
             }
-            if (p->enable_td_constraint) {
+            if (p->enable_td_constraint &&
+                (!p->constraint_round_robin || part == p->partition_to_constrain)) {
                 fft_inverse(p->fft, Wp, p->time_scratch);
                 for (int i = 0; i < p->fft_size; ++i) p->time_scratch[i] *= p->td_window[i];
                 fft_forward(p->fft, p->time_scratch, Wp);
             }
         }
+        if (p->enable_td_constraint && p->constraint_round_robin)
+            p->partition_to_constrain = (p->partition_to_constrain + 1) % N;
     }
 
     p->partition_idx = (p->partition_idx + 1) % N;
@@ -771,12 +776,15 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
             Wp[k].r += fmaf(ksr, er, -(ksi * ei));
             Wp[k].i += fmaf(ksr, ei,  (ksi * er));
         }
-        if (b->enable_td_constraint) {
+        if (b->enable_td_constraint &&
+            (!b->constraint_round_robin || part == b->partition_to_constrain)) {
             fft_inverse(b->fft, Wp, b->time_scratch);
             for (int i = 0; i < b->fft_size; ++i) b->time_scratch[i] *= b->td_window[i];
             fft_forward(b->fft, b->time_scratch, Wp);
         }
     }
+    if (b->enable_td_constraint && b->constraint_round_robin)
+        b->partition_to_constrain = (b->partition_to_constrain + 1) % N;
 
     /* E2 fix: scale mu_aec3 by mu_scale_arr before H_error decay so that masked
      * bins (RSA narrowband mask + DT scale) do not decay while their W is frozen.

@@ -74,7 +74,7 @@ typedef struct AecConfig {
                                                * Path A/B/EPV/shadow_rise realign
                                                * while near recently present */
     int    dt_aware_res_floor_enabled;        /* 1 — DT-gated RES min-gain floor */
-    float  min_gain_floor_dt_db;              /* -20.0 — DT floor (dB) */
+    float  min_gain_floor_dt_db;              /* -16.0 — DT floor (dB) */
     /* ne_recent gate parameters (mirror AecConfig.ne_recent_*). threshold is
      * f64 to match Python's float(0.3) exactly (0.3f rounds differently). */
     double ne_recent_threshold;               /* 0.3 */

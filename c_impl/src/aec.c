@@ -66,7 +66,10 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     /* DT-deg recovery stack (default ON, mirrors Python 16285fd). */
     cfg->dt_aware_recovery_soft = 1;
     cfg->dt_aware_res_floor_enabled = 1;
-    cfg->min_gain_floor_dt_db = -20.0f;
+    /* -16 (re-tuned from -20 alongside constraint_round_robin): round-robin's
+     * deeper linear convergence lifts FS echo, freeing headroom to raise this
+     * DT-only floor and neutralise round-robin's DT-deg cost. */
+    cfg->min_gain_floor_dt_db = -16.0f;
     cfg->ne_recent_threshold = 0.3;   /* f64, matches Python float(0.3) */
     cfg->ne_recent_hold = 150;
     cfg->ne_recent_sustain = 3;
@@ -406,6 +409,8 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     /* RSA-driven poor-excitation init (1000 blocks → hop-scaled). */
     long poor_init = blocks_to_hops_round(1000, hop, cfg->sample_rate);
     a->main_filter.base.poor_excitation_counter = poor_init;
+    /* AEC3 round-robin TD constraint (production default ON) — main + shadow. */
+    a->main_filter.base.constraint_round_robin = 1;
 
     /* Shadow filter (PBFDAF NLMS). */
     if (cfg->enable_shadow) {
@@ -416,6 +421,7 @@ int aec_create(Aec* a, const AecConfig* cfg) {
         /* FFT dedup: the shadow's near_spec / error_spec_windowed are never read
          * — skip computing them (byte-equal, 2 fewer FFTs/hop). */
         a->shadow_filter.lightweight = 1;
+        a->shadow_filter.constraint_round_robin = 1;
         a->has_shadow = 1;
     }
 
@@ -873,6 +879,7 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         a->main_filter.Q[k]      = cfg->kalman_q_high;
     }
     a->main_filter.base.poor_excitation_counter = blocks_to_hops_round(1000, hop, cfg->sample_rate);
+    a->main_filter.base.constraint_round_robin = 1;  /* AEC3 round-robin (main) */
     ptr += kf_sz;
 
     /* Shadow filter (PBFDAF static) */
@@ -883,6 +890,7 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         a->shadow_filter.saturated_capture = 0;
         /* FFT dedup: skip the shadow's unread near_spec / error_spec_windowed. */
         a->shadow_filter.lightweight = 1;
+        a->shadow_filter.constraint_round_robin = 1;  /* AEC3 round-robin (shadow) */
         a->has_shadow = 1;
         ptr += af_sz;
     }
