@@ -16,6 +16,42 @@ when verdict requires it.
 
 ---
 
+## [3.24.0] — 2026-06-22 — AEC3 round-robin TD constraint (FFT cut + echo gain) + DT-floor re-tune
+
+A BALANCED algorithm change from an FFT/IFFT audit of the AEC→NR→RES path. The
+time-domain gradient constraint (the per-partition `irfft→window→rfft` that zeros
+each filter partition's non-causal tail) was applied to **all** partitions
+**every hop** on both the main (PBFDKF) and shadow (PBFDAF) filters — whereas
+AEC3 constrains **one partition per hop, round-robin**
+(`adaptive_fir_filter.cc:686-689`). That constraint was ~70% of the integrated
+per-hop FFT cost (24 of ~34 ops/hop).
+
+**(1) Round-robin constraint (`constraint_round_robin`, default ON).** Constrain
+one partition per hop, cycling (`partition_to_constrain`), on each filter →
+constraint FFTs 24→4 ops/hop (**~58% of the integrated per-hop FFTs removed**).
+The old all-partitions-every-hop form was *over-constraining* (the float32
+irfft/rfft round-trip + boundary window repeatedly nibbled freshly-adapted taps),
+so the lazier round-robin also **deepens linear convergence → more echo
+cancelled**. Verified genuine (not a near-end trade): FS buckets (no near present)
+gain echo with deg pinned at the 4.999 ceiling, and matched-echo shows the FS gain
+is 3–9× the far-active-floor knob's at equal deg cost — round-robin is *not*
+dominated by the floor knob.
+
+**(2) DT-floor re-tune (`min_gain_floor_dt_db` −20 → −16).** Round-robin's deeper
+convergence frees FS-echo headroom; spending it on the DT-only min-gain floor
+neutralises round-robin's standalone −0.031 DT-deg cost.
+
+800-case no-PA (balanced / fl=832 / cng), vs the full-constraint 3.23.0 baseline:
+echo up in every far-active bucket (FS_static +0.029, FS_movement +0.022,
+DT_static +0.014, DT_movement +0.027), **DT deg held** (DT_static 2.074→2.076,
+DT_movement 2.140→2.136), NE flat (deg −0.009); all four ship bars pass. C port
+mirrors both filters (`pbfdkf.c` constraint sites gate on `partition_to_constrain`;
+`aec.c` enables on main + shadow); `parity_aec_e2e` PASSes all 3 presets with
+*tighter* tolerance than before (linear max 9.8e-7 / out 2.0e-5 — round-robin does
+6× fewer FFT round-trips, so less float32 drift accumulates).
+
+---
+
 ## [Unreleased] — 2026-06-20 — C FFT backend: pocketfft → KISS (NR-shared, float32)
 
 **C-only change; Python reference + `__version__` (3.23.0) unchanged.** The C FFT

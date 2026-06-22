@@ -78,6 +78,16 @@ typedef struct PBFDAF {
     const Complex* precomputed_far_spec;
     int      lightweight;
 
+    /* AEC3 round-robin TD constraint (adaptive_fir_filter.cc:686-689): constrain
+     * ONE partition per hop (cycling `partition_to_constrain`) instead of all
+     * partitions every hop — saves ~58% of the per-hop constraint FFTs and
+     * deepens convergence (the old all-every-hop over-constrained). aec_create
+     * sets `constraint_round_robin`=1 on BOTH filters (production default). Each
+     * filter keeps its own counter; persists across reset() (mirrors Python —
+     * reset() does not touch it). */
+    int      constraint_round_robin;
+    int      partition_to_constrain;
+
     /* AEC3 SubtractorOutput.s_*_max_abs — time-domain peak of the echo
      * predictor on the valid hop (max|echo_time[hop:block]|). Recomputed every
      * frontend pass; consumed by AecState SaturationDetector. */

@@ -34,6 +34,13 @@ class PBFDAF:
         self.delta = delta
         self.alpha_power = 0.9
         self.enable_td_constraint = True  # can be disabled for diagnosis
+        # AEC3 round-robin constraint (adaptive_fir_filter.cc:686-689) — constrain
+        # ONE partition per hop (cycling) instead of all every hop; saves ~58% of
+        # the per-hop constraint FFTs and deepens convergence (the old all-every-hop
+        # over-constrained). Orchestrator sets this from config (default ON in
+        # production); the filter-level default stays OFF for standalone use.
+        self._constraint_round_robin = False
+        self._partition_to_constrain = 0
 
         # Time-domain constraint window: 50% truncation with smooth non-causal fade.
         # Fade is placed in the NON-CAUSAL region [hop:hop+fade_len] so the causal
@@ -404,11 +411,17 @@ class PBFDAF:
             p_idx = (curr_p - p) % self.n_partitions
             grad = _err_grad * np.conj(self.X_buf[p_idx])
             self.W[p] += mu_eff * grad
-            # Time-domain constraint: fade out non-causal part (raised cosine)
-            if self.enable_td_constraint:
+            # Time-domain constraint: fade out non-causal part (raised cosine).
+            # Round-robin (default OFF): constrain only the scheduled partition.
+            if self.enable_td_constraint and (
+                    not self._constraint_round_robin
+                    or p == self._partition_to_constrain):
                 w_time = np.fft.irfft(self.W[p], self.fft_size).astype(np.float32)
                 w_time *= self._td_window
                 self.W[p] = np.fft.rfft(w_time).astype(np.complex64)
+        if self.enable_td_constraint and self._constraint_round_robin:
+            self._partition_to_constrain = (
+                self._partition_to_constrain + 1) % self.n_partitions
 
     def get_error_energy(self) -> float:
         return float(np.sum(np.abs(self.error_spec) ** 2))
@@ -733,10 +746,16 @@ class PBFDKF(PBFDAF):
             K_scaled = K * mu_scale_arr          # apply DT scale
             self.W[p] += K_scaled * _err_grad
             # Time-domain constraint (raised cosine fade).
-            if self.enable_td_constraint:
+            # Round-robin (default OFF): constrain only the scheduled partition.
+            if self.enable_td_constraint and (
+                    not self._constraint_round_robin
+                    or p == self._partition_to_constrain):
                 w_time = np.fft.irfft(self.W[p], self.fft_size).astype(np.float32)
                 w_time *= self._td_window
                 self.W[p] = np.fft.rfft(w_time).astype(np.complex64)
+        if self.enable_td_constraint and self._constraint_round_robin:
+            self._partition_to_constrain = (
+                self._partition_to_constrain + 1) % self.n_partitions
 
         # H_error decay (per-bin, refined_filter_update_gain.cc:116-119).
         # AEC3 places this decay INSIDE the active-update `else` block — it
