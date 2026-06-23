@@ -47,6 +47,13 @@ typedef struct AecConfig {
     int    enable_shadow;          /* 1 */
     int    enable_res;             /* 1 */
     int    saturation_softclip_ref;/* 1 */
+    /* Linear-AEC + external-RES seam (mirrors Python AecConfig.return_res_context,
+     * config.py:332). When set, the AEC3 post block RUNS (computes res_gain / R² /
+     * comfort_noise / windowed error spectrum and exposes them via AecResContext)
+     * but, if enable_res==0, its suppression is NOT applied — the time output stays
+     * the linear residual (raw_output). Lets a caller run AEC(linear) → NR → RES
+     * externally. Default 0 (memset) → production cascade untouched. */
+    int    return_res_context;     /* 0 */
 
     /* scalar tunables (balanced base) */
     float  shadow_err_alpha;       /* 0.80 */
@@ -272,6 +279,19 @@ typedef struct AecResContext {
     const Complex* echo_spec;
     const Complex* far_spec;
     const Complex* near_spec;
+    /* Freq-domain seam for an external post-NR residual suppressor (mirrors the
+     * Python AecResContext freq fields). Valid only when return_res_context=1;
+     * NULL otherwise. error_spec = windowed linear error E(f) in AUDIO scale
+     * (== Python ctx.error_spec, |E|²·32768² = error_psd). res_gain = the AEC3
+     * SuppressionGain G_res(f), amplitude [0..1]. r2 = residual-echo PSD R²(f)
+     * and comfort_noise = CNG N²(f), BOTH int16²-scaled (divide by 32768² to
+     * reach the |E|² audio-power scale, as run_res does). All length n_freqs.
+     * The pointers alias the AEC's internal per-hop buffers — read before the
+     * next aec_process() call. */
+    const Complex* error_spec;     /* windowed linear error E(f), audio scale */
+    const float*   res_gain;       /* AEC3 G_res(f), amplitude [0..1]          */
+    const float*   r2;             /* residual-echo PSD R²(f), int16²-scaled   */
+    const float*   comfort_noise;  /* CNG N²(f), int16²-scaled                 */
     float          far_power;
     float          erle_factor;
     float          dt_indicator;

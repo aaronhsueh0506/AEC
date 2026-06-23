@@ -1706,7 +1706,11 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     double dt_indicator = 0.0;
     double erle_windowed = 0.0;
     double far_power = 0.0;
-    if (a->cfg.enable_res) {
+    /* Run the AEC3 post block when EITHER the internal RES is on OR the caller
+     * asked for the res-context seam (mirrors Python orchestrator.py:2021,
+     * `enable_res or return_res_context`). With enable_res=1 this is unchanged
+     * (return_res_context is irrelevant) → production cascade byte-exact. */
+    if (a->cfg.enable_res || a->cfg.return_res_context) {
         far_power = mean_sq(a->far_hop, hop);
         /* erle_windowed (step 13a). */
         const double erle_decay = 0.999;
@@ -1867,6 +1871,14 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             aec3_post_run(&a->post, &in, &obj, &a->a3_sc, a->final_out, &pgc, &pdc);
             a->pending_gain_change = pgc;
             a->pending_delay_change = pdc;
+
+            /* Context-only seam (return_res_context && !enable_res): the AEC3
+             * post ran so res_gain / R² / comfort_noise are valid for the
+             * caller's external RES, but its suppression must NOT be applied —
+             * emit the linear residual (raw_output) so the external RES is the
+             * sole suppressor (mirrors Python orchestrator.py:3485-3486). */
+            if (!a->cfg.enable_res)
+                memcpy(a->final_out, a->raw_output, (size_t)hop * sizeof(float));
         }
 
         /* per-bin mu_scale update AFTER RES (orchestrator 2291-2307). */
@@ -2042,6 +2054,18 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
     ctx->echo_spec  = a->main_filter.base.echo_spec;
     ctx->far_spec   = a->main_filter.base.far_spec;
     ctx->near_spec  = a->main_filter.base.near_spec;
+    /* Freq-domain seam (valid when the AEC3 post block ran this hop, i.e.
+     * enable_res || return_res_context). These alias the internal per-hop
+     * buffers populated by aec3_post_run: error_spec_windowed (audio scale,
+     * == Python ctx.error_spec), the SuppressionGain output (a3_sg.gain), the
+     * residual-echo PSD (a3_sc.r2, int16²) and the CNG N² (post.comfort_noise,
+     * int16²). Left NULL when neither RES nor the context seam is enabled. */
+    if (a->cfg.enable_res || a->cfg.return_res_context) {
+        ctx->error_spec    = a->main_filter.base.error_spec_windowed;
+        ctx->res_gain      = a->a3_sg.gain;
+        ctx->r2            = a->a3_sc.r2;
+        ctx->comfort_noise = a->post.comfort_noise;
+    }
     ctx->far_power = (float)a->last_far_power;
     ctx->erle_factor = (float)a->erle_factor_prev;
     ctx->dt_indicator = (float)a->last_dt_indicator;
