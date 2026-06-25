@@ -1384,12 +1384,43 @@ class AEC:
                 _already_cancelling = (
                     bool(getattr(self.config, 'delay_acquire_protect_converged', False))
                     and float(self._diag.get('erle_windowed', 0.0)) > 2.5)  # dB
+                if getattr(self.config, 'delay_acquire_protect_inst_erle', False):
+                    # EXPERIMENT (default-OFF): erle_windowed lags ~0 at no-PA cold
+                    # start; use the recent inst-ERLE peak (last ~15 frames of the
+                    # 500 ms slope ring) so a filter already cancelling via tap-reach
+                    # is not wiped by the first-acquisition realign.
+                    _recent = list(self._erle_slope_buf)[-15:]
+                    _peak = max(_recent) if _recent else 0.0
+                    _already_cancelling = _already_cancelling or (
+                        _peak > float(getattr(self.config, 'delay_acquire_inst_erle_db', 4.0)))
                 if (_delay_eligible
                         and self._current_delay < 0
                         and self.delay_est.is_solid
                         and not _already_cancelling):
                     self._current_delay = new_delay
-                    if self.config.dt_aware_recovery_soft and self._ne_recent_frames > 0:
+                    # Warm transfer applies ONLY to the line condition: the filter
+                    # was cancelling (an IR worth keeping) AND the delay fits the
+                    # tap reach (the shift is meaningful). Outside that (echo out of
+                    # reach → no cancellation → no line), shifting by delay > IR
+                    # length just zeros the taps while skipping the derived-state
+                    # reset → measured up to −6.65 dB echo cost. So gate it.
+                    _warm_ok = False
+                    if getattr(self.config, 'delay_acquire_warm_transfer', False) \
+                            and self.filter is not None:
+                        _wpk = max(list(self._erle_slope_buf)[-15:] or [0.0])
+                        _reach = self.filter.n_partitions * self.filter.hop_size
+                        _warm_ok = (_wpk > float(getattr(
+                            self.config, 'delay_acquire_inst_erle_db', 4.0))
+                            and 0 < int(new_delay) < _reach)
+                    if _warm_ok:
+                        # Shift the learned IR by the acquired delay instead of
+                        # zeroing — preserve cancellation across the realign so the
+                        # cold-start line never forms. The ring read offset (below)
+                        # applies the same delay; taps now match the realigned far.
+                        for _filt in (self.filter, self.shadow_filter):
+                            if _filt is not None and hasattr(_filt, 'warm_shift_ir'):
+                                _filt.warm_shift_ir(int(new_delay))
+                    elif self.config.dt_aware_recovery_soft and self._ne_recent_frames > 0:
                         # Experimental soft acquisition: apply the alignment
                         # (ring offset above) + reset filter excitation counters
                         # only; keep the filter taps + convergence and let it

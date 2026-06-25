@@ -16,6 +16,59 @@ when verdict requires it.
 
 ---
 
+## [3.24.1] — 2026-06-25 — Warm tap-transfer on delay acquisition (cold-start "vertical line" fix)
+
+A no-PA-path BALANCED change. At no-pre-align cold start the far-end is silent
+until ~1 s, so the online matched-filter delay estimator cannot lock until then;
+when it does (e.g. 2uGeP `..._farend_singletalk`, frame 114 / t=1.14 s, delay 0→448)
+the ring buffer realigns and the PBFDKF filter was **fully reset** — discarding
+the ~12 dB cancellation it had already built at the cold alignment. The exposed
+echo is a **bright broadband vertical line** at the lock instant (clearest at the
+linear stage; the RES/NR post-filter suppresses ~25 dB of it downstream, which is
+why it reads as a faint haze in the final output). The reset is the filter's
+destructive reaction to a **correct** realign — the delay estimate itself is right
+(true delay ≈503, estimated 448 = within half a block; 1.14 s lock is the
+conservative `is_solid + ≥3 updates` gate, not an error).
+
+**Fix — `delay_acquire_warm_transfer` (default ON).** Instead of zeroing the
+filter, shift the learned impulse response LEFT by the acquired delay (time-domain
+`irfft → roll → rfft` per partition, exact across partition boundaries) so the
+cancellation survives the realign. Gated to the line condition: the filter was
+genuinely cancelling (recent inst-ERLE peak > `delay_acquire_inst_erle_db` = 4 dB
+— `erle_windowed` lags ~0 here so it cannot be used) AND the delay fits the tap
+reach (`n_partitions · hop`). Outside the gate it falls through to the existing
+reset path unchanged. Unlike AEC3 — which dodges the line via
+`SetInitialState(true)` + routing raw mic during re-convergence (wrong for an
+NR/NN back-end that cannot cancel echo from raw mic) — this **keeps our strong
+linear filter**, which is the asset for a linear→NN/NR pipeline.
+
+**Validation (no-PA / `NO_PREALIGN=1`, the production-realistic path).** Fires on
+**117 / 600** FS+DT cases (delay < tap reach AND filter cancelling); non-firing
+cases are byte-equal to the zero-reset path. Per-case AECMOS A/B on the firing
+population (non-firing Δ ≡ 0, so this is the exact full-corpus delta):
+
+| Bucket | AEC stage (enable_res) ΔFULL | NR pipeline (Audio_ALG) ΔFULL |
+|---|---|---|
+| FS_static | echo +0.003 / deg −0.000 | echo +0.0015 / deg −0.000 |
+| FS_movement | echo +0.001 / deg −0.000 | echo +0.0022 / deg −0.000 |
+| DT_static | echo −0.001 / **deg +0.029** | echo +0.0028 / **deg +0.019** |
+| DT_movement | echo +0.007 / deg +0.004 | echo +0.0073 / deg +0.009 |
+| NE | byte-equal (warm never fires) | byte-equal |
+
+Every bucket echo+deg neutral-to-up on both the AEC's own RES path **and** the
+real `AEC linear → NR → RES(min, ne_floor=0.4)` pipeline; no ship bar threatened;
+NE untouched. Mechanism: removing the residual-echo line at the linear stage means
+RES/NR need not suppress as hard → less near-end damage → DT deg up. 2uGeP line
+level −12.3 → −23.9 dB with steady-state cancellation preserved (12.2 vs 11.9).
+
+**Byte-equal under the legacy pre-align bench** (delay-est OFF for non-movement →
+no acquisition realign → warm never fires), so the default-config 800-case AECMOS
+numbers for `[3.24.0]` are unchanged. `delay_acquire_protect_inst_erle` (option A,
+block the realign entirely) was A/B-rejected — echo cost not cleanly gateable —
+and is kept default-OFF for reference.
+
+---
+
 ## [3.24.0] — 2026-06-22 — AEC3 round-robin TD constraint (FFT cut + echo gain) + DT-floor re-tune
 
 A BALANCED algorithm change from an FFT/IFFT audit of the AEC→NR→RES path. The

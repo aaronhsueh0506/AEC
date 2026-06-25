@@ -136,6 +136,35 @@ class PBFDAF:
         self.partition_idx = 0
         self.error_spec_windowed.fill(0)
 
+    def warm_shift_ir(self, shift_samples: int) -> None:
+        """EXPERIMENT: warm delay-realign — shift the learned impulse response
+        LEFT by ``shift_samples`` (toward tap 0), zero-filling the freed tail,
+        instead of zeroing the whole filter. When the ring buffer realigns by D
+        samples (delay acquired), the echo that the filter modelled at tap ~D
+        moves to tap ~0; shifting the IR by D preserves that cancellation across
+        the realign rather than re-converging from scratch (the cold-start
+        "vertical line"). Time-domain shift = exact across partition boundaries.
+        """
+        s = int(shift_samples)
+        if s <= 0:
+            return
+        hop, nF, nP = self.hop_size, self.fft_size, self.n_partitions
+        ir = np.zeros(nP * hop, dtype=np.float32)
+        for p in range(nP):
+            ir[p * hop:(p + 1) * hop] = np.fft.irfft(self.W[p], nF)[:hop]
+        s = min(s, len(ir))
+        ir_new = np.zeros_like(ir)
+        ir_new[:len(ir) - s] = ir[s:]
+        for p in range(nP):
+            blk = np.zeros(nF, dtype=np.float32)
+            blk[:hop] = ir_new[p * hop:(p + 1) * hop]
+            self.W[p] = np.fft.rfft(blk, nF).astype(np.complex64)
+        # Keep X_buf by default — clearing it loses the immediate cancellation
+        # (measured: line removal -16.8 vs -23.9 dB, steady 11.5 vs 12.2). The
+        # opt-in clear is kept for experimentation.
+        if getattr(self, '_warm_clear_xbuf', False):
+            self.X_buf.fill(0)
+
     def zero_filter_partitions(self, old_size: int, new_size: int) -> None:
         """AEC3-strict port of ``AdaptiveFirFilter::ZeroFilter(old, new, &H_)``
         (adaptive_fir_filter.cc:460-472).
