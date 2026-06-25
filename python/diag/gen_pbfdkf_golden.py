@@ -155,7 +155,8 @@ def main():
 
     rows = []
 
-    def p_proc(self, near_end, far_end, mu_scale=1.0, defer_update=False):
+    def p_proc(self, near_end, far_end, mu_scale=1.0, defer_update=False,
+               precomputed_far_spec=None):
         # snapshot external inputs + pre-hop internal counters. The orchestrator
         # may have fired handle_echo_path_change BEFORE this call (resets
         # call_counter→0, poor_exc→400, H_error→10000). We capture the pre-hop
@@ -184,7 +185,8 @@ def main():
         }
         grab.clear()
         far_e = float(np.sum(np.asarray(far_end, np.float32) ** 2) / self.hop_size)
-        ret = orig_proc(self, near_end, far_end, mu_scale, defer_update)
+        ret = orig_proc(self, near_end, far_end, mu_scale, defer_update,
+                        precomputed_far_spec)
 
         if far_e <= 1e-4:
             path = 0

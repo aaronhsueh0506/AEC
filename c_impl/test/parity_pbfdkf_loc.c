@@ -82,6 +82,7 @@ int main(int argc, char **argv) {
 
     PBFDKF flt;
     pbfdkf_init(&flt, block_size, N, mu, delta, hop);
+    flt.base.constraint_round_robin = 1;  /* v3.24.0 default-ON (aec.c:432) — match golden */
     for (int k = 0; k < K; ++k) { flt.Q_high[k]=q_high; flt.Q_low[k]=q_low; flt.Q[k]=q_high; }
     flt.base.initial_state_threshold_hops = init_thr;
 

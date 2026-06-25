@@ -71,6 +71,12 @@ int main(int argc, char **argv) {
     /* Build PBFDKF exactly as the orchestrator does: block_size = 2*hop. */
     PBFDKF flt;
     pbfdkf_init(&flt, block_size, N, mu, delta, hop);
+    /* v3.24.0 round-robin TD constraint (config default ON; aec.c:432 sets it on
+     * the production main filter). pbfdkf_init defaults it OFF, so the isolated
+     * replay MUST enable it to match the golden (generated via aec.process with
+     * constraint_round_robin=True) — else W diverges at the first constrained
+     * far-active hop (~71). */
+    flt.base.constraint_round_robin = 1;
     /* apply config Q (orchestrator: Q_high/Q_low/Q = config). golden q_high =
      * kalman_q_high (balanced 1e-3). */
     for (int k = 0; k < K; ++k) {
