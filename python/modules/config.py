@@ -257,6 +257,34 @@ class AecConfig:
     # legitimate cold acquisition); the gain is a bench-measurement artifact fix.
     delay_acquire_protect_converged: bool = True
 
+    # Recent INST-ERLE peak (dB) over the last ~15 frames of the 500 ms slope
+    # ring. erle_windowed lags ~0 in the ~140 ms between far-end onset and first
+    # delay lock at no-PA cold start, so it cannot tell whether the cold filter is
+    # already cancelling via tap-reach. The inst-ERLE peak can. LOAD-BEARING: it is
+    # the gate threshold for delay_acquire_warm_transfer below (warm only fires
+    # when the filter was genuinely cancelling, peak > this).
+    delay_acquire_inst_erle_db: float = 4.0
+    # REJECTED option-A substrate (default-OFF): use the inst-ERLE peak to BLOCK the
+    # first realign entirely. A/B'd on 800-case — echo cost not cleanly gateable
+    # (165 cases fire, 15 >1 dB, corr(delay,cost)≈0). Superseded by warm transfer
+    # (which keeps the realign but preserves cancellation). Kept for reference.
+    delay_acquire_protect_inst_erle: bool = False
+
+    # Warm tap-transfer on first delay acquisition (default-ON, production). When
+    # the online matched-filter locks the delay and the ring buffer realigns,
+    # instead of ZEROING the filter (which discards the cancellation it built at
+    # the cold alignment and exposes the echo — the 1.14 s "vertical line" in
+    # cold-start FS/DT), shift the learned IR LEFT by the acquired delay so the
+    # cancellation survives the realign (gated on: filter already cancelling
+    # [inst-ERLE peak > delay_acquire_inst_erle_db] AND delay within tap reach).
+    # Keeps our strong linear AEC (~12 dB) through the lock, unlike AEC3 which
+    # dodges the line by barely cancelling in linear. Validated no-PA on the AEC
+    # 800-case (enable_res) AND the Audio_ALG NR pipeline: every bucket echo+deg
+    # neutral-to-up (DT deg +0.089 firing-subset / +0.019 full-corpus, FS echo
+    # +0.009), NE byte-equal, zero ship-bar risk. Fires on ~117/600 FS+DT cases;
+    # non-firing cases are byte-equal to the zero-reset path.
+    delay_acquire_warm_transfer: bool = True
+
     # ── Shadow filter (dual-filter divergence control) ──────────────────
     enable_shadow: bool = True
     shadow_copy_threshold: float = 0.65
