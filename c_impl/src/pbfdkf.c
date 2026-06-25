@@ -495,6 +495,35 @@ void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src) {
     memcpy(dst->W, src->W, (size_t)Wsz * sizeof(Complex));
 }
 
+/* Warm tap-transfer (v3.24.1): shift the learned IR LEFT by `shift_samples`
+ * (toward tap 0), zero-filling the freed tail, INSTEAD of zeroing the filter —
+ * so the cold-start cancellation survives a delay realign (the "1.14s vertical
+ * line" fix). Mirrors filters.py:139-166: raw irfft per partition (first hop
+ * taps) -> concatenate -> left-shift by s -> rfft each hop block (zero-padded
+ * to fft_size) back into W[p]. Keeps X_buf (Python _warm_clear_xbuf default
+ * False). NO td_window — Python uses raw irfft here (unlike the TD-constraint
+ * round-trip). Bounded stack scratch (no malloc → static-memory safe). */
+void pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
+    int s = shift_samples;
+    if (s <= 0) return;
+    int hop = p->hop_size, nF = p->fft_size, nP = p->n_partitions, K = p->n_freqs;
+    int total = nP * hop;
+    if (total <= 0 || total > 4096) return;   /* safety; real max ~2080 */
+    if (s > total) s = total;
+    float ir[4096];
+    for (int part = 0; part < nP; ++part) {
+        fft_inverse(p->fft, p->W + (size_t)part * K, p->time_scratch);
+        for (int i = 0; i < hop; ++i) ir[part * hop + i] = p->time_scratch[i];
+    }
+    for (int i = 0; i < total - s; ++i) ir[i] = ir[i + s];   /* read-ahead safe */
+    for (int i = total - s; i < total; ++i) ir[i] = 0.0f;
+    for (int part = 0; part < nP; ++part) {
+        memset(p->time_scratch, 0, (size_t)nF * sizeof(float));
+        for (int i = 0; i < hop; ++i) p->time_scratch[i] = ir[part * hop + i];
+        fft_forward(p->fft, p->time_scratch, p->W + (size_t)part * K);
+    }
+}
+
 /* ===== PBFDKF (v3.22) ==================================================== */
 
 static void pbfdkf_init_scalars(PBFDKF* p) {

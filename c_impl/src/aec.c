@@ -63,6 +63,11 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->kalman_q_high = 1e-3f;
     cfg->kalman_q_low = 1e-6f;
     cfg->delay_acquire_protect_converged = 1;
+    /* Warm tap-transfer (v3.24.1, default ON) + its gate threshold; option-A
+     * (block realign) default-OFF. Mirrors config.py:266/271/286. */
+    cfg->delay_acquire_warm_transfer = 1;
+    cfg->delay_acquire_inst_erle_db = 4.0;
+    cfg->delay_acquire_protect_inst_erle = 0;
     /* DT-deg recovery stack (default ON, mirrors Python 16285fd). */
     cfg->dt_aware_recovery_soft = 1;
     cfg->dt_aware_res_floor_enabled = 1;
@@ -149,6 +154,8 @@ static void aec_reset_filter_derived_state(Aec* a) {
     a->erle_window_err = 1e-10;
     a->erle_factor_prev = 0.0;
     a->inst_erle_smooth = 1.0;
+    a->erle_slope_len = 0;     /* mirror _erle_slope_buf.clear() (orch 1176) */
+    a->erle_slope_head = 0;
 
     a->simple_mu_ratio = 1.0;
     a->simple_mu_holdoff = 0;
@@ -354,6 +361,18 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     }
     a->hop_size = hop; a->block_size = blk; a->fft_size = fft;
     a->n_freqs = K; a->n_partitions = n_parts;
+
+    /* inst-ERLE slope ring cap = Python _slope_n = max(2, int(0.5*sr/hop)),
+     * clamped to the static array size (orchestrator.py:649). */
+    {
+        int _sn = (int)(0.5 * (double)cfg->sample_rate / (double)(hop > 0 ? hop : 1));
+        if (_sn < 2) _sn = 2;
+        if (_sn > (int)(sizeof(a->erle_slope_buf) / sizeof(a->erle_slope_buf[0])))
+            _sn = (int)(sizeof(a->erle_slope_buf) / sizeof(a->erle_slope_buf[0]));
+        a->erle_slope_cap = _sn;
+        a->erle_slope_len = 0;
+        a->erle_slope_head = 0;
+    }
 
     /* HPF (mic only; ref HPF retired). */
     if (cfg->enable_highpass) {
@@ -849,6 +868,23 @@ static void misadj_fire(Aec* a) {
     a->misadj_hangover_remaining = a->cfg.filter_misadjustment_hangover_frames;
 }
 
+/* max() of the last 15 inst-ERLE ring entries — the warm-transfer gate input.
+ * Mirrors Python `max(list(self._erle_slope_buf)[-15:] or [0.0])`
+ * (orchestrator.py:1409): 0.0 when the ring is empty, else the true max
+ * (which may be negative) of the most recent <=15 appends. */
+static float aec_erle_ring_max_last15(const Aec* a) {
+    int n = a->erle_slope_len < 15 ? a->erle_slope_len : 15;
+    if (n <= 0) return 0.0f;
+    int idx = a->erle_slope_head;   /* head = next write = one past newest */
+    float m = 0.0f; int got = 0;
+    for (int i = 0; i < n; i++) {
+        idx = (idx - 1 + a->erle_slope_cap) % a->erle_slope_cap;
+        float v = a->erle_slope_buf[idx];
+        if (!got || v > m) { m = v; got = 1; }
+    }
+    return m;
+}
+
 /* ───────────────────────── process ─────────────────────────────────────── */
 
 void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
@@ -900,10 +936,30 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         /* Path A — first acquisition. */
         int already_cancelling = a->cfg.delay_acquire_protect_converged
                                  && (a->last_erle_windowed > 2.5);
+        /* option-A (default-OFF): also protect via inst-ERLE peak (orch 1387). */
+        if (a->cfg.delay_acquire_protect_inst_erle
+                && aec_erle_ring_max_last15(a) > a->cfg.delay_acquire_inst_erle_db)
+            already_cancelling = 1;
         if (eligible && a->current_delay < 0 && delay_aec3_is_solid(&a->delay)
                 && !already_cancelling) {
             a->current_delay = new_delay;
-            if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
+            /* Warm tap-transfer (orch 1407-1422): if the filter is already
+             * cancelling (inst-ERLE peak > thresh) AND the delay fits the tap
+             * reach, shift the learned IR by the delay instead of zeroing — the
+             * cold-start cancellation survives the realign (the "line" fix).
+             * Outside that, fall through to soft / hard reset unchanged. */
+            int warm_ok = 0;
+            if (a->cfg.delay_acquire_warm_transfer) {
+                float wpk = aec_erle_ring_max_last15(a);
+                int reach = a->main_filter.base.n_partitions
+                            * a->main_filter.base.hop_size;
+                warm_ok = (wpk > a->cfg.delay_acquire_inst_erle_db)
+                          && (new_delay > 0) && (new_delay < reach);
+            }
+            if (warm_ok) {
+                pbfdaf_warm_shift_ir(&a->main_filter.base, new_delay);
+                if (a->has_shadow) pbfdaf_warm_shift_ir(&a->shadow_filter, new_delay);
+            } else if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
                 /* Soft acquisition (mirrors Python 16285fd): apply the ring
                  * alignment (current_delay set above) + reset filter excitation
                  * counters ONLY; keep the converged taps + let them re-adapt at
@@ -1266,6 +1322,25 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* 16. misadjustment estimator update + fire. */
     misadj_update(a, a->near_hop, a->raw_output, hop);
     misadj_fire(a);
+
+    /* inst-ERLE slope ring: append get_erle_instant() (orchestrator.py:2382)
+     * UNCONDITIONALLY every freq-path hop — Python appends OUTSIDE the
+     * enable_res sub-block, so the warm-transfer gate works even with
+     * enable_res=0 / return_res_context=0. Value = the SAME formula as the
+     * erle_for_factor compute inside the block below (get_erle_instant uses
+     * error_power == raw_error_power, alias set at orch 2563). near_power /
+     * raw_error_power here are the prior-hop EMAs (updated later, step ~1958),
+     * matching Python's read-before-update ordering. Read at Path-A (step 3)
+     * is therefore 1-hop delayed, matching Python (read@1412 / append@2382). */
+    {
+        double _ei;
+        if (a->near_power < 1e-10 && a->raw_error_power < 1e-10) _ei = 0.0;
+        else _ei = 10.0 * log10((a->near_power + 1e-10) / (a->raw_error_power + 1e-10));
+        int _h = a->erle_slope_head;
+        a->erle_slope_buf[_h] = (float)_ei;
+        a->erle_slope_head = (_h + 1) % a->erle_slope_cap;
+        if (a->erle_slope_len < a->erle_slope_cap) a->erle_slope_len++;
+    }
 
     /* 17. RES / post block (enable_res). */
     int is_stationary_dt = 0;
