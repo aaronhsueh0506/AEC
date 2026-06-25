@@ -73,6 +73,14 @@ typedef struct AecConfig {
     float  kalman_q_high;          /* 1e-3 */
     float  kalman_q_low;           /* 1e-6 */
     int    delay_acquire_protect_converged;   /* 1 */
+    /* Warm tap-transfer on first delay acquisition (v3.24.1, default ON):
+     * shift the learned IR by the acquired delay instead of zeroing, so the
+     * cold-start cancellation survives the realign (the "1.14s vertical line"
+     * fix). Gated on inst-ERLE peak > _inst_erle_db AND delay < tap reach.
+     * _protect_inst_erle is the A/B-rejected option-A (block the realign). */
+    int    delay_acquire_warm_transfer;       /* 1 */
+    double delay_acquire_inst_erle_db;        /* 4.0 */
+    int    delay_acquire_protect_inst_erle;   /* 0 */
 
     /* DT-deg recovery stack (default ON, mirrors Python 16285fd). The
      * energy-based held near-end gate (_ne_recent_frames) arms two levers
@@ -169,6 +177,12 @@ typedef struct Aec {
     double erle_window_near, erle_window_err;
     double erle_factor_prev;
     double inst_erle_smooth;
+    /* inst-ERLE slope ring (mirrors Python orchestrator _erle_slope_buf, a
+     * deque maxlen ~500ms/hop). Holds get_erle_instant() dB values; the warm
+     * tap-transfer gate reads max() of the last 15. Filled every freq-path hop
+     * OUTSIDE the enable_res gate (Python appends unconditionally). */
+    float  erle_slope_buf[64];   /* cap >= ceil(500ms/hop)=50 @hop160/16k */
+    int    erle_slope_cap, erle_slope_len, erle_slope_head;
     double wn_err_baseline;
     int    stat_dt_hangover;
     int    warmup_frames_remaining;

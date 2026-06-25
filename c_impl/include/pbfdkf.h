@@ -132,6 +132,8 @@ void pbfdaf_process(PBFDAF* p,
                        float*       output);
 
 void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src);
+/* Warm tap-transfer: shift learned IR left by shift_samples (v3.24.1). */
+void pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples);
 
 /* ── PBFDKF (per-bin H_error Kalman) ────────────────────────────── */
 
