@@ -1,5 +1,7 @@
 # AEC — Acoustic Echo Cancellation
 
+> **C 使用與整合**：[AEC C User Manual（繁體中文）](docs/c_user_manual_zh_TW.md)
+
 Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.

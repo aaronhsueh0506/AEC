@@ -16,7 +16,7 @@ speaker, conferencing, automotive).
 cd c_impl/
 make            # → bin/aec_wav (CLI binary)
 make lib        # → bin/libaec.a (static library)
-make debug      # build with -g -DDEBUG
+make debug      # build with -g -DAEC_DEBUG
 make clean
 ```
 
@@ -48,17 +48,17 @@ non-deterministic state in HPF / saturation / detector accumulators.
 ./bin/aec_wav mic.wav ref.wav out.wav --no-delay-est
 ./bin/aec_wav mic.wav ref.wav out.wav --no-hpf
 
-# Filter length / reverb override
-./bin/aec_wav mic.wav ref.wav out.wav --filter-length-ms 64
-./bin/aec_wav mic.wav ref.wav out.wav --reverb-decay 0.85 --reverb-gain 1.6
+# Preset + toggle combined, and CSV debug trace
+./bin/aec_wav mic.wav ref.wav out.wav --preset aggressive --no-hpf
+./bin/aec_wav mic.wav ref.wav out.wav --debug-trace trace.csv
 
 # Debug log (per-frame stderr or file)
 ./bin/aec_wav mic.wav ref.wav out.wav --debug-level 2
 ./bin/aec_wav mic.wav ref.wav out.wav --debug-level 2 --debug-log /tmp/aec.log
 ```
 
-Unknown preset names exit non-zero (no silent fallback). Output WAV is
-fp32 PCM by default; `AEC_FP32_WAV=0` forces 16-bit PCM.
+Unknown preset names or options exit with code 2 (no silent fallback).
+Output WAV is fp32 PCM by default; `AEC_OUT_FLOAT=0` forces 16-bit PCM.
 
 ### Preset selection
 
@@ -114,13 +114,22 @@ via `cfg.enable_*` flags before `aec_create`.
 | `aec.h` | `aec.c` | top-level orchestration, `AecConfig`, control flow |
 | `hpf.h` | `hpf.c` | 80 Hz Butterworth biquad |
 | `saturation.h` | `saturation.c` | clip detection + ref-side soft-clip |
-| `delay_est.h` | `delay_est.c` | GCC-PHAT delay estimation |
+| `delay_aec3.h` | `delay_aec3.c` | AEC3-style matched-filter bank + lag-histogram aggregator + clockdrift detector for delay estimation (replaces the legacy GCC-PHAT estimator) |
 | `pbfdkf.h` | `pbfdkf.c` | PBFDAF base + PBFDKF (G1 KX-blended P-update) |
 | `detectors.h` | `detectors.c` | RenderActivity + FilterConvergence + DoubleTalkAnalyzer |
 | `epc_shadow.h` | `epc_shadow.c` | EchoPathChangeDetector + ShadowCopyController |
 | `aec3_post.h` | `aec3_post.c` | **AEC3 post-filter driver** — PSD derivation + coherence-ERLE gate + CNG + OLA (production post-stage) |
 | `aec_state.h` / `residual_echo_estimator.h` / `suppression_gain.h` / `reverb_model.h` | resp. `.c` | post-filter sub-modules: AecState · ResidualEchoEstimator · SuppressionGain (ENR/EMR `GainToNoAudibleEcho`) · ReverbModel |
 | `aec_debug.h` | `aec_debug.c` | timestamped log infrastructure |
+
+> `AecConfig` has grown beyond what this guide covers — newer fields
+> include warm tap-transfer (`delay_acquire_warm_transfer`,
+> `delay_acquire_inst_erle_db`), DT-aware recovery
+> (`dt_aware_recovery_soft`, `dt_aware_res_floor_enabled`,
+> `min_gain_floor_dt_db`, `ne_recent_*`), and filter-misadjustment
+> estimation (`filter_misadjustment_*`). This guide does not maintain a
+> full config table — read `c_impl/include/aec.h` directly for the
+> complete field list.
 
 ---
 
@@ -274,11 +283,11 @@ Lets you separate filter-side issues from RES-side issues.
 
 ## 9. Output format
 
-`aec_wav` writes 32-bit-float WAV by default. Set `AEC_FP32_WAV=0` to
+`aec_wav` writes 32-bit-float WAV by default. Set `AEC_OUT_FLOAT=0` to
 force 16-bit PCM:
 
 ```bash
-AEC_FP32_WAV=0 ./bin/aec_wav mic.wav ref.wav out.wav
+AEC_OUT_FLOAT=0 ./bin/aec_wav mic.wav ref.wav out.wav
 ```
 
 Internal pipeline always runs at fp32 sample I/O regardless of file
@@ -353,9 +362,10 @@ hops differ; underrun + overrun detection/recovery pass).
 
 ### 10.2 Sample-rate auto-derivation
 
-Most sizes are derived from `sample_rate` in `aec_derive_sizes()`.
-Caller only sets `sample_rate` (and optionally `filter_length_ms`); the
-rest is automatic:
+Most sizes are derived from `sample_rate` inline inside `aec_create()`
+— there is no separate `aec_derive_sizes()` function. Caller only sets
+`sample_rate` (and optionally `filter_length_ms`); the rest is
+automatic:
 
 | Field | 8 kHz | 16 kHz | 48 kHz | Auto? |
 |---|---|---|---|---|
@@ -364,7 +374,7 @@ rest is automatic:
 | `fft_size` | 256 | 512 | 1024 | ✓ (`next_pow2(2·hop)`) |
 | `n_freqs` | 129 | 257 | 513 | ✓ (`fft/2 + 1`) |
 | `n_partitions` (52 ms filter) | 6 | 6 | 6 | ✓ |
-| `ref_ring_size` | `max_delay + 4096` | same | same | ✓ |
+| `ref_ring_size` | 16384 | 32768 | 98304 | ✓ (note 2) |
 | RES bin resolution | sr / blk | sr / blk | sr / blk | ✓ |
 | `filter_length_ms` (default) | 52 | 52 | 52 (note 1) | ✗ user override |
 | `highpass_cutoff_hz` (80) | same | same | same | ✗ Hz, auto-correct |
@@ -375,6 +385,12 @@ rest is automatic:
 > longer reverb tails; the C port does not auto-bump and keeps 52 ms.
 > Set `cfg.filter_length_ms = 64.0f` manually for 48 kHz if your room
 > RT60 is high.
+>
+> Note 2 — `ref_ring_size` is the sample count for `cfg.delay_buffer_ms`
+> (default 2048 ms), floored at `max_delay_ms`-equivalent samples + 4096
+> if that floor is larger. With the default `delay_buffer_ms` (2048)
+> and `max_delay_ms` (1024), `delay_buffer_ms` drives the value at all
+> three standard sample rates (values above).
 
 ### 10.3 Gotchas when changing SR
 
@@ -395,8 +411,8 @@ rest is automatic:
    else.
 5. **Latency is fixed in *time*, not samples.** RES OLA always adds
    one hop = 10 ms regardless of SR.
-6. **`warmup_frames` is in frames, not seconds.** Default 80 frames =
-   800 ms at 10 ms hop. Keep this in mind if you tune it.
+6. **`warmup_frames` is in frames, not seconds.** Default 100 frames =
+   1000 ms (approx. 1s) at 10 ms hop. Keep this in mind if you tune it.
 
 ---
 
