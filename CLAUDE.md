@@ -22,10 +22,13 @@ tolerance:
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
 (currently **3.23.0**; BALANCED changed in 3.23.0 — no-PA matched-filter
 pre-echo fix + DT-deg recovery stack — see CHANGELOG). The Python↔C port's
-**non-FFT logic is bit-exact** (verified under `-DUSE_STANDARD_MATH`); the
-production **FFT backend is KISS FFT (float32)** (NE10 opt-in via `make
-NE10_DIR=...`), so end-to-end C aligns with Python to ~float32 precision
-(correlation 0.99999958, ≈ −60 dB, inaudible — not 0/0). Canonical algorithm reference:
+**non-FFT logic is bit-exact** (verified under `-DUSE_STANDARD_MATH`) —
+**except the delay-estimator matched filter**, which runs float32 fast-math
+dots + duty-cycling unconditionally in C (intentional divergence, sampled at
+zero AECMOS cost; see `c_impl/include/delay_aec3.h`). The production **FFT
+backend is KISS FFT (float32)** (NE10 opt-in via `make NE10_DIR=...`), so
+end-to-end C aligns with Python to ~float32 precision (correlation
+0.99999958, ≈ −60 dB, inaudible — not 0/0). Canonical algorithm reference:
 [docs/aec_methods.md](docs/aec_methods.md). Architecture flowcharts —
 current vs AEC3 reference:
 [docs/architecture_v3_22_5_vs_aec3.html](docs/architecture_v3_22_5_vs_aec3.html).

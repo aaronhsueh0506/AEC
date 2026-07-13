@@ -86,8 +86,8 @@ typedef enum {
  *   _CONSISTENT_ESTIMATE_THRESHOLD=125.
  */
 /* Down-sampling factor: 4, the WebRTC-style reference decimation (the
- * bit-exact Python-reference path). An 8x option was sampled (800-case
- * AECMOS bench) and removed — real farend-singletalk regression. */
+ * bit-exact Python-reference path). An 8x option was sampled (60-case
+ * stratified AECMOS) and removed — real farend-singletalk regression. */
 #define DA_DOWN_SAMPLING_FACTOR 4
 #define DA_AEC3_BLOCK_SIZE      64
 #define DA_SUB_BLOCK_SIZE       (DA_AEC3_BLOCK_SIZE / DA_DOWN_SAMPLING_FACTOR) /* 16 */
