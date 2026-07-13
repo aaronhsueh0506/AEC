@@ -68,7 +68,7 @@ from modules.orchestrator import AEC  # noqa: E402
 from modules.residual.residual_echo_estimator import ResidualEchoEstimator  # noqa: E402
 from eval_aec_challenge import estimate_delay  # noqa: E402
 
-ROOT = '/Users/mingyu/Desktop/novatek/SE/AEC'
+import os; ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 WAV = os.path.join(ROOT, 'wav', 'aec_challenge_blind')
 CASES = [
     os.path.join(WAV, 'doubletalk', '0I0XMl3M0ECO0U1N0cJvpg_doubletalk'),

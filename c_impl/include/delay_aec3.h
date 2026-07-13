@@ -75,9 +75,25 @@ typedef enum {
  *   _DOWN_SAMPLING_FACTOR=4, _AEC3_BLOCK_SIZE=64, _SUB_BLOCK_SIZE=16,
  *   _CONSISTENT_ESTIMATE_THRESHOLD=125.
  */
-#define DA_DOWN_SAMPLING_FACTOR 4
+/* Down-sampling factor: 4 (default, the bit-exact Python-reference path) or
+ * 8 (opt-in via -DAEC_DELAY_DS_FACTOR=8 — see Makefile flag docs). The 8x
+ * path follows AEC3's own ds8 configuration (docs/aec3_extracts/src/aec3/
+ * decimator.cc): the anti-alias stage becomes kBandPassFilterDs8 (cheby1
+ * bandpass 1000-2000 Hz, 5 identical sections) and the noise-reduction HP
+ * becomes a pass-through. Every derived size below (sub-block, filter taps,
+ * ring capacity, headroom, histogram bins) scales through this macro exactly
+ * as AEC3 scales them. ⚠ 8x DIVERGES from the Python reference (which only
+ * ports ds4): half the matched-filter work per block, but delay resolution
+ * coarsens from 4 to 8 samples. Quality-gated pending an 800-case bench. */
+#ifndef AEC_DELAY_DS_FACTOR
+#define AEC_DELAY_DS_FACTOR 4
+#endif
+#if AEC_DELAY_DS_FACTOR != 4 && AEC_DELAY_DS_FACTOR != 8
+#error "AEC_DELAY_DS_FACTOR must be 4 (reference) or 8 (AEC3 ds8 path)"
+#endif
+#define DA_DOWN_SAMPLING_FACTOR AEC_DELAY_DS_FACTOR
 #define DA_AEC3_BLOCK_SIZE      64
-#define DA_SUB_BLOCK_SIZE       16   /* 64 / 4 */
+#define DA_SUB_BLOCK_SIZE       (DA_AEC3_BLOCK_SIZE / DA_DOWN_SAMPLING_FACTOR) /* 16 @ds4, 8 @ds8 */
 #define DA_NUM_FILTERS          5
 #define DA_WINDOW_SIZE_SB       32
 #define DA_ALIGNMENT_SHIFT_SB   24
@@ -100,12 +116,19 @@ typedef enum {
 #define DA_K_NUM_BLOCKS_PER_SEC 250  /* kNumBlocksPerSecond (16000/64) */
 #define DA_STABILITY_RESET_HOPS 3000 /* ms_to_hops(30000) -> 3000 */
 
-/* ---- biquad cascade (max 3 sections) ---- */
+/* ---- biquad cascade ----
+ * Max sections: 3 for the ds4 LP (elliptic, 3 sections); the ds8 bandpass
+ * anti-alias is 5 identical sections (AEC3 kBandPassFilterDs8). */
+#if AEC_DELAY_DS_FACTOR == 8
+#define DA_BQ_MAX_SECTIONS 5
+#else
+#define DA_BQ_MAX_SECTIONS 3
+#endif
 typedef struct {
     int    n_sections;
-    double b[3][3];    /* {b0,b1,b2} per section */
-    double a[3][2];    /* {a1,a2} per section (a0 normalised) */
-    double z[3][2];    /* per-section state */
+    double b[DA_BQ_MAX_SECTIONS][3];    /* {b0,b1,b2} per section */
+    double a[DA_BQ_MAX_SECTIONS][2];    /* {a1,a2} per section (a0 normalised) */
+    double z[DA_BQ_MAX_SECTIONS][2];    /* per-section state */
 } DaBiquad;
 
 typedef struct {
@@ -197,6 +220,17 @@ void delay_aec3_reset(DelayAec3 *d);
  * far = raw reference, both BEFORE ring-buffer alignment). Returns 1 iff a
  * NEW delay value was emitted this hop (mirrors shim accumulate()). */
 int  delay_aec3_accumulate(DelayAec3 *d, const float *near, const float *far, int hop);
+
+/* Duty-cycle variant (cfg->delay_est_duty_cycle support). With
+ * run_matched_filter=1: identical to delay_aec3_accumulate (byte-exact).
+ * With 0: the hop is FED (decimators run for state continuity, the decimated
+ * render sub-blocks are pushed into the ring so the matched filter never
+ * sees gapped audio) but not ANALYSED (no matched-filter / aggregator /
+ * clockdrift update; latest_* unchanged). Feeding-without-analysing has no
+ * Python counterpart — a documented divergence, only reachable when the
+ * duty-cycle config is enabled. */
+int  delay_aec3_accumulate_ex(DelayAec3 *d, const float *near, const float *far,
+                              int hop, int run_matched_filter);
 
 /* legacy accessors */
 int    delay_aec3_estimated_delay(const DelayAec3 *d);   /* -1 until first estimate */

@@ -5,11 +5,11 @@
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
- *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/include \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/erl_estimator.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/reverb_frequency_response.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/aec3_scale.c \
- *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/test/parity_erl_estimator.c \
+ *       -Ic_impl/include \
+ *       c_impl/src/erl_estimator.c \
+ *       c_impl/src/reverb_frequency_response.c \
+ *       c_impl/src/aec3_scale.c \
+ *       c_impl/test/parity_erl_estimator.c \
  *       -lm -o /tmp/p_erl
  *   python3 .../python/diag/gen_erl_estimator_golden.py /tmp/erl_golden.bin
  *   /tmp/p_erl /tmp/erl_golden.bin

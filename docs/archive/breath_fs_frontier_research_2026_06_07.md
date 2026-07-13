@@ -383,7 +383,7 @@ The unifying reason all of bucket A fails *for you specifically*: they are **ren
 
 **Key sources:** [Song & Shin 2020, Appl.Sci.](https://www.mdpi.com/2076-3417/10/15/5291) · [Tashev coherence-adaptive DTD](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/Tashev_ET11_DoubleTalkDetector_final.pdf) · [Habets MMSE-LSA multiple interferences 2006](https://israelcohen.com/wp-content/uploads/2018/05/IWAENC2006_Habets.pdf) · [Habets joint dereverb+RES](https://www.researchgate.net/publication/224332472) · [a-priori SDR reduced-distortion AES/ANS](https://www.researchgate.net/publication/220242534) · [soft-decision AES](https://www.researchgate.net/publication/221491798) · [Faller & Chen spectral-envelope AES 2005](https://www.researchgate.net/publication/3334140) · [Faller & Tournery robust echo control](https://www.semanticscholar.org/paper/Robust-Acoustic-ECHO-Control-using-a-Simple-ECHO-Faller-Tournery/bc3142b1995f938c77badd9dabcf8b32a35a078c) · [wavelet-ICA non-Gaussianity DT 2015](https://www.sciencedirect.com/science/article/abs/pii/S0003682X15001139) · [Benesty/Gänsler fast-NCC DTD](https://www.sciencedirect.com/science/article/abs/pii/S0165168405003166) (bucket A, flagged) · [foreground/background two-filter EP0872962A2](https://patents.google.com/patent/EP0872962A2/en) (bucket A, flagged) · [Cohen/Berdugo DTD-aided RES 2022](https://israelcohen.com/wp-content/uploads/2022/09/acoustics-04-00039.pdf) (NN, taxonomy only).
 
-Extracted source PDFs saved at: `/Users/mingyu/.claude/projects/-Users-mingyu-Desktop-novatek-SE/2cc3ad9d-517c-44a3-9fac-9e87ea2d5a7c/tool-results/webfetch-1780815052738-ys102f.pdf` (Tashev) and `.../webfetch-1780815052577-83ysa5.pdf` (Cohen DTD-RES).
+Extracted source PDFs saved at: `/Users/mingyu/.claude/projects/<session-dir>/2cc3ad9d-517c-44a3-9fac-9e87ea2d5a7c/tool-results/webfetch-1780815052738-ys102f.pdf` (Tashev) and `.../webfetch-1780815052577-83ysa5.pdf` (Cohen DTD-RES).
 ---
 ## Report 3 — Speex leak mechanism dissection
 
@@ -531,7 +531,7 @@ Adopt Speex's RER structure but use *your* delay-aligned coherence as the lower 
 - `libspeexdsp/mdf.c` ~L96 `MIN_LEAK=.005`; ~L1038-1067 leak covariance (`Eh/Yh/Pey/Pyy/leak_estimate`); ~L1490 `RER` float formula `(.0001*Sxx + 3.*leak*Syy)/See` with `Sey²/(See·Syy)` coherence floor and `.5` cap; ~L770-790 `speex_echo_get_residual` (`leak2 = 2·leak`, `residual = leak2·|Ŷ|²`); ~L618 `spec_average = frame_size/sampling_rate`.
 - `libspeexdsp/preprocess.c` ~L23-25 `ECHO_SUPPRESS_DEFAULT=-40 / ACTIVE=-15 / NOISE_SUPPRESS=-15`; ~L311 `echo_noise = max(.6·echo_noise, residual_echo)`; ~L200-208 `compute_gain_floor` (`0.11513`, `.2302585`, `sqrt((noise+gain_ratio·echo)/(noise+echo))`); ~L419 `effective_echo_suppress = (1-Pframe)·suppress + Pframe·suppress_active`; ~L517-518 `gain2 = (p·sqrt(gain) + (1-p)·sqrt(gain_floor))²`.
 
-No source `.c` exists on this machine (only the compiled wheel at `/Users/mingyu/Desktop/novatek/SE/.venv/lib/python3.9/site-packages/speexdsp/_speexdsp.cpython-39-darwin.so` and headers at `/opt/homebrew/include/speex/`); the above is the canonical 1.2.1 source matching the installed binding.
+No source `.c` exists on this machine (only the compiled wheel at `<workspace>/.venv/lib/python3.9/site-packages/speexdsp/_speexdsp.cpython-39-darwin.so` and headers at `/opt/homebrew/include/speex/`); the above is the canonical 1.2.1 source matching the installed binding.
 ---
 ## Report 4 — AEC3 broad-robustness dissection
 

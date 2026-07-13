@@ -567,6 +567,7 @@ void pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
     p->H_error_per_bin = (float*)malloc((size_t)K * sizeof(float));
     p->erl_per_bin = (float*)malloc((size_t)K * sizeof(float));
     p->e2_coarse_per_bin = (float*)malloc((size_t)K * sizeof(float));
+    p->e2_ref_scratch = (float*)malloc((size_t)K * sizeof(float));
     pbfdkf_init_scalars(p);
     p->is_static = 0;
 }
@@ -586,6 +587,7 @@ size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
     total += ALIGN16((size_t)K * sizeof(float));   /* H_error_per_bin */
     total += ALIGN16((size_t)K * sizeof(float));   /* erl_per_bin */
     total += ALIGN16((size_t)K * sizeof(float));   /* e2_coarse_per_bin */
+    total += ALIGN16((size_t)K * sizeof(float));   /* e2_ref_scratch */
     return total;
 }
 
@@ -607,7 +609,8 @@ void pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
     p->error_psd = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     p->H_error_per_bin = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     p->erl_per_bin = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-    p->e2_coarse_per_bin = (float*)ptr; /* last */
+    p->e2_coarse_per_bin = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    p->e2_ref_scratch = (float*)ptr; /* last */
     pbfdkf_init_scalars(p);
     p->is_static = 1;
 }
@@ -618,6 +621,7 @@ void pbfdkf_free(PBFDKF* p) {
     free(p->Q_high); free(p->Q_low); free(p->Q); free(p->R);
     free(p->error_psd); free(p->H_error_per_bin); free(p->erl_per_bin);
     free(p->e2_coarse_per_bin);
+    free(p->e2_ref_scratch);
     pbfdaf_free(&p->base);
 }
 
@@ -690,7 +694,7 @@ void pbfdkf_scale_filter(PBFDKF* p, float scale) {
 
 /* AEC3 H_error leakage refresh + clamp (refined_filter_update_gain.cc:128-138).
  * Runs on every hop (gated path + after active decay). */
-static void pbfdkf_h_error_refresh(PBFDKF* p) {
+static void pbfdkf_h_error_refresh(PBFDKF* p, const float *e2_ref_bins) {
     PBFDAF* b = &p->base;
     int K = b->n_freqs;
 
@@ -704,11 +708,15 @@ static void pbfdkf_h_error_refresh(PBFDKF* p) {
     }
 
     if (p->e2_coarse_per_bin_valid) {
-        /* per-bin path. e2_refined = np.abs(error_spec)**2 (current frame). */
+        /* per-bin path. e2_ref_bins[k] = np.abs(error_spec[k])**2 (current
+         * frame), precomputed once by the caller (pbfdkf_process) and shared
+         * with the error_psd EMA loop + pbfdkf_update_weights_aec3's mu gate
+         * -- all three read the same untouched b->error_spec this hop, so
+         * recomputing cmag2_np() per call site here was pure waste (up to
+         * 3x per bin per hop before this change). */
         int n_div = 0;   /* count of bins on the diverged-leakage branch */
         for (int k = 0; k < K; ++k) {
-            float er = b->error_spec[k].r, ei = b->error_spec[k].i;
-            float e2_ref = cmag2_np(er, ei);
+            float e2_ref = e2_ref_bins[k];
             int use_conv = (e2_ref <= p->e2_coarse_per_bin[k]) ||
                            p->disallow_leakage_diverged;
             if (!use_conv) ++n_div;
@@ -749,7 +757,8 @@ static void pbfdkf_h_error_refresh(PBFDKF* p) {
 /* AEC3-aligned per-bin Kalman gain via H_error
  * (refined_filter_update_gain.cc:104-138). mu_scale_arr is already post-RSA. */
 static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
-                                       const float* mu_scale_arr) {
+                                       const float* mu_scale_arr,
+                                       const float* e2_ref_bins) {
     PBFDAF* b = &p->base;
     int K = b->n_freqs, N = b->n_partitions;
 
@@ -775,11 +784,13 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
     float n_part = (float)N;
     float ng_thr = (float)AEC3_FILTER_NOISE_GATE_POWER_FLOAT;
 
-    /* mu[k] = H_error / (0.5·H_error·X² + n·E²_refined + δ), gated by X²≥gate. */
+    /* mu[k] = H_error / (0.5·H_error·X² + n·E²_refined + δ), gated by X²≥gate.
+     * e2_ref_bins[k] = |error_spec[k]|² precomputed once by pbfdkf_process
+     * (same value cmag2_np(er,ei) would give here -- error_spec is untouched
+     * since pbfdaf_frontend ran at the top of this hop). */
     float mu_aec3[8192];
     for (int k = 0; k < K; ++k) {
-        float er = b->error_spec[k].r, ei = b->error_spec[k].i;
-        float e2_ref = cmag2_np(er, ei);   /* = (np.abs(error_spec)**2) */
+        float e2_ref = e2_ref_bins[k];
         float He = p->H_error_per_bin[k];
         float denom = 0.5f * He * X2[k] + n_part * e2_ref + delta32;
         float m = He / denom;
@@ -824,7 +835,7 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
         p->H_error_per_bin[k] -= 0.5f * mu_aec3[k] * X2[k] * p->H_error_per_bin[k];
 
     /* always-on refresh + clamp. */
-    pbfdkf_h_error_refresh(p);
+    pbfdkf_h_error_refresh(p, e2_ref_bins);
 }
 
 void pbfdkf_process(PBFDKF* p,
@@ -854,17 +865,30 @@ void pbfdkf_process(PBFDKF* p,
             for (int k = 0; k < K; ++k) mu_local[k] = mu_scale_scalar;
             mu_arr = mu_local;
         }
+        /* e2_ref[k] = |error_spec[k]|², computed once here and shared by the
+         * error_psd EMA below, pbfdkf_update_weights_aec3's mu gate, and
+         * pbfdkf_h_error_refresh's per-bin branch (all 4 call sites in this
+         * function, including both refresh-only early-returns below): all of
+         * them read the SAME b->error_spec, set once by pbfdaf_frontend above
+         * and untouched for the rest of this hop. Previously recomputed via
+         * cmag2_np() up to 3x per bin on the full-update path -- same
+         * deterministic function of the same floats, so reusing the value
+         * changes nothing bit-wise. */
+        float *e2_ref = p->e2_ref_scratch;   /* instance scratch, not stack */
+        for (int k = 0; k < K; ++k)
+            e2_ref[k] = cmag2_np(b->error_spec[k].r, b->error_spec[k].i);
+
         /* startup / poor-excitation / saturation gates → refresh only. */
         b->call_counter += 1;
         if (b->call_counter <= N || b->poor_excitation_counter < N ||
             b->saturated_capture) {
-            pbfdkf_h_error_refresh(p);
+            pbfdkf_h_error_refresh(p, e2_ref);
             b->partition_idx = (b->partition_idx + 1) % N;
             return;
         }
         /* stationary-far gate → refresh only. */
         if (b->block_stationary) {
-            pbfdkf_h_error_refresh(p);
+            pbfdkf_h_error_refresh(p, e2_ref);
             b->partition_idx = (b->partition_idx + 1) % N;
             return;
         }
@@ -879,13 +903,11 @@ void pbfdkf_process(PBFDKF* p,
         const float ar = (float)0.95;
         const float oar = (float)(1.0 - 0.95);
         for (int k = 0; k < K; ++k) {
-            float er = b->error_spec[k].r, ei = b->error_spec[k].i;
-            float e2 = cmag2_np(er, ei);
-            p->error_psd[k] = ar * p->error_psd[k] + oar * e2;
+            p->error_psd[k] = ar * p->error_psd[k] + oar * e2_ref[k];
             p->R[k] = (p->error_psd[k] > b->delta) ? p->error_psd[k] : (float)b->delta;
         }
 
-        pbfdkf_update_weights_aec3(p, curr_p, mu_arr);
+        pbfdkf_update_weights_aec3(p, curr_p, mu_arr, e2_ref);
     }
 
     b->partition_idx = (b->partition_idx + 1) % N;
