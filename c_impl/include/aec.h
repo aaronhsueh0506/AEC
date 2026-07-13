@@ -10,8 +10,8 @@
  * Out of scope for this cutover:
  *   - AecMode != PBFDKF (NLMS / buffered FDAF queue)
  *   - get_stats / debug logger / capture_stages / pure-diagnostic _diag stashes
- *   - aec_init (static-memory pool) — TODO on the static-memory branch; only
- *     the malloc path (aec_create) is implemented here.
+ *   - (historical note: aec_init/aec_get_mem_size static-memory pool is now
+ *     IMPLEMENTED — see STATIC_MEMORY.md; both paths live in aec.c.)
  */
 #ifndef AEC_AEC_H
 #define AEC_AEC_H

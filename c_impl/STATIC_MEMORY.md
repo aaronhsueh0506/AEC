@@ -37,7 +37,7 @@ aec_destroy(&aec);   /* no-op for static path; safe for both paths */
 `aec_get_mem_size` returns the exact byte count needed for the supplied
 config (sample rate, filter length, optional shadow filter, optional delay
 ring). At BALANCED / 16 kHz / 52 ms filter length / shadow on / delay on the
-pool is **525,792 bytes (513.5 KB)**. RES is value-typed and always present, so
+pool is **539,328 bytes (526.7 KB)**. RES is value-typed and always present, so
 `enable_res` does not change the pool size; `enable_shadow` and `enable_delay_est`
 do (shadow ≈ 61.5 KB, delay ring 128 KB).
 
@@ -109,7 +109,7 @@ gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/in
     test_static_aec.c $(find src -name '*.c') \
     ../../audio_common/bin/kiss/libaudio_common.a -lm -o bin/test_static_aec
 ./bin/test_static_aec mic.wav ref.wav
-# → Pool: 525792 bytes (513.5 KB), frames: N
+# → Pool: 539328 bytes (526.7 KB), frames: N
 #   PASS: all <2*N> samples byte-equal (static == dynamic)
 ```
 
@@ -131,7 +131,7 @@ heap-only (`aec_create`), so to see the static-path lines a harness must call
 `aec_init` directly and raise the debug level; the format is:
 
 ```text
-# [AEC][t= 0.000s][f=    0][Init] static-mem pool=525792 bytes (513.5 KB) sr=16000 hop=160 preset_q=0.001 cng=0
+# [AEC][t= 0.000s][f=    0][Init] static-mem pool=539328 bytes (526.7 KB) sr=16000 hop=160 preset_q=0.001 cng=0
 # [AEC][t= ...   ][f= ... ][Init] destroy: static path (no free; caller owns pool)
 ```
 
@@ -148,7 +148,7 @@ Measured via `aec_get_mem_size`:
 | Main `pbfdkf` (W, X_buf, P, FFT cfgs, scratch)             | 69.7 KB |
 | Shadow `pbfdaf` (same layout, no Kalman P)                 | 61.5 KB |
 | `fft_wrapper` post FFT (KISS cfgs in-pool)                 | 16.6 KB |
-| `Aec` struct + AEC3 chain backing arrays (state / RES-est / suppression / stationarity / LFS / run + hop scratch) + render FIFO + RSA counters | ~238 KB |
-| **Total**                                                  | **513.5 KB** (525,792 B) |
+| `Aec` struct + AEC3 chain backing arrays (state / RES-est / suppression / stationarity / LFS / run + hop scratch incl. the 12 former float[8192] stack arrays) + render FIFO + RSA counters | ~251 KB |
+| **Total**                                                  | **526.7 KB** (539,328 B) |
 
 Sample rates other than 16 kHz scale roughly proportional to hop_size.
