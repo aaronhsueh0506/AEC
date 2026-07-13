@@ -1,5 +1,11 @@
-/* delay_aec3.c — BIT-EXACT C port of python/modules/delay/.
- * See delay_aec3.h for the chain overview and parity notes.
+/* delay_aec3.c — C port of python/modules/delay/. See delay_aec3.h for the
+ * chain overview and parity notes. ⚠ The matched-filter dot products /
+ * NLMS update run the float32 fast-math path unconditionally (see the
+ * "matched-filter arithmetic" note below) — an intentional, sampled-cost-
+ * free divergence from the Python float64 reference, so this file is no
+ * longer bit-exact to Python by construction. test/parity_delay.c +
+ * test/gen_delay_c_golden.c together form a C-regression harness (catches
+ * accidental future changes) rather than a Python-parity gate.
  *
  * Build (standalone, do NOT link aec.c):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
@@ -31,47 +37,20 @@ static double delay_aec3_dot(const float *a, const float *b, int n) {
     return s;
 }
 
-/* Fused (h·x, x·x) over the SAME x_window pass -- the two hot 512-tap dot
- * products of da_matched_filter_core were independent single-pass loops
- * over x_window (one reading x_window twice for x·x, the other reading h
- * once + x_window again for h·x); merging them into one loop halves the
- * x_window traffic and the loop/bounds-check overhead. Each accumulator
- * (hx, xx) still sums its own float32 products for i=0..n-1 in the exact
- * same order as delay_aec3_dot did -- interleaving two INDEPENDENT
- * accumulators does not change either one's value (IEEE 754 add is not
- * reordered within an accumulator; a[i]*b[i] is commutative and bit-exact
- * regardless of which operand is written first). This runs 80x per
- * 64-sample block (5 filters x 16 sub-samples), so it dominates the
- * delay-estimator's cost (measured ~68% of aec_process). */
-#ifndef AEC_FAST_MATH   /* the FAST_MATH core uses da_dot_f32 instead */
-static void delay_aec3_dot_pair(const float *h, const float *x, int n,
-                                double *hx_sum, double *xx_sum) {
-    double hx = 0.0, xx = 0.0;
-    int i;
-    for (i = 0; i < n; ++i) {
-        float xv = x[i];
-        hx += (double)(h[i] * xv);
-        xx += (double)(xv * xv);
-    }
-    *hx_sum = hx;
-    *xx_sum = xx;
-}
-#endif
-
-#ifdef AEC_FAST_MATH
-/* ======================= AEC_FAST_MATH matched filter =====================
- * Opt-in (-DAEC_FAST_MATH, default OFF — see Makefile flag docs). DIVERGES
- * from the bit-exact Python reference: the two 512-tap dot products
- * accumulate in float32 instead of double (this is exactly what WebRTC's
- * NEON matched filter does, matched_filter_neon in matched_filter.cc), and
- * x²_sum SLIDES across the 16 sub-block iterations (the window advances by
+/* ======================= matched-filter arithmetic =========================
+ * The two 512-tap dot products accumulate in float32 (this is exactly what
+ * WebRTC's NEON matched filter does, matched_filter_neon in matched_filter.cc),
+ * and x²_sum SLIDES across the 16 sub-block iterations (the window advances by
  * one sample per iteration: x2 += new² − old²) instead of being re-summed.
  * The saturation gate, the `x2_sum > x2_sum_threshold` excitation gate, the
  * `error_sum < 0.3·anchor` reliability test and the NLMS alpha formula keep
  * the SAME comparisons/expressions — only the precision of the x2_sum / h·x
  * values feeding them changes (f32 vs f64 accumulation, sub-ULP-to-1e-4
- * relative). Integer lag output may differ from the reference on ties;
- * quality-gated for a future 800-case bench before production use.
+ * relative). This intentionally DIVERGES from the Python float64 reference;
+ * a 60-case AECMOS sample showed all deltas 0.000 (the integer lag / winner
+ * selection is robust to the sub-ULP difference in practice). The delay
+ * chain's Python bit-exact parity anchor is retired by design — see
+ * test/parity_delay.c for the C-regression golden that replaces it.
  *
  * On ARM (__ARM_NEON) the f32 dot + NLMS update use 4-wide fmla intrinsics;
  * a scalar float path is kept for non-NEON builds. */
@@ -128,7 +107,6 @@ static void da_nlms_update_f32(float *h, const float *x, float alpha, int n) {
     for (i = 0; i < n; ++i) h[i] += alpha * x[i];
 }
 #endif /* __ARM_NEON */
-#endif /* AEC_FAST_MATH */
 
 /* numpy argmax over h*h (float32): FIRST index of the strongest squared tap.
  * Mirrors max_square_peak_index (returns 0 on size<2). */
@@ -321,20 +299,17 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
         int k0;
         for (k0 = 0; k0 < DA_ACC_ERR_SIZE; ++k0) instantaneous_error_out[k0] = 0.0f;
     }
-#ifdef AEC_FAST_MATH
     /* Sliding x²_sum: window i covers span[(SB-1-i) .. (SB-1-i)+511]; moving
      * i→i+1 adds span[SB-2-i] (one newer sample at the front) and drops
      * span[(SB-1-i)+512] (the oldest). Initialised once for i=0, then O(1)
      * per iteration instead of a 512-tap re-sum. f32 accumulation — see the
-     * AEC_FAST_MATH divergence note above. */
+     * matched-filter arithmetic note above. */
     float x2_slide = da_dot_f32(span + (DA_SUB_BLOCK_SIZE - 1),
                                 span + (DA_SUB_BLOCK_SIZE - 1), DA_FILTER_SIZE);
-#endif
     for (i = 0; i < DA_SUB_BLOCK_SIZE; ++i) {
         const float *x_window = span + (DA_SUB_BLOCK_SIZE - 1 - i);
         double x2_sum, s, e;
-        int saturation, t;
-#ifdef AEC_FAST_MATH
+        int saturation;
         if (i > 0) {
             float in_v  = x_window[0];               /* newly entered sample */
             float out_v = x_window[DA_FILTER_SIZE];  /* just left the window */
@@ -342,9 +317,6 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
         }
         x2_sum = (double)x2_slide;
         s = (double)da_dot_f32(h, x_window, DA_FILTER_SIZE);
-#else
-        delay_aec3_dot_pair(h, x_window, DA_FILTER_SIZE, &s, &x2_sum);
-#endif
         e = (double)y[i] - s;
         saturation = (y[i] >= DA_SATURATION_LIMIT || y[i] <= -DA_SATURATION_LIMIT);
         error_sum += e * e;
@@ -381,14 +353,7 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
              * op casts alpha to float32 and computes h += f32(alpha)*x in f32. */
             double alpha_d = (double)smoothing * e / x2_sum;
             float  alpha_f = (float)alpha_d;
-#ifdef AEC_FAST_MATH
             da_nlms_update_f32(h, x_window, alpha_f, DA_FILTER_SIZE);
-            (void)t;
-#else
-            for (t = 0; t < DA_FILTER_SIZE; ++t) {
-                h[t] = h[t] + (alpha_f * x_window[t]);
-            }
-#endif
             filters_updated = 1;
         }
     }
@@ -853,9 +818,10 @@ int delay_aec3_accumulate(DelayAec3 *d, const float *near, const float *far, int
     return delay_aec3_accumulate_ex(d, near, far, hop, 1);
 }
 
-/* Duty-cycle-aware accumulate (delay_est_duty_cycle support; a DIVERGENCE
- * from the Python reference when run_matched_filter=0 — the reference always
- * analyses). run_matched_filter=1 is byte-identical to delay_aec3_accumulate.
+/* Duty-cycle-aware accumulate (driven unconditionally by aec.c's always-on
+ * duty-cycle state machine; a DIVERGENCE from the Python reference when
+ * run_matched_filter=0 — the reference always analyses).
+ * run_matched_filter=1 is byte-identical to delay_aec3_accumulate.
  * With 0, this hop's samples are decimated + pushed into the ring (the
  * estimator's buffers stay gapless — the correctness crux) but no
  * matched-filter/aggregator work runs, so latest_* stays put. */

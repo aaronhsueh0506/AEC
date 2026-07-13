@@ -58,7 +58,6 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->delay_buffer_ms = 2048.0f;
     cfg->delay_est_init_s = 0.3f;
     cfg->delay_est_period_s = 0.5f;
-    cfg->delay_est_duty_cycle = 0;   /* 0 = reference behaviour (byte-exact) */
     cfg->highpass_cutoff_hz = 80.0f;
     cfg->saturation_threshold = 0.95f;
     cfg->kalman_q_high = 1e-3f;
@@ -958,62 +957,58 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             saturation_soft_clip(a->far_hop, a->far_hop, hop, 0.8);
     }
 
-    /* 3. delay estimation + ring-buffer alignment. */
+    /* 3. delay estimation + ring-buffer alignment. Duty-cycled analysis is
+     * ALWAYS ON (baked in — see the duty_* field doc in aec.h): the estimator
+     * is FED every hop regardless (accumulate_ex keeps decimators + ring
+     * gapless); only the matched-filter analysis is decimated to 1-in-K once
+     * the estimate has been solid+unchanged for delay_est_init_s. This is an
+     * intentional, sampled-cost-free divergence from the Python reference
+     * (which always analyses every hop). */
     if (a->has_delay) {
-        if (!a->cfg.delay_est_duty_cycle) {
-            /* Reference behaviour: analyse every hop (byte-exact default). */
-            delay_aec3_accumulate(&a->delay, a->near_hop, a->far_hop, hop);
-        } else {
-            /* Duty-cycled analysis (opt-in DIVERGENCE — see the
-             * delay_est_duty_cycle doc in aec.h). The estimator is FED every
-             * hop regardless (accumulate_ex keeps decimators + ring gapless);
-             * only the matched-filter analysis is decimated to 1-in-K once
-             * the estimate has been solid+unchanged for delay_est_init_s. */
-            double hop_s = (double)hop / (double)a->cfg.sample_rate;
-            int hold_hops = (int)lrint((double)a->cfg.delay_est_init_s / hop_s);
-            int K = (int)lrint((double)a->cfg.delay_est_period_s / hop_s) / 5;
-            int run_filter = 1;
-            if (hold_hops < 1) hold_hops = 1;
-            if (K < 2) K = 2;
-            if (a->duty_active) {
-                a->duty_pos += 1;
-                if (a->duty_pos >= K) a->duty_pos = 0;
-                run_filter = (a->duty_pos == 0);
-            }
-            delay_aec3_accumulate_ex(&a->delay, a->near_hop, a->far_hop, hop,
-                                     run_filter);
-            {
-                int cur = delay_aec3_estimated_delay(&a->delay);
-                int solid = delay_aec3_is_solid(&a->delay);
-                if (!solid || cur < 0 || cur != a->duty_last_delay) {
-                    /* estimate moved / lost confidence → full rate + re-arm */
-                    a->duty_active = 0;
-                    a->duty_stable_hops = 0;
-                } else if (!a->duty_active) {
-                    a->duty_stable_hops += 1;
-                    if (a->duty_stable_hops >= hold_hops) {
-                        a->duty_active = 1;
-                        a->duty_pos = 0;
-                        a->duty_erle_peak = a->last_erle_windowed;
-                    }
-                }
-                a->duty_last_delay = cur;
-            }
-            if (a->duty_active) {
-                /* ERLE watchdog: leaky peak (~0.1 dB/s at 10 ms hops); resume
-                 * full-rate analysis on a >6 dB collapse from that peak. Armed
-                 * only once the peak exceeds 6 dB so it cannot fire before the
-                 * filter ever converged. */
-                if (a->last_erle_windowed > a->duty_erle_peak)
+        double hop_s = (double)hop / (double)a->cfg.sample_rate;
+        int hold_hops = (int)lrint((double)a->cfg.delay_est_init_s / hop_s);
+        int K = (int)lrint((double)a->cfg.delay_est_period_s / hop_s) / 5;
+        int run_filter = 1;
+        if (hold_hops < 1) hold_hops = 1;
+        if (K < 2) K = 2;
+        if (a->duty_active) {
+            a->duty_pos += 1;
+            if (a->duty_pos >= K) a->duty_pos = 0;
+            run_filter = (a->duty_pos == 0);
+        }
+        delay_aec3_accumulate_ex(&a->delay, a->near_hop, a->far_hop, hop,
+                                 run_filter);
+        {
+            int cur = delay_aec3_estimated_delay(&a->delay);
+            int solid = delay_aec3_is_solid(&a->delay);
+            if (!solid || cur < 0 || cur != a->duty_last_delay) {
+                /* estimate moved / lost confidence → full rate + re-arm */
+                a->duty_active = 0;
+                a->duty_stable_hops = 0;
+            } else if (!a->duty_active) {
+                a->duty_stable_hops += 1;
+                if (a->duty_stable_hops >= hold_hops) {
+                    a->duty_active = 1;
+                    a->duty_pos = 0;
                     a->duty_erle_peak = a->last_erle_windowed;
-                else
-                    a->duty_erle_peak -= 0.001;
-                if (a->duty_erle_peak > 6.0 &&
-                    a->last_erle_windowed < a->duty_erle_peak - 6.0) {
-                    a->duty_active = 0;
-                    a->duty_stable_hops = 0;
-                    a->duty_erle_peak = 0.0;
                 }
+            }
+            a->duty_last_delay = cur;
+        }
+        if (a->duty_active) {
+            /* ERLE watchdog: leaky peak (~0.1 dB/s at 10 ms hops); resume
+             * full-rate analysis on a >6 dB collapse from that peak. Armed
+             * only once the peak exceeds 6 dB so it cannot fire before the
+             * filter ever converged. */
+            if (a->last_erle_windowed > a->duty_erle_peak)
+                a->duty_erle_peak = a->last_erle_windowed;
+            else
+                a->duty_erle_peak -= 0.001;
+            if (a->duty_erle_peak > 6.0 &&
+                a->last_erle_windowed < a->duty_erle_peak - 6.0) {
+                a->duty_active = 0;
+                a->duty_stable_hops = 0;
+                a->duty_erle_peak = 0.0;
             }
         }
         int new_delay = delay_aec3_estimated_delay(&a->delay);

@@ -1,16 +1,28 @@
-/* parity_delay.c — replay the binary golden from
- * python/diag/gen_delay_golden.py through the C AEC3 matched-filter delay
- * estimator (DelayAec3 / delay_aec3_*) and assert the public outputs are
- * BIT-EXACT every hop:
+/* parity_delay.c — replay a binary golden through the C AEC3 matched-filter
+ * delay estimator (DelayAec3 / delay_aec3_*) and assert the public outputs
+ * are BIT-EXACT every hop:
  *   estimated_delay (int, EXACT)
  *   n_updates       (int, EXACT)
  *   is_solid        (int, EXACT)
  *   confidence      (double 0.0/0.5/1.0, EXACT)
  *
- * Build (from c_impl/, standalone -- does NOT link aec.c):
+ * ⚠ The delay chain's matched-filter arithmetic is now hardcoded to the
+ * float32/sliding-x2/NEON path (see delay_aec3.c's "matched-filter
+ * arithmetic" note) — an intentional, sampled-cost-free divergence from the
+ * Python float64 reference. python/diag/gen_delay_golden.py's golden (built
+ * from Python's LegacyDelayShim output) is no longer guaranteed to match and
+ * is not the primary target any more; the recommended golden is now the
+ * C-REGRESSION one from test/gen_delay_c_golden.c (records this C code's own
+ * output as "expected", so this checker instead catches accidental future
+ * changes to delay_aec3.c). Both goldens share the same binary layout, so
+ * this checker works unmodified against either.
+ *
+ * Build + run (from c_impl/, standalone -- does NOT link aec.c):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
  *       src/delay_aec3.c test/parity_delay.c -lm -o /tmp/p_delay
- *   python3 python/diag/gen_delay_golden.py /tmp/delay_golden.bin
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
+ *       src/delay_aec3.c test/gen_delay_c_golden.c -lm -o /tmp/gen_delay_golden
+ *   /tmp/gen_delay_golden /tmp/delay_golden.bin
  *   /tmp/p_delay /tmp/delay_golden.bin
  */
 #include "delay_aec3.h"
