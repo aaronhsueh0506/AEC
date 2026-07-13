@@ -156,7 +156,6 @@ static int da_argmax_i(const int *a, int n) {
 
 /* ------------------------------------------------------------------ biquad */
 
-#if AEC_DELAY_DS_FACTOR != 8   /* ds4 tables (unused in a ds8 build) */
 static const double DA_LP_B[3][3] = {
     {0.0180919877, 0.00320961363, 0.0180919877},
     {1.0,         -1.24550459,    1.0},
@@ -173,53 +172,27 @@ static const double DA_HP_B[1][3] = {
 static const double DA_HP_A[1][2] = {
     {-1.45424359, 0.574061915},
 };
-#endif
-
-#if AEC_DELAY_DS_FACTOR == 8
-/* AEC3 kBandPassFilterDs8 (docs/aec3_extracts/src/aec3/decimator.cc:31-45):
- * signal.cheby1(1, 6, [1000/8000, 2000/8000], 'bandpass') repeated 5 times.
- * The ds8 decimator uses this as its anti-alias stage and a PASS-THROUGH
- * noise-reduction stage (kPassThroughFilter) — the coefficients here are the
- * f32 literals from decimator.cc widened to double (our biquads run in f64,
- * mirroring the reference's f64 _CascadedBiquad). */
-static const double DA_BP8_B[3] = {0.103304783, 0.0, -0.103304783};
-static const double DA_BP8_A[2] = {-1.520363, 0.793390435};
-#endif
 
 static void da_biquad_reset(DaBiquad *bq) {
     memset(bq->z, 0, sizeof(bq->z));
 }
 
-/* anti-alias stage: ds4 = kLowPassFilterDs4 (elliptic LP, 3 sections);
- * ds8 = kBandPassFilterDs8 (cheby1 bandpass, 5 identical sections). */
+/* anti-alias stage: ds4 = kLowPassFilterDs4 (elliptic LP, 3 sections). */
 static void da_biquad_init_antialias(DaBiquad *bq) {
     int s;
-#if AEC_DELAY_DS_FACTOR == 8
-    bq->n_sections = 5;
-    for (s = 0; s < 5; ++s) {
-        bq->b[s][0] = DA_BP8_B[0]; bq->b[s][1] = DA_BP8_B[1]; bq->b[s][2] = DA_BP8_B[2];
-        bq->a[s][0] = DA_BP8_A[0]; bq->a[s][1] = DA_BP8_A[1];
-    }
-#else
     bq->n_sections = 3;
     for (s = 0; s < 3; ++s) {
         bq->b[s][0] = DA_LP_B[s][0]; bq->b[s][1] = DA_LP_B[s][1]; bq->b[s][2] = DA_LP_B[s][2];
         bq->a[s][0] = DA_LP_A[s][0]; bq->a[s][1] = DA_LP_A[s][1];
     }
-#endif
     da_biquad_reset(bq);
 }
 
-/* noise-reduction stage: ds4 = kHighPassFilter (butter HP @1 kHz);
- * ds8 = pass-through (0 sections — the cascade loop simply forwards x). */
+/* noise-reduction stage: ds4 = kHighPassFilter (butter HP @1 kHz). */
 static void da_biquad_init_noise_reduction(DaBiquad *bq) {
-#if AEC_DELAY_DS_FACTOR == 8
-    bq->n_sections = 0;
-#else
     bq->n_sections = 1;
     bq->b[0][0] = DA_HP_B[0][0]; bq->b[0][1] = DA_HP_B[0][1]; bq->b[0][2] = DA_HP_B[0][2];
     bq->a[0][0] = DA_HP_A[0][0]; bq->a[0][1] = DA_HP_A[0][1];
-#endif
     da_biquad_reset(bq);
 }
 
@@ -335,12 +308,12 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
      * (SUB_BLOCK_SIZE-1-i) + k) back = span[(SUB_BLOCK_SIZE-1-i) + k], where
      * span = gather_back(alignment_shift_back, FILTER_SIZE+SUB_BLOCK_SIZE-1).
      * One 527-sample gather replaces 16 gathers of 512 (8192 -> 527 floats
-     * copied per filter per block; ds4 numbers — 263 vs 2048 at ds8); every
-     * window is the identical value sequence the per-i gather produced (the
-     * ring is not written during the whole matched-filter update), so all
-     * downstream arithmetic is byte-identical. Deepest sample touched is
-     * alignment_shift_back + FILTER_SIZE+SUB_BLOCK_SIZE-2 (= 1536+526 = 2062
-     * at ds4; 768+262 = 1030 at ds8), always < DA_RING_CAPACITY. */
+     * copied per filter per block); every window is the identical value
+     * sequence the per-i gather produced (the ring is not written during the
+     * whole matched-filter update), so all downstream arithmetic is
+     * byte-identical. Deepest sample touched is alignment_shift_back +
+     * FILTER_SIZE+SUB_BLOCK_SIZE-2 (= 1536+526 = 2062), always <
+     * DA_RING_CAPACITY. */
     float span[DA_FILTER_SIZE + DA_SUB_BLOCK_SIZE - 1];
     da_ring_gather_back(ring, alignment_shift_back,
                         DA_FILTER_SIZE + DA_SUB_BLOCK_SIZE - 1, span);

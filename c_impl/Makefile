@@ -82,16 +82,6 @@ lib: dirs $(OBJS) | audio_common_lib
 #   byte-identical). The integer delay output can differ on near-tie votes.
 #   Quality-gated: run the 800-case bench before shipping with this on.
 #   Example: make EXTRA_CFLAGS="-DAEC_FAST_MATH"
-#
-# AEC_DELAY_DS_FACTOR - Delay-estimator down-sampling factor: 4 (default) or 8.
-#   8 selects AEC3's own ds8 configuration (kBandPassFilterDs8 anti-alias +
-#   pass-through noise reduction, see docs/aec3_extracts/src/aec3/decimator.cc)
-#   and halves the matched-filter tap count (512->256) + sub-block rate
-#   (16->8), roughly halving the delay-estimator cost.
-#   ⚠ DIVERGES from the Python reference (which only ports ds4): the delay
-#   resolution coarsens from 4 to 8 samples. Default 4 stays byte-identical.
-#   Quality-gated: run the 800-case bench before shipping with this on.
-#   Example: make EXTRA_CFLAGS="-DAEC_DELAY_DS_FACTOR=8"
 
 debug: CFLAGS += -g -DAEC_DEBUG
 debug: dirs $(TARGET)

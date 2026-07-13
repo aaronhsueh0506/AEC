@@ -75,25 +75,12 @@ typedef enum {
  *   _DOWN_SAMPLING_FACTOR=4, _AEC3_BLOCK_SIZE=64, _SUB_BLOCK_SIZE=16,
  *   _CONSISTENT_ESTIMATE_THRESHOLD=125.
  */
-/* Down-sampling factor: 4 (default, the bit-exact Python-reference path) or
- * 8 (opt-in via -DAEC_DELAY_DS_FACTOR=8 — see Makefile flag docs). The 8x
- * path follows AEC3's own ds8 configuration (docs/aec3_extracts/src/aec3/
- * decimator.cc): the anti-alias stage becomes kBandPassFilterDs8 (cheby1
- * bandpass 1000-2000 Hz, 5 identical sections) and the noise-reduction HP
- * becomes a pass-through. Every derived size below (sub-block, filter taps,
- * ring capacity, headroom, histogram bins) scales through this macro exactly
- * as AEC3 scales them. ⚠ 8x DIVERGES from the Python reference (which only
- * ports ds4): half the matched-filter work per block, but delay resolution
- * coarsens from 4 to 8 samples. Quality-gated pending an 800-case bench. */
-#ifndef AEC_DELAY_DS_FACTOR
-#define AEC_DELAY_DS_FACTOR 4
-#endif
-#if AEC_DELAY_DS_FACTOR != 4 && AEC_DELAY_DS_FACTOR != 8
-#error "AEC_DELAY_DS_FACTOR must be 4 (reference) or 8 (AEC3 ds8 path)"
-#endif
-#define DA_DOWN_SAMPLING_FACTOR AEC_DELAY_DS_FACTOR
+/* Down-sampling factor: 4, the WebRTC-style reference decimation (the
+ * bit-exact Python-reference path). An 8x option was sampled (800-case
+ * AECMOS bench) and removed — real farend-singletalk regression. */
+#define DA_DOWN_SAMPLING_FACTOR 4
 #define DA_AEC3_BLOCK_SIZE      64
-#define DA_SUB_BLOCK_SIZE       (DA_AEC3_BLOCK_SIZE / DA_DOWN_SAMPLING_FACTOR) /* 16 @ds4, 8 @ds8 */
+#define DA_SUB_BLOCK_SIZE       (DA_AEC3_BLOCK_SIZE / DA_DOWN_SAMPLING_FACTOR) /* 16 */
 #define DA_NUM_FILTERS          5
 #define DA_WINDOW_SIZE_SB       32
 #define DA_ALIGNMENT_SHIFT_SB   24
@@ -117,13 +104,8 @@ typedef enum {
 #define DA_STABILITY_RESET_HOPS 3000 /* ms_to_hops(30000) -> 3000 */
 
 /* ---- biquad cascade ----
- * Max sections: 3 for the ds4 LP (elliptic, 3 sections); the ds8 bandpass
- * anti-alias is 5 identical sections (AEC3 kBandPassFilterDs8). */
-#if AEC_DELAY_DS_FACTOR == 8
-#define DA_BQ_MAX_SECTIONS 5
-#else
+ * Max sections: 3 (the ds4 LP is elliptic, 3 sections). */
 #define DA_BQ_MAX_SECTIONS 3
-#endif
 typedef struct {
     int    n_sections;
     double b[DA_BQ_MAX_SECTIONS][3];    /* {b0,b1,b2} per section */
