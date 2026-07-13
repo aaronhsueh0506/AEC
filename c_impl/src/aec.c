@@ -749,10 +749,17 @@ int aec_create(Aec* a, const AecConfig* cfg) {
 
 void aec_destroy(Aec* a) {
     if (!a) return;
-    if (a->has_delay) free(a->ref_ring);
-    free(a->render_fifo);
+    /* Release library-internal FFT/filter allocations first.
+     * pbfdkf_free/pbfdaf_free call fft_destroy() on their nested FFT handle,
+     * which is the only thing that releases a NE10 backend's R2C twiddle
+     * config. Same story for post_fft below; fft_destroy() itself is a no-op
+     * for a NULL handle. */
+    fft_destroy(a->post_fft);
     pbfdkf_free(&a->main_filter);
     if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
+
+    if (a->has_delay) free(a->ref_ring);
+    free(a->render_fifo);
     free(a->rsa_counters);
     /* sub-module storage frees omitted (process owns no extra; OS reclaims on
      * exit). The malloc'd backing arrays are reachable only through the

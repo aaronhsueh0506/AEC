@@ -10,10 +10,12 @@
  *   3. UNDERRUN — capturing with an empty FIFO fires AEC_BUF_RENDER_UNDERRUN,
  *      processes (silent render), and normal operation resumes afterwards.
  *
- * Build (from c_impl/):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
- *       $(find src -name '*.c' ! -name 'fft_wrapper_ne10.c') \
- *       lib/kiss_fft/kiss_fft.c test/stream_sim.c -lm -o /tmp/stream_sim
+ * Build (from c_impl/); the FFT wrapper now lives in the shared audio_common
+ * archive:
+ *   make -C ../../audio_common BACKEND=kiss lib
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
+ *       $(find src -name '*.c') test/stream_sim.c \
+ *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/stream_sim
  *   /tmp/stream_sim
  */
 #include "aec.h"

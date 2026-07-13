@@ -4,12 +4,12 @@
  * WS5 Phase 5.2 gate (the AecState ERL layer).
  *
  * Build (standalone, from anywhere):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I<path-to-repo>/c_impl/include \
- *       <path-to-repo>/c_impl/src/erl_estimator.c \
- *       <path-to-repo>/c_impl/src/reverb_frequency_response.c \
- *       <path-to-repo>/c_impl/src/aec3_scale.c \
- *       <path-to-repo>/c_impl/test/parity_erl_estimator.c \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
+ *       -Ic_impl/include \
+ *       c_impl/src/erl_estimator.c \
+ *       c_impl/src/reverb_frequency_response.c \
+ *       c_impl/src/aec3_scale.c \
+ *       c_impl/test/parity_erl_estimator.c \
  *       -lm -o /tmp/p_erl
  *   python3 .../python/diag/gen_erl_estimator_golden.py /tmp/erl_golden.bin
  *   /tmp/p_erl /tmp/erl_golden.bin

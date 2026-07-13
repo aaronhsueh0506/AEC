@@ -1,40 +1,42 @@
 # AEC C Implementation — Makefile
 
 CC      = gcc
-CFLAGS  = -Wall -Wextra -O2 -ffp-contract=off -std=c99
+CFLAGS  = -Wall -Wextra -O2 -ffp-contract=off -std=gnu99
 CFLAGS += -I./include -I./example
 CFLAGS += $(EXTRA_CFLAGS)
 LDFLAGS = -lm
 
 SRC_DIR     = src
-LIB_DIR     = lib
 EXAMPLE_DIR = example
 OBJ_DIR     = obj
 BIN_DIR     = bin
 
-# Algorithm sources (auto-detected — drop a new file in src/ to add it).
-# The FFT backend is selected at build time (below) and excluded from the
-# wildcard so exactly one backend compiles.
-ALL_SRCS = $(wildcard $(SRC_DIR)/*.c)
-SRCS = $(filter-out $(SRC_DIR)/fft_wrapper.c $(SRC_DIR)/fft_wrapper_ne10.c,$(ALL_SRCS))
+# Shared DSP layer (FFT backend + fast_math) lives in audio_common, vendored
+# out of this repo (same API this repo used to own: Complex, fft_create,
+# fft_get_mem_size/fft_init, fft_forward/inverse/power/apply_gain, ALIGN16).
+# AC_DIR resolves whether audio_common sits next to this repo (SE/audio_common)
+# or nested deeper (e.g. an Audio_ALG submodule checkout).
+AC_DIR ?= $(firstword $(wildcard ../../audio_common ../../../../audio_common))
 
 # FFT backend selection. KISS/NE10 compute in float32 -> ~1e-5 vs numpy's fp64
 # np.fft (a documented tolerance; the non-FFT C logic stays bit-exact to Python).
-#   default          -> KISS FFT  (portable, vendored lib/kiss_fft)
-#   make NE10_DIR=... -> NE10 R2C/C2R (ARM NEON; caller supplies the Ne10 lib)
-ifdef NE10_DIR
-  SRCS    += $(SRC_DIR)/fft_wrapper_ne10.c
-  CFLAGS  += -I$(NE10_DIR)/inc
-  LDFLAGS += -L$(NE10_DIR)/lib -lNE10
-  LIB_OBJS =
-else
-  SRCS    += $(SRC_DIR)/fft_wrapper.c
-  CFLAGS  += -I./lib/kiss_fft
-  LIB_OBJS = $(OBJ_DIR)/kiss_fft.o
+#   BACKEND=kiss (default) -> portable KISS FFT, deterministic (tests use this)
+#   BACKEND=ne10           -> ARM NEON NE10 R2C/C2R (the embedded deliverable)
+BACKEND ?= kiss
+CFLAGS  += -I$(AC_DIR)/include
+LDFLAGS += $(AC_DIR)/bin/$(BACKEND)/libaudio_common.a
+ifeq ($(BACKEND),ne10)
+  # The ne10 archive carries one C++ TU (NE10's dsp .cpp kernels); linking a
+  # plain C driver against it needs the C++ runtime.
+  LDFLAGS += -lc++
 endif
 
+# Algorithm sources (auto-detected — drop a new file in src/ to add it).
+# fft_wrapper*.c no longer live here; they're part of the audio_common archive
+# linked above.
+SRCS = $(wildcard $(SRC_DIR)/*.c)
+
 OBJS  = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
-OBJS += $(LIB_OBJS)
 
 EXAMPLE_SRCS = $(EXAMPLE_DIR)/aec_wav.c
 EXAMPLE_OBJS = $(patsubst $(EXAMPLE_DIR)/%.c,$(OBJ_DIR)/%.o,$(EXAMPLE_SRCS))
@@ -47,19 +49,21 @@ all: dirs $(TARGET)
 dirs:
 	@mkdir -p $(OBJ_DIR) $(BIN_DIR)
 
-$(TARGET): $(OBJS) $(EXAMPLE_OBJS)
+# Order-only prereq: make sure the shared archive is built (for the selected
+# BACKEND) before anything links against it.
+audio_common_lib:
+	$(MAKE) -C $(AC_DIR) BACKEND=$(BACKEND) lib
+
+$(TARGET): $(OBJS) $(EXAMPLE_OBJS) | audio_common_lib
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(OBJ_DIR)/kiss_fft.o: $(LIB_DIR)/kiss_fft/kiss_fft.c
-	$(CC) $(CFLAGS) -c -o $@ $<
-
 $(OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-lib: dirs $(OBJS)
+lib: dirs $(OBJS) | audio_common_lib
 	ar rcs $(LIB_TARGET) $(OBJS)
 
 # Build Configuration Flags (pass via EXTRA_CFLAGS)
@@ -83,5 +87,7 @@ help:
 	@echo ""
 	@echo "Usage:"
 	@echo "  ./bin/aec_wav <mic.wav> <ref.wav> <out.wav> [options]"
+	@echo "  make BACKEND=kiss|ne10   (default: kiss; ne10 is the embedded deliverable)"
+	@echo "  make AC_DIR=<path>       (override audio_common location)"
 
-.PHONY: all dirs clean lib debug help
+.PHONY: all dirs clean lib debug help audio_common_lib

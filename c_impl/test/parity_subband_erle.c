@@ -3,11 +3,11 @@
  * exact (bit-for-bit float32 + exact int/bool) match. WS5 Phase 5.2 gate.
  *
  * Build (standalone, from anywhere):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I<path-to-repo>/c_impl/include \
- *       <path-to-repo>/c_impl/src/subband_erle.c \
- *       <path-to-repo>/c_impl/src/aec3_scale.c \
- *       <path-to-repo>/c_impl/test/parity_subband_erle.c \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
+ *       -Ic_impl/include \
+ *       c_impl/src/subband_erle.c \
+ *       c_impl/src/aec3_scale.c \
+ *       c_impl/test/parity_subband_erle.c \
  *       -lm -o /tmp/p_se
  *   python3 .../python/diag/gen_subband_erle_golden.py /tmp/se_golden.bin
  *   /tmp/p_se /tmp/se_golden.bin

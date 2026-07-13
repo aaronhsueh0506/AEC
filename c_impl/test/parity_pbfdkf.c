@@ -17,10 +17,12 @@
  * (see pbfdkf.c + project_c_port_parity_rules.md) — keep the per-hop port logic
  * faithful; the chaotic drift is purely the recursive FFT-roundoff accumulation.
  *
- * Build (from c_impl/), STANDALONE (do NOT link aec.c — old API):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
- *       src/pbfdkf.c src/fft_wrapper.c lib/kiss_fft/kiss_fft.c \
- *       src/aec3_scale.c test/parity_pbfdkf.c -lm -o /tmp/p_pbfdkf
+ * Build (from c_impl/), STANDALONE (do NOT link aec.c — old API); the FFT
+ * wrapper now lives in the shared audio_common archive:
+ *   make -C ../../audio_common BACKEND=kiss lib
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
+ *       src/pbfdkf.c src/aec3_scale.c test/parity_pbfdkf.c \
+ *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_pbfdkf
  *   python3 python/diag/gen_pbfdkf_golden.py /tmp/pbfdkf_golden.bin
  *   /tmp/p_pbfdkf /tmp/pbfdkf_golden.bin
  */

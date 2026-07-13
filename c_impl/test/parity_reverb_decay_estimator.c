@@ -4,7 +4,7 @@
  * per-update state.  WS5 Phase 5.1 gate.
  *
  * Build (standalone, from c_impl/):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
  *       src/reverb_decay_estimator.c test/parity_reverb_decay_estimator.c \
  *       -lm -o /tmp/p_rde
  *   python3 ../python/diag/gen_reverb_decay_estimator_golden.py /tmp/rde_golden.bin

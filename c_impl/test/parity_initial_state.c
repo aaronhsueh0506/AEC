@@ -5,10 +5,10 @@
  * mid-run reset(). WS5 Phase 5.2 gate.
  *
  * Build (standalone, from anywhere):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I<path-to-repo>/c_impl/include \
- *       <path-to-repo>/c_impl/src/initial_state.c \
- *       <path-to-repo>/c_impl/test/parity_initial_state.c \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
+ *       -Ic_impl/include \
+ *       c_impl/src/initial_state.c \
+ *       c_impl/test/parity_initial_state.c \
  *       -o /tmp/p_istate
  *   python3 .../python/diag/gen_initial_state_golden.py /tmp/initial_state_golden.bin
  *   /tmp/p_istate /tmp/initial_state_golden.bin

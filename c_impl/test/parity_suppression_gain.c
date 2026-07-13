@@ -3,9 +3,11 @@
  * assert exact bit-for-bit float32 match on the gain[n_bins] output across all
  * 3 real cases (doubletalk / farend_singletalk / nearend_singletalk). WS5 gate.
  *
- * Build (standalone, from anywhere):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
+ * Build (standalone, from anywhere; fast_math.h now lives in the shared
+ * audio_common layer, so its include dir must be on -I too):
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
  *       -I<path-to-repo>/c_impl/include \
+ *       -I<path-to-audio_common>/include \
  *       <path-to-repo>/c_impl/src/suppression_gain.c \
  *       <path-to-repo>/c_impl/src/reverb_frequency_response.c \
  *       <path-to-repo>/c_impl/test/parity_suppression_gain.c \

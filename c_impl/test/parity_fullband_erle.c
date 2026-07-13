@@ -4,11 +4,11 @@
  * WS5 Phase 5.2 gate (the AecState fullband-ERLE layer).
  *
  * Build (standalone, from anywhere):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I<path-to-repo>/c_impl/include \
- *       <path-to-repo>/c_impl/src/fullband_erle.c \
- *       <path-to-repo>/c_impl/src/aec3_scale.c \
- *       <path-to-repo>/c_impl/test/parity_fullband_erle.c \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
+ *       -Ic_impl/include \
+ *       c_impl/src/fullband_erle.c \
+ *       c_impl/src/aec3_scale.c \
+ *       c_impl/test/parity_fullband_erle.c \
  *       -lm -o /tmp/p_fberle
  *   python3 .../python/diag/gen_fullband_erle_golden.py /tmp/fberle_golden.bin
  *   /tmp/p_fberle /tmp/fberle_golden.bin

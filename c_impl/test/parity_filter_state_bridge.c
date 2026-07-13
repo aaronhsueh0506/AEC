@@ -10,10 +10,12 @@
  * (measured worst ~3e-8), so it is gated within FSB_TAPS_TOL, not bit-for-bit.
  * (Under the retired pocketfft backend filter_taps was bit-exact too.)
  *
- * Build (from c_impl/):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
- *       src/filter_state_bridge.c src/fft_wrapper.c lib/kiss_fft/kiss_fft.c \
- *       test/parity_filter_state_bridge.c -lm -o /tmp/p_fsb
+ * Build (from c_impl/); the FFT wrapper now lives in the shared audio_common
+ * archive:
+ *   make -C ../../audio_common BACKEND=kiss lib
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
+ *       src/filter_state_bridge.c test/parity_filter_state_bridge.c \
+ *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_fsb
  *   python3 ../python/diag/gen_filter_state_bridge_golden.py /tmp/fsb_golden.bin
  *   /tmp/p_fsb /tmp/fsb_golden.bin
  */

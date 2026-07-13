@@ -4,10 +4,10 @@
  * WS5 Phase 5.2 (AecState layer).
  *
  * Build (standalone, from anywhere):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I<path-to-repo>/c_impl/include \
- *       <path-to-repo>/c_impl/src/saturation_detector.c \
- *       <path-to-repo>/c_impl/test/parity_saturation_detector.c \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
+ *       -Ic_impl/include \
+ *       c_impl/src/saturation_detector.c \
+ *       c_impl/test/parity_saturation_detector.c \
  *       -lm -o /tmp/p_satdet
  *   python3 .../python/diag/gen_saturation_detector_golden.py /tmp/satdet_golden.bin
  *   /tmp/p_satdet /tmp/satdet_golden.bin

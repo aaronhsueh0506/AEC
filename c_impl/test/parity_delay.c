@@ -8,7 +8,7 @@
  *   confidence      (double 0.0/0.5/1.0, EXACT)
  *
  * Build (from c_impl/, standalone -- does NOT link aec.c):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
  *       src/delay_aec3.c test/parity_delay.c -lm -o /tmp/p_delay
  *   python3 python/diag/gen_delay_golden.py /tmp/delay_golden.bin
  *   /tmp/p_delay /tmp/delay_golden.bin

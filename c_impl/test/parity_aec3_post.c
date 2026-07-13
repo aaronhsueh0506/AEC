@@ -12,19 +12,20 @@
  * The two FFT-derived outputs — the pre-irfft e_out_spec (carries the
  * windowed-error rfft) and the final out[hop] (adds the irfft + OLA) — drift at
  * ULP scale under the KISS float32 backend (fft_wrapper.c + lib/kiss_fft/
- * kiss_fft.c): measured e_out_spec max ~1.2e-7, out max ~6e-8. They are gated
- * within POST_TOL, not bit-for-bit. (Under the retired pocketfft backend both
- * were bit-exact.) A real driver regression diverges by O(0.1), well above tol.
+ * kiss_fft.c, now vendored in the shared audio_common layer): measured
+ * e_out_spec max ~1.2e-7, out max ~6e-8. They are gated within POST_TOL, not
+ * bit-for-bit. (Under the retired pocketfft backend both were bit-exact.) A
+ * real driver regression diverges by O(0.1), well above tol.
  *
  * Build (standalone, from anywhere):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
+ *   make -C <path-to-audio_common> BACKEND=kiss lib
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
  *       -I<path-to-repo>/c_impl/include \
- *       -I<path-to-repo>/c_impl/lib/kiss_fft \
+ *       -I<path-to-audio_common>/include \
  *       <path-to-repo>/c_impl/src/aec3_post.c \
  *       <path-to-repo>/c_impl/src/reverb_model.c \
- *       <path-to-repo>/c_impl/src/fft_wrapper.c \
- *       <path-to-repo>/c_impl/lib/kiss_fft/kiss_fft.c \
  *       <path-to-repo>/c_impl/test/parity_aec3_post.c \
+ *       <path-to-audio_common>/bin/kiss/libaudio_common.a \
  *       -lm -o /tmp/p_post
  *   python3 .../python/diag/gen_aec3_post_golden.py /tmp/aec3_post_golden.bin
  *   /tmp/p_post /tmp/aec3_post_golden.bin

@@ -3,7 +3,7 @@
  * and assert bit-exact float32 match + per-frame fp64 state-drift checks.
  *
  * Build (standalone, from anywhere):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -DUSE_STANDARD_MATH \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -DUSE_STANDARD_MATH \
  *       -I<path-to-repo>/c_impl/include \
  *       <path-to-repo>/c_impl/src/hpf.c \
  *       <path-to-repo>/c_impl/test/modules/parity_hpf.c \

@@ -12,10 +12,12 @@
  * ULP-scale, not algorithmic. (Under the retired pocketfft backend this was a
  * strict 0/0 bit-pattern check; KISS trades that for the float32 tolerance.)
  *
- * Build (from c_impl/), STANDALONE (do NOT link aec.c):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
- *       src/linear_filter_output.c src/fft_wrapper.c lib/kiss_fft/kiss_fft.c \
- *       test/parity_linear_filter_select.c -lm -o /tmp/p_lfs
+ * Build (from c_impl/), STANDALONE (do NOT link aec.c); the FFT wrapper now
+ * lives in the shared audio_common archive:
+ *   make -C ../../audio_common BACKEND=kiss lib
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
+ *       src/linear_filter_output.c test/parity_linear_filter_select.c \
+ *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_lfs
  *   python3 python/diag/gen_linear_filter_select_golden.py /tmp/lfs_golden.bin
  *   /tmp/p_lfs /tmp/lfs_golden.bin
  */

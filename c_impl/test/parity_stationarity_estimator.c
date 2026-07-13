@@ -4,11 +4,11 @@
  * match. WS5 Phase 5.1 gate.
  *
  * Build (standalone, from anywhere):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I<path-to-repo>/c_impl/include \
- *       <path-to-repo>/c_impl/src/stationarity_estimator.c \
- *       <path-to-repo>/c_impl/src/aec3_scale.c \
- *       <path-to-repo>/c_impl/test/parity_stationarity_estimator.c \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
+ *       -Ic_impl/include \
+ *       c_impl/src/stationarity_estimator.c \
+ *       c_impl/src/aec3_scale.c \
+ *       c_impl/test/parity_stationarity_estimator.c \
  *       -lm -o /tmp/p_stat
  *   python3 .../python/diag/gen_stationarity_estimator_golden.py /tmp/stat_golden.bin
  *   /tmp/p_stat /tmp/stat_golden.bin

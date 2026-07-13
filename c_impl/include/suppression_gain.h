@@ -8,7 +8,7 @@
  * f64. Pairwise float32 sums (np.sum / np.mean over float32) replicated by
  * f32_pairwise_sum().
  *
- * Build: gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Ic_impl/include
+ * Build: gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Ic_impl/include
  *   link: suppression_gain.c freq_utils.c aec3_scale.c reverb_frequency_response.c
  *
  * The caller owns all per-bin storage (passed at init) to keep the port

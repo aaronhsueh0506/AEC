@@ -65,8 +65,9 @@ Lockstep (`analyze_render` then `process_capture`) is **byte-identical** to
 
 The C port's **non-FFT logic is bit-exact** to `python/aec.py` (verified at
 v3.23.0 under `-DUSE_STANDARD_MATH` with a numpy-precision FFT). The production
-**FFT backend is KISS FFT (float32)** — vendored `lib/kiss_fft/`, with NE10
-(ARM NEON) opt-in via `make NE10_DIR=...` — which differs from numpy's fp64
+**FFT backend is KISS FFT (float32)** — the FFT wrapper, KISS FFT, and NE10
+(ARM NEON) backend now live in the shared `audio_common` layer (a sibling repo);
+select one via `make BACKEND=kiss` (default) or `make BACKEND=ne10` — which differs from numpy's fp64
 `np.fft` by float32 precision. So the **end-to-end C output aligns with Python
 to ~float32 precision, NOT 0/0**: correlation 0.99999958, RMS error ≈ −60 dB
 below signal, per-sample max ~6e-3 over 4186 recursive hops (inaudible). The
@@ -86,6 +87,13 @@ the linear output. The **authoritative end-to-end gate** is
 See [../memory parity rules] and
 `docs/` for the numpy→C idioms (`np.abs(c64)**2` = scaled-hypot-FMA,
 complex×complex FMA, EMA double-coeff).
+
+## Static-memory variant
+
+This branch (`main`) is the malloc build. The heap-free static-pool variant
+(`aec_get_mem_size()`/`aec_init()`, one caller-owned pool, byte-equal to the
+malloc path) lives on the `feature/static-memory` branch — see its
+`STATIC_MEMORY.md`.
 
 Full CLI options, C API reference, integration rules, runtime resource
 notes, and validation steps:

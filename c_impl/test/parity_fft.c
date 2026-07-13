@@ -1,7 +1,8 @@
 /* parity_fft.c — replay python/diag/gen_fft_golden.py through the C FFT wrapper
- * (fft_wrapper.c, backed by the vendored KISS FFT (float32)) and check the
- * worst absolute diff vs numpy's np.fft.rfft / np.fft.irfft at n=512 stays
- * within the documented float32 FFT tolerance.
+ * (fft_wrapper.c, now vendored in the shared audio_common layer, backed by the
+ * vendored KISS FFT (float32)) and check the worst absolute diff vs numpy's
+ * np.fft.rfft / np.fft.irfft at n=512 stays within the documented float32 FFT
+ * tolerance.
  *
  * KISS computes in float32, so it does NOT match numpy's fp64 np.fft bit-for-bit
  * (the mismatch COUNT is large — most values differ in the low bits). The
@@ -11,12 +12,12 @@
  * a strict 0/0 bit-exact check; KISS trades that for the float32 tolerance.)
  *
  * Build (standalone, from anywhere):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
+ *   make -C <path-to-audio_common> BACKEND=kiss lib
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
  *       -I<path-to-repo>/c_impl/include \
- *       -I<path-to-repo>/c_impl/lib/kiss_fft \
- *       <path-to-repo>/c_impl/src/fft_wrapper.c \
- *       <path-to-repo>/c_impl/lib/kiss_fft/kiss_fft.c \
+ *       -I<path-to-audio_common>/include \
  *       <path-to-repo>/c_impl/test/parity_fft.c \
+ *       <path-to-audio_common>/bin/kiss/libaudio_common.a \
  *       -lm -o /tmp/p_fft
  *   python3 .../python/diag/gen_fft_golden.py /tmp/fft_golden.bin
  *   /tmp/p_fft /tmp/fft_golden.bin

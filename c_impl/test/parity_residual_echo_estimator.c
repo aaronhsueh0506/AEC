@@ -5,7 +5,7 @@
  * ReverbFrequencyResponse tail_response, and the average_decay (f64).
  *
  * Build (from c_impl/):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
  *       src/residual_echo_estimator.c src/reverb_model.c \
  *       src/reverb_frequency_response.c \
  *       test/parity_residual_echo_estimator.c -lm -o /tmp/p_ree

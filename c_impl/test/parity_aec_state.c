@@ -9,7 +9,7 @@
  * replays the same control/update rows in order, and compares.
  *
  * Build (from c_impl/):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
  *       src/aec_state.c src/erle_estimator.c src/subband_erle.c \
  *       src/fullband_erle.c src/erl_estimator.c src/filter_quality.c \
  *       src/saturation_detector.c src/filter_delay.c src/initial_state.c \

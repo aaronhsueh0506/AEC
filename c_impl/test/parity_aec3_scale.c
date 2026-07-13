@@ -3,7 +3,7 @@
  * (python/diag/parity_aec3_scale_golden.py). Phase 5.0 golden gate.
  *
  * Build (from c_impl/):
- *   gcc -Wall -O2 -ffp-contract=off -std=c99 -Iinclude \
+ *   gcc -Wall -O2 -ffp-contract=off -std=gnu99 -Iinclude \
  *       src/aec3_scale.c src/freq_utils.c test/parity_aec3_scale.c -lm -o /tmp/p_scale
  */
 #include "aec3_scale.h"
