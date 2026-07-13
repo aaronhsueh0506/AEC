@@ -23,7 +23,11 @@ struct FftHandle {
     ne10_fft_r2c_cfg_float32_t r2c_cfg; // Single config (forward & inverse)
     ne10_float32_t*            real_buf; // [fft_size] real work buffer
     ne10_fft_cpx_float32_t*    cpx_buf;  // [n_freqs] complex work buffer
+
+    int pool_owned;  // 1 if placed via fft_init (no free of handle/bufs in destroy)
 };
+
+/* --- construction (heap) -------------------------------------------------- */
 
 FftHandle* fft_create(int fft_size) {
     if (fft_size <= 0 || (fft_size & (fft_size - 1)) != 0) {
@@ -44,6 +48,7 @@ FftHandle* fft_create(int fft_size) {
 
     h->fft_size = fft_size;
     h->n_freqs = fft_size / 2 + 1;
+    h->pool_owned = 0;
 
     // Allocate R2C config
     h->r2c_cfg = ne10_fft_alloc_r2c_float32(fft_size);
@@ -64,10 +69,66 @@ FftHandle* fft_create(int fft_size) {
     return h;
 }
 
+/* --- construction (static pool, caller-owned buffer) -----------------------
+ * The handle and work buffers (real_buf/cpx_buf) are bump-allocated from the
+ * caller's block. The NE10 R2C twiddle config is NOT pool-able: standard NE10
+ * has no external-memory API for it, so ne10_fft_alloc_r2c_float32() still
+ * does its own one-time internal malloc here (fft_destroy still releases it
+ * unconditionally). The per-frame audio path (fft_forward/fft_inverse) stays
+ * malloc-free either way. */
+
+size_t fft_get_mem_size(int fft_size) {
+    if (fft_size <= 0 || (fft_size & (fft_size - 1)) != 0) return 0;
+    int n_freqs = fft_size / 2 + 1;
+    size_t total = 0;
+    total += ALIGN16(sizeof(FftHandle));
+    total += ALIGN16((size_t)fft_size * sizeof(ne10_float32_t));        /* real_buf */
+    total += ALIGN16((size_t)n_freqs * sizeof(ne10_fft_cpx_float32_t)); /* cpx_buf  */
+    /* NE10 twiddle cfg uses NE10-internal malloc — deliberately NOT counted. */
+    return total;
+}
+
+FftHandle* fft_init(void* mem, size_t mem_size, int fft_size) {
+    if (!mem || fft_size <= 0 || (fft_size & (fft_size - 1)) != 0) return NULL;
+    if (mem_size < fft_get_mem_size(fft_size)) return NULL;
+
+    // One-time NE10 initialization
+    if (!ne10_initialized) {
+        if (ne10_init() != NE10_OK) return NULL;
+        ne10_initialized = 1;
+    }
+
+    memset(mem, 0, fft_get_mem_size(fft_size));  /* calloc-equivalent */
+    uint8_t* cursor = (uint8_t*)mem;
+
+    FftHandle* h = (FftHandle*)cursor;
+    cursor += ALIGN16(sizeof(FftHandle));
+
+    h->fft_size = fft_size;
+    h->n_freqs = fft_size / 2 + 1;
+    h->pool_owned = 1;
+
+    // R2C config — NE10 owns this allocation (one-time internal malloc).
+    h->r2c_cfg = ne10_fft_alloc_r2c_float32(fft_size);
+    if (!h->r2c_cfg) return NULL;
+
+    // Work buffers from the caller's block.
+    h->real_buf = (ne10_float32_t*)cursor;
+    cursor += ALIGN16((size_t)fft_size * sizeof(ne10_float32_t));
+    h->cpx_buf = (ne10_fft_cpx_float32_t*)cursor;
+    cursor += ALIGN16((size_t)h->n_freqs * sizeof(ne10_fft_cpx_float32_t));
+
+    return h;
+}
+
 void fft_destroy(FftHandle* h) {
     if (!h) return;
 
+    // NE10 twiddle cfg is never pool-owned; always release it.
     if (h->r2c_cfg) ne10_fft_destroy_r2c_float32(h->r2c_cfg);
+
+    if (h->pool_owned) return;  /* handle + work buffers live in caller's block */
+
     if (h->real_buf) free(h->real_buf);
     if (h->cpx_buf) free(h->cpx_buf);
 
