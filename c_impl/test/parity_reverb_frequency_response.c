@@ -4,7 +4,7 @@
  * tail_response (float32) and average_decay (float64). WS5 Phase 5.1 gate.
  *
  * Build (standalone, from c_impl/):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
  *       src/reverb_frequency_response.c test/parity_reverb_frequency_response.c \
  *       -lm -o /tmp/p_rfr
  *   python3 ../python/diag/gen_reverb_frequency_response_golden.py /tmp/rfr_golden.bin

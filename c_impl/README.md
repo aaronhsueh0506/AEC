@@ -65,8 +65,9 @@ Lockstep (`analyze_render` then `process_capture`) is **byte-identical** to
 
 The C port's **non-FFT logic is bit-exact** to `python/aec.py` (verified at
 v3.23.0 under `-DUSE_STANDARD_MATH` with a numpy-precision FFT). The production
-**FFT backend is KISS FFT (float32)** — vendored `lib/kiss_fft/`, with NE10
-(ARM NEON) opt-in via `make NE10_DIR=...` — which differs from numpy's fp64
+**FFT backend is KISS FFT (float32)** — the FFT wrapper, KISS FFT, and NE10
+(ARM NEON) backend now live in the shared `audio_common` layer (a sibling repo);
+select one via `make BACKEND=kiss` (default) or `make BACKEND=ne10` — which differs from numpy's fp64
 `np.fft` by float32 precision. So the **end-to-end C output aligns with Python
 to ~float32 precision, NOT 0/0**: correlation 0.99999958, RMS error ≈ −60 dB
 below signal, per-sample max ~6e-3 over 4186 recursive hops (inaudible). The
@@ -102,7 +103,9 @@ With the KISS FFT backend the FFT is now **fully heap-free too** — the kiss
 configs are placed in the caller pool via `kiss_fft_alloc`'s mem/lenmem API
 (unlike the old pocketfft plans, which had to stay on the heap), so the static
 path makes no heap allocation at all. The static-memory variant lives on the
-`feature/static-memory` branch; `main` uses malloc.
+`feature/static-memory` branch; `main` uses malloc. (Under NE10, the R2C/C2R
+twiddle configs are backend-internal heap allocations outside the pool; they
+are released by `fft_destroy`/`aec_destroy`, not by freeing the pool.)
 
 Full CLI options, C API reference, integration rules, runtime resource
 notes, and validation steps:

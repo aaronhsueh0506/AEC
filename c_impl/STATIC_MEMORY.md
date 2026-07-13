@@ -52,7 +52,8 @@ void    module_init_static(Module* m,
 ```
 
 `*_init_static` walks the supplied buffer with `ALIGN16` boundaries
-(defined in `include/fft_wrapper.h`) and assigns every internal field by
+(defined in `fft_wrapper.h`, now vendored in the shared `audio_common`
+layer and pulled in via `-I`) and assigns every internal field by
 pointer arithmetic. The same `*_free` works for both paths because each
 struct carries an `is_static` flag — the static branch early-returns
 without freeing.
@@ -103,13 +104,17 @@ top-level `aec_get_mem_size` / `aec_init`.
 `aec_init` (static pool) and asserts every output sample is byte-equal:
 
 ```bash
-gcc -O2 -ffp-contract=off -std=c99 -Iinclude -Iexample -Ilib/kiss_fft \
-    test_static_aec.c $(find src -name '*.c' ! -name 'fft_wrapper_ne10.c') \
-    lib/kiss_fft/kiss_fft.c -lm -o bin/test_static_aec
+make -C ../../audio_common BACKEND=kiss lib
+gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/include \
+    test_static_aec.c $(find src -name '*.c') \
+    ../../audio_common/bin/kiss/libaudio_common.a -lm -o bin/test_static_aec
 ./bin/test_static_aec mic.wav ref.wav
 # → Pool: 525792 bytes (513.5 KB), frames: N
 #   PASS: all <2*N> samples byte-equal (static == dynamic)
 ```
+
+(Or just `make` from `c_impl/` — the top-level Makefile builds the
+`audio_common` archive as an order-only prereq automatically.)
 
 The two paths produce **bit-identical output** across all presets and all three
 scenarios (FS / DT / NE). The `aec_wav` CLI itself is heap-only — it does not

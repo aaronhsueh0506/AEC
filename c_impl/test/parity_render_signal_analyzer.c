@@ -4,7 +4,7 @@
  * poor_signal_excitation / masked-mu. WS5 Phase 5.1 gate.
  *
  * Build (standalone, from repo root):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
  *       -Ic_impl/include c_impl/src/render_signal_analyzer.c \
  *       c_impl/test/parity_render_signal_analyzer.c -lm -o /tmp/p_rsa
  *   python3 python/diag/gen_render_signal_analyzer_golden.py /tmp/rsa_golden.bin

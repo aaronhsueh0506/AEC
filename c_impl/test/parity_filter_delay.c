@@ -5,7 +5,7 @@
  * multi-frame state-evolution sequence. WS5 Phase 5.2 gate.
  *
  * Build (standalone, from repo root):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
  *       -Ic_impl/include c_impl/src/filter_delay.c \
  *       c_impl/test/parity_filter_delay.c -lm -o /tmp/p_fd
  *   python3 python/diag/gen_filter_delay_golden.py /tmp/fd_golden.bin

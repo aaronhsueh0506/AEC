@@ -4,7 +4,7 @@
  * WS5 Phase 5.2 (AecState layer).
  *
  * Build (standalone, from anywhere):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
  *       -I/Users/mingyu/Desktop/novatek/SE/AEC/c_impl/include \
  *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/src/saturation_detector.c \
  *       /Users/mingyu/Desktop/novatek/SE/AEC/c_impl/test/parity_saturation_detector.c \

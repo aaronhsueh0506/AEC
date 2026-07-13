@@ -3,7 +3,7 @@
  * (bit-for-bit float32) match. WS5 Phase 5.1 gate.
  *
  * Build (from c_impl/):
- *   gcc -O2 -ffp-contract=off -std=c99 -Iinclude \
+ *   gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude \
  *       src/reverb_model.c test/parity_reverb_model.c -lm -o /tmp/p_reverb
  *   python3 ../python/diag/gen_reverb_golden.py /tmp/reverb_golden.bin
  *   /tmp/p_reverb /tmp/reverb_golden.bin

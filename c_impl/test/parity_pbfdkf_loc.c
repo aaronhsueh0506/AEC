@@ -13,10 +13,12 @@
  * numpy-precision FFT. For the production gate see parity_pbfdkf.c (int state
  * bit-exact + output tolerance) and parity_aec_e2e.c.
  *
- * Build (from c_impl/):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 -Iinclude -Ilib/kiss_fft \
- *       src/pbfdkf.c src/fft_wrapper.c lib/kiss_fft/kiss_fft.c \
- *       src/aec3_scale.c test/parity_pbfdkf_loc.c -lm -o /tmp/p_loc
+ * Build (from c_impl/); the FFT wrapper now lives in the shared audio_common
+ * archive:
+ *   make -C ../../audio_common BACKEND=kiss lib
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
+ *       src/pbfdkf.c src/aec3_scale.c test/parity_pbfdkf_loc.c \
+ *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_loc
  *   /tmp/p_loc /tmp/pbfdkf_golden.bin
  */
 #include "pbfdkf.h"

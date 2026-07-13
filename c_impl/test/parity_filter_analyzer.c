@@ -5,7 +5,7 @@
  * internal accumulators, for every per-hop step. WS5 Phase 5.2 gate.
  *
  * Build (standalone, from repo root):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
  *       -Ic_impl/include c_impl/src/filter_analyzer.c \
  *       c_impl/test/parity_filter_analyzer.c -lm -o /tmp/p_fa
  *   python3 python/diag/gen_filter_analyzer_golden.py /tmp/fa_golden.bin

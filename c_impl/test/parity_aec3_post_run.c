@@ -11,9 +11,11 @@
  * mismatch in ANY sub-module call sequence shows up here. (Under the retired
  * pocketfft backend out[hop] was bit-exact too.)
  *
- * Build (standalone):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
- *       -I.../c_impl/include -I.../c_impl/lib/kiss_fft \
+ * Build (standalone; the FFT wrapper now lives in the shared audio_common
+ * archive, built once for BACKEND=kiss and linked in):
+ *   make -C .../audio_common BACKEND=kiss lib
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
+ *       -I.../c_impl/include -I.../audio_common/include \
  *       .../c_impl/src/aec3_post.c .../reverb_model.c \
  *       .../reverb_frequency_response.c .../aec3_scale.c .../freq_utils.c \
  *       .../aec_state.c .../erle_estimator.c .../subband_erle.c \
@@ -22,8 +24,8 @@
  *       .../filter_analyzer.c .../residual_echo_estimator.c \
  *       .../suppression_gain.c .../stationarity_estimator.c \
  *       .../linear_filter_output.c .../filter_state_bridge.c \
- *       .../fft_wrapper.c .../lib/kiss_fft/kiss_fft.c \
- *       .../test/parity_aec3_post_run.c -lm -o /tmp/p_post_run
+ *       .../test/parity_aec3_post_run.c \
+ *       .../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_post_run
  *   python3 .../python/diag/gen_aec3_post_run_golden.py /tmp/aec3_post_run_golden.bin
  *   /tmp/p_post_run /tmp/aec3_post_run_golden.bin
  */

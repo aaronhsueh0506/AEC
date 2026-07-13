@@ -1,10 +1,13 @@
 /* test_static_aec.c — verify aec_init() (static) produces byte-equal output
  * to aec_create() (dynamic) on the same input.
  *
- * Build (standalone, KISS FFT backend; fft_wrapper_ne10.c is NE10-only):
- *   gcc -O2 -ffp-contract=off -std=c99 -Iinclude -Iexample -Ilib/kiss_fft \
- *       test_static_aec.c $(find src -name '*.c' ! -name 'fft_wrapper_ne10.c') \
- *       lib/kiss_fft/kiss_fft.c -lm -o bin/test_static_aec
+ * Build (standalone, KISS FFT backend; the FFT wrapper + fast_math now live in
+ * the shared audio_common archive, built once and linked in):
+ *   make -C ../../audio_common BACKEND=kiss lib
+ *   gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/include \
+ *       test_static_aec.c $(find src -name '*.c') \
+ *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o bin/test_static_aec
+ * (Or just `make` from c_impl/ — the top-level Makefile wires this for you.)
  * Run:
  *   ./bin/test_static_aec mic.wav ref.wav
  */
@@ -76,6 +79,39 @@ int main(int argc, char** argv) {
     else
         printf("FAIL: %d/%d samples differ\n", diffs, frames * hop);
 
+    /* B2 regression guard: aec_destroy() must be called on the static
+     * instance too. On a NE10 build this is what releases the 3 NE10 R2C
+     * twiddle configs (post_fft / main_filter.fft / shadow_filter.fft) that
+     * live outside the pool and therefore aren't reclaimed by free(pool)
+     * alone. Harmless no-op cost on the KISS backend (fft_destroy() is a
+     * no-op for a pool-owned KISS handle). */
+    aec_destroy(aec_st);
     free(out_dyn); free(out_st); free(pool); free(mic); free(ref);
+
+    /* Leak-loop: repeat init -> process -> destroy so a leak checker
+     * (`leaks --atExit -- ./bin/test_static_aec ...`) can see whether
+     * anything grows with iteration count. A real leak (e.g. aec_destroy()
+     * skipping the fft_destroy() calls above on the static path) shows up
+     * here as N-times-repeated allocations; a correct teardown stays flat. */
+    {
+        const int kIters = 50;
+        const int loop_frames = frames < 20 ? frames : 20; /* keep it fast */
+        for (int iter = 0; iter < kIters; ++iter) {
+            size_t sz = aec_get_mem_size(&cfg);
+            void* p = malloc(sz);
+            if (!p) { fprintf(stderr, "leak-loop: pool alloc failed at iter %d\n", iter); return 1; }
+            Aec* inst = aec_init(p, sz, &cfg);
+            if (!inst) { fprintf(stderr, "leak-loop: aec_init failed at iter %d\n", iter); free(p); return 1; }
+            float scratch_out[/*hop*/ 4096];
+            for (int i = 0; i < loop_frames; ++i) {
+                if (hop > (int)(sizeof(scratch_out) / sizeof(scratch_out[0]))) break;
+                aec_process(inst, mic + i*hop, ref + i*hop, scratch_out);
+            }
+            aec_destroy(inst);
+            free(p);
+        }
+        printf("Leak-loop: %d init->process->destroy cycles completed\n", kIters);
+    }
+
     return diffs ? 1 : 0;
 }

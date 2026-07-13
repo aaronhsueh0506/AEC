@@ -1194,11 +1194,24 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
 }
 
 void aec_destroy(Aec* a) {
-    if (!a || a->is_static) return;
-    if (a->has_delay) free(a->ref_ring);
-    free(a->render_fifo);
+    if (!a) return;
+    /* Release library-internal FFT/filter allocations on BOTH the heap and
+     * static-pool paths. pbfdkf_free/pbfdaf_free already guard their own
+     * pool-owned buffers internally (is_static branch frees nothing from the
+     * pool) but they still call fft_destroy() on their nested FFT handle,
+     * which is the only thing that releases a NE10 backend's R2C twiddle
+     * config — an allocation that lives outside the caller's pool and is
+     * therefore NOT reclaimed by free(pool). Same story for post_fft below.
+     * fft_destroy() itself is a no-op for a NULL handle and (KISS backend)
+     * for a pool-owned handle, so this is safe pre- or post- pool-teardown. */
+    fft_destroy(a->post_fft);
     pbfdkf_free(&a->main_filter);
     if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
+
+    if (a->is_static) return;   /* caller owns the pool: nothing else to free */
+
+    if (a->has_delay) free(a->ref_ring);
+    free(a->render_fifo);
     free(a->rsa_counters);
     /* sub-module storage frees omitted (process owns no extra; OS reclaims on
      * exit). The malloc'd backing arrays are reachable only through the

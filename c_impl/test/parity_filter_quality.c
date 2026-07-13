@@ -6,7 +6,7 @@
  * multi-frame sequence (state evolution incl. reset semantics). WS5 Phase 5.2.
  *
  * Build (standalone, from repo root):
- *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99 \
+ *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
  *       -Ic_impl/include c_impl/src/filter_quality.c \
  *       c_impl/test/parity_filter_quality.c -o /tmp/p_fq
  *   python3 python/diag/gen_filter_quality_golden.py /tmp/fq_golden.bin

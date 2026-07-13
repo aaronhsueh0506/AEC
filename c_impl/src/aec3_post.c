@@ -1,7 +1,7 @@
 /* aec3_post.c — C port of the AEC3 post-filter DRIVER (AEC._aec3_post).
  * WS5 Phase 5.5. See aec3_post.h for the stage breakdown + parity rules.
  *
- * Build: gcc -Wall -Wextra -O2 -ffp-contract=off -std=c99
+ * Build: gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99
  *        -Ic_impl/include -Ic_impl/lib/pocketfft
  *   link: aec3_post.c reverb_model.c fft_pocketfft.c pocketfft.c -lm
  */
