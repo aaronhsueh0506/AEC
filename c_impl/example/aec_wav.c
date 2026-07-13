@@ -23,12 +23,15 @@ static void print_usage(const char* prog) {
         "  --cng                          Enable comfort noise\n"
         "  --no-cng                       Explicitly disable CNG\n"
         "  --no-delay-est                 Disable online delay estimation\n"
+        "  --delay-duty                   Duty-cycle the delay estimator once the\n"
+        "                                 estimate is solid (diverges from reference)\n"
         "  --no-res                       Disable residual echo suppressor\n"
         "  --no-shadow                    Disable shadow filter\n"
         "  --no-hpf                       Disable 80Hz high-pass\n"
         "  --debug-level <0..3>           0=off, 1=summary, 2=per-frame, 3=full\n"
         "  --debug-log <path>             redirect log to file (default stderr)\n"
-        "  --debug-trace <path>           per-frame CSV trace (logr) of post-filter state\n",
+        "  --debug-trace <path>           per-frame CSV trace (logr) of post-filter state\n"
+        "  --debug                        print one aec_debug_status() line per second\n",
         prog);
 }
 
@@ -48,9 +51,11 @@ int main(int argc, char* argv[]) {
     AecPreset preset = AEC_PRESET_BALANCED;
     int explicit_cng = -1;
     int no_delay_est = 0, no_res = 0, no_shadow = 0, no_hpf = 0;
+    int delay_duty = 0;
     int debug_level = 0;
     const char* debug_log = NULL;
     const char* debug_trace = NULL;
+    int debug_status = 0;   /* --debug: periodic aec_debug_status() print */
 
     for (int i = 4; i < argc; ++i) {
         const char* arg = argv[i];
@@ -63,6 +68,7 @@ int main(int argc, char* argv[]) {
         } else if (!strcmp(arg, "--cng"))           explicit_cng = 1;
         else if (!strcmp(arg, "--no-cng"))          explicit_cng = 0;
         else if (!strcmp(arg, "--no-delay-est"))    no_delay_est = 1;
+        else if (!strcmp(arg, "--delay-duty"))      delay_duty = 1;
         else if (!strcmp(arg, "--no-res"))          no_res = 1;
         else if (!strcmp(arg, "--no-shadow"))       no_shadow = 1;
         else if (!strcmp(arg, "--no-hpf"))          no_hpf = 1;
@@ -72,6 +78,8 @@ int main(int argc, char* argv[]) {
             debug_log = argv[++i];
         else if (!strcmp(arg, "--debug-trace") && i + 1 < argc)
             debug_trace = argv[++i];
+        else if (!strcmp(arg, "--debug"))
+            debug_status = 1;
         else {
             fprintf(stderr, "ERROR: unknown option '%s'\n", arg);
             return 2;
@@ -91,6 +99,7 @@ int main(int argc, char* argv[]) {
     aec_config_from_preset(&cfg, preset, sr);
     if (explicit_cng >= 0) cfg.enable_cng = explicit_cng;
     if (no_delay_est) cfg.enable_delay_est = 0;
+    if (delay_duty)   cfg.delay_est_duty_cycle = 1;
     if (no_res)       cfg.enable_res = 0;
     if (no_shadow)    cfg.enable_shadow = 0;
     if (no_hpf)       cfg.enable_highpass = 0;
@@ -124,6 +133,11 @@ int main(int argc, char* argv[]) {
     float* ref = (float*)malloc((size_t)hop * sizeof(float));
     float* out = (float*)malloc((size_t)hop * sizeof(float));
 
+    /* --debug cadence: once per second of audio (hop is always sr/100, i.e.
+     * a fixed 10ms, so frames_per_sec is exactly 100 for any sample_rate). */
+    int frames_per_sec = hop > 0 ? sr / hop : 0;
+    if (frames_per_sec <= 0) frames_per_sec = 1;
+
     int frame_idx = 0;
     for (int i = 0; i + hop <= n; i += hop) {
         wav_read_float(mr, mic, hop);
@@ -132,6 +146,18 @@ int main(int argc, char* argv[]) {
         aec_process(&aec, mic, ref, out);
         wav_write_float(ww, out, hop);
         frame_idx++;
+
+        if (debug_status && frame_idx % frames_per_sec == 0) {
+            AecDebugStatus st;
+            aec_debug_status(&aec, &st);
+            fprintf(stderr,
+                "[dbg %5.1fs] delay=%d (conf %.1f, upd %d) erle=%.1fdB "
+                "usable_lin=%d conv=%d near=%.2e out=%.2e\n",
+                (double)frame_idx / frames_per_sec,
+                st.delay_samples, st.delay_confidence, st.delay_updates,
+                st.erle_windowed_db, st.usable_linear, st.filter_converged,
+                st.near_power, st.out_power);
+        }
     }
 
     fprintf(stderr, "Processed %d frames @ hop=%d sr=%d preset=%s cng=%d delay_est=%d\n",

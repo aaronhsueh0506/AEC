@@ -175,6 +175,13 @@ typedef struct PBFDKF {
 
     long   partition_sum_x2_startup_hops;  /* 0 = partition-sum from hop 1 */
 
+    /* Per-hop scratch [n_freqs]: |error_spec|² computed once per hop in
+     * pbfdkf_process and shared by the error_psd EMA + the AEC3 mu gate +
+     * the H_error refresh (they all read the same untouched error_spec).
+     * Instance storage, not stack — keeps aec_process stack usage
+     * independent of n_freqs (embedded task stacks are small). */
+    float* e2_ref_scratch;
+
     int is_static;               /* 1 = state placed in caller buffer */
 } PBFDKF;
 

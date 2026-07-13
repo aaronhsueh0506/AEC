@@ -66,6 +66,20 @@ typedef struct AecConfig {
     float  delay_buffer_ms;        /* 2048 */
     float  delay_est_init_s;       /* 0.3  */
     float  delay_est_period_s;     /* 0.5  */
+    /* Delay-estimator duty cycling (default 0 = analyse every hop, exactly
+     * the Python reference → byte-identical). When 1, a DOCUMENTED DIVERGENCE
+     * from the reference (pending a quality bench): once the delay estimate
+     * is solid (confidence 1.0) AND unchanged for delay_est_init_s seconds,
+     * the matched-filter analysis drops to 1 hop in every K, where
+     * K = max(2, round(delay_est_period_s/hop_s)/5) — 10 with the default
+     * 0.5 s period @10 ms hop, cutting ~90% of the matched-filter cost. The
+     * estimator's decimators + render ring stay FED on every hop (only the
+     * analysis decimates), so the matched filter never sees gapped audio.
+     * Full-rate analysis resumes immediately when (a) the estimate changes
+     * or loses solidity, or (b) the ERLE watchdog fires: erle_windowed drops
+     * >6 dB below its running peak (peak leaks ~0.1 dB/s; armed only once
+     * the peak exceeds 6 dB, so it cannot fire before first convergence). */
+    int    delay_est_duty_cycle;   /* 0 */
     float  highpass_cutoff_hz;     /* 80   */
     float  saturation_threshold;   /* 0.95 */
     float  kalman_q_high;          /* 1e-3 */
@@ -133,6 +147,12 @@ typedef struct Aec {
     float* ref_ring;       int ref_ring_size, ref_ring_write, ref_ring_filled;
     int    current_delay;  /* -1 until first acquisition */
     int    pending_delay;  int has_pending; int pending_delay_ttl;
+    /* duty-cycle state (only driven when cfg.delay_est_duty_cycle != 0) */
+    int    duty_active;        /* 1 = decimated analysis in effect */
+    int    duty_stable_hops;   /* consecutive solid+unchanged hops (arming) */
+    int    duty_pos;           /* position in the 1-in-K analysis cycle */
+    int    duty_last_delay;    /* estimate on the previous hop (change detect) */
+    double duty_erle_peak;     /* leaky running peak of erle_windowed (dB) */
 
     /* linear filters */
     PBFDKF main_filter;
@@ -233,6 +253,30 @@ typedef struct Aec {
     Complex* W_all;            /* [n_partitions × n_freqs] flat snapshot */
     Complex* X_buf_all;        /* [n_partitions × n_freqs] flat snapshot */
 
+    /* per-hop freq-bin scratch (Tier-1 stack-safety fix): these used to be
+     * `float x[8192]` locals inside aec_process() / mean_sq(), sized far
+     * beyond the actual n_freqs (K) they ever hold and with no assertion
+     * tying 8192 to fft_size — a larger FFT config would silently smash the
+     * stack, and some scopes stacked 2-3 of them at once (~96 KB worst case
+     * in one block), which is unsafe headroom for an embedded RTOS task
+     * stack (often 16-64 KB total). Moved into the Aec instance (malloc'd in
+     * aec_create, pool-carved in aec_init, sized exactly K — or hop for
+     * scr_sq, which mean_sq() only ever runs over hop-length buffers) so
+     * stack usage no longer depends on n_freqs at all. Bit-exact: same
+     * values, same order, only storage location changed. */
+    float* scr_sq;          /* mean_sq() scratch, size hop_size (not K) */
+    float* scr_e2_echo;
+    float* scr_e2_near;
+    float* scr_rsa_psd;
+    float* scr_rsa_mask;
+    float* scr_mu_buf_pre;
+    float* scr_e2coa_pre;
+    float* scr_mu_buf;
+    float* scr_far_psd;
+    float* scr_e2ref_arr;
+    float* scr_e2coa_arr;
+    float* scr_erl_arr;
+
     /* ── streaming render-hop FIFO (async render/capture decoupling) ──
      * Only exercised by the streaming API (aec_analyze_render /
      * aec_process_capture). The lockstep aec_process() bypasses it entirely,
@@ -311,6 +355,41 @@ typedef struct AecResContext {
 } AecResContext;
 
 void aec_get_res_context(const Aec* a, AecResContext* ctx);
+
+/* ── Runtime debug/status introspection ───────────────────────────────────
+ * Read-only status query for an integrator to poll (e.g. once per second)
+ * to tell whether the pipeline is behaving on an embedded target. Fills a
+ * plain struct from fields the engine already maintains — no logging inside
+ * the library, no extra per-frame state, no added hot-path cost; the caller
+ * (e.g. example/aec_wav.c --debug) is responsible for printing. */
+typedef struct AecDebugStatus {
+    /* delay estimation (EchoPathDelayEstimator / AEC3 matched-filter) */
+    int    delay_samples;      /* current applied delay, samples; -1 = not yet
+                                 * acquired (mirrors a->current_delay)         */
+    double delay_confidence;   /* 0.0 / 0.5 / 1.0 (delay_aec3_confidence)      */
+    int    delay_updates;      /* matched-filter update count
+                                 * (delay_aec3_n_updates)                      */
+
+    /* linear filter health */
+    double erle_windowed_db;   /* windowed ERLE (dB) from the last hop that
+                                 * ran the AEC3 post chain (a->last_erle_windowed),
+                                 * 0.0 before the post chain has run once      */
+    int    usable_linear;      /* AEC3 usable-linear-estimate gate state
+                                 * (aec_state_usable_linear_estimate)          */
+    int    filter_converged;   /* FilterConvergenceAnalyzer latch state
+                                 * (a->convergence.converged, same value
+                                 * AecResContext.filter_converged exposes)     */
+
+    /* levels — EMA (alpha=0.95), NOT an instantaneous last-hop mean. Reuses
+     * the power-tracking EMAs the ERLE machinery already updates every hop
+     * (two multiply-accumulate loops that run unconditionally), so reading
+     * them here adds zero per-frame cost. */
+    double near_power;         /* EMA of mic/near-hop power (a->near_power)    */
+    double out_power;          /* EMA of the linear, pre-RES-gain output power
+                                 * (a->raw_error_power)                        */
+} AecDebugStatus;
+
+void aec_debug_status(const Aec* a, AecDebugStatus* out);
 
 #ifdef __cplusplus
 }

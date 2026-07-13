@@ -31,6 +31,105 @@ static double delay_aec3_dot(const float *a, const float *b, int n) {
     return s;
 }
 
+/* Fused (h·x, x·x) over the SAME x_window pass -- the two hot 512-tap dot
+ * products of da_matched_filter_core were independent single-pass loops
+ * over x_window (one reading x_window twice for x·x, the other reading h
+ * once + x_window again for h·x); merging them into one loop halves the
+ * x_window traffic and the loop/bounds-check overhead. Each accumulator
+ * (hx, xx) still sums its own float32 products for i=0..n-1 in the exact
+ * same order as delay_aec3_dot did -- interleaving two INDEPENDENT
+ * accumulators does not change either one's value (IEEE 754 add is not
+ * reordered within an accumulator; a[i]*b[i] is commutative and bit-exact
+ * regardless of which operand is written first). This runs 80x per
+ * 64-sample block (5 filters x 16 sub-samples), so it dominates the
+ * delay-estimator's cost (measured ~68% of aec_process). */
+#ifndef AEC_FAST_MATH   /* the FAST_MATH core uses da_dot_f32 instead */
+static void delay_aec3_dot_pair(const float *h, const float *x, int n,
+                                double *hx_sum, double *xx_sum) {
+    double hx = 0.0, xx = 0.0;
+    int i;
+    for (i = 0; i < n; ++i) {
+        float xv = x[i];
+        hx += (double)(h[i] * xv);
+        xx += (double)(xv * xv);
+    }
+    *hx_sum = hx;
+    *xx_sum = xx;
+}
+#endif
+
+#ifdef AEC_FAST_MATH
+/* ======================= AEC_FAST_MATH matched filter =====================
+ * Opt-in (-DAEC_FAST_MATH, default OFF — see Makefile flag docs). DIVERGES
+ * from the bit-exact Python reference: the two 512-tap dot products
+ * accumulate in float32 instead of double (this is exactly what WebRTC's
+ * NEON matched filter does, matched_filter_neon in matched_filter.cc), and
+ * x²_sum SLIDES across the 16 sub-block iterations (the window advances by
+ * one sample per iteration: x2 += new² − old²) instead of being re-summed.
+ * The saturation gate, the `x2_sum > x2_sum_threshold` excitation gate, the
+ * `error_sum < 0.3·anchor` reliability test and the NLMS alpha formula keep
+ * the SAME comparisons/expressions — only the precision of the x2_sum / h·x
+ * values feeding them changes (f32 vs f64 accumulation, sub-ULP-to-1e-4
+ * relative). Integer lag output may differ from the reference on ties;
+ * quality-gated for a future 800-case bench before production use.
+ *
+ * On ARM (__ARM_NEON) the f32 dot + NLMS update use 4-wide fmla intrinsics;
+ * a scalar float path is kept for non-NEON builds. */
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+
+/* float32 h·x, 4 independent NEON accumulators (n must be a multiple of 16;
+ * DA_FILTER_SIZE = 512). */
+static float da_dot_f32(const float *a, const float *b, int n) {
+    float32x4_t acc0 = vdupq_n_f32(0.0f), acc1 = vdupq_n_f32(0.0f);
+    float32x4_t acc2 = vdupq_n_f32(0.0f), acc3 = vdupq_n_f32(0.0f);
+    int i;
+    for (i = 0; i + 16 <= n; i += 16) {
+        acc0 = vfmaq_f32(acc0, vld1q_f32(a + i),      vld1q_f32(b + i));
+        acc1 = vfmaq_f32(acc1, vld1q_f32(a + i + 4),  vld1q_f32(b + i + 4));
+        acc2 = vfmaq_f32(acc2, vld1q_f32(a + i + 8),  vld1q_f32(b + i + 8));
+        acc3 = vfmaq_f32(acc3, vld1q_f32(a + i + 12), vld1q_f32(b + i + 12));
+    }
+    {
+        float32x4_t acc = vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3));
+        float s = vaddvq_f32(acc);
+        for (; i < n; ++i) s += a[i] * b[i];
+        return s;
+    }
+}
+
+/* h += alpha * x, 4-wide fmla. */
+static void da_nlms_update_f32(float *h, const float *x, float alpha, int n) {
+    float32x4_t va = vdupq_n_f32(alpha);
+    int i;
+    for (i = 0; i + 4 <= n; i += 4)
+        vst1q_f32(h + i, vfmaq_f32(vld1q_f32(h + i), va, vld1q_f32(x + i)));
+    for (; i < n; ++i) h[i] += alpha * x[i];
+}
+#else  /* scalar float fallback (non-NEON targets) */
+static float da_dot_f32(const float *a, const float *b, int n) {
+    float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+    int i;
+    for (i = 0; i + 4 <= n; i += 4) {
+        s0 += a[i] * b[i];
+        s1 += a[i + 1] * b[i + 1];
+        s2 += a[i + 2] * b[i + 2];
+        s3 += a[i + 3] * b[i + 3];
+    }
+    {
+        float s = (s0 + s1) + (s2 + s3);
+        for (; i < n; ++i) s += a[i] * b[i];
+        return s;
+    }
+}
+
+static void da_nlms_update_f32(float *h, const float *x, float alpha, int n) {
+    int i;
+    for (i = 0; i < n; ++i) h[i] += alpha * x[i];
+}
+#endif /* __ARM_NEON */
+#endif /* AEC_FAST_MATH */
+
 /* numpy argmax over h*h (float32): FIRST index of the strongest squared tap.
  * Mirrors max_square_peak_index (returns 0 on size<2). */
 static int da_max_square_peak_index(const float *h, int n) {
@@ -57,6 +156,7 @@ static int da_argmax_i(const int *a, int n) {
 
 /* ------------------------------------------------------------------ biquad */
 
+#if AEC_DELAY_DS_FACTOR != 8   /* ds4 tables (unused in a ds8 build) */
 static const double DA_LP_B[3][3] = {
     {0.0180919877, 0.00320961363, 0.0180919877},
     {1.0,         -1.24550459,    1.0},
@@ -73,25 +173,53 @@ static const double DA_HP_B[1][3] = {
 static const double DA_HP_A[1][2] = {
     {-1.45424359, 0.574061915},
 };
+#endif
+
+#if AEC_DELAY_DS_FACTOR == 8
+/* AEC3 kBandPassFilterDs8 (docs/aec3_extracts/src/aec3/decimator.cc:31-45):
+ * signal.cheby1(1, 6, [1000/8000, 2000/8000], 'bandpass') repeated 5 times.
+ * The ds8 decimator uses this as its anti-alias stage and a PASS-THROUGH
+ * noise-reduction stage (kPassThroughFilter) — the coefficients here are the
+ * f32 literals from decimator.cc widened to double (our biquads run in f64,
+ * mirroring the reference's f64 _CascadedBiquad). */
+static const double DA_BP8_B[3] = {0.103304783, 0.0, -0.103304783};
+static const double DA_BP8_A[2] = {-1.520363, 0.793390435};
+#endif
 
 static void da_biquad_reset(DaBiquad *bq) {
     memset(bq->z, 0, sizeof(bq->z));
 }
 
-static void da_biquad_init_lp(DaBiquad *bq) {
+/* anti-alias stage: ds4 = kLowPassFilterDs4 (elliptic LP, 3 sections);
+ * ds8 = kBandPassFilterDs8 (cheby1 bandpass, 5 identical sections). */
+static void da_biquad_init_antialias(DaBiquad *bq) {
     int s;
+#if AEC_DELAY_DS_FACTOR == 8
+    bq->n_sections = 5;
+    for (s = 0; s < 5; ++s) {
+        bq->b[s][0] = DA_BP8_B[0]; bq->b[s][1] = DA_BP8_B[1]; bq->b[s][2] = DA_BP8_B[2];
+        bq->a[s][0] = DA_BP8_A[0]; bq->a[s][1] = DA_BP8_A[1];
+    }
+#else
     bq->n_sections = 3;
     for (s = 0; s < 3; ++s) {
         bq->b[s][0] = DA_LP_B[s][0]; bq->b[s][1] = DA_LP_B[s][1]; bq->b[s][2] = DA_LP_B[s][2];
         bq->a[s][0] = DA_LP_A[s][0]; bq->a[s][1] = DA_LP_A[s][1];
     }
+#endif
     da_biquad_reset(bq);
 }
 
-static void da_biquad_init_hp(DaBiquad *bq) {
+/* noise-reduction stage: ds4 = kHighPassFilter (butter HP @1 kHz);
+ * ds8 = pass-through (0 sections — the cascade loop simply forwards x). */
+static void da_biquad_init_noise_reduction(DaBiquad *bq) {
+#if AEC_DELAY_DS_FACTOR == 8
+    bq->n_sections = 0;
+#else
     bq->n_sections = 1;
     bq->b[0][0] = DA_HP_B[0][0]; bq->b[0][1] = DA_HP_B[0][1]; bq->b[0][2] = DA_HP_B[0][2];
     bq->a[0][0] = DA_HP_A[0][0]; bq->a[0][1] = DA_HP_A[0][1];
+#endif
     da_biquad_reset(bq);
 }
 
@@ -117,8 +245,8 @@ static double da_biquad_process1(DaBiquad *bq, double xn) {
 /* ---------------------------------------------------------------- decimator */
 
 static void da_decimator_init(DaDecimator *dec) {
-    da_biquad_init_lp(&dec->anti_alias);
-    da_biquad_init_hp(&dec->noise_reduction);
+    da_biquad_init_antialias(&dec->anti_alias);
+    da_biquad_init_noise_reduction(&dec->noise_reduction);
 }
 
 /* Decimate a 64-sample block to a 16-sample sub-block.
@@ -126,12 +254,21 @@ static void da_decimator_init(DaDecimator *dec) {
  * x[::4].astype(f32).  The biquad chains run on ALL 64 samples (state
  * carries), but only every 4th post-HP sample is kept & cast to f32. */
 static void da_decimator_decimate(DaDecimator *dec, const float *in_block, float *out_sub) {
-    int i, o = 0;
-    for (i = 0; i < DA_AEC3_BLOCK_SIZE; ++i) {
-        double lp = da_biquad_process1(&dec->anti_alias, (double)in_block[i]);
+    /* Same per-sample biquad processing order as the modulo form (i =
+     * 0..DA_AEC3_BLOCK_SIZE-1 through both cascades, output kept on the FIRST
+     * sample of every DA_DOWN_SAMPLING_FACTOR group) -- restructured as a
+     * nested loop so neither `i % DOWN_SAMPLING_FACTOR` nor a per-sample
+     * branch runs in the inner loop. DA_AEC3_BLOCK_SIZE / DA_DOWN_SAMPLING_FACTOR
+     * == DA_SUB_BLOCK_SIZE by construction (64 / 4 == 16). */
+    int o, j;
+    for (o = 0; o < DA_SUB_BLOCK_SIZE; ++o) {
+        int base = o * DA_DOWN_SAMPLING_FACTOR;
+        double lp = da_biquad_process1(&dec->anti_alias, (double)in_block[base]);
         double hp = da_biquad_process1(&dec->noise_reduction, lp);
-        if ((i % DA_DOWN_SAMPLING_FACTOR) == 0) {
-            out_sub[o++] = (float)hp;
+        out_sub[o] = (float)hp;
+        for (j = 1; j < DA_DOWN_SAMPLING_FACTOR; ++j) {
+            lp = da_biquad_process1(&dec->anti_alias, (double)in_block[base + j]);
+            da_biquad_process1(&dec->noise_reduction, lp);
         }
     }
 }
@@ -144,10 +281,20 @@ static void da_ring_reset(DaRing *r) {
 }
 
 static void da_ring_push(DaRing *r, const float *sub, int n) {
-    int i;
-    for (i = 0; i < n; ++i) {
-        r->buffer[r->write] = sub[i];
-        r->write = (r->write + 1) % DA_RING_CAPACITY;
+    /* Values identical to the per-sample-modulo walk, but written as at most
+     * two contiguous memcpy segments -- no integer division in the inner
+     * loop. Same class of fix as da_ring_gather_back below: n (=
+     * DA_SUB_BLOCK_SIZE, currently 16) samples pushed twice per 64-sample
+     * block, so this was ~500K %-ops/sec at 16 kHz. */
+    int first = DA_RING_CAPACITY - r->write;
+    if (first >= n) {
+        memcpy(r->buffer + r->write, sub, (size_t)n * sizeof(float));
+        r->write += n;
+        if (r->write == DA_RING_CAPACITY) r->write = 0;
+    } else {
+        memcpy(r->buffer + r->write, sub, (size_t)first * sizeof(float));
+        memcpy(r->buffer, sub + first, (size_t)(n - first) * sizeof(float));
+        r->write = n - first;
     }
 }
 
@@ -183,18 +330,48 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
     double error_sum = 0.0;
     int filters_updated = 0;
     int i;
-    float x_window[DA_FILTER_SIZE];
+    /* All DA_SUB_BLOCK_SIZE windows of this call are subranges of ONE
+     * contiguous span: window_i[k] = ring sample (alignment_shift_back +
+     * (SUB_BLOCK_SIZE-1-i) + k) back = span[(SUB_BLOCK_SIZE-1-i) + k], where
+     * span = gather_back(alignment_shift_back, FILTER_SIZE+SUB_BLOCK_SIZE-1).
+     * One 527-sample gather replaces 16 gathers of 512 (8192 -> 527 floats
+     * copied per filter per block; ds4 numbers — 263 vs 2048 at ds8); every
+     * window is the identical value sequence the per-i gather produced (the
+     * ring is not written during the whole matched-filter update), so all
+     * downstream arithmetic is byte-identical. Deepest sample touched is
+     * alignment_shift_back + FILTER_SIZE+SUB_BLOCK_SIZE-2 (= 1536+526 = 2062
+     * at ds4; 768+262 = 1030 at ds8), always < DA_RING_CAPACITY. */
+    float span[DA_FILTER_SIZE + DA_SUB_BLOCK_SIZE - 1];
+    da_ring_gather_back(ring, alignment_shift_back,
+                        DA_FILTER_SIZE + DA_SUB_BLOCK_SIZE - 1, span);
     if (instantaneous_error_out) {
         int k0;
         for (k0 = 0; k0 < DA_ACC_ERR_SIZE; ++k0) instantaneous_error_out[k0] = 0.0f;
     }
+#ifdef AEC_FAST_MATH
+    /* Sliding x²_sum: window i covers span[(SB-1-i) .. (SB-1-i)+511]; moving
+     * i→i+1 adds span[SB-2-i] (one newer sample at the front) and drops
+     * span[(SB-1-i)+512] (the oldest). Initialised once for i=0, then O(1)
+     * per iteration instead of a 512-tap re-sum. f32 accumulation — see the
+     * AEC_FAST_MATH divergence note above. */
+    float x2_slide = da_dot_f32(span + (DA_SUB_BLOCK_SIZE - 1),
+                                span + (DA_SUB_BLOCK_SIZE - 1), DA_FILTER_SIZE);
+#endif
     for (i = 0; i < DA_SUB_BLOCK_SIZE; ++i) {
-        int start_back = alignment_shift_back + (DA_SUB_BLOCK_SIZE - 1 - i);
+        const float *x_window = span + (DA_SUB_BLOCK_SIZE - 1 - i);
         double x2_sum, s, e;
         int saturation, t;
-        da_ring_gather_back(ring, start_back, DA_FILTER_SIZE, x_window);
-        x2_sum = delay_aec3_dot(x_window, x_window, DA_FILTER_SIZE);
-        s = delay_aec3_dot(h, x_window, DA_FILTER_SIZE);
+#ifdef AEC_FAST_MATH
+        if (i > 0) {
+            float in_v  = x_window[0];               /* newly entered sample */
+            float out_v = x_window[DA_FILTER_SIZE];  /* just left the window */
+            x2_slide += in_v * in_v - out_v * out_v;
+        }
+        x2_sum = (double)x2_slide;
+        s = (double)da_dot_f32(h, x_window, DA_FILTER_SIZE);
+#else
+        delay_aec3_dot_pair(h, x_window, DA_FILTER_SIZE, &s, &x2_sum);
+#endif
         e = (double)y[i] - s;
         saturation = (y[i] >= DA_SATURATION_LIMIT || y[i] <= -DA_SATURATION_LIMIT);
         error_sum += e * e;
@@ -231,9 +408,14 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
              * op casts alpha to float32 and computes h += f32(alpha)*x in f32. */
             double alpha_d = (double)smoothing * e / x2_sum;
             float  alpha_f = (float)alpha_d;
+#ifdef AEC_FAST_MATH
+            da_nlms_update_f32(h, x_window, alpha_f, DA_FILTER_SIZE);
+            (void)t;
+#else
             for (t = 0; t < DA_FILTER_SIZE; ++t) {
                 h[t] = h[t] + (alpha_f * x_window[t]);
             }
+#endif
             filters_updated = 1;
         }
     }
@@ -576,9 +758,21 @@ static void da_estimator_reset(DaEstimator *e, int reset_delay_confidence) {
 }
 
 /* _process_inner_block. Returns 1 if an estimate was produced this block
- * (writes *quality / *delay in RAW samples). */
+ * (writes *quality / *delay in RAW samples).
+ *
+ * run_matched_filter (duty-cycle support, see delay_aec3_accumulate_ex):
+ * when 0, the block is FED but not ANALYSED — both decimators still run
+ * (their biquad cascades carry state across every sample, so skipping them
+ * would corrupt all later sub-samples) and the decimated render sub-block is
+ * still pushed into the ring (the matched filter's x-window must see gapless
+ * audio, else the next analysed block correlates against a buffer with holes
+ * and reports garbage). Only the matched-filter NLMS update + lag
+ * aggregation + clockdrift + stability bookkeeping are skipped; every piece
+ * of estimator DECISION state (histograms, old_agg, counters) is left
+ * exactly as the previous analysed block set it. */
 static int da_estimator_process_inner_block(DaEstimator *e, const float *render_block,
                                             const float *capture_block,
+                                            int run_matched_filter,
                                             DelayQuality *quality_out, int *delay_out) {
     float render_sub[DA_SUB_BLOCK_SIZE];
     float capture_sub[DA_SUB_BLOCK_SIZE];
@@ -592,6 +786,7 @@ static int da_estimator_process_inner_block(DaEstimator *e, const float *render_
     da_decimator_decimate(&e->render_decimator, render_block, render_sub);
     da_decimator_decimate(&e->capture_decimator, capture_block, capture_sub);
     da_ring_push(&e->render_ring, render_sub, DA_SUB_BLOCK_SIZE);
+    if (!run_matched_filter) return 0;   /* fed, not analysed (see above) */
     da_matched_filter_update(&e->matched_filter, &e->render_ring, capture_sub,
                              da_aggregator_reliable_delay_found(&e->aggregator));
     produced = da_aggregator_aggregate(
@@ -635,6 +830,7 @@ static int da_estimator_process_inner_block(DaEstimator *e, const float *render_
  * the LATEST such estimate into *quality / *delay). */
 static int da_estimator_estimate_delay(DaEstimator *e, const float *render_hop,
                                        const float *capture_hop, int hop,
+                                       int run_matched_filter,
                                        DelayQuality *quality_out, int *delay_out) {
     int produced_any = 0;
     int i;
@@ -648,7 +844,7 @@ static int da_estimator_estimate_delay(DaEstimator *e, const float *render_hop,
             DelayQuality bq;
             int bd;
             if (da_estimator_process_inner_block(e, e->render_pending, e->capture_pending,
-                                                 &bq, &bd)) {
+                                                 run_matched_filter, &bq, &bd)) {
                 produced_any = 1;
                 q = bq;
                 delay = bd;
@@ -681,13 +877,25 @@ void delay_aec3_reset(DelayAec3 *d) {
 }
 
 int delay_aec3_accumulate(DelayAec3 *d, const float *near, const float *far, int hop) {
+    return delay_aec3_accumulate_ex(d, near, far, hop, 1);
+}
+
+/* Duty-cycle-aware accumulate (delay_est_duty_cycle support; a DIVERGENCE
+ * from the Python reference when run_matched_filter=0 — the reference always
+ * analyses). run_matched_filter=1 is byte-identical to delay_aec3_accumulate.
+ * With 0, this hop's samples are decimated + pushed into the ring (the
+ * estimator's buffers stay gapless — the correctness crux) but no
+ * matched-filter/aggregator work runs, so latest_* stays put. */
+int delay_aec3_accumulate_ex(DelayAec3 *d, const float *near, const float *far,
+                             int hop, int run_matched_filter) {
     DelayQuality q = DELAY_QUALITY_COARSE;
     int delay = 0;
     int produced;
     int prev_delay = d->latest_valid ? d->latest_delay : -1;
     int emitted_new = 0;
     /* NOTE: estimate_delay takes (render, capture) = (far, near). */
-    produced = da_estimator_estimate_delay(&d->est, far, near, hop, &q, &delay);
+    produced = da_estimator_estimate_delay(&d->est, far, near, hop,
+                                           run_matched_filter, &q, &delay);
     if (produced) {
         d->latest_valid = 1;
         d->latest_delay = delay;

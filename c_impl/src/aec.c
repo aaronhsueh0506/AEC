@@ -58,6 +58,7 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->delay_buffer_ms = 2048.0f;
     cfg->delay_est_init_s = 0.3f;
     cfg->delay_est_period_s = 0.5f;
+    cfg->delay_est_duty_cycle = 0;   /* 0 = reference behaviour (byte-exact) */
     cfg->highpass_cutoff_hz = 80.0f;
     cfg->saturation_threshold = 0.95f;
     cfg->kalman_q_high = 1e-3f;
@@ -99,11 +100,12 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
 /* ───────────────────────── helpers ─────────────────────────────────────── */
 
 /* np.mean(x ** 2): square in fp32, sum via numpy-1.26 pairwise f32, divide
- * (np.float32 / int → float64). Uses the bit-exact pairwise from aec3_post. */
-static double mean_sq(const float* x, int n) {
-    float sq[8192];
-    for (int i = 0; i < n; ++i) sq[i] = x[i] * x[i];
-    float s = aec3_post_pairwise_sum_f32(sq, (size_t)n);
+ * (np.float32 / int → float64). Uses the bit-exact pairwise from aec3_post.
+ * `scratch` must hold >= n floats (n is always hop_size at every call site;
+ * callers pass a->scr_sq, sized hop_size -- see aec.h struct comment). */
+static double mean_sq(const float* x, int n, float* scratch) {
+    for (int i = 0; i < n; ++i) scratch[i] = x[i] * x[i];
+    float s = aec3_post_pairwise_sum_f32(scratch, (size_t)n);
     return (double)(s / (float)n);
 }
 
@@ -222,8 +224,8 @@ static double get_simple_mu_scale(Aec* a, int* out_is_array) {
 /* _update_simple_mu_ratio (orchestrator 1478-1522). */
 static void update_simple_mu_ratio(Aec* a, const float* output,
                                    const float* far_end, int n) {
-    double error_power = mean_sq(output, n) + 1e-10;
-    double far_power   = mean_sq(far_end, n) + 1e-10;
+    double error_power = mean_sq(output, n, a->scr_sq) + 1e-10;
+    double far_power   = mean_sq(far_end, n, a->scr_sq) + 1e-10;
     if (far_power < 1e-6 && error_power < 1e-6) return;
     if (far_power > 1e-4 && a->simple_mu_ratio < 0.1) {
         a->simple_mu_ratio = 0.8;
@@ -235,7 +237,7 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
     int K = a->n_freqs;
     /* np.sum(np.abs(spec)**2): cmag2_np per bin → numpy-1.26 pairwise f32 sum;
      * + 1e-10 widens to f64. */
-    float e2_echo[8192], e2_near[8192];
+    float *e2_echo = a->scr_e2_echo, *e2_near = a->scr_e2_near;
     for (int k = 0; k < K; ++k) {
         e2_echo[k] = cmag2_c(a->main_filter.base.echo_spec[k].r,
                              a->main_filter.base.echo_spec[k].i);
@@ -399,6 +401,7 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     } else {
         a->current_delay = 0;
     }
+    a->duty_last_delay = -1;   /* duty-cycle change detect (rest zeroed by memset) */
 
     /* Streaming render-hop FIFO (async render/capture decoupling). Allocated
      * unconditionally; only exercised by the streaming API. Capacity is a
@@ -744,6 +747,21 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     a->filter_taps_full = (float*)malloc((size_t)n_parts * (size_t)hop * sizeof(float));
     a->W_all      = (Complex*)malloc((size_t)n_parts * (size_t)K * sizeof(Complex));
     a->X_buf_all  = (Complex*)malloc((size_t)n_parts * (size_t)K * sizeof(Complex));
+
+    /* per-hop freq-bin scratch (see aec.h struct comment). */
+    a->scr_sq        = (float*)malloc((size_t)hop * sizeof(float));
+    a->scr_e2_echo   = (float*)malloc((size_t)K   * sizeof(float));
+    a->scr_e2_near   = (float*)malloc((size_t)K   * sizeof(float));
+    a->scr_rsa_psd   = (float*)malloc((size_t)K   * sizeof(float));
+    a->scr_rsa_mask  = (float*)malloc((size_t)K   * sizeof(float));
+    a->scr_mu_buf_pre= (float*)malloc((size_t)K   * sizeof(float));
+    a->scr_e2coa_pre = (float*)malloc((size_t)K   * sizeof(float));
+    a->scr_mu_buf    = (float*)malloc((size_t)K   * sizeof(float));
+    a->scr_far_psd   = (float*)malloc((size_t)K   * sizeof(float));
+    a->scr_e2ref_arr = (float*)malloc((size_t)K   * sizeof(float));
+    a->scr_e2coa_arr = (float*)malloc((size_t)K   * sizeof(float));
+    a->scr_erl_arr   = (float*)malloc((size_t)K   * sizeof(float));
+
     return 0;
 }
 
@@ -769,6 +787,10 @@ void aec_destroy(Aec* a) {
     free(a->near_hop); free(a->far_hop); free(a->raw_output);
     free(a->shadow_out); free(a->final_out);
     free(a->filter_taps_full); free(a->W_all); free(a->X_buf_all);
+    free(a->scr_sq); free(a->scr_e2_echo); free(a->scr_e2_near);
+    free(a->scr_rsa_psd); free(a->scr_rsa_mask); free(a->scr_mu_buf_pre);
+    free(a->scr_e2coa_pre); free(a->scr_mu_buf); free(a->scr_far_psd);
+    free(a->scr_e2ref_arr); free(a->scr_e2coa_arr); free(a->scr_erl_arr);
 }
 
 int aec_hop_size(const Aec* a) { return a->hop_size; }
@@ -783,6 +805,8 @@ void aec_reset(Aec* a) {
         a->current_delay = -1; a->pending_delay = -1; a->has_pending = 0;
         a->pending_delay_ttl = 0;
     }
+    a->duty_active = 0; a->duty_stable_hops = 0; a->duty_pos = 0;
+    a->duty_last_delay = -1; a->duty_erle_peak = 0.0;
     if (a->render_fifo)
         memset(a->render_fifo, 0,
                (size_t)a->fifo_cap_hops * a->hop_size * sizeof(float));
@@ -936,7 +960,62 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
     /* 3. delay estimation + ring-buffer alignment. */
     if (a->has_delay) {
-        delay_aec3_accumulate(&a->delay, a->near_hop, a->far_hop, hop);
+        if (!a->cfg.delay_est_duty_cycle) {
+            /* Reference behaviour: analyse every hop (byte-exact default). */
+            delay_aec3_accumulate(&a->delay, a->near_hop, a->far_hop, hop);
+        } else {
+            /* Duty-cycled analysis (opt-in DIVERGENCE — see the
+             * delay_est_duty_cycle doc in aec.h). The estimator is FED every
+             * hop regardless (accumulate_ex keeps decimators + ring gapless);
+             * only the matched-filter analysis is decimated to 1-in-K once
+             * the estimate has been solid+unchanged for delay_est_init_s. */
+            double hop_s = (double)hop / (double)a->cfg.sample_rate;
+            int hold_hops = (int)lrint((double)a->cfg.delay_est_init_s / hop_s);
+            int K = (int)lrint((double)a->cfg.delay_est_period_s / hop_s) / 5;
+            int run_filter = 1;
+            if (hold_hops < 1) hold_hops = 1;
+            if (K < 2) K = 2;
+            if (a->duty_active) {
+                a->duty_pos += 1;
+                if (a->duty_pos >= K) a->duty_pos = 0;
+                run_filter = (a->duty_pos == 0);
+            }
+            delay_aec3_accumulate_ex(&a->delay, a->near_hop, a->far_hop, hop,
+                                     run_filter);
+            {
+                int cur = delay_aec3_estimated_delay(&a->delay);
+                int solid = delay_aec3_is_solid(&a->delay);
+                if (!solid || cur < 0 || cur != a->duty_last_delay) {
+                    /* estimate moved / lost confidence → full rate + re-arm */
+                    a->duty_active = 0;
+                    a->duty_stable_hops = 0;
+                } else if (!a->duty_active) {
+                    a->duty_stable_hops += 1;
+                    if (a->duty_stable_hops >= hold_hops) {
+                        a->duty_active = 1;
+                        a->duty_pos = 0;
+                        a->duty_erle_peak = a->last_erle_windowed;
+                    }
+                }
+                a->duty_last_delay = cur;
+            }
+            if (a->duty_active) {
+                /* ERLE watchdog: leaky peak (~0.1 dB/s at 10 ms hops); resume
+                 * full-rate analysis on a >6 dB collapse from that peak. Armed
+                 * only once the peak exceeds 6 dB so it cannot fire before the
+                 * filter ever converged. */
+                if (a->last_erle_windowed > a->duty_erle_peak)
+                    a->duty_erle_peak = a->last_erle_windowed;
+                else
+                    a->duty_erle_peak -= 0.001;
+                if (a->duty_erle_peak > 6.0 &&
+                    a->last_erle_windowed < a->duty_erle_peak - 6.0) {
+                    a->duty_active = 0;
+                    a->duty_stable_hops = 0;
+                    a->duty_erle_peak = 0.0;
+                }
+            }
+        }
         int new_delay = delay_aec3_estimated_delay(&a->delay);
         int eligible = (new_delay >= 0 && delay_aec3_n_updates(&a->delay) >= 3);
 
@@ -1079,7 +1158,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      *    |filter.far_spec|² from the PREVIOUS hop (far_spec set inside step-9
      *    pbfdkf_process). First hop: far_spec is zero. */
     {
-        float rsa_psd[8192];
+        float *rsa_psd = a->scr_rsa_psd;
         for (int k = 0; k < K; ++k)
             rsa_psd[k] = cmag2_c(a->main_filter.base.far_spec[k].r,
                                  a->main_filter.base.far_spec[k].i);
@@ -1105,7 +1184,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* The RSA narrowband mask is applied INSIDE Python's _update_weights for
      * BOTH main and shadow (filters.py:338-341 + 627-629); the C pbfdkf/pbfdaf
      * omit it. Compute it ONCE here and apply to main (step 9) + shadow (11). */
-    float rsa_mask[8192];
+    float *rsa_mask = a->scr_rsa_mask;
     for (int k = 0; k < K; ++k) rsa_mask[k] = 1.0f;
     rsa_mask_regions_around_narrow_bands(&a->rsa, rsa_mask);
     int rsa_mask_active = 0;
@@ -1117,12 +1196,12 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     int far_excited = 0;
     if (a->has_shadow) {
         a->shadow_frame_count++;
-        double far_mean_pre = mean_sq(a->far_hop, hop);
+        double far_mean_pre = mean_sq(a->far_hop, hop, a->scr_sq);
         far_excited = (far_mean_pre > 1e-4);
         int saturation_safe_pre = (a->saturation_level < 0.5);
         float shadow_mu_pre = (far_excited && saturation_safe_pre) ? 1.0f : 0.1f;
         if (rsa_mask_active) {
-            float mu_buf_pre[8192];
+            float *mu_buf_pre = a->scr_mu_buf_pre;
             for (int k = 0; k < K; ++k) mu_buf_pre[k] = shadow_mu_pre * rsa_mask[k];
             pbfdaf_process(&a->shadow_filter, a->near_hop, a->far_hop, mu_buf_pre, 0.0f, a->shadow_out);
         } else {
@@ -1131,7 +1210,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         }
         /* Publish current-hop e2_coarse to main_filter BEFORE main runs. */
         {
-            float e2coa_pre[8192];
+            float *e2coa_pre = a->scr_e2coa_pre;
             for (int k = 0; k < K; ++k)
                 e2coa_pre[k] = cmag2_c(a->shadow_filter.error_spec[k].r,
                                         a->shadow_filter.error_spec[k].i);
@@ -1151,7 +1230,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         a->has_shadow ? a->shadow_filter.far_spec : NULL;
     double main_mu_scalar = a->regime.main_paused ? 0.0 : mu_scalar;
     {
-        float mu_buf[8192];
+        float *mu_buf = a->scr_mu_buf;
         int use_array = mu_is_array;
         if (mu_is_array) {
             float pause = a->regime.main_paused ? 0.0f : 1.0f;
@@ -1179,7 +1258,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         if (!a->non_zero_render_seen && far_max >= a->render_peak_floor)
             a->non_zero_render_seen = 1;
         if (a->non_zero_render_seen) {
-            float far_psd[8192];
+            float *far_psd = a->scr_far_psd;
             for (int k = 0; k < K; ++k)
                 far_psd[k] = cmag2_c(a->main_filter.base.far_spec[k].r,
                                      a->main_filter.base.far_spec[k].i);
@@ -1204,7 +1283,8 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* 12. e2_coarse + erl publish + poor-coarse rescue. */
     if (a->has_shadow) {
         /* _e2_ref = Σ|filter.error_spec|² (cmag2_np, pairwise f32). */
-        float e2ref_arr[8192], e2coa_arr[8192], erl_arr[8192];
+        float *e2ref_arr = a->scr_e2ref_arr, *e2coa_arr = a->scr_e2coa_arr,
+              *erl_arr = a->scr_erl_arr;
         for (int k = 0; k < K; ++k)
             e2ref_arr[k] = cmag2_c(a->main_filter.base.error_spec[k].r,
                                    a->main_filter.base.error_spec[k].i);
@@ -1269,7 +1349,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
                                     far_excited, a->main_err_smooth, a->shadow_err_smooth);
         int delay_reliable = a->has_delay && (delay_aec3_confidence(&a->delay) >= 0.5);
         ShadowCopyDecision dec = shadow_copy_update(
-            &a->regime, a->shadow_frame_count, mean_sq(a->far_hop, hop),
+            &a->regime, a->shadow_frame_count, mean_sq(a->far_hop, hop, a->scr_sq),
             a->main_err_smooth, a->shadow_err_smooth,
             a->epc.active, a->saturation_level,
             a->dt_analyzer.dt_from_energy, 0.0, delay_reliable);
@@ -1359,7 +1439,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      * `enable_res or return_res_context`). With enable_res=1 this is unchanged
      * (return_res_context is irrelevant) → production cascade byte-exact. */
     if (a->cfg.enable_res || a->cfg.return_res_context) {
-        far_power = mean_sq(a->far_hop, hop);
+        far_power = mean_sq(a->far_hop, hop, a->scr_sq);
         /* erle_windowed (step 13a). */
         const double erle_decay = 0.999;
         a->erle_window_near = erle_decay * a->erle_window_near + a->near_power;
@@ -1377,8 +1457,8 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         a->erle_factor_prev = erle_factor;
 
         double far_pwr = far_power + 1e-10;
-        double mic_pwr = mean_sq(a->near_hop, hop) + 1e-10;
-        double raw_err_pwr = mean_sq(a->raw_output, hop) + 1e-10;
+        double mic_pwr = mean_sq(a->near_hop, hop, a->scr_sq) + 1e-10;
+        double raw_err_pwr = mean_sq(a->raw_output, hop, a->scr_sq) + 1e-10;
 
         /* erl tracking (B4). */
         if (far_pwr > 1e-4) {
@@ -1590,7 +1670,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
     /* 20. convergence detection. */
     {
-        int far_active = (mean_sq(a->far_hop, hop) > 1e-4);
+        int far_active = (mean_sq(a->far_hop, hop, a->scr_sq) > 1e-4);
         int just_converged = filter_convergence_update_convergence(
             &a->convergence, a->near_power, a->raw_error_power,
             far_active, a->warmup_frames_remaining <= 0);
@@ -1725,4 +1805,23 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
     ctx->filter_converged = a->convergence.converged;
     ctx->filter_once_converged = a->convergence.once_converged;
     ctx->epc_active = a->epc.active;
+}
+
+/* Read-only status query — see AecDebugStatus (aec.h). No state mutated, no
+ * per-frame cost added: every field read here is already maintained by the
+ * engine on the hot path regardless of whether this is ever called. */
+void aec_debug_status(const Aec* a, AecDebugStatus* out) {
+    if (!a || !out) return;
+    memset(out, 0, sizeof(*out));
+
+    out->delay_samples    = a->current_delay;
+    out->delay_confidence = delay_aec3_confidence(&a->delay);
+    out->delay_updates    = delay_aec3_n_updates(&a->delay);
+
+    out->erle_windowed_db = a->last_erle_windowed;
+    out->usable_linear    = aec_state_usable_linear_estimate(&a->a3_state);
+    out->filter_converged = a->convergence.converged;
+
+    out->near_power = a->near_power;
+    out->out_power  = a->raw_error_power;
 }

@@ -71,6 +71,27 @@ lib: dirs $(OBJS) | audio_common_lib
 # USE_STANDARD_MATH - Use standard math library functions (for debugging/parity check)
 #   Default: fast_math.h approximations for expf/sqrtf in hot paths
 #   Example: make EXTRA_CFLAGS="-DUSE_STANDARD_MATH"
+#
+# AEC_FAST_MATH - Opt-in fast matched-filter arithmetic (default: OFF).
+#   Switches the delay estimator's two 512-tap dot products to float32
+#   accumulation (what WebRTC's NEON matched filter does) and slides x2_sum
+#   across the 16 sub-block iterations (O(1)/iter instead of a 512-tap
+#   re-sum); uses NEON fmla intrinsics for the dots + NLMS update on
+#   __ARM_NEON targets (scalar float fallback elsewhere).
+#   ⚠ DIVERGES from the bit-exact Python reference (default builds stay
+#   byte-identical). The integer delay output can differ on near-tie votes.
+#   Quality-gated: run the 800-case bench before shipping with this on.
+#   Example: make EXTRA_CFLAGS="-DAEC_FAST_MATH"
+#
+# AEC_DELAY_DS_FACTOR - Delay-estimator down-sampling factor: 4 (default) or 8.
+#   8 selects AEC3's own ds8 configuration (kBandPassFilterDs8 anti-alias +
+#   pass-through noise reduction, see docs/aec3_extracts/src/aec3/decimator.cc)
+#   and halves the matched-filter tap count (512->256) + sub-block rate
+#   (16->8), roughly halving the delay-estimator cost.
+#   ⚠ DIVERGES from the Python reference (which only ports ds4): the delay
+#   resolution coarsens from 4 to 8 samples. Default 4 stays byte-identical.
+#   Quality-gated: run the 800-case bench before shipping with this on.
+#   Example: make EXTRA_CFLAGS="-DAEC_DELAY_DS_FACTOR=8"
 
 debug: CFLAGS += -g -DAEC_DEBUG
 debug: dirs $(TARGET)
