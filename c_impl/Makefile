@@ -71,17 +71,6 @@ lib: dirs $(OBJS) | audio_common_lib
 # USE_STANDARD_MATH - Use standard math library functions (for debugging/parity check)
 #   Default: fast_math.h approximations for expf/sqrtf in hot paths
 #   Example: make EXTRA_CFLAGS="-DUSE_STANDARD_MATH"
-#
-# AEC_FAST_MATH - Opt-in fast matched-filter arithmetic (default: OFF).
-#   Switches the delay estimator's two 512-tap dot products to float32
-#   accumulation (what WebRTC's NEON matched filter does) and slides x2_sum
-#   across the 16 sub-block iterations (O(1)/iter instead of a 512-tap
-#   re-sum); uses NEON fmla intrinsics for the dots + NLMS update on
-#   __ARM_NEON targets (scalar float fallback elsewhere).
-#   ⚠ DIVERGES from the bit-exact Python reference (default builds stay
-#   byte-identical). The integer delay output can differ on near-tie votes.
-#   Quality-gated: run the 800-case bench before shipping with this on.
-#   Example: make EXTRA_CFLAGS="-DAEC_FAST_MATH"
 
 debug: CFLAGS += -g -DAEC_DEBUG
 debug: dirs $(TARGET)

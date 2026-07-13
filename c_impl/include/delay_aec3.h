@@ -1,5 +1,10 @@
-/* delay_aec3.h — BIT-EXACT C port of python/modules/delay/ (the v3.22
- * AEC3 matched-filter delay-estimation package).
+/* delay_aec3.h — C port of python/modules/delay/ (the v3.22 AEC3
+ * matched-filter delay-estimation package). ⚠ The matched-filter dot
+ * products / NLMS update (the hot path — see delay_aec3.c) run float32
+ * accumulation unconditionally, an intentional, sampled-cost-free
+ * divergence from the Python float64 reference; everything else described
+ * below (decimator biquads, error_sum_anchor, argmax/quantisation rules)
+ * stays bit-exact.
  *
  * REPLACES the stale v3.10 GCC-PHAT estimator in delay_est.{c,h}. This is a
  * pure-additive module; the cutover that wires it into aec.c happens later.
@@ -33,11 +38,16 @@
  *     are also the array scalar rule (scalar cast to f32, op in f32).
  *   - The dot products `np.dot(h, x)` / `np.dot(x, x)` are float32 inputs.
  *     numpy routes these through OpenBLAS SDOT (a CPU-dispatched AVX kernel
- *     that is NOT portably bit-reproducible).  We accumulate the f32 products
- *     in a DOUBLE running sum (delay_aec3_dot) -- the most faithful value.
- *     The matched-filter peak (argmax h^2) and the histogram-voted lag are
- *     robust to the sub-ULP SDOT/double-accum difference: the integer lag +
- *     DelayQuality are bit-exact every hop on the golden (that is the bar).
+ *     that is NOT portably bit-reproducible). The matched-filter's two
+ *     512-tap dot products (da_dot_f32 in delay_aec3.c) now accumulate in
+ *     float32 directly (WebRTC NEON-matched-filter style) rather than the
+ *     double running sum this note originally described — an intentional
+ *     divergence (60-case AECMOS sample: all deltas 0.000). The smaller
+ *     16-sample error_sum_anchor dot (delay_aec3_dot) is unaffected and
+ *     still accumulates in double. The matched-filter peak (argmax h^2) and
+ *     the histogram-voted lag are robust to the sub-ULP/f32 accumulation
+ *     difference in practice, but are no longer guaranteed bit-exact to
+ *     Python by construction.
  *   - argmax = numpy argmax = FIRST max index on ties.
  *   - int(round())/lrint not needed here: every quantisation is integer
  *     floor (// ) or bit-shift, reproduced verbatim.
@@ -203,14 +213,14 @@ void delay_aec3_reset(DelayAec3 *d);
  * NEW delay value was emitted this hop (mirrors shim accumulate()). */
 int  delay_aec3_accumulate(DelayAec3 *d, const float *near, const float *far, int hop);
 
-/* Duty-cycle variant (cfg->delay_est_duty_cycle support). With
+/* Duty-cycle variant. aec.c's per-hop duty-cycle state machine (always
+ * active — see the duty_* fields in aec.h) drives this unconditionally. With
  * run_matched_filter=1: identical to delay_aec3_accumulate (byte-exact).
  * With 0: the hop is FED (decimators run for state continuity, the decimated
  * render sub-blocks are pushed into the ring so the matched filter never
  * sees gapped audio) but not ANALYSED (no matched-filter / aggregator /
  * clockdrift update; latest_* unchanged). Feeding-without-analysing has no
- * Python counterpart — a documented divergence, only reachable when the
- * duty-cycle config is enabled. */
+ * Python counterpart — an intentional, sampled-cost-free divergence. */
 int  delay_aec3_accumulate_ex(DelayAec3 *d, const float *near, const float *far,
                               int hop, int run_matched_filter);
 
