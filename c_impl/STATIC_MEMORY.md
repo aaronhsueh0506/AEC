@@ -41,17 +41,13 @@ while (read_block(mic, ref, hop)) {
     write_block(out, hop);
 }
 
-/* aec_destroy() must be called exactly once before `pool` is freed/reused,
- * regardless of backend:
- *  - KISS backend: allocates nothing outside `pool`; aec_destroy() is a
- *    genuine no-op here (nothing to free) but is still safe/cheap to call.
- *  - NE10 backend: aec_init() triggers 3 backend-internal heap allocations
- *    (the post-filter + main-filter + shadow-filter R2C/C2R twiddle
- *    configs) that live OUTSIDE `pool` and are NOT sized into
- *    aec_get_mem_size()'s figure. aec_destroy() is what releases them.
- *    Skipping the call leaks them; calling aec_destroy() twice on the same
- *    instance double-frees them (unsafe) — call it exactly once, before
- *    `pool` is released or handed to a new aec_init(). */
+/* aec_destroy() on a pool instance is a genuine no-op on BOTH backends:
+ * everything — including NE10's R2C/C2R twiddle configs (vendored patch
+ * P0001, see audio_common/lib/ne10/VENDORED.md) — lives inside `pool` and
+ * is sized into aec_get_mem_size()'s figure. The call is safe, idempotent,
+ * and cheap; strict init-to-destroy zero-heap is enforced by
+ * test/test_zero_heap_aec.c (allocator-hook counts stay 0 on both
+ * backends). The pool is yours to release or reuse afterwards. */
 aec_destroy(aec);
 free(pool);   /* caller owns `pool`; substitute your platform's deallocator */
 ```
@@ -69,11 +65,12 @@ delay on the pool is:
 | Backend | Pool |
 |---|---:|
 | KISS (host/reference) | **533,008 B (520.5 KB)** |
-| NE10 (embedded)       | **494,560 B (483.0 KB)** |
+| NE10 (embedded)       | **528,880 B (516.5 KB)** |
 
-(NE10's R2C/C2R twiddle configs are backend-internal heap allocations that
-live outside the pool either way — see `fft_destroy`/`aec_destroy` note
-below.) Both figures are static==dynamic byte-equal, verified by
+(Both figures now include everything — NE10's three R2C/C2R twiddle configs
+are carved from the pool since vendored patch P0001; there are no
+backend-internal heap allocations left on the static path, enforced by
+`test/test_zero_heap_aec.c`.) Both figures are static==dynamic byte-equal, verified by
 `test_static_aec.c` (669,920 samples, 50-cycle init/destroy leak loop). The
 old figures (539,328 B / 526.7 KB, KISS only) are stale — since then: +24.5 KB
 de-stacked instance scratch (13 former `float[8192]`/`float[4096]`
@@ -153,7 +150,7 @@ gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/in
     test_static_aec.c $(find src -name '*.c') \
     ../../audio_common/bin/kiss/libaudio_common.a -lm -o bin/test_static_aec
 ./bin/test_static_aec mic.wav ref.wav
-# → Pool: 533008 bytes (520.5 KB), frames: N   [KISS backend; NE10 -> 494560 B / 483.0 KB]
+# → Pool: 533008 bytes (520.5 KB), frames: N   [KISS backend; NE10 -> 528880 B / 516.5 KB]
 #   PASS: all <2*N> samples byte-equal (static == dynamic)
 ```
 
@@ -210,9 +207,11 @@ elsewhere. The vectorization campaign then removed another **24.7 KB**: the
 per-hop `W_all`/`X_buf_all` snapshot buffers are gone (aec3_post now reads
 the filter state directly through its const input pointers).
 
-**NE10 backend (embedded build): 483.0 KB (494,560 B) total** — smaller than
-KISS because the R2C/C2R twiddle configs are NE10-internal heap allocations
-that live *outside* this pool (released by `fft_destroy`/`aec_destroy`, not by
-freeing the pool); everything else in the table above is backend-independent.
+**NE10 backend (embedded build): 516.5 KB (528,880 B) total** — the three
+R2C/C2R twiddle configs (11,440 B each at nfft=512) are carved from this
+pool since vendored patch P0001, so the figure is the complete memory
+requirement; everything else in the table above is backend-independent.
+(Pre-P0001 the configs were NE10-internal heap allocations outside the pool
+and the figure understated the true footprint.)
 
 Sample rates other than 16 kHz scale roughly proportional to hop_size.

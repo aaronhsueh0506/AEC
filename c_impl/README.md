@@ -115,11 +115,11 @@ harness design.
 For embedded targets, build one pool and place the whole instance in it:
 
 ```c
-size_t bytes = aec_get_mem_size(&cfg);   /* balanced @ hop=160: 533,008 B (KISS) / 494,560 B (NE10) */
+size_t bytes = aec_get_mem_size(&cfg);   /* balanced @ hop=160: 533,008 B (KISS) / 528,880 B (NE10) */
 void*  pool  = your_static_alloc(bytes); /* MUST be 16-byte aligned (posix_memalign, etc.) */
 Aec*   a     = aec_init(pool, bytes, &cfg);  /* NULL on failure; byte-equal to aec_create output */
 /* ... aec_process(a, ...) ... */
-aec_destroy(a);   /* call exactly once, before `pool` is freed/reused — see note below */
+aec_destroy(a);   /* genuine no-op for pool instances (both backends); idempotent */
 free(pool);
 ```
 
@@ -132,12 +132,12 @@ heap allocation at all and `aec_destroy` is a genuine no-op on this backend.
 Both memory models ship in the same library: `aec_create` (heap) and
 `aec_get_mem_size`/`aec_init` (caller pool) are always compiled, selected at
 runtime — `USE_EXT_MEM` or similar compile flags are not involved; which
-constructor you call is the only switch. **Under NE10**, `aec_init` triggers
-3 backend-internal heap allocations (R2C/C2R twiddle configs for the
-post-filter + main + shadow filters) that live outside `pool` and are not
-counted in `aec_get_mem_size`'s figure; `aec_destroy` is what releases them,
-so on this backend it must be called exactly once before `pool` is freed or
-handed to a new `aec_init` — skipping it leaks, calling it twice double-frees.
+constructor you call is the only switch. **Under NE10** the three R2C/C2R
+twiddle configs (post-filter + main + shadow) are carved from `pool` too
+(vendored patch P0001, see audio_common/lib/ne10/VENDORED.md), so the static
+path is strictly heap-free on both backends — allocator-hook-verified by
+`test/test_zero_heap_aec.c` — and `aec_destroy` is a genuine, idempotent
+no-op for pool instances on either backend.
 
 Full CLI options, C API reference, integration rules, runtime resource
 notes, and validation steps:

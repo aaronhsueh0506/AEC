@@ -132,23 +132,19 @@ misaligned base). Both paths produce **bit-identical** output on a given
 backend (verified across all 3 presets and FS / DT / NE scenarios; NE10 vs
 KISS output is not bit-identical to *each other* — a pre-existing, expected
 difference between the two FFT implementations). At BALANCED / 16 kHz /
-52 ms filter / shadow on / RES on / delay-est on the pool is **557,680 B
-(544.6 KB)** on the KISS backend (host/reference, `make`, default) or
-**519,232 B (507.1 KB)** on the NE10 backend (embedded, `make
+52 ms filter / shadow on / RES on / delay-est on the pool is **533,008 B
+(520.5 KB)** on the KISS backend (host/reference, `make`, default) or
+**528,880 B (516.5 KB)** on the NE10 backend (embedded, `make
 BACKEND=ne10`). The `aec_wav` CLI is heap-only; `test_static_aec.c` is
 the static-path harness.
 
-**`aec_destroy` ownership differs by backend.** On KISS, `aec_init`
-allocates nothing outside `pool`, so `aec_destroy` is a genuine no-op —
-safe to call any number of times, and `pool` can be freed without calling it
-at all (though calling it is still good practice). On NE10, `aec_init`
-triggers 3 backend-internal heap allocations (the R2C/C2R twiddle configs
-for the post-filter, main filter, and shadow filter) that live **outside**
-`pool` and are **not** included in `aec_get_mem_size`'s figure —
-`aec_destroy` is what releases them. On this backend you **must** call
-`aec_destroy(aec)` exactly once before `pool` is freed or reused: skipping
-it leaks the 3 twiddle configs, and calling it a second time on the same
-instance double-frees them (currently unsafe — there is no destroyed-guard).
+**`aec_destroy` is a genuine no-op for pool instances on both backends.**
+Everything `aec_init` places — including NE10's three R2C/C2R twiddle
+configs (vendored patch P0001, `audio_common/lib/ne10/VENDORED.md`) — lives
+inside `pool` and is included in `aec_get_mem_size`'s figure. The call is
+safe, idempotent, and optional before releasing/reusing the pool; strict
+init-to-destroy zero-heap is allocator-hook-verified by
+`test/test_zero_heap_aec.c` on both backends.
 Full design notes and per-module breakdown:
 [../c_impl/STATIC_MEMORY.md](../c_impl/STATIC_MEMORY.md).
 
@@ -254,8 +250,8 @@ These cause correctness failures (not just style issues):
 
 | | |
 |---|---|
-| Static pool, KISS (host/reference, `make`) | 557,680 B (544.6 KB) |
-| Static pool, NE10 (embedded, `make BACKEND=ne10`) | 519,232 B (507.1 KB) (twiddles outside pool) |
+| Static pool, KISS (host/reference, `make`) | 533,008 B (520.5 KB) |
+| Static pool, NE10 (embedded, `make BACKEND=ne10`) | 528,880 B (516.5 KB, twiddle configs in-pool since P0001) |
 | Compute / frame | 4 × 512-FFT + Kalman update (257 bins × 6 partitions) |
 | FFT | KISS FFT (float32; NE10 ARM-NEON opt-in) — ~float32 precision vs numpy `np.fft` |
 

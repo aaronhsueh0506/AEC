@@ -178,8 +178,8 @@ free(pool);   /* aec_destroy() 之後才輪到 caller 回收 pool（見下方 ba
 `NULL`。同一個 backend 下兩條 path 輸出 **bit-identical**（`c_impl/test_static_aec.c` 驗證
 static == dynamic byte-equal）；NE10 與 KISS 彼此的輸出並非 bit-identical（既有、
 預期中的 FFT 實作差異）。BALANCED / 16 kHz / 52 ms filter / shadow + RES +
-delay-est 全開時 pool 為：KISS backend **557,680 B（544.6 KB）**；NE10 backend
-**519,232 B（507.1 KB）**。設計說明與 per-module 佔用明細見
+delay-est 全開時 pool 為：KISS backend **533,008 B（520.5 KB）**；NE10 backend
+**528,880 B（516.5 KB）**。設計說明與 per-module 佔用明細見
 [../c_impl/STATIC_MEMORY.md](../c_impl/STATIC_MEMORY.md)。
 
 **`aec_destroy()` 的釋放範圍依 backend 而不同**：KISS backend 下 `aec_init()`
@@ -324,12 +324,12 @@ aec_get_res_context(&aec, &ctx);
 
 - `Aec` storage 由 caller 持有；`aec_create()` 會配置其內部動態資源。
 - 改用 `aec_init()`（§4.1）時內部資源全部來自 caller pool；`aec_destroy()` 不會
-  free pool，pool 生命週期由 caller 管理（KISS backend 下 static path 完全零 heap；
-  NE10 backend 下 `aec_init()` 另有 3 個 backend-internal 的 twiddle 設定活在
-  pool 之外，須靠 `aec_destroy()` 釋放，見 §4.1）。
-- `aec_destroy()` 必須和成功的 `aec_create()`／`aec_init()`（不論哪一個）成對，
-  且對同一個 instance 只呼叫一次；NE10 backend 下必須在 pool 被釋放或重用前呼叫，
-  漏呼叫會洩漏 twiddle 設定，呼叫兩次會 double-free。
+  free pool，pool 生命週期由 caller 管理。兩個 backend 的 static path 都是嚴格
+  零 heap——NE10 的 3 個 twiddle 設定自 vendored patch P0001 起也放進 pool
+  （`audio_common/lib/ne10/VENDORED.md`），由 `test/test_zero_heap_aec.c` 以
+  allocator hook 驗證 init→destroy 全程配置次數為 0。
+- pool instance 的 `aec_destroy()` 是真 no-op 且 idempotent（重複呼叫安全）；
+  heap instance（`aec_create()`）仍須恰好一次 `aec_destroy()` 釋放 arena。
 - `aec_reset()` 清 state 但保留 config／allocation，適合同規格的新串流。
 - `mic`、`ref`、`out` buffer 由 caller 持有，至少包含一個 hop。
 - `Aec` 是 stateful、非 reentrant；同一 instance 不可無同步並行呼叫。
