@@ -41,8 +41,13 @@ OBJS  = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
 EXAMPLE_SRCS = $(EXAMPLE_DIR)/aec_wav.c
 EXAMPLE_OBJS = $(patsubst $(EXAMPLE_DIR)/%.c,$(OBJ_DIR)/%.o,$(EXAMPLE_SRCS))
 
+TEST_DIR = test
+
 TARGET     = $(BIN_DIR)/aec_wav
 LIB_TARGET = $(BIN_DIR)/libaec.a
+BENCH_SRCS = $(TEST_DIR)/bench_rtf.c
+BENCH_OBJS = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(BENCH_SRCS))
+BENCH_TARGET = $(BIN_DIR)/bench_rtf
 
 all: dirs $(TARGET)
 
@@ -63,8 +68,19 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 $(OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+$(OBJ_DIR)/%.o: $(TEST_DIR)/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 lib: dirs $(OBJS) | audio_common_lib
 	ar rcs $(LIB_TARGET) $(OBJS)
+
+# Per-module RTF (real-time-factor) timing harness — no Python/corpus needed.
+# Linked the same way as bin/aec_wav (same algorithm objects + audio_common
+# archive), so it respects BACKEND and EXTRA_CFLAGS identically.
+bench: dirs $(BENCH_TARGET)
+
+$(BENCH_TARGET): $(OBJS) $(BENCH_OBJS) | audio_common_lib
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # Build Configuration Flags (pass via EXTRA_CFLAGS)
 #
@@ -82,12 +98,14 @@ help:
 	@echo "Targets:"
 	@echo "  all     Build CLI binary (bin/aec_wav)  [default]"
 	@echo "  lib     Build static library (bin/libaec.a)"
+	@echo "  bench   Build RTF timing harness (bin/bench_rtf)"
 	@echo "  debug   Build with -g -DAEC_DEBUG"
 	@echo "  clean   Remove obj/ and bin/"
 	@echo ""
 	@echo "Usage:"
 	@echo "  ./bin/aec_wav <mic.wav> <ref.wav> <out.wav> [options]"
+	@echo "  ./bin/bench_rtf [--seconds N] [--repeat M] [--preset mild|balanced|aggressive]"
 	@echo "  make BACKEND=kiss|ne10   (default: kiss; ne10 is the embedded deliverable)"
 	@echo "  make AC_DIR=<path>       (override audio_common location)"
 
-.PHONY: all dirs clean lib debug help audio_common_lib
+.PHONY: all dirs clean lib bench debug help audio_common_lib
