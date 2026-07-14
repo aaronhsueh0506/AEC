@@ -390,14 +390,10 @@ static float pbfdaf_frontend(PBFDAF* p,
         while (p_idx < 0) p_idx += p->n_partitions;
         const Complex* Wp = p->W     + (size_t)part  * K;
         const Complex* Xp = p->X_buf + (size_t)p_idx * K;
-        for (int k = 0; k < K; ++k) {
-            float wr = Wp[k].r, wi = Wp[k].i;
-            float xr = Xp[k].r, xi = Xp[k].i;
-            /* numpy complex64 mul uses FMA on arm64: re=fma(wr,xr,-(wi*xi)),
-             * im=fma(wr,xi, wi*xr). (Verified 0/300000 vs naive's 25%.) */
-            p->echo_spec[k].r += fmaf(wr, xr, -(wi * xi));
-            p->echo_spec[k].i += fmaf(wr, xi,  (wi * xr));
-        }
+        /* numpy complex64 mul uses FMA on arm64: re=fma(wr,xr,-(wi*xi)),
+         * im=fma(wr,xi, wi*xr). (Verified 0/300000 vs naive's 25%.) Matches
+         * sk_cmac_np_f32's scalar reference expression-for-expression. */
+        sk_cmac_np_f32(p->echo_spec, Wp, Xp, K);
     }
 
     /* IFFT echo, output = near[-hop:] - echo_time[hop:block] */
@@ -503,18 +499,11 @@ void pbfdaf_process(PBFDAF* p,
             int p_idx = curr_p - part; while (p_idx < 0) p_idx += N;
             Complex* Wp = p->W + (size_t)part * K;
             const Complex* Xp = p->X_buf + (size_t)p_idx * K;
-            for (int k = 0; k < K; ++k) {
-                float er = p->error_spec[k].r, ei = p->error_spec[k].i;
-                float xr = Xp[k].r, xi = Xp[k].i;
-                /* grad = error_spec * conj(X). conj(X)=(xr,-xi); complex64 mul
-                 * uses numpy FMA form re=fma(er,cxr,-(ei*cxi)),
-                 * im=fma(er,cxi, ei*cxr). mu_eff×grad is real×complex (no FMA). */
-                float cxr = xr, cxi = -xi;
-                float gr = fmaf(er, cxr, -(ei * cxi));
-                float gi = fmaf(er, cxi,  (ei * cxr));
-                Wp[k].r += mu_eff[k] * gr;
-                Wp[k].i += mu_eff[k] * gi;
-            }
+            /* grad = error_spec * conj(X). conj(X)=(xr,-xi); complex64 mul
+             * uses numpy FMA form re=fma(er,cxr,-(ei*cxi)),
+             * im=fma(er,cxi, ei*cxr). mu_eff×grad is real×complex (no FMA).
+             * Matches sk_wupdate_nlms_f32's scalar reference exactly. */
+            sk_wupdate_nlms_f32(Wp, Xp, p->error_spec, mu_eff, K);
             if (p->enable_td_constraint &&
                 (!p->constraint_round_robin || part == p->partition_to_constrain)) {
                 fft_inverse(p->fft, Wp, p->time_scratch);
@@ -853,20 +842,11 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
         int p_idx = curr_p - part; while (p_idx < 0) p_idx += N;
         const Complex* Xp = b->X_buf + (size_t)p_idx * K;
         Complex* Wp = b->W + (size_t)part * K;
-        for (int k = 0; k < K; ++k) {
-            float xr = Xp[k].r, xi = Xp[k].i;
-            /* K = mu * conj(X) = (mu*xr, -mu*xi) */
-            float kr = mu_aec3[k] * xr;
-            float ki = -(mu_aec3[k] * xi);
-            /* K_scaled = K * mu_scale_arr[k] (complex×real: no FMA needed) */
-            float ksr = kr * mu_scale_arr[k];
-            float ksi = ki * mu_scale_arr[k];
-            /* W += K_scaled * error_spec. complex64×complex64 → numpy FMA form
-             * re=fma(ksr,er,-(ksi*ei)), im=fma(ksr,ei, ksi*er). */
-            float er = b->error_spec[k].r, ei = b->error_spec[k].i;
-            Wp[k].r += fmaf(ksr, er, -(ksi * ei));
-            Wp[k].i += fmaf(ksr, ei,  (ksi * er));
-        }
+        /* K = mu*conj(X); K_scaled = K*mu_scale_arr; W += K_scaled*error_spec
+         * (complex64×complex64 → numpy FMA form re=fma(ksr,er,-(ksi*ei)),
+         * im=fma(ksr,ei, ksi*er)). Matches sk_wupdate_kf_f32's scalar
+         * reference exactly. */
+        sk_wupdate_kf_f32(Wp, Xp, b->error_spec, mu_aec3, mu_scale_arr, K);
         if (b->enable_td_constraint &&
             (!b->constraint_round_robin || part == b->partition_to_constrain)) {
             fft_inverse(b->fft, Wp, b->time_scratch);
