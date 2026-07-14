@@ -16,6 +16,51 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-07-15 — external-review remediation campaign (F01–F20 all closed; 16 kHz byte-identical throughout except one flagged commit)
+
+Full remediation of the 2026-07-14 external C/SIMD/NE10/memory-pool review
+(No-Go → all software gates green; on-target A53/A73 measurement remains).
+Every commit was gated on the 60-case C render aggregate (KISS + NE10),
+test_static_aec, parity_aec_e2e, and the campaign test suite; the only
+deliberate byte-change lives in Audio_ALG (pipeline TU `-ffp-contract=off`).
+
+- **Multi-rate (F01)**: 8/16/48 kHz all supported, every dimension derived
+  from the hop = 10 ms rule. Per-rate tables are generator-emitted from the
+  live Python spec (`gen_aec_balanced_config_h.py` — cross-rate invariance
+  assertion caught 8 genuinely rate-scaled power constants), consumed via
+  `aec3b_rate_cfg()`; filter_length is ms-derived (416/832/3072). The 8 kHz
+  taps OOB (880-alloc/960-read — the review's heap≠pool SHA divergence) is
+  fixed; delay-estimator geometry mirrors the Python spec (fixed /4) with
+  coverage 1216/608/~203 ms documented. Acceptance: per-rate Python↔C
+  e2e parity (8 k −90 dB corr 1.0; 48 k −23.8 dB corr 0.99998, root-caused
+  and tolerance-documented), delay C-goldens bit-exact ×3, static==dynamic
+  ×3×2 backends, COLA/impulse structural tests, UBSan clean ×3.
+- **Zero-heap (F02/F08)**: NE10 twiddle configs carved from the caller pool
+  (audio_common vendored patch P0001); `aec_init→destroy` makes zero
+  allocator calls on both backends (`test_zero_heap_aec.c`, hook-verified);
+  destroy is a true idempotent no-op for pool instances.
+- **Lifecycle (F03/F04)**: `aec_create` arena-fied onto the shared
+  `aec_carve()` (87 leaks/184 KB per lifecycle → 0; −316 lines of
+  hand-mirrored duplication); pbfd* inits return status; single-path
+  rollback; `test_lifecycle.c` 1/10/1000 cycles.
+- **Validation (F05/F07)**: central `aec_validate_config()` (rate whitelist,
+  bounded fields), saturating `ck_*` size arithmetic, misaligned-base
+  rejection; `test_config_validation.c` 82 checks.
+- **WAV (F06)**: hardened single reader in audio_common (shim here);
+  fmt/format/bounds/odd-chunk/EOF checks, non-finite float ingress
+  sanitized+counted.
+- **SIMD NaN (F10)**: cabs helper NaN-exact vs scalar (vmaxq/vminq AND
+  vabsq were both NaN-divergent); NaN corpora in the selftests; fast_math
+  domain guards (fast_exp NaN OOB-LUT fixed).
+- **Streaming FIFO (F09)**: SPSC acquire/release atomics (layout unchanged);
+  contract narrowed to one render + one capture thread; 100 k-hop
+  concurrent stress + bookkeeping identity.
+- **Build hygiene (F12)**: parse-time config-stamp rebuild keying; WERROR
+  knob. **Docs (F19)**: real 3-param `aec_init` everywhere; ownership truth
+  per backend; `docs_smoke.sh` compiles the STATIC_MEMORY.md sample.
+- Pool totals (16 k): KISS 537,680 B / NE10 533,552 B (in-pool twiddles +
+  de-stacked scratch + config growth); per-rate table in STATIC_MEMORY.md.
+
 ## [Unreleased] — 2026-07-16 — vectorization campaign (byte-identical, NEON via shared kernels)
 
 Whole-repo per-bin/per-sample loop vectorization on top of the float32
