@@ -87,6 +87,30 @@ int main(int argc, char* argv[]) {
     if (!mr || !rr) {
         fprintf(stderr, "ERROR: cannot open input wavs\n"); return 3;
     }
+
+    /* F05: reject an unsupported sample rate (or a mic/ref rate mismatch)
+     * before ever constructing an AecConfig — aec_create would reject the
+     * same rate today via aec_validate_config, but failing here gives a
+     * clear, WAV-specific message instead of a bare aec_create() failure. */
+    if (!aec_is_valid_sample_rate(mr->info.sample_rate)) {
+        fprintf(stderr,
+            "ERROR: unsupported mic sample rate %d Hz (AEC whitelist: 16000 Hz only)\n",
+            mr->info.sample_rate);
+        return 4;
+    }
+    if (!aec_is_valid_sample_rate(rr->info.sample_rate)) {
+        fprintf(stderr,
+            "ERROR: unsupported ref sample rate %d Hz (AEC whitelist: 16000 Hz only)\n",
+            rr->info.sample_rate);
+        return 4;
+    }
+    if (mr->info.sample_rate != rr->info.sample_rate) {
+        fprintf(stderr,
+            "ERROR: mic/ref sample-rate mismatch (mic=%d Hz, ref=%d Hz)\n",
+            mr->info.sample_rate, rr->info.sample_rate);
+        return 4;
+    }
+
     int sr = mr->info.sample_rate;
     int n  = mr->info.num_samples < rr->info.num_samples
            ? mr->info.num_samples : rr->info.num_samples;

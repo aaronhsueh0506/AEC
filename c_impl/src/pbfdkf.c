@@ -36,6 +36,20 @@
 
 static int next_pow2(int x) { int n = 1; while (n < x) n <<= 1; return n; }
 
+/* Checked equivalent of `t += ALIGN16(count*elem_size) * reps` — reps
+ * identically-sized fields laid out back-to-back (each individually
+ * ALIGN16'd by the matching init_static's pool-carve, so their sum is
+ * exactly reps * ALIGN16(count*elem_size)). Saturates to SIZE_MAX on
+ * overflow via mem_align.h's ck_* helpers, same as ck_field_size.
+ * (Local twin of the same helper in aec.c — this file has no shared header
+ * to hang a cross-TU static on, matching this file's existing per-TU-local
+ * static-helper convention, e.g. next_pow2 above.) */
+static size_t ck_field_size_reps(size_t total, size_t count, size_t elem_size,
+                                  size_t reps) {
+    size_t one = ck_align16_size(ck_mul_size(count, elem_size));
+    return ck_add_size(total, ck_mul_size(one, reps));
+}
+
 /* pairwise float32 sum matching numpy's reduction EXACTLY: an 8-accumulator
  * unrolled leaf for n<=128 (numpy NPY_PW_BLOCKSIZE), then a recursive split at
  * n/2 rounded down to a multiple of 8. Verified 0/5000 mismatch vs np.sum over
@@ -199,32 +213,41 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
     int blk, fft, K;
     pbfdaf_compute_sizes(hop, NULL, &blk, &fft, &K);
     if (n_partitions <= 0 || K <= 0) return 0;
-    int Wsz = n_partitions * K;
+    size_t Wsz = ck_mul_size((size_t)n_partitions, (size_t)K);
+
+    /* Checked size arithmetic (F05): saturating ck_* helpers (mem_align.h);
+     * MEM_SIZE_INVALID(total) at the end reports failure (0) on overflow
+     * instead of a small wrapped total. Field order/grouping unchanged from
+     * the previous unchecked `total += ALIGN16(...)` walk — pbfdaf_init_
+     * static's carve order must stay in lockstep with this one. */
     size_t total = 0;
-    total += ALIGN16((size_t)fft * sizeof(float));    /* td_window */
-    total += ALIGN16((size_t)blk * sizeof(float));    /* sqrt_hann */
-    total += ALIGN16((size_t)Wsz * sizeof(Complex));  /* W */
-    total += ALIGN16((size_t)Wsz * sizeof(Complex));  /* X_buf */
-    total += ALIGN16((size_t)blk * sizeof(float));    /* near_buffer */
-    total += ALIGN16((size_t)blk * sizeof(float));    /* far_buffer */
-    total += ALIGN16((size_t)K   * sizeof(float));    /* power */
-    total += ALIGN16((size_t)K   * sizeof(Complex));  /* near_spec */
-    total += ALIGN16((size_t)K   * sizeof(Complex));  /* echo_spec */
-    total += ALIGN16((size_t)K   * sizeof(Complex));  /* error_spec */
-    total += ALIGN16((size_t)K   * sizeof(Complex));  /* far_spec */
-    total += ALIGN16((size_t)K   * sizeof(Complex));  /* error_spec_windowed */
-    total += fft_get_mem_size(fft);                   /* nested FFT */
-    total += ALIGN16((size_t)fft * sizeof(float));    /* time_scratch */
-    total += ALIGN16((size_t)K   * sizeof(Complex));  /* spec_scratch */
+    total = ck_field_size(total, (size_t)fft, sizeof(float));   /* td_window */
+    total = ck_field_size(total, (size_t)blk, sizeof(float));   /* sqrt_hann */
+    total = ck_field_size(total, Wsz, sizeof(Complex));         /* W */
+    total = ck_field_size(total, Wsz, sizeof(Complex));         /* X_buf */
+    total = ck_field_size(total, (size_t)blk, sizeof(float));   /* near_buffer */
+    total = ck_field_size(total, (size_t)blk, sizeof(float));   /* far_buffer */
+    total = ck_field_size(total, (size_t)K,   sizeof(float));   /* power */
+    total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* near_spec */
+    total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* echo_spec */
+    total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* error_spec */
+    total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* far_spec */
+    total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* error_spec_windowed */
+    total = ck_add_size(total, fft_get_mem_size(fft));          /* nested FFT */
+    total = ck_field_size(total, (size_t)fft, sizeof(float));   /* time_scratch */
+    total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* spec_scratch */
     /* De-stacked per-hop scratch (see pbfdkf.h PBFDAF comment). */
-    total += ALIGN16((size_t)hop * sizeof(float));    /* scr_fsq */
+    total = ck_field_size(total, (size_t)hop, sizeof(float));   /* scr_fsq */
     if (with_process_scratch) {
-        total += ALIGN16((size_t)K * sizeof(float));  /* scr_mu_local */
-        total += ALIGN16((size_t)K * sizeof(float));  /* scr_x2psum */
-        total += ALIGN16((size_t)K * sizeof(float));  /* scr_mu_eff */
+        total = ck_field_size(total, (size_t)K, sizeof(float)); /* scr_mu_local */
+        total = ck_field_size(total, (size_t)K, sizeof(float)); /* scr_x2psum */
+        total = ck_field_size(total, (size_t)K, sizeof(float)); /* scr_mu_eff */
     }
-    total += ALIGN16((size_t)n_partitions * (size_t)hop * sizeof(float)); /* scr_ir */
-    total += ALIGN16((size_t)K   * sizeof(float));    /* scr_e2 */
+    total = ck_field_size(total, ck_mul_size((size_t)n_partitions, (size_t)hop),
+                         sizeof(float));                        /* scr_ir */
+    total = ck_field_size(total, (size_t)K,   sizeof(float));   /* scr_e2 */
+
+    if (MEM_SIZE_INVALID(total)) return 0;
     return total;
 }
 
@@ -233,8 +256,19 @@ void pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                          float mu, float delta, int hop_size,
                          int with_process_scratch) {
     if (!p || !mem) return;
-    if (mem_size < pbfdaf_get_mem_size(block_size, n_partitions, hop_size,
-                                       with_process_scratch)) return;
+    /* F07: reject a misaligned pool base before any pool write — hardens a
+     * caller invoking this directly (the parent aec_init always carves
+     * ALIGN16 offsets off an already-aligned base, so this never fires
+     * there). */
+    if (!MEM_IS_ALIGNED16(mem)) return;
+    {
+        /* pbfdaf_get_mem_size returning 0 means "invalid" (F05); a real
+         * config's size is always > 0, so 0 is an unambiguous failure here
+         * rather than `mem_size < 0`, which is never true for a size_t. */
+        size_t need = pbfdaf_get_mem_size(block_size, n_partitions, hop_size,
+                                          with_process_scratch);
+        if (need == 0 || mem_size < need) return;
+    }
 
     int hop = (hop_size > 0) ? hop_size : block_size / 2;
     memset(p, 0, sizeof(*p));
@@ -600,18 +634,17 @@ size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
     (void)blk; (void)fft;
     if (n_partitions <= 0 || K <= 0) return 0;
     size_t total = pbfdaf_get_mem_size(block_size, n_partitions, hop_size, 0);
-    total += ALIGN16((size_t)K * sizeof(float));   /* Q_high */
-    total += ALIGN16((size_t)K * sizeof(float));   /* Q_low */
-    total += ALIGN16((size_t)K * sizeof(float));   /* Q */
-    total += ALIGN16((size_t)K * sizeof(float));   /* R */
-    total += ALIGN16((size_t)K * sizeof(float));   /* error_psd */
-    total += ALIGN16((size_t)K * sizeof(float));   /* H_error_per_bin */
-    total += ALIGN16((size_t)K * sizeof(float));   /* erl_per_bin */
-    total += ALIGN16((size_t)K * sizeof(float));   /* e2_coarse_per_bin */
-    total += ALIGN16((size_t)K * sizeof(float));   /* e2_ref_scratch */
-    total += ALIGN16((size_t)K * sizeof(float));   /* scr_mu_local */
-    total += ALIGN16((size_t)K * sizeof(float));   /* scr_X2 */
-    total += ALIGN16((size_t)K * sizeof(float));   /* scr_mu_aec3 */
+    if (total == 0) return 0;   /* base PBFDAF sizing rejected its own inputs */
+    /* Checked size arithmetic (F05): 12 identically-sized K-length float
+     * fields (Q_high, Q_low, Q, R, error_psd, H_error_per_bin, erl_per_bin,
+     * e2_coarse_per_bin, e2_ref_scratch, scr_mu_local, scr_X2, scr_mu_aec3),
+     * each individually ALIGN16'd by pbfdkf_init_static below — order/
+     * grouping unchanged, only the arithmetic is wrapped (mem_align.h
+     * ck_field_size_reps composes ck_mul_size/ck_align16_size/ck_add_size
+     * with the same saturate-to-SIZE_MAX-on-overflow behavior). */
+    total = ck_field_size_reps(total, (size_t)K, sizeof(float), 12);
+
+    if (MEM_SIZE_INVALID(total)) return 0;
     return total;
 }
 
@@ -619,7 +652,15 @@ void pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                          int block_size, int n_partitions,
                          float mu, float delta, int hop_size) {
     if (!p || !mem) return;
-    if (mem_size < pbfdkf_get_mem_size(block_size, n_partitions, hop_size)) return;
+    /* F07: reject a misaligned pool base before any pool write (see the
+     * matching guard in pbfdaf_init_static above). */
+    if (!MEM_IS_ALIGNED16(mem)) return;
+    {
+        /* pbfdkf_get_mem_size returning 0 means "invalid" (F05); guard the
+         * same 0-vs-`mem_size < 0` ambiguity as pbfdaf_init_static above. */
+        size_t need = pbfdkf_get_mem_size(block_size, n_partitions, hop_size);
+        if (need == 0 || mem_size < need) return;
+    }
     size_t base_sz = pbfdaf_get_mem_size(block_size, n_partitions, hop_size, 0);
     memset(p, 0, sizeof(*p));
     pbfdaf_init_static(&p->base, mem, base_sz,

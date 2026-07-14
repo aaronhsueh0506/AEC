@@ -112,6 +112,15 @@ typedef struct AecConfig {
 void aec_config_defaults(AecConfig* cfg, int sample_rate);
 void aec_config_from_preset(AecConfig* cfg, AecPreset preset, int sample_rate);
 
+/* Sample-rate whitelist query (F05: no sample-rate validation anywhere).
+ * The single source of truth for the whitelist lives in aec.c next to
+ * aec_validate_config(); this is the public read of it, for callers (e.g.
+ * example/aec_wav.c) that need to reject an unsupported input WAV rate
+ * before ever constructing an AecConfig. Returns 1 iff sample_rate is
+ * production-qualified today (16000 only — see aec.c for the widen-later
+ * note). */
+int aec_is_valid_sample_rate(int sample_rate);
+
 /* ── opaque-ish context ────────────────────────────────────────────────── */
 /* Streaming render/capture buffering events (mirror AEC3
  * render_delay_buffer.h:28 BufferingEvent). Returned by the streaming API. */

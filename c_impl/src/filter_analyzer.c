@@ -221,7 +221,15 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     float  abs_scratch[1024];           /* >= size (960); detect slice <= size  */
     float  render_sq_scratch[1024];     /* >= render_block_len (160)            */
 
-    if (size == 0) {
+    /* Guard (clang-analyzer): size<0 (an invalid-config path — m->size is
+     * derived from filter_length/hop) would clip region_end negative in
+     * fa_set_region below, then the peak-finding code reads h[region_start]
+     * = h[0] out of the h_highpass buffer (sized `size`, i.e. 0 bytes) —
+     * an OOB/uninitialized read. size==0 already returned here; widened to
+     * size<=0 to also close the negative case. Pure guard: any valid config
+     * always has size > 0 (n_partitions*hop, both positive), so this never
+     * fires in production. */
+    if (size <= 0) {
         return;
     }
     m->blocks_since_reset += 1;

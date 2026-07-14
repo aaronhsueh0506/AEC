@@ -94,7 +94,108 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
         case AEC_PRESET_MILD:     cfg->min_gain_floor_far_active_db = -20.0f; break;
         case AEC_PRESET_BALANCED:   cfg->min_gain_floor_far_active_db = -28.0f; break;
         case AEC_PRESET_AGGRESSIVE: cfg->min_gain_floor_far_active_db = -38.0f; break;
+        /* preset enum out of range (F05): no default case existed before —
+         * an out-of-enum-range int silently left min_gain_floor_far_active_db
+         * at aec_config_defaults' -28 dB (balanced), which is already a safe,
+         * defined fallback. Made explicit here rather than left implicit. */
+        default: cfg->min_gain_floor_far_active_db = -28.0f; break;
     }
+}
+
+/* ── F05/F07 config validation ────────────────────────────────────────────
+ * Sample-rate whitelist. Only 16 kHz is production-qualified today (every
+ * preset, every corpus WAV, every parity/static-memory test in this repo is
+ * 16 kHz). 8000 and 48000 are added once their per-rate coefficient/
+ * threshold tables land (a later stage widens this list) — do not add
+ * entries here without that accompanying per-rate tuning work. */
+static const int AEC_SR_WHITELIST[] = { 16000 };
+
+int aec_is_valid_sample_rate(int sample_rate) {
+    for (size_t i = 0; i < sizeof(AEC_SR_WHITELIST) / sizeof(AEC_SR_WHITELIST[0]); ++i) {
+        if (sample_rate == AEC_SR_WHITELIST[i]) return 1;
+    }
+    return 0;
+}
+
+/* Single source of truth for AecConfig bounds-checking (F05: "no sample-
+ * rate/config validation anywhere"). aec_create / aec_get_mem_size /
+ * aec_init all run this before touching cfg-derived sizes or state; none of
+ * them assert on the release path — an invalid cfg is reported through each
+ * function's existing failure convention (aec_create: nonzero; aec_get_
+ * mem_size: 0; aec_init: NULL).
+ *
+ * Bounds are "generous but finite" around each field's shipped default (see
+ * aec_config_defaults above): wide enough that every preset/tuning value in
+ * this repo passes (verified: mild/balanced/aggressive all pass), tight
+ * enough that a corrupted or garbage-filled AecConfig cannot reach the size/
+ * pool arithmetic below with a value that overflows or loops unboundedly
+ * (e.g. a negative/huge filter_length or n_partitions). */
+static int aec_validate_config(const AecConfig* cfg) {
+    if (!cfg) return 0;
+    if (!aec_is_valid_sample_rate(cfg->sample_rate)) return 0;
+    if (cfg->filter_length <= 0 || cfg->filter_length > 4096) return 0;
+    if (cfg->n_partitions != 0 &&
+        (cfg->n_partitions < 1 || cfg->n_partitions > 256)) return 0;
+
+#define AEC_CK_BOOL(field) \
+    do { if (cfg->field != 0 && cfg->field != 1) return 0; } while (0)
+#define AEC_CK_RANGE_F(field, lo, hi) \
+    do { if (!isfinite(cfg->field) || cfg->field < (lo) || cfg->field > (hi)) return 0; } while (0)
+#define AEC_CK_RANGE_I(field, lo, hi) \
+    do { if (cfg->field < (lo) || cfg->field > (hi)) return 0; } while (0)
+
+    /* toggles (13) */
+    AEC_CK_BOOL(enable_cng);
+    AEC_CK_BOOL(enable_delay_est);
+    AEC_CK_BOOL(enable_highpass);
+    AEC_CK_BOOL(enable_saturation);
+    AEC_CK_BOOL(enable_shadow);
+    AEC_CK_BOOL(enable_res);
+    AEC_CK_BOOL(saturation_softclip_ref);
+    AEC_CK_BOOL(return_res_context);
+    AEC_CK_BOOL(delay_acquire_protect_converged);
+    AEC_CK_BOOL(delay_acquire_warm_transfer);
+    AEC_CK_BOOL(delay_acquire_protect_inst_erle);
+    AEC_CK_BOOL(dt_aware_recovery_soft);
+    AEC_CK_BOOL(dt_aware_res_floor_enabled);
+
+    /* scalar tunables (22 floats) — generous, finite ranges around default */
+    AEC_CK_RANGE_F(mu,                          0.0f,    10.0f);
+    AEC_CK_RANGE_F(delta,                       0.0f,     1.0f);
+    AEC_CK_RANGE_F(shadow_err_alpha,            0.0f,     1.0f);
+    AEC_CK_RANGE_F(shadow_mu_min,               0.0f,    10.0f);
+    AEC_CK_RANGE_F(shadow_mu_nlms,              0.0f,    10.0f);
+    AEC_CK_RANGE_F(epc_total_rise,              0.0f,  1000.0f);
+    AEC_CK_RANGE_F(epc_delta_threshold,         0.0f,  1000.0f);
+    AEC_CK_RANGE_F(epc_mu_floor,                0.0f,    10.0f);
+    AEC_CK_RANGE_F(max_delay_ms,                0.0f, 60000.0f);
+    AEC_CK_RANGE_F(delay_buffer_ms,             0.0f,120000.0f);
+    AEC_CK_RANGE_F(delay_est_init_s,            0.0f,  3600.0f);
+    AEC_CK_RANGE_F(delay_est_period_s,          0.0f,  3600.0f);
+    AEC_CK_RANGE_F(highpass_cutoff_hz,          0.0f, 20000.0f);
+    AEC_CK_RANGE_F(saturation_threshold,        0.0f,    10.0f);
+    AEC_CK_RANGE_F(kalman_q_high,               0.0f,     1.0f);
+    AEC_CK_RANGE_F(kalman_q_low,                0.0f,     1.0f);
+    AEC_CK_RANGE_F(delay_acquire_inst_erle_db,-100.0f,   100.0f);
+    AEC_CK_RANGE_F(min_gain_floor_dt_db,     -300.0f,    50.0f);
+    AEC_CK_RANGE_F(ne_recent_threshold,          0.0f,  1000.0f);
+    AEC_CK_RANGE_F(min_gain_floor_far_active_db,-300.0f,  50.0f);
+    AEC_CK_RANGE_F(filter_misadjustment_scale_min, 0.0f, 1000.0f);
+    AEC_CK_RANGE_F(filter_misadjustment_scale_max, 0.0f, 1000.0f);
+
+    /* scalar tunables (6 ints, non-boolean counts) */
+    AEC_CK_RANGE_I(warmup_frames,                       0, 1000000);
+    AEC_CK_RANGE_I(epc_hangover,                         0, 1000000);
+    AEC_CK_RANGE_I(ne_recent_hold,                       0, 1000000);
+    AEC_CK_RANGE_I(ne_recent_sustain,                    0, 1000000);
+    AEC_CK_RANGE_I(filter_misadjustment_stable_frames,   0, 1000000);
+    AEC_CK_RANGE_I(filter_misadjustment_hangover_frames, 0, 1000000);
+
+#undef AEC_CK_BOOL
+#undef AEC_CK_RANGE_F
+#undef AEC_CK_RANGE_I
+
+    return 1;
 }
 
 /* ───────────────────────── helpers ─────────────────────────────────────── */
@@ -262,7 +363,22 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
 
 /* ───────────────────────── construction ────────────────────────────────── */
 
-static int next_pow2(int x) { int n = 1; while (n < x) n <<= 1; return n; }
+/* F05: was a signed left shift (`int n = 1; while (n < x) n <<= 1;`) with no
+ * bound on x — a corrupted/garbage x approaching INT_MAX loops until n
+ * overflows int (UB) rather than terminating. Shift is now done in unsigned
+ * arithmetic (well-defined on overflow) and x is capped at 1<<20 (1,048,576 —
+ * >2000x any block_size this repo derives from a validated 16 kHz config, so
+ * the cap never engages for a real config; it only bounds a pathological
+ * input). Byte-identical to the old expression for every x this repo ever
+ * passes (block_size <= a few thousand). */
+static int next_pow2(int x) {
+    if (x <= 1) return 1;
+    if (x > (1 << 20)) x = (1 << 20);
+    unsigned int n = 1u;
+    unsigned int ux = (unsigned int)x;
+    while (n < ux) n <<= 1u;
+    return (int)n;
+}
 
 /* aec3_scale.blocks_to_hops(blocks, hop, sr) = round(blocks * 64/hop ... ).
  * For our hop=160/sr=16000 we bake the values the Python produces (the only
@@ -351,6 +467,11 @@ static void aec3_post_chain_reset(Aec* a) {
 }
 
 int aec_create(Aec* a, const AecConfig* cfg) {
+    /* F05/F07: reject before any state is touched — no release-path assert,
+     * just the existing int failure convention (0 = success, checked by
+     * every caller as `!= 0` or truthy). */
+    if (!a || !cfg || !aec_validate_config(cfg)) return -1;
+
     memset(a, 0, sizeof(*a));
     a->cfg = *cfg;
 
@@ -787,89 +908,137 @@ static void aec_derive_dims(const AecConfig* cfg,
     *o_fifo_cap = cap;
 }
 
+/* Checked equivalent of `t += ALIGN16(count*elem_size) * reps` — reps
+ * identically-sized fields laid out back-to-back (each individually
+ * ALIGN16'd by aec_init's pool-carve, so their sum is exactly
+ * reps * ALIGN16(count*elem_size)). Saturates to SIZE_MAX on overflow via
+ * mem_align.h's ck_* helpers, same as ck_field_size. */
+static size_t ck_field_size_reps(size_t total, size_t count, size_t elem_size,
+                                  size_t reps) {
+    size_t one = ck_align16_size(ck_mul_size(count, elem_size));
+    return ck_add_size(total, ck_mul_size(one, reps));
+}
+
 size_t aec_get_mem_size(const AecConfig* cfg) {
     if (!cfg) return 0;
+    if (!aec_validate_config(cfg)) return 0;
     int hop, blk, fft, K, np, buf, fcap;
     aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf, &fcap);
 
     const int ncc  = AEC3B_ST_NUM_CAPTURE_CHANNELS;
     const int rh   = (AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW ? 1 : 0) + 2;
     const int sg_n = AEC3B_SG_NEAREND_SMOOTHER_N;
+    const size_t Kz = (size_t)K;
 
+    /* Checked size arithmetic (F05): every add/multiply/align below
+     * saturates to SIZE_MAX on overflow (mem_align.h ck_* helpers) instead
+     * of silently wrapping; MEM_SIZE_INVALID(t) at the end catches an
+     * overflow anywhere in the chain and this function reports failure (0)
+     * rather than a small wrapped total a later aec_init would carve past.
+     * Field ORDER/grouping is unchanged from the previous unchecked
+     * `t += ALIGN16(...)` walk — only the arithmetic is wrapped, since
+     * get_mem_size/aec_init are a lockstep pool-carve pair. */
     size_t t = 0;
-    t += ALIGN16(sizeof(Aec));
-    if (cfg->enable_delay_est) t += ALIGN16((size_t)buf * sizeof(float));
-    t += ALIGN16((size_t)fcap * hop * sizeof(float));
-    t += ALIGN16((size_t)(K - 2 > 0 ? K - 2 : 1) * sizeof(int64_t));
-    t += pbfdkf_get_mem_size(blk, np, hop);
-    if (cfg->enable_shadow) t += pbfdaf_get_mem_size(blk, np, hop, 1);
-    t += fft_get_mem_size(fft);
+    t = ck_field_size(t, 1, sizeof(Aec));
+    if (cfg->enable_delay_est) t = ck_field_size(t, (size_t)buf, sizeof(float));
+    t = ck_field_size(t, ck_mul_size((size_t)fcap, (size_t)hop), sizeof(float));
+    t = ck_field_size(t, (size_t)(K - 2 > 0 ? K - 2 : 1), sizeof(int64_t));
+    {
+        size_t kf_sz = pbfdkf_get_mem_size(blk, np, hop);
+        if (kf_sz == 0) return 0;   /* sub-config rejected its own inputs */
+        t = ck_add_size(t, kf_sz);
+    }
+    if (cfg->enable_shadow) {
+        size_t af_sz = pbfdaf_get_mem_size(blk, np, hop, 1);
+        if (af_sz == 0) return 0;
+        t = ck_add_size(t, af_sz);
+    }
+    t = ck_add_size(t, fft_get_mem_size(fft));
     /* aec3_post (21) */
-    t += ALIGN16(K * sizeof(float)) * 6;           /* avg_rev y2s n2 n2i sye_re sye_im */
-    t += ALIGN16(K * sizeof(float)) * 2;            /* syy see */
-    t += ALIGN16((size_t)blk * sizeof(float));      /* ola */
-    t += ALIGN16(K * sizeof(float)) * 8;            /* np_ fp_ ep_ erp_ cpe x2r cn nf */
-    t += ALIGN16(K * sizeof(unsigned char));        /* cgm */
-    t += ALIGN16(K * sizeof(Complex));              /* eout */
-    t += ALIGN16((size_t)fft * sizeof(float));      /* eout_full */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 6);   /* avg_rev y2s n2 n2i sye_re sye_im */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 2);   /* syy see */
+    t = ck_field_size(t, (size_t)blk, sizeof(float));  /* ola */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 8);   /* np_ fp_ ep_ erp_ cpe x2r cn nf */
+    t = ck_field_size(t, Kz, sizeof(unsigned char));   /* cgm */
+    t = ck_field_size(t, Kz, sizeof(Complex));         /* eout */
+    t = ck_field_size(t, (size_t)fft, sizeof(float));  /* eout_full */
     /* AecStateStorage (14) */
-    t += ALIGN16(K * sizeof(float)) * 5;            /* erle_max/erle/oc/unb/during */
-    t += ALIGN16(K * sizeof(unsigned char));        /* erle_coming_onset */
-    t += ALIGN16(K * sizeof(int32_t));              /* erle_hold */
-    t += ALIGN16(K * sizeof(float)) * 2;            /* erle_y2_acc/e2_acc */
-    t += ALIGN16(K * sizeof(unsigned char));        /* erle_low_render */
-    t += ALIGN16(K * sizeof(float));                /* erl */
-    t += ALIGN16((size_t)(K - 2) * sizeof(int));    /* erl_hold */
-    t += ALIGN16((size_t)ncc * sizeof(int));         /* filter_delays_blocks */
-    t += ALIGN16(AEC3B_FILTER_TAPS_SIZE * sizeof(float)); /* fa_h_highpass */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 5);   /* erle_max/erle/oc/unb/during */
+    t = ck_field_size(t, Kz, sizeof(unsigned char));   /* erle_coming_onset */
+    t = ck_field_size(t, Kz, sizeof(int32_t));         /* erle_hold */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 2);   /* erle_y2_acc/e2_acc */
+    t = ck_field_size(t, Kz, sizeof(unsigned char));   /* erle_low_render */
+    t = ck_field_size(t, Kz, sizeof(float));           /* erl */
+    t = ck_field_size(t, (size_t)(K - 2), sizeof(int)); /* erl_hold */
+    t = ck_field_size(t, (size_t)ncc, sizeof(int));    /* filter_delays_blocks */
+    t = ck_field_size(t, (size_t)AEC3B_FILTER_TAPS_SIZE, sizeof(float)); /* fa_h_highpass */
     /* ResidualEchoEstimator (10) */
-    t += ALIGN16(K * sizeof(float));                /* x2_nf */
-    t += ALIGN16(K * sizeof(int));                  /* x2_nf_c */
-    t += ALIGN16(K * sizeof(float)) * 2;            /* rm_st rt_st */
-    t += ALIGN16((size_t)rh * K * sizeof(float));   /* rh_st */
-    t += ALIGN16((size_t)REE_DELAY_BUF_SIZE * K * sizeof(float)) * 2; /* drd rrd */
-    t += ALIGN16(K * sizeof(float)) * 3;            /* ld_st lr_st scr_st */
+    t = ck_field_size(t, Kz, sizeof(float));           /* x2_nf */
+    t = ck_field_size(t, Kz, sizeof(int));             /* x2_nf_c */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 2);   /* rm_st rt_st */
+    t = ck_field_size(t, ck_mul_size((size_t)rh, Kz), sizeof(float)); /* rh_st */
+    t = ck_field_size_reps(t, ck_mul_size((size_t)REE_DELAY_BUF_SIZE, Kz),
+                           sizeof(float), 2);          /* drd rrd */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 3);   /* ld_st lr_st scr_st */
     /* SuppressionGain (11) */
-    t += ALIGN16(K * sizeof(float)) * 3;            /* last_gain/ne/echo */
-    t += ALIGN16((size_t)sg_n * K * sizeof(float)); /* ma */
-    t += ALIGN16(K * sizeof(float)) * 7;            /* ne wr ming maxg graw gout gsum */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 3);   /* last_gain/ne/echo */
+    t = ck_field_size(t, ck_mul_size((size_t)sg_n, Kz), sizeof(float)); /* ma */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 7);   /* ne wr ming maxg graw gout gsum */
     /* StationarityEstimator (4) */
-    t += ALIGN16(K * sizeof(float));                /* stat_noise */
-    t += ALIGN16(K * sizeof(int32_t));              /* stat_hang */
-    t += ALIGN16(K * sizeof(unsigned char));        /* stat_flags */
-    t += ALIGN16(16 * K * sizeof(float));           /* stat_hist */
+    t = ck_field_size(t, Kz, sizeof(float));           /* stat_noise */
+    t = ck_field_size(t, Kz, sizeof(int32_t));         /* stat_hang */
+    t = ck_field_size(t, Kz, sizeof(unsigned char));   /* stat_flags */
+    t = ck_field_size(t, ck_mul_size((size_t)16, Kz), sizeof(float)); /* stat_hist */
     /* LinearFilterSelect (4) */
-    t += ALIGN16((size_t)hop * sizeof(float)) * 2;  /* prev_output_time e_form */
-    t += ALIGN16((size_t)blk * sizeof(float));      /* block_win */
-    t += ALIGN16(K * sizeof(Complex));              /* lfs sel_esw */
+    t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 2); /* prev_output_time e_form */
+    t = ck_field_size(t, (size_t)blk, sizeof(float));  /* block_win */
+    t = ck_field_size(t, Kz, sizeof(Complex));         /* lfs sel_esw */
     /* LinearFilterSelect de-stacked scratch (4): were fixed-size stack locals
      * (hop/fft_size entries, up to 8192) in linear_filter_select() —
      * a stack-overflow hazard on small embedded task stacks. */
-    t += ALIGN16((size_t)hop * sizeof(float)) * 3;  /* scr_sq scr_sref scr_scoa */
-    t += ALIGN16((size_t)fft * sizeof(float));      /* scr_tin */
+    t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 3); /* scr_sq scr_sref scr_scoa */
+    t = ck_field_size(t, (size_t)fft, sizeof(float));  /* scr_tin */
     /* Aec3PostRunScratch (20) */
-    t += ALIGN16(K * sizeof(Complex)) * 4;          /* sel_esw sel_echo nsw_e1 ybase */
-    t += ALIGN16(K * sizeof(float)) * 9;            /* abs_near..x2_past */
-    t += ALIGN16((size_t)np * K * sizeof(float));   /* w_mag2 */
-    t += ALIGN16((size_t)hop * sizeof(float));      /* render_block_scaled */
-    t += ALIGN16((size_t)fft * sizeof(float));      /* bridge_taps */
-    t += ALIGN16(K * sizeof(float)) * 3;            /* r2 r2_unb nearend_pwr */
-    t += ALIGN16(K * sizeof(unsigned char));        /* stat_mask */
+    t = ck_field_size_reps(t, Kz, sizeof(Complex), 4); /* sel_esw sel_echo nsw_e1 ybase */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 9);   /* abs_near..x2_past */
+    t = ck_field_size(t, ck_mul_size((size_t)np, Kz), sizeof(float)); /* w_mag2 */
+    t = ck_field_size(t, (size_t)hop, sizeof(float));  /* render_block_scaled */
+    t = ck_field_size(t, (size_t)fft, sizeof(float));  /* bridge_taps */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 3);   /* r2 r2_unb nearend_pwr */
+    t = ck_field_size(t, Kz, sizeof(unsigned char));   /* stat_mask */
     /* hop scratch (10) */
-    t += ALIGN16(K * sizeof(float));                /* per_bin_mu_scale */
-    t += ALIGN16((size_t)hop * sizeof(float)) * 6;  /* limiter_near_lag near_hop far_hop raw shadow final */
-    t += ALIGN16((size_t)np * hop * sizeof(float)); /* filter_taps_full */
+    t = ck_field_size(t, Kz, sizeof(float));           /* per_bin_mu_scale */
+    t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 6); /* limiter_near_lag near_hop far_hop raw shadow final */
+    t = ck_field_size(t, ck_mul_size((size_t)np, (size_t)hop), sizeof(float)); /* filter_taps_full */
     /* per-hop freq-bin scratch (12; see aec.h struct comment) */
-    t += ALIGN16((size_t)hop * sizeof(float));      /* scr_sq */
-    t += ALIGN16((size_t)K * sizeof(float)) * 11;   /* scr_e2_echo .. scr_erl_arr */
-    if (cfg->enable_highpass) t += ALIGN16(hpf_get_mem_size());  /* mic-path HPF */
+    t = ck_field_size(t, (size_t)hop, sizeof(float));  /* scr_sq */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 11);  /* scr_e2_echo .. scr_erl_arr */
+    if (cfg->enable_highpass) t = ck_field_size(t, 1, hpf_get_mem_size()); /* mic-path HPF */
+
+    if (MEM_SIZE_INVALID(t)) return 0;
     return t;
 }
 
 /* Place Aec + all backing arrays in the provided pool; no malloc called.
- * Returns (Aec*)mem on success, NULL on invalid inputs or undersized pool. */
+ * Returns (Aec*)mem on success, NULL on invalid inputs, misaligned base, or
+ * undersized pool (F05/F07). */
 Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
-    if (!mem || !cfg || mem_size < aec_get_mem_size(cfg)) return NULL;
+    if (!mem || !cfg) return NULL;
+    if (!aec_validate_config(cfg)) return NULL;
+    /* F07: reject a misaligned pool base before any pool write. Every offset
+     * aec_init carves below is an ALIGN16 bump off `mem`, so a misaligned
+     * base would misalign every sub-module's SIMD-sensitive buffers too. */
+    if (!MEM_IS_ALIGNED16(mem)) return NULL;
+    {
+        /* aec_get_mem_size(cfg) returning 0 means "invalid" (F05) — a
+         * legitimate config's total is always > 0 (sizeof(Aec) alone
+         * guarantees that), so 0 is an unambiguous failure sentinel here,
+         * unlike a bare `mem_size < aec_get_mem_size(cfg)` which would never
+         * reject anything once aec_get_mem_size started returning 0 for
+         * invalid input (mem_size < 0 is never true for a size_t). */
+        size_t need = aec_get_mem_size(cfg);
+        if (need == 0 || mem_size < need) return NULL;
+    }
 
     int hop, blk, fft, K, np, buf_samp, fcap;
     aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf_samp, &fcap);

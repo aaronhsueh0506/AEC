@@ -22,6 +22,22 @@ void render_activity_reset(RenderActivity* r) {
 
 RenderActivityResult render_activity_update(RenderActivity* r,
                                                const float* far_end, int n) {
+    /* Guard (clang-analyzer): n<=0 would leave `blocks[0]` unwritten below
+     * (n_blocks would be 0, or negative n would skip the fill loop entirely)
+     * and then read it uninitialized at `far_pwr_raw = blocks[0] / n`. Every
+     * real call site passes n == hop_size (always > 0), so this never fires
+     * in production — pure guard, no behavior change for valid inputs.
+     * Returns current state unchanged, far_pwr floored the same way the
+     * silent-far branch below would (`far_pwr_raw=0` + epsilon). */
+    if (n <= 0) {
+        RenderActivityResult res0 = {
+            .far_pwr       = 1e-10f,
+            .is_active     = r->active_prev,
+            .is_stationary = r->is_stationary,
+            .warmup_active = 0,
+        };
+        return res0;
+    }
     /* far_pwr_raw = mean(far_end ** 2), computed in float32.
      *
      * np.mean of an fp32 array uses pairwise summation in fp32 then divides
