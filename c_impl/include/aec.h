@@ -253,8 +253,6 @@ typedef struct Aec {
     float* shadow_out;
     float* final_out;
     float* filter_taps_full;   /* [n_partitions × hop] */
-    Complex* W_all;            /* [n_partitions × n_freqs] flat snapshot */
-    Complex* X_buf_all;        /* [n_partitions × n_freqs] flat snapshot */
 
     /* per-hop freq-bin scratch (Tier-1 stack-safety fix): these used to be
      * `float x[8192]` locals inside aec_process() / mean_sq(), sized far

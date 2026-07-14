@@ -746,8 +746,6 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     a->shadow_out = (float*)malloc((size_t)hop * sizeof(float));
     a->final_out  = (float*)malloc((size_t)hop * sizeof(float));
     a->filter_taps_full = (float*)malloc((size_t)n_parts * (size_t)hop * sizeof(float));
-    a->W_all      = (Complex*)malloc((size_t)n_parts * (size_t)K * sizeof(Complex));
-    a->X_buf_all  = (Complex*)malloc((size_t)n_parts * (size_t)K * sizeof(Complex));
 
     /* per-hop freq-bin scratch (see aec.h struct comment). */
     a->scr_sq        = (float*)malloc((size_t)hop * sizeof(float));
@@ -861,7 +859,6 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
     t += ALIGN16(K * sizeof(float));                /* per_bin_mu_scale */
     t += ALIGN16((size_t)hop * sizeof(float)) * 6;  /* limiter_near_lag near_hop far_hop raw shadow final */
     t += ALIGN16((size_t)np * hop * sizeof(float)); /* filter_taps_full */
-    t += ALIGN16((size_t)np * K * sizeof(Complex)) * 2; /* W_all X_buf_all */
     /* per-hop freq-bin scratch (12; see aec.h struct comment) */
     t += ALIGN16((size_t)hop * sizeof(float));      /* scr_sq */
     t += ALIGN16((size_t)K * sizeof(float)) * 11;   /* scr_e2_echo .. scr_erl_arr */
@@ -1196,8 +1193,6 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     a->shadow_out = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->final_out  = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->filter_taps_full = (float*)ptr; ptr += ALIGN16((size_t)np * hop * sizeof(float));
-    a->W_all     = (Complex*)ptr; ptr += ALIGN16((size_t)np * K * sizeof(Complex));
-    a->X_buf_all = (Complex*)ptr; ptr += ALIGN16((size_t)np * K * sizeof(Complex));
 
     /* per-hop freq-bin scratch (see aec.h struct comment). */
     a->scr_sq        = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
@@ -1273,7 +1268,7 @@ void aec_destroy(Aec* a) {
     free(a->per_bin_mu_scale); free(a->limiter_near_lag);
     free(a->near_hop); free(a->far_hop); free(a->raw_output);
     free(a->shadow_out); free(a->final_out);
-    free(a->filter_taps_full); free(a->W_all); free(a->X_buf_all);
+    free(a->filter_taps_full);
     free(a->scr_sq); free(a->scr_e2_echo); free(a->scr_e2_near);
     free(a->scr_rsa_psd); free(a->scr_rsa_mask); free(a->scr_mu_buf_pre);
     free(a->scr_e2coa_pre); free(a->scr_mu_buf); free(a->scr_far_psd);
@@ -2030,9 +2025,6 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
         /* ── aec3_post_run → final_output ── */
         {
-            /* Snapshot W + X_buf flat for the run driver. */
-            memcpy(a->W_all, a->main_filter.base.W, (size_t)N * (size_t)K * sizeof(Complex));
-            memcpy(a->X_buf_all, a->main_filter.base.X_buf, (size_t)N * (size_t)K * sizeof(Complex));
             pbfdaf_get_time_domain_filter(&a->main_filter.base, a->filter_taps_full);
 
             Aec3PostRunIn in;
@@ -2042,8 +2034,8 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             in.echo_spec = a->main_filter.base.echo_spec;
             in.error_spec_windowed = a->main_filter.base.error_spec_windowed;
             in.W0 = a->main_filter.base.W;             /* W[0] */
-            in.W_all = a->W_all;
-            in.X_buf = a->X_buf_all;
+            in.W_all = a->main_filter.base.W;          /* live, read-only for the call */
+            in.X_buf = a->main_filter.base.X_buf;      /* live, read-only for the call */
             in.sqrt_hann = a->main_filter.base.sqrt_hann;
             in.kalman_P = NULL; in.kalman_P_len = 0;   /* divergence_indicator dead */
             in.partition_idx = a->main_filter.base.partition_idx;
