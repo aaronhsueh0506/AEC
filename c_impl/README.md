@@ -115,20 +115,29 @@ harness design.
 For embedded targets, build one pool and place the whole instance in it:
 
 ```c
-size_t bytes = aec_get_mem_size(&cfg);     /* balanced @ hop=160: 532,992 B (KISS) / 494,544 B (NE10) */
-void*  pool  = your_static_alloc(bytes);   /* 16-byte aligned */
-Aec a; aec_init(&a, pool, bytes, &cfg);    /* byte-equal to aec_create */
+size_t bytes = aec_get_mem_size(&cfg);   /* balanced @ hop=160: 533,008 B (KISS) / 494,560 B (NE10) */
+void*  pool  = your_static_alloc(bytes); /* MUST be 16-byte aligned (posix_memalign, etc.) */
+Aec*   a     = aec_init(pool, bytes, &cfg);  /* NULL on failure; byte-equal to aec_create output */
+/* ... aec_process(a, ...) ... */
+aec_destroy(a);   /* call exactly once, before `pool` is freed/reused — see note below */
+free(pool);
 ```
 
-`aec_init` is byte-equal to the malloc path (`test_static_aec.c`, 0 mismatches).
-With the KISS FFT backend the FFT is now **fully heap-free too** — the kiss
-configs are placed in the caller pool via `kiss_fft_alloc`'s mem/lenmem API
-(unlike the old pocketfft plans, which had to stay on the heap), so the static
-path makes no heap allocation at all. Both memory models ship in the same
-library: `aec_create` (heap) and `aec_get_mem_size`/`aec_init` (caller pool)
-are always compiled, selected at runtime. (Under NE10, the R2C/C2R
-twiddle configs are backend-internal heap allocations outside the pool; they
-are released by `fft_destroy`/`aec_destroy`, not by freeing the pool.)
+`aec_init` returns a pointer into `pool` (not an out-param) and is byte-equal
+to the malloc path (`test_static_aec.c`, 0 mismatches). With the KISS FFT
+backend the FFT is now **fully heap-free too** — the kiss configs are placed
+in the caller pool via `kiss_fft_alloc`'s mem/lenmem API (unlike the old
+pocketfft plans, which had to stay on the heap), so the static path makes no
+heap allocation at all and `aec_destroy` is a genuine no-op on this backend.
+Both memory models ship in the same library: `aec_create` (heap) and
+`aec_get_mem_size`/`aec_init` (caller pool) are always compiled, selected at
+runtime — `USE_EXT_MEM` or similar compile flags are not involved; which
+constructor you call is the only switch. **Under NE10**, `aec_init` triggers
+3 backend-internal heap allocations (R2C/C2R twiddle configs for the
+post-filter + main + shadow filters) that live outside `pool` and are not
+counted in `aec_get_mem_size`'s figure; `aec_destroy` is what releases them,
+so on this backend it must be called exactly once before `pool` is freed or
+handed to a new `aec_init` — skipping it leaks, calling it twice double-frees.
 
 Full CLI options, C API reference, integration rules, runtime resource
 notes, and validation steps:

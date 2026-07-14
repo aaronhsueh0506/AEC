@@ -8,31 +8,58 @@ pre-allocate a single memory pool and slice it per module. The existing
 
 ## Top-level usage
 
+`aec_init()` returns `Aec*` (NULL on failure) — it does **not** take a
+caller-owned `Aec` struct by pointer. The pool must be 16-byte aligned;
+`posix_memalign` (POSIX hosts) or your platform's aligned allocator both
+work — plain `malloc` is not guaranteed to satisfy the alignment check and
+`aec_init` will reject a misaligned base.
+
+<!-- docs-smoke:begin -->
 ```c
 #include "aec.h"
+#include <stdlib.h>
 
 AecConfig cfg;
 aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, /*sr=*/16000);
 
-size_t pool_bytes = aec_get_mem_size(&cfg);     /* query needed buffer size */
-void*  pool       = your_static_pool_alloc(pool_bytes);  /* 16-byte aligned */
-
-Aec aec;
-if (aec_init(&aec, pool, pool_bytes, &cfg) != 0) {
-    /* pool too small, or NULL inputs */
+size_t pool_bytes = aec_get_mem_size(&cfg);   /* query needed buffer size */
+void*  pool = NULL;
+if (posix_memalign(&pool, 16, pool_bytes) != 0) {
+    /* allocation failed */
 }
 
-int hop = aec_hop_size(&aec);
+Aec* aec = aec_init(pool, pool_bytes, &cfg);
+if (!aec) {
+    /* pool too small, or NULL/misaligned inputs — aec_init() returns NULL */
+}
+
+int hop = aec_hop_size(aec);
 float mic[hop], ref[hop], out[hop];
 
 while (read_block(mic, ref, hop)) {
-    aec_process(&aec, mic, ref, out);
+    aec_process(aec, mic, ref, out);
     write_block(out, hop);
 }
 
-aec_destroy(&aec);   /* no-op for static path; safe for both paths */
-/* caller frees `pool` itself */
+/* aec_destroy() must be called exactly once before `pool` is freed/reused,
+ * regardless of backend:
+ *  - KISS backend: allocates nothing outside `pool`; aec_destroy() is a
+ *    genuine no-op here (nothing to free) but is still safe/cheap to call.
+ *  - NE10 backend: aec_init() triggers 3 backend-internal heap allocations
+ *    (the post-filter + main-filter + shadow-filter R2C/C2R twiddle
+ *    configs) that live OUTSIDE `pool` and are NOT sized into
+ *    aec_get_mem_size()'s figure. aec_destroy() is what releases them.
+ *    Skipping the call leaks them; calling aec_destroy() twice on the same
+ *    instance double-frees them (unsafe) — call it exactly once, before
+ *    `pool` is released or handed to a new aec_init(). */
+aec_destroy(aec);
+free(pool);   /* caller owns `pool`; substitute your platform's deallocator */
 ```
+<!-- docs-smoke:end -->
+
+The sample above is compiled and run on 1 s of silence by
+[`test/docs_smoke.sh`](test/docs_smoke.sh) so this snippet cannot silently
+drift from the real `aec.h` signatures again.
 
 `aec_get_mem_size` returns the exact byte count needed for the supplied
 config (sample rate, filter length, optional shadow filter, optional delay
@@ -41,8 +68,8 @@ delay on the pool is:
 
 | Backend | Pool |
 |---|---:|
-| KISS (host/reference) | **532,992 B (520.5 KB)** |
-| NE10 (embedded)       | **494,544 B (483.0 KB)** |
+| KISS (host/reference) | **533,008 B (520.5 KB)** |
+| NE10 (embedded)       | **494,560 B (483.0 KB)** |
 
 (NE10's R2C/C2R twiddle configs are backend-internal heap allocations that
 live outside the pool either way — see `fft_destroy`/`aec_destroy` note
@@ -126,7 +153,7 @@ gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/in
     test_static_aec.c $(find src -name '*.c') \
     ../../audio_common/bin/kiss/libaudio_common.a -lm -o bin/test_static_aec
 ./bin/test_static_aec mic.wav ref.wav
-# → Pool: 532992 bytes (520.5 KB), frames: N   [KISS backend; NE10 -> 494544 B / 483.0 KB]
+# → Pool: 533008 bytes (520.5 KB), frames: N   [KISS backend; NE10 -> 494560 B / 483.0 KB]
 #   PASS: all <2*N> samples byte-equal (static == dynamic)
 ```
 
@@ -153,7 +180,7 @@ heap-only (`aec_create`), so to see the static-path lines a harness must call
 `aec_init` directly and raise the debug level; the format is:
 
 ```text
-# [AEC][t= 0.000s][f=    0][Init] static-mem pool=532992 bytes (520.5 KB) sr=16000 hop=160 preset_q=0.001 cng=0
+# [AEC][t= 0.000s][f=    0][Init] static-mem pool=533008 bytes (520.5 KB) sr=16000 hop=160 preset_q=0.001 cng=0
 # [AEC][t= ...   ][f= ... ][Init] destroy: static path (no free; caller owns pool)
 ```
 
@@ -171,7 +198,7 @@ Measured via `aec_get_mem_size`, KISS backend (host/reference build):
 | Shadow `pbfdaf` (same layout, no Kalman P)                 | 61.5 KB |
 | `fft_wrapper` post FFT (KISS cfgs in-pool)                 | 16.6 KB |
 | `Aec` struct + AEC3 chain backing arrays (state / RES-est / suppression / stationarity / LFS / run + hop scratch, incl. the de-stacked instance scratch) + render FIFO + RSA counters | ~248 KB |
-| **Total (KISS)**                                           | **520.5 KB** (532,992 B) |
+| **Total (KISS)**                                           | **520.5 KB** (533,008 B) |
 
 What moved since the previous figure (526.7 KB / 539,328 B): +24.5 KB of
 former function-local stack scratch (13 `float[8192]`/`float[4096]` arrays,
@@ -183,7 +210,7 @@ elsewhere. The vectorization campaign then removed another **24.7 KB**: the
 per-hop `W_all`/`X_buf_all` snapshot buffers are gone (aec3_post now reads
 the filter state directly through its const input pointers).
 
-**NE10 backend (embedded build): 483.0 KB (494,544 B) total** — smaller than
+**NE10 backend (embedded build): 483.0 KB (494,560 B) total** — smaller than
 KISS because the R2C/C2R twiddle configs are NE10-internal heap allocations
 that live *outside* this pool (released by `fft_destroy`/`aec_destroy`, not by
 freeing the pool); everything else in the table above is backend-independent.

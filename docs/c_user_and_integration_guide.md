@@ -113,26 +113,43 @@ For embedded targets without a heap, supply a single pre-allocated pool
 instead of calling `aec_create`:
 
 ```c
-size_t pool_bytes = aec_get_mem_size(&cfg);     /* exact pool size for cfg */
-void*  pool       = your_static_pool_alloc(pool_bytes);  /* 16-byte aligned */
+size_t pool_bytes = aec_get_mem_size(&cfg);   /* exact pool size for cfg */
+void*  pool = NULL;
+if (posix_memalign(&pool, 16, pool_bytes) != 0) { /* allocation failed */ }
 
-Aec aec;
-if (aec_init(&aec, pool, pool_bytes, &cfg) != 0) { /* pool too small */ }
+Aec* aec = aec_init(pool, pool_bytes, &cfg);  /* returns NULL, not an int status */
+if (!aec) { /* pool too small, or NULL/misaligned inputs */ }
 
-/* aec_process / aec_reset / aec_destroy as usual */
-aec_destroy(&aec);   /* frees nothing on the static path; safe for both paths */
-/* caller frees pool itself */
+/* aec_process(aec, ...) / aec_reset(aec) / aec_destroy(aec) as usual —
+ * aec is now a pointer, so no more `&aec` on call sites. */
+aec_destroy(aec);
+free(pool);   /* caller frees pool itself, after aec_destroy() (see below) */
 ```
 
-Both paths produce **bit-identical** output on a given backend (verified
-across all 3 presets and FS / DT / NE scenarios; NE10 vs KISS output is not
-bit-identical to *each other* — a pre-existing, expected difference between
-the two FFT implementations). At BALANCED / 16 kHz / 52 ms filter / shadow
-on / RES on / delay-est on the pool is **557,680 B (544.6 KB)** on the KISS
-backend (host/reference, `make`, default) or **519,232 B (507.1 KB)** on the
-NE10 backend (embedded, `make BACKEND=ne10`; the R2C/C2R twiddle configs live
-outside the pool). The `aec_wav` CLI is heap-only; `test_static_aec.c` is
-the static-path harness. Full design notes and per-module breakdown:
+`aec_init` takes the pool directly (no out-param `Aec*` argument) and
+returns `Aec*` — `NULL` on failure (pool too small, NULL pointer, or a
+misaligned base). Both paths produce **bit-identical** output on a given
+backend (verified across all 3 presets and FS / DT / NE scenarios; NE10 vs
+KISS output is not bit-identical to *each other* — a pre-existing, expected
+difference between the two FFT implementations). At BALANCED / 16 kHz /
+52 ms filter / shadow on / RES on / delay-est on the pool is **557,680 B
+(544.6 KB)** on the KISS backend (host/reference, `make`, default) or
+**519,232 B (507.1 KB)** on the NE10 backend (embedded, `make
+BACKEND=ne10`). The `aec_wav` CLI is heap-only; `test_static_aec.c` is
+the static-path harness.
+
+**`aec_destroy` ownership differs by backend.** On KISS, `aec_init`
+allocates nothing outside `pool`, so `aec_destroy` is a genuine no-op —
+safe to call any number of times, and `pool` can be freed without calling it
+at all (though calling it is still good practice). On NE10, `aec_init`
+triggers 3 backend-internal heap allocations (the R2C/C2R twiddle configs
+for the post-filter, main filter, and shadow filter) that live **outside**
+`pool` and are **not** included in `aec_get_mem_size`'s figure —
+`aec_destroy` is what releases them. On this backend you **must** call
+`aec_destroy(aec)` exactly once before `pool` is freed or reused: skipping
+it leaks the 3 twiddle configs, and calling it a second time on the same
+instance double-frees them (currently unsafe — there is no destroyed-guard).
+Full design notes and per-module breakdown:
 [../c_impl/STATIC_MEMORY.md](../c_impl/STATIC_MEMORY.md).
 
 ### Module ownership

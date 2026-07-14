@@ -162,22 +162,35 @@ cleanup:
 
 ```c
 size_t pool_bytes = aec_get_mem_size(&cfg);      /* 該 cfg 的精確 pool 大小 */
-void  *pool       = platform_pool_alloc(pool_bytes);  /* 必須 16-byte 對齊 */
+void  *pool = NULL;
+if (posix_memalign(&pool, 16, pool_bytes) != 0) { /* 配置失敗 */ }
 
-Aec aec;
-if (aec_init(&aec, pool, pool_bytes, &cfg) != 0) { /* pool 不足 */ }
+Aec *aec = aec_init(pool, pool_bytes, &cfg);   /* 回傳 Aec*，失敗回傳 NULL */
+if (!aec) { /* pool 不足，或 pool 未對齊 */ }
 
-/* aec_process / aec_reset / aec_destroy 照常使用 */
-aec_destroy(&aec);   /* static path 不會 free 任何東西；pool 由 caller 回收 */
+/* aec_process(aec, ...) / aec_reset(aec) / aec_destroy(aec) 照常使用（aec 現在是指標，
+ * call site 不再需要 &aec） */
+aec_destroy(aec);
+free(pool);   /* aec_destroy() 之後才輪到 caller 回收 pool（見下方 backend 差異說明） */
 ```
 
-同一個 backend 下兩條 path 輸出 **bit-identical**（`c_impl/test_static_aec.c` 驗證
+`aec_init()` 直接回傳 `Aec*`（不是用 out-param 寫入 caller 的 `Aec` 變數），失敗回傳
+`NULL`。同一個 backend 下兩條 path 輸出 **bit-identical**（`c_impl/test_static_aec.c` 驗證
 static == dynamic byte-equal）；NE10 與 KISS 彼此的輸出並非 bit-identical（既有、
 預期中的 FFT 實作差異）。BALANCED / 16 kHz / 52 ms filter / shadow + RES +
 delay-est 全開時 pool 為：KISS backend **557,680 B（544.6 KB）**；NE10 backend
-**519,232 B（507.1 KB）**（R2C/C2R twiddle 設定屬 backend-internal heap
-配置，落在 pool 之外）。設計說明與 per-module 佔用明細見
+**519,232 B（507.1 KB）**。設計說明與 per-module 佔用明細見
 [../c_impl/STATIC_MEMORY.md](../c_impl/STATIC_MEMORY.md)。
+
+**`aec_destroy()` 的釋放範圍依 backend 而不同**：KISS backend 下 `aec_init()`
+除了 `pool` 之外不配置任何東西，所以 `aec_destroy()` 在這個 backend 上是真正的
+no-op——呼叫幾次都安全，甚至不呼叫直接回收 `pool` 也不會漏東西（但仍建議呼叫）。
+NE10 backend 下 `aec_init()` 會觸發 3 個 backend-internal 的 heap 配置（post-filter、
+main filter、shadow filter 各自的 R2C/C2R twiddle 設定）——這些配置活在 `pool`
+**之外**，也**沒有**算進 `aec_get_mem_size()` 的數字裡；`aec_destroy()` 就是負責釋放
+它們的地方。因此在 NE10 backend 上，`pool` 被釋放或交給下一次 `aec_init()` 重用之前，
+**必須**先呼叫且只呼叫一次 `aec_destroy(aec)`：漏呼叫會洩漏這 3 個 twiddle 設定，
+對同一個 instance 呼叫兩次則會 double-free（目前沒有 destroyed-guard，不安全）。
 
 ## 5. Decoupled render/capture API
 
@@ -311,8 +324,12 @@ aec_get_res_context(&aec, &ctx);
 
 - `Aec` storage 由 caller 持有；`aec_create()` 會配置其內部動態資源。
 - 改用 `aec_init()`（§4.1）時內部資源全部來自 caller pool；`aec_destroy()` 不會
-  free pool，pool 生命週期由 caller 管理（KISS backend 下 static path 完全零 heap）。
-- `aec_destroy()` 必須和成功的 `aec_create()` 成對，且只呼叫一次。
+  free pool，pool 生命週期由 caller 管理（KISS backend 下 static path 完全零 heap；
+  NE10 backend 下 `aec_init()` 另有 3 個 backend-internal 的 twiddle 設定活在
+  pool 之外，須靠 `aec_destroy()` 釋放，見 §4.1）。
+- `aec_destroy()` 必須和成功的 `aec_create()`／`aec_init()`（不論哪一個）成對，
+  且對同一個 instance 只呼叫一次；NE10 backend 下必須在 pool 被釋放或重用前呼叫，
+  漏呼叫會洩漏 twiddle 設定，呼叫兩次會 double-free。
 - `aec_reset()` 清 state 但保留 config／allocation，適合同規格的新串流。
 - `mic`、`ref`、`out` buffer 由 caller 持有，至少包含一個 hop。
 - `Aec` 是 stateful、非 reentrant；同一 instance 不可無同步並行呼叫。

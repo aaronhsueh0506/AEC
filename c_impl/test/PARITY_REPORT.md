@@ -53,7 +53,7 @@ The DT_7GTxy peak (0.11) is at sample 453420 (frame ~2834) — late in the file,
 
 ## Bug found while validating (worth filing)
 
-`c_impl/example/aec_wav.c` line ~135 sets `setenv("AEC_FP32_WAV", "1", 1)` for "parity-friendly" float32 output, but `c_impl/example/wav_io.h:215` actually reads `AEC_OUT_FLOAT`. The hardcoded "default to float32" in the CLI is therefore a no-op — the C tool always writes PCM_16 unless the caller exports `AEC_OUT_FLOAT=1` themselves. This was the first divergence we hit (peak \|Δ\|=2.09 from int16 quantization + ±1.0 clipping, masking the real algorithmic drift). Fix: rename the setenv key, or update the env-var name in `wav_io.h` — either works, but they need to agree.
+**Resolved.** `c_impl/example/aec_wav.c` originally set `setenv("AEC_FP32_WAV", "1", 1)` for "parity-friendly" float32 output while `c_impl/example/wav_io.h:215` read `AEC_OUT_FLOAT` — the mismatched keys made the "default to float32" behavior a no-op (the CLI always wrote PCM_16 unless the caller separately exported `AEC_OUT_FLOAT=1`). This was the first divergence hit in this report (peak \|Δ\|=2.09 from int16 quantization + ±1.0 clipping, masking the real algorithmic drift). The keys have since been made to agree — `aec_wav.c` now sets `AEC_OUT_FLOAT` directly (`if (!getenv("AEC_OUT_FLOAT")) setenv("AEC_OUT_FLOAT", "1", 1);`), so the CLI defaults to float32 output as originally intended; no env var needs to be exported by hand.
 
 ## Deferred fixtures (TODO — not implemented this pass)
 
