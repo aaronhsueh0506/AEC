@@ -10,6 +10,7 @@
 #include <math.h>
 #include <string.h>
 #include "fast_math.h"
+#include "simd_kernels.h"
 
 #define PSD_SCALE (32768.0 * 32768.0)   /* int16 max^2 (Python _PSD_SCALE) */
 
@@ -435,7 +436,7 @@ int aec3_post_run(Aec3Post *p,
     int fft_size = c->fft_size;
     int hop = c->hop_size;
     int n_part = in->n_partitions;
-    int k, pp;
+    int k;
     Aec3PostAbs mag;
     int saturated_capture = (in->saturation_level > 0.5f);
     int pgc = in->pending_gain_change;
@@ -458,23 +459,30 @@ int aec3_post_run(Aec3Post *p,
 
     /* ── Step 2: precompute the np.abs magnitude arrays (3037-3052,
      *            3267-3270, 3629-3630). sel_esw/sel_echo come from Step 1.   */
-    for (k = 0; k < nb; ++k) {
-        /* E1 near_spec_win = error_spec_windowed + echo_spec (ORIGINAL). */
-        sc->nsw_e1[k].r = in->error_spec_windowed[k].r + in->echo_spec[k].r;
-        sc->nsw_e1[k].i = in->error_spec_windowed[k].i + in->echo_spec[k].i;
-        /* E2 y_base = sel_esw + sel_echo (SELECTED). */
-        sc->ybase[k].r = sc->sel_esw[k].r + sc->sel_echo[k].r;
-        sc->ybase[k].i = sc->sel_esw[k].i + sc->sel_echo[k].i;
-    }
-    for (k = 0; k < nb; ++k) {
-        sc->abs_near[k]     = cabs_np(in->near_spec[k].r, in->near_spec[k].i);
-        sc->abs_far[k]      = cabs_np(in->far_spec[k].r, in->far_spec[k].i);
-        sc->abs_sel_echo[k] = cabs_np(sc->sel_echo[k].r, sc->sel_echo[k].i);
-        sc->abs_error[k]    = cabs_np(sc->sel_esw[k].r, sc->sel_esw[k].i);
-        sc->abs_echo_coh[k] = cabs_np(in->echo_spec[k].r, in->echo_spec[k].i);
-        sc->abs_nsw_e1[k]   = cabs_np(sc->nsw_e1[k].r, sc->nsw_e1[k].i);
-        sc->abs_ybase[k]    = cabs_np(sc->ybase[k].r, sc->ybase[k].i);
-    }
+    /* E1 near_spec_win = error_spec_windowed + echo_spec (ORIGINAL); E2
+     * y_base = sel_esw + sel_echo (SELECTED). Fissioned into 2 independent
+     * elementwise complex adds -- disjoint destinations (nsw_e1/ybase are
+     * separate caller-owned scratch buffers), so splitting the single
+     * per-k loop into 2 full-range sk_cadd_f32 calls changes nothing:
+     * sk_cadd_f32 reproduces `out[k].r = a[k].r+b[k].r; out[k].i =
+     * a[k].i+b[k].i` expression-for-expression. */
+    sk_cadd_f32(sc->nsw_e1, in->error_spec_windowed, in->echo_spec, nb);
+    sk_cadd_f32(sc->ybase, sc->sel_esw, sc->sel_echo, nb);
+
+    /* 7 independent np.abs magnitude arrays. Fissioned into 7 per-array
+     * sk_cabs_np_f32 calls -- each out[k] = cabs_np(z[k].r, z[k].i)
+     * elementwise with no loop-carried dependency across k, so splitting
+     * the single loop into 7 full passes over disjoint destinations is
+     * order-preserving; sk_cabs_np_f32's scalar reference is the same
+     * ar/ai/larger/smaller/ratio/sqrtf(fmaf(...)) sequence as cabs_np()
+     * above, verbatim. */
+    sk_cabs_np_f32(in->near_spec, sc->abs_near, nb);
+    sk_cabs_np_f32(in->far_spec, sc->abs_far, nb);
+    sk_cabs_np_f32(sc->sel_echo, sc->abs_sel_echo, nb);
+    sk_cabs_np_f32(sc->sel_esw, sc->abs_error, nb);
+    sk_cabs_np_f32(in->echo_spec, sc->abs_echo_coh, nb);
+    sk_cabs_np_f32(sc->nsw_e1, sc->abs_nsw_e1, nb);
+    sk_cabs_np_f32(sc->ybase, sc->abs_ybase, nb);
     mag.abs_near = sc->abs_near;
     mag.abs_far = sc->abs_far;
     mag.abs_sel_echo = sc->abs_sel_echo;
@@ -514,11 +522,17 @@ int aec3_post_run(Aec3Post *p,
              * cmag2_np per bin, f32 sums (Stage 3a; was f64 sums, 3095-3098). */
             const Complex *es = in->shadow_error_spec;
             float inner = 0.0f;
-            /* (np.abs(c)²) per bin (cmag2_np), NOT er*er+ei*ei. */
-            for (k = 1; k < nb - 1; ++k) {
-                float m = cabs_np(es[k].r, es[k].i);
-                inner += m * m;
-            }
+            /* (np.abs(c)²) per bin (cmag2_np), NOT er*er+ei*ei. Batched via
+             * sk_cmag2_np_f32 into sc->x2_at_delay as scratch -- provably
+             * dead here: within this call, x2_at_delay is next written by
+             * Step 9 below (aec3_post_compute_x2_reverb consumes it
+             * immediately after), and the previous hop's Step 9 already
+             * consumed its former contents the same way before returning;
+             * nothing reads x2_at_delay between that consume and this
+             * point. The manual serial sum below keeps the exact k=1..nb-2
+             * left-to-right accumulation order of the original loop. */
+            sk_cmag2_np_f32(es + 1, sc->x2_at_delay, nb - 2);
+            for (k = 0; k < nb - 2; ++k) inner += sc->x2_at_delay[k];
             {
                 float m0 = cabs_np(es[0].r, es[0].i);
                 float mn = cabs_np(es[nb - 1].r, es[nb - 1].i);
@@ -600,13 +614,14 @@ int aec3_post_run(Aec3Post *p,
                 if (in->X_buf != NULL && n_part > 0) {
                     const Complex *Xd = in->X_buf + (size_t)delay_idx * nb;
                     const Complex *Xp = in->X_buf + (size_t)past_idx * nb;
-                    /* x2 = (np.abs(X)**2).astype(f32) = cmag2_np per bin. */
-                    for (k = 0; k < nb; ++k) {
-                        float md = cabs_np(Xd[k].r, Xd[k].i);
-                        float mp = cabs_np(Xp[k].r, Xp[k].i);
-                        sc->x2_at_delay[k] = md * md;
-                        sc->x2_past[k] = mp * mp;
-                    }
+                    /* x2 = (np.abs(X)**2).astype(f32) = cmag2_np per bin.
+                     * Fissioned into 2 independent elementwise cmag2 calls:
+                     * disjoint destinations (x2_at_delay/x2_past), disjoint
+                     * nb-contiguous sources (Xd/Xp are two different
+                     * partition-slices of X_buf) -- no ordering dependency
+                     * between them. */
+                    sk_cmag2_np_f32(Xd, sc->x2_at_delay, nb);
+                    sk_cmag2_np_f32(Xp, sc->x2_past, nb);
                     x2_present = 1;
                 }
                 /* decay_steady = ree._reverb_decay(dominant_nearend=False) —
@@ -661,15 +676,16 @@ int aec3_post_run(Aec3Post *p,
 
                 /* ── Step 14: ree update_reverb_models (3354-3400) ───────── */
                 /* attach_reverb_decay_estimator: no-op (use_adaptive_decay=False). */
-                /* _w_mag2 = |filter.W|² (cmag2_np), shape n_part × nb. */
-                for (pp = 0; pp < n_part; ++pp) {
-                    const Complex *Wp = in->W_all + (size_t)pp * nb;
-                    float *row = sc->w_mag2 + (size_t)pp * nb;
-                    for (k = 0; k < nb; ++k) {
-                        float m = cabs_np(Wp[k].r, Wp[k].i);
-                        row[k] = m * m;
-                    }
-                }
+                /* _w_mag2 = |filter.W|² (cmag2_np), shape n_part × nb.
+                 * in->W_all and sc->w_mag2 are verified single contiguous
+                 * flat blocks with stride exactly nb at every call site
+                 * (aec.c dynamic malloc+memcpy / static-arena carve of
+                 * W_all and w_mag2; parity_aec3_post_run.c test harness) --
+                 * so the (partition, bin) double loop collapses to one
+                 * flat elementwise cmag2 pass over n_part*nb elements
+                 * (cmag2_np_elem is per-index, not a reduction, so there is
+                 * no reordering risk in merging the two loop levels). */
+                sk_cmag2_np_f32(in->W_all, sc->w_mag2, n_part * nb);
                 {
                     int delay_blocks =
                         aec_state_min_direct_path_filter_delay(obj->state);

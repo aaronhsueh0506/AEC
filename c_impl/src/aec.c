@@ -13,6 +13,7 @@
 #include "aec_debug.h"
 #include "aec3_balanced_config.h"
 #include "aec3_scale.h"
+#include "simd_kernels.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -112,7 +113,10 @@ static float mean_sq(const float* x, int n, float* scratch) {
 /* (historical note: this used to widen to float64 to match a Python
  * reference; the reference comparison is retired, kept float32.) Not used. */
 
-static float cmag2_c(float r, float i) {
+/* Kept (not deleted/renamed) per task scope even though every call site in
+ * this file now goes through simd_kernels.h's sk_cmag2_np_f32/_acc_f32 --
+ * marked unused to keep the build warning-clean. */
+__attribute__((unused)) static float cmag2_c(float r, float i) {
     /* numpy complex64 |z|² via scaled-hypot FMA (cmag2_np). */
     float ar = r < 0.0f ? -r : r;
     float ai = i < 0.0f ? -i : i;
@@ -237,12 +241,10 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
     /* np.sum(np.abs(spec)**2): cmag2_np per bin → numpy-1.26 pairwise f32 sum;
      * float32 throughout (f64 widening retired). */
     float *e2_echo = a->scr_e2_echo, *e2_near = a->scr_e2_near;
-    for (int k = 0; k < K; ++k) {
-        e2_echo[k] = cmag2_c(a->main_filter.base.echo_spec[k].r,
-                             a->main_filter.base.echo_spec[k].i);
-        e2_near[k] = cmag2_c(a->main_filter.base.near_spec[k].r,
-                             a->main_filter.base.near_spec[k].i);
-    }
+    /* fissioned into two independent per-array kernel fills (elementwise,
+     * no data dependency between echo_spec and near_spec) */
+    sk_cmag2_np_f32(a->main_filter.base.echo_spec, e2_echo, K);
+    sk_cmag2_np_f32(a->main_filter.base.near_spec, e2_near, K);
     float echo_est_pwr = aec3_post_pairwise_sum_f32(e2_echo, (size_t)K) + 1e-10f;
     float near_pwr     = aec3_post_pairwise_sum_f32(e2_near, (size_t)K) + 1e-10f;
     if (near_pwr > 1e-8f) {
@@ -1641,9 +1643,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      *    pbfdkf_process). First hop: far_spec is zero. */
     {
         float *rsa_psd = a->scr_rsa_psd;
-        for (int k = 0; k < K; ++k)
-            rsa_psd[k] = cmag2_c(a->main_filter.base.far_spec[k].r,
-                                 a->main_filter.base.far_spec[k].i);
+        sk_cmag2_np_f32(a->main_filter.base.far_spec, rsa_psd, K);
         rsa_update(&a->rsa, rsa_psd, a->far_hop, hop);
         int poor = rsa_poor_signal_excitation(&a->rsa);
         if (poor) a->main_filter.base.poor_excitation_counter = 0;
@@ -1693,9 +1693,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         /* Publish current-hop e2_coarse to main_filter BEFORE main runs. */
         {
             float *e2coa_pre = a->scr_e2coa_pre;
-            for (int k = 0; k < K; ++k)
-                e2coa_pre[k] = cmag2_c(a->shadow_filter.error_spec[k].r,
-                                        a->shadow_filter.error_spec[k].i);
+            sk_cmag2_np_f32(a->shadow_filter.error_spec, e2coa_pre, K);
             a->main_filter.e2_coarse_for_refresh =
                 (float)aec3_post_pairwise_sum_f32(e2coa_pre, (size_t)K);
             for (int k = 0; k < K; ++k)
@@ -1741,9 +1739,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             a->non_zero_render_seen = 1;
         if (a->non_zero_render_seen) {
             float *far_psd = a->scr_far_psd;
-            for (int k = 0; k < K; ++k)
-                far_psd[k] = cmag2_c(a->main_filter.base.far_spec[k].r,
-                                     a->main_filter.base.far_spec[k].i);
+            sk_cmag2_np_f32(a->main_filter.base.far_spec, far_psd, K);
             stationarity_estimator_update_noise_estimator(&a->a3_stat, far_psd);
             /* E16: pass avg_reverb from previous hop's aec3_post_compute_x2_reverb —
              * same state Python reads from _aec3_avg_render_reverb.reverb (one-hop stale,
@@ -1767,19 +1763,17 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         /* _e2_ref = Σ|filter.error_spec|² (cmag2_np, pairwise f32). */
         float *e2ref_arr = a->scr_e2ref_arr, *e2coa_arr = a->scr_e2coa_arr,
               *erl_arr = a->scr_erl_arr;
-        for (int k = 0; k < K; ++k)
-            e2ref_arr[k] = cmag2_c(a->main_filter.base.error_spec[k].r,
-                                   a->main_filter.base.error_spec[k].i);
-        for (int k = 0; k < K; ++k)
-            e2coa_arr[k] = cmag2_c(a->shadow_filter.error_spec[k].r,
-                                   a->shadow_filter.error_spec[k].i);
+        sk_cmag2_np_f32(a->main_filter.base.error_spec, e2ref_arr, K);
+        sk_cmag2_np_f32(a->shadow_filter.error_spec, e2coa_arr, K);
         float e2_ref = aec3_post_pairwise_sum_f32(e2ref_arr, (size_t)K);
         float e2_coa = aec3_post_pairwise_sum_f32(e2coa_arr, (size_t)K);
-        /* erl[k] = Σ_p |W_p[k]|². */
+        /* erl[k] = Σ_p |W_p[k]|². zero-init once, then accumulate every
+         * partition (including p==0) via the acc kernel — matches the
+         * original zero-fill-then-`+=`-every-partition shape exactly. */
         for (int k = 0; k < K; ++k) erl_arr[k] = 0.0f;
         for (int part = 0; part < N; ++part) {
             const Complex* Wp = a->main_filter.base.W + (size_t)part * K;
-            for (int k = 0; k < K; ++k) erl_arr[k] += cmag2_c(Wp[k].r, Wp[k].i);
+            sk_cmag2_np_acc_f32(Wp, erl_arr, K);
         }
         /* publish to the refined filter. */
         a->main_filter.e2_coarse_for_refresh = e2_coa;
@@ -1970,9 +1964,19 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             int vb_start = (int)(100.0f / freq_per_bin); if (vb_start < 1) vb_start = 1;
             int vb_limit = (int)(3000.0f / freq_per_bin); if (vb_limit > K) vb_limit = K;
             float track_err_pwr = 0.0f;
-            for (int k = vb_start; k < vb_limit; ++k)
-                track_err_pwr += cmag2_c(a->main_filter.base.error_spec[k].r,
-                                                 a->main_filter.base.error_spec[k].i);
+            {
+                /* Scalar serial reduction (not an elementwise fill/acc target):
+                 * fill-scratch-then-serial-sum, reusing scr_e2ref_arr, which is
+                 * provably dead here (last written/read at step 12 above, not
+                 * touched again until next hop's step 12) — the k-order
+                 * `track_err_pwr +=` sum below is unchanged from the original
+                 * inline-compute-then-accumulate loop, just reading the
+                 * precomputed (bit-identical) per-bin magnitude values. */
+                float *terr_scr = a->scr_e2ref_arr;
+                sk_cmag2_np_f32(a->main_filter.base.error_spec + vb_start,
+                                 terr_scr + vb_start, vb_limit - vb_start);
+                for (int k = vb_start; k < vb_limit; ++k) track_err_pwr += terr_scr[k];
+            }
             track_err_pwr += 1e-10f;
             if (a->wn_err_baseline < 1e-6f) a->wn_err_baseline = track_err_pwr;
             float jump_ratio = track_err_pwr / (a->wn_err_baseline + 1e-10f);

@@ -24,6 +24,7 @@
  */
 #include "pbfdkf.h"
 #include "aec3_scale.h"
+#include "simd_kernels.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -373,15 +374,13 @@ static float pbfdaf_frontend(PBFDAF* p,
         far_psd_sum += cmag2_np(p->far_spec[k].r, p->far_spec[k].i);
     if (pwr_sum < 1e-10f && far_psd_sum > 1e-10f) {
         /* cold start: power = np.abs(far_spec)**2 */
-        for (int k = 0; k < K; ++k)
-            p->power[k] = cmag2_np(p->far_spec[k].r, p->far_spec[k].i);
+        sk_cmag2_np_f32(p->far_spec, p->power, K);
     } else {
         /* power = alpha_power*power + (1-alpha_power)*far_psd; alpha_power=0.9,
          * float32-by-design. */
         const float a = 0.9f;
         const float b = 1.0f - 0.9f;
-        for (int k = 0; k < K; ++k)
-            p->power[k] = a * p->power[k] + b * cmag2_np(p->far_spec[k].r, p->far_spec[k].i);
+        sk_ema_cmag2_f32(p->power, p->far_spec, a, b, K);
     }
 
     /* echo_spec = Σ_p W[p] * X_buf[(curr_p-p)%N] */
@@ -490,8 +489,7 @@ void pbfdaf_process(PBFDAF* p,
         for (int k = 0; k < K; ++k) x2psum[k] = 0.0f;
         for (int part = 0; part < N; ++part) {
             const Complex* Xp = p->X_buf + (size_t)part * K;
-            for (int k = 0; k < K; ++k)
-                x2psum[k] += cmag2_np(Xp[k].r, Xp[k].i);
+            sk_cmag2_np_acc_f32(Xp, x2psum, K);
         }
         float mu_initial_boost = p->initial_state_active ? (0.95f / 0.7f) : 1.0f;
         float ng_thr = (float)AEC3_FILTER_NOISE_GATE_POWER_FLOAT;
@@ -714,8 +712,7 @@ void pbfdkf_copy_weights_from(PBFDKF* dst, const PBFDKF* src) {
 float pbfdaf_get_error_energy(PBFDAF* p) {
     int K = p->n_freqs;
     float *e2 = p->scr_e2;   /* instance scratch, not stack: [n_freqs] */
-    for (int k = 0; k < K; ++k)
-        e2[k] = cmag2_np(p->error_spec[k].r, p->error_spec[k].i);
+    sk_cmag2_np_f32(p->error_spec, e2, K);
     return pairwise_sum_f32(e2, K);
 }
 
@@ -827,13 +824,11 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
         for (int k = 0; k < K; ++k) X2[k] = 0.0f;
         for (int part = 0; part < N; ++part) {
             const Complex* Xp = b->X_buf + (size_t)part * K;
-            for (int k = 0; k < K; ++k)
-                X2[k] += cmag2_np(Xp[k].r, Xp[k].i);
+            sk_cmag2_np_acc_f32(Xp, X2, K);
         }
     } else {
         const Complex* Xl = b->X_buf + (size_t)curr_p * K;
-        for (int k = 0; k < K; ++k)
-            X2[k] = cmag2_np(Xl[k].r, Xl[k].i);
+        sk_cmag2_np_f32(Xl, X2, K);
     }
 
     float delta32 = (float)b->delta;
@@ -931,8 +926,7 @@ void pbfdkf_process(PBFDKF* p,
          * deterministic function of the same floats, so reusing the value
          * changes nothing bit-wise. */
         float *e2_ref = p->e2_ref_scratch;   /* instance scratch, not stack */
-        for (int k = 0; k < K; ++k)
-            e2_ref[k] = cmag2_np(b->error_spec[k].r, b->error_spec[k].i);
+        sk_cmag2_np_f32(b->error_spec, e2_ref, K);
 
         /* startup / poor-excitation / saturation gates → refresh only. */
         b->call_counter += 1;
