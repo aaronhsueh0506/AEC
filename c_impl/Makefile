@@ -31,6 +31,45 @@ ifeq ($(BACKEND),ne10)
   LDFLAGS += -lc++
 endif
 
+# -Werror opt-in for this repo's OWN sources (default off; CI can flip it on
+# with `make WERROR=1`). AEC compiles no vendored TUs itself (the FFT vendor
+# code lives in audio_common), so every object built by this Makefile is
+# "our code" -- no separate warning isolation is needed here.
+WERROR ?= 0
+ifeq ($(WERROR),1)
+  CFLAGS += -Werror
+endif
+
+# --- Build-configuration stamp (F12 build hygiene) --------------------------
+# obj/ is a single flat directory shared across every BACKEND/EXTRA_CFLAGS
+# combination, so switching either on an already-built tree used to silently
+# keep stale .o files around (they don't encode which flags produced them).
+# CFG_SIG hashes the exact compiler invocation that will produce every object
+# in this build.
+#
+# This check runs at PARSE time (via $(shell ...), not as a build-rule
+# recipe): tried an order-only-prerequisite version first (a stamp FILE that
+# a rule creates, referenced via `obj/%.o: %.c | $(CFG_STAMP)`), but that is
+# racy -- verified empirically. When N objects share one order-only
+# prerequisite whose recipe wipes the directory they all live in, GNU Make
+# decides "is object #1 out of date?" using the prerequisite tree it already
+# resolved, and for at least one sibling object that decision is finalized
+# before the shared prerequisite's wipe recipe actually runs, so that object
+# silently keeps its (about to be deleted) stale .o and is never recompiled.
+# Doing the compare-and-wipe unconditionally while the Makefile is being
+# read sidesteps the whole issue: by the time `make` starts asking "is any
+# target out of date", obj/ has already been wiped (if needed) or left
+# alone (if not) -- no build-graph race is possible.
+CFG_SIG        := $(shell printf '%s' "$(CC) $(CFLAGS) $(EXTRA_CFLAGS) BACKEND=$(BACKEND) WERROR=$(WERROR)" | shasum -a 256 | cut -c1-12)
+CFG_STAMP_FILE := $(OBJ_DIR)/.cfg_stamp
+CFG_LAST_SIG   := $(shell test -f $(CFG_STAMP_FILE) && cat $(CFG_STAMP_FILE))
+ifneq ($(CFG_SIG),$(CFG_LAST_SIG))
+$(info AEC c_impl: build config changed -- wiping $(OBJ_DIR) for a full rebuild)
+$(shell rm -rf $(OBJ_DIR))
+$(shell mkdir -p $(OBJ_DIR))
+$(shell echo $(CFG_SIG) > $(CFG_STAMP_FILE))
+endif
+
 # Algorithm sources (auto-detected — drop a new file in src/ to add it).
 # fft_wrapper*.c no longer live here; they're part of the audio_common archive
 # linked above.
@@ -126,5 +165,6 @@ help:
 	@echo "  ./bin/bench_rtf [--seconds N] [--repeat M] [--preset mild|balanced|aggressive]"
 	@echo "  make BACKEND=kiss|ne10   (default: kiss; ne10 is the embedded deliverable)"
 	@echo "  make AC_DIR=<path>       (override audio_common location)"
+	@echo "  make WERROR=1            (opt-in: -Werror for this repo's own sources)"
 
 .PHONY: all dirs clean lib bench selftest debug help audio_common_lib
