@@ -79,7 +79,7 @@ typedef struct AecConfig {
      * fix). Gated on inst-ERLE peak > _inst_erle_db AND delay < tap reach.
      * _protect_inst_erle is the A/B-rejected option-A (block the realign). */
     int    delay_acquire_warm_transfer;       /* 1 */
-    double delay_acquire_inst_erle_db;        /* 4.0 */
+    float  delay_acquire_inst_erle_db;        /* 4.0 */
     int    delay_acquire_protect_inst_erle;   /* 0 */
 
     /* DT-deg recovery stack (default ON, mirrors Python 16285fd). The
@@ -91,8 +91,9 @@ typedef struct AecConfig {
     int    dt_aware_res_floor_enabled;        /* 1 — DT-gated RES min-gain floor */
     float  min_gain_floor_dt_db;              /* -16.0 — DT floor (dB) */
     /* ne_recent gate parameters (mirror AecConfig.ne_recent_*). threshold is
-     * f64 to match Python's float(0.3) exactly (0.3f rounds differently). */
-    double ne_recent_threshold;               /* 0.3 */
+     * float32-by-design (Python bit-exact parity retired; f32/f64 drift
+     * across this threshold is accepted). */
+    float  ne_recent_threshold;               /* 0.3 */
     int    ne_recent_hold;                    /* 150 */
     int    ne_recent_sustain;                 /* 3 */
 
@@ -152,7 +153,7 @@ typedef struct Aec {
     int    duty_stable_hops;   /* consecutive solid+unchanged hops (arming) */
     int    duty_pos;           /* position in the 1-in-K analysis cycle */
     int    duty_last_delay;    /* estimate on the previous hop (change detect) */
-    double duty_erle_peak;     /* leaky running peak of erle_windowed (dB) */
+    float  duty_erle_peak;     /* leaky running peak of erle_windowed (dB) */
 
     /* linear filters */
     PBFDKF main_filter;
@@ -186,33 +187,35 @@ typedef struct Aec {
     float  render_peak_floor;
     int    block_stationary_next;   /* _block_stationary_for_next_hop latch */
 
-    /* per-frame scalars (mirror orchestrator instance fields) */
-    double saturation_level;
-    double erl_estimate;
-    double main_err_smooth, shadow_err_smooth;
+    /* per-frame scalars (mirror orchestrator instance fields). float32-by-
+     * design (Stage-2 f32 conversion; Python f64 bit-exact parity retired,
+     * f32/f64 drift accepted — see aec.c). */
+    float  saturation_level;
+    float  erl_estimate;
+    float  main_err_smooth, shadow_err_smooth;
     long   shadow_frame_count;
     int    epc_render_forced_remaining;
-    double erle_window_near, erle_window_err;
-    double erle_factor_prev;
-    double inst_erle_smooth;
+    float  erle_window_near, erle_window_err;
+    float  erle_factor_prev;
+    float  inst_erle_smooth;
     /* inst-ERLE slope ring (mirrors Python orchestrator _erle_slope_buf, a
      * deque maxlen ~500ms/hop). Holds get_erle_instant() dB values; the warm
      * tap-transfer gate reads max() of the last 15. Filled every freq-path hop
      * OUTSIDE the enable_res gate (Python appends unconditionally). */
     float  erle_slope_buf[64];   /* cap >= ceil(500ms/hop)=50 @hop160/16k */
     int    erle_slope_cap, erle_slope_len, erle_slope_head;
-    double wn_err_baseline;
+    float  wn_err_baseline;
     int    stat_dt_hangover;
     int    warmup_frames_remaining;
     int    warmup_far_active;
-    double simple_mu_ratio;
+    float  simple_mu_ratio;
     int    simple_mu_holdoff;
     float* per_bin_mu_scale;   int has_per_bin_mu;
-    double limiter_gain;
+    float  limiter_gain;
     float* limiter_near_lag;   int has_limiter_lag;
     /* power EMAs (alpha=0.95 sample loop) */
-    double near_power, raw_error_power;
-    double alpha_pow;
+    float  near_power, raw_error_power;
+    float  alpha_pow;
     long   frame_count;
 
     /* DT-deg recovery: held "near-end seen recently" gate (mirrors Python
@@ -228,19 +231,19 @@ typedef struct Aec {
     int    leakage_div_sustained_counter;
 
     /* FilterMisadjustmentEstimator accumulators */
-    double misadj_e2_acum, misadj_y2_acum;
+    float  misadj_e2_acum, misadj_y2_acum;
     int    misadj_n_acum;
-    double misadj_inv;
+    float  misadj_inv;
     int    misadj_overhang;
     int    misadj_stable_count;
     int    misadj_hangover_remaining;
 
     /* erle_windowed cache for the delay Path-A _already_cancelling guard
      * (= last frame's erle_windowed dB). */
-    double last_erle_windowed;
+    float  last_erle_windowed;
 
     /* RES-context stash (last frame) */
-    double last_far_power, last_shadow_dt, last_dt_indicator;
+    float  last_far_power, last_shadow_dt, last_dt_indicator;
     int    last_is_stationary_dt;
 
     /* hop scratch */
@@ -373,12 +376,12 @@ typedef struct AecDebugStatus {
     /* delay estimation (EchoPathDelayEstimator / AEC3 matched-filter) */
     int    delay_samples;      /* current applied delay, samples; -1 = not yet
                                  * acquired (mirrors a->current_delay)         */
-    double delay_confidence;   /* 0.0 / 0.5 / 1.0 (delay_aec3_confidence)      */
+    float  delay_confidence;   /* 0.0 / 0.5 / 1.0 (delay_aec3_confidence)      */
     int    delay_updates;      /* matched-filter update count
                                  * (delay_aec3_n_updates)                      */
 
     /* linear filter health */
-    double erle_windowed_db;   /* windowed ERLE (dB) from the last hop that
+    float  erle_windowed_db;   /* windowed ERLE (dB) from the last hop that
                                  * ran the AEC3 post chain (a->last_erle_windowed),
                                  * 0.0 before the post chain has run once      */
     int    usable_linear;      /* AEC3 usable-linear-estimate gate state
@@ -391,8 +394,8 @@ typedef struct AecDebugStatus {
      * the power-tracking EMAs the ERLE machinery already updates every hop
      * (two multiply-accumulate loops that run unconditionally), so reading
      * them here adds zero per-frame cost. */
-    double near_power;         /* EMA of mic/near-hop power (a->near_power)    */
-    double out_power;          /* EMA of the linear, pre-RES-gain output power
+    float  near_power;         /* EMA of mic/near-hop power (a->near_power)    */
+    float  out_power;          /* EMA of the linear, pre-RES-gain output power
                                  * (a->raw_error_power)                        */
 } AecDebugStatus;
 

@@ -66,7 +66,7 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     /* Warm tap-transfer (v3.24.1, default ON) + its gate threshold; option-A
      * (block realign) default-OFF. Mirrors config.py:266/271/286. */
     cfg->delay_acquire_warm_transfer = 1;
-    cfg->delay_acquire_inst_erle_db = 4.0;
+    cfg->delay_acquire_inst_erle_db = 4.0f;
     cfg->delay_acquire_protect_inst_erle = 0;
     /* DT-deg recovery stack (default ON, mirrors Python 16285fd). */
     cfg->dt_aware_recovery_soft = 1;
@@ -75,7 +75,7 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
      * deeper linear convergence lifts FS echo, freeing headroom to raise this
      * DT-only floor and neutralise round-robin's DT-deg cost. */
     cfg->min_gain_floor_dt_db = -16.0f;
-    cfg->ne_recent_threshold = 0.3;   /* f64, matches Python float(0.3) */
+    cfg->ne_recent_threshold = 0.3f;   /* float32-by-design (Python bit-exact parity retired) */
     cfg->ne_recent_hold = 150;
     cfg->ne_recent_sustain = 3;
     cfg->min_gain_floor_far_active_db = -28.0f;   /* balanced */
@@ -98,19 +98,19 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
 
 /* ───────────────────────── helpers ─────────────────────────────────────── */
 
-/* np.mean(x ** 2): square in fp32, sum via numpy-1.26 pairwise f32, divide
- * (np.float32 / int → float64). Uses the bit-exact pairwise from aec3_post.
+/* np.mean(x ** 2): square in fp32, sum via numpy-1.26 pairwise f32, divide.
+ * Runs entirely in float32-by-design (f64 widening retired — see aec.c/aec.h
+ * Stage-2 conversion note). Uses the bit-exact pairwise from aec3_post.
  * `scratch` must hold >= n floats (n is always hop_size at every call site;
  * callers pass a->scr_sq, sized hop_size -- see aec.h struct comment). */
-static double mean_sq(const float* x, int n, float* scratch) {
+static float mean_sq(const float* x, int n, float* scratch) {
     for (int i = 0; i < n; ++i) scratch[i] = x[i] * x[i];
     float s = aec3_post_pairwise_sum_f32(scratch, (size_t)n);
-    return (double)(s / (float)n);
+    return s / (float)n;
 }
 
-/* float(np.sum(near**2)) over hop floats in float64 (Python upcasts the
- * sample-loop EMA inputs; the sum_sum below is the EMA sum which is unused at
- * this layer, so we only need np.abs(c64)**2-style sums elsewhere). Not used. */
+/* (historical note: this used to widen to float64 to match a Python
+ * reference; the reference comparison is retired, kept float32.) Not used. */
 
 static float cmag2_c(float r, float i) {
     /* numpy complex64 |z|² via scaled-hypot FMA (cmag2_np). */
@@ -146,23 +146,23 @@ static void aec_reset_filter_derived_state(Aec* a) {
     filter_convergence_reset(&a->convergence);
     epc_reset(&a->epc);
 
-    a->main_err_smooth = 0.0;
-    a->shadow_err_smooth = 0.0;
-    a->raw_error_power = 0.0;
-    a->near_power = 0.0;
+    a->main_err_smooth = 0.0f;
+    a->shadow_err_smooth = 0.0f;
+    a->raw_error_power = 0.0f;
+    a->near_power = 0.0f;
 
-    a->erle_window_near = 1e-10;
-    a->erle_window_err = 1e-10;
-    a->erle_factor_prev = 0.0;
-    a->inst_erle_smooth = 1.0;
+    a->erle_window_near = 1e-10f;
+    a->erle_window_err = 1e-10f;
+    a->erle_factor_prev = 0.0f;
+    a->inst_erle_smooth = 1.0f;
     a->erle_slope_len = 0;     /* mirror _erle_slope_buf.clear() (orch 1176) */
     a->erle_slope_head = 0;
 
-    a->simple_mu_ratio = 1.0;
+    a->simple_mu_ratio = 1.0f;
     a->simple_mu_holdoff = 0;
     a->has_per_bin_mu = 0;          /* _per_bin_mu_scale = None */
 
-    a->erl_estimate = 0.1;
+    a->erl_estimate = 0.1f;
     a->epc_render_forced_remaining = 0;
     doubletalk_reset(&a->dt_analyzer);
     a->stat_dt_hangover = 0;
@@ -185,57 +185,57 @@ static void aec_reset_filter_derived_state(Aec* a) {
     a->has_pending = 0;
     a->pending_delay_ttl = 0;
 
-    a->last_erle_windowed = 0.0;
+    a->last_erle_windowed = 0.0f;
 }
 
 /* _get_simple_mu_scale (orchestrator 1456-1476). Writes a per-bin array into
  * a->per_bin_mu_scale when one is active, returns scalar otherwise; sets
  * *out_is_array. */
-static double get_simple_mu_scale(Aec* a, int* out_is_array) {
-    double mu_min = a->cfg.shadow_mu_min;
+static float get_simple_mu_scale(Aec* a, int* out_is_array) {
+    float mu_min = a->cfg.shadow_mu_min;
     *out_is_array = 0;
     if (a->warmup_frames_remaining > 0) {
         if (a->warmup_far_active) a->warmup_frames_remaining--;
-        if (a->simple_mu_ratio < 0.2) {
-            return (a->simple_mu_ratio > 0.2) ? a->simple_mu_ratio : 0.2;  /* max(0.2,ratio) */
+        if (a->simple_mu_ratio < 0.2f) {
+            return (a->simple_mu_ratio > 0.2f) ? a->simple_mu_ratio : 0.2f;  /* max(0.2,ratio) */
         }
-        double v = a->simple_mu_ratio + 0.2;       /* min(1.0, max(0.5, .)) */
-        if (v < 0.5) v = 0.5;
-        if (v > 1.0) v = 1.0;
+        float v = a->simple_mu_ratio + 0.2f;       /* min(1.0, max(0.5, .)) */
+        if (v < 0.5f) v = 0.5f;
+        if (v > 1.0f) v = 1.0f;
         return v;
     }
-    if (!a->convergence.converged) { if (mu_min < 0.3) mu_min = 0.3; }
-    else                          { if (mu_min < 0.2) mu_min = 0.2; }
+    if (!a->convergence.converged) { if (mu_min < 0.3f) mu_min = 0.3f; }
+    else                          { if (mu_min < 0.2f) mu_min = 0.2f; }
     if (a->has_per_bin_mu) {
         /* np.maximum(_per_bin_mu_scale, mu_min) (f32 array vs f32 scalar). */
         int K = a->n_freqs;
         for (int k = 0; k < K; ++k) {
             float v = a->per_bin_mu_scale[k];
-            if (v < (float)mu_min) v = (float)mu_min;
+            if (v < mu_min) v = mu_min;
             a->per_bin_mu_scale[k] = v;
         }
         *out_is_array = 1;
-        return 0.0;  /* unused */
+        return 0.0f;  /* unused */
     }
-    return mu_min + (1.0 - mu_min) * a->simple_mu_ratio;
+    return mu_min + (1.0f - mu_min) * a->simple_mu_ratio;
 }
 
 /* _update_simple_mu_ratio (orchestrator 1478-1522). */
 static void update_simple_mu_ratio(Aec* a, const float* output,
                                    const float* far_end, int n) {
-    double error_power = mean_sq(output, n, a->scr_sq) + 1e-10;
-    double far_power   = mean_sq(far_end, n, a->scr_sq) + 1e-10;
-    if (far_power < 1e-6 && error_power < 1e-6) return;
-    if (far_power > 1e-4 && a->simple_mu_ratio < 0.1) {
-        a->simple_mu_ratio = 0.8;
+    float error_power = mean_sq(output, n, a->scr_sq) + 1e-10f;
+    float far_power   = mean_sq(far_end, n, a->scr_sq) + 1e-10f;
+    if (far_power < 1e-6f && error_power < 1e-6f) return;
+    if (far_power > 1e-4f && a->simple_mu_ratio < 0.1f) {
+        a->simple_mu_ratio = 0.8f;
         a->simple_mu_holdoff = 0;
         return;
     }
-    double ratio = far_power / error_power;
-    if (ratio > 1.0) ratio = 1.0;
+    float ratio = far_power / error_power;
+    if (ratio > 1.0f) ratio = 1.0f;
     int K = a->n_freqs;
     /* np.sum(np.abs(spec)**2): cmag2_np per bin → numpy-1.26 pairwise f32 sum;
-     * + 1e-10 widens to f64. */
+     * float32 throughout (f64 widening retired). */
     float *e2_echo = a->scr_e2_echo, *e2_near = a->scr_e2_near;
     for (int k = 0; k < K; ++k) {
         e2_echo[k] = cmag2_c(a->main_filter.base.echo_spec[k].r,
@@ -243,19 +243,19 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
         e2_near[k] = cmag2_c(a->main_filter.base.near_spec[k].r,
                              a->main_filter.base.near_spec[k].i);
     }
-    double echo_est_pwr = (double)aec3_post_pairwise_sum_f32(e2_echo, (size_t)K) + 1e-10;
-    double near_pwr     = (double)aec3_post_pairwise_sum_f32(e2_near, (size_t)K) + 1e-10;
-    if (near_pwr > 1e-8) {
-        double r2 = echo_est_pwr / near_pwr;
-        if (r2 < 0.0) r2 = 0.0; if (r2 > 1.0) r2 = 1.0;
-        double r2_half = r2 * 0.5;
+    float echo_est_pwr = aec3_post_pairwise_sum_f32(e2_echo, (size_t)K) + 1e-10f;
+    float near_pwr     = aec3_post_pairwise_sum_f32(e2_near, (size_t)K) + 1e-10f;
+    if (near_pwr > 1e-8f) {
+        float r2 = echo_est_pwr / near_pwr;
+        if (r2 < 0.0f) r2 = 0.0f; if (r2 > 1.0f) r2 = 1.0f;
+        float r2_half = r2 * 0.5f;
         if (r2_half > ratio) ratio = r2_half;
     }
-    double alpha;
-    if (ratio < a->simple_mu_ratio) { alpha = 0.3; a->simple_mu_holdoff = 20; }
-    else if (a->simple_mu_holdoff > 0) { a->simple_mu_holdoff--; alpha = 0.99; }
-    else alpha = 0.95;
-    a->simple_mu_ratio = alpha * a->simple_mu_ratio + (1.0 - alpha) * ratio;
+    float alpha;
+    if (ratio < a->simple_mu_ratio) { alpha = 0.3f; a->simple_mu_holdoff = 20; }
+    else if (a->simple_mu_holdoff > 0) { a->simple_mu_holdoff--; alpha = 0.99f; }
+    else alpha = 0.95f;
+    a->simple_mu_ratio = alpha * a->simple_mu_ratio + (1.0f - alpha) * ratio;
 }
 
 /* ───────────────────────── construction ────────────────────────────────── */
@@ -269,10 +269,11 @@ static long blocks_to_hops_round(int blocks, int hop, int sr) {
     /* AEC3 block = 64 samples; per-hop count = blocks * 64 / hop ... but the
      * Python helper uses round(blocks * kBlockSize / hop * (sr_ref/sr))? We use
      * the verified production value via the same formula as aec3_scale. The
-     * only call here is 1000 → init poor-excitation counter. */
-    double v = (double)blocks * (64.0) / (double)hop;
+     * only call here is 1000 → init poor-excitation counter. Init-only,
+     * float32-by-design. */
+    float v = (float)blocks * 64.0f / (float)hop;
     (void)sr;
-    return (long)floor(v + 0.5);
+    return (long)floorf(v + 0.5f);
 }
 
 /* Clear + recreate the AEC3 post chain sub-objects (mirrors _reset_aec3_post
@@ -366,7 +367,7 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     /* inst-ERLE slope ring cap = Python _slope_n = max(2, int(0.5*sr/hop)),
      * clamped to the static array size (orchestrator.py:649). */
     {
-        int _sn = (int)(0.5 * (double)cfg->sample_rate / (double)(hop > 0 ? hop : 1));
+        int _sn = (int)(0.5f * (float)cfg->sample_rate / (float)(hop > 0 ? hop : 1));
         if (_sn < 2) _sn = 2;
         if (_sn > (int)(sizeof(a->erle_slope_buf) / sizeof(a->erle_slope_buf[0])))
             _sn = (int)(sizeof(a->erle_slope_buf) / sizeof(a->erle_slope_buf[0]));
@@ -617,12 +618,12 @@ int aec_create(Aec* a, const AecConfig* cfg) {
         scfg.split_floor_enabled = 1;
         /* preset axis: split_floor_far_active = 10^(db/10). */
         scfg.split_floor_far_active =
-            pow(10.0, (double)cfg->min_gain_floor_far_active_db / 10.0);
+            powf(10.0f, cfg->min_gain_floor_far_active_db / 10.0f);
         scfg.split_floor_far_silent = AEC3B_SG_SPLIT_FLOOR_FAR_SILENT;
         /* DT-gated floor: 10^(min_gain_floor_dt_db/10) (mirrors Python
          * split_floor_dt_db -> _split_floor_dt). */
         scfg.split_floor_dt =
-            pow(10.0, (double)cfg->min_gain_floor_dt_db / 10.0);
+            powf(10.0f, cfg->min_gain_floor_dt_db / 10.0f);
         scfg.split_floor_latch_power = AEC3B_SG_SPLIT_FLOOR_LATCH_POWER;
         scfg.soft_blend_enabled = AEC3B_SG_SOFT_BLEND_ENABLED;
         scfg.soft_blend_per_bin = AEC3B_SG_SOFT_BLEND_PER_BIN;
@@ -707,33 +708,33 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     a->stationarity_converge_hops = AEC3B_STATIONARITY_CONVERGE_HOPS;
 
     /* scalar state. */
-    a->saturation_level = 0.0;
-    a->erl_estimate = 0.1;
-    a->main_err_smooth = 0.0; a->shadow_err_smooth = 0.0;
+    a->saturation_level = 0.0f;
+    a->erl_estimate = 0.1f;
+    a->main_err_smooth = 0.0f; a->shadow_err_smooth = 0.0f;
     a->shadow_frame_count = 0;
     a->epc_render_forced_remaining = 0;
-    a->erle_window_near = 1e-10; a->erle_window_err = 1e-10;
-    a->erle_factor_prev = 0.0;
-    a->inst_erle_smooth = 1.0;
-    a->wn_err_baseline = 1e-8;
+    a->erle_window_near = 1e-10f; a->erle_window_err = 1e-10f;
+    a->erle_factor_prev = 0.0f;
+    a->inst_erle_smooth = 1.0f;
+    a->wn_err_baseline = 1e-8f;
     a->stat_dt_hangover = 0;
     a->warmup_frames_remaining = cfg->warmup_frames;
     a->warmup_far_active = 0;
-    a->simple_mu_ratio = 1.0;
+    a->simple_mu_ratio = 1.0f;
     a->simple_mu_holdoff = 0;
     a->has_per_bin_mu = 0;
-    a->limiter_gain = 1.0;
+    a->limiter_gain = 1.0f;
     a->has_limiter_lag = 0;
-    a->near_power = 0.0; a->raw_error_power = 0.0;
-    a->alpha_pow = 0.95;
+    a->near_power = 0.0f; a->raw_error_power = 0.0f;
+    a->alpha_pow = 0.95f;
     a->frame_count = 0;
     a->poor_coarse_counter = 0;
     a->coarse_reset_hangover = 0;
     a->leakage_div_sustained_counter = 0;
-    a->misadj_e2_acum = 0.0; a->misadj_y2_acum = 0.0; a->misadj_n_acum = 0;
-    a->misadj_inv = 0.0; a->misadj_overhang = 0;
+    a->misadj_e2_acum = 0.0f; a->misadj_y2_acum = 0.0f; a->misadj_n_acum = 0;
+    a->misadj_inv = 0.0f; a->misadj_overhang = 0;
     a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
-    a->last_erle_windowed = 0.0;
+    a->last_erle_windowed = 0.0f;
 
     /* hop scratch. */
     a->per_bin_mu_scale = (float*)malloc((size_t)K * sizeof(float));
@@ -879,7 +880,7 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     /* inst-ERLE slope ring cap = Python _slope_n = max(2, int(0.5*sr/hop)),
      * clamped to the static array size. (orchestrator.py:649) */
     {
-        int _sn = (int)(0.5 * (double)cfg->sample_rate / (double)(hop > 0 ? hop : 1));
+        int _sn = (int)(0.5f * (float)cfg->sample_rate / (float)(hop > 0 ? hop : 1));
         if (_sn < 2) _sn = 2;
         if (_sn > (int)(sizeof(a->erle_slope_buf) / sizeof(a->erle_slope_buf[0])))
             _sn = (int)(sizeof(a->erle_slope_buf) / sizeof(a->erle_slope_buf[0]));
@@ -1098,11 +1099,11 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         scfg.low_render_threshold = AEC3B_SG_LOW_RENDER_THRESHOLD;
         scfg.split_floor_enabled = 1;
         scfg.split_floor_far_active =
-            pow(10.0, (double)cfg->min_gain_floor_far_active_db / 10.0);
+            powf(10.0f, cfg->min_gain_floor_far_active_db / 10.0f);
         scfg.split_floor_far_silent = AEC3B_SG_SPLIT_FLOOR_FAR_SILENT;
         /* DT-gated floor: 10^(min_gain_floor_dt_db/10) (mirrors aec_create). */
         scfg.split_floor_dt =
-            pow(10.0, (double)cfg->min_gain_floor_dt_db / 10.0);
+            powf(10.0f, cfg->min_gain_floor_dt_db / 10.0f);
         scfg.split_floor_latch_power = AEC3B_SG_SPLIT_FLOOR_LATCH_POWER;
         scfg.soft_blend_enabled = AEC3B_SG_SOFT_BLEND_ENABLED;
         scfg.soft_blend_per_bin = AEC3B_SG_SOFT_BLEND_PER_BIN;
@@ -1208,21 +1209,21 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     a->render_peak_floor = 10.0f / 32768.0f;
     a->block_stationary_next = 0;
     a->stationarity_converge_hops = AEC3B_STATIONARITY_CONVERGE_HOPS;
-    a->saturation_level = 0.0; a->erl_estimate = 0.1;
-    a->main_err_smooth = 0.0; a->shadow_err_smooth = 0.0;
+    a->saturation_level = 0.0f; a->erl_estimate = 0.1f;
+    a->main_err_smooth = 0.0f; a->shadow_err_smooth = 0.0f;
     a->shadow_frame_count = 0; a->epc_render_forced_remaining = 0;
-    a->erle_window_near = 1e-10; a->erle_window_err = 1e-10;
-    a->erle_factor_prev = 0.0; a->inst_erle_smooth = 1.0;
-    a->wn_err_baseline = 1e-8; a->stat_dt_hangover = 0;
+    a->erle_window_near = 1e-10f; a->erle_window_err = 1e-10f;
+    a->erle_factor_prev = 0.0f; a->inst_erle_smooth = 1.0f;
+    a->wn_err_baseline = 1e-8f; a->stat_dt_hangover = 0;
     a->warmup_frames_remaining = cfg->warmup_frames; a->warmup_far_active = 0;
-    a->simple_mu_ratio = 1.0; a->simple_mu_holdoff = 0; a->has_per_bin_mu = 0;
-    a->limiter_gain = 1.0; a->has_limiter_lag = 0;
-    a->near_power = 0.0; a->raw_error_power = 0.0; a->alpha_pow = 0.95;
+    a->simple_mu_ratio = 1.0f; a->simple_mu_holdoff = 0; a->has_per_bin_mu = 0;
+    a->limiter_gain = 1.0f; a->has_limiter_lag = 0;
+    a->near_power = 0.0f; a->raw_error_power = 0.0f; a->alpha_pow = 0.95f;
     a->frame_count = 0; a->poor_coarse_counter = 0; a->coarse_reset_hangover = 0;
-    a->misadj_e2_acum = 0.0; a->misadj_y2_acum = 0.0; a->misadj_n_acum = 0;
-    a->misadj_inv = 0.0; a->misadj_overhang = 0;
+    a->misadj_e2_acum = 0.0f; a->misadj_y2_acum = 0.0f; a->misadj_n_acum = 0;
+    a->misadj_inv = 0.0f; a->misadj_overhang = 0;
     a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
-    a->last_erle_windowed = 0.0;
+    a->last_erle_windowed = 0.0f;
     filter_q_high(&a->main_filter);
     a->is_static = 1;
     return a;
@@ -1275,7 +1276,7 @@ void aec_reset(Aec* a) {
         a->pending_delay_ttl = 0;
     }
     a->duty_active = 0; a->duty_stable_hops = 0; a->duty_pos = 0;
-    a->duty_last_delay = -1; a->duty_erle_peak = 0.0;
+    a->duty_last_delay = -1; a->duty_erle_peak = 0.0f;
     if (a->render_fifo)
         memset(a->render_fifo, 0,
                (size_t)a->fifo_cap_hops * a->hop_size * sizeof(float));
@@ -1297,74 +1298,75 @@ void aec_reset(Aec* a) {
     aec3_post_chain_reset(a);
     a->pending_gain_change = 0;
     a->pending_delay_change = -1;
-    a->saturation_level = 0.0;
-    a->erl_estimate = 0.1;
-    a->main_err_smooth = 0.0; a->shadow_err_smooth = 0.0;
+    a->saturation_level = 0.0f;
+    a->erl_estimate = 0.1f;
+    a->main_err_smooth = 0.0f; a->shadow_err_smooth = 0.0f;
     a->shadow_frame_count = 0;
     a->epc_render_forced_remaining = 0;
-    a->erle_window_near = 1e-10; a->erle_window_err = 1e-10;
-    a->erle_factor_prev = 0.0; a->inst_erle_smooth = 1.0;
-    a->wn_err_baseline = 1e-8; a->stat_dt_hangover = 0;
+    a->erle_window_near = 1e-10f; a->erle_window_err = 1e-10f;
+    a->erle_factor_prev = 0.0f; a->inst_erle_smooth = 1.0f;
+    a->wn_err_baseline = 1e-8f; a->stat_dt_hangover = 0;
     a->warmup_frames_remaining = a->cfg.warmup_frames;
     a->warmup_far_active = 0;
-    a->simple_mu_ratio = 1.0; a->simple_mu_holdoff = 0; a->has_per_bin_mu = 0;
-    a->limiter_gain = 1.0; a->has_limiter_lag = 0;
-    a->near_power = 0.0; a->raw_error_power = 0.0;
+    a->simple_mu_ratio = 1.0f; a->simple_mu_holdoff = 0; a->has_per_bin_mu = 0;
+    a->limiter_gain = 1.0f; a->has_limiter_lag = 0;
+    a->near_power = 0.0f; a->raw_error_power = 0.0f;
     a->frame_count = 0;
     a->ne_above = 0; a->ne_recent_frames = 0;
     a->poor_coarse_counter = 0; a->coarse_reset_hangover = 0;
     a->leakage_div_sustained_counter = 0;
-    a->misadj_e2_acum = 0.0; a->misadj_y2_acum = 0.0; a->misadj_n_acum = 0;
-    a->misadj_inv = 0.0; a->misadj_overhang = 0;
+    a->misadj_e2_acum = 0.0f; a->misadj_y2_acum = 0.0f; a->misadj_n_acum = 0;
+    a->misadj_inv = 0.0f; a->misadj_overhang = 0;
     a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
-    a->last_erle_windowed = 0.0;
+    a->last_erle_windowed = 0.0f;
 }
 
 /* ───────────────────────── misadjustment estimator ─────────────────────── */
 
-/* _update_misadjustment_estimator (orchestrator 100-148). */
+/* _update_misadjustment_estimator (orchestrator 100-148). float32-by-design
+ * (Stage-2 conversion; block-energy sums accumulate in int16²-domain
+ * magnitudes, same domain as the power EMAs above). */
 static void misadj_update(Aec* a, const float* near_hpf, const float* raw_out, int hop) {
-    /* e2/y2 block = float(np.sum(arr.astype(f64)**2)) over hop. */
-    double e2_block = 0.0, y2_block = 0.0;
+    float e2_block = 0.0f, y2_block = 0.0f;
     for (int i = 0; i < hop; ++i) {
-        double r = (double)raw_out[i]; e2_block += r * r;
-        double n = (double)near_hpf[i]; y2_block += n * n;
+        float r = raw_out[i]; e2_block += r * r;
+        float n = near_hpf[i]; y2_block += n * n;
     }
     a->misadj_e2_acum += e2_block;
     a->misadj_y2_acum += y2_block;
     a->misadj_n_acum += 1;
     int n_hops_target = 2;
     if (a->misadj_n_acum < n_hops_target) return;
-    double total_samples = (double)(n_hops_target * hop);
-    double int16_sq = 32768.0 * 32768.0;
-    double y2_threshold = (200.0 * 200.0) * total_samples / int16_sq;
-    double e2_overhang_threshold = (7500.0 * 7500.0) * total_samples / int16_sq;
+    float total_samples = (float)(n_hops_target * hop);
+    float int16_sq = 32768.0f * 32768.0f;
+    float y2_threshold = (200.0f * 200.0f) * total_samples / int16_sq;
+    float e2_overhang_threshold = (7500.0f * 7500.0f) * total_samples / int16_sq;
     if (a->misadj_y2_acum > y2_threshold) {
-        double denom = a->misadj_y2_acum > 1e-20 ? a->misadj_y2_acum : 1e-20;
-        double update = a->misadj_e2_acum / denom;
+        float denom = a->misadj_y2_acum > 1e-20f ? a->misadj_y2_acum : 1e-20f;
+        float update = a->misadj_e2_acum / denom;
         if (a->misadj_e2_acum > e2_overhang_threshold) a->misadj_overhang = 4;
         else { a->misadj_overhang -= 1; if (a->misadj_overhang < 0) a->misadj_overhang = 0; }
         if ((update < a->misadj_inv) || (a->misadj_overhang > 0))
-            a->misadj_inv += 0.1 * (update - a->misadj_inv);
+            a->misadj_inv += 0.1f * (update - a->misadj_inv);
     }
-    a->misadj_e2_acum = 0.0; a->misadj_y2_acum = 0.0; a->misadj_n_acum = 0;
+    a->misadj_e2_acum = 0.0f; a->misadj_y2_acum = 0.0f; a->misadj_n_acum = 0;
 }
 
-/* _fire_aec3_misadj_scale (orchestrator 150-191). */
+/* _fire_aec3_misadj_scale (orchestrator 150-191). float32-by-design. */
 static void misadj_fire(Aec* a) {
     if (a->misadj_hangover_remaining > 0) { a->misadj_hangover_remaining--; return; }
     int stable = a->convergence.converged && !a->epc.active && !a->regime.main_paused;
     if (!stable) { a->misadj_stable_count = 0; return; }
     a->misadj_stable_count++;
     if (a->misadj_stable_count < a->cfg.filter_misadjustment_stable_frames) return;
-    if (a->misadj_inv <= 10.0) return;
-    double base = a->misadj_inv > 1e-6 ? a->misadj_inv : 1e-6;
-    double scale_raw = 2.0 / sqrt(base);
-    double scale = scale_raw;
+    if (a->misadj_inv <= 10.0f) return;
+    float base = a->misadj_inv > 1e-6f ? a->misadj_inv : 1e-6f;
+    float scale_raw = 2.0f / sqrtf(base);
+    float scale = scale_raw;
     if (scale < a->cfg.filter_misadjustment_scale_min) scale = a->cfg.filter_misadjustment_scale_min;
     if (scale > a->cfg.filter_misadjustment_scale_max) scale = a->cfg.filter_misadjustment_scale_max;
-    pbfdkf_scale_filter(&a->main_filter, (float)scale);
-    a->misadj_inv = 0.0; a->misadj_overhang = 0;
+    pbfdkf_scale_filter(&a->main_filter, scale);
+    a->misadj_inv = 0.0f; a->misadj_overhang = 0;
     a->misadj_hangover_remaining = a->cfg.filter_misadjustment_hangover_frames;
 }
 
@@ -1404,7 +1406,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      * preserved). Require `sustain` consecutive frames above threshold before
      * arming, then hold for `hold` frames. */
     {
-        double ne_ind = a->dt_analyzer.dt_from_energy;
+        float ne_ind = (float)a->dt_analyzer.dt_from_energy;  /* receive: DoubleTalk (Stage-3) is double */
         if (ne_ind > a->cfg.ne_recent_threshold)
             a->ne_above += 1;
         else
@@ -1418,12 +1420,12 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     }
 
     /* 2. saturation. */
-    double sat_ref = 0.0;
+    float sat_ref = 0.0f;  /* receive: Saturation (Stage-3) getter returns double */
     if (a->has_sat) {
-        sat_ref = saturation_detect(&a->sat_ref, a->far_hop, hop);
-        double sat_mic = saturation_detect(&a->sat_mic, a->near_hop, hop);
-        a->saturation_level = (sat_ref > sat_mic * 0.5) ? sat_ref : sat_mic * 0.5;
-        if (a->cfg.saturation_softclip_ref && sat_ref > 0.1)
+        sat_ref = (float)saturation_detect(&a->sat_ref, a->far_hop, hop);
+        float sat_mic = (float)saturation_detect(&a->sat_mic, a->near_hop, hop);
+        a->saturation_level = (sat_ref > sat_mic * 0.5f) ? sat_ref : sat_mic * 0.5f;
+        if (a->cfg.saturation_softclip_ref && sat_ref > 0.1f)
             saturation_soft_clip(a->far_hop, a->far_hop, hop, 0.8);
     }
 
@@ -1435,9 +1437,9 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      * intentional, sampled-cost-free divergence from the Python reference
      * (which always analyses every hop). */
     if (a->has_delay) {
-        double hop_s = (double)hop / (double)a->cfg.sample_rate;
-        int hold_hops = (int)lrint((double)a->cfg.delay_est_init_s / hop_s);
-        int K = (int)lrint((double)a->cfg.delay_est_period_s / hop_s) / 5;
+        float hop_s = (float)hop / (float)a->cfg.sample_rate;
+        int hold_hops = (int)lrintf(a->cfg.delay_est_init_s / hop_s);
+        int K = (int)lrintf(a->cfg.delay_est_period_s / hop_s) / 5;
         int run_filter = 1;
         if (hold_hops < 1) hold_hops = 1;
         if (K < 2) K = 2;
@@ -1473,12 +1475,12 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             if (a->last_erle_windowed > a->duty_erle_peak)
                 a->duty_erle_peak = a->last_erle_windowed;
             else
-                a->duty_erle_peak -= 0.001;
-            if (a->duty_erle_peak > 6.0 &&
-                a->last_erle_windowed < a->duty_erle_peak - 6.0) {
+                a->duty_erle_peak -= 0.001f;
+            if (a->duty_erle_peak > 6.0f &&
+                a->last_erle_windowed < a->duty_erle_peak - 6.0f) {
                 a->duty_active = 0;
                 a->duty_stable_hops = 0;
-                a->duty_erle_peak = 0.0;
+                a->duty_erle_peak = 0.0f;
             }
         }
         int new_delay = delay_aec3_estimated_delay(&a->delay);
@@ -1486,7 +1488,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
         /* Path A — first acquisition. */
         int already_cancelling = a->cfg.delay_acquire_protect_converged
-                                 && (a->last_erle_windowed > 2.5);
+                                 && (a->last_erle_windowed > 2.5f);
         /* option-A (default-OFF): also protect via inst-ERLE peak (orch 1387). */
         if (a->cfg.delay_acquire_protect_inst_erle
                 && aec_erle_ring_max_last15(a) > a->cfg.delay_acquire_inst_erle_db)
@@ -1607,15 +1609,15 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* 4. render activity. */
     RenderActivityResult ra = render_activity_update(&a->render_activity, a->far_hop, hop);
     a->warmup_far_active = ra.warmup_active;
-    double far_pwr_global = ra.far_pwr;
+    float far_pwr_global = (float)ra.far_pwr;  /* receive: RenderActivity (Stage-3) is double */
 
     /* 5. mu_scale (simple variable mu, Valin 2007 RER-inspired). */
     int mu_is_array = 0;
-    double mu_scalar = get_simple_mu_scale(a, &mu_is_array);
+    float mu_scalar = get_simple_mu_scale(a, &mu_is_array);
 
     /* 6. mic-clip emergency. */
     if (a->has_sat && a->sat_mic.saturation_level > 0.8) {
-        mu_scalar = 0.0;
+        mu_scalar = 0.0f;
         mu_is_array = 0;
     }
 
@@ -1631,11 +1633,11 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         int poor = rsa_poor_signal_excitation(&a->rsa);
         if (poor) a->main_filter.base.poor_excitation_counter = 0;
         else      a->main_filter.base.poor_excitation_counter += 1;
-        a->main_filter.base.saturated_capture = (a->saturation_level > 0.5);
+        a->main_filter.base.saturated_capture = (a->saturation_level > 0.5f);
         if (a->has_shadow) {
             if (poor) a->shadow_filter.poor_excitation_counter = 0;
             else      a->shadow_filter.poor_excitation_counter += 1;
-            a->shadow_filter.saturated_capture = (a->saturation_level > 0.5);
+            a->shadow_filter.saturated_capture = (a->saturation_level > 0.5f);
         }
     }
 
@@ -1661,9 +1663,9 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     int far_excited = 0;
     if (a->has_shadow) {
         a->shadow_frame_count++;
-        double far_mean_pre = mean_sq(a->far_hop, hop, a->scr_sq);
-        far_excited = (far_mean_pre > 1e-4);
-        int saturation_safe_pre = (a->saturation_level < 0.5);
+        float far_mean_pre = mean_sq(a->far_hop, hop, a->scr_sq);
+        far_excited = (far_mean_pre > 1e-4f);
+        int saturation_safe_pre = (a->saturation_level < 0.5f);
         float shadow_mu_pre = (far_excited && saturation_safe_pre) ? 1.0f : 0.1f;
         if (rsa_mask_active) {
             float *mu_buf_pre = a->scr_mu_buf_pre;
@@ -1693,7 +1695,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      * of recomputing — byte-equal, saves 1 FFT/hop. One-shot (frontend clears). */
     a->main_filter.base.precomputed_far_spec =
         a->has_shadow ? a->shadow_filter.far_spec : NULL;
-    double main_mu_scalar = a->regime.main_paused ? 0.0 : mu_scalar;
+    float main_mu_scalar = a->regime.main_paused ? 0.0f : mu_scalar;
     {
         float *mu_buf = a->scr_mu_buf;
         int use_array = mu_is_array;
@@ -1703,7 +1705,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         }
         if (rsa_mask_active && !use_array) {
             /* Python: scalar → full(scalar) → × mask. */
-            for (int k = 0; k < K; ++k) mu_buf[k] = (float)main_mu_scalar * rsa_mask[k];
+            for (int k = 0; k < K; ++k) mu_buf[k] = main_mu_scalar * rsa_mask[k];
             use_array = 1;
         } else if (rsa_mask_active && use_array) {
             for (int k = 0; k < K; ++k) mu_buf[k] = mu_buf[k] * rsa_mask[k];
@@ -1712,7 +1714,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             pbfdkf_process(&a->main_filter, a->near_hop, a->far_hop, mu_buf, 0.0f, a->raw_output);
         else
             pbfdkf_process(&a->main_filter, a->near_hop, a->far_hop, NULL,
-                           (float)main_mu_scalar, a->raw_output);
+                           main_mu_scalar, a->raw_output);
     }
 
     /* 10. stationarity refresh for NEXT hop (StationarityEstimator on
@@ -1756,8 +1758,8 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         for (int k = 0; k < K; ++k)
             e2coa_arr[k] = cmag2_c(a->shadow_filter.error_spec[k].r,
                                    a->shadow_filter.error_spec[k].i);
-        double e2_ref = (double)aec3_post_pairwise_sum_f32(e2ref_arr, (size_t)K);
-        double e2_coa = (double)aec3_post_pairwise_sum_f32(e2coa_arr, (size_t)K);
+        float e2_ref = aec3_post_pairwise_sum_f32(e2ref_arr, (size_t)K);
+        float e2_coa = aec3_post_pairwise_sum_f32(e2coa_arr, (size_t)K);
         /* erl[k] = Σ_p |W_p[k]|². */
         for (int k = 0; k < K; ++k) erl_arr[k] = 0.0f;
         for (int part = 0; part < N; ++part) {
@@ -1765,13 +1767,13 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             for (int k = 0; k < K; ++k) erl_arr[k] += cmag2_c(Wp[k].r, Wp[k].i);
         }
         /* publish to the refined filter. */
-        a->main_filter.e2_coarse_for_refresh = (float)e2_coa;
+        a->main_filter.e2_coarse_for_refresh = e2_coa;
         for (int k = 0; k < K; ++k) a->main_filter.e2_coarse_per_bin[k] = e2coa_arr[k];
         a->main_filter.e2_coarse_per_bin_valid = 1;
         for (int k = 0; k < K; ++k) a->main_filter.erl_per_bin[k] = erl_arr[k];
 
         /* rescue: cond_fire = e2_ref < 0.5*e2_coa; threshold_hops=blocks_to_hops(5)=2. */
-        int cond_fire = (e2_ref < 0.5 * e2_coa);
+        int cond_fire = (e2_ref < 0.5f * e2_coa);
         int threshold_hops = 2;
         if (cond_fire) a->poor_coarse_counter += 1; else a->poor_coarse_counter = 0;
         if (a->poor_coarse_counter >= threshold_hops) {
@@ -1805,9 +1807,9 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
     /* 13. smoothed errs + DT analyzer + regime handler. */
     if (a->has_shadow) {
-        double main_err   = pbfdkf_get_error_energy(&a->main_filter);
-        double shadow_err = pbfdaf_get_error_energy(&a->shadow_filter);
-        double as = a->cfg.shadow_err_alpha, oas = 1.0 - as;
+        float main_err   = (float)pbfdkf_get_error_energy(&a->main_filter);   /* receive: PBFDKF (Stage-3) is double */
+        float shadow_err = (float)pbfdaf_get_error_energy(&a->shadow_filter); /* receive: PBFDAF (Stage-3) is double */
+        float as = a->cfg.shadow_err_alpha, oas = 1.0f - as;
         a->main_err_smooth   = as * a->main_err_smooth   + oas * main_err;
         a->shadow_err_smooth = as * a->shadow_err_smooth + oas * shadow_err;
         doubletalk_update_shadow_dt(&a->dt_analyzer, a->shadow_frame_count,
@@ -1840,7 +1842,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         filter_q_high(&a->main_filter);
         filter_convergence_mark_diverged(&a->convergence);
         a->epc_render_forced_remaining = a->cfg.epc_hangover;
-        if (a->erl_estimate > 0.3) a->erl_estimate = 0.3;
+        if (a->erl_estimate > 0.3f) a->erl_estimate = 0.3f;
     }
 
     /* 15. shadow_rise (only if shadow + converged); else hangover tick. */
@@ -1862,7 +1864,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             filter_q_high(&a->main_filter);
             filter_convergence_mark_diverged(&a->convergence);
             a->epc_render_forced_remaining = a->cfg.epc_hangover;
-            if (a->erl_estimate > 0.3) a->erl_estimate = 0.3;
+            if (a->erl_estimate > 0.3f) a->erl_estimate = 0.3f;
         } else {
             epc_tick_hangover(&a->epc);
         }
@@ -1885,20 +1887,20 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      * matching Python's read-before-update ordering. Read at Path-A (step 3)
      * is therefore 1-hop delayed, matching Python (read@1412 / append@2382). */
     {
-        double _ei;
-        if (a->near_power < 1e-10 && a->raw_error_power < 1e-10) _ei = 0.0;
-        else _ei = 10.0 * log10((a->near_power + 1e-10) / (a->raw_error_power + 1e-10));
+        float _ei;
+        if (a->near_power < 1e-10f && a->raw_error_power < 1e-10f) _ei = 0.0f;
+        else _ei = 10.0f * log10f((a->near_power + 1e-10f) / (a->raw_error_power + 1e-10f));
         int _h = a->erle_slope_head;
-        a->erle_slope_buf[_h] = (float)_ei;
+        a->erle_slope_buf[_h] = _ei;
         a->erle_slope_head = (_h + 1) % a->erle_slope_cap;
         if (a->erle_slope_len < a->erle_slope_cap) a->erle_slope_len++;
     }
 
     /* 17. RES / post block (enable_res). */
     int is_stationary_dt = 0;
-    double dt_indicator = 0.0;
-    double erle_windowed = 0.0;
-    double far_power = 0.0;
+    float dt_indicator = 0.0f;
+    float erle_windowed = 0.0f;
+    float far_power = 0.0f;
     /* Run the AEC3 post block when EITHER the internal RES is on OR the caller
      * asked for the res-context seam (mirrors Python orchestrator.py:2021,
      * `enable_res or return_res_context`). With enable_res=1 this is unchanged
@@ -1906,34 +1908,34 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     if (a->cfg.enable_res || a->cfg.return_res_context) {
         far_power = mean_sq(a->far_hop, hop, a->scr_sq);
         /* erle_windowed (step 13a). */
-        const double erle_decay = 0.999;
+        const float erle_decay = 0.999f;
         a->erle_window_near = erle_decay * a->erle_window_near + a->near_power;
         a->erle_window_err  = erle_decay * a->erle_window_err  + a->raw_error_power;
-        erle_windowed = 10.0 * log10((a->erle_window_near + 1e-10)
-                                     / (a->erle_window_err + 1e-10));
+        erle_windowed = 10.0f * log10f((a->erle_window_near + 1e-10f)
+                                     / (a->erle_window_err + 1e-10f));
         /* erle_for_factor = max(get_erle_instant(), erle_windowed). */
-        double erle_inst;
-        if (a->near_power < 1e-10 && a->raw_error_power < 1e-10) erle_inst = 0.0;
-        else erle_inst = 10.0 * log10((a->near_power + 1e-10) / (a->raw_error_power + 1e-10));
-        double erle_for_factor = erle_inst > erle_windowed ? erle_inst : erle_windowed;
-        double erle_factor = erle_for_factor / 10.0;
-        if (erle_factor < 0.0) erle_factor = 0.0;
-        if (erle_factor > 1.0) erle_factor = 1.0;
+        float erle_inst;
+        if (a->near_power < 1e-10f && a->raw_error_power < 1e-10f) erle_inst = 0.0f;
+        else erle_inst = 10.0f * log10f((a->near_power + 1e-10f) / (a->raw_error_power + 1e-10f));
+        float erle_for_factor = erle_inst > erle_windowed ? erle_inst : erle_windowed;
+        float erle_factor = erle_for_factor / 10.0f;
+        if (erle_factor < 0.0f) erle_factor = 0.0f;
+        if (erle_factor > 1.0f) erle_factor = 1.0f;
         a->erle_factor_prev = erle_factor;
 
-        double far_pwr = far_power + 1e-10;
-        double mic_pwr = mean_sq(a->near_hop, hop, a->scr_sq) + 1e-10;
-        double raw_err_pwr = mean_sq(a->raw_output, hop, a->scr_sq) + 1e-10;
+        float far_pwr = far_power + 1e-10f;
+        float mic_pwr = mean_sq(a->near_hop, hop, a->scr_sq) + 1e-10f;
+        float raw_err_pwr = mean_sq(a->raw_output, hop, a->scr_sq) + 1e-10f;
 
         /* erl tracking (B4). */
-        if (far_pwr > 1e-4) {
-            double raw_dt_ratio = raw_err_pwr / (far_pwr + 1e-10);
-            double inst_erl_raw = mic_pwr / far_pwr;
-            if (raw_dt_ratio < 2.0 && inst_erl_raw < 1.5) {
-                double inst_erl = inst_erl_raw;
-                if (inst_erl < 0.001) inst_erl = 0.001; if (inst_erl > 1.0) inst_erl = 1.0;
-                double alpha_erl = a->convergence.converged ? 0.999 : 0.99;
-                a->erl_estimate = alpha_erl * a->erl_estimate + (1.0 - alpha_erl) * inst_erl;
+        if (far_pwr > 1e-4f) {
+            float raw_dt_ratio = raw_err_pwr / (far_pwr + 1e-10f);
+            float inst_erl_raw = mic_pwr / far_pwr;
+            if (raw_dt_ratio < 2.0f && inst_erl_raw < 1.5f) {
+                float inst_erl = inst_erl_raw;
+                if (inst_erl < 0.001f) inst_erl = 0.001f; if (inst_erl > 1.0f) inst_erl = 1.0f;
+                float alpha_erl = a->convergence.converged ? 0.999f : 0.99f;
+                a->erl_estimate = alpha_erl * a->erl_estimate + (1.0f - alpha_erl) * inst_erl;
             }
         }
 
@@ -1941,52 +1943,52 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
                                     far_pwr, mic_pwr, a->erl_estimate);
 
         /* base DT confidence (simple energy-ratio estimate). */
-        double simple_dt = 1.0 - far_pwr / (mic_pwr + far_pwr);
-        double raw_dt = a->dt_analyzer.dt_from_energy;
-        double sd_half = simple_dt * 0.5;
+        float simple_dt = 1.0f - far_pwr / (mic_pwr + far_pwr);
+        float raw_dt = (float)a->dt_analyzer.dt_from_energy;  /* receive: DoubleTalk (Stage-3) is double */
+        float sd_half = simple_dt * 0.5f;
         if (sd_half > raw_dt) raw_dt = sd_half;
 
         /* stationary-DT macro detection. */
         if (a->render_activity.is_stationary && a->convergence.converged) {
             int fft_size = a->main_filter.base.fft_size;
-            double freq_per_bin = (double)a->cfg.sample_rate / (double)fft_size;
-            int vb_start = (int)(100.0 / freq_per_bin); if (vb_start < 1) vb_start = 1;
-            int vb_limit = (int)(3000.0 / freq_per_bin); if (vb_limit > K) vb_limit = K;
-            double track_err_pwr = 0.0;
+            float freq_per_bin = (float)a->cfg.sample_rate / (float)fft_size;
+            int vb_start = (int)(100.0f / freq_per_bin); if (vb_start < 1) vb_start = 1;
+            int vb_limit = (int)(3000.0f / freq_per_bin); if (vb_limit > K) vb_limit = K;
+            float track_err_pwr = 0.0f;
             for (int k = vb_start; k < vb_limit; ++k)
-                track_err_pwr += (double)cmag2_c(a->main_filter.base.error_spec[k].r,
+                track_err_pwr += cmag2_c(a->main_filter.base.error_spec[k].r,
                                                  a->main_filter.base.error_spec[k].i);
-            track_err_pwr += 1e-10;
-            if (a->wn_err_baseline < 1e-6) a->wn_err_baseline = track_err_pwr;
-            double jump_ratio = track_err_pwr / (a->wn_err_baseline + 1e-10);
-            if (jump_ratio > 1.5) a->stat_dt_hangover = 80;
+            track_err_pwr += 1e-10f;
+            if (a->wn_err_baseline < 1e-6f) a->wn_err_baseline = track_err_pwr;
+            float jump_ratio = track_err_pwr / (a->wn_err_baseline + 1e-10f);
+            if (jump_ratio > 1.5f) a->stat_dt_hangover = 80;
             if (a->stat_dt_hangover > 0) {
                 is_stationary_dt = 1;
                 a->stat_dt_hangover--;
-                a->wn_err_baseline = 0.999 * a->wn_err_baseline + 0.001 * track_err_pwr;
+                a->wn_err_baseline = 0.999f * a->wn_err_baseline + 0.001f * track_err_pwr;
             } else {
                 is_stationary_dt = 0;
-                a->wn_err_baseline = 0.95 * a->wn_err_baseline + 0.05 * track_err_pwr;
+                a->wn_err_baseline = 0.95f * a->wn_err_baseline + 0.05f * track_err_pwr;
             }
         }
         /* D4 baseline slow-track. */
         if (a->convergence.converged && !a->render_activity.is_stationary
-                && far_pwr > 1e-4 && a->wn_err_baseline > 1e-6) {
-            a->wn_err_baseline = 0.995 * a->wn_err_baseline + 0.005 * raw_err_pwr;
+                && far_pwr > 1e-4f && a->wn_err_baseline > 1e-6f) {
+            a->wn_err_baseline = 0.995f * a->wn_err_baseline + 0.005f * raw_err_pwr;
         }
 
         /* inst_erle correction. */
-        double inst_erle_fast_raw = mic_pwr / raw_err_pwr;
-        a->inst_erle_smooth = 0.7 * a->inst_erle_smooth + 0.3 * inst_erle_fast_raw;
-        if (a->inst_erle_smooth > 2.0) {
-            double erle_for_dt = a->inst_erle_smooth;
-            if (erle_for_dt > 4.0) erle_for_dt = 4.0;
+        float inst_erle_fast_raw = mic_pwr / raw_err_pwr;
+        a->inst_erle_smooth = 0.7f * a->inst_erle_smooth + 0.3f * inst_erle_fast_raw;
+        if (a->inst_erle_smooth > 2.0f) {
+            float erle_for_dt = a->inst_erle_smooth;
+            if (erle_for_dt > 4.0f) erle_for_dt = 4.0f;
             raw_dt /= erle_for_dt;
         }
         /* EPC physical gate. */
-        if (a->epc.active) { raw_dt = 0.0; is_stationary_dt = 0; }
-        dt_indicator = raw_dt; if (dt_indicator < 0.0) dt_indicator = 0.0;
-        if (dt_indicator > 0.8) dt_indicator = 0.8;
+        if (a->epc.active) { raw_dt = 0.0f; is_stationary_dt = 0; }
+        dt_indicator = raw_dt; if (dt_indicator < 0.0f) dt_indicator = 0.0f;
+        if (dt_indicator > 0.8f) dt_indicator = 0.8f;
 
         /* divergence indicator EMA. */
         filter_convergence_update_divergence(&a->convergence, a->near_power, a->raw_error_power);
@@ -1997,10 +1999,11 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
          * is a counter decrement only). */
         if (a->epc_render_forced_remaining > 0) a->epc_render_forced_remaining--;
 
-        /* shadow_dt stash for RES context. */
-        double shadow_dt_v = a->dt_analyzer.dt_from_energy;
-        if (a->dt_analyzer.dt_from_shadow > shadow_dt_v) shadow_dt_v = a->dt_analyzer.dt_from_shadow;
-        if (a->epc.active) shadow_dt_v *= 0.08;
+        /* shadow_dt stash for RES context. Both operands received from
+         * DoubleTalk (Stage-3, double) — cast at the receive/compare site. */
+        float shadow_dt_v = (float)a->dt_analyzer.dt_from_energy;
+        if ((float)a->dt_analyzer.dt_from_shadow > shadow_dt_v) shadow_dt_v = (float)a->dt_analyzer.dt_from_shadow;
+        if (a->epc.active) shadow_dt_v *= 0.08f;
         a->last_far_power = far_power;
         a->last_shadow_dt = shadow_dt_v;
         a->last_is_stationary_dt = is_stationary_dt;
@@ -2078,7 +2081,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         if (a->convergence.converged) {
             float mu_min = a->cfg.shadow_mu_min;
             for (int k = 0; k < K; ++k) a->per_bin_mu_scale[k] = mu_min;
-            a->simple_mu_ratio = 0.0;
+            a->simple_mu_ratio = 0.0f;
             if (is_stationary_dt) {
                 for (int k = 0; k < K; ++k) a->per_bin_mu_scale[k] = mu_min;
                 a->simple_mu_ratio = mu_min;
@@ -2092,10 +2095,10 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* enable_res==False C-parity fallback (orchestrator 2313-2316) is unused
      * here since balanced always has enable_res=True. */
 
-    /* 18. OLA-lagged output limiter. Python computes near_peak/out_peak via
-     *     np.max(np.abs(.)) (float32) and target_gain = near_peak/out_peak
-     *     (float32 / float32 → float32); the EMA mix is float64 (scalar
-     *     promotion). The comparison `out_peak > near_peak > 1e-6` is float. */
+    /* 18. OLA-lagged output limiter. near_peak/out_peak via np.max(np.abs(.))
+     *     and target_gain = near_peak/out_peak, the EMA mix and the limiter
+     *     gain itself all run float32-by-design (Stage-2 conversion; the
+     *     historical Python float64 EMA-mix reference is retired). */
     {
         if (!a->has_limiter_lag) { memset(a->limiter_near_lag, 0, (size_t)hop * sizeof(float)); a->has_limiter_lag = 1; }
         float near_peak = 0.0f, out_peak = 0.0f;
@@ -2106,36 +2109,31 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             if (ao > out_peak)  out_peak  = ao;
         }
         memcpy(a->limiter_near_lag, a->near_hop, (size_t)hop * sizeof(float));
-        /* `out_peak > near_peak` is f32>f32; `near_peak > 1e-6` is f32>pyfloat
-         * (near_peak promoted to f64). target_gain = near_peak/out_peak is
-         * f32/f32 → f32 (then widened in the EMA mix). */
-        double target_gain;
-        if (out_peak > near_peak && (double)near_peak > 1e-6)
-            target_gain = (double)(near_peak / out_peak);
+        float target_gain;
+        if (out_peak > near_peak && near_peak > 1e-6f)
+            target_gain = near_peak / out_peak;
         else
-            target_gain = 1.0;
-        double alpha_lim = (target_gain < a->limiter_gain) ? 0.3 : 0.8;
-        a->limiter_gain = alpha_lim * a->limiter_gain + (1.0 - alpha_lim) * target_gain;
-        /* final_output *= _limiter_gain: float32_arr *= python_float → all-f32
-         * (numpy<2 scalar value-cast rule). */
-        float lg = (float)a->limiter_gain;
+            target_gain = 1.0f;
+        float alpha_lim = (target_gain < a->limiter_gain) ? 0.3f : 0.8f;
+        a->limiter_gain = alpha_lim * a->limiter_gain + (1.0f - alpha_lim) * target_gain;
+        float lg = a->limiter_gain;
         for (int i = 0; i < hop; ++i)
             a->final_out[i] = a->final_out[i] * lg;
     }
 
     /* 19. power EMAs (sample loop; read by NEXT frame's step 17). */
     {
-        const double ap = a->alpha_pow, oap = 1.0 - a->alpha_pow;
+        const float ap = a->alpha_pow, oap = 1.0f - a->alpha_pow;
         for (int i = 0; i < hop; ++i) {
             float n = a->near_hop[i], r = a->raw_output[i];
-            a->near_power      = ap * a->near_power      + oap * (double)(n * n);
-            a->raw_error_power = ap * a->raw_error_power + oap * (double)(r * r);
+            a->near_power      = ap * a->near_power      + oap * (n * n);
+            a->raw_error_power = ap * a->raw_error_power + oap * (r * r);
         }
     }
 
     /* 20. convergence detection. */
     {
-        int far_active = (mean_sq(a->far_hop, hop, a->scr_sq) > 1e-4);
+        int far_active = (mean_sq(a->far_hop, hop, a->scr_sq) > 1e-4f);
         int just_converged = filter_convergence_update_convergence(
             &a->convergence, a->near_power, a->raw_error_power,
             far_active, a->warmup_frames_remaining <= 0);
@@ -2158,13 +2156,13 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     if (a->cfg.enable_res && aec_debug_trace_active()) {
         int Kk = a->n_freqs;
         AecDebugTraceRow tr;
-        double esum = 0.0, r2sum = 0.0, cnsum = 0.0;
+        float esum = 0.0f, r2sum = 0.0f, cnsum = 0.0f;
         const float *erle = aec_state_erle(&a->a3_state, /*onset=*/1);
         int kk;
         for (kk = 0; kk < Kk; ++kk) {
-            esum  += (double)erle[kk];
-            r2sum += (double)a->a3_sc.r2[kk];
-            cnsum += (double)a->post.comfort_noise[kk];
+            esum  += erle[kk];
+            r2sum += a->a3_sc.r2[kk];
+            cnsum += a->post.comfort_noise[kk];
         }
         tr.delay            = aec_state_min_direct_path_filter_delay(&a->a3_state);
         tr.far_active       = a->post.trace.far_active;
@@ -2173,10 +2171,10 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         tr.dominant_nearend = suppression_gain_is_dominant_nearend(&a->a3_sg);
         tr.filter_converged = a->post.trace.aec3_converged;
         tr.fullband_erle    = aec_state_fullband_erle_log2(&a->a3_state);
-        tr.erle_mean        = (Kk > 0) ? esum  / Kk : 0.0;
-        tr.r2_mean          = (Kk > 0) ? r2sum / Kk : 0.0;
+        tr.erle_mean        = (Kk > 0) ? esum  / Kk : 0.0f;
+        tr.r2_mean          = (Kk > 0) ? r2sum / Kk : 0.0f;
         tr.gain_mean        = a->post.trace.gain_mean;
-        tr.comfort_noise_mean = (Kk > 0) ? cnsum / Kk : 0.0;
+        tr.comfort_noise_mean = (Kk > 0) ? cnsum / Kk : 0.0f;
         tr.near_pwr         = a->near_power;
         tr.raw_err_pwr      = a->raw_error_power;
         tr.limiter_gain     = a->limiter_gain;
@@ -2259,13 +2257,13 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
         ctx->r2            = a->a3_sc.r2;
         ctx->comfort_noise = a->post.comfort_noise;
     }
-    ctx->far_power = (float)a->last_far_power;
-    ctx->erle_factor = (float)a->erle_factor_prev;
-    ctx->dt_indicator = (float)a->last_dt_indicator;
-    ctx->divergence = (float)a->convergence.divergence;
-    ctx->saturation_level = (float)a->saturation_level;
-    ctx->erl_estimate = (float)a->erl_estimate;
-    ctx->shadow_dt = (float)a->last_shadow_dt;
+    ctx->far_power = a->last_far_power;
+    ctx->erle_factor = a->erle_factor_prev;
+    ctx->dt_indicator = a->last_dt_indicator;
+    ctx->divergence = (float)a->convergence.divergence;  /* receive: FilterConvergence (Stage-3) is double */
+    ctx->saturation_level = a->saturation_level;
+    ctx->erl_estimate = a->erl_estimate;
+    ctx->shadow_dt = a->last_shadow_dt;
     ctx->is_stationary_dt = a->last_is_stationary_dt;
     ctx->filter_converged = a->convergence.converged;
     ctx->filter_once_converged = a->convergence.once_converged;
