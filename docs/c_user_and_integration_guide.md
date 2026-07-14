@@ -136,7 +136,7 @@ the static-path harness. Full design notes and per-module breakdown:
 | Header | Source | Owns |
 |---|---|---|
 | `aec.h` | `aec.c` | top-level orchestration, `AecConfig`, control flow |
-| `hpf.h` | `hpf.c` | 80 Hz Butterworth biquad |
+| `hpf_f64.h` (audio_common) | `hpf_f64.c` (audio_common) | 80 Hz Butterworth biquad, fp64-state parity variant |
 | `saturation.h` | `saturation.c` | clip detection + ref-side soft-clip |
 | `delay_aec3.h` | `delay_aec3.c` | AEC3-style matched-filter bank + lag-histogram aggregator + clockdrift detector for delay estimation (replaces the legacy GCC-PHAT estimator) |
 | `pbfdkf.h` | `pbfdkf.c` | PBFDAF base + PBFDKF (G1 KX-blended P-update) |

@@ -377,7 +377,7 @@ int aec_create(Aec* a, const AecConfig* cfg) {
 
     /* HPF (mic only; ref HPF retired). */
     if (cfg->enable_highpass) {
-        hpf_init(&a->hp_mic, cfg->highpass_cutoff_hz, cfg->sample_rate);
+        hpf_f64_init(&a->hp_mic, cfg->highpass_cutoff_hz, cfg->sample_rate);
         a->has_hp = 1;
     }
     /* Saturation. */
@@ -889,7 +889,7 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     }
 
     /* HPF */
-    if (cfg->enable_highpass) { hpf_init(&a->hp_mic, cfg->highpass_cutoff_hz, cfg->sample_rate); a->has_hp = 1; }
+    if (cfg->enable_highpass) { hpf_f64_init(&a->hp_mic, cfg->highpass_cutoff_hz, cfg->sample_rate); a->has_hp = 1; }
     /* Saturation */
     if (cfg->enable_saturation) {
         saturation_init(&a->sat_ref, cfg->saturation_threshold);
@@ -1265,7 +1265,7 @@ void aec_destroy(Aec* a) {
 int aec_hop_size(const Aec* a) { return a->hop_size; }
 
 void aec_reset(Aec* a) {
-    if (a->has_hp) hpf_reset(&a->hp_mic);
+    if (a->has_hp) hpf_f64_reset(&a->hp_mic);
     if (a->has_sat) { saturation_reset(&a->sat_ref); saturation_reset(&a->sat_mic); }
     if (a->has_delay) {
         delay_aec3_reset(&a->delay);
@@ -1393,7 +1393,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     memcpy(a->far_hop,  ref_in, (size_t)hop * sizeof(float));
 
     /* 1. mic HPF (ref HPF OFF). */
-    if (a->has_hp) hpf_process(&a->hp_mic, a->near_hop, a->near_hop, hop);
+    if (a->has_hp) hpf_f64_process(&a->hp_mic, a->near_hop, a->near_hop, hop);
 
     /* Held "near-end seen recently" gate for DT-aware soft recovery (mirrors
      * Python orchestrator 16285fd). Reads the PREVIOUS frame's dt_from_energy

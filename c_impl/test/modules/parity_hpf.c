@@ -1,18 +1,19 @@
 /* parity_hpf.c — replay the binary golden from
- * python/diag/gen_hpf_golden.py through the C Hpf (mic-path high-pass biquad)
+ * python/diag/gen_hpf_golden.py through the C HpfF64 (mic-path high-pass biquad, audio_common)
  * and assert bit-exact float32 match + per-frame fp64 state-drift checks.
  *
- * Build (standalone, from anywhere):
+ * Build (standalone; the filter lives in audio_common as hpf_f64):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -DUSE_STANDARD_MATH \
- *       -I<path-to-repo>/c_impl/include \
- *       <path-to-repo>/c_impl/src/hpf.c \
+ *       -I<path-to-audio_common>/include \
+ *       <path-to-audio_common>/src/hpf_f64.c \
  *       <path-to-repo>/c_impl/test/modules/parity_hpf.c \
  *       -lm -o /tmp/p_hpf
  *   python3 .../python/diag/gen_hpf_golden.py /tmp/hpf_golden.bin
  *   /tmp/p_hpf /tmp/hpf_golden.bin
  *
- * (hpf.c uses only <math.h> tan/sqrt — no fast_math.h — so -DUSE_STANDARD_MATH
- * is a no-op here, but is passed for consistency with the parity-test suite.)
+ * (hpf_f64.c uses only <math.h> tan/sqrt — no fast_math.h — so
+ * -DUSE_STANDARD_MATH is a no-op here, but is passed for consistency with the
+ * parity-test suite.)
  *
  * Golden format (LE):
  *   header:  int32 n_frames, int32 hop, int32 sample_rate, float64 cutoff_hz
@@ -22,7 +23,7 @@
  * Gate: max-abs error across all samples must be 0 (bit-exact, since Python
  * and C use identical fp64 internal arithmetic with f32 output cast).
  */
-#include "hpf.h"
+#include "hpf_f64.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,8 +50,8 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "[parity_hpf] n_frames=%d hop=%d sr=%d cutoff=%.2fHz\n",
             n_frames, hop, sample_rate, cutoff_hz);
 
-    Hpf h;
-    hpf_init(&h, cutoff_hz, sample_rate);
+    HpfF64 h;
+    hpf_f64_init(&h, cutoff_hz, sample_rate);
 
     float* in_buf  = (float*)malloc((size_t)hop * sizeof(float));
     float* out_buf = (float*)malloc((size_t)hop * sizeof(float));
@@ -77,7 +78,7 @@ int main(int argc, char* argv[]) {
             fail = 1; break;
         }
 
-        hpf_process(&h, in_buf, out_buf, (size_t)hop);
+        hpf_f64_process(&h, in_buf, out_buf, (size_t)hop);
 
         for (int k = 0; k < hop; ++k) {
             float diff = fabsf(out_buf[k] - exp_buf[k]);

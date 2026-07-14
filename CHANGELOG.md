@@ -25,6 +25,13 @@ retired: `main` now carries both memory models in one library — `aec_create`
 single-branch model. Gates: consolidated `aec_wav` output byte-identical to the
 former branch build, and `test_static_aec` static == dynamic byte-equal.
 
+Also in this pass: the mic-path HPF moved to `audio_common` as `hpf_f64`
+(local `c_impl/{src,include}/hpf.{c,h}` deleted; pure rename, output
+byte-identical, `parity_hpf` golden still bit-exact at 0 error). This removes
+the last local copy of an `audio_common` component and kills the latent
+`hpf_init`/`hpf_process`/`hpf_reset` symbol collision with `audio_common`'s
+f32 platform HPF (different signatures, ABI-incompatible).
+
 ## [3.24.1] — 2026-06-25 — Warm tap-transfer on delay acquisition (cold-start "vertical line" fix)
 
 A no-PA-path BALANCED change. At no-pre-align cold start the far-end is silent
