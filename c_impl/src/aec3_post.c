@@ -29,33 +29,11 @@ float cabs_np(float re, float im) {
 }
 
 /* numpy-1.26-bit-exact pairwise float32 sum (block <=128, unrolled by 8,
- * recursive split) — matches np.sum over a float32 array. */
+ * recursive split) — matches np.sum over a float32 array. Delegates to the
+ * shared kernel in simd_kernels.h (sk_pairwise_sum_f32 replicates this exact
+ * tree verbatim — this file is in fact its documented reference source). */
 static float pairwise_sum_f32(const float *a, size_t n) {
-    if (n <= 8) {
-        float s = 0.0f;
-        size_t i;
-        for (i = 0; i < n; ++i) s += a[i];
-        return s;
-    }
-    if (n <= 128) {
-        float acc[8];
-        size_t i, j;
-        for (j = 0; j < 8; ++j) acc[j] = a[j];
-        for (i = 8; i + 8 <= n; i += 8)
-            for (j = 0; j < 8; ++j) acc[j] += a[i + j];
-        {
-            float s = 0.0f, r;
-            for (; i < n; ++i) s += a[i];
-            r = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
-              + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-            return r + s;
-        }
-    }
-    {
-        size_t half = n / 2;
-        half -= half % 8;  /* keep the split on an 8-boundary (numpy semantics) */
-        return pairwise_sum_f32(a, half) + pairwise_sum_f32(a + half, n - half);
-    }
+    return sk_pairwise_sum_f32(a, n);
 }
 
 float aec3_post_pairwise_sum_f32(const float *a, size_t n) {
@@ -282,8 +260,8 @@ void aec3_post_apply_output(Aec3Post *p,
             /* |abs|^2 == (abs*abs)*1.0f bit-for-bit (multiplying by 1.0f is
              * an exact IEEE no-op, incl. sign of ±0.0f), so sk_sq_scale_f32
              * with scale=1.0f reproduces the source square verbatim.
-             * pairwise_sum_f32 itself is untouched (separate task; not one
-             * of the 20 sk_ kernels). */
+             * pairwise_sum_f32 now delegates to sk_pairwise_sum_f32 (see its
+             * definition above). */
             sk_sq_scale_f32(mag->abs_error, 1.0f, se2, nb);
             se = pairwise_sum_f32(se2, (size_t)nb);
             sk_sq_scale_f32(mag->abs_ybase, 1.0f, se2, nb);
@@ -386,36 +364,11 @@ void aec3_post_process(Aec3Post *p,
 /* f32 pairwise sum of x[i]² (Stage 3a: the former f64 upcast used to match
  * float(np.sum(arr.astype(np.float64) ** 2)) is retired — accumulates in f32
  * throughout, same pairwise/unrolled-by-8 structure and split order as
- * pairwise_sum_f32 above; drift vs the numpy reference accepted). */
+ * pairwise_sum_f32 above; drift vs the numpy reference accepted). Delegates
+ * to the shared kernel (sk_sum_sq_pairwise_f32 replicates this exact tree
+ * verbatim — this file is its documented reference source). */
 static float sum_sq_f32_pairwise(const float *a, size_t n) {
-    if (n <= 8) {
-        float s = 0.0f;
-        size_t i;
-        for (i = 0; i < n; ++i) { float v = a[i]; s += v * v; }
-        return s;
-    }
-    if (n <= 128) {
-        float acc[8];
-        size_t i, j;
-        for (j = 0; j < 8; ++j) { float v = a[j]; acc[j] = v * v; }
-        for (i = 8; i + 8 <= n; i += 8)
-            for (j = 0; j < 8; ++j) {
-                float v = a[i + j];
-                acc[j] += v * v;
-            }
-        {
-            float s = 0.0f, r;
-            for (; i < n; ++i) { float v = a[i]; s += v * v; }
-            r = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
-              + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-            return r + s;
-        }
-    }
-    {
-        size_t half = n / 2;
-        half -= half % 8;
-        return sum_sq_f32_pairwise(a, half) + sum_sq_f32_pairwise(a + half, n - half);
-    }
+    return sk_sum_sq_pairwise_f32(a, n);
 }
 
 int aec3_post_run(Aec3Post *p,
