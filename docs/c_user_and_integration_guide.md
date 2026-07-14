@@ -124,10 +124,14 @@ aec_destroy(&aec);   /* frees nothing on the static path; safe for both paths */
 /* caller frees pool itself */
 ```
 
-Both paths produce **bit-identical** output (verified across all 3
-presets and FS / DT / NE scenarios). At BALANCED / 16 kHz / 52 ms
-filter / shadow on / RES on / delay-est on the pool is **539,328 B
-(526.7 KB)**. The `aec_wav` CLI is heap-only; `test_static_aec.c` is
+Both paths produce **bit-identical** output on a given backend (verified
+across all 3 presets and FS / DT / NE scenarios; NE10 vs KISS output is not
+bit-identical to *each other* — a pre-existing, expected difference between
+the two FFT implementations). At BALANCED / 16 kHz / 52 ms filter / shadow
+on / RES on / delay-est on the pool is **557,680 B (544.6 KB)** on the KISS
+backend (host/reference, `make`, default) or **519,232 B (507.1 KB)** on the
+NE10 backend (embedded, `make BACKEND=ne10`; the R2C/C2R twiddle configs live
+outside the pool). The `aec_wav` CLI is heap-only; `test_static_aec.c` is
 the static-path harness. Full design notes and per-module breakdown:
 [../c_impl/STATIC_MEMORY.md](../c_impl/STATIC_MEMORY.md).
 
@@ -233,10 +237,13 @@ These cause correctness failures (not just style issues):
 
 | | |
 |---|---|
-| Memory (main + shadow filter) | ~200 KB |
-| Memory (incl. RES + delay est.) | ~280 KB |
+| Static pool, KISS (host/reference, `make`) | 557,680 B (544.6 KB) |
+| Static pool, NE10 (embedded, `make BACKEND=ne10`) | 519,232 B (507.1 KB) (twiddles outside pool) |
 | Compute / frame | 4 × 512-FFT + Kalman update (257 bins × 6 partitions) |
-| FFT | fp64 radix-2 (no external dep, ~6 KB code) |
+| FFT | KISS FFT (float32; NE10 ARM-NEON opt-in) — ~float32 precision vs numpy `np.fft` |
+
+Both backends are static==dynamic byte-equal (`test_static_aec`); full
+per-region breakdown → [`../c_impl/STATIC_MEMORY.md`](../c_impl/STATIC_MEMORY.md).
 
 - **Threading**: each `Aec` instance is single-threaded. Multi-stream →
   multiple instances; no shared state.
@@ -373,8 +380,8 @@ ref ring buffer). Both calls still take exactly `hop_size` samples.
 
 - **Lockstep equivalence:** one `aec_analyze_render(ref)` immediately followed by
   one `aec_process_capture(mic, out)` is **byte-identical to `aec_process(mic,
-  ref, out)`** — the FIFO is pure pass-through in lockstep, so offline/bit-exact
-  parity is unaffected.
+  ref, out)`** — the FIFO is pure pass-through in lockstep, so the C-side
+  byte-equal regression gate is unaffected.
 - **Underrun** (capture with empty FIFO): processed with a silent render hop,
   returns `AEC_BUF_RENDER_UNDERRUN`.
 - **Overrun** (render past FIFO capacity): the oldest buffered hop is dropped,

@@ -36,10 +36,27 @@ aec_destroy(&aec);   /* no-op for static path; safe for both paths */
 
 `aec_get_mem_size` returns the exact byte count needed for the supplied
 config (sample rate, filter length, optional shadow filter, optional delay
-ring). At BALANCED / 16 kHz / 52 ms filter length / shadow on / delay on the
-pool is **539,328 bytes (526.7 KB)**. RES is value-typed and always present, so
-`enable_res` does not change the pool size; `enable_shadow` and `enable_delay_est`
-do (shadow ≈ 61.5 KB, delay ring 128 KB).
+ring). At BALANCED / 16 kHz / 52 ms filter length / shadow on / RES on /
+delay on the pool is:
+
+| Backend | Pool |
+|---|---:|
+| KISS (host/reference) | **557,680 B (544.6 KB)** |
+| NE10 (embedded)       | **519,232 B (507.1 KB)** |
+
+(NE10's R2C/C2R twiddle configs are backend-internal heap allocations that
+live outside the pool either way — see `fft_destroy`/`aec_destroy` note
+below.) Both figures are static==dynamic byte-equal, verified by
+`test_static_aec.c` (669,920 samples, 50-cycle init/destroy leak loop). The
+old figures (539,328 B / 526.7 KB, KISS only) are stale — since then: +24.5 KB
+de-stacked instance scratch (13 former `float[8192]`/`float[4096]`
+function-local stack arrays moved into the pool, sized by real dims), −2 KB
+coherence arrays converted double→float, −3.1 KB PBFDAF process-scratch now
+flag-gated off for the PBFDKF base, plus small struct deltas.
+
+RES is value-typed and always present, so `enable_res` does not change the
+pool size; `enable_shadow` and `enable_delay_est` do (shadow ≈ 61.5 KB, delay
+ring 128 KB — see the per-region breakdown below for the current split).
 
 ## Design pattern
 
@@ -109,16 +126,21 @@ gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/in
     test_static_aec.c $(find src -name '*.c') \
     ../../audio_common/bin/kiss/libaudio_common.a -lm -o bin/test_static_aec
 ./bin/test_static_aec mic.wav ref.wav
-# → Pool: 539328 bytes (526.7 KB), frames: N
+# → Pool: 557680 bytes (544.6 KB), frames: N   [KISS backend; NE10 -> 519232 B / 507.1 KB]
 #   PASS: all <2*N> samples byte-equal (static == dynamic)
 ```
 
 (Or just `make` from `c_impl/` — the top-level Makefile builds the
-`audio_common` archive as an order-only prereq automatically.)
+`audio_common` archive as an order-only prereq automatically. Build against
+the NE10 archive — `make BACKEND=ne10 lib` in `audio_common/` — to reproduce
+the NE10 pool figure instead.)
 
 The two paths produce **bit-identical output** across all presets and all three
-scenarios (FS / DT / NE). The `aec_wav` CLI itself is heap-only — it does not
-expose a `--static-mem` flag; `test_static_aec.c` is the static-path harness.
+scenarios (FS / DT / NE), on each backend independently (NE10 vs KISS output is
+*not* bit-identical to each other — a pre-existing, expected difference from the
+two FFT implementations; NE10+static == NE10+malloc is byte-equal, same as
+KISS). The `aec_wav` CLI itself is heap-only — it does not expose a
+`--static-mem` flag; `test_static_aec.c` is the static-path harness.
 
 ## Debug logging
 
@@ -131,24 +153,37 @@ heap-only (`aec_create`), so to see the static-path lines a harness must call
 `aec_init` directly and raise the debug level; the format is:
 
 ```text
-# [AEC][t= 0.000s][f=    0][Init] static-mem pool=539328 bytes (526.7 KB) sr=16000 hop=160 preset_q=0.001 cng=0
+# [AEC][t= 0.000s][f=    0][Init] static-mem pool=557680 bytes (544.6 KB) sr=16000 hop=160 preset_q=0.001 cng=0
 # [AEC][t= ...   ][f= ... ][Init] destroy: static path (no free; caller owns pool)
 ```
 
 Release builds (`make` without `debug`) strip log strings entirely;
 no overhead.
 
-## Memory layout (16 kHz, 52 ms filter, BALANCED, shadow on, delay on)
+## Memory layout (16 kHz, 52 ms filter, BALANCED, shadow on, RES on, delay on)
 
-Measured via `aec_get_mem_size`:
+Measured via `aec_get_mem_size`, KISS backend (host/reference build):
 
 | Region | Size |
 |---|---:|
 | `ref_ring` delay buffer (2048 ms @ 16 kHz)                 | 128 KB |
-| Main `pbfdkf` (W, X_buf, P, FFT cfgs, scratch)             | 69.7 KB |
+| Main `pbfdkf` (W, X_buf, P, FFT cfgs, scratch)             | 66.6 KB |
 | Shadow `pbfdaf` (same layout, no Kalman P)                 | 61.5 KB |
 | `fft_wrapper` post FFT (KISS cfgs in-pool)                 | 16.6 KB |
-| `Aec` struct + AEC3 chain backing arrays (state / RES-est / suppression / stationarity / LFS / run + hop scratch incl. the 12 former float[8192] stack arrays) + render FIFO + RSA counters | ~251 KB |
-| **Total**                                                  | **526.7 KB** (539,328 B) |
+| `Aec` struct + AEC3 chain backing arrays (state / RES-est / suppression / stationarity / LFS / run + hop scratch, incl. the de-stacked instance scratch) + render FIFO + RSA counters | ~272 KB |
+| **Total (KISS)**                                           | **544.6 KB** (557,680 B) |
+
+What moved since the previous figure (526.7 KB / 539,328 B): +24.5 KB of
+former function-local stack scratch (13 `float[8192]`/`float[4096]` arrays,
+sized by real dims) is now pool-resident instead of stack-resident; −2 KB
+from the coherence arrays converting double→float; −3.1 KB because the
+PBFDAF process-scratch fields are now flag-gated off for the PBFDKF base
+(main filter no longer carries the unused copy); plus small struct deltas
+elsewhere.
+
+**NE10 backend (embedded build): 507.1 KB (519,232 B) total** — smaller than
+KISS because the R2C/C2R twiddle configs are NE10-internal heap allocations
+that live *outside* this pool (released by `fft_destroy`/`aec_destroy`, not by
+freeing the pool); everything else in the table above is backend-independent.
 
 Sample rates other than 16 kHz scale roughly proportional to hop_size.

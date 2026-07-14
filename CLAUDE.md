@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 Single-channel AEC (1 mic + 1 ref reference signal). Two implementations of the
-**same algorithm** that must produce **bit-equal output** within numerical
-tolerance:
+**same algorithm** — Python is the fp64 algorithm spec, C is the float32
+production implementation, and their outputs must agree within a documented
+numerical tolerance (not bit-equal — see the float32 campaign note below):
 
 - `python/aec.py` — top-level shim that re-exports every public symbol so
   `from aec import AEC, AecConfig, ...` keeps working. Algorithm itself
@@ -21,16 +22,34 @@ tolerance:
 
 Algorithm version is tracked by `__version__` in [aec.py](python/aec.py)
 (currently **3.23.0**; BALANCED changed in 3.23.0 — no-PA matched-filter
-pre-echo fix + DT-deg recovery stack — see CHANGELOG). The Python↔C port's
-**non-FFT logic is bit-exact** (verified under `-DUSE_STANDARD_MATH`) —
-**except the delay-estimator matched filter**, which runs float32 fast-math
-dots + duty-cycling unconditionally in C (intentional divergence, sampled at
-zero AECMOS cost; see `c_impl/include/delay_aec3.h`). The production **FFT
-backend is KISS FFT (float32)** (NE10 opt-in via `make NE10_DIR=...`), so
-end-to-end C aligns with Python to ~float32 precision (correlation
-0.99999958, ≈ −60 dB, inaudible — not 0/0). Canonical algorithm reference:
-[docs/aec_methods.md](docs/aec_methods.md). Architecture flowcharts —
-current vs AEC3 reference:
+pre-echo fix + DT-deg recovery stack — see CHANGELOG).
+
+**Float32 campaign (2026-07-15): all production C is now float32
+end-to-end** — delay chain, orchestrator scalars, post/state modules,
+`residual_echo_estimator`, and the mic-path HPF (`reverb_decay_estimator.c`
+is the sole remaining `double` file, and it is dead code with no production
+caller). **Python bit-exact parity is retired repo-wide**: the Python
+reference (fp64) is now the **algorithm spec**, C is the float32
+**implementation**, and Python↔C comparison is **tolerance-based** (~−60 dB
+class, correlation 0.99999958) — never 0/0. The regression anchors are now:
+
+- **C-goldens** — `c_impl/test/parity_delay.c` regenerated against its own
+  prior output via `c_impl/test/gen_delay_c_golden.c` (the delay chain's
+  fast-math/duty-cycled matched filter is checked against itself, not
+  Python), and the end-to-end tolerance gate `c_impl/test/parity_aec_e2e.c`.
+- **Staged gates vs the `fp64-baseline` git tag** — 60-case stratified
+  AECMOS (worst per-case delta −0.021 echo, all bucket means ≤0.002, within
+  the established noise bar), waveform drift median −95 dB, and a 1-hour
+  soak (delay trajectory identical, power-EMA worst rel diff 1.3e-5, final
+  ERLE matching to 4 digits).
+
+The production **FFT backend is KISS FFT (float32)** (host/reference build:
+malloc + KISS, `make`, default). The embedded deployment (caller pool + NE10,
+`make BACKEND=ne10` + `aec_get_mem_size`/`aec_init`) ships from the same main
+branch; NE10 vs KISS output is not bit-identical to each other (pre-existing,
+expected), but each backend's static path is byte-equal to its own malloc
+path. Canonical algorithm reference: [docs/aec_methods.md](docs/aec_methods.md).
+Architecture flowcharts — current vs AEC3 reference:
 [docs/architecture_v3_22_5_vs_aec3.html](docs/architecture_v3_22_5_vs_aec3.html).
 
 ## Common commands
@@ -67,8 +86,33 @@ aren't comparable to prior verdicts.
 
 ### Byte-equal regression check (post-cleanup gate)
 
-A behaviour-neutral cleanup must produce byte-identical output. Render a
-small case set before and after the edit and compare with `cmp`:
+A behaviour-neutral cleanup must produce byte-identical output on the side of
+the port it touches. **Python-side edits** still use the Python render
+procedure below. **C-side edits** (this is the standard path since the f32
+campaign) are gated with C renders instead — `bin/aec_wav` binary output +
+`cmp` — not the Python renderer, since Python↔C is tolerance-based, not
+byte-equal (see "What this repo is" above).
+
+**C-side gate** (render with `bin/aec_wav` before/after, compare with `cmp`):
+
+```bash
+cd c_impl && make clean && make   # BEFORE editing
+mkdir -p /tmp/cbe_before /tmp/cbe_after
+for f in <stems>; do ./bin/aec_wav "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "/tmp/cbe_before/${f}.wav" --preset balanced --cng; done
+# ... make edits ...
+cd c_impl && make clean && make   # AFTER editing
+for f in <stems>; do ./bin/aec_wav "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "/tmp/cbe_after/${f}.wav" --preset balanced --cng; done
+for f in /tmp/cbe_after/*.wav; do \
+  cmp -s "$f" "/tmp/cbe_before/$(basename "$f")" \
+    && echo "MATCH $(basename "$f")" || echo "DIFFER $(basename "$f")"; done
+```
+
+Also re-run `test_static_aec` (static == dynamic) and `parity_aec_e2e`
+(tolerance gate) — see `c_impl/STATIC_MEMORY.md` and
+`c_impl/test/PARITY_REPORT.md`.
+
+**Python-side gate** (unchanged — render a small case set before and after
+the edit and compare with `cmp`):
 
 ```bash
 # BEFORE editing: render a baseline (any small dir of mic/lpb cases)
@@ -94,7 +138,9 @@ make                  # debug: `make debug` (adds -g -DAEC_DEBUG)
 ./bin/aec_wav mic.wav ref.wav out.wav --debug-level 2 --debug-log /tmp/aec.log
 ```
 
-`-ffp-contract=off` in `CFLAGS` is mandatory for Python↔C byte-equal parity.
+`-ffp-contract=off` in `CFLAGS` is mandatory for build determinism and golden
+stability (no FMA reassociation drift between compilers/builds) — retained
+post-campaign even though Python↔C is no longer a byte-equal target.
 Output WAV defaults to fp32 PCM (`AEC_OUT_FLOAT=0` for 16-bit).
 
 ### Python tests
@@ -200,8 +246,11 @@ aggressive differ from balanced **only** in that one floor field.
 matched-filter pre-echo `accumulated_error` binning bug (`i//4` → AEC3 cumsum
 prefix-error) that had collapsed pre-echo to 0 and corrupted no-PA delay
 estimation — plus a default-ON DT-deg recovery stack (`dt_aware_recovery_soft`
-+ `dt_aware_res_floor`, `min_gain_floor_dt_db = −20`), and completes Python↔C
-bit-exactness under `-DUSE_STANDARD_MATH` (4 production-C port bugs fixed). It
++ `dt_aware_res_floor`, `min_gain_floor_dt_db = −20`), and at the time completed
+Python↔C bit-exactness under `-DUSE_STANDARD_MATH` (4 production-C port bugs
+fixed) — **since superseded by the 2026-07-15 float32 campaign** (see "What
+this repo is" above): Python bit-exact parity is retired repo-wide, Python is
+now the algorithm spec and C the tolerance-checked float32 implementation. It
 supersedes 3.22.2 as production; see CHANGELOG `[3.23.0]`. The frontier history
 below is retained for context.
 

@@ -6,7 +6,23 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v3.23.0 (2026-06-20) — Python `aec.py` `__version__ = "3.23.0"`; Python↔C **non-FFT logic bit-exact** (verified under `-DUSE_STANDARD_MATH`) — except the C delay-estimator matched filter, which runs float32 fast-math + duty-cycling unconditionally (intentional divergence, sampled at zero AECMOS cost; see `c_impl/include/delay_aec3.h`); the production **FFT backend is KISS FFT (float32)** (NE10 opt-in via `make NE10_DIR=...`), so end-to-end C aligns with Python to ~float32 precision (correlation 0.99999958, RMS error ≈ −60 dB below signal, inaudible — not 0/0). The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the no-pre-align (no-PA) online-delay path — the matched-filter pre-echo `accumulated_error` binning bug (`i//4` → AEC3 cumsum prefix-error) that had collapsed pre-echo to 0 and corrupted no-PA delay estimation — and ships a default-ON DT-deg recovery stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`, `min_gain_floor_dt_db = −20`); 4 production-C port bugs were also fixed. Three Pareto presets — `mild` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.23.0]`.
+**Release**: v3.23.0 (2026-06-20) — Python `aec.py` `__version__ = "3.23.0"`. The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the no-pre-align (no-PA) online-delay path — the matched-filter pre-echo `accumulated_error` binning bug (`i//4` → AEC3 cumsum prefix-error) that had collapsed pre-echo to 0 and corrupted no-PA delay estimation — and ships a default-ON DT-deg recovery stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`, `min_gain_floor_dt_db = −20`). Three Pareto presets — `mild` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.23.0]`.
+
+**Float32 campaign** (2026-07-15, on top of 3.23.0): all production C is now
+float32 end-to-end (delay chain, orchestrator scalars, post/state modules,
+`residual_echo_estimator`, HPF). **Python bit-exact parity is retired
+repo-wide** — the Python reference (fp64) is now the **algorithm spec**, C is
+the float32 **implementation**, and Python↔C comparison is **tolerance-based**
+(~−60 dB class, correlation 0.99999958), not 0/0. The production **FFT
+backend is KISS FFT (float32)** on the host/reference build (`make`, malloc);
+the embedded deployment (`make BACKEND=ne10`, caller pool via
+`aec_get_mem_size`/`aec_init`) ships from the same main branch — NE10 vs KISS
+output is not bit-identical to each other (pre-existing), but each backend's
+static path is byte-equal to its own malloc path. Regression anchors: C-goldens
+(`c_impl/test/parity_delay.c` + `c_impl/test/parity_aec_e2e.c`) and staged
+gates vs the `fp64-baseline` tag (60-case stratified AECMOS within noise bar,
+waveform drift median −95 dB, 1-hour soak stable). See
+[CHANGELOG.md](CHANGELOG.md) `[Unreleased] — 2026-07-15`.
 
 ---
 
@@ -74,10 +90,13 @@ single-channel DT-deg-vs-echo wall; all share the same `_aec3_post` chain and
 
 | | |
 |---|---|
-| Memory (main+shadow filter)        | ~200 KB |
-| Memory (incl. RES + delay est.)    | ~280 KB |
+| Static pool, KISS (host/reference) | 557,680 B (544.6 KB) |
+| Static pool, NE10 (embedded)       | 519,232 B (507.1 KB) (twiddles live outside the pool) |
 | Compute / frame                    | 4 × 512-FFT + Kalman update (257 bins × 6 partitions) |
 | FFT                                | KISS FFT (float32; NE10 ARM-NEON opt-in) — ~float32 precision vs numpy `np.fft` |
+
+Both backends are static==dynamic byte-equal (`test_static_aec`); full
+per-region breakdown → [c_impl/STATIC_MEMORY.md](c_impl/STATIC_MEMORY.md).
 
 ### Known limitations (cases this AEC cannot fully solve)
 

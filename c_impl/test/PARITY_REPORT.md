@@ -65,3 +65,67 @@ These were scoped out of the narrowed P0 acceptance. To localize the drift to a 
 - [ ] `c_impl/Makefile` — `parity` target wiring the two stubs above plus a runner that compares against `parity_dump.py` output.
 
 Once those land, run them in order: plateau → residual_echo → (later) helper / pbfdkf weights. The first stage that fails is the root cause; everything downstream of it inherits the drift.
+
+---
+
+## 2026-07-15 — Disposition: Python bit-exact parity retired (float32 campaign)
+
+The narrative above (v3.10.4-era P0 gate) predates the AEC3-aligned pipeline
+and the float32 campaign by a long margin; it is kept as historical record of
+the original parity effort, not as a current-state description. As of the
+2026-07-15 float32 campaign, **Python bit-exact parity is retired
+repo-wide**:
+
+- All production C is now float32 end-to-end (delay chain, orchestrator
+  scalars, post/state modules, `residual_echo_estimator`, HPF).
+  `reverb_decay_estimator.c` is the sole remaining `double` file, and it is
+  dead code with no production caller.
+- The Python reference (`python/aec.py`, fp64) is now the **algorithm spec**;
+  this C port is the float32 **implementation**. Python↔C comparison is
+  **tolerance-based** (~−60 dB class, correlation 0.99999958) — it was never
+  going to be 0/0 once the FFT and math went float32, and it is not the goal
+  any more.
+
+**Disposition of the harnesses in this directory:**
+
+- **HISTORICAL, not deleted** — every `parity_*.c` file here (`parity_pbfdkf.c`,
+  `parity_aec3_post.c`, `parity_aec3_post_run.c`, `parity_aec_state.c`,
+  `parity_residual_echo_estimator.c`, `parity_suppression_gain.c`,
+  `parity_fft.c`, `parity_filter_analyzer.c`, `parity_filter_delay.c`,
+  `parity_filter_quality.c`, `parity_filter_state_bridge.c`,
+  `parity_fullband_erle.c`, `parity_initial_state.c`,
+  `parity_linear_filter_select.c`, `parity_erl_estimator.c`,
+  `parity_reverb_decay_estimator.c`, `parity_reverb_frequency_response.c`,
+  `parity_reverb_model.c`, `parity_saturation_detector.c`,
+  `parity_stationarity_estimator.c`, `parity_subband_erle.c`,
+  `parity_render_signal_analyzer.c`, `parity_pbfdkf_loc.c`,
+  `parity_aec3_scale.c`) replays a binary golden generated from the fp64
+  Python reference (`python/diag/gen_*_golden.py`) through the now-float32 C
+  module. They **may report drift by design** — the modules they exercise
+  were converted to float32 as part of the campaign, so exact bit-match
+  against an fp64 golden is no longer the expected outcome. A subset also
+  reads f64 golden scalars into f32 `AecConfig`/state fields via silent
+  narrowing, which is a further, expected source of reported drift, not a
+  bug. None of these harnesses were deleted; they remain useful as
+  diagnostic tools (they still catch gross logic breaks — sign flips, wrong
+  indices, dropped terms — even though they no longer gate on exact
+  equality).
+- **MAINTAINED regression anchors** (the only two harnesses treated as
+  pass/fail gates going forward):
+  - `parity_delay.c` — a **C-regression golden**: it checks the delay chain's
+    (already-float32, fast-math, duty-cycled) matched filter against its own
+    prior recorded output, regenerated via `gen_delay_c_golden.c`. This was
+    converted ahead of the rest of the campaign, on 2026-07-13, when the
+    delay chain's fast-math path was made unconditional.
+  - `parity_aec_e2e.c` — the **authoritative end-to-end gate**: full
+    `aec_create` → `aec_process` output within a 2e-2 float32 tolerance
+    (correlation 0.99999958, RMS ≈ −60 dB below signal, per-sample max ~6e-3
+    over ≈4186 recursive hops — inaudible).
+- **Additional staged gates** (outside this directory, vs the `fp64-baseline`
+  git tag): 60-case stratified AECMOS (worst per-case delta −0.021 echo, all
+  bucket means ≤0.002 — within the established noise bar), waveform drift
+  median −95 dB, and a 1-hour soak (delay trajectory identical, power-EMA
+  worst rel diff 1.3e-5, final ERLE matching to 4 digits).
+
+See `../README.md` ("Precision & regression anchors") and
+`../STATIC_MEMORY.md` for the current pool figures under the same campaign.

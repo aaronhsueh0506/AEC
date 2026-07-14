@@ -26,12 +26,14 @@ make lib        # bin/libaec.a
 make debug      # 加入 -g -DAEC_DEBUG
 ```
 
-預設使用 repo 內附的 KISS FFT。ARM 平台可改用 NE10：
+預設使用 host/reference 組態：`malloc` + KISS FFT backend（`make`，`BACKEND=kiss` 為預設值）。ARM 平台（embedded 部署）可改用 caller-pool + NE10：
 
 ```bash
-make NE10_DIR=/path/to/Ne10 CC=aarch64-linux-gnu-gcc
-make lib NE10_DIR=/path/to/Ne10 CC=aarch64-linux-gnu-gcc
+make BACKEND=ne10
+make lib BACKEND=ne10
 ```
+
+兩種 backend 共用同一條 main branch；NE10 與 KISS 的輸出彼此並非 bit-identical（既有、預期中的 FFT 實作差異），但各自的 static path 對自己的 malloc path 都是 byte-equal。
 
 整合 application 時必須保留 `-ffp-contract=off`：
 
@@ -169,9 +171,12 @@ if (aec_init(&aec, pool, pool_bytes, &cfg) != 0) { /* pool 不足 */ }
 aec_destroy(&aec);   /* static path 不會 free 任何東西；pool 由 caller 回收 */
 ```
 
-兩條 path 輸出 **bit-identical**（`c_impl/test_static_aec.c` 驗證 static == dynamic
-byte-equal）。BALANCED / 16 kHz / 52 ms filter / shadow + RES + delay-est 全開時
-pool 為 **539,328 B（526.7 KB）**。設計說明與 per-module 佔用明細見
+同一個 backend 下兩條 path 輸出 **bit-identical**（`c_impl/test_static_aec.c` 驗證
+static == dynamic byte-equal）；NE10 與 KISS 彼此的輸出並非 bit-identical（既有、
+預期中的 FFT 實作差異）。BALANCED / 16 kHz / 52 ms filter / shadow + RES +
+delay-est 全開時 pool 為：KISS backend **557,680 B（544.6 KB）**；NE10 backend
+**519,232 B（507.1 KB）**（R2C/C2R twiddle 設定屬 backend-internal heap
+配置，落在 pool 之外）。設計說明與 per-module 佔用明細見
 [../c_impl/STATIC_MEMORY.md](../c_impl/STATIC_MEMORY.md)。
 
 ## 5. Decoupled render/capture API

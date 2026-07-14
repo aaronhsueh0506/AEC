@@ -16,6 +16,33 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-07-15 — float32 campaign (Python bit-exact parity retired)
+
+Staged conversion of all production C to float32 end-to-end: (1) delay chain
+(`delay_aec3.c` biquads + scalar bookkeeping), (2) `aec.c` orchestrator
+scalars, (3) the post/state module chain (`aec3_post`, `aec_state`,
+`residual_echo_estimator`, `suppression_gain`, ERLE/reverb/stationarity), (4)
+mic-path HPF swapped to `audio_common`'s shared f32 platform HPF
+(DF2-transposed; `parity_hpf.c` + `gen_hpf_golden.py` removed).
+`reverb_decay_estimator.c` is the sole remaining `double` file (dead code, no
+production caller). Also: de-stacked 13 large function-local
+`float[8192]`/`[4096]` arrays into the static pool; renamed preset
+`gentle`→`mild` (NR-style naming, parameters unchanged, `AEC_PRESET_MILD`);
+and a `/simplify` cleanup pass over the full diff.
+
+**Python bit-exact parity is retired repo-wide** — Python (fp64) is now the
+algorithm spec, C is the float32 implementation, Python↔C is
+tolerance-based (~−60 dB class), not 0/0. Gates: C-goldens
+(`test/parity_delay.c`/`gen_delay_c_golden.c`, `test/parity_aec_e2e.c`
+tolerance) plus staged checks vs the `fp64-baseline` tag — 60-case
+stratified AECMOS (worst Δ −0.021 echo, buckets ≤0.002), waveform drift
+median −95 dB, 1-hour soak stable. Static pool (BALANCED/16 kHz/52 ms):
+KISS 557,680 B (544.6 KB), NE10 519,232 B (507.1 KB), both static==dynamic
+byte-equal. Deployment model unchanged: host/reference = malloc + KISS
+(`make`, default); embedded = caller-pool + NE10 (`make BACKEND=ne10`) —
+same main branch; NE10 vs KISS not bit-identical (pre-existing).
+`-ffp-contract=off`/`std=gnu99` retained.
+
 ## [Unreleased] — 2026-07-14 — single-branch consolidation (static-memory API folded into main)
 
 Repo hygiene, zero algorithm change. The `feature/static-memory` branch is
@@ -1033,7 +1060,7 @@ Per `docs/aec_methods.md`: v3.21.5 already beat AEC2 by +1.12 FS and beat AEC3 b
 
 ### Discipline rules established
 
-- [`feedback_no_parity_claim_for_divergence`](../../../.claude/projects/-Users-mingyu-Desktop-novatek-SE/memory/feedback_no_parity_claim_for_divergence.md): when AEC3 parity closes as intentionally-incompatible, successor design in a later cycle (e.g., v3.22 G.2 after v3.21.6 P2) must be labelled as intentional divergence with PBFDKF-specific rationale — must NOT claim AEC3 parity restoration. Mirror-image of the Round-7 "no parity smuggling into v3.22" anti-pattern.
+- `feedback_no_parity_claim_for_divergence` (local memory note): when AEC3 parity closes as intentionally-incompatible, successor design in a later cycle (e.g., v3.22 G.2 after v3.21.6 P2) must be labelled as intentional divergence with PBFDKF-specific rationale — must NOT claim AEC3 parity restoration. Mirror-image of the Round-7 "no parity smuggling into v3.22" anti-pattern.
 
 ---
 
