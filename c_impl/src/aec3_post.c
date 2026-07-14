@@ -193,42 +193,29 @@ void aec3_post_compute_coherence(Aec3Post *p,
                                  const Complex *near_spec,
                                  const Aec3PostAbs *mag) {
     const Aec3PostConfig *c = &p->cfg;
-    int nb = c->n_bins, k;
-    float a = c->erle_coh_gate_alpha;
-    float af = a;
-    float omaf = 1.0f - a;
+    int nb = c->n_bins;
     if (!c->erle_coh_gate_enabled) return;
-    for (k = 0; k < nb; ++k) {
-        float er = echo_spec_for_coh[k].r, ei = echo_spec_for_coh[k].i;
-        float nr = near_spec[k].r, ni = near_spec[k].i;
-        float pr = er * nr + ei * ni;      /* re = ac + bd (echo·conj(near)) */
-        float pi = ei * nr - er * ni;      /* im = bc - ad */
-        float echo_abs2, near_abs2;
-        p->coh_sye_re[k] = omaf * p->coh_sye_re[k] + af * pr;
-        p->coh_sye_im[k] = omaf * p->coh_sye_im[k] + af * pi;
-        echo_abs2 = mag->abs_echo_coh[k] * mag->abs_echo_coh[k];
-        near_abs2 = mag->abs_near[k] * mag->abs_near[k];
-        p->coh_syy[k] = (1.0f - a) * p->coh_syy[k] + af * echo_abs2;
-        p->coh_see[k] = (1.0f - a) * p->coh_see[k] + af * near_abs2;
-    }
-    for (k = 0; k < nb; ++k) {
-        float sye2 = p->coh_sye_re[k] * p->coh_sye_re[k]
-                   + p->coh_sye_im[k] * p->coh_sye_im[k];
-        float denom = p->coh_syy[k] * p->coh_see[k];
-        float g2;
-        if (denom < 1.0e-30f) denom = 1.0e-30f;
-        g2 = sye2 / denom;
-        p->coh_gate_mask[k] =
-            (g2 >= c->erle_coh_gate_threshold) ? 1u : 0u;
-    }
+    /* Was 2 separate per-bin loops (EMA update, then threshold gate); fused
+     * into sk_coherence_ema_gate_f32's single per-bin pass -- the gate loop
+     * only ever reads coh_sye_re/im/syy/see at the SAME index k the EMA loop
+     * just wrote, never a different index, so per-k fusion is order-
+     * preserving (see the kernel's doc comment in simd_kernels.h). */
+    sk_coherence_ema_gate_f32(p->coh_sye_re, p->coh_sye_im,
+                              p->coh_syy, p->coh_see,
+                              echo_spec_for_coh, near_spec,
+                              mag->abs_echo_coh, mag->abs_near,
+                              c->erle_coh_gate_alpha, c->erle_coh_gate_threshold,
+                              p->coh_gate_mask, nb);
 }
 
 /* ── stage 5: CNG N2 tracking → comfort_noise ──────────────────────────── */
 void aec3_post_compute_comfort_noise(Aec3Post *p, int saturated_capture) {
     const Aec3PostConfig *c = &p->cfg;
-    int nb = c->n_bins, k;
+    int nb = c->n_bins;
     if (!p->noise_initialized) {
-        for (k = 0; k < nb; ++k) p->y2_smoothed[k] = p->near_psd[k];
+        /* straight copy -- memcpy is bit-exact by construction (no rounding
+         * involved, so no NEON kernel is needed for this one). */
+        memcpy(p->y2_smoothed, p->near_psd, (size_t)nb * sizeof(float));
         p->noise_initialized = 1;
     }
     if (!saturated_capture) {
@@ -239,39 +226,35 @@ void aec3_post_compute_comfort_noise(Aec3Post *p, int saturated_capture) {
         float ia = c->cng_n2_initial_alpha;
         float nfloor = c->noise_floor_int16sq;
         int dur = c->cng_n2_initial_duration_hops;
-        for (k = 0; k < nb; ++k) {
-            p->y2_smoothed[k] = p->y2_smoothed[k]
-                + y2a * (p->near_psd[k] - p->y2_smoothed[k]);
-        }
+        /* delta-form EMA: y2_smoothed += y2a*(near_psd-y2_smoothed) --
+         * sk_ema_delta_f32 mirrors the source's separate sub/mul/add. */
+        sk_ema_delta_f32(p->y2_smoothed, p->near_psd, y2a, nb);
         if (p->n2_counter > c->cng_n2_update_onset_hops) {
-            for (k = 0; k < nb; ++k) {
-                float track = (fresh * p->y2_smoothed[k]
-                               + retain * p->n2[k]) * g_up;
-                float up = p->n2[k] * g_up;
-                p->n2[k] = (p->y2_smoothed[k] < p->n2[k]) ? track : up;
-            }
+            /* data-dependent track/up select on n2 -- sk_n2_track_f32. */
+            sk_n2_track_f32(p->n2, p->y2_smoothed, fresh, retain, g_up, nb);
         }
         if (p->n2_counter < dur) {
             p->n2_counter += 1;
             if (p->n2_counter < dur) {
-                for (k = 0; k < nb; ++k) {
-                    float slow = p->n2_initial[k]
-                               + ia * (p->n2[k] - p->n2_initial[k]);
-                    p->n2_initial[k] = (p->n2[k] > p->n2_initial[k])
-                                       ? slow : p->n2[k];
-                }
+                /* data-dependent slow/raw select on n2_initial --
+                 * sk_n2_initial_track_f32. */
+                sk_n2_initial_track_f32(p->n2_initial, p->n2, ia, nb);
             }
         }
-        for (k = 0; k < nb; ++k) if (p->n2[k] < nfloor) p->n2[k] = nfloor;
+        /* floor clamp: `if (x[k]<nfloor) x[k]=nfloor;` with no upper bound
+         * at all -- sk_clip_f32(x, nfloor, +inf, n) reproduces this exactly:
+         * `x[k] > +inf` is unreachable for any finite x (and false even for
+         * x==+inf), so the clip's high branch degenerates to a no-op and
+         * only the low-bound compare+select fires, verbatim. */
+        sk_clip_f32(p->n2, nfloor, (float)INFINITY, nb);
         if (p->n2_counter < dur) {
-            for (k = 0; k < nb; ++k)
-                if (p->n2_initial[k] < nfloor) p->n2_initial[k] = nfloor;
+            sk_clip_f32(p->n2_initial, nfloor, (float)INFINITY, nb);
         }
     }
     {
         const float *cn = (p->n2_counter < c->cng_n2_initial_duration_hops)
                           ? p->n2_initial : p->n2;
-        for (k = 0; k < nb; ++k) p->comfort_noise[k] = cn[k];
+        memcpy(p->comfort_noise, cn, (size_t)nb * sizeof(float));
     }
 }
 
@@ -296,35 +279,47 @@ void aec3_post_apply_output(Aec3Post *p,
         if (c->output_capture_when_linear_unusable && !usable_linear) {
             float *se2 = p->nf;
             float se, sy;
-            for (k = 0; k < nb; ++k)
-                se2[k] = mag->abs_error[k] * mag->abs_error[k];
+            /* |abs|^2 == (abs*abs)*1.0f bit-for-bit (multiplying by 1.0f is
+             * an exact IEEE no-op, incl. sign of ±0.0f), so sk_sq_scale_f32
+             * with scale=1.0f reproduces the source square verbatim.
+             * pairwise_sum_f32 itself is untouched (separate task; not one
+             * of the 20 sk_ kernels). */
+            sk_sq_scale_f32(mag->abs_error, 1.0f, se2, nb);
             se = pairwise_sum_f32(se2, (size_t)nb);
-            for (k = 0; k < nb; ++k)
-                se2[k] = mag->abs_ybase[k] * mag->abs_ybase[k];
+            sk_sq_scale_f32(mag->abs_ybase, 1.0f, se2, nb);
             sy = pairwise_sum_f32(se2, (size_t)nb);
             if (se > sy) {
-                for (k = 0; k < nb; ++k) {
-                    p->e_out_spec[k].r = error_spec[k].r + echo_spec_sel[k].r;
-                    p->e_out_spec[k].i = error_spec[k].i + echo_spec_sel[k].i;
-                }
+                sk_cadd_f32(p->e_out_spec, error_spec, echo_spec_sel, nb);
                 out_base = p->e_out_spec;
             }
         }
-        for (k = 0; k < nb; ++k) {
-            p->e_out_spec[k].r = out_base[k].r * gain[k];
-            p->e_out_spec[k].i = out_base[k].i * gain[k];
-        }
+        /* out_base may alias p->e_out_spec (the se>sy branch above just
+         * wrote it there) -- sk_capply_gain_f32 explicitly supports
+         * out == z in-place (full load before store, no cross-iteration
+         * reuse of a not-yet-overwritten element), which is exactly this
+         * case. */
+        sk_capply_gain_f32(p->e_out_spec, out_base, gain, nb);
     }
 
     if (c->enable_cng) {
         int n_random = nb - 2;
         uint32_t seed = p->cng_seed;
         static const float inv_psd_scale = 1.0f / (float)PSD_SCALE;  /* 2^-30, exact */
-        for (k = 0; k < nb; ++k) {
-            float v = p->comfort_noise[k] * inv_psd_scale;
-            if (v < 0.0f) v = 0.0f;
-            p->nf[k] = fast_sqrt(v);
-        }
+        /* v = comfort_noise[k]*inv_psd_scale is pure float32*float32 --
+         * inv_psd_scale is a compile-time-folded float32 constant (2^-30
+         * exact); PSD_SCALE's double literal never touches the per-element
+         * math. Split into: plain scalar multiply into p->nf as scratch
+         * (provably dead here -- whatever nf held before, whether leftover
+         * se2 scratch from the E2 block above or a previous hop's contents,
+         * is never read again: every element is overwritten by this
+         * multiply before anything reads nf back), then the floor clamp via
+         * sk_clip_f32(v, 0, +inf) (the source has no upper bound either --
+         * same +inf-degenerates-to-floor-only trick as the CNG N2 clamps
+         * above), then a single batched sk_fast_sqrt_f32 in place. */
+        for (k = 0; k < nb; ++k)
+            p->nf[k] = p->comfort_noise[k] * inv_psd_scale;
+        sk_clip_f32(p->nf, 0.0f, (float)INFINITY, nb);
+        sk_fast_sqrt_f32(p->nf, p->nf, nb);
         for (k = 0; k < n_random; ++k) {
             uint32_t ix;
             int re_idx, im_idx, bin = k + 1;
@@ -738,26 +733,26 @@ int aec3_post_run(Aec3Post *p,
                                 for (k = 0; k < nb; ++k)
                                     if (stat_mask[k]) { any = 1; break; }
                                 if (any) {
-                                    for (k = 0; k < nb; ++k) {
-                                        if (stat_mask[k]) {
-                                            sc->r2[k] = 0.0f;
-                                            sc->r2_unb[k] = 0.0f;
-                                        }
-                                    }
+                                    /* r2/r2_unb are disjoint destinations
+                                     * sharing the same mask + index range --
+                                     * no ordering dependency between the two
+                                     * calls, so each converts independently
+                                     * to sk_mask_zero_f32 (verbatim
+                                     * `if (mask[k]) x[k]=0.0f;`). */
+                                    sk_mask_zero_f32(sc->r2, stat_mask, nb);
+                                    sk_mask_zero_f32(sc->r2_unb, stat_mask, nb);
                                 }
                             }
 
                             /* ── Step 18: nearend_pwr (3484-3488) ──────────── */
                             if (usable) {
-                                for (k = 0; k < nb; ++k) {
-                                    float e = p->error_psd[k];
-                                    float y = p->near_psd[k];
-                                    /* np.minimum compares in float. */
-                                    sc->nearend_pwr[k] = (e < y) ? e : y;
-                                }
+                                /* np.minimum compares in float -- exact shape
+                                 * of sk_min_f32: (a<b)?a:b. */
+                                sk_min_f32(sc->nearend_pwr, p->error_psd,
+                                          p->near_psd, nb);
                             } else {
-                                for (k = 0; k < nb; ++k)
-                                    sc->nearend_pwr[k] = p->near_psd[k];
+                                memcpy(sc->nearend_pwr, p->near_psd,
+                                      (size_t)nb * sizeof(float));
                             }
 
                             /* ── Step 19: comfort_noise (3502-3570) ────────── */
