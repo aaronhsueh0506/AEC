@@ -376,10 +376,10 @@ int aec_create(Aec* a, const AecConfig* cfg) {
         a->erle_slope_head = 0;
     }
 
-    /* HPF (mic only; ref HPF retired). */
+    /* HPF (mic only; ref HPF retired) — audio_common f32 platform HPF. */
     if (cfg->enable_highpass) {
-        hpf_f64_init(&a->hp_mic, cfg->highpass_cutoff_hz, cfg->sample_rate);
-        a->has_hp = 1;
+        a->hp_mic = hpf_create(cfg->highpass_cutoff_hz, cfg->sample_rate);
+        a->has_hp = (a->hp_mic != NULL);
     }
     /* Saturation. */
     if (cfg->enable_saturation) {
@@ -864,6 +864,7 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
     /* per-hop freq-bin scratch (12; see aec.h struct comment) */
     t += ALIGN16((size_t)hop * sizeof(float));      /* scr_sq */
     t += ALIGN16((size_t)K * sizeof(float)) * 11;   /* scr_e2_echo .. scr_erl_arr */
+    if (cfg->enable_highpass) t += ALIGN16(hpf_get_mem_size());  /* mic-path HPF */
     return t;
 }
 
@@ -894,8 +895,7 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         a->erle_slope_head = 0;
     }
 
-    /* HPF */
-    if (cfg->enable_highpass) { hpf_f64_init(&a->hp_mic, cfg->highpass_cutoff_hz, cfg->sample_rate); a->has_hp = 1; }
+    /* HPF: pool-carved at the scratch tail below (audio_common f32 HPF). */
     /* Saturation */
     if (cfg->enable_saturation) {
         saturation_init(&a->sat_ref, cfg->saturation_threshold);
@@ -1210,7 +1210,14 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     a->scr_far_psd   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_e2ref_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_e2coa_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
-    a->scr_erl_arr   = (float*)ptr; /* last — no advance needed */
+    a->scr_erl_arr   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
+    /* mic-path HPF (audio_common f32; pool-resident, hpf_destroy no-ops) */
+    if (cfg->enable_highpass) {
+        a->hp_mic = hpf_init(ptr, hpf_get_mem_size(),
+                             cfg->highpass_cutoff_hz, cfg->sample_rate);
+        a->has_hp = (a->hp_mic != NULL);
+        /* ptr advance not needed — last carve */
+    }
 
     /* scalar state (mirrors aec_create tail) */
     a->pending_gain_change = 0; a->pending_delay_change = -1;
@@ -1250,6 +1257,7 @@ void aec_destroy(Aec* a) {
      * fft_destroy() itself is a no-op for a NULL handle and (KISS backend)
      * for a pool-owned handle, so this is safe pre- or post- pool-teardown. */
     fft_destroy(a->post_fft);
+    if (a->has_hp) { hpf_destroy(a->hp_mic); a->hp_mic = NULL; }
     pbfdkf_free(&a->main_filter);
     if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
 
@@ -1275,7 +1283,7 @@ void aec_destroy(Aec* a) {
 int aec_hop_size(const Aec* a) { return a->hop_size; }
 
 void aec_reset(Aec* a) {
-    if (a->has_hp) hpf_f64_reset(&a->hp_mic);
+    if (a->has_hp) hpf_reset(a->hp_mic);
     if (a->has_sat) { saturation_reset(&a->sat_ref); saturation_reset(&a->sat_mic); }
     if (a->has_delay) {
         delay_aec3_reset(&a->delay);
@@ -1404,7 +1412,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     memcpy(a->far_hop,  ref_in, (size_t)hop * sizeof(float));
 
     /* 1. mic HPF (ref HPF OFF). */
-    if (a->has_hp) hpf_f64_process(&a->hp_mic, a->near_hop, a->near_hop, hop);
+    if (a->has_hp) hpf_process(a->hp_mic, a->near_hop, hop);
 
     /* Held "near-end seen recently" gate for DT-aware soft recovery (mirrors
      * Python orchestrator 16285fd). Reads the PREVIOUS frame's dt_from_energy

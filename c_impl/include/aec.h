@@ -17,7 +17,7 @@
 #define AEC_AEC_H
 
 #include "fft_wrapper.h"
-#include "hpf_f64.h"
+#include "hpf.h"
 #include "saturation.h"
 #include "delay_aec3.h"
 #include "detectors.h"
@@ -128,7 +128,7 @@ typedef struct Aec {
     int hop_size, block_size, fft_size, n_freqs, n_partitions;
 
     /* preprocessing */
-    HpfF64 hp_mic;            int has_hp;
+    Hpf  *hp_mic;             int has_hp;
     Saturation sat_ref, sat_mic;  int has_sat;
 
     /* delay (AEC3 matched filter) + ring */
