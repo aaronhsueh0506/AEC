@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
     FILE *f = fopen(path, "rb");
     int size, hop, n_steps;
     int s, k, mism = 0;
-    float *taps, *block, *exp_h, *h_storage;
+    float *taps, *block, *exp_h, *h_storage, *abs_scratch, *render_sq_scratch;
     FilterAnalyzer m;
 
     if (!f) { fprintf(stderr, "cannot open %s\n", path); return 2; }
@@ -39,11 +39,19 @@ int main(int argc, char **argv) {
     block     = malloc((size_t)hop * sizeof(float));
     exp_h     = malloc((size_t)size * sizeof(float));
     h_storage = malloc((size_t)size * sizeof(float));
-    if (!taps || !block || !exp_h || !h_storage) { fprintf(stderr, "oom\n"); return 2; }
+    /* M3: fa_update()'s former fixed-size stack scratch is now caller-owned
+     * (pool-carved in production); this standalone harness mallocs its own
+     * copies sized exactly to what fa_update requires (size / hop). */
+    abs_scratch       = malloc((size_t)size * sizeof(float));
+    render_sq_scratch = malloc((size_t)hop * sizeof(float));
+    if (!taps || !block || !exp_h || !h_storage || !abs_scratch || !render_sq_scratch) {
+        fprintf(stderr, "oom\n"); return 2;
+    }
 
     /* Defaults match the Python FilterAnalyzer() ctor. */
     fa_init(&m, h_storage, size, 100.0 /*active_render_limit*/,
-            0 /*bounded_erl*/, 1.0 /*default_gain*/);
+            0 /*bounded_erl*/, 1.0 /*default_gain*/,
+            abs_scratch, size, render_sq_scratch, hop);
 
     for (s = 0; s < n_steps; ++s) {
         int e_peak, e_delay, e_cons, e_min, e_any, e_sig, e_flo, e_fhi, e_dref;
@@ -165,5 +173,6 @@ int main(int argc, char **argv) {
     if (mism) { printf(">>> FAIL\n"); return 1; }
     printf(">>> PASS (bit-exact)\n");
     free(taps); free(block); free(exp_h); free(h_storage);
+    free(abs_scratch); free(render_sq_scratch);
     return 0;
 }

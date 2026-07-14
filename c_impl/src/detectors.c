@@ -10,14 +10,23 @@
 static const float RA_ALPHA_CV     = 0.99f;
 static const float RA_STATIONARY_C = 0.02f;
 
-void render_activity_init(RenderActivity* r) {
+void render_activity_init(RenderActivity* r, float* pairwise_scratch,
+                           int pairwise_scratch_len) {
     r->env_mean      = 1e-10f;
     r->env_var       = 0.0f;
     r->active_prev   = 0;
     r->is_stationary = 0;
+    r->pairwise_scratch     = pairwise_scratch;
+    r->pairwise_scratch_len = pairwise_scratch_len;
 }
 void render_activity_reset(RenderActivity* r) {
-    render_activity_init(r);
+    /* Scalar state only -- pairwise_scratch/pairwise_scratch_len are
+     * caller-owned and set once at render_activity_init; reset must not
+     * clobber them (there is no pool-carved buffer to re-supply here). */
+    r->env_mean      = 1e-10f;
+    r->env_var       = 0.0f;
+    r->active_prev   = 0;
+    r->is_stationary = 0;
 }
 
 RenderActivityResult render_activity_update(RenderActivity* r,
@@ -48,8 +57,21 @@ RenderActivityResult render_activity_update(RenderActivity* r,
      */
     enum { PAIR_BLOCK = 8 };
     int n_blocks = (n + PAIR_BLOCK - 1) / PAIR_BLOCK;
-    /* Stack buffer: max hop in our pipeline ≤ 8192 → ≤ 1024 blocks. */
-    float blocks[1024];
+    /* Guard: pairwise_scratch is caller-owned (pool-carved by aec_carve,
+     * sized ceil(hop/PAIR_BLOCK) from the same runtime hop passed as `n`
+     * here), so this never fires in production -- but a corrupted or
+     * mis-sized carve must not silently overrun caller memory. Mirrors the
+     * n<=0 guard above: return current state unchanged. */
+    if (n_blocks > r->pairwise_scratch_len) {
+        RenderActivityResult res_guard = {
+            .far_pwr       = 1e-10f,
+            .is_active     = r->active_prev,
+            .is_stationary = r->is_stationary,
+            .warmup_active = 0,
+        };
+        return res_guard;
+    }
+    float* blocks = r->pairwise_scratch;
     for (int b = 0; b < n_blocks; ++b) {
         int start = b * PAIR_BLOCK;
         int end   = start + PAIR_BLOCK;

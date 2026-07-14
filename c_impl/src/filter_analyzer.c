@@ -136,7 +136,9 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
 
 /* ------------------------------ FilterAnalyzer --------------------------- */
 void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
-             float active_render_limit, int bounded_erl, float default_gain) {
+             float active_render_limit, int bounded_erl, float default_gain,
+             float *abs_scratch, int abs_scratch_len,
+             float *render_sq_scratch, int render_sq_scratch_len) {
     m->active_render_threshold =
         (active_render_limit * active_render_limit) * (float)FA_HOP_SAMPLES;
     m->bounded_erl = bounded_erl ? 1 : 0;
@@ -152,6 +154,10 @@ void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
     m->delay_blocks = 0;
     m->size = size;
     m->h_highpass = h_highpass_storage;
+    m->abs_scratch = abs_scratch;
+    m->abs_scratch_len = abs_scratch_len;
+    m->render_sq_scratch = render_sq_scratch;
+    m->render_sq_scratch_len = render_sq_scratch_len;
     if (m->h_highpass != NULL && size > 0) {
         memset(m->h_highpass, 0, (size_t)size * sizeof(float));
     }
@@ -215,11 +221,6 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     float cur_sq, best_sq, hp, sp;
     int sufficient;
     float peak_abs;
-    /* scratch buffers sized to the filter length / render length. The largest
-     * abs-slice spans at most one region (HOP) plus the floor offsets; the
-     * filter length (size) bounds it safely. render block bounds the sq buf. */
-    float  abs_scratch[1024];           /* >= size (960); detect slice <= size  */
-    float  render_sq_scratch[1024];     /* >= render_block_len (160)            */
 
     /* Guard (clang-analyzer): size<0 (an invalid-config path — m->size is
      * derived from filter_length/hop) would clip region_end negative in
@@ -230,6 +231,15 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
      * always has size > 0 (n_partitions*hop, both positive), so this never
      * fires in production. */
     if (size <= 0) {
+        return;
+    }
+    /* Guard: abs_scratch/render_sq_scratch are caller-owned (pool-carved by
+     * aec_carve, sized from the same runtime n_partitions*hop / hop dims as
+     * `size`/render_block_len), so this never fires in production -- but a
+     * corrupted or mis-sized carve must not silently overrun caller memory
+     * (the largest abs-slice spans at most `size` elements; the render sum
+     * spans exactly render_block_len). */
+    if (m->abs_scratch_len < size || m->render_sq_scratch_len < render_block_len) {
         return;
     }
     m->blocks_since_reset += 1;
@@ -278,11 +288,10 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     }
 
     /* ConsistentFilterDetector (filter_analyzer.cc:135-138). */
-    (void)abs_scratch; /* sized above */
     m->consistent_estimate = cd_detect(
         &m->consistent, h, size, m->region_start, m->region_end,
         render_block, render_block_len, m->peak_index, m->delay_blocks,
-        abs_scratch, render_sq_scratch);
+        m->abs_scratch, m->render_sq_scratch);
 }
 
 /* ------------------------------ queries --------------------------------- */

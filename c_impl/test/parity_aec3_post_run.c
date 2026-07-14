@@ -183,6 +183,10 @@ int main(int argc, char **argv) {
     acfg.erle_max_l = st_d[2];
     acfg.erle_max_h = st_d[3];
     acfg.filter_taps_size = cnt_i[3] > 0 ? cnt_i[3] : 960;
+    /* M3: FilterAnalyzer's de-stacked fa_update() scratch is now
+     * caller-owned; this harness only knows filter_taps_size, so size
+     * fa_abs_scratch to it directly. */
+    acfg.fa_scratch_size = acfg.filter_taps_size;
 
     AecStateStorage ast;
     ast.erle_max = malloc((size_t)n_bins * sizeof(float));
@@ -199,6 +203,8 @@ int main(int argc, char **argv) {
     ast.erl_hold = malloc((size_t)(n_bins - 2) * sizeof(int));
     ast.filter_delays_blocks = malloc((size_t)acfg.num_capture_channels * sizeof(int));
     ast.fa_h_highpass = malloc((size_t)acfg.filter_taps_size * sizeof(float));
+    ast.fa_abs_scratch = malloc((size_t)acfg.fa_scratch_size * sizeof(float));
+    ast.fa_render_sq_scratch = malloc((size_t)acfg.hop_size * sizeof(float));
     AecState state;
     aec_state_init(&state, &acfg, &ast);
 

@@ -21,7 +21,14 @@ int main(int argc, char* argv[]) {
 
     /* DoubleTalkAnalyzer config defaults must match Python AecConfig BALANCED:
      *   shadow_dtd_offset=1.5  shadow_dtd_advantage_scale=3.0  */
-    RenderActivity     ra; render_activity_init(&ra);
+    RenderActivity     ra;
+    /* M3: render_activity_update()'s former fixed-size stack scratch is now
+     * caller-owned (pool-carved in production); this standalone harness
+     * mallocs its own copy sized ceil(hop/8), matching detectors.c's
+     * PAIR_BLOCK=8. */
+    int ra_scratch_len = (hop + 7) / 8;
+    float* ra_scratch = (float*)malloc((size_t)ra_scratch_len * sizeof(float));
+    render_activity_init(&ra, ra_scratch, ra_scratch_len);
     FilterConvergence  fc; filter_convergence_init(&fc);
     DoubleTalk         dt; doubletalk_init(&dt, 1.5, 3.0);
 
@@ -87,7 +94,7 @@ int main(int argc, char* argv[]) {
             diffs++;
         }
     }
-    fclose(f); free(far_buf);
+    fclose(f); free(far_buf); free(ra_scratch);
     fprintf(stderr, "[det] diffs=%d / %d\n", diffs, n_frames);
     if (fail || diffs > 0) {
         fprintf(stderr, "[det] FAIL\n"); return 1;

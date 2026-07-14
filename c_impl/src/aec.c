@@ -424,6 +424,11 @@ static void aec3_post_chain_reset(Aec* a) {
         acfg.erle_max_l = AEC3B_ST_ERLE_MAX_L;
         acfg.erle_max_h = AEC3B_ST_ERLE_MAX_H;
         acfg.filter_taps_size = AEC3B_FILTER_TAPS_SIZE;
+        /* Re-init reuses the same fa_abs_scratch/fa_render_sq_scratch
+         * pointers already bound in a->a3_state_st (carved once in
+         * aec_carve); fa_scratch_size must match the np*hop capacity that
+         * buffer was originally sized to. */
+        acfg.fa_scratch_size = a->n_partitions * a->hop_size;
         aec_state_init(&a->a3_state, &acfg, &a->a3_state_st);
     }
     {
@@ -585,6 +590,9 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
         if (af_sz == 0) return 0;
         t = ck_add_size(t, af_sz);
     }
+    /* RenderActivityDetector pairwise-sum scratch (M3: de-stacked from a
+     * fixed `float[1024]` local; ceil(hop/8) blocks -- see detectors.c). */
+    t = ck_field_size(t, (size_t)((hop + 7) / 8), sizeof(float));
     t = ck_add_size(t, fft_get_mem_size(fft));
     /* aec3_post (21) */
     t = ck_field_size_reps(t, Kz, sizeof(float), 6);   /* avg_rev y2s n2 n2i sye_re sye_im */
@@ -604,6 +612,12 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
     t = ck_field_size(t, (size_t)(K - 2), sizeof(int)); /* erl_hold */
     t = ck_field_size(t, (size_t)ncc, sizeof(int));    /* filter_delays_blocks */
     t = ck_field_size(t, (size_t)AEC3B_FILTER_TAPS_SIZE, sizeof(float)); /* fa_h_highpass */
+    /* FilterAnalyzer de-stacked fa_update() scratch (M3): sized from the
+     * runtime dims (n_partitions*hop / hop) that fa_update actually bounds
+     * its writes by -- NOT AEC3B_FILTER_TAPS_SIZE, so this stays correct
+     * independent of that macro's value. */
+    t = ck_field_size(t, ck_mul_size((size_t)np, (size_t)hop), sizeof(float)); /* fa_abs_scratch */
+    t = ck_field_size(t, (size_t)hop, sizeof(float));  /* fa_render_sq_scratch */
     /* ResidualEchoEstimator (10) */
     t = ck_field_size(t, Kz, sizeof(float));           /* x2_nf */
     t = ck_field_size(t, Kz, sizeof(int));             /* x2_nf_c */
@@ -765,7 +779,9 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     }
 
     /* Detectors / EPC / regime / RSA */
-    render_activity_init(&a->render_activity);
+    a->ra_pairwise_scratch = (float*)ptr;
+    ptr += ALIGN16((size_t)((hop + 7) / 8) * sizeof(float));
+    render_activity_init(&a->render_activity, a->ra_pairwise_scratch, (hop + 7) / 8);
     filter_convergence_init(&a->convergence);
     doubletalk_init(&a->dt_analyzer, 1.5, 3.0);
     epc_init(&a->epc, cfg->epc_hangover, cfg->epc_total_rise, cfg->epc_delta_threshold);
@@ -844,6 +860,11 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         s->erl_hold           = (int*)ptr; ptr += ALIGN16((size_t)(K - 2) * sizeof(int));
         s->filter_delays_blocks = (int*)ptr; ptr += ALIGN16((size_t)AEC3B_ST_NUM_CAPTURE_CHANNELS * sizeof(int));
         s->fa_h_highpass      = (float*)ptr; ptr += ALIGN16(AEC3B_FILTER_TAPS_SIZE * sizeof(float));
+        /* FilterAnalyzer de-stacked fa_update() scratch (M3): sized from the
+         * runtime dims (np*hop / hop), not AEC3B_FILTER_TAPS_SIZE -- see the
+         * matching aec_get_mem_size comment above. */
+        s->fa_abs_scratch       = (float*)ptr; ptr += ALIGN16(ck_mul_size((size_t)np, (size_t)hop) * sizeof(float));
+        s->fa_render_sq_scratch = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
         {
             AecStateConfig acfg; aec_state_config_defaults(&acfg);
             acfg.n_bins = K; acfg.num_capture_channels = AEC3B_ST_NUM_CAPTURE_CHANNELS;
@@ -858,6 +879,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
             acfg.erle_min = AEC3B_ST_ERLE_MIN; acfg.erle_max_l = AEC3B_ST_ERLE_MAX_L;
             acfg.erle_max_h = AEC3B_ST_ERLE_MAX_H;
             acfg.filter_taps_size = AEC3B_FILTER_TAPS_SIZE;
+            acfg.fa_scratch_size = np * hop;
             aec_state_init(&a->a3_state, &acfg, s);
         }
     }

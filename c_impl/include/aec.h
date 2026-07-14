@@ -170,6 +170,10 @@ typedef struct Aec {
 
     /* detectors / EPC / regime / RSA */
     RenderActivity    render_activity;
+    /* De-stacked RenderActivity scratch (formerly a fixed `float[1024]`
+     * local inside render_activity_update()); pool-carved, sized
+     * ceil(hop_size/8) -- see detectors.h. */
+    float*            ra_pairwise_scratch;
     FilterConvergence convergence;
     DoubleTalk        dt_analyzer;
     EpcDetector       epc;

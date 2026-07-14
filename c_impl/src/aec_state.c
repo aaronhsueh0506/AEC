@@ -24,6 +24,7 @@ void aec_state_config_defaults(AecStateConfig *cfg) {
     cfg->sample_rate = 16000;
     cfg->enable_filter_analyzer = 1;
     cfg->filter_taps_size = 960;  /* hop=160 -> fft=512 -> 6 part * 160 = 960 */
+    cfg->fa_scratch_size = 960;   /* default matches filter_taps_size at 16 kHz */
 }
 
 void aec_state_init(AecState *s, const AecStateConfig *cfg,
@@ -55,7 +56,9 @@ void aec_state_init(AecState *s, const AecStateConfig *cfg,
         /* FilterAnalyzer() Python defaults: active_render_limit=100.0,
          * bounded_erl=False, default_gain=1.0. */
         fa_init(&s->filter_analyzer, st->fa_h_highpass, cfg->filter_taps_size,
-                100.0, 0, 1.0);
+                100.0, 0, 1.0,
+                st->fa_abs_scratch, cfg->fa_scratch_size,
+                st->fa_render_sq_scratch, cfg->hop_size);
     }
 
     s->strong_not_saturated_render_blocks = 0;

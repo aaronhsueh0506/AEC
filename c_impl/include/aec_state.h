@@ -111,6 +111,13 @@ typedef struct {
     int    sample_rate;                /* default 16000 (unused at this layer) */
     int    enable_filter_analyzer;     /* default 1 (BALANCED) */
     int    filter_taps_size;           /* full impulse-response length (FilterAnalyzer) */
+    /* Capacity (in floats) of st->fa_abs_scratch -- the FilterAnalyzer
+     * ConsistentFilterDetector abs-slice scratch, de-stacked from a fixed
+     * `float[1024]` local. Caller derives this from the true runtime filter
+     * length (n_partitions*hop), NOT necessarily equal to filter_taps_size.
+     * st->fa_render_sq_scratch's capacity is always hop_size (no separate
+     * field needed -- fa_update's render_block_len is always the hop). */
+    int    fa_scratch_size;
 } AecStateConfig;
 
 /* Caller-owned backing storage for the per-bin sub-estimator arrays + the
@@ -136,6 +143,10 @@ typedef struct {
     int     *filter_delays_blocks;
     /* FilterAnalyzer HPF taps (length filter_taps_size). */
     float   *fa_h_highpass;
+    /* FilterAnalyzer de-stacked fa_update() scratch (length fa_scratch_size /
+     * hop_size respectively -- see AecStateConfig.fa_scratch_size doc). */
+    float   *fa_abs_scratch;
+    float   *fa_render_sq_scratch;
 } AecStateStorage;
 
 typedef struct {

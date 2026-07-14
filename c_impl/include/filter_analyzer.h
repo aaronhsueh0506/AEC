@@ -74,18 +74,39 @@ typedef struct {
 
     int    size;                     /* filter length (== filter_taps size)     */
     float *h_highpass;               /* owned by caller; length `size`, f32     */
+
+    /* De-stacked fa_update() scratch (formerly `float abs_scratch[1024]` /
+     * `float render_sq_scratch[1024]` fixed-size locals -- a stack-overflow
+     * hazard once the runtime filter length can exceed 1024, e.g. a
+     * higher-sample-rate build). Both owned by caller; see fa_init. */
+    float *abs_scratch;              /* length >= size (ConsistentFilterDetector abs-slice sums) */
+    int    abs_scratch_len;
+    float *render_sq_scratch;        /* length >= render_block_len at every fa_update call */
+    int    render_sq_scratch_len;
 } FilterAnalyzer;
 
 /* h_highpass_storage must hold at least `size` floats (filter_taps length).
  * active_render_limit / bounded_erl / default_gain match the Python defaults
- * (100.0 / 0 / 1.0) unless overridden. `size` is the full filter length. */
+ * (100.0 / 0 / 1.0) unless overridden. `size` is the full filter length.
+ *
+ * abs_scratch/abs_scratch_len and render_sq_scratch/render_sq_scratch_len are
+ * caller-owned scratch buffers used internally by fa_update (the abs-slice
+ * ConsistentFilterDetector sums and the render-block-squared sum,
+ * respectively) -- see the fa_update doc comment below for the exact size
+ * each call requires; fa_update early-returns (no-op) if either buffer is
+ * too small for the current call, so undersizing is safe but silently
+ * disables the analyzer rather than overrunning caller memory. */
 void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
-             float active_render_limit, int bounded_erl, float default_gain);
+             float active_render_limit, int bounded_erl, float default_gain,
+             float *abs_scratch, int abs_scratch_len,
+             float *render_sq_scratch, int render_sq_scratch_len);
 
 void fa_reset(FilterAnalyzer *m);
 
 /* Per-hop update. filter_taps (float32, length == size) and render_block
- * (float32, length render_block_len). */
+ * (float32, length render_block_len). Requires m->abs_scratch_len >= size
+ * and m->render_sq_scratch_len >= render_block_len (both set at fa_init);
+ * no-ops (state unchanged) if either scratch buffer is undersized. */
 void fa_update(FilterAnalyzer *m, const float *filter_taps,
                const float *render_block, int render_block_len);
 

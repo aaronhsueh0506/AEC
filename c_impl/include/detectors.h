@@ -20,6 +20,14 @@ typedef struct RenderActivity {
     float  env_var;
     int    active_prev;
     int    is_stationary;
+    /* De-stacked render_activity_update() scratch (formerly a fixed
+     * `float blocks[1024]` local -- a stack-overflow hazard once the
+     * runtime hop can require more than 1024/PAIR_BLOCK=8 blocks, e.g. a
+     * higher-sample-rate build). Owned by caller; length >=
+     * ceil(n/8) for the `n` passed to render_activity_update (n is always
+     * the instance's hop_size at every call site). */
+    float* pairwise_scratch;
+    int    pairwise_scratch_len;
 } RenderActivity;
 
 typedef struct RenderActivityResult {
@@ -29,7 +37,11 @@ typedef struct RenderActivityResult {
     int    warmup_active;
 } RenderActivityResult;
 
-void render_activity_init(RenderActivity* r);
+/* pairwise_scratch/pairwise_scratch_len: caller-owned scratch for the
+ * internal 8-wide pairwise-sum reduction (see render_activity_update);
+ * length must be >= ceil(hop_size/8). */
+void render_activity_init(RenderActivity* r, float* pairwise_scratch,
+                           int pairwise_scratch_len);
 void render_activity_reset(RenderActivity* r);
 RenderActivityResult render_activity_update(RenderActivity* r,
                                                const float* far_end, int n);
