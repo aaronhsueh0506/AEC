@@ -167,10 +167,11 @@ void linear_filter_select(LinearFilterSelect *s,
          * pocketfft). Mirrors pbfdkf.c rfft_padded. Instance scratch, not
          * stack (see LinearFilterSelect struct comment). */
         {
-            float *tin = s->scr_tin;   /* length fft_size */
+            float *tin = s->scr_tin;   /* length fft_size, dead after the
+                                        * call -> clobber-permitted rfft */
             memcpy(tin, s->block_win, (size_t)blk * sizeof(float));
             memset(tin + blk, 0, (size_t)(fft_size - blk) * sizeof(float));
-            fft_forward(fft, tin, s->sel_esw);
+            fft_forward_scratch(fft, tin, s->sel_esw);
         }
 
         /* _near_spec_win = error_spec_windowed + echo_spec (complex64)

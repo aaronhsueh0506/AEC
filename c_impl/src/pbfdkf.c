@@ -318,7 +318,9 @@ static void rfft_padded(PBFDAF* p, const float* time_in, int in_len,
         memcpy(p->time_scratch, time_in, (size_t)in_len * sizeof(float));
         memset(p->time_scratch + in_len, 0,
                (size_t)(p->fft_size - in_len) * sizeof(float));
-        fft_forward(p->fft, p->time_scratch, spec_out);
+        /* time_scratch is dead after this call -> clobber-permitted rfft
+         * (NE10 skips its input staging copy; KISS delegates unchanged). */
+        fft_forward_scratch(p->fft, p->time_scratch, spec_out);
     }
 }
 
@@ -402,7 +404,7 @@ static float pbfdaf_frontend(PBFDAF* p,
     /* error_spec: zero-pad, valid region [hop, block) = output */
     memset(p->time_scratch, 0, (size_t)p->fft_size * sizeof(float));
     for (int i = 0; i < hop; ++i) p->time_scratch[hop + i] = output[i];
-    fft_forward(p->fft, p->time_scratch, p->error_spec);
+    fft_forward_scratch(p->fft, p->time_scratch, p->error_spec);
 
     /* windowed near (sqrt-Hann × near_buffer) − echo_spec. RES analysis = main
      * filter only; the shadow's error_spec_windowed is never read, so skip it in
@@ -495,7 +497,7 @@ void pbfdaf_process(PBFDAF* p,
                 (!p->constraint_round_robin || part == p->partition_to_constrain)) {
                 fft_inverse(p->fft, Wp, p->time_scratch);
                 for (int i = 0; i < p->fft_size; ++i) p->time_scratch[i] *= p->td_window[i];
-                fft_forward(p->fft, p->time_scratch, Wp);
+                fft_forward_scratch(p->fft, p->time_scratch, Wp);
             }
         }
         if (p->enable_td_constraint && p->constraint_round_robin)
@@ -536,7 +538,7 @@ void pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
     for (int part = 0; part < nP; ++part) {
         memset(p->time_scratch, 0, (size_t)nF * sizeof(float));
         for (int i = 0; i < hop; ++i) p->time_scratch[i] = ir[part * hop + i];
-        fft_forward(p->fft, p->time_scratch, p->W + (size_t)part * K);
+        fft_forward_scratch(p->fft, p->time_scratch, p->W + (size_t)part * K);
     }
 }
 
@@ -838,7 +840,7 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
             (!b->constraint_round_robin || part == b->partition_to_constrain)) {
             fft_inverse(b->fft, Wp, b->time_scratch);
             for (int i = 0; i < b->fft_size; ++i) b->time_scratch[i] *= b->td_window[i];
-            fft_forward(b->fft, b->time_scratch, Wp);
+            fft_forward_scratch(b->fft, b->time_scratch, Wp);
         }
     }
     if (b->enable_td_constraint && b->constraint_round_robin)
