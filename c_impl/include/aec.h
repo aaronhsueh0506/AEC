@@ -301,6 +301,14 @@ typedef struct Aec {
     int    last_buffering_event;   /* AecBufferingEvent of the last capture step */
 
     int is_static;
+
+    /* F03 arena-fication: aec_create()'s single malloc'd arena backing every
+     * sub-module array above (ref_ring, render_fifo, rsa_counters, the main/
+     * shadow filter state, the whole AEC3 post chain, hop/per-hop-freq-bin
+     * scratch, ...). NULL on the static-pool path (aec_init) — there the
+     * caller owns the pool and aec_destroy() must not free it. Appended at
+     * the end of the struct so existing field offsets are unchanged. */
+    void*  heap_arena;
 } Aec;
 
 int  aec_create(Aec* a, const AecConfig* cfg);

@@ -131,12 +131,19 @@ typedef struct PBFDAF {
  * (scr_mu_local/scr_x2psum/scr_mu_eff). Pass 0 when the instance is only
  * driven via pbfdaf_frontend() (the PBFDKF base) — pbfdaf_process() must
  * NOT be called on such an instance. */
-void   pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
+/* F04: returns 0 on success, -1 if the nested fft_create() allocation failed
+ * (OOM) — the filter's arrays are all freed before returning (mirrors
+ * pbfdaf_free's heap branch) rather than leaving a half-built filter around
+ * whose FFT calls would silently no-op on the NULL handle. */
+int    pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size,
                     int with_process_scratch);
 size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
                            int with_process_scratch);
-void   pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
+/* F04: returns 0 on success, -1 if the pool base/size checks reject the
+ * inputs (F05/F07, nothing written to `mem`) or the nested fft_init()
+ * allocation failed (OOM). */
+int    pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
                            float mu, float delta, int hop_size,
                     int with_process_scratch);
@@ -215,10 +222,15 @@ typedef struct PBFDKF {
     int is_static;               /* 1 = state placed in caller buffer */
 } PBFDKF;
 
-void   pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
+/* F04: returns 0 on success, -1 if the nested pbfdaf_init() (base filter's
+ * fft_create()) failed (OOM). */
+int    pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size);
 size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size);
-void   pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
+/* F04: returns 0 on success, -1 if the pool base/size checks reject the
+ * inputs (F05/F07, nothing written to `mem`) or the nested pbfdaf_init_
+ * static() (base filter's fft_init()) failed (OOM). */
+int    pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
                            float mu, float delta, int hop_size);
 void pbfdkf_free(PBFDKF* p);

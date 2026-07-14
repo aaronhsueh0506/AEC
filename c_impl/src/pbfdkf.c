@@ -162,7 +162,7 @@ static void pbfdaf_zero_state(PBFDAF* p) {
 
 /* ===== PBFDAF ============================================================ */
 
-void pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
+int pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size,
                     int with_process_scratch) {
     int hop = (hop_size > 0) ? hop_size : block_size / 2;
@@ -205,6 +205,17 @@ void pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
     pbfdaf_init_scalars(p, n_partitions, mu, delta);
     pbfdaf_fill_windows(p);
     p->is_static = 0;
+
+    if (!p->fft) {
+        /* F04: fft_create() failed (OOM) -- free everything just allocated
+         * (pbfdaf_free's heap branch frees every pointer field
+         * unconditionally; free(NULL) is a no-op for anything not yet
+         * assigned) instead of leaving a half-built filter around whose FFT
+         * calls would silently no-op on the NULL handle. */
+        pbfdaf_free(p);
+        return -1;
+    }
+    return 0;
 }
 
 size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
@@ -251,23 +262,23 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
     return total;
 }
 
-void pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
+int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                          int block_size, int n_partitions,
                          float mu, float delta, int hop_size,
                          int with_process_scratch) {
-    if (!p || !mem) return;
+    if (!p || !mem) return -1;
     /* F07: reject a misaligned pool base before any pool write — hardens a
-     * caller invoking this directly (the parent aec_init always carves
+     * caller invoking this directly (the parent aec_carve always carves
      * ALIGN16 offsets off an already-aligned base, so this never fires
      * there). */
-    if (!MEM_IS_ALIGNED16(mem)) return;
+    if (!MEM_IS_ALIGNED16(mem)) return -1;
     {
         /* pbfdaf_get_mem_size returning 0 means "invalid" (F05); a real
          * config's size is always > 0, so 0 is an unambiguous failure here
          * rather than `mem_size < 0`, which is never true for a size_t. */
         size_t need = pbfdaf_get_mem_size(block_size, n_partitions, hop_size,
                                           with_process_scratch);
-        if (need == 0 || mem_size < need) return;
+        if (need == 0 || mem_size < need) return -1;
     }
 
     int hop = (hop_size > 0) ? hop_size : block_size / 2;
@@ -313,12 +324,19 @@ void pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
     pbfdaf_zero_state(p);
     pbfdaf_fill_windows(p);
     p->is_static = 1;
+
+    if (!p->fft) return -1;   /* F04: nested fft_init() failed (OOM) */
+    return 0;
 }
 
 void pbfdaf_free(PBFDAF* p) {
     if (!p) return;
     if (p->is_static) {
-        if (p->fft) fft_destroy(p->fft);  /* no-op when nested static */
+        /* F04/lifecycle: NULL the handle after destroying it so a second
+         * pbfdaf_free() (e.g. via a caller's double aec_destroy()) sees
+         * p->fft == NULL and does not dereference a pointer into memory the
+         * pool/arena owner may since have freed. */
+        if (p->fft) { fft_destroy(p->fft); p->fft = NULL; }
         return;
     }
     free(p->td_window); free(p->sqrt_hann);
@@ -607,9 +625,11 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
     p->base.poor_excitation_counter = 400;
 }
 
-void pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
+int pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size) {
-    pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size, 0);
+    if (pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size, 0) != 0)
+        return -1;   /* F04: base filter's nested fft_create() failed (OOM);
+                      * pbfdaf_init already freed its own partial state. */
     int K = p->base.n_freqs;
     p->Q_high = (float*)malloc((size_t)K * sizeof(float));
     p->Q_low  = (float*)malloc((size_t)K * sizeof(float));
@@ -625,6 +645,7 @@ void pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
     p->scr_mu_aec3  = (float*)malloc((size_t)K * sizeof(float));
     pbfdkf_init_scalars(p);
     p->is_static = 0;
+    return 0;
 }
 
 size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
@@ -648,23 +669,24 @@ size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
     return total;
 }
 
-void pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
+int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                          int block_size, int n_partitions,
                          float mu, float delta, int hop_size) {
-    if (!p || !mem) return;
+    if (!p || !mem) return -1;
     /* F07: reject a misaligned pool base before any pool write (see the
      * matching guard in pbfdaf_init_static above). */
-    if (!MEM_IS_ALIGNED16(mem)) return;
+    if (!MEM_IS_ALIGNED16(mem)) return -1;
     {
         /* pbfdkf_get_mem_size returning 0 means "invalid" (F05); guard the
          * same 0-vs-`mem_size < 0` ambiguity as pbfdaf_init_static above. */
         size_t need = pbfdkf_get_mem_size(block_size, n_partitions, hop_size);
-        if (need == 0 || mem_size < need) return;
+        if (need == 0 || mem_size < need) return -1;
     }
     size_t base_sz = pbfdaf_get_mem_size(block_size, n_partitions, hop_size, 0);
     memset(p, 0, sizeof(*p));
-    pbfdaf_init_static(&p->base, mem, base_sz,
-                       block_size, n_partitions, mu, delta, hop_size, 0);
+    if (pbfdaf_init_static(&p->base, mem, base_sz,
+                       block_size, n_partitions, mu, delta, hop_size, 0) != 0)
+        return -1;   /* F04: base filter's nested fft_init() failed (OOM) */
     uint8_t* ptr = (uint8_t*)mem + base_sz;
     int K = p->base.n_freqs;
     p->Q_high    = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
@@ -682,6 +704,7 @@ void pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
     (void)ptr;
     pbfdkf_init_scalars(p);
     p->is_static = 1;
+    return 0;
 }
 
 void pbfdkf_free(PBFDKF* p) {

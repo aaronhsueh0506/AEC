@@ -466,429 +466,61 @@ static void aec3_post_chain_reset(Aec* a) {
     }
 }
 
+/* fwd decls: aec_carve() (F03 arena-fication shared carve) and
+ * aec_derive_dims() are defined further down, next to aec_get_mem_size()
+ * (whose field layout aec_carve's pointer walk must stay in lockstep with),
+ * but aec_create() above that point needs to call both. */
+static void aec_derive_dims(const AecConfig* cfg,
+                            int* o_hop, int* o_blk, int* o_fft, int* o_K,
+                            int* o_nparts, int* o_buf_samp, int* o_fifo_cap);
+static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                      int hop, int blk, int fft, int K, int np,
+                      int buf_samp, int fcap, int is_static);
+
 int aec_create(Aec* a, const AecConfig* cfg) {
     /* F05/F07: reject before any state is touched — no release-path assert,
      * just the existing int failure convention (0 = success, checked by
      * every caller as `!= 0` or truthy). */
     if (!a || !cfg || !aec_validate_config(cfg)) return -1;
 
+    int hop, blk, fft, K, np, buf_samp, fcap;
+    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf_samp, &fcap);
+
+    /* F03 (arena-fication): the ~87 individual per-array mallocs this
+     * function used to make (one per sub-module scratch/state array, plus
+     * ~200 lines of config boilerplate hand-duplicated from aec_init) are
+     * gone. One arena, sized by the exact same aec_get_mem_size() total the
+     * static-pool path budgets against (minus the Aec struct term -- the
+     * caller already owns `a`, so the arena only needs the part of the pool
+     * that would otherwise sit after the struct), carved by the same
+     * aec_carve() aec_init() uses below. Byte-for-byte the same initial
+     * state as before this refactor (test_static_aec.c / test_lifecycle.c
+     * both exercise this). */
+    size_t total = aec_get_mem_size(cfg);
+    if (total == 0) return -1;
+    size_t arena_sz = total - ALIGN16(sizeof(Aec));
+
+    uint8_t* arena = (uint8_t*)malloc(arena_sz);
+    if (!arena) return -1;
+
     memset(a, 0, sizeof(*a));
-    a->cfg = *cfg;
-
-    int hop = (int)(0.010f * cfg->sample_rate);
-    int blk = 2 * hop;
-    int fft = next_pow2(blk);
-    int K   = fft / 2 + 1;
-    int n_parts = cfg->n_partitions;
-    if (n_parts <= 0) {
-        n_parts = (cfg->filter_length + hop - 1) / hop;
-        if (n_parts < 1) n_parts = 1;
+    if (aec_carve(a, arena, cfg, hop, blk, fft, K, np, buf_samp, fcap,
+                  /*is_static=*/0) != 0) {
+        /* F04: a nested FFT allocation failed (OOM) partway through the
+         * carve. aec_carve() already tore down whatever nested FFT handles
+         * (main filter / shadow filter / post_fft) it had brought up before
+         * returning, so the arena itself is the only thing left to release. */
+        free(arena);
+        memset(a, 0, sizeof(*a));
+        return -1;
     }
-    a->hop_size = hop; a->block_size = blk; a->fft_size = fft;
-    a->n_freqs = K; a->n_partitions = n_parts;
-
-    /* inst-ERLE slope ring cap = Python _slope_n = max(2, int(0.5*sr/hop)),
-     * clamped to the static array size (orchestrator.py:649). */
-    {
-        int _sn = (int)(0.5f * (float)cfg->sample_rate / (float)(hop > 0 ? hop : 1));
-        if (_sn < 2) _sn = 2;
-        if (_sn > (int)(sizeof(a->erle_slope_buf) / sizeof(a->erle_slope_buf[0])))
-            _sn = (int)(sizeof(a->erle_slope_buf) / sizeof(a->erle_slope_buf[0]));
-        a->erle_slope_cap = _sn;
-        a->erle_slope_len = 0;
-        a->erle_slope_head = 0;
-    }
-
-    /* HPF (mic only; ref HPF retired) — audio_common f32 platform HPF. */
-    if (cfg->enable_highpass) {
-        a->hp_mic = hpf_create(cfg->highpass_cutoff_hz, cfg->sample_rate);
-    }
-    /* Saturation. */
-    if (cfg->enable_saturation) {
-        saturation_init(&a->sat_ref, cfg->saturation_threshold);
-        saturation_init(&a->sat_mic, cfg->saturation_threshold);
-        a->has_sat = 1;
-    }
-    /* Delay (AEC3 matched filter) + ring. */
-    if (cfg->enable_delay_est) {
-        delay_aec3_init(&a->delay);
-        a->has_delay = 1;
-        int max_delay_samp = (int)(cfg->max_delay_ms * cfg->sample_rate / 1000.0f);
-        int buffer_samp = (int)(cfg->delay_buffer_ms * cfg->sample_rate / 1000.0f);
-        if (buffer_samp < max_delay_samp + 4096) buffer_samp = max_delay_samp + 4096;
-        a->ref_ring_size = buffer_samp;
-        a->ref_ring = (float*)calloc((size_t)buffer_samp, sizeof(float));
-        a->current_delay = -1;
-        a->pending_delay = -1; a->has_pending = 0; a->pending_delay_ttl = 0;
-    } else {
-        a->current_delay = 0;
-    }
-    a->duty_last_delay = -1;   /* duty-cycle change detect (rest zeroed by memset) */
-
-    /* Streaming render-hop FIFO (async render/capture decoupling). Allocated
-     * unconditionally; only exercised by the streaming API. Capacity is a
-     * render/capture CALL-jitter budget in ms (independent of hop size and of
-     * the echo delay, which the downstream ref_ring handles), converted to a
-     * whole number of hops for the current hop_size / sample_rate. */
-    {
-        const int fifo_ms = AEC_STREAM_FIFO_MS;
-        int cap = (fifo_ms * cfg->sample_rate / 1000 + a->hop_size - 1)
-                  / a->hop_size;            /* ceil(fifo_ms / hop_ms) */
-        if (cap < 2) cap = 2;               /* need ≥2 to buffer any skew */
-        a->fifo_cap_hops = cap;
-    }
-    a->render_fifo = (float*)calloc((size_t)a->fifo_cap_hops * a->hop_size,
-                                    sizeof(float));
-    a->fifo_count = 0; a->fifo_read = 0; a->fifo_write = 0;
-    a->render_call_count = 0; a->capture_call_count = 0;
-    a->last_buffering_event = AEC_BUF_NONE;
-
-    /* Main filter (PBFDKF). */
-    pbfdkf_init(&a->main_filter, blk, n_parts, cfg->mu, cfg->delta, hop);
-    for (int k = 0; k < K; ++k) {
-        a->main_filter.Q_high[k] = cfg->kalman_q_high;
-        a->main_filter.Q_low[k]  = cfg->kalman_q_low;
-        a->main_filter.Q[k]      = cfg->kalman_q_high;
-    }
-    /* RSA-driven poor-excitation init (1000 blocks → hop-scaled). */
-    long poor_init = blocks_to_hops_round(1000, hop, cfg->sample_rate);
-    a->main_filter.base.poor_excitation_counter = poor_init;
-    /* AEC3 round-robin TD constraint (production default ON) — main + shadow. */
-    a->main_filter.base.constraint_round_robin = 1;
-
-    /* Shadow filter (PBFDAF NLMS). */
-    if (cfg->enable_shadow) {
-        pbfdaf_init(&a->shadow_filter, blk, n_parts, cfg->shadow_mu_nlms,
-                    cfg->delta, hop, 1);
-        a->shadow_filter.poor_excitation_counter = poor_init;
-        a->shadow_filter.saturated_capture = 0;
-        /* FFT dedup: the shadow's near_spec / error_spec_windowed are never read
-         * — skip computing them (byte-equal, 2 fewer FFTs/hop). */
-        a->shadow_filter.lightweight = 1;
-        a->shadow_filter.constraint_round_robin = 1;
-        a->has_shadow = 1;
-    }
-
-    /* detectors / EPC / regime / RSA. */
-    render_activity_init(&a->render_activity);
-    filter_convergence_init(&a->convergence);
-    doubletalk_init(&a->dt_analyzer, 1.5, 3.0);   /* shadow_dtd_offset / advantage_scale */
-    epc_init(&a->epc, cfg->epc_hangover, cfg->epc_total_rise, cfg->epc_delta_threshold);
-    shadow_copy_init(&a->regime, SC_GATE_ENERGY, 0.65, 3, cfg->epc_hangover);
-    a->rsa_counters = (int64_t*)calloc((size_t)(K - 2 > 0 ? K - 2 : 1), sizeof(int64_t));
-    rsa_init(&a->rsa, a->rsa_counters, K, n_parts);  /* strong_peak_freeze_duration=n_partitions */
-
-    /* ── AEC3 post chain ─────────────────────────────────────────────────── */
-    a->post_fft = fft_create(fft);
-
-    /* aec3_post driver. */
-    {
-        Aec3PostConfig pcfg;
-        aec3_post_config_defaults(&pcfg);
-        pcfg.n_bins = K; pcfg.fft_size = fft; pcfg.block_size = blk; pcfg.hop_size = hop;
-        pcfg.erle_coh_gate_enabled = AEC3B_ERLE_COH_GATE_ENABLED;
-        pcfg.erle_windowed_capture_psd = AEC3B_ERLE_WINDOWED_CAPTURE_PSD;
-        pcfg.erle_render_x2_psd_scale = AEC3B_ERLE_RENDER_X2_PSD_SCALE;
-        pcfg.output_capture_when_linear_unusable = AEC3B_OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE;
-        pcfg.enable_cng = cfg->enable_cng;
-        pcfg.cng_n2_update_onset_hops = AEC3B_CNG_N2_UPDATE_ONSET_HOPS;
-        pcfg.cng_n2_initial_duration_hops = AEC3B_CNG_N2_INITIAL_DURATION_HOPS;
-        pcfg.cng_y2_alpha = AEC3B_CNG_Y2_ALPHA;
-        pcfg.cng_n2_track_freshness = AEC3B_CNG_N2_TRACK_FRESHNESS;
-        pcfg.cng_n2_track_retention = AEC3B_CNG_N2_TRACK_RETENTION;
-        pcfg.cng_n2_slow_up = AEC3B_CNG_N2_SLOW_UP;
-        pcfg.cng_n2_initial_alpha = AEC3B_CNG_N2_INITIAL_ALPHA;
-        pcfg.noise_floor_int16sq = AEC3B_NOISE_FLOOR_INT16SQ;
-        pcfg.erle_coh_gate_alpha = AEC3B_ERLE_COH_GATE_ALPHA;
-        pcfg.erle_coh_gate_threshold = AEC3B_ERLE_COH_GATE_THRESHOLD;
-
-        /* driver backing storage */
-        float *avg_rev   = (float*)malloc((size_t)K * sizeof(float));
-        float *y2s       = (float*)malloc((size_t)K * sizeof(float));
-        float *n2        = (float*)malloc((size_t)K * sizeof(float));
-        float *n2i       = (float*)malloc((size_t)K * sizeof(float));
-        float *sye_re    = (float*)malloc((size_t)K * sizeof(float));
-        float *sye_im    = (float*)malloc((size_t)K * sizeof(float));
-        float *syy       = (float*)malloc((size_t)K * sizeof(float));
-        float *see       = (float*)malloc((size_t)K * sizeof(float));
-        float *ola       = (float*)malloc((size_t)blk * sizeof(float));
-        float *np_       = (float*)malloc((size_t)K * sizeof(float));
-        float *fp_       = (float*)malloc((size_t)K * sizeof(float));
-        float *ep_       = (float*)malloc((size_t)K * sizeof(float));
-        float *erp_      = (float*)malloc((size_t)K * sizeof(float));
-        float *cpe       = (float*)malloc((size_t)K * sizeof(float));
-        float *x2r       = (float*)malloc((size_t)K * sizeof(float));
-        float *cn        = (float*)malloc((size_t)K * sizeof(float));
-        float *nf        = (float*)malloc((size_t)K * sizeof(float));
-        unsigned char *cgm = (unsigned char*)malloc((size_t)K);
-        Complex *eout    = (Complex*)malloc((size_t)K * sizeof(Complex));
-        float *eout_full = (float*)malloc((size_t)fft * sizeof(float));
-        aec3_post_init(&a->post, &pcfg, a->post_fft,
-                       AEC3B_SYNTH_WINDOW, AEC3B_SQRT2_SIN_LUT, avg_rev,
-                       y2s, n2, n2i, sye_re, sye_im, syy, see, ola,
-                       np_, fp_, ep_, erp_, cpe, x2r, cgm, cn, nf,
-                       eout, eout_full);
-    }
-
-    /* AecState (storage allocated then init). */
-    {
-        AecStateStorage* s = &a->a3_state_st;
-        int ncc = AEC3B_ST_NUM_CAPTURE_CHANNELS;
-        s->erle_max = (float*)malloc((size_t)K * sizeof(float));
-        s->erle = (float*)malloc((size_t)K * sizeof(float));
-        s->erle_oc = (float*)malloc((size_t)K * sizeof(float));
-        s->erle_unb = (float*)malloc((size_t)K * sizeof(float));
-        s->erle_during = (float*)malloc((size_t)K * sizeof(float));
-        s->erle_coming_onset = (unsigned char*)malloc((size_t)K);
-        s->erle_hold = (int32_t*)malloc((size_t)K * sizeof(int32_t));
-        s->erle_y2_acc = (float*)malloc((size_t)K * sizeof(float));
-        s->erle_e2_acc = (float*)malloc((size_t)K * sizeof(float));
-        s->erle_low_render = (unsigned char*)malloc((size_t)K);
-        s->erl = (float*)malloc((size_t)K * sizeof(float));
-        s->erl_hold = (int*)malloc((size_t)(K - 2) * sizeof(int));
-        s->filter_delays_blocks = (int*)malloc((size_t)ncc * sizeof(int));
-        s->fa_h_highpass = (float*)malloc((size_t)AEC3B_FILTER_TAPS_SIZE * sizeof(float));
-
-        AecStateConfig acfg;
-        aec_state_config_defaults(&acfg);
-        acfg.n_bins = K;
-        acfg.num_capture_channels = ncc;
-        acfg.hop_size = hop;
-        acfg.enable_filter_analyzer = AEC3B_ST_ENABLE_FILTER_ANALYZER;
-        acfg.erle_startup_hops = AEC3B_ST_ERLE_STARTUP_HOPS;
-        acfg.erl_startup_hops = AEC3B_ST_ERL_STARTUP_HOPS;
-        acfg.echo_can_saturate = AEC3B_ST_ECHO_CAN_SATURATE;
-        acfg.use_linear_filter = AEC3B_ST_USE_LINEAR_FILTER;
-        acfg.conservative_initial_phase = AEC3B_ST_CONSERVATIVE_INITIAL_PHASE;
-        acfg.delay_headroom_samples = AEC3B_ST_DELAY_HEADROOM_SAMPLES;
-        acfg.initial_state_seconds = AEC3B_ST_INITIAL_STATE_SECONDS;
-        acfg.erle_min = AEC3B_ST_ERLE_MIN;
-        acfg.erle_max_l = AEC3B_ST_ERLE_MAX_L;
-        acfg.erle_max_h = AEC3B_ST_ERLE_MAX_H;
-        acfg.filter_taps_size = AEC3B_FILTER_TAPS_SIZE;
-        aec_state_init(&a->a3_state, &acfg, s);
-    }
-
-    /* ResidualEchoEstimator (storage + init). */
-    {
-        ResidualEchoEstimator* r = &a->a3_ree;
-        int rh = (AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW ? 1 : 0) + 1 + 1;
-        float *x2_nf   = (float*)malloc((size_t)K * sizeof(float));
-        int   *x2_nf_c = (int*)malloc((size_t)K * sizeof(int));
-        float *rm_st   = (float*)malloc((size_t)K * sizeof(float));
-        float *rt_st   = (float*)malloc((size_t)K * sizeof(float));
-        float *rh_st   = (float*)malloc((size_t)rh * (size_t)K * sizeof(float));
-        float *drd_st  = (float*)malloc((size_t)REE_DELAY_BUF_SIZE * (size_t)K * sizeof(float));
-        float *rrd_st  = (float*)malloc((size_t)REE_DELAY_BUF_SIZE * (size_t)K * sizeof(float));
-        float *ld_st   = (float*)malloc((size_t)K * sizeof(float));
-        float *lr_st   = (float*)malloc((size_t)K * sizeof(float));
-        float *scr_st  = (float*)malloc((size_t)K * sizeof(float));
-        ReeEchoModelConfig em;
-        memset(&em, 0, sizeof(em));
-        em.min_noise_floor_power = AEC3B_REE_MIN_NOISE_FLOOR_POWER;
-        em.noise_gate_power = AEC3B_REE_NOISE_GATE_POWER_LEGACY;
-        em.noise_gate_slope = AEC3B_REE_NOISE_GATE_SLOPE;
-        em.stationary_gate_slope = AEC3B_REE_STATIONARY_GATE_SLOPE;
-        em.model_reverb_in_nonlinear_mode = AEC3B_REE_MODEL_REVERB_IN_NL;
-        ree_init(r, K, AEC3B_REE_HOP_SIZE, &em,
-                 AEC3B_REE_DEFAULT_GAIN, AEC3B_REE_TM_GAIN, AEC3B_REE_ERLE_ONSET_COMP,
-                 AEC3B_REE_REVERB_DECAY, AEC3B_REE_REVERB_MILD_SCALE,
-                 AEC3B_REE_REVERB_ENABLED, AEC3B_REE_REVERB_TAIL_STRENGTH,
-                 AEC3B_REE_USE_AEC3_RESIDUAL_NOISE_GATE,
-                 AEC3B_USE_STATIONARITY_PROPERTIES,
-                 AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW,
-                 AEC3B_REE_NL_R2_ENABLED, AEC3B_REE_NL_R2_ALPHA, AEC3B_REE_NL_NORM_POWER,
-                 AEC3B_REE_RESIDUAL_NOISE_GATE_POWER, AEC3B_REE_NOISE_FLOOR_HOLD_HOPS,
-                 AEC3B_REE_USE_FREQ_RESPONSE, AEC3B_REE_REVERB_USE_CONSERVATIVE,
-                 AEC3B_REE_REVERB_SMOOTHING_BASE,
-                 x2_nf, x2_nf_c, rm_st, rt_st, rh_st, drd_st, rrd_st,
-                 ld_st, lr_st, scr_st);
-    }
-
-    /* SuppressionGain (config baked; tuning arrays = baked const tables). */
-    {
-        SuppressionGain* sg = &a->a3_sg;
-        SuppressionGainConfig scfg;
-        SuppressionGainTuning stun;
-        memset(&scfg, 0, sizeof(scfg));
-        scfg.n_bins = K; scfg.sr = cfg->sample_rate; scfg.hop_size = hop;
-        scfg.last_lf_band = AEC3B_SG_LAST_LF_BAND;
-        scfg.first_hf_band = AEC3B_SG_FIRST_HF_BAND;
-        scfg.last_lf_smoothing_band = AEC3B_SG_LAST_LF_SMOOTHING_BAND;
-        scfg.last_permanent_lf_smoothing_band = AEC3B_SG_LAST_PERMANENT;
-        scfg.lf_smoothing_during_initial_phase = AEC3B_SG_LF_SMOOTHING_INITIAL;
-        scfg.lf_clamp_bin = AEC3B_SG_LF_CLAMP_BIN;
-        scfg.dne_lf_end = AEC3B_SG_DNE_LF_END;
-        scfg.nearend_smoother_n = AEC3B_SG_NEAREND_SMOOTHER_N;
-        scfg.aud_lf_end_bin = AEC3B_SG_AUD_LF_END_BIN;
-        scfg.aud_mf_end_bin = AEC3B_SG_AUD_MF_END_BIN;
-        scfg.floor_power = AEC3B_SG_FLOOR_POWER;
-        scfg.aud_thr_lf = AEC3B_SG_AUD_THR_LF;
-        scfg.aud_thr_mf = AEC3B_SG_AUD_THR_MF;
-        scfg.aud_thr_hf = AEC3B_SG_AUD_THR_HF;
-        scfg.low_render_limit = AEC3B_SG_LOW_RENDER_LIMIT;
-        scfg.normal_render_limit = AEC3B_SG_NORMAL_RENDER_LIMIT;
-        scfg.hf_lgb = AEC3B_SG_HF_LGB;
-        scfg.hf_biq = AEC3B_SG_HF_BIQ;
-        scfg.conservative_hf = AEC3B_SG_CONSERVATIVE_HF;
-        scfg.max_inc_normal = (float)AEC3B_SG_MAX_INC;
-        scfg.max_inc_nearend = (float)AEC3B_SG_MAX_INC;
-        scfg.max_dec_lf_normal = (float)AEC3B_SG_MAX_DEC_LF;
-        scfg.max_dec_lf_nearend = (float)AEC3B_SG_MAX_DEC_LF;
-        scfg.floor_first_increase = 0.00001f;
-        scfg.low_render_threshold = AEC3B_SG_LOW_RENDER_THRESHOLD;
-        scfg.split_floor_enabled = 1;
-        /* preset axis: split_floor_far_active = 10^(db/10). */
-        scfg.split_floor_far_active =
-            powf(10.0f, cfg->min_gain_floor_far_active_db / 10.0f);
-        scfg.split_floor_far_silent = AEC3B_SG_SPLIT_FLOOR_FAR_SILENT;
-        /* DT-gated floor: 10^(min_gain_floor_dt_db/10) (mirrors Python
-         * split_floor_dt_db -> _split_floor_dt). */
-        scfg.split_floor_dt =
-            powf(10.0f, cfg->min_gain_floor_dt_db / 10.0f);
-        scfg.split_floor_latch_power = AEC3B_SG_SPLIT_FLOOR_LATCH_POWER;
-        scfg.soft_blend_enabled = AEC3B_SG_SOFT_BLEND_ENABLED;
-        scfg.soft_blend_per_bin = AEC3B_SG_SOFT_BLEND_PER_BIN;
-        scfg.soft_blend_enr_thr = (float)AEC3B_SG_SOFT_BLEND_ENR_THR;
-        scfg.soft_blend_softness = (float)AEC3B_SG_SOFT_BLEND_SOFTNESS;
-        scfg.dne_enr_threshold = AEC3B_SG_DNE_ENR_THRESHOLD;
-        scfg.dne_enr_exit_threshold = AEC3B_SG_DNE_ENR_EXIT_THRESHOLD;
-        scfg.dne_snr_threshold = AEC3B_SG_DNE_SNR_THRESHOLD;
-        scfg.dne_use_during_initial_phase = AEC3B_SG_DNE_USE_DURING_INITIAL_PHASE;
-        scfg.dne_use_unbounded_echo = AEC3B_SG_DNE_USE_UNBOUNDED_ECHO;
-        scfg.dne_lf_endpoint_bin = AEC3B_SG_DNE_LF_ENDPOINT_BIN;
-        scfg.dne_trigger_threshold_hops = AEC3B_SG_TRIGGER_THRESHOLD_HOPS;
-        scfg.dne_hold_duration_hops = AEC3B_SG_HOLD_DURATION_HOPS;
-        scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10f;
-        stun.nearend_enr_tr = AEC3B_SG_NEAREND_ENR_TR;
-        stun.nearend_enr_su = AEC3B_SG_NEAREND_ENR_SU;
-        stun.nearend_emr_tr = AEC3B_SG_NEAREND_EMR_TR;
-        stun.normal_enr_tr  = AEC3B_SG_NORMAL_ENR_TR;
-        stun.normal_enr_su  = AEC3B_SG_NORMAL_ENR_SU;
-        stun.normal_emr_tr  = AEC3B_SG_NORMAL_EMR_TR;
-
-        float *last_gain = (float*)malloc((size_t)K * sizeof(float));
-        float *last_ne   = (float*)malloc((size_t)K * sizeof(float));
-        float *last_echo = (float*)malloc((size_t)K * sizeof(float));
-        float *ma        = (float*)malloc((size_t)AEC3B_SG_NEAREND_SMOOTHER_N * (size_t)K * sizeof(float));
-        float *ne        = (float*)malloc((size_t)K * sizeof(float));
-        float *wr        = (float*)malloc((size_t)K * sizeof(float));
-        float *ming      = (float*)malloc((size_t)K * sizeof(float));
-        float *maxg      = (float*)malloc((size_t)K * sizeof(float));
-        float *graw      = (float*)malloc((size_t)K * sizeof(float));
-        float *gout      = (float*)malloc((size_t)K * sizeof(float));
-        float *gsum      = (float*)malloc((size_t)K * sizeof(float));
-        suppression_gain_init(sg, &scfg, &stun, last_gain, last_ne, last_echo,
-                              ma, ne, wr, ming, maxg, graw, gout, gsum);
-    }
-
-    /* StationarityEstimator. */
-    {
-        float *stat_noise = (float*)malloc((size_t)K * sizeof(float));
-        int32_t *stat_hang = (int32_t*)malloc((size_t)K * sizeof(int32_t));
-        unsigned char *stat_flags = (unsigned char*)malloc((size_t)K);
-        float *stat_hist = (float*)malloc((size_t)16 * (size_t)K * sizeof(float));
-        stationarity_estimator_init(&a->a3_stat, K, hop, cfg->sample_rate,
-                                    stat_noise, stat_hang, stat_flags, stat_hist);
-    }
-
-    /* LinearFilterSelect. */
-    linear_filter_select_init(&a->a3_lfs, hop, blk, fft, K);
-
-    /* run scratch. */
-    {
-        Aec3PostRunScratch* sc = &a->a3_sc;
-        sc->sel_esw  = (Complex*)malloc((size_t)K * sizeof(Complex));
-        sc->sel_echo = (Complex*)malloc((size_t)K * sizeof(Complex));
-        sc->nsw_e1   = (Complex*)malloc((size_t)K * sizeof(Complex));
-        sc->ybase    = (Complex*)malloc((size_t)K * sizeof(Complex));
-        sc->abs_near = (float*)malloc((size_t)K * sizeof(float));
-        sc->abs_far  = (float*)malloc((size_t)K * sizeof(float));
-        sc->abs_sel_echo = (float*)malloc((size_t)K * sizeof(float));
-        sc->abs_error    = (float*)malloc((size_t)K * sizeof(float));
-        sc->abs_echo_coh = (float*)malloc((size_t)K * sizeof(float));
-        sc->abs_nsw_e1   = (float*)malloc((size_t)K * sizeof(float));
-        sc->abs_ybase    = (float*)malloc((size_t)K * sizeof(float));
-        sc->x2_at_delay  = (float*)malloc((size_t)K * sizeof(float));
-        sc->x2_past      = (float*)malloc((size_t)K * sizeof(float));
-        sc->w_mag2 = (float*)malloc((size_t)n_parts * (size_t)K * sizeof(float));
-        sc->render_block_scaled = (float*)malloc((size_t)hop * sizeof(float));
-        sc->bridge_taps = (float*)malloc((size_t)fft * sizeof(float));
-        sc->r2       = (float*)malloc((size_t)K * sizeof(float));
-        sc->r2_unb   = (float*)malloc((size_t)K * sizeof(float));
-        sc->nearend_pwr = (float*)malloc((size_t)K * sizeof(float));
-        sc->stat_mask = (unsigned char*)malloc((size_t)K);
-    }
-
-    /* pending EPV mirror + stationarity read-state. */
-    a->pending_gain_change = 0;
-    a->pending_delay_change = -1;
-    a->stationarity_active_hops = 0;
-    a->non_zero_render_seen = 0;
-    a->render_peak_floor = 10.0f / 32768.0f;
-    a->block_stationary_next = 0;
-    a->stationarity_converge_hops = AEC3B_STATIONARITY_CONVERGE_HOPS;
-
-    /* scalar state. */
-    a->saturation_level = 0.0f;
-    a->erl_estimate = 0.1f;
-    a->main_err_smooth = 0.0f; a->shadow_err_smooth = 0.0f;
-    a->shadow_frame_count = 0;
-    a->epc_render_forced_remaining = 0;
-    a->erle_window_near = 1e-10f; a->erle_window_err = 1e-10f;
-    a->erle_factor_prev = 0.0f;
-    a->inst_erle_smooth = 1.0f;
-    a->wn_err_baseline = 1e-8f;
-    a->stat_dt_hangover = 0;
-    a->warmup_frames_remaining = cfg->warmup_frames;
-    a->warmup_far_active = 0;
-    a->simple_mu_ratio = 1.0f;
-    a->simple_mu_holdoff = 0;
-    a->has_per_bin_mu = 0;
-    a->limiter_gain = 1.0f;
-    a->has_limiter_lag = 0;
-    a->near_power = 0.0f; a->raw_error_power = 0.0f;
-    a->alpha_pow = 0.95f;
-    a->frame_count = 0;
-    a->poor_coarse_counter = 0;
-    a->coarse_reset_hangover = 0;
-    a->leakage_div_sustained_counter = 0;
-    a->misadj_e2_acum = 0.0f; a->misadj_y2_acum = 0.0f; a->misadj_n_acum = 0;
-    a->misadj_inv = 0.0f; a->misadj_overhang = 0;
-    a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
-    a->last_erle_windowed = 0.0f;
-
-    /* hop scratch. */
-    a->per_bin_mu_scale = (float*)malloc((size_t)K * sizeof(float));
-    a->limiter_near_lag = (float*)malloc((size_t)hop * sizeof(float));
-    a->near_hop   = (float*)malloc((size_t)hop * sizeof(float));
-    a->far_hop    = (float*)malloc((size_t)hop * sizeof(float));
-    a->raw_output = (float*)malloc((size_t)hop * sizeof(float));
-    a->shadow_out = (float*)malloc((size_t)hop * sizeof(float));
-    a->final_out  = (float*)malloc((size_t)hop * sizeof(float));
-    a->filter_taps_full = (float*)malloc((size_t)n_parts * (size_t)hop * sizeof(float));
-
-    /* per-hop freq-bin scratch (see aec.h struct comment). */
-    a->scr_sq        = (float*)malloc((size_t)hop * sizeof(float));
-    a->scr_e2_echo   = (float*)malloc((size_t)K   * sizeof(float));
-    a->scr_e2_near   = (float*)malloc((size_t)K   * sizeof(float));
-    a->scr_rsa_psd   = (float*)malloc((size_t)K   * sizeof(float));
-    a->scr_rsa_mask  = (float*)malloc((size_t)K   * sizeof(float));
-    a->scr_mu_buf_pre= (float*)malloc((size_t)K   * sizeof(float));
-    a->scr_e2coa_pre = (float*)malloc((size_t)K   * sizeof(float));
-    a->scr_mu_buf    = (float*)malloc((size_t)K   * sizeof(float));
-    a->scr_far_psd   = (float*)malloc((size_t)K   * sizeof(float));
-    a->scr_e2ref_arr = (float*)malloc((size_t)K   * sizeof(float));
-    a->scr_e2coa_arr = (float*)malloc((size_t)K   * sizeof(float));
-    a->scr_erl_arr   = (float*)malloc((size_t)K   * sizeof(float));
-
-    a->is_static = 0;
+    a->heap_arena = arena;
     return 0;
 }
 
-/* ── static-memory helper ────────────────────────────────────────────────── */
+/* ── dimension helper (shared by aec_create() and aec_init()) ─────────────── */
 
-/* Derive all frame-dimension parameters from cfg — same logic as aec_create(). */
+/* Derive all frame-dimension parameters from cfg. */
 static void aec_derive_dims(const AecConfig* cfg,
                             int* o_hop, int* o_blk, int* o_fft, int* o_K,
                             int* o_nparts, int* o_buf_samp, int* o_fifo_cap) {
@@ -1022,30 +654,31 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
 /* Place Aec + all backing arrays in the provided pool; no malloc called.
  * Returns (Aec*)mem on success, NULL on invalid inputs, misaligned base, or
  * undersized pool (F05/F07). */
-Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
-    if (!mem || !cfg) return NULL;
-    if (!aec_validate_config(cfg)) return NULL;
-    /* F07: reject a misaligned pool base before any pool write. Every offset
-     * aec_init carves below is an ALIGN16 bump off `mem`, so a misaligned
-     * base would misalign every sub-module's SIMD-sensitive buffers too. */
-    if (!MEM_IS_ALIGNED16(mem)) return NULL;
-    {
-        /* aec_get_mem_size(cfg) returning 0 means "invalid" (F05) — a
-         * legitimate config's total is always > 0 (sizeof(Aec) alone
-         * guarantees that), so 0 is an unambiguous failure sentinel here,
-         * unlike a bare `mem_size < aec_get_mem_size(cfg)` which would never
-         * reject anything once aec_get_mem_size started returning 0 for
-         * invalid input (mem_size < 0 is never true for a size_t). */
-        size_t need = aec_get_mem_size(cfg);
-        if (need == 0 || mem_size < need) return NULL;
-    }
-
-    int hop, blk, fft, K, np, buf_samp, fcap;
-    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf_samp, &fcap);
-
-    Aec* a = (Aec*)mem;
-    uint8_t* ptr = (uint8_t*)mem + ALIGN16(sizeof(Aec));
-    memset(a, 0, sizeof(Aec));
+/* ── shared arena carve (F03) ──────────────────────────────────────────────
+ * Both aec_init() (caller-owned pool, Aec placed at mem[0]) and aec_create()
+ * (caller-owned Aec, followed by a single malloc'd arena) carve the
+ * identical set of sub-module buffers in the identical order from a raw
+ * byte cursor -- this is that shared body (formerly hand-duplicated: ~200
+ * lines of matching config boilerplate plus, on the aec_create side, ~400
+ * lines of individual per-array mallocs where this carve does one pointer
+ * bump per array instead). `a` must already be zeroed by the caller; `ptr`
+ * is the first byte of the arena (aec_init: mem + ALIGN16(sizeof(Aec));
+ * aec_create: the base of the freshly malloc'd arena). `is_static` records
+ * the two paths' only remaining difference, read by aec_destroy(): 1 means
+ * the caller owns the memory and aec_destroy() must not free it.
+ *
+ * Returns 0 on success, -1 iff a nested FFT allocation failed (main filter's,
+ * shadow filter's, or post_fft's -- the only sub-inits below that can fail
+ * post-arena-fication: every other sub-init here is a pure pointer-bump
+ * against a buffer aec_get_mem_size() already proved big enough, so it
+ * cannot fail). On failure, any nested FFT handle that DID come up earlier
+ * in this same carve (and therefore owns a real allocation outside the
+ * pool/arena -- the NE10 backend's R2C/C2R twiddle config) is torn down
+ * before returning, so the caller has only the pool/arena bytes themselves
+ * left to deal with. */
+static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+                      int hop, int blk, int fft, int K, int np,
+                      int buf_samp, int fcap, int is_static) {
     a->cfg = *cfg;
     a->hop_size = hop; a->block_size = blk; a->fft_size = fft;
     a->n_freqs = K; a->n_partitions = np;
@@ -1062,7 +695,7 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         a->erle_slope_head = 0;
     }
 
-    /* HPF: pool-carved at the scratch tail below (audio_common f32 HPF). */
+    /* HPF: arena/pool-carved at the scratch tail below (audio_common f32 HPF). */
     /* Saturation */
     if (cfg->enable_saturation) {
         saturation_init(&a->sat_ref, cfg->saturation_threshold);
@@ -1095,9 +728,11 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     size_t rsa_sz = ALIGN16((size_t)(K - 2 > 0 ? K - 2 : 1) * sizeof(int64_t));
     memset(ptr, 0, rsa_sz); ptr += rsa_sz;
 
-    /* Main filter (PBFDKF static) */
+    /* Main filter (PBFDKF, arena/pool-carved on BOTH heap and static paths
+     * since the F03 arena-fication below aec_create()). */
     size_t kf_sz = pbfdkf_get_mem_size(blk, np, hop);
-    pbfdkf_init_static(&a->main_filter, ptr, kf_sz, blk, np, cfg->mu, cfg->delta, hop);
+    if (pbfdkf_init_static(&a->main_filter, ptr, kf_sz, blk, np, cfg->mu, cfg->delta, hop) != 0)
+        return -1;   /* F04: nested fft_init failed (OOM) -- nothing to unwind yet */
     for (int k = 0; k < K; ++k) {
         a->main_filter.Q_high[k] = cfg->kalman_q_high;
         a->main_filter.Q_low[k]  = cfg->kalman_q_low;
@@ -1107,10 +742,16 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     a->main_filter.base.constraint_round_robin = 1;  /* AEC3 round-robin (main) */
     ptr += kf_sz;
 
-    /* Shadow filter (PBFDAF static) */
+    /* Shadow filter (PBFDAF, arena/pool-carved on BOTH paths since F03). */
     if (cfg->enable_shadow) {
         size_t af_sz = pbfdaf_get_mem_size(blk, np, hop, 1);
-        pbfdaf_init_static(&a->shadow_filter, ptr, af_sz, blk, np, cfg->shadow_mu_nlms, cfg->delta, hop, 1);
+        if (pbfdaf_init_static(&a->shadow_filter, ptr, af_sz, blk, np, cfg->shadow_mu_nlms, cfg->delta, hop, 1) != 0) {
+            /* F04: unwind the main filter's nested fft (already brought up
+             * above -- it owns a real allocation outside the pool/arena on
+             * the NE10 backend) before reporting failure. */
+            pbfdkf_free(&a->main_filter);
+            return -1;
+        }
         a->shadow_filter.poor_excitation_counter = a->main_filter.base.poor_excitation_counter;
         a->shadow_filter.saturated_capture = 0;
         /* FFT dedup: skip the shadow's unread near_spec / error_spec_windowed. */
@@ -1131,6 +772,15 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     /* FFT handle */
     size_t fft_sz = fft_get_mem_size(fft);
     a->post_fft = fft_init(ptr, fft_sz, fft);
+    if (!a->post_fft) {
+        /* F04: nested fft_init failed (OOM) -- unwind whatever nested FFT
+         * handles came up earlier in this same carve (each owns a real
+         * allocation outside the pool/arena on the NE10 backend) before
+         * reporting failure. */
+        if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
+        pbfdkf_free(&a->main_filter);
+        return -1;
+    }
     ptr += fft_sz;
 
     /* aec3_post backing */
@@ -1376,14 +1026,14 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     a->scr_e2ref_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_e2coa_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_erl_arr   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
-    /* mic-path HPF (audio_common f32; pool-resident, hpf_destroy no-ops) */
+    /* mic-path HPF (audio_common f32; arena/pool-resident, hpf_destroy no-ops) */
     if (cfg->enable_highpass) {
         a->hp_mic = hpf_init(ptr, hpf_get_mem_size(),
                              cfg->highpass_cutoff_hz, cfg->sample_rate);
         ptr += ALIGN16(hpf_get_mem_size());
     }
 
-    /* scalar state (mirrors aec_create tail) */
+    /* scalar state */
     a->pending_gain_change = 0; a->pending_delay_change = -1;
     a->stationarity_active_hops = 0; a->non_zero_render_seen = 0;
     a->render_peak_floor = 10.0f / 32768.0f;
@@ -1400,48 +1050,82 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     a->limiter_gain = 1.0f; a->has_limiter_lag = 0;
     a->near_power = 0.0f; a->raw_error_power = 0.0f; a->alpha_pow = 0.95f;
     a->frame_count = 0; a->poor_coarse_counter = 0; a->coarse_reset_hangover = 0;
+    a->leakage_div_sustained_counter = 0;
     a->misadj_e2_acum = 0.0f; a->misadj_y2_acum = 0.0f; a->misadj_n_acum = 0;
     a->misadj_inv = 0.0f; a->misadj_overhang = 0;
     a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
     a->last_erle_windowed = 0.0f;
     filter_q_high(&a->main_filter);
-    a->is_static = 1;
+    a->is_static = is_static;
+    return 0;
+}
+
+Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
+    if (!mem || !cfg) return NULL;
+    if (!aec_validate_config(cfg)) return NULL;
+    /* F07: reject a misaligned pool base before any pool write. Every offset
+     * aec_carve carves below is an ALIGN16 bump off `mem`, so a misaligned
+     * base would misalign every sub-module's SIMD-sensitive buffers too. */
+    if (!MEM_IS_ALIGNED16(mem)) return NULL;
+    {
+        /* aec_get_mem_size(cfg) returning 0 means "invalid" (F05) — a
+         * legitimate config's total is always > 0 (sizeof(Aec) alone
+         * guarantees that), so 0 is an unambiguous failure sentinel here,
+         * unlike a bare `mem_size < aec_get_mem_size(cfg)` which would never
+         * reject anything once aec_get_mem_size started returning 0 for
+         * invalid input (mem_size < 0 is never true for a size_t). */
+        size_t need = aec_get_mem_size(cfg);
+        if (need == 0 || mem_size < need) return NULL;
+    }
+
+    int hop, blk, fft, K, np, buf_samp, fcap;
+    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf_samp, &fcap);
+
+    Aec* a = (Aec*)mem;
+    memset(a, 0, sizeof(Aec));
+    uint8_t* ptr = (uint8_t*)mem + ALIGN16(sizeof(Aec));
+    if (aec_carve(a, ptr, cfg, hop, blk, fft, K, np, buf_samp, fcap,
+                  /*is_static=*/1) != 0) {
+        /* F04: a nested FFT allocation failed (OOM). aec_carve() already
+         * destroyed any nested FFT handles it had brought up before
+         * returning; the pool itself belongs to the caller, so there is
+         * nothing else for us to release. */
+        return NULL;
+    }
+    a->heap_arena = NULL;
     return a;
 }
 
 void aec_destroy(Aec* a) {
     if (!a) return;
-    /* Release library-internal FFT/filter allocations on BOTH the heap and
-     * static-pool paths. pbfdkf_free/pbfdaf_free already guard their own
-     * pool-owned buffers internally (is_static branch frees nothing from the
-     * pool) but they still call fft_destroy() on their nested FFT handle,
-     * which is the only thing that releases a NE10 backend's R2C twiddle
-     * config — an allocation that lives outside the caller's pool and is
-     * therefore NOT reclaimed by free(pool). Same story for post_fft below.
-     * fft_destroy() itself is a no-op for a NULL handle and (KISS backend)
-     * for a pool-owned handle, so this is safe pre- or post- pool-teardown. */
-    fft_destroy(a->post_fft);
+    /* Release library-internal FFT allocations on BOTH the heap-arena and
+     * static-pool paths. main_filter / shadow_filter are ALWAYS arena/pool-
+     * carved via *_init_static since the F03 arena-fication (on both
+     * paths), so pbfdkf_free/pbfdaf_free always take their "static" branch:
+     * it tears down only the nested FFT's NE10 twiddle config (an
+     * allocation that lives outside the pool/arena either way) and frees
+     * nothing else. Same story for post_fft. fft_destroy() is a no-op for a
+     * NULL handle and (KISS backend) for a pool-owned handle, so this is
+     * safe pre- or post- pool/arena teardown. Each handle is NULLed right
+     * after so a second aec_destroy() call on the same instance (see
+     * test_lifecycle.c) cannot dereference a pointer that now lives in
+     * freed memory instead of silently corrupting/crashing. */
+    if (a->post_fft) { fft_destroy(a->post_fft); a->post_fft = NULL; }
     if (a->hp_mic) { hpf_destroy(a->hp_mic); a->hp_mic = NULL; }
     pbfdkf_free(&a->main_filter);
     if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
 
     if (a->is_static) return;   /* caller owns the pool: nothing else to free */
 
-    if (a->has_delay) free(a->ref_ring);
-    free(a->render_fifo);
-    free(a->rsa_counters);
-    /* sub-module storage frees omitted (process owns no extra; OS reclaims on
-     * exit). The malloc'd backing arrays are reachable only through the
-     * structs; freeing them individually is a maintenance burden with no
-     * functional effect for the CLI/golden lifecycle. */
-    free(a->per_bin_mu_scale); free(a->limiter_near_lag);
-    free(a->near_hop); free(a->far_hop); free(a->raw_output);
-    free(a->shadow_out); free(a->final_out);
-    free(a->filter_taps_full);
-    free(a->scr_sq); free(a->scr_e2_echo); free(a->scr_e2_near);
-    free(a->scr_rsa_psd); free(a->scr_rsa_mask); free(a->scr_mu_buf_pre);
-    free(a->scr_e2coa_pre); free(a->scr_mu_buf); free(a->scr_far_psd);
-    free(a->scr_e2ref_arr); free(a->scr_e2coa_arr); free(a->scr_erl_arr);
+    /* F03: everything else (ref_ring, render_fifo, rsa_counters, the whole
+     * AEC3 post chain's backing arrays, hop / per-hop-freq-bin scratch, ...)
+     * is carved out of the single arena below rather than individually
+     * malloc'd -- freeing any of those pointers on their own would free an
+     * interior address instead of the malloc() base, which is undefined
+     * behaviour. One free() reclaims all of it, and is itself idempotent
+     * (a second call sees heap_arena already NULLed). */
+    free(a->heap_arena);
+    a->heap_arena = NULL;
 }
 
 int aec_hop_size(const Aec* a) { return a->hop_size; }
