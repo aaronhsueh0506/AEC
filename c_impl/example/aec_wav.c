@@ -19,7 +19,7 @@ static void print_usage(const char* prog) {
     fprintf(stderr,
         "Usage: %s <mic.wav> <ref.wav> <out.wav> [options]\n\n"
         "Options:\n"
-        "  --preset {gentle|balanced|aggressive}   default: balanced\n"
+        "  --preset {mild|balanced|aggressive}   default: balanced\n"
         "  --cng                          Enable comfort noise\n"
         "  --no-cng                       Explicitly disable CNG\n"
         "  --no-delay-est                 Disable online delay estimation\n"
@@ -34,7 +34,7 @@ static void print_usage(const char* prog) {
 }
 
 static int parse_preset(const char* s, AecPreset* out) {
-    if (!strcmp(s, "gentle"))     { *out = AEC_PRESET_GENTLE;     return 0; }
+    if (!strcmp(s, "mild"))     { *out = AEC_PRESET_GENTLE;     return 0; }
     if (!strcmp(s, "balanced"))   { *out = AEC_PRESET_BALANCED;   return 0; }
     if (!strcmp(s, "aggressive")) { *out = AEC_PRESET_AGGRESSIVE; return 0; }
     return -1;
@@ -59,7 +59,7 @@ int main(int argc, char* argv[]) {
         if (!strcmp(arg, "--preset") && i + 1 < argc) {
             if (parse_preset(argv[++i], &preset) != 0) {
                 fprintf(stderr, "ERROR: unknown preset '%s'. "
-                                "Valid: gentle|balanced|aggressive\n", argv[i]);
+                                "Valid: mild|balanced|aggressive\n", argv[i]);
                 return 2;
             }
         } else if (!strcmp(arg, "--cng"))           explicit_cng = 1;
@@ -157,7 +157,7 @@ int main(int argc, char* argv[]) {
 
     fprintf(stderr, "Processed %d frames @ hop=%d sr=%d preset=%s cng=%d delay_est=%d\n",
             frame_idx, hop, sr,
-            preset == AEC_PRESET_GENTLE ? "gentle" :
+            preset == AEC_PRESET_GENTLE ? "mild" :
             preset == AEC_PRESET_BALANCED ? "balanced" : "aggressive",
             cfg.enable_cng, cfg.enable_delay_est);
 

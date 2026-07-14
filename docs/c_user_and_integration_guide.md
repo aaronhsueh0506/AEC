@@ -38,7 +38,7 @@ non-deterministic state in HPF / saturation / detector accumulators.
 ./bin/aec_wav <mic.wav> <ref.wav> <out.wav>
 
 # Other presets
-./bin/aec_wav mic.wav ref.wav out.wav --preset gentle
+./bin/aec_wav mic.wav ref.wav out.wav --preset mild
 ./bin/aec_wav mic.wav ref.wav out.wav --preset aggressive
 
 # Toggles
@@ -68,7 +68,7 @@ against near-end preservation):
 
 | Preset | floor | FS echo suppression | DT NE preservation | Use case |
 |---|---|---|---|---|
-| **gentle** | −20 dB | lower (FS dips below 3.5 by design) | best — near-priority | echo 安靜場景、demo / 試聽、想保留近端原始質感 |
+| **mild** | −20 dB | lower (FS dips below 3.5 by design) | best — near-priority | echo 安靜場景、demo / 試聽、想保留近端原始質感 |
 | **balanced** ★ | −28 dB | high (all four ship bars met) | medium | general calls (**recommended default**) |
 | **aggressive** | −38 dB | very high — echo-priority | medium-low (deg still >2.0) | automotive, noisy / hi-coupling speakerphones |
 
@@ -280,7 +280,7 @@ log strings entirely.
 
 ### 8.2 NE clipped during double-talk
 
-- **Lower preset**: `--preset balanced` or `gentle`.
+- **Lower preset**: `--preset balanced` or `mild`.
 - Don't tweak individual RES knobs — preset values are co-tuned.
 
 ### 8.3 Slow startup / first-second echo

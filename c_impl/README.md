@@ -39,7 +39,7 @@ for bit-exact parity with the Python reference; see Parity below).
 ```
 
 Presets (single residual-echo strength axis `min_gain_floor_far_active_db`):
-`gentle` (−20, near-priority) / `balanced` (−28, production) /
+`mild` (−20, near-priority) / `balanced` (−28, production) /
 `aggressive` (−38, echo-priority). Other flags: `--cng`,
 `--debug-level <n>` / `--debug-log <path>` (level-gated trace),
 `--debug-trace <path>` (opt-in per-frame CSV of post-filter internals —

@@ -97,9 +97,9 @@ typedef struct AecConfig {
     int    ne_recent_hold;                    /* 150 */
     int    ne_recent_sustain;                 /* 3 */
 
-    /* preset strength axis (the ONLY field gentle/balanced/aggressive differ
+    /* preset strength axis (the ONLY field mild/balanced/aggressive differ
      * in): SuppressionGain far-active min-gain floor in dB
-     * (gentle -20 / balanced -28 / aggressive -38). */
+     * (mild -20 / balanced -28 / aggressive -38). */
     float  min_gain_floor_far_active_db;
 
     /* FilterMisadjustmentEstimator (AEC3 ScaleFilter) */

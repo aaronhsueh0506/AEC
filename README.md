@@ -6,7 +6,7 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v3.23.0 (2026-06-20) — Python `aec.py` `__version__ = "3.23.0"`; Python↔C **non-FFT logic bit-exact** (verified under `-DUSE_STANDARD_MATH`) — except the C delay-estimator matched filter, which runs float32 fast-math + duty-cycling unconditionally (intentional divergence, sampled at zero AECMOS cost; see `c_impl/include/delay_aec3.h`); the production **FFT backend is KISS FFT (float32)** (NE10 opt-in via `make NE10_DIR=...`), so end-to-end C aligns with Python to ~float32 precision (correlation 0.99999958, RMS error ≈ −60 dB below signal, inaudible — not 0/0). The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the no-pre-align (no-PA) online-delay path — the matched-filter pre-echo `accumulated_error` binning bug (`i//4` → AEC3 cumsum prefix-error) that had collapsed pre-echo to 0 and corrupted no-PA delay estimation — and ships a default-ON DT-deg recovery stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`, `min_gain_floor_dt_db = −20`); 4 production-C port bugs were also fixed. Three Pareto presets — `gentle` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.23.0]`.
+**Release**: v3.23.0 (2026-06-20) — Python `aec.py` `__version__ = "3.23.0"`; Python↔C **non-FFT logic bit-exact** (verified under `-DUSE_STANDARD_MATH`) — except the C delay-estimator matched filter, which runs float32 fast-math + duty-cycling unconditionally (intentional divergence, sampled at zero AECMOS cost; see `c_impl/include/delay_aec3.h`); the production **FFT backend is KISS FFT (float32)** (NE10 opt-in via `make NE10_DIR=...`), so end-to-end C aligns with Python to ~float32 precision (correlation 0.99999958, RMS error ≈ −60 dB below signal, inaudible — not 0/0). The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the no-pre-align (no-PA) online-delay path — the matched-filter pre-echo `accumulated_error` binning bug (`i//4` → AEC3 cumsum prefix-error) that had collapsed pre-echo to 0 and corrupted no-PA delay estimation — and ships a default-ON DT-deg recovery stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`, `min_gain_floor_dt_db = −20`); 4 production-C port bugs were also fixed. Three Pareto presets — `mild` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.23.0]`.
 
 ---
 
@@ -47,11 +47,11 @@ residual-gain floor that trades echo suppression against near-end preservation:
 
 | Preset | floor | character |
 |---|---|---|
-| `gentle`       | −20 dB | near-priority — more near-end kept, more echo leak (FS dips below the 3.5 bar by design) |
+| `mild`       | −20 dB | near-priority — more near-end kept, more echo leak (FS dips below the 3.5 bar by design). Was `gentle` until 2026-07-15 (NR-style naming, same parameters) |
 | **`balanced` ★** | −28 dB | **production** — all four ship bars met |
 | `aggressive`   | −38 dB | echo-priority — deeper suppression, more near-end loss (deg stays >2.0, above AEC3) |
 
-`gentle` / `aggressive` are deliberate Pareto operating points on the proven
+`mild` / `aggressive` are deliberate Pareto operating points on the proven
 single-channel DT-deg-vs-echo wall; all share the same `_aec3_post` chain and
 800-case-tuned base. Full version history → [CHANGELOG.md](CHANGELOG.md).
 
@@ -102,7 +102,7 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 | Symptom | Diagnosis & adjustment |
 |---|---|
 | **Residual echo too high (FS / NE)** | 1. With `--no-res`, output should be a clean linear-AEC residual. Echo still dominating → ref signal is wrong, mic-ref delay > filter length, or sample rates differ. 2. `--preset aggressive` for stronger RES (cost: more NE compression). 3. `--filter-length-ms 100` for big rooms / long reverb. |
-| **NE clipped during double-talk** | Lower preset → `--preset gentle` (−20 dB floor, near-priority: keeps more near-end at the cost of more echo leak). Don't tweak individual RES knobs — preset values are co-tuned. |
+| **NE clipped during double-talk** | Lower preset → `--preset mild` (−20 dB floor, near-priority: keeps more near-end at the cost of more echo leak). Don't tweak individual RES knobs — preset values are co-tuned. |
 | **Slow startup / first-second echo** | Filter convergence needs ≥ 0.5 s of meaningful far energy. Normal adaptive behavior. Consider muting output during application warm-up (e.g. play a "connecting…" cue). |
 | **Echo spikes when device moves** | Echo path changes → EPC fires → ~200 ms re-convergence with brief leak. Usually self-recovers. For frequent movement, increase filter length. |
 | **Output sounds muffled / pumping in NE-only** | Comfort noise mismatch. Try `--cng` (C) / `--enable-cng` (Python) to shape the noise floor; do NOT stack a second CNG layer downstream. |
@@ -230,8 +230,8 @@ pip install numpy soundfile matplotlib
 # BALANCED preset, PBFDKF + RES (recommended)
 python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset balanced --enable-res
 
-# Other presets (gentle = near-priority, aggressive = echo-priority)
-python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset {gentle|balanced|aggressive} --enable-res
+# Other presets (mild = near-priority, aggressive = echo-priority)
+python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset {mild|balanced|aggressive} --enable-res
 
 # CNG on
 python3 aec.py mic.wav ref.wav out.wav --mode pbfdkf --preset balanced --enable-res --cng
@@ -283,7 +283,7 @@ Preset trade-off:
 
 | Preset | floor | Echo suppression | NE preservation | Use |
 |---|---|---|---|---|
-| `gentle`     | −20 dB | light  | best (near-priority) | NE 過度被壓時、demo / 試聽 |
+| `mild`     | −20 dB | light  | best (near-priority) | NE 過度被壓時、demo / 試聽 |
 | `balanced` ★ | −28 dB | medium | good (all ship bars) | general / production default |
 | `aggressive` | −38 dB | strong | minor loss (echo-priority) | hands-free, speakerphone, high echo |
 

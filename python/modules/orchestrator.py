@@ -3754,8 +3754,8 @@ Examples:
                         help='Enable comfort noise generation in RES (default: from preset, else off)')
     parser.add_argument('--no-td-constraint', action='store_true',
                         help='Disable time-domain constraint on filter weights (diagnostic)')
-    parser.add_argument('--preset', choices=['gentle', 'balanced', 'aggressive'],
-                        help='Pareto preset: gentle (near-priority) / balanced '
+    parser.add_argument('--preset', choices=['mild', 'balanced', 'aggressive'],
+                        help='Pareto preset: mild (near-priority) / balanced '
                              '(shipped) / aggressive (echo-priority). Differ only '
                              'in the far-active min-gain floor (-20/-28/-38 dB).')
     parser.add_argument('--no-shadow', action='store_true', help='Disable shadow filter')

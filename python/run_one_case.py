@@ -34,7 +34,7 @@ from aec import AEC, AecConfig, AecMode, AecPreset
 
 
 PRESET_MAP = {
-    'gentle': AecPreset.GENTLE,
+    'mild': AecPreset.MILD,
     'balanced': AecPreset.BALANCED,
     'aggressive': AecPreset.AGGRESSIVE,
 }

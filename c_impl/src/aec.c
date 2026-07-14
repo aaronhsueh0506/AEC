@@ -87,7 +87,7 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
 
 void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
     aec_config_defaults(cfg, sr);
-    /* gentle / balanced / aggressive differ ONLY in the far-active min-gain
+    /* mild / balanced / aggressive differ ONLY in the far-active min-gain
      * floor (the SuppressionGain split-floor power axis). */
     switch (p) {
         case AEC_PRESET_GENTLE:     cfg->min_gain_floor_far_active_db = -20.0f; break;

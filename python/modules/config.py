@@ -139,7 +139,7 @@ class AecConfig:
     soft_nearend_blend_softness: float = 0.25
     # Per-bin near-end blend (v3.22 P5): replace the scalar broadband-LF ne_w with
     # a PER-BIN ne_w from per-bin ENR (echo[k]/nearend[k]). Bins where near-end
-    # dominates blend toward nearend_tuning (gentle, preserve near), echo-dominant
+    # dominates blend toward nearend_tuning (mild, preserve near), echo-dominant
     # bins toward normal_tuning (aggressive, suppress echo) — frequency-selective
     # near-end protection that lets the far-active floor drop without the broadband
     # DT near-end cost. DEFAULT ON (v3.22.2): paired with far_active -28 it
@@ -398,11 +398,11 @@ class AecConfig:
         ``min_gain_floor_far_active_db`` — the far-active residual-gain floor
         that trades echo suppression against near-end preservation:
 
-          gentle      near-priority  (higher floor → more near kept, more echo leak)
+          mild      near-priority  (higher floor → more near kept, more echo leak)
           balanced    −28 dB         the shipped all-four-bars-met operating point
           aggressive  echo-priority  (deeper floor → more echo killed, more near loss)
 
-        gentle/aggressive deliberately sit off the balanced ship-bar set
+        mild/aggressive deliberately sit off the balanced ship-bar set
         (Pareto picks), not within it — the DT-deg vs echo trade is a proven
         single-channel DSP wall, so a strength axis is the honest way to expose it.
         """
@@ -416,7 +416,7 @@ class AecConfig:
         )
         # Strength axis: far-active min-gain floor (dataclass default −28 = balanced).
         strength = {
-            AecPreset.GENTLE:     dict(min_gain_floor_far_active_db=-20.0),
+            AecPreset.MILD:     dict(min_gain_floor_far_active_db=-20.0),
             AecPreset.BALANCED:   dict(),
             AecPreset.AGGRESSIVE: dict(min_gain_floor_far_active_db=-38.0),
         }

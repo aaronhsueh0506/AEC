@@ -155,25 +155,25 @@ bypass it.
 
 ### `AecConfig` and presets
 
-Three presets — `gentle` / `balanced` / `aggressive` — defined in
+Three presets — `mild` / `balanced` / `aggressive` (NR-style naming; `mild` was `gentle` until 2026-07-15, same −20 dB parameters) — defined in
 [python/modules/config.py](python/modules/config.py) (`from_preset`). All share
 the same AEC3 chain + the four 800-case AECMOS-tuned base overrides (`enable_cng`,
 `shadow_mu_min`, `warmup_frames`, `kalman_q_high`); everything else uses dataclass
 defaults. **Knobs are co-tuned** — don't tweak a single field without a full
 800-case re-bench.
 
-`balanced` is the production preset (all four ship bars met). `gentle` and
+`balanced` is the production preset (all four ship bars met). `mild` and
 `aggressive` are deliberate **Pareto operating points** on a single residual-echo
 strength knob — `min_gain_floor_far_active_db`, the far-active min-gain floor
-(gentle −20 / balanced −28 / aggressive −38 dB):
+(mild −20 / balanced −28 / aggressive −38 dB):
 
-- `gentle` = near-priority (higher floor → more near-end kept, more echo leak;
+- `mild` = near-priority (higher floor → more near-end kept, more echo leak;
   DT_static deg reaches AEC2's, FS echo drops below balanced's 3.5 bar by design).
 - `aggressive` = echo-priority (deeper floor → more echo killed, more near loss;
   beats AEC2 on DT+FS echo, deg stays >2.0 and above AEC3).
 
 The DT-deg-vs-echo trade is a proven single-channel DSP Pareto wall (see CHANGELOG
-`[3.22.4]`); the strength axis exposes it honestly rather than hiding it. gentle/
+`[3.22.4]`); the strength axis exposes it honestly rather than hiding it. mild/
 aggressive differ from balanced **only** in that one floor field.
 
 ### Diagnostic surfaces (do not remove)

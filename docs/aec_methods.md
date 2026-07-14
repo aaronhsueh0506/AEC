@@ -2,7 +2,7 @@
 
 **Release**: algorithm current through v3.23.0. The split min-gain floor (§3.4)
 was added in v3.22.0 on top of the v3.21 pipeline, the three Pareto presets
-(gentle/balanced/aggressive) in v3.22.4, and the **DT-aware recovery stack**
+(mild/balanced/aggressive) in v3.22.4, and the **DT-aware recovery stack**
 (matched-filter pre-echo fix + DT-aware soft recovery + DT-gated RES floor, §2.3
 and §3.4) in v3.23.0 — the work that closed the no-pre-align (production-faithful
 online self-align) delay-acquisition gap. The C port's **non-FFT logic is
@@ -82,13 +82,13 @@ AecConfig(
 )
 ```
 
-`gentle` and `aggressive` are deliberate **Pareto operating points** that differ
+`mild` and `aggressive` are deliberate **Pareto operating points** that differ
 from `balanced` in exactly one field — `min_gain_floor_far_active_db`, the
 far-active min-gain floor (the single residual-echo strength knob):
 
 | preset | floor | character |
 |---|---|---|
-| `gentle` | −20 dB | near-priority — more near kept, more echo leak (DT_static deg ≈ AEC2; FS echo below balanced's 3.5 bar by design) |
+| `mild` | −20 dB | near-priority — more near kept, more echo leak (DT_static deg ≈ AEC2; FS echo below balanced's 3.5 bar by design) |
 | `balanced` | −28 dB | production — all four ship bars met |
 | `aggressive` | −38 dB | echo-priority — beats AEC2 on DT+FS echo, deg >2.0 and above AEC3 |
 
@@ -108,7 +108,7 @@ All benchmarking tooling (`eval_aec_challenge.py`, `check_byte_equal.py`,
 ### Tunable parameters (`AecConfig`)
 
 The full release surface is `AecConfig` (`modules/config.py`). The three presets
-differ **only** in `min_gain_floor_far_active_db` (gentle −20 / balanced −28 /
+differ **only** in `min_gain_floor_far_active_db` (mild −20 / balanced −28 /
 aggressive −38); `from_preset` additionally pins a shared base
 (`enable_cng=True`, `shadow_mu_min=0.5`, `warmup_frames=100`,
 `kalman_q_high=1e-3`). Everything below uses dataclass defaults. Fields are
@@ -432,7 +432,7 @@ far-active criterion). It latches from the first far frame so FS/DT use the
 gentler floor throughout (no cold-start leak); only recordings where far is
 never active keep the strong floor. Config (`AecConfig`):
 `min_gain_split_floor_enabled`, `min_gain_floor_far_active_db` (balanced −28;
-gentle −20 / aggressive −38 — the v3.22.4 preset strength knob),
+mild −20 / aggressive −38 — the v3.22.4 preset strength knob),
 `min_gain_floor_far_silent_db` (−12), `min_gain_far_latch_power` (1e6). The
 floors are amplitude-domain dB; the orchestrator constructs `SuppressionGain`
 with these as `split_floor_*` (`orchestrator.py:960`). The far-active floor

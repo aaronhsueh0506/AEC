@@ -18,7 +18,7 @@
  *       $(find src -name '*.c') test/parity_aec_e2e.c \
  *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_e2e
  *   python3 ../python/diag/gen_aec_e2e_golden.py /tmp/aec_e2e_golden.bin [preset]
- *   /tmp/p_e2e /tmp/aec_e2e_golden.bin [preset]      # preset: balanced|gentle|aggressive
+ *   /tmp/p_e2e /tmp/aec_e2e_golden.bin [preset]      # preset: balanced|mild|aggressive
  */
 #include "aec.h"
 
@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
 
     AecPreset preset = AEC_PRESET_BALANCED;
     if (argc > 2) {
-        if (!strcmp(argv[2], "gentle")) preset = AEC_PRESET_GENTLE;
+        if (!strcmp(argv[2], "mild")) preset = AEC_PRESET_GENTLE;
         else if (!strcmp(argv[2], "aggressive")) preset = AEC_PRESET_AGGRESSIVE;
     }
     AecConfig cfg;

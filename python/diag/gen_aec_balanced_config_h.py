@@ -9,8 +9,8 @@ we capture the LIVE balanced instance's exact values once and emit them as C
 literals. aec_create() then bakes them straight into the sub-module init calls,
 mirroring c_impl/test/parity_aec3_post_run.c.
 
-gentle / aggressive differ from balanced ONLY in split_floor_far_active_db
-(gentle -20 / balanced -28 / aggressive -38), applied at runtime in
+mild / aggressive differ from balanced ONLY in split_floor_far_active_db
+(mild -20 / balanced -28 / aggressive -38), applied at runtime in
 aec_config_from_preset — so only the balanced base is baked here.
 
 Run: python3 python/diag/gen_aec_balanced_config_h.py

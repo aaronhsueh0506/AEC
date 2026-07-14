@@ -49,7 +49,7 @@ cc -std=c99 -O2 -ffp-contract=off app.c \
 ./bin/aec_wav mic.wav ref.wav out.wav
 
 # preset
-./bin/aec_wav mic.wav ref.wav out.wav --preset gentle
+./bin/aec_wav mic.wav ref.wav out.wav --preset mild
 ./bin/aec_wav mic.wav ref.wav out.wav --preset aggressive
 
 # 模組開關
@@ -74,7 +74,7 @@ cc -std=c99 -O2 -ffp-contract=off app.c \
 
 | Preset | `min_gain_floor_far_active_db` | 方向 |
 |---|---:|---|
-| `gentle` | -20 dB | 近端保留優先，允許較多 residual echo |
+| `mild` | -20 dB | 近端保留優先，允許較多 residual echo |
 | `balanced` | -28 dB | 預設／一般通話 |
 | `aggressive` | -38 dB | 回聲抑制優先，double-talk 近端損失風險較高 |
 
@@ -320,7 +320,7 @@ aec_get_res_context(&aec, &ctx);
 | 回聲幾乎沒有下降 | ref 不是實際 playback loopback | 先修正 reference routing，再調參數 |
 | 長時間後回聲變差 | mic/ref clock drift | 使用共同 clock 或上層 drift compensation |
 | 開始約一秒回聲較多 | filter 尚未 convergence／delay acquisition | 保持 far-end energy，確認 delay search 可涵蓋實際延遲 |
-| double-talk 近端被壓低 | preset 太 aggressive | 先改 balanced/gentle，不要先關閉整個 RES |
+| double-talk 近端被壓低 | preset 太 aggressive | 先改 balanced/mild，不要先關閉整個 RES |
 | far-end only 仍有殘響尾 | acoustic path 超過 filter | 增加 `filter_length` 後重新 create，並重新評估記憶體與 CPU |
 | 輸出出現突波／發散 | clipping、錯誤 ref、delay 劇變 | 保留 saturation/shadow/EPC，開 debug trace 定位 |
 | async API 持續 underrun | render/capture 排程或 producer 太慢 | 監控 event，修正 scheduling；不要把 FIFO 當 clock-drift 修正器 |
