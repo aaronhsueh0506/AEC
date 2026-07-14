@@ -23,6 +23,16 @@
  *
  * After correctness, runs a small microbenchmark per kernel (n=257,
  * ~200k reps, CLOCK_MONOTONIC) and prints a one-line summary.
+ *
+ * Review finding F10 (SIMD NaN semantics) adds a dedicated NaN corpus after
+ * the finite-corpus tests above (see "NaN corpus (review F10)" section):
+ * qNaN/sNaN/-NaN/+-Inf patterns in re-only/im-only/interleaved-every-3rd/
+ * Inf-mixed-with-NaN combinations, at lengths spanning every kernel's NEON
+ * lane-count boundary. The cabs_np/cmag2_np family (the kernels
+ * sk__cabs_np_neon4's fix targets) is checked STRICT (exit(1) on mismatch,
+ * same discipline as the finite corpus); every other kernel in the file is
+ * checked SOFT (reported via check_bits_soft, tallied, does not abort) since
+ * a mismatch there would be a new finding outside this fix's scope.
  */
 #include "aec_simd_kernels.h"
 
@@ -129,6 +139,128 @@ static void fill_bench_complex(Complex *a, int n) {
     for (i = 0; i < n; ++i) { a[i].r = gen_bench_float(); a[i].i = gen_bench_float(); }
 }
 
+/* ═══════════════════════════ NaN corpus (review F10) ═══════════════════════
+ * Dedicated NaN-carrying input generation, separate from gen_float()'s
+ * special_pool (which deliberately EXCLUDES NaN, see that comment above) --
+ * NaN inputs are the entire point of this section. Two uses:
+ *
+ *   1. The cabs_np/cmag2_np family (kernels 1/2/3/5, sharing the
+ *      sk__cabs_np_neon4 helper this finding fixed): full pattern x length
+ *      sweep, STRICT bitwise memcmp (check_bits_or_die, same zero-tolerance
+ *      discipline as the finite corpus above) -- this is the actual
+ *      regression gate for the F10 fix.
+ *   2. Every other kernel in the file ("W-updates/EMA etc. process arbitrary
+ *      floats too"): one NaN-sprinkled run per kernel, checked with
+ *      check_bits_soft (reports and keeps going rather than exit(1)) --
+ *      these kernels were audited to already avoid vmaxq_f32/vminq_f32/
+ *      vabsq_f32 (see the header's "NaN semantics" note), so a mismatch here
+ *      would be a NEW finding outside the cabs family, to be reported rather
+ *      than silently patched. */
+
+#define NAN_POOL_COUNT 6
+static float nan_pool[NAN_POOL_COUNT];
+
+static void init_nan_pool(void) {
+    nan_pool[0] = bits_to_float(0x7fc12345u); /* qNaN, custom payload (the
+                                                * reviewer's repro pattern) */
+    nan_pool[1] = bits_to_float(0x7fc00000u); /* qNaN, default payload */
+    nan_pool[2] = bits_to_float(0x7fa00001u); /* sNaN */
+    nan_pool[3] = bits_to_float(0xffc00000u); /* -NaN */
+    nan_pool[4] = (float)INFINITY;
+    nan_pool[5] = -(float)INFINITY;
+}
+
+/* n=1..17 straddles every kernel's 4-lane NEON/scalar-tail boundary many
+ * times over; 128/129/160/255/256/257 straddle the pairwise-sum leaf/split
+ * cutovers (kernel 13/14's n<=128 leaf, kernel 21/22 share the same cutover
+ * for n<=257 -- their own >257 recursion is covered by the finite corpus's
+ * dedicated PW_TAILFOLD_N_LIST already, no separate NaN pass needed there). */
+static const int NAN_N_LIST[] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+    128, 129, 160, 255, 256, 257
+};
+#define NAN_N_LIST_COUNT ((int)(sizeof(NAN_N_LIST) / sizeof(NAN_N_LIST[0])))
+
+typedef enum {
+    NANPAT_RE_ONLY = 0,     /* NaN in re only, im stays finite */
+    NANPAT_IM_ONLY,         /* NaN in im only, re stays finite */
+    NANPAT_INTERLEAVE3,     /* every 3rd element: BOTH re and im NaN */
+    NANPAT_INF_NAN_MIX      /* alternating +-Inf paired with NaN */
+} nan_pattern_t;
+
+static const nan_pattern_t NAN_PATTERNS[] = {
+    NANPAT_RE_ONLY, NANPAT_IM_ONLY, NANPAT_INTERLEAVE3, NANPAT_INF_NAN_MIX
+};
+#define NAN_PATTERN_COUNT ((int)(sizeof(NAN_PATTERNS) / sizeof(NAN_PATTERNS[0])))
+static const char *NAN_PATTERN_NAMES[] = {
+    "re_only", "im_only", "interleave3", "inf_nan_mix"
+};
+
+static void fill_complex_nan(Complex *z, int n, nan_pattern_t pat) {
+    int i;
+    for (i = 0; i < n; ++i) {
+        switch (pat) {
+        case NANPAT_RE_ONLY:
+            z[i].r = nan_pool[i % NAN_POOL_COUNT];
+            z[i].i = gen_float();
+            break;
+        case NANPAT_IM_ONLY:
+            z[i].r = gen_float();
+            z[i].i = nan_pool[i % NAN_POOL_COUNT];
+            break;
+        case NANPAT_INTERLEAVE3:
+            if (i % 3 == 0) {
+                z[i].r = nan_pool[i % NAN_POOL_COUNT];
+                z[i].i = nan_pool[(i / 3 + 1) % NAN_POOL_COUNT];
+            } else {
+                z[i].r = gen_float();
+                z[i].i = gen_float();
+            }
+            break;
+        case NANPAT_INF_NAN_MIX:
+        default:
+            if (i & 1) {
+                z[i].r = (i & 2) ? (float)INFINITY : -(float)INFINITY;
+                z[i].i = nan_pool[i % NAN_POOL_COUNT];
+            } else {
+                z[i].r = nan_pool[i % NAN_POOL_COUNT];
+                z[i].i = (i & 2) ? -(float)INFINITY : (float)INFINITY;
+            }
+            break;
+        }
+    }
+}
+
+/* Real-array NaN sprinkle (every 3rd element replaced by a NaN-pool value,
+ * cycling qNaN/sNaN/-NaN/+-Inf), rest finite via gen_float(). Used by the
+ * "every other kernel" sweep. */
+static void fill_floats_nan_sprinkle(float *a, int n) {
+    int i;
+    for (i = 0; i < n; ++i) {
+        if (i % 3 == 0) a[i] = nan_pool[i % NAN_POOL_COUNT];
+        else a[i] = gen_float();
+    }
+}
+
+/* Complex-array NaN sprinkle: every 3rd element both-NaN, every (3rd+1)
+ * element re-only NaN, remaining third left finite. */
+static void fill_complex_nan_sprinkle(Complex *z, int n) {
+    int i;
+    for (i = 0; i < n; ++i) {
+        int m = i % 3;
+        if (m == 0) {
+            z[i].r = nan_pool[i % NAN_POOL_COUNT];
+            z[i].i = nan_pool[(i + 1) % NAN_POOL_COUNT];
+        } else if (m == 1) {
+            z[i].r = nan_pool[i % NAN_POOL_COUNT];
+            z[i].i = gen_float();
+        } else {
+            z[i].r = gen_float();
+            z[i].i = gen_float();
+        }
+    }
+}
+
 /* ═══════════════════════════ mismatch reporting ═══════════════════════════ */
 
 static int first_diff_bits(const float *a, const float *b, int count) {
@@ -166,6 +298,28 @@ static void check_scalar_bits_or_die(const char *kernel, int n, int trial,
             "MISMATCH kernel=%s n=%d trial=%d idx=0 simd=0x%08x (%.9g) scalar=0x%08x (%.9g)\n",
             kernel, n, trial, (unsigned)gb, (double)simd_val, (unsigned)wb, (double)scalar_val);
         exit(1);
+    }
+}
+
+/* Soft counterpart of check_bits_or_die for the "every other kernel" NaN
+ * sweep (review F10): reports a mismatch to stderr and tallies it, but does
+ * NOT exit -- these kernels are outside the cabs/cmag2 family this finding
+ * fixes, so per the review's instruction a mismatch here is a NEW finding to
+ * report, not something to patch silently mid-sweep. See main()'s final
+ * summary. */
+static int g_nan_soft_mismatch_count = 0;
+
+static void check_bits_soft(const char *kernel, int n, int trial,
+                             const float *simd, const float *scalar, int count) {
+    int idx = first_diff_bits(simd, scalar, count);
+    if (idx >= 0) {
+        uint32_t gb, wb;
+        memcpy(&gb, &simd[idx], sizeof gb);
+        memcpy(&wb, &scalar[idx], sizeof wb);
+        fprintf(stderr,
+            "NAN-SWEEP-MISMATCH kernel=%s n=%d trial=%d idx=%d simd=0x%08x (%.9g) scalar=0x%08x (%.9g)\n",
+            kernel, n, trial, idx, (unsigned)gb, (double)simd[idx], (unsigned)wb, (double)scalar[idx]);
+        g_nan_soft_mismatch_count++;
     }
 }
 
@@ -877,6 +1031,372 @@ static void test_mask_zero(void) {
     }
     printf("PASS mask_zero_f32\n");
 }
+
+/* ═══════════════════════ NaN corpus: cabs/cmag2 family (STRICT) ═══════════
+ * The actual F10 regression gate: sk__cabs_np_neon4 must bit-match
+ * sk__cabs_np_elem across every NaN pattern x length combination. Any
+ * mismatch here means the fix regressed or is incomplete -- hard exit(1),
+ * same as the finite corpus. */
+
+static void test_cabs_np_nan(void) {
+    Complex z[SK_TEST_MAX_N];
+    float out_scalar[SK_TEST_MAX_N], out_simd[SK_TEST_MAX_N];
+    int pi, ni;
+    for (pi = 0; pi < NAN_PATTERN_COUNT; ++pi) {
+        for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+            int n = NAN_N_LIST[ni];
+            char name[64];
+            snprintf(name, sizeof name, "cabs_np_f32_nan:%s", NAN_PATTERN_NAMES[pi]);
+            fill_complex_nan(z, n, NAN_PATTERNS[pi]);
+            sk_cabs_np_f32_scalar(z, out_scalar, n);
+            sk_cabs_np_f32(z, out_simd, n);
+            check_bits_or_die(name, n, pi, out_simd, out_scalar, n);
+        }
+    }
+    printf("PASS cabs_np_f32_nan\n");
+}
+
+static void test_cmag2_np_nan(void) {
+    Complex z[SK_TEST_MAX_N];
+    float out_scalar[SK_TEST_MAX_N], out_simd[SK_TEST_MAX_N];
+    int pi, ni;
+    for (pi = 0; pi < NAN_PATTERN_COUNT; ++pi) {
+        for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+            int n = NAN_N_LIST[ni];
+            char name[64];
+            snprintf(name, sizeof name, "cmag2_np_f32_nan:%s", NAN_PATTERN_NAMES[pi]);
+            fill_complex_nan(z, n, NAN_PATTERNS[pi]);
+            sk_cmag2_np_f32_scalar(z, out_scalar, n);
+            sk_cmag2_np_f32(z, out_simd, n);
+            check_bits_or_die(name, n, pi, out_simd, out_scalar, n);
+        }
+    }
+    printf("PASS cmag2_np_f32_nan\n");
+}
+
+static void test_cmag2_np_acc_nan(void) {
+    Complex z[SK_TEST_MAX_N];
+    float acc_init[SK_TEST_MAX_N], acc_scalar[SK_TEST_MAX_N], acc_simd[SK_TEST_MAX_N];
+    int pi, ni;
+    for (pi = 0; pi < NAN_PATTERN_COUNT; ++pi) {
+        for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+            int n = NAN_N_LIST[ni];
+            char name[64];
+            snprintf(name, sizeof name, "cmag2_np_acc_f32_nan:%s", NAN_PATTERN_NAMES[pi]);
+            fill_complex_nan(z, n, NAN_PATTERNS[pi]);
+            fill_floats(acc_init, n); /* finite accumulator seed, isolates the effect to cmag2 */
+            memcpy(acc_scalar, acc_init, (size_t)n * sizeof(float));
+            memcpy(acc_simd, acc_init, (size_t)n * sizeof(float));
+            sk_cmag2_np_acc_f32_scalar(z, acc_scalar, n);
+            sk_cmag2_np_acc_f32(z, acc_simd, n);
+            check_bits_or_die(name, n, pi, acc_simd, acc_scalar, n);
+        }
+    }
+    printf("PASS cmag2_np_acc_f32_nan\n");
+}
+
+static void test_ema_cmag2_nan(void) {
+    Complex z[SK_TEST_MAX_N];
+    float state_init[SK_TEST_MAX_N], state_scalar[SK_TEST_MAX_N], state_simd[SK_TEST_MAX_N];
+    int pi, ni;
+    const float alpha = 0.9f, beta = 0.1f;
+    for (pi = 0; pi < NAN_PATTERN_COUNT; ++pi) {
+        for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+            int n = NAN_N_LIST[ni];
+            char name[64];
+            snprintf(name, sizeof name, "ema_cmag2_f32_nan:%s", NAN_PATTERN_NAMES[pi]);
+            fill_complex_nan(z, n, NAN_PATTERNS[pi]);
+            fill_floats(state_init, n);
+            memcpy(state_scalar, state_init, (size_t)n * sizeof(float));
+            memcpy(state_simd, state_init, (size_t)n * sizeof(float));
+            sk_ema_cmag2_f32_scalar(state_scalar, z, alpha, beta, n);
+            sk_ema_cmag2_f32(state_simd, z, alpha, beta, n);
+            check_bits_or_die(name, n, pi, state_simd, state_scalar, n);
+        }
+    }
+    printf("PASS ema_cmag2_f32_nan\n");
+}
+
+/* ═══════════════════ NaN corpus: every other kernel (SOFT) ═══════════════
+ * Not part of the F10 fix's own regression gate -- these kernels don't use
+ * sk__cabs_np_neon4 and were audited to already avoid vmaxq_f32/vminq_f32/
+ * vabsq_f32 (see header). Run anyway per the review's "every kernel in this
+ * file" instruction; check_bits_soft reports rather than exit(1)s so a
+ * finding here surfaces as a NEW, separately-reportable item instead of
+ * being silently patched inside this F10 changeset. */
+
+static void test_cmac_np_nan(void) {
+    Complex w[SK_TEST_MAX_N], x[SK_TEST_MAX_N];
+    Complex acc_init[SK_TEST_MAX_N], acc_scalar[SK_TEST_MAX_N], acc_simd[SK_TEST_MAX_N];
+    int ni;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_complex_nan_sprinkle(w, n);
+        fill_complex_nan_sprinkle(x, n);
+        fill_complex(acc_init, n);
+        memcpy(acc_scalar, acc_init, (size_t)n * sizeof(Complex));
+        memcpy(acc_simd, acc_init, (size_t)n * sizeof(Complex));
+        sk_cmac_np_f32_scalar(acc_scalar, w, x, n);
+        sk_cmac_np_f32(acc_simd, w, x, n);
+        check_bits_soft("cmac_np_f32_nan", n, 0, (const float *)acc_simd, (const float *)acc_scalar, 2 * n);
+    }
+    printf("PASS cmac_np_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_wupdate_nlms_nan(void) {
+    Complex X[SK_TEST_MAX_N], err[SK_TEST_MAX_N];
+    Complex W_init[SK_TEST_MAX_N], W_scalar[SK_TEST_MAX_N], W_simd[SK_TEST_MAX_N];
+    float mu_eff[SK_TEST_MAX_N];
+    int ni;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_complex_nan_sprinkle(X, n);
+        fill_complex_nan_sprinkle(err, n);
+        fill_complex(W_init, n);
+        fill_floats_nan_sprinkle(mu_eff, n);
+        memcpy(W_scalar, W_init, (size_t)n * sizeof(Complex));
+        memcpy(W_simd, W_init, (size_t)n * sizeof(Complex));
+        sk_wupdate_nlms_f32_scalar(W_scalar, X, err, mu_eff, n);
+        sk_wupdate_nlms_f32(W_simd, X, err, mu_eff, n);
+        check_bits_soft("wupdate_nlms_f32_nan", n, 0, (const float *)W_simd, (const float *)W_scalar, 2 * n);
+    }
+    printf("PASS wupdate_nlms_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_wupdate_kf_nan(void) {
+    Complex X[SK_TEST_MAX_N], err[SK_TEST_MAX_N];
+    Complex W_init[SK_TEST_MAX_N], W_scalar[SK_TEST_MAX_N], W_simd[SK_TEST_MAX_N];
+    float mu[SK_TEST_MAX_N], mu_scale[SK_TEST_MAX_N];
+    int ni;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_complex_nan_sprinkle(X, n);
+        fill_complex_nan_sprinkle(err, n);
+        fill_complex(W_init, n);
+        fill_floats_nan_sprinkle(mu, n);
+        fill_floats_nan_sprinkle(mu_scale, n);
+        memcpy(W_scalar, W_init, (size_t)n * sizeof(Complex));
+        memcpy(W_simd, W_init, (size_t)n * sizeof(Complex));
+        sk_wupdate_kf_f32_scalar(W_scalar, X, err, mu, mu_scale, n);
+        sk_wupdate_kf_f32(W_simd, X, err, mu, mu_scale, n);
+        check_bits_soft("wupdate_kf_f32_nan", n, 0, (const float *)W_simd, (const float *)W_scalar, 2 * n);
+    }
+    printf("PASS wupdate_kf_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_pairwise_sum_nan(void) {
+    float a[SK_TEST_MAX_N];
+    int ni;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats_nan_sprinkle(a, n);
+        {
+            float rs = sk_pairwise_sum_f32_scalar(a, (size_t)n);
+            float rn = sk_pairwise_sum_f32(a, (size_t)n);
+            uint32_t gb, wb;
+            memcpy(&gb, &rn, sizeof gb); memcpy(&wb, &rs, sizeof wb);
+            if (gb != wb) {
+                fprintf(stderr, "NAN-SWEEP-MISMATCH kernel=pairwise_sum_f32_nan n=%d simd=0x%08x scalar=0x%08x\n",
+                        n, (unsigned)gb, (unsigned)wb);
+                g_nan_soft_mismatch_count++;
+            }
+        }
+    }
+    printf("PASS pairwise_sum_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_sum_sq_pairwise_nan(void) {
+    float a[SK_TEST_MAX_N];
+    int ni;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats_nan_sprinkle(a, n);
+        {
+            float rs = sk_sum_sq_pairwise_f32_scalar(a, (size_t)n);
+            float rn = sk_sum_sq_pairwise_f32(a, (size_t)n);
+            uint32_t gb, wb;
+            memcpy(&gb, &rn, sizeof gb); memcpy(&wb, &rs, sizeof wb);
+            if (gb != wb) {
+                fprintf(stderr, "NAN-SWEEP-MISMATCH kernel=sum_sq_pairwise_f32_nan n=%d simd=0x%08x scalar=0x%08x\n",
+                        n, (unsigned)gb, (unsigned)wb);
+                g_nan_soft_mismatch_count++;
+            }
+        }
+    }
+    printf("PASS sum_sq_pairwise_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_pairwise_sum_tailfold_nan(void) {
+    float a[SK_TEST_MAX_N];
+    int ni;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats_nan_sprinkle(a, n);
+        {
+            float rs = sk_pairwise_sum_tailfold_f32_scalar(a, (size_t)n);
+            float rn = sk_pairwise_sum_tailfold_f32(a, (size_t)n);
+            uint32_t gb, wb;
+            memcpy(&gb, &rn, sizeof gb); memcpy(&wb, &rs, sizeof wb);
+            if (gb != wb) {
+                fprintf(stderr, "NAN-SWEEP-MISMATCH kernel=pairwise_sum_tailfold_f32_nan n=%d simd=0x%08x scalar=0x%08x\n",
+                        n, (unsigned)gb, (unsigned)wb);
+                g_nan_soft_mismatch_count++;
+            }
+        }
+    }
+    printf("PASS pairwise_sum_tailfold_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_pairwise_sum_tailfold_b_nan(void) {
+    float a[SK_TEST_MAX_N];
+    int ni;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats_nan_sprinkle(a, n);
+        {
+            float rs = sk_pairwise_sum_tailfold_b_f32_scalar(a, (size_t)n);
+            float rn = sk_pairwise_sum_tailfold_b_f32(a, (size_t)n);
+            uint32_t gb, wb;
+            memcpy(&gb, &rn, sizeof gb); memcpy(&wb, &rs, sizeof wb);
+            if (gb != wb) {
+                fprintf(stderr, "NAN-SWEEP-MISMATCH kernel=pairwise_sum_tailfold_b_f32_nan n=%d simd=0x%08x scalar=0x%08x\n",
+                        n, (unsigned)gb, (unsigned)wb);
+                g_nan_soft_mismatch_count++;
+            }
+        }
+    }
+    printf("PASS pairwise_sum_tailfold_b_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_coherence_ema_gate_nan(void) {
+    Complex echo[SK_TEST_MAX_N], near_spec[SK_TEST_MAX_N];
+    float abs_echo[SK_TEST_MAX_N], abs_near[SK_TEST_MAX_N];
+    float sye_re_init[SK_TEST_MAX_N], sye_im_init[SK_TEST_MAX_N];
+    float syy_init[SK_TEST_MAX_N], see_init[SK_TEST_MAX_N];
+    float sye_re_s[SK_TEST_MAX_N], sye_im_s[SK_TEST_MAX_N];
+    float syy_s[SK_TEST_MAX_N], see_s[SK_TEST_MAX_N];
+    float sye_re_n[SK_TEST_MAX_N], sye_im_n[SK_TEST_MAX_N];
+    float syy_n[SK_TEST_MAX_N], see_n[SK_TEST_MAX_N];
+    unsigned char mask_s[SK_TEST_MAX_N], mask_n[SK_TEST_MAX_N];
+    int ni;
+    const float alpha = 0.05f, threshold = 0.5f;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_complex_nan_sprinkle(echo, n);
+        fill_complex_nan_sprinkle(near_spec, n);
+        fill_floats_nan_sprinkle(abs_echo, n);
+        fill_floats_nan_sprinkle(abs_near, n);
+        fill_floats(sye_re_init, n);
+        fill_floats(sye_im_init, n);
+        fill_floats(syy_init, n);
+        fill_floats(see_init, n);
+        memcpy(sye_re_s, sye_re_init, (size_t)n * sizeof(float));
+        memcpy(sye_im_s, sye_im_init, (size_t)n * sizeof(float));
+        memcpy(syy_s, syy_init, (size_t)n * sizeof(float));
+        memcpy(see_s, see_init, (size_t)n * sizeof(float));
+        memcpy(sye_re_n, sye_re_init, (size_t)n * sizeof(float));
+        memcpy(sye_im_n, sye_im_init, (size_t)n * sizeof(float));
+        memcpy(syy_n, syy_init, (size_t)n * sizeof(float));
+        memcpy(see_n, see_init, (size_t)n * sizeof(float));
+        sk_coherence_ema_gate_f32_scalar(sye_re_s, sye_im_s, syy_s, see_s,
+                                          echo, near_spec, abs_echo, abs_near,
+                                          alpha, threshold, mask_s, n);
+        sk_coherence_ema_gate_f32(sye_re_n, sye_im_n, syy_n, see_n,
+                                   echo, near_spec, abs_echo, abs_near,
+                                   alpha, threshold, mask_n, n);
+        check_bits_soft("coherence_ema_gate_f32_nan:sye_re", n, 0, sye_re_n, sye_re_s, n);
+        check_bits_soft("coherence_ema_gate_f32_nan:sye_im", n, 0, sye_im_n, sye_im_s, n);
+        check_bits_soft("coherence_ema_gate_f32_nan:syy", n, 0, syy_n, syy_s, n);
+        check_bits_soft("coherence_ema_gate_f32_nan:see", n, 0, see_n, see_s, n);
+        {
+            int idx;
+            for (idx = 0; idx < n; ++idx) {
+                if (mask_s[idx] != mask_n[idx]) {
+                    fprintf(stderr,
+                        "NAN-SWEEP-MISMATCH kernel=coherence_ema_gate_f32_nan:mask n=%d idx=%d simd=%u scalar=%u\n",
+                        n, idx, (unsigned)mask_n[idx], (unsigned)mask_s[idx]);
+                    g_nan_soft_mismatch_count++;
+                }
+            }
+        }
+    }
+    printf("PASS coherence_ema_gate_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_ema_delta_nan(void) {
+    float state_init[SK_TEST_MAX_N], state_scalar[SK_TEST_MAX_N], state_simd[SK_TEST_MAX_N];
+    float x[SK_TEST_MAX_N];
+    int ni;
+    const float alpha = 0.23156652857908377f;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats(state_init, n);
+        fill_floats_nan_sprinkle(x, n);
+        memcpy(state_scalar, state_init, (size_t)n * sizeof(float));
+        memcpy(state_simd, state_init, (size_t)n * sizeof(float));
+        sk_ema_delta_f32_scalar(state_scalar, x, alpha, n);
+        sk_ema_delta_f32(state_simd, x, alpha, n);
+        check_bits_soft("ema_delta_f32_nan", n, 0, state_simd, state_scalar, n);
+    }
+    printf("PASS ema_delta_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_n2_track_nan(void) {
+    float n2_init[SK_TEST_MAX_N], n2_scalar[SK_TEST_MAX_N], n2_simd[SK_TEST_MAX_N];
+    float y2s[SK_TEST_MAX_N];
+    int ni;
+    const float fresh = 0.9968377223398316f;
+    const float retain = 0.003162277660168411f;
+    const float g_up = 1.0005000750025f;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats(n2_init, n);
+        fill_floats_nan_sprinkle(y2s, n);
+        memcpy(n2_scalar, n2_init, (size_t)n * sizeof(float));
+        memcpy(n2_simd, n2_init, (size_t)n * sizeof(float));
+        sk_n2_track_f32_scalar(n2_scalar, y2s, fresh, retain, g_up, n);
+        sk_n2_track_f32(n2_simd, y2s, fresh, retain, g_up, n);
+        check_bits_soft("n2_track_f32_nan", n, 0, n2_simd, n2_scalar, n);
+    }
+    printf("PASS n2_track_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_n2_initial_track_nan(void) {
+    float n2i_init[SK_TEST_MAX_N], n2i_scalar[SK_TEST_MAX_N], n2i_simd[SK_TEST_MAX_N];
+    float n2[SK_TEST_MAX_N];
+    int ni;
+    const float alpha = 0.0024981253125391234f;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats(n2i_init, n);
+        fill_floats_nan_sprinkle(n2, n);
+        memcpy(n2i_scalar, n2i_init, (size_t)n * sizeof(float));
+        memcpy(n2i_simd, n2i_init, (size_t)n * sizeof(float));
+        sk_n2_initial_track_f32_scalar(n2i_scalar, n2, alpha, n);
+        sk_n2_initial_track_f32(n2i_simd, n2, alpha, n);
+        check_bits_soft("n2_initial_track_f32_nan", n, 0, n2i_simd, n2i_scalar, n);
+    }
+    printf("PASS n2_initial_track_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_mask_zero_nan(void) {
+    float x_init[SK_TEST_MAX_N], x_scalar[SK_TEST_MAX_N], x_simd[SK_TEST_MAX_N];
+    unsigned char mask[SK_TEST_MAX_N];
+    int ni;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        int i;
+        fill_floats_nan_sprinkle(x_init, n);
+        for (i = 0; i < n; ++i) mask[i] = (unsigned char)(lcg_next() & 1u);
+        memcpy(x_scalar, x_init, (size_t)n * sizeof(float));
+        memcpy(x_simd, x_init, (size_t)n * sizeof(float));
+        sk_mask_zero_f32_scalar(x_scalar, mask, n);
+        sk_mask_zero_f32(x_simd, mask, n);
+        check_bits_soft("mask_zero_f32_nan", n, 0, x_simd, x_scalar, n);
+    }
+    printf("PASS mask_zero_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
 static void bench_coherence_ema_gate(void) {
     Complex echo[BENCH_N], near_spec[BENCH_N];
     float abs_echo[BENCH_N], abs_near[BENCH_N];
@@ -1005,6 +1525,7 @@ static void bench_mask_zero(void) {
 
 int main(void) {
     init_special_pool();
+    init_nan_pool();
 
     test_cabs_np();
     test_cmag2_np();
@@ -1022,6 +1543,31 @@ int main(void) {
     test_n2_track();
     test_n2_initial_track();
     test_mask_zero();
+
+    printf("\n--- NaN corpus (review F10) ---\n");
+    test_cabs_np_nan();
+    test_cmag2_np_nan();
+    test_cmag2_np_acc_nan();
+    test_ema_cmag2_nan();
+    test_cmac_np_nan();
+    test_wupdate_nlms_nan();
+    test_wupdate_kf_nan();
+    test_pairwise_sum_nan();
+    test_sum_sq_pairwise_nan();
+    test_pairwise_sum_tailfold_nan();
+    test_pairwise_sum_tailfold_b_nan();
+    test_coherence_ema_gate_nan();
+    test_ema_delta_nan();
+    test_n2_track_nan();
+    test_n2_initial_track_nan();
+    test_mask_zero_nan();
+    if (g_nan_soft_mismatch_count > 0) {
+        printf("NAN SWEEP: %d soft mismatch(es) outside the cabs/cmag2 family "
+               "-- see NAN-SWEEP-MISMATCH lines above (reported, not auto-fixed)\n",
+               g_nan_soft_mismatch_count);
+    } else {
+        printf("NAN SWEEP: 0 mismatches outside the cabs/cmag2 family\n");
+    }
 
     printf("\n--- microbenchmarks (n=%d, %d reps) ---\n", BENCH_N, BENCH_REPS);
     bench_cabs_np();

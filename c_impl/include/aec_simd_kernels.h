@@ -47,6 +47,39 @@
  *     - sk_wupdate_kf_f32's K = mu*conj(X) and K *= mu_scale steps
  *       (kernel 8)
  *
+ * ────────────────────────────── NaN semantics ──────────────────────────────
+ * All kernels in this file are specified over the FINITE domain -- the
+ * primary line of defense against NaN/Inf is ingress sanitization at the
+ * WAV/API boundary (mic/reference samples are never expected to carry NaN
+ * once past that gate). That said, kernels 1/2/3/5's shared cabs_np/cmag2_np
+ * helper (sk__cabs_np_neon4) is verified NaN-exact against its scalar twin
+ * (sk__cabs_np_elem) on this repo's target toolchain (AArch64, Apple
+ * clang 17, -ffp-contract=off): every comparison the scalar helper performs
+ * with C's `<`/`>` operators (both in the `re<0.0f ?-re:re` abs step and the
+ * `ar>ai` larger/smaller step) is unordered-false for a NaN operand, exactly
+ * like vcltq_f32/vcgtq_f32 -- so the NEON body replicates BOTH steps with
+ * compare(vcltq_f32/vcgtq_f32)+select(vbslq_f32), never vabsq_f32/vmaxq_f32/
+ * vminq_f32 (vabsq_f32 is a bitwise sign-bit-clear -- it does NOT match the
+ * scalar ternary's "leave a NaN's sign bit untouched" behavior; vmaxq_f32/
+ * vminq_f32 lower to FMAX/FMIN, which propagate NaN unconditionally rather
+ * than taking the "false branch" the scalar `>` ternary takes). Single-NaN
+ * lanes (exactly one of re/im NaN, the other finite/Inf) bit-match scalar
+ * strictly, verified by the selftest's dedicated NaN corpus. Both-NaN lanes
+ * (re AND im both NaN) also verified to bit-match on this toolchain/CPU --
+ * scalar and NEON execute the identical fmaf/sqrtf/div instruction sequence
+ * per lane on the same FP unit, so NaN-payload propagation through that
+ * sequence is deterministic and identical either way -- but this equivalence
+ * is an empirical property of this specific compiler+architecture pairing
+ * (C leaves multi-NaN-operand payload selection implementation-defined), not
+ * a portable language guarantee; the selftest documents it as verified-here
+ * rather than architecturally mandated. No other kernel in this file does
+ * comparison-based branching whose branches themselves reach a NaN-sensitive
+ * early-out the way sk__cabs_np_neon4's `larger==0.0f` does; the remaining
+ * compare+select kernels (16/18/19's data-dependent tracks) were audited and
+ * already use vcltq_f32/vcgtq_f32+vbslq_f32 (never vmaxq_f32/vminq_f32), so
+ * their NaN behavior falls out of the same unordered-false argument for
+ * free -- see each kernel's inline comment.
+ *
  * ───────────────────────────────── Style ──────────────────────────────────
  * Header-only, C99, static inline -- same convention as simd_kernels.h and
  * fast_math.h. `#include "simd_kernels.h"` first: this pulls in Complex
@@ -102,19 +135,41 @@ static inline float sk__cmag2_np_elem(float re, float im) {
 #if SK_HAVE_NEON
 /* 4-lane version of sk__cabs_np_elem: `larger==0` lanes computed as 0/0 =
  * NaN through the divide/sqrt, then bslq-selected to an exact +0.0f — same
- * final bits as the scalar early-return, just reached without branching. */
+ * final bits as the scalar early-return, just reached without branching.
+ *
+ * NaN-exactness (see header's "NaN semantics" section): every step below is
+ * a compare(vcltq_f32/vcgtq_f32)+select(vbslq_f32) that reproduces the
+ * scalar helper's C ternaries operator-for-operator --
+ *   ar = re<0.0f ? -re : re;   ai = im<0.0f ? -im : im;        (the abs step)
+ *   larger  = ar>ai ? ar : ai; smaller = ar>ai ? ai : ar;      (the minmax step)
+ * NOT vabsq_f32/vmaxq_f32/vminq_f32: those lower to bitwise-FABS / FMAX /
+ * FMIN, which do NOT match the scalar ternaries on a NaN operand --
+ * vabsq_f32 unconditionally clears a NaN's sign bit (the scalar ternary's
+ * `<` is unordered-false for NaN, so it takes the untouched `re` branch,
+ * sign bit and all) and FMAX/FMIN propagate NaN unconditionally (the scalar
+ * ternary's `>` is likewise unordered-false, so it takes the OTHER,
+ * possibly non-NaN, operand — e.g. this is exactly how the `larger==0.0f`
+ * early-out below still fires correctly for a NaN paired with a zero
+ * component). For all FINITE inputs (incl. -0.0f) this produces bit-identical
+ * `larger`/`smaller` to the old vabsq_f32+vmaxq_f32/vminq_f32 form — abs of
+ * any finite nonzero value is sign-bit-independent, and a -0.0f/+0.0f sign
+ * difference in `smaller` never survives (smaller only feeds ratio*ratio,
+ * and (-x)*(-x) == x*x for x==0.0f too) — so this is a NaN-only behavior
+ * change, verified against the scalar helper by the selftest's NaN corpus. */
 static inline float32x4_t sk__cabs_np_neon4(float32x4_t re, float32x4_t im) {
-    float32x4_t ar = vabsq_f32(re);
-    float32x4_t ai = vabsq_f32(im);
-    float32x4_t larger  = vmaxq_f32(ar, ai);   /* both operands >= +0.0f: no
-                                                 * signed-zero tie is possible
-                                                 * here (see header comment). */
-    float32x4_t smaller = vminq_f32(ar, ai);
+    float32x4_t zero = vdupq_n_f32(0.0f);
+    uint32x4_t re_neg = vcltq_f32(re, zero);           /* re < 0.0f */
+    uint32x4_t im_neg = vcltq_f32(im, zero);           /* im < 0.0f */
+    float32x4_t ar = vbslq_f32(re_neg, vnegq_f32(re), re);  /* re<0?-re:re */
+    float32x4_t ai = vbslq_f32(im_neg, vnegq_f32(im), im);  /* im<0?-im:im */
+    uint32x4_t gt = vcgtq_f32(ar, ai);                 /* ar > ai */
+    float32x4_t larger  = vbslq_f32(gt, ar, ai);       /* ar>ai?ar:ai */
+    float32x4_t smaller = vbslq_f32(gt, ai, ar);       /* ar>ai?ai:ar */
     float32x4_t ratio = vdivq_f32(smaller, larger);
     float32x4_t m = vmulq_f32(larger,
                        vsqrtq_f32(vfmaq_f32(vdupq_n_f32(1.0f), ratio, ratio)));
-    uint32x4_t is_zero = vceqq_f32(larger, vdupq_n_f32(0.0f));
-    return vbslq_f32(is_zero, vdupq_n_f32(0.0f), m);
+    uint32x4_t is_zero = vceqq_f32(larger, zero);
+    return vbslq_f32(is_zero, zero, m);
 }
 
 static inline float32x4_t sk__cmag2_np_neon4(float32x4_t re, float32x4_t im) {
