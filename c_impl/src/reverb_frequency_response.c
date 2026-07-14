@@ -2,7 +2,7 @@
  * See the header for the parity contract. Build with -ffp-contract=off. */
 #include "reverb_frequency_response.h"
 
-#include "simd_kernels.h"
+#include "aec_simd_kernels.h"
 
 #include <string.h>
 

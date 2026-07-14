@@ -49,6 +49,13 @@ BENCH_SRCS = $(TEST_DIR)/bench_rtf.c
 BENCH_OBJS = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(BENCH_SRCS))
 BENCH_TARGET = $(BIN_DIR)/bench_rtf
 
+# Standalone bit-exactness + microbench harness for the AEC-only kernel split
+# (aec_simd_kernels.h). Header-only + <math.h> -- no audio_common archive
+# link needed (unlike bench_rtf/aec_wav), so this target does not depend on
+# audio_common_lib.
+SELFTEST_SRC    = $(TEST_DIR)/simd_selftest_aec.c
+SELFTEST_TARGET = $(BIN_DIR)/simd_selftest_aec
+
 all: dirs $(TARGET)
 
 dirs:
@@ -82,6 +89,17 @@ bench: dirs $(BENCH_TARGET)
 $(BENCH_TARGET): $(OBJS) $(BENCH_OBJS) | audio_common_lib
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+# Bit-exactness + microbench self-test for the AEC-only kernel split
+# (include/aec_simd_kernels.h). Unlike bench/aec_wav this links with -lm
+# only (no audio_common archive, no audio_common_lib prereq) -- the header
+# is self-contained aside from transitively pulling in simd_kernels.h via
+# CFLAGS' -I$(AC_DIR)/include. Builds then runs immediately.
+selftest: dirs $(SELFTEST_TARGET)
+	./$(SELFTEST_TARGET)
+
+$(SELFTEST_TARGET): $(SELFTEST_SRC)
+	$(CC) $(CFLAGS) -o $@ $< -lm
+
 # Build Configuration Flags (pass via EXTRA_CFLAGS)
 #
 # USE_STANDARD_MATH - Use standard math library functions (for debugging/parity check)
@@ -99,6 +117,7 @@ help:
 	@echo "  all     Build CLI binary (bin/aec_wav)  [default]"
 	@echo "  lib     Build static library (bin/libaec.a)"
 	@echo "  bench   Build RTF timing harness (bin/bench_rtf)"
+	@echo "  selftest Build + run the AEC-only kernel-split self-test (bin/simd_selftest_aec)"
 	@echo "  debug   Build with -g -DAEC_DEBUG"
 	@echo "  clean   Remove obj/ and bin/"
 	@echo ""
@@ -108,4 +127,4 @@ help:
 	@echo "  make BACKEND=kiss|ne10   (default: kiss; ne10 is the embedded deliverable)"
 	@echo "  make AC_DIR=<path>       (override audio_common location)"
 
-.PHONY: all dirs clean lib bench debug help audio_common_lib
+.PHONY: all dirs clean lib bench selftest debug help audio_common_lib

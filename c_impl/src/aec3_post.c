@@ -10,7 +10,7 @@
 #include <math.h>
 #include <string.h>
 #include "fast_math.h"
-#include "simd_kernels.h"
+#include "aec_simd_kernels.h"
 
 #define PSD_SCALE (32768.0 * 32768.0)   /* int16 max^2 (Python _PSD_SCALE) */
 

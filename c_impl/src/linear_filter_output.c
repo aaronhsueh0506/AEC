@@ -4,7 +4,7 @@
  */
 #include "linear_filter_output.h"
 
-#include "simd_kernels.h"
+#include "aec_simd_kernels.h"
 
 #include <stdlib.h>
 #include <string.h>

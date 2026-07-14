@@ -18,7 +18,7 @@
 
 #include <string.h>
 #include "fast_math.h"
-#include "simd_kernels.h"
+#include "aec_simd_kernels.h"
 
 
 /* float32 sum of a sub-slice a[lo:hi) via the canonical pairwise sum. */

@@ -24,7 +24,7 @@
  */
 #include "pbfdkf.h"
 #include "aec3_scale.h"
-#include "simd_kernels.h"
+#include "aec_simd_kernels.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>

@@ -2,7 +2,7 @@
  * parity contract. Build with -ffp-contract=off. */
 #include "filter_state_bridge.h"
 
-#include "simd_kernels.h"
+#include "aec_simd_kernels.h"
 
 /* numpy 1.26 pairwise_sum over float32, accumulated in float32. Mirrors
  * numpy/core/src/umath/loops_utils.h.src @pairwise_sum@:

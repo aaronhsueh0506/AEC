@@ -11,7 +11,7 @@
 #include "fullband_erle.h"
 
 #include "aec3_scale.h"   /* aec3_per_bin_psd_threshold */
-#include "simd_kernels.h"
+#include "aec_simd_kernels.h"
 
 #include <math.h>
 

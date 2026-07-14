@@ -3,7 +3,7 @@
  * Build with -ffp-contract=off. */
 #include "filter_analyzer.h"
 
-#include "simd_kernels.h"
+#include "aec_simd_kernels.h"
 
 #include <math.h>
 #include <string.h>
