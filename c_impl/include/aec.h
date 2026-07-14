@@ -10,6 +10,8 @@
  * Out of scope for this cutover:
  *   - AecMode != PBFDKF (NLMS / buffered FDAF queue)
  *   - get_stats / debug logger / capture_stages / pure-diagnostic _diag stashes
+ *   - (historical note: aec_init/aec_get_mem_size static-memory pool is now
+ *     IMPLEMENTED — see STATIC_MEMORY.md; both paths live in aec.c.)
  */
 #ifndef AEC_AEC_H
 #define AEC_AEC_H
@@ -288,11 +290,18 @@ typedef struct Aec {
     long   render_call_count, capture_call_count;
     int    last_buffering_event;   /* AecBufferingEvent of the last capture step */
 
+    int is_static;
 } Aec;
 
 int  aec_create(Aec* a, const AecConfig* cfg);
 void aec_destroy(Aec* a);
 void aec_reset(Aec* a);
+
+/* Static-memory companions: place Aec + all backing arrays in a single pool.
+ * aec_get_mem_size() returns the total byte requirement; caller allocates once.
+ * aec_init() places the Aec struct at mem[0] and returns it; no malloc called. */
+size_t aec_get_mem_size(const AecConfig* cfg);
+Aec*   aec_init(void* mem, size_t mem_size, const AecConfig* cfg);
 
 /* Process exactly hop_size samples — OFFLINE / lockstep path. Byte-exact to
  * Python aec.py. Render and capture supplied together. */

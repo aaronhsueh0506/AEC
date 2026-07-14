@@ -16,6 +16,15 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-07-14 — single-branch consolidation (static-memory API folded into main)
+
+Repo hygiene, zero algorithm change. The `feature/static-memory` branch is
+retired: `main` now carries both memory models in one library — `aec_create`
+(heap) and `aec_get_mem_size`/`aec_init` (single caller-owned pool, see
+`c_impl/STATIC_MEMORY.md`) — selected at runtime, mirroring the NR repo's
+single-branch model. Gates: consolidated `aec_wav` output byte-identical to the
+former branch build, and `test_static_aec` static == dynamic byte-equal.
+
 ## [3.24.1] — 2026-06-25 — Warm tap-transfer on delay acquisition (cold-start "vertical line" fix)
 
 A no-PA-path BALANCED change. At no-pre-align cold start the far-end is silent
@@ -263,8 +272,10 @@ Estimator + SuppressionGain + CNG/OLA), and the 21-step `aec_process`. Bit-exact
 required matching three numpy-on-arm64 idioms (`np.abs(c64)**2` = SIMD
 scaled-hypot-FMA squared, complex64×complex64 multiply uses FMA, EMA `(1-α)` is a
 double subtraction cast to f32) — `-ffp-contract=off` is mandatory. Per-module
-golden tests (`test/parity_*.c`); end-to-end gate `test/parity_aec_e2e.c`.
-Opt-in per-frame CSV trace via `aec_wav --debug-trace <path>` (audio-passive).
+golden tests (`test/parity_*.c`); end-to-end gate `test/parity_aec_e2e.c`. A
+heap-free **static-memory** pool variant (`aec_init`/`aec_get_mem_size`,
+byte-equal) ships in-tree — see `c_impl/STATIC_MEMORY.md`. Opt-in
+per-frame CSV trace via `aec_wav --debug-trace <path>` (audio-passive).
 
 ## [3.22.3] — 2026-06-03 — isolated parity/correctness candidates (P0 audit; AECMOS-neutral)
 

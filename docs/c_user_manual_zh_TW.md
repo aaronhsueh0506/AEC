@@ -154,6 +154,26 @@ cleanup:
 
 `aec_process()` 回傳型別是 `void`。應在 create 階段檢查 `aec_create()`，並由上層保證 pointer、block size、sample format 與 stream synchronization 正確。
 
+### 4.1 Heap-free init（static memory pool）
+
+無 heap 的 embedded target 可改用單一 caller-owned pool，取代 `aec_create()`：
+
+```c
+size_t pool_bytes = aec_get_mem_size(&cfg);      /* 該 cfg 的精確 pool 大小 */
+void  *pool       = platform_pool_alloc(pool_bytes);  /* 必須 16-byte 對齊 */
+
+Aec aec;
+if (aec_init(&aec, pool, pool_bytes, &cfg) != 0) { /* pool 不足 */ }
+
+/* aec_process / aec_reset / aec_destroy 照常使用 */
+aec_destroy(&aec);   /* static path 不會 free 任何東西；pool 由 caller 回收 */
+```
+
+兩條 path 輸出 **bit-identical**（`c_impl/test_static_aec.c` 驗證 static == dynamic
+byte-equal）。BALANCED / 16 kHz / 52 ms filter / shadow + RES + delay-est 全開時
+pool 為 **539,328 B（526.7 KB）**。設計說明與 per-module 佔用明細見
+[../c_impl/STATIC_MEMORY.md](../c_impl/STATIC_MEMORY.md)。
+
 ## 5. Decoupled render/capture API
 
 若 playback/render 與 microphone/capture 不是由同一 callback 交付，可使用：
@@ -285,6 +305,8 @@ aec_get_res_context(&aec, &ctx);
 ## 9. Resource ownership 與 thread safety
 
 - `Aec` storage 由 caller 持有；`aec_create()` 會配置其內部動態資源。
+- 改用 `aec_init()`（§4.1）時內部資源全部來自 caller pool；`aec_destroy()` 不會
+  free pool，pool 生命週期由 caller 管理（KISS backend 下 static path 完全零 heap）。
 - `aec_destroy()` 必須和成功的 `aec_create()` 成對，且只呼叫一次。
 - `aec_reset()` 清 state 但保留 config／allocation，適合同規格的新串流。
 - `mic`、`ref`、`out` buffer 由 caller 持有，至少包含一個 hop。

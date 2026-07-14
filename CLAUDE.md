@@ -95,7 +95,7 @@ make                  # debug: `make debug` (adds -g -DAEC_DEBUG)
 ```
 
 `-ffp-contract=off` in `CFLAGS` is mandatory for Python↔C byte-equal parity.
-Output WAV defaults to fp32 PCM (`AEC_FP32_WAV=0` for 16-bit).
+Output WAV defaults to fp32 PCM (`AEC_OUT_FLOAT=0` for 16-bit).
 
 ### Python tests
 

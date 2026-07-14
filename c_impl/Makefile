@@ -82,7 +82,7 @@ help:
 	@echo "Targets:"
 	@echo "  all     Build CLI binary (bin/aec_wav)  [default]"
 	@echo "  lib     Build static library (bin/libaec.a)"
-	@echo "  debug   Build with -g -DDEBUG"
+	@echo "  debug   Build with -g -DAEC_DEBUG"
 	@echo "  clean   Remove obj/ and bin/"
 	@echo ""
 	@echo "Usage:"
