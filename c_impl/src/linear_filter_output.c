@@ -4,6 +4,8 @@
  */
 #include "linear_filter_output.h"
 
+#include "simd_kernels.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -13,26 +15,13 @@
  * design; formerly a float64 accumulator mirroring pbfdkf.c's pairwise_sum_f32
  * twin): an 8-accumulator unrolled leaf for n<=128 (numpy NPY_PW_BLOCKSIZE),
  * then a recursive split at n/2 rounded down to a multiple of 8.
- * Used for the e2/y2/s2 = np.sum(<arr> ** 2) block energies. */
-static float pw_leaf_f32(const float *a, int n) {
-    if (n < 8) {
-        float s = 0.0f;
-        for (int i = 0; i < n; ++i) s += a[i];
-        return s;
-    }
-    float r[8];
-    for (int j = 0; j < 8; ++j) r[j] = a[j];
-    int i = 8;
-    for (; i + 8 <= n; i += 8)
-        for (int j = 0; j < 8; ++j) r[j] += a[i + j];
-    float res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
-    for (; i < n; ++i) res += a[i];
-    return res;
-}
+ * Used for the e2/y2/s2 = np.sum(<arr> ** 2) block energies.
+ * Body delegates to simd_kernels.h's sk_pairwise_sum_tailfold_f32 (same
+ * kernel pbfdkf.c's twin now uses — this file's tree diffed byte-identical
+ * to pbfdkf.c's, modulo whitespace); local symbol/signature kept so call
+ * sites are unchanged. */
 static float pairwise_sum_f32(const float *a, int n) {
-    if (n <= 128) return pw_leaf_f32(a, n);
-    int n2 = n / 2; n2 -= (n2 % 8);
-    return pairwise_sum_f32(a, n2) + pairwise_sum_f32(a + n2, n - n2);
+    return sk_pairwise_sum_tailfold_f32(a, (size_t)n);
 }
 
 /* np.sum(arr ** 2): square and pairwise-sum, both float32 (float32-by-design;

@@ -3,6 +3,8 @@
  * Build with -ffp-contract=off. */
 #include "filter_analyzer.h"
 
+#include "simd_kernels.h"
+
 #include <math.h>
 #include <string.h>
 
@@ -25,44 +27,14 @@ static const float FA_HPF_COEFFS[3] = {
  *   n < 8     -> sequential
  *   n <= 128  -> 8 partial accumulators, balanced-tree combine, sequential tail
  *   n > 128   -> split at n2 = (n/2) floored to a multiple of 8, recurse, add.
- * Every op is a float32 add (no f64 widening). */
+ * Every op is a float32 add (no f64 widening).
+ * Body delegates to simd_kernels.h's sk_pairwise_sum_tailfold_b_f32 (this
+ * exact tree is that kernel's `_scalar` twin verbatim source; byte-identical
+ * local copies also live in reverb_frequency_response.c/filter_state_bridge.c/
+ * fullband_erle.c, all now delegating to the same shared kernel); local
+ * symbol/signature kept so call sites are unchanged. */
 float fa_f32_pairwise_sum(const float *a, size_t n) {
-    if (n == 0) {
-        return 0.0f;
-    }
-    if (n < 8) {
-        float res = a[0];
-        size_t i;
-        for (i = 1; i < n; ++i) {
-            res = res + a[i];
-        }
-        return res;
-    }
-    if (n <= 128) {
-        float r0 = a[0], r1 = a[1], r2 = a[2], r3 = a[3];
-        float r4 = a[4], r5 = a[5], r6 = a[6], r7 = a[7];
-        float res;
-        size_t i;
-        for (i = 8; i + 8 <= n; i += 8) {
-            r0 = r0 + a[i + 0];
-            r1 = r1 + a[i + 1];
-            r2 = r2 + a[i + 2];
-            r3 = r3 + a[i + 3];
-            r4 = r4 + a[i + 4];
-            r5 = r5 + a[i + 5];
-            r6 = r6 + a[i + 6];
-            r7 = r7 + a[i + 7];
-        }
-        res = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7));
-        for (; i < n; ++i) {
-            res = res + a[i];
-        }
-        return res;
-    } else {
-        size_t n2 = n / 2;
-        n2 -= n2 % 8;
-        return fa_f32_pairwise_sum(a, n2) + fa_f32_pairwise_sum(a + n2, n - n2);
-    }
+    return sk_pairwise_sum_tailfold_b_f32(a, n);
 }
 
 

@@ -39,26 +39,13 @@ static int next_pow2(int x) { int n = 1; while (n < x) n <<= 1; return n; }
 /* pairwise float32 sum matching numpy's reduction EXACTLY: an 8-accumulator
  * unrolled leaf for n<=128 (numpy NPY_PW_BLOCKSIZE), then a recursive split at
  * n/2 rounded down to a multiple of 8. Verified 0/5000 mismatch vs np.sum over
- * f32 across lengths {80,160,257,320,512}. Used for np.sum(far_end**2). */
-static float pw_leaf_f32(const float* a, int n) {
-    if (n < 8) {
-        float s = 0.0f;
-        for (int i = 0; i < n; ++i) s += a[i];
-        return s;
-    }
-    float r[8];
-    for (int j = 0; j < 8; ++j) r[j] = a[j];
-    int i = 8;
-    for (; i + 8 <= n; i += 8)
-        for (int j = 0; j < 8; ++j) r[j] += a[i + j];
-    float res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
-    for (; i < n; ++i) res += a[i];
-    return res;
-}
+ * f32 across lengths {80,160,257,320,512}. Used for np.sum(far_end**2).
+ * Body delegates to simd_kernels.h's sk_pairwise_sum_tailfold_f32, which
+ * reproduces this exact tree (verbatim source for that kernel's `_scalar`
+ * twin) plus a bit-identical NEON path; local symbol/signature kept so call
+ * sites are unchanged. */
 static float pairwise_sum_f32(const float* a, int n) {
-    if (n <= 128) return pw_leaf_f32(a, n);
-    int n2 = n / 2; n2 -= (n2 % 8);
-    return pairwise_sum_f32(a, n2) + pairwise_sum_f32(a + n2, n - n2);
+    return sk_pairwise_sum_tailfold_f32(a, (size_t)n);
 }
 
 /* |complex64|² matching numpy's `np.abs(z) ** 2` BIT-EXACTLY. numpy computes
