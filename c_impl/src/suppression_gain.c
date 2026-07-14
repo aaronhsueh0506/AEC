@@ -18,6 +18,7 @@
 
 #include <string.h>
 #include "fast_math.h"
+#include "simd_kernels.h"
 
 
 /* float32 sum of a sub-slice a[lo:hi) via the canonical pairwise sum. */
@@ -94,10 +95,9 @@ static int low_noise_render_detect(SuppressionGain *sg, const float *rb,
     int low_noise, i;
     *x2_sum_out = 0.0f;
     if (hop == 0) return 0;
-    for (i = 0; i < hop; ++i) {
-        float v = rb[i];             /* render_block, float32 */
-        x2[i] = v * v;
-    }
+    /* x2[i] = rb[i]*rb[i]; sk_sq_scale_f32 with scale=1.0f is bit-exact here
+     * ((x*x)*1.0f == x*x for every finite value, no rounding change). */
+    sk_sq_scale_f32(rb, 1.0f, x2, hop);
     x2_sum = f32_pairwise_sum(x2, (size_t)hop);
     *x2_sum_out = x2_sum;
     x2_max = x2[0];
@@ -219,12 +219,13 @@ static void get_max_gain(SuppressionGain *sg, float *out) {
     float inc = is_ne ? c->max_inc_nearend : c->max_inc_normal;
     float ffi = c->floor_first_increase;
     int k;
-    for (k = 0; k < c->n_bins; ++k) {
-        float v = sg->last_gain[k] * inc;     /* f32 array * f32 scalar */
-        if (v < ffi) v = ffi;                 /* max(., ffi) */
-        if (v > 1.0f) v = 1.0f;               /* min(., 1.0f) */
-        out[k] = v;
-    }
+    /* f32 array * f32 scalar: no matching kernel (sk_sq_scale_f32 squares
+     * first; there is no plain scale-by-scalar kernel), kept as plain C. */
+    for (k = 0; k < c->n_bins; ++k) out[k] = sg->last_gain[k] * inc;
+    /* max(.,ffi) then min(.,1.0f), low-bound-then-high-bound -- exactly
+     * sk_clip_f32's order; ffi (floor_first_increase, e.g. 1e-5) < 1.0f
+     * always holds by construction. */
+    sk_clip_f32(out, ffi, 1.0f, c->n_bins);
 }
 
 /* _get_min_gain */
@@ -282,12 +283,10 @@ static void get_min_gain(SuppressionGain *sg, const float *weighted_residual,
         } else {
             base_floor = c->split_floor_far_silent;
         }
-        for (k = 0; k < n; ++k) {
-            float v = out[k];
-            if (v < base_floor) v = base_floor;  /* max f32 */
-            if (v > 1.0f) v = 1.0f;
-            out[k] = v;
-        }
+        /* max(.,base_floor) then min(.,1.0f) -- sk_clip_f32's exact
+         * low-then-high order; base_floor is a power-domain gain floor
+         * (10^(db/10), db<0) so base_floor<1.0f always holds. */
+        sk_clip_f32(out, base_floor, 1.0f, n);
     }
 }
 
@@ -457,12 +456,16 @@ const float *suppression_gain_get_gain(
     /* Step 6: np.maximum(np.minimum(G_raw, max_gain), min_gain).
      * E7 fix: order is minimum-first then maximum, not np.clip (min(max(x,lo),hi)).
      * When min_gain > max_gain (saturated-echo recovery), min_gain wins. */
+    /* minimum(G_raw, max_gain): "if (v>hi) v=hi;" == (hi<v)?hi:v, which
+     * matches sk_min_f32(a,b)=(a<b)?a:b with a=max_gain, b=g_raw exactly
+     * (including the signed-zero tie case, since b is returned unmodified
+     * on the false branch just like the original's implicit "else v"). */
+    sk_min_f32(sg->gain, sg->max_gain, sg->g_raw, n);
+    /* maximum(., min_gain): per-bin array bound, no matching two-array-max
+     * kernel exists (only sk_min_f32 is available) -- kept as plain C,
+     * unchanged from the original "if (v<lo) v=lo;" expression. */
     for (k = 0; k < n; ++k) {
-        float v = sg->g_raw[k];
-        float lo = sg->min_gain[k], hi = sg->max_gain[k];
-        if (v > hi) v = hi;   /* minimum first */
-        if (v < lo) v = lo;   /* maximum second */
-        sg->gain[k] = v;
+        if (sg->gain[k] < sg->min_gain[k]) sg->gain[k] = sg->min_gain[k];
     }
 
     /* Step 7: LF + HF limiters */
@@ -476,11 +479,15 @@ const float *suppression_gain_get_gain(
     memcpy(sg->last_nearend, sg->nearend, (size_t)n * sizeof(float));
     memcpy(sg->last_echo, sg->weighted_residual, (size_t)n * sizeof(float));
 
-    /* Step 8: sqrt to amplitude domain. sqrt(max(G,0.0f)) */
-    for (k = 0; k < n; ++k) {
-        float v = sg->gain[k];
-        if (v < 0.0f) v = 0.0f;
-        sg->gain[k] = fast_sqrt(v);
-    }
+    /* Step 8: sqrt to amplitude domain. sqrt(max(G,0.0f)). The explicit
+     * negative clamp stays: under the default fast_sqrt it is redundant
+     * (fast_sqrt(v<=0)=0), but under USE_STANDARD_MATH fast_sqrt is plain
+     * sqrtf, where the clamp is what keeps negatives from becoming NaN —
+     * dropping it would change that build's semantics. sk_fast_sqrt_f32
+     * replicates fast_sqrt verbatim in both build modes, so clamp + kernel
+     * reproduces the original loop bit-exactly. */
+    for (int k = 0; k < n; ++k)
+        if (sg->gain[k] < 0.0f) sg->gain[k] = 0.0f;
+    sk_fast_sqrt_f32(sg->gain, sg->gain, n);
     return sg->gain;
 }
