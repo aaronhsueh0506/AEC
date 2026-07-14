@@ -47,6 +47,18 @@ typedef struct {
     float   *e_form;        /* length hop */
     float   *block_win;     /* length block_size */
     Complex *sel_esw;       /* length n_freqs (selected_esw, also returned) */
+
+    /* Per-hop scratch, instance storage (not stack) — these were float[8192]
+     * locals in linear_filter_select() (stack-overflow hazard on small
+     * embedded task stacks). Each gets its own field: sq is reused
+     * sequentially across several sum_sq_f32() calls (safe, since each call
+     * fully consumes it before the next), but sref/scoa/tin are separate
+     * because sq is read again (as scratch) while sref's/scoa's own values
+     * are still needed by the caller in the surrounding scope. */
+    float   *scr_sq;         /* length hop:      sum_sq_f32 scratch (e2/y2/s2) */
+    float   *scr_sref;       /* length hop:      s_refined_time = near - e_refined */
+    float   *scr_scoa;       /* length hop:      s_coarse_time  = near - e_coarse */
+    float   *scr_tin;        /* length fft_size: zero-padded rfft input */
 } LinearFilterSelect;
 
 /* Allocate scratch + persistent buffers; sets state to Python init

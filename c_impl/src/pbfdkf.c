@@ -188,6 +188,14 @@ void pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
     p->time_scratch = (float*)calloc((size_t)p->fft_size, sizeof(float));
     p->spec_scratch = (Complex*)calloc((size_t)p->n_freqs, sizeof(Complex));
 
+    /* De-stacked per-hop scratch (see pbfdkf.h PBFDAF comment). */
+    p->scr_fsq      = (float*)malloc((size_t)p->hop_size * sizeof(float));
+    p->scr_mu_local = (float*)malloc((size_t)p->n_freqs * sizeof(float));
+    p->scr_x2psum   = (float*)malloc((size_t)p->n_freqs * sizeof(float));
+    p->scr_mu_eff   = (float*)malloc((size_t)p->n_freqs * sizeof(float));
+    p->scr_ir       = (float*)malloc((size_t)p->n_partitions * (size_t)p->hop_size * sizeof(float));
+    p->scr_e2       = (float*)malloc((size_t)p->n_freqs * sizeof(float));
+
     pbfdaf_init_scalars(p, n_partitions, mu, delta);
     pbfdaf_fill_windows(p);
     p->is_static = 0;
@@ -215,6 +223,13 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size) {
     total += fft_get_mem_size(fft);                   /* nested FFT */
     total += ALIGN16((size_t)fft * sizeof(float));    /* time_scratch */
     total += ALIGN16((size_t)K   * sizeof(Complex));  /* spec_scratch */
+    /* De-stacked per-hop scratch (see pbfdkf.h PBFDAF comment). */
+    total += ALIGN16((size_t)hop * sizeof(float));    /* scr_fsq */
+    total += ALIGN16((size_t)K   * sizeof(float));    /* scr_mu_local */
+    total += ALIGN16((size_t)K   * sizeof(float));    /* scr_x2psum */
+    total += ALIGN16((size_t)K   * sizeof(float));    /* scr_mu_eff */
+    total += ALIGN16((size_t)n_partitions * (size_t)hop * sizeof(float)); /* scr_ir */
+    total += ALIGN16((size_t)K   * sizeof(float));    /* scr_e2 */
     return total;
 }
 
@@ -248,7 +263,15 @@ void pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
     size_t fft_sz = fft_get_mem_size(fft);
     p->fft        = fft_init(ptr, fft_sz, fft); ptr += fft_sz;
     p->time_scratch = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
-    p->spec_scratch = (Complex*)ptr; /* last */
+    p->spec_scratch = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
+
+    /* De-stacked per-hop scratch (see pbfdkf.h PBFDAF comment). */
+    p->scr_fsq      = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+    p->scr_mu_local = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    p->scr_x2psum   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    p->scr_mu_eff   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    p->scr_ir       = (float*)ptr; ptr += ALIGN16((size_t)n_partitions * (size_t)hop * sizeof(float));
+    p->scr_e2       = (float*)ptr; /* last */
 
     pbfdaf_init_scalars(p, n_partitions, mu, delta);
     pbfdaf_zero_state(p);
@@ -268,6 +291,8 @@ void pbfdaf_free(PBFDAF* p) {
     free(p->near_spec); free(p->echo_spec); free(p->error_spec);
     free(p->far_spec); free(p->error_spec_windowed);
     free(p->time_scratch); free(p->spec_scratch);
+    free(p->scr_fsq); free(p->scr_mu_local); free(p->scr_x2psum);
+    free(p->scr_mu_eff); free(p->scr_ir); free(p->scr_e2);
     if (p->fft) fft_destroy(p->fft);
 }
 
@@ -399,7 +424,7 @@ static float pbfdaf_frontend(PBFDAF* p,
     /* far_hop_energy = np.sum(far_end**2) / hop. Reproduce np.sum (pairwise f32)
      * over far_end**2, then divide in float32 (float32-by-design). */
     {
-        float fsq[8192];
+        float *fsq = p->scr_fsq;   /* instance scratch, not stack: [hop_size] */
         for (int i = 0; i < hop; ++i) fsq[i] = far_end[i] * far_end[i];
         float s = pairwise_sum_f32(fsq, hop);
         return s / (float)hop;
@@ -426,7 +451,7 @@ void pbfdaf_process(PBFDAF* p,
 
     if (far_hop_energy > 1e-4f) {
         /* === PBFDAF NLMS _update_weights (coarse_filter_update_gain.cc) === */
-        float mu_local[8192];
+        float* mu_local = p->scr_mu_local;   /* instance scratch, not stack: [n_freqs] */
         const float* mu_arr = mu_scale_arr;
         if (mu_arr == NULL) {
             for (int k = 0; k < K; ++k) mu_local[k] = mu_scale_scalar;
@@ -447,7 +472,7 @@ void pbfdaf_process(PBFDAF* p,
 
         /* x2_partition_sum = (np.abs(X_buf)**2).sum(axis=0) — cmag2_np, summed
          * sequentially over partitions (n=6<8 → numpy axis-0 sequential). */
-        float x2psum[8192];
+        float *x2psum = p->scr_x2psum;   /* instance scratch, not stack: [n_freqs] */
         for (int k = 0; k < K; ++k) x2psum[k] = 0.0f;
         for (int part = 0; part < N; ++part) {
             const Complex* Xp = p->X_buf + (size_t)part * K;
@@ -456,7 +481,7 @@ void pbfdaf_process(PBFDAF* p,
         }
         float mu_initial_boost = p->initial_state_active ? (0.95f / 0.7f) : 1.0f;
         float ng_thr = (float)AEC3_FILTER_NOISE_GATE_POWER_FLOAT;
-        float mu_eff[8192];
+        float *mu_eff = p->scr_mu_eff;   /* instance scratch, not stack: [n_freqs] */
         for (int k = 0; k < K; ++k) {
             float denom = x2psum[k] + p->delta;
             float m = (p->mu * mu_initial_boost * mu_arr[k]) / denom;
@@ -504,7 +529,8 @@ void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src) {
  * taps) -> concatenate -> left-shift by s -> rfft each hop block (zero-padded
  * to fft_size) back into W[p]. Keeps X_buf (Python _warm_clear_xbuf default
  * False). NO td_window — Python uses raw irfft here (unlike the TD-constraint
- * round-trip). Bounded stack scratch (no malloc → static-memory safe). */
+ * round-trip). Uses p->scr_ir instance scratch, not stack — sized exactly
+ * n_partitions*hop_size at init (see pbfdkf.h PBFDAF comment). */
 void pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
     int s = shift_samples;
     if (s <= 0) return;
@@ -512,7 +538,7 @@ void pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
     int total = nP * hop;
     if (total <= 0 || total > 4096) return;   /* safety; real max ~2080 */
     if (s > total) s = total;
-    float ir[4096];
+    float *ir = p->scr_ir;
     for (int part = 0; part < nP; ++part) {
         fft_inverse(p->fft, p->W + (size_t)part * K, p->time_scratch);
         for (int i = 0; i < hop; ++i) ir[part * hop + i] = p->time_scratch[i];
@@ -570,6 +596,9 @@ void pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
     p->erl_per_bin = (float*)malloc((size_t)K * sizeof(float));
     p->e2_coarse_per_bin = (float*)malloc((size_t)K * sizeof(float));
     p->e2_ref_scratch = (float*)malloc((size_t)K * sizeof(float));
+    p->scr_mu_local = (float*)malloc((size_t)K * sizeof(float));
+    p->scr_X2       = (float*)malloc((size_t)K * sizeof(float));
+    p->scr_mu_aec3  = (float*)malloc((size_t)K * sizeof(float));
     pbfdkf_init_scalars(p);
     p->is_static = 0;
 }
@@ -590,6 +619,9 @@ size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
     total += ALIGN16((size_t)K * sizeof(float));   /* erl_per_bin */
     total += ALIGN16((size_t)K * sizeof(float));   /* e2_coarse_per_bin */
     total += ALIGN16((size_t)K * sizeof(float));   /* e2_ref_scratch */
+    total += ALIGN16((size_t)K * sizeof(float));   /* scr_mu_local */
+    total += ALIGN16((size_t)K * sizeof(float));   /* scr_X2 */
+    total += ALIGN16((size_t)K * sizeof(float));   /* scr_mu_aec3 */
     return total;
 }
 
@@ -612,7 +644,10 @@ void pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
     p->H_error_per_bin = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     p->erl_per_bin = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     p->e2_coarse_per_bin = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-    p->e2_ref_scratch = (float*)ptr; /* last */
+    p->e2_ref_scratch = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    p->scr_mu_local = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    p->scr_X2       = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    p->scr_mu_aec3  = (float*)ptr; /* last */
     pbfdkf_init_scalars(p);
     p->is_static = 1;
 }
@@ -624,6 +659,7 @@ void pbfdkf_free(PBFDKF* p) {
     free(p->error_psd); free(p->H_error_per_bin); free(p->erl_per_bin);
     free(p->e2_coarse_per_bin);
     free(p->e2_ref_scratch);
+    free(p->scr_mu_local); free(p->scr_X2); free(p->scr_mu_aec3);
     pbfdaf_free(&p->base);
 }
 
@@ -656,16 +692,19 @@ void pbfdkf_copy_weights_from(PBFDKF* dst, const PBFDKF* src) {
 }
 
 /* sum(|error_spec|**2) — cmag2_np into a scratch then the numpy-1.26 pairwise
- * float32 sum, returned as float32 (float32-by-design, no double promotion). */
-float pbfdaf_get_error_energy(const PBFDAF* p) {
+ * float32 sum, returned as float32 (float32-by-design, no double promotion).
+ * Not const: writes through p->scr_e2 instance scratch (was a fixed-size
+ * stack local, n_freqs up to 8192 entries) — see the pbfdkf.h prototype
+ * comment for the const rationale. */
+float pbfdaf_get_error_energy(PBFDAF* p) {
     int K = p->n_freqs;
-    float e2[8192];
+    float *e2 = p->scr_e2;   /* instance scratch, not stack: [n_freqs] */
     for (int k = 0; k < K; ++k)
         e2[k] = cmag2_np(p->error_spec[k].r, p->error_spec[k].i);
     return pairwise_sum_f32(e2, K);
 }
 
-float pbfdkf_get_error_energy(const PBFDKF* p) {
+float pbfdkf_get_error_energy(PBFDKF* p) {
     return pbfdaf_get_error_energy(&p->base);
 }
 
@@ -768,7 +807,7 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
      * Python: X2 = (np.abs(X_buf)**2).sum(axis=0)  [partition-sum, n=6<8 →
      * sequential over part 0..N-1] or (np.abs(X_latest)**2). cmag2_np = the
      * bit-exact np.abs(.)**2. */
-    float X2[8192];
+    float *X2 = p->scr_X2;   /* instance scratch, not stack: [n_freqs] */
     if (b->call_counter > p->partition_sum_x2_startup_hops) {
         for (int k = 0; k < K; ++k) X2[k] = 0.0f;
         for (int part = 0; part < N; ++part) {
@@ -790,7 +829,7 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
      * e2_ref_bins[k] = |error_spec[k]|² precomputed once by pbfdkf_process
      * (same value cmag2_np(er,ei) would give here -- error_spec is untouched
      * since pbfdaf_frontend ran at the top of this hop). */
-    float mu_aec3[8192];
+    float *mu_aec3 = p->scr_mu_aec3;   /* instance scratch, not stack: [n_freqs] */
     for (int k = 0; k < K; ++k) {
         float e2_ref = e2_ref_bins[k];
         float He = p->H_error_per_bin[k];
@@ -861,7 +900,7 @@ void pbfdkf_process(PBFDKF* p,
 
     if (far_hop_energy > 1e-4f) {
         /* === PBFDKF._update_weights ============================== */
-        float mu_local[8192];
+        float *mu_local = p->scr_mu_local;   /* instance scratch, not stack: [n_freqs] */
         const float* mu_arr = mu_scale_arr;
         if (mu_arr == NULL) {
             for (int k = 0; k < K; ++k) mu_local[k] = mu_scale_scalar;

@@ -58,7 +58,13 @@ int linear_filter_select_init(LinearFilterSelect *s,
     s->e_form           = (float *)malloc((size_t)hop * sizeof(float));
     s->block_win        = (float *)malloc((size_t)block_size * sizeof(float));
     s->sel_esw          = (Complex *)malloc((size_t)n_freqs * sizeof(Complex));
-    if (!s->prev_output_time || !s->e_form || !s->block_win || !s->sel_esw) {
+    /* De-stacked per-hop scratch (see LinearFilterSelect struct comment). */
+    s->scr_sq           = (float *)malloc((size_t)hop * sizeof(float));
+    s->scr_sref         = (float *)malloc((size_t)hop * sizeof(float));
+    s->scr_scoa         = (float *)malloc((size_t)hop * sizeof(float));
+    s->scr_tin          = (float *)malloc((size_t)fft_size * sizeof(float));
+    if (!s->prev_output_time || !s->e_form || !s->block_win || !s->sel_esw ||
+        !s->scr_sq || !s->scr_sref || !s->scr_scoa || !s->scr_tin) {
         linear_filter_select_free(s);
         return -1;
     }
@@ -80,6 +86,10 @@ void linear_filter_select_free(LinearFilterSelect *s) {
     free(s->e_form);           s->e_form = NULL;
     free(s->block_win);        s->block_win = NULL;
     free(s->sel_esw);          s->sel_esw = NULL;
+    free(s->scr_sq);           s->scr_sq = NULL;
+    free(s->scr_sref);         s->scr_sref = NULL;
+    free(s->scr_scoa);         s->scr_scoa = NULL;
+    free(s->scr_tin);          s->scr_tin = NULL;
 }
 
 void linear_filter_select(LinearFilterSelect *s,
@@ -96,8 +106,11 @@ void linear_filter_select(LinearFilterSelect *s,
 
     /* s_refined_time = near - e_refined; s_coarse_time = near - e_coarse
      * (float32 elementwise). e2/y2/s2 = np.sum(arr ** 2), float32-by-design
-     * (formerly np.sum(arr.astype(f64) ** 2)). */
-    float sq[8192];   /* hop <= block_size <= 8192 */
+     * (formerly np.sum(arr.astype(f64) ** 2)). Instance scratch, not stack
+     * (see LinearFilterSelect struct comment) — sq is reused sequentially
+     * across the calls below (each sum_sq_f32 call fully consumes it before
+     * the next writes it). */
+    float *sq = s->scr_sq;      /* length hop */
     /* e2_refined */
     float e2_refined = sum_sq_f32(e_refined_time, hop, sq);
     /* e2_coarse */
@@ -106,11 +119,11 @@ void linear_filter_select(LinearFilterSelect *s,
     float y2 = sum_sq_f32(near_end, hop, sq);
     /* s2_refined: build s_refined_time (f32) then sum-sq in f32 */
     {
-        float sref[8192];
+        float *sref = s->scr_sref;   /* length hop */
         for (int i = 0; i < hop; ++i) sref[i] = near_end[i] - e_refined_time[i];
         float s2_refined = sum_sq_f32(sref, hop, sq);
         /* s2_coarse */
-        float scoa[8192];
+        float *scoa = s->scr_scoa;   /* length hop */
         for (int i = 0; i < hop; ++i) scoa[i] = near_end[i] - e_coarse_time[i];
         float s2_coarse = sum_sq_f32(scoa, hop, sq);
 
@@ -162,9 +175,10 @@ void linear_filter_select(LinearFilterSelect *s,
 
         /* selected_esw = rfft(_e_block_win, fft_size).astype(complex64):
          * zero-pad block_size samples to fft_size, forward FFT (bit-exact
-         * pocketfft). Mirrors pbfdkf.c rfft_padded. */
+         * pocketfft). Mirrors pbfdkf.c rfft_padded. Instance scratch, not
+         * stack (see LinearFilterSelect struct comment). */
         {
-            float tin[8192];
+            float *tin = s->scr_tin;   /* length fft_size */
             memcpy(tin, s->block_win, (size_t)blk * sizeof(float));
             memset(tin + blk, 0, (size_t)(fft_size - blk) * sizeof(float));
             fft_forward(fft, tin, s->sel_esw);

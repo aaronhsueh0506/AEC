@@ -111,6 +111,19 @@ typedef struct PBFDAF {
     float*     time_scratch;   /* [fft_size] */
     Complex*   spec_scratch;   /* [n_freqs] */
 
+    /* Per-hop scratch, instance storage (not stack) — keeps pbfdaf_process /
+     * pbfdaf_frontend / pbfdaf_get_error_energy / pbfdaf_warm_shift_ir stack
+     * usage independent of n_freqs / n_partitions (embedded task stacks are
+     * small; these were float[8192]/float[4096] locals, a stack-overflow
+     * hazard). Mirrors the e2_ref_scratch pattern below on PBFDKF. One field
+     * per distinct concurrent live range (see pbfdkf.c comments at each use). */
+    float*  scr_fsq;           /* [hop_size]     pbfdaf_frontend far_end**2 */
+    float*  scr_mu_local;      /* [n_freqs]      pbfdaf_process mu broadcast */
+    float*  scr_x2psum;        /* [n_freqs]      pbfdaf_process X_buf**2 partition sum */
+    float*  scr_mu_eff;        /* [n_freqs]      pbfdaf_process per-bin mu */
+    float*  scr_ir;            /* [n_partitions*hop_size] pbfdaf_warm_shift_ir IR concat */
+    float*  scr_e2;            /* [n_freqs]      pbfdaf_get_error_energy |error_spec|**2 */
+
     int is_static;             /* 1 = state placed in caller buffer */
 } PBFDAF;
 
@@ -182,6 +195,16 @@ typedef struct PBFDKF {
      * independent of n_freqs (embedded task stacks are small). */
     float* e2_ref_scratch;
 
+    /* More de-stacked per-hop scratch (same rationale as e2_ref_scratch
+     * above): each was a float[8192] local in pbfdkf.c. scr_mu_local and
+     * scr_X2/scr_mu_aec3 have overlapping live ranges within their call
+     * (mu_scale_arr / X2 / mu_aec3 are all read together at the tail of
+     * pbfdkf_update_weights_aec3), so each gets its own field — see the
+     * use sites in pbfdkf.c for the exact live-range reasoning. */
+    float* scr_mu_local;       /* [n_freqs] pbfdkf_process mu broadcast */
+    float* scr_X2;             /* [n_freqs] pbfdkf_update_weights_aec3 X_buf**2 */
+    float* scr_mu_aec3;        /* [n_freqs] pbfdkf_update_weights_aec3 per-bin mu */
+
     int is_static;               /* 1 = state placed in caller buffer */
 } PBFDKF;
 
@@ -210,9 +233,12 @@ void pbfdkf_handle_echo_path_change(PBFDKF* p, int delay_change, int gain_change
 void pbfdkf_copy_weights_from(PBFDKF* dst, const PBFDKF* src);
 
 /* sum(|error_spec|**2) via cmag2_np + pairwise float32 sum (float32-by-design,
- * no double promotion). */
-float pbfdaf_get_error_energy(const PBFDAF* p);
-float pbfdkf_get_error_energy(const PBFDKF* p);
+ * no double promotion). Not const: needs p->scr_e2 instance scratch (was a
+ * float[8192] stack local) — all call sites already pass non-const Aec-owned
+ * filters, so dropping const costs nothing and avoids a separate mutable-
+ * pointer workaround. */
+float pbfdaf_get_error_energy(PBFDAF* p);
+float pbfdkf_get_error_energy(PBFDKF* p);
 
 /* get_time_domain_filter: concat per-partition irfft(W[p])[:hop] →
  * out[n_partitions × hop_size] (caller-owned). Mirrors filters.py:397. */

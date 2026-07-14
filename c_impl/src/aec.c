@@ -843,6 +843,11 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
     t += ALIGN16((size_t)hop * sizeof(float)) * 2;  /* prev_output_time e_form */
     t += ALIGN16((size_t)blk * sizeof(float));      /* block_win */
     t += ALIGN16(K * sizeof(Complex));              /* lfs sel_esw */
+    /* LinearFilterSelect de-stacked scratch (4): were fixed-size stack locals
+     * (hop/fft_size entries, up to 8192) in linear_filter_select() —
+     * a stack-overflow hazard on small embedded task stacks. */
+    t += ALIGN16((size_t)hop * sizeof(float)) * 3;  /* scr_sq scr_sref scr_scoa */
+    t += ALIGN16((size_t)fft * sizeof(float));      /* scr_tin */
     /* Aec3PostRunScratch (20) */
     t += ALIGN16(K * sizeof(Complex)) * 4;          /* sel_esw sel_echo nsw_e1 ybase */
     t += ALIGN16(K * sizeof(float)) * 9;            /* abs_near..x2_past */
@@ -1151,6 +1156,12 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         a->a3_lfs.e_form           = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
         a->a3_lfs.block_win        = (float*)ptr; ptr += ALIGN16((size_t)blk * sizeof(float));
         a->a3_lfs.sel_esw          = (Complex*)ptr; ptr += ALIGN16(K * sizeof(Complex));
+        /* De-stacked scratch (matching aec_get_mem_size's "LinearFilterSelect
+         * de-stacked scratch (4)" block above — keep in lockstep). */
+        a->a3_lfs.scr_sq   = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+        a->a3_lfs.scr_sref = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+        a->a3_lfs.scr_scoa = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
+        a->a3_lfs.scr_tin  = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
         linear_filter_select_reset(&a->a3_lfs);
     }
 
