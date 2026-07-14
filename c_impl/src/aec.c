@@ -112,12 +112,17 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
 }
 
 /* ── F05/F07 config validation ────────────────────────────────────────────
- * Sample-rate whitelist. Only 16 kHz is production-qualified today (every
- * preset, every corpus WAV, every parity/static-memory test in this repo is
- * 16 kHz). 8000 and 48000 are added once their per-rate coefficient/
- * threshold tables land (a later stage widens this list) — do not add
- * entries here without that accompanying per-rate tuning work. */
-static const int AEC_SR_WHITELIST[] = { 16000 };
+ * Sample-rate whitelist. M5 (multi-rate campaign, review F01) widens this
+ * from {16000} to {8000, 16000, 48000}: the M2 per-rate coefficient/
+ * threshold tables (aec3_balanced_config.h's R8K-/R48K- blocks +
+ * AEC3B_RATE_TABLE) and the M4 consumption switch (aec_carve /
+ * aec3_post_chain_reset resolving every rate-varying dimension through
+ * aec3b_rate_cfg()) have already landed and been proven 16 kHz
+ * byte-identical; the per-rate verification suite (parity_aec_e2e,
+ * gen_delay_c_golden/parity_delay, test_static_aec, test_rate_structural)
+ * covers 8000/16000/48000 end to end. 44100 and any other rate stay
+ * rejected — no per-rate tables exist for them. */
+static const int AEC_SR_WHITELIST[] = { 8000, 16000, 48000 };
 
 int aec_is_valid_sample_rate(int sample_rate) {
     for (size_t i = 0; i < sizeof(AEC_SR_WHITELIST) / sizeof(AEC_SR_WHITELIST[0]); ++i) {

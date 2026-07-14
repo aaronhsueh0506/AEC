@@ -9,7 +9,13 @@
  *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o bin/test_static_aec
  * (Or just `make` from c_impl/ — the top-level Makefile wires this for you.)
  * Run:
- *   ./bin/test_static_aec mic.wav ref.wav
+ *   ./bin/test_static_aec mic.wav ref.wav [sample_rate]
+ *
+ * M5 (multi-rate campaign, review F01): optional 3rd argv selects the sample
+ * rate used to build AecConfig (default 16000, unchanged). The WAV files
+ * themselves must already be at that rate (this test does not resample) --
+ * see m5/resample_pairs.py for the 8k/48k doubletalk pair this repo's M5
+ * verification run used.
  */
 #include "aec.h"
 #include "wav_io.h"
@@ -33,7 +39,8 @@ static int read_wav_f32(const char* path, float** out) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) { fprintf(stderr, "Usage: %s <mic.wav> <ref.wav>\n", argv[0]); return 1; }
+    if (argc < 3) { fprintf(stderr, "Usage: %s <mic.wav> <ref.wav> [sample_rate]\n", argv[0]); return 1; }
+    int sr = argc > 3 ? atoi(argv[3]) : 16000;
 
     float *mic = NULL, *ref = NULL;
     int n_mic = read_wav_f32(argv[1], &mic);
@@ -42,7 +49,7 @@ int main(int argc, char** argv) {
     int n = n_mic < n_ref ? n_mic : n_ref;
 
     AecConfig cfg;
-    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
 
     /* Dynamic path */
     Aec aec_dyn;

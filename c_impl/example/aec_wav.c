@@ -94,13 +94,13 @@ int main(int argc, char* argv[]) {
      * clear, WAV-specific message instead of a bare aec_create() failure. */
     if (!aec_is_valid_sample_rate(mr->info.sample_rate)) {
         fprintf(stderr,
-            "ERROR: unsupported mic sample rate %d Hz (AEC whitelist: 16000 Hz only)\n",
+            "ERROR: unsupported mic sample rate %d Hz (AEC whitelist: 8000/16000/48000 Hz)\n",
             mr->info.sample_rate);
         return 4;
     }
     if (!aec_is_valid_sample_rate(rr->info.sample_rate)) {
         fprintf(stderr,
-            "ERROR: unsupported ref sample rate %d Hz (AEC whitelist: 16000 Hz only)\n",
+            "ERROR: unsupported ref sample rate %d Hz (AEC whitelist: 8000/16000/48000 Hz)\n",
             rr->info.sample_rate);
         return 4;
     }

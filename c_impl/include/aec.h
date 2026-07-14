@@ -117,8 +117,8 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset preset, int sample_rate);
  * aec_validate_config(); this is the public read of it, for callers (e.g.
  * example/aec_wav.c) that need to reject an unsupported input WAV rate
  * before ever constructing an AecConfig. Returns 1 iff sample_rate is
- * production-qualified today (16000 only — see aec.c for the widen-later
- * note). */
+ * production-qualified today (8000/16000/48000 — see aec.c for the
+ * per-rate table this rests on). */
 int aec_is_valid_sample_rate(int sample_rate);
 
 /* ── opaque-ish context ────────────────────────────────────────────────── */
