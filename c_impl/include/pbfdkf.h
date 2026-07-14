@@ -127,12 +127,19 @@ typedef struct PBFDAF {
     int is_static;             /* 1 = state placed in caller buffer */
 } PBFDAF;
 
+/* with_process_scratch: 1 allocates the pbfdaf_process()-only scratch
+ * (scr_mu_local/scr_x2psum/scr_mu_eff). Pass 0 when the instance is only
+ * driven via pbfdaf_frontend() (the PBFDKF base) — pbfdaf_process() must
+ * NOT be called on such an instance. */
 void   pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
-                    float mu, float delta, int hop_size);
-size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size);
+                    float mu, float delta, int hop_size,
+                    int with_process_scratch);
+size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
+                           int with_process_scratch);
 void   pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
-                           float mu, float delta, int hop_size);
+                           float mu, float delta, int hop_size,
+                    int with_process_scratch);
 void pbfdaf_free(PBFDAF* p);
 void pbfdaf_reset(PBFDAF* p);
 

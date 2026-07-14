@@ -30,7 +30,7 @@
 extern "C" {
 #endif
 
-typedef enum { AEC_PRESET_GENTLE = 0, AEC_PRESET_BALANCED, AEC_PRESET_AGGRESSIVE } AecPreset;
+typedef enum { AEC_PRESET_MILD = 0, AEC_PRESET_BALANCED, AEC_PRESET_AGGRESSIVE } AecPreset;
 
 typedef struct AecConfig {
     int    sample_rate;        /* 16000 */
@@ -128,7 +128,7 @@ typedef struct Aec {
     int hop_size, block_size, fft_size, n_freqs, n_partitions;
 
     /* preprocessing */
-    Hpf  *hp_mic;             int has_hp;
+    Hpf  *hp_mic;             /* NULL when highpass disabled */
     Saturation sat_ref, sat_mic;  int has_sat;
 
     /* delay (AEC3 matched filter) + ring */

@@ -90,7 +90,7 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
     /* mild / balanced / aggressive differ ONLY in the far-active min-gain
      * floor (the SuppressionGain split-floor power axis). */
     switch (p) {
-        case AEC_PRESET_GENTLE:     cfg->min_gain_floor_far_active_db = -20.0f; break;
+        case AEC_PRESET_MILD:     cfg->min_gain_floor_far_active_db = -20.0f; break;
         case AEC_PRESET_BALANCED:   cfg->min_gain_floor_far_active_db = -28.0f; break;
         case AEC_PRESET_AGGRESSIVE: cfg->min_gain_floor_far_active_db = -38.0f; break;
     }
@@ -379,7 +379,6 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     /* HPF (mic only; ref HPF retired) — audio_common f32 platform HPF. */
     if (cfg->enable_highpass) {
         a->hp_mic = hpf_create(cfg->highpass_cutoff_hz, cfg->sample_rate);
-        a->has_hp = (a->hp_mic != NULL);
     }
     /* Saturation. */
     if (cfg->enable_saturation) {
@@ -437,7 +436,7 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     /* Shadow filter (PBFDAF NLMS). */
     if (cfg->enable_shadow) {
         pbfdaf_init(&a->shadow_filter, blk, n_parts, cfg->shadow_mu_nlms,
-                    cfg->delta, hop);
+                    cfg->delta, hop, 1);
         a->shadow_filter.poor_excitation_counter = poor_init;
         a->shadow_filter.saturated_capture = 0;
         /* FFT dedup: the shadow's near_spec / error_spec_windowed are never read
@@ -613,7 +612,7 @@ int aec_create(Aec* a, const AecConfig* cfg) {
         scfg.max_inc_nearend = (float)AEC3B_SG_MAX_INC;
         scfg.max_dec_lf_normal = (float)AEC3B_SG_MAX_DEC_LF;
         scfg.max_dec_lf_nearend = (float)AEC3B_SG_MAX_DEC_LF;
-        scfg.floor_first_increase = 0.00001;
+        scfg.floor_first_increase = 0.00001f;
         scfg.low_render_threshold = AEC3B_SG_LOW_RENDER_THRESHOLD;
         scfg.split_floor_enabled = 1;
         /* preset axis: split_floor_far_active = 10^(db/10). */
@@ -637,7 +636,7 @@ int aec_create(Aec* a, const AecConfig* cfg) {
         scfg.dne_lf_endpoint_bin = AEC3B_SG_DNE_LF_ENDPOINT_BIN;
         scfg.dne_trigger_threshold_hops = AEC3B_SG_TRIGGER_THRESHOLD_HOPS;
         scfg.dne_hold_duration_hops = AEC3B_SG_HOLD_DURATION_HOPS;
-        scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10;
+        scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10f;
         stun.nearend_enr_tr = AEC3B_SG_NEAREND_ENR_TR;
         stun.nearend_enr_su = AEC3B_SG_NEAREND_ENR_SU;
         stun.nearend_emr_tr = AEC3B_SG_NEAREND_EMR_TR;
@@ -803,7 +802,7 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
     t += ALIGN16((size_t)fcap * hop * sizeof(float));
     t += ALIGN16((size_t)(K - 2 > 0 ? K - 2 : 1) * sizeof(int64_t));
     t += pbfdkf_get_mem_size(blk, np, hop);
-    if (cfg->enable_shadow) t += pbfdaf_get_mem_size(blk, np, hop);
+    if (cfg->enable_shadow) t += pbfdaf_get_mem_size(blk, np, hop, 1);
     t += fft_get_mem_size(fft);
     /* aec3_post (21) */
     t += ALIGN16(K * sizeof(float)) * 6;           /* avg_rev y2s n2 n2i sye_re sye_im */
@@ -942,8 +941,8 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
 
     /* Shadow filter (PBFDAF static) */
     if (cfg->enable_shadow) {
-        size_t af_sz = pbfdaf_get_mem_size(blk, np, hop);
-        pbfdaf_init_static(&a->shadow_filter, ptr, af_sz, blk, np, cfg->shadow_mu_nlms, cfg->delta, hop);
+        size_t af_sz = pbfdaf_get_mem_size(blk, np, hop, 1);
+        pbfdaf_init_static(&a->shadow_filter, ptr, af_sz, blk, np, cfg->shadow_mu_nlms, cfg->delta, hop, 1);
         a->shadow_filter.poor_excitation_counter = a->main_filter.base.poor_excitation_counter;
         a->shadow_filter.saturated_capture = 0;
         /* FFT dedup: skip the shadow's unread near_spec / error_spec_windowed. */
@@ -1099,7 +1098,7 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         scfg.max_inc_nearend = (float)AEC3B_SG_MAX_INC;
         scfg.max_dec_lf_normal = (float)AEC3B_SG_MAX_DEC_LF;
         scfg.max_dec_lf_nearend = (float)AEC3B_SG_MAX_DEC_LF;
-        scfg.floor_first_increase = 0.00001;
+        scfg.floor_first_increase = 0.00001f;
         scfg.low_render_threshold = AEC3B_SG_LOW_RENDER_THRESHOLD;
         scfg.split_floor_enabled = 1;
         scfg.split_floor_far_active =
@@ -1121,7 +1120,7 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         scfg.dne_lf_endpoint_bin = AEC3B_SG_DNE_LF_ENDPOINT_BIN;
         scfg.dne_trigger_threshold_hops = AEC3B_SG_TRIGGER_THRESHOLD_HOPS;
         scfg.dne_hold_duration_hops = AEC3B_SG_HOLD_DURATION_HOPS;
-        scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10;
+        scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10f;
         stun.nearend_enr_tr = AEC3B_SG_NEAREND_ENR_TR; stun.nearend_enr_su = AEC3B_SG_NEAREND_ENR_SU;
         stun.nearend_emr_tr = AEC3B_SG_NEAREND_EMR_TR;
         stun.normal_enr_tr  = AEC3B_SG_NORMAL_ENR_TR;  stun.normal_enr_su  = AEC3B_SG_NORMAL_ENR_SU;
@@ -1215,8 +1214,7 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     if (cfg->enable_highpass) {
         a->hp_mic = hpf_init(ptr, hpf_get_mem_size(),
                              cfg->highpass_cutoff_hz, cfg->sample_rate);
-        a->has_hp = (a->hp_mic != NULL);
-        /* ptr advance not needed — last carve */
+        ptr += ALIGN16(hpf_get_mem_size());
     }
 
     /* scalar state (mirrors aec_create tail) */
@@ -1257,7 +1255,7 @@ void aec_destroy(Aec* a) {
      * fft_destroy() itself is a no-op for a NULL handle and (KISS backend)
      * for a pool-owned handle, so this is safe pre- or post- pool-teardown. */
     fft_destroy(a->post_fft);
-    if (a->has_hp) { hpf_destroy(a->hp_mic); a->hp_mic = NULL; }
+    if (a->hp_mic) { hpf_destroy(a->hp_mic); a->hp_mic = NULL; }
     pbfdkf_free(&a->main_filter);
     if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
 
@@ -1283,7 +1281,7 @@ void aec_destroy(Aec* a) {
 int aec_hop_size(const Aec* a) { return a->hop_size; }
 
 void aec_reset(Aec* a) {
-    if (a->has_hp) hpf_reset(a->hp_mic);
+    if (a->hp_mic) hpf_reset(a->hp_mic);
     if (a->has_sat) { saturation_reset(&a->sat_ref); saturation_reset(&a->sat_mic); }
     if (a->has_delay) {
         delay_aec3_reset(&a->delay);
@@ -1412,7 +1410,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     memcpy(a->far_hop,  ref_in, (size_t)hop * sizeof(float));
 
     /* 1. mic HPF (ref HPF OFF). */
-    if (a->has_hp) hpf_process(a->hp_mic, a->near_hop, hop);
+    if (a->hp_mic) hpf_process(a->hp_mic, a->near_hop, hop);
 
     /* Held "near-end seen recently" gate for DT-aware soft recovery (mirrors
      * Python orchestrator 16285fd). Reads the PREVIOUS frame's dt_from_energy
@@ -1565,7 +1563,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
         /* Path B — delay shift. */
         float conf = delay_aec3_confidence(&a->delay);
-        if (eligible && a->current_delay >= 0 && conf >= 0.5
+        if (eligible && a->current_delay >= 0 && conf >= 0.5f
                 && abs(new_delay - a->current_delay) > 32) {
             if (a->has_pending && abs(new_delay - a->pending_delay) < 16) {
                 a->current_delay = new_delay;
@@ -1633,7 +1631,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     float mu_scalar = get_simple_mu_scale(a, &mu_is_array);
 
     /* 6. mic-clip emergency. */
-    if (a->has_sat && a->sat_mic.saturation_level > 0.8) {
+    if (a->has_sat && a->sat_mic.saturation_level > 0.8f) {
         mu_scalar = 0.0f;
         mu_is_array = 0;
     }
@@ -1831,7 +1829,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         a->shadow_err_smooth = as * a->shadow_err_smooth + oas * shadow_err;
         doubletalk_update_shadow_dt(&a->dt_analyzer, a->shadow_frame_count,
                                     far_excited, a->main_err_smooth, a->shadow_err_smooth);
-        int delay_reliable = a->has_delay && (delay_aec3_confidence(&a->delay) >= 0.5);
+        int delay_reliable = a->has_delay && (delay_aec3_confidence(&a->delay) >= 0.5f);
         ShadowCopyDecision dec = shadow_copy_update(
             &a->regime, a->shadow_frame_count, mean_sq(a->far_hop, hop, a->scr_sq),
             a->main_err_smooth, a->shadow_err_smooth,

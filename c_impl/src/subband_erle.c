@@ -6,8 +6,8 @@
  * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity
  * retired, drift accepted). All per-bin ERLE arithmetic is float32 end-to-end
  * (scalars combined with the f32 arrays round once, in float). The lone
- * threshold quantity _x2_band_energy_threshold is float32 too (narrowed once
- * from the double aec3_per_bin_psd_threshold() helper's result at init); the
+ * threshold quantity _x2_band_energy_threshold is float32 too (it is the
+ * result of the float32 aec3_per_bin_psd_threshold() helper, stored at init); the
  * low-render test `low |= x2(f32) < thr(f32)` is now a plain float32 compare.
  * Built with -ffp-contract=off so per-op float roundings are not fused.
  */

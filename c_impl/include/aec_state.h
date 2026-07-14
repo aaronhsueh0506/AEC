@@ -65,17 +65,16 @@
  *     erle_estimator_init() (float32 params) and are float32 here as well —
  *     the (float) casts that used to bridge double config -> float ctor are
  *     gone.
- *   - initial_state_seconds stays double: its only consumer is
+ *   - initial_state_seconds is float32 end-to-end: its only consumer is
  *     initial_state_init() (initial_state.h/.c, NOT part of this conversion),
- *     a double-typed API outside this module set's scope.
+ *     which itself takes a float32 param.
  *   - subtractor_s_refined_max_abs / subtractor_s_coarse_max_abs /
  *     echo_path_gain (aec_state_update params) and
- *     aec_state_filter_analyzer_max_echo_path_gain stay double for the same
- *     reason: they are pure pass-through plumbing to saturation_detector.h
- *     and filter_analyzer.h (both outside this conversion's file set); no
- *     arithmetic on them happens in this file, so retyping them would only
- *     insert a spurious float32 rounding hop with no float32 math to show
- *     for it.
+ *     aec_state_filter_analyzer_max_echo_path_gain are float32 too: they are
+ *     pure pass-through plumbing to saturation_detector.h and
+ *     filter_analyzer.h (both outside this conversion's file set); no
+ *     arithmetic on them happens in this file, so the value is simply carried
+ *     through unchanged.
  */
 #ifndef AEC_STATE_H
 #define AEC_STATE_H
@@ -185,7 +184,7 @@ void aec_state_handle_echo_path_change(AecState *s, int gain_change,
  *                               parity; may be NULL).
  *   active_render             : bool.
  *   subtractor_s_refined_max_abs / subtractor_s_coarse_max_abs / echo_path_gain
- *                             : Python-float doubles.
+ *                             : float32 (pass-through to saturation_detector.h).
  *   render_block              : float32 array, length render_block_len; NULL
  *                               signals Python None (skips analyzer + sat).
  *   filter_taps_full          : float32, length filter_taps_size; NULL == None.

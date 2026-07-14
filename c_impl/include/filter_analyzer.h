@@ -1,4 +1,4 @@
-/* filter_analyzer.h — byte-equal C port of
+/* filter_analyzer.h — C port (float32-by-design; parity retired) of
  * python/modules/state/filter_analyzer.py (single-channel AEC3 FilterAnalyzer,
  * mirrors AEC3 filter_analyzer.{cc,h}).
  *
@@ -96,11 +96,10 @@ float  fa_max_echo_path_gain(const FilterAnalyzer *m);
 int    fa_peak_index(const FilterAnalyzer *m);
 const float *fa_get_adjusted_filters(const FilterAnalyzer *m);
 
-/* float32 pairwise sums (numpy-1.26-shaped reduction tree; exposed for the
- * parity test). fa_f64_pairwise_sum is float32-by-design now (formerly a
- * float64 accumulator variant used for the render active-power sum) — kept
- * as a distinct entry point since callers still reference it by name. */
+/* float32 pairwise sum (numpy-1.26-shaped reduction tree; exposed for the
+ * parity test). The former fa_f64_pairwise_sum twin (a float64 accumulator
+ * variant for the render active-power sum) was deleted after the f32
+ * campaign made it identical to this one. */
 float  fa_f32_pairwise_sum(const float *a, size_t n);
-float  fa_f64_pairwise_sum(const float *a, size_t n);
 
 #endif /* FILTER_ANALYZER_H */

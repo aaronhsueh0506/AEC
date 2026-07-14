@@ -1,4 +1,4 @@
-/* filter_analyzer.c — byte-equal C port of
+/* filter_analyzer.c — C port (float32-by-design; parity retired) of
  * python/modules/state/filter_analyzer.py. See header for the parity contract.
  * Build with -ffp-contract=off. */
 #include "filter_analyzer.h"
@@ -65,47 +65,6 @@ float fa_f32_pairwise_sum(const float *a, size_t n) {
     }
 }
 
-/* Same structure, float32-by-design (formerly a float64 accumulate variant;
- * converted for uniformity — the render active-power sum below now runs
- * entirely in float32, matching fa_f32_pairwise_sum bit-for-bit). */
-float fa_f64_pairwise_sum(const float *a, size_t n) {
-    if (n == 0) {
-        return 0.0f;
-    }
-    if (n < 8) {
-        float res = a[0];
-        size_t i;
-        for (i = 1; i < n; ++i) {
-            res = res + a[i];
-        }
-        return res;
-    }
-    if (n <= 128) {
-        float r0 = a[0], r1 = a[1], r2 = a[2], r3 = a[3];
-        float r4 = a[4], r5 = a[5], r6 = a[6], r7 = a[7];
-        float res;
-        size_t i;
-        for (i = 8; i + 8 <= n; i += 8) {
-            r0 = r0 + a[i + 0];
-            r1 = r1 + a[i + 1];
-            r2 = r2 + a[i + 2];
-            r3 = r3 + a[i + 3];
-            r4 = r4 + a[i + 4];
-            r5 = r5 + a[i + 5];
-            r6 = r6 + a[i + 6];
-            r7 = r7 + a[i + 7];
-        }
-        res = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7));
-        for (; i < n; ++i) {
-            res = res + a[i];
-        }
-        return res;
-    } else {
-        size_t n2 = n / 2;
-        n2 -= n2 % 8;
-        return fa_f64_pairwise_sum(a, n2) + fa_f64_pairwise_sum(a + n2, n - n2);
-    }
-}
 
 /* ----------------------- ConsistentFilterDetector ------------------------ */
 static void cd_reset(FaConsistentDetector *c) {
@@ -190,7 +149,7 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
             float v = render_block[i];  /* float32-by-design (was astype(np.float64)) */
             render_sq_scratch[i] = v * v;
         }
-        active = (fa_f64_pairwise_sum(render_sq_scratch, (size_t)render_block_len)
+        active = (fa_f32_pairwise_sum(render_sq_scratch, (size_t)render_block_len)
                   > c->active_render_threshold);
         if (c->delay_ref == delay_blocks) {
             if (active) c->counter += 1;

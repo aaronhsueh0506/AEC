@@ -34,7 +34,7 @@ static void print_usage(const char* prog) {
 }
 
 static int parse_preset(const char* s, AecPreset* out) {
-    if (!strcmp(s, "mild"))     { *out = AEC_PRESET_GENTLE;     return 0; }
+    if (!strcmp(s, "mild"))     { *out = AEC_PRESET_MILD;     return 0; }
     if (!strcmp(s, "balanced"))   { *out = AEC_PRESET_BALANCED;   return 0; }
     if (!strcmp(s, "aggressive")) { *out = AEC_PRESET_AGGRESSIVE; return 0; }
     return -1;
@@ -157,7 +157,7 @@ int main(int argc, char* argv[]) {
 
     fprintf(stderr, "Processed %d frames @ hop=%d sr=%d preset=%s cng=%d delay_est=%d\n",
             frame_idx, hop, sr,
-            preset == AEC_PRESET_GENTLE ? "mild" :
+            preset == AEC_PRESET_MILD ? "mild" :
             preset == AEC_PRESET_BALANCED ? "balanced" : "aggressive",
             cfg.enable_cng, cfg.enable_delay_est);
 

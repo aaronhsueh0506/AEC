@@ -26,10 +26,10 @@
  *     _coming_onset / _low_render_energy                  : bool (257,)
  *     _hold_counters                                      : int32 (257,)
  *     _x2_band_energy_threshold                           : float32 scalar
- *       (was float64; its SOURCE constant SE_X2_BAND_ENERGY_THRESHOLD stays a
- *       double literal — it is only ever an argument to the shared,
- *       unconverted aec3_per_bin_psd_threshold() double API; the double
- *       result is narrowed to float32 once, at the store in
+ *       (its SOURCE constant SE_X2_BAND_ENERGY_THRESHOLD is only ever an
+ *       argument to the shared aec3_per_bin_psd_threshold() helper
+ *       (aec3_scale.h/.c, itself float32-typed and outside this conversion's
+ *       file set); the float32 result is stored directly at the store in
  *       subband_erle_init())
  *   All per-bin ERLE arithmetic is float32 end-to-end (alpha, min_erle,
  *   max_erle[k], 1e-30f, 10.0f are float32 scalars combined with the float32
@@ -55,9 +55,9 @@
 #define SE_BLOCKS_FOR_ONSET_DETECTION 100
 #define SE_POINTS_TO_ACCUMULATE   6
 #define SE_UNBOUNDED_ERLE_MAX     100000.0f
-/* AEC3 kX2BandEnergyThreshold source value (scaled per hop in init). Kept as
- * a double literal (NOT `f`-suffixed): it is only ever passed to the shared,
- * unconverted aec3_per_bin_psd_threshold() double API. */
+/* AEC3 kX2BandEnergyThreshold source value (scaled per hop in init). Passed
+ * to the shared aec3_per_bin_psd_threshold() helper (aec3_scale.h/.c, itself
+ * float32-typed and outside this conversion's file set). */
 #define SE_X2_BAND_ENERGY_THRESHOLD 44015068.0f
 
 typedef struct {
@@ -68,8 +68,8 @@ typedef struct {
     float  alpha_up;          /* 0.05f */
     float  alpha_down;        /* 0.1f  */
     float  onset_release_decay; /* 0.97f */
-    float  x2_band_energy_threshold; /* float32 (narrowed once from the
-                                       * double threshold helper's result) */
+    float  x2_band_energy_threshold; /* float32 (result of the float32
+                                       * threshold helper) */
 
     /* per-bin state (caller-owned, length n_bins) */
     float   *max_erle;        /* LF half = max_erle_l, HF half = max_erle_h */

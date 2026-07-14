@@ -69,8 +69,8 @@ void erl_estimator_update(ErlEstimator *e,
             if (new_erl < e->erl[k]) {              /* f32 < f32 */
                 e->hold_counters[k - 1] = ERL_HOLD_HOPS;
                 /* delta = 0.1f * (new_erl - erl[k]); float32 end-to-end. */
-                float diff_f = new_erl - e->erl[k];   /* float32 sub */
-                float delta = 0.1f * diff_f;          /* float32 mul */
+                float diff = new_erl - e->erl[k];     /* float32 sub */
+                float delta = 0.1f * diff;            /* float32 mul */
                 e->erl[k] = e->erl[k] + delta;        /* float32 add */
                 /* erl[k] = max(erl[k], _MIN_ERL), compared in float32. */
                 if (e->erl[k] < ERL_MIN_ERL) {

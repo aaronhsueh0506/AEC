@@ -69,7 +69,7 @@ static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
     }
 
     {
-        float alpha_f = noise_spectrum_alpha_now(n); /* float32-by-design */
+        float alpha = noise_spectrum_alpha_now(n); /* float32-by-design */
         int   apply_mask10 = (n->block_counter > n->init_phase);
         for (k = 0; k < n->n_freqs; ++k) {
             float pb = spectrum[k];                  /* spectrum.astype(f32) */
@@ -78,7 +78,7 @@ static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
                 /* alpha_inc = alpha * (pn / max(pb, 1e-30)) */
                 float denom = pb > 1e-30f ? pb : 1e-30f; /* np.maximum */
                 float ratio = pn / denom;            /* f32 */
-                float alpha_inc = alpha_f * ratio;   /* f32 */
+                float alpha_inc = alpha * ratio;     /* f32 */
                 if (apply_mask10) {
                     /* mask10 = (10.0 * pn) < pb */
                     float ten_pn = 10.0f * pn;        /* scalar 10.0 → f32 */
@@ -90,9 +90,9 @@ static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
                 n->noise[k] = pn + alpha_inc * (pb - pn);
             } else {                                  /* falling (~rising) */
                 /* noise = max(pn + alpha*(pb-pn), min) */
-                float upd = pn + alpha_f * (pb - pn);
-                float floor_f = n->min_noise;         /* np.maximum(.., _min) */
-                n->noise[k] = upd > floor_f ? upd : floor_f;
+                float upd = pn + alpha * (pb - pn);
+                float floor_v = n->min_noise;         /* np.maximum(.., _min) */
+                n->noise[k] = upd > floor_v ? upd : floor_v;
             }
         }
     }

@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
 
     AecPreset preset = AEC_PRESET_BALANCED;
     if (argc > 2) {
-        if (!strcmp(argv[2], "mild")) preset = AEC_PRESET_GENTLE;
+        if (!strcmp(argv[2], "mild")) preset = AEC_PRESET_MILD;
         else if (!strcmp(argv[2], "aggressive")) preset = AEC_PRESET_AGGRESSIVE;
     }
     AecConfig cfg;

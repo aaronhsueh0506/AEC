@@ -21,11 +21,11 @@
  *     accumulation fires. We carry it as (has_erle_log2, erle_log2).
  *   - get_quality_estimate() returns None while erle_log2 is NULL; the C side
  *     exposes a *valid flag so the caller can mirror the None.
- *   - The one float64 holdout is x2_band_energy_threshold's SOURCE constant
- *     (FBERLE_X2_BAND_ENERGY_THRESHOLD): it is only ever an argument to the
- *     shared, unconverted aec3_per_bin_psd_threshold() double API; the
- *     double result is narrowed to float32 once, at the store in
- *     fb_erle_init().
+ *   - x2_band_energy_threshold's SOURCE constant (FBERLE_X2_BAND_ENERGY_THRESHOLD)
+ *     is only ever an argument to the shared aec3_per_bin_psd_threshold()
+ *     helper (aec3_scale.h/.c, itself float32-typed and outside this
+ *     conversion's file set); the float32 result is stored directly at the
+ *     store in fb_erle_init().
  *
  * Built with -ffp-contract=off so the per-op float rounding matches across
  * builds.
@@ -51,8 +51,8 @@ float fb_erle_pairwise_sum(const float *a, size_t n);
 /* int(0.4 * HOPS_PER_SECOND), HOPS_PER_SECOND = 100 */
 #define FBERLE_BLOCKS_TO_HOLD_ERLE  40
 /* AEC3 source value; per_bin_psd_threshold(.., hop=160, ref=160) is a no-op.
- * Kept as a double literal (NOT `f`-suffixed): it is only ever passed to the
- * shared, unconverted aec3_per_bin_psd_threshold() double API. */
+ * Passed to the shared aec3_per_bin_psd_threshold() helper (aec3_scale.h/.c,
+ * itself float32-typed and outside this conversion's file set). */
 #define FBERLE_X2_BAND_ENERGY_THRESHOLD 44015068.0f
 #define FBERLE_MAXMIN_FORGET        0.0004f
 #define FBERLE_QUALITY_ALPHA        0.07f
@@ -77,7 +77,7 @@ typedef struct {
 typedef struct {
     int    n_freqs;
     float  x2_band_energy_threshold; /* per-bin X^2 gate (already hop-scaled,
-                                       * narrowed once from the double helper) */
+                                       * result of the float32 threshold helper) */
     float  min_erle_log2;            /* log2(min_erle + EPSILON) */
     float  max_erle_lf_log2;         /* log2(max_erle_l + EPSILON) */
     float  td_alpha;                 /* _td_alpha (0.05f) */

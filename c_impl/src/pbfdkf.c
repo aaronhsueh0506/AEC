@@ -161,7 +161,8 @@ static void pbfdaf_zero_state(PBFDAF* p) {
 /* ===== PBFDAF ============================================================ */
 
 void pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
-                    float mu, float delta, int hop_size) {
+                    float mu, float delta, int hop_size,
+                    int with_process_scratch) {
     int hop = (hop_size > 0) ? hop_size : block_size / 2;
     pbfdaf_compute_sizes(hop, &p->hop_size, &p->block_size,
                          &p->fft_size, &p->n_freqs);
@@ -190,9 +191,12 @@ void pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
 
     /* De-stacked per-hop scratch (see pbfdkf.h PBFDAF comment). */
     p->scr_fsq      = (float*)malloc((size_t)p->hop_size * sizeof(float));
-    p->scr_mu_local = (float*)malloc((size_t)p->n_freqs * sizeof(float));
-    p->scr_x2psum   = (float*)malloc((size_t)p->n_freqs * sizeof(float));
-    p->scr_mu_eff   = (float*)malloc((size_t)p->n_freqs * sizeof(float));
+    p->scr_mu_local = with_process_scratch
+        ? (float*)malloc((size_t)p->n_freqs * sizeof(float)) : NULL;
+    p->scr_x2psum   = with_process_scratch
+        ? (float*)malloc((size_t)p->n_freqs * sizeof(float)) : NULL;
+    p->scr_mu_eff   = with_process_scratch
+        ? (float*)malloc((size_t)p->n_freqs * sizeof(float)) : NULL;
     p->scr_ir       = (float*)malloc((size_t)p->n_partitions * (size_t)p->hop_size * sizeof(float));
     p->scr_e2       = (float*)malloc((size_t)p->n_freqs * sizeof(float));
 
@@ -201,7 +205,8 @@ void pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
     p->is_static = 0;
 }
 
-size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size) {
+size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
+                           int with_process_scratch) {
     int hop = (hop_size > 0) ? hop_size : block_size / 2;
     int blk, fft, K;
     pbfdaf_compute_sizes(hop, NULL, &blk, &fft, &K);
@@ -225,9 +230,11 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size) {
     total += ALIGN16((size_t)K   * sizeof(Complex));  /* spec_scratch */
     /* De-stacked per-hop scratch (see pbfdkf.h PBFDAF comment). */
     total += ALIGN16((size_t)hop * sizeof(float));    /* scr_fsq */
-    total += ALIGN16((size_t)K   * sizeof(float));    /* scr_mu_local */
-    total += ALIGN16((size_t)K   * sizeof(float));    /* scr_x2psum */
-    total += ALIGN16((size_t)K   * sizeof(float));    /* scr_mu_eff */
+    if (with_process_scratch) {
+        total += ALIGN16((size_t)K * sizeof(float));  /* scr_mu_local */
+        total += ALIGN16((size_t)K * sizeof(float));  /* scr_x2psum */
+        total += ALIGN16((size_t)K * sizeof(float));  /* scr_mu_eff */
+    }
     total += ALIGN16((size_t)n_partitions * (size_t)hop * sizeof(float)); /* scr_ir */
     total += ALIGN16((size_t)K   * sizeof(float));    /* scr_e2 */
     return total;
@@ -235,9 +242,11 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size) {
 
 void pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                          int block_size, int n_partitions,
-                         float mu, float delta, int hop_size) {
+                         float mu, float delta, int hop_size,
+                         int with_process_scratch) {
     if (!p || !mem) return;
-    if (mem_size < pbfdaf_get_mem_size(block_size, n_partitions, hop_size)) return;
+    if (mem_size < pbfdaf_get_mem_size(block_size, n_partitions, hop_size,
+                                       with_process_scratch)) return;
 
     int hop = (hop_size > 0) ? hop_size : block_size / 2;
     memset(p, 0, sizeof(*p));
@@ -267,11 +276,16 @@ void pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
 
     /* De-stacked per-hop scratch (see pbfdkf.h PBFDAF comment). */
     p->scr_fsq      = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-    p->scr_mu_local = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-    p->scr_x2psum   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-    p->scr_mu_eff   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    if (with_process_scratch) {
+        p->scr_mu_local = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+        p->scr_x2psum   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+        p->scr_mu_eff   = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
+    } else {
+        p->scr_mu_local = NULL; p->scr_x2psum = NULL; p->scr_mu_eff = NULL;
+    }
     p->scr_ir       = (float*)ptr; ptr += ALIGN16((size_t)n_partitions * (size_t)hop * sizeof(float));
-    p->scr_e2       = (float*)ptr; /* last */
+    p->scr_e2       = (float*)ptr; ptr += ALIGN16((size_t)p->n_freqs * sizeof(float));
+    (void)ptr;
 
     pbfdaf_init_scalars(p, n_partitions, mu, delta);
     pbfdaf_zero_state(p);
@@ -585,7 +599,7 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
 
 void pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size) {
-    pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size);
+    pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size, 0);
     int K = p->base.n_freqs;
     p->Q_high = (float*)malloc((size_t)K * sizeof(float));
     p->Q_low  = (float*)malloc((size_t)K * sizeof(float));
@@ -609,7 +623,7 @@ size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
     pbfdaf_compute_sizes(hop, NULL, &blk, &fft, &K);
     (void)blk; (void)fft;
     if (n_partitions <= 0 || K <= 0) return 0;
-    size_t total = pbfdaf_get_mem_size(block_size, n_partitions, hop_size);
+    size_t total = pbfdaf_get_mem_size(block_size, n_partitions, hop_size, 0);
     total += ALIGN16((size_t)K * sizeof(float));   /* Q_high */
     total += ALIGN16((size_t)K * sizeof(float));   /* Q_low */
     total += ALIGN16((size_t)K * sizeof(float));   /* Q */
@@ -630,10 +644,10 @@ void pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                          float mu, float delta, int hop_size) {
     if (!p || !mem) return;
     if (mem_size < pbfdkf_get_mem_size(block_size, n_partitions, hop_size)) return;
-    size_t base_sz = pbfdaf_get_mem_size(block_size, n_partitions, hop_size);
+    size_t base_sz = pbfdaf_get_mem_size(block_size, n_partitions, hop_size, 0);
     memset(p, 0, sizeof(*p));
     pbfdaf_init_static(&p->base, mem, base_sz,
-                       block_size, n_partitions, mu, delta, hop_size);
+                       block_size, n_partitions, mu, delta, hop_size, 0);
     uint8_t* ptr = (uint8_t*)mem + base_sz;
     int K = p->base.n_freqs;
     p->Q_high    = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
@@ -647,7 +661,8 @@ void pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
     p->e2_ref_scratch = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     p->scr_mu_local = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
     p->scr_X2       = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
-    p->scr_mu_aec3  = (float*)ptr; /* last */
+    p->scr_mu_aec3  = (float*)ptr; ptr += ALIGN16((size_t)p->base.n_freqs * sizeof(float));
+    (void)ptr;
     pbfdkf_init_scalars(p);
     p->is_static = 1;
 }

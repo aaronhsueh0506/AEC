@@ -77,7 +77,7 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
     const int N = r->n_freqs;
     const float *direct;   /* frequency_response[filter_delay_blocks] */
     const float *tail_row; /* frequency_response[-1] */
-    float direct_energy_f, tail_energy_f;
+    float tail_energy_f;
     float direct_energy, average_decay, smoothing;
     float decay_f; /* average_decay applied per-bin (float32-by-design) */
     float *tail = r->tail_response;
@@ -94,10 +94,9 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
     direct   = frequency_response + (size_t)filter_delay_blocks * (size_t)N;
     tail_row = frequency_response + (size_t)(n_partitions - 1) * (size_t)N;
 
-    /* Average-decay scalar over k>=1 (kSkipBins=1). np.sum -> f32 pairwise. */
-    direct_energy_f = f32_pairwise_sum(direct + 1, (size_t)(N - 1));
-    /* float32-by-design (formerly widened via python float() -> f64). */
-    direct_energy = direct_energy_f;
+    /* Average-decay scalar over k>=1 (kSkipBins=1). np.sum -> f32 pairwise
+     * (float32-by-design; formerly widened via python float() -> f64). */
+    direct_energy = f32_pairwise_sum(direct + 1, (size_t)(N - 1));
     if (direct_energy == 0.0f) {
         average_decay = 0.0f;
     } else {

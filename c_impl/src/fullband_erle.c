@@ -180,8 +180,8 @@ void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
                         float min_erle, float max_erle_l, int hop_size) {
     s->n_freqs = n_freqs;
     s->td_alpha = FBERLE_TD_ALPHA;
-    /* The helper is double-typed (out of scope); its result is narrowed to
-     * float32 once, here. */
+    /* The helper (aec3_scale.h/.c) is float32-typed and out of scope for this
+     * conversion; its result is stored directly here. */
     s->x2_band_energy_threshold =
         aec3_per_bin_psd_threshold(FBERLE_X2_BAND_ENERGY_THRESHOLD, hop_size, 160);
     s->min_erle_log2 = fast_log2(min_erle + FBERLE_EPSILON);

@@ -43,11 +43,10 @@
 /* ── Constants (erl_estimator.py module level) ───────────────────────────── */
 #define ERL_MIN_ERL  0.01f    /* _MIN_ERL */
 #define ERL_MAX_ERL  1000.0f  /* _MAX_ERL */
-/* _AEC3_X2_MIN source constant — deliberately left as a double literal (NOT
- * `f`-suffixed): its only use is as the `calibrated_value` argument to the
- * shared aec3_per_bin_psd_threshold() helper (aec3_scale.h/.c), which is a
- * double-typed API outside this conversion's scope. The double RESULT of
- * that call is narrowed to float32 exactly once, at the `x2_min` store in
+/* _AEC3_X2_MIN source constant, passed as the `calibrated_value` argument to
+ * the shared aec3_per_bin_psd_threshold() helper (aec3_scale.h/.c, itself
+ * float32-typed and outside this conversion's file set). The float32 result
+ * of that call is stored directly at the `x2_min` store in
  * erl_estimator_init(). _HOLD_HOPS = int(4.0 * HOPS_PER_SECOND) = 400. */
 #define ERL_AEC3_X2_MIN  44015068.0f
 #define ERL_HOLD_HOPS    400
@@ -63,8 +62,8 @@ float f32_pairwise_sum(const float *a, size_t n);
 typedef struct {
     int     startup_hops;          /* _startup_hops               */
     int     n_bins;                /* _n_bins                     */
-    float   x2_min;                /* _x2_min (float32; narrowed once from
-                                     * the double threshold helper's result) */
+    float   x2_min;                /* _x2_min (float32; result of
+                                     * aec3_per_bin_psd_threshold(), itself float32) */
     float  *erl;                   /* _erl,           length n_bins     */
     int    *hold_counters;         /* _hold_counters, length n_bins-2   */
     float   erl_time_domain;       /* _erl_time_domain            */

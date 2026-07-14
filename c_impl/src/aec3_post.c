@@ -437,7 +437,7 @@ int aec3_post_run(Aec3Post *p,
     int n_part = in->n_partitions;
     int k, pp;
     Aec3PostAbs mag;
-    int saturated_capture = (in->saturation_level > 0.5);
+    int saturated_capture = (in->saturation_level > 0.5f);
     int pgc = in->pending_gain_change;
     int pdc = in->pending_delay_change;   /* -1 == None */
 

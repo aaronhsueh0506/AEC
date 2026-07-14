@@ -55,8 +55,7 @@ RenderActivityResult render_activity_update(RenderActivity* r,
         if (len & 1) blocks[half] = blocks[len - 1], half++;
         len = half;
     }
-    float mean_f32 = blocks[0] / (float)n;
-    float far_pwr_raw = mean_f32;
+    float far_pwr_raw = blocks[0] / (float)n;
     float far_pwr     = far_pwr_raw + 1e-10f;
     int   warmup_active = far_pwr_raw > 1e-6f ? 1 : 0;
 

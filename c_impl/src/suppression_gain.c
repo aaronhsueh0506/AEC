@@ -16,41 +16,9 @@
  */
 #include "suppression_gain.h"
 
-#include <math.h>
 #include <string.h>
 #include "fast_math.h"
 
-/* float32 pairwise sum over a scratch buffer (same tree shape as the f32
- * version in reverb_frequency_response.c, accumulated in float32). Used by
- * the two local squared-render-sample reductions below; kept as a distinct
- * function from the extern f32_pairwise_sum() to avoid touching that shared
- * definition's call sites. */
-static float f32_local_pairwise_sum(const float *a, size_t n) {
-    if (n == 0) return 0.0f;
-    if (n < 8) {
-        float res = a[0];
-        size_t i;
-        for (i = 1; i < n; ++i) res = res + a[i];
-        return res;
-    }
-    if (n <= 128) {
-        float r0 = a[0], r1 = a[1], r2 = a[2], r3 = a[3];
-        float r4 = a[4], r5 = a[5], r6 = a[6], r7 = a[7];
-        float res;
-        size_t i;
-        for (i = 8; i + 8 <= n; i += 8) {
-            r0 += a[i + 0]; r1 += a[i + 1]; r2 += a[i + 2]; r3 += a[i + 3];
-            r4 += a[i + 4]; r5 += a[i + 5]; r6 += a[i + 6]; r7 += a[i + 7];
-        }
-        res = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7));
-        for (; i < n; ++i) res = res + a[i];
-        return res;
-    } else {
-        size_t n2 = n / 2;
-        n2 -= n2 % 8;
-        return f32_local_pairwise_sum(a, n2) + f32_local_pairwise_sum(a + n2, n - n2);
-    }
-}
 
 /* float32 sum of a sub-slice a[lo:hi) via the canonical pairwise sum. */
 static float f32_sum_slice(const float *a, int lo, int hi) {
@@ -119,17 +87,19 @@ static int ne_state_for_gain_rules(const SuppressionGain *sg) {
 
 /* LowNoiseRenderDetector.detect — returns bool, mutates avg power. */
 static int low_noise_render_detect(SuppressionGain *sg, const float *rb,
-                                   int hop) {
+                                   int hop, float *x2_sum_out) {
     const SuppressionGainConfig *c = &sg->cfg;
     float x2[1024];          /* hop_size <= 1024 in practice */
     float x2_sum, x2_max;
     int low_noise, i;
+    *x2_sum_out = 0.0f;
     if (hop == 0) return 0;
     for (i = 0; i < hop; ++i) {
         float v = rb[i];             /* render_block, float32 */
         x2[i] = v * v;
     }
-    x2_sum = f32_local_pairwise_sum(x2, (size_t)hop);
+    x2_sum = f32_pairwise_sum(x2, (size_t)hop);
+    *x2_sum_out = x2_sum;
     x2_max = x2[0];
     for (i = 1; i < hop; ++i) if (x2[i] > x2_max) x2_max = x2[i];
     /* Normalize average_power to per-sample before peak comparison.
@@ -449,6 +419,7 @@ const float *suppression_gain_get_gain(
     int k;
     const float *echo_for_det;
     int low_noise_render;
+    float render_x2_sum = 0.0f;
     int hf_lim_applied;
 
     /* stationary_mask is None in balanced -> stat_mask_frac = 0.0f. */
@@ -459,18 +430,14 @@ const float *suppression_gain_get_gain(
     dominant_nearend_update(sg, nearend_spectrum, echo_for_det, comfort_noise,
                             sg->initial_state);
 
-    low_noise_render = low_noise_render_detect(sg, render_block, c->hop_size);
+    low_noise_render = low_noise_render_detect(sg, render_block, c->hop_size,
+                                                &render_x2_sum);
 
     /* split-floor far-active latch (pre-_lower_band_gain). */
     if (c->split_floor_enabled && !sg->far_active_latched) {
-        float mean_pow;
-        float rb2[1024];
-        int hop = c->hop_size;
-        for (k = 0; k < hop; ++k) {
-            float v = render_block[k];
-            rb2[k] = v * v;
-        }
-        mean_pow = f32_local_pairwise_sum(rb2, (size_t)hop) / (float)hop;
+        /* reuse the render x2 sum computed by low_noise_render_detect above
+         * (same pairwise tree over the same block — identical value). */
+        float mean_pow = render_x2_sum / (float)c->hop_size;
         if (mean_pow > c->split_floor_latch_power) sg->far_active_latched = 1;
     }
 
