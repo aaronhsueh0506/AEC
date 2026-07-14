@@ -16,6 +16,42 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-07-16 — vectorization campaign (byte-identical, NEON via shared kernels)
+
+Whole-repo per-bin/per-sample loop vectorization on top of the float32
+campaign, output **byte-identical throughout** (60-case render aggregate md5
+unchanged on BOTH backends at every commit; static==dynamic byte-equal both
+backends; delay C-golden bit-exact; e2e tolerance unchanged):
+
+- **Shared kernel layer** `audio_common/include/simd_kernels.h` (22 kernels,
+  AArch64 NEON + always-compiled scalar twins, bitwise selftest incl.
+  denormal/±0/inf and n=257 tails; `SIMD_KERNELS_FORCE_SCALAR` A/B knob).
+  Bit-exactness rests on per-lane IEEE NEON ops + strict FMA discipline
+  (explicit `fmaf` ↔ `vfmaq_f32`; plain mul+add never fused — consumer TUs
+  must keep `-ffp-contract=off`); min/clip use compare+select (vminq/vmaxq
+  diverge from the C ternary at ±0 ties).
+- **Converted**: all complex-magnitude loops (~10.8k scaled-hypot calls/hop),
+  echo_spec partition MAC + both filter W-updates, post-chain elementwise
+  loops with fusion (coherence EMA+Γ² gate single pass; CNG N2 tracking;
+  E2 select/gain apply), suppression-gain clips/min/final sqrt, numpy
+  pairwise-sum trees (the numpy tree + BOTH tail-fold variants — probe-proven
+  distinct at ±0 — now single shared implementations), `fft_power`
+  (contraction made explicit as `fmaf`, objdump-verified identical codegen)
+  and `fft_apply_gain` NEON in both FFT backends.
+- **Structural**: per-hop `W_all`/`X_buf_all` snapshot copies (2×~12 KB/hop)
+  removed — post reads filter state via const pointers; static pool
+  **557,680 → 532,992 B KISS / 519,232 → 494,544 B NE10**. NE10 wrapper
+  output staging memcpys removed; new clobber-permitted
+  `fft_forward_scratch`/`fft_inverse_scratch` API adopted at six
+  dead-scratch rfft sites (input staging also skipped on NE10 there).
+- **Perf**: dev-box (arm64 clang, auto-vectorizing) RTF flat-to-slightly-
+  better — expected; the intrinsics make vectorization compiler-independent
+  for the embedded gcc target. Measure on-target with `make bench`
+  (`bin/bench_rtf`, new in this campaign; cross-compiles with
+  `BACKEND=ne10 CC=<cross-gcc>`).
+
+---
+
 ## [Unreleased] — 2026-07-15 — float32 campaign (Python bit-exact parity retired)
 
 Staged conversion of all production C to float32 end-to-end: (1) delay chain

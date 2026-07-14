@@ -90,8 +90,8 @@ single-channel DT-deg-vs-echo wall; all share the same `_aec3_post` chain and
 
 | | |
 |---|---|
-| Static pool, KISS (host/reference) | 557,680 B (544.6 KB) |
-| Static pool, NE10 (embedded)       | 519,232 B (507.1 KB) (twiddles live outside the pool) |
+| Static pool, KISS (host/reference) | 532,992 B (520.5 KB) |
+| Static pool, NE10 (embedded)       | 494,544 B (483.0 KB) (twiddles live outside the pool) |
 | Compute / frame                    | 4 × 512-FFT + Kalman update (257 bins × 6 partitions) |
 | FFT                                | KISS FFT (float32; NE10 ARM-NEON opt-in) — ~float32 precision vs numpy `np.fft` |
 

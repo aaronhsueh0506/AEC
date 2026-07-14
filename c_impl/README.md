@@ -115,7 +115,7 @@ harness design.
 For embedded targets, build one pool and place the whole instance in it:
 
 ```c
-size_t bytes = aec_get_mem_size(&cfg);     /* balanced @ hop=160: 557,680 B (KISS) / 519,232 B (NE10) */
+size_t bytes = aec_get_mem_size(&cfg);     /* balanced @ hop=160: 532,992 B (KISS) / 494,544 B (NE10) */
 void*  pool  = your_static_alloc(bytes);   /* 16-byte aligned */
 Aec a; aec_init(&a, pool, bytes, &cfg);    /* byte-equal to aec_create */
 ```
