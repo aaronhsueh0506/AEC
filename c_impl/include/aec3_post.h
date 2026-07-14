@@ -105,6 +105,14 @@ typedef struct {
     int    cng_n2_update_onset_hops;
     int    cng_n2_initial_duration_hops;
     float  noise_floor_int16sq;               /* GetNoiseFloorFactor(dbfs) */
+
+    /* M4 (multi-rate consumption switch): length of the `synth_window`
+     * array passed to aec3_post_init (the caller's per-rate lookup row's
+     * synth_window_len -- pointer-identical to AEC3B_SYNTH_WINDOW's 320 at
+     * 16 kHz). aec3_post_apply_output asserts this == block_size right
+     * before the OLA loop reads synth_window; appended here (not inserted
+     * above) per the struct-fields-append-only rule for this campaign. */
+    int    synth_window_len;
 } Aec3PostConfig;
 
 /* Audio-passive per-hop trace capture. The three scalars below are decided

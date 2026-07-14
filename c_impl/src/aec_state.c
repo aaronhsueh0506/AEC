@@ -3,6 +3,8 @@
  * strict update() order. */
 #include "aec_state.h"
 
+#include <assert.h>
+
 /* DelayAdjustment enum (delay_types.py): NONE=0, BUFFER_FLUSH=1,
  * NEW_DETECTED_DELAY=2. */
 #define AEC_DELAY_ADJ_NONE 0
@@ -197,11 +199,25 @@ void aec_state_update(AecState *s,
     int  analyzer_delay_storage[1];
     const int *analyzer_delays = NULL;
     int  analyzer_delays_len = 0;
+    /* M4 (multi-rate consumption switch): filter_taps_full_len is a live,
+     * per-hop value (aec.c recomputes it every hop as n_partitions*hop from
+     * the then-current dims), not a construction-time constant like
+     * cfg.filter_taps_size -- so, unlike the SuppressionGain tuning-table
+     * length check (a pure init-time assert), this gets BOTH a debug assert
+     * (catches a real per-hop wiring bug immediately) AND a release-path
+     * guard (skips fa_update instead of letting it read filter_taps_full
+     * against s->filter_analyzer's h_highpass/abs_scratch buffers, which
+     * are sized from cfg.filter_taps_size, with a mismatched length -- an
+     * OOB read if filter_taps_full_len is too short). Never fires for the
+     * validated {16000} whitelist (both are n_partitions*hop for the same
+     * np/hop pair every hop there). */
+    assert(filter_taps_full == NULL
+           || filter_taps_full_len == s->cfg.filter_taps_size);
     if (s->has_filter_analyzer && filter_taps_full != NULL
-            && render_block != NULL) {
+            && render_block != NULL
+            && filter_taps_full_len == s->cfg.filter_taps_size) {
         fa_update(&s->filter_analyzer, filter_taps_full, render_block,
                   render_block_len);
-        (void)filter_taps_full_len;  /* length == cfg.filter_taps_size */
         /* filter_delays_blocks() -> [delay_blocks] (single channel). */
         analyzer_delay_storage[0] = fa_min_filter_delay_blocks(&s->filter_analyzer);
         analyzer_delays = analyzer_delay_storage;

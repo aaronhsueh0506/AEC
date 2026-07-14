@@ -133,6 +133,8 @@ int main(int argc, char **argv) {
     aec3_post_config_defaults(&cfg);
     cfg.n_bins = n_bins; cfg.fft_size = fft_size;
     cfg.block_size = block_size; cfg.hop_size = hop;
+    /* M4: synth_window (below) is read at exactly block_size width. */
+    cfg.synth_window_len = block_size;
     cfg.erle_coh_gate_enabled = flag_i[0];
     cfg.erle_windowed_capture_psd = flag_i[1];
     cfg.erle_render_x2_psd_scale = flag_i[2];
@@ -290,6 +292,9 @@ int main(int argc, char **argv) {
     stun.nearend_enr_tr = t_ne_enr_tr; stun.nearend_enr_su = t_ne_enr_su;
     stun.nearend_emr_tr = t_ne_emr_tr; stun.normal_enr_tr = t_no_enr_tr;
     stun.normal_enr_su = t_no_enr_su; stun.normal_emr_tr = t_no_emr_tr;
+    /* M4: the six tables above were read at n_bins width (see the A(t_ne_*,
+     * n_bins) allocations + rd() calls above), so table_len == n_bins. */
+    stun.table_len = n_bins;
 
     SuppressionGain sg;
     float *sg_last_gain = malloc((size_t)n_bins * sizeof(float));

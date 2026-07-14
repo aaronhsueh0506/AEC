@@ -16,6 +16,7 @@
  */
 #include "suppression_gain.h"
 
+#include <assert.h>
 #include <string.h>
 #include "fast_math.h"
 #include "aec_simd_kernels.h"
@@ -41,6 +42,17 @@ void suppression_gain_init(SuppressionGain *sg,
     memset(sg, 0, sizeof(*sg));
     sg->cfg = *cfg;
     sg->tun = *tun;
+    /* M4 (multi-rate consumption switch): tun->table_len is the length the
+     * caller's per-rate lookup row baked the six per-bin tuning arrays at.
+     * gain_to_no_audible_echo's per-bin loop below reads all six at index
+     * [0, cfg->n_bins) -- a mismatch would walk off the end of one of those
+     * static const arrays. Construction-time-only invariant (both n_bins
+     * and the tables come from the same rate-table row for a validated
+     * sample rate), so a debug assert is the whole guard here (unlike
+     * aec_state.c's filter_taps_full_len, which is a per-hop live value and
+     * gets both a debug assert AND a release-path skip). Never fires for
+     * the validated {16000} whitelist (table_len == n_bins == 257 there). */
+    assert(tun->table_len == cfg->n_bins);
     sg->last_gain = last_gain;
     sg->last_nearend = last_nearend;
     sg->last_echo = last_echo;

@@ -104,6 +104,14 @@ typedef struct {
     const float *normal_enr_tr;
     const float *normal_enr_su;
     const float *normal_emr_tr;
+
+    /* M4 (multi-rate consumption switch): length the caller's per-rate
+     * lookup row baked the six arrays above at (aec3b_rate_cfg(sr)->
+     * sg_table_len -- pointer-identical to AEC3B_N_BINS at 16 kHz).
+     * suppression_gain_init asserts this == cfg->n_bins; appended here
+     * (not inserted above) per the struct-fields-append-only rule for this
+     * campaign. */
+    int table_len;
 } SuppressionGainTuning;
 
 /* Mutable per-instance state. All n_bins arrays are caller-owned scratch. */

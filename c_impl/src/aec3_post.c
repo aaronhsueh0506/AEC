@@ -7,6 +7,7 @@
  */
 #include "aec3_post.h"
 
+#include <assert.h>
 #include <math.h>
 #include <string.h>
 #include "fast_math.h"
@@ -61,6 +62,10 @@ void aec3_post_config_defaults(Aec3PostConfig *cfg) {
     cfg->cng_n2_update_onset_hops = 20;
     cfg->cng_n2_initial_duration_hops = 400;
     cfg->noise_floor_int16sq = 68.50682420305405f;
+    /* M4: default == block_size (the 16 kHz row's synth_window_len); the
+     * caller (aec.c) overrides with the per-rate lookup value, same as
+     * every other cfg field below block_size above. */
+    cfg->synth_window_len = cfg->block_size;
 }
 
 void aec3_post_init(Aec3Post *p, const Aec3PostConfig *cfg,
@@ -322,9 +327,23 @@ void aec3_post_apply_output(Aec3Post *p,
 
     fft_inverse(p->fft, p->e_out_spec, p->e_out_full);
 
-    for (k = 0; k < bs; ++k) {
-        float windowed = p->e_out_full[k] * p->synth_window[k];
-        p->ola_buf[k] = p->ola_buf[k] + windowed;
+    /* M4 (multi-rate consumption switch): synth_window is caller-owned,
+     * sized to c->synth_window_len (the per-rate lookup row's window
+     * length) -- asserted equal to block_size right before the read below
+     * (both come from the same Aec3BalancedRateDims row for a validated
+     * sample rate, so this never fires for the {16000} whitelist: 320==320).
+     * The win_n clamp is the release-path guard for a hypothetical NDEBUG
+     * build that strips the assert: it degrades to a partial OLA window
+     * instead of reading past whichever buffer is shorter, rather than an
+     * OOB read. At every validated rate win_n == bs, so the loop below is
+     * byte-identical to the unguarded version it replaces. */
+    assert(c->synth_window_len == bs);
+    {
+        int win_n = (c->synth_window_len < bs) ? c->synth_window_len : bs;
+        for (k = 0; k < win_n; ++k) {
+            float windowed = p->e_out_full[k] * p->synth_window[k];
+            p->ola_buf[k] = p->ola_buf[k] + windowed;
+        }
     }
     for (k = 0; k < hop; ++k) out[k] = p->ola_buf[k];
     memmove(p->ola_buf, p->ola_buf + hop,

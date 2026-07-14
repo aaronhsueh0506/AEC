@@ -128,6 +128,8 @@ int main(int argc, char **argv) {
     aec3_post_config_defaults(&cfg);
     cfg.n_bins = n_bins; cfg.fft_size = fft_size;
     cfg.block_size = block_size; cfg.hop_size = hop;
+    /* M4: synth_window (below) is read at exactly block_size width. */
+    cfg.synth_window_len = block_size;
     cfg.erle_coh_gate_enabled = hdr_i[5];
     cfg.erle_windowed_capture_psd = hdr_i[6];
     cfg.erle_render_x2_psd_scale = hdr_i[7];
