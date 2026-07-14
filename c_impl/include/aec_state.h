@@ -53,8 +53,29 @@
  *   - enable_filter_analyzer=True → step 1b runs; analyzer drives step-2
  *     delays AND step-5 echo_path_gain.
  *
- * PARITY: no new float math at this layer. All counters are integer/bool.
- * The bit-exact surface is delegated to the sub-modules.
+ * PRECISION: no new float math at this layer — all counters are
+ * integer/bool, and this file performs no floating-point computation of its
+ * own. The float32-by-design conversion (f32 campaign; Python bit-exact
+ * parity retired, drift accepted) is delegated to the sub-modules:
+ *   - erle_estimator / subband_erle / fullband_erle / erl_estimator are
+ *     float32-by-design; the getters that surface their scalars
+ *     (aec_state_fullband_erle_log2, aec_state_get_inst_linear_quality_estimate,
+ *     aec_state_erl_time_domain) are float32 here too.
+ *   - erle_min / erle_max_l / erle_max_h in AecStateConfig feed directly into
+ *     erle_estimator_init() (float32 params) and are float32 here as well —
+ *     the (float) casts that used to bridge double config -> float ctor are
+ *     gone.
+ *   - initial_state_seconds stays double: its only consumer is
+ *     initial_state_init() (initial_state.h/.c, NOT part of this conversion),
+ *     a double-typed API outside this module set's scope.
+ *   - subtractor_s_refined_max_abs / subtractor_s_coarse_max_abs /
+ *     echo_path_gain (aec_state_update params) and
+ *     aec_state_filter_analyzer_max_echo_path_gain stay double for the same
+ *     reason: they are pure pass-through plumbing to saturation_detector.h
+ *     and filter_analyzer.h (both outside this conversion's file set); no
+ *     arithmetic on them happens in this file, so retyping them would only
+ *     insert a spurious float32 rounding hop with no float32 math to show
+ *     for it.
  */
 #ifndef AEC_STATE_H
 #define AEC_STATE_H
@@ -77,15 +98,15 @@
 typedef struct {
     int    use_linear_filter;          /* default 1 */
     int    conservative_initial_phase; /* default 0 */
-    double initial_state_seconds;      /* default 2.5 */
+    float initial_state_seconds;       /* default 2.5 */
     int    delay_headroom_samples;     /* default 32 */
     int    num_capture_channels;       /* default 1 */
     int    echo_can_saturate;          /* default 1 */
     int    n_bins;                     /* default 257 */
     int    erle_startup_hops;          /* default 200 */
-    double erle_min;                   /* default 1.0 */
-    double erle_max_l;                 /* default 4.0 */
-    double erle_max_h;                 /* default 1.5 */
+    float  erle_min;                   /* default 1.0f */
+    float  erle_max_l;                 /* default 4.0f */
+    float  erle_max_h;                 /* default 1.5f */
     int    erl_startup_hops;           /* default 200 */
     int    hop_size;                   /* default 160 */
     int    sample_rate;                /* default 16000 (unused at this layer) */
@@ -180,9 +201,9 @@ void aec_state_update(AecState *s,
                       const float *error_psd,
                       const float *echo_psd,
                       int active_render,
-                      double subtractor_s_refined_max_abs,
-                      double subtractor_s_coarse_max_abs,
-                      double echo_path_gain,
+                      float subtractor_s_refined_max_abs,
+                      float subtractor_s_coarse_max_abs,
+                      float echo_path_gain,
                       const float *render_block, int render_block_len,
                       const float *filter_taps_full, int filter_taps_full_len,
                       const float *x2_reverb_for_erle,
@@ -201,13 +222,13 @@ int    aec_state_initial_state_active(const AecState *s);
 int    aec_state_min_direct_path_filter_delay(const AecState *s);
 const float *aec_state_erle(AecState *s, int onset_compensated);
 const float *aec_state_erle_unbounded(const AecState *s);
-double aec_state_fullband_erle_log2(const AecState *s);
+float aec_state_fullband_erle_log2(const AecState *s);
 /* get_inst_linear_quality_estimate: *valid==0 mirrors a Python None. */
-double aec_state_get_inst_linear_quality_estimate(const AecState *s, int *valid);
+float aec_state_get_inst_linear_quality_estimate(const AecState *s, int *valid);
 const float *aec_state_erl(const AecState *s);
-double aec_state_erl_time_domain(const AecState *s);
+float aec_state_erl_time_domain(const AecState *s);
 int    aec_state_filter_analyzer_consistent(const AecState *s);
 int    aec_state_filter_analyzer_peak_index(const AecState *s);
-double aec_state_filter_analyzer_max_echo_path_gain(const AecState *s);
+float aec_state_filter_analyzer_max_echo_path_gain(const AecState *s);
 
 #endif /* AEC_STATE_H */

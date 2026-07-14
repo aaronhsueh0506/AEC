@@ -1,12 +1,13 @@
 /* suppression_gain.h — C port of python/modules/residual/suppression_gain.py
  * (WS5). Single-channel + single-band AEC3 SuppressionGain.
  *
- * Byte-equal port: produces bit-identical gain[n_bins] (amplitude domain,
- * sqrt'd) to the Python reference. fp64 rule: ENR/EMR/min/max/CNG math runs
- * in DOUBLE; per-bin arrays Python declares float32 (gain, tuning tables)
- * stay float, computed-in-double-then-(float)-truncated where the inputs are
- * f64. Pairwise float32 sums (np.sum / np.mean over float32) replicated by
- * f32_pairwise_sum().
+ * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity is
+ * retired for this module; drift accepted). Produces gain[n_bins] (amplitude
+ * domain, sqrt'd) at float32 precision throughout: ENR/EMR/min/max/CNG math
+ * and every per-bin array (gain, tuning tables) are float32, single rounding
+ * per op (the old "scalar f32 * pyfloat -> f64, then narrow back to f32"
+ * numpy-parity round trips are retired). Pairwise float32 sums (np.sum /
+ * np.mean-equivalent) replicated by f32_pairwise_sum().
  *
  * Build: gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Ic_impl/include
  *   link: suppression_gain.c freq_utils.c aec3_scale.c reverb_frequency_response.c
@@ -43,12 +44,12 @@ typedef struct {
     /* audibility (WeightEchoForAudibility) */
     int    aud_lf_end_bin;
     int    aud_mf_end_bin;
-    double floor_power;
-    double aud_thr_lf;
-    double aud_thr_mf;
-    double aud_thr_hf;
-    double low_render_limit;
-    double normal_render_limit;
+    float  floor_power;
+    float  aud_thr_lf;
+    float  aud_thr_mf;
+    float  aud_thr_hf;
+    float  low_render_limit;
+    float  normal_render_limit;
 
     /* HF limiter */
     int    hf_lgb;
@@ -60,20 +61,20 @@ typedef struct {
     float  max_inc_nearend;
     float  max_dec_lf_normal;
     float  max_dec_lf_nearend;
-    double floor_first_increase;
+    float  floor_first_increase;
 
     /* LowNoiseRender */
-    double low_render_threshold;
+    float  low_render_threshold;
 
     /* split min-gain floor (default ON) */
     int    split_floor_enabled;                  /* bool */
-    double split_floor_far_active;               /* power */
-    double split_floor_far_silent;               /* power */
+    float  split_floor_far_active;               /* power */
+    float  split_floor_far_silent;               /* power */
     /* DT-gated floor: used in place of far_active when the orchestrator sets
      * dt_protect_active (double-talk). Default == near far_active so an un-set
      * flag is behaviourally neutral (mirrors Python _split_floor_dt). */
-    double split_floor_dt;                       /* power */
-    double split_floor_latch_power;
+    float  split_floor_dt;                       /* power */
+    float  split_floor_latch_power;
 
     /* soft nearend blend (default ON in balanced) */
     int    soft_blend_enabled;                   /* bool */
@@ -82,9 +83,9 @@ typedef struct {
     float  soft_blend_softness;
 
     /* DominantNearend thresholds */
-    double dne_enr_threshold;
-    double dne_enr_exit_threshold;
-    double dne_snr_threshold;
+    float  dne_enr_threshold;
+    float  dne_enr_exit_threshold;
+    float  dne_snr_threshold;
     int    dne_use_during_initial_phase;         /* bool */
     int    dne_use_unbounded_echo;               /* bool */
     int    dne_lf_endpoint_bin;
@@ -92,7 +93,7 @@ typedef struct {
     int    dne_hold_duration_hops;
 
     int    stat_aware_ne_proxy_enabled;          /* bool */
-    double stat_aware_ne_proxy_threshold;
+    float  stat_aware_ne_proxy_threshold;
 } SuppressionGainConfig;
 
 /* Per-bin tuning tables (n_bins each), supplied by caller. */
@@ -114,13 +115,13 @@ typedef struct {
     float *last_gain;           /* [n_bins] */
     float *last_nearend;        /* [n_bins] */
     float *last_echo;           /* [n_bins] */
-    double low_render_avg_power;
+    float  low_render_avg_power;
     int    far_active_latched;  /* bool */
     int    dt_protect_active;   /* bool — set by orchestrator before get_gain
                                  * (== Python _dt_protect_active); lifts the
                                  * floor to split_floor_dt during double-talk. */
     int    initial_state;       /* bool */
-    double stat_mask_frac;
+    float  stat_mask_frac;
 
     /* DominantNearend state */
     int    dne_trigger_counter;

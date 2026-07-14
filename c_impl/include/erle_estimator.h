@@ -67,9 +67,9 @@ void erle_estimator_update(ErleEstimator *e,
 /* erle(onset_compensated) -> subband.erle(onset_compensated). */
 const float *erle_estimator_erle(const ErleEstimator *e, int onset_compensated);
 const float *erle_estimator_erle_unbounded(const ErleEstimator *e);
-double erle_estimator_fullband_erle_log2(const ErleEstimator *e);
+float erle_estimator_fullband_erle_log2(const ErleEstimator *e);
 /* get_inst_linear_quality_estimate(): *valid==0 mirrors a Python None. */
-double erle_estimator_get_inst_linear_quality_estimate(const ErleEstimator *e,
+float erle_estimator_get_inst_linear_quality_estimate(const ErleEstimator *e,
                                                        int *valid);
 
 #endif /* ERLE_ESTIMATOR_H */

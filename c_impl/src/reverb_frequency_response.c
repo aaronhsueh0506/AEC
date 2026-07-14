@@ -53,17 +53,17 @@ float f32_pairwise_sum(const float *a, size_t n) {
 
 void reverb_freq_resp_init(ReverbFrequencyResponse *r, float *tail_storage,
                            int n_freqs, int use_conservative,
-                           double smoothing_base) {
+                           float smoothing_base) {
     r->n_freqs = n_freqs;
     r->use_conservative = use_conservative ? 1 : 0;
     r->smoothing_base = smoothing_base;
-    r->average_decay = 0.0;
+    r->average_decay = 0.0f;
     r->tail_response = tail_storage;
     memset(r->tail_response, 0, (size_t)n_freqs * sizeof(float));
 }
 
 void reverb_freq_resp_reset(ReverbFrequencyResponse *r) {
-    r->average_decay = 0.0;
+    r->average_decay = 0.0f;
     memset(r->tail_response, 0, (size_t)r->n_freqs * sizeof(float));
 }
 
@@ -71,15 +71,15 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
                              const float *frequency_response,
                              int n_partitions,
                              int filter_delay_blocks,
-                             double linear_filter_quality,
+                             float linear_filter_quality,
                              int linear_filter_quality_is_none,
                              int stationary_block) {
     const int N = r->n_freqs;
     const float *direct;   /* frequency_response[filter_delay_blocks] */
     const float *tail_row; /* frequency_response[-1] */
     float direct_energy_f, tail_energy_f;
-    double direct_energy, average_decay, smoothing;
-    float decay_f; /* (float)average_decay applied per-bin (numpy weak scalar) */
+    float direct_energy, average_decay, smoothing;
+    float decay_f; /* average_decay applied per-bin (float32-by-design) */
     float *tail = r->tail_response;
     int k;
 
@@ -96,22 +96,21 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
 
     /* Average-decay scalar over k>=1 (kSkipBins=1). np.sum -> f32 pairwise. */
     direct_energy_f = f32_pairwise_sum(direct + 1, (size_t)(N - 1));
-    /* python: float(np.sum(...)) -> f64. The == 0.0 test is on the f64 value. */
-    direct_energy = (double)direct_energy_f;
-    if (direct_energy == 0.0) {
-        average_decay = 0.0;
+    /* float32-by-design (formerly widened via python float() -> f64). */
+    direct_energy = direct_energy_f;
+    if (direct_energy == 0.0f) {
+        average_decay = 0.0f;
     } else {
         tail_energy_f = f32_pairwise_sum(tail_row + 1, (size_t)(N - 1));
-        average_decay = (double)tail_energy_f / direct_energy;
+        average_decay = tail_energy_f / direct_energy;
     }
 
-    /* EMA: smoothing = smoothing_base * quality (f64); state update in f64. */
+    /* EMA: smoothing = smoothing_base * quality (f32); state update in f32. */
     smoothing = r->smoothing_base * linear_filter_quality;
     r->average_decay += smoothing * (average_decay - r->average_decay);
 
-    /* Per-bin tail = direct(f32) * average_decay: numpy casts the f64 scalar to
-     * f32 first, so the multiply is f32 * (float)average_decay. */
-    decay_f = (float)r->average_decay;
+    /* Per-bin tail = direct(f32) * average_decay(f32), both float32. */
+    decay_f = r->average_decay;
     for (k = 0; k < N; ++k) {
         tail[k] = direct[k] * decay_f;
     }

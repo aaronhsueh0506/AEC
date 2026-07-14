@@ -13,9 +13,10 @@
  *    and error_psd accumulates |error_spec|², so H_error / error_psd / R are
  *    rtol-bounded (<1e-4), not bit-exact. Only the integer control state
  *    (call_counter / partition_idx / initial_state) is bit-exact.
- *  - np.float32 ⇒ float; np.complex64 ⇒ Complex; scalar pyfloat·f32 promotions
- *    follow the OPPOSITE-of-array weak-promotion rule (done in double where the
- *    Python forms a 0-d scalar from a pyfloat × f32).
+ *  - np.float32 ⇒ float; np.complex64 ⇒ Complex. float32-by-design: the old
+ *    "scalar pyfloat×f32 promotes through double" parity nuance is retired —
+ *    Python bit-exact parity is no longer a goal, so scalar promotions here
+ *    are done directly in float32 (single literals get the `f` suffix).
  *
  * v3.10 → v3.22 change: the old P-denominator Kalman body (P/Q/R Riccati +
  * KX-blend + P_floor/p_max clamps) is GONE. The active update is the AEC3
@@ -29,7 +30,7 @@
 #include <math.h>
 
 #ifndef M_PI_AEC
-#define M_PI_AEC 3.14159265358979323846
+#define M_PI_AEC 3.14159265358979323846f
 #endif
 
 static int next_pow2(int x) { int n = 1; while (n < x) n <<= 1; return n; }
@@ -102,18 +103,19 @@ static void pbfdaf_fill_windows(PBFDAF* p) {
      * descending fade in [hop-fade_len:hop], suppressing the last 40 causal taps
      * → dead zone in every partition of the 832-tap IR. */
     for (int i = 0; i < p->hop_size; ++i) p->td_window[i] = 1.0f;
-    /* Non-causal fade [hop:hop+fade_len]: descending from ~1.0 to 0.0. */
+    /* Non-causal fade [hop:hop+fade_len]: descending from ~1.0 to 0.0.
+     * float32-by-design (Python double parity retired). */
     for (int i = 0; i < fade_len; ++i) {
         int idx = p->hop_size + i;
         if (idx < p->fft_size) {
-            double v = 0.5 * (1.0 - cos(M_PI_AEC * (double)(fade_len - 1 - i) / (double)fade_len));
-            p->td_window[idx] = (float)v;
+            float v = 0.5f * (1.0f - cosf(M_PI_AEC * (float)(fade_len - 1 - i) / (float)fade_len));
+            p->td_window[idx] = v;
         }
     }
     /* [hop+fade_len, fft_size) stays 0. */
     for (int i = 0; i < p->block_size; ++i) {
-        double h = 0.5 * (1.0 - cos(2.0 * M_PI_AEC * (double)i / (double)p->block_size));
-        p->sqrt_hann[i] = (float)sqrt(h);
+        float h = 0.5f * (1.0f - cosf(2.0f * M_PI_AEC * (float)i / (float)p->block_size));
+        p->sqrt_hann[i] = sqrtf(h);
     }
 }
 
@@ -296,7 +298,7 @@ static void rfft_padded(PBFDAF* p, const float* time_in, int in_len,
 /* Shared front-end: buffer shift, FFTs, power EMA, echo, error, windowed-error.
  * Identical for PBFDAF and PBFDKF (matches PBFDAF.process lines 191-248).
  * Returns far_hop_energy (the W-update gate). curr_p stored in *out_curr_p. */
-static double pbfdaf_frontend(PBFDAF* p,
+static float pbfdaf_frontend(PBFDAF* p,
                               const float* near_end, const float* far_end,
                               float* output, int* out_curr_p) {
     int hop = p->hop_size, blk = p->block_size, K = p->n_freqs;
@@ -325,20 +327,20 @@ static double pbfdaf_frontend(PBFDAF* p,
     memcpy(p->X_buf + (size_t)curr_p * K, p->far_spec, (size_t)K * sizeof(Complex));
 
     /* power EMA (cold start: direct init when sum(power)<1e-10 and active far) */
-    double pwr_sum = 0.0;
-    for (int k = 0; k < K; ++k) pwr_sum += (double)p->power[k];
-    double far_psd_sum = 0.0;
+    float pwr_sum = 0.0f;
+    for (int k = 0; k < K; ++k) pwr_sum += p->power[k];
+    float far_psd_sum = 0.0f;
     for (int k = 0; k < K; ++k)
-        far_psd_sum += (double)cmag2_np(p->far_spec[k].r, p->far_spec[k].i);
-    if (pwr_sum < 1e-10 && far_psd_sum > 1e-10) {
+        far_psd_sum += cmag2_np(p->far_spec[k].r, p->far_spec[k].i);
+    if (pwr_sum < 1e-10f && far_psd_sum > 1e-10f) {
         /* cold start: power = np.abs(far_spec)**2 */
         for (int k = 0; k < K; ++k)
             p->power[k] = cmag2_np(p->far_spec[k].r, p->far_spec[k].i);
     } else {
-        /* power = alpha_power*power + (1-alpha_power)*far_psd; alpha_power=0.9
-         * (Python float) → (1-0.9) is a double cast to f32. */
-        const float a = (float)0.9;
-        const float b = (float)(1.0 - 0.9);
+        /* power = alpha_power*power + (1-alpha_power)*far_psd; alpha_power=0.9,
+         * float32-by-design. */
+        const float a = 0.9f;
+        const float b = 1.0f - 0.9f;
         for (int k = 0; k < K; ++k)
             p->power[k] = a * p->power[k] + b * cmag2_np(p->far_spec[k].r, p->far_spec[k].i);
     }
@@ -395,12 +397,12 @@ static double pbfdaf_frontend(PBFDAF* p,
     }
 
     /* far_hop_energy = np.sum(far_end**2) / hop. Reproduce np.sum (pairwise f32)
-     * over far_end**2, then divide as f64 (np.float32 / int → float64). */
+     * over far_end**2, then divide in float32 (float32-by-design). */
     {
         float fsq[8192];
         for (int i = 0; i < hop; ++i) fsq[i] = far_end[i] * far_end[i];
         float s = pairwise_sum_f32(fsq, hop);
-        return (double)s / (double)hop;
+        return s / (float)hop;
     }
 }
 
@@ -411,18 +413,18 @@ void pbfdaf_process(PBFDAF* p,
                        float*       output) {
     int K = p->n_freqs, N = p->n_partitions;
     int curr_p;
-    double far_hop_energy = pbfdaf_frontend(p, near_end, far_end, output, &curr_p);
+    float far_hop_energy = pbfdaf_frontend(p, near_end, far_end, output, &curr_p);
 
     /* AEC3 InitialState tracking (count active render hops). */
     if (p->initial_state_active &&
-        far_hop_energy > (double)p->initial_state_far_energy_floor) {
+        far_hop_energy > p->initial_state_far_energy_floor) {
         p->initial_state_active_render_hops += 1;
         if (p->initial_state_active_render_hops >= p->initial_state_threshold_hops)
             p->initial_state_active = 0;
     }
     p->last_initial_state_active = p->initial_state_active;
 
-    if (far_hop_energy > 1e-4) {
+    if (far_hop_energy > 1e-4f) {
         /* === PBFDAF NLMS _update_weights (coarse_filter_update_gain.cc) === */
         float mu_local[8192];
         const float* mu_arr = mu_scale_arr;
@@ -452,7 +454,7 @@ void pbfdaf_process(PBFDAF* p,
             for (int k = 0; k < K; ++k)
                 x2psum[k] += cmag2_np(Xp[k].r, Xp[k].i);
         }
-        float mu_initial_boost = p->initial_state_active ? (float)(0.95 / 0.7) : 1.0f;
+        float mu_initial_boost = p->initial_state_active ? (0.95f / 0.7f) : 1.0f;
         float ng_thr = (float)AEC3_FILTER_NOISE_GATE_POWER_FLOAT;
         float mu_eff[8192];
         for (int k = 0; k < K; ++k) {
@@ -653,17 +655,17 @@ void pbfdkf_copy_weights_from(PBFDKF* dst, const PBFDKF* src) {
     pbfdaf_copy_weights_from(&dst->base, &src->base);
 }
 
-/* float(np.sum(np.abs(error_spec)**2)) — cmag2_np into a scratch then the
- * numpy-1.26 pairwise float32 sum, returned as a C double (Python float()). */
-double pbfdaf_get_error_energy(const PBFDAF* p) {
+/* sum(|error_spec|**2) — cmag2_np into a scratch then the numpy-1.26 pairwise
+ * float32 sum, returned as float32 (float32-by-design, no double promotion). */
+float pbfdaf_get_error_energy(const PBFDAF* p) {
     int K = p->n_freqs;
     float e2[8192];
     for (int k = 0; k < K; ++k)
         e2[k] = cmag2_np(p->error_spec[k].r, p->error_spec[k].i);
-    return (double)pairwise_sum_f32(e2, K);
+    return pairwise_sum_f32(e2, K);
 }
 
-double pbfdkf_get_error_energy(const PBFDKF* p) {
+float pbfdkf_get_error_energy(const PBFDKF* p) {
     return pbfdaf_get_error_energy(&p->base);
 }
 
@@ -723,20 +725,20 @@ static void pbfdkf_h_error_refresh(PBFDKF* p, const float *e2_ref_bins) {
             float leakage = use_conv ? lc_eff : ld_eff;
             float erl_eff = p->erl_per_bin[k];
             if (p->h_error_refresh_erl_floor > 0.0f) {
-                /* max(erl, floor) compared in double per parity rule */
-                if ((double)erl_eff < (double)p->h_error_refresh_erl_floor)
+                /* max(erl, floor), float32-by-design. */
+                if (erl_eff < p->h_error_refresh_erl_floor)
                     erl_eff = p->h_error_refresh_erl_floor;
             }
             p->H_error_per_bin[k] = p->H_error_per_bin[k] + leakage * erl_eff;
         }
         /* Diag: fraction of bins on diverged-leakage (np.mean(~mask)). */
-        p->last_leakage_div_frac = (float)((double)n_div / (double)K);
+        p->last_leakage_div_frac = (float)n_div / (float)K;
     } else {
-        /* scalar fallback: e2_ref_sum = float(np.sum(error_psd)) ; e2_coa scalar.
+        /* scalar fallback: e2_ref_sum = sum(error_psd) (float32); e2_coa scalar.
          * (Not exercised in production: orchestrator sets e2_coarse_per_bin
          * every hop. Kept pairwise-correct for completeness.) */
-        double e2_ref_sum = (double)pairwise_sum_f32(p->error_psd, K);
-        double e2_coa_sum = (double)p->e2_coarse_for_refresh;
+        float e2_ref_sum = pairwise_sum_f32(p->error_psd, K);
+        float e2_coa_sum = p->e2_coarse_for_refresh;
         int use_conv = (e2_ref_sum <= e2_coa_sum) || p->disallow_leakage_diverged;
         /* scalar path is all-or-nothing → frac is 0.0 or 1.0. */
         p->last_leakage_div_frac = use_conv ? 0.0f : 1.0f;
@@ -846,18 +848,18 @@ void pbfdkf_process(PBFDKF* p,
     PBFDAF* b = &p->base;
     int K = b->n_freqs, N = b->n_partitions;
     int curr_p;
-    double far_hop_energy = pbfdaf_frontend(b, near_end, far_end, output, &curr_p);
+    float far_hop_energy = pbfdaf_frontend(b, near_end, far_end, output, &curr_p);
 
     /* AEC3 InitialState tracking. */
     if (b->initial_state_active &&
-        far_hop_energy > (double)b->initial_state_far_energy_floor) {
+        far_hop_energy > b->initial_state_far_energy_floor) {
         b->initial_state_active_render_hops += 1;
         if (b->initial_state_active_render_hops >= b->initial_state_threshold_hops)
             b->initial_state_active = 0;
     }
     b->last_initial_state_active = b->initial_state_active;
 
-    if (far_hop_energy > 1e-4) {
+    if (far_hop_energy > 1e-4f) {
         /* === PBFDKF._update_weights ============================== */
         float mu_local[8192];
         const float* mu_arr = mu_scale_arr;
@@ -895,13 +897,12 @@ void pbfdkf_process(PBFDKF* p,
         /* (RSA mask folded into captured mu_arr — see header note.) */
 
         /* error_psd EMA + R = max(error_psd, delta).
-         * Python: error_psd = np.abs(error_spec)**2;
-         *         _error_psd = _alpha_r*_error_psd + (1-_alpha_r)*error_psd.
-         * _alpha_r is a Python float (double 0.95), so (1-_alpha_r) is computed
-         * in DOUBLE then cast to f32 by the array op — (float)(1.0-0.95), NOT
-         * 1.0f-0.95f (the all-f32 form is off by 1 ULP). */
-        const float ar = (float)0.95;
-        const float oar = (float)(1.0 - 0.95);
+         * error_psd = |error_spec|**2;
+         * _error_psd = _alpha_r*_error_psd + (1-_alpha_r)*error_psd.
+         * alpha_r=0.95, float32-by-design (the old double-promotion parity
+         * nuance is retired). */
+        const float ar = 0.95f;
+        const float oar = 1.0f - 0.95f;
         for (int k = 0; k < K; ++k) {
             p->error_psd[k] = ar * p->error_psd[k] + oar * e2_ref[k];
             p->R[k] = (p->error_psd[k] > b->delta) ? p->error_psd[k] : (float)b->delta;

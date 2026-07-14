@@ -53,14 +53,14 @@ typedef struct AecDebugTraceRow {
     int    usable_linear;       /* aec_state.usable_linear_estimate()         */
     int    dominant_nearend;    /* suppression_gain dominant-nearend          */
     int    filter_converged;    /* AEC3 per-frame aec3_converged              */
-    double fullband_erle;       /* aec_state.fullband_erle_log2()             */
-    double erle_mean;           /* mean of per-bin subband ERLE               */
-    double r2_mean;             /* mean of per-bin residual-echo R^2          */
-    double gain_mean;           /* mean of per-bin SuppressionGain output     */
-    double comfort_noise_mean;  /* mean of per-bin comfort-noise PSD          */
-    double near_pwr;            /* near-power EMA                             */
-    double raw_err_pwr;         /* raw-error-power EMA                        */
-    double limiter_gain;        /* OLA output limiter gain                    */
+    float  fullband_erle;       /* aec_state.fullband_erle_log2()             */
+    float  erle_mean;           /* mean of per-bin subband ERLE               */
+    float  r2_mean;             /* mean of per-bin residual-echo R^2          */
+    float  gain_mean;           /* mean of per-bin SuppressionGain output     */
+    float  comfort_noise_mean;  /* mean of per-bin comfort-noise PSD          */
+    float  near_pwr;            /* near-power EMA                             */
+    float  raw_err_pwr;         /* raw-error-power EMA                        */
+    float  limiter_gain;        /* OLA output limiter gain                    */
 } AecDebugTraceRow;
 
 void aec_debug_set_trace(FILE* fp);  /* NULL → trace off (default)            */

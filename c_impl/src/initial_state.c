@@ -3,17 +3,18 @@
  * Cold-start state machine (initial-phase counter). No float arithmetic in the
  * update path; the sole numeric op is the constructor threshold
  *   int(initial_state_seconds * HOPS_PER_SECOND)
- * = an f64 multiply then truncate-toward-zero (Python int()), reproduced as
- * (int)((double)seconds * HOPS_PER_SECOND). All run-time state is integer/bool.
+ * = a float32 multiply (float32-by-design; converted for uniformity, drift
+ * accepted) then truncate-toward-zero (Python int()), reproduced as
+ * (int)((float)seconds * HOPS_PER_SECOND). All run-time state is integer/bool.
  */
 #include "initial_state.h"
 
 void initial_state_init(InitialState *s, int conservative_initial_phase,
-                        double initial_state_seconds) {
+                        float initial_state_seconds) {
     s->conservative = conservative_initial_phase ? 1 : 0;
-    /* int(initial_state_seconds * HOPS_PER_SECOND) — f64 product, int() trunc */
+    /* int(initial_state_seconds * HOPS_PER_SECOND) — f32 product, int() trunc */
     s->initial_state_hops =
-        (int)((double)initial_state_seconds * (double)INITIAL_STATE_HOPS_PER_SECOND);
+        (int)(initial_state_seconds * (float)INITIAL_STATE_HOPS_PER_SECOND);
     /* AEC3 5 s conservative threshold -> 5 * 100 = 500 hops */
     s->conservative_hops = 5 * INITIAL_STATE_HOPS_PER_SECOND;
     s->initial_state = 1;

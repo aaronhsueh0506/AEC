@@ -15,76 +15,76 @@
  *     saturation_level = alpha*saturation_level + (1-alpha)*raw_sat
  *
  * Note: np.sum over a bool array is integer; in C we use long sum.
- * abs(...) on Python float is fp64; C uses fabs.
+ * abs(...) runs float32-by-design; C uses fabsf.
  */
 #include "saturation.h"
 #include <math.h>
 #include <stddef.h>
 
-void saturation_init(Saturation* s, double threshold) {
+void saturation_init(Saturation* s, float threshold) {
     s->threshold        = threshold;
-    s->saturation_level = 0.0;
-    s->alpha_attack     = 0.3;
-    s->alpha_release    = 0.98;
+    s->saturation_level = 0.0f;
+    s->alpha_attack     = 0.3f;
+    s->alpha_release    = 0.98f;
 }
 
 void saturation_reset(Saturation* s) {
-    s->saturation_level = 0.0;
+    s->saturation_level = 0.0f;
 }
 
-double saturation_detect(Saturation* s, const float* signal, size_t n) {
+float saturation_detect(Saturation* s, const float* signal, size_t n) {
     if (n == 0) return s->saturation_level;
 
-    const double thr      = s->threshold;
-    const double thr_high = thr * 0.8;
+    const float thr      = s->threshold;
+    const float thr_high = thr * 0.8f;
 
     long clip_count   = 0;
     long consec_count = 0;
 
-    /* First pass: clip_count + build high_mask implicitly via fabs. */
+    /* First pass: clip_count + build high_mask implicitly via fabsf. */
     for (size_t i = 0; i < n; ++i) {
-        double a = fabs((double)signal[i]);
+        float a = fabsf(signal[i]);
         if (a > thr) clip_count++;
     }
 
     /* Consecutive-near-peak loop (Python iterates i from 1..n-1) */
     for (size_t i = 1; i < n; ++i) {
-        double a_i  = fabs((double)signal[i]);
-        double a_im = fabs((double)signal[i - 1]);
+        float a_i  = fabsf(signal[i]);
+        float a_im = fabsf(signal[i - 1]);
         if (a_i > thr_high && a_im > thr_high &&
-            fabs((double)signal[i] - (double)signal[i - 1]) < 1e-6) {
+            fabsf(signal[i] - signal[i - 1]) < 1e-6f) {
             consec_count++;
         }
     }
 
-    double raw_sat = (double)(clip_count + 2 * consec_count) / (double)n;
-    if (raw_sat > 1.0) raw_sat = 1.0;
+    float raw_sat = (float)(clip_count + 2 * consec_count) / (float)n;
+    if (raw_sat > 1.0f) raw_sat = 1.0f;
 
-    double alpha = (raw_sat > s->saturation_level) ? s->alpha_attack
-                                                   : s->alpha_release;
+    float alpha = (raw_sat > s->saturation_level) ? s->alpha_attack
+                                                  : s->alpha_release;
     s->saturation_level = alpha * s->saturation_level
-                        + (1.0 - alpha) * raw_sat;
+                        + (1.0f - alpha) * raw_sat;
     return s->saturation_level;
 }
 
 void saturation_soft_clip(const float* signal, float* out, size_t n,
-                             double knee) {
+                             float knee) {
     /* Python:
      *     out = signal.copy()
      *     mask = abs(signal) >= knee
      *     for masked: out = sign * (knee + tanh(excess/scale)*scale)
      *     scale = max(1.0 - knee, 1e-6)
      */
-    double scale = 1.0 - knee;
-    if (scale < 1e-6) scale = 1e-6;
+    float scale = 1.0f - knee;
+    if (scale < 1e-6f) scale = 1e-6f;
     for (size_t i = 0; i < n; ++i) {
-        double xi = (double)signal[i];
-        double a  = fabs(xi);
+        float xi = signal[i];
+        float a  = fabsf(xi);
         if (a >= knee) {
-            double sign     = (xi > 0.0) ? 1.0 : (xi < 0.0 ? -1.0 : 0.0);
-            double excess   = a - knee;
-            double compr    = knee + tanh(excess / scale) * scale;
-            out[i] = (float)(sign * compr);
+            float sign     = (xi > 0.0f) ? 1.0f : (xi < 0.0f ? -1.0f : 0.0f);
+            float excess   = a - knee;
+            float compr    = knee + tanhf(excess / scale) * scale;
+            out[i] = sign * compr;
         } else {
             out[i] = signal[i];
         }

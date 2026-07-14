@@ -3,11 +3,12 @@
  * Per-bin ERLE estimator with onset compensation (AEC3 SubbandErleEstimator,
  * single capture channel). See subband_erle.h for the parity contract.
  *
- * All per-bin ERLE arithmetic is float32 (numpy weak promotion: Python-float
- * scalars cast to f32 before combining with the f32 arrays). The lone float64
- * quantity is _x2_band_energy_threshold; the low-render test
- *   low |= x2(f32) < thr(f64)
- * is a numpy mixed-dtype comparison -> x2 promoted to f64, compared in double.
+ * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity
+ * retired, drift accepted). All per-bin ERLE arithmetic is float32 end-to-end
+ * (scalars combined with the f32 arrays round once, in float). The lone
+ * threshold quantity _x2_band_energy_threshold is float32 too (narrowed once
+ * from the double aec3_per_bin_psd_threshold() helper's result at init); the
+ * low-render test `low |= x2(f32) < thr(f32)` is now a plain float32 compare.
  * Built with -ffp-contract=off so per-op float roundings are not fused.
  */
 #include "subband_erle.h"
@@ -39,11 +40,11 @@ void subband_erle_init(SubbandErle *s, int n_bins,
     s->min_erle = min_erle;
     s->use_onset_detection = use_onset_detection ? 1 : 0;
     s->use_min_erle_during_onsets = use_min_erle_during_onsets ? 1 : 0;
-    s->alpha_up = 0.05;
-    s->alpha_down = 0.1;
-    s->onset_release_decay = 0.97;
+    s->alpha_up = 0.05f;
+    s->alpha_down = 0.1f;
+    s->onset_release_decay = 0.97f;
     /* _x2_band_energy_threshold = per_bin_psd_threshold(44015068.0, hop_size)
-     * (ref_hop=160), a float64 scalar. */
+     * (ref_hop=160); float32 end-to-end. */
     s->x2_band_energy_threshold =
         aec3_per_bin_psd_threshold(SE_X2_BAND_ENERGY_THRESHOLD, hop_size, 160);
 
@@ -83,27 +84,25 @@ void subband_erle_reset(SubbandErle *s) {
 
 /* _smoothed_update(prev, new_val, low_render, min_v, max_v) -> float (f32).
  *
- * numpy scalar promotion: prev/new_val are np.float32 scalars; alpha/min_v/
- * max_v are Python floats (f64). So:
- *   diff = new_val - prev          -> float32 (two f32 scalars)
- *   v    = prev + alpha * diff     -> float64 (f32_scalar * pyfloat -> f64)
- *   v    = np.clip(v, min_v, max_v)-> float64
- *   store to f32 array             -> (float)v
- * alpha (0.05/0.1/0.0) is exactly representable so passing it as float is fine
- * inside the f64 multiply; min_v/max_v are passed as double for the clip. */
+ * All-float32, single rounding per op:
+ *   diff = new_val - prev          -> float32
+ *   v    = prev + alpha * diff     -> float32
+ *   v    = clip(v, min_v, max_v)   -> float32
+ * (previously widened alpha*diff to float64 to mirror numpy's Python-float ×
+ * f32-scalar promotion; that widen-then-narrow round trip is retired.) */
 static float smoothed_update(const SubbandErle *s, float prev, float new_val,
-                             int low_render, double min_v, double max_v) {
-    double alpha = s->alpha_up;
-    float  diff = new_val - prev;                  /* f32 subtraction */
-    double v;
+                             int low_render, float min_v, float max_v) {
+    float alpha = s->alpha_up;
+    float diff = new_val - prev;                   /* f32 subtraction */
+    float v;
     if (new_val < prev) {
-        alpha = low_render ? 0.0 : s->alpha_down;
+        alpha = low_render ? 0.0f : s->alpha_down;
     }
-    v = (double)prev + alpha * (double)diff;       /* f64 */
-    /* np.clip(v, min_v, max_v): clamp low then high (f64). */
+    v = prev + alpha * diff;                       /* f32 */
+    /* clip(v, min_v, max_v): clamp low then high. */
     if (v < min_v) v = min_v;
     if (v > max_v) v = max_v;
-    return (float)v;                               /* store to f32 array */
+    return v;
 }
 
 /* _update_accumulated_spectra */
@@ -123,8 +122,8 @@ static void update_accumulated_spectra(SubbandErle *s,
     for (k = 0; k < s->n_bins; ++k) {
         s->y2_acc[k] = s->y2_acc[k] + y2[k];     /* f32 += f32 */
         s->e2_acc[k] = s->e2_acc[k] + e2[k];     /* f32 += f32 */
-        /* low_render |= x2 < thr : x2(f32) promoted to f64, compared in double */
-        if ((double)x2[k] < s->x2_band_energy_threshold) {
+        /* low_render |= x2 < thr : both float32, compare directly. */
+        if (x2[k] < s->x2_band_energy_threshold) {
             s->low_render_energy[k] = 1;
         }
     }
@@ -171,18 +170,17 @@ static void update_bands(SubbandErle *s, int converged_filter,
                 if (s->coming_onset[k]) {
                     s->coming_onset[k] = 0;
                     if (!s->use_min_erle_during_onsets) {
-                        /* v = during + alpha*(new_erle - during): the (new-during)
-                         * subtraction is f32; alpha(pyfloat)*diff -> f64; clip f64;
-                         * store (float). alpha = 0.3 if new<during else 0.15. */
-                        float  prev_d = s->erle_during_onsets[k];
-                        double alpha = (new_erle < prev_d) ? 0.3 : 0.15;
-                        float  diff = new_erle - prev_d;          /* f32 */
-                        double v = (double)prev_d + alpha * (double)diff; /* f64 */
-                        double lo = (double)s->min_erle;
-                        double hi = (double)s->max_erle[k];
-                        if (v < lo) v = lo;            /* np.clip */
+                        /* v = during + alpha*(new_erle - during), all float32.
+                         * alpha = 0.3f if new<during else 0.15f. */
+                        float prev_d = s->erle_during_onsets[k];
+                        float alpha = (new_erle < prev_d) ? 0.3f : 0.15f;
+                        float diff = new_erle - prev_d;          /* f32 */
+                        float v = prev_d + alpha * diff;         /* f32 */
+                        float lo = s->min_erle;
+                        float hi = s->max_erle[k];
+                        if (v < lo) v = lo;            /* clip */
                         if (v > hi) v = hi;
-                        s->erle_during_onsets[k] = (float)v;
+                        s->erle_during_onsets[k] = v;
                     }
                 }
                 s->hold_counters[k] = SE_BLOCKS_FOR_ONSET_DETECTION;
@@ -192,17 +190,15 @@ static void update_bands(SubbandErle *s, int converged_filter,
         /* Per-bin smoothed ERLE update (only when is_erle_updated). */
         if (is_updated) {
             s->erle[k] = smoothed_update(s, s->erle[k], new_erle, low,
-                                         (double)s->min_erle,
-                                         (double)s->max_erle[k]);
+                                         s->min_erle, s->max_erle[k]);
             if (s->use_onset_detection) {
                 s->erle_onset_compensated[k] =
                     smoothed_update(s, s->erle_onset_compensated[k], new_erle,
-                                    low, (double)s->min_erle,
-                                    (double)s->max_erle[k]);
+                                    low, s->min_erle, s->max_erle[k]);
             }
             s->erle_unbounded[k] =
                 smoothed_update(s, s->erle_unbounded[k], new_erle, low,
-                                (double)s->min_erle, SE_UNBOUNDED_ERLE_MAX);
+                                s->min_erle, SE_UNBOUNDED_ERLE_MAX);
         }
     }
 }
@@ -216,15 +212,12 @@ static void decrease_erle_for_low_render(SubbandErle *s) {
         if (s->hold_counters[k] <=
             (SE_BLOCKS_FOR_ONSET_DETECTION - SE_BLOCKS_TO_HOLD_ERLE)) {
             if (s->erle_onset_compensated[k] > s->erle_during_onsets[k]) {
-                /* max(during, 0.97 * onset_compensated): 0.97(pyfloat) *
-                 * onset_compensated(f32 scalar) -> f64; builtin max picks the
-                 * f64 product or the f32 'during' (promoted in the compare);
-                 * result stored to f32 array -> (float). */
-                double decayed = s->onset_release_decay *
-                                 (double)s->erle_onset_compensated[k];
-                double during = (double)s->erle_during_onsets[k];
+                /* max(during, 0.97f * onset_compensated), all float32. */
+                float decayed = s->onset_release_decay *
+                                s->erle_onset_compensated[k];
+                float during = s->erle_during_onsets[k];
                 s->erle_onset_compensated[k] =
-                    (float)(decayed > during ? decayed : during);
+                    decayed > during ? decayed : during;
             }
             if (s->hold_counters[k] <= 0) {
                 s->coming_onset[k] = 1;

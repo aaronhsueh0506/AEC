@@ -7,7 +7,7 @@
  * Parity: the real pipeline feeds float32 power_spectrum + float32/scalar
  * scaling, so the whole update runs in float32 — three separate float32
  * roundings (mul, add, mul). Built with -ffp-contract=off so the compiler does
- * not fuse them. `reverb` is therefore `float`, not `aec3_real`.
+ * not fuse them. `reverb` is `float` (the whole chain is float32 now).
  */
 #ifndef REVERB_MODEL_H
 #define REVERB_MODEL_H

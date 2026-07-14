@@ -12,8 +12,9 @@
  *   This module carries NO float arithmetic in its update path. The only
  *   numeric op is the constructor threshold
  *     _initial_state_hops = int(initial_state_seconds * HOPS_PER_SECOND)
- *   which is a Python float multiply (f64) followed by int() truncation
- *   toward zero. Reproduced as (int)((double)seconds * HOPS_PER_SECOND).
+ *   which is a float32 multiply (float32-by-design; converted for uniformity,
+ *   drift accepted — formerly a Python f64 multiply) followed by int()
+ *   truncation toward zero. Reproduced as (int)((float)seconds * HOPS_PER_SECOND).
  *   All run-time state is integer/bool:
  *     _strong_not_saturated_render_blocks : int (monotonic counter)
  *     _initial_state, _transition_triggered : bool.
@@ -35,7 +36,7 @@ typedef struct {
 
 /* conservative_initial_phase: 0/1 ; initial_state_seconds: config float (default 2.5) */
 void initial_state_init(InitialState *s, int conservative_initial_phase,
-                        double initial_state_seconds);
+                        float initial_state_seconds);
 
 void initial_state_reset(InitialState *s);
 

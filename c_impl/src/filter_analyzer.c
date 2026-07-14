@@ -14,8 +14,8 @@ static const float FA_HPF_COEFFS[3] = {
 #define FA_HPF_LEN 3
 
 /* ConsistentFilterDetector thresholds (filter_analyzer.cc:264-265 verbatim). */
-#define FA_FLOOR_RATIO        10.0
-#define FA_SECONDARY_RATIO     2.0
+#define FA_FLOOR_RATIO        10.0f
+#define FA_SECONDARY_RATIO     2.0f
 #define FA_FLOOR_LOW_OFFSET    64
 #define FA_FLOOR_HIGH_OFFSET   128
 
@@ -65,13 +65,15 @@ float fa_f32_pairwise_sum(const float *a, size_t n) {
     }
 }
 
-/* Same structure, float64 accumulate (NPY_PW_BLOCKSIZE=128 for all dtypes). */
-double fa_f64_pairwise_sum(const double *a, size_t n) {
+/* Same structure, float32-by-design (formerly a float64 accumulate variant;
+ * converted for uniformity — the render active-power sum below now runs
+ * entirely in float32, matching fa_f32_pairwise_sum bit-for-bit). */
+float fa_f64_pairwise_sum(const float *a, size_t n) {
     if (n == 0) {
-        return 0.0;
+        return 0.0f;
     }
     if (n < 8) {
-        double res = a[0];
+        float res = a[0];
         size_t i;
         for (i = 1; i < n; ++i) {
             res = res + a[i];
@@ -79,9 +81,9 @@ double fa_f64_pairwise_sum(const double *a, size_t n) {
         return res;
     }
     if (n <= 128) {
-        double r0 = a[0], r1 = a[1], r2 = a[2], r3 = a[3];
-        double r4 = a[4], r5 = a[5], r6 = a[6], r7 = a[7];
-        double res;
+        float r0 = a[0], r1 = a[1], r2 = a[2], r3 = a[3];
+        float r4 = a[4], r5 = a[5], r6 = a[6], r7 = a[7];
+        float res;
         size_t i;
         for (i = 8; i + 8 <= n; i += 8) {
             r0 = r0 + a[i + 0];
@@ -108,8 +110,8 @@ double fa_f64_pairwise_sum(const double *a, size_t n) {
 /* ----------------------- ConsistentFilterDetector ------------------------ */
 static void cd_reset(FaConsistentDetector *c) {
     c->significant_peak = 0;
-    c->floor_accum = 0.0;
-    c->secondary_peak = 0.0;
+    c->floor_accum = 0.0f;
+    c->secondary_peak = 0.0f;
     c->floor_low_limit = 0;
     c->floor_high_limit = 0;
     c->counter = 0;
@@ -127,15 +129,15 @@ static void cd_accumulate_slice(FaConsistentDetector *c, const float *taps,
     for (i = 0; i < n; ++i) {
         scratch[i] = fabsf(taps[lo + i]);
     }
-    /* np.abs(seg).sum() : float32 pairwise -> float() -> += f64 */
-    c->floor_accum += (double)fa_f32_pairwise_sum(scratch, (size_t)n);
-    /* np.abs(seg).max(initial=0.0) : float32 max, widened to f64 via float() */
+    /* np.abs(seg).sum() : float32 pairwise, accumulated directly (float32-by-design) */
+    c->floor_accum += fa_f32_pairwise_sum(scratch, (size_t)n);
+    /* np.abs(seg).max(initial=0.0) : float32 max, stored directly (float32-by-design) */
     seg_max = scratch[0];
     for (i = 1; i < n; ++i) {
         if (scratch[i] > seg_max) seg_max = scratch[i];
     }
-    if ((double)seg_max > c->secondary_peak) {
-        c->secondary_peak = (double)seg_max;
+    if (seg_max > c->secondary_peak) {
+        c->secondary_peak = seg_max;
     }
 }
 
@@ -144,12 +146,12 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
                      int region_start, int region_end,
                      const float *render_block, int render_block_len,
                      int peak_index, int delay_blocks,
-                     float *scratch, double *render_sq_scratch) {
+                     float *scratch, float *render_sq_scratch) {
     int hi_lower, lo_upper;
 
     if (region_start == 0) {
-        c->floor_accum = 0.0;
-        c->secondary_peak = 0.0;
+        c->floor_accum = 0.0f;
+        c->secondary_peak = 0.0f;
         c->floor_low_limit =
             (peak_index >= FA_FLOOR_LOW_OFFSET) ? peak_index - FA_FLOOR_LOW_OFFSET : 0;
         c->floor_high_limit =
@@ -174,9 +176,9 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
     /* End-of-sweep significance check (filter_analyzer.cc:258-266). */
     if (region_end == size - 1) {
         int denom_i = c->floor_low_limit + size - c->floor_high_limit;
-        double denom = (denom_i > 1) ? (double)denom_i : 1.0;
-        double floor_v = c->floor_accum / denom;
-        double abs_peak = fabs((double)h[peak_index]);
+        float denom = (denom_i > 1) ? (float)denom_i : 1.0f;
+        float floor_v = c->floor_accum / denom;
+        float abs_peak = fabsf(h[peak_index]);
         c->significant_peak =
             (abs_peak > FA_FLOOR_RATIO * floor_v
              && abs_peak > FA_SECONDARY_RATIO * c->secondary_peak);
@@ -185,7 +187,7 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
     if (c->significant_peak) {
         int active, i;
         for (i = 0; i < render_block_len; ++i) {
-            double v = (double)render_block[i];  /* astype(np.float64) */
+            float v = render_block[i];  /* float32-by-design (was astype(np.float64)) */
             render_sq_scratch[i] = v * v;
         }
         active = (fa_f64_pairwise_sum(render_sq_scratch, (size_t)render_block_len)
@@ -203,9 +205,9 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
 
 /* ------------------------------ FilterAnalyzer --------------------------- */
 void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
-             double active_render_limit, int bounded_erl, double default_gain) {
+             float active_render_limit, int bounded_erl, float default_gain) {
     m->active_render_threshold =
-        (double)((active_render_limit * active_render_limit) * (double)FA_HOP_SAMPLES);
+        (active_render_limit * active_render_limit) * (float)FA_HOP_SAMPLES;
     m->bounded_erl = bounded_erl ? 1 : 0;
     m->default_gain = default_gain;
     m->consistent.active_render_threshold = m->active_render_threshold;
@@ -281,12 +283,12 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     int seg_lo, seg_hi, i, seg_amax;
     float cur_sq, best_sq, hp, sp;
     int sufficient;
-    double peak_abs;
+    float peak_abs;
     /* scratch buffers sized to the filter length / render length. The largest
      * abs-slice spans at most one region (HOP) plus the floor offsets; the
-     * filter length (size) bounds it safely. render block bounds the f64 sq. */
+     * filter length (size) bounds it safely. render block bounds the sq buf. */
     float  abs_scratch[1024];           /* >= size (960); detect slice <= size  */
-    double render_sq_scratch[1024];     /* >= render_block_len (160)            */
+    float  render_sq_scratch[1024];     /* >= render_block_len (160)            */
 
     if (size == 0) {
         return;
@@ -326,14 +328,14 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
      * UpdateFilterGain and reads filter_time_domain[peak_index] from it, so the
      * gain is |h_hpf[peak]| (matches filter_analyzer.py update()). */
     sufficient = (m->blocks_since_reset > FA_CONVERGENCE_THRESHOLD_HOPS);
-    peak_abs = fabs((double)h[m->peak_index]);
+    peak_abs = fabsf(h[m->peak_index]);
     if (sufficient && m->consistent_estimate) {
         m->gain = peak_abs;
-    } else if (m->gain != 0.0) {        /* `elif self._gain:` (truthy) */
+    } else if (m->gain != 0.0f) {        /* `elif self._gain:` (truthy) */
         m->gain = (m->gain > peak_abs) ? m->gain : peak_abs;
     }
-    if (m->bounded_erl && m->gain != 0.0) {
-        m->gain = (m->gain > 0.01) ? m->gain : 0.01;
+    if (m->bounded_erl && m->gain != 0.0f) {
+        m->gain = (m->gain > 0.01f) ? m->gain : 0.01f;
     }
 
     /* ConsistentFilterDetector (filter_analyzer.cc:135-138). */
@@ -353,7 +355,7 @@ int fa_any_filter_consistent(const FilterAnalyzer *m) {
     return m->consistent_estimate;
 }
 
-double fa_max_echo_path_gain(const FilterAnalyzer *m) {
+float fa_max_echo_path_gain(const FilterAnalyzer *m) {
     return m->gain;
 }
 

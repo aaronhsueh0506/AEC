@@ -9,40 +9,40 @@
 #include <math.h>
 
 /* ---------------------------------------------------------------------------
- * pairwise float64 sum matching numpy's reduction EXACTLY (the f64 twin of
- * pbfdkf.c's pairwise_sum_f32): an 8-accumulator unrolled leaf for n<=128
- * (numpy NPY_PW_BLOCKSIZE), then a recursive split at n/2 rounded down to a
- * multiple of 8. np.sum over float64 is pairwise the same way as float32.
- * Used for the e2/y2/s2 = np.sum(<arr>.astype(float64)**2) block energies. */
-static double pw_leaf_f64(const double *a, int n) {
+ * pairwise float32 sum matching numpy's reduction tree shape (float32-by-
+ * design; formerly a float64 accumulator mirroring pbfdkf.c's pairwise_sum_f32
+ * twin): an 8-accumulator unrolled leaf for n<=128 (numpy NPY_PW_BLOCKSIZE),
+ * then a recursive split at n/2 rounded down to a multiple of 8.
+ * Used for the e2/y2/s2 = np.sum(<arr> ** 2) block energies. */
+static float pw_leaf_f32(const float *a, int n) {
     if (n < 8) {
-        double s = 0.0;
+        float s = 0.0f;
         for (int i = 0; i < n; ++i) s += a[i];
         return s;
     }
-    double r[8];
+    float r[8];
     for (int j = 0; j < 8; ++j) r[j] = a[j];
     int i = 8;
     for (; i + 8 <= n; i += 8)
         for (int j = 0; j < 8; ++j) r[j] += a[i + j];
-    double res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
+    float res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
     for (; i < n; ++i) res += a[i];
     return res;
 }
-static double pairwise_sum_f64(const double *a, int n) {
-    if (n <= 128) return pw_leaf_f64(a, n);
+static float pairwise_sum_f32(const float *a, int n) {
+    if (n <= 128) return pw_leaf_f32(a, n);
     int n2 = n / 2; n2 -= (n2 % 8);
-    return pairwise_sum_f64(a, n2) + pairwise_sum_f64(a + n2, n - n2);
+    return pairwise_sum_f32(a, n2) + pairwise_sum_f32(a + n2, n - n2);
 }
 
-/* np.sum(arr.astype(float64) ** 2): upcast each f32 sample to double, square in
- * double, pairwise-sum in double. */
-static double sum_sq_f64(const float *a, int n, double *scratch) {
+/* np.sum(arr ** 2): square and pairwise-sum, both float32 (float32-by-design;
+ * formerly upcast each f32 sample to double before squaring/summing). */
+static float sum_sq_f32(const float *a, int n, float *scratch) {
     for (int i = 0; i < n; ++i) {
-        double v = (double)a[i];
+        float v = a[i];
         scratch[i] = v * v;
     }
-    return pairwise_sum_f64(scratch, n);
+    return pairwise_sum_f32(scratch, n);
 }
 
 int linear_filter_select_init(LinearFilterSelect *s,
@@ -95,31 +95,32 @@ void linear_filter_select(LinearFilterSelect *s,
     int hop = s->hop, blk = s->block_size, fft_size = s->fft_size, K = s->n_freqs;
 
     /* s_refined_time = near - e_refined; s_coarse_time = near - e_coarse
-     * (float32 elementwise). e2/y2/s2 = np.sum(arr.astype(f64) ** 2). */
-    double sq[8192];   /* hop <= block_size <= 8192 */
+     * (float32 elementwise). e2/y2/s2 = np.sum(arr ** 2), float32-by-design
+     * (formerly np.sum(arr.astype(f64) ** 2)). */
+    float sq[8192];   /* hop <= block_size <= 8192 */
     /* e2_refined */
-    double e2_refined = sum_sq_f64(e_refined_time, hop, sq);
+    float e2_refined = sum_sq_f32(e_refined_time, hop, sq);
     /* e2_coarse */
-    double e2_coarse = sum_sq_f64(e_coarse_time, hop, sq);
+    float e2_coarse = sum_sq_f32(e_coarse_time, hop, sq);
     /* y2 */
-    double y2 = sum_sq_f64(near_end, hop, sq);
-    /* s2_refined: build s_refined_time (f32) then sum-sq in f64 */
+    float y2 = sum_sq_f32(near_end, hop, sq);
+    /* s2_refined: build s_refined_time (f32) then sum-sq in f32 */
     {
         float sref[8192];
         for (int i = 0; i < hop; ++i) sref[i] = near_end[i] - e_refined_time[i];
-        double s2_refined = sum_sq_f64(sref, hop, sq);
+        float s2_refined = sum_sq_f32(sref, hop, sq);
         /* s2_coarse */
         float scoa[8192];
         for (int i = 0; i < hop; ++i) scoa[i] = near_end[i] - e_coarse_time[i];
-        double s2_coarse = sum_sq_f64(scoa, hop, sq);
+        float s2_coarse = sum_sq_f32(scoa, hop, sq);
 
-        /* thresholds (all double) */
-        double int16_scale_sq = 32768.0 * 32768.0;
-        double thr_30 = (30.0 * 30.0) * (double)hop / int16_scale_sq;
-        double thr_60 = (60.0 * 60.0) * (double)hop / int16_scale_sq;
+        /* thresholds (all float32) */
+        float int16_scale_sq = 32768.0f * 32768.0f;
+        float thr_30 = (30.0f * 30.0f) * (float)hop / int16_scale_sq;
+        float thr_60 = (60.0f * 60.0f) * (float)hop / int16_scale_sq;
 
         int cond_coarse_cleaner =
-            (e2_coarse < 0.9 * e2_refined) &&
+            (e2_coarse < 0.9f * e2_refined) &&
             (y2 > thr_30) &&
             (s2_refined > thr_60 || s2_coarse > thr_60);
         int cond_refined_diverged =
@@ -141,7 +142,7 @@ void linear_filter_select(LinearFilterSelect *s,
              * → f32. (1.0 - _s): pyfloat - f32_array → f32. products f32. */
             for (int k = 0; k < kT; ++k) {
                 float kf = (float)k + 1.0f;          /* arange(f32)+1.0 → f32 */
-                float sc = kf / (float)(kT + 1.0);   /* / pyfloat-as-f32 */
+                float sc = kf / (float)(kT + 1);      /* f32 divide */
                 float one_minus = 1.0f - sc;         /* 1.0(f32) - sc */
                 s->e_form[k] = one_minus * from_time[k] + sc * to_time[k];
             }

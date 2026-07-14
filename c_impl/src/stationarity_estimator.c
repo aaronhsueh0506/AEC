@@ -1,12 +1,12 @@
 /* stationarity_estimator.c — C port of
  * python/modules/state/stationarity_estimator.py.
  *
- * All per-bin math is float32 to match numpy<2 weak promotion: every Python
- * float scalar is cast to float32 before combining with the float32 arrays.
- * Each (cast scalar) op is a separate float32 rounding; -ffp-contract=off keeps
- * the compiler from fusing them. fp64 only appears for the scalar pre-compute of
- * alpha / 1.0/avg_init (exactly as Python computes those scalars in double, then
- * the numpy array op casts them down to float32).
+ * All per-bin math is float32-by-design (converted for uniformity as part of
+ * the f32 campaign; formerly matched numpy<2 weak promotion by keeping Python
+ * float scalars in fp64 and casting to float32 at the point they combined with
+ * the float32 arrays). Each op is a separate float32 rounding; -ffp-contract=off
+ * keeps the compiler from fusing them. The scalar pre-compute of alpha /
+ * 1.0/avg_init now runs directly in float32.
  */
 #include "stationarity_estimator.h"
 
@@ -18,9 +18,9 @@
 /* ── _NoiseSpectrum ───────────────────────────────────────────────────────── */
 
 static void noise_spectrum_init(NoiseSpectrum *n, int n_freqs,
-                                double min_noise_power, int avg_init_hops,
-                                int initial_phase_hops, double alpha,
-                                double alpha_init, float *noise_storage) {
+                                float min_noise_power, int avg_init_hops,
+                                int initial_phase_hops, float alpha,
+                                float alpha_init, float *noise_storage) {
     int k;
     n->n_freqs = n_freqs;
     n->min_noise = min_noise_power;
@@ -29,10 +29,10 @@ static void noise_spectrum_init(NoiseSpectrum *n, int n_freqs,
     n->alpha = alpha;
     n->alpha_init = alpha_init;
     /* _tilt = (alpha_init - alpha) / max(1, init_phase) */
-    n->tilt = (alpha_init - alpha) / (double)(initial_phase_hops > 1 ? initial_phase_hops : 1);
+    n->tilt = (alpha_init - alpha) / (float)(initial_phase_hops > 1 ? initial_phase_hops : 1);
     n->noise = noise_storage;
     for (k = 0; k < n_freqs; ++k) {
-        n->noise[k] = (float)min_noise_power; /* np.full(.., _min, f32) */
+        n->noise[k] = min_noise_power; /* np.full(.., _min, f32) */
     }
     n->block_counter = 0;
 }
@@ -40,17 +40,17 @@ static void noise_spectrum_init(NoiseSpectrum *n, int n_freqs,
 static void noise_spectrum_reset(NoiseSpectrum *n) {
     int k;
     for (k = 0; k < n->n_freqs; ++k) {
-        n->noise[k] = (float)n->min_noise;
+        n->noise[k] = n->min_noise;
     }
     n->block_counter = 0;
 }
 
-/* _alpha_now (Python returns a float64). */
-static double noise_spectrum_alpha_now(const NoiseSpectrum *n) {
+/* _alpha_now (float32-by-design; formerly returned a widened float64). */
+static float noise_spectrum_alpha_now(const NoiseSpectrum *n) {
     if (n->block_counter > (n->init_phase + n->avg_init)) {
         return n->alpha;
     }
-    return n->alpha_init - n->tilt * (double)(n->block_counter - n->avg_init);
+    return n->alpha_init - n->tilt * (float)(n->block_counter - n->avg_init);
 }
 
 static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
@@ -58,9 +58,9 @@ static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
     n->block_counter += 1;
 
     if (n->block_counter <= n->avg_init) {
-        /* noise += (1.0/avg_init) * spectrum.astype(f32)
-         * scalar (1.0/avg_init) computed in f64, cast to f32 at the multiply. */
-        float inv = (float)(1.0 / (double)n->avg_init);
+        /* noise += (1.0/avg_init) * spectrum.astype(f32); scalar (1.0/avg_init)
+         * computed and applied directly in float32 (float32-by-design). */
+        float inv = 1.0f / (float)n->avg_init;
         for (k = 0; k < n->n_freqs; ++k) {
             float tmp = inv * spectrum[k];          /* f32 mul */
             n->noise[k] = n->noise[k] + tmp;        /* f32 add */
@@ -69,22 +69,21 @@ static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
     }
 
     {
-        double alpha_d = noise_spectrum_alpha_now(n);
-        float  alpha_f = (float)alpha_d;             /* scalar→f32 at array op */
-        int    apply_mask10 = (n->block_counter > n->init_phase);
+        float alpha_f = noise_spectrum_alpha_now(n); /* float32-by-design */
+        int   apply_mask10 = (n->block_counter > n->init_phase);
         for (k = 0; k < n->n_freqs; ++k) {
             float pb = spectrum[k];                  /* spectrum.astype(f32) */
             float pn = n->noise[k];
             if (pb > pn) {                           /* rising */
                 /* alpha_inc = alpha * (pn / max(pb, 1e-30)) */
-                float denom = pb > (float)1e-30 ? pb : (float)1e-30; /* np.maximum */
+                float denom = pb > 1e-30f ? pb : 1e-30f; /* np.maximum */
                 float ratio = pn / denom;            /* f32 */
                 float alpha_inc = alpha_f * ratio;   /* f32 */
                 if (apply_mask10) {
                     /* mask10 = (10.0 * pn) < pb */
-                    float ten_pn = (float)10.0 * pn; /* scalar 10.0 → f32 */
+                    float ten_pn = 10.0f * pn;        /* scalar 10.0 → f32 */
                     if (ten_pn < pb) {
-                        alpha_inc = alpha_inc * (float)0.1; /* scalar 0.1 → f32 */
+                        alpha_inc = alpha_inc * 0.1f; /* scalar 0.1 → f32 */
                     }
                 }
                 /* noise = pn + alpha_inc*(pb-pn) */
@@ -92,7 +91,7 @@ static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
             } else {                                  /* falling (~rising) */
                 /* noise = max(pn + alpha*(pb-pn), min) */
                 float upd = pn + alpha_f * (pb - pn);
-                float floor_f = (float)n->min_noise;  /* np.maximum(.., _min) */
+                float floor_f = n->min_noise;         /* np.maximum(.., _min) */
                 n->noise[k] = upd > floor_f ? upd : floor_f;
             }
         }
@@ -224,9 +223,9 @@ void stationarity_estimator_update_stationarity_flags(StationarityEstimator *s,
          * THR_RATIO * noise; stationary if acum < that. */
         {
             float nz = s->noise.noise[k];
-            float ndenom = nz > (float)1e-30 ? nz : (float)1e-30; /* np.maximum */
-            float noise_scaled = (float)s->window_hops * ndenom;  /* int*f32 → f32 */
-            float thr = (float)STAT_THR_RATIO * noise_scaled;     /* 10.0(f64)→f32 */
+            float ndenom = nz > 1e-30f ? nz : 1e-30f;              /* np.maximum */
+            float noise_scaled = (float)s->window_hops * ndenom;   /* int*f32 → f32 */
+            float thr = STAT_THR_RATIO * noise_scaled;             /* f32 */
             s->stationarity_flags[k] = (acc < thr) ? 1 : 0;
         }
     }
@@ -252,6 +251,6 @@ int stationarity_estimator_is_block_stationary(const StationarityEstimator *s) {
     for (k = 0; k < s->n_freqs; ++k) {
         if (s->stationarity_flags[k] && s->hangovers[k] == 0) count++;
     }
-    /* float(np.mean(mask)) > BLOCK_FRACTION; mean = count / n_freqs in f64 */
-    return ((double)count / (double)s->n_freqs) > STAT_BLOCK_FRACTION;
+    /* float(np.mean(mask)) > BLOCK_FRACTION; mean = count / n_freqs (float32-by-design) */
+    return ((float)count / (float)s->n_freqs) > STAT_BLOCK_FRACTION;
 }

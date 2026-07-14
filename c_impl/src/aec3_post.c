@@ -72,16 +72,16 @@ void aec3_post_config_defaults(Aec3PostConfig *cfg) {
     cfg->erle_render_x2_psd_scale = 1;
     cfg->output_capture_when_linear_unusable = 1;
     cfg->enable_cng = 1;
-    cfg->erle_coh_gate_alpha = 0.05;
-    cfg->erle_coh_gate_threshold = 0.5;
-    cfg->cng_y2_alpha = 0.23156652857908377;
-    cfg->cng_n2_track_freshness = 0.9968377223398316;
-    cfg->cng_n2_track_retention = 0.003162277660168411;
-    cfg->cng_n2_slow_up = 1.0005000750025;
-    cfg->cng_n2_initial_alpha = 0.0024981253125391234;
+    cfg->erle_coh_gate_alpha = 0.05f;
+    cfg->erle_coh_gate_threshold = 0.5f;
+    cfg->cng_y2_alpha = 0.23156652857908377f;
+    cfg->cng_n2_track_freshness = 0.9968377223398316f;
+    cfg->cng_n2_track_retention = 0.003162277660168411f;
+    cfg->cng_n2_slow_up = 1.0005000750025f;
+    cfg->cng_n2_initial_alpha = 0.0024981253125391234f;
     cfg->cng_n2_update_onset_hops = 20;
     cfg->cng_n2_initial_duration_hops = 400;
-    cfg->noise_floor_int16sq = 68.50682420305405;
+    cfg->noise_floor_int16sq = 68.50682420305405f;
 }
 
 void aec3_post_init(Aec3Post *p, const Aec3PostConfig *cfg,
@@ -90,7 +90,7 @@ void aec3_post_init(Aec3Post *p, const Aec3PostConfig *cfg,
                     float *avg_reverb_storage,
                     float *y2_smoothed, float *n2, float *n2_initial,
                     float *coh_sye_re, float *coh_sye_im,
-                    double *coh_syy, double *coh_see,
+                    float *coh_syy, float *coh_see,
                     float *ola_buf,
                     float *near_psd, float *far_psd, float *echo_psd,
                     float *error_psd, float *capture_psd_erle,
@@ -100,7 +100,7 @@ void aec3_post_init(Aec3Post *p, const Aec3PostConfig *cfg,
     p->cfg = *cfg;
     p->trace.aec3_converged = 0;
     p->trace.far_active = 0;
-    p->trace.gain_mean = 0.0;
+    p->trace.gain_mean = 0.0f;
     p->fft = fft;
     p->synth_window = synth_window;
     p->sqrt2_sin_lut = sqrt2_sin_lut;
@@ -142,8 +142,8 @@ void aec3_post_reset(Aec3Post *p) {
         p->n2_initial[k] = 0.0f;
         p->coh_sye_re[k] = 0.0f;     /* _reset_coherence_state: sye=0 */
         p->coh_sye_im[k] = 0.0f;
-        p->coh_syy[k] = 1.0e-30;     /* syy=see=1e-30 */
-        p->coh_see[k] = 1.0e-30;
+        p->coh_syy[k] = 1.0e-30f;    /* syy=see=1e-30 */
+        p->coh_see[k] = 1.0e-30f;
     }
     reverb_model_reset(&p->avg_reverb);
 }
@@ -173,12 +173,12 @@ void aec3_post_compute_psds(Aec3Post *p, const Aec3PostAbs *mag) {
 /* ── stage 3: avg-render-reverb x2_reverb_for_erle ─────────────────────── */
 void aec3_post_compute_x2_reverb(Aec3Post *p, int x2_present,
                                  const float *x2_at_delay, const float *x2_past,
-                                 double decay_steady) {
+                                 float decay_steady) {
     const Aec3PostConfig *c = &p->cfg;
     int nb = c->n_bins, k;
     if (!x2_present) return;
     reverb_model_update_no_freq_shaping(&p->avg_reverb, x2_past,
-                                        1.0f, (float)decay_steady);
+                                        1.0f, decay_steady);
     for (k = 0; k < nb; ++k) {
         float v = x2_at_delay[k] + p->avg_reverb.reverb[k];
         if (c->erle_render_x2_psd_scale) v = (float)(v * (float)PSD_SCALE);
@@ -193,9 +193,9 @@ void aec3_post_compute_coherence(Aec3Post *p,
                                  const Aec3PostAbs *mag) {
     const Aec3PostConfig *c = &p->cfg;
     int nb = c->n_bins, k;
-    double a = c->erle_coh_gate_alpha;
-    float af = (float)a;
-    float omaf = (float)(1.0 - a);
+    float a = c->erle_coh_gate_alpha;
+    float af = a;
+    float omaf = 1.0f - a;
     if (!c->erle_coh_gate_enabled) return;
     for (k = 0; k < nb; ++k) {
         float er = echo_spec_for_coh[k].r, ei = echo_spec_for_coh[k].i;
@@ -207,18 +207,18 @@ void aec3_post_compute_coherence(Aec3Post *p,
         p->coh_sye_im[k] = omaf * p->coh_sye_im[k] + af * pi;
         echo_abs2 = mag->abs_echo_coh[k] * mag->abs_echo_coh[k];
         near_abs2 = mag->abs_near[k] * mag->abs_near[k];
-        p->coh_syy[k] = (1.0 - a) * p->coh_syy[k] + (double)(af * echo_abs2);
-        p->coh_see[k] = (1.0 - a) * p->coh_see[k] + (double)(af * near_abs2);
+        p->coh_syy[k] = (1.0f - a) * p->coh_syy[k] + af * echo_abs2;
+        p->coh_see[k] = (1.0f - a) * p->coh_see[k] + af * near_abs2;
     }
     for (k = 0; k < nb; ++k) {
-        double sye2 = (double)p->coh_sye_re[k] * p->coh_sye_re[k]
-                    + (double)p->coh_sye_im[k] * p->coh_sye_im[k];
-        double denom = p->coh_syy[k] * p->coh_see[k];
+        float sye2 = p->coh_sye_re[k] * p->coh_sye_re[k]
+                   + p->coh_sye_im[k] * p->coh_sye_im[k];
+        float denom = p->coh_syy[k] * p->coh_see[k];
         float g2;
-        if (denom < 1.0e-30) denom = 1.0e-30;
-        g2 = (float)(sye2 / denom);
+        if (denom < 1.0e-30f) denom = 1.0e-30f;
+        g2 = sye2 / denom;
         p->coh_gate_mask[k] =
-            (g2 >= (float)c->erle_coh_gate_threshold) ? 1u : 0u;
+            (g2 >= c->erle_coh_gate_threshold) ? 1u : 0u;
     }
 }
 
@@ -231,12 +231,12 @@ void aec3_post_compute_comfort_noise(Aec3Post *p, int saturated_capture) {
         p->noise_initialized = 1;
     }
     if (!saturated_capture) {
-        float y2a = (float)c->cng_y2_alpha;
-        float fresh = (float)c->cng_n2_track_freshness;
-        float retain = (float)c->cng_n2_track_retention;
-        float g_up = (float)c->cng_n2_slow_up;
-        float ia = (float)c->cng_n2_initial_alpha;
-        float nfloor = (float)c->noise_floor_int16sq;
+        float y2a = c->cng_y2_alpha;
+        float fresh = c->cng_n2_track_freshness;
+        float retain = c->cng_n2_track_retention;
+        float g_up = c->cng_n2_slow_up;
+        float ia = c->cng_n2_initial_alpha;
+        float nfloor = c->noise_floor_int16sq;
         int dur = c->cng_n2_initial_duration_hops;
         for (k = 0; k < nb; ++k) {
             p->y2_smoothed[k] = p->y2_smoothed[k]
@@ -294,13 +294,13 @@ void aec3_post_apply_output(Aec3Post *p,
         const Complex *out_base = error_spec;
         if (c->output_capture_when_linear_unusable && !usable_linear) {
             float *se2 = p->nf;
-            double se, sy;
+            float se, sy;
             for (k = 0; k < nb; ++k)
                 se2[k] = mag->abs_error[k] * mag->abs_error[k];
-            se = (double)pairwise_sum_f32(se2, (size_t)nb);
+            se = pairwise_sum_f32(se2, (size_t)nb);
             for (k = 0; k < nb; ++k)
                 se2[k] = mag->abs_ybase[k] * mag->abs_ybase[k];
-            sy = (double)pairwise_sum_f32(se2, (size_t)nb);
+            sy = pairwise_sum_f32(se2, (size_t)nb);
             if (se > sy) {
                 for (k = 0; k < nb; ++k) {
                     p->e_out_spec[k].r = error_spec[k].r + echo_spec_sel[k].r;
@@ -366,7 +366,7 @@ void aec3_post_process(Aec3Post *p,
                        const Aec3PostAbs *mag,
                        int x2_present,
                        const float *x2_at_delay, const float *x2_past,
-                       double decay_steady,
+                       float decay_steady,
                        const float *far_end,
                        int saturated_capture,
                        int usable_linear,
@@ -387,27 +387,29 @@ void aec3_post_process(Aec3Post *p,
  * lines 3001-3689). Drives the sub-modules in the exact Python order.
  * ──────────────────────────────────────────────────────────────────────── */
 
-/* f64 pairwise sum of x[i]² (x upcast to double), matching
- * float(np.sum(arr.astype(np.float64) ** 2)) over a float32 array. */
-static double sum_sq_f64_pairwise(const float *a, size_t n) {
+/* f32 pairwise sum of x[i]² (Stage 3a: the former f64 upcast used to match
+ * float(np.sum(arr.astype(np.float64) ** 2)) is retired — accumulates in f32
+ * throughout, same pairwise/unrolled-by-8 structure and split order as
+ * pairwise_sum_f32 above; drift vs the numpy reference accepted). */
+static float sum_sq_f32_pairwise(const float *a, size_t n) {
     if (n <= 8) {
-        double s = 0.0;
+        float s = 0.0f;
         size_t i;
-        for (i = 0; i < n; ++i) { double v = (double)a[i]; s += v * v; }
+        for (i = 0; i < n; ++i) { float v = a[i]; s += v * v; }
         return s;
     }
     if (n <= 128) {
-        double acc[8];
+        float acc[8];
         size_t i, j;
-        for (j = 0; j < 8; ++j) { double v = (double)a[j]; acc[j] = v * v; }
+        for (j = 0; j < 8; ++j) { float v = a[j]; acc[j] = v * v; }
         for (i = 8; i + 8 <= n; i += 8)
             for (j = 0; j < 8; ++j) {
-                double v = (double)a[i + j];
+                float v = a[i + j];
                 acc[j] += v * v;
             }
         {
-            double s = 0.0, r;
-            for (; i < n; ++i) { double v = (double)a[i]; s += v * v; }
+            float s = 0.0f, r;
+            for (; i < n; ++i) { float v = a[i]; s += v * v; }
             r = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
               + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
             return r + s;
@@ -416,7 +418,7 @@ static double sum_sq_f64_pairwise(const float *a, size_t n) {
     {
         size_t half = n / 2;
         half -= half % 8;
-        return sum_sq_f64_pairwise(a, half) + sum_sq_f64_pairwise(a + half, n - half);
+        return sum_sq_f32_pairwise(a, half) + sum_sq_f32_pairwise(a + half, n - half);
     }
 }
 
@@ -496,35 +498,35 @@ int aec3_post_run(Aec3Post *p,
 
     /* ── Step 4: convergence flags (3075-3106) ────────────────────────────── */
     {
-        double y2_time = sum_sq_f64_pairwise(in->near_end, (size_t)hop);
-        double e2_refined = sum_sq_f64_pairwise(in->raw_output, (size_t)hop);
-        double y2_thr = 3.73e-4;
-        double y2_thr_low = y2_thr * (20.0 / 50.0) * (20.0 / 50.0);
-        double y2_thr_div = y2_thr * (30.0 / 50.0) * (30.0 / 50.0);
-        double e2_coarse = 0.0;
+        float y2_time = sum_sq_f32_pairwise(in->near_end, (size_t)hop);
+        float e2_refined = sum_sq_f32_pairwise(in->raw_output, (size_t)hop);
+        float y2_thr = 3.73e-4f;
+        float y2_thr_low = y2_thr * (20.0f / 50.0f) * (20.0f / 50.0f);
+        float y2_thr_div = y2_thr * (30.0f / 50.0f) * (30.0f / 50.0f);
+        float e2_coarse = 0.0f;
         int refined_conv, coarse_conv = 0, coarse_conv_relaxed = 0;
         int aec3_converged, all_diverged;
-        double min_e2;
+        float min_e2;
 
-        refined_conv = (e2_refined < 0.5 * y2_time) && (y2_time > y2_thr);
+        refined_conv = (e2_refined < 0.5f * y2_time) && (y2_time > y2_thr);
         if (in->shadow_present) {
             /* Parseval map: (2·Σ|E[1:-1]|² + |E[0]|² + |E[-1]|²)/fft_size,
-             * cmag2_np per bin, f64 sums (3095-3098). */
+             * cmag2_np per bin, f32 sums (Stage 3a; was f64 sums, 3095-3098). */
             const Complex *es = in->shadow_error_spec;
-            double inner = 0.0;
+            float inner = 0.0f;
             /* (np.abs(c)²) per bin (cmag2_np), NOT er*er+ei*ei. */
             for (k = 1; k < nb - 1; ++k) {
                 float m = cabs_np(es[k].r, es[k].i);
-                inner += (double)(m * m);
+                inner += m * m;
             }
             {
                 float m0 = cabs_np(es[0].r, es[0].i);
                 float mn = cabs_np(es[nb - 1].r, es[nb - 1].i);
-                e2_coarse = (2.0 * inner + (double)(m0 * m0) + (double)(mn * mn))
-                          / (double)fft_size;
+                e2_coarse = (2.0f * inner + m0 * m0 + mn * mn)
+                          / (float)fft_size;
             }
-            coarse_conv = (e2_coarse < 0.05 * y2_time) && (y2_time > y2_thr);
-            coarse_conv_relaxed = (e2_coarse < 0.3 * y2_time)
+            coarse_conv = (e2_coarse < 0.05f * y2_time) && (y2_time > y2_thr);
+            coarse_conv_relaxed = (e2_coarse < 0.3f * y2_time)
                                   && (y2_time > y2_thr_low);
         }
         aec3_converged = refined_conv || coarse_conv;
@@ -532,7 +534,7 @@ int aec3_post_run(Aec3Post *p,
         min_e2 = in->shadow_present
                  ? (e2_refined < e2_coarse ? e2_refined : e2_coarse)
                  : e2_refined;
-        all_diverged = (min_e2 > 1.5 * y2_time) && (y2_time > y2_thr_div);
+        all_diverged = (min_e2 > 1.5f * y2_time) && (y2_time > y2_thr_div);
 
         /* ── Step 5: filter_state_bridge (3109-3118) ─────────────────────── */
         {
@@ -587,7 +589,7 @@ int aec3_post_run(Aec3Post *p,
             /* ── Step 9: avg-render-reverb (3195-3220) ───────────────────── */
             {
                 int x2_present = 0;
-                double decay_steady = 0.0;
+                float decay_steady = 0.0f;
                 int curr_p = ((in->partition_idx - 1) % n_part + n_part) % n_part;
                 int delay = aec_state_min_direct_path_filter_delay(obj->state);
                 int delay_idx, past_idx;
@@ -608,7 +610,7 @@ int aec3_post_run(Aec3Post *p,
                     x2_present = 1;
                 }
                 /* decay_steady = ree._reverb_decay(dominant_nearend=False) —
-                 * pow(reverb_decay, hop/64) at our hop (NOT verbatim 0.83). */
+                 * powf(reverb_decay, hop/64) at our hop (NOT verbatim 0.83). */
                 decay_steady = ree_reverb_decay_value(obj->ree, 0);
                 aec3_post_compute_x2_reverb(p, x2_present, sc->x2_at_delay,
                                             sc->x2_past, decay_steady);
@@ -622,13 +624,11 @@ int aec3_post_run(Aec3Post *p,
 
             /* ── Step 11: aec_state.update (3302-3319) ───────────────────── */
             {
-                /* far_pwr = float(np.mean(far_end²)) — np.mean over a float32
-                 * array is pairwise-sum / n computed in f32, THEN float()
-                 * widens. f64-division would differ by ~1 ULP and could flip the
-                 * active_render threshold on a borderline frame. */
-                float far_mean_f32 = pairwise_sum_f32(sc->nearend_pwr,
-                                                      (size_t)hop) / (float)hop;
-                double far_pwr = (double)far_mean_f32;
+                /* far_pwr = mean(far_end²), f32 pairwise-sum / n (Stage 3a: the
+                 * former f64 widen used to match numpy's float(np.mean(...))
+                 * exactly is retired — plain f32 compare now, drift accepted). */
+                float far_pwr = pairwise_sum_f32(sc->nearend_pwr,
+                                                 (size_t)hop) / (float)hop;
                 int active_render = (far_pwr > in->active_render_threshold);
                 p->trace.far_active = active_render;   /* audio-passive trace stash */
                 int x2r_present_state =
@@ -674,9 +674,9 @@ int aec3_post_run(Aec3Post *p,
                     int delay_blocks =
                         aec_state_min_direct_path_filter_delay(obj->state);
                     int fq_valid = 0;
-                    double filter_q =
-                        aec_state_get_inst_linear_quality_estimate(obj->state,
-                                                                   &fq_valid);
+                    float filter_q =
+                        aec_state_get_inst_linear_quality_estimate(
+                            obj->state, &fq_valid);
                     int stationary_block =
                         stationarity_estimator_is_block_stationary(obj->stationarity);
                     int usable =
@@ -759,9 +759,9 @@ int aec3_post_run(Aec3Post *p,
 
                                 /* audio-passive trace stash: mean per-bin gain. */
                                 {
-                                    double gsum = 0.0;
-                                    for (k = 0; k < nb; ++k) gsum += (double)gain[k];
-                                    p->trace.gain_mean = (nb > 0) ? gsum / nb : 0.0;
+                                    float gsum = 0.0f;
+                                    for (k = 0; k < nb; ++k) gsum += gain[k];
+                                    p->trace.gain_mean = (nb > 0) ? gsum / (float)nb : 0.0f;
                                 }
 
                                 /* ── Step 21: apply_output (3606-3689) ──────── */

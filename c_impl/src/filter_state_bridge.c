@@ -49,26 +49,27 @@ float fsb_f32_pairwise_sum(const float *a, size_t n) {
     }
 }
 
-/* np.mean over a float32 array: float32 pairwise sum / float32(n), widened to
- * double by the float() cast in `p_trace = float(np.mean(P))`. */
-double fsb_f32_mean(const float *a, size_t n) {
+/* np.mean over a float32 array: float32 pairwise sum / float32(n), kept in
+ * float32 (float32-by-design; formerly widened via the float() cast in
+ * `p_trace = float(np.mean(P))`). */
+float fsb_f32_mean(const float *a, size_t n) {
     float s;
     if (n == 0) {
-        return 0.0;
+        return 0.0f;
     }
     s = fsb_f32_pairwise_sum(a, n);
-    /* numpy mean divides the f32 sum by n in float32, then float() widens. */
-    return (double)(s / (float)n);
+    /* numpy mean divides the f32 sum by n in float32; kept in float32. */
+    return s / (float)n;
 }
 
 void filter_state_bridge_build(FilterStateBridge *out,
                                FftHandle *fft,
                                const Complex *W0, int fft_size, int n_freqs,
                                const float *P, size_t p_len,
-                               int has_shadow, double main_e, double shadow_e,
+                               int has_shadow, float main_e, float shadow_e,
                                int filter_converged,
                                int main_paused,
-                               double mu_final,
+                               float mu_final,
                                int external_delay_samples,
                                int any_coarse_filter_converged,
                                int all_filters_diverged,
@@ -88,19 +89,19 @@ void filter_state_bridge_build(FilterStateBridge *out,
     /* --- divergence_indicator ----------------------------------------------
      * div = 0 unless P is present and non-empty. */
     {
-        double div = 0.0;
+        float div = 0.0f;
         if (P != NULL && p_len > 0) {
-            double p_trace = fsb_f32_mean(P, p_len);
-            double e_ratio = 1.0;
+            float p_trace = fsb_f32_mean(P, p_len);
+            float e_ratio = 1.0f;
             if (has_shadow) {
-                if (main_e > 1e-12) {
+                if (main_e > 1e-12f) {
                     e_ratio = shadow_e / main_e;
                 }
             }
             {
-                double t = e_ratio - 1.0;
-                if (t < 0.0) {
-                    t = 0.0;        /* max(0.0, e_ratio - 1.0) */
+                float t = e_ratio - 1.0f;
+                if (t < 0.0f) {
+                    t = 0.0f;       /* max(0.0, e_ratio - 1.0) */
                 }
                 div = p_trace * t;
             }

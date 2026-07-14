@@ -8,13 +8,14 @@
  *   2. poor_signal_excitation(): any narrow-band counter > 10 → freeze W.
  *   3. narrow_peak_band(): dominant strong narrow peak (diagnostic).
  *
- * BYTE-EQUAL parity notes (numpy 1.26 → C):
+ * FLOAT32-BY-DESIGN parity notes (numpy 1.26 → C):
  *   - render_psd (|X|²) and render_block (time samples) arrive as float32 from
  *     the real pipeline; the small-narrow-band peak test runs ALL-float32
  *     (numpy value-based promotion keeps `3.0f * f32_array` in float32):
  *         is_peak = x_center > 3.0f * fmaxf(x_left, x_right)
- *   - the strong-narrow-band test widens float32 window maxima to f64 via
- *     Python float(); those comparisons run in double.
+ *   - the strong-narrow-band test keeps its float32 window maxima in float32
+ *     throughout (formerly widened to f64 via Python float(); converted for
+ *     uniformity, drift accepted) — those comparisons now run in float32.
  *   - counters are int64 (length n_freqs - 2).
  *   - np.argmax returns the FIRST max index (strict-greater scan).
  *

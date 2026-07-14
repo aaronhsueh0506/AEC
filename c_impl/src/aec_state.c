@@ -16,9 +16,9 @@ void aec_state_config_defaults(AecStateConfig *cfg) {
     cfg->echo_can_saturate = 1;
     cfg->n_bins = 257;
     cfg->erle_startup_hops = 200;
-    cfg->erle_min = 1.0;
-    cfg->erle_max_l = 4.0;
-    cfg->erle_max_h = 1.5;
+    cfg->erle_min = 1.0f;
+    cfg->erle_max_l = 4.0f;
+    cfg->erle_max_h = 1.5f;
     cfg->erl_startup_hops = 200;
     cfg->hop_size = 160;
     cfg->sample_rate = 16000;
@@ -41,8 +41,7 @@ void aec_state_init(AecState *s, const AecStateConfig *cfg,
 
     erle_estimator_init(&s->erle_estimator,
                         cfg->erle_startup_hops, cfg->n_bins,
-                        (float)cfg->erle_min, (float)cfg->erle_max_l,
-                        (float)cfg->erle_max_h,
+                        cfg->erle_min, cfg->erle_max_l, cfg->erle_max_h,
                         /*use_onset_detection=*/1, cfg->hop_size,
                         st->erle_max, st->erle, st->erle_oc, st->erle_unb,
                         st->erle_during, st->erle_coming_onset, st->erle_hold,
@@ -108,11 +107,11 @@ const float *aec_state_erle_unbounded(const AecState *s) {
     return erle_estimator_erle_unbounded(&s->erle_estimator);
 }
 
-double aec_state_fullband_erle_log2(const AecState *s) {
+float aec_state_fullband_erle_log2(const AecState *s) {
     return erle_estimator_fullband_erle_log2(&s->erle_estimator);
 }
 
-double aec_state_get_inst_linear_quality_estimate(const AecState *s, int *valid) {
+float aec_state_get_inst_linear_quality_estimate(const AecState *s, int *valid) {
     return erle_estimator_get_inst_linear_quality_estimate(&s->erle_estimator,
                                                            valid);
 }
@@ -121,7 +120,7 @@ const float *aec_state_erl(const AecState *s) {
     return erl_estimator_erl(&s->erl_estimator);
 }
 
-double aec_state_erl_time_domain(const AecState *s) {
+float aec_state_erl_time_domain(const AecState *s) {
     return erl_estimator_erl_time_domain(&s->erl_estimator);
 }
 
@@ -135,7 +134,7 @@ int aec_state_filter_analyzer_peak_index(const AecState *s) {
     return fa_peak_index(&s->filter_analyzer);
 }
 
-double aec_state_filter_analyzer_max_echo_path_gain(const AecState *s) {
+float aec_state_filter_analyzer_max_echo_path_gain(const AecState *s) {
     if (!s->has_filter_analyzer) return 0.0;
     return fa_max_echo_path_gain(&s->filter_analyzer);
 }
@@ -176,9 +175,9 @@ void aec_state_update(AecState *s,
                       const float *error_psd,
                       const float *echo_psd,
                       int active_render,
-                      double subtractor_s_refined_max_abs,
-                      double subtractor_s_coarse_max_abs,
-                      double echo_path_gain,
+                      float subtractor_s_refined_max_abs,
+                      float subtractor_s_coarse_max_abs,
+                      float echo_path_gain,
                       const float *render_block, int render_block_len,
                       const float *filter_taps_full, int filter_taps_full_len,
                       const float *x2_reverb_for_erle,
@@ -239,7 +238,7 @@ void aec_state_update(AecState *s,
 
     /* 5. SaturationDetector. AEC3-strict echo_path_gain from FilterAnalyzer
      * (aec_state.cc:258-260) when the analyzer is present. */
-    double epg = echo_path_gain;
+    float epg = echo_path_gain;
     if (s->has_filter_analyzer) {
         epg = fa_max_echo_path_gain(&s->filter_analyzer);
     }

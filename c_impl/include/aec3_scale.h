@@ -8,8 +8,15 @@
  * route it through here so the conversion is explicit and uniform.
  *
  * Parity note: Python's int(round(x)) is round-half-to-EVEN; the *_to_hops
- * helpers below use lrint() (default FE_TONEAREST = round-half-to-even), NOT
+ * helpers below use lrintf() (default FE_TONEAREST = round-half-to-even), NOT
  * round() (half-away-from-zero), so bin/hop counts match the reference exactly.
+ *
+ * These are init-only conversion helpers (called once at setup, not per-hop);
+ * every parameter and return value is float32-by-design (formerly double,
+ * converted for uniformity as part of the f32 campaign, drift accepted). The
+ * #define constants below are left as plain (untyped) literals — they are
+ * consumed verbatim by other modules across the codebase and are out of scope
+ * for this conversion.
  */
 #ifndef AEC3_SCALE_H
 #define AEC3_SCALE_H
@@ -22,16 +29,16 @@
 #define AEC3_FFT_LENGTH_BY_2   64                    /* AEC3 kFftLengthBy2 */
 
 /* ── Conversion functions (pure; match aec3_scale.py semantics) ─────────── */
-double aec3_psd_int16_to_float(double value);
+float  aec3_psd_int16_to_float(float value);
 int    aec3_blocks_to_hops(int blocks, int hop_samples, int sample_rate);
-int    aec3_ms_to_hops(double ms, int hop_samples, int sample_rate);
-double aec3_per_block_rate_to_per_hop(double per_block_rate, int hop_samples, int sample_rate);
-double aec3_per_block_ema_alpha_to_per_hop(double per_block_alpha, int hop_samples, int sample_rate);
-double aec3_fft_density_scale(double value_int16sq, int fft_size);
-double aec3_per_bin_psd_threshold(double calibrated_value, int hop_size, int ref_hop);
-double aec3_nl_r2_norm_power(int hop_size, int ref_hop);
-double aec3_block_energy_scale(double value_int16sq, int hop_samples);
-double aec3_per_block_growth_to_per_hop(double per_block_multiplier, int hop_samples, int sample_rate);
+int    aec3_ms_to_hops(float ms, int hop_samples, int sample_rate);
+float  aec3_per_block_rate_to_per_hop(float per_block_rate, int hop_samples, int sample_rate);
+float  aec3_per_block_ema_alpha_to_per_hop(float per_block_alpha, int hop_samples, int sample_rate);
+float  aec3_fft_density_scale(float value_int16sq, int fft_size);
+float  aec3_per_bin_psd_threshold(float calibrated_value, int hop_size, int ref_hop);
+float  aec3_nl_r2_norm_power(int hop_size, int ref_hop);
+float  aec3_block_energy_scale(float value_int16sq, int hop_samples);
+float  aec3_per_block_growth_to_per_hop(float per_block_multiplier, int hop_samples, int sample_rate);
 
 /* ── Pre-converted constants (16 kHz, hop=160 reference) ───────────────────
  * Defined by their computing expression so they fold bit-identically to the

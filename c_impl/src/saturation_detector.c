@@ -2,10 +2,11 @@
  * python/modules/state/saturation_detector.py.
  *
  * The else-branch reduction (max over |render_block|) runs in float32 to match
- * `np.abs(render_block).max()` on a float32 array; the resulting f32 scalar is
- * then promoted to double (Python `float(...)`) and the margin/gain multiplies +
- * the final compare are all double. The usable-branch comparisons are f64 vs
- * f64. Built with -ffp-contract=off so nothing fuses.
+ * `np.abs(render_block).max()` on a float32 array; the resulting f32 scalar and
+ * the margin/gain multiplies + the final compare are now all float32-by-design
+ * (formerly promoted to double via Python `float(...)`; converted for
+ * uniformity, drift accepted). The usable-branch comparisons are f32 vs f32.
+ * Built with -ffp-contract=off so nothing fuses.
  */
 #include "saturation_detector.h"
 
@@ -17,22 +18,22 @@ void saturation_detector_update(SaturationDetector *d,
                                 const float *render_block, int render_block_len,
                                 int saturated_capture,
                                 int usable_linear_estimate,
-                                double subtractor_s_refined_max_abs,
-                                double subtractor_s_coarse_max_abs,
-                                double echo_path_gain) {
+                                float subtractor_s_refined_max_abs,
+                                float subtractor_s_coarse_max_abs,
+                                float echo_path_gain) {
     d->saturated_echo = 0;
     if (!saturated_capture) {
         return;
     }
     if (usable_linear_estimate) {
-        /* refined_max_abs > THR or coarse_max_abs > THR  (all f64). */
+        /* refined_max_abs > THR or coarse_max_abs > THR  (all f32). */
         d->saturated_echo =
             (subtractor_s_refined_max_abs > SATDET_SATURATION_THRESHOLD ||
              subtractor_s_coarse_max_abs  > SATDET_SATURATION_THRESHOLD) ? 1 : 0;
     } else {
-        /* max_sample = float(np.abs(render_block).max()) if size>0 else 0.0
-         *   → float32 max-abs reduction, then promote to double. */
-        double max_sample;
+        /* max_sample = np.abs(render_block).max() if size>0 else 0.0
+         *   → float32 max-abs reduction, kept in float32. */
+        float max_sample;
         if (render_block_len > 0) {
             float max_f = -1.0f;            /* |x| >= 0, so the first sets it */
             int i;
@@ -41,13 +42,13 @@ void saturation_detector_update(SaturationDetector *d,
                 float av = a < 0.0f ? -a : a;   /* np.abs (float32) */
                 if (av > max_f) max_f = av;     /* np.max (float32) */
             }
-            max_sample = (double)max_f;     /* float(...) promote f32→f64 */
+            max_sample = max_f;
         } else {
-            max_sample = 0.0;
+            max_sample = 0.0f;
         }
-        /* peak = max_sample * echo_path_gain * _RENDER_MARGIN  (all f64). */
+        /* peak = max_sample * echo_path_gain * _RENDER_MARGIN  (all f32). */
         {
-            double peak = max_sample * echo_path_gain * SATDET_RENDER_MARGIN;
+            float peak = max_sample * echo_path_gain * SATDET_RENDER_MARGIN;
             d->saturated_echo = (peak > SATDET_INT16_SATURATION) ? 1 : 0;
         }
     }

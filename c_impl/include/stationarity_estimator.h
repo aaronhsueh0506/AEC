@@ -7,14 +7,16 @@
  *   - StationarityEstimator : history ring of render PSDs → per-bin
  *     stationarity flags + hangover + 3-bin smoothing + is_block_stationary.
  *
- * PARITY (numpy 1.26 → C):
+ * FLOAT32-BY-DESIGN (numpy 1.26 → C):
  *   The real pipeline feeds a float32 render_psd (= |far_spec|² .astype(f32))
- *   and average_reverb is always None (→ float32 zeros). Every numpy scalar in
- *   this module is a Python float, which numpy 1.x casts to float32 before
- *   combining with the float32 arrays — so the WHOLE noise-EMA + flag math runs
- *   in float32. All arrays here are therefore `float`, the hangover counter is
- *   int32, and the flags are bytes (bool). Built with -ffp-contract=off so the
- *   compiler does not fuse the three-step float32 roundings.
+ *   and average_reverb is always None (→ float32 zeros). Every scalar in this
+ *   module — formerly kept as fp64 to mirror numpy's weak-promotion rule
+ *   (Python float scalars cast to float32 at the point they combine with the
+ *   float32 arrays) — is now float32 throughout, converted for uniformity as
+ *   part of the f32 campaign (drift accepted). All arrays here are therefore
+ *   `float`, the hangover counter is int32, and the flags are bytes (bool).
+ *   Built with -ffp-contract=off so the compiler does not fuse the three-step
+ *   float32 roundings.
  *
  *   window_hops / hangover_hops are derived from AEC3 block counts (13 / 12) via
  *   aec3_blocks_to_hops(); at hop=160/sr=16000 both = 5.
@@ -26,27 +28,28 @@
 
 /* ── Constants mirrored from aec3_scale.py (16 kHz / hop=160 reference) ──── */
 /* STATIONARITY_MIN_NOISE_POWER_FLOAT = psd_int16_to_float(10.0) = 10 / 32768² */
-#define STAT_MIN_NOISE_POWER_FLOAT (10.0 / (32768.0 * 32768.0)) /* 9.31e-9 */
-#define STAT_THR_RATIO             10.0   /* acum < 10×noise → stationary */
-#define STAT_BLOCK_FRACTION        0.75   /* >75% bands stationary → block  */
-#define STAT_ALPHA                 0.004  /* long-term smoothing            */
-#define STAT_ALPHA_INIT            0.04   /* warmup smoothing               */
+#define STAT_MIN_NOISE_POWER_FLOAT (10.0f / (32768.0f * 32768.0f)) /* 9.31e-9 */
+#define STAT_THR_RATIO             10.0f  /* acum < 10×noise → stationary */
+#define STAT_BLOCK_FRACTION        0.75f  /* >75% bands stationary → block  */
+#define STAT_ALPHA                 0.004f /* long-term smoothing            */
+#define STAT_ALPHA_INIT            0.04f  /* warmup smoothing               */
 /* blocks_to_hops(20,160,16000)=8 ; blocks_to_hops(500,160,16000)=200 */
 #define STAT_AVG_INIT_HOPS_DEFAULT       8
 #define STAT_INITIAL_PHASE_HOPS_DEFAULT  200
 
 /* ── _NoiseSpectrum ───────────────────────────────────────────────────────
  * Per-bin slow noise-floor tracker (stationarity_estimator.cc:159-242). All
- * arithmetic float32; scalars (1/avg_init, alpha, ...) are stored as double but
- * cast to float at the multiply, matching numpy weak promotion. */
+ * arithmetic float32, including the scalars (1/avg_init, alpha, ...), which
+ * are float32-by-design (formerly stored as double and cast to float at each
+ * multiply to mirror numpy weak promotion). */
 typedef struct {
     int    n_freqs;
-    double min_noise;     /* _min  (Python float)            */
+    float  min_noise;     /* _min  (Python float)            */
     int    avg_init;      /* _avg_init = max(1, avg_init_hops) */
     int    init_phase;    /* _init_phase                     */
-    double alpha;         /* _alpha                          */
-    double alpha_init;    /* _alpha_init                     */
-    double tilt;          /* (_alpha_init - _alpha)/max(1,_init_phase) */
+    float  alpha;         /* _alpha                          */
+    float  alpha_init;    /* _alpha_init                     */
+    float  tilt;          /* (_alpha_init - _alpha)/max(1,_init_phase) */
     float *noise;         /* owned by caller; length n_freqs */
     int    block_counter; /* block_counter                   */
 } NoiseSpectrum;

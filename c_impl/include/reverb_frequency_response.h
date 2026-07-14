@@ -13,17 +13,18 @@
  *   (conservative) tail[k] = max(tail[k], raw_tail[k])
  *   (neighbour)    tail[k] = max(tail[k], 0.5*(tail[k-1]+tail[k+1])) for 1<=k<N-1
  *
- * PARITY NOTES (numpy 1.26 -> C, captured from real balanced/DT case):
+ * FLOAT32-BY-DESIGN NOTES (numpy 1.26 -> C, captured from real balanced/DT case):
  *  - frequency_response is float32 (n_partitions x n_freqs); rows are float32.
  *  - The two energy reductions are numpy `np.sum` over a float32 slice, which
- *    uses PAIRWISE summation accumulated in float32 (NOT naive left-to-right,
- *    NOT float64). Replicated bit-exactly by f32_pairwise_sum().
- *  - average_decay = tail_energy / direct_energy is computed in float64
- *    (python `float()` of each f32 sum, then f64 divide). _average_decay and
- *    `smoothing` stay float64.
- *  - tail = freq_resp_direct(f32) * average_decay(f64): numpy casts the python
- *    f64 scalar to f32 FIRST, so each store is f32_elem * (float)average_decay.
- *  - 0.5*(tail[k-1]+tail[k+1]) is all-float32 (0.5 cast to f32, exact).
+ *    uses PAIRWISE summation accumulated in float32 (NOT naive left-to-right).
+ *    Replicated bit-exactly by f32_pairwise_sum().
+ *  - average_decay = tail_energy / direct_energy is computed in float32
+ *    throughout (formerly widened via python `float()` of each f32 sum, then
+ *    f64 divide; converted for uniformity, drift accepted). _average_decay and
+ *    `smoothing` are float32.
+ *  - tail = freq_resp_direct(f32) * average_decay(f32): each store is
+ *    f32_elem * average_decay, both float32.
+ *  - 0.5*(tail[k-1]+tail[k+1]) is all-float32 (0.5f, exact).
  *  Built with -ffp-contract=off so the f32 roundings are not fused.
  */
 #ifndef REVERB_FREQUENCY_RESPONSE_H
@@ -34,15 +35,15 @@
 typedef struct {
     int    n_freqs;            /* spectrum length (e.g. 257) */
     int    use_conservative;   /* point-wise max with raw_tail */
-    double smoothing_base;     /* 0.2, or wall-clock-rescaled value */
-    double average_decay;      /* EMA scalar state (float64) */
+    float  smoothing_base;     /* 0.2, or wall-clock-rescaled value */
+    float  average_decay;      /* EMA scalar state (float32) */
     float *tail_response;      /* owned by caller storage; length n_freqs */
 } ReverbFrequencyResponse;
 
 /* tail_storage must point to n_freqs floats; ownership stays with caller. */
 void reverb_freq_resp_init(ReverbFrequencyResponse *r, float *tail_storage,
                            int n_freqs, int use_conservative,
-                           double smoothing_base);
+                           float smoothing_base);
 
 void reverb_freq_resp_reset(ReverbFrequencyResponse *r);
 
@@ -63,7 +64,7 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
                              const float *frequency_response,
                              int n_partitions,
                              int filter_delay_blocks,
-                             double linear_filter_quality,
+                             float linear_filter_quality,
                              int linear_filter_quality_is_none,
                              int stationary_block);
 

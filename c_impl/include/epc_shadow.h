@@ -1,5 +1,8 @@
 /* epc_shadow.h — Wave 3: ports of EchoPathChangeDetector +
  * ShadowCopyController (aec.py 2726-3006).
+ *
+ * All scalar math float32-by-design (Python fp64 bit-exact parity retired;
+ * the resulting drift is accepted).
  */
 #ifndef AEC_EPC_SHADOW_H
 #define AEC_EPC_SHADOW_H
@@ -24,24 +27,24 @@ typedef struct EpcEvent {
 typedef struct EpcDetector {
     int    active;       /* 0/1 */
     int    hangover;
-    double epv_gain_fast;
-    double epv_gain_slow;
-    double prev_total_err;
+    float  epv_gain_fast;
+    float  epv_gain_slow;
+    float  prev_total_err;
     /* Config slice */
     int    epc_hangover;
-    double epc_total_rise;
-    double epc_delta_threshold;
+    float  epc_total_rise;
+    float  epc_delta_threshold;
 } EpcDetector;
 
-void epc_init(EpcDetector* e, int hangover, double total_rise,
-                 double delta_threshold);
+void epc_init(EpcDetector* e, int hangover, float total_rise,
+                 float delta_threshold);
 void epc_reset(EpcDetector* e);
 EpcEvent epc_force_delay(EpcDetector* e);
-EpcEvent epc_update_epv(EpcDetector* e, double far_pwr_global,
+EpcEvent epc_update_epv(EpcDetector* e, float far_pwr_global,
                              int filter_converged, int main_paused);
 EpcEvent epc_update_shadow_rise(EpcDetector* e,
-                                     double main_err_smooth,
-                                     double shadow_err_smooth,
+                                     float main_err_smooth,
+                                     float shadow_err_smooth,
                                      int is_stationary);
 void epc_tick_hangover(EpcDetector* e);
 
@@ -61,30 +64,30 @@ typedef struct ShadowCopyDecision {
 
 typedef struct ShadowCopy {
     ShadowCopyGateMode gate_mode;
-    double copy_err_baseline;
+    float  copy_err_baseline;
     int    copy_counter;
     int    streak;
     int    main_paused;
     int    pause_resume;
     /* Config slice */
-    double shadow_copy_threshold;
+    float  shadow_copy_threshold;
     int    shadow_copy_hysteresis;
     int    epc_hangover;
 } ShadowCopy;
 
 void shadow_copy_init(ShadowCopy* s, ShadowCopyGateMode mode,
-                         double threshold, int hysteresis, int epc_hangover);
+                         float threshold, int hysteresis, int epc_hangover);
 void shadow_copy_reset(ShadowCopy* s);
 ShadowCopyDecision shadow_copy_update(
     ShadowCopy* s,
     int    shadow_frame_count,
-    double far_pwr,
-    double main_err_smooth,
-    double shadow_err_smooth,
+    float  far_pwr,
+    float  main_err_smooth,
+    float  shadow_err_smooth,
     int    epc_active,
-    double saturation_level,
-    double dt_from_energy,
-    double dt_from_coherence,   /* default 0.0 */
+    float  saturation_level,
+    float  dt_from_energy,
+    float  dt_from_coherence,   /* default 0.0 */
     int    delay_reliable);     /* default 0 */
 
 #ifdef __cplusplus

@@ -15,8 +15,9 @@
  *   - per-hop onset release decay of _erle_onset_compensated.
  *   - endpoints (bin 0, n-1) mirror their interior neighbour.
  *
- * PARITY (numpy 1.26 -> C):
- *   Real pipeline dtypes (captured on a real doubletalk case):
+ * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity is
+ * retired for this module; drift accepted). Real pipeline shapes (captured
+ * on a real doubletalk case):
  *     x2 / y2 / e2          : float32 (257,)
  *     converged_filter      : bool scalar
  *     coh_gate_mask         : bool (257,)  (present, not None)
@@ -24,12 +25,16 @@
  *     _erle_during_onsets / _max_erle / _y2_acc / _e2_acc : float32 (257,)
  *     _coming_onset / _low_render_energy                  : bool (257,)
  *     _hold_counters                                      : int32 (257,)
- *     _x2_band_energy_threshold                           : float64 scalar
- *   All per-bin ERLE arithmetic is float32: numpy 1.x casts the Python-float
- *   scalars (alpha, min_erle, max_erle[k], 1e-30, 10.0) to float32 before
- *   combining with the float32 arrays, so every smoothing step rounds in
- *   float. The single float64 quantity is the x2 band-energy threshold; the
- *   comparison `x2(f32) < thr(f64)` promotes x2 to f64 (numpy mixed compare).
+ *     _x2_band_energy_threshold                           : float32 scalar
+ *       (was float64; its SOURCE constant SE_X2_BAND_ENERGY_THRESHOLD stays a
+ *       double literal — it is only ever an argument to the shared,
+ *       unconverted aec3_per_bin_psd_threshold() double API; the double
+ *       result is narrowed to float32 once, at the store in
+ *       subband_erle_init())
+ *   All per-bin ERLE arithmetic is float32 end-to-end (alpha, min_erle,
+ *   max_erle[k], 1e-30f, 10.0f are float32 scalars combined with the float32
+ *   arrays; single rounding per op, no widen-then-narrow). The x2 band-energy
+ *   gate `x2(f32) < thr(f32)` is now a plain float32 compare.
  *   Built with -ffp-contract=off so the per-op float roundings are not fused.
  *
  * STORAGE: caller supplies all per-bin arrays (length n_bins each). Sizes:
@@ -49,19 +54,22 @@
 /* _BLOCKS_FOR_ONSET_DETECTION = 40 + int(0.6 * 100) = 100 */
 #define SE_BLOCKS_FOR_ONSET_DETECTION 100
 #define SE_POINTS_TO_ACCUMULATE   6
-#define SE_UNBOUNDED_ERLE_MAX     100000.0
-/* AEC3 kX2BandEnergyThreshold source value (scaled per hop in init). */
-#define SE_X2_BAND_ENERGY_THRESHOLD 44015068.0
+#define SE_UNBOUNDED_ERLE_MAX     100000.0f
+/* AEC3 kX2BandEnergyThreshold source value (scaled per hop in init). Kept as
+ * a double literal (NOT `f`-suffixed): it is only ever passed to the shared,
+ * unconverted aec3_per_bin_psd_threshold() double API. */
+#define SE_X2_BAND_ENERGY_THRESHOLD 44015068.0f
 
 typedef struct {
     int    n_bins;
-    float  min_erle;          /* _min_erle (Python float -> stored f32-cast at use) */
+    float  min_erle;          /* _min_erle */
     int    use_onset_detection;
     int    use_min_erle_during_onsets;
-    double alpha_up;          /* 0.05 (Python float) */
-    double alpha_down;        /* 0.1  (Python float) */
-    double onset_release_decay; /* 0.97 (Python float) */
-    double x2_band_energy_threshold; /* float64 scalar (per_bin_psd_threshold) */
+    float  alpha_up;          /* 0.05f */
+    float  alpha_down;        /* 0.1f  */
+    float  onset_release_decay; /* 0.97f */
+    float  x2_band_energy_threshold; /* float32 (narrowed once from the
+                                       * double threshold helper's result) */
 
     /* per-bin state (caller-owned, length n_bins) */
     float   *max_erle;        /* LF half = max_erle_l, HF half = max_erle_h */

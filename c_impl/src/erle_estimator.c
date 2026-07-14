@@ -17,8 +17,7 @@ void erle_estimator_init(ErleEstimator *e,
     e->startup_hops       = startup_phase_length_hops;
     e->blocks_since_reset = 0;
     /* Python ctor: FullBandErleEstimator(min_erle, max_erle_l, hop_size). */
-    fb_erle_init(&e->fullband, n_bins, (double)min_erle, (double)max_erle_l,
-                 hop_size);
+    fb_erle_init(&e->fullband, n_bins, min_erle, max_erle_l, hop_size);
     /* Python ctor: SubbandErleEstimator(n_bins, min_erle, max_erle_l,
      *   max_erle_h, use_onset_detection, hop_size). use_min_erle_during_onsets
      *   defaults True in SubbandErleEstimator.__init__. */
@@ -60,11 +59,11 @@ const float *erle_estimator_erle_unbounded(const ErleEstimator *e) {
     return subband_erle_erle_unbounded(&e->subband);
 }
 
-double erle_estimator_fullband_erle_log2(const ErleEstimator *e) {
+float erle_estimator_fullband_erle_log2(const ErleEstimator *e) {
     return fb_erle_log2(&e->fullband);
 }
 
-double erle_estimator_get_inst_linear_quality_estimate(const ErleEstimator *e,
+float erle_estimator_get_inst_linear_quality_estimate(const ErleEstimator *e,
                                                        int *valid) {
     return fb_erle_get_inst_linear_quality_estimate(&e->fullband, valid);
 }

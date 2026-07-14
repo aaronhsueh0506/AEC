@@ -16,9 +16,9 @@
 
 #define RSA_COUNTER_THRESHOLD          5
 #define RSA_POOR_EXCITATION_THRESHOLD  10
-#define RSA_MAX_ABS_THRESHOLD_FLOAT    (100.0 / 32768.0)   /* 3.0517578125e-3 */
-#define RSA_PEAK_RATIO_NARROW          3.0
-#define RSA_PEAK_RATIO_STRONG          100.0
+#define RSA_MAX_ABS_THRESHOLD_FLOAT    (100.0f / 32768.0f)   /* 3.0517578125e-3 */
+#define RSA_PEAK_RATIO_NARROW          3.0f
+#define RSA_PEAK_RATIO_STRONG          100.0f
 
 void rsa_init(RenderSignalAnalyzer *m, int64_t *counters_storage, int n_freqs,
               int strong_peak_freeze_duration) {
@@ -56,7 +56,7 @@ static void identify_small_narrow_band_regions(RenderSignalAnalyzer *m,
         float x_left   = render_psd[k - 1];
         float x_right  = render_psd[k + 1];
         float neigh    = x_left > x_right ? x_left : x_right; /* np.maximum */
-        float thresh   = (float)RSA_PEAK_RATIO_NARROW * neigh; /* f32*f32 -> f32 */
+        float thresh   = RSA_PEAK_RATIO_NARROW * neigh; /* f32*f32 -> f32 */
         int idx = k - 1;
         if (x_center > thresh) {
             m->counters[idx] = m->counters[idx] + 1;
@@ -72,7 +72,7 @@ static void identify_strong_narrow_band_component(RenderSignalAnalyzer *m,
                                                   const float *render_block,
                                                   int render_block_len) {
     int peak_bin, lo_lo, lo_hi, hi_lo, hi_hi, i;
-    double non_peak_power, max_abs, peak_level;
+    float non_peak_power, max_abs, peak_level;
     float wmax;
 
     /* Tick down freeze counter. */
@@ -101,34 +101,34 @@ static void identify_strong_narrow_band_component(RenderSignalAnalyzer *m,
     hi_lo = peak_bin + 5;  if (hi_lo > m->n_freqs) hi_lo = m->n_freqs;
     hi_hi = peak_bin + 15; if (hi_hi > m->n_freqs) hi_hi = m->n_freqs;
 
-    non_peak_power = 0.0;
+    non_peak_power = 0.0f;
     if (lo_hi > lo_lo) {
         wmax = render_psd[lo_lo];               /* np.max over float32 window */
         for (i = lo_lo + 1; i < lo_hi; ++i) {
             if (render_psd[i] > wmax) wmax = render_psd[i];
         }
-        if ((double)wmax > non_peak_power) non_peak_power = (double)wmax;
+        if (wmax > non_peak_power) non_peak_power = wmax;
     }
     if (hi_hi > hi_lo) {
         wmax = render_psd[hi_lo];
         for (i = hi_lo + 1; i < hi_hi; ++i) {
             if (render_psd[i] > wmax) wmax = render_psd[i];
         }
-        if ((double)wmax > non_peak_power) non_peak_power = (double)wmax;
+        if (wmax > non_peak_power) non_peak_power = wmax;
     }
 
-    /* max_abs of render time block: np.max(np.abs(render_block)) in float32,
-     * then float() to f64. */
+    /* max_abs of render time block: np.max(np.abs(render_block)), kept in
+     * float32 (float32-by-design; formerly widened via float() to f64). */
     {
         float amax = (render_block_len > 0) ? fabsf(render_block[0]) : 0.0f;
         for (i = 1; i < render_block_len; ++i) {
             float a = fabsf(render_block[i]);
             if (a > amax) amax = a;
         }
-        max_abs = (double)amax;
+        max_abs = amax;
     }
 
-    peak_level = (double)render_psd[peak_bin];   /* float(X2[peak_bin]) */
+    peak_level = render_psd[peak_bin];   /* X2[peak_bin], float32-by-design */
 
     if (peak_bin > 0
             && max_abs > RSA_MAX_ABS_THRESHOLD_FLOAT

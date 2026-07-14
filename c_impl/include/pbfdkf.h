@@ -209,9 +209,10 @@ void pbfdkf_handle_echo_path_change(PBFDKF* p, int delay_change, int gain_change
 /* W copy only (H_error / R untouched). */
 void pbfdkf_copy_weights_from(PBFDKF* dst, const PBFDKF* src);
 
-/* float(np.sum(np.abs(error_spec)**2)) — bit-exact (cmag2_np + pairwise). */
-double pbfdaf_get_error_energy(const PBFDAF* p);
-double pbfdkf_get_error_energy(const PBFDKF* p);
+/* sum(|error_spec|**2) via cmag2_np + pairwise float32 sum (float32-by-design,
+ * no double promotion). */
+float pbfdaf_get_error_energy(const PBFDAF* p);
+float pbfdkf_get_error_energy(const PBFDKF* p);
 
 /* get_time_domain_filter: concat per-partition irfft(W[p])[:hop] →
  * out[n_partitions × hop_size] (caller-owned). Mirrors filters.py:397. */

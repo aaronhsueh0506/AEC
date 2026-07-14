@@ -49,7 +49,7 @@ void aec_debug_set_frame(int frame_idx, int hop, int sample_rate) {
 
 void aec_debug_logf(const char* module, const char* fmt, ...) {
     FILE* fp = (g_fp != NULL) ? g_fp : stderr;
-    double t = (double)(g_frame_idx * g_hop) / (double)g_sr;
+    float t = (float)(g_frame_idx * g_hop) / (float)g_sr;
     fprintf(fp, "[AEC][t=%6.3fs][f=%5d][%s] ", t, g_frame_idx, module);
 
     va_list ap;

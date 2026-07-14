@@ -487,8 +487,8 @@ int aec_create(Aec* a, const AecConfig* cfg) {
         float *n2i       = (float*)malloc((size_t)K * sizeof(float));
         float *sye_re    = (float*)malloc((size_t)K * sizeof(float));
         float *sye_im    = (float*)malloc((size_t)K * sizeof(float));
-        double *syy      = (double*)malloc((size_t)K * sizeof(double));
-        double *see      = (double*)malloc((size_t)K * sizeof(double));
+        float *syy       = (float*)malloc((size_t)K * sizeof(float));
+        float *see       = (float*)malloc((size_t)K * sizeof(float));
         float *ola       = (float*)malloc((size_t)blk * sizeof(float));
         float *np_       = (float*)malloc((size_t)K * sizeof(float));
         float *fp_       = (float*)malloc((size_t)K * sizeof(float));
@@ -807,7 +807,7 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
     t += fft_get_mem_size(fft);
     /* aec3_post (21) */
     t += ALIGN16(K * sizeof(float)) * 6;           /* avg_rev y2s n2 n2i sye_re sye_im */
-    t += ALIGN16(K * sizeof(double)) * 2;           /* syy see */
+    t += ALIGN16(K * sizeof(float)) * 2;            /* syy see */
     t += ALIGN16((size_t)blk * sizeof(float));      /* ola */
     t += ALIGN16(K * sizeof(float)) * 8;            /* np_ fp_ ep_ erp_ cpe x2r cn nf */
     t += ALIGN16(K * sizeof(unsigned char));        /* cgm */
@@ -983,13 +983,12 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         pcfg.erle_coh_gate_threshold     = AEC3B_ERLE_COH_GATE_THRESHOLD;
 
 #define P_FSLICE(n) ((float*)(ptr));    ptr += ALIGN16(K * sizeof(float));    (void)(n)
-#define P_DSLICE(n) ((double*)(ptr));   ptr += ALIGN16(K * sizeof(double));   (void)(n)
 #define P_CSLICE(n) ((Complex*)(ptr));  ptr += ALIGN16(K * sizeof(Complex));  (void)(n)
 #define P_BSLICE(n) ((unsigned char*)(ptr)); ptr += ALIGN16(K * sizeof(unsigned char)); (void)(n)
         float        *avg_rev  = P_FSLICE(0); float *y2s    = P_FSLICE(0);
         float        *n2       = P_FSLICE(0); float *n2i    = P_FSLICE(0);
         float        *sye_re   = P_FSLICE(0); float *sye_im = P_FSLICE(0);
-        double       *syy      = P_DSLICE(0); double *see   = P_DSLICE(0);
+        float        *syy      = P_FSLICE(0); float *see    = P_FSLICE(0);
         float        *ola      = (float*)ptr;  ptr += ALIGN16((size_t)blk * sizeof(float));
         float        *np_      = P_FSLICE(0); float *fp_    = P_FSLICE(0);
         float        *ep_      = P_FSLICE(0); float *erp_   = P_FSLICE(0);
@@ -998,7 +997,7 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         unsigned char *cgm     = P_BSLICE(0);
         Complex      *eout     = P_CSLICE(0);
         float        *eout_full = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
-        memset(syy, 0, K * sizeof(double)); memset(see, 0, K * sizeof(double));
+        memset(syy, 0, K * sizeof(float)); memset(see, 0, K * sizeof(float));
         aec3_post_init(&a->post, &pcfg, a->post_fft,
                        AEC3B_SYNTH_WINDOW, AEC3B_SQRT2_SIN_LUT, avg_rev,
                        y2s, n2, n2i, sye_re, sye_im, syy, see, ola,
@@ -1173,7 +1172,6 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
         sc->stat_mask   = P_BSLICE(0);
     }
 #undef P_FSLICE
-#undef P_DSLICE
 #undef P_CSLICE
 #undef P_BSLICE
 
@@ -1406,7 +1404,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      * preserved). Require `sustain` consecutive frames above threshold before
      * arming, then hold for `hold` frames. */
     {
-        float ne_ind = (float)a->dt_analyzer.dt_from_energy;  /* receive: DoubleTalk (Stage-3) is double */
+        float ne_ind = a->dt_analyzer.dt_from_energy;
         if (ne_ind > a->cfg.ne_recent_threshold)
             a->ne_above += 1;
         else
@@ -1422,8 +1420,8 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* 2. saturation. */
     float sat_ref = 0.0f;  /* receive: Saturation (Stage-3) getter returns double */
     if (a->has_sat) {
-        sat_ref = (float)saturation_detect(&a->sat_ref, a->far_hop, hop);
-        float sat_mic = (float)saturation_detect(&a->sat_mic, a->near_hop, hop);
+        sat_ref = saturation_detect(&a->sat_ref, a->far_hop, hop);
+        float sat_mic = saturation_detect(&a->sat_mic, a->near_hop, hop);
         a->saturation_level = (sat_ref > sat_mic * 0.5f) ? sat_ref : sat_mic * 0.5f;
         if (a->cfg.saturation_softclip_ref && sat_ref > 0.1f)
             saturation_soft_clip(a->far_hop, a->far_hop, hop, 0.8);
@@ -1609,7 +1607,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* 4. render activity. */
     RenderActivityResult ra = render_activity_update(&a->render_activity, a->far_hop, hop);
     a->warmup_far_active = ra.warmup_active;
-    float far_pwr_global = (float)ra.far_pwr;  /* receive: RenderActivity (Stage-3) is double */
+    float far_pwr_global = ra.far_pwr;
 
     /* 5. mu_scale (simple variable mu, Valin 2007 RER-inspired). */
     int mu_is_array = 0;
@@ -1807,8 +1805,8 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
     /* 13. smoothed errs + DT analyzer + regime handler. */
     if (a->has_shadow) {
-        float main_err   = (float)pbfdkf_get_error_energy(&a->main_filter);   /* receive: PBFDKF (Stage-3) is double */
-        float shadow_err = (float)pbfdaf_get_error_energy(&a->shadow_filter); /* receive: PBFDAF (Stage-3) is double */
+        float main_err   = pbfdkf_get_error_energy(&a->main_filter);
+        float shadow_err = pbfdaf_get_error_energy(&a->shadow_filter);
         float as = a->cfg.shadow_err_alpha, oas = 1.0f - as;
         a->main_err_smooth   = as * a->main_err_smooth   + oas * main_err;
         a->shadow_err_smooth = as * a->shadow_err_smooth + oas * shadow_err;
@@ -1944,7 +1942,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
         /* base DT confidence (simple energy-ratio estimate). */
         float simple_dt = 1.0f - far_pwr / (mic_pwr + far_pwr);
-        float raw_dt = (float)a->dt_analyzer.dt_from_energy;  /* receive: DoubleTalk (Stage-3) is double */
+        float raw_dt = a->dt_analyzer.dt_from_energy;
         float sd_half = simple_dt * 0.5f;
         if (sd_half > raw_dt) raw_dt = sd_half;
 
@@ -2001,8 +1999,8 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
         /* shadow_dt stash for RES context. Both operands received from
          * DoubleTalk (Stage-3, double) — cast at the receive/compare site. */
-        float shadow_dt_v = (float)a->dt_analyzer.dt_from_energy;
-        if ((float)a->dt_analyzer.dt_from_shadow > shadow_dt_v) shadow_dt_v = (float)a->dt_analyzer.dt_from_shadow;
+        float shadow_dt_v = a->dt_analyzer.dt_from_energy;
+        if (a->dt_analyzer.dt_from_shadow > shadow_dt_v) shadow_dt_v = a->dt_analyzer.dt_from_shadow;
         if (a->epc.active) shadow_dt_v *= 0.08f;
         a->last_far_power = far_power;
         a->last_shadow_dt = shadow_dt_v;
@@ -2034,10 +2032,10 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             in.shadow_present = a->has_shadow;
             in.shadow_error_spec = a->has_shadow ? a->shadow_filter.error_spec : NULL;
             in.last_shadow_output_time = a->has_shadow ? a->shadow_out : NULL;
-            in.s_ref_max = (double)a->main_filter.base.last_s_max_abs * 32768.0;
-            in.s_coa_max = a->has_shadow ? (double)a->shadow_filter.last_s_max_abs * 32768.0 : 0.0;
+            in.s_ref_max = a->main_filter.base.last_s_max_abs * 32768.0f;
+            in.s_coa_max = a->has_shadow ? a->shadow_filter.last_s_max_abs * 32768.0f : 0.0f;
             in.main_error_energy = pbfdkf_get_error_energy(&a->main_filter);
-            in.shadow_error_energy = a->has_shadow ? pbfdaf_get_error_energy(&a->shadow_filter) : 0.0;
+            in.shadow_error_energy = a->has_shadow ? pbfdaf_get_error_energy(&a->shadow_filter) : 0.0f;
             in.raw_output = a->raw_output;
             in.near_end = a->near_hop;
             in.far_end = a->far_hop;
@@ -2260,7 +2258,7 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
     ctx->far_power = a->last_far_power;
     ctx->erle_factor = a->erle_factor_prev;
     ctx->dt_indicator = a->last_dt_indicator;
-    ctx->divergence = (float)a->convergence.divergence;  /* receive: FilterConvergence (Stage-3) is double */
+    ctx->divergence = a->convergence.divergence;
     ctx->saturation_level = a->saturation_level;
     ctx->erl_estimate = a->erl_estimate;
     ctx->shadow_dt = a->last_shadow_dt;

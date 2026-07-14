@@ -31,8 +31,10 @@
  *   - _PSD_SCALE = 32768² (int16 max²). PSD = (|c64|² in f32) · _PSD_SCALE in
  *     f32 (array · pyfloat → f32, numpy<2 rule), then .astype(f32) no-op.
  *   - coherence Γ²: sye is complex64 (component-wise f32 EMA, scalars value-
- *     cast to f32); syy/see are float64 (the f32 a·|·|² term widened to f64 in
- *     the add). gamma2 = (|sye|²/max(syy·see,1e-30)).astype(f32).
+ *     cast to f32); syy/see are float32 (Stage 3a: the f64 widen previously
+ *     used to match the numpy reference is retired — same EMA computed in f32
+ *     throughout, structure/order unchanged, drift accepted). gamma2 =
+ *     (|sye|²/max(syy·see,1e-30)).astype(f32).
  *   - CNG N2 tracking: y2_smoothed / n2 / n2_initial are float32 arrays; the
  *     per-hop α/freshness/retention/slow-up are python-float scalars value-cast
  *     to f32 in each array op (all-f32 computation), then np.where → .astype
@@ -91,18 +93,18 @@ typedef struct {
     int    enable_cng;                       /* 1 */
 
     /* coherence Γ²(Ŷ,Y) EMA */
-    double erle_coh_gate_alpha;              /* 0.05 */
-    double erle_coh_gate_threshold;          /* 0.5  */
+    float  erle_coh_gate_alpha;               /* 0.05 */
+    float  erle_coh_gate_threshold;           /* 0.5  */
 
     /* CNG wall-clock-rescaled constants */
-    double cng_y2_alpha;                     /* y2_smoothed EMA α */
-    double cng_n2_track_freshness;
-    double cng_n2_track_retention;
-    double cng_n2_slow_up;
-    double cng_n2_initial_alpha;
+    float  cng_y2_alpha;                      /* y2_smoothed EMA α */
+    float  cng_n2_track_freshness;
+    float  cng_n2_track_retention;
+    float  cng_n2_slow_up;
+    float  cng_n2_initial_alpha;
     int    cng_n2_update_onset_hops;
     int    cng_n2_initial_duration_hops;
-    double noise_floor_int16sq;              /* GetNoiseFloorFactor(dbfs) */
+    float  noise_floor_int16sq;               /* GetNoiseFloorFactor(dbfs) */
 } Aec3PostConfig;
 
 /* Audio-passive per-hop trace capture. The three scalars below are decided
@@ -113,7 +115,7 @@ typedef struct {
 typedef struct {
     int    aec3_converged;   /* AEC3 per-frame convergence (refined||coarse) */
     int    far_active;       /* active_render (far_pwr > threshold)         */
-    double gain_mean;        /* mean of the SuppressionGain output array     */
+    float  gain_mean;        /* mean of the SuppressionGain output array     */
 } Aec3PostTrace;
 
 /* Mutable driver state. All per-bin arrays are caller-owned. */
@@ -136,11 +138,11 @@ typedef struct {
     float   *n2;                   /* [n_bins] */
     float   *n2_initial;           /* [n_bins] */
 
-    /* coherence Γ²(Ŷ,Y) EMA (sye complex64 split; syy/see float64) */
+    /* coherence Γ²(Ŷ,Y) EMA (sye complex64 split; syy/see float32) */
     float   *coh_sye_re;           /* [n_bins] */
     float   *coh_sye_im;           /* [n_bins] */
-    double  *coh_syy;              /* [n_bins] */
-    double  *coh_see;              /* [n_bins] */
+    float   *coh_syy;              /* [n_bins] */
+    float   *coh_see;              /* [n_bins] */
 
     /* avg-render-reverb (owned ReverbModel) */
     ReverbModel avg_reverb;        /* uses avg_reverb_storage */
@@ -177,7 +179,7 @@ void aec3_post_init(Aec3Post *p, const Aec3PostConfig *cfg,
                     float *avg_reverb_storage,
                     float *y2_smoothed, float *n2, float *n2_initial,
                     float *coh_sye_re, float *coh_sye_im,
-                    double *coh_syy, double *coh_see,
+                    float *coh_syy, float *coh_see,
                     float *ola_buf,
                     float *near_psd, float *far_psd, float *echo_psd,
                     float *error_psd, float *capture_psd_erle,
@@ -236,7 +238,7 @@ void aec3_post_process(Aec3Post *p,
                        const Aec3PostAbs *mag,
                        int x2_present,
                        const float *x2_at_delay, const float *x2_past,
-                       double decay_steady,
+                       float decay_steady,
                        const float *far_end,
                        int saturated_capture,
                        int usable_linear,
@@ -256,7 +258,7 @@ void aec3_post_compute_psds(Aec3Post *p, const Aec3PostAbs *mag);
 /* Stage 3: avg-render-reverb → p->x2_reverb_for_erle (only when x2_present). */
 void aec3_post_compute_x2_reverb(Aec3Post *p, int x2_present,
                                  const float *x2_at_delay, const float *x2_past,
-                                 double decay_steady);
+                                 float decay_steady);
 
 /* Stage 4: coherence Γ²(Ŷ,Y) EMA → p->coh_gate_mask (when erle_coh_gate). */
 void aec3_post_compute_coherence(Aec3Post *p,
@@ -323,10 +325,10 @@ typedef struct {
     const Complex *shadow_error_spec;    /* shadow.error_spec (coarse e2)  */
     const float   *last_shadow_output_time; /* _last_shadow_output_time;
                                              * NULL → not available        */
-    double         s_ref_max;            /* filter._last_s_max_abs         */
-    double         s_coa_max;            /* shadow._last_s_max_abs (or 0)  */
-    double         main_error_energy;    /* bridge e_ratio numerator/denom */
-    double         shadow_error_energy;
+    float          s_ref_max;            /* filter._last_s_max_abs         */
+    float          s_coa_max;            /* shadow._last_s_max_abs (or 0)  */
+    float          main_error_energy;    /* bridge e_ratio numerator/denom */
+    float          shadow_error_energy;
 
     /* ── args ───────────────────────────────────────────────────────────── */
     const float   *raw_output;           /* [hop]  e_refined_time          */
@@ -336,7 +338,7 @@ typedef struct {
     /* ── delay tracker / saturation / pending EPV flags ─────────────────── */
     int            current_delay;        /* int(self._current_delay)       */
     int            delay_active;         /* self._delay_active             */
-    double         saturation_level;     /* self._saturation_level         */
+    float          saturation_level;     /* self._saturation_level         */
     int            pending_gain_change;  /* _aec3_pending_gain_change (in) */
     int            pending_delay_change; /* _aec3_pending_delay_change:
                                           *  -1 == None, else DelayAdjustment */
@@ -348,7 +350,7 @@ typedef struct {
     /* ── config flags ───────────────────────────────────────────────────── */
     int            erle_coh_gate_enabled;
     int            use_stationarity_properties; /* sg echo_audibility flag */
-    double         active_render_threshold;     /* _ar_thr = 5.96e-4       */
+    float          active_render_threshold;     /* _ar_thr = 5.96e-4       */
 } Aec3PostRunIn;
 
 /* Sub-module object bundle the driver wires. All caller-owned + constructed. */

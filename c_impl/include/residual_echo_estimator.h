@@ -19,7 +19,8 @@
  *     norm=1.07e7 are python floats in an ARRAY expression → all-float32
  *     (0.1*x2² then /norm in f32), then explicit (float) cast (no-op).
  *   - reverb tail comes from ReverbModel + ReverbFrequencyResponse C ports.
- *   - decay = 0.83 ** (hop/64): pow() in double, then used as a float scaling.
+ *   - decay = 0.83f ** (hop/64): powf() in float32 (converted from the former
+ *     double pow(); drift accepted), then used as a float scaling.
  *   Built with -ffp-contract=off so the per-op f32 roundings are not fused.
  *
  * The estimator OWNS a ReverbModel and a ReverbFrequencyResponse. The caller
@@ -36,10 +37,10 @@
 
 /* EchoModelConfig subset (frozen in Python). */
 typedef struct {
-    double min_noise_floor_power;   /* fft-density-scaled at init (6553600 @ fft512) */
-    double noise_gate_power;        /* legacy 27509562 (only used when !use_aec3_gate) */
-    double noise_gate_slope;        /* 0.3 */
-    double stationary_gate_slope;   /* 10.0 */
+    float  min_noise_floor_power;   /* fft-density-scaled at init (6553600 @ fft512) */
+    float  noise_gate_power;        /* legacy 27509562 (only used when !use_aec3_gate) */
+    float  noise_gate_slope;        /* 0.3 */
+    float  stationary_gate_slope;   /* 10.0 */
     int    model_reverb_in_nonlinear_mode; /* True */
 } ReeEchoModelConfig;
 
@@ -48,16 +49,16 @@ typedef struct {
 
     /* config */
     ReeEchoModelConfig echo_model;
-    double default_gain_early;      /* 1.0 */
-    double default_gain_late;       /* 1.0 */
-    double tm_gain_early;           /* 0.01 */
-    double tm_gain_late;            /* 0.01 */
+    float  default_gain_early;      /* 1.0 */
+    float  default_gain_late;       /* 1.0 */
+    float  tm_gain_early;           /* 0.01 */
+    float  tm_gain_late;            /* 0.01 */
     int    erle_onset_comp_in_dominant; /* False */
-    double reverb_decay;            /* 0.83 */
-    double reverb_mild_decay_scale; /* 1.0 */
+    float  reverb_decay;            /* 0.83 */
+    float  reverb_mild_decay_scale; /* 1.0 */
     int    reverb_enabled;          /* True */
     int    hop_size;                /* 160 */
-    double reverb_tail_strength;    /* 1.0 */
+    float  reverb_tail_strength;    /* 1.0 */
     int    use_aec3_residual_noise_gate; /* True */
     int    use_stationarity_properties;  /* True in production — when set, the
                                           * nonlinear-path residual noise gate
@@ -65,9 +66,9 @@ typedef struct {
                                           * Python `not _use_stationarity_properties`). */
     int    use_aec3_echo_gen_window;     /* True */
     int    nl_r2_enabled;           /* True */
-    double nl_r2_alpha;             /* 0.1 */
-    double nl_norm_power;           /* 1.07e7 */
-    double residual_noise_gate_power; /* per_bin_psd_threshold(27509.42,hop) */
+    float  nl_r2_alpha;             /* 0.1 */
+    float  nl_norm_power;           /* 1.07e7 */
+    float  residual_noise_gate_power; /* per_bin_psd_threshold(27509.42,hop) */
     int    noise_floor_hold_hops;   /* 50 */
     int    render_pre_window_size;  /* 1 */
     int    render_post_window_size; /* 1 */
@@ -124,18 +125,18 @@ void ree_init(ResidualEchoEstimator *r,
               int n_bins,
               int hop_size,
               const ReeEchoModelConfig *echo_model,
-              double default_gain, double tm_gain,
+              float default_gain, float tm_gain,
               int erle_onset_comp_in_dominant,
-              double reverb_decay, double reverb_mild_decay_scale,
-              int reverb_enabled, double reverb_tail_strength,
+              float reverb_decay, float reverb_mild_decay_scale,
+              int reverb_enabled, float reverb_tail_strength,
               int use_aec3_residual_noise_gate,
               int use_stationarity_properties,
               int use_aec3_echo_gen_window,
-              int nl_r2_enabled, double nl_r2_alpha, double nl_norm_power,
-              double residual_noise_gate_power,
+              int nl_r2_enabled, float nl_r2_alpha, float nl_norm_power,
+              float residual_noise_gate_power,
               int noise_floor_hold_hops,
               int use_freq_response, int reverb_use_conservative,
-              double reverb_smoothing_base,
+              float reverb_smoothing_base,
               float *x2_noise_floor, int *x2_noise_floor_counter,
               float *reverb_model_storage, float *reverb_tail_storage,
               float *render_history_storage,
@@ -149,8 +150,8 @@ void ree_reset(ResidualEchoEstimator *r);
  * decay = reverb_decay (× mild_decay_scale if dominant_nearend), then
  * pow(decay, hop/64) when hop != 64. Returns 0 when reverb disabled. Used by
  * the orchestrator's avg-render-reverb step (decay_steady = dominant=False). */
-double ree_reverb_decay_value(const ResidualEchoEstimator *r,
-                              int dominant_nearend);
+float ree_reverb_decay_value(const ResidualEchoEstimator *r,
+                             int dominant_nearend);
 
 /* update_reverb_models — refreshes the bound ReverbFrequencyResponse.
  * (The adaptive ReverbDecayEstimator is not bound in the production path, so
@@ -162,7 +163,7 @@ void ree_update_reverb_models(ResidualEchoEstimator *r,
                               const float *frequency_response,
                               int n_partitions,
                               int filter_delay_blocks,
-                              double filter_quality,
+                              float filter_quality,
                               int filter_quality_is_none,
                               int stationary_block);
 

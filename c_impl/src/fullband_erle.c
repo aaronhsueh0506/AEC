@@ -1,11 +1,12 @@
 /* fullband_erle.c — C port of python/modules/state/fullband_erle.py.
  *
- * The per-bin inputs x2/y2/e2 are float32 arrays; np.sum over them is numpy
- * pairwise summation in float32, then float(..) widens to double. Every scalar
- * accumulator / ratio / log2 / EMA / max-min / quality op is in double, exactly
- * as the Python module computes them (the _fast_log2 helper returns a Python
- * float from float(np.log2(double))). Built with -ffp-contract=off so each
- * double op rounds separately, matching numpy's per-op rounding.
+ * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity
+ * retired, drift accepted). The per-bin inputs x2/y2/e2 are float32 arrays;
+ * the pairwise sum over them stays float32 (fb_erle_pairwise_sum), no longer
+ * widened to double afterward. Every scalar accumulator / ratio / log2 / EMA
+ * / max-min / quality op is float32 end-to-end, matching the arrays'
+ * precision (the _fast_log2 helper now wraps log2f). Built with
+ * -ffp-contract=off so each float op rounds separately.
  */
 #include "fullband_erle.h"
 
@@ -61,42 +62,43 @@ float fb_erle_pairwise_sum(const float *a, size_t n) {
     }
 }
 
-/* _fast_log2(x) = float(np.log2(x)). np.log2 on a Python float returns a
- * float64; double log2() matches it bit-for-bit under -ffp-contract=off. */
-static double fast_log2(double x) {
-    return log2(x);
+/* _fast_log2(x) = log2f(x) — float32 in, float32 out (was float(np.log2(x))
+ * i.e. a float64 log2; now a single-precision log2 to match the rest of the
+ * float32 pipeline). */
+static float fast_log2(float x) {
+    return log2f(x);
 }
 
 /* ── _ErleInstantaneous ─────────────────────────────────────────────────────── */
 
-static void inst_init(ErleInstantaneous *e, double quality_alpha) {
+static void inst_init(ErleInstantaneous *e, float quality_alpha) {
     e->clamp_zero = 1;            /* clamp_quality_to_zero default True */
     e->clamp_one = 1;            /* clamp_quality_to_one  default True */
     e->quality_alpha = quality_alpha;
     e->has_erle_log2 = 0;
-    e->erle_log2 = 0.0;
-    e->inst_quality_estimate = 0.0;
-    e->max_erle_log2 = -10.0;
-    e->min_erle_log2 = 33.0;
-    e->y2_acum = 0.0;
-    e->e2_acum = 0.0;
+    e->erle_log2 = 0.0f;
+    e->inst_quality_estimate = 0.0f;
+    e->max_erle_log2 = -10.0f;
+    e->min_erle_log2 = 33.0f;
+    e->y2_acum = 0.0f;
+    e->e2_acum = 0.0f;
     e->num_points = 0;
 }
 
 static void inst_reset_accumulators(ErleInstantaneous *e) {
     e->has_erle_log2 = 0;
-    e->erle_log2 = 0.0;          /* mirror _erle_log2 = None (value unused) */
-    e->inst_quality_estimate = 0.0;
+    e->erle_log2 = 0.0f;         /* mirror _erle_log2 = None (value unused) */
+    e->inst_quality_estimate = 0.0f;
     e->num_points = 0;
-    e->y2_acum = 0.0;
-    e->e2_acum = 0.0;
+    e->y2_acum = 0.0f;
+    e->e2_acum = 0.0f;
 }
 
 static void inst_reset(ErleInstantaneous *e) {
     inst_reset_accumulators(e);
-    e->max_erle_log2 = -10.0;
-    e->min_erle_log2 = 33.0;
-    e->inst_quality_estimate = 0.0;
+    e->max_erle_log2 = -10.0f;
+    e->min_erle_log2 = 33.0f;
+    e->inst_quality_estimate = 0.0f;
 }
 
 static void inst_update_max_min(ErleInstantaneous *e) {
@@ -111,8 +113,8 @@ static void inst_update_max_min(ErleInstantaneous *e) {
 }
 
 static void inst_update_quality_estimate(ErleInstantaneous *e) {
-    double alpha = e->quality_alpha;
-    double quality = 0.0;
+    float alpha = e->quality_alpha;
+    float quality = 0.0f;
     if (e->max_erle_log2 > e->min_erle_log2) {
         quality = (e->erle_log2 - e->min_erle_log2) /
                   (e->max_erle_log2 - e->min_erle_log2);
@@ -125,20 +127,20 @@ static void inst_update_quality_estimate(ErleInstantaneous *e) {
 }
 
 /* ErleInstantaneous::update -> returns whether estimates updated. */
-static int inst_update(ErleInstantaneous *e, double y2_sum, double e2_sum) {
+static int inst_update(ErleInstantaneous *e, float y2_sum, float e2_sum) {
     int update_estimates = 0;
     e->e2_acum += e2_sum;
     e->y2_acum += y2_sum;
     e->num_points += 1;
     if (e->num_points == FBERLE_POINTS_TO_ACCUMULATE) {
-        if (e->e2_acum > 0.0) {
+        if (e->e2_acum > 0.0f) {
             update_estimates = 1;
             e->erle_log2 = fast_log2(e->y2_acum / e->e2_acum + FBERLE_EPSILON);
             e->has_erle_log2 = 1;
         }
         e->num_points = 0;
-        e->e2_acum = 0.0;
-        e->y2_acum = 0.0;
+        e->e2_acum = 0.0f;
+        e->y2_acum = 0.0f;
     }
     if (update_estimates) {
         inst_update_max_min(e);
@@ -148,19 +150,19 @@ static int inst_update(ErleInstantaneous *e, double y2_sum, double e2_sum) {
 }
 
 /* get_quality_estimate() — *valid = 0 mirrors a None return (erle_log2 None). */
-static double inst_get_quality_estimate(const ErleInstantaneous *e, int *valid) {
-    double value;
+static float inst_get_quality_estimate(const ErleInstantaneous *e, int *valid) {
+    float value;
     if (!e->has_erle_log2) {
         *valid = 0;
-        return 0.0;
+        return 0.0f;
     }
     *valid = 1;
     value = e->inst_quality_estimate;
-    if (e->clamp_zero && value < 0.0) {
-        value = 0.0;
+    if (e->clamp_zero && value < 0.0f) {
+        value = 0.0f;
     }
-    if (e->clamp_one && value > 1.0) {
-        value = 1.0;
+    if (e->clamp_one && value > 1.0f) {
+        value = 1.0f;
     }
     return value;
 }
@@ -169,15 +171,17 @@ static double inst_get_quality_estimate(const ErleInstantaneous *e, int *valid) 
 
 static void update_quality_estimate(FullBandErleEstimator *s) {
     int valid = 0;
-    double q = inst_get_quality_estimate(&s->inst, &valid);
+    float q = inst_get_quality_estimate(&s->inst, &valid);
     s->has_linear_filter_quality = valid;
     s->linear_filter_quality = q;
 }
 
 void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
-                        double min_erle, double max_erle_l, int hop_size) {
+                        float min_erle, float max_erle_l, int hop_size) {
     s->n_freqs = n_freqs;
     s->td_alpha = FBERLE_TD_ALPHA;
+    /* The helper is double-typed (out of scope); its result is narrowed to
+     * float32 once, here. */
     s->x2_band_energy_threshold =
         aec3_per_bin_psd_threshold(FBERLE_X2_BAND_ENERGY_THRESHOLD, hop_size, 160);
     s->min_erle_log2 = fast_log2(min_erle + FBERLE_EPSILON);
@@ -186,7 +190,7 @@ void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
     s->erle_time_domain_log2 = s->min_erle_log2;
     inst_init(&s->inst, FBERLE_QUALITY_ALPHA);
     s->has_linear_filter_quality = 0;
-    s->linear_filter_quality = 0.0;
+    s->linear_filter_quality = 0.0f;
     fb_erle_reset(s);
 }
 
@@ -201,11 +205,11 @@ void fb_erle_update(FullBandErleEstimator *s,
                           const float *x2, const float *y2, const float *e2,
                           int converged_filter) {
     if (converged_filter) {
-        /* x2_sum = float(np.sum(x2)) — pairwise f32 then widen to double. */
-        double x2_sum = (double)fb_erle_pairwise_sum(x2, (size_t)s->n_freqs);
-        if (x2_sum > s->x2_band_energy_threshold * (double)s->n_freqs) {
-            double y2_sum = (double)fb_erle_pairwise_sum(y2, (size_t)s->n_freqs);
-            double e2_sum = (double)fb_erle_pairwise_sum(e2, (size_t)s->n_freqs);
+        /* x2_sum = pairwise f32 sum, consumed directly as float32. */
+        float x2_sum = fb_erle_pairwise_sum(x2, (size_t)s->n_freqs);
+        if (x2_sum > s->x2_band_energy_threshold * (float)s->n_freqs) {
+            float y2_sum = fb_erle_pairwise_sum(y2, (size_t)s->n_freqs);
+            float e2_sum = fb_erle_pairwise_sum(e2, (size_t)s->n_freqs);
             if (inst_update(&s->inst, y2_sum, e2_sum)) {
                 s->hold_counter_inst_erle = FBERLE_BLOCKS_TO_HOLD_ERLE;
                 s->erle_time_domain_log2 +=
@@ -223,11 +227,11 @@ void fb_erle_update(FullBandErleEstimator *s,
     update_quality_estimate(s);
 }
 
-double fb_erle_log2(const FullBandErleEstimator *s) {
+float fb_erle_log2(const FullBandErleEstimator *s) {
     return s->erle_time_domain_log2;
 }
 
-double fb_erle_get_inst_linear_quality_estimate(const FullBandErleEstimator *s,
+float fb_erle_get_inst_linear_quality_estimate(const FullBandErleEstimator *s,
                                                       int *valid) {
     *valid = s->has_linear_filter_quality;
     return s->linear_filter_quality;
