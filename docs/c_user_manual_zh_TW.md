@@ -83,7 +83,7 @@ cc -std=c99 -O2 -ffp-contract=off app.c \
 ### 3.2 WAV contract
 
 - 建議／驗證 sample rate：8、16、48 kHz。
-- 輸入支援 PCM16、PCM32 與 IEEE float32 WAV；多聲道只取第一聲道。
+- 輸入支援 PCM16 與 IEEE float32 WAV（PCM32 已在 wav_io 硬化後拒收）；多聲道只取第一聲道。
 - mic/ref sample rate 必須相同，且應從同一時間基準開始。
 - CLI 處理兩個輸入中較短的長度；最後不足一個 hop 的尾端不處理。
 - `aec_wav` 未設定 `AEC_OUT_FLOAT` 時會主動選擇單聲道 float32 WAV，方便 parity 比較。
@@ -171,26 +171,23 @@ if (!aec) { /* pool 不足，或 pool 未對齊 */ }
 /* aec_process(aec, ...) / aec_reset(aec) / aec_destroy(aec) 照常使用（aec 現在是指標，
  * call site 不再需要 &aec） */
 aec_destroy(aec);
-free(pool);   /* aec_destroy() 之後才輪到 caller 回收 pool（見下方 backend 差異說明） */
+free(pool);   /* pool 由 caller 回收；aec_destroy() 對 pool instance 是 no-op（見下） */
 ```
 
 `aec_init()` 直接回傳 `Aec*`（不是用 out-param 寫入 caller 的 `Aec` 變數），失敗回傳
 `NULL`。同一個 backend 下兩條 path 輸出 **bit-identical**（`c_impl/test_static_aec.c` 驗證
 static == dynamic byte-equal）；NE10 與 KISS 彼此的輸出並非 bit-identical（既有、
 預期中的 FFT 實作差異）。BALANCED / 16 kHz / 52 ms filter / shadow + RES +
-delay-est 全開時 pool 為：KISS backend **533,008 B（520.5 KB）**；NE10 backend
-**528,880 B（516.5 KB）**。設計說明與 per-module 佔用明細見
+delay-est 全開時 pool 為：KISS backend **537,680 B（525.1 KB）**；NE10 backend
+**533,552 B（521.0 KB）**。設計說明與 per-module 佔用明細見
 [../c_impl/STATIC_MEMORY.md](../c_impl/STATIC_MEMORY.md)。
 
-**`aec_destroy()` 的釋放範圍依 backend 而不同**：KISS backend 下 `aec_init()`
-除了 `pool` 之外不配置任何東西，所以 `aec_destroy()` 在這個 backend 上是真正的
-no-op——呼叫幾次都安全，甚至不呼叫直接回收 `pool` 也不會漏東西（但仍建議呼叫）。
-NE10 backend 下 `aec_init()` 會觸發 3 個 backend-internal 的 heap 配置（post-filter、
-main filter、shadow filter 各自的 R2C/C2R twiddle 設定）——這些配置活在 `pool`
-**之外**，也**沒有**算進 `aec_get_mem_size()` 的數字裡；`aec_destroy()` 就是負責釋放
-它們的地方。因此在 NE10 backend 上，`pool` 被釋放或交給下一次 `aec_init()` 重用之前，
-**必須**先呼叫且只呼叫一次 `aec_destroy(aec)`：漏呼叫會洩漏這 3 個 twiddle 設定，
-對同一個 instance 呼叫兩次則會 double-free（目前沒有 destroyed-guard，不安全）。
+**`aec_destroy()` 對 pool instance 在兩個 backend 都是真 no-op**：`aec_init()`
+放進去的所有東西——包含 NE10 的 3 個 R2C/C2R twiddle 設定（vendored patch
+P0001，`audio_common/lib/ne10/VENDORED.md`）——都在 `pool` 之內、都算進
+`aec_get_mem_size()` 的數字。呼叫安全、idempotent、可省略；init→destroy 全程
+零 heap 由 `test/test_zero_heap_aec.c` 以 allocator hook 在兩個 backend 驗證。
+（heap instance——`aec_create()`——仍需恰好一次 `aec_destroy()` 釋放 arena。）
 
 ## 5. Decoupled render/capture API
 

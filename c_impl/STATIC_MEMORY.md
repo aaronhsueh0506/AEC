@@ -64,8 +64,8 @@ delay on the pool is:
 
 | Backend | Pool |
 |---|---:|
-| KISS (host/reference) | **533,008 B (520.5 KB)** |
-| NE10 (embedded)       | **528,880 B (516.5 KB)** |
+| KISS (host/reference) | **537,680 B (525.1 KB)** |
+| NE10 (embedded)       | **533,552 B (521.0 KB)** |
 
 (Both figures now include everything — NE10's three R2C/C2R twiddle configs
 are carved from the pool since vendored patch P0001; there are no
@@ -150,7 +150,7 @@ gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/in
     test_static_aec.c $(find src -name '*.c') \
     ../../audio_common/bin/kiss/libaudio_common.a -lm -o bin/test_static_aec
 ./bin/test_static_aec mic.wav ref.wav
-# → Pool: 533008 bytes (520.5 KB), frames: N   [KISS backend; NE10 -> 528880 B / 516.5 KB]
+# → Pool: 537680 bytes (525.1 KB), frames: N   [KISS 16 kHz; per-rate table below]
 #   PASS: all <2*N> samples byte-equal (static == dynamic)
 ```
 
@@ -177,7 +177,7 @@ heap-only (`aec_create`), so to see the static-path lines a harness must call
 `aec_init` directly and raise the debug level; the format is:
 
 ```text
-# [AEC][t= 0.000s][f=    0][Init] static-mem pool=533008 bytes (520.5 KB) sr=16000 hop=160 preset_q=0.001 cng=0
+# [AEC][t= 0.000s][f=    0][Init] static-mem pool=537680 bytes (525.1 KB) sr=16000 hop=160 preset_q=0.001 cng=0
 # [AEC][t= ...   ][f= ... ][Init] destroy: static path (no free; caller owns pool)
 ```
 
@@ -195,7 +195,7 @@ Measured via `aec_get_mem_size`, KISS backend (host/reference build):
 | Shadow `pbfdaf` (same layout, no Kalman P)                 | 61.5 KB |
 | `fft_wrapper` post FFT (KISS cfgs in-pool)                 | 16.6 KB |
 | `Aec` struct + AEC3 chain backing arrays (state / RES-est / suppression / stationarity / LFS / run + hop scratch, incl. the de-stacked instance scratch) + render FIFO + RSA counters | ~248 KB |
-| **Total (KISS)**                                           | **520.5 KB** (533,008 B) |
+| **Total (KISS)**                                           | **525.1 KB** (537,680 B) |
 
 What moved since the previous figure (526.7 KB / 539,328 B): +24.5 KB of
 former function-local stack scratch (13 `float[8192]`/`float[4096]` arrays,
@@ -207,11 +207,25 @@ elsewhere. The vectorization campaign then removed another **24.7 KB**: the
 per-hop `W_all`/`X_buf_all` snapshot buffers are gone (aec3_post now reads
 the filter state directly through its const input pointers).
 
-**NE10 backend (embedded build): 516.5 KB (528,880 B) total** — the three
+**NE10 backend (embedded build): 521.0 KB (533,552 B) total** — the three
 R2C/C2R twiddle configs (11,440 B each at nfft=512) are carved from this
 pool since vendored patch P0001, so the figure is the complete memory
 requirement; everything else in the table above is backend-independent.
 (Pre-P0001 the configs were NE10-internal heap allocations outside the pool
 and the figure understated the true footprint.)
 
-Sample rates other than 16 kHz scale roughly proportional to hop_size.
+Per-rate pool totals (balanced, ms-derived filter length 52 ms / 64 ms ≥44.1 k,
+all dims auto-derived from the hop = 10 ms rule; verified static==dynamic
+byte-equal per rate by `test_static_aec <mic> <ref> <sr>`):
+
+| Rate | KISS | NE10 |
+|---|---:|---:|
+| 8 kHz  (FL 416, 6 part., taps 480)   |   290,352 B |   288,528 B |
+| 16 kHz (FL 832, 6 part., taps 960)   |   537,680 B |   533,552 B |
+| 48 kHz (FL 3072, 7 part., taps 3360) | 1,251,760 B | 1,243,024 B |
+
+Delay-estimator coverage is spec-inherited (fixed /4 decimation, 64-sample
+inner blocks, native-sample reporting — mirrors the Python reference, which
+hard-rejects any other decimation): max acquirable delay ≈ 1216 ms @ 8 k /
+608 ms @ 16 k / **~203 ms @ 48 k**. The 48 kHz bound is a known spec
+limitation — changing it must land Python-first.

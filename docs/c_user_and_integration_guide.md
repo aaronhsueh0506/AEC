@@ -132,9 +132,9 @@ misaligned base). Both paths produce **bit-identical** output on a given
 backend (verified across all 3 presets and FS / DT / NE scenarios; NE10 vs
 KISS output is not bit-identical to *each other* — a pre-existing, expected
 difference between the two FFT implementations). At BALANCED / 16 kHz /
-52 ms filter / shadow on / RES on / delay-est on the pool is **533,008 B
-(520.5 KB)** on the KISS backend (host/reference, `make`, default) or
-**528,880 B (516.5 KB)** on the NE10 backend (embedded, `make
+52 ms filter / shadow on / RES on / delay-est on the pool is **537,680 B
+(525.1 KB)** on the KISS backend (host/reference, `make`, default) or
+**533,552 B (521.0 KB)** on the NE10 backend (embedded, `make
 BACKEND=ne10`). The `aec_wav` CLI is heap-only; `test_static_aec.c` is
 the static-path harness.
 
@@ -250,8 +250,8 @@ These cause correctness failures (not just style issues):
 
 | | |
 |---|---|
-| Static pool, KISS (host/reference, `make`) | 533,008 B (520.5 KB) |
-| Static pool, NE10 (embedded, `make BACKEND=ne10`) | 528,880 B (516.5 KB, twiddle configs in-pool since P0001) |
+| Static pool, KISS (host/reference, `make`) | 537,680 B (525.1 KB) |
+| Static pool, NE10 (embedded, `make BACKEND=ne10`) | 533,552 B (521.0 KB, twiddle configs in-pool since P0001) |
 | Compute / frame | 4 × 512-FFT + Kalman update (257 bins × 6 partitions) |
 | FFT | KISS FFT (float32; NE10 ARM-NEON opt-in) — ~float32 precision vs numpy `np.fft` |
 
