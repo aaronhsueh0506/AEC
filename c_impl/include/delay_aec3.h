@@ -1,16 +1,19 @@
 /* delay_aec3.h — C port of python/modules/delay/ (the v3.22 AEC3
- * matched-filter delay-estimation package). ⚠ The matched-filter dot
- * products / NLMS update (the hot path — see delay_aec3.c) run float32
- * accumulation unconditionally, an intentional, sampled-cost-free
- * divergence from the Python float64 reference; everything else described
- * below (decimator biquads, error_sum_anchor, argmax/quantisation rules)
- * stays bit-exact.
+ * matched-filter delay-estimation package). ⚠ The ENTIRE C delay chain
+ * (decimator biquads, matched-filter dot products / NLMS update,
+ * error_sum_anchor / x2_sum_threshold / pre-echo aggregator scalars, the
+ * confidence getter) now runs float32 unconditionally — an intentional,
+ * sampled-cost-free divergence from the Python float64 reference. This
+ * chain's Python bit-exact parity is retired BY DESIGN: test/parity_delay.c
+ * + test/gen_delay_c_golden.c form a C-regression golden (catches
+ * accidental future changes) rather than a Python-parity gate.
  *
  * REPLACES the stale v3.10 GCC-PHAT estimator in delay_est.{c,h}. This is a
  * pure-additive module; the cutover that wires it into aec.c happens later.
  *
  * Chain (mirrors the Python package):
- *   Decimator x4 (cascaded biquad LP + HP, all-float64)
+ *   Decimator x4 (cascaded biquad LP + HP; Python runs float64, C runs
+ *   float32 -- see the divergence note above)
  *     -> DownsampledRenderBuffer (forward-stored ring)
  *       -> MatchedFilter bank (num_filters NLMS cross-correlators)
  *         -> MatchedFilterLagAggregator (250-estimate histogram +
@@ -22,30 +25,34 @@
  * Public surface mirrors LegacyDelayShim:
  *   delay_aec3_accumulate(d, near[hop], far[hop], hop)  -- per-hop drive
  *   delay_aec3_estimated_delay(d)  -> int    (-1 until first estimate)
- *   delay_aec3_confidence(d)       -> double (0.0 / 0.5 / 1.0)
+ *   delay_aec3_confidence(d)       -> float  (0.0 / 0.5 / 1.0)
  *   delay_aec3_is_solid(d)         -> int    (confidence >= 1.0)
  *   delay_aec3_n_updates(d)        -> int    (estimate_count)
  *
- * PARITY NOTES (numpy 1.26 -> C, -ffp-contract=off mandatory):
- *   - Decimator biquads run entirely in double (Python b/a/z are float64);
- *     each section is direct-form-II transposed.  Output cast to float32 per
- *     sample, then strided [::4].
+ * PARITY NOTES (numpy 1.26 -> C, -ffp-contract=off mandatory) -- historical,
+ * describing the retired Python bit-exact target; the C side below is now
+ * float32 throughout by construction, not double:
+ *   - Decimator biquads: Python b/a/z are float64, each section direct-form-II
+ *     transposed, output cast to float32 per sample then strided [::4]. The C
+ *     port (DaBiquad) now runs the whole cascade in float32 instead of
+ *     mirroring Python's float64 -- an intentional divergence.
  *   - The NLMS update `h += alpha * x_window` is the numpy ARRAY scalar rule:
  *     alpha (a Python double) is value-cast to float32 FIRST, then the
  *     per-tap product and add are computed in float32 (verified 0/20000 vs
- *     the f64-mul candidate which mismatched 99%).
+ *     the f64-mul candidate which mismatched 99%). The C port now computes
+ *     alpha directly as a float32 expression (no double intermediate).
  *   - `instantaneous * one_over_anchor` and `0.015 * (norm - accumulated)`
- *     are also the array scalar rule (scalar cast to f32, op in f32).
+ *     are also the array scalar rule (scalar cast to f32, op in f32); the C
+ *     port carries one_over_anchor as float32 end to end now.
  *   - The dot products `np.dot(h, x)` / `np.dot(x, x)` are float32 inputs.
  *     numpy routes these through OpenBLAS SDOT (a CPU-dispatched AVX kernel
  *     that is NOT portably bit-reproducible). The matched-filter's two
- *     512-tap dot products (da_dot_f32 in delay_aec3.c) now accumulate in
- *     float32 directly (WebRTC NEON-matched-filter style) rather than the
- *     double running sum this note originally described — an intentional
- *     divergence (60-case AECMOS sample: all deltas 0.000). The smaller
- *     16-sample error_sum_anchor dot (delay_aec3_dot) is unaffected and
- *     still accumulates in double. The matched-filter peak (argmax h^2) and
- *     the histogram-voted lag are robust to the sub-ULP/f32 accumulation
+ *     512-tap dot products (da_dot_f32 in delay_aec3.c) accumulate in
+ *     float32 directly (WebRTC NEON-matched-filter style). The smaller
+ *     16-sample error_sum_anchor dot (delay_aec3_dot) also now accumulates
+ *     in float32 (previously double) -- an intentional divergence (60-case
+ *     AECMOS sample: all deltas 0.000). The matched-filter peak (argmax h^2)
+ *     and the histogram-voted lag are robust to the sub-ULP/f32 accumulation
  *     difference in practice, but are no longer guaranteed bit-exact to
  *     Python by construction.
  *   - argmax = numpy argmax = FIRST max index on ties.
@@ -118,9 +125,9 @@ typedef enum {
 #define DA_BQ_MAX_SECTIONS 3
 typedef struct {
     int    n_sections;
-    double b[DA_BQ_MAX_SECTIONS][3];    /* {b0,b1,b2} per section */
-    double a[DA_BQ_MAX_SECTIONS][2];    /* {a1,a2} per section (a0 normalised) */
-    double z[DA_BQ_MAX_SECTIONS][2];    /* per-section state */
+    float  b[DA_BQ_MAX_SECTIONS][3];    /* {b0,b1,b2} per section */
+    float  a[DA_BQ_MAX_SECTIONS][2];    /* {a1,a2} per section (a0 normalised) */
+    float  z[DA_BQ_MAX_SECTIONS][2];    /* per-section state */
 } DaBiquad;
 
 typedef struct {
@@ -226,7 +233,7 @@ int  delay_aec3_accumulate_ex(DelayAec3 *d, const float *near, const float *far,
 
 /* legacy accessors */
 int    delay_aec3_estimated_delay(const DelayAec3 *d);   /* -1 until first estimate */
-double delay_aec3_confidence(const DelayAec3 *d);        /* 0.0 / 0.5 / 1.0 */
+float  delay_aec3_confidence(const DelayAec3 *d);        /* 0.0 / 0.5 / 1.0 (float32, was double) */
 int    delay_aec3_is_solid(const DelayAec3 *d);          /* confidence >= 1.0 */
 int    delay_aec3_n_updates(const DelayAec3 *d);
 int    delay_aec3_has_clockdrift(const DelayAec3 *d);

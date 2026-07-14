@@ -1,11 +1,13 @@
 /* delay_aec3.c — C port of python/modules/delay/. See delay_aec3.h for the
- * chain overview and parity notes. ⚠ The matched-filter dot products /
- * NLMS update run the float32 fast-math path unconditionally (see the
- * "matched-filter arithmetic" note below) — an intentional, sampled-cost-
- * free divergence from the Python float64 reference, so this file is no
- * longer bit-exact to Python by construction. test/parity_delay.c +
- * test/gen_delay_c_golden.c together form a C-regression harness (catches
- * accidental future changes) rather than a Python-parity gate.
+ * chain overview and parity notes. ⚠ The WHOLE delay chain (decimator
+ * biquads, matched-filter dot products / NLMS update, error-sum / anchor /
+ * pre-echo aggregator scalars, the confidence getter) now runs float32
+ * unconditionally (see the "matched-filter arithmetic" note below) — an
+ * intentional, sampled-cost-free divergence from the Python float64
+ * reference, so this file is no longer bit-exact to Python by construction.
+ * test/parity_delay.c + test/gen_delay_c_golden.c together form a
+ * C-regression harness (catches accidental future changes) rather than a
+ * Python-parity gate.
  *
  * Build (standalone, do NOT link aec.c):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
@@ -21,19 +23,21 @@
 #define DA_SATURATION_LIMIT   (32000.0f / 32768.0f)   /* 0.9765625 */
 #define DA_SMOOTHING_FAST     0.7f
 #define DA_SMOOTHING_SLOW     0.1f
-#define DA_MATCHING_THRESHOLD 0.3   /* used as f64 multiplier of anchor */
+#define DA_MATCHING_THRESHOLD 0.3f  /* used as f32 multiplier of anchor */
 
 /* ------------------------------------------------------------------ helpers */
 
 /* np.dot over float32 inputs.  numpy routes f32 dot through OpenBLAS SDOT
  * (not portably bit-reproducible); we accumulate the float32 products in a
- * double running sum -- the most faithful scalar value.  The downstream
- * integer lag / DelayQuality are robust to the sub-ULP difference (verified
- * bit-exact on the golden). */
-static double delay_aec3_dot(const float *a, const float *b, int n) {
-    double s = 0.0;
+ * float32 running sum -- consistent with the rest of this file, which is
+ * float32 throughout (see the file banner: the delay chain's Python
+ * bit-exact parity is retired by design, anchored by the C-regression
+ * golden instead).  The downstream integer lag / DelayQuality are robust to
+ * the sub-ULP difference (verified bit-exact on the golden). */
+static float delay_aec3_dot(const float *a, const float *b, int n) {
+    float s = 0.0f;
     int i;
-    for (i = 0; i < n; ++i) s += (double)(a[i] * b[i]);
+    for (i = 0; i < n; ++i) s += a[i] * b[i];
     return s;
 }
 
@@ -134,21 +138,21 @@ static int da_argmax_i(const int *a, int n) {
 
 /* ------------------------------------------------------------------ biquad */
 
-static const double DA_LP_B[3][3] = {
-    {0.0180919877, 0.00320961363, 0.0180919877},
-    {1.0,         -1.24550459,    1.0},
-    {1.0,         -1.4221681,     1.0},
+static const float DA_LP_B[3][3] = {
+    {0.0180919877f, 0.00320961363f, 0.0180919877f},
+    {1.0f,         -1.24550459f,    1.0f},
+    {1.0f,         -1.4221681f,     1.0f},
 };
-static const double DA_LP_A[3][2] = {
-    {-1.5183195,   0.633165865},
-    {-1.49784254,  0.853586692},
-    {-1.49791282,  0.969572384},
+static const float DA_LP_A[3][2] = {
+    {-1.5183195f,   0.633165865f},
+    {-1.49784254f,  0.853586692f},
+    {-1.49791282f,  0.969572384f},
 };
-static const double DA_HP_B[1][3] = {
-    {0.757076375, -1.51415275, 0.757076375},
+static const float DA_HP_B[1][3] = {
+    {0.757076375f, -1.51415275f, 0.757076375f},
 };
-static const double DA_HP_A[1][2] = {
-    {-1.45424359, 0.574061915},
+static const float DA_HP_A[1][2] = {
+    {-1.45424359f, 0.574061915f},
 };
 
 static void da_biquad_reset(DaBiquad *bq) {
@@ -174,18 +178,21 @@ static void da_biquad_init_noise_reduction(DaBiquad *bq) {
     da_biquad_reset(bq);
 }
 
-/* Process one sample through the cascade, returning the double output.
- * Direct-form-II transposed, all-float64 (mirrors _CascadedBiquad.process).
+/* Process one sample through the cascade, returning the float32 output.
+ * Direct-form-II transposed, all-float32 (this file's delay chain is float32
+ * throughout by design -- diverges from Python's _CascadedBiquad.process,
+ * which runs float64; see the file banner / delay_aec3.h for the retired
+ * parity anchor).
  *   out = b0*x + z0
  *   z0  = b1*x - a1*out + z1
  *   z1  = b2*x - a2*out
  */
-static double da_biquad_process1(DaBiquad *bq, double xn) {
+static float da_biquad_process1(DaBiquad *bq, float xn) {
     int s;
-    double yn = xn;
+    float yn = xn;
     for (s = 0; s < bq->n_sections; ++s) {
-        double inp = yn;
-        double out = bq->b[s][0] * inp + bq->z[s][0];
+        float inp = yn;
+        float out = bq->b[s][0] * inp + bq->z[s][0];
         bq->z[s][0] = bq->b[s][1] * inp - bq->a[s][0] * out + bq->z[s][1];
         bq->z[s][1] = bq->b[s][2] * inp - bq->a[s][1] * out;
         yn = out;
@@ -214,11 +221,11 @@ static void da_decimator_decimate(DaDecimator *dec, const float *in_block, float
     int o, j;
     for (o = 0; o < DA_SUB_BLOCK_SIZE; ++o) {
         int base = o * DA_DOWN_SAMPLING_FACTOR;
-        double lp = da_biquad_process1(&dec->anti_alias, (double)in_block[base]);
-        double hp = da_biquad_process1(&dec->noise_reduction, lp);
-        out_sub[o] = (float)hp;
+        float lp = da_biquad_process1(&dec->anti_alias, in_block[base]);
+        float hp = da_biquad_process1(&dec->noise_reduction, lp);
+        out_sub[o] = hp;
         for (j = 1; j < DA_DOWN_SAMPLING_FACTOR; ++j) {
-            lp = da_biquad_process1(&dec->anti_alias, (double)in_block[base + j]);
+            lp = da_biquad_process1(&dec->anti_alias, in_block[base + j]);
             da_biquad_process1(&dec->noise_reduction, lp);
         }
     }
@@ -275,10 +282,10 @@ static void da_ring_gather_back(const DaRing *r, int start_offset, int length, f
 
 /* Mirrors matched_filter_core(). Returns filters_updated; writes *error_sum. */
 static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
-                                  double x2_sum_threshold, float smoothing,
-                                  const float *y, float *h, double *error_sum_out,
+                                  float x2_sum_threshold, float smoothing,
+                                  const float *y, float *h, float *error_sum_out,
                                   float *instantaneous_error_out) {
-    double error_sum = 0.0;
+    float error_sum = 0.0f;
     int filters_updated = 0;
     int i;
     /* All DA_SUB_BLOCK_SIZE windows of this call are subranges of ONE
@@ -308,16 +315,16 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
                                 span + (DA_SUB_BLOCK_SIZE - 1), DA_FILTER_SIZE);
     for (i = 0; i < DA_SUB_BLOCK_SIZE; ++i) {
         const float *x_window = span + (DA_SUB_BLOCK_SIZE - 1 - i);
-        double x2_sum, s, e;
+        float x2_sum, s, e;
         int saturation;
         if (i > 0) {
             float in_v  = x_window[0];               /* newly entered sample */
             float out_v = x_window[DA_FILTER_SIZE];  /* just left the window */
             x2_slide += in_v * in_v - out_v * out_v;
         }
-        x2_sum = (double)x2_slide;
-        s = (double)da_dot_f32(h, x_window, DA_FILTER_SIZE);
-        e = (double)y[i] - s;
+        x2_sum = x2_slide;
+        s = da_dot_f32(h, x_window, DA_FILTER_SIZE);
+        e = y[i] - s;
         saturation = (y[i] >= DA_SATURATION_LIMIT || y[i] <= -DA_SATURATION_LIMIT);
         error_sum += e * e;
         if (instantaneous_error_out) {
@@ -327,7 +334,9 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
              * ComputePreEchoLag then walks back for the earliest group whose prefix
              * already explains the echo (= onset). Mirrors numpy exactly: f32 product,
              * f32 sequential group-sum (.sum over 4), f32 cumsum prefix, then the
-             * (prefix − y[i]) subtraction and the += accumulation in float64.
+             * (prefix − y[i]) subtraction and the += accumulation, all in float32
+             * (this file's delay chain is float32 throughout by design; diverges
+             * from the Python float64 reference — see file banner).
              * Uses pre-NLMS-update h (the update below runs after this block). */
             float prefix = 0.0f;
             int j;
@@ -340,19 +349,18 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
                 gs = gs + hp[3] * xp[3];
                 prefix = prefix + gs;
                 {
-                    double d = (double)prefix - (double)y[i];
-                    instantaneous_error_out[j] =
-                        (float)((double)instantaneous_error_out[j] + d * d);
+                    float d = prefix - y[i];
+                    instantaneous_error_out[j] += d * d;
                 }
                 hp += DA_ACCUMULATED_ERROR_SUBSAMPLE_RATE;
                 xp += DA_ACCUMULATED_ERROR_SUBSAMPLE_RATE;
             }
         }
         if (x2_sum > x2_sum_threshold && !saturation) {
-            /* alpha = smoothing * e / x2_sum  (Python double); then the array
-             * op casts alpha to float32 and computes h += f32(alpha)*x in f32. */
-            double alpha_d = (double)smoothing * e / x2_sum;
-            float  alpha_f = (float)alpha_d;
+            /* alpha = smoothing * e / x2_sum, computed directly in float32 (no
+             * more double-then-cast dance -- this file's chain is float32
+             * throughout); h += alpha*x runs in f32 via da_nlms_update_f32. */
+            float alpha_f = smoothing * e / x2_sum;
             da_nlms_update_f32(h, x_window, alpha_f, DA_FILTER_SIZE);
             filters_updated = 1;
         }
@@ -365,11 +373,10 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
  * squared error filled by da_matched_filter_core for the last filter in the bank
  * (matches Python's single shared _instantaneous_error buffer). */
 static void da_update_accumulated_error(const float *instantaneous, float *accumulated,
-                                        double one_over_anchor) {
+                                        float one_over_anchor) {
     int k;
-    float ooa_f = (float)one_over_anchor;
     for (k = 0; k < DA_ACC_ERR_SIZE; ++k) {
-        float norm = instantaneous[k] * ooa_f;   /* array scalar rule: f32 */
+        float norm = instantaneous[k] * one_over_anchor;   /* f32 throughout */
         if (norm < accumulated[k]) {
             accumulated[k] = norm;
         } else {
@@ -425,10 +432,10 @@ static void da_matched_filter_reset(DaMatchedFilter *mf, int full_reset) {
 static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
                                      const float *capture, int use_slow_smoothing) {
     float smoothing = use_slow_smoothing ? DA_SMOOTHING_SLOW : DA_SMOOTHING_FAST;
-    double x2_sum_threshold = (double)DA_FILTER_SIZE
-                              * (double)DA_EXCITATION_LIMIT * (double)DA_EXCITATION_LIMIT;
-    double error_sum_anchor = delay_aec3_dot(capture, capture, DA_SUB_BLOCK_SIZE);
-    double winner_error_sum = error_sum_anchor;
+    float x2_sum_threshold = (float)DA_FILTER_SIZE
+                            * DA_EXCITATION_LIMIT * DA_EXCITATION_LIMIT;
+    float error_sum_anchor = delay_aec3_dot(capture, capture, DA_SUB_BLOCK_SIZE);
+    float winner_error_sum = error_sum_anchor;
     int winner_index = -1;
     int alignment_shift = 0;
     int prev_lag_valid = 0, prev_lag = 0;
@@ -438,7 +445,7 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
     mf->reported_valid = 0;
 
     for (n = 0; n < DA_NUM_FILTERS; ++n) {
-        double error_sum;
+        float error_sum;
         int filters_updated, lag_estimate, reliable, lag;
         filters_updated = da_matched_filter_core(ring, alignment_shift, x2_sum_threshold,
                                                  smoothing, capture, mf->filters[n], &error_sum,
@@ -473,10 +480,10 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
         if (mf->last_detected_best_lag_filter == winner_index) {
             /* AEC3 gate is int16-scale (error_sum > 1.0 in Q15²); the float[-1,1]
              * equivalent is 1.0 / 32768² ≈ 9.3e-10 (matches matched_filter.py). */
-            if (error_sum_anchor > 1.0 / (32768.0 * 32768.0)) {
+            if (error_sum_anchor > 1.0f / (32768.0f * 32768.0f)) {
                 da_update_accumulated_error(mf->instantaneous_error,
                                             mf->accumulated_error[winner_index],
-                                            1.0 / error_sum_anchor);
+                                            1.0f / error_sum_anchor);
                 mf->number_pre_echo_updates += 1;
             }
             if (mf->number_pre_echo_updates >= DA_PRE_ECHO_UPDATES_TO_REPORT) {
@@ -553,7 +560,7 @@ static void da_pre_echo_aggregate(DaPreEcho *pe, int pre_echo_lag) {
 
     if (pe->number_updates < DA_K_NUM_BLOCKS_PER_SEC * 2) {
         int window = DA_K_MFW_SUB_BLOCKS;
-        double penalty = 1.0, best_value = -1.0;
+        float penalty = 1.0f, best_value = -1.0f;
         int best_idx = 0, n = DA_PE_HIST_SIZE, i = 0;
         pe->number_updates += 1;
         while (n - i >= window) {
@@ -564,13 +571,13 @@ static void da_pre_echo_aggregate(DaPreEcho *pe, int pre_echo_lag) {
                 if (pe->histogram[i + j] > seg_best) { seg_best = pe->histogram[i + j]; local_max_offset = j; }
             }
             {
-                double local_max_value = (double)seg_best * penalty;
+                float local_max_value = (float)seg_best * penalty;
                 if (local_max_value > best_value) {
                     best_value = local_max_value;
                     best_idx = i + local_max_offset;
                 }
             }
-            penalty *= 0.7;
+            penalty *= 0.7f;
             i = end;
         }
         pe->pre_echo_candidate = best_idx << pe->block_size_log2;
@@ -850,15 +857,15 @@ int delay_aec3_estimated_delay(const DelayAec3 *d) {
     return d->latest_delay;
 }
 
-double delay_aec3_confidence(const DelayAec3 *d) {
-    if (!d->latest_valid) return 0.0;
-    if (d->latest_quality == DELAY_QUALITY_REFINED) return 1.0;
-    if (d->latest_quality == DELAY_QUALITY_COARSE) return 0.5;
-    return 0.0;
+float delay_aec3_confidence(const DelayAec3 *d) {
+    if (!d->latest_valid) return 0.0f;
+    if (d->latest_quality == DELAY_QUALITY_REFINED) return 1.0f;
+    if (d->latest_quality == DELAY_QUALITY_COARSE) return 0.5f;
+    return 0.0f;
 }
 
 int delay_aec3_is_solid(const DelayAec3 *d) {
-    return delay_aec3_confidence(d) >= 1.0;
+    return delay_aec3_confidence(d) >= 1.0f;
 }
 
 int delay_aec3_n_updates(const DelayAec3 *d) {

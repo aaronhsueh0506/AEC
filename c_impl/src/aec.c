@@ -1545,7 +1545,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         }
 
         /* Path B — delay shift. */
-        double conf = delay_aec3_confidence(&a->delay);
+        float conf = delay_aec3_confidence(&a->delay);
         if (eligible && a->current_delay >= 0 && conf >= 0.5
                 && abs(new_delay - a->current_delay) > 32) {
             if (a->has_pending && abs(new_delay - a->pending_delay) < 16) {
