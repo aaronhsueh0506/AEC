@@ -156,7 +156,10 @@ round-3 review B04 this is a **unified policy across all four repos**
 each Makefile compiles, own code and vendored KISS/NE10 alike, builds with
 the flag appended LAST (after `EXTRA_CFLAGS`/`BACKEND`/`WERROR`/`NO_STDIO`)
 so nothing can override it, with parse-time rejection of an `EXTRA_CFLAGS`
-containing `-Ofast`/`-ffast-math`/`-ffp-contract=<anything>`. See
+containing `-Ofast`/`-ffast-math`/`-ffp-contract=<anything>`, and (round-4)
+outright rejection of any command-line `CFLAGS=`/`CXXFLAGS=`/`LDFLAGS=`
+override (which would silently disable the Makefile's own appends —
+`EXTRA_CFLAGS`/`EXTRA_LDFLAGS` are the supported hooks). See
 `c_impl/README.md`'s "Unified FP-contraction policy" section and
 `audio_common/scripts/audit_fp_contract.sh` (the disassembly-level PASS/
 EXEMPT audit gate) for the full writeup.

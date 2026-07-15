@@ -22,6 +22,11 @@ EXTRA_LDFLAGS ?=
 NO_STDIO      ?= 0
 DEBUG         ?= 0
 
+# TOOLCHAIN_CHECK=0 skips the CC/CXX -dumpmachine target-coherence guard in
+# _cfg_guard below (round-4 review P1-2). Participates in CFG_SIG, so a
+# guard-skipped build can never alias a guarded one.
+TOOLCHAIN_CHECK ?= 1
+
 CFLAGS  = -Wall -Wextra -O2 -std=gnu99
 CFLAGS += -I./include -I./example
 CFLAGS += $(EXTRA_CFLAGS)
@@ -45,10 +50,17 @@ AC_DIR ?= $(firstword $(wildcard ../../audio_common ../../../../audio_common))
 #   BACKEND=ne10           -> ARM NEON NE10 R2C/C2R (the embedded deliverable)
 BACKEND ?= kiss
 CFLAGS  += -I$(AC_DIR)/include
+
+# Link driver (round-4 review P1-2): the ne10 audio_common archive carries
+# one C++ TU (NE10's generic-radix .cpp kernel), so binaries linking it use
+# the C++ driver -- which supplies the correct C++ runtime itself (libc++ on
+# macOS/clang, libstdc++ on GNU/Linux gcc). The old `LDFLAGS += -lc++` here
+# was a macOS-ism (duplicate of what the driver adds there, a link error on
+# GNU/Linux) and is gone. Declared before CFG_SIG so it participates in the
+# payload (P2-1).
+LINK = $(CC)
 ifeq ($(BACKEND),ne10)
-  # The ne10 archive carries one C++ TU (NE10's dsp .cpp kernels); linking a
-  # plain C driver against it needs the C++ runtime.
-  LDFLAGS += -lc++
+  LINK = $(CXX)
 endif
 
 # -Werror opt-in for this repo's OWN sources (default off; CI can flip it on
@@ -98,12 +110,22 @@ endif
 # the full cross-repo design writeup and scripts/audit_fp_contract.sh (in
 # audio_common) for the disassembly-level verification.
 #
+# --- Command-line override rejection (round-4 review P1-1) ------------------
+# See audio_common's Makefile for the full writeup: a command-line
+# CFLAGS=/CXXFLAGS=/CPPFLAGS=/LDFLAGS=/FP_POLICY= silently disables every one
+# of this file's own assignments/appends to that variable (here that would
+# strip -ffp-contract=off, -DAEC_NO_STDIO, the -I paths, and -lm) while still
+# producing artifacts. EXTRA_CFLAGS / EXTRA_LDFLAGS are the supported hooks.
+$(foreach v,CFLAGS CXXFLAGS CPPFLAGS LDFLAGS FP_POLICY,\
+  $(if $(findstring command,$(origin $(v)))$(findstring override,$(origin $(v))),\
+    $(error $(v) cannot be overridden (origin: $(origin $(v))) -- it would silently drop this Makefile's own flag appends (FP policy, NO_STDIO, include paths); use EXTRA_CFLAGS / EXTRA_LDFLAGS instead)))
+
 # Conflict detection (round-3 review B04): reject outright rather than let
 # a caller silently re-enable contraction. Checked against the
-# fully-assembled $(CFLAGS) (already includes EXTRA_CFLAGS and any CFLAGS=
-# command-line override) BEFORE FP_POLICY is appended below and BEFORE
-# CFG_SIG is computed, so a rejected build never creates an obj/bin
-# directory.
+# fully-assembled $(CFLAGS) (already includes EXTRA_CFLAGS; a command-line
+# CFLAGS= override is rejected outright just above) BEFORE FP_POLICY is
+# appended below and BEFORE CFG_SIG is computed, so a rejected build never
+# creates an obj/bin directory.
 ifneq ($(findstring -Ofast,$(CFLAGS)),)
 $(error FP policy conflict: CFLAGS/EXTRA_CFLAGS contains -Ofast; this repo pins -ffp-contract=off; remove -Ofast from EXTRA_CFLAGS)
 endif
@@ -167,7 +189,7 @@ CFLAGS    += $(FP_POLICY)
 # printed, and the final phase-2 sub-make's compile/link recipes are also
 # just printed -- verified empirically: `make -n all` spawns real
 # `make` processes but creates zero files, same as a non-recursive recipe.
-AC_FWD = BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO)
+AC_FWD = BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
 .PHONY: all bench
@@ -189,6 +211,25 @@ else
 AC_PRODUCER_SIG := $(notdir $(patsubst %/,%,$(dir $(AC_LIB))))
 endif
 
+# Algorithm sources (auto-detected — drop a new file in src/ to add it).
+# fft_wrapper*.c no longer live here; they're part of the audio_common archive
+# linked above. Declared HERE, before CFG_SIG_PAYLOAD (round-4 review P1-4),
+# because the payload folds in the sorted source list -- adding or removing a
+# source file must key to a fresh obj/bin directory (see the fresh-archive
+# recipe below for the other half of the stale-member fix).
+SRCS = $(wildcard $(SRC_DIR)/*.c)
+
+# NO_STDIO=1 (round-3 review B03): belt-and-braces exclusion of the one
+# stdio TU from the library sources -- aec_debug.c already compiles to an
+# empty file under -DAEC_NO_STDIO (see that file), so this filter-out is
+# redundant with the source-level gate by design (either alone keeps
+# aec_debug.o's fprintf/vfprintf/stderr out of $(OBJS)/the archive; both
+# together means neither can regress silently). `ar -t` on the resulting
+# libaec.a must not list aec_debug.o -- verified by `audit-no-stdio` below.
+ifeq ($(NO_STDIO),1)
+  SRCS := $(filter-out $(SRC_DIR)/aec_debug.c,$(SRCS))
+endif
+
 # --- Hash-keyed object/binary directory + full-coverage CFG_SIG ------------
 # obj/<backend>-<sig>/ AND (round-3 review B01) bin/<backend>-<sig>/ -- see
 # audio_common's Makefile for the full rationale (identical design, applied
@@ -203,7 +244,7 @@ endif
 # for goals like `lib`/`selftest` that never touch audio_common at all).
 #
 # This MUST be defined after CFLAGS/LDFLAGS are fully assembled (including
-# the BACKEND-conditional -lc++ and WERROR appends above) and after the
+# the BACKEND-conditional and WERROR appends above) and after the
 # AC_LIB ifeq/else above resolves AC_PRODUCER_SIG, but before the first rule
 # below that mentions $(OBJ_DIR)/$(BIN_DIR)/anything derived from them --
 # GNU Make expands a rule's target/prerequisite list immediately when
@@ -214,28 +255,15 @@ endif
 # Deliberately NOT $(strip)'d (see audio_common's Makefile for the false-miss
 # vs false-hit rationale). cksum (POSIX) computes the hash; `cut -d' ' -f1`
 # isolates the checksum from cksum's "<checksum> <byte-count>" stdout.
-CFG_SIG_PAYLOAD := CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) WERROR=$(WERROR) NO_STDIO=$(NO_STDIO) DEBUG=$(DEBUG) AC_PRODUCER_SIG=$(AC_PRODUCER_SIG)
+# Round-4 review payload additions: LINK (P2-1), TOOLCHAIN_CHECK (the
+# guard-skip knob must not alias a guarded build), SRCS (P1-4: sorted source
+# list, post-NO_STDIO-filter, so source add/remove keys to a fresh directory).
+CFG_SIG_PAYLOAD := CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) LINK=$(LINK) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) WERROR=$(WERROR) NO_STDIO=$(NO_STDIO) DEBUG=$(DEBUG) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK) AC_PRODUCER_SIG=$(AC_PRODUCER_SIG) SRCS=$(sort $(SRCS))
 CFG_SIG := $(shell printf '%s' "$(CFG_SIG_PAYLOAD)" | cksum | cut -d' ' -f1)
 
 OBJ_ROOT = obj
 OBJ_DIR  = $(OBJ_ROOT)/$(BACKEND)-$(CFG_SIG)
 BIN_DIR  = bin/$(BACKEND)-$(CFG_SIG)
-
-# Algorithm sources (auto-detected — drop a new file in src/ to add it).
-# fft_wrapper*.c no longer live here; they're part of the audio_common archive
-# linked above.
-SRCS = $(wildcard $(SRC_DIR)/*.c)
-
-# NO_STDIO=1 (round-3 review B03): belt-and-braces exclusion of the one
-# stdio TU from the library sources -- aec_debug.c already compiles to an
-# empty file under -DAEC_NO_STDIO (see that file), so this filter-out is
-# redundant with the source-level gate by design (either alone keeps
-# aec_debug.o's fprintf/vfprintf/stderr out of $(OBJS)/the archive; both
-# together means neither can regress silently). `ar -t` on the resulting
-# libaec.a must not list aec_debug.o -- verified by `audit-no-stdio` below.
-ifeq ($(NO_STDIO),1)
-  SRCS := $(filter-out $(SRC_DIR)/aec_debug.c,$(SRCS))
-endif
 
 OBJS  = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
 
@@ -269,6 +297,16 @@ SELFTEST_TARGET = $(BIN_DIR)/simd_selftest_aec
 # time after, atomically (temp file + mv).
 .PHONY: _cfg_guard
 _cfg_guard:
+	@if [ "$(BACKEND)" = "ne10" ] && [ "$(TOOLCHAIN_CHECK)" = "1" ]; then \
+	  cc_m="$$($(CC) -dumpmachine 2>/dev/null)"; cxx_m="$$($(CXX) -dumpmachine 2>/dev/null)"; \
+	  if [ -z "$$cc_m" ] || [ "$$cc_m" != "$$cxx_m" ]; then \
+	    echo "FATAL: CC/CXX compile for different targets (CC='$(CC)' -> '$$cc_m', CXX='$(CXX)' -> '$$cxx_m')." >&2; \
+	    echo "  BACKEND=ne10 links a C++ TU (audio_common's NE10 archive); pass the FULL toolchain:" >&2; \
+	    echo "    make BACKEND=ne10 CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib" >&2; \
+	    echo "  (TOOLCHAIN_CHECK=0 skips this check; it participates in CFG_SIG.)" >&2; \
+	    exit 1; \
+	  fi; \
+	fi
 	@mkdir -p $(OBJ_DIR) $(BIN_DIR)
 	@for d in $(OBJ_DIR) $(BIN_DIR); do \
 	  m="$$d/config.manifest"; \
@@ -307,9 +345,15 @@ lib: $(LIB_TARGET)
 # linked into libaec.a -- so, per the two-phase design above, it's a real
 # rule living entirely outside the AC_LIB dispatch (never shells out to
 # audio_common, works even if audio_common isn't present at all).
+# Fresh-archive discipline (round-4 review P1-4): always built from scratch
+# into a temp file and renamed into place -- never `ar rc` onto an existing
+# archive (which only adds/replaces members and would keep a removed source's
+# stale member forever). See audio_common's Makefile for the full writeup.
 $(LIB_TARGET): $(OBJS) | _cfg_guard
-	$(AR) rc $@ $(OBJS)
-	$(RANLIB) $@
+	rm -f $@.tmp
+	$(AR) rc $@.tmp $(OBJS)
+	$(RANLIB) $@.tmp
+	mv -f $@.tmp $@
 	@echo "aec [$(BACKEND)] -> $@"
 
 # Bit-exactness + microbench self-test for the AEC-only kernel split
@@ -341,12 +385,15 @@ $(AC_LIB): FORCE
 	+$(MAKE) -C $(AC_DIR) $(AC_FWD) lib
 	@test -f '$@' || { echo "ERROR: audio_common did not produce $@ (query/build divergence -- only BACKEND/WERROR/CC/CXX/EXTRA_CFLAGS/NO_STDIO overrides are supported)"; exit 1; }
 
+# $(LINK), not $(CC) (round-4 review P1-2): the C++ driver for BACKEND=ne10
+# supplies the C++ runtime the NE10 archive's one C++ TU needs (the old
+# hardcoded -lc++ is gone). Same pattern as NR's/pipelines' link recipes.
 $(TARGET): $(OBJS) $(EXAMPLE_OBJS) $(AC_LIB) | _cfg_guard
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "aec_wav [$(BACKEND)] -> $@"
 
 $(BENCH_TARGET): $(OBJS) $(BENCH_OBJS) $(AC_LIB) | _cfg_guard
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "bench_rtf [$(BACKEND)] -> $@"
 endif
 
@@ -386,9 +433,11 @@ print-lib-path:
 # needs $(AC_LIB) to exist, so `publish` goes through the same two-phase
 # dispatch as `all`/`bench` when AC_LIB isn't already known.
 # =============================================================================
+# publish v3 (round-4 review P2-2): content-addressed immutable releases --
+# dist/<backend>/<cfg_sig>-<content12>/, never rm -rf'd, idempotent
+# republish; see audio_common's Makefile for the full writeup.
 PUBLISH_ARTIFACTS = $(LIB_TARGET) $(TARGET) $(BENCH_TARGET)
 DIST_BACKEND_DIR  = dist/$(BACKEND)
-DIST_REL_DIR      = $(DIST_BACKEND_DIR)/$(CFG_SIG)
 DIST_LOCK         = dist/.lock.$(BACKEND)
 
 ifeq ($(AC_LIB),)
@@ -405,31 +454,47 @@ publish: $(PUBLISH_ARTIFACTS)
 	  echo "FATAL: publish lock $(DIST_LOCK) already held (concurrent 'make publish BACKEND=$(BACKEND)'?)" >&2; \
 	  exit 1; \
 	fi; \
-	trap 'rmdir "$(DIST_LOCK)" 2>/dev/null' EXIT INT TERM; \
+	tmp="$(DIST_BACKEND_DIR)/.stage.$$$$"; \
+	trap 'rmdir "$(DIST_LOCK)" 2>/dev/null; rm -rf "$$tmp"' EXIT INT TERM; \
 	set -e; \
 	commit="$$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"; \
+	dirty=0; [ -n "$$(git status --porcelain 2>/dev/null)" ] && dirty=1; \
 	dateutc="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
 	mkdir -p "$(DIST_BACKEND_DIR)"; \
-	tmp="$(DIST_BACKEND_DIR)/$(CFG_SIG).tmp"; \
 	rm -rf "$$tmp"; mkdir -p "$$tmp"; \
 	cp $(PUBLISH_ARTIFACTS) "$$tmp/"; \
 	shas="$$( cd "$$tmp" && for f in *; do shasum -a 256 "$$f"; done )"; \
+	content12="$$(printf '%s\n' "$$shas" | sort | shasum -a 256 | cut -c1-12)"; \
+	rel_id="$(CFG_SIG)-$$content12"; \
+	rel_dir="$(DIST_BACKEND_DIR)/$$rel_id"; \
 	{ echo "repo=aec"; \
+	  echo "release_id=$$rel_id"; \
 	  echo "backend=$(BACKEND)"; \
 	  echo "cfg_sig=$(CFG_SIG)"; \
 	  echo "producer_cfg_sig=$(AC_PRODUCER_SIG)"; \
-	  echo "cc=$(CC)"; echo "cxx=$(CXX)"; \
+	  echo "cc=$(CC)"; echo "cxx=$(CXX)"; echo "ar=$(AR)"; echo "ranlib=$(RANLIB)"; echo "link=$(LINK)"; \
 	  echo "cflags=$(CFLAGS)"; \
 	  echo "extra_cflags=$(EXTRA_CFLAGS)"; \
 	  echo "werror=$(WERROR)"; echo "no_stdio=$(NO_STDIO)"; echo "debug=$(DEBUG)"; \
-	  echo "git_commit=$$commit"; echo "date_utc=$$dateutc"; \
+	  echo "git_commit=$$commit"; echo "git_dirty=$$dirty"; echo "date_utc=$$dateutc"; \
 	  echo "$$shas"; \
 	} > "$$tmp/MANIFEST.txt"; \
-	rm -rf "$(DIST_REL_DIR)"; \
-	mv "$$tmp" "$(DIST_REL_DIR)"; \
-	ln -s "$(CFG_SIG)" "$(DIST_BACKEND_DIR)/.current.tmp"; \
-	mv -f "$(DIST_BACKEND_DIR)/.current.tmp" "$(DIST_BACKEND_DIR)/current"; \
-	echo "aec: published $(BACKEND)/$(CFG_SIG) -> $(DIST_BACKEND_DIR)/current"
+	if [ -d "$$rel_dir" ]; then \
+	  for f in "$$tmp"/*; do \
+	    bn="$$(basename "$$f")"; [ "$$bn" = "MANIFEST.txt" ] && continue; \
+	    cmp -s "$$f" "$$rel_dir/$$bn" || { echo "FATAL: existing release $$rel_id differs from staged content for $$bn (content-address collision -- should be impossible)" >&2; exit 1; }; \
+	  done; \
+	  rm -rf "$$tmp"; \
+	  echo "aec: $$rel_id already published (identical content) -- repointing current only"; \
+	else \
+	  mv "$$tmp" "$$rel_dir"; \
+	fi; \
+	ln -s "$$rel_id" "$(DIST_BACKEND_DIR)/.current.tmp"; \
+	if ! mv -fT "$(DIST_BACKEND_DIR)/.current.tmp" "$(DIST_BACKEND_DIR)/current" 2>/dev/null; then \
+	  rm -f "$(DIST_BACKEND_DIR)/current"; \
+	  mv -f "$(DIST_BACKEND_DIR)/.current.tmp" "$(DIST_BACKEND_DIR)/current"; \
+	fi; \
+	echo "aec: published $(BACKEND)/$$rel_id -> $(DIST_BACKEND_DIR)/current"
 endif
 
 # =============================================================================
@@ -503,7 +568,8 @@ audit-no-stdio:
 	 test -n "$$ac" && test -f "$$ac" || { echo "FATAL: could not resolve/build audio_common archive (AC_DIR=$(AC_DIR))" >&2; exit 1; }; \
 	 mkdir -p $(AUDIT_BIN_DIR); \
 	 exe="$(AUDIT_BIN_DIR)/no_stdio_main"; \
-	 $(CC) $(CFLAGS) -o "$$exe" $(TEST_DIR)/no_stdio_main.c "$$lib_ns1" "$$ac" $(LDFLAGS); \
+	 $(CC) $(CFLAGS) -c -o "$(AUDIT_BIN_DIR)/no_stdio_main.o" $(TEST_DIR)/no_stdio_main.c; \
+	 $(LINK) -o "$$exe" "$(AUDIT_BIN_DIR)/no_stdio_main.o" "$$lib_ns1" "$$ac" $(LDFLAGS); \
 	 echo "PASS: linked $$exe"; \
 	 exe_hits="$$(nm -A "$$exe" 2>/dev/null | grep -iE '$(AUDIT_STRICT_ALL)' || true)"; \
 	 exe_own_hits="$$(printf '%s\n' "$$exe_hits" | grep -iE '$(AUDIT_STRICT_OWN)' || true)"; \

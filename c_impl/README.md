@@ -62,6 +62,18 @@ $ make EXTRA_CFLAGS=-ffast-math
 Makefile:111: *** FP policy conflict: CFLAGS/EXTRA_CFLAGS contains -ffast-math; this repo pins -ffp-contract=off; remove -ffast-math from EXTRA_CFLAGS.  Stop.
 ```
 
+Round-4 hardening: a command-line `CFLAGS=`/`CXXFLAGS=`/`CPPFLAGS=`/
+`LDFLAGS=`/`FP_POLICY=` override is now rejected outright in all four
+Makefiles — GNU Make silently ignores a Makefile's own `+=`/`:=` assignments
+to a command-line-set variable, so `make CFLAGS=-O3` used to strip
+`-ffp-contract=off` (and `-DAEC_NO_STDIO`, the `-I` paths, `-lm`) while
+still building. `EXTRA_CFLAGS`/`EXTRA_LDFLAGS` are the two supported hooks:
+
+```
+$ make CFLAGS=-O3
+Makefile:119: *** CFLAGS cannot be overridden (origin: command line) -- it would silently drop this Makefile's own flag appends (FP policy, NO_STDIO, include paths); use EXTRA_CFLAGS / EXTRA_LDFLAGS instead.  Stop.
+```
+
 `audio_common/scripts/audit_fp_contract.sh` is the disassembly-level proof
 the flag actually bites: it disassembles a fixed list of TUs expected to be
 genuinely scalar (audio_common's `hpf.o`/`kiss_fft.o`/NE10's scalar-C

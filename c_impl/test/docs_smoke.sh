@@ -123,16 +123,28 @@ make -C "$AC_DIR" BACKEND="$BACKEND" lib
 AC_LIB_PATH="$(make -s -C "$AC_DIR" BACKEND="$BACKEND" print-lib-path)"
 
 echo "== docs_smoke: compiling extracted sample against aec.h + libaudio_common ($BACKEND) =="
-EXTRA_LDFLAGS=""
+# Compile as C with the C driver, then LINK with the C++ driver for ne10
+# (round-4 review P1-2): the NE10 archive carries one C++ TU, and the C++
+# driver supplies the correct C++ runtime itself (libc++ on macOS/clang,
+# libstdc++ on GNU/Linux gcc) -- no hardcoded -lc++ (a macOS-ism that fails
+# to link on GNU/Linux), mirroring the Makefiles' own LINK=$(CXX) pattern.
+LINK_DRV=gcc
 if [ "$BACKEND" = "ne10" ]; then
-    EXTRA_LDFLAGS="-lc++"  # NE10 archive carries one C++ TU; see c_impl/Makefile
+    LINK_DRV=c++
 fi
 
-gcc -O2 -ffp-contract=off -std=gnu99 \
-    -I"$C_IMPL_DIR/include" -I"$C_IMPL_DIR/example" -I"$AC_DIR/include" \
-    "$WORK/docs_smoke_main.c" $(find "$C_IMPL_DIR/src" -name '*.c') \
-    "$AC_LIB_PATH" -lm $EXTRA_LDFLAGS \
-    -o "$WORK/docs_smoke_bin"
+OBJ_LIST=""
+i=0
+for src in "$WORK/docs_smoke_main.c" $(find "$C_IMPL_DIR/src" -name '*.c'); do
+    obj="$WORK/docs_smoke_obj_$i.o"
+    gcc -O2 -ffp-contract=off -std=gnu99 \
+        -I"$C_IMPL_DIR/include" -I"$C_IMPL_DIR/example" -I"$AC_DIR/include" \
+        -c "$src" -o "$obj"
+    OBJ_LIST="$OBJ_LIST $obj"
+    i=$((i + 1))
+done
+
+$LINK_DRV $OBJ_LIST "$AC_LIB_PATH" -lm -o "$WORK/docs_smoke_bin"
 
 echo "== docs_smoke: running (BACKEND=$BACKEND) =="
 "$WORK/docs_smoke_bin"
