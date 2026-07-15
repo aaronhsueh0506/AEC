@@ -40,6 +40,29 @@ Compile flags (already in Makefile): `-O2 -ffp-contract=off -I include
 for build determinism and golden stability across builds/compilers; see
 Precision & regression anchors below).
 
+### No-stdio library builds (`NO_STDIO=1`)
+
+`make lib NO_STDIO=1` produces a `libaec.a` with the per-hop debug trace
+compiled out entirely (`src/aec_debug.c` — the library's only stdio
+translation unit, `FILE*`/`fprintf`/`vfprintf`/`fputc` — is excluded from the
+archive, and its one call site in `aec.c`'s per-frame trace block is
+`#ifndef AEC_NO_STDIO`'d out) — no `fprintf`/`vfprintf`/`stderr` reference
+anywhere in the archive, defined or undefined. This is a compile-time,
+default-OFF gate (`NO_STDIO ?= 0`): default builds (`NO_STDIO=0`, i.e. every
+build before this flag existed) are byte-identical to before.
+
+Only the `lib` goal is meant to be built with `NO_STDIO=1` — the CLI
+(`aec_wav`) calls the `FILE*`-based debug API directly (`--debug-log` /
+`--debug-trace`) and is not expected to compile under this macro. Board / MCU
+images that link `libaec.a` without a hosted stdio should build with
+`make lib NO_STDIO=1`. Verify with `make audit-no-stdio` (builds the
+NO_STDIO=1 archive, `ar -t`s it for the excluded debug object, `nm -A`s it and
+a minimal linked stdio-free consumer for stdio symbols, then runs that
+consumer) — see the Makefile comment above that target for the full
+calibration (on this host, `BACKEND=ne10` links a fully stdio-free
+executable; `BACKEND=kiss` retains a small, out-of-scope residual from
+audio_common's vendored KISS FFT's own error-log macro).
+
 ## Run
 
 ```bash

@@ -2190,7 +2190,19 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      *    (single NULL test). Reads the post-filter internals — the three not
      *    otherwise persisted (aec3_converged / far_active / gain_mean) were
      *    stashed on a->post.trace during aec3_post_run; everything else is
-     *    re-read here from the AEC3 sub-module accessors. */
+     *    re-read here from the AEC3 sub-module accessors.
+     *
+     * Whole block compiled out under AEC_NO_STDIO (round-3 review B03):
+     * aec_debug_trace_active()/aec_debug_trace_row() are runtime-gated only
+     * (a single NULL-FILE* test), which still pulls in aec_debug.o's
+     * fprintf/vfprintf/stderr references for board/no-stdio builds even
+     * though the trace is never armed there. NDEBUG alone never stripped
+     * this — it is release/debug orthogonal (unlike AEC_DEBUG_LOG, this
+     * trace runs in ordinary release builds whenever --debug-trace is set).
+     * AEC_NO_STDIO removes the call sites entirely so the library carries
+     * no stdio reference regardless of runtime state; see aec_debug.h/.c
+     * and the Makefile's NO_STDIO switch. */
+#ifndef AEC_NO_STDIO
     if (a->cfg.enable_res && aec_debug_trace_active()) {
         int Kk = a->n_freqs;
         AecDebugTraceRow tr;
@@ -2218,6 +2230,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         tr.limiter_gain     = a->limiter_gain;
         aec_debug_trace_row(&tr);
     }
+#endif /* AEC_NO_STDIO */
 
     /* 21. emit. */
     memcpy(out, a->final_out, (size_t)hop * sizeof(float));

@@ -2,7 +2,17 @@
  *
  * Implementation kept tiny on purpose: stderr fprintf, no ring buffer, no
  * async I/O. Maintenance > perf for debug code.
- */
+ *
+ * Round-3 review B03 (AEC_NO_STDIO): this is the ONLY stdio translation unit
+ * in the library (fprintf/vfprintf/fputc, plus the lazily-resolved stderr in
+ * aec_debug_logf) — every symbol it defines has a static-inline no-op
+ * replacement in aec_debug.h under AEC_NO_STDIO, so this whole file compiles
+ * to nothing (not even an empty translation unit warning risk: no code, no
+ * declarations) when that macro is set. Belt and braces with the Makefile,
+ * which additionally excludes this file's object from the library sources
+ * entirely under NO_STDIO=1 — either mechanism alone is sufficient to keep
+ * libaec.a stdio-free; both together mean neither can regress silently. */
+#ifndef AEC_NO_STDIO
 #include "aec_debug.h"
 #include <stdio.h>
 #include <stdarg.h>
@@ -59,3 +69,4 @@ void aec_debug_logf(const char* module, const char* fmt, ...) {
 
     fputc('\n', fp);
 }
+#endif /* AEC_NO_STDIO */

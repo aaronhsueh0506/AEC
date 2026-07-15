@@ -3,6 +3,22 @@
  * Build switches:
  *   AEC_DEBUG    : enable debug log call sites (compile-time)
  *   NDEBUG       : strip log call sites entirely
+ *   AEC_NO_STDIO : (round-3 review B03) board/no-stdio builds — this header
+ *                  does not include <stdio.h> and exposes no FILE*-based API
+ *                  at all; every aec_debug_* symbol a LIBRARY TU could call
+ *                  becomes a static-inline no-op instead, so aec.c (the only
+ *                  library TU that includes this header) still compiles
+ *                  clean without pulling any stdio symbol into the archive.
+ *                  src/aec_debug.c compiles to an empty TU under this macro
+ *                  (see that file) and the Makefile excludes it from the
+ *                  library sources entirely when NO_STDIO=1 — this header's
+ *                  stubs mean that exclusion can never surface as a link
+ *                  error even if some future library TU calls one of these.
+ *                  The CLI (example/aec_wav.c) is never built with
+ *                  AEC_NO_STDIO (see Makefile/README) and keeps the full
+ *                  FILE*-based API unchanged when the macro is undefined —
+ *                  default (NO_STDIO=0) builds are byte-identical to before
+ *                  this switch existed.
  *
  * Runtime: aec_debug_set_level() sets per-call gate
  *   0 = off
@@ -16,13 +32,16 @@
 #ifndef AEC_DEBUG_H
 #define AEC_DEBUG_H
 
+#ifndef AEC_NO_STDIO
 #include <stdio.h>
+#endif
 #include <stdarg.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+#ifndef AEC_NO_STDIO
 /* Global state — owned by aec_debug.c. Threaded use is single-AEC-per-thread
  * for the rewrite; no thread-local needed. */
 void aec_debug_set_level(int level);
@@ -33,6 +52,24 @@ int  aec_debug_level(void);
 /* Core emit. Module is a short tag like "PBFDKF" / "ResFilter" / "State". */
 void aec_debug_logf(const char* module, const char* fmt, ...)
     __attribute__((format(printf, 2, 3)));
+#else
+/* AEC_NO_STDIO stubs — zero-cost (static inline, always unused in a library
+ * build since the one library call site, aec.c's trace block, is itself
+ * compiled out under this same macro). `aec_debug_set_log`/`aec_debug_set_
+ * trace` (FILE*-based) are deliberately NOT declared here at all rather than
+ * given a void* shim: the only caller today is the CLI (example/aec_wav.c),
+ * which is never built with AEC_NO_STDIO, so an accidental library-side call
+ * under this macro is a hard compile error instead of a silently-swallowed
+ * runtime no-op. */
+static inline void aec_debug_set_level(int level) { (void)level; }
+static inline void aec_debug_set_frame(int frame_idx, int hop, int sample_rate) {
+    (void)frame_idx; (void)hop; (void)sample_rate;
+}
+static inline int aec_debug_level(void) { return 0; }
+static inline void aec_debug_logf(const char* module, const char* fmt, ...) {
+    (void)module; (void)fmt;
+}
+#endif
 
 /* ── Per-frame structured trace ("logr") ──────────────────────────────────────
  * A separate, runtime-gated CSV stream that captures the post-filter internals
@@ -63,9 +100,22 @@ typedef struct AecDebugTraceRow {
     float  limiter_gain;        /* OLA output limiter gain                    */
 } AecDebugTraceRow;
 
+#ifndef AEC_NO_STDIO
 void aec_debug_set_trace(FILE* fp);  /* NULL → trace off (default)            */
 int  aec_debug_trace_active(void);   /* 1 when a trace file is set            */
 void aec_debug_trace_row(const AecDebugTraceRow* row);  /* emit one CSV row   */
+#else
+/* aec_debug_set_trace (FILE*-based) is unavailable under AEC_NO_STDIO — see
+ * the header-level comment above. aec_debug_trace_active()/aec_debug_trace_
+ * row() DO have a library call site (aec.c's per-frame trace block), but
+ * that whole block is itself compiled out under this same macro (see
+ * aec.c), so these stubs exist purely as a belt-and-braces fallback and are
+ * never actually invoked in a NO_STDIO=1 library build. trace_active()
+ * returns 0 (consistent with "trace off") in case that guarantee is ever
+ * relied on directly. */
+static inline int  aec_debug_trace_active(void) { return 0; }
+static inline void aec_debug_trace_row(const AecDebugTraceRow* row) { (void)row; }
+#endif
 
 /* Compile-time gate. In NDEBUG release builds the call site collapses to
  * nothing — no string literal is emitted, no branch is generated. */

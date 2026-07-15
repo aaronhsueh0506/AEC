@@ -195,6 +195,18 @@ heap-only (`aec_create`), so to see the static-path lines a harness must call
 Release builds (`make` without `debug`) strip log strings entirely;
 no overhead.
 
+**No-stdio builds (`NO_STDIO=1`, round-3 review B03):** board/embedded images
+that link `libaec.a` without a hosted stdio should build with `make lib
+NO_STDIO=1` instead. This compiles out `src/aec_debug.c` (the library's only
+stdio translation unit) entirely and `#ifndef`s out its one runtime-gated
+call site in `aec.c` (the per-frame `--debug-trace` block), so the resulting
+archive carries no `fprintf`/`vfprintf`/`stderr` reference at all — verified
+by `make audit-no-stdio` (archive `nm`/`ar` check + a minimal linked
+stdio-free consumer, `test/no_stdio_main.c`). `NO_STDIO` is a compile-time,
+default-OFF (`NO_STDIO ?= 0`) gate; ordinary builds are unaffected byte for
+byte. See `c_impl/README.md` § "No-stdio library builds" for the full recipe
+and calibration notes.
+
 ## Memory layout (16 kHz, 52 ms filter, BALANCED, shadow on, RES on, delay on)
 
 Measured via `aec_get_mem_size`, KISS backend (host/reference build):

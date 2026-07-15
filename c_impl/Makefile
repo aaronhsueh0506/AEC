@@ -5,13 +5,17 @@ CXX     ?= c++
 AR      ?= ar
 RANLIB  ?= ranlib
 
-# CFG_SIG payload-coverage placeholders (round-3 review B01): CXXFLAGS/
-# CPPFLAGS/EXTRA_LDFLAGS/NO_STDIO/DEBUG are not consumed by this Makefile
-# today (this repo has no C++ TUs of its own, and no NO_STDIO/DEBUG-gated
-# code path), but the CFG_SIG payload below unconditionally includes all of
-# them so the payload string has the same stable shape as audio_common's and
-# NR's, and so a future use of any of them here keys builds correctly
-# instead of silently aliasing with a build that didn't set it.
+# CFG_SIG payload-coverage placeholders (round-3 review B01). CXXFLAGS/
+# CPPFLAGS/EXTRA_LDFLAGS/DEBUG are still not consumed by this Makefile (this
+# repo has no C++ TUs of its own, and no DEBUG-gated code path -- `make
+# debug` is a distinct recipe, see below), but the CFG_SIG payload
+# unconditionally includes them so the payload string has the same stable
+# shape as audio_common's and NR's, and so a future use of any of them here
+# keys builds correctly instead of silently aliasing with a build that
+# didn't set it. NO_STDIO is no longer a placeholder (round-3 review B03):
+# NO_STDIO=1 adds -DAEC_NO_STDIO to CFLAGS below and excludes src/aec_debug.c
+# from the library sources, producing a stdio-free libaec.a -- see the
+# NO_STDIO block further down and the `audit-no-stdio` target.
 CXXFLAGS      ?=
 CPPFLAGS      ?=
 EXTRA_LDFLAGS ?=
@@ -54,6 +58,28 @@ endif
 WERROR ?= 0
 ifeq ($(WERROR),1)
   CFLAGS += -Werror
+endif
+
+# NO_STDIO=1 (round-3 review B03): compile-time gate that produces a
+# stdio-free libaec.a — the trace/debug plumbing (src/aec_debug.c, the ONLY
+# stdio TU in this library: FILE* g_fp, fprintf/vfprintf/fputc) is compiled
+# out entirely and its one call site in src/aec.c (the per-frame trace
+# block, runtime-gated only -- a bare NULL-FILE* test that still pulled
+# aec_debug.o's fprintf/stderr references into every link) is `#ifndef
+# AEC_NO_STDIO`'d out. This block MUST run before CFG_SIG_PAYLOAD is
+# computed below (same reasoning as the WERROR/BACKEND flags immediately
+# above) so a NO_STDIO=1 build keys to its own obj/bin directory instead of
+# aliasing with a NO_STDIO=0 build of otherwise-identical flags. See
+# aec_debug.h/aec_debug.c for the header/TU side and the `audit-no-stdio`
+# target further down for the verification recipe.
+#
+# Only the LIBRARY objects ($(OBJS), i.e. `make lib`) are meant to be built
+# with NO_STDIO=1 -- the CLI (example/aec_wav.c) calls the FILE*-based debug
+# API directly (--debug-log/--debug-trace) and is not expected to compile
+# under this macro; `audit-no-stdio` below only ever builds the `lib` goal
+# with NO_STDIO=1, never `all`/`bench`.
+ifeq ($(NO_STDIO),1)
+  CFLAGS += -DAEC_NO_STDIO
 endif
 
 .DEFAULT_GOAL := all
@@ -164,6 +190,17 @@ BIN_DIR  = bin/$(BACKEND)-$(CFG_SIG)
 # fft_wrapper*.c no longer live here; they're part of the audio_common archive
 # linked above.
 SRCS = $(wildcard $(SRC_DIR)/*.c)
+
+# NO_STDIO=1 (round-3 review B03): belt-and-braces exclusion of the one
+# stdio TU from the library sources -- aec_debug.c already compiles to an
+# empty file under -DAEC_NO_STDIO (see that file), so this filter-out is
+# redundant with the source-level gate by design (either alone keeps
+# aec_debug.o's fprintf/vfprintf/stderr out of $(OBJS)/the archive; both
+# together means neither can regress silently). `ar -t` on the resulting
+# libaec.a must not list aec_debug.o -- verified by `audit-no-stdio` below.
+ifeq ($(NO_STDIO),1)
+  SRCS := $(filter-out $(SRC_DIR)/aec_debug.c,$(SRCS))
+endif
 
 OBJS  = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
 
@@ -360,6 +397,103 @@ publish: $(PUBLISH_ARTIFACTS)
 	echo "aec: published $(BACKEND)/$(CFG_SIG) -> $(DIST_BACKEND_DIR)/current"
 endif
 
+# =============================================================================
+# audit-no-stdio: verifies a NO_STDIO=1 libaec.a is genuinely stdio-free
+# (round-3 review B03). Self-contained recipe-time sub-makes (same pattern as
+# `publish`'s AC_LIB-unset branch above) -- builds its own NO_STDIO=1 `lib`
+# regardless of what NO_STDIO this invocation itself used, so a bare `make
+# audit-no-stdio` just works.
+#
+# Checks, in order:
+#   1. key-isolation  -- the NO_STDIO=1 print-lib-path differs from the
+#      NO_STDIO=0 one (distinct CFG_SIG -> distinct obj/bin directory; a
+#      NO_STDIO build can never silently alias a non-NO_STDIO one).
+#   2. `ar -t`         -- aec_debug.o (the one stdio TU) is absent from the
+#      NO_STDIO=1 archive.
+#   3. `nm -A` (archive)-- no fprintf/vfprintf/printf/puts/fputs/fputc/fwrite/
+#      stderr/__stderrp anywhere in libaec.a, defined or undefined. This is
+#      the strong, unconditionally-true claim: AEC's OWN objects carry zero
+#      stdio references under NO_STDIO=1, on either FFT backend.
+#   4. minimal-main ELF gate -- link test/no_stdio_main.c (itself stdio-free:
+#      no <stdio.h>, no printf) against the NO_STDIO=1 libaec.a + the
+#      resolved audio_common archive, `nm -A` the EXECUTABLE, then run it.
+#      Calibration (empirically measured on this host, both backends):
+#        - BACKEND=ne10: the executable is FULLY stdio-free -- zero hits,
+#          same strict set as the archive check. This is the embedded/board
+#          deliverable backend; it sets the real bar.
+#        - BACKEND=kiss: audio_common's vendored KISS FFT (lib/kiss_fft/
+#          kiss_fft_log.h's KISS_FFT_ERROR macro, used on kiss_fft.c's
+#          malloc-failure diagnostic paths) unconditionally references
+#          __stderrp/fputc/fwrite -- a pre-existing dependency entirely
+#          outside this AEC-side change (confirmed: `nm -u` on kiss_fft.o
+#          alone shows exactly these three; libaec.a alone shows none). The
+#          honest, achievable assertion on this backend is therefore that
+#          NONE of fprintf/vfprintf/printf/puts/fputs (the exact symbols
+#          aec_debug.c itself used to contribute -- confirmed by diffing
+#          this same nm against a NO_STDIO=0 link, where exactly those two
+#          symbols additionally appear) show up; the three KISS-FFT-owned
+#          symbols are reported, not gated.
+#   5. Run the linked executable; exit code must be 0 (aec_create +
+#      one hop of aec_process + aec_destroy all succeeded with no stdio
+#      call of its own).
+# =============================================================================
+AUDIT_STRICT_ALL  = fprintf|vfprintf|printf|puts|fputs|fputc|fwrite|stderr|__stderrp
+AUDIT_STRICT_OWN  = fprintf|vfprintf|printf|puts|fputs
+AUDIT_BIN_DIR     = bin/audit-no-stdio/$(BACKEND)
+
+.PHONY: audit-no-stdio
+audit-no-stdio:
+	@echo "== audit-no-stdio: BACKEND=$(BACKEND) WERROR=$(WERROR) CC=$(CC) =="
+	+@$(MAKE) --no-print-directory NO_STDIO=1 BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' lib
+	@lib_ns1="$$($(MAKE) -s --no-print-directory NO_STDIO=1 BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' print-lib-path)"; \
+	 lib_ns0="$$($(MAKE) -s --no-print-directory NO_STDIO=0 BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' print-lib-path)"; \
+	 echo "-- NO_STDIO=1 lib: $$lib_ns1"; \
+	 echo "-- NO_STDIO=0 lib (key-isolation reference): $$lib_ns0"; \
+	 test "$$lib_ns1" != "$$lib_ns0" || { echo "FATAL: NO_STDIO=1/0 resolved to the SAME path -- CFG_SIG key-isolation broken" >&2; exit 1; }; \
+	 echo "PASS: key-isolation ($$lib_ns1 != $$lib_ns0)"; \
+	 echo "-- ar -t $$lib_ns1 --"; \
+	 ar -t "$$lib_ns1"; \
+	 if ar -t "$$lib_ns1" | grep -qx 'aec_debug.o'; then \
+	   echo "FATAL: aec_debug.o present in NO_STDIO=1 archive" >&2; exit 1; \
+	 fi; \
+	 echo "PASS: aec_debug.o absent from NO_STDIO=1 archive"; \
+	 hits="$$(nm -A "$$lib_ns1" 2>/dev/null | grep -iE '$(AUDIT_STRICT_ALL)' || true)"; \
+	 if [ -n "$$hits" ]; then \
+	   echo "FATAL: stdio symbols found in NO_STDIO=1 archive:" >&2; echo "$$hits" >&2; exit 1; \
+	 fi; \
+	 echo "PASS: nm -A $$lib_ns1 -- no fprintf/vfprintf/printf/puts/fputs/fputc/fwrite/stderr/__stderrp (defined or undefined)"; \
+	 echo "== audit-no-stdio: minimal-main ELF gate (BACKEND=$(BACKEND)) =="; \
+	 $(MAKE) --no-print-directory -C $(AC_DIR) BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=1 lib; \
+	 ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=1 print-lib-path)"; \
+	 test -n "$$ac" && test -f "$$ac" || { echo "FATAL: could not resolve/build audio_common archive (AC_DIR=$(AC_DIR))" >&2; exit 1; }; \
+	 mkdir -p $(AUDIT_BIN_DIR); \
+	 exe="$(AUDIT_BIN_DIR)/no_stdio_main"; \
+	 $(CC) $(CFLAGS) -o "$$exe" $(TEST_DIR)/no_stdio_main.c "$$lib_ns1" "$$ac" $(LDFLAGS); \
+	 echo "PASS: linked $$exe"; \
+	 exe_hits="$$(nm -A "$$exe" 2>/dev/null | grep -iE '$(AUDIT_STRICT_ALL)' || true)"; \
+	 exe_own_hits="$$(printf '%s\n' "$$exe_hits" | grep -iE '$(AUDIT_STRICT_OWN)' || true)"; \
+	 if [ -n "$$exe_own_hits" ]; then \
+	   echo "FATAL: AEC-attributable stdio symbols found in linked executable:" >&2; echo "$$exe_own_hits" >&2; exit 1; \
+	 fi; \
+	 if [ -n "$$exe_hits" ]; then \
+	   echo "CALIBRATED (BACKEND=$(BACKEND)): executable still carries these stdio-family symbols:"; \
+	   echo "$$exe_hits"; \
+	   echo "  -- attributed to audio_common's vendored KISS FFT (lib/kiss_fft/kiss_fft_log.h's"; \
+	   echo "     KISS_FFT_ERROR malloc-failure diagnostic macro), NOT to AEC or this NO_STDIO"; \
+	   echo "     gate -- pre-existing, out of scope for this AEC-side change. Verified: none of"; \
+	   echo "     fprintf/vfprintf/printf/puts/fputs (the exact symbols aec_debug.c itself"; \
+	   echo "     referenced) appear; only __stderrp/fputc/fwrite from kiss_fft.c's own error"; \
+	   echo "     path remain. BACKEND=ne10 (the embedded/board deliverable) carries no such"; \
+	   echo "     vendor residual and links fully stdio-free on this host."; \
+	 else \
+	   echo "PASS: linked executable is FULLY stdio-free (zero fprintf/vfprintf/printf/puts/fputs/fputc/fwrite/stderr/__stderrp, defined or undefined)"; \
+	 fi; \
+	 echo "== audit-no-stdio: running $$exe =="; \
+	 "$$exe"; rc=$$?; \
+	 echo "exit code: $$rc"; \
+	 test "$$rc" -eq 0 || { echo "FATAL: no_stdio_main exited $$rc (expected 0)" >&2; exit 1; }; \
+	 echo "audit-no-stdio: PASS (BACKEND=$(BACKEND))"
+
 # Build Configuration Flags (pass via EXTRA_CFLAGS)
 #
 # USE_STANDARD_MATH - Use standard math library functions (for debugging/parity check)
@@ -390,6 +524,8 @@ help:
 	@echo "  selftest Build + run the AEC-only kernel-split self-test (simd_selftest_aec)"
 	@echo "  debug   Build with -g -DAEC_DEBUG"
 	@echo "  publish Copy this build's artifacts to dist/<backend>/<config-hash>/ + update dist/<backend>/current"
+	@echo "  audit-no-stdio  Build lib with NO_STDIO=1 and verify it (and a minimal linked"
+	@echo "                  binary) carry no fprintf/vfprintf/stderr/etc -- see Makefile comment"
 	@echo "  clean   Remove obj/ and bin/ (dist/ survives -- publish is a deliberate release, not a build cache)"
 	@echo ""
 	@echo "Usage:"
@@ -403,6 +539,8 @@ help:
 	@echo "  make BACKEND=kiss|ne10   (default: kiss; ne10 is the embedded deliverable)"
 	@echo "  make AC_DIR=<path>       (override audio_common location)"
 	@echo "  make WERROR=1            (opt-in: -Werror for this repo's own sources)"
+	@echo "  make lib NO_STDIO=1      (opt-in: stdio-free libaec.a for board/no-stdio builds --"
+	@echo "                            only the 'lib' goal; CLI/bench are not built under this flag)"
 	@echo ""
 	@echo "Objects/binaries live in obj|bin/<backend>-<config-hash>/ -- switching"
 	@echo "BACKEND, EXTRA_CFLAGS, or WERROR always lands in a fresh directory"
