@@ -16,6 +16,23 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-07-15 — round-5 remediation (release tooling; no algorithm change)
+
+Build/release-tooling-only follow-up; renders byte-identical:
+
+- **publish v4**: `current` swapped via a rename(2)-atomic helper
+  (`audio_common/tools/atomic_symlink_swap.c`, built with `HOSTCC` — BSD/
+  macOS `mv` has no `-T` and follows symlink-to-dir destinations, and the
+  old fallback left a missing-`current` window); the per-backend lock is
+  now taken BEFORE the prerequisite build (concurrent same-config
+  publishes can no longer race object/archive writes); `MANIFEST.txt` is
+  deterministic (config + per-file SHA-256, byte-verified on republish —
+  tamper detection) and provenance (git commit/dirty/timestamp) moved to
+  an append-only `ATTEST/` directory, one attestation per publish event;
+  `DIST_ROOT=` redirects the release tree (isolation tests never touch
+  real releases). Archive temp files are PID-suffixed (same-config
+  concurrent build vs publish can't collide).
+
 ## [Unreleased] — 2026-07-15 — round-4 remediation (build-system hardening; no algorithm change)
 
 Build-system-only follow-up to the round-3 campaign — all four P1 findings

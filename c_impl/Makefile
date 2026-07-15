@@ -27,6 +27,15 @@ DEBUG         ?= 0
 # guard-skipped build can never alias a guarded one.
 TOOLCHAIN_CHECK ?= 1
 
+# DIST_ROOT / HOSTCC (round-5 review): where `make publish` writes releases
+# (test scripts point this at a throwaway mktemp dir so they never touch the
+# real dist/), and the HOST compiler for the publish-time atomic
+# symlink-swap helper (never $(CC): that may be a cross compiler). Neither
+# is in CFG_SIG -- neither affects what is built. See audio_common's
+# Makefile for the full writeups.
+DIST_ROOT ?= dist
+HOSTCC    ?= cc
+
 CFLAGS  = -Wall -Wextra -O2 -std=gnu99
 CFLAGS += -I./include -I./example
 CFLAGS += $(EXTRA_CFLAGS)
@@ -348,12 +357,12 @@ lib: $(LIB_TARGET)
 # Fresh-archive discipline (round-4 review P1-4): always built from scratch
 # into a temp file and renamed into place -- never `ar rc` onto an existing
 # archive (which only adds/replaces members and would keep a removed source's
-# stale member forever). See audio_common's Makefile for the full writeup.
+# stale member forever). One chained shell line with a PID-suffixed temp
+# (round-5 review P2): two same-config processes racing this rule each write
+# their OWN temp, final mv is atomic last-writer-wins. See audio_common's
+# Makefile for the full writeup.
 $(LIB_TARGET): $(OBJS) | _cfg_guard
-	rm -f $@.tmp
-	$(AR) rc $@.tmp $(OBJS)
-	$(RANLIB) $@.tmp
-	mv -f $@.tmp $@
+	t="$@.tmp.$$$$" && rm -f "$$t" && $(AR) rc "$$t" $(OBJS) && $(RANLIB) "$$t" && mv -f "$$t" $@
 	@echo "aec [$(BACKEND)] -> $@"
 
 # Bit-exactness + microbench self-test for the AEC-only kernel split
@@ -424,42 +433,52 @@ print-lib-path:
 	@echo $(abspath $(LIB_TARGET))
 
 # =============================================================================
-# publish: immutable per-config release under dist/ (round-3 review B01) --
-# same design as audio_common's publish (see that Makefile for the full
-# writeup): dist/<backend>/<cfg_sig>/ + dist/<backend>/current symlink, a
-# per-backend mkdir-lock serialising concurrent publishes, MANIFEST.txt with
-# relative paths + per-file sha256 + this build's resolved AC_PRODUCER_SIG
-# (the audio_common config this release was linked against). PUBLISH_ARTIFACTS
-# needs $(AC_LIB) to exist, so `publish` goes through the same two-phase
-# dispatch as `all`/`bench` when AC_LIB isn't already known.
+# publish v4: immutable, content-addressed release under $(DIST_ROOT)
+# (round-3 B01 -> round-4 P2-2 -> round-5 P2) -- same design as
+# audio_common's publish; see that Makefile for the full layout/semantics
+# writeup (deterministic MANIFEST + append-only ATTEST/ provenance,
+# byte-verified idempotent republish incl. MANIFEST tamper detection,
+# rename(2)-atomic `current` swap via the swapln helper built with
+# $(HOSTCC), and lock-FIRST driver so two concurrent same-config publishes
+# can't race the prerequisite build). `publish` is the locked driver;
+# _publish_impl is INTERNAL (direct invocation skips the lock) and goes
+# through the same two-phase AC_LIB dispatch as `all`/`bench`.
 # =============================================================================
-# publish v3 (round-4 review P2-2): content-addressed immutable releases --
-# dist/<backend>/<cfg_sig>-<content12>/, never rm -rf'd, idempotent
-# republish; see audio_common's Makefile for the full writeup.
 PUBLISH_ARTIFACTS = $(LIB_TARGET) $(TARGET) $(BENCH_TARGET)
-DIST_BACKEND_DIR  = dist/$(BACKEND)
-DIST_LOCK         = dist/.lock.$(BACKEND)
+DIST_BACKEND_DIR  = $(DIST_ROOT)/$(BACKEND)
+DIST_LOCK         = $(DIST_ROOT)/.lock.$(BACKEND)
 
-ifeq ($(AC_LIB),)
 .PHONY: publish
+# (Recipe mentions $(MAKE), so it executes under -n too: the lock dir is
+# transiently created/removed while the child make inherits -n and only
+# prints -- no build/dist side effects.)
 publish:
-	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
-	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path" >&2; exit 1; }; \
-	 $(MAKE) --no-print-directory publish AC_LIB="$$ac"
-else
-.PHONY: publish
-publish: $(PUBLISH_ARTIFACTS)
-	@mkdir -p dist; \
+	+@mkdir -p $(DIST_ROOT); \
 	if ! mkdir "$(DIST_LOCK)" 2>/dev/null; then \
 	  echo "FATAL: publish lock $(DIST_LOCK) already held (concurrent 'make publish BACKEND=$(BACKEND)'?)" >&2; \
 	  exit 1; \
 	fi; \
+	trap 'rmdir "$(DIST_LOCK)" 2>/dev/null' EXIT INT TERM; \
+	$(MAKE) --no-print-directory _publish_impl
+
+ifeq ($(AC_LIB),)
+.PHONY: _publish_impl
+_publish_impl:
+	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
+	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path" >&2; exit 1; }; \
+	 $(MAKE) --no-print-directory _publish_impl AC_LIB="$$ac"
+else
+.PHONY: _publish_impl
+_publish_impl: $(PUBLISH_ARTIFACTS)
+	@set -e; \
+	work="$$(mktemp -d)"; \
 	tmp="$(DIST_BACKEND_DIR)/.stage.$$$$"; \
-	trap 'rmdir "$(DIST_LOCK)" 2>/dev/null; rm -rf "$$tmp"' EXIT INT TERM; \
-	set -e; \
+	trap 'rm -rf "$$tmp" "$$work"' EXIT INT TERM; \
 	commit="$$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"; \
 	dirty=0; [ -n "$$(git status --porcelain 2>/dev/null)" ] && dirty=1; \
 	dateutc="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+	stamp="$$(date -u +%Y%m%dT%H%M%SZ)"; \
+	$(HOSTCC) -O2 -o "$$work/swapln" $(AC_DIR)/tools/atomic_symlink_swap.c || { echo "FATAL: could not build the atomic symlink-swap helper with HOSTCC=$(HOSTCC) (pass HOSTCC=<host compiler>)" >&2; exit 1; }; \
 	mkdir -p "$(DIST_BACKEND_DIR)"; \
 	rm -rf "$$tmp"; mkdir -p "$$tmp"; \
 	cp $(PUBLISH_ARTIFACTS) "$$tmp/"; \
@@ -476,25 +495,31 @@ publish: $(PUBLISH_ARTIFACTS)
 	  echo "cflags=$(CFLAGS)"; \
 	  echo "extra_cflags=$(EXTRA_CFLAGS)"; \
 	  echo "werror=$(WERROR)"; echo "no_stdio=$(NO_STDIO)"; echo "debug=$(DEBUG)"; \
-	  echo "git_commit=$$commit"; echo "git_dirty=$$dirty"; echo "date_utc=$$dateutc"; \
 	  echo "$$shas"; \
 	} > "$$tmp/MANIFEST.txt"; \
+	suffix=""; [ "$$dirty" = "1" ] && suffix="-dirty"; \
+	attest_name="attest-$$stamp-$$commit$$suffix.txt"; \
+	{ echo "release_id=$$rel_id"; \
+	  echo "cfg_sig=$(CFG_SIG)"; \
+	  echo "backend=$(BACKEND)"; \
+	  echo "git_commit=$$commit"; echo "git_dirty=$$dirty"; echo "date_utc=$$dateutc"; \
+	} > "$$work/attest.txt"; \
 	if [ -d "$$rel_dir" ]; then \
 	  for f in "$$tmp"/*; do \
-	    bn="$$(basename "$$f")"; [ "$$bn" = "MANIFEST.txt" ] && continue; \
-	    cmp -s "$$f" "$$rel_dir/$$bn" || { echo "FATAL: existing release $$rel_id differs from staged content for $$bn (content-address collision -- should be impossible)" >&2; exit 1; }; \
+	    bn="$$(basename "$$f")"; \
+	    cmp -s "$$f" "$$rel_dir/$$bn" || { echo "FATAL: existing release $$rel_id differs from staged content for $$bn (content-address collision, or the stored release/MANIFEST was modified on disk)" >&2; exit 1; }; \
 	  done; \
 	  rm -rf "$$tmp"; \
-	  echo "aec: $$rel_id already published (identical content) -- repointing current only"; \
+	  echo "aec: $$rel_id already published (byte-verified, incl. MANIFEST) -- appending attestation + repointing current"; \
 	else \
+	  mkdir "$$tmp/ATTEST"; \
 	  mv "$$tmp" "$$rel_dir"; \
 	fi; \
-	ln -s "$$rel_id" "$(DIST_BACKEND_DIR)/.current.tmp"; \
-	if ! mv -fT "$(DIST_BACKEND_DIR)/.current.tmp" "$(DIST_BACKEND_DIR)/current" 2>/dev/null; then \
-	  rm -f "$(DIST_BACKEND_DIR)/current"; \
-	  mv -f "$(DIST_BACKEND_DIR)/.current.tmp" "$(DIST_BACKEND_DIR)/current"; \
-	fi; \
-	echo "aec: published $(BACKEND)/$$rel_id -> $(DIST_BACKEND_DIR)/current"
+	mkdir -p "$$rel_dir/ATTEST"; \
+	cp "$$work/attest.txt" "$$rel_dir/ATTEST/.$$attest_name.tmp"; \
+	mv -f "$$rel_dir/ATTEST/.$$attest_name.tmp" "$$rel_dir/ATTEST/$$attest_name"; \
+	"$$work/swapln" "$$rel_id" "$(DIST_BACKEND_DIR)/current"; \
+	echo "aec: published $(BACKEND)/$$rel_id -> $(DIST_BACKEND_DIR)/current (attested: $$attest_name)"
 endif
 
 # =============================================================================
