@@ -32,6 +32,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
+#include <math.h>
 
 static int g_fail = 0;
 static int g_pass = 0;
@@ -145,6 +146,137 @@ static void test_misaligned_base(void) {
     free(raw);
 }
 
+/* R08 (AEC-side re-review gap): highpass_cutoff_hz used to be checked with a
+ * flat, rate-blind [0, 20000] Hz range regardless of enable_highpass, while
+ * hpf_init() (audio_common hpf.c, called from aec_carve whenever
+ * enable_highpass is set) separately rejects any cutoff_hz that isn't finite,
+ * isn't > 0, or isn't < 0.45*sample_rate -- silently returning NULL and
+ * leaving the AEC instance with no mic-path HPF, with no error surfaced
+ * anywhere. E.g. {sample_rate=8000, highpass_cutoff_hz=4000} used to sail
+ * through aec_validate_config and then silently drop the HPF underneath.
+ * aec_validate_config now mirrors hpf_params_valid exactly when
+ * enable_highpass=1, so every combination below that hpf_init would reject
+ * must now be rejected here too (all three public entry points), and every
+ * combination hpf_init would accept must still sail through end-to-end. */
+static void test_highpass_cutoff(void) {
+    AecConfig valid_cfg; base_cfg(&valid_cfg);
+    size_t sz = aec_get_mem_size(&valid_cfg);
+    CHECK(sz > 0, "highpass test setup: valid 16k config sizes > 0");
+    void* mem = malloc(sz);
+    CHECK(mem != NULL, "highpass test setup: malloc aligned pool");
+
+    /* Negative cases: {sample_rate, cutoff_hz} pairs that hpf_params_valid
+     * (audio_common hpf.c) rejects -- includes the exact 0.45*sample_rate
+     * boundary (rejected: hpf_params_valid uses `>=`) at all three
+     * whitelisted rates, plus NaN/0/negative, all with enable_highpass=1. */
+    struct { int sr; float cutoff; } bad_hp[] = {
+        { 8000,  4000.0f },              /* > 0.45*8000=3600 */
+        { 8000,  3600.0f },              /* == 0.45*8000 boundary, rejected */
+        { 16000, 7200.0f },              /* == 0.45*16000 boundary, rejected */
+        { 16000, 20000.0f },             /* old flat bound's own ceiling, still way over 0.45*sr */
+        { 48000, 21600.0f },             /* == 0.45*48000 boundary, rejected */
+        { 8000,  NAN },                  /* NaN */
+        { 16000, 0.0f },                 /* not > 0 */
+        { 48000, -80.0f },               /* negative */
+    };
+    for (size_t i = 0; i < sizeof(bad_hp) / sizeof(bad_hp[0]); ++i) {
+        AecConfig cfg;
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, bad_hp[i].sr);
+        cfg.enable_highpass = 1;
+        cfg.highpass_cutoff_hz = bad_hp[i].cutoff;
+        char what[80];
+        snprintf(what, sizeof(what), "highpass sr=%d cutoff=%g (enabled)",
+                 bad_hp[i].sr, (double)bad_hp[i].cutoff);
+        check_rejected(what, &cfg, mem, sz);
+    }
+
+    /* Same bad cutoff values must NOT be rejected when enable_highpass=0 --
+     * the field is inert (aec_carve never reaches hpf_init), so it keeps the
+     * old flat [0, 20000] range instead of the rate-relative one. Skip the
+     * NaN/negative cases here (still invalid under the flat range too; only
+     * exercise the ones that are >0.45*sr but still inside [0, 20000]). No
+     * 48000 entry: 0.45*48000=21600 already exceeds the flat range's own
+     * 20000 ceiling, so there is no cutoff value that is rejected by the
+     * tightened (enabled) rule but still accepted by the flat (disabled)
+     * one at this rate -- 8000/16000 already demonstrate the distinction. */
+    {
+        struct { int sr; float cutoff; } inert_ok[] = {
+            { 8000,  4000.0f },
+            { 8000,  3600.0f },
+            { 16000, 7200.0f },
+        };
+        for (size_t i = 0; i < sizeof(inert_ok) / sizeof(inert_ok[0]); ++i) {
+            AecConfig cfg;
+            aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, inert_ok[i].sr);
+            cfg.enable_highpass = 0;
+            cfg.highpass_cutoff_hz = inert_ok[i].cutoff;
+            char what[96];
+            size_t bsz = aec_get_mem_size(&cfg);
+            snprintf(what, sizeof(what),
+                     "highpass sr=%d cutoff=%g (disabled): aec_get_mem_size() > 0",
+                     inert_ok[i].sr, (double)inert_ok[i].cutoff);
+            CHECK(bsz > 0, what);
+        }
+    }
+    free(mem);
+
+    /* Positive cases: one Hz below the 0.45*sample_rate boundary at each
+     * whitelisted rate, enable_highpass=1 -- must pass end to end (get_mem_
+     * size>0, aec_init succeeds, aec_create succeeds, one hop of process
+     * runs), proving the tightened check didn't collaterally reject a
+     * legitimate cutoff. */
+    struct { int sr; float cutoff; } good_hp[] = {
+        { 8000,  150.0f },
+        { 16000, 7199.0f },
+        { 48000, 21599.0f },
+    };
+    for (size_t i = 0; i < sizeof(good_hp) / sizeof(good_hp[0]); ++i) {
+        AecConfig cfg;
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, good_hp[i].sr);
+        cfg.enable_highpass = 1;
+        cfg.highpass_cutoff_hz = good_hp[i].cutoff;
+        char what[96];
+
+        size_t gsz = aec_get_mem_size(&cfg);
+        snprintf(what, sizeof(what), "highpass sr=%d cutoff=%g: aec_get_mem_size() > 0",
+                 good_hp[i].sr, (double)good_hp[i].cutoff);
+        CHECK(gsz > 0, what);
+        if (gsz == 0) continue;
+
+        void* gmem = malloc(gsz);
+        snprintf(what, sizeof(what), "highpass sr=%d cutoff=%g: malloc pool",
+                 good_hp[i].sr, (double)good_hp[i].cutoff);
+        CHECK(gmem != NULL, what);
+        if (!gmem) continue;
+
+        Aec* a = aec_init(gmem, gsz, &cfg);
+        snprintf(what, sizeof(what), "highpass sr=%d cutoff=%g: aec_init() succeeds",
+                 good_hp[i].sr, (double)good_hp[i].cutoff);
+        CHECK(a != NULL, what);
+        if (a) {
+            int hop = aec_hop_size(a);
+            float* mic = (float*)calloc((size_t)hop, sizeof(float));
+            float* ref = (float*)calloc((size_t)hop, sizeof(float));
+            float* out = (float*)malloc((size_t)hop * sizeof(float));
+            aec_process(a, mic, ref, out);
+            snprintf(what, sizeof(what),
+                     "highpass sr=%d cutoff=%g (static): one hop of aec_process() runs",
+                     good_hp[i].sr, (double)good_hp[i].cutoff);
+            CHECK(1, what);
+            aec_destroy(a);
+            free(mic); free(ref); free(out);
+        }
+        free(gmem);
+
+        Aec dyn;
+        int rc = aec_create(&dyn, &cfg);
+        snprintf(what, sizeof(what), "highpass sr=%d cutoff=%g: aec_create() == 0",
+                 good_hp[i].sr, (double)good_hp[i].cutoff);
+        CHECK(rc == 0, what);
+        if (rc == 0) aec_destroy(&dyn);
+    }
+}
+
 /* Otherwise-valid 16 kHz balanced config: prove validation didn't collaterally
  * break the real path. get_mem_size>0, init OK, one hop of process runs.
  * aec_destroy() deliberately NOT called here — lifecycle/leak coverage is
@@ -241,6 +373,7 @@ static void test_multi_rate_valid_smoke(void) {
 int main(void) {
     test_sample_rate();
     test_filter_length();
+    test_highpass_cutoff();
     test_misaligned_base();
     test_valid_config_smoke();
     test_multi_rate_valid_smoke();

@@ -186,7 +186,32 @@ static int aec_validate_config(const AecConfig* cfg) {
     AEC_CK_RANGE_F(delay_buffer_ms,             0.0f,120000.0f);
     AEC_CK_RANGE_F(delay_est_init_s,            0.0f,  3600.0f);
     AEC_CK_RANGE_F(delay_est_period_s,          0.0f,  3600.0f);
-    AEC_CK_RANGE_F(highpass_cutoff_hz,          0.0f, 20000.0f);
+    /* highpass_cutoff_hz (R08, AEC-side re-review gap): when enable_highpass
+     * is set, this field is fed straight into hpf_init() (aec_carve, below)
+     * which silently returns NULL — dropping the HPF entirely, with no error
+     * surfaced — whenever audio_common's hpf_params_valid() (hpf.c) rejects
+     * the (cutoff_hz, sample_rate) pair. hpf_params_valid is *rate-relative*
+     * (cutoff must stay < 0.45*sample_rate, matching hpf_compute_coeffs's
+     * tan(wc/2) margin from the pi/2 singularity), while this validator's
+     * old bound was a flat, rate-blind [0, 20000] Hz range: e.g.
+     * {sample_rate=8000, highpass_cutoff_hz=4000} used to pass here but
+     * made hpf_init() return NULL underneath, silently constructing an AEC
+     * instance with no mic-path HPF even though the caller asked for one.
+     * Mirror hpf_params_valid() exactly — same isfinite/>0/0.45-margin
+     * checks, same double-vs-float comparison shape — so this validator and
+     * hpf_init can never disagree. When enable_highpass is 0 the field is
+     * inert (aec_carve's `if (cfg->enable_highpass)` guard means it never
+     * reaches hpf_init), so it keeps the old flat generous range — the same
+     * treatment every other enable_*-gated tunable in this function gets
+     * (e.g. shadow_mu_min/shadow_mu_nlms stay unconditionally range-checked
+     * whether or not enable_shadow is set): inert fields are still bounded,
+     * just not rate-relative. */
+    if (cfg->enable_highpass) {
+        if (!isfinite(cfg->highpass_cutoff_hz) || cfg->highpass_cutoff_hz <= 0.0f) return 0;
+        if ((double)cfg->highpass_cutoff_hz >= 0.45 * (double)cfg->sample_rate) return 0;
+    } else {
+        AEC_CK_RANGE_F(highpass_cutoff_hz,      0.0f, 20000.0f);
+    }
     AEC_CK_RANGE_F(saturation_threshold,        0.0f,    10.0f);
     AEC_CK_RANGE_F(kalman_q_high,               0.0f,     1.0f);
     AEC_CK_RANGE_F(kalman_q_low,                0.0f,     1.0f);
@@ -541,10 +566,12 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     memset(a, 0, sizeof(*a));
     if (aec_carve(a, arena, cfg, hop, blk, fft, K, np, buf_samp, fcap,
                   /*is_static=*/0) != 0) {
-        /* F04: a nested FFT allocation failed (OOM) partway through the
-         * carve. aec_carve() already tore down whatever nested FFT handles
-         * (main filter / shadow filter / post_fft) it had brought up before
-         * returning, so the arena itself is the only thing left to release. */
+        /* F04: a nested FFT allocation failed (OOM), or (R08 belt-and-
+         * braces, practically unreachable post-validator-fix) hpf_init()
+         * rejected its params, partway through the carve. aec_carve()
+         * already tore down whatever nested FFT handles (main filter /
+         * shadow filter / post_fft) it had brought up before returning, so
+         * the arena itself is the only thing left to release. */
         free(arena);
         memset(a, 0, sizeof(*a));
         return -1;
@@ -728,14 +755,20 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
  * the caller owns the memory and aec_destroy() must not free it.
  *
  * Returns 0 on success, -1 iff a nested FFT allocation failed (main filter's,
- * shadow filter's, or post_fft's -- the only sub-inits below that can fail
- * post-arena-fication: every other sub-init here is a pure pointer-bump
- * against a buffer aec_get_mem_size() already proved big enough, so it
- * cannot fail). On failure, any nested FFT handle that DID come up earlier
- * in this same carve (and therefore owns a real allocation outside the
- * pool/arena -- the NE10 backend's R2C/C2R twiddle config) is torn down
- * before returning, so the caller has only the pool/arena bytes themselves
- * left to deal with. */
+ * shadow filter's, or post_fft's), or iff the mic-path HPF's hpf_init()
+ * rejected its (cutoff_hz, sample_rate) pair (R08 belt-and-braces: with
+ * aec_validate_config's highpass_cutoff_hz check now mirroring
+ * hpf_params_valid exactly, every {enable_highpass, cutoff_hz, sample_rate}
+ * combination that reaches this carve has already been proven acceptable to
+ * hpf_init, so this branch is unreachable in practice -- kept as a defined
+ * internal-error path rather than silently constructing an instance with no
+ * HPF). Those are the only sub-inits below that can fail post-arena-
+ * fication: every other sub-init here is a pure pointer-bump against a
+ * buffer aec_get_mem_size() already proved big enough, so it cannot fail.
+ * On failure, any nested FFT handle that DID come up earlier in this same
+ * carve (and therefore owns a real allocation outside the pool/arena -- the
+ * NE10 backend's R2C/C2R twiddle config) is torn down before returning, so
+ * the caller has only the pool/arena bytes themselves left to deal with. */
 static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
                       int hop, int blk, int fft, int K, int np,
                       int buf_samp, int fcap, int is_static) {
@@ -1141,10 +1174,26 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->scr_e2ref_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_e2coa_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_erl_arr   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
-    /* mic-path HPF (audio_common f32; arena/pool-resident, hpf_destroy no-ops) */
+    /* mic-path HPF (audio_common f32; arena/pool-resident, hpf_destroy no-ops).
+     * R08: hpf_init() returns NULL if hpf_params_valid() (audio_common
+     * hpf.c) rejects (cutoff_hz, sample_rate) -- aec_validate_config now
+     * mirrors that exact check whenever enable_highpass is set, so this
+     * should never fire in practice. Checked anyway (belt-and-braces, same
+     * F04 unwind-and-fail shape as the nested FFT allocations above) rather
+     * than silently leaving a->hp_mic NULL and running with no mic-path HPF
+     * despite the caller asking for one. */
     if (cfg->enable_highpass) {
         a->hp_mic = hpf_init(ptr, hpf_get_mem_size(),
                              cfg->highpass_cutoff_hz, cfg->sample_rate);
+        if (!a->hp_mic) {
+            /* Unwind every nested allocation brought up earlier in this
+             * carve (post_fft is always non-NULL here -- the fft_init check
+             * above already returned -1 if it failed). */
+            fft_destroy(a->post_fft); a->post_fft = NULL;
+            if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
+            pbfdkf_free(&a->main_filter);
+            return -1;
+        }
         ptr += ALIGN16(hpf_get_mem_size());
     }
 
@@ -1201,10 +1250,12 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
     uint8_t* ptr = (uint8_t*)mem + ALIGN16(sizeof(Aec));
     if (aec_carve(a, ptr, cfg, hop, blk, fft, K, np, buf_samp, fcap,
                   /*is_static=*/1) != 0) {
-        /* F04: a nested FFT allocation failed (OOM). aec_carve() already
-         * destroyed any nested FFT handles it had brought up before
-         * returning; the pool itself belongs to the caller, so there is
-         * nothing else for us to release. */
+        /* F04: a nested FFT allocation failed (OOM), or (R08 belt-and-
+         * braces, practically unreachable post-validator-fix) hpf_init()
+         * rejected its params. aec_carve() already destroyed any nested FFT
+         * handles it had brought up before returning; the pool itself
+         * belongs to the caller, so there is nothing else for us to
+         * release. */
         return NULL;
     }
     a->heap_arena = NULL;
