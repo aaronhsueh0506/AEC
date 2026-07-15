@@ -16,6 +16,53 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-07-15 — round-6 remediation (publish dry-run + attest hardening; no algorithm change)
+
+Build/release-tooling-only follow-up to round-5; renders byte-identical (obj/
+bin keyed paths unchanged for default invocations, CFG_SIG payload
+untouched):
+
+- **Dry-run guard**: `make -n/-q/-t publish` is now side-effect-free — a
+  MAKEFLAGS word-scan branches BEFORE `$(DIST_ROOT)` is created or the
+  per-backend lock is taken (`-n`/`-t` recurse into a print-only path, `-q`
+  exits 1 per question-mode's "needs updating" semantics) — round-5's driver
+  mentioned `$(MAKE)`, so GNU make ran it for real even under `-n`,
+  transiently mkdir'ing `dist/` and taking/releasing the real lock on every
+  dry run.
+- **ATTEST one-event-one-file**: every publish event (including an
+  idempotent republish) now writes exactly one NEW
+  `attest-<utc>-<commit>[-dirty]-<seq>.txt`, installed via
+  `audio_common/tools/atomic_symlink_swap.c`'s new `--excl-install` mode
+  (write-temp + `link(2)`, the atomic no-clobber equivalent of
+  `O_CREAT|O_EXCL` — `link(2)` fails `EEXIST` if the name is already taken).
+  A same-second name collision regenerates the event id with the next `<seq>`
+  and retries; an existing attestation is never overwritten (round-5 used
+  `mv -f`, so same-second republishes could silently clobber the prior
+  record). `git_commit` is now always the full 40-hex object id (round-5
+  used `git rev-parse --short`).
+- **Cross-repo provenance**: the attestation also records the audio_common
+  *producer's* own commit/dirty state
+  (`audio_common_git_commit`/`audio_common_git_dirty`/
+  `audio_common_dirty_diff_sha256`) — this repo's release links against
+  audio_common's archive, so "which source state produced this release"
+  now spans both repos, not just this one.
+- **Dirty-checkout refusal**: `make publish` FATALs by default when either
+  this checkout or the resolved audio_common checkout has uncommitted
+  tracked changes (full `git status --porcelain`, untracked counts) or no
+  git identity at all. `ALLOW_DIRTY_PUBLISH=1` is the escape hatch for dev
+  publishes; the attestation then records `allow_dirty_publish=1` plus a
+  `dirty_diff_sha256` (sha256 of `git diff --binary HEAD`) for whichever
+  repo(s) are dirty, so the deviation is itself traceable.
+- **OBJ_ROOT/BIN_ROOT placement knobs** (round-6 P1, not in `CFG_SIG`):
+  isolation tests can point the keyed obj/bin trees at a scratch directory
+  (`OBJ_ROOT=.../obj BIN_ROOT=.../bin`) to run tamper/injection scenarios
+  against a real worktree build without ever touching the real `obj/`/`bin/`
+  — default expansion (`obj`/`bin`) is byte-identical to the previous
+  hardcoded paths. `clean` now removes both `$(OBJ_ROOT)` and `$(BIN_ROOT)`.
+- `ATTEST_STAMP` (test-only): overrides the UTC timestamp embedded in the
+  attestation filename so the isolation tests can force deterministic
+  same-second collisions and prove the sequence-retry path.
+
 ## [Unreleased] — 2026-07-15 — round-5 remediation (release tooling; no algorithm change)
 
 Build/release-tooling-only follow-up; renders byte-identical:
