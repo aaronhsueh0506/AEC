@@ -16,6 +16,33 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-07-15 — round-3 remediation (B01–B09; build isolation + no-stdio + FP policy)
+
+AEC-side items from the round-3 review campaign:
+
+- **Config-keyed final artifacts + two-phase audio_common resolution (B01)**:
+  archives/binaries now live in `bin/<backend>-<cfg-sig>/` (full-coverage
+  signature incl. AR/RANLIB and the resolved producer identity;
+  `config.manifest` collision guard; `-MD -MP` header deps; `print-*`
+  queries; `publish` → immutable `dist/<backend>/<sig>/` + atomic `current`
+  symlink). The hardcoded flat audio_common path and the order-only
+  recursion are gone — the archive is a normal prerequisite resolved at
+  recipe time with full variable forwarding.
+- **SIMD edge matrix (B05)**: n=0..17 sweeps, element-offset unaligned
+  forms, canary guards, alias matrix, UBSan runner; finite corpus for the
+  12 payload-unspecified kernels reconciled to classified comparison
+  (UBSan run went fail → pass). 293,015 → 43,109,992 checks.
+- **`AEC_NO_STDIO` (B03)**: `NO_STDIO=1` produces a stdio-free `libaec.a`
+  (trace call sites compiled out, `aec_debug.o` excluded);
+  `audit-no-stdio` gates the delivered archive + a stdio-free minimal-main
+  executable. ne10 (board deliverable) is stdio-free end to end.
+- **FP policy (B04)**: `-ffp-contract=off` moved to last position with
+  parse-time conflict rejection; AEC's own default codegen byte-identical
+  — the campaign's one deliberate byte-change comes from audio_common+NR
+  gaining the flag (they had none): new 60-case aggregates
+  KISS `a2fc5d07…` / NE10 `44540201…` (supersede `652a2152…`/`09125432…`;
+  median render delta −73 dB RMS, all parities within tolerance).
+
 ## [Unreleased] — 2026-07-15 — re-review remediation (R01–R10; streaming FIFO rewritten)
 
 Remediation of the 2026-07-15 external re-review. AEC-side items:
