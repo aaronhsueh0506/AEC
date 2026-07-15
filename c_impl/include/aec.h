@@ -296,60 +296,94 @@ typedef struct Aec {
      * aec_process_capture). The lockstep aec_process() bypasses it entirely,
      * so offline byte-exact parity with Python is untouched. In lockstep use
      * (one analyze_render then one process_capture) the FIFO is pass-through
-     * (count 1→0, no event) → identical output to aec_process(). */
-    /* F09 (render/capture FIFO data race): render and capture may run on two
-     * different threads (SPSC — see the contract above aec_analyze_render /
-     * aec_process_capture below). aec.c touches every field below through
-     * GCC/Clang `__atomic_*_n` builtins, never a plain `x++`/`x--`, whenever
-     * the field can be seen by the other thread. Builtins (not
-     * `<stdatomic.h>` _Atomic types) are used deliberately: they operate on
-     * plain int/long lvalues, so the struct's size and member offsets are
-     * completely unaffected (no ABI break for existing callers/pool-size
-     * math) and the header stays includable from a C89 translation unit.
+     * (fifo_write one ahead of fifo_read, no event) → identical output to
+     * aec_process(). */
+    /* F09 Variant A' (drop-new + consumer catch-up): a from-scratch SPSC
+     * ring, replacing an earlier design where both the producer and the
+     * consumer could advance the read cursor (the producer's overrun path
+     * used to drop the OLDEST buffered hop, which requires a second writer
+     * on the read side and forces every touch of it through a full
+     * fetch_add RMW). This rewrite gives each cursor exactly ONE writer —
+     * the textbook SPSC shape — by moving the overrun response to "producer
+     * drops the NEW incoming hop" (drop-new) and adding a symmetric
+     * "consumer catches up to the freshest hop" response for when the
+     * consumer has fallen a full `cap` hops behind. The same two
+     * AecBufferingEvent values are still reported; only which side's data is
+     * sacrificed under sustained skew changes (newest vs. oldest hop
+     * dropped). aec.c touches every cross-thread field below through
+     * GCC/Clang `__atomic_*_n` builtins on plain int/unsigned lvalues, never
+     * `<stdatomic.h>` _Atomic types — so the struct's size and member
+     * offsets are completely unaffected (no ABI break for existing callers/
+     * pool-size math) and the header stays includable from a C89
+     * translation unit.
      * Per-field protocol:
-     *   - fifo_write:  producer-only. Never read or written by the capture
-     *     thread, so it needs no atomics at all (plain int, wraps mod
-     *     fifo_cap_hops exactly as before).
-     *   - fifo_read:   the one field BOTH threads can advance — the normal
-     *     consumer claim in aec_process_capture(), *and* the producer's
-     *     overrun "drop the oldest hop" path in aec_analyze_render() (full
-     *     FIFO). That second writer is why this can't be a classic
-     *     "consumer owns fifo_read" SPSC ring: both sides claim slots via
-     *     `__atomic_fetch_add(&fifo_read, 1, ACQ_REL)`, never a plain
-     *     load-then-store. fetch_add is a true RMW — every caller (either
-     *     thread) gets back a distinct, never-repeated previous value, so
-     *     two claims can never resolve to the same physical ring slot even
-     *     though there are two potential writers. The field is treated as
-     *     an ever-increasing cursor (indexed into the ring with `% cap` at
-     *     each use, not stored pre-wrapped) so a decades-long uptime never
-     *     hits signed-overflow UB on the `int` storage — see the unsigned-
-     *     cast comment at the call sites.
-     *   - fifo_count:  the full/empty gate read by both sides
-     *     (`__atomic_load_n(ACQUIRE)`), and adjusted with
-     *     `__atomic_fetch_add`/`__atomic_fetch_sub` (RELEASE) — never a bare
-     *     `count++`/`count--`. The producer's normal path does exactly one
-     *     +1; on overrun it does one extra -1 (drop) bracketing that +1, so
-     *     "count only crossed by one increment/decrement per event" holds on
-     *     both sides. A guard check (`cnt >= cap` / `cnt > 0`) is taken
-     *     against a snapshot that can be one atomic op stale by the time the
-     *     matching fetch_add/fetch_sub fires; this residual is accepted as
-     *     bounded and non-corrupting: closing that window would need
-     *     ~cap consecutive full aec_process() hops (real DSP work, µs–ms
-     *     each) to complete inside the handful of nanoseconds between one
-     *     thread's load and its very next atomic instruction, which the two
-     *     single (not pooled/re-entrant) producer/consumer threads here
-     *     cannot do — see aec_analyze_render()/aec_process_capture() in
-     *     aec.c for the full derivation.
+     *   - fifo_write: producer-owned monotonic unsigned write sequence
+     *     number (ever-increasing, indexed into the ring with `% cap` at
+     *     each use — never stored pre-wrapped — so unsigned wraparound
+     *     after a decades-long uptime is well-defined and harmless). Sole
+     *     writer: the render thread, in aec_analyze_render(). Read by its
+     *     own thread as a plain load (no other writer of this field exists,
+     *     so that load cannot race); RELEASE-stored only after the new
+     *     hop's memcpy into the ring slot has completed, so that store
+     *     publishes the payload write to whichever thread's ACQUIRE load of
+     *     fifo_write next observes the incremented value.
+     *   - fifo_read: consumer-owned monotonic unsigned read sequence number,
+     *     same wraparound treatment. Sole writer: the capture thread, in
+     *     aec_process_capture() — including its own catch-up path (unlike
+     *     the earlier design, the producer never touches fifo_read here).
+     *     Plain-loaded by its own thread; RELEASE-stored only AFTER
+     *     aec_process() has returned for the claimed hop (see the
+     *     slot-lifetime note below), so that store both publishes the new
+     *     read cursor and marks the slot free to the producer's next
+     *     ACQUIRE load of fifo_read.
+     *   - occupancy is always `fifo_write - fifo_read` (unsigned
+     *     subtraction). fifo_cap_hops is forced to a power of two
+     *     specifically so this stays correct across the 2^32 wrap of either
+     *     cursor: `(x mod 2^32) mod cap == x mod cap` for every unsigned x
+     *     only when cap divides 2^32 exactly (see aec_derive_dims in
+     *     aec.c). The invariant `0 <= fifo_write - fifo_read <= cap` holds
+     *     at every instant, by induction: the producer only advances
+     *     fifo_write after observing `fifo_write - fifo_read_obs < cap` for
+     *     some fifo_read_obs <= the true fifo_read at that moment (an
+     *     ACQUIRE load can only lag, never lead, its writer), so the
+     *     post-increment true occupancy is <= cap; the consumer only
+     *     advances fifo_read after observing `fifo_write_obs - fifo_read >
+     *     0` for some fifo_write_obs <= the true fifo_write, so the
+     *     post-increment true occupancy is >= 0. Slot aliasing — two live
+     *     claims resolving to the same physical ring index — would require
+     *     fifo_write == fifo_read (mod cap), i.e. fifo_write - fifo_read
+     *     equal to either 0 or cap; both are exactly the boundary values the
+     *     guards above forbid crossing without the matching drop-new /
+     *     catch-up event, so the producer never writes a slot the consumer
+     *     might still be reading and the consumer never reads a slot the
+     *     producer has not yet fully written.
+     *   - The producer's occupancy check is staleness-safe in the
+     *     conservative direction: because fifo_read_obs <= the true
+     *     fifo_read, the producer's computed occupancy
+     *     (fifo_write_true - fifo_read_obs) can only OVER-estimate the true
+     *     occupancy — worst case it refuses to write (a spurious drop-new)
+     *     when there was actually room; it can never UNDER-estimate and so
+     *     never overwrites a slot the consumer has not released.
      *   - The ring slot's audio payload: the producer memcpy's the new hop
-     *     BEFORE its release fetch_add on fifo_count (so the data is visible
-     *     to whichever thread's acquire-load next observes the incremented
-     *     count); the consumer only fetch_subs fifo_count AFTER
-     *     aec_process() has returned (its first act is to copy `ref` out of
-     *     the ring into a->far_hop) — i.e. the slot is held "claimed" for
-     *     the whole hop, not released the instant the copy is done. That is
-     *     more conservative than strictly necessary (it can turn one extra
-     *     hop into a reported overrun under sustained producer/consumer
-     *     skew) but needs no change inside aec_process() itself.
+     *     into the ring BEFORE its RELEASE store of fifo_write (see above);
+     *     the consumer only RELEASE-stores its advanced fifo_read AFTER
+     *     aec_process() has returned — its first act, at the top of
+     *     aec_process(), is to memcpy the passed-in `ref` OUT of the ring
+     *     into a->far_hop — i.e. the slot is held "claimed" for the whole
+     *     hop, not released the instant the copy-out is done. That is more
+     *     conservative than strictly necessary (it can turn one extra
+     *     producer call into a reported drop-new under sustained skew) but
+     *     needs no change inside aec_process() itself.
+     *   - fifo_count: RETIRED by this rewrite — always 0. Kept ONLY so every
+     *     field below it keeps its pre-existing byte offset (layout
+     *     stability). Nothing in aec.c reads or writes it except the
+     *     zeroing at init/reset.
+     *   - fifo_zero_ref: an immutable all-zero hop, carved from the pool at
+     *     init and re-zeroed at reset — otherwise never written by either
+     *     streaming thread. This is the underrun reference: unlike the
+     *     earlier design (which memset a ring slot in place on underrun),
+     *     the ring itself is never written by the capture thread, so
+     *     aec_process_capture() has nothing to race against on this path.
      *   - render_call_count / capture_call_count / last_buffering_event:
      *     each is written by exactly one side (render_call_count only by
      *     the render thread, the other two only by the capture thread), so
@@ -363,11 +397,13 @@ typedef struct Aec {
      * aec_reset()/aec_create()/aec_init() write these fields as plain ints —
      * correct only because the contract requires the caller to fully
      * serialize with both the render and capture threads before resetting
-     * or destroying a streaming-mode Aec (see the contract text below). */
+     * or destroying a streaming-mode Aec (see the contract text below).
+     * This design is TSan-clean with zero suppressions (see
+     * test/test_fifo_spsc.c's header comment). */
     float* render_fifo;        /* [fifo_cap_hops × hop_size] ring of render hops */
-    int    fifo_cap_hops;      /* capacity in hops */
-    int    fifo_count;         /* buffered render hops not yet consumed — atomic, see above */
-    int    fifo_read, fifo_write;  /* fifo_read: atomic cursor (both threads); fifo_write: producer-private */
+    int    fifo_cap_hops;      /* capacity in hops — forced to a power of two, see aec_derive_dims */
+    int    fifo_count;         /* RETIRED — always 0, kept only for layout stability, see above */
+    int    fifo_read, fifo_write;  /* fifo_read: consumer-owned monotonic unsigned cursor; fifo_write: producer-owned monotonic unsigned cursor (see above) */
     long   render_call_count, capture_call_count;  /* single-writer-per-field stats, plain ops (see above) */
     int    last_buffering_event;   /* AecBufferingEvent of the last capture step — relaxed-atomic (see above) */
 
@@ -380,6 +416,12 @@ typedef struct Aec {
      * caller owns the pool and aec_destroy() must not free it. Appended at
      * the end of the struct so existing field offsets are unchanged. */
     void*  heap_arena;
+
+    /* Appended AFTER heap_arena (same append-at-end precedent, so every
+     * field above keeps its pre-existing offset). fifo_zero_ref: an
+     * immutable all-zero hop, the F09 Variant A' underrun reference — see
+     * the streaming-FIFO design note above. */
+    float* fifo_zero_ref;
 } Aec;
 
 int  aec_create(Aec* a, const AecConfig* cfg);
@@ -406,7 +448,7 @@ void aec_process(Aec* a, const float* mic, const float* ref, float* out);
  * aec_analyze_render() and exactly ONE (possibly different) thread may call
  * aec_process_capture() on a given Aec — single-producer/single-consumer.
  * Under that contract the two functions may run fully concurrently with no
- * external lock; every field they share (fifo_read, fifo_count) is touched
+ * external lock; every field they share (fifo_write, fifo_read) is touched
  * only through acquire/release `__atomic_*_n` builtins (see the field
  * comments on the Aec struct above) and the ring's audio payload is always
  * memcpy'd by its producer before, and read by its consumer after, the
@@ -431,9 +473,12 @@ void aec_process(Aec* a, const float* mic, const float* ref, float* out);
  * to aec_process(mic, ref, out) — the FIFO is pass-through and no event
  * fires.
  *
- * Underrun (capture with empty FIFO): processed with a silent render hop and
+ * Underrun (capture with empty FIFO): processed with a silent render hop
+ * (aec_process_capture() substitutes the immutable fifo_zero_ref) and
  * AEC_BUF_RENDER_UNDERRUN returned. Overrun (render past FIFO capacity): the
- * oldest buffered hop is dropped and AEC_BUF_RENDER_OVERRUN returned. */
+ * incoming hop is discarded (drop-new); if the capture side finds the ring
+ * full it skips to the freshest hop (catch-up) and reports
+ * AEC_BUF_RENDER_OVERRUN. */
 AecBufferingEvent aec_analyze_render(Aec* a, const float* ref);
 AecBufferingEvent aec_process_capture(Aec* a, const float* mic, float* out);
 /* Last buffering event from the most recent aec_process_capture(). */

@@ -16,6 +16,35 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-07-15 — re-review remediation (R01–R10; streaming FIFO rewritten)
+
+Remediation of the 2026-07-15 external re-review. AEC-side items:
+
+- **Streaming FIFO rewritten to a provable SPSC ring (R02, replaces the
+  first F09 fix)**: the previous atomic patch kept a shared `fifo_read`
+  RMW cursor and was refuted by an interleaving proof (producer's
+  drop-oldest advance could collide with the consumer's claimed slot at
+  full; the consumer's underrun `memset` raced the producer's first write
+  at empty). New protocol — Variant A′: `fifo_write`/`fifo_read` are
+  monotonic unsigned sequences with exactly one writer each (producer /
+  consumer), occupancy = `w − r`, `fifo_count` retired (kept at offset,
+  always 0); overrun = **drop-new** (producer never writes when full, never
+  touches the read cursor) + **consumer catch-up** (on observing a full
+  ring the capture side skips to the freshest hop — staleness self-heals to
+  ~1 hop after a burst, vs. the old drop-oldest's permanent ~320 ms lag);
+  underrun uses a new immutable all-zero pool hop (`fifo_zero_ref`) — the
+  ring is never written by the capture thread. Ownership proof in aec.h;
+  every shared word has exactly one writer; TSan-clean by construction
+  (zero suppressions). `test_fifo_spsc.c` rewritten as a payload-integrity
+  stress (per-hop sequence + full-hop bit-exact regeneration oracle via
+  `far_hop`, producer/consumer jitter, bounded-staleness + gap accounting
+  identities); `stream_sim.c` gains an exact-count overrun check and a
+  catch-up check. Lockstep single-thread behaviour byte-identical (old vs
+  new `--singlethread` dump `cmp`-equal; 60-case render aggregates
+  unchanged — offline `aec_process()` untouched). Pool +`ALIGN16(hop·4)`
+  (16 k: KISS 538,320 B / NE10 534,192 B; per-rate table in
+  STATIC_MEMORY.md).
+
 ## [Unreleased] — 2026-07-15 — external-review remediation campaign (F01–F20 all closed; 16 kHz byte-identical throughout except one flagged commit)
 
 Full remediation of the 2026-07-14 external C/SIMD/NE10/memory-pool review
@@ -58,8 +87,10 @@ deliberate byte-change lives in Audio_ALG (pipeline TU `-ffp-contract=off`).
 - **Build hygiene (F12)**: parse-time config-stamp rebuild keying; WERROR
   knob. **Docs (F19)**: real 3-param `aec_init` everywhere; ownership truth
   per backend; `docs_smoke.sh` compiles the STATIC_MEMORY.md sample.
-- Pool totals (16 k): KISS 537,680 B / NE10 533,552 B (in-pool twiddles +
-  de-stacked scratch + config growth); per-rate table in STATIC_MEMORY.md.
+- Pool totals (16 k): KISS 538,320 B / NE10 534,192 B (in-pool twiddles +
+  de-stacked scratch + config growth; figure includes the later F09 Variant
+  A' streaming-FIFO rewrite's +640 B `fifo_zero_ref`); per-rate table in
+  STATIC_MEMORY.md.
 
 ## [Unreleased] — 2026-07-16 — vectorization campaign (byte-identical, NEON via shared kernels)
 

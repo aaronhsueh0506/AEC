@@ -178,8 +178,8 @@ free(pool);   /* pool 由 caller 回收；aec_destroy() 對 pool instance 是 no
 `NULL`。同一個 backend 下兩條 path 輸出 **bit-identical**（`c_impl/test_static_aec.c` 驗證
 static == dynamic byte-equal）；NE10 與 KISS 彼此的輸出並非 bit-identical（既有、
 預期中的 FFT 實作差異）。BALANCED / 16 kHz / 52 ms filter / shadow + RES +
-delay-est 全開時 pool 為：KISS backend **537,680 B（525.1 KB）**；NE10 backend
-**533,552 B（521.0 KB）**。設計說明與 per-module 佔用明細見
+delay-est 全開時 pool 為：KISS backend **538,320 B（525.7 KB）**；NE10 backend
+**534,192 B（521.7 KB）**。設計說明與 per-module 佔用明細見
 [../c_impl/STATIC_MEMORY.md](../c_impl/STATIC_MEMORY.md)。
 
 **`aec_destroy()` 對 pool instance 在兩個 backend 都是真 no-op**：`aec_init()`

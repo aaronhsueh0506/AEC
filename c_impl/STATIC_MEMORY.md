@@ -64,15 +64,21 @@ delay on the pool is:
 
 | Backend | Pool |
 |---|---:|
-| KISS (host/reference) | **537,680 B (525.1 KB)** |
-| NE10 (embedded)       | **533,552 B (521.0 KB)** |
+| KISS (host/reference) | **538,320 B (525.7 KB)** |
+| NE10 (embedded)       | **534,192 B (521.7 KB)** |
 
 (Both figures now include everything — NE10's three R2C/C2R twiddle configs
 are carved from the pool since vendored patch P0001; there are no
 backend-internal heap allocations left on the static path, enforced by
 `test/test_zero_heap_aec.c`.) Both figures are static==dynamic byte-equal, verified by
 `test_static_aec.c` (669,920 samples, 50-cycle init/destroy leak loop). The
-old figures (539,328 B / 526.7 KB, KISS only) are stale — since then: +24.5 KB
+previous figures (537,680 B KISS / 533,552 B NE10) grew by exactly
+`ALIGN16(hop_size * sizeof(float))` — 640 B at 16 kHz (hop=160) — for the F09
+Variant A' streaming-FIFO rewrite's `fifo_zero_ref`: an immutable all-zero
+hop carved right after `render_fifo`, used as the underrun reference so the
+capture thread never has to write into the ring (see aec.h/aec.c). Before
+that: the old figures (539,328 B / 526.7 KB, KISS only) were stale — since
+then: +24.5 KB
 de-stacked instance scratch (13 former `float[8192]`/`float[4096]`
 function-local stack arrays moved into the pool, sized by real dims), −2 KB
 coherence arrays converted double→float, −3.1 KB PBFDAF process-scratch now
@@ -150,7 +156,7 @@ gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/in
     test_static_aec.c $(find src -name '*.c') \
     ../../audio_common/bin/kiss/libaudio_common.a -lm -o bin/test_static_aec
 ./bin/test_static_aec mic.wav ref.wav
-# → Pool: 537680 bytes (525.1 KB), frames: N   [KISS 16 kHz; per-rate table below]
+# → Pool: 538320 bytes (525.7 KB), frames: N   [KISS 16 kHz; per-rate table below]
 #   PASS: all <2*N> samples byte-equal (static == dynamic)
 ```
 
@@ -177,7 +183,7 @@ heap-only (`aec_create`), so to see the static-path lines a harness must call
 `aec_init` directly and raise the debug level; the format is:
 
 ```text
-# [AEC][t= 0.000s][f=    0][Init] static-mem pool=537680 bytes (525.1 KB) sr=16000 hop=160 preset_q=0.001 cng=0
+# [AEC][t= 0.000s][f=    0][Init] static-mem pool=538320 bytes (525.7 KB) sr=16000 hop=160 preset_q=0.001 cng=0
 # [AEC][t= ...   ][f= ... ][Init] destroy: static path (no free; caller owns pool)
 ```
 
@@ -194,8 +200,8 @@ Measured via `aec_get_mem_size`, KISS backend (host/reference build):
 | Main `pbfdkf` (W, X_buf, P, FFT cfgs, scratch)             | 66.6 KB |
 | Shadow `pbfdaf` (same layout, no Kalman P)                 | 61.5 KB |
 | `fft_wrapper` post FFT (KISS cfgs in-pool)                 | 16.6 KB |
-| `Aec` struct + AEC3 chain backing arrays (state / RES-est / suppression / stationarity / LFS / run + hop scratch, incl. the de-stacked instance scratch) + render FIFO + RSA counters | ~248 KB |
-| **Total (KISS)**                                           | **525.1 KB** (537,680 B) |
+| `Aec` struct + AEC3 chain backing arrays (state / RES-est / suppression / stationarity / LFS / run + hop scratch, incl. the de-stacked instance scratch) + render FIFO + `fifo_zero_ref` + RSA counters | ~248.6 KB |
+| **Total (KISS)**                                           | **525.7 KB** (538,320 B) |
 
 What moved since the previous figure (526.7 KB / 539,328 B): +24.5 KB of
 former function-local stack scratch (13 `float[8192]`/`float[4096]` arrays,
@@ -205,9 +211,15 @@ PBFDAF process-scratch fields are now flag-gated off for the PBFDKF base
 (main filter no longer carries the unused copy); plus small struct deltas
 elsewhere. The vectorization campaign then removed another **24.7 KB**: the
 per-hop `W_all`/`X_buf_all` snapshot buffers are gone (aec3_post now reads
-the filter state directly through its const input pointers).
+the filter state directly through its const input pointers). Most recently,
+the F09 Variant A' streaming-FIFO rewrite (drop-new + consumer catch-up)
+added **+640 B** (16 kHz): `fifo_zero_ref`, an immutable all-zero hop
+(`ALIGN16(hop_size * sizeof(float))`) carved right after `render_fifo` and
+used as the underrun reference, so the capture thread never writes into the
+ring itself. Behaviour-neutral otherwise — `fifo_count` stays in the struct
+(RETIRED, always 0) purely for field-offset/layout stability.
 
-**NE10 backend (embedded build): 521.0 KB (533,552 B) total** — the three
+**NE10 backend (embedded build): 521.7 KB (534,192 B) total** — the three
 R2C/C2R twiddle configs (11,440 B each at nfft=512) are carved from this
 pool since vendored patch P0001, so the figure is the complete memory
 requirement; everything else in the table above is backend-independent.
@@ -220,9 +232,14 @@ byte-equal per rate by `test_static_aec <mic> <ref> <sr>`):
 
 | Rate | KISS | NE10 |
 |---|---:|---:|
-| 8 kHz  (FL 416, 6 part., taps 480)   |   290,352 B |   288,528 B |
-| 16 kHz (FL 832, 6 part., taps 960)   |   537,680 B |   533,552 B |
-| 48 kHz (FL 3072, 7 part., taps 3360) | 1,251,760 B | 1,243,024 B |
+| 8 kHz  (FL 416, 6 part., taps 480)   |   290,672 B |   288,848 B |
+| 16 kHz (FL 832, 6 part., taps 960)   |   538,320 B |   534,192 B |
+| 48 kHz (FL 3072, 7 part., taps 3360) | 1,253,680 B | 1,244,944 B |
+
+(Each rate grew by exactly `ALIGN16(hop_size * sizeof(float))` for
+`fifo_zero_ref` — 320 B @ 8 kHz (hop=80), 640 B @ 16 kHz (hop=160), 1,920 B
+@ 48 kHz (hop=480) — over the pre-F09-Variant-A' figures (290,352 / 537,680 /
+1,251,760 B KISS; 288,528 / 533,552 / 1,243,024 B NE10).)
 
 Delay-estimator coverage is spec-inherited (fixed /4 decimation, 64-sample
 inner blocks, native-sample reporting — mirrors the Python reference, which

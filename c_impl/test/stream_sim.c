@@ -1,14 +1,21 @@
 /* stream_sim.c — streaming API verification (no Python golden needed).
  *
- * Three checks:
+ * Four checks:
  *   1. LOCKSTEP EQUIVALENCE — feeding the same (mic,ref) through aec_process()
  *      vs through aec_analyze_render()+aec_process_capture() in lockstep yields
  *      BYTE-IDENTICAL output. This is the bit-exact-preservation guarantee:
  *      the streaming wrapper does not alter the offline engine.
- *   2. OVERRUN — pushing > fifo_cap renders before any capture fires
- *      AEC_BUF_RENDER_OVERRUN and does not crash / overflow.
+ *   2. OVERRUN (drop-new) — pushing > fifo_cap renders before any capture
+ *      fires AEC_BUF_RENDER_OVERRUN on every render past capacity (exactly
+ *      cap of them succeed, the rest are dropped) and does not crash /
+ *      overflow.
  *   3. UNDERRUN — capturing with an empty FIFO fires AEC_BUF_RENDER_UNDERRUN,
  *      processes (silent render), and normal operation resumes afterwards.
+ *   4. CONSUMER CATCH-UP — once the ring is completely full, the next
+ *      capture skips straight to the freshest buffered hop (instead of
+ *      draining the backlog oldest-first), reports AEC_BUF_RENDER_OVERRUN,
+ *      heals the occupancy to <=1, and the following render+capture pair is
+ *      back to NONE/NONE (F09 Variant A').
  *
  * Build (from c_impl/); the FFT wrapper now lives in the shared audio_common
  * archive:
@@ -90,13 +97,32 @@ int main(void) {
 
     /* ---- Check 2: overrun (push > capacity renders before a capture) ---- */
     aec_reset(&a_str);
-    int overrun_seen = 0;
-    for (int h = 0; h < 100; ++h) {           /* fifo_cap is 64 */
+    /* fifo_cap is 32 @ 16 kHz (AEC_STREAM_FIFO_MS=320 / hop=10 ms, rounded up
+     * to the next power of two by aec_derive_dims -- already a power of two
+     * at this rate, so no growth). F09 Variant A' is drop-new: the ring
+     * fills after the first 32 renders (fifo_write - fifo_read reaches cap
+     * with zero capture calls to drain it), and every render after that is
+     * dropped, so pushing 100 renders with no intervening capture must
+     * report exactly 100-32=68 overruns -- not just "at least one". */
+    int overrun_count = 0;
+    for (int h = 0; h < 100; ++h) {
         gen_signal(mic, ref, hop);
-        if (aec_analyze_render(&a_str, ref) == AEC_BUF_RENDER_OVERRUN)
-            overrun_seen = 1;
+        AecBufferingEvent ev = aec_analyze_render(&a_str, ref);
+        if (h < 32) {
+            if (ev != AEC_BUF_NONE) {
+                printf("FAIL: overrun count — render %d expected NONE, got %d\n", h, ev);
+                return 1;
+            }
+        } else {
+            if (ev != AEC_BUF_RENDER_OVERRUN) {
+                printf("FAIL: overrun count — render %d expected OVERRUN, got %d\n", h, ev);
+                return 1;
+            }
+            overrun_count++;
+        }
     }
-    printf("%s: overrun detected after > capacity renders\n",
+    int overrun_seen = (overrun_count == 68);
+    printf("%s: overrun count exactly 68/100 (first 32 NONE, then 68 OVERRUN)\n",
            overrun_seen ? "PASS" : "FAIL");
     if (!overrun_seen) return 1;
 
@@ -113,6 +139,45 @@ int main(void) {
     printf("%s: underrun detected on empty FIFO; %s: recovered to NONE\n",
            underrun_ok ? "PASS" : "FAIL", recovered ? "PASS" : "FAIL");
     if (!underrun_ok || !recovered) return 1;
+
+    /* ---- Check 4: consumer catch-up (F09 Variant A') ---- */
+    aec_reset(&a_str);
+    /* Fill the ring to exactly capacity with no intervening captures --
+     * every one of these must report NONE (see Check 2's byte-exact count
+     * of the first `cap` renders). */
+    for (int h = 0; h < a_str.fifo_cap_hops; ++h) {
+        gen_signal(mic, ref, hop);
+        AecBufferingEvent ev = aec_analyze_render(&a_str, ref);
+        if (ev != AEC_BUF_NONE) {
+            printf("FAIL: catch-up setup — render %d expected NONE, got %d\n", h, ev);
+            return 1;
+        }
+    }
+    /* Single-threaded peek (no atomics needed -- this is the test harness,
+     * not a second concurrent actor): occupancy must read exactly `cap`. */
+    unsigned occ_before = *(unsigned*)&a_str.fifo_write - *(unsigned*)&a_str.fifo_read;
+    if (occ_before != (unsigned)a_str.fifo_cap_hops) {
+        printf("FAIL: catch-up setup — ring not full (occupancy=%u, cap=%d)\n",
+               occ_before, a_str.fifo_cap_hops);
+        return 1;
+    }
+    AecBufferingEvent catchup_ev = aec_process_capture(&a_str, mic, out_str);
+    int catchup_ok = (catchup_ev == AEC_BUF_RENDER_OVERRUN);
+    unsigned occ_after = *(unsigned*)&a_str.fifo_write - *(unsigned*)&a_str.fifo_read;
+    int healed = (occ_after <= 1u);
+    printf("%s: catch-up capture reports OVERRUN; %s: occupancy heals to <=1 (occ=%u)\n",
+           catchup_ok ? "PASS" : "FAIL", healed ? "PASS" : "FAIL", occ_after);
+    if (!catchup_ok || !healed) return 1;
+
+    /* The very next render+capture pair must be back to a clean NONE/NONE
+     * lockstep -- the catch-up must not leave any lingering skew. */
+    gen_signal(mic, ref, hop);
+    AecBufferingEvent rev2 = aec_analyze_render(&a_str, ref);
+    AecBufferingEvent cev2 = aec_process_capture(&a_str, mic, out_str);
+    int recovered2 = (rev2 == AEC_BUF_NONE && cev2 == AEC_BUF_NONE);
+    printf("%s: post-catch-up render+capture pair is NONE/NONE\n",
+           recovered2 ? "PASS" : "FAIL");
+    if (!recovered2) return 1;
 
     aec_destroy(&a_off); aec_destroy(&a_str);
     free(mic); free(ref); free(out_off); free(out_str);
