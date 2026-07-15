@@ -13,15 +13,18 @@
  *
  * Build (standalone, from c_impl/). NOTE: neither this repo's Makefile nor
  * test_static_aec.c (c_impl/test_static_aec.c) is actually wired into a
- * `make` target today — despite a stale comment in test_static_aec.c
- * claiming otherwise, `grep -n test_static_aec Makefile` finds nothing, and
- * STATIC_MEMORY.md documents the manual gcc recipe below as the real way to
- * build it. This test mirrors that same manual recipe:
+ * `make` target today -- `grep -n test_static_aec Makefile` finds nothing,
+ * and STATIC_MEMORY.md documents the manual gcc recipe below as the real
+ * way to build it. (test_static_aec.c used to carry a stale comment
+ * claiming a top-level `make` target wired this in; that comment has since
+ * been removed, re-review round-3 R04 -- this note's own description of the
+ * actual (unwired) state was already correct and is unchanged.) This test
+ * mirrors that same manual recipe:
  *   make -C ../../audio_common BACKEND=kiss lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audio_common/include \
  *       test/test_config_validation.c $(find src -name '*.c') \
- *       ../../audio_common/bin/kiss/libaudio_common.a -lm \
+ *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
  *       -o bin/test_config_validation
  * Run:
  *   ./bin/test_config_validation

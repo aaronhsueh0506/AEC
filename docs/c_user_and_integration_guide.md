@@ -14,11 +14,16 @@ speaker, conferencing, automotive).
 
 ```bash
 cd c_impl/
-make            # → bin/aec_wav (CLI binary)
-make lib        # → bin/libaec.a (static library)
+make            # → bin/<backend>-<config-hash>/aec_wav (CLI binary)
+make lib        # → bin/<backend>-<config-hash>/libaec.a (static library)
 make debug      # build with -g -DAEC_DEBUG
 make clean
 ```
+
+Artifacts land in a config-hashed `bin/<backend>-<config-hash>/` directory
+(run `make print-bin-dir` with the same flags to get the exact path, or
+`make publish` for a stable `dist/<backend>/current/` handoff path); the
+example invocations below elide this prefix for readability.
 
 Required compile flags (already in Makefile):
 

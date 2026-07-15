@@ -55,7 +55,7 @@
  *   make -C ../../audio_common BACKEND=kiss lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
  *       $(find src -name '*.c') test/parity_aec_e2e.c \
- *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_e2e
+ *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o /tmp/p_e2e
  *   python3 ../python/diag/gen_aec_e2e_golden.py /tmp/aec_e2e_golden.bin balanced --sr 16000
  *   /tmp/p_e2e /tmp/aec_e2e_golden.bin [preset]      # preset: balanced|mild|aggressive
  *   # 8k/48k (M5): --sr 8000 / --sr 48000 on the generator; this checker

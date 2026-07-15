@@ -21,10 +21,14 @@ AEC 用於 full-duplex hands-free 場景，處理一組同步的單聲道訊號�
 ```bash
 cd c_impl
 
-make            # bin/aec_wav
-make lib        # bin/libaec.a
+make            # bin/<backend>-<config-hash>/aec_wav
+make lib        # bin/<backend>-<config-hash>/libaec.a
 make debug      # 加入 -g -DAEC_DEBUG
 ```
+
+輸出檔案位於依 backend + 編譯參數雜湊命名的 `bin/<backend>-<config-hash>/` 目錄
+（用 `make print-bin-dir`，帶上與建置相同的參數，取得確切路徑；或 `make publish`
+產出穩定的 `dist/<backend>/current/` 交付路徑）。以下範例指令為簡潔起見省略此前綴。
 
 預設使用 host/reference 組態：`malloc` + KISS FFT backend（`make`，`BACKEND=kiss` 為預設值）。ARM 平台（embedded 部署）可改用 caller-pool + NE10：
 

@@ -6,8 +6,10 @@
  *   make -C ../../audio_common BACKEND=kiss lib
  *   gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/include \
  *       test_static_aec.c $(find src -name '*.c') \
- *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o bin/test_static_aec
- * (Or just `make` from c_impl/ — the top-level Makefile wires this for you.)
+ *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o bin/test_static_aec
+ * (This test is NOT wired into any `make` target -- the manual recipe above
+ * is the real way to build it; see STATIC_MEMORY.md and
+ * test/test_config_validation.c's own build note, re-review round-3 R04.)
  * Run:
  *   ./bin/test_static_aec mic.wav ref.wav [sample_rate]
  *

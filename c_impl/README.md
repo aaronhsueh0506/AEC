@@ -23,10 +23,17 @@ c_impl/
 ## Build
 
 ```bash
-make            # → bin/aec_wav (CLI binary)
-make lib        # → bin/libaec.a (static library)
+make            # → bin/<backend>-<config-hash>/aec_wav (CLI binary)
+make lib        # → bin/<backend>-<config-hash>/libaec.a (static library)
 make clean
 ```
+
+Artifacts land in a config-hashed `bin/<backend>-<config-hash>/` directory
+(switching `BACKEND`/`EXTRA_CFLAGS`/`WERROR` always lands in a fresh one
+automatically — no stale-object risk, no manual clean needed). Run `make
+print-bin-dir` (same flags as your build) to get the exact path, or `make
+publish` to copy this build's artifacts to a stable `dist/<backend>/current/`
+handoff path.
 
 Compile flags (already in Makefile): `-O2 -ffp-contract=off -I include
 -I example`. `-ffp-contract=off` is **required** (no FMA fusion — load-bearing

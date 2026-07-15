@@ -58,7 +58,7 @@
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -pthread \
  *       -Iinclude -Iexample -I../../audio_common/include \
  *       test/test_fifo_spsc.c $(find src -name '*.c') \
- *       ../../audio_common/bin/kiss/libaudio_common.a -lm \
+ *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
  *       -o bin/test_fifo_spsc
  * Run:
  *   ./bin/test_fifo_spsc
@@ -69,7 +69,7 @@
  *   gcc -Wall -Wextra -O1 -ffp-contract=off -std=gnu99 -pthread \
  *       -fsanitize=thread -Iinclude -Iexample -I../../audio_common/include \
  *       test/test_fifo_spsc.c $(find src -name '*.c') \
- *       ../../audio_common/bin/kiss/libaudio_common.a -lm -fsanitize=thread \
+ *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -fsanitize=thread \
  *       -o bin/test_fifo_spsc_tsan
  *   ./bin/test_fifo_spsc_tsan
  */

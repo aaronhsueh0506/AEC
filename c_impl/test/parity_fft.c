@@ -17,7 +17,7 @@
  *       -I<path-to-repo>/c_impl/include \
  *       -I<path-to-audio_common>/include \
  *       <path-to-repo>/c_impl/test/parity_fft.c \
- *       <path-to-audio_common>/bin/kiss/libaudio_common.a \
+ *       $(make -s -C <path-to-audio_common> BACKEND=kiss print-lib-path) \
  *       -lm -o /tmp/p_fft
  *   python3 .../python/diag/gen_fft_golden.py /tmp/fft_golden.bin
  *   /tmp/p_fft /tmp/fft_golden.bin

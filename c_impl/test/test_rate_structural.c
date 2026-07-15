@@ -35,7 +35,7 @@
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audio_common/include \
  *       test/test_rate_structural.c $(find src -name '*.c') \
- *       ../../audio_common/bin/kiss/libaudio_common.a -lm \
+ *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
  *       -o bin/test_rate_structural
  * Run:
  *   ./bin/test_rate_structural

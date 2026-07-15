@@ -17,7 +17,7 @@
  *   make -C ../../audio_common BACKEND=kiss lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
  *       src/linear_filter_output.c test/parity_linear_filter_select.c \
- *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_lfs
+ *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o /tmp/p_lfs
  *   python3 python/diag/gen_linear_filter_select_golden.py /tmp/lfs_golden.bin
  *   /tmp/p_lfs /tmp/lfs_golden.bin
  */

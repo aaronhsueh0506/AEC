@@ -19,15 +19,24 @@
  *       -Iinclude -Iexample -I../../audio_common/include \
  *       -I../../audio_common/test \
  *       test/test_zero_heap_aec.c $(find src -name '*.c') \
- *       ../../audio_common/bin/<backend>/libaudio_common.a \
- *       -L../../audio_common/bin/<backend> -lzero_heap_hook \
- *       -Wl,-rpath,../../audio_common/bin/<backend> \
+ *       "$$(make -s -C ../../audio_common BACKEND=<b> print-lib-path)" \
+ *       -L"$$(make -s -C ../../audio_common BACKEND=<b> print-bin-dir)" -lzero_heap_hook \
+ *       -Wl,-rpath,"$$(make -s -C ../../audio_common BACKEND=<b> print-bin-dir)" \
  *       -lm -o /tmp/tzha
  *   (cd ../../audio_common && /tmp/tzha)
  * (-fno-builtin: clang otherwise deletes unobserved alloc/free pairs at -O2
- * and the hook sanity-check would pass vacuously. Run with audio_common as
- * the cwd: the hook dylib's install name is the relative path it was built
- * at, bin/<backend>/libzero_heap_hook.dylib.)
+ * and the hook sanity-check would pass vacuously. bin/<backend>-<config-hash>/
+ * is CFG_SIG-keyed now -- print-bin-dir/print-lib-path resolve the exact path
+ * for whatever flags this build command used, same as `make BACKEND=<b>
+ * test_zero_heap` used to build the hook dylib. Still run with audio_common
+ * as the cwd, same as before this path became CFG_SIG-keyed: the hook
+ * dylib's install name (LC_ID_DYLIB) is the literal relative path it was
+ * built at -- bin/<backend>-<config-hash>/libzero_heap_hook.dylib -- which
+ * dyld resolves relative to the PROCESS'S CWD at load time, not relative to
+ * the rpath entry above (the rpath only helps for @rpath/-prefixed
+ * references, which this dylib's plain relative install name is not); the
+ * -L/-rpath flags above only matter at LINK time, to find the .dylib to
+ * link against in the first place.)
  */
 #include "aec.h"
 #include "zero_heap_hook.h"

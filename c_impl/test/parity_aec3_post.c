@@ -25,7 +25,7 @@
  *       <path-to-repo>/c_impl/src/aec3_post.c \
  *       <path-to-repo>/c_impl/src/reverb_model.c \
  *       <path-to-repo>/c_impl/test/parity_aec3_post.c \
- *       <path-to-audio_common>/bin/kiss/libaudio_common.a \
+ *       $(make -s -C <path-to-audio_common> BACKEND=kiss print-lib-path) \
  *       -lm -o /tmp/p_post
  *   python3 .../python/diag/gen_aec3_post_golden.py /tmp/aec3_post_golden.bin
  *   /tmp/p_post /tmp/aec3_post_golden.bin

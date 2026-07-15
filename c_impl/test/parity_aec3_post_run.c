@@ -25,7 +25,7 @@
  *       .../suppression_gain.c .../stationarity_estimator.c \
  *       .../linear_filter_output.c .../filter_state_bridge.c \
  *       .../test/parity_aec3_post_run.c \
- *       .../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_post_run
+ *       $(make -s -C .../audio_common BACKEND=kiss print-lib-path) -lm -o /tmp/p_post_run
  *   python3 .../python/diag/gen_aec3_post_run_golden.py /tmp/aec3_post_run_golden.bin
  *   /tmp/p_post_run /tmp/aec3_post_run_golden.bin
  */

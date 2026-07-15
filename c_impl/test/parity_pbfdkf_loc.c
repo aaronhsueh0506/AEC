@@ -18,7 +18,7 @@
  *   make -C ../../audio_common BACKEND=kiss lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
  *       src/pbfdkf.c src/aec3_scale.c test/parity_pbfdkf_loc.c \
- *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_loc
+ *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o /tmp/p_loc
  *   /tmp/p_loc /tmp/pbfdkf_golden.bin
  */
 #include "pbfdkf.h"

@@ -3,6 +3,7 @@
 *.a
 bin/
 obj/
+dist/
 
 # Python
 __pycache__/

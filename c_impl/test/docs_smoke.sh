@@ -115,6 +115,13 @@ FOOTER_EOF
 echo "== docs_smoke: building audio_common (BACKEND=$BACKEND) =="
 make -C "$AC_DIR" BACKEND="$BACKEND" lib
 
+# Resolve the exact archive path for THIS build (round-3 review B01:
+# audio_common's bin/ is now keyed bin/<backend>-<config-hash>/, not a flat
+# bin/$BACKEND/ -- print-lib-path is queried with the SAME BACKEND= this
+# script's own `make -C "$AC_DIR" BACKEND="$BACKEND" lib` line just used, so
+# the two can never point at different configs).
+AC_LIB_PATH="$(make -s -C "$AC_DIR" BACKEND="$BACKEND" print-lib-path)"
+
 echo "== docs_smoke: compiling extracted sample against aec.h + libaudio_common ($BACKEND) =="
 EXTRA_LDFLAGS=""
 if [ "$BACKEND" = "ne10" ]; then
@@ -124,7 +131,7 @@ fi
 gcc -O2 -ffp-contract=off -std=gnu99 \
     -I"$C_IMPL_DIR/include" -I"$C_IMPL_DIR/example" -I"$AC_DIR/include" \
     "$WORK/docs_smoke_main.c" $(find "$C_IMPL_DIR/src" -name '*.c') \
-    "$AC_DIR/bin/$BACKEND/libaudio_common.a" -lm $EXTRA_LDFLAGS \
+    "$AC_LIB_PATH" -lm $EXTRA_LDFLAGS \
     -o "$WORK/docs_smoke_bin"
 
 echo "== docs_smoke: running (BACKEND=$BACKEND) =="

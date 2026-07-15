@@ -154,16 +154,21 @@ top-level `aec_get_mem_size` / `aec_init`.
 make -C ../../audio_common BACKEND=kiss lib
 gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/include \
     test_static_aec.c $(find src -name '*.c') \
-    ../../audio_common/bin/kiss/libaudio_common.a -lm -o bin/test_static_aec
+    $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o bin/test_static_aec
 ./bin/test_static_aec mic.wav ref.wav
 # → Pool: 538320 bytes (525.7 KB), frames: N   [KISS 16 kHz; per-rate table below]
 #   PASS: all <2*N> samples byte-equal (static == dynamic)
 ```
 
-(Or just `make` from `c_impl/` — the top-level Makefile builds the
-`audio_common` archive as an order-only prereq automatically. Build against
-the NE10 archive — `make BACKEND=ne10 lib` in `audio_common/` — to reproduce
-the NE10 pool figure instead.)
+(Or just `make` from `c_impl/` — the top-level Makefile resolves and builds
+the `audio_common` archive automatically as a real, mtime-tracked
+prerequisite of `aec_wav`, not just an order-only trigger; see the
+Makefile's two-phase `AC_LIB` resolution comment. Artifacts land in
+`bin/<backend>-<config-hash>/` — run `make print-bin-dir` (same flags as
+your build) to locate them, or `make publish` for a stable
+`dist/<backend>/current/` handoff path. Build against the NE10 archive —
+`make BACKEND=ne10 lib` in `audio_common/` — to reproduce the NE10 pool
+figure instead.)
 
 The two paths produce **bit-identical output** across all presets and all three
 scenarios (FS / DT / NE), on each backend independently (NE10 vs KISS output is

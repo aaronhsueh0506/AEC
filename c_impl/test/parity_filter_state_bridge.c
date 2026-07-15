@@ -15,7 +15,7 @@
  *   make -C ../../audio_common BACKEND=kiss lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
  *       src/filter_state_bridge.c test/parity_filter_state_bridge.c \
- *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_fsb
+ *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o /tmp/p_fsb
  *   python3 ../python/diag/gen_filter_state_bridge_golden.py /tmp/fsb_golden.bin
  *   /tmp/p_fsb /tmp/fsb_golden.bin
  */

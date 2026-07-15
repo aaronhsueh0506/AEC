@@ -22,7 +22,7 @@
  *   make -C ../../audio_common BACKEND=kiss lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
  *       src/pbfdkf.c src/aec3_scale.c test/parity_pbfdkf.c \
- *       ../../audio_common/bin/kiss/libaudio_common.a -lm -o /tmp/p_pbfdkf
+ *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o /tmp/p_pbfdkf
  *   python3 python/diag/gen_pbfdkf_golden.py /tmp/pbfdkf_golden.bin
  *   /tmp/p_pbfdkf /tmp/pbfdkf_golden.bin
  */
