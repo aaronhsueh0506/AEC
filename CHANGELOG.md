@@ -44,6 +44,27 @@ Remediation of the 2026-07-15 external re-review. AEC-side items:
   unchanged — offline `aec_process()` untouched). Pool +`ALIGN16(hop·4)`
   (16 k: KISS 538,320 B / NE10 534,192 B; per-rate table in
   STATIC_MEMORY.md).
+- **Rate-relative HPF validation (R08)**: `highpass_cutoff_hz` now mirrors
+  audio_common's `hpf_params_valid` exactly (isfinite / >0 / <0.45·sr) when
+  `enable_highpass` is set — {8 kHz, 4 kHz} used to pass the flat [0, 20000]
+  bound and then silently construct with no mic-path HPF (`hpf_init` NULL
+  was never checked; `aec_carve` now fails construction on it).
+  test_config_validation 82→126 checks.
+- **SIMD NaN sweep is a hard gate (R07)**: the soft-warn path in
+  `simd_selftest_aec.c` is a classified assertion now — every element must
+  be bit-equal or both-NaN (payload unspecified: multi-NaN reduction
+  tie-breaks are out of contract); anything else exits non-zero. All 60
+  historical soft mismatches (265 elements) classify as both-NaN; no kernel
+  needed fixing. Special-value contract table + pinned selftest values live
+  in audio_common (`fast_math.h`).
+- **Build hygiene (R10)**: object dirs are hash-keyed
+  (`obj/<backend>-<cksum-sig>`) — no parse-time wipe, `make -n` is
+  side-effect-free, different-flag builds coexist; cksum replaces shasum.
+- The upstream WAV-writer hardening (audio_common, R01) is this campaign's
+  only deliberate byte-change: float-WAV headers gain the correct outer
+  RIFF size. New 60-case aggregates: KISS `652a2152…` / NE10 `09125432…`
+  (payload verified byte-identical per file; PCM16/pipeline/NR outputs
+  unchanged).
 
 ## [Unreleased] — 2026-07-15 — external-review remediation campaign (F01–F20 all closed; 16 kHz byte-identical throughout except one flagged commit)
 
