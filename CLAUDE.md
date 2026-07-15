@@ -101,14 +101,12 @@ current/` path after `make publish`:
 
 ```bash
 cd c_impl && make clean && make   # BEFORE editing
-ac="$(make -s -C ../../audio_common BACKEND=kiss print-lib-path)"
-bin_before="$(make -s print-bin-dir AC_LIB="$ac")"
+bin_before="$(make -s print-bin-dir)"
 mkdir -p /tmp/cbe_before /tmp/cbe_after
 for f in <stems>; do "$bin_before/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "/tmp/cbe_before/${f}.wav" --preset balanced --cng; done
 # ... make edits ...
 cd c_impl && make clean && make   # AFTER editing
-ac="$(make -s -C ../../audio_common BACKEND=kiss print-lib-path)"
-bin_after="$(make -s print-bin-dir AC_LIB="$ac")"
+bin_after="$(make -s print-bin-dir)"
 for f in <stems>; do "$bin_after/aec_wav" "wav/${f}_mic.wav" "wav/${f}_lpb.wav" "/tmp/cbe_after/${f}.wav" --preset balanced --cng; done
 for f in /tmp/cbe_after/*.wav; do \
   cmp -s "$f" "/tmp/cbe_before/$(basename "$f")" \
@@ -145,7 +143,7 @@ make                  # debug: `make debug` (adds -g -DAEC_DEBUG)
 # artifacts land in bin/<backend>-<config-hash>/ (round-3 review B01);
 # `make print-bin-dir` (same flags) resolves the exact path, or use
 # `make publish` for a stable dist/<backend>/current/ path:
-bin="$(make -s print-bin-dir AC_LIB="$(make -s -C ../../audio_common BACKEND=kiss print-lib-path)")"
+bin="$(make -s print-bin-dir)"
 "$bin/aec_wav" mic.wav ref.wav out.wav --preset balanced --cng
 "$bin/aec_wav" mic.wav ref.wav out.wav --debug-level 2 --debug-log /tmp/aec.log
 ```

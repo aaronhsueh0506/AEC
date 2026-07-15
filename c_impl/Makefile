@@ -279,18 +279,26 @@ $(BENCH_TARGET): $(OBJS) $(BENCH_OBJS) $(AC_LIB) | _cfg_guard
 endif
 
 # --- Query targets (round-3 review B01) -------------------------------------
-# These report THIS invocation's own build identity (AEC's own flags; empty
-# AC_PRODUCER_SIG unless AC_LIB was explicitly passed in) -- they never shell
-# out to audio_common (consistent with `lib`/`selftest`/`clean` above, and
-# fast/side-effect-free even when audio_common isn't buildable). To get the
-# exact path `make all` would produce (which DOES fold in the resolved
-# producer's identity), pass AC_LIB explicitly, matching phase 1's own
-# protocol:
-#   ac=$$(make -s -C ../../audio_common BACKEND=$$B print-lib-path)
-#   make -s BACKEND=$$B print-bin-dir AC_LIB="$$ac"
+# print-obj-dir / print-lib-path report THIS invocation's own build identity
+# (AEC's own flags; empty AC_PRODUCER_SIG unless AC_LIB was passed in) -- they
+# never shell out to audio_common, matching where a bare `make lib` /
+# `make selftest` actually places its artifacts.
+# print-bin-dir is different: the binaries (`aec_wav`, `bench_rtf`) only ever
+# exist in the RESOLVED-producer directory `make all`/`make bench` deliver
+# into, so a bare `make -s print-bin-dir` dispatches through the same phase-1
+# resolution as `all`/`bench` and prints that exact directory. (Passing
+# AC_LIB= explicitly skips the extra query sub-make, same protocol as
+# phase 1.)
 .PHONY: print-bin-dir print-obj-dir print-lib-path
+ifeq ($(AC_LIB),)
+print-bin-dir:
+	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
+	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR))" >&2; exit 1; }; \
+	 $(MAKE) -s --no-print-directory print-bin-dir AC_LIB="$$ac"
+else
 print-bin-dir:
 	@echo $(abspath $(BIN_DIR))
+endif
 print-obj-dir:
 	@echo $(abspath $(OBJ_DIR))
 print-lib-path:
