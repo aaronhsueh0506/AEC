@@ -16,6 +16,32 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-07-15 — round-4 remediation (build-system hardening; no algorithm change)
+
+Build-system-only follow-up to the round-3 campaign — all four P1 findings
+of the round-4 review closed; renders byte-identical (60-case anchors
+unchanged):
+
+- **Command-line override rejection (P1-1)**: `make CFLAGS=...` (likewise
+  `CXXFLAGS`/`CPPFLAGS`/`LDFLAGS`/`FP_POLICY`) is rejected at parse time —
+  GNU make silently drops the Makefile's own `+=`/`:=` appends for a
+  command-line-set variable, which used to strip `-ffp-contract=off` and
+  `-DAEC_NO_STDIO` while still building. `EXTRA_CFLAGS`/`EXTRA_LDFLAGS`
+  remain the supported hooks.
+- **Full-toolchain discipline (P1-2)**: hardcoded ne10 `-lc++` removed
+  (C++ runtime comes from the `LINK=$(CXX)` driver; GNU/Linux uses
+  libstdc++ automatically); CC/CXX `-dumpmachine` coherence guard for
+  `BACKEND=ne10` (a partial cross-toolchain override is now a hard error;
+  `TOOLCHAIN_CHECK=0` opt-out participates in the config signature).
+- **Source-set identity + fresh archives (P1-4)**: the sorted source list
+  is part of `CFG_SIG`; `libaec.a` is always built fresh (`$@.tmp` +
+  `mv -f`) so a removed source can never leave a stale archive member.
+- **publish v3 (P2)**: content-addressed immutable releases
+  `dist/<backend>/<cfg_sig>-<content12>/`, idempotent republish, `LINK`
+  in the signature, atomic `current` swap (GNU `mv -fT` + BSD fallback —
+  fixes a round-3-latent republish bug where `mv` followed the existing
+  `current` symlink into the release dir).
+
 ## [Unreleased] — 2026-07-15 — round-3 remediation (B01–B09; build isolation + no-stdio + FP policy)
 
 AEC-side items from the round-3 review campaign:
