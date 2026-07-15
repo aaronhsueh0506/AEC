@@ -8,7 +8,18 @@ LDFLAGS = -lm
 
 SRC_DIR     = src
 EXAMPLE_DIR = example
-OBJ_DIR     = obj
+# Hash-keyed object dir: obj/<backend>-<cfg-sig>/ (CFG_SIG is computed
+# further below, once BACKEND/WERROR/CFLAGS are all resolved -- see that
+# comment for why OBJ_DIR must not be referenced by any rule before then).
+# Every distinct (BACKEND, CFLAGS, EXTRA_CFLAGS, WERROR) combination gets
+# its own directory automatically, so nothing is ever wiped to "switch"
+# between them and two differently-configured builds can run concurrently
+# in this same tree. OBJ_ROOT is the whole obj/ tree (every config) -- used
+# by `clean` to nuke everything, not just the current config's subdirectory.
+# BIN_DIR stays flat (not per-backend/config): the final binary is a
+# last-write-wins whole, same as before.
+OBJ_ROOT    = obj
+OBJ_DIR     = $(OBJ_ROOT)/$(BACKEND)-$(CFG_SIG)
 BIN_DIR     = bin
 
 # Shared DSP layer (FFT backend + fast_math) lives in audio_common, vendored
@@ -40,35 +51,42 @@ ifeq ($(WERROR),1)
   CFLAGS += -Werror
 endif
 
-# --- Build-configuration stamp (F12 build hygiene) --------------------------
-# obj/ is a single flat directory shared across every BACKEND/EXTRA_CFLAGS
-# combination, so switching either on an already-built tree used to silently
-# keep stale .o files around (they don't encode which flags produced them).
-# CFG_SIG hashes the exact compiler invocation that will produce every object
-# in this build.
+# --- Hash-keyed object directory (build hygiene) ----------------------------
+# obj/ used to be a single flat directory shared across every BACKEND/
+# EXTRA_CFLAGS combination, so switching either on an already-built tree
+# used to silently keep stale .o files around (they don't encode which
+# flags produced them). CFG_SIG hashes the exact compiler invocation that
+# will produce every object in this build, and OBJ_DIR (see above) embeds
+# CFG_SIG directly in its path -- every distinct config gets its own
+# directory, automatically.
 #
-# This check runs at PARSE time (via $(shell ...), not as a build-rule
-# recipe): tried an order-only-prerequisite version first (a stamp FILE that
-# a rule creates, referenced via `obj/%.o: %.c | $(CFG_STAMP)`), but that is
-# racy -- verified empirically. When N objects share one order-only
-# prerequisite whose recipe wipes the directory they all live in, GNU Make
-# decides "is object #1 out of date?" using the prerequisite tree it already
-# resolved, and for at least one sibling object that decision is finalized
-# before the shared prerequisite's wipe recipe actually runs, so that object
-# silently keeps its (about to be deleted) stale .o and is never recompiled.
-# Doing the compare-and-wipe unconditionally while the Makefile is being
-# read sidesteps the whole issue: by the time `make` starts asking "is any
-# target out of date", obj/ has already been wiped (if needed) or left
-# alone (if not) -- no build-graph race is possible.
-CFG_SIG        := $(shell printf '%s' "$(CC) $(CFLAGS) $(EXTRA_CFLAGS) BACKEND=$(BACKEND) WERROR=$(WERROR)" | shasum -a 256 | cut -c1-12)
-CFG_STAMP_FILE := $(OBJ_DIR)/.cfg_stamp
-CFG_LAST_SIG   := $(shell test -f $(CFG_STAMP_FILE) && cat $(CFG_STAMP_FILE))
-ifneq ($(CFG_SIG),$(CFG_LAST_SIG))
-$(info AEC c_impl: build config changed -- wiping $(OBJ_DIR) for a full rebuild)
-$(shell rm -rf $(OBJ_DIR))
-$(shell mkdir -p $(OBJ_DIR))
-$(shell echo $(CFG_SIG) > $(CFG_STAMP_FILE))
-endif
+# This MUST be defined here, before any rule below mentions $(OBJ_DIR) (or
+# anything derived from it, e.g. $(OBJS)/$(EXAMPLE_OBJS)/$(BENCH_OBJS) used
+# in a prerequisite list): GNU Make expands a rule's target/prerequisite
+# list IMMEDIATELY when that line is parsed, not deferred like a recipe
+# body, so a forward reference would silently resolve using CFG_SIG's value
+# at THAT point in the file (empty, if this line hadn't run yet) -- verified
+# empirically with a minimal reproduction.
+#
+# There is no parse-time comparison and nothing is ever deleted to "detect"
+# a config change (the previous scheme did a $(shell rm -rf ...)/$(shell
+# mkdir ...)/$(shell echo ...) unconditionally while the Makefile was being
+# read, which mutated the filesystem even under `make -n` and raced two
+# concurrent builds with different flags against each other's shared obj/
+# directory). Under this scheme `make -n` touches nothing on disk (CFG_SIG
+# is a pure string hash) and two differently-configured builds (e.g.
+# `make BACKEND=kiss -j4 & make BACKEND=ne10 -j4 & wait`) can run
+# concurrently in this same tree: each lands in its own obj/<backend>-<sig>/
+# directory and never touches the other's objects. OBJ_DIR's own creation
+# happens lazily via the order-only prerequisite on the pattern rules below
+# ($(OBJ_DIR)/%.o: ... | $(OBJ_DIR)), not at Makefile-parse time.
+#
+# cksum (POSIX -- present on macOS/BSD/GNU/busybox, unlike shasum which is a
+# GNU coreutils extension and may be absent from slim embedded build images)
+# computes the hash. On stdin it prints "<checksum> <byte-count>" with no
+# filename field (verified on macOS's BSD cksum), so `cut -d' ' -f1` isolates
+# just the checksum.
+CFG_SIG := $(shell printf '%s' "$(CC) $(CFLAGS) $(EXTRA_CFLAGS) BACKEND=$(BACKEND) WERROR=$(WERROR)" | cksum | cut -d' ' -f1)
 
 # Algorithm sources (auto-detected — drop a new file in src/ to add it).
 # fft_wrapper*.c no longer live here; they're part of the audio_common archive
@@ -95,37 +113,46 @@ BENCH_TARGET = $(BIN_DIR)/bench_rtf
 SELFTEST_SRC    = $(TEST_DIR)/simd_selftest_aec.c
 SELFTEST_TARGET = $(BIN_DIR)/simd_selftest_aec
 
-all: dirs $(TARGET)
+all: $(TARGET)
 
-dirs:
-	@mkdir -p $(OBJ_DIR) $(BIN_DIR)
+# $(OBJ_DIR)/$(BIN_DIR) creation is an order-only prerequisite on the actual
+# compile/link rules below (not a $(shell mkdir) at parse time, and not a
+# plain prerequisite that could race a parallel compile under `make -j`) --
+# every rule that writes into one of these directories depends on it
+# existing first, and mkdir -p is idempotent if two rules' order-only
+# prereqs resolve concurrently. `dirs` is kept as a convenience alias for
+# any caller used to invoking it directly.
+$(OBJ_DIR) $(BIN_DIR):
+	@mkdir -p $@
+
+dirs: $(OBJ_DIR) $(BIN_DIR)
 
 # Order-only prereq: make sure the shared archive is built (for the selected
 # BACKEND) before anything links against it.
 audio_common_lib:
 	$(MAKE) -C $(AC_DIR) BACKEND=$(BACKEND) lib
 
-$(TARGET): $(OBJS) $(EXAMPLE_OBJS) | audio_common_lib
+$(TARGET): $(OBJS) $(EXAMPLE_OBJS) | audio_common_lib $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c
+$(OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(OBJ_DIR)/%.o: $(TEST_DIR)/%.c
+$(OBJ_DIR)/%.o: $(TEST_DIR)/%.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-lib: dirs $(OBJS) | audio_common_lib
+lib: $(OBJS) | audio_common_lib $(BIN_DIR)
 	ar rcs $(LIB_TARGET) $(OBJS)
 
 # Per-module RTF (real-time-factor) timing harness — no Python/corpus needed.
 # Linked the same way as bin/aec_wav (same algorithm objects + audio_common
 # archive), so it respects BACKEND and EXTRA_CFLAGS identically.
-bench: dirs $(BENCH_TARGET)
+bench: $(BENCH_TARGET)
 
-$(BENCH_TARGET): $(OBJS) $(BENCH_OBJS) | audio_common_lib
+$(BENCH_TARGET): $(OBJS) $(BENCH_OBJS) | audio_common_lib $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # Bit-exactness + microbench self-test for the AEC-only kernel split
@@ -133,10 +160,10 @@ $(BENCH_TARGET): $(OBJS) $(BENCH_OBJS) | audio_common_lib
 # only (no audio_common archive, no audio_common_lib prereq) -- the header
 # is self-contained aside from transitively pulling in simd_kernels.h via
 # CFLAGS' -I$(AC_DIR)/include. Builds then runs immediately.
-selftest: dirs $(SELFTEST_TARGET)
+selftest: $(SELFTEST_TARGET)
 	./$(SELFTEST_TARGET)
 
-$(SELFTEST_TARGET): $(SELFTEST_SRC)
+$(SELFTEST_TARGET): $(SELFTEST_SRC) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $< -lm
 
 # Build Configuration Flags (pass via EXTRA_CFLAGS)
@@ -146,10 +173,10 @@ $(SELFTEST_TARGET): $(SELFTEST_SRC)
 #   Example: make EXTRA_CFLAGS="-DUSE_STANDARD_MATH"
 
 debug: CFLAGS += -g -DAEC_DEBUG
-debug: dirs $(TARGET)
+debug: $(TARGET)
 
 clean:
-	rm -rf $(OBJ_DIR) $(BIN_DIR)
+	rm -rf $(OBJ_ROOT) $(BIN_DIR)
 
 help:
 	@echo "Targets:"
@@ -166,5 +193,10 @@ help:
 	@echo "  make BACKEND=kiss|ne10   (default: kiss; ne10 is the embedded deliverable)"
 	@echo "  make AC_DIR=<path>       (override audio_common location)"
 	@echo "  make WERROR=1            (opt-in: -Werror for this repo's own sources)"
+	@echo ""
+	@echo "Objects live in obj/<backend>-<config-hash>/ -- switching BACKEND,"
+	@echo "EXTRA_CFLAGS, or WERROR always lands in a fresh directory automatically;"
+	@echo "no manual clean needed, and two differently-configured builds can run"
+	@echo "concurrently in this same tree."
 
 .PHONY: all dirs clean lib bench selftest debug help audio_common_lib
