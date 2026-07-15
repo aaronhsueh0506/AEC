@@ -94,6 +94,16 @@
  * No `restrict` anywhere, same aliasing rule as simd_kernels.h: pointers
  * are assumed non-aliasing except where a kernel's own comment documents
  * an in-place case.
+ *
+ * Round-3 review B05: only the alias form actually exercised by
+ * simd_selftest_aec.c's matrix is contractually supported -- sk_mask_zero_f32
+ * (kernel 20) is the sole one in this file, and it isn't optional aliasing
+ * the way sk_capply_gain_f32's out==z is: this kernel has no separate output
+ * parameter at all, so `x` is unconditionally both the read source and the
+ * write destination on every call (see test_mask_zero_edge() in the
+ * selftest, and the ordinary test_mask_zero() above it). No other kernel in
+ * this file is documented or tested with any overlapping-pointer usage;
+ * that is unsupported, even if it happens to work today on some input.
  */
 
 #ifndef AEC_SIMD_KERNELS_H
