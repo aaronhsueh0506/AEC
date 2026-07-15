@@ -22,7 +22,7 @@ EXTRA_LDFLAGS ?=
 NO_STDIO      ?= 0
 DEBUG         ?= 0
 
-CFLAGS  = -Wall -Wextra -O2 -ffp-contract=off -std=gnu99
+CFLAGS  = -Wall -Wextra -O2 -std=gnu99
 CFLAGS += -I./include -I./example
 CFLAGS += $(EXTRA_CFLAGS)
 LDFLAGS = -lm
@@ -81,6 +81,41 @@ endif
 ifeq ($(NO_STDIO),1)
   CFLAGS += -DAEC_NO_STDIO
 endif
+
+# --- FP-contraction policy: unified across all four repos (round-3 review
+# B04). This flag USED TO be the third token in the base CFLAGS assignment
+# above (`-Wall -Wextra -O2 -ffp-contract=off -std=gnu99`) -- i.e. BEFORE
+# EXTRA_CFLAGS/BACKEND/WERROR/NO_STDIO were folded in, so a caller passing
+# EXTRA_CFLAGS=-ffp-contract=fast (or -Ofast/-ffast-math, which imply
+# contraction) would land LATER on the compile line and silently win,
+# re-enabling FMA reassociation despite this repo's documented
+# build-determinism policy (see CLAUDE.md / README's build-flags section).
+# Moved here -- appended LAST, after every other CFLAGS append in this file
+# (EXTRA_CFLAGS, the BACKEND-conditional -I$(AC_DIR)/include, WERROR,
+# NO_STDIO), and BEFORE CFG_SIG_PAYLOAD is computed below (so it
+# automatically participates in CFG_SIG, no separate payload entry needed)
+# -- so nothing can override it any more. See audio_common's Makefile for
+# the full cross-repo design writeup and scripts/audit_fp_contract.sh (in
+# audio_common) for the disassembly-level verification.
+#
+# Conflict detection (round-3 review B04): reject outright rather than let
+# a caller silently re-enable contraction. Checked against the
+# fully-assembled $(CFLAGS) (already includes EXTRA_CFLAGS and any CFLAGS=
+# command-line override) BEFORE FP_POLICY is appended below and BEFORE
+# CFG_SIG is computed, so a rejected build never creates an obj/bin
+# directory.
+ifneq ($(findstring -Ofast,$(CFLAGS)),)
+$(error FP policy conflict: CFLAGS/EXTRA_CFLAGS contains -Ofast; this repo pins -ffp-contract=off; remove -Ofast from EXTRA_CFLAGS)
+endif
+ifneq ($(findstring -ffast-math,$(CFLAGS)),)
+$(error FP policy conflict: CFLAGS/EXTRA_CFLAGS contains -ffast-math; this repo pins -ffp-contract=off; remove -ffast-math from EXTRA_CFLAGS)
+endif
+ifneq ($(findstring -ffp-contract=,$(CFLAGS)),)
+$(error FP policy conflict: CFLAGS/EXTRA_CFLAGS contains -ffp-contract=; this repo pins -ffp-contract=off; remove -ffp-contract= from EXTRA_CFLAGS)
+endif
+
+FP_POLICY := -ffp-contract=off
+CFLAGS    += $(FP_POLICY)
 
 .DEFAULT_GOAL := all
 

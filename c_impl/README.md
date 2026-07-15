@@ -35,10 +35,43 @@ print-bin-dir` (same flags as your build) to get the exact path, or `make
 publish` to copy this build's artifacts to a stable `dist/<backend>/current/`
 handoff path.
 
-Compile flags (already in Makefile): `-O2 -ffp-contract=off -I include
--I example`. `-ffp-contract=off` is **required** (no FMA fusion — load-bearing
-for build determinism and golden stability across builds/compilers; see
-Precision & regression anchors below).
+Compile flags (already in Makefile): `-O2 -I include -I example`, plus
+`-ffp-contract=off` appended **last** (round-3 review B04 — see "Unified
+FP-contraction policy" below). `-ffp-contract=off` is **required** (no FMA
+fusion — load-bearing for build determinism and golden stability across
+builds/compilers; see Precision & regression anchors below).
+
+### Unified FP-contraction policy (round-3 review B04)
+
+`-ffp-contract=off` is no longer just an AEC convention — it is a **repo-wide
+policy spanning all four repos** (`audio_common`, `NR/c_impl`, `AEC/c_impl`,
+`Audio_ALG/pipelines`): every translation unit any of their Makefiles compile
+— each repo's own sources *and* the vendored KISS/NE10 C and C++ TUs alike —
+builds with this flag. In every one of the four Makefiles the flag is
+appended **last** in the CFLAGS/CXXFLAGS assembly (after `EXTRA_CFLAGS`, after
+any BACKEND-conditional append, after `WERROR`/`NO_STDIO`), so nothing a
+caller passes can land after it and override it — AEC's Makefile used to
+carry the flag as the *third* token of the base CFLAGS assignment (before
+`EXTRA_CFLAGS` was folded in), which this review moved to its current
+trailing position. Each Makefile also rejects outright, at parse time, an
+`EXTRA_CFLAGS` (or `CFLAGS=` override) containing `-Ofast`, `-ffast-math`, or
+`-ffp-contract=<anything>` (all of which would re-enable contraction), e.g.:
+
+```
+$ make EXTRA_CFLAGS=-ffast-math
+Makefile:111: *** FP policy conflict: CFLAGS/EXTRA_CFLAGS contains -ffast-math; this repo pins -ffp-contract=off; remove -ffast-math from EXTRA_CFLAGS.  Stop.
+```
+
+`audio_common/scripts/audit_fp_contract.sh` is the disassembly-level proof
+the flag actually bites: it disassembles a fixed list of TUs expected to be
+genuinely scalar (audio_common's `hpf.o`/`kiss_fft.o`/NE10's scalar-C
+objects, NR's three core objects) and fails if any fmadd/fmsub/fnmadd/
+fnmsub/fmla/fmls instruction shows up. AEC's own `aec_simd_kernels.h` — with
+its explicit `vfmaq_f32`-family intrinsics, consumed by AEC's TUs — is the
+same "legitimate explicit fusion, not compiler contraction" exemption
+category that script documents for its own audit list (see that script's
+header comment for the full rationale, including two non-obvious
+classifications it derived empirically rather than by filename guess).
 
 ### No-stdio library builds (`NO_STDIO=1`)
 

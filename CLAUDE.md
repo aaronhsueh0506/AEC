@@ -150,7 +150,16 @@ bin="$(make -s print-bin-dir)"
 
 `-ffp-contract=off` in `CFLAGS` is mandatory for build determinism and golden
 stability (no FMA reassociation drift between compilers/builds) — retained
-post-campaign even though Python↔C is no longer a byte-equal target.
+post-campaign even though Python↔C is no longer a byte-equal target. As of
+round-3 review B04 this is a **unified policy across all four repos**
+(`audio_common`, `NR/c_impl`, `AEC/c_impl`, `Audio_ALG/pipelines`): every TU
+each Makefile compiles, own code and vendored KISS/NE10 alike, builds with
+the flag appended LAST (after `EXTRA_CFLAGS`/`BACKEND`/`WERROR`/`NO_STDIO`)
+so nothing can override it, with parse-time rejection of an `EXTRA_CFLAGS`
+containing `-Ofast`/`-ffast-math`/`-ffp-contract=<anything>`. See
+`c_impl/README.md`'s "Unified FP-contraction policy" section and
+`audio_common/scripts/audit_fp_contract.sh` (the disassembly-level PASS/
+EXEMPT audit gate) for the full writeup.
 Output WAV defaults to fp32 PCM (`AEC_OUT_FLOAT=0` for 16-bit).
 
 ### Python tests
