@@ -16,6 +16,85 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-07-16 — round-7 remediation (publish untracked-content policy; -t no-op correction; no algorithm change)
+
+Build/release-tooling-only follow-up to round-6; renders byte-identical (obj/
+bin keyed paths unchanged for default invocations, CFG_SIG payload
+untouched):
+
+- **`-t` correction**: round-6 documented `make -n/-q/-t publish` as fully
+  side-effect-free, but that was not true for `-t` — the round-6 driver
+  recursed into `_publish_impl` under `-t` exactly as it did under `-n`, and
+  GNU make's standard touch semantics on that recursive recipe chain bumped
+  the mtimes of the real `libaec.a`/`aec_wav`/`bench_rtf` (and, via the
+  `AC_LIB` dispatch, audio_common's own archive) — a genuine write for a
+  target that is supposed to be a phony action, not a build product. `-t` is
+  now an explicit no-op: it prints a one-line note and exits 0 without
+  recursing. `-n` and `-q` are unaffected. All three flags are now
+  verifiably zero-write. **Combined dry-run flags** (e.g. `make -nt
+  publish`) are now handled `-t`-FIRST: the driver's `MAKEFLAGS` word-scan
+  checks `has_t` before `has_q`/`has_n`, because in a combined invocation
+  the old `-n`-first ordering handed the recursive child `make` both flags
+  at once, and GNU make really applied touch semantics to that recursive
+  chain regardless (reproduced) — the same real-write bug the `-t`-alone
+  fix addressed, just reachable through a different flag combination. Any
+  `t` now wins unconditionally over `n`/`q`, so touch semantics can never
+  reach the artifact chain through a combined flag set either.
+- **Untracked-content provenance (new dimension, separate from
+  `ALLOW_DIRTY_PUBLISH`)**: `make publish` now also refuses by default when
+  EITHER this checkout OR the resolved audio_common producer checkout
+  contains any untracked, non-ignored file (`git ls-files --others
+  --exclude-standard` non-empty) — an untracked source a Makefile
+  references (even in an otherwise-clean tracked tree) can change the
+  artifact without leaving any trace in the tracked diff, so round-6's
+  dirty-diff hash alone said nothing about it. `ALLOW_UNTRACKED_PUBLISH=1`
+  is the new, separate escape hatch; it records `untracked_tree_sha256`
+  (this repo) / `audio_common_untracked_tree_sha256` (the producer) in the
+  attestation — sha256 over sorted, COLLISION-FREE FIXED-FIELD records:
+  `L <sha256(path)> <sha256(readlink output)>` for symlinks, `F <mode>
+  <sha256(path)> <sha256(content)>` for regular files. Every
+  variable-length value (the path itself, a symlink's target, a file's
+  content) is itself hashed before being placed into the record, so records
+  concatenate unambiguously — the original raw space-joined `L <path>
+  <target>` encoding was collision-prone (`"a b"->"c"` and `"a"->"b c"`
+  encoded identically). Record generation is FAIL-CLOSED: any `stat`/
+  `readlink`/`shasum` I/O failure downgrades that entry to an `X` record,
+  which FATALs publish outright rather than ever recording an empty or
+  partial hash for the affected path — a hashing failure can never silently
+  fall back to an incomplete-but-present `untracked_tree_sha256`. Two
+  different untracked source states can never share a provenance record. An
+  untracked path that is neither a regular file nor a symlink (an embedded
+  git checkout, a fifo, …), or one that fails to hash for any reason, is
+  always refused, naming the path and which repo it came from.
+- **`ALLOW_DIRTY_PUBLISH` narrowed to tracked changes only**: the dirty
+  check now uses `git status --porcelain -uno` (tracked-only) instead of
+  full porcelain, since untracked content is now its own dimension above —
+  lumping the two together previously let two different untracked source
+  states publish under the same `dirty_diff_sha256` (which only ever
+  covered `git diff --binary HEAD`, i.e. tracked bytes). The FATAL wording
+  changed accordingly (“uncommitted TRACKED changes”). Both checks — tracked
+  dirty and untracked — are applied to BOTH this checkout and the
+  audio_common producer checkout, and each FATAL names exactly which
+  repo(s) and which dimension triggered the refusal.
+- **Identity-less checkout refused unconditionally (no escape hatch)**: a
+  checkout — this repo OR the resolved audio_common producer — for which
+  `git rev-parse HEAD` fails is now FATAL immediately, checked before
+  `dirty`/`untracked` are even computed for that repo, and neither
+  `ALLOW_DIRTY_PUBLISH=1` nor `ALLOW_UNTRACKED_PUBLISH=1` admits it: an
+  attestation cannot name a source state or enumerate untracked content for
+  a checkout with no git identity, so no knob is allowed to paper over that
+  gap. This closes a round-6 hole — the prior shape folded an `unknown`
+  identity into the same `dirty`/`ac_dirty` violation flag that
+  `ALLOW_DIRTY_PUBLISH=1` short-circuits, so passing that knob alone could
+  previously let a non-git (or an unresolved-`AC_DIR`) tree publish despite
+  having no real provenance to record.
+- Attestation field order is otherwise unchanged and purely additive:
+  `git_untracked`/`[untracked_tree_sha256]` follow `git_dirty`/
+  `[dirty_diff_sha256]`; `audio_common_git_untracked`/
+  `[audio_common_untracked_tree_sha256]` follow `audio_common_git_dirty`/
+  `[audio_common_dirty_diff_sha256]`; `allow_untracked_publish` follows
+  `allow_dirty_publish`.
+
 ## [Unreleased] — 2026-07-15 — round-6 remediation (publish dry-run + attest hardening; no algorithm change)
 
 Build/release-tooling-only follow-up to round-5; renders byte-identical (obj/
