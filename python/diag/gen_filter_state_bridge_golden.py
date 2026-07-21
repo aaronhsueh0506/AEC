@@ -40,6 +40,27 @@ Layout (LE):
   ]
 
 Run: python3 python/diag/gen_filter_state_bridge_golden.py /tmp/fsb_golden.bin
+
+Round-4 review (Task C): ``div``/``mu_final`` used to be written straight from
+``build_filter_state_bridge``'s return value, which computes both in Python
+float64 (the algorithm SPEC, per this repo's float32-campaign policy --
+python/modules/filter/filter_state_bridge.py is intentionally left as-is).
+But ``FilterStateBridge.divergence_indicator``/``.mu_final`` are declared
+``float`` (float32) in the C struct, and ``filter_state_bridge_build``'s
+``main_e``/``shadow_e``/``mu_final`` PARAMETERS are likewise ``float``, so
+the C computes the whole e_ratio/div chain in native float32 arithmetic --
+not "float64 then truncate once at the end". Comparing the C's float32
+result bit-exact against the float64 golden was therefore comparing two
+genuinely different computations (not just a wider-vs-narrower cast of the
+SAME computation), which parity_filter_state_bridge.c's `!=` checks caught
+as a permanent ~3-4.5e-8 divergence on every frame -- expected float32-vs-
+float64 drift, not a bug in either side.
+``_c_contract_div_mu()`` below reproduces the C's exact op sequence
+(fsb_f32_mean's pairwise sum via numpy's own float32-preserving np.sum,
+then every subsequent op on np.float32 scalars, which numpy keeps in
+float32 -- unlike raw Python floats, always float64) so the golden's
+expected div/mu values are what the CURRENT f32 C contract actually
+produces, restoring true bit-exact-vs-itself regression coverage.
 """
 import os
 import sys
@@ -48,6 +69,41 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from modules.filter.filter_state_bridge import build_filter_state_bridge  # noqa: E402
+
+
+def _c_contract_div_mu(P, main_e, shadow_e, has_shadow, mu_final):
+    """Mirror filter_state_bridge.c's filter_state_bridge_build() EXACTLY,
+    op-for-op, in native float32 (np.float32 scalar arithmetic stays
+    float32 -- unlike Python floats, which are always float64). Returns
+    (div, mu) as Python floats holding EXACT float32 values, ready to
+    write into the f64 golden slots the C-side (float, widened to double
+    for storage) will bit-exact-match.
+    """
+    mu32 = np.float32(mu_final)  # out->mu_final = mu_final; (float param)
+
+    if P.size == 0:
+        return float(np.float32(0.0)), float(mu32)
+
+    # p_trace = fsb_f32_mean(P, p_len): float32 pairwise sum / float32(n).
+    # P is already float32; np.sum over a float32 array stays float32
+    # (numpy preserves dtype for floating input) and numpy 1.26's pairwise
+    # algorithm is the one fsb_f32_pairwise_sum is built to match bit-exact
+    # (same claim this codebase already relies on for erl_estimator.c /
+    # filter_analyzer.c / fullband_erle.c's own f32 pairwise-sum kernels).
+    p_trace32 = np.float32(np.sum(P, dtype=np.float32)) / np.float32(P.size)
+
+    main_e32 = np.float32(main_e)      # C's `float main_e` parameter
+    shadow_e32 = np.float32(shadow_e)  # C's `float shadow_e` parameter
+    e_ratio32 = np.float32(1.0)
+    if has_shadow and main_e32 > np.float32(1e-12):
+        e_ratio32 = np.float32(shadow_e32 / main_e32)  # float32 / float32 -> float32
+
+    t32 = np.float32(e_ratio32 - np.float32(1.0))
+    if t32 < np.float32(0.0):
+        t32 = np.float32(0.0)
+    div32 = np.float32(p_trace32 * t32)
+
+    return float(div32), float(mu32)
 
 # Production geometry: hop=160 -> block=320 -> fft_size=512, n_freqs=257.
 FFT_SIZE = 512
@@ -170,13 +226,18 @@ def main():
             np.array([int(any_coarse), int(all_div)], dtype=np.int32).tofile(f)
 
             # --- write expected outputs ---
+            # div/mu: recomputed via the C f32 contract (see
+            # _c_contract_div_mu's docstring) -- NOT br.divergence_indicator/
+            # br.mu_final, which are build_filter_state_bridge's float64 SPEC
+            # values and no longer what the float32 C struct fields hold.
+            exp_div, exp_mu = _c_contract_div_mu(P, main_e, shadow_e, has_shadow, mu_final)
             taps = np.asarray(br.filter_taps, dtype=np.float32)
             np.array([taps.shape[0]], dtype=np.int32).tofile(f)
             taps.tofile(f)
-            np.array([float(br.divergence_indicator)], dtype=np.float64).tofile(f)
+            np.array([exp_div], dtype=np.float64).tofile(f)
             np.array([int(br.regime)], dtype=np.int32).tofile(f)
             np.array([int(br.filter_converged), int(br.main_paused)], dtype=np.int32).tofile(f)
-            np.array([float(br.mu_final)], dtype=np.float64).tofile(f)
+            np.array([exp_mu], dtype=np.float64).tofile(f)
             np.array([int(br.external_delay_samples)], dtype=np.int32).tofile(f)
             np.array([int(br.any_coarse_filter_converged),
                       int(br.all_filters_diverged)], dtype=np.int32).tofile(f)

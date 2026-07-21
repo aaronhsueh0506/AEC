@@ -245,7 +245,10 @@ static int aec_validate_config(const AecConfig* cfg) {
  * `scratch` must hold >= n floats (n is always hop_size at every call site;
  * callers pass a->scr_sq, sized hop_size -- see aec.h struct comment). */
 static float mean_sq(const float* x, int n, float* scratch) {
-    for (int i = 0; i < n; ++i) scratch[i] = x[i] * x[i];
+    /* sk_sq_scale_f32(x, 1.0f, ...) is bit-exact to x[i]*x[i] (scale=1.0f is
+     * an exact IEEE no-op multiply) -- same established pattern already
+     * shipped at suppression_gain.c:112 and aec3_post.c:270/272. */
+    sk_sq_scale_f32(x, 1.0f, scratch, n);
     float s = aec3_post_pairwise_sum_f32(scratch, (size_t)n);
     return s / (float)n;
 }
@@ -717,12 +720,14 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
      * a stack-overflow hazard on small embedded task stacks. */
     t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 3); /* scr_sq scr_sref scr_scoa */
     t = ck_field_size(t, (size_t)fft, sizeof(float));  /* scr_tin */
-    /* Aec3PostRunScratch (20) */
+    /* Aec3PostRunScratch (19) */
     t = ck_field_size_reps(t, Kz, sizeof(Complex), 4); /* sel_esw sel_echo nsw_e1 ybase */
     t = ck_field_size_reps(t, Kz, sizeof(float), 9);   /* abs_near..x2_past */
     t = ck_field_size(t, ck_mul_size((size_t)np, Kz), sizeof(float)); /* w_mag2 */
     t = ck_field_size(t, (size_t)hop, sizeof(float));  /* render_block_scaled */
-    t = ck_field_size(t, (size_t)fft, sizeof(float));  /* bridge_taps */
+    /* bridge_taps (formerly here, [fft_size]) removed: it was write-only-by-
+     * nobody once the filter_state_bridge IRFFT call was deleted from
+     * aec3_post.c -- see that file's Step-5 comment. */
     t = ck_field_size_reps(t, Kz, sizeof(float), 3);   /* r2 r2_unb nearend_pwr */
     t = ck_field_size(t, Kz, sizeof(unsigned char));   /* stat_mask */
     /* hop scratch (10) */
@@ -1142,7 +1147,6 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         sc->x2_past      = P_FSLICE(0);
         sc->w_mag2 = (float*)ptr; ptr += ALIGN16((size_t)np * K * sizeof(float));
         sc->render_block_scaled = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
-        sc->bridge_taps         = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
         sc->r2          = P_FSLICE(0); sc->r2_unb   = P_FSLICE(0);
         sc->nearend_pwr = P_FSLICE(0);
         sc->stat_mask   = P_BSLICE(0);
@@ -1396,7 +1400,20 @@ static void misadj_fire(Aec* a) {
     if (a->misadj_hangover_remaining > 0) { a->misadj_hangover_remaining--; return; }
     int stable = a->convergence.converged && !a->epc.active && !a->regime.main_paused;
     if (!stable) { a->misadj_stable_count = 0; return; }
-    a->misadj_stable_count++;
+    /* Threshold-gate counter: sole reader is the
+     * "< a->cfg.filter_misadjustment_stable_frames" comparison on the next
+     * line. Round-6 re-review finding: "stable" (converged, EPC inactive,
+     * main not paused) is the ordinary steady state for a fixed-position
+     * device left running -- it can hold continuously for the entire
+     * unbounded-overflow timeframe, so the `!stable` reset above does NOT
+     * bound this counter (contrary to a prior round's premature "there's a
+     * reset branch" conclusion). Saturate at filter_misadjustment_stable_frames
+     * -- once reached, the "<" comparison is permanently false either way,
+     * so this is observationally identical to the old unconditional
+     * increment for every reachable state, while eliminating the eventual
+     * signed-integer-overflow UB on a very long streaming session. */
+    if (a->misadj_stable_count < a->cfg.filter_misadjustment_stable_frames)
+        a->misadj_stable_count++;
     if (a->misadj_stable_count < a->cfg.filter_misadjustment_stable_frames) return;
     if (a->misadj_inv <= 10.0f) return;
     float base = a->misadj_inv > 1e-6f ? a->misadj_inv : 1e-6f;
@@ -1446,9 +1463,22 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      * arming, then hold for `hold` frames. */
     {
         float ne_ind = a->dt_analyzer.dt_from_energy;
-        if (ne_ind > a->cfg.ne_recent_threshold)
-            a->ne_above += 1;
-        else
+        if (ne_ind > a->cfg.ne_recent_threshold) {
+            /* Threshold-gate counter: sole reader is the
+             * ">= a->cfg.ne_recent_sustain" comparison two lines below.
+             * Round-6 re-review finding (Codex-confirmed live UBSan repro):
+             * sustained near-end energy above ne_recent_threshold (e.g. a
+             * long nearend-singletalk / continuous-speech stretch) can hold
+             * this branch for the entire unbounded-overflow timeframe with
+             * no reset in between, so an unconditional `+= 1` would
+             * eventually signed-integer-overflow on a very long streaming
+             * session. Saturate at ne_recent_sustain -- once reached the
+             * ">=" comparison is permanently true either way, so this is
+             * observationally identical to the old unconditional increment
+             * for every reachable state. */
+            if (a->ne_above < a->cfg.ne_recent_sustain)
+                a->ne_above += 1;
+        } else
             a->ne_above = 0;
         if (a->ne_above >= a->cfg.ne_recent_sustain)
             a->ne_recent_frames = a->cfg.ne_recent_hold;
@@ -1645,6 +1675,14 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         }
     }
 
+    /* far_hop is fully finalized above (memcpy + optional soft-clip +
+     * optional delay-ring re-read) and is never written again for the rest
+     * of this hop (every remaining reference below is a read) -- compute
+     * mean_sq(far_hop) ONCE here and reuse it at every call site that would
+     * otherwise recompute the identical deterministic value from the same
+     * unchanged input. */
+    float far_hop_mean_sq = mean_sq(a->far_hop, hop, a->scr_sq);
+
     /* 4. render activity. */
     RenderActivityResult ra = render_activity_update(&a->render_activity, a->far_hop, hop);
     a->warmup_far_active = ra.warmup_active;
@@ -1668,12 +1706,31 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         sk_cmag2_np_f32(a->main_filter.base.far_spec, rsa_psd, K);
         rsa_update(&a->rsa, rsa_psd, a->far_hop, hop);
         int poor = rsa_poor_signal_excitation(&a->rsa);
+        /* Ceilinged at each filter's own n_partitions (UBSan-confirmed
+         * signed-overflow fix): poor_excitation_counter's only production
+         * consumers are pbfdaf_process's/pbfdkf_process's
+         * `poor_excitation_counter < N` gates, each read against THIS
+         * SAME filter instance's own n_partitions (N) -- confirmed by grep,
+         * no other consumer anywhere in src/include/python. Not read
+         * bit-exact by any parity harness (test/parity_pbfdkf.c and
+         * test/parity_pbfdkf_loc.c treat it purely as an
+         * orchestrator-supplied external input, set on the C filter before
+         * calling process(), never asserted afterward). Once the counter
+         * reaches n_partitions, further increments can never change the
+         * `< n_partitions` outcome (already false, stays false), so
+         * gating the increment at n_partitions is observationally
+         * identical to the old unconditional `+= 1` for every reachable
+         * state, while eliminating the eventual signed overflow. */
         if (poor) a->main_filter.base.poor_excitation_counter = 0;
-        else      a->main_filter.base.poor_excitation_counter += 1;
+        else if (a->main_filter.base.poor_excitation_counter <
+                 a->main_filter.base.n_partitions)
+            a->main_filter.base.poor_excitation_counter += 1;
         a->main_filter.base.saturated_capture = (a->saturation_level > 0.5f);
         if (a->has_shadow) {
             if (poor) a->shadow_filter.poor_excitation_counter = 0;
-            else      a->shadow_filter.poor_excitation_counter += 1;
+            else if (a->shadow_filter.poor_excitation_counter <
+                     a->shadow_filter.n_partitions)
+                a->shadow_filter.poor_excitation_counter += 1;
             a->shadow_filter.saturated_capture = (a->saturation_level > 0.5f);
         }
     }
@@ -1700,8 +1757,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     int far_excited = 0;
     if (a->has_shadow) {
         a->shadow_frame_count++;
-        float far_mean_pre = mean_sq(a->far_hop, hop, a->scr_sq);
-        far_excited = (far_mean_pre > 1e-4f);
+        far_excited = (far_hop_mean_sq > 1e-4f);
         int saturation_safe_pre = (a->saturation_level < 0.5f);
         float shadow_mu_pre = (far_excited && saturation_safe_pre) ? 1.0f : 0.1f;
         if (rsa_mask_active) {
@@ -1768,7 +1824,33 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
              * aec3_post_run fires at step 18, AFTER this stationarity refresh). */
             stationarity_estimator_update_stationarity_flags(&a->a3_stat, far_psd,
                                                               a->post.avg_reverb.reverb);
-            a->stationarity_active_hops += 1;
+            /* Threshold-gate counter: sole reader is the
+             * ">= a->stationarity_converge_hops" comparison just below (and
+             * the same comparison re-derived from the mirrored copy passed
+             * into aec3_post_run's inputs). Saturate at EXACTLY
+             * stationarity_converge_hops -- once the counter reaches it the
+             * ">=" comparison is permanently true either way -- so a very
+             * long streaming session can never hit signed-integer-overflow
+             * UB on this unconditional increment.
+             *
+             * Round-6 re-review off-by-one fix: the guard used to read
+             * "<= stationarity_converge_hops", which lets the counter take
+             * one extra step to stationarity_converge_hops + 1 before the
+             * guard stops firing -- one more than this comment's own claimed
+             * cap, though NOT a behavior change (both
+             * stationarity_converge_hops and stationarity_converge_hops + 1
+             * satisfy the ">=" comparison identically, forever, so every
+             * downstream decision -- here and in aec3_post.c's mirrored
+             * "in->stationarity_active_hops >= in->stationarity_converge_hops"
+             * copy -- is unaffected either way; see
+             * test/test_counter_saturation.c's
+             * "stationarity_active_hops settles at converge_hops" case,
+             * which pins the exact numeric cap so this can't silently drift
+             * again). "<" makes the counter settle at exactly
+             * stationarity_converge_hops, matching this comment's claim. */
+            if (a->stationarity_active_hops < a->stationarity_converge_hops) {
+                a->stationarity_active_hops += 1;
+            }
         }
         /* latch flag for the NEXT hop (applied at step 8 of hop+1). Do NOT
          * overwrite this hop's filter.block_stationary — step 11's shadow
@@ -1783,12 +1865,17 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* 12. e2_coarse + erl publish + poor-coarse rescue. */
     if (a->has_shadow) {
         /* _e2_ref = Σ|filter.error_spec|² (cmag2_np, pairwise f32). */
-        float *e2ref_arr = a->scr_e2ref_arr, *e2coa_arr = a->scr_e2coa_arr,
-              *erl_arr = a->scr_erl_arr;
+        float *e2ref_arr = a->scr_e2ref_arr, *erl_arr = a->scr_erl_arr;
         sk_cmag2_np_f32(a->main_filter.base.error_spec, e2ref_arr, K);
-        sk_cmag2_np_f32(a->shadow_filter.error_spec, e2coa_arr, K);
         float e2_ref = aec3_post_pairwise_sum_f32(e2ref_arr, (size_t)K);
-        float e2_coa = aec3_post_pairwise_sum_f32(e2coa_arr, (size_t)K);
+        /* e2_coa: shadow_filter.error_spec did NOT change since step 8.5
+         * (the shadow filter runs once/hop, pre-main; nothing between here
+         * and there touches it) -- so cmag2(shadow_filter.error_spec) +
+         * its pairwise-sum + per-bin publish were already computed and
+         * published there. Reuse a->main_filter.e2_coarse_for_refresh /
+         * e2_coarse_per_bin[] instead of recomputing the identical values
+         * a second time this hop. */
+        float e2_coa = a->main_filter.e2_coarse_for_refresh;
         /* erl[k] = Σ_p |W_p[k]|². zero-init once, then accumulate every
          * partition (including p==0) via the acc kernel — matches the
          * original zero-fill-then-`+=`-every-partition shape exactly. */
@@ -1797,10 +1884,6 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             const Complex* Wp = a->main_filter.base.W + (size_t)part * K;
             sk_cmag2_np_acc_f32(Wp, erl_arr, K);
         }
-        /* publish to the refined filter. */
-        a->main_filter.e2_coarse_for_refresh = e2_coa;
-        for (int k = 0; k < K; ++k) a->main_filter.e2_coarse_per_bin[k] = e2coa_arr[k];
-        a->main_filter.e2_coarse_per_bin_valid = 1;
         for (int k = 0; k < K; ++k) a->main_filter.erl_per_bin[k] = erl_arr[k];
 
         /* rescue: cond_fire = e2_ref < 0.5*e2_coa; threshold_hops=blocks_to_hops(5)=2. */
@@ -1847,7 +1930,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
                                     far_excited, a->main_err_smooth, a->shadow_err_smooth);
         int delay_reliable = a->has_delay && (delay_aec3_confidence(&a->delay) >= 0.5f);
         ShadowCopyDecision dec = shadow_copy_update(
-            &a->regime, a->shadow_frame_count, mean_sq(a->far_hop, hop, a->scr_sq),
+            &a->regime, a->shadow_frame_count, far_hop_mean_sq,
             a->main_err_smooth, a->shadow_err_smooth,
             a->epc.active, a->saturation_level,
             a->dt_analyzer.dt_from_energy, 0.0, delay_reliable);
@@ -1937,7 +2020,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      * `enable_res or return_res_context`). With enable_res=1 this is unchanged
      * (return_res_context is irrelevant) → production cascade byte-exact. */
     if (a->cfg.enable_res || a->cfg.return_res_context) {
-        far_power = mean_sq(a->far_hop, hop, a->scr_sq);
+        far_power = far_hop_mean_sq;
         /* erle_windowed (step 13a). */
         const float erle_decay = 0.999f;
         a->erle_window_near = erle_decay * a->erle_window_near + a->near_power;
@@ -2074,8 +2157,17 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             in.last_shadow_output_time = a->has_shadow ? a->shadow_out : NULL;
             in.s_ref_max = a->main_filter.base.last_s_max_abs * 32768.0f;
             in.s_coa_max = a->has_shadow ? a->shadow_filter.last_s_max_abs * 32768.0f : 0.0f;
-            in.main_error_energy = pbfdkf_get_error_energy(&a->main_filter);
-            in.shadow_error_energy = a->has_shadow ? pbfdaf_get_error_energy(&a->shadow_filter) : 0.0f;
+            /* in.main_error_energy / in.shadow_error_energy intentionally left
+             * at their memset(0) default: Aec3PostRunIn.main_error_energy /
+             * shadow_error_energy have zero readers anywhere in aec3_post.c
+             * (the FilterStateBridge call that used to consume them was
+             * removed) -- recomputing them here was a pure-waste O(n_freqs)
+             * cmag2 + pairwise-sum pass feeding an unread field. The real,
+             * still-needed computation (feeding a->main_err_smooth /
+             * a->shadow_err_smooth for double-talk detection) stays at step 13
+             * above; error_spec is not mutated between there and here in the
+             * same hop, so this was provably a redundant recompute, not a
+             * distinct value. */
             in.raw_output = a->raw_output;
             in.near_end = a->near_hop;
             in.far_end = a->far_hop;
@@ -2171,7 +2263,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
     /* 20. convergence detection. */
     {
-        int far_active = (mean_sq(a->far_hop, hop, a->scr_sq) > 1e-4f);
+        int far_active = (far_hop_mean_sq > 1e-4f);
         int just_converged = filter_convergence_update_convergence(
             &a->convergence, a->near_power, a->raw_error_power,
             far_active, a->warmup_frames_remaining <= 0);

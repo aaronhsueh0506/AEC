@@ -135,11 +135,13 @@ void aec3_post_reset(Aec3Post *p) {
 /* PSD = (mag*mag) in f32, then * _PSD_SCALE in f32 (numpy<2 array*pyfloat rule),
  * .astype(f32) is a no-op. mag is the captured np.abs(c64) f32 value. */
 static void psd_from_abs(const float *mag, int n, float *out) {
-    int k;
-    for (k = 0; k < n; ++k) {
-        float a2 = mag[k] * mag[k];              /* |c|^2 in f32 */
-        out[k] = (float)(a2 * (float)PSD_SCALE); /* * _PSD_SCALE in f32 */
-    }
+    /* sk_sq_scale_f32(mag, scale, ...) computes out[i]=(mag[i]*mag[i])*scale
+     * -- textually identical op sequence to this loop's body, and
+     * (float)PSD_SCALE (2^30, exact in f32) folds to the same constant
+     * regardless of call path. Same established bit-exact scale-multiply
+     * pattern already used at lines 270/272 in this file and in
+     * suppression_gain.c:112 (there with scale=1.0f). */
+    sk_sq_scale_f32(mag, (float)PSD_SCALE, out, n);
 }
 
 /* ── stage 1-2: PSDs (+ E1 capture_psd_erle) ───────────────────────────── */
@@ -464,10 +466,12 @@ int aec3_post_run(Aec3Post *p,
     /* render_block_scaled = (far_end * 32768).astype(f32) (3056). */
     for (k = 0; k < hop; ++k)
         sc->render_block_scaled[k] = (float)(in->far_end[k] * 32768.0f);
-    /* far_pwr = mean(far_end²) (pairwise f32; 3053). */
+    /* far_pwr = mean(far_end²) (pairwise f32; 3053). sk_sq_scale_f32 with
+     * scale=1.0f is bit-exact to x*x (exact IEEE no-op multiply) -- same
+     * established pattern as lines 270/272 above and suppression_gain.c:112. */
     {
         float *fsq = sc->nearend_pwr;   /* borrow scratch */
-        for (k = 0; k < hop; ++k) fsq[k] = in->far_end[k] * in->far_end[k];
+        sk_sq_scale_f32(in->far_end, 1.0f, fsq, hop);
         (void)fsq;
     }
 
@@ -476,12 +480,9 @@ int aec3_post_run(Aec3Post *p,
         float y2_time = sum_sq_f32_pairwise(in->near_end, (size_t)hop);
         float e2_refined = sum_sq_f32_pairwise(in->raw_output, (size_t)hop);
         float y2_thr = 3.73e-4f;
-        float y2_thr_low = y2_thr * (20.0f / 50.0f) * (20.0f / 50.0f);
-        float y2_thr_div = y2_thr * (30.0f / 50.0f) * (30.0f / 50.0f);
         float e2_coarse = 0.0f;
-        int refined_conv, coarse_conv = 0, coarse_conv_relaxed = 0;
-        int aec3_converged, all_diverged;
-        float min_e2;
+        int refined_conv, coarse_conv = 0;
+        int aec3_converged;
 
         refined_conv = (e2_refined < 0.5f * y2_time) && (y2_time > y2_thr);
         if (in->shadow_present) {
@@ -507,39 +508,24 @@ int aec3_post_run(Aec3Post *p,
                           / (float)fft_size;
             }
             coarse_conv = (e2_coarse < 0.05f * y2_time) && (y2_time > y2_thr);
-            coarse_conv_relaxed = (e2_coarse < 0.3f * y2_time)
-                                  && (y2_time > y2_thr_low);
         }
         aec3_converged = refined_conv || coarse_conv;
         p->trace.aec3_converged = aec3_converged;   /* audio-passive trace stash */
-        min_e2 = in->shadow_present
-                 ? (e2_refined < e2_coarse ? e2_refined : e2_coarse)
-                 : e2_refined;
-        all_diverged = (min_e2 > 1.5f * y2_time) && (y2_time > y2_thr_div);
 
-        /* ── Step 5: filter_state_bridge (3109-3118) ─────────────────────── */
+        /* Step 5 (filter_state_bridge, formerly here) was dead code: every
+         * output field of the FilterStateBridge it built (including the
+         * unconditional per-hop IRFFT into what was then sc->bridge_taps) was
+         * discarded -- the only downstream consumer, AecState.update, already
+         * reads the live aec3_converged local directly (see Step 11 below),
+         * which is bit-for-bit what bridge.filter_converged would have held
+         * anyway (a pure passthrough in filter_state_bridge_build). Removed;
+         * see filter_state_bridge_build itself (still exercised directly by
+         * test/parity_filter_state_bridge.c) for that function's own
+         * behaviour. The now-write-only-by-nobody sc->bridge_taps scratch
+         * field ([fft_size] float, in Aec3PostRunScratch) was later removed
+         * from the struct entirely (aec.c's pool-size accounting + carve, and
+         * this driver's caller struct in aec3_post.h). */
         {
-            FilterStateBridge bridge;
-            int ext_delay_samples = (in->delay_active ? in->current_delay : -1);
-            filter_state_bridge_build(&bridge, obj->fft, in->W0,
-                                      fft_size, nb,
-                                      in->kalman_P, in->kalman_P_len,
-                                      in->shadow_present,
-                                      in->main_error_energy,
-                                      in->shadow_error_energy,
-                                      aec3_converged,
-                                      /*main_paused=*/0,
-                                      /*mu_final=*/1.0,
-                                      ext_delay_samples,
-                                      coarse_conv_relaxed,
-                                      all_diverged,
-                                      sc->bridge_taps);
-            /* AecState.update consumes only bridge.filter_converged (the
-             * all_filters_diverged / divergence_indicator path feeds
-             * TransparentMode, permanently None in balanced). The build is kept
-             * for line-by-line fidelity (read-only; only side-effect is irfft). */
-            (void)bridge;
-
             /* ── Step 6: ext_delay (3126-3131) ───────────────────────────── */
             FilterDelayEstimate ext;
             const FilterDelayEstimate *ext_p = NULL;

@@ -25,6 +25,7 @@
 #include "pbfdkf.h"
 #include "aec3_scale.h"
 #include "aec_simd_kernels.h"
+#include <limits.h>   /* LONG_MAX */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,27 +63,15 @@ static float pairwise_sum_f32(const float* a, int n) {
     return sk_pairwise_sum_tailfold_f32(a, (size_t)n);
 }
 
-/* |complex64|² matching numpy's `np.abs(z) ** 2` BIT-EXACTLY. numpy computes
- * np.abs on complex64 via the SIMD `simd_cabsolute` (NEON/SSE) = a scaled-hypot
- * with a FUSED multiply-add on `ratio*ratio + 1`, NOT hypotf and NOT
- * sqrtf(r²+i²) (both verified to mismatch ~35%/3.7%). Then `**2` is `m*m`.
- * `fmaf` + `sqrtf` are IEEE-754 correctly-rounded, so this scalar form is
- * deterministic & portable and reproduces np.abs(z)**2 with 0/300000 mismatch.
- * Used wherever Python writes `np.abs(...)**2` (error_psd EMA, X² partition sum,
- * e2_refined, h_error refresh). */
-static float cmag2_np(float er, float ei) {
-    float a = fabsf(er), b = fabsf(ei);
-    float larger  = (a > b) ? a : b;
-    float smaller = (a > b) ? b : a;
-    float m;
-    if (larger == 0.0f) {
-        m = 0.0f;
-    } else {
-        float ratio = smaller / larger;
-        m = larger * sqrtf(fmaf(ratio, ratio, 1.0f));
-    }
-    return m * m;
-}
+/* numpy |complex64|**2 (np.abs(z)**2) is now computed exclusively via the
+ * sk_cmag2_np_f32/sk_ema_cmag2_f32/sk__cmag2_np_elem kernel family
+ * (aec_simd_kernels.h) -- this file's own former scalar `cmag2_np(er, ei)`
+ * helper (a scaled-hypot with an fmaf, bit-exact to those kernels for all
+ * finite inputs: they differ only in the sign of an intermediate zero, which
+ * never survives into the squared result) is retired now that its last call
+ * site (pbfdaf_frontend's far_psd_sum loop) was folded into the
+ * sk_cmag2_np_f32 call just below it. Referenced by name only in comments
+ * below (e2_ref_scratch dedup) for historical context. */
 
 /* Compute derived sizes. */
 static void pbfdaf_compute_sizes(int hop_size, int* out_hop, int* out_blk,
@@ -168,6 +157,11 @@ int pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
     int hop = (hop_size > 0) ? hop_size : block_size / 2;
     pbfdaf_compute_sizes(hop, &p->hop_size, &p->block_size,
                          &p->fft_size, &p->n_freqs);
+    /* Set early (before any malloc below) so pbfdaf_free(p) is safe to call
+     * from the OOM path even if the very first allocation fails -- it reads
+     * p->is_static to pick its heap-vs-static branch, and that must never
+     * be uninitialized garbage. */
+    p->is_static = 0;
 
     p->td_window = (float*)calloc((size_t)p->fft_size, sizeof(float));
     p->sqrt_hann = (float*)malloc((size_t)p->block_size * sizeof(float));
@@ -202,19 +196,33 @@ int pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
     p->scr_ir       = (float*)malloc((size_t)p->n_partitions * (size_t)p->hop_size * sizeof(float));
     p->scr_e2       = (float*)malloc((size_t)p->n_freqs * sizeof(float));
 
-    pbfdaf_init_scalars(p, n_partitions, mu, delta);
-    pbfdaf_fill_windows(p);
-    p->is_static = 0;
-
-    if (!p->fft) {
-        /* F04: fft_create() failed (OOM) -- free everything just allocated
-         * (pbfdaf_free's heap branch frees every pointer field
-         * unconditionally; free(NULL) is a no-op for anything not yet
-         * assigned) instead of leaving a half-built filter around whose FFT
-         * calls would silently no-op on the NULL handle. */
+    /* F04 (round-4 review D1, extending the existing fft_create() OOM
+     * convention to every malloc'd/calloc'd scratch field above): any of
+     * these can return NULL under real OOM, and pbfdaf_fill_windows() below
+     * writes straight through p->td_window/p->sqrt_hann unconditionally --
+     * a NULL td_window/sqrt_hann would be an immediate NULL-deref crash
+     * before we ever reach the old `if (!p->fft)` check. Check every
+     * pointer BEFORE calling pbfdaf_init_scalars()/pbfdaf_fill_windows(),
+     * not after. scr_mu_local/scr_x2psum/scr_mu_eff are only required
+     * non-NULL when with_process_scratch requested them (they're
+     * deliberately NULL otherwise -- not an OOM). pbfdaf_free(p) tolerates
+     * a partially-NULL struct (free(NULL) is a no-op for every field, and
+     * `if (p->fft) fft_destroy(p->fft);` already guards the one non-free
+     * teardown call). */
+    if (!p->td_window || !p->sqrt_hann || !p->W || !p->X_buf ||
+        !p->near_buffer || !p->far_buffer || !p->power ||
+        !p->near_spec || !p->echo_spec || !p->error_spec || !p->far_spec ||
+        !p->error_spec_windowed || !p->fft || !p->time_scratch ||
+        !p->spec_scratch || !p->scr_fsq ||
+        (with_process_scratch &&
+         (!p->scr_mu_local || !p->scr_x2psum || !p->scr_mu_eff)) ||
+        !p->scr_ir || !p->scr_e2) {
         pbfdaf_free(p);
         return -1;
     }
+
+    pbfdaf_init_scalars(p, n_partitions, mu, delta);
+    pbfdaf_fill_windows(p);
     return 0;
 }
 
@@ -256,7 +264,7 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
     }
     total = ck_field_size(total, ck_mul_size((size_t)n_partitions, (size_t)hop),
                          sizeof(float));                        /* scr_ir */
-    total = ck_field_size(total, (size_t)K,   sizeof(float));   /* scr_e2 */
+    total = ck_field_size(total, (size_t)K,   sizeof(float));   /* scr_e2 (also frontend's far_cmag2 scratch -- D2) */
 
     if (MEM_SIZE_INVALID(total)) return 0;
     return total;
@@ -407,21 +415,47 @@ static float pbfdaf_frontend(PBFDAF* p,
     *out_curr_p = curr_p;
     memcpy(p->X_buf + (size_t)curr_p * K, p->far_spec, (size_t)K * sizeof(Complex));
 
-    /* power EMA (cold start: direct init when sum(power)<1e-10 and active far) */
+    /* power EMA (cold start: direct init when sum(power)<1e-10 and active far).
+     * cmag2(far_spec[k]) computed ONCE here into instance scratch, reused for
+     * both the far_psd_sum reduction and the cold-start/EMA power update
+     * below (previously recomputed a 2nd time inside sk_cmag2_np_f32/
+     * sk_ema_cmag2_f32, which both derive |far_spec[k]|^2 from scratch
+     * internally). sk_cmag2_np_f32's ternary-based abs and cmag2_np's
+     * fabsf-based abs are bit-exact equivalent for all finite inputs (they
+     * differ only in the sign of an intermediate zero, which never survives
+     * into the squared result) -- already relied upon by the cold-start/EMA
+     * branches just below, which already call these sk_ kernels on this same
+     * far_spec array.
+     *
+     * Round-4 review D2: borrows p->scr_e2 (normally
+     * pbfdaf_get_error_energy's |error_spec|^2 scratch) instead of a
+     * dedicated scr_far_cmag2 field -- cross-phase reuse, safe because this
+     * whole computation (write far_cmag2, read it twice below) is fully
+     * self-contained within THIS call, well before pbfdaf_get_error_energy
+     * runs later in the same hop (aec.c step 13, strictly after step
+     * 8.5/9's pbfdaf_process/pbfdkf_process -- i.e. after pbfdaf_frontend
+     * returns) and unconditionally overwrites every element before reading
+     * any of them back. Same argument aec3_post.c documents for
+     * x2_at_delay's cross-phase reuse. */
+    float *far_cmag2 = p->scr_e2;   /* instance scratch, not stack: [n_freqs] */
+    sk_cmag2_np_f32(p->far_spec, far_cmag2, K);
     float pwr_sum = 0.0f;
     for (int k = 0; k < K; ++k) pwr_sum += p->power[k];
     float far_psd_sum = 0.0f;
     for (int k = 0; k < K; ++k)
-        far_psd_sum += cmag2_np(p->far_spec[k].r, p->far_spec[k].i);
+        far_psd_sum += far_cmag2[k];
     if (pwr_sum < 1e-10f && far_psd_sum > 1e-10f) {
-        /* cold start: power = np.abs(far_spec)**2 */
-        sk_cmag2_np_f32(p->far_spec, p->power, K);
+        /* cold start: power = np.abs(far_spec)**2 (already computed above) */
+        memcpy(p->power, far_cmag2, (size_t)K * sizeof(float));
     } else {
         /* power = alpha_power*power + (1-alpha_power)*far_psd; alpha_power=0.9,
-         * float32-by-design. */
+         * float32-by-design -- textually identical to sk_ema_cmag2_f32_scalar's
+         * own combine (state[i]=alpha*state[i]+beta*mag2), matching the
+         * e2_ref/error_psd precedent below (pbfdkf.c e2_ref_scratch dedup). */
         const float a = 0.9f;
         const float b = 1.0f - 0.9f;
-        sk_ema_cmag2_f32(p->power, p->far_spec, a, b, K);
+        for (int k = 0; k < K; ++k)
+            p->power[k] = a * p->power[k] + b * far_cmag2[k];
     }
 
     /* echo_spec = Σ_p W[p] * X_buf[(curr_p-p)%N] */
@@ -510,7 +544,20 @@ void pbfdaf_process(PBFDAF* p,
         int any_pos = 0;
         for (int k = 0; k < K; ++k) if (mu_arr[k] > 0.0f) { any_pos = 1; break; }
         if (!any_pos) { p->partition_idx = (p->partition_idx + 1) % N; return; }
-        p->call_counter += 1;  /* E22: increment before saturation gate (mirrors AEC3/PBFDKF) */
+        /* E22: increment before saturation gate (mirrors AEC3/PBFDKF).
+         * UBSan-confirmed signed-overflow fix, floored at LONG_MAX: unlike
+         * poor_excitation_counter (fixed above with a tight
+         * n_partitions cap), call_counter's raw value is read bit-exact by
+         * test/parity_pbfdkf.c (`flt.base.call_counter != exp_call`,
+         * explicitly documented above as one of the 3 fields this port
+         * keeps bit-exact) -- capping at N/the startup threshold would
+         * still satisfy the `<= N` gate below, but would desync the raw
+         * value from Python's unbounded golden the very next call (same
+         * trap as erl_estimator.c's hold_counter_time_domain -- see that
+         * fix's comment). Capping at LONG_MAX instead is a no-op for
+         * every practically-reachable call count while eliminating the UB
+         * at the true overflow boundary. */
+        if (p->call_counter < LONG_MAX) p->call_counter += 1;
         if (p->saturated_capture) { p->partition_idx = (p->partition_idx + 1) % N; return; }
         if (p->call_counter <= N || p->poor_excitation_counter < N) {
             p->partition_idx = (p->partition_idx + 1) % N; return;
@@ -627,6 +674,10 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
 
 int pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size) {
+    /* Set early (before any malloc below) so pbfdkf_free(p) is safe to call
+     * from the OOM path even if the very first allocation fails -- see
+     * pbfdaf_init's identical reasoning. */
+    p->is_static = 0;
     if (pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size, 0) != 0)
         return -1;   /* F04: base filter's nested fft_create() failed (OOM);
                       * pbfdaf_init already freed its own partial state. */
@@ -643,8 +694,23 @@ int pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
     p->scr_mu_local = (float*)malloc((size_t)K * sizeof(float));
     p->scr_X2       = (float*)malloc((size_t)K * sizeof(float));
     p->scr_mu_aec3  = (float*)malloc((size_t)K * sizeof(float));
+
+    /* F04 (round-4 review D1): pbfdkf_init_scalars() below writes straight
+     * through p->Q_high[k]/Q_low[k]/.../e2_coarse_per_bin[k] unconditionally
+     * -- any NULL among the 12 mallocs above would be an immediate NULL-deref
+     * crash right there, not just on some later process() call. Check every
+     * pointer BEFORE calling pbfdkf_init_scalars(). pbfdkf_free(p) already
+     * tolerates a partially-NULL struct (free(NULL) is a no-op for each of
+     * these fields; the base filter is fully built at this point so
+     * pbfdaf_free(&p->base) inside it is unaffected). */
+    if (!p->Q_high || !p->Q_low || !p->Q || !p->R || !p->error_psd ||
+        !p->H_error_per_bin || !p->erl_per_bin || !p->e2_coarse_per_bin ||
+        !p->e2_ref_scratch || !p->scr_mu_local || !p->scr_X2 || !p->scr_mu_aec3) {
+        pbfdkf_free(p);
+        return -1;
+    }
+
     pbfdkf_init_scalars(p);
-    p->is_static = 0;
     return 0;
 }
 
@@ -961,8 +1027,12 @@ void pbfdkf_process(PBFDKF* p,
         float *e2_ref = p->e2_ref_scratch;   /* instance scratch, not stack */
         sk_cmag2_np_f32(b->error_spec, e2_ref, K);
 
-        /* startup / poor-excitation / saturation gates → refresh only. */
-        b->call_counter += 1;
+        /* startup / poor-excitation / saturation gates → refresh only.
+         * UBSan-confirmed signed-overflow fix, floored at LONG_MAX -- same
+         * bit-exact-parity reasoning as pbfdaf_process's call_counter
+         * increment above (test/parity_pbfdkf.c asserts this exact field
+         * on the PBFDKF/main-filter path). */
+        if (b->call_counter < LONG_MAX) b->call_counter += 1;
         if (b->call_counter <= N || b->poor_excitation_counter < N ||
             b->saturated_capture) {
             pbfdkf_h_error_refresh(p, e2_ref);

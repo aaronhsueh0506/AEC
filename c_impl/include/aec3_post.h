@@ -388,7 +388,6 @@ typedef struct {
     float   *x2_past;            /* [n_freqs] */
     float   *w_mag2;             /* [n_part × n_freqs] frequency_response  */
     float   *render_block_scaled;/* [hop] far_end × 32768                  */
-    float   *bridge_taps;        /* [fft_size] filter_state_bridge taps    */
     float   *r2;                 /* [n_freqs] */
     float   *r2_unb;             /* [n_freqs] */
     float   *nearend_pwr;        /* [n_freqs] */

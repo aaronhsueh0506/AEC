@@ -4,6 +4,7 @@
  * casts + math.log2/pow in the Python reference); inputs arrive as float32. */
 #include "reverb_decay_estimator.h"
 
+#include <limits.h>   /* INT_MAX */
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -131,10 +132,22 @@ static void early_accumulate(RdeEarlyEstimator *E, double value, double smoothin
     if (last_section > E->n_storage - 1) last_section = E->n_storage - 1;
 
     if (last_section < 0) {
-        /* Block beyond storage — still advance coeff counter. */
+        /* Block beyond storage — still advance coeff counter.
+         * coefficients_counter is self-bounding (reset to 0 every
+         * RDE_K_FFT_LENGTH_BY_2 cycle, right below) -- no fix needed.
+         * block_counter is NOT: it's a genuine algorithmic index (used
+         * arithmetically in x_value/value_to_add above, not merely a
+         * boolean gate), with no cap of its own besides the external
+         * early_reset(). This module is confirmed dead code (no
+         * production caller — CLAUDE.md), so flooring at INT_MAX (the
+         * true overflow boundary, same UBSan bug class as this round's
+         * other counter fixes) rather than any smaller threshold avoids
+         * having to re-derive a "smallest safe ceiling" for a value that
+         * feeds arithmetic, and is a no-op for every reachable state
+         * short of ~2^31 blocks. */
         E->coefficients_counter += 1;
         if (E->coefficients_counter == RDE_K_FFT_LENGTH_BY_2) {
-            E->block_counter += 1;
+            if (E->block_counter < INT_MAX) E->block_counter += 1;
             E->coefficients_counter = 0;
         }
         return;
@@ -160,7 +173,8 @@ static void early_accumulate(RdeEarlyEstimator *E, double value, double smoothin
                 E->n_sections = section + 1;
             }
         }
-        E->block_counter += 1;
+        /* Same INT_MAX-floor reasoning as the early-return branch above. */
+        if (E->block_counter < INT_MAX) E->block_counter += 1;
         E->coefficients_counter = 0;
     }
 }

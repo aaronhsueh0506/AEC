@@ -5,6 +5,7 @@
 
 #include "aec_simd_kernels.h"
 
+#include <limits.h>   /* LONG_MAX */
 #include <math.h>
 #include <string.h>
 
@@ -124,7 +125,22 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
         active = (fa_f32_pairwise_sum(render_sq_scratch, (size_t)render_block_len)
                   > c->active_render_threshold);
         if (c->delay_ref == delay_blocks) {
-            if (active) c->counter += 1;
+            /* UBSan-confirmed signed-overflow fix, floored at LONG_MAX (not
+             * at the FA_CONSISTENT_HOLD_HOPS threshold the boolean below
+             * reads): unlike a pure boolean-gate counter, this field's raw
+             * value is read bit-exact by test/parity_filter_analyzer.c
+             * (`m.consistent.counter != e_counter`), which mirrors the
+             * Python ConsistentFilterDetector's own unbounded `_counter`
+             * accumulator. Capping at the threshold would still make the
+             * `> FA_CONSISTENT_HOLD_HOPS` boolean below match, but would
+             * desync the raw value from Python's golden the very next hop
+             * (same trap as erl_estimator.c's hold_counter_time_domain --
+             * see that fix's comment). Capping at LONG_MAX instead is a
+             * no-op for every practically-reachable state (this counter
+             * only advances on active-render hops with a held delay
+             * estimate) while eliminating the UB at the true overflow
+             * boundary. */
+            if (active && c->counter < LONG_MAX) c->counter += 1;
         } else {
             c->counter = 0;
             c->delay_ref = delay_blocks;
@@ -242,7 +258,19 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     if (m->abs_scratch_len < size || m->render_sq_scratch_len < render_block_len) {
         return;
     }
-    m->blocks_since_reset += 1;
+    /* Ceilinged at FA_CONVERGENCE_THRESHOLD_HOPS+1 (UBSan-confirmed
+     * signed-overflow fix): the ONLY consumer of blocks_since_reset
+     * anywhere in this file is the `> FA_CONVERGENCE_THRESHOLD_HOPS` check
+     * below (test/parity_filter_analyzer.c does not read this field, only
+     * `consistent.counter` -- see that field's own fix above). Once the
+     * counter exceeds FA_CONVERGENCE_THRESHOLD_HOPS, further increments
+     * can never change that comparison's outcome (already true, stays
+     * true), so gating the increment at the smallest value that still
+     * satisfies `>` is observationally identical to the old unconditional
+     * `+= 1` for every reachable state, while eliminating the eventual
+     * signed overflow. */
+    if (m->blocks_since_reset <= FA_CONVERGENCE_THRESHOLD_HOPS)
+        m->blocks_since_reset += 1;
     fa_set_region(m, size);
     fa_preprocess(m, filter_taps);
     h = m->h_highpass;

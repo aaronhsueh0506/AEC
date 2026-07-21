@@ -10,6 +10,8 @@
 #ifndef AEC_DETECTORS_H
 #define AEC_DETECTORS_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -98,13 +100,70 @@ typedef struct FilterPlateauDetector {
     float  dt_signal_ratio;     /* 0.10 */
     int    max_attempts;        /* 2 */
     /* State */
-    int    frame_count;
-    int    far_active_count;
-    int    dt_signal_count;
+    /* frame_count/far_active_count/dt_signal_count: round-6 re-review
+     * (Codex-confirmed live UBSan repro) -- filter_plateau_update()
+     * increments all three UNCONDITIONALLY on every call, before any of
+     * the function's early-return gates (cooldown_remaining>0,
+     * once_converged, attempts>=max_attempts, frame_count<=grace_frames).
+     * Once `once_converged` latches true (the caller's FilterConvergence
+     * analog never structurally guarantees a reset back to false within
+     * this detector's practical lifetime) or attempts reaches max_attempts,
+     * every subsequent call early-returns right after the three increments
+     * without ever reaching the reset-on-fire path
+     * (frame_count/far_active_count/dt_signal_count = 0), so a plain `int`
+     * would eventually signed-integer-overflow on a very long streaming
+     * session. Unlike the other threshold-gate counters in this codebase,
+     * these three feed a RATIO (far_ratio = far_active_count/frame_count,
+     * dt_ratio = dt_signal_count/frame_count) rather than a plain boolean
+     * compare, so saturating any one of them alone at a cap would corrupt
+     * that ratio's numeric value for the remaining (still-reachable, i.e.
+     * pre-terminal) region -- not an "observationally identical" fix the
+     * way the plain threshold-gate counters' caps are. int64_t widening
+     * instead is unconditionally behavior-preserving forever (2^63 hops is
+     * astronomically beyond any real deployment lifetime) with no ratio
+     * distortion at any reachable state.
+     *
+     * Struct-size cost, MEASURED (not hand-counted) via a throwaway
+     * `sizeof(FilterPlateauDetector)` probe compiled against this header --
+     * a prior version of this comment claimed "12 extra bytes" for this
+     * round's widening (naive field-count arithmetic: 3 fields x 4 bytes),
+     * which was WRONG: the true delta is +16 (48 -> 64), because the first
+     * int64_t field forces the compiler to insert 4 bytes of alignment
+     * padding right before it (an int64_t needs 8-byte alignment, and the
+     * five 4-byte fields above it total an unaligned 20 bytes) -- padding
+     * naive field-count arithmetic always misses. Full measured history:
+     *   - 48 bytes: original all-`int`/`float` layout (pre-widening).
+     *   - 64 bytes: after frame_count/far_active_count/dt_signal_count
+     *     were widened to int64_t (+16, not the previously-claimed +12).
+     *   - 72 bytes: after THIS round also widened last_reset_frame below to
+     *     int64_t (+8 more, no additional padding introduced -- it's the
+     *     last field and was already immediately preceded by three 4-byte
+     *     ints summing to a multiple of 8 relative to the frame_count
+     *     block's own end).
+     * NOT part of the static-memory pool accounting (this struct has no
+     * parent-struct pool carve anywhere in aec.h/STATIC_MEMORY.md --
+     * FilterPlateauDetector is currently unreferenced by aec_create()/
+     * aec_init(), same "ported but not yet wired in" status as
+     * reverb_decay_estimator.c), so none of this widening has any
+     * pool-size impact. See test/test_counter_saturation.c's
+     * FilterPlateauDetector cases for the cap-behavior + ratio-preservation
+     * proof. */
+    int64_t frame_count;
+    int64_t far_active_count;
+    int64_t dt_signal_count;
     int    consecutive_match;
     int    attempts;
     int    cooldown_remaining;
-    int    last_reset_frame;
+    /* round-7 review: also widened to int64_t (was a plain `int`) --
+     * filter_plateau_update()'s Fire block does
+     * `p->last_reset_frame = p->frame_count;` (frame_count is int64_t), an
+     * implementation-defined narrowing conversion once frame_count exceeds
+     * INT_MAX, inconsistent with why the other three fields above were
+     * widened in the first place. See test/test_counter_saturation.c's
+     * section_filter_plateau "huge frame_count fire" case for the proof
+     * (seeds frame_count at (int64_t)INT_MAX+1000, drives real fire, checks
+     * last_reset_frame == that exact value, not a wrapped 32-bit one). */
+    int64_t last_reset_frame;
 } FilterPlateauDetector;
 
 #define FILTER_PLATEAU_CONSECUTIVE_REQUIRED 50

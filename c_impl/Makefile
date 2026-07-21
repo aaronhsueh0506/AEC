@@ -16,8 +16,27 @@ RANLIB  ?= ranlib
 # NO_STDIO=1 adds -DAEC_NO_STDIO to CFLAGS below and excludes src/aec_debug.c
 # from the library sources, producing a stdio-free libaec.a -- see the
 # NO_STDIO block further down and the `audit-no-stdio` target.
-CXXFLAGS      ?=
-CPPFLAGS      ?=
+#
+# CXXFLAGS and CPPFLAGS are different: they are also two of the five names
+# the "Command-line override rejection" foreach further below rejects a
+# command-line/`-e` override of (a Codex review finding -- the same class
+# of bug audio_common's CPPFLAGS had two rounds ago, fixed there the same
+# way). `?=` only ever assigns when the variable's origin is still
+# "undefined" -- if either already has a value from the environment, `?=`
+# is a complete no-op (GNU Make never attempts the assignment at all), so
+# the origin never flips to "environment override" under `make -e` no
+# matter how early this line sits (confirmed empirically:
+# `env FP_POLICY=-ffp-contract=fast make -e -n BACKEND=kiss lib` used to
+# sail straight through with no error). `+=` fixes this while keeping the
+# externally-visible behaviour identical: appending an empty string is a
+# no-op on the VALUE (a plain-environment CXXFLAGS/CPPFLAGS still folds in
+# normally -- origin becomes "file" -- and still participates in
+# CFG_SIG_PAYLOAD unchanged), but `+=` is an unconditional assignment
+# ATTEMPT, so under `-e` GNU Make's origin bookkeeping now correctly flips
+# it to "environment override", which the foreach rejects. See
+# audio_common's Makefile for the identical CPPFLAGS fix and full writeup.
+CXXFLAGS      +=
+CPPFLAGS      +=
 EXTRA_LDFLAGS ?=
 NO_STDIO      ?= 0
 DEBUG         ?= 0
@@ -177,6 +196,32 @@ endif
 # the full cross-repo design writeup and scripts/audit_fp_contract.sh (in
 # audio_common) for the disassembly-level verification.
 #
+# --- Bare-literal policy flag, defined early (Codex review: `make -e`
+# environment-override gap) --------------------------------------------------
+# FP_POLICY is a plain, dependency-free `:=` literal (no reference to CFLAGS
+# or anything else computed above) that used to be defined much further down
+# this file, immediately ahead of CFG_SIG_PAYLOAD -- for a reason that still
+# applies and is unaffected by this move (see the "FP-contraction policy"
+# comment above: FP_POLICY's CFLAGS append still needs to happen AFTER every
+# other CFLAGS append in this file, and BEFORE CFG_SIG_PAYLOAD is computed --
+# both still true with only the bare literal relocated here). FP_POLICY is
+# ALSO listed in the "Command-line override rejection" foreach directly
+# below, and that combination used to be a real gap under `make -e`,
+# empirically confirmed: `env FP_POLICY=-ffp-contract=fast make -e -n
+# BACKEND=kiss lib` used to sail straight through with no error (rc=0),
+# silently dropping -ffp-contract=off from the dry-run compile line (see the
+# foreach's own comment for the full mechanism -- $(origin FP_POLICY) only
+# flips from plain "environment" to "environment override" once a makefile
+# assignment to FP_POLICY has actually been PARSED, which never happened
+# before the foreach ran while the bare `:=` sat all the way down at its old
+# position, well after this foreach). Duplicating only the bare literal up
+# here -- ahead of the foreach in file order -- fixes it; the original site
+# further below still holds its OTHER job unchanged (`CFLAGS +=
+# $(FP_POLICY)`, appended LAST), so there is exactly one `:=` definition of
+# FP_POLICY in this file, just moved. Same fix audio_common already applied
+# to its own FP_POLICY/FFT_WRAPPER_ALIAS_CFLAGS two rounds ago.
+FP_POLICY := -ffp-contract=off
+
 # --- Command-line override rejection (round-4 review P1-1) ------------------
 # See audio_common's Makefile for the full writeup: a command-line
 # CFLAGS=/CXXFLAGS=/CPPFLAGS=/LDFLAGS=/FP_POLICY= silently disables every one
@@ -187,23 +232,151 @@ $(foreach v,CFLAGS CXXFLAGS CPPFLAGS LDFLAGS FP_POLICY,\
   $(if $(findstring command,$(origin $(v)))$(findstring override,$(origin $(v))),\
     $(error $(v) cannot be overridden (origin: $(origin $(v))) -- it would silently drop this Makefile's own flag appends (FP policy, NO_STDIO, include paths); use EXTRA_CFLAGS / EXTRA_LDFLAGS instead)))
 
-# Conflict detection (round-3 review B04): reject outright rather than let
-# a caller silently re-enable contraction. Checked against the
-# fully-assembled $(CFLAGS) (already includes EXTRA_CFLAGS; a command-line
-# CFLAGS= override is rejected outright just above) BEFORE FP_POLICY is
-# appended below and BEFORE CFG_SIG is computed, so a rejected build never
-# creates an obj/bin directory.
-ifneq ($(findstring -Ofast,$(CFLAGS)),)
-$(error FP policy conflict: CFLAGS/EXTRA_CFLAGS contains -Ofast; this repo pins -ffp-contract=off; remove -Ofast from EXTRA_CFLAGS)
-endif
-ifneq ($(findstring -ffast-math,$(CFLAGS)),)
-$(error FP policy conflict: CFLAGS/EXTRA_CFLAGS contains -ffast-math; this repo pins -ffp-contract=off; remove -ffast-math from EXTRA_CFLAGS)
-endif
-ifneq ($(findstring -ffp-contract=,$(CFLAGS)),)
-$(error FP policy conflict: CFLAGS/EXTRA_CFLAGS contains -ffp-contract=; this repo pins -ffp-contract=off; remove -ffp-contract= from EXTRA_CFLAGS)
+# Conflict detection (round-3 review B04; widened to CXXFLAGS/CPPFLAGS by a
+# later Codex review, mirroring audio_common's identical fix): reject
+# outright rather than let a caller silently re-enable contraction. Checked
+# against the fully-assembled $(CFLAGS) $(CXXFLAGS) $(CPPFLAGS) (each already
+# includes EXTRA_CFLAGS folded in above, AND any CFLAGS=/CXXFLAGS=/CPPFLAGS=
+# command-line override, since a command-line-set value is what every prior
+# `+=` in this file appended to) -- BEFORE FP_POLICY is appended below and
+# BEFORE CFG_SIG is computed, so a rejected build never creates an obj/bin
+# directory.
+#
+# CORRECTED UNDERSTANDING (this used to check $(CFLAGS) alone, reasoning that
+# this repo has no C++ TUs of its own so CXXFLAGS/CPPFLAGS "didn't matter" --
+# a Codex review found the gap that reasoning missed: CXXFLAGS/CPPFLAGS are
+# still two of the five names the "Command-line override rejection" foreach
+# above rejects a command-line/`-e` override of, and both already
+# participate in CFG_SIG_PAYLOAD below (see this file's own top comment) --
+# a PLAIN ENVIRONMENT CXXFLAGS or CPPFLAGS is deliberately allowed to fold in
+# normally via that same foreach's origin logic, never going through
+# EXTRA_CFLAGS at all, so `env CXXFLAGS=-Ofast make BACKEND=kiss lib` used to
+# sail straight through this block entirely: no check here ever inspected
+# $(CXXFLAGS), so the day either variable starts feeding a real compile
+# recipe (this file already carries the placeholder plumbing for that, see
+# the top-of-file comment), a live -Ofast/-ffast-math/-ffp-contract=<x>
+# could ride in completely unchecked. The check below inspects all three
+# variables together so no combination of CFLAGS/CXXFLAGS/CPPFLAGS --
+# command-line-folded, EXTRA_CFLAGS-folded, or a plain environment value --
+# can carry any of these three patterns past this gate, today or once either
+# variable is actually consumed. This position (after every CFLAGS/CXXFLAGS/
+# CPPFLAGS append earlier in this file and before FP_POLICY's own append
+# just below) is the same position already relied on to see CFLAGS's
+# fully-composed value, and is equally late enough for CXXFLAGS and
+# CPPFLAGS: neither is ever appended to anywhere else in this file (each is
+# a single bare `+=` at the top of this file -- see that line's own
+# comment), both fully resolved well before this point.
+#
+# (round-9-class fix, applied here from the start rather than retrofitted)
+# $(findstring ...) does a plain SUBSTRING search over the whole concatenated
+# text, so it false-positives on any token that merely CONTAINS one of these
+# patterns as part of a larger identifier -- e.g. a harmless
+# `-DROUND9_NOTE=-Ofastness` macro definition is not the compiler flag
+# -Ofast at all, yet a naive $(findstring -Ofast,...) check (as this block
+# used to be) would reject it anyway. $(filter PATTERN...,TEXT) instead
+# splits TEXT on whitespace into WORDS and matches each whole word against
+# PATTERN (a trailing %% is a single wildcard, used here for
+# -ffp-contract=<anything>), so it only ever matches a complete flag token,
+# never a substring buried inside an unrelated token.
+FP_INPUT_FLAGS := $(CFLAGS) $(CXXFLAGS) $(CPPFLAGS)
+
+# (Codex review) $(filter) directly above does whole-WORD matching against
+# GNU Make's OWN text representation of CFLAGS/CXXFLAGS/CPPFLAGS -- but Make
+# has zero concept of shell quoting. A value like EXTRA_CFLAGS="'-Ofast'" is
+# stored by Make as the literal 9-character text '-Ofast', quote characters
+# included, which is not equal to the bare word -Ofast, so $(filter) can
+# never match it -- yet when this same text later appears on an actual
+# compile recipe line and that line is handed to $(SHELL), the shell strips
+# the quote characters and the compiler genuinely receives -Ofast as a real
+# argv token. Three confirmed-live bypass shapes: EXTRA_CFLAGS="'-Ofast'"
+# (single-quoted), EXTRA_CFLAGS='"-ffast-math"' (double-quoted), and
+# EXTRA_CFLAGS="-O'f'ast" (quote-split mid-token -- the shell concatenates
+# the pieces back into -Ofast once it strips the quotes). A fourth family,
+# @response-file syntax (EXTRA_CFLAGS=@flags.rsp), is unrelated to quoting
+# but equally invisible to a plain whole-word check: many compilers treat a
+# bare @file argv token as "read more arguments from this file", which could
+# inject anything at all with zero text ever appearing in CFLAGS/
+# EXTRA_CFLAGS itself.
+#
+# Since Make cannot parse shell quoting, this block does not try to detect
+# "a quoted variant of -Ofast" specifically. Instead, the ONLY supported
+# external-input format for CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS is plain,
+# unquoted, whitespace-separated compiler argv tokens -- and ANY appearance
+# of shell quoting/escaping/expansion/response-file syntax in the combined
+# text is rejected outright, regardless of what follows it, BEFORE the
+# $(filter ...) exact-token conflict check below even runs, so that check
+# only ever sees guaranteed-unquoted input. (This paragraph intentionally
+# says nothing about -Ofast/-ffast-math/-ffp-contract itself: whether a
+# token IS one of those three is decided solely by the unchanged $(filter)
+# check; a harmless token that merely contains innocuous characters, e.g.
+# -DROUND9_NOTE=-Ofastness or -DTEXT=ffast-math, contains none of the
+# characters checked for below and so is untouched by this block.)
+#
+# A literal "$(" -- Make's own function/variable-reference opener, and also
+# the two-character shell command/variable-substitution opener -- cannot
+# safely be written as raw punctuation inline in a $(findstring ...) call:
+# GNU Make's parser matches parentheses while scanning a function call's
+# argument text, so an unbalanced literal "(" typed inline would confuse
+# that scan. Built instead via small helper variables (one holding a literal
+# "$" via the doubled-dollar escape, one holding a literal "(", concatenated
+# into one holding the two-char sequence) and that variable is referenced as
+# the findstring pattern -- confirmed by direct testing to parse cleanly
+# and to actually match (a raw unbalanced "(" typed inline here does NOT
+# parse cleanly; the helper-variable indirection does). Same mechanism
+# audio_common's Makefile uses for its own identical check.
+FP_DOLLAR_CHAR      := $$
+FP_OPEN_PAREN_CHAR   := (
+FP_DOLLAR_PAREN_SEQ  := $(FP_DOLLAR_CHAR)$(FP_OPEN_PAREN_CHAR)
+
+ifneq ($(findstring ',$(FP_INPUT_FLAGS)),)
+$(error FP policy conflict: CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS contains a single-quote character; this repo requires plain, unquoted, whitespace-separated compiler argv tokens -- shell quoting cannot be safely detected here by GNU Make and is rejected outright)
 endif
 
-FP_POLICY := -ffp-contract=off
+ifneq ($(findstring ",$(FP_INPUT_FLAGS)),)
+$(error FP policy conflict: CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS contains a double-quote character; this repo requires plain, unquoted, whitespace-separated compiler argv tokens -- shell quoting cannot be safely detected here by GNU Make and is rejected outright)
+endif
+
+ifneq ($(findstring \,$(FP_INPUT_FLAGS)),)
+$(error FP policy conflict: CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS contains a backslash character; this repo requires plain, unquoted, whitespace-separated compiler argv tokens -- shell escaping cannot be safely detected here by GNU Make and is rejected outright)
+endif
+
+ifneq ($(findstring `,$(FP_INPUT_FLAGS)),)
+$(error FP policy conflict: CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS contains a backtick character; this repo requires plain, unquoted, whitespace-separated compiler argv tokens -- shell command substitution cannot be safely detected here by GNU Make and is rejected outright)
+endif
+
+ifneq ($(findstring $(FP_DOLLAR_PAREN_SEQ),$(FP_INPUT_FLAGS)),)
+$(error FP policy conflict: CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS contains a '$$(' sequence (command/variable substitution); this repo requires plain, unquoted, whitespace-separated compiler argv tokens -- shell/make expansion cannot be safely detected here by GNU Make and is rejected outright)
+endif
+
+ifneq ($(findstring ;,$(FP_INPUT_FLAGS)),)
+$(error FP policy conflict: CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS contains a semicolon character; this repo requires plain, unquoted, whitespace-separated compiler argv tokens -- shell command separators cannot be safely detected here by GNU Make and are rejected outright)
+endif
+
+ifneq ($(findstring |,$(FP_INPUT_FLAGS)),)
+$(error FP policy conflict: CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS contains a pipe character; this repo requires plain, unquoted, whitespace-separated compiler argv tokens -- shell pipelines cannot be safely detected here by GNU Make and are rejected outright)
+endif
+
+ifneq ($(findstring &,$(FP_INPUT_FLAGS)),)
+$(error FP policy conflict: CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS contains an ampersand character; this repo requires plain, unquoted, whitespace-separated compiler argv tokens -- shell backgrounding/AND-lists cannot be safely detected here by GNU Make and are rejected outright)
+endif
+
+FP_RESPONSE_FILE_TOKENS := $(filter @%,$(FP_INPUT_FLAGS))
+ifneq ($(FP_RESPONSE_FILE_TOKENS),)
+$(error FP policy conflict: CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS contains an @-prefixed response-file token ($(FP_RESPONSE_FILE_TOKENS)); this repo requires plain, unquoted, whitespace-separated compiler argv tokens -- @file compiler response-file syntax cannot be safely expanded/inspected here and is rejected outright)
+endif
+
+FP_CONFLICT_FLAGS := $(filter -Ofast -ffast-math -ffp-contract=%,$(FP_INPUT_FLAGS))
+ifneq ($(FP_CONFLICT_FLAGS),)
+$(error FP policy conflict: CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS contains $(FP_CONFLICT_FLAGS); this repo pins -ffp-contract=off; remove $(FP_CONFLICT_FLAGS) from CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS)
+endif
+
+# (Codex review / `make -e` gap fix: FP_POLICY's own bare `:=` literal now
+# lives earlier in this file, directly above the "Command-line override
+# rejection" foreach -- see that foreach's "Bare-literal policy flag"
+# comment for why. Only FP_POLICY's OTHER job -- appending it to CFLAGS,
+# LAST, exactly as the "FP-contraction policy" comment above describes --
+# still lives at this position; there is exactly one `:=` definition of
+# FP_POLICY in this file, not two.)
 CFLAGS    += $(FP_POLICY)
 
 .DEFAULT_GOAL := all
@@ -259,8 +432,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench
-all bench:
+.PHONY: all bench test-counter-saturation
+all bench test-counter-saturation:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -353,6 +526,16 @@ BENCH_SRCS = $(TEST_DIR)/bench_rtf.c
 BENCH_OBJS = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(BENCH_SRCS))
 BENCH_TARGET = $(BIN_DIR)/bench_rtf
 
+# Permanent counter-saturation regression test (round-6 review: replaces the
+# ad hoc/throwaway UBSan probes rounds 4-6 each wrote to verify their counter
+# overflow fixes with a checked-in test that runs going forward). Needs the
+# full Aec type (aec.c/pbfdkf.c's FFT-backed sections), so -- unlike
+# SELFTEST_TARGET below -- this lives in the two-phase/AC_LIB-dependent part
+# of this Makefile, same as $(TARGET)/$(BENCH_TARGET).
+TEST_CS_SRCS   = $(TEST_DIR)/test_counter_saturation.c
+TEST_CS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_CS_SRCS))
+TEST_CS_TARGET = $(BIN_DIR)/test_counter_saturation
+
 # Standalone bit-exactness + microbench harness for the AEC-only kernel split
 # (aec_simd_kernels.h). Header-only + <math.h> -- no audio_common archive
 # link needed (unlike bench_rtf/aec_wav), so this target does not depend on
@@ -439,7 +622,7 @@ $(LIB_TARGET): $(OBJS) | _cfg_guard
 # transitively pulling in simd_kernels.h via CFLAGS' -I$(AC_DIR)/include.
 .PHONY: selftest
 selftest: $(SELFTEST_TARGET)
-	./$(SELFTEST_TARGET)
+	"$(abspath $(SELFTEST_TARGET))"
 
 $(SELFTEST_TARGET): $(SELFTEST_SRC) | _cfg_guard
 	$(CC) $(CFLAGS) -o $@ $< -lm
@@ -452,9 +635,18 @@ $(SELFTEST_TARGET): $(SELFTEST_SRC) | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE
+.PHONY: all bench FORCE test-counter-saturation
 all: $(TARGET)
 bench: $(BENCH_TARGET)
+
+# Builds AND runs (like `selftest` below, not like `bench` which only
+# builds) -- this is the permanent regression test, meant to be run every
+# time, not just built. Must be invoked from c_impl/ (the delay_aec3
+# section reads a checked-in fixture at a path relative to that cwd; see
+# test/test_counter_saturation.c's own top comment) -- same cwd convention
+# `make` recipes already run under.
+test-counter-saturation: $(TEST_CS_TARGET)
+	"$(abspath $(TEST_CS_TARGET))"
 
 FORCE:
 
@@ -472,6 +664,10 @@ $(TARGET): $(OBJS) $(EXAMPLE_OBJS) $(AC_LIB) | _cfg_guard
 $(BENCH_TARGET): $(OBJS) $(BENCH_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "bench_rtf [$(BACKEND)] -> $@"
+
+$(TEST_CS_TARGET): $(OBJS) $(TEST_CS_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_counter_saturation [$(BACKEND)] -> $@"
 endif
 
 # --- Query targets (round-3 review B01) -------------------------------------
@@ -929,6 +1125,8 @@ help:
 	@echo "  lib     Build static library (libaec.a)"
 	@echo "  bench   Build RTF timing harness (bench_rtf)"
 	@echo "  selftest Build + run the AEC-only kernel-split self-test (simd_selftest_aec)"
+	@echo "  test-counter-saturation  Build + run the permanent counter-saturation"
+	@echo "                  regression test (test_counter_saturation) -- run from c_impl/"
 	@echo "  debug   Build with -g -DAEC_DEBUG"
 	@echo "  publish Copy this build's artifacts to dist/<backend>/<config-hash>/ + update dist/<backend>/current"
 	@echo "  audit-no-stdio  Build lib with NO_STDIO=1 and verify it (and a minimal linked"

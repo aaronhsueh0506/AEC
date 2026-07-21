@@ -141,6 +141,63 @@ static void fill_complex(Complex *a, int n) {
     for (i = 0; i < n; ++i) gen_complex(&a[i]);
 }
 
+/* ═══════════════════════ int32 input generation (kernels 24-26) ═══════════
+ * hold_counters is int32 -- separate generator from gen_float()'s bit-LCG
+ * (an int32 has no NaN/Inf concept, so no exclusion logic is needed there),
+ * but same 25%-special-pool / 75%-raw-bits shape for consistency. Formerly
+ * (pre-overflow-fix) the raw-bits path steered clear of INT32_MIN because
+ * kernel 25 (then `sk_dec1_s32`) unconditionally subtracted 1 from every
+ * element, and INT32_MIN-1 is signed-integer-overflow UB in C -- confirmed
+ * live by UBSan ("signed integer overflow: -2147483648 - 1 cannot be
+ * represented in type 'int'"). Kernel 25 went through TWO fixed contracts:
+ * first `sk_dec1_floor0_s32` (decrement only while >0, floored at 0), later
+ * corrected to today's `sk_dec1_floorintmin_s32` (decrement only while
+ * >INT_MIN, floored at INT_MIN -- the floor-at-0 form was found to desync
+ * test/parity_erl_estimator.c's bit-exact golden, see that kernel's header
+ * comment in aec_simd_kernels.h for the full argument). Under EITHER fixed
+ * contract INT32_MIN is perfectly safe as an input (it's <=0 and also
+ * ==INT_MIN, so both kernels leave it unchanged, never subtract from it) --
+ * so INT32_MIN stays INCLUDED in both the special pool below and the
+ * raw-bits path (no remapping), exercising the exact corner the fix
+ * targets; INT32_MIN+1 is also in the special pool below specifically to
+ * exercise the one lane where floor-at-INT_MIN's speculative decrement
+ * actually fires the hop before hitting the floor. */
+#define SPECIAL_INT_POOL_COUNT 10
+static int32_t special_int_pool[SPECIAL_INT_POOL_COUNT];
+
+static void init_special_int_pool(void) {
+    special_int_pool[0] = 0;
+    special_int_pool[1] = 1;
+    special_int_pool[2] = -1;
+    special_int_pool[3] = 400;    /* ERL_HOLD_HOPS */
+    special_int_pool[4] = -400;
+    special_int_pool[5] = 2;
+    special_int_pool[6] = -2;
+    special_int_pool[7] = INT32_MAX;
+    special_int_pool[8] = INT32_MIN;
+    special_int_pool[9] = INT32_MIN + 1;
+}
+
+static int32_t gen_int32(void) {
+    uint32_t r = lcg_next();
+    if ((r & 3u) == 0u) {
+        uint32_t idx = (lcg_next() >> 8) % SPECIAL_INT_POOL_COUNT;
+        return special_int_pool[idx];
+    } else {
+        uint32_t bits = lcg_next();
+        int32_t v;
+        memcpy(&v, &bits, sizeof v);
+        return v;   /* INT32_MIN included -- safe under kernel 25's
+                     * floor-at-INT_MIN contract, see the corpus comment
+                     * above. */
+    }
+}
+
+static void fill_ints(int *a, int n) {
+    int i;
+    for (i = 0; i < n; ++i) a[i] = (int)gen_int32();
+}
+
 /* Separate, moderate-range generator for the microbenchmarks only -- keeps
  * the timing loops away from Inf/NaN-producing accumulation artifacts so
  * the reported numbers reflect typical-case throughput. Not used by any
@@ -338,6 +395,24 @@ static void check_scalar_bits_or_die(const char *kernel, int n, int trial,
             "MISMATCH kernel=%s n=%d trial=%d idx=0 simd=0x%08x (%.9g) scalar=0x%08x (%.9g)\n",
             kernel, n, trial, (unsigned)gb, (double)simd_val, (unsigned)wb, (double)scalar_val);
         exit(1);
+    }
+}
+
+/* int32 counterpart of check_bits_or_die: hold_counters (kernels 24/25/26)
+ * has no NaN/payload-ambiguity concept at all -- an int32 is exact integer
+ * arithmetic, always strict bit-for-bit equality expected, no classify
+ * escape hatch needed or offered. */
+static void check_ints_or_die(const char *kernel, int n, int trial,
+                               const int *simd, const int *scalar, int count) {
+    int i;
+    g_total_checks += count;
+    for (i = 0; i < count; ++i) {
+        if (simd[i] != scalar[i]) {
+            fprintf(stderr,
+                "MISMATCH kernel=%s n=%d trial=%d idx=%d simd=%d scalar=%d\n",
+                kernel, n, trial, i, simd[i], scalar[i]);
+            exit(1);
+        }
     }
 }
 
@@ -927,6 +1002,33 @@ static void edge_check_canary_b(const char *label, const unsigned char *arena, i
                 "CANARY VIOLATION %s: mask[%d]=0x%02x (want canary 0x%02x) "
                 "-- out-of-bounds access, payload window=[%d,%d)\n",
                 label, i, (unsigned)arena[i], (unsigned)EDGE_MASK_CANARY, win_lo, win_hi);
+            exit(1);
+        }
+    }
+}
+
+/* int32 counterpart (hold_counters, kernels 24/25/26): 0xDEADC0DE is not a
+ * value any of these kernels' arithmetic would plausibly produce (nowhere
+ * near ERL_HOLD_HOPS=400 or any of the special_int_pool values), same
+ * unambiguous-leak-detector intent as the float/byte canary patterns above. */
+#define EDGE_INT_CANARY ((int)0xDEADC0DEu)
+
+static void edge_fill_canary_i(int *arena, int len) {
+    int i;
+    for (i = 0; i < len; ++i) arena[i] = EDGE_INT_CANARY;
+}
+static void edge_check_canary_i(const char *label, const int *arena, int len,
+                                 int win_lo, int win_len) {
+    int i;
+    int win_hi = win_lo + win_len;
+    for (i = 0; i < len; ++i) {
+        if (i >= win_lo && i < win_hi) continue;
+        g_total_checks++;
+        if (arena[i] != EDGE_INT_CANARY) {
+            fprintf(stderr,
+                "CANARY VIOLATION %s: arena[%d]=%d (want canary %d) "
+                "-- out-of-bounds access, payload window=[%d,%d)\n",
+                label, i, arena[i], EDGE_INT_CANARY, win_lo, win_hi);
             exit(1);
         }
     }
@@ -1607,6 +1709,190 @@ static void test_mask_zero_edge(void) {
     printf("PASS mask_zero_f32_edge (n=0..17+existing x offset 1..15, in-place alias form, canary-guarded)\n");
 }
 
+/* ═══════════════════════════ correctness: kernel 23 ══════════════════════ */
+
+static void test_noise_spectrum_update_edge(void) {
+    float *spec_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *noise_scalar_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *noise_simd_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    const float alpha = 0.0024981253125391234f;
+    const float min_noise = 1.0e-4f;
+    int ni, form, o, m10;
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (form = 0; form < EDGE_FORM_COUNT; ++form) {
+            for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
+                for (m10 = 0; m10 < 2; ++m10) {
+                    int in_off, out_off;
+                    edge_offsets_for_form(form, o, &in_off, &out_off);
+
+                    edge_fill_canary_f(spec_arena, EDGE_ARENA_LEN);
+                    edge_fill_canary_f(noise_scalar_arena, EDGE_ARENA_LEN);
+                    edge_fill_canary_f(noise_simd_arena, EDGE_ARENA_LEN);
+                    fill_floats(spec_arena + in_off, n);
+                    fill_floats(noise_scalar_arena + out_off, n);
+                    memcpy(noise_simd_arena + out_off, noise_scalar_arena + out_off,
+                           (size_t)n * sizeof(float));
+
+                    sk_noise_spectrum_update_f32_scalar(noise_scalar_arena + out_off,
+                        spec_arena + in_off, alpha, m10, min_noise, n);
+                    sk_noise_spectrum_update_f32(noise_simd_arena + out_off,
+                        spec_arena + in_off, alpha, m10, min_noise, n);
+
+                    /* classified, not strict -- like n2_track/n2_initial_track,
+                     * the rising branch's alpha_inc*(pb-pn) combine can hit an
+                     * Inf-Inf=NaN payload on extreme special-pool inputs; see
+                     * n2_track_edge's comment above for the house rationale. */
+                    check_bits_classify("noise_spectrum_update_f32_edge", n,
+                                         form * 200 + o * 2 + m10,
+                                         noise_simd_arena + out_off,
+                                         noise_scalar_arena + out_off, n);
+                    edge_check_canary_f("noise_spectrum_update_f32_edge:spec", spec_arena, EDGE_ARENA_LEN, in_off, n);
+                    edge_check_canary_f("noise_spectrum_update_f32_edge:noise_scalar", noise_scalar_arena, EDGE_ARENA_LEN, out_off, n);
+                    edge_check_canary_f("noise_spectrum_update_f32_edge:noise_simd", noise_simd_arena, EDGE_ARENA_LEN, out_off, n);
+                }
+            }
+        }
+    }
+    free(spec_arena); free(noise_scalar_arena); free(noise_simd_arena);
+    printf("PASS noise_spectrum_update_f32_edge (n=0..17+existing x offset 1..15 x 3 forms x apply_mask10{0,1}, canary-guarded)\n");
+}
+
+/* ═══════════════════════════ correctness: kernel 24 ══════════════════════ */
+
+static void test_erl_bin_update_edge(void) {
+    float *x2_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *y2_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *erl_scalar_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *erl_simd_arena   = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    int   *hold_scalar_arena = (int *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(int));
+    int   *hold_simd_arena   = (int *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(int));
+    const float x2_min = 44015068.0f;
+    const int hold_hops = 400;
+    const float min_erl = 0.01f;
+    int ni, form, o;
+    /* Primary input role = x2, primary output role = erl; y2 (secondary
+     * read-only input) and hold (secondary in-place int32 array) stay fixed
+     * at offset 0 -- same >2-buffer scope decision as
+     * test_coherence_ema_gate_edge above. hold is still read-write, so it
+     * gets its own scalar/simd arena pair even though its offset never
+     * varies (a shared arena would let the scalar call's mutation leak into
+     * the simd call's "before" state). */
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (form = 0; form < EDGE_FORM_COUNT; ++form) {
+            for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
+                int in_off, out_off;
+                edge_offsets_for_form(form, o, &in_off, &out_off);
+
+                edge_fill_canary_f(x2_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(y2_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(erl_scalar_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(erl_simd_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_i(hold_scalar_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_i(hold_simd_arena, EDGE_ARENA_LEN);
+
+                fill_floats(x2_arena + in_off, n);
+                fill_floats(y2_arena, n);
+                fill_floats(erl_scalar_arena + out_off, n);
+                memcpy(erl_simd_arena + out_off, erl_scalar_arena + out_off, (size_t)n * sizeof(float));
+                fill_ints(hold_scalar_arena, n);
+                memcpy(hold_simd_arena, hold_scalar_arena, (size_t)n * sizeof(int));
+
+                sk_erl_bin_update_f32_scalar(erl_scalar_arena + out_off, hold_scalar_arena,
+                                              x2_arena + in_off, y2_arena,
+                                              x2_min, hold_hops, min_erl, n);
+                sk_erl_bin_update_f32(erl_simd_arena + out_off, hold_simd_arena,
+                                       x2_arena + in_off, y2_arena,
+                                       x2_min, hold_hops, min_erl, n);
+
+                check_bits_classify("erl_bin_update_f32_edge:erl", n, form * 100 + o,
+                                     erl_simd_arena + out_off, erl_scalar_arena + out_off, n);
+                check_ints_or_die("erl_bin_update_f32_edge:hold", n, form * 100 + o,
+                                   hold_simd_arena, hold_scalar_arena, n);
+
+                edge_check_canary_f("erl_bin_update_f32_edge:x2", x2_arena, EDGE_ARENA_LEN, in_off, n);
+                edge_check_canary_f("erl_bin_update_f32_edge:y2", y2_arena, EDGE_ARENA_LEN, 0, n);
+                edge_check_canary_f("erl_bin_update_f32_edge:erl_scalar", erl_scalar_arena, EDGE_ARENA_LEN, out_off, n);
+                edge_check_canary_f("erl_bin_update_f32_edge:erl_simd", erl_simd_arena, EDGE_ARENA_LEN, out_off, n);
+                edge_check_canary_i("erl_bin_update_f32_edge:hold_scalar", hold_scalar_arena, EDGE_ARENA_LEN, 0, n);
+                edge_check_canary_i("erl_bin_update_f32_edge:hold_simd", hold_simd_arena, EDGE_ARENA_LEN, 0, n);
+            }
+        }
+    }
+    free(x2_arena); free(y2_arena); free(erl_scalar_arena); free(erl_simd_arena);
+    free(hold_scalar_arena); free(hold_simd_arena);
+    printf("PASS erl_bin_update_f32_edge (n=0..17+existing x x2/erl offset 1..15 x 3 forms; "
+           "y2/hold fixed@0, canary-guarded)\n");
+}
+
+/* ═══════════════════════════ correctness: kernel 25 ══════════════════════ */
+
+static void test_dec1_floorintmin_s32_edge(void) {
+    int *x_scalar_arena = (int *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(int));
+    int *x_simd_arena   = (int *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(int));
+    int ni, o;
+    /* Single in-place int32 buffer, no separate output parameter -- same
+     * shape as sk_mask_zero_f32's edge test above (see that test's own
+     * comment: no distinct input/output role to assign the 3-form matrix
+     * to), so this sweeps only the one offset. */
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
+            edge_fill_canary_i(x_scalar_arena, EDGE_ARENA_LEN);
+            edge_fill_canary_i(x_simd_arena, EDGE_ARENA_LEN);
+            fill_ints(x_scalar_arena + o, n);
+            memcpy(x_simd_arena + o, x_scalar_arena + o, (size_t)n * sizeof(int));
+
+            sk_dec1_floorintmin_s32_scalar(x_scalar_arena + o, n);
+            sk_dec1_floorintmin_s32(x_simd_arena + o, n);
+
+            check_ints_or_die("dec1_floorintmin_s32_edge", n, o, x_simd_arena + o, x_scalar_arena + o, n);
+            edge_check_canary_i("dec1_floorintmin_s32_edge:x_scalar", x_scalar_arena, EDGE_ARENA_LEN, o, n);
+            edge_check_canary_i("dec1_floorintmin_s32_edge:x_simd", x_simd_arena, EDGE_ARENA_LEN, o, n);
+        }
+    }
+    free(x_scalar_arena); free(x_simd_arena);
+    printf("PASS dec1_floorintmin_s32_edge (n=0..17+existing x offset 1..15, in-place, canary-guarded)\n");
+}
+
+/* ═══════════════════════════ correctness: kernel 26 ══════════════════════ */
+
+static void test_erl_hold_expire_edge(void) {
+    int   *hold_arena = (int *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(int));
+    float *erl_scalar_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *erl_simd_arena   = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    const float max_erl = 1000.0f;
+    int ni, form, o;
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (form = 0; form < EDGE_FORM_COUNT; ++form) {
+            for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
+                int in_off, out_off;
+                edge_offsets_for_form(form, o, &in_off, &out_off);
+
+                edge_fill_canary_i(hold_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(erl_scalar_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(erl_simd_arena, EDGE_ARENA_LEN);
+                fill_ints(hold_arena + in_off, n);
+                fill_floats(erl_scalar_arena + out_off, n);
+                memcpy(erl_simd_arena + out_off, erl_scalar_arena + out_off, (size_t)n * sizeof(float));
+
+                sk_erl_hold_expire_f32_scalar(erl_scalar_arena + out_off, hold_arena + in_off, max_erl, n);
+                sk_erl_hold_expire_f32(erl_simd_arena + out_off, hold_arena + in_off, max_erl, n);
+
+                check_bits_classify("erl_hold_expire_f32_edge", n, form * 100 + o,
+                                     erl_simd_arena + out_off, erl_scalar_arena + out_off, n);
+                edge_check_canary_i("erl_hold_expire_f32_edge:hold", hold_arena, EDGE_ARENA_LEN, in_off, n);
+                edge_check_canary_f("erl_hold_expire_f32_edge:erl_scalar", erl_scalar_arena, EDGE_ARENA_LEN, out_off, n);
+                edge_check_canary_f("erl_hold_expire_f32_edge:erl_simd", erl_simd_arena, EDGE_ARENA_LEN, out_off, n);
+            }
+        }
+    }
+    free(hold_arena); free(erl_scalar_arena); free(erl_simd_arena);
+    printf("PASS erl_hold_expire_f32_edge (n=0..17+existing x hold/erl offset 1..15 x 3 forms, canary-guarded)\n");
+}
+
 /* ═══════════════════════════════ microbench ═══════════════════════════════
  * n=257, ~200k reps, CLOCK_MONOTONIC. `g_bench_sink` (volatile) forces the
  * compiler to keep each call's result live, so the timing loop can't be
@@ -2035,6 +2321,116 @@ static void test_mask_zero(void) {
     printf("PASS mask_zero_f32\n");
 }
 
+/* ═══════════════════════════ correctness: kernel 23 ══════════════════════ */
+
+static void test_noise_spectrum_update(void) {
+    float noise_init[SK_TEST_MAX_N], noise_scalar[SK_TEST_MAX_N], noise_simd[SK_TEST_MAX_N];
+    float spectrum[SK_TEST_MAX_N];
+    int ni, t, m10;
+    const float alpha = 0.0024981253125391234f;
+    const float min_noise = 1.0e-4f;
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (t = 0; t < TRIALS; ++t) {
+            /* apply_mask10 is a call-level (not per-lane) scalar in the real
+             * caller -- exercise both values, not just one, since it selects
+             * a genuinely different instruction sequence inside the rising
+             * branch (see kernel 23's header comment). */
+            for (m10 = 0; m10 < 2; ++m10) {
+                fill_floats(noise_init, n);
+                fill_floats(spectrum, n);
+                memcpy(noise_scalar, noise_init, (size_t)n * sizeof(float));
+                memcpy(noise_simd, noise_init, (size_t)n * sizeof(float));
+                sk_noise_spectrum_update_f32_scalar(noise_scalar, spectrum, alpha, m10, min_noise, n);
+                sk_noise_spectrum_update_f32(noise_simd, spectrum, alpha, m10, min_noise, n);
+                check_bits_classify("noise_spectrum_update_f32", n, t * 2 + m10, noise_simd, noise_scalar, n);
+            }
+        }
+    }
+    printf("PASS noise_spectrum_update_f32\n");
+}
+
+/* ═══════════════════════════ correctness: kernel 24 ══════════════════════ */
+
+static void test_erl_bin_update(void) {
+    float erl_init[SK_TEST_MAX_N], erl_scalar[SK_TEST_MAX_N], erl_simd[SK_TEST_MAX_N];
+    int hold_init[SK_TEST_MAX_N], hold_scalar[SK_TEST_MAX_N], hold_simd[SK_TEST_MAX_N];
+    float x2[SK_TEST_MAX_N], y2[SK_TEST_MAX_N];
+    int ni, t;
+    const float x2_min = 44015068.0f;   /* ERL_AEC3_X2_MIN */
+    const int hold_hops = 400;          /* ERL_HOLD_HOPS */
+    const float min_erl = 0.01f;        /* ERL_MIN_ERL */
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (t = 0; t < TRIALS; ++t) {
+            fill_floats(erl_init, n);
+            fill_floats(x2, n);
+            fill_floats(y2, n);
+            fill_ints(hold_init, n);
+            memcpy(erl_scalar, erl_init, (size_t)n * sizeof(float));
+            memcpy(erl_simd, erl_init, (size_t)n * sizeof(float));
+            memcpy(hold_scalar, hold_init, (size_t)n * sizeof(int));
+            memcpy(hold_simd, hold_init, (size_t)n * sizeof(int));
+
+            sk_erl_bin_update_f32_scalar(erl_scalar, hold_scalar, x2, y2,
+                                          x2_min, hold_hops, min_erl, n);
+            sk_erl_bin_update_f32(erl_simd, hold_simd, x2, y2,
+                                   x2_min, hold_hops, min_erl, n);
+
+            /* classified, not strict -- x2/y2 are drawn from the full
+             * special-value pool including +-Inf/0, and the erl+delta blend
+             * can legitimately produce a NaN from finite/Inf operands (e.g.
+             * erl[k]==+Inf with new_erl==-Inf gives delta==-Inf, blend
+             * (+Inf)+(-Inf)==NaN) -- see kernel 24's header comment. */
+            check_bits_classify("erl_bin_update_f32:erl", n, t, erl_simd, erl_scalar, n);
+            /* hold_counters is exact int32 -- always strict. */
+            check_ints_or_die("erl_bin_update_f32:hold", n, t, hold_simd, hold_scalar, n);
+        }
+    }
+    printf("PASS erl_bin_update_f32\n");
+}
+
+/* ═══════════════════════════ correctness: kernel 25 ══════════════════════ */
+
+static void test_dec1_floorintmin_s32(void) {
+    int x_init[SK_TEST_MAX_N], x_scalar[SK_TEST_MAX_N], x_simd[SK_TEST_MAX_N];
+    int ni, t;
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (t = 0; t < TRIALS; ++t) {
+            fill_ints(x_init, n);
+            memcpy(x_scalar, x_init, (size_t)n * sizeof(int));
+            memcpy(x_simd, x_init, (size_t)n * sizeof(int));
+            sk_dec1_floorintmin_s32_scalar(x_scalar, n);
+            sk_dec1_floorintmin_s32(x_simd, n);
+            check_ints_or_die("dec1_floorintmin_s32", n, t, x_simd, x_scalar, n);
+        }
+    }
+    printf("PASS dec1_floorintmin_s32\n");
+}
+
+/* ═══════════════════════════ correctness: kernel 26 ══════════════════════ */
+
+static void test_erl_hold_expire(void) {
+    float erl_init[SK_TEST_MAX_N], erl_scalar[SK_TEST_MAX_N], erl_simd[SK_TEST_MAX_N];
+    int hold[SK_TEST_MAX_N];
+    int ni, t;
+    const float max_erl = 1000.0f; /* ERL_MAX_ERL */
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (t = 0; t < TRIALS; ++t) {
+            fill_floats(erl_init, n);
+            fill_ints(hold, n);
+            memcpy(erl_scalar, erl_init, (size_t)n * sizeof(float));
+            memcpy(erl_simd, erl_init, (size_t)n * sizeof(float));
+            sk_erl_hold_expire_f32_scalar(erl_scalar, hold, max_erl, n);
+            sk_erl_hold_expire_f32(erl_simd, hold, max_erl, n);
+            check_bits_classify("erl_hold_expire_f32", n, t, erl_simd, erl_scalar, n);
+        }
+    }
+    printf("PASS erl_hold_expire_f32\n");
+}
+
 /* ═══════════════════════ NaN corpus: cabs/cmag2 family (STRICT) ═══════════
  * The actual F10 regression gate: sk__cabs_np_neon4 must bit-match
  * sk__cabs_np_elem across every NaN pattern x length combination. Any
@@ -2373,6 +2769,81 @@ static void test_mask_zero_nan(void) {
     printf("PASS mask_zero_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
 }
 
+static void test_noise_spectrum_update_nan(void) {
+    float noise_init[SK_TEST_MAX_N], noise_scalar[SK_TEST_MAX_N], noise_simd[SK_TEST_MAX_N];
+    float spectrum[SK_TEST_MAX_N];
+    int ni, m10;
+    const float alpha = 0.0024981253125391234f;
+    const float min_noise = 1.0e-4f;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        for (m10 = 0; m10 < 2; ++m10) {
+            fill_floats(noise_init, n);
+            fill_floats_nan_sprinkle(spectrum, n);
+            memcpy(noise_scalar, noise_init, (size_t)n * sizeof(float));
+            memcpy(noise_simd, noise_init, (size_t)n * sizeof(float));
+            sk_noise_spectrum_update_f32_scalar(noise_scalar, spectrum, alpha, m10, min_noise, n);
+            sk_noise_spectrum_update_f32(noise_simd, spectrum, alpha, m10, min_noise, n);
+            check_bits_classify("noise_spectrum_update_f32_nan", n, m10, noise_simd, noise_scalar, n);
+        }
+    }
+    printf("PASS noise_spectrum_update_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+static void test_erl_bin_update_nan(void) {
+    float erl_init[SK_TEST_MAX_N], erl_scalar[SK_TEST_MAX_N], erl_simd[SK_TEST_MAX_N];
+    int hold_init[SK_TEST_MAX_N], hold_scalar[SK_TEST_MAX_N], hold_simd[SK_TEST_MAX_N];
+    float x2[SK_TEST_MAX_N], y2[SK_TEST_MAX_N];
+    int ni;
+    const float x2_min = 44015068.0f;
+    const int hold_hops = 400;
+    const float min_erl = 0.01f;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats(erl_init, n);
+        fill_floats_nan_sprinkle(x2, n);
+        fill_floats_nan_sprinkle(y2, n);
+        fill_ints(hold_init, n);
+        memcpy(erl_scalar, erl_init, (size_t)n * sizeof(float));
+        memcpy(erl_simd, erl_init, (size_t)n * sizeof(float));
+        memcpy(hold_scalar, hold_init, (size_t)n * sizeof(int));
+        memcpy(hold_simd, hold_init, (size_t)n * sizeof(int));
+
+        sk_erl_bin_update_f32_scalar(erl_scalar, hold_scalar, x2, y2,
+                                      x2_min, hold_hops, min_erl, n);
+        sk_erl_bin_update_f32(erl_simd, hold_simd, x2, y2,
+                               x2_min, hold_hops, min_erl, n);
+
+        check_bits_classify("erl_bin_update_f32_nan:erl", n, 0, erl_simd, erl_scalar, n);
+        check_ints_or_die("erl_bin_update_f32_nan:hold", n, 0, hold_simd, hold_scalar, n);
+    }
+    printf("PASS erl_bin_update_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
+/* dec1_floorintmin_s32 has no NaN corpus test: it operates on int32 hold_counters,
+ * which has no NaN/Inf concept at all -- exact integer compare-then-subtract,
+ * already covered exhaustively (incl. every special_int_pool value, now
+ * including INT32_MIN) by test_dec1_floorintmin_s32() and
+ * test_dec1_floorintmin_s32_edge() above. */
+
+static void test_erl_hold_expire_nan(void) {
+    float erl_init[SK_TEST_MAX_N], erl_scalar[SK_TEST_MAX_N], erl_simd[SK_TEST_MAX_N];
+    int hold[SK_TEST_MAX_N];
+    int ni;
+    const float max_erl = 1000.0f;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats_nan_sprinkle(erl_init, n);
+        fill_ints(hold, n);
+        memcpy(erl_scalar, erl_init, (size_t)n * sizeof(float));
+        memcpy(erl_simd, erl_init, (size_t)n * sizeof(float));
+        sk_erl_hold_expire_f32_scalar(erl_scalar, hold, max_erl, n);
+        sk_erl_hold_expire_f32(erl_simd, hold, max_erl, n);
+        check_bits_classify("erl_hold_expire_f32_nan", n, 0, erl_simd, erl_scalar, n);
+    }
+    printf("PASS erl_hold_expire_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
+}
+
 static void bench_coherence_ema_gate(void) {
     Complex echo[BENCH_N], near_spec[BENCH_N];
     float abs_echo[BENCH_N], abs_near[BENCH_N];
@@ -2497,11 +2968,102 @@ static void bench_mask_zero(void) {
     }
 }
 
+static void bench_noise_spectrum_update(void) {
+    float noise[BENCH_N], spectrum[BENCH_N];
+    fill_bench_floats(noise, BENCH_N);
+    fill_bench_floats(spectrum, BENCH_N);
+    {
+        double t0, t1; int r;
+        t0 = now_ns();
+        for (r = 0; r < BENCH_REPS; ++r) { sk_noise_spectrum_update_f32_scalar(noise, spectrum, 0.0025f, 1, 1.0e-4f, BENCH_N); g_bench_sink += noise[0]; }
+        t1 = now_ns();
+        {
+            double ns_scalar = (t1 - t0) / BENCH_REPS;
+            double t2 = now_ns();
+            for (r = 0; r < BENCH_REPS; ++r) { sk_noise_spectrum_update_f32(noise, spectrum, 0.0025f, 1, 1.0e-4f, BENCH_N); g_bench_sink += noise[0]; }
+            {
+                double t3 = now_ns();
+                report_bench("noise_spectrum_update_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
+            }
+        }
+    }
+}
+
+static void bench_erl_bin_update(void) {
+    float erl[BENCH_N], x2[BENCH_N], y2[BENCH_N];
+    int hold[BENCH_N];
+    int i;
+    fill_bench_floats(erl, BENCH_N);
+    fill_bench_floats(x2, BENCH_N);
+    fill_bench_floats(y2, BENCH_N);
+    for (i = 0; i < BENCH_N; ++i) hold[i] = 0;
+    {
+        double t0, t1; int r;
+        t0 = now_ns();
+        for (r = 0; r < BENCH_REPS; ++r) { sk_erl_bin_update_f32_scalar(erl, hold, x2, y2, 44015068.0f, 400, 0.01f, BENCH_N); g_bench_sink += erl[0]; }
+        t1 = now_ns();
+        {
+            double ns_scalar = (t1 - t0) / BENCH_REPS;
+            double t2 = now_ns();
+            for (r = 0; r < BENCH_REPS; ++r) { sk_erl_bin_update_f32(erl, hold, x2, y2, 44015068.0f, 400, 0.01f, BENCH_N); g_bench_sink += erl[0]; }
+            {
+                double t3 = now_ns();
+                report_bench("erl_bin_update_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
+            }
+        }
+    }
+}
+
+static void bench_dec1_floorintmin_s32(void) {
+    int x[BENCH_N];
+    int i;
+    for (i = 0; i < BENCH_N; ++i) x[i] = i;
+    {
+        double t0, t1; int r;
+        t0 = now_ns();
+        for (r = 0; r < BENCH_REPS; ++r) { sk_dec1_floorintmin_s32_scalar(x, BENCH_N); g_bench_sink += x[0]; }
+        t1 = now_ns();
+        {
+            double ns_scalar = (t1 - t0) / BENCH_REPS;
+            double t2 = now_ns();
+            for (r = 0; r < BENCH_REPS; ++r) { sk_dec1_floorintmin_s32(x, BENCH_N); g_bench_sink += x[0]; }
+            {
+                double t3 = now_ns();
+                report_bench("dec1_floorintmin_s32", ns_scalar, (t3 - t2) / BENCH_REPS);
+            }
+        }
+    }
+}
+
+static void bench_erl_hold_expire(void) {
+    float erl[BENCH_N];
+    int hold[BENCH_N];
+    int i;
+    fill_bench_floats(erl, BENCH_N);
+    for (i = 0; i < BENCH_N; ++i) hold[i] = (i & 1) ? -1 : 1;
+    {
+        double t0, t1; int r;
+        t0 = now_ns();
+        for (r = 0; r < BENCH_REPS; ++r) { sk_erl_hold_expire_f32_scalar(erl, hold, 1000.0f, BENCH_N); g_bench_sink += erl[0]; }
+        t1 = now_ns();
+        {
+            double ns_scalar = (t1 - t0) / BENCH_REPS;
+            double t2 = now_ns();
+            for (r = 0; r < BENCH_REPS; ++r) { sk_erl_hold_expire_f32(erl, hold, 1000.0f, BENCH_N); g_bench_sink += erl[0]; }
+            {
+                double t3 = now_ns();
+                report_bench("erl_hold_expire_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
+            }
+        }
+    }
+}
+
 /* ═══════════════════════════════════ main ══════════════════════════════════ */
 
 int main(void) {
     init_special_pool();
     init_nan_pool();
+    init_special_int_pool();
 
     test_cabs_np();
     test_cmag2_np();
@@ -2519,6 +3081,10 @@ int main(void) {
     test_n2_track();
     test_n2_initial_track();
     test_mask_zero();
+    test_noise_spectrum_update();
+    test_erl_bin_update();
+    test_dec1_floorintmin_s32();
+    test_erl_hold_expire();
 
     printf("\n--- NaN corpus (review F10) ---\n");
     test_cabs_np_nan();
@@ -2537,6 +3103,9 @@ int main(void) {
     test_n2_track_nan();
     test_n2_initial_track_nan();
     test_mask_zero_nan();
+    test_noise_spectrum_update_nan();
+    test_erl_bin_update_nan();
+    test_erl_hold_expire_nan();
     if (g_nan_soft_mismatch_count > 0) {
         printf("NAN SWEEP: %d mismatch(es) outside the cabs/cmag2 family "
                "-- see BOTH-NAN/HARD-FAIL lines above; classified below\n",
@@ -2563,6 +3132,10 @@ int main(void) {
     test_n2_track_edge();
     test_n2_initial_track_edge();
     test_mask_zero_edge();
+    test_noise_spectrum_update_edge();
+    test_erl_bin_update_edge();
+    test_dec1_floorintmin_s32_edge();
+    test_erl_hold_expire_edge();
     /* Second call (round-3 B05): the table below now reflects the edge
      * matrix's own classify tallies too, cumulative with the first printout
      * above -- g_tally/g_hard_fail_count are running totals for the whole
@@ -2587,6 +3160,10 @@ int main(void) {
     bench_n2_track();
     bench_n2_initial_track();
     bench_mask_zero();
+    bench_noise_spectrum_update();
+    bench_erl_bin_update();
+    bench_dec1_floorintmin_s32();
+    bench_erl_hold_expire();
 
     if (g_hard_fail_count > 0) {
         fprintf(stderr,

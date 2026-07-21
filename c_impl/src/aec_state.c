@@ -229,12 +229,35 @@ void aec_state_update(AecState *s,
                         external_delay,
                         s->strong_not_saturated_render_blocks);
 
-    /* 3. active_render + saturation block counters. */
+    /* 3. active_render + saturation block counters.
+     *
+     * Both counters are pure threshold-gate state (never read as a raw
+     * value, only ever compared against a fixed threshold), so each
+     * increment is saturated at the smallest cap that reproduces the
+     * unbounded original's comparison result identically forever, avoiding
+     * signed-integer-overflow UB on a very long streaming session:
+     *
+     *   blocks_with_active_render: sole reader is
+     *     aec_state_active_render() -- "> AEC_STATE_ACTIVE_RENDER_BLOCKS"
+     *     above. Cap at AEC_STATE_ACTIVE_RENDER_BLOCKS + 1 (the smallest
+     *     value still `>` the threshold) by gating the increment on
+     *     `<= AEC_STATE_ACTIVE_RENDER_BLOCKS`.
+     *   strong_not_saturated_render_blocks: passed into filter_delay_update()
+     *     (just below) which only ever tests
+     *     "< FILTER_ADAPTATION_THRESHOLD_HOPS" (filter_delay.h). Cap at
+     *     exactly that threshold -- once the counter reaches it the "<"
+     *     comparison is permanently false either way.
+     */
     if (active_render) {
-        s->blocks_with_active_render += 1;
+        if (s->blocks_with_active_render <= AEC_STATE_ACTIVE_RENDER_BLOCKS) {
+            s->blocks_with_active_render += 1;
+        }
     }
     if (active_render && !s->capture_signal_saturation) {
-        s->strong_not_saturated_render_blocks += 1;
+        if (s->strong_not_saturated_render_blocks
+                < FILTER_ADAPTATION_THRESHOLD_HOPS) {
+            s->strong_not_saturated_render_blocks += 1;
+        }
     }
 
     /* 4a. ERLE — transition-triggered soft reset BEFORE update. */

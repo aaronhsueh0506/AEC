@@ -7,6 +7,8 @@
  */
 #include "filter_quality.h"
 
+#include <limits.h>   /* INT_MAX */
+
 void fq_init(FilteringQualityAnalyzer *m, int use_linear_filter) {
     m->use_linear_filter = use_linear_filter ? 1 : 0;
     m->overall_usable = 0;
@@ -32,13 +34,33 @@ void fq_update(FilteringQualityAnalyzer *m,
     int filter_update = active_render && !saturated_capture;
     int startup_ok, reset_ok, usable, gate3;
 
+    /* All three counters below: UBSan-confirmed signed-overflow fix,
+     * floored at INT_MAX rather than at either gate threshold
+     * (FQ_STARTUP_HOPS / FQ_RESET_HOPS). Unlike a pure boolean-gate
+     * counter, all three raw values are read bit-exact by
+     * test/parity_filter_quality.c (`got[3..4]` via fq_startup_blocks/
+     * fq_reset_blocks, `got[6]` via m.convergence_hops_counter directly),
+     * which mirrors this module's Python reference's own unbounded
+     * counters over a multi-frame sequence -- capping at the gate
+     * threshold would still satisfy the `> FQ_STARTUP_HOPS`/
+     * `> FQ_RESET_HOPS` booleans, but would desync the raw value from the
+     * golden the very next hop (same trap as erl_estimator.c's
+     * hold_counter_time_domain -- see that fix's comment).
+     * convergence_hops_counter specifically is also documented in the
+     * header as "diagnostic only (no gate consumes it)" -- the textbook
+     * case for a saturating diagnostic counter. Capping at INT_MAX instead
+     * is a no-op for every practically-reachable hop count while
+     * eliminating the UB at the true overflow boundary. */
     if (filter_update) {
-        m->filter_update_blocks_since_reset += 1;
-        m->filter_update_blocks_since_start += 1;
+        if (m->filter_update_blocks_since_reset < INT_MAX)
+            m->filter_update_blocks_since_reset += 1;
+        if (m->filter_update_blocks_since_start < INT_MAX)
+            m->filter_update_blocks_since_start += 1;
     }
     if (any_filter_converged) {
         m->convergence_seen = 1;
-        m->convergence_hops_counter += 1;
+        if (m->convergence_hops_counter < INT_MAX)
+            m->convergence_hops_counter += 1;
     }
 
     startup_ok = m->filter_update_blocks_since_start > FQ_STARTUP_HOPS;

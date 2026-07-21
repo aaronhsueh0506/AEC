@@ -160,6 +160,12 @@ typedef struct {
     int ring[DA_HIST_WINDOW];
     int ring_index;
     int candidate;
+    int candidate_valid;   /* internal-only: 0 forces a da_argmax_i rescan on
+                             * the next aggregate() call (set on every reset();
+                             * `candidate` itself deliberately is NOT reset --
+                             * see da_highest_peak_reset -- this flag exists
+                             * precisely so the incremental-argmax scheme never
+                             * trusts that stale value). */
 } DaHighestPeak;
 
 typedef struct {
@@ -169,6 +175,14 @@ typedef struct {
     int number_updates;
     int pre_echo_candidate;
     int block_size_log2;
+    int argmax_idx;        /* incremental-argmax tracking (raw bin index, NOT
+                             * shifted by block_size_log2) -- maintained every
+                             * call regardless of which branch (windowed
+                             * local-max vs steady-state) produces
+                             * pre_echo_candidate, so it is already warm by
+                             * the time number_updates crosses the steady-
+                             * state threshold. */
+    int argmax_valid;
 } DaPreEcho;
 
 typedef struct {

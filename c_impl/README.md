@@ -174,6 +174,20 @@ malloc path (`test_static_aec.c`).
   (worst per-case delta −0.021 echo, all bucket means ≤0.002), waveform drift
   median −95 dB, 1-hour soak (delay trajectory identical, power-EMA worst rel
   diff 1.3e-5, final ERLE matching to 4 digits).
+- `test/test_counter_saturation.c` (`make test-counter-saturation`) — the
+  **permanent counter-saturation regression test** (round-6 review): for
+  every unbounded `struct_field += 1` / `-= 1` counter-overflow fix across
+  rounds 4-6 (plus the round-6 sweep's own new finds), proves cap-1→cap,
+  cap→cap (no-op), thousands-of-calls-past-cap runaway-proof, and
+  decision-invariance (the boolean/comparison the counter feeds is identical
+  at the cap vs. a synthetic huge value standing in for the unbounded value
+  the original bug would have produced). `FilterPlateauDetector`'s trio
+  (widened to `int64_t` rather than capped, to avoid corrupting the
+  far_ratio/dt_ratio they feed) gets a dedicated ratio-preservation +
+  no-wraparound-past-`INT32_MAX` case. Replaces the ad hoc/throwaway UBSan
+  probes each prior round wrote to verify these fixes.
+  `test/run_counter_saturation_ubsan.sh` builds+runs this same source under
+  `-fsanitize=undefined` (same shape as `test/run_selftest_ubsan.sh`).
 
 The remaining per-module `test/parity_*.c` ⟷ `python/diag/gen_*_golden.py`
 harnesses are kept as **historical** diagnostics — they compare against fp64
@@ -190,7 +204,7 @@ harness design.
 For embedded targets, build one pool and place the whole instance in it:
 
 ```c
-size_t bytes = aec_get_mem_size(&cfg);   /* balanced @ hop=160: 538,320 B (KISS) / 534,192 B (NE10) */
+size_t bytes = aec_get_mem_size(&cfg);   /* balanced @ hop=160: 536,288 B (KISS) / 532,160 B (NE10) */
 void*  pool  = your_static_alloc(bytes); /* MUST be 16-byte aligned (posix_memalign, etc.) */
 Aec*   a     = aec_init(pool, bytes, &cfg);  /* NULL on failure; byte-equal to aec_create output */
 /* ... aec_process(a, ...) ... */

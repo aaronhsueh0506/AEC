@@ -64,15 +64,45 @@ delay on the pool is:
 
 | Backend | Pool |
 |---|---:|
-| KISS (host/reference) | **538,320 B (525.7 KB)** |
-| NE10 (embedded)       | **534,192 B (521.7 KB)** |
+| KISS (host/reference) | **536,288 B (523.7 KB)** |
+| NE10 (embedded)       | **532,160 B (519.7 KB)** |
 
 (Both figures now include everything — NE10's three R2C/C2R twiddle configs
 are carved from the pool since vendored patch P0001; there are no
 backend-internal heap allocations left on the static path, enforced by
 `test/test_zero_heap_aec.c`.) Both figures are static==dynamic byte-equal, verified by
-`test_static_aec.c` (669,920 samples, 50-cycle init/destroy leak loop). The
-previous figures (537,680 B KISS / 533,552 B NE10) grew by exactly
+`test_static_aec.c` (669,920 samples, 50-cycle init/destroy leak loop). Most
+recently, −2,096 B (both backends, every rate) from removing `PBFDAF`'s
+`scr_far_cmag2` instance-scratch field (round-4 review D2): `pbfdaf_frontend`
+now computes its `|far_spec[k]|²` scratch straight into `scr_e2` (normally
+`pbfdaf_get_error_energy`'s `|error_spec[k]|²` scratch) instead of a
+dedicated field — cross-phase reuse is safe because frontend's own use is
+fully write-then-read within a single call, well before that hop's (single)
+`get_error_energy` call runs later in the same hop and unconditionally
+overwrites every element before reading any back (see the field's comment in
+pbfdkf.h and pbfdaf_frontend's own comment in pbfdkf.c for the full
+argument). Exactly undoes the `scr_far_cmag2` addition below (2 `PBFDAF`
+instances × `ALIGN16(n_freqs * sizeof(float))` at 16 kHz), confirmed via a
+direct before/after `test_static_aec` re-measurement on both backends (KISS
+538,384→536,288 B, NE10 534,256→532,160 B), both still static==dynamic
+byte-equal. Before that: +16 B (both backends, every rate) from the
+`da_highest_peak_reset`
+`candidate_valid` + `da_pre_echo_reset` `argmax_idx`/`argmax_valid` fields
+added to `DaHighestPeak`/`DaPreEcho` (the incremental-argmax rewrite of
+`da_highest_peak_aggregate`/`da_pre_echo_aggregate`, round-of-perf-fixes,
+2026-07) — these 3 new `int` fields are absorbed automatically via
+`sizeof(Aec)` (DelayAec3 is embedded by value in `Aec`, not part of the
+manually-tracked `aec_get_mem_size()` byte-budget), so no pool-constant
+edits were needed, only this figure. Before that: the previous figures
+(538,320 B KISS / 534,192 B NE10) grew by exactly
+`ALIGN16(n_freqs * sizeof(float))` per `PBFDAF` instance (2 instances:
+`main_filter.base` + `shadow_filter`) — 2,096 B at 16 kHz (n_freqs=257) —
+for the redundant-cmag2 dedup in `pbfdaf_frontend` (round-of-perf-fixes,
+2026-07): a new `scr_far_cmag2` instance-scratch field lets the far-power
+EMA update compute `|far_spec[k]|²` once per hop instead of twice (once for
+`far_psd_sum`, again inside `sk_cmag2_np_f32`/`sk_ema_cmag2_f32`). Before
+that, the previous-previous figures (537,680 B KISS / 533,552 B NE10) grew
+by exactly
 `ALIGN16(hop_size * sizeof(float))` — 640 B at 16 kHz (hop=160) — for the F09
 Variant A' streaming-FIFO rewrite's `fifo_zero_ref`: an immutable all-zero
 hop carved right after `render_fifo`, used as the underrun reference so the
@@ -156,7 +186,7 @@ gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/in
     test_static_aec.c $(find src -name '*.c') \
     $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o bin/test_static_aec
 ./bin/test_static_aec mic.wav ref.wav
-# → Pool: 538320 bytes (525.7 KB), frames: N   [KISS 16 kHz; per-rate table below]
+# → Pool: 536288 bytes (523.7 KB), frames: N   [KISS 16 kHz; per-rate table below]
 #   PASS: all <2*N> samples byte-equal (static == dynamic)
 ```
 
@@ -188,7 +218,7 @@ heap-only (`aec_create`), so to see the static-path lines a harness must call
 `aec_init` directly and raise the debug level; the format is:
 
 ```text
-# [AEC][t= 0.000s][f=    0][Init] static-mem pool=538320 bytes (525.7 KB) sr=16000 hop=160 preset_q=0.001 cng=0
+# [AEC][t= 0.000s][f=    0][Init] static-mem pool=536288 bytes (523.7 KB) sr=16000 hop=160 preset_q=0.001 cng=0
 # [AEC][t= ...   ][f= ... ][Init] destroy: static path (no free; caller owns pool)
 ```
 
@@ -214,13 +244,36 @@ Measured via `aec_get_mem_size`, KISS backend (host/reference build):
 | Region | Size |
 |---|---:|
 | `ref_ring` delay buffer (2048 ms @ 16 kHz)                 | 128 KB |
-| Main `pbfdkf` (W, X_buf, P, FFT cfgs, scratch)             | 66.6 KB |
-| Shadow `pbfdaf` (same layout, no Kalman P)                 | 61.5 KB |
+| Main `pbfdkf` (W, X_buf, P, FFT cfgs, scratch)             | 67.6 KB |
+| Shadow `pbfdaf` (same layout, no Kalman P)                 | 62.5 KB |
 | `fft_wrapper` post FFT (KISS cfgs in-pool)                 | 16.6 KB |
-| `Aec` struct + AEC3 chain backing arrays (state / RES-est / suppression / stationarity / LFS / run + hop scratch, incl. the de-stacked instance scratch) + render FIFO + `fifo_zero_ref` + RSA counters | ~248.6 KB |
-| **Total (KISS)**                                           | **525.7 KB** (538,320 B) |
+| `Aec` struct + AEC3 chain backing arrays (state / RES-est / suppression / stationarity / LFS / run + hop scratch, incl. the de-stacked instance scratch) + render FIFO + `fifo_zero_ref` + RSA counters | ~246.6 KB |
+| **Total (KISS)**                                           | **523.7 KB** (536,288 B) |
 
-What moved since the previous figure (526.7 KB / 539,328 B): +24.5 KB of
+Most recently, round-4 review's D2 removed `PBFDAF`'s `scr_far_cmag2`
+instance-scratch field (`[n_freqs]`, one per `PBFDAF` instance): rather than
+its own dedicated buffer, `pbfdaf_frontend`'s `|far_spec[k]|²` scratch now
+borrows `scr_e2` (normally `pbfdaf_get_error_energy`'s `|error_spec[k]|²`
+scratch) for the duration of its own call. Safe because frontend
+write-then-reads the buffer fully within its own call, strictly before that
+hop's one `get_error_energy` call (aec.c step 13, `has_shadow` block) later
+overwrites-then-reads it fully within ITS own call — no code in between
+reads either phase's data through the other's stale contents. **−2,096 B**
+(16 kHz), exactly undoing the `scr_far_cmag2` addition described below; see
+the per-rate table for the other rates/backends. Before that, the
+FilterStateBridge dead-code cleanup follow-up (Codex
+review, 2026-07) removed `Aec3PostRunScratch.bridge_taps` (`[fft_size]`
+float) entirely: the buffer had been write-only-by-nobody since a prior
+round already deleted the one call (`filter_state_bridge_build`'s
+unconditional per-hop IRFFT into it) that used to write it, and it had no
+readers even before that — **−2,048 B** (16 kHz, `ALIGN16(fft_size=512 ×
+4)`); see the per-rate table below for the other rates/backends. Before that,
+the `pbfdaf_frontend` redundant-cmag2 dedup (round-of-perf-fixes,
+2026-07) added a new `scr_far_cmag2` instance-scratch field (`[n_freqs]`, one
+per `PBFDAF` instance) so far-power EMA no longer recomputes `|far_spec[k]|²`
+a second time inside `sk_cmag2_np_f32`/`sk_ema_cmag2_f32` — **+2,096 B**
+(16 kHz) split across the main and shadow filters. Before that: what moved
+since the previous figure (526.7 KB / 539,328 B): +24.5 KB of
 former function-local stack scratch (13 `float[8192]`/`float[4096]` arrays,
 sized by real dims) is now pool-resident instead of stack-resident; −2 KB
 from the coherence arrays converting double→float; −3.1 KB because the
@@ -236,7 +289,7 @@ used as the underrun reference, so the capture thread never writes into the
 ring itself. Behaviour-neutral otherwise — `fifo_count` stays in the struct
 (RETIRED, always 0) purely for field-offset/layout stability.
 
-**NE10 backend (embedded build): 521.7 KB (534,192 B) total** — the three
+**NE10 backend (embedded build): 519.7 KB (532,160 B) total** — the three
 R2C/C2R twiddle configs (11,440 B each at nfft=512) are carved from this
 pool since vendored patch P0001, so the figure is the complete memory
 requirement; everything else in the table above is backend-independent.
@@ -249,9 +302,38 @@ byte-equal per rate by `test_static_aec <mic> <ref> <sr>`):
 
 | Rate | KISS | NE10 |
 |---|---:|---:|
-| 8 kHz  (FL 416, 6 part., taps 480)   |   290,672 B |   288,848 B |
-| 16 kHz (FL 832, 6 part., taps 960)   |   538,320 B |   534,192 B |
-| 48 kHz (FL 3072, 7 part., taps 3360) | 1,253,680 B | 1,244,944 B |
+| 8 kHz  (FL 416, 6 part., taps 480)   |   289,664 B |   287,840 B |
+| 16 kHz (FL 832, 6 part., taps 960)   |   536,288 B |   532,160 B |
+| 48 kHz (FL 3072, 7 part., taps 3360) | 1,249,600 B | 1,240,864 B |
+
+(Each rate shrank by exactly `ALIGN16(n_freqs × sizeof(float))` per removed
+`scr_far_cmag2` field (round-4 review D2) — backend-independent, same
+`n_freqs` at a given rate regardless of KISS vs NE10 — over the
+pre-D2-removal figures (290,736 / 538,384 / 1,253,744 B KISS; 288,912 /
+534,256 / 1,245,008 B NE10): −1,072 B @ 8 kHz (n_freqs=129), −2,096 B @
+16 kHz (n_freqs=257), −4,144 B @ 48 kHz (n_freqs=513) — the exact mirror of
+the `scr_far_cmag2` addition figures two paragraphs below, confirming the
+removal is byte-for-byte symmetric with the original addition; measured
+directly via `aec_get_mem_size`, matching `test_static_aec`'s printed pool
+size at each rate.)
+
+(Each rate shrank by exactly `ALIGN16(fft_size × sizeof(float))` for the
+removed `bridge_taps` field — backend-independent, same `fft_size` at a
+given rate regardless of KISS vs NE10 — over the pre-cleanup figures
+(291,760 / 540,432 / 1,257,840 B KISS; 289,936 / 536,304 / 1,249,104 B NE10):
+−1,024 B @ 8 kHz (fft_size=256), −2,048 B @ 16 kHz (fft_size=512), −4,096 B
+@ 48 kHz (fft_size=1024); measured directly via `aec_get_mem_size`, matching
+`test_static_aec`'s printed pool size at each rate.)
+
+(Each rate grew by a flat +16 B over the `scr_far_cmag2`-dedup figures below
+(the incremental-argmax `int` fields, sizeof(Aec)-absorbed, same at every
+rate/backend — see above); each rate grew by the `scr_far_cmag2` dedup field
+above the pre-dedup figures in turn (290,672 / 538,320 / 1,253,680 B KISS;
+288,848 / 534,192 / 1,244,944 B NE10) — +1,072 B @ 8 kHz (n_freqs=129),
++2,096 B @ 16 kHz (n_freqs=257), +4,144 B @ 48 kHz (n_freqs=513); measured
+directly via `aec_get_mem_size`, not hand-derived, since one `ALIGN16` field
+addition per `PBFDAF` instance doesn't cleanly predict the totals from
+`n_freqs` alone.)
 
 (Each rate grew by exactly `ALIGN16(hop_size * sizeof(float))` for
 `fifo_zero_ref` — 320 B @ 8 kHz (hop=80), 640 B @ 16 kHz (hop=160), 1,920 B

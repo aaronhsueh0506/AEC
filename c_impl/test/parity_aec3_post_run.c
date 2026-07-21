@@ -346,7 +346,6 @@ int main(int argc, char **argv) {
     A(sc.x2_at_delay, n_bins); A(sc.x2_past, n_bins);
     sc.w_mag2 = malloc((size_t)n_part * (size_t)n_bins * sizeof(float));
     A(sc.render_block_scaled, hop);
-    A(sc.bridge_taps, fft_size);
     A(sc.r2, n_bins); A(sc.r2_unb, n_bins); A(sc.nearend_pwr, n_bins);
     A(sc.stat_mask, n_bins);
 

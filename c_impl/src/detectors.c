@@ -276,7 +276,7 @@ int filter_plateau_update(FilterPlateauDetector* p,
     if (p->attempts >= p->max_attempts) return 0;
     if (p->frame_count <= p->grace_frames) return 0;
 
-    int denom = p->frame_count > 1 ? p->frame_count : 1;
+    int64_t denom = p->frame_count > 1 ? p->frame_count : (int64_t)1;
     float far_ratio = (float)p->far_active_count / (float)denom;
     float dt_ratio  = (float)p->dt_signal_count  / (float)denom;
 

@@ -13,6 +13,7 @@
 #include "aec3_scale.h"   /* aec3_per_bin_psd_threshold */
 #include "aec_simd_kernels.h"
 
+#include <limits.h>   /* INT_MIN */
 #include <math.h>
 
 /* numpy 1.26 pairwise_sum over float32 (verbatim copy of the verified routine
@@ -189,7 +190,25 @@ void fb_erle_update(FullBandErleEstimator *s,
             }
         }
     }
-    s->hold_counter_inst_erle -= 1;
+    /* UBSan-confirmed signed-overflow fix, floored at INT_MIN -- NOT at 0
+     * (⚠ do not "fix" this the way erle_estimator.c/erl_estimator.c's
+     * LEVEL-check counters were fixed: the gate below is `== 0`, an
+     * EDGE-triggered one-shot check, not a level check. The old unbounded
+     * decrement crosses exactly 0 once per re-arm cycle then keeps
+     * counting down (-1, -2, ...), so `== 0` fires exactly once per cycle.
+     * Flooring at 0 would PIN the value at 0 once reached, making `== 0`
+     * fire on every subsequent hop too -- inst_reset_accumulators() would
+     * re-fire every hop instead of once, discarding any partial
+     * accumulation inst_update() makes on those hops and changing
+     * production behaviour (this field's raw value is also read bit-exact
+     * by test/parity_fullband_erle.c: `s.hold_counter_inst_erle !=
+     * exp_hold`, which mirrors the module's Python reference's own
+     * unbounded `_hold_counter_inst_erle`). Flooring at INT_MIN instead
+     * preserves BOTH the one-shot edge-trigger semantics and the bit-exact
+     * golden for every practically-reachable hop count (10 ms hops ->
+     * INT_MIN is ~248 days of continuous uptime away), while eliminating
+     * the UB at the true overflow boundary. */
+    if (s->hold_counter_inst_erle > INT_MIN) s->hold_counter_inst_erle -= 1;
     if (s->hold_counter_inst_erle == 0) {
         inst_reset_accumulators(&s->inst);
     }

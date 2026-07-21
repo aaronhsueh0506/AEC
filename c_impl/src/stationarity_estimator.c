@@ -10,8 +10,10 @@
  */
 #include "stationarity_estimator.h"
 
-#include "aec3_scale.h"   /* aec3_blocks_to_hops */
+#include "aec3_scale.h"        /* aec3_blocks_to_hops */
+#include "aec_simd_kernels.h"  /* sk_noise_spectrum_update_f32 (kernel 23) */
 
+#include <limits.h>   /* INT_MAX */
 #include <math.h>
 #include <string.h>
 
@@ -55,7 +57,22 @@ static float noise_spectrum_alpha_now(const NoiseSpectrum *n) {
 
 static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
     int k;
-    n->block_counter += 1;
+    /* UBSan-confirmed signed-overflow fix, floored at INT_MAX: unlike a
+     * pure boolean-gate counter, block_counter's raw value also feeds
+     * noise_spectrum_alpha_now()'s tilt arithmetic
+     * (`block_counter - avg_init`) for as long as it's <=
+     * (init_phase + avg_init) -- capping at that threshold (the value the
+     * `>` gates below would otherwise use) would leave block_counter
+     * permanently AT the threshold instead of past it, which would keep
+     * re-entering the tilt-arithmetic branch forever with a frozen input
+     * instead of settling on the constant `alpha` AEC3 intends once
+     * warmup completes. Not read bit-exact by any parity harness
+     * (test/parity_stationarity_estimator.c never reads block_counter),
+     * so there's no golden-drift constraint either way -- INT_MAX is
+     * simply the boundary-only fix that's trivially safe to prove
+     * correct: it's a no-op for every practically-reachable block count
+     * while eliminating the UB at the true overflow boundary. */
+    if (n->block_counter < INT_MAX) n->block_counter += 1;
 
     if (n->block_counter <= n->avg_init) {
         /* noise += (1.0/avg_init) * spectrum.astype(f32); scalar (1.0/avg_init)
@@ -71,30 +88,11 @@ static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
     {
         float alpha = noise_spectrum_alpha_now(n); /* float32-by-design */
         int   apply_mask10 = (n->block_counter > n->init_phase);
-        for (k = 0; k < n->n_freqs; ++k) {
-            float pb = spectrum[k];                  /* spectrum.astype(f32) */
-            float pn = n->noise[k];
-            if (pb > pn) {                           /* rising */
-                /* alpha_inc = alpha * (pn / max(pb, 1e-30)) */
-                float denom = pb > 1e-30f ? pb : 1e-30f; /* np.maximum */
-                float ratio = pn / denom;            /* f32 */
-                float alpha_inc = alpha * ratio;     /* f32 */
-                if (apply_mask10) {
-                    /* mask10 = (10.0 * pn) < pb */
-                    float ten_pn = 10.0f * pn;        /* scalar 10.0 → f32 */
-                    if (ten_pn < pb) {
-                        alpha_inc = alpha_inc * 0.1f; /* scalar 0.1 → f32 */
-                    }
-                }
-                /* noise = pn + alpha_inc*(pb-pn) */
-                n->noise[k] = pn + alpha_inc * (pb - pn);
-            } else {                                  /* falling (~rising) */
-                /* noise = max(pn + alpha*(pb-pn), min) */
-                float upd = pn + alpha * (pb - pn);
-                float floor_v = n->min_noise;         /* np.maximum(.., _min) */
-                n->noise[k] = upd > floor_v ? upd : floor_v;
-            }
-        }
+        /* sk_noise_spectrum_update_f32: branchless NEON (compute-both +
+         * vbslq_f32 select) twin of the scalar per-bin update above --
+         * bit-exact by construction (aec_simd_kernels.h kernel 23). */
+        sk_noise_spectrum_update_f32(n->noise, spectrum, alpha, apply_mask10,
+                                     n->min_noise, n->n_freqs);
     }
 }
 

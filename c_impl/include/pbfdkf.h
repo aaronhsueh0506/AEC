@@ -122,7 +122,18 @@ typedef struct PBFDAF {
     float*  scr_x2psum;        /* [n_freqs]      pbfdaf_process X_buf**2 partition sum */
     float*  scr_mu_eff;        /* [n_freqs]      pbfdaf_process per-bin mu */
     float*  scr_ir;            /* [n_partitions*hop_size] pbfdaf_warm_shift_ir IR concat */
-    float*  scr_e2;            /* [n_freqs]      pbfdaf_get_error_energy |error_spec|**2 */
+    float*  scr_e2;            /* [n_freqs] pbfdaf_get_error_energy |error_spec|**2 --
+                                 * ALSO pbfdaf_frontend's far_spec cmag2 scratch (far_psd_sum
+                                 * + cold-start/EMA power update), reused across the two
+                                 * phases -- round-4 review D2: frontend fully writes-then-
+                                 * consumes it within its own call, and get_error_energy fully
+                                 * overwrites-then-reads it within its own call (its only
+                                 * caller, aec.c step 13, runs strictly after that hop's
+                                 * frontend, itself invoked from pbfdaf_process/pbfdkf_process
+                                 * step 9/8.5), so nothing ever reads either phase's data
+                                 * through the other's stale contents -- see pbfdaf_frontend's
+                                 * own comment for the full argument. Saves one
+                                 * ALIGN16(n_freqs*4)-byte field per instance (main + shadow). */
 
     int is_static;             /* 1 = state placed in caller buffer */
 } PBFDAF;

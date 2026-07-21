@@ -31,7 +31,20 @@ void initial_state_reset(InitialState *s) {
 void initial_state_update(InitialState *s, int active_render, int saturated_capture) {
     int prev_initial;
     if (active_render && !saturated_capture) {
-        s->strong_not_saturated_render_blocks += 1;
+        /* Threshold-gate counter: the only two readers below each test
+         * "< threshold" against exactly one of conservative_hops (fixed
+         * per-instance since s->conservative never changes post-construction)
+         * or initial_state_hops (config-derived, not a hardcoded compile-time
+         * constant). Saturate at the larger of the two -- always >= the one
+         * branch actually evaluated for this instance's lifetime -- so the
+         * comparison result matches the unbounded counter identically
+         * forever, without ever risking signed-integer-overflow UB on a very
+         * long streaming session. */
+        int cap = (s->conservative_hops > s->initial_state_hops)
+                      ? s->conservative_hops : s->initial_state_hops;
+        if (s->strong_not_saturated_render_blocks < cap) {
+            s->strong_not_saturated_render_blocks += 1;
+        }
     }
     prev_initial = s->initial_state;
     if (s->conservative) {

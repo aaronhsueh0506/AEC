@@ -42,7 +42,20 @@ void erle_estimator_update(ErleEstimator *e,
                            const float *x2, const float *y2, const float *e2,
                            int converged_filter,
                            const unsigned char *coh_gate_mask) {
-    e->blocks_since_reset += 1;
+    /* Ceilinged at startup_hops (UBSan-confirmed signed-overflow fix,
+     * same class/shape as erl_estimator.c's blocks_since_reset fix): the
+     * ONLY consumer of blocks_since_reset anywhere in this file/header is
+     * the `< startup_hops` comparison right below (not read/compared
+     * bit-exact by any parity test -- neither test/parity_fullband_erle.c
+     * nor test/parity_subband_erle.c exercises the ErleEstimator wrapper
+     * struct that owns this field). Once the counter reaches startup_hops,
+     * further increments can never change that comparison's outcome (it's
+     * already false and stays false), so gating the increment on
+     * `< startup_hops` is observationally identical to the old
+     * unconditional `+= 1` for every reachable state, while eliminating
+     * the eventual overflow (at 10 ms hops, unconditional would wrap
+     * ~248 days into continuous uptime). */
+    if (e->blocks_since_reset < e->startup_hops) e->blocks_since_reset += 1;
     if (e->blocks_since_reset < e->startup_hops) {
         return;
     }

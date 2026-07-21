@@ -111,6 +111,15 @@
 
 #include "simd_kernels.h"
 
+#include <limits.h>   /* INT_MIN -- kernel 25's floor point, same macro
+                        * erl_estimator.c/fullband_erle.c use for their
+                        * sibling scalar hold-counter fixes (not INT32_MIN
+                        * from the already-transitively-included <stdint.h>;
+                        * hold_counters is declared plain `int`, so INT_MIN
+                        * is the type-matching constant, and it keeps this
+                        * kernel's naming/reasoning consistent with those two
+                        * call sites). */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -1187,6 +1196,449 @@ static inline float sk_pairwise_sum_tailfold_b_f32(const float *a, size_t n) {
 #else
 static inline float sk_pairwise_sum_tailfold_b_f32(const float *a, size_t n) {
     return sk_pairwise_sum_tailfold_b_f32_scalar(a, n);
+}
+#endif
+
+/* ═══════════════════════════════ kernel 23 ═════════════════════════════════
+ * sk_noise_spectrum_update_f32 — the StationarityEstimator per-bin noise
+ * floor tracker. Verbatim from
+ * AEC/c_impl/src/stationarity_estimator.c noise_spectrum_update()'s steady-
+ * state branch (block_counter > avg_init):
+ *   if (pb > pn) {                                    // rising
+ *       denom = max(pb, 1e-30f);
+ *       alpha_inc = alpha * (pn / denom);
+ *       if (apply_mask10 && (10.0f*pn < pb)) alpha_inc *= 0.1f;
+ *       noise = pn + alpha_inc*(pb - pn);
+ *   } else {                                           // falling (incl. ==)
+ *       upd = pn + alpha*(pb - pn);
+ *       noise = max(upd, min_noise);
+ *   }
+ *
+ * Unlike kernels 18/19 (sk_n2_track_f32 / sk_n2_initial_track_f32), this is
+ * a NESTED 2-way-inside-2-way conditional (the apply_mask10 scale-down lives
+ * inside the rising branch) -- one level more complex than those two, so it
+ * gets a dedicated correctness callout instead of a one-line "same shape as
+ * 18/19" note:
+ *   - `apply_mask10` is a call-level (not per-lane) boolean, computed once
+ *     per hop by the caller (`block_counter > init_phase`) -- broadcasting
+ *     it to an all-ones/all-zeros mask and ANDing with the per-lane
+ *     `10*pn<pb` compare is a faithful vectorization of the scalar `if
+ *     (apply_mask10) { if (...) ... }` nesting, not an approximation.
+ *   - `max(pb, 1e-30f)` and the final `max(upd, min_noise)` are compare
+ *     (`>`) + vbslq_f32 select, NEVER vmaxq_f32/vminq_f32 (this header's
+ *     signed-zero tie-break rule) -- both source comparisons are strict
+ *     `>`, so a tie (pb==1e-30f or upd==min_noise) takes the same side as
+ *     the scalar ternary on both paths.
+ *   - the shared `pb - pn` subtraction is textually identical in both the
+ *     rising and falling branches of the SOURCE, so computing it once
+ *     (`vdiff`) ahead of the two-branch compute-both-then-select is genuine
+ *     CSE, not reassociation.
+ *   - `vdivq_f32` (SK_HAVE_NEON == AArch64-only, see this header's own NaN-
+ *     semantics section) is correctly-rounded IEEE-754 binary32 on this
+ *     repo's target toolchain, matching the scalar `/` bit-for-bit --
+ *     already relied on at kernel 1/16's cabs_np/coherence-gate call sites,
+ *     not a new assumption for this kernel.
+ * Every comparison here is over the FINITE domain per this file's NaN-
+ * semantics contract (production's line of defense is WAV/API ingress
+ * sanitization); a speculative rising-branch divide for an about-to-be-
+ * discarded falling lane is masked out by the final vbslq_f32 select, never
+ * observed. */
+
+static inline float sk__noise_spectrum_update_elem(float pb, float pn,
+                                                     float alpha, int apply_mask10,
+                                                     float min_noise) {
+    if (pb > pn) {
+        float denom = pb > 1e-30f ? pb : 1e-30f;
+        float ratio = pn / denom;
+        float alpha_inc = alpha * ratio;
+        if (apply_mask10) {
+            float ten_pn = 10.0f * pn;
+            if (ten_pn < pb) alpha_inc = alpha_inc * 0.1f;
+        }
+        return pn + alpha_inc * (pb - pn);
+    } else {
+        float upd = pn + alpha * (pb - pn);
+        return upd > min_noise ? upd : min_noise;
+    }
+}
+
+static inline void sk_noise_spectrum_update_f32_scalar(float *noise, const float *spectrum,
+                                                         float alpha, int apply_mask10,
+                                                         float min_noise, int n) {
+    int k;
+    for (k = 0; k < n; ++k)
+        noise[k] = sk__noise_spectrum_update_elem(spectrum[k], noise[k], alpha,
+                                                   apply_mask10, min_noise);
+}
+
+#if SK_HAVE_NEON
+static inline void sk_noise_spectrum_update_f32(float *noise, const float *spectrum,
+                                                 float alpha, int apply_mask10,
+                                                 float min_noise, int n) {
+    int k = 0;
+    float32x4_t valpha = vdupq_n_f32(alpha), veps = vdupq_n_f32(1.0e-30f);
+    float32x4_t vten = vdupq_n_f32(10.0f), vpoint1 = vdupq_n_f32(0.1f);
+    float32x4_t vminn = vdupq_n_f32(min_noise);
+    uint32x4_t venable10 = apply_mask10 ? vdupq_n_u32(0xFFFFFFFFu) : vdupq_n_u32(0);
+    for (; k + 4 <= n; k += 4) {
+        float32x4_t vpb = vld1q_f32(spectrum + k);
+        float32x4_t vpn = vld1q_f32(noise + k);
+        float32x4_t vdiff = vsubq_f32(vpb, vpn); /* pb-pn: textually identical
+                                                   * in BOTH scalar branches. */
+        /* rising, computed unconditionally */
+        uint32x4_t gt_eps = vcgtq_f32(vpb, veps);
+        float32x4_t vdenom = vbslq_f32(gt_eps, vpb, veps);   /* max(pb,1e-30f) */
+        float32x4_t vratio = vdivq_f32(vpn, vdenom);
+        float32x4_t valpha_inc = vmulq_f32(valpha, vratio);
+        {
+            uint32x4_t mask10 = vandq_u32(venable10, vcltq_f32(vmulq_f32(vten, vpn), vpb));
+            float32x4_t scaled = vmulq_f32(valpha_inc, vpoint1);
+            valpha_inc = vbslq_f32(mask10, scaled, valpha_inc);
+        }
+        float32x4_t vrising = vaddq_f32(vpn, vmulq_f32(valpha_inc, vdiff));
+        /* falling, computed unconditionally */
+        float32x4_t vupd = vaddq_f32(vpn, vmulq_f32(valpha, vdiff));
+        uint32x4_t gt_floor = vcgtq_f32(vupd, vminn);
+        float32x4_t vfalling = vbslq_f32(gt_floor, vupd, vminn);  /* max(upd,min_noise) */
+        /* top-level select */
+        uint32x4_t rising_sel = vcgtq_f32(vpb, vpn);
+        vst1q_f32(noise + k, vbslq_f32(rising_sel, vrising, vfalling));
+    }
+    for (; k < n; ++k)
+        noise[k] = sk__noise_spectrum_update_elem(spectrum[k], noise[k], alpha,
+                                                   apply_mask10, min_noise);
+}
+#else
+static inline void sk_noise_spectrum_update_f32(float *noise, const float *spectrum,
+                                                 float alpha, int apply_mask10,
+                                                 float min_noise, int n) {
+    sk_noise_spectrum_update_f32_scalar(noise, spectrum, alpha, apply_mask10, min_noise, n);
+}
+#endif
+
+/* ═══════════════════════════════ kernel 24 ═════════════════════════════════
+ * sk_erl_bin_update_f32 — the ErlEstimator per-bin minimum-statistics update,
+ * FUSED into one per-bin masked pass. Verbatim from
+ * AEC/c_impl/src/erl_estimator.c erl_estimator_update()'s loop 1
+ * (lines 65-81), for k = 1..n_bins-2:
+ *
+ *   if (x2[k] > x2_min) {
+ *       new_erl = y2[k] / x2[k];                          // float32 divide
+ *       if (new_erl < erl[k]) {
+ *           hold_counters[k-1] = ERL_HOLD_HOPS;            // int32 arm
+ *           delta = 0.1f * (new_erl - erl[k]);             // plain sub/mul,
+ *           erl[k] = erl[k] + delta;                       //   NOT fmaf
+ *           if (erl[k] < ERL_MIN_ERL) erl[k] = ERL_MIN_ERL; // compare+select
+ *       }
+ *   }
+ *
+ * Caller offsets: called with erl/x2/y2 all advanced by +1 (so lane j of the
+ * kernel's arrays is source index k=j+1) and hold_counters passed UNSHIFTED
+ * -- hold_counters[j] already IS hold_counters[k-1] once erl/x2/y2 are
+ * pre-offset by the caller (k-1 = (j+1)-1 = j), so no k-1 arithmetic happens
+ * inside the kernel itself.
+ *
+ * FUSION SAFETY / masking: the int32 hold_counters store and the float32 erl
+ * blend+floor only both happen when BOTH `x2[k]>x2_min` AND `new_erl<erl[k]`
+ * hold — cond1 (x2>x2_min) and cond2 (new_erl<erl[k], against the ORIGINAL
+ * erl[k], read once before any blend) are computed as two independent lane
+ * masks and ANDed into a single combined mask that gates BOTH the erl store
+ * and the hold_counters store identically, matching the scalar's nested `if`
+ * exactly (never one store gated by cond1 alone and the other by the full
+ * AND, or vice versa). The floor step is likewise computed for all lanes and
+ * only becomes visible through that same top-level mask — not a second,
+ * independently-gated store; matches the scalar form where the floor `if` is
+ * nested INSIDE the same `if (new_erl<erl[k])` body as the hold_counters
+ * write, not a sibling conditional.
+ *
+ * Speculative divide: `new_erl = y2[j]/x2[j]` is computed for every lane
+ * unconditionally (incl. lanes that fail cond1, e.g. x2[j]==0 -> new_erl is
+ * Inf or NaN) — same masked-speculative-compute pattern as kernel 23's
+ * rising-branch divide: cond1 being false for that lane forces the combined
+ * mask false regardless of what cond2 evaluates to on a NaN/Inf new_erl
+ * (vcltq_f32 is unordered-false for NaN, exactly like scalar `<`), so the
+ * speculative result never reaches erl[] or hold_counters[]. A NaN new_erl
+ * specifically can NEVER be selected at all: cond2 requires new_erl<erl[k]
+ * to hold, and IEEE `<` is unordered-false for a NaN operand on either side
+ * -- so mask=true implies new_erl is a genuine (non-NaN) ordered value.
+ * Per this header's NaN-semantics contract real inputs are finite (WAV/API
+ * ingress sanitized); this is belt-and-suspenders equivalence, verified by
+ * the selftest's dedicated NaN corpus, not a claim of new NaN-safety scope. */
+
+static inline void sk__erl_bin_update_elem(float *erl, int *hold,
+                                            float x2v, float y2v,
+                                            float x2_min, int hold_hops,
+                                            float min_erl) {
+    if (x2v > x2_min) {
+        float new_erl = y2v / x2v;
+        if (new_erl < *erl) {
+            float diff = new_erl - *erl;
+            float delta = 0.1f * diff;
+            *hold = hold_hops;
+            *erl = *erl + delta;
+            if (*erl < min_erl) *erl = min_erl;
+        }
+    }
+}
+
+static inline void sk_erl_bin_update_f32_scalar(float *erl, int *hold,
+                                                  const float *x2, const float *y2,
+                                                  float x2_min, int hold_hops,
+                                                  float min_erl, int n) {
+    int j;
+    for (j = 0; j < n; ++j)
+        sk__erl_bin_update_elem(&erl[j], &hold[j], x2[j], y2[j], x2_min, hold_hops, min_erl);
+}
+
+#if SK_HAVE_NEON
+static inline void sk_erl_bin_update_f32(float *erl, int *hold,
+                                          const float *x2, const float *y2,
+                                          float x2_min, int hold_hops,
+                                          float min_erl, int n) {
+    int j = 0;
+    float32x4_t vx2min  = vdupq_n_f32(x2_min);
+    float32x4_t vminerl = vdupq_n_f32(min_erl);
+    float32x4_t vpoint1 = vdupq_n_f32(0.1f);
+    int32x4_t   vholdhops = vdupq_n_s32(hold_hops);
+    for (; j + 4 <= n; j += 4) {
+        float32x4_t vx2  = vld1q_f32(x2 + j);
+        float32x4_t vy2  = vld1q_f32(y2 + j);
+        float32x4_t verl = vld1q_f32(erl + j);
+        int32x4_t   vhold = vld1q_s32(hold + j);
+
+        uint32x4_t cond1 = vcgtq_f32(vx2, vx2min);        /* x2>x2_min */
+        float32x4_t vnew_erl = vdivq_f32(vy2, vx2);       /* speculative */
+        uint32x4_t cond2 = vcltq_f32(vnew_erl, verl);     /* new_erl<erl, orig erl */
+        uint32x4_t mask = vandq_u32(cond1, cond2);
+
+        float32x4_t diff     = vsubq_f32(vnew_erl, verl);
+        float32x4_t delta    = vmulq_f32(vpoint1, diff);
+        float32x4_t blended  = vaddq_f32(verl, delta);
+        uint32x4_t floormask = vcltq_f32(blended, vminerl);
+        float32x4_t floored  = vbslq_f32(floormask, vminerl, blended);
+
+        float32x4_t erl_result  = vbslq_f32(mask, floored, verl);
+        int32x4_t   hold_result = vbslq_s32(mask, vholdhops, vhold);
+
+        vst1q_f32(erl + j, erl_result);
+        vst1q_s32(hold + j, hold_result);
+    }
+    for (; j < n; ++j)
+        sk__erl_bin_update_elem(&erl[j], &hold[j], x2[j], y2[j], x2_min, hold_hops, min_erl);
+}
+#else
+static inline void sk_erl_bin_update_f32(float *erl, int *hold,
+                                          const float *x2, const float *y2,
+                                          float x2_min, int hold_hops,
+                                          float min_erl, int n) {
+    sk_erl_bin_update_f32_scalar(erl, hold, x2, y2, x2_min, hold_hops, min_erl, n);
+}
+#endif
+
+/* ═══════════════════════════════ kernel 25 ═════════════════════════════════
+ * sk_dec1_floorintmin_s32 — x[i] -= 1 across a whole int32 array, FLOORED AT
+ * INT_MIN (decrement only while x[i]>INT_MIN; once it reaches INT_MIN it
+ * stays there), no other comparisons/branches gate the store. Verbatim from
+ * AEC/c_impl/src/erl_estimator.c erl_estimator_update()'s loop 2:
+ *   for (k = 0; k < e->n_bins - 2; ++k)
+ *       if (e->hold_counters[k] > INT_MIN) e->hold_counters[k] -= 1;
+ *
+ * WHY FLOOR AT INT_MIN, NOT AT 0 (UBSan-confirmed signed-overflow fix; this
+ * is this kernel's SECOND floor point, see HISTORY below): run every hop
+ * indefinitely with no floor at all, `x[i] -= 1` eventually drives x[i] from
+ * 0 down through INT32_MIN and UB-overflows (UBSan: "signed integer
+ * overflow: -2147483648 - 1 cannot be represented in type 'int'", at 10 ms
+ * hops reachable after ~248 days of continuous uptime). The ONLY *behavioural*
+ * consumer of hold_counters' value anywhere is kernel 26's `<= 0` check
+ * (immediately downstream, same three-loop chain) and kernel 24's re-arm
+ * write (`*hold = hold_hops`, always a positive literal, ignoring the prior
+ * value entirely) — a floor at ANY value <=0 (0, INT_MIN, anything between)
+ * satisfies that `<= 0` gate IDENTICALLY to the old unbounded decrement for
+ * every reachable state, so the boolean-gate argument alone underdetermines
+ * where to floor.
+ *
+ * What breaks the tie is a SECOND consumer this kernel's own reasoning
+ * originally missed: hold_counters' raw integer values (not just the `<=0`
+ * boolean) are also read directly by test/parity_erl_estimator.c's
+ * bit-exact golden comparison, which mirrors
+ * python/modules/state/erl_estimator.py's own `self._hold_counters -= 1`
+ * (an ordinary numpy int32 subtract). NOTE what this actually contrasts
+ * with: numpy int32 arithmetic is NOT "no wraparound" — it wraps, by
+ * design, in well-defined two's-complement fashion (e.g. INT32_MIN - 1
+ * wraps to INT32_MAX in numpy), unlike C signed-overflow, which is
+ * undefined behaviour. The real three-way distinction this fix rests on is
+ * numpy's WRAP vs C's original UB vs this kernel's SATURATE (stop
+ * decrementing once at INT_MIN) — wrap and saturate are themselves
+ * different behaviours, and only diverge from each other at the one
+ * boundary case (a bin actually being decremented again *from* INT_MIN)
+ * that never occurs in any realistic (or even multi-year) run, which is
+ * WHY saturating is a safe stand-in despite not being a literal
+ * reproduction of numpy's wrap semantics. Floor-at-0 PINS each bin's value
+ * the hop after it first goes non-positive, while Python's/the old C's kept
+ * counting down (-1, -2, -3, ...); this was tried and the mismatch is real,
+ * not asymptotic: with floor-at-0, this hold_counters array alone accounted
+ * for 2142 of the golden's 3043 total mismatches (the fully-broken total at
+ * the time), on top of a 901-mismatch true baseline that already existed
+ * before this bug and is unrelated to it (round-3-origin, some other
+ * cause) — i.e. 3043 = 901 true-baseline + 2142 attributable to this exact
+ * floor-at-0 bug on this array, not "baseline of 3043, +5 more". (The "+5"
+ * figure belongs to a different, smaller-scope isolated test of a DIFFERENT
+ * single scalar field, `hold_counter_time_domain` below — it was mistakenly
+ * generalized to this 255-wide array in an earlier draft of this comment.)
+ * Flooring at INT_MIN instead reproduces the golden's expected values
+ * EXACTLY — back down to that same 901-mismatch true baseline, zero
+ * mismatches attributable to this field — because a normal-length test (or
+ * even a multi-year deployment) never gets remotely close to INT32_MIN, so
+ * floor-at-INT_MIN is byte-for-byte identical to the original
+ * buggy-but-golden-matching trajectory for every realistic/testable run,
+ * and only diverges from "keep going into UB" at the one boundary that
+ * actually matters for safety. Same reasoning/fix already
+ * applied to this field's two sibling scalar counters in the same UBSan
+ * sweep — erl_estimator.c's `hold_counter_time_domain`
+ * (`if (f > INT_MIN) f -= 1;`) and fullband_erle.c's `hold_counter_inst_erle`
+ * — both floored at INT_MIN via a plain scalar guard, no kernel needed since
+ * they're lone ints, not arrays; hold_counters is the one field of the three
+ * that IS an array (hence the only one needing a NEON kernel), and this
+ * fix brings it to the same contract.
+ *
+ * NEON-safety of the speculative subtract at the new floor point: unlike the
+ * scalar `x[i] -= 1` (where `-` on `int` is a C arithmetic operator, and
+ * INT_MIN-1 is undefined behaviour the compiler is entitled to assume never
+ * happens — the exact thing UBSan traps), `vsubq_s32` is a fixed-width SIMD
+ * intrinsic specified by ARM to wrap modulo 2^32 (two's-complement, no trap,
+ * no compiler-assumed non-overflow) and is not instrumented by
+ * -fsanitize=undefined's signed-integer-overflow check (that check
+ * instruments the frontend's handling of the `-`/`+`/`*` operators on scalar
+ * integer expressions, not NEON intrinsic calls). So computing
+ * `vsubq_s32(v, vone)` speculatively for every lane — including a lane
+ * sitting at INT_MIN, where the true mathematical result would be
+ * INT32_MIN-1 — is well-defined (it wraps to INT32_MAX in that lane) and
+ * never observed anyway: `vcgtq_s32(v, vintmin)` is false for that exact
+ * lane, so `vbslq_s32` selects the original untouched INT_MIN value, not the
+ * wrapped garbage. Same speculative-compute + masked-select shape as kernel
+ * 24's divide (and this kernel's own prior floor-at-0 form): `x[i]-1` is
+ * computed for every lane unconditionally, `x[i]>INT_MIN` is a plain int32
+ * compare (vcgtq_s32 against a vdupq_n_s32(INT_MIN) vector, no float
+ * involved), and the decremented value is selected only where the mask
+ * holds.
+ *
+ * HISTORY: this kernel first shipped (this same optimization effort, an
+ * earlier round) as `sk_dec1_floor0_s32`, floored at 0 — sound reasoning
+ * purely from the `<=0` boolean-gate argument above, but not checked at the
+ * time against the parity golden's raw-value read. A later round's isolated
+ * A/B test (same call site, same golden) caught the 2142 added mismatches
+ * this caused and produced the INT_MIN fix recorded here; renamed accordingly to
+ * keep the name matching the actual floor point, same convention as this
+ * kernel's own earlier rename (was `sk_dec1_s32`, unconditional, before the
+ * UBSan bug was found at all). erl_estimator.c's loop 2 remains this
+ * kernel's only call site (verified by grep) — the contract change carries
+ * no other-caller risk. Kernels 24/25/26 must still run as three SEPARATE
+ * sequential calls in source order (loop 1 conditionally writes
+ * hold_counters, loop 2 unconditionally reads+decrements-or-floors ALL of
+ * it, loop 3 reads the just-updated values) — fusing across calls would
+ * break that dependency chain. */
+
+static inline void sk_dec1_floorintmin_s32_scalar(int *x, int n) {
+    int i;
+    for (i = 0; i < n; ++i)
+        if (x[i] > INT_MIN) x[i] -= 1;
+}
+
+#if SK_HAVE_NEON
+static inline void sk_dec1_floorintmin_s32(int *x, int n) {
+    int i = 0;
+    int32x4_t vintmin = vdupq_n_s32(INT_MIN);
+    int32x4_t vone    = vdupq_n_s32(1);
+    for (; i + 4 <= n; i += 4) {
+        int32x4_t v    = vld1q_s32(x + i);
+        uint32x4_t mask = vcgtq_s32(v, vintmin);       /* x[i]>INT_MIN */
+        int32x4_t  dec  = vsubq_s32(v, vone);          /* speculative, wraps
+                                                          * (well-defined) at
+                                                          * the INT_MIN lane,
+                                                          * never selected */
+        int32x4_t  result = vbslq_s32(mask, dec, v);   /* else unchanged */
+        vst1q_s32(x + i, result);
+    }
+    for (; i < n; ++i)
+        if (x[i] > INT_MIN) x[i] -= 1;
+}
+#else
+static inline void sk_dec1_floorintmin_s32(int *x, int n) {
+    sk_dec1_floorintmin_s32_scalar(x, n);
+}
+#endif
+
+/* ═══════════════════════════════ kernel 26 ═════════════════════════════════
+ * sk_erl_hold_expire_f32 — bins whose hold counter has expired double toward
+ * ERL_MAX_ERL. Verbatim from AEC/c_impl/src/erl_estimator.c
+ * erl_estimator_update()'s loop 3 (lines 89-99), for k = 1..n_bins-2:
+ *   if (hold_counters[k-1] <= 0) {
+ *       doubled = 2.0f * erl[k];
+ *       erl[k] = (doubled < ERL_MAX_ERL) ? doubled : ERL_MAX_ERL;
+ *   }
+ * Same caller-offset convention as kernel 24: erl advanced by +1 (lane j ==
+ * source k=j+1), hold_counters passed UNSHIFTED (hold[j] == hold_counters[k-1]
+ * once erl is pre-offset). hold_counters here are the values loop 2
+ * (sk_dec1_floorintmin_s32) JUST decremented-or-floored -- this kernel must run
+ * strictly after kernel 25's call completes, not fused with it or with
+ * kernel 24.
+ *
+ * `hold <= 0` is an exact int32 compare (vcleq_s32, no float involved).
+ * `2.0f*erl[k]` is a plain multiply (vmulq_f32), not vaddq_f32(erl,erl) --
+ * bit-identical for all finite erl[k] either way, but kept as a literal
+ * multiply to mirror the source token-for-token. The `<ERL_MAX_ERL` clamp is
+ * compare(vcltq_f32)+select(vbslq_f32), never vminq_f32, per this header's
+ * signed-zero tie-break rule (erl[k] is always >=ERL_MIN_ERL>0 in practice,
+ * so the tie-break never actually engages here, but the rule is applied
+ * uniformly regardless of whether a given call site can prove it moot).
+ * Note this kernel's `doubled` can never surface a NaN-vs-NaN payload
+ * ambiguity the way kernel 24's blend can: whenever `doubled` is NaN (e.g.
+ * erl[k] itself started NaN), `doubled<ERL_MAX_ERL` is unordered-false on
+ * BOTH scalar and NEON, so both deterministically select the fixed constant
+ * ERL_MAX_ERL instead of the NaN — never the NaN payload itself — so this
+ * kernel's selected output is always one of {unchanged erl[k] bits, doubled
+ * (only ever selected when finite and < ERL_MAX_ERL), ERL_MAX_ERL}, none of
+ * which is a NaN payload race; still exercised by the selftest's NaN corpus
+ * for completeness, not because a divergence is expected there. */
+
+static inline void sk__erl_hold_expire_elem(float *erl, int hold, float max_erl) {
+    if (hold <= 0) {
+        float doubled = 2.0f * (*erl);
+        *erl = (doubled < max_erl) ? doubled : max_erl;
+    }
+}
+
+static inline void sk_erl_hold_expire_f32_scalar(float *erl, const int *hold,
+                                                   float max_erl, int n) {
+    int j;
+    for (j = 0; j < n; ++j)
+        sk__erl_hold_expire_elem(&erl[j], hold[j], max_erl);
+}
+
+#if SK_HAVE_NEON
+static inline void sk_erl_hold_expire_f32(float *erl, const int *hold,
+                                           float max_erl, int n) {
+    int j = 0;
+    float32x4_t vmax  = vdupq_n_f32(max_erl);
+    float32x4_t vtwo  = vdupq_n_f32(2.0f);
+    int32x4_t   vzero = vdupq_n_s32(0);
+    for (; j + 4 <= n; j += 4) {
+        float32x4_t verl  = vld1q_f32(erl + j);
+        int32x4_t   vhold = vld1q_s32(hold + j);
+        uint32x4_t mask = vcleq_s32(vhold, vzero);        /* hold<=0 */
+        float32x4_t doubled = vmulq_f32(vtwo, verl);
+        uint32x4_t lt = vcltq_f32(doubled, vmax);
+        float32x4_t clamped = vbslq_f32(lt, doubled, vmax);
+        float32x4_t result = vbslq_f32(mask, clamped, verl);
+        vst1q_f32(erl + j, result);
+    }
+    for (; j < n; ++j)
+        sk__erl_hold_expire_elem(&erl[j], hold[j], max_erl);
+}
+#else
+static inline void sk_erl_hold_expire_f32(float *erl, const int *hold,
+                                           float max_erl, int n) {
+    sk_erl_hold_expire_f32_scalar(erl, hold, max_erl, n);
 }
 #endif
 

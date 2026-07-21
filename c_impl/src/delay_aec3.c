@@ -15,6 +15,7 @@
  */
 #include "delay_aec3.h"
 
+#include <limits.h>
 #include <math.h>
 #include <string.h>
 
@@ -447,9 +448,19 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
     for (n = 0; n < DA_NUM_FILTERS; ++n) {
         float error_sum;
         int filters_updated, lag_estimate, reliable, lag;
+        /* mf->instantaneous_error is a SINGLE shared buffer (not per-filter,
+         * see delay_aec3.h) that da_matched_filter_core unconditionally
+         * zero-fills and fully recomputes from scratch whenever a non-NULL
+         * pointer is passed. Every read of it after this loop (see
+         * da_update_accumulated_error below) only ever wants the LAST
+         * filter's value -- so n<DA_NUM_FILTERS-1's writes are always fully
+         * overwritten before anything looks at them. Passing NULL for those
+         * skips the (dead) zero-fill + accumulation work for 4 of 5 filters
+         * while leaving the surviving n==DA_NUM_FILTERS-1 call byte-for-byte
+         * identical to before. */
         filters_updated = da_matched_filter_core(ring, alignment_shift, x2_sum_threshold,
                                                  smoothing, capture, mf->filters[n], &error_sum,
-                                                 mf->instantaneous_error);
+                                                 (n == DA_NUM_FILTERS - 1) ? mf->instantaneous_error : NULL);
         lag_estimate = da_max_square_peak_index(mf->filters[n], DA_FILTER_SIZE);
         reliable = (lag_estimate > 2
                     && lag_estimate < (DA_FILTER_SIZE - 10)
@@ -484,7 +495,23 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
                 da_update_accumulated_error(mf->instantaneous_error,
                                             mf->accumulated_error[winner_index],
                                             1.0f / error_sum_anchor);
-                mf->number_pre_echo_updates += 1;
+                /* Threshold-gate counter: sole reader is the
+                 * ">= DA_PRE_ECHO_UPDATES_TO_REPORT" check on the next line.
+                 * Round-6 re-review finding: this field is reset to 0 only
+                 * by da_matched_filter_init() (construction) and
+                 * da_matched_filter_reset(mf, full_reset=1) (a genuine
+                 * delay/echo-path-change reset) -- neither fires just
+                 * because the delay estimate stays locked, which is the
+                 * ordinary steady state for a device that hasn't moved, so
+                 * "last_detected_best_lag_filter == winner_index" can hold
+                 * (and this branch keep incrementing) for the entire
+                 * unbounded-overflow timeframe. Saturate at
+                 * DA_PRE_ECHO_UPDATES_TO_REPORT -- once reached the ">="
+                 * comparison is permanently true either way, so this is
+                 * observationally identical to the old unconditional
+                 * increment for every reachable state. */
+                if (mf->number_pre_echo_updates < DA_PRE_ECHO_UPDATES_TO_REPORT)
+                    mf->number_pre_echo_updates += 1;
             }
             if (mf->number_pre_echo_updates >= DA_PRE_ECHO_UPDATES_TO_REPORT) {
                 int pre_echo = da_compute_pre_echo_lag(
@@ -499,11 +526,115 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
 
 /* ---------------------------------------------------- highest-peak aggregator */
 
+/* da_argmax_incremental_update -- O(1)-when-provable incremental maintenance
+ * of (*candidate, *candidate_valid) as the FIRST index of the maximum value
+ * in `histogram[0..hist_size)`, shared by da_highest_peak_aggregate (always
+ * had_evict=1) and da_pre_echo_aggregate (had_evict=0 while its -1-sentinel
+ * ring is still filling). This function performs BOTH the histogram
+ * mutation (decrement histogram[A] iff had_evict, then increment
+ * histogram[B]) AND the candidate/M bookkeeping -- callers must NOT
+ * separately apply those two histogram writes, and must NOT call this when
+ * `had_evict && A == B && *candidate_valid` (that combination is a pure
+ * net-unchanged wash the caller must fast-path BEFORE calling this: see the
+ * correctness note below for why this specific combination breaks the
+ * general derivation and has to be excluded structurally, not merely as an
+ * optimization).
+ *
+ * Correctness (re-derived from first principles, not copied from an
+ * external claim):
+ *
+ * Invariant maintained: whenever *candidate_valid is true, `c = *candidate`
+ * is provably the first index of the maximum value `M = histogram[c]`
+ * (equivalent to da_argmax_i(histogram, hist_size)).
+ *
+ *  - !*candidate_valid: state isn't trustworthy (fresh reset, or a prior
+ *    call already gave up) -- mutate histogram, then do the one authoritative
+ *    da_argmax_i rescan and mark valid. Exact by construction; this is also
+ *    the path a fresh A==B call takes (see below), so A==B is never actually
+ *    unsafe THROUGH this branch, only through the two branches below it.
+ *
+ *  - had_evict && A == c (the tracked candidate itself lost a count): after
+ *    the decrement c's own value drops to M-1, so (c,M) can no longer be
+ *    trusted -- there may be an UNTRACKED bin already tied at value M (it
+ *    must be at some index > c, since c was defined as the first index
+ *    reaching M, so nothing below c could already equal M). If the insert at
+ *    B produces a value > the OLD M, B is now strictly greater than every
+ *    other bin (every other bin was <= M, including any untracked tie), so B
+ *    is unambiguously the new unique argmax -- O(1) and exact regardless of
+ *    what's hidden. Otherwise (Bval0+1 <= M) we cannot rule out an untracked
+ *    tie or a third bin now being the true max, so we MUST rescan -- this is
+ *    exactly the case the naive "compare against the candidate's own
+ *    post-decrement value" heuristic gets wrong (counterexample:
+ *    H=[3,5,5,2,0], candidate=1 (M=5, untracked tie at index 2); evicting
+ *    bin 1 (->4) while inserting at bin 3 (2->3) has post-decrement 4 >= 3,
+ *    which LOOKS safe under that heuristic, but the true new argmax is index
+ *    2, not 1 or 3 -- comparing against the OLD M=5, not the post-decrement
+ *    4, correctly routes this case to the rescan fallback instead).
+ *
+ *  - otherwise (A != c, or !had_evict -- i.e. no eviction happened at all):
+ *    (c,M) is UNCHANGED by the (possible) decrement, because decrementing a
+ *    non-candidate bin can only lower a value already <= M, never raise any
+ *    other bin above M, and never touches c. So (c,M) remains exactly
+ *    correct going into the insert. Only B's value changed (to Bval0+1,
+ *    since A != B guarantees the increment is the sole modification to B
+ *    this call): if Bval0+1 > M, B is a strictly new unique max (every other
+ *    bin, tracked or not, was <= M); if Bval0+1 == M, B ties the max and
+ *    numpy argmax's first-index rule means the new answer is min(B,c) -- but
+ *    nothing below c can already hold M (c is BY DEFINITION the first such
+ *    index), so the comparison reduces to "B < c" alone (no untracked bin
+ *    can be at a lower index than both); if Bval0+1 < M, nothing changes.
+ *    O(1) and exact in every sub-case.
+ *
+ * The A == B && had_evict fast-path exclusion: if it were allowed through,
+ * `Bval0 = histogram[B]` (read before mutation) would ALREADY equal
+ * histogram[A]'s pre-mutation value (since A==B), and the decrement+increment
+ * nets to zero -- but the ">M"/"==M" comparisons above assume the decrement
+ * and increment are on DIFFERENT bins (the decrement's effect on `M` is
+ * "none, because A!=c" or "drop to M-1, because A==c" -- either way a
+ * distinct bin from B). With A==B those two assumptions collide: e.g.
+ * candidate=c (M), and A(=B) is a DIFFERENT bin ALSO already at value M
+ * (untracked tie, index > c) -- Bval0=M, so "Bval0+1>M" is trivially true,
+ * which would incorrectly move candidate to A even though the net histogram
+ * change is exactly zero and the true answer is still c. Hence: the caller
+ * must intercept had_evict && A==B && *candidate_valid before ever reaching
+ * here (net-unchanged, zero mutation needed, candidate/M already correct by
+ * the standing invariant). */
+static void da_argmax_incremental_update(int *histogram, int hist_size,
+                                         int had_evict, int A, int B,
+                                         int *candidate, int *candidate_valid) {
+    if (!*candidate_valid) {
+        if (had_evict) histogram[A] -= 1;
+        histogram[B] += 1;
+        *candidate = da_argmax_i(histogram, hist_size);
+        *candidate_valid = 1;
+        return;
+    }
+    {
+        int c = *candidate;
+        int M = histogram[c];
+        int Bval0 = histogram[B];
+        if (had_evict) histogram[A] -= 1;
+        histogram[B] += 1;
+        if (had_evict && A == c) {
+            if (Bval0 + 1 > M) { *candidate = B; return; }
+            *candidate = da_argmax_i(histogram, hist_size);
+            return;
+        }
+        if (Bval0 + 1 > M || (Bval0 + 1 == M && B < c)) *candidate = B;
+        /* else: unchanged, still c */
+    }
+}
+
 static void da_highest_peak_reset(DaHighestPeak *hp) {
     memset(hp->histogram, 0, sizeof(hp->histogram));
     memset(hp->ring, 0, sizeof(hp->ring));
     hp->ring_index = 0;
-    /* candidate is NOT reset in Python HighestPeakAggregator.reset; preserve. */
+    /* candidate is NOT reset in Python HighestPeakAggregator.reset; preserve.
+     * candidate_valid IS reset (internal-only guard, no Python equivalent --
+     * see the DaHighestPeak struct comment): forces the next aggregate()
+     * call to take the authoritative da_argmax_i rescan path instead of
+     * trusting a candidate/M pair computed against the pre-reset histogram. */
+    hp->candidate_valid = 0;
 }
 
 static void da_highest_peak_init(DaHighestPeak *hp) {
@@ -513,13 +644,19 @@ static void da_highest_peak_init(DaHighestPeak *hp) {
 
 static void da_highest_peak_aggregate(DaHighestPeak *hp, int lag) {
     int old_lag = hp->ring[hp->ring_index];
-    hp->histogram[old_lag] -= 1;
-    if (lag < 0) lag = 0;
-    else if (lag >= DA_HP_HIST_SIZE) lag = DA_HP_HIST_SIZE - 1;
-    hp->ring[hp->ring_index] = lag;
-    hp->histogram[lag] += 1;
+    int clamped_lag = lag;
+    if (clamped_lag < 0) clamped_lag = 0;
+    else if (clamped_lag >= DA_HP_HIST_SIZE) clamped_lag = DA_HP_HIST_SIZE - 1;
+    hp->ring[hp->ring_index] = clamped_lag;
     hp->ring_index = (hp->ring_index + 1) % DA_HIST_WINDOW;
-    hp->candidate = da_argmax_i(hp->histogram, DA_HP_HIST_SIZE);
+    if (old_lag == clamped_lag && hp->candidate_valid) {
+        /* net-unchanged: evicted bin == inserted bin, histogram provably
+         * untouched, existing candidate/M pair still exactly correct. */
+        return;
+    }
+    da_argmax_incremental_update(hp->histogram, DA_HP_HIST_SIZE,
+                                 /*had_evict=*/1, old_lag, clamped_lag,
+                                 &hp->candidate, &hp->candidate_valid);
 }
 
 /* ------------------------------------------------------- pre-echo aggregator */
@@ -540,6 +677,13 @@ static void da_pre_echo_reset(DaPreEcho *pe) {
     pe->ring_index = 0;
     pe->number_updates = 0;
     pe->pre_echo_candidate = 0;
+    /* internal-only incremental-argmax guard (no Python equivalent): forces
+     * the next aggregate() call to (re-)establish argmax_idx from scratch
+     * instead of trusting a pair computed against the pre-reset histogram.
+     * argmax_idx itself doesn't need zeroing (never read while !valid) but
+     * is zeroed anyway for deterministic/debuggable state. */
+    pe->argmax_idx = 0;
+    pe->argmax_valid = 0;
 }
 
 static void da_pre_echo_init(DaPreEcho *pe) {
@@ -553,10 +697,36 @@ static void da_pre_echo_aggregate(DaPreEcho *pe, int pre_echo_lag) {
     if (pbs < 0) pbs = 0;
     else if (pbs > DA_PE_HIST_SIZE - 1) pbs = DA_PE_HIST_SIZE - 1;
     old = pe->ring[pe->ring_index];
-    if (old != -1) pe->histogram[old] -= 1;
     pe->ring[pe->ring_index] = pbs;
-    pe->histogram[pbs] += 1;
     pe->ring_index = (pe->ring_index + 1) % DA_HIST_WINDOW;
+
+    /* Incremental argmax tracking (kernel-shared with da_highest_peak_aggregate,
+     * see da_argmax_incremental_update's correctness note above) -- this ALSO
+     * performs the histogram[old]-=1 / histogram[pbs]+=1 mutation that used to
+     * be written out inline here, so it must run unconditionally on every
+     * call (both the windowed-local-max phase below AND the steady-state
+     * phase), regardless of which branch ultimately produces
+     * pre_echo_candidate this call: argmax_idx/argmax_valid must already be
+     * warm by the time number_updates crosses the steady-state threshold.
+     * `old == -1` (ring slot never written since the last reset -- this
+     * struct's ring is -1-sentinel-initialized, unlike DaHighestPeak's
+     * 0-initialized one) means "no bin evicted this call", handled via
+     * had_evict=0. */
+    {
+        int had_evict = (old != -1);
+        if (had_evict && old == pbs && pe->argmax_valid) {
+            /* net-unchanged: same fast path/rationale as
+             * da_highest_peak_aggregate -- required, not just an
+             * optimization (see da_argmax_incremental_update's comment on
+             * why had_evict && A==B must never reach the general logic).
+             * histogram is provably untouched (decrement+increment on the
+             * SAME bin), so there is nothing to do here at all. */
+        } else {
+            da_argmax_incremental_update(pe->histogram, DA_PE_HIST_SIZE,
+                                         had_evict, old, pbs,
+                                         &pe->argmax_idx, &pe->argmax_valid);
+        }
+    }
 
     if (pe->number_updates < DA_K_NUM_BLOCKS_PER_SEC * 2) {
         int window = DA_K_MFW_SUB_BLOCKS;
@@ -582,8 +752,13 @@ static void da_pre_echo_aggregate(DaPreEcho *pe, int pre_echo_lag) {
         }
         pe->pre_echo_candidate = best_idx << pe->block_size_log2;
     } else {
-        int best_idx = da_argmax_i(pe->histogram, DA_PE_HIST_SIZE);
-        pe->pre_echo_candidate = best_idx << pe->block_size_log2;
+        /* was: int best_idx = da_argmax_i(pe->histogram, DA_PE_HIST_SIZE);
+         * -- pe->argmax_idx is kept in exact lockstep with that same
+         * da_argmax_i(pe->histogram, DA_PE_HIST_SIZE) result by the
+         * incremental update above (proven in da_argmax_incremental_update's
+         * header comment), so this is a pure read of an already-current
+         * value, not a behavior change. */
+        pe->pre_echo_candidate = pe->argmax_idx << pe->block_size_log2;
     }
 }
 
@@ -648,7 +823,19 @@ static void da_clockdrift_init(DaClockdrift *cd) {
 static void da_clockdrift_update(DaClockdrift *cd, int delay_estimate) {
     int d1, d2, d3, probable_up, verified_up, probable_down, verified_down;
     if (delay_estimate == cd->delay_history[0]) {
-        cd->stability_counter += 1;
+        /* Ceilinged at DA_STABILITY_RESET_HOPS+1 (UBSan-confirmed
+         * signed-overflow fix): the ONLY consumer of stability_counter
+         * anywhere in this file/header is the `> DA_STABILITY_RESET_HOPS`
+         * check on the very next line (not read/compared bit-exact by any
+         * parity harness -- this file's own C-regression golden doesn't
+         * exercise DaClockdrift's raw counters, only delay/quality
+         * outputs). Once the counter exceeds DA_STABILITY_RESET_HOPS,
+         * further increments can never change that comparison's outcome
+         * (already true, stays true), so gating the increment at the
+         * smallest value that still satisfies `>` is observationally
+         * identical to the old unconditional `+= 1` for every reachable
+         * state, while eliminating the eventual signed overflow. */
+        if (cd->stability_counter <= DA_STABILITY_RESET_HOPS) cd->stability_counter += 1;
         if (cd->stability_counter > DA_STABILITY_RESET_HOPS) cd->level = CLOCKDRIFT_NONE;
         return;
     }
@@ -846,7 +1033,13 @@ int delay_aec3_accumulate_ex(DelayAec3 *d, const float *near, const float *far,
         d->latest_valid = 1;
         d->latest_delay = delay;
         d->latest_quality = q;
-        d->estimate_count += 1;
+        /* estimate_count is a public diagnostic counter (delay_aec3_n_updates()
+         * below) with no internal threshold comparison anywhere in this file
+         * -- external callers may read the raw value, so it is not safe to
+         * assume a boolean-threshold cap. Saturate at INT_MAX instead: keeps
+         * monotonic-increase-until-cap semantics for any reader, never
+         * invokes signed-integer-overflow UB. */
+        if (d->estimate_count < INT_MAX) d->estimate_count += 1;
         if (delay != prev_delay) emitted_new = 1;
     }
     return emitted_new;
