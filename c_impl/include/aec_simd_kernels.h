@@ -104,6 +104,33 @@
  * selftest, and the ordinary test_mask_zero() above it). No other kernel in
  * this file is documented or tested with any overlapping-pointer usage;
  * that is unsupported, even if it happens to work today on some input.
+ *
+ * ───────────────────── Complex-quad NEON load/store (aliasing) ────────────
+ * Every kernel in this file that moves a `Complex` buffer through NEON
+ * registers (kernels 1/2/3/5/6/7/8/16 -- sk_cabs_np_f32, sk_cmag2_np_f32,
+ * sk_cmag2_np_acc_f32, sk_ema_cmag2_f32, sk_cmac_np_f32,
+ * sk_wupdate_nlms_f32, sk_wupdate_kf_f32, sk_coherence_ema_gate_f32) uses
+ * `sk__cquad_load`/`sk__cquad_store` -- defined once in simd_kernels.h's
+ * "Complex-quad NEON load/store (legal aliasing)" section and pulled in
+ * transitively by the `#include "simd_kernels.h"` above -- rather than
+ * casting a `const Complex*`/`Complex*` straight to `(const float*)`/
+ * `(float*)` and handing that to vld2q_f32/vst2q_f32 directly (a
+ * type-based-aliasing violation under C11 6.5p7: `float` is not the
+ * effective type of a `Complex` object, so the compiler is entitled to
+ * assume the two pointers never alias). No second copy of the helper is
+ * defined here: simd_kernels.h is included before any of these kernels are
+ * defined, so sk__cquad_load/sk__cquad_store are already reachable by the
+ * time this file needs them -- see that header's own comment (search
+ * "sk__cquad_load") for the full memcpy+uzp/zip rationale and the
+ * disassembly-verified claim that it converges back to ld2/st2-equivalent
+ * codegen with no surviving stack-scratch traffic. The `Complex` layout
+ * `_Static_assert`s that justify this (exactly 2 floats, r at offset 0, i at
+ * offset 4, no padding) also live in simd_kernels.h, immediately after its
+ * own `#include "fft_wrapper.h"` and before any kernel that depends on the
+ * layout is defined -- since this file's own `#include "simd_kernels.h"`
+ * likewise precedes every kernel here that depends on the same layout, that
+ * single pair of asserts already covers this file too; no duplicate assert
+ * is added here.
  */
 
 #ifndef AEC_SIMD_KERNELS_H
@@ -209,7 +236,11 @@ static inline void sk_cabs_np_f32_scalar(const Complex *z, float *out, int n) {
 static inline void sk_cabs_np_f32(const Complex *z, float *out, int n) {
     int i = 0;
     for (; i + 4 <= n; i += 4) {
-        float32x4x2_t v = vld2q_f32((const float *)(z + i));
+        /* sk__cquad_load (simd_kernels.h) -- memcpy-based Complex-quad
+         * load, NOT a direct Complex*->float* cast fed to vld2q_f32 (that
+         * cast is a strict-aliasing violation, see simd_kernels.h's
+         * "Complex-quad NEON load/store" section for the full writeup). */
+        float32x4x2_t v = sk__cquad_load(z + i);
         float32x4_t r = sk__cabs_np_neon4(v.val[0], v.val[1]);
         vst1q_f32(out + i, r);
     }
@@ -233,7 +264,9 @@ static inline void sk_cmag2_np_f32_scalar(const Complex *z, float *out, int n) {
 static inline void sk_cmag2_np_f32(const Complex *z, float *out, int n) {
     int i = 0;
     for (; i + 4 <= n; i += 4) {
-        float32x4x2_t v = vld2q_f32((const float *)(z + i));
+        /* sk__cquad_load -- see sk_cabs_np_f32 above for the aliasing
+         * rationale. */
+        float32x4x2_t v = sk__cquad_load(z + i);
         float32x4_t m2 = sk__cmag2_np_neon4(v.val[0], v.val[1]);
         vst1q_f32(out + i, m2);
     }
@@ -258,7 +291,9 @@ static inline void sk_cmag2_np_acc_f32_scalar(const Complex *z, float *acc, int 
 static inline void sk_cmag2_np_acc_f32(const Complex *z, float *acc, int n) {
     int i = 0;
     for (; i + 4 <= n; i += 4) {
-        float32x4x2_t v = vld2q_f32((const float *)(z + i));
+        /* sk__cquad_load -- see sk_cabs_np_f32 above for the aliasing
+         * rationale. */
+        float32x4x2_t v = sk__cquad_load(z + i);
         float32x4_t m2 = sk__cmag2_np_neon4(v.val[0], v.val[1]);
         float32x4_t a = vld1q_f32(acc + i);
         vst1q_f32(acc + i, vaddq_f32(a, m2));
@@ -300,7 +335,9 @@ static inline void sk_ema_cmag2_f32(float *state, const Complex *z,
     int i = 0;
     float32x4_t va = vdupq_n_f32(alpha), vb = vdupq_n_f32(beta);
     for (; i + 4 <= n; i += 4) {
-        float32x4x2_t zv = vld2q_f32((const float *)(z + i));
+        /* sk__cquad_load -- see sk_cabs_np_f32 above for the aliasing
+         * rationale. */
+        float32x4x2_t zv = sk__cquad_load(z + i);
         float32x4_t mag2 = sk__cmag2_np_neon4(zv.val[0], zv.val[1]);
         float32x4_t s = vld1q_f32(state + i);
         float32x4_t r = vaddq_f32(vmulq_f32(va, s), vmulq_f32(vb, mag2));
@@ -339,17 +376,22 @@ static inline void sk_cmac_np_f32(Complex *acc, const Complex *w,
                                    const Complex *x, int n) {
     int i = 0;
     for (; i + 4 <= n; i += 4) {
-        float32x4x2_t wv = vld2q_f32((const float *)(w + i));
+        /* sk__cquad_load/sk__cquad_store (simd_kernels.h) -- memcpy-based
+         * Complex-quad load/store, NOT a direct Complex*->float* cast fed
+         * to vld2q_f32/vst2q_f32 (that cast is a strict-aliasing
+         * violation, see simd_kernels.h's "Complex-quad NEON load/store"
+         * section for the full writeup). */
+        float32x4x2_t wv = sk__cquad_load(w + i);
         float32x4_t wr = wv.val[0], wi = wv.val[1];
-        float32x4x2_t xv = vld2q_f32((const float *)(x + i));
+        float32x4x2_t xv = sk__cquad_load(x + i);
         float32x4_t xr = xv.val[0], xi = xv.val[1];
         float32x4_t re_prod = vfmaq_f32(vnegq_f32(vmulq_f32(wi, xi)), wr, xr);
         float32x4_t im_prod = vfmaq_f32(vmulq_f32(wi, xr), wr, xi);
-        float32x4x2_t av = vld2q_f32((const float *)(acc + i));
+        float32x4x2_t av = sk__cquad_load(acc + i);
         float32x4x2_t rv;
         rv.val[0] = vaddq_f32(av.val[0], re_prod);
         rv.val[1] = vaddq_f32(av.val[1], im_prod);
-        vst2q_f32((float *)(acc + i), rv);
+        sk__cquad_store(acc + i, rv);
     }
     for (; i < n; ++i) {
         float wr = w[i].r, wi = w[i].i, xr = x[i].r, xi = x[i].i;
@@ -398,20 +440,22 @@ static inline void sk_wupdate_nlms_f32(Complex *W, const Complex *X,
                                         const float *mu_eff, int n) {
     int i = 0;
     for (; i + 4 <= n; i += 4) {
-        float32x4x2_t ev = vld2q_f32((const float *)(err + i));
+        /* sk__cquad_load/sk__cquad_store -- see sk_cmac_np_f32 above for
+         * the aliasing rationale. */
+        float32x4x2_t ev = sk__cquad_load(err + i);
         float32x4_t er = ev.val[0], ei = ev.val[1];
-        float32x4x2_t xv = vld2q_f32((const float *)(X + i));
+        float32x4x2_t xv = sk__cquad_load(X + i);
         float32x4_t xr = xv.val[0], xi = xv.val[1];
         float32x4_t cxr = xr;
         float32x4_t cxi = vnegq_f32(xi);
         float32x4_t gr = vfmaq_f32(vnegq_f32(vmulq_f32(ei, cxi)), er, cxr);
         float32x4_t gi = vfmaq_f32(vmulq_f32(ei, cxr), er, cxi);
         float32x4_t mu = vld1q_f32(mu_eff + i);
-        float32x4x2_t wv = vld2q_f32((const float *)(W + i));
+        float32x4x2_t wv = sk__cquad_load(W + i);
         float32x4x2_t rv;
         rv.val[0] = vaddq_f32(wv.val[0], vmulq_f32(mu, gr));
         rv.val[1] = vaddq_f32(wv.val[1], vmulq_f32(mu, gi));
-        vst2q_f32((float *)(W + i), rv);
+        sk__cquad_store(W + i, rv);
     }
     for (; i < n; ++i) {
         float er = err[i].r, ei = err[i].i;
@@ -469,7 +513,9 @@ static inline void sk_wupdate_kf_f32(Complex *W, const Complex *X,
                                       const float *mu_scale, int n) {
     int i = 0;
     for (; i + 4 <= n; i += 4) {
-        float32x4x2_t xv = vld2q_f32((const float *)(X + i));
+        /* sk__cquad_load/sk__cquad_store -- see sk_cmac_np_f32 above for
+         * the aliasing rationale. */
+        float32x4x2_t xv = sk__cquad_load(X + i);
         float32x4_t xr = xv.val[0], xi = xv.val[1];
         float32x4_t muv = vld1q_f32(mu + i);
         float32x4_t msv = vld1q_f32(mu_scale + i);
@@ -477,15 +523,15 @@ static inline void sk_wupdate_kf_f32(Complex *W, const Complex *X,
         float32x4_t ki = vnegq_f32(vmulq_f32(muv, xi));
         float32x4_t ksr = vmulq_f32(kr, msv);
         float32x4_t ksi = vmulq_f32(ki, msv);
-        float32x4x2_t ev = vld2q_f32((const float *)(err + i));
+        float32x4x2_t ev = sk__cquad_load(err + i);
         float32x4_t er = ev.val[0], ei = ev.val[1];
         float32x4_t dr = vfmaq_f32(vnegq_f32(vmulq_f32(ksi, ei)), ksr, er);
         float32x4_t di = vfmaq_f32(vmulq_f32(ksi, er), ksr, ei);
-        float32x4x2_t wv = vld2q_f32((const float *)(W + i));
+        float32x4x2_t wv = sk__cquad_load(W + i);
         float32x4x2_t rv;
         rv.val[0] = vaddq_f32(wv.val[0], dr);
         rv.val[1] = vaddq_f32(wv.val[1], di);
-        vst2q_f32((float *)(W + i), rv);
+        sk__cquad_store(W + i, rv);
     }
     for (; i < n; ++i) {
         float xr = X[i].r, xi = X[i].i;
@@ -754,9 +800,11 @@ static inline void sk_coherence_ema_gate_f32(
     float32x4_t va = vdupq_n_f32(alpha), vomaf = vdupq_n_f32(omaf);
     float32x4_t vfloor = vdupq_n_f32(1.0e-30f);
     for (; i + 4 <= n; i += 4) {
-        float32x4x2_t ev = vld2q_f32((const float *)(echo + i));
+        /* sk__cquad_load (read-only side of this kernel) -- see
+         * sk_cabs_np_f32 above for the aliasing rationale. */
+        float32x4x2_t ev = sk__cquad_load(echo + i);
         float32x4_t er = ev.val[0], ei = ev.val[1];
-        float32x4x2_t nv = vld2q_f32((const float *)(near_spec + i));
+        float32x4x2_t nv = sk__cquad_load(near_spec + i);
         float32x4_t nr = nv.val[0], ni = nv.val[1];
         float32x4_t pr = vaddq_f32(vmulq_f32(er, nr), vmulq_f32(ei, ni));
         float32x4_t pi = vsubq_f32(vmulq_f32(ei, nr), vmulq_f32(er, ni));
