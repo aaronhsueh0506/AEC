@@ -454,6 +454,8 @@ int main(int argc, char **argv) {
         in.pending_delay_change = pend_i[1];
         in.stationarity_active_hops = pend_i[2];
         in.stationarity_converge_hops = cnt_i[2];
+        in.stationary_block =
+            stationarity_estimator_is_block_stationary(&stat);
         in.erle_coh_gate_enabled = flag_i[0];
         in.use_stationarity_properties = flag_i[5];
         in.active_render_threshold = cng_d[8];

@@ -354,10 +354,14 @@ typedef struct {
     /* ── stationarity read state (updated upstream) ─────────────────────── */
     int            stationarity_active_hops;
     int            stationarity_converge_hops;
+    int            stationary_block;       /* raw is_block_stationary result;
+                                             * not convergence-gated          */
 
     /* ── config flags ───────────────────────────────────────────────────── */
     int            erle_coh_gate_enabled;
     int            use_stationarity_properties; /* sg echo_audibility flag */
+    int            context_only;          /* expose gain/R²/CNG seam but skip
+                                             * unused private time synthesis */
     float          active_render_threshold;     /* _ar_thr = 5.96e-4       */
 } Aec3PostRunIn;
 
@@ -394,7 +398,8 @@ typedef struct {
     unsigned char *stat_mask;    /* [n_freqs] band_stationary_mask         */
 } Aec3PostRunScratch;
 
-/* Process one hop end-to-end. `out[hop]` is written. Returns 0 on success.
+/* Process one hop end-to-end. `out[hop]` is always written: the synthesized
+ * internal-RES signal normally, or in->raw_output when context_only is set.
  * The pending EPV flags in `in` are consumed (the caller's mirror is cleared
  * via the returned values): *out_pending_gain_change / *out_pending_delay_change
  * receive the post-call state (cleared to 0 / -1 when an event fired). */

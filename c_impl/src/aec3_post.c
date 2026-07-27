@@ -646,14 +646,12 @@ int aec3_post_run(Aec3Post *p,
                     float filter_q =
                         aec_state_get_inst_linear_quality_estimate(
                             obj->state, &fq_valid);
-                    int stationary_block =
-                        stationarity_estimator_is_block_stationary(obj->stationarity);
                     int usable =
                         aec_state_usable_linear_estimate(obj->state);
                     ree_update_reverb_models(obj->ree, sc->w_mag2, n_part,
                                              delay_blocks, filter_q,
                                              /*fq_is_none=*/!fq_valid,
-                                             stationary_block);
+                                             in->stationary_block);
 
                     /* ── Step 15: ree.estimate (3402-3411) ───────────────── */
                     {
@@ -734,9 +732,20 @@ int aec3_post_run(Aec3Post *p,
                                 }
 
                                 /* ── Step 21: apply_output (3606-3689) ──────── */
-                                aec3_post_apply_output(p, sc->sel_esw,
-                                                       sc->sel_echo, &mag,
-                                                       usable, gain, out);
+                                if (in->context_only) {
+                                    /* The external joint NR/RES consumes E(f),
+                                     * gain, R² and comfort_noise, then performs
+                                     * its own CNG/IFFT/OLA. Preserve the run()
+                                     * output contract by returning the linear
+                                     * residual, without advancing the otherwise
+                                     * private AEC synthesis OLA/CNG phase. */
+                                    memcpy(out, in->raw_output,
+                                           (size_t)hop * sizeof(float));
+                                } else {
+                                    aec3_post_apply_output(p, sc->sel_esw,
+                                                           sc->sel_echo, &mag,
+                                                           usable, gain, out);
+                                }
                             }
                         }
                     }

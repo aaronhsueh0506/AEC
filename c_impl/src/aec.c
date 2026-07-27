@@ -1447,6 +1447,7 @@ static float aec_erle_ring_max_last15(const Aec* a) {
 
 void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     const int hop = a->hop_size, K = a->n_freqs, N = a->n_partitions;
+    int stationarity_block_for_post;
     memcpy(a->near_hop, mic_in, (size_t)hop * sizeof(float));
     memcpy(a->far_hop,  ref_in, (size_t)hop * sizeof(float));
 
@@ -1856,8 +1857,15 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
          * overwrite this hop's filter.block_stationary — step 11's shadow
          * still reads the value pushed at step 8. */
         int converged_enough = (a->stationarity_active_hops >= a->stationarity_converge_hops);
+        /* This raw value is also consumed later by REE in aec3_post_run. No
+         * stationarity flags or hangovers change between here and that call,
+         * so carry it forward instead of scanning every frequency bin twice
+         * after convergence. Keep it separate from block_stationary_next:
+         * that latch is convergence-gated, while REE expects the raw result. */
+        stationarity_block_for_post =
+            stationarity_estimator_is_block_stationary(&a->a3_stat);
         a->block_stationary_next =
-            converged_enough && stationarity_estimator_is_block_stationary(&a->a3_stat);
+            converged_enough && stationarity_block_for_post;
     }
 
     /* 11. SHADOW filter — already ran pre-main in step 8.5 (E15 fix). */
@@ -2178,8 +2186,14 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             in.pending_delay_change = a->pending_delay_change;
             in.stationarity_active_hops = a->stationarity_active_hops;
             in.stationarity_converge_hops = a->stationarity_converge_hops;
+            in.stationary_block = stationarity_block_for_post;
             in.erle_coh_gate_enabled = AEC3B_ERLE_COH_GATE_ENABLED;
             in.use_stationarity_properties = AEC3B_USE_STATIONARITY_PROPERTIES;
+            /* In the external AEC→NR/RES seam, Step 19's comfort-noise PSD,
+             * Step 20's gain and R² are consumed by the caller, but Step 21's
+             * private gain/CNG/IFFT/OLA result is immediately replaced by the
+             * linear residual. Skip only that final synthesis stage. */
+            in.context_only = (!a->cfg.enable_res && a->cfg.return_res_context);
             in.active_render_threshold = AEC3B_ACTIVE_RENDER_THRESHOLD;
 
             Aec3PostRunObj obj;
@@ -2198,13 +2212,8 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             a->pending_gain_change = pgc;
             a->pending_delay_change = pdc;
 
-            /* Context-only seam (return_res_context && !enable_res): the AEC3
-             * post ran so res_gain / R² / comfort_noise are valid for the
-             * caller's external RES, but its suppression must NOT be applied —
-             * emit the linear residual (raw_output) so the external RES is the
-             * sole suppressor (mirrors Python orchestrator.py:3485-3486). */
-            if (!a->cfg.enable_res)
-                memcpy(a->final_out, a->raw_output, (size_t)hop * sizeof(float));
+            /* In context-only mode aec3_post_run emits raw_output directly;
+             * the external NR/RES remains the sole suppressor. */
         }
 
         /* per-bin mu_scale update AFTER RES (orchestrator 2291-2307). */
