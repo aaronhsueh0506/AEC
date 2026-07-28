@@ -222,6 +222,13 @@ endif
 # to its own FP_POLICY/FFT_WRAPPER_ALIAS_CFLAGS two rounds ago.
 FP_POLICY := -ffp-contract=off
 
+# sk__cquad_load/store use native vld2q_f32/vst2q_f32 on interleaved
+# Complex storage. Scope the required aliasing policy to only the three
+# production objects (plus the header-only selftest below) that instantiate
+# those helpers. Keep this named and protected so the policy participates in
+# CFG_SIG and cannot be stripped by a command-line or make -e override.
+AEC_COMPLEX_ALIAS_CFLAGS := -fno-strict-aliasing
+
 # FP_ALLOWED_CHARS_RE (added alongside the FP-policy allow-list redesign
 # below -- replicated from audio_common's identical fix, see the "REDESIGN"
 # comment further down for the full writeup) is a SECOND bare,
@@ -241,7 +248,7 @@ FP_ALLOWED_CHARS_RE := ^[A-Za-z0-9_./=,+ -]*$$
 # override of FP_ALLOWED_CHARS_RE specifically could widen the allowed
 # character set (e.g. to `.*`, matching anything) and silently neuter the
 # allow-list below. EXTRA_CFLAGS / EXTRA_LDFLAGS are the supported hooks.
-$(foreach v,CFLAGS CXXFLAGS CPPFLAGS LDFLAGS FP_POLICY FP_ALLOWED_CHARS_RE,\
+$(foreach v,CFLAGS CXXFLAGS CPPFLAGS LDFLAGS FP_POLICY AEC_COMPLEX_ALIAS_CFLAGS FP_ALLOWED_CHARS_RE,\
   $(if $(findstring command,$(origin $(v)))$(findstring override,$(origin $(v))),\
     $(error $(v) cannot be overridden (origin: $(origin $(v))) -- it would silently drop this Makefile's own flag appends (FP policy, NO_STDIO, include paths); use EXTRA_CFLAGS / EXTRA_LDFLAGS instead)))
 
@@ -631,7 +638,7 @@ endif
 # Round-4 review payload additions: LINK (P2-1), TOOLCHAIN_CHECK (the
 # guard-skip knob must not alias a guarded build), SRCS (P1-4: sorted source
 # list, post-NO_STDIO-filter, so source add/remove keys to a fresh directory).
-CFG_SIG_PAYLOAD := CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) LINK=$(LINK) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) WERROR=$(WERROR) NO_STDIO=$(NO_STDIO) DEBUG=$(DEBUG) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK) AC_PRODUCER_SIG=$(AC_PRODUCER_SIG) SRCS=$(sort $(SRCS))
+CFG_SIG_PAYLOAD := CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) LINK=$(LINK) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) WERROR=$(WERROR) NO_STDIO=$(NO_STDIO) DEBUG=$(DEBUG) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK) AC_PRODUCER_SIG=$(AC_PRODUCER_SIG) SRCS=$(sort $(SRCS)) AEC_COMPLEX_ALIAS_CFLAGS=$(AEC_COMPLEX_ALIAS_CFLAGS)
 CFG_SIG := $(shell printf '%s' "$(CFG_SIG_PAYLOAD)" | cksum | cut -d' ' -f1)
 
 # OBJ_ROOT / BIN_ROOT (round-6 review P1): where the keyed obj/bin trees
@@ -649,6 +656,8 @@ OBJ_DIR  = $(OBJ_ROOT)/$(BACKEND)-$(CFG_SIG)
 BIN_DIR  = $(BIN_ROOT)/$(BACKEND)-$(CFG_SIG)
 
 OBJS  = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
+
+$(OBJ_DIR)/aec.o $(OBJ_DIR)/pbfdkf.o $(OBJ_DIR)/aec3_post.o: CFLAGS += $(AEC_COMPLEX_ALIAS_CFLAGS)
 
 EXAMPLE_SRCS = $(EXAMPLE_DIR)/aec_wav.c
 EXAMPLE_OBJS = $(patsubst $(EXAMPLE_DIR)/%.c,$(OBJ_DIR)/%.o,$(EXAMPLE_SRCS))
@@ -758,7 +767,7 @@ selftest: $(SELFTEST_TARGET)
 	"$(abspath $(SELFTEST_TARGET))"
 
 $(SELFTEST_TARGET): $(SELFTEST_SRC) | _cfg_guard
-	$(CC) $(CFLAGS) -o $@ $< -lm
+	$(CC) $(CFLAGS) $(AEC_COMPLEX_ALIAS_CFLAGS) -o $@ $< -lm
 
 # =============================================================================
 # Phase 2 real rules: only defined once AC_LIB is known (see the dispatch
