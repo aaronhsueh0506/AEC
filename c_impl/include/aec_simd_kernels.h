@@ -111,15 +111,19 @@
  * sk_cmag2_np_acc_f32, sk_ema_cmag2_f32, sk_cmac_np_f32,
  * sk_wupdate_nlms_f32, sk_wupdate_kf_f32, sk_coherence_ema_gate_f32) uses
  * `sk__cquad_load`/`sk__cquad_store` -- defined once in simd_kernels.h's
- * "Complex-quad NEON load/store" section and pulled in
+ * "Complex-quad NEON load/store (legal aliasing)" section and pulled in
  * transitively by the `#include "simd_kernels.h"` above -- rather than
  * casting a `const Complex*`/`Complex*` straight to `(const float*)`/
- * `(float*)` independently. No second copy of the helper is defined here:
- * simd_kernels.h is included before any of these kernels are defined, so
- * sk__cquad_load/sk__cquad_store are already reachable by the time this
- * file needs them. Those helpers use native vld2q_f32/vst2q_f32; the AEC
- * Makefile therefore applies -fno-strict-aliasing to every object that
- * instantiates them and records the policy in CFG_SIG. The `Complex` layout
+ * `(float*)` and handing that to vld2q_f32/vst2q_f32 directly (a
+ * type-based-aliasing violation under C11 6.5p7: `float` is not the
+ * effective type of a `Complex` object, so the compiler is entitled to
+ * assume the two pointers never alias). No second copy of the helper is
+ * defined here: simd_kernels.h is included before any of these kernels are
+ * defined, so sk__cquad_load/sk__cquad_store are already reachable by the
+ * time this file needs them -- see that header's own comment (search
+ * "sk__cquad_load") for the full memcpy+uzp/zip rationale and the
+ * disassembly-verified claim that it converges back to ld2/st2-equivalent
+ * codegen with no surviving stack-scratch traffic. The `Complex` layout
  * `_Static_assert`s that justify this (exactly 2 floats, r at offset 0, i at
  * offset 4, no padding) also live in simd_kernels.h, immediately after its
  * own `#include "fft_wrapper.h"` and before any kernel that depends on the
@@ -232,7 +236,10 @@ static inline void sk_cabs_np_f32_scalar(const Complex *z, float *out, int n) {
 static inline void sk_cabs_np_f32(const Complex *z, float *out, int n) {
     int i = 0;
     for (; i + 4 <= n; i += 4) {
-        /* Shared Complex-quad load; the owning TU carries the alias flag. */
+        /* sk__cquad_load (simd_kernels.h) -- memcpy-based Complex-quad
+         * load, NOT a direct Complex*->float* cast fed to vld2q_f32 (that
+         * cast is a strict-aliasing violation, see simd_kernels.h's
+         * "Complex-quad NEON load/store" section for the full writeup). */
         float32x4x2_t v = sk__cquad_load(z + i);
         float32x4_t r = sk__cabs_np_neon4(v.val[0], v.val[1]);
         vst1q_f32(out + i, r);
@@ -369,7 +376,11 @@ static inline void sk_cmac_np_f32(Complex *acc, const Complex *w,
                                    const Complex *x, int n) {
     int i = 0;
     for (; i + 4 <= n; i += 4) {
-        /* Shared Complex-quad access; the owning TU carries the alias flag. */
+        /* sk__cquad_load/sk__cquad_store (simd_kernels.h) -- memcpy-based
+         * Complex-quad load/store, NOT a direct Complex*->float* cast fed
+         * to vld2q_f32/vst2q_f32 (that cast is a strict-aliasing
+         * violation, see simd_kernels.h's "Complex-quad NEON load/store"
+         * section for the full writeup). */
         float32x4x2_t wv = sk__cquad_load(w + i);
         float32x4_t wr = wv.val[0], wi = wv.val[1];
         float32x4x2_t xv = sk__cquad_load(x + i);
