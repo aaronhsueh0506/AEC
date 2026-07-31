@@ -133,18 +133,23 @@ if [ "$BACKEND" = "ne10" ]; then
     LINK_DRV=c++
 fi
 
-OBJ_LIST=""
+SOURCES=("$WORK/docs_smoke_main.c")
+while IFS= read -r -d '' src; do
+    SOURCES+=("$src")
+done < <(find "$C_IMPL_DIR/src" -name '*.c' -print0)
+
+OBJ_LIST=()
 i=0
-for src in "$WORK/docs_smoke_main.c" $(find "$C_IMPL_DIR/src" -name '*.c'); do
+for src in "${SOURCES[@]}"; do
     obj="$WORK/docs_smoke_obj_$i.o"
     gcc -O2 -ffp-contract=off -std=gnu99 \
         -I"$C_IMPL_DIR/include" -I"$C_IMPL_DIR/example" -I"$AC_DIR/include" \
         -c "$src" -o "$obj"
-    OBJ_LIST="$OBJ_LIST $obj"
+    OBJ_LIST+=("$obj")
     i=$((i + 1))
 done
 
-$LINK_DRV $OBJ_LIST "$AC_LIB_PATH" -lm -o "$WORK/docs_smoke_bin"
+"$LINK_DRV" "${OBJ_LIST[@]}" "$AC_LIB_PATH" -lm -o "$WORK/docs_smoke_bin"
 
 echo "== docs_smoke: running (BACKEND=$BACKEND) =="
 "$WORK/docs_smoke_bin"
