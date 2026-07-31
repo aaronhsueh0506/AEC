@@ -32,6 +32,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     int    n_freqs;            /* spectrum length (e.g. 257) */
     int    use_conservative;   /* point-wise max with raw_tail */
@@ -67,5 +71,9 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
                              float linear_filter_quality,
                              int linear_filter_quality_is_none,
                              int stationary_block);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* REVERB_FREQUENCY_RESPONSE_H */

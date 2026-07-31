@@ -16,6 +16,10 @@
 #ifndef AEC_AEC_H
 #define AEC_AEC_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "fft_wrapper.h"
 #include "hpf.h"
 #include "saturation.h"
@@ -25,10 +29,6 @@
 #include "epc_shadow.h"
 #include "render_signal_analyzer.h"
 #include "aec3_post.h"   /* Aec3Post + Aec3PostRunObj/In/Scratch + sub-modules */
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 typedef enum { AEC_PRESET_MILD = 0, AEC_PRESET_BALANCED, AEC_PRESET_AGGRESSIVE } AecPreset;
 

@@ -40,6 +40,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ── Constants (erl_estimator.py module level) ───────────────────────────── */
 #define ERL_MIN_ERL  0.01f    /* _MIN_ERL */
 #define ERL_MAX_ERL  1000.0f  /* _MAX_ERL */
@@ -87,5 +91,9 @@ void erl_estimator_update(ErlEstimator *e,
 /* Accessors. erl() returns the internal _erl pointer (length n_bins). */
 const float *erl_estimator_erl(const ErlEstimator *e);
 float erl_estimator_erl_time_domain(const ErlEstimator *e);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* ERL_ESTIMATOR_H */
