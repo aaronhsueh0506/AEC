@@ -59,7 +59,8 @@ static float delay_aec3_dot(const float *a, const float *b, int n) {
  *
  * On ARM (__ARM_NEON) the f32 dot + NLMS update use 4-wide fmla intrinsics;
  * a scalar float path is kept for non-NEON builds. */
-#ifdef __ARM_NEON
+#if defined(__ARM_NEON) && defined(__aarch64__) && \
+    !defined(SIMD_KERNELS_FORCE_SCALAR)
 #include <arm_neon.h>
 
 /* float32 h·x, 4 independent NEON accumulators (n must be a multiple of 16;
@@ -111,7 +112,7 @@ static void da_nlms_update_f32(float *h, const float *x, float alpha, int n) {
     int i;
     for (i = 0; i < n; ++i) h[i] += alpha * x[i];
 }
-#endif /* __ARM_NEON */
+#endif /* AArch64 NEON and not SIMD_KERNELS_FORCE_SCALAR */
 
 /* numpy argmax over h*h (float32): FIRST index of the strongest squared tap.
  * Mirrors max_square_peak_index (returns 0 on size<2). */

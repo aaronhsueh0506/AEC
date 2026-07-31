@@ -34,6 +34,7 @@ typedef enum { AEC_PRESET_MILD = 0, AEC_PRESET_BALANCED, AEC_PRESET_AGGRESSIVE }
 
 typedef struct AecConfig {
     int    sample_rate;        /* 16000 */
+    int    fft_size;           /* frame size; 256/512 @16k, 1024 @48k */
     int    filter_length;      /* 832 samples (52 ms) */
     int    n_partitions;       /* derived if 0 */
     float  mu;                 /* 0.3 */

@@ -83,7 +83,7 @@ int main(void) {
     }
     memset(pool, 0xA5, need);   /* dirty pool: init must not rely on zeros */
 
-    int hop = (int)(0.010f * cfg.sample_rate);
+    int hop = cfg.fft_size / 2;
     long m, c, r, f;
     int failures = 0;
 

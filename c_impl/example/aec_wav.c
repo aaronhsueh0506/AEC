@@ -26,6 +26,7 @@ static void print_usage(const char* prog) {
         "  --no-res                       Disable residual echo suppressor\n"
         "  --no-shadow                    Disable shadow filter\n"
         "  --no-hpf                       Disable 80Hz high-pass\n"
+        "  --fft-size <n>                 256/512 @16kHz; 1024 @48kHz\n"
         "  --debug-level <0..3>           0=off, 1=summary, 2=per-frame, 3=full\n"
         "  --debug-log <path>             redirect log to file (default stderr)\n"
         "  --debug-trace <path>           per-frame CSV trace (logr) of post-filter state\n"
@@ -53,6 +54,7 @@ int main(int argc, char* argv[]) {
     const char* debug_log = NULL;
     const char* debug_trace = NULL;
     int debug_status = 0;   /* --debug: periodic aec_debug_status() print */
+    int fft_size = 0;
 
     for (int i = 4; i < argc; ++i) {
         const char* arg = argv[i];
@@ -68,6 +70,8 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(arg, "--no-res"))          no_res = 1;
         else if (!strcmp(arg, "--no-shadow"))       no_shadow = 1;
         else if (!strcmp(arg, "--no-hpf"))          no_hpf = 1;
+        else if (!strcmp(arg, "--fft-size") && i + 1 < argc)
+            fft_size = atoi(argv[++i]);
         else if (!strcmp(arg, "--debug-level") && i + 1 < argc)
             debug_level = atoi(argv[++i]);
         else if (!strcmp(arg, "--debug-log") && i + 1 < argc)
@@ -117,6 +121,7 @@ int main(int argc, char* argv[]) {
 
     AecConfig cfg;
     aec_config_from_preset(&cfg, preset, sr);
+    if (fft_size > 0) cfg.fft_size = fft_size;
     if (explicit_cng >= 0) cfg.enable_cng = explicit_cng;
     if (no_delay_est) cfg.enable_delay_est = 0;
     if (no_res)       cfg.enable_res = 0;
@@ -136,7 +141,15 @@ int main(int argc, char* argv[]) {
     }
 
     Aec aec;
-    aec_create(&aec, &cfg);
+    if (aec_create(&aec, &cfg) != 0) {
+        fprintf(stderr,
+                "ERROR: invalid AEC signal grid (sr=%d, fft=%d); "
+                "use 256/512 @16kHz or 1024 @48kHz\n",
+                sr, cfg.fft_size);
+        wav_close_read(mr); wav_close_read(rr);
+        if (trace_fp) { aec_debug_set_trace(NULL); fclose(trace_fp); }
+        return 4;
+    }
     int hop = aec_hop_size(&aec);
     aec_debug_set_frame(0, hop, sr);
 
@@ -152,8 +165,7 @@ int main(int argc, char* argv[]) {
     float* ref = (float*)malloc((size_t)hop * sizeof(float));
     float* out = (float*)malloc((size_t)hop * sizeof(float));
 
-    /* --debug cadence: once per second of audio (hop is always sr/100, i.e.
-     * a fixed 10ms, so frames_per_sec is exactly 100 for any sample_rate). */
+    /* --debug cadence: approximately once per second on every signal grid. */
     int frames_per_sec = hop > 0 ? sr / hop : 0;
     if (frames_per_sec <= 0) frames_per_sec = 1;
 

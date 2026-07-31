@@ -21,8 +21,10 @@ class AecConfig:
 
     # ── System / framing ────────────────────────────────────────────────
     sample_rate: int = 16000        # 8000 / 16000 / 48000
-    frame_size: int = -1            # Auto: sample_rate * 20ms
-    hop_size: int = -1              # Auto: frame_size / 2
+    # No-padding signal grid. Auto: 256 @ 8 kHz, 512 @ 16 kHz,
+    # 1024 @ 48 kHz. 16 kHz also accepts the low-compute 256/128 grid.
+    frame_size: int = -1            # analysis frame == FFT size
+    hop_size: int = -1              # frame_size / 2
     filter_length: int = -1         # Auto: 52ms (<44.1 kHz) or 64ms (≥44.1 kHz)
     mu: float = 0.3                 # Step size
     delta: float = 1e-8             # Regularization
@@ -362,9 +364,13 @@ class AecConfig:
 
     def __post_init__(self):
         if self.frame_size == -1:
-            self.frame_size = self.sample_rate * 20 // 1000  # 20ms
+            self.frame_size = {
+                8000: 256,
+                16000: 512,
+                48000: 1024,
+            }.get(self.sample_rate, 0)
         if self.hop_size == -1:
-            self.hop_size = self.frame_size // 2             # 10ms
+            self.hop_size = self.frame_size // 2
         if self.filter_length == -1:
             if self.sample_rate >= 44100:
                 self.filter_length = self.sample_rate * 64 // 1000
@@ -375,11 +381,25 @@ class AecConfig:
                 f"50% overlap invariant violated: frame_size={self.frame_size} "
                 f"must equal 2 * hop_size={self.hop_size}"
             )
+        if self.frame_size <= 0 or self.frame_size & (self.frame_size - 1):
+            raise ValueError(
+                f"no-padding invariant violated: frame_size={self.frame_size} "
+                "must be a positive power of two"
+            )
+        valid_grids = {
+            8000: {256},
+            16000: {256, 512},
+            48000: {1024},
+        }
+        if self.frame_size not in valid_grids.get(self.sample_rate, set()):
+            raise ValueError(
+                f"unsupported signal grid: sample_rate={self.sample_rate}, "
+                f"frame_size/fft_size={self.frame_size}"
+            )
 
     @property
     def fft_size(self) -> int:
-        n = self.frame_size
-        return 1 << (n - 1).bit_length()
+        return self.frame_size
 
     @property
     def n_partitions(self) -> int:

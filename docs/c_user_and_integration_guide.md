@@ -94,7 +94,7 @@ cfg.enable_delay_est = 1;        // default on
 Aec aec;
 aec_create(&aec, &cfg);
 
-int hop = aec_hop_size(&aec);    // 160 @16k, 480 @48k
+int hop = aec_hop_size(&aec);    // 256 @16k default, 512 @48k
 float mic[hop], ref[hop], out[hop];
 
 while (read_block(mic, ref, hop)) {
@@ -188,7 +188,8 @@ These cause correctness failures (not just style issues):
    echo signal. Without a converged linear estimate, RES has nothing to
    suppress.
 2. **Do not feed non-`hop_size` blocks.** `aec_process` requires
-   exactly `hop_size` samples per call (160 @16k, 480 @48k). Use a ring
+   exactly `hop_size` samples per call (query `aec_hop_size`; e.g. 256 @16k
+   default, 512 @48k). Use a ring
    buffer upstream for variable-size input.
 3. **Do not change `filter_length_ms` mid-stream.** Partition count is
    fixed at `aec_create`. Mid-stream changes invalidate `P` / `Q` / `W`
@@ -219,8 +220,8 @@ These cause correctness failures (not just style issues):
 | Sample rate | 8 / 16 / 48 kHz |
 | Bit depth | 16-bit PCM or 32-bit float |
 | Channels | mono |
-| Frame / hop | 20 ms / 10 ms (auto-derived from SR) |
-| Filter length | 52 ms default |
+| Frame / hop | frame=FFT、hop=frame/2；8k 256/128、16k 512/256（可選256/128）、48k 1024/512 |
+| Filter length | 52 ms @ 8/16 kHz；64 ms @ 48 kHz |
 
 ### 5.2 Prerequisites
 
@@ -354,10 +355,10 @@ that absorbs partial frames; the caller must feed exactly `hop_size`
 samples each call.
 
 ```
-hop_size  = sample_rate × 0.010   (10 ms)
-8 kHz  →  80 samples
-16 kHz → 160 samples
-48 kHz → 480 samples
+frame_size = fft_size; hop_size = fft_size / 2
+8 kHz          → 256 / 128
+16 kHz default → 512 / 256   (optional low grid: 256 / 128)
+48 kHz         → 1024 / 512
 ```
 
 Get the value at runtime via `aec_hop_size(&aec)`.
@@ -369,7 +370,8 @@ full block. From the caller's view this is fully streaming — no
 build-up phase past the first call.
 
 **Algorithmic latency:**
-- With RES enabled (default): **~10 ms** (one hop). The delay comes
+- With RES enabled (default): **one hop** (8k/16k default 16 ms、16k low-grid
+  8 ms、48k 10.667 ms). The delay comes
   from the RES sqrt-Hann analysis × Hann synthesis OLA.
 - With `--no-res` / `cfg.enable_res = 0`: effectively **0 ms**.
 
@@ -413,27 +415,25 @@ hops differ; underrun + overrun detection/recovery pass).
 
 Most sizes are derived from `sample_rate` inline inside `aec_create()`
 — there is no separate `aec_derive_sizes()` function. Caller only sets
-`sample_rate` (and optionally `filter_length_ms`); the rest is
+`sample_rate` (and optionally the sample-count field `filter_length`); the rest is
 automatic:
 
 | Field | 8 kHz | 16 kHz | 48 kHz | Auto? |
 |---|---|---|---|---|
-| `hop_size` | 80 | 160 | 480 | ✓ (`0.010 · sr`) |
-| `block_size` | 160 | 320 | 960 | ✓ (`2 · hop`) |
-| `fft_size` | 256 | 512 | 1024 | ✓ (`next_pow2(2·hop)`) |
-| `n_freqs` | 129 | 257 | 513 | ✓ (`fft/2 + 1`) |
-| `n_partitions` (52 ms filter) | 6 | 6 | 6 | ✓ |
+| `hop_size` | 128 | 256（可選128） | 512 | ✓ (`fft/2`) |
+| `block_size` | 256 | 512（可選256） | 1024 | ✓ (`2 · hop`) |
+| `fft_size` | 256 | 512（可選256） | 1024 | ✓ (`block_size`，不補零) |
+| `n_freqs` | 129 | 257 default／129 low-grid | 513 | ✓ (`fft/2 + 1`) |
+| `n_partitions` | 4 (52 ms) | 4 default／7 low-grid (52 ms) | 6 (64 ms) | ✓ (`ceil(filter_length/hop)`) |
 | `ref_ring_size` | 16384 | 32768 | 98304 | ✓ (note 2) |
 | RES bin resolution | sr / blk | sr / blk | sr / blk | ✓ |
-| `filter_length_ms` (default) | 52 | 52 | 52 (note 1) | ✗ user override |
+| `filter_length` default duration | 52 ms | 52 ms | 64 ms (note 1) | ✗ user override |
 | `highpass_cutoff_hz` (80) | same | same | same | ✗ Hz, auto-correct |
 | `max_delay_ms` (1024) | same | same | same | ✗ ms |
 | `saturation_threshold` (0.95) | same | same | same | ✗ amplitude |
 
-> Note 1 — Python reference uses 64 ms at SR ≥ 44.1 kHz to capture
-> longer reverb tails; the C port does not auto-bump and keeps 52 ms.
-> Set `cfg.filter_length_ms = 64.0f` manually for 48 kHz if your room
-> RT60 is high.
+> Note 1 — Both Python and C default to 64 ms at 48 kHz and 52 ms below
+> 44.1 kHz. `filter_length` itself is a sample count, not a millisecond field.
 >
 > Note 2 — `ref_ring_size` is the sample count for `cfg.delay_buffer_ms`
 > (default 2048 ms), floored at `max_delay_ms`-equivalent samples + 4096
@@ -450,18 +450,19 @@ automatic:
 2. **8 kHz hits the high-frequency edge.** The RES stationary-DT mask
    has Hz fades at 3000–4000 Hz; at 8 kHz Nyquist is 4 kHz so the fade
    is right against the edge. Functional but shaped tightly.
-3. **48 kHz has tighter circular-conv margin.** `fft_size = 1024 vs
-   block = 960` is only 6.7 % padding (vs ~60 % at 16 kHz). Long
-   filters (`filter_length_ms` ≫ 52) at 48 kHz can alias — keep within
-   the partition design.
-4. **Non-standard SRs are silently truncated.** `(int)(0.010 · sr)`
-   gives `hop = 441` at 44.1 kHz, slightly off the 10 ms target. Stick
-   to 8 / 16 / 48 kHz; resample upstream if the input is anything
-   else.
-5. **Latency is fixed in *time*, not samples.** RES OLA always adds
-   one hop = 10 ms regardless of SR.
-6. **`warmup_frames` is in frames, not seconds.** Default 100 frames =
-   1000 ms (approx. 1s) at 10 ms hop. Keep this in mind if you tune it.
+3. **No grid has zero-padding margin.** Every grid deliberately uses
+   `block_size == fft_size == 2*hop`; overlap-save remains valid because each
+   filter partition is one hop long. Longer filters add partitions rather than
+   extending a partition beyond one hop.
+4. **Non-standard SRs and non-whitelisted FFT sizes are rejected.** Stick to
+   8 / 16 / 48 kHz and the table above; resample upstream otherwise.
+5. **Latency is grid-dependent.** RES OLA adds one hop; the hop durations are
+   8–16 ms depending on the selected rate/grid, not a universal 10 ms.
+6. **Project tuning fields ending in `_frames` and several project EMAs remain
+   per-hop values.** For example, preset `warmup_frames=100` lasts 1.6 s on the
+   16k/512 default grid and about 1.067 s on 48k/1024. AEC3-derived internal
+   constants use the `aec3_scale` wall-clock helpers, but these project-level
+   knobs still require per-grid qualification before changing production tuning.
 
 ---
 

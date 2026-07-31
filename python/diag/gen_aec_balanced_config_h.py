@@ -44,14 +44,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 OUT = os.path.join(ROOT, 'c_impl', 'include', 'aec3_balanced_config.h')
 
 SR = 16000
+DEFAULT_FRAME = 512
 FL = 832
 
 # M2: additional rates. filter_length is left at Python's own __post_init__
 # auto-policy (None => not passed => dataclass sentinel -1 => 52 ms <44.1kHz
 # / 64 ms >=44.1kHz), NOT hardcoded like the legacy 16 kHz FL=832.
-EXTRA_RATES = (8000, 48000)
-RATE_TAG = {8000: 'R8K', 16000: '', 48000: 'R48K'}
-RATE_ENABLE_FLAG = {8000: 'AEC3B_ENABLE_8K', 48000: 'AEC3B_ENABLE_48K'}
+EXTRA_GRIDS = (
+    (8000, 256, 'R8K', 'AEC3B_ENABLE_8K'),
+    (16000, 256, 'R16K256', 'AEC3B_ENABLE_16K_256'),
+    (48000, 1024, 'R48K', 'AEC3B_ENABLE_48K'),
+)
 
 
 def f64(x):
@@ -81,7 +84,7 @@ def _lf_clamp_comment(n_bins, sr, val):
             % (n_bins, sr, n_bins, sr, val))
 
 
-def _capture_all(sr, filter_length=None):
+def _capture_all(sr, frame_size, filter_length=None):
     """Instantiate the live Python balanced AEC at `sr` and return every
     value the header emitter needs, keyed by the AEC3B_* macro name it
     feeds (sans prefix/tag). This dict is the SINGLE SOURCE OF TRUTH used by
@@ -93,7 +96,11 @@ def _capture_all(sr, filter_length=None):
     policy. Only the legacy 16 kHz call passes an explicit filter_length
     (832, matching the historical hardcoded FL).
     """
-    kwargs = dict(sample_rate=sr)
+    kwargs = dict(
+        sample_rate=sr,
+        frame_size=frame_size,
+        hop_size=frame_size // 2,
+    )
     if filter_length is not None:
         kwargs['filter_length'] = filter_length
     cfg = AecConfig.from_preset('balanced', **kwargs)
@@ -282,6 +289,15 @@ RATE_VARYING_MACROS = {
     'REE_MIN_NOISE_FLOOR_POWER', 'REE_NL_NORM_POWER',
     'REE_RESIDUAL_NOISE_GATE_POWER',
     'NOISE_FLOOR_INT16SQ',
+    # Wall-clock-rescaled values vary when hop/sample-rate is no longer
+    # locked to exactly 10 ms.
+    'STATIONARITY_CONVERGE_HOPS',
+    'CNG_Y2_ALPHA', 'CNG_N2_TRACK_FRESHNESS', 'CNG_N2_TRACK_RETENTION',
+    'CNG_N2_SLOW_UP', 'CNG_N2_INITIAL_ALPHA',
+    'CNG_N2_UPDATE_ONSET_HOPS', 'CNG_N2_INITIAL_DURATION_HOPS',
+    'REE_NOISE_FLOOR_HOLD_HOPS', 'REE_REVERB_SMOOTHING_BASE',
+    'SG_MAX_INC', 'SG_MAX_DEC_LF', 'SG_TRIGGER_THRESHOLD_HOPS',
+    'SG_HOLD_DURATION_HOPS', 'SG_NEAREND_SMOOTHER_N',
 }
 # The per-bin tuning arrays always vary (length == n_bins).
 RATE_VARYING_ARRAYS = {
@@ -332,7 +348,7 @@ def _assert_cross_rate_invariance(captures):
             'emitted per-rate), never silently ignored:',
         ]
         for name, r0, v0, r1, v1 in problems:
-            msg.append('  %s: sr=%d -> %r   vs   sr=%d -> %r' % (name, r0, v0, r1, v1))
+            msg.append('  %s: grid=%r -> %r   vs   grid=%r -> %r' % (name, r0, v0, r1, v1))
         raise SystemExit('\n'.join(msg))
 
 
@@ -530,6 +546,19 @@ def emit_rate_block(w, tag, enable_flag, cap):
     w('#define AEC3B_%s_REE_RESIDUAL_NOISE_GATE_POWER (%s)\n' % (tag, f64(v['REE_RESIDUAL_NOISE_GATE_POWER'])))
     w('#define AEC3B_%s_NOISE_FLOOR_INT16SQ (%s)\n\n' % (tag, f64(v['NOISE_FLOOR_INT16SQ'])))
 
+    w('/* Wall-clock-rescaled constants for this exact hop duration. */\n')
+    for name in ('STATIONARITY_CONVERGE_HOPS',
+                 'CNG_N2_UPDATE_ONSET_HOPS', 'CNG_N2_INITIAL_DURATION_HOPS',
+                 'REE_NOISE_FLOOR_HOLD_HOPS', 'SG_TRIGGER_THRESHOLD_HOPS',
+                 'SG_HOLD_DURATION_HOPS', 'SG_NEAREND_SMOOTHER_N'):
+        w('#define AEC3B_%s_%s %d\n' % (tag, name, v[name]))
+    for name in ('CNG_Y2_ALPHA', 'CNG_N2_TRACK_FRESHNESS',
+                 'CNG_N2_TRACK_RETENTION', 'CNG_N2_SLOW_UP',
+                 'CNG_N2_INITIAL_ALPHA', 'REE_REVERB_SMOOTHING_BASE',
+                 'SG_MAX_INC', 'SG_MAX_DEC_LF'):
+        w('#define AEC3B_%s_%s (%s)\n' % (tag, name, f64(v[name])))
+    w('\n')
+
     w('/* SuppressionGain per-bin tuning arrays at %d Hz (length = n_bins). */\n' % sr)
     w(emit_array('AEC3B_%s_SG_NEAREND_ENR_TR' % tag, cap['arrays']['SG_NEAREND_ENR_TR']))
     w(emit_array('AEC3B_%s_SG_NEAREND_ENR_SU' % tag, cap['arrays']['SG_NEAREND_ENR_SU']))
@@ -592,6 +621,21 @@ def emit_rate_table(w):
     w('    float ree_nl_norm_power;\n')
     w('    float ree_residual_noise_gate_power;\n')
     w('    float noise_floor_int16sq;\n')
+    w('    int stationarity_converge_hops;\n')
+    w('    float cng_y2_alpha;\n')
+    w('    float cng_n2_track_freshness;\n')
+    w('    float cng_n2_track_retention;\n')
+    w('    float cng_n2_slow_up;\n')
+    w('    float cng_n2_initial_alpha;\n')
+    w('    int cng_n2_update_onset_hops;\n')
+    w('    int cng_n2_initial_duration_hops;\n')
+    w('    int ree_noise_floor_hold_hops;\n')
+    w('    float ree_reverb_smoothing_base;\n')
+    w('    float sg_max_inc;\n')
+    w('    float sg_max_dec_lf;\n')
+    w('    int sg_trigger_threshold_hops;\n')
+    w('    int sg_hold_duration_hops;\n')
+    w('    int sg_nearend_smoother_n;\n')
     w('} Aec3BalancedRateDims;\n\n')
 
     w('static const Aec3BalancedRateDims AEC3B_RATE_TABLE[] __attribute__((unused)) = {\n')
@@ -611,10 +655,17 @@ def emit_rate_table(w):
     w('      AEC3B_SG_LOW_RENDER_THRESHOLD, AEC3B_SG_FLOOR_POWER, AEC3B_SG_LOW_RENDER_LIMIT,\n')
     w('      AEC3B_SG_NORMAL_RENDER_LIMIT, AEC3B_REE_MIN_NOISE_FLOOR_POWER,\n')
     w('      AEC3B_REE_NL_NORM_POWER, AEC3B_REE_RESIDUAL_NOISE_GATE_POWER,\n')
-    w('      AEC3B_NOISE_FLOOR_INT16SQ },\n')
+    w('      AEC3B_NOISE_FLOOR_INT16SQ,\n')
+    w('      AEC3B_STATIONARITY_CONVERGE_HOPS, AEC3B_CNG_Y2_ALPHA,\n')
+    w('      AEC3B_CNG_N2_TRACK_FRESHNESS, AEC3B_CNG_N2_TRACK_RETENTION,\n')
+    w('      AEC3B_CNG_N2_SLOW_UP, AEC3B_CNG_N2_INITIAL_ALPHA,\n')
+    w('      AEC3B_CNG_N2_UPDATE_ONSET_HOPS, AEC3B_CNG_N2_INITIAL_DURATION_HOPS,\n')
+    w('      AEC3B_REE_NOISE_FLOOR_HOLD_HOPS, AEC3B_REE_REVERB_SMOOTHING_BASE,\n')
+    w('      AEC3B_SG_MAX_INC, AEC3B_SG_MAX_DEC_LF,\n')
+    w('      AEC3B_SG_TRIGGER_THRESHOLD_HOPS, AEC3B_SG_HOLD_DURATION_HOPS,\n')
+    w('      AEC3B_SG_NEAREND_SMOOTHER_N },\n')
 
-    for sr, tag in ((8000, 'R8K'), (48000, 'R48K')):
-        flag = RATE_ENABLE_FLAG[sr]
+    for sr, fft_size, tag, flag in EXTRA_GRIDS:
         w('#if %s\n' % flag)
         w('    { /* %d Hz */\n' % sr)
         w('      %d,\n' % sr)
@@ -639,16 +690,25 @@ def emit_rate_table(w):
           % (tag, tag, tag))
         w('      AEC3B_%s_SG_NORMAL_RENDER_LIMIT, AEC3B_%s_REE_MIN_NOISE_FLOOR_POWER,\n' % (tag, tag))
         w('      AEC3B_%s_REE_NL_NORM_POWER, AEC3B_%s_REE_RESIDUAL_NOISE_GATE_POWER,\n' % (tag, tag))
-        w('      AEC3B_%s_NOISE_FLOOR_INT16SQ },\n' % tag)
+        w('      AEC3B_%s_NOISE_FLOOR_INT16SQ,\n' % tag)
+        w('      AEC3B_%s_STATIONARITY_CONVERGE_HOPS, AEC3B_%s_CNG_Y2_ALPHA,\n' % (tag, tag))
+        w('      AEC3B_%s_CNG_N2_TRACK_FRESHNESS, AEC3B_%s_CNG_N2_TRACK_RETENTION,\n' % (tag, tag))
+        w('      AEC3B_%s_CNG_N2_SLOW_UP, AEC3B_%s_CNG_N2_INITIAL_ALPHA,\n' % (tag, tag))
+        w('      AEC3B_%s_CNG_N2_UPDATE_ONSET_HOPS, AEC3B_%s_CNG_N2_INITIAL_DURATION_HOPS,\n' % (tag, tag))
+        w('      AEC3B_%s_REE_NOISE_FLOOR_HOLD_HOPS, AEC3B_%s_REE_REVERB_SMOOTHING_BASE,\n' % (tag, tag))
+        w('      AEC3B_%s_SG_MAX_INC, AEC3B_%s_SG_MAX_DEC_LF,\n' % (tag, tag))
+        w('      AEC3B_%s_SG_TRIGGER_THRESHOLD_HOPS, AEC3B_%s_SG_HOLD_DURATION_HOPS,\n' % (tag, tag))
+        w('      AEC3B_%s_SG_NEAREND_SMOOTHER_N },\n' % tag)
         w('#endif /* %s */\n' % flag)
 
     w('};\n\n')
 
-    w('static inline const Aec3BalancedRateDims* aec3b_rate_cfg(int sample_rate) {\n')
+    w('static inline const Aec3BalancedRateDims* aec3b_rate_cfg(int sample_rate, int fft_size) {\n')
     w('    int i;\n')
     w('    int n = (int)(sizeof(AEC3B_RATE_TABLE) / sizeof(AEC3B_RATE_TABLE[0]));\n')
     w('    for (i = 0; i < n; ++i) {\n')
-    w('        if (AEC3B_RATE_TABLE[i].sample_rate == sample_rate) {\n')
+    w('        if (AEC3B_RATE_TABLE[i].sample_rate == sample_rate &&\n')
+    w('            AEC3B_RATE_TABLE[i].fft_size == fft_size) {\n')
     w('            return &AEC3B_RATE_TABLE[i];\n')
     w('        }\n')
     w('    }\n')
@@ -657,11 +717,14 @@ def emit_rate_table(w):
 
 
 def main():
-    cap16 = _capture_all(SR, filter_length=FL)
-    extra_caps = {sr: _capture_all(sr, filter_length=None) for sr in EXTRA_RATES}
+    cap16 = _capture_all(SR, DEFAULT_FRAME, filter_length=FL)
+    extra_caps = {
+        (sr, fft_size): _capture_all(sr, fft_size, filter_length=None)
+        for sr, fft_size, _tag, _flag in EXTRA_GRIDS
+    }
 
     all_caps = dict(extra_caps)
-    all_caps[SR] = cap16
+    all_caps[(SR, DEFAULT_FRAME)] = cap16
     _assert_cross_rate_invariance(all_caps)
 
     lines = []
@@ -684,8 +747,8 @@ def main():
     emit_legacy_block(w, cap16)
     w('\n')
 
-    for sr, tag in ((8000, 'R8K'), (48000, 'R48K')):
-        emit_rate_block(w, tag, RATE_ENABLE_FLAG[sr], extra_caps[sr])
+    for sr, fft_size, tag, flag in EXTRA_GRIDS:
+        emit_rate_block(w, tag, flag, extra_caps[(sr, fft_size)])
 
     emit_rate_table(w)
 
@@ -693,9 +756,11 @@ def main():
 
     with open(OUT, 'w') as fh:
         fh.writelines(lines)
-    print('wrote %s (%d lines, n_bins=%d filter_taps=%d; +8k n_bins=%d +48k n_bins=%d)'
+    print('wrote %s (%d lines, n_bins=%d filter_taps=%d; +8k=%d +16k/256=%d +48k=%d)'
           % (OUT, len(lines), cap16['values']['N_BINS'], cap16['filter_taps_size'],
-             extra_caps[8000]['values']['N_BINS'], extra_caps[48000]['values']['N_BINS']))
+             extra_caps[(8000, 256)]['values']['N_BINS'],
+             extra_caps[(16000, 256)]['values']['N_BINS'],
+             extra_caps[(48000, 1024)]['values']['N_BINS']))
 
 
 if __name__ == '__main__':

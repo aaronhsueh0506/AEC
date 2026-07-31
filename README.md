@@ -79,20 +79,20 @@ single-channel DT-deg-vs-echo wall; all share the same `_aec3_post` chain and
 
 | Field | Value |
 |---|---|
-| Sample rate | 8 / 16 / 48 kHz (frame/fft/hop auto-derived) |
+| Sample rate | 8 / 16 / 48 kHz (whitelisted no-padding grids) |
 | Bit depth | 16-bit PCM or 32-bit float |
 | Channels | mono |
-| Frame / hop | 20 ms / 10 ms |
-| Filter length | 52 ms default (configurable) |
-| Algorithmic delay | 10 ms (1 hop) |
+| Frame / hop | 8k: 256/128; 16k: 512/256 default or 256/128; 48k: 1024/512 |
+| Filter length | 52 ms @ 8/16 kHz; 64 ms @ 48 kHz (configurable) |
+| Algorithmic delay | one hop with RES: 16 ms / 8 ms / 10.667 ms by grid |
 
-### Resource (C, fl=52 ms @16 kHz)
+### Resource (C, 16 kHz default grid 512/256, fl=52 ms)
 
 | | |
 |---|---|
-| Static pool, KISS (host/reference) | 538,320 B (525.7 KB) |
-| Static pool, NE10 (embedded)       | 534,192 B (521.7 KB) (twiddle configs in-pool since P0001) |
-| Compute / frame                    | 4 × 512-FFT + Kalman update (257 bins × 6 partitions) |
+| Static pool, KISS (host/reference) | 543,040 B (current `aec_get_mem_size`) |
+| Static pool, other backend | Query `aec_get_mem_size`; FFT workspace is backend-dependent |
+| Compute / frame | 4 × 512-FFT + Kalman update (257 bins × 4 partitions) |
 | FFT                                | KISS FFT (float32; NE10 ARM-NEON opt-in) — ~float32 precision vs numpy `np.fft` |
 
 Both backends are static==dynamic byte-equal (`test_static_aec`); full

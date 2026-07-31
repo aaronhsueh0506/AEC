@@ -260,6 +260,8 @@ aggressive differ from balanced **only** in that one floor field.
 - Per-case CNG determinism: `np.random.seed(0)` before each `AEC(cfg)` instantiation (see `eval_aec_challenge.py:run_ours`).
 - HPF defaults locked: far-end (ref) HPF=OFF, mic-path HPF=ON.
 - macOS: use `python3` (not `python`); kiss_fft symlink in `c_impl/lib/kiss_fft` → `../../../lib/nr/c_impl/lib/kiss_fft` in the Audio_ALG integration repo.
+- `active_render` threshold is **5.96e-4**, empirically tuned — the strict-AEC3
+  value 9.31e-6 was validated as a regression; do not "align" it to the reference.
 
 ## Branch model
 
@@ -273,56 +275,6 @@ Python↔C bit-exactness under `-DUSE_STANDARD_MATH` (4 production-C port bugs
 fixed) — **since superseded by the 2026-07-15 float32 campaign** (see "What
 this repo is" above): Python bit-exact parity is retired repo-wide, Python is
 now the algorithm spec and C the tolerance-checked float32 implementation. It
-supersedes 3.22.2 as production; see CHANGELOG `[3.23.0]`. The frontier history
-below is retained for context.
-
-The **3.22.2** BALANCED preset
-(`soft_nearend_blend_per_bin`, default ON) + far-active min-gain floor
-−28 dB (`min_gain_floor_far_active_db`): the per-bin frequency-selective
-near-end protection lets the deeper floor cancel more echo (DT echo +0.113
-vs the −22 baseline) at only −0.044 DT deg, all four ship bars met. The
-`far_active_floor_db` is the single-knob preset axis (weak −18 / strong
-−28+). Built on the v3.22.1 P4 delay-acquire guard, the v3.22.0 split
-min-gain floor + default-ON stack (E1+x2+E2+D3+L1+C′), and the v3.21.6.4
-AEC3-alignment completion. See CHANGELOG `[3.22.2]` and
-[docs/archive/v3_22.md](docs/archive/v3_22.md) for the full flag-campaign evidence.
-
-On top of 3.22.2, a **byte-equal hygiene pass** (CHANGELOG `[Unreleased]`,
-`__version__` unchanged): Track A `SuppressionGain`-ctor dedup, Track B
-retired 6 dud default-OFF flags (`AecConfig` 109 fields), Track C added the
-default-OFF per-bin near-end SPP substrate (`NearendSpp` +
-[python/spp_step0_diag.py](python/spp_step0_diag.py)) for the DT frontier —
-**NULL verdict** (near-gated cohxd lands on the plain-cohxd Pareto line; the
-per-bin near-mask hits the voice-on-voice bin-overlap wall, [docs/archive/v3_22.md](docs/archive/v3_22.md)
-§7). All three byte-equal-verified; production behaviour unchanged.
-
-On top of that, **3.22.3** (CHANGELOG `[3.22.3]`) ships the surviving
-**isolated parity/correctness candidates** from the Codex source audit:
-**P0.1** coherence-gate EMA reset hygiene, **P0.4** analysis-window canonical
-sqrt-Hann (true perfect reconstruction), **P0.5** `erle_e2y2_gate_*` preserved
-across reset. Output changes vs 3.22.2 but **AECMOS-neutral** (≤0.002 all
-buckets). Three parity candidates were **gated** (P0.2a windowed SG-nearend,
-P0.2b CNG source, P0.3 C′ selected/windowed) — the audit's "contaminates R²"
-framing was refuted (R² is decoupled from `near_psd`); P0.2b is kept documented
-in-code as a CN-floor DT-deg lever for the frontier. See [docs/archive/v3_22.md](docs/archive/v3_22.md) §8.
-
-The **v3.21 CLOSE** (branch `v3_21_release`, byte-equal, no algorithm
-change — see CHANGELOG `[Unreleased]`) finalised the arc: a hop/fft
-conversion audit + 800-case Tier-C validation adjudicated every
-"physical-meaning conversion" flag (matched-magnitude AECMOS Pareto),
-then hard-coded the surviving default-True alignment flags into their
-call sites and deleted all NOSHIP / temp substrate. Net effect on the
-two large files: **config 412→230, filters 1057→863** (legacy
-P-denominator Kalman body removed; 10 always-True refined/shadow
-AEC3-parity flags inlined), orchestrator construction/`_aec3_post`
-branches collapsed. Also removed the unused alternate filter line
-(`NlmsFilter` + `AecMode.LMS`/`NLMS`) and the dead `erle.py`
-back-compat re-export. `active_render` 5.96e-4 is now documented as an
-empirically-tuned threshold (the strict-AEC3 9.31e-6 validated as a
-regression) — the only flag whose "alignment" label changed.
-
-Byte-equal verified across the cleanup arc (`_ours` + `_ours_nores`
-md5, all buckets incl. movement). See [CHANGELOG.md](CHANGELOG.md) for
-per-version detail and
-[docs/architecture_v3_22_5_vs_aec3.html](docs/architecture_v3_22_5_vs_aec3.html)
-for the architectural before/after.
+supersedes 3.22.2 as production; see CHANGELOG `[3.23.0]`. Earlier frontier
+history (3.22.x, v3.21 CLOSE) lives in [CHANGELOG.md](CHANGELOG.md) and
+[docs/archive/v3_22.md](docs/archive/v3_22.md).

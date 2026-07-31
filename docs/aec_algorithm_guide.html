@@ -100,13 +100,12 @@ ref ──────► Saturation ─► EchoPathDelayEstimator ─► RingBu
   </thead>
   <tbody>
     <tr><td>Sample rate</td><td>16 kHz</td><td>fixed (16 kHz mono speech)</td></tr>
-    <tr><td>Frame size</td><td>320 samples (20 ms)</td><td>50 % overlap</td></tr>
-    <tr><td>Hop size</td><td>160 samples (10 ms)</td><td>10 ms hop</td></tr>
-    <tr><td>Block size</td><td>64 samples (4 ms)</td><td>PBFDKF block</td></tr>
-    <tr><td>FFT size</td><td>128</td><td>2 × block size</td></tr>
-    <tr><td>Frequency bins</td><td>65 (DC … 8 kHz)</td><td>n_freqs = FFT/2 + 1</td></tr>
+    <tr><td>Frame / block size</td><td>512 samples (32 ms)</td><td>equal to FFT; no zero-padding</td></tr>
+    <tr><td>Hop size</td><td>256 samples (16 ms)</td><td>50 % overlap</td></tr>
+    <tr><td>FFT size</td><td>512</td><td>equal to frame size</td></tr>
+    <tr><td>Frequency bins</td><td>257 (DC … 8 kHz)</td><td>n_freqs = FFT/2 + 1</td></tr>
     <tr><td>Filter length</td><td>832 samples (52 ms)</td><td><code>--filter 832</code> default</td></tr>
-    <tr><td>n_partitions</td><td>13</td><td>filter_length / block_size</td></tr>
+    <tr><td>n_partitions</td><td>4</td><td>ceil(filter_length / hop_size)</td></tr>
     <tr><td>Max delay range</td><td>1024 ms</td><td><code>max_delay_ms = 1024</code> (v3.10.4 widening)</td></tr>
   </tbody>
 </table>

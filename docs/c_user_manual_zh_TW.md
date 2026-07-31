@@ -233,15 +233,16 @@ Lockstep 呼叫 `aec_analyze_render(ref)` 後立即呼叫 `aec_process_capture(m
 
 ## 6. Frame、delay 與 latency contract
 
-hop 由 sample rate 推導：
+frame 嚴格等於 FFT、hop 為 frame/2，不做 zero-padding：
 
-| Sample rate | Hop | 時間 |
-|---:|---:|---:|
-| 8 kHz | 80 samples | 10 ms |
-| 16 kHz | 160 samples | 10 ms |
-| 48 kHz | 480 samples | 10 ms |
+| Sample rate / grid | Frame=FFT | Hop | Hop 時間 |
+|---:|---:|---:|---:|
+| 8 kHz | 256 | 128 | 16 ms |
+| 16 kHz（低算量） | 256 | 128 | 8 ms |
+| 16 kHz（預設） | 512 | 256 | 16 ms |
+| 48 kHz | 1024 | 512 | 10.667 ms |
 
-內部 analysis block 是兩個 hop，使用 50% overlap。啟用 residual suppression 時通常要把一個 hop（約 10 ms）的 OLA 納入 latency budget；關閉 RES 後為線性路徑，沒有這段 post-filter OLA 延遲。
+內部 analysis block 是兩個 hop，使用 50% overlap。啟用 residual suppression 時通常要把一個 hop 的 OLA 納入 latency budget；關閉 RES 後為線性路徑，沒有這段 post-filter OLA 延遲。
 
 online delay estimator 預設開啟，最大搜尋範圍由 `max_delay_ms` 控制。它不能修復 mic/ref 不同 sample rate、持續 clock drift 或錯誤的 render reference。
 
@@ -264,7 +265,7 @@ cfg.enable_highpass = 1;
 | 欄位 | 預設 | 說明 |
 |---|---:|---|
 | `sample_rate` | caller 指定 | 建立後不可更換 |
-| `filter_length` | 832 samples | 16 kHz 時約 52 ms；不是 millisecond 欄位 |
+| `filter_length` | 依 SR 自動 | 8/16 kHz 約 52 ms；48 kHz 約 64 ms；不是 millisecond 欄位 |
 | `enable_cng` | 1 | comfort noise |
 | `enable_delay_est` | 1 | online delay estimator |
 | `enable_highpass` | 1 | mic 端 80 Hz HPF |
@@ -272,7 +273,7 @@ cfg.enable_highpass = 1;
 | `enable_shadow` | 1 | shadow adaptive filter |
 | `enable_res` | 1 | AEC3 post-filter suppression |
 | `max_delay_ms` | 1024 | delay 搜尋上限 |
-| `warmup_frames` | 100 | 10 ms hop 下約 1 秒 |
+| `warmup_frames` | 100 | raw hop count；16k預設約1.6秒、48k約1.067秒 |
 | `delay_acquire_warm_transfer` | 1 | 首次 delay acquisition 時的 warm tap-transfer（v3.24.1）：搬移已學到的 IR 而非歸零，讓 realign 前的 cold-start 抑制效果得以保留 |
 | `delay_acquire_inst_erle_db` | 4.0 | double；warm tap-transfer 的 inst-ERLE 峰值門檻（dB），超過才觸發搬移 |
 | `dt_aware_recovery_soft` | 1 | double-talk 期間允許 soft（非破壞性）Path A/B／EPV／shadow-rise realign |
@@ -286,7 +287,7 @@ cfg.enable_highpass = 1;
 | `filter_misadjustment_scale_min` | 0.5 | misadjustment scale 修正下限 |
 | `filter_misadjustment_scale_max` | 2.0 | misadjustment scale 修正上限 |
 
-`filter_length` 是 sample 數，預設固定為 832；換到 8／48 kHz 時若要維持相同毫秒數，application 應在 create 前自行換算。`n_partitions=0` 會由 create 根據 filter length 與 hop 推導。
+`filter_length` 是 sample 數，預設會依 sample rate 換算成上述 52/64 ms；application override 時仍須自行換算。`n_partitions=0` 會由 create 根據 filter length 與 hop 推導。`*_frames` 與 project-level EMA 目前仍是 per-hop tuning；AEC3-derived 內部常數雖已經由 `aec3_scale` 做 wall-clock 換算，這些外層欄位仍必須逐 grid qualification。
 
 改變 sample rate、filter length、partition count 或其他會改變 allocation/layout 的欄位時，必須 destroy 再 create。不要在 process 途中直接修改 `aec.cfg`。
 

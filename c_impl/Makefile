@@ -113,9 +113,23 @@ ALLOW_DIRTY_PUBLISH ?= 0
 ALLOW_UNTRACKED_PUBLISH ?= 0
 ATTEST_STAMP ?=
 
+SIMD ?= 1
+ifneq ($(words $(SIMD)),1)
+$(error SIMD must be exactly 0 or 1, got '$(SIMD)')
+endif
+ifneq ($(filter-out 0 1,$(SIMD)),)
+$(error SIMD must be exactly 0 or 1, got '$(SIMD)')
+endif
+ifeq ($(SIMD),0)
+SIMD_CFLAGS := -DSIMD_KERNELS_FORCE_SCALAR
+else
+SIMD_CFLAGS :=
+endif
+
 CFLAGS  = -Wall -Wextra -O2 -std=gnu99
 CFLAGS += -I./include -I./example
 CFLAGS += $(EXTRA_CFLAGS)
+CFLAGS += $(SIMD_CFLAGS)
 LDFLAGS = -lm
 LDFLAGS += $(EXTRA_LDFLAGS)
 
@@ -562,7 +576,7 @@ CFLAGS    += $(FP_POLICY)
 # printed, and the final phase-2 sub-make's compile/link recipes are also
 # just printed -- verified empirically: `make -n all` spawns real
 # `make` processes but creates zero files, same as a non-recursive recipe.
-AC_FWD = BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
+AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
 .PHONY: all bench test-counter-saturation
@@ -631,7 +645,7 @@ endif
 # Round-4 review payload additions: LINK (P2-1), TOOLCHAIN_CHECK (the
 # guard-skip knob must not alias a guarded build), SRCS (P1-4: sorted source
 # list, post-NO_STDIO-filter, so source add/remove keys to a fresh directory).
-CFG_SIG_PAYLOAD := CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) LINK=$(LINK) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) WERROR=$(WERROR) NO_STDIO=$(NO_STDIO) DEBUG=$(DEBUG) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK) AC_PRODUCER_SIG=$(AC_PRODUCER_SIG) SRCS=$(sort $(SRCS))
+CFG_SIG_PAYLOAD := CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) LINK=$(LINK) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) NO_STDIO=$(NO_STDIO) DEBUG=$(DEBUG) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK) AC_PRODUCER_SIG=$(AC_PRODUCER_SIG) SRCS=$(sort $(SRCS))
 CFG_SIG := $(shell printf '%s' "$(CFG_SIG_PAYLOAD)" | cksum | cut -d' ' -f1)
 
 # OBJ_ROOT / BIN_ROOT (round-6 review P1): where the keyed obj/bin trees
@@ -785,7 +799,7 @@ FORCE:
 
 $(AC_LIB): FORCE
 	+$(MAKE) -C $(AC_DIR) $(AC_FWD) lib
-	@test -f '$@' || { echo "ERROR: audio_common did not produce $@ (query/build divergence -- only BACKEND/WERROR/CC/CXX/EXTRA_CFLAGS/NO_STDIO overrides are supported)"; exit 1; }
+	@test -f '$@' || { echo "ERROR: audio_common did not produce $@ (query/build divergence -- supported forwarded controls are BACKEND/SIMD/WERROR/CC/CXX/EXTRA_CFLAGS/NO_STDIO/TOOLCHAIN_CHECK)"; exit 1; }
 
 # $(LINK), not $(CC) (round-4 review P1-2): the C++ driver for BACKEND=ne10
 # supplies the C++ runtime the NE10 archive's one C++ TU needs (the old

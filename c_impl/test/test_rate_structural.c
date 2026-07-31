@@ -3,7 +3,8 @@
  * (mirrors test_config_validation.c / test_static_aec.c's own header
  * recipe) -- does NOT link into any Makefile target.
  *
- * Three checks, run at each of the three whitelisted rates (8000/16000/48000):
+ * Three checks, run at each of the four whitelisted grids
+ * (8000/256, 16000/256, 16000/512, 48000/1024):
  *
  *   (a) COLA: the rate's own synthesis window (Aec3BalancedRateDims::
  *       synth_window, looked up via aec3b_rate_cfg()) satisfies the
@@ -57,16 +58,20 @@ static int g_pass = 0;
         else         { printf("pass: %s\n", (msg)); g_pass++; } \
     } while (0)
 
-static const int RATES[] = { 8000, 16000, 48000 };
-#define N_RATES (int)(sizeof(RATES) / sizeof(RATES[0]))
+typedef struct { int sample_rate; int fft_size; } TestGrid;
+static const TestGrid GRIDS[] = {
+    { 8000, 256 }, { 16000, 256 }, { 16000, 512 }, { 48000, 1024 }
+};
+#define N_GRIDS (int)(sizeof(GRIDS) / sizeof(GRIDS[0]))
 
 /* ── (a) COLA: sqrt-Hann 50%-overlap perfect reconstruction ───────────── */
 static void test_cola(void) {
-    for (int r = 0; r < N_RATES; ++r) {
-        int sr = RATES[r];
-        const Aec3BalancedRateDims *rd = aec3b_rate_cfg(sr);
+    for (int r = 0; r < N_GRIDS; ++r) {
+        int sr = GRIDS[r].sample_rate;
+        int fft_size = GRIDS[r].fft_size;
+        const Aec3BalancedRateDims *rd = aec3b_rate_cfg(sr, fft_size);
         char what[96];
-        snprintf(what, sizeof(what), "sr=%d: aec3b_rate_cfg() found", sr);
+        snprintf(what, sizeof(what), "sr=%d fft=%d: aec3b_rate_cfg() found", sr, fft_size);
         CHECK(rd != NULL, what);
         if (!rd) continue;
 
@@ -121,13 +126,14 @@ static void test_impulse_linear_path(void) {
     const int N_HOPS = 1500;    /* generous convergence budget at mu=0.3 */
     const int TAIL_HOPS = 200;  /* window used for the post-convergence ratio */
 
-    for (int r = 0; r < N_RATES; ++r) {
-        int sr = RATES[r];
+    for (int r = 0; r < N_GRIDS; ++r) {
+        int sr = GRIDS[r].sample_rate;
         char what[128];
         g_lcg_state = 0x2026075Fu;   /* fixed seed per rate: reproducible */
 
         AecConfig cfg;
         aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        cfg.fft_size = GRIDS[r].fft_size;
         cfg.enable_res = 0;   /* linear-only output (aec_wav.c's --no-res knob) */
         cfg.enable_cng = 0;   /* deterministic -- no dither noise floor */
 
@@ -197,31 +203,35 @@ static void test_impulse_linear_path(void) {
 
 /* ── (c) aec_get_mem_size monotonicity/consistency across rates ───────── */
 static void test_mem_size_consistency(void) {
-    size_t sizes[N_RATES];
-    for (int r = 0; r < N_RATES; ++r) {
+    size_t sizes[N_GRIDS];
+    for (int r = 0; r < N_GRIDS; ++r) {
         AecConfig cfg;
-        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, RATES[r]);
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, GRIDS[r].sample_rate);
+        cfg.fft_size = GRIDS[r].fft_size;
         sizes[r] = aec_get_mem_size(&cfg);
         char what[96];
-        snprintf(what, sizeof(what), "sr=%d: aec_get_mem_size() > 0", RATES[r]);
+        snprintf(what, sizeof(what), "sr=%d fft=%d: aec_get_mem_size() > 0",
+                 GRIDS[r].sample_rate, GRIDS[r].fft_size);
         CHECK(sizes[r] > 0, what);
     }
-    CHECK(sizes[0] < sizes[1], "mem_size(8000) < mem_size(16000)");
-    CHECK(sizes[1] < sizes[2], "mem_size(16000) < mem_size(48000)");
+    CHECK(sizes[0] < sizes[2], "mem_size(8000/256) < mem_size(16000/512)");
+    CHECK(sizes[1] < sizes[2], "mem_size(16000/256) < mem_size(16000/512)");
+    CHECK(sizes[2] < sizes[3], "mem_size(16000/512) < mem_size(48000/1024)");
 
     AecPreset presets[] = { AEC_PRESET_MILD, AEC_PRESET_BALANCED, AEC_PRESET_AGGRESSIVE };
     const char *preset_names[] = { "mild", "balanced", "aggressive" };
-    for (int r = 0; r < N_RATES; ++r) {
+    for (int r = 0; r < N_GRIDS; ++r) {
         size_t base = 0;
         for (int p = 0; p < 3; ++p) {
             AecConfig cfg;
-            aec_config_from_preset(&cfg, presets[p], RATES[r]);
+            aec_config_from_preset(&cfg, presets[p], GRIDS[r].sample_rate);
+            cfg.fft_size = GRIDS[r].fft_size;
             size_t sz = aec_get_mem_size(&cfg);
             if (p == 0) base = sz;
             char what[128];
             snprintf(what, sizeof(what),
                      "sr=%d preset=%s: mem_size == mild's mem_size (%zu == %zu, presets don't affect sizing)",
-                     RATES[r], preset_names[p], sz, base);
+                     GRIDS[r].sample_rate, preset_names[p], sz, base);
             CHECK(sz == base, what);
         }
     }

@@ -305,7 +305,7 @@ from aec import AEC, AecConfig, AecMode
 config = AecConfig(mode=AecMode.PBFDKF, enable_shadow=True, enable_res=False)
 aec = AEC(config)
 
-hop_size = aec.hop_size   # 160 samples (10ms @ 16kHz)
+hop_size = aec.hop_size   # 256 samples on the default 16kHz/FFT512 grid
 while has_audio:
     output = aec.process(mic_block, ref_block)
     erle = aec.get_erle()

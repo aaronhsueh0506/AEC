@@ -36,6 +36,9 @@
 void aec_config_defaults(AecConfig* cfg, int sr) {
     memset(cfg, 0, sizeof(*cfg));
     cfg->sample_rate = sr;
+    cfg->fft_size = (sr == 48000) ? 1024
+                    : (sr == 16000) ? 512
+                    : (sr == 8000) ? 256 : 0;
     /* M4 (multi-rate consumption switch): filter_length used to be the fixed
      * 16 kHz bake (832 = 52 ms @ 16000 Hz). Replaced with the actual Python
      * ms policy (AecConfig.__post_init__): 64 ms at sr>=44100 (the high-rate
@@ -147,6 +150,10 @@ int aec_is_valid_sample_rate(int sample_rate) {
 static int aec_validate_config(const AecConfig* cfg) {
     if (!cfg) return 0;
     if (!aec_is_valid_sample_rate(cfg->sample_rate)) return 0;
+    if (!((cfg->sample_rate == 8000 && cfg->fft_size == 256) ||
+          (cfg->sample_rate == 16000 &&
+           (cfg->fft_size == 256 || cfg->fft_size == 512)) ||
+          (cfg->sample_rate == 48000 && cfg->fft_size == 1024))) return 0;
     if (cfg->filter_length <= 0 || cfg->filter_length > 4096) return 0;
     if (cfg->n_partitions != 0 &&
         (cfg->n_partitions < 1 || cfg->n_partitions > 256)) return 0;
@@ -452,7 +459,8 @@ static void aec3_post_chain_reset(Aec* a) {
      * construction), so this always hits -- the `rd ? rd->x : AEC3B_x`
      * fallback below is a pure defensive no-op for the validated {16000}
      * whitelist (never actually taken). */
-    const Aec3BalancedRateDims* rd = aec3b_rate_cfg(a->cfg.sample_rate);
+    const Aec3BalancedRateDims* rd = aec3b_rate_cfg(
+        a->cfg.sample_rate, a->cfg.fft_size);
     /* AecState + REE + SuppressionGain are recreated in Python; here we
      * re-init in place (same backing storage). */
     {
@@ -506,9 +514,9 @@ static void aec3_post_chain_reset(Aec* a) {
                  rd ? rd->ree_nl_norm_power : AEC3B_REE_NL_NORM_POWER,
                  rd ? rd->ree_residual_noise_gate_power
                     : AEC3B_REE_RESIDUAL_NOISE_GATE_POWER,
-                 AEC3B_REE_NOISE_FLOOR_HOLD_HOPS,
+                 rd ? rd->ree_noise_floor_hold_hops : AEC3B_REE_NOISE_FLOOR_HOLD_HOPS,
                  AEC3B_REE_USE_FREQ_RESPONSE, AEC3B_REE_REVERB_USE_CONSERVATIVE,
-                 AEC3B_REE_REVERB_SMOOTHING_BASE,
+                 rd ? rd->ree_reverb_smoothing_base : AEC3B_REE_REVERB_SMOOTHING_BASE,
                  a->a3_ree.x2_noise_floor, a->a3_ree.x2_noise_floor_counter,
                  a->a3_ree.reverb_model.reverb,
                  a->a3_ree.reverb_freq_resp.tail_response,
@@ -589,9 +597,9 @@ int aec_create(Aec* a, const AecConfig* cfg) {
 static void aec_derive_dims(const AecConfig* cfg,
                             int* o_hop, int* o_blk, int* o_fft, int* o_K,
                             int* o_nparts, int* o_buf_samp, int* o_fifo_cap) {
-    int hop = (int)(0.010f * cfg->sample_rate);
-    int blk = 2 * hop;
-    int fft = next_pow2(blk);
+    int fft = cfg->fft_size;
+    int blk = fft;
+    int hop = fft / 2;
     *o_hop = hop; *o_blk = blk; *o_fft = fft; *o_K = fft / 2 + 1;
     int n = cfg->n_partitions;
     if (n <= 0) { n = (cfg->filter_length + hop - 1) / hop; if (n < 1) n = 1; }
@@ -633,7 +641,10 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
 
     const int ncc  = AEC3B_ST_NUM_CAPTURE_CHANNELS;
     const int rh   = (AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW ? 1 : 0) + 2;
-    const int sg_n = AEC3B_SG_NEAREND_SMOOTHER_N;
+    const Aec3BalancedRateDims* rd = aec3b_rate_cfg(
+        cfg->sample_rate, cfg->fft_size);
+    if (!rd) return 0;
+    const int sg_n = rd->sg_nearend_smoother_n;
     const size_t Kz = (size_t)K;
 
     /* Checked size arithmetic (F05): every add/multiply/align below
@@ -786,7 +797,8 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
      * identical to the legacy unsuffixed macros/arrays it replaces below
      * (see aec3_balanced_config.h), so every switch in this function is a
      * no-op change in the bytes produced. */
-    const Aec3BalancedRateDims* rd = aec3b_rate_cfg(cfg->sample_rate);
+    const Aec3BalancedRateDims* rd = aec3b_rate_cfg(
+        cfg->sample_rate, cfg->fft_size);
     if (!rd) return -1;
 
     a->cfg = *cfg;
@@ -918,13 +930,13 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         pcfg.erle_render_x2_psd_scale    = AEC3B_ERLE_RENDER_X2_PSD_SCALE;
         pcfg.output_capture_when_linear_unusable = AEC3B_OUTPUT_CAPTURE_WHEN_LINEAR_UNUSABLE;
         pcfg.enable_cng                  = cfg->enable_cng;
-        pcfg.cng_n2_update_onset_hops    = AEC3B_CNG_N2_UPDATE_ONSET_HOPS;
-        pcfg.cng_n2_initial_duration_hops = AEC3B_CNG_N2_INITIAL_DURATION_HOPS;
-        pcfg.cng_y2_alpha                = AEC3B_CNG_Y2_ALPHA;
-        pcfg.cng_n2_track_freshness      = AEC3B_CNG_N2_TRACK_FRESHNESS;
-        pcfg.cng_n2_track_retention      = AEC3B_CNG_N2_TRACK_RETENTION;
-        pcfg.cng_n2_slow_up              = AEC3B_CNG_N2_SLOW_UP;
-        pcfg.cng_n2_initial_alpha        = AEC3B_CNG_N2_INITIAL_ALPHA;
+        pcfg.cng_n2_update_onset_hops    = rd->cng_n2_update_onset_hops;
+        pcfg.cng_n2_initial_duration_hops = rd->cng_n2_initial_duration_hops;
+        pcfg.cng_y2_alpha                = rd->cng_y2_alpha;
+        pcfg.cng_n2_track_freshness      = rd->cng_n2_track_freshness;
+        pcfg.cng_n2_track_retention      = rd->cng_n2_track_retention;
+        pcfg.cng_n2_slow_up              = rd->cng_n2_slow_up;
+        pcfg.cng_n2_initial_alpha        = rd->cng_n2_initial_alpha;
         pcfg.noise_floor_int16sq         = rd->noise_floor_int16sq;
         pcfg.erle_coh_gate_alpha         = AEC3B_ERLE_COH_GATE_ALPHA;
         pcfg.erle_coh_gate_threshold     = AEC3B_ERLE_COH_GATE_THRESHOLD;
@@ -1024,9 +1036,9 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
                  AEC3B_USE_STATIONARITY_PROPERTIES,
                  AEC3B_REE_USE_AEC3_ECHO_GEN_WINDOW,
                  AEC3B_REE_NL_R2_ENABLED, AEC3B_REE_NL_R2_ALPHA, rd->ree_nl_norm_power,
-                 rd->ree_residual_noise_gate_power, AEC3B_REE_NOISE_FLOOR_HOLD_HOPS,
+                 rd->ree_residual_noise_gate_power, rd->ree_noise_floor_hold_hops,
                  AEC3B_REE_USE_FREQ_RESPONSE, AEC3B_REE_REVERB_USE_CONSERVATIVE,
-                 AEC3B_REE_REVERB_SMOOTHING_BASE,
+                 rd->ree_reverb_smoothing_base,
                  x2_nf, x2_nfc, rm_st, rt_st, rh_st, drd_st, rrd_st,
                  ld_st, lr_st, scr_st);
     }
@@ -1049,7 +1061,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         scfg.lf_smoothing_during_initial_phase = AEC3B_SG_LF_SMOOTHING_INITIAL;
         scfg.lf_clamp_bin = rd->sg_lf_clamp_bin;
         scfg.dne_lf_end = rd->sg_dne_lf_end;
-        scfg.nearend_smoother_n = AEC3B_SG_NEAREND_SMOOTHER_N;
+        scfg.nearend_smoother_n = rd->sg_nearend_smoother_n;
         scfg.aud_lf_end_bin = rd->sg_aud_lf_end_bin; scfg.aud_mf_end_bin = rd->sg_aud_mf_end_bin;
         /* M4: rate-varying SG absolute-power floor. */
         scfg.floor_power = rd->sg_floor_power;
@@ -1060,10 +1072,10 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         scfg.normal_render_limit = rd->sg_normal_render_limit;
         scfg.hf_lgb = rd->sg_hf_lgb; scfg.hf_biq = AEC3B_SG_HF_BIQ;
         scfg.conservative_hf = AEC3B_SG_CONSERVATIVE_HF;
-        scfg.max_inc_normal = (float)AEC3B_SG_MAX_INC;
-        scfg.max_inc_nearend = (float)AEC3B_SG_MAX_INC;
-        scfg.max_dec_lf_normal = (float)AEC3B_SG_MAX_DEC_LF;
-        scfg.max_dec_lf_nearend = (float)AEC3B_SG_MAX_DEC_LF;
+        scfg.max_inc_normal = rd->sg_max_inc;
+        scfg.max_inc_nearend = rd->sg_max_inc;
+        scfg.max_dec_lf_normal = rd->sg_max_dec_lf;
+        scfg.max_dec_lf_nearend = rd->sg_max_dec_lf;
         scfg.floor_first_increase = 0.00001f;
         /* M4: rate-varying SG absolute-power threshold. */
         scfg.low_render_threshold = rd->sg_low_render_threshold;
@@ -1085,8 +1097,8 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         scfg.dne_use_during_initial_phase = AEC3B_SG_DNE_USE_DURING_INITIAL_PHASE;
         scfg.dne_use_unbounded_echo = AEC3B_SG_DNE_USE_UNBOUNDED_ECHO;
         scfg.dne_lf_endpoint_bin = rd->sg_dne_lf_endpoint_bin;
-        scfg.dne_trigger_threshold_hops = AEC3B_SG_TRIGGER_THRESHOLD_HOPS;
-        scfg.dne_hold_duration_hops = AEC3B_SG_HOLD_DURATION_HOPS;
+        scfg.dne_trigger_threshold_hops = rd->sg_trigger_threshold_hops;
+        scfg.dne_hold_duration_hops = rd->sg_hold_duration_hops;
         scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10f;
         /* M4: the six per-bin tuning table pointers now come from rd
          * (pointer-identical to the legacy AEC3B_SG_* arrays at 16 kHz) +
@@ -1097,7 +1109,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         stun.normal_emr_tr  = rd->sg_normal_emr_tr;
         stun.table_len      = rd->sg_table_len;
         float *last_gain = P_FSLICE(0); float *last_ne = P_FSLICE(0); float *last_echo = P_FSLICE(0);
-        float *ma   = (float*)ptr; ptr += ALIGN16((size_t)AEC3B_SG_NEAREND_SMOOTHER_N * K * sizeof(float));
+        float *ma   = (float*)ptr; ptr += ALIGN16((size_t)rd->sg_nearend_smoother_n * K * sizeof(float));
         float *ne_s = P_FSLICE(0); float *wr_s = P_FSLICE(0);
         float *ming = P_FSLICE(0); float *maxg = P_FSLICE(0);
         float *graw = P_FSLICE(0); float *gout = P_FSLICE(0); float *gsum = P_FSLICE(0);
@@ -1206,7 +1218,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->stationarity_active_hops = 0; a->non_zero_render_seen = 0;
     a->render_peak_floor = 10.0f / 32768.0f;
     a->block_stationary_next = 0;
-    a->stationarity_converge_hops = AEC3B_STATIONARITY_CONVERGE_HOPS;
+    a->stationarity_converge_hops = rd->stationarity_converge_hops;
     a->saturation_level = 0.0f; a->erl_estimate = 0.1f;
     a->main_err_smooth = 0.0f; a->shadow_err_smooth = 0.0f;
     a->shadow_frame_count = 0; a->epc_render_forced_remaining = 0;

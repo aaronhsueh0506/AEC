@@ -118,7 +118,7 @@ grouped by subsystem; **ON**/**OFF** marks the default state of a feature flag.
 | Subsystem | Field | Default | Notes |
 |---|---|---|---|
 | System / framing | `sample_rate` | 16000 | 8000/16000/48000 |
-| | `frame_size` / `hop_size` | auto | 20 ms / 10 ms (50 % overlap) |
+| | `frame_size` / `hop_size` | auto | frame=FFT、hop=frame/2；8k 256/128、16k 512/256（可選256/128）、48k 1024/512 |
 | | `filter_length` | auto | 52 ms (<44.1 kHz), 64 ms (≥44.1 kHz) |
 | | `mu` / `delta` | 0.3 / 1e-8 | step size / regularization |
 | Residual / CNG | `enable_res` | **ON** | post-filter master gate (§3.7) |

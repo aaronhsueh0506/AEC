@@ -6,10 +6,12 @@ AEC v3.22.5 · the freq-domain seam for swapping any post-linear stage with a le
 > No NN is shipped; the DSP stages remain the default and fallback. Companion pipeline design:
 > `Audio_ALG/docs/freq_domain_pipeline_design.md`.
 
-## The shared grid (fixed — see item-13 sensitivity)
-All stages operate on one analysis grid: **16 kHz · fft=512 · hop=160 (10 ms) · sqrt-Hann periodic (COLA) ·
-257 complex bins** (`n_freqs = fft/2+1`). A model MUST match this grid. Changing it is a structural refactor
-(delay block-rate is `250 = 16000/64`, PSD constants are int16²-sum-calibrated at fft=512) — not a free knob.
+## The shared grid (fixed per instance)
+All stages in one instance share a no-padding grid: **frame=FFT, hop=frame/2,
+sqrt-Hann periodic (COLA)**. Supported choices are 8k:256/128,
+16k:512/256 (default) or 256/128, and 48k:1024/512. A model MUST match the
+selected instance grid; `n_freqs = fft/2+1` is therefore 129, 257, or 513.
+The grid cannot change mid-stream.
 
 ## The seam: `AecResContext` (per-frame, frequency-domain)
 Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, ref_hop)` returns
@@ -17,9 +19,9 @@ Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, re
 
 | field | shape / type | meaning (model input) |
 |---|---|---|
-| `near_spec` | (257,) complex64 | **E(f)** — linear AEC error spectrum (mic − Ŵ·X). The "noisy" signal to denoise / suppress. |
-| `echo_spec` | (257,) complex64 | **Ŷ(f)** — linear echo estimate. Residual-echo reference. |
-| `far_spec` | (257,) complex64 | **X(f)** — far-end (render) spectrum. |
+| `near_spec` | (n_freqs,) complex64 | **E(f)** — linear AEC error spectrum (mic − Ŵ·X). The "noisy" signal to denoise / suppress. |
+| `echo_spec` | (n_freqs,) complex64 | **Ŷ(f)** — linear echo estimate. Residual-echo reference. |
+| `far_spec` | (n_freqs,) complex64 | **X(f)** — far-end (render) spectrum. |
 | `far_power` | float | mean(far²) — far activity. |
 | `filter_converged` | bool | linear filter converged this frame. |
 | `erle_factor` | float [0,1] | linear convergence quality. |
@@ -27,7 +29,7 @@ Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, re
 | `divergence` | float [0,1] | filter divergence indicator. |
 | `over_sub` | float | dynamic over-subtraction factor. |
 | `erl_estimate` | float | dynamic echo-return-loss (render-based residual). |
-| `raw_output` | (160,) float | time-domain linear output (for reference/fallback). |
+| `raw_output` | (hop_size,) float | time-domain linear output (for reference/fallback). |
 
 These are produced every hop by the production linear AEC with zero extra cost (already computed internally).
 
@@ -57,7 +59,7 @@ Each is a pure function on the shared grid; the network replaces the DSP functio
 3. Apply the returned gain/spectrum in the frequency domain.
 4. One `irFFT + sqrt-Hann OLA` at the very end (shared back-end).
 - The linear AEC, the front-end window+FFT, and the back-end IFFT+OLA are **unchanged** across all three
-  swaps. The model only needs to honor the 257-bin / hop-160 / 16 k contract and return a same-shaped
+  swaps. The model needs to honor its selected `sample_rate/fft/hop/n_freqs` contract and return a same-shaped
   gain or spectrum. The DSP path stays as the deterministic fallback (and the A/B reference).
 
 ## Why this is safe for a DSP-first release

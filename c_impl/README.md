@@ -25,11 +25,12 @@ c_impl/
 ```bash
 make            # → bin/<backend>-<config-hash>/aec_wav (CLI binary)
 make lib        # → bin/<backend>-<config-hash>/libaec.a (static library)
+make SIMD=0     # force every optional SIMD path (including matched filter) to scalar
 make clean
 ```
 
 Artifacts land in a config-hashed `bin/<backend>-<config-hash>/` directory
-(switching `BACKEND`/`EXTRA_CFLAGS`/`WERROR` always lands in a fresh one
+(switching `BACKEND`/`SIMD`/`EXTRA_CFLAGS`/`WERROR` always lands in a fresh one
 automatically — no stale-object risk, no manual clean needed). Run `make
 print-bin-dir` (same flags as your build) to get the exact path, or `make
 publish` to copy this build's artifacts to a stable `dist/<backend>/current/`
@@ -204,7 +205,7 @@ harness design.
 For embedded targets, build one pool and place the whole instance in it:
 
 ```c
-size_t bytes = aec_get_mem_size(&cfg);   /* balanced @ hop=160: 536,288 B (KISS) / 532,160 B (NE10) */
+size_t bytes = aec_get_mem_size(&cfg);   /* 16k default 512/256 balanced: 543,040 B on current KISS build */
 void*  pool  = your_static_alloc(bytes); /* MUST be 16-byte aligned (posix_memalign, etc.) */
 Aec*   a     = aec_init(pool, bytes, &cfg);  /* NULL on failure; byte-equal to aec_create output */
 /* ... aec_process(a, ...) ... */
