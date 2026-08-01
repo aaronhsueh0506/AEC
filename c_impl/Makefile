@@ -149,6 +149,15 @@ AC_DIR ?= $(firstword $(wildcard ../../audio_common ../../../../audio_common))
 #   BACKEND=kiss (default) -> portable KISS FFT, deterministic (tests use this)
 #   BACKEND=ne10           -> ARM NEON NE10 R2C/C2R (the embedded deliverable)
 BACKEND ?= kiss
+
+# Announce the resolved backend on every build (same MAKECMDGOALS guard as
+# audio_common's own banner: print-bin-dir/print-obj-dir/print-lib-path are
+# consumed via `$$(make -s ... print-lib-path)` command substitution
+# elsewhere, and this must not add stray stdout to that captured value).
+ifeq ($(filter print-%,$(MAKECMDGOALS)),)
+$(info AEC: FFT backend = $(BACKEND) -- switch with `make BACKEND=kiss` or `make BACKEND=ne10`)
+endif
+
 CFLAGS  += -I$(AC_DIR)/include
 
 # Link driver (round-4 review P1-2): the ne10 audio_common archive carries
