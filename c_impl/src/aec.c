@@ -37,7 +37,7 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     memset(cfg, 0, sizeof(*cfg));
     cfg->sample_rate = sr;
     cfg->fft_size = (sr == 48000) ? 1024
-                    : (sr == 16000) ? 512
+                    : (sr == 16000) ? 256
                     : (sr == 8000) ? 256 : 0;
     /* M4 (multi-rate consumption switch): filter_length used to be the fixed
      * 16 kHz bake (832 = 52 ms @ 16000 Hz). Replaced with the actual Python

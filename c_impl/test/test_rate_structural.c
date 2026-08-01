@@ -3,7 +3,7 @@
  * (mirrors test_config_validation.c / test_static_aec.c's own header
  * recipe) -- does NOT link into any Makefile target.
  *
- * Three checks, run at each of the four whitelisted grids
+ * Five checks, run at each of the four whitelisted grids
  * (8000/256, 16000/256, 16000/512, 48000/1024):
  *
  *   (a) COLA: the rate's own synthesis window (Aec3BalancedRateDims::
@@ -25,11 +25,24 @@
  *           is structural sanity that the linear path actually adapts and
  *           cancels at every rate, not a quality bar).
  *
+ *   (b2) impulse-through-full-post-chain: identical excitation, cfg.enable_res
+ *       = 1 -- the actual production path. Added alongside the 16kHz default
+ *       grid flip (512/256 -> 256/128): (b) alone never touched the AEC3
+ *       post-chain (SuppressionGain/ResidualEchoEstimator/CNG), which reads
+ *       a per-(sample_rate, fft_size) tuning row from aec3b_rate_cfg() that
+ *       nothing had exercised end-to-end before this.
+ *
  *   (c) aec_get_mem_size monotonicity/consistency: pool size must increase
  *       8k < 16k < 48k (bigger FFT/filter/n_partitions at higher rates), and
  *       must be identical across the three presets at a fixed rate (mild/
  *       balanced/aggressive differ only in one float field, not a size-
  *       affecting one).
+ *
+ *   (c2) aec_init (static pool) byte-equal to aec_create (heap), full
+ *       post-chain, every grid -- test_static_aec.c only ever exercised this
+ *       at whichever fft_size happened to be the rate's *default*; this
+ *       loops all four grids explicitly so a default flip can't silently
+ *       leave the non-default grid's static path unchecked.
  *
  * Build (standalone, KISS FFT backend; from c_impl/):
  *   make -C ../../audio_common BACKEND=kiss lib
@@ -102,8 +115,9 @@ static float lcg_uniform(void) {
     return (float)(g_lcg_state >> 8) / (float)(1u << 24);
 }
 
-/* ── (b) impulse-through-linear-path ───────────────────────────────────── */
-static void test_impulse_linear_path(void) {
+/* ── (b) impulse-through-linear-path (and, parametrized, through the full
+ * AEC3 post-chain) ────────────────────────────────────────────────────── */
+static void run_impulse_test(int enable_res, const char *label) {
     /* A perfectly PERIODIC impulse train turned out to be an adversarial
      * input for the online delay estimator: an exactly-periodic comb is
      * ambiguous under any matched filter (every period-multiple offset
@@ -134,12 +148,12 @@ static void test_impulse_linear_path(void) {
         AecConfig cfg;
         aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
         cfg.fft_size = GRIDS[r].fft_size;
-        cfg.enable_res = 0;   /* linear-only output (aec_wav.c's --no-res knob) */
+        cfg.enable_res = enable_res;
         cfg.enable_cng = 0;   /* deterministic -- no dither noise floor */
 
         Aec aec;
         int rc = aec_create(&aec, &cfg);
-        snprintf(what, sizeof(what), "sr=%d: aec_create() for impulse test", sr);
+        snprintf(what, sizeof(what), "sr=%d %s: aec_create() for impulse test", sr, label);
         CHECK(rc == 0, what);
         if (rc != 0) continue;
 
@@ -187,17 +201,90 @@ static void test_impulse_linear_path(void) {
             sample_idx += hop;
         }
 
-        snprintf(what, sizeof(what), "sr=%d: impulse-path output finite for all %d hops", sr, N_HOPS);
+        snprintf(what, sizeof(what), "sr=%d %s: impulse-path output finite for all %d hops", sr, label, N_HOPS);
         CHECK(all_finite, what);
 
         double ratio = (mic_e_tail > 0.0) ? (out_e_tail / mic_e_tail) : 0.0;
         snprintf(what, sizeof(what),
-                 "sr=%d: echo attenuated after convergence (tail out/mic energy ratio=%.4f <= 0.5)",
-                 sr, ratio);
+                 "sr=%d %s: echo attenuated after convergence (tail out/mic energy ratio=%.4f <= 0.5)",
+                 sr, label, ratio);
         CHECK(ratio <= 0.5, what);
 
         aec_destroy(&aec);
         free(far); free(mic); free(out); free(far_hist);
+    }
+}
+
+static void test_impulse_linear_path(void) {
+    run_impulse_test(0, "linear-only");   /* aec_wav.c's --no-res knob */
+}
+
+/* Same excitation, full AEC3 post-chain (RES) enabled -- the actual
+ * production path (BALANCED ships with enable_res=1). test_impulse_linear_path
+ * above only ever exercised the linear PBFDKF filter; M5 added a 16000/256
+ * grid with its own aec3b_rate_cfg() tuning row (CNG/REE/SG parameters), and
+ * nothing had run that row's post-chain end-to-end before this. */
+static void test_impulse_res_enabled(void) {
+    run_impulse_test(1, "RES-enabled");
+}
+
+/* ── (c2) aec_init (static pool) matches aec_create (heap), full post-chain,
+ * every grid ───────────────────────────────────────────────────────────── */
+static void test_static_pool_matches_heap(void) {
+    const int N_HOPS = 50;   /* structural equality check, not a convergence test */
+
+    for (int r = 0; r < N_GRIDS; ++r) {
+        int sr = GRIDS[r].sample_rate;
+        int fft_size = GRIDS[r].fft_size;
+        char what[128];
+        g_lcg_state = 0x53746174u;   /* fixed seed, independent of the impulse test's */
+
+        AecConfig cfg;
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        cfg.fft_size = fft_size;
+        cfg.enable_res = 1;   /* exercise the full post-chain, not just the linear filter */
+        cfg.enable_cng = 0;   /* deterministic */
+
+        Aec aec_heap;
+        int rc = aec_create(&aec_heap, &cfg);
+        snprintf(what, sizeof(what), "sr=%d fft=%d: aec_create() for static-vs-heap test", sr, fft_size);
+        CHECK(rc == 0, what);
+        if (rc != 0) continue;
+
+        size_t pool_sz = aec_get_mem_size(&cfg);
+        void *pool = malloc(pool_sz);
+        Aec *aec_static = aec_init(pool, pool_sz, &cfg);
+        snprintf(what, sizeof(what), "sr=%d fft=%d: aec_init() for static-vs-heap test", sr, fft_size);
+        CHECK(aec_static != NULL, what);
+        if (!aec_static) { aec_destroy(&aec_heap); free(pool); continue; }
+
+        int hop = aec_hop_size(&aec_heap);
+        float *far = (float*)malloc((size_t)hop * sizeof(float));
+        float *mic = (float*)malloc((size_t)hop * sizeof(float));
+        float *out_heap = (float*)malloc((size_t)hop * sizeof(float));
+        float *out_static = (float*)malloc((size_t)hop * sizeof(float));
+        int mismatch = 0;
+
+        for (int hi = 0; hi < N_HOPS; ++hi) {
+            for (int k = 0; k < hop; ++k) {
+                far[k] = (lcg_uniform() < (1.0f / 37.0f)) ? (0.5f + 0.4f * lcg_uniform()) : 0.0f;
+                mic[k] = 0.3f * far[k] + 0.02f * (lcg_uniform() - 0.5f);
+            }
+            aec_process(&aec_heap, mic, far, out_heap);
+            aec_process(aec_static, mic, far, out_static);
+            if (memcmp(out_heap, out_static, (size_t)hop * sizeof(float)) != 0) mismatch = 1;
+        }
+
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: aec_init (static) byte-equal to aec_create (heap) over %d hops, RES-enabled",
+                 sr, fft_size, N_HOPS);
+        CHECK(!mismatch, what);
+
+        aec_destroy(&aec_heap);
+        aec_destroy(aec_static);   /* B2 contract: required even for a pool instance
+                                    * -- see test_static_aec.c's own regression guard,
+                                    * some fields own resources outside the pool. */
+        free(pool); free(far); free(mic); free(out_heap); free(out_static);
     }
 }
 
@@ -240,6 +327,8 @@ static void test_mem_size_consistency(void) {
 int main(void) {
     test_cola();
     test_impulse_linear_path();
+    test_impulse_res_enabled();
+    test_static_pool_matches_heap();
     test_mem_size_consistency();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

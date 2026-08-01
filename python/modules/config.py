@@ -21,8 +21,9 @@ class AecConfig:
 
     # ── System / framing ────────────────────────────────────────────────
     sample_rate: int = 16000        # 8000 / 16000 / 48000
-    # No-padding signal grid. Auto: 256 @ 8 kHz, 512 @ 16 kHz,
-    # 1024 @ 48 kHz. 16 kHz also accepts the low-compute 256/128 grid.
+    # No-padding signal grid. Auto: 256 @ 8 kHz, 256 @ 16 kHz (8 ms hop,
+    # the low-latency/low-compute default), 1024 @ 48 kHz. 16 kHz also
+    # accepts the higher-compute 512/256 grid (16 ms hop) explicitly.
     frame_size: int = -1            # analysis frame == FFT size
     hop_size: int = -1              # frame_size / 2
     filter_length: int = -1         # Auto: 52ms (<44.1 kHz) or 64ms (≥44.1 kHz)
@@ -366,7 +367,7 @@ class AecConfig:
         if self.frame_size == -1:
             self.frame_size = {
                 8000: 256,
-                16000: 512,
+                16000: 256,
                 48000: 1024,
             }.get(self.sample_rate, 0)
         if self.hop_size == -1:

@@ -60,12 +60,21 @@ drift from the real `aec.h` signatures again.
 `aec_get_mem_size` returns the exact byte count needed for the supplied
 config (sample rate, filter length, optional shadow filter, optional delay
 ring). At BALANCED / 16 kHz / 52 ms filter length / shadow on / RES on /
-delay on the pool is:
+delay on the pool is (as of the 2026-08-01 default-grid flip, see
+CHANGELOG — measured directly via `test_static_aec`, both backends
+static==dynamic byte-equal):
 
-| Backend | Pool |
-|---|---:|
-| KISS (host/reference) | **536,288 B (523.7 KB)** |
-| NE10 (embedded)       | **532,160 B (519.7 KB)** |
+| Backend | Pool @ 256/128 (current default) | Pool @ 512/256 (still selectable) |
+|---|---:|---:|
+| KISS (host/reference) | **397,072 B (387.8 KB)** | 543,040 B (530.3 KB) |
+| NE10 (embedded)       | **395,248 B (386.0 KB)** | 538,912 B (526.3 KB) |
+
+⚠ The worked examples further down this document (hop=160, 10 ms era —
+predating M5's multi-rate grid work entirely) and the table below this
+paragraph are historical, kept for the per-region breakdown narrative they
+still correctly illustrate the *mechanism* of — they do **not** reflect
+current byte counts at any grid. Use the two-backend table above (or just
+call `aec_get_mem_size` yourself) for current numbers.
 
 (Both figures now include everything — NE10's three R2C/C2R twiddle configs
 are carved from the pool since vendored patch P0001; there are no

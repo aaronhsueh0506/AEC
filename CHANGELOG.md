@@ -16,6 +16,55 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-01 — 16 kHz default signal grid: 512/256 → 256/128 (8 ms hop)
+
+`aec_config_defaults()`/`AecConfig.__post_init__` now default 16 kHz to the
+low-latency/low-compute 256-point FFT / 128-sample hop grid (8 ms algorithmic
+delay) instead of the 512/256 grid (16 ms) that M5 (multi-rate campaign,
+`d862a38`) had made the auto-default when it added 16 kHz/256 as a *selectable*
+option alongside the existing 512 grid. Both 16 kHz grids remain fully
+supported and explicitly selectable via `AecConfig(sample_rate=16000,
+frame_size=...)` / `cfg->fft_size` — only the auto-derived default (when
+`frame_size`/`fft_size` is left unspecified) changes. 8 kHz (256) and 48 kHz
+(1024) defaults are unchanged.
+
+**Note on M5 itself**: `d862a38` (which introduced the 256/128 grid, the
+`aec3b_rate_cfg(sample_rate, fft_size)` dispatch table, and changed
+`aec_derive_dims()`'s hop derivation from a fixed `0.010 * sample_rate` to
+`fft_size / 2`) was not itself changelogged at the time it landed — its
+16 kHz *default* silently went from 10 ms to 16 ms hop as a side effect, with
+no entry here and no version bump. This entry covers both that
+already-shipped change and today's default flip on top of it.
+
+**Verification — structural only, no perceptual/AECMOS bench this round**
+(explicit decision: the 800-case bench standard this file states above was
+not run for this entry; do not treat this as "regression-tested" for
+perceptual quality until that's done):
+- `test_rate_structural` extended with two new checks run at all 4 grids —
+  impulse-through-**full AEC3 post-chain** (`enable_res=1`; the previous
+  version of this test only ever ran the linear-only path) and
+  `aec_init`/static-pool byte-equality vs `aec_create`/heap, also with the
+  post-chain enabled. Nothing in the post-chain had been exercised end-to-end
+  at 16 kHz/256 before this. 67/67 pass, including at 16000/256.
+- `test_static_aec` (default args, i.e. now exercising 256/128 at 16 kHz):
+  static == dynamic, byte-equal, pool = 397,072 B.
+- `make selftest` (NEON vs scalar, `SK_HAVE_NEON=1`): all pass, unaffected
+  (this change doesn't touch SIMD kernel code).
+
+**Measured static pool sizes** (BALANCED, all three presets identical —
+presets don't affect sizing): 8000/256 = 292,992 B; **16000/256 (new
+default) = 397,072 B**; 16000/512 (still selectable) = 543,040 B; 48000/1024
+= 1,233,680 B. (The 16000/512 figure supersedes `STATIC_MEMORY.md`'s
+previously-recorded 536,288 B, which predates this change and at least one
+other since; see that file's own note.)
+
+`__version__` intentionally NOT bumped with this entry — following the last
+month's actual practice in this file (see the string of `[Unreleased]`
+entries above `[3.24.1]`, several of which are themselves production-behavior
+changes), version bumps here appear to be a separate, deliberately-batched
+release-cut decision rather than one per entry; leaving that to whoever cuts
+the next version.
+
 ## [Unreleased] — 2026-07-16 — round-7 remediation (publish untracked-content policy; -t no-op correction; no algorithm change)
 
 Build/release-tooling-only follow-up to round-6; renders byte-identical (obj/
