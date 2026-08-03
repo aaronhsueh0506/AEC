@@ -133,7 +133,14 @@ def estimate_delay(mic, ref, sr, max_delay_ms=1024.0):
 
 
 def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
-             is_movement=False, **config_overrides):
+             is_movement=False, config_holder=None, **config_overrides):
+    """
+    config_holder: optional list. When provided, the real resolved AecConfig
+    instance actually used for this call is appended to it (index 0). Purely
+    a provenance/introspection hook for callers that need to record exactly
+    what config was live (e.g. eval_manifest90.py) -- default None keeps this
+    a complete no-op, so every existing caller's behavior is unchanged.
+    """
     n = min(len(mic), len(ref))
 
     if os.environ.get('NO_PREALIGN'):
@@ -287,6 +294,8 @@ def run_ours(mic, ref, sr, fl, enable_res=True, preset=None,
         config = AecConfig.from_preset(preset, **common_kw)
     else:
         config = AecConfig(**common_kw)
+    if config_holder is not None:
+        config_holder.append(config)
     # Per-case CNG determinism: seed numpy before each AEC instantiation
     # so CNG noise is identical across runs (run-to-run AECMOS Δ otherwise
     # masks small code-induced changes).
