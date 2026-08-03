@@ -339,16 +339,12 @@ void aec3_post_apply_output(Aec3Post *p,
 
     fft_inverse(p->fft, p->e_out_spec, p->e_out_full);
 
-    /* M4 (multi-rate consumption switch): synth_window is caller-owned,
-     * sized to c->synth_window_len (the per-rate lookup row's window
-     * length) -- asserted equal to block_size right before the read below
-     * (both come from the same Aec3BalancedRateDims row for a validated
-     * sample rate, so this never fires for the {16000} whitelist: 320==320).
-     * The win_n clamp is the release-path guard for a hypothetical NDEBUG
+    /* synth_window is caller-owned and sized by the selected signal-grid
+     * row. It must match block_size for every supported grid. The win_n
+     * clamp is the release-path guard for a hypothetical NDEBUG
      * build that strips the assert: it degrades to a partial OLA window
      * instead of reading past whichever buffer is shorter, rather than an
-     * OOB read. At every validated rate win_n == bs, so the loop below is
-     * byte-identical to the unguarded version it replaces. */
+     * OOB read. At every validated grid win_n == bs. */
     assert(c->synth_window_len == bs);
     {
         int win_n = (c->synth_window_len < bs) ? c->synth_window_len : bs;
@@ -421,20 +417,26 @@ int aec3_post_run(Aec3Post *p,
     int pgc = in->pending_gain_change;
     int pdc = in->pending_delay_change;   /* -1 == None */
 
-    /* ── Step 1: shadow-output selection (orchestrator 3029-3036) ─────────── */
-    if (in->shadow_present && in->last_shadow_output_time != NULL) {
-        linear_filter_select(obj->lfs,
-                             in->raw_output, in->near_end,
-                             in->last_shadow_output_time,
-                             in->error_spec_windowed, in->echo_spec,
-                             in->sqrt_hann, obj->fft,
-                             sc->sel_esw, sc->sel_echo);
-    } else {
-        for (k = 0; k < nb; ++k) {
-            sc->sel_esw[k] = in->error_spec_windowed[k];
-            sc->sel_echo[k] = in->echo_spec[k];
-        }
-    }
+    /* ── Step 1: form the linear output on the post-filter WOLA grid ────────
+     *
+     * PBFDKF's error_spec_windowed is an internal estimator quantity:
+     * FFT(sqrt-Hann * capture) - unwindowed_echo_spec.  It is not the STFT
+     * of the continuous time-domain linear residual and therefore cannot be
+     * paired with the post-filter's sqrt-Hann synthesis window.  Always run
+     * FormLinearFilterOutput so sel_esw is exactly
+     * FFT(sqrt-Hann * [previous formed hop, current formed hop]).
+     *
+     * With a shadow filter this also performs refined/coarse selection.  With
+     * no shadow, passing raw_output as both candidates reduces the selector
+     * to a pure stateful WOLA analysis of the refined linear output. */
+    linear_filter_select(obj->lfs,
+                         in->raw_output, in->near_end,
+                         (in->shadow_present && in->last_shadow_output_time != NULL)
+                             ? in->last_shadow_output_time
+                             : in->raw_output,
+                         in->error_spec_windowed, in->echo_spec,
+                         in->sqrt_hann, obj->fft,
+                         sc->sel_esw, sc->sel_echo);
 
     /* ── Step 2: precompute the np.abs magnitude arrays (3037-3052,
      *            3267-3270, 3629-3630). sel_esw/sel_echo come from Step 1.   */

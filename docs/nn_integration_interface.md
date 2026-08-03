@@ -19,9 +19,10 @@ Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, re
 
 | field | shape / type | meaning (model input) |
 |---|---|---|
-| `near_spec` | (n_freqs,) complex64 | **E(f)** — linear AEC error spectrum (mic − Ŵ·X). The "noisy" signal to denoise / suppress. |
-| `echo_spec` | (n_freqs,) complex64 | **Ŷ(f)** — linear echo estimate. Residual-echo reference. |
-| `far_spec` | (n_freqs,) complex64 | **X(f)** — far-end (render) spectrum. |
+| `error_spec` | (n_freqs,) complex64 | **E(f)** — reconstructing 50%-overlap sqrt-Hann STFT of the selected/crossfaded linear output. |
+| `echo_spec` | (n_freqs,) complex64 | Matching windowed **Ŷ(f)** residual-echo reference. |
+| `near_spec` | (n_freqs,) complex64 | Matching windowed capture spectrum; exactly `error_spec + echo_spec`. |
+| `far_spec` | (n_freqs,) complex64 | PBFDKF far-end spectrum used by the adaptive filter; not a downstream WOLA synthesis frame. |
 | `far_power` | float | mean(far²) — far activity. |
 | `filter_converged` | bool | linear filter converged this frame. |
 | `erle_factor` | float [0,1] | linear convergence quality. |
@@ -29,7 +30,8 @@ Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, re
 | `divergence` | float [0,1] | filter divergence indicator. |
 | `over_sub` | float | dynamic over-subtraction factor. |
 | `erl_estimate` | float | dynamic echo-return-loss (render-based residual). |
-| `raw_output` | (hop_size,) float | time-domain linear output (for reference/fallback). |
+| `raw_output` | (hop_size,) float | Refined PBFDKF output before refined/coarse selection. |
+| `formed_output` | (hop_size,) float | Current selected/crossfaded hop underlying `error_spec`; use this when a downstream block performs its own STFT. |
 
 These are produced every hop by the production linear AEC with zero extra cost (already computed internally).
 

@@ -82,7 +82,7 @@ backend-internal heap allocations left on the static path, enforced by
 `test/test_zero_heap_aec.c`.) Both figures are static==dynamic byte-equal, verified by
 `test_static_aec.c` (669,920 samples, 50-cycle init/destroy leak loop). Most
 recently, −2,096 B (both backends, every rate) from removing `PBFDAF`'s
-`scr_far_cmag2` instance-scratch field (round-4 review D2): `pbfdaf_frontend`
+`scr_far_cmag2` instance-scratch field: `pbfdaf_frontend`
 now computes its `|far_spec[k]|²` scratch straight into `scr_e2` (normally
 `pbfdaf_get_error_energy`'s `|error_spec[k]|²` scratch) instead of a
 dedicated field — cross-phase reuse is safe because frontend's own use is
@@ -234,7 +234,7 @@ heap-only (`aec_create`), so to see the static-path lines a harness must call
 Release builds (`make` without `debug`) strip log strings entirely;
 no overhead.
 
-**No-stdio builds (`NO_STDIO=1`, round-3 review B03):** board/embedded images
+**No-stdio builds (`NO_STDIO=1`):** board/embedded images
 that link `libaec.a` without a hosted stdio should build with `make lib
 NO_STDIO=1` instead. This compiles out `src/aec_debug.c` (the library's only
 stdio translation unit) entirely and `#ifndef`s out its one runtime-gated
@@ -259,7 +259,7 @@ Measured via `aec_get_mem_size`, KISS backend (host/reference build):
 | `Aec` struct + AEC3 chain backing arrays (state / RES-est / suppression / stationarity / LFS / run + hop scratch, incl. the de-stacked instance scratch) + render FIFO + `fifo_zero_ref` + RSA counters | ~246.6 KB |
 | **Total (KISS)**                                           | **523.7 KB** (536,288 B) |
 
-Most recently, round-4 review's D2 removed `PBFDAF`'s `scr_far_cmag2`
+The current layout removes `PBFDAF`'s `scr_far_cmag2`
 instance-scratch field (`[n_freqs]`, one per `PBFDAF` instance): rather than
 its own dedicated buffer, `pbfdaf_frontend`'s `|far_spec[k]|²` scratch now
 borrows `scr_e2` (normally `pbfdaf_get_error_energy`'s `|error_spec[k]|²`
@@ -270,8 +270,8 @@ overwrites-then-reads it fully within ITS own call — no code in between
 reads either phase's data through the other's stale contents. **−2,096 B**
 (16 kHz), exactly undoing the `scr_far_cmag2` addition described below; see
 the per-rate table for the other rates/backends. Before that, the
-FilterStateBridge dead-code cleanup follow-up (Codex
-review, 2026-07) removed `Aec3PostRunScratch.bridge_taps` (`[fft_size]`
+FilterStateBridge dead-code cleanup removed
+`Aec3PostRunScratch.bridge_taps` (`[fft_size]`
 float) entirely: the buffer had been write-only-by-nobody since a prior
 round already deleted the one call (`filter_state_bridge_build`'s
 unconditional per-hop IRFFT into it) that used to write it, and it had no
@@ -316,7 +316,7 @@ byte-equal per rate by `test_static_aec <mic> <ref> <sr>`):
 | 48 kHz (FL 3072, 7 part., taps 3360) | 1,249,600 B | 1,240,864 B |
 
 (Each rate shrank by exactly `ALIGN16(n_freqs × sizeof(float))` per removed
-`scr_far_cmag2` field (round-4 review D2) — backend-independent, same
+`scr_far_cmag2` field — backend-independent, same
 `n_freqs` at a given rate regardless of KISS vs NE10 — over the
 pre-D2-removal figures (290,736 / 538,384 / 1,253,744 B KISS; 288,912 /
 534,256 / 1,245,008 B NE10): −1,072 B @ 8 kHz (n_freqs=129), −2,096 B @

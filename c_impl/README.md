@@ -37,12 +37,12 @@ publish` to copy this build's artifacts to a stable `dist/<backend>/current/`
 handoff path.
 
 Compile flags (already in Makefile): `-O2 -I include -I example`, plus
-`-ffp-contract=off` appended **last** (round-3 review B04 — see "Unified
+`-ffp-contract=off` appended **last** (see "Unified
 FP-contraction policy" below). `-ffp-contract=off` is **required** (no FMA
 fusion — load-bearing for build determinism and golden stability across
 builds/compilers; see Precision & regression anchors below).
 
-### Unified FP-contraction policy (round-3 review B04)
+### Unified FP-contraction policy
 
 `-ffp-contract=off` is no longer just an AEC convention — it is a **repo-wide
 policy spanning all four repos** (`audio_common`, `NR/c_impl`, `AEC/c_impl`,
@@ -51,9 +51,9 @@ policy spanning all four repos** (`audio_common`, `NR/c_impl`, `AEC/c_impl`,
 builds with this flag. In every one of the four Makefiles the flag is
 appended **last** in the CFLAGS/CXXFLAGS assembly (after `EXTRA_CFLAGS`, after
 any BACKEND-conditional append, after `WERROR`/`NO_STDIO`), so nothing a
-caller passes can land after it and override it — AEC's Makefile used to
+caller passes can land after it and override it — AEC's Makefile previously
 carry the flag as the *third* token of the base CFLAGS assignment (before
-`EXTRA_CFLAGS` was folded in), which this review moved to its current
+`EXTRA_CFLAGS` was folded in), before being moved to its current
 trailing position. Each Makefile also rejects outright, at parse time, an
 `EXTRA_CFLAGS` (or `CFLAGS=` override) containing `-Ofast`, `-ffast-math`, or
 `-ffp-contract=<anything>` (all of which would re-enable contraction), e.g.:
@@ -63,7 +63,7 @@ $ make EXTRA_CFLAGS=-ffast-math
 Makefile:111: *** FP policy conflict: CFLAGS/EXTRA_CFLAGS contains -ffast-math; this repo pins -ffp-contract=off; remove -ffast-math from EXTRA_CFLAGS.  Stop.
 ```
 
-Round-4 hardening: a command-line `CFLAGS=`/`CXXFLAGS=`/`CPPFLAGS=`/
+Build hardening rejects a command-line `CFLAGS=`/`CXXFLAGS=`/`CPPFLAGS=`/
 `LDFLAGS=`/`FP_POLICY=` override is now rejected outright in all four
 Makefiles — GNU Make silently ignores a Makefile's own `+=`/`:=` assignments
 to a command-line-set variable, so `make CFLAGS=-O3` used to strip
@@ -176,9 +176,9 @@ malloc path (`test_static_aec.c`).
   median −95 dB, 1-hour soak (delay trajectory identical, power-EMA worst rel
   diff 1.3e-5, final ERLE matching to 4 digits).
 - `test/test_counter_saturation.c` (`make test-counter-saturation`) — the
-  **permanent counter-saturation regression test** (round-6 review): for
+  **permanent counter-saturation regression test**: for
   every unbounded `struct_field += 1` / `-= 1` counter-overflow fix across
-  rounds 4-6 (plus the round-6 sweep's own new finds), proves cap-1→cap,
+  every fixed counter-overflow path, proves cap-1→cap,
   cap→cap (no-op), thousands-of-calls-past-cap runaway-proof, and
   decision-invariance (the boolean/comparison the counter feeds is identical
   at the cap vs. a synthetic huge value standing in for the unbounded value

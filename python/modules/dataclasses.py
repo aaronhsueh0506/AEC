@@ -91,10 +91,11 @@ class AecStats:
 class AecResContext:
     """Per-frame context for external RES processing."""
     raw_output: np.ndarray       # (hop_size,) linear AEC output
-    echo_spec: np.ndarray        # (n_freqs,) complex echo estimate
+    formed_output: np.ndarray    # (hop_size,) selected output underlying error_spec
+    echo_spec: np.ndarray        # (n_freqs,) matching WOLA echo estimate
     far_power: float             # mean(far_end²)
     far_spec: np.ndarray         # (n_freqs,) complex far-end spectrum
-    near_spec: np.ndarray        # (n_freqs,) complex mic spectrum
+    near_spec: np.ndarray        # (n_freqs,) matching WOLA mic spectrum (E + echo)
     filter_converged: bool
     erle_factor: float           # [0, 1] convergence metric
     dt_indicator: float          # [0, 0.8] double-talk confidence
@@ -108,7 +109,7 @@ class AecResContext:
     # so the post-NR stage is a pure freq multiply S(f)=error_spec·G_nr·res_gain
     # (+CNG) — reusing the tuned gain instead of re-deriving it. Populated only
     # when return_res_context=True; None on the default production path.
-    error_spec: Optional[np.ndarray] = None    # (n_freqs,) complex windowed linear E(f)
+    error_spec: Optional[np.ndarray] = None    # (n_freqs,) reconstructing WOLA linear E(f)
     res_gain: Optional[np.ndarray] = None       # (n_freqs,) real AEC3 suppression gain G_res
     comfort_noise: Optional[np.ndarray] = None  # (n_freqs,) real CNG power N² (int16²-scaled)
     r2: Optional[np.ndarray] = None             # (n_freqs,) real residual-echo PSD R² (int16²-scaled)

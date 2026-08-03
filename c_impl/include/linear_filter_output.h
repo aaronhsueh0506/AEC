@@ -23,8 +23,10 @@
  *  - complex64 add / subtract are elementwise (no FMA needed).
  *  - built with -ffp-contract=off so each float op rounds separately.
  *
- * Pure additive port (not wired into aec.c). Heap-only init/reset (matches the
- * orchestrator state, which has no static-memory variant).
+ * When no shadow filter is present, the caller passes e_refined_time for both
+ * candidates; the selector then becomes the stateful WOLA formatter required
+ * by RES/NR. Heap and caller-pool construction paths are both supported by the
+ * owning AEC instance.
  */
 #ifndef LINEAR_FILTER_OUTPUT_H
 #define LINEAR_FILTER_OUTPUT_H

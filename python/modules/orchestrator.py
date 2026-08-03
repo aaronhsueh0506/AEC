@@ -87,12 +87,18 @@ class AEC:
     def _maybe_mark_diverged(self, source: str) -> None:
         if source not in self._epc_no_reset_sources:
             self._convergence.mark_diverged()
-        # Round 3 trace: per-source counter (audio-passive)
-        if not hasattr(self, '_round3_div_counts'):
-            self._round3_div_counts = {'delay_first': 0, 'delay_shift': 0,
-                                       'epv': 0, 'shadow_rise': 0}
-        self._round3_div_counts[source] = self._round3_div_counts.get(source, 0) + 1
-        self._round3_last_div_source = source
+        # Audio-passive per-source divergence diagnostics.
+        if not hasattr(self, '_divergence_source_counts'):
+            self._divergence_source_counts = {
+                'delay_first': 0,
+                'delay_shift': 0,
+                'epv': 0,
+                'shadow_rise': 0,
+            }
+        self._divergence_source_counts[source] = (
+            self._divergence_source_counts.get(source, 0) + 1
+        )
+        self._last_divergence_source = source
 
     # Filter misadjustment estimator + ScaleFilter wiring (AEC3 parity).
 
@@ -916,8 +922,9 @@ class AEC:
         # Clear cross-case lazy state
         if hasattr(self, '_pending_delay'):
             del self._pending_delay
-        for _attr in ('_round3_div_counts', '_round3_last_div_source',
-                      '_r7_prev_delay', '_r7_prev_div_counts',
+        for _attr in ('_divergence_source_counts', '_last_divergence_source',
+                      '_diag_prev_delay', '_diag_prev_divergence_counts',
+                      '_raw_dt_pre_epc',
                       '_dominant_nearend_hold',
                       '_poor_coarse_counter', '_coarse_reset_hangover',
                       '_block_stationary_for_next_hop',
@@ -1239,7 +1246,7 @@ class AEC:
         # Clear cross-recovery state that would otherwise mis-fire.
         # _pending_delay: stale pending shift could pair with a later rogue
         #   estimate and trigger a spurious force_delay (audio bug).
-        # NOTE: _round3_div_counts / _round3_last_div_source /
+        # NOTE: _divergence_source_counts / _last_divergence_source /
         # _dominant_nearend_hold are session-cumulative diagnostic counters
         # and MUST survive recovery — they are only cleared in full
         # AEC.reset().
@@ -1940,7 +1947,7 @@ class AEC:
                 filter_converged=self._filter_converged,
                 main_paused=self._regime_handler.main_paused,
             )
-            # ── Round 7.1a: EPV weak-filter false-positive damping ──
+            # EPV weak-filter false-positive damping.
             # Worst-DT_mv fires EPV 2.75x more often than best (P0 trace) but
             # its filter_w_norm is 40% of best (~7 vs ~18). Re-arming Kalman
             # state on a filter that hasn't yet grown destabilises it without
@@ -2198,10 +2205,9 @@ class AEC:
                     raw_dt /= erle_for_dt
 
                 # EPC physical gate
-                # Round 3 D3 trace: record raw_dt BEFORE the EPC zero so we can
-                # see what the suppressor would have seen if the gate were
-                # split (adaptation vs RES). audio-passive.
-                self._round3_raw_dt_pre_epc = float(raw_dt)
+                # Record raw_dt before the EPC zero so diagnostics preserve
+                # what the suppressor would have seen without the gate.
+                self._raw_dt_pre_epc = float(raw_dt)
                 if self.epc_active:
                     raw_dt = 0.0
                     is_stationary_dt = False  # EPC error spike is from filter divergence, not speech
@@ -2213,15 +2219,18 @@ class AEC:
 
                 final_output = self._aec3_post(raw_output, near_end, far_end)
 
-                # Populate AecResContext when caller requested it
-                # (research / NN-integration surface, see CLAUDE.md
-                # "Diagnostic surfaces"). Gated by config so the default
-                # production path stays untouched.
+                # Populate AecResContext when requested. Gated by config so
+                # the default production path stays untouched.
                 if self.config.return_res_context:
                     _res_context = AecResContext(
                         raw_output=raw_output.astype(np.float32, copy=True),
+                        formed_output=np.asarray(
+                            getattr(self, '_res_formed_output', raw_output),
+                            dtype=np.float32,
+                        ).copy(),
                         echo_spec=np.asarray(
-                            getattr(self.filter, 'echo_spec', np.zeros(1)),
+                            getattr(self, '_res_echo_spec',
+                                    getattr(self.filter, 'echo_spec', np.zeros(1))),
                             dtype=np.complex64,
                         ).copy(),
                         far_power=float(far_power),
@@ -2230,7 +2239,8 @@ class AEC:
                             dtype=np.complex64,
                         ).copy(),
                         near_spec=np.asarray(
-                            getattr(self.filter, 'near_spec', np.zeros(1)),
+                            getattr(self, '_res_near_spec',
+                                    getattr(self.filter, 'near_spec', np.zeros(1))),
                             dtype=np.complex64,
                         ).copy(),
                         filter_converged=bool(self._convergence.converged),
@@ -2646,7 +2656,7 @@ class AEC:
         self._diag['erle_reset_signal'] = int(_erle_reset_signal)
         # ── end Phase 0 trace ──
 
-        # ── Round 3 trace-only: delay / EPC / P-override / scale ──
+        # Trace-only diagnostics: delay / EPC / P-override / scale.
         # These are audio-passive (read-only inspection of state set by other code).
         self._diag['epc_active_now'] = bool(self._epc_det.active)
         self._diag['epc_hangover_count'] = int(self._epc_det.hangover_count)
@@ -2662,8 +2672,8 @@ class AEC:
                 _pfloor_active = True
         self._diag['p_max_override_active'] = _pmax_active
         self._diag['p_floor_beta_active'] = _pfloor_active
-        self._diag['div_source_last'] = getattr(self, '_round3_last_div_source', '')
-        self._diag['div_counts'] = dict(getattr(self, '_round3_div_counts',
+        self._diag['div_source_last'] = getattr(self, '_last_divergence_source', '')
+        self._diag['div_counts'] = dict(getattr(self, '_divergence_source_counts',
                                                 {'delay_first': 0, 'delay_shift': 0,
                                                  'epv': 0, 'shadow_rise': 0}))
         # Filter scale ratio: filter's echo_psd magnitude vs render-based estimate
@@ -2679,10 +2689,9 @@ class AEC:
         self._diag['inst_erle_smooth'] = float(self._inst_erle_smooth)
         # Pre-EPC DT for D3 design: if we ZEROED raw_dt due to EPC, this records the
         # value we WOULD have had. Set in process() before the EPC zero (search marker).
-        self._diag['raw_dt_pre_epc'] = float(getattr(self, '_round3_raw_dt_pre_epc', 0.0))
-        # ── end Round 3 trace ──
+        self._diag['raw_dt_pre_epc'] = float(getattr(self, '_raw_dt_pre_epc', 0.0))
 
-        # Round 5 trace: 9 per-stage gain slots. Legacy ResFilter._stage_*
+        # Per-stage gain trace. Legacy ResFilter._stage_*
         # wrote per-frame voice-band means; AEC3 chain doesn't use this trace,
         # so the slots are constant zero (preserved here to keep the diag dict
         # structure stable for external consumers).
@@ -2691,25 +2700,32 @@ class AEC:
                    'pre_temporal', 'post_temporal', 'after_noise_lift'):
             self._diag[f'g_stage_{_n}_voice'] = 0.0
 
-        # ── Round 7 trace: filter trajectory + transition events (audio-passive) ──
-        if not hasattr(self, '_r7_prev_delay'):
-            self._r7_prev_delay = -1
-            self._r7_prev_div_counts = {'delay_first': 0, 'delay_shift': 0,
-                                         'epv': 0, 'shadow_rise': 0}
+        # Filter trajectory and transition-event diagnostics (audio-passive).
+        if not hasattr(self, '_diag_prev_delay'):
+            self._diag_prev_delay = -1
+            self._diag_prev_divergence_counts = {
+                'delay_first': 0,
+                'delay_shift': 0,
+                'epv': 0,
+                'shadow_rise': 0,
+            }
 
         cur_delay = int(getattr(self, '_current_delay', -1))
         self._diag['delay_samples'] = cur_delay
-        if cur_delay >= 0 and self._r7_prev_delay >= 0:
-            self._diag['delay_delta'] = cur_delay - self._r7_prev_delay
+        if cur_delay >= 0 and self._diag_prev_delay >= 0:
+            self._diag['delay_delta'] = cur_delay - self._diag_prev_delay
         else:
             self._diag['delay_delta'] = 0
-        self._r7_prev_delay = cur_delay
+        self._diag_prev_delay = cur_delay
 
-        cur_div = getattr(self, '_round3_div_counts',
+        cur_div = getattr(self, '_divergence_source_counts',
                           {'delay_first': 0, 'delay_shift': 0, 'epv': 0, 'shadow_rise': 0})
         for _src in ('delay_first', 'delay_shift', 'epv', 'shadow_rise'):
-            self._diag[f'event_{_src}'] = bool(cur_div.get(_src, 0) > self._r7_prev_div_counts.get(_src, 0))
-        self._r7_prev_div_counts = dict(cur_div)
+            self._diag[f'event_{_src}'] = bool(
+                cur_div.get(_src, 0)
+                > self._diag_prev_divergence_counts.get(_src, 0)
+            )
+        self._diag_prev_divergence_counts = dict(cur_div)
 
         _filt = getattr(self, 'filter', None)
         self._diag['p_max_override_remaining'] = int(getattr(_filt, '_p_max_override_frames', 0)) if _filt is not None else 0
@@ -2731,7 +2747,6 @@ class AEC:
             self._diag['nores_echo_proxy'] = float(np.sqrt(_nores_pwr / max(_mic_pwr, _np_eps)))
         except (NameError, AttributeError):
             pass
-        # ── end Round 7 trace ──
 
         result = final_output.astype(np.float32)
         if _res_context is not None:
@@ -2855,6 +2870,7 @@ class AEC:
 
     def _aec3_select_linear_filter_output(
         self, *, e_refined_time: np.ndarray, near_end_block: np.ndarray,
+        e_coarse_time: Optional[np.ndarray] = None,
     ) -> tuple:
         """AEC3 ``UseRefinedOutput`` + ``FormLinearFilterOutput`` parity
         for the linear filter output flowing into RES + SuppressionGain.
@@ -2870,30 +2886,26 @@ class AEC:
         FormLinearFilterOutput then does sample-by-sample crossfade between
         previous-selected and current-selected outputs.
 
-        Our pipeline drives RES + SuppressionGain via the windowed error
-        spectrum (``filter.error_spec_windowed``) and ``filter.echo_spec``.
-        Hop-aligned spectral selection produces the AEC3-equivalent linear-
-        output substitution at the FFT boundary; the sqrt-Hann + OLA temporal
-        smoothing acts as the SignalTransition analog. The hysteresis state
-        ``_refined_filter_output_last_selected`` tracks the previous frame
-        selection for symmetry with AEC3 even though spectral switching is
-        hop-quantised.
+        The helper is also the mandatory WOLA formatter when no shadow filter
+        exists. In that case ``e_coarse_time`` is omitted and the refined
+        output is used for both candidates, producing the exact STFT of
+        ``[previous refined hop, current refined hop]`` without changing the
+        selection state.
 
         Returns
         -------
         selected_error_spec_windowed : np.ndarray (complex64, shape n_freqs)
-            Equals ``filter.error_spec_windowed`` when refined is selected, and
-            ``near_spec_windowed - shadow_filter.echo_spec`` (=
-            ``filter.error_spec_windowed + filter.echo_spec -
-            shadow_filter.echo_spec``) when coarse is selected.
+            Reconstructing WOLA spectrum of the formed refined/coarse linear
+            output, including the 30-sample transition on selection changes.
         selected_echo_spec : np.ndarray (complex64, shape n_freqs)
             Echo-estimate spectrum from the selected filter.
 
-        Caller is responsible for guarding with the
-        ``use_refined_output_selection_for_linear_path`` config flag and for
-        ensuring ``self._last_shadow_output_time`` is populated.
+        ``selected_error_spec_windowed`` and ``selected_echo_spec`` share the
+        same periodic-sqrt-Hann analysis frame, so their sum is the matching
+        windowed capture spectrum.
         """
-        e_coarse_time = self._last_shadow_output_time
+        if e_coarse_time is None:
+            e_coarse_time = e_refined_time
         hop = int(near_end_block.shape[0])
         # AEC3 SubtractorOutput fields used by UseRefinedOutput (time-domain
         # block sum-of-squares). s_refined / s_coarse are the echo estimates
@@ -2968,8 +2980,8 @@ class AEC:
         Takes the linear-filter time-domain residual ``raw_output`` (length =
         hop_size) and returns the suppressed time-domain hop. Per-bin
         suppression gain comes from the AEC3 chain operating on PBFDKF
-        spectra; the gain is applied to ``filter.error_spec_windowed`` and
-        the result IFFT'd back to time domain over [hop_size:block_size].
+        spectra; the gain is applied to the formed linear-output WOLA spectrum
+        and the result is synthesized with the matching sqrt-Hann OLA.
         """
         from .filter import build_filter_state_bridge
 
@@ -2984,22 +2996,23 @@ class AEC:
         # before they enter ResidualEchoEstimator + SuppressionGain.
         # Gain is a ratio so the scale cancels at apply time.
         _PSD_SCALE = (32768.0) ** 2  # int16 max^2
-        # AEC3 UseRefinedOutput spectral selection. When a shadow output
-        # is available, the per-frame predicate picks the cleaner of
-        # refined/coarse and routes that to RES + SuppressionGain via
-        # error_spec / echo_psd.
-        if (self.shadow_filter is not None
-                and self._last_shadow_output_time is not None):
-            _sel_esw, _sel_echo_spec = self._aec3_select_linear_filter_output(
-                e_refined_time=raw_output, near_end_block=near_end,
-            )
-        else:
-            # No-shadow fallback: use filter's own windowed-error spec + raw echo.
-            # echo_spec = Σ W[p]·X[p]; derived from filter output, not windowed-near
-            # like the shadow path. Equivalent: near_spec_win - error_spec_windowed
-            # = (error_spec_windowed + echo_spec) - error_spec_windowed = echo_spec.
-            _sel_esw = self.filter.error_spec_windowed
-            _sel_echo_spec = self.filter.echo_spec
+        # Always form a reconstructing 50%-overlap WOLA frame from the
+        # time-domain linear output. PBFDKF's error_spec_windowed is an
+        # estimator quantity (windowed capture minus an unwindowed echo
+        # spectrum), not the STFT of the continuous linear residual. With a
+        # shadow output the helper also selects/crossfades refined vs coarse;
+        # without one it formats the refined output only.
+        _coarse_time = (
+            self._last_shadow_output_time
+            if self.shadow_filter is not None
+            and self._last_shadow_output_time is not None
+            else None
+        )
+        _sel_esw, _sel_echo_spec = self._aec3_select_linear_filter_output(
+            e_refined_time=raw_output,
+            near_end_block=near_end,
+            e_coarse_time=_coarse_time,
+        )
         near_psd = (np.abs(self.filter.near_spec) ** 2 * _PSD_SCALE).astype(np.float32)
         far_psd = (np.abs(self.filter.far_spec) ** 2 * _PSD_SCALE).astype(np.float32)
         echo_psd = (np.abs(_sel_echo_spec) ** 2 * _PSD_SCALE).astype(np.float32)
@@ -3531,12 +3544,19 @@ class AEC:
         )
 
         # Freq-domain seam for an EXTERNAL post-NR residual suppressor
-        # (Audio_ALG AEC-linear → NR → RES). Stash the linear windowed error
-        # spectrum + the gain/CNG computed this frame so the caller can apply
-        # S(f) = error_spec · G_nr · res_gain (+CNG) AFTER NR, reusing this
+        # (Audio_ALG AEC-linear → NR → RES). Stash the reconstructing WOLA
+        # error/echo/capture spectra plus gain/CNG so the caller can apply
+        # S(f) = error_spec · G_nr · res_gain (+CNG) after NR, reusing this
         # tuned gain instead of re-deriving it. Only when the caller opted in.
         if self.config.return_res_context:
             self._res_error_spec = error_spec.astype(np.complex64, copy=True)
+            self._res_echo_spec = _sel_echo_spec.astype(np.complex64, copy=True)
+            self._res_near_spec = (
+                error_spec + _sel_echo_spec
+            ).astype(np.complex64, copy=True)
+            self._res_formed_output = np.asarray(
+                self._form_prev_output_time, dtype=np.float32
+            ).copy()
             self._res_gain = gain.astype(np.float32, copy=True)
             self._res_comfort_noise = comfort_noise.astype(np.float32, copy=True)
             # Residual-echo PSD R² (int16²-scaled, same as comfort_noise) — lets an
@@ -3550,12 +3570,8 @@ class AEC:
 
         # trace_hf_chain audit trace removed (default-OFF dev knob).
 
-        # Apply gain in spectrum domain, IFFT to fft_size=512, take the
-        # block_size=320 region that holds the analysis window, then
-        # synth-window + OLA. error_spec_windowed was built from
-        # near_buffer[:block_size] * sqrt-Hann analysis (zero-padded to
-        # fft_size). Multiplying it by sqrt-Hann synthesis and accumulating
-        # at 50% overlap gives Hann-summed perfect reconstruction.
+        # Apply gain in the formed linear-output spectrum, IFFT to the active
+        # FFT size, then matching sqrt-Hann synthesis + 50%-overlap OLA.
         #
         # Apply gain to the linear residual (E2: switch to raw capture Y when the
         # linear filter is unusable, matching AEC3 echo_remover.cc:475

@@ -193,8 +193,7 @@ class EchoPathDelayEstimator:
         return self._aggregator.reliable_delay_found()
 
     def reset(self, reset_delay_confidence: bool) -> None:
-        # Full reset — see call-site audit (2026-08-03 Codex review): the
-        # ONLY caller of this public reset() is
+        # Full reset. The only caller of this public reset() is
         # LegacyDelayShim.reset()/RenderDelayController.reset() <-
         # AEC.reset()/aec_reset() (orchestrator.py / aec.c), a top-level
         # cold-start-style reset (recreates AecState/ResidualEchoEstimator/

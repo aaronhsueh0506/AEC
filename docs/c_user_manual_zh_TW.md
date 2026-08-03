@@ -314,7 +314,9 @@ aec_get_res_context(&aec, &ctx);
 
 主要欄位：
 
-- `error_spec`：windowed linear error `E(f)`，audio amplitude scale。
+- `formed_hop`：`error_spec` 所對應的 selected/crossfaded linear hop。
+- `error_spec`：formed linear output 的 50% overlap periodic-sqrt-Hann STFT `E(f)`，audio amplitude scale。
+- `echo_spec` / `near_spec`：與 `error_spec` 同 window、同對齊的 echo/capture spectrum，且 `near_spec = error_spec + echo_spec`。
 - `res_gain`：AEC3 suppression amplitude gain，範圍 `[0, 1]`。
 - `r2`：residual echo PSD，使用 int16² scale；轉成 `|E|²` audio scale 時除以 `32768²`。
 - `comfort_noise`：CNG PSD，同樣使用 int16² scale。

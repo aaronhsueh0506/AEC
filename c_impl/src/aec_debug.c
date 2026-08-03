@@ -3,7 +3,7 @@
  * Implementation kept tiny on purpose: stderr fprintf, no ring buffer, no
  * async I/O. Maintenance > perf for debug code.
  *
- * Round-3 review B03 (AEC_NO_STDIO): this is the ONLY stdio translation unit
+ * With AEC_NO_STDIO, this is the only stdio translation unit
  * in the library (fprintf/vfprintf/fputc, plus the lazily-resolved stderr in
  * aec_debug_logf) — every symbol it defines has a static-inline no-op
  * replacement in aec_debug.h under AEC_NO_STDIO, so this whole file compiles

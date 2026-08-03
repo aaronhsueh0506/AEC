@@ -16,6 +16,21 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-03 — Reconstructing WOLA interface for downstream RES/NR
+
+- `AecResContext.error_spec` now always exposes the selected linear output on
+  the post-filter's periodic-sqrt-Hann, 50%-overlap STFT grid. Previously the
+  no-shadow C/Python path exposed PBFDKF's internal estimator spectrum, which
+  is not a reconstructing STFT of the continuous linear output.
+- `echo_spec` and `near_spec` now use the same window and frame alignment as
+  `error_spec`, with `near_spec = error_spec + echo_spec`.
+- Added `formed_hop` (C) / `formed_output` (Python), the exact current
+  selected/crossfaded time-domain hop represented by the second half of the
+  WOLA frame. This is an additive public context-structure change; C callers
+  must rebuild against the updated header.
+- Added structural reconstruction tests for every supported grid, with the
+  shadow filter both enabled and disabled.
+
 ## [Unreleased] — 2026-08-03 (追加2) — top-level (non-AEC3) hop-authored constant audit: the batch the AEC3-internal audit missed
 
 Follow-up to the AEC3 per-block/hop-count constant audit two entries below.

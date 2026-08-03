@@ -61,7 +61,7 @@ import eval_aec_challenge as eac  # run_ours, compute_erle, compute_sdr
 from bench_aecmos import FastAECMOS
 
 # ---------------------------------------------------------------------------
-# Run-provenance metadata (Codex review, 2026-08-03): a run's scores.json is
+# Run-provenance metadata: a run's scores.json is
 # only trustworthy/reproducible if it also records EXACTLY what produced the
 # numbers -- the resolved signal grid, whether NO_PREALIGN was set, every
 # other AEC-relevant env-var override, the fully-resolved AecConfig (not just
@@ -355,7 +355,7 @@ def main():
             'manifest': os.path.abspath(args.manifest),
             'dataset_dir': os.path.abspath(args.dataset_dir),
         },
-        # Provenance/reproducibility block (Codex review) -- unconditionally
+        # Provenance/reproducibility block -- unconditionally
         # populated every run, never optional/best-effort: exact signal grid,
         # NO_PREALIGN + every other AEC-relevant env override, the fully
         # resolved AecConfig(s) actually live, and the exact code state.

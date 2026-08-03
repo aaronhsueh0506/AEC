@@ -318,7 +318,7 @@ arbitrates between the two filters:
   signals from `DoubleTalkAnalyzer` (energy-gated; the opt-in DTD detector
   subsystem was retired in 3.22.5).
 * Load-bearing on ~7/800 cohort-tail cases.
-* Must not be removed or bypassed (see CLAUDE.md).
+* Must not be removed or bypassed.
 
 ### 2.6 Render signal analyzer
 

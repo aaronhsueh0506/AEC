@@ -95,7 +95,7 @@
  * are assumed non-aliasing except where a kernel's own comment documents
  * an in-place case.
  *
- * Round-3 review B05: only the alias form actually exercised by
+ * Only the alias form exercised by
  * simd_selftest_aec.c's matrix is contractually supported -- sk_mask_zero_f32
  * (kernel 20) is the sole one in this file, and it isn't optional aliasing
  * the way sk_capply_gain_f32's out==z is: this kernel has no separate output

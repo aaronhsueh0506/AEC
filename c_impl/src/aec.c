@@ -251,7 +251,7 @@ static int aec_validate_config(const AecConfig* cfg) {
     AEC_CK_RANGE_F(delay_buffer_ms,             0.0f,120000.0f);
     AEC_CK_RANGE_F(delay_est_init_s,            0.0f,  3600.0f);
     AEC_CK_RANGE_F(delay_est_period_s,          0.0f,  3600.0f);
-    /* highpass_cutoff_hz (R08, AEC-side re-review gap): when enable_highpass
+    /* When enable_highpass
      * is set, this field is fed straight into hpf_init() (aec_carve, below)
      * which silently returns NULL — dropping the HPF entirely, with no error
      * surfaced — whenever audio_common's hpf_params_valid() (hpf.c) rejects
@@ -2462,7 +2462,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
  * output. Only real async jitter exercises the underrun/overrun paths.
  *
  * F09 Variant A' (drop-new + consumer catch-up): a from-scratch SPSC ring.
- * The original F09 fix (review finding: render and capture are documented,
+ * Render and capture are documented,
  * aec.h, as callable from two different threads — SPSC — and the FIFO
  * bookkeeping was plain, non-atomic `int`/`long` read-modify-write, a data
  * race the instant that documented concurrency was actually used) routed
@@ -2588,20 +2588,30 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
     ctx->n_freqs = a->n_freqs;
     ctx->hop_size = a->hop_size;
     ctx->linear_hop = a->raw_output;
-    ctx->echo_spec  = a->main_filter.base.echo_spec;
     ctx->far_spec   = a->main_filter.base.far_spec;
-    ctx->near_spec  = a->main_filter.base.near_spec;
     /* Freq-domain seam (valid when the AEC3 post block ran this hop, i.e.
      * enable_res || return_res_context). These alias the internal per-hop
-     * buffers populated by aec3_post_run: error_spec_windowed (audio scale,
-     * == Python ctx.error_spec), the SuppressionGain output (a3_sg.gain), the
-     * residual-echo PSD (a3_sc.r2, int16²) and the CNG N² (post.comfort_noise,
-     * int16²). Left NULL when neither RES nor the context seam is enabled. */
+     * buffers populated by aec3_post_run.  sel_esw is the exact 50%-overlap
+     * sqrt-Hann STFT of the formed linear output; sel_echo is its matching
+     * echo estimate and ybase = sel_esw + sel_echo is the matching windowed
+     * capture spectrum.  Do not expose main_filter.error_spec_windowed here:
+     * that is a PBFDKF estimator quantity, not a reconstructing WOLA frame.
+     * res_gain is the SuppressionGain output, r2 the residual-echo PSD
+     * (int16²), and comfort_noise the CNG N² (int16²). Left NULL when
+     * neither RES nor the context seam is enabled. */
     if (a->cfg.enable_res || a->cfg.return_res_context) {
-        ctx->error_spec    = a->main_filter.base.error_spec_windowed;
+        ctx->error_spec    = a->a3_sc.sel_esw;
+        ctx->echo_spec     = a->a3_sc.sel_echo;
+        ctx->near_spec     = a->a3_sc.ybase;
+        ctx->formed_hop    = a->a3_lfs.e_form;
         ctx->res_gain      = a->a3_sg.gain;
         ctx->r2            = a->a3_sc.r2;
         ctx->comfort_noise = a->post.comfort_noise;
+    } else {
+        /* Diagnostic-only raw PBFDKF spectra when the post block did not run.
+         * No reconstructing error spectrum is available in this mode. */
+        ctx->echo_spec = a->main_filter.base.echo_spec;
+        ctx->near_spec = a->main_filter.base.near_spec;
     }
     ctx->far_power = a->last_far_power;
     ctx->erle_factor = a->erle_factor_prev;

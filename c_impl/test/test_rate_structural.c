@@ -1,9 +1,9 @@
-/* test_rate_structural.c — M5 (multi-rate campaign, review F01) per-rate
- * unity/impulse/COLA structural micro-checks. Standalone-gcc convention
+/* test_rate_structural.c — per-rate unity/impulse/COLA structural checks.
+ * Standalone-gcc convention
  * (mirrors test_config_validation.c / test_static_aec.c's own header
- * recipe) -- does NOT link into any Makefile target.
+ * recipe). It is wired to the `make test-rate-structural` target.
  *
- * Six checks, run at each of the four whitelisted grids
+ * Seven checks, run at each of the four whitelisted grids
  * (8000/256, 16000/256, 16000/512, 48000/1024):
  *
  *   (a) COLA: the rate's own synthesis window (Aec3BalancedRateDims::
@@ -60,6 +60,15 @@
  *       post-defaults grid-override path that forced retiming to live in
  *       aec_carve() rather than aec_config_defaults() (see aec.c's
  *       aec_legacy10ms_hops()/aec_legacy10ms_alpha() doc comment).
+ *
+ *   (e) external RES/NR seam WOLA identity: with internal RES disabled and
+ *       return_res_context enabled, reconstruct ctx.error_spec with the
+ *       matching sqrt-Hann synthesis/OLA and verify it produces the previous
+ *       ctx.formed_hop. Runs with shadow selection both enabled and disabled,
+ *       and also verifies near_spec == error_spec + echo_spec. This catches a
+ *       wrong context pointer to PBFDKF's non-reconstructing estimator
+ *       error_spec_windowed even though the synthesis window itself passes
+ *       the standalone COLA check in (a).
  *
  * Build (standalone, KISS FFT backend; from c_impl/):
  *   make -C ../../audio_common BACKEND=kiss lib
@@ -243,6 +252,121 @@ static void test_impulse_linear_path(void) {
  * nothing had run that row's post-chain end-to-end before this. */
 static void test_impulse_res_enabled(void) {
     run_impulse_test(1, "RES-enabled");
+}
+
+/* ── (e) external RES/NR seam is a reconstructing 50%-overlap WOLA ─────── */
+static void test_res_context_wola_identity(void) {
+    const int N_HOPS = 80;
+
+    for (int shadow = 0; shadow <= 1; ++shadow) {
+        for (int r = 0; r < N_GRIDS; ++r) {
+            int sr = GRIDS[r].sample_rate;
+            int fft_size = GRIDS[r].fft_size;
+            const Aec3BalancedRateDims *rd = aec3b_rate_cfg(sr, fft_size);
+            AecConfig cfg;
+            Aec aec;
+            FftHandle *fft = NULL;
+            float *far = NULL, *mic = NULL, *out = NULL;
+            float *previous = NULL, *ifft = NULL, *ola = NULL;
+            char what[192];
+            float max_recon_error = 0.0f;
+            float max_sum_error = 0.0f;
+            int context_valid = 1;
+
+            aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+            cfg.fft_size = fft_size;
+            cfg.enable_shadow = shadow;
+            cfg.enable_res = 0;
+            cfg.return_res_context = 1;
+            cfg.enable_cng = 0;
+            cfg.enable_delay_est = 0;
+            cfg.enable_highpass = 0;
+            cfg.enable_saturation = 0;
+
+            int rc = rd ? aec_create(&aec, &cfg) : -1;
+            if (rc == 0) fft = fft_create(fft_size);
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d shadow=%d: construct WOLA seam test",
+                     sr, fft_size, shadow);
+            CHECK(rc == 0 && fft != NULL, what);
+            if (rc != 0 || !fft) {
+                if (rc == 0) aec_destroy(&aec);
+                fft_destroy(fft);
+                continue;
+            }
+
+            int hop = aec_hop_size(&aec);
+            int n_freqs = fft_size / 2 + 1;
+            far = (float*)malloc((size_t)hop * sizeof(float));
+            mic = (float*)malloc((size_t)hop * sizeof(float));
+            out = (float*)malloc((size_t)hop * sizeof(float));
+            previous = (float*)calloc((size_t)hop, sizeof(float));
+            ifft = (float*)malloc((size_t)fft_size * sizeof(float));
+            ola = (float*)calloc((size_t)fft_size, sizeof(float));
+            if (!far || !mic || !out || !previous || !ifft || !ola)
+                context_valid = 0;
+
+            g_lcg_state = 0x574F4C41u + (unsigned)(17 * r + shadow);
+            for (int hi = 0; hi < N_HOPS && context_valid; ++hi) {
+                AecResContext ctx;
+                for (int i = 0; i < hop; ++i) {
+                    far[i] = 0.18f * (2.0f * lcg_uniform() - 1.0f);
+                    mic[i] = 0.45f * far[i]
+                           + 0.025f * (2.0f * lcg_uniform() - 1.0f);
+                }
+                aec_process(&aec, mic, far, out);
+                aec_get_res_context(&aec, &ctx);
+                if (!ctx.error_spec || !ctx.echo_spec || !ctx.near_spec ||
+                    !ctx.formed_hop || ctx.n_freqs != n_freqs ||
+                    ctx.hop_size != hop) {
+                    context_valid = 0;
+                    break;
+                }
+
+                for (int k = 0; k < n_freqs; ++k) {
+                    float sum_re = ctx.error_spec[k].r + ctx.echo_spec[k].r;
+                    float sum_im = ctx.error_spec[k].i + ctx.echo_spec[k].i;
+                    float dr = fabsf(ctx.near_spec[k].r - sum_re);
+                    float di = fabsf(ctx.near_spec[k].i - sum_im);
+                    if (dr > max_sum_error) max_sum_error = dr;
+                    if (di > max_sum_error) max_sum_error = di;
+                }
+
+                fft_inverse(fft, ctx.error_spec, ifft);
+                for (int i = 0; i < fft_size; ++i)
+                    ola[i] += ifft[i] * rd->synth_window[i];
+                for (int i = 0; i < hop; ++i) {
+                    float d = fabsf(ola[i] - previous[i]);
+                    if (d > max_recon_error) max_recon_error = d;
+                }
+                memmove(ola, ola + hop,
+                        (size_t)(fft_size - hop) * sizeof(float));
+                memset(ola + (fft_size - hop), 0,
+                       (size_t)hop * sizeof(float));
+                memcpy(previous, ctx.formed_hop,
+                       (size_t)hop * sizeof(float));
+            }
+
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d shadow=%d: RES context exposes complete WOLA fields",
+                     sr, fft_size, shadow);
+            CHECK(context_valid, what);
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d shadow=%d: unity-gain WOLA reconstructs formed hop "
+                     "(max abs %.3g <= 1e-4)",
+                     sr, fft_size, shadow, max_recon_error);
+            CHECK(context_valid && max_recon_error <= 1e-4f, what);
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d shadow=%d: near == error + echo "
+                     "(max abs %.3g <= 1e-6)",
+                     sr, fft_size, shadow, max_sum_error);
+            CHECK(context_valid && max_sum_error <= 1e-6f, what);
+
+            free(far); free(mic); free(out); free(previous); free(ifft); free(ola);
+            fft_destroy(fft);
+            aec_destroy(&aec);
+        }
+    }
 }
 
 /* ── (c2) aec_init (static pool) matches aec_create (heap), full post-chain,
@@ -435,6 +559,7 @@ int main(void) {
     test_cola();
     test_impulse_linear_path();
     test_impulse_res_enabled();
+    test_res_context_wola_identity();
     test_static_pool_matches_heap();
     test_mem_size_consistency();
     test_top_level_constant_retiming();

@@ -515,20 +515,24 @@ int  aec_hop_size(const Aec* a);
 typedef struct AecResContext {
     int            n_freqs;
     int            hop_size;
-    const float*   linear_hop;
+    const float*   linear_hop;       /* refined PBFDKF hop, before selection */
+    const float*   formed_hop;       /* current hop underlying error_spec    */
     const Complex* echo_spec;
     const Complex* far_spec;
     const Complex* near_spec;
     /* Freq-domain seam for an external post-NR residual suppressor (mirrors the
-     * Python AecResContext freq fields). Valid only when return_res_context=1;
-     * NULL otherwise. error_spec = windowed linear error E(f) in AUDIO scale
-     * (== Python ctx.error_spec, |E|²·32768² = error_psd). res_gain = the AEC3
+     * Python AecResContext freq fields). Valid when enable_res=1 or
+     * return_res_context=1; NULL otherwise. error_spec is the exact
+     * 50%-overlap periodic-sqrt-Hann
+     * STFT of the formed linear output E(f), in AUDIO scale. echo_spec is the
+     * matching formed echo estimate and near_spec = error_spec + echo_spec is
+     * the matching windowed capture spectrum. res_gain is the AEC3
      * SuppressionGain G_res(f), amplitude [0..1]. r2 = residual-echo PSD R²(f)
      * and comfort_noise = CNG N²(f), BOTH int16²-scaled (divide by 32768² to
      * reach the |E|² audio-power scale, as run_res does). All length n_freqs.
      * The pointers alias the AEC's internal per-hop buffers — read before the
      * next aec_process() call. */
-    const Complex* error_spec;     /* windowed linear error E(f), audio scale */
+    const Complex* error_spec;     /* reconstructing WOLA linear E(f), audio scale */
     const float*   res_gain;       /* AEC3 G_res(f), amplitude [0..1]          */
     const float*   r2;             /* residual-echo PSD R²(f), int16²-scaled   */
     const float*   comfort_noise;  /* CNG N²(f), int16²-scaled                 */

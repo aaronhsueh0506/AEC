@@ -200,9 +200,10 @@ gain so a downstream stage runs entirely in the frequency domain:
 
 | Field | Meaning |
 |---|---|
-| `error_spec` | E(f) — windowed linear AEC error spectrum (the "noisy" input) |
-| `echo_spec` | Ŷ(f) — linear echo estimate (residual-echo reference) |
-| `far_spec`, `near_spec` | X(f), mic spectrum |
+| `formed_output` / `formed_hop` | Selected/crossfaded linear hop represented by `error_spec` |
+| `error_spec` | E(f) — reconstructing 50%-overlap sqrt-Hann STFT of the formed linear output |
+| `echo_spec`, `near_spec` | Matching windowed echo and capture spectra; `near_spec = error_spec + echo_spec` |
+| `far_spec` | X(f) — PBFDKF render spectrum (shared reference/diagnostic coordinate) |
 | `res_gain`, `comfort_noise` | the AEC3 SuppressionGain + CNG this frame |
 | `erle_factor`, `dt_indicator`, `divergence`, `over_sub`, `erl_estimate` | per-frame telemetry |
 

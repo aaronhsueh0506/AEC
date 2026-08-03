@@ -138,10 +138,9 @@ static void early_accumulate(RdeEarlyEstimator *E, double value, double smoothin
          * block_counter is NOT: it's a genuine algorithmic index (used
          * arithmetically in x_value/value_to_add above, not merely a
          * boolean gate), with no cap of its own besides the external
-         * early_reset(). This module is confirmed dead code (no
-         * production caller — CLAUDE.md), so flooring at INT_MAX (the
-         * true overflow boundary, same UBSan bug class as this round's
-         * other counter fixes) rather than any smaller threshold avoids
+         * early_reset(). This module has no production caller, so flooring
+         * at INT_MAX (the true overflow boundary) rather than any smaller
+         * threshold avoids
          * having to re-derive a "smallest safe ceiling" for a value that
          * feeds arithmetic, and is a no-op for every reachable state
          * short of ~2^31 blocks. */

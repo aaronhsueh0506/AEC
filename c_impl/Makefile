@@ -207,7 +207,7 @@ endif
 # EXTRA_CFLAGS=-ffp-contract=fast (or -Ofast/-ffast-math, which imply
 # contraction) would land LATER on the compile line and silently win,
 # re-enabling FMA reassociation despite this repo's documented
-# build-determinism policy (see CLAUDE.md / README's build-flags section).
+# build-determinism policy (see README's build-flags section).
 # Moved here -- appended LAST, after every other CFLAGS append in this file
 # (EXTRA_CFLAGS, the BACKEND-conditional -I$(AC_DIR)/include, WERROR,
 # NO_STDIO), and BEFORE CFG_SIG_PAYLOAD is computed below (so it
