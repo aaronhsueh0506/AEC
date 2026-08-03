@@ -1,5 +1,4 @@
-/* no_stdio_main.c — round-3 review B03 minimal-main ELF gate for
- * AEC_NO_STDIO.
+/* no_stdio_main.c — minimal-main ELF gate for AEC_NO_STDIO.
  *
  * Deliberately does NOT itself use stdio (no <stdio.h>, no printf/fprintf
  * anywhere in this file) so that `nm` run over the linked executable can

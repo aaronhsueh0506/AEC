@@ -3,7 +3,7 @@
  * Build switches:
  *   AEC_DEBUG    : enable debug log call sites (compile-time)
  *   NDEBUG       : strip log call sites entirely
- *   AEC_NO_STDIO : (round-3 review B03) board/no-stdio builds — this header
+ *   AEC_NO_STDIO : board/no-stdio builds — this header
  *                  does not include <stdio.h> and exposes no FILE*-based API
  *                  at all; every aec_debug_* symbol a LIBRARY TU could call
  *                  becomes a static-inline no-op instead, so aec.c (the only

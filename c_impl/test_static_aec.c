@@ -9,7 +9,7 @@
  *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o bin/test_static_aec
  * (This test is NOT wired into any `make` target -- the manual recipe above
  * is the real way to build it; see STATIC_MEMORY.md and
- * test/test_config_validation.c's own build note, re-review round-3 R04.)
+ * test/test_config_validation.c's own build note.)
  * Run:
  *   ./bin/test_static_aec mic.wav ref.wav [sample_rate]
  *

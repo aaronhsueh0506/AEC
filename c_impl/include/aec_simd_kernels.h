@@ -1527,7 +1527,7 @@ static inline void sk_erl_bin_update_f32(float *erl, int *hold,
  * not asymptotic: with floor-at-0, this hold_counters array alone accounted
  * for 2142 of the golden's 3043 total mismatches (the fully-broken total at
  * the time), on top of a 901-mismatch true baseline that already existed
- * before this bug and is unrelated to it (round-3-origin, some other
+ * before this bug and is unrelated to it (a separate, unrelated pre-existing
  * cause) — i.e. 3043 = 901 true-baseline + 2142 attributable to this exact
  * floor-at-0 bug on this array, not "baseline of 3043, +5 more". (The "+5"
  * figure belongs to a different, smaller-scope isolated test of a DIFFERENT

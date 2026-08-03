@@ -575,7 +575,7 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
                                             1.0f / error_sum_anchor);
                 /* Threshold-gate counter: sole reader is the
                  * ">= DA_PRE_ECHO_UPDATES_TO_REPORT" check on the next line.
-                 * Round-6 re-review finding: this field is reset to 0 only
+                 * This field is reset to 0 only
                  * by da_matched_filter_init() (construction) and
                  * da_matched_filter_reset(mf, full_reset=1) (a genuine
                  * delay/echo-path-change reset) -- neither fires just
@@ -979,7 +979,7 @@ static void da_estimator_reset_internal(DaEstimator *e, int reset_lag_aggregator
  * signal chain (matched filter + aggregator + decimators + ring buffer +
  * pending edge-chunker samples).
  *
- * 2026-08-03 Codex review finding + call-site audit: the ONLY caller of
+ * Call-site audit: the ONLY caller of
  * delay_aec3_reset() (which calls this) is aec_reset() (aec.c) / AEC.reset()
  * on the Python side -- a top-level cold-start-style reset that recreates
  * AecState/ResidualEchoEstimator/SuppressionGain, clears CNG state, zeroes

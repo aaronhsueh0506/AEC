@@ -100,8 +100,8 @@ typedef struct FilterPlateauDetector {
     float  dt_signal_ratio;     /* 0.10 */
     int    max_attempts;        /* 2 */
     /* State */
-    /* frame_count/far_active_count/dt_signal_count: round-6 re-review
-     * (Codex-confirmed live UBSan repro) -- filter_plateau_update()
+    /* frame_count/far_active_count/dt_signal_count (confirmed via a live
+     * UBSan repro): filter_plateau_update()
      * increments all three UNCONDITIONALLY on every call, before any of
      * the function's early-return gates (cooldown_remaining>0,
      * once_converged, attempts>=max_attempts, frame_count<=grace_frames).
@@ -154,7 +154,7 @@ typedef struct FilterPlateauDetector {
     int    consecutive_match;
     int    attempts;
     int    cooldown_remaining;
-    /* round-7 review: also widened to int64_t (was a plain `int`) --
+    /* Also widened to int64_t (was a plain `int`) --
      * filter_plateau_update()'s Fire block does
      * `p->last_reset_frame = p->frame_count;` (frame_count is int64_t), an
      * implementation-defined narrowing conversion once frame_count exceeds

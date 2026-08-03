@@ -1,16 +1,14 @@
-/* test_counter_saturation.c — permanent, checked-in regression test for the
- * round-4..6 counter-saturation fixes across this repo's C AEC
- * implementation (external review, round 6: every ad hoc UBSan probe used to
- * verify these fixes across rounds 4-6 was throwaway and never committed --
- * this file replaces that with a permanent `make test-counter-saturation`
- * target that runs every time, plus a permanent UBSan build recipe, see
- * test/run_counter_saturation_ubsan.sh).
+/* test_counter_saturation.c — permanent, checked-in regression test for
+ * counter-saturation fixes across this repo's C AEC implementation (every
+ * ad hoc UBSan probe previously used to verify these fixes was throwaway
+ * and never committed -- this file replaces that with a permanent `make
+ * test-counter-saturation` target that runs every time, plus a permanent
+ * UBSan build recipe, see test/run_counter_saturation_ubsan.sh).
  *
- * For every struct-field increment/decrement site the round-6 exhaustive
- * grep sweep re-verified as genuinely unbounded (fixed this round), plus a
- * representative sample of the round-4/5/6 sites that were already fixed
- * and are reachable from a public API/struct without excessive plumbing,
- * this file exercises at minimum:
+ * For every struct-field increment/decrement site an exhaustive grep sweep
+ * verified as genuinely unbounded, plus a representative sample of sites
+ * that were already fixed and are reachable from a public API/struct
+ * without excessive plumbing, this file exercises at minimum:
  *   - cap-1 -> cap   : one more increment from just below the cap lands
  *                      exactly on the cap.
  *   - cap -> cap     : an increment attempt AT the cap is a no-op.
@@ -23,7 +21,7 @@
  *                      buggy code would eventually have produced.
  *
  * FilterPlateauDetector gets its own dedicated section (see
- * section_filter_plateau below) per the round-6 review's explicit ask:
+ * section_filter_plateau below):
  * frame_count/far_active_count/dt_signal_count were widened to int64_t
  * rather than saturated (a per-field saturating cap would corrupt the
  * far_ratio/dt_ratio these three feed -- see include/detectors.h's struct
@@ -66,8 +64,8 @@ static long g_fails  = 0;
     } while (0)
 
 /* ════════════════════════════════════════════════════════════════════
- * FilterPlateauDetector (detectors.h) -- dedicated section (round-6 fix:
- * frame_count/far_active_count/dt_signal_count widened int -> int64_t).
+ * FilterPlateauDetector (detectors.h) -- dedicated section (widened
+ * frame_count/far_active_count/dt_signal_count int -> int64_t).
  * ════════════════════════════════════════════════════════════════════ */
 static void section_filter_plateau(void) {
     FilterPlateauDetector p;
@@ -181,10 +179,9 @@ static void section_filter_plateau(void) {
               "plateau fire path arms cooldown");
     }
 
-    /* --- Case E (round-7 review, Finding 4 test coverage): the actual fire
-     * path from a frame_count value that would have silently
-     * narrowed/wrapped under the OLD 32-bit `last_reset_frame` (before this
-     * round widened it to int64_t alongside the other three counters).
+    /* --- Case E: the actual fire path from a frame_count value that would
+     * have silently narrowed/wrapped under the OLD 32-bit `last_reset_frame`
+     * (widened to int64_t alongside the other three counters).
      * far_active_count/dt_signal_count are seeded EQUAL to frame_count so
      * far_ratio/dt_ratio are exactly 1.0 (comfortably clearing their
      * 0.5/0.10 gates) on every call regardless of frame_count's magnitude --
@@ -227,9 +224,8 @@ static void section_filter_plateau(void) {
               " (this case actually exercises the narrowing/wraparound bug window, not vacuously)");
         CHECK(p.last_reset_frame == expected_last_reset,
               "plateau huge-frame_count: last_reset_frame equals the EXACT int64_t frame_count"
-              " value at the moment of firing -- the round-7 fix (last_reset_frame widened"
-              " int -> int64_t); before this fix a plain `int` would have silently narrowed/"
-              "wrapped this same assignment");
+              " value at the moment of firing -- last_reset_frame is widened int -> int64_t;"
+              " a plain `int` would have silently narrowed/wrapped this same assignment");
         CHECK(p.frame_count == 0 && p.far_active_count == 0 && p.dt_signal_count == 0,
               "plateau huge-frame_count: fire path still resets all three widened counters to 0"
               " exactly as in Case D, even starting from a value past INT_MAX");
@@ -327,7 +323,7 @@ static void section_aec_level(void) {
         }
     }
 
-    /* --- stationarity_active_hops: round-6 off-by-one fix. cap = EXACTLY
+    /* --- stationarity_active_hops: off-by-one fix. cap = EXACTLY
      * a.stationarity_converge_hops (post-fix; pre-fix settled one past it).
      * non_zero_render_seen latches permanently once set, so the branch runs
      * unconditionally on every subsequent hop without re-poking. */
@@ -351,11 +347,11 @@ static void section_aec_level(void) {
             int at_huge = (counter_at_huge >= cap);
             CHECK(at_cap == at_huge,
                   "stationarity_active_hops: '>= cap' decision identical at cap vs cap+1e6"
-                  " (proves the round-6 <= -> < off-by-one fix changes nothing observable)");
+                  " (the <= -> < off-by-one fix changes nothing observable here)");
         }
     }
 
-    /* --- aec_state.c (already fixed round 6): blocks_with_active_render
+    /* --- aec_state.c (already fixed): blocks_with_active_render
      * (cap = live active_render_blocks+1, reader is strict ">"),
      * strong_not_saturated_render_blocks (cap = live filter_adaptation_threshold_hops,
      * reader is strict "<"). aec_state_update()'s internal wiring is deep
@@ -408,7 +404,7 @@ static void section_aec_level(void) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
- * delay_aec3.c: number_pre_echo_updates (round-6 fix) driven through the
+ * delay_aec3.c: number_pre_echo_updates driven through the
  * REAL production per-hop API with a checked-in real audio fixture (not a
  * synthetic reimplementation) -- plus a bonus invariant check on
  * pending_count (already-safe cyclic counter, same driven loop).
@@ -425,7 +421,7 @@ static void section_delay_aec3(void) {
     long hops_read = 0;
     long expected_min_hops;
 
-    /* round-7 review (Finding 2, P2): a missing/unreadable fixture used to
+    /* A missing/unreadable fixture used to
      * silently `return` here with NO CHECK() and NO g_fails increment --
      * this whole section's ~2000+ checks would vanish from the run (e.g. if
      * ever invoked from the wrong cwd) while main()'s final tally still
@@ -448,7 +444,7 @@ static void section_delay_aec3(void) {
         return;
     }
 
-    /* Minimum-hop-count assertion (round-7 review, Finding 2 part b): the
+    /* Minimum-hop-count assertion: the
      * loop below's only exit condition is a short/EOF read, with no floor on
      * how many hops it actually processed -- a truncated/corrupted fixture
      * could silently satisfy every CHECK() in the loop by just running

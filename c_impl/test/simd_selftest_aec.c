@@ -60,7 +60,7 @@
 /* ═══════════════════════════════ config ═══════════════════════════════ */
 
 #define SK_TEST_MAX_N 512
-/* Round-3 review B05: extended to n=0 (must be a zero-read/zero-write no-op,
+/* Extended to n=0 (must be a zero-read/zero-write no-op,
  * see the canary section below) plus the COMPLETE 1..17 run (every kernel's
  * 4-lane NEON/scalar-tail boundary crossed at every possible remainder, not
  * just a sparse sample) -- on top of the original hand-picked lane/leaf/
@@ -257,7 +257,7 @@ static void init_nan_pool(void) {
  * cutovers (kernel 13/14's n<=128 leaf, kernel 21/22 share the same cutover
  * for n<=257 -- their own >257 recursion is covered by the finite corpus's
  * dedicated PW_TAILFOLD_N_LIST already, no separate NaN pass needed there). */
-/* n=0 prepended (round-3 review B05, mechanical retrofit): a NaN-sprinkled
+/* n=0 prepended: a NaN-sprinkled
  * fill over zero elements is a no-op, same zero-touch contract as the
  * finite corpus's n=0 case, so it belongs in this list too. */
 static const int NAN_N_LIST[] = {
@@ -347,7 +347,7 @@ static void fill_complex_nan_sprinkle(Complex *z, int n) {
 }
 
 /* ═══════════════════════════ mismatch reporting ═══════════════════════════
- * g_total_checks (round-3 review B05): a running count of individual
+ * g_total_checks: a running count of individual
  * bit-pattern comparisons actually performed, incremented at each of the
  * chokepoints every check funnels through (check_bits_or_die,
  * check_scalar_bits_or_die, check_bits_classify, check_mask_classify, and
@@ -466,7 +466,7 @@ typedef struct {
     long fail;
 } kernel_tally_t;
 
-/* Round-3 review B05: bumped 24 -> 40. The pre-existing NaN corpus already
+/* Kernel tally table bumped 24 -> 40. The pre-existing NaN corpus already
  * registers 16 distinct tallied names (cmac_np_f32_nan, wupdate_nlms_f32_nan,
  * wupdate_kf_f32_nan, the 4 pairwise-sum_*_nan kernels,
  * coherence_ema_gate_f32_nan's 5 sub-buffers, ema_delta_f32_nan,
@@ -792,7 +792,7 @@ static void test_sum_sq_pairwise(void) {
  * kernel 13 -- see kernel 21's header comment). Separate, larger backing
  * buffer (960) since this exceeds SK_TEST_MAX_N (512), used only here. */
 
-/* Round-3 review B05: 0 and the complete 1..17 run prepended (same
+/* 0 and the complete 1..17 run prepended (same
  * rationale as N_LIST above), on top of the original boundary-specific
  * values, which stay for their own documented reasons. */
 #define PW_TAILFOLD_MAX_N 960
@@ -874,11 +874,11 @@ static void test_pairwise_sum_tailfold_b(void) {
     printf("PASS pairwise_sum_tailfold_b_f32\n");
 }
 
-/* ═══════════ alignment + canary edge-case matrix (round-3 review B05) ═════
- * Finding B05's edge-case matrix, layered on top of every per-kernel
+/* ═══════════ alignment + canary edge-case matrix ══════════════════════════
+ * This edge-case matrix is layered on top of every per-kernel
  * correctness test above (same design as audio_common/test/simd_selftest.c's
- * own B05 section -- see that file's header comment for the full rationale;
- * summarized here for this file's kernels):
+ * equivalent section -- see that file's header comment for the full
+ * rationale; summarized here for this file's kernels):
  *
  *   - n=0 / n=1..17: already covered by the extended N_LIST/NAN_N_LIST/
  *     PW_TAILFOLD_N_LIST above. For n=0 specifically the canary buffers
@@ -1312,7 +1312,7 @@ static void test_wupdate_kf_edge(void) {
                  * above. Empirically confirmed necessary: reproduced under
                  * UBSan at n=128 (this file's own pre-existing finite-corpus
                  * test_wupdate_kf() hits the identical class of divergence,
-                 * unrelated to this new matrix -- see the round-3 report). */
+                 * unrelated to this new matrix). */
                 check_bits_classify("wupdate_kf_f32_edge", n, form * 100 + o,
                                      (const float *)(W_simd_arena + out_off),
                                      (const float *)(W_scalar_arena + out_off), 2 * n);
@@ -1671,9 +1671,9 @@ static void test_mask_zero_edge(void) {
      * separate output parameter at all: x is unconditionally both the read
      * source and the write destination on every single call, by signature.
      * Every call in this matrix (n=0/1..17/existing x offset 1..15) IS
-     * therefore already the "in-place" exercise the round-3 review asked
-     * for (finding B05 item 4) -- there is no separate out-of-place form of
-     * this kernel to additionally test. Single-buffer offset sweep, same
+     * therefore already the only meaningful "in-place" exercise for this
+     * kernel -- there is no separate out-of-place form of this kernel to
+     * additionally test. Single-buffer offset sweep, same
      * shape as sk_clip_f32's edge test in the common file, for the same
      * reason (no distinct input/output roles to assign the 3-form matrix
      * to). mask stays fixed at offset 0 (read-only, shared safely between
@@ -3115,7 +3115,7 @@ int main(void) {
     }
     print_classification_summary();
 
-    printf("\n--- alignment + canary edge-case matrix (round-3 review B05) ---\n");
+    printf("\n--- alignment + canary edge-case matrix ---\n");
     test_cabs_np_edge();
     test_cmag2_np_edge();
     test_cmag2_np_acc_edge();
@@ -3136,7 +3136,7 @@ int main(void) {
     test_erl_bin_update_edge();
     test_dec1_floorintmin_s32_edge();
     test_erl_hold_expire_edge();
-    /* Second call (round-3 B05): the table below now reflects the edge
+    /* Second call: the table below now reflects the edge
      * matrix's own classify tallies too, cumulative with the first printout
      * above -- g_tally/g_hard_fail_count are running totals for the whole
      * process, not reset between calls, so this is purely an additional

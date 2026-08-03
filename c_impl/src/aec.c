@@ -1512,12 +1512,12 @@ static void misadj_fire(Aec* a) {
     if (!stable) { a->misadj_stable_count = 0; return; }
     /* Threshold-gate counter: sole reader is the
      * "< a->cfg.filter_misadjustment_stable_frames" comparison on the next
-     * line. Round-6 re-review finding: "stable" (converged, EPC inactive,
+     * line. "stable" (converged, EPC inactive,
      * main not paused) is the ordinary steady state for a fixed-position
      * device left running -- it can hold continuously for the entire
      * unbounded-overflow timeframe, so the `!stable` reset above does NOT
-     * bound this counter (contrary to a prior round's premature "there's a
-     * reset branch" conclusion). Saturate at filter_misadjustment_stable_frames
+     * bound this counter (a reset branch existing here does not by itself
+     * guarantee periodic resets). Saturate at filter_misadjustment_stable_frames
      * -- once reached, the "<" comparison is permanently false either way,
      * so this is observationally identical to the old unconditional
      * increment for every reachable state, while eliminating the eventual
@@ -1577,8 +1577,8 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         if (ne_ind > a->cfg.ne_recent_threshold) {
             /* Threshold-gate counter: sole reader is the
              * ">= a->cfg.ne_recent_sustain" comparison two lines below.
-             * Round-6 re-review finding (Codex-confirmed live UBSan repro):
-             * sustained near-end energy above ne_recent_threshold (e.g. a
+             * Confirmed via a live UBSan repro: sustained near-end energy
+             * above ne_recent_threshold (e.g. a
              * long nearend-singletalk / continuous-speech stretch) can hold
              * this branch for the entire unbounded-overflow timeframe with
              * no reset in between, so an unconditional `+= 1` would
@@ -1944,7 +1944,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
              * long streaming session can never hit signed-integer-overflow
              * UB on this unconditional increment.
              *
-             * Round-6 re-review off-by-one fix: the guard used to read
+             * Off-by-one fix: the guard used to read
              * "<= stationarity_converge_hops", which lets the counter take
              * one extra step to stationarity_converge_hops + 1 before the
              * guard stops firing -- one more than this comment's own claimed
@@ -2409,7 +2409,7 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      *    stashed on a->post.trace during aec3_post_run; everything else is
      *    re-read here from the AEC3 sub-module accessors.
      *
-     * Whole block compiled out under AEC_NO_STDIO (round-3 review B03):
+     * Whole block compiled out under AEC_NO_STDIO:
      * aec_debug_trace_active()/aec_debug_trace_row() are runtime-gated only
      * (a single NULL-FILE* test), which still pulls in aec_debug.o's
      * fprintf/vfprintf/stderr references for board/no-stdio builds even

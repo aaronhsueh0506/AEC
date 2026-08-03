@@ -130,7 +130,7 @@ typedef struct PBFDAF {
     float*  scr_e2;            /* [n_freqs] pbfdaf_get_error_energy |error_spec|**2 --
                                  * ALSO pbfdaf_frontend's far_spec cmag2 scratch (far_psd_sum
                                  * + cold-start/EMA power update), reused across the two
-                                 * phases -- round-4 review D2: frontend fully writes-then-
+                                 * phases -- frontend fully writes-then-
                                  * consumes it within its own call, and get_error_energy fully
                                  * overwrites-then-reads it within its own call (its only
                                  * caller, aec.c step 13, runs strictly after that hop's

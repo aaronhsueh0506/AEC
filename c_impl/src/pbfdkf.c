@@ -203,7 +203,7 @@ int pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
     p->scr_ir       = (float*)malloc((size_t)p->n_partitions * (size_t)p->hop_size * sizeof(float));
     p->scr_e2       = (float*)malloc((size_t)p->n_freqs * sizeof(float));
 
-    /* F04 (round-4 review D1, extending the existing fft_create() OOM
+    /* F04 (extending the existing fft_create() OOM
      * convention to every malloc'd/calloc'd scratch field above): any of
      * these can return NULL under real OOM, and pbfdaf_fill_windows() below
      * writes straight through p->td_window/p->sqrt_hann unconditionally --
@@ -434,7 +434,7 @@ static float pbfdaf_frontend(PBFDAF* p,
      * branches just below, which already call these sk_ kernels on this same
      * far_spec array.
      *
-     * Round-4 review D2: borrows p->scr_e2 (normally
+     * Borrows p->scr_e2 (normally
      * pbfdaf_get_error_energy's |error_spec|^2 scratch) instead of a
      * dedicated scr_far_cmag2 field -- cross-phase reuse, safe because this
      * whole computation (write far_cmag2, read it twice below) is fully
@@ -713,7 +713,7 @@ int pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
     p->scr_X2       = (float*)malloc((size_t)K * sizeof(float));
     p->scr_mu_aec3  = (float*)malloc((size_t)K * sizeof(float));
 
-    /* F04 (round-4 review D1): pbfdkf_init_scalars() below writes straight
+    /* F04: pbfdkf_init_scalars() below writes straight
      * through p->Q_high[k]/Q_low[k]/.../e2_coarse_per_bin[k] unconditionally
      * -- any NULL among the 12 mallocs above would be an immediate NULL-deref
      * crash right there, not just on some later process() call. Check every

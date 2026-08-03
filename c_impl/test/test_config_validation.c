@@ -17,9 +17,9 @@
  * and STATIC_MEMORY.md documents the manual gcc recipe below as the real
  * way to build it. (test_static_aec.c used to carry a stale comment
  * claiming a top-level `make` target wired this in; that comment has since
- * been removed, re-review round-3 R04 -- this note's own description of the
- * actual (unwired) state was already correct and is unchanged.) This test
- * mirrors that same manual recipe:
+ * been removed -- this note's own description of the actual (unwired)
+ * state was already correct and is unchanged.) This test mirrors that same
+ * manual recipe:
  *   make -C ../../audio_common BACKEND=kiss lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audio_common/include \

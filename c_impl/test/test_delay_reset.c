@@ -1,4 +1,4 @@
-/* test_delay_reset.c — Codex review regression test (2026-08-03): verify
+/* test_delay_reset.c — regression test: verify
  * delay_aec3_reset() clears the delay estimator's ENTIRE 48kHz signal chain
  * consistently -- both the OUTER DaResample48 anti-alias sidechain (filter
  * state + decimation phase) AND the INNER DaEstimator's decimators / ring
@@ -7,7 +7,7 @@
  * Bug this guards against: reset() used to clear only the outer sidechain
  * (added alongside the sidechain itself), leaving the inner chain's biquad
  * memory / ring-buffer audio history / pending partial-block samples stale
- * -- a mixed fresh/stale reset (Codex finding). Call-site audit
+ * -- a mixed fresh/stale reset. Call-site audit
  * (delay_aec3_reset's only caller is aec_reset(), a full top-level
  * cold-start-style reset -- see aec.c / test_lifecycle.c / bench_rtf.c, NOT
  * a lightweight per-echo-path-change nudge) established that the correct
