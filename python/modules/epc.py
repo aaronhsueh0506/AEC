@@ -13,6 +13,7 @@ Self-contained: numpy + modules.dataclasses.
 """
 import numpy as np
 
+from . import aec3_scale as _aec3_scale
 from .dataclasses import AecEvent, AecEventType, EpcEvent, RegimeHandlerDecision
 
 
@@ -51,22 +52,43 @@ class EchoPathChangeDetector:
     State (private):
         _active            currently in EPC (firing or hangover)
         _hangover          remaining hangover frames
-        _epv_gain_fast     fast far-power EMA (TC ≈ 50 frames)
-        _epv_gain_slow     slow far-power EMA (TC ≈ 1000 frames)
+        _epv_gain_fast     fast far-power EMA (TC ≈ 50 frames @ legacy grid)
+        _epv_gain_slow     slow far-power EMA (TC ≈ 1000 frames @ legacy grid)
         _prev_total_err    last frame's main_err+shadow_err sum (for shadow_rise)
+
+    EPV_FAST_TC/EPV_SLOW_TC are per-hop RETENTION-convention EMA constants
+    (``fast <- EPV_FAST_TC*fast + (1-EPV_FAST_TC)*new`` -- the constant
+    multiplies the OLD state directly) authored at the legacy
+    hop=160/sample_rate=16000 (10 ms) grid (TC ~50/~1000 frames = ~500 ms/
+    ~10 s wall-clock) with zero rate conversion -- project-native, not
+    AEC3-sourced. hop_size/sample_rate were previously not parameters at
+    all (__init__ only took ``config``); retimed per-instance in __init__
+    below via ``aec3_scale.growth_rehop`` (a direct power law -- the
+    RETENTION convention here is the OPPOSITE of
+    ``per_block_ema_alpha_to_per_hop``'s AEC3 new-sample-weight form)
+    (2026-08 gap-fix) into ``self._epv_fast_tc``/``self._epv_slow_tc``,
+    which update_epv() reads instead of the class constants. Must match
+    epc_shadow.c's epc_init() (C side).
     """
     EPV_FAST_TC = 0.98
     EPV_SLOW_TC = 0.999
     EPV_LOW = 0.25
     EPV_HIGH = 4.0
 
-    def __init__(self, config: 'AecConfig'):
+    def __init__(self, config: 'AecConfig', *, hop_size: int = None,
+                 sample_rate: int = None):
         self.config = config
         self._active = False
         self._hangover = 0
         self._epv_gain_fast = 0.0
         self._epv_gain_slow = 0.0
         self._prev_total_err = 0.0
+        _hop = config.hop_size if hop_size is None else hop_size
+        _sr = config.sample_rate if sample_rate is None else sample_rate
+        self._epv_fast_tc = _aec3_scale.growth_rehop(
+            self.EPV_FAST_TC, 160, 16000, _hop, _sr)
+        self._epv_slow_tc = _aec3_scale.growth_rehop(
+            self.EPV_SLOW_TC, 160, 16000, _hop, _sr)
 
     def reset(self) -> None:
         self._active = False
@@ -89,10 +111,10 @@ class EchoPathChangeDetector:
         if self._epv_gain_fast < 1e-12:
             self._epv_gain_fast = self._epv_gain_slow = far_pwr_global
         else:
-            self._epv_gain_fast = (self.EPV_FAST_TC * self._epv_gain_fast
-                                   + (1 - self.EPV_FAST_TC) * far_pwr_global)
-            self._epv_gain_slow = (self.EPV_SLOW_TC * self._epv_gain_slow
-                                   + (1 - self.EPV_SLOW_TC) * far_pwr_global)
+            self._epv_gain_fast = (self._epv_fast_tc * self._epv_gain_fast
+                                   + (1 - self._epv_fast_tc) * far_pwr_global)
+            self._epv_gain_slow = (self._epv_slow_tc * self._epv_gain_slow
+                                   + (1 - self._epv_slow_tc) * far_pwr_global)
         if (filter_converged and not self._active and not main_paused
                 and self._epv_gain_slow > 1e-10):
             ratio = self._epv_gain_fast / (self._epv_gain_slow + 1e-10)

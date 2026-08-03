@@ -3,7 +3,7 @@
  * (mirrors test_config_validation.c / test_static_aec.c's own header
  * recipe) -- does NOT link into any Makefile target.
  *
- * Five checks, run at each of the four whitelisted grids
+ * Six checks, run at each of the four whitelisted grids
  * (8000/256, 16000/256, 16000/512, 48000/1024):
  *
  *   (a) COLA: the rate's own synthesis window (Aec3BalancedRateDims::
@@ -43,6 +43,23 @@
  *       at whichever fft_size happened to be the rate's *default*; this
  *       loops all four grids explicitly so a default flip can't silently
  *       leave the non-default grid's static path unchecked.
+ *
+ *   (d) top-level (non-AEC3) constant retiming (2026-08 gap-fix): proves
+ *       shadow_err_alpha / warmup_frames / epc_hangover / ne_recent_hold /
+ *       filter_misadjustment_{stable,hangover}_frames and EpcDetector's
+ *       EPV_FAST_TC/EPV_SLOW_TC now cover approximately the SAME
+ *       wall-clock duration at every grid -- these are project-native
+ *       (non-AEC3) constants that were literal hop counts / per-hop EMA
+ *       constants frozen at the legacy hop=160/sample_rate=16000 (10 ms)
+ *       grid with zero rate conversion, exactly the same bug class the
+ *       AEC3-internal per-block/hop-count constant audit fixed for
+ *       subband_erle/fullband_erle/etc, just missed in that pass because
+ *       these live in aec.c/epc_shadow.c/config.py/epc.py instead. Builds
+ *       via aec_config_from_preset() THEN overrides cfg.fft_size (mirrors
+ *       aec_wav.c's --fft-size flag) before aec_create() -- the exact
+ *       post-defaults grid-override path that forced retiming to live in
+ *       aec_carve() rather than aec_config_defaults() (see aec.c's
+ *       aec_legacy10ms_hops()/aec_legacy10ms_alpha() doc comment).
  *
  * Build (standalone, KISS FFT backend; from c_impl/):
  *   make -C ../../audio_common BACKEND=kiss lib
@@ -324,12 +341,103 @@ static void test_mem_size_consistency(void) {
     }
 }
 
+/* ── (d) top-level (non-AEC3) constant retiming (2026-08 gap-fix) ───────
+ * See file header comment. Legacy target: the wall-clock duration/TC each
+ * constant was authored to cover at the legacy hop=160/sample_rate=16000
+ * (10 ms) grid, before per-rate multi-grid support existed. A relative
+ * tolerance of 15% comfortably covers integer-hop-count rounding at the
+ * smallest field (epc_hangover, ~12-25 hops depending on grid) while
+ * still failing hard against the pre-fix bug class, where the SAME hop
+ * COUNT was frozen at every grid (e.g. warmup_frames=100 covered 0.8 s /
+ * 1.6 s / 1.067 s at 16k/256, 16k/512, 48k/1024 respectively -- up to 2x
+ * apart, far outside a 15% band). */
+static void check_close(const char *label, int sr, int fft, double actual_ms,
+                        double target_ms, double rel_tol) {
+    double rel_err = fabs(actual_ms - target_ms) / target_ms;
+    char what[192];
+    snprintf(what, sizeof(what),
+             "sr=%d fft=%d: %s wall-clock %.2f ms ~= legacy target %.2f ms (rel_err=%.4f <= %.2f)",
+             sr, fft, label, actual_ms, target_ms, rel_err, rel_tol);
+    CHECK(rel_err <= rel_tol, what);
+}
+
+static void test_top_level_constant_retiming(void) {
+    const double HOP_MS_TOL = 0.15;    /* integer-hop-count rounding budget */
+    const double ALPHA_TOL  = 0.01;    /* growth_rehop is continuous (no
+                                        * integer rounding), so this should
+                                        * be near-exact modulo float32 error */
+
+    for (int r = 0; r < N_GRIDS; ++r) {
+        int sr = GRIDS[r].sample_rate;
+        int fft = GRIDS[r].fft_size;
+
+        AecConfig cfg;
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        /* Post-defaults grid override -- mirrors aec_wav.c's --fft-size
+         * flag / this file's own (b)/(c)/(c2) pattern, and is exactly the
+         * path that forced retiming to live in aec_carve() rather than
+         * aec_config_defaults() (see aec.c's aec_legacy10ms_hops()/
+         * aec_legacy10ms_alpha() doc comment). */
+        cfg.fft_size = fft;
+
+        Aec aec;
+        char what[128];
+        int rc = aec_create(&aec, &cfg);
+        snprintf(what, sizeof(what), "sr=%d fft=%d: aec_create() for retiming test", sr, fft);
+        CHECK(rc == 0, what);
+        if (rc != 0) continue;
+
+        int hop = aec_hop_size(&aec);
+        double hop_ms = 1000.0 * hop / sr;
+
+        check_close("warmup_frames", sr, fft, aec.cfg.warmup_frames * hop_ms, 1000.0, HOP_MS_TOL);
+        check_close("epc_hangover", sr, fft, aec.cfg.epc_hangover * hop_ms, 200.0, HOP_MS_TOL);
+        check_close("ne_recent_hold", sr, fft, aec.cfg.ne_recent_hold * hop_ms, 1500.0, HOP_MS_TOL);
+        check_close("filter_misadjustment_stable_frames", sr, fft,
+                    aec.cfg.filter_misadjustment_stable_frames * hop_ms, 300.0, HOP_MS_TOL);
+        check_close("filter_misadjustment_hangover_frames", sr, fft,
+                    aec.cfg.filter_misadjustment_hangover_frames * hop_ms, 1000.0, HOP_MS_TOL);
+
+        /* Time-constant form (EMA "RETENTION" convention -- see
+         * aec3_growth_rehop's doc comment) for the three alpha-shaped
+         * constants: TC = -hop_seconds / ln(retention). Continuous (no
+         * integer rounding), so this should track the legacy target far
+         * tighter than the hop-count fields above. */
+        double tc_shadow = -(hop_ms / 1000.0) / log((double)aec.cfg.shadow_err_alpha) * 1000.0;
+        check_close("shadow_err_alpha (TC)", sr, fft, tc_shadow, 44.82, ALPHA_TOL);
+
+        double tc_fast = -(hop_ms / 1000.0) / log((double)aec.epc.epv_fast_tc) * 1000.0;
+        check_close("EPV_FAST_TC (TC)", sr, fft, tc_fast, 495.0, ALPHA_TOL);
+
+        double tc_slow = -(hop_ms / 1000.0) / log((double)aec.epc.epv_slow_tc) * 1000.0;
+        check_close("EPV_SLOW_TC (TC)", sr, fft, tc_slow, 9995.0, ALPHA_TOL);
+
+        aec_destroy(&aec);
+    }
+
+    /* ne_recent_sustain: genuine consecutive-event count, NOT a duration --
+     * confirm it stays the untouched literal 3 at every grid (the negative
+     * space of this test: proving it was correctly left OUT of the
+     * retiming batch, not merely that it wasn't exercised above). */
+    for (int r = 0; r < N_GRIDS; ++r) {
+        AecConfig cfg;
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, GRIDS[r].sample_rate);
+        cfg.fft_size = GRIDS[r].fft_size;
+        char what[128];
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: ne_recent_sustain stays literal 3 (event count, not retimed)",
+                 GRIDS[r].sample_rate, GRIDS[r].fft_size);
+        CHECK(cfg.ne_recent_sustain == 3, what);
+    }
+}
+
 int main(void) {
     test_cola();
     test_impulse_linear_path();
     test_impulse_res_enabled();
     test_static_pool_matches_heap();
     test_mem_size_consistency();
+    test_top_level_constant_retiming();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

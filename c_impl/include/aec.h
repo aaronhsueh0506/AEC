@@ -56,12 +56,16 @@ typedef struct AecConfig {
      * externally. Default 0 (memset) → production cascade untouched. */
     int    return_res_context;     /* 0 */
 
-    /* scalar tunables (balanced base) */
-    float  shadow_err_alpha;       /* 0.80 */
+    /* scalar tunables (balanced base). shadow_err_alpha/warmup_frames/
+     * epc_hangover are wall-clock-authored at the legacy hop=160/sr=16000
+     * (10 ms) grid and retimed live for the real grid in
+     * aec_config_defaults() (2026-08 gap-fix) -- the values in comments
+     * below are the legacy-grid figures, not necessarily today's default. */
+    float  shadow_err_alpha;       /* 0.80 @ 10 ms hop */
     float  shadow_mu_min;          /* 0.5  */
     float  shadow_mu_nlms;         /* 0.5  */
-    int    warmup_frames;          /* 100  */
-    int    epc_hangover;           /* 20   */
+    int    warmup_frames;          /* 100 hops = 1000 ms @ 10 ms hop */
+    int    epc_hangover;           /* 20 hops = 200 ms @ 10 ms hop */
     float  epc_total_rise;         /* 1.5  */
     float  epc_delta_threshold;    /* 0.3  */
     float  epc_mu_floor;           /* 0.5  */
@@ -93,19 +97,25 @@ typedef struct AecConfig {
     float  min_gain_floor_dt_db;              /* -16.0 — DT floor (dB) */
     /* ne_recent gate parameters (mirror AecConfig.ne_recent_*). threshold is
      * float32-by-design (Python bit-exact parity retired; f32/f64 drift
-     * across this threshold is accepted). */
+     * across this threshold is accepted). ne_recent_hold is wall-clock-
+     * authored @ 10 ms hop and retimed live (2026-08 gap-fix);
+     * ne_recent_sustain is a genuine consecutive-event count (NOT a
+     * duration) and is intentionally left unretimed -- see
+     * aec_config_defaults(). */
     float  ne_recent_threshold;               /* 0.3 */
-    int    ne_recent_hold;                    /* 150 */
-    int    ne_recent_sustain;                 /* 3 */
+    int    ne_recent_hold;                    /* 150 hops = 1500 ms @ 10 ms hop */
+    int    ne_recent_sustain;                 /* 3 (event count, not retimed) */
 
     /* preset strength axis (the ONLY field mild/balanced/aggressive differ
      * in): SuppressionGain far-active min-gain floor in dB
      * (mild -20 / balanced -28 / aggressive -38). */
     float  min_gain_floor_far_active_db;
 
-    /* FilterMisadjustmentEstimator (AEC3 ScaleFilter) */
-    int    filter_misadjustment_stable_frames;   /* 30  */
-    int    filter_misadjustment_hangover_frames;  /* 100 */
+    /* FilterMisadjustmentEstimator (AEC3 ScaleFilter). stable/hangover_frames
+     * are wall-clock-authored @ 10 ms hop and retimed live (2026-08 gap-fix,
+     * see aec_config_defaults()). */
+    int    filter_misadjustment_stable_frames;   /* 30 hops = 300 ms @ 10 ms hop */
+    int    filter_misadjustment_hangover_frames;  /* 100 hops = 1000 ms @ 10 ms hop */
     float  filter_misadjustment_scale_min;        /* 0.5 */
     float  filter_misadjustment_scale_max;        /* 2.0 */
 } AecConfig;

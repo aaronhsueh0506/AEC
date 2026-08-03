@@ -33,6 +33,46 @@
 
 /* ───────────────────────── config ──────────────────────────────────────── */
 
+/* Top-level (non-AEC3) constant retiming helpers (2026-08 gap-fix, follow-up
+ * to the AEC3-internal per-block/hop-count constant audit). shadow_err_alpha,
+ * warmup_frames, epc_hangover, ne_recent_hold and the two
+ * filter_misadjustment_*_frames fields (AecConfig, aec.h) were literal hop
+ * counts / per-hop EMA alphas frozen at the legacy hop=160/sample_rate=16000
+ * (10 ms) grid that predates this repo's own multi-rate history, with zero
+ * rate conversion when the 16 kHz default flipped to 8 ms hop (2026-08-01)
+ * or at 8/48 kHz. Retime via aec3_ms_to_hops()/aec3_growth_rehop() so they
+ * cover approximately the same wall-clock duration at every grid; fall back
+ * to the exact pre-fix literal (legacy_ms/10, alpha unscaled) if hop
+ * resolved to 0 (an unrecognized/invalid sample_rate -- aec_validate_config's
+ * whitelist rejects this before aec_carve ever reads it). shadow_err_alpha
+ * uses the RETENTION convention (x <- alpha*x_old + (1-alpha)*new -- see
+ * this file's actual smoothing formula), so aec3_growth_rehop (a direct
+ * power law), NOT aec3_per_block_ema_alpha_to_per_hop's "1-(1-a)^ratio"
+ * AEC3-new-sample-weight form, is the correct helper here.
+ *
+ * CALLED FROM aec_carve() (construction time), NOT aec_config_defaults():
+ * aec_config_defaults() only knows the DEFAULT fft_size for a given
+ * sample_rate, but a caller may override cfg.fft_size afterward (e.g.
+ * aec_wav.c's --fft-size flag) before ever calling aec_create()/aec_init() --
+ * aec_carve() is the one place guaranteed to see the FINAL resolved hop
+ * (aec_derive_dims() re-derives it from cfg->fft_size on every call), so
+ * retiming there (into a->cfg, the carved instance's own copy -- the
+ * caller's original cfg is left untouched) cannot go stale the way baking
+ * it into aec_config_defaults() would. Must match config.py's
+ * AecConfig.__post_init__ (Python side has no equivalent post-construction
+ * grid-override path -- see that file's own comment for why the two sides
+ * differ here). */
+static int aec_legacy10ms_hops(float legacy_ms, int hop, int sample_rate) {
+    return (hop > 0 && sample_rate > 0)
+        ? aec3_ms_to_hops(legacy_ms, hop, sample_rate)
+        : (int)lrintf(legacy_ms / 10.0f);
+}
+static float aec_legacy10ms_alpha(float legacy_alpha, int hop, int sample_rate) {
+    return (hop > 0 && sample_rate > 0)
+        ? aec3_growth_rehop(legacy_alpha, 160, 16000, hop, sample_rate)
+        : legacy_alpha;
+}
+
 void aec_config_defaults(AecConfig* cfg, int sr) {
     memset(cfg, 0, sizeof(*cfg));
     cfg->sample_rate = sr;
@@ -59,6 +99,20 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->enable_shadow = 1;
     cfg->enable_res = 1;
     cfg->saturation_softclip_ref = 1;
+    /* shadow_err_alpha/warmup_frames/epc_hangover/ne_recent_hold/
+     * filter_misadjustment_{stable,hangover}_frames below are set here to
+     * their RAW legacy-hop=160/sample_rate=16000 (10 ms) literals -- NOT
+     * retimed at this point. aec_config_defaults() only knows the DEFAULT
+     * fft_size for `sr`; a caller MAY still override cfg.fft_size afterward
+     * (e.g. aec_wav.c's --fft-size flag, test_rate_structural.c's alternate
+     * 16000/512 grid selection) before ever calling aec_create()/aec_init(),
+     * so retiming here against the (possibly stale) default fft_size would
+     * silently freeze the wrong grid. The actual retiming happens exactly
+     * once, in aec_carve() (2026-08 gap-fix), against the FINAL resolved
+     * hop derived from cfg->fft_size at construction time -- see that
+     * function's own comment. Must match config.py's AecConfig.__post_init__
+     * (Python side has no equivalent post-construction grid-override path;
+     * see that file's own comment for why the two sides differ here). */
     cfg->shadow_err_alpha = 0.80f;
     cfg->shadow_mu_min = 0.5f;
     cfg->shadow_mu_nlms = 0.5f;
@@ -90,6 +144,10 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->min_gain_floor_dt_db = -16.0f;
     cfg->ne_recent_threshold = 0.3f;   /* float32-by-design (Python bit-exact parity retired) */
     cfg->ne_recent_hold = 150;
+    /* ne_recent_sustain: genuine event count (consecutive near-end-active
+     * hops required to ARM the hold above, not a duration itself) --
+     * intentionally left unretimed. Out of scope for this pass regardless
+     * (not part of the audited constant batch). */
     cfg->ne_recent_sustain = 3;
     cfg->min_gain_floor_far_active_db = -28.0f;   /* balanced */
     cfg->filter_misadjustment_stable_frames = 30;
@@ -816,6 +874,25 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->hop_size = hop; a->block_size = blk; a->fft_size = fft;
     a->n_freqs = K; a->n_partitions = np;
 
+    /* Retime the top-level (non-AEC3) wall-clock-authored constants against
+     * the FINAL resolved (hop, cfg->sample_rate) grid (2026-08 gap-fix) --
+     * see aec_legacy10ms_hops()/aec_legacy10ms_alpha()'s doc comment for why
+     * this must happen here (aec_carve, construction time) rather than in
+     * aec_config_defaults(). Mutates a->cfg (the carved instance's own
+     * copy) only -- the caller's original *cfg is left untouched. Every
+     * downstream reader of these six fields in this file already reads
+     * a->cfg.* except the three call sites immediately below (epc_init/
+     * shadow_copy_init/warmup_frames_remaining init), updated alongside
+     * this to read a->cfg.* too so they see the retimed value. */
+    a->cfg.shadow_err_alpha = aec_legacy10ms_alpha(cfg->shadow_err_alpha, hop, cfg->sample_rate);
+    a->cfg.warmup_frames = aec_legacy10ms_hops((float)cfg->warmup_frames * 10.0f, hop, cfg->sample_rate);
+    a->cfg.epc_hangover = aec_legacy10ms_hops((float)cfg->epc_hangover * 10.0f, hop, cfg->sample_rate);
+    a->cfg.ne_recent_hold = aec_legacy10ms_hops((float)cfg->ne_recent_hold * 10.0f, hop, cfg->sample_rate);
+    a->cfg.filter_misadjustment_stable_frames = aec_legacy10ms_hops(
+        (float)cfg->filter_misadjustment_stable_frames * 10.0f, hop, cfg->sample_rate);
+    a->cfg.filter_misadjustment_hangover_frames = aec_legacy10ms_hops(
+        (float)cfg->filter_misadjustment_hangover_frames * 10.0f, hop, cfg->sample_rate);
+
     /* inst-ERLE slope ring cap = Python _slope_n = max(2, int(0.5*sr/hop)),
      * clamped to the static array size. (orchestrator.py:649) */
     {
@@ -909,8 +986,9 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     render_activity_init(&a->render_activity, a->ra_pairwise_scratch, (hop + 7) / 8);
     filter_convergence_init(&a->convergence);
     doubletalk_init(&a->dt_analyzer, 1.5, 3.0);
-    epc_init(&a->epc, cfg->epc_hangover, cfg->epc_total_rise, cfg->epc_delta_threshold);
-    shadow_copy_init(&a->regime, SC_GATE_ENERGY, 0.65, 3, cfg->epc_hangover);
+    epc_init(&a->epc, a->cfg.epc_hangover, cfg->epc_total_rise, cfg->epc_delta_threshold,
+             hop, cfg->sample_rate);
+    shadow_copy_init(&a->regime, SC_GATE_ENERGY, 0.65, 3, a->cfg.epc_hangover);
     rsa_init(&a->rsa, a->rsa_counters, K, np);
 
     /* FFT handle */
@@ -1243,7 +1321,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->erle_window_near = 1e-10f; a->erle_window_err = 1e-10f;
     a->erle_factor_prev = 0.0f; a->inst_erle_smooth = 1.0f;
     a->wn_err_baseline = 1e-8f; a->stat_dt_hangover = 0;
-    a->warmup_frames_remaining = cfg->warmup_frames; a->warmup_far_active = 0;
+    a->warmup_frames_remaining = a->cfg.warmup_frames; a->warmup_far_active = 0;
     a->simple_mu_ratio = 1.0f; a->simple_mu_holdoff = 0; a->has_per_bin_mu = 0;
     a->limiter_gain = 1.0f; a->has_limiter_lag = 0;
     a->near_power = 0.0f; a->raw_error_power = 0.0f; a->alpha_pow = 0.95f;

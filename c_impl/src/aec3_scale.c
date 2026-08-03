@@ -81,3 +81,11 @@ float aec3_per_block_growth_to_per_hop(float per_block_multiplier,
     float hop_seconds = (float)hop_samples / (float)sample_rate;
     return powf(per_block_multiplier, hop_seconds / block_seconds);
 }
+
+float aec3_growth_rehop(float retention_at_ref, int ref_hop_samples,
+                        int ref_sample_rate, int hop_samples,
+                        int sample_rate) {
+    float ref_seconds = (float)ref_hop_samples / (float)ref_sample_rate;
+    float hop_seconds = (float)hop_samples / (float)sample_rate;
+    return powf(retention_at_ref, hop_seconds / ref_seconds);
+}

@@ -567,7 +567,7 @@ static void section_epc_shadow(void) {
     ShadowCopy s;
     int i;
 
-    epc_init(&e, /*hangover=*/7, 2.0f, 0.5f);
+    epc_init(&e, /*hangover=*/7, 2.0f, 0.5f, /*hop_size=*/160, /*sample_rate=*/16000);
     epc_force_delay(&e);
     CHECK(e.active == 1 && e.hangover == 7, "EpcDetector: force_delay arms hangover");
     /* epc_tick_hangover decrements-then-stays-active on each call where

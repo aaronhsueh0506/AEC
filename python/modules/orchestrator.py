@@ -616,8 +616,12 @@ class AEC:
                 )
             self.shadow_filter._saturated_capture = False
 
-        # Echo path change detector (owns active/hangover/EPV-EMAs/prev_total_err)
-        self._epc_det = EchoPathChangeDetector(self.config)
+        # Echo path change detector (owns active/hangover/EPV-EMAs/prev_total_err).
+        # hop_size/sample_rate passed through explicitly (2026-08 gap-fix) so
+        # EPV_FAST_TC/EPV_SLOW_TC retime for the real grid -- see epc.py.
+        self._epc_det = EchoPathChangeDetector(
+            self.config, hop_size=self.config.hop_size,
+            sample_rate=self.config.sample_rate)
 
         # Misadjustment estimator state (always live in production).
         self._misadjustment_stable_count = 0

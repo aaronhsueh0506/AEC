@@ -215,6 +215,32 @@ def per_block_growth_to_per_hop(per_block_multiplier: float,
     return per_block_multiplier ** (hop_seconds / block_seconds)
 
 
+def growth_rehop(retention_at_ref: float, ref_hop_samples: int, ref_sample_rate: int,
+                 hop_samples: int, sample_rate: int) -> float:
+    """Generalizes ``per_block_growth_to_per_hop``'s fixed AEC3-4ms-block
+    reference to an ARBITRARY reference grid (``ref_hop_samples`` @
+    ``ref_sample_rate``).
+
+    For PROJECT-NATIVE (non-AEC3) per-hop RETENTION-convention EMA constants
+    -- i.e. ones whose update is literally ``x <- retention * x + (1 -
+    retention) * new`` (the constant multiplies the OLD state directly; this
+    is the OPPOSITE convention from ``per_block_ema_alpha_to_per_hop``'s AEC3
+    ``x <- (1-a)*x + a*new``, where ``a`` multiplies the NEW sample) --
+    authored against this repo's own legacy hop=160/sample_rate=16000
+    (10 ms) default, the implicit single-grid assumption that predates
+    per-rate multi-grid support, with zero rate conversion (e.g.
+    ``AecConfig.shadow_err_alpha``, ``EchoPathChangeDetector.EPV_FAST_TC``/
+    ``EPV_SLOW_TC``).
+
+    Same power-law derivation as ``per_block_growth_to_per_hop``::
+
+        retention_new = retention_at_ref ^ (hop_seconds / ref_seconds)
+    """
+    ref_seconds = ref_hop_samples / float(ref_sample_rate)
+    hop_seconds = hop_samples / float(sample_rate)
+    return retention_at_ref ** (hop_seconds / ref_seconds)
+
+
 # ── Pre-converted AEC3 constants (16 kHz, hop_size 160 reference) ──
 # These are the canonical float-scale values used across Phase B/C ports.
 # At non-default hop_size, derive at runtime via blocks_to_hops() etc.

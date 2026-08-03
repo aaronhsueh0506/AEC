@@ -4,17 +4,32 @@
  * All scalar math float32 (float32-by-design) + ints.
  */
 #include "epc_shadow.h"
+#include "aec3_scale.h"
 #include <math.h>
 
 /* ── EchoPathChangeDetector ───────────────────────────────────── */
 
+/* Legacy-grid EPV time constants (TC ~50 frames / ~1000 frames @ the legacy
+ * hop=160/sample_rate=16000 = 10 ms hop, i.e. ~500 ms / ~10 s wall-clock).
+ * Project-native (NOT AEC3-sourced), authored before per-rate multi-grid
+ * support existed, with zero rate conversion. Both use the RETENTION
+ * convention (epc_update_epv(): ``fast <- EPV_FAST_TC*fast + (1-EPV_FAST_TC)
+ * *new`` -- the constant multiplies the OLD state directly), so
+ * aec3_growth_rehop (a direct power law), NOT
+ * aec3_per_block_ema_alpha_to_per_hop's AEC3-new-sample-weight form, is the
+ * correct helper. epc_init() retimes these into each EpcDetector instance's
+ * epv_fast_tc/epv_slow_tc via aec3_growth_rehop() (2026-08 gap-fix) so the
+ * wall-clock envelopes match at every grid; epc_update_epv() reads the
+ * retimed per-instance fields, NOT these module constants directly. Must
+ * match epc.py's EchoPathChangeDetector.EPV_FAST_TC/EPV_SLOW_TC (Python
+ * side). */
 static const float EPV_FAST_TC = 0.98f;
 static const float EPV_SLOW_TC = 0.999f;
 static const float EPV_LOW     = 0.25f;
 static const float EPV_HIGH    = 4.0f;
 
 void epc_init(EpcDetector* e, int hangover, float total_rise,
-                 float delta_threshold) {
+                 float delta_threshold, int hop_size, int sample_rate) {
     e->active        = 0;
     e->hangover      = 0;
     e->epv_gain_fast = 0.0f;
@@ -23,6 +38,16 @@ void epc_init(EpcDetector* e, int hangover, float total_rise,
     e->epc_hangover  = hangover;
     e->epc_total_rise = total_rise;
     e->epc_delta_threshold = delta_threshold;
+    if (hop_size > 0 && sample_rate > 0) {
+        e->epv_fast_tc = aec3_growth_rehop(EPV_FAST_TC, 160, 16000, hop_size, sample_rate);
+        e->epv_slow_tc = aec3_growth_rehop(EPV_SLOW_TC, 160, 16000, hop_size, sample_rate);
+    } else {
+        /* Invalid/unrecognized grid: fall back to the exact pre-fix
+         * (unscaled) literals rather than divide-by-zero inside the rehop
+         * helper -- mirrors aec.c's aec_legacy10ms_* fallback. */
+        e->epv_fast_tc = EPV_FAST_TC;
+        e->epv_slow_tc = EPV_SLOW_TC;
+    }
 }
 void epc_reset(EpcDetector* e) {
     e->active = 0; e->hangover = 0;
@@ -44,10 +69,10 @@ EpcEvent epc_update_epv(EpcDetector* e, float far_pwr_global,
     if (e->epv_gain_fast < 1e-12f) {
         e->epv_gain_fast = e->epv_gain_slow = far_pwr_global;
     } else {
-        e->epv_gain_fast = EPV_FAST_TC * e->epv_gain_fast
-                         + (1.0f - EPV_FAST_TC) * far_pwr_global;
-        e->epv_gain_slow = EPV_SLOW_TC * e->epv_gain_slow
-                         + (1.0f - EPV_SLOW_TC) * far_pwr_global;
+        e->epv_gain_fast = e->epv_fast_tc * e->epv_gain_fast
+                         + (1.0f - e->epv_fast_tc) * far_pwr_global;
+        e->epv_gain_slow = e->epv_slow_tc * e->epv_gain_slow
+                         + (1.0f - e->epv_slow_tc) * far_pwr_global;
     }
     if (filter_converged && !e->active && !main_paused
         && e->epv_gain_slow > 1e-10f) {

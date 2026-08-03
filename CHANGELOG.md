@@ -16,6 +16,106 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-03 (追加2) — top-level (non-AEC3) hop-authored constant audit: the batch the AEC3-internal audit missed
+
+Follow-up to the AEC3 per-block/hop-count constant audit two entries below.
+That pass covered constants ported FROM AEC3 (per-4ms-block leakage rates,
+ERLE/ERL alphas, stationarity alphas, ...); a reviewer found it missed a
+second class living in the same files: **top-level, project-native**
+constants (never sourced from AEC3 at all) that were literal hop counts /
+per-hop EMA constants frozen at the legacy hop=160/sample_rate=16000 (10 ms)
+grid that predates this repo's own multi-rate history, with zero rate
+conversion when the 16 kHz default flipped to 8 ms hop (2026-08-01) or at
+8/48 kHz — the exact same bug class, just outside the AEC3-ported set the
+first audit scoped to.
+
+**Retimed (wall-clock durations — AecConfig, `aec.c`/`config.py`):**
+`shadow_err_alpha` (0.80, main/shadow error-energy smoothing — EMA lag
+~44.8 ms), `warmup_frames` (100 hops = 1000 ms Kalman-Q warm-up window),
+`epc_hangover` (20 hops = 200 ms EPC-active hold), `ne_recent_hold` (150
+hops = 1500 ms "near-end seen recently" hold), `filter_misadjustment_
+stable_frames` (30 hops = 300 ms required pre-fire stability window) and
+`filter_misadjustment_hangover_frames` (100 hops = 1000 ms post-fire
+hold-off). Also **`EchoPathChangeDetector.EPV_FAST_TC`/`EPV_SLOW_TC`**
+(0.98/0.999, `epc.py`/`epc_shadow.c` — fast/slow far-power EMAs feeding the
+EPV echo-path-change trigger; TC ≈ 495 ms / 9995 ms at the legacy grid).
+
+**Left alone (genuine event counts, NOT durations — no rate conversion
+applies):** `ne_recent_sustain` (3 — consecutive near-end-active hops
+required to ARM the `ne_recent_hold` timer above; the counted "event" is a
+per-hop occurrence, not an elapsed-time proxy, and it's a small fixed
+debounce, not a window). Each retimed-vs-left-alone call is justified by
+tracing every read site of the field, not just its name (`ne_recent_hold`
+and `ne_recent_sustain` sit right next to each other in config.py and read
+very similarly by name alone — only the usage sites disambiguate).
+
+**Math correction caught mid-implementation**: `shadow_err_alpha` and
+`EPV_FAST_TC`/`EPV_SLOW_TC` all use the update `x <- c*x_old + (1-c)*new`
+— the constant `c` multiplies the OLD state directly (a RETENTION
+convention). This is the OPPOSITE of AEC3's own convention that
+`aec3_per_block_ema_alpha_to_per_hop` assumes (`x <- (1-a)*x + a*new`,
+where `a` multiplies the NEW sample). Applying the existing AEC3-style
+helper to a retention-convention constant silently retimes it
+**backwards** (verified: it produced smaller per-hop retention at a
+*shorter* hop, when a shorter hop needs *larger* per-hop retention to
+match the same wall-clock decay). Added a new, correctly-generalized
+helper instead of reusing the mismatched one — `aec3_growth_rehop()` /
+`growth_rehop()` (`aec3_scale.c`/`.h`/`.py`), which generalizes the
+existing `aec3_per_block_growth_to_per_hop` (already a direct power law,
+already the right convention) from its hardcoded AEC3 4 ms block reference
+to an arbitrary reference period (our legacy hop=160/sample_rate=16000).
+No new conversion *mechanism* — same power-law derivation, parameterized
+reference.
+
+**`epc_init()` signature change (C)**: `EPV_FAST_TC`/`EPV_SLOW_TC` live as
+module-level `static const float` in `epc_shadow.c`, so retiming them
+per-instance required a real place to store the retimed values and a real
+grid to retime against — `epc_init(EpcDetector*, int hangover, float
+total_rise, float delta_threshold)` gained two new trailing parameters,
+`int hop_size, int sample_rate`, and `EpcDetector` gained two new fields,
+`float epv_fast_tc, epv_slow_tc` (computed once at `epc_init()` time,
+config-slice semantics — not touched by `epc_reset()`). Both call sites
+updated: `aec.c`'s `aec_carve()` (passes the real carve-time grid) and
+`test_counter_saturation.c`'s `section_epc_shadow` (passes the legacy
+160/16000 — that test only exercises hangover countdown, not EPV).
+Python's `EchoPathChangeDetector.__init__` gained the same two (optional,
+keyword-only) parameters, defaulting to `config.hop_size`/
+`config.sample_rate` when omitted; its sole call site
+(`orchestrator.py`) now passes them explicitly.
+
+**A second, subtler bug found while wiring this up**: baking the
+AecConfig-level retiming into `aec_config_defaults()` (the natural-looking
+spot, alongside `filter_length`'s existing sr-based derivation) is wrong —
+`aec_wav.c`'s `--fft-size` flag (and `test_rate_structural.c`'s own
+alternate-grid selection) overrides `cfg.fft_size` *after*
+`aec_config_from_preset()` returns, so retiming against the default-grid
+hop at that point freezes the wrong grid the moment a caller picks the
+non-default 16 kHz/512 grid. Retiming instead happens once, in
+`aec_carve()` (construction time, when `aec_derive_dims()` has already
+re-resolved `hop` from the FINAL `cfg->fft_size`), writing into `a->cfg`
+(the carved instance's own copy) — the caller's original `AecConfig` is
+left untouched. Python has no equivalent post-construction grid-override
+call site (`__post_init__` runs once, immediately, and no code in this
+repo mutates `frame_size`/`hop_size` afterward), so `AecConfig.__post_init__`
+remains the correct, single retiming point on that side.
+
+**Tests**: `c_impl/test/test_rate_structural.c` gained a sixth check,
+`test_top_level_constant_retiming` (40 new assertions across all four
+grids, exercising the exact post-defaults `cfg.fft_size` override path
+above), and a new `python/test_hop_authored_timing_parity.py` (9 tests).
+Both mutation-tested (reverting the C `aec_carve()` retiming block, the C
+`epc_init()` EPV retiming, and the Python `__post_init__` retiming each
+independently, confirming the new tests fail without the fix and pass with
+it). Verified end-to-end: `make selftest` and `make test-counter-saturation`
+(12017/12017) unaffected; `parity_aec_e2e` PASS at all three rates (8/16/48 kHz,
+within existing tolerance — a genuine behavior change, not byte-equal:
+16 kHz linear-path max diff 1.3e-5, post-chain max diff 1.9e-4, both well
+inside the 2.0e-2 gate); `aec_wav` runs end-to-end on a real 800-case clip at
+both the default and `--fft-size 512`-overridden grid; Python smoke test
+(construct `AEC` + run 50 random hops) finite at all three grids.
+
+`__version__` not bumped, same batching rationale as the two entries below.
+
 ## [Unreleased] — 2026-08-03 — Native 8 kHz delay-estimator timing fix (C) + Python 48 kHz anti-alias sidechain port + e2e-golden hop-drift fix
 
 **C: `delay_aec3_init()` (`c_impl/src/delay_aec3.c`) was hardcoding the internal

@@ -7,6 +7,7 @@ NOSHIP flags are deleted entirely.
 """
 from dataclasses import dataclass, field
 
+from . import aec3_scale as _aec3_scale
 from .enums import AecMode, AecPreset
 
 
@@ -291,6 +292,10 @@ class AecConfig:
     # ── Shadow filter (dual-filter divergence control) ──────────────────
     enable_shadow: bool = True
     shadow_copy_threshold: float = 0.65
+    # Per-hop EMA alpha (EMA lag ~44.8 ms @ this literal's legacy hop=160/
+    # sample_rate=16000 = 10 ms grid) smoothing main/shadow error energies.
+    # Wall-clock-authored with zero rate conversion; retimed live in
+    # __post_init__ below (2026-08 gap-fix) -- see that block's comment.
     shadow_err_alpha: float = 0.80
     shadow_mu_min: float = 0.5
     shadow_copy_hysteresis: int = 3
@@ -301,6 +306,10 @@ class AecConfig:
 
     # ── Filter misadjustment estimator (AEC3 parity, INTERNAL tuning) ──
     # AEC3 inv_misadjustment over n-hop window; shrinks W on divergence.
+    # Both hop counts below are wall-clock-authored @ legacy hop=160/
+    # sample_rate=16000 (10 ms) grid (100 hops = 1000 ms hold-off,
+    # 30 hops = 300 ms required stability), zero rate conversion; retimed
+    # live in __post_init__ below (2026-08 gap-fix).
     filter_misadjustment_hangover_frames: int = 100
     filter_misadjustment_stable_frames: int = 30
     filter_misadjustment_scale_min: float = 0.5
@@ -310,11 +319,20 @@ class AecConfig:
     use_kalman: bool = True
     kalman_q_high: float = 1e-3
     kalman_q_low: float = 1e-6
+    # Warm-up hop count (80 hops = 800 ms @ legacy hop=160/sample_rate=16000
+    # = 10 ms grid); ``from_preset`` overrides this to 100 (=1000 ms) for
+    # every preset -- 100 is the actual production/live value, this 80 is
+    # only reachable via a bare ``AecConfig()``. Both are wall-clock-
+    # authored with zero rate conversion; retimed live in __post_init__
+    # below (2026-08 gap-fix).
     warmup_frames: int = 80
 
     # ── Echo-path-change detection (requires shadow) ────────────────────
     epc_delta_threshold: float = 0.3
     epc_total_rise: float = 1.5
+    # 20 hops = 200 ms @ legacy hop=160/sample_rate=16000 (10 ms) grid,
+    # zero rate conversion; retimed live in __post_init__ below (2026-08
+    # gap-fix).
     epc_hangover: int = 20
 
     # ── Delay estimation (matched-filter + ring buffer) ─────────────────
@@ -334,7 +352,12 @@ class AecConfig:
     # far-end single-talk (which never raises the near-end indicator, so its
     # recoveries stay aggressive and FS echo depth is preserved).
     ne_recent_threshold: float = 0.3
+    # 150 hops = 1500 ms @ legacy hop=160/sample_rate=16000 (10 ms) grid,
+    # zero rate conversion; retimed live in __post_init__ below (2026-08
+    # gap-fix).
     ne_recent_hold: int = 150
+    # Genuine consecutive-event count (near-end-active hops required to ARM
+    # the hold above), NOT a duration -- intentionally left unretimed.
     ne_recent_sustain: int = 3
     # Master switch for DT-aware soft recovery. When True, the delay/EPC
     # recovery triggers (Path A first-acquisition, Path B re-lock, EPV,
@@ -397,6 +420,45 @@ class AecConfig:
                 f"unsupported signal grid: sample_rate={self.sample_rate}, "
                 f"frame_size/fft_size={self.frame_size}"
             )
+
+        # Wall-clock-authored top-level (non-AEC3) constants (2026-08
+        # gap-fix, follow-up to the AEC3-internal per-block/hop-count
+        # constant audit). shadow_err_alpha / warmup_frames / epc_hangover /
+        # ne_recent_hold / filter_misadjustment_{stable,hangover}_frames
+        # were literal hop counts / per-hop EMA alphas frozen at the legacy
+        # hop=160/sample_rate=16000 (10 ms) grid that predates this repo's
+        # own multi-rate history, with zero rate conversion when the
+        # 16 kHz default flipped to 8 ms hop (2026-08-01) or at 8/48 kHz.
+        # Retimed here via aec3_scale.ms_to_hops()/growth_rehop() so they
+        # cover approximately the same wall-clock duration at every grid --
+        # applied to WHATEVER value ended up in the field, whether the
+        # dataclass default or an explicit constructor kwarg (e.g.
+        # ``from_preset``'s ``warmup_frames=100`` base override), since
+        # both were authored under the same frozen 10 ms assumption. A
+        # POST-CONSTRUCTION ``setattr(cfg, ...)`` mutation still bypasses
+        # this (same as frame_size/hop_size/filter_length above) and is
+        # honored verbatim. shadow_err_alpha uses the RETENTION convention
+        # (``alpha*old + (1-alpha)*new`` -- see orchestrator.py's actual
+        # smoothing formula), so ``growth_rehop`` (a direct power law), NOT
+        # ``per_block_ema_alpha_to_per_hop``'s AEC3-new-sample-weight form,
+        # is the correct helper here. Must match aec.c's
+        # aec_config_defaults() (C side).
+        self.shadow_err_alpha = _aec3_scale.growth_rehop(
+            self.shadow_err_alpha, 160, 16000, self.hop_size, self.sample_rate)
+        self.warmup_frames = _aec3_scale.ms_to_hops(
+            self.warmup_frames * 10.0, self.hop_size, self.sample_rate)
+        self.epc_hangover = _aec3_scale.ms_to_hops(
+            self.epc_hangover * 10.0, self.hop_size, self.sample_rate)
+        self.ne_recent_hold = _aec3_scale.ms_to_hops(
+            self.ne_recent_hold * 10.0, self.hop_size, self.sample_rate)
+        # ne_recent_sustain is a genuine consecutive-event count (NOT a
+        # duration -- see orchestrator.py's ``_ne_recent_frames`` gate) and
+        # is intentionally left unretimed; also out of scope for this pass
+        # (not part of the audited constant batch).
+        self.filter_misadjustment_stable_frames = _aec3_scale.ms_to_hops(
+            self.filter_misadjustment_stable_frames * 10.0, self.hop_size, self.sample_rate)
+        self.filter_misadjustment_hangover_frames = _aec3_scale.ms_to_hops(
+            self.filter_misadjustment_hangover_frames * 10.0, self.hop_size, self.sample_rate)
 
     @property
     def fft_size(self) -> int:

@@ -39,6 +39,22 @@ float  aec3_per_bin_psd_threshold(float calibrated_value, int hop_size, int ref_
 float  aec3_nl_r2_norm_power(int hop_size, int ref_hop);
 float  aec3_block_energy_scale(float value_int16sq, int hop_samples);
 float  aec3_per_block_growth_to_per_hop(float per_block_multiplier, int hop_samples, int sample_rate);
+/* Generalizes aec3_per_block_growth_to_per_hop's fixed AEC3-4ms-block
+ * reference to an ARBITRARY reference grid. For PROJECT-NATIVE (non-AEC3)
+ * per-hop RETENTION-convention EMA constants -- i.e. ones whose update is
+ * literally ``x <- retention * x + (1 - retention) * new`` (the constant
+ * multiplies the OLD state directly; this is the OPPOSITE convention from
+ * aec3_per_block_ema_alpha_to_per_hop's AEC3 ``x <- (1-a)x + a*new``, where a
+ * multiplies the NEW sample) -- authored against this repo's own legacy
+ * hop=160/sample_rate=16000 (10 ms) default, the implicit single-grid
+ * assumption that predates per-rate multi-grid support, with zero rate
+ * conversion (e.g. aec.c's shadow_err_alpha, epc_shadow.c's EPV_FAST_TC/
+ * EPV_SLOW_TC). Same power-law derivation as
+ * aec3_per_block_growth_to_per_hop (``g_per_hop = g_per_ref ^
+ * (hop_seconds/ref_seconds)``), parameterized reference period instead of
+ * the hardcoded AEC3 4 ms block. */
+float  aec3_growth_rehop(float retention_at_ref, int ref_hop_samples, int ref_sample_rate,
+                         int hop_samples, int sample_rate);
 
 /* ── Pre-converted constants (16 kHz, hop=160 reference) ───────────────────
  * Defined by their computing expression so they fold bit-identically to the
