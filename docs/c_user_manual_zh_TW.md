@@ -238,8 +238,8 @@ frame 嚴格等於 FFT、hop 為 frame/2，不做 zero-padding：
 | Sample rate / grid | Frame=FFT | Hop | Hop 時間 |
 |---:|---:|---:|---:|
 | 8 kHz | 256 | 128 | 16 ms |
-| 16 kHz（低算量） | 256 | 128 | 8 ms |
-| 16 kHz（預設） | 512 | 256 | 16 ms |
+| 16 kHz（預設） | 256 | 128 | 8 ms |
+| 16 kHz（可選） | 512 | 256 | 16 ms |
 | 48 kHz | 1024 | 512 | 10.667 ms |
 
 內部 analysis block 是兩個 hop，使用 50% overlap。啟用 residual suppression 時通常要把一個 hop 的 OLA 納入 latency budget；關閉 RES 後為線性路徑，沒有這段 post-filter OLA 延遲。

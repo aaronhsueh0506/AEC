@@ -9,7 +9,7 @@ AEC v3.22.5 · the freq-domain seam for swapping any post-linear stage with a le
 ## The shared grid (fixed per instance)
 All stages in one instance share a no-padding grid: **frame=FFT, hop=frame/2,
 sqrt-Hann periodic (COLA)**. Supported choices are 8k:256/128,
-16k:512/256 (default) or 256/128, and 48k:1024/512. A model MUST match the
+16k:256/128 (default) or 512/256, and 48k:1024/512. A model MUST match the
 selected instance grid; `n_freqs = fft/2+1` is therefore 129, 257, or 513.
 The grid cannot change mid-stream.
 

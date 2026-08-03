@@ -220,7 +220,7 @@ These cause correctness failures (not just style issues):
 | Sample rate | 8 / 16 / 48 kHz |
 | Bit depth | 16-bit PCM or 32-bit float |
 | Channels | mono |
-| Frame / hop | frame=FFT、hop=frame/2；8k 256/128、16k 512/256（可選256/128）、48k 1024/512 |
+| Frame / hop | frame=FFT、hop=frame/2；8k 256/128、16k 256/128（可選512/256）、48k 1024/512 |
 | Filter length | 52 ms @ 8/16 kHz；64 ms @ 48 kHz |
 
 ### 5.2 Prerequisites
@@ -357,7 +357,7 @@ samples each call.
 ```
 frame_size = fft_size; hop_size = fft_size / 2
 8 kHz          → 256 / 128
-16 kHz default → 512 / 256   (optional low grid: 256 / 128)
+16 kHz default → 256 / 128   (optional alternate grid: 512 / 256)
 48 kHz         → 1024 / 512
 ```
 
@@ -420,11 +420,11 @@ automatic:
 
 | Field | 8 kHz | 16 kHz | 48 kHz | Auto? |
 |---|---|---|---|---|
-| `hop_size` | 128 | 256（可選128） | 512 | ✓ (`fft/2`) |
-| `block_size` | 256 | 512（可選256） | 1024 | ✓ (`2 · hop`) |
-| `fft_size` | 256 | 512（可選256） | 1024 | ✓ (`block_size`，不補零) |
-| `n_freqs` | 129 | 257 default／129 low-grid | 513 | ✓ (`fft/2 + 1`) |
-| `n_partitions` | 4 (52 ms) | 4 default／7 low-grid (52 ms) | 6 (64 ms) | ✓ (`ceil(filter_length/hop)`) |
+| `hop_size` | 128 | 128（可選256） | 512 | ✓ (`fft/2`) |
+| `block_size` | 256 | 256（可選512） | 1024 | ✓ (`2 · hop`) |
+| `fft_size` | 256 | 256（可選512） | 1024 | ✓ (`block_size`，不補零) |
+| `n_freqs` | 129 | 129 default／257 alt-grid | 513 | ✓ (`fft/2 + 1`) |
+| `n_partitions` | 4 (52 ms) | 7 default／4 alt-grid (52 ms) | 6 (64 ms) | ✓ (`ceil(filter_length/hop)`) |
 | `ref_ring_size` | 16384 | 32768 | 98304 | ✓ (note 2) |
 | RES bin resolution | sr / blk | sr / blk | sr / blk | ✓ |
 | `filter_length` default duration | 52 ms | 52 ms | 64 ms (note 1) | ✗ user override |
