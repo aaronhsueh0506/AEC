@@ -588,8 +588,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench test-counter-saturation
-all bench test-counter-saturation:
+.PHONY: all bench test-counter-saturation test-rate-structural
+all bench test-counter-saturation test-rate-structural:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -691,6 +691,19 @@ BENCH_TARGET = $(BIN_DIR)/bench_rtf
 TEST_CS_SRCS   = $(TEST_DIR)/test_counter_saturation.c
 TEST_CS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_CS_SRCS))
 TEST_CS_TARGET = $(BIN_DIR)/test_counter_saturation
+
+# Permanent per-rate structural regression test (M5 multi-rate campaign,
+# review F01; formerly standalone-gcc-only -- Codex review 2026-08-04 found
+# it wasn't wired into any Makefile target, so a grid regression (e.g. the
+# hop-authored top-level constant retiming this test's check (d) covers)
+# could pass 107/107 by hand once and then silently break with no CI gate
+# noticing). Needs the full Aec type, same as TEST_CS_TARGET above -- reuses
+# the already-built $(OBJS) rather than test_rate_structural.c's own header
+# comment's standalone `$(find src -name '*.c')` recipe (that recipe predates
+# this Makefile wiring and remains valid for a from-scratch manual build).
+TEST_RS_SRCS   = $(TEST_DIR)/test_rate_structural.c
+TEST_RS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_RS_SRCS))
+TEST_RS_TARGET = $(BIN_DIR)/test_rate_structural
 
 # Standalone bit-exactness + microbench harness for the AEC-only kernel split
 # (aec_simd_kernels.h). Header-only + <math.h> -- no audio_common archive
@@ -816,7 +829,7 @@ $(TEST_DR_TARGET): $(TEST_DR_OBJS) | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -828,6 +841,10 @@ bench: $(BENCH_TARGET)
 # `make` recipes already run under.
 test-counter-saturation: $(TEST_CS_TARGET)
 	"$(abspath $(TEST_CS_TARGET))"
+
+# Builds AND runs, same convention as test-counter-saturation above.
+test-rate-structural: $(TEST_RS_TARGET)
+	"$(abspath $(TEST_RS_TARGET))"
 
 FORCE:
 
@@ -849,6 +866,10 @@ $(BENCH_TARGET): $(OBJS) $(BENCH_OBJS) $(AC_LIB) | _cfg_guard
 $(TEST_CS_TARGET): $(OBJS) $(TEST_CS_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_counter_saturation [$(BACKEND)] -> $@"
+
+$(TEST_RS_TARGET): $(OBJS) $(TEST_RS_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_rate_structural [$(BACKEND)] -> $@"
 endif
 
 # --- Query targets (round-3 review B01) -------------------------------------
@@ -1310,6 +1331,8 @@ help:
 	@echo "                  regression test (test_counter_saturation) -- run from c_impl/"
 	@echo "  test-delay-reset  Build + run the permanent delay_aec3_reset() consistency"
 	@echo "                  regression test (test_delay_reset) -- run from c_impl/"
+	@echo "  test-rate-structural  Build + run the permanent per-rate structural"
+	@echo "                  regression test (test_rate_structural) -- run from c_impl/"
 	@echo "  debug   Build with -g -DAEC_DEBUG"
 	@echo "  publish Copy this build's artifacts to dist/<backend>/<config-hash>/ + update dist/<backend>/current"
 	@echo "  audit-no-stdio  Build lib with NO_STDIO=1 and verify it (and a minimal linked"

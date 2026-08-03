@@ -178,5 +178,109 @@ class TopLevelConstantRetimingTests(unittest.TestCase):
                 "the tolerance band is too loose to catch a regression)")
 
 
+class ConfigReconstructionIdempotencyTests(unittest.TestCase):
+    """Regression test for the reconstruction-idempotency bug (2026-08-04
+    gap-fix, follow-up to the retiming fix above): __post_init__ used to
+    treat WHATEVER value sat in a retimed field as still "authored at the
+    legacy 10 ms grid" on every run, so rebuilding an already-resolved
+    config via ``dataclasses.replace()``/``AecConfig(**asdict(cfg))`` (e.g.
+    process_wav_files()'s sample-rate-mismatch re-resolve path at
+    modules/orchestrator.py) silently double-retimed the six wall-clock
+    fields, compounding further on every additional reconstruction.
+
+    Fix: timing_reference_hop_size/_sample_rate track which grid the
+    current field values are calibrated for; retiming is skipped when that
+    already matches the resolved grid, and rebased from the tracked
+    reference (not a hardcoded 10 ms) when it doesn't.
+    """
+
+    RETIMED_FIELDS = (
+        'warmup_frames', 'epc_hangover', 'ne_recent_hold',
+        'filter_misadjustment_stable_frames',
+        'filter_misadjustment_hangover_frames', 'shadow_err_alpha',
+    )
+
+    def _values(self, cfg: AecConfig) -> tuple:
+        return tuple(getattr(cfg, f) for f in self.RETIMED_FIELDS)
+
+    def test_replace_is_idempotent(self) -> None:
+        from dataclasses import replace
+        cfg = AecConfig.from_preset(
+            AecPreset.BALANCED, sample_rate=16000, frame_size=256)
+        original = self._values(cfg)
+        once = self._values(replace(cfg))
+        thrice = self._values(replace(replace(replace(cfg))))
+        self.assertEqual(
+            once, original,
+            msg="dataclasses.replace(cfg) must not re-retime an "
+                "already-resolved config")
+        self.assertEqual(
+            thrice, original,
+            msg="repeated replace() must not compound drift")
+
+    def test_asdict_roundtrip_is_idempotent(self) -> None:
+        from dataclasses import asdict
+        cfg = AecConfig.from_preset(
+            AecPreset.BALANCED, sample_rate=16000, frame_size=256)
+        original = self._values(cfg)
+        rebuilt = self._values(AecConfig(**asdict(cfg)))
+        self.assertEqual(
+            rebuilt, original,
+            msg="AecConfig(**asdict(cfg)) must not re-retime an "
+                "already-resolved config")
+
+    def test_pre_fix_double_retime_would_have_failed(self) -> None:
+        """Sanity-check: mutation test. Simulating the OLD unconditional
+        retiming (rebase from a hardcoded 10 ms every call, regardless of
+        provenance) on an already-resolved config must visibly drift from
+        the original -- otherwise this test wouldn't catch a regression."""
+        from modules import aec3_scale as _aec3_scale
+        cfg = AecConfig.from_preset(
+            AecPreset.BALANCED, sample_rate=16000, frame_size=256)
+        naive_replay = _aec3_scale.ms_to_hops(
+            cfg.warmup_frames * 10.0, cfg.hop_size, cfg.sample_rate)
+        self.assertNotEqual(
+            naive_replay, cfg.warmup_frames,
+            msg="the naive (provenance-unaware) retime should visibly "
+                "drift from the correct already-resolved value -- if it "
+                "doesn't, this test's tolerance is too loose to catch the "
+                "bug it's named for")
+
+    def test_sample_rate_change_via_replace_matches_fresh_construction(
+            self) -> None:
+        """The actual production path this bug lives on:
+        process_wav_files() calls ``dataclasses.replace(config,
+        sample_rate=mic_sr, frame_size=-1, hop_size=-1, filter_length=-1)``
+        when the caller's config was built for a different sample rate than
+        the file being processed. The reconstructed config must match a
+        config built fresh for the new rate, not a double-retimed drift."""
+        from dataclasses import replace
+        cfg_16k = AecConfig.from_preset(
+            AecPreset.BALANCED, sample_rate=16000, frame_size=256)
+        reconstructed = replace(
+            cfg_16k, sample_rate=48000, frame_size=-1, hop_size=-1,
+            filter_length=-1)
+        fresh_48k = AecConfig.from_preset(
+            AecPreset.BALANCED, sample_rate=48000, frame_size=1024)
+        self.assertEqual(
+            self._values(reconstructed), self._values(fresh_48k),
+            msg="replace()-driven sample-rate change must retime "
+                "identically to a fresh construction at the new rate")
+
+    def test_fresh_construction_unaffected_by_provenance_tracking(
+            self) -> None:
+        """The idempotency fix must be behavior-preserving for the common
+        (fresh-construction) path: a bare AecConfig() and an
+        AecConfig.from_preset() must retime exactly as before (10 ms
+        reference), since timing_reference_* defaults to the legacy grid."""
+        cfg = AecConfig.from_preset(
+            AecPreset.BALANCED, sample_rate=16000, frame_size=256)
+        self.assertEqual(cfg.timing_reference_hop_size, 128)
+        self.assertEqual(cfg.timing_reference_sample_rate, 16000)
+        # warmup_frames=100 authored hops @ legacy 10 ms grid -> retimed to
+        # the 8 ms (128-sample hop) grid: round(100*10/8) = 125.
+        self.assertEqual(cfg.warmup_frames, 125)
+
+
 if __name__ == '__main__':
     unittest.main()

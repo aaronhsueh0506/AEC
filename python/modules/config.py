@@ -386,6 +386,20 @@ class AecConfig:
     return_res_context: bool = False
     clear_filter_history: bool = False
 
+    # ── Wall-clock timing provenance (INTERNAL, do not document as a
+    # customer knob) ─────────────────────────────────────────────────────
+    # The (hop_size, sample_rate) grid that shadow_err_alpha / warmup_frames
+    # / epc_hangover / ne_recent_hold / filter_misadjustment_{stable,
+    # hangover}_frames are CURRENTLY calibrated against. Defaults to the
+    # legacy hop=160/sample_rate=16000 (10 ms) grid these fields' literals
+    # were originally authored at. Regular dataclass fields (not
+    # ``field(init=False)``), so ``dataclasses.replace()``/``**asdict()``
+    # roundtrip construction carries the CURRENT grid forward automatically
+    # -- see __post_init__ below for why that is what makes retiming
+    # idempotent under reconstruction.
+    timing_reference_hop_size: int = 160
+    timing_reference_sample_rate: int = 16000
+
     def __post_init__(self):
         if self.frame_size == -1:
             self.frame_size = {
@@ -430,35 +444,61 @@ class AecConfig:
         # own multi-rate history, with zero rate conversion when the
         # 16 kHz default flipped to 8 ms hop (2026-08-01) or at 8/48 kHz.
         # Retimed here via aec3_scale.ms_to_hops()/growth_rehop() so they
-        # cover approximately the same wall-clock duration at every grid --
-        # applied to WHATEVER value ended up in the field, whether the
-        # dataclass default or an explicit constructor kwarg (e.g.
-        # ``from_preset``'s ``warmup_frames=100`` base override), since
-        # both were authored under the same frozen 10 ms assumption. A
-        # POST-CONSTRUCTION ``setattr(cfg, ...)`` mutation still bypasses
-        # this (same as frame_size/hop_size/filter_length above) and is
-        # honored verbatim. shadow_err_alpha uses the RETENTION convention
-        # (``alpha*old + (1-alpha)*new`` -- see orchestrator.py's actual
-        # smoothing formula), so ``growth_rehop`` (a direct power law), NOT
-        # ``per_block_ema_alpha_to_per_hop``'s AEC3-new-sample-weight form,
-        # is the correct helper here. Must match aec.c's
-        # aec_config_defaults() (C side).
-        self.shadow_err_alpha = _aec3_scale.growth_rehop(
-            self.shadow_err_alpha, 160, 16000, self.hop_size, self.sample_rate)
-        self.warmup_frames = _aec3_scale.ms_to_hops(
-            self.warmup_frames * 10.0, self.hop_size, self.sample_rate)
-        self.epc_hangover = _aec3_scale.ms_to_hops(
-            self.epc_hangover * 10.0, self.hop_size, self.sample_rate)
-        self.ne_recent_hold = _aec3_scale.ms_to_hops(
-            self.ne_recent_hold * 10.0, self.hop_size, self.sample_rate)
-        # ne_recent_sustain is a genuine consecutive-event count (NOT a
-        # duration -- see orchestrator.py's ``_ne_recent_frames`` gate) and
-        # is intentionally left unretimed; also out of scope for this pass
-        # (not part of the audited constant batch).
-        self.filter_misadjustment_stable_frames = _aec3_scale.ms_to_hops(
-            self.filter_misadjustment_stable_frames * 10.0, self.hop_size, self.sample_rate)
-        self.filter_misadjustment_hangover_frames = _aec3_scale.ms_to_hops(
-            self.filter_misadjustment_hangover_frames * 10.0, self.hop_size, self.sample_rate)
+        # cover approximately the same wall-clock duration at every grid.
+        #
+        # IDEMPOTENCY (2026-08-04 gap-fix): the naive version of this block
+        # retimed unconditionally on every __post_init__ run, treating
+        # WHATEVER value currently sat in the field as still "authored at
+        # the legacy 10 ms grid" -- true for a genuinely fresh construction
+        # (dataclass default or an explicit constructor kwarg like
+        # ``from_preset``'s ``warmup_frames=100`` base override), but FALSE
+        # for a config rebuilt from an already-resolved instance
+        # (``dataclasses.replace(cfg, ...)`` / ``AecConfig(**asdict(cfg))``
+        # -- e.g. process_wav_files()'s sample-rate-mismatch re-resolve
+        # path): the field already holds the PREVIOUS grid's retimed hop
+        # count, so re-running the same conversion silently compounds the
+        # error every reconstruction. timing_reference_hop_size/
+        # _sample_rate (regular fields, so they survive replace()/asdict()
+        # roundtrips) record which grid the current values are calibrated
+        # for; retiming only runs -- and only needs to run -- when that
+        # differs from the grid just resolved above, and always rebases
+        # from the TRACKED reference grid (not a hardcoded 10 ms), so a
+        # same-grid reconstruction is a no-op and a changed-grid
+        # reconstruction re-derives correctly from whatever ms-equivalent
+        # the carried-over values actually represent. Must match aec.c's
+        # aec_config_defaults()/aec_carve() (C side) -- there this is a
+        # non-issue because retiming reads the caller's untouched *cfg into
+        # a->cfg exactly once, at construction, with no re-entrant path.
+        if (self.hop_size, self.sample_rate) != (
+                self.timing_reference_hop_size,
+                self.timing_reference_sample_rate):
+            ref_ms_per_hop = (1000.0 * self.timing_reference_hop_size /
+                              self.timing_reference_sample_rate)
+            # shadow_err_alpha uses the RETENTION convention (``alpha*old +
+            # (1-alpha)*new`` -- see orchestrator.py's actual smoothing
+            # formula), so ``growth_rehop`` (a direct power law), NOT
+            # ``per_block_ema_alpha_to_per_hop``'s AEC3-new-sample-weight
+            # form, is the correct helper here.
+            self.shadow_err_alpha = _aec3_scale.growth_rehop(
+                self.shadow_err_alpha, self.timing_reference_hop_size,
+                self.timing_reference_sample_rate, self.hop_size,
+                self.sample_rate)
+            self.warmup_frames = _aec3_scale.ms_to_hops(
+                self.warmup_frames * ref_ms_per_hop, self.hop_size, self.sample_rate)
+            self.epc_hangover = _aec3_scale.ms_to_hops(
+                self.epc_hangover * ref_ms_per_hop, self.hop_size, self.sample_rate)
+            self.ne_recent_hold = _aec3_scale.ms_to_hops(
+                self.ne_recent_hold * ref_ms_per_hop, self.hop_size, self.sample_rate)
+            # ne_recent_sustain is a genuine consecutive-event count (NOT a
+            # duration -- see orchestrator.py's ``_ne_recent_frames`` gate)
+            # and is intentionally left unretimed; also out of scope for
+            # this pass (not part of the audited constant batch).
+            self.filter_misadjustment_stable_frames = _aec3_scale.ms_to_hops(
+                self.filter_misadjustment_stable_frames * ref_ms_per_hop, self.hop_size, self.sample_rate)
+            self.filter_misadjustment_hangover_frames = _aec3_scale.ms_to_hops(
+                self.filter_misadjustment_hangover_frames * ref_ms_per_hop, self.hop_size, self.sample_rate)
+            self.timing_reference_hop_size = self.hop_size
+            self.timing_reference_sample_rate = self.sample_rate
 
     @property
     def fft_size(self) -> int:

@@ -58,9 +58,12 @@ typedef struct AecConfig {
 
     /* scalar tunables (balanced base). shadow_err_alpha/warmup_frames/
      * epc_hangover are wall-clock-authored at the legacy hop=160/sr=16000
-     * (10 ms) grid and retimed live for the real grid in
-     * aec_config_defaults() (2026-08 gap-fix) -- the values in comments
-     * below are the legacy-grid figures, not necessarily today's default. */
+     * (10 ms) grid and retimed live for the real grid in aec_carve() --
+     * construction time, the one place guaranteed to see the FINAL
+     * resolved hop after any caller override (e.g. aec_wav.c's
+     * --fft-size), NOT aec_config_defaults() (2026-08 gap-fix) -- the
+     * values in comments below are the legacy-grid figures, not
+     * necessarily today's default. */
     float  shadow_err_alpha;       /* 0.80 @ 10 ms hop */
     float  shadow_mu_min;          /* 0.5  */
     float  shadow_mu_nlms;         /* 0.5  */
@@ -98,10 +101,9 @@ typedef struct AecConfig {
     /* ne_recent gate parameters (mirror AecConfig.ne_recent_*). threshold is
      * float32-by-design (Python bit-exact parity retired; f32/f64 drift
      * across this threshold is accepted). ne_recent_hold is wall-clock-
-     * authored @ 10 ms hop and retimed live (2026-08 gap-fix);
-     * ne_recent_sustain is a genuine consecutive-event count (NOT a
-     * duration) and is intentionally left unretimed -- see
-     * aec_config_defaults(). */
+     * authored @ 10 ms hop and retimed live in aec_carve() (2026-08
+     * gap-fix); ne_recent_sustain is a genuine consecutive-event count
+     * (NOT a duration) and is intentionally left unretimed. */
     float  ne_recent_threshold;               /* 0.3 */
     int    ne_recent_hold;                    /* 150 hops = 1500 ms @ 10 ms hop */
     int    ne_recent_sustain;                 /* 3 (event count, not retimed) */
@@ -112,8 +114,8 @@ typedef struct AecConfig {
     float  min_gain_floor_far_active_db;
 
     /* FilterMisadjustmentEstimator (AEC3 ScaleFilter). stable/hangover_frames
-     * are wall-clock-authored @ 10 ms hop and retimed live (2026-08 gap-fix,
-     * see aec_config_defaults()). */
+     * are wall-clock-authored @ 10 ms hop and retimed live in aec_carve()
+     * (2026-08 gap-fix). */
     int    filter_misadjustment_stable_frames;   /* 30 hops = 300 ms @ 10 ms hop */
     int    filter_misadjustment_hangover_frames;  /* 100 hops = 1000 ms @ 10 ms hop */
     float  filter_misadjustment_scale_min;        /* 0.5 */

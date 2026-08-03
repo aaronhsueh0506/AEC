@@ -189,6 +189,17 @@ malloc path (`test_static_aec.c`).
   probes each prior round wrote to verify these fixes.
   `test/run_counter_saturation_ubsan.sh` builds+runs this same source under
   `-fsanitize=undefined` (same shape as `test/run_selftest_ubsan.sh`).
+- `test/test_rate_structural.c` (`make test-rate-structural`) — the
+  **permanent per-rate structural regression test** (M5 multi-rate campaign,
+  review F01): at each of the four whitelisted grids (8k/256, 16k/256,
+  16k/512, 48k/1024) checks synthesis-window COLA, impulse-through-linear
+  and impulse-through-full-post-chain convergence, `aec_get_mem_size`
+  monotonicity/preset-invariance, `aec_init` (static pool) byte-equal to
+  `aec_create` (heap), and — the top-level (non-AEC3) hop-authored constant
+  audit's own regression gate — that `shadow_err_alpha`/`warmup_frames`/
+  `epc_hangover`/`ne_recent_hold`/`filter_misadjustment_{stable,hangover}_
+  frames`/`EPV_FAST_TC`/`EPV_SLOW_TC` cover approximately the same
+  wall-clock duration at every grid. 107 checks total.
 
 The remaining per-module `test/parity_*.c` ⟷ `python/diag/gen_*_golden.py`
 harnesses are kept as **historical** diagnostics — they compare against fp64
@@ -205,7 +216,7 @@ harness design.
 For embedded targets, build one pool and place the whole instance in it:
 
 ```c
-size_t bytes = aec_get_mem_size(&cfg);   /* 16k default 512/256 balanced: 543,040 B on current KISS build */
+size_t bytes = aec_get_mem_size(&cfg);   /* 16k default 256/128 balanced: 399,056 B on current KISS build */
 void*  pool  = your_static_alloc(bytes); /* MUST be 16-byte aligned (posix_memalign, etc.) */
 Aec*   a     = aec_init(pool, bytes, &cfg);  /* NULL on failure; byte-equal to aec_create output */
 /* ... aec_process(a, ...) ... */
