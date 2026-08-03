@@ -1,4 +1,4 @@
-"""Codex review regression test (2026-08-03) — EchoPathDelayEstimator.reset()
+"""Regression test: EchoPathDelayEstimator.reset()
 must clear its ENTIRE 48kHz signal chain consistently: both the OUTER
 _Resample48 anti-alias sidechain (filter state + decimation phase) AND the
 INNER decimators / ring buffer / pending edge-chunker samples.

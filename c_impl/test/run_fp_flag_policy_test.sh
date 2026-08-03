@@ -5,8 +5,8 @@
 # "FP_INPUT_FLAGS" there).
 #
 # BACKGROUND: this repo's Makefile used to check ONLY $(CFLAGS), via three
-# separate $(findstring PATTERN,$(CFLAGS)) substring searches -- a Codex
-# review found this both too narrow (CXXFLAGS/CPPFLAGS could carry
+# separate $(findstring PATTERN,$(CFLAGS)) substring searches -- this was
+# both too narrow (CXXFLAGS/CPPFLAGS could carry
 # -Ofast/-ffast-math/-ffp-contract=<x> straight past it, e.g.
 # `env CXXFLAGS=-Ofast make ... lib`) and too broad ($(findstring) does a
 # plain substring search, so a harmless `-DROUND9_NOTE=-Ofastness` macro
@@ -73,14 +73,13 @@
 #
 # Also re-confirms the OTHER two things a naive re-implementation could
 # regress: (i) an actual bare -Ofast/-ffast-math/-ffp-contract=<x> token,
-# unquoted, in CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS, is still rejected
-# (round-3/round-9 behaviour preserved) -- including via CXXFLAGS/CPPFLAGS
-# specifically now that the check has been widened from CFLAGS-only; and
-# (ii) the pre-existing, unrelated "Command-line override rejection"
-# foreach (round-4 review P1-1: a command-line CFLAGS=/CXXFLAGS=/CPPFLAGS=/
-# LDFLAGS=/FP_POLICY=/FP_ALLOWED_CHARS_RE= override, or `make -e` with any
-# of those six set in the environment) still fires first and is untouched
-# by this change.
+# unquoted, in CFLAGS/CXXFLAGS/CPPFLAGS/EXTRA_CFLAGS, is still rejected --
+# including via CXXFLAGS/CPPFLAGS specifically now that the check has been
+# widened from CFLAGS-only; and (ii) the pre-existing, unrelated
+# "Command-line override rejection" foreach (a command-line CFLAGS=/
+# CXXFLAGS=/CPPFLAGS=/LDFLAGS=/FP_POLICY=/FP_ALLOWED_CHARS_RE= override, or
+# `make -e` with any of those six set in the environment) still fires first
+# and is untouched by this change.
 #
 # Cases 11-17 (allow-list bypass shapes the OLD 9-item deny-list never
 # caught -- audio_common S24 equivalent): glob-star, glob-question,
@@ -90,7 +89,7 @@
 # character-class allow-list, identifying the specific offending
 # character(s).
 #
-# Case 18: positive control (Codex review, distinct code path): a
+# Case 18: positive control, distinct code path: a
 # Make-native ${VAR}-style expansion must still be rejected via the
 # EXACT-TOKEN $(filter) check, not the character allow-list -- GNU Make
 # treats ${...} identically to $(...) and resolves it to R11_FLAG's value
@@ -256,7 +255,7 @@ else
     cat "$LOG5B" >&2
 fi
 
-echo "=== run_fp_flag_policy_test: prior (round-3/round-9) behaviour must not regress ==="
+echo "=== run_fp_flag_policy_test: prior behaviour must not regress ==="
 
 # A real, unquoted -Ofast/-ffast-math/-ffp-contract=<x> must still be
 # rejected -- via EXTRA_CFLAGS (the original, narrower CFLAGS-only check's
@@ -271,7 +270,7 @@ if env EXTRA_CFLAGS=-Ofast "$MAKE_BIN" BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROO
     cat "$LOG6" >&2
 else
     if grep -q "FP policy conflict" "$LOG6" && grep -q -- "-Ofast" "$LOG6"; then
-        pass "case 6: env EXTRA_CFLAGS=-Ofast print-obj-dir correctly FAILS (round-3 behaviour preserved)"
+        pass "case 6: env EXTRA_CFLAGS=-Ofast print-obj-dir correctly FAILS (prior behaviour preserved)"
     else
         fail "case 6: env EXTRA_CFLAGS=-Ofast print-obj-dir failed but did NOT identify -Ofast specifically"
         cat "$LOG6" >&2
@@ -305,7 +304,7 @@ else
 fi
 
 # The pre-existing, unrelated command-line-override / `make -e` rejection
-# (round-4 review P1-1) must still fire first and untouched -- a command-
+# must still fire first and untouched -- a command-
 # line CFLAGS= override, and `make -e` with FP_POLICY= set in the
 # environment, are both still rejected by that separate foreach, never
 # reaching (or being affected by) this fix's own conflict-detection block.
@@ -315,7 +314,7 @@ if "$MAKE_BIN" CFLAGS=-O3 BACKEND=kiss OBJ_ROOT="$OBJ_ROOT" BIN_ROOT="$BIN_ROOT"
     cat "$LOG9" >&2
 else
     if grep -q "cannot be overridden" "$LOG9"; then
-        pass "case 9: make CFLAGS=-O3 print-obj-dir correctly FAILS, mentioning 'cannot be overridden' (round-4 P1-1 untouched)"
+        pass "case 9: make CFLAGS=-O3 print-obj-dir correctly FAILS, mentioning 'cannot be overridden' (untouched by this fix)"
     else
         fail "case 9: make CFLAGS=-O3 print-obj-dir failed but did NOT mention 'cannot be overridden'"
         cat "$LOG9" >&2
@@ -452,7 +451,7 @@ fp_check_override_rejected "FP_CONFLICT_FLAGS"     ""      '-Ofast' dashe
 
 echo
 echo "=== run_fp_flag_policy_test: link-flags (LDFLAGS/EXTRA_LDFLAGS)"
-echo "=== character-safety coverage (Codex review) ==="
+echo "=== character-safety coverage ==="
 
 # The literal reported repro: a semicolon payload via EXTRA_LDFLAGS,
 # dry-run-confirmed BEFORE this fix to sail through untouched and land live

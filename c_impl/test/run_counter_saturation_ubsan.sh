@@ -1,8 +1,8 @@
 #!/bin/sh
 # run_counter_saturation_ubsan.sh - UBSan probe for
-# test/test_counter_saturation.c (round-6 review: the permanent,
-# checked-in counter-saturation regression test; Codex explicitly asked for
-# a committed test since every prior round's UBSan probe was ad hoc).
+# test/test_counter_saturation.c -- the permanent, checked-in
+# counter-saturation regression test (replacing what used to be an ad hoc
+# UBSan probe run by hand).
 #
 # Standalone script rather than a new UBSan-flavoured Makefile target --
 # same shape/rationale as test/run_selftest_ubsan.sh (kept consistent with
@@ -44,8 +44,8 @@
 # SCRATCH, removed by a single trap covering normal exit and both signals --
 # the same isolation discipline audio_common's own
 # scripts/test_build_isolation.sh applies to its own scratch builds.
-# OBJ_ROOT/BIN_ROOT are audio_common's OWN placement knobs (round-6 review,
-# that repo) and are passed with IDENTICAL values to both the `lib` build
+# OBJ_ROOT/BIN_ROOT are audio_common's OWN placement knobs and are passed
+# with IDENTICAL values to both the `lib` build
 # call and the `print-lib-path` query call below, so the two invocations can
 # never resolve to different paths -- the same query/build-divergence
 # discipline this repo's own Makefile enforces for its own
@@ -54,7 +54,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-# Explicit template (round-8 review): a bare `mktemp -d` with no template
+# Explicit template: a bare `mktemp -d` with no template
 # argument ignores $TMPDIR on this host (confirmed by direct repro -- it
 # creates under /var/folders/... regardless of $TMPDIR), which silently
 # defeated any caller (e.g. this repo's own signal-handling regression
@@ -62,7 +62,7 @@ cd "$(dirname "$0")/.."
 # this script's scratch-dir lifecycle. The explicit template below actually
 # honors $TMPDIR (falling back to /tmp if unset).
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/aec-counter-saturation-ubsan.XXXXXX")"
-# Separate, explicit handlers (round-7 review: a combined `trap '...' EXIT INT
+# Separate, explicit handlers (a combined `trap '...' EXIT INT
 # TERM` registers the SAME handler -- a bare cleanup command with no exit --
 # for all three. On INT/TERM that handler runs to completion and then the
 # shell simply continues the script (`set -e` doesn't apply to a trap body

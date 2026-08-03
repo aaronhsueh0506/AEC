@@ -1,6 +1,6 @@
 """Regression test for the erle_startup_hops/erl_startup_hops sentinel bug.
 
-Bug (Codex review finding): AecStateConfig.erle_startup_hops/erl_startup_hops
+Bug: AecStateConfig.erle_startup_hops/erl_startup_hops
 used to default to the literal 200, and AecState._resolve_startup_hops read
 "field still equals 200" as "caller left it at default -> auto-compute the
 grid-correct hop count", overriding ANY caller-supplied value that happened

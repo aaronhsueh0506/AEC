@@ -1,6 +1,5 @@
 #!/bin/sh
-# run_selftest_ubsan.sh - UBSan probe for test/simd_selftest_aec.c
-# (round-3 review B05, item 5).
+# run_selftest_ubsan.sh - UBSan probe for test/simd_selftest_aec.c.
 #
 # Standalone script rather than a new Makefile target: this repo's Makefile
 # is being reworked concurrently by another task, so wiring a target in
@@ -33,7 +32,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-# Explicit template (round-8 review): a bare `mktemp -d` with no template
+# Explicit template: a bare `mktemp -d` with no template
 # argument ignores $TMPDIR on this host (confirmed by direct repro -- it
 # creates under /var/folders/... regardless of $TMPDIR), which silently
 # defeated any caller (e.g. this repo's own signal-handling regression
@@ -41,7 +40,7 @@ cd "$(dirname "$0")/.."
 # this script's scratch-dir lifecycle. The explicit template below actually
 # honors $TMPDIR (falling back to /tmp if unset).
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/aec-selftest-ubsan.XXXXXX")"
-# Separate, explicit handlers (round-7 review: a combined `trap '...' EXIT INT
+# Separate, explicit handlers (a combined `trap '...' EXIT INT
 # TERM` registers the SAME handler -- a bare cleanup command with no exit --
 # for all three. On INT/TERM that handler runs to completion and then the
 # shell simply continues the script (`set -e` doesn't apply to a trap body

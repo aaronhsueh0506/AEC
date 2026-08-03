@@ -115,16 +115,16 @@ FOOTER_EOF
 echo "== docs_smoke: building audio_common (BACKEND=$BACKEND) =="
 make -C "$AC_DIR" BACKEND="$BACKEND" lib
 
-# Resolve the exact archive path for THIS build (round-3 review B01:
-# audio_common's bin/ is now keyed bin/<backend>-<config-hash>/, not a flat
+# Resolve the exact archive path for THIS build (audio_common's bin/ is
+# keyed bin/<backend>-<config-hash>/, not a flat
 # bin/$BACKEND/ -- print-lib-path is queried with the SAME BACKEND= this
 # script's own `make -C "$AC_DIR" BACKEND="$BACKEND" lib` line just used, so
 # the two can never point at different configs).
 AC_LIB_PATH="$(make -s -C "$AC_DIR" BACKEND="$BACKEND" print-lib-path)"
 
 echo "== docs_smoke: compiling extracted sample against aec.h + libaudio_common ($BACKEND) =="
-# Compile as C with the C driver, then LINK with the C++ driver for ne10
-# (round-4 review P1-2): the NE10 archive carries one C++ TU, and the C++
+# Compile as C with the C driver, then LINK with the C++ driver for ne10:
+# the NE10 archive carries one C++ TU, and the C++
 # driver supplies the correct C++ runtime itself (libc++ on macOS/clang,
 # libstdc++ on GNU/Linux gcc) -- no hardcoded -lc++ (a macOS-ism that fails
 # to link on GNU/Linux), mirroring the Makefiles' own LINK=$(CXX) pattern.
