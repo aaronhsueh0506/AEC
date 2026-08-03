@@ -24,7 +24,7 @@ from typing import Optional
 
 import numpy as np
 
-from ._constants import HOPS_PER_SECOND
+from .. import aec3_scale as _aec3_scale
 from .erl_estimator import ErlEstimator
 from .erle_estimator import ErleEstimator
 from .filter_analyzer import FilterAnalyzer
@@ -40,11 +40,17 @@ from ..delay.delay_types import (
 from ..filter.filter_state_bridge import FilterStateBridge
 
 
-_CONSERVATIVE_INITIAL_HOPS = int(1.5 * HOPS_PER_SECOND)  # AEC3 1.5*250 -> 150 hops
-_FAST_INITIAL_HOPS = int(0.8 * HOPS_PER_SECOND)           # AEC3 0.8*250 -> 80 hops
-_ACTIVE_RENDER_BLOCKS = 80   # AEC3 200 blocks × 4 ms = 800 ms wall-clock
-                             # = blocks_to_hops(200, 160, 16000) = 80 hops.
-                             # Legacy 200-hops-verbatim was 2 s (2.5× too slow).
+
+
+# Sentinel for AecStateConfig.erle_startup_hops/erl_startup_hops: `None`
+# means "not explicitly set", which AecState._resolve_startup_hops reads as
+# "compute the live, grid-correct hop count instead". A caller that
+# explicitly sets either field to ANY integer -- including 200, which
+# happens to be the auto-computed value at the legacy hop=160/sr=16000 grid
+# -- gets it honored verbatim. `None` (rather than a reachable integer like
+# the old literal 200) is used specifically so no legitimate explicit value
+# can ever collide with the "unset" marker.
+_AUTO_STARTUP_HOPS = None
 
 
 @dataclass
@@ -58,11 +64,15 @@ class AecStateConfig:
     num_capture_channels: int = 1
     echo_can_saturate: bool = True
     n_bins: int = 257
-    erle_startup_hops: int = 200    # AEC3 2*kNumBlocksPerSecond -> our 2*100 hops
+    # AEC3 2*kNumBlocksPerSecond (2.0 s). Left at _AUTO_STARTUP_HOPS (None) ->
+    # AecState recomputes it live for the real grid; set explicitly (any int,
+    # including 200) to override with a raw hop count instead (see
+    # _resolve_startup_hops).
+    erle_startup_hops: Optional[int] = _AUTO_STARTUP_HOPS
     erle_min: float = 1.0           # AEC3 default
     erle_max_l: float = 4.0
     erle_max_h: float = 1.5
-    erl_startup_hops: int = 200
+    erl_startup_hops: Optional[int] = _AUTO_STARTUP_HOPS
     # hop_size/sample_rate feed the per_block→per_hop conversion.
     hop_size: int = 160
     sample_rate: int = 16000
@@ -79,42 +89,77 @@ class AecState:
     """Per-frame AEC3 state machine. Single source of truth for
     ``usable_linear_estimate()``."""
 
+    def _resolve_startup_hops(self, configured_hops: Optional[int]) -> int:
+        """See _AUTO_STARTUP_HOPS / AecStateConfig.erle_startup_hops."""
+        if configured_hops is not None:
+            return int(configured_hops)
+        return _aec3_scale.ms_to_hops(
+            2000.0, self._config.hop_size, self._config.sample_rate
+        )
+
     def __init__(self, config: Optional[AecStateConfig] = None) -> None:
         self._config = config or AecStateConfig()
         self._initial_state = InitialState(
             conservative_initial_phase=self._config.conservative_initial_phase,
             initial_state_seconds=self._config.initial_state_seconds,
+            hop_size=self._config.hop_size,
+            sample_rate=self._config.sample_rate,
         )
         self._delay_state = FilterDelay(
             delay_headroom_samples=self._config.delay_headroom_samples,
             num_capture_channels=self._config.num_capture_channels,
+            hop_size=self._config.hop_size,
+            sample_rate=self._config.sample_rate,
         )
         self._filter_quality = FilteringQualityAnalyzer(
             use_linear_filter=self._config.use_linear_filter,
+            hop_size=self._config.hop_size,
+            sample_rate=self._config.sample_rate,
         )
         self._saturation_detector = SaturationDetector()
+        # erle_startup_hops/erl_startup_hops (AecStateConfig) are Optional[int]
+        # hop-count fields defaulting to None (= "auto": AEC3's 2.0 s,
+        # resolved live for the real grid; at the legacy hop=160/sr=16000
+        # grid that happens to be 200). _resolve_startup_hops treats None as
+        # "not explicitly overridden" and recomputes it live; any explicitly-
+        # set integer (including 200) is honored verbatim -- so ERLE and ERL
+        # each resolve independently and a caller CAN still diverge them,
+        # unlike a version of this fix that shared one precomputed value for
+        # both.
+        erle_hops = self._resolve_startup_hops(self._config.erle_startup_hops)
+        erl_hops = self._resolve_startup_hops(self._config.erl_startup_hops)
         self._erle_estimator = ErleEstimator(
-            startup_phase_length_hops=self._config.erle_startup_hops,
+            startup_phase_length_hops=erle_hops,
             n_bins=self._config.n_bins,
             min_erle=self._config.erle_min,
             max_erle_l=self._config.erle_max_l,
             max_erle_h=self._config.erle_max_h,
             hop_size=self._config.hop_size,
+            sample_rate=self._config.sample_rate,
         )
         self._erl_estimator = ErlEstimator(
-            startup_phase_length_hops=self._config.erl_startup_hops,
+            startup_phase_length_hops=erl_hops,
             n_bins=self._config.n_bins,
             hop_size=self._config.hop_size,
+            sample_rate=self._config.sample_rate,
         )
         # TransparentMode permanently disabled in production.
         self._transparent_mode = None
         self._filter_analyzer: Optional[FilterAnalyzer] = (
-            FilterAnalyzer() if self._config.enable_filter_analyzer else None
+            FilterAnalyzer(
+                hop_size=self._config.hop_size,
+                sample_rate=self._config.sample_rate,
+            ) if self._config.enable_filter_analyzer else None
         )
         # Counters tracked at this level (not in helpers).
         self._strong_not_saturated_render_blocks = 0
         self._blocks_with_active_render = 0
         self._capture_signal_saturation = False
+        # AEC3 200 blocks x 4 ms = 800 ms wall-clock. Was a bare literal 80
+        # (correct only at the legacy hop=160/sr=16000 grid); rescaled live.
+        self._active_render_blocks = _aec3_scale.ms_to_hops(
+            800.0, self._config.hop_size, self._config.sample_rate
+        )
 
     # ---------------------------------------------------------- public queries
 
@@ -125,7 +170,7 @@ class AecState:
         )
 
     def active_render(self) -> bool:
-        return self._blocks_with_active_render > _ACTIVE_RENDER_BLOCKS
+        return self._blocks_with_active_render > self._active_render_blocks
 
     def saturated_echo(self) -> bool:
         return self._saturation_detector.saturated_echo()

@@ -219,7 +219,8 @@ class _LowNoiseRenderDetector:
     fires at the same wall-clock render level as AEC3."""
 
     def __init__(self, *, hop_samples: int = 64, sample_rate: int = 16000,
-                 use_wallclock_block_energy_threshold: bool = False) -> None:
+                 use_wallclock_block_energy_threshold: bool = False,
+                 use_wallclock_ema_alpha: bool = False) -> None:
         self._average_power = 32768.0 * 32768.0
         self._hop_samples = hop_samples  # needed to normalize peak-rejection
         if use_wallclock_block_energy_threshold:
@@ -232,8 +233,16 @@ class _LowNoiseRenderDetector:
         # AEC3 power IIR (average_power = 0.9·avg + 0.1·x2) per-4ms-block.
         # Literal 0.1 (NOT 1.0-0.9, which is 0.0999…9) keeps the math
         # bit-identical to the original `* 0.9 + x2_sum * 0.1`.
-        self._iir_decay = 0.9
-        self._iir_weight = 0.1
+        if use_wallclock_ema_alpha:
+            from .. import aec3_scale as _aec3_scale
+            _alpha = _aec3_scale.per_block_ema_alpha_to_per_hop(
+                0.1, hop_samples, sample_rate
+            )
+            self._iir_decay = 1.0 - _alpha
+            self._iir_weight = _alpha
+        else:
+            self._iir_decay = 0.9
+            self._iir_weight = 0.1
 
     def detect(self, render_block: np.ndarray) -> bool:
         if render_block.size == 0:
@@ -491,6 +500,7 @@ class SuppressionGain:
     def __init__(self, *, n_bins: int = 257, config: Optional[SuppressorConfig] = None,
                  sr: int = 16000, hop_size: int = 160,
                  use_wallclock_block_energy_threshold: bool = False,
+                 use_wallclock_ema_alpha: bool = False,
                  use_wallclock_gain_ratchet: bool = False,
                  soft_nearend_blend_enabled: bool = False,
                  soft_nearend_blend_enr_threshold: float = 0.25,
@@ -533,6 +543,7 @@ class SuppressionGain:
             use_wallclock_block_energy_threshold=bool(
                 use_wallclock_block_energy_threshold
             ),
+            use_wallclock_ema_alpha=bool(use_wallclock_ema_alpha),
         )
         # AEC3 `nearend_average_blocks` is in 4 ms blocks; wall-clock rescale
         # to our hop_size so the moving-average window physically matches.

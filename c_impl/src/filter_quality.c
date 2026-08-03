@@ -2,20 +2,26 @@
  * python/modules/state/filter_quality.py. See header for parity notes.
  *
  * Pure integer counters + bool gates; no float math. Mirrors AEC3
- * aec_state.cc:390-444 with hop-rescaled thresholds (FQ_STARTUP_HOPS=40,
- * FQ_RESET_HOPS=20).
+ * aec_state.cc:390-444 with hop-rescaled thresholds (startup_hops/
+ * reset_hops, computed live in fq_init() from hop_size/sample_rate).
  */
 #include "filter_quality.h"
+#include "aec3_scale.h"
 
 #include <limits.h>   /* INT_MAX */
 
-void fq_init(FilteringQualityAnalyzer *m, int use_linear_filter) {
+void fq_init(FilteringQualityAnalyzer *m, int use_linear_filter,
+            int hop_size, int sample_rate) {
     m->use_linear_filter = use_linear_filter ? 1 : 0;
     m->overall_usable = 0;
     m->filter_update_blocks_since_reset = 0;
     m->filter_update_blocks_since_start = 0;
     m->convergence_seen = 0;
     m->convergence_hops_counter = 0;
+    /* AEC3 ~100/50 blocks (~400/200 ms). Were frozen #defines (40/20,
+     * correct only at hop=160/sr=16000); computed live here. */
+    m->startup_hops = aec3_ms_to_hops(400.0f, hop_size, sample_rate);
+    m->reset_hops = aec3_ms_to_hops(200.0f, hop_size, sample_rate);
 }
 
 void fq_reset(FilteringQualityAnalyzer *m) {
@@ -63,9 +69,9 @@ void fq_update(FilteringQualityAnalyzer *m,
             m->convergence_hops_counter += 1;
     }
 
-    startup_ok = m->filter_update_blocks_since_start > FQ_STARTUP_HOPS;
+    startup_ok = m->filter_update_blocks_since_start > m->startup_hops;
     reset_ok = startup_ok &&
-               (m->filter_update_blocks_since_reset > FQ_RESET_HOPS);
+               (m->filter_update_blocks_since_reset > m->reset_hops);
     usable = startup_ok && reset_ok;
     /* Gate 3: convergence ever seen OR external delay present (AEC3 default). */
     gate3 = external_delay_present || m->convergence_seen;
@@ -86,10 +92,10 @@ int fq_reset_blocks(const FilteringQualityAnalyzer *m) {
 }
 
 int fq_gate1_pass(const FilteringQualityAnalyzer *m) {
-    return (m->filter_update_blocks_since_start > FQ_STARTUP_HOPS) ? 1 : 0;
+    return (m->filter_update_blocks_since_start > m->startup_hops) ? 1 : 0;
 }
 
 int fq_gate2_pass(const FilteringQualityAnalyzer *m) {
-    return ((m->filter_update_blocks_since_start > FQ_STARTUP_HOPS) &&
-            (m->filter_update_blocks_since_reset > FQ_RESET_HOPS)) ? 1 : 0;
+    return ((m->filter_update_blocks_since_start > m->startup_hops) &&
+            (m->filter_update_blocks_since_reset > m->reset_hops)) ? 1 : 0;
 }

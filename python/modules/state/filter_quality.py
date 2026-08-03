@@ -6,20 +6,19 @@ hop-rescaled thresholds.
 
 The 4 gates (all must pass for the linear estimate to be usable):
   1. Sufficient data since startup: filter_update_blocks_since_start >
-     0.4 * kNumBlocksPerSecond  (AEC3 ~100 blocks ~400 ms -> our 40 hops).
+     0.4 * kNumBlocksPerSecond  (AEC3 ~100 blocks, ~400 ms wall-clock).
   2. Sufficient data since last reset: filter_update_blocks_since_reset >
-     0.2 * kNumBlocksPerSecond  (AEC3 ~50 blocks ~200 ms -> our 20 hops).
+     0.2 * kNumBlocksPerSecond  (AEC3 ~50 blocks, ~200 ms wall-clock).
   3. Convergence ever seen OR external delay present.
   4. NOT in transparent mode.
+
+Both hop counts are computed at construction time from the live hop_size/
+sample_rate (see __init__), not a fixed hop assumption.
 """
 from typing import Optional
 
-from ._constants import HOPS_PER_SECOND
+from .. import aec3_scale as _aec3_scale
 from ..delay.delay_types import DelayEstimate
-
-
-_STARTUP_HOPS = int(0.4 * HOPS_PER_SECOND)  # AEC3 0.4*250=100 blocks (~400 ms) -> 40 hops
-_RESET_HOPS = int(0.2 * HOPS_PER_SECOND)    # AEC3 0.2*250=50 blocks (~200 ms) -> 20 hops
 
 
 class FilteringQualityAnalyzer:
@@ -27,6 +26,8 @@ class FilteringQualityAnalyzer:
         self,
         *,
         use_linear_filter: bool = True,
+        hop_size: int = 160,
+        sample_rate: int = 16000,
     ) -> None:
         self._use_linear_filter = bool(use_linear_filter)
         self._overall_usable = False
@@ -36,6 +37,11 @@ class FilteringQualityAnalyzer:
         # Counter retained for diagnostic readers (always increments with
         # convergence_seen; no behaviour gate consumes it).
         self._convergence_hops_counter = 0
+        # AEC3 ~100/50 blocks (~400/200 ms). Was module-level constants
+        # (`HOPS_PER_SECOND` from state/_constants.py, baked at the stale
+        # hop=160/sr=16000 assumption); computed live here instead.
+        self._startup_hops = _aec3_scale.ms_to_hops(400.0, hop_size, sample_rate)
+        self._reset_hops = _aec3_scale.ms_to_hops(200.0, hop_size, sample_rate)
 
     def reset(self) -> None:
         self._overall_usable = False
@@ -61,8 +67,8 @@ class FilteringQualityAnalyzer:
             self._convergence_seen = True
             self._convergence_hops_counter += 1
 
-        startup_ok = self._filter_update_blocks_since_start > _STARTUP_HOPS
-        reset_ok = startup_ok and self._filter_update_blocks_since_reset > _RESET_HOPS
+        startup_ok = self._filter_update_blocks_since_start > self._startup_hops
+        reset_ok = startup_ok and self._filter_update_blocks_since_reset > self._reset_hops
         usable = startup_ok and reset_ok
         # Gate 3: convergence ever seen OR external delay present (AEC3 default).
         gate3 = (external_delay is not None) or self._convergence_seen
@@ -83,8 +89,8 @@ class FilteringQualityAnalyzer:
         return self._filter_update_blocks_since_reset
 
     def gate1_pass(self) -> bool:
-        return self._filter_update_blocks_since_start > _STARTUP_HOPS
+        return self._filter_update_blocks_since_start > self._startup_hops
 
     def gate2_pass(self) -> bool:
-        return (self._filter_update_blocks_since_start > _STARTUP_HOPS
-                and self._filter_update_blocks_since_reset > _RESET_HOPS)
+        return (self._filter_update_blocks_since_start > self._startup_hops
+                and self._filter_update_blocks_since_reset > self._reset_hops)

@@ -12,6 +12,7 @@
 #include <string.h>
 #include "fast_math.h"
 #include "aec_simd_kernels.h"
+#include "aec3_scale.h"
 
 #define PSD_SCALE (32768.0 * 32768.0)   /* int16 max^2 (Python _PSD_SCALE) */
 
@@ -85,6 +86,15 @@ void aec3_post_init(Aec3Post *p, const Aec3PostConfig *cfg,
     p->trace.aec3_converged = 0;
     p->trace.far_active = 0;
     p->trace.gain_mean = 0.0f;
+    /* Convergence-flags y2 threshold (step 4 below): was a bare literal
+     * 3.73e-4f = 50^2*64/32768^2, correct only at the legacy hop=160
+     * grid but compared against y2_time summed over the LIVE hop_size.
+     * Rescaled live via the same helper suppression_gain.c already uses
+     * for this identical AEC3 constant (aec3_block_energy_scale is a pure
+     * sample-count ratio -- hop_size only, no sample_rate). Mirrors
+     * orchestrator.py's _y2_threshold. */
+    p->y2_thr = aec3_block_energy_scale(50.0f * 50.0f * 64.0f, cfg->hop_size)
+              / (32768.0f * 32768.0f);
     p->fft = fft;
     p->synth_window = synth_window;
     p->sqrt2_sin_lut = sqrt2_sin_lut;
@@ -479,7 +489,7 @@ int aec3_post_run(Aec3Post *p,
     {
         float y2_time = sum_sq_f32_pairwise(in->near_end, (size_t)hop);
         float e2_refined = sum_sq_f32_pairwise(in->raw_output, (size_t)hop);
-        float y2_thr = 3.73e-4f;
+        float y2_thr = p->y2_thr;
         float e2_coarse = 0.0f;
         int refined_conv, coarse_conv = 0;
         int aec3_converged;

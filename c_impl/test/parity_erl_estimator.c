@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
         double   exp_erl_td;
 
         ErlEstimator e;
-        erl_estimator_init(&e, startup_hops, n_bins, 160, erl_st, hold_st);
+        erl_estimator_init(&e, startup_hops, n_bins, 160, 16000, erl_st, hold_st);
 
         /* x2_min parity (init derives it from aec3_per_bin_psd_threshold). */
         if (e.x2_min != x2_min) {

@@ -41,6 +41,11 @@ extern "C" {
 
 typedef struct PBFDAF {
     int     hop_size;
+    int     sample_rate;       /* drives every wall-clock-rescaled field below
+                                 * (initial_state_threshold_hops here;
+                                 * PBFDKF's leakage rates and its
+                                 * poor_excitation_counter reset, via
+                                 * base.sample_rate) */
     int     block_size;        /* 2 * hop_size */
     int     fft_size;          /* next pow2 >= block_size */
     int     n_partitions;
@@ -148,7 +153,7 @@ typedef struct PBFDAF {
  * whose FFT calls would silently no-op on the NULL handle. */
 int    pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size,
-                    int with_process_scratch);
+                    int with_process_scratch, int sample_rate);
 size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
                            int with_process_scratch);
 /* F04: returns 0 on success, -1 if the pool base/size checks reject the
@@ -157,7 +162,7 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
 int    pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
                            float mu, float delta, int hop_size,
-                    int with_process_scratch);
+                    int with_process_scratch, int sample_rate);
 void pbfdaf_free(PBFDAF* p);
 void pbfdaf_reset(PBFDAF* p);
 
@@ -236,14 +241,15 @@ typedef struct PBFDKF {
 /* F04: returns 0 on success, -1 if the nested pbfdaf_init() (base filter's
  * fft_create()) failed (OOM). */
 int    pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
-                    float mu, float delta, int hop_size);
+                    float mu, float delta, int hop_size, int sample_rate);
 size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size);
 /* F04: returns 0 on success, -1 if the pool base/size checks reject the
  * inputs (F05/F07, nothing written to `mem`) or the nested pbfdaf_init_
  * static() (base filter's fft_init()) failed (OOM). */
 int    pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
-                           float mu, float delta, int hop_size);
+                           float mu, float delta, int hop_size,
+                           int sample_rate);
 void pbfdkf_free(PBFDKF* p);
 void pbfdkf_reset(PBFDKF* p);
 

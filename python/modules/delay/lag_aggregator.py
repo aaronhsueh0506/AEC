@@ -2,10 +2,12 @@
 
 Mirrors docs/aec3_extracts/src/aec3/matched_filter_lag_aggregator.{cc,h}.
 
-Histogram window is 250 ESTIMATES, NOT a time constant. In AEC3 the
-aggregator is called per-block (4 ms) → 250 estimates ≈ 1 s of memory.
-In our port the aggregator is called per inner block (4 ms via the
-EchoPathDelayEstimator outer→inner adapter), so 250 stays verbatim.
+Histogram window is kNumBlocksPerSecond ESTIMATES (~1 s of memory), NOT a
+fixed time constant -- previously the bare literal 250 (correct only at
+sr=16000, since kNumBlocksPerSecond = sample_rate/64). The aggregator is
+called per inner 64-raw-sample block via the EchoPathDelayEstimator
+outer→inner adapter, so the window is now computed from the real
+sample_rate (see _num_blocks_per_second) instead of assumed to be 16 kHz.
 
 PreEchoLagAggregator ported from AEC3
 matched_filter_lag_aggregator.cc:130-189. When enabled (``detect_pre_echo=True``
@@ -27,11 +29,20 @@ from .delay_types import DelayEstimate, DelayQuality
 from .matched_filter import LagEstimate
 
 
-_HISTOGRAM_WINDOW = 250  # AEC3 verbatim — see file docstring
 _K_BLOCK_SIZE_LOG2 = 6   # AEC3 kBlockSizeLog2 (64 = 1<<6)
 _K_MATCHED_FILTER_WINDOW_SUB_BLOCKS = 32  # AEC3 kMatchedFilterWindowSizeSubBlocks
-_K_NUM_BLOCKS_PER_SECOND = 250  # AEC3 kNumBlocksPerSecond (16000/64)
 _PRE_ECHO_HISTOGRAM_DATA_NOT_UPDATED = -1
+
+
+def _num_blocks_per_second(sample_rate: int) -> int:
+    """AEC3 kNumBlocksPerSecond = sample_rate / kBlockSize(=64), i.e. how many
+    64-raw-sample inner blocks this class is updated on per wall-clock
+    second. Was the bare literal 250 (== 16000/64), correct only at
+    sr=16000 -- e.g. 750 at 48000, not 250. aggregate() is called once per
+    EchoPathDelayEstimator inner block (_AEC3_BLOCK_SIZE=64 raw samples),
+    so this -- not hop_size -- is the right basis, matching how
+    ClockdriftDetector's own stability counter was fixed."""
+    return max(1, round(sample_rate / 64.0))
 
 
 def _get_down_sampling_block_size_log2(down_sampling_factor: int) -> int:
@@ -64,9 +75,10 @@ class _HighestPeakAggregator:
     """Ring of recent winner lags + per-lag histogram. ``candidate`` is the
     argmax bin index. Mirrors HighestPeakAggregator in the .cc file."""
 
-    def __init__(self, max_filter_lag: int) -> None:
+    def __init__(self, max_filter_lag: int, sample_rate: int = 16000) -> None:
         self._histogram = np.zeros(max_filter_lag + 1, dtype=np.int32)
-        self._ring = np.zeros(_HISTOGRAM_WINDOW, dtype=np.int32)
+        self._window = _num_blocks_per_second(sample_rate)
+        self._ring = np.zeros(self._window, dtype=np.int32)
         self._ring_index = 0
         self._candidate = -1
 
@@ -85,7 +97,7 @@ class _HighestPeakAggregator:
             lag = self._histogram.size - 1
         self._ring[self._ring_index] = lag
         self._histogram[lag] += 1
-        self._ring_index = (self._ring_index + 1) % _HISTOGRAM_WINDOW
+        self._ring_index = (self._ring_index + 1) % self._window
         self._candidate = int(np.argmax(self._histogram))
 
     def candidate(self) -> int:
@@ -109,14 +121,17 @@ class _PreEchoLagAggregator:
     the earliest high-confidence lag. After that, simple argmax.
     """
 
-    def __init__(self, max_filter_lag: int, down_sampling_factor: int) -> None:
+    def __init__(self, max_filter_lag: int, down_sampling_factor: int,
+                 sample_rate: int = 16000) -> None:
         self._block_size_log2 = _get_down_sampling_block_size_log2(down_sampling_factor)
         # histogram_size = ((max_filter_lag+1) * ds_factor) >> kBlockSizeLog2
         size = ((max_filter_lag + 1) * down_sampling_factor) >> _K_BLOCK_SIZE_LOG2
         if size <= 0:
             size = 1
         self._histogram = np.zeros(size, dtype=np.int32)
-        self._ring = np.full(_HISTOGRAM_WINDOW, _PRE_ECHO_HISTOGRAM_DATA_NOT_UPDATED,
+        self._num_blocks_per_second = _num_blocks_per_second(sample_rate)
+        self._window = self._num_blocks_per_second
+        self._ring = np.full(self._window, _PRE_ECHO_HISTOGRAM_DATA_NOT_UPDATED,
                              dtype=np.int32)
         self._ring_index = 0
         self._number_updates = 0
@@ -138,10 +153,10 @@ class _PreEchoLagAggregator:
             self._histogram[old] -= 1
         self._ring[self._ring_index] = pre_echo_block_size
         self._histogram[pre_echo_block_size] += 1
-        self._ring_index = (self._ring_index + 1) % _HISTOGRAM_WINDOW
+        self._ring_index = (self._ring_index + 1) % self._window
 
         # First 2 seconds (2 * kNumBlocksPerSecond) → earliest-lag bias.
-        if self._number_updates < _K_NUM_BLOCKS_PER_SECOND * 2:
+        if self._number_updates < self._num_blocks_per_second * 2:
             self._number_updates += 1
             window = _K_MATCHED_FILTER_WINDOW_SUB_BLOCKS
             penalty = 1.0
@@ -187,14 +202,17 @@ class MatchedFilterLagAggregator:
         delay_headroom_samples: int = 32,
         down_sampling_factor: int = 4,
         detect_pre_echo: bool = False,
+        sample_rate: int = 16000,
     ) -> None:
         self._thresholds = thresholds or DelaySelectionThresholds()
         if self._thresholds.initial > self._thresholds.converged:
             raise ValueError("thresholds.initial must be <= thresholds.converged")
         self._headroom = int(delay_headroom_samples // down_sampling_factor)
-        self._highest_peak = _HighestPeakAggregator(max_filter_lag=max_filter_lag)
+        self._highest_peak = _HighestPeakAggregator(
+            max_filter_lag=max_filter_lag, sample_rate=sample_rate
+        )
         self._pre_echo: Optional[_PreEchoLagAggregator] = (
-            _PreEchoLagAggregator(max_filter_lag, down_sampling_factor)
+            _PreEchoLagAggregator(max_filter_lag, down_sampling_factor, sample_rate=sample_rate)
             if detect_pre_echo else None
         )
         self._significant_candidate_found = False

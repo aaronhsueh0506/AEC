@@ -2,6 +2,7 @@
  * python/modules/state/filter_analyzer.py. See header for the parity contract.
  * Build with -ffp-contract=off. */
 #include "filter_analyzer.h"
+#include "aec3_scale.h"
 
 #include "aec_simd_kernels.h"
 
@@ -147,19 +148,26 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
         }
     }
 
-    return c->counter > FA_CONSISTENT_HOLD_HOPS;
+    return c->counter > c->consistent_hold_hops;
 }
 
 /* ------------------------------ FilterAnalyzer --------------------------- */
 void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
              float active_render_limit, int bounded_erl, float default_gain,
              float *abs_scratch, int abs_scratch_len,
-             float *render_sq_scratch, int render_sq_scratch_len) {
+             float *render_sq_scratch, int render_sq_scratch_len,
+             int hop_size, int sample_rate) {
+    m->hop_size = hop_size;
     m->active_render_threshold =
-        (active_render_limit * active_render_limit) * (float)FA_HOP_SAMPLES;
+        (active_render_limit * active_render_limit) * (float)hop_size;
     m->bounded_erl = bounded_erl ? 1 : 0;
     m->default_gain = default_gain;
     m->consistent.active_render_threshold = m->active_render_threshold;
+    /* AEC3 verbatim: 5s convergence threshold, 1.5s consistency hold. Were
+     * frozen #defines (500/150, correct only at hop=160/sr=16000); computed
+     * live here. */
+    m->convergence_threshold_hops = aec3_ms_to_hops(5000.0f, hop_size, sample_rate);
+    m->consistent.consistent_hold_hops = aec3_ms_to_hops(1500.0f, hop_size, sample_rate);
     cd_reset(&m->consistent);
     m->region_start = 0;
     m->region_end = 0;
@@ -195,7 +203,7 @@ void fa_reset(FilterAnalyzer *m) {
 
 /* filter_analyzer.cc:194-206. Cycles one block forward; wraps at end. */
 static void fa_set_region(FilterAnalyzer *m, int size) {
-    int block = FA_HOP_SAMPLES;
+    int block = m->hop_size;
     if (m->region_end >= size - 1) {
         m->region_start = 0;
     } else {
@@ -269,7 +277,7 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
      * satisfies `>` is observationally identical to the old unconditional
      * `+= 1` for every reachable state, while eliminating the eventual
      * signed overflow. */
-    if (m->blocks_since_reset <= FA_CONVERGENCE_THRESHOLD_HOPS)
+    if (m->blocks_since_reset <= m->convergence_threshold_hops)
         m->blocks_since_reset += 1;
     fa_set_region(m, size);
     fa_preprocess(m, filter_taps);
@@ -299,12 +307,12 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     if (best_sq > cur_sq) {
         m->peak_index = seg_lo + seg_amax;
     }
-    m->delay_blocks = m->peak_index / FA_HOP_SAMPLES;
+    m->delay_blocks = m->peak_index / m->hop_size;
 
     /* UpdateFilterGain (filter_analyzer.cc:142-159). AEC3 passes h_highpass_ to
      * UpdateFilterGain and reads filter_time_domain[peak_index] from it, so the
      * gain is |h_hpf[peak]| (matches filter_analyzer.py update()). */
-    sufficient = (m->blocks_since_reset > FA_CONVERGENCE_THRESHOLD_HOPS);
+    sufficient = (m->blocks_since_reset > m->convergence_threshold_hops);
     peak_abs = fabsf(h[m->peak_index]);
     if (sufficient && m->consistent_estimate) {
         m->gain = peak_abs;

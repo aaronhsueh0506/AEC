@@ -230,7 +230,7 @@ int main(int argc, char **argv) {
     float *lr = malloc((size_t)n_bins * sizeof(float));
     float *ree_scratch = malloc((size_t)n_bins * sizeof(float));
     ResidualEchoEstimator ree;
-    ree_init(&ree, n_bins, ree_hop, &em, ree_d[4], ree_d[5], ree_i[2],
+    ree_init(&ree, n_bins, ree_hop, 16000, &em, ree_d[4], ree_d[5], ree_i[2],
              ree_d[6], ree_d[7], ree_i[3], ree_d[8],
              ree_i[4], ree_i[10], ree_i[5], ree_i[6], ree_d[9], ree_d[10],
              ree_d[11], ree_i[7], ree_i[8], ree_i[9], ree_d[12],

@@ -22,9 +22,6 @@
 #ifndef INITIAL_STATE_H
 #define INITIAL_STATE_H
 
-/* 10 ms hop @ 16 kHz; helper for AEC3-second thresholds (modules/state/_constants.py) */
-#define INITIAL_STATE_HOPS_PER_SECOND 100
-
 typedef struct {
     int conservative;                       /* bool _conservative              */
     int initial_state_hops;                 /* int(initial_state_seconds*HPS)  */
@@ -34,9 +31,13 @@ typedef struct {
     int strong_not_saturated_render_blocks; /* int counter                     */
 } InitialState;
 
-/* conservative_initial_phase: 0/1 ; initial_state_seconds: config float (default 2.5) */
+/* conservative_initial_phase: 0/1 ; initial_state_seconds: config float (default 2.5) ;
+ * hop_size/sample_rate: live grid, used to compute initial_state_hops/
+ * conservative_hops via aec3_ms_to_hops() instead of the frozen hop=160/
+ * sr=16000 assumption the module-level HOPS_PER_SECOND=100 used to bake in. */
 void initial_state_init(InitialState *s, int conservative_initial_phase,
-                        float initial_state_seconds);
+                        float initial_state_seconds,
+                        int hop_size, int sample_rate);
 
 void initial_state_reset(InitialState *s);
 

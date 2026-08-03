@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
         if (!rdi(f, &n_frames) || !rdi(f, &max_part)) return 2;
 
         /* fresh estimator per case (matches the per-case AEC() instantiation) */
-        ree_init(&ree, n_bins, hop_size, &em, default_gain, tm_gain,
+        ree_init(&ree, n_bins, hop_size, 16000, &em, default_gain, tm_gain,
                  erle_onset_comp, reverb_decay, reverb_mild_scale,
                  reverb_enabled, reverb_tail_strength,
                  use_aec3_residual_noise_gate, use_stationarity_properties,

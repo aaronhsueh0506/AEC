@@ -22,11 +22,14 @@
 #include <string.h>
 
 void erl_estimator_init(ErlEstimator *e, int startup_phase_length_hops,
-                        int n_bins, int hop_size,
+                        int n_bins, int hop_size, int sample_rate,
                         float *erl_storage, int *hold_counters_storage) {
     int k;
     e->startup_hops = startup_phase_length_hops;
     e->n_bins = n_bins;
+    /* AEC3 1000 blocks (~4 s) hold-after-drop. Was a frozen #define (400,
+     * correct only at hop=160/sr=16000); computed live here. */
+    e->hold_hops = aec3_ms_to_hops(4000.0f, hop_size, sample_rate);
     /* self._x2_min = aec3_scale.per_bin_psd_threshold(_AEC3_X2_MIN, hop_size)
      * (ref_hop default 160; no-op at hop=160); float32 end-to-end. */
     e->x2_min = aec3_per_bin_psd_threshold(ERL_AEC3_X2_MIN, hop_size, 160);
@@ -78,7 +81,7 @@ void erl_estimator_update(ErlEstimator *e,
      * pre-offset (k-1 = (j+1)-1 = j). See aec_simd_kernels.h kernel 24's
      * header comment for the fusion-safety/masking argument. */
     sk_erl_bin_update_f32(e->erl + 1, e->hold_counters, x2 + 1, y2 + 1,
-                          e->x2_min, ERL_HOLD_HOPS, ERL_MIN_ERL,
+                          e->x2_min, e->hold_hops, ERL_MIN_ERL,
                           e->n_bins - 2);
 
     /* self._hold_counters -= 1, floored at INT_MIN (all n_bins-2 elements),
@@ -119,7 +122,7 @@ void erl_estimator_update(ErlEstimator *e,
             float y2_sum = f32_pairwise_sum(y2, (size_t)e->n_bins);
             float new_erl = y2_sum / x2_sum;          /* f32 */
             if (new_erl < e->erl_time_domain) {
-                e->hold_counter_time_domain = ERL_HOLD_HOPS;
+                e->hold_counter_time_domain = e->hold_hops;
                 e->erl_time_domain += 0.1f * (new_erl - e->erl_time_domain);
                 if (e->erl_time_domain < ERL_MIN_ERL) {
                     e->erl_time_domain = ERL_MIN_ERL;

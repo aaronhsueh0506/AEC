@@ -47,7 +47,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "oom\n"); return 2;
         }
 
-        filter_delay_init(&fd, delays_store, (int)headroom, (int)nch);
+        filter_delay_init(&fd, delays_store, (int)headroom, (int)nch, 160, 16000);
 
         /* init snapshot */
         if (!rd32(f, &init_min) || !rd32(f, &init_ext)) {

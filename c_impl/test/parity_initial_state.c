@@ -40,7 +40,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "short header cfg %d\n", c); return 2;
         }
 
-        initial_state_init(&s, cons, secs);
+        initial_state_init(&s, cons, secs, 160, 16000);
 
         /* constructor-derived thresholds must match the Python instance */
         if (s.initial_state_hops != thr_hops) {

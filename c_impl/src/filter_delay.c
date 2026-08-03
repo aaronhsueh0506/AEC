@@ -3,24 +3,34 @@
  * contract. Built with -ffp-contract=off for consistency with the rest of the
  * port (no float ops here, so it is a no-op for this TU). */
 #include "filter_delay.h"
+#include "aec3_scale.h"
 
 #include <stddef.h>  /* NULL */
 
 void filter_delay_init(FilterDelay *fd, int *delays_storage,
-                       int delay_headroom_samples, int num_capture_channels) {
+                       int delay_headroom_samples, int num_capture_channels,
+                       int hop_size, int sample_rate) {
     int c;
 
-    /* delay_headroom_blocks = int(delay_headroom_samples) // HOP_SAMPLES.
+    /* delay_headroom_blocks = int(delay_headroom_samples) // hop_size.
      * Python `//` is floor division; for the non-negative headroom (always
      * >= 0 in practice) C's `/` on non-negative ints is identical. Clamp to
-     * floor semantics defensively in case of a negative input. */
-    int blocks = delay_headroom_samples / FILTER_DELAY_HOP_SAMPLES;
+     * floor semantics defensively in case of a negative input. Was
+     * `/ FILTER_DELAY_HOP_SAMPLES` (frozen at 160); uses the live hop_size
+     * now (numerically inert either way while delay_headroom_samples stays
+     * well under any real hop_size, but no longer silently wrong if it
+     * ever isn't). */
+    int blocks = delay_headroom_samples / hop_size;
     if (delay_headroom_samples < 0 &&
-        blocks * FILTER_DELAY_HOP_SAMPLES != delay_headroom_samples) {
+        blocks * hop_size != delay_headroom_samples) {
         blocks -= 1;  /* floor toward -inf, matching Python `//` */
     }
 
     fd->delay_headroom_blocks = blocks;
+    /* AEC3 2 s (= 500 blocks) filter-adaptation threshold. Was a frozen
+     * #define (200, correct only at hop=160/sr=16000); computed live here. */
+    fd->filter_adaptation_threshold_hops =
+        aec3_ms_to_hops(2000.0f, hop_size, sample_rate);
     fd->num_channels = num_capture_channels;
     fd->filter_delays_blocks = delays_storage;
     for (c = 0; c < num_capture_channels; ++c) {
@@ -45,7 +55,7 @@ int filter_delay_update(FilterDelay *fd, const int *analyzer, int analyzer_len,
     }
 
     delay_estimator_unconverged =
-        blocks_with_proper_filter_adaptation < FILTER_ADAPTATION_THRESHOLD_HOPS;
+        blocks_with_proper_filter_adaptation < fd->filter_adaptation_threshold_hops;
 
     if (delay_estimator_unconverged && fd->external_delay.reported) {
         /* filter_delays_blocks[*] = delay_headroom_blocks */

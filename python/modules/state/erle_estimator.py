@@ -25,11 +25,12 @@ class ErleEstimator:
         max_erle_h: float = 1.5,
         use_onset_detection: bool = True,
         hop_size: int = 160,
+        sample_rate: int = 16000,
     ) -> None:
         self._startup_hops = int(startup_phase_length_hops)
         self._fullband = FullBandErleEstimator(
             min_erle=min_erle, max_erle_l=max_erle_l,
-            hop_size=hop_size,
+            hop_size=hop_size, sample_rate=sample_rate,
         )
         self._subband = SubbandErleEstimator(
             n_bins=n_bins,
@@ -38,6 +39,7 @@ class ErleEstimator:
             max_erle_h=max_erle_h,
             use_onset_detection=use_onset_detection,
             hop_size=hop_size,
+            sample_rate=sample_rate,
         )
         self._blocks_since_reset = 0
 

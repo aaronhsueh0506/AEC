@@ -90,8 +90,9 @@
 #include "erl_estimator.h"
 #include "filter_analyzer.h"
 
-/* AEC3 _ACTIVE_RENDER_BLOCKS = 80 (aec_state.py:45). */
-#define AEC_STATE_ACTIVE_RENDER_BLOCKS 80
+/* AEC3 200 blocks x 4 ms = 800 ms wall-clock. Was a frozen #define (80,
+ * correct only at hop=160/sr=16000); now computed live in aec_state_init()
+ * from cfg.hop_size/cfg.sample_rate -- see AecState.active_render_blocks. */
 
 /* Config knobs (mirrors AecStateConfig fields the C path uses). */
 typedef struct {
@@ -102,13 +103,19 @@ typedef struct {
     int    num_capture_channels;       /* default 1 */
     int    echo_can_saturate;          /* default 1 */
     int    n_bins;                     /* default 257 */
-    int    erle_startup_hops;          /* default 200 */
+    /* default -1 == AEC_STATE_STARTUP_HOPS_AUTO (aec_state.c): "not
+     * explicitly set" -> resolved live to the grid-correct hop count
+     * (aec3_ms_to_hops(2000ms, hop_size, sample_rate); 200 at the legacy
+     * hop=160/sr=16000 grid). Any other value, INCLUDING 200 itself, is
+     * honored verbatim -- -1 (not a reachable hop count) is used so no
+     * legitimate explicit value can ever collide with the "unset" marker. */
+    int    erle_startup_hops;          /* default -1 (auto) */
     float  erle_min;                   /* default 1.0f */
     float  erle_max_l;                 /* default 4.0f */
     float  erle_max_h;                 /* default 1.5f */
-    int    erl_startup_hops;           /* default 200 */
+    int    erl_startup_hops;           /* default -1 (auto); see erle_startup_hops */
     int    hop_size;                   /* default 160 */
-    int    sample_rate;                /* default 16000 (unused at this layer) */
+    int    sample_rate;                /* default 16000 */
     int    enable_filter_analyzer;     /* default 1 (BALANCED) */
     int    filter_taps_size;           /* full impulse-response length (FilterAnalyzer) */
     /* Capacity (in floats) of st->fa_abs_scratch -- the FilterAnalyzer
@@ -165,6 +172,7 @@ typedef struct {
     int strong_not_saturated_render_blocks;
     int blocks_with_active_render;
     int capture_signal_saturation;                /* bool */
+    int active_render_blocks;   /* live-computed, was AEC_STATE_ACTIVE_RENDER_BLOCKS=80 */
 
     AecStateStorage st;
 } AecState;

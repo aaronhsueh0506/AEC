@@ -289,7 +289,8 @@ class AEC:
                 n_partitions=n_partitions,
                 mu=self.config.mu,
                 delta=self.config.delta,
-                hop_size=self._internal_hop
+                hop_size=self._internal_hop,
+                sample_rate=self.config.sample_rate
             )
             self.filter.enable_td_constraint = self.config.enable_td_constraint
             self.filter._constraint_round_robin = self.config.constraint_round_robin
@@ -591,7 +592,8 @@ class AEC:
                 n_partitions=self.filter.n_partitions,
                 mu=shadow_mu,
                 delta=self.config.delta,
-                hop_size=self.filter.hop_size
+                hop_size=self.filter.hop_size,
+                sample_rate=self.config.sample_rate
             )
             self.shadow_filter.enable_td_constraint = self.config.enable_td_constraint
             self.shadow_filter._constraint_round_robin = self.config.constraint_round_robin
@@ -1834,18 +1836,24 @@ class AEC:
                                     'aec3_reset_res_on_rescue_edge_fired', 0
                                 ) + 1
                             )
-                    # Track F: sustained leakage_div gate fires after 5
-                    # consecutive hops (50 ms) with >50% bins on diverged
-                    # leakage — covers the DT-onset window before
-                    # coarse_reset_hangover kicks in (~300 ms later).
+                    # Track F: sustained leakage_div gate fires after ~50 ms
+                    # of consecutive hops with >50% bins on diverged leakage
+                    # — covers the DT-onset window before coarse_reset_hangover
+                    # kicks in (~300 ms later). Sustain threshold was a bare
+                    # literal 5 (= 50 ms only at the legacy hop=160/sr=16000
+                    # grid); rescaled live like the poor_coarse trigger above.
+                    # Anti-windup clamp scales proportionally (was 2x the
+                    # sustain threshold).
                     _ld_frac = float(getattr(
                         self.filter, '_last_leakage_div_frac', 0.0))
+                    _ld_sustain_hops = _aec3_scale.ms_to_hops(
+                        50.0, self.config.hop_size, self.config.sample_rate)
                     _ld_ctr = getattr(
                         self, '_leakage_div_sustained_counter', 0)
-                    _ld_ctr = (min(_ld_ctr + 1, 10) if _ld_frac > 0.5
+                    _ld_ctr = (min(_ld_ctr + 1, 2 * _ld_sustain_hops) if _ld_frac > 0.5
                                else max(_ld_ctr - 1, 0))
                     self._leakage_div_sustained_counter = _ld_ctr
-                    _dt_leakage_gate = (_ld_ctr >= 5)
+                    _dt_leakage_gate = (_ld_ctr >= _ld_sustain_hops)
                     if getattr(self, '_coarse_reset_hangover', 0) > 0:
                         self._coarse_reset_hangover -= 1
                         self.filter._disallow_leakage_diverged = True
@@ -2138,7 +2146,13 @@ class AEC:
                     jump_ratio = track_err_pwr / (self._wn_err_baseline + 1e-10)
 
                     if jump_ratio > 1.5:
-                        self._stat_dt_hangover = 80  # 800ms protection window (covers syllable gaps)
+                        # 800ms protection window (covers syllable gaps). Was
+                        # a bare literal 80 (= 800ms only at the legacy
+                        # hop=160/sr=16000 grid); rescaled live so the window
+                        # stays 800ms at any grid.
+                        from . import aec3_scale as _aec3_scale_dt
+                        self._stat_dt_hangover = _aec3_scale_dt.ms_to_hops(
+                            800.0, self.config.hop_size, self.config.sample_rate)
 
                     if self._stat_dt_hangover > 0:
                         is_stationary_dt = True
@@ -3015,9 +3029,18 @@ class AEC:
         # shadow's echo_time — we approximate via shadow.error_spec by inverse
         # FFT, but cheaper to use spectrum energies (Parseval-equivalent for
         # the ratio, only threshold needs adjustment).
+        from . import aec3_scale as _aec3_scale_y2
         _y2_time = float(np.sum(near_end.astype(np.float64) ** 2))
         _e2_refined = float(np.sum(raw_output.astype(np.float64) ** 2))
-        _y2_threshold = 3.73e-4  # 50²·64 / 32768² · (160/64)
+        # Was a bare literal 3.73e-4 = 50²·64 / 32768² · (160/64) -- frozen at
+        # the legacy hop=160/sr=16000 grid, but _y2_time above is summed over
+        # the LIVE hop (self.config.hop_size), so the threshold no longer
+        # matched the sample count being summed at any of today's real grids.
+        # Rescaled live via the same helper suppression_gain.py already uses
+        # for this identical AEC3 constant (block_energy_scale).
+        _y2_threshold = _aec3_scale_y2.block_energy_scale(
+            50.0 * 50.0 * 64.0, self.config.hop_size
+        ) / (32768.0 ** 2)
         # Relaxed gate uses lower-level convergence threshold 20²·hop
         # (kConvergenceThresholdLowLevel in subtractor_output_analyzer.cc:45).
         _y2_threshold_low = _y2_threshold * (20.0 / 50.0) ** 2  # = 5.97e-5

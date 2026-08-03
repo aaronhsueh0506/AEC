@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
     far  = malloc((size_t)hop * sizeof(float));
     if (!near || !far) { fprintf(stderr, "oom\n"); return 2; }
 
-    delay_aec3_init(&d);
+    delay_aec3_init(&d, 16000);
 
     for (i = 0; i < n_hops; ++i) {
         int    exp_delay, exp_nupd, exp_solid;

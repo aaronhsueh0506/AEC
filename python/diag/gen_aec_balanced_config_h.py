@@ -400,6 +400,12 @@ def emit_legacy_block(w, cap):
     w('/* AecState config */\n')
     w('#define AEC3B_ST_NUM_CAPTURE_CHANNELS %d\n' % v['ST_NUM_CAPTURE_CHANNELS'])
     w('#define AEC3B_ST_ENABLE_FILTER_ANALYZER %d\n' % v['ST_ENABLE_FILTER_ANALYZER'])
+    # -1 == AEC_STATE_STARTUP_HOPS_AUTO (aec_state.c): the BALANCED preset
+    # never overrides erle_startup_hops/erl_startup_hops, so this is always
+    # the "auto" sentinel, resolved live per-grid at aec_state_init() time
+    # -- NOT a literal hop count. Must stay the sentinel value (not a real
+    # hop count like 200) so aec_create()'s multi-rate (8k/16k/48k) call
+    # sites keep auto-scaling instead of freezing at a 16 kHz-only constant.
     w('#define AEC3B_ST_ERLE_STARTUP_HOPS %d\n' % v['ST_ERLE_STARTUP_HOPS'])
     w('#define AEC3B_ST_ERL_STARTUP_HOPS %d\n' % v['ST_ERL_STARTUP_HOPS'])
     w('#define AEC3B_ST_ECHO_CAN_SATURATE %d\n' % v['ST_ECHO_CAN_SATURATE'])

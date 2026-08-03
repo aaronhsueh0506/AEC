@@ -40,7 +40,7 @@ class LegacyDelayShim:
         # estimator (which carries its own internal smoothing + cadence).
         self._legacy_kwargs = legacy_kwargs
 
-        self._estimator = EchoPathDelayEstimator()
+        self._estimator = EchoPathDelayEstimator(sample_rate=self._sample_rate)
         self._latest_estimate: Optional[DelayEstimate] = None  # raw 16 kHz samples
         self._estimate_count = 0
         self._latest_variability: Optional[EchoPathVariability] = None

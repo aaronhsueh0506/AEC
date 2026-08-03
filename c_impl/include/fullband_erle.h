@@ -33,7 +33,11 @@
  * Time constants (see fullband_erle.py docstring):
  *   POINTS_TO_ACCUMULATE = 6 (a count, NOT rescaled).
  *   BLOCKS_TO_HOLD_ERLE  = int(0.4 * HOPS_PER_SECOND) = 40 hops.
- *   0.0004 max/min envelope per update — kept verbatim (NOT rescaled).
+ *   0.0004 max/min envelope forget step — IS AEC3-native (verbatim literal
+ *   + comment in fullband_erle_estimator.cc's UpdateMaxMin(), same 6-point
+ *   cadence as quality_alpha/td_alpha); now rescaled live like its siblings
+ *   (an earlier "kept verbatim, not rescaled" claim here was a provenance
+ *   error, corrected 2026-08-02).
  */
 #ifndef FULLBAND_ERLE_H
 #define FULLBAND_ERLE_H
@@ -48,21 +52,25 @@ float fb_erle_pairwise_sum(const float *a, size_t n);
 /* ── Constants mirrored from fullband_erle.py ───────────────────────────────── */
 #define FBERLE_EPSILON              1.0e-3f
 #define FBERLE_POINTS_TO_ACCUMULATE 6
-/* int(0.4 * HOPS_PER_SECOND), HOPS_PER_SECOND = 100 */
-#define FBERLE_BLOCKS_TO_HOLD_ERLE  40
 /* AEC3 source value; per_bin_psd_threshold(.., hop=160, ref=160) is a no-op.
  * Passed to the shared aec3_per_bin_psd_threshold() helper (aec3_scale.h/.c,
  * itself float32-typed and outside this conversion's file set). */
 #define FBERLE_X2_BAND_ENERGY_THRESHOLD 44015068.0f
+/* AEC3-native forget-step literal (see header comment above); rescaled live
+ * in fb_erle_init() and stored into ErleInstantaneous.maxmin_forget below,
+ * not used directly at the point of use any more. */
 #define FBERLE_MAXMIN_FORGET        0.0004f
-#define FBERLE_QUALITY_ALPHA        0.07f
-#define FBERLE_TD_ALPHA             0.05f
+/* blocks_to_hold_erle/quality_alpha/td_alpha were frozen #defines (40 hops,
+ * 0.07f, 0.05f -- correct only at the legacy hop=160/sr=16000 grid) and are
+ * now computed live in fb_erle_init() from hop_size/sample_rate instead;
+ * see the struct fields below. */
 
 /* ── _ErleInstantaneous (FullBandErleEstimator::ErleInstantaneous) ──────────── */
 typedef struct {
     int    clamp_zero;          /* _clamp_zero */
     int    clamp_one;           /* _clamp_one  */
     float  quality_alpha;       /* _quality_alpha */
+    float  maxmin_forget;       /* live-computed AEC3-native forget step */
     int    has_erle_log2;       /* _erle_log2 is not None */
     float  erle_log2;           /* _erle_log2 (valid only when has_erle_log2) */
     float  inst_quality_estimate; /* _inst_quality_estimate */
@@ -80,7 +88,9 @@ typedef struct {
                                        * result of the float32 threshold helper) */
     float  min_erle_log2;            /* log2(min_erle + EPSILON) */
     float  max_erle_lf_log2;         /* log2(max_erle_l + EPSILON) */
-    float  td_alpha;                 /* _td_alpha (0.05f) */
+    float  td_alpha;                 /* _td_alpha, live-computed */
+    float  quality_alpha;            /* _quality_alpha, live-computed */
+    int    blocks_to_hold_erle;      /* _blocks_to_hold_erle, live-computed */
     int    hold_counter_inst_erle;   /* _hold_counter_inst_erle */
     float  erle_time_domain_log2;    /* _erle_time_domain_log2 */
     ErleInstantaneous inst;          /* _instantaneous_erle */
@@ -89,9 +99,12 @@ typedef struct {
 } FullBandErleEstimator;
 
 /* Initialise. hop_size scales x2_band_energy_threshold via the per-bin PSD rule
- * (no-op at hop_size=160). min_erle / max_erle_l mirror the Python kwargs. */
+ * (no-op at hop_size=160). min_erle / max_erle_l mirror the Python kwargs.
+ * sample_rate (with hop_size) drives the live blocks_to_hold_erle/
+ * quality_alpha/td_alpha computation. */
 void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
-                        float min_erle, float max_erle_l, int hop_size);
+                        float min_erle, float max_erle_l, int hop_size,
+                        int sample_rate);
 
 void fb_erle_reset(FullBandErleEstimator *s);
 

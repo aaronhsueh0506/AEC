@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
 
     /* Build PBFDKF exactly as the orchestrator does: block_size = 2*hop. */
     PBFDKF flt;
-    pbfdkf_init(&flt, block_size, N, mu, delta, hop);
+    pbfdkf_init(&flt, block_size, N, mu, delta, hop, 16000);
     /* v3.24.0 round-robin TD constraint (config default ON; aec.c:432 sets it on
      * the production main filter). pbfdkf_init defaults it OFF, so the isolated
      * replay MUST enable it to match the golden (generated via aec.process with

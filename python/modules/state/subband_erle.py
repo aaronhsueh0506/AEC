@@ -11,12 +11,9 @@ Rate notes:
 """
 import numpy as np
 
-from ._constants import HOPS_PER_SECOND
 from .. import aec3_scale as _aec3_scale
 
 _AEC3_X2_BAND_ENERGY_THRESHOLD = 44015068.0  # AEC3 source value — scaled per hop in __init__
-_BLOCKS_TO_HOLD_ERLE = int(0.4 * HOPS_PER_SECOND)            # AEC3 100 (~400 ms) -> 40 hops
-_BLOCKS_FOR_ONSET_DETECTION = _BLOCKS_TO_HOLD_ERLE + int(0.6 * HOPS_PER_SECOND)  # AEC3 250 (~1 s) -> 100 hops
 _POINTS_TO_ACCUMULATE = 6
 _UNBOUNDED_ERLE_MAX = 100000.0
 
@@ -45,16 +42,41 @@ class SubbandErleEstimator:
         use_onset_detection: bool = True,
         use_min_erle_during_onsets: bool = True,
         hop_size: int = 160,
+        sample_rate: int = 16000,
     ) -> None:
         self._n_bins = int(n_bins)
         self._min_erle = float(min_erle)
         self._max_erle = _set_max_erle_bands(self._n_bins, max_erle_l, max_erle_h)
         self._use_onset_detection = bool(use_onset_detection)
         self._use_min_erle_during_onsets = bool(use_min_erle_during_onsets)
-        # AEC3 subband EMA constants are per-4ms-block; our update fires per hop.
-        self._alpha_up = 0.05
-        self._alpha_down = 0.1
-        self._onset_release_decay = 0.97
+        # AEC3 kBlocksToHoldErle=100 (~400 ms) / kBlocksForOnsetDetection=250
+        # (~1 s). Was module-level constants baked at the stale hop=160/
+        # sr=16000 assumption; computed live here instead.
+        self._blocks_to_hold_erle = _aec3_scale.ms_to_hops(400.0, hop_size, sample_rate)
+        self._blocks_for_onset_detection = _aec3_scale.ms_to_hops(1000.0, hop_size, sample_rate)
+        # AEC3 subband EMA constants are per-4ms-block. alpha_up/alpha_down
+        # actually fire once per _POINTS_TO_ACCUMULATE(=6)-hop accumulation
+        # window (see _update_bands' `if self._num_points !=
+        # _POINTS_TO_ACCUMULATE: return` gate below) -- NOT every hop.
+        # onset_release_decay DOES fire every hop
+        # (_decrease_erle_per_band_for_low_render_signals is called
+        # unconditionally from update(), ungated by the accumulator).
+        # Both our accumulation window (6 hops) and AEC3's reference update
+        # period (6 native 4ms blocks = 24ms) carry the same factor of 6,
+        # so it cancels: rescale by passing plain hop_size against
+        # per_block_ema_alpha_to_per_hop's fixed single-native-block (4ms)
+        # denominator -- NOT 6*hop_size (an earlier fix on 2026-08-01 passed
+        # 6*hop_size, which compares 6 real hops against only 1 native
+        # block, inflating the exponent 6x too far; caught in review).
+        self._alpha_up = _aec3_scale.per_block_ema_alpha_to_per_hop(
+            0.05, hop_size, sample_rate
+        )
+        self._alpha_down = _aec3_scale.per_block_ema_alpha_to_per_hop(
+            0.1, hop_size, sample_rate
+        )
+        self._onset_release_decay = 1.0 - _aec3_scale.per_block_ema_alpha_to_per_hop(
+            1.0 - 0.97, hop_size, sample_rate
+        )
         self._erle = np.full(self._n_bins, self._min_erle, dtype=np.float32)
         self._erle_onset_compensated = np.full(self._n_bins, self._min_erle, dtype=np.float32)
         self._erle_unbounded = np.full(self._n_bins, self._min_erle, dtype=np.float32)
@@ -178,7 +200,7 @@ class SubbandErleEstimator:
                         self._erle_during_onsets[k] = float(
                             np.clip(v, self._min_erle, self._max_erle[k])
                         )
-                self._hold_counters[k] = _BLOCKS_FOR_ONSET_DETECTION
+                self._hold_counters[k] = self._blocks_for_onset_detection
         # Per-bin smoothed ERLE update.
         for k in range(1, self._n_bins - 1):
             if not is_erle_updated[k]:
@@ -216,7 +238,7 @@ class SubbandErleEstimator:
         for k in range(1, self._n_bins - 1):
             self._hold_counters[k] -= 1
             if self._hold_counters[k] <= (
-                _BLOCKS_FOR_ONSET_DETECTION - _BLOCKS_TO_HOLD_ERLE
+                self._blocks_for_onset_detection - self._blocks_to_hold_erle
             ):
                 if self._erle_onset_compensated[k] > self._erle_during_onsets[k]:
                     self._erle_onset_compensated[k] = max(

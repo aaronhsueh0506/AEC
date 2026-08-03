@@ -118,6 +118,14 @@ def capture_sg_config(sg):
     )
 
 
+def _hops_or_auto(v):
+    """AecStateConfig.erle_startup_hops/erl_startup_hops are Optional[int]
+    ("None" == auto-resolve for the live grid). The int32 golden wire format
+    has no None, so mirror the C-side AEC_STATE_STARTUP_HOPS_AUTO sentinel
+    (-1, aec_state.c) here instead."""
+    return -1 if v is None else int(v)
+
+
 def capture_state_config(state):
     sc = state._config
     fa = state._filter_analyzer
@@ -126,8 +134,8 @@ def capture_state_config(state):
         num_capture_channels=int(sc.num_capture_channels),
         hop_size=int(sc.hop_size),
         enable_filter_analyzer=int(fa is not None),
-        erle_startup_hops=int(sc.erle_startup_hops),
-        erl_startup_hops=int(sc.erl_startup_hops),
+        erle_startup_hops=_hops_or_auto(sc.erle_startup_hops),
+        erl_startup_hops=_hops_or_auto(sc.erl_startup_hops),
         echo_can_saturate=int(sc.echo_can_saturate),
         use_linear_filter=int(sc.use_linear_filter),
         conservative_initial_phase=int(sc.conservative_initial_phase),

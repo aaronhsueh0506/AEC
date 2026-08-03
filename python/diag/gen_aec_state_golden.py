@@ -125,6 +125,15 @@ def _w_f32arr(f, a):
     np.asarray(a, dtype=np.float32).ravel().tofile(f)
 
 
+def _hops_or_auto(v):
+    """AecStateConfig.erle_startup_hops/erl_startup_hops are Optional[int]
+    ("None" == auto-resolve for the live grid). The int32 golden wire format
+    has no None, so mirror the C-side AEC_STATE_STARTUP_HOPS_AUTO sentinel
+    (-1, aec_state.c) here instead. Same convention as the sibling
+    gen_aec3_post_run_golden.py's _hops_or_auto()."""
+    return -1 if v is None else int(v)
+
+
 def _capture_inputs_outputs(state, kwargs):
     """Snapshot inputs (the kwargs dict) + post-update query outputs."""
     n_bins = state._config.n_bins
@@ -303,9 +312,17 @@ def main():
     first_usable = next((i for i, r in enumerate(upd_rows)
                          if r['out_usable']), -1)
 
+    # erle_startup_hops/erl_startup_hops are Optional[int] ("None" == auto-
+    # resolve for the live grid). The int32 golden wire format has no None,
+    # so mirror the C-side AEC_STATE_STARTUP_HOPS_AUTO sentinel (-1,
+    # aec_state.c) here instead -- same convention as gen_aec3_post_run_golden.py's
+    # _hops_or_auto().
+    erle_startup_wire = _hops_or_auto(sc.erle_startup_hops)
+    erl_startup_wire = _hops_or_auto(sc.erl_startup_hops)
+
     with open(out, 'wb') as f:
         _w_i32(f, n_bins, filter_taps_size, sc.num_capture_channels, sc.hop_size,
-               enable_fa, sc.erle_startup_hops, sc.erl_startup_hops,
+               enable_fa, erle_startup_wire, erl_startup_wire,
                int(sc.echo_can_saturate), int(sc.use_linear_filter),
                int(sc.conservative_initial_phase))
         _w_f64(f, sc.initial_state_seconds)

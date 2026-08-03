@@ -699,6 +699,19 @@ TEST_CS_TARGET = $(BIN_DIR)/test_counter_saturation
 SELFTEST_SRC    = $(TEST_DIR)/simd_selftest_aec.c
 SELFTEST_TARGET = $(BIN_DIR)/simd_selftest_aec
 
+# Permanent delay_aec3_reset() consistency regression test (Codex review
+# 2026-08-03: reset() used to clear only the outer DaResample48 sidechain,
+# leaving the inner DaEstimator's decimators/ring buffer/pending samples
+# stale). Needs only delay_aec3.c + its aec3_scale.c helper dependency --
+# NOT the full Aec type/audio_common archive (unlike test-counter-saturation)
+# -- so, like `selftest` above, this target lives outside the two-phase
+# AC_LIB dispatch and reuses the same $(OBJ_DIR)/%.o pattern rules (sharing
+# objects with a full `all`/`lib` build under the same CFG_SIG, if present).
+TEST_DR_SRCS   = $(SRC_DIR)/delay_aec3.c $(SRC_DIR)/aec3_scale.c $(TEST_DIR)/test_delay_reset.c
+TEST_DR_OBJS   = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(filter $(SRC_DIR)/%.c,$(TEST_DR_SRCS))) \
+                  $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(filter $(TEST_DIR)/%.c,$(TEST_DR_SRCS)))
+TEST_DR_TARGET = $(BIN_DIR)/test_delay_reset
+
 # --- CFG_SIG collision guard + directory creation (round-3 review B01) -----
 # Single order-only prerequisite for every compile/link/archive rule below
 # (replacing the old bare "| $(OBJ_DIR)"/"| $(BIN_DIR)" prerequisites and
@@ -782,6 +795,18 @@ selftest: $(SELFTEST_TARGET)
 
 $(SELFTEST_TARGET): $(SELFTEST_SRC) | _cfg_guard
 	$(CC) $(CFLAGS) -o $@ $< -lm
+
+# Builds AND runs (like `selftest`/`test-counter-saturation`, not like
+# `bench` which only builds) -- the permanent delay_aec3_reset() regression
+# test. Run from c_impl/ (same cwd convention as every other test target
+# here); the test itself is self-contained (synthetic signals, no fixture
+# file) so cwd only matters for consistency, not correctness.
+.PHONY: test-delay-reset
+test-delay-reset: $(TEST_DR_TARGET)
+	"$(abspath $(TEST_DR_TARGET))"
+
+$(TEST_DR_TARGET): $(TEST_DR_OBJS) | _cfg_guard
+	$(CC) $(CFLAGS) -o $@ $(TEST_DR_OBJS) -lm
 
 # =============================================================================
 # Phase 2 real rules: only defined once AC_LIB is known (see the dispatch
@@ -1283,6 +1308,8 @@ help:
 	@echo "  selftest Build + run the AEC-only kernel-split self-test (simd_selftest_aec)"
 	@echo "  test-counter-saturation  Build + run the permanent counter-saturation"
 	@echo "                  regression test (test_counter_saturation) -- run from c_impl/"
+	@echo "  test-delay-reset  Build + run the permanent delay_aec3_reset() consistency"
+	@echo "                  regression test (test_delay_reset) -- run from c_impl/"
 	@echo "  debug   Build with -g -DAEC_DEBUG"
 	@echo "  publish Copy this build's artifacts to dist/<backend>/<config-hash>/ + update dist/<backend>/current"
 	@echo "  audit-no-stdio  Build lib with NO_STDIO=1 and verify it (and a minimal linked"

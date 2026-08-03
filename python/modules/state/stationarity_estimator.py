@@ -27,13 +27,9 @@ import numpy as np
 from ..aec3_scale import (
     STATIONARITY_ALPHA,
     STATIONARITY_ALPHA_INIT,
-    STATIONARITY_AVG_INIT_HOPS_DEFAULT,
     STATIONARITY_BLOCK_FRACTION,
-    STATIONARITY_HANGOVER_HOPS_DEFAULT,
-    STATIONARITY_INITIAL_PHASE_HOPS_DEFAULT,
     STATIONARITY_MIN_NOISE_POWER_FLOAT,
     STATIONARITY_THR_RATIO,
-    STATIONARITY_WINDOW_HOPS_DEFAULT,
 )
 
 
@@ -105,13 +101,28 @@ class StationarityEstimator:
         from .. import aec3_scale as _aec3_scale
         self._window_hops = _aec3_scale.blocks_to_hops(13, hop_samples, sample_rate)
         self._hangover_hops = _aec3_scale.blocks_to_hops(12, hop_samples, sample_rate)
+        # Was STATIONARITY_AVG_INIT_HOPS_DEFAULT / STATIONARITY_INITIAL_PHASE_
+        # HOPS_DEFAULT -- module-level constants frozen at hop=160/sr=16000,
+        # passed straight through unlike _window_hops/_hangover_hops above.
+        # Rescaled live the same way for consistency.
+        # STATIONARITY_ALPHA/_INIT (0.004/0.04) are AEC3-native per-4ms-block
+        # constants (stationarity_estimator.cc: `constexpr float kAlpha =
+        # 0.004f`, applied once per NoiseSpectrum::Update() call, which AEC3
+        # calls once per block). This port's update_noise_estimator() calls
+        # _NoiseSpectrum.update() once per hop (not per 4ms block), so the
+        # bare literals need the same per_block_ema_alpha_to_per_hop rescale
+        # as every other AEC3 per-block alpha in this codebase.
         self.noise = _NoiseSpectrum(
             n_freqs=self.n_freqs,
             min_noise_power=STATIONARITY_MIN_NOISE_POWER_FLOAT,
-            avg_init_hops=STATIONARITY_AVG_INIT_HOPS_DEFAULT,
-            initial_phase_hops=STATIONARITY_INITIAL_PHASE_HOPS_DEFAULT,
-            alpha=STATIONARITY_ALPHA,
-            alpha_init=STATIONARITY_ALPHA_INIT,
+            avg_init_hops=_aec3_scale.blocks_to_hops(20, hop_samples, sample_rate),
+            initial_phase_hops=_aec3_scale.blocks_to_hops(500, hop_samples, sample_rate),
+            alpha=_aec3_scale.per_block_ema_alpha_to_per_hop(
+                STATIONARITY_ALPHA, hop_samples, sample_rate
+            ),
+            alpha_init=_aec3_scale.per_block_ema_alpha_to_per_hop(
+                STATIONARITY_ALPHA_INIT, hop_samples, sample_rate
+            ),
         )
         self.hangovers = np.zeros(self.n_freqs, dtype=np.int32)
         self.stationarity_flags = np.zeros(self.n_freqs, dtype=bool)

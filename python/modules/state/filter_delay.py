@@ -10,12 +10,8 @@ Reports delay in OUR hop units (matches what RenderDelayController emits).
 """
 from typing import Optional
 
-from ._constants import HOPS_PER_SECOND
-from .._rates import HOP_SAMPLES
+from .. import aec3_scale as _aec3_scale
 from ..delay.delay_types import DelayEstimate
-
-
-_FILTER_ADAPTATION_THRESHOLD_HOPS = 2 * HOPS_PER_SECOND  # AEC3 2 s (=500 blocks) -> 200 hops
 
 
 class FilterDelay:
@@ -35,11 +31,23 @@ class FilterDelay:
         *,
         delay_headroom_samples: int = 32,
         num_capture_channels: int = 1,
+        hop_size: int = 160,
+        sample_rate: int = 16000,
     ) -> None:
-        self._delay_headroom_blocks = int(delay_headroom_samples) // HOP_SAMPLES
+        # Was `int(delay_headroom_samples) // HOP_SAMPLES` (stale hop=160
+        # assumption) -- currently numerically inert (32 // any real hop is
+        # 0 either way) but fixed for consistency/future-proofing.
+        self._delay_headroom_blocks = int(delay_headroom_samples) // hop_size
         self._filter_delays_blocks = [self._delay_headroom_blocks] * num_capture_channels
         self._min_filter_delay = self._delay_headroom_blocks
         self._external_delay: Optional[DelayEstimate] = None
+        # AEC3 2 s (=500 blocks) filter-adaptation threshold. Was a
+        # module-level constant frozen at the stale hop=160/sr=16000
+        # assumption (giving 200 hops = 2.0s only at that legacy grid);
+        # computed live here instead.
+        self._filter_adaptation_threshold_hops = _aec3_scale.ms_to_hops(
+            2000.0, hop_size, sample_rate
+        )
 
     def update(
         self,
@@ -52,7 +60,7 @@ class FilterDelay:
             self._external_delay = external_delay
 
         delay_estimator_unconverged = (
-            blocks_with_proper_filter_adaptation < _FILTER_ADAPTATION_THRESHOLD_HOPS
+            blocks_with_proper_filter_adaptation < self._filter_adaptation_threshold_hops
         )
         if delay_estimator_unconverged and self._external_delay is not None:
             self._filter_delays_blocks = [self._delay_headroom_blocks] * len(

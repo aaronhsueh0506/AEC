@@ -90,7 +90,7 @@ int main(int argc, char **argv) {
             SubbandErle s;
             subband_erle_init(&s, n_bins,
                               cfg_f[2] /*min_erle*/, cfg_f[0] /*l*/, cfg_f[1] /*h*/,
-                              use_onset, use_min_during, 160 /*hop*/,
+                              use_onset, use_min_during, 160 /*hop*/, 16000 /*sample_rate*/,
                               max_erle_st, erle_st, erle_oc_st, erle_unb_st,
                               erle_dur_st, coming_st, hold_st,
                               y2acc_st, e2acc_st, low_st);

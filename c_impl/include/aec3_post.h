@@ -133,6 +133,10 @@ typedef struct {
     /* audio-passive trace stash (see Aec3PostTrace) */
     Aec3PostTrace trace;
 
+    /* Live-computed convergence-flags y2 threshold (step 4, aec3_post_run).
+     * See aec3_post_init()'s comment; was a frozen literal 3.73e-4f. */
+    float y2_thr;
+
     /* synthesis window (block_size) + sqrt(2)·sin LUT (32), caller-owned,
      * read-only after init. */
     const float *synth_window;     /* [block_size] */

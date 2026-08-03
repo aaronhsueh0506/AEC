@@ -41,10 +41,12 @@ static float fast_log2(float x) {
 
 /* ── _ErleInstantaneous ─────────────────────────────────────────────────────── */
 
-static void inst_init(ErleInstantaneous *e, float quality_alpha) {
+static void inst_init(ErleInstantaneous *e, float quality_alpha,
+                       float maxmin_forget) {
     e->clamp_zero = 1;            /* clamp_quality_to_zero default True */
     e->clamp_one = 1;            /* clamp_quality_to_one  default True */
     e->quality_alpha = quality_alpha;
+    e->maxmin_forget = maxmin_forget;
     e->has_erle_log2 = 0;
     e->erle_log2 = 0.0f;
     e->inst_quality_estimate = 0.0f;
@@ -72,11 +74,11 @@ static void inst_reset(ErleInstantaneous *e) {
 }
 
 static void inst_update_max_min(ErleInstantaneous *e) {
-    e->max_erle_log2 -= FBERLE_MAXMIN_FORGET;
+    e->max_erle_log2 -= e->maxmin_forget;
     if (e->erle_log2 > e->max_erle_log2) {
         e->max_erle_log2 = e->erle_log2;   /* max(_max, _erle) */
     }
-    e->min_erle_log2 += FBERLE_MAXMIN_FORGET;
+    e->min_erle_log2 += e->maxmin_forget;
     if (e->erle_log2 < e->min_erle_log2) {
         e->min_erle_log2 = e->erle_log2;   /* min(_min, _erle) */
     }
@@ -147,9 +149,33 @@ static void update_quality_estimate(FullBandErleEstimator *s) {
 }
 
 void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
-                        float min_erle, float max_erle_l, int hop_size) {
+                        float min_erle, float max_erle_l, int hop_size,
+                        int sample_rate) {
     s->n_freqs = n_freqs;
-    s->td_alpha = FBERLE_TD_ALPHA;
+    /* AEC3 fullband EMAs (quality 0.07, erle_time_domain 0.05) are
+     * per-4ms-block, and fire once per FBERLE_POINTS_TO_ACCUMULATE(=6)-hop
+     * accumulation window (see fb_erle_update()), not every hop. Both our
+     * accumulation window (6 hops) and AEC3's reference update period (6
+     * native 4ms blocks = 24ms) carry the same factor of 6, so it cancels:
+     * pass plain hop_size against aec3_per_block_ema_alpha_to_per_hop's
+     * fixed single-native-block (4ms) denominator, NOT
+     * FBERLE_POINTS_TO_ACCUMULATE*hop_size (an earlier fix on 2026-08-01
+     * passed the latter, which compares 6 real hops against only 1 native
+     * block, inflating the exponent 6x too far; caught in review). */
+    s->td_alpha = aec3_per_block_ema_alpha_to_per_hop(
+        0.05f, hop_size, sample_rate);
+    s->quality_alpha = aec3_per_block_ema_alpha_to_per_hop(
+        0.07f, hop_size, sample_rate);
+    /* FBERLE_MAXMIN_FORGET is AEC3's own literal per-event forget *step*
+     * (additive, not a retention alpha) on the same 6-point-gated cadence
+     * as quality_alpha/td_alpha above -- the wall-clock-preserving rescale
+     * is the linear aec3_per_block_rate_to_per_hop (same hop_size-cancels-
+     * the-6x reasoning), not the EMA formula. */
+    float maxmin_forget = aec3_per_block_rate_to_per_hop(
+        FBERLE_MAXMIN_FORGET, hop_size, sample_rate);
+    /* AEC3 kBlocksToHoldErle=100 blocks (~400 ms). Was a frozen #define (40
+     * hops, correct only at hop=160/sr=16000); rescaled live here. */
+    s->blocks_to_hold_erle = aec3_ms_to_hops(400.0f, hop_size, sample_rate);
     /* The helper (aec3_scale.h/.c) is float32-typed and out of scope for this
      * conversion; its result is stored directly here. */
     s->x2_band_energy_threshold =
@@ -158,7 +184,7 @@ void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
     s->max_erle_lf_log2 = fast_log2(max_erle_l + FBERLE_EPSILON);
     s->hold_counter_inst_erle = 0;
     s->erle_time_domain_log2 = s->min_erle_log2;
-    inst_init(&s->inst, FBERLE_QUALITY_ALPHA);
+    inst_init(&s->inst, s->quality_alpha, maxmin_forget);
     s->has_linear_filter_quality = 0;
     s->linear_filter_quality = 0.0f;
     fb_erle_reset(s);
@@ -181,7 +207,7 @@ void fb_erle_update(FullBandErleEstimator *s,
             float y2_sum = fb_erle_pairwise_sum(y2, (size_t)s->n_freqs);
             float e2_sum = fb_erle_pairwise_sum(e2, (size_t)s->n_freqs);
             if (inst_update(&s->inst, y2_sum, e2_sum)) {
-                s->hold_counter_inst_erle = FBERLE_BLOCKS_TO_HOLD_ERLE;
+                s->hold_counter_inst_erle = s->blocks_to_hold_erle;
                 s->erle_time_domain_log2 +=
                     s->td_alpha * (s->inst.erle_log2 - s->erle_time_domain_log2);
                 if (s->erle_time_domain_log2 < s->min_erle_log2) {

@@ -30,7 +30,7 @@ static void set_max_erle_bands(float *arr, int n_bins,
 void subband_erle_init(SubbandErle *s, int n_bins,
                        float min_erle, float max_erle_l, float max_erle_h,
                        int use_onset_detection, int use_min_erle_during_onsets,
-                       int hop_size,
+                       int hop_size, int sample_rate,
                        float *max_erle_st, float *erle_st, float *erle_oc_st,
                        float *erle_unb_st, float *erle_during_st,
                        unsigned char *coming_onset_st, int32_t *hold_st,
@@ -40,9 +40,28 @@ void subband_erle_init(SubbandErle *s, int n_bins,
     s->min_erle = min_erle;
     s->use_onset_detection = use_onset_detection ? 1 : 0;
     s->use_min_erle_during_onsets = use_min_erle_during_onsets ? 1 : 0;
-    s->alpha_up = 0.05f;
-    s->alpha_down = 0.1f;
-    s->onset_release_decay = 0.97f;
+    /* AEC3 subband EMA constants are per-4ms-block. alpha_up/alpha_down fire
+     * once per SE_POINTS_TO_ACCUMULATE(=6)-hop accumulation window (see
+     * subband_erle_update()'s gated path below), NOT every hop.
+     * onset_release_decay DOES fire every hop. Both our accumulation window
+     * (6 hops) and AEC3's reference update period (6 native 4ms blocks =
+     * 24ms) carry the same factor of 6, so it cancels: pass plain hop_size
+     * against the shared EMA helper's fixed single-native-block (4ms)
+     * denominator, NOT SE_POINTS_TO_ACCUMULATE*hop_size (an earlier fix on
+     * 2026-08-01 passed the latter, which compares 6 real hops against only
+     * 1 native block, inflating the exponent 6x too far; caught in
+     * review). */
+    s->alpha_up = aec3_per_block_ema_alpha_to_per_hop(
+        0.05f, hop_size, sample_rate);
+    s->alpha_down = aec3_per_block_ema_alpha_to_per_hop(
+        0.1f, hop_size, sample_rate);
+    s->onset_release_decay = 1.0f - aec3_per_block_ema_alpha_to_per_hop(
+        1.0f - 0.97f, hop_size, sample_rate);
+    /* AEC3 kBlocksToHoldErle=100(~400ms)/kBlocksForOnsetDetection=250(~1s).
+     * Were frozen #defines (40/100 hops, correct only at hop=160/sr=16000);
+     * rescaled live here. */
+    s->blocks_to_hold_erle = aec3_ms_to_hops(400.0f, hop_size, sample_rate);
+    s->blocks_for_onset_detection = aec3_ms_to_hops(1000.0f, hop_size, sample_rate);
     /* _x2_band_energy_threshold = per_bin_psd_threshold(44015068.0, hop_size)
      * (ref_hop=160); float32 end-to-end. */
     s->x2_band_energy_threshold =
@@ -183,7 +202,7 @@ static void update_bands(SubbandErle *s, int converged_filter,
                         s->erle_during_onsets[k] = v;
                     }
                 }
-                s->hold_counters[k] = SE_BLOCKS_FOR_ONSET_DETECTION;
+                s->hold_counters[k] = s->blocks_for_onset_detection;
             }
         }
 
@@ -210,7 +229,7 @@ static void decrease_erle_for_low_render(SubbandErle *s) {
     for (k = 1; k <= n - 2; ++k) {
         s->hold_counters[k] -= 1;
         if (s->hold_counters[k] <=
-            (SE_BLOCKS_FOR_ONSET_DETECTION - SE_BLOCKS_TO_HOLD_ERLE)) {
+            (s->blocks_for_onset_detection - s->blocks_to_hold_erle)) {
             if (s->erle_onset_compensated[k] > s->erle_during_onsets[k]) {
                 /* max(during, 0.97f * onset_compensated), all float32. */
                 float decayed = s->onset_release_decay *

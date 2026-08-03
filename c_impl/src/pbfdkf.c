@@ -110,8 +110,10 @@ static void pbfdaf_fill_windows(PBFDAF* p) {
     }
 }
 
-static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu, float delta) {
+static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu,
+                                float delta, int sample_rate) {
     p->n_partitions = n_partitions;
+    p->sample_rate = sample_rate;
     p->mu = mu;
     p->delta = delta;
     p->alpha_power = 0.9f;
@@ -123,7 +125,12 @@ static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu, float del
     p->block_stationary = 0;
     p->initial_state_active = 1;
     p->initial_state_active_render_hops = 0;
-    p->initial_state_threshold_hops = 250;
+    /* AEC3 kInitialStateSeconds-equivalent threshold; was a bare literal 250
+     * (= 2.5s only at the legacy hop=160/sr=16000 grid). Rescaled via
+     * aec3_ms_to_hops so the window stays 2.5s at any grid. Mirrors
+     * filters.py's PBFDAF._initial_state_threshold_hops. */
+    p->initial_state_threshold_hops =
+        aec3_ms_to_hops(2500.0f, p->hop_size, sample_rate);
     p->initial_state_far_energy_floor = 1e-4f;
     p->last_initial_state_active = 1;
     p->last_s_max_abs = 0.0f;
@@ -153,7 +160,7 @@ static void pbfdaf_zero_state(PBFDAF* p) {
 
 int pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size,
-                    int with_process_scratch) {
+                    int with_process_scratch, int sample_rate) {
     int hop = (hop_size > 0) ? hop_size : block_size / 2;
     pbfdaf_compute_sizes(hop, &p->hop_size, &p->block_size,
                          &p->fft_size, &p->n_freqs);
@@ -221,7 +228,7 @@ int pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
         return -1;
     }
 
-    pbfdaf_init_scalars(p, n_partitions, mu, delta);
+    pbfdaf_init_scalars(p, n_partitions, mu, delta, sample_rate);
     pbfdaf_fill_windows(p);
     return 0;
 }
@@ -273,7 +280,7 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
 int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                          int block_size, int n_partitions,
                          float mu, float delta, int hop_size,
-                         int with_process_scratch) {
+                         int with_process_scratch, int sample_rate) {
     if (!p || !mem) return -1;
     /* F07: reject a misaligned pool base before any pool write — hardens a
      * caller invoking this directly (the parent aec_carve always carves
@@ -328,7 +335,7 @@ int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
     p->scr_e2       = (float*)ptr; ptr += ALIGN16((size_t)p->n_freqs * sizeof(float));
     (void)ptr;
 
-    pbfdaf_init_scalars(p, n_partitions, mu, delta);
+    pbfdaf_init_scalars(p, n_partitions, mu, delta, sample_rate);
     pbfdaf_zero_state(p);
     pbfdaf_fill_windows(p);
     p->is_static = 1;
@@ -658,10 +665,20 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
     p->alpha_r = 0.95f;
     p->h_error_floor = (float)AEC3_H_ERROR_FLOOR_FLOAT;
     p->h_error_ceil  = (float)AEC3_H_ERROR_CEIL_FLOAT;
-    p->leakage_converged = (float)AEC3_LEAKAGE_CONVERGED_PER_HOP;
-    p->leakage_diverged  = (float)AEC3_LEAKAGE_DIVERGED_PER_HOP;
-    p->leakage_converged_transient = (float)AEC3_LEAKAGE_CONVERGED_TRANSIENT_PER_HOP;
-    p->leakage_diverged_transient  = (float)AEC3_LEAKAGE_DIVERGED_TRANSIENT_PER_HOP;
+    /* The AEC3_LEAKAGE_*_PER_HOP #defines pre-bake the x2.5 factor for the
+     * legacy hop=160/sr=16000 grid and are never recomputed for the filter's
+     * actual hop_size/sample_rate. Rescaled live here via the same
+     * per_block_rate_to_per_hop helper filters.py uses (raw AEC3 per-block
+     * rates 5e-5/5e-2/5e-3/5e-1). Mirrors filters.py's PBFDKF
+     * leakage_converged/_diverged/_converged_transient/_diverged_transient. */
+    p->leakage_converged = aec3_per_block_rate_to_per_hop(
+        5e-5f, p->base.hop_size, p->base.sample_rate);
+    p->leakage_diverged = aec3_per_block_rate_to_per_hop(
+        5e-2f, p->base.hop_size, p->base.sample_rate);
+    p->leakage_converged_transient = aec3_per_block_rate_to_per_hop(
+        5e-3f, p->base.hop_size, p->base.sample_rate);
+    p->leakage_diverged_transient = aec3_per_block_rate_to_per_hop(
+        5e-1f, p->base.hop_size, p->base.sample_rate);
     p->e2_coarse_per_bin_valid = 0;
     p->e2_coarse_for_refresh = 0.0f;
     p->disallow_leakage_diverged = 0;
@@ -673,12 +690,13 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
 }
 
 int pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
-                    float mu, float delta, int hop_size) {
+                    float mu, float delta, int hop_size, int sample_rate) {
     /* Set early (before any malloc below) so pbfdkf_free(p) is safe to call
      * from the OOM path even if the very first allocation fails -- see
      * pbfdaf_init's identical reasoning. */
     p->is_static = 0;
-    if (pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size, 0) != 0)
+    if (pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size, 0,
+                     sample_rate) != 0)
         return -1;   /* F04: base filter's nested fft_create() failed (OOM);
                       * pbfdaf_init already freed its own partial state. */
     int K = p->base.n_freqs;
@@ -737,7 +755,8 @@ size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
 
 int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                          int block_size, int n_partitions,
-                         float mu, float delta, int hop_size) {
+                         float mu, float delta, int hop_size,
+                         int sample_rate) {
     if (!p || !mem) return -1;
     /* F07: reject a misaligned pool base before any pool write (see the
      * matching guard in pbfdaf_init_static above). */
@@ -751,7 +770,8 @@ int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
     size_t base_sz = pbfdaf_get_mem_size(block_size, n_partitions, hop_size, 0);
     memset(p, 0, sizeof(*p));
     if (pbfdaf_init_static(&p->base, mem, base_sz,
-                       block_size, n_partitions, mu, delta, hop_size, 0) != 0)
+                       block_size, n_partitions, mu, delta, hop_size, 0,
+                       sample_rate) != 0)
         return -1;   /* F04: base filter's nested fft_init() failed (OOM) */
     uint8_t* ptr = (uint8_t*)mem + base_sz;
     int K = p->base.n_freqs;
@@ -795,10 +815,16 @@ void pbfdkf_reset(PBFDKF* p) {
 }
 
 void pbfdkf_handle_echo_path_change(PBFDKF* p, int delay_change, int gain_change) {
-    /* CoarseFilterUpdateGain M3 counter reset (not-gain_change). */
+    /* CoarseFilterUpdateGain M3 counter reset (not-gain_change). Was reset to
+     * the frozen reference-grid AEC3_POOR_EXC_COUNTER_INITIAL_HOPS (400),
+     * silently undoing the correctly rate-scaled value aec.c's construction
+     * path sets via the identical aec3_blocks_to_hops(1000, hop, sr) call --
+     * every echo-path-change event after construction re-clobbered it back
+     * to the reference-grid constant. Mirrors filters.py's
+     * _poor_excitation_counter fix. */
     if (!gain_change) {
         p->base.poor_excitation_counter =
-            AEC3_POOR_EXC_COUNTER_INITIAL_HOPS;
+            aec3_blocks_to_hops(1000, p->base.hop_size, p->base.sample_rate);
         p->base.call_counter = 0;
     }
     if (delay_change) {

@@ -117,18 +117,53 @@ typedef enum {
 #define DA_ACCUMULATED_ERROR_SUBSAMPLE_RATE 4
 #define DA_BLOCK_SIZE_LOG2      6    /* kBlockSizeLog2 (64 = 1<<6) */
 #define DA_K_MFW_SUB_BLOCKS     32   /* kMatchedFilterWindowSizeSubBlocks */
-#define DA_K_NUM_BLOCKS_PER_SEC 250  /* kNumBlocksPerSecond (16000/64) */
-#define DA_STABILITY_RESET_HOPS 3000 /* ms_to_hops(30000) -> 3000 */
+#define DA_K_NUM_BLOCKS_PER_SEC 250  /* kNumBlocksPerSecond (16000/64) -- FIXED
+                                      * at the 16kHz-native rate; DA_HIST_WINDOW
+                                      * and the ring/histogram arrays it sizes
+                                      * are NOT yet rate-parameterised for
+                                      * sample rates above 16 kHz (tracked
+                                      * alongside the decimator's fixed
+                                      * anti-alias biquad coefficients, which
+                                      * have the same 16kHz-only limitation --
+                                      * see downsampled_ring.py's docstring). */
+/* DA_STABILITY_RESET_HOPS was a frozen #define (3000, = ms_to_hops(30000)
+ * only at hop=160/sr=16000, wrong even at sr=16000 since this counter ticks
+ * once per DA_AEC3_BLOCK_SIZE=64-sample inner block -- not once per outer
+ * hop); now computed live in delay_aec3_init() from sample_rate, matching
+ * the Python ClockdriftDetector fix (see clockdrift_detector.py). */
 
 /* ---- biquad cascade ----
- * Max sections: 3 (the ds4 LP is elliptic, 3 sections). */
-#define DA_BQ_MAX_SECTIONS 3
+ * Max sections: 4 (the ds4 LP is elliptic, 3 sections; the 48k->16k
+ * pre-decimation anti-alias stage below is elliptic order-7, 4 sections). */
+#define DA_BQ_MAX_SECTIONS 4
 typedef struct {
     int    n_sections;
     float  b[DA_BQ_MAX_SECTIONS][3];    /* {b0,b1,b2} per section */
     float  a[DA_BQ_MAX_SECTIONS][2];    /* {a1,a2} per section (a0 normalised) */
     float  z[DA_BQ_MAX_SECTIONS][2];    /* per-section state */
 } DaBiquad;
+
+/* ---- 48kHz -> 16kHz pre-decimation sidechain ----
+ * DelayAec3's own internal decimator/matched-filter/clockdrift constants are
+ * all native to a 16kHz feed rate (DA_K_NUM_BLOCKS_PER_SEC etc. above). At
+ * 48kHz, this stage anti-alias-filters + decimates-by-3 BEFORE any of that
+ * internal machinery ever sees a sample, so DelayAec3 always operates on a
+ * genuine 16kHz-equivalent stream regardless of the caller's native rate --
+ * exactly mirroring the shared 4ch pipeline's SharedMatchedDelayEstimator
+ * (Python pipeline.py), which does the same 48->16 reduction externally
+ * before feeding this same estimator. Two independent filter+phase chains
+ * (capture/near, render/far) since they're independent signals.
+ * Worst-case output length per call: the only 48kHz grid is hop=512, so
+ * ceil(512/3)+1 = 172; 192 leaves headroom without being a materially
+ * different memory cost (float[192] = 768 bytes per channel). */
+#define DA_RESAMPLE48_FACTOR      3
+#define DA_RESAMPLE48_SCRATCH_MAX 192
+typedef struct {
+    DaBiquad near_lp;    /* capture channel anti-alias LP (order-7, 4 sections) */
+    DaBiquad far_lp;     /* render channel anti-alias LP (order-7, 4 sections) */
+    int      phase;      /* decimation phase, continuous across hops (like the
+                           * 4ch pipeline's own delay_phase) */
+} DaResample48;
 
 typedef struct {
     DaBiquad anti_alias;       /* LP ds4 (3 sections) */
@@ -195,6 +230,7 @@ typedef struct {
     int delay_history[3];      /* newest -> oldest */
     ClockdriftLevel level;
     int stability_counter;
+    int stability_reset_hops;  /* live-computed, was DA_STABILITY_RESET_HOPS=3000 */
 } DaClockdrift;
 
 typedef struct {
@@ -209,6 +245,7 @@ typedef struct {
     int old_agg_delay;
     DelayQuality old_agg_quality;
     int consistent_estimate_counter;
+    int consistent_estimate_threshold; /* live-computed, was DA_CONSISTENT_EST_THR=125 */
     /* outer->inner edge buffers (raw 16 kHz samples awaiting a 64-sample block) */
     float capture_pending[DA_AEC3_BLOCK_SIZE];
     float render_pending[DA_AEC3_BLOCK_SIZE];
@@ -218,19 +255,37 @@ typedef struct {
 /* ===================== LegacyDelayShim ===================== */
 typedef struct {
     DaEstimator est;
-    /* latest emitted estimate (raw 16 kHz samples) */
+    /* 48kHz->16kHz sidechain (see DaResample48 above). rate_factor is 1 at
+     * every native-16kHz-equivalent grid (est always runs at 16kHz-native
+     * regardless), 3 only when this instance was constructed at 48000. */
+    int          rate_factor;
+    DaResample48 resample48;
+    float        near16_scratch[DA_RESAMPLE48_SCRATCH_MAX];
+    float        far16_scratch[DA_RESAMPLE48_SCRATCH_MAX];
+    /* latest emitted estimate (raw samples in the ESTIMATOR's own 16kHz-
+     * equivalent domain; delay_aec3_estimated_delay() rescales by
+     * rate_factor before returning to the caller's native domain) */
     int          latest_valid;
     int          latest_delay;
     DelayQuality latest_quality;
     int          estimate_count;   /* _n_updates */
 } DelayAec3;
 
-/* lifecycle */
-void delay_aec3_init(DelayAec3 *d);
+/* lifecycle. sample_rate selects the 48kHz->16kHz sidechain (rate_factor=3
+ * at 48000, else 1) -- the underlying DaEstimator always runs at a fixed
+ * 16kHz-native cadence (da_estimator_init() is always called with 16000,
+ * never the caller's sample_rate) since accumulate() below guarantees it is
+ * only ever fed a 16kHz-equivalent stream, either directly (native 16kHz
+ * callers) or via the pre-decimation sidechain (48kHz callers). This mirrors
+ * the Python SharedMatchedDelayEstimator's identical design. */
+void delay_aec3_init(DelayAec3 *d, int sample_rate);
 void delay_aec3_reset(DelayAec3 *d);
 
-/* per-hop drive. near/far are length `hop` float arrays (near = HPF mic,
- * far = raw reference, both BEFORE ring-buffer alignment). Returns 1 iff a
+/* per-hop drive. near/far are length `hop` float arrays in the CALLER's
+ * native sample-rate domain (near = HPF mic, far = raw reference, both
+ * BEFORE ring-buffer alignment) -- at 48kHz they are internally anti-alias
+ * filtered + decimated by 3 before reaching the 16kHz-native estimator; at
+ * every other supported rate this is a no-op passthrough. Returns 1 iff a
  * NEW delay value was emitted this hop (mirrors shim accumulate()). */
 int  delay_aec3_accumulate(DelayAec3 *d, const float *near, const float *far, int hop);
 
@@ -246,7 +301,10 @@ int  delay_aec3_accumulate_ex(DelayAec3 *d, const float *near, const float *far,
                               int hop, int run_matched_filter);
 
 /* legacy accessors */
-int    delay_aec3_estimated_delay(const DelayAec3 *d);   /* -1 until first estimate */
+int    delay_aec3_estimated_delay(const DelayAec3 *d);   /* -1 until first estimate;
+                                                            * else caller-native-rate
+                                                            * samples (rescaled by
+                                                            * rate_factor internally) */
 float  delay_aec3_confidence(const DelayAec3 *d);        /* 0.0 / 0.5 / 1.0 (float32, was double) */
 int    delay_aec3_is_solid(const DelayAec3 *d);          /* confidence >= 1.0 */
 int    delay_aec3_n_updates(const DelayAec3 *d);

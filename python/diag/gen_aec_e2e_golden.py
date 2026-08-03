@@ -77,9 +77,11 @@ def main():
     args = ap.parse_args()
 
     sr = args.sr
-    hop = sr * 10 // 1000   # 10ms hop, same derivation as AecConfig (frame/2)
-
     cfg = AecConfig.from_preset(args.preset, sample_rate=sr)
+    hop = cfg.hop_size   # was hardcoded "sr*10//1000" (10ms) -- diverged from
+                          # AecConfig's real hop once 16kHz's default grid
+                          # moved to 256/128 (8ms), crashing aec.process() on
+                          # a mismatched hop size.
     np.random.seed(0)
     aec = AEC(cfg)
 

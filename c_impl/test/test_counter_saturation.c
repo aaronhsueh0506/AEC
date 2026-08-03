@@ -356,8 +356,8 @@ static void section_aec_level(void) {
     }
 
     /* --- aec_state.c (already fixed round 6): blocks_with_active_render
-     * (cap = AEC_STATE_ACTIVE_RENDER_BLOCKS+1, reader is strict ">"),
-     * strong_not_saturated_render_blocks (cap = FILTER_ADAPTATION_THRESHOLD_HOPS,
+     * (cap = live active_render_blocks+1, reader is strict ">"),
+     * strong_not_saturated_render_blocks (cap = live filter_adaptation_threshold_hops,
      * reader is strict "<"). aec_state_update()'s internal wiring is deep
      * (filter_analyzer/filter_delay/etc.), so rather than reverse-engineer
      * every input aec3_post_run threads into it, this poke-then-run-many
@@ -365,8 +365,15 @@ static void section_aec_level(void) {
      * past its cap no matter how many more real hops run, PLUS a direct
      * decision-invariance check against a synthetic huge value. */
     {
-        int cap1 = AEC_STATE_ACTIVE_RENDER_BLOCKS + 1;
-        int cap2 = FILTER_ADAPTATION_THRESHOLD_HOPS;
+        /* AEC_STATE_ACTIVE_RENDER_BLOCKS / FILTER_ADAPTATION_THRESHOLD_HOPS
+         * are gone (live-computed per instance now, not compile-time
+         * constants) -- read the equivalent live fields off the already-
+         * constructed `a` instance instead. */
+        int active_render_blocks = a.a3_state.active_render_blocks;
+        int filter_adaptation_threshold_hops =
+            a.a3_state.delay_state.filter_adaptation_threshold_hops;
+        int cap1 = active_render_blocks + 1;
+        int cap2 = filter_adaptation_threshold_hops;
         a.a3_state.blocks_with_active_render = cap1;
         a.a3_state.strong_not_saturated_render_blocks = cap2;
         for (i = 0; i < 500; i++) aec_process(&a, mic, ref, out);
@@ -375,11 +382,11 @@ static void section_aec_level(void) {
         CHECK(a.a3_state.strong_not_saturated_render_blocks <= cap2,
               "aec_state.strong_not_saturated_render_blocks: never exceeds cap over 500 real hops");
         {
-            int at_cap1  = (cap1 > AEC_STATE_ACTIVE_RENDER_BLOCKS);
-            int at_huge1 = ((cap1 + 1000000) > AEC_STATE_ACTIVE_RENDER_BLOCKS);
+            int at_cap1  = (cap1 > active_render_blocks);
+            int at_huge1 = ((cap1 + 1000000) > active_render_blocks);
             CHECK(at_cap1 == at_huge1, "blocks_with_active_render: '>' decision identical at cap vs cap+1e6");
-            int at_cap2  = (cap2 < FILTER_ADAPTATION_THRESHOLD_HOPS);
-            int at_huge2 = ((cap2 + 1000000) < FILTER_ADAPTATION_THRESHOLD_HOPS);
+            int at_cap2  = (cap2 < filter_adaptation_threshold_hops);
+            int at_huge2 = ((cap2 + 1000000) < filter_adaptation_threshold_hops);
             CHECK(at_cap2 == at_huge2, "strong_not_saturated_render_blocks: '<' decision identical at cap vs cap+1e6");
         }
     }
@@ -471,7 +478,7 @@ static void section_delay_aec3(void) {
           " 1000 hops at hop=160 (confirmed via Python `wave`: num_samples=160000 for"
           " both files); if this fails the fixture changed duration");
 
-    delay_aec3_init(&d);
+    delay_aec3_init(&d, 16000);
     for (;;) {
         int gm = wav_read_float(mr, mic, hop);
         int gr = wav_read_float(rr, ref, hop);
@@ -616,7 +623,7 @@ static void section_epc_shadow(void) {
  * ════════════════════════════════════════════════════════════════════ */
 static void section_filter_quality(void) {
     FilteringQualityAnalyzer m;
-    fq_init(&m, 1);
+    fq_init(&m, 1, 160, 16000);
 
     m.filter_update_blocks_since_start = INT_MAX - 1;
     m.filter_update_blocks_since_reset = INT_MAX - 1;
@@ -653,7 +660,7 @@ static void section_fullband_erle(void) {
     float x2[8], y2[8], e2[8];
     int i, k;
 
-    fb_erle_init(&s, nf, 0.001f, 1000.0f, 160);
+    fb_erle_init(&s, nf, 0.001f, 1000.0f, 160, 16000);
     for (k = 0; k < nf; k++) { x2[k] = 1.0e9f; y2[k] = 1.0e6f; e2[k] = 1.0e3f; }
 
     for (i = 0; i < 6 * 20; i++) {
@@ -684,7 +691,7 @@ static void section_erl_estimator(void) {
     float x2[8], y2[8];
     int i, k;
 
-    erl_estimator_init(&e, /*startup_phase_length_hops=*/1, nb, 160, erl_storage, hold_storage);
+    erl_estimator_init(&e, /*startup_phase_length_hops=*/1, nb, 160, 16000, erl_storage, hold_storage);
     /* x2 deliberately kept BELOW the fullband gate's own x2_sum > x2_min*n_bins
      * threshold (~3.5e8 for n_bins=8) -- an fp32 EMA converging toward a
      * FIXED ratio approaches its target monotonically from above and can
@@ -729,7 +736,7 @@ static void section_initial_state(void) {
     InitialState s;
     int cap, i;
 
-    initial_state_init(&s, /*conservative_initial_phase=*/0, /*initial_state_seconds=*/2.5f);
+    initial_state_init(&s, /*conservative_initial_phase=*/0, /*initial_state_seconds=*/2.5f, 160, 16000);
     cap = (s.conservative_hops > s.initial_state_hops) ? s.conservative_hops : s.initial_state_hops;
 
     s.strong_not_saturated_render_blocks = cap - 1;
@@ -766,17 +773,20 @@ static void section_filter_analyzer(void) {
     for (k = 0; k < 160; k++) render_block[k] = 200.0f;
 
     fa_init(&m, h_highpass, size, /*active_render_limit=*/100.0f, /*bounded_erl=*/0,
-            /*default_gain=*/1.0f, abs_scratch, size, render_sq_scratch, 160);
+            /*default_gain=*/1.0f, abs_scratch, size, render_sq_scratch, 160, 160, 16000);
 
     /* Prime once so delay_ref/peak_index settle (peak stays at index 0
      * every call since filter_taps[0] is the only nonzero tap). */
     fa_update(&m, filter_taps, render_block, 160);
 
-    cap1 = FA_CONVERGENCE_THRESHOLD_HOPS + 1;   /* strict ">" reader downstream */
-    m.blocks_since_reset = FA_CONVERGENCE_THRESHOLD_HOPS;
+    /* FA_CONVERGENCE_THRESHOLD_HOPS is gone (live-computed per instance now,
+     * not a compile-time constant) -- read the equivalent live field off
+     * the already-constructed `m` instance instead. */
+    cap1 = m.convergence_threshold_hops + 1;   /* strict ">" reader downstream */
+    m.blocks_since_reset = m.convergence_threshold_hops;
     fa_update(&m, filter_taps, render_block, 160);
     CHECK(m.blocks_since_reset == cap1,
-          "filter_analyzer.blocks_since_reset: settles at FA_CONVERGENCE_THRESHOLD_HOPS+1 (matches its strict '>' reader)");
+          "filter_analyzer.blocks_since_reset: settles at convergence_threshold_hops+1 (matches its strict '>' reader)");
     fa_update(&m, filter_taps, render_block, 160);
     CHECK(m.blocks_since_reset == cap1, "filter_analyzer.blocks_since_reset: cap -> cap (no-op)");
     for (i = 0; i < 2000; i++) fa_update(&m, filter_taps, render_block, 160);

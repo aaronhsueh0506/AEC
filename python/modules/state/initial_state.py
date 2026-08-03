@@ -3,7 +3,7 @@
 Mirrors docs/aec3_extracts/src/aec3/aec_state.cc:327-353 verbatim with
 hop-rescaled thresholds.
 """
-from ._constants import HOPS_PER_SECOND
+from .. import aec3_scale as _aec3_scale
 
 
 class InitialState:
@@ -26,11 +26,22 @@ class InitialState:
         *,
         conservative_initial_phase: bool = False,
         initial_state_seconds: float = 2.5,
+        hop_size: int = 160,
+        sample_rate: int = 16000,
     ) -> None:
         self._conservative = bool(conservative_initial_phase)
-        self._initial_state_hops = int(initial_state_seconds * HOPS_PER_SECOND)
-        # AEC3 5 s conservative threshold (~5*250=1250 blocks) -> our 5*100=500 hops
-        self._conservative_hops = 5 * HOPS_PER_SECOND
+        # Was `int(initial_state_seconds * HOPS_PER_SECOND)` -- HOPS_PER_SECOND
+        # (state/_constants.py) bakes in a stale hop=160/sr=16000 assumption
+        # that matches none of the currently supported grids. Rescaled live
+        # via ms_to_hops so the window stays initial_state_seconds/5s at any
+        # grid.
+        self._initial_state_hops = _aec3_scale.ms_to_hops(
+            initial_state_seconds * 1000.0, hop_size, sample_rate
+        )
+        # AEC3 5 s conservative threshold (~5*250=1250 blocks).
+        self._conservative_hops = _aec3_scale.ms_to_hops(
+            5000.0, hop_size, sample_rate
+        )
         self._initial_state = True
         self._transition_triggered = False
         self._strong_not_saturated_render_blocks = 0

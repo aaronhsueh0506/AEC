@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
     /* Defaults match the Python FilterAnalyzer() ctor. */
     fa_init(&m, h_storage, size, 100.0 /*active_render_limit*/,
             0 /*bounded_erl*/, 1.0 /*default_gain*/,
-            abs_scratch, size, render_sq_scratch, hop);
+            abs_scratch, size, render_sq_scratch, hop, hop, 16000);
 
     for (s = 0; s < n_steps; ++s) {
         int e_peak, e_delay, e_cons, e_min, e_any, e_sig, e_flo, e_fhi, e_dref;

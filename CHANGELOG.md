@@ -16,6 +16,118 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-03 — Native 8 kHz delay-estimator timing fix (C) + Python 48 kHz anti-alias sidechain port + e2e-golden hop-drift fix
+
+**C: `delay_aec3_init()` (`c_impl/src/delay_aec3.c`) was hardcoding the internal
+delay estimator's feed rate to 16000 regardless of the AEC's actual configured
+`sample_rate`.** `da_estimator_init()`/`da_clockdrift_init()` derive real-world
+timing constants from that rate (the ~30 s clockdrift `stability_reset_hops`
+and the ~500 ms `consistent_estimate_threshold`, both `seconds * sample_rate /
+DA_AEC3_BLOCK_SIZE`) — passing the wrong rate distorts their real elapsed
+time, not just a label. 16 kHz was coincidentally correct; 48 kHz was also
+correct, but because the render/capture pair is resampled to a 16 kHz-
+equivalent stream before reaching the estimator (see next item); native
+8 kHz was wrong — both real-time thresholds ran at 2x their intended
+wall-clock duration. Fixed to pass the true feed rate (native `sample_rate`
+at 8/16 kHz, 16000 only when the 48 kHz sidechain is active).
+Verified: `test_rate_structural` (67/67, all four grids), `test_counter_saturation`
+(12017/12017, incl. `section_delay_aec3`), an isolated old-vs-new before/after
+comparison at native 8 kHz, and `test_static_aec` static==dynamic at all
+three rates (8000: 193,280 B pool; 48000: byte-equal).
+
+**Python: `EchoPathDelayEstimator` (`python/modules/delay/echo_path_delay_estimator.py`)
+ported the C-side `DaResample48` 48kHz→16kHz anti-alias sidechain (added
+2026-08-02) — this had been flagged C-only.** A `parity_aec_e2e` investigation
+found the asymmetry caused Python and C to lock onto *different delays at
+different hops* at 48 kHz (Python hop 68/delay 1024 vs C hop 100/delay 960) —
+not a numerical-precision drift but a structural mismatch, since Python fed
+the matched filter raw, aliased 48 kHz samples in 1.33 ms inner blocks instead
+of the intended 4 ms. Added `_Resample48` (same order-7 elliptic 4-SOS-section
+coefficients as `DA_RESAMPLE48_B`/`A` in C, `scipy.signal.sosfilt`'s default
+recurrence is the identical Direct-Form-II-Transposed form `da_biquad_process1`
+implements — verified sample-for-sample against the C filter to float32
+precision on a test signal). `ClockdriftDetector`/`MatchedFilterLagAggregator`'s
+`sample_rate` parameter is now the *effective* inner-block rate (16000 when
+the sidechain is active) rather than the raw native rate, mirroring the C fix
+above. `parity_aec_e2e` 48 kHz max diff: 4.596e-01 (FAIL, tol 1.0e-01) →
+3.873e-02 (PASS) — back in the same class as the originally-measured 6.4e-2
+baseline that calibrated the 48 kHz tolerance. 16 kHz/8 kHz outputs unchanged
+(rate_factor=1 path is a no-op).
+
+**Test tooling: `python/diag/gen_aec_e2e_golden.py`** hardcoded `hop =
+sr*10//1000` (10 ms), which diverged from the constructed `AecConfig`'s real
+hop once 16 kHz's default grid moved to 256/128 (previous entry, 2026-08-01) —
+regenerating a golden at the new default crashed (`ValueError: could not
+broadcast ... (160,) into (128,)`). Fixed to read `hop_size` back from the
+constructed config. This is the reason the 48 kHz asymmetry above went
+undetected until now — the E2E gate had been silently unable to run at any
+rate since the grid default changed.
+
+`__version__` not bumped, same batching rationale as the 2026-08-01 entry
+above.
+
+## [Unreleased] — 2026-08-03 (追加) — AEC3 per-block/hop-count constant audit: rescale for the live sample_rate
+
+Following the 8 kHz delay-estimator timing bug above, audited the rest of the
+state/residual/delay chain for the same bug class: a per-block AEC3 timing
+constant frozen at the legacy hop=160/sr=16000 grid instead of converted live
+via the existing `aec3_ms_to_hops`/`aec3_blocks_to_hops`/
+`aec3_per_block_rate_to_per_hop` helpers (`c_impl/src/aec3_scale.c` /
+`python/modules/aec3_scale.py`).
+
+**Tier 1 — verified no-op at the current production grid (hop=160, sr=16000),
+only changes behavior at 8 kHz / 48 kHz:** ERL/ERLE hold + startup hops,
+`FilterAnalyzer`/`FilterDelay`/`FilteringQualityAnalyzer` convergence/
+consistency/adaptation thresholds, `InitialState` hops, PBFDKF leakage rates,
+`aec.c`'s poor-coarse/coarse-reset/leakage-div/stat-dt-hangover counters,
+`aec3_post.c`'s `y2_thr`, reverb-decay wall-clock alignment in
+`residual_echo_estimator`. Each hand-verified to reproduce its old frozen
+constant exactly at hop=160/sr=16000 (e.g. `aec3_ms_to_hops(800.0, 160,
+16000) == 80 == ` the old `AEC_STATE_ACTIVE_RENDER_BLOCKS` literal).
+
+**Tier 2 — genuine production-behavior changes AT the current 16 kHz default,
+because these were previously applied as raw, unrescaled AEC3 literals with
+no rate conversion at all (so rescaling changes today's output, not just
+other rates'):** `subband_erle.c`/`.py` (`alpha_up`/`alpha_down`/
+`onset_release_decay`), `fullband_erle.c`/`.py` (`quality_alpha`/`td_alpha`/
+`maxmin_forget`), `residual_echo_estimator.c`/`.py`
+(`noise_floor_growth_per_hop`, 1.1 → ~1.27 at hop=160), `stationarity_estimator.c`/`.py`
+(noise-spectrum `alpha`/`alpha_init`). These four have **not** been through
+the 800-case AECMOS bench yet — do not treat as ship-ready.
+
+**Explicitly held back, NOT included in this round's commit:**
+`suppression_gain.py`'s `_LowNoiseRenderDetector` IIR (`0.9`/`0.1` →
+wall-clock-rescaled) and its C-side `suppression_gain.c` counterpart. This
+exact mechanism (`use_wallclock_low_noise_render_iir`-equivalent) was
+exposed as default-OFF research substrate in `[3.22.1]` and then removed
+entirely as dead code in a later cleanup (`"kept the literal 0.9 decay"`) —
+turning it back on in production a third time needs its own bench pass and
+sign-off, not a silent revival inside an unrelated rate-audit. Python's
+`use_wallclock_ema_alpha` kwarg is not passed from `orchestrator.py` (so
+`SuppressionGain`'s own `False` default applies); C's `suppression_gain.c`
+keeps the literal `0.9f`/`0.1f`. Tracked as a follow-up decision, not
+abandoned.
+
+Also folded into this same round (both already had their own dedicated
+regression tests before this commit):
+- `delay_aec3_reset()` / `EchoPathDelayEstimator.reset()` now clears the
+  full signal chain — was previously leaving the inner decimators/ring/
+  pending-sample state stale after the 48 kHz sidechain's own reset (a
+  mixed fresh/stale reset). `c_impl/test/test_delay_reset.c` +
+  `python/test_delay_reset.py`.
+- `erle_startup_hops`/`erl_startup_hops`'s `200`-as-sentinel collision
+  fixed (`None`/`-1` now means "auto"; an explicit `200` request could
+  previously never be expressed, since it was indistinguishable from the
+  auto default). `python/test_aec_state_startup_hops.py`.
+
+Verified: `test_rate_structural` (67/67, all four grids), `test_counter_saturation`
+(12017/12017) with the held-back mechanism reverted to its pre-audit
+literal values. **Not yet run**: the 800-case AECMOS bench this repo's own
+rules require before Tier 2 items ship — treat this commit as a local,
+unpushed checkpoint, not a ship decision.
+
+`__version__` not bumped pending that bench pass.
+
 ## [Unreleased] — 2026-08-01 — 16 kHz default signal grid: 512/256 → 256/128 (8 ms hop)
 
 `aec_config_defaults()`/`AecConfig.__post_init__` now default 16 kHz to the

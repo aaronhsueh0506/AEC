@@ -53,7 +53,9 @@ extern "C" {
  * of that call is stored directly at the `x2_min` store in
  * erl_estimator_init(). _HOLD_HOPS = int(4.0 * HOPS_PER_SECOND) = 400. */
 #define ERL_AEC3_X2_MIN  44015068.0f
-#define ERL_HOLD_HOPS    400
+/* hold_hops (AEC3 1000 blocks, ~4 s) was a frozen #define (400, correct only
+ * at hop=160/sr=16000); now computed live in erl_estimator_init() from
+ * hop_size/sample_rate -- see the ErlEstimator.hold_hops field below. */
 
 /* numpy 1.26 pairwise float32 sum (declared in reverb_frequency_response.c).
  * Reused here for float(np.sum(x2)) / float(np.sum(y2)). */
@@ -66,6 +68,7 @@ float f32_pairwise_sum(const float *a, size_t n);
 typedef struct {
     int     startup_hops;          /* _startup_hops               */
     int     n_bins;                /* _n_bins                     */
+    int     hold_hops;             /* live-computed, was ERL_HOLD_HOPS */
     float   x2_min;                /* _x2_min (float32; result of
                                      * aec3_per_bin_psd_threshold(), itself float32) */
     float  *erl;                   /* _erl,           length n_bins     */
@@ -75,9 +78,10 @@ typedef struct {
     int     blocks_since_reset;    /* _blocks_since_reset         */
 } ErlEstimator;
 
-/* hop_size feeds aec3_per_bin_psd_threshold(44015068.0, hop_size) for x2_min. */
+/* hop_size feeds aec3_per_bin_psd_threshold(44015068.0, hop_size) for x2_min.
+ * sample_rate (with hop_size) drives the live hold_hops computation. */
 void erl_estimator_init(ErlEstimator *e, int startup_phase_length_hops,
-                        int n_bins, int hop_size,
+                        int n_bins, int hop_size, int sample_rate,
                         float *erl_storage, int *hold_counters_storage);
 
 void erl_estimator_reset(ErlEstimator *e);

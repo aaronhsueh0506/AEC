@@ -108,9 +108,17 @@ void stationarity_estimator_init(StationarityEstimator *s,
     s->n_freqs = n_freqs;
     s->window_hops = aec3_blocks_to_hops(13, hop_samples, sample_rate);
     s->hangover_hops = aec3_blocks_to_hops(12, hop_samples, sample_rate);
+    /* Was STAT_AVG_INIT_HOPS_DEFAULT/STAT_INITIAL_PHASE_HOPS_DEFAULT (frozen
+     * #defines, blocks_to_hops(20/500,160,16000)=8/200) and STAT_ALPHA/
+     * STAT_ALPHA_INIT (frozen AEC3 per-4ms-block literals, 0.004f/0.04f) --
+     * all four passed straight through unlike window_hops/hangover_hops
+     * above. Rescaled live the same way for consistency. */
     noise_spectrum_init(&s->noise, n_freqs, STAT_MIN_NOISE_POWER_FLOAT,
-                        STAT_AVG_INIT_HOPS_DEFAULT, STAT_INITIAL_PHASE_HOPS_DEFAULT,
-                        STAT_ALPHA, STAT_ALPHA_INIT, noise_storage);
+                        aec3_blocks_to_hops(20, hop_samples, sample_rate),
+                        aec3_blocks_to_hops(500, hop_samples, sample_rate),
+                        aec3_per_block_ema_alpha_to_per_hop(STAT_ALPHA, hop_samples, sample_rate),
+                        aec3_per_block_ema_alpha_to_per_hop(STAT_ALPHA_INIT, hop_samples, sample_rate),
+                        noise_storage);
     s->hangovers = hangovers_storage;
     s->stationarity_flags = flags_storage;
     s->history = history_storage;

@@ -240,9 +240,21 @@ typedef struct Aec {
     /* poor-coarse rescue (process loop) */
     int    poor_coarse_counter;
     int    coarse_reset_hangover;
-    /* Track F: sustained leakage-diverged gate counter (clamped 0..10).
-     * Mirrors orchestrator._leakage_div_sustained_counter. */
+    /* Track F: sustained leakage-diverged gate counter (clamped 0..
+     * 2*leakage_div_sustain_hops). Mirrors
+     * orchestrator._leakage_div_sustained_counter. */
     int    leakage_div_sustained_counter;
+    /* Live-computed thresholds for the four counters above (+
+     * stat_dt_hangover), all previously frozen at the legacy hop=160/
+     * sr=16000 grid's hop-count result (2/10/5/80) instead of being
+     * recomputed for the live hop_size/sample_rate -- see aec.c's
+     * poor-coarse-rescue / Track-F / stationary-DT-hangover blocks.
+     * Mirrors orchestrator.py's _aec3_scale.blocks_to_hops(5)/(25) and
+     * ms_to_hops(50.0)/(800.0) calls at those same sites. */
+    int    poor_coarse_threshold_hops;    /* was hardcoded 2 */
+    int    coarse_reset_hangover_hops;    /* was hardcoded 10 */
+    int    leakage_div_sustain_hops;      /* was hardcoded 5 (clamp was 2x = 10) */
+    int    stat_dt_hangover_hops;         /* was hardcoded 80 */
 
     /* FilterMisadjustmentEstimator accumulators */
     float  misadj_e2_acum, misadj_y2_acum;

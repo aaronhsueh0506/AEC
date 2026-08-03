@@ -3,24 +3,24 @@
 Mirrors docs/aec3_extracts/src/aec3/filter_analyzer.{cc,h}.
 
 Per-frame ``update(filter_taps, render_block)`` produces:
-  - ``filter_delays_blocks()`` -> ``[peak_index // HOP_SAMPLES]``
+  - ``filter_delays_blocks()`` -> ``[peak_index // hop_size]``
   - ``min_filter_delay_blocks()`` -> the same scalar
   - ``any_filter_consistent()`` -> ConsistentFilterDetector verdict
   - ``max_echo_path_gain()`` -> |h[peak]| (post 5 s convergence)
   - ``get_adjusted_filters()`` -> the high-pass-filtered TD taps
 
 The peak-finding region cycles incrementally over the full filter
-length, processing ``HOP_SAMPLES`` samples per call (AEC3 verbatim
+length, processing ``hop_size`` samples per call (AEC3 verbatim
 ``kNumberBlocksToUpdate=1`` * ``kBlockSize``). The HPF is the AEC3
 verbatim 3-tap minimum-phase ~600 Hz cutoff filter.
 
 Block unit translation:
-  AEC3 kBlockSize=64 samples (4 ms @16k) -> our HOP_SAMPLES=160 (10 ms).
-  delay_blocks = peak_index // HOP_SAMPLES. With filter_taps ~ 960
-  samples (6 partitions * 160) the delay range is 0..5 blocks (vs
-  AEC3's 0..12); resolution is 2.5x coarser but the downstream
-  consumer (FilterDelay.min_direct_path_filter_delay) only needs a
-  non-zero scalar in OUR block units.
+  AEC3 kBlockSize=64 samples (4 ms @16k) -> OUR configured hop_size
+  (passed at construction time; e.g. 128 @16 kHz default, 8 ms).
+  delay_blocks = peak_index // hop_size. Resolution/coarseness vs
+  AEC3's own kBlockSize-based delay range varies with the live grid; the
+  downstream consumer (FilterDelay.min_direct_path_filter_delay) only
+  needs a non-zero scalar in OUR block units.
 
 Active-render threshold uses ``render_block_scaled`` (int16 amplitude),
 matching the units AEC3 uses (``active_render_limit`` defaults to 100
@@ -30,14 +30,7 @@ from typing import Optional
 
 import numpy as np
 
-from .._rates import HOP_SAMPLES, SR_HZ
-
-
-_HOPS_PER_SECOND = SR_HZ // HOP_SAMPLES  # 16000/160 = 100
-
-# AEC3 verbatim ints translated to OUR hop unit.
-_CONVERGENCE_THRESHOLD_HOPS = 5 * _HOPS_PER_SECOND     # AEC3 5 * 250 -> 500
-_CONSISTENT_HOLD_HOPS = int(1.5 * _HOPS_PER_SECOND)    # AEC3 1.5 * 250 -> 150
+from .. import aec3_scale as _aec3_scale
 
 # Minimum-phase HPF cutoff ~600 Hz (filter_analyzer.cc:170-172 verbatim).
 _HPF_COEFFS = np.array([0.7929742, -0.36072128, -0.47047766], dtype=np.float32)
@@ -60,8 +53,9 @@ class _ConsistentFilterDetector:
     region_start == 0) — see filter_analyzer.cc:232-238.
     """
 
-    def __init__(self, active_render_threshold: float) -> None:
+    def __init__(self, active_render_threshold: float, consistent_hold_hops: int) -> None:
         self._active_render_threshold = active_render_threshold
+        self._consistent_hold_hops = consistent_hold_hops
         self.reset()
 
     def reset(self) -> None:
@@ -125,7 +119,7 @@ class _ConsistentFilterDetector:
                 self._counter = 0
                 self._delay_ref = delay_blocks
 
-        return self._counter > _CONSISTENT_HOLD_HOPS
+        return self._counter > self._consistent_hold_hops
 
 
 class FilterAnalyzer:
@@ -142,11 +136,27 @@ class FilterAnalyzer:
         active_render_limit: float = _DEFAULT_ACTIVE_RENDER_LIMIT,
         bounded_erl: bool = False,
         default_gain: float = 1.0,
+        hop_size: int = 160,
+        sample_rate: int = 16000,
     ) -> None:
-        self._active_render_threshold = float((active_render_limit ** 2) * HOP_SAMPLES)
+        # hop_size/sample_rate were previously not parameters at all -- every
+        # time-based constant below was hardcoded against the stale
+        # hop=160/sr=16000 assumption (_rates.HOP_SAMPLES), which matches
+        # none of the currently supported grids.
+        self._hop_size = int(hop_size)
+        self._active_render_threshold = float((active_render_limit ** 2) * self._hop_size)
         self._bounded_erl = bool(bounded_erl)
         self._default_gain = float(default_gain)
-        self._consistent = _ConsistentFilterDetector(self._active_render_threshold)
+        # AEC3 verbatim: 5 s convergence threshold, 1.5 s consistency hold.
+        self._convergence_threshold_hops = _aec3_scale.ms_to_hops(
+            5000.0, hop_size, sample_rate
+        )
+        self._consistent_hold_hops = _aec3_scale.ms_to_hops(
+            1500.0, hop_size, sample_rate
+        )
+        self._consistent = _ConsistentFilterDetector(
+            self._active_render_threshold, self._consistent_hold_hops
+        )
         self._region_start = 0
         self._region_end = 0
         self._blocks_since_reset = 0
@@ -170,7 +180,7 @@ class FilterAnalyzer:
 
     def _set_region(self, size: int) -> None:
         # filter_analyzer.cc:194-206. Cycles one block forward; wraps at end.
-        block = HOP_SAMPLES
+        block = self._hop_size
         if self._region_end >= size - 1:
             self._region_start = 0
         else:
@@ -210,11 +220,11 @@ class FilterAnalyzer:
         seg_amax = int(np.argmax(seg_sq))
         if float(seg_sq[seg_amax]) > cur_sq:
             self._peak_index = self._region_start + seg_amax
-        self._delay_blocks = self._peak_index // HOP_SAMPLES
+        self._delay_blocks = self._peak_index // self._hop_size
         # UpdateFilterGain (filter_analyzer.cc:131,142-159): AEC3 passes h_highpass_
         # to UpdateFilterGain and reads filter_time_domain[peak_index] from it,
         # so the gain is |h_hpf[peak]|, not the raw-filter value.
-        sufficient = self._blocks_since_reset > _CONVERGENCE_THRESHOLD_HOPS
+        sufficient = self._blocks_since_reset > self._convergence_threshold_hops
         peak_abs = float(abs(h[self._peak_index]))
         if sufficient and self._consistent_estimate:
             self._gain = peak_abs

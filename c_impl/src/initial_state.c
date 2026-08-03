@@ -8,15 +8,19 @@
  * (int)((float)seconds * HOPS_PER_SECOND). All run-time state is integer/bool.
  */
 #include "initial_state.h"
+#include "aec3_scale.h"
 
 void initial_state_init(InitialState *s, int conservative_initial_phase,
-                        float initial_state_seconds) {
+                        float initial_state_seconds,
+                        int hop_size, int sample_rate) {
     s->conservative = conservative_initial_phase ? 1 : 0;
-    /* int(initial_state_seconds * HOPS_PER_SECOND) — f32 product, int() trunc */
-    s->initial_state_hops =
-        (int)(initial_state_seconds * (float)INITIAL_STATE_HOPS_PER_SECOND);
-    /* AEC3 5 s conservative threshold -> 5 * 100 = 500 hops */
-    s->conservative_hops = 5 * INITIAL_STATE_HOPS_PER_SECOND;
+    /* Was `(int)(initial_state_seconds * INITIAL_STATE_HOPS_PER_SECOND)` with
+     * HOPS_PER_SECOND frozen at 100 (hop=160/sr=16000); computed live via
+     * aec3_ms_to_hops so the window stays initial_state_seconds at any grid. */
+    s->initial_state_hops = aec3_ms_to_hops(
+        initial_state_seconds * 1000.0f, hop_size, sample_rate);
+    /* AEC3 5 s conservative threshold. */
+    s->conservative_hops = aec3_ms_to_hops(5000.0f, hop_size, sample_rate);
     s->initial_state = 1;
     s->transition_triggered = 0;
     s->strong_not_saturated_render_blocks = 0;

@@ -4,6 +4,7 @@
  * per-hop reverb decay runs in float32 (converted from the former double
  * pow(); drift accepted). Built with -ffp-contract=off. */
 #include "residual_echo_estimator.h"
+#include "aec3_scale.h"
 
 #include <math.h>
 #include <string.h>
@@ -33,7 +34,7 @@ static const float *ree_buf_at(const float *buf, int n_bins, int head, int i) {
 }
 
 void ree_init(ResidualEchoEstimator *r,
-              int n_bins, int hop_size,
+              int n_bins, int hop_size, int sample_rate,
               const ReeEchoModelConfig *echo_model,
               float default_gain, float tm_gain,
               int erle_onset_comp_in_dominant,
@@ -56,6 +57,13 @@ void ree_init(ResidualEchoEstimator *r,
     int k;
     r->n_bins = n_bins;
     r->hop_size = hop_size;
+    r->sample_rate = sample_rate;
+    /* AEC3 UpdateRenderNoisePower per-block growth (x2_noise_floor *= 1.1,
+     * cc:325-359) -- was a bare per-hop literal with no rate conversion at
+     * all; rescaled live here so the wall-clock recovery-after-hold rate is
+     * preserved at any grid. Mirrors residual_echo_estimator.py. */
+    r->noise_floor_growth_per_hop =
+        aec3_per_block_growth_to_per_hop(1.1f, hop_size, sample_rate);
     r->echo_model = *echo_model;
     r->default_gain_early = default_gain;
     r->default_gain_late = default_gain;
@@ -152,8 +160,8 @@ static void ree_update_render_noise_power(ResidualEchoEstimator *r,
         } else {
             /* not_down */
             if (r->x2_noise_floor_counter[k] >= hold) {
-                /* ramp up 10% (f32 array * pyfloat 1.1 = f32), max vs min. */
-                float ramp = r->x2_noise_floor[k] * 1.1f;
+                /* ramp up (wall-clock-rescaled growth), max vs min. */
+                float ramp = r->x2_noise_floor[k] * r->noise_floor_growth_per_hop;
                 r->x2_noise_floor[k] = (ramp > min_floor) ? ramp : min_floor;
             } else {
                 r->x2_noise_floor_counter[k] += 1;
@@ -188,9 +196,11 @@ static float ree_reverb_decay(const ResidualEchoEstimator *r,
     if (dominant_nearend) {
         d *= r->reverb_mild_decay_scale;
     }
-    if (r->hop_size != 64) {
-        d = powf(d, (float)r->hop_size / 64.0f);
-    }
+    /* Wall-clock-preserving rescale (accounts for BOTH hop_size AND
+     * sample_rate) -- see the header comment / residual_echo_estimator.py's
+     * _reverb_decay() docstring for the full derivation. The former
+     * hop_size/64-only formula was 3x too fast at 48 kHz. */
+    d = aec3_per_block_growth_to_per_hop(d, r->hop_size, r->sample_rate);
     return d;
 }
 

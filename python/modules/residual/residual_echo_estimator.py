@@ -173,6 +173,13 @@ class ResidualEchoEstimator:
         self._noise_floor_hold_hops = _aec3_scale.ms_to_hops(
             echo_model.noise_floor_hold_ms, self._hop_size, self._sr
         )
+        # AEC3 UpdateRenderNoisePower per-block growth (x2_noise_floor *= 1.1,
+        # cc:325-359) -- was applied as a bare per-hop literal with no rate
+        # conversion at all (unlike the hold duration just above), so the
+        # wall-clock recovery-after-hold rate was wrong at every grid.
+        self._noise_floor_growth_per_hop = _aec3_scale.per_block_growth_to_per_hop(
+            1.1, self._hop_size, self._sr
+        )
         self._tm_gain_early = _TRANSPARENT_MODE_GAIN
         self._tm_gain_late = _TRANSPARENT_MODE_GAIN
         self._default_gain_early = float(ep_strength.default_gain)
@@ -538,7 +545,7 @@ class ResidualEchoEstimator:
         ramp_mask = not_down & (self._x2_noise_floor_counter >= hold)
         if ramp_mask.any():
             self._x2_noise_floor[ramp_mask] = np.maximum(
-                self._x2_noise_floor[ramp_mask] * 1.1,
+                self._x2_noise_floor[ramp_mask] * self._noise_floor_growth_per_hop,
                 self._echo_model.min_noise_floor_power,
             )
         # Counter increment for non-down bins not yet past hold.
@@ -568,15 +575,21 @@ class ResidualEchoEstimator:
         AEC3 spec uses ``decay`` as the per-block (4 ms / 64-sample)
         multiplier in ``reverb_[k] = (reverb_[k] + injection) * decay``
         applied per ``ReverbModel::UpdateReverb`` call. Our pipeline calls
-        the same update once per hop (10 ms / 160-sample), so the AEC3
-        constant 0.83 applied verbatim would decay 2.5× slower in
-        wall-clock — inflating R²_reverb steady-state when the filter is
-        unconverged and the scaling input is held stale.
+        the same update once per hop, so the AEC3 constant 0.83 applied
+        verbatim would decay at the wrong wall-clock rate — inflating
+        R²_reverb steady-state when the filter is unconverged and the
+        scaling input is held stale.
 
-        Wall-clock alignment: ``d_per_hop = d_aec3 ** (hop / 64)``.
-        At hop=160 this is ``0.83 ** 2.5 ≈ 0.624``. The conversion is
-        applied to BOTH static-config decay and the adaptive estimator
-        output, since both feed the same per-hop ReverbModel.update call.
+        Wall-clock alignment via ``aec3_scale.per_block_growth_to_per_hop``
+        (``d_per_hop = d_aec3 ** (hop_seconds / block_seconds)``), which
+        accounts for BOTH hop_size and sample_rate. The previous formula
+        (``d ** (hop_size / 64)``) only accounted for hop_size and was
+        correct only by coincidence at sr=16000 (AEC3's own reference
+        rate) — at 48 kHz it used an exponent 3x too large (512/64=8
+        instead of the true 512*250/48000≈2.67), decaying the reverb tail
+        roughly 3x too fast in wall-clock time. The conversion is applied
+        to BOTH static-config decay and the adaptive estimator output,
+        since both feed the same per-hop ReverbModel.update call.
         """
         if not self._reverb_cfg.enabled:
             return 0.0
@@ -586,10 +599,7 @@ class ResidualEchoEstimator:
             d = float(self._reverb_cfg.decay)
             if dominant_nearend:
                 d *= float(self._reverb_cfg.mild_decay_scale)
-        # Wall-clock alignment vs AEC3 kBlockSize=64.
-        _AEC3_BLOCK_SAMPLES = 64
-        if self._hop_size != _AEC3_BLOCK_SAMPLES:
-            d = float(d) ** (self._hop_size / _AEC3_BLOCK_SAMPLES)
+        d = _aec3_scale.per_block_growth_to_per_hop(float(d), self._hop_size, self._sr)
         return float(d)
 
     def _update_reverb_linear(

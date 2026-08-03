@@ -2,12 +2,30 @@
  * Integration / orchestration layer; see aec_state.h for the full spec and the
  * strict update() order. */
 #include "aec_state.h"
+#include "aec3_scale.h"
 
 #include <assert.h>
 
 /* DelayAdjustment enum (delay_types.py): NONE=0, BUFFER_FLUSH=1,
  * NEW_DETECTED_DELAY=2. */
 #define AEC_DELAY_ADJ_NONE 0
+
+/* Sentinel for AecStateConfig.erle_startup_hops/erl_startup_hops: "not
+ * explicitly overridden" (aec_state_config_defaults()'s own default) is
+ * read by resolve_startup_hops() as "compute the live, grid-correct hop
+ * count instead". A caller that explicitly sets either field to ANY OTHER
+ * value -- including 200, which happens to be the auto-computed value at
+ * the legacy hop=160/sr=16000 grid -- gets it honored verbatim. -1 (not a
+ * reachable hop count) is used specifically so no legitimate explicit value
+ * can ever collide with the "unset" marker. */
+#define AEC_STATE_STARTUP_HOPS_AUTO (-1)
+
+static int resolve_startup_hops(int configured_hops, int hop_size, int sample_rate) {
+    if (configured_hops != AEC_STATE_STARTUP_HOPS_AUTO) {
+        return configured_hops;
+    }
+    return aec3_ms_to_hops(2000.0f, hop_size, sample_rate);
+}
 
 void aec_state_config_defaults(AecStateConfig *cfg) {
     cfg->use_linear_filter = 1;
@@ -17,11 +35,11 @@ void aec_state_config_defaults(AecStateConfig *cfg) {
     cfg->num_capture_channels = 1;
     cfg->echo_can_saturate = 1;
     cfg->n_bins = 257;
-    cfg->erle_startup_hops = 200;
+    cfg->erle_startup_hops = AEC_STATE_STARTUP_HOPS_AUTO;
     cfg->erle_min = 1.0f;
     cfg->erle_max_l = 4.0f;
     cfg->erle_max_h = 1.5f;
-    cfg->erl_startup_hops = 200;
+    cfg->erl_startup_hops = AEC_STATE_STARTUP_HOPS_AUTO;
     cfg->hop_size = 160;
     cfg->sample_rate = 16000;
     cfg->enable_filter_analyzer = 1;
@@ -31,27 +49,38 @@ void aec_state_config_defaults(AecStateConfig *cfg) {
 
 void aec_state_init(AecState *s, const AecStateConfig *cfg,
                     const AecStateStorage *st) {
+    int erle_hops, erl_hops;
+
     s->cfg = *cfg;
     s->st  = *st;
 
     initial_state_init(&s->initial_state,
                        cfg->conservative_initial_phase,
-                       cfg->initial_state_seconds);
+                       cfg->initial_state_seconds,
+                       cfg->hop_size, cfg->sample_rate);
     filter_delay_init(&s->delay_state, st->filter_delays_blocks,
-                      cfg->delay_headroom_samples, cfg->num_capture_channels);
-    fq_init(&s->filter_quality, cfg->use_linear_filter);
+                      cfg->delay_headroom_samples, cfg->num_capture_channels,
+                      cfg->hop_size, cfg->sample_rate);
+    fq_init(&s->filter_quality, cfg->use_linear_filter,
+           cfg->hop_size, cfg->sample_rate);
     saturation_detector_init(&s->saturation_detector);
 
+    /* erle_startup_hops/erl_startup_hops resolve independently -- see
+     * resolve_startup_hops() above -- instead of sharing one precomputed
+     * value, so a caller CAN still diverge them via an explicit override. */
+    erle_hops = resolve_startup_hops(cfg->erle_startup_hops, cfg->hop_size, cfg->sample_rate);
+    erl_hops = resolve_startup_hops(cfg->erl_startup_hops, cfg->hop_size, cfg->sample_rate);
+
     erle_estimator_init(&s->erle_estimator,
-                        cfg->erle_startup_hops, cfg->n_bins,
+                        erle_hops, cfg->n_bins,
                         cfg->erle_min, cfg->erle_max_l, cfg->erle_max_h,
-                        /*use_onset_detection=*/1, cfg->hop_size,
+                        /*use_onset_detection=*/1, cfg->hop_size, cfg->sample_rate,
                         st->erle_max, st->erle, st->erle_oc, st->erle_unb,
                         st->erle_during, st->erle_coming_onset, st->erle_hold,
                         st->erle_y2_acc, st->erle_e2_acc, st->erle_low_render);
 
-    erl_estimator_init(&s->erl_estimator, cfg->erl_startup_hops, cfg->n_bins,
-                       cfg->hop_size, st->erl, st->erl_hold);
+    erl_estimator_init(&s->erl_estimator, erl_hops, cfg->n_bins,
+                       cfg->hop_size, cfg->sample_rate, st->erl, st->erl_hold);
 
     s->has_filter_analyzer = cfg->enable_filter_analyzer ? 1 : 0;
     if (s->has_filter_analyzer) {
@@ -60,12 +89,16 @@ void aec_state_init(AecState *s, const AecStateConfig *cfg,
         fa_init(&s->filter_analyzer, st->fa_h_highpass, cfg->filter_taps_size,
                 100.0, 0, 1.0,
                 st->fa_abs_scratch, cfg->fa_scratch_size,
-                st->fa_render_sq_scratch, cfg->hop_size);
+                st->fa_render_sq_scratch, cfg->hop_size,
+                cfg->hop_size, cfg->sample_rate);
     }
 
     s->strong_not_saturated_render_blocks = 0;
     s->blocks_with_active_render = 0;
     s->capture_signal_saturation = 0;
+    /* AEC3 200 blocks x 4 ms = 800 ms wall-clock. Was frozen at 80 (correct
+     * only at hop=160/sr=16000); computed live here. */
+    s->active_render_blocks = aec3_ms_to_hops(800.0f, cfg->hop_size, cfg->sample_rate);
 }
 
 /* ── queries ───────────────────────────────────────────────────────────── */
@@ -76,7 +109,7 @@ int aec_state_usable_linear_estimate(const AecState *s) {
 }
 
 int aec_state_active_render(const AecState *s) {
-    return s->blocks_with_active_render > AEC_STATE_ACTIVE_RENDER_BLOCKS;
+    return s->blocks_with_active_render > s->active_render_blocks;
 }
 
 int aec_state_saturated_echo(const AecState *s) {
@@ -249,13 +282,13 @@ void aec_state_update(AecState *s,
      *     comparison is permanently false either way.
      */
     if (active_render) {
-        if (s->blocks_with_active_render <= AEC_STATE_ACTIVE_RENDER_BLOCKS) {
+        if (s->blocks_with_active_render <= s->active_render_blocks) {
             s->blocks_with_active_render += 1;
         }
     }
     if (active_render && !s->capture_signal_saturation) {
         if (s->strong_not_saturated_render_blocks
-                < FILTER_ADAPTATION_THRESHOLD_HOPS) {
+                < s->delay_state.filter_adaptation_threshold_hops) {
             s->strong_not_saturated_render_blocks += 1;
         }
     }

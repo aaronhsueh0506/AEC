@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
     fwrite(hdr, sizeof(int32_t), 2, f);
 
     DelayAec3 d;
-    delay_aec3_init(&d);
+    delay_aec3_init(&d, 16000);
 
     float near[HOP_MAX], far[HOP_MAX];
     int solid_hops = 0, max_nupd = 0;

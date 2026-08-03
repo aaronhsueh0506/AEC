@@ -429,19 +429,6 @@ static int next_pow2(int x) {
     return (int)n;
 }
 
-/* aec3_scale.blocks_to_hops(blocks, hop, sr) = round(blocks * 64/hop ... ).
- * For our hop=160/sr=16000 we bake the values the Python produces (the only
- * ones the orchestrator uses: poor_excitation 1000-block init). */
-static long blocks_to_hops_round(int blocks, int hop, int sr) {
-    /* AEC3 block = 64 samples; per-hop count = blocks * 64 / hop ... but the
-     * Python helper uses round(blocks * kBlockSize / hop * (sr_ref/sr))? We use
-     * the verified production value via the same formula as aec3_scale. The
-     * only call here is 1000 → init poor-excitation counter. Init-only,
-     * float32-by-design. */
-    float v = (float)blocks * 64.0f / (float)hop;
-    (void)sr;
-    return (long)floorf(v + 0.5f);
-}
 
 /* Clear + recreate the AEC3 post chain sub-objects (mirrors _reset_aec3_post
  * with preserve_render_side=True: StationarityEstimator + non_zero_render_seen
@@ -469,7 +456,17 @@ static void aec3_post_chain_reset(Aec* a) {
         acfg.n_bins = a->n_freqs;
         acfg.num_capture_channels = AEC3B_ST_NUM_CAPTURE_CHANNELS;
         acfg.hop_size = a->hop_size;
+        /* AecStateConfig.sample_rate was never populated at this call site
+         * (stayed at aec_state_config_defaults()'s 16000 regardless of the
+         * real cfg.sample_rate) -- every hop/sr-scaled threshold downstream
+         * silently behaved as if sample_rate==16000 at every grid. */
+        acfg.sample_rate = a->cfg.sample_rate;
         acfg.enable_filter_analyzer = AEC3B_ST_ENABLE_FILTER_ANALYZER;
+        /* AEC3B_ST_ERLE_STARTUP_HOPS/ST_ERL_STARTUP_HOPS are always the
+         * AEC_STATE_STARTUP_HOPS_AUTO sentinel (-1, aec_state.c), never a
+         * literal hop count -- resolve_startup_hops() re-derives the real
+         * hop count from acfg.hop_size/acfg.sample_rate above (which DO vary
+         * across the 8k/16k/48k M4 grids). Do not replace with a literal. */
         acfg.erle_startup_hops = AEC3B_ST_ERLE_STARTUP_HOPS;
         acfg.erl_startup_hops = AEC3B_ST_ERL_STARTUP_HOPS;
         acfg.echo_can_saturate = AEC3B_ST_ECHO_CAN_SATURATE;
@@ -503,7 +500,7 @@ static void aec3_post_chain_reset(Aec* a) {
         em.stationary_gate_slope = AEC3B_REE_STATIONARY_GATE_SLOPE;
         em.model_reverb_in_nonlinear_mode = AEC3B_REE_MODEL_REVERB_IN_NL;
         /* re-init reuses the same storage pointers already bound in a3_ree. */
-        ree_init(&a->a3_ree, a->n_freqs, a->hop_size, &em,
+        ree_init(&a->a3_ree, a->n_freqs, a->hop_size, a->cfg.sample_rate, &em,
                  AEC3B_REE_DEFAULT_GAIN, AEC3B_REE_TM_GAIN, AEC3B_REE_ERLE_ONSET_COMP,
                  AEC3B_REE_REVERB_DECAY, AEC3B_REE_REVERB_MILD_SCALE,
                  AEC3B_REE_REVERB_ENABLED, AEC3B_REE_REVERB_TAIL_STRENGTH,
@@ -785,6 +782,20 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
  * carve (and therefore owns a real allocation outside the pool/arena -- the
  * NE10 backend's R2C/C2R twiddle config) is torn down before returning, so
  * the caller has only the pool/arena bytes themselves left to deal with. */
+
+/* Wall-clock-preserving thresholds for poor_coarse/coarse_reset/
+ * leakage_div_sustain/stat_dt_hangover -- shared by aec_carve() (construction)
+ * and aec_reset() (mirrors orchestrator.py's live blocks_to_hops(5)/(25) and
+ * ms_to_hops(50.0)/(800.0) calls; see aec.h field comments). Single source of
+ * truth so the two call sites cannot drift the way they briefly did before
+ * this helper existed. */
+static void aec_recompute_wallclock_thresholds(Aec* a, int hop, int sample_rate) {
+    a->poor_coarse_threshold_hops = aec3_blocks_to_hops(5, hop, sample_rate);
+    a->coarse_reset_hangover_hops = aec3_blocks_to_hops(25, hop, sample_rate);
+    a->leakage_div_sustain_hops = aec3_ms_to_hops(50.0f, hop, sample_rate);
+    a->stat_dt_hangover_hops = aec3_ms_to_hops(800.0f, hop, sample_rate);
+}
+
 static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
                       int hop, int blk, int fft, int K, int np,
                       int buf_samp, int fcap, int is_static) {
@@ -826,7 +837,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     }
     /* Delay ring */
     if (cfg->enable_delay_est) {
-        delay_aec3_init(&a->delay);
+        delay_aec3_init(&a->delay, cfg->sample_rate);
         a->has_delay = 1;
         a->ref_ring_size = buf_samp;
         a->ref_ring = (float*)ptr; ptr += ALIGN16((size_t)buf_samp * sizeof(float));
@@ -862,21 +873,21 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     /* Main filter (PBFDKF, arena/pool-carved on BOTH heap and static paths
      * since the F03 arena-fication below aec_create()). */
     size_t kf_sz = pbfdkf_get_mem_size(blk, np, hop);
-    if (pbfdkf_init_static(&a->main_filter, ptr, kf_sz, blk, np, cfg->mu, cfg->delta, hop) != 0)
+    if (pbfdkf_init_static(&a->main_filter, ptr, kf_sz, blk, np, cfg->mu, cfg->delta, hop, cfg->sample_rate) != 0)
         return -1;   /* F04: nested fft_init failed (OOM) -- nothing to unwind yet */
     for (int k = 0; k < K; ++k) {
         a->main_filter.Q_high[k] = cfg->kalman_q_high;
         a->main_filter.Q_low[k]  = cfg->kalman_q_low;
         a->main_filter.Q[k]      = cfg->kalman_q_high;
     }
-    a->main_filter.base.poor_excitation_counter = blocks_to_hops_round(1000, hop, cfg->sample_rate);
+    a->main_filter.base.poor_excitation_counter = aec3_blocks_to_hops(1000, hop, cfg->sample_rate);
     a->main_filter.base.constraint_round_robin = 1;  /* AEC3 round-robin (main) */
     ptr += kf_sz;
 
     /* Shadow filter (PBFDAF, arena/pool-carved on BOTH paths since F03). */
     if (cfg->enable_shadow) {
         size_t af_sz = pbfdaf_get_mem_size(blk, np, hop, 1);
-        if (pbfdaf_init_static(&a->shadow_filter, ptr, af_sz, blk, np, cfg->shadow_mu_nlms, cfg->delta, hop, 1) != 0) {
+        if (pbfdaf_init_static(&a->shadow_filter, ptr, af_sz, blk, np, cfg->shadow_mu_nlms, cfg->delta, hop, 1, cfg->sample_rate) != 0) {
             /* F04: unwind the main filter's nested fft (already brought up
              * above -- it owns a real allocation outside the pool/arena on
              * the NE10 backend) before reporting failure. */
@@ -989,7 +1000,14 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         {
             AecStateConfig acfg; aec_state_config_defaults(&acfg);
             acfg.n_bins = K; acfg.num_capture_channels = AEC3B_ST_NUM_CAPTURE_CHANNELS;
-            acfg.hop_size = hop; acfg.enable_filter_analyzer = AEC3B_ST_ENABLE_FILTER_ANALYZER;
+            acfg.hop_size = hop;
+            /* Was never populated at this call site either (see the sibling
+             * fix's comment above) -- stayed at the config-defaults 16000
+             * regardless of the real cfg->sample_rate. */
+            acfg.sample_rate = cfg->sample_rate;
+            acfg.enable_filter_analyzer = AEC3B_ST_ENABLE_FILTER_ANALYZER;
+            /* Sentinel, not a literal hop count -- see the sibling call
+             * site's comment above (AEC_STATE_STARTUP_HOPS_AUTO). */
             acfg.erle_startup_hops = AEC3B_ST_ERLE_STARTUP_HOPS;
             acfg.erl_startup_hops  = AEC3B_ST_ERL_STARTUP_HOPS;
             acfg.echo_can_saturate = AEC3B_ST_ECHO_CAN_SATURATE;
@@ -1028,7 +1046,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
         em.noise_gate_slope      = AEC3B_REE_NOISE_GATE_SLOPE;
         em.stationary_gate_slope = AEC3B_REE_STATIONARY_GATE_SLOPE;
         em.model_reverb_in_nonlinear_mode = AEC3B_REE_MODEL_REVERB_IN_NL;
-        ree_init(&a->a3_ree, K, hop, &em,
+        ree_init(&a->a3_ree, K, hop, cfg->sample_rate, &em,
                  AEC3B_REE_DEFAULT_GAIN, AEC3B_REE_TM_GAIN, AEC3B_REE_ERLE_ONSET_COMP,
                  AEC3B_REE_REVERB_DECAY, AEC3B_REE_REVERB_MILD_SCALE,
                  AEC3B_REE_REVERB_ENABLED, AEC3B_REE_REVERB_TAIL_STRENGTH,
@@ -1231,6 +1249,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->near_power = 0.0f; a->raw_error_power = 0.0f; a->alpha_pow = 0.95f;
     a->frame_count = 0; a->poor_coarse_counter = 0; a->coarse_reset_hangover = 0;
     a->leakage_div_sustained_counter = 0;
+    aec_recompute_wallclock_thresholds(a, hop, cfg->sample_rate);
     a->misadj_e2_acum = 0.0f; a->misadj_y2_acum = 0.0f; a->misadj_n_acum = 0;
     a->misadj_inv = 0.0f; a->misadj_overhang = 0;
     a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
@@ -1370,6 +1389,7 @@ void aec_reset(Aec* a) {
     a->ne_above = 0; a->ne_recent_frames = 0;
     a->poor_coarse_counter = 0; a->coarse_reset_hangover = 0;
     a->leakage_div_sustained_counter = 0;
+    aec_recompute_wallclock_thresholds(a, a->hop_size, a->cfg.sample_rate);
     a->misadj_e2_acum = 0.0f; a->misadj_y2_acum = 0.0f; a->misadj_n_acum = 0;
     a->misadj_inv = 0.0f; a->misadj_overhang = 0;
     a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
@@ -1906,29 +1926,33 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         }
         for (int k = 0; k < K; ++k) a->main_filter.erl_per_bin[k] = erl_arr[k];
 
-        /* rescue: cond_fire = e2_ref < 0.5*e2_coa; threshold_hops=blocks_to_hops(5)=2. */
+        /* rescue: cond_fire = e2_ref < 0.5*e2_coa; threshold_hops live-computed
+         * at construction (poor_coarse_threshold_hops), not a frozen literal. */
         int cond_fire = (e2_ref < 0.5f * e2_coa);
-        int threshold_hops = 2;
+        int threshold_hops = a->poor_coarse_threshold_hops;
         if (cond_fire) a->poor_coarse_counter += 1; else a->poor_coarse_counter = 0;
         if (a->poor_coarse_counter >= threshold_hops) {
             pbfdaf_copy_weights_from(&a->shadow_filter, &a->main_filter.base);
-            a->coarse_reset_hangover = 10;  /* blocks_to_hops(25)=10 */
+            a->coarse_reset_hangover = a->coarse_reset_hangover_hops;
             a->poor_coarse_counter = 0;
             ree_reset(&a->a3_ree);          /* REE reset on rescue rising edge. */
         }
-        /* Track F: sustained leakage_div gate. Fires after 5 consecutive hops
-         * (50 ms) with >50% bins on the diverged-leakage branch — covers the
-         * DT-onset window before coarse_reset_hangover kicks in. Mirrors
-         * orchestrator.py _leakage_div_sustained_counter / _dt_leakage_gate. */
+        /* Track F: sustained leakage_div gate. Fires after
+         * leakage_div_sustain_hops (~50 ms wall-clock, live-computed) of
+         * consecutive hops with >50% bins on the diverged-leakage branch —
+         * covers the DT-onset window before coarse_reset_hangover kicks in.
+         * Mirrors orchestrator.py _leakage_div_sustained_counter /
+         * _dt_leakage_gate. */
         float ld_frac = a->main_filter.last_leakage_div_frac;
+        int ld_sustain_hops = a->leakage_div_sustain_hops;
         if (ld_frac > 0.5f) {
-            if (a->leakage_div_sustained_counter < 10)
+            if (a->leakage_div_sustained_counter < 2 * ld_sustain_hops)
                 a->leakage_div_sustained_counter++;
         } else {
             if (a->leakage_div_sustained_counter > 0)
                 a->leakage_div_sustained_counter--;
         }
-        int dt_leakage_gate = (a->leakage_div_sustained_counter >= 5);
+        int dt_leakage_gate = (a->leakage_div_sustained_counter >= ld_sustain_hops);
         if (a->coarse_reset_hangover > 0) {
             a->coarse_reset_hangover--;
             a->main_filter.disallow_leakage_diverged = 1;
@@ -2105,7 +2129,9 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             track_err_pwr += 1e-10f;
             if (a->wn_err_baseline < 1e-6f) a->wn_err_baseline = track_err_pwr;
             float jump_ratio = track_err_pwr / (a->wn_err_baseline + 1e-10f);
-            if (jump_ratio > 1.5f) a->stat_dt_hangover = 80;
+            /* 800ms protection window (covers syllable gaps), live-computed
+             * at construction (stat_dt_hangover_hops), not a frozen literal. */
+            if (jump_ratio > 1.5f) a->stat_dt_hangover = a->stat_dt_hangover_hops;
             if (a->stat_dt_hangover > 0) {
                 is_stationary_dt = 1;
                 a->stat_dt_hangover--;

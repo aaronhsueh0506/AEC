@@ -31,11 +31,6 @@
 #ifndef FILTER_QUALITY_H
 #define FILTER_QUALITY_H
 
-/* AEC3 0.4*250=100 blocks (~400 ms) -> our 40 hops */
-#define FQ_STARTUP_HOPS 40
-/* AEC3 0.2*250=50 blocks (~200 ms) -> our 20 hops */
-#define FQ_RESET_HOPS   20
-
 typedef struct {
     int use_linear_filter;                    /* config (bool) */
     int overall_usable;                       /* bool */
@@ -43,10 +38,15 @@ typedef struct {
     int filter_update_blocks_since_start;
     int convergence_seen;                     /* bool, latches */
     int convergence_hops_counter;             /* diagnostic only */
+    int startup_hops;   /* live-computed, was frozen FQ_STARTUP_HOPS=40 */
+    int reset_hops;     /* live-computed, was frozen FQ_RESET_HOPS=20 */
 } FilteringQualityAnalyzer;
 
-/* use_linear_filter mirrors the Python ctor kwarg (default True -> pass 1). */
-void fq_init(FilteringQualityAnalyzer *m, int use_linear_filter);
+/* use_linear_filter mirrors the Python ctor kwarg (default True -> pass 1).
+ * hop_size/sample_rate drive the live startup_hops/reset_hops computation
+ * (AEC3 ~400/200 ms; was frozen at hop=160/sr=16000). */
+void fq_init(FilteringQualityAnalyzer *m, int use_linear_filter,
+            int hop_size, int sample_rate);
 
 /* reset(): clears overall_usable + blocks_since_reset. blocks_since_start and
  * convergence_seen are deliberately NOT reset (AEC3 parity). */

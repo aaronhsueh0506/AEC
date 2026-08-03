@@ -19,8 +19,14 @@
  *     norm=1.07e7 are python floats in an ARRAY expression → all-float32
  *     (0.1*x2² then /norm in f32), then explicit (float) cast (no-op).
  *   - reverb tail comes from ReverbModel + ReverbFrequencyResponse C ports.
- *   - decay = 0.83f ** (hop/64): powf() in float32 (converted from the former
- *     double pow(); drift accepted), then used as a float scaling.
+ *   - decay = aec3_per_block_growth_to_per_hop(0.83f, hop_size, sample_rate):
+ *     wall-clock-preserving rescale (accounts for BOTH hop_size AND
+ *     sample_rate) in float32, then used as a float scaling. The former
+ *     formula (0.83f ** (hop/64), ignoring sample_rate) was correct only by
+ *     coincidence at sr=16000 -- at 48 kHz it used an exponent 3x too large,
+ *     decaying the reverb tail roughly 3x too fast in wall-clock time.
+ *     Mirrors residual_echo_estimator.py's _reverb_decay(), fixed there
+ *     first (see its docstring for the full derivation).
  *   Built with -ffp-contract=off so the per-op f32 roundings are not fused.
  *
  * The estimator OWNS a ReverbModel and a ReverbFrequencyResponse. The caller
@@ -58,6 +64,9 @@ typedef struct {
     float  reverb_mild_decay_scale; /* 1.0 */
     int    reverb_enabled;          /* True */
     int    hop_size;                /* 160 */
+    int    sample_rate;             /* live rate; drives noise_floor_growth_per_hop
+                                      * and the reverb-decay wall-clock rescale below */
+    float  noise_floor_growth_per_hop; /* live-computed; see ree_init() */
     float  reverb_tail_strength;    /* 1.0 */
     int    use_aec3_residual_noise_gate; /* True */
     int    use_stationarity_properties;  /* True in production — when set, the
@@ -124,6 +133,7 @@ typedef struct {
 void ree_init(ResidualEchoEstimator *r,
               int n_bins,
               int hop_size,
+              int sample_rate,
               const ReeEchoModelConfig *echo_model,
               float default_gain, float tm_gain,
               int erle_onset_comp_in_dominant,

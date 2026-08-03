@@ -35,12 +35,10 @@
 #ifndef FILTER_DELAY_H
 #define FILTER_DELAY_H
 
-/* Project-locked framing (python/modules/_rates.py): hop = 160 samples. */
-#define FILTER_DELAY_HOP_SAMPLES 160
-
-/* AEC3 2 s (= 500 blocks) -> 200 OUR hops (2 * HOPS_PER_SECOND, HOPS=100).
- * python/modules/state/filter_delay.py:18 (_FILTER_ADAPTATION_THRESHOLD_HOPS). */
-#define FILTER_ADAPTATION_THRESHOLD_HOPS 200
+/* delay_headroom_blocks and filter_adaptation_threshold_hops were frozen at
+ * a hop=160/sr=16000 assumption (FILTER_DELAY_HOP_SAMPLES=160,
+ * FILTER_ADAPTATION_THRESHOLD_HOPS=200); both are now computed live in
+ * filter_delay_init() from hop_size/sample_rate -- see the struct fields. */
 
 /* DelayEstimate POD (python modules/delay/delay_types.DelayEstimate).
  * `quality` is DelayQuality (0=COARSE, 1=REFINED); `delay` is in samples.
@@ -52,17 +50,20 @@ typedef struct {
 } FilterDelayEstimate;
 
 typedef struct {
-    int delay_headroom_blocks;   /* delay_headroom_samples // HOP_SAMPLES     */
+    int delay_headroom_blocks;   /* delay_headroom_samples / hop_size, live   */
     int num_channels;            /* len(filter_delays_blocks)                 */
     int *filter_delays_blocks;   /* caller-owned storage; length num_channels */
     int min_filter_delay;        /* min(filter_delays_blocks)                 */
     FilterDelayEstimate external_delay;  /* cached external delay (.reported)  */
+    int filter_adaptation_threshold_hops; /* live-computed, was frozen at 200 */
 } FilterDelay;
 
 /* delays_storage must point to num_capture_channels ints; ownership stays with
- * the caller. Mirrors FilterDelay.__init__. */
+ * the caller. hop_size/sample_rate drive the live delay_headroom_blocks and
+ * filter_adaptation_threshold_hops computation. Mirrors FilterDelay.__init__. */
 void filter_delay_init(FilterDelay *fd, int *delays_storage,
-                       int delay_headroom_samples, int num_capture_channels);
+                       int delay_headroom_samples, int num_capture_channels,
+                       int hop_size, int sample_rate);
 
 /* update (aec_state.cc:355-388 line port).
  *   analyzer            : per-channel direct-path delays, length analyzer_len.

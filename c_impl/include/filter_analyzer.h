@@ -38,17 +38,16 @@
 
 #include <stddef.h>
 
-/* Project-locked framing (modules/_rates.py): hop=160, sr=16000. */
-#define FA_HOP_SAMPLES               160
-#define FA_SR_HZ                     16000
-#define FA_HOPS_PER_SECOND           (FA_SR_HZ / FA_HOP_SAMPLES)        /* 100 */
-#define FA_CONVERGENCE_THRESHOLD_HOPS (5 * FA_HOPS_PER_SECOND)          /* 500 */
-/* int(1.5 * 100) = 150. */
-#define FA_CONSISTENT_HOLD_HOPS      150
+/* hop_size/sample_rate were previously not parameters at all -- every
+ * time-based constant below (active_render_threshold's block-length factor,
+ * the region-cycling block size, the delay_blocks conversion, the 5s
+ * convergence threshold, the 1.5s consistency hold) was hardcoded against
+ * the stale hop=160/sr=16000 assumption. All are now computed live in
+ * fa_init() from hop_size/sample_rate -- see the struct fields below. */
 
 /* ConsistentFilterDetector mirror state (reset each full-filter sweep). */
 typedef struct {
-    float  active_render_threshold;  /* (active_render_limit^2) * HOP_SAMPLES   */
+    float  active_render_threshold;  /* (active_render_limit^2) * hop_size      */
     int    significant_peak;         /* bool                                    */
     float  floor_accum;              /* float32                                 */
     float  secondary_peak;           /* float32 (holds the f32 max)             */
@@ -56,10 +55,11 @@ typedef struct {
     int    floor_high_limit;
     long   counter;
     int    delay_ref;                /* starts at -10                           */
+    int    consistent_hold_hops;     /* live-computed, was FA_CONSISTENT_HOLD_HOPS=150 */
 } FaConsistentDetector;
 
 typedef struct {
-    float  active_render_threshold;  /* (active_render_limit^2) * HOP_SAMPLES   */
+    float  active_render_threshold;  /* (active_render_limit^2) * hop_size      */
     int    bounded_erl;              /* bool                                    */
     float  default_gain;
     FaConsistentDetector consistent;
@@ -73,6 +73,8 @@ typedef struct {
     int    delay_blocks;
 
     int    size;                     /* filter length (== filter_taps size)     */
+    int    hop_size;                 /* live grid, was FA_HOP_SAMPLES=160       */
+    int    convergence_threshold_hops; /* live-computed, was FA_CONVERGENCE_THRESHOLD_HOPS=500 */
     float *h_highpass;               /* owned by caller; length `size`, f32     */
 
     /* De-stacked fa_update() scratch (formerly `float abs_scratch[1024]` /
@@ -99,7 +101,8 @@ typedef struct {
 void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
              float active_render_limit, int bounded_erl, float default_gain,
              float *abs_scratch, int abs_scratch_len,
-             float *render_sq_scratch, int render_sq_scratch_len);
+             float *render_sq_scratch, int render_sq_scratch_len,
+             int hop_size, int sample_rate);
 
 void fa_reset(FilterAnalyzer *m);
 

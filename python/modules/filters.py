@@ -22,10 +22,17 @@ class PBFDAF:
 
     def __init__(self, block_size: int, n_partitions: int,
                  mu: float = 0.3, delta: float = 1e-8,
-                 hop_size: int = 0):
+                 hop_size: int = 0, sample_rate: int = 16000):
         # Overlap-save: block_size = 2 × hop (proper 50% ratio for TD constraint)
         # FFT zero-pads to next power of 2 if block_size isn't one
         self.hop_size = hop_size if hop_size > 0 else block_size // 2
+        # Wall-clock hop duration, needed to convert AEC3's per-4ms-block
+        # timing constants to real elapsed time at whatever grid this filter
+        # actually runs at (hop_size alone is ambiguous: 128 samples is 8 ms
+        # @16 kHz but 16 ms @8 kHz). Threaded from AecConfig.sample_rate by
+        # the orchestrator at both the main and shadow filter construction
+        # sites; the 16000 default only matters for direct/standalone use.
+        self.sample_rate = sample_rate
         self.block_size = 2 * self.hop_size  # overlap-save buffer (exactly 2× hop)
         self.fft_size = 1 << (self.block_size - 1).bit_length()  # next pow2
         self.n_partitions = n_partitions
@@ -121,9 +128,15 @@ class PBFDAF:
         # both PBFDAF (shadow) and PBFDKF (refined, subclass) share the
         # counter. Only PBFDKF._h_error_refresh consumes _initial_state_active
         # to switch leakage source. PBFDAF carries the attrs as benign state.
+        from . import aec3_scale as _aec3_scale
         self._initial_state_active: bool = True
         self._initial_state_active_render_hops: int = 0
-        self._initial_state_threshold_hops: int = 250
+        # AEC3's InitialState window is 2.5 s wall-clock (aec_state.cc:336-353);
+        # was a bare literal 250 (= 2.5s only at the legacy hop=160/sr=16000
+        # grid). Rescaled via ms_to_hops so the window stays 2.5s at any grid.
+        self._initial_state_threshold_hops: int = _aec3_scale.ms_to_hops(
+            2500.0, self.hop_size, self.sample_rate
+        )
         self._initial_state_far_energy_floor: float = 1e-4
         self._last_initial_state_active: bool = True
 
@@ -210,8 +223,17 @@ class PBFDAF:
         if delay_change and zero_filter:
             self.W.fill(0)
         if not gain_change:
-            self._poor_excitation_counter = int(
-                _aec3_scale.POOR_EXCITATION_COUNTER_INITIAL_HOPS_DEFAULT
+            # AEC3 kPoorExcitationCounterInitial = 1000 blocks (4s); was the
+            # frozen hop=160/sr=16000 module default (400), silently undoing
+            # the correctly hop-scaled value the orchestrator sets at
+            # construction time on every echo-path-change event thereafter.
+            # Currently a no-behavioral-effect fix: the sole consumer compares
+            # this counter against n_partitions (4-7 at every supported grid),
+            # and both the old and new values vastly exceed that -- kept
+            # correct anyway so a future n_partitions/grid change can't
+            # silently resurrect the bug.
+            self._poor_excitation_counter = _aec3_scale.blocks_to_hops(
+                1000, self.hop_size, self.sample_rate
             )
             self._call_counter = 0
 
@@ -497,8 +519,8 @@ class PBFDKF(PBFDAF):
 
     def __init__(self, block_size: int, n_partitions: int,
                  mu: float = 0.3, delta: float = 1e-8,
-                 hop_size: int = 0):
-        super().__init__(block_size, n_partitions, mu, delta, hop_size)
+                 hop_size: int = 0, sample_rate: int = 16000):
+        super().__init__(block_size, n_partitions, mu, delta, hop_size, sample_rate)
 
         # P: error covariance (real, per-partition per-bin)
         self.P = np.ones((n_partitions, self.n_freqs), dtype=np.float32) * 0.01
@@ -540,11 +562,15 @@ class PBFDKF(PBFDAF):
         )
         self._h_error_floor = np.float32(_aec3_scale.H_ERROR_FLOOR_FLOAT)
         self._h_error_ceil = np.float32(_aec3_scale.H_ERROR_CEIL_FLOAT)
+        # AEC3 steady refined config (echo_canceller3_config.h:92-97):
+        # leakage_converged=0.00005/block, leakage_diverged=0.05/block. Was
+        # the frozen hop=160/sr=16000 module default -- rescaled live so the
+        # per-second leakage-decay rate matches AEC3's intent at any grid.
         self._leakage_converged = np.float32(
-            _aec3_scale.LEAKAGE_CONVERGED_PER_HOP_DEFAULT
+            _aec3_scale.per_block_rate_to_per_hop(5e-5, self.hop_size, self.sample_rate)
         )
         self._leakage_diverged = np.float32(
-            _aec3_scale.LEAKAGE_DIVERGED_PER_HOP_DEFAULT
+            _aec3_scale.per_block_rate_to_per_hop(5e-2, self.hop_size, self.sample_rate)
         )
         # Updated per hop by orchestrator. Per-bin `_e2_coarse_per_bin` is
         # the instantaneous coarse error PSD published per hop, consumed by
@@ -574,13 +600,15 @@ class PBFDKF(PBFDAF):
         # at session start. Source: AecState::InitialState (aec_state.cc:336-353)
         # + FilterConfig refined_initial (echo_canceller3_config.h:102-113).
         # AEC3 threshold: 2.5 s × kNumBlocksPerSecond (250) = 625 active blocks.
-        # hop=160/sr=16000 equivalent: 2.5 s × 100 hops/s = 250 active hops.
         # _h_error_refresh() consults _initial_state_active to pick the leakage
         # source. Counter only increments on active far render (energy gate
         # = 1e-4, same threshold the W update uses).
+        # NOTE: _initial_state_threshold_hops is NOT re-set here -- the correct,
+        # live-hop-scaled value already computed in PBFDAF.__init__ (via
+        # super().__init__() above) must not be clobbered back to a fixed
+        # literal.
         self._initial_state_active: bool = True
         self._initial_state_active_render_hops: int = 0
-        self._initial_state_threshold_hops: int = 250
         self._initial_state_far_energy_floor: float = 1e-4
         # Diag — last frame's initial_state_active value (for trace).
         self._last_initial_state_active: bool = True
@@ -826,8 +854,16 @@ class PBFDKF(PBFDAF):
         # (echo_canceller3_config.h:102-107).
         if self._initial_state_active:
             from . import aec3_scale as _aec3_scale
-            _lc_eff = np.float32(_aec3_scale.LEAKAGE_CONVERGED_TRANSIENT_PER_HOP)
-            _ld_eff = np.float32(_aec3_scale.LEAKAGE_DIVERGED_TRANSIENT_PER_HOP)
+            # refined_initial config (echo_canceller3_config.h:102-107):
+            # leakage_converged=0.005/block, leakage_diverged=0.5/block. Was
+            # the frozen hop=160/sr=16000 module default -- rescaled live,
+            # same as the steady-state pair above.
+            _lc_eff = np.float32(
+                _aec3_scale.per_block_rate_to_per_hop(5e-3, self.hop_size, self.sample_rate)
+            )
+            _ld_eff = np.float32(
+                _aec3_scale.per_block_rate_to_per_hop(5e-1, self.hop_size, self.sample_rate)
+            )
         else:
             _lc_eff = self._leakage_converged
             _ld_eff = self._leakage_diverged

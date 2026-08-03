@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
     if (!f) { fprintf(stderr, "cannot open %s\n", path); return 2; }
     if (!rd(f, &n_steps, 4)) return 2;
 
-    fq_init(&m, 1 /* use_linear_filter */);
+    fq_init(&m, 1 /* use_linear_filter */, 160, 16000);
 
     for (s = 0; s < n_steps; ++s) {
         int32_t in[6];

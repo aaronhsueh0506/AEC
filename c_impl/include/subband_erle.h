@@ -47,12 +47,11 @@
 
 #include <stdint.h>
 
-/* ── Constants (16 kHz / hop=160 reference, mirrored from subband_erle.py) ── */
-#define SE_HOPS_PER_SECOND        100
-/* _BLOCKS_TO_HOLD_ERLE        = int(0.4 * 100) = 40 */
-#define SE_BLOCKS_TO_HOLD_ERLE    40
-/* _BLOCKS_FOR_ONSET_DETECTION = 40 + int(0.6 * 100) = 100 */
-#define SE_BLOCKS_FOR_ONSET_DETECTION 100
+/* ── Constants (mirrored from subband_erle.py) ──────────────────────────────
+ * blocks_to_hold_erle/blocks_for_onset_detection/alpha_up/alpha_down/
+ * onset_release_decay were frozen #defines or literals (correct only at the
+ * legacy hop=160/sr=16000 grid); all five are now computed live in
+ * subband_erle_init() from hop_size/sample_rate -- see the struct fields. */
 #define SE_POINTS_TO_ACCUMULATE   6
 #define SE_UNBOUNDED_ERLE_MAX     100000.0f
 /* AEC3 kX2BandEnergyThreshold source value (scaled per hop in init). Passed
@@ -65,11 +64,13 @@ typedef struct {
     float  min_erle;          /* _min_erle */
     int    use_onset_detection;
     int    use_min_erle_during_onsets;
-    float  alpha_up;          /* 0.05f */
-    float  alpha_down;        /* 0.1f  */
-    float  onset_release_decay; /* 0.97f */
+    float  alpha_up;          /* live-computed */
+    float  alpha_down;        /* live-computed */
+    float  onset_release_decay; /* live-computed */
     float  x2_band_energy_threshold; /* float32 (result of the float32
                                        * threshold helper) */
+    int    blocks_to_hold_erle;         /* live-computed */
+    int    blocks_for_onset_detection;  /* live-computed */
 
     /* per-bin state (caller-owned, length n_bins) */
     float   *max_erle;        /* LF half = max_erle_l, HF half = max_erle_h */
@@ -99,7 +100,7 @@ typedef struct {
 void subband_erle_init(SubbandErle *s, int n_bins,
                        float min_erle, float max_erle_l, float max_erle_h,
                        int use_onset_detection, int use_min_erle_during_onsets,
-                       int hop_size,
+                       int hop_size, int sample_rate,
                        float *max_erle_st, float *erle_st, float *erle_oc_st,
                        float *erle_unb_st, float *erle_during_st,
                        unsigned char *coming_onset_st, int32_t *hold_st,

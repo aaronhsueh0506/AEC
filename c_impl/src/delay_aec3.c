@@ -14,6 +14,7 @@
  *       src/delay_aec3.c test/parity_delay.c -lm -o /tmp/p_delay
  */
 #include "delay_aec3.h"
+#include "aec3_scale.h"
 
 #include <limits.h>
 #include <math.h>
@@ -157,6 +158,31 @@ static const float DA_HP_A[1][2] = {
     {-1.45424359f, 0.574061915f},
 };
 
+/* 48kHz -> 16kHz pre-decimation anti-alias filter (DaResample48, decimate by
+ * DA_RESAMPLE48_FACTOR=3). Elliptic lowpass, order 7 (4 SOS sections),
+ * designed (not hand-tuned) via scipy.signal.ellipord/ellip for a 48kHz
+ * input: passband edge 6800 Hz (1.0 dB ripple), stopband edge 8000 Hz (the
+ * new 16kHz Nyquist, 60 dB attenuation target). Verified via
+ * scipy.signal.sosfreqz: passband -0.99 dB @6800Hz, stopband -68.3 dB
+ * @8000Hz, >=60 dB attenuation at every frequency that would alias into the
+ * 0-8kHz post-decimation band (9/12/16/20/24 kHz all checked). Coefficients
+ * are scipy's sosfilt convention ({b0,b1,b2,a0=1,a1,a2} per section,
+ * Direct-Form-II-Transposed) -- da_biquad_process1() below implements the
+ * identical recurrence, so this is a numerically-verifiable port, not a
+ * from-scratch reimplementation. */
+static const float DA_RESAMPLE48_B[4][3] = {
+    {5.11914823e-03f, 4.05806316e-04f, 5.11914823e-03f},
+    {1.0f,            1.0f,            0.0f},
+    {1.0f,           -8.01570761e-01f, 1.0f},
+    {1.0f,           -1.01138476e+00f, 1.0f},
+};
+static const float DA_RESAMPLE48_A[4][2] = {
+    {-7.66104626e-01f,  0.0f},
+    {-1.43464531e+00f,  6.95652982e-01f},
+    {-1.29338870e+00f,  8.61962453e-01f},
+    {-1.23733825e+00f,  9.63974476e-01f},
+};
+
 static void da_biquad_reset(DaBiquad *bq) {
     memset(bq->z, 0, sizeof(bq->z));
 }
@@ -200,6 +226,57 @@ static float da_biquad_process1(DaBiquad *bq, float xn) {
         yn = out;
     }
     return yn;
+}
+
+/* -------------------------------------------------- 48kHz->16kHz sidechain */
+
+static void da_biquad_init_resample48(DaBiquad *bq) {
+    int s;
+    bq->n_sections = 4;
+    for (s = 0; s < 4; ++s) {
+        bq->b[s][0] = DA_RESAMPLE48_B[s][0];
+        bq->b[s][1] = DA_RESAMPLE48_B[s][1];
+        bq->b[s][2] = DA_RESAMPLE48_B[s][2];
+        bq->a[s][0] = DA_RESAMPLE48_A[s][0];
+        bq->a[s][1] = DA_RESAMPLE48_A[s][1];
+    }
+    da_biquad_reset(bq);
+}
+
+static void da_resample48_init(DaResample48 *r) {
+    da_biquad_init_resample48(&r->near_lp);
+    da_biquad_init_resample48(&r->far_lp);
+    r->phase = 0;
+}
+
+static void da_resample48_reset(DaResample48 *r) {
+    da_biquad_reset(&r->near_lp);
+    da_biquad_reset(&r->far_lp);
+    r->phase = 0;
+}
+
+/* Filter n_in samples through bq (state carries across calls -- every input
+ * sample is fed through the cascade even though only every DA_RESAMPLE48_
+ * FACTOR-th post-filter sample is kept, exactly like da_decimator_decimate's
+ * ds4 stage above), keep every DA_RESAMPLE48_FACTOR-th sample with phase
+ * continuity across calls (mirrors the 4ch pipeline's own delay_phase /
+ * SharedMatchedDelayEstimator._to_16k_pair stride-pick, just with a real
+ * anti-alias filter ahead of the stride instead of a naive pick). Returns
+ * the count of samples written to out (<= DA_RESAMPLE48_SCRATCH_MAX given
+ * n_in <= the one 48kHz grid's hop=512). */
+static int da_resample48_channel(DaBiquad *bq, const float *in, int n_in,
+                                 float *out, int *phase) {
+    int i, count = 0;
+    int p = *phase;
+    for (i = 0; i < n_in; ++i) {
+        float filtered = da_biquad_process1(bq, in[i]);
+        if (((i + p) % DA_RESAMPLE48_FACTOR) == 0 &&
+            count < DA_RESAMPLE48_SCRATCH_MAX) {
+            out[count++] = filtered;
+        }
+    }
+    *phase = (p + n_in) % DA_RESAMPLE48_FACTOR;
+    return count;
 }
 
 /* ---------------------------------------------------------------- decimator */
@@ -815,10 +892,20 @@ static int da_aggregator_aggregate(DaLagAggregator *agg, int lag_estimate_valid,
 
 /* ------------------------------------------------------------ clockdrift */
 
-static void da_clockdrift_init(DaClockdrift *cd) {
+static void da_clockdrift_init(DaClockdrift *cd, int sample_rate) {
     cd->delay_history[0] = cd->delay_history[1] = cd->delay_history[2] = 0;
     cd->level = CLOCKDRIFT_NONE;
     cd->stability_counter = 0;
+    /* AEC3 7500 blocks (~30 s at the native 4 ms/block cadence). Ticks are
+     * inner DA_AEC3_BLOCK_SIZE(=64)-sample blocks, so the tick period is
+     * 64/sample_rate seconds -- rescale by real sample_rate, not by outer
+     * hop_size (matches python/modules/delay/clockdrift_detector.py).
+     * Routed through the canonical aec3_ms_to_hops() (aec3_scale.h) instead
+     * of a hand-rolled round-half-away-from-zero formula, matching that
+     * helper's own "never paste a raw ms-block count -- route it through
+     * here" contract and its lrintf (round-half-to-even) rounding. */
+    cd->stability_reset_hops =
+        aec3_ms_to_hops(30000.0f, DA_AEC3_BLOCK_SIZE, sample_rate);
 }
 
 static void da_clockdrift_update(DaClockdrift *cd, int delay_estimate) {
@@ -836,8 +923,8 @@ static void da_clockdrift_update(DaClockdrift *cd, int delay_estimate) {
          * smallest value that still satisfies `>` is observationally
          * identical to the old unconditional `+= 1` for every reachable
          * state, while eliminating the eventual signed overflow. */
-        if (cd->stability_counter <= DA_STABILITY_RESET_HOPS) cd->stability_counter += 1;
-        if (cd->stability_counter > DA_STABILITY_RESET_HOPS) cd->level = CLOCKDRIFT_NONE;
+        if (cd->stability_counter <= cd->stability_reset_hops) cd->stability_counter += 1;
+        if (cd->stability_counter > cd->stability_reset_hops) cd->level = CLOCKDRIFT_NONE;
         return;
     }
     cd->stability_counter = 0;
@@ -858,13 +945,19 @@ static void da_clockdrift_update(DaClockdrift *cd, int delay_estimate) {
 
 /* --------------------------------------------------- EchoPathDelayEstimator */
 
-static void da_estimator_init(DaEstimator *e) {
+static void da_estimator_init(DaEstimator *e, int sample_rate) {
     da_decimator_init(&e->capture_decimator);
     da_decimator_init(&e->render_decimator);
     da_ring_reset(&e->render_ring);
     da_matched_filter_init(&e->matched_filter);
     da_aggregator_init(&e->aggregator);
-    da_clockdrift_init(&e->clockdrift);
+    da_clockdrift_init(&e->clockdrift, sample_rate);
+    /* AEC3 kNumBlocksPerSecondBy2 = 125 blocks (~500 ms). Was a frozen
+     * #define (DA_CONSISTENT_EST_THR=125, correct only at sr=16000);
+     * computed live here (same inner-block-rate basis as clockdrift above).
+     * Routed through aec3_ms_to_hops() -- see stability_reset_hops above. */
+    e->consistent_estimate_threshold =
+        aec3_ms_to_hops(500.0f, DA_AEC3_BLOCK_SIZE, sample_rate);
     e->old_agg_valid = 0;
     e->old_agg_delay = 0;
     e->old_agg_quality = DELAY_QUALITY_COARSE;
@@ -882,12 +975,43 @@ static void da_estimator_reset_internal(DaEstimator *e, int reset_lag_aggregator
     e->consistent_estimate_counter = 0;
 }
 
-/* public reset(reset_delay_confidence) -> full reset of lag aggregator. */
+/* public reset(reset_delay_confidence) -> full reset of the delay-estimator
+ * signal chain (matched filter + aggregator + decimators + ring buffer +
+ * pending edge-chunker samples).
+ *
+ * 2026-08-03 Codex review finding + call-site audit: the ONLY caller of
+ * delay_aec3_reset() (which calls this) is aec_reset() (aec.c) / AEC.reset()
+ * on the Python side -- a top-level cold-start-style reset that recreates
+ * AecState/ResidualEchoEstimator/SuppressionGain, clears CNG state, zeroes
+ * the OLA buffer, and resets every other subsystem (HPF, saturation
+ * detectors, filter taps, regime handler, stationarity estimator, ...) to a
+ * pristine state. It is NOT a lightweight per-echo-path-change nudge -- that
+ * is the SEPARATE da_estimator_reset_internal(e, 0, 0) call from
+ * da_estimator_process_inner_block (fires on the consistent-estimate
+ * stability counter, every ~500 ms in normal steady state), which correctly
+ * leaves the whole signal chain (sidechain, decimators, ring, pending)
+ * untouched.
+ *
+ * Given that, delay_aec3_reset() must clear the ENTIRE chain consistently:
+ * the outer 48kHz resample48 sidechain (reset by delay_aec3_reset() itself)
+ * AND this estimator's inner decimators / ring buffer / pending samples.
+ * Previously only the sidechain was reset (added alongside the sidechain
+ * itself) while decimator biquad memory, ring-buffer audio history and
+ * pending partial-block samples were left stale -- a freshly-reset
+ * sidechain feeding a stale inner estimator, which could let pre-reset
+ * echo-path audio in the ring contaminate the matched filter's first
+ * correlation windows after reset. da_decimator_init is reused as the
+ * reset (it only zeroes coefficients/state, no allocation, so calling it
+ * again is a safe, idempotent reset). clockdrift is deliberately left
+ * untouched (pre-existing behaviour predating the sidechain, out of scope
+ * here -- it tracks a 30s-horizon hardware clock-drift estimate, not
+ * reset-scoped audio history). */
 static void da_estimator_reset(DaEstimator *e, int reset_delay_confidence) {
     da_estimator_reset_internal(e, 1, reset_delay_confidence);
-    /* decimators / ring / clockdrift / pending are NOT cleared by Python
-     * EchoPathDelayEstimator.reset (it only touches aggregator + matched
-     * filter + old_agg + counter), so leave them intact for parity. */
+    da_decimator_init(&e->capture_decimator);
+    da_decimator_init(&e->render_decimator);
+    da_ring_reset(&e->render_ring);
+    e->pending_count = 0;
 }
 
 /* _process_inner_block. Returns 1 if an estimate was produced this block
@@ -947,7 +1071,7 @@ static int da_estimator_process_inner_block(DaEstimator *e, const float *render_
     e->old_agg_delay = agg_delay;
     e->old_agg_quality = agg_quality;
 
-    if (e->consistent_estimate_counter > DA_CONSISTENT_EST_THR)
+    if (e->consistent_estimate_counter > e->consistent_estimate_threshold)
         da_estimator_reset_internal(e, 0, 0);  /* partial reset */
 
     if (agg_valid) {
@@ -995,8 +1119,22 @@ static int da_estimator_estimate_delay(DaEstimator *e, const float *render_hop,
 
 /* ====================== LegacyDelayShim (public API) ====================== */
 
-void delay_aec3_init(DelayAec3 *d) {
-    da_estimator_init(&d->est);
+void delay_aec3_init(DelayAec3 *d, int sample_rate) {
+    /* DaEstimator's internal clockdrift/consistent-estimate constants
+     * (da_estimator_init) are computed in real seconds FROM the sample_rate
+     * argument -- they are not hardcoded, so this must be the estimator's
+     * true feed rate, not always "16000". Only 48kHz actually gets resampled
+     * down to a 16kHz-equivalent stream before reaching the estimator (the
+     * sidechain below); native 8kHz/16kHz feed the estimator directly at
+     * their own rate (2026-08-03 fix -- previously this was hardcoded to
+     * 16000 unconditionally, so an 8kHz config silently ran its clockdrift/
+     * consistent-estimate timers at 2x their intended real-time duration). */
+    int rate_factor = (sample_rate == 48000) ? DA_RESAMPLE48_FACTOR : 1;
+    da_estimator_init(&d->est, (rate_factor > 1) ? 16000 : sample_rate);
+    d->rate_factor = rate_factor;
+    if (d->rate_factor > 1) {
+        da_resample48_init(&d->resample48);
+    }
     d->latest_valid = 0;
     d->latest_delay = 0;
     d->latest_quality = DELAY_QUALITY_COARSE;
@@ -1005,6 +1143,9 @@ void delay_aec3_init(DelayAec3 *d) {
 
 void delay_aec3_reset(DelayAec3 *d) {
     da_estimator_reset(&d->est, 1);
+    if (d->rate_factor > 1) {
+        da_resample48_reset(&d->resample48);
+    }
     d->latest_valid = 0;
     d->estimate_count = 0;
 }
@@ -1027,8 +1168,34 @@ int delay_aec3_accumulate_ex(DelayAec3 *d, const float *near, const float *far,
     int produced;
     int prev_delay = d->latest_valid ? d->latest_delay : -1;
     int emitted_new = 0;
+    const float *near_fed = near;
+    const float *far_fed = far;
+    int hop_fed = hop;
+    if (d->rate_factor > 1) {
+        /* Anti-alias-filter + decimate both channels to the estimator's
+         * fixed 16kHz-native feed rate before it ever sees a sample (see
+         * delay_aec3_init()'s comment). Two independent phase-continuous
+         * filter chains since near/far are independent signals; the
+         * per-channel resample48_channel() calls share d->resample48.phase
+         * only conceptually -- each channel tracks its own phase via the
+         * same *phase argument, which is safe because both are fed the
+         * exact same hop length every call, so their phases stay identical;
+         * kept as two calls (not one shared phase var reused blindly) so a
+         * future caller feeding mismatched hop lengths per channel can't
+         * silently desync them. */
+        int near_phase = d->resample48.phase;
+        int far_phase = d->resample48.phase;
+        int n_near = da_resample48_channel(&d->resample48.near_lp, near, hop,
+                                           d->near16_scratch, &near_phase);
+        int n_far = da_resample48_channel(&d->resample48.far_lp, far, hop,
+                                          d->far16_scratch, &far_phase);
+        d->resample48.phase = near_phase;   /* == far_phase, see comment above */
+        near_fed = d->near16_scratch;
+        far_fed = d->far16_scratch;
+        hop_fed = (n_near < n_far) ? n_near : n_far;
+    }
     /* NOTE: estimate_delay takes (render, capture) = (far, near). */
-    produced = da_estimator_estimate_delay(&d->est, far, near, hop,
+    produced = da_estimator_estimate_delay(&d->est, far_fed, near_fed, hop_fed,
                                            run_matched_filter, &q, &delay);
     if (produced) {
         d->latest_valid = 1;
@@ -1048,7 +1215,11 @@ int delay_aec3_accumulate_ex(DelayAec3 *d, const float *near, const float *far,
 
 int delay_aec3_estimated_delay(const DelayAec3 *d) {
     if (!d->latest_valid) return -1;
-    return d->latest_delay;
+    /* latest_delay is always in the estimator's own fixed-16kHz-equivalent
+     * domain (see delay_aec3_init()'s comment); rescale to the caller's
+     * native sample domain here so every external reader gets a
+     * ready-to-use value without needing to know rate_factor exists. */
+    return d->latest_delay * d->rate_factor;
 }
 
 float delay_aec3_confidence(const DelayAec3 *d) {

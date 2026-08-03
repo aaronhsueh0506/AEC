@@ -8,7 +8,7 @@ void erle_estimator_init(ErleEstimator *e,
                          int n_bins,
                          float min_erle, float max_erle_l, float max_erle_h,
                          int use_onset_detection,
-                         int hop_size,
+                         int hop_size, int sample_rate,
                          float *max_erle_st, float *erle_st, float *erle_oc_st,
                          float *erle_unb_st, float *erle_during_st,
                          unsigned char *coming_onset_st, int32_t *hold_st,
@@ -17,14 +17,14 @@ void erle_estimator_init(ErleEstimator *e,
     e->startup_hops       = startup_phase_length_hops;
     e->blocks_since_reset = 0;
     /* Python ctor: FullBandErleEstimator(min_erle, max_erle_l, hop_size). */
-    fb_erle_init(&e->fullband, n_bins, min_erle, max_erle_l, hop_size);
+    fb_erle_init(&e->fullband, n_bins, min_erle, max_erle_l, hop_size, sample_rate);
     /* Python ctor: SubbandErleEstimator(n_bins, min_erle, max_erle_l,
      *   max_erle_h, use_onset_detection, hop_size). use_min_erle_during_onsets
      *   defaults True in SubbandErleEstimator.__init__. */
     subband_erle_init(&e->subband, n_bins,
                       min_erle, max_erle_l, max_erle_h,
                       use_onset_detection, /*use_min_erle_during_onsets=*/1,
-                      hop_size,
+                      hop_size, sample_rate,
                       max_erle_st, erle_st, erle_oc_st, erle_unb_st,
                       erle_during_st, coming_onset_st, hold_st,
                       y2_acc_st, e2_acc_st, low_render_st);

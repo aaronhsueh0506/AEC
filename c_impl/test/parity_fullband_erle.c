@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
         float *e2 = malloc((size_t)n_freqs * sizeof(float));
         FullBandErleEstimator s;
 
-        fb_erle_init(&s, n_freqs, 1.0, 4.0, 160);
+        fb_erle_init(&s, n_freqs, 1.0, 4.0, 160, 16000);
 
         /* Sanity: the precomputed scalars must match the golden header. */
         chk_f64(s.x2_band_energy_threshold, g_thr, "x2_band_energy_threshold", -1,
