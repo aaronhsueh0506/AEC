@@ -5,12 +5,25 @@ Mirrors docs/aec3_extracts/src/aec3/render_delay_controller.{cc,h} +
 collapses the ``EchoPathVariability`` emission that AEC3 does inside
 ``render_delay_buffer::AlignFromDelay``.
 
-Rate notes:
+NOT the production delay path (LEGACY/reference port, no live callers).
+``orchestrator.py`` uses ``LegacyDelayShim``/``EchoPathDelayEstimator``
+instead -- see ``legacy_compat.py``'s module docstring: hop-quantising the
+delay here loses the sub-hop sample precision the orchestrator's ring buffer
+needs. This module is kept as an AEC3-structural reference/for future
+migrations, has no dedicated test coverage, and its rate constants
+(``.._rates.HOP_SAMPLES`` etc.) are a fixed legacy 16 kHz/10 ms reference,
+NOT the live per-instance grid -- they do not track ``AecConfig``'s current
+hop size (which defaults to 8 ms at 16 kHz as of the 2026-08-01 grid change).
+Do not wire this into a live per-rate/per-grid path without first making
+``_rates.py`` take the actual sample_rate/hop_size instead of module-level
+constants, and adding real test coverage.
+
+Rate notes (against the fixed legacy reference above, not the live grid):
   - AEC3 reports buffer delay in ``kBlockSize=64``-sample blocks
-    (``>> kBlockSizeLog2``). Our port reports buffer delay in OUR
+    (``>> kBlockSizeLog2``). This port reports buffer delay in the legacy
     10 ms hops (``>> log2(HOP_SAMPLES)`` analogue, via ``// HOP_SAMPLES``).
-  - ``hysteresis_limit_blocks`` (AEC3 default 1 block = 4 ms) maps to OUR
-    1 hop (10 ms) — the smallest hysteresis we can express.
+  - ``hysteresis_limit_blocks`` (AEC3 default 1 block = 4 ms) maps to 1 of
+    those legacy hops (10 ms) — the smallest hysteresis expressible there.
 """
 from typing import Optional
 

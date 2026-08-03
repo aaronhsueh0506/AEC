@@ -1,7 +1,17 @@
 """Block / FFT rate constants and AEC3 rescale helpers.
 
-Project-locked framing for AEC: SR=16 kHz, hop=160 samples (10 ms), FFT=512.
-AEC3 reference uses SR=16 kHz, kBlockSize=64 (4 ms), kFftLength=128.
+LEGACY -- the only importer is ``delay/render_delay_controller.py``, itself
+a reference/legacy port with no production caller (see that module's
+docstring). Everywhere else in this package that needs a rate/hop
+conversion takes ``hop_size``/``sample_rate`` as real parameters and uses
+``aec3_scale.py``'s helpers instead (see e.g. ``state/filter_analyzer.py``,
+which used to hardcode against this same module before being fixed that
+way). Do not add a new import of this module -- use ``aec3_scale.py``.
+
+Project-locked framing for AEC: SR=16 kHz, hop=160 samples (10 ms), FFT=512
+(the legacy 16 kHz default before the 2026-08-01 grid change -- NOT any
+current default). AEC3 reference uses SR=16 kHz, kBlockSize=64 (4 ms),
+kFftLength=128.
 
 Every AEC3 per-block constant must be converted to milliseconds first, then
 re-discretised to OUR hops via ``aec3_blocks_to_our_hops`` (or ``ms_to_hops``

@@ -3,12 +3,15 @@
 
 Replaces the legacy GCC-PHAT ``python/modules/delay.py`` shim.
 
-Entry point: ``RenderDelayController(...)``. Per-hop call:
-
-    controller = RenderDelayController()
-    delay_est, variability = controller.get_delay(render_hop, capture_hop)
-    # delay_est: Optional[DelayEstimate]; .delay is in OUR 10 ms hop units.
-    # variability.delay_change: NONE | BUFFER_FLUSH | NEW_DETECTED_DELAY.
+Production entry point: ``orchestrator.py`` uses ``LegacyDelayShim`` (see
+``legacy_compat.py``) directly over ``EchoPathDelayEstimator``, NOT
+``RenderDelayController`` -- the latter quantises delay to hop boundaries,
+losing the sub-hop sample precision the orchestrator's ring buffer needs.
+``RenderDelayController`` is exported below as an AEC3-structural
+reference/for future migrations; it has no live caller, no dedicated test
+coverage, and its rate constants are a fixed legacy 16 kHz/10 ms reference
+that does not track the current per-instance grid (see its own docstring
+before using it in anything new).
 """
 from .clockdrift_detector import ClockdriftDetector, ClockdriftLevel
 from .delay_types import DelayAdjustment, DelayEstimate, DelayQuality, EchoPathVariability
