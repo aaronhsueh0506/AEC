@@ -388,17 +388,24 @@ class AecConfig:
 
     # ── Wall-clock timing provenance (INTERNAL, do not document as a
     # customer knob) ─────────────────────────────────────────────────────
-    # The (hop_size, sample_rate) grid that shadow_err_alpha / warmup_frames
-    # / epc_hangover / ne_recent_hold / filter_misadjustment_{stable,
-    # hangover}_frames are CURRENTLY calibrated against. Defaults to the
-    # legacy hop=160/sample_rate=16000 (10 ms) grid these fields' literals
-    # were originally authored at. Regular dataclass fields (not
-    # ``field(init=False)``), so ``dataclasses.replace()``/``**asdict()``
-    # roundtrip construction carries the CURRENT grid forward automatically
-    # -- see __post_init__ below for why that is what makes retiming
-    # idempotent under reconstruction.
-    timing_reference_hop_size: int = 160
-    timing_reference_sample_rate: int = 16000
+    # Canonical (grid-independent) authored values for shadow_err_alpha /
+    # warmup_frames / epc_hangover / ne_recent_hold / filter_misadjustment_
+    # {stable,hangover}_frames, captured ONCE against the legacy hop=160/
+    # sample_rate=16000 (10 ms) grid these fields' literals were originally
+    # authored at, and NEVER updated afterward. -1.0 sentinel means "not yet
+    # captured" (a genuinely fresh construction). Regular dataclass fields
+    # (not ``field(init=False)``), so ``dataclasses.replace()``/
+    # ``**asdict()`` roundtrip construction carries an already-captured
+    # value forward unchanged -- see __post_init__ below for why rebasing
+    # from this PINNED canonical value (rather than from the previous
+    # grid's already-rounded hop-count/alpha) is what avoids quantization
+    # drift compounding through a chain of grid changes.
+    _canonical_ms_warmup_frames: float = field(default=-1.0, repr=False)
+    _canonical_ms_epc_hangover: float = field(default=-1.0, repr=False)
+    _canonical_ms_ne_recent_hold: float = field(default=-1.0, repr=False)
+    _canonical_ms_filter_misadjustment_stable_frames: float = field(default=-1.0, repr=False)
+    _canonical_ms_filter_misadjustment_hangover_frames: float = field(default=-1.0, repr=False)
+    _canonical_retention_shadow_err_alpha: float = field(default=-1.0, repr=False)
 
     def __post_init__(self):
         if self.frame_size == -1:
@@ -446,59 +453,71 @@ class AecConfig:
         # Retimed here via aec3_scale.ms_to_hops()/growth_rehop() so they
         # cover approximately the same wall-clock duration at every grid.
         #
-        # IDEMPOTENCY (2026-08-04 gap-fix): the naive version of this block
-        # retimed unconditionally on every __post_init__ run, treating
-        # WHATEVER value currently sat in the field as still "authored at
-        # the legacy 10 ms grid" -- true for a genuinely fresh construction
-        # (dataclass default or an explicit constructor kwarg like
-        # ``from_preset``'s ``warmup_frames=100`` base override), but FALSE
-        # for a config rebuilt from an already-resolved instance
-        # (``dataclasses.replace(cfg, ...)`` / ``AecConfig(**asdict(cfg))``
-        # -- e.g. process_wav_files()'s sample-rate-mismatch re-resolve
-        # path): the field already holds the PREVIOUS grid's retimed hop
-        # count, so re-running the same conversion silently compounds the
-        # error every reconstruction. timing_reference_hop_size/
-        # _sample_rate (regular fields, so they survive replace()/asdict()
-        # roundtrips) record which grid the current values are calibrated
-        # for; retiming only runs -- and only needs to run -- when that
-        # differs from the grid just resolved above, and always rebases
-        # from the TRACKED reference grid (not a hardcoded 10 ms), so a
-        # same-grid reconstruction is a no-op and a changed-grid
-        # reconstruction re-derives correctly from whatever ms-equivalent
-        # the carried-over values actually represent. Must match aec.c's
-        # aec_config_defaults()/aec_carve() (C side) -- there this is a
-        # non-issue because retiming reads the caller's untouched *cfg into
-        # a->cfg exactly once, at construction, with no re-entrant path.
-        if (self.hop_size, self.sample_rate) != (
-                self.timing_reference_hop_size,
-                self.timing_reference_sample_rate):
-            ref_ms_per_hop = (1000.0 * self.timing_reference_hop_size /
-                              self.timing_reference_sample_rate)
-            # shadow_err_alpha uses the RETENTION convention (``alpha*old +
-            # (1-alpha)*new`` -- see orchestrator.py's actual smoothing
-            # formula), so ``growth_rehop`` (a direct power law), NOT
-            # ``per_block_ema_alpha_to_per_hop``'s AEC3-new-sample-weight
-            # form, is the correct helper here.
-            self.shadow_err_alpha = _aec3_scale.growth_rehop(
-                self.shadow_err_alpha, self.timing_reference_hop_size,
-                self.timing_reference_sample_rate, self.hop_size,
-                self.sample_rate)
-            self.warmup_frames = _aec3_scale.ms_to_hops(
-                self.warmup_frames * ref_ms_per_hop, self.hop_size, self.sample_rate)
-            self.epc_hangover = _aec3_scale.ms_to_hops(
-                self.epc_hangover * ref_ms_per_hop, self.hop_size, self.sample_rate)
-            self.ne_recent_hold = _aec3_scale.ms_to_hops(
-                self.ne_recent_hold * ref_ms_per_hop, self.hop_size, self.sample_rate)
-            # ne_recent_sustain is a genuine consecutive-event count (NOT a
-            # duration -- see orchestrator.py's ``_ne_recent_frames`` gate)
-            # and is intentionally left unretimed; also out of scope for
-            # this pass (not part of the audited constant batch).
-            self.filter_misadjustment_stable_frames = _aec3_scale.ms_to_hops(
-                self.filter_misadjustment_stable_frames * ref_ms_per_hop, self.hop_size, self.sample_rate)
-            self.filter_misadjustment_hangover_frames = _aec3_scale.ms_to_hops(
-                self.filter_misadjustment_hangover_frames * ref_ms_per_hop, self.hop_size, self.sample_rate)
-            self.timing_reference_hop_size = self.hop_size
-            self.timing_reference_sample_rate = self.sample_rate
+        # IDEMPOTENCY + CROSS-GRID PRECISION (2026-08-04 gap-fix, revised
+        # same day): an earlier version of this fix tracked "which grid is
+        # the CURRENT field value calibrated for" and rebased from that --
+        # correct for repeated same-grid reconstruction, but still lossy
+        # across a CHAIN of different grids, because ``ms_to_hops()`` rounds
+        # to the nearest integer hop and each step in the chain rebased from
+        # the PREVIOUS step's already-rounded hop count instead of the
+        # original canonical millisecond value (e.g. 16k/512 -> 48k/1024 ->
+        # 16k/512 landed one hop off the true original -- confirmed by
+        # direct measurement, not just theory). Fixed by capturing the
+        # canonical ms/retention values ONCE (into the ``_canonical_*``
+        # fields above, pinned for the lifetime of the value chain since
+        # they are regular fields that survive replace()/asdict()
+        # roundtrips unchanged) and ALWAYS re-deriving the live fields
+        # fresh from that pinned canonical value + whatever grid was just
+        # resolved above -- a pure function of (canonical, grid) with no
+        # dependency on the field's own previous value, so however many
+        # reconstructions or however many intermediate grids a config has
+        # been through, every retime rebases from the exact same pristine
+        # source. Must match aec.c's aec_config_defaults()/aec_carve() (C
+        # side) -- there this is a non-issue because retiming reads the
+        # caller's untouched *cfg into a->cfg exactly once, at construction,
+        # with no re-entrant path.
+        if self._canonical_ms_warmup_frames < 0:
+            # First time this value chain has run __post_init__: capture
+            # canonical values by interpreting whatever currently sits in
+            # each field as authored at the legacy 10 ms grid -- true for
+            # the dataclass default AND an explicit constructor kwarg like
+            # ``from_preset``'s ``warmup_frames=100`` base override, since
+            # both were authored under the same frozen 10 ms assumption.
+            self._canonical_ms_warmup_frames = self.warmup_frames * 10.0
+            self._canonical_ms_epc_hangover = self.epc_hangover * 10.0
+            self._canonical_ms_ne_recent_hold = self.ne_recent_hold * 10.0
+            self._canonical_ms_filter_misadjustment_stable_frames = (
+                self.filter_misadjustment_stable_frames * 10.0)
+            self._canonical_ms_filter_misadjustment_hangover_frames = (
+                self.filter_misadjustment_hangover_frames * 10.0)
+            self._canonical_retention_shadow_err_alpha = self.shadow_err_alpha
+
+        # shadow_err_alpha uses the RETENTION convention (``alpha*old +
+        # (1-alpha)*new`` -- see orchestrator.py's actual smoothing
+        # formula), so ``growth_rehop`` (a direct power law), NOT
+        # ``per_block_ema_alpha_to_per_hop``'s AEC3-new-sample-weight form,
+        # is the correct helper here. Always rebased from the FIXED legacy
+        # 160/16000 grid (never from the previous grid), so this too is
+        # immune to chained-conversion drift.
+        self.shadow_err_alpha = _aec3_scale.growth_rehop(
+            self._canonical_retention_shadow_err_alpha, 160, 16000,
+            self.hop_size, self.sample_rate)
+        self.warmup_frames = _aec3_scale.ms_to_hops(
+            self._canonical_ms_warmup_frames, self.hop_size, self.sample_rate)
+        self.epc_hangover = _aec3_scale.ms_to_hops(
+            self._canonical_ms_epc_hangover, self.hop_size, self.sample_rate)
+        self.ne_recent_hold = _aec3_scale.ms_to_hops(
+            self._canonical_ms_ne_recent_hold, self.hop_size, self.sample_rate)
+        # ne_recent_sustain is a genuine consecutive-event count (NOT a
+        # duration -- see orchestrator.py's ``_ne_recent_frames`` gate) and
+        # is intentionally left unretimed; also out of scope for this pass
+        # (not part of the audited constant batch).
+        self.filter_misadjustment_stable_frames = _aec3_scale.ms_to_hops(
+            self._canonical_ms_filter_misadjustment_stable_frames,
+            self.hop_size, self.sample_rate)
+        self.filter_misadjustment_hangover_frames = _aec3_scale.ms_to_hops(
+            self._canonical_ms_filter_misadjustment_hangover_frames,
+            self.hop_size, self.sample_rate)
 
     @property
     def fft_size(self) -> int:

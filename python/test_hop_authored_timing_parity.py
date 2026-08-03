@@ -272,14 +272,95 @@ class ConfigReconstructionIdempotencyTests(unittest.TestCase):
         """The idempotency fix must be behavior-preserving for the common
         (fresh-construction) path: a bare AecConfig() and an
         AecConfig.from_preset() must retime exactly as before (10 ms
-        reference), since timing_reference_* defaults to the legacy grid."""
+        reference), since the _canonical_* fields capture from the legacy
+        grid on first construction."""
         cfg = AecConfig.from_preset(
             AecPreset.BALANCED, sample_rate=16000, frame_size=256)
-        self.assertEqual(cfg.timing_reference_hop_size, 128)
-        self.assertEqual(cfg.timing_reference_sample_rate, 16000)
+        self.assertEqual(cfg._canonical_ms_warmup_frames, 1000.0)
         # warmup_frames=100 authored hops @ legacy 10 ms grid -> retimed to
         # the 8 ms (128-sample hop) grid: round(100*10/8) = 125.
         self.assertEqual(cfg.warmup_frames, 125)
+
+    def test_chained_grid_changes_do_not_drift(self) -> None:
+        """Regression test (2026-08-04, same-day follow-up): the FIRST
+        version of the idempotency fix tracked "which grid is the CURRENT
+        value calibrated for" and rebased from THAT -- correct for repeated
+        same-grid reconstruction, but still lossy across a CHAIN of
+        different grids, because ms_to_hops() rounds to the nearest integer
+        hop and each chain step rebased from the previous step's
+        already-rounded hop count instead of the original canonical ms
+        value (confirmed by direct measurement: 16k/512 -> 48k/1024 ->
+        16k/512 landed one hop off the true original in that version).
+        Fixed by pinning the canonical value once and always rederiving
+        from it. A long chain through every whitelisted grid must return
+        exactly to the starting values, not a rounding-drifted neighbour."""
+        from dataclasses import replace
+        cfg = AecConfig.from_preset(
+            AecPreset.BALANCED, sample_rate=16000, frame_size=512)
+        original = self._values(cfg)
+        chain = [(48000, 1024), (16000, 256), (8000, 256), (16000, 512),
+                 (48000, 1024), (16000, 512)]
+        c = cfg
+        for sr, fs in chain:
+            c = replace(c, sample_rate=sr, frame_size=fs, hop_size=-1,
+                        filter_length=-1)
+        self.assertEqual(
+            self._values(c), original,
+            msg="a chain through every whitelisted grid and back must "
+                "return exactly to the original values, not a "
+                "rounding-drifted neighbour")
+
+    def test_full_grid_pair_matrix_matches_fresh_construction(self) -> None:
+        """Every (from-grid, to-grid) pair among the four whitelisted grids
+        (16 pairs including same-grid) must retime a replace()-reconstructed
+        config identically to a fresh construction at the to-grid -- not
+        just the one 16k->48k pair spot-checked above."""
+        from dataclasses import replace
+        for sr_a, fs_a in GRIDS:
+            cfg_a = AecConfig.from_preset(
+                AecPreset.BALANCED, sample_rate=sr_a, frame_size=fs_a)
+            for sr_b, fs_b in GRIDS:
+                reconstructed = replace(
+                    cfg_a, sample_rate=sr_b, frame_size=fs_b, hop_size=-1,
+                    filter_length=-1)
+                fresh_b = AecConfig.from_preset(
+                    AecPreset.BALANCED, sample_rate=sr_b, frame_size=fs_b)
+                self.assertEqual(
+                    self._values(reconstructed), self._values(fresh_b),
+                    msg=f"{sr_a}/{fs_a} -> {sr_b}/{fs_b}: reconstructed "
+                        "config must match a fresh construction at the "
+                        "target grid")
+
+    def test_pre_fix_chained_drift_would_have_failed(self) -> None:
+        """Mutation check: simulate the FIRST version's bug (rebase from
+        the PREVIOUS grid's already-rounded hop count at each chain step,
+        instead of a pinned canonical ms value) directly and confirm it
+        visibly drifts from the correct (canonical) result -- otherwise the
+        chain test above wouldn't actually be exercising anything. Uses the
+        exact chain confirmed (by direct measurement) to drift:
+        filter_misadjustment_stable_frames 19 -> 18 through
+        16k/512 -> 48k/1024 -> 16k/256 -> 8k/256 -> 16k/512."""
+        from modules import aec3_scale as _aec3_scale
+
+        def naive_chain_rebase(authored_value, hop_rate_chain):
+            ref_hop, ref_rate = 160, 16000  # legacy 10 ms authoring grid
+            value = authored_value
+            for hop, rate in hop_rate_chain:
+                ref_ms_per_hop = 1000.0 * ref_hop / ref_rate
+                value = _aec3_scale.ms_to_hops(value * ref_ms_per_hop, hop, rate)
+                ref_hop, ref_rate = hop, rate
+            return value
+
+        chain = [(256, 16000), (512, 48000), (128, 16000), (128, 8000),
+                 (256, 16000)]
+        naive_result = naive_chain_rebase(30, chain)  # dataclass default
+        correct_result = _aec3_scale.ms_to_hops(30 * 10.0, 256, 16000)
+        self.assertNotEqual(
+            naive_result, correct_result,
+            msg="the naive previous-grid-rebase chain should visibly "
+                "drift from the correct canonical-rebase result -- if it "
+                "doesn't, this mutation check's numbers don't exercise "
+                "the bug it's named for")
 
 
 if __name__ == '__main__':
