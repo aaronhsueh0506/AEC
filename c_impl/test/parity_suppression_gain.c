@@ -149,6 +149,7 @@ int main(int argc, char **argv) {
         cfg.dne_lf_endpoint_bin = dne_i[2];
         cfg.stat_aware_ne_proxy_enabled = 0;
         cfg.stat_aware_ne_proxy_threshold = 0.10;
+        cfg.use_wallclock_ema_alpha = 0;  /* held-back mechanism stays OFF */
 
         tun.nearend_enr_tr = t_ne_enr_tr;
         tun.nearend_enr_su = t_ne_enr_su;

@@ -20,6 +20,7 @@
 #include <string.h>
 #include "fast_math.h"
 #include "aec_simd_kernels.h"
+#include "aec3_scale.h"
 
 
 /* float32 sum of a sub-slice a[lo:hi) via the canonical pairwise sum. */
@@ -71,6 +72,24 @@ void suppression_gain_init(SuppressionGain *sg,
         sg->last_echo[k] = 0.0f;
     }
     sg->low_render_avg_power = 32768.0f * 32768.0f;
+    /* AEC3 power IIR (average_power = 0.9*avg + 0.1*x2) is per-4ms-block;
+     * a bare hardcoded 0.9f/0.1f has no rate conversion at all (wrong even
+     * at the legacy hop=160/sr=16000 grid: the correct per-hop alpha there
+     * is 1-0.9^2.5 ~= 0.2316, not 0.1). The wall-clock-rescaled form below
+     * mirrors suppression_gain.py's _LowNoiseRenderDetector with
+     * use_wallclock_ema_alpha=True, but -- same as the Python default --
+     * stays OFF (cfg->use_wallclock_ema_alpha=0) until it has its own
+     * bench pass + sign-off; see suppression_gain.h and CHANGELOG's
+     * "Explicitly held back" entry. Do not flip the default without that. */
+    if (cfg->use_wallclock_ema_alpha) {
+        float alpha = aec3_per_block_ema_alpha_to_per_hop(
+            0.1f, cfg->hop_size, cfg->sr);
+        sg->low_render_iir_decay = 1.0f - alpha;
+        sg->low_render_iir_weight = alpha;
+    } else {
+        sg->low_render_iir_decay = 0.9f;
+        sg->low_render_iir_weight = 0.1f;
+    }
     sg->far_active_latched = 0;
     sg->dt_protect_active = 0;
     sg->initial_state = 1;
@@ -123,7 +142,8 @@ static int low_noise_render_detect(SuppressionGain *sg, const float *rb,
         low_noise = (sg->low_render_avg_power < c->low_render_threshold)
                     && (x2_max < 3.0f * avg_per_sample);
     }
-    sg->low_render_avg_power = sg->low_render_avg_power * 0.9f + x2_sum * 0.1f;
+    sg->low_render_avg_power = sg->low_render_avg_power * sg->low_render_iir_decay
+                              + x2_sum * sg->low_render_iir_weight;
     return low_noise ? 1 : 0;
 }
 

@@ -94,6 +94,16 @@ typedef struct {
 
     int    stat_aware_ne_proxy_enabled;          /* bool */
     float  stat_aware_ne_proxy_threshold;
+
+    /* LowNoiseRenderDetector power IIR rate conversion (mirrors Python's
+     * _LowNoiseRenderDetector use_wallclock_ema_alpha kwarg). Default OFF
+     * (0, matching the caller's memset-to-zero SuppressionGainConfig and
+     * Python's `bool = False` default): keeps the legacy literal
+     * 0.9f/0.1f IIR. This mechanism was exposed as default-OFF research
+     * substrate before, removed as dead code, and must not be turned back
+     * on without its own bench pass + sign-off -- see CHANGELOG's
+     * "Explicitly held back" entry. Do not flip this to 1 without that. */
+    int    use_wallclock_ema_alpha;              /* bool */
 } SuppressionGainConfig;
 
 /* Per-bin tuning tables (n_bins each), supplied by caller. */
@@ -124,6 +134,10 @@ typedef struct {
     float *last_nearend;        /* [n_bins] */
     float *last_echo;           /* [n_bins] */
     float  low_render_avg_power;
+    float  low_render_iir_decay;  /* set in suppression_gain_init() from
+                                    * cfg->use_wallclock_ema_alpha */
+    float  low_render_iir_weight; /* set in suppression_gain_init() from
+                                    * cfg->use_wallclock_ema_alpha */
     int    far_active_latched;  /* bool */
     int    dt_protect_active;   /* bool — set by orchestrator before get_gain
                                  * (== Python _dt_protect_active); lifts the

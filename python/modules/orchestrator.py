@@ -955,6 +955,11 @@ class AEC:
             sr=cfg.sample_rate,
             hop_size=cfg.hop_size,
             use_wallclock_block_energy_threshold=True,
+            # use_wallclock_ema_alpha: intentionally NOT passed (class default
+            # False applies) -- this mechanism was killed twice before as
+            # dead code and needs its own bench pass + sign-off before a
+            # third revival; see CHANGELOG's "Explicitly held back" entry.
+            # Do not pass True here without that bench.
             use_wallclock_gain_ratchet=True,
             soft_nearend_blend_enabled=bool(
                 getattr(cfg, "soft_nearend_blend_enabled", False)),
