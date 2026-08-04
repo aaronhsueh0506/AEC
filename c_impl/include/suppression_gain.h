@@ -183,6 +183,21 @@ void suppression_gain_set_initial_state(SuppressionGain *sg, int state);
  * get_gain (one-hop lag: it reflects the previous hop's get_gain update). */
 int suppression_gain_is_dominant_nearend(const SuppressionGain *sg);
 
+/* State-updating prefix of get_gain(), factored out so a caller that never
+ * consumes the gain array itself (e.g. a per-lane AEC feeding a downstream
+ * beamform-then-fuse suppression stage) can keep the DominantNearend hold
+ * state advancing -- which the NEXT hop's ERLE onset decision and residual-
+ * echo estimate depend on -- without paying for the rest of get_gain()'s
+ * per-bin work, whose only consumer is the gain array this path discards.
+ * get_gain() itself calls this internally; this is the single source of
+ * truth for what dominant_nearend_update() is fed. */
+void suppression_gain_update_dominant_nearend(
+    SuppressionGain *sg,
+    const float *nearend_spectrum,        /* [n_bins] Y^2 / E^2 */
+    const float *residual_echo,           /* [n_bins] R^2 */
+    const float *residual_echo_unbounded, /* [n_bins] R^2_unb */
+    const float *comfort_noise);          /* [n_bins] CN power */
+
 /* One hop. Inputs are the f32 spectra (n_bins) + the f32 render block
  * (hop_size). Returns the gain pointer (== sg->gain). */
 const float *suppression_gain_get_gain(

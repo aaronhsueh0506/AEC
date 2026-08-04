@@ -363,6 +363,25 @@ typedef struct {
     int            use_stationarity_properties; /* sg echo_audibility flag */
     int            context_only;          /* expose gain/R²/CNG seam but skip
                                              * unused private time synthesis */
+    int            spatial_linear_context; /* this lane's own G_res is never
+                                             * consumed (a downstream fused/
+                                             * beamformed stage recomputes an
+                                             * equivalent gain) -- skip
+                                             * computing it, but keep the
+                                             * DominantNearend hold-state
+                                             * advancing every hop, since the
+                                             * NEXT hop's ERLE onset decision
+                                             * (Step 13) and therefore r2
+                                             * (consumed downstream) depend on
+                                             * it. comfort_noise (Step 19) is
+                                             * computed independently of DNE --
+                                             * it is one of DNE's own INPUTS,
+                                             * not something DNE affects -- and
+                                             * stays correct in this mode
+                                             * regardless. Only meaningful, and
+                                             * only validated, when context_only is
+                                             * also set -- aec_validate_config()
+                                             * enforces this precondition. */
     float          active_render_threshold;     /* _ar_thr = 5.96e-4       */
 } Aec3PostRunIn;
 

@@ -284,6 +284,73 @@ static void test_highpass_cutoff(void) {
  * break the real path. get_mem_size>0, init OK, one hop of process runs.
  * aec_destroy() deliberately NOT called here — lifecycle/leak coverage is
  * test_static_aec.c's job (this test only touches config validation). */
+/* spatial_linear_context's whole premise (aec3_post_run Step 20/21) is that
+ * apply_output() never reads the skipped gain -- true only under
+ * context_only (enable_res==0 && return_res_context==1). Every other
+ * combination must be rejected by aec_validate_config() itself, not left to
+ * the aec3_post_run() debug assert alone. */
+static void test_spatial_linear_context_requires_context_only(void) {
+    AecConfig valid_cfg; base_cfg(&valid_cfg);
+    size_t sz = aec_get_mem_size(&valid_cfg);
+    CHECK(sz > 0, "spatial_linear_context test setup: valid 16k config sizes > 0");
+    void* mem = malloc(sz);
+    CHECK(mem != NULL, "spatial_linear_context test setup: malloc aligned pool");
+
+    {
+        AecConfig cfg; base_cfg(&cfg);
+        cfg.enable_res = 0;
+        cfg.return_res_context = 0;
+        cfg.spatial_linear_context = 1;
+        check_rejected("spatial_linear_context=1, return_res_context=0",
+                       &cfg, mem, sz);
+    }
+    {
+        AecConfig cfg; base_cfg(&cfg);
+        cfg.enable_res = 1;
+        cfg.return_res_context = 1;
+        cfg.spatial_linear_context = 1;
+        check_rejected("spatial_linear_context=1, enable_res=1",
+                       &cfg, mem, sz);
+    }
+    {
+        /* Out-of-{0,1} value: caught by the plain AEC_CK_BOOL, same as any
+         * other toggle field, ahead of the compound check. */
+        AecConfig cfg; base_cfg(&cfg);
+        cfg.enable_res = 0;
+        cfg.return_res_context = 1;
+        cfg.spatial_linear_context = 2;
+        check_rejected("spatial_linear_context=2 (not a bool)", &cfg, mem, sz);
+    }
+
+    {
+        AecConfig cfg; base_cfg(&cfg);
+        cfg.enable_res = 0;
+        cfg.return_res_context = 1;
+        cfg.spatial_linear_context = 1;
+        Aec a;
+        int rc = aec_create(&a, &cfg);
+        CHECK(rc == 0, "spatial_linear_context=1 with context_only satisfied: "
+                       "aec_create() succeeds");
+        if (rc == 0) {
+            int hop = aec_hop_size(&a);
+            float* mic = (float*)calloc((size_t)hop, sizeof(float));
+            float* ref = (float*)calloc((size_t)hop, sizeof(float));
+            float* out = (float*)malloc((size_t)hop * sizeof(float));
+            AecResContext ctx;
+            aec_process(&a, mic, ref, out);
+            aec_get_res_context(&a, &ctx);
+            CHECK(ctx.res_gain == NULL,
+                  "spatial_linear_context=1: AecResContext.res_gain is NULL");
+            CHECK(ctx.r2 != NULL && ctx.comfort_noise != NULL,
+                  "spatial_linear_context=1: r2/comfort_noise still exposed");
+            aec_destroy(&a);
+            free(mic); free(ref); free(out);
+        }
+    }
+
+    free(mem);
+}
+
 static void test_valid_config_smoke(void) {
     AecConfig cfg; base_cfg(&cfg);
 
@@ -378,6 +445,7 @@ int main(void) {
     test_filter_length();
     test_highpass_cutoff();
     test_misaligned_base();
+    test_spatial_linear_context_requires_context_only();
     test_valid_config_smoke();
     test_multi_rate_valid_smoke();
 

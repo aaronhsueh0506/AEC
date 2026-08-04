@@ -223,7 +223,7 @@ static int aec_validate_config(const AecConfig* cfg) {
 #define AEC_CK_RANGE_I(field, lo, hi) \
     do { if (cfg->field < (lo) || cfg->field > (hi)) return 0; } while (0)
 
-    /* toggles (13) */
+    /* toggles (14) */
     AEC_CK_BOOL(enable_cng);
     AEC_CK_BOOL(enable_delay_est);
     AEC_CK_BOOL(enable_highpass);
@@ -232,11 +232,19 @@ static int aec_validate_config(const AecConfig* cfg) {
     AEC_CK_BOOL(enable_res);
     AEC_CK_BOOL(saturation_softclip_ref);
     AEC_CK_BOOL(return_res_context);
+    AEC_CK_BOOL(spatial_linear_context);
     AEC_CK_BOOL(delay_acquire_protect_converged);
     AEC_CK_BOOL(delay_acquire_warm_transfer);
     AEC_CK_BOOL(delay_acquire_protect_inst_erle);
     AEC_CK_BOOL(dt_aware_recovery_soft);
     AEC_CK_BOOL(dt_aware_res_floor_enabled);
+    /* spatial_linear_context's whole premise is that apply_output() (Step 21)
+     * never reads the skipped gain -- true only when context_only holds
+     * (enable_res==0 && return_res_context==1). Reject any other
+     * combination here rather than relying on the aec3_post_run() debug
+     * assert alone. */
+    if (cfg->spatial_linear_context &&
+        (cfg->enable_res || !cfg->return_res_context)) return 0;
 
     /* scalar tunables (22 floats) — generous, finite ranges around default */
     AEC_CK_RANGE_F(mu,                          0.0f,    10.0f);
@@ -2305,11 +2313,20 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
             in.stationary_block = stationarity_block_for_post;
             in.erle_coh_gate_enabled = AEC3B_ERLE_COH_GATE_ENABLED;
             in.use_stationarity_properties = AEC3B_USE_STATIONARITY_PROPERTIES;
-            /* In the external AEC→NR/RES seam, Step 19's comfort-noise PSD,
-             * Step 20's gain and R² are consumed by the caller, but Step 21's
-             * private gain/CNG/IFFT/OLA result is immediately replaced by the
-             * linear residual. Skip only that final synthesis stage. */
+            /* In the external AEC→NR/RES seam, Step 19's comfort-noise PSD
+             * and Step 20's R² are consumed by the caller (Step 20's gain
+             * itself is consumed only when spatial_linear_context is unset --
+             * see below), but Step 21's private gain/CNG/IFFT/OLA result is
+             * immediately replaced by the linear residual. Skip only that
+             * final synthesis stage. */
             in.context_only = (!a->cfg.enable_res && a->cfg.return_res_context);
+            /* spatial_linear_context requires context_only (enforced by
+             * aec_validate_config()): a caller that sets it has already
+             * committed to never reading res_gain (aec_get_res_context()
+             * exposes NULL for it in this mode), so Step 20 can skip
+             * computing the array Step 21 would otherwise never read here
+             * either way. */
+            in.spatial_linear_context = a->cfg.spatial_linear_context;
             in.active_render_threshold = AEC3B_ACTIVE_RENDER_THRESHOLD;
 
             Aec3PostRunObj obj;
@@ -2598,13 +2615,17 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
      * that is a PBFDKF estimator quantity, not a reconstructing WOLA frame.
      * res_gain is the SuppressionGain output, r2 the residual-echo PSD
      * (int16²), and comfort_noise the CNG N² (int16²). Left NULL when
-     * neither RES nor the context seam is enabled. */
+     * neither RES nor the context seam is enabled -- also left NULL under
+     * spatial_linear_context, where a->a3_sg.gain is never written past its
+     * zero-init (get_gain() itself never runs), so exposing it would misread
+     * as "G_res == 0 everywhere" (full suppression) rather than "not
+     * computed". */
     if (a->cfg.enable_res || a->cfg.return_res_context) {
         ctx->error_spec    = a->a3_sc.sel_esw;
         ctx->echo_spec     = a->a3_sc.sel_echo;
         ctx->near_spec     = a->a3_sc.ybase;
         ctx->formed_hop    = a->a3_lfs.e_form;
-        ctx->res_gain      = a->a3_sg.gain;
+        ctx->res_gain      = a->cfg.spatial_linear_context ? NULL : a->a3_sg.gain;
         ctx->r2            = a->a3_sc.r2;
         ctx->comfort_noise = a->post.comfort_noise;
     } else {

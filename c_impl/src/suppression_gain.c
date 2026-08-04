@@ -436,6 +436,24 @@ static void limit_hf_gains(SuppressionGain *sg, float *gain) {
 
 /* --------------------------------------------------------------- get_gain */
 
+void suppression_gain_update_dominant_nearend(
+    SuppressionGain *sg,
+    const float *nearend_spectrum,
+    const float *residual_echo,
+    const float *residual_echo_unbounded,
+    const float *comfort_noise) {
+    const SuppressionGainConfig *c = &sg->cfg;
+    const float *echo_for_det;
+
+    /* stationary_mask is None in balanced -> stat_mask_frac = 0.0f. */
+    sg->stat_mask_frac = 0.0f;
+
+    echo_for_det = c->dne_use_unbounded_echo ? residual_echo_unbounded
+                                             : residual_echo;
+    dominant_nearend_update(sg, nearend_spectrum, echo_for_det, comfort_noise,
+                            sg->initial_state);
+}
+
 const float *suppression_gain_get_gain(
     SuppressionGain *sg,
     const float *nearend_spectrum,
@@ -448,18 +466,13 @@ const float *suppression_gain_get_gain(
     const SuppressionGainConfig *c = &sg->cfg;
     int n = c->n_bins;
     int k;
-    const float *echo_for_det;
     int low_noise_render;
     float render_x2_sum = 0.0f;
     int hf_lim_applied;
 
-    /* stationary_mask is None in balanced -> stat_mask_frac = 0.0f. */
-    sg->stat_mask_frac = 0.0f;
-
-    echo_for_det = c->dne_use_unbounded_echo ? residual_echo_unbounded
-                                             : residual_echo;
-    dominant_nearend_update(sg, nearend_spectrum, echo_for_det, comfort_noise,
-                            sg->initial_state);
+    suppression_gain_update_dominant_nearend(
+        sg, nearend_spectrum, residual_echo, residual_echo_unbounded,
+        comfort_noise);
 
     low_noise_render = low_noise_render_detect(sg, render_block, c->hop_size,
                                                 &render_x2_sum);

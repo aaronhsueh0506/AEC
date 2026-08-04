@@ -55,6 +55,18 @@ typedef struct AecConfig {
      * the linear residual (raw_output). Lets a caller run AEC(linear) → NR → RES
      * externally. Default 0 (memset) → production cascade untouched. */
     int    return_res_context;     /* 0 */
+    /* This lane's own AEC3 SuppressionGain output (G_res) is never computed
+     * -- a downstream fused/beamformed post-stage (e.g. a multi-channel
+     * wrapper) recomputes an equivalent gain from combined multi-lane data
+     * instead. The DominantNearend hold-state (which the next hop's ERLE
+     * onset decision, and therefore r2, depend on) is still updated every
+     * hop. comfort_noise is computed independently (it is one of DNE's own
+     * inputs, not something DNE affects) and is unaffected either way.
+     * Only valid when enable_res==0 && return_res_context==1 (the
+     * context-only seam); aec_validate_config() rejects any other
+     * combination, since apply_output() -- the only consumer of the skipped
+     * gain -- only runs when that seam is NOT active. Default 0 (memset). */
+    int    spatial_linear_context; /* 0 */
 
     /* scalar tunables (balanced base). shadow_err_alpha/warmup_frames/
      * epc_hangover are wall-clock-authored at the legacy hop=160/sr=16000
@@ -533,7 +545,13 @@ typedef struct AecResContext {
      * The pointers alias the AEC's internal per-hop buffers — read before the
      * next aec_process() call. */
     const Complex* error_spec;     /* reconstructing WOLA linear E(f), audio scale */
-    const float*   res_gain;       /* AEC3 G_res(f), amplitude [0..1]          */
+    const float*   res_gain;       /* AEC3 G_res(f), amplitude [0..1]; NULL when
+                                     * AecConfig.spatial_linear_context is set
+                                     * (this lane's G_res is never computed --
+                                     * NULL signals "not computed", since the
+                                     * underlying buffer is otherwise never
+                                     * written past its zero-init and would
+                                     * otherwise misread as "fully suppressed")*/
     const float*   r2;             /* residual-echo PSD R²(f), int16²-scaled   */
     const float*   comfort_noise;  /* CNG N²(f), int16²-scaled                 */
     float          far_power;

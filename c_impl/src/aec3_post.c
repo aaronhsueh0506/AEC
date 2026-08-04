@@ -731,19 +731,43 @@ int aec3_post_run(Aec3Post *p,
                             {
                                 const float *gain;
                                 int sat_echo = saturated;  /* aec_state.saturated_echo() */
-                                gain = suppression_gain_get_gain(
-                                    obj->sg, sc->nearend_pwr, sc->r2, sc->r2_unb,
-                                    p->comfort_noise, sc->render_block_scaled,
-                                    /*clock_drift=*/0, sat_echo);
+                                if (in->spatial_linear_context) {
+                                    /* G_res is provably unused downstream in
+                                     * this mode (context_only is required, so
+                                     * apply_output below never reads it
+                                     * either) -- but the DominantNearend
+                                     * hold-state must keep advancing: it is
+                                     * read via suppression_gain_is_dominant_
+                                     * nearend() at Step 13 of the NEXT hop,
+                                     * feeding the ERLE onset flag ->
+                                     * ree_estimate() -> r2, which a downstream
+                                     * fused-context consumer (e.g. the 4ch
+                                     * wrapper's fuse_contexts()) does use. */
+                                    suppression_gain_update_dominant_nearend(
+                                        obj->sg, sc->nearend_pwr, sc->r2,
+                                        sc->r2_unb, p->comfort_noise);
+                                    gain = NULL;
+                                } else {
+                                    gain = suppression_gain_get_gain(
+                                        obj->sg, sc->nearend_pwr, sc->r2, sc->r2_unb,
+                                        p->comfort_noise, sc->render_block_scaled,
+                                        /*clock_drift=*/0, sat_echo);
 
-                                /* audio-passive trace stash: mean per-bin gain. */
-                                {
-                                    float gsum = 0.0f;
-                                    for (k = 0; k < nb; ++k) gsum += gain[k];
-                                    p->trace.gain_mean = (nb > 0) ? gsum / (float)nb : 0.0f;
+                                    /* audio-passive trace stash: mean per-bin gain. */
+                                    {
+                                        float gsum = 0.0f;
+                                        for (k = 0; k < nb; ++k) gsum += gain[k];
+                                        p->trace.gain_mean = (nb > 0) ? gsum / (float)nb : 0.0f;
+                                    }
                                 }
 
                                 /* ── Step 21: apply_output (3606-3689) ──────── */
+                                /* spatial_linear_context implies context_only
+                                 * (aec_validate_config() enforces this), so
+                                 * the NULL `gain` above is never dereferenced
+                                 * by aec3_post_apply_output(). */
+                                assert(!in->spatial_linear_context ||
+                                       in->context_only);
                                 if (in->context_only) {
                                     /* The external joint NR/RES consumes E(f),
                                      * gain, R² and comfort_noise, then performs

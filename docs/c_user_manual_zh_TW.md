@@ -317,7 +317,7 @@ aec_get_res_context(&aec, &ctx);
 - `formed_hop`：`error_spec` 所對應的 selected/crossfaded linear hop。
 - `error_spec`：formed linear output 的 50% overlap periodic-sqrt-Hann STFT `E(f)`，audio amplitude scale。
 - `echo_spec` / `near_spec`：與 `error_spec` 同 window、同對齊的 echo/capture spectrum，且 `near_spec = error_spec + echo_spec`。
-- `res_gain`：AEC3 suppression amplitude gain，範圍 `[0, 1]`。
+- `res_gain`：AEC3 suppression amplitude gain，範圍 `[0, 1]`；但若 `cfg.spatial_linear_context = 1`（多聲道呼叫端要求每個 lane 自己的 gain 完全不計算，改由外部融合多路資料後只算一次時使用），這個欄位是 `NULL`，不是全 0——`NULL` 代表「沒算」，讀成「全部抑制」是錯的解讀。使用前務必先檢查非 NULL。
 - `r2`：residual echo PSD，使用 int16² scale；轉成 `|E|²` audio scale 時除以 `32768²`。
 - `comfort_noise`：CNG PSD，同樣使用 int16² scale。
 - `far_power`、`dt_indicator`、`divergence`、`filter_converged`：外部 gate／診斷資訊。

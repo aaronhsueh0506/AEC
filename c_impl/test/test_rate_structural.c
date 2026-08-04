@@ -3,7 +3,7 @@
  * (mirrors test_config_validation.c / test_static_aec.c's own header
  * recipe). It is wired to the `make test-rate-structural` target.
  *
- * Seven checks, run at each of the four whitelisted grids
+ * Nine checks, run at each of the four whitelisted grids
  * (8000/256, 16000/256, 16000/512, 48000/1024):
  *
  *   (a) COLA: the rate's own synthesis window (Aec3BalancedRateDims::
@@ -70,6 +70,27 @@
  *       error_spec_windowed even though the synthesis window itself passes
  *       the standalone COLA check in (a).
  *
+ *   (e2) spatial_linear_context: an Aec configured to skip computing its own
+ *       (otherwise-unused) per-lane suppression gain must still expose an
+ *       identical R²/comfort_noise/near_spec/echo_spec/error_spec/formed_hop
+ *       to a baseline instance fed the same inputs -- only res_gain differs
+ *       (NULL instead of the computed array). Runs with shadow selection
+ *       both enabled and disabled.
+ *
+ *   (e3) suppression_gain_update_dominant_nearend() vs get_gain(): drives two
+ *       SuppressionGain instances (via two Aec's a3_sg) through a
+ *       deliberately-constructed enter/hold/early-exit cycle of the
+ *       DominantNearend state machine and asserts dne_trigger_counter/
+ *       dne_hold_counter/dne_nearend_state match every hop. This is the
+ *       actual "removing the state-updating prefix must fail" mutation
+ *       proof for the spatial_linear_context design in (e2) -- deterministic
+ *       by construction rather than dependent on an incidental signal
+ *       reaching these states. Mutation-tested by temporarily dropping
+ *       get_gain()'s call to suppression_gain_update_dominant_nearend():
+ *       confirmed to fail at all 4 grids (unlike (e2)'s dependence on
+ *       whether a specific synthetic signal happens to reach these states).
+ *
+
  * Build (standalone, KISS FFT backend; from c_impl/):
  *   make -C ../../audio_common BACKEND=kiss lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
@@ -369,6 +390,353 @@ static void test_res_context_wola_identity(void) {
     }
 }
 
+/* ── (e2) spatial_linear_context: skipping the unused per-lane G_res leaves
+ * every OTHER context field byte-identical, every grid, shadow on/off ────
+ * A multi-channel wrapper (e.g. pipelines/4ch_pipelines/4aec_nr_res.c) sets
+ * this to stop computing a per-lane suppression gain that only a downstream
+ * fused/beamformed stage ever reads, while the DominantNearend hold-state
+ * (suppression_gain_update_dominant_nearend(), still called every hop) keeps
+ * advancing so the NEXT hop's ERLE onset decision, and therefore r2, are
+ * unaffected. comfort_noise is a separate, independent Step 19 computation
+ * (one of DominantNearend's own inputs, not something it affects) and is
+ * checked here for completeness, not because it depends on this mechanism.
+ * Proves that "keep the state-updating prefix, skip everything else" is a
+ * true no-op on every field except res_gain itself, end to end through a
+ * real Aec instance.
+ *
+ * The DominantNearend state machine itself (enter/hold/early-exit) is
+ * mutation-tested in isolation, at every grid, in
+ * test_suppression_gain_dne_prefix_matches_get_gain() below -- see that
+ * test for the actual "removing the prefix must fail" proof; this test's
+ * job is bit-exactness of the mode as a whole, not of that one mechanism. */
+static void test_spatial_linear_context_matches_baseline(void) {
+    /* 200, not 80: at the default 16k/256 grid, DominantNearend does not
+     * reach its ACTIVE hold state within 80 hops on this synthetic signal --
+     * a run that never activates DNE would not actually exercise the one
+     * state transition (dne_nearend_state, fed forward into the next hop's
+     * ERLE onset decision) this test exists to protect. 200 hops was
+     * verified (by hand, across every grid x shadow combination below) to
+     * reach dne_nearend_state==1 at least once; saw_dominant_nearend below
+     * asserts that, so a future signal-generation change that regresses
+     * back to "never activates" fails loudly instead of silently testing
+     * less than it claims to. */
+    const int N_HOPS = 200;
+
+    for (int shadow = 0; shadow <= 1; ++shadow) {
+        for (int r = 0; r < N_GRIDS; ++r) {
+            int sr = GRIDS[r].sample_rate;
+            int fft_size = GRIDS[r].fft_size;
+            AecConfig cfg;
+            Aec base, spatial;
+            float *far = NULL, *mic = NULL, *out_base = NULL, *out_spatial = NULL;
+            char what[192];
+            int base_res_gain_ever_null = 0;
+            int spatial_res_gain_seen_null = 1;
+            int r2_identical = 1, cn_identical = 1, near_identical = 1;
+            int echo_identical = 1, error_identical = 1, formed_identical = 1;
+            int out_identical = 1;
+            int all_finite = 1;
+            int saw_dominant_nearend = 0;
+            int valid = 1;
+
+            aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+            cfg.fft_size = fft_size;
+            cfg.enable_shadow = shadow;
+            cfg.enable_res = 0;
+            cfg.return_res_context = 1;
+            cfg.enable_cng = 0;
+            cfg.enable_delay_est = 0;
+            cfg.enable_highpass = 0;
+            cfg.enable_saturation = 0;
+
+            int rc_base = aec_create(&base, &cfg);
+            cfg.spatial_linear_context = 1;
+            int rc_spatial = aec_create(&spatial, &cfg);
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d shadow=%d: construct spatial_linear_context pair",
+                     sr, fft_size, shadow);
+            CHECK(rc_base == 0 && rc_spatial == 0, what);
+            if (rc_base != 0 || rc_spatial != 0) {
+                if (rc_base == 0) aec_destroy(&base);
+                if (rc_spatial == 0) aec_destroy(&spatial);
+                continue;
+            }
+
+            int hop = aec_hop_size(&base);
+            int n_freqs = fft_size / 2 + 1;
+            far = (float*)malloc((size_t)hop * sizeof(float));
+            mic = (float*)malloc((size_t)hop * sizeof(float));
+            out_base = (float*)malloc((size_t)hop * sizeof(float));
+            out_spatial = (float*)malloc((size_t)hop * sizeof(float));
+            if (!far || !mic || !out_base || !out_spatial) valid = 0;
+
+            /* Bursty far-end (loud/near-silent, ~300 ms per half-cycle) rather
+             * than stationary noise: a constant-level signal never creates a
+             * genuine render-level transition, which is what feeds
+             * SubbandErle's coming_onset/hold_counter machinery -- with a
+             * flat signal, erle_onset_compensated tracks erle exactly, so
+             * onset never has anything to select between and a broken
+             * dominant_ne feed goes undetected. Authored in wall-clock ms and
+             * retimed per grid (this codebase's own convention for
+             * warmup_frames/epc_hangover/etc., aec.c's aec_carve()) rather
+             * than a fixed hop count: a fixed 20-hop period was verified (by
+             * hand) to only trigger the divergence at half the grids here --
+             * 8000/256 and 16000/512 both have a 16 ms hop and caught it,
+             * 16000/256 (8 ms hop) and 48000/1024 (10.67 ms hop) did not,
+             * because 20 hops covers a different wall-clock burst length at
+             * each rate. */
+            const int burst_hops_local =
+                ((300 * sr) / (1000 * hop)) > 0 ? (300 * sr) / (1000 * hop) : 1;
+            g_lcg_state = 0x53504331u + (unsigned)(17 * r + shadow);
+            for (int hi = 0; hi < N_HOPS && valid; ++hi) {
+                AecResContext ctx_base, ctx_spatial;
+                int burst_on = ((hi / burst_hops_local) % 2) == 0;
+                float far_scale = burst_on ? 0.18f : 0.002f;
+                for (int i = 0; i < hop; ++i) {
+                    far[i] = far_scale * (2.0f * lcg_uniform() - 1.0f);
+                    mic[i] = 0.45f * far[i]
+                           + 0.025f * (2.0f * lcg_uniform() - 1.0f);
+                }
+                /* Identical inputs fed to both instances every hop -- mic/far
+                 * are read-only, so one pair of buffers is safe to reuse. */
+                aec_process(&base, mic, far, out_base);
+                aec_process(&spatial, mic, far, out_spatial);
+                aec_get_res_context(&base, &ctx_base);
+                aec_get_res_context(&spatial, &ctx_spatial);
+
+                if (!ctx_base.r2 || !ctx_base.comfort_noise ||
+                    !ctx_base.near_spec || !ctx_base.echo_spec ||
+                    !ctx_base.error_spec || !ctx_base.formed_hop ||
+                    !ctx_spatial.r2 || !ctx_spatial.comfort_noise ||
+                    !ctx_spatial.near_spec || !ctx_spatial.echo_spec ||
+                    !ctx_spatial.error_spec || !ctx_spatial.formed_hop) {
+                    valid = 0;
+                    break;
+                }
+                /* Accumulate across ALL hops, not just the last one -- the
+                 * pointer doesn't actually move hop to hop, but asserting
+                 * that every hop stayed non-NULL is the honest claim, not an
+                 * incidental one-hop snapshot. */
+                if (ctx_base.res_gain == NULL) base_res_gain_ever_null = 1;
+                if (ctx_spatial.res_gain != NULL) spatial_res_gain_seen_null = 0;
+
+                if (suppression_gain_is_dominant_nearend(&base.a3_sg))
+                    saw_dominant_nearend = 1;
+
+                /* Genuine byte-identical checks (memcmp over the raw arrays),
+                 * not a numeric-equality proxy -- fabsf(a-b) > 0 would also
+                 * silently pass a NaN divergence (fabsf(NaN) compares false
+                 * against any threshold), so finiteness is checked
+                 * separately below rather than folded into the diff. */
+                for (int k = 0; k < n_freqs && all_finite; ++k) {
+                    if (!isfinite(ctx_base.r2[k]) || !isfinite(ctx_spatial.r2[k]) ||
+                        !isfinite(ctx_base.comfort_noise[k]) ||
+                        !isfinite(ctx_spatial.comfort_noise[k]) ||
+                        !isfinite(ctx_base.near_spec[k].r) ||
+                        !isfinite(ctx_base.near_spec[k].i) ||
+                        !isfinite(ctx_spatial.near_spec[k].r) ||
+                        !isfinite(ctx_spatial.near_spec[k].i) ||
+                        !isfinite(ctx_base.echo_spec[k].r) ||
+                        !isfinite(ctx_base.echo_spec[k].i) ||
+                        !isfinite(ctx_spatial.echo_spec[k].r) ||
+                        !isfinite(ctx_spatial.echo_spec[k].i) ||
+                        !isfinite(ctx_base.error_spec[k].r) ||
+                        !isfinite(ctx_base.error_spec[k].i) ||
+                        !isfinite(ctx_spatial.error_spec[k].r) ||
+                        !isfinite(ctx_spatial.error_spec[k].i)) {
+                        all_finite = 0;
+                    }
+                }
+                for (int i = 0; i < hop && all_finite; ++i) {
+                    if (!isfinite(ctx_base.formed_hop[i]) ||
+                        !isfinite(ctx_spatial.formed_hop[i]) ||
+                        !isfinite(out_base[i]) || !isfinite(out_spatial[i])) {
+                        all_finite = 0;
+                    }
+                }
+
+                if (memcmp(ctx_base.r2, ctx_spatial.r2,
+                          (size_t)n_freqs * sizeof(float)) != 0)
+                    r2_identical = 0;
+                if (memcmp(ctx_base.comfort_noise, ctx_spatial.comfort_noise,
+                          (size_t)n_freqs * sizeof(float)) != 0)
+                    cn_identical = 0;
+                if (memcmp(ctx_base.near_spec, ctx_spatial.near_spec,
+                          (size_t)n_freqs * sizeof(Complex)) != 0)
+                    near_identical = 0;
+                if (memcmp(ctx_base.echo_spec, ctx_spatial.echo_spec,
+                          (size_t)n_freqs * sizeof(Complex)) != 0)
+                    echo_identical = 0;
+                if (memcmp(ctx_base.error_spec, ctx_spatial.error_spec,
+                          (size_t)n_freqs * sizeof(Complex)) != 0)
+                    error_identical = 0;
+                if (memcmp(ctx_base.formed_hop, ctx_spatial.formed_hop,
+                          (size_t)hop * sizeof(float)) != 0)
+                    formed_identical = 0;
+                if (memcmp(out_base, out_spatial, (size_t)hop * sizeof(float)) != 0)
+                    out_identical = 0;
+            }
+
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d shadow=%d: baseline exposes res_gain, spatial_linear_context exposes NULL",
+                     sr, fft_size, shadow);
+            CHECK(valid && !base_res_gain_ever_null && spatial_res_gain_seen_null, what);
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d shadow=%d: reached dne_nearend_state==1 at least once "
+                     "(exercises the state transition this test protects)",
+                     sr, fft_size, shadow);
+            CHECK(valid && saw_dominant_nearend, what);
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d shadow=%d: all compared fields stayed finite",
+                     sr, fft_size, shadow);
+            CHECK(valid && all_finite, what);
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d shadow=%d: r2/comfort_noise/near/echo/error/formed_hop "
+                     "byte-identical (memcmp) every hop",
+                     sr, fft_size, shadow);
+            CHECK(valid && r2_identical && cn_identical && near_identical &&
+                  echo_identical && error_identical && formed_identical, what);
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d shadow=%d: synthesized output byte-identical (memcmp) every hop",
+                     sr, fft_size, shadow);
+            CHECK(valid && out_identical, what);
+
+            free(far); free(mic); free(out_base); free(out_spatial);
+            aec_destroy(&base);
+            aec_destroy(&spatial);
+        }
+    }
+}
+
+/* ── (e3) suppression_gain_update_dominant_nearend() reproduces get_gain()'s
+ * DominantNearend trajectory exactly, through a deliberately-driven
+ * enter -> hold -> early-exit cycle, at every grid ─────────────────────────
+ * Deterministic contract test: two Aec instances at the same grid, one
+ * driven through the full suppression_gain_get_gain(), the other through
+ * only the standalone prefix. Both are fed identical, hand-crafted
+ * nearend/echo/comfort_noise spectra designed (from the DominantNearend
+ * trigger formula in suppression_gain.c: trigger_active = enr_pass &&
+ * snr_pass, where enr_pass = echo_sum < dne_enr_threshold*ne_sum and
+ * snr_pass = ne_sum > dne_snr_threshold*noise_sum; early_exit =
+ * echo_sum > dne_enr_exit_threshold*ne_sum && echo_sum >
+ * dne_snr_threshold*noise_sum) to force ENTER for dne_trigger_threshold_hops
+ * hops, then hold under NEUTRAL input (neither condition satisfied) partway
+ * into dne_hold_duration_hops, then force an EARLY EXIT. dne_trigger_counter/
+ * dne_hold_counter/dne_nearend_state are compared every hop -- unlike
+ * test_spatial_linear_context_matches_baseline() above (which depends on a
+ * signal incidentally reaching these states), this one drives the exact
+ * state machine transitions by construction, so it needs no by-hand
+ * verification of coverage and mutation-catches at every grid. */
+static void test_suppression_gain_dne_prefix_matches_get_gain(void) {
+    for (int r = 0; r < N_GRIDS; ++r) {
+        int sr = GRIDS[r].sample_rate;
+        int fft_size = GRIDS[r].fft_size;
+        AecConfig cfg;
+        Aec full, prefix_only;
+        float *nearend = NULL, *echo = NULL, *echo_unb = NULL, *cn = NULL;
+        float *render_block = NULL;
+        char what[192];
+        int trig_identical = 1, hold_identical = 1, state_identical = 1;
+        int saw_enter = 0, saw_hold = 0, saw_exit = 0;
+        int valid = 1;
+
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        cfg.fft_size = fft_size;
+        cfg.enable_cng = 0;
+        cfg.enable_delay_est = 0;
+
+        int rc_full = aec_create(&full, &cfg);
+        int rc_prefix = aec_create(&prefix_only, &cfg);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: construct DNE-prefix pair", sr, fft_size);
+        CHECK(rc_full == 0 && rc_prefix == 0, what);
+        if (rc_full != 0 || rc_prefix != 0) {
+            if (rc_full == 0) aec_destroy(&full);
+            if (rc_prefix == 0) aec_destroy(&prefix_only);
+            continue;
+        }
+        /* dne_use_during_initial_phase=1 in balanced makes trigger_initial_
+         * gate always true regardless -- forcing initial_state off just
+         * removes that as a variable to reason about. */
+        suppression_gain_set_initial_state(&full.a3_sg, 0);
+        suppression_gain_set_initial_state(&prefix_only.a3_sg, 0);
+
+        int n_bins = full.a3_sg.cfg.n_bins;
+        int hop = aec_hop_size(&full);
+        int trig_hops = full.a3_sg.cfg.dne_trigger_threshold_hops;
+        int hold_hops = full.a3_sg.cfg.dne_hold_duration_hops;
+        nearend = (float*)malloc((size_t)n_bins * sizeof(float));
+        echo = (float*)malloc((size_t)n_bins * sizeof(float));
+        echo_unb = (float*)malloc((size_t)n_bins * sizeof(float));
+        cn = (float*)malloc((size_t)n_bins * sizeof(float));
+        render_block = (float*)calloc((size_t)hop, sizeof(float));
+        if (!nearend || !echo || !echo_unb || !cn || !render_block) valid = 0;
+
+        /* Phases, driven by the trigger/exit formula's exact inequalities
+         * (thresholds in balanced: dne_enr_threshold=0.25,
+         * dne_enr_exit_threshold=10, dne_snr_threshold=30 -- see
+         * aec3_balanced_config.h -- margins below are wide enough to hold
+         * regardless of the exact per-rate table row). */
+        int enter_end = trig_hops + 2;
+        int hold_check = enter_end + (hold_hops > 2 ? hold_hops / 2 : 1);
+        int exit_start = enter_end + (hold_hops > 0 ? hold_hops - 1 : 1);
+        int total_hops = exit_start + 5;
+
+        for (int hi = 0; hi < total_hops && valid; ++hi) {
+            float ne_val, echo_val, cn_val;
+            if (hi < enter_end) {
+                /* ENTER: echo_sum << 0.25*ne_sum, ne_sum >> 30*noise_sum. */
+                ne_val = 1.0f; echo_val = 0.001f; cn_val = 0.0001f;
+            } else if (hi < exit_start) {
+                /* NEUTRAL: neither trigger_active nor early_exit -- lets
+                 * dne_hold_counter decay by exactly 1/hop instead of being
+                 * re-armed (trigger_active) or zeroed (early_exit). */
+                ne_val = 1.0f; echo_val = 1.0f; cn_val = 1.0f;
+            } else {
+                /* EARLY EXIT: echo_sum > 10*ne_sum AND echo_sum > 30*noise_sum. */
+                ne_val = 1.0f; echo_val = 1000.0f; cn_val = 0.001f;
+            }
+            for (int k = 0; k < n_bins; ++k) {
+                nearend[k] = ne_val;
+                echo[k] = echo_val;
+                echo_unb[k] = echo_val;
+                cn[k] = cn_val;
+            }
+
+            suppression_gain_get_gain(&full.a3_sg, nearend, echo, echo_unb, cn,
+                                      render_block, /*clock_drift=*/0,
+                                      /*saturated_echo=*/0);
+            suppression_gain_update_dominant_nearend(&prefix_only.a3_sg,
+                                                      nearend, echo, echo_unb, cn);
+
+            if (full.a3_sg.dne_trigger_counter != prefix_only.a3_sg.dne_trigger_counter)
+                trig_identical = 0;
+            if (full.a3_sg.dne_hold_counter != prefix_only.a3_sg.dne_hold_counter)
+                hold_identical = 0;
+            if (full.a3_sg.dne_nearend_state != prefix_only.a3_sg.dne_nearend_state)
+                state_identical = 0;
+
+            if (hi == enter_end - 1 && full.a3_sg.dne_nearend_state) saw_enter = 1;
+            if (hi == hold_check && full.a3_sg.dne_nearend_state) saw_hold = 1;
+            if (hi == total_hops - 1 && !full.a3_sg.dne_nearend_state) saw_exit = 1;
+        }
+
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: driven signal actually reaches enter(%d)/hold(%d)/exit(%d)",
+                 sr, fft_size, saw_enter, saw_hold, saw_exit);
+        CHECK(valid && saw_enter && saw_hold && saw_exit, what);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: dne_trigger_counter/hold_counter/nearend_state "
+                 "identical every hop through enter/hold/exit",
+                 sr, fft_size);
+        CHECK(valid && trig_identical && hold_identical && state_identical, what);
+
+        free(nearend); free(echo); free(echo_unb); free(cn); free(render_block);
+        aec_destroy(&full);
+        aec_destroy(&prefix_only);
+    }
+}
+
 /* ── (c2) aec_init (static pool) matches aec_create (heap), full post-chain,
  * every grid ───────────────────────────────────────────────────────────── */
 static void test_static_pool_matches_heap(void) {
@@ -560,6 +928,8 @@ int main(void) {
     test_impulse_linear_path();
     test_impulse_res_enabled();
     test_res_context_wola_identity();
+    test_spatial_linear_context_matches_baseline();
+    test_suppression_gain_dne_prefix_matches_get_gain();
     test_static_pool_matches_heap();
     test_mem_size_consistency();
     test_top_level_constant_retiming();

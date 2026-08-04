@@ -16,6 +16,41 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-04 — `AecConfig.spatial_linear_context`: skip an unused per-lane suppression gain
+
+- New `AecConfig` field `spatial_linear_context` (default 0, no behavior
+  change unless set). When enabled, this AEC instance never computes its own
+  `SuppressionGain` output (`res_gain`) — intended for a multi-channel
+  caller (e.g. `pipelines/4ch_pipelines/4aec_nr_res.c`) that runs one AEC
+  per microphone lane purely for its linear filter, then recomputes an
+  equivalent gain once from beamformed multi-lane data; a per-lane gain in
+  that architecture is computed and then never read.
+- The `DominantNearend` hold-state (`suppression_gain_update_dominant_nearend()`,
+  newly exported from `suppression_gain.h`) still updates every hop even in
+  this mode: it feeds the next hop's ERLE onset decision, and therefore `r2`,
+  which remains used. `comfort_noise` is computed independently in Step 19 —
+  it is one of `DominantNearend`'s own *inputs*, not something it affects —
+  and stays correct in this mode regardless. Only the remaining,
+  provably-dead part of `suppression_gain_get_gain()` is skipped. Verified
+  bit-exact against the normal path on every other `AecResContext` field
+  (`r2`, `comfort_noise`, `near_spec`, `echo_spec`, `error_spec`,
+  `formed_hop`) and the synthesized output, at every supported grid, shadow
+  filter on and off (`c_impl/test/test_rate_structural.c`).
+- `AecResContext.res_gain` is `NULL` (not a stale/zeroed array) whenever
+  `spatial_linear_context` is set — see the updated field doc in `aec.h`.
+  Only valid together with the existing context-only seam
+  (`enable_res=0 && return_res_context=1`); `aec_validate_config()` rejects
+  any other combination.
+- **This is a public `AecConfig` struct-layout change** (new field added
+  after `return_res_context`). C callers must rebuild against the updated
+  header — do not link an old build's object files or a cached static
+  library against the new header (or vice versa); a mismatched
+  `sizeof(AecConfig)`/field offsets between a caller's compiled code and this
+  library is undefined behavior, not merely a stale-default risk. A
+  zero-initialized (`memset`) `AecConfig` from a rebuilt caller is
+  unaffected (new field defaults to 0 = off, matching every existing
+  caller's behavior).
+
 ## [Unreleased] — 2026-08-03 — Reconstructing WOLA interface for downstream RES/NR
 
 - `AecResContext.error_spec` now always exposes the selected linear output on
