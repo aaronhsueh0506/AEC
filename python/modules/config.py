@@ -450,6 +450,15 @@ class AecConfig:
                 f"no-padding invariant violated: frame_size={self.frame_size} "
                 "must be a positive power of two"
             )
+        # 8 kHz is fully supported by this standalone library and by the
+        # Audio_ALG MONO pipeline (audio_pipeline.c accepts/tests it as a
+        # 4th grid -- see pipelines/README.md "Parameter Alignment"). It is
+        # NOT supported by the Audio_ALG 4-CHANNEL pipeline, whose public
+        # API contracts to exactly three grids: 16 kHz/256, 16 kHz/512,
+        # 48 kHz/1024 (see 4ch_pipelines/README.md and
+        # 4ch_pipelines/4aec_nr_res.c's explicit sample_rate check). Callers
+        # targeting the 4-channel pipeline specifically should not construct
+        # this at 8 kHz even though the check below allows it.
         valid_grids = {
             8000: {256},
             16000: {256, 512},

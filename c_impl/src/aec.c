@@ -182,7 +182,17 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
  * byte-identical; the per-rate verification suite (parity_aec_e2e,
  * gen_delay_c_golden/parity_delay, test_static_aec, test_rate_structural)
  * covers 8000/16000/48000 end to end. 44100 and any other rate stay
- * rejected — no per-rate tables exist for them. */
+ * rejected — no per-rate tables exist for them.
+ *
+ * 8000 is fully supported by this standalone library and by the Audio_ALG
+ * MONO pipeline (audio_pipeline.c accepts/tests it as a 4th grid — see
+ * Audio_ALG/pipelines/README.md "Parameter Alignment"). It is NOT
+ * supported by the Audio_ALG 4-CHANNEL pipeline, whose public API
+ * contracts to exactly three grids: 16 kHz/256, 16 kHz/512, 48 kHz/1024
+ * (see Audio_ALG/pipelines/4ch_pipelines/README.md and
+ * 4aec_nr_res.c's explicit sample_rate check). Callers targeting the
+ * 4-channel pipeline specifically should not construct an Aec at 8 kHz
+ * even though this whitelist allows it. */
 static const int AEC_SR_WHITELIST[] = { 8000, 16000, 48000 };
 
 int aec_is_valid_sample_rate(int sample_rate) {
