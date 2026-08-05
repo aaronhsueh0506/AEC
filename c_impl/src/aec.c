@@ -1578,8 +1578,26 @@ static float aec_erle_ring_max_last15(const Aec* a) {
  * (power EMAs + convergence detection, which the NEXT hop's step-17 logic
  * depends on and therefore can never be skipped by either caller). Does NOT
  * run step 18 (output limiter) or step 21 (emit into a caller `out` buffer)
- * -- those are caller-specific and live in the two thin wrappers below. */
-static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in) {
+ * -- those are caller-specific and live in the two thin wrappers below.
+ *
+ * Group 6: shared_far_spec (NULL for the normal aec_process()/
+ * aec_process_context() path -- byte-identical to before Group 6) lets a
+ * caller supply an externally-computed far-end spectrum instead of having
+ * this instance compute its own via FFT, for multi-instance callers (e.g.
+ * a 4-lane wrapper) whose lanes all consume the IDENTICAL far-end signal
+ * every hop: one lane computes the real FFT, the rest borrow it. This
+ * plugs into the exact same one-shot precomputed_far_spec mechanism
+ * aec.c already uses INTERNALLY to let the main filter borrow the shadow
+ * filter's far_spec instead of recomputing it (see the step-9 comment
+ * below) -- shared_far_spec just gives that mechanism an external source
+ * instead of an internal one. ref_in is still required even when
+ * shared_far_spec is supplied: pbfdaf_frontend() unconditionally updates
+ * far_buffer (the OLA history) from it, and every non-FFT use of the raw
+ * time-domain far signal in this function (saturation detection, delay
+ * estimation, mu_scale, ...) is unaffected by Group 6 and still needs
+ * it. */
+static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
+                              const Complex* shared_far_spec) {
     const int hop = a->hop_size, K = a->n_freqs, N = a->n_partitions;
     int stationarity_block_for_post;
     memcpy(a->near_hop, mic_in, (size_t)hop * sizeof(float));
@@ -1895,6 +1913,12 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in) {
         far_excited = (far_hop_mean_sq > 1e-4f);
         int saturation_safe_pre = (a->saturation_level < 0.5f);
         float shadow_mu_pre = (far_excited && saturation_safe_pre) ? 1.0f : 0.1f;
+        /* Group 6: borrow the caller-supplied spectrum instead of computing
+         * this instance's own far FFT. NULL (the normal aec_process()/
+         * aec_process_context() path) is a pure no-op here -- shadow's
+         * precomputed_far_spec is already NULL from init/reset, so this
+         * assignment changes nothing in that case. */
+        a->shadow_filter.precomputed_far_spec = shared_far_spec;
         if (rsa_mask_active) {
             float *mu_buf_pre = a->scr_mu_buf_pre;
             for (int k = 0; k < K; ++k) mu_buf_pre[k] = shadow_mu_pre * rsa_mask[k];
@@ -1918,9 +1942,13 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in) {
     /* 9. MAIN filter. */
     /* FFT dedup: the shadow ran pre-main on the SAME far_hop with an identical
      * far_buffer (lockstep shift + paired reset), so reuse its far_spec instead
-     * of recomputing — byte-equal, saves 1 FFT/hop. One-shot (frontend clears). */
+     * of recomputing — byte-equal, saves 1 FFT/hop. One-shot (frontend clears).
+     * When there's no shadow to borrow from, fall through to shared_far_spec
+     * (Group 6) instead of unconditionally computing a fresh FFT -- NULL in
+     * the normal path, so this is unchanged from before Group 6 whenever no
+     * caller-supplied spectrum exists. */
     a->main_filter.base.precomputed_far_spec =
-        a->has_shadow ? a->shadow_filter.far_spec : NULL;
+        a->has_shadow ? a->shadow_filter.far_spec : shared_far_spec;
     float main_mu_scalar = a->regime.main_paused ? 0.0f : mu_scalar;
     {
         float *mu_buf = a->scr_mu_buf;
@@ -2422,7 +2450,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in) {
  * changed what a --debug-trace consumer observes). */
 void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     const int hop = a->hop_size;
-    aec_process_core(a, mic_in, ref_in);
+    aec_process_core(a, mic_in, ref_in, NULL);
 
     /* 18. OLA-lagged output limiter. near_peak/out_peak via np.max(np.abs(.))
      *     and target_gain = near_peak/out_peak, the EMA mix and the limiter
@@ -2527,7 +2555,38 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
  * audible artifact. Every caller in this repo (mono/4ch pipelines) picks
  * one of the two at construction time and never switches. */
 void aec_process_context(Aec* a, const float* mic_in, const float* ref_in) {
-    aec_process_core(a, mic_in, ref_in);
+    aec_process_core(a, mic_in, ref_in, NULL);
+}
+
+/* Group 6: like aec_process_context(), but shared_far_spec (non-NULL, length
+ * n_freqs) lets this instance skip computing its OWN far-end FFT and borrow
+ * one an external caller already computed instead -- for a multi-instance
+ * caller (e.g. a 4-lane wrapper) whose lanes all see the IDENTICAL far-end
+ * signal every hop: one lane (via plain aec_process_context(), which still
+ * computes its own far_spec) computes the real FFT once, the rest borrow it
+ * through this entry point instead of each redundantly recomputing an
+ * identical transform. Read the lane-0 spectrum to share via
+ * aec_get_res_context()'s far_spec field (unconditionally populated,
+ * independent of enable_res/return_res_context).
+ *
+ * PRECONDITION (caller's responsibility): shared_far_spec must be the
+ * value THIS hop's aec_get_res_context() on the computing instance would
+ * return, i.e. computed from the exact same far-end time-domain signal
+ * this call's own ref_in carries -- ref_in is still required (pbfdaf_frontend()
+ * unconditionally updates far_buffer's OLA history from it, and every
+ * non-FFT use of the raw far signal elsewhere in aec_process_core() --
+ * saturation detection, delay estimation, mu_scale -- is unaffected by
+ * Group 6). A mismatched or stale spectrum silently produces a wrong
+ * (not crashing) linear filter result -- see 4aec_nr_res.c's caller for how
+ * the 4-lane wrapper keeps this invariant (identical p->aligned_ref handed
+ * to every lane, all lanes reset together on any delay change). Same
+ * lifetime rule as aec_process_context(): this instance must use only this
+ * entry point (or only aec_process_context(), never mixed) for its whole
+ * lifetime. */
+void aec_process_context_shared_far(
+        Aec* a, const float* mic_in, const float* ref_in,
+        const Complex* shared_far_spec) {
+    aec_process_core(a, mic_in, ref_in, shared_far_spec);
 }
 
 /* ── Streaming API ────────────────────────────────────────────────────────

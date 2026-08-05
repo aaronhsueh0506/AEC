@@ -489,6 +489,24 @@ void aec_process(Aec* a, const float* mic, const float* ref, float* out);
  * discontinuity the next aec_process() call). */
 void aec_process_context(Aec* a, const float* mic, const float* ref);
 
+/* Group 6: like aec_process_context(), but shared_far_spec (non-NULL,
+ * length n_freqs) lets this instance skip its own far-end FFT and borrow
+ * one an external caller already computed -- for multi-instance callers
+ * (e.g. a 4-lane wrapper) whose instances all see the identical far-end
+ * signal every hop. shared_far_spec must be exactly the value the
+ * computing instance's aec_get_res_context() would return this same hop,
+ * computed from the SAME far-end time-domain signal this call's own `ref`
+ * carries -- `ref` is still required even when shared_far_spec is
+ * supplied (the OLA far-buffer history and every non-FFT use of the raw
+ * far signal are unaffected by Group 6). Pass NULL to fall back to
+ * aec_process_context()'s own behavior (compute this instance's own
+ * FFT) -- see aec.c's doc comment on this function for the full
+ * precondition and aec_process_context()'s doc comment for the shared
+ * one-entry-point-per-instance-lifetime rule. */
+void aec_process_context_shared_far(
+        Aec* a, const float* mic, const float* ref,
+        const Complex* shared_far_spec);
+
 /* ── Streaming API (real-time async render/capture) ───────────────────────
  * For deployments where the far-end (render) and mic (capture) arrive on
  * separate calls / threads and not necessarily 1:1. aec_analyze_render()

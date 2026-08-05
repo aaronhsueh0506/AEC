@@ -374,6 +374,19 @@ void pbfdaf_reset(PBFDAF* p) {
     memset(p->power, 0, (size_t)p->n_freqs * sizeof(float));
     p->partition_idx = 0;
     memset(p->error_spec_windowed, 0, (size_t)p->n_freqs * sizeof(Complex));
+    /* Defensive hardening (Group 6): precomputed_far_spec is documented as
+     * one-shot -- set and consumed within the same pbfdaf_frontend() call,
+     * cleared there immediately after the memcpy. Today that means it is
+     * already NULL by the time any reset() call can observe it (reset
+     * never runs mid-hop), so this has never been a live bug -- but with
+     * cross-instance sharing (aec_process_context_shared_far()) now
+     * setting this from outside the instance, a caller that resets an
+     * instance between setting the pointer and this instance's own
+     * process call would otherwise leave a stale, potentially
+     * caller-freed pointer sitting on the struct. Clearing it here removes
+     * that possibility entirely rather than relying on every caller to
+     * get the ordering right on its own. */
+    p->precomputed_far_spec = NULL;
 }
 
 /* forward rfft of an input shorter than fft_size (zero-pad). */
