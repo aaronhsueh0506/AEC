@@ -16,6 +16,115 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-05 — Shared FFT handle: one `FftHandle` per `Aec` instance instead of three
+
+- `aec_create`/`aec_init` now carve and construct exactly ONE `FftHandle` per
+  instance (still exactly `fft_get_mem_size(fft)` bytes at the same `fft_size`
+  every sub-module already used); the main filter and the shadow filter each
+  borrow it (`pbfdaf_init_static`'s new required `shared_fft` parameter)
+  instead of carving/owning a private handle, and `aec_post_fft` remains the
+  single owner responsible for `fft_destroy`. Reduces static-pool size and
+  construction cost (`aec_get_mem_size`, BALANCED preset, measured
+  before/after): 16k/256 −17,568 B KISS / −16,352 B NE10; 16k/512 −33,952 B
+  KISS / −31,200 B NE10; 48k/1024 −66,720 B KISS / −60,896 B NE10. Per-hop
+  compute is unaffected (each sub-module still runs its own transforms
+  against the shared handle, fully sequentially — shadow, then main, then
+  the AEC3 post block, never interleaved, which this codebase's
+  single-threaded synchronous call path already guaranteed).
+- Safe because all three consumers run at the identical `fft_size` (derived
+  once per instance in `aec_derive_dims`) and each `fft_forward`/
+  `fft_inverse`/`fft_forward_scratch` call is a complete synchronous
+  operation — no consumer retains a pointer into the handle's internal
+  scratch across calls.
+- `pbfdaf_free`'s static-path branch no longer calls `fft_destroy` (it never
+  owns the handle it borrowed); calling it there as well would double-free
+  the NE10 backend's twiddle-config allocation every borrower now shares.
+  `pbfdaf_reset` is unaffected (it never touched `p->fft`).
+- Byte-equal verified: `aec_wav` renders across an 8-case stratified subset
+  of the AEC Challenge corpus, KISS and NE10 backends, before/after —
+  MATCH on all 16. Full existing suite (counter-saturation, rate-structural,
+  delay-reset, SIMD self-test, far-end-FFT-sharing regression test,
+  context-only-processing regression test) re-run clean across
+  BACKEND={kiss,ne10} x SIMD={0,1}.
+
+## [Unreleased] — 2026-08-04 — Far-end-FFT sharing across instances: `aec_process_context_shared_far`
+
+- New entry point `aec_process_context_shared_far(aec, mic, ref,
+  shared_far_spec)`: like `aec_process_context`, but a non-NULL
+  `shared_far_spec` lets this instance skip computing its own far-end FFT and
+  borrow one an external caller already computed — for a multi-instance
+  caller (e.g. a 4-lane spatial wrapper) whose instances all see the
+  identical far-end signal every hop. Generalizes the pre-existing internal
+  shadow→main `precomputed_far_spec` borrow mechanism (documented as
+  "borrowed, one-shot, cleared after use") to an external source instead of
+  only an internal one; `ref` is still required even when sharing (the OLA
+  far-buffer history and every non-FFT use of the raw far signal — saturation
+  detection, delay estimation, mu_scale — are unaffected).
+- New read-only instrumentation `aec_far_fft_real_compute_count(aec)`:
+  cumulative count of hops this instance actually ran its own far-end rfft
+  (not borrowed one), for tests proving a multi-lane caller's total far-FFT
+  count actually dropped after switching lanes over to share one spectrum.
+- Hardening: `pbfdaf_reset` now also clears `precomputed_far_spec` — latent
+  but never triggered before this change (the field was always NULL by the
+  time any reset could observe it, since it was previously set-and-consumed
+  purely within a single internal call); with cross-instance sharing, a
+  caller resetting an instance between setting the pointer and that
+  instance's own process call could otherwise leave a stale/potentially
+  freed pointer on the struct.
+- Verified via `test/test_shared_far_spec.c` (51 checks, now wired into the
+  Makefile as `make test-shared-far-spec`): byte-identical `AecResContext`
+  between borrowing and independently computing, across all 3 grids x shadow
+  on/off; a negative control proving a wrong shared spectrum genuinely
+  changes the result (rules out a silent fallback); a heap-allocate-then-free
+  reset-safety case; and the far-FFT counter's 4-hop mutation test.
+
+## [Unreleased] — 2026-08-04 — `aec_process_context`: context-only entry point, no limiter/emit
+
+- `aec_process`'s ~900-line body is now split into a shared static
+  `aec_process_core()` (the linear filter + AEC3 post/RES block, plus the
+  power-EMA/convergence-detection steps the NEXT hop depends on) and two thin
+  wrappers: `aec_process` (core + output limiter + emit into `out`) and the
+  new `aec_process_context(aec, mic, ref)` (core only — no `out` parameter,
+  no limiter). For a caller that only reads `aec_get_res_context()`
+  (`error_spec`/`res_gain`/`formed_hop`/etc, e.g. a pipeline running
+  `enable_res=0 && return_res_context=1` purely for the linear filter's
+  context) and never plays `aec_process`'s own returned audio, this skips the
+  limiter's `O(hop)` work and the final `O(hop)` emit copy — the linear
+  filter and RES/post cost are identical either way.
+- **One-hard-precondition rule**: a given `Aec` instance's calls fall into
+  two classes — "full" (`aec_process`, and `aec_process_capture` since it
+  calls `aec_process` internally) drives the output limiter and carries its
+  one-hop state (`limiter_gain`/`limiter_near_lag`/`has_limiter_lag`);
+  "context-only" (`aec_process_context`, and
+  `aec_process_context_shared_far` above) never touches it. The safety
+  boundary is one construct-or-reset EPOCH, not "construction decides for
+  the instance's whole lifetime": `aec_reset()` zeroes the limiter state, so
+  a caller may switch classes across a reset, but must never mix a
+  full-class call with a context-only-class call within the same epoch —
+  doing so desyncs the limiter state, producing an audible one-hop gain
+  discontinuity the next full-class call makes (not a crash). See
+  `aec_process_context`'s doc comment in `aec.h`/`aec.c` for the full rule,
+  and the [C user & integration guide](docs/c_user_and_integration_guide.md)
+  §3.3 for a worked example.
+- Wired into both pipelines: mono `audio_pipeline.c`'s non-`aec_only` path
+  and every lane of the 4ch `4aec_nr_res.c` wrapper now use
+  `aec_process_context`/`aec_process_context_shared_far` instead of
+  `aec_process` — mono's dead "seam unavailable" fallback branch (provably
+  unreachable once `enable_res=0/return_res_context=1` is set unconditionally
+  for every non-`aec_only` instance) was removed rather than kept "just in
+  case," and the 4ch wrapper's now-unused `lane_out` staging buffer was
+  removed (`FOUR_AEC_NR_RES_LAYOUT_VERSION` bumped).
+- Verified via `test/test_process_context.c` (74 checks, now wired into the
+  Makefile as `make test-process-context`): direct inspection proving
+  `aec_process_context` never touches limiter state (including the full
+  `limiter_near_lag` buffer contents, snapshotted post-construction, not
+  just the two scalar flags); byte-identical `AecResContext` — every field
+  a real caller reads, including `linear_hop`/`far_spec`/`res_gain`/
+  `saturation_level` — between `aec_process` and `aec_process_context`
+  across the 3 officially-contracted grids x shadow on/off x
+  `spatial_linear_context` on/off (the 4ch wrapper's exact per-lane config);
+  every populated field checked finite; and a reset-survival case.
+
 ## [Unreleased] — 2026-08-05 — `AecConfig.return_formed_output`: lightweight formed-hop seam
 
 - New `AecConfig` field `return_formed_output` (default `False`, no behavior

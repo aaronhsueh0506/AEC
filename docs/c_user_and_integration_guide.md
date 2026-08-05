@@ -137,21 +137,92 @@ misaligned base). Both paths produce **bit-identical** output on a given
 backend (verified across all 3 presets and FS / DT / NE scenarios; NE10 vs
 KISS output is not bit-identical to *each other* — a pre-existing, expected
 difference between the two FFT implementations). At BALANCED / 16 kHz /
-52 ms filter / shadow on / RES on / delay-est on the pool is **538,320 B
-(525.7 KB)** on the KISS backend (host/reference, `make`, default) or
-**534,192 B (521.7 KB)** on the NE10 backend (embedded, `make
+52 ms filter / shadow on / RES on / delay-est on the pool is **381,536 B
+(372.6 KB)** on the KISS backend (host/reference, `make`, default) or
+**380,928 B (372.0 KB)** on the NE10 backend (embedded, `make
 BACKEND=ne10`). The `aec_wav` CLI is heap-only; `test_static_aec.c` is
 the static-path harness.
 
 **`aec_destroy` is a genuine no-op for pool instances on both backends.**
-Everything `aec_init` places — including NE10's three R2C/C2R twiddle
-configs (vendored patch P0001, `audio_common/lib/ne10/VENDORED.md`) — lives
+Everything `aec_init` places — including NE10's ONE shared R2C/C2R twiddle
+config (vendored patch P0001, `audio_common/lib/ne10/VENDORED.md`; main
+filter, shadow filter, and the AEC3 post block all borrow the same
+`FftHandle` rather than each owning a private one) — lives
 inside `pool` and is included in `aec_get_mem_size`'s figure. The call is
 safe, idempotent, and optional before releasing/reusing the pool; strict
 init-to-destroy zero-heap is allocator-hook-verified by
 `test/test_zero_heap_aec.c` on both backends.
 Full design notes and per-module breakdown:
 [../c_impl/STATIC_MEMORY.md](../c_impl/STATIC_MEMORY.md).
+
+### 3.3 Context-only processing & the external post-filter seam
+
+For a caller that never plays `aec_process`'s own returned audio — e.g. a
+multi-stage pipeline that runs AEC(linear) → NR → RES externally and only
+ever reads `AecResContext` (see below) — `aec_process_context` skips the
+output limiter and the copy into an `out` buffer, since neither is needed:
+
+```c
+cfg.enable_res = 0;
+cfg.return_res_context = 1;   /* AEC3 post/RES block still RUNS and fills
+                                * AecResContext -- only its own suppression
+                                * output is not applied to the time signal */
+aec_create(&aec, &cfg);
+
+while (read_block(mic, ref, hop)) {
+    aec_process_context(&aec, mic, ref);   /* no `out` parameter at all */
+
+    AecResContext ctx;
+    aec_get_res_context(&aec, &ctx);
+    /* ctx.error_spec / ctx.echo_spec / ctx.near_spec / ctx.res_gain / ctx.r2 /
+     * ctx.comfort_noise / ctx.linear_hop / ctx.far_spec / ... — read them
+     * here, before the NEXT AEC processing call on this instance (they alias
+     * internal per-hop buffers, not a copy). */
+}
+```
+
+**Entry-point classes and the one-hard-precondition rule.** There are two
+classes of entry point on a given `Aec` instance:
+
+- **Full** — `aec_process` and `aec_process_capture` (the streaming API's
+  capture side calls `aec_process` internally) — drives the output limiter
+  and carries its one-hop state.
+- **Context-only** — `aec_process_context` and
+  `aec_process_context_shared_far` (below) — never touches the limiter.
+
+The safety boundary is **one construct-or-reset epoch**: the span from
+`aec_create`/`aec_init` (or the most recent `aec_reset`) up to the next
+`aec_reset`/`aec_destroy`. A caller *may* switch classes across a reset
+(`aec_reset` zeroes the limiter state), but must never call a full-class
+entry point and a context-only-class entry point within the *same* epoch —
+mixing desyncs the limiter's one-hop state and produces an audible one-hop
+gain discontinuity the next full-class call makes (not a crash). Every
+caller in this repo's pipelines picks one class at construction time and
+never switches.
+
+**Sharing one lane's far-end FFT across instances.** `aec_process_context_
+shared_far(aec, mic, ref, shared_far_spec)` lets a multi-instance caller
+(e.g. a 4-lane spatial wrapper, where every lane processes the identical
+far-end signal each hop) skip recomputing the far-end FFT on every lane but
+one:
+
+```c
+aec_process_context(&lane[0], mic0, ref);       /* lane 0 computes its own FFT */
+AecResContext ctx0;
+aec_get_res_context(&lane[0], &ctx0);
+for (int ch = 1; ch < 4; ++ch)
+    aec_process_context_shared_far(&lane[ch], mic[ch], ref, ctx0.far_spec);
+```
+
+`shared_far_spec` must be computed from the exact same far-end time-domain
+signal this call's own `ref` carries — `ref` is still required even when
+sharing (the OLA far-buffer history and every non-FFT use of the raw far
+signal are unaffected). Pass `NULL` to fall back to
+`aec_process_context`'s own behavior. `aec_far_fft_real_compute_count(aec)`
+is a read-only instrumentation counter (cumulative since construction or the
+last reset) for verifying a multi-lane caller's total far-FFT count actually
+dropped after switching lanes over to share one spectrum — not part of the
+audio path.
 
 ### Module ownership
 
@@ -256,8 +327,8 @@ These cause correctness failures (not just style issues):
 
 | | |
 |---|---|
-| Static pool, KISS (host/reference, `make`) | 538,320 B (525.7 KB) |
-| Static pool, NE10 (embedded, `make BACKEND=ne10`) | 534,192 B (521.7 KB, twiddle configs in-pool since P0001) |
+| Static pool, KISS (host/reference, `make`) | 381,536 B (372.6 KB) |
+| Static pool, NE10 (embedded, `make BACKEND=ne10`) | 380,928 B (372.0 KB, twiddle config in-pool since P0001) |
 | Compute / frame | 4 × 512-FFT + Kalman update (257 bins × 6 partitions) |
 | FFT | KISS FFT (float32; NE10 ARM-NEON opt-in) — ~float32 precision vs numpy `np.fft` |
 
