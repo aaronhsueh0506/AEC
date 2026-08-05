@@ -384,6 +384,25 @@ class AecConfig:
     # ── Mode / output ───────────────────────────────────────────────────
     mode: AecMode = AecMode.PBFDKF
     return_res_context: bool = False
+    # When True, process() additionally makes the pre-limiter formed linear
+    # hop readable via get_formed_output() -- the same value
+    # AecResContext.formed_output exposes, but without requiring
+    # return_res_context's full context. Runs the AEC3 UseRefinedOutput/
+    # FormLinearFilterOutput selection-and-crossfade step
+    # (_aec3_select_linear_filter_output()) and reads back its one-hop WOLA
+    # memory (_form_prev_output_time); does not feed back into filter tap
+    # adaptation. Cost depends on whether _aec3_post() already runs this hop
+    # (enable_res or return_res_context, either true): if so, this is a free
+    # readback of state that selector call already populated; if not
+    # (enable_res=False and return_res_context=False), this triggers that
+    # one selector call on its own -- energy sums, array construction, and
+    # one rFFT for the WOLA spectrum -- where the default path would have
+    # run none of it. Independent of return_res_context/enable_res: does not
+    # skip RES/CNG/suppression when those are on, and does not skip or alter
+    # the limiter itself (it still runs, updating its own state exactly as
+    # before) -- only the value a caller can additionally read changes.
+    # Default off so no existing caller pays for it.
+    return_formed_output: bool = False
     clear_filter_history: bool = False
 
     # ── Wall-clock timing provenance (INTERNAL, do not document as a

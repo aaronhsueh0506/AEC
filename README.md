@@ -207,6 +207,21 @@ gain so a downstream stage runs entirely in the frequency domain:
 | `res_gain`, `comfort_noise` | the AEC3 SuppressionGain + CNG this frame |
 | `erle_factor`, `dt_indicator`, `divergence`, `over_sub`, `erl_estimate` | per-frame telemetry |
 
+**Lightweight variant — just the formed linear hop, no RES/CNG context.** A caller that only
+wants `formed_output` (e.g. a dataset-gen tool building a "clean linear AEC error" channel,
+with no interest in `error_spec`/`res_gain`/telemetry) doesn't need to opt into the full
+`AecResContext` — `enable_res=False` with `return_res_context=True` still runs the entire
+`_aec3_post` chain (`ResidualEchoEstimator` + `SuppressionGain` + CNG) purely to populate a
+context most of whose fields go unread. Set `AecConfig.return_formed_output = True` instead:
+`aec.process()`'s return shape/type is **unchanged** (still just `linear_out`, or `(linear_out,
+AecResContext)` if `return_res_context` is *also* set), and after each `process()` call
+`aec.get_formed_output()` returns the same value `AecResContext.formed_output` would have —
+computed by running only the AEC3 `UseRefinedOutput`/`FormLinearFilterOutput` selection-and-
+crossfade step, not the heavier gain/CNG chain around it. Independent of `enable_res`: it
+does not skip RES/CNG when `enable_res=True`, and does not alter the limiter (still runs,
+still updates its own state) — only an additional value becomes readable. Byte-identical to
+`context.formed_output` in every configuration; see `python/test_formed_output_seam.py`.
+
 This seam is **already exercised** in the
 [Audio_ALG](https://github.com/aaronhsueh0506/Audio_ALG) integration repo, whose
 `AEC(linear) → echo-aware NR → RES` frequency-domain pipeline folds the residual-echo

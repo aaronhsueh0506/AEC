@@ -16,6 +16,33 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-05 — `AecConfig.return_formed_output`: lightweight formed-hop seam
+
+- New `AecConfig` field `return_formed_output` (default `False`, no behavior
+  change unless set). When `True`, `process()`'s return shape is unchanged,
+  and `aec.get_formed_output()` becomes available after each call, returning
+  the same value `AecResContext.formed_output` exposes — the pre-limiter,
+  shadow-selected/crossfaded, WOLA-formed linear residual — without requiring
+  `return_res_context=True`'s full `AecResContext` (and, when `enable_res=
+  False`, without running the rest of the `_aec3_post` gain/CNG chain that
+  context would otherwise pull in just to populate one field). Runs only the
+  AEC3 `UseRefinedOutput`/`FormLinearFilterOutput` selection-and-crossfade
+  step (`_aec3_select_linear_filter_output()`); does not feed back into
+  filter tap adaptation and does not alter the limiter (still runs, still
+  updates its own state) — only an additional read-only value becomes
+  available. Verified byte-identical to `context.formed_output` across
+  3 grids x shadow on/off, and algebraically identical to `result /
+  limiter_gain` (while refined stays selected) under a forced limiter
+  excursion — see `python/test_formed_output_seam.py`.
+- Motivated by `Audio_ALG/AIAEC/dataset_gen/linear_aec.py`'s `ch5` channel
+  (the dataset's linear-AEC-error reference signal), which previously read
+  the *limiter-processed* `process()` output instead of the pre-limiter
+  formed hop — a discontinuity whenever the limiter's gain excursion crossed
+  1.0 mid-utterance, visible as a vertical line in ch5's spectrogram. Fixed
+  by switching `LinearAecProcessor` to this seam (`LINEAR_AEC_CONTRACT_VERSION`
+  bumped `v1`->`v2`, which `rematerialize_linear_aec.py` uses to regenerate
+  any dataset sequence built against the old contract).
+
 ## [Unreleased] — 2026-08-04 — `AecConfig.spatial_linear_context`: skip an unused per-lane suppression gain
 
 - New `AecConfig` field `spatial_linear_context` (default 0, no behavior

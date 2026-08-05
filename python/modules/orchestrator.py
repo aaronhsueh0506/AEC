@@ -744,6 +744,9 @@ class AEC:
         # Buffer one hop of mic so the limiter compares against the SOURCE
         # frame for `final_output`, not the current frame. Sized lazily.
         self._limiter_near_lag = None
+        # Pre-limiter linear output, captured only when
+        # config.return_formed_output is set -- see get_formed_output().
+        self._formed_output = None
 
         # High-pass filter (DC blocker + low-freq removal)
         if self.config.enable_highpass:
@@ -944,6 +947,7 @@ class AEC:
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
         self._limiter_gain = 1.0
         self._limiter_near_lag = None
+        self._formed_output = None
         self._per_bin_mu_scale = None
         # Reset DT signals (now owned by DoubleTalkAnalyzer)
         self._dt_analyzer.reset()
@@ -2052,6 +2056,45 @@ class AEC:
             self._last_raw_output = raw_output  # save for diagnostic (time-domain echo power)
             final_output = raw_output.copy()
 
+            # return_formed_output: run ONLY the FORM step (AEC3
+            # UseRefinedOutput selection + FormLinearFilterOutput crossfade +
+            # WOLA memory update) that _aec3_post() would otherwise also run
+            # as part of its much heavier R2/SuppressionGain/CNG chain --
+            # _aec3_select_linear_filter_output() is already fully
+            # self-contained (only touches self._form_*/
+            # self._refined_filter_output_last_selected, none of which feed
+            # back into the main/shadow filter's own tap adaptation), so
+            # calling it here does not require or trigger any of that other
+            # machinery. Plain raw_output (no shadow selection at all) is
+            # NOT an equivalent substitute: when a shadow filter exists and
+            # AEC3's UseRefinedOutput picks the coarse/shadow candidate for
+            # some hops, raw_output silently misses that selection entirely.
+            #
+            # Only run this when _aec3_post() below won't ALSO run this hop
+            # (enable_res or return_res_context both false): _aec3_post()
+            # calls this exact same selector itself, and self._form_* is
+            # one-hop WOLA memory -- calling it twice in the same hop would
+            # have the second call read back what the first call just wrote
+            # as "previous hop", corrupting that memory for whichever path
+            # legitimately owns it this hop. See the mirrored capture right
+            # after the _aec3_post() call below for the enable_res/
+            # return_res_context=True case.
+            if (self.config.return_formed_output
+                    and not self.config.enable_res
+                    and not self.config.return_res_context):
+                _coarse_time_fo = (
+                    self._last_shadow_output_time
+                    if self.shadow_filter is not None
+                    and self._last_shadow_output_time is not None
+                    else None
+                )
+                self._aec3_select_linear_filter_output(
+                    e_refined_time=raw_output,
+                    near_end_block=near_end,
+                    e_coarse_time=_coarse_time_fo,
+                )
+                self._formed_output = self._form_prev_output_time.copy()
+
             # FilterMisadjustmentEstimator + ScaleFilter update. AEC3-parity
             # estimator tracks e²_refined / y² to detect over-adaptation.
             # Scale action affects subsequent frames only; current frame's
@@ -2218,6 +2261,15 @@ class AEC:
                 self._convergence.update_divergence(self.near_power, self.raw_error_power)
 
                 final_output = self._aec3_post(raw_output, near_end, far_end)
+
+                # Counterpart of the return_formed_output capture above, for
+                # the enable_res/return_res_context=True case: _aec3_post()
+                # just called this exact same FORM step internally (as part
+                # of building error_spec/_res_formed_output), so
+                # self._form_prev_output_time already reflects THIS hop --
+                # just copy it out, no second selector call.
+                if self.config.return_formed_output:
+                    self._formed_output = self._form_prev_output_time.copy()
 
                 # Populate AecResContext when requested. Gated by config so
                 # the default production path stays untouched.
@@ -2756,6 +2808,18 @@ class AEC:
     def get_diagnostics(self) -> dict:
         """Return per-frame diagnostic dict (latest values)."""
         return self._diag.copy()
+
+    def get_formed_output(self) -> np.ndarray:
+        """Return the pre-limiter linear output from the most recent
+        process() call. Requires config.return_formed_output=True; raises
+        if that wasn't set or process() hasn't run yet."""
+        if not self.config.return_formed_output:
+            raise ValueError(
+                "get_formed_output() requires config.return_formed_output=True"
+            )
+        if self._formed_output is None:
+            raise ValueError("get_formed_output() called before process()")
+        return self._formed_output
 
     def get_erle(self) -> float:
         """Return cumulative ERLE (full-segment average)."""
