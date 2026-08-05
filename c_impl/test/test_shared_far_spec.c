@@ -1,4 +1,4 @@
-/* test_shared_far_spec.c — Group 6 regression test.
+/* test_shared_far_spec.c — far-end-FFT sharing regression test.
  *
  * aec_process_context_shared_far() lets one instance borrow another's
  * already-computed far-end spectrum instead of running its own FFT, for

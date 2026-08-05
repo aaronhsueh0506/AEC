@@ -1,25 +1,35 @@
-/* test_process_context.c — Group 5 regression test.
+/* test_process_context.c — context-only processing regression test.
  *
  * aec_process() was split into a shared aec_process_core() (steps 1-17,
  * 19-20: linear filter + AEC3 post/RES block + power EMAs + convergence
  * detection) and two thin wrappers: aec_process() (core + output limiter +
- * emit) and the new aec_process_context() (core only). This test proves
- * two things a byte-equal WAV render alone cannot:
+ * emit) and aec_process_context() (core only). This test proves three
+ * things a byte-equal WAV render alone cannot:
  *
  *   1. aec_process_context() genuinely never touches the limiter's
- *      per-instance state (limiter_gain / has_limiter_lag / limiter_near_lag)
- *      -- proven by direct inspection of those Aec struct fields (this repo's
- *      existing convention, e.g. test_config_validation.c/test_lifecycle.c
- *      already read Aec fields directly; the struct is not opaque). A
- *      link-time call-counter (zero_heap_hook.c's technique) does not apply
- *      here since the limiter is inline code in the same translation unit,
- *      not a call to an external/opaque symbol -- direct state inspection is
- *      the equivalent, precedented mechanism for an internal code path.
- *   2. Every AecResContext field aec_process()'s caller could read is
- *      BYTE-IDENTICAL to what aec_process_context() produces on two
- *      separately-constructed, identically-configured, identically-fed
- *      instances -- proving the context-only entry point loses nothing the
- *      context exposes, it only skips the limiter + emit side effects.
+ *      per-instance state (limiter_gain / has_limiter_lag / limiter_near_lag,
+ *      including the full [hop_size] buffer contents, not just the two
+ *      scalar flags) -- proven by direct inspection of those Aec struct
+ *      fields (this repo's existing convention, e.g. test_config_validation.c/
+ *      test_lifecycle.c already read Aec fields directly; the struct is not
+ *      opaque). A link-time call-counter (zero_heap_hook.c's technique) does
+ *      not apply here since the limiter is inline code in the same
+ *      translation unit, not a call to an external/opaque symbol -- direct
+ *      state inspection is the equivalent, precedented mechanism for an
+ *      internal code path.
+ *   2. EVERY AecResContext field aec_process()'s caller could read --
+ *      including linear_hop, far_spec, res_gain, and saturation_level, not
+ *      just the subset this test originally covered -- is BYTE-IDENTICAL to
+ *      what aec_process_context() produces on two separately-constructed,
+ *      identically-configured, identically-fed instances, across the three
+ *      officially-contracted grids x shadow on/off x spatial_linear_context
+ *      on/off (the exact config the 4ch wrapper uses is
+ *      spatial_linear_context=1 -- untested before this pass) -- proving the
+ *      context-only entry point loses nothing the context exposes, it only
+ *      skips the limiter + emit side effects. Every populated field is also
+ *      checked finite (no NaN/Inf), not just equal to its sibling.
+ *   3. aec_reset() on a context-only instance restores it to the same clean
+ *      state a fresh aec_create() would produce.
  *
  * Build (standalone, from c_impl/ — mirrors test_lifecycle.c's documented
  * recipe):
@@ -31,6 +41,7 @@
  *       -o bin/test_process_context
  * Run:
  *   ./bin/test_process_context
+ * Also wired into the Makefile: `make test-process-context`.
  */
 #include "aec.h"
 #include <math.h>
@@ -53,10 +64,26 @@ static void context_only_config(AecConfig* cfg, int sample_rate) {
     cfg->return_res_context = 1;
 }
 
-/* fft_size=0 means "use the preset's default grid for this sample_rate". */
-static void context_only_config_grid(AecConfig* cfg, int sample_rate, int fft_size) {
+/* fft_size=0 means "use the preset's default grid for this sample_rate".
+ * spatial_linear_context mirrors the exact config the 4ch wrapper uses for
+ * every lane (enable_res=0/return_res_context=1/spatial_linear_context=1) --
+ * only valid on top of context_only_config's enable_res=0/return_res_
+ * context=1 base (aec_validate_config rejects any other combination). */
+static void context_only_config_grid(AecConfig* cfg, int sample_rate, int fft_size,
+                                      int spatial_linear_context) {
     context_only_config(cfg, sample_rate);
     if (fft_size > 0) cfg->fft_size = fft_size;
+    cfg->spatial_linear_context = spatial_linear_context;
+}
+
+static int all_finite(const float* buf, int n) {
+    for (int i = 0; i < n; ++i) if (!isfinite(buf[i])) return 0;
+    return 1;
+}
+
+static int all_finite_complex(const Complex* buf, int n) {
+    for (int i = 0; i < n; ++i) if (!isfinite(buf[i].r) || !isfinite(buf[i].i)) return 0;
+    return 1;
 }
 
 /* Deterministic pseudo-random hop generator (no <random.h> dependency,
@@ -87,6 +114,14 @@ static void test_context_only_never_touches_limiter_state(void) {
     CHECK(hop > 0 && hop <= 4096, "limiter-state test: valid hop size");
     if (hop <= 0 || hop > 4096) { aec_destroy(&ctx_only); aec_destroy(&full); return; }
 
+    /* Snapshot the raw limiter_near_lag buffer right after construction --
+     * compared byte-for-byte after the loop below, so this test doesn't need
+     * to assume any particular initial value (zeroed on aec_init's pool,
+     * uninitialized malloc garbage on aec_create's heap arena) -- only that
+     * aec_process_context() never writes to it, whatever it started as. */
+    float* near_lag_snapshot = (float*)malloc((size_t)hop * sizeof(float));
+    memcpy(near_lag_snapshot, ctx_only.limiter_near_lag, (size_t)hop * sizeof(float));
+
     float mic[4096], ref[4096], out[4096];
     g_rng_state = 0x2AEC5EEDu;
     for (int i = 0; i < 200; ++i) {
@@ -115,7 +150,14 @@ static void test_context_only_never_touches_limiter_state(void) {
     CHECK(full.limiter_gain < 0.95f,
           "aec_process()-only instance: the loud burst actually forced limiter_gain below 0.95 "
           "(otherwise this test cannot distinguish 'ran and had no effect' from 'never ran')");
+    CHECK(memcmp(ctx_only.limiter_near_lag, near_lag_snapshot, (size_t)hop * sizeof(float)) == 0,
+          "aec_process_context()-only instance: limiter_near_lag buffer byte-identical to its "
+          "post-construction snapshot after 200 hops (never written, not just the two scalar flags)");
+    CHECK(memcmp(full.limiter_near_lag, near_lag_snapshot, (size_t)hop * sizeof(float)) != 0,
+          "aec_process()-only instance: limiter_near_lag buffer DID change from its post-construction "
+          "snapshot (the limiter actually ran and wrote it, sanity check against a vacuous pass)");
 
+    free(near_lag_snapshot);
     aec_destroy(&ctx_only);
     aec_destroy(&full);
 }
@@ -123,19 +165,25 @@ static void test_context_only_never_touches_limiter_state(void) {
 /* Two separately-constructed, identically-configured, identically-fed
  * instances -- one driven exclusively by aec_process(), one exclusively by
  * aec_process_context() -- must expose byte-identical AecResContext on
- * every hop. Proves the context-only path loses no information the
- * context struct itself carries. */
-static void test_context_matches_full_process_context_shadow(
-        int sample_rate, int fft_size, int enable_shadow) {
+ * every hop, across every field a real caller (mono pipeline, 4ch wrapper)
+ * actually reads -- including linear_hop/far_spec/res_gain/saturation_level,
+ * and spatial_linear_context on/off (the 4ch wrapper's exact config).
+ * Proves the context-only path loses no information the context struct
+ * itself carries. Every populated field is also checked finite, since a
+ * byte-equal comparison of two NaN payloads would otherwise pass vacuously. */
+static void test_context_matches_full_process_context(
+        int sample_rate, int fft_size, int enable_shadow, int spatial_linear_context) {
     AecConfig cfg;
-    context_only_config_grid(&cfg, sample_rate, fft_size);
+    context_only_config_grid(&cfg, sample_rate, fft_size, spatial_linear_context);
     cfg.enable_shadow = enable_shadow;
 
     Aec via_full, via_context;
-    char label[128];
-    snprintf(label, sizeof(label), "context-parity sr=%d/fft=%d: aec_create(via_full)", sample_rate, cfg.fft_size);
+    char label[160];
+    snprintf(label, sizeof(label), "context-parity sr=%d/fft=%d/shadow=%d/spatial=%d: aec_create(via_full)",
+             sample_rate, cfg.fft_size, enable_shadow, spatial_linear_context);
     CHECK(aec_create(&via_full, &cfg) == 0, label);
-    snprintf(label, sizeof(label), "context-parity sr=%d/fft=%d: aec_create(via_context)", sample_rate, cfg.fft_size);
+    snprintf(label, sizeof(label), "context-parity sr=%d/fft=%d/shadow=%d/spatial=%d: aec_create(via_context)",
+             sample_rate, cfg.fft_size, enable_shadow, spatial_linear_context);
     CHECK(aec_create(&via_context, &cfg) == 0, label);
 
     int hop = aec_hop_size(&via_full);
@@ -144,6 +192,8 @@ static void test_context_matches_full_process_context_shadow(
     float mic[4096], ref[4096], out[4096];
     g_rng_state = 0x51DEC0DEu;
     int all_match = 1;
+    int all_finite_ok = 1;
+    int res_gain_null_as_expected = 1;
     for (int i = 0; i < 150; ++i) {
         float amp = (i >= 50 && i < 55) ? 0.8f : 0.05f; /* occasional burst too */
         for (int s = 0; s < hop; ++s) {
@@ -161,25 +211,56 @@ static void test_context_matches_full_process_context_shadow(
         if (ca.n_freqs != cb.n_freqs || ca.hop_size != cb.hop_size) { all_match = 0; break; }
         int K = ca.n_freqs;
         if (memcmp(ca.formed_hop, cb.formed_hop, (size_t)hop * sizeof(float)) != 0) { all_match = 0; break; }
+        if (memcmp(ca.linear_hop, cb.linear_hop, (size_t)hop * sizeof(float)) != 0) { all_match = 0; break; }
+        if (memcmp(ca.far_spec, cb.far_spec, (size_t)K * sizeof(Complex)) != 0) { all_match = 0; break; }
         if (memcmp(ca.error_spec, cb.error_spec, (size_t)K * sizeof(Complex)) != 0) { all_match = 0; break; }
         if (memcmp(ca.echo_spec, cb.echo_spec, (size_t)K * sizeof(Complex)) != 0) { all_match = 0; break; }
         if (memcmp(ca.near_spec, cb.near_spec, (size_t)K * sizeof(Complex)) != 0) { all_match = 0; break; }
         if (memcmp(ca.r2, cb.r2, (size_t)K * sizeof(float)) != 0) { all_match = 0; break; }
         if (memcmp(ca.comfort_noise, cb.comfort_noise, (size_t)K * sizeof(float)) != 0) { all_match = 0; break; }
+        /* res_gain is NULL on both sides under spatial_linear_context (this
+         * lane's G_res is never computed -- see AecResContext's doc
+         * comment); otherwise it must be byte-identical like every other
+         * per-bin field. */
+        if ((ca.res_gain == NULL) != (cb.res_gain == NULL)) { all_match = 0; break; }
+        if ((ca.res_gain == NULL) != (spatial_linear_context != 0)) res_gain_null_as_expected = 0;
+        if (ca.res_gain != NULL &&
+            memcmp(ca.res_gain, cb.res_gain, (size_t)K * sizeof(float)) != 0) { all_match = 0; break; }
         if (ca.far_power != cb.far_power || ca.erle_factor != cb.erle_factor
                 || ca.dt_indicator != cb.dt_indicator || ca.divergence != cb.divergence
+                || ca.saturation_level != cb.saturation_level
                 || ca.erl_estimate != cb.erl_estimate || ca.shadow_dt != cb.shadow_dt
                 || ca.is_stationary_dt != cb.is_stationary_dt
                 || ca.filter_converged != cb.filter_converged
                 || ca.filter_once_converged != cb.filter_once_converged
                 || ca.epc_active != cb.epc_active) { all_match = 0; break; }
+
+        if (!all_finite(ca.formed_hop, hop) || !all_finite(ca.linear_hop, hop)
+                || !all_finite_complex(ca.far_spec, K) || !all_finite_complex(ca.error_spec, K)
+                || !all_finite_complex(ca.echo_spec, K) || !all_finite_complex(ca.near_spec, K)
+                || !all_finite(ca.r2, K) || !all_finite(ca.comfort_noise, K)
+                || (ca.res_gain != NULL && !all_finite(ca.res_gain, K))
+                || !isfinite(ca.far_power) || !isfinite(ca.erle_factor)
+                || !isfinite(ca.dt_indicator) || !isfinite(ca.divergence)
+                || !isfinite(ca.saturation_level) || !isfinite(ca.erl_estimate)
+                || !isfinite(ca.shadow_dt)) { all_finite_ok = 0; break; }
     }
 
     snprintf(label, sizeof(label),
-             "context-parity sr=%d/fft=%d/shadow=%d: AecResContext byte-identical every hop, "
+             "context-parity sr=%d/fft=%d/shadow=%d/spatial=%d: AecResContext byte-identical every hop, "
              "aec_process() vs aec_process_context()",
-             sample_rate, cfg.fft_size, enable_shadow);
+             sample_rate, cfg.fft_size, enable_shadow, spatial_linear_context);
     CHECK(all_match, label);
+
+    snprintf(label, sizeof(label),
+             "context-parity sr=%d/fft=%d/shadow=%d/spatial=%d: every populated AecResContext field stays finite",
+             sample_rate, cfg.fft_size, enable_shadow, spatial_linear_context);
+    CHECK(all_finite_ok, label);
+
+    snprintf(label, sizeof(label),
+             "context-parity sr=%d/fft=%d/shadow=%d/spatial=%d: res_gain is NULL iff spatial_linear_context is set",
+             sample_rate, cfg.fft_size, enable_shadow, spatial_linear_context);
+    CHECK(res_gain_null_as_expected, label);
 
     aec_destroy(&via_full);
     aec_destroy(&via_context);
@@ -222,14 +303,20 @@ int main(void) {
     test_context_only_never_touches_limiter_state();
 
     /* The three officially-contracted grids (see AEC/CLAUDE.md /
-     * pipelines/README.md "Parameter Alignment"), each with shadow both on
-     * (preset default) and off. */
-    test_context_matches_full_process_context_shadow(16000, 0, 1);    /* 16k/256 default */
-    test_context_matches_full_process_context_shadow(16000, 0, 0);
-    test_context_matches_full_process_context_shadow(16000, 512, 1);  /* 16k/512 alt */
-    test_context_matches_full_process_context_shadow(16000, 512, 0);
-    test_context_matches_full_process_context_shadow(48000, 0, 1);    /* 48k/1024 */
-    test_context_matches_full_process_context_shadow(48000, 0, 0);
+     * pipelines/README.md "Parameter Alignment") x shadow on/off x
+     * spatial_linear_context on/off -- the last axis is the exact config
+     * the 4ch wrapper uses for every lane (enable_res=0/return_res_
+     * context=1/spatial_linear_context=1), previously untested here. */
+    static const int grids[][1] = { {0}, {512}, {0} };
+    static const int rates[]    = { 16000, 16000, 48000 };
+    for (int g = 0; g < 3; ++g) {
+        for (int shadow = 0; shadow <= 1; ++shadow) {
+            for (int spatial = 0; spatial <= 1; ++spatial) {
+                test_context_matches_full_process_context(
+                        rates[g], grids[g][0], shadow, spatial);
+            }
+        }
+    }
 
     test_context_survives_reset();
 
