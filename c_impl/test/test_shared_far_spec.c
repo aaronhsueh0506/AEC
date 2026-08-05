@@ -23,6 +23,13 @@
  *   3. aec_reset() on an instance that has an unconsumed
  *      precomputed_far_spec pointer pending does not leave a stale pointer
  *      behind (the pbfdaf_reset() defensive-clear fix).
+ *   4. aec_far_fft_real_compute_count() actually reflects "did this
+ *      instance run its own far FFT this hop" -- it increments once per
+ *      hop on a plain aec_process_context() instance, and stays flat
+ *      forever on an aec_process_context_shared_far()-only instance. This
+ *      is the counter a multi-lane caller (4aec_nr_res.c) uses to prove
+ *      its own total per-hop far-FFT count actually dropped after
+ *      switching lanes 1-3 over to share lane 0's spectrum.
  *
  * Build (standalone, from c_impl/ — mirrors test_process_context.c's
  * documented recipe):
@@ -267,6 +274,63 @@ static void test_reset_after_shared_far_is_clean(void) {
     aec_destroy(&a);
 }
 
+/* aec_far_fft_real_compute_count(): the counter a multi-lane caller uses
+ * to prove its total per-hop far-FFT count dropped. Proves both halves:
+ * a plain aec_process_context() instance increments by exactly 1 every
+ * hop, and an aec_process_context_shared_far()-only instance (given a
+ * valid spectrum every hop) never increments at all. */
+static void test_far_fft_counter_reflects_actual_computation(void) {
+    AecConfig cfg;
+    context_only_config(&cfg, 16000, 0, 1);
+
+    Aec computing, borrowing;
+    CHECK(aec_create(&computing, &cfg) == 0, "counter test: aec_create(computing)");
+    CHECK(aec_create(&borrowing, &cfg) == 0, "counter test: aec_create(borrowing)");
+
+    int hop = aec_hop_size(&computing);
+    if (hop <= 0 || hop > 4096) { aec_destroy(&computing); aec_destroy(&borrowing); return; }
+
+    CHECK(aec_far_fft_real_compute_count(&computing) == 0,
+          "counter test: starts at 0 on a freshly created instance");
+    CHECK(aec_far_fft_real_compute_count(&borrowing) == 0,
+          "counter test: starts at 0 on a freshly created instance (borrowing side too)");
+
+    float mic_a[4096], mic_b[4096], ref[4096];
+    g_rng_state = 0xF17C0000u;
+    const int n_hops = 25;
+    for (int i = 0; i < n_hops; ++i) {
+        for (int s = 0; s < hop; ++s) {
+            ref[s] = rng_uniform(0.3f);
+            mic_a[s] = rng_uniform(0.3f) + 0.4f * ref[s];
+            mic_b[s] = rng_uniform(0.3f) + 0.2f * ref[s];
+        }
+        aec_process_context(&computing, mic_a, ref);
+        AecResContext ctx;
+        aec_get_res_context(&computing, &ctx);
+        aec_process_context_shared_far(&borrowing, mic_b, ref, ctx.far_spec);
+    }
+
+    char label[128];
+    snprintf(label, sizeof(label),
+             "counter test: plain aec_process_context() increments by exactly %d after %d hops",
+             n_hops, n_hops);
+    CHECK(aec_far_fft_real_compute_count(&computing) == n_hops, label);
+    snprintf(label, sizeof(label),
+             "counter test: aec_process_context_shared_far()-only instance stays at 0 after %d hops",
+             n_hops);
+    CHECK(aec_far_fft_real_compute_count(&borrowing) == 0, label);
+
+    /* aec_reset() zeroes the counter (matches frame_count's own reset
+     * convention) -- not load-bearing for the multi-lane use case, but a
+     * caller reading this across a reset should not see a stale count. */
+    aec_reset(&computing);
+    CHECK(aec_far_fft_real_compute_count(&computing) == 0,
+          "counter test: aec_reset() zeroes the counter");
+
+    aec_destroy(&computing);
+    aec_destroy(&borrowing);
+}
+
 int main(void) {
     /* Three officially-contracted grids x shadow on/off. */
     test_borrow_matches_compute(16000, 0, 1);    /* 16k/256 default */
@@ -278,6 +342,7 @@ int main(void) {
 
     test_wrong_shared_spec_changes_result();
     test_reset_after_shared_far_is_clean();
+    test_far_fft_counter_reflects_actual_computation();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     if (g_fail == 0) printf("PASS\n");

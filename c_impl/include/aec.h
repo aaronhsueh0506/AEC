@@ -507,6 +507,19 @@ void aec_process_context_shared_far(
         Aec* a, const float* mic, const float* ref,
         const Complex* shared_far_spec);
 
+/* Group 6 instrumentation, read-only: how many hops (cumulative since
+ * construction or the last aec_reset()) this instance has actually run
+ * its own far-end FFT, as opposed to borrowing one -- either via the
+ * internal shadow->main dedup or an external
+ * aec_process_context_shared_far() caller. A lane driven exclusively
+ * through aec_process_context_shared_far() with a valid spectrum every
+ * hop stays at 0 forever; a lane computing its own (aec_process() /
+ * aec_process_context()) increments by 1 every hop. Intended for tests/
+ * instrumentation proving a multi-lane caller's total far-FFT count
+ * actually dropped after switching lanes over to share one spectrum --
+ * not part of the audio path, has no effect on any processing. */
+long aec_far_fft_real_compute_count(const Aec* a);
+
 /* ── Streaming API (real-time async render/capture) ───────────────────────
  * For deployments where the far-end (render) and mic (capture) arrive on
  * separate calls / threads and not necessarily 1:1. aec_analyze_render()

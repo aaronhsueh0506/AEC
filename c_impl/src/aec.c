@@ -1427,6 +1427,18 @@ void aec_destroy(Aec* a) {
 
 int aec_hop_size(const Aec* a) { return a->hop_size; }
 
+/* Group 6 instrumentation: how many times THIS instance has actually run
+ * its own far-end rfft (not borrowed one, whether from its own internal
+ * shadow->main dedup or an external aec_process_context_shared_far()
+ * caller), summed across whichever of shadow/main filter is the one that
+ * can run it fresh this hop. At most one of the two ever increments per
+ * hop (shadow's own internal dedup already guaranteed that before Group
+ * 6) -- see pbfdaf_frontend()'s far_fft_real_compute_count comment. */
+long aec_far_fft_real_compute_count(const Aec* a) {
+    return a->main_filter.base.far_fft_real_compute_count +
+           (a->has_shadow ? a->shadow_filter.far_fft_real_compute_count : 0);
+}
+
 void aec_reset(Aec* a) {
     if (a->hp_mic) hpf_reset(a->hp_mic);
     if (a->has_sat) { saturation_reset(&a->sat_ref); saturation_reset(&a->sat_mic); }

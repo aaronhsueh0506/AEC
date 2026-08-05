@@ -82,6 +82,17 @@ typedef struct PBFDAF {
      * Both are byte-equal. Borrowed pointer — not pool-owned. */
     const Complex* precomputed_far_spec;
     int      lightweight;
+    /* Group 6 instrumentation: incremented exactly once per hop this
+     * filter ACTUALLY runs a far-end rfft (the else-branch in
+     * pbfdaf_frontend() below) -- i.e. NOT when precomputed_far_spec was
+     * set (internal shadow->main borrow OR an external caller's
+     * aec_process_context_shared_far()). Never read internally; exposed
+     * read-only via aec_far_fft_real_compute_count() for tests/instrumentation
+     * that need to prove a multi-lane caller's far-FFT count actually
+     * dropped after switching lanes over to the shared-spectrum entry
+     * point, without conflating it with the near/error/W-tap FFTs that
+     * also flow through the same underlying fft_forward_scratch(). */
+    long     far_fft_real_compute_count;
 
     /* AEC3 round-robin TD constraint (adaptive_fir_filter.cc:686-689): constrain
      * ONE partition per hop (cycling `partition_to_constrain`) instead of all

@@ -136,6 +136,7 @@ static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu,
     p->last_s_max_abs = 0.0f;
     p->lightweight = 0;
     p->precomputed_far_spec = NULL;
+    p->far_fft_real_compute_count = 0;
     p->constraint_round_robin = 0;
     p->partition_to_constrain = 0;
 }
@@ -387,6 +388,7 @@ void pbfdaf_reset(PBFDAF* p) {
      * that possibility entirely rather than relying on every caller to
      * get the ordering right on its own. */
     p->precomputed_far_spec = NULL;
+    p->far_fft_real_compute_count = 0;
 }
 
 /* forward rfft of an input shorter than fft_size (zero-pad). */
@@ -429,6 +431,7 @@ static float pbfdaf_frontend(PBFDAF* p,
         p->precomputed_far_spec = NULL;
     } else {
         rfft_padded(p, p->far_buffer, blk, p->far_spec);
+        p->far_fft_real_compute_count++;
     }
 
     int curr_p = p->partition_idx;
