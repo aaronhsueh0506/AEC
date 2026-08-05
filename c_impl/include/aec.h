@@ -482,34 +482,45 @@ void aec_process(Aec* a, const float* mic, const float* ref, float* out);
  * formed_output / etc), never aec_process()'s own returned audio. Cheaper
  * per-hop than aec_process() by exactly the limiter's O(hop) work plus one
  * O(hop) memcpy; the linear filter and RES/post cost is identical either
- * way. See aec.c's aec_process_context() doc comment for the one hard
- * precondition: a single Aec instance must use ONLY aec_process() or ONLY
- * aec_process_context() for its whole lifetime, never both interleaved
- * (mixing desyncs the limiter's one-hop state, producing an audible gain
- * discontinuity the next aec_process() call). */
+ * way.
+ *
+ * PRECONDITION (caller's responsibility, not checked here): see aec.c's
+ * doc comment on this function for the full rule. Summary -- there are two
+ * CLASSES of entry point: "full" (aec_process(), and aec_process_capture()
+ * since it calls aec_process() internally) drives the output limiter;
+ * "context-only" (this function, and aec_process_context_shared_far())
+ * never does. The safety boundary is one construct-or-reset EPOCH (from
+ * aec_create()/aec_init(), or the most recent aec_reset(), up to the next
+ * aec_reset()/aec_destroy()) -- NOT "construction decides for the whole
+ * lifetime": a caller MAY switch classes across a reset, but must never
+ * call a full-class entry point (aec_process_capture() included) and a
+ * context-only-class entry point within the same epoch. Mixing classes
+ * within one epoch desyncs the limiter's one-hop state, producing an
+ * audible gain discontinuity the next full-class call makes. */
 void aec_process_context(Aec* a, const float* mic, const float* ref);
 
-/* Group 6: like aec_process_context(), but shared_far_spec (non-NULL,
- * length n_freqs) lets this instance skip its own far-end FFT and borrow
- * one an external caller already computed -- for multi-instance callers
- * (e.g. a 4-lane wrapper) whose instances all see the identical far-end
- * signal every hop. shared_far_spec must be exactly the value the
+/* Shared-far-end-FFT variant of aec_process_context(): shared_far_spec
+ * (non-NULL, length n_freqs) lets this instance skip its own far-end FFT
+ * and borrow one an external caller already computed -- for multi-instance
+ * callers (e.g. a 4-lane wrapper) whose instances all see the identical
+ * far-end signal every hop. shared_far_spec must be exactly the value the
  * computing instance's aec_get_res_context() would return this same hop,
  * computed from the SAME far-end time-domain signal this call's own `ref`
- * carries -- `ref` is still required even when shared_far_spec is
- * supplied (the OLA far-buffer history and every non-FFT use of the raw
- * far signal are unaffected by Group 6). Pass NULL to fall back to
- * aec_process_context()'s own behavior (compute this instance's own
- * FFT) -- see aec.c's doc comment on this function for the full
- * precondition and aec_process_context()'s doc comment for the shared
- * one-entry-point-per-instance-lifetime rule. */
+ * carries -- `ref` is still required even when shared_far_spec is supplied
+ * (the OLA far-buffer history and every non-FFT use of the raw far signal
+ * are unaffected by this sharing). Pass NULL to fall back to
+ * aec_process_context()'s own behavior (compute this instance's own FFT)
+ * -- see aec.c's doc comment on this function for the full precondition.
+ * Same construct-or-reset-epoch rule as aec_process_context() above: this
+ * is a context-only-class entry point, never mixed with aec_process()/
+ * aec_process_capture() within the same epoch. */
 void aec_process_context_shared_far(
         Aec* a, const float* mic, const float* ref,
         const Complex* shared_far_spec);
 
-/* Group 6 instrumentation, read-only: how many hops (cumulative since
- * construction or the last aec_reset()) this instance has actually run
- * its own far-end FFT, as opposed to borrowing one -- either via the
+/* Shared-far-end-FFT instrumentation, read-only: how many hops (cumulative
+ * since construction or the last aec_reset()) this instance has actually
+ * run its own far-end FFT, as opposed to borrowing one -- either via the
  * internal shadow->main dedup or an external
  * aec_process_context_shared_far() caller. A lane driven exclusively
  * through aec_process_context_shared_far() with a valid spectrum every
@@ -549,6 +560,14 @@ long aec_far_fft_real_compute_count(const Aec* a);
  *   - mixing aec_process_capture() with the offline aec_process() on the
  *     same instance concurrently with the streaming pair.
  *
+ * aec_process_capture() calls aec_process() internally, so it is a "full"
+ * class entry point for the construct-or-reset-epoch rule documented on
+ * aec_process_context() above: an instance driven through
+ * aec_process_capture() must never also call aec_process_context() /
+ * aec_process_context_shared_far() within the same epoch (this is a
+ * limiter-state-consistency concern, separate from the threading contract
+ * above).
+ *
  * Lockstep equivalence: calling aec_analyze_render(ref) immediately followed
  * by aec_process_capture(mic, out) from a SINGLE thread (the degenerate,
  * always-supported case of the contract above) yields byte-identical output
@@ -587,8 +606,12 @@ typedef struct AecResContext {
      * SuppressionGain G_res(f), amplitude [0..1]. r2 = residual-echo PSD R²(f)
      * and comfort_noise = CNG N²(f), BOTH int16²-scaled (divide by 32768² to
      * reach the |E|² audio-power scale, as run_res does). All length n_freqs.
-     * The pointers alias the AEC's internal per-hop buffers — read before the
-     * next aec_process() call. */
+     * The pointers alias the AEC's internal per-hop buffers — read before
+     * the next AEC processing call on this instance, whichever entry point
+     * it is (aec_process(), aec_process_context(),
+     * aec_process_context_shared_far(), or aec_process_capture()): every
+     * one of them re-runs aec_process_core() and overwrites these buffers
+     * in place, not just aec_process() specifically. */
     const Complex* error_spec;     /* reconstructing WOLA linear E(f), audio scale */
     const float*   res_gain;       /* AEC3 G_res(f), amplitude [0..1]; NULL when
                                      * AecConfig.spatial_linear_context is set

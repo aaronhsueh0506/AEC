@@ -650,12 +650,13 @@ int aec_create(Aec* a, const AecConfig* cfg) {
     memset(a, 0, sizeof(*a));
     if (aec_carve(a, arena, cfg, hop, blk, fft, K, np, buf_samp, fcap,
                   /*is_static=*/0) != 0) {
-        /* F04: a nested FFT allocation failed (OOM), or (R08 belt-and-
-         * braces, practically unreachable post-validator-fix) hpf_init()
-         * rejected its params, partway through the carve. aec_carve()
-         * already tore down whatever nested FFT handles (main filter /
-         * shadow filter / post_fft) it had brought up before returning, so
-         * the arena itself is the only thing left to release. */
+        /* F04: the shared FFT allocation failed (OOM -- main filter /
+         * shadow filter only ever borrow it, never own one), or (R08
+         * belt-and-braces, practically unreachable post-validator-fix)
+         * hpf_init() rejected its params, partway through the carve.
+         * aec_carve() already tore down the shared handle if it had brought
+         * it up before returning, so the arena itself is the only thing left
+         * to release. */
         free(arena);
         memset(a, 0, sizeof(*a));
         return -1;
@@ -734,6 +735,13 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
     t = ck_field_size(t, ck_mul_size((size_t)fcap, (size_t)hop), sizeof(float));   /* render_fifo */
     t = ck_field_size(t, (size_t)hop, sizeof(float));  /* fifo_zero_ref (F09 Variant A' underrun ref) */
     t = ck_field_size(t, (size_t)(K - 2 > 0 ? K - 2 : 1), sizeof(int64_t));
+    /* Shared FFT handle: ONE FftHandle for the whole instance (main filter,
+     * shadow filter, and aec3_post all borrow it -- see aec_carve()) instead
+     * of each carving/owning its own. Carved here, before the main/shadow
+     * filters, since both now require an already-constructed handle to
+     * borrow at their own init time; kf_sz/af_sz below no longer include a
+     * nested-FFT term (pbfdaf_get_mem_size never does, post-Group-7). */
+    t = ck_add_size(t, fft_get_mem_size(fft));
     {
         size_t kf_sz = pbfdkf_get_mem_size(blk, np, hop);
         if (kf_sz == 0) return 0;   /* sub-config rejected its own inputs */
@@ -747,7 +755,6 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
     /* RenderActivityDetector pairwise-sum scratch (M3: de-stacked from a
      * fixed `float[1024]` local; ceil(hop/8) blocks -- see detectors.c). */
     t = ck_field_size(t, (size_t)((hop + 7) / 8), sizeof(float));
-    t = ck_add_size(t, fft_get_mem_size(fft));
     /* aec3_post (21) */
     t = ck_field_size_reps(t, Kz, sizeof(float), 6);   /* avg_rev y2s n2 n2i sye_re sye_im */
     t = ck_field_size_reps(t, Kz, sizeof(float), 2);   /* syy see */
@@ -843,8 +850,10 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
  * the two paths' only remaining difference, read by aec_destroy(): 1 means
  * the caller owns the memory and aec_destroy() must not free it.
  *
- * Returns 0 on success, -1 iff a nested FFT allocation failed (main filter's,
- * shadow filter's, or post_fft's), or iff the mic-path HPF's hpf_init()
+ * Returns 0 on success, -1 iff the shared FFT allocation failed (one
+ * FftHandle for the whole instance -- main filter and shadow filter only
+ * ever borrow it, they no longer carve/own a private one), or iff the
+ * mic-path HPF's hpf_init()
  * rejected its (cutoff_hz, sample_rate) pair (R08 belt-and-braces: with
  * aec_validate_config's highpass_cutoff_hz check now mirroring
  * hpf_params_valid exactly, every {enable_highpass, cutoff_hz, sample_rate}
@@ -965,11 +974,32 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     size_t rsa_sz = ALIGN16((size_t)(K - 2 > 0 ? K - 2 : 1) * sizeof(int64_t));
     memset(ptr, 0, rsa_sz); ptr += rsa_sz;
 
+    /* Shared FFT handle. ONE FftHandle for the whole instance,
+     * carved and constructed first so the main filter, shadow filter, and
+     * aec3_post all have something to borrow at their own init time below --
+     * they never carve/own a private handle anymore (see pbfdaf_init_static's
+     * doc comment). Safe because all three run at the identical fft_size
+     * (this same `fft` local, per-instance -- see aec_derive_dims above) and
+     * fully sequentially: shadow runs to completion, then main, then
+     * aec3_post, never interleaved, on this codebase's single-threaded
+     * synchronous call path. This is also now the ONLY nested-FFT allocation
+     * in this whole carve, so it is also the only failure this function can
+     * unwind for that reason -- nothing has been constructed yet that owns
+     * an external (NE10 twiddle-config) allocation, so a failure here needs
+     * no unwind at all. */
+    size_t fft_sz = fft_get_mem_size(fft);
+    a->post_fft = fft_init(ptr, fft_sz, fft);
+    if (!a->post_fft) return -1;   /* F04: fft_init failed (OOM) -- nothing to unwind yet */
+    ptr += fft_sz;
+
     /* Main filter (PBFDKF, arena/pool-carved on BOTH heap and static paths
-     * since the F03 arena-fication below aec_create()). */
+     * since the F03 arena-fication below aec_create()). Borrows a->post_fft
+     * (the shared FFT handle above) rather than owning its own handle. */
     size_t kf_sz = pbfdkf_get_mem_size(blk, np, hop);
-    if (pbfdkf_init_static(&a->main_filter, ptr, kf_sz, blk, np, cfg->mu, cfg->delta, hop, cfg->sample_rate) != 0)
-        return -1;   /* F04: nested fft_init failed (OOM) -- nothing to unwind yet */
+    if (pbfdkf_init_static(&a->main_filter, ptr, kf_sz, blk, np, cfg->mu, cfg->delta, hop, cfg->sample_rate, a->post_fft) != 0) {
+        fft_destroy(a->post_fft); a->post_fft = NULL;
+        return -1;
+    }
     for (int k = 0; k < K; ++k) {
         a->main_filter.Q_high[k] = cfg->kalman_q_high;
         a->main_filter.Q_low[k]  = cfg->kalman_q_low;
@@ -979,14 +1009,18 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->main_filter.base.constraint_round_robin = 1;  /* AEC3 round-robin (main) */
     ptr += kf_sz;
 
-    /* Shadow filter (PBFDAF, arena/pool-carved on BOTH paths since F03). */
+    /* Shadow filter (PBFDAF, arena/pool-carved on BOTH paths since F03).
+     * Borrows a->post_fft too -- same shared handle the main filter just
+     * borrowed above. */
     if (cfg->enable_shadow) {
         size_t af_sz = pbfdaf_get_mem_size(blk, np, hop, 1);
-        if (pbfdaf_init_static(&a->shadow_filter, ptr, af_sz, blk, np, cfg->shadow_mu_nlms, cfg->delta, hop, 1, cfg->sample_rate) != 0) {
-            /* F04: unwind the main filter's nested fft (already brought up
-             * above -- it owns a real allocation outside the pool/arena on
-             * the NE10 backend) before reporting failure. */
+        if (pbfdaf_init_static(&a->shadow_filter, ptr, af_sz, blk, np, cfg->shadow_mu_nlms, cfg->delta, hop, 1, cfg->sample_rate, a->post_fft) != 0) {
+            /* Neither main filter nor the shared handle owns anything
+             * needing unwind-order care beyond the usual pbfdkf_free/
+             * fft_destroy pair -- main filter's pbfdaf_free() is now a pure
+             * pointer-drop (it never owned the fft it borrowed). */
             pbfdkf_free(&a->main_filter);
+            fft_destroy(a->post_fft); a->post_fft = NULL;
             return -1;
         }
         a->shadow_filter.poor_excitation_counter = a->main_filter.base.poor_excitation_counter;
@@ -1009,21 +1043,8 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     shadow_copy_init(&a->regime, SC_GATE_ENERGY, 0.65, 3, a->cfg.epc_hangover);
     rsa_init(&a->rsa, a->rsa_counters, K, np);
 
-    /* FFT handle */
-    size_t fft_sz = fft_get_mem_size(fft);
-    a->post_fft = fft_init(ptr, fft_sz, fft);
-    if (!a->post_fft) {
-        /* F04: nested fft_init failed (OOM) -- unwind whatever nested FFT
-         * handles came up earlier in this same carve (each owns a real
-         * allocation outside the pool/arena on the NE10 backend) before
-         * reporting failure. */
-        if (a->has_shadow) pbfdaf_free(&a->shadow_filter);
-        pbfdkf_free(&a->main_filter);
-        return -1;
-    }
-    ptr += fft_sz;
-
-    /* aec3_post backing */
+    /* aec3_post backing (reuses a->post_fft, the shared handle constructed
+     * above -- no separate carve/init here anymore). */
     {
         Aec3PostConfig pcfg;
         aec3_post_config_defaults(&pcfg);
@@ -1396,17 +1417,20 @@ Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
 void aec_destroy(Aec* a) {
     if (!a) return;
     /* Release library-internal FFT allocations on BOTH the heap-arena and
-     * static-pool paths. main_filter / shadow_filter are ALWAYS arena/pool-
-     * carved via *_init_static since the F03 arena-fication (on both
-     * paths), so pbfdkf_free/pbfdaf_free always take their "static" branch:
-     * it tears down only the nested FFT's NE10 twiddle config (an
-     * allocation that lives outside the pool/arena either way) and frees
-     * nothing else. Same story for post_fft. fft_destroy() is a no-op for a
-     * NULL handle and (KISS backend) for a pool-owned handle, so this is
-     * safe pre- or post- pool/arena teardown. Each handle is NULLed right
-     * after so a second aec_destroy() call on the same instance (see
-     * test_lifecycle.c) cannot dereference a pointer that now lives in
-     * freed memory instead of silently corrupting/crashing. */
+     * static-pool paths. a->post_fft is the SOLE FftHandle for
+     * the whole instance -- main_filter / shadow_filter only ever borrow it
+     * (see pbfdaf_init_static's doc comment), so their pbfdkf_free/
+     * pbfdaf_free calls below are now pure pointer-drops, not destroys.
+     * Destroying a->post_fft here is therefore the ONLY place that tears
+     * down the nested FFT's NE10 twiddle config (an allocation that lives
+     * outside the pool/arena either way); calling it a second time (e.g. via
+     * a stray destroy inside main_filter/shadow_filter) would double-free
+     * that allocation, which is exactly what borrowing-not-owning avoids.
+     * fft_destroy() is a no-op for a NULL handle and (KISS backend) for a
+     * pool-owned handle, so this is safe pre- or post- pool/arena teardown.
+     * post_fft is NULLed right after so a second aec_destroy() call on the
+     * same instance (see test_lifecycle.c) cannot dereference a pointer that
+     * now lives in freed memory instead of silently corrupting/crashing. */
     if (a->post_fft) { fft_destroy(a->post_fft); a->post_fft = NULL; }
     if (a->hp_mic) { hpf_destroy(a->hp_mic); a->hp_mic = NULL; }
     pbfdkf_free(&a->main_filter);
@@ -1427,13 +1451,14 @@ void aec_destroy(Aec* a) {
 
 int aec_hop_size(const Aec* a) { return a->hop_size; }
 
-/* Group 6 instrumentation: how many times THIS instance has actually run
- * its own far-end rfft (not borrowed one, whether from its own internal
- * shadow->main dedup or an external aec_process_context_shared_far()
+/* Far-end-FFT-sharing instrumentation: how many times THIS instance has
+ * actually run its own far-end rfft (not borrowed one, whether from its own
+ * internal shadow->main dedup or an external aec_process_context_shared_far()
  * caller), summed across whichever of shadow/main filter is the one that
  * can run it fresh this hop. At most one of the two ever increments per
- * hop (shadow's own internal dedup already guaranteed that before Group
- * 6) -- see pbfdaf_frontend()'s far_fft_real_compute_count comment. */
+ * hop (shadow's own internal dedup already guaranteed that before this
+ * sharing feature existed) -- see pbfdaf_frontend()'s
+ * far_fft_real_compute_count comment. */
 long aec_far_fft_real_compute_count(const Aec* a) {
     return a->main_filter.base.far_fft_real_compute_count +
            (a->has_shadow ? a->shadow_filter.far_fft_real_compute_count : 0);
@@ -1585,15 +1610,17 @@ static float aec_erle_ring_max_last15(const Aec* a) {
 
 /* ───────────────────────── process ─────────────────────────────────────── */
 
-/* Group 5: everything aec_process()/aec_process_context() share -- steps 1-17
+/* The context-only split's shared core: everything aec_process()/
+ * aec_process_context() share -- steps 1-17
  * (linear filter + AEC3 post/RES block, writing a->final_out) and steps 19-20
  * (power EMAs + convergence detection, which the NEXT hop's step-17 logic
  * depends on and therefore can never be skipped by either caller). Does NOT
  * run step 18 (output limiter) or step 21 (emit into a caller `out` buffer)
  * -- those are caller-specific and live in the two thin wrappers below.
  *
- * Group 6: shared_far_spec (NULL for the normal aec_process()/
- * aec_process_context() path -- byte-identical to before Group 6) lets a
+ * Far-end-FFT sharing: shared_far_spec (NULL for the normal aec_process()/
+ * aec_process_context() path -- byte-identical to before this sharing
+ * feature existed) lets a
  * caller supply an externally-computed far-end spectrum instead of having
  * this instance compute its own via FFT, for multi-instance callers (e.g.
  * a 4-lane wrapper) whose lanes all consume the IDENTICAL far-end signal
@@ -1606,8 +1633,8 @@ static float aec_erle_ring_max_last15(const Aec* a) {
  * shared_far_spec is supplied: pbfdaf_frontend() unconditionally updates
  * far_buffer (the OLA history) from it, and every non-FFT use of the raw
  * time-domain far signal in this function (saturation detection, delay
- * estimation, mu_scale, ...) is unaffected by Group 6 and still needs
- * it. */
+ * estimation, mu_scale, ...) is unaffected by far-end-FFT sharing and
+ * still needs it. */
 static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
                               const Complex* shared_far_spec) {
     const int hop = a->hop_size, K = a->n_freqs, N = a->n_partitions;
@@ -1925,7 +1952,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         far_excited = (far_hop_mean_sq > 1e-4f);
         int saturation_safe_pre = (a->saturation_level < 0.5f);
         float shadow_mu_pre = (far_excited && saturation_safe_pre) ? 1.0f : 0.1f;
-        /* Group 6: borrow the caller-supplied spectrum instead of computing
+        /* Borrow the caller-supplied spectrum instead of computing
          * this instance's own far FFT. NULL (the normal aec_process()/
          * aec_process_context() path) is a pure no-op here -- shadow's
          * precomputed_far_spec is already NULL from init/reset, so this
@@ -1956,9 +1983,9 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
      * far_buffer (lockstep shift + paired reset), so reuse its far_spec instead
      * of recomputing — byte-equal, saves 1 FFT/hop. One-shot (frontend clears).
      * When there's no shadow to borrow from, fall through to shared_far_spec
-     * (Group 6) instead of unconditionally computing a fresh FFT -- NULL in
-     * the normal path, so this is unchanged from before Group 6 whenever no
-     * caller-supplied spectrum exists. */
+     * instead of unconditionally computing a fresh FFT -- NULL in
+     * the normal path, so this is unchanged from before far-end-FFT sharing
+     * existed whenever no caller-supplied spectrum exists. */
     a->main_filter.base.precomputed_far_spec =
         a->has_shadow ? a->shadow_filter.far_spec : shared_far_spec;
     float main_mu_scalar = a->regime.main_paused ? 0.0f : mu_scalar;
@@ -2556,21 +2583,32 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
  * and final-copy in aec_process() are pure waste for them.
  *
  * PRECONDITION (caller's responsibility, not checked here -- see aec.c's
- * "no runtime asserts" convention elsewhere in this file): a single Aec
- * instance must use EXACTLY ONE of aec_process() / aec_process_context()
- * for its entire lifetime, decided once at construction time, never
- * interleaved hop-to-hop. aec_process()'s output limiter carries one-hop
- * state (limiter_gain, limiter_near_lag, has_limiter_lag); a hop that
- * goes through aec_process_context() never updates that state, so mixing
- * the two entry points on one instance produces a one-hop gain
- * discontinuity the next time aec_process() runs -- not a crash, but an
+ * "no runtime asserts" convention elsewhere in this file): there are two
+ * CLASSES of entry point on a given Aec instance. "Full" -- aec_process()
+ * and aec_process_capture() (which calls aec_process() internally, so it
+ * carries the exact same limiter behavior) -- runs the output limiter and
+ * carries its one-hop state (limiter_gain, limiter_near_lag,
+ * has_limiter_lag). "Context-only" -- aec_process_context() and
+ * aec_process_context_shared_far() -- never touches that state. The real
+ * safety boundary is ONE CONSTRUCT-OR-RESET EPOCH: the span from
+ * aec_create()/aec_init() (or the most recent aec_reset()) up to the NEXT
+ * aec_reset() (or aec_destroy()) -- NOT "construction decides for the
+ * instance's whole lifetime". aec_reset() zeroes limiter_gain/
+ * has_limiter_lag, so a caller MAY switch classes across a reset boundary.
+ * What it must never do is call a full-class entry point and a
+ * context-only-class entry point within the SAME epoch, in either order --
+ * this explicitly includes aec_process_capture(): a context-only instance
+ * must never call aec_process_capture() either, since that function
+ * unconditionally drives aec_process() (and therefore the limiter)
+ * internally. Mixing classes within one epoch produces a one-hop gain
+ * discontinuity the next full-class call makes -- not a crash, but an
  * audible artifact. Every caller in this repo (mono/4ch pipelines) picks
- * one of the two at construction time and never switches. */
+ * one class at construction time and never switches. */
 void aec_process_context(Aec* a, const float* mic_in, const float* ref_in) {
     aec_process_core(a, mic_in, ref_in, NULL);
 }
 
-/* Group 6: like aec_process_context(), but shared_far_spec (non-NULL, length
+/* Far-end-FFT-sharing entry point: like aec_process_context(), but shared_far_spec (non-NULL, length
  * n_freqs) lets this instance skip computing its OWN far-end FFT and borrow
  * one an external caller already computed instead -- for a multi-instance
  * caller (e.g. a 4-lane wrapper) whose lanes all see the IDENTICAL far-end
@@ -2588,13 +2626,15 @@ void aec_process_context(Aec* a, const float* mic_in, const float* ref_in) {
  * unconditionally updates far_buffer's OLA history from it, and every
  * non-FFT use of the raw far signal elsewhere in aec_process_core() --
  * saturation detection, delay estimation, mu_scale -- is unaffected by
- * Group 6). A mismatched or stale spectrum silently produces a wrong
+ * this sharing). A mismatched or stale spectrum silently produces a wrong
  * (not crashing) linear filter result -- see 4aec_nr_res.c's caller for how
  * the 4-lane wrapper keeps this invariant (identical p->aligned_ref handed
  * to every lane, all lanes reset together on any delay change). Same
- * lifetime rule as aec_process_context(): this instance must use only this
- * entry point (or only aec_process_context(), never mixed) for its whole
- * lifetime. */
+ * lifetime rule as aec_process_context(): this is a context-only-class entry
+ * point (see aec_process_context()'s doc comment for the full construct-or-
+ * reset-epoch rule and why aec_process_capture() is included in the
+ * incompatible "full" class) -- never mixed with aec_process()/
+ * aec_process_capture() within the same construct-or-reset epoch. */
 void aec_process_context_shared_far(
         Aec* a, const float* mic_in, const float* ref_in,
         const Complex* shared_far_spec) {

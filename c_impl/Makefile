@@ -587,8 +587,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench test-counter-saturation test-rate-structural
-all bench test-counter-saturation test-rate-structural:
+.PHONY: all bench test-counter-saturation test-rate-structural test-process-context test-shared-far-spec test-shared-fft-handle
+all bench test-counter-saturation test-rate-structural test-process-context test-shared-far-spec test-shared-fft-handle:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -703,6 +703,42 @@ TEST_CS_TARGET = $(BIN_DIR)/test_counter_saturation
 TEST_RS_SRCS   = $(TEST_DIR)/test_rate_structural.c
 TEST_RS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_RS_SRCS))
 TEST_RS_TARGET = $(BIN_DIR)/test_rate_structural
+
+# Permanent context-only-processing regression test (aec_process_context()):
+# proves the split-out core (shared by aec_process() and aec_process_
+# context()) never lets the context-only path touch the output limiter's
+# state, and that every AecResContext field a real caller reads is
+# byte-identical between the two entry points. Was standalone-gcc-only (its
+# own header comment's `$(find src -name '*.c')` recipe) and not wired into
+# any Makefile target -- meaning a `make all` + existing-suite green run
+# never actually re-verified this, the single most load-bearing regression
+# test for the context-only split. Needs the full Aec type, same as
+# TEST_CS_TARGET/TEST_RS_TARGET above.
+TEST_PC_SRCS   = $(TEST_DIR)/test_process_context.c
+TEST_PC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_PC_SRCS))
+TEST_PC_TARGET = $(BIN_DIR)/test_process_context
+
+# Permanent shared-far-end-FFT regression test
+# (aec_process_context_shared_far()): proves borrowing an externally-computed
+# far-end spectrum produces byte-identical AecResContext to computing it
+# independently, that the borrowed spectrum is genuinely consumed (not
+# silently ignored), that aec_reset() clears a pending borrow cleanly, and
+# that the real-FFT-compute counter actually reflects borrow-vs-compute.
+# Same "was standalone-gcc-only, never wired into a make target" gap as
+# TEST_PC_TARGET above.
+TEST_SFS_SRCS   = $(TEST_DIR)/test_shared_far_spec.c
+TEST_SFS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SFS_SRCS))
+TEST_SFS_TARGET = $(BIN_DIR)/test_shared_far_spec
+
+# Permanent shared-FFT-handle regression test: proves main filter, shadow
+# filter, and the AEC3 post block all borrow the exact SAME FftHandle
+# (pointer identity, not just equal size) instead of each owning a private
+# one, on both the heap-arena (aec_create) and caller-pool (aec_init) paths,
+# surviving a real process() hop and aec_reset(). Mutation-tested: fails
+# (33/63) when the sharing is reverted to per-sub-module private handles.
+TEST_SFH_SRCS   = $(TEST_DIR)/test_shared_fft_handle.c
+TEST_SFH_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SFH_SRCS))
+TEST_SFH_TARGET = $(BIN_DIR)/test_shared_fft_handle
 
 # Standalone bit-exactness + microbench harness for the AEC-only kernel split
 # (aec_simd_kernels.h). Header-only + <math.h> -- no audio_common archive
@@ -828,7 +864,7 @@ $(TEST_DR_TARGET): $(TEST_DR_OBJS) | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation test-rate-structural
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural test-process-context test-shared-far-spec test-shared-fft-handle
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -844,6 +880,18 @@ test-counter-saturation: $(TEST_CS_TARGET)
 # Builds AND runs, same convention as test-counter-saturation above.
 test-rate-structural: $(TEST_RS_TARGET)
 	"$(abspath $(TEST_RS_TARGET))"
+
+# Builds AND runs, same convention as test-counter-saturation above.
+test-process-context: $(TEST_PC_TARGET)
+	"$(abspath $(TEST_PC_TARGET))"
+
+# Builds AND runs, same convention as test-counter-saturation above.
+test-shared-far-spec: $(TEST_SFS_TARGET)
+	"$(abspath $(TEST_SFS_TARGET))"
+
+# Builds AND runs, same convention as test-counter-saturation above.
+test-shared-fft-handle: $(TEST_SFH_TARGET)
+	"$(abspath $(TEST_SFH_TARGET))"
 
 FORCE:
 
@@ -869,6 +917,18 @@ $(TEST_CS_TARGET): $(OBJS) $(TEST_CS_OBJS) $(AC_LIB) | _cfg_guard
 $(TEST_RS_TARGET): $(OBJS) $(TEST_RS_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_rate_structural [$(BACKEND)] -> $@"
+
+$(TEST_PC_TARGET): $(OBJS) $(TEST_PC_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_process_context [$(BACKEND)] -> $@"
+
+$(TEST_SFS_TARGET): $(OBJS) $(TEST_SFS_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_shared_far_spec [$(BACKEND)] -> $@"
+
+$(TEST_SFH_TARGET): $(OBJS) $(TEST_SFH_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_shared_fft_handle [$(BACKEND)] -> $@"
 endif
 
 # --- Query targets -------------------------------------------------------
@@ -1330,6 +1390,12 @@ help:
 	@echo "                  regression test (test_delay_reset) -- run from c_impl/"
 	@echo "  test-rate-structural  Build + run the permanent per-rate structural"
 	@echo "                  regression test (test_rate_structural) -- run from c_impl/"
+	@echo "  test-process-context  Build + run the permanent context-only-processing"
+	@echo "                  regression test (test_process_context) -- run from c_impl/"
+	@echo "  test-shared-far-spec  Build + run the permanent shared-far-end-FFT"
+	@echo "                  regression test (test_shared_far_spec) -- run from c_impl/"
+	@echo "  test-shared-fft-handle  Build + run the permanent shared-FFT-handle"
+	@echo "                  regression test (test_shared_fft_handle) -- run from c_impl/"
 	@echo "  debug   Build with -g -DAEC_DEBUG"
 	@echo "  publish Copy this build's artifacts to dist/<backend>/<config-hash>/ + update dist/<backend>/current"
 	@echo "  audit-no-stdio  Build lib with NO_STDIO=1 and verify it (and a minimal linked"

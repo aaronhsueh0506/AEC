@@ -82,7 +82,7 @@ typedef struct PBFDAF {
      * Both are byte-equal. Borrowed pointer — not pool-owned. */
     const Complex* precomputed_far_spec;
     int      lightweight;
-    /* Group 6 instrumentation: incremented exactly once per hop this
+    /* Far-end-FFT-sharing instrumentation: incremented exactly once per hop this
      * filter ACTUALLY runs a far-end rfft (the else-branch in
      * pbfdaf_frontend() below) -- i.e. NOT when precomputed_far_spec was
      * set (internal shadow->main borrow OR an external caller's
@@ -165,15 +165,30 @@ typedef struct PBFDAF {
 int    pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size,
                     int with_process_scratch, int sample_rate);
+/* Static-path sizing never includes a nested FFT: pbfdaf_init_static() always
+ * runs against a caller-supplied `shared_fft` (one FftHandle shared
+ * by main filter / shadow filter / aec3_post within a single Aec instance,
+ * carved once by aec_get_mem_size()/aec_carve() rather than once per
+ * sub-module). Only the heap path (pbfdaf_init(), pbfdaf_get_mem_size() has
+ * no heap counterpart because the heap path never queries a size up front)
+ * owns its own FFT. */
 size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
                            int with_process_scratch);
-/* F04: returns 0 on success, -1 if the pool base/size checks reject the
- * inputs (F05/F07, nothing written to `mem`) or the nested fft_init()
- * allocation failed (OOM). */
+/* shared_fft: REQUIRED, non-NULL — an FftHandle already fft_init()'d by the
+ * caller at this instance's fft_size (pbfdaf_compute_sizes(hop_size, ...)).
+ * `p` borrows it for its lifetime and never destroys it; the caller (whoever
+ * constructed shared_fft) remains solely responsible for fft_destroy()-ing it
+ * exactly once, after every borrower is done with it. Precondition:
+ * single-threaded, fully sequential use — at most one transform in flight
+ * across ALL borrowers of shared_fft at any time, and no borrower may retain
+ * a pointer into the handle's internal scratch across calls. F04: returns 0
+ * on success, -1 if the pool base/size checks reject the inputs (F05/F07,
+ * nothing written to `mem`) or shared_fft is NULL. */
 int    pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
                            float mu, float delta, int hop_size,
-                    int with_process_scratch, int sample_rate);
+                    int with_process_scratch, int sample_rate,
+                    FftHandle* shared_fft);
 void pbfdaf_free(PBFDAF* p);
 void pbfdaf_reset(PBFDAF* p);
 
@@ -254,13 +269,14 @@ typedef struct PBFDKF {
 int    pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size, int sample_rate);
 size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size);
-/* F04: returns 0 on success, -1 if the pool base/size checks reject the
- * inputs (F05/F07, nothing written to `mem`) or the nested pbfdaf_init_
- * static() (base filter's fft_init()) failed (OOM). */
+/* shared_fft: forwarded verbatim to the base filter's pbfdaf_init_static() —
+ * see that function's doc comment (REQUIRED, non-NULL, borrowed not
+ * owned). F04: returns 0 on success, -1 if the pool base/size checks reject
+ * the inputs (F05/F07, nothing written to `mem`) or shared_fft is NULL. */
 int    pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
                            float mu, float delta, int hop_size,
-                           int sample_rate);
+                           int sample_rate, FftHandle* shared_fft);
 void pbfdkf_free(PBFDKF* p);
 void pbfdkf_reset(PBFDKF* p);
 

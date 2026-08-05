@@ -260,7 +260,9 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
     total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* error_spec */
     total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* far_spec */
     total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* error_spec_windowed */
-    total = ck_add_size(total, fft_get_mem_size(fft));          /* nested FFT */
+    /* No nested-FFT term here: the static path always borrows a
+     * caller-carved shared_fft (see pbfdaf_init_static's doc comment) instead
+     * of carving its own. */
     total = ck_field_size(total, (size_t)fft, sizeof(float));   /* time_scratch */
     total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* spec_scratch */
     /* De-stacked per-hop scratch (see pbfdkf.h PBFDAF comment). */
@@ -281,8 +283,9 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
 int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                          int block_size, int n_partitions,
                          float mu, float delta, int hop_size,
-                         int with_process_scratch, int sample_rate) {
-    if (!p || !mem) return -1;
+                         int with_process_scratch, int sample_rate,
+                         FftHandle* shared_fft) {
+    if (!p || !mem || !shared_fft) return -1;
     /* F07: reject a misaligned pool base before any pool write — hardens a
      * caller invoking this directly (the parent aec_carve always carves
      * ALIGN16 offsets off an already-aligned base, so this never fires
@@ -318,8 +321,13 @@ int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
     p->error_spec = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
     p->far_spec   = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
     p->error_spec_windowed = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
-    size_t fft_sz = fft_get_mem_size(fft);
-    p->fft        = fft_init(ptr, fft_sz, fft); ptr += fft_sz;
+    /* Borrow the caller's shared_fft instead of carving/owning a
+     * private FftHandle. Precondition (documented on the header decl):
+     * shared_fft is already fft_init()'d at this same fft_size, and every
+     * borrower's use of it is fully sequential (single-threaded, no
+     * transform left in flight across calls) -- exactly how main filter,
+     * shadow filter, and aec3_post already call each other today. */
+    p->fft          = shared_fft;
     p->time_scratch = (float*)ptr; ptr += ALIGN16((size_t)fft * sizeof(float));
     p->spec_scratch = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
 
@@ -341,18 +349,21 @@ int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
     pbfdaf_fill_windows(p);
     p->is_static = 1;
 
-    if (!p->fft) return -1;   /* F04: nested fft_init() failed (OOM) */
     return 0;
 }
 
 void pbfdaf_free(PBFDAF* p) {
     if (!p) return;
     if (p->is_static) {
-        /* F04/lifecycle: NULL the handle after destroying it so a second
-         * pbfdaf_free() (e.g. via a caller's double aec_destroy()) sees
-         * p->fft == NULL and does not dereference a pointer into memory the
-         * pool/arena owner may since have freed. */
-        if (p->fft) { fft_destroy(p->fft); p->fft = NULL; }
+        /* The static path never owns p->fft (it's a borrowed
+         * shared_fft — see pbfdaf_init_static's doc comment), so it must
+         * NEVER be destroyed here. Ownership/destruction is the sole
+         * responsibility of whoever constructed the shared handle (aec_carve
+         * via a->post_fft, see aec_destroy()) — destroying it here as well
+         * would double-free the NE10 backend's twiddle-config allocation
+         * every other borrower (main filter, shadow filter, aec3_post) also
+         * points at. Just drop this borrower's reference. */
+        p->fft = NULL;
         return;
     }
     free(p->td_window); free(p->sqrt_hann);
@@ -375,7 +386,7 @@ void pbfdaf_reset(PBFDAF* p) {
     memset(p->power, 0, (size_t)p->n_freqs * sizeof(float));
     p->partition_idx = 0;
     memset(p->error_spec_windowed, 0, (size_t)p->n_freqs * sizeof(Complex));
-    /* Defensive hardening (Group 6): precomputed_far_spec is documented as
+    /* Defensive hardening (far-end-FFT sharing): precomputed_far_spec is documented as
      * one-shot -- set and consumed within the same pbfdaf_frontend() call,
      * cleared there immediately after the memcpy. Today that means it is
      * already NULL by the time any reset() call can observe it (reset
@@ -772,8 +783,8 @@ size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
 int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                          int block_size, int n_partitions,
                          float mu, float delta, int hop_size,
-                         int sample_rate) {
-    if (!p || !mem) return -1;
+                         int sample_rate, FftHandle* shared_fft) {
+    if (!p || !mem || !shared_fft) return -1;
     /* F07: reject a misaligned pool base before any pool write (see the
      * matching guard in pbfdaf_init_static above). */
     if (!MEM_IS_ALIGNED16(mem)) return -1;
@@ -787,8 +798,8 @@ int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
     memset(p, 0, sizeof(*p));
     if (pbfdaf_init_static(&p->base, mem, base_sz,
                        block_size, n_partitions, mu, delta, hop_size, 0,
-                       sample_rate) != 0)
-        return -1;   /* F04: base filter's nested fft_init() failed (OOM) */
+                       sample_rate, shared_fft) != 0)
+        return -1;   /* F07: base filter's pool base/size checks rejected the inputs */
     uint8_t* ptr = (uint8_t*)mem + base_sz;
     int K = p->base.n_freqs;
     p->Q_high    = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
