@@ -475,6 +475,20 @@ Aec*   aec_init(void* mem, size_t mem_size, const AecConfig* cfg);
  * Python aec.py. Render and capture supplied together. */
 void aec_process(Aec* a, const float* mic, const float* ref, float* out);
 
+/* Context-only variant of aec_process(): runs the full linear filter + AEC3
+ * post/RES block (so aec_get_res_context() is fully populated afterward)
+ * but skips the output limiter and never writes an `out` buffer -- for
+ * callers that only ever read the context (error_spec / res_gain /
+ * formed_output / etc), never aec_process()'s own returned audio. Cheaper
+ * per-hop than aec_process() by exactly the limiter's O(hop) work plus one
+ * O(hop) memcpy; the linear filter and RES/post cost is identical either
+ * way. See aec.c's aec_process_context() doc comment for the one hard
+ * precondition: a single Aec instance must use ONLY aec_process() or ONLY
+ * aec_process_context() for its whole lifetime, never both interleaved
+ * (mixing desyncs the limiter's one-hop state, producing an audible gain
+ * discontinuity the next aec_process() call). */
+void aec_process_context(Aec* a, const float* mic, const float* ref);
+
 /* ── Streaming API (real-time async render/capture) ───────────────────────
  * For deployments where the far-end (render) and mic (capture) arrive on
  * separate calls / threads and not necessarily 1:1. aec_analyze_render()

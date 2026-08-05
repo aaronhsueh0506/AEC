@@ -1573,7 +1573,13 @@ static float aec_erle_ring_max_last15(const Aec* a) {
 
 /* ───────────────────────── process ─────────────────────────────────────── */
 
-void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
+/* Group 5: everything aec_process()/aec_process_context() share -- steps 1-17
+ * (linear filter + AEC3 post/RES block, writing a->final_out) and steps 19-20
+ * (power EMAs + convergence detection, which the NEXT hop's step-17 logic
+ * depends on and therefore can never be skipped by either caller). Does NOT
+ * run step 18 (output limiter) or step 21 (emit into a caller `out` buffer)
+ * -- those are caller-specific and live in the two thin wrappers below. */
+static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in) {
     const int hop = a->hop_size, K = a->n_freqs, N = a->n_partitions;
     int stationarity_block_for_post;
     memcpy(a->near_hop, mic_in, (size_t)hop * sizeof(float));
@@ -2377,32 +2383,6 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* enable_res==False C-parity fallback (orchestrator 2313-2316) is unused
      * here since balanced always has enable_res=True. */
 
-    /* 18. OLA-lagged output limiter. near_peak/out_peak via np.max(np.abs(.))
-     *     and target_gain = near_peak/out_peak, the EMA mix and the limiter
-     *     gain itself all run float32-by-design (Stage-2 conversion; the
-     *     historical Python float64 EMA-mix reference is retired). */
-    {
-        if (!a->has_limiter_lag) { memset(a->limiter_near_lag, 0, (size_t)hop * sizeof(float)); a->has_limiter_lag = 1; }
-        float near_peak = 0.0f, out_peak = 0.0f;
-        for (int i = 0; i < hop; ++i) {
-            float an = fabsf(a->limiter_near_lag[i]);
-            float ao = fabsf(a->final_out[i]);
-            if (an > near_peak) near_peak = an;
-            if (ao > out_peak)  out_peak  = ao;
-        }
-        memcpy(a->limiter_near_lag, a->near_hop, (size_t)hop * sizeof(float));
-        float target_gain;
-        if (out_peak > near_peak && near_peak > 1e-6f)
-            target_gain = near_peak / out_peak;
-        else
-            target_gain = 1.0f;
-        float alpha_lim = (target_gain < a->limiter_gain) ? 0.3f : 0.8f;
-        a->limiter_gain = alpha_lim * a->limiter_gain + (1.0f - alpha_lim) * target_gain;
-        float lg = a->limiter_gain;
-        for (int i = 0; i < hop; ++i)
-            a->final_out[i] = a->final_out[i] * lg;
-    }
-
     /* 19. power EMAs (sample loop; read by NEXT frame's step 17). */
     {
         const float ap = a->alpha_pow, oap = 1.0f - a->alpha_pow;
@@ -2429,6 +2409,47 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     /* cache erle_windowed for next frame's Path-A guard. */
     if (a->cfg.enable_res) a->last_erle_windowed = erle_windowed;
 
+    a->frame_count++;
+}
+
+/* Process exactly hop_size samples — OFFLINE / lockstep path. Byte-exact to
+ * Python aec.py. Render and capture supplied together. Thin wrapper over
+ * aec_process_core(): adds step 18 (output limiter) and step 21 (emit into
+ * the caller's `out` buffer), neither of which aec_process_context() below
+ * wants. Preserves the original single-function's exact behavior and
+ * ordering, including the debug trace reading limiter_gain AFTER this
+ * hop's limiter update (moving the trace block would have silently
+ * changed what a --debug-trace consumer observes). */
+void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
+    const int hop = a->hop_size;
+    aec_process_core(a, mic_in, ref_in);
+
+    /* 18. OLA-lagged output limiter. near_peak/out_peak via np.max(np.abs(.))
+     *     and target_gain = near_peak/out_peak, the EMA mix and the limiter
+     *     gain itself all run float32-by-design (Stage-2 conversion; the
+     *     historical Python float64 EMA-mix reference is retired). */
+    {
+        if (!a->has_limiter_lag) { memset(a->limiter_near_lag, 0, (size_t)hop * sizeof(float)); a->has_limiter_lag = 1; }
+        float near_peak = 0.0f, out_peak = 0.0f;
+        for (int i = 0; i < hop; ++i) {
+            float an = fabsf(a->limiter_near_lag[i]);
+            float ao = fabsf(a->final_out[i]);
+            if (an > near_peak) near_peak = an;
+            if (ao > out_peak)  out_peak  = ao;
+        }
+        memcpy(a->limiter_near_lag, a->near_hop, (size_t)hop * sizeof(float));
+        float target_gain;
+        if (out_peak > near_peak && near_peak > 1e-6f)
+            target_gain = near_peak / out_peak;
+        else
+            target_gain = 1.0f;
+        float alpha_lim = (target_gain < a->limiter_gain) ? 0.3f : 0.8f;
+        a->limiter_gain = alpha_lim * a->limiter_gain + (1.0f - alpha_lim) * target_gain;
+        float lg = a->limiter_gain;
+        for (int i = 0; i < hop; ++i)
+            a->final_out[i] = a->final_out[i] * lg;
+    }
+
     /* ── per-frame structured trace ("logr"). Audio-passive, read-only: only
      *    runs when --debug-trace set a CSV file. Zero hot-path cost otherwise
      *    (single NULL test). Reads the post-filter internals — the three not
@@ -2445,7 +2466,13 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
      * trace runs in ordinary release builds whenever --debug-trace is set).
      * AEC_NO_STDIO removes the call sites entirely so the library carries
      * no stdio reference regardless of runtime state; see aec_debug.h/.c
-     * and the Makefile's NO_STDIO switch. */
+     * and the Makefile's NO_STDIO switch.
+     *
+     * Only reachable via aec_process(): aec_process_context() never runs
+     * this. That is not a new limitation -- the a->cfg.enable_res guard
+     * below already meant this never fired for a context_only instance
+     * (enable_res=0 by definition), so no observable behavior changes for
+     * any existing caller. */
 #ifndef AEC_NO_STDIO
     if (a->cfg.enable_res && aec_debug_trace_active()) {
         int Kk = a->n_freqs;
@@ -2478,7 +2505,29 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
 
     /* 21. emit. */
     memcpy(out, a->final_out, (size_t)hop * sizeof(float));
-    a->frame_count++;
+}
+
+/* Context-only entry point: runs aec_process_core() only -- no output
+ * limiter, no emit into any `out` buffer. For callers that only read
+ * aec_get_res_context() (error_spec / res_gain / formed_output / etc via
+ * AecResContext) and never touch aec_process()'s own returned audio, e.g.
+ * a pipeline running enable_res=0 && return_res_context=1
+ * (context_only) purely for the linear filter's context -- the limiter
+ * and final-copy in aec_process() are pure waste for them.
+ *
+ * PRECONDITION (caller's responsibility, not checked here -- see aec.c's
+ * "no runtime asserts" convention elsewhere in this file): a single Aec
+ * instance must use EXACTLY ONE of aec_process() / aec_process_context()
+ * for its entire lifetime, decided once at construction time, never
+ * interleaved hop-to-hop. aec_process()'s output limiter carries one-hop
+ * state (limiter_gain, limiter_near_lag, has_limiter_lag); a hop that
+ * goes through aec_process_context() never updates that state, so mixing
+ * the two entry points on one instance produces a one-hop gain
+ * discontinuity the next time aec_process() runs -- not a crash, but an
+ * audible artifact. Every caller in this repo (mono/4ch pipelines) picks
+ * one of the two at construction time and never switches. */
+void aec_process_context(Aec* a, const float* mic_in, const float* ref_in) {
+    aec_process_core(a, mic_in, ref_in);
 }
 
 /* ── Streaming API ────────────────────────────────────────────────────────
