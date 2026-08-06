@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_ubsan_signal_handling_test.sh - permanent regression test for the
 # signal-handling fix in test/run_counter_saturation_ubsan.sh and
-# test/run_selftest_ubsan.sh (round-7 review).
+# test/run_selftest_ubsan.sh (regression review).
 #
 # THE BUG THIS GUARDS AGAINST: both scripts used to register one combined
 # trap for normal exit AND both signals:
@@ -98,7 +98,7 @@
 # assertion above held. Nonzero + at least one "FAIL" line means a
 # regression.
 #
-# ROUND-8 ADDITIONS (three more false-pass mechanisms Codex found in this
+# ADDITIONAL REGRESSION COVERAGE (three more false-pass mechanisms verification identified in this
 # test itself, not in the two scripts under test):
 #   1. Both scripts' `SCRATCH="$(mktemp -d)"` (no template) silently ignores
 #      $TMPDIR on this host, so the scratch-cleanup check below was
@@ -125,7 +125,7 @@
 #      file in WORK_ROOT) that picks a working stat/sha256 syntax once
 #      before any trial runs, or FATAL-exits immediately if neither works.
 #
-# ROUND-9 ADDITIONS (two more Codex-review-confirmed issues, this time in
+# ADDITIONAL REGRESSION COVERAGE (two more independently confirmed issues, this time in
 # THIS test's own process-cleanup and tree-snapshot logic):
 #   4. run_decoy_trial's end-of-trial cleanup used a SYSTEM-WIDE
 #      `pkill -9 -f "$binpat"` plus a `pgrep -f "$binpat"` leftover check,
@@ -185,11 +185,11 @@
 #      and a chmod-000 (unreadable) file must make the snapshot function
 #      FATAL rather than silently omit it.
 #
-# ROUND-10 ADDITIONS (two more Codex-review-confirmed issues, again in
+# ADDITIONAL REGRESSION COVERAGE (two more independently confirmed issues, again in
 # THIS test's own process-cleanup and tree-snapshot logic):
 #   6. pid_scoped_cleanup only ever walked ONE level of target_pid's
 #      descendants (a single `pgrep -P "$target_pid"` call), leaking any
-#      grandchild-or-deeper descendant -- Codex confirmed a real 'sleep 60'
+#      grandchild-or-deeper descendant -- verification confirmed a real 'sleep 60'
 #      process with PPID=1 left running after a full 48/48 PASS run (a
 #      descendant reparented to init once its own parent, itself only a
 #      one-level-removed child of target_pid, was killed). Fixed by
@@ -235,13 +235,13 @@
 #      killed until it returns. The SAME gap existed, undetected until
 #      instrumented, in run_pkill_immunity_trial's own end-of-trial
 #      cleanup for unrelated_bin (a plain `kill -9` with no descendant walk
-#      at all, even under round-9); fixed the same way.
-#   7. snapshot_tree_root's find call, even after round-9's fix, still
+#      at all, even under regression); fixed the same way.
+#   7. snapshot_tree_root's find call, even after regression's fix, still
 #      pre-filtered to `-type d -o -type f -o -type l`, so a FIFO/socket/
 #      device-node entry anywhere under the tree was silently DROPPED from
 #      find's own output before snapshot_one_entry ever got a chance to see
 #      it (and refuse it) -- invisible, not FATAL, the same class of blind
-#      spot round-9 fixed for "only -type f" moved one level up the
+#      spot regression fixed for "only -type f" moved one level up the
 #      filter. find's own exit status was also still folded into (and
 #      implicitly trusted by) the process-substitution read, never checked
 #      as its own explicit step. Fixed by restructuring snapshot_tree_root
@@ -294,7 +294,7 @@ fail() { FAIL_COUNT=$((FAIL_COUNT + 1)); echo "  FAIL: $1"; }
 WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ubsan_sigtest.XXXXXX")"
 trap 'rm -rf "$WORK_ROOT"' EXIT
 
-# --- platform-detection probe (round-8 review, must run BEFORE any trial;
+# --- platform-detection probe (regression review, must run BEFORE any trial;
 # fail CLOSED, not open) --------------------------------------------------
 # snapshot_real_trees{,_sha} below need a `stat` invocation and a sha256
 # tool that actually work on this host. The original code hardcoded BSD
@@ -375,7 +375,7 @@ chmod +x "$SLOW_MAKE"
 # snapshot_one_entry <path> <mode:mtime|sha>
 # Emits exactly one canonical line for ONE filesystem entry (directory,
 # regular file, or symlink) -- or FATAL-exits the WHOLE script immediately
-# on any failure (round-9 review: the old code let stat_line/sha_line fail
+# on any failure (regression review: the old code let stat_line/sha_line fail
 # silently inside a `find | while read` pipeline, which just produced a
 # shorter-than-expected snapshot with no error -- a before/after pair could
 # spuriously match even though verification itself was broken, or a real
@@ -412,7 +412,7 @@ snapshot_one_entry() {
         fi
         echo "F $path $leaf"
     elif [ ! -e "$path" ]; then
-        # round-10 review: this path was recorded by find's own listing
+        # regression review: this path was recorded by find's own listing
         # (stage 1) but no longer exists by the time this function runs
         # (stage 2) -- e.g. a symlink removed out from under a concurrent
         # snapshot, or any other entry that vanished mid-walk. Silently
@@ -421,7 +421,7 @@ snapshot_one_entry() {
         echo "FATAL: snapshot: '$path' was recorded by find but no longer exists (removed between listing and processing) -- refusing to silently drop it from the snapshot" >&2
         exit 1
     else
-        # round-10 review: reachable at all now only because
+        # regression review: reachable at all now only because
         # snapshot_tree_root's find call no longer pre-filters by -type --
         # a fifo/socket/device-node/anything-else entry used to be
         # silently EXCLUDED from find's own output before this function
@@ -438,14 +438,14 @@ snapshot_one_entry() {
 
 # snapshot_tree_root <root_path> <mode:mtime|sha>
 # One root's full contribution to the overall snapshot: a PRESENT/ABSENT
-# record line (round-9 review: so a root going from absent to
+# record line (regression review: so a root going from absent to
 # newly-created-but-empty is ITSELF a detectable, recorded change), plus --
 # for a PRESENT root -- one canonical line per entry anywhere under it,
 # classified by snapshot_one_entry. `-mindepth 1` excludes the root
 # directory entry itself, already covered by the PRESENT/ABSENT line
 # above. Output is sorted for a stable, order-independent comparison.
 #
-# round-10 review: restructured into an explicit TWO-STAGE form (the old
+# regression review: restructured into an explicit TWO-STAGE form (the old
 # single `find ... -print0 | ...` / `< <(find ...)` form (a) pre-filtered
 # find itself to `-type d -o -type f -o -type l`, silently DROPPING any
 # fifo/socket/device-node entry from find's own output before
@@ -547,7 +547,7 @@ wait_for_marker() {
 
 # wait_for_file <path> <timeout_secs>
 # Busy-polls (no sleep) until <path> exists and is non-empty, or the
-# timeout elapses. Used (round-10 review) to synchronize on a descendant
+# timeout elapses. Used (regression review) to synchronize on a descendant
 # process in a multilevel chain actually having started and recorded its
 # own PID (see build_multilevel_chain/start_multilevel_chain below) before
 # the caller reads that PID back -- ground truth, independent of the
@@ -565,7 +565,7 @@ wait_for_file() {
 # that chain (including as candidate_pid's immediate parent). This is what
 # lets wait_for_binary tell "a real descendant of the specific backgrounded
 # trial script" apart from "any unrelated process anywhere on the system
-# whose command line happens to match" (round-8 review).
+# whose command line happens to match" (regression review).
 is_descendant_of() {
     local ancestor="$1" candidate="$2"
     local cur="$candidate" ppid hops=0
@@ -583,7 +583,7 @@ is_descendant_of() {
 # wait_for_binary <target_pid> <binpat>
 # Only reports "ready" once some pgrep -f match is target_pid itself or an
 # actual descendant of it -- fixes the system-wide false-positive bug
-# (round-8 review): the target pid is threaded in explicitly by every call
+# (regression review): the target pid is threaded in explicitly by every call
 # site (the same `pid=$!` each trial already captures) rather than being
 # read from an outer-scope variable.
 wait_for_binary() {
@@ -695,7 +695,7 @@ run_normal_trial() {
     fi
 
     # Symmetry with run_signal_trial's existing scratch-cleanup check
-    # (round-8 review): an uninterrupted run deserves the same proof its
+    # (regression review): an uninterrupted run deserves the same proof its
     # scratch dir was fully cleaned up, not just interrupted ones.
     local leftover
     leftover="$(ls -A "$tmpdir_for_script" 2>/dev/null)"
@@ -707,7 +707,7 @@ run_normal_trial() {
 }
 
 # --- decoy-process trial (guards wait_for_binary's descendant scoping,
-# round-8 review) ---------------------------------------------------------
+# regression review) ---------------------------------------------------------
 # old_unscoped_wait_for_binary is a VERBATIM copy of the ORIGINAL,
 # system-wide-matching wait_for_binary this test used to call (pre-fix).
 # It is never used by any real trial above -- it exists solely so
@@ -722,8 +722,8 @@ old_unscoped_wait_for_binary() {
     pgrep -f "$binpat" >/dev/null 2>&1
 }
 
-# --- PID-scoped cleanup helpers (round-9 review P2 fix; full-subtree
-# post-order rewrite round-10 review) ----------------------------------------
+# --- PID-scoped cleanup helpers (regression review P2 fix; full-subtree
+# post-order rewrite regression review) ----------------------------------------
 # wait_pids_gone <timeout_secs> <pid...>
 # Busy-polls (no sleep, consistent with this file's zero-sleep discipline)
 # until `kill -0` fails (ESRCH) for EVERY pid given, or the timeout elapses.
@@ -750,7 +750,7 @@ wait_pids_gone() {
     return 1
 }
 
-# --- Global PID bookkeeping (round-10 review) -------------------------------
+# --- Global PID bookkeeping (regression review) -------------------------------
 # record_pid <pid>: appends pid to ALL_TRACKED_PIDS, a single running list of
 # every PID this ENTIRE test script has ever spawned as a detached/background
 # fixture process across every trial (decoy processes, multilevel chains,
@@ -759,7 +759,7 @@ wait_pids_gone() {
 # `wait`). The final sweep near the end of this script asserts `kill -0`
 # fails for every single one of these, not just the specific PIDs each
 # trial's own narrower assertion happens to check -- exactly the check that
-# would have caught the PPID=1 orphan Codex found (a leftover descendant no
+# would have caught the PPID=1 orphan verification identified (a leftover descendant no
 # single trial's own assertion was looking at).
 ALL_TRACKED_PIDS=""
 record_pid() {
@@ -769,7 +769,7 @@ record_pid() {
 # collect_descendants_post_order <pid>
 # Recursively walks pid's FULL descendant subtree via repeated `pgrep -P`
 # lookups, queried while everything is still alive -- the fix for the
-# round-9 cleanup's one-level blind spot (Codex review: a 'sleep 60'
+# regression cleanup's one-level blind spot (regression coverage: a 'sleep 60'
 # process with PPID=1 was found still running after a full 48/48 PASS run
 # -- a grandchild-or-deeper descendant the single `pgrep -P "$target_pid"`
 # call never captured, since an orphaned process's children are reparented
@@ -835,11 +835,11 @@ collect_full_subtree_settled() {
 }
 
 # old_one_level_cleanup <decoy_pid> <target_pid>
-# VERBATIM copy of the ORIGINAL (round-9) one-level pid_scoped_cleanup's own
+# VERBATIM copy of the ORIGINAL (regression) one-level pid_scoped_cleanup's own
 # kill/wait MECHANICS -- never called by any real cleanup path in this
 # script. Exists solely so run_multilevel_subtree_trial can empirically
 # prove the OLD code really does leave a grandchild-or-deeper descendant
-# running (the Codex-confirmed bug), the same "reproduce the old bug, don't
+# running (the verified bug), the same "reproduce the old bug, don't
 # just assert the new behaviour" discipline this file already applies to
 # the trap bug (see header) and to wait_for_binary's decoy immunity
 # (old_unscoped_wait_for_binary above). Deliberately has no internal
@@ -863,9 +863,9 @@ old_one_level_cleanup() {
 
 # pid_scoped_cleanup <label> <decoy_pid> <target_pid>
 # Explicit-PID-tracking cleanup: NEVER a system-wide pkill/pgrep-by-name.
-# FIXED (round-10 review P2): the round-9 version (see old_one_level_cleanup
+# FIXED (regression review P2): the regression version (see old_one_level_cleanup
 # above for its preserved mechanics) walked only ONE level of target_pid's
-# descendants, leaking any grandchild-or-deeper descendant -- Codex
+# descendants, leaking any grandchild-or-deeper descendant -- regression
 # confirmed a real 'sleep 60' process with PPID=1 left running after a full
 # 48/48 PASS run. Now: (1) build the COMPLETE post-order descendant list
 # for BOTH target_pid and decoy_pid via collect_descendants_post_order,
@@ -911,7 +911,7 @@ pid_scoped_cleanup() {
 run_decoy_trial() {
     local id="${1:-$$_${RANDOM}${RANDOM}}"
     local label="wait_for_binary decoy immunity ($id)"
-    # Per-invocation-unique pattern (round-9 review P1-ish fix, defense-in-
+    # Per-invocation-unique pattern (regression review P1-ish fix, defense-in-
     # depth on top of pid_scoped_cleanup above -- NOT a replacement for it):
     # even a second, fully independent concurrent run of this whole test
     # script never has to share this literal process-name text with an
@@ -935,7 +935,7 @@ run_decoy_trial() {
     # (pgrep -f matches binpat against the full command line, same
     # convention as the real binpat values in run_signal_trial -- no
     # trailing argv tokens allowed after the name).
-    # NOTE (round-10 review): deliberately a BARE `sleep 60`, not
+    # NOTE (regression review): deliberately a BARE `sleep 60`, not
     # `exec sleep 60` -- unlike build_multilevel_chain's throwaway
     # decoy.sh/unrelated_script below (which are never pattern-matched by
     # name), decoy_bin/real_bin's own SCRIPT PATH is exactly what binpat
@@ -1028,12 +1028,12 @@ EOF
     fi
 
     # cleanup: decoy + target's whole subtree (never leave these running) --
-    # PID-scoped (round-9 review P2 fix), see pid_scoped_cleanup's own
+    # PID-scoped (regression review P2 fix), see pid_scoped_cleanup's own
     # comment for why this is no longer a system-wide pkill/pgrep-by-name.
     pid_scoped_cleanup "$label" "$decoy_pid" "$target_pid"
 }
 
-# --- unrelated same-pattern process immunity trial (round-9 review P2) -----
+# --- unrelated same-pattern process immunity trial (regression review P2) -----
 # Proves the OTHER half of the pkill/pgrep-by-name bug: not only could the
 # old cleanup be FOOLED (wait_for_binary, already covered above), it could
 # actively KILL an unrelated process anywhere on the system that merely
@@ -1077,7 +1077,7 @@ EOF
         fail "$label: unrelated same-pattern process ($unrelated_pid) was killed by the decoy trial's cleanup -- system-wide pkill/pgrep-by-name regression"
     fi
 
-    # round-10 review: unrelated_bin is the SAME bare (non-exec) `sleep 60`
+    # regression review: unrelated_bin is the SAME bare (non-exec) `sleep 60`
     # shape as decoy_bin/real_bin, so it can equally well have forked its
     # own untracked "sleep 60" child by now -- a plain `kill -9
     # "$unrelated_pid"` alone (the old shape of this cleanup) would leave
@@ -1169,7 +1169,7 @@ wait_for_child_of() {
     return 1
 }
 
-# --- concurrent decoy-trial-style cleanup isolation trial (round-9 review
+# --- concurrent decoy-trial-style cleanup isolation trial (regression review
 # P2 item 3b) -----------------------------------------------------------
 # Runs TWO independent decoy+target process trios AT THE SAME TIME, and
 # deliberately gives them the SAME literal pattern text (id "conc_shared")
@@ -1215,7 +1215,7 @@ run_concurrent_decoy_trial() {
     pid_scoped_cleanup "$label: instance B cleanup" "$decoy_pid_b" "$target_pid_b"
 }
 
-# --- Full-subtree post-order cleanup trials (round-10 review P2 fix) -------
+# --- Full-subtree post-order cleanup trials (regression review P2 fix) -------
 # build_multilevel_chain <trial_dir>
 # Creates (but does not start) three chained POSIX shell scripts under
 # trial_dir, forming a >=3-level-deep descendant chain BELOW whatever
@@ -1231,7 +1231,7 @@ run_concurrent_decoy_trial() {
 #                                     ggc_pidfile, then `exec`s into a long
 #                                     sleep -- so `ps` shows the process
 #                                     itself as "sleep 999", the same shape
-#                                     as the real orphan Codex found)
+#                                     as the real orphan verification identified)
 # Each pidfile is written by the level itself -- ground truth, independent
 # of collect_descendants_post_order/pid_scoped_cleanup, the very mechanism
 # under test -- using bash-3.2-friendly OUT-globals (no `local -n`
@@ -1480,8 +1480,8 @@ run_concurrent_multilevel_trial() {
     pid_scoped_cleanup "$label: instance B cleanup" "$decoy_b" "$root_b"
 }
 
-# --- snapshot fail-closed / comprehensiveness negative tests (round-9
-# review P2 item 3; extended round-10 review for the two-stage,
+# --- snapshot fail-closed / comprehensiveness negative tests (regression
+# review P2 item 3; extended regression review for the two-stage,
 # no-type-filter rewrite) ------------------------------------------------
 # A THROWAWAY synthetic tree under WORK_ROOT (never the real obj/bin
 # trees): snapshots it, makes ONE controlled change, re-snapshots, and
@@ -1495,7 +1495,7 @@ run_snapshot_negative_tests() {
     mkdir -p "$synth/sub"
     echo "hello" > "$synth/sub/file.txt"
 
-    # (a) new empty subdirectory -> snapshot must differ. (round-10 review:
+    # (a) new empty subdirectory -> snapshot must differ. (regression review:
     # re-confirmed under the two-stage rewrite -- unchanged behaviour.)
     before="$(snapshot_tree_root "$synth" mtime)"
     mkdir -p "$synth/new_empty_dir"
@@ -1540,7 +1540,7 @@ run_snapshot_negative_tests() {
         fail "snapshot negative test (c): an unreadable file did NOT make the snapshot function fail (rc=$rc) -- silent-omission regression"
     fi
 
-    # (d) round-10 review: an unreadable DIRECTORY (permission-denied while
+    # (d) regression review: an unreadable DIRECTORY (permission-denied while
     # DESCENDING, as opposed to (c)'s unreadable regular file) forces
     # `find` ITSELF to exit nonzero mid-listing. Verified INDEPENDENTLY,
     # with a bare `find` call, BEFORE trusting the assertion below -- a
@@ -1567,7 +1567,7 @@ run_snapshot_negative_tests() {
     chmod 755 "$synth/blocked_dir"   # restore BEFORE removal
     rm -rf "$synth/blocked_dir"
 
-    # (e) round-10 review: a FIFO under the tree must FATAL as an
+    # (e) regression review: a FIFO under the tree must FATAL as an
     # unexpected type. Before this round's fix, find's own `-type d -o
     # -type f -o -type l` filter silently EXCLUDED a fifo from its output
     # entirely -- invisible, not FATAL -- so this case would have PASSED
@@ -1587,7 +1587,7 @@ run_snapshot_negative_tests() {
         echo "NOTE: mkfifo unavailable/failed on this host -- skipping the FIFO negative test (e)" >&2
     fi
 
-    # (f) round-10 review: a Unix domain socket, best-effort via python3's
+    # (f) regression review: a Unix domain socket, best-effort via python3's
     # socket module (skipped cleanly if python3 or the bind is unavailable
     # -- this sub-case is explicitly optional per the task, not a required
     # pass/fail).
@@ -1615,7 +1615,7 @@ PYEOF
         echo "NOTE: could not create a Unix domain socket on this host (no python3, or bind failed) -- skipping the Unix-domain-socket negative test (f) as genuinely impractical here" >&2
     fi
 
-    # (g) round-10 review: a symlink where readlink itself effectively
+    # (g) regression review: a symlink where readlink itself effectively
     # fails, forced via the exact mechanism this two-stage rewrite exposes
     # a real seam for -- list the tree (stage 1), THEN remove the symlink
     # from disk BEFORE processing (stage 2). Exercised by calling the two
@@ -1645,7 +1645,7 @@ echo "=== run_ubsan_signal_handling_test: snapshot fail-closed / comprehensivene
 run_snapshot_negative_tests
 
 echo "=== run_ubsan_signal_handling_test: snapshotting real obj/bin trees (before) ==="
-# rc checked explicitly (round-9 review fix): snapshot_real_trees/_sha are
+# rc checked explicitly (regression review fix): snapshot_real_trees/_sha are
 # still captured via `$(...)`, which is ITS OWN subshell boundary -- an
 # `exit 1` deep inside (snapshot_one_entry, via snapshot_tree_root) makes
 # THAT subshell exit non-zero, which becomes this assignment's own exit
@@ -1719,11 +1719,11 @@ else
     fail "real c_impl/obj+bin and audio_common obj+bin sha256 CHANGED across the runs above"
 fi
 
-# --- Final full-sweep leftover-process check (round-10 review) -------------
+# --- Final full-sweep leftover-process check (regression review) -------------
 # Independently re-checks EVERY PID this ENTIRE test run ever recorded via
 # record_pid, across every trial -- not a spot-check of just the specific
 # PIDs each trial's own narrower assertion happened to look at. This is
-# exactly the check that would have caught the Codex-confirmed PPID=1
+# exactly the check that would have caught the verified PPID=1
 # orphan: a leftover descendant that no single trial's own assertion,
 # taken alone, was inspecting.
 echo "=== run_ubsan_signal_handling_test: final full-sweep leftover-process check (all recorded PIDs) ==="

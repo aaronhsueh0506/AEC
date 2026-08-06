@@ -116,7 +116,10 @@ static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu,
     p->sample_rate = sample_rate;
     p->mu = mu;
     p->delta = delta;
-    p->alpha_power = 0.9f;
+    /* Far-end power EMA, per hop. Authored at the legacy hop=160/16000
+     * (10 ms) grid. Mirrors filters.py PBFDKF.alpha_power. */
+    p->alpha_power = aec3_growth_rehop(0.9f, 160, 16000,
+                                       p->hop_size, p->sample_rate);
     p->enable_td_constraint = 1;
     p->partition_idx = 0;
     p->call_counter = 0;
@@ -162,7 +165,16 @@ static void pbfdaf_zero_state(PBFDAF* p) {
 int pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size,
                     int with_process_scratch, int sample_rate) {
-    int hop = (hop_size > 0) ? hop_size : block_size / 2;
+    int hop;
+    /* sample_rate is load-bearing, not decorative: it retimes alpha_power and
+     * initial_state_threshold_hops. aec_create() validates it upstream, but
+     * this is public API and a direct caller passing 0 would otherwise build a
+     * filter whose EMAs never adapt, with no error anywhere. Reject rather
+     * than substitute a default -- guessing the caller's grid is how a silent
+     * 1.6x mistiming gets shipped. */
+    if (!p || sample_rate <= 0) return -1;
+    hop = (hop_size > 0) ? hop_size : block_size / 2;
+    if (hop <= 0) return -1;
     pbfdaf_compute_sizes(hop, &p->hop_size, &p->block_size,
                          &p->fft_size, &p->n_freqs);
     /* Set early (before any malloc below) so pbfdaf_free(p) is safe to call
@@ -582,7 +594,7 @@ void pbfdaf_process(PBFDAF* p,
          * UBSan-confirmed signed-overflow fix, floored at LONG_MAX: unlike
          * poor_excitation_counter (fixed above with a tight
          * n_partitions cap), call_counter's raw value is read bit-exact by
-         * test/parity_pbfdkf.c (`flt.base.call_counter != exp_call`,
+         * test/historical/parity_pbfdkf.c (`flt.base.call_counter != exp_call`,
          * explicitly documented above as one of the 3 fields this port
          * keeps bit-exact) -- capping at N/the startup threshold would
          * still satisfy the `<= N` gate below, but would desync the raw
@@ -689,7 +701,12 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
         p->erl_per_bin[k] = 0.1f;
         p->e2_coarse_per_bin[k] = 0.0f;
     }
-    p->alpha_r = 0.95f;
+    /* Measurement-noise PSD EMA, per hop. NOTE the reference grid is
+     * hop=256/16000 (16 ms), NOT the 10 ms grid used above: authored by
+     * commit e9cb383, whose config declared frame_size=512/hop_size=256.
+     * Retiming off 10 ms would be wrong by 1.6x. Mirrors filters.py. */
+    p->alpha_r = aec3_growth_rehop(0.95f, 256, 16000,
+                                   p->base.hop_size, p->base.sample_rate);
     p->h_error_floor = (float)AEC3_H_ERROR_FLOOR_FLOAT;
     p->h_error_ceil  = (float)AEC3_H_ERROR_CEIL_FLOAT;
     /* The AEC3_LEAKAGE_*_PER_HOP #defines pre-bake the x2.5 factor for the
@@ -721,11 +738,15 @@ int pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
     /* Set early (before any malloc below) so pbfdkf_free(p) is safe to call
      * from the OOM path even if the very first allocation fails -- see
      * pbfdaf_init's identical reasoning. */
+    if (!p) return -1;
     p->is_static = 0;
     if (pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size, 0,
                      sample_rate) != 0)
-        return -1;   /* F04: base filter's nested fft_create() failed (OOM);
-                      * pbfdaf_init already freed its own partial state. */
+        return -1;   /* F04: base filter's nested fft_create() failed (OOM), or
+                      * (2026-08) sample_rate/hop rejected -- alpha_r here is
+                      * retimed off the same grid, so a bad rate must not get
+                      * past this point. pbfdaf_init already freed its own
+                      * partial state or wrote nothing at all. */
     int K = p->base.n_freqs;
     p->Q_high = (float*)malloc((size_t)K * sizeof(float));
     p->Q_low  = (float*)malloc((size_t)K * sizeof(float));
@@ -1083,7 +1104,7 @@ void pbfdkf_process(PBFDKF* p,
         /* startup / poor-excitation / saturation gates → refresh only.
          * UBSan-confirmed signed-overflow fix, floored at LONG_MAX -- same
          * bit-exact-parity reasoning as pbfdaf_process's call_counter
-         * increment above (test/parity_pbfdkf.c asserts this exact field
+         * increment above (test/historical/parity_pbfdkf.c asserts this exact field
          * on the PBFDKF/main-filter path). */
         if (b->call_counter < LONG_MAX) b->call_counter += 1;
         if (b->call_counter <= N || b->poor_excitation_counter < N ||

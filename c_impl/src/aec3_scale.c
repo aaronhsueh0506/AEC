@@ -85,7 +85,24 @@ float aec3_per_block_growth_to_per_hop(float per_block_multiplier,
 float aec3_growth_rehop(float retention_at_ref, int ref_hop_samples,
                         int ref_sample_rate, int hop_samples,
                         int sample_rate) {
-    float ref_seconds = (float)ref_hop_samples / (float)ref_sample_rate;
-    float hop_seconds = (float)hop_samples / (float)sample_rate;
+    float ref_seconds, hop_seconds;
+    /* Guard here rather than at each call site: this is the single funnel every
+     * retimed constant passes through, and a non-positive rate/hop would make
+     * hop_seconds Inf or negative, so powf() returns 0 or NaN and silently
+     * poisons an EMA that is only ever read, never validated. Falling back to
+     * the authoring value is the one well-defined answer -- it degrades to "not
+     * retimed" (the pre-2026-08 behaviour) instead of to a dead filter.
+     *
+     * The top-level AecConfig validator already rejects these, so this is
+     * unreachable through aec_create(); it exists for the direct pbfdaf_init()/
+     * pbfdkf_init()/saturation_init() entry points, which are public API and
+     * are called by tests and by out-of-tree integrations. saturation_init()
+     * in particular returns void and has no other way to refuse. */
+    if (sample_rate <= 0 || hop_samples <= 0 ||
+        ref_sample_rate <= 0 || ref_hop_samples <= 0) {
+        return retention_at_ref;
+    }
+    ref_seconds = (float)ref_hop_samples / (float)ref_sample_rate;
+    hop_seconds = (float)hop_samples / (float)sample_rate;
     return powf(retention_at_ref, hop_seconds / ref_seconds);
 }

@@ -109,7 +109,7 @@
 # be FP_ALLOWLIST_RC -- see the "link-flags character-safety coverage"
 # section below.)
 #
-# LINK-FLAGS (LDFLAGS/EXTRA_LDFLAGS) CHARACTER-SAFETY COVERAGE (Codex
+# LINK-FLAGS (LDFLAGS/EXTRA_LDFLAGS) CHARACTER-SAFETY COVERAGE (regression
 # review, replicated from audio_common's identical fix -- see that repo's
 # Makefile/test suite (search "S25") for the full writeup this section
 # mirrors): the allow-list above originally validated FP_INPUT_FLAGS only

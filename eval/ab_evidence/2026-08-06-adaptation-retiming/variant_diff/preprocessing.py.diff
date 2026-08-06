@@ -1,0 +1,15 @@
+--- /private/tmp/claude-501/-Users-mingyu-Desktop-novatek-SE/fdd8dd4d-5e9f-4d28-b239-09e595e85967/scratchpad/bench/v2_legacy/preprocessing.py	2026-08-06 13:05:54
++++ /private/tmp/claude-501/-Users-mingyu-Desktop-novatek-SE/fdd8dd4d-5e9f-4d28-b239-09e595e85967/scratchpad/bench/v2_retimed/preprocessing.py	2026-08-06 13:05:54
+@@ -71,8 +71,10 @@
+         # config declaring frame_size=512/hop_size=256. The defaults above
+         # reproduce the authored values so standalone/diagnostic use is
+         # unchanged.
+-        self.alpha_attack = 0.3
+-        self.alpha_release = 0.98
++        self.alpha_attack = aec3_scale.growth_rehop(
++            0.3, 256, 16000, hop_size, sample_rate)    # fast attack
++        self.alpha_release = aec3_scale.growth_rehop(
++            0.98, 256, 16000, hop_size, sample_rate)   # slow release
+ 
+     def detect(self, signal: np.ndarray) -> float:
+         """Detect saturation level in signal. Returns smoothed level in [0, 1]."""

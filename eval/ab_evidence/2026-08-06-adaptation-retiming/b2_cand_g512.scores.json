@@ -1,0 +1,482 @@
+{
+  "label": "b2_cand_g512",
+  "summary": {
+    "NE": {
+      "n": 30,
+      "echo_mean": 4.98388261795044,
+      "deg_mean": 2.5561042030652366
+    },
+    "DT_static": {
+      "n": 4,
+      "echo_mean": 4.161375999450684,
+      "deg_mean": 2.3132998943328857
+    },
+    "FS_movement": {
+      "n": 25,
+      "echo_mean": 3.150285310745239,
+      "deg_mean": 4.999684677124024
+    },
+    "FS_static": {
+      "n": 5,
+      "echo_mean": 2.930691385269165,
+      "deg_mean": 4.99950475692749
+    },
+    "DT_movement": {
+      "n": 26,
+      "echo_mean": 4.054976197389456,
+      "deg_mean": 2.289415432856633
+    }
+  },
+  "scores": {
+    "00d2fda6-46a5-4380-933d-335f4e00bd86_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999638080596924,
+      "deg": 2.7983973026275635
+    },
+    "00t5hG031EmZTpJtcnhS0g_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999957084655762,
+      "deg": 2.626929759979248
+    },
+    "0132ca07-7891-461a-9944-c78f0208e1f0_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999887466430664,
+      "deg": 2.6345484256744385
+    },
+    "014AzuqPZku2004NbTTmcA_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.995332717895508,
+      "deg": 4.411701202392578
+    },
+    "02a565aa-ca43-4023-8362-0e38d9f45202_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999992370605469,
+      "deg": 1.7005709409713745
+    },
+    "02f2lbI4f0Kj67Vu4oqmJg_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.998109817504883,
+      "deg": 4.0124616622924805
+    },
+    "03ra86gHhkWD5ttLpOXWkA_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999870777130127,
+      "deg": 2.4971978664398193
+    },
+    "04281ceb-b127-417e-a2f8-50ccd1a958be_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999998092651367,
+      "deg": 1.9296129941940308
+    },
+    "051aec4b-cdfb-48b7-8c9e-0325262b920b_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999996662139893,
+      "deg": 2.0493125915527344
+    },
+    "080ssMm6ZkSbKJOft5nfOg_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.998035430908203,
+      "deg": 3.9620909690856934
+    },
+    "089bda7c-0d68-44a3-8001-ab075ee32903_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999999046325684,
+      "deg": 1.6553031206130981
+    },
+    "08ec6dc2-c8a8-423f-a5b1-73affaef4cfa_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999999046325684,
+      "deg": 1.8756892681121826
+    },
+    "0992d38e-9d39-4a13-a323-8fc51bf0c26c_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.9999895095825195,
+      "deg": 1.5535714626312256
+    },
+    "0GM6HqJCwUqGKDMb35gBKg_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.9998345375061035,
+      "deg": 2.8711490631103516
+    },
+    "0I0XMl3M0ECO0U1N0cJvpg_doubletalk": {
+      "bucket": "DT_static",
+      "echo": 4.556766033172607,
+      "deg": 1.456403136253357
+    },
+    "0I0XMl3M0ECO0U1N0cJvpg_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 4.25085973739624,
+      "deg": 4.999619007110596
+    },
+    "0I5GfBeKbkyZz9aTFW9dXg_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.86480712890625,
+      "deg": 2.0826704502105713
+    },
+    "0KjzXA3g20qsd8zmSekADw_farend_singletalk": {
+      "bucket": "FS_static",
+      "echo": 3.266390562057495,
+      "deg": 4.999373435974121
+    },
+    "0MUptpjaOEykR0UDj8telw_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999975681304932,
+      "deg": 1.801883339881897
+    },
+    "0TWdnelx0ECAqW7WnLr4Ww_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999668598175049,
+      "deg": 2.845417022705078
+    },
+    "0Ufz0DNYKkeJdmeZSP3tkQ_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.9984025955200195,
+      "deg": 3.3578925132751465
+    },
+    "0YbPVdUxc0K5n3ffNbRhoA_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999479293823242,
+      "deg": 1.304771065711975
+    },
+    "0a60cae0-d1a1-409f-af55-29949398bf36_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999993324279785,
+      "deg": 2.205502986907959
+    },
+    "0b3ca3f8-0a82-47a8-81dd-14b97deb5cb0_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999847412109375,
+      "deg": 2.535095453262329
+    },
+    "0c2fd9c0-a2cc-4a94-99fe-ff61d45027dc_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999995231628418,
+      "deg": 2.5133140087127686
+    },
+    "0c923332-2145-4c03-bec9-415e8792db13_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999766826629639,
+      "deg": 3.3544511795043945
+    },
+    "0cb258f1-5d71-4722-ba68-a8f15832e595_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.99973201751709,
+      "deg": 3.316737174987793
+    },
+    "0ccd139d-743b-450a-b55e-5fe132fd1d57_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.8306379318237305,
+      "deg": 2.1006124019622803
+    },
+    "0cf99a5e-dccc-40c0-84bb-68dc642363ce_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.9999918937683105,
+      "deg": 2.020669460296631
+    },
+    "0fb22f26-4c37-4bc3-b2da-61ffb5ce7cbc_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999998092651367,
+      "deg": 2.9970743656158447
+    },
+    "0ge5avh5skCpMilSy1UPIw_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.835161209106445,
+      "deg": 1.7996716499328613
+    },
+    "0luXwWjGEEC9G5nf0yTVXw_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.227140426635742,
+      "deg": 4.999997615814209
+    },
+    "0ow14xnMzUK7PqEGfJ440A_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.999874591827393,
+      "deg": 2.717522621154785
+    },
+    "0pUW17od8U28mntA3Siv5w_nearend_singletalk": {
+      "bucket": "NE",
+      "echo": 4.99850606918335,
+      "deg": 3.151303768157959
+    },
+    "1fvt8ajGxk2OhS7UglBjoA_farend_singletalk": {
+      "bucket": "FS_static",
+      "echo": 3.1910228729248047,
+      "deg": 4.999939918518066
+    },
+    "3UAwzzOa40aCXQAmEdpwww_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 3.141648769378662,
+      "deg": 4.999862194061279
+    },
+    "49DamGOwmUWGCn23bmI8xw_farend_singletalk": {
+      "bucket": "FS_static",
+      "echo": 3.834351062774658,
+      "deg": 4.9982781410217285
+    },
+    "49IIo03GZ0CYQOmeA3A0BA_doubletalk": {
+      "bucket": "DT_static",
+      "echo": 4.118704319000244,
+      "deg": 2.817927598953247
+    },
+    "49IIo03GZ0CYQOmeA3A0BA_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.0350341796875,
+      "deg": 2.836728811264038
+    },
+    "4pN9yn7mhEa5iDiKnr5jlw_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 4.435386657714844,
+      "deg": 4.998714447021484
+    },
+    "5bJUo1K3uEmMrGa9UhGyVg_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.802414894104004,
+      "deg": 4.999935150146484
+    },
+    "7GTxyTksSUqCnP5y0ILG4A_doubletalk": {
+      "bucket": "DT_static",
+      "echo": 3.8626012802124023,
+      "deg": 3.1831178665161133
+    },
+    "7GTxyTksSUqCnP5y0ILG4A_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 3.2259440422058105,
+      "deg": 3.4006295204162598
+    },
+    "7GTxyTksSUqCnP5y0ILG4A_farend_singletalk": {
+      "bucket": "FS_static",
+      "echo": 1.3704314231872559,
+      "deg": 5.0
+    },
+    "BYRb7rMHZUOVwHO90KRg9Q_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 3.2416582107543945,
+      "deg": 4.999764919281006
+    },
+    "Fi80N5kW9U6nwaoS04O3vQ_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.499023914337158,
+      "deg": 4.999988555908203
+    },
+    "HAxmF7v4dE0itSp5R5B3Dw_doubletalk": {
+      "bucket": "DT_static",
+      "echo": 4.1074323654174805,
+      "deg": 1.7957509756088257
+    },
+    "HAxmF7v4dE0itSp5R5B3Dw_farend_singletalk": {
+      "bucket": "FS_static",
+      "echo": 2.9912610054016113,
+      "deg": 4.999932289123535
+    },
+    "Hp5g1asacUCt5rJVLO1FuQ_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.589748382568359,
+      "deg": 1.3733067512512207
+    },
+    "Hp5g1asacUCt5rJVLO1FuQ_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 3.9739832878112793,
+      "deg": 4.9995903968811035
+    },
+    "Hq00pd6Ey0mGtuMFRoF79w_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.8951401710510254,
+      "deg": 4.999958515167236
+    },
+    "I2bme08keUmAnyJRKNYDGQ_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.141440391540527,
+      "deg": 1.8301870822906494
+    },
+    "I2bme08keUmAnyJRKNYDGQ_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 3.297907829284668,
+      "deg": 4.999912738800049
+    },
+    "IqtJR4tjJkWrwUjYorz0Og_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.5895400047302246,
+      "deg": 4.999995708465576
+    },
+    "IrQvqOTCmEWMXn9k2ICtRQ_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 2.5668766498565674,
+      "deg": 2.4788472652435303
+    },
+    "IrQvqOTCmEWMXn9k2ICtRQ_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.16748046875,
+      "deg": 5.0
+    },
+    "Ixf70mgKwkCoFYq32586cw_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.117476463317871,
+      "deg": 3.3453314304351807
+    },
+    "Ixf70mgKwkCoFYq32586cw_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 3.7667078971862793,
+      "deg": 4.999486923217773
+    },
+    "Ja8OngfthkOCmL8ldcRNyg_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 3.582813262939453,
+      "deg": 4.999751567840576
+    },
+    "Je6gJ7y1PECStwxnrOe9aA_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.026672840118408,
+      "deg": 2.7194910049438477
+    },
+    "Je6gJ7y1PECStwxnrOe9aA_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 4.076003074645996,
+      "deg": 4.9989776611328125
+    },
+    "JjCzlhn3gEiBQvfJtPNJ9A_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 3.977628231048584,
+      "deg": 2.538100242614746
+    },
+    "JjCzlhn3gEiBQvfJtPNJ9A_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.9153401851654053,
+      "deg": 4.999940395355225
+    },
+    "JtodX3Ug6Eu5TYu0HN5IOw_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.067223310470581,
+      "deg": 4.999999523162842
+    },
+    "KSN5Jrzo7kaixP0z8xfr4Q_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.380393981933594,
+      "deg": 1.5545259714126587
+    },
+    "KSN5Jrzo7kaixP0z8xfr4Q_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 3.414691209793091,
+      "deg": 4.9992146492004395
+    },
+    "KgCF0xsN8EibTdJ2Yac2dw_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 4.124842166900635,
+      "deg": 4.999327659606934
+    },
+    "Khk1qeMXFUuvFhw3YRSm0w_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.777050256729126,
+      "deg": 4.999964714050293
+    },
+    "LHsrJBRGnUKiMC2mihEr0g_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.611749649047852,
+      "deg": 2.1899068355560303
+    },
+    "LHsrJBRGnUKiMC2mihEr0g_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.460648536682129,
+      "deg": 4.999979019165039
+    },
+    "LN18k5r8t00C9DulUd809A_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.218281269073486,
+      "deg": 1.996658205986023
+    },
+    "LeV1uF4j10Whm0FPG80tmw_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.034017324447632,
+      "deg": 5.0
+    },
+    "Lsa5WpwTpUeb7C9dc9RXuQ_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 3.632474422454834,
+      "deg": 2.0220389366149902
+    },
+    "Lsa5WpwTpUeb7C9dc9RXuQ_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 2.544520378112793,
+      "deg": 4.999990940093994
+    },
+    "ML4MF3Mea0yurjceNQPfNA_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 3.538177967071533,
+      "deg": 4.999235153198242
+    },
+    "MYrVxVEMxkaE7OuyTUmI0Q_farend_singletalk_with_movement": {
+      "bucket": "FS_movement",
+      "echo": 3.932912826538086,
+      "deg": 4.9989094734191895
+    },
+    "N2rQLbnp2UOg2QFRaggbDw_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 3.9399330615997314,
+      "deg": 2.5773777961730957
+    },
+    "N94NwopiZEyNnraWHLMDcg_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.021589279174805,
+      "deg": 2.232426881790161
+    },
+    "OXCtw0FVhUWGUBil6Uucdw_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 3.8308284282684326,
+      "deg": 3.12992262840271
+    },
+    "OmB0Ht0hmE2crVnftAEtsw_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.498303413391113,
+      "deg": 1.4389638900756836
+    },
+    "QEeKiaNiDECfqXTRrDFWWw_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 3.9664855003356934,
+      "deg": 2.625221014022827
+    },
+    "QK70KpLuZ0O43BBSWEZvHg_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.141985893249512,
+      "deg": 2.354933738708496
+    },
+    "QkRkwwFKVEar0WtcuvJsZg_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 3.963623523712158,
+      "deg": 2.4068446159362793
+    },
+    "S22FCqKDWUyymN1YbpItIw_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.2204790115356445,
+      "deg": 3.682915210723877
+    },
+    "SgKY30fjT0G8e3kQL0RHSQ_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.140264987945557,
+      "deg": 2.616743564605713
+    },
+    "SwfEwuGDlkWYy9pb4H00eQ_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.130590438842773,
+      "deg": 1.6095930337905884
+    },
+    "TGZ5Wq0SCUCOXPsfee3uMQ_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 3.781790256500244,
+      "deg": 1.9496309757232666
+    },
+    "Tgtk8jp1zkqmKzsmdrKt0g_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.237484931945801,
+      "deg": 1.4303160905838013
+    },
+    "V0JqgjlrB0Ke9y91r0rxNw_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.627641201019287,
+      "deg": 1.5420894622802734
+    },
+    "V6Mw0Ti8RUSkzvMGB4WGiw_doubletalk_with_movement": {
+      "bucket": "DT_movement",
+      "echo": 4.404660701751709,
+      "deg": 1.6420702934265137
+    }
+  }
+}

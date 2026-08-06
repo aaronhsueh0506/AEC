@@ -1,42 +1,11 @@
-/* test_zero_heap_aec.c — strict init-to-destroy zero-heap acceptance for the
- * AEC static-pool path (review F02 closure at the module level).
+/* Strict zero-heap acceptance test for the caller-owned pool path.
  *
- * Proves that with the caller-pool constructor (aec_get_mem_size + aec_init)
- * the AEC makes ZERO malloc/calloc/realloc/free calls across:
+ * Proves that AEC makes no malloc/calloc/realloc/free calls across:
  *   aec_init -> N hops aec_process -> aec_reset -> N hops -> aec_destroy
- * and across 50 repeated init/destroy cycles on the same pool — on BOTH FFT
- * backends (KISS was already heap-free; NE10's twiddle configs are carved
- * from the pool since audio_common's vendored patch P0001, see
- * audio_common/lib/ne10/VENDORED.md).
- *
- * Allocator observation reuses audio_common's counting hook
- * (test/zero_heap_hook.c — dyld __interpose dylib on macOS, ld --wrap on
- * Linux; see that file for why).
- *
- * Build (standalone, from c_impl/; macOS shown — build the hook dylib first
- * via `make -C ../../audio_common BACKEND=<b> test_zero_heap`):
- *   gcc -O2 -ffp-contract=off -fno-builtin -std=gnu99 \
- *       -Iinclude -Iexample -I../../audio_common/include \
- *       -I../../audio_common/test \
- *       test/test_zero_heap_aec.c $(find src -name '*.c') \
- *       "$$(make -s -C ../../audio_common BACKEND=<b> print-lib-path)" \
- *       -L"$$(make -s -C ../../audio_common BACKEND=<b> print-bin-dir)" -lzero_heap_hook \
- *       -Wl,-rpath,"$$(make -s -C ../../audio_common BACKEND=<b> print-bin-dir)" \
- *       -lm -o /tmp/tzha
- *   (cd ../../audio_common && /tmp/tzha)
- * (-fno-builtin: clang otherwise deletes unobserved alloc/free pairs at -O2
- * and the hook sanity-check would pass vacuously. bin/<backend>-<config-hash>/
- * is CFG_SIG-keyed now -- print-bin-dir/print-lib-path resolve the exact path
- * for whatever flags this build command used, same as `make BACKEND=<b>
- * test_zero_heap` used to build the hook dylib. Still run with audio_common
- * as the cwd, same as before this path became CFG_SIG-keyed: the hook
- * dylib's install name (LC_ID_DYLIB) is the literal relative path it was
- * built at -- bin/<backend>-<config-hash>/libzero_heap_hook.dylib -- which
- * dyld resolves relative to the PROCESS'S CWD at load time, not relative to
- * the rpath entry above (the rpath only helps for @rpath/-prefixed
- * references, which this dylib's plain relative install name is not); the
- * -L/-rpath flags above only matter at LINK time, to find the .dylib to
- * link against in the first place.)
+ * for 50 lifecycles on both FFT backends. The platform-specific allocator
+ * hook lives in audio_common/test/zero_heap_hook.c. Run with
+ * `make BACKEND=kiss|ne10 test-zero-heap`; -fno-builtin is required so the
+ * hook sanity allocation cannot be optimized away.
  */
 #include "aec.h"
 #include "zero_heap_hook.h"

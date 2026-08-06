@@ -3,7 +3,7 @@
 C implementation of the AEC algorithm. Top-level orchestration in
 `aec.{h,c}`, CLI binary `bin/aec_wav`.
 
-> **User & integration guide** → [../docs/c_user_and_integration_guide.md](../docs/c_user_and_integration_guide.md)
+> **User & integration guide** → [../docs/c_user_manual_zh_TW.md](../docs/c_user_manual_zh_TW.md)
 > Algorithm reference → [../docs/aec_methods.md](../docs/aec_methods.md)
 > Changelog → [../CHANGELOG.md](../CHANGELOG.md)
 
@@ -112,7 +112,8 @@ audio_common's vendored KISS FFT's own error-log macro).
 ## Run
 
 ```bash
-./bin/aec_wav mic.wav ref.wav out.wav --preset balanced --cng
+BIN="$(make -s print-bin-dir)"
+"$BIN"/aec_wav mic.wav ref.wav out.wav --preset balanced --cng
 ```
 
 Presets (single residual-echo strength axis `min_gain_floor_far_active_db`):
@@ -136,15 +137,15 @@ aec_process_capture(&a, mic, out);    /* consume + process one mic hop */
 
 Lockstep (`analyze_render` then `process_capture`) is **byte-identical** to
 `aec_process`; underrun/overrun return `AEC_BUF_RENDER_UNDERRUN`/`_OVERRUN`. See
-[guide §10.1.1](../docs/c_user_and_integration_guide.md) and `test/stream_sim.c`.
+[使用手冊 §8.4](../docs/c_user_manual_zh_TW.md) and `test/stream_sim.c`.
 
 ## Precision & regression anchors
 
 **Float32 campaign (2026-07-15): Python bit-exact parity is retired
 repo-wide.** All production C is now float32 end-to-end — delay chain,
 orchestrator scalars, post/state modules, `residual_echo_estimator`, HPF
-(`reverb_decay_estimator.c` is the sole remaining `double` file, and it is
-dead code with no production caller). The Python reference (`python/aec.py`,
+(`test/support/reverb_decay_estimator.c` is the sole remaining `double` file;
+it is test-only and is not linked into `libaec.a`). The Python reference (`python/aec.py`,
 fp64) is now the **algorithm spec**; this C port is the float32
 **implementation**; Python↔C comparison is **tolerance-based** (~−60 dB
 class, correlation 0.99999958) — never 0/0.
@@ -191,7 +192,7 @@ malloc path (`test_static_aec.c`).
   `-fsanitize=undefined` (same shape as `test/run_selftest_ubsan.sh`).
 - `test/test_rate_structural.c` (`make test-rate-structural`) — the
   **permanent per-rate structural regression test** (M5 multi-rate campaign,
-  review F01): at each of the four whitelisted grids (8k/256, 16k/256,
+  multi-rate contract): at each of the four whitelisted grids (8k/256, 16k/256,
   16k/512, 48k/1024) checks synthesis-window COLA, impulse-through-linear
   and impulse-through-full-post-chain convergence, `aec_get_mem_size`
   monotonicity/preset-invariance, `aec_init` (static pool) byte-equal to
@@ -201,12 +202,11 @@ malloc path (`test_static_aec.c`).
   frames`/`EPV_FAST_TC`/`EPV_SLOW_TC` cover approximately the same
   wall-clock duration at every grid. 107 checks total.
 
-The remaining per-module `test/parity_*.c` ⟷ `python/diag/gen_*_golden.py`
+The remaining per-module `test/historical/parity_*.c` ⟷ `python/diag/gen_*_golden.py`
 harnesses are kept as **historical** diagnostics — they compare against fp64
 Python goldens predating the campaign and may report drift by design now
 that the modules they exercise are float32; some also read f64 golden
-scalars into f32 configs via silent narrowing. See
-[`test/PARITY_REPORT.md`](test/PARITY_REPORT.md) for the full disposition.
+scalars into f32 configs via silent narrowing.
 See `docs/` for the numpy→C idioms (`np.abs(c64)**2` = scaled-hypot-FMA,
 complex×complex FMA, EMA double-coeff) that motivated the original per-module
 harness design.
@@ -216,7 +216,7 @@ harness design.
 For embedded targets, build one pool and place the whole instance in it:
 
 ```c
-size_t bytes = aec_get_mem_size(&cfg);   /* 16k default 256/128 balanced: 399,056 B on current KISS build */
+size_t bytes = aec_get_mem_size(&cfg);   /* query at runtime; size is backend/config dependent */
 void*  pool  = your_static_alloc(bytes); /* MUST be 16-byte aligned (posix_memalign, etc.) */
 Aec*   a     = aec_init(pool, bytes, &cfg);  /* NULL on failure; byte-equal to aec_create output */
 /* ... aec_process(a, ...) ... */
@@ -242,4 +242,4 @@ no-op for pool instances on either backend.
 
 Full CLI options, C API reference, integration rules, runtime resource
 notes, and validation steps:
-[../docs/c_user_and_integration_guide.md](../docs/c_user_and_integration_guide.md).
+[../docs/c_user_manual_zh_TW.md](../docs/c_user_manual_zh_TW.md).

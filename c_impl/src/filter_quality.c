@@ -44,7 +44,7 @@ void fq_update(FilteringQualityAnalyzer *m,
      * floored at INT_MAX rather than at either gate threshold
      * (FQ_STARTUP_HOPS / FQ_RESET_HOPS). Unlike a pure boolean-gate
      * counter, all three raw values are read bit-exact by
-     * test/parity_filter_quality.c (`got[3..4]` via fq_startup_blocks/
+     * test/historical/parity_filter_quality.c (`got[3..4]` via fq_startup_blocks/
      * fq_reset_blocks, `got[6]` via m.convergence_hops_counter directly),
      * which mirrors this module's Python reference's own unbounded
      * counters over a multi-frame sequence -- capping at the gate

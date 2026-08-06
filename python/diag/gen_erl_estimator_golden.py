@@ -2,7 +2,7 @@
 
 Runs the Python ErlEstimator over a deterministic float32 render/capture-PSD
 sequence and writes inputs + full per-frame state to a raw little-endian file
-that c_impl/test/parity_erl_estimator.c replays.
+that c_impl/test/historical/parity_erl_estimator.c replays.
 
 The sequence is engineered to exercise every branch:
   * startup gate (blocks_since_reset < startup_hops → early return)

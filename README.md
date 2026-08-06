@@ -6,7 +6,7 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v3.23.0 (2026-06-20) — Python `aec.py` `__version__ = "3.23.0"`. The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the no-pre-align (no-PA) online-delay path — the matched-filter pre-echo `accumulated_error` binning bug (`i//4` → AEC3 cumsum prefix-error) that had collapsed pre-echo to 0 and corrupted no-PA delay estimation — and ships a default-ON DT-deg recovery stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`, `min_gain_floor_dt_db = −20`). Three Pareto presets — `mild` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.23.0]`.
+**Release**: v4.0.0rc1 — Python `aec.py` `__version__ = "4.0.0rc1"`. **Not ship-ready.** Two entries under `[4.0.0]` (the AEC3 Tier-2 constant audit and the 16 kHz default-grid flip) change production 16 kHz output and carry their own "800-case bench not run" disclaimers, and the hop-authored timing audit is incomplete outside `detectors.*` — see `[4.0.0]` "Known gaps". Do not tag or publish until those close. The `4.x` major bump records the public-ABI and output-contract breaks listed under `[4.0.0]` in [CHANGELOG.md](CHANGELOG.md) (custom output limiter removed so output is no longer bit-identical, `AecConfig`/`AecResContext` layout changes, 16 kHz default grid 512/256 → 256/128), **not** a new algorithm generation. The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the no-pre-align (no-PA) online-delay path — the matched-filter pre-echo `accumulated_error` binning bug (`i//4` → AEC3 cumsum prefix-error) that had collapsed pre-echo to 0 and corrupted no-PA delay estimation — and ships a default-ON DT-deg recovery stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`, `min_gain_floor_dt_db = −16`). Three Pareto presets — `mild` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.23.0]`.
 
 **Float32 campaign** (2026-07-15, on top of 3.23.0): all production C is now
 float32 end-to-end (delay chain, orchestrator scalars, post/state modules,
@@ -90,7 +90,7 @@ single-channel DT-deg-vs-echo wall; all share the same `_aec3_post` chain and
 
 | | |
 |---|---|
-| Static pool, KISS (host/reference) | 397,072 B (current `aec_get_mem_size`; 543,040 B for the 512/256 grid) |
+| Static pool | Backend、grid、filter 長度與功能開關都會影響大小；部署時以 `aec_get_mem_size()` 查詢，不使用文件中的固定常數 |
 | Static pool, other backend | Query `aec_get_mem_size`; FFT workspace is backend-dependent |
 | Compute / frame | 4 × 256-FFT + Kalman update (129 bins × 7 partitions) |
 | FFT                                | KISS FFT (float32; NE10 ARM-NEON opt-in) — ~float32 precision vs numpy `np.fft` |
@@ -108,13 +108,13 @@ per-region breakdown → [c_impl/STATIC_MEMORY.md](c_impl/STATIC_MEMORY.md).
 | Delay direction           | positive only (mic lags ref). Negative-delay scenarios must be aligned upstream |
 | Stationary far + weak NE  | linear AEC may absorb very low-energy NE syllables into the echo path. Stationary-DT hangover mitigates but cannot fully restore worst frames |
 | DT-from-frame-0           | NE present from sample 0 prevents the filter from ever converging — see [docs/aec_methods.md 附錄 E](docs/aec_methods.md#附錄-e-dt-from-frame-0-限制) |
-| Echo-path > filter length | echo tail beyond `filter_length_ms` (default 52 ms) is not modelled. Larger rooms need longer filter (cost: memory + compute) |
-| Mid-stream SR/filter change | not supported. `filter_length_ms` is fixed at construction; SR change requires destroy + re-create |
+| Echo-path > filter length | echo tail beyond `filter_length` (default 52 ms worth of samples) is not modelled. Larger rooms need a longer filter (cost: memory + compute). C-API only — there is no CLI flag for it |
+| Mid-stream SR/filter change | not supported. `filter_length` is fixed at construction; SR change requires destroy + re-create |
 | Mic/ref clock drift       | sustained sample-rate drift between mic and ref tanks ERLE (filter cannot track) |
 
 ### Common problems & adjustments
 
-Both Python (`aec.py`) and C (`bin/aec_wav`) use the same algorithm; the
+Both Python (`aec.py`) and C (`c_impl`'s config-keyed `aec_wav`) use the same algorithm; the
 adjustments below apply to both unless noted. CLI flag examples shown for
 C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 
@@ -124,11 +124,11 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 | **NE clipped during double-talk** | Lower preset → `--preset mild` (−20 dB floor, near-priority: keeps more near-end at the cost of more echo leak). Don't tweak individual RES knobs — preset values are co-tuned. |
 | **Slow startup / first-second echo** | Filter convergence needs ≥ 0.5 s of meaningful far energy. Normal adaptive behavior. Consider muting output during application warm-up (e.g. play a "connecting…" cue). |
 | **Echo spikes when device moves** | Echo path changes → EPC fires → ~200 ms re-convergence with brief leak. Usually self-recovers. For frequent movement, increase filter length. |
-| **Output sounds muffled / pumping in NE-only** | Comfort noise mismatch. Try `--cng` (C) / `--enable-cng` (Python) to shape the noise floor; do NOT stack a second CNG layer downstream. |
+| **Output sounds muffled / pumping in NE-only** | Comfort noise mismatch. Try `--cng` (both C and Python; Python uses `--no-cng` to disable) to shape the noise floor; do NOT stack a second CNG layer downstream. |
 | **First file sounds OK but second file glitches in batch processing** | Missed `aec_reset` between files. DT / EPC / convergence state accumulates. Reset before each independent stream. |
-| **Linear-AEC residual sounds wrong (separate filter from RES)** | `./bin/aec_wav mic ref linear_only.wav --no-res` (or Python `--no-res` equivalent). Lets you isolate filter-side issues from RES-side issues. |
+| **Linear-AEC residual sounds wrong (separate filter from RES)** | `"$BIN"/aec_wav mic ref linear_only.wav --no-res` after resolving `BIN="$(make -s print-bin-dir)"` in `c_impl/` (or use the Python `--no-res` equivalent). This isolates filter-side issues from RES-side issues. |
 | **Per-frame state inspection** | C: `--debug-level 2 --debug-log /tmp/aec.log`, then `grep PBFDKF /tmp/aec.log`. Python: `python3 aec.py mic ref out --diag`. |
-| **Detect mic/ref drift or wrong delay** | Run with `--no-delay-est`, supply pre-aligned files, compare output vs the online-delay-est version. Large divergence → drift or a delay outside `max_delay_ms` (default 1024 ms since v3.10.4; was 250 ms ≤ v3.8.3 / 512 ms in v3.10.0–v3.10.3). |
+| **Detect mic/ref drift or wrong delay** | Run with `--no-delay-est`, supply pre-aligned files, compare output vs the online-delay-est version. Large divergence → drift, or a delay beyond the acquirable ceiling (1216 / 608 / 608 ms at 8 / 16 / 48 kHz — compile-time, not raised by `max_delay_ms`; see the C manual §3). |
 | **Build mismatch between Python and C output** | Verify C built with `-ffp-contract=off` (mandatory) and same preset / `--cng` setting. Output WAV defaults to fp32 PCM in C; `AEC_OUT_FLOAT=0` for 16-bit PCM. |
 
 ---
@@ -175,8 +175,8 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 The v3.21 pipeline retired the legacy 9-stage `ResFilter`; the post-filter is
 now `AEC._aec3_post` driving the AEC3-aligned chain (`modules/state`,
 `modules/residual`, `modules/render`, `modules/delay`). Algorithm details →
-[docs/aec_methods.md](docs/aec_methods.md). PBFDKF / shadow overview →
-[docs/pbfdkf_shadow_intro.md](docs/pbfdkf_shadow_intro.md).
+[docs/aec_methods.md](docs/aec_methods.md). Historical PBFDKF/shadow parameter
+tables are not current default contracts.
 
 ### Future direction — NN post-filter after the linear AEC
 
@@ -218,9 +218,10 @@ AecResContext)` if `return_res_context` is *also* set), and after each `process(
 `aec.get_formed_output()` returns the same value `AecResContext.formed_output` would have —
 computed by running only the AEC3 `UseRefinedOutput`/`FormLinearFilterOutput` selection-and-
 crossfade step, not the heavier gain/CNG chain around it. Independent of `enable_res`: it
-does not skip RES/CNG when `enable_res=True`, and does not alter the limiter (still runs,
-still updates its own state) — only an additional value becomes readable. Byte-identical to
-`context.formed_output` in every configuration; see `python/test_formed_output_seam.py`.
+does not skip RES/CNG when `enable_res=True` — only an additional value becomes readable.
+Note this is the *selected and crossfaded* linear output, not the raw main-filter output,
+which is why a consumer needing the linear residual must read it. Byte-identical to
+`context.formed_output` in every configuration; see `python/tests/test_formed_output_seam.py`.
 
 This seam is **already exercised** in the
 [Audio_ALG](https://github.com/aaronhsueh0506/Audio_ALG) integration repo, whose
@@ -242,7 +243,8 @@ deterministic fallback. NN-integration contract →
 | `python/run_one_case.py` | One-call render of a single mic/ref pair plus a 5-panel PNG (mic / ref / out waveforms, mic+out spectrograms, per-frame ERLE). Default writes `<out>.png`; pass `--no-plot` to skip. |
 | `python/eval_aec_challenge.py` | Batch render on the AEC Challenge dataset. Supports `--all-presets`, alternative engines (`--aec3`, `--aec3-linear`, `--old-aec`, `--speex`), and parallel scenario processing. Writes `<stem>_ours.wav` etc. into the output dir. |
 | `python/bench_aecmos.py` | AECMOS scoring of rendered outputs. Reads a directory of `<stem>_ours.wav`, writes `scores.json` + `result.md`. Optional `--baseline` produces Δ vs a saved scores.json. |
-| `python/batch_c_eval.py` | Same dataset traversal as `eval_aec_challenge.py`, but invokes `c_impl/bin/aec_wav` instead of running the Python algorithm — used to render C outputs for AECMOS scoring. |
+| `python/eval_manifest90.py` | Fixed 90-case partial blind benchmark with ERLE/SDR and scenario-correct AECMOS metrics. |
+| `python/tests/` | Python regression tests for reset, grid timing, WOLA/context, and formed-output contracts. |
 
 ### Debug logging
 
@@ -250,7 +252,7 @@ deterministic fallback. NN-integration contract →
 |---|---|---|
 | Python (`python/aec.py`) | `--diag` on the CLI | per-second console line: ERLE / gain mean / shadow-advantage / DT indicator. For per-frame internal state, instantiate `AEC` programmatically and read `aec._diag` after each `aec.process(...)` call. |
 | Python (`python/run_one_case.py`) | always — generates the diagnostic PNG | mic / ref / out waveforms + spectrograms + per-frame ERLE |
-| C (`c_impl/bin/aec_wav`) | `--debug-level {0..3}`, optional `--debug-log <path>` | grep-friendly per-frame stderr (or file) lines: `[AEC][t=…s][f=…][PBFDKF] mu_mean=… P_mean=…`. Release builds (`-DNDEBUG`) strip log strings entirely. |
+| C (`c_impl/bin/<backend>-<config-hash>/aec_wav`) | `--debug-level {0..3}`, optional `--debug-log <path>` | grep-friendly per-frame stderr (or file) lines: `[AEC][t=…s][f=…][PBFDKF] mu_mean=… P_mean=…`. Release builds (`-DNDEBUG`) strip log strings entirely. |
 
 ---
 
@@ -283,16 +285,17 @@ python3 ../python/run_one_case.py mic.wav ref.wav out.wav --preset balanced
 ```bash
 cd c_impl
 make
+BIN="$(make -s print-bin-dir)"
 
-./bin/aec_wav mic.wav ref.wav out.wav                  # BALANCED preset
-./bin/aec_wav mic.wav ref.wav out.wav --preset aggressive
-./bin/aec_wav mic.wav ref.wav out.wav --cng            # enable CNG (default off)
-./bin/aec_wav mic.wav ref.wav out.wav --no-res         # skip residual filter
-./bin/aec_wav mic.wav ref.wav out.wav --debug-level 2  # per-frame log
+"$BIN"/aec_wav mic.wav ref.wav out.wav                  # BALANCED preset
+"$BIN"/aec_wav mic.wav ref.wav out.wav --preset aggressive
+"$BIN"/aec_wav mic.wav ref.wav out.wav --cng            # enable CNG (default off)
+"$BIN"/aec_wav mic.wav ref.wav out.wav --no-res         # skip residual filter
+"$BIN"/aec_wav mic.wav ref.wav out.wav --debug-level 2  # per-frame log
 ```
 
 C usage / API / integration details
-→ [docs/c_user_and_integration_guide.md](docs/c_user_and_integration_guide.md).
+→ [docs/c_user_manual_zh_TW.md](docs/c_user_manual_zh_TW.md).
 
 ---
 
@@ -343,8 +346,9 @@ python3 python/bench_aecmos.py out_python/ results/ --baseline /path/to/baseline
 # All presets at once (Python rendering only)
 python3 python/eval_aec_challenge.py wav/aec_challenge_blind/ --all-presets
 
-# C run on the same dataset
-python3 python/batch_c_eval.py wav/aec_challenge_blind/ -o out_c/ --preset balanced
+# C-side release gates (including real-WAV heap/pool byte equality)
+make -C c_impl test-static-aec
+make -C c_impl test-rate-structural test-process-context
 ```
 
 ---
@@ -359,9 +363,10 @@ AEC/
 │   ├── run_one_case.py              # single-case render + diagnostic plot (PNG)
 │   ├── eval_aec_challenge.py        # render outputs on the AEC Challenge dataset
 │   ├── bench_aecmos.py              # AECMOS scoring of rendered outputs
-│   └── batch_c_eval.py              # run the C binary in batch on the same dataset
+│   ├── eval_manifest90.py            # fixed partial blind benchmark
+│   └── tests/                        # Python regression tests
 ├── c_impl/                          # C implementation
-│   ├── README.md                    # short landing → docs/c_user_and_integration_guide.md
+│   ├── README.md                    # short landing → docs/c_user_manual_zh_TW.md
 │   ├── include/                     # public headers
 │   ├── src/                         # sources
 │   ├── example/
@@ -371,16 +376,12 @@ AEC/
 │   └── Makefile
 ├── docs/
 │   ├── aec_methods.md                   # canonical algorithm spec (v3.21)
-│   ├── aec_algorithm_guide.html         # presentation overview (v3.21)
-│   ├── architecture_v3_22_5_vs_aec3.html  # v3.22.5-pipeline vs AEC3 flowcharts (3.23.0 = config-only delta)
-│   ├── pbfdkf_shadow_intro.md
-│   ├── v3_22_5_release.md                # release summary + 3-way AEC3/Speex comparison
+│   ├── archive/                         # historical reports, presentations, and retired parameter guides
+│   ├── development_guide.md              # contributor invariants and validation commands
 │   ├── nn_integration_interface.md       # NN residual/NR/joint freq-domain seam
-│   ├── c_user_and_integration_guide.md  # canonical C CLI / API / integration guide
-│   └── bench/v3_21_3aadd2d_baseline/    # 800-case AECMOS anchor + 25-case byte-equal reference
-├── bin/                             # optional WebRTC benchmark helpers
-│   ├── aec3_cli, aec3_linear_cli, old_aec_cli
-└── wav/                             # test audio
+│   └── c_user_manual_zh_TW.md            # canonical C user manual (API + CLI appendix)
+├── eval/                            # fixed benchmark manifest + builder
+└── wav/                             # local/downloaded test audio (mostly ignored)
 ```
 
 ---

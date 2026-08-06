@@ -31,7 +31,10 @@ int main(int argc, char* argv[]) {
             n_frames, hop, threshold);
 
     Saturation s;
-    saturation_init(&s, threshold);
+    /* The golden's header carries hop but not sample_rate; this harness
+     * predates the retiming. 16000 reproduces the authored constants at
+     * hop=256 and keeps the existing golden valid. */
+    saturation_init(&s, threshold, hop, 16000);
 
     float* in_buf = (float*)malloc((size_t)hop * sizeof(float));
     int    fail   = 0;

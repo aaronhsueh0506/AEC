@@ -17,16 +17,11 @@ boundaries.
 This document is the deep algorithm specification for the production
 pipeline. The v3.21 release retires the legacy 9-stage `ResFilter`
 post-filter in favour of an AEC3-aligned chain
-(`AecState` + `ResidualEchoEstimator` + `SuppressionGain` + CNG). See
-[architecture_v3_22_5_vs_aec3.html](architecture_v3_22_5_vs_aec3.html)
-for the side-by-side flowcharts of the current build and the WebRTC AEC3 reference.
+(`AecState` + `ResidualEchoEstimator` + `SuppressionGain` + CNG).
 
 | Companion doc | Purpose |
 |---|---|
-| [`aec_algorithm_guide.html`](aec_algorithm_guide.html) | Presentation overview |
-| [`architecture_v3_22_5_vs_aec3.html`](architecture_v3_22_5_vs_aec3.html) | Architecture flowcharts vs WebRTC AEC3 (the v3.23.0 DT-aware stack is config-only over this pipeline) |
-| [`c_user_and_integration_guide.md`](c_user_and_integration_guide.md) | C API, integration, streaming contract |
-| [`pbfdkf_shadow_intro.md`](pbfdkf_shadow_intro.md) | PBFDKF + shadow design |
+| [`c_user_manual_zh_TW.md`](c_user_manual_zh_TW.md) | C API, integration, streaming contract |
 | [`nn_integration_interface.md`](nn_integration_interface.md) | NN residual/NR/joint swap seams |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | Version history |
 
@@ -103,8 +98,8 @@ its own tuning embedded in `AecStateConfig` / `SuppressionGainConfig`
 ### Determinism
 
 Per-case CNG seed: `np.random.seed(42)` before each `AEC(cfg)` instance.
-All benchmarking tooling (`eval_aec_challenge.py`, `check_byte_equal.py`,
-`run_one_case.py`) seeds before instantiation.
+The maintained render tools (`eval_aec_challenge.py`, `eval_manifest90.py`,
+and `run_one_case.py`) seed before instantiation.
 
 ### Tunable parameters (`AecConfig`)
 
@@ -114,6 +109,9 @@ aggressive −38); `from_preset` additionally pins a shared base
 (`enable_cng=True`, `shadow_mu_min=0.5`, `warmup_frames=100`,
 `kalman_q_high=1e-3`). Everything below uses dataclass defaults. Fields are
 grouped by subsystem; **ON**/**OFF** marks the default state of a feature flag.
+Frame-count fields marked as a 10 ms authored basis are converted at
+construction to preserve wall-clock duration on the selected grid; the table
+shows their public configuration values, not necessarily the internal hop count.
 
 | Subsystem | Field | Default | Notes |
 |---|---|---|---|
@@ -135,7 +133,7 @@ grouped by subsystem; **ON**/**OFF** marks the default state of a feature flag.
 | | `dt_aware_res_floor_enabled` | **ON** | DT-gated RES floor lift (§3.4) |
 | | `min_gain_floor_dt_db` | −20 | floor used in double-talk |
 | | `ne_recent_threshold` | 0.3 | near-recent gate arm threshold |
-| | `ne_recent_hold` | 150 | hold frames after arm |
+| | `ne_recent_hold` | 150 | 10 ms authored basis; approximately 1.5 s after grid retiming |
 | | `ne_recent_sustain` | 3 | frames above threshold to arm |
 | Soft near-end blend | `soft_nearend_blend_enabled` | **ON** | sigmoid ENR tuning blend (D3) |
 | | `soft_nearend_blend_enr_threshold` / `_softness` | 0.25 / 0.25 | |
@@ -154,10 +152,10 @@ grouped by subsystem; **ON**/**OFF** marks the default state of a feature flag.
 | | `shadow_copy_threshold` / `_hysteresis` | 0.65 / 3 | |
 | | `shadow_err_alpha` | 0.80 | |
 | | `shadow_dtd_advantage_scale` / `_offset` | 3.0 / 1.5 | |
-| Misadjustment estimator | `filter_misadjustment_*` | 100 / 30 / 0.5 / 2.0 | hangover / stable / scale min/max |
+| Misadjustment estimator | `filter_misadjustment_*` | 100 / 30 / 0.5 / 2.0 | hangover/stable use 10 ms authored basis; scale min/max are dimensionless |
 | PBFDKF (Kalman) | `use_kalman` | **ON** | |
 | | `kalman_q_high` / `kalman_q_low` | 1e-3 / 1e-6 | |
-| | `warmup_frames` | 80 (preset 100) | forced-high-mu window |
+| | `warmup_frames` | 80 (preset 100) | 10 ms authored basis; preset remains approximately 1.0 s after grid retiming |
 | EPC | `epc_delta_threshold` / `epc_total_rise` / `epc_hangover` | 0.3 / 1.5 / 20 | |
 | Delay estimation | `enable_delay_est` | **ON** | |
 | | `max_delay_ms` / `delay_buffer_ms` | 1024 / 2048 | |
@@ -468,7 +466,8 @@ self._aec3_sg._dt_protect_active = bool(
 `_ne_recent_frames` is the held "near-end seen recently" gate (same mechanism
 that arms `dt_aware_recovery_soft`, §2.3): the `_dt_from_energy` indicator
 must stay above `ne_recent_threshold` (0.3) for `ne_recent_sustain` (3) frames
-to arm, then holds for `ne_recent_hold` (150) frames (`orchestrator.py:1323-1336`).
+to arm, then holds for the grid-retimed duration authored by
+`ne_recent_hold=150` (approximately 1.5 s).
 Far-end single-talk never sustains the indicator, so FS recoveries keep the −28 dB
 floor and FS echo depth is preserved; the energy gate does false-arm a little on
 loud FS echo (the bounded FS cost). Config (`AecConfig`):
@@ -517,7 +516,7 @@ type to `(out, AecResContext)`.
 ### `trace_p52_regime_handler`
 Per-frame regime-handler trace flag (default OFF). Classifier in
 `modules/p52_regime_classifier.py` is analysis-only; the
-`AntiLoopholeTests` in `python/test_p52_regime.py` enforce that the
+`AntiLoopholeTests` in `python/tests/test_p52_regime.py` enforce that the
 classifier never modifies audio.
 
 ---
@@ -529,16 +528,14 @@ classifier never modifies audio.
   Standard config: `--preset balanced --filter 832 --cng --parallel --workers 4`.
 * `python/bench_aecmos.py` — AECMOS scoring driver
   (needs `speechmos` + `onnxruntime ≤ 1.16.3` + `numpy < 2`).
-* `python/check_byte_equal.py` — 25-case representative byte-equal harness
-  (5 per bucket at echo percentiles 0/25/50/75/100); reference at
-  [`bench/v3_21_3aadd2d_baseline/`](bench/v3_21_3aadd2d_baseline/README.md).
-  Must report `=== 25/25 PASS, 0 FAIL ===` before any commit that touches
-  Python code outside `docs/`.
+* `python/eval_manifest90.py` — fixed 90-case partial blind benchmark with
+  ERLE/SDR and scenario-correct AECMOS metrics.
 * `python/run_one_case.py` — single-case dev tool with diagnostic
   5-panel PNG (waveforms + spectrograms + ERLE).
-* `python/run_e2e_parity.py` — Python ↔ C parity driver.
-* `python/batch_c_eval.py` — batch-run the C `aec_wav` binary.
-* `python/test_p52_regime.py` — pytest for the regime classifier
+* `c_impl/Makefile` release gates — `test-static-aec`,
+  `test-rate-structural`, and `test-process-context` cover C pool parity,
+  supported grids, and the external context seam.
+* `python/tests/test_p52_regime.py` — pytest for the regime classifier
   anti-loophole contract.
 
 ---
@@ -581,7 +578,7 @@ BALANCED beats AEC3 on every DT/NE deg bucket and holds all four echo/deg ship
 bars under online self-align.
 
 > **Historical (pre-align, NOT a current result).** The retired v3.21 anchor
-> (`docs/bench/v3_21_3aadd2d_baseline/`, commit `3aadd2d`) was scored *with*
+> (commit `3aadd2d`; the old result bundle is not part of this release tree) was scored *with*
 > offline GCC pre-alignment, which inflates FS deg to ≈5.0 and shifts the echo
 > means; those numbers are kept only as a historical anchor and must never be
 > presented as a current production result.
@@ -593,7 +590,7 @@ bars under online self-align.
 The `c_impl/` port is the production C implementation of the **same algorithm**
 as `python/aec.py`. Through v3.23.0 (under `-DUSE_STANDARD_MATH` with a
 numpy-precision FFT) the non-FFT C logic was verified **bit-exact** to the
-Python reference — every per-module parity test (`c_impl/test/parity_*.c` —
+Python reference — every per-module parity test (`c_impl/test/historical/parity_*.c` —
 PBFDKF, delay, AecState, ResidualEchoEstimator, SuppressionGain, the
 ERLE/reverb estimators, etc.) plus the end-to-end `parity_aec_e2e` passed with
 0 mismatches across all three presets over the full ≈4186-hop doubletalk case.
@@ -602,8 +599,8 @@ That 0-mismatch record is now historical.
 **Float32 campaign (2026-07-15) — Python bit-exact parity retired repo-wide.**
 All production C is float32 end-to-end: delay chain, orchestrator scalars,
 post/state modules, `residual_echo_estimator`, and the mic-path HPF
-(`reverb_decay_estimator.c` is the sole remaining `double` file, and it is
-dead code with no production caller). The relationship between the two
+The optional double-precision reverb-decay reference port is retained under
+`c_impl/test/support/` only and is not part of `libaec.a`. The relationship between the two
 implementations is no longer "port that must match bit-for-bit" — it is:
 
 * **Python (fp64) is the algorithm spec.**
@@ -629,9 +626,7 @@ error ≈ −60 dB below signal, per-sample max ~6e-3 (inaudible).
 within a **2e-2 float32 tolerance** (not strict equality) and is the
 **authoritative C regression gate**.
 
-**Regression anchors going forward** (see
-[`c_impl/test/PARITY_REPORT.md`](../c_impl/test/PARITY_REPORT.md) for the
-full disposition):
+**Regression anchors going forward**:
 
 * `c_impl/test/parity_delay.c` (C-golden) and `c_impl/test/parity_aec_e2e.c`
   (tolerance gate) are the maintained regression tests.
@@ -667,4 +662,4 @@ multiply-add reassociation), independent of any Python-parity target. The C
 structure mirrors the Python class boundaries one-to-one (`PBFDKF`,
 `ShadowFilter`, `AecState`, `SuppressionGain`, `EchoPathDelayEstimator`, …), so
 a module-level regression isolates any divergence to a single stage. See
-`docs/c_user_and_integration_guide.md` (build + integration).
+`docs/c_user_manual_zh_TW.md` (build + integration).

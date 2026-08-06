@@ -1,0 +1,22 @@
+--- /private/tmp/claude-501/-Users-mingyu-Desktop-novatek-SE/fdd8dd4d-5e9f-4d28-b239-09e595e85967/scratchpad/bench/v2_legacy/filters.py	2026-08-06 13:05:54
++++ /private/tmp/claude-501/-Users-mingyu-Desktop-novatek-SE/fdd8dd4d-5e9f-4d28-b239-09e595e85967/scratchpad/bench/v2_retimed/filters.py	2026-08-06 13:05:54
+@@ -44,7 +44,8 @@
+         self.delta = delta
+         # Far-end power EMA, per hop. Authored at the legacy
+         # hop=160/16000 (10 ms) grid (commit 235d3ec era, frame=20 ms).
+-        self.alpha_power = 0.9
++        self.alpha_power = aec3_scale.growth_rehop(
++            0.9, 160, 16000, self.hop_size, self.sample_rate)
+         self.enable_td_constraint = True  # can be disabled for diagnosis
+         # AEC3 round-robin constraint (adaptive_fir_filter.cc:686-689) — constrain
+         # ONE partition per hop (cycling) instead of all every hop; saves ~58% of
+@@ -541,7 +542,8 @@
+         # use: this was authored by commit e9cb383 (2026-03-20), whose
+         # config declared frame_size=512/hop_size=256. Retiming it off
+         # 10 ms would be wrong by 1.6x.
+-        self._alpha_r = 0.95
++        self._alpha_r = aec3_scale.growth_rehop(
++            0.95, 256, 16000, self.hop_size, self.sample_rate)
+ 
+         # AEC3 startup / poor-excitation / saturation gates
+         # (refined_filter_update_gain.cc:96-99). Orchestrator sets

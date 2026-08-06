@@ -95,7 +95,7 @@ void erl_estimator_update(ErlEstimator *e,
      * hold_counter_inst_erle): floor-at-0 would satisfy kernel 26's `<= 0`
      * check just below identically to the old unbounded-negative decrement,
      * but hold_counters' raw values are ALSO read bit-exact by
-     * test/parity_erl_estimator.c's golden, which floor-at-0 desyncs from
+     * test/historical/parity_erl_estimator.c's golden, which floor-at-0 desyncs from
      * almost immediately (confirmed: this field alone accounts for 2142 of
      * the golden's 3043 total broken-before-fix mismatches, on top of a
      * 901-mismatch true baseline unrelated to this bug -- NOT "baseline of
@@ -139,7 +139,7 @@ void erl_estimator_update(ErlEstimator *e,
      * check's boolean outcome identical to the unbounded decrement for
      * every hop, same argument as hold_counters), BUT this field's raw
      * integer value is ALSO read directly (not just the boolean) by
-     * test/parity_erl_estimator.c's bit-exact golden comparison, which
+     * test/historical/parity_erl_estimator.c's bit-exact golden comparison, which
      * mirrors python/modules/state/erl_estimator.py's own
      * `_hold_counter_time_domain -= 1` (an ordinary Python int -- no floor,
      * no wraparound). Floor-at-0 pins the value the hop after it first

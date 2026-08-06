@@ -5,7 +5,7 @@ sequence (warmup avg-init phase → EMA rising/falling → past initial_phase so
 mask10 (10×pn < pb) branch fires; the history ring fills + the flag/hangover/
 3-bin-smooth/is_block_stationary chain all evolve) and writes inputs + expected
 outputs to a raw little-endian file that
-c_impl/test/parity_stationarity_estimator.c replays.
+c_impl/test/historical/parity_stationarity_estimator.c replays.
 
 Per-frame order matches the real pipeline (orchestrator.py:1809-1810):
   update_noise_estimator(psd)  then  update_stationarity_flags(psd)

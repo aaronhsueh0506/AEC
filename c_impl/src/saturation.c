@@ -18,14 +18,21 @@
  * abs(...) runs float32-by-design; C uses fabsf.
  */
 #include "saturation.h"
+#include "aec3_scale.h"
 #include <math.h>
 #include <stddef.h>
 
-void saturation_init(Saturation* s, float threshold) {
+void saturation_init(Saturation* s, float threshold,
+                     int hop_size, int sample_rate) {
     s->threshold        = threshold;
     s->saturation_level = 0.0f;
-    s->alpha_attack     = 0.3f;
-    s->alpha_release    = 0.98f;
+    /* Asymmetric per-hop EMA. Reference grid is hop=256/16000 (16 ms),
+     * NOT 10 ms: authored by commit 243d67c against frame 512/hop 256.
+     * Mirrors preprocessing.py SaturationDetector. */
+    s->alpha_attack  = aec3_growth_rehop(0.3f,  256, 16000,
+                                         hop_size, sample_rate);
+    s->alpha_release = aec3_growth_rehop(0.98f, 256, 16000,
+                                         hop_size, sample_rate);
 }
 
 void saturation_reset(Saturation* s) {

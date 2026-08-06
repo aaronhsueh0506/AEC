@@ -69,7 +69,7 @@ static void check_shared_identity(const Aec* a, int enable_shadow, const char* l
 }
 
 /* aec_create() (heap arena) path, across all 3 officially-contracted grids
- * (see AEC/CLAUDE.md / pipelines/README.md "Parameter Alignment") x shadow
+ * (see AEC/docs/development_guide.md / pipelines/README.md "Parameter Alignment") x shadow
  * on/off. */
 static void test_shared_identity_heap(int sample_rate, int fft_size, int enable_shadow) {
     AecConfig cfg;

@@ -2,7 +2,7 @@
 
 Runs the Python ReverbModel over a deterministic float32 input sequence (both
 update flavours + a decay<=0 no-op case) and writes inputs + expected outputs to
-a raw little-endian file that c_impl/test/parity_reverb_model.c replays.
+a raw little-endian file that c_impl/test/historical/parity_reverb_model.c replays.
 
 Layout (LE):
   int32 n_bins, int32 n_nfs, int32 n_u

@@ -1,0 +1,24 @@
+--- /private/tmp/claude-501/-Users-mingyu-Desktop-novatek-SE/fdd8dd4d-5e9f-4d28-b239-09e595e85967/scratchpad/bench/v2_legacy/orchestrator.py	2026-08-06 13:05:54
++++ /private/tmp/claude-501/-Users-mingyu-Desktop-novatek-SE/fdd8dd4d-5e9f-4d28-b239-09e595e85967/scratchpad/bench/v2_retimed/orchestrator.py	2026-08-06 13:05:54
+@@ -652,8 +652,10 @@
+         # annotates hop_size as '10ms'). Both the primary site and the
+         # nores C2-parity site read these, so they cannot drift apart.
+         from . import aec3_scale as _aec3s
+-        self._alpha_erl_tracking = 0.99
+-        self._alpha_erl_converged = 0.999
++        self._alpha_erl_tracking = _aec3s.growth_rehop(
++            0.99, 160, 16000, self.config.hop_size, self.config.sample_rate)
++        self._alpha_erl_converged = _aec3s.growth_rehop(
++            0.999, 160, 16000, self.config.hop_size, self.config.sample_rate)
+         # Per-band ERL EMA broadcast to filter._erl_per_bin. Stays at
+         # uniform 0.1 (the Arc G EMA update that would mutate this lived
+         # in the post-filter loop that was retired with ResFilter).
+@@ -834,7 +836,7 @@
+         # and is hop-invariant: alpha^(16000/sr). Using the hop-based
+         # growth_rehop() here would be wrong. Authored at sr=16000; at
+         # 48 kHz the unretimed value would track 3x too fast.
+-        self.alpha = 0.95
++        self.alpha = 0.95 ** (16000.0 / self.config.sample_rate)
+         # Cumulative ERLE (full-segment average)
+         self.near_power_sum = 0.0
+         self.error_power_sum = 0.0  # backward compat alias for raw

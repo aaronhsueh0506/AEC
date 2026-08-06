@@ -36,8 +36,7 @@ int main(int argc, char* argv[]) {
         wav_read_float(mr, mic, hop);
         wav_read_float(rr, ref, hop);
         aec_process(&aec, mic, ref, out);
-        /* Dump raw_output (pre-RES), res_output (post-RES, pre-limiter),
-         * final out (post-limiter), and a few scalars. */
+        /* Dump raw output, post-RES output, final output and diagnostics. */
         fwrite(aec.raw_output, sizeof(float), hop, fp);
         fwrite(aec.res_output, sizeof(float), hop, fp);
         fwrite(out, sizeof(float), hop, fp);
@@ -45,9 +44,8 @@ int main(int argc, char* argv[]) {
         double erl = aec.erl_estimate;
         double mes = aec.main_err_smooth;
         double mu  = aec.simple_mu_ratio;
-        double lim = aec.limiter_gain;
         fwrite(&sat,8,1,fp); fwrite(&erl,8,1,fp); fwrite(&mes,8,1,fp);
-        fwrite(&mu, 8,1,fp); fwrite(&lim,8,1,fp);
+        fwrite(&mu, 8,1,fp);
     }
     fclose(fp);
     fprintf(stderr, "Dumped %d frames\n", n_frames);

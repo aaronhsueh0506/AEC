@@ -24,7 +24,13 @@ typedef struct Saturation {
     float alpha_release;
 } Saturation;
 
-void  saturation_init(Saturation* s, float threshold);   /* default 0.95 */
+/* hop_size/sample_rate retime the attack/release EMAs off their authored
+ * hop=256/16000 (16 ms) grid — NOT the 10 ms reference the filter EMAs use.
+ * Returns void, so a non-positive hop_size/sample_rate cannot be reported:
+ * aec3_growth_rehop() absorbs it by returning the authoring value, leaving the
+ * detector un-retimed rather than driving it with a NaN retention. */
+void  saturation_init(Saturation* s, float threshold,   /* default 0.95 */
+                      int hop_size, int sample_rate);
 void  saturation_reset(Saturation* s);
 /* Returns smoothed saturation_level (also stored in s->saturation_level). */
 float saturation_detect(Saturation* s, const float* signal, size_t n);

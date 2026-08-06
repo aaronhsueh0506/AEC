@@ -14,7 +14,7 @@ PathChangeRegimeHandler, RegimeHandlerDecision, ...`` unchanged.
 
 CLI entry point: ``python3 python/aec.py mic.wav ref.wav out.wav --preset balanced``
 """
-__version__ = "3.24.1"
+__version__ = "4.0.0rc1"
 
 # Algorithm classes live under python/modules/.
 from modules.enums import (  # noqa: F401

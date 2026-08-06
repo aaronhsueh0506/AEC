@@ -1,136 +1,20 @@
 /**
- * aec_simd_kernels.h - AEC-specific NEON/scalar bit-exact DSP micro-kernels.
+ * AEC-specific scalar/NEON micro-kernels.
  *
- * The AEC-only half of the shared micro-kernel split (generic kernels stay
- * in audio_common, AEC-specific kernels move here): kernels whose
- * doc-comments mirror one specific
- * AEC/c_impl source shape and are not used anywhere outside this repo --
- * the numpy |z|/|z|**2 magnitude family, the PBFDAF/PBFDKF per-bin
- * filter-weight updates, the AEC3-post coherence-gate/CNG per-bin
- * trackers, and the four numpy-pairwise-sum float32 reduction trees used
- * by the filter-quality/audit modules. The algorithm-agnostic kernels
- * (min/clip/gain-apply/complex-add/sq-scale/EMA/fast_sqrt) that the wider
- * Audio_ALG pipeline also consumes directly stay in
- * audio_common/include/simd_kernels.h and are pulled in transitively by
- * the #include below -- every AEC source that used to `#include
- * "simd_kernels.h"` now includes this header instead and gets both sets.
+ * Generic kernels and the compile-time SIMD switch come from
+ * audio_common/include/simd_kernels.h. For finite inputs every NEON entry
+ * point must be byte-identical to its scalar reference. Multi-NaN expressions
+ * may select different NaN payloads, but must agree on NaN classification;
+ * the self-test reports those separately from hard failures.
  *
- * ─────────────────────────── Bit-exactness contract ──────────────────────
- * This header inherits the FULL contract verbatim from simd_kernels.h's
- * top-of-file comment (the NEON-vs-scalar byte-identity requirement, the
- * "replicate the scalar op SEQUENCE -- which ops are fused, which are
- * separate, and in what order -- lane-for-lane" rule, the ban on estimate
- * instructions (vrsqrteq_f32/vrecpeq_f32 and friends), and the min/clip
- * compare+select-not-vminq/vmaxq signed-zero tie-break rule) -- see that
- * file for the complete text, this is a pointer to it, not a restatement.
+ * Keep the scalar operation order: explicit fmaf calls stay fused, ordinary
+ * multiply/add expressions stay separate, and including translation units
+ * must use -ffp-contract=off. Estimate reciprocal/sqrt instructions and
+ * reassociation are not allowed.
  *
- * Restated only for the FMA-fusion call this file's own kernels make (the
- * general rule lives in simd_kernels.h; these are this file's instances of
- * it):
- *
- *   Uses explicit fmaf()/vfmaq_f32 (mirrors an explicit `fmaf(...)` call in
- *   the AEC source -- always fused, with or without -ffp-contract, since an
- *   explicit fmaf() call requests FMA directly rather than relying on
- *   contraction of separate ops):
- *     - the cabs_np/cmag2_np magnitude helper's `ratio*ratio + 1.0f` term
- *       (kernels 1, 2, 3, 5's internal magnitude computation)
- *     - sk_cmac_np_f32          (kernel 6)
- *     - sk_wupdate_nlms_f32's grad = err * conj(X) term (kernel 7)
- *     - sk_wupdate_kf_f32's final W += K_scaled * error_spec term (kernel 8)
- *
- *   Uses separate mul then add, NEVER fused (mirrors the source NOT calling
- *   fmaf for that particular step -- needs -ffp-contract=off to stay this
- *   way, the same flag AEC/c_impl's own Makefile already mandates for every
- *   TU that includes this header):
- *     - sk_ema_cmag2_f32's outer alpha*state+beta*mag2 combine (kernel 5)
- *     - sk_wupdate_nlms_f32's final W += mu_eff*grad combine   (kernel 7)
- *     - sk_wupdate_kf_f32's K = mu*conj(X) and K *= mu_scale steps
- *       (kernel 8)
- *
- * ────────────────────────────── NaN semantics ──────────────────────────────
- * All kernels in this file are specified over the FINITE domain -- the
- * primary line of defense against NaN/Inf is ingress sanitization at the
- * WAV/API boundary (mic/reference samples are never expected to carry NaN
- * once past that gate). That said, kernels 1/2/3/5's shared cabs_np/cmag2_np
- * helper (sk__cabs_np_neon4) is verified NaN-exact against its scalar twin
- * (sk__cabs_np_elem) on this repo's target toolchain (AArch64, Apple
- * clang 17, -ffp-contract=off): every comparison the scalar helper performs
- * with C's `<`/`>` operators (both in the `re<0.0f ?-re:re` abs step and the
- * `ar>ai` larger/smaller step) is unordered-false for a NaN operand, exactly
- * like vcltq_f32/vcgtq_f32 -- so the NEON body replicates BOTH steps with
- * compare(vcltq_f32/vcgtq_f32)+select(vbslq_f32), never vabsq_f32/vmaxq_f32/
- * vminq_f32 (vabsq_f32 is a bitwise sign-bit-clear -- it does NOT match the
- * scalar ternary's "leave a NaN's sign bit untouched" behavior; vmaxq_f32/
- * vminq_f32 lower to FMAX/FMIN, which propagate NaN unconditionally rather
- * than taking the "false branch" the scalar `>` ternary takes). Single-NaN
- * lanes (exactly one of re/im NaN, the other finite/Inf) bit-match scalar
- * strictly, verified by the selftest's dedicated NaN corpus. Both-NaN lanes
- * (re AND im both NaN) also verified to bit-match on this toolchain/CPU --
- * scalar and NEON execute the identical fmaf/sqrtf/div instruction sequence
- * per lane on the same FP unit, so NaN-payload propagation through that
- * sequence is deterministic and identical either way -- but this equivalence
- * is an empirical property of this specific compiler+architecture pairing
- * (C leaves multi-NaN-operand payload selection implementation-defined), not
- * a portable language guarantee; the selftest documents it as verified-here
- * rather than architecturally mandated. No other kernel in this file does
- * comparison-based branching whose branches themselves reach a NaN-sensitive
- * early-out the way sk__cabs_np_neon4's `larger==0.0f` does; the remaining
- * compare+select kernels (16/18/19's data-dependent tracks) were audited and
- * already use vcltq_f32/vcgtq_f32+vbslq_f32 (never vmaxq_f32/vminq_f32), so
- * their NaN behavior falls out of the same unordered-false argument for
- * free -- see each kernel's inline comment.
- *
- * ───────────────────────────────── Style ──────────────────────────────────
- * Header-only, C99, static inline -- same convention as simd_kernels.h and
- * fast_math.h. `#include "simd_kernels.h"` first: this pulls in Complex
- * (fft_wrapper.h), <math.h>/<stdint.h>/<stddef.h>, the SK_HAVE_NEON /
- * SIMD_KERNELS_FORCE_SCALAR knobs, and the generic kernel set (sk_min_f32,
- * sk_capply_gain_f32, sk_cadd_f32, sk_sq_scale_f32, sk_ema_f32,
- * sk_fast_sqrt_f32) that Audio_ALG's own pipeline calls directly.
- * SK_HAVE_NEON is NOT redefined here -- it is inherited as-is from
- * simd_kernels.h, so both files always agree on whether NEON bodies are
- * compiled in.
- *
- * No `restrict` anywhere, same aliasing rule as simd_kernels.h: pointers
- * are assumed non-aliasing except where a kernel's own comment documents
- * an in-place case.
- *
- * Only the alias form exercised by
- * simd_selftest_aec.c's matrix is contractually supported -- sk_mask_zero_f32
- * (kernel 20) is the sole one in this file, and it isn't optional aliasing
- * the way sk_capply_gain_f32's out==z is: this kernel has no separate output
- * parameter at all, so `x` is unconditionally both the read source and the
- * write destination on every call (see test_mask_zero_edge() in the
- * selftest, and the ordinary test_mask_zero() above it). No other kernel in
- * this file is documented or tested with any overlapping-pointer usage;
- * that is unsupported, even if it happens to work today on some input.
- *
- * ───────────────────── Complex-quad NEON load/store (aliasing) ────────────
- * Every kernel in this file that moves a `Complex` buffer through NEON
- * registers (kernels 1/2/3/5/6/7/8/16 -- sk_cabs_np_f32, sk_cmag2_np_f32,
- * sk_cmag2_np_acc_f32, sk_ema_cmag2_f32, sk_cmac_np_f32,
- * sk_wupdate_nlms_f32, sk_wupdate_kf_f32, sk_coherence_ema_gate_f32) uses
- * `sk__cquad_load`/`sk__cquad_store` -- defined once in simd_kernels.h's
- * "Complex-quad NEON load/store (legal aliasing)" section and pulled in
- * transitively by the `#include "simd_kernels.h"` above -- rather than
- * casting a `const Complex*`/`Complex*` straight to `(const float*)`/
- * `(float*)` and handing that to vld2q_f32/vst2q_f32 directly (a
- * type-based-aliasing violation under C11 6.5p7: `float` is not the
- * effective type of a `Complex` object, so the compiler is entitled to
- * assume the two pointers never alias). No second copy of the helper is
- * defined here: simd_kernels.h is included before any of these kernels are
- * defined, so sk__cquad_load/sk__cquad_store are already reachable by the
- * time this file needs them -- see that header's own comment (search
- * "sk__cquad_load") for the full memcpy+uzp/zip rationale and the
- * disassembly-verified claim that it converges back to ld2/st2-equivalent
- * codegen with no surviving stack-scratch traffic. The `Complex` layout
- * `_Static_assert`s that justify this (exactly 2 floats, r at offset 0, i at
- * offset 4, no padding) also live in simd_kernels.h, immediately after its
- * own `#include "fft_wrapper.h"` and before any kernel that depends on the
- * layout is defined -- since this file's own `#include "simd_kernels.h"`
- * likewise precedes every kernel here that depends on the same layout, that
- * single pair of asserts already covers this file too; no duplicate assert
- * is added here.
+ * Partial pointer overlap is unsupported. sk_mask_zero_f32 is explicitly
+ * in-place. Complex NEON access must use sk__cquad_load/sk__cquad_store from
+ * simd_kernels.h so strict-aliasing remains valid.
  */
 
 #ifndef AEC_SIMD_KERNELS_H
@@ -1484,107 +1368,11 @@ static inline void sk_erl_bin_update_f32(float *erl, int *hold,
 #endif
 
 /* ═══════════════════════════════ kernel 25 ═════════════════════════════════
- * sk_dec1_floorintmin_s32 — x[i] -= 1 across a whole int32 array, FLOORED AT
- * INT_MIN (decrement only while x[i]>INT_MIN; once it reaches INT_MIN it
- * stays there), no other comparisons/branches gate the store. Verbatim from
- * AEC/c_impl/src/erl_estimator.c erl_estimator_update()'s loop 2:
- *   for (k = 0; k < e->n_bins - 2; ++k)
- *       if (e->hold_counters[k] > INT_MIN) e->hold_counters[k] -= 1;
- *
- * WHY FLOOR AT INT_MIN, NOT AT 0 (UBSan-confirmed signed-overflow fix; this
- * is this kernel's SECOND floor point, see HISTORY below): run every hop
- * indefinitely with no floor at all, `x[i] -= 1` eventually drives x[i] from
- * 0 down through INT32_MIN and UB-overflows (UBSan: "signed integer
- * overflow: -2147483648 - 1 cannot be represented in type 'int'", at 10 ms
- * hops reachable after ~248 days of continuous uptime). The ONLY *behavioural*
- * consumer of hold_counters' value anywhere is kernel 26's `<= 0` check
- * (immediately downstream, same three-loop chain) and kernel 24's re-arm
- * write (`*hold = hold_hops`, always a positive literal, ignoring the prior
- * value entirely) — a floor at ANY value <=0 (0, INT_MIN, anything between)
- * satisfies that `<= 0` gate IDENTICALLY to the old unbounded decrement for
- * every reachable state, so the boolean-gate argument alone underdetermines
- * where to floor.
- *
- * What breaks the tie is a SECOND consumer this kernel's own reasoning
- * originally missed: hold_counters' raw integer values (not just the `<=0`
- * boolean) are also read directly by test/parity_erl_estimator.c's
- * bit-exact golden comparison, which mirrors
- * python/modules/state/erl_estimator.py's own `self._hold_counters -= 1`
- * (an ordinary numpy int32 subtract). NOTE what this actually contrasts
- * with: numpy int32 arithmetic is NOT "no wraparound" — it wraps, by
- * design, in well-defined two's-complement fashion (e.g. INT32_MIN - 1
- * wraps to INT32_MAX in numpy), unlike C signed-overflow, which is
- * undefined behaviour. The real three-way distinction this fix rests on is
- * numpy's WRAP vs C's original UB vs this kernel's SATURATE (stop
- * decrementing once at INT_MIN) — wrap and saturate are themselves
- * different behaviours, and only diverge from each other at the one
- * boundary case (a bin actually being decremented again *from* INT_MIN)
- * that never occurs in any realistic (or even multi-year) run, which is
- * WHY saturating is a safe stand-in despite not being a literal
- * reproduction of numpy's wrap semantics. Floor-at-0 PINS each bin's value
- * the hop after it first goes non-positive, while Python's/the old C's kept
- * counting down (-1, -2, -3, ...); this was tried and the mismatch is real,
- * not asymptotic: with floor-at-0, this hold_counters array alone accounted
- * for 2142 of the golden's 3043 total mismatches (the fully-broken total at
- * the time), on top of a 901-mismatch true baseline that already existed
- * before this bug and is unrelated to it (a separate, unrelated pre-existing
- * cause) — i.e. 3043 = 901 true-baseline + 2142 attributable to this exact
- * floor-at-0 bug on this array, not "baseline of 3043, +5 more". (The "+5"
- * figure belongs to a different, smaller-scope isolated test of a DIFFERENT
- * single scalar field, `hold_counter_time_domain` below — it was mistakenly
- * generalized to this 255-wide array in an earlier draft of this comment.)
- * Flooring at INT_MIN instead reproduces the golden's expected values
- * EXACTLY — back down to that same 901-mismatch true baseline, zero
- * mismatches attributable to this field — because a normal-length test (or
- * even a multi-year deployment) never gets remotely close to INT32_MIN, so
- * floor-at-INT_MIN is byte-for-byte identical to the original
- * buggy-but-golden-matching trajectory for every realistic/testable run,
- * and only diverges from "keep going into UB" at the one boundary that
- * actually matters for safety. Same reasoning/fix already
- * applied to this field's two sibling scalar counters in the same UBSan
- * sweep — erl_estimator.c's `hold_counter_time_domain`
- * (`if (f > INT_MIN) f -= 1;`) and fullband_erle.c's `hold_counter_inst_erle`
- * — both floored at INT_MIN via a plain scalar guard, no kernel needed since
- * they're lone ints, not arrays; hold_counters is the one field of the three
- * that IS an array (hence the only one needing a NEON kernel), and this
- * fix brings it to the same contract.
- *
- * NEON-safety of the speculative subtract at the new floor point: unlike the
- * scalar `x[i] -= 1` (where `-` on `int` is a C arithmetic operator, and
- * INT_MIN-1 is undefined behaviour the compiler is entitled to assume never
- * happens — the exact thing UBSan traps), `vsubq_s32` is a fixed-width SIMD
- * intrinsic specified by ARM to wrap modulo 2^32 (two's-complement, no trap,
- * no compiler-assumed non-overflow) and is not instrumented by
- * -fsanitize=undefined's signed-integer-overflow check (that check
- * instruments the frontend's handling of the `-`/`+`/`*` operators on scalar
- * integer expressions, not NEON intrinsic calls). So computing
- * `vsubq_s32(v, vone)` speculatively for every lane — including a lane
- * sitting at INT_MIN, where the true mathematical result would be
- * INT32_MIN-1 — is well-defined (it wraps to INT32_MAX in that lane) and
- * never observed anyway: `vcgtq_s32(v, vintmin)` is false for that exact
- * lane, so `vbslq_s32` selects the original untouched INT_MIN value, not the
- * wrapped garbage. Same speculative-compute + masked-select shape as kernel
- * 24's divide (and this kernel's own prior floor-at-0 form): `x[i]-1` is
- * computed for every lane unconditionally, `x[i]>INT_MIN` is a plain int32
- * compare (vcgtq_s32 against a vdupq_n_s32(INT_MIN) vector, no float
- * involved), and the decremented value is selected only where the mask
- * holds.
- *
- * HISTORY: this kernel first shipped (this same optimization effort, an
- * earlier round) as `sk_dec1_floor0_s32`, floored at 0 — sound reasoning
- * purely from the `<=0` boolean-gate argument above, but not checked at the
- * time against the parity golden's raw-value read. A later round's isolated
- * A/B test (same call site, same golden) caught the 2142 added mismatches
- * this caused and produced the INT_MIN fix recorded here; renamed accordingly to
- * keep the name matching the actual floor point, same convention as this
- * kernel's own earlier rename (was `sk_dec1_s32`, unconditional, before the
- * UBSan bug was found at all). erl_estimator.c's loop 2 remains this
- * kernel's only call site (verified by grep) — the contract change carries
- * no other-caller risk. Kernels 24/25/26 must still run as three SEPARATE
- * sequential calls in source order (loop 1 conditionally writes
- * hold_counters, loop 2 unconditionally reads+decrements-or-floors ALL of
- * it, loop 3 reads the just-updated values) — fusing across calls would
- * break that dependency chain. */
+ * Decrement every int counter, saturating at INT_MIN. A zero floor would
+ * alter diagnostic/raw counter values; INT_MIN preserves all practical
+ * trajectories while removing signed-overflow UB in indefinitely running
+ * streams. The NEON subtract is well-defined modulo 2^32 and its wrapped
+ * value is masked off for lanes already at INT_MIN. */
 
 static inline void sk_dec1_floorintmin_s32_scalar(int *x, int n) {
     int i;

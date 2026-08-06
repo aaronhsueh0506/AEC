@@ -532,7 +532,7 @@ int aec3_post_run(Aec3Post *p,
          * which is bit-for-bit what bridge.filter_converged would have held
          * anyway (a pure passthrough in filter_state_bridge_build). Removed;
          * see filter_state_bridge_build itself (still exercised directly by
-         * test/parity_filter_state_bridge.c) for that function's own
+         * test/historical/parity_filter_state_bridge.c) for that function's own
          * behaviour. The now-write-only-by-nobody sc->bridge_taps scratch
          * field ([fft_size] float, in Aec3PostRunScratch) was later removed
          * from the struct entirely (aec.c's pool-size accounting + carve, and

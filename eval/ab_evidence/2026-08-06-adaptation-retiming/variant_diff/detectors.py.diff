@@ -1,0 +1,18 @@
+--- /private/tmp/claude-501/-Users-mingyu-Desktop-novatek-SE/fdd8dd4d-5e9f-4d28-b239-09e595e85967/scratchpad/bench/v2_legacy/detectors.py	2026-08-06 13:05:54
++++ /private/tmp/claude-501/-Users-mingyu-Desktop-novatek-SE/fdd8dd4d-5e9f-4d28-b239-09e595e85967/scratchpad/bench/v2_retimed/detectors.py	2026-08-06 13:05:54
+@@ -41,12 +41,13 @@
+ 
+ def _rehop(retention_at_ref: float, hop_size: int, sample_rate: int) -> float:
+     """Retime a per-hop retention-convention EMA coefficient to the live grid."""
+-    return retention_at_ref
++    return aec3_scale.growth_rehop(retention_at_ref, _REF_HOP, _REF_SR,
++                                   hop_size, sample_rate)
+ 
+ 
+ def _rehop_ms(authored_ms: float, hop_size: int, sample_rate: int) -> int:
+     """Retime an authored duration to an integer hop count on the live grid."""
+-    return int(round(authored_ms / 10.0))
++    return aec3_scale.ms_to_hops(authored_ms, hop_size, sample_rate)
+ 
+ 
+ class RenderActivityDetector:

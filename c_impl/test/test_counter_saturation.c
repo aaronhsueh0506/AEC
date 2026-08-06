@@ -525,7 +525,8 @@ static void section_delay_aec3(void) {
 static void section_filter_convergence(void) {
     FilterConvergence c;
     int i, fired_at = -1;
-    filter_convergence_init(&c);
+    /* Grid is irrelevant to this counter test; use the default 16k/hop128. */
+    filter_convergence_init(&c, 128, 16000);
     /* Drive real convergence: near_power/raw_error_power chosen so
      * inst_erle_db = 10*log10(near/err) > FC_CONV_ERLE_DB=5.0 every call. */
     for (i = 0; i < 200; i++) {

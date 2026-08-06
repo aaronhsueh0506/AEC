@@ -38,17 +38,15 @@ void aec_debug_trace_row(const AecDebugTraceRow* row) {
         fprintf(g_trace_fp,
             "frame,delay,far_active,saturated_echo,usable_linear,"
             "dominant_nearend,filter_converged,fullband_erle,erle_mean,"
-            "r2_mean,gain_mean,comfort_noise_mean,near_pwr,raw_err_pwr,"
-            "limiter_gain\n");
+            "r2_mean,gain_mean,comfort_noise_mean,near_pwr,raw_err_pwr\n");
         g_trace_header = 1;
     }
     fprintf(g_trace_fp,
-        "%d,%d,%d,%d,%d,%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
+        "%d,%d,%d,%d,%d,%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
         g_frame_idx, row->delay, row->far_active, row->saturated_echo,
         row->usable_linear, row->dominant_nearend, row->filter_converged,
         row->fullband_erle, row->erle_mean, row->r2_mean, row->gain_mean,
-        row->comfort_noise_mean, row->near_pwr, row->raw_err_pwr,
-        row->limiter_gain);
+        row->comfort_noise_mean, row->near_pwr, row->raw_err_pwr);
 }
 
 void aec_debug_set_frame(int frame_idx, int hop, int sample_rate) {

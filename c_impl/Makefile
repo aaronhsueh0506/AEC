@@ -587,8 +587,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench test-counter-saturation test-rate-structural test-process-context test-shared-far-spec test-shared-fft-handle
-all bench test-counter-saturation test-rate-structural test-process-context test-shared-far-spec test-shared-fft-handle:
+.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -704,15 +704,20 @@ TEST_RS_SRCS   = $(TEST_DIR)/test_rate_structural.c
 TEST_RS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_RS_SRCS))
 TEST_RS_TARGET = $(BIN_DIR)/test_rate_structural
 
+# Config-validation regression test. Wired 2026-08-06 for exactly the reason
+# the comment above describes: it had lived as a standalone-gcc recipe with no
+# target, so its checks only ever ran when someone remembered to compile it by
+# hand. Its newest section (test_direct_init_rejects_bad_rate) gates the
+# pbfdaf_init/pbfdkf_init/saturation_init sample_rate preconditions, which is
+# not a gate at all unless something runs it.
+TEST_CV_SRCS   = $(TEST_DIR)/test_config_validation.c
+TEST_CV_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_CV_SRCS))
+TEST_CV_TARGET = $(BIN_DIR)/test_config_validation
+
 # Permanent context-only-processing regression test (aec_process_context()):
-# proves the split-out core (shared by aec_process() and aec_process_
-# context()) never lets the context-only path touch the output limiter's
-# state, and that every AecResContext field a real caller reads is
-# byte-identical between the two entry points. Was standalone-gcc-only (its
-# own header comment's `$(find src -name '*.c')` recipe) and not wired into
-# any Makefile target -- meaning a `make all` + existing-suite green run
-# never actually re-verified this, the single most load-bearing regression
-# test for the context-only split. Needs the full Aec type, same as
+# proves the two entry points may be interleaved freely on one instance, and
+# that every AecResContext field a real caller reads is byte-identical
+# between them. Needs the full Aec type, same as
 # TEST_CS_TARGET/TEST_RS_TARGET above.
 TEST_PC_SRCS   = $(TEST_DIR)/test_process_context.c
 TEST_PC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_PC_SRCS))
@@ -739,6 +744,34 @@ TEST_SFS_TARGET = $(BIN_DIR)/test_shared_far_spec
 TEST_SFH_SRCS   = $(TEST_DIR)/test_shared_fft_handle.c
 TEST_SFH_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_SFH_SRCS))
 TEST_SFH_TARGET = $(BIN_DIR)/test_shared_fft_handle
+
+# Heap-vs-caller-pool byte-equality test on a complete real recording.
+TEST_STATIC_SRCS   = $(TEST_DIR)/test_static_aec.c
+TEST_STATIC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_STATIC_SRCS))
+TEST_STATIC_TARGET = $(BIN_DIR)/test_static_aec
+TEST_STATIC_MIC ?= ../wav/aec_challenge_blind/doubletalk/0I0XMl3M0ECO0U1N0cJvpg_doubletalk_mic.wav
+TEST_STATIC_REF ?= ../wav/aec_challenge_blind/doubletalk/0I0XMl3M0ECO0U1N0cJvpg_doubletalk_lpb.wav
+TEST_STATIC_SR  ?= 16000
+
+# Python/C parity gate for the three detectors (RenderActivity /
+# FilterConvergence / DoubleTalk). detectors.c includes only detectors.h and
+# <math.h>, so this links against nothing else -- no $(OBJS), no audio_common
+# archive (aec3_scale.c is the one extra TU, for the retiming helpers). The
+# golden is generated on demand from the Python reference rather
+# than checked in, matching the other parity harnesses.
+# This target existed as an orphan for eight weeks with no Makefile entry and
+# no generator, which is how the SHADOW_FRAME_GATE 50-vs-20 Python/C
+# divergence survived undetected. Keep it wired.
+TEST_DET_SRC    = $(TEST_DIR)/modules/parity_detectors.c
+TEST_DET_TARGET = $(BIN_DIR)/parity_detectors
+TEST_DET_HOP   ?= 128
+TEST_DET_SR    ?= 16000
+TEST_DET_GOLDEN = $(BIN_DIR)/det_golden.bin
+
+# Allocator-hook acceptance test for the complete caller-pool lifecycle.
+TEST_ZH_SRCS   = $(TEST_DIR)/test_zero_heap_aec.c
+TEST_ZH_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_ZH_SRCS))
+TEST_ZH_TARGET = $(BIN_DIR)/test_zero_heap_aec
 
 # Standalone bit-exactness + microbench harness for the AEC-only kernel split
 # (aec_simd_kernels.h). Header-only + <math.h> -- no audio_common archive
@@ -812,6 +845,9 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | _cfg_guard
 $(OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c | _cfg_guard
 	$(CC) $(CFLAGS) -MD -MP -c -o $@ $<
 
+$(OBJ_DIR)/test_zero_heap_aec.o: $(TEST_DIR)/test_zero_heap_aec.c | _cfg_guard
+	$(CC) $(CFLAGS) -fno-builtin -I$(AC_DIR)/test -MD -MP -c -o $@ $<
+
 $(OBJ_DIR)/%.o: $(TEST_DIR)/%.c | _cfg_guard
 	$(CC) $(CFLAGS) -MD -MP -c -o $@ $<
 
@@ -864,7 +900,7 @@ $(TEST_DR_TARGET): $(TEST_DR_OBJS) | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation test-rate-structural test-process-context test-shared-far-spec test-shared-fft-handle
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural test-config-validation test-process-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -882,6 +918,10 @@ test-rate-structural: $(TEST_RS_TARGET)
 	"$(abspath $(TEST_RS_TARGET))"
 
 # Builds AND runs, same convention as test-counter-saturation above.
+test-config-validation: $(TEST_CV_TARGET)
+	"$(abspath $(TEST_CV_TARGET))"
+
+# Builds AND runs, same convention as test-counter-saturation above.
 test-process-context: $(TEST_PC_TARGET)
 	"$(abspath $(TEST_PC_TARGET))"
 
@@ -892,6 +932,32 @@ test-shared-far-spec: $(TEST_SFS_TARGET)
 # Builds AND runs, same convention as test-counter-saturation above.
 test-shared-fft-handle: $(TEST_SFH_TARGET)
 	"$(abspath $(TEST_SFH_TARGET))"
+
+test-static-aec: $(TEST_STATIC_TARGET)
+	@test -f "$(TEST_STATIC_MIC)" || { echo "FATAL: TEST_STATIC_MIC not found: $(TEST_STATIC_MIC)" >&2; exit 1; }
+	@test -f "$(TEST_STATIC_REF)" || { echo "FATAL: TEST_STATIC_REF not found: $(TEST_STATIC_REF)" >&2; exit 1; }
+	"$(abspath $(TEST_STATIC_TARGET))" "$(TEST_STATIC_MIC)" "$(TEST_STATIC_REF)" "$(TEST_STATIC_SR)"
+
+# Regenerates the golden from the Python reference every run, so the gate
+# compares the CURRENT Python against the CURRENT C rather than a stale blob.
+test-detectors-parity: $(TEST_DET_TARGET)
+	python3 ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" $(TEST_DET_HOP) $(TEST_DET_SR)
+	"$(abspath $(TEST_DET_TARGET))" "$(TEST_DET_GOLDEN)"
+
+# Permanent four-grid gate: legacy 8 kHz plus the three product grids.
+test-detectors-parity-all: $(TEST_DET_TARGET)
+	python3 ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 128 8000
+	"$(abspath $(TEST_DET_TARGET))" "$(TEST_DET_GOLDEN)"
+	python3 ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 128 16000
+	"$(abspath $(TEST_DET_TARGET))" "$(TEST_DET_GOLDEN)"
+	python3 ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 256 16000
+	"$(abspath $(TEST_DET_TARGET))" "$(TEST_DET_GOLDEN)"
+	python3 ../python/diag/gen_detectors_golden.py "$(TEST_DET_GOLDEN)" 512 48000
+	"$(abspath $(TEST_DET_TARGET))" "$(TEST_DET_GOLDEN)"
+
+test-zero-heap: $(TEST_ZH_TARGET)
+	+$(MAKE) -C $(AC_DIR) $(AC_FWD) test_zero_heap
+	@cd $(AC_DIR) && "$(abspath $(TEST_ZH_TARGET))"
 
 FORCE:
 
@@ -918,6 +984,10 @@ $(TEST_RS_TARGET): $(OBJS) $(TEST_RS_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_rate_structural [$(BACKEND)] -> $@"
 
+$(TEST_CV_TARGET): $(OBJS) $(TEST_CV_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_config_validation [$(BACKEND)] -> $@"
+
 $(TEST_PC_TARGET): $(OBJS) $(TEST_PC_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_process_context [$(BACKEND)] -> $@"
@@ -929,6 +999,32 @@ $(TEST_SFS_TARGET): $(OBJS) $(TEST_SFS_OBJS) $(AC_LIB) | _cfg_guard
 $(TEST_SFH_TARGET): $(OBJS) $(TEST_SFH_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_shared_fft_handle [$(BACKEND)] -> $@"
+
+$(TEST_DET_TARGET): $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec3_scale.c include/detectors.h | _cfg_guard
+	@mkdir -p $(BIN_DIR)
+#	$(CC), not $(LINK): under BACKEND=ne10 LINK is $(CXX) so that NE10's C++
+#	archive links, but this target pulls in no archive at all -- feeding C
+#	sources with -std=gnu99 to a C++ driver just fails.
+	$(CC) $(CFLAGS) -o $@ $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec3_scale.c -lm
+	@echo "parity_detectors [$(BACKEND)] -> $@"
+
+$(TEST_STATIC_TARGET): $(OBJS) $(TEST_STATIC_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_static_aec [$(BACKEND)] -> $@"
+
+$(TEST_ZH_TARGET): $(OBJS) $(TEST_ZH_OBJS) $(AC_LIB) | _cfg_guard
+	+$(MAKE) -C $(AC_DIR) $(AC_FWD) test_zero_heap
+ifeq ($(shell uname -s),Darwin)
+	@ac_bin="$$($(MAKE) -s -C $(AC_DIR) $(AC_FWD) print-bin-dir)"; \
+	$(LINK) $(CFLAGS) -fno-builtin -o $@ $(OBJS) $(TEST_ZH_OBJS) $(AC_LIB) \
+		-L"$$ac_bin" -lzero_heap_hook -Wl,-rpath,"$$ac_bin" $(LDFLAGS)
+else
+	@ac_obj="$$($(MAKE) -s -C $(AC_DIR) $(AC_FWD) print-obj-dir)"; \
+	$(LINK) $(CFLAGS) -fno-builtin -o $@ $(OBJS) $(TEST_ZH_OBJS) \
+		"$$ac_obj/zero_heap_hook.o" $(AC_LIB) $(LDFLAGS) \
+		-Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
+endif
+	@echo "test_zero_heap_aec [$(BACKEND)] -> $@"
 endif
 
 # --- Query targets -------------------------------------------------------
@@ -1396,6 +1492,11 @@ help:
 	@echo "                  regression test (test_shared_far_spec) -- run from c_impl/"
 	@echo "  test-shared-fft-handle  Build + run the permanent shared-FFT-handle"
 	@echo "                  regression test (test_shared_fft_handle) -- run from c_impl/"
+	@echo "  test-static-aec  Build + run heap-vs-caller-pool byte-equality on a real WAV pair"
+	@echo "                  (override TEST_STATIC_MIC/TEST_STATIC_REF/TEST_STATIC_SR as needed)"
+	@echo "  test-zero-heap  Prove caller-pool init/process/reset/destroy performs no allocation"
+	@echo "  test-detectors-parity  Gate detectors.c against the Python reference (regenerates the golden)"
+	@echo "  test-detectors-parity-all  Run detector parity on legacy 8 kHz and all three product grids"
 	@echo "  debug   Build with -g -DAEC_DEBUG"
 	@echo "  publish Copy this build's artifacts to dist/<backend>/<config-hash>/ + update dist/<backend>/current"
 	@echo "  audit-no-stdio  Build lib with NO_STDIO=1 and verify it (and a minimal linked"

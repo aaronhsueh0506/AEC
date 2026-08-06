@@ -1,17 +1,8 @@
-/* aec.h — top-level v3.22 AEC orchestration (AEC3 post-filter chain).
+/* Public C API for the single-channel PBFDKF AEC.
  *
- * Wires the bit-exact v3.22 modules into one frame-level aec_process() that
- * mirrors python/modules/orchestrator.py AEC.process for the BALANCED preset
- * (mode=PBFDKF, simple variable-mu, enable_res=True,
- * enable_cng per preset). The post-stage is driven entirely by aec3_post_run
- * (the bit-exact full _aec3_post orchestration); this file ports the AUDIO
- * PATH of process() around it.
- *
- * Out of scope for this cutover:
- *   - AecMode != PBFDKF (NLMS / buffered FDAF queue)
- *   - get_stats / debug logger / capture_stages / pure-diagnostic _diag stashes
- *   - (historical note: aec_init/aec_get_mem_size static-memory pool is now
- *     IMPLEMENTED — see STATIC_MEMORY.md; both paths live in aec.c.)
+ * Python is the algorithm specification; this header exposes the float32 C
+ * implementation, heap and caller-owned-pool construction, lockstep and
+ * split render/capture processing, and the external RES context seam.
  */
 #ifndef AEC_AEC_H
 #define AEC_AEC_H
@@ -71,11 +62,10 @@ typedef struct AecConfig {
     /* scalar tunables (balanced base). shadow_err_alpha/warmup_frames/
      * epc_hangover are wall-clock-authored at the legacy hop=160/sr=16000
      * (10 ms) grid and retimed live for the real grid in aec_carve() --
-     * construction time, the one place guaranteed to see the FINAL
+     * construction time, the one place guaranteed to see the final
      * resolved hop after any caller override (e.g. aec_wav.c's
-     * --fft-size), NOT aec_config_defaults() (2026-08 gap-fix) -- the
-     * values in comments below are the legacy-grid figures, not
-     * necessarily today's default. */
+     * --fft-size), not aec_config_defaults(). Values below are reference-grid
+     * figures and may differ from the effective values stored by an Aec. */
     float  shadow_err_alpha;       /* 0.80 @ 10 ms hop */
     float  shadow_mu_min;          /* 0.5  */
     float  shadow_mu_nlms;         /* 0.5  */
@@ -113,8 +103,8 @@ typedef struct AecConfig {
     /* ne_recent gate parameters (mirror AecConfig.ne_recent_*). threshold is
      * float32-by-design (Python bit-exact parity retired; f32/f64 drift
      * across this threshold is accepted). ne_recent_hold is wall-clock-
-     * authored @ 10 ms hop and retimed live in aec_carve() (2026-08
-     * gap-fix); ne_recent_sustain is a genuine consecutive-event count
+     * authored @ 10 ms hop and retimed live in aec_carve();
+     * ne_recent_sustain is a genuine consecutive-event count
      * (NOT a duration) and is intentionally left unretimed. */
     float  ne_recent_threshold;               /* 0.3 */
     int    ne_recent_hold;                    /* 150 hops = 1500 ms @ 10 ms hop */
@@ -126,8 +116,7 @@ typedef struct AecConfig {
     float  min_gain_floor_far_active_db;
 
     /* FilterMisadjustmentEstimator (AEC3 ScaleFilter). stable/hangover_frames
-     * are wall-clock-authored @ 10 ms hop and retimed live in aec_carve()
-     * (2026-08 gap-fix). */
+     * are wall-clock-authored @ 10 ms hop and retimed live in aec_carve(). */
     int    filter_misadjustment_stable_frames;   /* 30 hops = 300 ms @ 10 ms hop */
     int    filter_misadjustment_hangover_frames;  /* 100 hops = 1000 ms @ 10 ms hop */
     float  filter_misadjustment_scale_min;        /* 0.5 */
@@ -249,8 +238,6 @@ typedef struct Aec {
     float  simple_mu_ratio;
     int    simple_mu_holdoff;
     float* per_bin_mu_scale;   int has_per_bin_mu;
-    float  limiter_gain;
-    float* limiter_near_lag;   int has_limiter_lag;
     /* power EMAs (alpha=0.95 sample loop) */
     float  near_power, raw_error_power;
     float  alpha_pow;
@@ -294,6 +281,8 @@ typedef struct Aec {
 
     /* RES-context stash (last frame) */
     float  last_far_power, last_shadow_dt, last_dt_indicator;
+    /* Retimed ERL tracker EMAs (per hop, 10 ms authored grid). */
+    float  alpha_erl_tracking, alpha_erl_converged;
     int    last_is_stationary_dt;
 
     /* hop scratch */
@@ -335,24 +324,11 @@ typedef struct Aec {
      * (one analyze_render then one process_capture) the FIFO is pass-through
      * (fifo_write one ahead of fifo_read, no event) → identical output to
      * aec_process(). */
-    /* F09 Variant A' (drop-new + consumer catch-up): a from-scratch SPSC
-     * ring, replacing an earlier design where both the producer and the
-     * consumer could advance the read cursor (the producer's overrun path
-     * used to drop the OLDEST buffered hop, which requires a second writer
-     * on the read side and forces every touch of it through a full
-     * fetch_add RMW). This rewrite gives each cursor exactly ONE writer —
-     * the textbook SPSC shape — by moving the overrun response to "producer
-     * drops the NEW incoming hop" (drop-new) and adding a symmetric
-     * "consumer catches up to the freshest hop" response for when the
-     * consumer has fallen a full `cap` hops behind. The same two
-     * AecBufferingEvent values are still reported; only which side's data is
-     * sacrificed under sustained skew changes (newest vs. oldest hop
-     * dropped). aec.c touches every cross-thread field below through
-     * GCC/Clang `__atomic_*_n` builtins on plain int/unsigned lvalues, never
-     * `<stdatomic.h>` _Atomic types — so the struct's size and member
-     * offsets are completely unaffected (no ABI break for existing callers/
-     * pool-size math) and the header stays includable from a C89
-     * translation unit.
+    /* SPSC ring with one writer per cursor. On overrun the producer drops the
+     * new hop; when a full ring separates the cursors, the consumer catches
+     * up to the freshest hop. Cross-thread cursor access uses GCC/Clang
+     * __atomic builtins on plain fields so the public layout remains C89-
+     * compatible.
      * Per-field protocol:
      *   - fifo_write: producer-owned monotonic unsigned write sequence
      *     number (ever-increasing, indexed into the ring with `% cap` at
@@ -446,18 +422,10 @@ typedef struct Aec {
 
     int is_static;
 
-    /* F03 arena-fication: aec_create()'s single malloc'd arena backing every
-     * sub-module array above (ref_ring, render_fifo, rsa_counters, the main/
-     * shadow filter state, the whole AEC3 post chain, hop/per-hop-freq-bin
-     * scratch, ...). NULL on the static-pool path (aec_init) — there the
-     * caller owns the pool and aec_destroy() must not free it. Appended at
-     * the end of the struct so existing field offsets are unchanged. */
+    /* Single allocation owned by aec_create(); NULL for caller-pool aec_init(). */
     void*  heap_arena;
 
-    /* Appended AFTER heap_arena (same append-at-end precedent, so every
-     * field above keeps its pre-existing offset). fifo_zero_ref: an
-     * immutable all-zero hop, the F09 Variant A' underrun reference — see
-     * the streaming-FIFO design note above. */
+    /* Immutable all-zero reference used on streaming FIFO underrun. */
     float* fifo_zero_ref;
 } Aec;
 
@@ -477,26 +445,16 @@ void aec_process(Aec* a, const float* mic, const float* ref, float* out);
 
 /* Context-only variant of aec_process(): runs the full linear filter + AEC3
  * post/RES block (so aec_get_res_context() is fully populated afterward)
- * but skips the output limiter and never writes an `out` buffer -- for
- * callers that only ever read the context (error_spec / res_gain /
- * formed_output / etc), never aec_process()'s own returned audio. Cheaper
- * per-hop than aec_process() by exactly the limiter's O(hop) work plus one
- * O(hop) memcpy; the linear filter and RES/post cost is identical either
- * way.
+ * but never writes an `out` buffer -- for callers that only ever read the
+ * context (error_spec / res_gain / formed_output / etc), never
+ * aec_process()'s own returned audio. Cheaper per-hop than aec_process() by
+ * exactly one O(hop) memcpy; the linear filter and RES/post cost is
+ * identical either way.
  *
- * PRECONDITION (caller's responsibility, not checked here): see aec.c's
- * doc comment on this function for the full rule. Summary -- there are two
- * CLASSES of entry point: "full" (aec_process(), and aec_process_capture()
- * since it calls aec_process() internally) drives the output limiter;
- * "context-only" (this function, and aec_process_context_shared_far())
- * never does. The safety boundary is one construct-or-reset EPOCH (from
- * aec_create()/aec_init(), or the most recent aec_reset(), up to the next
- * aec_reset()/aec_destroy()) -- NOT "construction decides for the whole
- * lifetime": a caller MAY switch classes across a reset, but must never
- * call a full-class entry point (aec_process_capture() included) and a
- * context-only-class entry point within the same epoch. Mixing classes
- * within one epoch desyncs the limiter's one-hop state, producing an
- * audible gain discontinuity the next full-class call makes. */
+ * No mixing restriction: this and aec_process() / aec_process_capture() /
+ * aec_process_context_shared_far() all advance identical state and differ
+ * only by whether the result is copied out, so they may be interleaved
+ * freely on one instance without an intervening aec_reset(). */
 void aec_process_context(Aec* a, const float* mic, const float* ref);
 
 /* Shared-far-end-FFT variant of aec_process_context(): shared_far_spec
@@ -510,10 +468,7 @@ void aec_process_context(Aec* a, const float* mic, const float* ref);
  * (the OLA far-buffer history and every non-FFT use of the raw far signal
  * are unaffected by this sharing). Pass NULL to fall back to
  * aec_process_context()'s own behavior (compute this instance's own FFT)
- * -- see aec.c's doc comment on this function for the full precondition.
- * Same construct-or-reset-epoch rule as aec_process_context() above: this
- * is a context-only-class entry point, never mixed with aec_process()/
- * aec_process_capture() within the same epoch. */
+ * -- see aec.c's doc comment on this function for the full precondition. */
 void aec_process_context_shared_far(
         Aec* a, const float* mic, const float* ref,
         const Complex* shared_far_spec);
@@ -559,14 +514,6 @@ long aec_far_fft_real_compute_count(const Aec* a);
  *     pair is quiesced first;
  *   - mixing aec_process_capture() with the offline aec_process() on the
  *     same instance concurrently with the streaming pair.
- *
- * aec_process_capture() calls aec_process() internally, so it is a "full"
- * class entry point for the construct-or-reset-epoch rule documented on
- * aec_process_context() above: an instance driven through
- * aec_process_capture() must never also call aec_process_context() /
- * aec_process_context_shared_far() within the same epoch (this is a
- * limiter-state-consistency concern, separate from the threading contract
- * above).
  *
  * Lockstep equivalence: calling aec_analyze_render(ref) immediately followed
  * by aec_process_capture(mic, out) from a SINGLE thread (the degenerate,

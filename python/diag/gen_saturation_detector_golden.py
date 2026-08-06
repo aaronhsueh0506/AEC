@@ -4,7 +4,7 @@ Runs the Python SaturationDetector (AecState variant,
 modules/state/saturation_detector.py) over a deterministic sequence that
 exercises all three branches and their boundaries, then writes inputs + the
 expected per-frame _saturated_echo flag to a raw little-endian file that
-c_impl/test/parity_saturation_detector.c replays.
+c_impl/test/historical/parity_saturation_detector.c replays.
 
 Real captured dtypes (aec_state.py:333 call site, monkeypatch on one
 doubletalk case): render_block float32 1-D (hop=160); saturated_capture +

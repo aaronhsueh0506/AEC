@@ -5,7 +5,7 @@ x2/y2/e2 sequence (incl. converged_filter True/False, a coherence gate mask,
 the kPointsToAccumulate(=6) accumulation rollover, the low-render branch, the
 onset-detection hold/release chain) and writes inputs + the full per-frame
 ERLE state to a raw little-endian file that
-c_impl/test/parity_subband_erle.c replays.
+c_impl/test/historical/parity_subband_erle.c replays.
 
 We emit MULTIPLE config variants back-to-back in one file so the C test can
 exercise:

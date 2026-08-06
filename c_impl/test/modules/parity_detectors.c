@@ -1,5 +1,6 @@
-/* parity_detectors.c — Wave 1.5/1.6/1.7 gate.
- * Bit-exact gate (all fp64 arithmetic, integer state) on synthetic vectors.
+/* parity_detectors.c — Python/C parity gate for the three detectors.
+ * Booleans and counters must match exactly; float fields within an fp32 band.
+ * Golden: python3 python/diag/gen_detectors_golden.py <out.bin> [hop] [sample_rate]
  */
 #include "detectors.h"
 #include <stdio.h>
@@ -14,8 +15,8 @@ int main(int argc, char* argv[]) {
     FILE* f = fopen(argv[1], "rb");
     if (!f) { perror("open"); return 2; }
 
-    int32_t hop, n_frames;
-    if (rd(f, &hop, 4) || rd(f, &n_frames, 4)) {
+    int32_t hop, sample_rate, n_frames;
+    if (rd(f, &hop, 4) || rd(f, &sample_rate, 4) || rd(f, &n_frames, 4)) {
         fprintf(stderr, "header read failed\n"); return 2;
     }
 
@@ -28,9 +29,9 @@ int main(int argc, char* argv[]) {
      * PAIR_BLOCK=8. */
     int ra_scratch_len = (hop + 7) / 8;
     float* ra_scratch = (float*)malloc((size_t)ra_scratch_len * sizeof(float));
-    render_activity_init(&ra, ra_scratch, ra_scratch_len);
-    FilterConvergence  fc; filter_convergence_init(&fc);
-    DoubleTalk         dt; doubletalk_init(&dt, 1.5, 3.0);
+    render_activity_init(&ra, ra_scratch, ra_scratch_len, hop, sample_rate);
+    FilterConvergence  fc; filter_convergence_init(&fc, hop, sample_rate);
+    DoubleTalk         dt; doubletalk_init(&dt, 1.5, 3.0, hop, sample_rate);
 
     float* far_buf = (float*)malloc((size_t)hop * sizeof(float));
     int diffs = 0;
@@ -63,23 +64,51 @@ int main(int argc, char* argv[]) {
                                        mic_pwr, erl_est);
 
         /* Tolerances:
-         *  far_pwr: fp32 ULP (Python np.mean uses pairwise fp32 sum; we
-         *           use 8-block pairwise but exact algorithm differs by
-         *           ≤ 2 fp32-ULP). dt_from_energy compounds far_pwr drift.
-         *  Booleans / counters / fp64-only EMAs: exact match. */
+         *  Every float-valued field is compared in a float32 ULP band.
+         *  detectors.c is float32 by design and the fp64 bit-exact parity
+         *  target is retired (see the note at the top of that file), so the
+         *  divergence/dt_from_shadow/shadow_advantage fields cannot be
+         *  compared with exact equality -- they are fp32 in C and fp64 in
+         *  Python. This harness originally asserted exact equality on those
+         *  three, which is why it could never pass and ended up shelved with
+         *  no Makefile target. The band is tight enough to stay a real gate:
+         *  the SHADOW_FRAME_GATE 50-vs-20 divergence this test exists to
+         *  catch shows up as 0.0 vs ~0.059, ~7 orders of magnitude outside it.
+         *  Booleans and counters remain exact.
+         *  far_pwr: Python np.mean uses pairwise fp32 sum; we use 8-block
+         *  pairwise, so the exact algorithm differs by <= 2 fp32-ULP.
+         *  dt_from_energy compounds far_pwr drift. */
         const double F32_ULP = 1.2e-7;
-        int far_drift = fabs(ra_res.far_pwr - exp_far_pwr) >
-                        2.0 * F32_ULP * (fabs(exp_far_pwr) + 1e-30);
-        int dte_drift = fabs(dt.dt_from_energy - exp_dte) >
-                        4.0 * F32_ULP * (fabs(exp_dte) + 1e-30);
-        if (far_drift || dte_drift ||
+        #define DRIFT(c, py, ulps) \
+            (fabs((double)(c) - (double)(py)) > \
+             (ulps) * F32_ULP * (fabs((double)(py)) + 1e-30))
+        /* EMA-ACCUMULATED fields use a RELATIVE band, not a ULP count.
+         * Since the retiming landed, the EMA coefficient itself differs
+         * between the ports -- C's aec3_growth_rehop is float32 powf, Python's
+         * growth_rehop is float64 -- so the two sides run slightly different
+         * recursions. The gap therefore GROWS with the length of a decay run
+         * (~N * 1 coefficient-ULP over N steps), which a fixed ULP count
+         * cannot express: 16 ULP held for 240 frames and failed on a 20-frame
+         * silence tail at 16.3. Measured worst case over all four grids is
+         * ~2e-6 relative; 1e-4 is 50x that and still four orders below any
+         * real defect (a wrong constant shows up at 20%+ -- see the mutation
+         * cases in the file header). The instantaneous fields keep their tight
+         * ULP bands: they carry no accumulated state. */
+        #define REL_DRIFT(c, py, rel) \
+            (fabs((double)(c) - (double)(py)) > \
+             (rel) * (fabs((double)(py)) + 1e-12))
+        const double EMA_REL = 1e-4;
+        int far_drift = DRIFT(ra_res.far_pwr, exp_far_pwr, 2.0);
+        int adv_drift = DRIFT(dt.shadow_advantage, exp_adv, 4.0);
+        int dte_drift = REL_DRIFT(dt.dt_from_energy, exp_dte, EMA_REL);
+        int div_drift = REL_DRIFT(fc.divergence, exp_div, EMA_REL);
+        int dts_drift = REL_DRIFT(dt.dt_from_shadow, exp_dts, EMA_REL);
+        if (far_drift || dte_drift || div_drift || dts_drift || adv_drift ||
             ra_res.is_active != exp_active ||
             ra_res.is_stationary != exp_stat ||
             ra_res.warmup_active != exp_warm ||
             fc.converged != exp_conv || fc.once_converged != exp_once ||
-            just != exp_just || fc.divergence != exp_div ||
-            dt.dt_from_shadow != exp_dts ||
-            dt.shadow_advantage != exp_adv) {
+            just != exp_just) {
             if (diffs < 5) {
                 fprintf(stderr,
                     "[det] frame %d MISMATCH:\n"
@@ -99,6 +128,6 @@ int main(int argc, char* argv[]) {
     if (fail || diffs > 0) {
         fprintf(stderr, "[det] FAIL\n"); return 1;
     }
-    fprintf(stderr, "[det] PASS (bit-exact)\n");
+    fprintf(stderr, "[det] PASS (exact on state, fp32 band on floats)\n");
     return 0;
 }

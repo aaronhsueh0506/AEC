@@ -129,7 +129,7 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
             /* UBSan-confirmed signed-overflow fix, floored at LONG_MAX (not
              * at the FA_CONSISTENT_HOLD_HOPS threshold the boolean below
              * reads): unlike a pure boolean-gate counter, this field's raw
-             * value is read bit-exact by test/parity_filter_analyzer.c
+             * value is read bit-exact by test/historical/parity_filter_analyzer.c
              * (`m.consistent.counter != e_counter`), which mirrors the
              * Python ConsistentFilterDetector's own unbounded `_counter`
              * accumulator. Capping at the threshold would still make the
@@ -269,7 +269,7 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     /* Ceilinged at FA_CONVERGENCE_THRESHOLD_HOPS+1 (UBSan-confirmed
      * signed-overflow fix): the ONLY consumer of blocks_since_reset
      * anywhere in this file is the `> FA_CONVERGENCE_THRESHOLD_HOPS` check
-     * below (test/parity_filter_analyzer.c does not read this field, only
+     * below (test/historical/parity_filter_analyzer.c does not read this field, only
      * `consistent.counter` -- see that field's own fix above). Once the
      * counter exceeds FA_CONVERGENCE_THRESHOLD_HOPS, further increments
      * can never change that comparison's outcome (already true, stays

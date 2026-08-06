@@ -4,7 +4,7 @@ Runs the Python RenderSignalAnalyzer over a deterministic float32 input
 sequence and writes, for each per-hop step, the inputs + the full observable
 state (counters, narrow_peak_band, poor_signal_excitation) and the masked-mu
 output, to a raw little-endian file replayed by
-c_impl/test/parity_render_signal_analyzer.c.
+c_impl/test/historical/parity_render_signal_analyzer.c.
 
 REAL input dtypes (captured from the balanced 16 kHz / fl=832 pipeline on
 wav/aec_challenge_blind/doubletalk/0I0XMl3M0ECO0U1N0cJvpg_doubletalk_*.wav):

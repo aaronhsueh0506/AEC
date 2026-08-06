@@ -81,7 +81,7 @@ static inline void aec_debug_logf(const char* module, const char* fmt, ...) {
  * Schema (one row per hop):
  *   frame,delay,far_active,saturated_echo,usable_linear,dominant_nearend,
  *   filter_converged,fullband_erle,erle_mean,r2_mean,gain_mean,
- *   comfort_noise_mean,near_pwr,raw_err_pwr,limiter_gain
+ *   comfort_noise_mean,near_pwr,raw_err_pwr
  */
 typedef struct AecDebugTraceRow {
     int    delay;               /* min_direct_path_filter_delay (blocks)      */
@@ -97,7 +97,6 @@ typedef struct AecDebugTraceRow {
     float  comfort_noise_mean;  /* mean of per-bin comfort-noise PSD          */
     float  near_pwr;            /* near-power EMA                             */
     float  raw_err_pwr;         /* raw-error-power EMA                        */
-    float  limiter_gain;        /* OLA output limiter gain                    */
 } AecDebugTraceRow;
 
 #ifndef AEC_NO_STDIO

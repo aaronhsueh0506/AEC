@@ -5,10 +5,17 @@ All notable changes to this AEC implementation. Format roughly follows
 research-arc workflow used here. Each version entry links to the canonical
 verdict / closure doc under [docs/](docs/) for full evidence.
 
-Versioning: `__version__` in [python/aec.py](python/aec.py) tracks the
-production-graded BALANCED preset. `v3.x.y` jumps when a new production change
-ships into BALANCED; `v3.x` arc closure (collection of NEUTRAL closures + arc
-documentation) bumps `x`.
+Versioning: `__version__` in [python/aec.py](python/aec.py) versions this
+library's PUBLIC API and OUTPUT CONTRACT — the C header
+`c_impl/include/aec.h` (struct layouts, entry-point signatures, context-field
+semantics), the auto-derived default signal grid, the `--debug-trace` CSV
+schema, and whether `aec_process()` output stays bit-identical. MAJOR bumps
+when any of those break; MINOR when production BALANCED behaviour changes
+compatibly or new surface is added; PATCH for fixes that keep both the API and
+the output contract intact. Through `[3.24.1]` this field instead tracked only
+the production-graded BALANCED preset, with `v3.x.y` jumping per production
+change into BALANCED and `v3.x` arc closure bumping `x` — entries below
+`[4.0.0]` were written under that older rule and are not restated here.
 
 Bench standard for every entry below: 800-case AEC Challenge corpus,
 `preset=balanced / fl=832 (52 ms) / cng=True / -j 4`. Listen evidence cited
@@ -16,824 +23,949 @@ when verdict requires it.
 
 ---
 
-## [Unreleased] — 2026-08-05 — Shared FFT handle: one `FftHandle` per `Aec` instance instead of three
+## [4.0.0] — 2026-08-06 — Output-contract + public-ABI break: custom output limiter removed, 16 kHz default grid 512/256 → 256/128, context-only entry points, one shared FftHandle
 
-- `aec_create`/`aec_init` now carve and construct exactly ONE `FftHandle` per
-  instance (still exactly `fft_get_mem_size(fft)` bytes at the same `fft_size`
-  every sub-module already used); the main filter and the shadow filter each
-  borrow it (`pbfdaf_init_static`'s new required `shared_fft` parameter)
-  instead of carving/owning a private handle, and `aec_post_fft` remains the
-  single owner responsible for `fft_destroy`. Reduces static-pool size and
-  construction cost (`aec_get_mem_size`, BALANCED preset, measured
-  before/after): 16k/256 −17,568 B KISS / −16,352 B NE10; 16k/512 −33,952 B
-  KISS / −31,200 B NE10; 48k/1024 −66,720 B KISS / −60,896 B NE10. Per-hop
-  compute is unaffected (each sub-module still runs its own transforms
-  against the shared handle, fully sequentially — shadow, then main, then
-  the AEC3 post block, never interleaved, which this codebase's
-  single-threaded synchronous call path already guaranteed).
-- Safe because all three consumers run at the identical `fft_size` (derived
-  once per instance in `aec_derive_dims`) and each `fft_forward`/
-  `fft_inverse`/`fft_forward_scratch` call is a complete synchronous
-  operation — no consumer retains a pointer into the handle's internal
-  scratch across calls.
-- `pbfdaf_free`'s static-path branch no longer calls `fft_destroy` (it never
-  owns the handle it borrowed); calling it there as well would double-free
-  the NE10 backend's twiddle-config allocation every borrower now shares.
-  `pbfdaf_reset` is unaffected (it never touched `p->fft`).
-- Byte-equal verified: `aec_wav` renders across an 8-case stratified subset
-  of the AEC Challenge corpus, KISS and NE10 backends, before/after —
-  MATCH on all 16. Full existing suite (counter-saturation, rate-structural,
-  delay-reset, SIMD self-test, far-end-FFT-sharing regression test,
-  context-only-processing regression test) re-run clean across
-  BACKEND={kiss,ne10} x SIMD={0,1}.
+The `4.x` series is the same v3.21/v3.22 AEC3 algorithm; the major bump
+records the ABI and output-contract breaks below, not a new algorithm
+generation. The production chain is still the v3.21 AEC3-aligned `_aec3_post`
+chain with the v3.22 split min-gain floor.
 
-## [Unreleased] — 2026-08-04 — Far-end-FFT sharing across instances: `aec_process_context_shared_far`
+### ⚠ BREAKING
 
-- New entry point `aec_process_context_shared_far(aec, mic, ref,
-  shared_far_spec)`: like `aec_process_context`, but a non-NULL
-  `shared_far_spec` lets this instance skip computing its own far-end FFT and
-  borrow one an external caller already computed — for a multi-instance
-  caller (e.g. a 4-lane spatial wrapper) whose instances all see the
-  identical far-end signal every hop. Generalizes the pre-existing internal
-  shadow→main `precomputed_far_spec` borrow mechanism (documented as
-  "borrowed, one-shot, cleared after use") to an external source instead of
-  only an internal one; `ref` is still required even when sharing (the OLA
-  far-buffer history and every non-FFT use of the raw far signal — saturation
-  detection, delay estimation, mu_scale — are unaffected).
-- New read-only instrumentation `aec_far_fft_real_compute_count(aec)`:
-  cumulative count of hops this instance actually ran its own far-end rfft
-  (not borrowed one), for tests proving a multi-lane caller's total far-FFT
-  count actually dropped after switching lanes over to share one spectrum.
-- Hardening: `pbfdaf_reset` now also clears `precomputed_far_spec` — latent
-  but never triggered before this change (the field was always NULL by the
-  time any reset could observe it, since it was previously set-and-consumed
-  purely within a single internal call); with cross-instance sharing, a
-  caller resetting an instance between setting the pointer and that
-  instance's own process call could otherwise leave a stale/potentially
-  freed pointer on the struct.
-- Verified via `test/test_shared_far_spec.c` (51 checks, now wired into the
-  Makefile as `make test-shared-far-spec`): byte-identical `AecResContext`
-  between borrowing and independently computing, across all 3 grids x shadow
-  on/off; a negative control proving a wrong shared spectrum genuinely
-  changes the result (rules out a silent fallback); a heap-allocate-then-free
-  reset-safety case; and the far-FFT counter's 4-hop mutation test.
+1. **Output is no longer bit-identical.** The custom peak-ratio time-domain
+   output limiter was removed from the last stage of `aec_process()`. The
+   `aec_wav` + `cmp` byte-equality gate does not apply across this release.
+   *Migration*: re-baseline every stored reference render and every
+   byte-equality gate; if you relied on the limiter for clipping protection,
+   add an AGC/DRC or output-stage limiter outside this library. Measured on
+   75 AEC Challenge blind clips (25 each far-end singletalk / doubletalk /
+   near-end singletalk, KISS backend, BALANCED): mean level change +0.05 to
+   +0.14 dB (max +0.59 dB); files containing any sample above 1.0 went from
+   16/75 to 17/75; worst-case peak 1.156 → 1.381, affecting ≤0.09 % of samples
+   in the worst file, every such file having a microphone peak ≥0.96 (source
+   already at full scale). No sustained excursion or divergence was observed.
+   Note the old limiter did **not** prevent overshoot either — it reached
+   1.156/1.149/1.116 on those same files, because its gain is smoothed and
+   one-hop-lagged and so cannot catch an intra-hop transient.
+   - *Relaxation, not a break, but it belongs with this item*: **the
+     full/context entry-point mixing restriction is lifted.** The limiter was
+     the only state that `aec_process()` advanced and `aec_process_context()`
+     did not, so the "never mix classes within one construct-or-reset epoch"
+     rule previously documented on `aec_process_context()` is gone.
+     `aec_process()`, `aec_process_capture()`, `aec_process_context()` and
+     `aec_process_context_shared_far()` may now be interleaved freely on one
+     instance. *Migration*: any integration guide that copied the old
+     hard-precondition rule must be corrected.
+2. **`--debug-trace` CSV schema change.** The `limiter_gain` column is gone; a
+   row is now 14 fields, ending at `raw_err_pwr` (was 15). *Migration*: update
+   every downstream trace parser — column indices after the removed field all
+   shift.
+3. **Public `AecConfig` struct-layout change (twice).**
+   `spatial_linear_context` was added after `return_res_context`, and
+   `return_formed_output` was added. *Migration*: C callers must rebuild
+   against the updated header — do not link an old build's object files or a
+   cached static library against the new header (or vice versa); a mismatched
+   `sizeof(AecConfig)`/field offsets between a caller's compiled code and this
+   library is undefined behavior, not merely a stale-default risk. A
+   zero-initialized (`memset`) `AecConfig` from a *rebuilt* caller is
+   unaffected — both new fields default to 0 = off, matching every existing
+   caller's behavior.
+4. **`AecResContext` changed additively AND semantically.** New `formed_hop`
+   field (C) / `formed_output` (Python), so C callers must rebuild. More
+   importantly `error_spec` now *always* exposes the selected linear output on
+   the post-filter's periodic-sqrt-Hann, 50%-overlap WOLA grid; the no-shadow
+   C/Python path previously exposed PBFDKF's internal estimator spectrum,
+   which is not a reconstructing STFT of the continuous linear output — so
+   no-shadow consumers get different NUMBERS, not just a new field.
+   `echo_spec` and `near_spec` are re-aligned to the same window and frame
+   alignment, with `near_spec = error_spec + echo_spec`. Additionally
+   `res_gain` is `NULL` (not a stale/zeroed array) whenever
+   `spatial_linear_context` is set. *Migration*: rebuild; re-derive any
+   downstream RES/NR tuning calibrated against the old no-shadow `error_spec`;
+   NULL-check `res_gain` when using `spatial_linear_context`.
+5. **16 kHz default signal grid 512/256 → 256/128 (8 ms hop).** For every
+   caller that leaves `frame_size`/`fft_size` unspecified this changes default
+   algorithmic latency 16 ms → 8 ms, default static pool 543,040 B → 397,072 B,
+   and `n_partitions` 4 → 7 (`ceil(filter_length/hop)` with
+   `filter_length = 832`). *Migration*: callers that need the old grid must now
+   request it explicitly (`AecConfig(sample_rate=16000, frame_size=...)` /
+   `cfg->fft_size`); both 16 kHz grids remain fully supported. 8 kHz (256) and
+   48 kHz (1024) defaults are unchanged.
+6. **One shared `FftHandle` per `Aec` instance instead of three.**
+   `pbfdaf_init_static()` gained a REQUIRED `shared_fft` parameter, and
+   `pbfdaf_free()`'s static path no longer calls `fft_destroy` (it never owns
+   the borrowed handle; calling it would double-free the NE10 backend's shared
+   twiddle-config allocation). *Migration*: update out-of-repo
+   `pbfdaf_init_static()` call sites; re-read `aec_get_mem_size()` instead of
+   using any previously published pool figure — every one of them changed:
+   16k/256 −17,568 B KISS / −16,352 B NE10; 16k/512 −33,952 B KISS /
+   −31,200 B NE10; 48k/1024 −66,720 B KISS / −60,896 B NE10.
+7. **`epc_init()` signature change (C).**
+   `epc_init(EpcDetector*, int hangover, float total_rise, float
+   delta_threshold)` gained two trailing parameters, `int hop_size, int
+   sample_rate`, and `EpcDetector` gained two new fields, `float epv_fast_tc,
+   epv_slow_tc`. Python's `EchoPathChangeDetector.__init__` gained the same
+   two as optional keyword-only arguments. *Migration*: all in-repo call sites
+   are updated; out-of-repo callers must pass the real grid.
+8. **Production 16 kHz behaviour change — AEC3 constant audit, Tier 2.**
+   `subband_erle` (`alpha_up`/`alpha_down`/`onset_release_decay`),
+   `fullband_erle` (`quality_alpha`/`td_alpha`/`maxmin_forget`),
+   `residual_echo_estimator` (`noise_floor_growth_per_hop`, 1.1 → ~1.27 at
+   hop=160) and `stationarity_estimator` (noise-spectrum `alpha`/`alpha_init`)
+   were previously applied as raw, unrescaled AEC3 literals with no rate
+   conversion at all, so rescaling them for the live `sample_rate` changes
+   today's 16 kHz output. These four have **not** been through the 800-case
+   AECMOS bench yet — do not treat as ship-ready. *Migration*: re-validate
+   any tuning derived from the previous 16 kHz output.
+9. **Production 16 kHz behaviour change — top-level hop-authored constants
+   retimed to wall clock.** `shadow_err_alpha`, `warmup_frames`,
+   `epc_hangover`, `ne_recent_hold`, `filter_misadjustment_stable_frames`,
+   `filter_misadjustment_hangover_frames` and
+   `EchoPathChangeDetector.EPV_FAST_TC`/`EPV_SLOW_TC` were literal hop counts
+   / per-hop EMA constants frozen at the legacy hop=160/sample_rate=16000
+   (10 ms) grid. Measured end-to-end drift at 16 kHz: linear-path max diff
+   1.3e-5, post-chain max diff 1.9e-4 (both well inside the 2.0e-2 gate).
+   *Migration*: same as #8 — a genuine behavior change, not byte-equal.
+10. **8 kHz timing behaviour change.** `delay_aec3_init()` was hardcoding the
+    internal delay estimator's feed rate to 16000 regardless of the AEC's
+    configured `sample_rate`, so at native 8 kHz both real-time thresholds (the
+    ~30 s clockdrift `stability_reset_hops` and the ~500 ms
+    `consistent_estimate_threshold`) ran at 2x their intended wall-clock
+    duration. Fixed to pass the true feed rate. 16 kHz was coincidentally
+    correct. *Migration*: re-validate any 8 kHz delay-acquisition timing
+    expectation.
+11. **Downstream contract bumps.** `LINEAR_AEC_CONTRACT_VERSION` v1 → v2 —
+    AI-AEC `dataset_gen`'s ch5 channel read the limiter-processed output, so
+    *migration*: any dataset sequence built against v1 must be regenerated with
+    `rematerialize_linear_aec.py`. `FOUR_AEC_NR_RES_LAYOUT_VERSION` also
+    bumped, because the 4ch wrapper's `lane_out` staging buffer was removed.
+12. **Config validation tightened.** `highpass_cutoff_hz` now mirrors
+    audio_common's `hpf_params_valid` exactly (isfinite / >0 / <0.45·sr) when
+    `enable_highpass` is set. Configs such as {8 kHz, 4 kHz} used to pass the
+    flat [0, 20000] bound and then silently construct with NO mic-path HPF
+    (`hpf_init` NULL was never checked); `aec_carve` now FAILS CONSTRUCTION on
+    them. *Migration*: fix out-of-band cutoffs — they now hard-fail instead of
+    silently disabling the filter.
+13. **Build-invocation break.** `make CFLAGS=...` (likewise `CXXFLAGS`,
+    `CPPFLAGS`, `LDFLAGS`, `FP_POLICY`) is now rejected at parse time, because
+    GNU make silently drops the Makefile's own `+=`/`:=` appends for a
+    command-line-set variable — which used to strip `-ffp-contract=off` and
+    `-DAEC_NO_STDIO` while still building. *Migration*: any build script
+    passing those variables now hard-errors; move to `EXTRA_CFLAGS` /
+    `EXTRA_LDFLAGS`, the only supported hooks.
+14. **Release-flow break.** `make publish` now FATALs by default when this
+    checkout OR the resolved audio_common producer checkout has uncommitted
+    tracked changes, OR contains any untracked non-ignored file, OR has no git
+    identity at all (the last is refused unconditionally — no escape hatch).
+    `ALLOW_DIRTY_PUBLISH=1` and `ALLOW_UNTRACKED_PUBLISH=1` are separate,
+    orthogonal knobs. `make -t publish` is now an explicit no-op.
+    *Migration*: commit or ignore working-tree content before publishing.
+    NOTE: this repo currently carries ~98 dirty entries including ~75
+    untracked moved files, so `publish` WILL refuse until they are committed.
+15. **Preset renamed `gentle` → `mild`** (`AEC_PRESET_MILD`; NR-style naming,
+    parameters unchanged). *Migration*: update preset strings/enums at call
+    sites.
 
-## [Unreleased] — 2026-08-04 — `aec_process_context`: context-only entry point, no limiter/emit
+16. **Detector timing constants are now retimed per grid, and three internal
+    init signatures changed.** `render_activity_init`, `filter_convergence_init`
+    and `doubletalk_init` each gained trailing `int hop_size, int sample_rate`
+    (`detectors.h`); the coefficients they used to read from file-scope statics
+    now live in the `RenderActivity` / `FilterConvergence` / `DoubleTalk`
+    structs. Both struct layouts changed. These are internal headers, not part
+    of the `aec.h` public surface, but anything that constructs the detectors
+    directly must be updated. *Migration*: pass the instance's hop and sample
+    rate at init. Note `filter_convergence_reset()` no longer forwards to
+    `filter_convergence_init()`, because reset has no grid to re-derive from.
 
-- `aec_process`'s ~900-line body is now split into a shared static
+17. **Five adaptation constants are now retimed per grid, and
+    `saturation_init()` changed signature.** The 2026-08-06 detector pass (16)
+    covered the constants reachable from `AecConfig`; these five live in the
+    adaptation path and were missed, so they still covered a different
+    wall-clock span at every grid:
+
+    | constant | where | authoring grid | wall-clock TC (all grids, after) |
+    |---|---|---|---|
+    | `Aec::alpha_pow` | `aec.c` | per-**sample**, sr=16000 | 1.2185 ms |
+    | `Aec::alpha_erl_tracking` | `aec.c` | per-hop, 10 ms | 994.99 ms |
+    | `Aec::alpha_erl_converged` | `aec.c` | per-hop, 10 ms | 9995.00 ms |
+    | `PBFDAF::alpha_power` | `pbfdkf.c` | per-hop, 10 ms | 94.91 ms |
+    | `PBFDKF::alpha_r` | `pbfdkf.c` | per-hop, **16 ms** | 311.93 ms |
+    | `Saturation::alpha_attack/release` | `saturation.c` | per-hop, **16 ms** | 13.29 / 791.97 ms |
+
+    The reference grids are **not uniform** — verified per constant from git
+    provenance (`e9cb383` and `243d67c` authored theirs against frame 512 /
+    hop 256). Retiming the 16 ms family off the 10 ms reference is wrong by
+    exactly 1.6x, and is invisible unless a 10 ms-hop grid is sampled.
+    Consequently `alpha_r` and the saturation pair are **unchanged** at
+    8000/256 and 16000/512 — both already have a 16.000 ms hop. That is
+    correct behaviour, not an unfinished retime.
+
+    `saturation_init()` gained trailing `int hop_size, int sample_rate`
+    (`saturation.h`). *Migration*: pass the instance's hop and sample rate.
+    Behaviour is unchanged at 8 kHz/256 and 16 kHz/512 and changes elsewhere.
+
+    Validated by a 90-case blind A/B (`preset=balanced`, `--filter 52`,
+    `--cng`, `NO_PREALIGN=1`) on both 16 kHz grids: worst bucket ΔAECMOS-echo
+    −0.017, worst Δdeg −0.013, every bucket within the ±0.05 abort band. 48 kHz
+    has a structural pass only — see "Known limitations". Per-case scores, the
+    exact baseline→candidate diff and the harness are checked in under
+    `eval/ab_evidence/2026-08-06-adaptation-retiming/`.
+
+18. **`pbfdaf_init()` / `pbfdkf_init()` now reject a non-positive
+    `sample_rate`, `hop_size`, or NULL instance** with `-1`, writing nothing.
+    These are public API sitting under `aec_create()`'s validator, and since
+    (17) `sample_rate` is load-bearing there. *Migration*: direct callers must
+    pass a real sample rate; `0` no longer means "don't care". `saturation_init()`
+    returns void and cannot report the error, so `aec3_growth_rehop()` absorbs
+    it by returning the authoring value — leaving the detector un-retimed
+    rather than driving it with a NaN retention.
+
+### Added
+
+- **`test_rate_structural` check (d2)** + `python/tests/test_detector_timing_effective_values.py`
+  — the permanent regression gate for (17), on all four grids in both
+  languages. Both assert the value an instance **actually ends up with**, not
+  that a retiming call appears in the source: a reviewer reading the four
+  touched modules concluded the retiming had never been applied, because three
+  of the seven values are legitimately identical to their authored literal on
+  two of the four grids. Only an effective-value assertion separates "retimed"
+  from "not retimed". Both halves of the negative space are covered — the 16 ms
+  family must NOT move on a 16 ms grid, and the 10 ms/per-sample constants MUST
+  move where the grids differ. Mutation-tested: reverting any one constant to
+  its authored literal fails it, and so does retiming a 16 ms constant off the
+  10 ms reference (194.96 ms vs the expected 311.93 ms).
+
+- **`make test-config-validation`** — `test_config_validation.c` had lived
+  since 2026-07 as a standalone-gcc recipe with **no Makefile target**, so its
+  checks only ran when someone remembered to compile it by hand. Now wired, and
+  extended with `test_direct_init_rejects_bad_rate` covering (18).
+
+- **`make test-detectors-parity`** + `python/diag/gen_detectors_golden.py` —
+  the Python/C gate for `detectors.{c,h}`. `test/modules/parity_detectors.c`
+  had existed since 2026-07 with **no Makefile target and no golden
+  generator**, so it had never run once. It also asserted fp64 bit-exactness on
+  three float fields, which `detectors.c` retired long ago, so it could not
+  have passed even if invoked — which is presumably why it was shelved rather
+  than fixed. Both gaps are closed: booleans and counters compare exactly,
+  instantaneous floats in an fp32 ULP band, EMA-accumulated floats in a
+  relative band (a fixed ULP count cannot express drift that grows with the
+  length of a decay run once the two ports' EMA coefficients differ).
+  The golden regenerates on every invocation, so the gate compares the CURRENT
+  Python against the CURRENT C rather than a stale blob, and the header carries
+  `sample_rate` as well as `hop` (hop=128 alone cannot distinguish 8 kHz from
+  16 kHz, and they retime differently). Mutation-tested: reverting the shadow
+  gate, dropping any individual retime, using the wrong reference grid, or
+  breaking the `NEW = 1 - OLD` pairing each fail it.
+
+- **`aec_process_context(aec, mic, ref)`** — context-only entry point.
+  `aec_process`'s ~900-line body is now split into a shared static
   `aec_process_core()` (the linear filter + AEC3 post/RES block, plus the
   power-EMA/convergence-detection steps the NEXT hop depends on) and two thin
-  wrappers: `aec_process` (core + output limiter + emit into `out`) and the
-  new `aec_process_context(aec, mic, ref)` (core only — no `out` parameter,
-  no limiter). For a caller that only reads `aec_get_res_context()`
-  (`error_spec`/`res_gain`/`formed_hop`/etc, e.g. a pipeline running
-  `enable_res=0 && return_res_context=1` purely for the linear filter's
-  context) and never plays `aec_process`'s own returned audio, this skips the
-  limiter's `O(hop)` work and the final `O(hop)` emit copy — the linear
-  filter and RES/post cost are identical either way.
-- **One-hard-precondition rule**: a given `Aec` instance's calls fall into
-  two classes — "full" (`aec_process`, and `aec_process_capture` since it
-  calls `aec_process` internally) drives the output limiter and carries its
-  one-hop state (`limiter_gain`/`limiter_near_lag`/`has_limiter_lag`);
-  "context-only" (`aec_process_context`, and
-  `aec_process_context_shared_far` above) never touches it. The safety
-  boundary is one construct-or-reset EPOCH, not "construction decides for
-  the instance's whole lifetime": `aec_reset()` zeroes the limiter state, so
-  a caller may switch classes across a reset, but must never mix a
-  full-class call with a context-only-class call within the same epoch —
-  doing so desyncs the limiter state, producing an audible one-hop gain
-  discontinuity the next full-class call makes (not a crash). See
-  `aec_process_context`'s doc comment in `aec.h`/`aec.c` for the full rule,
-  and the [C user & integration guide](docs/c_user_and_integration_guide.md)
-  §3.3 for a worked example.
-- Wired into both pipelines: mono `audio_pipeline.c`'s non-`aec_only` path
-  and every lane of the 4ch `4aec_nr_res.c` wrapper now use
+  wrappers: `aec_process` (core + emit into `out`) and `aec_process_context`
+  (core only — no `out` parameter). For a caller that only reads
+  `aec_get_res_context()` (`error_spec`/`res_gain`/`formed_hop`/etc, e.g. a
+  pipeline running `enable_res=0 && return_res_context=1` purely for the
+  linear filter's context) and never plays `aec_process`'s own returned audio,
+  this skips the final `O(hop)` emit copy — the linear filter and RES/post
+  cost are identical either way. Wired into the Makefile as
+  `make test-process-context` (`test/test_process_context.c`, 74 checks:
+  byte-identical `AecResContext` — every field a real caller reads, including
+  `linear_hop`/`far_spec`/`res_gain`/`saturation_level` — between
+  `aec_process` and `aec_process_context` across the 3 officially-contracted
+  grids x shadow on/off x `spatial_linear_context` on/off, i.e. the 4ch
+  wrapper's exact per-lane config; every populated field checked finite; a
+  reset-survival case; and, since the limiter's removal, a case that
+  interleaves the full and context-only entry points and requires
+  bit-identical output against an `aec_process()`-only reference).
+- **`aec_process_context_shared_far(aec, mic, ref, shared_far_spec)`** — like
+  `aec_process_context`, but a non-NULL `shared_far_spec` lets this instance
+  skip computing its own far-end FFT and borrow one an external caller already
+  computed, for a multi-instance caller (e.g. a 4-lane spatial wrapper) whose
+  instances all see the identical far-end signal every hop. Generalizes the
+  pre-existing internal shadow→main `precomputed_far_spec` borrow mechanism
+  (documented as "borrowed, one-shot, cleared after use") to an external
+  source; `ref` is still required even when sharing (the OLA far-buffer
+  history and every non-FFT use of the raw far signal — saturation detection,
+  delay estimation, mu_scale — are unaffected).
+- **`aec_far_fft_real_compute_count(aec)`** — read-only instrumentation:
+  cumulative count of hops this instance actually ran its own far-end rfft
+  (rather than borrowing one), for tests proving a multi-lane caller's total
+  far-FFT count really dropped. Covered by `test/test_shared_far_spec.c`
+  (51 checks, `make test-shared-far-spec`): byte-identical `AecResContext`
+  between borrowing and independently computing across all 3 grids x shadow
+  on/off; a negative control proving a wrong shared spectrum genuinely changes
+  the result (rules out a silent fallback); a heap-allocate-then-free
+  reset-safety case; and the counter's 4-hop mutation test.
+- **`AecConfig.return_formed_output`** (default `False`, no behavior change
+  unless set). When `True`, `process()`'s return shape is unchanged and
+  `aec.get_formed_output()` becomes available after each call, returning the
+  same value `AecResContext.formed_output` exposes — the shadow/main-SELECTED,
+  crossfaded, WOLA-formed linear residual — without requiring
+  `return_res_context=True`'s full `AecResContext` (and, when
+  `enable_res=False`, without running the rest of the `_aec3_post` gain/CNG
+  chain that context would otherwise pull in just to populate one field). Runs
+  only the AEC3 `UseRefinedOutput`/`FormLinearFilterOutput`
+  selection-and-crossfade step (`_aec3_select_linear_filter_output()`); does
+  not feed back into filter tap adaptation. Verified byte-identical to
+  `context.formed_output` across 3 grids x shadow on/off — see
+  `python/tests/test_formed_output_seam.py`. The seam is not merely
+  "pre-limiter": it exposes the selected/crossfaded linear residual, which is
+  not the raw main-filter output, so consumers that need the linear residual
+  (AI-AEC frontend) must keep reading it.
+- **`AecConfig.spatial_linear_context`** (default 0, no behavior change unless
+  set). When enabled, this AEC instance never computes its own
+  `SuppressionGain` output (`res_gain`) — intended for a multi-channel caller
+  (e.g. `pipelines/4ch_pipelines/4aec_nr_res.c`) that runs one AEC per
+  microphone lane purely for its linear filter, then recomputes an equivalent
+  gain once from beamformed multi-lane data; a per-lane gain in that
+  architecture is computed and then never read. The `DominantNearend`
+  hold-state (`suppression_gain_update_dominant_nearend()`, newly exported
+  from `suppression_gain.h`) still updates every hop even in this mode: it
+  feeds the next hop's ERLE onset decision, and therefore `r2`, which remains
+  used. `comfort_noise` is computed independently in Step 19 — it is one of
+  `DominantNearend`'s own *inputs*, not something it affects — and stays
+  correct in this mode regardless. Only the remaining, provably-dead part of
+  `suppression_gain_get_gain()` is skipped. Verified bit-exact against the
+  normal path on every other `AecResContext` field (`r2`, `comfort_noise`,
+  `near_spec`, `echo_spec`, `error_spec`, `formed_hop`) and the synthesized
+  output, at every supported grid, shadow filter on and off
+  (`c_impl/test/test_rate_structural.c`). Only valid together with the
+  existing context-only seam (`enable_res=0 && return_res_context=1`);
+  `aec_validate_config()` rejects any other combination.
+- **`AecResContext.formed_hop` (C) / `formed_output` (Python)** — the exact
+  current selected/crossfaded time-domain hop represented by the second half
+  of the WOLA frame, plus structural reconstruction tests for every supported
+  grid with the shadow filter both enabled and disabled.
+- **`aec3_growth_rehop()` / `growth_rehop()`** (`aec3_scale.c`/`.h`/`.py`) —
+  generalizes the existing `aec3_per_block_growth_to_per_hop` (already a
+  direct power law, already the right convention) from its hardcoded AEC3 4 ms
+  block reference to an arbitrary reference period (our legacy
+  hop=160/sample_rate=16000). No new conversion *mechanism* — same power-law
+  derivation, parameterized reference.
+- **Timing-audit tests**: `c_impl/test/test_rate_structural.c` gained a sixth
+  check, `test_top_level_constant_retiming` (40 new assertions across all four
+  grids, exercising the post-defaults `cfg.fft_size` override path), plus a
+  new `python/tests/test_hop_authored_timing_parity.py` (9 tests). Both
+  mutation-tested (reverting the C `aec_carve()` retiming block, the C
+  `epc_init()` EPV retiming, and the Python `__post_init__` retiming each
+  independently, confirming the new tests fail without the fix and pass with
+  it).
+- **`make test-zero-heap`** — an allocator-hook release gate for the complete
+  caller-pool init/process/reset/destroy lifecycle on KISS and NE10.
+- **Multi-rate 8/16/48 kHz (F01)**: every dimension derived from the
+  hop = 10 ms rule. Per-rate tables are generator-emitted from the live Python
+  spec (`gen_aec_balanced_config_h.py` — its cross-rate invariance assertion
+  caught 8 genuinely rate-scaled power constants), consumed via
+  `aec3b_rate_cfg()`; `filter_length` is ms-derived (416/832/3072).
+  Acceptance: per-rate Python↔C e2e parity (8 k −90 dB corr 1.0; 48 k
+  −23.8 dB corr 0.99998, root-caused and tolerance-documented), delay
+  C-goldens bit-exact ×3, static==dynamic ×3×2 backends, COLA/impulse
+  structural tests, UBSan clean ×3.
+- **Test/validation surface from the external-review campaign**:
+  `test_zero_heap_aec.c`, `test_lifecycle.c` (1/10/1000 cycles),
+  `test_config_validation.c`, a central `aec_validate_config()` (rate
+  whitelist, bounded fields) with saturating `ck_*` size arithmetic and
+  misaligned-base rejection, and `docs_smoke.sh` (compiles the
+  STATIC_MEMORY.md sample). `test_config_validation` 82 → 126 checks after the
+  rate-relative HPF work.
+- **Shared SIMD kernel layer** `audio_common/include/simd_kernels.h`
+  (22 kernels, AArch64 NEON + always-compiled scalar twins, bitwise selftest
+  incl. denormal/±0/inf and n=257 tails; `SIMD_KERNELS_FORCE_SCALAR` A/B
+  knob). Bit-exactness rests on per-lane IEEE NEON ops + strict FMA discipline
+  (explicit `fmaf` ↔ `vfmaq_f32`; plain mul+add never fused — consumer TUs
+  must keep `-ffp-contract=off`); min/clip use compare+select (vminq/vmaxq
+  diverge from the C ternary at ±0 ties).
+- **`bin/bench_rtf`** (`make bench`; cross-compiles with
+  `BACKEND=ne10 CC=<cross-gcc>`) and the clobber-permitted
+  `fft_forward_scratch`/`fft_inverse_scratch` API, adopted at six dead-scratch
+  rfft sites (input staging also skipped on NE10 there).
+- **Build isolation (B01/B03)**: config-keyed final artifacts in
+  `bin/<backend>-<cfg-sig>/` (full-coverage signature incl. AR/RANLIB and the
+  resolved producer identity; `config.manifest` collision guard; `-MD -MP`
+  header deps; `print-*` queries); `NO_STDIO=1` produces a stdio-free
+  `libaec.a` (trace call sites compiled out, `aec_debug.o` excluded) and
+  `audit-no-stdio` gates the delivered archive plus a stdio-free minimal-main
+  executable — ne10 (board deliverable) is stdio-free end to end.
+- **Toolchain discipline (P1-2)**: CC/CXX `-dumpmachine` coherence guard for
+  `BACKEND=ne10` (a partial cross-toolchain override is now a hard error),
+  with a `TOOLCHAIN_CHECK=0` opt-out that participates in the config
+  signature.
+- **publish v4**: `current` swapped via a rename(2)-atomic helper
+  (`audio_common/tools/atomic_symlink_swap.c`, built with `HOSTCC` — BSD/macOS
+  `mv` has no `-T` and follows symlink-to-dir destinations); the per-backend
+  lock is now taken BEFORE the prerequisite build (concurrent same-config
+  publishes can no longer race object/archive writes); `MANIFEST.txt` is
+  deterministic (config + per-file SHA-256, byte-verified on republish —
+  tamper detection); provenance (git commit/dirty/timestamp) moved to an
+  append-only `ATTEST/` directory, one attestation per publish event;
+  `DIST_ROOT=` redirects the release tree so isolation tests never touch real
+  releases. Archive temp files are PID-suffixed (same-config concurrent build
+  vs publish can't collide).
+- **Publish provenance knobs**: `ALLOW_DIRTY_PUBLISH=1` (records
+  `allow_dirty_publish=1` plus a `dirty_diff_sha256` — sha256 of `git diff
+  --binary HEAD` — for whichever repo(s) are dirty); `ALLOW_UNTRACKED_PUBLISH=1`
+  (records `untracked_tree_sha256` for this repo /
+  `audio_common_untracked_tree_sha256` for the producer);
+  `OBJ_ROOT`/`BIN_ROOT` placement knobs (not in `CFG_SIG`) so isolation tests
+  can point the keyed obj/bin trees at a scratch directory and run
+  tamper/injection scenarios against a real worktree build without ever
+  touching the real `obj/`/`bin/` — default expansion (`obj`/`bin`) is
+  byte-identical to the previous hardcoded paths, and `clean` now removes
+  both; and `ATTEST_STAMP` (test-only) to override the UTC timestamp embedded
+  in the attestation filename so isolation tests can force deterministic
+  same-second collisions and prove the sequence-retry path.
+- **Cross-repo provenance**: the attestation also records the audio_common
+  *producer's* own commit/dirty state (`audio_common_git_commit` /
+  `audio_common_git_dirty` / `audio_common_dirty_diff_sha256`) — this repo's
+  release links against audio_common's archive, so "which source state
+  produced this release" now spans both repos, not just this one. Attestation
+  field order is otherwise unchanged and purely additive:
+  `git_untracked`/`[untracked_tree_sha256]` follow
+  `git_dirty`/`[dirty_diff_sha256]`;
+  `audio_common_git_untracked`/`[audio_common_untracked_tree_sha256]` follow
+  `audio_common_git_dirty`/`[audio_common_dirty_diff_sha256]`;
+  `allow_untracked_publish` follows `allow_dirty_publish`.
+
+### Changed
+
+- **Detector wall-clock constants retimed to the live grid** (both ports).
+  `detectors.py` / `detectors.c` carried ten constants frozen at this repo's
+  legacy hop=160 @ 16 kHz (10.000 ms) grid, and neither file had a single
+  retiming call site. None of the four shipping grids is 10 ms, so every one
+  of them was mistimed everywhere: 8 kHz/128 and 16 kHz/256 (both 16.000 ms)
+  ran authored durations **60 % long**, the 16 kHz/128 production default
+  (8.000 ms) ran them **20 % short**, and 48 kHz/512 (10.667 ms) 6.7 % long.
+  `ALPHA_CV`'s "TC ≈ 1 s" was in fact 1592 / 796 / 1592 / 1061 ms; it is now
+  994.99 ms on all four. Retimed via the existing `aec3_scale.growth_rehop`
+  (retention-convention EMAs) and `ms_to_hops` (hop-count gates); only the OLD
+  term of each OLD/NEW pair is retimed, with NEW derived as `1 - OLD` so the
+  pairs still sum to exactly 1 on every grid. Authoring grid confirmed
+  numerically against the constants' own comments ("TC ≈ 1 s", "~4 s at
+  100 fps", "TC~90ms"), not assumed.
+  **Deliberately NOT retimed**: `CONV_FRAMES`, `CONV_ERLE_DB`, `DIV_ERLE_LIN`,
+  `STATIONARY_CV2`, `ERL_CEILING_FLOOR`, `SAFETY_MARGIN`, and the
+  `FilterPlateauDetector` ratio/threshold defaults. `CONV_FRAMES` is the
+  interesting one: `update_convergence()` early-returns *without touching* its
+  counter when far is inactive, warmup is unfinished, or near power is
+  negligible, so non-qualifying hops are skipped rather than resetting it and
+  its realised span is far-end-duty dependent. That makes it a consecutive-
+  evidence count, not a duration — the same reading that spared
+  `ne_recent_sustain=3` in the 2026-08-03 campaign. The rest are dimensionless
+  level gates. `FilterPlateauDetector`'s two durations are retimed for
+  consistency but the class is instantiated nowhere, so that retiming is
+  unexercised; `CONSECUTIVE_REQUIRED` is left alone with its classification
+  recorded as unresolved rather than guessed.
+
+- **`SHADOW_FRAME_GATE`: C corrected 50 → 20, matching Python.** Commit
+  `6cd995e` (2026-06-12) shortened the shadow-filter DT blind period
+  500 ms → 200 ms in Python and never mirrored it to C, so the two ports
+  disagreed for eight weeks. It survived because the one test that covers it
+  was the orphaned `parity_detectors.c` above. The constant is now expressed as
+  a duration (`DT_SHADOW_FRAME_GATE_MS = 200`) rather than a bare hop count, so
+  the ports cannot drift apart per-grid either. **No audio effect in C**: the
+  chain it feeds (`dt_from_shadow` → `AecResContext.shadow_dt`) has no reader
+  anywhere outside the AEC's own equality test — verified by tree-wide grep.
+  In Python the same signal does reach an audio path
+  (`dt_from_shadow > 0.5` → `_ne_evidence` → `refined_usable`), so the C port
+  is missing that consumer entirely. That gap is recorded, not fixed here.
+
+- **16 kHz default signal grid** — `aec_config_defaults()` /
+  `AecConfig.__post_init__` now default 16 kHz to the low-latency/low-compute
+  256-point FFT / 128-sample hop grid (8 ms algorithmic delay) instead of the
+  512/256 grid (16 ms) that M5 (multi-rate campaign, `d862a38`) had made the
+  auto-default when it added 16 kHz/256 as a *selectable* option alongside the
+  existing 512 grid. Only the auto-derived default changes; both 16 kHz grids
+  remain fully supported and explicitly selectable.
+  **Note on M5 itself**: `d862a38` (which introduced the 256/128 grid, the
+  `aec3b_rate_cfg(sample_rate, fft_size)` dispatch table, and changed
+  `aec_derive_dims()`'s hop derivation from a fixed `0.010 * sample_rate` to
+  `fft_size / 2`) was not itself changelogged at the time it landed — its
+  16 kHz *default* silently went from 10 ms to 16 ms hop as a side effect,
+  with no entry here and no version bump. This entry covers both that
+  already-shipped change and the default flip on top of it.
+  **Verification — structural only, no perceptual/AECMOS bench this round**
+  (explicit decision: the 800-case bench standard this file states above was
+  not run for this entry; do not treat this as "regression-tested" for
+  perceptual quality until that's done):
+  - `test_rate_structural` extended with two new checks run at all 4 grids —
+    impulse-through-**full AEC3 post-chain** (`enable_res=1`; the previous
+    version of this test only ever ran the linear-only path) and
+    `aec_init`/static-pool byte-equality vs `aec_create`/heap, also with the
+    post-chain enabled. Nothing in the post-chain had been exercised
+    end-to-end at 16 kHz/256 before this. 67/67 pass, including at 16000/256.
+  - `test_static_aec` (default args, i.e. now exercising 256/128 at 16 kHz):
+    static == dynamic, byte-equal, pool = 397,072 B.
+  - `make selftest` (NEON vs scalar, `SK_HAVE_NEON=1`): all pass, unaffected
+    (this change doesn't touch SIMD kernel code).
+  **Measured static pool sizes** (BALANCED, all three presets identical —
+  presets don't affect sizing): 8000/256 = 292,992 B; **16000/256 (new
+  default) = 397,072 B**; 16000/512 (still selectable) = 543,040 B;
+  48000/1024 = 1,233,680 B. (The 16000/512 figure supersedes
+  `STATIC_MEMORY.md`'s previously-recorded 536,288 B, which predates this
+  change and at least one other since; see that file's own note.)
+- **One `FftHandle` per instance.** `aec_create`/`aec_init` now carve and
+  construct exactly ONE `FftHandle` per instance (still exactly
+  `fft_get_mem_size(fft)` bytes at the same `fft_size` every sub-module
+  already used); the main filter and the shadow filter each borrow it instead
+  of carving/owning a private handle, and `aec_post_fft` remains the single
+  owner responsible for `fft_destroy`. Per-hop compute is unaffected (each
+  sub-module still runs its own transforms against the shared handle, fully
+  sequentially — shadow, then main, then the AEC3 post block, never
+  interleaved, which this codebase's single-threaded synchronous call path
+  already guaranteed). Safe because all three consumers run at the identical
+  `fft_size` (derived once per instance in `aec_derive_dims`) and each
+  `fft_forward`/`fft_inverse`/`fft_forward_scratch` call is a complete
+  synchronous operation — no consumer retains a pointer into the handle's
+  internal scratch across calls. Byte-equal verified: `aec_wav` renders across
+  an 8-case stratified subset of the AEC Challenge corpus, KISS and NE10
+  backends, before/after — MATCH on all 16. Full existing suite
+  (counter-saturation, rate-structural, delay-reset, SIMD self-test,
+  far-end-FFT-sharing regression test, context-only-processing regression
+  test) re-run clean across BACKEND={kiss,ne10} x SIMD={0,1}.
+- **Both pipelines rewired to the context-only seam**: mono
+  `audio_pipeline.c`'s non-`aec_only` path and every lane of the 4ch
+  `4aec_nr_res.c` wrapper now use
   `aec_process_context`/`aec_process_context_shared_far` instead of
-  `aec_process` — mono's dead "seam unavailable" fallback branch (provably
-  unreachable once `enable_res=0/return_res_context=1` is set unconditionally
-  for every non-`aec_only` instance) was removed rather than kept "just in
-  case," and the 4ch wrapper's now-unused `lane_out` staging buffer was
-  removed (`FOUR_AEC_NR_RES_LAYOUT_VERSION` bumped).
-- Verified via `test/test_process_context.c` (74 checks, now wired into the
-  Makefile as `make test-process-context`): direct inspection proving
-  `aec_process_context` never touches limiter state (including the full
-  `limiter_near_lag` buffer contents, snapshotted post-construction, not
-  just the two scalar flags); byte-identical `AecResContext` — every field
-  a real caller reads, including `linear_hop`/`far_spec`/`res_gain`/
-  `saturation_level` — between `aec_process` and `aec_process_context`
-  across the 3 officially-contracted grids x shadow on/off x
-  `spatial_linear_context` on/off (the 4ch wrapper's exact per-lane config);
-  every populated field checked finite; and a reset-survival case.
-
-## [Unreleased] — 2026-08-05 — `AecConfig.return_formed_output`: lightweight formed-hop seam
-
-- New `AecConfig` field `return_formed_output` (default `False`, no behavior
-  change unless set). When `True`, `process()`'s return shape is unchanged,
-  and `aec.get_formed_output()` becomes available after each call, returning
-  the same value `AecResContext.formed_output` exposes — the pre-limiter,
-  shadow-selected/crossfaded, WOLA-formed linear residual — without requiring
-  `return_res_context=True`'s full `AecResContext` (and, when `enable_res=
-  False`, without running the rest of the `_aec3_post` gain/CNG chain that
-  context would otherwise pull in just to populate one field). Runs only the
-  AEC3 `UseRefinedOutput`/`FormLinearFilterOutput` selection-and-crossfade
-  step (`_aec3_select_linear_filter_output()`); does not feed back into
-  filter tap adaptation and does not alter the limiter (still runs, still
-  updates its own state) — only an additional read-only value becomes
-  available. Verified byte-identical to `context.formed_output` across
-  3 grids x shadow on/off, and algebraically identical to `result /
-  limiter_gain` (while refined stays selected) under a forced limiter
-  excursion — see `python/test_formed_output_seam.py`.
-- Motivated by `Audio_ALG/AIAEC/dataset_gen/linear_aec.py`'s `ch5` channel
-  (the dataset's linear-AEC-error reference signal), which previously read
-  the *limiter-processed* `process()` output instead of the pre-limiter
-  formed hop — a discontinuity whenever the limiter's gain excursion crossed
-  1.0 mid-utterance, visible as a vertical line in ch5's spectrogram. Fixed
-  by switching `LinearAecProcessor` to this seam (`LINEAR_AEC_CONTRACT_VERSION`
-  bumped `v1`->`v2`, which `rematerialize_linear_aec.py` uses to regenerate
-  any dataset sequence built against the old contract).
-
-## [Unreleased] — 2026-08-04 — `AecConfig.spatial_linear_context`: skip an unused per-lane suppression gain
-
-- New `AecConfig` field `spatial_linear_context` (default 0, no behavior
-  change unless set). When enabled, this AEC instance never computes its own
-  `SuppressionGain` output (`res_gain`) — intended for a multi-channel
-  caller (e.g. `pipelines/4ch_pipelines/4aec_nr_res.c`) that runs one AEC
-  per microphone lane purely for its linear filter, then recomputes an
-  equivalent gain once from beamformed multi-lane data; a per-lane gain in
-  that architecture is computed and then never read.
-- The `DominantNearend` hold-state (`suppression_gain_update_dominant_nearend()`,
-  newly exported from `suppression_gain.h`) still updates every hop even in
-  this mode: it feeds the next hop's ERLE onset decision, and therefore `r2`,
-  which remains used. `comfort_noise` is computed independently in Step 19 —
-  it is one of `DominantNearend`'s own *inputs*, not something it affects —
-  and stays correct in this mode regardless. Only the remaining,
-  provably-dead part of `suppression_gain_get_gain()` is skipped. Verified
-  bit-exact against the normal path on every other `AecResContext` field
-  (`r2`, `comfort_noise`, `near_spec`, `echo_spec`, `error_spec`,
-  `formed_hop`) and the synthesized output, at every supported grid, shadow
-  filter on and off (`c_impl/test/test_rate_structural.c`).
-- `AecResContext.res_gain` is `NULL` (not a stale/zeroed array) whenever
-  `spatial_linear_context` is set — see the updated field doc in `aec.h`.
-  Only valid together with the existing context-only seam
-  (`enable_res=0 && return_res_context=1`); `aec_validate_config()` rejects
-  any other combination.
-- **This is a public `AecConfig` struct-layout change** (new field added
-  after `return_res_context`). C callers must rebuild against the updated
-  header — do not link an old build's object files or a cached static
-  library against the new header (or vice versa); a mismatched
-  `sizeof(AecConfig)`/field offsets between a caller's compiled code and this
-  library is undefined behavior, not merely a stale-default risk. A
-  zero-initialized (`memset`) `AecConfig` from a rebuilt caller is
-  unaffected (new field defaults to 0 = off, matching every existing
-  caller's behavior).
-
-## [Unreleased] — 2026-08-03 — Reconstructing WOLA interface for downstream RES/NR
-
-- `AecResContext.error_spec` now always exposes the selected linear output on
-  the post-filter's periodic-sqrt-Hann, 50%-overlap STFT grid. Previously the
-  no-shadow C/Python path exposed PBFDKF's internal estimator spectrum, which
-  is not a reconstructing STFT of the continuous linear output.
-- `echo_spec` and `near_spec` now use the same window and frame alignment as
-  `error_spec`, with `near_spec = error_spec + echo_spec`.
-- Added `formed_hop` (C) / `formed_output` (Python), the exact current
-  selected/crossfaded time-domain hop represented by the second half of the
-  WOLA frame. This is an additive public context-structure change; C callers
-  must rebuild against the updated header.
-- Added structural reconstruction tests for every supported grid, with the
-  shadow filter both enabled and disabled.
-
-## [Unreleased] — 2026-08-03 (追加2) — top-level (non-AEC3) hop-authored constant audit: the batch the AEC3-internal audit missed
-
-Follow-up to the AEC3 per-block/hop-count constant audit two entries below.
-That pass covered constants ported FROM AEC3 (per-4ms-block leakage rates,
-ERLE/ERL alphas, stationarity alphas, ...); a reviewer found it missed a
-second class living in the same files: **top-level, project-native**
-constants (never sourced from AEC3 at all) that were literal hop counts /
-per-hop EMA constants frozen at the legacy hop=160/sample_rate=16000 (10 ms)
-grid that predates this repo's own multi-rate history, with zero rate
-conversion when the 16 kHz default flipped to 8 ms hop (2026-08-01) or at
-8/48 kHz — the exact same bug class, just outside the AEC3-ported set the
-first audit scoped to.
-
-**Retimed (wall-clock durations — AecConfig, `aec.c`/`config.py`):**
-`shadow_err_alpha` (0.80, main/shadow error-energy smoothing — EMA lag
-~44.8 ms), `warmup_frames` (100 hops = 1000 ms Kalman-Q warm-up window),
-`epc_hangover` (20 hops = 200 ms EPC-active hold), `ne_recent_hold` (150
-hops = 1500 ms "near-end seen recently" hold), `filter_misadjustment_
-stable_frames` (30 hops = 300 ms required pre-fire stability window) and
-`filter_misadjustment_hangover_frames` (100 hops = 1000 ms post-fire
-hold-off). Also **`EchoPathChangeDetector.EPV_FAST_TC`/`EPV_SLOW_TC`**
-(0.98/0.999, `epc.py`/`epc_shadow.c` — fast/slow far-power EMAs feeding the
-EPV echo-path-change trigger; TC ≈ 495 ms / 9995 ms at the legacy grid).
-
-**Left alone (genuine event counts, NOT durations — no rate conversion
-applies):** `ne_recent_sustain` (3 — consecutive near-end-active hops
-required to ARM the `ne_recent_hold` timer above; the counted "event" is a
-per-hop occurrence, not an elapsed-time proxy, and it's a small fixed
-debounce, not a window). Each retimed-vs-left-alone call is justified by
-tracing every read site of the field, not just its name (`ne_recent_hold`
-and `ne_recent_sustain` sit right next to each other in config.py and read
-very similarly by name alone — only the usage sites disambiguate).
-
-**Math correction caught mid-implementation**: `shadow_err_alpha` and
-`EPV_FAST_TC`/`EPV_SLOW_TC` all use the update `x <- c*x_old + (1-c)*new`
-— the constant `c` multiplies the OLD state directly (a RETENTION
-convention). This is the OPPOSITE of AEC3's own convention that
-`aec3_per_block_ema_alpha_to_per_hop` assumes (`x <- (1-a)*x + a*new`,
-where `a` multiplies the NEW sample). Applying the existing AEC3-style
-helper to a retention-convention constant silently retimes it
-**backwards** (verified: it produced smaller per-hop retention at a
-*shorter* hop, when a shorter hop needs *larger* per-hop retention to
-match the same wall-clock decay). Added a new, correctly-generalized
-helper instead of reusing the mismatched one — `aec3_growth_rehop()` /
-`growth_rehop()` (`aec3_scale.c`/`.h`/`.py`), which generalizes the
-existing `aec3_per_block_growth_to_per_hop` (already a direct power law,
-already the right convention) from its hardcoded AEC3 4 ms block reference
-to an arbitrary reference period (our legacy hop=160/sample_rate=16000).
-No new conversion *mechanism* — same power-law derivation, parameterized
-reference.
-
-**`epc_init()` signature change (C)**: `EPV_FAST_TC`/`EPV_SLOW_TC` live as
-module-level `static const float` in `epc_shadow.c`, so retiming them
-per-instance required a real place to store the retimed values and a real
-grid to retime against — `epc_init(EpcDetector*, int hangover, float
-total_rise, float delta_threshold)` gained two new trailing parameters,
-`int hop_size, int sample_rate`, and `EpcDetector` gained two new fields,
-`float epv_fast_tc, epv_slow_tc` (computed once at `epc_init()` time,
-config-slice semantics — not touched by `epc_reset()`). Both call sites
-updated: `aec.c`'s `aec_carve()` (passes the real carve-time grid) and
-`test_counter_saturation.c`'s `section_epc_shadow` (passes the legacy
-160/16000 — that test only exercises hangover countdown, not EPV).
-Python's `EchoPathChangeDetector.__init__` gained the same two (optional,
-keyword-only) parameters, defaulting to `config.hop_size`/
-`config.sample_rate` when omitted; its sole call site
-(`orchestrator.py`) now passes them explicitly.
-
-**A second, subtler bug found while wiring this up**: baking the
-AecConfig-level retiming into `aec_config_defaults()` (the natural-looking
-spot, alongside `filter_length`'s existing sr-based derivation) is wrong —
-`aec_wav.c`'s `--fft-size` flag (and `test_rate_structural.c`'s own
-alternate-grid selection) overrides `cfg.fft_size` *after*
-`aec_config_from_preset()` returns, so retiming against the default-grid
-hop at that point freezes the wrong grid the moment a caller picks the
-non-default 16 kHz/512 grid. Retiming instead happens once, in
-`aec_carve()` (construction time, when `aec_derive_dims()` has already
-re-resolved `hop` from the FINAL `cfg->fft_size`), writing into `a->cfg`
-(the carved instance's own copy) — the caller's original `AecConfig` is
-left untouched. Python has no equivalent post-construction grid-override
-call site (`__post_init__` runs once, immediately, and no code in this
-repo mutates `frame_size`/`hop_size` afterward), so `AecConfig.__post_init__`
-remains the correct, single retiming point on that side.
-
-**Tests**: `c_impl/test/test_rate_structural.c` gained a sixth check,
-`test_top_level_constant_retiming` (40 new assertions across all four
-grids, exercising the exact post-defaults `cfg.fft_size` override path
-above), and a new `python/test_hop_authored_timing_parity.py` (9 tests).
-Both mutation-tested (reverting the C `aec_carve()` retiming block, the C
-`epc_init()` EPV retiming, and the Python `__post_init__` retiming each
-independently, confirming the new tests fail without the fix and pass with
-it). Verified end-to-end: `make selftest` and `make test-counter-saturation`
-(12017/12017) unaffected; `parity_aec_e2e` PASS at all three rates (8/16/48 kHz,
-within existing tolerance — a genuine behavior change, not byte-equal:
-16 kHz linear-path max diff 1.3e-5, post-chain max diff 1.9e-4, both well
-inside the 2.0e-2 gate); `aec_wav` runs end-to-end on a real 800-case clip at
-both the default and `--fft-size 512`-overridden grid; Python smoke test
-(construct `AEC` + run 50 random hops) finite at all three grids.
-
-`__version__` not bumped, same batching rationale as the two entries below.
-
-## [Unreleased] — 2026-08-03 — Native 8 kHz delay-estimator timing fix (C) + Python 48 kHz anti-alias sidechain port + e2e-golden hop-drift fix
-
-**C: `delay_aec3_init()` (`c_impl/src/delay_aec3.c`) was hardcoding the internal
-delay estimator's feed rate to 16000 regardless of the AEC's actual configured
-`sample_rate`.** `da_estimator_init()`/`da_clockdrift_init()` derive real-world
-timing constants from that rate (the ~30 s clockdrift `stability_reset_hops`
-and the ~500 ms `consistent_estimate_threshold`, both `seconds * sample_rate /
-DA_AEC3_BLOCK_SIZE`) — passing the wrong rate distorts their real elapsed
-time, not just a label. 16 kHz was coincidentally correct; 48 kHz was also
-correct, but because the render/capture pair is resampled to a 16 kHz-
-equivalent stream before reaching the estimator (see next item); native
-8 kHz was wrong — both real-time thresholds ran at 2x their intended
-wall-clock duration. Fixed to pass the true feed rate (native `sample_rate`
-at 8/16 kHz, 16000 only when the 48 kHz sidechain is active).
-Verified: `test_rate_structural` (67/67, all four grids), `test_counter_saturation`
-(12017/12017, incl. `section_delay_aec3`), an isolated old-vs-new before/after
-comparison at native 8 kHz, and `test_static_aec` static==dynamic at all
-three rates (8000: 193,280 B pool; 48000: byte-equal).
-
-**Python: `EchoPathDelayEstimator` (`python/modules/delay/echo_path_delay_estimator.py`)
-ported the C-side `DaResample48` 48kHz→16kHz anti-alias sidechain (added
-2026-08-02) — this had been flagged C-only.** A `parity_aec_e2e` investigation
-found the asymmetry caused Python and C to lock onto *different delays at
-different hops* at 48 kHz (Python hop 68/delay 1024 vs C hop 100/delay 960) —
-not a numerical-precision drift but a structural mismatch, since Python fed
-the matched filter raw, aliased 48 kHz samples in 1.33 ms inner blocks instead
-of the intended 4 ms. Added `_Resample48` (same order-7 elliptic 4-SOS-section
-coefficients as `DA_RESAMPLE48_B`/`A` in C, `scipy.signal.sosfilt`'s default
-recurrence is the identical Direct-Form-II-Transposed form `da_biquad_process1`
-implements — verified sample-for-sample against the C filter to float32
-precision on a test signal). `ClockdriftDetector`/`MatchedFilterLagAggregator`'s
-`sample_rate` parameter is now the *effective* inner-block rate (16000 when
-the sidechain is active) rather than the raw native rate, mirroring the C fix
-above. `parity_aec_e2e` 48 kHz max diff: 4.596e-01 (FAIL, tol 1.0e-01) →
-3.873e-02 (PASS) — back in the same class as the originally-measured 6.4e-2
-baseline that calibrated the 48 kHz tolerance. 16 kHz/8 kHz outputs unchanged
-(rate_factor=1 path is a no-op).
-
-**Test tooling: `python/diag/gen_aec_e2e_golden.py`** hardcoded `hop =
-sr*10//1000` (10 ms), which diverged from the constructed `AecConfig`'s real
-hop once 16 kHz's default grid moved to 256/128 (previous entry, 2026-08-01) —
-regenerating a golden at the new default crashed (`ValueError: could not
-broadcast ... (160,) into (128,)`). Fixed to read `hop_size` back from the
-constructed config. This is the reason the 48 kHz asymmetry above went
-undetected until now — the E2E gate had been silently unable to run at any
-rate since the grid default changed.
-
-`__version__` not bumped, same batching rationale as the 2026-08-01 entry
-above.
-
-## [Unreleased] — 2026-08-03 (追加) — AEC3 per-block/hop-count constant audit: rescale for the live sample_rate
-
-Following the 8 kHz delay-estimator timing bug above, audited the rest of the
-state/residual/delay chain for the same bug class: a per-block AEC3 timing
-constant frozen at the legacy hop=160/sr=16000 grid instead of converted live
-via the existing `aec3_ms_to_hops`/`aec3_blocks_to_hops`/
-`aec3_per_block_rate_to_per_hop` helpers (`c_impl/src/aec3_scale.c` /
-`python/modules/aec3_scale.py`).
-
-**Tier 1 — verified no-op at the current production grid (hop=160, sr=16000),
-only changes behavior at 8 kHz / 48 kHz:** ERL/ERLE hold + startup hops,
-`FilterAnalyzer`/`FilterDelay`/`FilteringQualityAnalyzer` convergence/
-consistency/adaptation thresholds, `InitialState` hops, PBFDKF leakage rates,
-`aec.c`'s poor-coarse/coarse-reset/leakage-div/stat-dt-hangover counters,
-`aec3_post.c`'s `y2_thr`, reverb-decay wall-clock alignment in
-`residual_echo_estimator`. Each hand-verified to reproduce its old frozen
-constant exactly at hop=160/sr=16000 (e.g. `aec3_ms_to_hops(800.0, 160,
-16000) == 80 == ` the old `AEC_STATE_ACTIVE_RENDER_BLOCKS` literal).
-
-**Tier 2 — genuine production-behavior changes AT the current 16 kHz default,
-because these were previously applied as raw, unrescaled AEC3 literals with
-no rate conversion at all (so rescaling changes today's output, not just
-other rates'):** `subband_erle.c`/`.py` (`alpha_up`/`alpha_down`/
-`onset_release_decay`), `fullband_erle.c`/`.py` (`quality_alpha`/`td_alpha`/
-`maxmin_forget`), `residual_echo_estimator.c`/`.py`
-(`noise_floor_growth_per_hop`, 1.1 → ~1.27 at hop=160), `stationarity_estimator.c`/`.py`
-(noise-spectrum `alpha`/`alpha_init`). These four have **not** been through
-the 800-case AECMOS bench yet — do not treat as ship-ready.
-
-**Explicitly held back, NOT included in this round's commit:**
-`suppression_gain.py`'s `_LowNoiseRenderDetector` IIR (`0.9`/`0.1` →
-wall-clock-rescaled) and its C-side `suppression_gain.c` counterpart. This
-exact mechanism (`use_wallclock_low_noise_render_iir`-equivalent) was
-exposed as default-OFF research substrate in `[3.22.1]` and then removed
-entirely as dead code in a later cleanup (`"kept the literal 0.9 decay"`) —
-turning it back on in production a third time needs its own bench pass and
-sign-off, not a silent revival inside an unrelated rate-audit. Python's
-`use_wallclock_ema_alpha` kwarg is not passed from `orchestrator.py` (so
-`SuppressionGain`'s own `False` default applies); C's `suppression_gain.c`
-keeps the literal `0.9f`/`0.1f`. Tracked as a follow-up decision, not
-abandoned.
-
-Also folded into this same round (both already had their own dedicated
-regression tests before this commit):
-- `delay_aec3_reset()` / `EchoPathDelayEstimator.reset()` now clears the
-  full signal chain — was previously leaving the inner decimators/ring/
-  pending-sample state stale after the 48 kHz sidechain's own reset (a
-  mixed fresh/stale reset). `c_impl/test/test_delay_reset.c` +
-  `python/test_delay_reset.py`.
-- `erle_startup_hops`/`erl_startup_hops`'s `200`-as-sentinel collision
-  fixed (`None`/`-1` now means "auto"; an explicit `200` request could
-  previously never be expressed, since it was indistinguishable from the
-  auto default). `python/test_aec_state_startup_hops.py`.
-
-Verified: `test_rate_structural` (67/67, all four grids), `test_counter_saturation`
-(12017/12017) with the held-back mechanism reverted to its pre-audit
-literal values. **Not yet run**: the 800-case AECMOS bench this repo's own
-rules require before Tier 2 items ship — treat this commit as a local,
-unpushed checkpoint, not a ship decision.
-
-`__version__` not bumped pending that bench pass.
-
-## [Unreleased] — 2026-08-01 — 16 kHz default signal grid: 512/256 → 256/128 (8 ms hop)
-
-`aec_config_defaults()`/`AecConfig.__post_init__` now default 16 kHz to the
-low-latency/low-compute 256-point FFT / 128-sample hop grid (8 ms algorithmic
-delay) instead of the 512/256 grid (16 ms) that M5 (multi-rate campaign,
-`d862a38`) had made the auto-default when it added 16 kHz/256 as a *selectable*
-option alongside the existing 512 grid. Both 16 kHz grids remain fully
-supported and explicitly selectable via `AecConfig(sample_rate=16000,
-frame_size=...)` / `cfg->fft_size` — only the auto-derived default (when
-`frame_size`/`fft_size` is left unspecified) changes. 8 kHz (256) and 48 kHz
-(1024) defaults are unchanged.
-
-**Note on M5 itself**: `d862a38` (which introduced the 256/128 grid, the
-`aec3b_rate_cfg(sample_rate, fft_size)` dispatch table, and changed
-`aec_derive_dims()`'s hop derivation from a fixed `0.010 * sample_rate` to
-`fft_size / 2`) was not itself changelogged at the time it landed — its
-16 kHz *default* silently went from 10 ms to 16 ms hop as a side effect, with
-no entry here and no version bump. This entry covers both that
-already-shipped change and today's default flip on top of it.
-
-**Verification — structural only, no perceptual/AECMOS bench this round**
-(explicit decision: the 800-case bench standard this file states above was
-not run for this entry; do not treat this as "regression-tested" for
-perceptual quality until that's done):
-- `test_rate_structural` extended with two new checks run at all 4 grids —
-  impulse-through-**full AEC3 post-chain** (`enable_res=1`; the previous
-  version of this test only ever ran the linear-only path) and
-  `aec_init`/static-pool byte-equality vs `aec_create`/heap, also with the
-  post-chain enabled. Nothing in the post-chain had been exercised end-to-end
-  at 16 kHz/256 before this. 67/67 pass, including at 16000/256.
-- `test_static_aec` (default args, i.e. now exercising 256/128 at 16 kHz):
-  static == dynamic, byte-equal, pool = 397,072 B.
-- `make selftest` (NEON vs scalar, `SK_HAVE_NEON=1`): all pass, unaffected
-  (this change doesn't touch SIMD kernel code).
-
-**Measured static pool sizes** (BALANCED, all three presets identical —
-presets don't affect sizing): 8000/256 = 292,992 B; **16000/256 (new
-default) = 397,072 B**; 16000/512 (still selectable) = 543,040 B; 48000/1024
-= 1,233,680 B. (The 16000/512 figure supersedes `STATIC_MEMORY.md`'s
-previously-recorded 536,288 B, which predates this change and at least one
-other since; see that file's own note.)
-
-`__version__` intentionally NOT bumped with this entry — following the last
-month's actual practice in this file (see the string of `[Unreleased]`
-entries above `[3.24.1]`, several of which are themselves production-behavior
-changes), version bumps here appear to be a separate, deliberately-batched
-release-cut decision rather than one per entry; leaving that to whoever cuts
-the next version.
-
-## [Unreleased] — 2026-07-16 — round-7 remediation (publish untracked-content policy; -t no-op correction; no algorithm change)
-
-Build/release-tooling-only follow-up to round-6; renders byte-identical (obj/
-bin keyed paths unchanged for default invocations, CFG_SIG payload
-untouched):
-
-- **`-t` correction**: round-6 documented `make -n/-q/-t publish` as fully
-  side-effect-free, but that was not true for `-t` — the round-6 driver
-  recursed into `_publish_impl` under `-t` exactly as it did under `-n`, and
-  GNU make's standard touch semantics on that recursive recipe chain bumped
-  the mtimes of the real `libaec.a`/`aec_wav`/`bench_rtf` (and, via the
-  `AC_LIB` dispatch, audio_common's own archive) — a genuine write for a
-  target that is supposed to be a phony action, not a build product. `-t` is
-  now an explicit no-op: it prints a one-line note and exits 0 without
-  recursing. `-n` and `-q` are unaffected. All three flags are now
-  verifiably zero-write. **Combined dry-run flags** (e.g. `make -nt
-  publish`) are now handled `-t`-FIRST: the driver's `MAKEFLAGS` word-scan
-  checks `has_t` before `has_q`/`has_n`, because in a combined invocation
-  the old `-n`-first ordering handed the recursive child `make` both flags
-  at once, and GNU make really applied touch semantics to that recursive
-  chain regardless (reproduced) — the same real-write bug the `-t`-alone
-  fix addressed, just reachable through a different flag combination. Any
-  `t` now wins unconditionally over `n`/`q`, so touch semantics can never
-  reach the artifact chain through a combined flag set either.
-- **Untracked-content provenance (new dimension, separate from
-  `ALLOW_DIRTY_PUBLISH`)**: `make publish` now also refuses by default when
-  EITHER this checkout OR the resolved audio_common producer checkout
-  contains any untracked, non-ignored file (`git ls-files --others
-  --exclude-standard` non-empty) — an untracked source a Makefile
-  references (even in an otherwise-clean tracked tree) can change the
-  artifact without leaving any trace in the tracked diff, so round-6's
-  dirty-diff hash alone said nothing about it. `ALLOW_UNTRACKED_PUBLISH=1`
-  is the new, separate escape hatch; it records `untracked_tree_sha256`
-  (this repo) / `audio_common_untracked_tree_sha256` (the producer) in the
-  attestation — sha256 over sorted, COLLISION-FREE FIXED-FIELD records:
-  `L <sha256(path)> <sha256(readlink output)>` for symlinks, `F <mode>
-  <sha256(path)> <sha256(content)>` for regular files. Every
+  `aec_process`.
+- **Static pool shrinks by exactly one hop-sized float buffer per instance**
+  with the limiter gone (`aec_get_mem_size`, BALANCED, measured
+  before/after): 16k/256 −528 B; 16k/512 −1,040 B; 48k/1024 −2,064 B.
+- **Top-level (non-AEC3) hop-authored constants retimed to wall clock**
+  (AecConfig, `aec.c`/`config.py`): `shadow_err_alpha` (0.80, main/shadow
+  error-energy smoothing — EMA lag ~44.8 ms), `warmup_frames` (100 hops =
+  1000 ms Kalman-Q warm-up window), `epc_hangover` (20 hops = 200 ms EPC-active
+  hold), `ne_recent_hold` (150 hops = 1500 ms "near-end seen recently" hold),
+  `filter_misadjustment_stable_frames` (30 hops = 300 ms required pre-fire
+  stability window) and `filter_misadjustment_hangover_frames` (100 hops =
+  1000 ms post-fire hold-off); also `EchoPathChangeDetector.EPV_FAST_TC` /
+  `EPV_SLOW_TC` (0.98/0.999, `epc.py`/`epc_shadow.c` — fast/slow far-power
+  EMAs feeding the EPV echo-path-change trigger; TC ≈ 495 ms / 9995 ms at the
+  legacy grid). These were project-native constants, never sourced from AEC3
+  at all, frozen at the legacy hop=160/sample_rate=16000 (10 ms) grid with
+  zero rate conversion when the 16 kHz default flipped to 8 ms hop or at
+  8/48 kHz — the same bug class as the AEC3-internal audit, just outside the
+  AEC3-ported set that audit scoped to.
+  **Left alone (genuine event counts, NOT durations — no rate conversion
+  applies)**: `ne_recent_sustain` (3 — consecutive near-end-active hops
+  required to ARM the `ne_recent_hold` timer above; the counted "event" is a
+  per-hop occurrence, not an elapsed-time proxy, and it's a small fixed
+  debounce, not a window). Each retimed-vs-left-alone call is justified by
+  tracing every read site of the field, not just its name (`ne_recent_hold`
+  and `ne_recent_sustain` sit right next to each other in config.py and read
+  very similarly by name alone — only the usage sites disambiguate).
+  Verified end-to-end: `make selftest` and `make test-counter-saturation`
+  (12017/12017) unaffected; `parity_aec_e2e` PASS at all three rates
+  (8/16/48 kHz, within existing tolerance — a genuine behavior change, not
+  byte-equal: 16 kHz linear-path max diff 1.3e-5, post-chain max diff 1.9e-4,
+  both well inside the 2.0e-2 gate); `aec_wav` runs end-to-end on a real
+  800-case clip at both the default and `--fft-size 512`-overridden grid;
+  Python smoke test (construct `AEC` + run 50 random hops) finite at all three
+  grids.
+- **AEC3 per-block/hop-count constants rescaled for the live `sample_rate`,
+  Tier 1 — verified no-op at the current production grid (hop=160,
+  sr=16000), only changes behavior at 8 kHz / 48 kHz**: ERL/ERLE hold +
+  startup hops, `FilterAnalyzer`/`FilterDelay`/`FilteringQualityAnalyzer`
+  convergence/consistency/adaptation thresholds, `InitialState` hops, PBFDKF
+  leakage rates, `aec.c`'s poor-coarse/coarse-reset/leakage-div/stat-dt-hangover
+  counters, `aec3_post.c`'s `y2_thr`, and reverb-decay wall-clock alignment in
+  `residual_echo_estimator`. Each hand-verified to reproduce its old frozen
+  constant exactly at hop=160/sr=16000 (e.g. `aec3_ms_to_hops(800.0, 160,
+  16000) == 80 == ` the old `AEC_STATE_ACTIVE_RENDER_BLOCKS` literal). The
+  conversion helpers are `aec3_ms_to_hops` / `aec3_blocks_to_hops` /
+  `aec3_per_block_rate_to_per_hop` (`c_impl/src/aec3_scale.c` /
+  `python/modules/aec3_scale.py`).
+  **Explicitly held back, NOT included in this round**:
+  `suppression_gain.py`'s `_LowNoiseRenderDetector` IIR (`0.9`/`0.1` →
+  wall-clock-rescaled) and its C-side `suppression_gain.c` counterpart. This
+  exact mechanism (`use_wallclock_low_noise_render_iir`-equivalent) was
+  exposed as default-OFF research substrate in `[3.22.1]` and then removed
+  entirely as dead code in a later cleanup (`"kept the literal 0.9 decay"`) —
+  turning it back on in production a third time needs its own bench pass and
+  sign-off, not a silent revival inside an unrelated rate-audit. Python's
+  `use_wallclock_ema_alpha` kwarg is not passed from `orchestrator.py` (so
+  `SuppressionGain`'s own `False` default applies); C's `suppression_gain.c`
+  keeps the literal `0.9f`/`0.1f`. Tracked as a follow-up decision, not
+  abandoned.
+  Verified: `test_rate_structural` (67/67, all four grids),
+  `test_counter_saturation` (12017/12017) with the held-back mechanism
+  reverted to its pre-audit literal values. **Not yet run**: the 800-case
+  AECMOS bench this repo's own rules require before Tier 2 items ship — treat
+  this commit as a local, unpushed checkpoint, not a ship decision.
+- **All production C converted to float32 end-to-end**, staged: (1) delay
+  chain (`delay_aec3.c` biquads + scalar bookkeeping), (2) `aec.c`
+  orchestrator scalars, (3) the post/state module chain (`aec3_post`,
+  `aec_state`, `residual_echo_estimator`, `suppression_gain`,
+  ERLE/reverb/stationarity), (4) mic-path HPF swapped to `audio_common`'s
+  shared f32 platform HPF (DF2-transposed). `reverb_decay_estimator.c` is the
+  sole remaining `double` file (dead code, no production caller). Also:
+  de-stacked 13 large function-local `float[8192]`/`[4096]` arrays into the
+  static pool, and a `/simplify` cleanup pass over the full diff.
+- **Python bit-exact parity is retired repo-wide** — Python (fp64) is now the
+  algorithm spec, C is the float32 implementation, Python↔C is
+  tolerance-based (~−60 dB class), not 0/0. Gates: C-goldens
+  (`test/parity_delay.c`/`gen_delay_c_golden.c`, `test/parity_aec_e2e.c`
+  tolerance) plus staged checks vs the `fp64-baseline` tag — 60-case
+  stratified AECMOS (worst Δ −0.021 echo, buckets ≤0.002), waveform drift
+  median −95 dB, 1-hour soak stable. Static pool (BALANCED/16 kHz/52 ms) at
+  that point: KISS 557,680 B (544.6 KB), NE10 519,232 B (507.1 KB), both
+  static==dynamic byte-equal. Deployment model unchanged: host/reference =
+  malloc + KISS (`make`, default); embedded = caller-pool + NE10
+  (`make BACKEND=ne10`) — same main branch; NE10 vs KISS not bit-identical
+  (pre-existing). `-ffp-contract=off`/`std=gnu99` retained.
+- **Whole-repo per-bin/per-sample loop vectorization**, output
+  **byte-identical throughout** (60-case render aggregate md5 unchanged on
+  BOTH backends at every commit; static==dynamic byte-equal both backends;
+  delay C-golden bit-exact; e2e tolerance unchanged). Converted: all
+  complex-magnitude loops (~10.8k scaled-hypot calls/hop), echo_spec partition
+  MAC + both filter W-updates, post-chain elementwise loops with fusion
+  (coherence EMA+Γ² gate single pass; CNG N2 tracking; E2 select/gain apply),
+  suppression-gain clips/min/final sqrt, numpy pairwise-sum trees (the numpy
+  tree + BOTH tail-fold variants — probe-proven distinct at ±0 — now single
+  shared implementations), `fft_power` (contraction made explicit as `fmaf`,
+  objdump-verified identical codegen) and `fft_apply_gain` NEON in both FFT
+  backends. Static pool **557,680 → 532,992 B KISS / 519,232 → 494,544 B
+  NE10**; NE10 wrapper output staging memcpys removed. Perf: dev-box (arm64
+  clang, auto-vectorizing) RTF flat-to-slightly-better — expected; the
+  intrinsics make vectorization compiler-independent for the embedded gcc
+  target. Measure on-target with `make bench`.
+- **`main` now carries both memory models in one library** — `aec_create`
+  (heap) and `aec_get_mem_size`/`aec_init` (single caller-owned pool, see
+  `c_impl/STATIC_MEMORY.md`) — selected at runtime, mirroring the NR repo's
+  single-branch model. Gates: consolidated `aec_wav` output byte-identical to
+  the former branch build, and `test_static_aec` static == dynamic byte-equal.
+- **Streaming FIFO rewritten to a provable SPSC ring (R02, replaces the first
+  F09 fix)**: the previous atomic patch kept a shared `fifo_read` RMW cursor
+  and was refuted by an interleaving proof (producer's drop-oldest advance
+  could collide with the consumer's claimed slot at full; the consumer's
+  underrun `memset` raced the producer's first write at empty). New protocol —
+  Variant A′: `fifo_write`/`fifo_read` are monotonic unsigned sequences with
+  exactly one writer each (producer / consumer), occupancy = `w − r`,
+  `fifo_count` retired (kept at offset, always 0); overrun = **drop-new**
+  (producer never writes when full, never touches the read cursor) +
+  **consumer catch-up** (on observing a full ring the capture side skips to
+  the freshest hop — staleness self-heals to ~1 hop after a burst, vs. the old
+  drop-oldest's permanent ~320 ms lag); underrun uses a new immutable all-zero
+  pool hop (`fifo_zero_ref`) — the ring is never written by the capture
+  thread. Ownership proof in aec.h; every shared word has exactly one writer.
+  `test_fifo_spsc.c` rewritten as a payload-integrity stress (per-hop sequence
+  + full-hop bit-exact regeneration oracle via `far_hop`, producer/consumer
+  jitter, bounded-staleness + gap accounting identities); `stream_sim.c` gains
+  an exact-count overrun check and a catch-up check. Lockstep single-thread
+  behaviour byte-identical (old vs new `--singlethread` dump `cmp`-equal;
+  60-case render aggregates unchanged — offline `aec_process()` untouched).
+  Pool +`ALIGN16(hop·4)` (16 k: KISS 538,320 B / NE10 534,192 B; per-rate
+  table in STATIC_MEMORY.md). The earlier F09 shape (SPSC acquire/release
+  atomics, layout unchanged, contract narrowed to one render + one capture
+  thread, 100 k-hop concurrent stress + bookkeeping identity) is superseded by
+  this rewrite.
+- **FP policy (B04)**: `-ffp-contract=off` moved to last position with
+  parse-time conflict rejection; AEC's own default codegen byte-identical —
+  that campaign's one deliberate byte-change comes from audio_common+NR
+  gaining the flag (they had none): new 60-case aggregates KISS `a2fc5d07…` /
+  NE10 `44540201…` (supersede `652a2152…`/`09125432…`; median render delta
+  −73 dB RMS, all parities within tolerance).
+- **SIMD edge matrix (B05)**: n=0..17 sweeps, element-offset unaligned forms,
+  canary guards, alias matrix, UBSan runner; finite corpus for the 12
+  payload-unspecified kernels reconciled to classified comparison (UBSan run
+  went fail → pass). 293,015 → 43,109,992 checks.
+- **Build hygiene (R10/F12)**: object dirs are hash-keyed
+  (`obj/<backend>-<cksum-sig>`) — no parse-time wipe, `make -n` is
+  side-effect-free, different-flag builds coexist; cksum replaces shasum;
+  parse-time config-stamp rebuild keying; `WERROR` knob.
+- **Source-set identity + fresh archives (P1-4)**: the sorted source list is
+  part of `CFG_SIG`; `libaec.a` is always built fresh (`$@.tmp` + `mv -f`).
+- **publish v3 (P2)**: content-addressed immutable releases
+  `dist/<backend>/<cfg_sig>-<content12>/`, idempotent republish, `LINK` in the
+  signature, atomic `current` swap (GNU `mv -fT` + BSD fallback).
+- **`ALLOW_DIRTY_PUBLISH` narrowed to tracked changes only**: the dirty check
+  now uses `git status --porcelain -uno` (tracked-only) instead of full
+  porcelain, since untracked content is now its own dimension — lumping the
+  two together previously let two different untracked source states publish
+  under the same `dirty_diff_sha256` (which only ever covered `git diff
+  --binary HEAD`, i.e. tracked bytes). The FATAL wording changed accordingly
+  (“uncommitted TRACKED changes”). Both checks — tracked dirty and untracked —
+  are applied to BOTH this checkout and the audio_common producer checkout,
+  and each FATAL names exactly which repo(s) and which dimension triggered the
+  refusal.
+- **Untracked-content provenance is fail-closed**: `untracked_tree_sha256` is
+  a sha256 over sorted, COLLISION-FREE FIXED-FIELD records —
+  `L <sha256(path)> <sha256(readlink output)>` for symlinks,
+  `F <mode> <sha256(path)> <sha256(content)>` for regular files. Every
   variable-length value (the path itself, a symlink's target, a file's
   content) is itself hashed before being placed into the record, so records
   concatenate unambiguously — the original raw space-joined `L <path>
   <target>` encoding was collision-prone (`"a b"->"c"` and `"a"->"b c"`
-  encoded identically). Record generation is FAIL-CLOSED: any `stat`/
-  `readlink`/`shasum` I/O failure downgrades that entry to an `X` record,
-  which FATALs publish outright rather than ever recording an empty or
-  partial hash for the affected path — a hashing failure can never silently
+  encoded identically). Any `stat`/`readlink`/`shasum` I/O failure downgrades
+  that entry to an `X` record, which FATALs publish outright rather than ever
+  recording an empty or partial hash — a hashing failure can never silently
   fall back to an incomplete-but-present `untracked_tree_sha256`. Two
   different untracked source states can never share a provenance record. An
-  untracked path that is neither a regular file nor a symlink (an embedded
-  git checkout, a fifo, …), or one that fails to hash for any reason, is
-  always refused, naming the path and which repo it came from.
-- **`ALLOW_DIRTY_PUBLISH` narrowed to tracked changes only**: the dirty
-  check now uses `git status --porcelain -uno` (tracked-only) instead of
-  full porcelain, since untracked content is now its own dimension above —
-  lumping the two together previously let two different untracked source
-  states publish under the same `dirty_diff_sha256` (which only ever
-  covered `git diff --binary HEAD`, i.e. tracked bytes). The FATAL wording
-  changed accordingly (“uncommitted TRACKED changes”). Both checks — tracked
-  dirty and untracked — are applied to BOTH this checkout and the
-  audio_common producer checkout, and each FATAL names exactly which
-  repo(s) and which dimension triggered the refusal.
-- **Identity-less checkout refused unconditionally (no escape hatch)**: a
-  checkout — this repo OR the resolved audio_common producer — for which
-  `git rev-parse HEAD` fails is now FATAL immediately, checked before
-  `dirty`/`untracked` are even computed for that repo, and neither
-  `ALLOW_DIRTY_PUBLISH=1` nor `ALLOW_UNTRACKED_PUBLISH=1` admits it: an
-  attestation cannot name a source state or enumerate untracked content for
-  a checkout with no git identity, so no knob is allowed to paper over that
-  gap. This closes a round-6 hole — the prior shape folded an `unknown`
-  identity into the same `dirty`/`ac_dirty` violation flag that
-  `ALLOW_DIRTY_PUBLISH=1` short-circuits, so passing that knob alone could
-  previously let a non-git (or an unresolved-`AC_DIR`) tree publish despite
-  having no real provenance to record.
-- Attestation field order is otherwise unchanged and purely additive:
-  `git_untracked`/`[untracked_tree_sha256]` follow `git_dirty`/
-  `[dirty_diff_sha256]`; `audio_common_git_untracked`/
-  `[audio_common_untracked_tree_sha256]` follow `audio_common_git_dirty`/
-  `[audio_common_dirty_diff_sha256]`; `allow_untracked_publish` follows
-  `allow_dirty_publish`.
-
-## [Unreleased] — 2026-07-15 — round-6 remediation (publish dry-run + attest hardening; no algorithm change)
-
-Build/release-tooling-only follow-up to round-5; renders byte-identical (obj/
-bin keyed paths unchanged for default invocations, CFG_SIG payload
-untouched):
-
-- **Dry-run guard**: `make -n/-q/-t publish` is now side-effect-free — a
-  MAKEFLAGS word-scan branches BEFORE `$(DIST_ROOT)` is created or the
-  per-backend lock is taken (`-n`/`-t` recurse into a print-only path, `-q`
-  exits 1 per question-mode's "needs updating" semantics) — round-5's driver
-  mentioned `$(MAKE)`, so GNU make ran it for real even under `-n`,
-  transiently mkdir'ing `dist/` and taking/releasing the real lock on every
-  dry run.
-- **ATTEST one-event-one-file**: every publish event (including an
-  idempotent republish) now writes exactly one NEW
+  untracked path that is neither a regular file nor a symlink (an embedded git
+  checkout, a fifo, …), or one that fails to hash for any reason, is always
+  refused, naming the path and which repo it came from.
+- **ATTEST one-event-one-file**: every publish event (including an idempotent
+  republish) now writes exactly one NEW
   `attest-<utc>-<commit>[-dirty]-<seq>.txt`, installed via
-  `audio_common/tools/atomic_symlink_swap.c`'s new `--excl-install` mode
-  (write-temp + `link(2)`, the atomic no-clobber equivalent of
-  `O_CREAT|O_EXCL` — `link(2)` fails `EEXIST` if the name is already taken).
-  A same-second name collision regenerates the event id with the next `<seq>`
-  and retries; an existing attestation is never overwritten (round-5 used
-  `mv -f`, so same-second republishes could silently clobber the prior
-  record). `git_commit` is now always the full 40-hex object id (round-5
-  used `git rev-parse --short`).
-- **Cross-repo provenance**: the attestation also records the audio_common
-  *producer's* own commit/dirty state
-  (`audio_common_git_commit`/`audio_common_git_dirty`/
-  `audio_common_dirty_diff_sha256`) — this repo's release links against
-  audio_common's archive, so "which source state produced this release"
-  now spans both repos, not just this one.
-- **Dirty-checkout refusal**: `make publish` FATALs by default when either
-  this checkout or the resolved audio_common checkout has uncommitted
-  tracked changes (full `git status --porcelain`, untracked counts) or no
-  git identity at all. `ALLOW_DIRTY_PUBLISH=1` is the escape hatch for dev
-  publishes; the attestation then records `allow_dirty_publish=1` plus a
-  `dirty_diff_sha256` (sha256 of `git diff --binary HEAD`) for whichever
-  repo(s) are dirty, so the deviation is itself traceable.
-- **OBJ_ROOT/BIN_ROOT placement knobs** (round-6 P1, not in `CFG_SIG`):
-  isolation tests can point the keyed obj/bin trees at a scratch directory
-  (`OBJ_ROOT=.../obj BIN_ROOT=.../bin`) to run tamper/injection scenarios
-  against a real worktree build without ever touching the real `obj/`/`bin/`
-  — default expansion (`obj`/`bin`) is byte-identical to the previous
-  hardcoded paths. `clean` now removes both `$(OBJ_ROOT)` and `$(BIN_ROOT)`.
-- `ATTEST_STAMP` (test-only): overrides the UTC timestamp embedded in the
-  attestation filename so the isolation tests can force deterministic
-  same-second collisions and prove the sequence-retry path.
+  `atomic_symlink_swap.c`'s `--excl-install` mode (write-temp + `link(2)`, the
+  atomic no-clobber equivalent of `O_CREAT|O_EXCL` — `link(2)` fails `EEXIST`
+  if the name is already taken). A same-second name collision regenerates the
+  event id with the next `<seq>` and retries. `git_commit` is now always the
+  full 40-hex object id (round-5 used `git rev-parse --short`).
+- **Documented 48 kHz matched-filter delay range corrected** from 203 ms to
+  approximately 608 ms — the estimator first decimates 48 kHz to 16 kHz and
+  rescales the result back to native samples; `test-delay-reset` now locks a
+  300 ms acquisition case. (The multi-rate campaign's documented coverage was
+  1216/608/~203 ms.)
 
-## [Unreleased] — 2026-07-15 — round-5 remediation (release tooling; no algorithm change)
+### Removed
 
-Build/release-tooling-only follow-up; renders byte-identical:
+- **The peak-ratio output limiter** that ran as the last stage of
+  `aec_process()`. It had no AEC3 counterpart — it was a local addition that
+  applied a smoothed, one-hop-lagged time-domain gain
+  (`final_output *= limiter_gain`, attack 0.3 / release 0.8) whenever the
+  output frame's peak exceeded the microphone frame's peak. Applying broadband
+  dynamics is not an echo canceller's job; clipping protection belongs to an
+  AGC/DRC or output stage outside this library. Removed with it: Python
+  `_limiter_gain` / `_limiter_near_lag`; C `limiter_gain` / `limiter_near_lag`
+  / `has_limiter_lag` and their pool carve; the per-hop `near_peak`/`out_peak`
+  scan and frame multiply; and the `limiter_gain` column from the
+  `--debug-trace` CSV.
+  **Explicitly NOT removed** (different mechanisms, all retained): the AEC3
+  suppression-gain LF/HF limiters, input saturation detection, main/shadow
+  filter divergence selection, and the final float→PCM hard-clip saturate in
+  the WAV writer.
+  **AI-AEC datasets and checkpoints are unaffected.**
+  `materialize_linear_error()` reads `get_formed_output()`, which was always
+  captured upstream of the limiter — verified byte-identical (same SHA-256 for
+  both `linear_error` and `echo_estimate`) before and after this change, on a
+  signal whose burst drives the output peak to 1.26. No regeneration needed.
+- **Mono pipeline's dead "seam unavailable" fallback branch** — provably
+  unreachable once `enable_res=0/return_res_context=1` is set unconditionally
+  for every non-`aec_only` instance — removed rather than kept "just in case";
+  and the 4ch wrapper's now-unused `lane_out` staging buffer.
+- **Per-hop `W_all`/`X_buf_all` snapshot copies** (2×~12 KB/hop) — post reads
+  filter state via const pointers instead.
+- **`parity_hpf.c` and `gen_hpf_golden.py`**, with the mic-path HPF move to
+  audio_common's shared f32 platform HPF.
+- **The `feature/static-memory` branch**, and the local
+  `c_impl/{src,include}/hpf.{c,h}` (moved to `audio_common` as `hpf_f64`; pure
+  rename, output byte-identical, `parity_hpf` golden still bit-exact at 0
+  error). This removes the last local copy of an `audio_common` component.
+- **Hardcoded ne10 `-lc++`** (the C++ runtime comes from the `LINK=$(CXX)`
+  driver; GNU/Linux uses libstdc++ automatically).
 
-- **publish v4**: `current` swapped via a rename(2)-atomic helper
-  (`audio_common/tools/atomic_symlink_swap.c`, built with `HOSTCC` — BSD/
-  macOS `mv` has no `-T` and follows symlink-to-dir destinations, and the
-  old fallback left a missing-`current` window); the per-backend lock is
-  now taken BEFORE the prerequisite build (concurrent same-config
-  publishes can no longer race object/archive writes); `MANIFEST.txt` is
-  deterministic (config + per-file SHA-256, byte-verified on republish —
-  tamper detection) and provenance (git commit/dirty/timestamp) moved to
-  an append-only `ATTEST/` directory, one attestation per publish event;
-  `DIST_ROOT=` redirects the release tree (isolation tests never touch
-  real releases). Archive temp files are PID-suffixed (same-config
-  concurrent build vs publish can't collide).
+### Fixed
 
-## [Unreleased] — 2026-07-15 — round-4 remediation (build-system hardening; no algorithm change)
-
-Build-system-only follow-up to the round-3 campaign — all four P1 findings
-of the round-4 review closed; renders byte-identical (60-case anchors
-unchanged):
-
-- **Command-line override rejection (P1-1)**: `make CFLAGS=...` (likewise
-  `CXXFLAGS`/`CPPFLAGS`/`LDFLAGS`/`FP_POLICY`) is rejected at parse time —
-  GNU make silently drops the Makefile's own `+=`/`:=` appends for a
-  command-line-set variable, which used to strip `-ffp-contract=off` and
-  `-DAEC_NO_STDIO` while still building. `EXTRA_CFLAGS`/`EXTRA_LDFLAGS`
-  remain the supported hooks.
-- **Full-toolchain discipline (P1-2)**: hardcoded ne10 `-lc++` removed
-  (C++ runtime comes from the `LINK=$(CXX)` driver; GNU/Linux uses
-  libstdc++ automatically); CC/CXX `-dumpmachine` coherence guard for
-  `BACKEND=ne10` (a partial cross-toolchain override is now a hard error;
-  `TOOLCHAIN_CHECK=0` opt-out participates in the config signature).
-- **Source-set identity + fresh archives (P1-4)**: the sorted source list
-  is part of `CFG_SIG`; `libaec.a` is always built fresh (`$@.tmp` +
-  `mv -f`) so a removed source can never leave a stale archive member.
-- **publish v3 (P2)**: content-addressed immutable releases
-  `dist/<backend>/<cfg_sig>-<content12>/`, idempotent republish, `LINK`
-  in the signature, atomic `current` swap (GNU `mv -fT` + BSD fallback —
-  fixes a round-3-latent republish bug where `mv` followed the existing
-  `current` symlink into the release dir).
-
-## [Unreleased] — 2026-07-15 — round-3 remediation (B01–B09; build isolation + no-stdio + FP policy)
-
-AEC-side items from the round-3 review campaign:
-
-- **Config-keyed final artifacts + two-phase audio_common resolution (B01)**:
-  archives/binaries now live in `bin/<backend>-<cfg-sig>/` (full-coverage
-  signature incl. AR/RANLIB and the resolved producer identity;
-  `config.manifest` collision guard; `-MD -MP` header deps; `print-*`
-  queries; `publish` → immutable `dist/<backend>/<sig>/` + atomic `current`
-  symlink). The hardcoded flat audio_common path and the order-only
-  recursion are gone — the archive is a normal prerequisite resolved at
-  recipe time with full variable forwarding.
-- **SIMD edge matrix (B05)**: n=0..17 sweeps, element-offset unaligned
-  forms, canary guards, alias matrix, UBSan runner; finite corpus for the
-  12 payload-unspecified kernels reconciled to classified comparison
-  (UBSan run went fail → pass). 293,015 → 43,109,992 checks.
-- **`AEC_NO_STDIO` (B03)**: `NO_STDIO=1` produces a stdio-free `libaec.a`
-  (trace call sites compiled out, `aec_debug.o` excluded);
-  `audit-no-stdio` gates the delivered archive + a stdio-free minimal-main
-  executable. ne10 (board deliverable) is stdio-free end to end.
-- **FP policy (B04)**: `-ffp-contract=off` moved to last position with
-  parse-time conflict rejection; AEC's own default codegen byte-identical
-  — the campaign's one deliberate byte-change comes from audio_common+NR
-  gaining the flag (they had none): new 60-case aggregates
-  KISS `a2fc5d07…` / NE10 `44540201…` (supersede `652a2152…`/`09125432…`;
-  median render delta −73 dB RMS, all parities within tolerance).
-
-## [Unreleased] — 2026-07-15 — re-review remediation (R01–R10; streaming FIFO rewritten)
-
-Remediation of the 2026-07-15 external re-review. AEC-side items:
-
-- **Streaming FIFO rewritten to a provable SPSC ring (R02, replaces the
-  first F09 fix)**: the previous atomic patch kept a shared `fifo_read`
-  RMW cursor and was refuted by an interleaving proof (producer's
-  drop-oldest advance could collide with the consumer's claimed slot at
-  full; the consumer's underrun `memset` raced the producer's first write
-  at empty). New protocol — Variant A′: `fifo_write`/`fifo_read` are
-  monotonic unsigned sequences with exactly one writer each (producer /
-  consumer), occupancy = `w − r`, `fifo_count` retired (kept at offset,
-  always 0); overrun = **drop-new** (producer never writes when full, never
-  touches the read cursor) + **consumer catch-up** (on observing a full
-  ring the capture side skips to the freshest hop — staleness self-heals to
-  ~1 hop after a burst, vs. the old drop-oldest's permanent ~320 ms lag);
-  underrun uses a new immutable all-zero pool hop (`fifo_zero_ref`) — the
-  ring is never written by the capture thread. Ownership proof in aec.h;
-  every shared word has exactly one writer; TSan-clean by construction
-  (zero suppressions). `test_fifo_spsc.c` rewritten as a payload-integrity
-  stress (per-hop sequence + full-hop bit-exact regeneration oracle via
-  `far_hop`, producer/consumer jitter, bounded-staleness + gap accounting
-  identities); `stream_sim.c` gains an exact-count overrun check and a
-  catch-up check. Lockstep single-thread behaviour byte-identical (old vs
-  new `--singlethread` dump `cmp`-equal; 60-case render aggregates
-  unchanged — offline `aec_process()` untouched). Pool +`ALIGN16(hop·4)`
-  (16 k: KISS 538,320 B / NE10 534,192 B; per-rate table in
-  STATIC_MEMORY.md).
-- **Rate-relative HPF validation (R08)**: `highpass_cutoff_hz` now mirrors
-  audio_common's `hpf_params_valid` exactly (isfinite / >0 / <0.45·sr) when
-  `enable_highpass` is set — {8 kHz, 4 kHz} used to pass the flat [0, 20000]
-  bound and then silently construct with no mic-path HPF (`hpf_init` NULL
-  was never checked; `aec_carve` now fails construction on it).
-  test_config_validation 82→126 checks.
-- **SIMD NaN sweep is a hard gate (R07)**: the soft-warn path in
-  `simd_selftest_aec.c` is a classified assertion now — every element must
-  be bit-equal or both-NaN (payload unspecified: multi-NaN reduction
-  tie-breaks are out of contract); anything else exits non-zero. All 60
-  historical soft mismatches (265 elements) classify as both-NaN; no kernel
-  needed fixing. Special-value contract table + pinned selftest values live
-  in audio_common (`fast_math.h`).
-- **Build hygiene (R10)**: object dirs are hash-keyed
-  (`obj/<backend>-<cksum-sig>`) — no parse-time wipe, `make -n` is
-  side-effect-free, different-flag builds coexist; cksum replaces shasum.
-- The upstream WAV-writer hardening (audio_common, R01) is this campaign's
-  only deliberate byte-change: float-WAV headers gain the correct outer
-  RIFF size. New 60-case aggregates: KISS `652a2152…` / NE10 `09125432…`
-  (payload verified byte-identical per file; PCM16/pipeline/NR outputs
-  unchanged).
-
-## [Unreleased] — 2026-07-15 — external-review remediation campaign (F01–F20 all closed; 16 kHz byte-identical throughout except one flagged commit)
-
-Full remediation of the 2026-07-14 external C/SIMD/NE10/memory-pool review
-(No-Go → all software gates green; on-target A53/A73 measurement remains).
-Every commit was gated on the 60-case C render aggregate (KISS + NE10),
-test_static_aec, parity_aec_e2e, and the campaign test suite; the only
-deliberate byte-change lives in Audio_ALG (pipeline TU `-ffp-contract=off`).
-
-- **Multi-rate (F01)**: 8/16/48 kHz all supported, every dimension derived
-  from the hop = 10 ms rule. Per-rate tables are generator-emitted from the
-  live Python spec (`gen_aec_balanced_config_h.py` — cross-rate invariance
-  assertion caught 8 genuinely rate-scaled power constants), consumed via
-  `aec3b_rate_cfg()`; filter_length is ms-derived (416/832/3072). The 8 kHz
-  taps OOB (880-alloc/960-read — the review's heap≠pool SHA divergence) is
-  fixed; delay-estimator geometry mirrors the Python spec (fixed /4) with
-  coverage 1216/608/~203 ms documented. Acceptance: per-rate Python↔C
-  e2e parity (8 k −90 dB corr 1.0; 48 k −23.8 dB corr 0.99998, root-caused
-  and tolerance-documented), delay C-goldens bit-exact ×3, static==dynamic
-  ×3×2 backends, COLA/impulse structural tests, UBSan clean ×3.
-- **Zero-heap (F02/F08)**: NE10 twiddle configs carved from the caller pool
-  (audio_common vendored patch P0001); `aec_init→destroy` makes zero
+- **`pbfdaf_free`'s static-path double-free**: it no longer calls
+  `fft_destroy` (it never owns the handle it borrowed); calling it there as
+  well would double-free the NE10 backend's twiddle-config allocation every
+  borrower now shares. `pbfdaf_reset` is unaffected (it never touched
+  `p->fft`).
+- **`pbfdaf_reset` now also clears `precomputed_far_spec`** — latent but never
+  triggered before far-FFT sharing existed (the field was always NULL by the
+  time any reset could observe it, since it was previously set-and-consumed
+  purely within a single internal call); with cross-instance sharing, a caller
+  resetting an instance between setting the pointer and that instance's own
+  process call could otherwise leave a stale/potentially-freed pointer on the
+  struct.
+- **AI-AEC `dataset_gen` ch5 read the limiter-processed output.**
+  `Audio_ALG/AIAEC/dataset_gen/linear_aec.py`'s `ch5` channel (the dataset's
+  linear-AEC-error reference signal) read `process()`'s output instead of the
+  pre-limiter formed hop — a discontinuity whenever the limiter's gain
+  excursion crossed 1.0 mid-utterance, visible as a vertical line in ch5's
+  spectrogram. Fixed by switching `LinearAecProcessor` to the
+  `return_formed_output` seam.
+- **Retention-vs-new-sample EMA convention bug, caught mid-implementation**:
+  `shadow_err_alpha` and `EPV_FAST_TC`/`EPV_SLOW_TC` all use the update
+  `x <- c*x_old + (1-c)*new` — the constant `c` multiplies the OLD state
+  directly (a RETENTION convention). This is the OPPOSITE of AEC3's own
+  convention that `aec3_per_block_ema_alpha_to_per_hop` assumes
+  (`x <- (1-a)*x + a*new`, where `a` multiplies the NEW sample). Applying the
+  existing AEC3-style helper to a retention-convention constant silently
+  retimes it **backwards** (verified: it produced smaller per-hop retention at
+  a *shorter* hop, when a shorter hop needs *larger* per-hop retention to
+  match the same wall-clock decay). A new, correctly-generalized helper was
+  added instead of reusing the mismatched one.
+- **Retiming point moved from `aec_config_defaults()` to `aec_carve()`.**
+  Baking the AecConfig-level retiming into `aec_config_defaults()` (the
+  natural-looking spot, alongside `filter_length`'s existing sr-based
+  derivation) is wrong — `aec_wav.c`'s `--fft-size` flag (and
+  `test_rate_structural.c`'s own alternate-grid selection) overrides
+  `cfg.fft_size` *after* `aec_config_from_preset()` returns, so retiming
+  against the default-grid hop at that point freezes the wrong grid the moment
+  a caller picks the non-default 16 kHz/512 grid. Retiming now happens once in
+  `aec_carve()` (construction time, when `aec_derive_dims()` has already
+  re-resolved `hop` from the FINAL `cfg->fft_size`), writing into `a->cfg`
+  (the carved instance's own copy) — the caller's original `AecConfig` is left
+  untouched. Python has no equivalent post-construction grid-override call
+  site (`__post_init__` runs once, immediately, and no code in this repo
+  mutates `frame_size`/`hop_size` afterward), so `AecConfig.__post_init__`
+  remains the correct, single retiming point on that side. `epc_init()`'s two
+  in-repo call sites are `aec.c`'s `aec_carve()` (passes the real carve-time
+  grid) and `test_counter_saturation.c`'s `section_epc_shadow` (passes the
+  legacy 160/16000 — that test only exercises hangover countdown, not EPV);
+  the retimed EPV values are computed once at `epc_init()` time,
+  config-slice semantics, not touched by `epc_reset()`. Python's sole call
+  site (`orchestrator.py`) now passes them explicitly.
+- **Native 8 kHz delay-estimator feed rate.** `delay_aec3_init()`
+  (`c_impl/src/delay_aec3.c`) was hardcoding the internal delay estimator's
+  feed rate to 16000 regardless of the AEC's actual configured `sample_rate`.
+  `da_estimator_init()`/`da_clockdrift_init()` derive real-world timing
+  constants from that rate (the ~30 s clockdrift `stability_reset_hops` and
+  the ~500 ms `consistent_estimate_threshold`, both
+  `seconds * sample_rate / DA_AEC3_BLOCK_SIZE`) — passing the wrong rate
+  distorts their real elapsed time, not just a label. 16 kHz was
+  coincidentally correct; 48 kHz was also correct, but only because the
+  render/capture pair is resampled to a 16 kHz-equivalent stream before
+  reaching the estimator. Now passes the true feed rate (native `sample_rate`
+  at 8/16 kHz, 16000 only when the 48 kHz sidechain is active). Verified:
+  `test_rate_structural` (67/67, all four grids), `test_counter_saturation`
+  (12017/12017, incl. `section_delay_aec3`), an isolated old-vs-new
+  before/after comparison at native 8 kHz, and `test_static_aec`
+  static==dynamic at all three rates (8000: 193,280 B pool; 48000:
+  byte-equal).
+- **Python 48 kHz anti-alias sidechain was missing**, making Python and C
+  structurally different at 48 kHz. `EchoPathDelayEstimator`
+  (`python/modules/delay/echo_path_delay_estimator.py`) now ports the C-side
+  `DaResample48` 48 kHz→16 kHz sidechain (added 2026-08-02, previously flagged
+  C-only). A `parity_aec_e2e` investigation found the asymmetry caused Python
+  and C to lock onto *different delays at different hops* at 48 kHz (Python
+  hop 68/delay 1024 vs C hop 100/delay 960) — not a numerical-precision drift
+  but a structural mismatch, since Python fed the matched filter raw, aliased
+  48 kHz samples in 1.33 ms inner blocks instead of the intended 4 ms. Added
+  `_Resample48` (same order-7 elliptic 4-SOS-section coefficients as
+  `DA_RESAMPLE48_B`/`A` in C; `scipy.signal.sosfilt`'s default recurrence is
+  the identical Direct-Form-II-Transposed form `da_biquad_process1` implements
+  — verified sample-for-sample against the C filter to float32 precision on a
+  test signal). `ClockdriftDetector`/`MatchedFilterLagAggregator`'s
+  `sample_rate` parameter is now the *effective* inner-block rate (16000 when
+  the sidechain is active) rather than the raw native rate, mirroring the C
+  fix. `parity_aec_e2e` 48 kHz max diff: 4.596e-01 (FAIL, tol 1.0e-01) →
+  3.873e-02 (PASS) — back in the same class as the originally-measured 6.4e-2
+  baseline that calibrated the 48 kHz tolerance. 16 kHz/8 kHz outputs
+  unchanged (rate_factor=1 path is a no-op).
+- **`python/diag/gen_aec_e2e_golden.py` hardcoded `hop = sr*10//1000`**
+  (10 ms), which diverged from the constructed `AecConfig`'s real hop once
+  16 kHz's default grid moved to 256/128 — regenerating a golden at the new
+  default crashed (`ValueError: could not broadcast ... (160,) into (128,)`).
+  Fixed to read `hop_size` back from the constructed config. This is why the
+  48 kHz asymmetry above went undetected: the E2E gate had been silently
+  unable to run at any rate since the grid default changed.
+- **`delay_aec3_reset()` / `EchoPathDelayEstimator.reset()` now clear the full
+  signal chain** — previously left the inner decimators/ring/pending-sample
+  state stale after the 48 kHz sidechain's own reset (a mixed fresh/stale
+  reset). `c_impl/test/test_delay_reset.c` + `python/tests/test_delay_reset.py`.
+- **`erle_startup_hops`/`erl_startup_hops`'s `200`-as-sentinel collision**:
+  `None`/`-1` now means "auto"; an explicit `200` request could previously
+  never be expressed, since it was indistinguishable from the auto default.
+  `python/tests/test_aec_state_startup_hops.py`.
+- **C `RenderActivity` now matches Python on activation**: the first active
+  render hop initializes the envelope but is not classified stationary until a
+  second observation exists. A three-state regression covers initial
+  activation, the second hop, and activation after silence.
+- **8 kHz taps OOB (F01)**: 880-alloc/960-read — the external review's
+  heap≠pool SHA divergence — fixed; delay-estimator geometry now mirrors the
+  Python spec (fixed /4).
+- **Zero-heap (F02/F08)**: NE10 twiddle configs are carved from the caller
+  pool (audio_common vendored patch P0001); `aec_init→destroy` makes zero
   allocator calls on both backends (`test_zero_heap_aec.c`, hook-verified);
   destroy is a true idempotent no-op for pool instances.
-- **Lifecycle (F03/F04)**: `aec_create` arena-fied onto the shared
-  `aec_carve()` (87 leaks/184 KB per lifecycle → 0; −316 lines of
-  hand-mirrored duplication); pbfd* inits return status; single-path
-  rollback; `test_lifecycle.c` 1/10/1000 cycles.
-- **Validation (F05/F07)**: central `aec_validate_config()` (rate whitelist,
-  bounded fields), saturating `ck_*` size arithmetic, misaligned-base
-  rejection; `test_config_validation.c` 82 checks.
-- **WAV (F06)**: hardened single reader in audio_common (shim here);
-  fmt/format/bounds/odd-chunk/EOF checks, non-finite float ingress
-  sanitized+counted.
-- **SIMD NaN (F10)**: cabs helper NaN-exact vs scalar (vmaxq/vminq AND
-  vabsq were both NaN-divergent); NaN corpora in the selftests; fast_math
-  domain guards (fast_exp NaN OOB-LUT fixed).
-- **Streaming FIFO (F09)**: SPSC acquire/release atomics (layout unchanged);
-  contract narrowed to one render + one capture thread; 100 k-hop
-  concurrent stress + bookkeeping identity.
-- **Build hygiene (F12)**: parse-time config-stamp rebuild keying; WERROR
-  knob. **Docs (F19)**: real 3-param `aec_init` everywhere; ownership truth
-  per backend; `docs_smoke.sh` compiles the STATIC_MEMORY.md sample.
-- Pool totals (16 k): KISS 538,320 B / NE10 534,192 B (in-pool twiddles +
-  de-stacked scratch + config growth; figure includes the later F09 Variant
-  A' streaming-FIFO rewrite's +640 B `fifo_zero_ref`); per-rate table in
-  STATIC_MEMORY.md.
+- **Lifecycle leaks (F03/F04)**: `aec_create` arena-fied onto the shared
+  `aec_carve()` — 87 leaks / 184 KB per lifecycle → 0, and −316 lines of
+  hand-mirrored duplication; pbfd* inits return status; single-path rollback.
+- **WAV ingress (F06)**: hardened single reader in audio_common (shim here);
+  fmt/format/bounds/odd-chunk/EOF checks, non-finite float ingress sanitized +
+  counted.
+- **SIMD NaN divergence (F10/R07)**: the cabs helper is NaN-exact vs scalar
+  (`vmaxq`/`vminq` AND `vabsq` were all NaN-divergent); NaN corpora added to
+  the selftests; fast_math domain guards (fast_exp NaN OOB-LUT fixed). The
+  soft-warn path in `simd_selftest_aec.c` is a classified assertion now —
+  every element must be bit-equal or both-NaN (payload unspecified: multi-NaN
+  reduction tie-breaks are out of contract); anything else exits non-zero. All
+  60 historical soft mismatches (265 elements) classify as both-NaN; no kernel
+  needed fixing. Special-value contract table + pinned selftest values live in
+  audio_common (`fast_math.h`).
+- **Docs (F19)**: real 3-param `aec_init` everywhere; ownership truth per
+  backend.
+- **Float-WAV outer RIFF size** (audio_common, R01) — that campaign's only
+  deliberate byte-change: float-WAV headers gain the correct outer RIFF size.
+  New 60-case aggregates: KISS `652a2152…` / NE10 `09125432…` (payload
+  verified byte-identical per file; PCM16/pipeline/NR outputs unchanged).
+- **Stale `libaec.a` archive members** — a removed source can no longer leave
+  one behind.
+- **publish v3's `current` swap followed the existing `current` symlink into
+  the release dir** (a round-3-latent republish bug); fixed by the atomic swap.
+- **Missing-`current` window and concurrent same-config publish race** —
+  closed by publish v4's rename(2)-atomic helper and by taking the per-backend
+  lock before the prerequisite build.
+- **`make -n/-q/-t publish` was not side-effect-free.** Round-5's driver
+  mentioned `$(MAKE)`, so GNU make ran it for real even under `-n`,
+  transiently mkdir'ing `dist/` and taking/releasing the real lock on every
+  dry run; a MAKEFLAGS word-scan now branches BEFORE `$(DIST_ROOT)` is created
+  or the lock is taken (`-n`/`-t` recurse into a print-only path, `-q` exits 1
+  per question-mode's "needs updating" semantics). Round-6 then documented all
+  three as side-effect-free, but that was still not true for `-t` — the
+  round-6 driver recursed into `_publish_impl` under `-t` exactly as under
+  `-n`, and GNU make's standard touch semantics on that recursive recipe chain
+  bumped the mtimes of the real `libaec.a`/`aec_wav`/`bench_rtf` (and, via the
+  `AC_LIB` dispatch, audio_common's own archive) — a genuine write for a
+  target that is supposed to be a phony action, not a build product. `-t` is
+  now an explicit no-op: it prints a one-line note and exits 0 without
+  recursing. All three flags are now verifiably zero-write.
+- **Combined dry-run flags** (e.g. `make -nt publish`) are now handled
+  `-t`-FIRST: the driver's `MAKEFLAGS` word-scan checks `has_t` before
+  `has_q`/`has_n`, because in a combined invocation the old `-n`-first
+  ordering handed the recursive child `make` both flags at once, and GNU make
+  really applied touch semantics to that recursive chain regardless
+  (reproduced) — the same real-write bug the `-t`-alone fix addressed, just
+  reachable through a different flag combination. Any `t` now wins
+  unconditionally over `n`/`q`.
+- **Same-second republish silently clobbered the prior attestation** (round-5
+  used `mv -f`); an existing attestation is never overwritten now.
+- **Identity-less checkout could previously publish**: the prior shape folded
+  an `unknown` identity into the same `dirty`/`ac_dirty` violation flag that
+  `ALLOW_DIRTY_PUBLISH=1` short-circuits, so passing that knob alone could let
+  a non-git (or an unresolved-`AC_DIR`) tree publish despite having no real
+  provenance to record. A checkout — this repo OR the resolved audio_common
+  producer — for which `git rev-parse HEAD` fails is now FATAL immediately,
+  checked before `dirty`/`untracked` are even computed for that repo, and
+  neither knob admits it.
+- **Latent `hpf_init`/`hpf_process`/`hpf_reset` symbol collision** with
+  audio_common's f32 platform HPF (different signatures, ABI-incompatible),
+  killed by the `hpf_f64` move.
 
-## [Unreleased] — 2026-07-16 — vectorization campaign (byte-identical, NEON via shared kernels)
+### Security
 
-Whole-repo per-bin/per-sample loop vectorization on top of the float32
-campaign, output **byte-identical throughout** (60-case render aggregate md5
-unchanged on BOTH backends at every commit; static==dynamic byte-equal both
-backends; delay C-golden bit-exact; e2e tolerance unchanged):
+- The rewritten streaming FIFO is **TSan-clean by construction, with zero
+  suppressions** — every shared word has exactly one writer, and the ownership
+  proof lives in `aec.h`.
 
-- **Shared kernel layer** `audio_common/include/simd_kernels.h` (22 kernels,
-  AArch64 NEON + always-compiled scalar twins, bitwise selftest incl.
-  denormal/±0/inf and n=257 tails; `SIMD_KERNELS_FORCE_SCALAR` A/B knob).
-  Bit-exactness rests on per-lane IEEE NEON ops + strict FMA discipline
-  (explicit `fmaf` ↔ `vfmaq_f32`; plain mul+add never fused — consumer TUs
-  must keep `-ffp-contract=off`); min/clip use compare+select (vminq/vmaxq
-  diverge from the C ternary at ±0 ties).
-- **Converted**: all complex-magnitude loops (~10.8k scaled-hypot calls/hop),
-  echo_spec partition MAC + both filter W-updates, post-chain elementwise
-  loops with fusion (coherence EMA+Γ² gate single pass; CNG N2 tracking;
-  E2 select/gain apply), suppression-gain clips/min/final sqrt, numpy
-  pairwise-sum trees (the numpy tree + BOTH tail-fold variants — probe-proven
-  distinct at ±0 — now single shared implementations), `fft_power`
-  (contraction made explicit as `fmaf`, objdump-verified identical codegen)
-  and `fft_apply_gain` NEON in both FFT backends.
-- **Structural**: per-hop `W_all`/`X_buf_all` snapshot copies (2×~12 KB/hop)
-  removed — post reads filter state via const pointers; static pool
-  **557,680 → 532,992 B KISS / 519,232 → 494,544 B NE10**. NE10 wrapper
-  output staging memcpys removed; new clobber-permitted
-  `fft_forward_scratch`/`fft_inverse_scratch` API adopted at six
-  dead-scratch rfft sites (input staging also skipped on NE10 there).
-- **Perf**: dev-box (arm64 clang, auto-vectorizing) RTF flat-to-slightly-
-  better — expected; the intrinsics make vectorization compiler-independent
-  for the embedded gcc target. Measure on-target with `make bench`
-  (`bin/bench_rtf`, new in this campaign; cross-compiles with
-  `BACKEND=ne10 CC=<cross-gcc>`).
+### Known limitations
+
+These are stated so a reader does not mistake "all tests green" for "validated
+at every grid". They are the reason this release carries an `rc` marker.
+
+- **48 kHz has structural evidence only.** Both retiming batches (16), (17)
+  were A/B-validated on the two 16 kHz grids and verified numerically stable at
+  48 kHz — 1875 hops of far-only / double-talk / near-only / echo-path change /
+  mid-stream `aec_reset()`, zero non-finite samples, finite `erl_estimate` and
+  `saturation_level` throughout. That proves the 48 kHz path does not break; it
+  does **not** validate 48 kHz tuning. No native 48 kHz far-end / double-talk /
+  near-end material exists in this repo, and upsampled 16 kHz material cannot
+  substitute — it carries no energy above 8 kHz, which is precisely the band a
+  48 kHz grid adds. A formal 48 kHz release needs native recordings.
+
+- **The 800-case bench has not been re-run for this release.** The retiming
+  batches used a 90-case blind subset. Items (11)–(14) of ⚠ BREAKING carry
+  their own "not yet through the 800-case bench" notes and are unchanged by
+  this entry.
+
+- **Wall-clock retiming is validated as timing, not as tuning.** Every constant
+  now covers the same wall-clock span at every grid, which is the property the
+  authoring comments always claimed. Whether that span is the *best* value at a
+  non-16 kHz grid is a separate question that no test here answers.
 
 ---
-
-## [Unreleased] — 2026-07-15 — float32 campaign (Python bit-exact parity retired)
-
-Staged conversion of all production C to float32 end-to-end: (1) delay chain
-(`delay_aec3.c` biquads + scalar bookkeeping), (2) `aec.c` orchestrator
-scalars, (3) the post/state module chain (`aec3_post`, `aec_state`,
-`residual_echo_estimator`, `suppression_gain`, ERLE/reverb/stationarity), (4)
-mic-path HPF swapped to `audio_common`'s shared f32 platform HPF
-(DF2-transposed; `parity_hpf.c` + `gen_hpf_golden.py` removed).
-`reverb_decay_estimator.c` is the sole remaining `double` file (dead code, no
-production caller). Also: de-stacked 13 large function-local
-`float[8192]`/`[4096]` arrays into the static pool; renamed preset
-`gentle`→`mild` (NR-style naming, parameters unchanged, `AEC_PRESET_MILD`);
-and a `/simplify` cleanup pass over the full diff.
-
-**Python bit-exact parity is retired repo-wide** — Python (fp64) is now the
-algorithm spec, C is the float32 implementation, Python↔C is
-tolerance-based (~−60 dB class), not 0/0. Gates: C-goldens
-(`test/parity_delay.c`/`gen_delay_c_golden.c`, `test/parity_aec_e2e.c`
-tolerance) plus staged checks vs the `fp64-baseline` tag — 60-case
-stratified AECMOS (worst Δ −0.021 echo, buckets ≤0.002), waveform drift
-median −95 dB, 1-hour soak stable. Static pool (BALANCED/16 kHz/52 ms):
-KISS 557,680 B (544.6 KB), NE10 519,232 B (507.1 KB), both static==dynamic
-byte-equal. Deployment model unchanged: host/reference = malloc + KISS
-(`make`, default); embedded = caller-pool + NE10 (`make BACKEND=ne10`) —
-same main branch; NE10 vs KISS not bit-identical (pre-existing).
-`-ffp-contract=off`/`std=gnu99` retained.
-
-## [Unreleased] — 2026-07-14 — single-branch consolidation (static-memory API folded into main)
-
-Repo hygiene, zero algorithm change. The `feature/static-memory` branch is
-retired: `main` now carries both memory models in one library — `aec_create`
-(heap) and `aec_get_mem_size`/`aec_init` (single caller-owned pool, see
-`c_impl/STATIC_MEMORY.md`) — selected at runtime, mirroring the NR repo's
-single-branch model. Gates: consolidated `aec_wav` output byte-identical to the
-former branch build, and `test_static_aec` static == dynamic byte-equal.
-
-Also in this pass: the mic-path HPF moved to `audio_common` as `hpf_f64`
-(local `c_impl/{src,include}/hpf.{c,h}` deleted; pure rename, output
-byte-identical, `parity_hpf` golden still bit-exact at 0 error). This removes
-the last local copy of an `audio_common` component and kills the latent
-`hpf_init`/`hpf_process`/`hpf_reset` symbol collision with `audio_common`'s
-f32 platform HPF (different signatures, ABI-incompatible).
 
 ## [3.24.1] — 2026-06-25 — Warm tap-transfer on delay acquisition (cold-start "vertical line" fix)
 
@@ -924,7 +1056,13 @@ mirrors both filters (`pbfdkf.c` constraint sites gate on `partition_to_constrai
 
 ---
 
-## [Unreleased] — 2026-06-20 — C FFT backend: pocketfft → KISS (NR-shared, float32)
+## [3.24.0-dev] — 2026-06-20 — C FFT backend: pocketfft → KISS (NR-shared, float32)
+
+Landed after the 3.23.0 tag and shipped inside 3.24.0; it carried no version
+bump of its own because `__version__` tracks the Python reference, which this
+did not touch. Retitled from `[Unreleased]` 2026-08-06 — it has been released
+for over a month, and a stale `[Unreleased]` heading in the middle of a
+released history is unreadable.
 
 **C-only change; Python reference + `__version__` (3.23.0) unchanged.** The C FFT
 backend is swapped from the vendored numpy pocketfft (fp64, numpy-bit-exact) to
@@ -993,8 +1131,8 @@ gaps (unset `lf_clamp_bin`, missing DT-floor replay, a stale gen kwarg, a missin
 Streaming C API + dead-code removal + research-arc closures. **BALANCED algorithm
 unchanged** — 800-case AECMOS scores are identical to 3.22.4 (FS_static 3.576 /
 DT_static 4.201·2.156 / NE 4.047); the bump is for the new public API + hygiene.
-Full release summary + 3-way AEC3/Speex comparison:
-[docs/v3_22_5_release.md](docs/v3_22_5_release.md).
+The retired full release report and 3-way AEC3/Speex comparison remain
+recoverable from Git history.
 
 **Release cleanup (both impls, bit-exact)**
 - Removed 10 default-OFF research flags (none enabled by any preset) + the opt-in
@@ -1025,7 +1163,7 @@ Full release summary + 3-way AEC3/Speex comparison:
   loss is echo-dominated (`near_fr` 0.13, reference-blind); a per-frame near-priority
   mask separates 1–3k window-averaged but leaks ~12 % of FS far-active frames. BALANCED
   stays byte-equal; `gentle` is the opt-in speech-preserving operating point, not a fix.
-  See [docs/breath_aec_record_6_7s_closeout_2026_06_07.md](docs/breath_aec_record_6_7s_closeout_2026_06_07.md).
+  See docs/breath_aec_record_6_7s_closeout_2026_06_07.md.
 - Removed stale top-level diag scripts (`diag_enr_trace.py`, `spp_step0_diag.py`).
 
 ## [3.22.4] — 2026-06-03 — three Pareto presets + finalization hygiene
@@ -1089,10 +1227,10 @@ per-frame CSV trace via `aec_wav --debug-trace <path>` (audio-passive).
 
 ## [3.22.3] — 2026-06-03 — isolated parity/correctness candidates (P0 audit; AECMOS-neutral)
 
-Adjudicated the Codex source-audit findings as **isolated parity/correctness
+Adjudicated the independent source-audit findings as **isolated parity/correctness
 candidates** — each its own 800-case A/B + per-case **energy audio-proof**, gated
-if it regressed or only reshaped without benefit ([[feedback_aec_code_review_accuracy]],
-[[feedback_audio_proof_required]]). Output changes vs 3.22.2 (NOT byte-equal) but
+if it regressed or only reshaped without benefit. Output changes vs 3.22.2
+(NOT byte-equal) but
 the surviving set is **AECMOS-neutral** (all buckets ≤0.002 vs C_pb28).
 `__version__` 3.22.2 → 3.22.3 (BALANCED output changed; no metric movement).
 
@@ -1145,7 +1283,7 @@ audio-proof separated artifact from real regression.
   inert on the FS path (R²=S²/ERLE; ERLE already windowed; capture_psd→R² only in
   the ~6–8 % saturated branch).
 
-Full evidence + the FS-regression diagnostic workflow: [docs/v3_22.md](docs/v3_22.md) §8.
+Full evidence + the FS-regression diagnostic workflow: docs/v3_22.md §8.
 
 ## [Unreleased] — code hygiene (byte-equal, no algorithm change)
 
@@ -1188,7 +1326,7 @@ Behaviour-neutral cleanup on top of 3.22.2. `__version__` stays **3.22.2**
   fields.
 
 - **per-bin near-end SPP substrate** (Track C, default-OFF): added
-  `NearendSpp` ([python/modules/residual/nearend_spp.py](python/modules/residual/nearend_spp.py))
+  `NearendSpp` (python/modules/residual/nearend_spp.py)
   — an IMCRA-style per-bin near-end speech-presence probability built on
   minima tracking of the residual-to-reference power ratio `|E|²/R²` (uses the
   reliable reference, not Ŷ/ERLE; multi-frame minima separate a near-end onset
@@ -1198,7 +1336,7 @@ Behaviour-neutral cleanup on top of 3.22.2. `__version__` stays **3.22.2**
   near-end is absent. Adds 6 default-`False`/conservative `AecConfig` fields
   (`nearend_spp_*`, `cohxd_nearend_spp_gate_enabled`; now 109). All paths
   guarded by the flags → production byte-equal (14/14, all buckets). Ships the
-  diagnostic harness [python/spp_step0_diag.py](python/spp_step0_diag.py)
+  diagnostic harness python/spp_step0_diag.py
   (synthetic-DT audio-proof). **Verdict: NULL — the near-gate does NOT move the
   DT frontier.** Step-0 audio-proof passes only with slow time constants
   (`alpha=0.02`, `minima_subwindow=200`); with those, the 800-case A/B (cohxd
@@ -1208,7 +1346,7 @@ Behaviour-neutral cleanup on top of 3.22.2. `__version__` stays **3.22.2**
   near-mask cannot release echo-only suppression without also touching near-end
   — confirms the voice-on-voice bin-overlap wall (consistent with the prior
   coherence-discriminator closures). Kept as default-OFF research substrate;
-  full reasoning in [docs/v3_22.md](docs/v3_22.md).
+  full reasoning in docs/v3_22.md.
 
 ## [3.22.2] — 2026-06-02 — BALANCED: per-bin near-end blend + far-active floor −28
 
@@ -1231,7 +1369,7 @@ deeper −28 floor cancel more echo without the broadband DT near-end cost.
 `far_active_floor_db` is the documented single-knob preset axis (weak −18 /
 strong −28+); per-bin blend is the base. Full default-OFF flag-campaign
 evidence (incl. the cohxd reference-coherence echo lever, deferred for its
-DT-deg root cause) in [docs/v3_22.md](docs/v3_22.md).
+DT-deg root cause) in docs/v3_22.md.
 
 Repo hygiene this version: consolidated the v3.21/v3.22 docs into single
 `docs/v3_21.md` / `docs/v3_22.md`; removed unused tooling
@@ -1248,7 +1386,7 @@ CLAUDE.md).
 ON). Guards the Path-A first delay acquisition: when the linear filter is
 already cancelling (>2.5 dB windowed ERLE) at the current alignment, a "solid"
 late acquisition is rejected (it would reset the filter + apply a spurious large
-shift). Verdict: [docs/v3_22_1_p4_delay_protect_verdict.md](docs/v3_22_1_p4_delay_protect_verdict.md).
+shift). Verdict: docs/v3_22_1_p4_delay_protect_verdict.md.
 
 **Root cause (audio-localised)**: the bench pre-aligns the reference (GCC-PHAT)
 *and then* the in-pipeline AEC3 matched filter runs — a double-alignment. On
@@ -1761,7 +1899,7 @@ After alignment shipped, dev-time substrate was removed. **Byte-equal vs `cd73f4
 
 Sprints P2 / P4 closed as **intentionally-incompatible with our PBFDKF architecture** — both AEC3 parity items are permanently retired (TransparentMode + AEC3-default-off stationarity); any v3.22+ revisit must be labelled as PBFDKF-specific divergence, NOT AEC3 parity restoration. Sprint P3 ships byte-equal structural parity (canonical control surface for `use_stationarity_properties` now lives at `SuppressorConfig.echo_audibility`, with top-level `aec3_post_stationarity_zero_enabled` retained as deprecated alias).
 
-Cycle close: [`docs/v3_21_6_cycle_close.md`](docs/v3_21_6_cycle_close.md). v3.22 entry gate (AEC3 parity baseline locked): **MET** — every Bucket-1 item has a closed verdict.
+Cycle close: `docs/v3_21_6_cycle_close.md`. v3.22 entry gate (AEC3 parity baseline locked): **MET** — every Bucket-1 item has a closed verdict.
 
 ### Sprint P1 — FilterAnalyzer port SHIPPED (Pareto-positive)
 
@@ -1769,7 +1907,7 @@ AEC3 [`filter_analyzer.cc`](docs/aec3_extracts/src/aec3/filter_analyzer.cc) prod
 
 P1 ships a full single-channel port (block units translated AEC3 `kBlockSize=64` 4ms → our `HOP_SAMPLES=160` 10ms; convergence hold 5s = 500 hops; consistency hold 1.5s = 150 hops). The new `state/filter_analyzer.py` (~250 LOC) covers `ConsistentFilterDetector` + 3-tap 600Hz HPF + region-sweep peak finder + state machine, verbatim against the AEC3 source. `AecState` owns the analyzer; `PBFDAF.get_time_domain_filter()` (new ~10 LOC IFFT concat helper) feeds the time-domain impulse response per hop. Reverb-update `_delay_blocks` switches from legacy `_current_delay // hop_size` to `aec_state.min_direct_path_filter_delay()`. The v3.18 Phase C.A audit-only stub (incompatible API) is deleted.
 
-Verified default-OFF byte-equal preserved (25/25 PASS vs v3.21.5 anchor) before flipping default True. 800-case bench Pareto-positive on FS without DT damage. Verdict: [`docs/v3_21_6_p1_filter_analyzer_verdict.md`](docs/v3_21_6_p1_filter_analyzer_verdict.md).
+Verified default-OFF byte-equal preserved (25/25 PASS vs v3.21.5 anchor) before flipping default True. 800-case bench Pareto-positive on FS without DT damage. Verdict: `docs/v3_21_6_p1_filter_analyzer_verdict.md`.
 
 Known limitation (not blocking ship): `fa_consistent=0%` on the LN18k5r8 cohort case — PBFDKF's Kalman peak position is noisier than AEC3's NLMS-stable envelope, so the 1.5s peak-stability detector rarely fires. Effect: `UpdateFilterGain` falls back to running-max path; `TransparentMode.any_filter_consistent` stays False (irrelevant — TM disabled by P2). Does not affect `filter_delays_blocks()` output (P1's primary deliverable). Documented as the PBFDKF-vs-AEC3 architectural-incompatibility note that motivated P2's parity closure.
 
@@ -1782,7 +1920,7 @@ Known limitation (not blocking ship): `fa_consistent=0%` on the LN18k5r8 cohort 
 - (C) `any_coarse_filter_converged` not threaded into `TransparentMode.update` (Legacy ignores; HMM variant not ported)
 - (D) `all_filters_diverged` derived from `bridge.divergence_indicator > 1.0` proxy (vs AEC3 SubtractorOutputAnalyzer)
 
-P2.0 cohort 3-case trace (LN18k5r8 / s90M7MOT / 9xjhi + 2 others) with `AEC_TRANSPARENT_MODE=1` showed LN18k5r8 fires TM 23.1% @ fa_consistent=0% — the exact PBFDKF-vs-AEC3 cohort-tail false-activation pattern P1's verdict had already documented for FilterAnalyzer. Per [plan's strict P2.1 protocol option 3](`~/.claude/plans/se-aec-aec-main-hazy-lynx.md`), this is sufficient cohort evidence to close as intentionally-incompatible without a full 800-case bench.
+P2.0 cohort 3-case trace (LN18k5r8 / s90M7MOT / 9xjhi + 2 others) with `AEC_TRANSPARENT_MODE=1` showed LN18k5r8 fires TM 23.1% @ fa_consistent=0% — the exact PBFDKF-vs-AEC3 cohort-tail false-activation pattern P1's verdict had already documented for FilterAnalyzer. The historical investigation protocol accepted this cohort evidence to close as intentionally-incompatible without a full 800-case bench.
 
 Per-mismatch verdicts:
 - A → intentionally-incompatible (production stays `transparent_mode_enabled=False`)
@@ -1790,7 +1928,7 @@ Per-mismatch verdicts:
 - C → aligned no-op
 - D → aligned via different source signal
 
-Parity substrate (config flag, `AEC_TRANSPARENT_MODE` env hook, 3 corrected constants, trace field) shipped dormant as v3.22 G.2 substrate. **v3.22 G.2 must be PBFDKF-specific divergence (e.g., Kalman-state-derived "no echo path" criterion / delete subsystem / keep dormant) — must NOT claim AEC3 parity restoration.** Verdict: [`docs/v3_21_6_p2_transparent_mode_audit_verdict.md`](docs/v3_21_6_p2_transparent_mode_audit_verdict.md). Discipline rule recorded as feedback memory.
+Parity substrate (config flag, `AEC_TRANSPARENT_MODE` env hook, 3 corrected constants, trace field) shipped dormant as v3.22 G.2 substrate. **v3.22 G.2 must be PBFDKF-specific divergence (e.g., Kalman-state-derived "no echo path" criterion / delete subsystem / keep dormant) — must NOT claim AEC3 parity restoration.** Verdict: `docs/v3_21_6_p2_transparent_mode_audit_verdict.md`. Discipline rule recorded as feedback memory.
 
 ### Sprint P3 — EchoAudibilityConfig structural wiring SHIPPED (byte-equal)
 
@@ -1798,7 +1936,7 @@ Promoted existing `EchoAudibilityConfig` dataclass (already had AEC3 audibility 
 
 Mid-implementation pitfall caught immediately: an initial duplicate `EchoAudibilityConfig` definition clobbered the existing rich one's fields; AttributeError on smoke-render flagged it → reverted to use the existing dataclass. Single-case md5 identical pre/post at default-True; env override `AEC_STATIONARITY_ZERO=0` still produces differing output (alias path verified working).
 
-Removal of the deprecated alias is deferred to v3.22 Sprint I cleanup (after P4 verdict). Per P4 outcome (below), the recommendation is to **keep** the alias as a research toggle indefinitely. Verdict: [`docs/v3_21_6_p3_echo_audibility_wiring_verdict.md`](docs/v3_21_6_p3_echo_audibility_wiring_verdict.md).
+Removal of the deprecated alias is deferred to v3.22 Sprint I cleanup (after P4 verdict). Per P4 outcome (below), the recommendation is to **keep** the alias as a research toggle indefinitely. Verdict: `docs/v3_21_6_p3_echo_audibility_wiring_verdict.md`.
 
 ### Sprint P4 — Stationarity default-off re-test CLOSED intentionally-incompatible
 
@@ -1814,7 +1952,7 @@ P4.0 cohort 3-case re-trace (Sprint B's worst 3: WcK0OrF / wVYSGV / xQEUtY2) on 
 
 Root cause: P1 / P2 / P3 paths don't feed into the `_DominantNearendDetector` ENR/SNR decision. The Sprint B safety-net evidence (stationarity zeroing compensates for the incomplete detector port — AEC3 has ScaleFilter / FilterMisadjustmentEstimator companions we don't port) holds on the post-P1+P2+P3 baseline. Hypothesis falsified by direct trace evidence.
 
-Per user directive ("若 P4.0 fail，直接 close P4 intentionally-incompatible，v3.21.6 保留 zeroing default True"), **no 800-case bench run**. Production stays `aec3_post_stationarity_zero_enabled = True` permanently for our PBFDKF + RES port. AEC3-default-off `use_stationarity_properties=False` retired as Bucket-3 closed-DSP decision. Any v3.22+ revisit (e.g., port the missing AEC3 ScaleFilter / FilterMisadjustmentEstimator companions, or replace the detector with a PBFDKF-Kalman-aware NE detector) must be labelled as PBFDKF-specific divergence, NOT AEC3 parity restoration. Verdict: [`docs/v3_21_6_p4_stationarity_retest_verdict.md`](docs/v3_21_6_p4_stationarity_retest_verdict.md).
+Per user directive ("若 P4.0 fail，直接 close P4 intentionally-incompatible，v3.21.6 保留 zeroing default True"), **no 800-case bench run**. Production stays `aec3_post_stationarity_zero_enabled = True` permanently for our PBFDKF + RES port. AEC3-default-off `use_stationarity_properties=False` retired as Bucket-3 closed-DSP decision. Any v3.22+ revisit (e.g., port the missing AEC3 ScaleFilter / FilterMisadjustmentEstimator companions, or replace the detector with a PBFDKF-Kalman-aware NE detector) must be labelled as PBFDKF-specific divergence, NOT AEC3 parity restoration. Verdict: `docs/v3_21_6_p4_stationarity_retest_verdict.md`.
 
 ### Cumulative bench
 
@@ -1849,10 +1987,9 @@ Sprints B / C / C2 all closed without shipping. Cumulative bench
 +0.033 / FS_movement +0.035 dB. DT deg AECMOS-sensitive but not audible
 per user spectrogram check.
 
-Plan: `~/.claude/plans/se-aec-aec-main-hazy-lynx.md` (3-cycle Round 7
-split: v3.21.5 safe parity / v3.21.6 parity completion / v3.22 intentional
-divergence; full plan-review evolution Rounds 1-9 documented in plan
-appendix). Triage policy and Bucket-1 closure status for each item below.
+Historical three-cycle investigation: v3.21.5 safe parity / v3.21.6 parity
+completion / v3.22 intentional divergence. Triage policy and Bucket-1 closure
+status for each item are recorded below.
 
 ### Sprint A — E2 = min(E2, Y2) clamp SHIPPED (Pareto-positive)
 
@@ -1865,7 +2002,7 @@ inflated → `DominantNearendDetector` ENR (= echo / nearend) biased low
 → detector mis-triggered nearend → `SuppressionGain` used conservative
 `nearend_tuning` → echo leaked through HF bands.
 
-Verdict: [docs/v3_21_5_phase1_a_e2_y2_clamp_verdict.md](docs/v3_21_5_phase1_a_e2_y2_clamp_verdict.md).
+Verdict: docs/v3_21_5_phase1_a_e2_y2_clamp_verdict.md.
 Action: `e2_y2_clamp_enabled: bool = True` (default-True) in
 [`config.py:222`](python/modules/config.py#L222); flag retained for A/B (set
 False for byte-equal vs v3.21.4).
@@ -1894,7 +2031,7 @@ net** compensating for our incomplete AEC3 detector port (missing
 companion `ScaleFilter` + `FilterMisadjustment` that keep
 `is_nearend_state` correctly firing on stationary-far).
 
-Verdict: [docs/v3_21_5_phase1_b_stationarity_gate_verdict.md](docs/v3_21_5_phase1_b_stationarity_gate_verdict.md).
+Verdict: docs/v3_21_5_phase1_b_stationarity_gate_verdict.md.
 Action: `aec3_post_stationarity_zero_enabled: bool = True` (default-True
 restored — load-bearing legacy zeroing kept). Byte-equal 25/25 vs
 v3.21.4 70e7f96 verified. Re-test scheduled for **v3.21.6 Sprint P4**
@@ -1907,7 +2044,7 @@ transparent_mode audit + P3 EchoAudibilityConfig structural wiring).
 investigated via Sprint 0 trace fields. Root cause: upstream FilterAnalyzer
 stub (`aec3_min_direct_path_blocks=0` always; `linear_filter_quality=None`
 90.5%). Both v3.21.5 fix candidates degenerate; cannot ship in v3.21.5
-narrow scope. Verdict: [docs/v3_21_5_phase1_c_reverb_semantic_audit_verdict.md](docs/v3_21_5_phase1_c_reverb_semantic_audit_verdict.md).
+narrow scope. Verdict: docs/v3_21_5_phase1_c_reverb_semantic_audit_verdict.md.
 Moved to **v3.21.6 Sprint P1** (FilterAnalyzer port — parity) +
 **v3.22 Sprint F** (RES-internal dead-tail fallback — divergence).
 
@@ -1921,7 +2058,7 @@ might mask the per-bin tracking damage on DT cases. C2.0 gate test
 (5 FS_static worst cases, A only vs A+C2): **9xjhi Δ erle_100 = -0.01 dB**
 (memory predicted +8.42 dB single-case win from 2026-05-18 tracer; no
 longer reproduces on v3.21.5 baseline). Gate fail → close as no-leverage.
-Verdict: [docs/v3_21_5_phase1_c2_per_bin_h_error_refresh_verdict.md](docs/v3_21_5_phase1_c2_per_bin_h_error_refresh_verdict.md).
+Verdict: docs/v3_21_5_phase1_c2_per_bin_h_error_refresh_verdict.md.
 Path stays dormant research code; env hook `AEC_PER_BIN_H_ERROR_REFRESH`
 retained for re-evaluation after v3.21.6 P1/P3 may again shift canonical state.
 
@@ -2002,7 +2139,7 @@ confirmed each counter measures a different physical quantity:
   transients).
 
 Existing values (12 / 50 / 50) kept as empirically-validated cohort
-tuning. Verdict: [docs/v3_21_4_time_domain_audit_verdict.md](docs/v3_21_4_time_domain_audit_verdict.md).
+tuning. Verdict: docs/v3_21_4_time_domain_audit_verdict.md.
 
 #### Companion structural refactor: ms-based time-domain config
 
@@ -2039,7 +2176,7 @@ stabilisers we don't have aligned.
 
 `use_per_bin_h_error_refresh: bool = False` (default OFF restored).
 Substrate code retained as dormant research path for v3.22+.
-Verdict: [docs/v3_21_4_u4a_per_bin_h_error_retest_verdict.md](docs/v3_21_4_u4a_per_bin_h_error_retest_verdict.md).
+Verdict: docs/v3_21_4_u4a_per_bin_h_error_retest_verdict.md.
 
 ### U4.B — B3 `lf_endpoint_hz` intermediate values CLOSED FAIL
 
@@ -2060,7 +2197,7 @@ triggers → DT speech sees less protection.
 
 `lf_endpoint_hz = 500.0` confirmed cohort-empirical sweet spot. B3
 fully closed across all tested intermediate values.
-Verdict: [docs/v3_21_4_u4b_b3_intermediate_verdict.md](docs/v3_21_4_u4b_b3_intermediate_verdict.md).
+Verdict: docs/v3_21_4_u4b_b3_intermediate_verdict.md.
 
 ### ReverbDecayEstimator — CLOSED NOT-PORTING
 
@@ -2075,7 +2212,7 @@ NEVER adapts the decay value: stays at `default_decay=0.85` on all
    too coarse.
 2. Upstream gates (`FilteringQualityAnalyzer` 4-gate AND +
    `StationarityEstimator`) intermittently block.
-3. Codex #2 recreate-on-recovery (v3.21.3) wipes estimator state on
+3. hygiene fix #2 recreate-on-recovery (v3.21.3) wipes estimator state on
    `_reset_filter_derived_state` events.
 4. Even when gates open, regression has too few data points to produce
    stable slope.
@@ -2088,7 +2225,7 @@ across all v3.21.x cycles.
 
 v3.22+ prerequisites for re-attempting port: loosen upstream gates +
 move estimator state to render-side preservation. Verdict:
-[docs/v3_21_4_reverb_decay_audit_verdict.md](docs/v3_21_4_reverb_decay_audit_verdict.md).
+docs/v3_21_4_reverb_decay_audit_verdict.md.
 
 ### 800-case AECMOS
 
@@ -2119,16 +2256,16 @@ production.
 
 ---
 
-## [3.21.3] — 2026-05-20 — Codex hygiene cycle (reset() AEC3 post-state + return_res_context + dead-knob removal)
+## [3.21.3] — 2026-05-20 — source hygiene cycle (reset() AEC3 post-state + return_res_context + dead-knob removal)
 
-**Headline**: 4 hygiene findings from Codex review of v3.21.2, all
+**Headline**: 4 hygiene findings from source audit of v3.21.2, all
 fixed and confirmed correct. Three are pure correctness improvements
 (reset path completeness + documented contract implementation); one
-is dead-code removal. One fix (Codex #2) produces a measurable Pareto
+is dead-code removal. One fix (hygiene fix #2) produces a measurable Pareto
 shift on the 800-case bench — accepted as honest correction of a
 previously-illusory FS_echo advantage.
 
-### Codex #1 (HIGH) — `AEC.reset()` clears AEC3 post-state
+### hygiene fix #1 (HIGH) — `AEC.reset()` clears AEC3 post-state
 
 Pre-fix: `AEC.reset()` body initialised the v3.21 AEC3-aligned
 post-stage fields (`_aec3_state` / `_aec3_ree` / `_aec3_sg` / OLA buf /
@@ -2146,10 +2283,10 @@ Fix:
   zero-filled, counters cleared.
 - `reset()` body invokes `self._reset_aec3_post()` at the end.
 
-Test coverage: 5 new unit tests in [python/test_aec_reset.py](python/test_aec_reset.py),
+Test coverage: 5 new unit tests in [python/tests/test_aec_reset.py](python/tests/test_aec_reset.py),
 all PASS.
 
-### Codex #2 (MED) — `_reset_filter_derived_state()` clears AEC3 post chain
+### hygiene fix #2 (MED) — `_reset_filter_derived_state()` clears AEC3 post chain
 
 Pre-fix: helper cleared the legacy ResFilter post-state (gain_smooth /
 echo_psd / noise_psd / gates) but v3.21.0 retired ResFilter. The
@@ -2169,7 +2306,7 @@ Fix:
 - Invoke `self._reset_aec3_post(preserve_render_side=True)` in the
   helper body.
 
-### Codex #3 (MED) — implement `return_res_context=True` contract
+### hygiene fix #3 (MED) — implement `return_res_context=True` contract
 
 Pre-fix: `AecConfig.return_res_context=True` was documented (CLAUDE.md
 "Diagnostic surfaces") to switch `process()` return type from
@@ -2189,7 +2326,7 @@ on 25-case byte-equal sample.
 
 Test coverage: 2 new unit tests, both PASS.
 
-### Codex #4 (MED) — remove dead legacy delay knobs
+### hygiene fix #4 (MED) — remove dead legacy delay knobs
 
 Two AecConfig fields became silent no-ops when v3.21 replaced the
 legacy DelayEstimator with `LegacyDelayShim` wrapping the AEC3
@@ -2216,18 +2353,18 @@ run_one_case. Byte-equal preserved (removed code was provably dead).
 
 | Bucket | Δecho | Δdeg | Note |
 |---|---:|---:|---|
-| FS_static | **−0.050** | +0.000 | Pareto cost of Codex #2 (was illusion) |
-| FS_movement | **−0.037** | +0.000 | Pareto cost of Codex #2 (was illusion) |
-| DT_static | −0.028 | **+0.025** | Pareto gain of Codex #2 (speech recovered) |
-| DT_movement | −0.032 | **+0.026** | Pareto gain of Codex #2 (speech recovered) |
+| FS_static | **−0.050** | +0.000 | Pareto cost of hygiene fix #2 (was illusion) |
+| FS_movement | **−0.037** | +0.000 | Pareto cost of hygiene fix #2 (was illusion) |
+| DT_static | −0.028 | **+0.025** | Pareto gain of hygiene fix #2 (speech recovered) |
+| DT_movement | −0.032 | **+0.026** | Pareto gain of hygiene fix #2 (speech recovered) |
 | NE | +0.000 | +0.000 | flat |
 
-Mechanism (Pareto attribution): Codex #1 / #3 / #4 are not exercised
-on a fresh-instance-per-case bench so contribute no delta. Codex #2
-is the source. Pre-Codex #2 (buggy): on filter recovery, AEC3 post
+Mechanism (Pareto attribution): hygiene fix #1 / #3 / #4 are not exercised
+on a fresh-instance-per-case bench so contribute no delta. hygiene fix #2
+is the source. Before hygiene fix #2 (buggy): on filter recovery, AEC3 post
 chain held stale ERLE / R² → applied confident-suppression logic to
 noisy untrained-filter output → over-suppressed FS_echo (good metric)
-but also over-suppressed DT speech (bad metric). Post-Codex #2
+but also over-suppressed DT speech (bad metric). After hygiene fix #2
 (correct): post chain resets alongside filter → no fake confidence →
 suppression backs off until filter retrains → less FS_echo gain, more
 DT speech preserved. Pareto shift reveals the bug was extracting
@@ -2245,10 +2382,10 @@ illusory FS_echo at DT_deg cost.
 
 ### Commits
 
-- `81a5103` — Codex #1 AEC.reset() AEC3 post-state.
-- `b2491a8` — Codex #2 _reset_filter_derived_state() AEC3 post chain.
-- `80da109` — Codex #3 return_res_context contract.
-- `fd2cfcd` — Codex #4 dead legacy delay knobs removed.
+- `81a5103` — hygiene fix #1 AEC.reset() AEC3 post-state.
+- `b2491a8` — hygiene fix #2 _reset_filter_derived_state() AEC3 post chain.
+- `80da109` — hygiene fix #3 return_res_context contract.
+- `fd2cfcd` — hygiene fix #4 dead legacy delay knobs removed.
 
 ---
 
@@ -2288,7 +2425,7 @@ auto-scale with `fft_size`:
 
 Smoke-test confirmed all freq defaults reverse-compute to the
 pre-refactor bin values (Phase A is mechanically byte-equal-at-init).
-[P52 regime tests](python/test_p52_regime.py) 18/18 PASS.
+[P52 regime tests](python/tests/test_p52_regime.py) 18/18 PASS.
 
 ### Phase B — flip to AEC3 frequency-canonical (ship candidate)
 
@@ -2327,7 +2464,7 @@ field-trial profile uses 0.02 — within AEC3-documented range, not an
 invention.
 
 Asymmetric Pareto-positive: every bucket non-negative vs Phase B T1.
-See [docs/v3_21_2_u5_fs_recovery_verdict.md](docs/v3_21_2_u5_fs_recovery_verdict.md)
+See docs/v3_21_2_u5_fs_recovery_verdict.md
 for full mechanism + U5.1 (mask_hf.enr_transparent) and U5.2
 (normal_render_limit) closed-no-effect results.
 
@@ -2338,7 +2475,7 @@ for full mechanism + U5.1 (mask_hf.enr_transparent) and U5.2
 `_limit_hf_gains` and all `hz_to_bin()` call sites. Orchestrator passes
 `self.config.sample_rate` at construction. 16 kHz behaviour byte-equal;
 verified sr=48000 now resolves lgb=4000 Hz to bin 43 (vs bin 128 @
-16 kHz). See [docs/v3_21_2_bin_audit_verdict.md](docs/v3_21_2_bin_audit_verdict.md)
+16 kHz). See docs/v3_21_2_bin_audit_verdict.md
 for the broader audit-clean verdict across `filter/`, `state/`, `delay/`,
 `render/`, `epc`, `orchestrator`.
 
@@ -2358,16 +2495,16 @@ but ~5% improved via U5.3 vs unmitigated T1.
 
 ### Audit verdicts
 
-- [docs/v3_21_2_audio_analysis_verdict.md](docs/v3_21_2_audio_analysis_verdict.md) —
+- docs/v3_21_2_audio_analysis_verdict.md —
   U1 quantitative band-energy analysis on 5 worst-deg DT_static cases.
   F2-F3 preservation **+0.48 dB mean** (all 5 cases positive +0.18–+0.91 dB);
   F1 +0.32 dB mean. PASS — the AECMOS deg gain corresponds to real voice
   formant preservation, not a spurious metric move.
-- [docs/v3_21_2_bin_audit_verdict.md](docs/v3_21_2_bin_audit_verdict.md) —
+- docs/v3_21_2_bin_audit_verdict.md —
   U2 exhaustive grep + line-read audit of all `python/modules/` for
   FFT-scale unit-conversion bugs. AUDIT-CLEAN: no other HIGH-severity
   bin-index bugs in production-active code.
-- [docs/v3_21_2_u5_fs_recovery_verdict.md](docs/v3_21_2_u5_fs_recovery_verdict.md) —
+- docs/v3_21_2_u5_fs_recovery_verdict.md —
   U5 sweep verdict + ship-candidate selection.
 
 ### Commits
@@ -2388,7 +2525,7 @@ but ~5% improved via U5.3 vs unmitigated T1.
   AEC3 intended. Direction of fix opposes FS recovery so deferred.
 - **ReverbDecayEstimator partial port** (1/3 of AEC3 size; missing
   `AnalyzeFilter` + `EarlyReverbLengthEstimator` + validation gates).
-- **Codex hygiene findings** (4 items, all verified): `AEC.reset()`
+- **source hygiene findings** (4 items, all verified): `AEC.reset()`
   doesn't clear AEC3 post-state; `_reset_filter_derived_state()`
   docblock stale; `return_res_context=True` dead contract; legacy
   delay knobs (`mov_rate_delay_est_enabled`, `trace_delay_est`) no-op.
@@ -2434,7 +2571,7 @@ substrate) through v3.20 (Phase A.1 delay subsystem + Phase B PBFDKF
 wiring + Phase C residual). v3.21 promotes it from substrate to
 production by retiring ResFilter and the `use_aec3_residual` flag.
 
-Reference comparison: [docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html).
+Reference comparison: docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html.
 
 ### Bench scores (800-case AEC Challenge, BALANCED)
 
@@ -2446,7 +2583,7 @@ Reference comparison: [docs/architecture_v3_10_5_vs_v3_21_vs_aec3.html](docs/arc
 | DT_movement  |  114 |     4.215 |    2.371 | **+0.521** | −0.019 |
 | NE           |  200 |     4.998 |    4.052 | **+0.602** | −0.048 |
 
-Anchor scores at [docs/bench/v3_21_3aadd2d_baseline/](docs/bench/v3_21_3aadd2d_baseline/README.md).
+Anchor scores at docs/bench/v3_21_3aadd2d_baseline/.
 
 ### Cleanup rounds (in order)
 
@@ -2496,7 +2633,7 @@ Shipped substrate retained:
   reference.json`. Must report `=== 25/25 PASS, 0 FAIL ===` before any
   commit that touches Python outside docs.
 - `python/test_f3_1_mic_excess.py` retired with ResFilter (R7).
-- `python/test_p52_regime.py` retained — enforces the
+- `python/tests/test_p52_regime.py` retained — enforces the
   `AcousticRegimeClassifier` anti-loophole contract.
 - `python/diagnose_gcc_phat.py` retired (R8) — research-only.
 
@@ -2538,7 +2675,7 @@ kickoff.
   - Why: enables v3.16 RES refactor consumers (Phase 3 candidates
     v3.16-A force_render OR-in / v3.16-B ENR-path lift) to read the
     signal without per-bench env-flag flipping.
-  - Verdict: [docs/v3_15_arc_t_s1_design_and_verdict.md](docs/v3_15_arc_t_s1_design_and_verdict.md)
+  - Verdict: docs/v3_15_arc_t_s1_design_and_verdict.md
 
 ### Bug fixes shipped
 
@@ -2547,11 +2684,11 @@ kickoff.
   to `AecFilterState` enum vocabulary, not the internal P3f state
   machine — the branch was structurally unreachable. Cleanup removes a
   code-clarity hazard; behaviour byte-equal on production paths.
-  - Verdict: [docs/v3_15_b4_verdict.md](docs/v3_15_b4_verdict.md)
+  - Verdict: docs/v3_15_b4_verdict.md
 - **§1.0.S2 B5** (`bb9076f`): `_shadow_copy_err_baseline` doc aligned
   with actual implementation as RESERVED (declared but not wired —
   future arc scope). Doc-only change.
-  - Verdict: [docs/v3_15_b5_verdict.md](docs/v3_15_b5_verdict.md)
+  - Verdict: docs/v3_15_b5_verdict.md
 - **§10.S0c B9** (`1323f92`): bench tooling `--workers` CLI flag +
   per-scenario chunk-split (`n_chunks = workers // 3`); 800-case bench
   ~2× speedup over hardcoded `max_workers=3`. Byte-equal sanity 120/120
@@ -2567,18 +2704,18 @@ kickoff.
   override candidates (full + per-bin only). Both fail FS Δecho bars
   3.8–10× over. Same family as v3.13 E5: filter-protection mechanism is
   trade-off-bound. Substrate `dt_ne_compression_fix=False` retained.
-  - Verdict: [docs/v3_15_dt_ne_compression_fix_closure.md](docs/v3_15_dt_ne_compression_fix_closure.md)
+  - Verdict: docs/v3_15_dt_ne_compression_fix_closure.md
 - **§1.4 Arc M V1+V2** (`92f264b`): EPC-gated per-band Kalman Q boost.
   V1 (0.5/1.0/2.0) FS_movement −0.027; V2 (0.7/1.0/1.5) cohort tail
   −0.053. EPC ⊃ cohort tail catastrophe windows — boosting Q during
   EPC-active windows boosts Q during catastrophe windows. Substrate
   `arc_m_epc_gated` retained.
-  - Verdict: [docs/v3_15_arc_m_closure.md](docs/v3_15_arc_m_closure.md)
+  - Verdict: docs/v3_15_arc_m_closure.md
 - **§1.4 Arc G** (`acd2f2d`): per-band W reset on detected gain-change
   drift. ERLE Δ=−1.48 dB / 0/5 audible improvement on listen cohort.
   Destructive zero-out; v3.16 candidate C8 considers non-destructive
   partial decay. Substrate `arc_g_per_band_w_reset` retained.
-  - Verdict: [docs/v3_15_arc_g_closure.md](docs/v3_15_arc_g_closure.md)
+  - Verdict: docs/v3_15_arc_g_closure.md
 - **§1.5 Arc T S2 RES preempt wiring** (`3d77486`): two independent
   no-op bugs proven by single-case smoke test on `qNvSMyU` (output
   bit-equal ON vs OFF):
@@ -2588,7 +2725,7 @@ kickoff.
       by `_residual_est.compute_residual_echo()` state machine.
   Substrate `arc_t_res_preempt_mode` retained for code symmetry; v3.16
   candidates v3.16-A / v3.16-B fix the integration patterns.
-  - Verdict: [docs/v3_15_arc_t_s2_wiring_closure.md](docs/v3_15_arc_t_s2_wiring_closure.md)
+  - Verdict: docs/v3_15_arc_t_s2_wiring_closure.md
 - **§1.5b Arc M.v3 T-gated rescue** (`03e311b`): wraps 5 `_arc_m_q_boost`
   call sites with `(arc_m_t_gated_enabled AND _arc_t_cohort_tail_signal)`
   gate. Subset 60-case bench: V1 ΔERLE_lin == M.v3 ΔERLE_lin in EVERY
@@ -2602,12 +2739,12 @@ kickoff.
   Substrate `arc_m_t_gated_enabled` retained. v3.16 candidate C7
   documents 3 retry options (α predictive signal / β post-assertion
   hysteresis / γ per-filter dispatch).
-  - Verdict: [docs/v3_15_arc_m_v3_closure.md](docs/v3_15_arc_m_v3_closure.md)
+  - Verdict: docs/v3_15_arc_m_v3_closure.md
 - **§1.6 Arc F per-band Kalman Q schedule** (`415e8ec`): cohort tail
   damage. Substrate `kalman_q_per_band` + `kalman_q_band_scales`
   retained — paired with Arc M V1 substrate (V1 reproduction needs
   THREE flags atomically).
-  - Verdict: [docs/v3_15_arc_f_closure.md](docs/v3_15_arc_f_closure.md)
+  - Verdict: docs/v3_15_arc_f_closure.md
 
 ### Audited but produced no actionable work
 
@@ -2623,7 +2760,7 @@ kickoff.
     all in `doubletalk/` scenario (40 DT_static + 20 DT_movement);
     0 FS / 0 NE / 0 cohort_tail. 800-case re-audit at v3.16 phase
     entry mandatory.
-  - Audit + plan: [docs/v3_15_res_audit_and_refactor_plan.md](docs/v3_15_res_audit_and_refactor_plan.md)
+  - Audit + plan: docs/v3_15_res_audit_and_refactor_plan.md
 
 ### v3.16 candidate plan (13 candidates, 5 phases, 21–30 sprints)
 
@@ -2651,8 +2788,8 @@ estimates change.
 
 ### References
 
-- Top-level closeout: [docs/v3_15_closeout_verdict_pack.md](docs/v3_15_closeout_verdict_pack.md)
-- v3.16 plan: [docs/v3_15_res_audit_and_refactor_plan.md](docs/v3_15_res_audit_and_refactor_plan.md)
+- Top-level closeout: docs/v3_15_closeout_verdict_pack.md
+- v3.16 plan: docs/v3_15_res_audit_and_refactor_plan.md
 - All v3.15 closure / verdict docs: [docs/v3_15_*.md](docs/)
 
 ---
@@ -2675,7 +2812,7 @@ policy) substrate shipped on `feature/v3.14-arc-d` but not merged
   `error_psd / far_lw` (Option B source signal). Replaces scalar
   `erl_estimate=0.3` (7× over-estimate in low-coupling rooms) with
   3-band LF/MF/HF EMA (α=0.99). Flag `f3_1_per_band_erl_adaptive=True`.
-  - Verdict: [docs/v3_14_p_s3_verdict.md](docs/v3_14_p_s3_verdict.md)
+  - Verdict: docs/v3_14_p_s3_verdict.md
 - **Arc R R.S2** (`5e3e96b`): per-band ENR thresholds with `block_lf`
   tilt (raise LF, lower HF). DT bucket +0.007 dB mean Δdeg on
   800-case; FS regression within −0.02 bar. 7-case xrtntuju listen
@@ -2684,7 +2821,7 @@ policy) substrate shipped on `feature/v3.14-arc-d` but not merged
   `res_per_band_enr=True`. R.S2.1 admit_hf control later confirmed
   block_lf winner direction; FS_static intrinsic cost is per-band ENR
   mechanism overhead, not direction-dependent.
-  - Verdict: [docs/v3_14_r_s2_verdict.md](docs/v3_14_r_s2_verdict.md)
+  - Verdict: docs/v3_14_r_s2_verdict.md
 - **Arc S-orth.A** (`8089974` + `f08ddbf`): decouple shadow's Kalman
   `_error_psd` + `R` from main's. 800-case GREEN PASS — all 5 buckets
   within bar; cohort tail `qNvSMyU` Δecho +0.0036; state correlation
@@ -2692,7 +2829,7 @@ policy) substrate shipped on `feature/v3.14-arc-d` but not merged
   Includes Option B quiescent re-sync safety regularization (10% blend
   toward main when 3× drift in steady FS). Flag
   `shadow_state_decoupled=True`.
-  - Verdict: [docs/v3_14_s_orth_a_s2_verdict.md](docs/v3_14_s_orth_a_s2_verdict.md)
+  - Verdict: docs/v3_14_s_orth_a_s2_verdict.md
 - **Housekeeping B1 + B2** (`5fbceb0`): `PBFDKF.reset()` cleanup
   (unconditional `delattr` of `_p_max_override_frames`); `AecStats`
   `filter_state` enum/string contract aligned at API boundary.
@@ -2707,9 +2844,9 @@ policy) substrate shipped on `feature/v3.14-arc-d` but not merged
   saturation = bounded NL residual floor (model mismatch), NOT
   impulsive gradient spike. Same physics wall as v3.13 E4/E5
   amplitude-domain closures. Substrate
-  [`tools/research/v3_14_h_s1_huber_proto.py`](tools/research/v3_14_h_s1_huber_proto.py)
+  `tools/research/v3_14_h_s1_huber_proto.py`
   preserved.
-  - Verdict: [docs/v3_14_h_s1_verdict.md](docs/v3_14_h_s1_verdict.md)
+  - Verdict: docs/v3_14_h_s1_verdict.md
 
 ### Substrate shipped but not merged to BALANCED
 
@@ -2726,7 +2863,7 @@ policy) substrate shipped on `feature/v3.14-arc-d` but not merged
   FS outliers (`0KjzXA3g…` FS_static Δecho −1.557; `KSN5Jrzo…`
   FS_movement Δecho −0.704). NOT promoted; substrate retained for
   potential v3.15 / v3.16 S-orth.B.S3 retry.
-  - Verdict: [docs/v3_14_s_orth_b_s2_verdict.md](docs/v3_14_s_orth_b_s2_verdict.md)
+  - Verdict: docs/v3_14_s_orth_b_s2_verdict.md
 
 ### Volterra arc (research substrate, not what shipped as v3.14)
 
@@ -2740,8 +2877,8 @@ required if reopened).
 
 ### References
 
-- Per-version evolution: [docs/aec_v3_evolution.md](docs/aec_v3_evolution.md) §v3.14
-- v3.14 plan archive: [docs/v3_14_plan.md](docs/v3_14_plan.md) (if preserved)
+- Per-version evolution: docs/aec_v3_evolution.md §v3.14
+- v3.14 plan archive: docs/v3_14_plan.md (if preserved)
 
 ---
 
@@ -2768,7 +2905,7 @@ surface. v3.14 Volterra design lock opens as the canonical breakthrough path.
   - Listen: xrtntuju 5-clip DT regression 0 reg / 2 imp; cohort tail
     (qNvSMyU FS_static) Δecho −0.004 (within bar).
   - Trade-off deferred to v3.14+ per-state ENR refactor.
-  - Verdict: [docs/v3_13_e2_s5_verdict.md](docs/v3_13_e2_s5_verdict.md)
+  - Verdict: docs/v3_13_e2_s5_verdict.md
 
 ### Closed CANNOT SHIP (no production change; default-OFF substrate retained)
 
@@ -2782,8 +2919,8 @@ surface. v3.14 Volterra design lock opens as the canonical breakthrough path.
   transients — unreachable by any amplitude mask family.
   - Detector preserved as default-OFF (`e4_nlp_enabled`); reused in v3.14
     as NL-frame identifier component of ensemble.
-  - Verdict: [docs/v3_13_e4_s6_verdict.md](docs/v3_13_e4_s6_verdict.md) +
-    [docs/v3_13_e4_s6a_s6b_verdict.md](docs/v3_13_e4_s6a_s6b_verdict.md)
+  - Verdict: docs/v3_13_e4_s6_verdict.md +
+    docs/v3_13_e4_s6a_s6b_verdict.md
 
 - **E5 Saturation deepening arc** (`c871a5d`): 4 sub-variants (S2/S3/S4a/S4b).
   All on FS-vs-DT trade-off line, slope ~0.5 dB DT loss per +1 dB FS gain.
@@ -2791,7 +2928,7 @@ surface. v3.14 Volterra design lock opens as the canonical breakthrough path.
   detector cannot distinguish FS-NL frames from DT high-echo frames — same
   correlation signature in [0.7, 0.95] mic-peak band fires on both.
   - Detector (E5.S3 mic-lpb correlation gate) preserved; reused in v3.14.
-  - Verdict: [docs/v3_13_e5_closure_verdict.md](docs/v3_13_e5_closure_verdict.md)
+  - Verdict: docs/v3_13_e5_closure_verdict.md
 
 ### Audited but produced no actionable work
 
@@ -2807,7 +2944,7 @@ surface. v3.14 Volterra design lock opens as the canonical breakthrough path.
     expected AECMOS delta ~ 0 (consistent with v3.12 5-NEUTRAL closure).
   - S6–S7 (canonical refactor) deprioritized; S8–S9 (4-cap audit + per-state
     ENR) deferred to v3.14+.
-  - Verdict: [docs/v3_13_phase3_res_audit_verdict.md](docs/v3_13_phase3_res_audit_verdict.md)
+  - Verdict: docs/v3_13_phase3_res_audit_verdict.md
 
 ### v3.14 candidate items (deferred)
 
@@ -2820,8 +2957,8 @@ surface. v3.14 Volterra design lock opens as the canonical breakthrough path.
 
 ### References
 
-- Top-level closure: [docs/v3_13_arc_closure.md](docs/v3_13_arc_closure.md)
-- v3.14 design lock: [docs/v3_14_volterra_design_lock.md](docs/v3_14_volterra_design_lock.md)
+- Top-level closure: docs/v3_13_arc_closure.md
+- v3.14 design lock: docs/v3_14_volterra_design_lock.md
 
 ---
 
@@ -2838,12 +2975,12 @@ the v3.13 plan.
 - Q3 / Q6 / Q7 RES architectural hypotheses fully falsified by 5-NEUTRAL +
   listen.
 - v3.11.x retained as production ceiling.
-- Verdict: [docs/v3_12_s6_s11_stage1_locked.md](docs/v3_12_s6_s11_stage1_locked.md)
+- Verdict: docs/v3_12_s6_s11_stage1_locked.md
 
 ### Sprints
 
 - S6 / S6b: nearend_floor refinement variants — NEUTRAL.
-- S7: dt_per_bin unified (third Q7 V3 carrier) — NEUTRAL ([docs/v3_12_s7_verdict.md](docs/v3_12_s7_verdict.md)).
+- S7: dt_per_bin unified (third Q7 V3 carrier) — NEUTRAL (docs/v3_12_s7_verdict.md).
 - S8: noise_floor_psd dominant carrier diagnostic.
 - S9: noise_floor_refine triple-trial null.
 - S10: res_noise_floor_refined NEUTRAL ([docs/v3_12_s10_*.md](docs/)).
@@ -2864,7 +3001,7 @@ the v3.13 plan.
 
 ### References
 
-- Phase 1 final review: [docs/v3_11_phase1_final_review.md](docs/v3_11_phase1_final_review.md)
+- Phase 1 final review: docs/v3_11_phase1_final_review.md
 
 ---
 
@@ -2880,7 +3017,7 @@ the v3.13 plan.
 ### References
 
 - B6 listen verdict: [docs/v3_11_phase1_b6_listen_verdict.md](docs/) (see
-  [Phase 1 final review](docs/v3_11_phase1_final_review.md))
+  Phase 1 final review)
 
 ---
 
@@ -2907,9 +3044,9 @@ the v3.13 plan.
 
 ### References
 
-- [docs/v3_11_phase1_final_review.md](docs/v3_11_phase1_final_review.md)
-- F2.3 R-reset verdict: [docs/f2_3_verdict.md](docs/f2_3_verdict.md)
-- F2.4 mu holdoff verdict: [docs/f2_4_verdict.md](docs/f2_4_verdict.md)
+- docs/v3_11_phase1_final_review.md
+- F2.3 R-reset verdict: docs/f2_3_verdict.md
+- F2.4 mu holdoff verdict: docs/f2_4_verdict.md
 
 ---
 
@@ -2926,9 +3063,9 @@ the v3.13 plan.
 
 ### References
 
-- Plan closure: [project_plan_hazy_lynx_closure.md](memory/project_plan_hazy_lynx_closure.md)
+- Plan closure: project_plan_hazy_lynx_closure.md
   (memory)
-- F3.1 / F2.1 verdicts: [project_f3_1_f2_1_results.md](memory/project_f3_1_f2_1_results.md)
+- F3.1 / F2.1 verdicts: project_f3_1_f2_1_results.md
   (memory)
 
 ---
@@ -2974,7 +3111,7 @@ cases; xrtntuju 5-clip 0 reg / 2 imp).
 ## Earlier history
 
 For v3.10.4 and earlier (v3.7 → v3.10.4), see canonical research log
-[docs/SUMMARY.md](docs/SUMMARY.md). v3.7.1 is the most recent git tag
+docs/SUMMARY.md. v3.7.1 is the most recent git tag
 prior to v3.13.0; tags between v3.7.1 and v3.13.0 are P52/P53 milestone
 tags rather than product versions:
 

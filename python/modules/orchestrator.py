@@ -641,11 +641,21 @@ class AEC:
 
         # Filter convergence + divergence-indicator (extracted to FilterConvergenceAnalyzer).
         # Backward-compat reads via @property below.
-        self._convergence = FilterConvergenceAnalyzer()
+        self._convergence = FilterConvergenceAnalyzer(
+            self.config.hop_size, self.config.sample_rate)
         # EPC render-forced countdown (Change D)
         self._epc_render_forced_remaining = 0
         # Dynamic ERL estimate for render-based echo (B4)
         self._erl_estimate = 0.1  # initial -20dB, conservative
+        # ERL tracker per-hop retention EMAs, authored at the legacy
+        # hop=160/16000 (10 ms) grid (commit 5407e71, whose config header
+        # annotates hop_size as '10ms'). Both the primary site and the
+        # nores C2-parity site read these, so they cannot drift apart.
+        from . import aec3_scale as _aec3s
+        self._alpha_erl_tracking = _aec3s.growth_rehop(
+            0.99, 160, 16000, self.config.hop_size, self.config.sample_rate)
+        self._alpha_erl_converged = _aec3s.growth_rehop(
+            0.999, 160, 16000, self.config.hop_size, self.config.sample_rate)
         # Per-band ERL EMA broadcast to filter._erl_per_bin. Stays at
         # uniform 0.1 (the Arc G EMA update that would mutate this lived
         # in the post-filter loop that was retired with ResFilter).
@@ -735,17 +745,8 @@ class AEC:
             'copy_err_baseline': 1e-6,  # copy gate error baseline
         }
 
-        # Output limiter: smoothed gain to avoid frame-boundary clicking
-        self._limiter_gain = 1.0
-        # When routing through the AEC3 chain, `_aec3_post` output is
-        # OLA-lagged by 1 hop, so comparing same-frame near_peak to
-        # out_peak miscalibrates the limiter (it fires on speech-silence
-        # transitions where loud OLA reconstruction lands in a quiet hop).
-        # Buffer one hop of mic so the limiter compares against the SOURCE
-        # frame for `final_output`, not the current frame. Sized lazily.
-        self._limiter_near_lag = None
-        # Pre-limiter linear output, captured only when
-        # config.return_formed_output is set -- see get_formed_output().
+        # Shadow/main-selected, crossfaded, WOLA-formed linear output. This is
+        # distinct from the raw main-filter output returned by process().
         self._formed_output = None
 
         # High-pass filter (DC blocker + low-freq removal)
@@ -758,15 +759,20 @@ class AEC:
 
         # Saturation detector (non-linear echo handling)
         if self.config.enable_saturation_detect:
-            self._sat_detector_ref = SaturationDetector(self.config.saturation_threshold)
-            self._sat_detector_mic = SaturationDetector(self.config.saturation_threshold)
+            self._sat_detector_ref = SaturationDetector(
+                self.config.saturation_threshold,
+                self.config.hop_size, self.config.sample_rate)
+            self._sat_detector_mic = SaturationDetector(
+                self.config.saturation_threshold,
+                self.config.hop_size, self.config.sample_rate)
         else:
             self._sat_detector_ref = None
             self._sat_detector_mic = None
         self._saturation_level = 0.0
 
         # Far-end activity + stationarity detector (extracted from inline EMA logic)
-        self._render_activity = RenderActivityDetector()
+        self._render_activity = RenderActivityDetector(
+            self.config.hop_size, self.config.sample_rate)
         self._wn_err_baseline = 1e-8
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
 
@@ -825,7 +831,12 @@ class AEC:
         self.near_power = 0.0
         self.error_power = 0.0  # backward compat alias for raw
         self.raw_error_power = 0.0
-        self.alpha = 0.95
+        # Per-SAMPLE ERLE power EMA (applied once per sample in the loop
+        # below, not once per hop), so it is retimed off the SAMPLE RATE
+        # and is hop-invariant: alpha^(16000/sr). Using the hop-based
+        # growth_rehop() here would be wrong. Authored at sr=16000; at
+        # 48 kHz the unretimed value would track 3x too fast.
+        self.alpha = 0.95 ** (16000.0 / self.config.sample_rate)
         # Cumulative ERLE (full-segment average)
         self.near_power_sum = 0.0
         self.error_power_sum = 0.0  # backward compat alias for raw
@@ -945,8 +956,6 @@ class AEC:
         self._inst_erle_smooth = 1.0
         self._wn_err_baseline = 1e-8
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
-        self._limiter_gain = 1.0
-        self._limiter_near_lag = None
         self._formed_output = None
         self._per_bin_mu_scale = None
         # Reset DT signals (now owned by DoubleTalkAnalyzer)
@@ -1228,7 +1237,6 @@ class AEC:
         self._coarse_reset_hangover = 0
         self._leakage_div_sustained_counter = 0
         self._block_stationary_for_next_hop = False
-        self._limiter_near_lag = None
 
         # Clear AEC3 post chain (filter-output-derived); preserve
         # render-side stationarity tracker per the input-side rule.
@@ -2158,7 +2166,9 @@ class AEC:
                     # so skip update.
                     if raw_dt_ratio < 2.0 and inst_erl_raw < 1.5:
                         inst_erl = np.clip(inst_erl_raw, erl_clip_lo, 1.0)
-                        alpha_erl = 0.99 if not self._filter_converged else 0.999
+                        alpha_erl = (self._alpha_erl_converged
+                                     if self._filter_converged
+                                     else self._alpha_erl_tracking)
                         self._erl_estimate = float(alpha_erl * self._erl_estimate + (1 - alpha_erl) * inst_erl)
 
                 # Pre-filter DT signal (Stage B): mic energy excess over
@@ -2375,7 +2385,11 @@ class AEC:
                     _c2_erl_raw = _c2_mic_pwr / _c2_far_pwr
                     if _c2_dt_ratio < 2.0 and _c2_erl_raw < 1.5:
                         _c2_inst_erl = float(np.clip(_c2_erl_raw, 0.001, 1.0))
-                        _c2_alpha = 0.99 if not self._filter_converged else 0.999
+                        # Same pair as the primary site above; both must be
+                        # retimed together or the nores path diverges.
+                        _c2_alpha = (self._alpha_erl_converged
+                                     if self._filter_converged
+                                     else self._alpha_erl_tracking)
                         self._erl_estimate = (_c2_alpha * self._erl_estimate
                                                + (1.0 - _c2_alpha) * _c2_inst_erl)
                 self._dt_analyzer.update_energy_dt(
@@ -2610,32 +2624,8 @@ class AEC:
             final_output = raw_output.copy()
             self._update_simple_mu_ratio(raw_output, far_end)
 
-        # Output limiter: final_output should never exceed mic amplitude.
-        # Uses smoothed gain to avoid frame-boundary clicking artifacts.
-        # When enable_res=True, `_aec3_post` OLA introduces a 1-hop delay so
-        # final_output corresponds to the PREVIOUS mic frame; compare against the
-        # lagged mic to avoid false onset suppression.
-        # When enable_res=False, _aec3_post is skipped (or early-returns raw_output)
-        # so final_output IS the current hop — use near_end directly.
-        if self._limiter_near_lag is None:
-            self._limiter_near_lag = np.zeros_like(near_end)
-        if self.config.enable_res:
-            near_for_limiter = self._limiter_near_lag
-        else:
-            near_for_limiter = near_end
-        self._limiter_near_lag = near_end.copy()
-        near_peak = np.max(np.abs(near_for_limiter))
-        out_peak = np.max(np.abs(final_output))
-        if out_peak > near_peak > 1e-6:
-            target_gain = near_peak / out_peak
-        else:
-            target_gain = 1.0
-        if target_gain < self._limiter_gain:
-            alpha_lim = 0.3   # attack: compress quickly
-        else:
-            alpha_lim = 0.8   # release: recover moderately
-        self._limiter_gain = alpha_lim * self._limiter_gain + (1 - alpha_lim) * target_gain
-        final_output *= self._limiter_gain
+        # AEC does not apply an output limiter. Product-level peak control
+        # belongs after AEC/NR/beamforming in an AGC, DRC or output stage.
 
         # ERLE: track raw (filter-only). Final (post-RES) tracking retired
         # in cleanup audit — final_error_power / _sum were write-only.
@@ -2810,9 +2800,10 @@ class AEC:
         return self._diag.copy()
 
     def get_formed_output(self) -> np.ndarray:
-        """Return the pre-limiter linear output from the most recent
-        process() call. Requires config.return_formed_output=True; raises
-        if that wasn't set or process() hasn't run yet."""
+        """Return the selected, crossfaded, WOLA-formed linear output.
+
+        Requires ``return_formed_output=True`` and one completed process call.
+        """
         if not self.config.return_formed_output:
             raise ValueError(
                 "get_formed_output() requires config.return_formed_output=True"

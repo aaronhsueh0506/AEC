@@ -153,7 +153,7 @@ static void fill_complex(Complex *a, int n) {
  * first `sk_dec1_floor0_s32` (decrement only while >0, floored at 0), later
  * corrected to today's `sk_dec1_floorintmin_s32` (decrement only while
  * >INT_MIN, floored at INT_MIN -- the floor-at-0 form was found to desync
- * test/parity_erl_estimator.c's bit-exact golden, see that kernel's header
+ * test/historical/parity_erl_estimator.c's bit-exact golden, see that kernel's header
  * comment in aec_simd_kernels.h for the full argument). Under EITHER fixed
  * contract INT32_MIN is perfectly safe as an input (it's <=0 and also
  * ==INT_MIN, so both kernels leave it unchanged, never subtract from it) --
@@ -416,7 +416,7 @@ static void check_ints_or_die(const char *kernel, int n, int trial,
     }
 }
 
-/* ═══════════════ NaN classification gate (re-review R07) ══════════════════
+/* ═════════════════════ NaN classification gate ════════════════════════════
  * Upgrades the "every other kernel" NaN sweep from a report-only tally into
  * a real pass/fail gate. For every scalar-vs-NEON element compared, sorts
  * the outcome into exactly one of three buckets:
@@ -571,7 +571,7 @@ static void check_mask_classify(const char *kernel, int n, int idx,
 
 static void print_classification_summary(void) {
     int i;
-    printf("\n--- NaN classification gate summary (re-review R07) ---\n");
+    printf("\n--- NaN classification gate summary ---\n");
     printf("%-42s %10s %10s %10s\n", "kernel", "bitexact", "both-nan", "FAIL");
     for (i = 0; i < g_tally_count; ++i) {
         printf("%-42s %10ld %10ld %10ld\n",
@@ -2520,7 +2520,7 @@ static void test_ema_cmag2_nan(void) {
  * Not part of the original F10 fix's own regression gate -- these kernels
  * don't use sk__cabs_np_neon4 and were audited to already avoid
  * vmaxq_f32/vminq_f32/vabsq_f32 (see header). Run per the review's "every
- * kernel in this file" instruction; check_bits_classify() (re-review R07)
+ * kernel in this file" instruction; check_bits_classify()
  * sorts each divergence into bit-exact / both-NaN (in contract) / HARD FAIL,
  * and a HARD FAIL here now actually fails the build (see main()) instead of
  * only being printed for a human to notice. */
@@ -3086,7 +3086,7 @@ int main(void) {
     test_dec1_floorintmin_s32();
     test_erl_hold_expire();
 
-    printf("\n--- NaN corpus (review F10) ---\n");
+    printf("\n--- NaN corpus ---\n");
     test_cabs_np_nan();
     test_cmag2_np_nan();
     test_cmag2_np_acc_nan();

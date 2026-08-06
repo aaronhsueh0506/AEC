@@ -67,7 +67,7 @@ static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
      * re-entering the tilt-arithmetic branch forever with a frozen input
      * instead of settling on the constant `alpha` AEC3 intends once
      * warmup completes. Not read bit-exact by any parity harness
-     * (test/parity_stationarity_estimator.c never reads block_counter),
+     * (test/historical/parity_stationarity_estimator.c never reads block_counter),
      * so there's no golden-drift constraint either way -- INT_MAX is
      * simply the boundary-only fix that's trivially safe to prove
      * correct: it's a no-op for every practically-reachable block count

@@ -3,7 +3,7 @@
  * (mirrors test_config_validation.c / test_static_aec.c's own header
  * recipe). It is wired to the `make test-rate-structural` target.
  *
- * Nine checks, run at each of the four whitelisted grids
+ * Ten checks, run at each of the four whitelisted grids
  * (8000/256, 16000/256, 16000/512, 48000/1024):
  *
  *   (a) COLA: the rate's own synthesis window (Aec3BalancedRateDims::
@@ -60,6 +60,19 @@
  *       post-defaults grid-override path that forced retiming to live in
  *       aec_carve() rather than aec_config_defaults() (see aec.c's
  *       aec_legacy10ms_hops()/aec_legacy10ms_alpha() doc comment).
+ *
+ *   (d2) adaptation-constant retiming (2026-08-06 batch): the same property
+ *       for the five constants that live in the ADAPTATION path rather than
+ *       in AecConfig -- Aec::alpha_pow (per-SAMPLE), alpha_erl_tracking/
+ *       alpha_erl_converged, PBFDAF::alpha_power (main AND shadow),
+ *       PBFDKF::alpha_r, and Saturation::alpha_attack/alpha_release. (d)
+ *       missed them because they are assigned in aec_carve()/pbfdkf_init()/
+ *       saturation_init(), not read out of the config struct. This is the C
+ *       mirror of python/tests/test_detector_timing_effective_values.py and
+ *       exists so the C/Python agreement is a REGRESSION GATE rather than a
+ *       one-off manual comparison. Includes both halves of the negative space:
+ *       the 16 ms-authored constants must NOT move on a 16 ms grid, and the
+ *       10 ms/per-sample ones MUST move where the grids differ.
  *
  *   (e) external RES/NR seam WOLA identity: with internal RES disabled and
  *       return_res_context enabled, reconstruct ctx.error_spec with the
@@ -923,6 +936,182 @@ static void test_top_level_constant_retiming(void) {
     }
 }
 
+/* ── (d2) adaptation-constant retiming (2026-08-06 batch) ───────────────
+ * The C mirror of python/tests/test_detector_timing_effective_values.py.
+ *
+ * (d) above covers the constants that live in AecConfig/EpcDetector. This
+ * covers the five that live in the ADAPTATION path -- Aec's own EMAs, the
+ * PBFDAF/PBFDKF filter EMAs and the saturation detector's attack/release --
+ * which the earlier pass missed because they are set in aec_carve()/
+ * pbfdkf_init()/saturation_init() rather than read out of the config struct.
+ *
+ * This asserts the value each instance ACTUALLY ENDS UP WITH at every grid,
+ * not that a retiming call appears in the source. That distinction is the
+ * reason the file exists: an external reviewer read the sources and concluded
+ * the retiming had never been applied, because three of the seven values are
+ * legitimately IDENTICAL to their authored literal on two of the four grids.
+ * Only an effective-value assertion separates "retimed" from "not retimed".
+ *
+ * The reference grids are NOT uniform, verified per constant from git
+ * provenance -- retiming a 16 ms constant off the 10 ms reference is wrong by
+ * exactly 1.6x, which is inside no sane tolerance but is invisible if you only
+ * ever sample the 16 ms grids:
+ *   alpha_pow                  per-SAMPLE, authored at sr=16000
+ *   alpha_erl_{tracking,conv}  per-hop, 10 ms   (5407e71)
+ *   alpha_power (PBFDAF)       per-hop, 10 ms   (235d3ec era)
+ *   alpha_r     (PBFDKF)       per-hop, 16 ms   (e9cb383, frame 512/hop 256)
+ *   saturation attack/release  per-hop, 16 ms   (243d67c, frame 512/hop 256)
+ *
+ * Targets are the wall-clock TC each retention covers on its OWN reference
+ * grid, so a correct retiming reproduces the same number at every rate. */
+static void check_moved(const char *label, int sr, int fft,
+                        double actual, double authored) {
+    char what[192];
+    snprintf(what, sizeof(what),
+             "sr=%d fft=%d: %s = %.9f actually moved off authored %.9f",
+             sr, fft, label, actual, authored);
+    CHECK(fabs(actual - authored) > 1e-6, what);
+}
+
+static void check_identity(const char *label, int sr, int fft,
+                           double actual, double authored) {
+    char what[192];
+    snprintf(what, sizeof(what),
+             "sr=%d fft=%d: %s = %.9f stays authored %.9f (already on its own "
+             "reference grid)", sr, fft, label, actual, authored);
+    CHECK(fabs(actual - authored) <= 1e-6, what);
+}
+
+static void test_adaptation_constant_retiming(void) {
+    /* growth_rehop is continuous (no integer-hop rounding), so the only error
+     * here is float32 representation of the retention -- worst case ~4e-5
+     * relative at alpha_erl_converged, where the retention is nearest 1. */
+    const double ALPHA_TOL = 0.01;
+
+    for (int r = 0; r < N_GRIDS; ++r) {
+        int sr = GRIDS[r].sample_rate;
+        int fft = GRIDS[r].fft_size;
+
+        AecConfig cfg;
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        cfg.fft_size = fft;             /* post-defaults override; see (d) */
+        cfg.enable_shadow = 1;          /* shadow_filter carries its own
+                                         * alpha_power off the same reference */
+        cfg.enable_saturation = 1;      /* else sat_mic/sat_ref are never
+                                         * initialized and would read as zero */
+
+        Aec aec;
+        char what[160];
+        int rc = aec_create(&aec, &cfg);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: aec_create() for adaptation retiming test", sr, fft);
+        CHECK(rc == 0, what);
+        if (rc != 0) continue;
+
+        int hop = aec_hop_size(&aec);
+        double hop_s = (double)hop / sr;
+
+        /* Per-SAMPLE constant: its TC is one SAMPLE period over ln(alpha), not
+         * one hop period. Feeding hop_s here would "pass" at 16k/256 by
+         * coincidence and be wrong everywhere else. */
+        double tc_alpha_pow =
+            -(1.0 / sr) / log((double)aec.alpha_pow) * 1000.0;
+        check_close("alpha_pow (per-sample TC)", sr, fft, tc_alpha_pow,
+                    1.218483, ALPHA_TOL);
+
+        /* Per-hop, 10 ms reference. */
+        check_close("alpha_erl_tracking (TC)", sr, fft,
+                    -hop_s / log((double)aec.alpha_erl_tracking) * 1000.0,
+                    994.991625, ALPHA_TOL);
+        check_close("alpha_erl_converged (TC)", sr, fft,
+                    -hop_s / log((double)aec.alpha_erl_converged) * 1000.0,
+                    9994.999166, ALPHA_TOL);
+        check_close("main_filter alpha_power (TC)", sr, fft,
+                    -hop_s / log((double)aec.main_filter.base.alpha_power) * 1000.0,
+                    94.912216, ALPHA_TOL);
+        snprintf(what, sizeof(what), "sr=%d fft=%d: shadow filter present", sr, fft);
+        CHECK(aec.has_shadow, what);
+        if (aec.has_shadow) {
+            /* The shadow is a bare PBFDAF constructed through a different call
+             * site than the main filter's PBFDKF. Checking only the main one
+             * would miss a retime applied to just one of the two. */
+            check_close("shadow_filter alpha_power (TC)", sr, fft,
+                        -hop_s / log((double)aec.shadow_filter.alpha_power) * 1000.0,
+                        94.912216, ALPHA_TOL);
+        }
+
+        /* Per-hop, 16 ms reference. */
+        check_close("alpha_r (TC)", sr, fft,
+                    -hop_s / log((double)aec.main_filter.alpha_r) * 1000.0,
+                    311.931612, ALPHA_TOL);
+        check_close("saturation alpha_attack (TC)", sr, fft,
+                    -hop_s / log((double)aec.sat_mic.alpha_attack) * 1000.0,
+                    13.289337, ALPHA_TOL);
+        check_close("saturation alpha_release (TC)", sr, fft,
+                    -hop_s / log((double)aec.sat_mic.alpha_release) * 1000.0,
+                    791.973063, ALPHA_TOL);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: sat_ref retimed identically to sat_mic", sr, fft);
+        CHECK(aec.sat_ref.alpha_attack == aec.sat_mic.alpha_attack &&
+              aec.sat_ref.alpha_release == aec.sat_mic.alpha_release, what);
+
+        /* Negative space, half 1 -- the 16 ms family MUST NOT move on a 16 ms
+         * grid (8000/256 and 16000/512 both have a 16.000 ms hop). A reviewer
+         * seeing these unchanged is looking at correct behaviour, and retiming
+         * them off the 10 ms reference by mistake would move them HERE. */
+        if (hop * 1000 == 16 * sr) {
+            check_identity("alpha_r", sr, fft, aec.main_filter.alpha_r, 0.95);
+            check_identity("saturation alpha_attack", sr, fft,
+                           aec.sat_mic.alpha_attack, 0.3);
+            check_identity("saturation alpha_release", sr, fft,
+                           aec.sat_mic.alpha_release, 0.98);
+        }
+
+        /* Negative space, half 2 -- guard against a whole-table identity map.
+         * Every check_close above still passes if nothing was retimed AND the
+         * reference grid happens to equal the live grid, so pin the cases that
+         * cannot be explained that way. */
+        if (sr == 16000 && fft == 256) {          /* 8 ms hop vs 10 ms ref */
+            check_moved("alpha_erl_tracking", sr, fft, aec.alpha_erl_tracking, 0.99);
+            check_moved("main_filter alpha_power", sr, fft,
+                        aec.main_filter.base.alpha_power, 0.9);
+            check_moved("saturation alpha_attack", sr, fft,
+                        aec.sat_mic.alpha_attack, 0.3);
+        }
+        if (sr == 48000) {                        /* per-sample constant */
+            check_moved("alpha_pow", sr, fft, aec.alpha_pow, 0.95);
+        }
+
+        aec_destroy(&aec);
+    }
+}
+
+static void test_render_activity_first_observation(void) {
+    float scratch[16];
+    float active[128];
+    float silent[128] = {0};
+    for (int i = 0; i < 128; ++i) active[i] = 0.1f;
+
+    RenderActivity detector;
+    render_activity_init(&detector, scratch, 16, 128, 16000);
+
+    RenderActivityResult first =
+        render_activity_update(&detector, active, 128);
+    CHECK(first.is_active && !first.is_stationary,
+          "render activity needs two observations before stationarity");
+
+    RenderActivityResult second =
+        render_activity_update(&detector, active, 128);
+    CHECK(second.is_active && second.is_stationary,
+          "constant render becomes stationary on the second observation");
+
+    (void)render_activity_update(&detector, silent, 128);
+    RenderActivityResult after_silence =
+        render_activity_update(&detector, active, 128);
+    CHECK(after_silence.is_active && !after_silence.is_stationary,
+          "stationarity requires a fresh second observation after silence");
+}
+
 int main(void) {
     test_cola();
     test_impulse_linear_path();
@@ -933,6 +1122,8 @@ int main(void) {
     test_static_pool_matches_heap();
     test_mem_size_consistency();
     test_top_level_constant_retiming();
+    test_adaptation_constant_retiming();
+    test_render_activity_first_observation();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

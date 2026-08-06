@@ -11,15 +11,10 @@
  * that the otherwise-valid 16 kHz balanced config still works end to end
  * (byte-identical-output gate lives elsewhere; this is just "didn't break").
  *
- * Build (standalone, from c_impl/). NOTE: neither this repo's Makefile nor
- * test_static_aec.c (c_impl/test_static_aec.c) is actually wired into a
- * `make` target today -- `grep -n test_static_aec Makefile` finds nothing,
- * and STATIC_MEMORY.md documents the manual gcc recipe below as the real
- * way to build it. (test_static_aec.c used to carry a stale comment
- * claiming a top-level `make` target wired this in; that comment has since
- * been removed -- this note's own description of the actual (unwired)
- * state was already correct and is unchanged.) This test mirrors that same
- * manual recipe:
+ * Build (standalone, from c_impl/). `test/test_static_aec.c` has its own
+ * `make test-static-aec` release gate; this file deliberately remains a
+ * focused config-validation executable. The manual recipe is retained for
+ * bring-up environments that do not use this repository's Makefile:
  *   make -C ../../audio_common BACKEND=kiss lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audio_common/include \
@@ -149,7 +144,7 @@ static void test_misaligned_base(void) {
     free(raw);
 }
 
-/* R08 (AEC-side re-review gap): highpass_cutoff_hz used to be checked with a
+/* Regression: highpass_cutoff_hz used to be checked with a
  * flat, rate-blind [0, 20000] Hz range regardless of enable_highpass, while
  * hpf_init() (audio_common hpf.c, called from aec_carve whenever
  * enable_highpass is set) separately rejects any cutoff_hz that isn't finite,
@@ -440,6 +435,48 @@ static void test_multi_rate_valid_smoke(void) {
     }
 }
 
+/* The three direct init entry points below sit UNDER aec_create()'s validator,
+ * so a bad sample_rate cannot reach them through the normal path. They are
+ * public API though, and since 2026-08 sample_rate is load-bearing there --
+ * it retimes alpha_power/alpha_r/initial_state_threshold_hops and the
+ * saturation attack/release pair. Before this, sample_rate=0 made hop_seconds
+ * infinite and powf() returned 0 or NaN, i.e. an EMA that never adapts or a
+ * filter full of NaN, reported by nothing. */
+static void test_direct_init_rejects_bad_rate(void) {
+    PBFDAF f;
+    PBFDKF k;
+    Saturation s;
+
+    CHECK(pbfdaf_init(&f, 256, 4, 0.3f, 1e-6f, 128, 0, 0) == -1,
+          "pbfdaf_init(sample_rate=0) == -1");
+    CHECK(pbfdaf_init(&f, 256, 4, 0.3f, 1e-6f, 128, 0, -16000) == -1,
+          "pbfdaf_init(sample_rate<0) == -1");
+    CHECK(pbfdaf_init(NULL, 256, 4, 0.3f, 1e-6f, 128, 0, 16000) == -1,
+          "pbfdaf_init(NULL) == -1");
+    CHECK(pbfdkf_init(&k, 256, 4, 0.3f, 1e-6f, 128, 0) == -1,
+          "pbfdkf_init(sample_rate=0) == -1");
+    CHECK(pbfdkf_init(NULL, 256, 4, 0.3f, 1e-6f, 128, 16000) == -1,
+          "pbfdkf_init(NULL) == -1");
+
+    /* A valid rate must still succeed -- otherwise the guard above would be
+     * indistinguishable from "always fails". */
+    CHECK(pbfdaf_init(&f, 256, 4, 0.3f, 1e-6f, 128, 0, 16000) == 0,
+          "pbfdaf_init(sample_rate=16000) == 0 (guard is not blanket)");
+    pbfdaf_free(&f);
+    CHECK(pbfdkf_init(&k, 256, 4, 0.3f, 1e-6f, 128, 16000) == 0,
+          "pbfdkf_init(sample_rate=16000) == 0 (guard is not blanket)");
+    pbfdkf_free(&k);
+
+    /* saturation_init returns void, so the fallback is the observable: the
+     * retentions stay at their authoring values instead of going NaN. */
+    saturation_init(&s, 0.95f, 0, 0);
+    CHECK(s.alpha_attack == 0.3f && s.alpha_release == 0.98f,
+          "saturation_init(hop=0, sr=0) falls back to authoring values, not NaN");
+    saturation_init(&s, 0.95f, 128, 16000);
+    CHECK(s.alpha_attack != 0.3f,
+          "saturation_init(hop=128, sr=16000) still retimes (fallback is not blanket)");
+}
+
 int main(void) {
     test_sample_rate();
     test_filter_length();
@@ -448,6 +485,7 @@ int main(void) {
     test_spatial_linear_context_requires_context_only();
     test_valid_config_smoke();
     test_multi_rate_valid_smoke();
+    test_direct_init_rejects_bad_rate();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

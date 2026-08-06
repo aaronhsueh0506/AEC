@@ -7,7 +7,7 @@ fft_density_scale, wall-clock-rescaled CNG/ratchet constants, per-bin tuning
 interpolation). Rather than re-derive all of that in C (and risk a 1-ULP drift),
 we capture the LIVE balanced instance's exact values once and emit them as C
 literals. aec_create() then bakes them straight into the sub-module init calls,
-mirroring c_impl/test/parity_aec3_post_run.c.
+mirroring c_impl/test/historical/parity_aec3_post_run.c.
 
 mild / aggressive differ from balanced ONLY in split_floor_far_active_db
 (mild -20 / balanced -28 / aggressive -38), applied at runtime in

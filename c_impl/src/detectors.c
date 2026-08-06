@@ -3,15 +3,28 @@
  * retired; the resulting drift is accepted).
  */
 #include "detectors.h"
+#include "aec3_scale.h"
 #include <math.h>
+
+/* Every wall-clock constant below is authored against this repo's legacy
+ * hop=160 @ 16000 Hz (10.000 ms) grid and retimed to the live grid in the
+ * *_init functions. Mirrors python/modules/detectors.py; the values are
+ * gated against it by test/modules/parity_detectors.c. */
+#define DET_REF_HOP 160
+#define DET_REF_SR  16000
+#define DET_REHOP(v, hop, sr) \
+    aec3_growth_rehop((v), DET_REF_HOP, DET_REF_SR, (hop), (sr))
 
 /* ── RenderActivityDetector ──────────────────────────────────── */
 
-static const float RA_ALPHA_CV     = 0.99f;
+static const float RA_ALPHA_CV_REF = 0.99f;   /* TC ~ 1 s at the 10 ms ref hop */
+/* Dimensionless CV^2 level gate -- no time content, so not retimed. */
 static const float RA_STATIONARY_C = 0.02f;
 
 void render_activity_init(RenderActivity* r, float* pairwise_scratch,
-                           int pairwise_scratch_len) {
+                           int pairwise_scratch_len,
+                           int hop_size, int sample_rate) {
+    r->alpha_cv = DET_REHOP(RA_ALPHA_CV_REF, hop_size, sample_rate);
     r->env_mean      = 1e-10f;
     r->env_var       = 0.0f;
     r->active_prev   = 0;
@@ -102,16 +115,21 @@ RenderActivityResult render_activity_update(RenderActivity* r,
             r->env_mean    = far_pwr;
             r->env_var     = 0.0f;
             r->active_prev = 1;
+            /* One observation has no variance estimate. Match the Python
+             * detector and wait for the next active hop before declaring
+             * the render stationary. */
+            r->is_stationary = 0;
         } else {
             float old_mean = r->env_mean;
-            r->env_mean = RA_ALPHA_CV * r->env_mean
-                        + (1.0f - RA_ALPHA_CV) * far_pwr;
+            r->env_mean = r->alpha_cv * r->env_mean
+                        + (1.0f - r->alpha_cv) * far_pwr;
             float diff = far_pwr - old_mean;
-            r->env_var = RA_ALPHA_CV * r->env_var
-                       + (1.0f - RA_ALPHA_CV) * (diff * diff);
+            r->env_var = r->alpha_cv * r->env_var
+                       + (1.0f - r->alpha_cv) * (diff * diff);
+            float far_cv2 = r->env_var /
+                            (r->env_mean * r->env_mean + 1e-10f);
+            r->is_stationary = (far_cv2 < RA_STATIONARY_C) ? 1 : 0;
         }
-        float far_cv2 = r->env_var / (r->env_mean * r->env_mean + 1e-10f);
-        r->is_stationary = (far_cv2 < RA_STATIONARY_C) ? 1 : 0;
     } else {
         r->active_prev   = 0;
         r->is_stationary = 0;
@@ -130,17 +148,22 @@ RenderActivityResult render_activity_update(RenderActivity* r,
 static const float FC_CONV_ERLE_DB = 5.0f;
 static const int   FC_CONV_FRAMES  = 10;
 static const float FC_DIV_ERLE_LIN = 0.63f;
-static const float FC_DIV_ALPHA    = 0.9f;
-static const float FC_DIV_DECAY    = 0.95f;
+static const float FC_DIV_ALPHA_REF = 0.9f;
+static const float FC_DIV_DECAY_REF = 0.95f;
 
-void filter_convergence_init(FilterConvergence* c) {
+void filter_convergence_init(FilterConvergence* c, int hop_size, int sample_rate) {
+    c->div_alpha = DET_REHOP(FC_DIV_ALPHA_REF, hop_size, sample_rate);
+    c->div_decay = DET_REHOP(FC_DIV_DECAY_REF, hop_size, sample_rate);
+    filter_convergence_reset(c);
+}
+void filter_convergence_reset(FilterConvergence* c) {
+    /* State only. div_alpha/div_decay are grid-derived and set once at init;
+     * reset must not clobber them (there is no hop/sample_rate to re-derive
+     * from here). Same rule as render_activity_reset's scratch pointers. */
     c->converged       = 0;
     c->once_converged  = 0;
     c->conv_counter    = 0;
     c->divergence      = 0.0f;
-}
-void filter_convergence_reset(FilterConvergence* c) {
-    filter_convergence_init(c);
 }
 void filter_convergence_mark_diverged(FilterConvergence* c) {
     c->converged    = 0;
@@ -152,10 +175,10 @@ void filter_convergence_update_divergence(FilterConvergence* c,
     if (c->converged && near_power > 1e-8f) {
         float inst_erle_lin = near_power / (raw_error_power + 1e-10f);
         float is_div        = (inst_erle_lin < FC_DIV_ERLE_LIN) ? 1.0f : 0.0f;
-        c->divergence = FC_DIV_ALPHA * c->divergence
-                      + (1.0f - FC_DIV_ALPHA) * is_div;
+        c->divergence = c->div_alpha * c->divergence
+                      + (1.0f - c->div_alpha) * is_div;
     } else {
-        c->divergence *= FC_DIV_DECAY;
+        c->divergence *= c->div_decay;
     }
 }
 int filter_convergence_update_convergence(FilterConvergence* c,
@@ -178,20 +201,35 @@ int filter_convergence_update_convergence(FilterConvergence* c,
 
 /* ── DoubleTalkAnalyzer ──────────────────────────────────────── */
 
-static const int   DT_SHADOW_FRAME_GATE = 50;
+/* Shadow-filter DT blind period; kept as a duration so all grids and both
+ * implementations use the same wall-clock gate. */
+static const float DT_SHADOW_FRAME_GATE_MS = 200.0f;
 static const float DT_ERL_CEILING_FLOOR = 0.01f;
 static const float DT_SAFETY_MARGIN     = 2.0f;
-static const float DTE_RISE_OLD = 0.3f, DTE_RISE_NEW = 0.7f;
-static const float DTE_DECAY_OLD = 0.9f, DTE_DECAY_NEW = 0.1f;
-static const float DTS_OLD = 0.7f, DTS_NEW = 0.3f;
-static const float DTS_INACTIVE_DECAY = 0.95f;
+static const float DTE_RISE_OLD_REF  = 0.3f;
+static const float DTE_DECAY_OLD_REF = 0.9f;  /* the "TC~90ms" hangover */
+static const float DTS_OLD_REF = 0.7f;
+static const float DTS_INACTIVE_DECAY_REF = 0.95f;
 
-void doubletalk_init(DoubleTalk* d, float offset, float advantage_scale) {
+void doubletalk_init(DoubleTalk* d, float offset, float advantage_scale,
+                        int hop_size, int sample_rate) {
     d->dt_from_energy   = 0.0f;
     d->dt_from_shadow   = 0.0f;
     d->shadow_advantage = 1.0f;
     d->shadow_dtd_offset           = offset;
     d->shadow_dtd_advantage_scale  = advantage_scale;
+    d->shadow_frame_gate = aec3_ms_to_hops(DT_SHADOW_FRAME_GATE_MS,
+                                           hop_size, sample_rate);
+    /* Only the OLD (retention) term is retimed; NEW is 1-OLD by construction
+     * so each pair keeps summing to 1 on every grid. */
+    d->dte_rise_old  = DET_REHOP(DTE_RISE_OLD_REF, hop_size, sample_rate);
+    d->dte_rise_new  = 1.0f - d->dte_rise_old;
+    d->dte_decay_old = DET_REHOP(DTE_DECAY_OLD_REF, hop_size, sample_rate);
+    d->dte_decay_new = 1.0f - d->dte_decay_old;
+    d->dts_old       = DET_REHOP(DTS_OLD_REF, hop_size, sample_rate);
+    d->dts_new       = 1.0f - d->dts_old;
+    d->dts_inactive_decay = DET_REHOP(DTS_INACTIVE_DECAY_REF,
+                                      hop_size, sample_rate);
 }
 void doubletalk_reset(DoubleTalk* d) {
     d->dt_from_energy   = 0.0f;
@@ -203,15 +241,15 @@ void doubletalk_update_shadow_dt(DoubleTalk* d,
                                     int shadow_frame_count, int far_excited,
                                     float main_err_smooth,
                                     float shadow_err_smooth) {
-    if (shadow_frame_count >= DT_SHADOW_FRAME_GATE && far_excited) {
+    if (shadow_frame_count >= d->shadow_frame_gate && far_excited) {
         d->shadow_advantage = main_err_smooth / (shadow_err_smooth + 1e-10f);
         float raw = (d->shadow_advantage - d->shadow_dtd_offset)
                    / d->shadow_dtd_advantage_scale;
         if (raw < 0.0f) raw = 0.0f;
         if (raw > 1.0f) raw = 1.0f;
-        d->dt_from_shadow = DTS_OLD * d->dt_from_shadow + DTS_NEW * raw;
+        d->dt_from_shadow = d->dts_old * d->dt_from_shadow + d->dts_new * raw;
     } else {
-        d->dt_from_shadow *= DTS_INACTIVE_DECAY;
+        d->dt_from_shadow *= d->dts_inactive_decay;
     }
 }
 
@@ -230,11 +268,11 @@ void doubletalk_update_energy_dt(DoubleTalk* d,
         inst = 0.0f;
     }
     if (inst > d->dt_from_energy) {
-        d->dt_from_energy = DTE_RISE_OLD * d->dt_from_energy
-                          + DTE_RISE_NEW * inst;
+        d->dt_from_energy = d->dte_rise_old * d->dt_from_energy
+                          + d->dte_rise_new * inst;
     } else {
-        d->dt_from_energy = DTE_DECAY_OLD * d->dt_from_energy
-                          + DTE_DECAY_NEW * inst;
+        d->dt_from_energy = d->dte_decay_old * d->dt_from_energy
+                          + d->dte_decay_new * inst;
     }
 }
 

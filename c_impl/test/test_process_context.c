@@ -2,21 +2,17 @@
  *
  * aec_process() was split into a shared aec_process_core() (steps 1-17,
  * 19-20: linear filter + AEC3 post/RES block + power EMAs + convergence
- * detection) and two thin wrappers: aec_process() (core + output limiter +
- * emit) and aec_process_context() (core only). This test proves three
- * things a byte-equal WAV render alone cannot:
+ * detection) and two thin wrappers: aec_process() (core + emit) and
+ * aec_process_context() (core only). This test proves three things a
+ * byte-equal WAV render alone cannot:
  *
- *   1. aec_process_context() genuinely never touches the limiter's
- *      per-instance state (limiter_gain / has_limiter_lag / limiter_near_lag,
- *      including the full [hop_size] buffer contents, not just the two
- *      scalar flags) -- proven by direct inspection of those Aec struct
- *      fields (this repo's existing convention, e.g. test_config_validation.c/
- *      test_lifecycle.c already read Aec fields directly; the struct is not
- *      opaque). A link-time call-counter (zero_heap_hook.c's technique) does
- *      not apply here since the limiter is inline code in the same
- *      translation unit, not a call to an external/opaque symbol -- direct
- *      state inspection is the equivalent, precedented mechanism for an
- *      internal code path.
+ *   1. The two entry points may be interleaved freely on ONE instance: they
+ *      advance identical state and differ only by the final copy into `out`.
+ *      Verified by comparing an interleaved instance against one driven by
+ *      aec_process() throughout, bit-for-bit, on every hop where both
+ *      produced output. This also guards the removal of the custom output
+ *      limiter -- any re-introduced stage that only one entry point advances
+ *      makes the two diverge and fails here.
  *   2. EVERY AecResContext field aec_process()'s caller could read --
  *      including linear_hop, far_spec, res_gain, and saturation_level, not
  *      just the subset this test originally covered -- is BYTE-IDENTICAL to
@@ -26,7 +22,7 @@
  *      on/off (the exact config the 4ch wrapper uses is
  *      spatial_linear_context=1 -- untested before this pass) -- proving the
  *      context-only entry point loses nothing the context exposes, it only
- *      skips the limiter + emit side effects. Every populated field is also
+ *      skips the emit side effect. Every populated field is also
  *      checked finite (no NaN/Inf), not just equal to its sibling.
  *   3. aec_reset() on a context-only instance restores it to the same clean
  *      state a fresh aec_create() would produce.
@@ -97,69 +93,77 @@ static float rng_uniform(float amp) {
     return amp * (2.0f * u - 1.0f);
 }
 
-/* limiter_gain / has_limiter_lag / limiter_near_lag never move when every
- * hop goes through aec_process_context(); aec_process() moves them from
- * the very first hop. Uses a loud burst (same style as the AEC3
- * formed-output-seam Python test) so limiter_gain would visibly excurse
- * below 1.0 if the limiter ran. */
-static void test_context_only_never_touches_limiter_state(void) {
+/* The two entry points may be MIXED FREELY on one instance.
+ *
+ * Since the custom output limiter was removed, aec_process() and
+ * aec_process_context() differ only by the final copy into `out` -- they
+ * advance identical state. So an instance whose hops alternate between the
+ * two must produce, on the hops where it did call aec_process(), output
+ * bit-identical to an instance that called aec_process() every hop.
+ *
+ * This replaces the old "context-only never touches limiter state" test and
+ * is strictly stronger: re-introducing ANY stateful stage that only one of
+ * the two entry points advances makes the interleaved instance's state
+ * diverge from the reference, so this fails. The burst assertion below keeps
+ * it from passing vacuously -- it proves the signal actually reaches the
+ * regime (output peak above mic peak) the removed limiter would have
+ * altered. */
+static void test_entry_points_may_be_freely_interleaved(void) {
     AecConfig cfg;
     context_only_config(&cfg, 16000);
 
-    Aec ctx_only, full;
-    CHECK(aec_create(&ctx_only, &cfg) == 0, "limiter-state test: aec_create(context-only instance)");
-    CHECK(aec_create(&full, &cfg) == 0, "limiter-state test: aec_create(full instance)");
+    Aec ref_inst, mixed;
+    CHECK(aec_create(&ref_inst, &cfg) == 0, "free-mixing test: aec_create(reference instance)");
+    CHECK(aec_create(&mixed, &cfg) == 0, "free-mixing test: aec_create(interleaved instance)");
 
-    int hop = aec_hop_size(&ctx_only);
-    CHECK(hop > 0 && hop <= 4096, "limiter-state test: valid hop size");
-    if (hop <= 0 || hop > 4096) { aec_destroy(&ctx_only); aec_destroy(&full); return; }
+    int hop = aec_hop_size(&ref_inst);
+    CHECK(hop > 0 && hop <= 4096, "free-mixing test: valid hop size");
+    if (hop <= 0 || hop > 4096) { aec_destroy(&ref_inst); aec_destroy(&mixed); return; }
 
-    /* Snapshot the raw limiter_near_lag buffer right after construction --
-     * compared byte-for-byte after the loop below, so this test doesn't need
-     * to assume any particular initial value (zeroed on aec_init's pool,
-     * uninitialized malloc garbage on aec_create's heap arena) -- only that
-     * aec_process_context() never writes to it, whatever it started as. */
-    float* near_lag_snapshot = (float*)malloc((size_t)hop * sizeof(float));
-    memcpy(near_lag_snapshot, ctx_only.limiter_near_lag, (size_t)hop * sizeof(float));
-
-    float mic[4096], ref[4096], out[4096];
+    float mic[4096], ref[4096], out_ref[4096], out_mixed[4096];
+    int mismatches = 0, compared = 0, saw_overshoot = 0;
     g_rng_state = 0x2AEC5EEDu;
     for (int i = 0; i < 200; ++i) {
         /* Quiet baseline, loud burst frames 40-49, quiet tail -- mic/ref
          * independently drawn (not one derived from the other) so the
          * adaptive filter has no real echo path to converge onto; the
-         * abrupt quiet->loud transition then forces a transient raw-output
-         * overshoot above the (one-hop-lagged) near peak the limiter
-         * compares against -- same technique as the AEC3 formed-output-seam
-         * Python test (test_formed_output_seam.py). */
+         * abrupt quiet->loud transition then forces a transient output
+         * overshoot above the near peak, which is exactly the condition the
+         * removed limiter used to act on. */
         float amp = (i >= 40 && i < 50) ? 0.9f : 0.02f;
+        float near_peak = 0.0f;
         for (int s = 0; s < hop; ++s) {
             mic[s] = rng_uniform(amp);
             ref[s] = 0.3f * rng_uniform(amp);
+            float am = mic[s] < 0.0f ? -mic[s] : mic[s];
+            if (am > near_peak) near_peak = am;
         }
-        aec_process_context(&ctx_only, mic, ref);
-        aec_process(&full, mic, ref, out);
+        aec_process(&ref_inst, mic, ref, out_ref);
+        if ((i & 1) == 0) {
+            aec_process(&mixed, mic, ref, out_mixed);
+            if (memcmp(out_ref, out_mixed, (size_t)hop * sizeof(float)) != 0) mismatches++;
+            compared++;
+        } else {
+            aec_process_context(&mixed, mic, ref);
+        }
+        float out_peak = 0.0f;
+        for (int s = 0; s < hop; ++s) {
+            float ao = out_ref[s] < 0.0f ? -out_ref[s] : out_ref[s];
+            if (ao > out_peak) out_peak = ao;
+        }
+        if (out_peak > near_peak && near_peak > 1e-6f) saw_overshoot = 1;
     }
 
-    CHECK(ctx_only.limiter_gain == 1.0f,
-          "aec_process_context()-only instance: limiter_gain stays exactly 1.0 after 200 hops incl. a loud burst");
-    CHECK(ctx_only.has_limiter_lag == 0,
-          "aec_process_context()-only instance: has_limiter_lag stays 0 (limiter block never entered)");
-    CHECK(full.has_limiter_lag == 1,
-          "aec_process()-only instance: has_limiter_lag becomes 1 (limiter block did run)");
-    CHECK(full.limiter_gain < 0.95f,
-          "aec_process()-only instance: the loud burst actually forced limiter_gain below 0.95 "
-          "(otherwise this test cannot distinguish 'ran and had no effect' from 'never ran')");
-    CHECK(memcmp(ctx_only.limiter_near_lag, near_lag_snapshot, (size_t)hop * sizeof(float)) == 0,
-          "aec_process_context()-only instance: limiter_near_lag buffer byte-identical to its "
-          "post-construction snapshot after 200 hops (never written, not just the two scalar flags)");
-    CHECK(memcmp(full.limiter_near_lag, near_lag_snapshot, (size_t)hop * sizeof(float)) != 0,
-          "aec_process()-only instance: limiter_near_lag buffer DID change from its post-construction "
-          "snapshot (the limiter actually ran and wrote it, sanity check against a vacuous pass)");
+    CHECK(compared == 100, "free-mixing test: compared the expected number of aec_process() hops");
+    CHECK(mismatches == 0,
+          "interleaving aec_process() and aec_process_context() on one instance is bit-identical "
+          "to using aec_process() throughout (no entry-point-specific state remains)");
+    CHECK(saw_overshoot == 1,
+          "free-mixing test: the signal actually reached the removed limiter's trigger condition "
+          "(output peak above mic peak), so a re-introduced limiter would have been caught");
 
-    free(near_lag_snapshot);
-    aec_destroy(&ctx_only);
-    aec_destroy(&full);
+    aec_destroy(&ref_inst);
+    aec_destroy(&mixed);
 }
 
 /* Two separately-constructed, identically-configured, identically-fed
@@ -288,7 +292,6 @@ static void test_context_survives_reset(void) {
 
     aec_reset(&a);
     CHECK(a.frame_count == 0, "reset test: aec_reset() zeroes frame_count");
-    CHECK(a.limiter_gain == 1.0f, "reset test: aec_reset() restores limiter_gain to 1.0");
 
     for (int i = 0; i < 5; ++i) {
         for (int s = 0; s < hop; ++s) { mic[s] = rng_uniform(0.3f); ref[s] = rng_uniform(0.2f); }
@@ -300,9 +303,9 @@ static void test_context_survives_reset(void) {
 }
 
 int main(void) {
-    test_context_only_never_touches_limiter_state();
+    test_entry_points_may_be_freely_interleaved();
 
-    /* The three officially-contracted grids (see AEC/CLAUDE.md /
+    /* The three officially-contracted grids (see AEC/docs/development_guide.md /
      * pipelines/README.md "Parameter Alignment") x shadow on/off x
      * spatial_linear_context on/off -- the last axis is the exact config
      * the 4ch wrapper uses for every lane (enable_res=0/return_res_

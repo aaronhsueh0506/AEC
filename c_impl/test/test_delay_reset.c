@@ -151,6 +151,9 @@ static void test_reset_mid_stream_reacquires_like_fresh(void) {
 
     CHECK(got_after_reset >= 0, "post-reset: delay re-acquired after reset");
     CHECK(got_fresh >= 0, "fresh baseline: delay acquired");
+    CHECK(abs(got_fresh - d2_samples) <= 192,
+          "48kHz estimator acquires a 300-ms delay beyond the incorrect "
+          "203-ms documentation limit");
     CHECK(got_after_reset == got_fresh,
           "post-reset estimate matches a fresh instance fed the same stream "
           "(no leftover contamination from the pre-reset stream)");

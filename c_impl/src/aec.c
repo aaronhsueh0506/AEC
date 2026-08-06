@@ -1,14 +1,5 @@
-/* aec.c — top-level v3.22 AEC orchestration (AEC3 post-filter chain).
- *
- * Faithful C port of python/modules/orchestrator.py AEC.process() audio path
- * for the BALANCED preset (mode=PBFDKF, enable_res=True,
- * enable_cng=True). The post-stage is driven by aec3_post_run() (bit-exact full
- * _aec3_post orchestration). See aec.h for scope.
- *
- * Built with -ffp-contract=off (Makefile). The construction of the AEC3 chain
- * mirrors test/parity_aec3_post_run.c, with the balanced sub-module config
- * baked from the live Python instance (include/aec3_balanced_config.h).
- */
+/* Top-level PBFDKF AEC orchestration with the AEC3-style post-filter chain.
+ * Python defines the algorithm; this file is the float32 C implementation. */
 #include "aec.h"
 #include "aec_debug.h"
 #include "aec3_balanced_config.h"
@@ -33,35 +24,9 @@
 
 /* ───────────────────────── config ──────────────────────────────────────── */
 
-/* Top-level (non-AEC3) constant retiming helpers (2026-08 gap-fix, follow-up
- * to the AEC3-internal per-block/hop-count constant audit). shadow_err_alpha,
- * warmup_frames, epc_hangover, ne_recent_hold and the two
- * filter_misadjustment_*_frames fields (AecConfig, aec.h) were literal hop
- * counts / per-hop EMA alphas frozen at the legacy hop=160/sample_rate=16000
- * (10 ms) grid that predates this repo's own multi-rate history, with zero
- * rate conversion when the 16 kHz default flipped to 8 ms hop (2026-08-01)
- * or at 8/48 kHz. Retime via aec3_ms_to_hops()/aec3_growth_rehop() so they
- * cover approximately the same wall-clock duration at every grid; fall back
- * to the exact pre-fix literal (legacy_ms/10, alpha unscaled) if hop
- * resolved to 0 (an unrecognized/invalid sample_rate -- aec_validate_config's
- * whitelist rejects this before aec_carve ever reads it). shadow_err_alpha
- * uses the RETENTION convention (x <- alpha*x_old + (1-alpha)*new -- see
- * this file's actual smoothing formula), so aec3_growth_rehop (a direct
- * power law), NOT aec3_per_block_ema_alpha_to_per_hop's "1-(1-a)^ratio"
- * AEC3-new-sample-weight form, is the correct helper here.
- *
- * CALLED FROM aec_carve() (construction time), NOT aec_config_defaults():
- * aec_config_defaults() only knows the DEFAULT fft_size for a given
- * sample_rate, but a caller may override cfg.fft_size afterward (e.g.
- * aec_wav.c's --fft-size flag) before ever calling aec_create()/aec_init() --
- * aec_carve() is the one place guaranteed to see the FINAL resolved hop
- * (aec_derive_dims() re-derives it from cfg->fft_size on every call), so
- * retiming there (into a->cfg, the carved instance's own copy -- the
- * caller's original cfg is left untouched) cannot go stale the way baking
- * it into aec_config_defaults() would. Must match config.py's
- * AecConfig.__post_init__ (Python side has no equivalent post-construction
- * grid-override path -- see that file's own comment for why the two sides
- * differ here). */
+/* Convert fields authored on the legacy 16 kHz/10 ms grid to the final grid.
+ * This runs in aec_carve(), after a caller may have overridden fft_size.
+ * Retention alphas use a direct power-law conversion. */
 static int aec_legacy10ms_hops(float legacy_ms, int hop, int sample_rate) {
     return (hop > 0 && sample_rate > 0)
         ? aec3_ms_to_hops(legacy_ms, hop, sample_rate)
@@ -173,7 +138,7 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
 }
 
 /* ── F05/F07 config validation ────────────────────────────────────────────
- * Sample-rate whitelist. M5 (multi-rate campaign, review F01) widens this
+ * Sample-rate whitelist. The multi-rate implementation widens this
  * from {16000} to {8000, 16000, 48000}: the M2 per-rate coefficient/
  * threshold tables (aec3_balanced_config.h's R8K-/R48K- blocks +
  * AEC3B_RATE_TABLE) and the M4 consumption switch (aec_carve /
@@ -821,9 +786,9 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
      * aec3_post.c -- see that file's Step-5 comment. */
     t = ck_field_size_reps(t, Kz, sizeof(float), 3);   /* r2 r2_unb nearend_pwr */
     t = ck_field_size(t, Kz, sizeof(unsigned char));   /* stat_mask */
-    /* hop scratch (10) */
+    /* hop scratch (9) */
     t = ck_field_size(t, Kz, sizeof(float));           /* per_bin_mu_scale */
-    t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 6); /* limiter_near_lag near_hop far_hop raw shadow final */
+    t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 5); /* near_hop far_hop raw shadow final */
     t = ck_field_size(t, ck_mul_size((size_t)np, (size_t)hop), sizeof(float)); /* filter_taps_full */
     /* per-hop freq-bin scratch (12; see aec.h struct comment) */
     t = ck_field_size(t, (size_t)hop, sizeof(float));  /* scr_sq */
@@ -935,8 +900,10 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     /* HPF: arena/pool-carved at the scratch tail below (audio_common f32 HPF). */
     /* Saturation */
     if (cfg->enable_saturation) {
-        saturation_init(&a->sat_ref, cfg->saturation_threshold);
-        saturation_init(&a->sat_mic, cfg->saturation_threshold);
+        saturation_init(&a->sat_ref, cfg->saturation_threshold,
+                        hop, cfg->sample_rate);
+        saturation_init(&a->sat_mic, cfg->saturation_threshold,
+                        hop, cfg->sample_rate);
         a->has_sat = 1;
     }
     /* Delay ring */
@@ -1035,9 +1002,10 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     /* Detectors / EPC / regime / RSA */
     a->ra_pairwise_scratch = (float*)ptr;
     ptr += ALIGN16((size_t)((hop + 7) / 8) * sizeof(float));
-    render_activity_init(&a->render_activity, a->ra_pairwise_scratch, (hop + 7) / 8);
-    filter_convergence_init(&a->convergence);
-    doubletalk_init(&a->dt_analyzer, 1.5, 3.0);
+    render_activity_init(&a->render_activity, a->ra_pairwise_scratch, (hop + 7) / 8,
+                         hop, cfg->sample_rate);
+    filter_convergence_init(&a->convergence, hop, cfg->sample_rate);
+    doubletalk_init(&a->dt_analyzer, 1.5, 3.0, hop, cfg->sample_rate);
     epc_init(&a->epc, a->cfg.epc_hangover, cfg->epc_total_rise, cfg->epc_delta_threshold,
              hop, cfg->sample_rate);
     shadow_copy_init(&a->regime, SC_GATE_ENERGY, 0.65, 3, a->cfg.epc_hangover);
@@ -1304,7 +1272,6 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
 
     /* hop scratch */
     a->per_bin_mu_scale = (float*)ptr; ptr += ALIGN16(K * sizeof(float));
-    a->limiter_near_lag = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->near_hop   = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->far_hop    = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->raw_output = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
@@ -1362,8 +1329,14 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->wn_err_baseline = 1e-8f; a->stat_dt_hangover = 0;
     a->warmup_frames_remaining = a->cfg.warmup_frames; a->warmup_far_active = 0;
     a->simple_mu_ratio = 1.0f; a->simple_mu_holdoff = 0; a->has_per_bin_mu = 0;
-    a->limiter_gain = 1.0f; a->has_limiter_lag = 0;
-    a->near_power = 0.0f; a->raw_error_power = 0.0f; a->alpha_pow = 0.95f;
+    a->near_power = 0.0f; a->raw_error_power = 0.0f; a->alpha_pow = powf(0.95f, 16000.0f / (float)a->cfg.sample_rate);
+    a->alpha_erl_tracking  = aec3_growth_rehop(0.99f,  160, 16000,
+                                               a->hop_size, a->cfg.sample_rate);
+    a->alpha_erl_converged = aec3_growth_rehop(0.999f, 160, 16000,
+                                               a->hop_size, a->cfg.sample_rate);
+    /* ^ per-SAMPLE ERLE power EMA (applied once per sample, not per hop),
+     * so it is retimed off the SAMPLE RATE and is hop-invariant.
+     * aec3_growth_rehop() would be wrong here. Mirrors orchestrator.py. */
     a->frame_count = 0; a->poor_coarse_counter = 0; a->coarse_reset_hangover = 0;
     a->leakage_div_sustained_counter = 0;
     aec_recompute_wallclock_thresholds(a, hop, cfg->sample_rate);
@@ -1516,7 +1489,6 @@ void aec_reset(Aec* a) {
     a->warmup_frames_remaining = a->cfg.warmup_frames;
     a->warmup_far_active = 0;
     a->simple_mu_ratio = 1.0f; a->simple_mu_holdoff = 0; a->has_per_bin_mu = 0;
-    a->limiter_gain = 1.0f; a->has_limiter_lag = 0;
     a->near_power = 0.0f; a->raw_error_power = 0.0f;
     a->frame_count = 0;
     a->ne_above = 0; a->ne_recent_frames = 0;
@@ -1615,8 +1587,11 @@ static float aec_erle_ring_max_last15(const Aec* a) {
  * (linear filter + AEC3 post/RES block, writing a->final_out) and steps 19-20
  * (power EMAs + convergence detection, which the NEXT hop's step-17 logic
  * depends on and therefore can never be skipped by either caller). Does NOT
- * run step 18 (output limiter) or step 21 (emit into a caller `out` buffer)
- * -- those are caller-specific and live in the two thin wrappers below.
+ * run step 21 (emit into a caller `out` buffer) -- that is caller-specific
+ * and lives in the aec_process() wrapper below. Since the custom output
+ * limiter was removed, the core IS the whole audio path: the two public
+ * entry points differ only by that final copy and share all state, so they
+ * may be mixed freely on one instance.
  *
  * Far-end-FFT sharing: shared_far_spec (NULL for the normal aec_process()/
  * aec_process_context() path -- byte-identical to before this sharing
@@ -1904,8 +1879,8 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
          * `poor_excitation_counter < N` gates, each read against THIS
          * SAME filter instance's own n_partitions (N) -- confirmed by grep,
          * no other consumer anywhere in src/include/python. Not read
-         * bit-exact by any parity harness (test/parity_pbfdkf.c and
-         * test/parity_pbfdkf_loc.c treat it purely as an
+         * bit-exact by any parity harness (test/historical/parity_pbfdkf.c and
+         * test/historical/parity_pbfdkf_loc.c treat it purely as an
          * orchestrator-supplied external input, set on the C filter before
          * calling process(), never asserted afterward). Once the counter
          * reaches n_partitions, further increments can never change the
@@ -2261,7 +2236,11 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             if (raw_dt_ratio < 2.0f && inst_erl_raw < 1.5f) {
                 float inst_erl = inst_erl_raw;
                 if (inst_erl < 0.001f) inst_erl = 0.001f; if (inst_erl > 1.0f) inst_erl = 1.0f;
-                float alpha_erl = a->convergence.converged ? 0.999f : 0.99f;
+                /* Per-hop retention EMAs authored at the legacy 10 ms hop
+                 * grid; mirrors orchestrator.py's _alpha_erl_*. */
+                float alpha_erl = a->convergence.converged
+                                ? a->alpha_erl_converged
+                                : a->alpha_erl_tracking;
                 a->erl_estimate = alpha_erl * a->erl_estimate + (1.0f - alpha_erl) * inst_erl;
             }
         }
@@ -2481,41 +2460,13 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
 
 /* Process exactly hop_size samples — OFFLINE / lockstep path. Byte-exact to
  * Python aec.py. Render and capture supplied together. Thin wrapper over
- * aec_process_core(): adds step 18 (output limiter) and step 21 (emit into
- * the caller's `out` buffer), neither of which aec_process_context() below
- * wants. Preserves the original single-function's exact behavior and
- * ordering, including the debug trace reading limiter_gain AFTER this
- * hop's limiter update (moving the trace block would have silently
- * changed what a --debug-trace consumer observes). */
+ * aec_process_core(): the only thing it adds is step 21 (emit into the
+ * caller's `out` buffer), which aec_process_context() below does not want.
+ * There is no output limiter: `final_out` is delivered exactly as the linear
+ * filter + AEC3 post chain produced it. */
 void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     const int hop = a->hop_size;
     aec_process_core(a, mic_in, ref_in, NULL);
-
-    /* 18. OLA-lagged output limiter. near_peak/out_peak via np.max(np.abs(.))
-     *     and target_gain = near_peak/out_peak, the EMA mix and the limiter
-     *     gain itself all run float32-by-design (Stage-2 conversion; the
-     *     historical Python float64 EMA-mix reference is retired). */
-    {
-        if (!a->has_limiter_lag) { memset(a->limiter_near_lag, 0, (size_t)hop * sizeof(float)); a->has_limiter_lag = 1; }
-        float near_peak = 0.0f, out_peak = 0.0f;
-        for (int i = 0; i < hop; ++i) {
-            float an = fabsf(a->limiter_near_lag[i]);
-            float ao = fabsf(a->final_out[i]);
-            if (an > near_peak) near_peak = an;
-            if (ao > out_peak)  out_peak  = ao;
-        }
-        memcpy(a->limiter_near_lag, a->near_hop, (size_t)hop * sizeof(float));
-        float target_gain;
-        if (out_peak > near_peak && near_peak > 1e-6f)
-            target_gain = near_peak / out_peak;
-        else
-            target_gain = 1.0f;
-        float alpha_lim = (target_gain < a->limiter_gain) ? 0.3f : 0.8f;
-        a->limiter_gain = alpha_lim * a->limiter_gain + (1.0f - alpha_lim) * target_gain;
-        float lg = a->limiter_gain;
-        for (int i = 0; i < hop; ++i)
-            a->final_out[i] = a->final_out[i] * lg;
-    }
 
     /* ── per-frame structured trace ("logr"). Audio-passive, read-only: only
      *    runs when --debug-trace set a CSV file. Zero hot-path cost otherwise
@@ -2565,7 +2516,6 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
         tr.comfort_noise_mean = (Kk > 0) ? cnsum / Kk : 0.0f;
         tr.near_pwr         = a->near_power;
         tr.raw_err_pwr      = a->raw_error_power;
-        tr.limiter_gain     = a->limiter_gain;
         aec_debug_trace_row(&tr);
     }
 #endif /* AEC_NO_STDIO */
@@ -2574,36 +2524,19 @@ void aec_process(Aec* a, const float* mic_in, const float* ref_in, float* out) {
     memcpy(out, a->final_out, (size_t)hop * sizeof(float));
 }
 
-/* Context-only entry point: runs aec_process_core() only -- no output
- * limiter, no emit into any `out` buffer. For callers that only read
+/* Context-only entry point: runs aec_process_core() only -- it just skips
+ * the final copy into an `out` buffer. For callers that only read
  * aec_get_res_context() (error_spec / res_gain / formed_output / etc via
  * AecResContext) and never touch aec_process()'s own returned audio, e.g.
- * a pipeline running enable_res=0 && return_res_context=1
- * (context_only) purely for the linear filter's context -- the limiter
- * and final-copy in aec_process() are pure waste for them.
+ * a pipeline running enable_res=0 && return_res_context=1 (context_only)
+ * purely for the linear filter's context -- the final copy in aec_process()
+ * is pure waste for them.
  *
- * PRECONDITION (caller's responsibility, not checked here -- see aec.c's
- * "no runtime asserts" convention elsewhere in this file): there are two
- * CLASSES of entry point on a given Aec instance. "Full" -- aec_process()
- * and aec_process_capture() (which calls aec_process() internally, so it
- * carries the exact same limiter behavior) -- runs the output limiter and
- * carries its one-hop state (limiter_gain, limiter_near_lag,
- * has_limiter_lag). "Context-only" -- aec_process_context() and
- * aec_process_context_shared_far() -- never touches that state. The real
- * safety boundary is ONE CONSTRUCT-OR-RESET EPOCH: the span from
- * aec_create()/aec_init() (or the most recent aec_reset()) up to the NEXT
- * aec_reset() (or aec_destroy()) -- NOT "construction decides for the
- * instance's whole lifetime". aec_reset() zeroes limiter_gain/
- * has_limiter_lag, so a caller MAY switch classes across a reset boundary.
- * What it must never do is call a full-class entry point and a
- * context-only-class entry point within the SAME epoch, in either order --
- * this explicitly includes aec_process_capture(): a context-only instance
- * must never call aec_process_capture() either, since that function
- * unconditionally drives aec_process() (and therefore the limiter)
- * internally. Mixing classes within one epoch produces a one-hop gain
- * discontinuity the next full-class call makes -- not a crash, but an
- * audible artifact. Every caller in this repo (mono/4ch pipelines) picks
- * one class at construction time and never switches. */
+ * No mixing restriction: aec_process(), aec_process_capture(),
+ * aec_process_context() and aec_process_context_shared_far() all advance
+ * exactly the same state via aec_process_core(), and differ only by whether
+ * they copy the result out. They may be interleaved freely on one instance,
+ * in any order, without a reset in between. */
 void aec_process_context(Aec* a, const float* mic_in, const float* ref_in) {
     aec_process_core(a, mic_in, ref_in, NULL);
 }
@@ -2629,12 +2562,7 @@ void aec_process_context(Aec* a, const float* mic_in, const float* ref_in) {
  * this sharing). A mismatched or stale spectrum silently produces a wrong
  * (not crashing) linear filter result -- see 4aec_nr_res.c's caller for how
  * the 4-lane wrapper keeps this invariant (identical p->aligned_ref handed
- * to every lane, all lanes reset together on any delay change). Same
- * lifetime rule as aec_process_context(): this is a context-only-class entry
- * point (see aec_process_context()'s doc comment for the full construct-or-
- * reset-epoch rule and why aec_process_capture() is included in the
- * incompatible "full" class) -- never mixed with aec_process()/
- * aec_process_capture() within the same construct-or-reset epoch. */
+ * to every lane, all lanes reset together on any delay change). */
 void aec_process_context_shared_far(
         Aec* a, const float* mic_in, const float* ref_in,
         const Complex* shared_far_spec) {

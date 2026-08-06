@@ -8,7 +8,7 @@ AEC-Challenge cases (one DT / FS / NE) so all gain/R² branches are exercised:
   - farend_singletalk : echo-dominant, linear path R² = S²/ERLE
   - nearend_singletalk: near-dominant, nonlinear X²·g² + nl_r2 path
 
-Writes raw little-endian binary; c_impl/test/parity_residual_echo_estimator.c
+Writes raw little-endian binary; c_impl/test/historical/parity_residual_echo_estimator.c
 replays the full estimator (update_reverb_models → estimate) and asserts every
 output bit-exact, INCLUDING the _last_r2_direct_component /
 _last_r2_reverb_component decomposition (so a reverb-tail bug can't hide behind

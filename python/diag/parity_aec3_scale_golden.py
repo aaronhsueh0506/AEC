@@ -1,12 +1,12 @@
 """Golden reference for the C aec3_scale + freq_utils port (WS5 Phase 5.0).
 
-Emits `key=%.17g` lines matching c_impl/test/parity_aec3_scale.c, so a bit-exact
+Emits `key=%.17g` lines matching c_impl/test/historical/parity_aec3_scale.c, so a bit-exact
 `diff` proves the C conversion layer reproduces the Python reference. Run:
 
     python3 python/diag/parity_aec3_scale_golden.py > /tmp/py_scale.txt
     gcc -O2 -ffp-contract=off -std=c99 -Ic_impl/include \\
         c_impl/src/aec3_scale.c c_impl/src/freq_utils.c \\
-        c_impl/test/parity_aec3_scale.c -lm -o /tmp/p_scale
+        c_impl/test/historical/parity_aec3_scale.c -lm -o /tmp/p_scale
     /tmp/p_scale > /tmp/c_scale.txt
     diff /tmp/py_scale.txt /tmp/c_scale.txt   # must be empty
 """

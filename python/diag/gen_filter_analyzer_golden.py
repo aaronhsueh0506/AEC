@@ -4,7 +4,7 @@ Runs the Python FilterAnalyzer over a deterministic float32 input sequence and
 writes, for each per-hop step, the inputs (filter_taps + render_block) and the
 full observable state AFTER the update (the high-pass-filtered taps, peak_index,
 delay_blocks, gain, consistent flag, consistent-detector internal accumulators),
-to a raw little-endian file replayed by c_impl/test/parity_filter_analyzer.c.
+to a raw little-endian file replayed by c_impl/test/historical/parity_filter_analyzer.c.
 
 This is a STATEFUL module: the region cursor sweeps the full filter incrementally
 and the ConsistentFilterDetector accumulates floor/secondary peaks across one

@@ -52,7 +52,12 @@ typedef struct PBFDAF {
     int     n_freqs;           /* fft_size/2 + 1 */
     float   mu;
     float   delta;
-    float   alpha_power;       /* 0.9 */
+    float   alpha_power;       /* far-end power EMA retention. AUTHORING value
+                                * 0.9 at hop=160/16000 (10 ms); the RUNTIME
+                                * value is retimed to this instance's grid by
+                                * pbfdaf_init_scalars() and equals 0.9 only on
+                                * a 10 ms hop. Read the effective value, never
+                                * this comment -- test_rate_structural (d2). */
     int     enable_td_constraint;
 
     float*  td_window;         /* [fft_size] */
@@ -161,7 +166,11 @@ typedef struct PBFDAF {
 /* F04: returns 0 on success, -1 if the nested fft_create() allocation failed
  * (OOM) — the filter's arrays are all freed before returning (mirrors
  * pbfdaf_free's heap branch) rather than leaving a half-built filter around
- * whose FFT calls would silently no-op on the NULL handle. */
+ * whose FFT calls would silently no-op on the NULL handle.
+ * Also -1, with nothing written to `p`, if p is NULL or sample_rate/hop are
+ * non-positive: sample_rate retimes alpha_power and
+ * initial_state_threshold_hops, so an unusable rate must be refused here
+ * rather than producing a filter whose EMAs never adapt. */
 int    pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size,
                     int with_process_scratch, int sample_rate);
@@ -219,7 +228,10 @@ typedef struct PBFDKF {
      * retained because the Python class still maintains it per hop. */
     float* R;
     float* error_psd;
-    float  alpha_r;            /* 0.95 */
+    float  alpha_r;            /* error-PSD EMA retention. AUTHORING value 0.95
+                                * at hop=256/16000 (16 ms -- NOT the 10 ms
+                                * reference alpha_power uses); retimed at
+                                * pbfdkf_init(). Identity on a 16 ms hop only. */
 
     /* === v3.22 AEC3 H_error per-bin state =========================== */
     float* H_error_per_bin;    /* [n_freqs], init 10000 */
@@ -265,7 +277,8 @@ typedef struct PBFDKF {
 } PBFDKF;
 
 /* F04: returns 0 on success, -1 if the nested pbfdaf_init() (base filter's
- * fft_create()) failed (OOM). */
+ * fft_create()) failed (OOM) or rejected p/sample_rate/hop — alpha_r is
+ * retimed off the same grid, so a bad rate is refused here too. */
 int    pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size, int sample_rate);
 size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size);

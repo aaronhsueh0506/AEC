@@ -5,6 +5,8 @@ only on numpy.
 """
 import numpy as np
 
+from . import aec3_scale
+
 
 class HighPassFilter:
     """2nd-order Butterworth IIR high-pass filter (bilinear transform).
@@ -59,11 +61,20 @@ class SaturationDetector:
     model the speaker's saturation behavior for the adaptive filter.
     """
 
-    def __init__(self, threshold: float = 0.95):
+    def __init__(self, threshold: float = 0.95,
+                 hop_size: int = 256, sample_rate: int = 16000):
         self.threshold = threshold
         self.saturation_level = 0.0
-        self.alpha_attack = 0.3    # Fast attack when saturation detected
-        self.alpha_release = 0.98  # Slow release (echo path retains saturation effects)
+        # Asymmetric per-hop EMA (detect() is called once per hop). Reference
+        # grid is hop=256/16000 (16 ms), NOT the 10 ms grid used by the older
+        # constants: commit 243d67c (2026-03-23) authored these against a
+        # config declaring frame_size=512/hop_size=256. The defaults above
+        # reproduce the authored values so standalone/diagnostic use is
+        # unchanged.
+        self.alpha_attack = aec3_scale.growth_rehop(
+            0.3, 256, 16000, hop_size, sample_rate)    # fast attack
+        self.alpha_release = aec3_scale.growth_rehop(
+            0.98, 256, 16000, hop_size, sample_rate)   # slow release
 
     def detect(self, signal: np.ndarray) -> float:
         """Detect saturation level in signal. Returns smoothed level in [0, 1]."""

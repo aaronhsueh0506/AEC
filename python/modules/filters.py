@@ -11,6 +11,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from . import aec3_scale
+
 
 class PBFDAF:
     """
@@ -24,7 +26,8 @@ class PBFDAF:
                  mu: float = 0.3, delta: float = 1e-8,
                  hop_size: int = 0, sample_rate: int = 16000):
         # Overlap-save: block_size = 2 × hop (proper 50% ratio for TD constraint)
-        # FFT zero-pads to next power of 2 if block_size isn't one
+        # Supported product grids make block_size a power of two, so this is
+        # a no-op there; next-power-of-two is only a defensive direct-use path.
         self.hop_size = hop_size if hop_size > 0 else block_size // 2
         # Wall-clock hop duration, needed to convert AEC3's per-4ms-block
         # timing constants to real elapsed time at whatever grid this filter
@@ -39,7 +42,10 @@ class PBFDAF:
         self.n_freqs = self.fft_size // 2 + 1
         self.mu = mu
         self.delta = delta
-        self.alpha_power = 0.9
+        # Far-end power EMA, per hop. Authored at the legacy
+        # hop=160/16000 (10 ms) grid (commit 235d3ec era, frame=20 ms).
+        self.alpha_power = aec3_scale.growth_rehop(
+            0.9, 160, 16000, self.hop_size, self.sample_rate)
         self.enable_td_constraint = True  # can be disabled for diagnosis
         # AEC3 round-robin constraint (adaptive_fir_filter.cc:686-689) — constrain
         # ONE partition per hop (cycling) instead of all every hop; saves ~58% of
@@ -531,7 +537,13 @@ class PBFDKF(PBFDAF):
         # R: measurement noise PSD (estimated from error)
         self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
         self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
-        self._alpha_r = 0.95   # faster R tracking for DT protection
+        # Measurement-noise PSD EMA, per hop. NOTE the reference grid is
+        # hop=256/16000 (16 ms), NOT the 10 ms grid the older constants
+        # use: this was authored by commit e9cb383 (2026-03-20), whose
+        # config declared frame_size=512/hop_size=256. Retiming it off
+        # 10 ms would be wrong by 1.6x.
+        self._alpha_r = aec3_scale.growth_rehop(
+            0.95, 256, 16000, self.hop_size, self.sample_rate)
 
         # AEC3 startup / poor-excitation / saturation gates
         # (refined_filter_update_gain.cc:96-99). Orchestrator sets

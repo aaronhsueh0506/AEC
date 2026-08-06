@@ -227,7 +227,7 @@ void fb_erle_update(FullBandErleEstimator *s,
      * re-fire every hop instead of once, discarding any partial
      * accumulation inst_update() makes on those hops and changing
      * production behaviour (this field's raw value is also read bit-exact
-     * by test/parity_fullband_erle.c: `s.hold_counter_inst_erle !=
+     * by test/historical/parity_fullband_erle.c: `s.hold_counter_inst_erle !=
      * exp_hold`, which mirrors the module's Python reference's own
      * unbounded `_hold_counter_inst_erle`). Flooring at INT_MIN instead
      * preserves BOTH the one-shot edge-trigger semantics and the bit-exact
