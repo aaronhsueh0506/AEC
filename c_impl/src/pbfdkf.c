@@ -708,11 +708,11 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
         p->erl_per_bin[k] = 0.1f;
         p->e2_coarse_per_bin[k] = 0.0f;
     }
-    /* Measurement-noise PSD EMA, per hop. NOTE the reference grid is
-     * hop=256/16000 (16 ms), NOT the 10 ms grid used above: authored by
-     * commit e9cb383, whose config declared frame_size=512/hop_size=256.
-     * Retiming off 10 ms would be wrong by 1.6x. Mirrors filters.py. */
-    p->alpha_r = aec3_growth_rehop(0.95f, 256, 16000,
+    /* Measurement-noise PSD EMA, per hop. 10 ms reference (TC 194.96 ms):
+     * authored at 16 ms (e9cb383) but the default moved to 10 ms 13 days
+     * later and every validating commit since kept 0.95 there. Anchor is the
+     * last grid it was measured on. Mirrors filters.py. */
+    p->alpha_r = aec3_growth_rehop(0.95f, 160, 16000,
                                    p->base.hop_size, p->base.sample_rate);
     p->h_error_floor = (float)AEC3_H_ERROR_FLOOR_FLOAT;
     p->h_error_ceil  = (float)AEC3_H_ERROR_CEIL_FLOAT;
@@ -1139,14 +1139,11 @@ void pbfdkf_process(PBFDKF* p,
          * _error_psd = _alpha_r*_error_psd + (1-_alpha_r)*error_psd.
          * float32-by-design (the old double-promotion parity nuance is retired).
          *
-         * KNOWN PARITY BREAK: p->alpha_r is retimed at init and read by
-         * nothing, while Python (filters.py:735) uses its retimed value, so
-         * the ports disagree at 16k/256 and 48k/1024. Not wired yet: doing so
-         * would commit both ports to an unadjudicated 16 ms anchor, and a
-         * settled-looking wrong anchor is worse than a visible divergence.
-         * Tracked in docs/timing_constant_inventory.md. */
-        const float ar = 0.95f;
-        const float oar = 1.0f - 0.95f;
+         * Reads p->alpha_r (grid-retimed at init, 10 ms anchor). Must NOT be
+         * a literal: a hardcoded 0.95f here bypassed the retimed field until
+         * 2026-08-07, exactly as alpha_power did above. */
+        const float ar = p->alpha_r;
+        const float oar = 1.0f - p->alpha_r;
         for (int k = 0; k < K; ++k) {
             p->error_psd[k] = ar * p->error_psd[k] + oar * e2_ref[k];
             p->R[k] = (p->error_psd[k] > b->delta) ? p->error_psd[k] : (float)b->delta;

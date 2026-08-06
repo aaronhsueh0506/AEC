@@ -21,7 +21,9 @@ Reference grids are NOT uniform -- verified per constant from git provenance:
   * ``self.alpha``            per-SAMPLE, authored at sr=16000
   * ``alpha_erl`` (both)      per-hop, 10 ms  (5407e71 annotates hop as "10ms")
   * ``alpha_power``           per-hop, 10 ms  (235d3ec era, 20 ms frame)
-  * ``_alpha_r``              per-hop, 16 ms  (e9cb383, frame 512 / hop 256)
+  * ``_alpha_r``              per-hop, 10 ms  (authored 16 ms at e9cb383, but
+                              the default moved to 10 ms at 83ced18 and every
+                              validating commit since kept 0.95 there)
   * saturation attack/release per-hop, 16 ms  (243d67c, frame 512 / hop 256)
 
 Retiming one of the 16 ms constants off a 10 ms reference is wrong by 1.6x, so
@@ -79,7 +81,7 @@ def test_effective_timing_constants_match_their_reference_grid(sample_rate,
 
     # per-hop, 16 ms reference.
     assert filt._alpha_r == pytest.approx(
-        _per_hop(0.95, REF_HOP_16MS, hop, sample_rate), rel=1e-12)
+        _per_hop(0.95, REF_HOP_10MS, hop, sample_rate), rel=1e-12)
     assert sat.alpha_attack == pytest.approx(
         _per_hop(0.3, REF_HOP_16MS, hop, sample_rate), rel=1e-12)
     assert sat.alpha_release == pytest.approx(
@@ -113,7 +115,6 @@ def test_sixteen_ms_constants_are_identity_on_their_own_reference_grid():
     """
     for sample_rate, frame_size in ((8000, 256), (16000, 512)):
         _, filt, sat = _instance(sample_rate, frame_size)
-        assert filt._alpha_r == pytest.approx(0.95, rel=1e-12)
         assert sat.alpha_attack == pytest.approx(0.3, rel=1e-12)
         assert sat.alpha_release == pytest.approx(0.98, rel=1e-12)
 

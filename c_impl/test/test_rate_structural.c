@@ -1043,7 +1043,7 @@ static void test_adaptation_constant_retiming(void) {
         /* Per-hop, 16 ms reference. */
         check_close("alpha_r (TC)", sr, fft,
                     -hop_s / log((double)aec.main_filter.alpha_r) * 1000.0,
-                    311.931612, ALPHA_TOL);
+                    194.957302, ALPHA_TOL);
         check_close("saturation alpha_attack (TC)", sr, fft,
                     -hop_s / log((double)aec.sat_mic.alpha_attack) * 1000.0,
                     13.289337, ALPHA_TOL);
@@ -1060,7 +1060,6 @@ static void test_adaptation_constant_retiming(void) {
          * seeing these unchanged is looking at correct behaviour, and retiming
          * them off the 10 ms reference by mistake would move them HERE. */
         if (hop * 1000 == 16 * sr) {
-            check_identity("alpha_r", sr, fft, aec.main_filter.alpha_r, 0.95);
             check_identity("saturation alpha_attack", sr, fft,
                            aec.sat_mic.alpha_attack, 0.3);
             check_identity("saturation alpha_release", sr, fft,
@@ -1080,6 +1079,14 @@ static void test_adaptation_constant_retiming(void) {
         }
         if (sr == 48000) {                        /* per-sample constant */
             check_moved("alpha_pow", sr, fft, aec.alpha_pow, 0.95);
+        }
+        if (hop * 1000 == 16 * sr) {
+            /* alpha_r moved from the 16 ms family to the 10 ms family on
+             * 2026-08-07, so a 16 ms grid is no longer its identity point --
+             * it must MOVE here. This assertion is the one that fails if the
+             * anchor is ever silently reverted to 256/16000. */
+            check_moved("alpha_r (10 ms anchor)", sr, fft,
+                        aec.main_filter.alpha_r, 0.95);
         }
 
         aec_destroy(&aec);
