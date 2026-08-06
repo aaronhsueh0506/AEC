@@ -1106,6 +1106,103 @@ static void test_adaptation_constant_retiming(void) {
  * assertion is "an increase is legal only from zero" -- no threshold, no
  * tolerance, and it cannot be satisfied by a stimulus that simply fails to
  * reach the branch, because coverage is asserted separately below. */
+/* ── (d4) retimed constants must reach the AUDIO PATH, not just the struct ──
+ * Check (d2) asserts the VALUE each instance ends up with. That is necessary
+ * and was not sufficient: pbfdaf_init_scalars() computed the retimed
+ * alpha_power into p->alpha_power, (d2) asserted on that field, and the actual
+ * far-power EMA a few hundred lines away used a hardcoded 0.9f. The field was
+ * set, was tested, and was read by nothing, so C silently diverged from Python
+ * at every grid while every test stayed green.
+ *
+ * This check closes that class by measuring the coefficient the EMA ACTUALLY
+ * applied, recovered from the filter's own state:
+ *
+ *     power_new = a * power_old + (1 - a) * far_psd
+ *  => a = (power_new - far_psd) / (power_old - far_psd)
+ *
+ * Two hops of a CONSTANT far-end make power_old, power_new and far_psd all
+ * observable through the public AecResContext far_spec plus the filter state,
+ * with no access to the coefficient itself -- so the assertion cannot be
+ * satisfied by a field nothing reads. */
+static void test_retimed_constants_reach_the_audio_path(void) {
+    const double TOL = 2e-3;   /* fp32 EMA recovery over one hop */
+
+    for (int r = 0; r < N_GRIDS; ++r) {
+        int sr = GRIDS[r].sample_rate;
+        int fft = GRIDS[r].fft_size;
+        AecConfig cfg;
+        Aec aec;
+        char what[224];
+
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        cfg.fft_size = fft;
+        cfg.enable_delay_est = 0;   /* keep far_spec aligned hop to hop */
+        cfg.enable_highpass = 0;
+        cfg.enable_saturation = 0;
+        cfg.enable_cng = 0;
+        int rc = aec_create(&aec, &cfg);
+        snprintf(what, sizeof(what), "sr=%d fft=%d: aec_create() for audio-path test", sr, fft);
+        CHECK(rc == 0, what);
+        if (rc != 0) continue;
+
+        int hop = aec_hop_size(&aec);
+        int K = fft / 2 + 1;
+        float *mic = (float*)calloc((size_t)hop, sizeof(float));
+        float *far = (float*)malloc((size_t)hop * sizeof(float));
+        float *out = (float*)malloc((size_t)hop * sizeof(float));
+        float *pw_before = (float*)malloc((size_t)K * sizeof(float));
+        if (!mic || !far || !out || !pw_before) {
+            free(mic); free(far); free(out); free(pw_before); aec_destroy(&aec); continue;
+        }
+
+        /* Deterministic, identical far-end every hop: with a repeating input the
+         * per-bin far_psd is the same on both hops, which is what lets one
+         * subtraction recover `a` exactly. */
+        g_lcg_state = 0x9E37u + (unsigned)r;
+        for (int i = 0; i < hop; ++i) far[i] = 0.25f * (2.0f * lcg_uniform() - 1.0f);
+
+        /* Warm past the cold-start branch (pwr_sum < 1e-10 memcpy path), which
+         * bypasses the EMA entirely and would recover a = 0. */
+        for (int h = 0; h < 6; ++h) aec_process(&aec, mic, far, out);
+
+        memcpy(pw_before, aec.main_filter.base.power, (size_t)K * sizeof(float));
+        aec_process(&aec, mic, far, out);
+
+        /* far_psd for this hop = |far_spec|^2, straight off the filter. */
+        int usable = 0;
+        double a_sum = 0.0;
+        for (int k = 0; k < K; ++k) {
+            const Complex *X = &aec.main_filter.base.far_spec[k];
+            double far_psd = (double)X->r * X->r + (double)X->i * X->i;
+            double num = (double)aec.main_filter.base.power[k] - far_psd;
+            double den = (double)pw_before[k] - far_psd;
+            /* Skip bins where the EMA has already converged (den ~ 0): the
+             * recovery is ill-conditioned there, not wrong. */
+            if (fabs(den) < 1e-9 || far_psd < 1e-12) continue;
+            a_sum += num / den;
+            usable++;
+        }
+
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: recovered alpha_power from >=8 usable bins (%d)",
+                 sr, fft, usable);
+        CHECK(usable >= 8, what);
+
+        if (usable >= 8) {
+            double a_meas = a_sum / usable;
+            double a_field = (double)aec.main_filter.base.alpha_power;
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d: far-power EMA actually applied alpha=%.6f, "
+                     "matching the retimed field %.6f (not the 0.9 literal)",
+                     sr, fft, a_meas, a_field);
+            CHECK(fabs(a_meas - a_field) <= TOL, what);
+        }
+
+        free(mic); free(far); free(out); free(pw_before);
+        aec_destroy(&aec);
+    }
+}
+
 static void test_mu_holdoff_rearm_guard(void) {
     const int N_HOPS = 120;
 
@@ -1207,6 +1304,7 @@ int main(void) {
     test_mem_size_consistency();
     test_top_level_constant_retiming();
     test_adaptation_constant_retiming();
+    test_retimed_constants_reach_the_audio_path();
     test_mu_holdoff_rearm_guard();
     test_render_activity_first_observation();
 

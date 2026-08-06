@@ -496,12 +496,23 @@ static float pbfdaf_frontend(PBFDAF* p,
         /* cold start: power = np.abs(far_spec)**2 (already computed above) */
         memcpy(p->power, far_cmag2, (size_t)K * sizeof(float));
     } else {
-        /* power = alpha_power*power + (1-alpha_power)*far_psd; alpha_power=0.9,
+        /* power = alpha_power*power + (1-alpha_power)*far_psd.
          * float32-by-design -- textually identical to sk_ema_cmag2_f32_scalar's
          * own combine (state[i]=alpha*state[i]+beta*mag2), matching the
-         * e2_ref/error_psd precedent below (pbfdkf.c e2_ref_scratch dedup). */
-        const float a = 0.9f;
-        const float b = 1.0f - 0.9f;
+         * e2_ref/error_psd precedent below (pbfdkf.c e2_ref_scratch dedup).
+         *
+         * MUST read p->alpha_power, not the 0.9f literal. This line hardcoded
+         * 0.9f until 2026-08-06 while pbfdaf_init_scalars() dutifully computed
+         * the retimed value into p->alpha_power -- so the field was set, was
+         * asserted on by the effective-value test, and was read by nothing.
+         * Python (filters.py:291) had already switched to its retimed
+         * self.alpha_power, so the two ports silently diverged at every grid
+         * (up to -0.055 at 8k/256 and 16k/512). Nothing caught it: the
+         * effective-value test compares the FIELD, and parity_pbfdkf.c -- the
+         * gate that compares the actual EMA output -- had been moved to
+         * test/historical/ and wired to no Makefile target. */
+        const float a = p->alpha_power;
+        const float b = 1.0f - p->alpha_power;
         for (int k = 0; k < K; ++k)
             p->power[k] = a * p->power[k] + b * far_cmag2[k];
     }
@@ -1132,8 +1143,21 @@ void pbfdkf_process(PBFDKF* p,
         /* error_psd EMA + R = max(error_psd, delta).
          * error_psd = |error_spec|**2;
          * _error_psd = _alpha_r*_error_psd + (1-_alpha_r)*error_psd.
-         * alpha_r=0.95, float32-by-design (the old double-promotion parity
-         * nuance is retired). */
+         * float32-by-design (the old double-promotion parity nuance is retired).
+         *
+         * KNOWN PARITY BREAK, DELIBERATELY NOT FIXED YET. Same bypass as
+         * alpha_power above: p->alpha_r is computed by pbfdkf_init() and read
+         * by nothing, while Python (filters.py:735) already uses its retimed
+         * self._alpha_r. C and Python therefore disagree at 16k/256 (0.950 vs
+         * 0.975) and 48k/1024 (0.950 vs 0.966); they agree at 8k/256 and
+         * 16k/512, whose 16 ms hop is the identity point.
+         *
+         * Wiring p->alpha_r here would restore parity but would also commit
+         * BOTH ports to a 16 ms authoring anchor (e9cb383, frame 512/hop 256)
+         * that has not been adjudicated against the alternative 10 ms reading
+         * -- and syncing a wrong anchor to both ends is strictly worse than a
+         * visible divergence, because it looks settled. Adjudicate the anchor
+         * first, then wire it. Tracked in docs/timing_constant_inventory.md. */
         const float ar = 0.95f;
         const float oar = 1.0f - 0.95f;
         for (int k = 0; k < K; ++k) {
