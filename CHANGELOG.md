@@ -2,8 +2,26 @@
 
 All notable changes to this AEC implementation. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) but adapted for the
-research-arc workflow used here. Each version entry links to the canonical
-verdict / closure doc under [docs/](docs/) for full evidence.
+research-arc workflow used here.
+
+**Retired evidence documents.** Entries below `[4.0.0]` cite per-arc verdict and
+closure documents under `docs/` (`docs/f2_4_verdict.md`, `docs/v3_14_plan.md`,
+and ~69 others). Those files were removed in the 4.0.0 release cleanup: they are
+development history, not release surface, and shipping them to an integrator
+would present superseded conclusions as current specifications. **They are not
+missing — every one is recoverable from git history** at the commit the entry
+describes, e.g. `git log --all --diff-filter=D -- docs/f2_4_verdict.md` to find
+the deleting commit, then `git show <sha>^:docs/f2_4_verdict.md`. Treat every
+`docs/*.md` path in an entry below `[4.0.0]` as a git-history reference, not a
+live file. The `[4.0.0]` entry itself cites no `docs/` path — its evidence is
+checked in under `eval/ab_evidence/` and `docs/timing_constant_inventory.md`.
+List the retired ones with (this reports the two example paths above as well,
+since they are themselves retired documents):
+
+```bash
+grep -oE '\bdocs/[A-Za-z0-9_/-]+\.(md|html)' CHANGELOG.md \
+  | while read -r p; do [ -f "$p" ] || echo "retired: $p"; done
+```
 
 Versioning: `__version__` in [python/aec.py](python/aec.py) versions this
 library's PUBLIC API and OUTPUT CONTRACT — the C header

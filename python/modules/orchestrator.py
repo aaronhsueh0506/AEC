@@ -528,7 +528,6 @@ class AEC:
             # Reverb tail dead-streak counter. Counts consecutive frames
             # where the residual_echo_estimator's reverb frequency response
             # tail is non-positive (i.e. no late reflection mass available).
-            self._reverb_tail_dead_counter = 0
             pass  # AEC3 chain init scope
 
         # StationarityEstimator.
@@ -691,9 +690,6 @@ class AEC:
         # after enabling the flag the first frame starts from the same state.
         _n_freqs = (self.filter.n_freqs
                     if hasattr(self.filter, 'n_freqs') else 1)
-        self._shadow_error_psd = np.ones(_n_freqs, dtype=np.float32) * 1e-2
-        self._shadow_R = np.ones(_n_freqs, dtype=np.float32) * 1e-2
-        self._shadow_mu_holdoff = 0   # independent of main's _simple_mu_holdoff
 
         # Windowed decaying ERLE accumulator for erle_factor (TC ≈ 10s)
         self._erle_window_near = 1e-10
@@ -715,7 +711,6 @@ class AEC:
 
         # P1 Phase 1 trace state: ring buffer of high-band mic power for
         # modulation CV^2 metric. 32 frames @ hop=160 @ 16kHz ≈ 320 ms.
-        self._hb_mic_pwr_ring = np.zeros(32, dtype=np.float32)
         self._hb_mic_pwr_idx = 0
         self._hb_mic_pwr_n = 0  # filled-count (≤ 32)
 
@@ -877,10 +872,7 @@ class AEC:
         self._simple_mu_holdoff = 0
         # Reset shadow decoupled state on full AEC.reset(); FilterAnalyzer
         # reset is owned by AecState._full_reset.
-        self._shadow_error_psd.fill(1e-2)
-        self._shadow_R.fill(1e-2)
         self._epc_reset_fired_this_frame = False
-        self._shadow_mu_holdoff = 0
         self._warmup_frames = self.config.warmup_frames
         self._warmup_far_active = False
         # Clear lazy-getattr diagnostic counters so cross-case batch
@@ -1229,9 +1221,6 @@ class AEC:
 
         # Reset shadow decoupled state on derived-state reset (shadow's
         # observation history restarts together with filter taps).
-        self._shadow_error_psd.fill(1e-2)
-        self._shadow_R.fill(1e-2)
-        self._shadow_mu_holdoff = 0
         # Coarse-filter quality counters (lazy-init via getattr in process loop)
         self._poor_coarse_counter = 0
         self._coarse_reset_hangover = 0
@@ -3457,11 +3446,6 @@ class AEC:
                 and hasattr(_reverb_fr_now, 'tail_response')):
             _reverb_tail_max_now = float(
                 np.max(_reverb_fr_now.tail_response))
-        if _reverb_tail_max_now <= 0.0:
-            self._reverb_tail_dead_counter = int(
-                self._reverb_tail_dead_counter) + 1
-        else:
-            self._reverb_tail_dead_counter = 0
         # Fallback injection into BOTH R² and R²_unb. SuppressionGain's
         # `_lower_band_gain` reads R² (residual_echo_spectrum) for the
         # gain computation; R²_unb only feeds DominantNearendDetector's
