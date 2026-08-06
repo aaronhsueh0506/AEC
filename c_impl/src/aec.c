@@ -447,11 +447,10 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
     float alpha;
     if (ratio < a->simple_mu_ratio) {
         alpha = 0.3f;
-        /* F2.4: arm the holdoff only on a FRESH double-talk onset. Ongoing DT
-         * must not re-arm it, or marginal-DT oscillation re-arms every hop and
-         * mu never releases. Mirrors orchestrator.py -- see the regression note
-         * there: the guard was lost in 2f3699f (2026-05-27) on both sides and
-         * restored 2026-08-06. 20 hops is NOT retimed yet. */
+        /* F2.4 invariant: arm only on a FRESH attack; an ongoing attack must
+         * not restart it, or marginal DT re-arms every hop and mu never
+         * releases. 20 hops authored at a 10 ms hop (200 ms), not yet
+         * retimed. Mirrors orchestrator.py. */
         if (a->simple_mu_holdoff == 0) a->simple_mu_holdoff = 20;
     }
     else if (a->simple_mu_holdoff > 0) { a->simple_mu_holdoff--; alpha = 0.99f; }

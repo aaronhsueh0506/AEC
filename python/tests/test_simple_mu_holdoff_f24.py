@@ -127,3 +127,62 @@ def test_holdoff_decrements_monotonically_while_it_runs():
             f"holdoff increased at hop {i}: {seen[i - 1]} -> {seen[i]}; "
             f"full trace {seen}"
         )
+
+# ── deterministic state transitions ──────────────────────────────────────────
+# The tests above drive the update with pseudo-random frames and assert on the
+# SHAPE of the resulting trace. That is real integration coverage, but it is
+# not a specification: it depends on the stimulus happening to hold the attack
+# branch. These three pin the invariant directly, with the branch forced.
+
+
+def _force(aec, *, attack):
+    """Put the instance one call away from a chosen branch.
+
+    The branch is `ratio < self._simple_mu_ratio`. `ratio` is derived from the
+    far/error power ratio, so pinning _simple_mu_ratio to an extreme makes the
+    comparison deterministic regardless of what the frame contains.
+    """
+    aec._simple_mu_ratio = 1.0 if attack else 0.0
+
+
+def _step(aec, rng):
+    hop = aec.config.hop_size
+    far = 0.001 * rng.standard_normal(hop)
+    out = 0.500 * rng.standard_normal(hop)
+    aec._update_simple_mu_ratio(out, far)
+
+
+def test_attack_while_holdoff_nonzero_leaves_it_unchanged():
+    """THE invariant. An ongoing attack must not restart the counter."""
+    aec = _aec()
+    rng = np.random.default_rng(11)
+    aec._simple_mu_holdoff = 7
+    _force(aec, attack=True)
+    _step(aec, rng)
+    assert aec._simple_mu_holdoff == 7, (
+        f"attack with holdoff=7 changed it to {aec._simple_mu_holdoff}; "
+        f"an ongoing attack must neither re-arm nor decrement"
+    )
+
+
+def test_non_attack_decrements_the_holdoff():
+    aec = _aec()
+    rng = np.random.default_rng(12)
+    aec._simple_mu_holdoff = 7
+    _force(aec, attack=False)
+    _step(aec, rng)
+    assert aec._simple_mu_holdoff == 6, (
+        f"non-attack hop left holdoff at {aec._simple_mu_holdoff}, expected 6"
+    )
+
+
+def test_attack_after_expiry_rearms():
+    aec = _aec()
+    rng = np.random.default_rng(13)
+    aec._simple_mu_holdoff = 0
+    _force(aec, attack=True)
+    _step(aec, rng)
+    assert aec._simple_mu_holdoff > 0, (
+        "a fresh attack with holdoff=0 must re-arm; a guard that simply "
+        "deleted the assignment would pass the first test and fail here"
+    )

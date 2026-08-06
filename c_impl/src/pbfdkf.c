@@ -501,16 +501,10 @@ static float pbfdaf_frontend(PBFDAF* p,
          * own combine (state[i]=alpha*state[i]+beta*mag2), matching the
          * e2_ref/error_psd precedent below (pbfdkf.c e2_ref_scratch dedup).
          *
-         * MUST read p->alpha_power, not the 0.9f literal. This line hardcoded
-         * 0.9f until 2026-08-06 while pbfdaf_init_scalars() dutifully computed
-         * the retimed value into p->alpha_power -- so the field was set, was
-         * asserted on by the effective-value test, and was read by nothing.
-         * Python (filters.py:291) had already switched to its retimed
-         * self.alpha_power, so the two ports silently diverged at every grid
-         * (up to -0.055 at 8k/256 and 16k/512). Nothing caught it: the
-         * effective-value test compares the FIELD, and parity_pbfdkf.c -- the
-         * gate that compares the actual EMA output -- had been moved to
-         * test/historical/ and wired to no Makefile target. */
+         * Reads p->alpha_power (grid-retimed at init). Must NOT be a literal:
+         * a hardcoded 0.9f here bypassed the retimed field entirely until
+         * 2026-08-06 -- see CHANGELOG and test_rate_structural check (d4),
+         * which recovers the coefficient the EMA actually applied. */
         const float a = p->alpha_power;
         const float b = 1.0f - p->alpha_power;
         for (int k = 0; k < K; ++k)
@@ -1145,19 +1139,12 @@ void pbfdkf_process(PBFDKF* p,
          * _error_psd = _alpha_r*_error_psd + (1-_alpha_r)*error_psd.
          * float32-by-design (the old double-promotion parity nuance is retired).
          *
-         * KNOWN PARITY BREAK, DELIBERATELY NOT FIXED YET. Same bypass as
-         * alpha_power above: p->alpha_r is computed by pbfdkf_init() and read
-         * by nothing, while Python (filters.py:735) already uses its retimed
-         * self._alpha_r. C and Python therefore disagree at 16k/256 (0.950 vs
-         * 0.975) and 48k/1024 (0.950 vs 0.966); they agree at 8k/256 and
-         * 16k/512, whose 16 ms hop is the identity point.
-         *
-         * Wiring p->alpha_r here would restore parity but would also commit
-         * BOTH ports to a 16 ms authoring anchor (e9cb383, frame 512/hop 256)
-         * that has not been adjudicated against the alternative 10 ms reading
-         * -- and syncing a wrong anchor to both ends is strictly worse than a
-         * visible divergence, because it looks settled. Adjudicate the anchor
-         * first, then wire it. Tracked in docs/timing_constant_inventory.md. */
+         * KNOWN PARITY BREAK: p->alpha_r is retimed at init and read by
+         * nothing, while Python (filters.py:735) uses its retimed value, so
+         * the ports disagree at 16k/256 and 48k/1024. Not wired yet: doing so
+         * would commit both ports to an unadjudicated 16 ms anchor, and a
+         * settled-looking wrong anchor is worse than a visible divergence.
+         * Tracked in docs/timing_constant_inventory.md. */
         const float ar = 0.95f;
         const float oar = 1.0f - 0.95f;
         for (int k = 0; k < K; ++k) {

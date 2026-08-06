@@ -1151,6 +1151,8 @@ static void test_retimed_constants_reach_the_audio_path(void) {
         float *far = (float*)malloc((size_t)hop * sizeof(float));
         float *out = (float*)malloc((size_t)hop * sizeof(float));
         float *pw_before = (float*)malloc((size_t)K * sizeof(float));
+        snprintf(what, sizeof(what), "sr=%d fft=%d: audio-path test allocations", sr, fft);
+        CHECK(mic && far && out && pw_before, what);
         if (!mic || !far || !out || !pw_before) {
             free(mic); free(far); free(out); free(pw_before); aec_destroy(&aec); continue;
         }
@@ -1170,7 +1172,8 @@ static void test_retimed_constants_reach_the_audio_path(void) {
 
         /* far_psd for this hop = |far_spec|^2, straight off the filter. */
         int usable = 0;
-        double a_sum = 0.0;
+        double a_sum = 0.0, a_worst_err = 0.0;
+        const double a_field_d = (double)aec.main_filter.base.alpha_power;
         for (int k = 0; k < K; ++k) {
             const Complex *X = &aec.main_filter.base.far_spec[k];
             double far_psd = (double)X->r * X->r + (double)X->i * X->i;
@@ -1179,7 +1182,10 @@ static void test_retimed_constants_reach_the_audio_path(void) {
             /* Skip bins where the EMA has already converged (den ~ 0): the
              * recovery is ill-conditioned there, not wrong. */
             if (fabs(den) < 1e-9 || far_psd < 1e-12) continue;
-            a_sum += num / den;
+            double a_k = num / den;
+            double err_k = fabs(a_k - a_field_d);
+            if (err_k > a_worst_err) a_worst_err = err_k;
+            a_sum += a_k;
             usable++;
         }
 
@@ -1190,12 +1196,19 @@ static void test_retimed_constants_reach_the_audio_path(void) {
 
         if (usable >= 8) {
             double a_meas = a_sum / usable;
-            double a_field = (double)aec.main_filter.base.alpha_power;
             snprintf(what, sizeof(what),
                      "sr=%d fft=%d: far-power EMA actually applied alpha=%.6f, "
                      "matching the retimed field %.6f (not the 0.9 literal)",
-                     sr, fft, a_meas, a_field);
-            CHECK(fabs(a_meas - a_field) <= TOL, what);
+                     sr, fft, a_meas, a_field_d);
+            CHECK(fabs(a_meas - a_field_d) <= TOL, what);
+            /* The mean alone would let a per-bin +err cancel a -err and report
+             * a clean average over a filter that is doing something different
+             * in every bin. Bound the WORST bin too. */
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d: worst-bin recovered alpha error %.2e <= %.2e "
+                     "(no per-bin cancellation hiding behind the mean)",
+                     sr, fft, a_worst_err, TOL);
+            CHECK(a_worst_err <= TOL, what);
         }
 
         free(mic); free(far); free(out); free(pw_before);
