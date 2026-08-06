@@ -6,7 +6,23 @@ Single-channel AEC (1 mic + 1 ref) supporting PBFDKF (frequency-domain Kalman),
 multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
-**Release**: v4.0.0rc1 — Python `aec.py` `__version__ = "4.0.0rc1"`. **Not ship-ready.** Two entries under `[4.0.0]` (the AEC3 Tier-2 constant audit and the 16 kHz default-grid flip) change production 16 kHz output and carry their own "800-case bench not run" disclaimers, and the hop-authored timing audit is incomplete outside `detectors.*` — see `[4.0.0]` "Known gaps". Do not tag or publish until those close. The `4.x` major bump records the public-ABI and output-contract breaks listed under `[4.0.0]` in [CHANGELOG.md](CHANGELOG.md) (custom output limiter removed so output is no longer bit-identical, `AecConfig`/`AecResContext` layout changes, 16 kHz default grid 512/256 → 256/128), **not** a new algorithm generation. The production algorithm is the v3.21 AEC3-aligned `_aec3_post` chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the no-pre-align (no-PA) online-delay path — the matched-filter pre-echo `accumulated_error` binning bug (`i//4` → AEC3 cumsum prefix-error) that had collapsed pre-echo to 0 and corrupted no-PA delay estimation — and ships a default-ON DT-deg recovery stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`, `min_gain_floor_dt_db = −16`). Three Pareto presets — `mild` / `balanced` / `aggressive` — differ only in the far-active min-gain floor; **`balanced` is production** and meets all four ship bars (FS echo >3.5, DT echo >4, DT deg >2, NE deg ≥4). See [CHANGELOG.md](CHANGELOG.md) `[3.23.0]`.
+**Release**: v4.0.0rc1 — Python `aec.py` `__version__ = "4.0.0rc1"`.
+**Not ship-ready.** The AEC3 Tier-2 audit, top-level timing retiming, and 16 kHz
+default-grid flip change production output; the 800-case bench has not been
+rerun, and 48 kHz still has structural evidence only. See `[4.0.0]` "Known
+limitations" in [CHANGELOG.md](CHANGELOG.md); do not tag or publish until those
+close. The `4.x` major bump records the public-ABI and output-contract breaks
+listed there (custom output limiter removed, `AecConfig`/`AecResContext`
+layout changes, 16 kHz default grid 512/256 → 256/128), **not** a new algorithm
+generation. The production algorithm is the v3.21 AEC3-aligned `_aec3_post`
+chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the
+v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the
+no-pre-align (no-PA) online-delay path and ships a default-ON DT-deg recovery
+stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`,
+`min_gain_floor_dt_db = −16`). Three Pareto presets — `mild` / `balanced` /
+`aggressive` — differ only in the far-active min-gain floor; **`balanced` is
+production** and meets all four historical ship bars. See `[3.23.0]` in the
+changelog for that release's evidence.
 
 **Float32 campaign** (2026-07-15, on top of 3.23.0): all production C is now
 float32 end-to-end (delay chain, orchestrator scalars, post/state modules,
@@ -21,8 +37,8 @@ output is not bit-identical to each other (pre-existing), but each backend's
 static path is byte-equal to its own malloc path. Regression anchors: C-goldens
 (`c_impl/test/parity_delay.c` + `c_impl/test/parity_aec_e2e.c`) and staged
 gates vs the `fp64-baseline` tag (60-case stratified AECMOS within noise bar,
-waveform drift median −95 dB, 1-hour soak stable). See
-[CHANGELOG.md](CHANGELOG.md) `[Unreleased] — 2026-07-15`.
+waveform drift median −95 dB, 1-hour soak stable). See the float32 and SIMD
+entries under [CHANGELOG.md](CHANGELOG.md) `[4.0.0]`.
 
 ---
 

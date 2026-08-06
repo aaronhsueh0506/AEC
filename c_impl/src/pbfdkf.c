@@ -297,7 +297,10 @@ int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                          float mu, float delta, int hop_size,
                          int with_process_scratch, int sample_rate,
                          FftHandle* shared_fft) {
-    if (!p || !mem || !shared_fft) return -1;
+    int hop;
+    if (!p || !mem || !shared_fft || sample_rate <= 0) return -1;
+    hop = (hop_size > 0) ? hop_size : block_size / 2;
+    if (hop <= 0) return -1;
     /* F07: reject a misaligned pool base before any pool write — hardens a
      * caller invoking this directly (the parent aec_carve always carves
      * ALIGN16 offsets off an already-aligned base, so this never fires
@@ -312,7 +315,6 @@ int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
         if (need == 0 || mem_size < need) return -1;
     }
 
-    int hop = (hop_size > 0) ? hop_size : block_size / 2;
     memset(p, 0, sizeof(*p));
     pbfdaf_compute_sizes(hop, &p->hop_size, &p->block_size,
                          &p->fft_size, &p->n_freqs);
@@ -738,7 +740,10 @@ int pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
     /* Set early (before any malloc below) so pbfdkf_free(p) is safe to call
      * from the OOM path even if the very first allocation fails -- see
      * pbfdaf_init's identical reasoning. */
-    if (!p) return -1;
+    int hop;
+    if (!p || sample_rate <= 0) return -1;
+    hop = (hop_size > 0) ? hop_size : block_size / 2;
+    if (hop <= 0) return -1;
     p->is_static = 0;
     if (pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size, 0,
                      sample_rate) != 0)
@@ -805,7 +810,10 @@ int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                          int block_size, int n_partitions,
                          float mu, float delta, int hop_size,
                          int sample_rate, FftHandle* shared_fft) {
-    if (!p || !mem || !shared_fft) return -1;
+    int hop;
+    if (!p || !mem || !shared_fft || sample_rate <= 0) return -1;
+    hop = (hop_size > 0) ? hop_size : block_size / 2;
+    if (hop <= 0) return -1;
     /* F07: reject a misaligned pool base before any pool write (see the
      * matching guard in pbfdaf_init_static above). */
     if (!MEM_IS_ALIGNED16(mem)) return -1;

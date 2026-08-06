@@ -3,7 +3,9 @@
  *
  * AEC3 source operates on int16 PSD scale (PSD ~ int16^2 up to 32768^2) and
  * 4 ms blocks (kBlockSize = 64 @ 16 kHz). Our pipeline runs on float[-1,1] PSD
- * scale and a config hop_size (default 160 @ 16 kHz, 50% overlap frame=2*hop).
+ * scale and the live config hop_size (50% overlap, frame=2*hop). Constants
+ * explicitly labelled as project-native below retain their legacy 16 kHz /
+ * hop=160 authoring grid; that is not the current production default.
  * NEVER paste a raw int16 PSD threshold or 4 ms-block count into ported code —
  * route it through here so the conversion is explicit and uniform.
  *

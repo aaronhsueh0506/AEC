@@ -444,19 +444,87 @@ static void test_multi_rate_valid_smoke(void) {
  * filter full of NaN, reported by nothing. */
 static void test_direct_init_rejects_bad_rate(void) {
     PBFDAF f;
+    PBFDAF f_before;
     PBFDKF k;
+    PBFDKF k_before;
     Saturation s;
 
+    memset(&f, 0xA5, sizeof(f));
+    memcpy(&f_before, &f, sizeof(f));
     CHECK(pbfdaf_init(&f, 256, 4, 0.3f, 1e-6f, 128, 0, 0) == -1,
           "pbfdaf_init(sample_rate=0) == -1");
+    CHECK(memcmp(&f, &f_before, sizeof(f)) == 0,
+          "pbfdaf_init(sample_rate=0) writes no instance state");
     CHECK(pbfdaf_init(&f, 256, 4, 0.3f, 1e-6f, 128, 0, -16000) == -1,
           "pbfdaf_init(sample_rate<0) == -1");
+    CHECK(pbfdaf_init(&f, 0, 4, 0.3f, 1e-6f, 0, 0, 16000) == -1,
+          "pbfdaf_init(resolved hop=0) == -1");
     CHECK(pbfdaf_init(NULL, 256, 4, 0.3f, 1e-6f, 128, 0, 16000) == -1,
           "pbfdaf_init(NULL) == -1");
+
+    memset(&k, 0xA5, sizeof(k));
+    memcpy(&k_before, &k, sizeof(k));
     CHECK(pbfdkf_init(&k, 256, 4, 0.3f, 1e-6f, 128, 0) == -1,
           "pbfdkf_init(sample_rate=0) == -1");
+    CHECK(memcmp(&k, &k_before, sizeof(k)) == 0,
+          "pbfdkf_init(sample_rate=0) writes no instance state");
+    CHECK(pbfdkf_init(&k, 0, 4, 0.3f, 1e-6f, 0, 16000) == -1,
+          "pbfdkf_init(resolved hop=0) == -1");
     CHECK(pbfdkf_init(NULL, 256, 4, 0.3f, 1e-6f, 128, 16000) == -1,
           "pbfdkf_init(NULL) == -1");
+
+    /* The pool-first variants are separate public entry points. They must
+     * enforce the same grid precondition before touching either the instance
+     * or caller-owned pool; relying on the heap constructor's guard does not
+     * protect these paths. */
+    {
+        size_t af_bytes = pbfdaf_get_mem_size(256, 4, 128, 0);
+        size_t kf_bytes = pbfdkf_get_mem_size(256, 4, 128);
+        size_t pool_bytes = af_bytes > kf_bytes ? af_bytes : kf_bytes;
+        unsigned char* raw = (unsigned char*)malloc(pool_bytes + 15u);
+        unsigned char* snapshot = (unsigned char*)malloc(pool_bytes);
+        unsigned char* pool = raw ? (unsigned char*)
+            (((uintptr_t)raw + 15u) & ~(uintptr_t)15u) : NULL;
+        FftHandle* shared_fft = fft_create(256);
+
+        CHECK(raw != NULL && snapshot != NULL && shared_fft != NULL,
+              "static direct-init guard test setup");
+        if (raw && snapshot && shared_fft) {
+            memset(pool, 0xA5, pool_bytes);
+            memcpy(snapshot, pool, pool_bytes);
+            memset(&f, 0xA5, sizeof(f));
+            memcpy(&f_before, &f, sizeof(f));
+            CHECK(pbfdaf_init_static(&f, pool, af_bytes, 256, 4,
+                                     0.3f, 1e-6f, 128, 0, 0,
+                                     shared_fft) == -1,
+                  "pbfdaf_init_static(sample_rate=0) == -1");
+            CHECK(memcmp(&f, &f_before, sizeof(f)) == 0 &&
+                  memcmp(pool, snapshot, pool_bytes) == 0,
+                  "pbfdaf_init_static bad grid writes neither instance nor pool");
+
+            memset(&k, 0xA5, sizeof(k));
+            memcpy(&k_before, &k, sizeof(k));
+            CHECK(pbfdkf_init_static(&k, pool, kf_bytes, 256, 4,
+                                     0.3f, 1e-6f, 128, 0,
+                                     shared_fft) == -1,
+                  "pbfdkf_init_static(sample_rate=0) == -1");
+            CHECK(memcmp(&k, &k_before, sizeof(k)) == 0 &&
+                  memcmp(pool, snapshot, pool_bytes) == 0,
+                  "pbfdkf_init_static bad grid writes neither instance nor pool");
+
+            CHECK(pbfdaf_init_static(&f, pool, af_bytes, 0, 4,
+                                     0.3f, 1e-6f, 0, 0, 16000,
+                                     shared_fft) == -1,
+                  "pbfdaf_init_static(resolved hop=0) == -1");
+            CHECK(pbfdkf_init_static(&k, pool, kf_bytes, 0, 4,
+                                     0.3f, 1e-6f, 0, 16000,
+                                     shared_fft) == -1,
+                  "pbfdkf_init_static(resolved hop=0) == -1");
+        }
+        if (shared_fft) fft_destroy(shared_fft);
+        free(snapshot);
+        free(raw);
+    }
 
     /* A valid rate must still succeed -- otherwise the guard above would be
      * indistinguishable from "always fails". */

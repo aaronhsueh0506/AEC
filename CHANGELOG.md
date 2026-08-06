@@ -211,8 +211,9 @@ chain with the v3.22 split min-gain floor.
     exact baseline→candidate diff and the harness are checked in under
     `eval/ab_evidence/2026-08-06-adaptation-retiming/`.
 
-18. **`pbfdaf_init()` / `pbfdkf_init()` now reject a non-positive
-    `sample_rate`, `hop_size`, or NULL instance** with `-1`, writing nothing.
+18. **`pbfdaf_init()` / `pbfdkf_init()` and their `_static()` counterparts
+    now reject a non-positive `sample_rate`, resolved hop, or NULL instance**
+    with `-1`, writing nothing to either the instance or caller-owned pool.
     These are public API sitting under `aec_create()`'s validator, and since
     (17) `sample_rate` is load-bearing there. *Migration*: direct callers must
     pass a real sample rate; `0` no longer means "don't care". `saturation_init()`
@@ -956,9 +957,9 @@ at every grid". They are the reason this release carries an `rc` marker.
   48 kHz grid adds. A formal 48 kHz release needs native recordings.
 
 - **The 800-case bench has not been re-run for this release.** The retiming
-  batches used a 90-case blind subset. Items (11)–(14) of ⚠ BREAKING carry
-  their own "not yet through the 800-case bench" notes and are unchanged by
-  this entry.
+  batches used a 90-case blind subset. Breaking items (8) and (9), plus the
+  16 kHz default-grid change under "Changed", alter production output and
+  still require the full release benchmark.
 
 - **Wall-clock retiming is validated as timing, not as tuning.** Every constant
   now covers the same wall-clock span at every grid, which is the property the

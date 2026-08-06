@@ -192,7 +192,8 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
  * across ALL borrowers of shared_fft at any time, and no borrower may retain
  * a pointer into the handle's internal scratch across calls. F04: returns 0
  * on success, -1 if the pool base/size checks reject the inputs (F05/F07,
- * nothing written to `mem`) or shared_fft is NULL. */
+ * nothing written to `mem`), shared_fft is NULL, or sample_rate/resolved hop
+ * is non-positive. Invalid arguments are rejected before writing `p` or mem. */
 int    pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
                            float mu, float delta, int hop_size,
@@ -285,7 +286,9 @@ size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size);
 /* shared_fft: forwarded verbatim to the base filter's pbfdaf_init_static() —
  * see that function's doc comment (REQUIRED, non-NULL, borrowed not
  * owned). F04: returns 0 on success, -1 if the pool base/size checks reject
- * the inputs (F05/F07, nothing written to `mem`) or shared_fft is NULL. */
+ * the inputs (F05/F07, nothing written to `mem`), shared_fft is NULL, or
+ * sample_rate/resolved hop is non-positive. Invalid arguments are rejected
+ * before writing `p` or mem. */
 int    pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
                            float mu, float delta, int hop_size,
