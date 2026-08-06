@@ -63,6 +63,35 @@ rows.append({
         "separately (see the EPC/P3f entries).",
 })
 
+# ── 2026-08-07 field findings that supersede the original adjudication ──────
+# Established by the alpha_power A/B (eval/ab_evidence/2026-08-07-alpha-power):
+# `power[]` is written by the EMA and read at exactly one site -- its own
+# cold-start guard -- in BOTH ports. Changing its coefficient produces
+# byte-identical output across 90 cases at two grids. The constant is real and
+# now correctly retimed, but it is dead for audio, so it belongs in the
+# auxiliary batch (parity + goldens, no AECMOS), not an audio batch.
+_ALPHA_POWER_NOTE = (
+    " FIELD FINDING 2026-08-07: retimed and now correctly consumed by the EMA "
+    "(5232ab6), but AUDIO-DEAD -- power[] is read only by its own cold-start "
+    "guard in both ports, and the 90-case two-grid A/B produced byte-identical "
+    "output. Belongs in the auxiliary/dead-output batch: needs C/Python parity "
+    "and golden coverage, does not need AECMOS."
+)
+for _r in rows:
+    if "alpha_power" in _r["name"]:
+        _r["reasoning"] = _r.get("reasoning", "") + _ALPHA_POWER_NOTE
+    if "_alpha_r" in _r["name"] or "alpha_r" == _r["name"]:
+        _r["reasoning"] = _r.get("reasoning", "") + (
+            " FIELD FINDING 2026-08-07: anchor re-adjudicated from 16 ms to "
+            "10 ms (TC 194.96 ms) and the C live path wired to the retimed "
+            "field. AUDIO-DEAD, same as alpha_power: error_psd's only consumer "
+            "is the scalar-fallback branch of the H_error refresh, which the "
+            "source itself marks 'Not exercised in production: orchestrator "
+            "sets e2_coarse_per_bin every hop'. The live per-bin branch reads "
+            "error_spec directly and never touches the smoothed error_psd. "
+            "90-case two-grid A/B: byte-identical. Auxiliary batch."
+        )
+
 # ── categories (exclusive, ordered) ─────────────────────────────────────────
 # Split the original single 'keep-event-count' bucket: a counter whose span is
 # duty-cycle dependent is NOT the same thing as an EMA running on a fixed

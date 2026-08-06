@@ -1,0 +1,151 @@
+commit d7e94f7e101889e4101a874ebfa270f338818ed0
+Author: aaron <aaron.hsueh@explorers-residence.com>
+Date:   Fri Aug 7 07:32:04 2026 +0800
+
+    fix: alpha_r bypass, on the 10 ms anchor
+    
+    Two changes, both required for the constant to mean anything.
+    
+    ANCHOR: 16 ms -> 10 ms. alpha_r = 0.95 was authored at e9cb383 (2026-03-20)
+    when the default was frame 512 / hop 256, so 16 ms looked like its reference.
+    But the default moved to frame 320 / hop 160 thirteen days later (83ced18,
+    2026-04-02) and every commit that has touched or validated it since -- 5407e71's
+    RES/Kalman C-parity round and the 800-case rounds after it -- kept 0.95 on the
+    10 ms grid. The anchor rule is the last grid the value was actually MEASURED
+    on, not the one it was first typed on, so the reference is hop=160/16000 and
+    the wall-clock TC is 194.96 ms, not 311.93 ms.
+    
+    BYPASS: the live error-PSD EMA now reads p->alpha_r. It hardcoded 0.95f while
+    pbfdkf_init() computed the retimed value into a field nothing consumed --
+    identical to the alpha_power bypass fixed in 5232ab6, in the same file.
+    
+    Unlike alpha_power, this one reaches audio. p->error_psd feeds e2_ref_sum ->
+    use_converged -> the leakage rate applied to H_error_per_bin (pbfdkf.c:986,
+    filters.py:911), which is the filter's adaptation gain. So this needs its own
+    A/B; alpha_power did not, for reasons recorded in its evidence directory.
+    
+    Effective values, both ports, all four grids:
+      8k/256    0.921208    16k/256   0.959796
+      16k/512   0.921208    48k/1024  0.946757
+    
+    Test targets moved with the anchor. alpha_r leaves the 16 ms identity block in
+    test_rate_structural (d2) and the Python effective-value suite, and gains the
+    opposite assertion: at a 16 ms grid it must now MOVE. That check is what fails
+    if the anchor is ever silently reverted to 256/16000, which is the specific
+    mistake this commit corrects.
+    
+    Verification: rate-structural 292, config-validation 160, detectors-parity
+    PASS, Python 88.
+
+ c_impl/src/pbfdkf.c                                | 23 ++++++++++------------
+ c_impl/test/test_rate_structural.c                 | 11 +++++++++--
+ python/modules/filters.py                          | 15 ++++++++------
+ .../tests/test_detector_timing_effective_values.py |  7 ++++---
+ 4 files changed, 32 insertions(+), 24 deletions(-)
+commit d7e94f7e101889e4101a874ebfa270f338818ed0
+Author: aaron <aaron.hsueh@explorers-residence.com>
+Date:   Fri Aug 7 07:32:04 2026 +0800
+
+    fix: alpha_r bypass, on the 10 ms anchor
+    
+    Two changes, both required for the constant to mean anything.
+    
+    ANCHOR: 16 ms -> 10 ms. alpha_r = 0.95 was authored at e9cb383 (2026-03-20)
+    when the default was frame 512 / hop 256, so 16 ms looked like its reference.
+    But the default moved to frame 320 / hop 160 thirteen days later (83ced18,
+    2026-04-02) and every commit that has touched or validated it since -- 5407e71's
+    RES/Kalman C-parity round and the 800-case rounds after it -- kept 0.95 on the
+    10 ms grid. The anchor rule is the last grid the value was actually MEASURED
+    on, not the one it was first typed on, so the reference is hop=160/16000 and
+    the wall-clock TC is 194.96 ms, not 311.93 ms.
+    
+    BYPASS: the live error-PSD EMA now reads p->alpha_r. It hardcoded 0.95f while
+    pbfdkf_init() computed the retimed value into a field nothing consumed --
+    identical to the alpha_power bypass fixed in 5232ab6, in the same file.
+    
+    Unlike alpha_power, this one reaches audio. p->error_psd feeds e2_ref_sum ->
+    use_converged -> the leakage rate applied to H_error_per_bin (pbfdkf.c:986,
+    filters.py:911), which is the filter's adaptation gain. So this needs its own
+    A/B; alpha_power did not, for reasons recorded in its evidence directory.
+    
+    Effective values, both ports, all four grids:
+      8k/256    0.921208    16k/256   0.959796
+      16k/512   0.921208    48k/1024  0.946757
+    
+    Test targets moved with the anchor. alpha_r leaves the 16 ms identity block in
+    test_rate_structural (d2) and the Python effective-value suite, and gains the
+    opposite assertion: at a 16 ms grid it must now MOVE. That check is what fails
+    if the anchor is ever silently reverted to 256/16000, which is the specific
+    mistake this commit corrects.
+    
+    Verification: rate-structural 292, config-validation 160, detectors-parity
+    PASS, Python 88.
+
+diff --git a/c_impl/src/pbfdkf.c b/c_impl/src/pbfdkf.c
+index dddff7e..768430d 100644
+--- a/c_impl/src/pbfdkf.c
++++ b/c_impl/src/pbfdkf.c
+@@ -708,11 +708,11 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
+         p->erl_per_bin[k] = 0.1f;
+         p->e2_coarse_per_bin[k] = 0.0f;
+     }
+-    /* Measurement-noise PSD EMA, per hop. NOTE the reference grid is
+-     * hop=256/16000 (16 ms), NOT the 10 ms grid used above: authored by
+-     * commit e9cb383, whose config declared frame_size=512/hop_size=256.
+-     * Retiming off 10 ms would be wrong by 1.6x. Mirrors filters.py. */
+-    p->alpha_r = aec3_growth_rehop(0.95f, 256, 16000,
++    /* Measurement-noise PSD EMA, per hop. 10 ms reference (TC 194.96 ms):
++     * authored at 16 ms (e9cb383) but the default moved to 10 ms 13 days
++     * later and every validating commit since kept 0.95 there. Anchor is the
++     * last grid it was measured on. Mirrors filters.py. */
++    p->alpha_r = aec3_growth_rehop(0.95f, 160, 16000,
+                                    p->base.hop_size, p->base.sample_rate);
+     p->h_error_floor = (float)AEC3_H_ERROR_FLOOR_FLOAT;
+     p->h_error_ceil  = (float)AEC3_H_ERROR_CEIL_FLOAT;
+@@ -1139,14 +1139,11 @@ void pbfdkf_process(PBFDKF* p,
+          * _error_psd = _alpha_r*_error_psd + (1-_alpha_r)*error_psd.
+          * float32-by-design (the old double-promotion parity nuance is retired).
+          *
+-         * KNOWN PARITY BREAK: p->alpha_r is retimed at init and read by
+-         * nothing, while Python (filters.py:735) uses its retimed value, so
+-         * the ports disagree at 16k/256 and 48k/1024. Not wired yet: doing so
+-         * would commit both ports to an unadjudicated 16 ms anchor, and a
+-         * settled-looking wrong anchor is worse than a visible divergence.
+-         * Tracked in docs/timing_constant_inventory.md. */
+-        const float ar = 0.95f;
+-        const float oar = 1.0f - 0.95f;
++         * Reads p->alpha_r (grid-retimed at init, 10 ms anchor). Must NOT be
++         * a literal: a hardcoded 0.95f here bypassed the retimed field until
++         * 2026-08-07, exactly as alpha_power did above. */
++        const float ar = p->alpha_r;
++        const float oar = 1.0f - p->alpha_r;
+         for (int k = 0; k < K; ++k) {
+             p->error_psd[k] = ar * p->error_psd[k] + oar * e2_ref[k];
+             p->R[k] = (p->error_psd[k] > b->delta) ? p->error_psd[k] : (float)b->delta;
+diff --git a/python/modules/filters.py b/python/modules/filters.py
+index a7ed1a2..d5e65a1 100644
+--- a/python/modules/filters.py
++++ b/python/modules/filters.py
+@@ -537,13 +537,16 @@ class PBFDKF(PBFDAF):
+         # R: measurement noise PSD (estimated from error)
+         self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
+         self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
+-        # Measurement-noise PSD EMA, per hop. NOTE the reference grid is
+-        # hop=256/16000 (16 ms), NOT the 10 ms grid the older constants
+-        # use: this was authored by commit e9cb383 (2026-03-20), whose
+-        # config declared frame_size=512/hop_size=256. Retiming it off
+-        # 10 ms would be wrong by 1.6x.
++        # Measurement-noise PSD EMA, per hop. Reference grid is hop=160/16000
++        # (10 ms), TC 194.96 ms. It was AUTHORED at 16 ms (e9cb383,
++        # 2026-03-20, frame_size=512/hop_size=256) but the default moved to
++        # 10 ms 13 days later (83ced18) and every commit that has touched or
++        # validated it since -- 5407e71's RES/Kalman C-parity round and the
++        # 800-case rounds after it -- kept 0.95 on the 10 ms grid. The anchor
++        # is the last grid the value was actually measured on, not the one it
++        # was first typed on.
+         self._alpha_r = aec3_scale.growth_rehop(
+-            0.95, 256, 16000, self.hop_size, self.sample_rate)
++            0.95, 160, 16000, self.hop_size, self.sample_rate)
+ 
+         # AEC3 startup / poor-excitation / saturation gates
+         # (refined_filter_update_gain.cc:96-99). Orchestrator sets

@@ -1,0 +1,107 @@
+commit 5232ab65587fdea6cc09a23ec131dfe063dce90e
+Author: aaron <aaron.hsueh@explorers-residence.com>
+Date:   Thu Aug 6 22:49:38 2026 +0800
+
+    fix: the retimed alpha_power never reached the audio path (C/Python divergence)
+    
+    pbfdaf_init_scalars() has computed a grid-retimed p->alpha_power since dc31dd2.
+    The far-power EMA in pbfdaf_frontend() read a hardcoded 0.9f. The field was
+    set, was asserted on by test_rate_structural check (d2), and was consumed by
+    nothing.
+    
+    I introduced this in dc31dd2: that commit retimed Python's self.alpha_power
+    (filters.py:291, live) and computed C's p->alpha_power (set, dead), and I then
+    verified "C matches Python on all four grids" by comparing the STRUCT FIELDS.
+    The fields did match. The audio paths did not:
+    
+      grid          Python   C (was)   delta
+      8000/256      0.844866  0.9      -0.055
+      16000/256     0.919166  0.9      +0.019   <- production default
+      16000/512     0.844866  0.9      -0.055
+      48000/1024    0.893701  0.9      -0.006
+    
+    Two gates should have caught it and neither could. Check (d2) asserts the value
+    an instance ENDS UP WITH, which is necessary but not sufficient -- it cannot
+    distinguish a field the audio path reads from one it ignores. parity_pbfdkf.c,
+    which compares the actual EMA output against the Python reference, was moved to
+    test/historical/ during the release cleanup and wired to no Makefile target, so
+    the one gate that compared behaviour rather than storage stopped running in the
+    same release that introduced the divergence.
+    
+    New check (d4) closes the class by measuring the coefficient the EMA ACTUALLY
+    applied, recovered from the filter's own state across one hop of constant
+    far-end:
+    
+        a = (power_new - far_psd) / (power_old - far_psd)
+    
+    It never reads the coefficient, so it cannot be satisfied by a field nothing
+    consumes. Mutation-tested: restoring the 0.9f literal fails all four grids with
+    the measured value printed as 0.900000 against the expected retimed value,
+    while (d2) stays green -- which is exactly the blind spot, demonstrated.
+    
+    alpha_r has the identical bypass and is DELIBERATELY LEFT DIVERGED, with the
+    reasoning recorded at the site. Wiring it would restore parity but would also
+    commit both ports to a 16 ms authoring anchor (e9cb383) that has not been
+    adjudicated against the alternative 10 ms reading. Syncing a wrong anchor to
+    both ends is worse than a visible divergence, because it looks settled.
+    
+    Verification: rate-structural 284 (was 272), config-validation 160,
+    static-aec byte-equal, zero-heap, detectors-parity, process-context all PASS,
+    Python 77.
+
+diff --git a/c_impl/src/pbfdkf.c b/c_impl/src/pbfdkf.c
+index ea360ac..10fb415 100644
+--- a/c_impl/src/pbfdkf.c
++++ b/c_impl/src/pbfdkf.c
+@@ -496,12 +496,23 @@ static float pbfdaf_frontend(PBFDAF* p,
+         /* cold start: power = np.abs(far_spec)**2 (already computed above) */
+         memcpy(p->power, far_cmag2, (size_t)K * sizeof(float));
+     } else {
+-        /* power = alpha_power*power + (1-alpha_power)*far_psd; alpha_power=0.9,
++        /* power = alpha_power*power + (1-alpha_power)*far_psd.
+          * float32-by-design -- textually identical to sk_ema_cmag2_f32_scalar's
+          * own combine (state[i]=alpha*state[i]+beta*mag2), matching the
+-         * e2_ref/error_psd precedent below (pbfdkf.c e2_ref_scratch dedup). */
+-        const float a = 0.9f;
+-        const float b = 1.0f - 0.9f;
++         * e2_ref/error_psd precedent below (pbfdkf.c e2_ref_scratch dedup).
++         *
++         * MUST read p->alpha_power, not the 0.9f literal. This line hardcoded
++         * 0.9f until 2026-08-06 while pbfdaf_init_scalars() dutifully computed
++         * the retimed value into p->alpha_power -- so the field was set, was
++         * asserted on by the effective-value test, and was read by nothing.
++         * Python (filters.py:291) had already switched to its retimed
++         * self.alpha_power, so the two ports silently diverged at every grid
++         * (up to -0.055 at 8k/256 and 16k/512). Nothing caught it: the
++         * effective-value test compares the FIELD, and parity_pbfdkf.c -- the
++         * gate that compares the actual EMA output -- had been moved to
++         * test/historical/ and wired to no Makefile target. */
++        const float a = p->alpha_power;
++        const float b = 1.0f - p->alpha_power;
+         for (int k = 0; k < K; ++k)
+             p->power[k] = a * p->power[k] + b * far_cmag2[k];
+     }
+@@ -1132,8 +1143,21 @@ void pbfdkf_process(PBFDKF* p,
+         /* error_psd EMA + R = max(error_psd, delta).
+          * error_psd = |error_spec|**2;
+          * _error_psd = _alpha_r*_error_psd + (1-_alpha_r)*error_psd.
+-         * alpha_r=0.95, float32-by-design (the old double-promotion parity
+-         * nuance is retired). */
++         * float32-by-design (the old double-promotion parity nuance is retired).
++         *
++         * KNOWN PARITY BREAK, DELIBERATELY NOT FIXED YET. Same bypass as
++         * alpha_power above: p->alpha_r is computed by pbfdkf_init() and read
++         * by nothing, while Python (filters.py:735) already uses its retimed
++         * self._alpha_r. C and Python therefore disagree at 16k/256 (0.950 vs
++         * 0.975) and 48k/1024 (0.950 vs 0.966); they agree at 8k/256 and
++         * 16k/512, whose 16 ms hop is the identity point.
++         *
++         * Wiring p->alpha_r here would restore parity but would also commit
++         * BOTH ports to a 16 ms authoring anchor (e9cb383, frame 512/hop 256)
++         * that has not been adjudicated against the alternative 10 ms reading
++         * -- and syncing a wrong anchor to both ends is strictly worse than a
++         * visible divergence, because it looks settled. Adjudicate the anchor
++         * first, then wire it. Tracked in docs/timing_constant_inventory.md. */
+         const float ar = 0.95f;
+         const float oar = 1.0f - 0.95f;
+         for (int k = 0; k < K; ++k) {

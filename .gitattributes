@@ -1,0 +1,6 @@
+
+# Archived A/B evidence: these are verbatim captures of `git show` output and
+# must stay byte-faithful to the commit they document. C comment blocks carry
+# trailing spaces on ` * ` continuation lines, so whitespace checks would flag
+# them forever. Exempt the artifacts, not the sources.
+eval/ab_evidence/**/*.diff -whitespace
