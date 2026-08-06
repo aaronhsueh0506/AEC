@@ -445,7 +445,15 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
         if (r2_half > ratio) ratio = r2_half;
     }
     float alpha;
-    if (ratio < a->simple_mu_ratio) { alpha = 0.3f; a->simple_mu_holdoff = 20; }
+    if (ratio < a->simple_mu_ratio) {
+        alpha = 0.3f;
+        /* F2.4: arm the holdoff only on a FRESH double-talk onset. Ongoing DT
+         * must not re-arm it, or marginal-DT oscillation re-arms every hop and
+         * mu never releases. Mirrors orchestrator.py -- see the regression note
+         * there: the guard was lost in 2f3699f (2026-05-27) on both sides and
+         * restored 2026-08-06. 20 hops is NOT retimed yet. */
+        if (a->simple_mu_holdoff == 0) a->simple_mu_holdoff = 20;
+    }
     else if (a->simple_mu_holdoff > 0) { a->simple_mu_holdoff--; alpha = 0.99f; }
     else alpha = 0.95f;
     a->simple_mu_ratio = alpha * a->simple_mu_ratio + (1.0f - alpha) * ratio;

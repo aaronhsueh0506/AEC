@@ -1329,7 +1329,22 @@ class AEC:
             # reset during the holdoff window — marginal DT oscillation keeps
             # resetting holdoff to 20 so mu never releases.
             alpha = 0.3
-            self._simple_mu_holdoff = 20  # hold low for ~20 frames (~320ms)
+            # REGRESSION 2026-05-27 .. 2026-08-06: this guard was lost in
+            # 2f3699f. That commit collapsed the legacy-flag branch
+            #     if not self.config.mu_holdoff_no_reset or self._simple_mu_holdoff == 0:
+            # to an unconditional assignment -- but `mu_holdoff_no_reset` was in
+            # _LEGACY_HARDCODE_TRUE, so the live branch was `holdoff == 0`, and
+            # the cleanup kept the FALSE arm. F2.4's whole point (7b2cf04,
+            # 800-case CONDITIONAL PASS, ratio 0.9x, worst -0.204) is that
+            # ongoing DT must NOT re-arm the counter; without this line marginal
+            # double-talk oscillation re-arms it every hop and mu never releases.
+            if self._simple_mu_holdoff == 0:
+                # 20 hops. NOT retimed yet -- see the timing inventory. The
+                # "~320ms" this comment used to claim was correct only at
+                # d774771's frame 512 / hop 256 grid; F2.4 validated it at
+                # hop 160 (10 ms), i.e. 200 ms, and today's default hop 128
+                # makes it 160 ms.
+                self._simple_mu_holdoff = 20
         elif self._simple_mu_holdoff > 0:
             # Holdoff active: keep ratio low, don't release yet
             self._simple_mu_holdoff -= 1

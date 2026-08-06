@@ -1086,6 +1086,90 @@ static void test_adaptation_constant_retiming(void) {
     }
 }
 
+/* ── (d3) F2.4 mu-holdoff re-arm regression ─────────────────────────────
+ * The holdoff counter must arm only on a FRESH double-talk onset. Ongoing DT
+ * must let it run down, or marginal-DT oscillation re-arms it every hop and
+ * the adaptation step size never releases.
+ *
+ * This shipped correct, was silently reverted by a "remove dead flag branches"
+ * cleanup (2f3699f, 2026-05-27) that collapsed
+ *     if (!cfg.mu_holdoff_no_reset || holdoff == 0)
+ * to an unconditional arm -- keeping the arm the flag had DISABLED, because
+ * mu_holdoff_no_reset lived in _LEGACY_HARDCODE_TRUE -- and stayed reverted for
+ * ten weeks in both ports. Nothing caught it: the counter is internal state, no
+ * test asserted on it, and a mu freeze under marginal DT does not move a bucket
+ * average enough to break the benchmark.
+ *
+ * The observable signature is exact and stimulus-independent: with the guard,
+ * the counter only ever goes 0 -> armed, or n -> n-1. Without it, a hop inside
+ * an active window jumps it back UP (measured: ... 18, 20, 19 ...). So the
+ * assertion is "an increase is legal only from zero" -- no threshold, no
+ * tolerance, and it cannot be satisfied by a stimulus that simply fails to
+ * reach the branch, because coverage is asserted separately below. */
+static void test_mu_holdoff_rearm_guard(void) {
+    const int N_HOPS = 120;
+
+    for (int r = 0; r < N_GRIDS; ++r) {
+        int sr = GRIDS[r].sample_rate;
+        int fft = GRIDS[r].fft_size;
+        AecConfig cfg;
+        Aec aec;
+        char what[192];
+
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        cfg.fft_size = fft;
+        int rc = aec_create(&aec, &cfg);
+        snprintf(what, sizeof(what), "sr=%d fft=%d: aec_create() for holdoff test", sr, fft);
+        CHECK(rc == 0, what);
+        if (rc != 0) continue;
+
+        int hop = aec_hop_size(&aec);
+        float *mic = (float*)malloc((size_t)hop * sizeof(float));
+        float *far = (float*)malloc((size_t)hop * sizeof(float));
+        float *out = (float*)malloc((size_t)hop * sizeof(float));
+        if (!mic || !far || !out) { free(mic); free(far); free(out); aec_destroy(&aec); continue; }
+
+        int prev = aec.simple_mu_holdoff;
+        int illegal_rearm = 0, armed_hops = 0, saw_decrement = 0;
+
+        g_lcg_state = 0x4632u + (unsigned)r;
+        for (int h = 0; h < N_HOPS; ++h) {
+            /* Near-end dominant with a small far-end: far_power << error_power,
+             * so ratio stays below simple_mu_ratio and every hop takes the
+             * attack branch -- the exact condition the guard governs. */
+            for (int i = 0; i < hop; ++i) {
+                far[i] = 0.002f * (2.0f * lcg_uniform() - 1.0f);
+                mic[i] = 0.5f   * (2.0f * lcg_uniform() - 1.0f);
+            }
+            aec_process(&aec, mic, far, out);
+
+            int v = aec.simple_mu_holdoff;
+            if (v > prev && prev != 0) illegal_rearm++;   /* the defect */
+            if (v < prev) saw_decrement = 1;
+            if (v > 0) armed_hops++;
+            prev = v;
+        }
+
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: holdoff never re-armed from a nonzero value "
+                 "(%d illegal re-arms)", sr, fft, illegal_rearm);
+        CHECK(illegal_rearm == 0, what);
+
+        /* Coverage guards: without these the check above passes trivially on a
+         * stimulus that never arms the counter at all. */
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: stimulus actually armed the holdoff (%d/%d hops)",
+                 sr, fft, armed_hops, N_HOPS);
+        CHECK(armed_hops > 0, what);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: stimulus actually exercised the countdown", sr, fft);
+        CHECK(saw_decrement, what);
+
+        free(mic); free(far); free(out);
+        aec_destroy(&aec);
+    }
+}
+
 static void test_render_activity_first_observation(void) {
     float scratch[16];
     float active[128];
@@ -1123,6 +1207,7 @@ int main(void) {
     test_mem_size_consistency();
     test_top_level_constant_retiming();
     test_adaptation_constant_retiming();
+    test_mu_holdoff_rearm_guard();
     test_render_activity_first_observation();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
