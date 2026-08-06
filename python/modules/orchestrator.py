@@ -672,25 +672,6 @@ class AEC:
         self._p3f_refined_latched = False  # latches true once refined_usable seen
         self._p3f_main_err_baseline = 0.0  # EMA baseline for jump detection
         self._p3f_diverged_streak = 0      # consecutive frames over diverged TH
-        # Previous-frame filter_state cache for state-aware shadow_mu.
-        # Filter-state classifier runs at end of process(); shadow µ
-        # schedule at start needs the previous frame's value.
-        #
-        # `_prev_filter_state` is the INTERNAL P3f-string state machine
-        # (values: 'idle', 'startup', 'diverged', 'suspicious_dt',
-        # 'refined_usable', 'coarse_learning'). Distinct from the PUBLIC
-        # `AecFilterState` enum (CONVERGED / WARMUP / EPC_RECOVERY ...)
-        # returned by `get_filter_state()`. The two state systems serve
-        # different consumers — see B2 docblock at AecStats.filter_state.
-        self._prev_filter_state: str = 'idle'
-
-        # S-orth.A — shadow decoupled state (initialised here regardless of flag;
-        # only *used* when shadow_state_decoupled=True so flag-OFF is byte-equal).
-        # These are initialised to the same values as PBFDKF.__init__ so that
-        # after enabling the flag the first frame starts from the same state.
-        _n_freqs = (self.filter.n_freqs
-                    if hasattr(self.filter, 'n_freqs') else 1)
-
         # Windowed decaying ERLE accumulator for erle_factor (TC ≈ 10s)
         self._erle_window_near = 1e-10
         self._erle_window_err = 1e-10
@@ -708,11 +689,6 @@ class AEC:
 
         # Per-bin mu_scale (updated from RES echo_psd/error_psd each frame)
         self._per_bin_mu_scale = None  # None = use scalar fallback
-
-        # P1 Phase 1 trace state: ring buffer of high-band mic power for
-        # modulation CV^2 metric. 32 frames @ hop=160 @ 16kHz ≈ 320 ms.
-        self._hb_mic_pwr_idx = 0
-        self._hb_mic_pwr_n = 0  # filled-count (≤ 32)
 
         # Diagnostic tracking (per-frame, latest values)
         self._diag = {
@@ -1200,7 +1176,6 @@ class AEC:
         self._p3f_refined_latched = False
         self._p3f_main_err_baseline = 0.0
         self._p3f_diverged_streak = 0
-        self._prev_filter_state = 'idle'
 
         # Diagnostic dict — would otherwise show stale ERLE / DT signals
         for k, v in (('erle_inst', 0.0), ('mu_scale', 1.0), ('far_activity', 0.0),
@@ -2599,8 +2574,6 @@ class AEC:
             self._diag['filter_state'] = str(_filter_state)
             self._diag['usable_linear'] = bool(_usable_linear)
             self._diag['p3f_main_err_baseline'] = float(self._p3f_main_err_baseline)
-            # B6 — cache for next-frame shadow_mu state-aware schedule.
-            self._prev_filter_state = _filter_state
 
             # P3h sustained-diverged filter reset removed (default-OFF NOSHIP).
 
@@ -2860,7 +2833,7 @@ class AEC:
         B2 note: This is the *public* API state (7 values: WARMUP, DIVERGED,
         EPC_RECOVERY, DT_ACTIVE, STATIONARY_FAR, CONVERGED, CONVERGING).
         It is distinct from the internal P3f diagnostic string stored in
-        _diag['filter_state'] / _prev_filter_state which uses a different
+        _diag['filter_state'], which uses a different
         vocabulary ('idle', 'startup', 'diverged', 'suspicious_dt',
         'refined_usable', 'coarse_learning') and is only used inside the
         filter-state computation block and shadow-mu scheduling.

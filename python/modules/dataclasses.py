@@ -28,7 +28,7 @@ class AecStats:
     # B2 note: filter_state is the *public* priority-ranked Kalman state
     # returned by get_filter_state() (AecFilterState enum).  This is distinct
     # from the internal P3f diagnostic string stored in _diag['filter_state']
-    # / _prev_filter_state (values: 'idle', 'startup', 'diverged',
+    # (values: 'idle', 'startup', 'diverged',
     # 'suspicious_dt', 'refined_usable', 'coarse_learning') which is a
     # separate finer-grained state machine used only inside the filter-state
     # computation block.  The two must never be confused.
