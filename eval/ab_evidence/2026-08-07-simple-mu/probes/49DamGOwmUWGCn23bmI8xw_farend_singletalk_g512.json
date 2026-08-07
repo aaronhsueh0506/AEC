@@ -1,0 +1,737 @@
+{
+ "branch_counts": {
+  "base": {
+   "attack_ongoing": 14,
+   "attack_onset": 14,
+   "hold": 271,
+   "release": 942
+  },
+  "cand": {
+   "attack_ongoing": 19,
+   "attack_onset": 15,
+   "hold": 171,
+   "release": 1036
+  }
+ },
+ "branch_transitions": {
+  "base": [
+   [
+    0,
+    "attack_onset"
+   ],
+   [
+    1,
+    "hold"
+   ],
+   [
+    21,
+    "release"
+   ],
+   [
+    24,
+    "attack_onset"
+   ],
+   [
+    25,
+    "attack_ongoing"
+   ],
+   [
+    27,
+    "hold"
+   ],
+   [
+    47,
+    "release"
+   ],
+   [
+    57,
+    "attack_onset"
+   ],
+   [
+    58,
+    "hold"
+   ],
+   [
+    70,
+    "attack_ongoing"
+   ],
+   [
+    71,
+    "hold"
+   ],
+   [
+    79,
+    "attack_onset"
+   ],
+   [
+    80,
+    "attack_ongoing"
+   ],
+   [
+    87,
+    "hold"
+   ],
+   [
+    90,
+    "attack_ongoing"
+   ],
+   [
+    91,
+    "hold"
+   ],
+   [
+    108,
+    "release"
+   ],
+   [
+    366,
+    "attack_onset"
+   ],
+   [
+    367,
+    "attack_ongoing"
+   ],
+   [
+    368,
+    "hold"
+   ],
+   [
+    388,
+    "release"
+   ],
+   [
+    446,
+    "attack_onset"
+   ],
+   [
+    447,
+    "hold"
+   ],
+   [
+    467,
+    "release"
+   ],
+   [
+    617,
+    "attack_onset"
+   ],
+   [
+    618,
+    "hold"
+   ],
+   [
+    638,
+    "release"
+   ],
+   [
+    700,
+    "attack_onset"
+   ],
+   [
+    701,
+    "hold"
+   ],
+   [
+    712,
+    "attack_ongoing"
+   ],
+   [
+    713,
+    "hold"
+   ],
+   [
+    722,
+    "release"
+   ],
+   [
+    792,
+    "attack_onset"
+   ],
+   [
+    793,
+    "hold"
+   ],
+   [
+    813,
+    "release"
+   ],
+   [
+    853,
+    "attack_onset"
+   ],
+   [
+    854,
+    "hold"
+   ],
+   [
+    874,
+    "release"
+   ],
+   [
+    991,
+    "attack_onset"
+   ],
+   [
+    992,
+    "attack_ongoing"
+   ],
+   [
+    993,
+    "hold"
+   ],
+   [
+    1013,
+    "release"
+   ],
+   [
+    1019,
+    "attack_onset"
+   ],
+   [
+    1020,
+    "hold"
+   ],
+   [
+    1040,
+    "release"
+   ],
+   [
+    1071,
+    "attack_onset"
+   ],
+   [
+    1072,
+    "hold"
+   ],
+   [
+    1092,
+    "release"
+   ],
+   [
+    1229,
+    "attack_onset"
+   ],
+   [
+    1230,
+    "hold"
+   ]
+  ],
+  "cand": [
+   [
+    0,
+    "attack_onset"
+   ],
+   [
+    1,
+    "hold"
+   ],
+   [
+    13,
+    "release"
+   ],
+   [
+    22,
+    "attack_onset"
+   ],
+   [
+    23,
+    "hold"
+   ],
+   [
+    24,
+    "attack_ongoing"
+   ],
+   [
+    27,
+    "hold"
+   ],
+   [
+    38,
+    "release"
+   ],
+   [
+    56,
+    "attack_onset"
+   ],
+   [
+    57,
+    "attack_ongoing"
+   ],
+   [
+    58,
+    "hold"
+   ],
+   [
+    70,
+    "attack_onset"
+   ],
+   [
+    71,
+    "hold"
+   ],
+   [
+    79,
+    "attack_ongoing"
+   ],
+   [
+    83,
+    "hold"
+   ],
+   [
+    84,
+    "attack_onset"
+   ],
+   [
+    85,
+    "attack_ongoing"
+   ],
+   [
+    87,
+    "hold"
+   ],
+   [
+    90,
+    "attack_ongoing"
+   ],
+   [
+    91,
+    "hold"
+   ],
+   [
+    100,
+    "release"
+   ],
+   [
+    366,
+    "attack_onset"
+   ],
+   [
+    367,
+    "attack_ongoing"
+   ],
+   [
+    368,
+    "hold"
+   ],
+   [
+    380,
+    "release"
+   ],
+   [
+    446,
+    "attack_onset"
+   ],
+   [
+    447,
+    "hold"
+   ],
+   [
+    459,
+    "release"
+   ],
+   [
+    568,
+    "attack_onset"
+   ],
+   [
+    569,
+    "hold"
+   ],
+   [
+    581,
+    "release"
+   ],
+   [
+    617,
+    "attack_onset"
+   ],
+   [
+    618,
+    "hold"
+   ],
+   [
+    630,
+    "release"
+   ],
+   [
+    700,
+    "attack_onset"
+   ],
+   [
+    701,
+    "hold"
+   ],
+   [
+    712,
+    "attack_ongoing"
+   ],
+   [
+    713,
+    "hold"
+   ],
+   [
+    714,
+    "release"
+   ],
+   [
+    792,
+    "attack_onset"
+   ],
+   [
+    793,
+    "hold"
+   ],
+   [
+    805,
+    "release"
+   ],
+   [
+    991,
+    "attack_onset"
+   ],
+   [
+    992,
+    "attack_ongoing"
+   ],
+   [
+    993,
+    "hold"
+   ],
+   [
+    1005,
+    "release"
+   ],
+   [
+    1019,
+    "attack_onset"
+   ],
+   [
+    1020,
+    "hold"
+   ],
+   [
+    1032,
+    "release"
+   ],
+   [
+    1071,
+    "attack_onset"
+   ],
+   [
+    1072,
+    "hold"
+   ],
+   [
+    1084,
+    "release"
+   ],
+   [
+    1229,
+    "attack_onset"
+   ],
+   [
+    1230,
+    "hold"
+   ],
+   [
+    1236,
+    "attack_ongoing"
+   ]
+  ]
+ },
+ "bulk_delay_samples": 1398,
+ "d_far_db": -0.4153122392515154,
+ "d_near_db": 3.352056515035063e-05,
+ "d_overall_db": -0.40853296167440667,
+ "far_active_hops": 1235,
+ "far_inactive_hops": 6,
+ "first_divergent_hop": 44,
+ "first_divergent_ms": 704.0,
+ "frame_size": 512,
+ "holdoff_limit": {
+  "base": 20,
+  "cand": null
+ },
+ "hop": 256,
+ "n_hops": 1241,
+ "per_second": [
+  {
+   "base_db": -47.02073472564681,
+   "cand_db": -47.0213504103301,
+   "d_db": -0.0006156846832866647,
+   "erle_base_db": 4.545432763203142,
+   "erle_cand_db": 4.546048447886429,
+   "far_active_frac": 0.9193548387096774,
+   "mu_base": 0.6202407689623529,
+   "mu_cand": 0.672144576925492,
+   "ratio_base": 0.4159464303556935,
+   "ratio_cand": 0.4744088004413249,
+   "t": 0.0
+  },
+  {
+   "base_db": -40.34510302505297,
+   "cand_db": -40.82293736663515,
+   "d_db": -0.47783434158218085,
+   "erle_base_db": 9.434802702559871,
+   "erle_cand_db": 9.912637044142052,
+   "far_active_frac": 1.0,
+   "mu_base": 0.7090094104935871,
+   "mu_cand": 0.7568439641818309,
+   "ratio_base": 0.4802016052377647,
+   "ratio_cand": 0.5437016620017158,
+   "t": 0.992
+  },
+  {
+   "base_db": -59.57789591422913,
+   "cand_db": -59.545207849473805,
+   "d_db": 0.03268806475532862,
+   "erle_base_db": 9.070398077171113,
+   "erle_cand_db": 9.037710012415785,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9618860351117476,
+   "mu_cand": 0.9913499721409949,
+   "ratio_base": 0.9275834667123206,
+   "ratio_cand": 0.9840630477902865,
+   "t": 1.984
+  },
+  {
+   "base_db": -59.49164450526149,
+   "cand_db": -60.470555346929444,
+   "d_db": -0.9789108416679468,
+   "erle_base_db": 25.024130323828576,
+   "erle_cand_db": 26.00304116549652,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9542949684434283,
+   "mu_cand": 0.9642928768782537,
+   "ratio_base": 0.9067222192040113,
+   "ratio_cand": 0.9271744508424683,
+   "t": 2.976
+  },
+  {
+   "base_db": -62.698343597318384,
+   "cand_db": -62.545866119181014,
+   "d_db": 0.15247747813735996,
+   "erle_base_db": 22.176865384497894,
+   "erle_cand_db": 22.02438790636053,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9805146805222689,
+   "mu_cand": 0.9910459934787995,
+   "ratio_base": 0.9629778929923103,
+   "ratio_cand": 0.9835029925521827,
+   "t": 3.968
+  },
+  {
+   "base_db": -54.42582540479592,
+   "cand_db": -52.45034726601074,
+   "d_db": 1.9754781387851852,
+   "erle_base_db": 18.471805769352258,
+   "erle_cand_db": 16.496327630567073,
+   "far_active_frac": 1.0,
+   "mu_base": 0.974686565420318,
+   "mu_cand": 0.9716943743199719,
+   "ratio_base": 0.9384582978782919,
+   "ratio_cand": 0.9309460056026146,
+   "t": 4.96
+  },
+  {
+   "base_db": -57.26190698345074,
+   "cand_db": -56.1006540010289,
+   "d_db": 1.1612529824218463,
+   "erle_base_db": 23.479154013124063,
+   "erle_cand_db": 22.317901030702217,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8334989815425743,
+   "mu_cand": 0.8842371574513388,
+   "ratio_base": 0.6771125849723678,
+   "ratio_cand": 0.7807955975915037,
+   "t": 5.952
+  },
+  {
+   "base_db": -64.42541440608402,
+   "cand_db": -63.44359318145258,
+   "d_db": 0.9818212246314373,
+   "erle_base_db": 7.921800399153848,
+   "erle_cand_db": 6.939979174522409,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9601730426703732,
+   "mu_cand": 0.9642467470669355,
+   "ratio_base": 0.9208055728783732,
+   "ratio_cand": 0.9284907635017375,
+   "t": 6.944
+  },
+  {
+   "base_db": -61.55413024722229,
+   "cand_db": -57.26031178829545,
+   "d_db": 4.293818458926834,
+   "erle_base_db": 31.849022799769315,
+   "erle_cand_db": 27.555204340842483,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9959242701473291,
+   "mu_cand": 0.927343938514303,
+   "ratio_base": 0.9922561132799251,
+   "ratio_cand": 0.8540215064318928,
+   "t": 7.936
+  },
+  {
+   "base_db": -60.534011728295354,
+   "cand_db": -60.23372591952597,
+   "d_db": 0.30028580876938155,
+   "erle_base_db": 26.299156019751532,
+   "erle_cand_db": 25.998870210982155,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9996750817968382,
+   "mu_cand": 0.9683485449530658,
+   "ratio_base": 0.9992139329209887,
+   "ratio_cand": 0.9358362097031185,
+   "t": 8.928
+  },
+  {
+   "base_db": -61.57873749122574,
+   "cand_db": -61.507772438751985,
+   "d_db": 0.07096505247375602,
+   "erle_base_db": 16.905220699167515,
+   "erle_cand_db": 16.834255646693762,
+   "far_active_frac": 0.9838709677419355,
+   "mu_base": 0.9975765140154887,
+   "mu_cand": 0.9834255422589179,
+   "ratio_base": 0.9952934954310078,
+   "ratio_cand": 0.9684914721934033,
+   "t": 9.92
+  },
+  {
+   "base_db": -57.30393576693103,
+   "cand_db": -56.452913032973,
+   "d_db": 0.8510227339580241,
+   "erle_base_db": 25.867512905315824,
+   "erle_cand_db": 25.0164901713578,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8996013978483482,
+   "mu_cand": 0.923328201372518,
+   "ratio_base": 0.797020023873978,
+   "ratio_cand": 0.845978101577622,
+   "t": 10.912
+  },
+  {
+   "base_db": -61.02044458098223,
+   "cand_db": -61.38008649443579,
+   "d_db": -0.35964191345357044,
+   "erle_base_db": 10.413981270565007,
+   "erle_cand_db": 10.773623184018577,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9702748678998759,
+   "mu_cand": 0.9842969309911154,
+   "ratio_base": 0.9413786775310292,
+   "ratio_cand": 0.9678336865759697,
+   "t": 11.904
+  },
+  {
+   "base_db": -57.74943381131539,
+   "cand_db": -61.293989270571316,
+   "d_db": -3.5445554592559203,
+   "erle_base_db": 22.220396634735195,
+   "erle_cand_db": 25.764952093991113,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9800676629629864,
+   "mu_cand": 0.8723644204078055,
+   "ratio_base": 0.9609598537439675,
+   "ratio_cand": 0.7438640214556927,
+   "t": 12.896
+  },
+  {
+   "base_db": -62.266540874677474,
+   "cand_db": -65.37348312793063,
+   "d_db": -3.106942253253153,
+   "erle_base_db": 23.797987935271536,
+   "erle_cand_db": 26.904930188524688,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9935910955988464,
+   "mu_cand": 0.9853488810081958,
+   "ratio_base": 0.9876960357999719,
+   "ratio_cand": 0.9730065397479473,
+   "t": 13.888
+  },
+  {
+   "base_db": -56.36444779259734,
+   "cand_db": -56.47089502557806,
+   "d_db": -0.10644723298072004,
+   "erle_base_db": 19.984404951238485,
+   "erle_cand_db": 20.09085218421921,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9997229953353907,
+   "mu_cand": 0.9999096241405752,
+   "ratio_base": 0.9937060873824727,
+   "ratio_cand": 0.9932254937644708,
+   "t": 14.88
+  },
+  {
+   "base_db": -58.73633696158397,
+   "cand_db": -59.51519928653926,
+   "d_db": -0.7788623249552762,
+   "erle_base_db": 25.299659104268414,
+   "erle_cand_db": 26.078521429223688,
+   "far_active_frac": 1.0,
+   "mu_base": 0.7790432994882723,
+   "mu_cand": 0.8320646003730656,
+   "ratio_base": 0.5610612204978846,
+   "ratio_cand": 0.6700107321473161,
+   "t": 15.872
+  },
+  {
+   "base_db": -63.03311017972402,
+   "cand_db": -63.49725909249461,
+   "d_db": -0.4641489127705895,
+   "erle_base_db": 10.235961505396599,
+   "erle_cand_db": 10.700110418167185,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9346361546609698,
+   "mu_cand": 0.9722995989307789,
+   "ratio_base": 0.8712885578697621,
+   "ratio_cand": 0.9451866585863822,
+   "t": 16.864
+  },
+  {
+   "base_db": -56.10685121196979,
+   "cand_db": -53.81818422530199,
+   "d_db": 2.2886669866677924,
+   "erle_base_db": 26.26072302875782,
+   "erle_cand_db": 23.972056042090028,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8665737952730115,
+   "mu_cand": 0.92360967966941,
+   "ratio_base": 0.7320906869181222,
+   "ratio_cand": 0.847160389308123,
+   "t": 17.856
+  },
+  {
+   "base_db": -65.33832236817898,
+   "cand_db": -62.4932906429066,
+   "d_db": 2.845031725272374,
+   "erle_base_db": 29.744408935609382,
+   "erle_cand_db": 26.899377210337008,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9798856092536351,
+   "mu_cand": 0.9727345239605241,
+   "ratio_base": 0.9610309622645271,
+   "ratio_cand": 0.9295380782438625,
+   "t": 18.848
+  },
+  {
+   "base_db": -53.471934624085094,
+   "cand_db": -56.169493262230674,
+   "d_db": -2.6975586381455825,
+   "erle_base_db": 27.86527942406458,
+   "erle_cand_db": 30.562838062210158,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9821720472473061,
+   "mu_cand": 0.5,
+   "ratio_base": 0.9647006535496659,
+   "ratio_cand": 0.0,
+   "t": 19.84
+  }
+ ],
+ "sample_rate": 16000,
+ "si_sdr": null,
+ "si_sdr_note": "not computable: the corpus ships mic+lpb only, with no clean near-end in any scenario, so any SI-SDR/STOI here would be scored against a reference that still contains the echo. Use d_near_db, and listen.",
+ "stem": "49DamGOwmUWGCn23bmI8xw_farend_singletalk",
+ "stoi": null
+}

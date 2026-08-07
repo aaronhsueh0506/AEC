@@ -1,0 +1,3729 @@
+{
+ "branch_counts": {
+  "base": {
+   "attack_ongoing": 1320,
+   "attack_onset": 71,
+   "hold": 682,
+   "release": 218
+  },
+  "cand": {
+   "attack_ongoing": 1299,
+   "attack_onset": 90,
+   "hold": 628,
+   "release": 274
+  }
+ },
+ "branch_transitions": {
+  "base": [
+   [
+    0,
+    "attack_onset"
+   ],
+   [
+    1,
+    "attack_ongoing"
+   ],
+   [
+    8,
+    "hold"
+   ],
+   [
+    9,
+    "attack_ongoing"
+   ],
+   [
+    11,
+    "hold"
+   ],
+   [
+    12,
+    "attack_ongoing"
+   ],
+   [
+    14,
+    "hold"
+   ],
+   [
+    20,
+    "attack_onset"
+   ],
+   [
+    21,
+    "attack_ongoing"
+   ],
+   [
+    24,
+    "hold"
+   ],
+   [
+    25,
+    "attack_onset"
+   ],
+   [
+    26,
+    "hold"
+   ],
+   [
+    28,
+    "attack_ongoing"
+   ],
+   [
+    31,
+    "hold"
+   ],
+   [
+    32,
+    "attack_onset"
+   ],
+   [
+    33,
+    "attack_ongoing"
+   ],
+   [
+    35,
+    "hold"
+   ],
+   [
+    36,
+    "attack_onset"
+   ],
+   [
+    37,
+    "attack_ongoing"
+   ],
+   [
+    39,
+    "hold"
+   ],
+   [
+    40,
+    "release"
+   ],
+   [
+    41,
+    "attack_onset"
+   ],
+   [
+    42,
+    "attack_ongoing"
+   ],
+   [
+    44,
+    "hold"
+   ],
+   [
+    45,
+    "attack_onset"
+   ],
+   [
+    46,
+    "attack_ongoing"
+   ],
+   [
+    47,
+    "hold"
+   ],
+   [
+    48,
+    "attack_onset"
+   ],
+   [
+    49,
+    "attack_ongoing"
+   ],
+   [
+    50,
+    "hold"
+   ],
+   [
+    51,
+    "attack_onset"
+   ],
+   [
+    52,
+    "attack_ongoing"
+   ],
+   [
+    53,
+    "hold"
+   ],
+   [
+    54,
+    "attack_onset"
+   ],
+   [
+    55,
+    "attack_ongoing"
+   ],
+   [
+    57,
+    "hold"
+   ],
+   [
+    58,
+    "attack_onset"
+   ],
+   [
+    59,
+    "attack_ongoing"
+   ],
+   [
+    64,
+    "hold"
+   ],
+   [
+    67,
+    "attack_onset"
+   ],
+   [
+    68,
+    "attack_ongoing"
+   ],
+   [
+    69,
+    "hold"
+   ],
+   [
+    72,
+    "attack_ongoing"
+   ],
+   [
+    74,
+    "hold"
+   ],
+   [
+    75,
+    "attack_onset"
+   ],
+   [
+    76,
+    "attack_ongoing"
+   ],
+   [
+    78,
+    "hold"
+   ],
+   [
+    79,
+    "attack_onset"
+   ],
+   [
+    80,
+    "attack_ongoing"
+   ],
+   [
+    81,
+    "hold"
+   ],
+   [
+    82,
+    "attack_onset"
+   ],
+   [
+    83,
+    "attack_ongoing"
+   ],
+   [
+    84,
+    "hold"
+   ],
+   [
+    85,
+    "attack_ongoing"
+   ],
+   [
+    86,
+    "hold"
+   ],
+   [
+    87,
+    "attack_onset"
+   ],
+   [
+    88,
+    "attack_ongoing"
+   ],
+   [
+    89,
+    "hold"
+   ],
+   [
+    90,
+    "attack_onset"
+   ],
+   [
+    91,
+    "attack_ongoing"
+   ],
+   [
+    93,
+    "hold"
+   ],
+   [
+    94,
+    "attack_onset"
+   ],
+   [
+    95,
+    "attack_ongoing"
+   ],
+   [
+    100,
+    "hold"
+   ],
+   [
+    103,
+    "attack_onset"
+   ],
+   [
+    104,
+    "attack_ongoing"
+   ],
+   [
+    108,
+    "hold"
+   ],
+   [
+    110,
+    "attack_ongoing"
+   ],
+   [
+    112,
+    "hold"
+   ],
+   [
+    113,
+    "attack_onset"
+   ],
+   [
+    114,
+    "attack_ongoing"
+   ],
+   [
+    116,
+    "hold"
+   ],
+   [
+    117,
+    "attack_ongoing"
+   ],
+   [
+    121,
+    "hold"
+   ],
+   [
+    122,
+    "attack_onset"
+   ],
+   [
+    123,
+    "attack_ongoing"
+   ],
+   [
+    126,
+    "hold"
+   ],
+   [
+    128,
+    "attack_onset"
+   ],
+   [
+    129,
+    "attack_ongoing"
+   ],
+   [
+    131,
+    "hold"
+   ],
+   [
+    134,
+    "attack_ongoing"
+   ],
+   [
+    139,
+    "hold"
+   ],
+   [
+    141,
+    "attack_ongoing"
+   ],
+   [
+    142,
+    "hold"
+   ],
+   [
+    143,
+    "attack_onset"
+   ],
+   [
+    144,
+    "attack_ongoing"
+   ],
+   [
+    146,
+    "hold"
+   ],
+   [
+    147,
+    "attack_onset"
+   ],
+   [
+    148,
+    "attack_ongoing"
+   ],
+   [
+    151,
+    "hold"
+   ],
+   [
+    152,
+    "attack_onset"
+   ],
+   [
+    153,
+    "attack_ongoing"
+   ],
+   [
+    154,
+    "hold"
+   ],
+   [
+    156,
+    "attack_ongoing"
+   ],
+   [
+    159,
+    "hold"
+   ],
+   [
+    174,
+    "attack_ongoing"
+   ],
+   [
+    177,
+    "hold"
+   ],
+   [
+    178,
+    "attack_onset"
+   ],
+   [
+    179,
+    "attack_ongoing"
+   ],
+   [
+    180,
+    "hold"
+   ],
+   [
+    184,
+    "attack_ongoing"
+   ],
+   [
+    189,
+    "hold"
+   ],
+   [
+    192,
+    "attack_onset"
+   ],
+   [
+    193,
+    "attack_ongoing"
+   ],
+   [
+    195,
+    "hold"
+   ],
+   [
+    201,
+    "attack_ongoing"
+   ],
+   [
+    781,
+    "hold"
+   ],
+   [
+    795,
+    "release"
+   ],
+   [
+    803,
+    "attack_onset"
+   ],
+   [
+    804,
+    "hold"
+   ],
+   [
+    808,
+    "attack_ongoing"
+   ],
+   [
+    809,
+    "hold"
+   ],
+   [
+    814,
+    "attack_ongoing"
+   ],
+   [
+    816,
+    "hold"
+   ],
+   [
+    819,
+    "attack_ongoing"
+   ],
+   [
+    820,
+    "hold"
+   ],
+   [
+    828,
+    "release"
+   ],
+   [
+    830,
+    "attack_onset"
+   ],
+   [
+    831,
+    "hold"
+   ],
+   [
+    839,
+    "attack_ongoing"
+   ],
+   [
+    841,
+    "hold"
+   ],
+   [
+    842,
+    "attack_ongoing"
+   ],
+   [
+    843,
+    "hold"
+   ],
+   [
+    854,
+    "release"
+   ],
+   [
+    867,
+    "attack_onset"
+   ],
+   [
+    868,
+    "attack_ongoing"
+   ],
+   [
+    871,
+    "hold"
+   ],
+   [
+    891,
+    "release"
+   ],
+   [
+    900,
+    "attack_onset"
+   ],
+   [
+    901,
+    "attack_ongoing"
+   ],
+   [
+    903,
+    "hold"
+   ],
+   [
+    907,
+    "attack_ongoing"
+   ],
+   [
+    908,
+    "hold"
+   ],
+   [
+    909,
+    "attack_ongoing"
+   ],
+   [
+    913,
+    "hold"
+   ],
+   [
+    918,
+    "attack_ongoing"
+   ],
+   [
+    921,
+    "hold"
+   ],
+   [
+    925,
+    "attack_ongoing"
+   ],
+   [
+    927,
+    "hold"
+   ],
+   [
+    933,
+    "release"
+   ],
+   [
+    934,
+    "attack_onset"
+   ],
+   [
+    935,
+    "attack_ongoing"
+   ],
+   [
+    937,
+    "hold"
+   ],
+   [
+    954,
+    "attack_ongoing"
+   ],
+   [
+    955,
+    "hold"
+   ],
+   [
+    958,
+    "release"
+   ],
+   [
+    959,
+    "attack_onset"
+   ],
+   [
+    960,
+    "attack_ongoing"
+   ],
+   [
+    962,
+    "hold"
+   ],
+   [
+    972,
+    "attack_ongoing"
+   ],
+   [
+    974,
+    "hold"
+   ],
+   [
+    981,
+    "attack_ongoing"
+   ],
+   [
+    986,
+    "hold"
+   ],
+   [
+    989,
+    "release"
+   ],
+   [
+    1029,
+    "attack_onset"
+   ],
+   [
+    1030,
+    "hold"
+   ],
+   [
+    1038,
+    "attack_ongoing"
+   ],
+   [
+    1039,
+    "hold"
+   ],
+   [
+    1040,
+    "attack_ongoing"
+   ],
+   [
+    1043,
+    "hold"
+   ],
+   [
+    1047,
+    "attack_ongoing"
+   ],
+   [
+    1053,
+    "hold"
+   ],
+   [
+    1060,
+    "release"
+   ],
+   [
+    1084,
+    "attack_onset"
+   ],
+   [
+    1085,
+    "attack_ongoing"
+   ],
+   [
+    1089,
+    "hold"
+   ],
+   [
+    1097,
+    "attack_ongoing"
+   ],
+   [
+    1101,
+    "hold"
+   ],
+   [
+    1113,
+    "release"
+   ],
+   [
+    1114,
+    "attack_onset"
+   ],
+   [
+    1115,
+    "attack_ongoing"
+   ],
+   [
+    1118,
+    "hold"
+   ],
+   [
+    1133,
+    "attack_ongoing"
+   ],
+   [
+    1135,
+    "hold"
+   ],
+   [
+    1140,
+    "release"
+   ],
+   [
+    1145,
+    "attack_onset"
+   ],
+   [
+    1146,
+    "attack_ongoing"
+   ],
+   [
+    1147,
+    "hold"
+   ],
+   [
+    1164,
+    "attack_ongoing"
+   ],
+   [
+    1168,
+    "hold"
+   ],
+   [
+    1171,
+    "release"
+   ],
+   [
+    1175,
+    "attack_onset"
+   ],
+   [
+    1176,
+    "attack_ongoing"
+   ],
+   [
+    1178,
+    "hold"
+   ],
+   [
+    1198,
+    "release"
+   ],
+   [
+    1201,
+    "attack_onset"
+   ],
+   [
+    1202,
+    "attack_ongoing"
+   ],
+   [
+    1204,
+    "hold"
+   ],
+   [
+    1216,
+    "attack_ongoing"
+   ],
+   [
+    1221,
+    "hold"
+   ],
+   [
+    1229,
+    "release"
+   ],
+   [
+    1232,
+    "attack_onset"
+   ],
+   [
+    1233,
+    "attack_ongoing"
+   ],
+   [
+    1234,
+    "hold"
+   ],
+   [
+    1235,
+    "attack_ongoing"
+   ],
+   [
+    1236,
+    "hold"
+   ],
+   [
+    1237,
+    "attack_ongoing"
+   ],
+   [
+    1238,
+    "hold"
+   ],
+   [
+    1239,
+    "attack_ongoing"
+   ],
+   [
+    1243,
+    "hold"
+   ],
+   [
+    1244,
+    "attack_ongoing"
+   ],
+   [
+    1247,
+    "hold"
+   ],
+   [
+    1263,
+    "release"
+   ],
+   [
+    1266,
+    "attack_onset"
+   ],
+   [
+    1267,
+    "attack_ongoing"
+   ],
+   [
+    1269,
+    "hold"
+   ],
+   [
+    1280,
+    "attack_ongoing"
+   ],
+   [
+    1282,
+    "hold"
+   ],
+   [
+    1291,
+    "release"
+   ],
+   [
+    1323,
+    "attack_onset"
+   ],
+   [
+    1324,
+    "hold"
+   ],
+   [
+    1329,
+    "attack_ongoing"
+   ],
+   [
+    1330,
+    "hold"
+   ],
+   [
+    1331,
+    "attack_ongoing"
+   ],
+   [
+    1332,
+    "hold"
+   ],
+   [
+    1342,
+    "attack_ongoing"
+   ],
+   [
+    1343,
+    "hold"
+   ],
+   [
+    1345,
+    "attack_ongoing"
+   ],
+   [
+    1351,
+    "hold"
+   ],
+   [
+    1353,
+    "release"
+   ],
+   [
+    1354,
+    "attack_onset"
+   ],
+   [
+    1355,
+    "attack_ongoing"
+   ],
+   [
+    1356,
+    "hold"
+   ],
+   [
+    1376,
+    "release"
+   ],
+   [
+    1382,
+    "attack_onset"
+   ],
+   [
+    1383,
+    "attack_ongoing"
+   ],
+   [
+    1385,
+    "hold"
+   ],
+   [
+    1391,
+    "attack_ongoing"
+   ],
+   [
+    1393,
+    "hold"
+   ],
+   [
+    1407,
+    "release"
+   ],
+   [
+    1412,
+    "attack_onset"
+   ],
+   [
+    1413,
+    "attack_ongoing"
+   ],
+   [
+    1414,
+    "hold"
+   ],
+   [
+    1420,
+    "attack_ongoing"
+   ],
+   [
+    1424,
+    "hold"
+   ],
+   [
+    1438,
+    "release"
+   ],
+   [
+    1459,
+    "attack_onset"
+   ],
+   [
+    1460,
+    "hold"
+   ],
+   [
+    1476,
+    "attack_ongoing"
+   ],
+   [
+    1477,
+    "hold"
+   ],
+   [
+    1478,
+    "attack_ongoing"
+   ],
+   [
+    1482,
+    "hold"
+   ],
+   [
+    1485,
+    "release"
+   ],
+   [
+    1488,
+    "attack_onset"
+   ],
+   [
+    1489,
+    "attack_ongoing"
+   ],
+   [
+    1490,
+    "hold"
+   ],
+   [
+    1492,
+    "attack_ongoing"
+   ],
+   [
+    1494,
+    "hold"
+   ],
+   [
+    1498,
+    "attack_ongoing"
+   ],
+   [
+    1500,
+    "hold"
+   ],
+   [
+    1511,
+    "attack_ongoing"
+   ],
+   [
+    1513,
+    "hold"
+   ],
+   [
+    1516,
+    "release"
+   ],
+   [
+    1522,
+    "attack_onset"
+   ],
+   [
+    1523,
+    "attack_ongoing"
+   ],
+   [
+    1524,
+    "hold"
+   ],
+   [
+    1526,
+    "attack_ongoing"
+   ],
+   [
+    1530,
+    "hold"
+   ],
+   [
+    1532,
+    "attack_ongoing"
+   ],
+   [
+    1535,
+    "hold"
+   ],
+   [
+    1551,
+    "release"
+   ],
+   [
+    1552,
+    "attack_onset"
+   ],
+   [
+    1553,
+    "hold"
+   ],
+   [
+    1561,
+    "attack_ongoing"
+   ],
+   [
+    1563,
+    "hold"
+   ],
+   [
+    1575,
+    "release"
+   ],
+   [
+    1585,
+    "attack_onset"
+   ],
+   [
+    1586,
+    "attack_ongoing"
+   ],
+   [
+    1589,
+    "hold"
+   ],
+   [
+    1609,
+    "release"
+   ],
+   [
+    1623,
+    "attack_onset"
+   ],
+   [
+    1624,
+    "attack_ongoing"
+   ],
+   [
+    1629,
+    "hold"
+   ],
+   [
+    1630,
+    "attack_ongoing"
+   ],
+   [
+    1633,
+    "hold"
+   ],
+   [
+    1638,
+    "attack_ongoing"
+   ],
+   [
+    1640,
+    "hold"
+   ],
+   [
+    1642,
+    "attack_onset"
+   ],
+   [
+    1643,
+    "attack_ongoing"
+   ],
+   [
+    1646,
+    "hold"
+   ],
+   [
+    1647,
+    "attack_onset"
+   ],
+   [
+    1648,
+    "hold"
+   ],
+   [
+    1655,
+    "attack_ongoing"
+   ],
+   [
+    1657,
+    "hold"
+   ],
+   [
+    1658,
+    "attack_onset"
+   ],
+   [
+    1659,
+    "attack_ongoing"
+   ],
+   [
+    1661,
+    "hold"
+   ],
+   [
+    1662,
+    "attack_onset"
+   ],
+   [
+    1663,
+    "attack_ongoing"
+   ],
+   [
+    1668,
+    "hold"
+   ],
+   [
+    1669,
+    "attack_ongoing"
+   ],
+   [
+    1670,
+    "hold"
+   ],
+   [
+    1671,
+    "attack_ongoing"
+   ],
+   [
+    1675,
+    "hold"
+   ],
+   [
+    1676,
+    "attack_onset"
+   ],
+   [
+    1677,
+    "attack_ongoing"
+   ],
+   [
+    1679,
+    "hold"
+   ],
+   [
+    1681,
+    "attack_ongoing"
+   ],
+   [
+    1682,
+    "hold"
+   ],
+   [
+    1683,
+    "attack_ongoing"
+   ],
+   [
+    1688,
+    "hold"
+   ],
+   [
+    1689,
+    "attack_onset"
+   ],
+   [
+    1690,
+    "attack_ongoing"
+   ],
+   [
+    1691,
+    "hold"
+   ],
+   [
+    1692,
+    "attack_onset"
+   ],
+   [
+    1693,
+    "attack_ongoing"
+   ],
+   [
+    1694,
+    "hold"
+   ],
+   [
+    1695,
+    "attack_ongoing"
+   ],
+   [
+    1697,
+    "hold"
+   ],
+   [
+    1698,
+    "attack_onset"
+   ],
+   [
+    1699,
+    "attack_ongoing"
+   ],
+   [
+    1703,
+    "hold"
+   ],
+   [
+    1704,
+    "attack_onset"
+   ],
+   [
+    1705,
+    "attack_ongoing"
+   ],
+   [
+    1706,
+    "hold"
+   ],
+   [
+    1711,
+    "attack_ongoing"
+   ],
+   [
+    1713,
+    "hold"
+   ],
+   [
+    1714,
+    "attack_onset"
+   ],
+   [
+    1715,
+    "attack_ongoing"
+   ],
+   [
+    1722,
+    "hold"
+   ],
+   [
+    1723,
+    "attack_onset"
+   ],
+   [
+    1724,
+    "attack_ongoing"
+   ],
+   [
+    1726,
+    "hold"
+   ],
+   [
+    1740,
+    "attack_ongoing"
+   ],
+   [
+    1747,
+    "hold"
+   ],
+   [
+    1748,
+    "attack_onset"
+   ],
+   [
+    1749,
+    "attack_ongoing"
+   ],
+   [
+    1751,
+    "hold"
+   ],
+   [
+    1757,
+    "attack_ongoing"
+   ],
+   [
+    1759,
+    "hold"
+   ],
+   [
+    1760,
+    "attack_onset"
+   ],
+   [
+    1761,
+    "attack_ongoing"
+   ],
+   [
+    1767,
+    "hold"
+   ],
+   [
+    1771,
+    "attack_ongoing"
+   ],
+   [
+    1772,
+    "hold"
+   ],
+   [
+    1783,
+    "attack_ongoing"
+   ],
+   [
+    1785,
+    "hold"
+   ],
+   [
+    1786,
+    "attack_ongoing"
+   ],
+   [
+    1787,
+    "hold"
+   ],
+   [
+    1791,
+    "attack_onset"
+   ],
+   [
+    1792,
+    "hold"
+   ],
+   [
+    1793,
+    "attack_ongoing"
+   ],
+   [
+    1797,
+    "hold"
+   ],
+   [
+    1798,
+    "attack_onset"
+   ],
+   [
+    1799,
+    "attack_ongoing"
+   ],
+   [
+    1801,
+    "hold"
+   ],
+   [
+    1802,
+    "attack_onset"
+   ],
+   [
+    1803,
+    "hold"
+   ],
+   [
+    1804,
+    "attack_ongoing"
+   ],
+   [
+    1811,
+    "hold"
+   ],
+   [
+    1812,
+    "attack_onset"
+   ],
+   [
+    1813,
+    "attack_ongoing"
+   ],
+   [
+    1815,
+    "hold"
+   ],
+   [
+    1820,
+    "attack_ongoing"
+   ],
+   [
+    1821,
+    "hold"
+   ],
+   [
+    1822,
+    "attack_ongoing"
+   ],
+   [
+    1833,
+    "hold"
+   ],
+   [
+    1847,
+    "release"
+   ],
+   [
+    1848,
+    "attack_onset"
+   ],
+   [
+    1849,
+    "attack_ongoing"
+   ],
+   [
+    1853,
+    "hold"
+   ],
+   [
+    1862,
+    "attack_onset"
+   ],
+   [
+    1863,
+    "hold"
+   ],
+   [
+    1867,
+    "attack_ongoing"
+   ],
+   [
+    1868,
+    "hold"
+   ],
+   [
+    1870,
+    "attack_ongoing"
+   ],
+   [
+    1878,
+    "hold"
+   ],
+   [
+    1879,
+    "attack_onset"
+   ],
+   [
+    1880,
+    "hold"
+   ],
+   [
+    1888,
+    "attack_ongoing"
+   ]
+  ],
+  "cand": [
+   [
+    0,
+    "attack_onset"
+   ],
+   [
+    1,
+    "attack_ongoing"
+   ],
+   [
+    6,
+    "hold"
+   ],
+   [
+    10,
+    "attack_ongoing"
+   ],
+   [
+    11,
+    "hold"
+   ],
+   [
+    12,
+    "attack_ongoing"
+   ],
+   [
+    14,
+    "hold"
+   ],
+   [
+    20,
+    "attack_onset"
+   ],
+   [
+    21,
+    "attack_ongoing"
+   ],
+   [
+    24,
+    "hold"
+   ],
+   [
+    25,
+    "attack_onset"
+   ],
+   [
+    26,
+    "hold"
+   ],
+   [
+    28,
+    "attack_ongoing"
+   ],
+   [
+    30,
+    "hold"
+   ],
+   [
+    31,
+    "attack_onset"
+   ],
+   [
+    32,
+    "attack_ongoing"
+   ],
+   [
+    35,
+    "hold"
+   ],
+   [
+    36,
+    "attack_onset"
+   ],
+   [
+    37,
+    "attack_ongoing"
+   ],
+   [
+    38,
+    "hold"
+   ],
+   [
+    39,
+    "attack_onset"
+   ],
+   [
+    40,
+    "hold"
+   ],
+   [
+    42,
+    "attack_ongoing"
+   ],
+   [
+    43,
+    "hold"
+   ],
+   [
+    44,
+    "attack_onset"
+   ],
+   [
+    45,
+    "attack_ongoing"
+   ],
+   [
+    46,
+    "hold"
+   ],
+   [
+    47,
+    "attack_onset"
+   ],
+   [
+    48,
+    "attack_ongoing"
+   ],
+   [
+    49,
+    "hold"
+   ],
+   [
+    50,
+    "attack_onset"
+   ],
+   [
+    51,
+    "attack_ongoing"
+   ],
+   [
+    53,
+    "hold"
+   ],
+   [
+    54,
+    "attack_onset"
+   ],
+   [
+    55,
+    "attack_ongoing"
+   ],
+   [
+    57,
+    "hold"
+   ],
+   [
+    58,
+    "attack_onset"
+   ],
+   [
+    59,
+    "attack_ongoing"
+   ],
+   [
+    64,
+    "hold"
+   ],
+   [
+    67,
+    "attack_onset"
+   ],
+   [
+    68,
+    "attack_ongoing"
+   ],
+   [
+    69,
+    "hold"
+   ],
+   [
+    70,
+    "attack_onset"
+   ],
+   [
+    71,
+    "attack_ongoing"
+   ],
+   [
+    74,
+    "hold"
+   ],
+   [
+    75,
+    "attack_onset"
+   ],
+   [
+    76,
+    "attack_ongoing"
+   ],
+   [
+    77,
+    "hold"
+   ],
+   [
+    78,
+    "attack_onset"
+   ],
+   [
+    79,
+    "attack_ongoing"
+   ],
+   [
+    80,
+    "hold"
+   ],
+   [
+    81,
+    "attack_onset"
+   ],
+   [
+    82,
+    "attack_ongoing"
+   ],
+   [
+    83,
+    "hold"
+   ],
+   [
+    84,
+    "attack_onset"
+   ],
+   [
+    85,
+    "attack_ongoing"
+   ],
+   [
+    87,
+    "hold"
+   ],
+   [
+    88,
+    "attack_onset"
+   ],
+   [
+    89,
+    "attack_ongoing"
+   ],
+   [
+    90,
+    "hold"
+   ],
+   [
+    91,
+    "attack_onset"
+   ],
+   [
+    92,
+    "attack_ongoing"
+   ],
+   [
+    93,
+    "hold"
+   ],
+   [
+    94,
+    "attack_onset"
+   ],
+   [
+    95,
+    "attack_ongoing"
+   ],
+   [
+    99,
+    "hold"
+   ],
+   [
+    103,
+    "attack_onset"
+   ],
+   [
+    104,
+    "attack_ongoing"
+   ],
+   [
+    105,
+    "hold"
+   ],
+   [
+    106,
+    "attack_ongoing"
+   ],
+   [
+    108,
+    "hold"
+   ],
+   [
+    110,
+    "attack_ongoing"
+   ],
+   [
+    112,
+    "hold"
+   ],
+   [
+    113,
+    "attack_onset"
+   ],
+   [
+    114,
+    "attack_ongoing"
+   ],
+   [
+    115,
+    "hold"
+   ],
+   [
+    117,
+    "attack_ongoing"
+   ],
+   [
+    120,
+    "hold"
+   ],
+   [
+    121,
+    "attack_onset"
+   ],
+   [
+    122,
+    "attack_ongoing"
+   ],
+   [
+    125,
+    "hold"
+   ],
+   [
+    128,
+    "attack_onset"
+   ],
+   [
+    129,
+    "attack_ongoing"
+   ],
+   [
+    130,
+    "hold"
+   ],
+   [
+    137,
+    "attack_ongoing"
+   ],
+   [
+    139,
+    "hold"
+   ],
+   [
+    141,
+    "attack_ongoing"
+   ],
+   [
+    142,
+    "hold"
+   ],
+   [
+    143,
+    "attack_onset"
+   ],
+   [
+    144,
+    "attack_ongoing"
+   ],
+   [
+    145,
+    "hold"
+   ],
+   [
+    146,
+    "attack_onset"
+   ],
+   [
+    147,
+    "attack_ongoing"
+   ],
+   [
+    148,
+    "hold"
+   ],
+   [
+    149,
+    "attack_onset"
+   ],
+   [
+    150,
+    "attack_ongoing"
+   ],
+   [
+    151,
+    "hold"
+   ],
+   [
+    152,
+    "attack_onset"
+   ],
+   [
+    153,
+    "attack_ongoing"
+   ],
+   [
+    154,
+    "hold"
+   ],
+   [
+    156,
+    "attack_ongoing"
+   ],
+   [
+    158,
+    "hold"
+   ],
+   [
+    159,
+    "attack_onset"
+   ],
+   [
+    160,
+    "attack_ongoing"
+   ],
+   [
+    161,
+    "hold"
+   ],
+   [
+    162,
+    "attack_ongoing"
+   ],
+   [
+    163,
+    "hold"
+   ],
+   [
+    164,
+    "attack_ongoing"
+   ],
+   [
+    165,
+    "hold"
+   ],
+   [
+    166,
+    "attack_ongoing"
+   ],
+   [
+    167,
+    "hold"
+   ],
+   [
+    174,
+    "attack_ongoing"
+   ],
+   [
+    177,
+    "hold"
+   ],
+   [
+    178,
+    "attack_onset"
+   ],
+   [
+    179,
+    "attack_ongoing"
+   ],
+   [
+    180,
+    "hold"
+   ],
+   [
+    182,
+    "attack_onset"
+   ],
+   [
+    183,
+    "attack_ongoing"
+   ],
+   [
+    188,
+    "hold"
+   ],
+   [
+    192,
+    "attack_onset"
+   ],
+   [
+    193,
+    "attack_ongoing"
+   ],
+   [
+    195,
+    "hold"
+   ],
+   [
+    201,
+    "attack_ongoing"
+   ],
+   [
+    781,
+    "hold"
+   ],
+   [
+    787,
+    "release"
+   ],
+   [
+    802,
+    "attack_onset"
+   ],
+   [
+    803,
+    "attack_ongoing"
+   ],
+   [
+    804,
+    "hold"
+   ],
+   [
+    808,
+    "attack_ongoing"
+   ],
+   [
+    809,
+    "hold"
+   ],
+   [
+    814,
+    "attack_ongoing"
+   ],
+   [
+    816,
+    "hold"
+   ],
+   [
+    819,
+    "attack_onset"
+   ],
+   [
+    820,
+    "hold"
+   ],
+   [
+    830,
+    "attack_ongoing"
+   ],
+   [
+    831,
+    "hold"
+   ],
+   [
+    833,
+    "release"
+   ],
+   [
+    835,
+    "attack_onset"
+   ],
+   [
+    836,
+    "hold"
+   ],
+   [
+    839,
+    "attack_ongoing"
+   ],
+   [
+    841,
+    "hold"
+   ],
+   [
+    842,
+    "attack_ongoing"
+   ],
+   [
+    843,
+    "hold"
+   ],
+   [
+    851,
+    "release"
+   ],
+   [
+    855,
+    "attack_onset"
+   ],
+   [
+    856,
+    "hold"
+   ],
+   [
+    857,
+    "attack_ongoing"
+   ],
+   [
+    858,
+    "hold"
+   ],
+   [
+    867,
+    "attack_ongoing"
+   ],
+   [
+    871,
+    "hold"
+   ],
+   [
+    873,
+    "release"
+   ],
+   [
+    899,
+    "attack_onset"
+   ],
+   [
+    900,
+    "attack_ongoing"
+   ],
+   [
+    902,
+    "hold"
+   ],
+   [
+    907,
+    "attack_ongoing"
+   ],
+   [
+    908,
+    "hold"
+   ],
+   [
+    909,
+    "attack_ongoing"
+   ],
+   [
+    913,
+    "hold"
+   ],
+   [
+    918,
+    "attack_ongoing"
+   ],
+   [
+    921,
+    "hold"
+   ],
+   [
+    922,
+    "release"
+   ],
+   [
+    925,
+    "attack_onset"
+   ],
+   [
+    926,
+    "attack_ongoing"
+   ],
+   [
+    927,
+    "hold"
+   ],
+   [
+    934,
+    "attack_ongoing"
+   ],
+   [
+    936,
+    "hold"
+   ],
+   [
+    941,
+    "release"
+   ],
+   [
+    952,
+    "attack_onset"
+   ],
+   [
+    953,
+    "attack_ongoing"
+   ],
+   [
+    955,
+    "hold"
+   ],
+   [
+    959,
+    "attack_ongoing"
+   ],
+   [
+    962,
+    "hold"
+   ],
+   [
+    970,
+    "release"
+   ],
+   [
+    971,
+    "attack_onset"
+   ],
+   [
+    972,
+    "attack_ongoing"
+   ],
+   [
+    974,
+    "hold"
+   ],
+   [
+    981,
+    "attack_ongoing"
+   ],
+   [
+    986,
+    "hold"
+   ],
+   [
+    991,
+    "release"
+   ],
+   [
+    1029,
+    "attack_onset"
+   ],
+   [
+    1030,
+    "attack_ongoing"
+   ],
+   [
+    1031,
+    "hold"
+   ],
+   [
+    1038,
+    "attack_ongoing"
+   ],
+   [
+    1039,
+    "hold"
+   ],
+   [
+    1040,
+    "attack_ongoing"
+   ],
+   [
+    1043,
+    "hold"
+   ],
+   [
+    1047,
+    "attack_onset"
+   ],
+   [
+    1048,
+    "attack_ongoing"
+   ],
+   [
+    1053,
+    "hold"
+   ],
+   [
+    1065,
+    "release"
+   ],
+   [
+    1073,
+    "attack_onset"
+   ],
+   [
+    1074,
+    "hold"
+   ],
+   [
+    1076,
+    "attack_ongoing"
+   ],
+   [
+    1077,
+    "hold"
+   ],
+   [
+    1085,
+    "attack_ongoing"
+   ],
+   [
+    1089,
+    "hold"
+   ],
+   [
+    1091,
+    "release"
+   ],
+   [
+    1094,
+    "attack_onset"
+   ],
+   [
+    1095,
+    "hold"
+   ],
+   [
+    1097,
+    "attack_ongoing"
+   ],
+   [
+    1101,
+    "hold"
+   ],
+   [
+    1111,
+    "release"
+   ],
+   [
+    1114,
+    "attack_onset"
+   ],
+   [
+    1115,
+    "attack_ongoing"
+   ],
+   [
+    1118,
+    "hold"
+   ],
+   [
+    1130,
+    "release"
+   ],
+   [
+    1133,
+    "attack_onset"
+   ],
+   [
+    1134,
+    "attack_ongoing"
+   ],
+   [
+    1135,
+    "hold"
+   ],
+   [
+    1145,
+    "attack_ongoing"
+   ],
+   [
+    1147,
+    "hold"
+   ],
+   [
+    1149,
+    "release"
+   ],
+   [
+    1160,
+    "attack_onset"
+   ],
+   [
+    1161,
+    "hold"
+   ],
+   [
+    1164,
+    "attack_ongoing"
+   ],
+   [
+    1168,
+    "hold"
+   ],
+   [
+    1176,
+    "attack_ongoing"
+   ],
+   [
+    1178,
+    "hold"
+   ],
+   [
+    1179,
+    "release"
+   ],
+   [
+    1186,
+    "attack_onset"
+   ],
+   [
+    1187,
+    "hold"
+   ],
+   [
+    1199,
+    "release"
+   ],
+   [
+    1200,
+    "attack_onset"
+   ],
+   [
+    1201,
+    "attack_ongoing"
+   ],
+   [
+    1204,
+    "hold"
+   ],
+   [
+    1216,
+    "attack_onset"
+   ],
+   [
+    1217,
+    "attack_ongoing"
+   ],
+   [
+    1220,
+    "hold"
+   ],
+   [
+    1232,
+    "attack_onset"
+   ],
+   [
+    1233,
+    "attack_ongoing"
+   ],
+   [
+    1234,
+    "hold"
+   ],
+   [
+    1235,
+    "attack_ongoing"
+   ],
+   [
+    1236,
+    "hold"
+   ],
+   [
+    1237,
+    "attack_ongoing"
+   ],
+   [
+    1238,
+    "hold"
+   ],
+   [
+    1240,
+    "attack_ongoing"
+   ],
+   [
+    1243,
+    "hold"
+   ],
+   [
+    1244,
+    "attack_ongoing"
+   ],
+   [
+    1245,
+    "hold"
+   ],
+   [
+    1252,
+    "release"
+   ],
+   [
+    1257,
+    "attack_onset"
+   ],
+   [
+    1258,
+    "attack_ongoing"
+   ],
+   [
+    1259,
+    "hold"
+   ],
+   [
+    1267,
+    "attack_ongoing"
+   ],
+   [
+    1269,
+    "hold"
+   ],
+   [
+    1273,
+    "release"
+   ],
+   [
+    1279,
+    "attack_onset"
+   ],
+   [
+    1280,
+    "attack_ongoing"
+   ],
+   [
+    1282,
+    "hold"
+   ],
+   [
+    1294,
+    "release"
+   ],
+   [
+    1321,
+    "attack_onset"
+   ],
+   [
+    1322,
+    "attack_ongoing"
+   ],
+   [
+    1324,
+    "hold"
+   ],
+   [
+    1329,
+    "attack_ongoing"
+   ],
+   [
+    1330,
+    "hold"
+   ],
+   [
+    1331,
+    "attack_ongoing"
+   ],
+   [
+    1332,
+    "hold"
+   ],
+   [
+    1338,
+    "release"
+   ],
+   [
+    1342,
+    "attack_onset"
+   ],
+   [
+    1343,
+    "hold"
+   ],
+   [
+    1345,
+    "attack_ongoing"
+   ],
+   [
+    1350,
+    "hold"
+   ],
+   [
+    1354,
+    "attack_ongoing"
+   ],
+   [
+    1356,
+    "hold"
+   ],
+   [
+    1362,
+    "release"
+   ],
+   [
+    1369,
+    "attack_onset"
+   ],
+   [
+    1370,
+    "hold"
+   ],
+   [
+    1378,
+    "attack_ongoing"
+   ],
+   [
+    1379,
+    "hold"
+   ],
+   [
+    1382,
+    "attack_ongoing"
+   ],
+   [
+    1385,
+    "hold"
+   ],
+   [
+    1386,
+    "release"
+   ],
+   [
+    1390,
+    "attack_onset"
+   ],
+   [
+    1391,
+    "attack_ongoing"
+   ],
+   [
+    1393,
+    "hold"
+   ],
+   [
+    1405,
+    "release"
+   ],
+   [
+    1407,
+    "attack_onset"
+   ],
+   [
+    1408,
+    "hold"
+   ],
+   [
+    1411,
+    "attack_ongoing"
+   ],
+   [
+    1414,
+    "hold"
+   ],
+   [
+    1420,
+    "attack_ongoing"
+   ],
+   [
+    1423,
+    "hold"
+   ],
+   [
+    1426,
+    "release"
+   ],
+   [
+    1444,
+    "attack_onset"
+   ],
+   [
+    1445,
+    "hold"
+   ],
+   [
+    1457,
+    "release"
+   ],
+   [
+    1459,
+    "attack_onset"
+   ],
+   [
+    1460,
+    "hold"
+   ],
+   [
+    1472,
+    "release"
+   ],
+   [
+    1476,
+    "attack_onset"
+   ],
+   [
+    1477,
+    "hold"
+   ],
+   [
+    1478,
+    "attack_ongoing"
+   ],
+   [
+    1482,
+    "hold"
+   ],
+   [
+    1489,
+    "attack_ongoing"
+   ],
+   [
+    1490,
+    "hold"
+   ],
+   [
+    1494,
+    "release"
+   ],
+   [
+    1498,
+    "attack_onset"
+   ],
+   [
+    1499,
+    "attack_ongoing"
+   ],
+   [
+    1500,
+    "hold"
+   ],
+   [
+    1511,
+    "attack_ongoing"
+   ],
+   [
+    1513,
+    "hold"
+   ],
+   [
+    1514,
+    "release"
+   ],
+   [
+    1522,
+    "attack_onset"
+   ],
+   [
+    1523,
+    "attack_ongoing"
+   ],
+   [
+    1524,
+    "hold"
+   ],
+   [
+    1526,
+    "attack_ongoing"
+   ],
+   [
+    1530,
+    "hold"
+   ],
+   [
+    1532,
+    "attack_ongoing"
+   ],
+   [
+    1535,
+    "hold"
+   ],
+   [
+    1543,
+    "release"
+   ],
+   [
+    1552,
+    "attack_onset"
+   ],
+   [
+    1553,
+    "hold"
+   ],
+   [
+    1561,
+    "attack_ongoing"
+   ],
+   [
+    1563,
+    "hold"
+   ],
+   [
+    1567,
+    "release"
+   ],
+   [
+    1571,
+    "attack_onset"
+   ],
+   [
+    1572,
+    "attack_ongoing"
+   ],
+   [
+    1574,
+    "hold"
+   ],
+   [
+    1586,
+    "release"
+   ],
+   [
+    1588,
+    "attack_onset"
+   ],
+   [
+    1589,
+    "hold"
+   ],
+   [
+    1601,
+    "release"
+   ],
+   [
+    1618,
+    "attack_onset"
+   ],
+   [
+    1619,
+    "attack_ongoing"
+   ],
+   [
+    1620,
+    "hold"
+   ],
+   [
+    1623,
+    "attack_onset"
+   ],
+   [
+    1624,
+    "attack_ongoing"
+   ],
+   [
+    1628,
+    "hold"
+   ],
+   [
+    1630,
+    "attack_ongoing"
+   ],
+   [
+    1633,
+    "hold"
+   ],
+   [
+    1638,
+    "attack_ongoing"
+   ],
+   [
+    1640,
+    "hold"
+   ],
+   [
+    1642,
+    "attack_onset"
+   ],
+   [
+    1643,
+    "attack_ongoing"
+   ],
+   [
+    1646,
+    "hold"
+   ],
+   [
+    1647,
+    "attack_onset"
+   ],
+   [
+    1648,
+    "hold"
+   ],
+   [
+    1655,
+    "attack_ongoing"
+   ],
+   [
+    1657,
+    "hold"
+   ],
+   [
+    1658,
+    "attack_onset"
+   ],
+   [
+    1659,
+    "attack_ongoing"
+   ],
+   [
+    1660,
+    "hold"
+   ],
+   [
+    1661,
+    "attack_onset"
+   ],
+   [
+    1662,
+    "attack_ongoing"
+   ],
+   [
+    1668,
+    "hold"
+   ],
+   [
+    1669,
+    "attack_ongoing"
+   ],
+   [
+    1670,
+    "hold"
+   ],
+   [
+    1671,
+    "attack_ongoing"
+   ],
+   [
+    1675,
+    "hold"
+   ],
+   [
+    1676,
+    "attack_onset"
+   ],
+   [
+    1677,
+    "attack_ongoing"
+   ],
+   [
+    1678,
+    "hold"
+   ],
+   [
+    1681,
+    "attack_ongoing"
+   ],
+   [
+    1682,
+    "hold"
+   ],
+   [
+    1683,
+    "attack_ongoing"
+   ],
+   [
+    1688,
+    "hold"
+   ],
+   [
+    1689,
+    "attack_onset"
+   ],
+   [
+    1690,
+    "attack_ongoing"
+   ],
+   [
+    1691,
+    "hold"
+   ],
+   [
+    1692,
+    "attack_onset"
+   ],
+   [
+    1693,
+    "attack_ongoing"
+   ],
+   [
+    1694,
+    "hold"
+   ],
+   [
+    1696,
+    "attack_ongoing"
+   ],
+   [
+    1697,
+    "hold"
+   ],
+   [
+    1698,
+    "attack_onset"
+   ],
+   [
+    1699,
+    "attack_ongoing"
+   ],
+   [
+    1703,
+    "hold"
+   ],
+   [
+    1704,
+    "attack_onset"
+   ],
+   [
+    1705,
+    "attack_ongoing"
+   ],
+   [
+    1706,
+    "hold"
+   ],
+   [
+    1711,
+    "attack_ongoing"
+   ],
+   [
+    1713,
+    "hold"
+   ],
+   [
+    1714,
+    "attack_onset"
+   ],
+   [
+    1715,
+    "attack_ongoing"
+   ],
+   [
+    1722,
+    "hold"
+   ],
+   [
+    1723,
+    "attack_onset"
+   ],
+   [
+    1724,
+    "attack_ongoing"
+   ],
+   [
+    1725,
+    "hold"
+   ],
+   [
+    1726,
+    "attack_onset"
+   ],
+   [
+    1727,
+    "hold"
+   ],
+   [
+    1729,
+    "attack_ongoing"
+   ],
+   [
+    1731,
+    "hold"
+   ],
+   [
+    1740,
+    "attack_ongoing"
+   ],
+   [
+    1747,
+    "hold"
+   ],
+   [
+    1748,
+    "attack_onset"
+   ],
+   [
+    1749,
+    "attack_ongoing"
+   ],
+   [
+    1750,
+    "hold"
+   ],
+   [
+    1751,
+    "attack_onset"
+   ],
+   [
+    1752,
+    "hold"
+   ],
+   [
+    1756,
+    "attack_ongoing"
+   ],
+   [
+    1759,
+    "hold"
+   ],
+   [
+    1760,
+    "attack_onset"
+   ],
+   [
+    1761,
+    "hold"
+   ],
+   [
+    1763,
+    "attack_ongoing"
+   ],
+   [
+    1764,
+    "hold"
+   ],
+   [
+    1766,
+    "attack_ongoing"
+   ],
+   [
+    1767,
+    "hold"
+   ],
+   [
+    1771,
+    "attack_ongoing"
+   ],
+   [
+    1772,
+    "hold"
+   ],
+   [
+    1776,
+    "release"
+   ],
+   [
+    1783,
+    "attack_onset"
+   ],
+   [
+    1784,
+    "attack_ongoing"
+   ],
+   [
+    1785,
+    "hold"
+   ],
+   [
+    1793,
+    "attack_ongoing"
+   ],
+   [
+    1797,
+    "hold"
+   ],
+   [
+    1798,
+    "attack_onset"
+   ],
+   [
+    1799,
+    "attack_ongoing"
+   ],
+   [
+    1801,
+    "hold"
+   ],
+   [
+    1802,
+    "attack_onset"
+   ],
+   [
+    1803,
+    "hold"
+   ],
+   [
+    1805,
+    "attack_ongoing"
+   ],
+   [
+    1811,
+    "hold"
+   ],
+   [
+    1812,
+    "attack_onset"
+   ],
+   [
+    1813,
+    "hold"
+   ],
+   [
+    1814,
+    "attack_ongoing"
+   ],
+   [
+    1815,
+    "hold"
+   ],
+   [
+    1820,
+    "attack_ongoing"
+   ],
+   [
+    1821,
+    "hold"
+   ],
+   [
+    1822,
+    "attack_ongoing"
+   ],
+   [
+    1833,
+    "hold"
+   ],
+   [
+    1838,
+    "release"
+   ],
+   [
+    1846,
+    "attack_onset"
+   ],
+   [
+    1847,
+    "attack_ongoing"
+   ],
+   [
+    1853,
+    "hold"
+   ],
+   [
+    1862,
+    "attack_onset"
+   ],
+   [
+    1863,
+    "hold"
+   ],
+   [
+    1872,
+    "attack_ongoing"
+   ],
+   [
+    1877,
+    "hold"
+   ],
+   [
+    1879,
+    "attack_onset"
+   ],
+   [
+    1880,
+    "hold"
+   ],
+   [
+    1888,
+    "attack_ongoing"
+   ]
+  ]
+ },
+ "bulk_delay_samples": 572,
+ "d_far_db": -0.26703501227115295,
+ "d_near_db": -5.732028573860733e-06,
+ "d_overall_db": -0.12387939050766952,
+ "far_active_hops": 1210,
+ "far_inactive_hops": 1081,
+ "first_divergent_hop": 27,
+ "first_divergent_ms": 432.0,
+ "frame_size": 512,
+ "holdoff_limit": {
+  "base": 20,
+  "cand": null
+ },
+ "hop": 256,
+ "n_hops": 2291,
+ "per_second": [
+  {
+   "base_db": -20.03400847124921,
+   "cand_db": -20.05779020317315,
+   "d_db": -0.023781731923942256,
+   "erle_base_db": 6.694790392986634,
+   "erle_cand_db": 6.718572124910576,
+   "far_active_frac": 0.7580645161290323,
+   "mu_base": 0.45182881915193734,
+   "mu_cand": 0.38958022545550913,
+   "ratio_base": 0.2555664689124956,
+   "ratio_cand": 0.20717964751047993,
+   "t": 0.0
+  },
+  {
+   "base_db": -25.161879621001837,
+   "cand_db": -27.627989916379747,
+   "d_db": -2.4661102953779057,
+   "erle_base_db": 7.817360964772942,
+   "erle_cand_db": 10.283471260150849,
+   "far_active_frac": 1.0,
+   "mu_base": 0.5675981793947054,
+   "mu_cand": 0.583904866301831,
+   "ratio_base": 0.25176338122179687,
+   "ratio_cand": 0.25642202108045314,
+   "t": 0.992
+  },
+  {
+   "base_db": -28.552758340967607,
+   "cand_db": -31.143361190354668,
+   "d_db": -2.5906028493870576,
+   "erle_base_db": 16.32395807381534,
+   "erle_cand_db": 18.914560923202398,
+   "far_active_frac": 1.0,
+   "mu_base": 0.5952976899515469,
+   "mu_cand": 0.6168090742761907,
+   "ratio_base": 0.19141966673951688,
+   "ratio_cand": 0.23542844947502964,
+   "t": 1.984
+  },
+  {
+   "base_db": -34.60968527560575,
+   "cand_db": -34.637346783760506,
+   "d_db": -0.027661508154757236,
+   "erle_base_db": 15.709219745582788,
+   "erle_cand_db": 15.736881253737545,
+   "far_active_frac": 0.6935483870967742,
+   "mu_base": 0.5339191999633278,
+   "mu_cand": 0.5310711142567367,
+   "ratio_base": 0.06571291425287873,
+   "ratio_cand": 0.06013311720088804,
+   "t": 2.976
+  },
+  {
+   "base_db": -38.861051499945255,
+   "cand_db": -38.89732240788749,
+   "d_db": -0.03627090794224029,
+   "erle_base_db": 24.151124344122863,
+   "erle_cand_db": 24.187395252065098,
+   "far_active_frac": 1.0,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 3.968
+  },
+  {
+   "base_db": -40.01944688891908,
+   "cand_db": -39.9303588096215,
+   "d_db": 0.0890880792975734,
+   "erle_base_db": 24.323603337410344,
+   "erle_cand_db": 24.234515258112772,
+   "far_active_frac": 1.0,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 4.96
+  },
+  {
+   "base_db": -36.717498344466854,
+   "cand_db": -36.6885461387534,
+   "d_db": 0.028952205713451033,
+   "erle_base_db": 8.7981028273222,
+   "erle_cand_db": 8.769150621608748,
+   "far_active_frac": 0.6129032258064516,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 5.952
+  },
+  {
+   "base_db": -39.43315683246924,
+   "cand_db": -39.298536828453486,
+   "d_db": 0.13462000401575547,
+   "erle_base_db": 24.539360805548437,
+   "erle_cand_db": 24.404740801532686,
+   "far_active_frac": 0.9838709677419355,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 6.944
+  },
+  {
+   "base_db": -44.31001794692551,
+   "cand_db": -44.15583122872753,
+   "d_db": 0.15418671819798516,
+   "erle_base_db": 26.285657111927037,
+   "erle_cand_db": 26.131470393729053,
+   "far_active_frac": 1.0,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 7.936
+  },
+  {
+   "base_db": -39.58535638278083,
+   "cand_db": -39.69488900557146,
+   "d_db": -0.10953262279062756,
+   "erle_base_db": 14.008351622876344,
+   "erle_cand_db": 14.11788424566697,
+   "far_active_frac": 0.8548387096774194,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 8.928
+  },
+  {
+   "base_db": -38.540994523977005,
+   "cand_db": -38.581733944329066,
+   "d_db": -0.04073942035206154,
+   "erle_base_db": 21.09051979763273,
+   "erle_cand_db": 21.13125921798479,
+   "far_active_frac": 0.9193548387096774,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.056451612903225805,
+   "ratio_cand": 0.056451612903225805,
+   "t": 9.92
+  },
+  {
+   "base_db": -35.55087851948804,
+   "cand_db": -35.55052028206513,
+   "d_db": 0.00035823742291126196,
+   "erle_base_db": 2.575816458954558,
+   "erle_cand_db": 2.575458221531646,
+   "far_active_frac": 0.04838709677419355,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 10.912
+  },
+  {
+   "base_db": -21.68422841752218,
+   "cand_db": -21.68422841752218,
+   "d_db": 0.0,
+   "erle_base_db": 0.5708815497705091,
+   "erle_cand_db": 0.5708815497705091,
+   "far_active_frac": 0.0,
+   "mu_base": 0.500000000213709,
+   "mu_cand": 0.5000000004017022,
+   "ratio_base": 4.683236707112535e-10,
+   "ratio_cand": 8.433323341502159e-10,
+   "t": 11.904
+  },
+  {
+   "base_db": -21.1879900520401,
+   "cand_db": -21.1879900520401,
+   "d_db": 0.0,
+   "erle_base_db": 0.389576920507696,
+   "erle_cand_db": 0.389576920507696,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000041979503,
+   "mu_cand": 0.5000000049357872,
+   "ratio_base": 8.683472566836522e-09,
+   "ratio_cand": 1.0072283968740555e-08,
+   "t": 12.896
+  },
+  {
+   "base_db": -22.815188718366848,
+   "cand_db": -22.815188718366848,
+   "d_db": 0.0,
+   "erle_base_db": 0.27548879431336265,
+   "erle_cand_db": 0.27548879431336265,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000113856838,
+   "mu_cand": 0.5000000203702243,
+   "ratio_base": 2.251266749926928e-08,
+   "ratio_cand": 4.057109550358935e-08,
+   "t": 13.888
+  },
+  {
+   "base_db": -20.592598605147483,
+   "cand_db": -20.592598605147483,
+   "d_db": 0.0,
+   "erle_base_db": 0.25038273314842613,
+   "erle_cand_db": 0.25038273314842613,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000031693408,
+   "mu_cand": 0.5000000049761587,
+   "ratio_base": 6.383335979665613e-09,
+   "ratio_cand": 1.0012903702994156e-08,
+   "t": 14.88
+  },
+  {
+   "base_db": -26.375608282284865,
+   "cand_db": -26.375608282284865,
+   "d_db": 0.0,
+   "erle_base_db": 1.2036642269449895,
+   "erle_cand_db": 1.2036642269449895,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000542161024,
+   "mu_cand": 0.5000000625091174,
+   "ratio_base": 1.0833240257514773e-07,
+   "ratio_cand": 1.2489876182558464e-07,
+   "t": 15.872
+  },
+  {
+   "base_db": -21.328669624438966,
+   "cand_db": -21.328669624438966,
+   "d_db": 0.0,
+   "erle_base_db": 0.04827453283027868,
+   "erle_cand_db": 0.04827453283027868,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000042842984,
+   "mu_cand": 0.5000000051971802,
+   "ratio_base": 8.662785856531315e-09,
+   "ratio_cand": 1.04723922401374e-08,
+   "t": 16.864
+  },
+  {
+   "base_db": -20.79617528400954,
+   "cand_db": -20.79617528400954,
+   "d_db": 0.0,
+   "erle_base_db": 0.3920089247865293,
+   "erle_cand_db": 0.3920089247865293,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000039680799,
+   "mu_cand": 0.5000000052627176,
+   "ratio_base": 7.870574036776968e-09,
+   "ratio_cand": 1.0473104624166334e-08,
+   "t": 17.856
+  },
+  {
+   "base_db": -22.592514518643366,
+   "cand_db": -22.592514518643366,
+   "d_db": 0.0,
+   "erle_base_db": 0.06493253208759053,
+   "erle_cand_db": 0.06493253208759053,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000056093236,
+   "mu_cand": 0.5000000060879383,
+   "ratio_base": 1.1383812679830431e-08,
+   "ratio_cand": 1.234122152647233e-08,
+   "t": 18.848
+  },
+  {
+   "base_db": -24.190104581337756,
+   "cand_db": -24.190104581337756,
+   "d_db": 0.0,
+   "erle_base_db": 0.23217287578915322,
+   "erle_cand_db": 0.23217287578915322,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000083892098,
+   "mu_cand": 0.5000000102133435,
+   "ratio_base": 1.7764158843130395e-08,
+   "ratio_cand": 2.1722659311937455e-08,
+   "t": 19.84
+  },
+  {
+   "base_db": -24.559008523317274,
+   "cand_db": -24.559008523317274,
+   "d_db": 0.0,
+   "erle_base_db": 0.6241697295933685,
+   "erle_cand_db": 0.6241697295933685,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000769316093,
+   "mu_cand": 0.5000000858595457,
+   "ratio_base": 1.5270755151491382e-07,
+   "ratio_cand": 1.702742194585503e-07,
+   "t": 20.832
+  },
+  {
+   "base_db": -22.507662873589954,
+   "cand_db": -22.507662873589954,
+   "d_db": 0.0,
+   "erle_base_db": 0.20288739043387444,
+   "erle_cand_db": 0.20288739043387444,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000054637884,
+   "mu_cand": 0.5000000070822394,
+   "ratio_base": 1.0944720035874739e-08,
+   "ratio_cand": 1.4158776356312846e-08,
+   "t": 21.824
+  },
+  {
+   "base_db": -28.357689812072504,
+   "cand_db": -28.357689812072504,
+   "d_db": 0.0,
+   "erle_base_db": 0.7277394635506915,
+   "erle_cand_db": 0.7277394635506915,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000555632077,
+   "mu_cand": 0.5000000719607702,
+   "ratio_base": 1.1127348510503895e-07,
+   "ratio_cand": 1.439629066823608e-07,
+   "t": 22.816
+  },
+  {
+   "base_db": -20.080722926402142,
+   "cand_db": -20.080722926402142,
+   "d_db": 0.0,
+   "erle_base_db": 0.42748475063362446,
+   "erle_cand_db": 0.42748475063362446,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000038305189,
+   "mu_cand": 0.5000000044674253,
+   "ratio_base": 7.612179548509693e-09,
+   "ratio_cand": 9.526722587630557e-09,
+   "t": 23.808
+  },
+  {
+   "base_db": -29.27961157428077,
+   "cand_db": -29.27961157428077,
+   "d_db": 0.0,
+   "erle_base_db": 0.4927217268881457,
+   "erle_cand_db": 0.4927217268881457,
+   "far_active_frac": 0.0,
+   "mu_base": 0.5000000190816515,
+   "mu_cand": 0.5000000271261775,
+   "ratio_base": 3.983524318406766e-08,
+   "ratio_cand": 5.685479330312505e-08,
+   "t": 24.8
+  },
+  {
+   "base_db": -25.64306721054999,
+   "cand_db": -25.669999174090744,
+   "d_db": -0.026931963540753702,
+   "erle_base_db": 10.609939700056634,
+   "erle_cand_db": 10.636871663597386,
+   "far_active_frac": 0.6290322580645161,
+   "mu_base": 0.6072818654906206,
+   "mu_cand": 0.5971184677660919,
+   "ratio_base": 0.21643591444767415,
+   "ratio_cand": 0.195311099235374,
+   "t": 25.792
+  },
+  {
+   "base_db": -23.04635759889047,
+   "cand_db": -23.085628265943154,
+   "d_db": -0.0392706670526804,
+   "erle_base_db": 8.158929269609764,
+   "erle_cand_db": 8.198199936662444,
+   "far_active_frac": 1.0,
+   "mu_base": 0.6090656176618402,
+   "mu_cand": 0.6062413835171984,
+   "ratio_base": 0.21841367715977406,
+   "ratio_cand": 0.21432885471895838,
+   "t": 26.784
+  },
+  {
+   "base_db": -21.168149857193296,
+   "cand_db": -21.166268843487344,
+   "d_db": 0.0018810137059499716,
+   "erle_base_db": 9.948012512640574,
+   "erle_cand_db": 9.946131498934623,
+   "far_active_frac": 1.0,
+   "mu_base": 0.5979247866577686,
+   "mu_cand": 0.612548832074773,
+   "ratio_base": 0.20659817199369673,
+   "ratio_cand": 0.23508063528372758,
+   "t": 27.776
+  },
+  {
+   "base_db": -23.35172709770187,
+   "cand_db": -23.351304869099067,
+   "d_db": 0.000422228602802064,
+   "erle_base_db": 6.488694552703718,
+   "erle_cand_db": 6.488272324100914,
+   "far_active_frac": 0.6935483870967742,
+   "mu_base": 0.5732390402743882,
+   "mu_cand": 0.566002301177131,
+   "ratio_base": 0.1335801614681747,
+   "ratio_cand": 0.11910905221408197,
+   "t": 28.768
+  },
+  {
+   "base_db": -36.44417161034746,
+   "cand_db": -35.95174214916989,
+   "d_db": 0.49242946117756475,
+   "erle_base_db": 21.393470713348904,
+   "erle_cand_db": 20.90104125217134,
+   "far_active_frac": 1.0,
+   "mu_base": 0.5868509019900722,
+   "mu_cand": 0.5772783063917907,
+   "ratio_base": 0.17369649725429448,
+   "ratio_cand": 0.15454893711730977,
+   "t": 29.76
+  },
+  {
+   "base_db": -19.240180736725996,
+   "cand_db": -19.155354910857866,
+   "d_db": 0.08482582586812797,
+   "erle_base_db": 6.893728404385037,
+   "erle_cand_db": 6.808902578516908,
+   "far_active_frac": 1.0,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 30.752
+  },
+  {
+   "base_db": -21.050589688438688,
+   "cand_db": -21.05126066717055,
+   "d_db": -0.0006709787318590636,
+   "erle_base_db": 2.3914618993444376,
+   "erle_cand_db": 2.3921328780762967,
+   "far_active_frac": 0.7419354838709677,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.03225806451612903,
+   "ratio_cand": 0.03225806451612903,
+   "t": 31.744
+  },
+  {
+   "base_db": -22.946597776965426,
+   "cand_db": -22.958039468727897,
+   "d_db": -0.011441691762473762,
+   "erle_base_db": 8.585064768621343,
+   "erle_cand_db": 8.596506460383818,
+   "far_active_frac": 0.8548387096774194,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 32.736
+  },
+  {
+   "base_db": -27.7348776847783,
+   "cand_db": -27.744031983211794,
+   "d_db": -0.009154298433492782,
+   "erle_base_db": 12.825324959864,
+   "erle_cand_db": 12.834479258297494,
+   "far_active_frac": 1.0,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 33.728
+  },
+  {
+   "base_db": -21.301342199442253,
+   "cand_db": -21.300079116051194,
+   "d_db": 0.0012630833910595369,
+   "erle_base_db": 3.9893620337333995,
+   "erle_cand_db": 3.988098950342339,
+   "far_active_frac": 0.967741935483871,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 34.72
+  },
+  {
+   "base_db": -20.986095752728172,
+   "cand_db": -21.05782662105829,
+   "d_db": -0.07173086833011837,
+   "erle_base_db": 4.5394501007012655,
+   "erle_cand_db": 4.611180969031384,
+   "far_active_frac": 0.7966101694915254,
+   "mu_base": 0.5,
+   "mu_cand": 0.5,
+   "ratio_base": 0.0,
+   "ratio_cand": 0.0,
+   "t": 35.712
+  }
+ ],
+ "sample_rate": 16000,
+ "si_sdr": null,
+ "si_sdr_note": "not computable: the corpus ships mic+lpb only, with no clean near-end in any scenario, so any SI-SDR/STOI here would be scored against a reference that still contains the echo. Use d_near_db, and listen.",
+ "stem": "JjCzlhn3gEiBQvfJtPNJ9A_doubletalk_with_movement",
+ "stoi": null
+}

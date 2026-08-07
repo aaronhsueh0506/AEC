@@ -1,0 +1,42 @@
+=== frame_size=256 ===
+16 stems x 16 settings = 256 runs
+
+mask   retimed                                 far mean  far worst  near mean  near worst
+(dB vs all-frozen. far: FS clips, positive = MORE residual echo. near: negative = near end removed.)
+0000   (none)                                    +0.000     +0.000     +0.000      +0.000
+1101   holdoff,attack,release                    +0.016     +0.596     -0.185      -2.978
+1010   holdoff,hold                              -0.022     +0.771     -0.270      -4.332
+0001   release                                   +0.023     +1.158     -0.003      -0.064
+0100   attack                                    +0.096     +1.192     -0.154      -2.494
+0110   attack,hold                               +0.080     +1.235     -0.279      -4.403
+1110   holdoff,attack,hold                       +0.071     +1.281     -0.194      -3.088
+0010   hold                                      +0.095     +1.296     -0.049      -0.736
+0011   hold,release                              +0.175     +1.310     -0.047      -0.733
+0101   attack,release                            +0.060     +1.318     -0.200      -3.194
+0111   attack,hold,release                       +0.096     +1.329     -0.203      -3.246
+1001   holdoff,release                           +0.087     +1.381     -0.169      -2.672
+1000   holdoff                                   +0.171     +1.411     -0.048      -0.783
+1011   holdoff,hold,release                      +0.083     +1.624     -0.192      -3.020
+1111   holdoff,attack,hold,release               +0.105     +1.648     -0.206      -3.271
+1100   holdoff,attack                            +0.194     +3.112     -0.185      -2.992
+=== frame_size=512 ===
+16 stems x 16 settings = 256 runs
+
+mask   retimed                                 far mean  far worst  near mean  near worst
+(dB vs all-frozen. far: FS clips, positive = MORE residual echo. near: negative = near end removed.)
+0000   (none)                                    +0.000     +0.000     +0.000      +0.000
+0010   hold                                      -0.070     +0.090     +0.009      -0.009
+1111   holdoff,attack,hold,release               -0.058     +0.335     +0.006      -0.005
+0111   attack,hold,release                       -0.014     +0.412     +0.005      -0.003
+1000   holdoff                                   +0.034     +0.561     +0.056      -0.001
+1101   holdoff,attack,release                    -0.009     +0.626     -0.011      -0.225
+1001   holdoff,release                           +0.028     +0.645     +0.063      -0.004
+0001   release                                   -0.049     +0.775     -0.000      -0.047
+0101   attack,release                            +0.112     +0.797     +0.001      -0.114
+1010   holdoff,hold                              +0.086     +0.844     +0.002      -0.059
+0110   attack,hold                               -0.002     +0.926     -0.002      -0.068
+1011   holdoff,hold,release                      +0.054     +0.938     +0.054      -0.001
+1100   holdoff,attack                            +0.103     +1.187     +0.002      -0.055
+0011   hold,release                              +0.050     +1.200     -0.014      -0.262
+0100   attack                                    +0.042     +1.212     +0.009      -0.004
+1110   holdoff,attack,hold                       -0.042     +1.258     +0.006      -0.004

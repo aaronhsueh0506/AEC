@@ -1,0 +1,15 @@
+--- /private/tmp/claude-501/-Users-mingyu-Desktop-novatek-SE/fdd8dd4d-5e9f-4d28-b239-09e595e85967/scratchpad/wt/mu-cand/c_impl/src/aec.c	2026-08-07 10:22:23
++++ /private/tmp/claude-501/-Users-mingyu-Desktop-novatek-SE/fdd8dd4d-5e9f-4d28-b239-09e595e85967/scratchpad/wt/noise-cand/c_impl/src/aec.c	2026-08-07 17:26:51
+@@ -874,7 +874,11 @@
+     a->simple_mu_holdoff_limit = aec_legacy10ms_hops(200.0f, hop, sample_rate);
+     a->simple_mu_alpha_attack  = aec_legacy10ms_alpha(0.3f,  hop, sample_rate);
+     a->simple_mu_alpha_hold    = aec_legacy10ms_alpha(0.99f, hop, sample_rate);
+-    a->simple_mu_alpha_release = aec_legacy10ms_alpha(0.95f, hop, sample_rate);
++    /* CONTROL PERTURBATION -- not a candidate. 0.95f -> 0.9500001f is a
++     * 1.1e-7 relative change, far below any timing meaning, but it is
++     * bit-changing. Any per-case AECMOS delta it produces is the NOISE
++     * FLOOR of the per-case measurement, not an effect. */
++    a->simple_mu_alpha_release = aec_legacy10ms_alpha(0.9500001f, hop, sample_rate);
+ }
+ 
+ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,

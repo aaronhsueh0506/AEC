@@ -1,0 +1,1259 @@
+{
+ "branch_counts": {
+  "base": {
+   "attack_ongoing": 39,
+   "attack_onset": 22,
+   "hold": 420,
+   "release": 928
+  },
+  "cand": {
+   "attack_ongoing": 35,
+   "attack_onset": 30,
+   "hold": 336,
+   "release": 1008
+  }
+ },
+ "branch_transitions": {
+  "base": [
+   [
+    0,
+    "release"
+   ],
+   [
+    1,
+    "attack_onset"
+   ],
+   [
+    2,
+    "attack_ongoing"
+   ],
+   [
+    3,
+    "hold"
+   ],
+   [
+    23,
+    "release"
+   ],
+   [
+    54,
+    "attack_onset"
+   ],
+   [
+    55,
+    "hold"
+   ],
+   [
+    75,
+    "release"
+   ],
+   [
+    122,
+    "attack_onset"
+   ],
+   [
+    123,
+    "attack_ongoing"
+   ],
+   [
+    124,
+    "hold"
+   ],
+   [
+    135,
+    "attack_ongoing"
+   ],
+   [
+    138,
+    "hold"
+   ],
+   [
+    147,
+    "release"
+   ],
+   [
+    155,
+    "attack_onset"
+   ],
+   [
+    156,
+    "hold"
+   ],
+   [
+    168,
+    "attack_ongoing"
+   ],
+   [
+    169,
+    "hold"
+   ],
+   [
+    177,
+    "release"
+   ],
+   [
+    342,
+    "attack_onset"
+   ],
+   [
+    343,
+    "hold"
+   ],
+   [
+    345,
+    "attack_ongoing"
+   ],
+   [
+    346,
+    "hold"
+   ],
+   [
+    364,
+    "release"
+   ],
+   [
+    368,
+    "attack_onset"
+   ],
+   [
+    369,
+    "hold"
+   ],
+   [
+    389,
+    "release"
+   ],
+   [
+    491,
+    "attack_onset"
+   ],
+   [
+    492,
+    "hold"
+   ],
+   [
+    509,
+    "attack_ongoing"
+   ],
+   [
+    513,
+    "hold"
+   ],
+   [
+    514,
+    "attack_ongoing"
+   ],
+   [
+    515,
+    "hold"
+   ],
+   [
+    517,
+    "release"
+   ],
+   [
+    573,
+    "attack_onset"
+   ],
+   [
+    574,
+    "hold"
+   ],
+   [
+    580,
+    "attack_ongoing"
+   ],
+   [
+    581,
+    "hold"
+   ],
+   [
+    595,
+    "release"
+   ],
+   [
+    637,
+    "attack_onset"
+   ],
+   [
+    638,
+    "hold"
+   ],
+   [
+    658,
+    "release"
+   ],
+   [
+    665,
+    "attack_onset"
+   ],
+   [
+    666,
+    "hold"
+   ],
+   [
+    673,
+    "attack_ongoing"
+   ],
+   [
+    676,
+    "hold"
+   ],
+   [
+    689,
+    "release"
+   ],
+   [
+    812,
+    "attack_onset"
+   ],
+   [
+    813,
+    "hold"
+   ],
+   [
+    814,
+    "attack_ongoing"
+   ],
+   [
+    816,
+    "hold"
+   ],
+   [
+    833,
+    "attack_ongoing"
+   ],
+   [
+    834,
+    "hold"
+   ],
+   [
+    836,
+    "release"
+   ],
+   [
+    845,
+    "attack_onset"
+   ],
+   [
+    846,
+    "attack_ongoing"
+   ],
+   [
+    848,
+    "hold"
+   ],
+   [
+    868,
+    "release"
+   ],
+   [
+    899,
+    "attack_onset"
+   ],
+   [
+    900,
+    "attack_ongoing"
+   ],
+   [
+    901,
+    "hold"
+   ],
+   [
+    906,
+    "attack_ongoing"
+   ],
+   [
+    907,
+    "hold"
+   ],
+   [
+    910,
+    "attack_ongoing"
+   ],
+   [
+    911,
+    "hold"
+   ],
+   [
+    923,
+    "release"
+   ],
+   [
+    982,
+    "attack_onset"
+   ],
+   [
+    983,
+    "attack_ongoing"
+   ],
+   [
+    985,
+    "hold"
+   ],
+   [
+    997,
+    "attack_ongoing"
+   ],
+   [
+    998,
+    "hold"
+   ],
+   [
+    1006,
+    "release"
+   ],
+   [
+    1048,
+    "attack_onset"
+   ],
+   [
+    1049,
+    "attack_ongoing"
+   ],
+   [
+    1050,
+    "hold"
+   ],
+   [
+    1059,
+    "attack_ongoing"
+   ],
+   [
+    1060,
+    "hold"
+   ],
+   [
+    1071,
+    "release"
+   ],
+   [
+    1096,
+    "attack_onset"
+   ],
+   [
+    1097,
+    "hold"
+   ],
+   [
+    1099,
+    "attack_ongoing"
+   ],
+   [
+    1100,
+    "hold"
+   ],
+   [
+    1118,
+    "release"
+   ],
+   [
+    1127,
+    "attack_onset"
+   ],
+   [
+    1128,
+    "hold"
+   ],
+   [
+    1148,
+    "release"
+   ],
+   [
+    1201,
+    "attack_onset"
+   ],
+   [
+    1202,
+    "hold"
+   ],
+   [
+    1213,
+    "attack_ongoing"
+   ],
+   [
+    1214,
+    "hold"
+   ],
+   [
+    1221,
+    "attack_ongoing"
+   ],
+   [
+    1224,
+    "hold"
+   ],
+   [
+    1225,
+    "attack_onset"
+   ],
+   [
+    1226,
+    "attack_ongoing"
+   ],
+   [
+    1229,
+    "hold"
+   ],
+   [
+    1230,
+    "release"
+   ],
+   [
+    1253,
+    "attack_onset"
+   ],
+   [
+    1254,
+    "attack_ongoing"
+   ],
+   [
+    1256,
+    "hold"
+   ],
+   [
+    1276,
+    "release"
+   ],
+   [
+    1305,
+    "attack_onset"
+   ],
+   [
+    1306,
+    "hold"
+   ],
+   [
+    1326,
+    "release"
+   ],
+   [
+    1336,
+    "attack_onset"
+   ],
+   [
+    1337,
+    "hold"
+   ],
+   [
+    1357,
+    "release"
+   ]
+  ],
+  "cand": [
+   [
+    0,
+    "release"
+   ],
+   [
+    1,
+    "attack_onset"
+   ],
+   [
+    2,
+    "attack_ongoing"
+   ],
+   [
+    3,
+    "hold"
+   ],
+   [
+    15,
+    "release"
+   ],
+   [
+    19,
+    "attack_onset"
+   ],
+   [
+    20,
+    "hold"
+   ],
+   [
+    28,
+    "release"
+   ],
+   [
+    54,
+    "attack_onset"
+   ],
+   [
+    55,
+    "hold"
+   ],
+   [
+    67,
+    "release"
+   ],
+   [
+    122,
+    "attack_onset"
+   ],
+   [
+    123,
+    "attack_ongoing"
+   ],
+   [
+    124,
+    "hold"
+   ],
+   [
+    135,
+    "attack_ongoing"
+   ],
+   [
+    137,
+    "hold"
+   ],
+   [
+    138,
+    "attack_onset"
+   ],
+   [
+    139,
+    "hold"
+   ],
+   [
+    148,
+    "attack_ongoing"
+   ],
+   [
+    149,
+    "hold"
+   ],
+   [
+    152,
+    "release"
+   ],
+   [
+    155,
+    "attack_onset"
+   ],
+   [
+    156,
+    "hold"
+   ],
+   [
+    168,
+    "attack_onset"
+   ],
+   [
+    169,
+    "hold"
+   ],
+   [
+    181,
+    "release"
+   ],
+   [
+    342,
+    "attack_onset"
+   ],
+   [
+    343,
+    "hold"
+   ],
+   [
+    345,
+    "attack_ongoing"
+   ],
+   [
+    346,
+    "hold"
+   ],
+   [
+    356,
+    "release"
+   ],
+   [
+    368,
+    "attack_onset"
+   ],
+   [
+    369,
+    "hold"
+   ],
+   [
+    381,
+    "release"
+   ],
+   [
+    491,
+    "attack_onset"
+   ],
+   [
+    492,
+    "hold"
+   ],
+   [
+    504,
+    "release"
+   ],
+   [
+    510,
+    "attack_onset"
+   ],
+   [
+    511,
+    "attack_ongoing"
+   ],
+   [
+    513,
+    "hold"
+   ],
+   [
+    514,
+    "attack_ongoing"
+   ],
+   [
+    515,
+    "hold"
+   ],
+   [
+    526,
+    "release"
+   ],
+   [
+    573,
+    "attack_onset"
+   ],
+   [
+    574,
+    "hold"
+   ],
+   [
+    580,
+    "attack_ongoing"
+   ],
+   [
+    581,
+    "hold"
+   ],
+   [
+    587,
+    "release"
+   ],
+   [
+    606,
+    "attack_onset"
+   ],
+   [
+    607,
+    "hold"
+   ],
+   [
+    619,
+    "release"
+   ],
+   [
+    637,
+    "attack_onset"
+   ],
+   [
+    638,
+    "hold"
+   ],
+   [
+    650,
+    "release"
+   ],
+   [
+    661,
+    "attack_onset"
+   ],
+   [
+    662,
+    "hold"
+   ],
+   [
+    665,
+    "attack_ongoing"
+   ],
+   [
+    666,
+    "hold"
+   ],
+   [
+    673,
+    "attack_ongoing"
+   ],
+   [
+    675,
+    "hold"
+   ],
+   [
+    677,
+    "release"
+   ],
+   [
+    812,
+    "attack_onset"
+   ],
+   [
+    813,
+    "attack_ongoing"
+   ],
+   [
+    816,
+    "hold"
+   ],
+   [
+    828,
+    "release"
+   ],
+   [
+    833,
+    "attack_onset"
+   ],
+   [
+    834,
+    "hold"
+   ],
+   [
+    845,
+    "attack_ongoing"
+   ],
+   [
+    848,
+    "hold"
+   ],
+   [
+    849,
+    "release"
+   ],
+   [
+    865,
+    "attack_onset"
+   ],
+   [
+    866,
+    "hold"
+   ],
+   [
+    878,
+    "release"
+   ],
+   [
+    899,
+    "attack_onset"
+   ],
+   [
+    900,
+    "attack_ongoing"
+   ],
+   [
+    901,
+    "hold"
+   ],
+   [
+    906,
+    "attack_ongoing"
+   ],
+   [
+    907,
+    "hold"
+   ],
+   [
+    914,
+    "release"
+   ],
+   [
+    981,
+    "attack_onset"
+   ],
+   [
+    982,
+    "attack_ongoing"
+   ],
+   [
+    985,
+    "hold"
+   ],
+   [
+    997,
+    "attack_onset"
+   ],
+   [
+    998,
+    "hold"
+   ],
+   [
+    1010,
+    "release"
+   ],
+   [
+    1048,
+    "attack_onset"
+   ],
+   [
+    1049,
+    "attack_ongoing"
+   ],
+   [
+    1050,
+    "hold"
+   ],
+   [
+    1059,
+    "attack_ongoing"
+   ],
+   [
+    1060,
+    "hold"
+   ],
+   [
+    1063,
+    "release"
+   ],
+   [
+    1096,
+    "attack_onset"
+   ],
+   [
+    1097,
+    "hold"
+   ],
+   [
+    1099,
+    "attack_ongoing"
+   ],
+   [
+    1100,
+    "hold"
+   ],
+   [
+    1110,
+    "release"
+   ],
+   [
+    1127,
+    "attack_onset"
+   ],
+   [
+    1128,
+    "hold"
+   ],
+   [
+    1140,
+    "release"
+   ],
+   [
+    1201,
+    "attack_onset"
+   ],
+   [
+    1202,
+    "hold"
+   ],
+   [
+    1213,
+    "attack_ongoing"
+   ],
+   [
+    1214,
+    "hold"
+   ],
+   [
+    1215,
+    "release"
+   ],
+   [
+    1220,
+    "attack_onset"
+   ],
+   [
+    1221,
+    "attack_ongoing"
+   ],
+   [
+    1223,
+    "hold"
+   ],
+   [
+    1224,
+    "attack_onset"
+   ],
+   [
+    1225,
+    "attack_ongoing"
+   ],
+   [
+    1227,
+    "hold"
+   ],
+   [
+    1230,
+    "release"
+   ],
+   [
+    1253,
+    "attack_onset"
+   ],
+   [
+    1254,
+    "attack_ongoing"
+   ],
+   [
+    1256,
+    "hold"
+   ],
+   [
+    1268,
+    "release"
+   ],
+   [
+    1305,
+    "attack_onset"
+   ],
+   [
+    1306,
+    "hold"
+   ],
+   [
+    1318,
+    "release"
+   ],
+   [
+    1334,
+    "attack_onset"
+   ],
+   [
+    1335,
+    "hold"
+   ],
+   [
+    1336,
+    "attack_ongoing"
+   ],
+   [
+    1337,
+    "hold"
+   ],
+   [
+    1348,
+    "release"
+   ]
+  ]
+ },
+ "bulk_delay_samples": 3424,
+ "d_far_db": 0.33533729846908866,
+ "d_near_db": -0.0003077486612575254,
+ "d_overall_db": 0.3339719874887145,
+ "far_active_hops": 1396,
+ "far_inactive_hops": 13,
+ "first_divergent_hop": 3,
+ "first_divergent_ms": 48.0,
+ "frame_size": 512,
+ "holdoff_limit": {
+  "base": 20,
+  "cand": null
+ },
+ "hop": 256,
+ "n_hops": 1409,
+ "per_second": [
+  {
+   "base_db": -48.07107702065255,
+   "cand_db": -48.07111249028522,
+   "d_db": -3.546963267480942e-05,
+   "erle_base_db": 7.795467151654459,
+   "erle_cand_db": 7.795502621287134,
+   "far_active_frac": 0.7903225806451613,
+   "mu_base": 0.8930696910497078,
+   "mu_cand": 0.8964633603166727,
+   "ratio_base": 0.7915042935594739,
+   "ratio_cand": 0.7921363302020488,
+   "t": 0.0
+  },
+  {
+   "base_db": -51.55056345383859,
+   "cand_db": -51.49028059550538,
+   "d_db": 0.0602828583332126,
+   "erle_base_db": 23.493297383611917,
+   "erle_cand_db": 23.433014525278708,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9725937052928875,
+   "mu_cand": 0.9805497418870024,
+   "ratio_base": 0.9391429922817527,
+   "ratio_cand": 0.9541621526915876,
+   "t": 0.992
+  },
+  {
+   "base_db": -29.581056488604467,
+   "cand_db": -29.571624463731737,
+   "d_db": 0.009432024872732385,
+   "erle_base_db": 1.842503809555713,
+   "erle_cand_db": 1.8330717846829803,
+   "far_active_frac": 1.0,
+   "mu_base": 0.6861533963827796,
+   "mu_cand": 0.6989649007850619,
+   "ratio_base": 0.37412787068328074,
+   "ratio_cand": 0.4013200491153874,
+   "t": 1.984
+  },
+  {
+   "base_db": -50.85775049535441,
+   "cand_db": -51.21055698154428,
+   "d_db": -0.35280648618986976,
+   "erle_base_db": 20.26249747157089,
+   "erle_cand_db": 20.61530395776076,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9419270978201296,
+   "mu_cand": 0.9640412595669487,
+   "ratio_base": 0.8896614858582467,
+   "ratio_cand": 0.9337490309691404,
+   "t": 2.976
+  },
+  {
+   "base_db": -52.15883670173945,
+   "cand_db": -52.296791136563016,
+   "d_db": -0.13795443482355763,
+   "erle_base_db": 17.16414782526902,
+   "erle_cand_db": 17.302102260092575,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8785184460445826,
+   "mu_cand": 0.8854143147199877,
+   "ratio_base": 0.7563447266118601,
+   "ratio_cand": 0.7704137877604893,
+   "t": 3.968
+  },
+  {
+   "base_db": -50.54761750197059,
+   "cand_db": -50.57230824062778,
+   "d_db": -0.02469073865718062,
+   "erle_base_db": 6.910855662216702,
+   "erle_cand_db": 6.935546400873884,
+   "far_active_frac": 1.0,
+   "mu_base": 0.940924682463156,
+   "mu_cand": 0.9500787026554581,
+   "ratio_base": 0.8788800139616406,
+   "ratio_cand": 0.8968680901627126,
+   "t": 4.96
+  },
+  {
+   "base_db": -53.46917504472568,
+   "cand_db": -53.57700780034875,
+   "d_db": -0.10783275562306911,
+   "erle_base_db": 24.868765628323576,
+   "erle_cand_db": 24.976598383946644,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9395605441693324,
+   "mu_cand": 0.9639408875723875,
+   "ratio_base": 0.8827065001737873,
+   "ratio_cand": 0.9315793293549369,
+   "t": 5.952
+  },
+  {
+   "base_db": -51.459663081333275,
+   "cand_db": -51.66993688924991,
+   "d_db": -0.21027380791663625,
+   "erle_base_db": 6.398252516365375,
+   "erle_cand_db": 6.608526324282012,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9901568905441609,
+   "mu_cand": 0.9920158606711512,
+   "ratio_base": 0.9773604145329763,
+   "ratio_cand": 0.9803655589198398,
+   "t": 6.944
+  },
+  {
+   "base_db": -36.52951536991913,
+   "cand_db": -37.45894083218388,
+   "d_db": -0.929425462264746,
+   "erle_base_db": 8.27454391888763,
+   "erle_cand_db": 9.203969381152376,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8207420082976207,
+   "mu_cand": 0.8189852248997769,
+   "ratio_base": 0.6430649610697189,
+   "ratio_cand": 0.6408598757900922,
+   "t": 7.936
+  },
+  {
+   "base_db": -50.00553241707611,
+   "cand_db": -50.01249970781793,
+   "d_db": -0.006967290741820074,
+   "erle_base_db": 8.507296172663722,
+   "erle_cand_db": 8.514263463405541,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8734231036172166,
+   "mu_cand": 0.897595628192659,
+   "ratio_base": 0.7463032067489664,
+   "ratio_cand": 0.7939492402510541,
+   "t": 8.928
+  },
+  {
+   "base_db": -38.31747346640925,
+   "cand_db": -31.424019002265947,
+   "d_db": 6.893454464143298,
+   "erle_base_db": 11.20643578490494,
+   "erle_cand_db": 4.31298132076164,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8698076107793087,
+   "mu_cand": 0.87451672817998,
+   "ratio_base": 0.7305165868496124,
+   "ratio_cand": 0.7427257826130365,
+   "t": 9.92
+  },
+  {
+   "base_db": -43.28384203928253,
+   "cand_db": -44.83524571732059,
+   "d_db": -1.5514036780380545,
+   "erle_base_db": 9.455413117211204,
+   "erle_cand_db": 11.006816795249259,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8604857043453853,
+   "mu_cand": 0.9450258831160075,
+   "ratio_base": 0.7316731751627011,
+   "ratio_cand": 0.8983641082779221,
+   "t": 10.912
+  },
+  {
+   "base_db": -52.01468088377652,
+   "cand_db": -53.24947234557361,
+   "d_db": -1.234791461797086,
+   "erle_base_db": 15.848412003107645,
+   "erle_cand_db": 17.083203464904734,
+   "far_active_frac": 1.0,
+   "mu_base": 0.993862978161794,
+   "mu_cand": 0.999647721701073,
+   "ratio_base": 0.9883396585074089,
+   "ratio_cand": 0.9993509567245294,
+   "t": 11.904
+  },
+  {
+   "base_db": -35.939883837374126,
+   "cand_db": -36.15512095996144,
+   "d_db": -0.21523712258731093,
+   "erle_base_db": 8.827146576457313,
+   "erle_cand_db": 9.042383699044624,
+   "far_active_frac": 1.0,
+   "mu_base": 0.7819766483362879,
+   "mu_cand": 0.8130617406875236,
+   "ratio_base": 0.5524695230565216,
+   "ratio_cand": 0.6159926853778724,
+   "t": 12.896
+  },
+  {
+   "base_db": -29.049260883332483,
+   "cand_db": -29.4208000512679,
+   "d_db": -0.3715391679354165,
+   "erle_base_db": 1.8248325297149774,
+   "erle_cand_db": 2.1963716976503944,
+   "far_active_frac": 1.0,
+   "mu_base": 0.7832907152287338,
+   "mu_cand": 0.8048322454589044,
+   "ratio_base": 0.5721658726211383,
+   "ratio_cand": 0.61738952680119,
+   "t": 13.888
+  },
+  {
+   "base_db": -42.96035048036478,
+   "cand_db": -43.42346423963089,
+   "d_db": -0.46311375926611004,
+   "erle_base_db": 8.585903052053464,
+   "erle_cand_db": 9.049016811319573,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8910372011523896,
+   "mu_cand": 0.9297676559004187,
+   "ratio_base": 0.7759588350115089,
+   "ratio_cand": 0.8500613827619009,
+   "t": 14.88
+  },
+  {
+   "base_db": -45.92670048724371,
+   "cand_db": -45.03853691159829,
+   "d_db": 0.8881635756454114,
+   "erle_base_db": 6.975459596943388,
+   "erle_cand_db": 6.087296021297977,
+   "far_active_frac": 1.0,
+   "mu_base": 0.7901449273621208,
+   "mu_cand": 0.8072056526815543,
+   "ratio_base": 0.5829626234723334,
+   "ratio_cand": 0.6162503338465167,
+   "t": 15.872
+  },
+  {
+   "base_db": -43.66666568219111,
+   "cand_db": -44.76622363956005,
+   "d_db": -1.0995579573689431,
+   "erle_base_db": 9.420767042549512,
+   "erle_cand_db": 10.520324999918456,
+   "far_active_frac": 1.0,
+   "mu_base": 0.766512974242416,
+   "mu_cand": 0.8087491280574993,
+   "ratio_base": 0.5337564168793657,
+   "ratio_cand": 0.6216133424085587,
+   "t": 16.864
+  },
+  {
+   "base_db": -52.23776228782002,
+   "cand_db": -52.916653772616904,
+   "d_db": -0.6788914847968764,
+   "erle_base_db": 20.68819848814439,
+   "erle_cand_db": 21.367089972941265,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8708677800433213,
+   "mu_cand": 0.9202778000660431,
+   "ratio_base": 0.7493951843494232,
+   "ratio_cand": 0.8462865387205732,
+   "t": 17.856
+  },
+  {
+   "base_db": -41.895289951274975,
+   "cand_db": -41.01177775592029,
+   "d_db": 0.8835121953546907,
+   "erle_base_db": 11.02484048602051,
+   "erle_cand_db": 10.141328290665822,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8663398007733228,
+   "mu_cand": 0.8721699481196868,
+   "ratio_base": 0.7317268528607968,
+   "ratio_cand": 0.7431151131403858,
+   "t": 18.848
+  },
+  {
+   "base_db": -33.47137200119212,
+   "cand_db": -33.54206499575562,
+   "d_db": -0.07069299456349712,
+   "erle_base_db": 1.0544355435986699,
+   "erle_cand_db": 1.125128538162167,
+   "far_active_frac": 1.0,
+   "mu_base": 0.8085565339589458,
+   "mu_cand": 0.8597803483328899,
+   "ratio_base": 0.6165331762750417,
+   "ratio_cand": 0.7203359542882457,
+   "t": 19.84
+  },
+  {
+   "base_db": -50.17011898312151,
+   "cand_db": -50.71086546034369,
+   "d_db": -0.5407464772221736,
+   "erle_base_db": 13.377738001735615,
+   "erle_cand_db": 13.918484478957787,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9320809731119719,
+   "mu_cand": 0.9528257286382752,
+   "ratio_base": 0.8655250225454553,
+   "ratio_cand": 0.9058150741056334,
+   "t": 20.832
+  },
+  {
+   "base_db": -53.41363814480458,
+   "cand_db": -54.872215828892685,
+   "d_db": -1.458577684088105,
+   "erle_base_db": 27.190873088002117,
+   "erle_cand_db": 28.64945077209022,
+   "far_active_frac": 1.0,
+   "mu_base": 0.9857531573191478,
+   "mu_cand": 0.9959001837805747,
+   "ratio_base": 0.9729309989063809,
+   "ratio_cand": 0.9924464318239657,
+   "t": 21.824
+  }
+ ],
+ "sample_rate": 16000,
+ "si_sdr": null,
+ "si_sdr_note": "not computable: the corpus ships mic+lpb only, with no clean near-end in any scenario, so any SI-SDR/STOI here would be scored against a reference that still contains the echo. Use d_near_db, and listen.",
+ "stem": "1fvt8ajGxk2OhS7UglBjoA_farend_singletalk",
+ "stoi": null
+}
