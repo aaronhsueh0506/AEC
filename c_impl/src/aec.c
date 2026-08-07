@@ -415,9 +415,16 @@ static float get_simple_mu_scale(Aec* a, int* out_is_array) {
     return mu_min + (1.0f - mu_min) * a->simple_mu_ratio;
 }
 
-/* _update_simple_mu_ratio (orchestrator 1478-1522). */
-static void update_simple_mu_ratio(Aec* a, const float* output,
-                                   const float* far_end, int n) {
+/* _update_simple_mu_ratio (orchestrator 1478-1522).
+ *
+ * Deliberately NOT static, and deliberately NOT declared in aec.h: it is not
+ * public API, but test_rate_structural check (d6) has to drive it directly.
+ * Going through aec_process() cannot work -- simple_mu_ratio is read earlier in
+ * the same hop to scale mu, so it feeds back into the very error signal the
+ * recovery would have to hold constant, and the two runs the recovery compares
+ * would no longer differ in one variable only. */
+void aec_update_simple_mu_ratio(Aec* a, const float* output,
+                                const float* far_end, int n) {
     float error_power = mean_sq(output, n, a->scr_sq) + 1e-10f;
     float far_power   = mean_sq(far_end, n, a->scr_sq) + 1e-10f;
     if (far_power < 1e-6f && error_power < 1e-6f) return;
@@ -444,17 +451,22 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
         float r2_half = r2 * 0.5f;
         if (r2_half > ratio) ratio = r2_half;
     }
+    /* All four constants are derived once in aec_carve(); no literal may appear
+     * here, or the grid is silently ignored. */
     float alpha;
     if (ratio < a->simple_mu_ratio) {
-        alpha = 0.3f;
+        alpha = a->simple_mu_alpha_attack;
         /* F2.4 invariant: arm only on a FRESH attack; an ongoing attack must
          * not restart it, or marginal DT re-arms every hop and mu never
-         * releases. 20 hops authored at a 10 ms hop (200 ms), not yet
-         * retimed. Mirrors orchestrator.py. */
-        if (a->simple_mu_holdoff == 0) a->simple_mu_holdoff = 20;
+         * releases. Mirrors orchestrator.py. */
+        if (a->simple_mu_holdoff == 0)
+            a->simple_mu_holdoff = a->simple_mu_holdoff_limit;
     }
-    else if (a->simple_mu_holdoff > 0) { a->simple_mu_holdoff--; alpha = 0.99f; }
-    else alpha = 0.95f;
+    else if (a->simple_mu_holdoff > 0) {
+        a->simple_mu_holdoff--;
+        alpha = a->simple_mu_alpha_hold;
+    }
+    else alpha = a->simple_mu_alpha_release;
     a->simple_mu_ratio = alpha * a->simple_mu_ratio + (1.0f - alpha) * ratio;
 }
 
@@ -851,6 +863,18 @@ static void aec_recompute_wallclock_thresholds(Aec* a, int hop, int sample_rate)
     a->coarse_reset_hangover_hops = aec3_blocks_to_hops(25, hop, sample_rate);
     a->leakage_div_sustain_hops = aec3_ms_to_hops(50.0f, hop, sample_rate);
     a->stat_dt_hangover_hops = aec3_ms_to_hops(800.0f, hop, sample_rate);
+    /* Simple-mu timing (F2.4). These four do not live in AecConfig, so they are
+     * derived onto the instance rather than into a->cfg. Derived ONCE per
+     * (hop, rate): a powf() per hop inside update_simple_mu_ratio() would be
+     * the same value recomputed on the audio path forever. This function is
+     * also called from aec_reset(), which re-derives them to the same values --
+     * they are constants of the resolved grid, not runtime state, and the two
+     * runtime fields (simple_mu_ratio, simple_mu_holdoff) are cleared there
+     * separately. */
+    a->simple_mu_holdoff_limit = aec_legacy10ms_hops(200.0f, hop, sample_rate);
+    a->simple_mu_alpha_attack  = aec_legacy10ms_alpha(0.3f,  hop, sample_rate);
+    a->simple_mu_alpha_hold    = aec_legacy10ms_alpha(0.99f, hop, sample_rate);
+    a->simple_mu_alpha_release = aec_legacy10ms_alpha(0.95f, hop, sample_rate);
 }
 
 static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
@@ -2430,7 +2454,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             a->has_per_bin_mu = 1;
         } else {
             a->has_per_bin_mu = 0;
-            update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
+            aec_update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
         }
     }
     /* enable_res==False C-parity fallback (orchestrator 2313-2316) is unused

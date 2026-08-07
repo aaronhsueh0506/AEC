@@ -237,6 +237,17 @@ typedef struct Aec {
     int    warmup_far_active;
     float  simple_mu_ratio;
     int    simple_mu_holdoff;
+    /* Simple-mu timing, derived once in aec_carve() against the resolved grid
+     * and NOT cleared by aec_reset() (which owns the two runtime fields above
+     * and nothing else). All four are authored at hop=160/16000 (10 ms) and
+     * validated there by F2.4; the guard was introduced on a 16 ms grid, so
+     * anchoring on the introducing commit would give a 320 ms holdoff instead
+     * of 200 -- a 1.6x error. They are one mechanism and are retimed together:
+     * their RELATIVE rates are what shape the response. */
+    int    simple_mu_holdoff_limit;   /* 200 ms in hops */
+    float  simple_mu_alpha_attack;    /* 0.3  at 10 ms */
+    float  simple_mu_alpha_hold;      /* 0.99 at 10 ms */
+    float  simple_mu_alpha_release;   /* 0.95 at 10 ms */
     float* per_bin_mu_scale;   int has_per_bin_mu;
     /* power EMAs (alpha=0.95 sample loop) */
     float  near_power, raw_error_power;

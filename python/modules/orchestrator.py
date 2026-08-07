@@ -747,7 +747,31 @@ class AEC:
         self._wn_err_baseline = 1e-8
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
 
-        # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
+        # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER).
+        # The four constants below are one mechanism: a fresh DT onset arms the
+        # holdoff, the attack retention sets how fast the ratio drops into it,
+        # the hold retention nearly freezes the ratio while it runs, and the
+        # release retention governs recovery afterwards. Their RELATIVE rates
+        # are what make the tracker behave, so they are retimed together or not
+        # at all -- retiming one alone would change the shape of the response,
+        # not just its speed.
+        #
+        # All four are authored at the legacy hop=160/16000 (10 ms) grid and
+        # validated there by F2.4 (7b2cf04, an 800-case ablation). Note the
+        # anchor: the guard was INTRODUCED on a 16 ms grid (d774771), so
+        # anchoring on the introducing commit would make the holdoff 320 ms
+        # instead of 200 -- a 1.6x error.
+        from . import aec3_scale as _aec3_scale_mu
+        _mu_hop = self.config.hop_size
+        _mu_sr = self.config.sample_rate
+        self._simple_mu_holdoff_limit = _aec3_scale_mu.ms_to_hops(
+            200.0, _mu_hop, _mu_sr)
+        self._simple_mu_alpha_attack = _aec3_scale_mu.growth_rehop(
+            0.3, 160, 16000, _mu_hop, _mu_sr)
+        self._simple_mu_alpha_hold = _aec3_scale_mu.growth_rehop(
+            0.99, 160, 16000, _mu_hop, _mu_sr)
+        self._simple_mu_alpha_release = _aec3_scale_mu.growth_rehop(
+            0.95, 160, 16000, _mu_hop, _mu_sr)
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0  # holdoff counter: blocks release for N frames
         self._warmup_frames = self.config.warmup_frames
@@ -1287,25 +1311,23 @@ class AEC:
                 ratio = max(ratio, ratio_echo * 0.5)
 
         # Asymmetric EMA + holdoff: fast attack, slow release with holdoff
+        # All four constants are derived once at construction (see __init__);
+        # no literal may appear here, or the grid is silently ignored.
         if ratio < self._simple_mu_ratio:
             # Attack: fast drop.
-            # F2.4: only arm holdoff on fresh DT onset (holdoff==0); do not
-            # reset during the holdoff window — marginal DT oscillation keeps
-            # resetting holdoff to 20 so mu never releases.
-            alpha = 0.3
+            alpha = self._simple_mu_alpha_attack
             # F2.4 INVARIANT: arm the holdoff only on a fresh attack.
             # An ongoing attack must not restart it, or marginal double-talk
             # re-arms every hop and mu never releases.
-            # 20 hops is authored at a 10 ms hop (200 ms); not yet retimed.
             if self._simple_mu_holdoff == 0:
-                self._simple_mu_holdoff = 20
+                self._simple_mu_holdoff = self._simple_mu_holdoff_limit
         elif self._simple_mu_holdoff > 0:
             # Holdoff active: keep ratio low, don't release yet
             self._simple_mu_holdoff -= 1
-            alpha = 0.99  # nearly frozen
+            alpha = self._simple_mu_alpha_hold  # nearly frozen
         else:
             # Release: slow recovery
-            alpha = 0.95
+            alpha = self._simple_mu_alpha_release
         self._simple_mu_ratio = alpha * self._simple_mu_ratio + (1 - alpha) * ratio
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
