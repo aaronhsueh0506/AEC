@@ -2,38 +2,33 @@
 
 Evidence for `d7e94f7`.
 
-## Result: byte-identical output, for the same reason as alpha_power
+## Result: byte-identical output through the whole `Aec` API — but NOT dead
 
-0 of 180 case-grid pairs changed; all 90 WAVs byte-identical at both grids.
+0 of 180 case-grid pairs changed (default config); a further 20-case run with
+`--no-shadow` is also byte-identical. But "audio-dead" -- which an earlier
+version of this file and of `d7e94f7`'s commit message both claimed -- is the
+wrong conclusion, and so is "the scalar fallback is unreachable".
 
-**This corrects a claim made in `d7e94f7`'s own commit message.** That message
-said "Unlike alpha_power, this one reaches audio", citing the chain
-`error_psd -> e2_ref_sum -> use_converged -> leakage -> H_error_per_bin`. The
-chain exists, but it is in a branch that production never takes. Two lines
-above it, the source says so:
+The precise picture, verified in source and empirically:
 
-```c
-} else {
-    /* scalar fallback: e2_ref_sum = sum(error_psd) (float32); e2_coa scalar.
-     * (Not exercised in production: orchestrator sets e2_coarse_per_bin
-     * every hop. Kept pairwise-correct for completeness.) */
-```
+| path | `error_psd` read? | does `alpha_r` change output? | why |
+|---|---|---|---|
+| `Aec`, shadow ON (default) | no | no | the per-bin branch (`pbfdkf.c:958`) reads `error_spec` directly |
+| `Aec`, shadow OFF | **yes** | **no** | scalar branch runs, but `e2_coarse_for_refresh` is only assigned inside `if (a->has_shadow)` (`aec.c:1955`), so it stays `0.0f`; `use_conv = (e2_ref_sum <= 0)` is constant-false for any positive `error_psd`, whatever `alpha_r` is |
+| direct `pbfdkf_process()` | **yes** | **YES** | a caller that supplies its own `e2_coarse_for_refresh` makes the comparison meaningful, and `alpha_r` then selects the leakage rate |
 
-The live path is the per-bin branch, which computes `e2_refined_per_bin` from
-the current frame's `error_spec` directly and never reads the smoothed
-`error_psd`. The orchestrator sets `e2_coarse_per_bin` unconditionally every
-hop (`orchestrator.py:1687,1784`; `aec.c:1959` sets
-`e2_coarse_per_bin_valid = 1`), so the `else` is unreachable in production.
-PBFDKF's `error_psd` therefore has no live consumer, and neither does `R`,
-which the header already documents as "computed in the active path but no
-longer feeds the H_error gain".
+So `alpha_r` is a **live adaptation constant of the public PBFDKF API** that
+happens to be inert through every path the `Aec` wrapper can reach — for two
+*different* reasons in the two shadow modes. It is not dead, and it must not be
+removed or left un-retimed; the 10 ms anchor matters for any integrator driving
+PBFDKF directly, which is a supported entry point (`pbfdkf.h` documents it).
 
-(The `error_psd` in `aec3_post.c` / `aec_state.c` is a different field on a
-different struct -- `aec3_post.h:166` -- not PBFDKF's.)
-
-I read the consumer and stopped there instead of checking whether its branch
-runs. That is the same mistake class as trusting a struct field that nothing
-reads, one level up.
+Two corrections this supersedes:
+- `d7e94f7`'s "Unlike alpha_power, this one reaches audio" -- it does not,
+  through `Aec`.
+- This file's earlier "AUDIO-DEAD ... the else is unreachable" -- the else IS
+  reachable with `--no-shadow`; it is *dominated*, which is a different claim
+  and does not extend to direct-API callers.
 
 ## What this means
 

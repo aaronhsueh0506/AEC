@@ -45,9 +45,11 @@ paths did not [match]" — the stored values diverged; no audio consumed them.
 
 Consequence for the campaign: `alpha_power` belongs in the auxiliary /
 dead-output batch, not in an audio batch. It needs C/Python parity and golden
-coverage, and it does not need AECMOS. `alpha_r`, by contrast, does reach audio
-(`error_psd` -> `e2_ref_sum` -> `use_converged` -> the leakage applied to
-`H_error_per_bin`) and is A/B'd separately.
+coverage, and it does not need AECMOS. `alpha_r` is a different case again -- see
+`../2026-08-07-alpha-r/README.md`. It is inert through every `Aec` path (for
+two different reasons depending on shadow mode) but is a live adaptation
+constant for a direct `pbfdkf_process()` caller, so it is neither
+audio-affecting here nor removable.
 
 ## Run identity
 
