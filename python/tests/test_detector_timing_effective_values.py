@@ -9,10 +9,10 @@ sampled were the authored ones. Two things make that failure mode easy:
   * a benchmark A/B harness swaps authored-value copies of these modules into
     the working tree while it renders its baseline, so the tree is transiently
     un-retimed and looks exactly like an unfinished implementation;
-  * three of the constants are legitimately UNCHANGED on two of the four grids
-    (``_alpha_r`` and the saturation pair are authored at a 16 ms hop, so they
-    are identity-mapped at 8k/128 and 16k/256), so sampling one grid can easily
-    show "nothing changed" for most of the table.
+  * two of the constants are legitimately UNCHANGED on two of the four grids
+    (the saturation pair is authored at a 16 ms hop, so it is identity-mapped
+    at 8k/128 and 16k/256), so sampling one grid can easily show "nothing
+    changed" for part of the table.
 
 Only an effective-value assertion across every grid distinguishes "retimed" from
 "not retimed", and it fails loudly if a baseline variant is ever left in place.
@@ -78,10 +78,10 @@ def test_effective_timing_constants_match_their_reference_grid(sample_rate,
         _per_hop(0.999, REF_HOP_10MS, hop, sample_rate), rel=1e-12)
     assert filt.alpha_power == pytest.approx(
         _per_hop(0.9, REF_HOP_10MS, hop, sample_rate), rel=1e-12)
-
-    # per-hop, 16 ms reference.
     assert filt._alpha_r == pytest.approx(
         _per_hop(0.95, REF_HOP_10MS, hop, sample_rate), rel=1e-12)
+
+    # per-hop, 16 ms reference.
     assert sat.alpha_attack == pytest.approx(
         _per_hop(0.3, REF_HOP_16MS, hop, sample_rate), rel=1e-12)
     assert sat.alpha_release == pytest.approx(

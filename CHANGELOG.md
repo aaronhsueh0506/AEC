@@ -207,16 +207,29 @@ chain with the v3.22 split min-gain floor.
     | `Aec::alpha_erl_tracking` | `aec.c` | per-hop, 10 ms | 994.99 ms |
     | `Aec::alpha_erl_converged` | `aec.c` | per-hop, 10 ms | 9995.00 ms |
     | `PBFDAF::alpha_power` | `pbfdkf.c` | per-hop, 10 ms | 94.91 ms |
-    | `PBFDKF::alpha_r` | `pbfdkf.c` | per-hop, **16 ms** | 311.93 ms |
+    | `PBFDKF::alpha_r` | `pbfdkf.c` | per-hop, 10 ms | 194.96 ms |
     | `Saturation::alpha_attack/release` | `saturation.c` | per-hop, **16 ms** | 13.29 / 791.97 ms |
 
     The reference grids are **not uniform** — verified per constant from git
-    provenance (`e9cb383` and `243d67c` authored theirs against frame 512 /
-    hop 256). Retiming the 16 ms family off the 10 ms reference is wrong by
+    provenance (`243d67c` authored the saturation pair against frame 512 /
+    hop 256). Retiming a 16 ms constant off the 10 ms reference is wrong by
     exactly 1.6x, and is invisible unless a 10 ms-hop grid is sampled.
-    Consequently `alpha_r` and the saturation pair are **unchanged** at
-    8000/256 and 16000/512 — both already have a 16.000 ms hop. That is
-    correct behaviour, not an unfinished retime.
+    Consequently the saturation pair is **unchanged** at 8000/256 and
+    16000/512 — both already have a 16.000 ms hop. That is correct behaviour,
+    not an unfinished retime.
+
+    `alpha_r` shipped in this release on the **10 ms** anchor, but reached it
+    in two steps and the intermediate state is worth recording. It was first
+    retimed off its *introducing* commit (`e9cb383`, 2026-03-20, frame 512 /
+    hop 256 → 311.93 ms). That is the wrong criterion: the anchor is the span
+    that was last empirically *validated*, and the default grid moved to
+    320/160 three days later at `9735b0f` — which re-benched at the new grid —
+    after which the EMA was re-authored at 10 ms by `c2551db` (the v3.0.0
+    filter rewrite, fixes B-11 and B-3a targeting this exact EMA) and 10 ms
+    held through every campaign until `d862a38`. `d7e94f7` corrected the
+    reference hop from 256 to 160 in both ports, giving 194.96 ms. A reader
+    comparing against a pre-`d7e94f7` document will see 311.93 ms; 194.96 ms
+    is current.
 
     `saturation_init()` gained trailing `int hop_size, int sample_rate`
     (`saturation.h`). *Migration*: pass the instance's hop and sample rate.
@@ -249,10 +262,12 @@ chain with the v3.22 split min-gain floor.
   of the seven values are legitimately identical to their authored literal on
   two of the four grids. Only an effective-value assertion separates "retimed"
   from "not retimed". Both halves of the negative space are covered — the 16 ms
-  family must NOT move on a 16 ms grid, and the 10 ms/per-sample constants MUST
-  move where the grids differ. Mutation-tested: reverting any one constant to
-  its authored literal fails it, and so does retiming a 16 ms constant off the
-  10 ms reference (194.96 ms vs the expected 311.93 ms).
+  saturation pair must NOT move on a 16 ms grid, and the 10 ms/per-sample
+  constants MUST move where the grids differ, `alpha_r` included since its
+  anchor moved. Mutation-tested: reverting any one constant to its authored
+  literal fails it, and so does retiming a 16 ms constant off the 10 ms
+  reference (`alpha_release` would read 494.98 ms against the expected
+  791.97 ms).
 
 - **`make test-config-validation`** — `test_config_validation.c` had lived
   since 2026-07 as a standalone-gcc recipe with **no Makefile target**, so its

@@ -501,10 +501,9 @@ static float pbfdaf_frontend(PBFDAF* p,
          * own combine (state[i]=alpha*state[i]+beta*mag2), matching the
          * e2_ref/error_psd precedent below (pbfdkf.c e2_ref_scratch dedup).
          *
-         * Reads p->alpha_power (grid-retimed at init). Must NOT be a literal:
-         * a hardcoded 0.9f here bypassed the retimed field entirely until
-         * 2026-08-06 -- see CHANGELOG and test_rate_structural check (d4),
-         * which recovers the coefficient the EMA actually applied. */
+         * Grid-retimed at init; never write the retention as a literal here.
+         * test_rate_structural check (d4) recovers the coefficient this loop
+         * actually applied. */
         const float a = p->alpha_power;
         const float b = 1.0f - p->alpha_power;
         for (int k = 0; k < K; ++k)
@@ -708,10 +707,8 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
         p->erl_per_bin[k] = 0.1f;
         p->e2_coarse_per_bin[k] = 0.0f;
     }
-    /* Measurement-noise PSD EMA, per hop. 10 ms reference (TC 194.96 ms):
-     * authored at 16 ms (e9cb383) but the default moved to 10 ms 13 days
-     * later and every validating commit since kept 0.95 there. Anchor is the
-     * last grid it was measured on. Mirrors filters.py. */
+    /* Measurement-noise PSD EMA, per hop. 10 ms reference, TC 194.96 ms
+     * (provenance: CHANGELOG 4.0.0 item 17). Mirrors filters.py. */
     p->alpha_r = aec3_growth_rehop(0.95f, 160, 16000,
                                    p->base.hop_size, p->base.sample_rate);
     p->h_error_floor = (float)AEC3_H_ERROR_FLOOR_FLOAT;
@@ -1139,9 +1136,8 @@ void pbfdkf_process(PBFDKF* p,
          * _error_psd = _alpha_r*_error_psd + (1-_alpha_r)*error_psd.
          * float32-by-design (the old double-promotion parity nuance is retired).
          *
-         * Reads p->alpha_r (grid-retimed at init, 10 ms anchor). Must NOT be
-         * a literal: a hardcoded 0.95f here bypassed the retimed field until
-         * 2026-08-07, exactly as alpha_power did above. */
+         * Grid-retimed at init; the direct-PBFDKF scalar fallback of the
+         * H_error refresh consumes this value. Never a literal here. */
         const float ar = p->alpha_r;
         const float oar = 1.0f - p->alpha_r;
         for (int k = 0; k < K; ++k) {

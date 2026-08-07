@@ -538,13 +538,7 @@ class PBFDKF(PBFDAF):
         self.R = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
         self._error_psd = np.ones(self.n_freqs, dtype=np.float32) * 1e-2
         # Measurement-noise PSD EMA, per hop. Reference grid is hop=160/16000
-        # (10 ms), TC 194.96 ms. It was AUTHORED at 16 ms (e9cb383,
-        # 2026-03-20, frame_size=512/hop_size=256) but the default moved to
-        # 10 ms 13 days later (83ced18) and every commit that has touched or
-        # validated it since -- 5407e71's RES/Kalman C-parity round and the
-        # 800-case rounds after it -- kept 0.95 on the 10 ms grid. The anchor
-        # is the last grid the value was actually measured on, not the one it
-        # was first typed on.
+        # (10 ms), TC 194.96 ms (provenance: CHANGELOG 4.0.0 item 17).
         self._alpha_r = aec3_scale.growth_rehop(
             0.95, 160, 16000, self.hop_size, self.sample_rate)
 

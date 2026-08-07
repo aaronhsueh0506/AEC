@@ -230,9 +230,10 @@ typedef struct PBFDKF {
     float* R;
     float* error_psd;
     float  alpha_r;            /* error-PSD EMA retention. AUTHORING value 0.95
-                                * at hop=256/16000 (16 ms -- NOT the 10 ms
-                                * reference alpha_power uses); retimed at
-                                * pbfdkf_init(). Identity on a 16 ms hop only. */
+                                * at hop=160/16000 (10 ms, same reference as
+                                * alpha_power); retimed at pbfdkf_init(), so
+                                * it equals 0.95 only on a 10 ms hop. Read the
+                                * effective value, never this comment. */
 
     /* === v3.22 AEC3 H_error per-bin state =========================== */
     float* H_error_per_bin;    /* [n_freqs], init 10000 */
