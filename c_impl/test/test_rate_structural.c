@@ -71,8 +71,10 @@
  *       mirror of python/tests/test_detector_timing_effective_values.py and
  *       exists so the C/Python agreement is a REGRESSION GATE rather than a
  *       one-off manual comparison. Includes both halves of the negative space:
- *       the 16 ms-authored constants must NOT move on a 16 ms grid, and the
- *       10 ms/per-sample ones MUST move where the grids differ.
+ *       the 16 ms-authored saturation pair must NOT move on a 16 ms grid, and
+ *       the 10 ms/per-sample constants MUST move where the grids differ --
+ *       including alpha_r, whose anchor moved to 10 ms on 2026-08-07, so a
+ *       16 ms grid is now one of the places it has to move.
  *
  *   (e) external RES/NR seam WOLA identity: with internal RES disabled and
  *       return_res_context enabled, reconstruct ctx.error_spec with the
@@ -116,6 +118,7 @@
  */
 #include "aec.h"
 #include "aec3_balanced_config.h"
+#include "aec3_scale.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -948,7 +951,7 @@ static void test_top_level_constant_retiming(void) {
  * This asserts the value each instance ACTUALLY ENDS UP WITH at every grid,
  * not that a retiming call appears in the source. That distinction is the
  * reason the file exists: an external reviewer read the sources and concluded
- * the retiming had never been applied, because three of the seven values are
+ * the retiming had never been applied, because two of the seven values are
  * legitimately IDENTICAL to their authored literal on two of the four grids.
  * Only an effective-value assertion separates "retimed" from "not retimed".
  *
@@ -959,7 +962,10 @@ static void test_top_level_constant_retiming(void) {
  *   alpha_pow                  per-SAMPLE, authored at sr=16000
  *   alpha_erl_{tracking,conv}  per-hop, 10 ms   (5407e71)
  *   alpha_power (PBFDAF)       per-hop, 10 ms   (235d3ec era)
- *   alpha_r     (PBFDKF)       per-hop, 16 ms   (e9cb383, frame 512/hop 256)
+ *   alpha_r     (PBFDKF)       per-hop, 10 ms   (introduced 16 ms at e9cb383;
+ *                                               the default moved to 10 ms at
+ *                                               83ced18 and every validating
+ *                                               commit since kept 0.95 there)
  *   saturation attack/release  per-hop, 16 ms   (243d67c, frame 512/hop 256)
  *
  * Targets are the wall-clock TC each retention covers on its OWN reference
@@ -1040,10 +1046,11 @@ static void test_adaptation_constant_retiming(void) {
                         94.912216, ALPHA_TOL);
         }
 
-        /* Per-hop, 16 ms reference. */
         check_close("alpha_r (TC)", sr, fft,
                     -hop_s / log((double)aec.main_filter.alpha_r) * 1000.0,
                     194.957302, ALPHA_TOL);
+
+        /* Per-hop, 16 ms reference. */
         check_close("saturation alpha_attack (TC)", sr, fft,
                     -hop_s / log((double)aec.sat_mic.alpha_attack) * 1000.0,
                     13.289337, ALPHA_TOL);
@@ -1313,6 +1320,227 @@ static void test_render_activity_first_observation(void) {
           "stationarity requires a fresh second observation after silence");
 }
 
+/* ── (d5) alpha_r is a live constant of the DIRECT PBFDKF API ───────────────
+ *
+ * alpha_r cannot be pinned the way alpha_power is pinned by (d4), because it
+ * does not reach audio through `Aec` at all -- and it took two wrong readings
+ * to establish why, so the mechanism is recorded here rather than in a commit
+ * message:
+ *
+ *   Aec + shadow ON (default)  error_psd is never read. The orchestrator
+ *                              publishes e2_coarse_per_bin every hop, and the
+ *                              live per-bin branch of the H_error refresh
+ *                              reads error_spec directly.
+ *   Aec + shadow OFF           the scalar fallback DOES run and DOES read the
+ *                              smoothed error_psd -- but e2_coarse_for_refresh
+ *                              is likewise assigned only inside
+ *                              `if (a->has_shadow)` (aec.c), so it stays 0.0f
+ *                              and `use_conv = (e2_ref_sum <= e2_coa_sum)` is
+ *                              constant-false whatever the coefficient is.
+ *                              Confirmed empirically: 90 cases x 2 grids with
+ *                              --no-shadow are byte-identical
+ *                              (eval/ab_evidence/2026-08-07-alpha-r/).
+ *   direct pbfdkf_process()    the caller supplies its own
+ *                              e2_coarse_for_refresh, both sides of the
+ *                              comparison vary, and alpha_r selects the
+ *                              leakage branch and the adaptation that follows.
+ *
+ * So no wrapper-level A/B can observe this constant, and a zero delta from one
+ * is not evidence that it is inert. This check drives PBFDKF directly, which is
+ * a supported entry point (pbfdkf.h), and pins two things:
+ *
+ *   (1) the coefficient the EMA actually APPLIED, recovered from two runs that
+ *       differ only in error_psd's starting value -- not the stored field,
+ *       which is what the pre-5232ab6 tests asserted while the loop ran on a
+ *       hardcoded literal;
+ *   (2) that the recovered coefficient selects the leakage branch, so the
+ *       constant has a downstream effect and not merely a value.
+ *
+ * Mutations that must fail: reverting the use site to `0.95f`; reverting the
+ * reference hop to 256 (the introduce grid); deleting the EMA. */
+typedef struct {
+    double psd_sum;         /* sum(error_psd) after the measured hop */
+    float  div_frac;        /* last_leakage_div_frac after the measured hop */
+    double h_error_mean;    /* mean H_error_per_bin after the measured hop */
+} DirectProbe;
+
+/* One measured hop on a fresh PBFDKF. `old` seeds error_psd; `e2_coa` is the
+ * scalar the refresh compares against. Deterministic: same seed, same signal,
+ * same warm-up, so two probes differ only in the arguments. */
+static DirectProbe pbfdkf_direct_probe(int fft, int hop, int sr, unsigned seed,
+                                       float old, float e2_coa) {
+    const int N_PART = 4;
+    const int WARM = 8;
+    DirectProbe out;
+    PBFDKF p;
+    int K = fft / 2 + 1;
+    memset(&out, 0, sizeof(out));
+
+    if (pbfdkf_init(&p, fft / 2, N_PART, 0.3f, 1e-6f, hop, sr) != 0)
+        return out;
+
+    float *mic = (float*)calloc((size_t)hop, sizeof(float));
+    float *far = (float*)malloc((size_t)hop * sizeof(float));
+    float *res = (float*)malloc((size_t)hop * sizeof(float));
+    if (!mic || !far || !res) {
+        free(mic); free(far); free(res); pbfdkf_free(&p); return out;
+    }
+    g_lcg_state = seed;
+    for (int i = 0; i < hop; ++i) {
+        far[i] = 0.25f * (2.0f * lcg_uniform() - 1.0f);
+        mic[i] = 0.10f * (2.0f * lcg_uniform() - 1.0f);
+    }
+    for (int h = 0; h < WARM; ++h)
+        pbfdkf_process(&p, mic, far, NULL, 1.0f, res);
+
+    /* Open every gate that would divert the hop to refresh-only, so the
+     * measured hop takes the full update path (EMA, then refresh). These are
+     * set directly rather than driven into place: the gates are not what this
+     * check is about, and driving them would make the probe stimulus-dependent.
+     * poor_excitation_counter is only reset by an explicit echo-path-change
+     * call, never per hop, so forcing it here is stable. */
+    p.base.call_counter = 10L * N_PART;
+    p.base.poor_excitation_counter = 10 * N_PART;
+    p.base.saturated_capture = 0;
+    p.base.block_stationary = 0;
+    p.base.initial_state_active = 0;     /* steady leakage pair, not transient */
+
+    p.e2_coarse_per_bin_valid = 0;       /* the scalar fallback under test */
+    p.disallow_leakage_diverged = 0;     /* else use_conv is forced true */
+    p.h_error_refresh_erl_floor = 0.0f;
+    p.e2_coarse_for_refresh = e2_coa;
+    p.leakage_converged = 1.25e-4f;
+    p.leakage_diverged  = 0.125f;
+    for (int k = 0; k < K; ++k) {
+        p.error_psd[k] = old;
+        p.H_error_per_bin[k] = 1.0f;     /* clear of both clamp bounds */
+        p.erl_per_bin[k] = 0.5f;
+    }
+
+    pbfdkf_process(&p, mic, far, NULL, 1.0f, res);
+
+    double psd = 0.0, he = 0.0;
+    for (int k = 0; k < K; ++k) {
+        psd += (double)p.error_psd[k];
+        he  += (double)p.H_error_per_bin[k];
+    }
+    out.psd_sum = psd;
+    out.h_error_mean = he / K;
+    out.div_frac = p.last_leakage_div_frac;
+
+    free(mic); free(far); free(res);
+    pbfdkf_free(&p);
+    return out;
+}
+
+static void test_alpha_r_reaches_the_direct_pbfdkf_path(void) {
+    const double TOL = 5e-4;          /* fp32 EMA recovery over one hop */
+    const double TC_TARGET_MS = 194.957302;   /* 0.95 at a 10 ms hop */
+
+    for (int r = 0; r < N_GRIDS; ++r) {
+        int sr = GRIDS[r].sample_rate;
+        int fft = GRIDS[r].fft_size;
+        int hop = fft / 2;
+        int K = fft / 2 + 1;
+        unsigned seed = 0x5A17u + (unsigned)r;
+        char what[240];
+
+        /* Probe 1 pins the stimulus term: with error_psd starting at 0 the
+         * result is (1-a)*sum(e2). */
+        DirectProbe p1 = pbfdkf_direct_probe(fft, hop, sr, seed, 0.0f, 0.0f);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: direct PBFDKF probe produced a non-zero "
+                 "error_psd sum (%.6g)", sr, fft, p1.psd_sum);
+        CHECK(p1.psd_sum > 0.0, what);
+        if (!(p1.psd_sum > 0.0)) continue;
+
+        /* Probe 2 differs ONLY in the starting value, chosen large enough that
+         * K*old dominates sum(e2) -- otherwise the two coefficients produce
+         * nearly the same sum and the branch test below is ill-conditioned. */
+        const double old2 = 1.0 + 30.0 * p1.psd_sum / K;
+        DirectProbe p2 = pbfdkf_direct_probe(fft, hop, sr, seed, (float)old2,
+                                             0.0f);
+
+        /* sum(old) = a*K*old + (1-a)*sum(e2), so the stimulus term cancels and
+         * `a` comes out of the two sums alone -- no assumption about the
+         * signal, the filter state, or the number of bins that converged. */
+        const double a_meas = (p2.psd_sum - p1.psd_sum) / (K * old2);
+        const double a_field = (double)aec3_growth_rehop(0.95f, 160, 16000,
+                                                         hop, sr);
+
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: error_psd EMA actually applied alpha=%.6f, "
+                 "matching the 10 ms-anchored %.6f", sr, fft, a_meas, a_field);
+        CHECK(fabs(a_meas - a_field) <= TOL, what);
+
+        /* The field-vs-applied check above still passes if BOTH move together,
+         * which is exactly what reverting the reference hop to 256 would do.
+         * Pin the wall-clock span itself. */
+        double tc_ms = -((double)hop / sr) * 1000.0 / log(a_meas);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: applied alpha_r covers TC %.3f ms, the 10 ms "
+                 "anchor's %.3f ms (a 16 ms reference would give %.3f)",
+                 sr, fft, tc_ms, TC_TARGET_MS, TC_TARGET_MS * 1.6);
+        CHECK(fabs(tc_ms - TC_TARGET_MS) <= 1.0, what);
+
+        /* No grid has a 10 ms hop, so the retimed value must differ from the
+         * authored literal everywhere -- i.e. this check cannot be satisfied by
+         * a use site that ignores the field. */
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: applied alpha_r %.6f is not the 0.95 literal",
+                 sr, fft, a_meas);
+        CHECK(fabs(a_meas - 0.95) > 1e-3, what);
+
+        /* ── downstream: the coefficient selects the leakage branch ──────── */
+        const double s_e2 = p1.psd_sum / (1.0 - a_meas);
+        const double sum_retimed = p2.psd_sum;
+        const double sum_literal = 0.95 * K * old2 + 0.05 * s_e2;
+        const double mid = 0.5 * (sum_retimed + sum_literal);
+
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: the two coefficients give separable error_psd "
+                 "sums (%.6g vs %.6g)", sr, fft, sum_retimed, sum_literal);
+        CHECK(fabs(sum_retimed - sum_literal) > 1e-3 * fabs(mid), what);
+
+        /* With the threshold set between them, `use_conv = (sum <= e2_coa)`
+         * resolves one way for the retimed coefficient and the other way for
+         * the literal. div_frac is 0.0 or 1.0 on the scalar path. */
+        const float expect_retimed = (sum_retimed <= mid) ? 0.0f : 1.0f;
+        const float expect_literal = (sum_literal <= mid) ? 0.0f : 1.0f;
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: setup separates the branches (%.1f vs %.1f)",
+                 sr, fft, expect_retimed, expect_literal);
+        CHECK(expect_retimed != expect_literal, what);
+
+        DirectProbe p3 = pbfdkf_direct_probe(fft, hop, sr, seed, (float)old2,
+                                             (float)mid);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: leakage branch follows the retimed alpha "
+                 "(div_frac %.1f, expected %.1f; the 0.95 literal would give "
+                 "%.1f)", sr, fft, p3.div_frac, expect_retimed, expect_literal);
+        CHECK(p3.div_frac == expect_retimed, what);
+
+        /* ...and the branch moves H_error, so this is a real downstream effect
+         * and not a diagnostic counter. Same probe, threshold pushed to the far
+         * side, and the two H_error means must differ by (ld - lc)*erl. */
+        DirectProbe p4 = pbfdkf_direct_probe(
+            fft, hop, sr, seed, (float)old2,
+            (float)(expect_retimed == 1.0f ? mid * 1e6 : -1.0));
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: forcing the other branch flips div_frac "
+                 "(%.1f -> %.1f)", sr, fft, p3.div_frac, p4.div_frac);
+        CHECK(p4.div_frac != p3.div_frac, what);
+
+        const double expect_gap = (0.125 - 1.25e-4) * 0.5;   /* (ld-lc)*erl */
+        const double gap = fabs(p3.h_error_mean - p4.h_error_mean);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: the branch moves H_error by %.6f, the expected "
+                 "(leakage_diverged - leakage_converged)*erl = %.6f",
+                 sr, fft, gap, expect_gap);
+        CHECK(fabs(gap - expect_gap) <= 1e-3, what);
+    }
+}
+
 int main(void) {
     test_cola();
     test_impulse_linear_path();
@@ -1325,6 +1553,7 @@ int main(void) {
     test_top_level_constant_retiming();
     test_adaptation_constant_retiming();
     test_retimed_constants_reach_the_audio_path();
+    test_alpha_r_reaches_the_direct_pbfdkf_path();
     test_mu_holdoff_rearm_guard();
     test_render_activity_first_observation();
 
