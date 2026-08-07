@@ -415,16 +415,9 @@ static float get_simple_mu_scale(Aec* a, int* out_is_array) {
     return mu_min + (1.0f - mu_min) * a->simple_mu_ratio;
 }
 
-/* _update_simple_mu_ratio (orchestrator 1478-1522).
- *
- * Deliberately NOT static, and deliberately NOT declared in aec.h: it is not
- * public API, but test_rate_structural check (d6) has to drive it directly.
- * Going through aec_process() cannot work -- simple_mu_ratio is read earlier in
- * the same hop to scale mu, so it feeds back into the very error signal the
- * recovery would have to hold constant, and the two runs the recovery compares
- * would no longer differ in one variable only. */
-void aec_update_simple_mu_ratio(Aec* a, const float* output,
-                                const float* far_end, int n) {
+/* _update_simple_mu_ratio (orchestrator 1478-1522). */
+static void update_simple_mu_ratio(Aec* a, const float* output,
+                                   const float* far_end, int n) {
     float error_power = mean_sq(output, n, a->scr_sq) + 1e-10f;
     float far_power   = mean_sq(far_end, n, a->scr_sq) + 1e-10f;
     if (far_power < 1e-6f && error_power < 1e-6f) return;
@@ -469,6 +462,24 @@ void aec_update_simple_mu_ratio(Aec* a, const float* output,
     else alpha = a->simple_mu_alpha_release;
     a->simple_mu_ratio = alpha * a->simple_mu_ratio + (1.0f - alpha) * ratio;
 }
+
+#ifdef AEC_TESTING
+/* TEST-ONLY hook. Absent from the production library: `make lib` never defines
+ * AEC_TESTING, so this symbol is not exported and `make test-no-testing-symbols`
+ * asserts that in both directions.
+ *
+ * It exists because test_rate_structural check (d6) has to drive the update
+ * directly. Going through aec_process() cannot substitute: simple_mu_ratio is
+ * read EARLIER in the same hop to scale mu, so it feeds back into the very
+ * error signal the two-point coefficient recovery has to hold constant, and the
+ * two probes would no longer differ in one variable only.
+ *
+ * Declared in test/aec_test_hooks.h, which is not installed. */
+void aec_testing_update_simple_mu_ratio(Aec* a, const float* output,
+                                        const float* far_end, int n) {
+    update_simple_mu_ratio(a, output, far_end, n);
+}
+#endif
 
 /* ───────────────────────── construction ────────────────────────────────── */
 
@@ -2454,7 +2465,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             a->has_per_bin_mu = 1;
         } else {
             a->has_per_bin_mu = 0;
-            aec_update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
+            update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
         }
     }
     /* enable_res==False C-parity fallback (orchestrator 2313-2316) is unused

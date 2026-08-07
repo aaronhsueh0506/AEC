@@ -178,6 +178,22 @@ ifeq ($(WERROR),1)
   CFLAGS += -Werror
 endif
 
+# AEC_TESTING=1: compile the test-only hooks declared in test/aec_test_hooks.h.
+# They reach internals that genuinely cannot be observed through the public API
+# (see that header for the per-hook justification) and must NOT ship: the
+# production library exports none of them.
+#
+# Like WERROR/NO_STDIO this appends to CFLAGS BEFORE CFG_SIG_PAYLOAD is
+# computed, so an AEC_TESTING=1 build keys to its own obj/bin directory instead
+# of aliasing with a production build of otherwise-identical flags -- the whole
+# point, since the two must never share objects. `make test-no-testing-symbols`
+# asserts the key isolation AND the symbol's absence/presence in both
+# directions.
+AEC_TESTING ?= 0
+ifeq ($(AEC_TESTING),1)
+  CFLAGS += -DAEC_TESTING
+endif
+
 # NO_STDIO=1: compile-time gate that produces a
 # stdio-free libaec.a — the trace/debug plumbing (src/aec_debug.c, the ONLY
 # stdio TU in this library: FILE* g_fp, fprintf/vfprintf/fputc) is compiled
@@ -653,7 +669,7 @@ endif
 # Additional CFG_SIG payload coverage: LINK, TOOLCHAIN_CHECK (the
 # guard-skip knob must not alias a guarded build), SRCS (sorted source
 # list, post-NO_STDIO-filter, so source add/remove keys to a fresh directory).
-CFG_SIG_PAYLOAD := CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) LINK=$(LINK) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) NO_STDIO=$(NO_STDIO) DEBUG=$(DEBUG) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK) AC_PRODUCER_SIG=$(AC_PRODUCER_SIG) SRCS=$(sort $(SRCS))
+CFG_SIG_PAYLOAD := CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) LINK=$(LINK) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) AEC_TESTING=$(AEC_TESTING) NO_STDIO=$(NO_STDIO) DEBUG=$(DEBUG) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK) AC_PRODUCER_SIG=$(AC_PRODUCER_SIG) SRCS=$(sort $(SRCS))
 CFG_SIG := $(shell printf '%s' "$(CFG_SIG_PAYLOAD)" | cksum | cut -d' ' -f1)
 
 # OBJ_ROOT / BIN_ROOT: where the keyed obj/bin trees
@@ -900,7 +916,7 @@ $(TEST_DR_TARGET): $(TEST_DR_OBJS) | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation test-rate-structural test-config-validation test-process-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -914,7 +930,15 @@ test-counter-saturation: $(TEST_CS_TARGET)
 	"$(abspath $(TEST_CS_TARGET))"
 
 # Builds AND runs, same convention as test-counter-saturation above.
-test-rate-structural: $(TEST_RS_TARGET)
+# Re-invokes make with AEC_TESTING=1: check (d6) drives an otherwise-static
+# internal through test/aec_test_hooks.h, and the recursion is what gives that
+# build its own CFG_SIG-keyed obj/bin tree instead of contaminating the
+# production objects. `_run-rate-structural` is the inner half; invoke
+# `test-rate-structural`.
+test-rate-structural:
+	+@$(MAKE) --no-print-directory AEC_TESTING=1 _run-rate-structural
+
+_run-rate-structural: $(TEST_RS_TARGET)
 	"$(abspath $(TEST_RS_TARGET))"
 
 # Builds AND runs, same convention as test-counter-saturation above.
@@ -1397,6 +1421,35 @@ endif
 AUDIT_STRICT_ALL  = fprintf|vfprintf|printf|puts|fputs|fputc|fwrite|stderr|__stderrp
 AUDIT_STRICT_OWN  = fprintf|vfprintf|printf|puts|fputs
 AUDIT_BIN_DIR     = $(BIN_ROOT)/audit-no-stdio/$(BACKEND)
+
+# Test-only symbols must not ship. Checked in BOTH directions: a one-way check
+# passes just as happily against a library that stopped defining them at all,
+# which would silently disable check (d6) rather than fail it. That reverse
+# check earned its keep immediately -- the first pattern here was ' aec_testing_'
+# and matched nothing on Darwin, where Mach-O nm emits a leading underscore, so
+# the production-side check could not have failed on a real leak either. The
+# ' _?' makes it work on both Mach-O and ELF.
+.PHONY: test-no-testing-symbols
+test-no-testing-symbols:
+	@echo "== test-no-testing-symbols: BACKEND=$(BACKEND) CC=$(CC) =="
+	+@$(MAKE) --no-print-directory AEC_TESTING=0 BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' lib
+	+@$(MAKE) --no-print-directory AEC_TESTING=1 BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' lib
+	@prod="$$($(MAKE) -s --no-print-directory AEC_TESTING=0 BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' print-lib-path)"; \
+	 test_="$$($(MAKE) -s --no-print-directory AEC_TESTING=1 BACKEND=$(BACKEND) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' print-lib-path)"; \
+	 echo "-- production lib:  $$prod"; \
+	 echo "-- AEC_TESTING lib: $$test_"; \
+	 test "$$prod" != "$$test_" || { echo "FATAL: AEC_TESTING=1/0 resolved to the SAME path -- CFG_SIG key-isolation broken, the two builds would share objects" >&2; exit 1; }; \
+	 echo "PASS: key-isolation"; \
+	 hits="$$(nm -g "$$prod" 2>/dev/null | grep -E ' _?aec_testing_' || true)"; \
+	 if [ -n "$$hits" ]; then \
+	   echo "FATAL: test-only symbols exported by the PRODUCTION library:" >&2; echo "$$hits" >&2; exit 1; \
+	 fi; \
+	 echo "PASS: no aec_testing_* symbol in the production archive"; \
+	 want="$$(nm -g "$$test_" 2>/dev/null | grep -cE ' _?aec_testing_' || true)"; \
+	 if [ "$$want" -lt 1 ]; then \
+	   echo "FATAL: AEC_TESTING=1 archive exports NO aec_testing_* symbol -- the check above cannot fail, and the hooks it guards are gone" >&2; exit 1; \
+	 fi; \
+	 echo "PASS: AEC_TESTING archive exports $$want test-only symbol(s)"
 
 .PHONY: audit-no-stdio
 audit-no-stdio:

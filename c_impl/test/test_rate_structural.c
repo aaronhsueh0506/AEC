@@ -119,6 +119,7 @@
 #include "aec.h"
 #include "aec3_balanced_config.h"
 #include "aec3_scale.h"
+#include "aec_test_hooks.h"   /* AEC_TESTING-only; see check (d6) */
 
 #include <math.h>
 #include <stdio.h>
@@ -1559,11 +1560,6 @@ static void test_alpha_r_reaches_the_direct_pbfdkf_path(void) {
  * constants while clearing the runtime pair, and -- the part a stored-field
  * check cannot give -- the coefficient the update ACTUALLY APPLIED, recovered
  * from two runs of the same stimulus that differ only in the starting ratio. */
-/* Not in aec.h: internal, exposed for this check only. See its definition in
- * aec.c for why aec_process() cannot substitute. */
-void aec_update_simple_mu_ratio(Aec* a, const float* output,
-                                const float* far_end, int n);
-
 static void mu_step(Aec* a, float far_scale, float err_scale, unsigned *seed) {
     int hop = aec_hop_size(a);
     float far[2048], out[2048];
@@ -1576,7 +1572,7 @@ static void mu_step(Aec* a, float far_scale, float err_scale, unsigned *seed) {
         far[i] = far_scale * (2.0f * u1 - 1.0f);
         out[i] = err_scale * (2.0f * u2 - 1.0f);
     }
-    aec_update_simple_mu_ratio(a, out, far, hop);
+    aec_testing_update_simple_mu_ratio(a, out, far, hop);
 }
 
 static void test_simple_mu_constant_retiming(void) {
