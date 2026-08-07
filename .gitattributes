@@ -1,6 +1,12 @@
 
-# Archived A/B evidence: these are verbatim captures of `git show` output and
-# must stay byte-faithful to the commit they document. C comment blocks carry
-# trailing spaces on ` * ` continuation lines, so whitespace checks would flag
-# them forever. Exempt the artifacts, not the sources.
-eval/ab_evidence/**/*.diff -whitespace
+# Archived A/B evidence: these two files are verbatim `git show` captures and
+# must stay byte-faithful to the commits they document. C comment blocks carry
+# trailing spaces on ` * ` continuation lines, so a whitespace check would flag
+# them forever.
+#
+# Listed individually on purpose. The previous rule was
+# `eval/ab_evidence/**/*.diff -whitespace`, which pre-exempted every future
+# evidence file in the tree -- a blanket waiver for artifacts nobody has looked
+# at yet. Adding a new one is a deliberate line here.
+eval/ab_evidence/2026-08-07-alpha-power/source.diff -whitespace
+eval/ab_evidence/2026-08-07-alpha-r/source.diff -whitespace
