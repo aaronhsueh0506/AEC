@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics as st
 import sys
 
@@ -36,6 +37,10 @@ DEEP = -0.10
 METRICS = ("echo", "deg")
 
 
+class ReportError(ValueError):
+    """Input is incomplete or cannot support a trustworthy comparison."""
+
+
 def percentile(values, q):
     """Nearest-rank percentile. Deliberately not interpolated: with n=4 or n=5
     buckets an interpolated p10 invents a value between two cases and reads as
@@ -43,7 +48,7 @@ def percentile(values, q):
     if not values:
         return None
     s = sorted(values)
-    k = max(0, min(len(s) - 1, int(round((q / 100.0) * (len(s) - 1)))))
+    k = max(0, min(len(s) - 1, math.ceil(q * len(s) / 100.0) - 1))
     return s[k]
 
 
@@ -51,11 +56,27 @@ def analyse(base, cand, label):
     common = sorted(set(base) & set(cand))
     missing_cand = sorted(set(base) - set(cand))
     missing_base = sorted(set(cand) - set(base))
+    if missing_cand or missing_base:
+        raise ReportError(
+            f"score sets differ: missing candidate={missing_cand[:8]}, "
+            f"missing baseline={missing_base[:8]}")
 
     cases = {}
     for stem in common:
+        base_bucket = base[stem].get("bucket")
+        cand_bucket = cand[stem].get("bucket")
+        if not base_bucket or cand_bucket != base_bucket:
+            raise ReportError(
+                f"{stem}: bucket mismatch {base_bucket!r} vs {cand_bucket!r}")
+        for side, row in (("baseline", base[stem]), ("candidate", cand[stem])):
+            for metric in METRICS:
+                value = row.get(metric)
+                if (not isinstance(value, (int, float)) or
+                        isinstance(value, bool) or not math.isfinite(value)):
+                    raise ReportError(
+                        f"{stem}: {side} {metric} is not finite: {value!r}")
         cases[stem] = {
-            "bucket": base[stem].get("bucket", "?"),
+            "bucket": base_bucket,
             "echo_base": base[stem]["echo"], "echo_cand": cand[stem]["echo"],
             "deg_base": base[stem]["deg"], "deg_cand": cand[stem]["deg"],
             "d_echo": cand[stem]["echo"] - base[stem]["echo"],
@@ -85,8 +106,6 @@ def analyse(base, cand, label):
     report = {
         "label": label,
         "n_cases": len(rows),
-        "missing_from_candidate": missing_cand,
-        "missing_from_baseline": missing_base,
         "band": BAND, "deep": DEEP,
         "overall": {m: stats(rows, m) for m in METRICS},
         "buckets": {b: {m: stats([r for r in rows if r["bucket"] == b], m)
@@ -126,7 +145,7 @@ def render_md(reports):
         we = r["overall"]["echo"]["worst5"][0]
         wd = r["overall"]["deg"]["worst5"][0]
         A(f"| {r['label']} | {r['n_cases']} | {we['delta']:+.3f} | "
-          f"`{we['stem'][:22]}` | {wd['delta']:+.3f} | `{wd['stem'][:22]}` |")
+          f"`{we['stem']}` | {wd['delta']:+.3f} | `{wd['stem']}` |")
     A("")
 
     A("## Regression counts (per case)")
@@ -166,7 +185,7 @@ def render_md(reports):
         A("|---|---|---|---:|---:|")
         for label, f in sorted(flagged, key=lambda x: min(x[1]["d_echo"],
                                                           x[1]["d_deg"])):
-            A(f"| {label} | {f['bucket']} | `{f['stem'][:26]}` | "
+            A(f"| {label} | {f['bucket']} | `{f['stem']}` | "
               f"{f['d_echo']:+.3f} | {f['d_deg']:+.3f} |")
     A("")
     return "\n".join(line.rstrip() for line in L).rstrip() + "\n"
@@ -174,7 +193,43 @@ def render_md(reports):
 
 def load_scores(path):
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)["scores"]
+        doc = json.load(fh)
+    scores = doc.get("scores")
+    if not isinstance(scores, dict) or not scores:
+        raise ReportError(f"{path}: non-empty 'scores' mapping required")
+    return scores
+
+
+def load_report(path):
+    with open(path, encoding="utf-8") as fh:
+        report = json.load(fh)
+    if not isinstance(report, dict) or not isinstance(report.get("overall"), dict):
+        raise ReportError(f"{path}: not an ab_report JSON object")
+    if report.get("band") != BAND or report.get("deep") != DEEP:
+        raise ReportError(f"{path}: threshold mismatch")
+    if not isinstance(report.get("label"), str) or not report["label"]:
+        raise ReportError(f"{path}: non-empty label required")
+    if not isinstance(report.get("n_cases"), int) or report["n_cases"] <= 0:
+        raise ReportError(f"{path}: positive n_cases required")
+    for metric in METRICS:
+        stats = report["overall"].get(metric)
+        if not isinstance(stats, dict) or stats.get("n") != report["n_cases"]:
+            raise ReportError(f"{path}: invalid overall {metric} statistics")
+        for key in ("mean", "median", "p10", "min", "max"):
+            value = stats.get(key)
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not math.isfinite(value)):
+                raise ReportError(f"{path}: non-finite {metric}.{key}")
+        worst = stats.get("worst5")
+        if not isinstance(worst, list) or not worst:
+            raise ReportError(f"{path}: missing {metric}.worst5")
+        for row in worst:
+            if (not isinstance(row, dict) or not isinstance(row.get("stem"), str)
+                    or not isinstance(row.get("delta"), (int, float))
+                    or isinstance(row.get("delta"), bool)
+                    or not math.isfinite(row["delta"])):
+                raise ReportError(f"{path}: invalid {metric}.worst5 row")
+    return report
 
 
 def main(argv=None):
@@ -188,13 +243,19 @@ def main(argv=None):
     ap.add_argument("--md")
     args = ap.parse_args(argv)
 
-    if args.summary is not None:
-        reports = [json.load(open(p, encoding="utf-8")) for p in args.summary]
-    else:
-        if not (args.base and args.cand):
-            ap.error("--base and --cand are required without --summary")
-        reports = [analyse(load_scores(args.base), load_scores(args.cand),
-                           args.label)]
+    try:
+        if args.summary is not None:
+            if not args.summary:
+                raise ReportError("--summary requires at least one report")
+            reports = [load_report(p) for p in args.summary]
+        else:
+            if not (args.base and args.cand):
+                ap.error("--base and --cand are required without --summary")
+            reports = [analyse(load_scores(args.base), load_scores(args.cand),
+                               args.label)]
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"A/B REPORT FAILED: {exc}", file=sys.stderr)
+        return 1
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:

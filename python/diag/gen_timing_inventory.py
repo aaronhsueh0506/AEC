@@ -40,6 +40,10 @@ CATEGORIES = [
     ("already-retimed", "Already retimed",
      "Verified to route through a retiming helper. Listed so that a future "
      "audit can tell 'checked and correct' from 'never looked at'."),
+    ("keep-rejected-retime", "Keep: rejected retime",
+     "Semantically time-based, but the measured retime failed the audio "
+     "acceptance gate. The validated hop-authored values remain frozen as an "
+     "explicit exception rather than being mislabeled as already retimed."),
     ("keep-event-count", "Keep: event count",
      "The counter is SKIPPED (early-returned past) on non-qualifying hops, so "
      "its realised span is duty-cycle dependent and N means N qualifying "

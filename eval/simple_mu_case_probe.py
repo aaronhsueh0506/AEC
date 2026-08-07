@@ -49,8 +49,24 @@ sys.path.insert(0, os.path.join(_REPO, "python"))
 
 DATASET = os.path.join(_REPO, "wav", "aec_challenge_blind")
 
-FROZEN = dict(_simple_mu_holdoff_limit=20, _simple_mu_alpha_attack=0.3,
-              _simple_mu_alpha_hold=0.99, _simple_mu_alpha_release=0.95)
+FROZEN = dict(_SIMPLE_MU_HOLDOFF_HOPS=20, _SIMPLE_MU_ALPHA_ATTACK=0.3,
+              _SIMPLE_MU_ALPHA_HOLD=0.99, _SIMPLE_MU_ALPHA_RELEASE=0.95)
+
+
+def retimed_values(sample_rate, frame_size):
+    """Rejected candidate values, independent of production's disposition."""
+    from modules import aec3_scale
+    hop = frame_size // 2
+    return {
+        "_SIMPLE_MU_HOLDOFF_HOPS":
+            aec3_scale.ms_to_hops(200.0, hop, sample_rate),
+        "_SIMPLE_MU_ALPHA_ATTACK":
+            aec3_scale.growth_rehop(0.3, 160, 16000, hop, sample_rate),
+        "_SIMPLE_MU_ALPHA_HOLD":
+            aec3_scale.growth_rehop(0.99, 160, 16000, hop, sample_rate),
+        "_SIMPLE_MU_ALPHA_RELEASE":
+            aec3_scale.growth_rehop(0.95, 160, 16000, hop, sample_rate),
+    }
 
 
 def case_paths(stem):
@@ -73,16 +89,16 @@ def run_with_trace(mic, ref, sr, overrides):
     import eval_aec_challenge as E
     from modules import orchestrator as O
 
+    orig_enable_cng = E._ENABLE_CNG
     E._ENABLE_CNG = True
     trace = {"branch": [], "holdoff": [], "ratio": [], "mu": []}
     orig_init, orig_process = O.AEC.__init__, O.AEC.process
     orig_mu = O.AEC._get_simple_mu_scale
+    orig_constants = {k: getattr(O, k) for k in FROZEN}
     state = {}
 
     def init(self, *a, **kw):
         orig_init(self, *a, **kw)
-        for k, v in overrides.items():
-            setattr(self, k, v)
         state["aec"] = self
         state["prev"] = self._simple_mu_holdoff
 
@@ -118,6 +134,8 @@ def run_with_trace(mic, ref, sr, overrides):
         trace["mu"].append(mu)
         return out
 
+    for key, value in overrides.items():
+        setattr(O, key, value)
     O.AEC.__init__, O.AEC.process = init, process
     O.AEC._get_simple_mu_scale = mu_scale
     try:
@@ -125,6 +143,9 @@ def run_with_trace(mic, ref, sr, overrides):
     finally:
         O.AEC.__init__, O.AEC.process = orig_init, orig_process
         O.AEC._get_simple_mu_scale = orig_mu
+        E._ENABLE_CNG = orig_enable_cng
+        for key, value in orig_constants.items():
+            setattr(O, key, value)
     return np.asarray(y, dtype=np.float64), trace, state["aec"].config.hop_size
 
 
@@ -152,11 +173,21 @@ def probe(stem, frame_size, far_active_db=-45.0):
     ref, _ = sf.read(lpb_path)
     n = min(len(mic), len(ref))
     mic, ref = mic[:n], ref[:n]
+    env_names = ("AEC_CFG_OVERRIDE", "NO_PREALIGN")
+    old_env = {name: os.environ.get(name) for name in env_names}
     os.environ["AEC_CFG_OVERRIDE"] = f"frame_size={frame_size}"
     os.environ["NO_PREALIGN"] = "1"
-
-    y_base, tr_base, hop = run_with_trace(mic, ref, sr, dict(FROZEN))
-    y_cand, tr_cand, _ = run_with_trace(mic, ref, sr, {})
+    candidate_values = retimed_values(sr, frame_size)
+    try:
+        y_base, tr_base, hop = run_with_trace(mic, ref, sr, dict(FROZEN))
+        y_cand, tr_cand, _ = run_with_trace(
+            mic, ref, sr, candidate_values)
+    finally:
+        for name, value in old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
     m = min(len(y_base), len(y_cand))
     y_base, y_cand = y_base[:m], y_cand[:m]
@@ -251,7 +282,10 @@ def probe(stem, frame_size, far_active_db=-45.0):
                        "clean near-end in any scenario, so any SI-SDR/STOI here "
                        "would be scored against a reference that still contains "
                        "the echo. Use d_near_db, and listen.",
-        "holdoff_limit": {"base": 20, "cand": None},
+        "holdoff_limit": {
+            "base": FROZEN["_SIMPLE_MU_HOLDOFF_HOPS"],
+            "cand": candidate_values["_SIMPLE_MU_HOLDOFF_HOPS"],
+        },
         "branch_counts": {"base": branch_counts(tr_base),
                           "cand": branch_counts(tr_cand)},
         "branch_transitions": {"base": transitions(tr_base),

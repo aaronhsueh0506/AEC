@@ -43,10 +43,12 @@ sys.path.insert(0, os.path.join(_REPO, "python"))
 sys.path.insert(0, _HERE)
 
 KNOBS = ["holdoff", "attack", "hold", "release"]
-FROZEN = {"holdoff": ("_simple_mu_holdoff_limit", 20),
-          "attack": ("_simple_mu_alpha_attack", 0.3),
-          "hold": ("_simple_mu_alpha_hold", 0.99),
-          "release": ("_simple_mu_alpha_release", 0.95)}
+CONSTANTS = {
+    "holdoff": "_SIMPLE_MU_HOLDOFF_HOPS",
+    "attack": "_SIMPLE_MU_ALPHA_ATTACK",
+    "hold": "_SIMPLE_MU_ALPHA_HOLD",
+    "release": "_SIMPLE_MU_ALPHA_RELEASE",
+}
 
 
 def mask_name(bits):
@@ -56,13 +58,10 @@ def mask_name(bits):
 
 def run_one(job):
     stem, frame_size, bits = job
-    from simple_mu_case_probe import case_paths, bulk_delay, hop_energy
+    from simple_mu_case_probe import (FROZEN, bulk_delay, case_paths,
+                                      hop_energy, retimed_values)
     import eval_aec_challenge as E
     from modules import orchestrator as O
-
-    os.environ["AEC_CFG_OVERRIDE"] = f"frame_size={frame_size}"
-    os.environ["NO_PREALIGN"] = "1"
-    E._ENABLE_CNG = True
 
     mic_path, lpb_path = case_paths(stem)
     mic, sr = sf.read(mic_path)
@@ -70,23 +69,32 @@ def run_one(job):
     n = min(len(mic), len(ref))
     mic, ref = mic[:n], ref[:n]
 
-    # A knob that is 0 is FROZEN at its authored literal; 1 leaves the retimed
-    # value the constructor derived.
-    overrides = {FROZEN[k][0]: FROZEN[k][1]
-                 for k, b in zip(KNOBS, bits) if not b}
-    orig = O.AEC.__init__
-
-    def init(self, *a, **kw):
-        orig(self, *a, **kw)
-        for k, v in overrides.items():
-            setattr(self, k, v)
-
-    O.AEC.__init__ = init
+    retimed = retimed_values(sr, frame_size)
+    overrides = {
+        CONSTANTS[k]: retimed[CONSTANTS[k]] if bit else FROZEN[CONSTANTS[k]]
+        for k, bit in zip(KNOBS, bits)
+    }
+    env_names = ("AEC_CFG_OVERRIDE", "NO_PREALIGN")
+    old_env = {name: os.environ.get(name) for name in env_names}
+    old_enable_cng = E._ENABLE_CNG
+    original = {key: getattr(O, key) for key in overrides}
     try:
+        os.environ["AEC_CFG_OVERRIDE"] = f"frame_size={frame_size}"
+        os.environ["NO_PREALIGN"] = "1"
+        E._ENABLE_CNG = True
+        for key, value in overrides.items():
+            setattr(O, key, value)
         y = np.asarray(E.run_ours(mic, ref, sr, 52, preset="balanced",
                                   is_movement=False), dtype=np.float64)
     finally:
-        O.AEC.__init__ = orig
+        for key, value in original.items():
+            setattr(O, key, value)
+        E._ENABLE_CNG = old_enable_cng
+        for name, value in old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
     hop = frame_size // 2
     n_hops = len(y) // hop

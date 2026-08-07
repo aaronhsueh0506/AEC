@@ -252,58 +252,27 @@ chain with the v3.22 split min-gain floor.
     it by returning the authoring value — leaving the detector un-retimed
     rather than driving it with a NaN retention.
 
-19. **The F2.4 simple-mu holdoff and its three retention alphas are retimed
-    per grid; `sizeof(Aec)` grows by 16 bytes.** These four are one mechanism —
-    a fresh double-talk onset arms the holdoff, the attack retention sets how
-    fast the ratio drops into it, the hold retention nearly freezes the ratio
-    while it runs, and the release retention governs recovery — and their
-    *relative* rates are what shape the response, so they are retimed together.
+19. **The F2.4 simple-mu retime was evaluated and rejected; production keeps
+    the four hop-authored values together.** The candidate converted the
+    holdoff and attack/hold/release alphas to a common wall-clock reference,
+    but the mechanism is a branch-coupled state machine rather than four
+    independent timers. On the two-grid 90-case A/B it produced case-level
+    Δecho down to −0.257 and Δdeg down to −0.349; the 2⁴ interaction matrix was
+    strongly non-additive and did not transfer between grids.
 
-    | constant | authored | wall-clock (all grids, after) |
-    |---|---|---|
-    | `simple_mu_holdoff` | 20 hops @ 10 ms | 200 ms (12 / 25 / 12 / 19 hops) |
-    | `simple_mu_alpha_attack` | 0.3 @ 10 ms | TC 8.31 ms |
-    | `simple_mu_alpha_hold` | 0.99 @ 10 ms | TC 994.99 ms |
-    | `simple_mu_alpha_release` | 0.95 @ 10 ms | TC 194.96 ms |
-
-    Frozen, the holdoff covered 160 ms at the 8 ms default and 320 ms at the
-    16 ms grids. **Anchor**: F2.4 was *introduced* on a 16 ms grid (`d774771`)
-    and *validated* on a 10 ms one (`7b2cf04`, an 800-case ablation). Anchoring
-    on the introducing commit gives a 320 ms holdoff — a 1.6x error, and the
-    exact mistake the anchor rule exists to prevent.
-
-    All four are derived once in `aec_recompute_wallclock_thresholds()` — a
-    `powf()` per hop would recompute the same value on the audio path forever —
-    and stored on `Aec` as `simple_mu_holdoff_limit`, `simple_mu_alpha_attack`,
-    `simple_mu_alpha_hold`, `simple_mu_alpha_release`. `aec_reset()` clears the
-    two runtime fields (`simple_mu_ratio`, `simple_mu_holdoff`) and re-derives
-    the four constants; clearing them would leave the instance adapting on
-    zeros from the second reset onward, which is asserted against.
-
-    *Migration*: `sizeof(Aec)` 41048 → 41064 and `aec_get_mem_size()` grows by
-    16 bytes at every grid (8k/256 276976 → 276992; 16k/256 381056 → 381072;
-    16k/512 510128 → 510144; 48k/1024 1166976 → 1166992). Callers that
-    statically size the pool must rebuild against the new header. Static and
-    heap paths stay byte-equal to each other (`test_static_aec`, 669824
-    samples).
+    Production therefore remains at `20 / 0.3 / 0.99 / 0.95`. There is no
+    `Aec` layout or pool-size change and no migration requirement. The known
+    grid-dependent timing is recorded as a rejected-retime exception in
+    `docs/timing_constant_inventory.md`; complete evidence is under
+    `eval/ab_evidence/2026-08-07-simple-mu/`.
 
 ### Added
 
-- **`test_rate_structural` check (d6)** + the new blocks in
-  `python/tests/test_simple_mu_holdoff_f24.py` — the gate for (19), on all four
-  grids in both languages. Beyond the effective values it recovers the
-  coefficient each branch ACTUALLY APPLIED, from two runs of the same stimulus
-  that differ only in the starting ratio (`ratio_new = a*ratio_old + (1-a)*r`,
-  and `r` does not depend on `ratio_old`, so it cancels). It also asserts the
-  ARM SITE separately — mutation-verified, because a use site that arms to a
-  literal 20 passed every stored-field and applied-alpha check until that
-  assertion was added, which is the `alpha_power` defect in a different file.
-  Branch coverage needs no test-only instrumentation: the holdoff counter's
-  transition names the branch (up = attack/fresh, down = hold, flat at 0 =
-  release, flat nonzero = attack/ongoing), so no diagnostic field was added to
-  the public struct. Four mutations must fail and do: holdoff back to 20 (C 4
-  checks / Python 3 tests), any alpha back to its literal (4 / 1), reference
-  back to the 16 ms introduce grid (8 / 8), fresh-onset guard removed (4 / 4).
+- **`test_rate_structural` check (d6)** and
+  `python/tests/test_simple_mu_holdoff_f24.py` lock the rejected-retime
+  exception on all four grids. They recover the coefficient each branch
+  actually applies and test the arm site independently, while the F2.4
+  no-reset guard remains covered.
 
 - **`test_rate_structural` check (d5)** + `python/tests/test_alpha_r_direct_pbfdkf.py`
   — the gate for `alpha_r`, which no wrapper-level benchmark can observe: it is

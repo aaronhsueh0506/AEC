@@ -253,7 +253,8 @@ python3 eval/ab_report.py --base b.json --cand c.json --label "..." --out r.json
 python3 eval/ab_report.py --summary r*.json --md AB_REPORT.md
 python3 eval/simple_mu_case_probe.py --stem <stem> --frame-size 256 --out probe.json
 python3 eval/simple_mu_interaction_matrix.py --stems stems.txt --frame-size 256 --out m.json
-python3 eval/simple_mu_branch_census.py --frame-size 256 --out branch_census_g256.json
+python3 eval/simple_mu_branch_census.py --policy retimed --frame-size 256 \
+    --out branch_census_g256.json
 ```
 
 ## Files
@@ -266,7 +267,7 @@ python3 eval/simple_mu_branch_census.py --frame-size 256 --out branch_census_g25
 | `{c,py}_wav_comparison_g{256,512}.json` | per-case SHA-256, sample count, rate, max/RMS diff |
 | `interaction_matrix_g{256,512}.json`, `interaction_matrix.txt` | all 16 settings, both grids |
 | `probes/` | per-case state trajectory + physical measures, 16 stems × 2 grids |
-| `listen_targets.txt`, `listen/` | the 11 deg cases narrowed to ~30 ms windows, plus excerpts of the worst three |
+| `listen_targets.txt` | the 11 deg cases narrowed to ~30 ms windows; WAV excerpts are local, ignored build artifacts and are not part of the repository evidence |
 | `branch_census_g{256,512}.json` | per-case attack/hold/release hit counts over all 90 cases |
 | `fs_static_bisect.{txt,json}` | each constant alone against all four, five FS_static clips |
 | `source.diff` | the exact baseline→candidate change |

@@ -31,6 +31,15 @@ from .epc import EchoPathChangeDetector, PathChangeRegimeHandler
 from .config import AecConfig
 from .debug_logger import AecDebugLogger
 
+# F2.4 simple-mu is deliberately frozen. The four values form one state
+# machine; retiming them independently or together failed the two-grid A/B
+# gate. Evaluation tools may temporarily override these module-private values
+# to reproduce the rejected candidate, but production uses this set.
+_SIMPLE_MU_HOLDOFF_HOPS = 20
+_SIMPLE_MU_ALPHA_ATTACK = 0.3
+_SIMPLE_MU_ALPHA_HOLD = 0.99
+_SIMPLE_MU_ALPHA_RELEASE = 0.95
+
 
 class AEC:
     """
@@ -748,30 +757,9 @@ class AEC:
         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
 
         # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER).
-        # The four constants below are one mechanism: a fresh DT onset arms the
-        # holdoff, the attack retention sets how fast the ratio drops into it,
-        # the hold retention nearly freezes the ratio while it runs, and the
-        # release retention governs recovery afterwards. Their RELATIVE rates
-        # are what make the tracker behave, so they are retimed together or not
-        # at all -- retiming one alone would change the shape of the response,
-        # not just its speed.
-        #
-        # All four are authored at the legacy hop=160/16000 (10 ms) grid and
-        # validated there by F2.4 (7b2cf04, an 800-case ablation). Note the
-        # anchor: the guard was INTRODUCED on a 16 ms grid (d774771), so
-        # anchoring on the introducing commit would make the holdoff 320 ms
-        # instead of 200 -- a 1.6x error.
-        from . import aec3_scale as _aec3_scale_mu
-        _mu_hop = self.config.hop_size
-        _mu_sr = self.config.sample_rate
-        self._simple_mu_holdoff_limit = _aec3_scale_mu.ms_to_hops(
-            200.0, _mu_hop, _mu_sr)
-        self._simple_mu_alpha_attack = _aec3_scale_mu.growth_rehop(
-            0.3, 160, 16000, _mu_hop, _mu_sr)
-        self._simple_mu_alpha_hold = _aec3_scale_mu.growth_rehop(
-            0.99, 160, 16000, _mu_hop, _mu_sr)
-        self._simple_mu_alpha_release = _aec3_scale_mu.growth_rehop(
-            0.95, 160, 16000, _mu_hop, _mu_sr)
+        # Its holdoff and three alphas form one state machine. A wall-clock
+        # retime failed the two-grid A/B gate, so the validated hop-authored
+        # values remain frozen as one documented exception.
         self._simple_mu_ratio = 1.0
         self._simple_mu_holdoff = 0  # holdoff counter: blocks release for N frames
         self._warmup_frames = self.config.warmup_frames
@@ -1310,24 +1298,22 @@ class AEC:
                 ratio_echo = np.clip(echo_est_pwr / near_pwr, 0.0, 1.0)
                 ratio = max(ratio, ratio_echo * 0.5)
 
-        # Asymmetric EMA + holdoff: fast attack, slow release with holdoff
-        # All four constants are derived once at construction (see __init__);
-        # no literal may appear here, or the grid is silently ignored.
+        # Asymmetric EMA + holdoff: fast attack, slow release with holdoff.
         if ratio < self._simple_mu_ratio:
             # Attack: fast drop.
-            alpha = self._simple_mu_alpha_attack
+            alpha = _SIMPLE_MU_ALPHA_ATTACK
             # F2.4 INVARIANT: arm the holdoff only on a fresh attack.
             # An ongoing attack must not restart it, or marginal double-talk
             # re-arms every hop and mu never releases.
             if self._simple_mu_holdoff == 0:
-                self._simple_mu_holdoff = self._simple_mu_holdoff_limit
+                self._simple_mu_holdoff = _SIMPLE_MU_HOLDOFF_HOPS
         elif self._simple_mu_holdoff > 0:
             # Holdoff active: keep ratio low, don't release yet
             self._simple_mu_holdoff -= 1
-            alpha = self._simple_mu_alpha_hold  # nearly frozen
+            alpha = _SIMPLE_MU_ALPHA_HOLD  # nearly frozen
         else:
             # Release: slow recovery
-            alpha = self._simple_mu_alpha_release
+            alpha = _SIMPLE_MU_ALPHA_RELEASE
         self._simple_mu_ratio = alpha * self._simple_mu_ratio + (1 - alpha) * ratio
 
     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
@@ -2847,8 +2833,8 @@ class AEC:
         It is distinct from the internal P3f diagnostic string stored in
         _diag['filter_state'], which uses a different
         vocabulary ('idle', 'startup', 'diverged', 'suspicious_dt',
-        'refined_usable', 'coarse_learning') and is only used inside the
-        filter-state computation block and shadow-mu scheduling.
+        'refined_usable', 'coarse_learning') and is exposed only through
+        diagnostics (for example ``run_one_case.py --trace-aec-state``).
         """
         if self._warmup_frames > 0:
             return AecFilterState.WARMUP

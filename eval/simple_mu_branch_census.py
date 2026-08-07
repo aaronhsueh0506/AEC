@@ -4,9 +4,9 @@ A retimed constant is only evidence if the branch that reads it is exercised by
 the corpus the A/B ran on. `_update_simple_mu_ratio` has three branches and each
 uses a different retimed retention:
 
-    attack    _simple_mu_alpha_attack    and arms the holdoff on a fresh onset
-    hold      _simple_mu_alpha_hold      while the holdoff runs down
-    release   _simple_mu_alpha_release   once it is spent
+    attack    _SIMPLE_MU_ALPHA_ATTACK    and arms the holdoff on a fresh onset
+    hold      _SIMPLE_MU_ALPHA_HOLD      while the holdoff runs down
+    release   _SIMPLE_MU_ALPHA_RELEASE   once it is spent
 
 A neutral A/B result means something different depending on which of those the
 corpus actually reached. If `release` never fires, a neutral verdict says
@@ -24,7 +24,7 @@ The last line is exact rather than a default: an attack at zero would arm the
 counter, and the limit is always >= 1, so a 0 -> 0 transition can only be
 release.
 
-    python3 eval/simple_mu_branch_census.py --out census.json [--limit N]
+    python3 eval/simple_mu_branch_census.py --policy retimed --out census.json
 """
 from __future__ import annotations
 
@@ -56,8 +56,10 @@ def case_paths(stem):
 
 
 def census_one(args):
-    stem, frame_size = args
+    stem, frame_size, policy = args
     from aec import AEC, AecConfig
+    from modules import orchestrator as O
+    from simple_mu_case_probe import FROZEN, retimed_values
 
     mic_path, lpb_path = case_paths(stem)
     mic, sr = sf.read(mic_path, dtype="float64", always_2d=False)
@@ -65,32 +67,43 @@ def census_one(args):
     n = min(len(mic), len(ref))
     mic, ref = mic[:n], ref[:n]
 
-    aec = AEC(AecConfig(sample_rate=sr, frame_size=frame_size,
-                        enable_cng=True))
-    hop = aec.config.hop_size
-    counts = collections.Counter()
-    prev = aec._simple_mu_holdoff
-    hops = 0
-    for i in range(0, n - hop + 1, hop):
-        aec.process(mic[i:i + hop], ref[i:i + hop])
-        now = aec._simple_mu_holdoff
-        if now > prev:
-            counts["attack_onset"] += 1
-        elif now < prev:
-            counts["hold"] += 1
-        elif now == 0:
-            counts["release"] += 1
-        else:
-            counts["attack_ongoing"] += 1
-        prev = now
-        hops += 1
-    return stem, aec._simple_mu_holdoff_limit, hops, dict(counts)
+    values = FROZEN if policy == "frozen" else retimed_values(sr, frame_size)
+    original = {key: getattr(O, key) for key in values}
+    for key, value in values.items():
+        setattr(O, key, value)
+    try:
+        aec = AEC(AecConfig(sample_rate=sr, frame_size=frame_size,
+                            enable_cng=True))
+        hop = aec.config.hop_size
+        counts = collections.Counter()
+        prev = aec._simple_mu_holdoff
+        hops = 0
+        for i in range(0, n - hop + 1, hop):
+            aec.process(mic[i:i + hop], ref[i:i + hop])
+            now = aec._simple_mu_holdoff
+            if now > prev:
+                counts["attack_onset"] += 1
+            elif now < prev:
+                counts["hold"] += 1
+            elif now == 0:
+                counts["release"] += 1
+            else:
+                counts["attack_ongoing"] += 1
+            prev = now
+            hops += 1
+        limit = values["_SIMPLE_MU_HOLDOFF_HOPS"]
+        return stem, limit, hops, dict(counts)
+    finally:
+        for key, value in original.items():
+            setattr(O, key, value)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--frame-size", type=int, default=256)
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--policy", choices=("frozen", "retimed"),
+                    default="frozen")
     ap.add_argument("--limit", type=int, default=0,
                     help="census only the first N cases (a partial census must "
                          "say so in whatever cites it)")
@@ -105,7 +118,7 @@ def main(argv=None):
 
     with multiprocessing.Pool(args.workers) as pool:
         results = pool.map(census_one,
-                           [(s, args.frame_size) for s in stems])
+                           [(s, args.frame_size, args.policy) for s in stems])
 
     total = collections.Counter()
     per_case = {}
@@ -119,6 +132,7 @@ def main(argv=None):
     missing = [b for b in branches if total.get(b, 0) == 0]
     report = {
         "frame_size": args.frame_size,
+        "policy": args.policy,
         "cases": len(stems),
         "partial": bool(args.limit),
         "holdoff_limit_hops": sorted(limits),

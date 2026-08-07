@@ -30,8 +30,8 @@ class AecStats:
     # from the internal P3f diagnostic string stored in _diag['filter_state']
     # (values: 'idle', 'startup', 'diverged',
     # 'suspicious_dt', 'refined_usable', 'coarse_learning') which is a
-    # separate finer-grained state machine used only inside the filter-state
-    # computation block.  The two must never be confused.
+    # separate finer-grained state machine exposed only through diagnostics.
+    # The two must never be confused.
     filter_state: AecFilterState  # public enum; use .value for string form
     filter_converged: bool
     filter_once_converged: bool  # True if converged at least once since reset

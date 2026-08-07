@@ -3234,7 +3234,7 @@
  "frame_size": 512,
  "holdoff_limit": {
   "base": 20,
-  "cand": null
+  "cand": 12
  },
  "hop": 256,
  "n_hops": 2291,

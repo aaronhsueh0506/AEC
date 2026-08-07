@@ -24,7 +24,6 @@ a bucket average. Hence an explicit state-level assertion here.
 """
 from __future__ import annotations
 
-import math
 import os
 import sys
 
@@ -38,6 +37,9 @@ if _PYTHON_ROOT not in sys.path:
 
 from aec import AEC, AecConfig  # noqa: E402
 
+FROZEN_HOLDOFF = 20
+FROZEN_ALPHA = {"attack": 0.3, "hold": 0.99, "release": 0.95}
+
 
 def _aec(sample_rate=16000, frame_size=None):
     kw = {"sample_rate": sample_rate}
@@ -47,15 +49,8 @@ def _aec(sample_rate=16000, frame_size=None):
 
 
 def _runout(aec):
-    """Hops to drive so a fully-armed counter certainly reaches zero.
-
-    Not a constant: the holdoff is 200 ms of wall clock, so its hop count is
-    25 at the 16 kHz default and 12 at a 16 ms grid. An earlier version of this
-    file hardcoded 40, which was comfortable while the counter was a frozen 20
-    and became too short the moment it was retimed -- the same un-retimed magic
-    number this file exists to catch, one level up.
-    """
-    return 2 * aec._simple_mu_holdoff_limit + 10
+    """Long enough to observe arm, drain, and release."""
+    return 2 * FROZEN_HOLDOFF + 10
 
 
 def _drive(aec, n_hops, far_scale, err_scale, rng):
@@ -118,10 +113,7 @@ def test_ongoing_doubletalk_does_not_rearm_the_holdoff():
     assert 0 in seen, (
         f"holdoff never reached 0 across {len(seen)} hops: {seen[-8:]}"
     )
-    assert armed == aec._simple_mu_holdoff_limit, (
-        f"armed to {armed}, expected the retimed limit "
-        f"{aec._simple_mu_holdoff_limit}"
-    )
+    assert armed == FROZEN_HOLDOFF
 
 
 def test_holdoff_can_rearm_after_it_has_expired():
@@ -142,17 +134,18 @@ def test_holdoff_can_rearm_after_it_has_expired():
 
     aec._simple_mu_ratio = 1.0          # fresh onset
     again = _drive(aec, 1, far_scale=0.001, err_scale=0.5, rng=rng)
-    assert again[0] == aec._simple_mu_holdoff_limit, (
-        "a new onset after expiry must re-arm the holdoff to the retimed limit")
+    assert again[0] == FROZEN_HOLDOFF, (
+        "a new onset after expiry must re-arm the frozen holdoff")
 
 
-def test_holdoff_decrements_monotonically_while_it_runs():
-    """Pins the shape, not just the endpoints: no hop may increase it."""
+def test_holdoff_never_rearms_before_the_first_expiry():
+    """Pins one arm/run-down cycle, not a later independent onset."""
     aec = _aec()
     _force_attack(aec)
     rng = np.random.default_rng(4)
     seen = _drive(aec, _runout(aec), far_scale=0.001, err_scale=0.5, rng=rng)
-    for i in range(1, len(seen)):
+    first_zero = seen.index(0)
+    for i in range(1, first_zero + 1):
         assert seen[i] <= seen[i - 1], (
             f"holdoff increased at hop {i}: {seen[i - 1]} -> {seen[i]}; "
             f"full trace {seen}"
@@ -218,79 +211,39 @@ def test_attack_after_expiry_rearms():
     )
 
 
-# ── the constant itself: 200 ms, on every grid ──────────────────────────────
-# The holdoff was a frozen 20 hops, which is 200 ms only at the legacy
-# hop=160/16000 grid -- 160 ms at today's 8 ms default and 320 ms at the 16 ms
-# grids. The three retention alphas beside it were frozen the same way. They are
-# one mechanism: their RELATIVE rates shape the response, so they are retimed
-# together and asserted together.
-#
-# Anchor note: F2.4 was INTRODUCED on a 16 ms grid (d774771) and VALIDATED on a
-# 10 ms one (7b2cf04, an 800-case ablation). Anchoring on the introducing commit
-# would give a 320 ms holdoff -- a 1.6x error, and exactly the mistake the
-# repo's anchor rule exists to prevent.
+# ── rejected retime: lock the frozen mechanism on every grid ──────────
+# The holdoff and three alphas form one state machine. Their wall-clock retime
+# failed the two-grid blind A/B gate, so production intentionally keeps the
+# validated hop-authored literals together.
 
 GRIDS = [(8000, 256), (16000, 256), (16000, 512), (48000, 1024)]
-REF_HOP_10MS = 160
-REF_SR = 16000
-
-
 @pytest.mark.parametrize("sample_rate,frame_size", GRIDS)
-def test_simple_mu_constants_are_retimed_on_every_grid(sample_rate, frame_size):
+def test_simple_mu_holdoff_stays_frozen_on_every_grid(sample_rate, frame_size):
+    aec = _aec(sample_rate, frame_size)
+    _force_attack(aec)
+    seen = _drive(aec, 1, 0.001, 0.5, np.random.default_rng(21))
+    assert seen == [FROZEN_HOLDOFF]
+
+
+def test_default_grid_distinguishes_frozen_from_retimed_policy():
     from modules import aec3_scale
 
-    aec = _aec(sample_rate, frame_size)
-    hop = aec.config.hop_size
-    assert aec._simple_mu_holdoff_limit == aec3_scale.ms_to_hops(
-        200.0, hop, sample_rate)
-    for attr, authored in (("_simple_mu_alpha_attack", 0.3),
-                           ("_simple_mu_alpha_hold", 0.99),
-                           ("_simple_mu_alpha_release", 0.95)):
-        assert getattr(aec, attr) == pytest.approx(
-            aec3_scale.growth_rehop(authored, REF_HOP_10MS, REF_SR, hop,
-                                    sample_rate), rel=1e-12), attr
-
-
-@pytest.mark.parametrize("sample_rate,frame_size", GRIDS)
-def test_the_wall_clock_spans_are_grid_invariant(sample_rate, frame_size):
-    """The point of the exercise: equal wall clock, not equal hop counts."""
-    aec = _aec(sample_rate, frame_size)
-    hop_ms = aec.config.hop_size / sample_rate * 1000.0
-    assert aec._simple_mu_holdoff_limit * hop_ms == pytest.approx(200.0, abs=hop_ms)
-    for attr, authored in (("_simple_mu_alpha_attack", 0.3),
-                           ("_simple_mu_alpha_hold", 0.99),
-                           ("_simple_mu_alpha_release", 0.95)):
-        tc = -hop_ms / math.log(getattr(aec, attr))
-        tc_ref = -10.0 / math.log(authored)
-        assert tc == pytest.approx(tc_ref, rel=1e-9), f"{attr}: {tc} vs {tc_ref}"
-
-
-def test_retiming_is_actually_applied_somewhere():
-    """Guards the degenerate pass: every assertion above still holds if nothing
-    was retimed AND the reference grid happens to equal the live grid. At the
-    16 kHz default (8 ms hop) all four values must MOVE off their literals."""
     aec = _aec(16000, 256)
-    assert aec._simple_mu_holdoff_limit != 20
-    assert aec._simple_mu_alpha_attack != pytest.approx(0.3, abs=1e-9)
-    assert aec._simple_mu_alpha_hold != pytest.approx(0.99, abs=1e-9)
-    assert aec._simple_mu_alpha_release != pytest.approx(0.95, abs=1e-9)
+    hop = aec.config.hop_size
+    assert aec3_scale.ms_to_hops(200.0, hop, 16000) != FROZEN_HOLDOFF
+    for authored in FROZEN_ALPHA.values():
+        retimed = aec3_scale.growth_rehop(authored, 160, 16000, hop, 16000)
+        assert retimed != pytest.approx(authored, abs=1e-9)
 
 
 @pytest.mark.parametrize("branch,holdoff", [("release", 0), ("hold", 5)])
-def test_no_live_literal_survives_in_the_update(branch, holdoff):
-    """A retiming that leaves the literal at the use site is the alpha_power
-    bug in a different file: the derived value is computed, stored, and
-    ignored by the code that matters.
-
-    So recover the coefficient the update ACTUALLY APPLIED, rather than reading
-    the attribute back. With far >> error the incoming ratio saturates at 1.0,
-    which makes the transition invertible:
+def test_hold_and_release_apply_the_frozen_coefficients(branch, holdoff):
+    """Recover the coefficient actually applied at the use site. With far >>
+    error the incoming ratio saturates at 1.0, making it invertible:
     ratio_new = a*ratio_old + (1-a)*1.0  ->  a = (ratio_new - 1) / (ratio_old - 1).
     """
-    expected = {"release": "_simple_mu_alpha_release",
-                "hold": "_simple_mu_alpha_hold"}[branch]
     aec = _aec(16000, 256)
-    want = getattr(aec, expected)
+    want = FROZEN_ALPHA[branch]
     start = 0.4                      # below 1.0, so the non-attack side is taken
     aec._simple_mu_holdoff = holdoff
     aec._simple_mu_ratio = start
@@ -303,28 +256,19 @@ def test_no_live_literal_survives_in_the_update(branch, holdoff):
 
     applied = (aec._simple_mu_ratio - 1.0) / (start - 1.0)
     assert applied == pytest.approx(want, abs=2e-6), (
-        f"{branch} branch applied {applied:.6f}, expected the retimed "
+        f"{branch} branch applied {applied:.6f}, expected the frozen "
         f"{want:.6f}")
 
 
-def test_reset_clears_runtime_state_but_keeps_the_derived_constants():
-    """`reset()` owns the counter and the ratio. The four derived constants are
-    properties of the resolved grid; clearing them would leave the instance
-    running on zeros after the first reset."""
+def test_reset_clears_simple_mu_runtime_state():
     aec = _aec(16000, 256)
-    limit = aec._simple_mu_holdoff_limit
-    alphas = (aec._simple_mu_alpha_attack, aec._simple_mu_alpha_hold,
-              aec._simple_mu_alpha_release)
     aec._simple_mu_holdoff = 9
     aec._simple_mu_ratio = 0.123
     aec.reset()
     assert aec._simple_mu_holdoff == 0 and aec._simple_mu_ratio == 1.0
-    assert aec._simple_mu_holdoff_limit == limit
-    assert (aec._simple_mu_alpha_attack, aec._simple_mu_alpha_hold,
-            aec._simple_mu_alpha_release) == alphas
 
 
-def test_the_attack_branch_applies_the_retimed_coefficient():
+def test_the_attack_branch_applies_the_frozen_coefficient():
     """The attack branch cannot use the saturation trick above -- its incoming
     ratio is small and shaped by the echo/near lift -- so recover the
     coefficient from TWO runs of the SAME stimulus that differ only in the
@@ -346,13 +290,13 @@ def test_the_attack_branch_applies_the_retimed_coefficient():
 
     new1, arm1, aec = step_from(0.90)
     new2, arm2, _ = step_from(0.95)
-    assert arm1 == arm2 == aec._simple_mu_holdoff_limit, (
+    assert arm1 == arm2 == FROZEN_HOLDOFF, (
         "both runs must have taken the attack branch and armed the holdoff")
 
     applied = (new2 - new1) / (0.95 - 0.90)
-    assert applied == pytest.approx(aec._simple_mu_alpha_attack, abs=2e-6), (
-        f"attack branch applied {applied:.6f}, expected the retimed "
-        f"{aec._simple_mu_alpha_attack:.6f}")
+    assert applied == pytest.approx(FROZEN_ALPHA["attack"], abs=2e-6), (
+        f"attack branch applied {applied:.6f}, expected the frozen "
+        f"{FROZEN_ALPHA['attack']:.6f}")
 
 
 def test_all_three_branches_are_reachable_and_distinguishable():
@@ -367,8 +311,6 @@ def test_all_three_branches_are_reachable_and_distinguishable():
                                limit is always >= 1)
     """
     aec = _aec(16000, 256)
-    assert aec._simple_mu_holdoff_limit >= 1, (
-        "a zero limit would make the 0 -> 0 transition ambiguous")
 
     rng = np.random.default_rng(24)
     seen = set()
@@ -388,5 +330,4 @@ def test_all_three_branches_are_reachable_and_distinguishable():
             seen.add("attack")
         prev = now
     assert seen == {"attack", "hold", "release"}, (
-        f"only reached {sorted(seen)} -- a branch with no coverage is a "
-        f"retimed constant with no evidence")
+        f"only reached {sorted(seen)} -- frozen branch coverage incomplete")

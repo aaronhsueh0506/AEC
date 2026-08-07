@@ -1542,24 +1542,12 @@ static void test_alpha_r_reaches_the_direct_pbfdkf_path(void) {
     }
 }
 
-/* ── (d6) simple-mu timing: four constants, one mechanism ──────────────────
+/* ── (d6) simple-mu frozen exception: four constants, one mechanism ──
  *
- * The F2.4 holdoff and its three retention alphas were frozen hop counts: 20
- * hops is 200 ms only at the legacy hop=160/16000 grid -- 160 ms at today's
- * 8 ms default and 320 ms at the 16 ms grids -- and 0.3/0.99/0.95 covered a
- * different span at every rate. They are retimed together because their
- * RELATIVE rates are what shape the response; moving one alone would change
- * the shape, not just the speed.
- *
- * Anchor: F2.4 was INTRODUCED on a 16 ms grid (d774771) and VALIDATED on a
- * 10 ms one (7b2cf04, an 800-case ablation). Anchoring on the introducing
- * commit gives a 320 ms holdoff -- a 1.6x error.
- *
- * Asserted here: the effective value on every grid, the wall-clock invariance
- * that is the point of the exercise, that aec_reset() keeps the derived
- * constants while clearing the runtime pair, and -- the part a stored-field
- * check cannot give -- the coefficient the update ACTUALLY APPLIED, recovered
- * from two runs of the same stimulus that differ only in the starting ratio. */
+ * The F2.4 holdoff and its three alphas are hop-authored. Retiming the four
+ * values as a group failed the two-grid blind A/B gate, so production keeps
+ * 20 and 0.3/0.99/0.95 together. The test recovers what each branch actually
+ * applies and separately checks the arm site; no stored copy can pass it. */
 static void mu_step(Aec* a, float far_scale, float err_scale, unsigned *seed) {
     int hop = aec_hop_size(a);
     float far[2048], out[2048];
@@ -1575,9 +1563,8 @@ static void mu_step(Aec* a, float far_scale, float err_scale, unsigned *seed) {
     aec_testing_update_simple_mu_ratio(a, out, far, hop);
 }
 
-static void test_simple_mu_constant_retiming(void) {
-    const double TOL = 1e-5;
-
+static void test_simple_mu_frozen_exception(void) {
+    static const float expected_alpha[3] = { 0.3f, 0.99f, 0.95f };
     for (int r = 0; r < N_GRIDS; ++r) {
         int sr = GRIDS[r].sample_rate;
         int fft = GRIDS[r].fft_size;
@@ -1594,89 +1581,34 @@ static void test_simple_mu_constant_retiming(void) {
         if (rc != 0) continue;
 
         int hop = aec_hop_size(&aec);
-        double hop_ms = (double)hop / sr * 1000.0;
 
-        /* Effective values, against the same helpers the implementation uses --
-         * so this fails if the reference grid is changed, not only if the
-         * retiming is dropped. */
-        snprintf(what, sizeof(what),
-                 "sr=%d fft=%d: simple_mu_holdoff_limit = %d hops (%.1f ms)",
-                 sr, fft, aec.simple_mu_holdoff_limit,
-                 aec.simple_mu_holdoff_limit * hop_ms);
-        CHECK(aec.simple_mu_holdoff_limit == aec3_ms_to_hops(200.0f, hop, sr), what);
-
-        /* The wall-clock claim itself. The hop count is an integer, so the
-         * realised span can be off by up to one hop -- that is rounding, not
-         * mistiming, and the bound says so. */
-        snprintf(what, sizeof(what),
-                 "sr=%d fft=%d: holdoff covers %.1f ms, target 200 ms "
-                 "(+-1 hop = %.1f ms)",
-                 sr, fft, aec.simple_mu_holdoff_limit * hop_ms, hop_ms);
-        CHECK(fabs(aec.simple_mu_holdoff_limit * hop_ms - 200.0) <= hop_ms, what);
-
-        const struct { const char *name; float value; float authored; } A[] = {
-            { "attack",  aec.simple_mu_alpha_attack,  0.3f  },
-            { "hold",    aec.simple_mu_alpha_hold,    0.99f },
-            { "release", aec.simple_mu_alpha_release, 0.95f },
-        };
-        for (int i = 0; i < 3; ++i) {
-            float want = aec3_growth_rehop(A[i].authored, 160, 16000, hop, sr);
-            snprintf(what, sizeof(what),
-                     "sr=%d fft=%d: simple_mu_alpha_%s = %.9f, retimed off the "
-                     "10 ms anchor (%.9f)", sr, fft, A[i].name, A[i].value, want);
-            CHECK(fabs((double)A[i].value - want) <= TOL, what);
-
-            double tc = -hop_ms / log((double)A[i].value);
-            double tc_ref = -10.0 / log((double)A[i].authored);
-            snprintf(what, sizeof(what),
-                     "sr=%d fft=%d: simple_mu_alpha_%s covers TC %.4f ms on "
-                     "every grid (10 ms anchor: %.4f ms)",
-                     sr, fft, A[i].name, tc, tc_ref);
-            CHECK(fabs(tc - tc_ref) <= 1e-3 * tc_ref, what);
-        }
-
-        /* Negative space: at the 16 kHz default all four must MOVE off their
-         * literals, or every check above is satisfiable by doing nothing. */
+        /* Prove the default grid distinguishes the frozen policy from the
+         * rejected wall-clock retime. */
         if (sr == 16000 && fft == 256) {
-            CHECK(aec.simple_mu_holdoff_limit != 20,
-                  "16000/256: holdoff_limit moved off the frozen 20");
-            check_moved("simple_mu_alpha_attack", sr, fft,
-                        aec.simple_mu_alpha_attack, 0.3);
-            check_moved("simple_mu_alpha_hold", sr, fft,
-                        aec.simple_mu_alpha_hold, 0.99);
-            check_moved("simple_mu_alpha_release", sr, fft,
-                        aec.simple_mu_alpha_release, 0.95);
+            CHECK(aec3_ms_to_hops(200.0f, hop, sr) != 20,
+                  "default grid distinguishes frozen and retimed holdoff");
+            for (int i = 0; i < 3; ++i) {
+                float retimed = aec3_growth_rehop(expected_alpha[i], 160,
+                                                   16000, hop, sr);
+                CHECK(fabsf(retimed - expected_alpha[i]) > 1e-5f,
+                      "default grid distinguishes frozen and retimed alpha");
+            }
         }
 
-        /* aec_reset() owns the runtime pair and nothing else. Clearing the
-         * derived constants would leave the instance adapting on zeros after
-         * the first reset -- silent, and only on the second call onward. */
+        /* Reset owns the runtime pair. */
         aec.simple_mu_holdoff = 9;
         aec.simple_mu_ratio = 0.123f;
-        int limit_before = aec.simple_mu_holdoff_limit;
-        float att_before = aec.simple_mu_alpha_attack;
-        float hold_before = aec.simple_mu_alpha_hold;
-        float rel_before = aec.simple_mu_alpha_release;
         aec_reset(&aec);
         snprintf(what, sizeof(what),
                  "sr=%d fft=%d: reset clears the runtime pair", sr, fft);
         CHECK(aec.simple_mu_holdoff == 0 && aec.simple_mu_ratio == 1.0f, what);
-        snprintf(what, sizeof(what),
-                 "sr=%d fft=%d: reset KEEPS the derived constants", sr, fft);
-        CHECK(aec.simple_mu_holdoff_limit == limit_before &&
-              aec.simple_mu_alpha_attack == att_before &&
-              aec.simple_mu_alpha_hold == hold_before &&
-              aec.simple_mu_alpha_release == rel_before, what);
-
         /* ── the coefficient each branch ACTUALLY APPLIED ─────────────────
          * ratio_new = a*ratio_old + (1-a)*r, and r depends on the frame and
          * the filter state but NOT on ratio_old, so running the same stimulus
          * from two starting points cancels it:  a = (new2-new1)/(s2-s1). */
         for (int b = 0; b < 3; ++b) {
             const char *name = (b == 0) ? "attack" : (b == 1) ? "hold" : "release";
-            float want = (b == 0) ? aec.simple_mu_alpha_attack
-                       : (b == 1) ? aec.simple_mu_alpha_hold
-                                  : aec.simple_mu_alpha_release;
+            float want = expected_alpha[b];
             /* attack needs ratio_in < ratio_old (error >> far); hold/release
              * need ratio_in >= ratio_old (far >> error). */
             float fs = (b == 0) ? 0.001f : 0.5f;
@@ -1692,16 +1624,12 @@ static void test_simple_mu_constant_retiming(void) {
             }
             double applied = (got[1] - got[0]) / (s[1] - s[0]);
             snprintf(what, sizeof(what),
-                     "sr=%d fft=%d: %s branch applied %.6f, the retimed %.6f "
-                     "(not its 10 ms literal)", sr, fft, name, applied, want);
+                     "sr=%d fft=%d: %s branch applied frozen %.6f",
+                     sr, fft, name, applied);
             CHECK(fabs(applied - (double)want) <= 2e-4, what);
         }
 
-        /* The ARM SITE, which the checks above do not reach. They assert the
-         * stored limit and the applied alphas; a use site that arms to a
-         * literal 20 satisfies every one of them -- verified by mutation, it
-         * did. This is the alpha_power defect in a different file: the derived
-         * value computed, asserted, and ignored by the line that matters. */
+        /* The arm site is independent of the alpha recovery above. */
         aec_reset(&aec);
         aec.simple_mu_ratio = 1.0f;
         aec.simple_mu_holdoff = 0;
@@ -1710,10 +1638,9 @@ static void test_simple_mu_constant_retiming(void) {
             mu_step(&aec, 0.001f, 0.5f, &seed);   /* error >> far -> attack */
         }
         snprintf(what, sizeof(what),
-                 "sr=%d fft=%d: a fresh attack arms the holdoff to %d, the "
-                 "retimed limit (%d) and not a literal",
-                 sr, fft, aec.simple_mu_holdoff, aec.simple_mu_holdoff_limit);
-        CHECK(aec.simple_mu_holdoff == aec.simple_mu_holdoff_limit, what);
+                 "sr=%d fft=%d: a fresh attack arms frozen 20 hops (got %d)",
+                 sr, fft, aec.simple_mu_holdoff);
+        CHECK(aec.simple_mu_holdoff == 20, what);
 
         /* ── all three branches reachable, identified without instrumentation
          * The holdoff counter's transition names the branch, so branch coverage
@@ -1740,8 +1667,7 @@ static void test_simple_mu_constant_retiming(void) {
         }
         snprintf(what, sizeof(what),
                  "sr=%d fft=%d: attack/hold/release all reached "
-                 "(%d/%d/%d) -- a branch with no coverage is a retimed "
-                 "constant with no evidence",
+                 "(%d/%d/%d)",
                  sr, fft, hit_attack, hit_hold, hit_release);
         CHECK(hit_attack && hit_hold && hit_release, what);
 
@@ -1762,7 +1688,7 @@ int main(void) {
     test_adaptation_constant_retiming();
     test_retimed_constants_reach_the_audio_path();
     test_alpha_r_reaches_the_direct_pbfdkf_path();
-    test_simple_mu_constant_retiming();
+    test_simple_mu_frozen_exception();
     test_mu_holdoff_rearm_guard();
     test_render_activity_first_observation();
 

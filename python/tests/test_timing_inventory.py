@@ -42,6 +42,7 @@ _GEN = os.path.join(_REPO, "python", "diag", "gen_timing_inventory.py")
 EXPECTED_SECTIONS = [
     "Retime",
     "Already retimed",
+    "Keep: rejected retime",
     "Keep: event count",
     "Keep: fixed internal cadence",
     "Keep: dominated default",
