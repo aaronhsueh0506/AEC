@@ -1,0 +1,642 @@
+{
+ "branches_never_taken": [],
+ "cases": 90,
+ "frame_size": 256,
+ "holdoff_limit_hops": [
+  25
+ ],
+ "partial": false,
+ "per_case": {
+  "00d2fda6-46a5-4380-933d-335f4e00bd86_nearend_singletalk": {
+   "attack_ongoing": 2192,
+   "attack_onset": 438,
+   "hold": 2933,
+   "hops": 5808,
+   "release": 245
+  },
+  "00t5hG031EmZTpJtcnhS0g_nearend_singletalk": {
+   "attack_ongoing": 533,
+   "attack_onset": 102,
+   "hold": 2017,
+   "hops": 6523,
+   "release": 3871
+  },
+  "0132ca07-7891-461a-9944-c78f0208e1f0_nearend_singletalk": {
+   "attack_ongoing": 1301,
+   "attack_onset": 435,
+   "hold": 2634,
+   "hops": 5400,
+   "release": 1030
+  },
+  "014AzuqPZku2004NbTTmcA_nearend_singletalk": {
+   "attack_ongoing": 412,
+   "attack_onset": 24,
+   "hold": 588,
+   "hops": 1379,
+   "release": 355
+  },
+  "02a565aa-ca43-4023-8362-0e38d9f45202_nearend_singletalk": {
+   "attack_ongoing": 701,
+   "attack_onset": 100,
+   "hold": 1786,
+   "hops": 5750,
+   "release": 3163
+  },
+  "02f2lbI4f0Kj67Vu4oqmJg_nearend_singletalk": {
+   "attack_ongoing": 1046,
+   "attack_onset": 143,
+   "hold": 2480,
+   "hops": 5009,
+   "release": 1340
+  },
+  "03ra86gHhkWD5ttLpOXWkA_nearend_singletalk": {
+   "attack_ongoing": 640,
+   "attack_onset": 103,
+   "hold": 1623,
+   "hops": 4017,
+   "release": 1651
+  },
+  "04281ceb-b127-417e-a2f8-50ccd1a958be_nearend_singletalk": {
+   "attack_ongoing": 3016,
+   "attack_onset": 28,
+   "hold": 546,
+   "hops": 5132,
+   "release": 1542
+  },
+  "051aec4b-cdfb-48b7-8c9e-0325262b920b_nearend_singletalk": {
+   "attack_ongoing": 245,
+   "attack_onset": 78,
+   "hold": 1950,
+   "hops": 4212,
+   "release": 1939
+  },
+  "080ssMm6ZkSbKJOft5nfOg_nearend_singletalk": {
+   "attack_ongoing": 1767,
+   "attack_onset": 100,
+   "hold": 2500,
+   "hops": 6635,
+   "release": 2268
+  },
+  "089bda7c-0d68-44a3-8001-ab075ee32903_nearend_singletalk": {
+   "attack_ongoing": 657,
+   "attack_onset": 116,
+   "hold": 1461,
+   "hops": 5242,
+   "release": 3008
+  },
+  "08ec6dc2-c8a8-423f-a5b1-73affaef4cfa_nearend_singletalk": {
+   "attack_ongoing": 691,
+   "attack_onset": 188,
+   "hold": 1783,
+   "hops": 4306,
+   "release": 1644
+  },
+  "0992d38e-9d39-4a13-a323-8fc51bf0c26c_nearend_singletalk": {
+   "hops": 3852,
+   "release": 3852
+  },
+  "0GM6HqJCwUqGKDMb35gBKg_nearend_singletalk": {
+   "attack_ongoing": 934,
+   "attack_onset": 131,
+   "hold": 3251,
+   "hops": 5723,
+   "release": 1407
+  },
+  "0I0XMl3M0ECO0U1N0cJvpg_doubletalk": {
+   "attack_ongoing": 2401,
+   "attack_onset": 127,
+   "hold": 1564,
+   "hops": 5233,
+   "release": 1141
+  },
+  "0I0XMl3M0ECO0U1N0cJvpg_farend_singletalk_with_movement": {
+   "attack_ongoing": 312,
+   "attack_onset": 25,
+   "hold": 295,
+   "hops": 3020,
+   "release": 2388
+  },
+  "0I5GfBeKbkyZz9aTFW9dXg_nearend_singletalk": {
+   "attack_ongoing": 258,
+   "attack_onset": 28,
+   "hold": 567,
+   "hops": 5353,
+   "release": 4500
+  },
+  "0KjzXA3g20qsd8zmSekADw_farend_singletalk": {
+   "hops": 2720,
+   "release": 2720
+  },
+  "0MUptpjaOEykR0UDj8telw_nearend_singletalk": {
+   "attack_ongoing": 1773,
+   "attack_onset": 267,
+   "hold": 2334,
+   "hops": 8004,
+   "release": 3630
+  },
+  "0TWdnelx0ECAqW7WnLr4Ww_nearend_singletalk": {
+   "attack_ongoing": 21,
+   "attack_onset": 10,
+   "hold": 250,
+   "hops": 4627,
+   "release": 4346
+  },
+  "0Ufz0DNYKkeJdmeZSP3tkQ_nearend_singletalk": {
+   "attack_ongoing": 1257,
+   "attack_onset": 144,
+   "hold": 3597,
+   "hops": 7045,
+   "release": 2047
+  },
+  "0YbPVdUxc0K5n3ffNbRhoA_nearend_singletalk": {
+   "attack_ongoing": 436,
+   "attack_onset": 55,
+   "hold": 1375,
+   "hops": 5039,
+   "release": 3173
+  },
+  "0a60cae0-d1a1-409f-af55-29949398bf36_nearend_singletalk": {
+   "attack_ongoing": 148,
+   "attack_onset": 66,
+   "hold": 1650,
+   "hops": 4456,
+   "release": 2592
+  },
+  "0b3ca3f8-0a82-47a8-81dd-14b97deb5cb0_nearend_singletalk": {
+   "attack_ongoing": 11,
+   "attack_onset": 6,
+   "hold": 150,
+   "hops": 4274,
+   "release": 4107
+  },
+  "0c2fd9c0-a2cc-4a94-99fe-ff61d45027dc_nearend_singletalk": {
+   "attack_ongoing": 905,
+   "attack_onset": 208,
+   "hold": 1115,
+   "hops": 4988,
+   "release": 2760
+  },
+  "0c923332-2145-4c03-bec9-415e8792db13_nearend_singletalk": {
+   "attack_ongoing": 1143,
+   "attack_onset": 189,
+   "hold": 2005,
+   "hops": 3570,
+   "release": 233
+  },
+  "0cb258f1-5d71-4722-ba68-a8f15832e595_nearend_singletalk": {
+   "attack_ongoing": 807,
+   "attack_onset": 249,
+   "hold": 2682,
+   "hops": 6392,
+   "release": 2654
+  },
+  "0ccd139d-743b-450a-b55e-5fe132fd1d57_nearend_singletalk": {
+   "attack_ongoing": 68,
+   "attack_onset": 14,
+   "hold": 350,
+   "hops": 6390,
+   "release": 5958
+  },
+  "0cf99a5e-dccc-40c0-84bb-68dc642363ce_nearend_singletalk": {
+   "attack_ongoing": 428,
+   "attack_onset": 102,
+   "hold": 1337,
+   "hops": 7380,
+   "release": 5513
+  },
+  "0fb22f26-4c37-4bc3-b2da-61ffb5ce7cbc_nearend_singletalk": {
+   "attack_ongoing": 15,
+   "attack_onset": 6,
+   "hold": 104,
+   "hops": 6776,
+   "release": 6651
+  },
+  "0ge5avh5skCpMilSy1UPIw_nearend_singletalk": {
+   "attack_ongoing": 570,
+   "attack_onset": 95,
+   "hold": 1227,
+   "hops": 5085,
+   "release": 3193
+  },
+  "0luXwWjGEEC9G5nf0yTVXw_farend_singletalk_with_movement": {
+   "attack_ongoing": 1044,
+   "attack_onset": 315,
+   "hold": 1236,
+   "hops": 2782,
+   "release": 187
+  },
+  "0ow14xnMzUK7PqEGfJ440A_nearend_singletalk": {
+   "attack_ongoing": 1826,
+   "attack_onset": 586,
+   "hold": 2535,
+   "hops": 6380,
+   "release": 1433
+  },
+  "0pUW17od8U28mntA3Siv5w_nearend_singletalk": {
+   "attack_ongoing": 212,
+   "attack_onset": 39,
+   "hold": 960,
+   "hops": 3363,
+   "release": 2152
+  },
+  "1fvt8ajGxk2OhS7UglBjoA_farend_singletalk": {
+   "attack_ongoing": 162,
+   "attack_onset": 35,
+   "hold": 810,
+   "hops": 2818,
+   "release": 1811
+  },
+  "3UAwzzOa40aCXQAmEdpwww_farend_singletalk_with_movement": {
+   "attack_ongoing": 29,
+   "attack_onset": 10,
+   "hold": 201,
+   "hops": 2906,
+   "release": 2666
+  },
+  "49DamGOwmUWGCn23bmI8xw_farend_singletalk": {
+   "attack_ongoing": 140,
+   "attack_onset": 24,
+   "hold": 517,
+   "hops": 2482,
+   "release": 1801
+  },
+  "49IIo03GZ0CYQOmeA3A0BA_doubletalk": {
+   "attack_ongoing": 1079,
+   "attack_onset": 108,
+   "hold": 1684,
+   "hops": 4757,
+   "release": 1886
+  },
+  "49IIo03GZ0CYQOmeA3A0BA_doubletalk_with_movement": {
+   "attack_ongoing": 1627,
+   "attack_onset": 119,
+   "hold": 1817,
+   "hops": 4732,
+   "release": 1169
+  },
+  "4pN9yn7mhEa5iDiKnr5jlw_farend_singletalk_with_movement": {
+   "attack_ongoing": 217,
+   "attack_onset": 31,
+   "hold": 759,
+   "hops": 2521,
+   "release": 1514
+  },
+  "5bJUo1K3uEmMrGa9UhGyVg_farend_singletalk_with_movement": {
+   "attack_ongoing": 2106,
+   "attack_onset": 95,
+   "hold": 453,
+   "hops": 2735,
+   "release": 81
+  },
+  "7GTxyTksSUqCnP5y0ILG4A_doubletalk": {
+   "attack_ongoing": 1324,
+   "attack_onset": 301,
+   "hold": 2167,
+   "hops": 4583,
+   "release": 791
+  },
+  "7GTxyTksSUqCnP5y0ILG4A_doubletalk_with_movement": {
+   "attack_ongoing": 1154,
+   "attack_onset": 216,
+   "hold": 2103,
+   "hops": 4583,
+   "release": 1110
+  },
+  "7GTxyTksSUqCnP5y0ILG4A_farend_singletalk": {
+   "attack_ongoing": 659,
+   "attack_onset": 158,
+   "hold": 1347,
+   "hops": 2708,
+   "release": 544
+  },
+  "BYRb7rMHZUOVwHO90KRg9Q_farend_singletalk_with_movement": {
+   "attack_ongoing": 7,
+   "attack_onset": 5,
+   "hold": 101,
+   "hops": 2713,
+   "release": 2600
+  },
+  "Fi80N5kW9U6nwaoS04O3vQ_farend_singletalk_with_movement": {
+   "attack_ongoing": 183,
+   "attack_onset": 25,
+   "hold": 543,
+   "hops": 2782,
+   "release": 2031
+  },
+  "HAxmF7v4dE0itSp5R5B3Dw_doubletalk": {
+   "attack_ongoing": 885,
+   "attack_onset": 125,
+   "hold": 2340,
+   "hops": 4658,
+   "release": 1308
+  },
+  "HAxmF7v4dE0itSp5R5B3Dw_farend_singletalk": {
+   "attack_ongoing": 2259,
+   "attack_onset": 30,
+   "hold": 339,
+   "hops": 2808,
+   "release": 180
+  },
+  "Hp5g1asacUCt5rJVLO1FuQ_doubletalk_with_movement": {
+   "attack_ongoing": 1479,
+   "attack_onset": 105,
+   "hold": 2169,
+   "hops": 4807,
+   "release": 1054
+  },
+  "Hp5g1asacUCt5rJVLO1FuQ_farend_singletalk_with_movement": {
+   "attack_ongoing": 274,
+   "attack_onset": 41,
+   "hold": 909,
+   "hops": 2521,
+   "release": 1297
+  },
+  "Hq00pd6Ey0mGtuMFRoF79w_farend_singletalk_with_movement": {
+   "attack_ongoing": 902,
+   "attack_onset": 48,
+   "hold": 740,
+   "hops": 2696,
+   "release": 1006
+  },
+  "I2bme08keUmAnyJRKNYDGQ_doubletalk_with_movement": {
+   "attack_ongoing": 656,
+   "attack_onset": 92,
+   "hold": 1805,
+   "hops": 4626,
+   "release": 2073
+  },
+  "I2bme08keUmAnyJRKNYDGQ_farend_singletalk_with_movement": {
+   "attack_ongoing": 527,
+   "attack_onset": 57,
+   "hold": 1127,
+   "hops": 2765,
+   "release": 1054
+  },
+  "IqtJR4tjJkWrwUjYorz0Og_farend_singletalk_with_movement": {
+   "attack_ongoing": 545,
+   "attack_onset": 26,
+   "hold": 285,
+   "hops": 2708,
+   "release": 1852
+  },
+  "IrQvqOTCmEWMXn9k2ICtRQ_doubletalk_with_movement": {
+   "attack_ongoing": 1786,
+   "attack_onset": 556,
+   "hold": 1776,
+   "hops": 4583,
+   "release": 465
+  },
+  "IrQvqOTCmEWMXn9k2ICtRQ_farend_singletalk_with_movement": {
+   "attack_ongoing": 2095,
+   "attack_onset": 242,
+   "hold": 746,
+   "hops": 3143,
+   "release": 60
+  },
+  "Ixf70mgKwkCoFYq32586cw_doubletalk_with_movement": {
+   "attack_ongoing": 844,
+   "attack_onset": 140,
+   "hold": 1697,
+   "hops": 4409,
+   "release": 1728
+  },
+  "Ixf70mgKwkCoFYq32586cw_farend_singletalk_with_movement": {
+   "attack_ongoing": 2298,
+   "attack_onset": 23,
+   "hold": 352,
+   "hops": 2722,
+   "release": 49
+  },
+  "Ja8OngfthkOCmL8ldcRNyg_farend_singletalk_with_movement": {
+   "attack_ongoing": 2083,
+   "attack_onset": 35,
+   "hold": 392,
+   "hops": 2608,
+   "release": 98
+  },
+  "Je6gJ7y1PECStwxnrOe9aA_doubletalk_with_movement": {
+   "attack_ongoing": 1341,
+   "attack_onset": 100,
+   "hold": 2086,
+   "hops": 5038,
+   "release": 1511
+  },
+  "Je6gJ7y1PECStwxnrOe9aA_farend_singletalk_with_movement": {
+   "attack_ongoing": 376,
+   "attack_onset": 54,
+   "hold": 1231,
+   "hops": 2783,
+   "release": 1122
+  },
+  "JjCzlhn3gEiBQvfJtPNJ9A_doubletalk_with_movement": {
+   "attack_ongoing": 1692,
+   "attack_onset": 122,
+   "hold": 1254,
+   "hops": 4583,
+   "release": 1515
+  },
+  "JjCzlhn3gEiBQvfJtPNJ9A_farend_singletalk_with_movement": {
+   "attack_ongoing": 2376,
+   "attack_onset": 135,
+   "hold": 654,
+   "hops": 3233,
+   "release": 68
+  },
+  "JtodX3Ug6Eu5TYu0HN5IOw_farend_singletalk_with_movement": {
+   "attack_ongoing": 527,
+   "attack_onset": 95,
+   "hold": 1242,
+   "hops": 2708,
+   "release": 844
+  },
+  "KSN5Jrzo7kaixP0z8xfr4Q_doubletalk_with_movement": {
+   "attack_ongoing": 982,
+   "attack_onset": 79,
+   "hold": 1763,
+   "hops": 4720,
+   "release": 1896
+  },
+  "KSN5Jrzo7kaixP0z8xfr4Q_farend_singletalk_with_movement": {
+   "attack_ongoing": 352,
+   "attack_onset": 45,
+   "hold": 807,
+   "hops": 2706,
+   "release": 1502
+  },
+  "KgCF0xsN8EibTdJ2Yac2dw_farend_singletalk_with_movement": {
+   "attack_ongoing": 207,
+   "attack_onset": 50,
+   "hold": 972,
+   "hops": 2770,
+   "release": 1541
+  },
+  "Khk1qeMXFUuvFhw3YRSm0w_farend_singletalk_with_movement": {
+   "attack_ongoing": 82,
+   "attack_onset": 17,
+   "hold": 356,
+   "hops": 2708,
+   "release": 2253
+  },
+  "LHsrJBRGnUKiMC2mihEr0g_doubletalk_with_movement": {
+   "attack_ongoing": 853,
+   "attack_onset": 110,
+   "hold": 1291,
+   "hops": 4671,
+   "release": 2417
+  },
+  "LHsrJBRGnUKiMC2mihEr0g_farend_singletalk_with_movement": {
+   "attack_ongoing": 519,
+   "attack_onset": 69,
+   "hold": 1030,
+   "hops": 2533,
+   "release": 915
+  },
+  "LN18k5r8t00C9DulUd809A_doubletalk_with_movement": {
+   "attack_ongoing": 775,
+   "attack_onset": 126,
+   "hold": 2217,
+   "hops": 4560,
+   "release": 1442
+  },
+  "LeV1uF4j10Whm0FPG80tmw_farend_singletalk_with_movement": {
+   "attack_ongoing": 545,
+   "attack_onset": 127,
+   "hold": 1299,
+   "hops": 2696,
+   "release": 725
+  },
+  "Lsa5WpwTpUeb7C9dc9RXuQ_doubletalk_with_movement": {
+   "attack_ongoing": 628,
+   "attack_onset": 157,
+   "hold": 2436,
+   "hops": 4608,
+   "release": 1387
+  },
+  "Lsa5WpwTpUeb7C9dc9RXuQ_farend_singletalk_with_movement": {
+   "attack_ongoing": 321,
+   "attack_onset": 48,
+   "hold": 780,
+   "hops": 2758,
+   "release": 1609
+  },
+  "ML4MF3Mea0yurjceNQPfNA_farend_singletalk_with_movement": {
+   "attack_ongoing": 704,
+   "attack_onset": 37,
+   "hold": 817,
+   "hops": 2745,
+   "release": 1187
+  },
+  "MYrVxVEMxkaE7OuyTUmI0Q_farend_singletalk_with_movement": {
+   "attack_ongoing": 437,
+   "attack_onset": 52,
+   "hold": 1036,
+   "hops": 2721,
+   "release": 1196
+  },
+  "N2rQLbnp2UOg2QFRaggbDw_doubletalk_with_movement": {
+   "attack_ongoing": 1497,
+   "attack_onset": 50,
+   "hold": 1005,
+   "hops": 4633,
+   "release": 2081
+  },
+  "N94NwopiZEyNnraWHLMDcg_doubletalk_with_movement": {
+   "attack_ongoing": 1423,
+   "attack_onset": 118,
+   "hold": 2051,
+   "hops": 4520,
+   "release": 928
+  },
+  "OXCtw0FVhUWGUBil6Uucdw_doubletalk_with_movement": {
+   "attack_ongoing": 1128,
+   "attack_onset": 144,
+   "hold": 2498,
+   "hops": 4582,
+   "release": 812
+  },
+  "OmB0Ht0hmE2crVnftAEtsw_doubletalk_with_movement": {
+   "attack_ongoing": 695,
+   "attack_onset": 94,
+   "hold": 2218,
+   "hops": 4458,
+   "release": 1451
+  },
+  "QEeKiaNiDECfqXTRrDFWWw_doubletalk_with_movement": {
+   "attack_ongoing": 722,
+   "attack_onset": 70,
+   "hold": 1467,
+   "hops": 4557,
+   "release": 2298
+  },
+  "QK70KpLuZ0O43BBSWEZvHg_doubletalk_with_movement": {
+   "attack_ongoing": 1475,
+   "attack_onset": 106,
+   "hold": 1362,
+   "hops": 4633,
+   "release": 1690
+  },
+  "QkRkwwFKVEar0WtcuvJsZg_doubletalk_with_movement": {
+   "attack_ongoing": 1374,
+   "attack_onset": 68,
+   "hold": 1209,
+   "hops": 4583,
+   "release": 1932
+  },
+  "S22FCqKDWUyymN1YbpItIw_doubletalk_with_movement": {
+   "attack_ongoing": 1877,
+   "attack_onset": 187,
+   "hold": 1537,
+   "hops": 4666,
+   "release": 1065
+  },
+  "SgKY30fjT0G8e3kQL0RHSQ_doubletalk_with_movement": {
+   "attack_ongoing": 1231,
+   "attack_onset": 128,
+   "hold": 1442,
+   "hops": 4846,
+   "release": 2045
+  },
+  "SwfEwuGDlkWYy9pb4H00eQ_doubletalk_with_movement": {
+   "attack_ongoing": 638,
+   "attack_onset": 58,
+   "hold": 1323,
+   "hops": 4621,
+   "release": 2602
+  },
+  "TGZ5Wq0SCUCOXPsfee3uMQ_doubletalk_with_movement": {
+   "attack_ongoing": 645,
+   "attack_onset": 116,
+   "hold": 1629,
+   "hops": 4758,
+   "release": 2368
+  },
+  "Tgtk8jp1zkqmKzsmdrKt0g_doubletalk_with_movement": {
+   "attack_ongoing": 632,
+   "attack_onset": 54,
+   "hold": 1267,
+   "hops": 4587,
+   "release": 2634
+  },
+  "V0JqgjlrB0Ke9y91r0rxNw_doubletalk_with_movement": {
+   "attack_ongoing": 708,
+   "attack_onset": 77,
+   "hold": 1685,
+   "hops": 4900,
+   "release": 2430
+  },
+  "V6Mw0Ti8RUSkzvMGB4WGiw_doubletalk_with_movement": {
+   "attack_ongoing": 3243,
+   "attack_onset": 68,
+   "hold": 1349,
+   "hops": 5196,
+   "release": 536
+  }
+ },
+ "total_hops": 381320,
+ "totals": {
+  "attack_ongoing": 83095,
+  "attack_onset": 9925,
+  "hold": 121377,
+  "release": 166923
+ }
+}

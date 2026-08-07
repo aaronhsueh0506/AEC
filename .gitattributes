@@ -1,5 +1,5 @@
 
-# Archived A/B evidence: these two files are verbatim `git show` captures and
+# Archived A/B evidence: these files are verbatim `git show` captures and
 # must stay byte-faithful to the commits they document. C comment blocks carry
 # trailing spaces on ` * ` continuation lines, so a whitespace check would flag
 # them forever.
@@ -10,3 +10,4 @@
 # at yet. Adding a new one is a deliberate line here.
 eval/ab_evidence/2026-08-07-alpha-power/source.diff -whitespace
 eval/ab_evidence/2026-08-07-alpha-r/source.diff -whitespace
+eval/ab_evidence/2026-08-07-simple-mu/source.diff -whitespace

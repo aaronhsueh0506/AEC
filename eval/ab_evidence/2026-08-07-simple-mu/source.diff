@@ -1,0 +1,172 @@
+diff --git a/c_impl/include/aec.h b/c_impl/include/aec.h
+index 2d0fa54..fc58684 100644
+--- a/c_impl/include/aec.h
++++ b/c_impl/include/aec.h
+@@ -237,6 +237,17 @@ typedef struct Aec {
+     int    warmup_far_active;
+     float  simple_mu_ratio;
+     int    simple_mu_holdoff;
++    /* Simple-mu timing, derived once in aec_carve() against the resolved grid
++     * and NOT cleared by aec_reset() (which owns the two runtime fields above
++     * and nothing else). All four are authored at hop=160/16000 (10 ms) and
++     * validated there by F2.4; the guard was introduced on a 16 ms grid, so
++     * anchoring on the introducing commit would give a 320 ms holdoff instead
++     * of 200 -- a 1.6x error. They are one mechanism and are retimed together:
++     * their RELATIVE rates are what shape the response. */
++    int    simple_mu_holdoff_limit;   /* 200 ms in hops */
++    float  simple_mu_alpha_attack;    /* 0.3  at 10 ms */
++    float  simple_mu_alpha_hold;      /* 0.99 at 10 ms */
++    float  simple_mu_alpha_release;   /* 0.95 at 10 ms */
+     float* per_bin_mu_scale;   int has_per_bin_mu;
+     /* power EMAs (alpha=0.95 sample loop) */
+     float  near_power, raw_error_power;
+diff --git a/c_impl/src/aec.c b/c_impl/src/aec.c
+index 5e80100..94eb42e 100644
+--- a/c_impl/src/aec.c
++++ b/c_impl/src/aec.c
+@@ -415,9 +415,16 @@ static float get_simple_mu_scale(Aec* a, int* out_is_array) {
+     return mu_min + (1.0f - mu_min) * a->simple_mu_ratio;
+ }
+ 
+-/* _update_simple_mu_ratio (orchestrator 1478-1522). */
+-static void update_simple_mu_ratio(Aec* a, const float* output,
+-                                   const float* far_end, int n) {
++/* _update_simple_mu_ratio (orchestrator 1478-1522).
++ *
++ * Deliberately NOT static, and deliberately NOT declared in aec.h: it is not
++ * public API, but test_rate_structural check (d6) has to drive it directly.
++ * Going through aec_process() cannot work -- simple_mu_ratio is read earlier in
++ * the same hop to scale mu, so it feeds back into the very error signal the
++ * recovery would have to hold constant, and the two runs the recovery compares
++ * would no longer differ in one variable only. */
++void aec_update_simple_mu_ratio(Aec* a, const float* output,
++                                const float* far_end, int n) {
+     float error_power = mean_sq(output, n, a->scr_sq) + 1e-10f;
+     float far_power   = mean_sq(far_end, n, a->scr_sq) + 1e-10f;
+     if (far_power < 1e-6f && error_power < 1e-6f) return;
+@@ -444,17 +451,22 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
+         float r2_half = r2 * 0.5f;
+         if (r2_half > ratio) ratio = r2_half;
+     }
++    /* All four constants are derived once in aec_carve(); no literal may appear
++     * here, or the grid is silently ignored. */
+     float alpha;
+     if (ratio < a->simple_mu_ratio) {
+-        alpha = 0.3f;
++        alpha = a->simple_mu_alpha_attack;
+         /* F2.4 invariant: arm only on a FRESH attack; an ongoing attack must
+          * not restart it, or marginal DT re-arms every hop and mu never
+-         * releases. 20 hops authored at a 10 ms hop (200 ms), not yet
+-         * retimed. Mirrors orchestrator.py. */
+-        if (a->simple_mu_holdoff == 0) a->simple_mu_holdoff = 20;
++         * releases. Mirrors orchestrator.py. */
++        if (a->simple_mu_holdoff == 0)
++            a->simple_mu_holdoff = a->simple_mu_holdoff_limit;
++    }
++    else if (a->simple_mu_holdoff > 0) {
++        a->simple_mu_holdoff--;
++        alpha = a->simple_mu_alpha_hold;
+     }
+-    else if (a->simple_mu_holdoff > 0) { a->simple_mu_holdoff--; alpha = 0.99f; }
+-    else alpha = 0.95f;
++    else alpha = a->simple_mu_alpha_release;
+     a->simple_mu_ratio = alpha * a->simple_mu_ratio + (1.0f - alpha) * ratio;
+ }
+ 
+@@ -851,6 +863,18 @@ static void aec_recompute_wallclock_thresholds(Aec* a, int hop, int sample_rate)
+     a->coarse_reset_hangover_hops = aec3_blocks_to_hops(25, hop, sample_rate);
+     a->leakage_div_sustain_hops = aec3_ms_to_hops(50.0f, hop, sample_rate);
+     a->stat_dt_hangover_hops = aec3_ms_to_hops(800.0f, hop, sample_rate);
++    /* Simple-mu timing (F2.4). These four do not live in AecConfig, so they are
++     * derived onto the instance rather than into a->cfg. Derived ONCE per
++     * (hop, rate): a powf() per hop inside update_simple_mu_ratio() would be
++     * the same value recomputed on the audio path forever. This function is
++     * also called from aec_reset(), which re-derives them to the same values --
++     * they are constants of the resolved grid, not runtime state, and the two
++     * runtime fields (simple_mu_ratio, simple_mu_holdoff) are cleared there
++     * separately. */
++    a->simple_mu_holdoff_limit = aec_legacy10ms_hops(200.0f, hop, sample_rate);
++    a->simple_mu_alpha_attack  = aec_legacy10ms_alpha(0.3f,  hop, sample_rate);
++    a->simple_mu_alpha_hold    = aec_legacy10ms_alpha(0.99f, hop, sample_rate);
++    a->simple_mu_alpha_release = aec_legacy10ms_alpha(0.95f, hop, sample_rate);
+ }
+ 
+ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
+@@ -2430,7 +2454,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
+             a->has_per_bin_mu = 1;
+         } else {
+             a->has_per_bin_mu = 0;
+-            update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
++            aec_update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
+         }
+     }
+     /* enable_res==False C-parity fallback (orchestrator 2313-2316) is unused
+diff --git a/python/modules/orchestrator.py b/python/modules/orchestrator.py
+index f841b62..a7dc198 100644
+--- a/python/modules/orchestrator.py
++++ b/python/modules/orchestrator.py
+@@ -747,7 +747,31 @@ class AEC:
+         self._wn_err_baseline = 1e-8
+         self._stat_dt_hangover = 0  # Stationary DT hold-off counter (frames)
+ 
+-        # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER)
++        # Simple variable mu (for non-DTD modes, inspired by Valin 2007 RER).
++        # The four constants below are one mechanism: a fresh DT onset arms the
++        # holdoff, the attack retention sets how fast the ratio drops into it,
++        # the hold retention nearly freezes the ratio while it runs, and the
++        # release retention governs recovery afterwards. Their RELATIVE rates
++        # are what make the tracker behave, so they are retimed together or not
++        # at all -- retiming one alone would change the shape of the response,
++        # not just its speed.
++        #
++        # All four are authored at the legacy hop=160/16000 (10 ms) grid and
++        # validated there by F2.4 (7b2cf04, an 800-case ablation). Note the
++        # anchor: the guard was INTRODUCED on a 16 ms grid (d774771), so
++        # anchoring on the introducing commit would make the holdoff 320 ms
++        # instead of 200 -- a 1.6x error.
++        from . import aec3_scale as _aec3_scale_mu
++        _mu_hop = self.config.hop_size
++        _mu_sr = self.config.sample_rate
++        self._simple_mu_holdoff_limit = _aec3_scale_mu.ms_to_hops(
++            200.0, _mu_hop, _mu_sr)
++        self._simple_mu_alpha_attack = _aec3_scale_mu.growth_rehop(
++            0.3, 160, 16000, _mu_hop, _mu_sr)
++        self._simple_mu_alpha_hold = _aec3_scale_mu.growth_rehop(
++            0.99, 160, 16000, _mu_hop, _mu_sr)
++        self._simple_mu_alpha_release = _aec3_scale_mu.growth_rehop(
++            0.95, 160, 16000, _mu_hop, _mu_sr)
+         self._simple_mu_ratio = 1.0
+         self._simple_mu_holdoff = 0  # holdoff counter: blocks release for N frames
+         self._warmup_frames = self.config.warmup_frames
+@@ -1287,25 +1311,23 @@ class AEC:
+                 ratio = max(ratio, ratio_echo * 0.5)
+ 
+         # Asymmetric EMA + holdoff: fast attack, slow release with holdoff
++        # All four constants are derived once at construction (see __init__);
++        # no literal may appear here, or the grid is silently ignored.
+         if ratio < self._simple_mu_ratio:
+             # Attack: fast drop.
+-            # F2.4: only arm holdoff on fresh DT onset (holdoff==0); do not
+-            # reset during the holdoff window — marginal DT oscillation keeps
+-            # resetting holdoff to 20 so mu never releases.
+-            alpha = 0.3
++            alpha = self._simple_mu_alpha_attack
+             # F2.4 INVARIANT: arm the holdoff only on a fresh attack.
+             # An ongoing attack must not restart it, or marginal double-talk
+             # re-arms every hop and mu never releases.
+-            # 20 hops is authored at a 10 ms hop (200 ms); not yet retimed.
+             if self._simple_mu_holdoff == 0:
+-                self._simple_mu_holdoff = 20
++                self._simple_mu_holdoff = self._simple_mu_holdoff_limit
+         elif self._simple_mu_holdoff > 0:
+             # Holdoff active: keep ratio low, don't release yet
+             self._simple_mu_holdoff -= 1
+-            alpha = 0.99  # nearly frozen
++            alpha = self._simple_mu_alpha_hold  # nearly frozen
+         else:
+             # Release: slow recovery
+-            alpha = 0.95
++            alpha = self._simple_mu_alpha_release
+         self._simple_mu_ratio = alpha * self._simple_mu_ratio + (1 - alpha) * ratio
+ 
+     def process(self, near_end: np.ndarray, far_end: np.ndarray) -> np.ndarray:
