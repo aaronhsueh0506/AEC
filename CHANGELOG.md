@@ -41,6 +41,67 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-13 — AecLinearContext seam (aligned far + delay status + generation token), ref_ring_filled overflow fix
+
+New public surface for an external neural post-filter (Align-ULCNet-class
+RES+NR) that needs the time-domain aligned far-end plus delay status. Output
+contract intact: `aec_wav` renders verified **byte-equal** to 4.0.0 on the
+challenge doubletalk clip at 16k/256+CNG and 16k/512 (full default path,
+delay est active).
+
+### Added
+
+1. **`AecLinearContext` + `aec_get_linear_context()`** (aec.h): read-only,
+   zero-copy view of `{formed_linear_hop, aligned_far_hop, delay_samples,
+   delay_confidence, delay_state, generation}`. `aligned_far_hop` aliases the
+   internal `far_hop` — byte-identical to what the PBFDKF consumed this hop.
+   `delay_state` is honest about non-alignment: `UNLOCKED` covers
+   pre-acquisition, the unfilled-ring window, and `enable_delay_est=0`
+   (where `delay_samples` reads −1, not the internal 0). `generation` is a
+   saturating token bumped at every ring-offset change — first acquisition,
+   confirmed shift (the soft-recovery realign paths set no other flag, so
+   this is their only external trace), and `aec_reset()`. `CHANGED` is
+   reported exactly on the hop that bumped it. Doc:
+   `docs/nn_integration_interface.md` (new time-domain seam section).
+2. **`test/test_linear_context.c`** (`make test-linear-context`): alias +
+   byte-equal content proof against the caller's own delayed raw far, on
+   16k/256, 16k/512, 48k/1024; generation/CHANGED at acquisition, shift and
+   reset; honest-UNLOCKED window (state-poked); delay-est-off honesty; ring
+   fill saturation. Mutation-tested: dropping either generation bump, forcing
+   `far_hop_aligned=1`, or removing the fill clamp each turns it red
+   (6/1/2 failures respectively). Measured info: post-lock delay-shift
+   re-lock takes 16.3 s of audio at 16k/256, 7.4 s at 16k/512, 35 s at 48k in
+   the `enable_res=0` context-only config — where the ERLE watchdog is inert
+   (`last_erle_windowed` is only cached under `enable_res`, aec.c) — so
+   integrators should not expect fast re-lock from this seam alone.
+
+### Fixed
+
+3. **`ref_ring_filled` signed-overflow UB** (aec.c ring-write step): the
+   monotone fill counter now freezes at `ref_ring_size` (guard BEFORE the
+   increment, freeze-not-wrap like the other counters). Unbounded, it
+   overflowed after ~37 h of continuous 16 kHz audio. Covered in
+   `test_counter_saturation.c` (INT_MAX-seeded, UBSan wrapper aborts on the
+   reverted form) — this counter was the one miss of the earlier
+   counter-saturation sweep.
+4. **Ring-capacity defense at acquisition**: a candidate delay larger than
+   `ref_ring_size - hop` is no longer eligible — previously the modulo read
+   would alias and silently return wrong (effectively future) far. Unreachable
+   with default configs (2048 ms ring vs ~509 ms search span); reachable only
+   when a caller shrinks `delay_buffer_ms`/`max_delay_ms`.
+
+### Notes
+
+- Pool sizes grow by 16 B per instance (three bookkeeping fields):
+  16k/256 381 056 → 381 072, 16k/512 510 128 → 510 144,
+  48k/1024 1 166 976 → 1 166 992.
+- `python/aec.py` and everything under `python/` is intentionally untouched
+  (no `__version__` bump yet): the AIAEC dataset contract pins an AST hash of
+  the mirrored `lib/aec/python` tree, and any Python-side edit — including a
+  version-string bump — invalidates every existing packed shard and
+  checkpoint. Fold the version bump into the next coordinated
+  contract-breaking release.
+
 ## [4.0.0] — 2026-08-06 — Output-contract + public-ABI break: custom output limiter removed, 16 kHz default grid 512/256 → 256/128, context-only entry points, one shared FftHandle
 
 The `4.x` series is the same v3.21/v3.22 AEC3 algorithm; the major bump

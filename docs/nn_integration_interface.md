@@ -35,6 +35,25 @@ Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, re
 
 These are produced every hop by the production linear AEC with zero extra cost (already computed internally).
 
+## The time-domain seam: `AecLinearContext` (aligned far + delay status)
+For post-filters that take the **time-domain aligned far-end** as a second input
+(e.g. an alignment-attention RES+NR model that performs its own sqrt-Hann STFT
+on both streams), `aec_get_linear_context()` exposes:
+
+| field | type | meaning |
+|---|---|---|
+| `formed_linear_hop` | (hop,) float | formed linear error (same hop `formed_output` reflects). |
+| `aligned_far_hop` | (hop,) float | **the exact time-domain far the PBFDKF consumed this hop** (aliases the internal buffer; valid until the next process/reset). NOT `far_spec`: that is a rectangular overlap-save FFT, unusable as a sqrt-Hann analysis frame. |
+| `delay_samples` | int | applied ring offset; −1 before acquisition. |
+| `delay_confidence` | float | 0 / 0.5 / 1. |
+| `delay_state` | enum | `UNLOCKED` (content is RAW far — do not treat as aligned), `LOCKED`, `CHANGED` (offset moved THIS hop — flush any far feature rings / attention history downstream). |
+| `generation` | unsigned | bumps on every ring-offset change including the flagless soft-recovery realigns and `aec_reset()`; saturating. Poll it instead of differencing `delay_samples` (transient A→B→A shifts are invisible to differencing). |
+
+Out-of-range bulk delay (beyond the matched filter's ~509 ms search span at
+16 kHz) is not detectable at this seam: the state simply stays `UNLOCKED`.
+Fail-open policy (bypass the far-conditioned model, emit the linear error)
+belongs to the integrator. Regression coverage: `test/test_linear_context.c`.
+
 ## The three swap points (freq-in → freq-out blocks)
 Each is a pure function on the shared grid; the network replaces the DSP function, nothing else.
 

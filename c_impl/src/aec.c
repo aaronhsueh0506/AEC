@@ -1483,6 +1483,9 @@ void aec_reset(Aec* a) {
         a->current_delay = -1; a->pending_delay = -1; a->has_pending = 0;
         a->pending_delay_ttl = 0;
     }
+    /* Reset invalidates any alignment context an external consumer cached. */
+    if (a->delay_generation != 0xFFFFFFFFu) a->delay_generation++;
+    a->far_hop_aligned = 0;
     a->duty_active = 0; a->duty_stable_hops = 0; a->duty_pos = 0;
     a->duty_last_delay = -1; a->duty_erle_peak = 0.0f;
     if (a->render_fifo)
@@ -1650,6 +1653,10 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
                               const Complex* shared_far_spec) {
     const int hop = a->hop_size, K = a->n_freqs, N = a->n_partitions;
     int stationarity_block_for_post;
+    /* AecLinearContext bookkeeping: CHANGED is "generation moved during this
+     * hop", so snapshot at entry; far_hop_aligned is re-derived every hop. */
+    a->delay_gen_hop_start = a->delay_generation;
+    a->far_hop_aligned = 0;
     memcpy(a->near_hop, mic_in, (size_t)hop * sizeof(float));
     memcpy(a->far_hop,  ref_in, (size_t)hop * sizeof(float));
 
@@ -1756,7 +1763,14 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             }
         }
         int new_delay = delay_aec3_estimated_delay(&a->delay);
-        int eligible = (new_delay >= 0 && delay_aec3_n_updates(&a->delay) >= 3);
+        int eligible = (new_delay >= 0 && delay_aec3_n_updates(&a->delay) >= 3
+                        /* Defensive: a delay the ring cannot hold would alias
+                         * through the modulo read below and silently return
+                         * wrong (effectively future) far. Unreachable with the
+                         * default ring (2048 ms) vs the matched filter's
+                         * ~509 ms span; reachable only when a caller shrinks
+                         * delay_buffer_ms/max_delay_ms. */
+                        && new_delay <= a->ref_ring_size - hop);
 
         /* Path A — first acquisition. */
         int already_cancelling = a->cfg.delay_acquire_protect_converged
@@ -1768,6 +1782,10 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         if (eligible && a->current_delay < 0 && delay_aec3_is_solid(&a->delay)
                 && !already_cancelling) {
             a->current_delay = new_delay;
+            /* Single bump site covers warm-transfer, soft and hard branches
+             * below alike -- generation tracks the ring offset, not the
+             * recovery flavour. */
+            if (a->delay_generation != 0xFFFFFFFFu) a->delay_generation++;
             /* Warm tap-transfer (orch 1407-1422): if the filter is already
              * cancelling (inst-ERLE peak > thresh) AND the delay fits the tap
              * reach, shift the learned IR by the delay instead of zeroing — the
@@ -1824,6 +1842,10 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
                 && abs(new_delay - a->current_delay) > 32) {
             if (a->has_pending && abs(new_delay - a->pending_delay) < 16) {
                 a->current_delay = new_delay;
+                /* Same single-site rule as Path A: the soft-realign branch
+                 * below deliberately sets no other flag, so this bump is the
+                 * ONLY externally visible trace of a soft shift. */
+                if (a->delay_generation != 0xFFFFFFFFu) a->delay_generation++;
                 a->has_pending = 0; a->pending_delay = -1; a->pending_delay_ttl = 0;
                 if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
                     /* Soft realign (mirrors Python 16285fd): the ring read
@@ -1861,7 +1883,17 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             memcpy(a->ref_ring, a->far_hop + p1, (size_t)(hop - p1) * sizeof(float));
         }
         a->ref_ring_write = (w + hop) % rs;
-        a->ref_ring_filled += hop;
+        /* Saturate at ring capacity: every comparison below only needs
+         * "filled >= current_delay + hop" and current_delay is capped at
+         * rs - hop, so rs is the largest value ever meaningful. Unbounded,
+         * this int overflows (UB) after ~37 h of continuous 16 kHz audio.
+         * Guard BEFORE adding -- the increment itself must never run near
+         * INT_MAX (same freeze-not-wrap rule as the other counters, see
+         * test_counter_saturation.c). */
+        if (a->ref_ring_filled < rs) {
+            a->ref_ring_filled += hop;
+            if (a->ref_ring_filled > rs) a->ref_ring_filled = rs;
+        }
 
         /* delay compensation read. */
         if (a->current_delay > 0 && a->ref_ring_filled >= a->current_delay + hop) {
@@ -1875,6 +1907,11 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
                 memcpy(a->far_hop, a->ref_ring + read_pos, (size_t)p1 * sizeof(float));
                 memcpy(a->far_hop + p1, a->ref_ring, (size_t)(hop - p1) * sizeof(float));
             }
+            a->far_hop_aligned = 1;
+        } else if (a->current_delay == 0) {
+            /* A zero applied delay needs no ring read: the raw far IS the
+             * aligned far. */
+            a->far_hop_aligned = 1;
         }
     }
 
@@ -2798,4 +2835,32 @@ void aec_debug_status(const Aec* a, AecDebugStatus* out) {
 
     out->near_power = a->near_power;
     out->out_power  = a->raw_error_power;
+}
+
+/* Read-only linear-AEC seam view — see AecLinearContext (aec.h). Pointer
+ * fields alias per-hop internals; valid until the next process/reset. */
+void aec_get_linear_context(const Aec* a, AecLinearContext* ctx) {
+    if (!a || !ctx) return;
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->hop_size = a->hop_size;
+    ctx->formed_linear_hop = (a->cfg.enable_res || a->cfg.return_res_context)
+                             ? a->a3_lfs.e_form : a->raw_output;
+    ctx->aligned_far_hop = a->far_hop;
+    ctx->generation = a->delay_generation;
+    if (!a->has_delay) {
+        /* No estimator: never aligned, and delay_samples must not read as a
+         * locked zero. */
+        ctx->delay_samples = -1;
+        ctx->delay_confidence = 0.0f;
+        ctx->delay_state = AEC_LINEAR_DELAY_UNLOCKED;
+        return;
+    }
+    ctx->delay_samples = a->current_delay;
+    ctx->delay_confidence = delay_aec3_confidence(&a->delay);
+    if (a->current_delay < 0 || !a->far_hop_aligned)
+        ctx->delay_state = AEC_LINEAR_DELAY_UNLOCKED;
+    else if (a->delay_generation != a->delay_gen_hop_start)
+        ctx->delay_state = AEC_LINEAR_DELAY_CHANGED;
+    else
+        ctx->delay_state = AEC_LINEAR_DELAY_LOCKED;
 }

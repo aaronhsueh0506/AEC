@@ -159,6 +159,18 @@ typedef struct Aec {
     float* ref_ring;       int ref_ring_size, ref_ring_write, ref_ring_filled;
     int    current_delay;  /* -1 until first acquisition */
     int    pending_delay;  int has_pending; int pending_delay_ttl;
+    /* Alignment-generation token for external consumers (AecLinearContext).
+     * Bumped (saturating, never wrapping) at EVERY write that changes the
+     * ring read offset -- first acquisition, confirmed shift (soft AND hard
+     * recovery paths share the same write site), and aec_reset(). External
+     * pollers cannot reconstruct this from delay_samples differences alone:
+     * the soft-recovery paths deliberately set no other flag. */
+    unsigned int delay_generation;
+    unsigned int delay_gen_hop_start;  /* snapshot at hop entry (CHANGED detect) */
+    int    far_hop_aligned;    /* 1 = this hop's far_hop was ring-compensated
+                                * (or the applied delay is exactly 0); 0 = raw,
+                                * unaligned far (pre-acquisition / ring not yet
+                                * filled / delay estimation disabled) */
     /* Delay-estimator duty-cycle state — ALWAYS ACTIVE (baked in, no config
      * gate): analyses every hop until the delay estimate is solid (confidence
      * 1.0) AND unchanged for delay_est_init_s seconds, then self-gates the
@@ -583,6 +595,50 @@ typedef struct AecResContext {
 } AecResContext;
 
 void aec_get_res_context(const Aec* a, AecResContext* ctx);
+
+/* ── Linear-AEC / NN post-filter seam ─────────────────────────────────────
+ * Minimal read-only view for an external neural post-filter (RES+NR) that
+ * consumes the formed linear error and the SAME time-domain aligned far the
+ * PBFDKF consumed this hop. Contract:
+ *   - aligned_far_hop aliases the internal per-hop buffer (a->far_hop): no
+ *     heap, no copy; valid only until the next process/reset call.
+ *   - aligned_far_hop is byte-identical to what the linear filter read this
+ *     hop. delay_state tells whether it was actually delay-compensated:
+ *     UNLOCKED means the content is the RAW far (pre-acquisition, ring not
+ *     yet filled, or delay estimation disabled) -- a consumer must not feed
+ *     it to a small-search-range aligner as if it were aligned.
+ *   - generation increments on every ring-offset change (first acquisition,
+ *     confirmed shift including the flagless soft-recovery paths, reset) and
+ *     saturates instead of wrapping. Poll it to invalidate cross-hop caches
+ *     (far feature rings, attention histories); differencing delay_samples
+ *     alone misses transient A->B->A shifts between polls.
+ *   - CHANGED is reported exactly on the hop whose processing bumped
+ *     generation; the next hop reads LOCKED again.
+ *   - Out-of-range bulk delay is NOT detectable here: beyond the matched
+ *     filter's search span (~509 ms at 16 kHz) the estimator simply never
+ *     acquires and the state stays UNLOCKED. Callers own that fail-open
+ *     policy. The getter itself mutates no state. */
+typedef enum AecLinearDelayState {
+    AEC_LINEAR_DELAY_UNLOCKED = 0,  /* far_hop is raw / not compensated */
+    AEC_LINEAR_DELAY_LOCKED   = 1,  /* compensated with a stable offset */
+    AEC_LINEAR_DELAY_CHANGED  = 2   /* compensated, but the offset changed
+                                     * during THIS hop (flush far caches) */
+} AecLinearDelayState;
+
+typedef struct AecLinearContext {
+    int hop_size;
+    const float* formed_linear_hop;  /* formed linear error e_form when the
+                                      * AEC3 post chain runs this config
+                                      * (enable_res || return_res_context),
+                                      * else the raw linear output          */
+    const float* aligned_far_hop;    /* aliases a->far_hop (see contract)   */
+    int   delay_samples;             /* applied ring offset; -1 = none      */
+    float delay_confidence;          /* 0.0 / 0.5 / 1.0                     */
+    AecLinearDelayState delay_state;
+    unsigned int generation;
+} AecLinearContext;
+
+void aec_get_linear_context(const Aec* a, AecLinearContext* ctx);
 
 /* ── Runtime debug/status introspection ───────────────────────────────────
  * Read-only status query for an integrator to poll (e.g. once per second)

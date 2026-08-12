@@ -603,8 +603,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
-all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
+.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -706,6 +706,15 @@ BENCH_TARGET = $(BIN_DIR)/bench_rtf
 TEST_CS_SRCS   = $(TEST_DIR)/test_counter_saturation.c
 TEST_CS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_CS_SRCS))
 TEST_CS_TARGET = $(BIN_DIR)/test_counter_saturation
+
+# Permanent AecLinearContext seam regression test (aec_get_linear_context):
+# aligned-far alias + byte-equal content vs the caller's delayed raw far,
+# generation bumps at acquisition/shift/reset (including the flagless
+# soft-recovery write site), UNLOCKED honesty under enable_delay_est=0, and
+# the ref_ring_filled freeze-at-capacity fix. Needs the full Aec type.
+TEST_LC_SRCS   = $(TEST_DIR)/test_linear_context.c
+TEST_LC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_LC_SRCS))
+TEST_LC_TARGET = $(BIN_DIR)/test_linear_context
 
 # Permanent per-rate structural regression test (M5 multi-rate campaign;
 # formerly standalone-gcc-only and not wired into any Makefile target, so a
@@ -916,7 +925,7 @@ $(TEST_DR_TARGET): $(TEST_DR_OBJS) | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -948,6 +957,10 @@ test-config-validation: $(TEST_CV_TARGET)
 # Builds AND runs, same convention as test-counter-saturation above.
 test-process-context: $(TEST_PC_TARGET)
 	"$(abspath $(TEST_PC_TARGET))"
+
+# Builds AND runs, same convention as test-counter-saturation above.
+test-linear-context: $(TEST_LC_TARGET)
+	"$(abspath $(TEST_LC_TARGET))"
 
 # Builds AND runs, same convention as test-counter-saturation above.
 test-shared-far-spec: $(TEST_SFS_TARGET)
@@ -1015,6 +1028,10 @@ $(TEST_CV_TARGET): $(OBJS) $(TEST_CV_OBJS) $(AC_LIB) | _cfg_guard
 $(TEST_PC_TARGET): $(OBJS) $(TEST_PC_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_process_context [$(BACKEND)] -> $@"
+
+$(TEST_LC_TARGET): $(OBJS) $(TEST_LC_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_linear_context [$(BACKEND)] -> $@"
 
 $(TEST_SFS_TARGET): $(OBJS) $(TEST_SFS_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)

@@ -258,6 +258,35 @@ static void section_aec_level(void) {
      * counters under test. */
     for (i = 0; i < hop; i++) ref[i] = 0.05f * ((i % 7) - 3);
 
+    /* --- ref_ring_filled: cap = ref_ring_size (freeze-at-capacity fix in
+     * aec_process_core's ring-write step). Sole reader is
+     * ">= current_delay + hop" and current_delay is capped at rs - hop, so
+     * rs is the largest value ever meaningful. The old unbounded form is
+     * signed-overflow UB after ~37 h of continuous 16 kHz audio; the guard
+     * runs BEFORE the increment, so a value already at/above the cap is
+     * frozen rather than incremented (this is what makes the INT_MAX seed
+     * below UB-free -- the UBSan wrapper of this same binary proves it). */
+    {
+        int rs = a.ref_ring_size;
+        a.ref_ring_filled = rs - 1;
+        aec_process(&a, mic, ref, out);
+        CHECK(a.ref_ring_filled == rs, "ref_ring_filled: rs-1 -> rs (clamped)");
+        aec_process(&a, mic, ref, out);
+        CHECK(a.ref_ring_filled == rs, "ref_ring_filled: rs -> rs (frozen)");
+        a.ref_ring_filled = INT_MAX - 1;
+        for (i = 0; i < 500; i++) aec_process(&a, mic, ref, out);
+        CHECK(a.ref_ring_filled == INT_MAX - 1,
+              "ref_ring_filled: INT_MAX-1 stays frozen over 500 real hops (no wrap, no UB)");
+        {
+            int d = 1600;
+            int at_cap  = (rs >= d + hop);
+            int at_huge = (INT_MAX - 1 >= d + hop);
+            CHECK(at_cap == at_huge,
+                  "ref_ring_filled: '>= delay+hop' decision identical at rs vs INT_MAX-1");
+        }
+        a.ref_ring_filled = rs;  /* leave a sane value for later sections */
+    }
+
     /* --- misadj_stable_count: cap = cfg.filter_misadjustment_stable_frames,
      * sole reader "< cap" (misadj_fire). Force+hold the "stable" precondition
      * (converged && !epc.active && !regime.main_paused) directly every call
