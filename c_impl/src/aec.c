@@ -2525,8 +2525,14 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         }
     }
 
-    /* cache erle_windowed for next frame's Path-A guard. */
-    if (a->cfg.enable_res) a->last_erle_windowed = erle_windowed;
+    /* cache erle_windowed for next frame's Path-A guard and the duty
+     * watchdog. Condition mirrors the compute block above (and Python
+     * orchestrator's post sub-block): enable_res OR return_res_context.
+     * The old enable_res-only gate was a port divergence -- in the
+     * context-only seam config Python's already-cancelling guard and ERLE
+     * watchdog stayed live while C's went dead (see CHANGELOG). */
+    if (a->cfg.enable_res || a->cfg.return_res_context)
+        a->last_erle_windowed = erle_windowed;
 
     a->frame_count++;
 }

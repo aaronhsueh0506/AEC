@@ -84,7 +84,17 @@ delay est active).
    `test_counter_saturation.c` (INT_MAX-seeded, UBSan wrapper aborts on the
    reverted form) — this counter was the one miss of the earlier
    counter-saturation sweep.
-4. **Ring-capacity defense at acquisition**: a candidate delay larger than
+4. **Context-only ERLE cache port divergence** (was listed under Notes as
+   known-not-fixed; fixed in a follow-up commit): `last_erle_windowed` is now
+   cached under `enable_res || return_res_context`, matching both the compute
+   block right above it and the Python spec. In the context-only seam config
+   the already-cancelling Path-A guard and the duty ERLE watchdog come back
+   to life (Python always had them); measured effect on the seam test's
+   delay-shift re-lock: 16.3 s -> 13.4 s of audio at 16k/256, 7.4 s -> 4.7 s
+   at 16k/512, 48 k unchanged. Default paths (`enable_res=1`) byte-equal
+   (re-verified with an `aec_wav` render diff). The warm tap-transfer gate
+   was never affected (inst-ERLE ring fills unconditionally).
+5. **Ring-capacity defense at acquisition**: a candidate delay larger than
    `ref_ring_size - hop` is no longer eligible — previously the modulo read
    would alias and silently return wrong (effectively future) far. Unreachable
    with default configs (2048 ms ring vs ~509 ms search span); reachable only
