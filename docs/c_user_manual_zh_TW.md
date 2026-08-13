@@ -182,7 +182,10 @@ int run_aec(int sample_rate)
 `DA_MAX_FILTER_LAG` × 4 倍降取樣）。48 kHz 輸入會先抗混疊降到 16 kHz，
 估計結果再乘 3 回傳 native-rate samples，所以 wall-clock 範圍仍為
 約 608 ms，不是把 9728 直接除以 48 kHz。此上限與設定無關，
-**調 `max_delay_ms` 不會提高它**。
+**調 `max_delay_ms` 不會提高它**。（608 ms 是幾何全 span；若再計入
+matched filter 的 reliability 條件 `lag < FILTER_SIZE-10`，實際可靠取得
+peak 的上界約 509 ms——`nn_integration_interface.md` 引用的就是後者，兩
+個數字定義不同、不矛盾。）
 `max_delay_ms`（預設 1024 ms）只決定參考訊號環形緩衝要開多大；調大只是多花記憶體。
 超過上表的延遲請在上游先粗對齊，實機仍應先量測總延遲。
 

@@ -76,11 +76,14 @@ static float rng_uniform(float amp) {
  * side, exactly which raw samples an aligned far_hop must contain.  Sized
  * for the largest scenario (48 kHz: 1500 hops x 512). */
 /* Sized for the largest scenario: 500 acquisition + 5000 shift hops at
- * 48 kHz/hop 512. The generous shift budget is deliberate: in the
- * enable_res=0 context-only config the ERLE watchdog is inert (see
- * aec.c:2492 note), so a confirmed delay shift re-locks only through the
- * duty-cycled matched-filter consensus, which takes tens of seconds of
- * audio. The measured re-lock hop count is printed as info. */
+ * 48 kHz/hop 512. The generous shift budget is deliberate: even with the
+ * ERLE watchdog LIVE in this enable_res=0 context-only config (since the
+ * Python-parity fix that widened the last_erle_windowed cache condition to
+ * enable_res || return_res_context, commit 87fe169 -- see the note above
+ * that cache write in aec.c; the watchdog used to be dead here), a
+ * confirmed delay shift still needs seconds of audio to re-lock (ERLE
+ * collapse resumes full-rate matched-filter analysis, then consensus must
+ * rebuild). The measured re-lock hop count is printed as info. */
 #define MAX_SAMPLES (5600 * 512 + 8192)
 static float g_far_hist[MAX_SAMPLES];
 

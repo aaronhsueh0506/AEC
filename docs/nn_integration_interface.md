@@ -49,8 +49,10 @@ on both streams), `aec_get_linear_context()` exposes:
 | `delay_state` | enum | `UNLOCKED` (content is RAW far — do not treat as aligned), `LOCKED`, `CHANGED` (offset moved THIS hop — flush any far feature rings / attention history downstream). |
 | `generation` | unsigned | bumps on every ring-offset change including the flagless soft-recovery realigns and `aec_reset()`; saturating. Poll it instead of differencing `delay_samples` (transient A→B→A shifts are invisible to differencing). |
 
-Out-of-range bulk delay (beyond the matched filter's ~509 ms search span at
-16 kHz) is not detectable at this seam: the state simply stays `UNLOCKED`.
+Out-of-range bulk delay (beyond the matched filter's ~509 ms reliable-peak
+bound at 16 kHz; the 608 ms figure in `c_user_manual_zh_TW.md` is the full
+filter-bank geometric span — a different definition, not a contradiction) is
+not detectable at this seam: the state simply stays `UNLOCKED`.
 Fail-open policy (bypass the far-conditioned model, emit the linear error)
 belongs to the integrator. Regression coverage: `test/test_linear_context.c`.
 
