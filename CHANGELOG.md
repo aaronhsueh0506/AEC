@@ -41,16 +41,17 @@ when verdict requires it.
 
 ---
 
-## [Unreleased] — 2026-08-14 — delay-estimator round: pre-echo winner fix, configurable bank size, delay survey docs
+## [Unreleased] — 2026-08-14 — delay-estimator round: configurable bank size, delay survey docs (pre-echo fix held on branch)
 
-Branch `feature/delay-prescan-anchor` (merges after the isolated 800-case
-blind A/B — the pre-echo fix is a behaviour change; `delay_num_filters` at
-its default is not).
+Split landing (2026-08-15): the behaviour-neutral items below are ON main;
+the pre-echo winner fix is NOT — it lives on `feature/delay-prescan-anchor`
+pending the isolated 800-case blind A/B (it perturbs 25% of the 2021 blind
+set with a statistically unresolved AECMOS balance, see item 1).
 
-### Fixed
+### Pending on branch (NOT in main)
 
-1. **Pre-echo instantaneous error now comes from the WINNING filter**
-   (Python `700994b`, C follow-up in this round). Both ports previously fed
+1. **Pre-echo instantaneous error from the WINNING filter**
+   (Python `700994b`, C `524a234`). Both ports previously fed
    the shared prefix-error buffer from the LAST filter and applied it to
    `accumulated_error[winner_index]` — correct only when the winner happened
    to be the last filter, which neutered pre-echo onset detection (walk-back
