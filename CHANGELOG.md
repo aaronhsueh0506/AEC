@@ -55,10 +55,18 @@ its default is not).
    `accumulated_error[winner_index]` — correct only when the winner happened
    to be the last filter, which neutered pre-echo onset detection (walk-back
    always broke on the ~1.0 unexcited-region error). Upstream computes it
-   for `n == last_detected_best_lag_filter`; both ports now match. Latent on
-   material where no winner holds 50 consecutive updates (the 579 ms FST
-   clip shows zero output change); synthetic two-arrival cases now resolve
-   the onset (fixed `(lag,pre_echo)=(60,27)` vs pre-fix `(60,60)`).
+   for `n == last_detected_best_lag_filter`; both ports now match. NOT
+   latent at corpus level (an earlier single-clip observation suggested
+   otherwise; the engagement counter is CUMULATIVE, not consecutive):
+   blind-set A/B (2021 full 287 pairs, isolated to exactly these two
+   commits) shows **72/287 clips (25%) change via altered delay
+   trajectories**, concentrated on movement material, both directions
+   (stability gains and oscillation regressions). AECMOS on the differing
+   clips is a statistical wash (bucket means within ±0.05, per-clip swings
+   to 1.46, NE untouched 0/33) — below the resolution of 287 clips, hence
+   the isolated 800-case gate before merge. Synthetic two-arrival cases
+   resolve the onset correctly (fixed `(lag,pre_echo)=(60,27)` vs pre-fix
+   `(60,60)`).
 
 ### Added
 
