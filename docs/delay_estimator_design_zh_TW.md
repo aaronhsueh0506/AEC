@@ -139,15 +139,19 @@ dominance 判準 + undecidable 閘；方法先以 579.44 ms 已知案例與合�
   這些案例在現行幾何下會發生 §2 的高信心誤鎖。
 - 少數量測為負值/低 ncc（如 −95 ms、ncc 0.07）屬弱相關低信心案例。
 
-**ICASSP 2023 blind set（48 kHz 確認，小批 24 對，非全集）**：
+**ICASSP 2023 blind set（48 kHz，每場景 100 case＝300 case / 600 檔）**：
 
-| 場景 | n | p50 | max | >509 ms |
-|---|---|---|---|---|
-| doubletalk(+movement) | 8 | ~46 ms | 81 ms | 0 |
-| farend_singletalk | 8 | 62 ms | 349 ms | 0 |
-| nearend_singletalk | 8 | 7/8 不可測（正確）；1 檔洩漏 349 ms | | 0 |
+| 場景 | n(可測) | p50 | p90 | max | >509 ms | >128 ms |
+|---|---|---|---|---|---|---|
+| farend_singletalk | 69 | 159 ms | 342 ms | **674 ms** | 1 | 38 |
+| farend_singletalk_with_movement | 23 | 168 ms | 299 ms | 406 ms | 0 | 18 |
+| doubletalk | 74 | 79 ms | 262 ms | 338 ms | 0 | 33 |
+| doubletalk_with_movement | 20 | 104 ms | 255 ms | 263 ms | 0 | 9 |
+| nearend_singletalk | 22（78 無回聲不可測） | 82 ms | 294 ms | 673 ms | 1 | 9 |
 
-小批樣本內全部落在現行覆蓋內；全集統計待需要時擴充（同一工具直接跑）。
+- 2023 的超界尾巴約 **1%**（2/208 可測 FST+DT+NST-洩漏，674/673 ms），
+  遠小於 2021 的 5%；分佈整體偏高於 2021（p50 79–168 ms vs 48 ms）但
+  99% 落在現行 509 ms 覆蓋內。
 
 ## 7. 48 kHz 適用性（2026-08-14 稽核結論）
 
@@ -157,12 +161,20 @@ dominance 判準 + undecidable 閘；方法先以 579.44 ms 已知案例與合�
 （同一合成 300 ms 延遲，48 k 與 16 k 鎖定值差 **0.000 ms**；ERLE 正常
 上升；無 NaN）。覆蓋上限以 ms 計與 16 k 相同（509/608 ms）。
 
+**真實 48 kHz clip 抽驗（2026-08-14，ICASSP-2023 集 10 clips 跨
+0–674 ms delay 頻段）**：9/9 在覆蓋內的 clip 全部鎖對 delay（誤差
++2.8～+5.7 ms、恆提早=headroom 契約）；消除量實測 4–13 dB（far-active
+能量域；三個 instant-ERLE 尾段平均偏低的 clip 經 far-active gating 重驗
+均為 10–12.8 dB 真實消除——instant-ERLE 的靜音段稀釋是量測 artifact，
+不是引擎問題）；674 ms 超界 clip 為**誠實未鎖定**（未誤鎖）。→ 48 kHz
+以現行參數**放行**用於 dataset 生成與評測。
+
 注意事項：
 
 1. **調校未驗證是官方已記載限制**（CHANGELOG 4.0.0rc Known
-   limitations）：48 kHz 至今只有結構性驗證（不崩潰/有限值），從未用
-   原生 48 kHz 素材做 AECMOS/ERLE 調校驗證。dataset 生成可直接跑，但
-   輸出品質不可假設等同 16 kHz 調校水準，須抽查。
+   limitations）：48 kHz 此前只有結構性驗證；上述抽驗是首批原生 48 kHz
+   素材的消除量數據點（4–13 dB，行為正常），但仍非系統性 AECMOS 調校
+   驗證。dataset 生成可直接跑，正式 release 前建議補 AECMOS 批次分數。
 2. **驅動腳本陷阱**：`eval_aec_challenge.py --filter` 預設 2048、
    `run_one_case.py` 預設 832，皆為 16 kHz-authored 絕對 sample 數；
    48 kHz 須顯式覆寫（3072）或走 config 自動解析路徑。
