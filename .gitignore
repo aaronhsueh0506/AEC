@@ -26,6 +26,7 @@ __pycache__/
 wav/aec_output/
 wav/aec_challenge/
 wav/aec_challenge_blind/
+wav/aec_challenge_blind_icassp2023/
 wav/*.wav
 
 # Eval output directories
