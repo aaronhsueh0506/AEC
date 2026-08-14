@@ -189,6 +189,13 @@ peak 的上界約 509 ms——`nn_integration_interface.md` 引用的就是後�
 `max_delay_ms`（預設 1024 ms）只決定參考訊號環形緩衝要開多大；調大只是多花記憶體。
 超過上表的延遲請在上游先粗對齊，實機仍應先量測總延遲。
 
+**超出可靠上界（~509 ms）的真延遲不會「估不到」，而是可能在範圍內
+高信心誤鎖**（confidence 只量 histogram 一致性、不量匹配品質）——機制
+細節、blind-test 語料的實測延遲分佈（2021 全集 p50≈48 ms / p90≈225 ms /
+max 923 ms、約 5% 超出 509 ms）與板端/離線的建議做法（系統延遲用
+`fixed_delay_samples` 由系統層補償），見
+`delay_estimator_design_zh_TW.md`。
+
 延遲估計**不能**修正這些問題：mic/ref 取樣率不同、持續的 clock drift、
 送錯的 reference 訊號。這些必須在上游解決。
 
