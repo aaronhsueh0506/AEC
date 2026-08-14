@@ -20,11 +20,11 @@ What is asserted:
      before this knob existed.
   2. THE KNOB REALLY MOVES THE GEOMETRY (the can-fail core) — the bank's
      reliable reach is ``(n-1)*384 + 501`` downsampled samples (0.25 ms
-     each), i.e. 125 / 221 / 317 / 413 / 509 ms for n = 1..5. So a 400 ms
+     each), i.e. 125 / 221 / 317 / 413 / 509 ms for n = 1..5. So a 350 ms
      echo is INSIDE reach at n=5 and OUTSIDE it at n=2, while a 150 ms echo
      is inside reach at both. Driving the FULL stack (AecConfig -> AEC ->
      orchestrator -> LegacyDelayShim -> EchoPathDelayEstimator) means the
-     n=2 "must not lock 400 ms" assertion fails the moment either wiring
+     n=2 "must not lock 350 ms" assertion fails the moment either wiring
      hop stops forwarding the value, because both regressions land on the
      same fallback of 5. ``test_mutation_*`` proves exactly that by
      re-running the n=2 case with the shim's forwarding monkeypatched away.
@@ -59,6 +59,13 @@ _DEFAULT_HP_HISTOGRAM_SIZE = 2433      # 5*384 + 512 + 1
 # (headroom 32 raw + ds granularity) yet far tighter than the ~180 ms gap
 # between the true delay and the deepest lag an out-of-reach bank can report.
 _LOCK_TOLERANCE_SAMPLES = 160
+# 350 ms, not 400: on a pure single-tap echo the PRE-FIX pre-echo
+# aggregator (the behaviour main carries while 700994b is branch-pending)
+# deterministically reports the 400 ms case one alignment shift early
+# (4800 vs 6400) -- same quirk test_delay_num_filters.c documents. 350 ms
+# behaves on both pre-echo variants, keeps the geometry point intact
+# (350 > n=2's 221 ms reach, < n=5's 509 ms), and lets this file pass on
+# main and on the branch alike.
 
 
 def _synth_echo(sample_rate: int, seconds: float, delay_samples: int,
@@ -128,19 +135,19 @@ class DelayNumFiltersDefaultTests(unittest.TestCase):
 class DelayNumFiltersGeometryTests(unittest.TestCase):
     """The knob must actually shrink the bank's reach end to end."""
 
-    def test_five_filters_lock_a_400ms_echo(self) -> None:
-        true_delay, got, _ = _lock_delay(num_filters=5, delay_ms=400.0)
-        self.assertNotEqual(got, -1, "n=5 must reach a 400 ms echo (509 ms bank)")
+    def test_five_filters_lock_a_350ms_echo(self) -> None:
+        true_delay, got, _ = _lock_delay(num_filters=5, delay_ms=350.0)
+        self.assertNotEqual(got, -1, "n=5 must reach a 350 ms echo (509 ms bank)")
         self.assertLessEqual(abs(got - true_delay), _LOCK_TOLERANCE_SAMPLES,
                              f"n=5 reported {got}, true {true_delay}")
 
-    def test_two_filters_do_not_lock_a_400ms_echo(self) -> None:
-        """The can-fail assertion: 400 ms is beyond the n=2 bank's 221 ms
+    def test_two_filters_do_not_lock_a_350ms_echo(self) -> None:
+        """The can-fail assertion: 350 ms is beyond the n=2 bank's 221 ms
         reliable reach, so a correctly-shrunk bank cannot report it."""
-        true_delay, got, aec = _lock_delay(num_filters=2, delay_ms=400.0)
+        true_delay, got, aec = _lock_delay(num_filters=2, delay_ms=350.0)
         if got != -1:
             self.assertGreater(abs(got - true_delay), _LOCK_TOLERANCE_SAMPLES,
-                               f"n=2 must not lock a 400 ms echo, reported {got}")
+                               f"n=2 must not lock a 350 ms echo, reported {got}")
         self.assertEqual(aec.delay_est._estimator._matched_filter._num_filters, 2)
 
     def test_two_filters_lock_a_150ms_echo(self) -> None:
@@ -160,13 +167,13 @@ class DelayNumFiltersGeometryTests(unittest.TestCase):
         self.assertEqual(est._aggregator._highest_peak._histogram.size,
                          2 * 384 + 512 + 1)                               # 1281
 
-    def test_mutation_dropping_the_shim_forwarding_makes_n2_lock_400ms(self) -> None:
-        """Mutation control. Re-run the n=2 / 400 ms case with the shim's
+    def test_mutation_dropping_the_shim_forwarding_makes_n2_lock_350ms(self) -> None:
+        """Mutation control. Re-run the n=2 / 350 ms case with the shim's
         num_filters forwarding removed (exactly the pre-fix behaviour, and
         also what a dropped orchestrator kwarg degrades to -- both fall back
         to 5). The bank silently becomes a 509 ms one, the echo comes into
         reach, and the assertion in
-        ``test_two_filters_do_not_lock_a_400ms_echo`` would go red. If this
+        ``test_two_filters_do_not_lock_a_350ms_echo`` would go red. If this
         test ever fails, that assertion is passing for some reason other
         than the geometry."""
 
@@ -177,7 +184,7 @@ class DelayNumFiltersGeometryTests(unittest.TestCase):
         original = legacy_compat.EchoPathDelayEstimator
         legacy_compat.EchoPathDelayEstimator = _SwallowNumFilters
         try:
-            true_delay, got, aec = _lock_delay(num_filters=2, delay_ms=400.0)
+            true_delay, got, aec = _lock_delay(num_filters=2, delay_ms=350.0)
             self.assertEqual(
                 aec.delay_est._estimator._matched_filter._num_filters, 5,
                 "mutation should have reverted the bank to the 5-filter default")
@@ -186,7 +193,7 @@ class DelayNumFiltersGeometryTests(unittest.TestCase):
         self.assertNotEqual(got, -1)
         self.assertLessEqual(
             abs(got - true_delay), _LOCK_TOLERANCE_SAMPLES,
-            "un-wired num_filters must let a 400 ms echo lock again "
+            "un-wired num_filters must let a 350 ms echo lock again "
             f"(reported {got}, true {true_delay}) -- otherwise the n=2 "
             "no-lock assertion is not actually testing the wiring")
 
