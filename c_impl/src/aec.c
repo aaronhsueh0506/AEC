@@ -90,6 +90,9 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->delay_buffer_ms = 2048.0f;
     cfg->delay_est_init_s = 0.3f;
     cfg->delay_est_period_s = 0.5f;
+    /* Matched-filter bank size (mirrors config.py's delay_num_filters). 5 =
+     * unchanged AEC3 geometry; see aec.h for the embedded compute knob. */
+    cfg->delay_num_filters = DA_NUM_FILTERS;
     cfg->highpass_cutoff_hz = 80.0f;
     cfg->saturation_threshold = 0.95f;
     cfg->kalman_q_high = 1e-3f;
@@ -277,6 +280,13 @@ static int aec_validate_config(const AecConfig* cfg) {
     AEC_CK_RANGE_I(ne_recent_sustain,                    0, 1000000);
     AEC_CK_RANGE_I(filter_misadjustment_stable_frames,   0, 1000000);
     AEC_CK_RANGE_I(filter_misadjustment_hangover_frames, 0, 1000000);
+    /* Bank size: unlike the counts above (whose "generous but finite" bounds
+     * only exist to stop garbage reaching the size arithmetic), this one is
+     * a HARD bound -- DA_NUM_FILTERS is the static array extent in
+     * DaMatchedFilter, and 0 filters is a delay estimator that can never
+     * report anything. Rejected rather than clamped, matching the Python
+     * side's ValueError (config.py __post_init__). */
+    AEC_CK_RANGE_I(delay_num_filters,                    1, DA_NUM_FILTERS);
 
 #undef AEC_CK_BOOL
 #undef AEC_CK_RANGE_F
@@ -944,7 +954,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     }
     /* Delay ring */
     if (cfg->enable_delay_est) {
-        delay_aec3_init(&a->delay, cfg->sample_rate);
+        delay_aec3_init_ex(&a->delay, cfg->sample_rate, cfg->delay_num_filters);
         a->has_delay = 1;
         a->ref_ring_size = buf_samp;
         a->ref_ring = (float*)ptr; ptr += ALIGN16((size_t)buf_samp * sizeof(float));

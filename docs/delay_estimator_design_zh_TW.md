@@ -106,9 +106,19 @@ NLMS 8192 MAC、末端 accumulated-error 常數 8192 MAC；250 block/s；
 | estimator OFF（`fixed_delay_samples`） | — | 0 | 0 | ~0 |
 
 縮 n 不動 window/shift/threshold（每個窗的統計行為與 upstream 完全一
-致），是偏離最小的縮法。前置條件：板端 fixed_delay 補償後的殘差
-profile（bring-up 量測）；`num_filters` 目前無 config 通路（Python 寫死
-於 estimator 預設值、C 為編譯期 `DA_NUM_FILTERS`），縮小前需先開通。
+致），是偏離最小的縮法。
+
+**Config 通路（2026-08-14 已開通）**：Python `AecConfig.delay_num_filters`
+（1..5，`__post_init__` fail-fast 驗證）→ orchestrator → LegacyDelayShim
+→ `EchoPathDelayEstimator(num_filters=…)`；C `AecConfig::delay_num_filters`
+（`aec_validate_config` 拒絕超界）→ `delay_aec3_init_ex()` → runtime
+`DaMatchedFilter::num_filters`。預設 5 = 幾何完全不變（byte-equal，測試
+釘住）。C 端刻意的取捨：**算力隨 n 縮、RAM 不縮**——靜態陣列維持
+`DA_NUM_FILTERS`(=5) 編譯期上限，保住 caller-pool 的 `aec_get_mem_size`
+單一常數契約；多配的 ring/histogram 已逐項論證為行為中立（搆不到的
+bin 永遠是零、argmax 取首個最大值）。使用場景：板端 fixed_delay 補償
+後 nf=1~2；bench/dataset 一律維持 5（發佈分數的量測幾何）。板端最終
+選值待 bring-up 殘差 profile 量測。
 
 ## 6. Blind-test 語料延遲普查（2026-08-14 實測）
 

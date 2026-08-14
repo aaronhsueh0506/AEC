@@ -41,6 +41,44 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-14 — delay-estimator round: pre-echo winner fix, configurable bank size, delay survey docs
+
+Branch `feature/delay-prescan-anchor` (merges after the isolated 800-case
+blind A/B — the pre-echo fix is a behaviour change; `delay_num_filters` at
+its default is not).
+
+### Fixed
+
+1. **Pre-echo instantaneous error now comes from the WINNING filter**
+   (Python `700994b`, C follow-up in this round). Both ports previously fed
+   the shared prefix-error buffer from the LAST filter and applied it to
+   `accumulated_error[winner_index]` — correct only when the winner happened
+   to be the last filter, which neutered pre-echo onset detection (walk-back
+   always broke on the ~1.0 unexcited-region error). Upstream computes it
+   for `n == last_detected_best_lag_filter`; both ports now match. Latent on
+   material where no winner holds 50 consecutive updates (the 579 ms FST
+   clip shows zero output change); synthetic two-arrival cases now resolve
+   the onset (fixed `(lag,pre_echo)=(60,27)` vs pre-fix `(60,60)`).
+
+### Added
+
+2. **`delay_num_filters` config (Python + C)** — matched-filter bank size
+   1..5, default 5 = byte-equal geometry (tests pin ring capacity 2064 /
+   histogram 2433 and bit-identical output vs default). Compute knob for
+   deployments whose bulk system delay is already compensated via
+   `fixed_delay_samples`: reliable reach 125/221/317/413/509 ms for n=1..5,
+   ~4.2 MMAC/s full-rate saved per dropped filter; C arrays stay at the
+   compile-time bound (RAM unchanged, pool contract intact). Geometry
+   proven end-to-end: n=2 locks a 150 ms echo, refuses a 350 ms echo that
+   n=5 locks (`test_delay_num_filters.{py,c}`, wiring-mutation checked).
+
+3. **`docs/delay_estimator_design_zh_TW.md`** — matched-filter mechanism,
+   confidence semantics (histogram consistency, not match quality; the
+   out-of-range confident-mislock mode), num_filters provenance, blind-set
+   delay survey (2021 full: p50 48 ms / p90 225 ms / max 923 ms, ~5% beyond
+   509 ms; 2023 sample 48 kHz: all ≤349 ms), 48 kHz applicability audit,
+   and the system-layer delay stance. Survey tool: `wav/measure_blind_delay.py`.
+
 ## [Unreleased] — 2026-08-13 — AecLinearContext seam (aligned far + delay status + generation token), ref_ring_filled overflow fix
 
 New public surface for an external neural post-filter (Align-ULCNet-class

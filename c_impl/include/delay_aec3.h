@@ -98,6 +98,31 @@ typedef enum {
 #define DA_DOWN_SAMPLING_FACTOR 4
 #define DA_AEC3_BLOCK_SIZE      64
 #define DA_SUB_BLOCK_SIZE       (DA_AEC3_BLOCK_SIZE / DA_DOWN_SAMPLING_FACTOR) /* 16 */
+/* DA_NUM_FILTERS is the matched-filter bank's STATIC UPPER BOUND -- it sizes
+ * every array below and is NOT the runtime bank size. The bank actually
+ * searched is DaMatchedFilter::num_filters, set once at construction from
+ * AecConfig::delay_num_filters (range [1, DA_NUM_FILTERS], default 5 =
+ * unchanged AEC3 geometry).
+ *
+ * DELIBERATE TRADE-OFF -- COMPUTE SHRINKS, RAM DOES NOT. The arrays stay
+ * carved at the 5-filter bound (filters/accumulated_error here, the ring and
+ * both histograms below), so a smaller bank saves MACs, not bytes. This
+ * keeps the static-memory footprint a single compile-time constant, which is
+ * what the caller-owned-pool contract (aec_get_mem_size) and the board's
+ * link-time budget are built on: a runtime-sized pool would make the pool
+ * size depend on a config field, and every consumer would have to re-derive
+ * it. Over-sized is also provably behaviour-neutral, not merely safe:
+ *   - ring: the filter bank only ever gathers back
+ *     (num_filters-1)*DA_FILTER_INTRA_SHIFT + DA_FILTER_SIZE samples, so any
+ *     capacity at or above that returns identical windows; the extra history
+ *     is never read.
+ *   - highest-peak histogram: the deepest lag the bank can report is
+ *     (num_filters-1)*384 + 511, so the bins above that are never
+ *     incremented, and da_argmax_i / the incremental-argmax tracker both
+ *     return the FIRST maximum -- an all-zero tail can never win a tie.
+ *   - pre-echo histogram: same argument, plus its windowed local-max scan
+ *     seeds best_value at -1 and compares strictly greater, so an all-zero
+ *     trailing window can never displace an earlier one. */
 #define DA_NUM_FILTERS          5
 #define DA_WINDOW_SIZE_SB       32
 #define DA_ALIGNMENT_SHIFT_SB   24
@@ -176,6 +201,12 @@ typedef struct {
 } DaRing;
 
 typedef struct {
+    /* Runtime bank size, [1, DA_NUM_FILTERS] -- see DA_NUM_FILTERS above for
+     * why the arrays stay statically sized at the bound. Only the first
+     * `num_filters` rows are ever searched or updated; the rest are still
+     * initialised (zeroed / set to 1.0f) so the struct's byte image is
+     * deterministic whatever the bank size. */
+    int   num_filters;
     float filters[DA_NUM_FILTERS][DA_FILTER_SIZE];
     float accumulated_error[DA_NUM_FILTERS][DA_ACC_ERR_SIZE];
     float instantaneous_error[DA_ACC_ERR_SIZE];   /* per-tap-prefix err, last filter (matches Python) */
@@ -279,6 +310,25 @@ typedef struct {
  * callers) or via the pre-decimation sidechain (48kHz callers). This mirrors
  * the Python SharedMatchedDelayEstimator's identical design. */
 void delay_aec3_init(DelayAec3 *d, int sample_rate);
+
+/* Bank-size variant. num_filters is the number of staggered matched-filter
+ * hypotheses actually searched; it is CLAMPED into [1, DA_NUM_FILTERS] (the
+ * static array bound) rather than rejected, because the caller-facing
+ * validation already happened -- aec_validate_config() refuses an
+ * AecConfig::delay_num_filters outside that range before aec_create()/
+ * aec_init() ever reach here, so the clamp is a defence-in-depth floor for
+ * direct users of this lower-level API, not the primary gate.
+ * delay_aec3_init(d, sr) == delay_aec3_init_ex(d, sr, DA_NUM_FILTERS) and
+ * stays byte-exact to its pre-existing behaviour.
+ *
+ * Reliable reach shrinks with the bank: (n-1)*DA_FILTER_INTRA_SHIFT +
+ * (DA_FILTER_SIZE - 11) downsampled samples at 0.25 ms each, i.e.
+ * n=1 -> 125 ms, 2 -> 221 ms, 3 -> 317 ms, 4 -> 413 ms, 5 -> 509 ms. Use a
+ * short bank only where the bulk system delay is already compensated
+ * out-of-band (AEC3's external-delay-hint stance); bench/dataset runs must
+ * stay at 5. */
+void delay_aec3_init_ex(DelayAec3 *d, int sample_rate, int num_filters);
+
 void delay_aec3_reset(DelayAec3 *d);
 
 /* per-hop drive. near/far are length `hop` float arrays in the CALLER's

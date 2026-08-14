@@ -38,9 +38,16 @@ class LegacyDelayShim:
         self._hop_size = int(hop_size)
         # Legacy kwargs accepted for call-site compat; ignored by the AEC3
         # estimator (which carries its own internal smoothing + cadence).
+        # ``num_filters`` is the ONE exception -- it is a real AEC3 geometry
+        # parameter (matched-filter bank size), so it is forwarded rather
+        # than swallowed. Default 5 keeps every existing caller that does not
+        # pass it byte-identical to before this pass-through existed.
         self._legacy_kwargs = legacy_kwargs
 
-        self._estimator = EchoPathDelayEstimator(sample_rate=self._sample_rate)
+        self._estimator = EchoPathDelayEstimator(
+            sample_rate=self._sample_rate,
+            num_filters=int(legacy_kwargs.get('num_filters', 5)),
+        )
         self._latest_estimate: Optional[DelayEstimate] = None  # raw 16 kHz samples
         self._estimate_count = 0
         self._latest_variability: Optional[EchoPathVariability] = None

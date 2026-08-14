@@ -401,6 +401,7 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | `delay_buffer_ms` | `float` | `2048.0` | 0 – 120000 | 參考訊號環形緩衝長度（ms）。實際樣本數取 `delay_buffer_ms` 與 `max_delay_ms + 4096 samples` 兩者較大者。調高 `max_delay_ms` 時通常要一併調高。 |
 | `delay_est_init_s` | `float` | `0.3` | 0 – 3600 | 延遲估計值需維持穩定多久才視為已鎖定（秒）。 |
 | `delay_est_period_s` | `float` | `0.5` | 0 – 3600 | 鎖定後的重新確認週期（秒）。回音路徑常變動（裝置會移動）可調短。 |
+| `delay_num_filters` | `int` | `5` | 1 – 5 | Matched-filter bank 大小（**算力旋鈕**）。可靠搜尋上限隨之縮小：n=1→125ms／2→221ms／3→317ms／4→413ms／5→509ms；每少一組省 ~4.2 MMAC/s 的 full-rate 搜尋算力，RAM 不變（陣列維持編譯期上限）。只在系統延遲已由 `fixed_delay_samples` 補償、matched filter 僅追殘差的部署縮小；bench/dataset 一律維持 5（見 `delay_estimator_design_zh_TW.md` §5）。 |
 | `delay_acquire_protect_converged` | `int` | `1` | 0 / 1 | filter 已收斂時，保護它不被延遲重新擷取破壞。 |
 | `delay_acquire_warm_transfer` | `int` | `1` | 0 / 1 | 首次擷取到延遲時，把已學到的回音模型平移過去而不是歸零，避免開場一秒左右出現一段明顯回音。建議維持開啟。 |
 | `delay_acquire_inst_erle_db` | `float` | `4.0` | -100 – 100 | 上一項的觸發門檻（dB）：既有模型要夠好才值得平移。 |

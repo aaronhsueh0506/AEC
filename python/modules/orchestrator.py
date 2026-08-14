@@ -250,6 +250,12 @@ class AEC:
                 self.delay_est = DelayEstimator(
                     sample_rate=self.config.sample_rate,
                     hop_size=self.config.hop_size,
+                    # Matched-filter bank size. Honoured (NOT a no-op): the
+                    # shim forwards it to EchoPathDelayEstimator, which sizes
+                    # the downsampled ring + aggregator histograms from it.
+                    # 5 = AEC3 default / bench+dataset value; smaller trades
+                    # reach for MACs on the embedded target (see config.py).
+                    num_filters=self.config.delay_num_filters,
                     # Legacy kwargs accepted as no-op for call-site compat:
                     max_delay_ms=self.config.max_delay_ms,
                     init_seconds=self.config.delay_est_init_s,

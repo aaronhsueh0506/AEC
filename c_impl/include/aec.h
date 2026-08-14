@@ -78,6 +78,19 @@ typedef struct AecConfig {
     float  delay_buffer_ms;        /* 2048 */
     float  delay_est_init_s;       /* 0.3  */
     float  delay_est_period_s;     /* 0.5  */
+    /* Matched-filter bank size, [1, DA_NUM_FILTERS]; mirrors Python
+     * AecConfig.delay_num_filters. 5 = the AEC3 default geometry and the
+     * only value bench/dataset runs may use. Smaller is a COMPUTE knob for
+     * the embedded target, where the bulk system delay is already
+     * compensated out-of-band and the matched filter only has to track the
+     * residual: the reliable reach drops to 125/221/317/413/509 ms for
+     * n=1..5 while each dropped filter removes ~4.2 MMAC/s of full-rate
+     * search. RAM is unchanged -- the arrays stay carved at the compile-time
+     * bound; see delay_aec3.h's DA_NUM_FILTERS comment for that trade-off
+     * and for why the over-sized ring/histograms are behaviour-neutral.
+     * Out-of-range values are REJECTED by aec_validate_config (they are a
+     * caller mistake, not something to silently normalise). */
+    int    delay_num_filters;      /* 5    */
     float  highpass_cutoff_hz;     /* 80   */
     float  saturation_threshold;   /* 0.95 */
     float  kalman_q_high;          /* 1e-3 */

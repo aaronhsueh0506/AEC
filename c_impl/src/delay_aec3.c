@@ -480,8 +480,16 @@ static int da_compute_pre_echo_lag(const float *accumulated_error, int lag,
     return pre_echo_lag + alignment_shift_winner;
 }
 
-static void da_matched_filter_init(DaMatchedFilter *mf) {
+/* num_filters: runtime bank size, clamped to the static array bound. Both
+ * loops below still cover the FULL DA_NUM_FILTERS array (not just the active
+ * prefix) so the struct's byte image does not depend on the bank size --
+ * cheap, once, and it keeps the heap-vs-caller-pool byte-equality gate
+ * (test_static_aec) comparing fully-defined memory. */
+static void da_matched_filter_init(DaMatchedFilter *mf, int num_filters) {
     int n, k;
+    if (num_filters < 1) num_filters = 1;
+    if (num_filters > DA_NUM_FILTERS) num_filters = DA_NUM_FILTERS;
+    mf->num_filters = num_filters;
     memset(mf->filters, 0, sizeof(mf->filters));
     for (n = 0; n < DA_NUM_FILTERS; ++n)
         for (k = 0; k < DA_ACC_ERR_SIZE; ++k) mf->accumulated_error[n][k] = 1.0f;
@@ -523,7 +531,12 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
     mf->winner_lag_valid = 0;
     mf->reported_valid = 0;
 
-    for (n = 0; n < DA_NUM_FILTERS; ++n) {
+    /* Bank size is the RUNTIME mf->num_filters, not the DA_NUM_FILTERS array
+     * bound: this loop is the entire search cost (~4.2 MMAC/s per filter at
+     * the full 250 block/s rate), so a short bank is exactly where the
+     * embedded saving comes from. At the default 5 this is the identical
+     * loop it always was. */
+    for (n = 0; n < mf->num_filters; ++n) {
         float error_sum;
         int filters_updated, lag_estimate, reliable, lag;
         /* mf->instantaneous_error is a SINGLE shared buffer (not per-filter,
@@ -531,14 +544,14 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
          * zero-fills and fully recomputes from scratch whenever a non-NULL
          * pointer is passed. Every read of it after this loop (see
          * da_update_accumulated_error below) only ever wants the LAST
-         * filter's value -- so n<DA_NUM_FILTERS-1's writes are always fully
-         * overwritten before anything looks at them. Passing NULL for those
-         * skips the (dead) zero-fill + accumulation work for 4 of 5 filters
-         * while leaving the surviving n==DA_NUM_FILTERS-1 call byte-for-byte
-         * identical to before. */
+         * SEARCHED filter's value -- so n<num_filters-1's writes are always
+         * fully overwritten before anything looks at them. Passing NULL for
+         * those skips the (dead) zero-fill + accumulation work for all but
+         * the last filter while leaving the surviving
+         * n==num_filters-1 call byte-for-byte identical to before. */
         filters_updated = da_matched_filter_core(ring, alignment_shift, x2_sum_threshold,
                                                  smoothing, capture, mf->filters[n], &error_sum,
-                                                 (n == DA_NUM_FILTERS - 1) ? mf->instantaneous_error : NULL);
+                                                 (n == mf->num_filters - 1) ? mf->instantaneous_error : NULL);
         lag_estimate = da_max_square_peak_index(mf->filters[n], DA_FILTER_SIZE);
         reliable = (lag_estimate > 2
                     && lag_estimate < (DA_FILTER_SIZE - 10)
@@ -945,11 +958,11 @@ static void da_clockdrift_update(DaClockdrift *cd, int delay_estimate) {
 
 /* --------------------------------------------------- EchoPathDelayEstimator */
 
-static void da_estimator_init(DaEstimator *e, int sample_rate) {
+static void da_estimator_init(DaEstimator *e, int sample_rate, int num_filters) {
     da_decimator_init(&e->capture_decimator);
     da_decimator_init(&e->render_decimator);
     da_ring_reset(&e->render_ring);
-    da_matched_filter_init(&e->matched_filter);
+    da_matched_filter_init(&e->matched_filter, num_filters);
     da_aggregator_init(&e->aggregator);
     da_clockdrift_init(&e->clockdrift, sample_rate);
     /* AEC3 kNumBlocksPerSecondBy2 = 125 blocks (~500 ms). Was a frozen
@@ -1120,6 +1133,10 @@ static int da_estimator_estimate_delay(DaEstimator *e, const float *render_hop,
 /* ====================== LegacyDelayShim (public API) ====================== */
 
 void delay_aec3_init(DelayAec3 *d, int sample_rate) {
+    delay_aec3_init_ex(d, sample_rate, DA_NUM_FILTERS);
+}
+
+void delay_aec3_init_ex(DelayAec3 *d, int sample_rate, int num_filters) {
     /* DaEstimator's internal clockdrift/consistent-estimate constants
      * (da_estimator_init) are computed in real seconds FROM the sample_rate
      * argument -- they are not hardcoded, so this must be the estimator's
@@ -1130,7 +1147,9 @@ void delay_aec3_init(DelayAec3 *d, int sample_rate) {
      * 16000 unconditionally, so an 8kHz config silently ran its clockdrift/
      * consistent-estimate timers at 2x their intended real-time duration). */
     int rate_factor = (sample_rate == 48000) ? DA_RESAMPLE48_FACTOR : 1;
-    da_estimator_init(&d->est, (rate_factor > 1) ? 16000 : sample_rate);
+    /* num_filters is clamped inside da_matched_filter_init (see its comment
+     * and delay_aec3_init_ex's declaration for why clamp, not reject). */
+    da_estimator_init(&d->est, (rate_factor > 1) ? 16000 : sample_rate, num_filters);
     d->rate_factor = rate_factor;
     if (d->rate_factor > 1) {
         da_resample48_init(&d->resample48);

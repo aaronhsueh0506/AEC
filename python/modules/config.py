@@ -344,6 +344,22 @@ class AecConfig:
     fixed_delay_samples: int = -1
     delay_par_low_threshold: float = 5.0
     delay_par_solid_threshold: float = 8.0
+    # Size of the matched-filter bank (number of staggered NLMS hypotheses).
+    # 5 is the AEC3 default and the ONLY value bench / dataset generation may
+    # use -- it is what the published scores were measured with. Lowering it
+    # is a COMPUTE knob for the embedded target, where the (bring-up
+    # measured) system delay is already compensated via
+    # ``fixed_delay_samples`` and the matched filter only has to track the
+    # residual; each filter dropped removes ~4.2 MMAC/s of full-rate search
+    # cost (n=1 is -73% vs n=5). Window / alignment shift / thresholds are
+    # NOT touched, so every surviving filter behaves exactly as it does at
+    # n=5 -- only the bank's reach shrinks. Reliable coverage is
+    # ``(n-1)*384 + 501`` downsampled samples at 0.25 ms each:
+    #   n=1 -> 125 ms | n=2 -> 221 ms | n=3 -> 317 ms | n=4 -> 413 ms
+    #   n=5 -> 509 ms (see docs/delay_estimator_design_zh_TW.md §4/§5).
+    # Range 1..5: the ring buffer and the aggregator histograms are sized
+    # from this value, and 5 is the geometry this port was validated at.
+    delay_num_filters: int = 5
     # DT-aware soft-recovery gate. The delay/EPC recovery triggers
     # (Path A/B, EPV, shadow_rise) fire at far-only moments but their
     # aggressive re-convergence tail overfits near-end speech that arrives
@@ -456,6 +472,17 @@ class AecConfig:
             raise ValueError(
                 f"unsupported signal grid: sample_rate={self.sample_rate}, "
                 f"frame_size/fft_size={self.frame_size}"
+            )
+
+        # Matched-filter bank size. Fail fast (same style as the grid check
+        # above) rather than clamping: a caller that asks for 0 or 7 filters
+        # has a wrong mental model of the delay geometry, and silently
+        # substituting 5 would hide it. Upper bound 5 mirrors the C side's
+        # DA_NUM_FILTERS compile-time array bound (delay_aec3.h).
+        if not 1 <= self.delay_num_filters <= 5:
+            raise ValueError(
+                f"delay_num_filters must be in [1, 5], got "
+                f"{self.delay_num_filters}"
             )
 
         # Wall-clock-authored top-level (non-AEC3) constants (2026-08

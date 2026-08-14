@@ -603,8 +603,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
-all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
+.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -715,6 +715,17 @@ TEST_CS_TARGET = $(BIN_DIR)/test_counter_saturation
 TEST_LC_SRCS   = $(TEST_DIR)/test_linear_context.c
 TEST_LC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_LC_SRCS))
 TEST_LC_TARGET = $(BIN_DIR)/test_linear_context
+
+# Permanent matched-filter-bank-size regression test
+# (AecConfig::delay_num_filters -> delay_aec3_init_ex -> the runtime loop
+# bound in da_matched_filter_update). Proves the default is still the AEC3
+# 5-filter geometry, that a shorter bank really loses reach end to end (a
+# 350 ms echo locks at n=5 and does not at n=2, while 150 ms locks at both),
+# and that out-of-range values are rejected by aec_validate_config while the
+# lower-level init_ex clamps. Needs the full Aec type.
+TEST_DNF_SRCS   = $(TEST_DIR)/test_delay_num_filters.c
+TEST_DNF_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_DNF_SRCS))
+TEST_DNF_TARGET = $(BIN_DIR)/test_delay_num_filters
 
 # Permanent per-rate structural regression test (M5 multi-rate campaign;
 # formerly standalone-gcc-only and not wired into any Makefile target, so a
@@ -925,7 +936,7 @@ $(TEST_DR_TARGET): $(TEST_DR_OBJS) | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -961,6 +972,10 @@ test-process-context: $(TEST_PC_TARGET)
 # Builds AND runs, same convention as test-counter-saturation above.
 test-linear-context: $(TEST_LC_TARGET)
 	"$(abspath $(TEST_LC_TARGET))"
+
+# Builds AND runs, same convention as test-counter-saturation above.
+test-delay-num-filters: $(TEST_DNF_TARGET)
+	"$(abspath $(TEST_DNF_TARGET))"
 
 # Builds AND runs, same convention as test-counter-saturation above.
 test-shared-far-spec: $(TEST_SFS_TARGET)
@@ -1032,6 +1047,10 @@ $(TEST_PC_TARGET): $(OBJS) $(TEST_PC_OBJS) $(AC_LIB) | _cfg_guard
 $(TEST_LC_TARGET): $(OBJS) $(TEST_LC_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_linear_context [$(BACKEND)] -> $@"
+
+$(TEST_DNF_TARGET): $(OBJS) $(TEST_DNF_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_delay_num_filters [$(BACKEND)] -> $@"
 
 $(TEST_SFS_TARGET): $(OBJS) $(TEST_SFS_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -1558,6 +1577,8 @@ help:
 	@echo "                  regression test (test_rate_structural) -- run from c_impl/"
 	@echo "  test-process-context  Build + run the permanent context-only-processing"
 	@echo "                  regression test (test_process_context) -- run from c_impl/"
+	@echo "  test-delay-num-filters  Build + run the permanent matched-filter-bank-size"
+	@echo "                  regression test (test_delay_num_filters) -- run from c_impl/"
 	@echo "  test-shared-far-spec  Build + run the permanent shared-far-end-FFT"
 	@echo "                  regression test (test_shared_far_spec) -- run from c_impl/"
 	@echo "  test-shared-fft-handle  Build + run the permanent shared-FFT-handle"
