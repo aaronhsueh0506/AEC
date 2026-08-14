@@ -5,17 +5,23 @@ NEON / SSE2 / AVX2 variants are not ported — numpy vectorises the inner
 tap loop).
 
 Rate / coverage notes:
-  - All sizes are in DOWNSAMPLED sub-block units. ``sub_block_size`` (16
-    samples = 1 ms at 16 kHz / down-sample 4) is AEC3-native; do NOT
-    rescale.
+  - All sizes are in DOWNSAMPLED sub-block units, on the 4 kHz grid the
+    AEC3 4x decimator produces from 16 kHz. One ds sample = 0.25 ms, so
+    ``sub_block_size`` (16 samples) = 4 ms — one AEC3 kBlockSize of 64
+    raw samples. AEC3-native; do NOT rescale.
   - ``window_size_sub_blocks`` (32), ``alignment_shift_sub_blocks`` (24)
-    and ``num_filters`` (5) are AEC3 defaults — total coverage =
-    5 * 24 ms + 32 ms = 152 ms. Match coverage in MS, not in
-    "N blocks at our 10 ms hop" (user lock 2026-05-17).
+    and ``num_filters`` (5) are AEC3 defaults. In milliseconds that is a
+    128 ms window per filter, staggered by 96 ms, so the bank's geometric
+    span is (5-1) * 96 + 128 = 512 ms and the deepest RELIABLE lag is
+    509.25 ms (2037 ds) once the ``lag_estimate < filter_size - 10``
+    reliability condition is applied. ``get_max_filter_lag()`` reports a
+    larger 608 ms — that is a histogram-sizing bound, not reach; see its
+    docstring. Match coverage in MS, not in "N blocks at our 10 ms hop"
+    (user lock 2026-05-17).
   - ``smoothing_fast`` / ``smoothing_slow`` are per-update constants
     inside the sub-block loop. The faithful sub-block adapter (see
-    ``echo_path_delay_estimator.py``) drives the update at AEC3-native
-    1 ms rate, so these values DO NOT rescale.
+    ``echo_path_delay_estimator.py``) drives the update at the AEC3-native
+    4 ms sub-block rate, so these values DO NOT rescale.
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -199,7 +205,18 @@ class MatchedFilter:
         return self._reported_lag
 
     def get_max_filter_lag(self) -> int:
-        """Deepest reachable lag in DOWNSAMPLED samples."""
+        """Upper bound on the reported lag, in DOWNSAMPLED samples — used to
+        SIZE the aggregator histograms, not to describe reach.
+
+        It over-counts by one full alignment shift: the deepest filter starts
+        at ``(num_filters - 1) * intra_shift`` and is ``filter_size`` long, so
+        the real geometric span is ``(num_filters - 1) * intra_shift +
+        filter_size`` (2048 ds = 512 ms at the AEC3 defaults) and the deepest
+        lag a peak can actually be accepted at is 11 ds less again
+        (``lag_estimate < filter_size - 10``), i.e. 2037 ds = 509.25 ms. This
+        formula returns 2432 ds = 608 ms. Upstream's GetMaxFilterLag has the
+        same over-count and the same sizing-only role, so it is kept verbatim;
+        do not read it as a delay ceiling."""
         return self._num_filters * self._filter_intra_lag_shift + self._filter_size
 
     def filter_intra_lag_shift(self) -> int:
