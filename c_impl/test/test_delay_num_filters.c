@@ -51,8 +51,8 @@
  *      than silently normalising a caller's wrong mental model.
  *   4. The lower-level delay_aec3_get_mem_size()/delay_aec3_init() pair
  *      REJECTS out-of-range n as well (get_mem_size -> 0, init -> nonzero;
- *      external review 2026-08-16 -- a silent clamp here let direct callers
- *      run a different bank than requested), plus the pool rejection
+ *      a silent clamp would let direct callers run a different bank than
+ *      requested with no error signal), plus the pool rejection
  *      contract (NULL / misaligned base / one byte short).
  *   5. Plan §3.4.1: on any one grid mem(n=1) < ... < mem(n=5), on all four
  *      grids -- every one of those numbers was IDENTICAL before step 2.
@@ -260,10 +260,10 @@ static void test_low_level_init_contract(void) {
     char msg[160];
     int n;
 
-    /* Fail-fast contract at the low level too (external review 2026-08-16:
-     * the earlier silent clamp let a direct caller run a different bank size
-     * than requested with no error signal). get_mem_size returns 0 and init
-     * returns nonzero for every out-of-range n; valid n still round-trips. */
+    /* Fail-fast contract at the low level too: a silent clamp would let a
+     * direct caller run a different bank size than requested with no error
+     * signal. get_mem_size returns 0 and init returns nonzero for every
+     * out-of-range n; valid n still round-trips. */
     pool = da_pool_init(&d, SR, HOP, 3);
     if (pool) {
         CHECK(d.est.matched_filter.num_filters == 3, "init(n=3) -> bank 3");

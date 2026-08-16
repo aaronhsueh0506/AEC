@@ -134,8 +134,8 @@ class DelayNumFiltersDefaultTests(unittest.TestCase):
 
 class ShimNumFiltersRangeTests(unittest.TestCase):
     """Direct LegacyDelayShim callers face the same [1, 5] range the
-    orchestrated AecConfig path and the C low-level API enforce (external
-    review 2026-08-16: the shim used to accept any int silently)."""
+    orchestrated AecConfig path and the C low-level API enforce -- accepting
+    any int silently here would bypass every other validation layer."""
 
     def test_direct_shim_rejects_out_of_range(self) -> None:
         from modules.delay.legacy_compat import LegacyDelayShim

@@ -1173,9 +1173,8 @@ typedef struct {
 
 /* Reject, not clamp -- see delay_aec3_get_mem_size()'s header comment. Sole
  * definition, so a query and an init can never disagree about whether a
- * request is admissible (external review 2026-08-16: the earlier silent
- * clamp let a direct low-level caller run a different bank size than
- * requested with no error signal, violating the project fail-fast rule). */
+ * request is admissible. A silent clamp here would let a direct low-level
+ * caller run a different bank size than requested with no error signal. */
 static int da_valid_num_filters(int num_filters) {
     return num_filters >= 1 && num_filters <= DA_NUM_FILTERS;
 }

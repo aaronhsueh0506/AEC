@@ -415,10 +415,10 @@ typedef struct {
  * num_filters is the number of staggered matched-filter hypotheses actually
  * searched; out-of-range values ([1, DA_NUM_FILTERS] exclusive) are
  * REJECTED here too -- delay_aec3_get_mem_size() returns 0 and
- * delay_aec3_init() returns -1 -- matching the project fail-fast rule the
+ * delay_aec3_init() returns -1 -- matching the fail-fast rule the
  * top-level aec_validate_config() already applies. A silent clamp at this
- * layer (the pre-review behaviour) would let a direct low-level caller run
- * a different bank size than requested with no error signal. One shared
+ * layer would let a direct low-level caller run a different bank size than
+ * requested with no error signal. One shared
  * validity helper feeds both entry points, so a query and an init can never
  * disagree about whether a request is admissible.
  *

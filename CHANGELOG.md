@@ -43,7 +43,7 @@ when verdict requires it.
 
 ## [Unreleased] — 2026-08-16 — delay productization line A, step 4 (CLI + memory diagnostics + docs/ABI) — A-line complete
 
-### Review follow-ups (external review, 2026-08-16)
+### Hardening and consistency fixes
 
 - Low-level `delay_aec3_get_mem_size()`/`delay_aec3_init()` now REJECT
   out-of-range `num_filters` (0 / nonzero error) instead of silently
