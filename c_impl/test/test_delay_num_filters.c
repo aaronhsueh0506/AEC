@@ -56,6 +56,10 @@
  *   5. Plan §3.4.1: on any one grid mem(n=1) < ... < mem(n=5), on all four
  *      grids -- every one of those numbers was IDENTICAL before step 2.
  *      Non-MATCHED modes, which carve no estimator, land below even n=1.
+ *   5b. Plan §3.2.8 / §3.4 (step 3): the FIXED pool then scales with
+ *      fixed_delay_samples -- exactly EXTERNAL_ALIGNED plus one
+ *      ALIGN16((fixed + hop) * 4) ring -- where before step 3 every FIXED
+ *      delay produced the same number (the MATCHED search-ring size).
  *   6. Plan §3.4.3: aec_create() (heap arena) and aec_init() (caller pool)
  *      stay sample-exact at every bank size, now that the layout depends on
  *      the bank size.
@@ -477,9 +481,11 @@ static void test_mem_size_shrinks_with_bank(void) {
             prev = got;
         }
         /* The estimator is a MATCHED-only cost: with no estimator to carve,
-         * the pool must land strictly below even the smallest bank. (The
-         * ring differentiation itself is plan step 3; this only asserts what
-         * step 2 already makes true.) */
+         * the pool must land strictly below even the smallest bank. Since
+         * plan step 3 the FIXED figure below is also the FLOOR of that mode
+         * (fixed_delay_samples=0, i.e. a hop-sized ring) rather than one
+         * fixed number for the whole mode -- see
+         * test_fixed_pool_scales_with_the_delay(). */
         {
             AecConfig c1, cf, ce;
             size_t m1, mf, me;
@@ -499,6 +505,111 @@ static void test_mem_size_shrinks_with_bank(void) {
             snprintf(msg, sizeof msg, "%s: EXTERNAL_ALIGNED (%zu) < FIXED (%zu)",
                      grids[g].tag, me, mf);
             CHECK(me > 0 && me < mf, msg);
+        }
+    }
+}
+
+/* Plan §3.2.8 / §3.4: the FIXED pool is a function of fixed_delay_samples,
+ * not one flat number for the mode. Before plan step 3 every row of this
+ * table was IDENTICAL (the ring was sized from the MATCHED search budget,
+ * max(delay_buffer_ms, max_delay_ms + 4096), whatever the delay was), so
+ * this is the assertion that pins the whole point of that step.
+ *
+ * Three separable claims:
+ *   a) strictly monotonic in the delay, by the EXACT ALIGN16 ring step --
+ *      "> prev" alone would still pass if the ring shrank by the wrong term;
+ *   b) a small fixed delay is DRAMATICALLY cheaper than the old search-ring
+ *      sizing -- pinned as a hard ratio against the MATCHED n=5 pool, not
+ *      as a hardcoded KiB figure;
+ *   c) the whole difference between EXTERNAL_ALIGNED and FIXED(d) is the
+ *      ring array itself, which is what "EXTERNAL carries no delay bytes"
+ *      means concretely.
+ * The printed table is the source of the manual's per-mode byte figures. */
+/* The FIXED ring as aec_carve() lays it out: ALIGN16((fixed + hop) * 4).
+ * Spelled ONCE so the exact-composition claim and the monotonic-step claim
+ * below cannot drift apart -- two hand-inlined copies of the same formula
+ * could be edited into agreeing with each other and with neither the carve.
+ * Deliberately re-derived here rather than read from a library helper: this
+ * is the independent expectation the assertions compare aec_get_mem_size()
+ * against. */
+static size_t fixed_ring_bytes(int fixed, int hop) {
+    return (((size_t)(fixed + hop) * sizeof(float)) + 15u) & ~(size_t)15u;
+}
+
+static void test_fixed_pool_scales_with_the_delay(void) {
+    static const struct { int sr, fft, hop; const char *tag; } grids[] = {
+        { 16000,  256, 128, "16k/256"  },
+        { 16000,  512, 256, "16k/512"  },
+        { 48000, 1024, 512, "48k/1024" },
+    };
+    /* ms of fixed delay -- converted per rate so every grid walks the same
+     * physical delays (0 / 5 / 25 / 100 / 500 / 2500 ms). */
+    static const float delay_ms[] = { 0.0f, 5.0f, 25.0f, 100.0f, 500.0f, 2500.0f };
+    char msg[224];
+    unsigned g, d;
+
+    printf("--- aec_get_mem_size(balanced) FIXED by grid x fixed_delay ---\n");
+    for (g = 0; g < sizeof grids / sizeof grids[0]; ++g) {
+        AecConfig cm, ce;
+        size_t m5, me, prev = 0;
+        int prev_fixed = 0;
+
+        aec_config_from_preset(&cm, AEC_PRESET_BALANCED, grids[g].sr);
+        cm.fft_size = grids[g].fft;
+        m5 = aec_get_mem_size(&cm);              /* MATCHED n=5 reference */
+        ce = cm;
+        ce.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+        me = aec_get_mem_size(&ce);
+        snprintf(msg, sizeof msg, "%s: MATCHED n=5 and EXTERNAL both size",
+                 grids[g].tag);
+        CHECK(m5 > 0 && me > 0, msg);
+
+        for (d = 0; d < sizeof delay_ms / sizeof delay_ms[0]; ++d) {
+            AecConfig cf;
+            size_t got, ring_bytes;
+            int fixed = (int)(delay_ms[d] * (float)grids[g].sr / 1000.0f);
+
+            cf = cm;
+            cf.delay_mode = AEC_DELAY_FIXED;
+            cf.fixed_delay_samples = fixed;
+            got = aec_get_mem_size(&cf);
+            printf("    %-10s fixed=%-7d (%6.1f ms)  %zu B   (MATCHED n=5: %zu B)\n",
+                   grids[g].tag, fixed, (double)delay_ms[d], got, m5);
+            snprintf(msg, sizeof msg, "%s: FIXED(%d) sizes", grids[g].tag, fixed);
+            CHECK(got > 0, msg);
+
+            /* (c) exact composition: EXTERNAL + ALIGN16((fixed+hop)*4). */
+            ring_bytes = fixed_ring_bytes(fixed, grids[g].hop);
+            snprintf(msg, sizeof msg,
+                     "%s: FIXED(%d) == EXTERNAL + ALIGN16((fixed+hop)*4) "
+                     "(%zu == %zu + %zu)",
+                     grids[g].tag, fixed, got, me, ring_bytes);
+            CHECK(got == me + ring_bytes, msg);
+
+            /* (a) monotonic by exactly the ring delta. */
+            if (d > 0) {
+                size_t step = fixed_ring_bytes(fixed, grids[g].hop)
+                            - fixed_ring_bytes(prev_fixed, grids[g].hop);
+                snprintf(msg, sizeof msg,
+                         "%s: FIXED(%d) - FIXED(%d) == %zu B exactly (%zu - %zu)",
+                         grids[g].tag, fixed, prev_fixed, step, got, prev);
+                CHECK(got > prev && got - prev == step, msg);
+            }
+            prev = got; prev_fixed = fixed;
+        }
+
+        /* (b) the headline: a 25 ms fixed delay costs a small fraction of the
+         * MATCHED n=5 pool, where before step 3 it cost within ~9% of it. */
+        {
+            AecConfig cf = cm;
+            size_t got;
+            cf.delay_mode = AEC_DELAY_FIXED;
+            cf.fixed_delay_samples = (int)(25.0f * (float)grids[g].sr / 1000.0f);
+            got = aec_get_mem_size(&cf);
+            snprintf(msg, sizeof msg,
+                     "%s: FIXED(25 ms) is under 70%% of MATCHED n=5 "
+                     "(%zu vs %zu)", grids[g].tag, got, m5);
+            CHECK(got * 10 < m5 * 7, msg);
         }
     }
 }
@@ -567,6 +678,7 @@ int main(void) {
     test_low_level_init_contract();
     test_pool_geometry_literals();
     test_mem_size_shrinks_with_bank();
+    test_fixed_pool_scales_with_the_delay();
     test_heap_vs_pool_parity_every_n();
     printf("---\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

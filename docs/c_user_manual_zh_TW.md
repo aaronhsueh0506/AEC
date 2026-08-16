@@ -204,7 +204,7 @@ instance 存活期間不可變）** 決定。這是唯一的真實來源：
 | `delay_mode` | 需要的欄位 | 行為 | 何時用 |
 |---|---|---|---|
 | `AEC_DELAY_MATCHED`（預設） | `delay_num_filters` = 1–5 | 內建 matched filter 線上估計延遲，參考環形緩衝套用 | 延遲未知或會變動（一般線上產品） |
-| `AEC_DELAY_FIXED` | `fixed_delay_samples` ≥ 0 | **不建 estimator**；用同一條參考環形緩衝套用固定延遲 | 硬體路徑固定、bring-up 已量測出系統延遲 |
+| `AEC_DELAY_FIXED` | `fixed_delay_samples` ≥ 0 | **不建 estimator**；配置一條剛好夠用的參考環形緩衝（`fixed_delay_samples + hop_size`）套用固定延遲 | 硬體路徑固定、bring-up 已量測出系統延遲 |
 | `AEC_DELAY_EXTERNAL_ALIGNED` | 無 | **不建 estimator、不建環形緩衝**；呼叫端保證傳進來的 `ref` 已對齊 | HAL 已對齊，或離線且檔案已精準對齊 |
 
 非法組合一律**拒絕**（`aec_create` / `aec_init` 失敗、`aec_get_mem_size`
@@ -221,7 +221,8 @@ instance 存活期間不可變）** 決定。這是唯一的真實來源：
 > 請直接寫 `delay_mode`；此欄位未來會移除。
 
 以下的可擷取上限**只適用於 `MATCHED`**（`FIXED` 沒有搜尋這回事，
-只要環形緩衝夠大即可；緩衝會自動長到 `fixed_delay_samples + 4096`）。
+環形緩衝自動配置成剛好夠用的 `fixed_delay_samples + hop_size`，
+上限只受 `fixed_delay_samples` 的 `120 × sample_rate` 驗證上界限制）。
 
 **可擷取的延遲上限由 `delay_num_filters` 決定，不是 `max_delay_ms`。**
 這點容易誤解。下表是預設 `delay_num_filters = 5`：
@@ -346,17 +347,61 @@ NE10 backend 在每一格都少 608 B（16 kHz/512 與 48 kHz/1024 少 1,376 B /
 histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 省
 22,912 B。
 
-非 `MATCHED` 模式不配置 estimator（16 kHz/256 KISS）：
+非 `MATCHED` 模式不配置 estimator，而且**參考訊號環形緩衝的大小也依 mode
+不同**（16 kHz/256 KISS）：
 
 | `delay_mode` | 記憶池 | 相對 `MATCHED n=5` |
 |---|---:|---:|
 | `MATCHED` n=5（預設） | 379,696 B | — |
 | `MATCHED` n=1 | 356,784 B | −22,912 B |
-| `FIXED` | 345,760 B | −33,936 B |
+| `FIXED`，`fixed_delay_samples = 0` | 215,200 B | −164,496 B |
+| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 216,800 B | −162,896 B |
+| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 221,600 B | −158,096 B |
+| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 247,200 B | −132,496 B |
 | `EXTERNAL_ALIGNED` | 214,688 B | −165,008 B |
 
-`EXTERNAL_ALIGNED` 額外省的是整條參考訊號環形緩衝（受 `max_delay_ms` /
-`delay_buffer_ms` 影響），`FIXED` 仍保留它。
+#### 環形緩衝大小公式
+
+環形緩衝的容量由**唯一一個** helper 決定（C：`aec.c` 的
+`aec_ref_ring_samples()`；Python：`modules/config.py` 的
+`ref_ring_samples()`），`aec_get_mem_size()` 與 init 的 pool carve 共用同一個
+呼叫，不可能對不上：
+
+| `delay_mode` | 環形緩衝容量（sample） |
+|---|---|
+| `MATCHED` | `max(delay_buffer_ms, max_delay_ms + 4096)` 換算成 sample |
+| `FIXED` | `fixed_delay_samples + hop_size` |
+| `EXTERNAL_ALIGNED` | 0（完全不配置） |
+
+`FIXED` 的公式是**緊上界**，不是估算：設 `T` 為目前已寫入的總 sample 數，
+環形緩衝持有 `[T-rs, T)`；每個 hop 先寫入最新的 `hop` 個 sample（`T` 前進），
+再讀取 `[T-d-hop, T-d)` 來做延遲補償，因此正確性條件就是 `rs >= d + hop`。
+`FIXED` 的 `d` 是不可變的（沒有 estimator，`aec_reset()` 也是重新填入同一個
+值），所以這是「對一個常數取緊上界」，不是「對會變動的量取最壞情況」——
+沒有任何 headroom 項有意義，`max_delay_ms` / `delay_buffer_ms` 在這個 mode
+下完全不生效（改它們不會改變記憶池大小）。取等號是安全的：`rs == d + hop`
+時讀取起點正好落在寫入游標上，也就是這個 hop 的寫入唯一沒有覆蓋到的那一段。
+
+`fixed_delay_samples = 0` 是退化情形：仍配置一條 hop 長度、只寫不讀的緩衝
+（偏移為 0 時根本不需要讀），這樣 `FIXED` 只會有一條環形緩衝程式路徑。
+`EXTERNAL_ALIGNED` 與 `FIXED(0)` 的記憶池差距因此正好是一條 hop 長度的
+陣列（16 kHz/256 為 512 B）。
+
+換算成 byte：每個 sample 4 B，再對齊到 16 B。以 16 kHz/256（hop 128）為例，
+每多 1 ms 的 `fixed_delay_samples` 就多 64 B；48 kHz/1024 每多 1 ms 多 192 B。
+
+各格點的 `FIXED` 實測值（KISS backend，balanced preset）：
+
+| 格點 | fixed=0 | 25 ms | 100 ms | 500 ms |
+|---|---:|---:|---:|---:|
+| 16 kHz / 256 | 215,200 B | 216,800 B | 221,600 B | 247,200 B |
+| 16 kHz / 512 | 344,784 B | 346,384 B | 351,184 B | 376,784 B |
+| 48 kHz / 1024 | 740,512 B | 745,312 B | 759,712 B | 836,512 B |
+
+> **注意**：`fixed_delay_samples` 很大時 `FIXED` 也可能比 `MATCHED n=5` 更
+> 耗記憶體（48 kHz/1024、2500 ms 為 1,220,512 B，高於 `MATCHED n=5` 的
+> 1,166,992 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
+> 記憶體，正確作法是讓呼叫端自己補償掉大延遲後改用 `EXTERNAL_ALIGNED`。
 
 另外一個明顯的開關（16 kHz/256 KISS，相對 379,696 B）：
 
@@ -479,9 +524,9 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | 欄位 | 型別 | 預設 | 允許範圍 | 說明／何時調整 |
 |---|---|---:|---|---|
 | `delay_mode` | `AecDelayMode` | `AEC_DELAY_MATCHED` | `MATCHED` / `FIXED` / `EXTERNAL_ALIGNED` | **對齊方式的唯一真實來源**（見 §3 延遲契約的三態表）。init 時決定、instance 存活期間不可變（各 mode 的 pool 佈局不同，要改必須 destroy + 重新 init）。非法組合一律拒絕。 |
-| `fixed_delay_samples` | `int` | `-1` | `-1`，或 `FIXED` 時 0 – `120 × sample_rate` | **只在 `FIXED` 有意義**：bring-up 量測到的系統延遲，單位是 native-rate sample。其他 mode 必須維持 `-1`（帶值會被拒絕，不會被忽略）。環形緩衝會自動長到 `fixed_delay_samples + 4096`。 |
-| `max_delay_ms` | `float` | `1024.0` | 0 – 60000 | **參考訊號環形緩衝的尺寸下限（ms）**，不是搜尋上限（見 §3 延遲契約）。調高只是多配記憶體，不會提高可擷取的延遲。 |
-| `delay_buffer_ms` | `float` | `2048.0` | 0 – 120000 | 參考訊號環形緩衝長度（ms）。實際樣本數取 `delay_buffer_ms` 與 `max_delay_ms + 4096 samples` 兩者較大者。調高 `max_delay_ms` 時通常要一併調高。 |
+| `fixed_delay_samples` | `int` | `-1` | `-1`，或 `FIXED` 時 0 – `120 × sample_rate` | **只在 `FIXED` 有意義**：bring-up 量測到的系統延遲，單位是 native-rate sample。其他 mode 必須維持 `-1`（帶值會被拒絕，不會被忽略）。它同時**決定參考環形緩衝的大小**：`FIXED` 只配置 `fixed_delay_samples + hop_size` 個 sample（緊上界，見 §5 記憶池表的公式），`max_delay_ms` / `delay_buffer_ms` 在此 mode 無效。 |
+| `max_delay_ms` | `float` | `1024.0` | 0 – 60000 | **`MATCHED` 專用**：參考訊號搜尋環形緩衝的尺寸下限（ms），不是搜尋上限（見 §3 延遲契約）。調高只是多配記憶體，不會提高可擷取的延遲。`FIXED` / `EXTERNAL_ALIGNED` 下完全無效（見 §5 環形緩衝大小公式）。 |
+| `delay_buffer_ms` | `float` | `2048.0` | 0 – 120000 | **`MATCHED` 專用**：參考訊號搜尋環形緩衝長度（ms）。實際樣本數取 `delay_buffer_ms` 與 `max_delay_ms + 4096 samples` 兩者較大者。調高 `max_delay_ms` 時通常要一併調高。`FIXED` / `EXTERNAL_ALIGNED` 下完全無效。 |
 | `delay_est_init_s` | `float` | `0.3` | 0 – 3600 | 延遲估計值需維持穩定多久才視為已鎖定（秒）。 |
 | `delay_est_period_s` | `float` | `0.5` | 0 – 3600 | 鎖定後的重新確認週期（秒）。回音路徑常變動（裝置會移動）可調短。 |
 | `delay_num_filters` | `int` | `5` | 1 – 5（**只在 `MATCHED`**；其他 mode 必須維持 5） | Matched-filter bank 大小（**算力旋鈕**）。可靠搜尋上限隨之縮小：n=1→125ms／2→221ms／3→317ms／4→413ms／5→509ms；每少一組省 ~4.2 MMAC/s 的 full-rate 搜尋算力，**並省 5,728 B 記憶池**（bank、render ring、兩個 histogram 都依 n 從記憶池切出，見 §5 記憶池表）。只在系統延遲已由 `fixed_delay_samples` 補償、matched filter 僅追殘差的部署縮小；bench/dataset 一律維持 5（見 `delay_estimator_design_zh_TW.md` §5）。`FIXED` / `EXTERNAL_ALIGNED` 根本沒有 matched filter，改這個值會被拒絕（不是忽略）；`0` 在任何 mode 都是錯誤，不是「關閉延遲估計」的入口。 |

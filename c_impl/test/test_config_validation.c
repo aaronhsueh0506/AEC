@@ -878,8 +878,9 @@ static void test_delay_mode_illegal_combinations(void) {
         check_rejected("FIXED + fixed_delay_samples=-1", &c, mem, sz);
         c.fixed_delay_samples = -1000;
         check_rejected("FIXED + negative fixed_delay_samples", &c, mem, sz);
-        /* Rate-relative 120 s bound: the ring is grown to fixed+4096, so an
-         * unbounded value would drive an unbounded allocation. */
+        /* Rate-relative 120 s bound: in FIXED the ring is sized fixed+hop
+         * (4096 is the MATCHED search ring's headroom, not this mode's), so
+         * an unbounded value would drive an unbounded allocation. */
         c.fixed_delay_samples = 120 * 16000 + 1;
         check_rejected("FIXED + fixed_delay_samples past the 120 s bound",
                        &c, mem, sz);
@@ -961,9 +962,18 @@ static void test_delay_mode_illegal_combinations(void) {
                 snprintf(label, sizeof(label),
                          "%s: current_delay seeded from the config", ok[i].tag);
                 CHECK(a.current_delay == ok[i].fixed, label);
+                /* Plan §3.2.8: the FIXED ring is sized for THIS delay -- the
+                 * tight `fixed + hop` bound -- not from the MATCHED search
+                 * budget it used to borrow (which also pulled in a legacy
+                 * +4096 headroom that has no meaning for an immutable
+                 * delay). The sizing rule itself, and the alignment
+                 * behaviour of the exact-fit ring, live in
+                 * test_linear_context.c / test_delay_num_filters.c; this row
+                 * only pins that a VALIDATED config lands on it. */
                 snprintf(label, sizeof(label),
-                         "%s: ring covers fixed + 4096", ok[i].tag);
-                CHECK(a.ref_ring_size >= ok[i].fixed + 4096, label);
+                         "%s: ring == fixed + hop (%d)", ok[i].tag,
+                         ok[i].fixed + a.hop_size);
+                CHECK(a.ref_ring_size == ok[i].fixed + a.hop_size, label);
             }
             aec_destroy(&a);
             /* Same config through the caller-pool path. */

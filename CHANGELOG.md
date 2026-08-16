@@ -41,6 +41,120 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-16 — delay productization line A, step 3: per-mode alignment ring
+
+Plan §3.2.8-9, §9.3. Step 2 stopped constructing an ESTIMATOR outside
+`MATCHED`; the reference alignment RING was still sized identically for every
+mode that had one. It now follows the mode. **Pool layout changes for
+`FIXED` — re-query `aec_get_mem_size()`** (no source change; `MATCHED` and
+`EXTERNAL_ALIGNED` pool sizes are unchanged). **Output contract intact**:
+byte-exact vs `5241d99` on both ports across
+{16k/256, 16k/512, 48k/1024} × {`MATCHED` n=5, `MATCHED` n=1, `FIXED` at
+0/100/128/1536/1600/8137/40000, `EXTERNAL_ALIGNED`} — 15 C cases (FNV-64 over
+every output hop) and 15 Python cases (SHA-256 over the concatenated output),
+all identical.
+
+### Changed
+
+1. **The reference ring is sized per mode, by ONE checked helper** —
+   C `aec_ref_ring_samples()` (`aec.c`), Python `ref_ring_samples()`
+   (`modules/config.py`), term for term the same:
+
+   | mode | ring capacity (samples) |
+   |---|---|
+   | `MATCHED` | `max(delay_buffer_ms, max_delay_ms + 4096)` — unchanged |
+   | `FIXED` | `fixed_delay_samples + hop_size` |
+   | `EXTERNAL_ALIGNED` | 0 |
+
+   `aec_get_mem_size()` and the `aec_carve()` pool walk take the number from
+   the same `aec_derive_dims()` call, so the query and the carve cannot
+   describe different rings. `MATCHED` keeps the legacy `+4096` headroom
+   deliberately: that ring size ALSO gates which estimates the controller may
+   accept (`new_delay <= ref_ring_size - hop`), so it is behaviour, not slack.
+
+2. **`FIXED` no longer borrows the search ring.** `max_delay_ms` and
+   `delay_buffer_ms` are now inert in that mode — a config differing only in
+   those two fields produces a byte-identical pool. The `fixed + hop` bound
+   is TIGHT, not an estimate: the ring holds absolute samples `[T-rs, T)`,
+   each hop writes the newest `hop` (advancing `T`) and then reads
+   `[T-d-hop, T-d)`, so validity is exactly `rs >= d + hop`; under `FIXED`,
+   `d` is immutable (no estimator, and `reset()` re-seeds the same value), so
+   this bounds a constant rather than a moving quantity and no headroom term
+   is meaningful. Equality is safe — at `rs == d + hop` the read starts on
+   the write cursor, i.e. the one hop this hop's write did not overwrite.
+   `fixed_delay_samples = 0` degenerates to a hop-sized, write-only ring
+   (the read is skipped by the `current_delay > 0` guard), kept rather than
+   special-cased to NULL so `FIXED` has exactly one ring code path.
+
+3. **`aec_get_mem_size(cfg)` now scales with `fixed_delay_samples`** (KISS,
+   balanced, 16 kHz/256), where every `FIXED` config used to return the same
+   345,760 B:
+
+   | config | pool | vs `MATCHED` n=5 |
+   |---|---:|---:|
+   | `MATCHED` n=5 (default) | 379,696 B | — |
+   | `FIXED` 0 | 215,200 B | −164,496 B |
+   | `FIXED` 400 (25 ms) | 216,800 B | −162,896 B |
+   | `FIXED` 1600 (100 ms) | 221,600 B | −158,096 B |
+   | `FIXED` 8000 (500 ms) | 247,200 B | −132,496 B |
+   | `EXTERNAL_ALIGNED` | 214,688 B | −165,008 B |
+
+   A typical fixed-path product (25 ms measured delay) drops from 345,760 B
+   to 216,800 B, i.e. **−128,960 B**. Per-grid tables in the manual (§5) and
+   printed by `make test-delay-num-filters`. Note the ring must still hold
+   the delay: a 2500 ms `FIXED` delay at 48 kHz costs 1,220,512 B, ABOVE
+   `MATCHED` n=5 — the memory-efficient answer to a large fixed delay is for
+   the caller to compensate it and use `EXTERNAL_ALIGNED`.
+
+### Fixed
+
+4. **`EXTERNAL_ALIGNED` left one delay attribute unset in Python.** The
+   orchestrator never assigned `_current_delay` in that branch, and
+   `get_stats()` / the `_diag` walk read it unconditionally — so
+   `AEC(delay_mode=EXTERNAL_ALIGNED).get_stats()` raised `AttributeError`
+   (present since step 1; audio path unaffected, every other reader is behind
+   `_delay_active`). It is now spelled `0`, the contract value, matching the
+   C port's `a->current_delay = 0` and what `aec_debug_status()` reports.
+   Only visible change beyond the fixed crash: `_diag['delay_samples']` reads
+   0 instead of -1 in that mode.
+
+### Added
+
+5. **Tests** — Python `test_delay_mode.py` 22 → 32 cases; C
+   `test_linear_context.c` 111 → 188 and `test_delay_num_filters.c`
+   109 → 166. New coverage: the ring-size formula per mode on every grid
+   (`FIXED` at 0 / below-a-hop / exactly-a-hop / exact-hop-multiple /
+   NON-multiple / past-`max_delay_ms`); `max_delay_ms`/`delay_buffer_ms`
+   proven inert under `FIXED`; the served far byte-equal to the caller's far
+   delayed by exactly `fixed_delay_samples` across hundreds of ring wraps
+   (the split two-part read is now the COMMON path — 218/400 hops at
+   `fixed=100` — not the rare edge case it was against a 32,768-sample ring),
+   the same again after `aec_reset()`'s refill with the RAW-far window
+   exactly as long as at init, a synthetic echo actually cancelled at the
+   right fixed delay (34.3 dB) and not at a wrong one (0.1 dB),
+   `EXTERNAL_ALIGNED` far passthrough sample-exact, and its pool proven equal
+   to `FIXED(0)`'s minus exactly one hop-sized array — the concrete meaning
+   of "carries no delay bytes".
+
+### Notes
+
+- **Mutation-checked, red/green both recorded** (4 C + 3 Python): dropping
+  `+ hop` from the `FIXED` arm → C `test_linear_context` faults and
+  `test_delay_num_filters` 38 red, Python 5 red; shifting the ring read by
+  one sample → C 15 red, Python 4 red (`test_delay_num_filters` stays green,
+  correctly — it sizes, it does not read); letting `EXTERNAL_ALIGNED` fall
+  through to a ring → C 3 red on the pool-composition row, Python 1 red on
+  the helper; additionally wiring that ring into the carve → C 8 red. Every
+  mutation restored and re-run green.
+- **The ERLE correctness test runs the shipped chain (RES on) on purpose.**
+  `enable_res=False` is not a neutral simplification here: it also starves
+  the AEC3 ERLE feed (`last_erle_windowed` is cached only under
+  `enable_res or return_res_context`), which stalls that configuration at
+  ~3 dB in EVERY delay mode alike — verified identical on `5241d99`, so it is
+  a property of that diagnostic config, not of the alignment path.
+- Plan §3.4.6's `--print-mem-size` diagnostics (resolved grid / mode / n /
+  estimator bytes / ring bytes) remain step 4.
+
 ## [Unreleased] — 2026-08-16 — delay productization line A, step 2: pool-first, config-sized `DelayAec3`
 
 Plan §3, §9.2. **`sizeof(Aec)` and the pool layout change — a rebuild is

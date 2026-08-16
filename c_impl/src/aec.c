@@ -260,6 +260,16 @@ int aec_config_resolve_delay(AecConfig* cfg) {
     return 0;
 }
 
+/* "Does this config have a reference alignment ring?" -- MATCHED and FIXED
+ * do, EXTERNAL_ALIGNED does not (the caller pre-aligned; nothing to buffer).
+ * Mirrors Python's `_delay_active`, and is a DIFFERENT question from "is
+ * there a matched-filter estimator" (that is MATCHED only, Aec::has_delay).
+ * The two agreed before FIXED existed, which is exactly why the predicate
+ * gets a name here instead of being open-coded at each site. */
+static inline int aec_ring_active(const AecConfig* cfg) {
+    return cfg->delay_mode != AEC_DELAY_EXTERNAL_ALIGNED;
+}
+
 /* Single source of truth for AecConfig bounds-checking (F05: "no sample-
  * rate/config validation anywhere"). aec_create / aec_get_mem_size /
  * aec_init all run this before touching cfg-derived sizes or state; none of
@@ -409,8 +419,8 @@ static int aec_validate_config(const AecConfig* cfg_in) {
         case AEC_DELAY_FIXED:
             if (cfg->fixed_delay_samples < 0) return 0;
             /* Generous but finite, and rate-relative: the reference ring is
-             * grown to fixed_delay_samples + 4096 (aec_derive_dims), so an
-             * unbounded value here would drive an unbounded allocation.
+             * sized `fixed_delay_samples + hop` (aec_ref_ring_samples), so
+             * an unbounded value here would drive an unbounded allocation.
              * 120 s matches delay_buffer_ms's own 120000 ms upper bound. */
             if ((long)cfg->fixed_delay_samples > 120L * (long)cfg->sample_rate) return 0;
             if (cfg->delay_num_filters != DA_NUM_FILTERS) return 0;
@@ -818,6 +828,74 @@ int aec_create(Aec* a, const AecConfig* cfg_in) {
     return 0;
 }
 
+/* ── reference alignment ring sizing (ONE checked helper) ─────────────────── */
+
+/* Legacy hop-boundary headroom carried by the MATCHED search ring.
+ *
+ * Deliberately NOT applied to FIXED (see aec_ref_ring_samples): under
+ * MATCHED it is load-bearing rather than mere slack, because ring size feeds
+ * the `new_delay <= ref_ring_size - hop` eligibility gate in aec_process()
+ * -- i.e. it also decides which estimates the controller is allowed to
+ * accept. Changing it would change the default path's audio, so it stays
+ * verbatim. */
+#define AEC_REF_RING_MATCHED_HEADROOM 4096
+
+/* Reference alignment ring capacity, in samples, for a DELAY-RESOLVED cfg.
+ * The single source of truth for that number: aec_get_mem_size() budgets it
+ * and aec_carve() carves it from the same call (via aec_derive_dims), so the
+ * two cannot drift.
+ *
+ *   MATCHED   max(delay_buffer_ms, max_delay_ms + AEC_REF_RING_MATCHED_HEADROOM)
+ *             -- a SEARCH ring: the applied delay is unknown at init and can
+ *             move at any hop, so it is sized for the whole configured
+ *             search budget rather than for one delay.
+ *   FIXED     fixed_delay_samples + hop_size       (exact, see derivation)
+ *   EXTERNAL  0                                    (nothing to buffer)
+ *
+ * FIXED derivation. Let T be the total sample count written so far; the ring
+ * holds absolute samples [T-rs, T). Each hop aec_process() first writes the
+ * newest `hop` samples (advancing T by hop), then the delay-compensating read
+ * takes absolute samples [T-d-hop, T-d). Validity is therefore exactly
+ *
+ *     rs >= d + hop
+ *
+ * and under FIXED `d` is immutable (== cfg.fixed_delay_samples: no estimator
+ * exists, and aec_reset() re-seeds the same value), so this is a tight bound
+ * on a constant, not a worst case over a moving quantity -- no headroom term
+ * is meaningful. Equality is safe: at rs == d+hop the read starts exactly at
+ * ref_ring_write, i.e. on the oldest hop in the ring, which is precisely the
+ * one this hop's write did NOT overwrite.
+ *
+ * Byte-exactness against the old (oversized) ring follows from the fill gate
+ * `ref_ring_filled >= d + hop`: ref_ring_filled saturates at rs, so for ANY
+ * rs >= d+hop the gate first passes at hop index ceil((d+hop)/hop) and the
+ * samples served are the same absolute samples. d == 0 is the degenerate
+ * case -- a hop-sized, write-only ring (the read is skipped entirely by the
+ * `current_delay > 0` guard), kept rather than special-cased to NULL so that
+ * FIXED has exactly one ring code path.
+ *
+ * Returns 0 for EXTERNAL_ALIGNED (no ring wanted) and, defensively, for a
+ * capacity that would not fit an int -- callers treat 0-on-a-ring-mode as a
+ * hard config failure, so the two cases never merge in practice.
+ * aec_validate_config() caps fixed_delay_samples at 120 s of samples
+ * (<= 5,760,000) and hop at 512, so the overflow arm is unreachable today. */
+static int aec_ref_ring_samples(const AecConfig* cfg, int hop) {
+    if (cfg->delay_mode == AEC_DELAY_EXTERNAL_ALIGNED) return 0;
+    if (hop <= 0) return 0;
+    if (cfg->delay_mode == AEC_DELAY_FIXED) {
+        long long need = (long long)cfg->fixed_delay_samples + (long long)hop;
+        if (need < (long long)hop || need > 2147483647LL) return 0;
+        return (int)need;
+    }
+    {
+        int max_d = (int)(cfg->max_delay_ms * cfg->sample_rate / 1000.0f);
+        int buf   = (int)(cfg->delay_buffer_ms * cfg->sample_rate / 1000.0f);
+        if (buf < max_d + AEC_REF_RING_MATCHED_HEADROOM)
+            buf = max_d + AEC_REF_RING_MATCHED_HEADROOM;
+        return buf;
+    }
+}
+
 /* ── dimension helper (shared by aec_create() and aec_init()) ─────────────── */
 
 /* Derive all frame-dimension parameters from cfg.
@@ -849,19 +927,11 @@ static void aec_derive_dims(const AecConfig* cfg,
     int n = cfg->n_partitions;
     if (n <= 0) { n = (cfg->filter_length + hop - 1) / hop; if (n < 1) n = 1; }
     *o_nparts = n;
-    int max_d = (int)(cfg->max_delay_ms * cfg->sample_rate / 1000.0f);
-    int buf   = (int)(cfg->delay_buffer_ms * cfg->sample_rate / 1000.0f);
-    if (buf < max_d + 4096) buf = max_d + 4096;
-    /* FIXED: the ring must be able to serve the measured delay even when it
-     * exceeds the matched-filter-oriented max_delay_ms budget (mirrors the
-     * Python orchestrator's `buffer_samp = max(buffer_samp, fixed + 4096)`).
-     * No effect on MATCHED / EXTERNAL_ALIGNED, where fixed_delay_samples is
-     * pinned at -1 by aec_validate_config. Overflow-free: the validator caps
-     * fixed_delay_samples at 120 s of samples. */
-    if (cfg->delay_mode == AEC_DELAY_FIXED &&
-        buf < cfg->fixed_delay_samples + 4096)
-        buf = cfg->fixed_delay_samples + 4096;
-    *o_buf_samp = buf;
+    /* Reference alignment ring: ONE mode-aware checked helper, shared with
+     * aec_get_mem_size()/aec_carve() through this out-param (0 == no ring,
+     * i.e. EXTERNAL_ALIGNED). Mirrors the Python orchestrator's
+     * ref_ring_samples(). */
+    *o_buf_samp = aec_ref_ring_samples(cfg, hop);
     int cap = (AEC_STREAM_FIFO_MS * cfg->sample_rate / 1000 + hop - 1) / hop;
     if (cap < 2) cap = 2;
     /* F09 Variant A': round up to the next power of two. The SPSC ring
@@ -932,8 +1002,13 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
     }
     /* Reference alignment ring: present for MATCHED and FIXED, absent only
      * for EXTERNAL_ALIGNED (the caller pre-aligned; nothing to buffer).
-     * Must stay in lockstep with the matching carve in aec_carve(). */
-    if (cfg->delay_mode != AEC_DELAY_EXTERNAL_ALIGNED)
+     * `buf` already carries the mode (aec_ref_ring_samples via
+     * aec_derive_dims): 0 means "this mode wants no ring". A ring mode that
+     * came back 0 is an unrepresentable capacity, i.e. a config failure --
+     * never a silent no-ring instance. Must stay in lockstep with the
+     * matching carve in aec_carve(). */
+    if (cfg->delay_mode != AEC_DELAY_EXTERNAL_ALIGNED && buf <= 0) return 0;
+    if (buf > 0)
         t = ck_field_size(t, (size_t)buf, sizeof(float));
     t = ck_field_size(t, ck_mul_size((size_t)fcap, (size_t)hop), sizeof(float));   /* render_fifo */
     t = ck_field_size(t, (size_t)hop, sizeof(float));  /* fifo_zero_ref (F09 Variant A' underrun ref) */
@@ -1156,9 +1231,17 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
      * same position aec_get_mem_size() budgets them, with the SAME
      * (sample_rate, hop, delay_num_filters) triple -- that triple is the
      * whole lockstep contract, so it is read from `cfg`/`hop` in both places
-     * and nowhere reconstructed. Only MATCHED carves it; FIXED still gets the
-     * same ring MATCHED does (differentiating THAT is plan step 3). */
-    if (cfg->delay_mode != AEC_DELAY_EXTERNAL_ALIGNED) {
+     * and nowhere reconstructed. Only MATCHED carves it.
+     *
+     * The ring's capacity is likewise mode-dependent (plan step 3): MATCHED
+     * gets the full search ring, FIXED only `fixed_delay_samples + hop` --
+     * see aec_ref_ring_samples(), which produced the `buf_samp` passed in
+     * here and the identical number aec_get_mem_size() budgeted. */
+    if (aec_ring_active(cfg)) {
+        /* Same rejection aec_get_mem_size() already made for this config;
+         * repeated so the carve can never walk a ring it could not size.
+         * Nothing has been constructed yet, so there is nothing to unwind. */
+        if (buf_samp <= 0) return -1;
         if (cfg->delay_mode == AEC_DELAY_MATCHED) {
             size_t da_sz = delay_aec3_get_mem_size(cfg->sample_rate, hop,
                                                    cfg->delay_num_filters);
@@ -1714,7 +1797,7 @@ void aec_reset(Aec* a) {
      * MATCHED-exclusive. Mirrors the Python orchestrator's reset(), which
      * clears the ring under `_delay_active` and re-seeds _current_delay from
      * fixed_delay_samples when there is no estimator to reset. */
-    if (a->cfg.delay_mode != AEC_DELAY_EXTERNAL_ALIGNED) {
+    if (aec_ring_active(&a->cfg)) {
         if (a->has_delay) delay_aec3_reset(&a->delay);
         memset(a->ref_ring, 0, (size_t)a->ref_ring_size * sizeof(float));
         a->ref_ring_write = 0; a->ref_ring_filled = 0;
@@ -1962,7 +2045,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
      * shares the ring write + delay-compensating read below verbatim and
      * simply never runs the matched filter, since its applied delay came
      * from the caller's bring-up measurement and never changes. */
-    if (a->cfg.delay_mode != AEC_DELAY_EXTERNAL_ALIGNED) {
+    if (aec_ring_active(&a->cfg)) {
       if (a->has_delay) {
         float hop_s = (float)hop / (float)a->cfg.sample_rate;
         int hold_hops = (int)lrintf(a->cfg.delay_est_init_s / hop_s);
@@ -2702,7 +2785,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
              * see no external delay despite one being applied every hop.
              * MATCHED (1) and EXTERNAL_ALIGNED (0) are unchanged from the
              * previous `a->has_delay`, so this is byte-exact for both. */
-            in.delay_active = (a->cfg.delay_mode != AEC_DELAY_EXTERNAL_ALIGNED);
+            in.delay_active = aec_ring_active(&a->cfg);
             in.saturation_level = a->saturation_level;
             in.pending_gain_change = a->pending_gain_change;
             in.pending_delay_change = a->pending_delay_change;

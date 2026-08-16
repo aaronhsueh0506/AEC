@@ -28,7 +28,7 @@ from .detectors import (
     DoubleTalkAnalyzer,
 )
 from .epc import EchoPathChangeDetector, PathChangeRegimeHandler
-from .config import AecConfig, resolve_signal_grid
+from .config import AecConfig, ref_ring_samples, resolve_signal_grid
 from .debug_logger import AecDebugLogger
 
 # F2.4 simple-mu is deliberately frozen. The four values form one state
@@ -267,15 +267,15 @@ class AEC:
         # longer silently switches modes, it raises.
         _delay_mode = self.config.delay_mode
         if _delay_mode is not AecDelayMode.EXTERNAL_ALIGNED:
-            max_delay_samp = int(self.config.max_delay_ms * self.config.sample_rate / 1000)
-            # Ring buffer sized to delay_buffer_ms (default 1024 ms,
-            # matching WebRTC AEC3 kRenderTransferQueueSizeFrames=1000 ms).
-            # The +4096 below is legacy headroom; we keep it on top of the
-            # configured buffer to absorb hop-boundary alignment.
-            buffer_samp = int(self.config.delay_buffer_ms * self.config.sample_rate / 1000)
-            buffer_samp = max(buffer_samp, max_delay_samp + 4096)
+            # Ring capacity comes from the ONE mode-aware helper shared with
+            # the C port (config.ref_ring_samples <-> aec_ref_ring_samples):
+            # MATCHED keeps the full search ring
+            # (max(delay_buffer_ms, max_delay_ms + 4096), matching WebRTC
+            # AEC3 kRenderTransferQueueSizeFrames), FIXED shrinks to the
+            # exact `fixed_delay_samples + hop` it can ever read. Deriving it
+            # inline here is what let the two ports drift before.
+            buffer_samp = ref_ring_samples(self.config, self.config.hop_size)
             if _delay_mode is AecDelayMode.FIXED:
-                buffer_samp = max(buffer_samp, self.config.fixed_delay_samples + 4096)
                 self.delay_est = None
                 self._current_delay = self.config.fixed_delay_samples
             else:
@@ -309,8 +309,19 @@ class AEC:
             self._ref_ring_filled = 0  # Total samples written (for warmup)
             self._delay_active = True
         else:
+            # EXTERNAL_ALIGNED: no estimator, no ring, and NO other
+            # delay-attached allocation -- `ref` is aligned to `mic` by the
+            # caller's contract, so there is nothing to buffer or shift.
             self.delay_est = None
             self._delay_active = False
+            # The applied delay is 0 by contract, and it must be SPELLED that
+            # way rather than left unset: get_stats() and the _diag walk read
+            # _current_delay unconditionally, so an absent attribute made
+            # get_stats() raise AttributeError in this mode (audio path
+            # unaffected -- every other reader is behind `_delay_active`).
+            # 0 also matches the C port, which seeds a->current_delay = 0 for
+            # EXTERNAL_ALIGNED and reports it through aec_debug_status().
+            self._current_delay = 0
 
         # Create adaptive filter based on mode
         if self.config.mode in _FREQ_MODES:

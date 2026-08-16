@@ -99,6 +99,58 @@ def resolve_signal_grid(sample_rate: int, fft_size: int,
         f"frame_size/fft_size={fft_size}")
 
 
+# Legacy hop-boundary headroom carried by the MATCHED search ring. NOT applied
+# to FIXED (see ref_ring_samples): under MATCHED it is load-bearing rather than
+# slack, because the ring size also feeds the orchestrator's
+# ``new_delay <= _ref_ring_size - hop`` eligibility gate -- changing it would
+# change the default path's audio. Mirrors C's
+# ``AEC_REF_RING_MATCHED_HEADROOM``.
+REF_RING_MATCHED_HEADROOM = 4096
+
+
+def ref_ring_samples(config, hop_size: int) -> int:
+    """Reference alignment ring capacity in samples for a resolved config.
+
+    The single source of truth for that number on the Python side, mirroring
+    C's ``aec_ref_ring_samples()`` in ``aec.c`` term for term:
+
+      * ``MATCHED``  -- ``max(delay_buffer_ms, max_delay_ms + headroom)``, a
+        SEARCH ring: the applied delay is unknown at init and can move at any
+        hop, so it is sized for the whole configured search budget.
+      * ``FIXED``    -- ``fixed_delay_samples + hop_size`` exactly.
+      * ``EXTERNAL_ALIGNED`` -- 0 (nothing to buffer).
+
+    FIXED derivation. With ``T`` the total samples written so far, the ring
+    holds absolute samples ``[T-rs, T)``. Each hop the orchestrator first
+    writes the newest ``hop`` samples (advancing ``T``), then the
+    delay-compensating read takes ``[T-d-hop, T-d)``. Validity is therefore
+    exactly ``rs >= d + hop``, and under FIXED ``d`` is immutable (no
+    estimator exists, and ``reset()`` re-seeds the same value) -- a tight
+    bound on a constant, not a worst case over a moving quantity, so no
+    headroom term is meaningful. Equality is safe: at ``rs == d + hop`` the
+    read starts exactly at the write cursor, i.e. on the oldest hop in the
+    ring, which is precisely the one this hop's write did not overwrite.
+
+    Byte-exactness against the old (oversized) ring follows from the fill
+    gate ``_ref_ring_filled >= d + hop``: for ANY ``rs >= d + hop`` the gate
+    first passes at hop index ``ceil((d+hop)/hop)`` and serves the same
+    absolute samples. ``d == 0`` degenerates to a hop-sized, write-only ring
+    (the read is skipped by the ``_current_delay > 0`` guard), kept rather
+    than special-cased away so FIXED has exactly one ring code path.
+    """
+    from .enums import AecDelayMode          # local: avoids an import cycle
+    if hop_size <= 0:
+        raise ValueError(f"ref_ring_samples: hop_size={hop_size} must be > 0")
+    mode = config.delay_mode
+    if mode is AecDelayMode.EXTERNAL_ALIGNED:
+        return 0
+    if mode is AecDelayMode.FIXED:
+        return int(config.fixed_delay_samples) + int(hop_size)
+    max_delay_samp = int(config.max_delay_ms * config.sample_rate / 1000)
+    buffer_samp = int(config.delay_buffer_ms * config.sample_rate / 1000)
+    return max(buffer_samp, max_delay_samp + REF_RING_MATCHED_HEADROOM)
+
+
 @dataclass
 class AecConfig:
     """AEC configuration (release surface).
@@ -688,10 +740,12 @@ class AecConfig:
                 raise ValueError(
                     "delay_mode=FIXED requires fixed_delay_samples >= 0, got "
                     f"{fixed}")
-            # Generous but finite, and rate-relative: the reference ring is
-            # grown to fixed + 4096, so an unbounded value here would drive
-            # an unbounded allocation. 120 s matches delay_buffer_ms's own
-            # 120000 ms upper bound on the C side.
+            # Generous but finite, and rate-relative: in FIXED the reference
+            # ring is sized fixed + hop (the 4096-sample headroom belongs to
+            # the MATCHED search ring, which this mode does not build), so an
+            # unbounded value here would drive an unbounded allocation. 120 s
+            # matches delay_buffer_ms's own 120000 ms upper bound on the C
+            # side.
             if fixed > 120 * self.sample_rate:
                 raise ValueError(
                     f"fixed_delay_samples={fixed} exceeds the 120 s bound "

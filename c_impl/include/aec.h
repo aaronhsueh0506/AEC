@@ -108,6 +108,10 @@ typedef struct AecConfig {
     float  epc_total_rise;         /* 1.5  */
     float  epc_delta_threshold;    /* 0.3  */
     float  epc_mu_floor;           /* 0.5  */
+    /* MATCHED-only: together these size the reference SEARCH ring
+     * (max(delay_buffer_ms, max_delay_ms + 4096 samples)). Inert under
+     * FIXED (sized from fixed_delay_samples + hop) and EXTERNAL_ALIGNED
+     * (no ring at all) -- see aec_ref_ring_samples() in aec.c. */
     float  max_delay_ms;           /* 1024 */
     float  delay_buffer_ms;        /* 2048 */
     float  delay_est_init_s;       /* 0.3  */
@@ -186,8 +190,11 @@ typedef struct AecConfig {
      * Must be < 0 (the -1 "unset" sentinel) in MATCHED and
      * EXTERNAL_ALIGNED -- a fixed delay those modes cannot honour is
      * rejected, not ignored. Mirrors Python AecConfig.fixed_delay_samples.
-     * The reference ring grows to cover fixed_delay_samples + 4096 samples
-     * (same rule as the Python orchestrator). */
+     * Sizes the reference ring exactly: FIXED carves
+     * `fixed_delay_samples + hop_size` samples and ignores max_delay_ms /
+     * delay_buffer_ms entirely (those size the MATCHED SEARCH ring, and
+     * there is no search here). Same rule as the Python orchestrator's
+     * ref_ring_samples(). */
     int    fixed_delay_samples;    /* -1 */
 } AecConfig;
 
@@ -318,9 +325,10 @@ typedef struct Aec {
      * matched-filter ESTIMATOR was constructed (mirrors Python's
      * `delay_est is not None`). The reference RING is a separate question:
      * it exists for MATCHED and FIXED alike and only EXTERNAL_ALIGNED has
-     * none (mirrors Python's `_delay_active`). Read
-     * cfg.delay_mode != AEC_DELAY_EXTERNAL_ALIGNED for "is there a ring",
-     * never has_delay. */
+     * none (mirrors Python's `_delay_active`). Ask aec_ring_active(&cfg)
+     * (aec.c) for "is there a ring" -- never has_delay, and never a
+     * re-spelled delay_mode comparison, so the two questions cannot silently
+     * merge again. */
     DelayAec3 delay;       int has_delay;
     float* ref_ring;       int ref_ring_size, ref_ring_write, ref_ring_filled;
     int    current_delay;  /* MATCHED: -1 until first acquisition.

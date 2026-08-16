@@ -33,6 +33,17 @@ What is asserted:
   5. LATE MUTATION STILL TRANSLATES — ``cfg.enable_delay_est = False`` after
      construction is honoured at AEC() time, mirroring the C port (which
      resolves inside ``aec_create()``, not inside ``aec_config_defaults()``).
+  6. THE RING IS SIZED PER MODE (plan §3.2.8-9, step 3) — ``MATCHED`` keeps
+     the search ring (``max(delay_buffer_ms, max_delay_ms + 4096)``, which
+     also gates which estimates the controller may accept), ``FIXED`` carves
+     exactly ``fixed_delay_samples + hop`` and is INERT to those two knobs,
+     and ``EXTERNAL_ALIGNED`` carves nothing and leaves no other
+     delay-attached state. All three mirror C's ``aec_ref_ring_samples()``.
+  7. THE EXACT-FIT RING STILL SERVES THE RIGHT SAMPLES — the far the engine
+     actually consumes is byte-equal to the caller's far delayed by exactly
+     ``fixed_delay_samples``, across hundreds of wraps (the split read is
+     now the common path, not an edge case), through ``reset()``'s refill,
+     and a real synthetic echo is cancelled only when the delay is right.
 
 Mutation checks (each breaks one line and must go red here):
   - drop the ``fixed_delay_samples >= 0`` arm of the translation (always
@@ -40,7 +51,12 @@ Mutation checks (each breaks one line and must go red here):
   - drop the ``enable_delay_est`` guard (translate unconditionally) ->
     the MATCHED default resolves to EXTERNAL_ALIGNED and rows 1/4 fail;
   - drop the mirror rewrite -> the idempotency/round-trip rows fail;
-  - relax any ``raise`` in ``_resolve_delay_mode`` -> the matrix in 3 fails.
+  - relax any ``raise`` in ``_resolve_delay_mode`` -> the matrix in 3 fails;
+  - drop the ``+ hop`` from ``ref_ring_samples``'s FIXED arm -> the ring
+    sizing rows and the wrap/refill alignment rows fail;
+  - shift the ring read offset by one hop/sample -> every "served far is
+    far[t-N]" row fails;
+  - hand EXTERNAL_ALIGNED a ring -> the no-ring rows fail.
 
 Run:
     python3 -m pytest python/tests/test_delay_mode.py
@@ -57,6 +73,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aec import AEC, AecConfig
+from modules.config import ref_ring_samples
 from modules.enums import AecDelayMode
 
 
@@ -267,11 +284,16 @@ class DelayModeBehaviourTests(unittest.TestCase):
         self.assertEqual(aec._current_delay, _FIXED)
 
     def test_fixed_ring_covers_a_delay_beyond_max_delay_ms(self) -> None:
-        """The ring grows to fixed + 4096 even past the max_delay_ms budget."""
+        """The ring covers a delay past the max_delay_ms budget -- exactly.
+
+        max_delay_ms/delay_buffer_ms size the MATCHED SEARCH ring and are
+        inert here (plan step 3): what the ring must hold is this one
+        immutable delay plus the hop being read, and nothing else.
+        """
         big = 40000   # 2.5 s at 16 kHz, past the 1024 ms max_delay_ms default
         cfg = AecConfig(delay_mode=AecDelayMode.FIXED, fixed_delay_samples=big)
         aec = AEC(cfg)
-        self.assertGreaterEqual(aec._ref_ring_size, big + 4096)
+        self.assertEqual(aec._ref_ring_size, big + cfg.hop_size)
 
     def test_external_aligned_builds_neither_estimator_nor_ring(self) -> None:
         near, far = _synth(_SR, 1.5, 800)
@@ -280,6 +302,12 @@ class DelayModeBehaviourTests(unittest.TestCase):
         self.assertIsNone(aec.delay_est)
         self.assertFalse(aec._delay_active)
         self.assertFalse(hasattr(aec, '_ref_ring'))
+        # ...and no other delay-attached state left dangling: the applied
+        # delay is spelled 0 (the contract value, and what the C port's
+        # aec_debug_status reports), not left unset. It used to be absent
+        # entirely, which made get_stats() raise AttributeError in this mode.
+        self.assertEqual(aec._current_delay, 0)
+        self.assertEqual(aec.get_stats().delay_samples, 0)
 
     def test_fixed_and_external_are_not_the_same_audio(self) -> None:
         """Guards a translation that resolves right but wires one branch."""
@@ -298,6 +326,262 @@ class DelayModeBehaviourTests(unittest.TestCase):
         aec.reset()
         self.assertEqual(aec._current_delay, _FIXED)
         self.assertEqual(aec._ref_ring_filled, 0)
+
+
+# ── plan §3.2.8-9: the ring is sized per mode ────────────────────────────────
+
+# (sample_rate, fft_size) x fixed delay rows worth distinguishing: the
+# degenerate 0, a delay below one hop, one exactly one hop, an exact hop
+# multiple, a NON-multiple (the case that makes the read wrap at an offset
+# that moves), and one past the max_delay_ms search budget.
+_RING_ROWS = [
+    (16000, 256, 0),
+    (16000, 256, 100),
+    (16000, 256, 128),
+    (16000, 256, 1536),
+    (16000, 256, 1600),
+    (16000, 256, 40000),
+    (16000, 512, 1600),
+    (48000, 1024, 4801),
+]
+
+
+def _cfg(sr, fft, **kw):
+    return AecConfig(sample_rate=sr, frame_size=fft, hop_size=fft // 2, **kw)
+
+
+class AlignmentRingSizingTests(unittest.TestCase):
+    """``config.ref_ring_samples`` -- one helper, mirrored by C's
+    ``aec_ref_ring_samples()``.
+
+    Before plan step 3 all three modes that had a ring shared ONE size,
+    ``max(delay_buffer_ms, max_delay_ms + 4096)``, whatever the mode knew
+    about its own delay. FIXED now carves the tight bound it can prove
+    (``fixed + hop``), and EXTERNAL_ALIGNED carves nothing.
+    """
+
+    def test_matched_ring_is_still_the_search_budget(self) -> None:
+        """Unchanged, and deliberately so: this size also gates which
+        estimates the controller may accept (``new_delay <= size - hop``),
+        so shrinking it would change the DEFAULT path's audio."""
+        for sr, fft in ((16000, 256), (16000, 512), (48000, 1024)):
+            with self.subTest(sr=sr, fft=fft):
+                cfg = _cfg(sr, fft)
+                want = max(int(cfg.delay_buffer_ms * sr / 1000),
+                           int(cfg.max_delay_ms * sr / 1000) + 4096)
+                self.assertEqual(ref_ring_samples(cfg, cfg.hop_size), want)
+                self.assertEqual(AEC(cfg)._ref_ring_size, want)
+
+    def test_fixed_ring_is_exactly_fixed_plus_hop(self) -> None:
+        for sr, fft, fixed in _RING_ROWS:
+            with self.subTest(sr=sr, fft=fft, fixed=fixed):
+                cfg = _cfg(sr, fft, delay_mode=AecDelayMode.FIXED,
+                           fixed_delay_samples=fixed)
+                want = fixed + cfg.hop_size
+                self.assertEqual(ref_ring_samples(cfg, cfg.hop_size), want)
+                self.assertEqual(AEC(cfg)._ref_ring_size, want)
+
+    def test_fixed_ring_ignores_the_search_knobs(self) -> None:
+        """The claim that would still hold under the OLD formula for large
+        delays, and fails the moment a ``max()`` against the search budget
+        comes back: those two fields must not reach this mode at all."""
+        for sr, fft, fixed in _RING_ROWS:
+            with self.subTest(sr=sr, fft=fft, fixed=fixed):
+                base = _cfg(sr, fft, delay_mode=AecDelayMode.FIXED,
+                            fixed_delay_samples=fixed)
+                wide = dataclasses.replace(base, max_delay_ms=60000.0,
+                                           delay_buffer_ms=120000.0)
+                self.assertEqual(ref_ring_samples(wide, wide.hop_size),
+                                 ref_ring_samples(base, base.hop_size))
+                self.assertEqual(AEC(wide)._ref_ring_size,
+                                 AEC(base)._ref_ring_size)
+
+    def test_fixed_ring_is_dramatically_smaller_than_the_matched_ring(self) -> None:
+        """The headline of step 3, as a ratio rather than a hardcoded size."""
+        cfg = _cfg(16000, 256, delay_mode=AecDelayMode.FIXED,
+                   fixed_delay_samples=400)          # 25 ms
+        matched = ref_ring_samples(_cfg(16000, 256), 128)
+        self.assertLess(ref_ring_samples(cfg, 128) * 20, matched)
+
+    def test_external_aligned_wants_no_ring(self) -> None:
+        for sr, fft in ((16000, 256), (16000, 512), (48000, 1024)):
+            with self.subTest(sr=sr, fft=fft):
+                cfg = _cfg(sr, fft, delay_mode=AecDelayMode.EXTERNAL_ALIGNED)
+                self.assertEqual(ref_ring_samples(cfg, cfg.hop_size), 0)
+                self.assertFalse(hasattr(AEC(cfg), '_ref_ring'))
+
+    def test_helper_rejects_a_nonpositive_hop(self) -> None:
+        for hop in (0, -1):
+            with self.subTest(hop=hop):
+                with self.assertRaises(ValueError):
+                    ref_ring_samples(AecConfig(), hop)
+
+
+def _capture_aligned_far(aec):
+    """Record the far hop the engine actually consumed, per process() call.
+
+    ``_render_activity.update(far_end)`` is the single call site immediately
+    downstream of the ring write/read block, so its argument IS the aligned
+    far -- the Python equivalent of C's ``AecLinearContext.aligned_far_hop``,
+    which Python has no public seam for.
+    """
+    seen = []
+    original = aec._render_activity.update
+
+    def spy(far_end):
+        seen.append(np.array(far_end, dtype=np.float32, copy=True))
+        return original(far_end)
+
+    aec._render_activity.update = spy
+    return seen
+
+
+class FixedRingAlignmentTests(unittest.TestCase):
+    """An exact-fit ring wraps constantly, so the split (two-part) read is
+    now the common path rather than a rare edge case. These walk hundreds of
+    wraps and demand the served far be byte-equal to the caller's own far
+    delayed by exactly ``fixed_delay_samples``."""
+
+    def _drive(self, sr, fft, fixed, hops):
+        cfg = _cfg(sr, fft, delay_mode=AecDelayMode.FIXED,
+                   fixed_delay_samples=fixed, enable_res=False)
+        np.random.seed(3)
+        aec = AEC(cfg)
+        hop = cfg.hop_size
+        seen = _capture_aligned_far(aec)
+        rng = np.random.default_rng(5)
+        far = (rng.standard_normal(hops * hop).astype(np.float32) * 0.05)
+        near = np.zeros_like(far)
+        if fixed:
+            near[fixed:] = far[:-fixed] * 0.5
+        else:
+            near[:] = far * 0.5
+        for h in range(hops):
+            aec.process(near[h * hop:(h + 1) * hop],
+                        far[h * hop:(h + 1) * hop])
+        return aec, far, seen, hop
+
+    def test_aligned_far_is_the_caller_far_delayed_by_fixed(self) -> None:
+        for sr, fft, fixed in _RING_ROWS:
+            if fixed >= 8000:
+                continue          # covered by the C wrap scenarios; slow here
+            hops = 260
+            with self.subTest(sr=sr, fft=fft, fixed=fixed):
+                aec, far, seen, hop = self._drive(sr, fft, fixed, hops)
+                ring = aec._ref_ring_size
+                self.assertEqual(ring, fixed + hop)
+                # Honest-RAW window: the ring cannot serve the offset for the
+                # first ceil(fixed/hop) + 1 hops (fixed == 0 needs no read).
+                fill = 0 if fixed == 0 else -(-fixed // hop) + 1
+                laps = hops * hop / ring
+                self.assertGreater(laps, 4.0, "ring never wrapped: weak test")
+                for h in range(fill, hops):
+                    end = (h + 1) * hop - fixed
+                    want = far[end - hop:end]
+                    np.testing.assert_array_equal(
+                        seen[h], want,
+                        f"hop {h}: served far is not far[t-{fixed}]")
+
+    def test_fixed_delay_cancels_a_known_echo(self) -> None:
+        """Correctness, not just bookkeeping: a synthetic echo at a known
+        delay is actually cancelled once compensated, and not at all when
+        the caller's fixed delay is wrong.
+
+        Runs the SHIPPED chain (RES on). ``enable_res=False`` is not a
+        neutral simplification here: it also starves the AEC3 ERLE feed
+        (``last_erle_windowed`` is only cached under
+        ``enable_res or return_res_context``), which stalls this
+        configuration at ~3 dB on every delay mode alike -- a property of
+        that diagnostic config, not of the alignment path.
+        """
+        sr, hop, true_delay = 16000, 128, 1600
+        rng = np.random.default_rng(7)
+        n = sr * 4
+        far = rng.standard_normal(n).astype(np.float32) * 0.1
+        near = np.zeros_like(far)
+        near[true_delay:] = far[:-true_delay] * 0.5
+
+        def erle_db(fixed):
+            cfg = _cfg(sr, 256, delay_mode=AecDelayMode.FIXED,
+                       fixed_delay_samples=fixed)
+            np.random.seed(1)
+            aec = AEC(cfg)
+            out = np.concatenate([
+                aec.process(near[i * hop:(i + 1) * hop],
+                            far[i * hop:(i + 1) * hop])
+                for i in range(n // hop)])
+            half = len(out) // 2       # steady state only
+            return 10.0 * np.log10(
+                float(np.sum(near[half:len(out)] ** 2))
+                / max(float(np.sum(out[half:] ** 2)), 1e-20))
+
+        # +4000 samples = 250 ms past the real path, well outside the
+        # 52 ms PBFDKF span, so the filter cannot absorb it as a residual.
+        right = erle_db(true_delay)
+        wrong = erle_db(true_delay + 4000)
+        self.assertGreater(right, 25.0,
+                           f"compensated echo not cancelled (ERLE {right:.1f} dB)")
+        self.assertGreater(right - wrong, 20.0,
+                           f"a wrong fixed delay cancelled just as well "
+                           f"({right:.1f} vs {wrong:.1f} dB) -- the ring read "
+                           f"is not actually applying the delay")
+
+    def test_reset_refills_the_ring_and_realigns(self) -> None:
+        """The exact-fit ring has no slack left to hide an off-by-one
+        refill: after reset() the RAW-far window must be exactly as long as
+        it was at init, then the served far must be correct again."""
+        sr, fft, fixed, hops = 16000, 256, 1600, 60
+        aec, far, seen, hop = self._drive(sr, fft, fixed, hops)
+        fill = -(-fixed // hop) + 1
+        aec.reset()
+        self.assertEqual(aec._ref_ring_filled, 0)
+        seen.clear()
+        rng = np.random.default_rng(9)
+        far2 = rng.standard_normal(hops * hop).astype(np.float32) * 0.05
+        near2 = np.zeros_like(far2)
+        near2[fixed:] = far2[:-fixed] * 0.5
+        for h in range(hops):
+            aec.process(near2[h * hop:(h + 1) * hop],
+                        far2[h * hop:(h + 1) * hop])
+        # Inside the refill window the engine serves RAW far again...
+        for h in range(fill - 1):
+            np.testing.assert_array_equal(
+                seen[h], far2[h * hop:(h + 1) * hop],
+                f"refill hop {h}: expected RAW far while the ring is short")
+        # ...and afterwards the delayed far, from the refilled ring only.
+        for h in range(fill, hops):
+            end = (h + 1) * hop - fixed
+            np.testing.assert_array_equal(
+                seen[h], far2[end - hop:end],
+                f"post-refill hop {h}: served far is not far[t-{fixed}]")
+
+
+class ExternalAlignedPassthroughTests(unittest.TestCase):
+    """EXTERNAL_ALIGNED must hand the linear filter the caller's own far,
+    sample for sample, on every hop -- there is no ring to go through."""
+
+    def test_far_is_passed_through_sample_exact(self) -> None:
+        for sr, fft in ((16000, 256), (48000, 1024)):
+            with self.subTest(sr=sr, fft=fft):
+                cfg = _cfg(sr, fft,
+                           delay_mode=AecDelayMode.EXTERNAL_ALIGNED,
+                           enable_res=False)
+                np.random.seed(2)
+                aec = AEC(cfg)
+                hop = cfg.hop_size
+                seen = _capture_aligned_far(aec)
+                rng = np.random.default_rng(13)
+                hops = 120
+                far = rng.standard_normal(hops * hop).astype(np.float32) * 0.05
+                near = np.zeros_like(far)
+                near[:] = far * 0.5
+                for h in range(hops):
+                    aec.process(near[h * hop:(h + 1) * hop],
+                                far[h * hop:(h + 1) * hop])
+                for h in range(hops):
+                    np.testing.assert_array_equal(
+                        seen[h], far[h * hop:(h + 1) * hop],
+                        f"hop {h}: external-aligned far was modified")
 
 
 if __name__ == '__main__':
