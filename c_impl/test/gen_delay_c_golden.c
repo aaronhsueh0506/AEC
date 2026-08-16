@@ -22,7 +22,9 @@
  *
  * Build + run (from c_impl/, standalone — does NOT link aec.c):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       src/delay_aec3.c test/gen_delay_c_golden.c -lm -o /tmp/gen_delay_golden
+ *       -I../../audio_common/include \
+ *       src/delay_aec3.c src/aec3_scale.c test/gen_delay_c_golden.c -lm \
+ *       -o /tmp/gen_delay_golden
  *   /tmp/gen_delay_golden /tmp/delay_golden.bin \
  *       ../wav/aec_challenge_blind/doubletalk/0I0XMl3M0ECO0U1N0cJvpg_doubletalk
  *
@@ -48,6 +50,7 @@
  *     float64 confidence
  */
 #include "delay_aec3.h"
+#include "delay_pool_test_util.h"
 #include "wav_io.h"
 
 #include <stdio.h>
@@ -88,7 +91,14 @@ int main(int argc, char **argv) {
     fwrite(hdr, sizeof(int32_t), 2, f);
 
     DelayAec3 d;
-    delay_aec3_init(&d, 16000);
+    /* Pool-first construction (plan step 2) at the default full bank; the
+     * pool lives for the whole generation run, so it is never freed. */
+    {
+        const char *why = NULL;
+        if (!delay_pool_init(&d, 16000, hop, DA_NUM_FILTERS, &why)) {
+            fprintf(stderr, "%s\n", why); return 2;
+        }
+    }
 
     float near[HOP_MAX], far[HOP_MAX];
     int solid_hops = 0, max_nupd = 0;

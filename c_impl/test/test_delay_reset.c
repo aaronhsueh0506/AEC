@@ -28,15 +28,18 @@
  * Build (standalone, from c_impl/ -- mirrors test/parity_delay.c's
  * documented recipe, does NOT link aec.c):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
+ *       -I../../audio_common/include \
  *       src/delay_aec3.c src/aec3_scale.c test/test_delay_reset.c -lm \
  *       -o bin/test_delay_reset
  * Run:
  *   ./bin/test_delay_reset
  */
 #include "delay_aec3.h"
+#include "delay_pool_test_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int g_fail = 0;
 static int g_pass = 0;
@@ -67,6 +70,15 @@ static int any_nonzero(const float *a, size_t n) {
     return 0;
 }
 
+/* Shared pool-first construction (delay_pool_test_util.h), reported in this
+ * file's printf + counter style. */
+static void *da_new_pool(DelayAec3 *d, int sample_rate, int hop, int n) {
+    const char *why = NULL;
+    void *pool = delay_pool_init(d, sample_rate, hop, n, &why);
+    if (!pool) { printf("FAIL: %s\n", why); g_fail++; }
+    return pool;
+}
+
 /* Feed a delayed-copy-of-noise stream (near = far delayed by delay_samples)
  * through d in `hop`-sample chunks for n_hops hops. Returns the LAST
  * emitted delay_aec3_estimated_delay() (native-rate samples), or -1 if the
@@ -93,12 +105,13 @@ static int feed_delayed_noise(DelayAec3 *d, unsigned int seed, int n_hops,
 
 static void test_reset_clears_inner_signal_chain_state(void) {
     DelayAec3 d;
-    delay_aec3_init(&d, 48000);
-
     int hop = 480; /* 10 ms @ 48 kHz */
+    void *pool = da_new_pool(&d, 48000, hop, DA_NUM_FILTERS);
+    if (!pool) return;
+
     feed_delayed_noise(&d, 7u, 1, hop, 0);
 
-    int pre_ring = any_nonzero(d.est.render_ring.buffer, DA_RING_CAPACITY);
+    int pre_ring = any_nonzero(d.est.render_ring.buffer, (size_t)d.est.render_ring.capacity);
     int pre_pending = (d.est.pending_count != 0);
     int pre_dec = any_nonzero(&d.est.capture_decimator.anti_alias.z[0][0], DA_BQ_MAX_SECTIONS * 2)
                || any_nonzero(&d.est.render_decimator.anti_alias.z[0][0], DA_BQ_MAX_SECTIONS * 2)
@@ -114,7 +127,7 @@ static void test_reset_clears_inner_signal_chain_state(void) {
           "reset: outer resample48 biquad state cleared");
     CHECK(d.resample48.phase == 0, "reset: outer resample48 phase cleared");
 
-    CHECK(!any_nonzero(d.est.render_ring.buffer, DA_RING_CAPACITY),
+    CHECK(!any_nonzero(d.est.render_ring.buffer, (size_t)d.est.render_ring.capacity),
           "reset: inner render_ring buffer cleared (was stale pre-fix)");
     CHECK(d.est.render_ring.write == 0, "reset: inner render_ring write cursor cleared");
     CHECK(d.est.pending_count == 0,
@@ -125,6 +138,26 @@ static void test_reset_clears_inner_signal_chain_state(void) {
     CHECK(!any_nonzero(&d.est.render_decimator.anti_alias.z[0][0], DA_BQ_MAX_SECTIONS * 2) &&
           !any_nonzero(&d.est.render_decimator.noise_reduction.z[0][0], DA_BQ_MAX_SECTIONS * 2),
           "reset: inner render_decimator biquad state cleared (was stale pre-fix)");
+
+    /* reset() clears STATE, never geometry: the pool pointers and every
+     * runtime size must survive it, or a post-reset hop would walk a
+     * differently-shaped buffer than the one that was carved. */
+    CHECK(d.est.render_ring.capacity == DA_RING_CAPACITY_FOR(DA_NUM_FILTERS) &&
+          d.est.matched_filter.num_filters == DA_NUM_FILTERS &&
+          d.est.aggregator.highest_peak.hist_size == DA_HP_HIST_SIZE_FOR(DA_NUM_FILTERS) &&
+          d.est.aggregator.pre_echo.hist_size == DA_PE_HIST_SIZE_FOR(DA_NUM_FILTERS),
+          "reset: pool geometry (ring capacity, bank size, both histogram sizes) survives");
+    CHECK(d.est.render_ring.buffer && d.est.matched_filter.filters &&
+          d.est.matched_filter.accumulated_error &&
+          d.est.matched_filter.instantaneous_error &&
+          d.est.aggregator.highest_peak.histogram &&
+          d.est.aggregator.highest_peak.ring &&
+          d.est.aggregator.pre_echo.histogram &&
+          d.est.aggregator.pre_echo.ring &&
+          d.near16_scratch && d.far16_scratch,
+          "reset: every pool pointer survives (incl. the 48 kHz sidechain scratch)");
+
+    free(pool);
 }
 
 static void test_reset_mid_stream_reacquires_like_fresh(void) {
@@ -136,8 +169,10 @@ static void test_reset_mid_stream_reacquires_like_fresh(void) {
     int d2_samples = 14400; /* 300 ms */
     int got1, got_after_reset, got_fresh;
     DelayAec3 d, fresh;
+    void *pool, *pool_fresh;
 
-    delay_aec3_init(&d, 48000);
+    pool = da_new_pool(&d, 48000, hop, DA_NUM_FILTERS);
+    if (!pool) return;
     got1 = feed_delayed_noise(&d, 11u, n_hops_d1, hop, d1_samples);
     CHECK(got1 >= 0, "pre-reset: delay estimate acquired before reset");
 
@@ -146,7 +181,8 @@ static void test_reset_mid_stream_reacquires_like_fresh(void) {
 
     got_after_reset = feed_delayed_noise(&d, 22u, n_hops_d2, hop, d2_samples);
 
-    delay_aec3_init(&fresh, 48000);
+    pool_fresh = da_new_pool(&fresh, 48000, hop, DA_NUM_FILTERS);
+    if (!pool_fresh) { free(pool); return; }
     got_fresh = feed_delayed_noise(&fresh, 22u, n_hops_d2, hop, d2_samples);
 
     CHECK(got_after_reset >= 0, "post-reset: delay re-acquired after reset");
@@ -157,6 +193,9 @@ static void test_reset_mid_stream_reacquires_like_fresh(void) {
     CHECK(got_after_reset == got_fresh,
           "post-reset estimate matches a fresh instance fed the same stream "
           "(no leftover contamination from the pre-reset stream)");
+
+    free(pool);
+    free(pool_fresh);
 }
 
 int main(void) {

@@ -19,16 +19,21 @@
  *
  * Build + run (from c_impl/, standalone -- does NOT link aec.c):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
- *       src/delay_aec3.c test/parity_delay.c -lm -o /tmp/p_delay
+ *       -I../../audio_common/include \
+ *       src/delay_aec3.c src/aec3_scale.c test/parity_delay.c -lm -o /tmp/p_delay
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
- *       src/delay_aec3.c test/gen_delay_c_golden.c -lm -o /tmp/gen_delay_golden
+ *       -I../../audio_common/include \
+ *       src/delay_aec3.c src/aec3_scale.c test/gen_delay_c_golden.c -lm \
+ *       -o /tmp/gen_delay_golden
  *   /tmp/gen_delay_golden /tmp/delay_golden.bin
  *   /tmp/p_delay /tmp/delay_golden.bin
  */
 #include "delay_aec3.h"
+#include "delay_pool_test_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int rd(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
 
@@ -48,7 +53,16 @@ int main(int argc, char **argv) {
     far  = malloc((size_t)hop * sizeof(float));
     if (!near || !far) { fprintf(stderr, "oom\n"); return 2; }
 
-    delay_aec3_init(&d, 16000);
+    /* Pool-first construction (plan step 2): DelayAec3 carries no arrays of
+     * its own, so the golden replay owns the block too, for the whole replay.
+     * The golden was recorded at the default full bank, so this replays at
+     * DA_NUM_FILTERS. */
+    {
+        const char *why = NULL;
+        if (!delay_pool_init(&d, 16000, hop, DA_NUM_FILTERS, &why)) {
+            fprintf(stderr, "%s\n", why); return 2;
+        }
+    }
 
     for (i = 0; i < n_hops; ++i) {
         int    exp_delay, exp_nupd, exp_solid;

@@ -114,14 +114,17 @@ typedef struct AecConfig {
     float  delay_est_period_s;     /* 0.5  */
     /* Matched-filter bank size, [1, DA_NUM_FILTERS]; mirrors Python
      * AecConfig.delay_num_filters. 5 = the AEC3 default geometry and the
-     * only value bench/dataset runs may use. Smaller is a COMPUTE knob for
-     * the embedded target, where the bulk system delay is already
-     * compensated out-of-band and the matched filter only has to track the
-     * residual: the reliable reach drops to 125/221/317/413/509 ms for
-     * n=1..5 while each dropped filter removes ~4.2 MMAC/s of full-rate
-     * search. RAM is unchanged -- the arrays stay carved at the compile-time
-     * bound; see delay_aec3.h's DA_NUM_FILTERS comment for that trade-off
-     * and for why the over-sized ring/histograms are behaviour-neutral.
+     * only value bench/dataset runs may use. Smaller is a COMPUTE AND
+     * MEMORY knob for the embedded target, where the bulk system delay is
+     * already compensated out-of-band and the matched filter only has to
+     * track the residual: the reliable reach drops to 125/221/317/413/509 ms
+     * for n=1..5, each dropped filter removes ~4.2 MMAC/s of full-rate
+     * search, AND aec_get_mem_size() drops by exactly 5,728 B per filter on
+     * every grid (the bank, the render ring and both lag histograms are
+     * pool-carved to this n -- see delay_aec3.h's MEMORY CONTRACT block).
+     * This is therefore part of the POOL LAYOUT: init-time immutable like
+     * the signal grid, and changing it means re-querying aec_get_mem_size()
+     * and re-initialising.
      * Out-of-range values are REJECTED by aec_validate_config (they are a
      * caller mistake, not something to silently normalise), and so is any
      * value other than the default when delay_mode is not MATCHED (there is
@@ -305,6 +308,12 @@ typedef struct Aec {
     Saturation sat_ref, sat_mic;  int has_sat;
 
     /* delay (AEC3 matched filter) + ring.
+     * `delay` is a METADATA struct: its arrays (bank, render ring, both lag
+     * histograms, 48 kHz sidechain scratch) live in this instance's pool,
+     * carved by aec_carve() at the size aec_get_mem_size() budgeted for the
+     * resolved (sample_rate, hop, delay_num_filters) triple. Nothing here is
+     * carved at a compile-time maximum. Only MATCHED carves it at all --
+     * when has_delay == 0 every pointer inside is NULL and every size 0.
      * has_delay == 1 iff cfg.delay_mode == AEC_DELAY_MATCHED, i.e. iff the
      * matched-filter ESTIMATOR was constructed (mirrors Python's
      * `delay_est is not None`). The reference RING is a separate question:

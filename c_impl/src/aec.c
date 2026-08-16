@@ -916,6 +916,20 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
      * get_mem_size/aec_init are a lockstep pool-carve pair. */
     size_t t = 0;
     t = ck_field_size(t, 1, sizeof(Aec));
+    /* Matched-filter delay estimator (plan step 2). `Aec` no longer embeds
+     * the bank/ring/histogram arrays -- DelayAec3 is a metadata struct and
+     * its arrays are carved from THIS pool, sized by the resolved
+     * (sample_rate, hop, delay_num_filters) triple, so n=1 really is ~23 KB
+     * cheaper than n=5 instead of merely cheaper in MACs. Carved only for
+     * MATCHED: that is the only mode that constructs an estimator (the
+     * FIXED / EXTERNAL_ALIGNED ring differentiation is plan step 3).
+     * Must stay in lockstep with the matching carve in aec_carve(). */
+    if (cfg->delay_mode == AEC_DELAY_MATCHED) {
+        size_t da_sz = delay_aec3_get_mem_size(cfg->sample_rate, hop,
+                                               cfg->delay_num_filters);
+        if (da_sz == 0) return 0;   /* sub-config rejected its own inputs */
+        t = ck_add_size(t, da_sz);
+    }
     /* Reference alignment ring: present for MATCHED and FIXED, absent only
      * for EXTERNAL_ALIGNED (the caller pre-aligned; nothing to buffer).
      * Must stay in lockstep with the matching carve in aec_carve(). */
@@ -1137,14 +1151,26 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
      *                     measurement and applied from the first hop the
      *                     ring can serve it
      *   EXTERNAL_ALIGNED  neither; `ref` is already aligned by contract
-     * NOTE (productization plan step 1 of 4): this wires the explicit mode
-     * onto the behaviour that already existed. The POOL is not yet
-     * differentiated per mode -- FIXED still carves the same ring MATCHED
-     * does and DelayAec3 still embeds its compile-time-max arrays even in
-     * FIXED/EXTERNAL. Shrinking sizeof(Aec) per mode/n is plan step 2/3. */
+     *
+     * The estimator's own arrays are pool-carved here (plan step 2), in the
+     * same position aec_get_mem_size() budgets them, with the SAME
+     * (sample_rate, hop, delay_num_filters) triple -- that triple is the
+     * whole lockstep contract, so it is read from `cfg`/`hop` in both places
+     * and nowhere reconstructed. Only MATCHED carves it; FIXED still gets the
+     * same ring MATCHED does (differentiating THAT is plan step 3). */
     if (cfg->delay_mode != AEC_DELAY_EXTERNAL_ALIGNED) {
         if (cfg->delay_mode == AEC_DELAY_MATCHED) {
-            delay_aec3_init_ex(&a->delay, cfg->sample_rate, cfg->delay_num_filters);
+            size_t da_sz = delay_aec3_get_mem_size(cfg->sample_rate, hop,
+                                                   cfg->delay_num_filters);
+            /* Unreachable for a validated config (aec_get_mem_size already
+             * queried the identical triple and refused to size the pool if
+             * it came back 0), but this carve must never walk past a block
+             * it could not size. Nothing has been constructed yet at this
+             * point, so there is nothing to unwind. */
+            if (da_sz == 0) return -1;
+            if (delay_aec3_init(&a->delay, ptr, da_sz, cfg->sample_rate, hop,
+                                cfg->delay_num_filters) != 0) return -1;
+            ptr += da_sz;
             a->has_delay = 1;
         }
         a->ref_ring_size = buf_samp;

@@ -42,6 +42,7 @@
  * shape as test/run_selftest_ubsan.sh) and must exit 0 with no diagnostic.
  */
 #include "aec.h"
+#include "delay_pool_test_util.h"
 #include "wav_io.h"
 
 #include <stdio.h>
@@ -444,6 +445,7 @@ static void section_delay_aec3(void) {
     WavReader *mr = wav_open_read(mic_path);
     WavReader *rr = wav_open_read(ref_path);
     DelayAec3 d;
+    void *delay_pool = NULL;
     int hop = 160;
     float mic[160], ref[160];
     int reached_cap = 0;
@@ -503,7 +505,20 @@ static void section_delay_aec3(void) {
           " 1000 hops at hop=160 (confirmed via Python `wave`: num_samples=160000 for"
           " both files); if this fails the fixture changed duration");
 
-    delay_aec3_init(&d, 16000);
+    /* Pool-first construction (plan step 2): DelayAec3 is a metadata struct
+     * now, so this section owns the block the estimator's arrays live in.
+     * Sized for the exact (16 kHz, hop=160, full bank) triple it drives. */
+    {
+        const char *why = NULL;
+        delay_pool = delay_pool_init(&d, 16000, hop, DA_NUM_FILTERS, &why);
+        CHECK(delay_pool != NULL,
+              why ? why
+                  : "section_delay_aec3: delay_aec3_init on a caller-owned pool");
+        if (!delay_pool) {
+            wav_close_read(mr); wav_close_read(rr);
+            return;
+        }
+    }
     for (;;) {
         int gm = wav_read_float(mr, mic, hop);
         int gr = wav_read_float(rr, ref, hop);
@@ -542,6 +557,7 @@ static void section_delay_aec3(void) {
         int at_huge = (counter_at_huge >= cap);
         CHECK(at_cap == at_huge, "number_pre_echo_updates: '>=' decision identical at cap vs cap+1e6");
     }
+    free(delay_pool);
     printf("section_delay_aec3: done (%ld checks so far, %ld fails)\n", g_checks, g_fails);
 }
 

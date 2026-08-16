@@ -41,6 +41,126 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-16 — delay productization line A, step 2: pool-first, config-sized `DelayAec3`
+
+Plan §3, §9.2. **`sizeof(Aec)` and the pool layout change — a rebuild is
+required** (no source change for callers who already use
+`aec_get_mem_size()`; a caller who hardcoded a byte count must re-query).
+**Output contract intact**: `MATCHED` + n=5 renders **sample-exact** to the
+pre-refactor baseline `e1142a4` across the full KISS/NE10 × SIMD=0/1 ×
+{16k/256, 16k/512, 48k/1024, 8k/256} × {default, CNG, `--no-delay-est`}
+matrix — 48/48 cases, compared sample-by-sample rather than by file hash
+(float WAV `PEAK` chunks carry a timestamp). The delay chain itself is
+additionally pinned bit-exact on its own: the C-regression golden generated
+from the **pre-refactor** sources replays through the post-refactor estimator
+with 0 mismatches on all four public outputs over 4187 hops.
+
+### Changed
+
+1. **`DelayAec3` is now metadata + pool pointers.** The matched-filter
+   coefficient bank, its accumulated-error rows, the down-sampled render
+   ring, both lag histograms and their 250-entry time-window rings, the
+   single instantaneous prefix-error buffer, and the 48 kHz anti-alias
+   sidechain scratch are all carved from the CALLER's pool, sized by the
+   resolved `(sample_rate, hop_size, num_filters)` triple. `Aec` no longer
+   embeds any of it.
+
+   *This withdraws the previous, deliberate "compute shrinks, RAM does not"
+   trade-off* (arrays carved at the 5-filter bound to keep the footprint a
+   single compile-time constant). The footprint was already a function of the
+   init config — `aec_get_mem_size(cfg)` — so pinning one field of it to a
+   constant bought nothing a consumer could use.
+
+2. **`delay_aec3_get_mem_size(sample_rate, hop_size, num_filters)` +
+   `delay_aec3_init(d, mem, bytes, sample_rate, hop_size, num_filters)`**
+   replace `delay_aec3_init(d, sr)` / `delay_aec3_init_ex(d, sr, n)`. One
+   canonical pool-first lifecycle, no construct-from-a-bare-struct entry
+   point. Both halves derive every size from ONE internal layout helper and
+   clamp `num_filters` through one shared function, so a query and an init
+   cannot describe different blocks. `aec_carve()` is the only production
+   caller and passes the resolved hop, never a guess.
+
+3. **`aec_get_mem_size(cfg)` shrinks with the delay config** (KISS, balanced,
+   16 kHz/256): 379,696 B at the `MATCHED` n=5 default, down to 356,784 B at
+   n=1, 345,760 B for `FIXED` and 214,688 B for `EXTERNAL_ALIGNED`. Each
+   dropped filter is exactly **5,728 B** on every grid — coefficients 2,048 +
+   accumulated error 512 + render ring 1,536 + highest-peak histogram 1,536 +
+   pre-echo histogram 96, every term a multiple of 16 so the per-field
+   ALIGN16 padding is identical at every n. Full four-grid × n=1..5 table in
+   the manual (§5) and printed by `make test-delay-num-filters`.
+   *(Non-`MATCHED` modes carving no estimator falls out of this step because
+   only `MATCHED` constructs one; the `FIXED` / `EXTERNAL_ALIGNED` alignment
+   RING differentiation is still plan step 3.)*
+
+4. **The n=5 default is also 1,376 B smaller than before**, because the two
+   48 kHz sidechain scratch buffers are no longer carried at 16 kHz — they
+   are carved only when `sample_rate == 48000`, sized `hop/3 + 1` from the
+   resolved hop instead of a fixed 192.
+
+5. **`DA_NUM_FILTERS` is demoted to a geometry upper bound** used by
+   validation and the reach table. It sizes nothing. The removed
+   `DA_RING_CAPACITY` / `DA_MAX_FILTER_LAG` / `DA_HP_HIST_SIZE` /
+   `DA_PE_HIST_SIZE` / `DA_RESAMPLE48_SCRATCH_MAX` constants are replaced by
+   `DA_*_FOR(n)` / `DA_RESAMPLE48_CAP_FOR(hop)` formula macros, and every
+   runtime size is readable off the instance (`render_ring.capacity`,
+   `highest_peak.hist_size`, `pre_echo.hist_size`, `resample_cap`).
+
+### Added
+
+6. **Safety, per plan §3.3.** Both walks go through the same checked size
+   helpers (`mem_align.h`'s saturating `ck_*`), so a size computation that
+   overflows reports failure rather than a wrapped total. `delay_aec3_init()`
+   rejects a NULL or non-16-byte-aligned base and an undersized block, and
+   **asserts the carve consumed EXACTLY the queried byte count** — not
+   "within", exactly — so a drift between the two field walks fails
+   construction instead of running on a layout nobody sized. Every carved f32
+   array is ALIGN16 (plan §11.7: the NEON matched-filter kernels' 512-tap
+   loads). Still zero heap on both construction paths.
+
+7. **Tests** — `test_delay_num_filters.c` 33 → 109 cases: hand-computed pool
+   geometry per n (ring 528/912/1296/1680/2064 samples, highest-peak
+   897/1281/1665/2049/2433 bins, pre-echo 56/80/104/128/152 bins), the exact
+   5,728 B step on all four grids, `FIXED` < `MATCHED` n=1 and
+   `EXTERNAL_ALIGNED` < `FIXED` on all four, `aec_create` vs `aec_init`
+   sample-exact at every n, the resolved-hop pass-through (the sidechain
+   scratch is 171 entries at 48 kHz and absent at every other rate), and the
+   pool rejection contract. `test_delay_reset.c` +2: geometry and every pool
+   pointer survive a reset.
+
+### Notes
+
+- **The histogram sizing formula deliberately keeps one filter of headroom**
+  (`n*SHIFT + SIZE`, not the arithmetically tight `(n-1)*SHIFT + SIZE`). This
+  is not caution, and it is not a local invention: it is upstream AEC3's own
+  `MatchedFilter::GetMaxFilterLag()`, mirrored verbatim by this repo's Python
+  port (`matched_filter.py`'s `get_max_filter_lag()`, whose docstring spells
+  the over-count out and states its sizing-only role). Diverging would have
+  put the C histogram geometry out of step with both. Independently, the
+  pre-echo histogram's bin count is BEHAVIOURAL: its
+  windowed local-max scan walks fixed 32-bin windows with a 0.7^k penalty and
+  stops when fewer than 32 bins remain, so the bin count decides how many
+  windows are scanned. Under the tight formula n=2 would get 56 bins = ONE
+  window covering bins 0..31, while that bank can itself report up to bin 55
+  — silently discarding half its own search range. Checked for every n in
+  [1,5]: the headroom form always scans exactly the windows holding the
+  bank's reachable bins, and every window it drops is provably all-zero (it
+  sits above the reachable lag) and so can never win the scan. Result: n=1..5
+  each keep the behaviour they had when the arrays were carved at the n=5
+  bound, and n=5 reproduces the pre-refactor array sizes exactly.
+- **Mutation-checked, measured not assumed** (4 mutations, red/green both
+  recorded): (a) sizing one field differently in the query walk than in the
+  carve → the exact-consumption assertion fires, 4 test targets red
+  (delay-num-filters 26 failures, config-validation 45, delay-reset 2,
+  static-aec fails to construct); (b) pinning the geometry macros back to the
+  n=5 bound → 28 rows red; (c) `aec_carve` ignoring `cfg->delay_num_filters`
+  → 20+ rows red (and the get-mem-size-still-honest variant of the same
+  mutation segfaults, i.e. the pool really is sized off that field);
+  (d) `aec_carve` passing a hardcoded hop instead of the resolved one → the
+  grid pass-through row red, and 524,798/576,000 samples of the 48 kHz output
+  change. **A first draft of the geometry test was fully green under
+  mutation (b)** because it read back the same `DA_*_FOR(n)` macros it was
+  checking; it now asserts hand-computed literals instead.
+
 ## [Unreleased] — 2026-08-16 — delay productization line A: shared signal-grid resolver
 
 Plan §2.4. `(sample_rate, fft_size)` admissibility and the frame/hop/bin

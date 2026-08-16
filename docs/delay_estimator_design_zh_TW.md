@@ -97,13 +97,18 @@ C 端實測模型（`delay_aec3.c`；每 filter 每 block 無條件 8704 MAC、
 NLMS 8192 MAC、末端 accumulated-error 常數 8192 MAC；250 block/s；
 鎖定穩定 0.3 s 後 duty-cycle 1-in-10）：
 
-| n | 可靠覆蓋 | full-rate | duty 穩態 | RAM（估計器） |
-|---|---|---|---|---|
-| 5（現行） | 509 ms | 23.2 MMAC/s | 2.32 | ~32 KB |
-| 3 | 317 ms | 14.7（−37%） | 1.47 | ~20 KB |
-| 2 | 221 ms | 10.5（−55%） | 1.05 | ~16 KB |
-| 1 | 125 ms | 6.3（−73%） | 0.63 | ~12 KB |
-| estimator OFF（`fixed_delay_samples`） | — | 0 | 0 | ~0 |
+RAM 欄是 `delay_aec3_get_mem_size()` 的**實測**回傳值（不是估計），
+16 kHz / hop 128；48 kHz / hop 512 每列再加 1,376 B 的抗混疊 sidechain
+scratch（只有 48 kHz 才配置）。
+
+| n | 可靠覆蓋 | full-rate | duty 穩態 | RAM（估計器，16 kHz 實測） |
+|---|---|---|---|---:|
+| 5（預設） | 509 ms | 23.2 MMAC/s | 2.32 | 33,936 B |
+| 4 | 413 ms | 18.9（−19%） | 1.89 | 28,208 B |
+| 3 | 317 ms | 14.7（−37%） | 1.47 | 22,480 B |
+| 2 | 221 ms | 10.5（−55%） | 1.05 | 16,752 B |
+| 1 | 125 ms | 6.3（−73%） | 0.63 | 11,024 B |
+| estimator OFF（`FIXED` / `EXTERNAL_ALIGNED`） | — | 0 | 0 | 0 B |
 
 縮 n 不動 window/shift/threshold（每個窗的統計行為與 upstream 完全一
 致），是偏離最小的縮法。
@@ -111,14 +116,29 @@ NLMS 8192 MAC、末端 accumulated-error 常數 8192 MAC；250 block/s；
 **Config 通路（2026-08-14 已開通）**：Python `AecConfig.delay_num_filters`
 （1..5，`__post_init__` fail-fast 驗證）→ orchestrator → LegacyDelayShim
 → `EchoPathDelayEstimator(num_filters=…)`；C `AecConfig::delay_num_filters`
-（`aec_validate_config` 拒絕超界）→ `delay_aec3_init_ex()` → runtime
-`DaMatchedFilter::num_filters`。預設 5 = 幾何完全不變（byte-equal，測試
-釘住）。C 端刻意的取捨：**算力隨 n 縮、RAM 不縮**——靜態陣列維持
-`DA_NUM_FILTERS`(=5) 編譯期上限，保住 caller-pool 的 `aec_get_mem_size`
-單一常數契約；多配的 ring/histogram 已逐項論證為行為中立（搆不到的
-bin 永遠是零、argmax 取首個最大值）。使用場景：板端 fixed_delay 補償
-後 nf=1~2；bench/dataset 一律維持 5（發佈分數的量測幾何）。板端最終
-選值待 bring-up 殘差 profile 量測。
+（`aec_validate_config` 拒絕超界）→ `delay_aec3_get_mem_size()` /
+`delay_aec3_init()` → runtime `DaMatchedFilter::num_filters`。預設 5 =
+幾何完全不變（byte-equal，測試釘住）。
+
+**RAM 也隨 n 縮（2026-08-16，產品化計畫 step 2 起）**。原本刻意的取捨
+「算力隨 n 縮、RAM 不縮」已撤回：`DelayAec3` 改成 metadata + pool
+pointers，bank／accumulated error／render ring／兩個 lag histogram 全部
+由 `aec_get_mem_size(cfg)` 依 resolved `(sample_rate, hop, n)` 從呼叫端
+記憶池切出，每少一組 filter 固定省 **5,728 B**（每個格點都一樣），
+n=1 相對 n=5 省 22,912 B。`DA_NUM_FILTERS`(=5) 現在只是驗證用的幾何上
+限，不再 size 任何東西。零 heap 不變；`n` 與格點一樣是 init-time
+immutable（要改必須重新查大小並重新 init）。
+
+Histogram bins 沿用 `n*SHIFT + SIZE` 的 **overclaim** 公式（多帶一組
+filter 的餘裕），不是算術上最緊的 `(n-1)*SHIFT + SIZE`。這不是保守，
+是必要的：pre-echo histogram 的 bin 數決定 windowed local-max scan 走
+幾個 32-bin 視窗，用最緊公式時 n=2 只會掃 1 個視窗（bin 0..31），
+但該 bank 自己就能報到 bin 55——等於砍掉一半搜尋範圍。overclaim 公式
+在 n=1..5 都剛好涵蓋可達 bin，且被捨掉的視窗恆為全零（永遠贏不了
+scan），所以每個 n 的行為都與「陣列固定配到 n=5 上限」時完全一致。
+
+使用場景：板端 fixed_delay 補償後 nf=1~2；bench/dataset 一律維持 5
+（發佈分數的量測幾何）。板端最終選值待 bring-up 殘差 profile 量測。
 
 ## 6. Blind-test 語料延遲普查（2026-08-14 實測）
 

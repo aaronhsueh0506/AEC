@@ -223,7 +223,8 @@ instance 存活期間不可變）** 決定。這是唯一的真實來源：
 以下的可擷取上限**只適用於 `MATCHED`**（`FIXED` 沒有搜尋這回事，
 只要環形緩衝夠大即可；緩衝會自動長到 `fixed_delay_samples + 4096`）。
 
-**可擷取的延遲上限是編譯期固定的，不是 `max_delay_ms`。** 這點容易誤解：
+**可擷取的延遲上限由 `delay_num_filters` 決定，不是 `max_delay_ms`。**
+這點容易誤解。下表是預設 `delay_num_filters = 5`：
 
 | 取樣率 | 可擷取上限 |
 |---:|---:|
@@ -232,7 +233,8 @@ instance 存活期間不可變）** 決定。這是唯一的真實來源：
 | 48 kHz | **608 ms** |
 
 上限來自 matched filter 的搜尋長度（`delay_aec3.h` 的
-`DA_MAX_FILTER_LAG` × 4 倍降取樣）。48 kHz 輸入會先抗混疊降到 16 kHz，
+`DA_MAX_FILTER_LAG_FOR(n)` × 4 倍降取樣，n = `delay_num_filters`）。
+48 kHz 輸入會先抗混疊降到 16 kHz，
 估計結果再乘 3 回傳 native-rate samples，所以 wall-clock 範圍仍為
 約 608 ms，不是把 9728 直接除以 48 kHz。此上限與設定無關，
 **調 `max_delay_ms` 不會提高它**。（608 ms 是幾何全 span；若再計入
@@ -325,24 +327,49 @@ free(pool);                                 /* 記憶池由呼叫端自行回收
 
 ### 記憶池大小（實測，balanced preset，其餘為預設值）
 
-| 格點 | KISS backend | NE10 backend |
+**記憶池大小會隨 `delay_mode` 與 `delay_num_filters` 改變**，因為 matched
+filter bank、降取樣 render ring 與兩個 lag histogram 都是依 init 設定從記憶池
+切出來的（不再是編譯期最大值）。下表是 KISS backend 的實測值：
+
+| 格點 | n=1 | n=2 | n=3 | n=4 | n=5（預設） |
+|---|---:|---:|---:|---:|---:|
+| 8 kHz / 256（legacy） | 252,704 B | 258,432 B | 264,160 B | 269,888 B | 275,616 B |
+| 16 kHz / 256 | 356,784 B | 362,512 B | 368,240 B | 373,968 B | 379,696 B |
+| 16 kHz / 512 | 485,856 B | 491,584 B | 497,312 B | 503,040 B | 508,768 B |
+| 48 kHz / 1024 | 1,144,080 B | 1,149,808 B | 1,155,536 B | 1,161,264 B | 1,166,992 B |
+
+NE10 backend 在每一格都少 608 B（16 kHz/512 與 48 kHz/1024 少 1,376 B / 2,912 B）；
+差異來自 FFT handle，與 delay 設定無關。
+
+每少一個 matched filter 固定省 **5,728 B**（每一格點都一樣）：coefficients
+2,048 B ＋ accumulated error 512 B ＋ render ring 1,536 B ＋ highest-peak
+histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 省
+22,912 B。
+
+非 `MATCHED` 模式不配置 estimator（16 kHz/256 KISS）：
+
+| `delay_mode` | 記憶池 | 相對 `MATCHED n=5` |
 |---|---:|---:|
-| 8 kHz / 256 | 276,928 B | 276,320 B |
-| 16 kHz / 256 | 381,008 B | 380,400 B |
-| 16 kHz / 512 | 510,080 B | 508,704 B |
-| 48 kHz / 1024 | 1,166,928 B | 1,164,016 B |
+| `MATCHED` n=5（預設） | 379,696 B | — |
+| `MATCHED` n=1 | 356,784 B | −22,912 B |
+| `FIXED` | 345,760 B | −33,936 B |
+| `EXTERNAL_ALIGNED` | 214,688 B | −165,008 B |
 
-上表是 64-bit 主機建置的實測值，僅供規劃參考。**實際請以 `aec_get_mem_size(&cfg)`
-的回傳值為準**——它會隨設定、backend 與目標 ABI 改變。
+`EXTERNAL_ALIGNED` 額外省的是整條參考訊號環形緩衝（受 `max_delay_ms` /
+`delay_buffer_ms` 影響），`FIXED` 仍保留它。
 
-影響記憶池大小最明顯的兩個開關（16 kHz/256 KISS，相對於上表 381,008 B）：
+另外一個明顯的開關（16 kHz/256 KISS，相對 379,696 B）：
 
 | 設定 | 記憶池 | 差異 |
 |---|---:|---:|
-| `enable_delay_est = 0` | 249,936 B | −131,072 B |
-| `enable_shadow = 0` | 348,448 B | −32,560 B |
+| `enable_shadow = 0` | 347,136 B | −32,560 B |
 
 `enable_res` 與 `enable_cng` **不影響**記憶池大小（相關緩衝區一律配置）。
+
+上表全是 64-bit 主機建置的實測值，僅供規劃參考。**實際請以
+`aec_get_mem_size(&cfg)` 的回傳值為準**——它會隨設定、backend 與目標 ABI
+改變。`fft_size`、`sample_rate`、`delay_mode`、`delay_num_filters` 任何一項
+改變都必須重新查詢並重新 init（pool 佈局不同）。
 
 ### `aec_reset`
 
@@ -430,7 +457,7 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 |---|---:|---|
 | `enable_res` | `1` | 殘留回音抑制。關閉後輸出是純線性 filter 殘差、延遲降為 0，但回音殘留明顯變多。診斷時可關（見 §9）。 |
 | `enable_cng` | `1` | 舒適噪音。若下游還有另一套噪音處理／CNG，**請關掉這個**，兩層疊加會讓噪音底變得不自然。 |
-| `enable_delay_est` | `1` | **DEPRECATED**——`delay_mode` 的相容轉譯層（見 §3 延遲契約與 §6.4）。設 0 等同 `EXTERNAL_ALIGNED`（或帶 `fixed_delay_samples` 時等同 `FIXED`）。`EXTERNAL_ALIGNED` 會少掉 131,072 B 記憶體（16 kHz）。新程式請直接寫 `delay_mode`。 |
+| `enable_delay_est` | `1` | **DEPRECATED**——`delay_mode` 的相容轉譯層（見 §3 延遲契約與 §6.4）。設 0 等同 `EXTERNAL_ALIGNED`（或帶 `fixed_delay_samples` 時等同 `FIXED`）。`EXTERNAL_ALIGNED` 會少掉 165,008 B 記憶體（16 kHz/256，見 §5 記憶池表）。新程式請直接寫 `delay_mode`。 |
 | `enable_highpass` | `1` | mic 路徑的高通濾波（見 `highpass_cutoff_hz`）。上游已有高通時可關。 |
 | `enable_saturation` | `1` | 削波偵測與參考訊號軟限幅。建議維持開啟。 |
 | `enable_shadow` | `1` | 輔助 filter，用於偵測回音路徑變化。關閉會少掉 32,560 B（16 kHz），但路徑突變後的恢復會變慢。 |
@@ -457,7 +484,7 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | `delay_buffer_ms` | `float` | `2048.0` | 0 – 120000 | 參考訊號環形緩衝長度（ms）。實際樣本數取 `delay_buffer_ms` 與 `max_delay_ms + 4096 samples` 兩者較大者。調高 `max_delay_ms` 時通常要一併調高。 |
 | `delay_est_init_s` | `float` | `0.3` | 0 – 3600 | 延遲估計值需維持穩定多久才視為已鎖定（秒）。 |
 | `delay_est_period_s` | `float` | `0.5` | 0 – 3600 | 鎖定後的重新確認週期（秒）。回音路徑常變動（裝置會移動）可調短。 |
-| `delay_num_filters` | `int` | `5` | 1 – 5（**只在 `MATCHED`**；其他 mode 必須維持 5） | Matched-filter bank 大小（**算力旋鈕**）。可靠搜尋上限隨之縮小：n=1→125ms／2→221ms／3→317ms／4→413ms／5→509ms；每少一組省 ~4.2 MMAC/s 的 full-rate 搜尋算力，RAM 不變（陣列維持編譯期上限）。只在系統延遲已由 `fixed_delay_samples` 補償、matched filter 僅追殘差的部署縮小；bench/dataset 一律維持 5（見 `delay_estimator_design_zh_TW.md` §5）。`FIXED` / `EXTERNAL_ALIGNED` 根本沒有 matched filter，改這個值會被拒絕（不是忽略）；`0` 在任何 mode 都是錯誤，不是「關閉延遲估計」的入口。 |
+| `delay_num_filters` | `int` | `5` | 1 – 5（**只在 `MATCHED`**；其他 mode 必須維持 5） | Matched-filter bank 大小（**算力旋鈕**）。可靠搜尋上限隨之縮小：n=1→125ms／2→221ms／3→317ms／4→413ms／5→509ms；每少一組省 ~4.2 MMAC/s 的 full-rate 搜尋算力，**並省 5,728 B 記憶池**（bank、render ring、兩個 histogram 都依 n 從記憶池切出，見 §5 記憶池表）。只在系統延遲已由 `fixed_delay_samples` 補償、matched filter 僅追殘差的部署縮小；bench/dataset 一律維持 5（見 `delay_estimator_design_zh_TW.md` §5）。`FIXED` / `EXTERNAL_ALIGNED` 根本沒有 matched filter，改這個值會被拒絕（不是忽略）；`0` 在任何 mode 都是錯誤，不是「關閉延遲估計」的入口。 |
 | `delay_acquire_protect_converged` | `int` | `1` | 0 / 1 | filter 已收斂時，保護它不被延遲重新擷取破壞。 |
 | `delay_acquire_warm_transfer` | `int` | `1` | 0 / 1 | 首次擷取到延遲時，把已學到的回音模型平移過去而不是歸零，避免開場一秒左右出現一段明顯回音。建議維持開啟。 |
 | `delay_acquire_inst_erle_db` | `float` | `4.0` | -100 – 100 | 上一項的觸發門檻（dB）：既有模型要夠好才值得平移。 |

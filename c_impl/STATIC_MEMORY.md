@@ -75,12 +75,22 @@ Audio_ALG production pipelines accept only the three rows above.
 Pool size depends on the complete config, backend and target ABI. Do not copy a
 checked-in byte count into firmware. Query `aec_get_mem_size` and reserve that
 exact result in the board memory map. For orientation, the balanced 16 kHz
-build measured on the current host is:
+build measured on the current host, at the default `delay_mode = MATCHED` /
+`delay_num_filters = 5`, is:
 
 | Backend | 256 / 128 | 512 / 256 |
 |---|---:|---:|
-| KISS | 381,008 B | 510,080 B |
-| NE10 | 380,400 B | 508,704 B |
+| KISS | 379,696 B | 508,768 B |
+| NE10 | 379,088 B | 507,392 B |
+
+The delay configuration moves these numbers, because the matched-filter bank,
+the down-sampled render ring and both lag histograms are carved from this same
+pool at the configured size rather than at a compile-time maximum. Each filter
+dropped from the bank costs 5,728 B less on every grid (n=1 is 22,912 B below
+the n=5 default); `FIXED` carves no estimator at all, and
+`EXTERNAL_ALIGNED` additionally carves no reference ring. `delay_mode` and
+`delay_num_filters` are therefore init-time immutable alongside the signal
+grid: changing either means re-querying `aec_get_mem_size` and re-initialising.
 
 ## Ownership model
 
@@ -105,6 +115,9 @@ make test-rate-structural
 make test-process-context
 make test-shared-far-spec
 make test-shared-fft-handle
+make test-delay-num-filters
+make test-config-validation
+make test-linear-context
 make test-zero-heap
 make test-static-aec TEST_STATIC_MIC=mic.wav TEST_STATIC_REF=ref.wav TEST_STATIC_SR=16000
 test/docs_smoke.sh

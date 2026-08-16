@@ -11,13 +11,16 @@
  *
  * Build (standalone, do NOT link aec.c):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
- *       src/delay_aec3.c test/parity_delay.c -lm -o /tmp/p_delay
+ *       -I../../audio_common/include \
+ *       src/delay_aec3.c src/aec3_scale.c test/parity_delay.c -lm -o /tmp/p_delay
  */
 #include "delay_aec3.h"
 #include "aec3_scale.h"
+#include "mem_align.h"   /* ALIGN16 / MEM_IS_ALIGNED16 / ck_* checked sizes */
 
 #include <limits.h>
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 /* float-domain equivalents of the AEC3 int16 thresholds (matched_filter.py) */
@@ -262,16 +265,16 @@ static void da_resample48_reset(DaResample48 *r) {
  * continuity across calls (mirrors the 4ch pipeline's own delay_phase /
  * SharedMatchedDelayEstimator._to_16k_pair stride-pick, just with a real
  * anti-alias filter ahead of the stride instead of a naive pick). Returns
- * the count of samples written to out (<= DA_RESAMPLE48_SCRATCH_MAX given
- * n_in <= the one 48kHz grid's hop=512). */
+ * the count of samples written to out (<= out_cap, which the caller sizes
+ * DA_RESAMPLE48_CAP_FOR(hop) = ceil(hop/3) at the one 48kHz grid, so the cap
+ * is a defence-in-depth bound rather than a live truncation). */
 static int da_resample48_channel(DaBiquad *bq, const float *in, int n_in,
-                                 float *out, int *phase) {
+                                 float *out, int out_cap, int *phase) {
     int i, count = 0;
     int p = *phase;
     for (i = 0; i < n_in; ++i) {
         float filtered = da_biquad_process1(bq, in[i]);
-        if (((i + p) % DA_RESAMPLE48_FACTOR) == 0 &&
-            count < DA_RESAMPLE48_SCRATCH_MAX) {
+        if (((i + p) % DA_RESAMPLE48_FACTOR) == 0 && count < out_cap) {
             out[count++] = filtered;
         }
     }
@@ -313,7 +316,7 @@ static void da_decimator_decimate(DaDecimator *dec, const float *in_block, float
 /* ------------------------------------------------------------------- ring */
 
 static void da_ring_reset(DaRing *r) {
-    memset(r->buffer, 0, sizeof(r->buffer));
+    memset(r->buffer, 0, (size_t)r->capacity * sizeof(float));
     r->write = 0;
 }
 
@@ -323,11 +326,11 @@ static void da_ring_push(DaRing *r, const float *sub, int n) {
      * loop. Same class of fix as da_ring_gather_back below: n (=
      * DA_SUB_BLOCK_SIZE, currently 16) samples pushed twice per 64-sample
      * block, so this was ~500K %-ops/sec at 16 kHz. */
-    int first = DA_RING_CAPACITY - r->write;
+    int first = r->capacity - r->write;
     if (first >= n) {
         memcpy(r->buffer + r->write, sub, (size_t)n * sizeof(float));
         r->write += n;
-        if (r->write == DA_RING_CAPACITY) r->write = 0;
+        if (r->write == r->capacity) r->write = 0;
     } else {
         memcpy(r->buffer + r->write, sub, (size_t)first * sizeof(float));
         memcpy(r->buffer, sub + first, (size_t)(n - first) * sizeof(float));
@@ -344,14 +347,15 @@ static void da_ring_gather_back(const DaRing *r, int start_offset, int length, f
      * 512 taps each), so the old per-sample `% DA_RING_CAPACITY` was ~10M
      * integer divisions/sec at 16 kHz and dominated the matched-filter cost
      * (measured 2.8x speedup of the delay-est chain from this change alone). */
-    int newest = (r->write - 1 + DA_RING_CAPACITY) % DA_RING_CAPACITY;
-    int end = (newest - start_offset + DA_RING_CAPACITY) % DA_RING_CAPACITY;
+    int cap = r->capacity;
+    int newest = (r->write - 1 + cap) % cap;
+    int end = (newest - start_offset + cap) % cap;
     int k = 0;
     int first = (end + 1 < length) ? end + 1 : length;
     const float *buf = r->buffer;
     for (; k < first; ++k) out[k] = buf[end - k];
     if (k < length) {
-        int idx2 = DA_RING_CAPACITY - 1;
+        int idx2 = cap - 1;
         int base = k;
         for (; k < length; ++k) out[k] = buf[idx2 - (k - base)];
     }
@@ -376,8 +380,9 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
      * sequence the per-i gather produced (the ring is not written during the
      * whole matched-filter update), so all downstream arithmetic is
      * byte-identical. Deepest sample touched is alignment_shift_back +
-     * FILTER_SIZE+SUB_BLOCK_SIZE-2 (= 1536+526 = 2062), always <
-     * DA_RING_CAPACITY. */
+     * FILTER_SIZE+SUB_BLOCK_SIZE-2, i.e. (n-1)*384 + 526 at the last filter
+     * -- DA_RING_CAPACITY_FOR(n) is exactly that plus two at every bank
+     * size, so this is always in range (2062 < 2064 at the n=5 default). */
     float span[DA_FILTER_SIZE + DA_SUB_BLOCK_SIZE - 1];
     da_ring_gather_back(ring, alignment_shift_back,
                         DA_FILTER_SIZE + DA_SUB_BLOCK_SIZE - 1, span);
@@ -480,20 +485,33 @@ static int da_compute_pre_echo_lag(const float *accumulated_error, int lag,
     return pre_echo_lag + alignment_shift_winner;
 }
 
-/* num_filters: runtime bank size, clamped to the static array bound. Both
- * loops below still cover the FULL DA_NUM_FILTERS array (not just the active
- * prefix) so the struct's byte image does not depend on the bank size --
- * cheap, once, and it keeps the heap-vs-caller-pool byte-equality gate
- * (test_static_aec) comparing fully-defined memory. */
+/* Row accessors for the two pool-carved row-major banks. Both row strides are
+ * multiples of 16 bytes (2048 and 512), so every row inherits the block's
+ * ALIGN16 base. */
+static float *da_mf_row(const DaMatchedFilter *mf, int n) {
+    return mf->filters + (size_t)n * DA_FILTER_SIZE;
+}
+static float *da_mf_acc(const DaMatchedFilter *mf, int n) {
+    return mf->accumulated_error + (size_t)n * DA_ACC_ERR_SIZE;
+}
+
+/* num_filters: runtime bank size. The pool holds EXACTLY this many rows (the
+ * bank is carved to fit), so both loops below cover the whole allocation --
+ * there is no inactive tail. The pre-pool code deliberately initialised all
+ * DA_NUM_FILTERS rows so the embedded struct's byte image did not depend on
+ * the bank size; that concern is gone with the arrays. The heap-vs-caller-
+ * pool byte-equality gate (test_static_aec) still compares fully-defined
+ * memory because every carved byte is written here. */
 static void da_matched_filter_init(DaMatchedFilter *mf, int num_filters) {
     int n, k;
-    if (num_filters < 1) num_filters = 1;
-    if (num_filters > DA_NUM_FILTERS) num_filters = DA_NUM_FILTERS;
     mf->num_filters = num_filters;
-    memset(mf->filters, 0, sizeof(mf->filters));
-    for (n = 0; n < DA_NUM_FILTERS; ++n)
-        for (k = 0; k < DA_ACC_ERR_SIZE; ++k) mf->accumulated_error[n][k] = 1.0f;
-    memset(mf->instantaneous_error, 0, sizeof(mf->instantaneous_error));
+    memset(mf->filters, 0,
+           (size_t)num_filters * DA_FILTER_SIZE * sizeof(float));
+    for (n = 0; n < num_filters; ++n) {
+        float *acc = da_mf_acc(mf, n);
+        for (k = 0; k < DA_ACC_ERR_SIZE; ++k) acc[k] = 1.0f;
+    }
+    memset(mf->instantaneous_error, 0, (size_t)DA_ACC_ERR_SIZE * sizeof(float));
     mf->last_detected_best_lag_filter = -1;
     mf->number_pre_echo_updates = 0;
     mf->reported_valid = 0;
@@ -504,13 +522,16 @@ static void da_matched_filter_init(DaMatchedFilter *mf, int num_filters) {
 }
 
 static void da_matched_filter_reset(DaMatchedFilter *mf, int full_reset) {
-    memset(mf->filters, 0, sizeof(mf->filters));
+    memset(mf->filters, 0,
+           (size_t)mf->num_filters * DA_FILTER_SIZE * sizeof(float));
     mf->winner_lag_valid = 0;
     mf->reported_valid = 0;
     if (full_reset) {
         int n, k;
-        for (n = 0; n < DA_NUM_FILTERS; ++n)
-            for (k = 0; k < DA_ACC_ERR_SIZE; ++k) mf->accumulated_error[n][k] = 1.0f;
+        for (n = 0; n < mf->num_filters; ++n) {
+            float *acc = da_mf_acc(mf, n);
+            for (k = 0; k < DA_ACC_ERR_SIZE; ++k) acc[k] = 1.0f;
+        }
         mf->number_pre_echo_updates = 0;
     }
 }
@@ -531,13 +552,16 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
     mf->winner_lag_valid = 0;
     mf->reported_valid = 0;
 
-    /* Bank size is the RUNTIME mf->num_filters, not the DA_NUM_FILTERS array
-     * bound: this loop is the entire search cost (~4.2 MMAC/s per filter at
-     * the full 250 block/s rate), so a short bank is exactly where the
-     * embedded saving comes from. At the default 5 this is the identical
-     * loop it always was. */
+    /* mf->num_filters is both the loop bound AND the number of rows the pool
+     * actually holds (the bank is carved to fit -- there is no tail beyond
+     * it to walk off into). This loop is the entire search cost (~4.2 MMAC/s
+     * per filter at the full 250 block/s rate); together with the 5,728 B/
+     * filter the layout saves, a short bank is where the whole embedded
+     * saving comes from. At the default 5 this is the identical loop it
+     * always was. */
     for (n = 0; n < mf->num_filters; ++n) {
         float error_sum;
+        float *h = da_mf_row(mf, n);
         int filters_updated, lag_estimate, reliable, lag;
         /* mf->instantaneous_error is a SINGLE shared buffer (not per-filter,
          * see delay_aec3.h) that da_matched_filter_core unconditionally
@@ -550,9 +574,9 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
          * the last filter while leaving the surviving
          * n==num_filters-1 call byte-for-byte identical to before. */
         filters_updated = da_matched_filter_core(ring, alignment_shift, x2_sum_threshold,
-                                                 smoothing, capture, mf->filters[n], &error_sum,
+                                                 smoothing, capture, h, &error_sum,
                                                  (n == mf->num_filters - 1) ? mf->instantaneous_error : NULL);
-        lag_estimate = da_max_square_peak_index(mf->filters[n], DA_FILTER_SIZE);
+        lag_estimate = da_max_square_peak_index(h, DA_FILTER_SIZE);
         reliable = (lag_estimate > 2
                     && lag_estimate < (DA_FILTER_SIZE - 10)
                     && error_sum < DA_MATCHING_THRESHOLD * error_sum_anchor);
@@ -584,7 +608,7 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
              * equivalent is 1.0 / 32768² ≈ 9.3e-10 (matches matched_filter.py). */
             if (error_sum_anchor > 1.0f / (32768.0f * 32768.0f)) {
                 da_update_accumulated_error(mf->instantaneous_error,
-                                            mf->accumulated_error[winner_index],
+                                            da_mf_acc(mf, winner_index),
                                             1.0f / error_sum_anchor);
                 /* Threshold-gate counter: sole reader is the
                  * ">= DA_PRE_ECHO_UPDATES_TO_REPORT" check on the next line.
@@ -606,7 +630,7 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
             }
             if (mf->number_pre_echo_updates >= DA_PRE_ECHO_UPDATES_TO_REPORT) {
                 int pre_echo = da_compute_pre_echo_lag(
-                    mf->accumulated_error[winner_index], mf->winner_lag,
+                    da_mf_acc(mf, winner_index), mf->winner_lag,
                     winner_index * DA_FILTER_INTRA_SHIFT);
                 mf->reported_pre_echo_lag = pre_echo;
             }
@@ -717,8 +741,8 @@ static void da_argmax_incremental_update(int *histogram, int hist_size,
 }
 
 static void da_highest_peak_reset(DaHighestPeak *hp) {
-    memset(hp->histogram, 0, sizeof(hp->histogram));
-    memset(hp->ring, 0, sizeof(hp->ring));
+    memset(hp->histogram, 0, (size_t)hp->hist_size * sizeof(int));
+    memset(hp->ring, 0, (size_t)DA_HIST_WINDOW * sizeof(int));
     hp->ring_index = 0;
     /* candidate is NOT reset in Python HighestPeakAggregator.reset; preserve.
      * candidate_valid IS reset (internal-only guard, no Python equivalent --
@@ -737,7 +761,7 @@ static void da_highest_peak_aggregate(DaHighestPeak *hp, int lag) {
     int old_lag = hp->ring[hp->ring_index];
     int clamped_lag = lag;
     if (clamped_lag < 0) clamped_lag = 0;
-    else if (clamped_lag >= DA_HP_HIST_SIZE) clamped_lag = DA_HP_HIST_SIZE - 1;
+    else if (clamped_lag >= hp->hist_size) clamped_lag = hp->hist_size - 1;
     hp->ring[hp->ring_index] = clamped_lag;
     hp->ring_index = (hp->ring_index + 1) % DA_HIST_WINDOW;
     if (old_lag == clamped_lag && hp->candidate_valid) {
@@ -745,7 +769,7 @@ static void da_highest_peak_aggregate(DaHighestPeak *hp, int lag) {
          * untouched, existing candidate/M pair still exactly correct. */
         return;
     }
-    da_argmax_incremental_update(hp->histogram, DA_HP_HIST_SIZE,
+    da_argmax_incremental_update(hp->histogram, hp->hist_size,
                                  /*had_evict=*/1, old_lag, clamped_lag,
                                  &hp->candidate, &hp->candidate_valid);
 }
@@ -763,7 +787,7 @@ static int da_get_ds_block_size_log2(int down_sampling_factor) {
 
 static void da_pre_echo_reset(DaPreEcho *pe) {
     int i;
-    memset(pe->histogram, 0, sizeof(pe->histogram));
+    memset(pe->histogram, 0, (size_t)pe->hist_size * sizeof(int));
     for (i = 0; i < DA_HIST_WINDOW; ++i) pe->ring[i] = -1;
     pe->ring_index = 0;
     pe->number_updates = 0;
@@ -786,7 +810,7 @@ static void da_pre_echo_aggregate(DaPreEcho *pe, int pre_echo_lag) {
     int pbs = pre_echo_lag >> pe->block_size_log2;
     int old;
     if (pbs < 0) pbs = 0;
-    else if (pbs > DA_PE_HIST_SIZE - 1) pbs = DA_PE_HIST_SIZE - 1;
+    else if (pbs > pe->hist_size - 1) pbs = pe->hist_size - 1;
     old = pe->ring[pe->ring_index];
     pe->ring[pe->ring_index] = pbs;
     pe->ring_index = (pe->ring_index + 1) % DA_HIST_WINDOW;
@@ -813,7 +837,7 @@ static void da_pre_echo_aggregate(DaPreEcho *pe, int pre_echo_lag) {
              * histogram is provably untouched (decrement+increment on the
              * SAME bin), so there is nothing to do here at all. */
         } else {
-            da_argmax_incremental_update(pe->histogram, DA_PE_HIST_SIZE,
+            da_argmax_incremental_update(pe->histogram, pe->hist_size,
                                          had_evict, old, pbs,
                                          &pe->argmax_idx, &pe->argmax_valid);
         }
@@ -822,7 +846,7 @@ static void da_pre_echo_aggregate(DaPreEcho *pe, int pre_echo_lag) {
     if (pe->number_updates < DA_K_NUM_BLOCKS_PER_SEC * 2) {
         int window = DA_K_MFW_SUB_BLOCKS;
         float penalty = 1.0f, best_value = -1.0f;
-        int best_idx = 0, n = DA_PE_HIST_SIZE, i = 0;
+        int best_idx = 0, n = pe->hist_size, i = 0;
         pe->number_updates += 1;
         while (n - i >= window) {
             int end = i + window;
@@ -843,9 +867,9 @@ static void da_pre_echo_aggregate(DaPreEcho *pe, int pre_echo_lag) {
         }
         pe->pre_echo_candidate = best_idx << pe->block_size_log2;
     } else {
-        /* was: int best_idx = da_argmax_i(pe->histogram, DA_PE_HIST_SIZE);
+        /* was: int best_idx = da_argmax_i(pe->histogram, pe->hist_size);
          * -- pe->argmax_idx is kept in exact lockstep with that same
-         * da_argmax_i(pe->histogram, DA_PE_HIST_SIZE) result by the
+         * da_argmax_i(pe->histogram, pe->hist_size) result by the
          * incremental update above (proven in da_argmax_incremental_update's
          * header comment), so this is a pure read of an already-current
          * value, not a behavior change. */
@@ -1132,11 +1156,149 @@ static int da_estimator_estimate_delay(DaEstimator *e, const float *render_hop,
 
 /* ====================== LegacyDelayShim (public API) ====================== */
 
-void delay_aec3_init(DelayAec3 *d, int sample_rate) {
-    delay_aec3_init_ex(d, sample_rate, DA_NUM_FILTERS);
+/* ─────────────────────── pool layout (plan §3.2/§3.3) ─────────────────────
+ * ONE description of the block, shared by delay_aec3_get_mem_size() and
+ * delay_aec3_init(): the query returns `total`, the carve walks the fields in
+ * the SAME order with the SAME ALIGN16 bumps and asserts it lands exactly on
+ * `total`. There is no second size expression anywhere -- that is the whole
+ * point of routing both through here. */
+typedef struct {
+    int    num_filters;     /* clamped */
+    int    ring_capacity;
+    int    hp_hist_size;
+    int    pe_hist_size;
+    int    resample_cap;    /* 0 unless the 48 kHz sidechain is built */
+    size_t total;           /* ALIGN16-sized */
+} DaLayout;
+
+/* Clamp, not reject -- see delay_aec3_get_mem_size()'s header comment. Sole
+ * definition, so a query and an init can never disagree about which bank size
+ * an out-of-range request means. */
+static int da_clamp_num_filters(int num_filters) {
+    if (num_filters < 1) return 1;
+    if (num_filters > DA_NUM_FILTERS) return DA_NUM_FILTERS;
+    return num_filters;
 }
 
-void delay_aec3_init_ex(DelayAec3 *d, int sample_rate, int num_filters) {
+/* Returns 1 on success (L fully populated), 0 on invalid input or on a size
+ * computation that overflowed. Every add/multiply/align goes through
+ * mem_align.h's saturating ck_* helpers, so one MEM_SIZE_INVALID() test at
+ * the end catches an overflow anywhere in the walk. */
+static int da_compute_layout(int sample_rate, int hop_size, int num_filters,
+                             DaLayout *L) {
+    size_t t = 0;
+    int n;
+    if (!L) return 0;
+    /* hop_size is bounded well below the point where hop/3+1 could overflow
+     * an int; sample_rate/hop_size <= 0 are the real caller mistakes. */
+    if (sample_rate <= 0 || hop_size <= 0) return 0;
+
+    n = da_clamp_num_filters(num_filters);
+    L->num_filters   = n;
+    L->ring_capacity = DA_RING_CAPACITY_FOR(n);
+    L->hp_hist_size  = DA_HP_HIST_SIZE_FOR(n);
+    L->pe_hist_size  = DA_PE_HIST_SIZE_FOR(n);
+    /* 48 kHz-only sidechain scratch (plan §3.2.7): nothing carved at any
+     * other rate, so a 16 kHz instance does not carry two 48 kHz buffers. */
+    L->resample_cap  = (sample_rate == 48000)
+                     ? DA_RESAMPLE48_CAP_FOR(hop_size) : 0;
+
+    /* ---- field walk; da_delay_carve() below MUST match this order ---- */
+    t = ck_field_size(t, ck_mul_size((size_t)n, (size_t)DA_FILTER_SIZE),
+                      sizeof(float));                                   /* filters */
+    t = ck_field_size(t, ck_mul_size((size_t)n, (size_t)DA_ACC_ERR_SIZE),
+                      sizeof(float));                                   /* accumulated_error */
+    t = ck_field_size(t, (size_t)DA_ACC_ERR_SIZE, sizeof(float));       /* instantaneous_error */
+    t = ck_field_size(t, (size_t)L->ring_capacity, sizeof(float));      /* render ring */
+    t = ck_field_size(t, (size_t)L->hp_hist_size, sizeof(int));         /* highest-peak hist */
+    t = ck_field_size(t, (size_t)DA_HIST_WINDOW, sizeof(int));          /* highest-peak ring */
+    t = ck_field_size(t, (size_t)L->pe_hist_size, sizeof(int));         /* pre-echo hist */
+    t = ck_field_size(t, (size_t)DA_HIST_WINDOW, sizeof(int));          /* pre-echo ring */
+    if (L->resample_cap > 0) {
+        t = ck_field_size(t, (size_t)L->resample_cap, sizeof(float));   /* near16 scratch */
+        t = ck_field_size(t, (size_t)L->resample_cap, sizeof(float));   /* far16 scratch */
+    }
+
+    if (MEM_SIZE_INVALID(t)) return 0;
+    L->total = t;
+    return 1;
+}
+
+/* Bind every pool pointer + its runtime size. Pure pointer bumps; no writes
+ * to the pool itself (da_estimator_init() does all the initialisation, after
+ * this, through the pointers bound here). Returns the byte count consumed so
+ * the caller can assert the lockstep. */
+static size_t da_delay_carve(DelayAec3 *d, uint8_t *mem, const DaLayout *L) {
+    uint8_t *p = mem;
+    DaMatchedFilter *mf = &d->est.matched_filter;
+    DaHighestPeak   *hp = &d->est.aggregator.highest_peak;
+    DaPreEcho       *pe = &d->est.aggregator.pre_echo;
+
+    mf->filters = (float *)p;
+    p += ALIGN16((size_t)L->num_filters * DA_FILTER_SIZE * sizeof(float));
+    mf->accumulated_error = (float *)p;
+    p += ALIGN16((size_t)L->num_filters * DA_ACC_ERR_SIZE * sizeof(float));
+    mf->instantaneous_error = (float *)p;
+    p += ALIGN16((size_t)DA_ACC_ERR_SIZE * sizeof(float));
+
+    d->est.render_ring.buffer   = (float *)p;
+    d->est.render_ring.capacity = L->ring_capacity;
+    p += ALIGN16((size_t)L->ring_capacity * sizeof(float));
+
+    hp->histogram = (int *)p;
+    p += ALIGN16((size_t)L->hp_hist_size * sizeof(int));
+    hp->ring = (int *)p;
+    p += ALIGN16((size_t)DA_HIST_WINDOW * sizeof(int));
+    hp->hist_size = L->hp_hist_size;
+
+    pe->histogram = (int *)p;
+    p += ALIGN16((size_t)L->pe_hist_size * sizeof(int));
+    pe->ring = (int *)p;
+    p += ALIGN16((size_t)DA_HIST_WINDOW * sizeof(int));
+    pe->hist_size = L->pe_hist_size;
+
+    if (L->resample_cap > 0) {
+        d->near16_scratch = (float *)p;
+        p += ALIGN16((size_t)L->resample_cap * sizeof(float));
+        d->far16_scratch = (float *)p;
+        p += ALIGN16((size_t)L->resample_cap * sizeof(float));
+    } else {
+        d->near16_scratch = NULL;
+        d->far16_scratch  = NULL;
+    }
+    d->resample_cap = L->resample_cap;
+
+    return (size_t)(p - mem);
+}
+
+size_t delay_aec3_get_mem_size(int sample_rate, int hop_size, int num_filters) {
+    DaLayout L;
+    if (!da_compute_layout(sample_rate, hop_size, num_filters, &L)) return 0;
+    return L.total;
+}
+
+int delay_aec3_init(DelayAec3 *d, void *mem, size_t bytes,
+                    int sample_rate, int hop_size, int num_filters) {
+    DaLayout L;
+    int rate_factor;
+    size_t used;
+
+    if (!d || !mem) return -1;
+    /* Every f32 array below is ALIGN16-bumped off this base, so a misaligned
+     * base would misalign the 512-tap banks the NEON matched-filter kernels
+     * load from (plan §11.7). Reject rather than silently de-align. */
+    if (!MEM_IS_ALIGNED16(mem)) return -1;
+    if (!da_compute_layout(sample_rate, hop_size, num_filters, &L)) return -1;
+    if (bytes < L.total) return -1;
+
+    memset(d, 0, sizeof(*d));
+    used = da_delay_carve(d, (uint8_t *)mem, &L);
+    /* Lockstep assertion (plan §3.3): the carve must land EXACTLY on the
+     * byte count the query promised -- not "within", exactly. A mismatch
+     * means the two field walks have drifted, which is a programming error,
+     * so fail construction instead of running on a layout nobody sized. */
+    if (used != L.total) return -1;
+
     /* DaEstimator's internal clockdrift/consistent-estimate constants
      * (da_estimator_init) are computed in real seconds FROM the sample_rate
      * argument -- they are not hardcoded, so this must be the estimator's
@@ -1146,10 +1308,9 @@ void delay_aec3_init_ex(DelayAec3 *d, int sample_rate, int num_filters) {
      * their own rate (2026-08-03 fix -- previously this was hardcoded to
      * 16000 unconditionally, so an 8kHz config silently ran its clockdrift/
      * consistent-estimate timers at 2x their intended real-time duration). */
-    int rate_factor = (sample_rate == 48000) ? DA_RESAMPLE48_FACTOR : 1;
-    /* num_filters is clamped inside da_matched_filter_init (see its comment
-     * and delay_aec3_init_ex's declaration for why clamp, not reject). */
-    da_estimator_init(&d->est, (rate_factor > 1) ? 16000 : sample_rate, num_filters);
+    rate_factor = (sample_rate == 48000) ? DA_RESAMPLE48_FACTOR : 1;
+    da_estimator_init(&d->est, (rate_factor > 1) ? 16000 : sample_rate,
+                      L.num_filters);
     d->rate_factor = rate_factor;
     if (d->rate_factor > 1) {
         da_resample48_init(&d->resample48);
@@ -1158,6 +1319,7 @@ void delay_aec3_init_ex(DelayAec3 *d, int sample_rate, int num_filters) {
     d->latest_delay = 0;
     d->latest_quality = DELAY_QUALITY_COARSE;
     d->estimate_count = 0;
+    return 0;
 }
 
 void delay_aec3_reset(DelayAec3 *d) {
@@ -1205,9 +1367,11 @@ int delay_aec3_accumulate_ex(DelayAec3 *d, const float *near, const float *far,
         int near_phase = d->resample48.phase;
         int far_phase = d->resample48.phase;
         int n_near = da_resample48_channel(&d->resample48.near_lp, near, hop,
-                                           d->near16_scratch, &near_phase);
+                                           d->near16_scratch, d->resample_cap,
+                                           &near_phase);
         int n_far = da_resample48_channel(&d->resample48.far_lp, far, hop,
-                                          d->far16_scratch, &far_phase);
+                                          d->far16_scratch, d->resample_cap,
+                                          &far_phase);
         d->resample48.phase = near_phase;   /* == far_phase, see comment above */
         near_fed = d->near16_scratch;
         far_fed = d->far16_scratch;
