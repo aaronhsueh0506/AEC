@@ -44,15 +44,43 @@ on both streams), `aec_get_linear_context()` exposes:
 |---|---|---|
 | `formed_linear_hop` | (hop,) float | formed linear error (same hop `formed_output` reflects). |
 | `aligned_far_hop` | (hop,) float | **the exact time-domain far the PBFDKF consumed this hop** (aliases the internal buffer; valid until the next process/reset). NOT `far_spec`: that is a rectangular overlap-save FFT, unusable as a sqrt-Hann analysis frame. |
-| `delay_samples` | int | applied ring offset; −1 before acquisition. |
-| `delay_confidence` | float | 0 / 0.5 / 1. |
-| `delay_state` | enum | `UNLOCKED` (content is RAW far — do not treat as aligned), `LOCKED`, `CHANGED` (offset moved THIS hop — flush any far feature rings / attention history downstream). |
+| `delay_samples` | int | applied ring offset. Meaning depends on `delay_mode` — see below. |
+| `delay_confidence` | float | 0 / 0.5 / 1 under `MATCHED`; always 1.0 under `FIXED`/`EXTERNAL_ALIGNED` (an out-of-band or contractual alignment carries no estimator uncertainty to report). |
+| `delay_state` | enum | `UNLOCKED` (content is RAW far — do not treat as aligned), `LOCKED`, `CHANGED` (offset moved THIS hop — flush any far feature rings / attention history downstream). Per-mode timing below. |
 | `generation` | unsigned | bumps on every ring-offset change including the flagless soft-recovery realigns and `aec_reset()`; saturating. Poll it instead of differencing `delay_samples` (transient A→B→A shifts are invisible to differencing). |
+
+### `delay_mode` changes the *timing* of this seam, not just its source
+`AecConfig.delay_mode` (`AEC_DELAY_MATCHED` / `AEC_DELAY_FIXED` /
+`AEC_DELAY_EXTERNAL_ALIGNED`, init-time immutable, see `aec.h`) is the single
+source of truth for far/mic alignment, and each mode reaches `LOCKED` on a
+different hop:
+
+| `delay_mode` | `delay_samples` | reaches `LOCKED` |
+|---|---|---|
+| `MATCHED` (default) | −1 before acquisition, else the estimated ring offset | once the matched filter acquires — needs far activity and `delay_aec3_n_updates() ≥ 3` solid updates; never, if the true delay is outside the ~509 ms reliable-peak bound |
+| `FIXED` | always `cfg.fixed_delay_samples` (never −1) | once the ring has filled: `ceil(fixed_delay_samples / hop) + 1` hops after the first process call, not hop 0 |
+| `EXTERNAL_ALIGNED` | always `0` | **hop 0** — the caller has contracted that `ref` is already aligned, so there is nothing to wait for |
+
+This is a **behavior change from the pre-`delay_mode` API**: the legacy
+`enable_delay_est=0` toggle (still accepted as a deprecated mirror, folded
+into `delay_mode` by `aec_config_resolve_delay()`) used to leave `delay_state`
+at `UNLOCKED` forever, because the library could not distinguish "caller
+pre-aligned the input" from "estimator switched off and nobody aligned
+anything". The equivalent `delay_mode` configuration is now
+`AEC_DELAY_EXTERNAL_ALIGNED`, which reports `LOCKED` / `delay_samples=0` /
+`delay_confidence=1.0` from the very first hop. A consumer that gates a
+far-conditioned NN post-filter on `delay_state == LOCKED` must account for
+this: under `EXTERNAL_ALIGNED` that gate is open immediately, with no
+warm-up wait to rely on; under `FIXED` it is closed for a short, computable
+window; only `MATCHED` can stay `UNLOCKED` indefinitely.
 
 Out-of-range bulk delay (beyond the matched filter's ~509 ms reliable-peak
 bound at 16 kHz; the 608 ms figure in `c_user_manual_zh_TW.md` is the full
 filter-bank geometric span — a different definition, not a contradiction) is
-not detectable at this seam: the state simply stays `UNLOCKED`.
+a `MATCHED`-only failure mode: the estimator simply never acquires and the
+state stays `UNLOCKED`. `FIXED` and `EXTERNAL_ALIGNED` cannot fail this way —
+alignment there is a caller contract, not a search, so it is not detectable
+at this seam either way.
 Fail-open policy (bypass the far-conditioned model, emit the linear error)
 belongs to the integrator. Regression coverage: `test/test_linear_context.c`.
 
