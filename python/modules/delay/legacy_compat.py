@@ -44,9 +44,17 @@ class LegacyDelayShim:
         # pass it byte-identical to before this pass-through existed.
         self._legacy_kwargs = legacy_kwargs
 
+        num_filters = int(legacy_kwargs.get('num_filters', 5))
+        if not 1 <= num_filters <= 5:
+            # Mirror AecConfig.__post_init__ / C delay_aec3 fail-fast: a
+            # direct caller of this shim must not be able to build a bank
+            # size the orchestrated/C paths would reject.
+            raise ValueError(
+                f"num_filters must be in [1, 5], got {num_filters}"
+            )
         self._estimator = EchoPathDelayEstimator(
             sample_rate=self._sample_rate,
-            num_filters=int(legacy_kwargs.get('num_filters', 5)),
+            num_filters=num_filters,
         )
         self._latest_estimate: Optional[DelayEstimate] = None  # raw 16 kHz samples
         self._estimate_count = 0

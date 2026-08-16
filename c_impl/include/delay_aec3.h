@@ -413,13 +413,14 @@ typedef struct {
  * does not take, an fft_size (plan §2.4).
  *
  * num_filters is the number of staggered matched-filter hypotheses actually
- * searched; it is CLAMPED into [1, DA_NUM_FILTERS] rather than rejected,
- * because the caller-facing validation already happened --
- * aec_validate_config() refuses an AecConfig::delay_num_filters outside that
- * range before aec_create()/aec_init() ever reach here, so the clamp is a
- * defence-in-depth floor for direct users of this lower-level API, not the
- * primary gate. get_mem_size and init clamp IDENTICALLY (one shared helper),
- * so a clamped query still describes the block a clamped init carves.
+ * searched; out-of-range values ([1, DA_NUM_FILTERS] exclusive) are
+ * REJECTED here too -- delay_aec3_get_mem_size() returns 0 and
+ * delay_aec3_init() returns -1 -- matching the project fail-fast rule the
+ * top-level aec_validate_config() already applies. A silent clamp at this
+ * layer (the pre-review behaviour) would let a direct low-level caller run
+ * a different bank size than requested with no error signal. One shared
+ * validity helper feeds both entry points, so a query and an init can never
+ * disagree about whether a request is admissible.
  *
  * Reliable reach shrinks with the bank: (n-1)*DA_FILTER_INTRA_SHIFT +
  * (DA_FILTER_SIZE - 11) downsampled samples at 0.25 ms each, i.e.

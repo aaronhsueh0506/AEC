@@ -92,8 +92,8 @@ aec_destroy(a);   /* aec_init 實例為 no-op;pool 由呼叫端釋放 */</code><
 
 <p><b><code>AecLinearContext</code> seam</b>(<code>aec_get_linear_context()</code>,時域,外接 NN 後級用):<code>formed_linear_hop</code>(post 鏈有跑時為 e_form,否則 raw 線性輸出)、<code>aligned_far_hop</code>(<b>本 hop PBFDKF 實際吃到的時域 far</b>,alias <code>a-&gt;far_hop</code>)。<code>delay_state</code> 誠實語意:</p>
 <ul>
-<li><code>AEC_LINEAR_DELAY_UNLOCKED</code> — 內容是<b>未補償的 raw far</b>:<code>MATCHED</code> 延遲尚未擷取、<code>FIXED</code> ring 未填滿(前 ⌈fixed/hop⌉+1 個 hop)、或 <code>EXTERNAL_ALIGNED</code>(舊寫法 <code>enable_delay_est=0</code>)。另外<b>超出可擷取上限的 bulk delay 永遠停在 UNLOCKED</b>(估計器不會擷取也不會報錯),fail-open 策略歸整合端。</li>
-<li><code>AEC_LINEAR_DELAY_LOCKED</code> — 已用穩定 offset 補償。</li>
+<li><code>AEC_LINEAR_DELAY_UNLOCKED</code> — 內容是<b>未補償的 raw far</b>:<code>MATCHED</code> 延遲尚未擷取、或 <code>FIXED</code> ring 未填滿(前 ⌈fixed/hop⌉+1 個 hop)。另外<b>超出可擷取上限的 bulk delay 永遠停在 UNLOCKED</b>(估計器不會擷取也不會報錯),fail-open 策略歸整合端。</li>
+<li><code>AEC_LINEAR_DELAY_LOCKED</code> — 已用穩定 offset 補償。<code>EXTERNAL_ALIGNED</code>(舊寫法 <code>enable_delay_est=0</code>)<b>從第一個 hop 起即為 LOCKED</b>(delay_samples=0、confidence=1.0、generation 恆定——呼叫端保證輸入 far 已對齊,seam 如實轉述這個契約);<code>FIXED</code> 於 ring 填滿後進入 LOCKED(delay_samples=固定值)。</li>
 <li><code>AEC_LINEAR_DELAY_CHANGED</code> — 恰在 offset 於<b>本 hop</b> 移動的那個 hop 回報(下一 hop 回到 LOCKED);下游應 flush far 特徵快取。</li>
 </ul>
 <p><code>generation</code> 在<b>每次</b> ring 讀取 offset 改變時 +1(首次擷取、確認位移——含不設任何旗標的 soft-recovery realign——以及 <code>aec_reset()</code>),飽和於 0xFFFFFFFF 不回繞。請輪詢 generation 而不是對 <code>delay_samples</code> 做差分(瞬時 A→B→A 位移對差分不可見)。</p>

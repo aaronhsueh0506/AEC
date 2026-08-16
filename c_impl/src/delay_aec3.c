@@ -1163,7 +1163,7 @@ static int da_estimator_estimate_delay(DaEstimator *e, const float *render_hop,
  * `total`. There is no second size expression anywhere -- that is the whole
  * point of routing both through here. */
 typedef struct {
-    int    num_filters;     /* clamped */
+    int    num_filters;     /* validated: [1, DA_NUM_FILTERS] */
     int    ring_capacity;
     int    hp_hist_size;
     int    pe_hist_size;
@@ -1171,13 +1171,13 @@ typedef struct {
     size_t total;           /* ALIGN16-sized */
 } DaLayout;
 
-/* Clamp, not reject -- see delay_aec3_get_mem_size()'s header comment. Sole
- * definition, so a query and an init can never disagree about which bank size
- * an out-of-range request means. */
-static int da_clamp_num_filters(int num_filters) {
-    if (num_filters < 1) return 1;
-    if (num_filters > DA_NUM_FILTERS) return DA_NUM_FILTERS;
-    return num_filters;
+/* Reject, not clamp -- see delay_aec3_get_mem_size()'s header comment. Sole
+ * definition, so a query and an init can never disagree about whether a
+ * request is admissible (external review 2026-08-16: the earlier silent
+ * clamp let a direct low-level caller run a different bank size than
+ * requested with no error signal, violating the project fail-fast rule). */
+static int da_valid_num_filters(int num_filters) {
+    return num_filters >= 1 && num_filters <= DA_NUM_FILTERS;
 }
 
 /* Returns 1 on success (L fully populated), 0 on invalid input or on a size
@@ -1192,8 +1192,9 @@ static int da_compute_layout(int sample_rate, int hop_size, int num_filters,
     /* hop_size is bounded well below the point where hop/3+1 could overflow
      * an int; sample_rate/hop_size <= 0 are the real caller mistakes. */
     if (sample_rate <= 0 || hop_size <= 0) return 0;
+    if (!da_valid_num_filters(num_filters)) return 0;
 
-    n = da_clamp_num_filters(num_filters);
+    n = num_filters;
     L->num_filters   = n;
     L->ring_capacity = DA_RING_CAPACITY_FOR(n);
     L->hp_hist_size  = DA_HP_HIST_SIZE_FOR(n);

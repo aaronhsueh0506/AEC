@@ -43,6 +43,19 @@ when verdict requires it.
 
 ## [Unreleased] — 2026-08-16 — delay productization line A, step 4 (CLI + memory diagnostics + docs/ABI) — A-line complete
 
+### Review follow-ups (external review, 2026-08-16)
+
+- Low-level `delay_aec3_get_mem_size()`/`delay_aec3_init()` now REJECT
+  out-of-range `num_filters` (0 / nonzero error) instead of silently
+  clamping to [1, 5]; `LegacyDelayShim` direct construction enforces the
+  same range. Fail-fast now holds at every public layer.
+- Doc reconciliation: STATIC_MEMORY.md pool figures caught up to the
+  +16 B census shift; aec.html's seam-state list corrected
+  (`EXTERNAL_ALIGNED` is LOCKED from hop 0, not UNLOCKED); the user
+  manual's `delay_num_filters` row no longer conflates small-bank
+  residual tracking with `FIXED` (which builds no matched filter at all).
+
+
 Plan §9.4 (last A-line step before the AEC push gate). Steps 1-3 (three-state
 `delay_mode`, the shared signal-grid resolver, and the pool-first
 `DelayAec3`/per-mode ring) landed the mechanism; this step makes it operable

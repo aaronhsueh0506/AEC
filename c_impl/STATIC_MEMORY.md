@@ -80,8 +80,8 @@ build measured on the current host, at the default `delay_mode = MATCHED` /
 
 | Backend | 256 / 128 | 512 / 256 |
 |---|---:|---:|
-| KISS | 379,696 B | 508,768 B |
-| NE10 | 379,088 B | 507,392 B |
+| KISS | 379,712 B | 508,784 B |
+| NE10 | 379,104 B | 507,408 B |
 
 The delay configuration moves these numbers, because the matched-filter bank,
 the down-sampled render ring and both lag histograms are carved from this same

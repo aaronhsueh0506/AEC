@@ -50,9 +50,10 @@
  *      (aec_create fails), matching the Python side's ValueError rather
  *      than silently normalising a caller's wrong mental model.
  *   4. The lower-level delay_aec3_get_mem_size()/delay_aec3_init() pair
- *      CLAMPS instead (defence in depth for direct users of that API), and
- *      clamps IDENTICALLY on both halves, plus the pool rejection contract
- *      (NULL / misaligned base / one byte short).
+ *      REJECTS out-of-range n as well (get_mem_size -> 0, init -> nonzero;
+ *      external review 2026-08-16 -- a silent clamp here let direct callers
+ *      run a different bank than requested), plus the pool rejection
+ *      contract (NULL / misaligned base / one byte short).
  *   5. Plan §3.4.1: on any one grid mem(n=1) < ... < mem(n=5), on all four
  *      grids -- every one of those numbers was IDENTICAL before step 2.
  *      Non-MATCHED modes, which carve no estimator, land below even n=1.
@@ -259,30 +260,35 @@ static void test_low_level_init_contract(void) {
     char msg[160];
     int n;
 
-    /* The clamp survives the move to a pool-first API, and -- this is the
-     * part that matters now -- get_mem_size and init clamp IDENTICALLY, so a
-     * clamped query still describes the block a clamped init carves. If they
-     * ever disagreed, init's exact-consumption assertion would reject the
-     * block and da_pool_init would report a failure here. */
+    /* Fail-fast contract at the low level too (external review 2026-08-16:
+     * the earlier silent clamp let a direct caller run a different bank size
+     * than requested with no error signal). get_mem_size returns 0 and init
+     * returns nonzero for every out-of-range n; valid n still round-trips. */
     pool = da_pool_init(&d, SR, HOP, 3);
     if (pool) {
         CHECK(d.est.matched_filter.num_filters == 3, "init(n=3) -> bank 3");
         free(pool);
     }
 
-    pool = da_pool_init(&d, SR, HOP, 0);
-    if (pool) { CHECK(d.est.matched_filter.num_filters == 1, "init(n=0) clamps up to 1"); free(pool); }
-    pool = da_pool_init(&d, SR, HOP, -7);
-    if (pool) { CHECK(d.est.matched_filter.num_filters == 1, "init(n=-7) clamps up to 1"); free(pool); }
-    pool = da_pool_init(&d, SR, HOP, 99);
-    if (pool) {
-        CHECK(d.est.matched_filter.num_filters == DA_NUM_FILTERS,
-              "init(n=99) clamps down to DA_NUM_FILTERS");
-        free(pool);
+    CHECK(delay_aec3_get_mem_size(SR, HOP, 0) == 0,  "get_mem_size(n=0) rejects (0)");
+    CHECK(delay_aec3_get_mem_size(SR, HOP, -7) == 0, "get_mem_size(n=-7) rejects (0)");
+    CHECK(delay_aec3_get_mem_size(SR, HOP, DA_NUM_FILTERS + 1) == 0,
+          "get_mem_size(n=max+1) rejects (0)");
+    CHECK(delay_aec3_get_mem_size(SR, HOP, 99) == 0, "get_mem_size(n=99) rejects (0)");
+    {
+        /* A validly-sized pool must still be refused when n is invalid --
+         * rejection must come from validation, not from a size mismatch. */
+        size_t ok_bytes = delay_aec3_get_mem_size(SR, HOP, DA_NUM_FILTERS);
+        void *p = NULL;
+        CHECK(ok_bytes > 0, "reference size for rejection probe");
+        if (ok_bytes > 0 && posix_memalign(&p, 16, ok_bytes) == 0) {
+            CHECK(delay_aec3_init(&d, p, ok_bytes, SR, HOP, 0) != 0,
+                  "init(n=0) rejects");
+            CHECK(delay_aec3_init(&d, p, ok_bytes, SR, HOP, 99) != 0,
+                  "init(n=99) rejects");
+            free(p);
+        }
     }
-    CHECK(delay_aec3_get_mem_size(SR, HOP, 0) == delay_aec3_get_mem_size(SR, HOP, 1) &&
-          delay_aec3_get_mem_size(SR, HOP, 99) == delay_aec3_get_mem_size(SR, HOP, DA_NUM_FILTERS),
-          "get_mem_size clamps exactly like init (same n, same bytes)");
 
     /* The bank size must survive a reset — delay_aec3_reset() clears the
      * signal chain, not the geometry. */

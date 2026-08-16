@@ -132,6 +132,24 @@ class DelayNumFiltersDefaultTests(unittest.TestCase):
                          _DEFAULT_HP_HISTOGRAM_SIZE)
 
 
+class ShimNumFiltersRangeTests(unittest.TestCase):
+    """Direct LegacyDelayShim callers face the same [1, 5] range the
+    orchestrated AecConfig path and the C low-level API enforce (external
+    review 2026-08-16: the shim used to accept any int silently)."""
+
+    def test_direct_shim_rejects_out_of_range(self) -> None:
+        from modules.delay.legacy_compat import LegacyDelayShim
+        for bad in (0, -1, 6, 99):
+            with self.assertRaises(ValueError):
+                LegacyDelayShim(sample_rate=16000, hop_size=128,
+                                num_filters=bad)
+
+    def test_direct_shim_accepts_bounds(self) -> None:
+        from modules.delay.legacy_compat import LegacyDelayShim
+        for ok in (1, 5):
+            LegacyDelayShim(sample_rate=16000, hop_size=128, num_filters=ok)
+
+
 class DelayNumFiltersGeometryTests(unittest.TestCase):
     """The knob must actually shrink the bank's reach end to end."""
 

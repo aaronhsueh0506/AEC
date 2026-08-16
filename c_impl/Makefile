@@ -717,12 +717,14 @@ TEST_LC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_LC_SRCS))
 TEST_LC_TARGET = $(BIN_DIR)/test_linear_context
 
 # Permanent matched-filter-bank-size regression test
-# (AecConfig::delay_num_filters -> delay_aec3_init_ex -> the runtime loop
-# bound in da_matched_filter_update). Proves the default is still the AEC3
-# 5-filter geometry, that a shorter bank really loses reach end to end (a
-# 350 ms echo locks at n=5 and does not at n=2, while 150 ms locks at both),
-# and that out-of-range values are rejected by aec_validate_config while the
-# lower-level init_ex clamps. Needs the full Aec type.
+# (AecConfig::delay_num_filters -> delay_aec3_get_mem_size/delay_aec3_init ->
+# the runtime loop bound in da_matched_filter_update). Proves the default is
+# still the AEC3 5-filter geometry, that a shorter bank really loses reach end
+# to end (a 350 ms echo locks at n=5 and does not at n=2, while 150 ms locks at
+# both), that the pool the estimator is carved into scales with n, and that
+# out-of-range values are REJECTED at every layer -- aec_validate_config above
+# and the pool-first delay_aec3_get_mem_size/delay_aec3_init below, neither of
+# which clamps. Needs the full Aec type.
 TEST_DNF_SRCS   = $(TEST_DIR)/test_delay_num_filters.c
 TEST_DNF_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_DNF_SRCS))
 TEST_DNF_TARGET = $(BIN_DIR)/test_delay_num_filters
