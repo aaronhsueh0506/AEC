@@ -58,6 +58,14 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->mu = 0.3f;
     cfg->delta = 1e-8f;
     cfg->enable_cng = 1;
+    /* Delay mode: MATCHED + n=5, the shipped default. enable_delay_est is
+     * the deprecated mirror of it (see aec.h) and is filled consistently so
+     * a config produced here reads the same whichever field a caller looks
+     * at; fixed_delay_samples MUST be spelled out (-1) rather than left at
+     * the memset 0, since 0 is a legal FIXED delay and would otherwise make
+     * the default config an illegal MATCHED+fixed combination. */
+    cfg->delay_mode = AEC_DELAY_MATCHED;
+    cfg->fixed_delay_samples = -1;
     cfg->enable_delay_est = 1;
     cfg->enable_highpass = 1;
     cfg->enable_saturation = 1;
@@ -170,6 +178,36 @@ int aec_is_valid_sample_rate(int sample_rate) {
     return 0;
 }
 
+/* ── delay-mode translation layer ─────────────────────────────────────────
+ * See aec.h's aec_config_resolve_delay() doc comment for the mapping table
+ * and the rationale. This is the ONE place the deprecated enable_delay_est
+ * mirror is read; everything downstream reads cfg->delay_mode.
+ *
+ * Deliberately NOT a "pick whichever field looks non-default" heuristic:
+ * `enable_delay_est == 1` is both its default AND its only informative
+ * value for MATCHED, so it can never contradict a delay_mode a caller set
+ * -- the two non-MATCHED delay_mode values are exactly the two outcomes
+ * clearing the legacy flag can select. Hence no conflict case exists and
+ * this function's only failure is an out-of-enum delay_mode. */
+int aec_config_resolve_delay(AecConfig* cfg) {
+    if (!cfg) return -1;
+    if (cfg->delay_mode != AEC_DELAY_MATCHED &&
+        cfg->delay_mode != AEC_DELAY_FIXED &&
+        cfg->delay_mode != AEC_DELAY_EXTERNAL_ALIGNED) return -1;
+    if (!cfg->enable_delay_est && cfg->delay_mode == AEC_DELAY_MATCHED) {
+        /* Legacy shape: the flag was cleared and delay_mode is untouched, so
+         * the legacy fields still describe the intent. fixed_delay_samples
+         * disambiguates "apply a measured delay" from "far is pre-aligned"
+         * exactly as the pre-delay_mode Python orchestrator did. */
+        cfg->delay_mode = (cfg->fixed_delay_samples >= 0)
+                          ? AEC_DELAY_FIXED : AEC_DELAY_EXTERNAL_ALIGNED;
+    }
+    /* Rewrite the mirror so the config is self-consistent afterwards (also
+     * what makes this function idempotent). */
+    cfg->enable_delay_est = (cfg->delay_mode == AEC_DELAY_MATCHED) ? 1 : 0;
+    return 0;
+}
+
 /* Single source of truth for AecConfig bounds-checking (F05: "no sample-
  * rate/config validation anywhere"). aec_create / aec_get_mem_size /
  * aec_init all run this before touching cfg-derived sizes or state; none of
@@ -183,8 +221,19 @@ int aec_is_valid_sample_rate(int sample_rate) {
  * enough that a corrupted or garbage-filled AecConfig cannot reach the size/
  * pool arithmetic below with a value that overflows or loops unboundedly
  * (e.g. a negative/huge filter_length or n_partitions). */
-static int aec_validate_config(const AecConfig* cfg) {
-    if (!cfg) return 0;
+static int aec_validate_config(const AecConfig* cfg_in) {
+    if (!cfg_in) return 0;
+    /* The deprecated enable_delay_est mirror is bounds-checked HERE, on the
+     * caller's own value, before aec_config_resolve_delay() rewrites it --
+     * otherwise a garbage non-{0,1} value would slip through as "truthy"
+     * and then be silently normalised to 1. */
+    if (cfg_in->enable_delay_est != 0 && cfg_in->enable_delay_est != 1) return 0;
+    /* Everything below validates the RESOLVED config: delay_mode is the
+     * single source of truth once the translation layer has run. */
+    AecConfig resolved = *cfg_in;
+    if (aec_config_resolve_delay(&resolved) != 0) return 0;   /* bad enum */
+    const AecConfig* cfg = &resolved;
+
     if (!aec_is_valid_sample_rate(cfg->sample_rate)) return 0;
     if (!((cfg->sample_rate == 8000 && cfg->fft_size == 256) ||
           (cfg->sample_rate == 16000 &&
@@ -201,9 +250,8 @@ static int aec_validate_config(const AecConfig* cfg) {
 #define AEC_CK_RANGE_I(field, lo, hi) \
     do { if (cfg->field < (lo) || cfg->field > (hi)) return 0; } while (0)
 
-    /* toggles (14) */
+    /* toggles (14) — enable_delay_est is checked above, pre-translation. */
     AEC_CK_BOOL(enable_cng);
-    AEC_CK_BOOL(enable_delay_est);
     AEC_CK_BOOL(enable_highpass);
     AEC_CK_BOOL(enable_saturation);
     AEC_CK_BOOL(enable_shadow);
@@ -287,6 +335,39 @@ static int aec_validate_config(const AecConfig* cfg) {
      * report anything. Rejected rather than clamped, matching the Python
      * side's ValueError (config.py __post_init__). */
     AEC_CK_RANGE_I(delay_num_filters,                    1, DA_NUM_FILTERS);
+
+    /* ── delay mode × field compatibility (productization plan §2.1) ──────
+     * STRICT by design: an illegal combination is REJECTED, never
+     * "normalised" and never silently ignored. The two rules that are easy
+     * to get wrong and therefore spelled out:
+     *   - a fixed delay is meaningless outside FIXED, so MATCHED /
+     *     EXTERNAL_ALIGNED demand the -1 unset sentinel rather than
+     *     quietly dropping a delay the caller measured and passed in;
+     *   - delay_num_filters sizes the MATCHED bank only, so outside MATCHED
+     *     it must still be the default -- accepting n=2 with no matched
+     *     filter in existence would let a caller believe they had bought a
+     *     compute saving that mode already gives them in full.
+     * Both mirror config.py's __post_init__ ValueErrors exactly. */
+    switch (cfg->delay_mode) {
+        case AEC_DELAY_MATCHED:
+            if (cfg->fixed_delay_samples != -1) return 0;
+            break;
+        case AEC_DELAY_FIXED:
+            if (cfg->fixed_delay_samples < 0) return 0;
+            /* Generous but finite, and rate-relative: the reference ring is
+             * grown to fixed_delay_samples + 4096 (aec_derive_dims), so an
+             * unbounded value here would drive an unbounded allocation.
+             * 120 s matches delay_buffer_ms's own 120000 ms upper bound. */
+            if ((long)cfg->fixed_delay_samples > 120L * (long)cfg->sample_rate) return 0;
+            if (cfg->delay_num_filters != DA_NUM_FILTERS) return 0;
+            break;
+        case AEC_DELAY_EXTERNAL_ALIGNED:
+            if (cfg->fixed_delay_samples != -1) return 0;
+            if (cfg->delay_num_filters != DA_NUM_FILTERS) return 0;
+            break;
+        default:
+            return 0;   /* unreachable: resolve_delay already rejected it */
+    }
 
 #undef AEC_CK_BOOL
 #undef AEC_CK_RANGE_F
@@ -632,11 +713,18 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
                       int hop, int blk, int fft, int K, int np,
                       int buf_samp, int fcap, int is_static);
 
-int aec_create(Aec* a, const AecConfig* cfg) {
+int aec_create(Aec* a, const AecConfig* cfg_in) {
     /* F05/F07: reject before any state is touched — no release-path assert,
      * just the existing int failure convention (0 = success, checked by
      * every caller as `!= 0` or truthy). */
-    if (!a || !cfg || !aec_validate_config(cfg)) return -1;
+    if (!a || !cfg_in || !aec_validate_config(cfg_in)) return -1;
+    /* Translate the deprecated enable_delay_est mirror ONCE, here, so every
+     * size/carve step below (and the a->cfg the instance keeps) sees a
+     * config whose delay_mode is the single source of truth. Cannot fail:
+     * aec_validate_config just accepted the same input. */
+    AecConfig cfg_resolved = *cfg_in;
+    (void)aec_config_resolve_delay(&cfg_resolved);
+    const AecConfig* cfg = &cfg_resolved;
 
     int hop, blk, fft, K, np, buf_samp, fcap;
     aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf_samp, &fcap);
@@ -692,6 +780,15 @@ static void aec_derive_dims(const AecConfig* cfg,
     int max_d = (int)(cfg->max_delay_ms * cfg->sample_rate / 1000.0f);
     int buf   = (int)(cfg->delay_buffer_ms * cfg->sample_rate / 1000.0f);
     if (buf < max_d + 4096) buf = max_d + 4096;
+    /* FIXED: the ring must be able to serve the measured delay even when it
+     * exceeds the matched-filter-oriented max_delay_ms budget (mirrors the
+     * Python orchestrator's `buffer_samp = max(buffer_samp, fixed + 4096)`).
+     * No effect on MATCHED / EXTERNAL_ALIGNED, where fixed_delay_samples is
+     * pinned at -1 by aec_validate_config. Overflow-free: the validator caps
+     * fixed_delay_samples at 120 s of samples. */
+    if (cfg->delay_mode == AEC_DELAY_FIXED &&
+        buf < cfg->fixed_delay_samples + 4096)
+        buf = cfg->fixed_delay_samples + 4096;
     *o_buf_samp = buf;
     int cap = (AEC_STREAM_FIFO_MS * cfg->sample_rate / 1000 + hop - 1) / hop;
     if (cap < 2) cap = 2;
@@ -718,9 +815,14 @@ static size_t ck_field_size_reps(size_t total, size_t count, size_t elem_size,
     return ck_add_size(total, ck_mul_size(one, reps));
 }
 
-size_t aec_get_mem_size(const AecConfig* cfg) {
-    if (!cfg) return 0;
-    if (!aec_validate_config(cfg)) return 0;
+size_t aec_get_mem_size(const AecConfig* cfg_in) {
+    if (!cfg_in) return 0;
+    if (!aec_validate_config(cfg_in)) return 0;
+    /* Same one-shot translation as aec_create/aec_init: this function and
+     * the init carve MUST see byte-identical resolved input (lockstep). */
+    AecConfig cfg_resolved = *cfg_in;
+    (void)aec_config_resolve_delay(&cfg_resolved);
+    const AecConfig* cfg = &cfg_resolved;
     int hop, blk, fft, K, np, buf, fcap;
     aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf, &fcap);
 
@@ -742,7 +844,11 @@ size_t aec_get_mem_size(const AecConfig* cfg) {
      * get_mem_size/aec_init are a lockstep pool-carve pair. */
     size_t t = 0;
     t = ck_field_size(t, 1, sizeof(Aec));
-    if (cfg->enable_delay_est) t = ck_field_size(t, (size_t)buf, sizeof(float));
+    /* Reference alignment ring: present for MATCHED and FIXED, absent only
+     * for EXTERNAL_ALIGNED (the caller pre-aligned; nothing to buffer).
+     * Must stay in lockstep with the matching carve in aec_carve(). */
+    if (cfg->delay_mode != AEC_DELAY_EXTERNAL_ALIGNED)
+        t = ck_field_size(t, (size_t)buf, sizeof(float));
     t = ck_field_size(t, ck_mul_size((size_t)fcap, (size_t)hop), sizeof(float));   /* render_fifo */
     t = ck_field_size(t, (size_t)hop, sizeof(float));  /* fifo_zero_ref (F09 Variant A' underrun ref) */
     t = ck_field_size(t, (size_t)(K - 2 > 0 ? K - 2 : 1), sizeof(int64_t));
@@ -952,14 +1058,28 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
                         hop, cfg->sample_rate);
         a->has_sat = 1;
     }
-    /* Delay ring */
-    if (cfg->enable_delay_est) {
-        delay_aec3_init_ex(&a->delay, cfg->sample_rate, cfg->delay_num_filters);
-        a->has_delay = 1;
+    /* Delay ring. `cfg` is already delay-resolved by every entry point
+     * (aec_create / aec_init), so delay_mode is authoritative here.
+     *   MATCHED           estimator + ring, delay unknown until acquisition
+     *   FIXED             ring only, delay known from the caller's bring-up
+     *                     measurement and applied from the first hop the
+     *                     ring can serve it
+     *   EXTERNAL_ALIGNED  neither; `ref` is already aligned by contract
+     * NOTE (productization plan step 1 of 4): this wires the explicit mode
+     * onto the behaviour that already existed. The POOL is not yet
+     * differentiated per mode -- FIXED still carves the same ring MATCHED
+     * does and DelayAec3 still embeds its compile-time-max arrays even in
+     * FIXED/EXTERNAL. Shrinking sizeof(Aec) per mode/n is plan step 2/3. */
+    if (cfg->delay_mode != AEC_DELAY_EXTERNAL_ALIGNED) {
+        if (cfg->delay_mode == AEC_DELAY_MATCHED) {
+            delay_aec3_init_ex(&a->delay, cfg->sample_rate, cfg->delay_num_filters);
+            a->has_delay = 1;
+        }
         a->ref_ring_size = buf_samp;
         a->ref_ring = (float*)ptr; ptr += ALIGN16((size_t)buf_samp * sizeof(float));
         memset(a->ref_ring, 0, (size_t)buf_samp * sizeof(float));
-        a->current_delay = -1;
+        a->current_delay = (cfg->delay_mode == AEC_DELAY_MATCHED)
+                           ? -1 : cfg->fixed_delay_samples;
         a->pending_delay = -1; a->has_pending = 0; a->pending_delay_ttl = 0;
     } else {
         a->current_delay = 0;
@@ -1395,9 +1515,15 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     return 0;
 }
 
-Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg) {
-    if (!mem || !cfg) return NULL;
-    if (!aec_validate_config(cfg)) return NULL;
+Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg_in) {
+    if (!mem || !cfg_in) return NULL;
+    if (!aec_validate_config(cfg_in)) return NULL;
+    /* Same one-shot delay translation aec_create/aec_get_mem_size do -- the
+     * get-mem-size query below and the carve further down must be handed
+     * byte-identical resolved input. */
+    AecConfig cfg_resolved = *cfg_in;
+    (void)aec_config_resolve_delay(&cfg_resolved);
+    const AecConfig* cfg = &cfg_resolved;
     /* F07: reject a misaligned pool base before any pool write. Every offset
      * aec_carve carves below is an ALIGN16 bump off `mem`, so a misaligned
      * base would misalign every sub-module's SIMD-sensitive buffers too. */
@@ -1486,11 +1612,16 @@ long aec_far_fft_real_compute_count(const Aec* a) {
 void aec_reset(Aec* a) {
     if (a->hp_mic) hpf_reset(a->hp_mic);
     if (a->has_sat) { saturation_reset(&a->sat_ref); saturation_reset(&a->sat_mic); }
-    if (a->has_delay) {
-        delay_aec3_reset(&a->delay);
+    /* Ring exists for MATCHED and FIXED; only the ESTIMATOR is
+     * MATCHED-exclusive. Mirrors the Python orchestrator's reset(), which
+     * clears the ring under `_delay_active` and re-seeds _current_delay from
+     * fixed_delay_samples when there is no estimator to reset. */
+    if (a->cfg.delay_mode != AEC_DELAY_EXTERNAL_ALIGNED) {
+        if (a->has_delay) delay_aec3_reset(&a->delay);
         memset(a->ref_ring, 0, (size_t)a->ref_ring_size * sizeof(float));
         a->ref_ring_write = 0; a->ref_ring_filled = 0;
-        a->current_delay = -1; a->pending_delay = -1; a->has_pending = 0;
+        a->current_delay = a->has_delay ? -1 : a->cfg.fixed_delay_samples;
+        a->pending_delay = -1; a->has_pending = 0;
         a->pending_delay_ttl = 0;
     }
     /* Reset invalidates any alignment context an external consumer cached. */
@@ -1724,8 +1855,17 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
      * gapless); only the matched-filter analysis is decimated to 1-in-K once
      * the estimate has been solid+unchanged for delay_est_init_s. This is an
      * intentional, sampled-cost-free divergence from the Python reference
-     * (which always analyses every hop). */
-    if (a->has_delay) {
+     * (which always analyses every hop).
+     *
+     * Structure (mirrors the Python orchestrator exactly): the OUTER gate is
+     * "does a reference ring exist" (MATCHED or FIXED -- Python's
+     * `_delay_active`); the INNER gate is "is there an estimator to run"
+     * (MATCHED only -- Python's `delay_est is not None`). FIXED therefore
+     * shares the ring write + delay-compensating read below verbatim and
+     * simply never runs the matched filter, since its applied delay came
+     * from the caller's bring-up measurement and never changes. */
+    if (a->cfg.delay_mode != AEC_DELAY_EXTERNAL_ALIGNED) {
+      if (a->has_delay) {
         float hop_s = (float)hop / (float)a->cfg.sample_rate;
         int hold_hops = (int)lrintf(a->cfg.delay_est_init_s / hop_s);
         int K = (int)lrintf(a->cfg.delay_est_period_s / hop_s) / 5;
@@ -1883,6 +2023,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
                 a->pending_delay = new_delay; a->has_pending = 1; a->pending_delay_ttl = 3;
             }
         }
+      }   /* end MATCHED-only estimator block */
 
         /* ring write. */
         int w = a->ref_ring_write, rs = a->ref_ring_size;
@@ -1923,6 +2064,14 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
              * aligned far. */
             a->far_hop_aligned = 1;
         }
+    } else {
+        /* EXTERNAL_ALIGNED: the caller CONTRACTED that `ref` is already
+         * aligned to `mic`, so the far this hop is aligned by definition --
+         * there is nothing to buffer and nothing to shift. Seam bookkeeping
+         * only (aec_get_linear_context); no audio path reads this flag, so
+         * this is byte-identical to the pre-delay_mode enable_delay_est=0
+         * behaviour, which simply had no way to say "aligned by contract". */
+        a->far_hop_aligned = 1;
     }
 
     /* far_hop is fully finalized above (memcpy + optional soft-clip +
@@ -2449,7 +2598,13 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             in.near_end = a->near_hop;
             in.far_end = a->far_hop;
             in.current_delay = a->current_delay;
-            in.delay_active = a->has_delay;
+            /* Mirrors Python's `self._delay_active` (orchestrator ~3150),
+             * which is "a reference ring exists", NOT "an estimator exists"
+             * -- so FIXED must report 1 here or the AEC3 post chain would
+             * see no external delay despite one being applied every hop.
+             * MATCHED (1) and EXTERNAL_ALIGNED (0) are unchanged from the
+             * previous `a->has_delay`, so this is byte-exact for both. */
+            in.delay_active = (a->cfg.delay_mode != AEC_DELAY_EXTERNAL_ALIGNED);
             in.saturation_level = a->saturation_level;
             in.pending_gain_change = a->pending_gain_change;
             in.pending_delay_change = a->pending_delay_change;
@@ -2834,6 +2989,25 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
     ctx->epc_active = a->epc.active;
 }
 
+/* How much to trust the alignment currently in force, in one place, for
+ * every reporting surface (AecDebugStatus and AecLinearContext both read
+ * it, so a consumer polling the two can never see them disagree).
+ *
+ * MATCHED is the only mode with an estimator, so it is the only mode whose
+ * confidence is a MEASUREMENT (delay_aec3_confidence's 0.0/0.5/1.0 ladder).
+ * FIXED and EXTERNAL_ALIGNED both report 1.0 for the same reason: the
+ * alignment is a CALLER CONTRACT, not something this library estimated --
+ * FIXED applies a delay the caller measured at bring-up, EXTERNAL_ALIGNED
+ * applies none because the caller guarantees `ref` arrives aligned. Neither
+ * may read the never-constructed DelayAec3, which would report 0.0 --
+ * "estimator present but unconverged" -- for an alignment that carries no
+ * uncertainty at all. */
+static float aec_delay_confidence(const Aec* a) {
+    if (a->cfg.delay_mode == AEC_DELAY_MATCHED)
+        return delay_aec3_confidence(&a->delay);
+    return 1.0f;
+}
+
 /* Read-only status query — see AecDebugStatus (aec.h). No state mutated, no
  * per-frame cost added: every field read here is already maintained by the
  * engine on the hot path regardless of whether this is ever called. */
@@ -2842,8 +3016,8 @@ void aec_debug_status(const Aec* a, AecDebugStatus* out) {
     memset(out, 0, sizeof(*out));
 
     out->delay_samples    = a->current_delay;
-    out->delay_confidence = delay_aec3_confidence(&a->delay);
-    out->delay_updates    = delay_aec3_n_updates(&a->delay);
+    out->delay_confidence = aec_delay_confidence(a);
+    out->delay_updates    = a->has_delay ? delay_aec3_n_updates(&a->delay) : 0;
 
     out->erle_windowed_db = a->last_erle_windowed;
     out->usable_linear    = aec_state_usable_linear_estimate(&a->a3_state);
@@ -2863,16 +3037,29 @@ void aec_get_linear_context(const Aec* a, AecLinearContext* ctx) {
                              ? a->a3_lfs.e_form : a->raw_output;
     ctx->aligned_far_hop = a->far_hop;
     ctx->generation = a->delay_generation;
-    if (!a->has_delay) {
-        /* No estimator: never aligned, and delay_samples must not read as a
-         * locked zero. */
-        ctx->delay_samples = -1;
-        ctx->delay_confidence = 0.0f;
-        ctx->delay_state = AEC_LINEAR_DELAY_UNLOCKED;
+    /* Per-mode semantics -- see the AecLinearContext contract in aec.h.
+     * Confidence is NOT one of the per-mode branches: it is the same
+     * question aec_debug_status() answers, so both read the one helper and
+     * only delay_samples/delay_state branch below. */
+    ctx->delay_confidence = aec_delay_confidence(a);
+    if (a->cfg.delay_mode == AEC_DELAY_EXTERNAL_ALIGNED) {
+        /* far IS the caller's own, already-aligned hop. */
+        ctx->delay_samples = 0;
+        ctx->delay_state = AEC_LINEAR_DELAY_LOCKED;
+        return;
+    }
+    if (a->cfg.delay_mode == AEC_DELAY_FIXED) {
+        ctx->delay_samples = a->current_delay;   /* == cfg.fixed_delay_samples */
+        /* far_hop_aligned is still consulted: for the first
+         * ceil(fixed/hop)+1 hops the ring cannot yet serve the offset, so
+         * far_hop is RAW and claiming LOCKED there would break this seam's
+         * central promise. CHANGED is unreachable (nothing bumps generation
+         * during processing without an estimator). */
+        ctx->delay_state = a->far_hop_aligned ? AEC_LINEAR_DELAY_LOCKED
+                                              : AEC_LINEAR_DELAY_UNLOCKED;
         return;
     }
     ctx->delay_samples = a->current_delay;
-    ctx->delay_confidence = delay_aec3_confidence(&a->delay);
     if (a->current_delay < 0 || !a->far_hop_aligned)
         ctx->delay_state = AEC_LINEAR_DELAY_UNLOCKED;
     else if (a->delay_generation != a->delay_gen_hop_start)

@@ -545,12 +545,263 @@ static void test_direct_init_rejects_bad_rate(void) {
           "saturation_init(hop=128, sr=16000) still retimes (fallback is not blanket)");
 }
 
+/* ── delay-mode translation + mode x field compatibility ──────────────────
+ * The three-state delay API (AecDelayMode) replaced two implicitly-coupled
+ * fields. Two properties need permanent cover:
+ *
+ *   1. TRANSLATION -- aec_config_resolve_delay() maps every legacy shape
+ *      (enable_delay_est / fixed_delay_samples) onto exactly one delay_mode
+ *      and rewrites the deprecated mirror from the result, idempotently.
+ *      Mirrors python/tests/test_delay_mode.py's mapping-table test row for
+ *      row; the two must never drift.
+ *   2. STRICTNESS -- an illegal mode x field combination is REJECTED by all
+ *      three entry points, not normalised and not ignored. Reusing
+ *      check_rejected() means a regression that only fixes ONE entry point
+ *      still fails here.
+ *
+ * Mutation checks (each breaks one line of the fix and must go red here):
+ *   - drop the `fixed_delay_samples >= 0` arm of the translation
+ *     -> "legacy fixed" rows resolve to EXTERNAL_ALIGNED and fail;
+ *   - drop the `!cfg->enable_delay_est` guard (translate unconditionally)
+ *     -> the MATCHED default row fails;
+ *   - drop the mirror rewrite -> the idempotency rows fail;
+ *   - drop any arm of the validator's mode switch -> the matrix fails. */
+static void test_delay_mode_translation(void) {
+    struct {
+        int est; int fixed; AecDelayMode in; AecDelayMode want; const char* tag;
+    } rows[] = {
+        { 1, -1,   AEC_DELAY_MATCHED,          AEC_DELAY_MATCHED,
+          "default (est=1, fixed=-1, MATCHED) -> MATCHED" },
+        { 0, -1,   AEC_DELAY_MATCHED,          AEC_DELAY_EXTERNAL_ALIGNED,
+          "legacy est=0, fixed=-1 -> EXTERNAL_ALIGNED" },
+        { 0, 1600, AEC_DELAY_MATCHED,          AEC_DELAY_FIXED,
+          "legacy est=0, fixed>=0 -> FIXED" },
+        { 0, 1600, AEC_DELAY_FIXED,            AEC_DELAY_FIXED,
+          "est=0 + explicit FIXED -> FIXED" },
+        { 0, -1,   AEC_DELAY_EXTERNAL_ALIGNED, AEC_DELAY_EXTERNAL_ALIGNED,
+          "est=0 + explicit EXTERNAL -> EXTERNAL_ALIGNED" },
+        { 1, 1600, AEC_DELAY_FIXED,            AEC_DELAY_FIXED,
+          "est=1 (default) + explicit FIXED -> FIXED" },
+        { 1, -1,   AEC_DELAY_EXTERNAL_ALIGNED, AEC_DELAY_EXTERNAL_ALIGNED,
+          "est=1 (default) + explicit EXTERNAL -> EXTERNAL_ALIGNED" },
+    };
+    char label[224];
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        AecConfig cfg; base_cfg(&cfg);
+        cfg.enable_delay_est = rows[i].est;
+        cfg.fixed_delay_samples = rows[i].fixed;
+        cfg.delay_mode = rows[i].in;
+        snprintf(label, sizeof(label), "translate: %s", rows[i].tag);
+        CHECK(aec_config_resolve_delay(&cfg) == 0 &&
+              cfg.delay_mode == rows[i].want, label);
+        /* Mirror rewritten from the resolved mode, both directions. */
+        snprintf(label, sizeof(label), "translate: %s (mirror rewritten)",
+                 rows[i].tag);
+        CHECK(cfg.enable_delay_est ==
+              (rows[i].want == AEC_DELAY_MATCHED ? 1 : 0), label);
+        /* Idempotent: a second pass must not move anything. */
+        AecConfig again = cfg;
+        snprintf(label, sizeof(label), "translate: %s (idempotent)",
+                 rows[i].tag);
+        CHECK(aec_config_resolve_delay(&again) == 0 &&
+              again.delay_mode == cfg.delay_mode &&
+              again.enable_delay_est == cfg.enable_delay_est, label);
+    }
+
+    /* Out-of-enum delay_mode is the helper's only failure mode. */
+    {
+        AecConfig cfg; base_cfg(&cfg);
+        cfg.delay_mode = (AecDelayMode)3;
+        CHECK(aec_config_resolve_delay(&cfg) == -1,
+              "translate: delay_mode=3 (out of enum) == -1");
+    }
+    CHECK(aec_config_resolve_delay(NULL) == -1,
+          "translate: NULL config == -1");
+
+    /* aec_config_defaults must spell fixed_delay_samples out rather than
+     * leaving it at the memset 0 -- 0 is a LEGAL fixed delay, so a memset
+     * default would make the shipped default config an illegal
+     * MATCHED+fixed combination. */
+    {
+        AecConfig cfg; aec_config_defaults(&cfg, 16000);
+        CHECK(cfg.delay_mode == AEC_DELAY_MATCHED,
+              "defaults: delay_mode == MATCHED");
+        CHECK(cfg.fixed_delay_samples == -1,
+              "defaults: fixed_delay_samples == -1 (not the memset 0)");
+        CHECK(cfg.enable_delay_est == 1,
+              "defaults: deprecated mirror agrees with MATCHED");
+        aec_config_from_preset(&cfg, AEC_PRESET_AGGRESSIVE, 48000);
+        CHECK(cfg.delay_mode == AEC_DELAY_MATCHED &&
+              cfg.fixed_delay_samples == -1,
+              "from_preset: keeps the default delay mode/fixed sentinel");
+    }
+}
+
+static void test_delay_mode_illegal_combinations(void) {
+    AecConfig valid_cfg; base_cfg(&valid_cfg);
+    size_t sz = aec_get_mem_size(&valid_cfg);
+    CHECK(sz > 0, "delay-mode test setup: valid 16k config sizes > 0");
+    void* mem = malloc(sz);
+    CHECK(mem != NULL, "delay-mode test setup: malloc pool");
+
+    /* A fixed delay is meaningless outside FIXED -- rejected, not dropped. */
+    {
+        AecConfig c; base_cfg(&c);
+        c.delay_mode = AEC_DELAY_MATCHED; c.fixed_delay_samples = 1600;
+        check_rejected("MATCHED + fixed_delay_samples=1600", &c, mem, sz);
+        c.fixed_delay_samples = 0;
+        check_rejected("MATCHED + fixed_delay_samples=0", &c, mem, sz);
+        c.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED; c.fixed_delay_samples = 1600;
+        check_rejected("EXTERNAL_ALIGNED + fixed_delay_samples=1600", &c, mem, sz);
+    }
+    /* FIXED without a delay to apply. */
+    {
+        AecConfig c; base_cfg(&c);
+        c.delay_mode = AEC_DELAY_FIXED; c.fixed_delay_samples = -1;
+        check_rejected("FIXED + fixed_delay_samples=-1", &c, mem, sz);
+        c.fixed_delay_samples = -1000;
+        check_rejected("FIXED + negative fixed_delay_samples", &c, mem, sz);
+        /* Rate-relative 120 s bound: the ring is grown to fixed+4096, so an
+         * unbounded value would drive an unbounded allocation. */
+        c.fixed_delay_samples = 120 * 16000 + 1;
+        check_rejected("FIXED + fixed_delay_samples past the 120 s bound",
+                       &c, mem, sz);
+    }
+    /* delay_num_filters sizes the MATCHED bank only. */
+    {
+        AecConfig c; base_cfg(&c);
+        c.delay_mode = AEC_DELAY_FIXED; c.fixed_delay_samples = 1600;
+        c.delay_num_filters = 2;
+        check_rejected("FIXED + delay_num_filters=2", &c, mem, sz);
+        c.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED; c.fixed_delay_samples = -1;
+        check_rejected("EXTERNAL_ALIGNED + delay_num_filters=2", &c, mem, sz);
+    }
+    /* n=0 is NEVER a silent "delay estimation off" switch, in any mode. */
+    {
+        const AecDelayMode modes[3] = { AEC_DELAY_MATCHED, AEC_DELAY_FIXED,
+                                        AEC_DELAY_EXTERNAL_ALIGNED };
+        const char* names[3] = { "MATCHED", "FIXED", "EXTERNAL_ALIGNED" };
+        char label[160];
+        for (int i = 0; i < 3; ++i) {
+            AecConfig c; base_cfg(&c);
+            c.delay_mode = modes[i];
+            c.fixed_delay_samples = (modes[i] == AEC_DELAY_FIXED) ? 1600 : -1;
+            c.delay_num_filters = 0;
+            snprintf(label, sizeof(label), "%s + delay_num_filters=0", names[i]);
+            check_rejected(label, &c, mem, sz);
+        }
+    }
+    /* Out-of-enum mode, and a garbage (non-boolean) deprecated mirror. */
+    {
+        AecConfig c; base_cfg(&c);
+        c.delay_mode = (AecDelayMode)7;
+        check_rejected("delay_mode=7 (out of enum)", &c, mem, sz);
+        base_cfg(&c);
+        c.enable_delay_est = 42;
+        check_rejected("enable_delay_est=42 (non-boolean mirror)", &c, mem, sz);
+    }
+
+    /* The guard is not blanket: every LEGAL combination still constructs,
+     * on all three entry points. Without this the matrix above would be
+     * indistinguishable from "always rejects". */
+    {
+        struct { AecDelayMode m; int fixed; int n; const char* tag; } ok[] = {
+            { AEC_DELAY_MATCHED,          -1,    5, "MATCHED n=5 (default)" },
+            { AEC_DELAY_MATCHED,          -1,    1, "MATCHED n=1" },
+            { AEC_DELAY_MATCHED,          -1,    3, "MATCHED n=3" },
+            { AEC_DELAY_FIXED,          1600,    5, "FIXED 1600" },
+            { AEC_DELAY_FIXED,             0,    5, "FIXED 0 (legal delay)" },
+            { AEC_DELAY_FIXED,   120 * 16000,    5, "FIXED at the 120 s bound" },
+            { AEC_DELAY_EXTERNAL_ALIGNED, -1,    5, "EXTERNAL_ALIGNED" },
+        };
+        char label[192];
+        for (size_t i = 0; i < sizeof(ok) / sizeof(ok[0]); ++i) {
+            AecConfig c; base_cfg(&c);
+            c.delay_mode = ok[i].m;
+            c.fixed_delay_samples = ok[i].fixed;
+            c.delay_num_filters = ok[i].n;
+            size_t need = aec_get_mem_size(&c);
+            snprintf(label, sizeof(label), "%s: aec_get_mem_size() > 0", ok[i].tag);
+            CHECK(need > 0, label);
+            Aec a;
+            snprintf(label, sizeof(label), "%s: aec_create() == 0", ok[i].tag);
+            CHECK(aec_create(&a, &c) == 0, label);
+            /* The instance keeps the RESOLVED config: delay_mode is the
+             * single source of truth after construction. */
+            snprintf(label, sizeof(label), "%s: instance keeps the resolved mode",
+                     ok[i].tag);
+            CHECK(a.cfg.delay_mode == ok[i].m &&
+                  a.cfg.enable_delay_est == (ok[i].m == AEC_DELAY_MATCHED),
+                  label);
+            snprintf(label, sizeof(label), "%s: estimator built iff MATCHED",
+                     ok[i].tag);
+            CHECK(a.has_delay == (ok[i].m == AEC_DELAY_MATCHED), label);
+            snprintf(label, sizeof(label), "%s: ring carved iff not EXTERNAL",
+                     ok[i].tag);
+            CHECK((a.ref_ring != NULL) ==
+                  (ok[i].m != AEC_DELAY_EXTERNAL_ALIGNED), label);
+            if (ok[i].m == AEC_DELAY_FIXED) {
+                snprintf(label, sizeof(label),
+                         "%s: current_delay seeded from the config", ok[i].tag);
+                CHECK(a.current_delay == ok[i].fixed, label);
+                snprintf(label, sizeof(label),
+                         "%s: ring covers fixed + 4096", ok[i].tag);
+                CHECK(a.ref_ring_size >= ok[i].fixed + 4096, label);
+            }
+            aec_destroy(&a);
+            /* Same config through the caller-pool path. */
+            void* pool = malloc(need);
+            snprintf(label, sizeof(label), "%s: aec_init() != NULL", ok[i].tag);
+            Aec* pa = aec_init(pool, need, &c);
+            CHECK(pa != NULL, label);
+            if (pa) {
+                snprintf(label, sizeof(label),
+                         "%s: pool path agrees on mode/ring", ok[i].tag);
+                CHECK(pa->cfg.delay_mode == ok[i].m &&
+                      pa->has_delay == (ok[i].m == AEC_DELAY_MATCHED) &&
+                      (pa->ref_ring != NULL) ==
+                          (ok[i].m != AEC_DELAY_EXTERNAL_ALIGNED), label);
+                aec_destroy(pa);
+            }
+            free(pool);
+        }
+    }
+
+    /* The LEGACY spelling must size and construct exactly like the explicit
+     * one -- this is what makes the deprecated mirror a translation layer
+     * rather than a second source of truth. */
+    {
+        AecConfig legacy; base_cfg(&legacy);
+        legacy.enable_delay_est = 0;
+        AecConfig explicit_ext; base_cfg(&explicit_ext);
+        explicit_ext.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
+        CHECK(aec_get_mem_size(&legacy) == aec_get_mem_size(&explicit_ext) &&
+              aec_get_mem_size(&legacy) > 0,
+              "legacy est=0 sizes identically to explicit EXTERNAL_ALIGNED");
+
+        AecConfig legacy_fixed; base_cfg(&legacy_fixed);
+        legacy_fixed.enable_delay_est = 0;
+        legacy_fixed.fixed_delay_samples = 1600;
+        AecConfig explicit_fixed; base_cfg(&explicit_fixed);
+        explicit_fixed.delay_mode = AEC_DELAY_FIXED;
+        explicit_fixed.fixed_delay_samples = 1600;
+        CHECK(aec_get_mem_size(&legacy_fixed) ==
+              aec_get_mem_size(&explicit_fixed) &&
+              aec_get_mem_size(&legacy_fixed) > 0,
+              "legacy est=0+fixed sizes identically to explicit FIXED");
+    }
+
+    free(mem);
+}
+
 int main(void) {
     test_sample_rate();
     test_filter_length();
     test_highpass_cutoff();
     test_misaligned_base();
     test_spatial_linear_context_requires_context_only();
+    test_delay_mode_translation();
+    test_delay_mode_illegal_combinations();
     test_valid_config_smoke();
     test_multi_rate_valid_smoke();
     test_direct_init_rejects_bad_rate();

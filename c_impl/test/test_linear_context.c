@@ -12,13 +12,26 @@
  *      confirmed shift, aec_reset — and at no other time. CHANGED is
  *      reported precisely on the hop whose processing bumped it.
  *   3. delay_state never claims alignment it does not have: UNLOCKED before
- *      acquisition, and permanently UNLOCKED (delay_samples == -1) when
- *      enable_delay_est=0, even though the engine's internal current_delay
- *      is 0 in that mode.
+ *      acquisition in MATCHED, and UNLOCKED for the ring-fill window in
+ *      FIXED, even though the applied delay is known from hop 0 there.
  *   4. ref_ring_filled saturates at ref_ring_size instead of growing without
  *      bound (its unbounded form is signed-overflow UB after ~37 h of
  *      continuous 16 kHz audio; the INT_MAX-seeded UBSan variant of this
  *      property lives in test_counter_saturation.c).
+ *   5. The PER-MODE seam semantics (AecDelayMode; productization plan
+ *      appendix 11.1) — each of MATCHED / FIXED / EXTERNAL_ALIGNED reports
+ *      exactly one story about delay_samples / confidence / state /
+ *      generation, and the far content it exposes matches that story:
+ *        MATCHED           unchanged (scenarios 1-2 above)
+ *        FIXED             delay_samples == the configured delay, always;
+ *                          confidence 1.0; generation frozen while
+ *                          processing; LOCKED once the ring can serve the
+ *                          offset, and the exposed far is then byte-equal
+ *                          to the caller's far delayed by exactly that many
+ *                          samples
+ *        EXTERNAL_ALIGNED  the exposed far IS the caller's own far (byte
+ *                          for byte, every hop); delay_samples == 0;
+ *                          LOCKED from hop 0; generation frozen
  *
  * Mutation checks (each reverts one line of the fix and must go red here):
  *   - drop the Path-A generation bump  -> "first lock: CHANGED on the lock
@@ -26,9 +39,15 @@
  *   - drop the Path-B generation bump  -> "shift: generation advanced" fails;
  *   - drop the aec_reset bump          -> "reset: generation advanced" fails;
  *   - report far_hop_aligned=1 unconditionally -> "pre-lock hops stay
- *     UNLOCKED" fails;
+ *     UNLOCKED" and "fixed: UNLOCKED until the ring can serve" fail;
  *   - remove the ref_ring_filled clamp -> "filled saturates at ring size"
- *     fails.
+ *     fails;
+ *   - seed FIXED's current_delay from anything but cfg.fixed_delay_samples
+ *     -> "fixed: aligned far is the caller far delayed by fixed" fails;
+ *   - run the ring write/read under the estimator gate instead of the
+ *     ring gate -> every "fixed: ..." alignment row fails;
+ *   - report EXTERNAL_ALIGNED as UNLOCKED/-1 (its pre-delay_mode reading)
+ *     -> the external-aligned rows fail.
  *
  * Build (standalone, from c_impl/ — mirrors test_process_context.c):
  *   make -C ../../audio_common BACKEND=kiss lib
@@ -239,25 +258,182 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     g_rng_state = 0x11EC5EEDu;  /* keep scenarios independent of ordering */
 }
 
-static void scenario_delay_est_disabled(void) {
+/* EXTERNAL_ALIGNED (and its legacy spelling, enable_delay_est=0): no
+ * estimator, no ring. The caller CONTRACTED that far is already aligned, so
+ * the seam says so -- delay_samples 0, LOCKED from the first hop, frozen
+ * generation -- and the exposed far must be the caller's own hop byte for
+ * byte, every hop, never a ring read.
+ *
+ * `legacy` drives the SAME assertions through the deprecated
+ * enable_delay_est=0 spelling, proving the translation layer lands on this
+ * mode rather than merely compiling. */
+static void scenario_external_aligned(int legacy) {
+    const char* tag = legacy ? "external-aligned(legacy est=0)"
+                             : "external-aligned";
+    char msg[160];
     AecConfig cfg;
     context_only_config(&cfg, 16000, 0);
-    cfg.enable_delay_est = 0;
+    if (legacy) cfg.enable_delay_est = 0;
+    else        cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED;
     Aec a;
-    CHECK(aec_create(&a, &cfg) == 0, "delay-est-off: aec_create");
+    snprintf(msg, sizeof msg, "%s: aec_create", tag);
+    CHECK(aec_create(&a, &cfg) == 0, msg);
+    snprintf(msg, sizeof msg, "%s: resolves to EXTERNAL_ALIGNED", tag);
+    CHECK(a.cfg.delay_mode == AEC_DELAY_EXTERNAL_ALIGNED, msg);
+    snprintf(msg, sizeof msg, "%s: no ring carved", tag);
+    CHECK(a.ref_ring == NULL && !a.has_delay, msg);
+
+    int hop = a.hop_size;
     long pushed = 0;
     AecLinearContext first, ctx;
     aec_get_linear_context(&a, &first);
-    run_hops(&a, 120, 800, &pushed, NULL, NULL);
+
+    /* Walk EVERY hop: the far the seam exposes must equal the far this test
+     * just handed in (modulo nothing -- amplitude 0.05 never soft-clips). */
+    int content_ok = 1, state_ok = 1, gen_ok = 1;
+    for (int h = 0; h < 120; ++h) {
+        long base = pushed;
+        float mic[1024], out[1024];
+        for (int i = 0; i < hop; ++i) {
+            g_far_hist[base + i] = rng_uniform(0.05f);
+            long src = base + i - 800;
+            mic[i] = (src >= 0) ? 0.5f * g_far_hist[src] : 0.0f;
+        }
+        aec_process(&a, mic, g_far_hist + base, out);
+        pushed = base + hop;
+        aec_get_linear_context(&a, &ctx);
+        if (memcmp(ctx.aligned_far_hop, g_far_hist + base,
+                   (size_t)hop * sizeof(float)) != 0) content_ok = 0;
+        if (ctx.delay_state != AEC_LINEAR_DELAY_LOCKED ||
+            ctx.delay_samples != 0 || ctx.delay_confidence != 1.0f) state_ok = 0;
+        if (ctx.generation != first.generation) gen_ok = 0;
+    }
+    snprintf(msg, sizeof msg, "%s: exposed far IS the caller's far, every hop", tag);
+    CHECK(content_ok, msg);
+    snprintf(msg, sizeof msg, "%s: LOCKED / delay 0 / confidence 1.0, every hop", tag);
+    CHECK(state_ok, msg);
+    snprintf(msg, sizeof msg, "%s: generation frozen while processing", tag);
+    CHECK(gen_ok, msg);
+    snprintf(msg, sizeof msg, "%s: aligned_far_hop aliases a->far_hop", tag);
+    CHECK(ctx.aligned_far_hop == a.far_hop, msg);
+    aec_destroy(&a);
+    g_rng_state = 0x11EC5EEDu;
+}
+
+/* FIXED: no estimator, but a ring that applies the caller's MEASURED delay
+ * from the first hop it can serve it. The seam must report that delay
+ * verbatim (never -1, never the estimator's 0.0 confidence), must not claim
+ * LOCKED while the ring is still filling, and must never bump generation --
+ * there is nothing that could re-lock. */
+static void scenario_fixed_delay(int legacy) {
+    const char* tag = legacy ? "fixed(legacy est=0+fixed)" : "fixed";
+    char msg[160];
+    const int fixed = 1600;   /* 100 ms at 16 kHz */
+    AecConfig cfg;
+    context_only_config(&cfg, 16000, 0);
+    cfg.fixed_delay_samples = fixed;
+    if (legacy) cfg.enable_delay_est = 0;
+    else        cfg.delay_mode = AEC_DELAY_FIXED;
+    Aec a;
+    snprintf(msg, sizeof msg, "%s: aec_create", tag);
+    CHECK(aec_create(&a, &cfg) == 0, msg);
+    snprintf(msg, sizeof msg, "%s: resolves to FIXED", tag);
+    CHECK(a.cfg.delay_mode == AEC_DELAY_FIXED, msg);
+    snprintf(msg, sizeof msg, "%s: ring carved, no estimator", tag);
+    CHECK(a.ref_ring != NULL && !a.has_delay, msg);
+
+    int hop = a.hop_size;
+    AecLinearContext first, ctx;
+    aec_get_linear_context(&a, &first);
+    snprintf(msg, sizeof msg, "%s: delay_samples reads the configured delay "
+                              "before the first hop", tag);
+    CHECK(first.delay_samples == fixed, msg);
+
+    /* The ring cannot serve `fixed` until it holds fixed + hop samples, so
+     * the honest state is UNLOCKED for exactly ceil(fixed/hop)+1 hops. */
+    int fill_hops = (fixed + hop - 1) / hop + 1;
+    long pushed = 0;
+    int early_unlocked = 1, late_locked = 1, delay_ok = 1, conf_ok = 1, gen_ok = 1;
+    int content_ok = 1, changed_seen = 0;
+    for (int h = 0; h < 400; ++h) {
+        long base = pushed;
+        float mic[1024], out[1024];
+        for (int i = 0; i < hop; ++i) {
+            g_far_hist[base + i] = rng_uniform(0.05f);
+            long src = base + i - fixed;
+            mic[i] = (src >= 0) ? 0.5f * g_far_hist[src] : 0.0f;
+        }
+        aec_process(&a, mic, g_far_hist + base, out);
+        pushed = base + hop;
+        aec_get_linear_context(&a, &ctx);
+        if (ctx.delay_samples != fixed) delay_ok = 0;
+        if (ctx.delay_confidence != 1.0f) conf_ok = 0;
+        if (ctx.generation != first.generation) gen_ok = 0;
+        if (ctx.delay_state == AEC_LINEAR_DELAY_CHANGED) changed_seen = 1;
+        if (h < fill_hops - 1) {
+            if (ctx.delay_state != AEC_LINEAR_DELAY_UNLOCKED) early_unlocked = 0;
+        } else {
+            if (ctx.delay_state != AEC_LINEAR_DELAY_LOCKED) late_locked = 0;
+            long start = pushed - hop - fixed;
+            if (start < 0 || memcmp(ctx.aligned_far_hop, g_far_hist + start,
+                                    (size_t)hop * sizeof(float)) != 0)
+                content_ok = 0;
+        }
+    }
+    snprintf(msg, sizeof msg, "%s: delay_samples == the configured delay, every hop", tag);
+    CHECK(delay_ok, msg);
+    snprintf(msg, sizeof msg, "%s: confidence 1.0 (measured, not estimated)", tag);
+    CHECK(conf_ok, msg);
+    snprintf(msg, sizeof msg, "%s: UNLOCKED until the ring can serve the offset", tag);
+    CHECK(early_unlocked, msg);
+    snprintf(msg, sizeof msg, "%s: LOCKED once the ring covers delay + hop", tag);
+    CHECK(late_locked, msg);
+    snprintf(msg, sizeof msg, "%s: aligned far is the caller far delayed by fixed", tag);
+    CHECK(content_ok, msg);
+    snprintf(msg, sizeof msg, "%s: generation frozen while processing", tag);
+    CHECK(gen_ok, msg);
+    snprintf(msg, sizeof msg, "%s: CHANGED is unreachable without an estimator", tag);
+    CHECK(!changed_seen, msg);
+
+    /* aec_reset re-zeroes the ring, so it DOES invalidate a consumer's cached
+     * far -- the one legitimate generation bump in this mode -- and must
+     * re-seed the applied delay from the config, not to -1. */
+    unsigned gen_before = ctx.generation;
+    aec_reset(&a);
     aec_get_linear_context(&a, &ctx);
-    CHECK(ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED,
-          "delay-est-off: permanently UNLOCKED");
-    CHECK(ctx.delay_samples == -1,
-          "delay-est-off: delay_samples reads -1, not the internal 0");
+    snprintf(msg, sizeof msg, "%s: reset re-seeds the configured delay (not -1)", tag);
+    CHECK(ctx.delay_samples == fixed && a.current_delay == fixed, msg);
+    snprintf(msg, sizeof msg, "%s: reset returns to UNLOCKED (ring emptied)", tag);
+    CHECK(ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED, msg);
+    snprintf(msg, sizeof msg, "%s: reset bumps generation (ring content invalidated)", tag);
+    CHECK(ctx.generation > gen_before, msg);
+    aec_destroy(&a);
+    g_rng_state = 0x11EC5EEDu;
+}
+
+/* A FIXED delay of 0 is legal and distinct from EXTERNAL_ALIGNED: the ring
+ * exists (so a later reset/realign has somewhere to read from) and the seam
+ * is LOCKED from hop 0 because a zero offset needs no ring read at all. */
+static void scenario_fixed_zero_delay(void) {
+    AecConfig cfg;
+    context_only_config(&cfg, 16000, 0);
+    cfg.delay_mode = AEC_DELAY_FIXED;
+    cfg.fixed_delay_samples = 0;
+    Aec a;
+    CHECK(aec_create(&a, &cfg) == 0, "fixed0: aec_create");
+    CHECK(a.ref_ring != NULL, "fixed0: ring still carved (unlike EXTERNAL)");
+    long pushed = 0;
+    AecLinearContext first, ctx;
+    aec_get_linear_context(&a, &first);
+    run_hops(&a, 40, 0, &pushed, NULL, NULL);
+    aec_get_linear_context(&a, &ctx);
+    CHECK(ctx.delay_samples == 0 && ctx.delay_state == AEC_LINEAR_DELAY_LOCKED,
+          "fixed0: LOCKED at delay 0 from the start");
     CHECK(ctx.generation == first.generation,
-          "delay-est-off: generation never moves across hops");
-    CHECK(ctx.aligned_far_hop == a.far_hop,
-          "delay-est-off: far pointer still valid (content is raw far)");
+          "fixed0: generation frozen while processing");
+    CHECK(memcmp(ctx.aligned_far_hop, g_far_hist + pushed - a.hop_size,
+                 (size_t)a.hop_size * sizeof(float)) == 0,
+          "fixed0: exposed far is the caller's latest hop");
     aec_destroy(&a);
     g_rng_state = 0x11EC5EEDu;
 }
@@ -344,7 +520,11 @@ int main(void) {
     scenario_acquire_and_verify(16000, 0,   1600, "16k/fft256");
     scenario_acquire_and_verify(16000, 512, 1600, "16k/fft512");
     scenario_acquire_and_verify(48000, 0,   4800, "48k/fft1024");
-    scenario_delay_est_disabled();
+    scenario_external_aligned(/*legacy=*/0);
+    scenario_external_aligned(/*legacy=*/1);
+    scenario_fixed_delay(/*legacy=*/0);
+    scenario_fixed_delay(/*legacy=*/1);
+    scenario_fixed_zero_delay();
     scenario_unfilled_ring_reads_unlocked();
     scenario_ring_filled_saturates();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

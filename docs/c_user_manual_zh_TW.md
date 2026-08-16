@@ -168,7 +168,30 @@ int run_aec(int sample_rate)
 
 ### 延遲契約
 
-`mic` 與 `ref` 之間的聲學延遲由內建的線上延遲估計處理（`enable_delay_est`，預設開啟）。
+`mic` 與 `ref` 之間的對齊方式由 **`cfg.delay_mode`（三選一，init 時決定、
+instance 存活期間不可變）** 決定。這是唯一的真實來源：
+
+| `delay_mode` | 需要的欄位 | 行為 | 何時用 |
+|---|---|---|---|
+| `AEC_DELAY_MATCHED`（預設） | `delay_num_filters` = 1–5 | 內建 matched filter 線上估計延遲，參考環形緩衝套用 | 延遲未知或會變動（一般線上產品） |
+| `AEC_DELAY_FIXED` | `fixed_delay_samples` ≥ 0 | **不建 estimator**；用同一條參考環形緩衝套用固定延遲 | 硬體路徑固定、bring-up 已量測出系統延遲 |
+| `AEC_DELAY_EXTERNAL_ALIGNED` | 無 | **不建 estimator、不建環形緩衝**；呼叫端保證傳進來的 `ref` 已對齊 | HAL 已對齊，或離線且檔案已精準對齊 |
+
+非法組合一律**拒絕**（`aec_create` / `aec_init` 失敗、`aec_get_mem_size`
+回 0），不會被靜默忽略或修正：`MATCHED` / `EXTERNAL_ALIGNED` 帶
+`fixed_delay_samples ≥ 0`、`FIXED` 沒帶 `fixed_delay_samples`、
+非 `MATCHED` 卻改了 `delay_num_filters`、以及任何模式下的
+`delay_num_filters = 0`，都會被擋下。
+
+> **`enable_delay_est` 已 deprecated。** 它現在只是 `delay_mode` 的相容
+> 轉譯層（`aec_config_resolve_delay()` 在驗證前跑一次）：`= 1`（預設）代表
+> 「沿用 `delay_mode`」；`= 0` 且 `fixed_delay_samples ≥ 0` → `FIXED`；
+> `= 0` 且沒帶 → `EXTERNAL_ALIGNED`。轉譯後只有 `delay_mode` 是真值，
+> 這個欄位會被改寫成對應的鏡像值。舊程式不需改動即可繼續運作，但新程式
+> 請直接寫 `delay_mode`；此欄位未來會移除。
+
+以下的可擷取上限**只適用於 `MATCHED`**（`FIXED` 沒有搜尋這回事，
+只要環形緩衝夠大即可；緩衝會自動長到 `fixed_delay_samples + 4096`）。
 
 **可擷取的延遲上限是編譯期固定的，不是 `max_delay_ms`。** 這點容易誤解：
 
@@ -199,8 +222,9 @@ max 923 ms、約 5% 超出 509 ms）與板端/離線的建議做法（系統延�
 延遲估計**不能**修正這些問題：mic/ref 取樣率不同、持續的 clock drift、
 送錯的 reference 訊號。這些必須在上游解決。
 
-離線處理且檔案已精準對齊時，可設 `cfg.enable_delay_est = 0` 省掉首次擷取的擾動。
-線上產品請維持開啟。
+離線處理且檔案已精準對齊時，可設
+`cfg.delay_mode = AEC_DELAY_EXTERNAL_ALIGNED`（舊寫法 `cfg.enable_delay_est = 0`
+效果相同）省掉首次擷取的擾動。線上產品請維持 `MATCHED`。
 
 ### 演算法延遲（實測）
 
@@ -376,7 +400,7 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 |---|---:|---|
 | `enable_res` | `1` | 殘留回音抑制。關閉後輸出是純線性 filter 殘差、延遲降為 0，但回音殘留明顯變多。診斷時可關（見 §9）。 |
 | `enable_cng` | `1` | 舒適噪音。若下游還有另一套噪音處理／CNG，**請關掉這個**，兩層疊加會讓噪音底變得不自然。 |
-| `enable_delay_est` | `1` | 線上延遲估計。只有在離線且檔案已精準對齊時才關。關閉會少掉 131,072 B 記憶體（16 kHz）。 |
+| `enable_delay_est` | `1` | **DEPRECATED**——`delay_mode` 的相容轉譯層（見 §3 延遲契約與 §6.4）。設 0 等同 `EXTERNAL_ALIGNED`（或帶 `fixed_delay_samples` 時等同 `FIXED`）。`EXTERNAL_ALIGNED` 會少掉 131,072 B 記憶體（16 kHz）。新程式請直接寫 `delay_mode`。 |
 | `enable_highpass` | `1` | mic 路徑的高通濾波（見 `highpass_cutoff_hz`）。上游已有高通時可關。 |
 | `enable_saturation` | `1` | 削波偵測與參考訊號軟限幅。建議維持開啟。 |
 | `enable_shadow` | `1` | 輔助 filter，用於偵測回音路徑變化。關閉會少掉 32,560 B（16 kHz），但路徑突變後的恢復會變慢。 |
@@ -397,11 +421,13 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 
 | 欄位 | 型別 | 預設 | 允許範圍 | 說明／何時調整 |
 |---|---|---:|---|---|
+| `delay_mode` | `AecDelayMode` | `AEC_DELAY_MATCHED` | `MATCHED` / `FIXED` / `EXTERNAL_ALIGNED` | **對齊方式的唯一真實來源**（見 §3 延遲契約的三態表）。init 時決定、instance 存活期間不可變（各 mode 的 pool 佈局不同，要改必須 destroy + 重新 init）。非法組合一律拒絕。 |
+| `fixed_delay_samples` | `int` | `-1` | `-1`，或 `FIXED` 時 0 – `120 × sample_rate` | **只在 `FIXED` 有意義**：bring-up 量測到的系統延遲，單位是 native-rate sample。其他 mode 必須維持 `-1`（帶值會被拒絕，不會被忽略）。環形緩衝會自動長到 `fixed_delay_samples + 4096`。 |
 | `max_delay_ms` | `float` | `1024.0` | 0 – 60000 | **參考訊號環形緩衝的尺寸下限（ms）**，不是搜尋上限（見 §3 延遲契約）。調高只是多配記憶體，不會提高可擷取的延遲。 |
 | `delay_buffer_ms` | `float` | `2048.0` | 0 – 120000 | 參考訊號環形緩衝長度（ms）。實際樣本數取 `delay_buffer_ms` 與 `max_delay_ms + 4096 samples` 兩者較大者。調高 `max_delay_ms` 時通常要一併調高。 |
 | `delay_est_init_s` | `float` | `0.3` | 0 – 3600 | 延遲估計值需維持穩定多久才視為已鎖定（秒）。 |
 | `delay_est_period_s` | `float` | `0.5` | 0 – 3600 | 鎖定後的重新確認週期（秒）。回音路徑常變動（裝置會移動）可調短。 |
-| `delay_num_filters` | `int` | `5` | 1 – 5 | Matched-filter bank 大小（**算力旋鈕**）。可靠搜尋上限隨之縮小：n=1→125ms／2→221ms／3→317ms／4→413ms／5→509ms；每少一組省 ~4.2 MMAC/s 的 full-rate 搜尋算力，RAM 不變（陣列維持編譯期上限）。只在系統延遲已由 `fixed_delay_samples` 補償、matched filter 僅追殘差的部署縮小；bench/dataset 一律維持 5（見 `delay_estimator_design_zh_TW.md` §5）。 |
+| `delay_num_filters` | `int` | `5` | 1 – 5（**只在 `MATCHED`**；其他 mode 必須維持 5） | Matched-filter bank 大小（**算力旋鈕**）。可靠搜尋上限隨之縮小：n=1→125ms／2→221ms／3→317ms／4→413ms／5→509ms；每少一組省 ~4.2 MMAC/s 的 full-rate 搜尋算力，RAM 不變（陣列維持編譯期上限）。只在系統延遲已由 `fixed_delay_samples` 補償、matched filter 僅追殘差的部署縮小；bench/dataset 一律維持 5（見 `delay_estimator_design_zh_TW.md` §5）。`FIXED` / `EXTERNAL_ALIGNED` 根本沒有 matched filter，改這個值會被拒絕（不是忽略）；`0` 在任何 mode 都是錯誤，不是「關閉延遲估計」的入口。 |
 | `delay_acquire_protect_converged` | `int` | `1` | 0 / 1 | filter 已收斂時，保護它不被延遲重新擷取破壞。 |
 | `delay_acquire_warm_transfer` | `int` | `1` | 0 / 1 | 首次擷取到延遲時，把已學到的回音模型平移過去而不是歸零，避免開場一秒左右出現一段明顯回音。建議維持開啟。 |
 | `delay_acquire_inst_erle_db` | `float` | `4.0` | -100 – 100 | 上一項的觸發門檻（dB）：既有模型要夠好才值得平移。 |

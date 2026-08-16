@@ -8,7 +8,7 @@ NOSHIP flags are deleted entirely.
 from dataclasses import dataclass, field
 
 from . import aec3_scale as _aec3_scale
-from .enums import AecMode, AecPreset
+from .enums import AecDelayMode, AecMode, AecPreset
 
 
 @dataclass
@@ -336,11 +336,30 @@ class AecConfig:
     epc_hangover: int = 20
 
     # ── Delay estimation (matched-filter + ring buffer) ─────────────────
+    # THE source of truth for far/mic alignment (see AecDelayMode). Accepts
+    # the enum, its int value, or its name as a string; normalised to the
+    # enum in __post_init__. init-time immutable in the C port (the pool
+    # layout differs per mode), so treat it as immutable here too.
+    delay_mode: AecDelayMode = AecDelayMode.MATCHED
+    # DEPRECATED translation-layer mirror of ``delay_mode``. Kept so
+    # pre-delay_mode callers keep working unchanged; it is NOT a second
+    # source of truth -- __post_init__ folds it into ``delay_mode`` once and
+    # then rewrites it to match, and every downstream read (orchestrator,
+    # 4ch wrappers, AIAEC) is of ``delay_mode`` alone. Mirrors the C
+    # ``AecConfig.enable_delay_est`` / ``aec_config_resolve_delay()``.
+    # Scheduled for removal once all callers have moved to delay_mode.
     enable_delay_est: bool = True
     max_delay_ms: float = 1024.0
     delay_buffer_ms: float = 2048.0
     delay_est_period_s: float = 0.5
     delay_est_init_s: float = 0.3
+    # FIXED only: the measured system delay in native-rate samples, >= 0.
+    # Must stay at the -1 unset sentinel in MATCHED / EXTERNAL_ALIGNED --
+    # a fixed delay those modes cannot honour is REJECTED, not ignored.
+    # (Before delay_mode existed, ``fixed_delay_samples >= 0`` IMPLICITLY
+    # overrode enable_delay_est. That implicit override is gone: say
+    # ``delay_mode=AecDelayMode.FIXED`` -- or, legacy-style,
+    # ``enable_delay_est=False`` -- alongside it.)
     fixed_delay_samples: int = -1
     delay_par_low_threshold: float = 5.0
     delay_par_solid_threshold: float = 8.0
@@ -485,6 +504,8 @@ class AecConfig:
                 f"{self.delay_num_filters}"
             )
 
+        self._resolve_delay_mode()
+
         # Wall-clock-authored top-level (non-AEC3) constants (2026-08
         # gap-fix, follow-up to the AEC3-internal per-block/hop-count
         # constant audit). shadow_err_alpha / warmup_frames / epc_hangover /
@@ -561,6 +582,71 @@ class AecConfig:
         self.filter_misadjustment_hangover_frames = _aec3_scale.ms_to_hops(
             self._canonical_ms_filter_misadjustment_hangover_frames,
             self.hop_size, self.sample_rate)
+
+    # ── delay-mode translation + validation ─────────────────────────────
+    # Byte-for-byte the same contract as C's aec_config_resolve_delay() +
+    # aec_validate_config() (c_impl/src/aec.c). Kept as one method so the
+    # two halves -- "fold the deprecated mirror away" and "reject illegal
+    # mode/field combinations" -- cannot drift apart or be run out of order.
+    #
+    # Mapping (the ONLY three legacy shapes that ever existed):
+    #
+    #   enable_delay_est | fixed_delay_samples | delay_mode in | resolved
+    #   -----------------+---------------------+---------------+----------
+    #    True (default)  | any                 | any           | delay_mode (unchanged)
+    #    False           | >= 0                | MATCHED (dflt)| FIXED
+    #    False           | <  0                | MATCHED (dflt)| EXTERNAL_ALIGNED
+    #    False           | any                 | FIXED         | FIXED
+    #    False           | any                 | EXTERNAL_ALIGN| EXTERNAL_ALIGNED
+    #
+    # ``enable_delay_est is True`` (its default) carries no information and
+    # leaves delay_mode alone; clearing it is the legacy way of saying "not
+    # MATCHED" and only translates while delay_mode is still at ITS default.
+    # No conflict case exists, because the two non-MATCHED delay_mode values
+    # are exactly the two outcomes clearing the legacy flag can select.
+    # Idempotent: the mirror is rewritten from the resolved mode, so
+    # re-running __post_init__ (dataclasses.replace / **asdict round-trips)
+    # is a no-op.
+    def _resolve_delay_mode(self) -> None:
+        self.delay_mode = AecDelayMode.coerce(self.delay_mode)
+        if (not self.enable_delay_est
+                and self.delay_mode is AecDelayMode.MATCHED):
+            self.delay_mode = (
+                AecDelayMode.FIXED if self.fixed_delay_samples >= 0
+                else AecDelayMode.EXTERNAL_ALIGNED)
+        self.enable_delay_est = (self.delay_mode is AecDelayMode.MATCHED)
+
+        fixed = int(self.fixed_delay_samples)
+        if self.delay_mode is AecDelayMode.FIXED:
+            if fixed < 0:
+                raise ValueError(
+                    "delay_mode=FIXED requires fixed_delay_samples >= 0, got "
+                    f"{fixed}")
+            # Generous but finite, and rate-relative: the reference ring is
+            # grown to fixed + 4096, so an unbounded value here would drive
+            # an unbounded allocation. 120 s matches delay_buffer_ms's own
+            # 120000 ms upper bound on the C side.
+            if fixed > 120 * self.sample_rate:
+                raise ValueError(
+                    f"fixed_delay_samples={fixed} exceeds the 120 s bound "
+                    f"({120 * self.sample_rate} samples at "
+                    f"{self.sample_rate} Hz)")
+        else:
+            if fixed != -1:
+                raise ValueError(
+                    f"fixed_delay_samples={fixed} is only meaningful with "
+                    f"delay_mode=FIXED (got {self.delay_mode.name}); leave it "
+                    "at the -1 unset sentinel")
+        if (self.delay_mode is not AecDelayMode.MATCHED
+                and self.delay_num_filters != 5):
+            # No matched filter exists to size, so a non-default n would be
+            # a silently ignored input -- and would let a caller believe
+            # they had bought a compute saving this mode already gives them
+            # in full.
+            raise ValueError(
+                f"delay_num_filters={self.delay_num_filters} is only "
+                f"meaningful with delay_mode=MATCHED (got "
+                f"{self.delay_mode.name}); leave it at the default 5")
 
     @property
     def fft_size(self) -> int:

@@ -41,6 +41,126 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-16 — delay productization line A, step 1: three-state delay mode + validation
+
+First of the four AEC steps in
+`docs/delay_estimator_productization_plan_zh_TW.md` §9. Alignment is now
+selected by ONE explicit field instead of two implicitly-coupled ones, and
+every illegal mode/field combination is rejected rather than normalised.
+**Output contract intact**: the default path (`MATCHED`, n=5) and both
+legacy spellings render **sample-exact** to the stable baseline `5cd14a0` —
+9 C cases (16k/256, 16k/512, 48k/1024 × default/CNG/mild/aggressive/
+`--no-delay-est`) and 3 Python cases (default, `from_preset('balanced')`,
+legacy `enable_delay_est=False`), compared sample-by-sample rather than by
+file hash (float WAV `PEAK` chunks carry a timestamp).
+
+### Added
+
+1. **`AecDelayMode` — `MATCHED` / `FIXED` / `EXTERNAL_ALIGNED`** (C
+   `aec.h`, Python `modules/enums.py`, identical integer values 0/1/2).
+   `AecConfig` gains `delay_mode` (both ports) and `fixed_delay_samples`
+   (C; Python already had it). init-time immutable. `MATCHED` estimates the
+   delay online; `FIXED` applies a bring-up-MEASURED delay through the same
+   reference ring with no estimator; `EXTERNAL_ALIGNED` builds neither
+   estimator nor ring because the caller guarantees `ref` is already
+   aligned. Defaults are unchanged (`MATCHED` + n=5 + `fixed=-1`), and the
+   C `aec_config_defaults()` spells `fixed_delay_samples = -1` out rather
+   than leaving the memset 0 — 0 is a legal fixed delay, so a memset default
+   would have made the shipped config itself illegal.
+   *All three behaviours already existed; this step NAMES them. The pool is
+   deliberately NOT yet differentiated per mode — `FIXED` still carves the
+   same ring `MATCHED` does and `DelayAec3` still embeds its compile-time-max
+   arrays in every mode. Shrinking `sizeof(Aec)` per mode/n is plan step 2/3.*
+
+2. **`aec_config_resolve_delay()` (C) / `AecConfig._resolve_delay_mode()`
+   (Python)** — the one, explicit, idempotent translation layer for the now
+   **deprecated** `enable_delay_est` mirror, run before validation on every
+   entry point (`aec_get_mem_size` / `aec_create` / `aec_init`;
+   `AecConfig.__post_init__` plus a re-run at `AEC()` construction so a
+   late `cfg.enable_delay_est = False` poke is still honoured, matching where
+   C resolves). Mapping: `est=1` (its default) carries no information and
+   leaves `delay_mode` alone; `est=0` + `fixed>=0` → `FIXED`; `est=0` +
+   `fixed<0` → `EXTERNAL_ALIGNED`. The mirror is rewritten from the resolved
+   mode afterwards, so **only `delay_mode` is the source of truth** from
+   that point on. `enable_delay_est` is scheduled for removal once callers
+   have moved.
+
+3. **`AecLinearContext` per-mode semantics** (plan appendix §11.1) — the NN
+   seam now tells the truth about each mode instead of collapsing two of
+   them onto "no estimator": `FIXED` reports `delay_samples ==
+   fixed_delay_samples` with `confidence 1.0` and a frozen `generation`;
+   `EXTERNAL_ALIGNED` reports `delay_samples == 0`, `LOCKED`, `confidence
+   1.0`, frozen `generation`, and its `aligned_far_hop` IS the caller's own
+   hop byte for byte. One deliberate refinement of §11.1: `FIXED` stays
+   `UNLOCKED` for the first `ceil(fixed/hop)+1` hops, the window where the
+   ring cannot yet serve the offset and `far_hop` is still RAW — claiming
+   `LOCKED` there would break this seam's central promise ("`UNLOCKED` means
+   the content is the RAW far") exactly where a small-search-range consumer
+   is most likely to mis-handle it. Steady state is `LOCKED` as specified.
+
+4. **Tests** — `python/tests/test_delay_mode.py` (22 cases: mapping table,
+   int/string coercion, `replace()`/`asdict()` idempotency, legacy-vs-explicit
+   bit-identical audio for both non-MATCHED modes, the illegal-combination
+   matrix, per-mode wiring, late-mutation translation);
+   `test_config_validation.c` +106 cases (same mapping table row for row, all
+   three entry points on every illegal combination, plus a "guard is not
+   blanket" sweep proving each legal combination still constructs on both the
+   heap and caller-pool paths); `test_linear_context.c` +55 cases (per-mode
+   seam assertions incl. both legacy spellings, and a legal `FIXED 0`).
+   Mutation-checked: dropping the `fixed>=0` arm of the translation, dropping
+   the `enable_delay_est` guard, or moving the ring write/read back under the
+   estimator gate each turns them red (Python 3/6, C 3/4 failures).
+
+### Changed
+
+5. **`fixed_delay_samples >= 0` no longer silently overrides
+   `enable_delay_est`** (Python; the C side never had the field). It was an
+   undocumented implicit mode switch inside the orchestrator:
+   `AecConfig(fixed_delay_samples=1600)` ran in fixed-delay mode while
+   `enable_delay_est` still read `True`. It now **raises** — say
+   `delay_mode=AecDelayMode.FIXED` (or, legacy-style, `enable_delay_est=False`)
+   alongside it. This is the only source-compatibility break in this step;
+   no in-repo caller used that shape.
+
+6. **`delay_num_filters` outside `MATCHED` is rejected**, not ignored (both
+   ports). There is no matched filter to size in `FIXED` /
+   `EXTERNAL_ALIGNED`, and accepting `n=2` there would let a caller believe
+   they had bought a compute saving those modes already give them in full.
+   `delay_num_filters=0` remains an error in every mode — never a silent
+   "delay estimation off" switch.
+
+7. **`AecLinearContext` for `enable_delay_est=0` reads `delay_samples=0` /
+   `LOCKED`** where it previously read `−1` / `UNLOCKED` (see item 3). A
+   seam-contract change, not an audio change; downstream consumers
+   (`Audio_ALG` pipelines, AIAEC) are updated in the pipeline steps of the
+   plan. `AecDebugStatus.delay_confidence` likewise reports `1.0` for
+   `FIXED` instead of reading the never-initialised `DelayAec3`, and `1.0`
+   for `EXTERNAL_ALIGNED` too (it read `0.0` before): both modes take their
+   alignment from a caller contract rather than from an estimator, so both
+   carry the same "no uncertainty to report" value that
+   `AecLinearContext.delay_confidence` has always reported for them. A
+   DIAGNOSTIC-field change only — no audio path reads it.
+
+8. **`Aec.has_delay` now means "the matched-filter ESTIMATOR exists"**
+   (i.e. `MATCHED` only), matching Python's `delay_est is not None`. "Does a
+   reference ring exist" is `cfg.delay_mode != AEC_DELAY_EXTERNAL_ALIGNED`
+   (Python's `_delay_active`). The AEC3 post chain's `delay_active` input was
+   reading the former where it needed the latter — inconsequential until now
+   (the two agreed in both C-reachable modes), but wrong for `FIXED`, which
+   would have reported no external delay while applying one every hop.
+
+### Notes
+
+- `AecConfig` grew two fields, appended at the END of the struct so every
+  pre-existing field keeps its byte offset. `sizeof(AecConfig)` and hence
+  `sizeof(Aec)` / `aec_get_mem_size()` change: **rebuild required**, no
+  source change required.
+- The C `FIXED` path is new implementation (the field did not exist in C
+  before), mirroring the Python orchestrator's structure exactly: the OUTER
+  gate is "is there a ring", the INNER gate is "is there an estimator". The
+  ring grows to `fixed_delay_samples + 4096` when that exceeds the
+  `max_delay_ms` budget, again mirroring Python.
+
 ## [Unreleased] — 2026-08-14 — delay-estimator round: configurable bank size, delay survey docs (pre-echo fix held on branch)
 
 Split landing (2026-08-15): the behaviour-neutral items below are ON main;

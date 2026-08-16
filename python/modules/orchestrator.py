@@ -17,7 +17,7 @@ import soundfile as sf
 
 # Lazy holder for FilteringQualityAnalyzer audit module; populated on
 from .enums import (
-    AecMode, AecPreset, AecFilterState, _FREQ_MODES,
+    AecDelayMode, AecMode, AecPreset, AecFilterState, _FREQ_MODES,
 )
 from .dataclasses import AecStats, AecResContext
 from .delay.legacy_compat import LegacyDelayShim as DelayEstimator
@@ -229,8 +229,29 @@ class AEC:
         if self.config.mu == AecConfig.mu:  # still at dataclass default
             self.config.mu = self._MODE_DEFAULT_MU.get(self.config.mode, 0.3)
 
-        # Delay estimation + reference alignment
-        if self.config.enable_delay_est or self.config.fixed_delay_samples >= 0:
+        # Re-run the delay-mode translation at CONSTRUCTION time, mirroring
+        # the C port -- there the deprecated enable_delay_est mirror is
+        # folded into delay_mode inside aec_create()/aec_init(), not inside
+        # aec_config_defaults(), precisely so a caller that pokes the field
+        # AFTER building its config (``cfg.enable_delay_est = False``, a
+        # shape several call sites in this repo use) is still honoured.
+        # Idempotent for every other case: __post_init__ already rewrote the
+        # mirror from the resolved mode, so this is a no-op unless the
+        # config was mutated in flight. Also re-validates, so an illegal
+        # mode/field combination introduced by such a poke fails here rather
+        # than silently taking the wrong branch below.
+        self.config._resolve_delay_mode()
+
+        # Delay estimation + reference alignment. ``delay_mode`` is the
+        # single source of truth (AecConfig.__post_init__ has already folded
+        # the deprecated enable_delay_est mirror into it and rejected every
+        # illegal mode/field combination), so nothing below re-derives the
+        # mode from enable_delay_est / fixed_delay_samples. In particular
+        # the old implicit "fixed_delay_samples >= 0 overrides
+        # enable_delay_est" rule is GONE -- a fixed delay outside FIXED no
+        # longer silently switches modes, it raises.
+        _delay_mode = self.config.delay_mode
+        if _delay_mode is not AecDelayMode.EXTERNAL_ALIGNED:
             max_delay_samp = int(self.config.max_delay_ms * self.config.sample_rate / 1000)
             # Ring buffer sized to delay_buffer_ms (default 1024 ms,
             # matching WebRTC AEC3 kRenderTransferQueueSizeFrames=1000 ms).
@@ -238,7 +259,7 @@ class AEC:
             # configured buffer to absorb hop-boundary alignment.
             buffer_samp = int(self.config.delay_buffer_ms * self.config.sample_rate / 1000)
             buffer_samp = max(buffer_samp, max_delay_samp + 4096)
-            if self.config.fixed_delay_samples >= 0:
+            if _delay_mode is AecDelayMode.FIXED:
                 buffer_samp = max(buffer_samp, self.config.fixed_delay_samples + 4096)
                 self.delay_est = None
                 self._current_delay = self.config.fixed_delay_samples
@@ -3161,7 +3182,7 @@ class AEC:
             self.delay_est is not None
             and getattr(self.delay_est, 'is_solid', False)
         )
-        _fixed_delay_active = (int(self.config.fixed_delay_samples) >= 0)
+        _fixed_delay_active = (self.config.delay_mode is AecDelayMode.FIXED)
         if not _ext_delay_present:
             _ext_delay_source = 'none'
         elif _fixed_delay_active:
