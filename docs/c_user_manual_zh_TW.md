@@ -47,16 +47,46 @@
 `sample_rate` 與 `fft_size` 是**成對**檢查的，下表以外的組合一律被 `aec_create()` /
 `aec_init()` / `aec_get_mem_size()` 拒絕：
 
-| sample_rate | fft_size | hop（每次呼叫的 sample 數） | hop 時間 | n_partitions（預設 filter 長度下） |
-|---:|---:|---:|---:|---:|
-| 8000 | 256 | 128 | 16.000 ms | 4 |
-| 16000 | 256（預設） | 128 | 8.000 ms | 7 |
-| 16000 | 512 | 256 | 16.000 ms | 4 |
-| 48000 | 1024（預設） | 512 | 10.667 ms | 6 |
+| sample_rate | fft_size | hop（每次呼叫的 sample 數） | hop 時間 | n_partitions（預設 filter 長度下） | 狀態 |
+|---:|---:|---:|---:|---:|---|
+| 8000 | 256 | 128 | 16.000 ms | 4 | **legacy**（非產品正式格點） |
+| 16000 | 256（預設） | 128 | 8.000 ms | 7 | 產品 |
+| 16000 | 512 | 256 | 16.000 ms | 4 | 產品（另一選擇） |
+| 48000 | 1024（預設） | 512 | 10.667 ms | 6 | 產品 |
 
-16 kHz 有兩個合法格點，預設是 256。要用 512 必須在 `aec_create()` 前自行覆寫
-`cfg.fft_size`。可用 `aec_is_valid_sample_rate()` 先檢查取樣率
-（8000/16000/48000 回傳 1，其餘回傳 0）。
+**核心不接受 `fft_size = 0`（「自動」）——格點必須是明確值。** 16 kHz 有
+兩個合法格點，函式庫不會替你猜是哪一個；`fft_size = 0` 會被
+`aec_create()` / `aec_init()` / `aec_get_mem_size()` 拒絕（和任何不成對的
+組合一樣）。
+
+填值的正確做法只有一條鏈：`aec_config_defaults()` / `aec_config_from_preset()`
+是**唯一**會替你填預設格點的地方（8k→256、16k→256、48k→1024，同
+`aec_default_fft_size()`），填完之後核心不再猜第二次。要用 16 kHz 的 512
+格點，就在 `aec_create()` 前自行覆寫 `cfg.fft_size = 512`。CLI／上層應用
+可以替沒指定的使用者選產品預設，但**呼叫函式庫前必須先 resolve 成非零
+`fft_size`**（`example/aec_wav.c` 就是這樣做的）。
+
+查詢用 API：
+
+- `aec_resolve_signal_grid(sample_rate, fft_size, &grid)` —— 全函式庫唯一
+  的格點解析器。成功回傳 1 並填入 `AecSignalGrid{sample_rate, fft_size,
+  frame_size, hop_size, n_freqs, is_legacy}`；失敗回傳 0 且**不動** `*out`。
+  驗證、`aec_get_mem_size()`、`aec_create()`、`aec_init()` 全部走這一支，
+  所以「配記憶體時看到的格點」＝「init 看到的」＝「`aec_process()` 實際
+  消耗的 hop」。`out` 可傳 NULL 當純檢查用。
+- `aec_is_valid_sample_rate(sample_rate)` —— 「這個取樣率至少有一個合法
+  格點嗎」（8000/16000/48000 回傳 1）。**注意：回傳 1 不代表任何
+  `fft_size` 都可以**，成對關係仍要 resolve。
+- `aec_default_fft_size(sample_rate)` —— 該取樣率的產品預設 `fft_size`
+  （不支援的取樣率回 0）。
+
+`fft_size`、`sample_rate`、`delay_mode`、`delay_num_filters` 都是
+**init-time immutable**：任何一項改變都必須重新查記憶體需求並重新 init。
+
+> 8 kHz 是 **legacy 格點**：本函式庫與 Audio_ALG MONO pipeline 支援它
+> （既有 8 kHz 測試路徑仍在用），但它不是產品正式格點，Audio_ALG 的
+> 4 聲道 pipeline 也不支援（該 API 只保證 16k/256、16k/512、48k/1024
+> 三個產品格點）。`AecSignalGrid.is_legacy` 會為它、且只為它設為 1。
 
 ### 硬性限制
 
@@ -390,7 +420,7 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | 欄位 | 型別 | 預設 | 允許範圍 | 說明／何時調整 |
 |---|---|---|---|---|
 | `sample_rate` | `int` | 呼叫端指定 | 8000 / 16000 / 48000 | 必填。與音訊來源一致。 |
-| `fft_size` | `int` | 8k→256、16k→256、48k→1024 | 須與 `sample_rate` 成對（見 §1） | 只有 16 kHz 有第二選擇（512）。改成 512 會讓 hop 變 16 ms、延遲加倍，但每秒呼叫次數減半。 |
+| `fft_size` | `int` | 8k→256、16k→256、48k→1024（由 `aec_config_defaults()` 填入，＝`aec_default_fft_size()`） | 須與 `sample_rate` 成對（見 §1）；**`0`（自動）會被拒絕** | 只有 16 kHz 有第二選擇（512）。改成 512 會讓 hop 變 16 ms、延遲加倍，但每秒呼叫次數減半。核心不會替你猜格點——所有入口都走同一支 `aec_resolve_signal_grid()`。 |
 | `filter_length` | `int` | `sr × 52/1000`（48 kHz 為 `sr × 64/1000`）→ 8k:416、16k:832、48k:3072 | 1 – 4096 | **單位是 sample，不是 ms。** 涵蓋的回音路徑長度。大房間／長殘響時調高，代價是記憶體與運算量上升。 |
 | `n_partitions` | `int` | `0`（自動） | `0` 或 1 – 256 | 留 `0` 即可，由 `filter_length` 與 hop 自動推導。 |
 

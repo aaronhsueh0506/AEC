@@ -6,9 +6,97 @@ under ``modules.orchestrator`` / ``modules.filters``; closed-substrate
 NOSHIP flags are deleted entirely.
 """
 from dataclasses import dataclass, field
+from typing import NamedTuple, Optional, Tuple
 
 from . import aec3_scale as _aec3_scale
 from .enums import AecDelayMode, AecMode, AecPreset
+
+
+# ── Signal grid: ONE resolver, shared by every derivation ────────────────
+# (sample_rate, fft_size) is the complete init-time description of the frame
+# geometry; everything else is derived. This project fixes
+# frame_size == fft_size and hop_size == fft_size // 2, but that derivation
+# lives in exactly ONE place -- ``resolve_signal_grid()`` -- which
+# ``AecConfig.__post_init__`` is the sole caller of. Mirrors the C
+# ``aec_resolve_signal_grid()`` / ``AEC_GRID_TABLE`` (c_impl/src/aec.c) row
+# for row, including the is_legacy flag.
+#
+# ``fft_size`` must be explicit at the core: 16 kHz has TWO production grids
+# (256 and 512), so a resolver that guessed would silently pick one.
+# ``default_fft_size()`` is the CONVENIENCE default a factory may apply
+# before resolving (what the ``frame_size = -1`` sentinel triggers below,
+# and what C's ``aec_config_defaults()`` fills in) -- it is the only place a
+# grid is ever chosen for a caller.
+class SignalGrid(NamedTuple):
+    """A fully resolved, self-consistent frame geometry."""
+
+    sample_rate: int
+    fft_size: int          # == frame_size in this project
+    frame_size: int
+    hop_size: int          # == fft_size // 2
+    n_freqs: int           # == fft_size // 2 + 1
+    is_legacy: bool        # True for 8 kHz: supported, not a product grid
+
+
+# 8 kHz is a LEGACY grid (productization plan §11.2, decided): supported by
+# this library and by the Audio_ALG MONO pipeline, but NOT a product grid
+# and NOT supported by the Audio_ALG 4-CHANNEL pipeline, whose public API
+# contracts to exactly the three product grids. Kept because real tests
+# depend on it; flagged rather than left sitting anonymously in a guessed
+# path.
+_GRID_TABLE: Tuple[SignalGrid, ...] = (
+    SignalGrid(16000,  256,  256, 128, 129, False),   # product, 16k default
+    SignalGrid(16000,  512,  512, 256, 257, False),   # product, 16k alternate
+    SignalGrid(48000, 1024, 1024, 512, 513, False),   # product
+    SignalGrid( 8000,  256,  256, 128, 129, True),    # LEGACY
+)
+
+
+def default_fft_size(sample_rate: int) -> int:
+    """The product-default fft_size for a rate, or 0 if unsupported.
+
+    The first table row for the rate (16 kHz -> 256, the low-latency /
+    low-compute grid; 48 kHz -> 1024; 8 kHz -> 256). A caller wanting the
+    16 kHz alternate must ask for 512 explicitly -- which is the whole
+    reason ``resolve_signal_grid`` refuses an unspecified fft_size.
+    Mirrors C's ``aec_default_fft_size()``.
+    """
+    for g in _GRID_TABLE:
+        if g.sample_rate == sample_rate:
+            return g.fft_size
+    return 0
+
+
+def resolve_signal_grid(sample_rate: int, fft_size: int,
+                        hop_size: Optional[int] = None) -> SignalGrid:
+    """Resolve (sample_rate, fft_size) into a full grid, or raise.
+
+    ``hop_size``, when given, is CHECKED against the resolved hop rather
+    than used to derive anything -- the 50%-overlap invariant is a property
+    of the grid, not a caller input. Pass None (or the matching value) for
+    the normal path.
+    """
+    if fft_size is None or fft_size <= 0:
+        raise ValueError(
+            f"signal grid must be explicit: got frame_size/fft_size="
+            f"{fft_size} at sample_rate={sample_rate}. 16 kHz has two "
+            f"production grids (256 and 512), so nothing guesses one for "
+            f"you here; use default_fft_size() if you want the product "
+            f"default.")
+    if fft_size & (fft_size - 1):
+        raise ValueError(
+            f"no-padding invariant violated: frame_size={fft_size} "
+            "must be a positive power of two")
+    for g in _GRID_TABLE:
+        if g.sample_rate == sample_rate and g.fft_size == fft_size:
+            if hop_size is not None and hop_size != g.hop_size:
+                raise ValueError(
+                    f"50% overlap invariant violated: frame_size={fft_size} "
+                    f"must equal 2 * hop_size={hop_size}")
+            return g
+    raise ValueError(
+        f"unsupported signal grid: sample_rate={sample_rate}, "
+        f"frame_size/fft_size={fft_size}")
 
 
 @dataclass
@@ -450,48 +538,26 @@ class AecConfig:
     _canonical_retention_shadow_err_alpha: float = field(default=-1.0, repr=False)
 
     def __post_init__(self):
+        # ── signal grid: ONE resolver call, no inline table ──────────────
+        # ``frame_size = -1`` is this dataclass's CONVENIENCE-default
+        # sentinel (the Python analogue of C's aec_config_defaults() filling
+        # a concrete fft_size): it is expanded to the rate's product default
+        # HERE, and then the strict resolver has the final word. Nothing
+        # downstream re-derives hop / n_freqs / validity -- that used to be
+        # spread across three separate blocks in this method plus an inline
+        # ``valid_grids`` dict, and the C side had its own third copy.
         if self.frame_size == -1:
-            self.frame_size = {
-                8000: 256,
-                16000: 256,
-                48000: 1024,
-            }.get(self.sample_rate, 0)
-        if self.hop_size == -1:
-            self.hop_size = self.frame_size // 2
+            self.frame_size = default_fft_size(self.sample_rate)
+        grid = resolve_signal_grid(
+            self.sample_rate, self.frame_size,
+            hop_size=None if self.hop_size == -1 else self.hop_size)
+        self.frame_size = grid.frame_size
+        self.hop_size = grid.hop_size
         if self.filter_length == -1:
             if self.sample_rate >= 44100:
                 self.filter_length = self.sample_rate * 64 // 1000
             else:
                 self.filter_length = self.sample_rate * 52 // 1000
-        if self.frame_size != 2 * self.hop_size:
-            raise ValueError(
-                f"50% overlap invariant violated: frame_size={self.frame_size} "
-                f"must equal 2 * hop_size={self.hop_size}"
-            )
-        if self.frame_size <= 0 or self.frame_size & (self.frame_size - 1):
-            raise ValueError(
-                f"no-padding invariant violated: frame_size={self.frame_size} "
-                "must be a positive power of two"
-            )
-        # 8 kHz is fully supported by this standalone library and by the
-        # Audio_ALG MONO pipeline (audio_pipeline.c accepts/tests it as a
-        # 4th grid -- see pipelines/README.md "Parameter Alignment"). It is
-        # NOT supported by the Audio_ALG 4-CHANNEL pipeline, whose public
-        # API contracts to exactly three grids: 16 kHz/256, 16 kHz/512,
-        # 48 kHz/1024 (see 4ch_pipelines/README.md and
-        # 4ch_pipelines/4aec_nr_res.c's explicit sample_rate check). Callers
-        # targeting the 4-channel pipeline specifically should not construct
-        # this at 8 kHz even though the check below allows it.
-        valid_grids = {
-            8000: {256},
-            16000: {256, 512},
-            48000: {1024},
-        }
-        if self.frame_size not in valid_grids.get(self.sample_rate, set()):
-            raise ValueError(
-                f"unsupported signal grid: sample_rate={self.sample_rate}, "
-                f"frame_size/fft_size={self.frame_size}"
-            )
 
         # Matched-filter bank size. Fail fast (same style as the grid check
         # above) rather than clamping: a caller that asks for 0 or 7 filters

@@ -41,9 +41,16 @@ static float aec_legacy10ms_alpha(float legacy_alpha, int hop, int sample_rate) 
 void aec_config_defaults(AecConfig* cfg, int sr) {
     memset(cfg, 0, sizeof(*cfg));
     cfg->sample_rate = sr;
-    cfg->fft_size = (sr == 48000) ? 1024
-                    : (sr == 16000) ? 256
-                    : (sr == 8000) ? 256 : 0;
+    /* CONVENIENCE default only. This factory is the ONE place a default
+     * fft_size is applied -- it returns a complete config with a concrete
+     * grid, and the core (aec_validate_config / aec_get_mem_size /
+     * aec_create / aec_init) never guesses again: fft_size == 0 is rejected
+     * there. A caller wanting the 16 kHz alternate 512/256 grid overrides
+     * this field afterwards. aec_default_fft_size() reads the same grid
+     * table aec_resolve_signal_grid() does, so there is no second copy of
+     * the mapping (it returns 0 for an unsupported rate, which the
+     * validator then rejects, exactly as the old inline expression did). */
+    cfg->fft_size = aec_default_fft_size(sr);
     /* M4 (multi-rate consumption switch): filter_length used to be the fixed
      * 16 kHz bake (832 = 52 ms @ 16000 Hz). Replaced with the actual Python
      * ms policy (AecConfig.__post_init__): 64 ms at sr>=44100 (the high-rate
@@ -148,32 +155,77 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
     }
 }
 
-/* ── F05/F07 config validation ────────────────────────────────────────────
- * Sample-rate whitelist. The multi-rate implementation widens this
- * from {16000} to {8000, 16000, 48000}: the M2 per-rate coefficient/
- * threshold tables (aec3_balanced_config.h's R8K-/R48K- blocks +
- * AEC3B_RATE_TABLE) and the M4 consumption switch (aec_carve /
- * aec3_post_chain_reset resolving every rate-varying dimension through
- * aec3b_rate_cfg()) have already landed and been proven 16 kHz
- * byte-identical; the per-rate verification suite (parity_aec_e2e,
- * gen_delay_c_golden/parity_delay, test_static_aec, test_rate_structural)
- * covers 8000/16000/48000 end to end. 44100 and any other rate stay
- * rejected — no per-rate tables exist for them.
+/* ── Signal-grid resolver: THE single source of truth ─────────────────────
+ * Every (sample_rate, fft_size) admissibility question and every
+ * frame/hop/bin derivation in this library goes through the table below,
+ * via aec_resolve_signal_grid(). aec_validate_config(), aec_derive_dims()
+ * (and therefore aec_get_mem_size() / aec_create() / aec_init()) and
+ * aec_is_valid_sample_rate() are all thin readers of it -- there is no
+ * second place that decides "is this grid legal" or re-derives hop from
+ * fft. See aec.h's AecSignalGrid comment for the public contract.
  *
- * 8000 is fully supported by this standalone library and by the Audio_ALG
- * MONO pipeline (audio_pipeline.c accepts/tests it as a 4th grid — see
- * Audio_ALG/pipelines/README.md "Parameter Alignment"). It is NOT
- * supported by the Audio_ALG 4-CHANNEL pipeline, whose public API
- * contracts to exactly three grids: 16 kHz/256, 16 kHz/512, 48 kHz/1024
- * (see Audio_ALG/pipelines/4ch_pipelines/README.md and
- * 4aec_nr_res.c's explicit sample_rate check). Callers targeting the
- * 4-channel pipeline specifically should not construct an Aec at 8 kHz
- * even though this whitelist allows it. */
-static const int AEC_SR_WHITELIST[] = { 8000, 16000, 48000 };
+ * The multi-rate implementation widened the accepted set from {16000} to
+ * {8000, 16000, 48000}: the M2 per-rate coefficient/threshold tables
+ * (aec3_balanced_config.h's R8K-/R48K- blocks + AEC3B_RATE_TABLE) and the
+ * M4 consumption switch (aec_carve / aec3_post_chain_reset resolving every
+ * rate-varying dimension through aec3b_rate_cfg()) have landed and been
+ * proven 16 kHz byte-identical; the per-rate verification suite
+ * (parity_aec_e2e, gen_delay_c_golden/parity_delay, test_static_aec,
+ * test_rate_structural) covers 8000/16000/48000 end to end. 44100 and any
+ * other rate stay rejected -- no per-rate tables exist for them.
+ *
+ * AEC3B_RATE_TABLE carries its own copy of {n_bins, fft_size, block_size,
+ * hop_size} alongside ~40 tuning constants. It is NOT a second resolver:
+ * nothing consults it to decide admissibility, and
+ * test_rate_structural.c's grid-lockstep section pins it row-for-row
+ * against this table so the two can never disagree.
+ *
+ * 8 kHz is a LEGACY grid (plan §11.2, decided): supported by this
+ * standalone library and by the Audio_ALG MONO pipeline (audio_pipeline.c
+ * accepts/tests it as a 4th grid -- see Audio_ALG/pipelines/README.md
+ * "Parameter Alignment"), but NOT a product grid and NOT supported by the
+ * Audio_ALG 4-CHANNEL pipeline, whose public API contracts to exactly the
+ * three product grids (see 4ch_pipelines/README.md and 4aec_nr_res.c's
+ * explicit sample_rate check). It is kept because real tests depend on it;
+ * it is flagged rather than left to sit anonymously in a "guessed" path. */
+static const AecSignalGrid AEC_GRID_TABLE[] = {
+    /* sr,    fft, frame,  hop, n_freqs, is_legacy */
+    { 16000,  256,   256,  128,     129, 0 },   /* product, 16 kHz default   */
+    { 16000,  512,   512,  256,     257, 0 },   /* product, 16 kHz alternate */
+    { 48000, 1024,  1024,  512,     513, 0 },   /* product                   */
+    {  8000,  256,   256,  128,     129, 1 },   /* LEGACY, not a product grid*/
+};
+
+int aec_resolve_signal_grid(int sample_rate, int fft_size, AecSignalGrid* out) {
+    /* fft_size == 0 ("auto") never resolves: 16 kHz has two production
+     * grids and guessing would silently pick one. See aec.h. */
+    if (fft_size <= 0) return 0;
+    for (size_t i = 0; i < sizeof(AEC_GRID_TABLE) / sizeof(AEC_GRID_TABLE[0]); ++i) {
+        if (AEC_GRID_TABLE[i].sample_rate == sample_rate &&
+            AEC_GRID_TABLE[i].fft_size == fft_size) {
+            if (out) *out = AEC_GRID_TABLE[i];
+            return 1;
+        }
+    }
+    return 0;
+}
 
 int aec_is_valid_sample_rate(int sample_rate) {
-    for (size_t i = 0; i < sizeof(AEC_SR_WHITELIST) / sizeof(AEC_SR_WHITELIST[0]); ++i) {
-        if (sample_rate == AEC_SR_WHITELIST[i]) return 1;
+    for (size_t i = 0; i < sizeof(AEC_GRID_TABLE) / sizeof(AEC_GRID_TABLE[0]); ++i) {
+        if (AEC_GRID_TABLE[i].sample_rate == sample_rate) return 1;
+    }
+    return 0;
+}
+
+int aec_default_fft_size(int sample_rate) {
+    /* The convenience-default policy, in ONE place: the first table row for
+     * the rate is its product default (16 kHz -> 256, the low-latency/
+     * low-compute grid; 48 kHz -> 1024; 8 kHz -> 256). Callers that want the
+     * 16 kHz alternate must ask for 512 explicitly -- that is the whole
+     * reason the core refuses fft_size == 0. */
+    for (size_t i = 0; i < sizeof(AEC_GRID_TABLE) / sizeof(AEC_GRID_TABLE[0]); ++i) {
+        if (AEC_GRID_TABLE[i].sample_rate == sample_rate)
+            return AEC_GRID_TABLE[i].fft_size;
     }
     return 0;
 }
@@ -234,11 +286,13 @@ static int aec_validate_config(const AecConfig* cfg_in) {
     if (aec_config_resolve_delay(&resolved) != 0) return 0;   /* bad enum */
     const AecConfig* cfg = &resolved;
 
-    if (!aec_is_valid_sample_rate(cfg->sample_rate)) return 0;
-    if (!((cfg->sample_rate == 8000 && cfg->fft_size == 256) ||
-          (cfg->sample_rate == 16000 &&
-           (cfg->fft_size == 256 || cfg->fft_size == 512)) ||
-          (cfg->sample_rate == 48000 && cfg->fft_size == 1024))) return 0;
+    /* Signal grid: ONE resolver call, no inline (sample_rate, fft_size)
+     * table of its own. This also rejects fft_size == 0 -- the core never
+     * guesses a grid, since 16 kHz has two production ones (see
+     * aec_resolve_signal_grid). aec_derive_dims() below resolves the SAME
+     * pair through the SAME function, so validation and sizing cannot see
+     * different geometry. */
+    if (!aec_resolve_signal_grid(cfg->sample_rate, cfg->fft_size, NULL)) return 0;
     if (cfg->filter_length <= 0 || cfg->filter_length > 4096) return 0;
     if (cfg->n_partitions != 0 &&
         (cfg->n_partitions < 1 || cfg->n_partitions > 256)) return 0;
@@ -766,14 +820,32 @@ int aec_create(Aec* a, const AecConfig* cfg_in) {
 
 /* ── dimension helper (shared by aec_create() and aec_init()) ─────────────── */
 
-/* Derive all frame-dimension parameters from cfg. */
+/* Derive all frame-dimension parameters from cfg.
+ *
+ * The frame geometry (fft/frame/hop/n_freqs) comes from the ONE shared
+ * resolver -- this function does NOT re-derive `hop = fft/2` or
+ * `K = fft/2+1` itself, which is exactly the duplication that let
+ * get-mem-size and init drift apart in principle. Everything else below
+ * (partitions, ring, FIFO capacity) is genuinely config-dependent and has
+ * always lived here.
+ *
+ * Every caller (aec_get_mem_size / aec_create / aec_init) has already run
+ * aec_validate_config(), which resolves the same pair, so the lookup here
+ * cannot miss; the zero-fill fallback exists only so a future caller that
+ * forgets cannot walk off with uninitialised dimensions. */
 static void aec_derive_dims(const AecConfig* cfg,
                             int* o_hop, int* o_blk, int* o_fft, int* o_K,
                             int* o_nparts, int* o_buf_samp, int* o_fifo_cap) {
-    int fft = cfg->fft_size;
-    int blk = fft;
-    int hop = fft / 2;
-    *o_hop = hop; *o_blk = blk; *o_fft = fft; *o_K = fft / 2 + 1;
+    AecSignalGrid g;
+    if (!aec_resolve_signal_grid(cfg->sample_rate, cfg->fft_size, &g)) {
+        *o_hop = 0; *o_blk = 0; *o_fft = 0; *o_K = 0;
+        *o_nparts = 0; *o_buf_samp = 0; *o_fifo_cap = 0;
+        return;
+    }
+    int fft = g.fft_size;
+    int blk = g.frame_size;
+    int hop = g.hop_size;
+    *o_hop = hop; *o_blk = blk; *o_fft = fft; *o_K = g.n_freqs;
     int n = cfg->n_partitions;
     if (n <= 0) { n = (cfg->filter_length + hop - 1) / hop; if (n < 1) n = 1; }
     *o_nparts = n;

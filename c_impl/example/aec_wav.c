@@ -122,7 +122,24 @@ int main(int argc, char* argv[]) {
 
     AecConfig cfg;
     aec_config_from_preset(&cfg, preset, sr);
+    /* Grid resolution happens HERE, in the CLI, before the library is
+     * called: a user who did not pass --fft-size gets this rate's product
+     * default (already filled by aec_config_from_preset via
+     * aec_default_fft_size), and the value handed to aec_create() is always
+     * a concrete nonzero fft_size. The core deliberately refuses
+     * fft_size == 0 -- 16 kHz has two production grids and the library must
+     * not guess which one a caller meant. Rejecting the unresolved pair
+     * here (rather than letting aec_create() fail with the same message
+     * further down) also catches a bad --fft-size before any allocation. */
     if (fft_size > 0) cfg.fft_size = fft_size;
+    if (!aec_resolve_signal_grid(sr, cfg.fft_size, NULL)) {
+        fprintf(stderr,
+                "ERROR: unsupported AEC signal grid (sr=%d, fft=%d); "
+                "use 256/512 @16kHz, 1024 @48kHz, or 256 @8kHz (legacy)\n",
+                sr, cfg.fft_size);
+        wav_close_read(mr); wav_close_read(rr);
+        return 4;
+    }
     if (explicit_cng >= 0) cfg.enable_cng = explicit_cng;
     if (no_delay_est) cfg.enable_delay_est = 0;
     if (no_res)       cfg.enable_res = 0;

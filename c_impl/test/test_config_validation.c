@@ -25,6 +25,11 @@
  *   ./bin/test_config_validation
  */
 #include "aec.h"
+/* AEC3B_RATE_TABLE / aec3b_rate_cfg(): the AEC3 tuning table carries its
+ * own {n_bins, fft_size, block_size, hop_size} alongside ~40 tuning
+ * constants. test_signal_grid_resolver() pins it against the shared
+ * resolver so the instance can never be split across two grids. */
+#include "aec3_balanced_config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -545,6 +550,218 @@ static void test_direct_init_rejects_bad_rate(void) {
           "saturation_init(hop=128, sr=16000) still retimes (fallback is not blanket)");
 }
 
+/* ── shared signal-grid resolver: lockstep across every entry point ───────
+ * (sample_rate, fft_size) used to be admissibility-checked by an inline
+ * table inside aec_validate_config() while aec_derive_dims() separately
+ * re-derived `hop = fft/2` / `K = fft/2+1`, and AEC3B_RATE_TABLE carried a
+ * THIRD copy of the same geometry. Nothing forced the three to agree. They
+ * now all read one resolver, and this section is what keeps that true.
+ *
+ * Proven here, on all four supported grids (the three product grids plus
+ * the 8 kHz legacy one):
+ *   1. RESOLVER CONTENT — frame/hop/n_freqs are what the grid table says,
+ *      hard-coded rather than recomputed from the same `fft/2` expression
+ *      the source uses (a recomputed expectation would move together with
+ *      a broken formula).
+ *   2. LOCKSTEP — the grid aec_get_mem_size() sized against == the grid
+ *      aec_init()/aec_create() initialised against == the hop aec_process()
+ *      actually consumes, on BOTH construction paths, AND == the geometry
+ *      AEC3B_RATE_TABLE hands the AEC3 post chain.
+ *   3. NO GUESSING — fft_size == 0 ("auto") is rejected by all three entry
+ *      points; so is every mismatched pair (16k/1024, 48k/256, 8k/512, ...).
+ *      16 kHz has TWO production grids, so a library that guessed would
+ *      silently pick one.
+ *
+ * Mutation checks (measured, not assumed):
+ *   - editing one AEC_GRID_TABLE row's hop (16k/512: 256 -> 128) turns rows
+ *     1 and 2's "as tabled" / "AEC3B_RATE_TABLE agrees" red (2 failures) --
+ *     the table is genuinely load-bearing, not decoration;
+ *   - additionally making aec_derive_dims re-derive `hop = fft/2` itself
+ *     instead of calling aec_resolve_signal_grid turns the LOCKSTEP rows
+ *     red too ("init sees the resolver's grid", "aec_hop_size() == the
+ *     resolved hop", "create sees the same grid", 5 failures total). That
+ *     pair is the isolation test for "one entry point bypassed the
+ *     resolver": on its own the bypass is value-identical today, and it is
+ *     the DIVERGENCE it permits that this section catches.
+ *   - KNOWN GAP (measured, recorded rather than papered over): removing the
+ *     aec_resolve_signal_grid() call from aec_validate_config() alone does
+ *     NOT turn this section red. Rejection still happens one layer later,
+ *     because aec3b_rate_cfg() returns NULL for an unsupported pair and
+ *     aec_get_mem_size() propagates that as 0 -- i.e. AEC3B_RATE_TABLE is a
+ *     de facto second admissibility gate today. The observable public
+ *     contract (all three entry points reject) is what this section pins,
+ *     and it holds either way; collapsing that second gate onto the
+ *     resolver means sourcing AEC3B_RATE_TABLE's four grid columns from
+ *     AEC_GRID_TABLE, which is a follow-up, not part of this step. The
+ *     "AEC3B_RATE_TABLE agrees with the resolver" row above is what keeps
+ *     the two honest until then. */
+static void test_signal_grid_resolver(void) {
+    struct { int sr, fft, frame, hop, K, legacy; const char* tag; } grids[] = {
+        { 16000,  256,  256, 128, 129, 0, "16k/256 (product default)"   },
+        { 16000,  512,  512, 256, 257, 0, "16k/512 (product alternate)" },
+        { 48000, 1024, 1024, 512, 513, 0, "48k/1024 (product)"          },
+        {  8000,  256,  256, 128, 129, 1, "8k/256 (legacy)"             },
+    };
+    char label[224];
+
+    for (size_t i = 0; i < sizeof(grids) / sizeof(grids[0]); ++i) {
+        AecSignalGrid g;
+        memset(&g, 0, sizeof g);
+        snprintf(label, sizeof(label), "%s: resolves", grids[i].tag);
+        CHECK(aec_resolve_signal_grid(grids[i].sr, grids[i].fft, &g) == 1, label);
+        snprintf(label, sizeof(label), "%s: frame/hop/n_freqs as tabled",
+                 grids[i].tag);
+        CHECK(g.sample_rate == grids[i].sr && g.fft_size == grids[i].fft &&
+              g.frame_size == grids[i].frame && g.hop_size == grids[i].hop &&
+              g.n_freqs == grids[i].K, label);
+        snprintf(label, sizeof(label), "%s: is_legacy flag", grids[i].tag);
+        CHECK(g.is_legacy == grids[i].legacy, label);
+
+        /* The AEC3 tuning table must describe the SAME geometry. It is not
+         * a second resolver -- nothing consults it for admissibility -- but
+         * it does hand the post chain its own n_bins/fft/block/hop, so a
+         * divergence would split the instance across two grids. */
+        const Aec3BalancedRateDims* rd = aec3b_rate_cfg(grids[i].sr, grids[i].fft);
+        snprintf(label, sizeof(label), "%s: AEC3B_RATE_TABLE agrees with the resolver",
+                 grids[i].tag);
+        CHECK(rd != NULL && rd->fft_size == g.fft_size &&
+              rd->block_size == g.frame_size && rd->hop_size == g.hop_size &&
+              rd->n_bins == g.n_freqs, label);
+
+        /* LOCKSTEP: size, init, and process must all see this same grid. */
+        AecConfig cfg;
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, grids[i].sr);
+        cfg.fft_size = grids[i].fft;
+        size_t need = aec_get_mem_size(&cfg);
+        snprintf(label, sizeof(label), "%s: aec_get_mem_size() > 0", grids[i].tag);
+        CHECK(need > 0, label);
+
+        void* pool = malloc(need);
+        Aec* pa = aec_init(pool, need, &cfg);
+        snprintf(label, sizeof(label), "%s: aec_init() != NULL", grids[i].tag);
+        CHECK(pa != NULL, label);
+        if (pa) {
+            snprintf(label, sizeof(label),
+                     "%s: init sees the resolver's grid", grids[i].tag);
+            CHECK(pa->fft_size == g.fft_size && pa->block_size == g.frame_size &&
+                  pa->hop_size == g.hop_size && pa->n_freqs == g.n_freqs, label);
+            snprintf(label, sizeof(label),
+                     "%s: aec_hop_size() == the resolved hop", grids[i].tag);
+            CHECK(aec_hop_size(pa) == g.hop_size, label);
+            /* And the hop aec_process() actually consumes: hand it exactly
+             * hop samples of a ramp and require the output hop to be
+             * written end to end (a wrong hop would leave the tail at the
+             * sentinel). */
+            {
+                int hop = aec_hop_size(pa);
+                float* mic = (float*)calloc((size_t)hop, sizeof(float));
+                float* ref = (float*)calloc((size_t)hop, sizeof(float));
+                float* out = (float*)malloc((size_t)(hop + 1) * sizeof(float));
+                for (int s = 0; s <= hop; ++s) out[s] = -12345.0f;
+                for (int s = 0; s < hop; ++s) { mic[s] = 0.25f; ref[s] = 0.25f; }
+                aec_process(pa, mic, ref, out);
+                int wrote_all = 1;
+                for (int s = 0; s < hop; ++s) if (out[s] == -12345.0f) wrote_all = 0;
+                snprintf(label, sizeof(label),
+                         "%s: aec_process() writes exactly the resolved hop",
+                         grids[i].tag);
+                CHECK(wrote_all && out[hop] == -12345.0f, label);
+                free(mic); free(ref); free(out);
+            }
+            aec_destroy(pa);
+        }
+        free(pool);
+
+        /* Same grid, other construction path -- and the SAME byte total. */
+        Aec dyn;
+        snprintf(label, sizeof(label), "%s: aec_create() == 0", grids[i].tag);
+        CHECK(aec_create(&dyn, &cfg) == 0, label);
+        snprintf(label, sizeof(label),
+                 "%s: create sees the same grid as get_mem_size/init",
+                 grids[i].tag);
+        CHECK(dyn.fft_size == g.fft_size && dyn.block_size == g.frame_size &&
+              dyn.hop_size == g.hop_size && dyn.n_freqs == g.n_freqs, label);
+        CHECK(aec_get_mem_size(&dyn.cfg) == need,
+              "grid lockstep: the instance's own config re-sizes identically");
+        aec_destroy(&dyn);
+    }
+
+    /* NO GUESSING: fft_size == 0 never resolves and is rejected everywhere. */
+    {
+        AecConfig valid_cfg; base_cfg(&valid_cfg);
+        size_t sz = aec_get_mem_size(&valid_cfg);
+        void* mem = malloc(sz);
+        int rates[] = { 8000, 16000, 48000 };
+        for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
+            snprintf(label, sizeof(label),
+                     "sr=%d: aec_resolve_signal_grid(fft=0) == 0", rates[i]);
+            CHECK(aec_resolve_signal_grid(rates[i], 0, NULL) == 0, label);
+            AecConfig c; aec_config_from_preset(&c, AEC_PRESET_BALANCED, rates[i]);
+            c.fft_size = 0;
+            snprintf(label, sizeof(label), "sr=%d + fft_size=0 (auto)", rates[i]);
+            check_rejected(label, &c, mem, sz);
+        }
+        /* Mismatched pairs: each fft is legal at SOME rate, just not this one. */
+        struct { int sr, fft; } bad[] = {
+            { 16000, 1024 }, { 48000, 256 }, { 48000, 512 }, { 8000, 512 },
+            { 8000, 1024 }, { 16000, 128 }, { 16000, 255 }, { 16000, -256 },
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+            snprintf(label, sizeof(label), "sr=%d + fft_size=%d does not resolve",
+                     bad[i].sr, bad[i].fft);
+            CHECK(aec_resolve_signal_grid(bad[i].sr, bad[i].fft, NULL) == 0, label);
+            AecConfig c; aec_config_from_preset(&c, AEC_PRESET_BALANCED, bad[i].sr);
+            c.fft_size = bad[i].fft;
+            snprintf(label, sizeof(label), "sr=%d + fft_size=%d",
+                     bad[i].sr, bad[i].fft);
+            check_rejected(label, &c, mem, sz);
+        }
+        /* An unsupported rate resolves at no fft at all. */
+        CHECK(aec_resolve_signal_grid(44100, 1024, NULL) == 0,
+              "sr=44100 does not resolve at any fft_size");
+        CHECK(aec_is_valid_sample_rate(44100) == 0,
+              "sr=44100 is not a valid sample rate");
+        /* A NULL out pointer is a pure validity query, not a crash. */
+        CHECK(aec_resolve_signal_grid(16000, 256, NULL) == 1,
+              "resolver accepts a NULL out (validity-only query)");
+        /* On failure *out is left untouched -- a caller that ignores the
+         * return value must not read a half-filled grid as if it were real. */
+        {
+            AecSignalGrid g; memset(&g, 0x5A, sizeof g);
+            AecSignalGrid before = g;
+            CHECK(aec_resolve_signal_grid(16000, 1024, &g) == 0 &&
+                  memcmp(&g, &before, sizeof g) == 0,
+                  "resolver leaves *out untouched on failure");
+        }
+        free(mem);
+    }
+
+    /* The convenience default factory is the ONE place a grid is guessed,
+     * and it agrees with the resolver's first row per rate. */
+    {
+        struct { int sr, fft; } dflt[] = { { 8000, 256 }, { 16000, 256 },
+                                           { 48000, 1024 } };
+        for (size_t i = 0; i < sizeof(dflt) / sizeof(dflt[0]); ++i) {
+            AecConfig c; aec_config_defaults(&c, dflt[i].sr);
+            snprintf(label, sizeof(label),
+                     "aec_config_defaults(sr=%d) fills fft_size=%d",
+                     dflt[i].sr, dflt[i].fft);
+            CHECK(c.fft_size == dflt[i].fft &&
+                  aec_default_fft_size(dflt[i].sr) == dflt[i].fft, label);
+            snprintf(label, sizeof(label),
+                     "aec_config_defaults(sr=%d) is immediately resolvable",
+                     dflt[i].sr);
+            CHECK(aec_resolve_signal_grid(c.sample_rate, c.fft_size, NULL) == 1,
+                  label);
+        }
+        /* An unsupported rate gets fft_size 0 -- which the core then
+         * rejects, exactly as the old inline expression did. */
+        AecConfig c; aec_config_defaults(&c, 44100);
+        CHECK(c.fft_size == 0 && aec_default_fft_size(44100) == 0,
+              "aec_config_defaults(sr=44100) leaves fft_size=0 (rejected later)");
+    }
+}
+
 /* ── delay-mode translation + mode x field compatibility ──────────────────
  * The three-state delay API (AecDelayMode) replaced two implicitly-coupled
  * fields. Two properties need permanent cover:
@@ -800,6 +1017,7 @@ int main(void) {
     test_highpass_cutoff();
     test_misaligned_base();
     test_spatial_linear_context_requires_context_only();
+    test_signal_grid_resolver();
     test_delay_mode_translation();
     test_delay_mode_illegal_combinations();
     test_valid_config_smoke();

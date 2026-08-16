@@ -386,12 +386,32 @@ p99.9 residual + jitter + drift + safety margin < bank reliable reach
    confidence=1.0、generation 恆定（init 後不再 bump）；`EXTERNAL_ALIGNED`=
    aligned_far_hop 即輸入 far、delay_samples=0、state=LOCKED、generation 恆定。
    三者都要進 seam 測試。
+   > **已實作（step 1，2026-08-16）**，並對 `FIXED` 加一條限定：ring 尚未
+   > 存滿 `fixed + hop` 之前（前 `ceil(fixed/hop)+1` 個 hop）`far_hop` 仍是
+   > RAW far，該窗內回報 `UNLOCKED` 而非 `LOCKED`。本附錄原文未考慮這個
+   > fill window；在 raw far 上宣稱 `LOCKED` 會違背 seam 本身的核心承諾
+   > （「`UNLOCKED` 代表內容是 raw far」），而且正好落在小搜尋範圍
+   > consumer 最容易誤用的區段。穩態仍是 `LOCKED`，其餘欄位照原文。
 2. **8 kHz grid 要明確表態**：resolver 的正式 grid 表只列 16k×2＋48k；repo 現有
    8 kHz 路徑（E2E parity、1216 ms 上限表）。決定：8k/256/128 列為 resolver 支援
    的 legacy grid（非產品正式 grid），或明文 deprecate；不得留在「猜」的路徑裡。
+   > **已裁定（2026-08-16）：legacy 保留。** 8k/256/128 列為 resolver 支援
+   > 的 **legacy grid**，在 C `AEC_GRID_TABLE` 與 Python `_GRID_TABLE` 各以
+   > `is_legacy` 旗標明確標示（唯一一列），文件標「legacy，非產品正式
+   > grid」。理由：repo 現有 8 kHz 測試路徑（`test_rate_structural`、E2E
+   > parity、detectors parity）與 Audio_ALG MONO pipeline 都真的依賴它，
+   > 直接 deprecate 會砍掉現行綠燈測試；但它不是產品 grid，4ch pipeline
+   > 也不支援。旗標化＝不再留在「猜」的路徑裡。step 2 起實作於
+   > `aec_resolve_signal_grid()` / `resolve_signal_grid()`。
 3. **NR repo 是否入列**：§2.4 清查清單提到 NR `*_default_config*()`，但 §範圍 未列
    NR。決定：NR 的 grid 顯式化納入 A 線範圍（動 NR repo），或本輪只清 AEC/
    pipeline，NR 另開工作項。不得曖昧。
+   > **已裁定（2026-08-16）：本輪不動 NR repo，NR 的 grid 顯式化另開工作
+   > 項。** A 線本輪範圍限定 AEC repo（＋後續 Audio_ALG pipeline）；NR 的
+   > `*_default_config*()` 顯式化與 AEC 的 delay mode／pool 重構沒有耦合，
+   > 混進來只會讓 byte-exact gate 的歸因變糊。新工作項應照 §2.4 同一原則
+   > 辦：唯一 resolver、core 不接受 `fft_size=0`、default factory 只能是
+   > convenience 而非第二條 hidden resolution chain。
 4. **研究 branch 手術與工具重落地**：8 個 local commit 移至 research branch 後，
    其中兩個中性工具是 A 線需要的——`--delay-num-filters` CLI（113e09e，與
    --delay-hysteresis 同 commit、糾纏 B 線 config 欄位）與 duty census 診斷

@@ -41,6 +41,80 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-16 — delay productization line A: shared signal-grid resolver
+
+Plan §2.4. `(sample_rate, fft_size)` admissibility and the frame/hop/bin
+derivation used to live in three places on the C side
+(`aec_validate_config`'s inline pair table, `aec_derive_dims`'s own
+`hop = fft/2`, `AEC3B_RATE_TABLE`'s baked columns) and three more inside
+Python's `AecConfig.__post_init__` (a default-fft dict, a `hop = frame // 2`
+line, a `valid_grids` dict). Nothing forced them to agree. There is now ONE
+table and ONE resolver per language, mirrored row for row. **Output contract
+intact**: the same 9 C + 3 Python byte-exact cases as step 1 remain
+sample-exact vs `5cd14a0`.
+
+### Added
+
+1. **`aec_resolve_signal_grid()` + `AecSignalGrid`** (C) /
+   **`resolve_signal_grid()` + `SignalGrid`** (Python) — the single source
+   of truth for `{frame_size, hop_size, n_freqs, is_legacy}`.
+   `aec_validate_config()`, `aec_derive_dims()` (hence `aec_get_mem_size()`
+   / `aec_create()` / `aec_init()`) and `aec_is_valid_sample_rate()` are all
+   thin readers of it; `AecConfig.__post_init__` is the Python resolver's
+   sole caller.
+2. **`aec_default_fft_size()`** (C) / **`default_fft_size()`** (Python) —
+   the convenience-default policy in ONE place, behind
+   `aec_config_defaults()` and behind Python's `frame_size = -1` sentinel.
+   Exposed so a CLI can resolve an unspecified grid itself instead of
+   hard-coding its own copy of the mapping.
+3. **Tests** — `python/tests/test_signal_grid.py` (16 cases; the Python
+   table is checked against C's `AEC_GRID_TABLE` **parsed out of
+   `c_impl/src/aec.c`**, so an unmirrored edit on either side fails) and
+   `test_config_validation.c`'s `test_signal_grid_resolver()` (+103 cases:
+   resolver content on all four grids, the get-mem-size == init == process-hop
+   lockstep on both construction paths, `AEC3B_RATE_TABLE` pinned against the
+   resolver, `fft_size = 0` and every mismatched pair rejected by all three
+   entry points).
+
+### Changed
+
+4. **The core refuses `fft_size = 0` ("auto")** — it always did in effect
+   (no pair matched), but it is now the explicit, documented contract rather
+   than a side effect: 16 kHz has two production grids and a library that
+   guessed would silently pick one. `aec_config_defaults()` /
+   `aec_config_from_preset()` remain the only place a grid is chosen for a
+   caller, and `example/aec_wav.c` now resolves the pair itself before
+   calling in (clearer error, before any allocation).
+5. **8 kHz is flagged `is_legacy`** (plan §11.2, decided: keep as a legacy
+   grid, do not deprecate). Supported by this library and the Audio_ALG MONO
+   pipeline — real tests depend on it — but not a product grid and not
+   supported by the 4-channel pipeline. It is now labelled in the table and
+   in the manual instead of sitting anonymously in a guessed path.
+6. **`aec_is_valid_sample_rate()` now reads the grid table** rather than a
+   separate `AEC_SR_WHITELIST`. Same answers (8000/16000/48000), one fewer
+   list to keep in sync. Its contract is documented more sharply: a true
+   return does NOT mean any `fft_size` will do — the pair still has to
+   resolve.
+7. **Python `AEC()` asserts its config is already resolved** — a sentinel or
+   a hand-poked inconsistent `frame_size`/`hop_size` raises at construction
+   instead of surfacing later as a wrong FFT size deep in the filter.
+   Mirrors the C side, where every entry point re-runs the validator.
+
+### Notes
+
+- **Known gap, measured and recorded rather than papered over**: removing
+  the resolver call from `aec_validate_config()` alone does NOT turn the new
+  test red — rejection still happens one layer later, because
+  `aec3b_rate_cfg()` returns NULL for an unsupported pair and
+  `aec_get_mem_size()` propagates that as 0. `AEC3B_RATE_TABLE` is therefore
+  a de facto second admissibility gate today. The observable public contract
+  (all three entry points reject) is pinned either way, and the new
+  "`AEC3B_RATE_TABLE` agrees with the resolver" assertion keeps the two
+  honest; collapsing the second gate means sourcing that table's four grid
+  columns from `AEC_GRID_TABLE`, which is a follow-up, not part of this step.
+- Plan §11.3 decided alongside: **NR's grid explicitness is a separate work
+  item**; this round does not touch the NR repo.
+
 ## [Unreleased] — 2026-08-16 — delay productization line A, step 1: three-state delay mode + validation
 
 First of the four AEC steps in

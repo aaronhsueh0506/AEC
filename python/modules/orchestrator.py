@@ -28,7 +28,7 @@ from .detectors import (
     DoubleTalkAnalyzer,
 )
 from .epc import EchoPathChangeDetector, PathChangeRegimeHandler
-from .config import AecConfig
+from .config import AecConfig, resolve_signal_grid
 from .debug_logger import AecDebugLogger
 
 # F2.4 simple-mu is deliberately frozen. The four values form one state
@@ -224,6 +224,21 @@ class AEC:
 
     def __init__(self, config: Optional[AecConfig] = None):
         self.config = config or AecConfig()
+
+        # The core requires an already-RESOLVED signal grid: no sentinel, no
+        # guessing here. ``AecConfig.__post_init__`` runs the one shared
+        # ``resolve_signal_grid()``, so the only way to arrive with a
+        # sentinel (or a hand-poked inconsistent pair) is to have bypassed
+        # or mutated it -- which would otherwise show up much later as a
+        # wrong FFT size deep in the filter. Mirrors the C side, where
+        # aec_validate_config() rejects fft_size == 0 at every entry point.
+        _grid = resolve_signal_grid(self.config.sample_rate,
+                                    self.config.frame_size,
+                                    hop_size=self.config.hop_size)
+        if self.config.hop_size != _grid.hop_size:   # defensive, unreachable
+            raise ValueError(
+                f"AEC config is not resolved: hop_size={self.config.hop_size} "
+                f"does not match the resolved grid {_grid}")
 
         # Apply per-mode default mu if user didn't override
         if self.config.mu == AecConfig.mu:  # still at dataclass default

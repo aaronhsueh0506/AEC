@@ -224,14 +224,66 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset preset, int sample_rate);
  * three enumerators. */
 int aec_config_resolve_delay(AecConfig* cfg);
 
+/* ── Signal grid: ONE resolver, shared by every entry point ───────────────
+ * (sample_rate, fft_size) is the complete init-time description of the
+ * frame geometry; everything else is derived. This project fixes
+ * frame_size == fft_size and hop_size == fft_size/2, but that derivation
+ * lives in exactly ONE place -- aec_resolve_signal_grid() -- and
+ * aec_validate_config(), aec_get_mem_size(), aec_create() and aec_init()
+ * all go through it, so a caller can never be sized against one grid and
+ * initialised against another.
+ *
+ * fft_size == 0 ("auto") is REJECTED here: 16 kHz has TWO production grids
+ * (256 and 512) and a library that guesses would silently pick one. The
+ * convenience factories aec_config_defaults() / aec_config_from_preset()
+ * fill a concrete fft_size for the caller (16k -> 256, 48k -> 1024,
+ * 8k -> 256), but they are the ONLY place a default is applied -- the core
+ * never re-guesses afterwards. Likewise a CLI may pick a product default
+ * for a user who did not specify one, but must resolve it to a nonzero
+ * fft_size before calling in.
+ *
+ * Supported grids:
+ *
+ *   sample rate | fft/frame | hop | status
+ *   ------------+-----------+-----+------------------------------------
+ *    16000      |  256      | 128 | product (default at 16 kHz)
+ *    16000      |  512      | 256 | product (alternate, higher compute)
+ *    48000      | 1024      | 512 | product
+ *     8000      |  256      | 128 | LEGACY -- supported, NOT a product
+ *                                 | grid; kept for the existing 8 kHz
+ *                                 | E2E-parity/structural tests and the
+ *                                 | Audio_ALG MONO pipeline. The 4-channel
+ *                                 | pipeline contracts to the three product
+ *                                 | grids only. is_legacy is set for it. */
+typedef struct AecSignalGrid {
+    int sample_rate;
+    int fft_size;     /* == frame_size in this project */
+    int frame_size;
+    int hop_size;     /* == fft_size / 2 */
+    int n_freqs;      /* == fft_size / 2 + 1 */
+    int is_legacy;    /* 1 for 8 kHz: supported, not a product grid */
+} AecSignalGrid;
+
+/* Resolve (sample_rate, fft_size) into the full grid. Returns 1 and fills
+ * *out on a supported pair; returns 0 and leaves *out untouched otherwise
+ * (including fft_size == 0). `out` may be NULL for a pure validity query. */
+int aec_resolve_signal_grid(int sample_rate, int fft_size, AecSignalGrid* out);
+
 /* Sample-rate whitelist query (F05: no sample-rate validation anywhere).
- * The single source of truth for the whitelist lives in aec.c next to
- * aec_validate_config(); this is the public read of it, for callers (e.g.
+ * "Is there at least one supported grid at this rate" -- a read of the SAME
+ * grid table aec_resolve_signal_grid() uses, for callers (e.g.
  * example/aec_wav.c) that need to reject an unsupported input WAV rate
- * before ever constructing an AecConfig. Returns 1 iff sample_rate is
- * production-qualified today (8000/16000/48000 — see aec.c for the
- * per-rate table this rests on). */
+ * before they have chosen an fft_size. Returns 1 for 8000/16000/48000.
+ * NOTE: a true sample_rate here does NOT mean any fft_size will do -- the
+ * pair still has to resolve. */
 int aec_is_valid_sample_rate(int sample_rate);
+
+/* The product-default fft_size for a rate, or 0 if the rate is unsupported.
+ * The single implementation behind aec_config_defaults()'s convenience
+ * fill; exposed so a CLI can resolve a user's unspecified grid to a
+ * concrete value before calling the core, instead of hard-coding its own
+ * copy of the mapping. */
+int aec_default_fft_size(int sample_rate);
 
 /* ── opaque-ish context ────────────────────────────────────────────────── */
 /* Streaming render/capture buffering events (mirror AEC3
