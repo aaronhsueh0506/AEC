@@ -1,7 +1,7 @@
 # AEC delay estimator 產品化實作計畫
 
-狀態：規劃文件，尚未授權 push。  
-範圍：`AEC/`、`Audio_ALG/pipelines/`、`Audio_ALG/pipelines/4ch_pipelines/`、`Audio_ALG/AIAEC/`。  
+狀態：規劃文件，尚未授權 push。
+範圍：`AEC/`、`Audio_ALG/pipelines/`、`Audio_ALG/pipelines/4ch_pipelines/`、`Audio_ALG/AIAEC/`。
 目標：讓產品能在初始化時選擇 delay 模式與 matched-filter bank 大小，同時讓 C static pool 的實際 RAM 隨設定縮小；另將 pre-echo 正確性修復與 PBFDKF delay controller 重新拆開驗證。
 
 ## 0. 不可混在一起的兩條工作線
@@ -170,6 +170,27 @@ int delay_aec3_init(
 8. `FIXED` 不配置 matched estimator，但配置足以涵蓋 fixed delay + hop/headroom 的 alignment ring。
 9. `EXTERNAL_ALIGNED` 不配置 estimator 或 delay ring。
 
+> **已實作並裁定（step 3，2026-08-16）：`FIXED` ring = `fixed_delay_samples
+> + hop_size`，headroom 項＝0。** 原文「+ hop/headroom」留了模糊空間；實測
+> 後裁定不加任何 headroom，理由是這個 bound 是**緊上界**而非最壞情況估計：
+> 環形緩衝持有 `[T-rs, T)`，每 hop 先寫最新 `hop`（`T` 前進）再讀
+> `[T-d-hop, T-d)`，正確性條件就是 `rs >= d + hop`；`FIXED` 的 `d`
+> immutable（無 estimator，`reset()` 重填同值），所以是「對常數取緊上界」，
+> 沒有需要 headroom 吸收的變動量。取等號安全（讀取起點正好落在寫入游標＝
+> 本 hop 唯一未覆蓋的那段），且對任何 `rs >= d + hop` fill gate
+> （`filled >= d + hop`，`filled` 在 `rs` 飽和）都在同一個 hop index 放行，
+> 故對舊的超大 ring **byte-exact**。`MATCHED` 的 legacy `+4096`
+> **保留原樣**：它同時決定 controller 可接受哪些估計
+> （`new_delay <= ref_ring_size - hop`），是行為不是 slack，動它會改預設路徑
+> 音訊。`d = 0` 退化成一條 hop 長度、只寫不讀的 ring（不特判成 NULL，讓
+> `FIXED` 只有一條 ring 程式路徑）。C `aec_ref_ring_samples()` ／ Python
+> `ref_ring_samples()` 為唯一 helper，`get_mem_size` 與 carve 共用同一次呼叫。
+>
+> 第 9 項複查結果：step 1/2 後 C/Python 兩側都已無殘留 ring 或 estimator
+> 配置；唯一殘留是 Python `EXTERNAL_ALIGNED` 分支沒設 `_current_delay`，
+> 導致 `get_stats()` 拋 `AttributeError`（audio path 無影響），step 3 補成
+> `0`（與 C `a->current_delay = 0` 一致）。
+
 `Aec`／`FourAecNrRes` 本體只保留狀態與 pointers，不再內嵌最大 bank arrays。
 
 ### 3.3 Lockstep 與安全性
@@ -276,6 +297,40 @@ safe window = [front_headroom, filter_length - tail_margin]
 需先寫設計表列出每個狀態、enter/hold/exit、危險方向、reset 行為，再寫 code。
 
 ## 7. 產品選 n／mode 的量測方法
+
+### 7.1 三個 delay 預算必須分開配置
+
+`delay_num_filters`、PBFDKF `filter_length` 與 AIAEC TA `D`應是三個
+彼此獨立的 init/export 參數，不得由其中一個自動推導另一個，也不得
+用單一「總 delay range」把三者相加：
+
+| 參數 | 負責的問題 | 不能取代的能力 |
+|---|---|---|
+| matched-filter `n` | 搜尋、鎖定 bulk far→mic delay，驅動 reference alignment | 不負責建模房間 echo tail |
+| PBFDKF `filter_length` | 在 reference 已對齊後，建模 causal echo path/RIR tail | 不是 bulk-delay acquisition window，也無法吸收負 residual |
+| TA `D` | 在送入 NN 的 far 上搜尋 current/past frame，範圍為 `(D-1)*model_hop` | 不會修復 PBFDKF 的 delay lock，也不會延長 PBFDKF coefficients |
+
+三者 API 獨立，但系統能力仍有耦合條件：
+
+```text
+matched filter/external align 必須先將 bulk delay 收進可用 residual
+0 <= positive residual + effective acoustic tail < PBFDKF filter span
+0 <= NN input residual <= (D - 1) * model_hop       # causal TA only
+```
+
+- `aligned_far` 模式：matched filter 負責 bulk delay，PBFDKF 負責 linear
+  cancellation，小 `D` 只吸收量化誤差、drift 與 delay-change transient。
+  matched filter 未鎖定或鎖錯時必須 fail-open，不能把 TA 當成額外
+  matched-filter bank。
+- `raw_far` 模式：TA 可搜尋總 far/model-input delay，但 PBFDKF 仍需
+  自己的 reference alignment。這只對 E2E-AECNR 有機會成為大範圍備援；
+  RES+NR 不得依賴 TA 補救已失鎖的 linear AEC。
+
+因此縮小 `n` 前要分別量測：產品 bulk-delay 分佈選 `n/mode`；
+對齊後 residual + RIR tail 選 PBFDKF `filter_length`；NN 實際輸入的
+residual-frame lag 分佈選 `D`。若有 external coarse delay，可將大幅固定
+delay 移除後再配小 `n` + 小 `D`，但不能宣稱總覆蓋範圍等於
+`MF reach + filter_length + TA reach`。
 
 每個 SKU/route 收集 far→mic residual delay：
 
