@@ -334,13 +334,21 @@ filter bank、降取樣 render ring 與兩個 lag histogram 都是依 init 設�
 
 | 格點 | n=1 | n=2 | n=3 | n=4 | n=5（預設） |
 |---|---:|---:|---:|---:|---:|
-| 8 kHz / 256（legacy） | 252,704 B | 258,432 B | 264,160 B | 269,888 B | 275,616 B |
-| 16 kHz / 256 | 356,784 B | 362,512 B | 368,240 B | 373,968 B | 379,696 B |
-| 16 kHz / 512 | 485,856 B | 491,584 B | 497,312 B | 503,040 B | 508,768 B |
-| 48 kHz / 1024 | 1,144,080 B | 1,149,808 B | 1,155,536 B | 1,161,264 B | 1,166,992 B |
+| 8 kHz / 256（legacy） | 252,720 B | 258,448 B | 264,176 B | 269,904 B | 275,632 B |
+| 16 kHz / 256 | 356,800 B | 362,528 B | 368,256 B | 373,984 B | 379,712 B |
+| 16 kHz / 512 | 485,872 B | 491,600 B | 497,328 B | 503,056 B | 508,784 B |
+| 48 kHz / 1024 | 1,144,096 B | 1,149,824 B | 1,155,552 B | 1,161,280 B | 1,167,008 B |
 
 NE10 backend 在每一格都少 608 B（16 kHz/512 與 48 kHz/1024 少 1,376 B / 2,912 B）；
 差異來自 FFT handle，與 delay 設定無關。
+
+> **產品化 step 4 起，每個總量比 step 3 多 16 B**（`sizeof(Aec)` 尾端新增
+> `duty_hops_total`/`duty_hops_run` 兩個 `unsigned long long` 診斷計數器，見
+> §8.5 duty census）。這是**每個 mode／n／格點都一樣的固定偏移**，不影響任何
+> delta（每 filter 5,728 B、`FIXED` 每 ms 的 byte/ms 公式、mode 間差值全部
+> 不變）──只有絕對 byte 數整批 +16。行為不受影響（位元組完全相同，
+> 只是多兩個唯讀計數器），但 **`sizeof(Aec)` 變了，舊呼叫端必須重新查詢
+> `aec_get_mem_size()` 並重新 init**（見 CHANGELOG ABI 段）。
 
 每少一個 matched filter 固定省 **5,728 B**（每一格點都一樣）：coefficients
 2,048 B ＋ accumulated error 512 B ＋ render ring 1,536 B ＋ highest-peak
@@ -352,13 +360,13 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | `delay_mode` | 記憶池 | 相對 `MATCHED n=5` |
 |---|---:|---:|
-| `MATCHED` n=5（預設） | 379,696 B | — |
-| `MATCHED` n=1 | 356,784 B | −22,912 B |
-| `FIXED`，`fixed_delay_samples = 0` | 215,200 B | −164,496 B |
-| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 216,800 B | −162,896 B |
-| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 221,600 B | −158,096 B |
-| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 247,200 B | −132,496 B |
-| `EXTERNAL_ALIGNED` | 214,688 B | −165,008 B |
+| `MATCHED` n=5（預設） | 379,712 B | — |
+| `MATCHED` n=1 | 356,800 B | −22,912 B |
+| `FIXED`，`fixed_delay_samples = 0` | 215,216 B | −164,496 B |
+| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 216,816 B | −162,896 B |
+| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 221,616 B | −158,096 B |
+| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 247,216 B | −132,496 B |
+| `EXTERNAL_ALIGNED` | 214,704 B | −165,008 B |
 
 #### 環形緩衝大小公式
 
@@ -394,20 +402,20 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | 格點 | fixed=0 | 25 ms | 100 ms | 500 ms |
 |---|---:|---:|---:|---:|
-| 16 kHz / 256 | 215,200 B | 216,800 B | 221,600 B | 247,200 B |
-| 16 kHz / 512 | 344,784 B | 346,384 B | 351,184 B | 376,784 B |
-| 48 kHz / 1024 | 740,512 B | 745,312 B | 759,712 B | 836,512 B |
+| 16 kHz / 256 | 215,216 B | 216,816 B | 221,616 B | 247,216 B |
+| 16 kHz / 512 | 344,800 B | 346,400 B | 351,200 B | 376,800 B |
+| 48 kHz / 1024 | 740,528 B | 745,328 B | 759,728 B | 836,528 B |
 
 > **注意**：`fixed_delay_samples` 很大時 `FIXED` 也可能比 `MATCHED n=5` 更
-> 耗記憶體（48 kHz/1024、2500 ms 為 1,220,512 B，高於 `MATCHED n=5` 的
-> 1,166,992 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
+> 耗記憶體（48 kHz/1024、2500 ms 為 1,220,528 B，高於 `MATCHED n=5` 的
+> 1,167,008 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
 > 記憶體，正確作法是讓呼叫端自己補償掉大延遲後改用 `EXTERNAL_ALIGNED`。
 
-另外一個明顯的開關（16 kHz/256 KISS，相對 379,696 B）：
+另外一個明顯的開關（16 kHz/256 KISS，相對 379,712 B）：
 
 | 設定 | 記憶池 | 差異 |
 |---|---:|---:|
-| `enable_shadow = 0` | 347,136 B | −32,560 B |
+| `enable_shadow = 0` | 347,152 B | −32,560 B |
 
 `enable_res` 與 `enable_cng` **不影響**記憶池大小（相關緩衝區一律配置）。
 
@@ -580,6 +588,28 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | `filter_misadjustment_scale_min` | `float` | `0.5` | 0 – 1000 | 回音估計修正倍率下限。 |
 | `filter_misadjustment_scale_max` | `float` | `2.0` | 0 – 1000 | 回音估計修正倍率上限。 |
 
+### 6.7 靜態記憶體拆解（`aec_get_mem_breakdown`）
+
+```c
+typedef struct AecMemBreakdown {
+    size_t total_bytes;       /* == aec_get_mem_size(cfg)                 */
+    size_t estimator_bytes;   /* delay_aec3_get_mem_size(); 0 非 MATCHED  */
+    size_t ring_bytes;        /* 對齊環形緩衝；0 為 EXTERNAL_ALIGNED     */
+} AecMemBreakdown;
+
+int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
+```
+
+把 §4 記憶池大小表格背後的算法變成一個可查詢的 API：`total_bytes` 就是
+`aec_get_mem_size(cfg)` 本身（同一次呼叫算出來，不是另一套算式），
+`estimator_bytes`／`ring_bytes` 是這個總量裡兩個有名字的子集，用的是
+`aec_get_mem_size()` 內部本來就在用的同一批 helper（`delay_aec3_get_mem_size()`、
+`aec_derive_dims()` 的 ring 大小 out-param）——查詢這個函式不可能得到與
+`aec_carve()` 實際切出來的 pool 佈局不同的答案。失敗條件與
+`aec_get_mem_size()` 完全一致：`cfg` 為 `NULL` 或未通過 `aec_validate_config()`
+時回傳 0（並把 `*out` 清零）。`example/aec_wav.c` 的 `--print-mem-size`
+（附錄 A）就是這個 API 的一個瘦封裝。
+
 ---
 
 ## 7. Preset 選擇
@@ -718,6 +748,37 @@ AecBufferingEvent e2 = aec_process_capture(&aec, mic, out);  /* 消耗並處理�
 注意上面這條限制是**執行緒**層面的，與 §8.1 的進入點選擇無關 —— 四個處理進入點
 本身可以自由混用。
 
+### 8.5 Duty-cycle engagement census
+
+`AecDebugStatus`（§8，`aec_debug_status()`）多了兩個計數器：
+
+```c
+unsigned long long duty_hops_total;  /* 經過 delay 區塊的 hop 數        */
+unsigned long long duty_hops_run;    /* 其中真的跑了 matched filter 的數 */
+```
+
+背景：duty-cycle 機制（`Aec` struct 裡 `duty_*` 欄位的說明）在估計穩定
+（confidence 1.0）且 `delay_est_init_s` 秒不變後，把 matched-filter
+分析降到 1-in-K，其文件註解宣稱這樣可省下「約 90% 的 matched-filter
+成本」——這是一個**設計數字**，只有機制真的完成降頻的 hop 才會實現；估計
+持續變動的回音路徑上，機制每次都要重新武裝，實際降頻可能遠低於設計值。
+這兩個計數器把**實測**engagement（`duty_hops_run / duty_hops_total`）變成
+每次執行都能讀到的數字，取代原本只能假設的設計估計值。
+
+- 只在 `delay_mode == AEC_DELAY_MATCHED` 時累積（`has_delay == 1` 才會進入
+  計數的程式路徑）；`FIXED`／`EXTERNAL_ALIGNED` 從未建過 matched filter，
+  兩個計數器永遠是 0——不是「估計器跑了但沒省到」，而是根本沒有機制可省。
+- 累積範圍是「自 `aec_create`／`aec_init` 或最近一次 `aec_reset()` 以來」，
+  與 `AecDebugStatus` 其餘欄位的累積規則一致；`aec_reset()` 會把兩個計數器
+  歸零，因為跨越 reset 的比值會把兩段不同的 duty 狀態混在一起，沒有意義。
+  在計數的 call site（消耗 `run_filter` 的那一行）遞增，不可能與實際執行
+  的機制脫鉤。
+- **純診斷**：兩個計數器只被寫入、從未被函式庫自己讀回，加起來是熱路徑上
+  兩個整數遞增，不影響任何音訊輸出（byte-exact 證明見 CHANGELOG 產品化
+  A 線 step 4 條目）。
+- `example/aec_wav.c` 每次執行結尾印一行（附錄 A「Duty census 診斷輸出」）。
+- 永久回歸測試：`make test-duty-census`（`test/test_duty_census.c`）。
+
 ---
 
 ## 9. 常見問題排除
@@ -815,6 +876,10 @@ BIN="$(make -s -C c_impl print-bin-dir BACKEND=kiss)"
 | `--no-shadow` | 關閉輔助 filter |
 | `--no-hpf` | 關閉 mic 路徑高通 |
 | `--fft-size <n>` | 覆寫 FFT 大小：16 kHz 可用 256/512，48 kHz 為 1024 |
+| `--delay-mode {matched\|fixed\|external}` | 覆寫 `cfg.delay_mode`（預設 `matched`）；`external` 對應 C API 的 `AEC_DELAY_EXTERNAL_ALIGNED` |
+| `--delay-num-filters <n>` | 覆寫 `cfg.delay_num_filters`（僅 `matched` 合法，1–5，預設 5） |
+| `--fixed-delay <samples>` | 覆寫 `cfg.fixed_delay_samples`（僅 `fixed` 合法，native-rate sample，≥0） |
+| `--print-mem-size` | 印出 resolved grid／mode／n 與 static-pool byte 拆解後**直接退出**，不開音檔輸出、不跑任何一個 hop（見下方「`--print-mem-size` 輸出」） |
 | `--debug-level <0..3>` | 0=關閉、1=摘要、2=每 frame、3=完整 |
 | `--debug-log <path>` | 將 log 導向檔案（預設 stderr） |
 | `--debug-trace <path>` | 每 frame 的 CSV trace |
@@ -823,6 +888,53 @@ BIN="$(make -s -C c_impl print-bin-dir BACKEND=kiss)"
 > 兩個容易誤解的地方：**沒有** `--filter-length` 或 `--filter-length-ms` 這個旗標
 > （`filter_length` 只能透過 C API 設定）；`--cng` 不是「開啟一個預設關閉的功能」，
 > 舒適噪音**預設就是開的**，`--cng` 與 `--no-cng` 只是明確覆寫。
+
+> `--delay-mode`／`--delay-num-filters`／`--fixed-delay` 三個旗標的值**未經
+> CLI 驗證就直接寫入 `AecConfig`**——`aec_validate_config()` 是唯一的範圍與
+> mode／欄位相容性權威（§2.1），CLI 不做第二次檢查也不做 clamp。組合非法
+> 時（例如 `--fixed-delay` 給負值、`--delay-mode fixed` 沒給 `--fixed-delay`、
+> `--delay-mode external` 卻改了 `--delay-num-filters`）`aec_create()` 會
+> fail-fast 印出訊息後以離開碼 4 結束，不會被靜默忽略或改成別的設定。
+
+### `--print-mem-size` 輸出
+
+不開音檔、不 `aec_create()` 一個真正的實例，只呼叫 `aec_get_mem_breakdown()`
+（§6.7）後印一行到 **stdout**（其餘旗標一律印到 stderr）：
+
+```text
+mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=379712 estimator_bytes=33936 ring_bytes=131072
+```
+
+欄位依序：resolved 後的 `sample_rate`／`fft_size`／`hop_size`、`delay_mode`、
+`delay_num_filters`、`fixed_delay_samples`、`aec_get_mem_size()` 回傳的總
+byte 數、`delay_aec3_get_mem_size()` 回傳的 estimator byte 數（非 `matched`
+時為 0）、對齊環形緩衝的 byte 數（`external` 時為 0）。三個 byte 欄位與 §4
+表格是同一個 `aec_get_mem_breakdown()` 呼叫算出來的，數字對不上就是文件
+過期，以實際輸出為準。組合非法時走與 `aec_create()` 相同的 fail-fast 路徑
+（離開碼 4），不會印出任何 `mem:` 行。
+
+```bash
+"$BIN"/aec_wav mic.wav ref.wav /dev/null --print-mem-size --delay-mode fixed --fixed-delay 1600
+```
+
+### Duty census 診斷輸出
+
+正常處理完（非 `--print-mem-size`）結尾，`aec_wav` 會在既有的 `Processed ...`
+摘要行之後多印一行 matched-filter duty-cycle **實測**（非估計）engagement
+（產品化計畫 §7 量測方法要用；見 §8.5）：
+
+```text
+duty: matched_filter_ran=379/1250 hops (30.32% engagement, 69.68% saved)
+```
+
+`delay_mode != matched` 時（`fixed`／`external`，或舊式
+`--no-delay-est`）從未建過 matched filter，沒有成本可省，印：
+
+```text
+duty: matched_filter_ran=0/0 hops (n/a -- no matched-filter estimator in delay_mode=fixed)
+```
+
+診斷用途，不影響音訊路徑（見 §8.5 的 byte-exact 證明）。
 
 輸入 / 輸出：
 

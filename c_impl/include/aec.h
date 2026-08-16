@@ -365,6 +365,24 @@ typedef struct Aec {
     int    duty_pos;           /* position in the 1-in-K analysis cycle */
     int    duty_last_delay;    /* estimate on the previous hop (change detect) */
     float  duty_erle_peak;     /* leaky running peak of erle_windowed (dB) */
+    /* Engagement census (productization plan §7 measurement method): the
+     * doc comment above claims the duty machine cuts "~90% of the
+     * matched-filter cost" as a DESIGN figure, which only materialises on
+     * hops the machine actually decimates -- on an echo path whose estimate
+     * keeps moving it re-arms every time and never decimates at all. These
+     * two counters make the REALISED saving measurable per run instead of
+     * assumed: duty_hops_run / duty_hops_total is the true matched-filter
+     * engagement, and 1 minus that ratio the true saving. Incremented at the
+     * single call site that consumes run_filter (aec_process_core), so the
+     * census cannot drift from what was actually executed. uint64 because a
+     * long-running stream at a 128-sample hop passes 2^31 hops in ~2 years
+     * of continuous audio. Diagnostic only -- nothing in the library reads
+     * them back; exposed read-only via AecDebugStatus and printed by
+     * example/aec_wav.c. Cumulative since aec_create/aec_init/aec_reset. */
+    unsigned long long duty_hops_total;  /* hops through the delay block   */
+    unsigned long long duty_hops_run;    /* of those, hops that actually
+                                          * ran the matched filter
+                                          * (run_filter == 1)               */
 
     /* linear filters */
     PBFDKF main_filter;
@@ -892,9 +910,46 @@ typedef struct AecDebugStatus {
     float  near_power;         /* EMA of mic/near-hop power (a->near_power)    */
     float  out_power;          /* EMA of the linear, pre-RES-gain output power
                                  * (a->raw_error_power)                        */
+
+    /* duty-cycle engagement census, cumulative since aec_create/aec_init/
+     * aec_reset. duty_hops_run / duty_hops_total is the MEASURED
+     * matched-filter engagement (see the duty_hops_* doc on the Aec struct
+     * above). Both are 0 whenever this instance never constructs a matched
+     * filter to decimate -- delay_mode != AEC_DELAY_MATCHED, not only the
+     * legacy enable_delay_est=0 case -- since there is then no cost for the
+     * duty machine to have saved. */
+    unsigned long long duty_hops_total;
+    unsigned long long duty_hops_run;
 } AecDebugStatus;
 
 void aec_debug_status(const Aec* a, AecDebugStatus* out);
+
+/* ── Static-pool memory breakdown (plan §3.4.6 RAM acceptance test 6) ─────
+ * `aec_get_mem_size()` returns one total; this labels two subsets of that
+ * same total instead of a caller (e.g. a CLI's --print-mem-size) having to
+ * re-derive them from the config by hand -- which would be exactly the
+ * kind of second, driftable size computation the pool-first refactor (plan
+ * §3) exists to avoid. total_bytes is always aec_get_mem_size(cfg) itself,
+ * called from inside this function, so the two can never disagree.
+ *
+ *   estimator_bytes  delay_aec3_get_mem_size() for the resolved
+ *                    (sample_rate, hop_size, delay_num_filters) triple;
+ *                    0 outside AEC_DELAY_MATCHED (no estimator is built).
+ *   ring_bytes       the alignment-ring float buffer, mode-aware
+ *                    (see aec_ref_ring_samples() in aec.c / the manual's
+ *                    ring-size-formula table); 0 for
+ *                    AEC_DELAY_EXTERNAL_ALIGNED (no ring at all).
+ *
+ * Returns 0 (and zeroes *out) under exactly the same condition
+ * aec_get_mem_size() itself reports failure on: cfg is NULL, or
+ * aec_validate_config(cfg) rejects it. */
+typedef struct AecMemBreakdown {
+    size_t total_bytes;
+    size_t estimator_bytes;
+    size_t ring_bytes;
+} AecMemBreakdown;
+
+int aec_get_mem_breakdown(const AecConfig* cfg, AecMemBreakdown* out);
 
 #ifdef __cplusplus
 }

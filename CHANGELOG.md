@@ -41,6 +41,174 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-16 — delay productization line A, step 4 (CLI + memory diagnostics + docs/ABI) — A-line complete
+
+Plan §9.4 (last A-line step before the AEC push gate). Steps 1-3 (three-state
+`delay_mode`, the shared signal-grid resolver, and the pool-first
+`DelayAec3`/per-mode ring) landed the mechanism; this step makes it operable
+and measurable from the CLI, and syncs every downstream document. **Output
+contract intact**: byte-exact vs `551e70d` (pre-step-4 HEAD) on 2 spot-check
+cases, SHA-256-compared — see "Byte-exact evidence" below.
+
+### Added
+
+1. **`aec_wav` CLI**: `--delay-mode {matched|fixed|external}`,
+   `--delay-num-filters <n>`, `--fixed-delay <samples>`, `--print-mem-size`.
+   All three delay-mode flags are handed to `AecConfig` **unvalidated**, same
+   convention as every other CLI override in this file —
+   `aec_validate_config()` is the single range/compatibility authority, so an
+   illegal value or mode/field combination fails at `aec_create()` (or, for
+   `--print-mem-size`, at `aec_get_mem_breakdown()`) with a fail-fast error
+   listing every delay field, never a silent clamp. `--print-mem-size` prints
+   one `mem: sr=... fft=... hop=... mode=... n=... fixed_delay_samples=...
+   total_bytes=... estimator_bytes=... ring_bytes=...` line to **stdout** and
+   exits before opening a WAV writer or running a single hop — no audio is
+   touched, matching plan §3.4.6 RAM acceptance test 6's mono `--print-mem-size`
+   requirement.
+2. **`AecMemBreakdown` + `aec_get_mem_breakdown()`** (`aec.h`/`aec.c`): labels
+   two subsets of the `aec_get_mem_size()` total instead of making a caller
+   re-derive them — `total_bytes` is that exact call (never a second
+   computation of it), `estimator_bytes` is `delay_aec3_get_mem_size()` for the
+   resolved `(sample_rate, hop, delay_num_filters)` triple (0 outside
+   `MATCHED`), `ring_bytes` is the mode-aware alignment-ring size (0 for
+   `EXTERNAL_ALIGNED`). Backs `--print-mem-size` and is documented at
+   `c_user_manual_zh_TW.md` §6.7.
+3. **Matched-filter duty-cycle engagement census** (`duty_hops_total` /
+   `duty_hops_run` on `Aec`, surfaced via `AecDebugStatus`): the duty machine's
+   doc comment in `aec.h` claims it cuts "~90% of the matched-filter cost" as a
+   DESIGN figure that was never measured — on an echo path whose estimate
+   keeps moving the machine re-arms every time and never decimates at all, so
+   the realised saving can be nothing like the design number. The two counters
+   make it measurable per run: incremented at the single call site that
+   consumes `run_filter` (so the census cannot drift from what actually
+   executed), reset with `aec_reset()` (a ratio spanning two duty regimes means
+   nothing), and only accumulate under `AEC_DELAY_MATCHED` (the only mode that
+   ever builds an estimator — `FIXED` and `EXTERNAL_ALIGNED` both leave
+   `has_delay == 0`, so both leave the census at 0 for the same structural
+   reason, not two different ones). `example/aec_wav.c` prints one
+   `duty: matched_filter_ran=R/T hops (E% engagement, S% saved)` stderr line
+   per run (measured on the 10 s reference pair: **379/1250 = 30.32%
+   engagement** — reproduces the pre-existing research-branch measurement of
+   the same underlying mechanism exactly). Diagnostic only: two counter
+   increments off the signal path, adding exactly 16 B to `sizeof(Aec)` (see
+   ABI below) and changing no output sample (byte-exact evidence below).
+4. **Tests**:
+   - `test/test_duty_census.c` (9 checks): `duty_hops_total` == hops
+     processed under `MATCHED`; `duty_hops_run < duty_hops_total` on a stable
+     3 s single-tap echo (the assertion that actually distinguishes a real
+     census from one wired to the hop counter); engagement lands in the
+     decimated band (0%, 60%); `FIXED` and `EXTERNAL_ALIGNED` both leave the
+     census at 0; `aec_reset()` zeroes it and counting resumes afterward.
+     Mutation-verified: dropping the `run_filter` guard (counting every hop as
+     "run") fails 2/9; dropping the `aec_reset()` zeroing fails 2/9. Both
+     restored and re-run green.
+   - `test/cli_delay_flags.sh` (43 checks, mirrors `test_delay_num_filters.c`'s
+     "CLI plumbing only" scope — the bank-size geometry, ring-size formula, and
+     mode×field validation matrix are already covered by the C regression
+     suites and are not re-tested here): every new flag reaches `AecConfig`;
+     every illegal mode/field combination is rejected, including
+     **`--fixed-delay` negative under `FIXED`** (the plan's requested mutation
+     target — mutation-verified: silently clamping a negative value to 0
+     *before* the `cfg` assignment, instead of the CLI's documented
+     hand-through-unvalidated contract, turns this and two downstream checks
+     red; restored and re-run green); a rejected run writes no output; the
+     default run is byte-identical to explicit
+     `--delay-mode matched --delay-num-filters 5`; `--print-mem-size` touches
+     no audio and its `total_bytes`/`estimator_bytes`/`ring_bytes` are
+     cross-checked against **`test/print_mem_size_ref.c`**, a tool that calls
+     `aec_get_mem_breakdown()` from its own source file specifically so the
+     check exercises a code path independent of `aec_wav.c`'s printf
+     (mutation-verified: `+16` on the printed `total_bytes` in `aec_wav.c`
+     turns all 5 mem-case checks red; restored and re-run green).
+
+### Changed
+
+5. **ABI: `sizeof(Aec)` +16 B, every documented pool-size figure shifts by
+   exactly +16 B.** The two new `unsigned long long` census fields are
+   appended at the end of the `Aec` struct (existing field offsets unchanged).
+   Because `aec_get_mem_size()` adds `ALIGN16(sizeof(Aec))` as one flat,
+   mode/n/grid-independent term, this is a **uniform +16 B shift on every
+   absolute total** (confirmed empirically on all 4 grids × `MATCHED` n=1..5 ×
+   `FIXED`/`EXTERNAL_ALIGNED` via `make test-delay-num-filters`'s printed
+   table) and **zero change to every delta** (the 5,728 B/filter step, the
+   `FIXED` byte/ms ring formula, and every mode-to-mode difference in
+   `c_user_manual_zh_TW.md` §4 are unaffected — both sides of a subtraction
+   carry the same +16 and it cancels). Representative before/after (KISS,
+   balanced, 16 kHz/256): `MATCHED` n=5 379,696 → **379,712 B**; `MATCHED` n=1
+   356,784 → **356,800 B**; `EXTERNAL_ALIGNED` 214,688 → **214,704 B**.
+   **A caller that hardcoded a byte count, or skipped the "any field change
+   requires re-querying `aec_get_mem_size()`" rule from §2.4/§3.3, must
+   rebuild and re-query.** No source change is required for callers who
+   already use `aec_get_mem_size()`/`aec_get_mem_breakdown()` (the normal
+   path). This repo carries no C-side `AEC_VERSION`/`AEC_ABI`/layout-version
+   macro (`grep AEC_VERSION\|AEC_LAYOUT` over `c_impl/include`+`c_impl/src`
+   returns nothing) — `AecConfig`/`Aec` layout changes are tracked here in the
+   CHANGELOG only, per the productization plan's fallback rule (§3.3: "bump
+   AEC ABI/layout/descriptor version; update changelog and rebuild-required
+   note" — bump if a version macro exists, changelog-only otherwise).
+   `python/aec.py`'s `__version__` stays `4.0.0rc1` for this commit; bumping
+   it to `4.0.0rc2` (or `4.0.0`) is a **release-time** decision the plan defers
+   to the actual push/tag, not to each intermediate productization step.
+
+### Docs
+
+6. **`c_user_manual_zh_TW.md`**: new §6.7 (`AecMemBreakdown`/
+   `aec_get_mem_breakdown()`), new §8.5 (duty-cycle census contract + test
+   pointer), Appendix A's flag table gets the four new CLI flags plus a
+   `--print-mem-size` output subsection and a "Duty census 診斷輸出"
+   subsection (both with a real captured example line). Every absolute
+   pool-size figure in §4's tables (the grid×n table, the delay_mode
+   comparison table, the FIXED-per-grid table, the 2500 ms/48 kHz note, the
+   `enable_shadow=0` entry) is updated +16 B with a note explaining the shift
+   is uniform and delta-preserving (identical reasoning to item 5 above).
+7. **`docs/html/aec.html`**: was stale since BEFORE step 1 (still carried
+   pre-refactor pool-size figures and, more seriously, a `delay_num_filters`
+   paragraph that said "RAM 不變(C 端陣列維持編譯期上限)" — flatly wrong
+   after step 2/3's pool-first refactor). Brought current: summary mem-size
+   table corrected to the real totals; new "Delay mode" subsection (3-mode
+   table + a `MATCHED`/`FIXED`/`EXTERNAL_ALIGNED` memory comparison table,
+   both cited from `c_user_manual_zh_TW.md` §4/§2.1, not invented); the
+   `delay_num_filters` paragraph corrected to state RAM DOES scale
+   (5,728 B/filter, all four grids); `aec_get_mem_breakdown()` documented;
+   the `ref_ring` row in the State table corrected from the retired
+   `enable_delay_est=0` framing to per-`delay_mode`; the `AecLinearContext`
+   `UNLOCKED` bullet and the `aec_debug_status()` paragraph updated for
+   `delay_mode`/the duty census; the CLI flags and both new test targets
+   added to the file list. Still self-contained, no external references,
+   24,109 B (< 30 KB budget).
+
+### Byte-exact evidence
+
+Verified via an isolated `git worktree` at `551e70d` (this step's parent
+commit, pre-CLI/pre-census), built KISS-backend, and SHA-256-compared against
+this commit's build on the same 10 s reference pair
+(`wav/aec_record/aec_record_{mic,ref}_10s.wav`):
+
+| case | flags | SHA-256 match |
+|---|---|---|
+| default, `MATCHED` n=5, 16k/256 | `--cng` | identical (`32ae3b34...`) |
+| `MATCHED` n=5, alternate 16k/512 grid | `--cng --fft-size 512` | identical (`c4fc34ef...`) |
+
+Both cases exercise the census-incrementing code path (`has_delay == 1`) on
+two different hop counts/K values. The only difference in `aec_wav`'s own
+stderr output is the new summary fields and the new `duty:` line — the WAV
+bytes themselves are untouched.
+
+### Full regression
+
+`pytest python/tests`: 227 passed (unchanged — no Python touched this step).
+C, both backends (KISS, NE10), every wired test target green: `test-counter-
+saturation` (12,023 checks), `test-rate-structural` (360), `test-config-
+validation` (388), `test-process-context` (70), `test-linear-context` (188),
+`test-delay-num-filters` (166), `test-duty-census` (9, **new**),
+`test-cli-delay-flags` (43 checks, **new**), `test-shared-far-spec` (51),
+`test-shared-fft-handle` (63), `test-zero-heap` (50 cycles, 0 allocator
+calls), `test-delay-reset` (16), `test-detectors-parity`/`-all` (0/260 diffs
+on both 16 kHz and legacy 48 kHz), `test-static-aec` (669,824 samples
+byte-equal, pool 379,712 B KISS / 379,104 B NE10 @16k/256).
+
+---
+
 ## [Unreleased] — 2026-08-16 — delay productization line A, step 3: per-mode alignment ring
 
 Plan §3.2.8-9, §9.3. Step 2 stopped constructing an ESTIMATOR outside

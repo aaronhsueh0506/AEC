@@ -260,6 +260,23 @@ int aec_config_resolve_delay(AecConfig* cfg) {
     return 0;
 }
 
+/* Resolve a caller's config ONCE, on the way in. Every public entry point
+ * (aec_create / aec_get_mem_size / aec_get_mem_breakdown / aec_init) must
+ * work off byte-identical resolved input, or a size query and the carve it
+ * budgets for could disagree about the mode; funnelling all four through
+ * this one helper is what makes that lockstep structural rather than a
+ * convention four call sites have to keep repeating.
+ *
+ * Cannot fail: every caller runs aec_validate_config() on the same input
+ * first, and an out-of-enum delay_mode is aec_config_resolve_delay()'s only
+ * failure. Returns by value so the caller owns the copy the rest of its
+ * body reads (the caller's own `cfg_in` is never mutated). */
+static AecConfig aec_resolved_config(const AecConfig* cfg_in) {
+    AecConfig cfg = *cfg_in;
+    (void)aec_config_resolve_delay(&cfg);
+    return cfg;
+}
+
 /* "Does this config have a reference alignment ring?" -- MATCHED and FIXED
  * do, EXTERNAL_ALIGNED does not (the caller pre-aligned; nothing to buffer).
  * Mirrors Python's `_delay_active`, and is a DIFFERENT question from "is
@@ -782,12 +799,7 @@ int aec_create(Aec* a, const AecConfig* cfg_in) {
      * just the existing int failure convention (0 = success, checked by
      * every caller as `!= 0` or truthy). */
     if (!a || !cfg_in || !aec_validate_config(cfg_in)) return -1;
-    /* Translate the deprecated enable_delay_est mirror ONCE, here, so every
-     * size/carve step below (and the a->cfg the instance keeps) sees a
-     * config whose delay_mode is the single source of truth. Cannot fail:
-     * aec_validate_config just accepted the same input. */
-    AecConfig cfg_resolved = *cfg_in;
-    (void)aec_config_resolve_delay(&cfg_resolved);
+    AecConfig cfg_resolved = aec_resolved_config(cfg_in);
     const AecConfig* cfg = &cfg_resolved;
 
     int hop, blk, fft, K, np, buf_samp, fcap;
@@ -960,10 +972,7 @@ static size_t ck_field_size_reps(size_t total, size_t count, size_t elem_size,
 size_t aec_get_mem_size(const AecConfig* cfg_in) {
     if (!cfg_in) return 0;
     if (!aec_validate_config(cfg_in)) return 0;
-    /* Same one-shot translation as aec_create/aec_init: this function and
-     * the init carve MUST see byte-identical resolved input (lockstep). */
-    AecConfig cfg_resolved = *cfg_in;
-    (void)aec_config_resolve_delay(&cfg_resolved);
+    AecConfig cfg_resolved = aec_resolved_config(cfg_in);
     const AecConfig* cfg = &cfg_resolved;
     int hop, blk, fft, K, np, buf, fcap;
     aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf, &fcap);
@@ -1110,6 +1119,42 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
 
     if (MEM_SIZE_INVALID(t)) return 0;
     return t;
+}
+
+/* Static-pool memory breakdown (plan §3.4.6 test 6; see AecMemBreakdown's
+ * doc comment in aec.h). Deliberately does NOT re-sum the fields
+ * aec_get_mem_size() walks above -- total_bytes is that exact call, so a
+ * caller (aec_wav.c's --print-mem-size) reads the SAME number
+ * aec_get_mem_size() would give it, not a second, driftable computation of
+ * it. estimator_bytes/ring_bytes reuse the identical helpers
+ * aec_get_mem_size() itself carves against (delay_aec3_get_mem_size(),
+ * aec_derive_dims()'s buf out-param), so a query here can never disagree
+ * with what aec_carve() actually lays out. */
+int aec_get_mem_breakdown(const AecConfig* cfg_in, AecMemBreakdown* out) {
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+    if (!cfg_in) return 0;
+
+    size_t total = aec_get_mem_size(cfg_in);
+    if (total == 0) return 0;
+
+    AecConfig cfg_resolved = aec_resolved_config(cfg_in);
+    const AecConfig* cfg = &cfg_resolved;
+
+    int hop, blk, fft, K, np, buf, fcap;
+    aec_derive_dims(cfg, &hop, &blk, &fft, &K, &np, &buf, &fcap);
+
+    size_t est = 0;
+    if (cfg->delay_mode == AEC_DELAY_MATCHED) {
+        est = delay_aec3_get_mem_size(cfg->sample_rate, hop,
+                                       cfg->delay_num_filters);
+    }
+    size_t ring = (buf > 0) ? ck_field_size(0, (size_t)buf, sizeof(float)) : 0;
+
+    out->total_bytes     = total;
+    out->estimator_bytes = est;
+    out->ring_bytes      = ring;
+    return 1;
 }
 
 /* Place Aec + all backing arrays in the provided pool; no malloc called.
@@ -1699,11 +1744,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
 Aec* aec_init(void* mem, size_t mem_size, const AecConfig* cfg_in) {
     if (!mem || !cfg_in) return NULL;
     if (!aec_validate_config(cfg_in)) return NULL;
-    /* Same one-shot delay translation aec_create/aec_get_mem_size do -- the
-     * get-mem-size query below and the carve further down must be handed
-     * byte-identical resolved input. */
-    AecConfig cfg_resolved = *cfg_in;
-    (void)aec_config_resolve_delay(&cfg_resolved);
+    AecConfig cfg_resolved = aec_resolved_config(cfg_in);
     const AecConfig* cfg = &cfg_resolved;
     /* F07: reject a misaligned pool base before any pool write. Every offset
      * aec_carve carves below is an ALIGN16 bump off `mem`, so a misaligned
@@ -1810,6 +1851,11 @@ void aec_reset(Aec* a) {
     a->far_hop_aligned = 0;
     a->duty_active = 0; a->duty_stable_hops = 0; a->duty_pos = 0;
     a->duty_last_delay = -1; a->duty_erle_peak = 0.0f;
+    /* The census measures ONE run of the duty machine, so it restarts with
+     * it -- carrying pre-reset hops across would blend two different duty
+     * regimes into a single, meaningless ratio. Matches the "cumulative
+     * since aec_create/aec_init/aec_reset" contract on AecDebugStatus. */
+    a->duty_hops_total = 0; a->duty_hops_run = 0;
     if (a->render_fifo)
         memset(a->render_fifo, 0,
                (size_t)a->fifo_cap_hops * a->hop_size * sizeof(float));
@@ -2058,6 +2104,11 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             if (a->duty_pos >= K) a->duty_pos = 0;
             run_filter = (a->duty_pos == 0);
         }
+        /* Engagement census (diagnostic; see the duty_hops_* doc in aec.h).
+         * Counted HERE, at the one call site that consumes run_filter, so
+         * the census can never drift from what actually executed. */
+        a->duty_hops_total += 1;
+        if (run_filter) a->duty_hops_run += 1;
         delay_aec3_accumulate_ex(&a->delay, a->near_hop, a->far_hop, hop,
                                  run_filter);
         {
@@ -3206,6 +3257,9 @@ void aec_debug_status(const Aec* a, AecDebugStatus* out) {
 
     out->near_power = a->near_power;
     out->out_power  = a->raw_error_power;
+
+    out->duty_hops_total = a->duty_hops_total;
+    out->duty_hops_run   = a->duty_hops_run;
 }
 
 /* Read-only linear-AEC seam view — see AecLinearContext (aec.h). Pointer
