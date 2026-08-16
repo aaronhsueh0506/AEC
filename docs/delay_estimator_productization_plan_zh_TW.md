@@ -1,7 +1,7 @@
 # AEC delay estimator 產品化實作計畫
 
 狀態：規劃文件，尚未授權 push。
-範圍：`AEC/`、`Audio_ALG/pipelines/`、`Audio_ALG/pipelines/4ch_pipelines/`、`Audio_ALG/AIAEC/`。
+範圍：`AEC/`、`Audio_ALG/pipelines/`、`Audio_ALG/pipelines/4ch_aec_bf_nr_res/`、`Audio_ALG/AIAEC/`。
 目標：讓產品能在初始化時選擇 delay 模式與 matched-filter bank 大小，同時讓 C static pool 的實際 RAM 隨設定縮小；另將 pre-echo 正確性修復與 PBFDKF delay controller 重新拆開驗證。
 
 ## 0. 不可混在一起的兩條工作線

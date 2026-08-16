@@ -1117,7 +1117,7 @@ chain with the v3.22 split min-gain floor.
 - **`AecConfig.spatial_linear_context`** (default 0, no behavior change unless
   set). When enabled, this AEC instance never computes its own
   `SuppressionGain` output (`res_gain`) — intended for a multi-channel caller
-  (e.g. `pipelines/4ch_pipelines/4aec_nr_res.c`) that runs one AEC per
+  (e.g. `pipelines/4ch_aec_bf_nr_res/4aec_nr_res.c`) that runs one AEC per
   microphone lane purely for its linear filter, then recomputes an equivalent
   gain once from beamformed multi-lane data; a per-lane gain in that
   architecture is computed and then never read. The `DominantNearend`

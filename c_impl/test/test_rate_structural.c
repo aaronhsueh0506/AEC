@@ -409,7 +409,7 @@ static void test_res_context_wola_identity(void) {
 
 /* ── (e2) spatial_linear_context: skipping the unused per-lane G_res leaves
  * every OTHER context field byte-identical, every grid, shadow on/off ────
- * A multi-channel wrapper (e.g. pipelines/4ch_pipelines/4aec_nr_res.c) sets
+ * A multi-channel wrapper (e.g. pipelines/4ch_aec_bf_nr_res/4aec_nr_res.c) sets
  * this to stop computing a per-lane suppression gain that only a downstream
  * fused/beamformed stage ever reads, while the DominantNearend hold-state
  * (suppression_gain_update_dominant_nearend(), still called every hop) keeps

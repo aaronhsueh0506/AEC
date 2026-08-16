@@ -185,7 +185,7 @@ void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
  * accepts/tests it as a 4th grid -- see Audio_ALG/pipelines/README.md
  * "Parameter Alignment"), but NOT a product grid and NOT supported by the
  * Audio_ALG 4-CHANNEL pipeline, whose public API contracts to exactly the
- * three product grids (see 4ch_pipelines/README.md and 4aec_nr_res.c's
+ * three product grids (see 4ch_aec_bf_nr_res/README.md and 4aec_nr_res.c's
  * explicit sample_rate check). It is kept because real tests depend on it;
  * it is flagged rather than left to sit anonymously in a "guessed" path. */
 static const AecSignalGrid AEC_GRID_TABLE[] = {

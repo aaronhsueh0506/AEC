@@ -13,7 +13,7 @@
 
 一般整合只 include `aec.h`。另有兩個 header 屬於**進階、範圍較窄的對外介面**，
 只有要在 AEC 之外自己跑一套 residual-echo suppression 的整合才需要
-（本專案的四麥克風 pipeline 就是這樣用的，見 `4ch_pipelines/4aec_nr_res.c`）：
+（本專案的四麥克風 pipeline 就是這樣用的，見 `4ch_aec_bf_nr_res/4aec_nr_res.c`）：
 
 | Header | 何時需要 |
 |---|---|
