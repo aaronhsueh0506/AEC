@@ -140,6 +140,28 @@ scan），所以每個 n 的行為都與「陣列固定配到 n=5 上限」時�
 使用場景：板端 fixed_delay 補償後 nf=1~2；bench/dataset 一律維持 5
 （發佈分數的量測幾何）。板端最終選值待 bring-up 殘差 profile 量測。
 
+### 5.1 實務延遲量級參考（按裝置/傳輸路徑，2026-08-14 討論定調）
+
+各部署形態的 bulk delay 典型量級（經驗值，供選 mode/n 的第一輪判斷；
+正式選值仍以 bring-up 實測公式為準——見
+`delay_estimator_productization_plan_zh_TW.md` §「p99.9 residual +
+jitter + drift + safety margin < bank reliable reach」）：
+
+| 部署形態 | 典型 bulk delay | 性質 | 建議 mode / n |
+|---|---|---|---|
+| 嵌入式 SoC、ref 走內部 loopback | ~0–50 ms | **固定、可量測**（firmware buffer 大小定死） | `FIXED`（bring-up 量一次），或 `MATCHED` n=1 |
+| USB／類比會議裝置 | 20–100 ms | 準固定 | `FIXED`＋小殘差，或 `MATCHED` n=1 |
+| PC／手機軟體堆疊 | 50–300 ms | 變動（OS buffer、resampler） | `MATCHED` n=2~3 |
+| 藍牙輸出 | 150–500 ms+ | 變動、重連會跳 | `MATCHED` n=4~5 |
+| challenge 語料（未知裝置錄音） | 實測見 §6：2021 全集 max 923 ms（~5% 超出 509 ms）；2023@48k max 674 ms（~1% 超界） | 無系統 hint，只能自己找 | `MATCHED` n=5（bench/dataset 固定幾何） |
+
+定調原則（同日決策，設計立場詳見 §4）：**系統延遲是系統層的知識**——firmware
+buffer 大小本來就已知，或 bring-up 用 loopback 量一次——用
+`fixed_delay_samples` 補掉（estimator 整個不建、搜尋算力=0），演算法
+只留小範圍追殘差/drift。這也是 upstream 的哲學：OS 以
+buffer-delay hint 回報延遲，matched filter 是沒有 hint 時的自救手段。
+延遲不可知的形態（藍牙類）才需要大 n 全程搜尋。
+
 ## 6. Blind-test 語料延遲普查（2026-08-14 實測）
 
 工具：`wav/measure_blind_delay.py`（NCC + 裁齊長度避開 zero-pad 假峰 +
