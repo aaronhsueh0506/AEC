@@ -808,10 +808,12 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx);
  *     alone misses transient A->B->A shifts between polls.
  *   - CHANGED is reported exactly on the hop whose processing bumped
  *     generation; the next hop reads LOCKED again.
- *   - Out-of-range bulk delay is NOT detectable here: beyond the matched
- *     filter's search span (~509 ms at 16 kHz) the estimator simply never
- *     acquires and the state stays UNLOCKED. Callers own that fail-open
- *     policy. The getter itself mutates no state.
+ *   - Out-of-range bulk delay is NOT detectable here. With a single dominant
+ *     out-of-range path the estimator may remain UNLOCKED, but an in-range
+ *     early reflection can also produce a confident lock at the wrong delay.
+ *     The seam has no ground truth with which to distinguish that mis-lock;
+ *     products must choose n from a measured route-delay envelope and own the
+ *     fail-open/recovery policy. The getter itself mutates no state.
  *
  * PER-MODE SEMANTICS (cfg.delay_mode; productization plan appendix 11.1) --
  * the three modes make the previously implicit alignment state explicit,
