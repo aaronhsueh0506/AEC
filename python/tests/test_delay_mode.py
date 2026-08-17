@@ -470,12 +470,21 @@ class FixedRingAlignmentTests(unittest.TestCase):
                 aec, far, seen, hop = self._drive(sr, fft, fixed, hops)
                 ring = aec._ref_ring_size
                 self.assertEqual(ring, fixed + hop)
-                # Honest-RAW window: the ring cannot serve the offset for the
-                # first ceil(fixed/hop) + 1 hops (fixed == 0 needs no read).
-                fill = 0 if fixed == 0 else -(-fixed // hop) + 1
+                # Honest-RAW window: the ring cannot serve the offset until
+                # the samples already written cover it, so hops
+                # 0..ceil(fixed/hop)-1 carry the caller's RAW far and hop
+                # ceil(fixed/hop) is the FIRST aligned one (fixed == 0 needs
+                # no read at all). Both sides of that boundary are asserted:
+                # skipping the first aligned hop would hide an off-by-one that
+                # serves raw audio for one hop past the switch.
+                raw_hops = 0 if fixed == 0 else -(-fixed // hop)
                 laps = hops * hop / ring
                 self.assertGreater(laps, 4.0, "ring never wrapped: weak test")
-                for h in range(fill, hops):
+                for h in range(raw_hops):
+                    np.testing.assert_array_equal(
+                        seen[h], far[h * hop:(h + 1) * hop],
+                        f"hop {h}: pre-fill far is not the caller's raw hop")
+                for h in range(raw_hops, hops):
                     end = (h + 1) * hop - fixed
                     want = far[end - hop:end]
                     np.testing.assert_array_equal(

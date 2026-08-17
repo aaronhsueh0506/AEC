@@ -6,7 +6,8 @@ AEC3 source operates on:
 
 Our pipeline operates on:
   * float[-1, 1] PSD scale (PSD ~ float² up to 1.0)
-  * Config-driven hop_size (default 160 samples @ 16 kHz = 10 ms)
+  * Config-driven hop_size (product default 128 samples @ 16 kHz = 8 ms;
+    supported alternate 256 samples @ 16 kHz = 16 ms)
   * 50% overlap invariant: frame_size = 2 * hop_size
 
 Use these helpers when porting AEC3 constants. NEVER paste a raw int16 PSD

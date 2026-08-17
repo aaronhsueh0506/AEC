@@ -302,6 +302,16 @@ class AEC:
                     fast_par_threshold=40.0,
                 )
                 self._current_delay = -1  # -1 = not yet estimated
+            # Backward-jump quarantine window: SECONDS -> estimation cycles
+            # once, here, against the resolved hop/sample rate — the same
+            # conversion C does in aec_carve(). Floor of 1: a sub-hop window
+            # still quarantines for exactly one cycle, never collapses into
+            # "off" (off is delay_backward_quarantine_enabled and nothing
+            # else). -1 = disarmed, the only state that may re-arm.
+            self._delay_quarantine_hops = max(1, int(round(
+                float(getattr(self.config, 'delay_backward_quarantine_s', 1.0))
+                / (self.config.hop_size / self.config.sample_rate))))
+            self._delay_quarantine_left = -1
             # Reference ring buffer for delay compensation
             self._ref_ring = np.zeros(buffer_samp, dtype=np.float32)
             self._ref_ring_write = 0
@@ -903,6 +913,10 @@ class AEC:
             self._ref_ring.fill(0)
             self._ref_ring_write = 0
             self._ref_ring_filled = 0
+            # A reset abandons the alignment the quarantine was protecting,
+            # so a countdown armed against it must not survive into the next
+            # lock. Mirrors aec_reset() in aec.c.
+            self._delay_quarantine_left = -1
         self._epc_det.reset()
         self._convergence.reset()
         self._erle_window_near = 1e-10
@@ -1532,6 +1546,35 @@ class AEC:
                             del self._pending_delay
                         del self._pending_delay_ttl
 
+                # Backward-jump quarantine for Path B. The rule it implements,
+                # its evidence test and the defect it replaces are documented
+                # once, on delay_backward_quarantine_enabled in config.py.
+                # What only this site knows:
+                #   - it is evaluated BEFORE Path B and repeats every one of
+                #     Path B's own admission terms, so the window can only
+                #     ever be spent on a candidate Path B would otherwise
+                #     have accepted this cycle;
+                #   - a negative countdown is unarmed and 0 is expiry: it is
+                #     armed once, on the first refusal, and ticks
+                #     unconditionally while armed, so the total veto stays
+                #     bounded however the candidate jitters.
+                _change_blocked = False
+                if (bool(getattr(self.config,
+                                 'delay_backward_quarantine_enabled', False))
+                        and _delay_eligible
+                        and self._current_delay >= 0
+                        and self.delay_est.confidence >= 0.5
+                        and new_delay < self._current_delay
+                        and self._current_delay - new_delay > 32
+                        and self.linear_is_cancelling()):
+                    if self._delay_quarantine_left < 0:
+                        self._delay_quarantine_left = self._delay_quarantine_hops
+                    if self._delay_quarantine_left > 0:
+                        self._delay_quarantine_left -= 1
+                        _change_blocked = True
+                else:
+                    self._delay_quarantine_left = -1
+
                 # Path B: delay shift. Independent of Path A — fires only
                 # when current_delay is already set and a meaningful shift
                 # is detected. Medium confidence (≥ 0.5) + consecutive-
@@ -1540,7 +1583,8 @@ class AEC:
                 if (_delay_eligible
                         and self._current_delay >= 0
                         and self.delay_est.confidence >= 0.5
-                        and abs(new_delay - self._current_delay) > 32):
+                        and abs(new_delay - self._current_delay) > 32
+                        and not _change_blocked):
                     if (hasattr(self, '_pending_delay')
                             and abs(new_delay - self._pending_delay) < 16):
                         self._current_delay = new_delay
@@ -2853,6 +2897,38 @@ class AEC:
         if self.near_power < eps and self.error_power < eps:
             return 0.0
         return 10 * np.log10((self.near_power + eps) / (self.error_power + eps))
+
+    def linear_is_cancelling(self) -> bool:
+        """Is this instance's linear filter demonstrably cancelling right now?
+
+        The single definition of "cancelling" behind the backward-jump
+        quarantine (``delay_backward_quarantine_enabled``), public so that a
+        wrapper owning its own shared delay estimator
+        (``pipelines/4ch_aec_bf_nr_res/pipeline.py``) asks the SAME question
+        of its lanes that this engine asks of itself, thresholds included,
+        instead of restating them. Mirrors C's
+        ``aec_linear_is_cancelling()``.
+
+        TWO readings, because neither alone answers the question over the
+        whole life of a lock: windowed ERLE is the sustained evidence but
+        lags ~0 for a few hundred ms after every realign (the lag documented
+        on ``delay_acquire_inst_erle_db``), and the inst-ERLE peak is the
+        recent evidence but ages out of its ~15-frame ring between far-active
+        bursts. Both thresholds are the ones Path A's own acquire-time guard
+        already uses; nothing new is introduced here.
+
+        Both readings start at 0.0, so an instance whose ERLE machinery has
+        not run (or has just been reset) answers False: "not demonstrably
+        cancelling" is the fail-open answer, never a blocking one.
+        Correspondingly this is evidence of cancellation, not of its absence
+        — a False does NOT assert the filter is broken, only that nothing
+        here proves it is working.
+        """
+        _recent = list(self._erle_slope_buf)[-15:]
+        return bool(
+            float(self._diag.get('erle_windowed', 0.0)) > 2.5  # dB
+            or (max(_recent) if _recent else 0.0)
+            > float(getattr(self.config, 'delay_acquire_inst_erle_db', 4.0)))
 
     def dump_p53_trace(self, path: str) -> int:
         """P53 Step 0: dump captured per-frame innovation-audit rows to .npz.

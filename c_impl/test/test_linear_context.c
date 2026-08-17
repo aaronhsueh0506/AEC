@@ -47,10 +47,13 @@
  *   - drop the aec_reset bump          -> "reset: generation advanced" fails;
  *   - report far_hop_aligned=1 unconditionally -> "pre-lock hops stay
  *     UNLOCKED" and "fixed: UNLOCKED until the ring can serve" fail;
+ *   - serve the ring read one hop early or late -> the per-hop content rows
+ *     ("exposed far is raw while UNLOCKED and far[t-delay] once locked" and
+ *     "fixed: aligned far is the caller far") fail on the boundary hop;
  *   - remove the ref_ring_filled clamp -> "filled saturates at ring size"
  *     fails;
  *   - seed FIXED's current_delay from anything but cfg.fixed_delay_samples
- *     -> "fixed: aligned far is the caller far delayed by fixed" fails;
+ *     -> "fixed: aligned far is the caller far" fails;
  *   - run the ring write/read under the estimator gate instead of the
  *     ring gate -> every "fixed: ..." alignment row fails;
  *   - report EXTERNAL_ALIGNED as UNLOCKED/-1 (its pre-delay_mode reading)
@@ -168,24 +171,40 @@ typedef struct LockWatch {
     int hops_seen;
     int first_changed_hop;
     int pre_lock_violation;
+    int content_violation;
     unsigned gen_before;
     unsigned gen_at_lock;
     AecLinearContext at_lock;
 } LockWatch;
 
 static void watch_hop(Aec* a, long pushed, void* user) {
-    (void)pushed;
     LockWatch* w = (LockWatch*)user;
     AecLinearContext ctx;
+    int hop = a->hop_size;
+    long start;
     aec_get_linear_context(a, &ctx);
     w->hops_seen++;
+    /* Content proof on EVERY hop, not only at lock: UNLOCKED promises the
+     * caller's RAW far, and from the first hop the ring can serve the offset
+     * the seam promises far[t - delay_samples]. Byte-compared against the
+     * history this test just pushed (amplitude 0.05 never soft-clips, so the
+     * ring holds the caller's exact samples).
+     *
+     * Byte-compared rather than merely non-NULL: aec_get_linear_context()
+     * assigns aligned_far_hop = a->far_hop unconditionally, so a NULL test
+     * can never fail and would not notice raw far served under a LOCKED
+     * seam, nor a ring read one hop early or late. */
+    start = pushed - hop -
+            (ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED ? 0 : ctx.delay_samples);
+    if (start < 0 || memcmp(ctx.aligned_far_hop, g_far_hist + start,
+                            (size_t)hop * sizeof(float)) != 0)
+        w->content_violation = 1;
     if (ctx.delay_state == AEC_LINEAR_DELAY_CHANGED) {
         if (w->changed_hops == 0) w->first_changed_hop = w->hops_seen;
         w->changed_hops++;
     }
     if (!w->locked_seen) {
         if (ctx.delay_state == AEC_LINEAR_DELAY_UNLOCKED) {
-            if (ctx.delay_samples >= 0 && !ctx.aligned_far_hop) w->pre_lock_violation = 1;
             if (ctx.generation != w->gen_before) {
                 /* generation may move only together with leaving UNLOCKED */
                 w->pre_lock_violation = 1;
@@ -221,6 +240,9 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     CHECK(w.locked_seen, msg);
     snprintf(msg, sizeof msg, "%s: pre-lock hops stay UNLOCKED with stable generation", tag);
     CHECK(!w.pre_lock_violation, msg);
+    snprintf(msg, sizeof msg, "%s: exposed far is raw while UNLOCKED and "
+                              "far[t-delay] once locked, every hop", tag);
+    CHECK(!w.content_violation, msg);
     snprintf(msg, sizeof msg, "%s: first lock: CHANGED on the lock hop", tag);
     CHECK(w.changed_on_lock_hop, msg);
     snprintf(msg, sizeof msg, "%s: first lock: generation == start+1", tag);
@@ -270,6 +292,9 @@ static void scenario_acquire_and_verify(int sample_rate, int fft_size,
     CHECK(ctx.generation > gen_locked, msg);
     snprintf(msg, sizeof msg, "%s: shift: CHANGED observed on some hop", tag);
     CHECK(w2.changed_hops >= 1, msg);
+    snprintf(msg, sizeof msg, "%s: shift: exposed far tracks the applied "
+                              "offset on every hop", tag);
+    CHECK(!w2.content_violation, msg);
     (void)changed_before;
     snprintf(msg, sizeof msg, "%s: shift: tracks the new delay", tag);
     CHECK(ctx.delay_samples > true_delay
@@ -376,9 +401,12 @@ static void scenario_fixed_delay(int legacy) {
                               "before the first hop", tag);
     CHECK(first.delay_samples == fixed, msg);
 
-    /* The ring cannot serve `fixed` until it holds fixed + hop samples, so
-     * the honest state is UNLOCKED for exactly ceil(fixed/hop)+1 hops. */
-    int fill_hops = (fixed + hop - 1) / hop + 1;
+    /* The ring cannot serve `fixed` until the samples already written cover
+     * it, so hops 0..ceil(fixed/hop)-1 carry the caller's RAW far and hop
+     * ceil(fixed/hop) is the FIRST aligned one. Spelled as that raw-hop count
+     * directly: a ceil+1 "fill" count compared with a -1 leaves the first
+     * aligned hop unasserted, which is exactly where an off-by-one lands. */
+    int raw_hops = (fixed + hop - 1) / hop;
     long pushed = 0;
     int early_unlocked = 1, late_locked = 1, delay_ok = 1, conf_ok = 1, gen_ok = 1;
     int content_ok = 1, changed_seen = 0;
@@ -389,8 +417,13 @@ static void scenario_fixed_delay(int legacy) {
         if (ctx.delay_confidence != 1.0f) conf_ok = 0;
         if (ctx.generation != first.generation) gen_ok = 0;
         if (ctx.delay_state == AEC_LINEAR_DELAY_CHANGED) changed_seen = 1;
-        if (h < fill_hops - 1) {
+        if (h < raw_hops) {
             if (ctx.delay_state != AEC_LINEAR_DELAY_UNLOCKED) early_unlocked = 0;
+            /* UNLOCKED means the content IS the caller's raw far, not
+             * silence and not a partially served hop. */
+            if (memcmp(ctx.aligned_far_hop, g_far_hist + pushed - hop,
+                       (size_t)hop * sizeof(float)) != 0)
+                content_ok = 0;
         } else {
             if (ctx.delay_state != AEC_LINEAR_DELAY_LOCKED) late_locked = 0;
             long start = pushed - hop - fixed;
@@ -407,7 +440,9 @@ static void scenario_fixed_delay(int legacy) {
     CHECK(early_unlocked, msg);
     snprintf(msg, sizeof msg, "%s: LOCKED once the ring covers delay + hop", tag);
     CHECK(late_locked, msg);
-    snprintf(msg, sizeof msg, "%s: aligned far is the caller far delayed by fixed", tag);
+    snprintf(msg, sizeof msg, "%s: aligned far is the caller far -- raw while "
+                              "the ring fills, delayed by fixed from the first "
+                              "servable hop", tag);
     CHECK(content_ok, msg);
     snprintf(msg, sizeof msg, "%s: generation frozen while processing", tag);
     CHECK(gen_ok, msg);
@@ -542,7 +577,7 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
     char msg[224];
     AecConfig cfg;
     Aec a;
-    int hop, fill_hops, wrapped = 0, laps;
+    int hop, raw_hops, wrapped = 0, laps;
     long pushed = 0;
     int content_ok = 1, locked_ok = 1, h;
 
@@ -552,7 +587,9 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
     snprintf(msg, sizeof msg, "%s: aec_create", tag);
     CHECK(aec_create(&a, &cfg) == 0, msg);
     hop = a.hop_size;
-    fill_hops = (fixed + hop - 1) / hop + 1;
+    /* Raw-far hops before the ring can serve the offset; hop raw_hops is the
+     * first aligned one and is asserted like every later hop. */
+    raw_hops = (fixed + hop - 1) / hop;
 
     for (h = 0; h < hops; ++h) {
         AecLinearContext ctx;
@@ -564,7 +601,7 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
         if (read_pos < 0) read_pos += a.ref_ring_size;
         if (read_pos + hop > a.ref_ring_size) wrapped++;
         aec_get_linear_context(&a, &ctx);
-        if (h < fill_hops - 1) continue;
+        if (h < raw_hops) continue;
         if (ctx.delay_state != AEC_LINEAR_DELAY_LOCKED) locked_ok = 0;
         {
             long start = pushed - hop - fixed;
@@ -601,7 +638,7 @@ static void scenario_fixed_reset_refill(void) {
     AecConfig cfg;
     Aec a;
     char msg[192];
-    int hop, fill_hops, pass, h;
+    int hop, raw_hops, pass, h;
     long pushed = 0;
 
     context_only_config(&cfg, 16000, 0);
@@ -609,11 +646,11 @@ static void scenario_fixed_reset_refill(void) {
     cfg.fixed_delay_samples = fixed;
     CHECK(aec_create(&a, &cfg) == 0, "fixed-refill: aec_create");
     hop = a.hop_size;
-    fill_hops = (fixed + hop - 1) / hop + 1;
+    raw_hops = (fixed + hop - 1) / hop;
 
     for (pass = 0; pass < 2; ++pass) {
         int unlocked_hops = 0, content_ok = 1, locked_ok = 1;
-        for (h = 0; h < 3 * fill_hops; ++h) {
+        for (h = 0; h < 3 * (raw_hops + 1); ++h) {
             AecLinearContext ctx;
             pushed = drive_hop(&a, pushed, fixed);
             aec_get_linear_context(&a, &ctx);
@@ -631,8 +668,8 @@ static void scenario_fixed_reset_refill(void) {
         }
         snprintf(msg, sizeof msg,
                  "fixed-refill pass %d: exactly %d RAW-far hops (got %d)",
-                 pass, fill_hops - 1, unlocked_hops);
-        CHECK(unlocked_hops == fill_hops - 1, msg);
+                 pass, raw_hops, unlocked_hops);
+        CHECK(unlocked_hops == raw_hops, msg);
         snprintf(msg, sizeof msg,
                  "fixed-refill pass %d: LOCKED once refilled", pass);
         CHECK(locked_ok, msg);

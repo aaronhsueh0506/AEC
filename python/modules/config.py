@@ -414,6 +414,59 @@ class AecConfig:
     # (which keeps the realign but preserves cancellation). Kept for reference.
     delay_acquire_protect_inst_erle: bool = False
 
+    # DEFAULT OFF. Backward-jump quarantine on a delay CHANGE (Path B), the
+    # sibling of delay_acquire_protect_converged above (which guards only the
+    # FIRST acquisition and is untouched by these two fields).
+    #
+    # QUARANTINED, and nothing else: a candidate strictly EARLIER than the
+    # delay already in force — the backward / pre-echo direction — offered
+    # while the linear filter is demonstrably cancelling at the alignment
+    # currently applied. A FORWARD jump (a larger delay), which pre-echo
+    # mis-attribution cannot produce, is never held; neither is the first
+    # acquisition.
+    #
+    # Why a direction test and not a longer confirmation window: the failure
+    # this targets is a sustained wrong candidate, not a one-hop glitch. With
+    # a white-noise far at a true bulk delay of 6400 samples the estimator
+    # locks correctly at 6336 (hop 32) and then re-locks to 4800 at hop 49 —
+    # exactly 1600 samples (100 ms) early, the pre-echo mis-attribution
+    # signature — and keeps reporting 4800 for the rest of the run. Any
+    # K-consecutive-confirmation gate confirms it. The re-lock is EARLIER
+    # than the truth, which is what makes direction a usable filter.
+    #
+    # Evidence for "still cancelling": the SAME two ERLE readings Path A's
+    # guard already uses — windowed ERLE against its 2.5 dB threshold, and
+    # the recent inst-ERLE peak against delay_acquire_inst_erle_db. Both arms
+    # are needed here, unlike Path A, because a pre-echo re-lock arrives
+    # within a few hundred ms of the first lock: measured at the 6400→4800
+    # acceptance hop, windowed ERLE is only 1.660 dB (still inside the lag
+    # documented on delay_acquire_inst_erle_db above) while the inst peak is
+    # 7.269 dB. A windowed-only predicate cannot see this defect at all.
+    #
+    # Both readings are 0.0 until the machinery that fills them has run, so
+    # an unavailable metric leaves the predicate false and the quarantine
+    # inert (fail-open to current behaviour) rather than blocking on an
+    # absent one.
+    #
+    # BOUNDED: the countdown is armed on the first refusal and spends one
+    # tick per estimation cycle; at expiry the candidate is ACCEPTED. So a
+    # mis-lock is DELAYED by at most the window, never cured — curing it is
+    # estimator work, not this guard's. There is no early release on
+    # dominance because the estimator publishes none: DelayEstimator's
+    # confidence is histogram consistency quantised to 0 / 0.5 / 1.0 and
+    # carries no quality information (the pre-echo candidate reaches REFINED
+    # too), and Path B already gates on it, so persistence — which the window
+    # measures — is the only signal available.
+    #
+    # The unbounded, direction-blind predicate this replaced — and the
+    # multipath measurement that killed it — are written up once, on
+    # delay_backward_quarantine_enabled in c_impl/include/aec.h.
+    delay_backward_quarantine_enabled: bool = False
+    # Quarantine window in SECONDS (converted to estimation cycles once, at
+    # construction, against the resolved hop/sample rate; minimum 1 cycle).
+    # Inert while delay_backward_quarantine_enabled is False.
+    delay_backward_quarantine_s: float = 1.0
+
     # Warm tap-transfer on first delay acquisition (default-ON, production). When
     # the online matched-filter locks the delay and the ring buffer realigns,
     # instead of ZEROING the filter (which discards the cancellation it built at

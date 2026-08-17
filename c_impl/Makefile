@@ -603,8 +603,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
-all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
+.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -737,6 +737,16 @@ TEST_DNF_TARGET = $(BIN_DIR)/test_delay_num_filters
 TEST_DUC_SRCS   = $(TEST_DIR)/test_duty_census.c
 TEST_DUC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_DUC_SRCS))
 TEST_DUC_TARGET = $(BIN_DIR)/test_duty_census
+
+# Permanent regression test for the Path-B backward-jump quarantine
+# (AecConfig::delay_backward_quarantine_enabled / _s). Reproduces the
+# sustained pre-echo re-lock (true 6400 -> 4800) with the mechanism off, then
+# pins that the quarantine DELAYS it by exactly the configured window, that a
+# multipath path-addition still re-locks in all four gain rows, and that a
+# forward move is untouched. Needs the full Aec type.
+TEST_DBQ_SRCS   = $(TEST_DIR)/test_delay_backward_quarantine.c
+TEST_DBQ_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_DBQ_SRCS))
+TEST_DBQ_TARGET = $(BIN_DIR)/test_delay_backward_quarantine
 
 # Independent reference tool for cli_delay_flags.sh's print-mem-size
 # cross-check: calls aec_get_mem_breakdown() from its OWN source file (not
@@ -957,7 +967,7 @@ $(TEST_DR_TARGET): $(TEST_DR_OBJS) | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -1001,6 +1011,10 @@ test-delay-num-filters: $(TEST_DNF_TARGET)
 # Builds AND runs, same convention as test-counter-saturation above.
 test-duty-census: $(TEST_DUC_TARGET)
 	"$(abspath $(TEST_DUC_TARGET))"
+
+# Builds AND runs, same convention as test-counter-saturation above.
+test-delay-backward-quarantine: $(TEST_DBQ_TARGET)
+	"$(abspath $(TEST_DBQ_TARGET))"
 
 # CLI plumbing for --delay-mode / --delay-num-filters / --fixed-delay /
 # --print-mem-size. Depends on the CLI binary itself (not a test_*.c), so it
@@ -1087,6 +1101,10 @@ $(TEST_DNF_TARGET): $(OBJS) $(TEST_DNF_OBJS) $(AC_LIB) | _cfg_guard
 $(TEST_DUC_TARGET): $(OBJS) $(TEST_DUC_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_duty_census [$(BACKEND)] -> $@"
+
+$(TEST_DBQ_TARGET): $(OBJS) $(TEST_DBQ_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_delay_backward_quarantine [$(BACKEND)] -> $@"
 
 $(TEST_PMR_TARGET): $(OBJS) $(TEST_PMR_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -1621,6 +1639,9 @@ help:
 	@echo "                  regression test (test_delay_num_filters) -- run from c_impl/"
 	@echo "  test-duty-census  Build + run the permanent matched-filter duty-cycle"
 	@echo "                  engagement census test (test_duty_census) -- run from c_impl/"
+	@echo "  test-delay-backward-quarantine  Build + run the permanent Path-B backward-"
+	@echo "                  jump quarantine regression test"
+	@echo "                  (test_delay_backward_quarantine) -- run from c_impl/"
 	@echo "  test-cli-delay-flags  Run the aec_wav --delay-mode/--delay-num-filters/"
 	@echo "                  --fixed-delay/--print-mem-size CLI plumbing test"
 	@echo "                  (test/cli_delay_flags.sh) -- run from c_impl/"

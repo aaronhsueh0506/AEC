@@ -41,6 +41,167 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-17 — `delay_backward_quarantine_*`: bounded backward-jump quarantine on a delay CHANGE (default OFF)
+
+### The defect
+
+With a white-noise far end at a true bulk delay of 6400 samples (16 kHz,
+fft 512 / hop 256, `MATCHED` n=5) the matched filter acquires CORRECTLY at
+6336 on hop 32, then on hop 49 re-locks to 4800 — exactly 1600 samples
+(100 ms) EARLY, the pre-echo mis-attribution signature — and keeps reporting
+4800 for the rest of the run. The wrong candidate is SUSTAINED, so no
+K-consecutive-confirmation gate can reject it: every confirmation window it
+is offered agrees with itself. `pipelines/4ch_aec_bf_nr_res` reproduces the
+same signature through its own shared estimator (hop 34 → 6336, hop 50 →
+4800).
+
+This is the inverse of the out-of-range mis-lock already documented in
+`docs/delay_estimator_design_zh_TW.md` §2.2: here the true delay is well
+inside the bank's reach and the first answer is right.
+
+### The mechanism
+
+Three properties, and the mechanism is unsound without all three.
+
+**Directional.** Only a candidate strictly EARLIER than the delay in force
+is quarantined. Pre-echo mis-attribution cannot produce a LARGER answer, so
+a forward jump is not this mechanism's business and is never held. First
+acquisition is not either — that stays `delay_acquire_protect_converged`.
+
+**Evidence-gated.** The candidate is held only while the linear filter is
+still demonstrably cancelling at the applied alignment.
+`aec_linear_is_cancelling()` (new, public, read-only) is that test, and is
+the single definition both this engine's Path-B arm and the 4ch wrapper's own
+arm consult. It reads two figures the engine already maintains, both against
+thresholds Path A's acquire-time guard already uses: last hop's windowed ERLE
+against 2.5 dB, and the recent inst-ERLE peak against
+`cfg.delay_acquire_inst_erle_db`. Both arms are load-bearing:
+
+- windowed-only cannot see this defect. The re-lock lands 17 hops after the
+  first acquisition, inside the lag `delay_acquire_inst_erle_db`'s own field
+  comment documents; measured at the acceptance hop, windowed ERLE is
+  1.660 dB (Python) / 1.804 dB (C) against its 2.5 dB threshold, while the
+  inst peak is 7.269 dB. Pinned in C by configuring the fast arm out of reach
+  and showing the quarantine stop engaging.
+- inst-only would release between far-active bursts, where the ~15-frame ring
+  ages out while the filter is still cancelling. Pinned in Python by the
+  backward-move scene: at the unguarded acceptance hop the inst peak is
+  −0.934 dB and windowed ERLE is 3.728 dB, so the slow arm alone engages.
+
+**Time-bounded for a continuously qualifying backward candidate.** The
+countdown is armed on the first refusal and spends one tick per estimation
+cycle while such candidates continue to be offered; at expiry the candidate
+is ACCEPTED. Candidate values may move within that qualifying class without
+re-arming the countdown. Cancellation collapse, a forward/non-qualifying
+estimate, or a confidence gap disarms it immediately; a later backward episode
+starts a new window. This is persistence gating, not a wall-clock deadline
+spanning unrelated estimator episodes.
+
+There is no dominance early-release, and that is a finding rather than an
+omission: `delay_aec3_confidence()` is histogram consistency quantised to
+0 / 0.5 / 1.0, carries no match-quality information (the pre-echo candidate
+reaches REFINED too), and Path B already gates on it. Persistence is the only
+signal available, and the window is what measures it.
+
+**A mis-lock is therefore DELAYED by one window, never cured.** Curing
+pre-echo mis-attribution is estimator work and is out of scope here.
+
+### Measured
+
+Pre-echo scene, acceptance hop of the WRONG delay (16 kHz / fft 512 /
+hop 256):
+
+| window | = cycles | lib/aec | 4ch core |
+|---|---|---|---|
+| off | — | 49 | 50 |
+| 0.5 s | 31 | 80 | 81 |
+| 1.0 s (default) | 62 | 111 | 112 |
+| 2.0 s | 125 | 174 | 175 |
+| 4.0 s | 250 | 299 | — |
+
+In this sustained pre-echo scene, acceptance lands on unguarded_hop +
+window_cycles exactly on every implementation: the predicate remains active,
+so expiry is the release path. Other scenes may release earlier when
+cancellation evidence disappears.
+
+Multipath / path addition (C, old path at 2400 surviving at g_old, stronger
+new path at 1600 / gain 0.5 appearing at hop 250, 1600 hops) — the family the
+previous predicate vetoed forever:
+
+| g_old | re-lock off | re-lock on | cost |
+|---|---|---|---|
+| 0.2 | 498 | 498 | 0 |
+| 0.3 | 488 | 488 | 0 |
+| 0.4 | 495 | 557 | +62 |
+| 0.5 | 1515 | 1577 | +62 |
+
+All four rows re-lock, worst case exactly one window; the two zero-cost rows
+are the early release firing. The Python reference on the same geometry
+(620 hops): 310/323/394/510 → 310/385/456/572, same shape.
+
+A forward move (64 → 3000 at hop 375) has a byte-identical accepted-delay
+trajectory with the mechanism on and off, in all three implementations.
+
+### Why the default window is 1.0 s
+
+Lower bound from the defect's dynamics: the pre-echo re-lock arrives 17 hops
+after the first lock, so the window must be comfortably longer than that to
+cover the interval in which a mis-lock is most damaging — 62 cycles is 3.6×.
+Upper bound from the cost of a real change: in the multipath table the
+estimator itself needs 488–1515 hops to produce the new candidate, so 62 more
+is 4–13% of a latency the guard did not create, and it is only ever paid when
+cancellation has NOT collapsed.
+
+### Behaviour and cost
+
+`AecConfig::delay_backward_quarantine_enabled` (default 0) gates Path B only;
+`delay_backward_quarantine_s` (default 1.0, seconds, converted to cycles once
+in `aec_carve()` against the resolved grid with a floor of 1) is inert while
+the enable is 0. Both ERLE readings sit at 0 until the machinery that fills
+them has run, so a configuration that never fills them leaves the mechanism
+inert (fail-open); it never blocks on an absent metric.
+
+Default OFF keeps the shipped path byte-exact, so no 800-case gate is
+required for this entry. Verified rather than assumed: the NN-seam
+configuration (`enable_res=0`, `return_res_context=1`) rendered with the
+mechanism off is byte-identical over 512,000 bytes to the pre-change build.
+
+### ABI
+
+`sizeof(AecConfig)` 196 → 204 B (one `int` + one `float`), and `Aec` gains the
+quarantine countdown pair, so every `aec_get_mem_size()` figure shifts by
+exactly +16 B — same offset on every mode / bank size / grid, every delta
+(5,728 B per filter, the `FIXED` byte-per-ms formula, the mode-to-mode
+differences) unchanged — **rebuild required**, no source change for callers
+that construct configs
+through `aec_config_defaults()` / `aec_config_from_preset()`. `aec.h` gains
+one function declaration (`aec_linear_is_cancelling`).
+
+### Tests
+
+`make test-delay-backward-quarantine` (new target, 31 checks) and
+`python/tests/test_delay_backward_quarantine.py` (8 tests). Both reproduce
+the defect with the mechanism OFF first and pin that as the documentation of
+it, then assert that the mechanism only delays it, that the multipath family
+re-locks in all four gain rows, and that a forward candidate is untouched.
+The 4ch C/Python per-hop parity test (7 tests) sweeps the window on both
+implementations and adds a proxy-noise scene, the only one on which
+"judge the estimator's own lane" and "judge any lane" are distinguishable.
+
+Mutation matrices are recorded in the three test headers: 9 mutations in C
+(1/8/8/4/0/5/1/1/13 rows red), 8 in Python (1/2/1/1/1/1/1/5 tests red) and 8
+across the 4ch core + its Python mirror (1 test red each), control green
+before and after every one. The single C zero is the windowed-ERLE arm, which
+no scene reachable through the public API makes the deciding one on a
+duty-cycled analysis; it is red in the Python mirror and the C test header
+says so rather than claiming coverage it does not have. Two scenes exist
+purely because their absence made a mutation read green: the FORWARD
+MULTIPATH scene (the plain forward move cannot see the direction test) and
+the 4ch proxy-noise scene (identical per-channel audio cannot see the
+proxy-lane rule).
+
+---
+
 ## [Unreleased] — 2026-08-16 — delay productization line A, step 4 (CLI + memory diagnostics + docs/ABI) — A-line complete
 
 ### Hardening and consistency fixes

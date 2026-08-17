@@ -58,7 +58,7 @@ different hop:
 | `delay_mode` | `delay_samples` | reaches `LOCKED` |
 |---|---|---|
 | `MATCHED` (default) | −1 before acquisition, else the estimated ring offset | once the matched filter acquires — needs far activity and `delay_aec3_n_updates() ≥ 3` solid updates; never, if the true delay is outside the ~509 ms reliable-peak bound |
-| `FIXED` | always `cfg.fixed_delay_samples` (never −1) | once the ring has filled: `ceil(fixed_delay_samples / hop) + 1` hops after the first process call, not hop 0 |
+| `FIXED` | always `cfg.fixed_delay_samples` (never −1) | once the ring can serve the offset, not hop 0: the first `ceil(fixed_delay_samples / hop)` hops report `UNLOCKED` over RAW far, and the next process call reports `LOCKED` |
 | `EXTERNAL_ALIGNED` | always `0` | **hop 0** — the caller has contracted that `ref` is already aligned, so there is nothing to wait for |
 
 This is a **behavior change from the pre-`delay_mode` API**: the legacy
@@ -82,7 +82,21 @@ state stays `UNLOCKED`. `FIXED` and `EXTERNAL_ALIGNED` cannot fail this way —
 alignment there is a caller contract, not a search, so it is not detectable
 at this seam either way.
 Fail-open policy (bypass the far-conditioned model, emit the linear error)
-belongs to the integrator. Regression coverage: `test/test_linear_context.c`.
+belongs to the integrator. Regression coverage: `test/test_linear_context.c`
+(194 checks).
+
+A second `MATCHED`-only failure mode is visible at this seam only through
+`generation`: the estimator can acquire correctly and then re-lock to an
+EARLIER, wrong delay (pre-echo mis-attribution), which arrives as a normal
+`CHANGED` hop. `AecConfig::delay_backward_quarantine_enabled` (default 0,
+`c_user_manual_zh_TW.md` §6.4) delays such an adoption by a bounded window
+but does not prevent it, so a consumer must not treat a post-`CHANGED`
+`LOCKED` as proof the alignment is correct — flush far feature rings on
+`generation` movement regardless. A consumer that owns its own estimator can
+ask the engine the same "is this lane still cancelling" question the guard
+uses, via the read-only `aec_linear_is_cancelling(const Aec*)` (`aec.h`);
+it returns 0 when the ERLE machinery has not run, i.e. absence of evidence,
+never a claim that the filter is broken.
 
 ## The three swap points (freq-in → freq-out blocks)
 Each is a pure function on the shared grid; the network replaces the DSP function, nothing else.

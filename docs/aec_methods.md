@@ -144,7 +144,9 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `reverb_tail_strength` | 1.0 | reverb-tail R² scale |
 | | `erle_windowed_capture_psd` | **ON** | E1 Y2/E2 sqrt-Hann coordinate consistency |
 | | `output_capture_when_linear_unusable` | **ON** | E2 output base = Y on diverged frames |
-| Delay-acquire guard | `delay_acquire_protect_converged` | **ON** | reject spurious late acquisition |
+| Delay-acquire guard | `delay_acquire_protect_converged` | **ON** | reject spurious late FIRST acquisition (Path A only) |
+| Delay-change quarantine (OFF) | `delay_backward_quarantine_enabled` | 0 (**OFF**) | hold a backward (pre-echo-direction) delay-change candidate while the filter still cancels; bounded window then accepts (delays, does not cure) |
+| | `delay_backward_quarantine_s` | 1.0 | quarantine window in seconds (converted to estimator cycles at init, floor 1) |
 | Cold-start deadlock (OFF) | `h_error_refresh_erl_floor` | 0.0 (**OFF**) | Kalman-gain cold-start breakers |
 | | `h_error_floor_override` | 0.0 (**OFF**) | |
 | Shadow filter | `enable_shadow` | **ON** | PBFDAF/NLMS coarse filter |

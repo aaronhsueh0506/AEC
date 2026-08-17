@@ -149,6 +149,47 @@ typedef struct AecConfig {
     int    delay_acquire_warm_transfer;       /* 1 */
     float  delay_acquire_inst_erle_db;        /* 4.0 */
     int    delay_acquire_protect_inst_erle;   /* 0 */
+    /* Backward-jump quarantine on a delay CHANGE (Path B). Sibling of
+     * delay_acquire_protect_converged above -- which guards the FIRST
+     * acquisition only and is untouched by these two fields. DEFAULT OFF, so
+     * the shipped path is byte-identical to a build without the mechanism.
+     *
+     * WHAT IS QUARANTINED, and nothing else: a candidate strictly EARLIER
+     * than the delay already in force (new_delay < current_delay -- the
+     * backward / pre-echo direction) offered while the linear filter is still
+     * demonstrably cancelling at the applied alignment
+     * (aec_linear_is_cancelling()). FORWARD jumps -- a LARGER delay, which
+     * pre-echo mis-attribution cannot produce -- are never quarantined, and
+     * neither is the first acquisition.
+     *
+     * TIME-BOUNDED, never a veto. The countdown is armed on the first refusal
+     * and spends one tick per estimation cycle; after
+     * delay_backward_quarantine_s worth of cycles the candidate is ACCEPTED.
+     * The window is converted to cycles once, in aec_carve(), against the
+     * RESOLVED hop and sample rate (minimum 1, so a sub-hop window still
+     * quarantines for exactly one cycle instead of silently disabling the
+     * mechanism). Two ways out early:
+     *   (a) cancellation collapses -- common for a hard path replacement,
+     *       but not guaranteed for multipath/path-addition changes -- and the
+     *       candidate is accepted on that cycle;
+     *   (b) nothing else. The estimator publishes no dominance signal beyond
+     *       persistence: delay_aec3_confidence() is histogram consistency
+     *       quantised to 0 / 0.5 / 1.0 and carries no quality information
+     *       (the pre-echo candidate reaches REFINED too), and Path B already
+     *       gates on it. "The candidate kept being offered" IS the
+     *       persistence evidence, and the window is what measures it.
+     *
+     * So a mis-lock is DELAYED by at most the window, never cured. Curing it
+     * is estimator work, out of scope for this guard.
+     *
+     * History (one line, so it is not re-derived): the first version of this
+     * mechanism refused ALL differing candidates while cancelling, with no
+     * bound. In multipath / path-addition scenes the surviving old reflection
+     * keeps ERLE up, so a genuine new path was vetoed indefinitely -- measured
+     * at old/new gains 0.4/0.5 with no re-lock through hop 850, and 0.5/0.5
+     * never. Candidate direction + a bound are what replaced it. */
+    int    delay_backward_quarantine_enabled; /* 0 */
+    float  delay_backward_quarantine_s;       /* 1.0 */
 
     /* DT-deg recovery stack (default ON, mirrors Python 16285fd). The
      * energy-based held near-end gate (_ne_recent_frames) arms two levers
@@ -335,6 +376,18 @@ typedef struct Aec {
                             * FIXED:   cfg.fixed_delay_samples, always.
                             * EXTERNAL_ALIGNED: 0 (nothing to apply). */
     int    pending_delay;  int has_pending; int pending_delay_ttl;
+    /* Backward-jump quarantine (cfg.delay_backward_quarantine_*).
+     * _left: estimation cycles still to spend before a refused EARLIER
+     *        candidate is accepted anyway. -1 = DISARMED, which is the only
+     *        state that may re-arm; 0 = armed and EXPIRED, i.e. this cycle
+     *        accepts. Disarming happens on any cycle the guard is not
+     *        engaged (no backward candidate, cancellation collapsed, or the
+     *        feature is off), which is also what disarms it after an
+     *        acceptance -- once current_delay moves the candidate is no
+     *        longer a backward jump.
+     * _hops: the window in cycles, derived once in aec_carve(); >= 1. */
+    int    delay_quarantine_left;
+    int    delay_quarantine_hops;
     /* Alignment-generation token for external consumers (AecLinearContext).
      * Bumped (saturating, never wrapping) at EVERY write that changes the
      * ring read offset -- first acquisition, confirmed shift (soft AND hard
@@ -692,6 +745,24 @@ void aec_process_context_shared_far(
  * not part of the audio path, has no effect on any processing. */
 long aec_far_fft_real_compute_count(const Aec* a);
 
+/* Read-only: is this instance's linear filter demonstrably cancelling right
+ * now? 1 = yes.
+ *
+ * The single definition of "cancelling" behind the backward-jump quarantine
+ * (delay_backward_quarantine_enabled), exported so that a wrapper owning its
+ * own shared delay estimator (pipelines/4ch_aec_bf_nr_res) asks the SAME question
+ * of its lanes that this engine asks of itself, thresholds included, instead
+ * of restating them. Reads two figures the engine already maintains -- last
+ * hop's windowed ERLE against 2.5 dB, and the recent inst-ERLE peak against
+ * cfg.delay_acquire_inst_erle_db -- so it adds nothing to the hot path.
+ *
+ * Both readings start at 0, so an instance whose ERLE machinery has not run
+ * (or has just been reset) answers 0: "not demonstrably cancelling" is the
+ * fail-open answer, never a blocking one. Correspondingly this is evidence
+ * of cancellation, not its absence -- a 0 does NOT assert the filter is
+ * broken, only that nothing here proves it is working. */
+int aec_linear_is_cancelling(const Aec* a);
+
 /* ── Streaming API (real-time async render/capture) ───────────────────────
  * For deployments where the far-end (render) and mic (capture) arrive on
  * separate calls / threads and not necessarily 1:1. aec_analyze_render()
@@ -832,9 +903,10 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx);
  *     aec_reset(), which genuinely invalidates the ring content a consumer
  *     may have cached. delay_state is LOCKED from the hop the ring first
  *     holds fixed_delay_samples + hop_size samples onward -- i.e. it is
- *     UNLOCKED for the first ceil(fixed_delay_samples / hop_size) + 1 hops,
- *     the window in which far_hop is still the RAW far because the ring
- *     cannot yet serve the requested offset. (Plan appendix 11.1 wrote
+ *     UNLOCKED for the first ceil(fixed_delay_samples / hop_size) hops. On
+ *     the following process call, writing the current hop makes the ring
+ *     hold fixed_delay_samples + hop_size samples, so that call already
+ *     reports LOCKED and serves the requested offset. (Plan appendix 11.1 wrote
  *     "LOCKED" without qualifying that fill window; reporting LOCKED over
  *     raw far would break this seam's core promise -- "UNLOCKED means the
  *     content is the RAW far" -- for the ~fixed_delay_samples of audio a
