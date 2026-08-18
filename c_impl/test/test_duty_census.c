@@ -59,11 +59,11 @@
  * output bytes (see the productization-plan step-4 CHANGELOG entry).
  *
  * Build (standalone, from c_impl/ -- mirrors test_delay_num_filters.c):
- *   make -C ../../audio_common BACKEND=kiss lib
+ *   make -C ../../audio_common BACKEND=ne10 lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample \
  *       -I../../audio_common/include \
  *       test/test_duty_census.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm \
+ *       $(make -s -C ../../audio_common BACKEND=ne10 print-lib-path) -lm \
  *       -o bin/test_duty_census
  * Run:  ./bin/test_duty_census
  * Also wired into the Makefile: `make test-duty-census`.

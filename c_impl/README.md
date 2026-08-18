@@ -154,11 +154,12 @@ The delay-estimator matched filter is the one piece that was already
 float32/fast-math/duty-cycled *unconditionally* before the wider campaign
 (intentional, sampled at zero AECMOS cost; see `include/delay_aec3.h`).
 
-The production **FFT backend is KISS FFT (float32)** — the FFT wrapper, KISS
-FFT, and NE10 (ARM NEON) backend now live in the shared `audio_common` layer
-(a sibling repo); select one via `make BACKEND=kiss` (default, host/reference
-build, malloc) or `make BACKEND=ne10` (embedded build, caller pool via
-`aec_get_mem_size`/`aec_init`) — which differs from numpy's fp64 `np.fft` by
+The production **FFT backend is NE10 (ARM NEON, float32)** — the FFT wrapper,
+KISS FFT, and NE10 backend now live in the shared `audio_common` layer
+(a sibling repo); select one via `make BACKEND=ne10` (default everywhere,
+embedded deliverable, caller pool via `aec_get_mem_size`/`aec_init`) or `make
+BACKEND=kiss` (explicitly-selectable, portable/bit-reproducible reference
+backend, malloc) — which differs from numpy's fp64 `np.fft` by
 float32 precision. NE10 vs KISS output is not bit-identical to each other
 (pre-existing, expected); each backend's static path is byte-equal to its own
 malloc path (`test_static_aec.c`).

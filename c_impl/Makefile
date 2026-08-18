@@ -143,9 +143,11 @@ AC_DIR ?= $(firstword $(wildcard ../../audio_common ../../../../audio_common))
 
 # FFT backend selection. KISS/NE10 compute in float32 -> ~1e-5 vs numpy's fp64
 # np.fft (a documented tolerance; the non-FFT C logic stays bit-exact to Python).
-#   BACKEND=kiss (default) -> portable KISS FFT, deterministic (tests use this)
-#   BACKEND=ne10           -> ARM NEON NE10 R2C/C2R (the embedded deliverable)
-BACKEND ?= kiss
+#   BACKEND=ne10 (default everywhere since 2026-08-18)
+#                          -> ARM NEON NE10 R2C/C2R (the embedded deliverable)
+#   BACKEND=kiss           -> portable KISS FFT, deterministic (pass explicitly
+#                             for bit-reproducible reference builds / non-NEON hosts)
+BACKEND ?= ne10
 
 # Announce the resolved backend on every build (same MAKECMDGOALS guard as
 # audio_common's own banner: print-bin-dir/print-obj-dir/print-lib-path are
@@ -1679,7 +1681,7 @@ help:
 	@echo "   comment in this Makefile -- and pass it: make print-bin-dir AC_LIB=\"...\")"
 	@echo "  ./bin/<backend>-<config-hash>/aec_wav <mic.wav> <ref.wav> <out.wav> [options]"
 	@echo "  ./bin/<backend>-<config-hash>/bench_rtf [--seconds N] [--repeat M] [--preset mild|balanced|aggressive]"
-	@echo "  make BACKEND=kiss|ne10   (default: kiss; ne10 is the embedded deliverable)"
+	@echo "  make BACKEND=kiss|ne10   (default: ne10; kiss is the portable/bit-reproducible reference)"
 	@echo "  make AC_DIR=<path>       (override audio_common location)"
 	@echo "  make WERROR=1            (opt-in: -Werror for this repo's own sources)"
 	@echo "  make lib NO_STDIO=1      (opt-in: stdio-free libaec.a for board/no-stdio builds --"

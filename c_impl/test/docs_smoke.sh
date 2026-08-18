@@ -25,8 +25,8 @@
 # This is a documentation regression check, not part of `make`/CI wiring —
 # no Makefile is touched or required. Run it by hand:
 #
-#   cd c_impl/test && ./docs_smoke.sh              # BACKEND=kiss (default)
-#   cd c_impl/test && BACKEND=ne10 ./docs_smoke.sh  # exercise the NE10 path
+#   cd c_impl/test && ./docs_smoke.sh              # BACKEND=ne10 (default)
+#   cd c_impl/test && BACKEND=kiss ./docs_smoke.sh  # portable reference path
 #
 # (or from anywhere: /path/to/c_impl/test/docs_smoke.sh — paths are resolved
 # relative to this script's own location, not $PWD).
@@ -37,7 +37,7 @@
 
 set -euo pipefail
 
-BACKEND="${BACKEND:-kiss}"
+BACKEND="${BACKEND:-ne10}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 C_IMPL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

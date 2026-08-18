@@ -19,10 +19,10 @@
  *
  * Build (from c_impl/); the FFT wrapper now lives in the shared audio_common
  * archive:
- *   make -C ../../audio_common BACKEND=kiss lib
+ *   make -C ../../audio_common BACKEND=ne10 lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude -I../../audio_common/include \
  *       $(find src -name '*.c') test/stream_sim.c \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o /tmp/stream_sim
+ *       $(make -s -C ../../audio_common BACKEND=ne10 print-lib-path) -lm -o /tmp/stream_sim
  *   /tmp/stream_sim
  */
 #include "aec.h"

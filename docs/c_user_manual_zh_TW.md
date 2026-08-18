@@ -112,8 +112,11 @@ make -C ../audio_common lib BACKEND=kiss     # 共用 DSP 函式庫
 make -C c_impl          lib BACKEND=kiss     # 本函式庫 libaec.a
 ```
 
-> ⚠️ 兩個 repo 的預設 BACKEND **不一樣**（本 repo 預設 `kiss`，`audio_common` 預設
-> `ne10`）。不明確指定會拿到不匹配的組合，請永遠明確帶上 `BACKEND=`。
+> ⚠️ 兩個 repo 的預設 BACKEND **邏輯不一樣**：本 repo（`c_impl/Makefile`）不論編譯目標一律
+> 預設 `ne10`（`BACKEND ?= ne10`）；`audio_common` 則是自動偵測（編譯目標有 ARM NEON
+> → `ne10`，否則退回 `kiss`）。兩者在 NEON 目標上結果一致（都是 `ne10`），但在**非
+> NEON 的桌機/CI host** 上會不匹配（本 repo 仍拿 `ne10`，`audio_common` 退回
+> `kiss`）。不明確指定會拿到不匹配的組合，請永遠明確帶上 `BACKEND=`。
 
 產出路徑會依編譯參數雜湊命名，用各自的查詢目標取得，不要自己拼路徑：
 

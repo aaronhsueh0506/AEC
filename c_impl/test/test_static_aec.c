@@ -1,12 +1,12 @@
 /* test_static_aec.c — verify aec_init() (static) produces byte-equal output
  * to aec_create() (dynamic) on the same input.
  *
- * Build (standalone, KISS FFT backend; the FFT wrapper + fast_math now live in
- * the shared audio_common archive, built once and linked in):
- *   make -C ../../audio_common BACKEND=kiss lib
+ * Build (standalone, NE10 FFT backend (default); the FFT wrapper + fast_math
+ * now live in the shared audio_common archive, built once and linked in):
+ *   make -C ../../audio_common BACKEND=ne10 lib
  *   gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude -Iexample -I../../audio_common/include \
  *       test/test_static_aec.c $(find src -name '*.c') \
- *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o bin/test_static_aec
+ *       $(make -s -C ../../audio_common BACKEND=ne10 print-lib-path) -lm -o bin/test_static_aec
  * The normal entry point is `make test-static-aec`; the standalone recipe is
  * retained for bring-up environments that do not use this repository's
  * Makefile.
