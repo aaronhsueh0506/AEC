@@ -651,16 +651,6 @@ int aec3_post_run(Aec3Post *p,
 
                 /* ── Step 14: ree update_reverb_models (3354-3400) ───────── */
                 /* attach_reverb_decay_estimator: no-op (use_adaptive_decay=False). */
-                /* _w_mag2 = |filter.W|² (cmag2_np), shape n_part × nb.
-                 * in->W_all and sc->w_mag2 are verified single contiguous
-                 * flat blocks with stride exactly nb at every call site
-                 * (aec.c dynamic malloc+memcpy / static-arena carve of
-                 * W_all and w_mag2; parity_aec3_post_run.c test harness) --
-                 * so the (partition, bin) double loop collapses to one
-                 * flat elementwise cmag2 pass over n_part*nb elements
-                 * (cmag2_np_elem is per-index, not a reduction, so there is
-                 * no reordering risk in merging the two loop levels). */
-                sk_cmag2_np_f32(in->W_all, sc->w_mag2, n_part * nb);
                 {
                     int delay_blocks =
                         aec_state_min_direct_path_filter_delay(obj->state);
@@ -670,6 +660,44 @@ int aec3_post_run(Aec3Post *p,
                             obj->state, &fq_valid);
                     int usable =
                         aec_state_usable_linear_estimate(obj->state);
+
+                    /* _w_mag2 = |filter.W|² (cmag2_np), an n_part × nb
+                     * row-major block. in->W_all and sc->w_mag2 are single
+                     * contiguous flat blocks with row stride exactly nb at
+                     * every call site (aec.c dynamic malloc+memcpy /
+                     * static-arena carve of W_all and w_mag2;
+                     * parity_aec3_post_run.c test harness), and REE's
+                     * frequency-response n_freqs is the same n_bins, so
+                     * row r is [r*nb, (r+1)*nb).
+                     *
+                     * Its one consumer -- ree_update_reverb_models ->
+                     * reverb_freq_resp_update -- reads exactly two rows,
+                     * the direct-path row delay_blocks and the tail row
+                     * n_part-1, and touches nothing at all when it takes an
+                     * early return. The conditions below are that consumer's
+                     * three early-return guards, evaluated here from the same
+                     * values passed into the call, so the rows materialized
+                     * are always exactly the rows about to be read;
+                     * delay_blocks moves hop to hop, so it must be read once
+                     * and used for both the guard and the row index.
+                     * cmag2_np_elem is per-index (not a reduction), so a row
+                     * slice produces bit-identical results to the same
+                     * elements inside a whole-block pass. Rows outside the
+                     * two are never read and are deliberately left stale; W
+                     * is rewritten every hop, so no result may be carried
+                     * across hops -- the only valid saving is computing
+                     * fewer rows. */
+                    if (!in->stationary_block && fq_valid &&
+                        delay_blocks >= 0 && delay_blocks < n_part) {
+                        int tail_row = n_part - 1;
+                        size_t doff = (size_t)delay_blocks * (size_t)nb;
+                        sk_cmag2_np_f32(in->W_all + doff, sc->w_mag2 + doff, nb);
+                        if (tail_row != delay_blocks) {
+                            size_t toff = (size_t)tail_row * (size_t)nb;
+                            sk_cmag2_np_f32(in->W_all + toff,
+                                            sc->w_mag2 + toff, nb);
+                        }
+                    }
                     ree_update_reverb_models(obj->ree, sc->w_mag2, n_part,
                                              delay_blocks, filter_q,
                                              /*fq_is_none=*/!fq_valid,
