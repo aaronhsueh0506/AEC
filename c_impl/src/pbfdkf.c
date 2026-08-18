@@ -663,8 +663,10 @@ void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src) {
     memcpy(dst->W, src->W, (size_t)Wsz * sizeof(Complex));
 }
 
-/* Warm tap-transfer (v3.24.1): shift the learned IR LEFT by `shift_samples`
- * (toward tap 0), zero-filling the freed tail, INSTEAD of zeroing the filter —
+/* Warm tap-transfer (v3.24.1): shift the learned IR by `shift_samples` —
+ * positive = LEFT (toward tap 0, the aligned far advanced), negative = RIGHT
+ * (the aligned far retarded), zero-filling the freed end, INSTEAD of zeroing
+ * the filter —
  * so the cold-start cancellation survives a delay realign (the "1.14s vertical
  * line" fix). Mirrors filters.py:139-166: raw irfft per partition (first hop
  * taps) -> concatenate -> left-shift by s -> rfft each hop block (zero-padded
@@ -674,18 +676,28 @@ void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src) {
  * n_partitions*hop_size at init (see pbfdkf.h PBFDAF comment). */
 void pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
     int s = shift_samples;
-    if (s <= 0) return;
+    if (s == 0) return;
     int hop = p->hop_size, nF = p->fft_size, nP = p->n_partitions, K = p->n_freqs;
     int total = nP * hop;
     if (total <= 0 || total > 4096) return;   /* safety; real max ~2080 */
     if (s > total) s = total;
+    if (s < -total) s = -total;
     float *ir = p->scr_ir;
     for (int part = 0; part < nP; ++part) {
         fft_inverse(p->fft, p->W + (size_t)part * K, p->time_scratch);
         for (int i = 0; i < hop; ++i) ir[part * hop + i] = p->time_scratch[i];
     }
-    for (int i = 0; i < total - s; ++i) ir[i] = ir[i + s];   /* read-ahead safe */
-    for (int i = total - s; i < total; ++i) ir[i] = 0.0f;
+    if (s > 0) {
+        for (int i = 0; i < total - s; ++i) ir[i] = ir[i + s]; /* read-ahead safe */
+        for (int i = total - s; i < total; ++i) ir[i] = 0.0f;
+    } else {
+        /* Negative shift: the aligned far stream RETARDED by -s samples (the
+         * external delay shrank), so the learned response moves toward later
+         * taps; walk backwards so the copy is read-ahead safe. */
+        int r = -s;
+        for (int i = total - 1; i >= r; --i) ir[i] = ir[i - r];
+        for (int i = 0; i < r; ++i) ir[i] = 0.0f;
+    }
     for (int part = 0; part < nP; ++part) {
         memset(p->time_scratch, 0, (size_t)nF * sizeof(float));
         for (int i = 0; i < hop; ++i) p->time_scratch[i] = ir[part * hop + i];

@@ -603,8 +603,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
-all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
+.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -744,6 +744,10 @@ TEST_DUC_TARGET = $(BIN_DIR)/test_duty_census
 # pins that the quarantine DELAYS it by exactly the configured window, that a
 # multipath path-addition still re-locks in all four gain rows, and that a
 # forward move is untouched. Needs the full Aec type.
+TEST_XRA_SRCS   = $(TEST_DIR)/test_external_realign.c
+TEST_XRA_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_XRA_SRCS))
+TEST_XRA_TARGET = $(BIN_DIR)/test_external_realign
+
 TEST_DBQ_SRCS   = $(TEST_DIR)/test_delay_backward_quarantine.c
 TEST_DBQ_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_DBQ_SRCS))
 TEST_DBQ_TARGET = $(BIN_DIR)/test_delay_backward_quarantine
@@ -967,7 +971,7 @@ $(TEST_DR_TARGET): $(TEST_DR_OBJS) | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -1015,6 +1019,9 @@ test-duty-census: $(TEST_DUC_TARGET)
 # Builds AND runs, same convention as test-counter-saturation above.
 test-delay-backward-quarantine: $(TEST_DBQ_TARGET)
 	"$(abspath $(TEST_DBQ_TARGET))"
+
+test-external-realign: $(TEST_XRA_TARGET)
+	"$(abspath $(TEST_XRA_TARGET))"
 
 # CLI plumbing for --delay-mode / --delay-num-filters / --fixed-delay /
 # --print-mem-size. Depends on the CLI binary itself (not a test_*.c), so it
@@ -1105,6 +1112,10 @@ $(TEST_DUC_TARGET): $(OBJS) $(TEST_DUC_OBJS) $(AC_LIB) | _cfg_guard
 $(TEST_DBQ_TARGET): $(OBJS) $(TEST_DBQ_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_delay_backward_quarantine [$(BACKEND)] -> $@"
+
+$(TEST_XRA_TARGET): $(OBJS) $(TEST_XRA_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_external_realign [$(BACKEND)] -> $@"
 
 $(TEST_PMR_TARGET): $(OBJS) $(TEST_PMR_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)

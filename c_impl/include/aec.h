@@ -692,6 +692,36 @@ int  aec_create(Aec* a, const AecConfig* cfg);
 void aec_destroy(Aec* a);
 void aec_reset(Aec* a);
 
+/**
+ * Realign an AEC_DELAY_EXTERNAL_ALIGNED instance across a caller-side change
+ * of the far alignment, WITHOUT the full reset that exposes echo again and
+ * restarts the WOLA sequence (the spectrogram "vertical line").
+ *
+ * delta_samples = new_alignment - old_alignment: positive when the aligned
+ * far stream advances (delay grew, including the first acquisition from raw
+ * far where old_alignment is 0), negative when it retards.
+ *
+ * When the filter is demonstrably cancelling (same inst-ERLE gate as the
+ * internal MATCHED warm tap-transfer) and the shift fits the tap span, the
+ * learned IR is shifted by delta and cancellation survives the realign.
+ * Otherwise the filter re-adapts from its current taps via the soft
+ * echo-path-change path (excitation counters only, no tap wipe, no WOLA
+ * restart). Never touches synthesis history, so output stays continuous
+ * either way.
+ *
+ * Direction asymmetry: an ADVANCE (delta > 0) is seamless. A RETARD
+ * (delta < 0) also clears the filter's far history -- the held history is
+ * ahead of the new stream and convolving it against the shifted taps
+ * mis-estimates the echo -- which costs a bounded <= 2-hop pass-through
+ * transient while the partition ring refills; cancellation resumes outright
+ * afterwards (regression-pinned in test_external_realign.c).
+ *
+ * Returns 1 when the warm tap-transfer ran, 0 when the soft path ran, and
+ * -1 on a NULL instance or a mode other than AEC_DELAY_EXTERNAL_ALIGNED.
+ * delta_samples == 0 is a no-op returning 0.
+ */
+int aec_apply_external_realign(Aec* a, int delta_samples);
+
 /* Static-memory companions: place Aec + all backing arrays in a single pool.
  * aec_get_mem_size() returns the total byte requirement; caller allocates once.
  * aec_init() places the Aec struct at mem[0] and returns it; no malloc called. */

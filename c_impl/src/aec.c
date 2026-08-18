@@ -1852,6 +1852,60 @@ long aec_far_fft_real_compute_count(const Aec* a) {
            (a->has_shadow ? a->shadow_filter.far_fft_real_compute_count : 0);
 }
 
+static float aec_erle_ring_max_last15(const Aec* a);
+
+int aec_apply_external_realign(Aec* a, int delta_samples) {
+    if (a == NULL || a->cfg.delay_mode != AEC_DELAY_EXTERNAL_ALIGNED)
+        return -1;
+    if (delta_samples == 0) return 0;
+    /* Same evidence gate as the internal MATCHED warm tap-transfer: the
+     * inst-ERLE ring is filled unconditionally every hop, so it is live in
+     * EXTERNAL_ALIGNED mode too. The shift must fit the tap span in BOTH
+     * directions or the learned response would be pushed off the filter. */
+    int warm_ok = 0;
+    if (a->cfg.delay_acquire_warm_transfer) {
+        float wpk = aec_erle_ring_max_last15(a);
+        int reach = a->main_filter.base.n_partitions
+                    * a->main_filter.base.hop_size;
+        int magnitude = delta_samples > 0 ? delta_samples : -delta_samples;
+        warm_ok = (wpk > a->cfg.delay_acquire_inst_erle_db)
+                  && (magnitude < reach);
+    }
+    if (warm_ok) {
+        pbfdaf_warm_shift_ir(&a->main_filter.base, delta_samples);
+        if (a->has_shadow) pbfdaf_warm_shift_ir(&a->shadow_filter, delta_samples);
+        if (delta_samples < 0) {
+            /* The alignment retarded, so the far history the filter holds is
+             * AHEAD of the new stream: the next hops replay samples X_buf
+             * already contains, and convolving that duplicated context
+             * against the shifted taps re-exposes echo for dozens of hops
+             * (measured on the regression scene). A delta > 0 realign only
+             * leaves a gap in the history, which settles quietly, so the
+             * history is cleared for the retard direction alone. */
+            int Wsz = a->main_filter.base.n_partitions
+                      * a->main_filter.base.n_freqs;
+            memset(a->main_filter.base.X_buf, 0,
+                   (size_t)Wsz * sizeof(Complex));
+            if (a->has_shadow) {
+                int Ssz = a->shadow_filter.n_partitions
+                          * a->shadow_filter.n_freqs;
+                memset(a->shadow_filter.X_buf, 0,
+                       (size_t)Ssz * sizeof(Complex));
+            }
+        }
+        return 1;
+    }
+    /* Soft echo-path change, exactly the internal soft-acquisition branch:
+     * excitation/convergence counters restart, the taps stay and re-adapt at
+     * normal step size. No tap wipe, no WOLA restart, no AecState reset. */
+    pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
+    if (a->has_shadow) {
+        a->shadow_filter.poor_excitation_counter = AEC3_POOR_EXC_COUNTER_INITIAL_HOPS;
+        a->shadow_filter.call_counter = 0;
+    }
+    return 0;
+}
+
 void aec_reset(Aec* a) {
     if (a->hp_mic) hpf_reset(a->hp_mic);
     if (a->has_sat) { saturation_reset(&a->sat_ref); saturation_reset(&a->sat_mic); }
