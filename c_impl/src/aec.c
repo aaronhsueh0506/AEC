@@ -510,11 +510,14 @@ static void filter_q_high(PBFDKF* f) {
  *    which is preserved per preserve_render_side=True). ───────────────────── */
 static void aec3_post_chain_reset(Aec* a);   /* fwd */
 
-static void aec_reset_filter_derived_state(Aec* a) {
-    pbfdkf_reset(&a->main_filter);
-    if (a->has_shadow) pbfdaf_reset(&a->shadow_filter);
-
-    filter_convergence_reset(&a->convergence);
+/* The filter-DERIVED latches, EMAs and detectors — everything downstream of
+ * the taps that a restarted filter must not carry forward. Shared verbatim by
+ * _reset_filter_derived_state below and by the external-realign filter reset
+ * (aec_reset_filter_for_realign), so the two can never disagree about what a
+ * restarted filter is allowed to remember. Everything the two callers DO
+ * differ on — which filter wipe they pair this with, which convergence call
+ * they make, and what else travels with it — stays at the call sites. */
+static void aec_reset_filter_latches(Aec* a) {
     epc_reset(&a->epc);
 
     a->main_err_smooth = 0.0f;
@@ -541,9 +544,6 @@ static void aec_reset_filter_derived_state(Aec* a) {
     a->shadow_frame_count = 0;
     shadow_copy_reset(&a->regime);
 
-    /* AEC3 post chain (filter-output-derived); render-side preserved. */
-    aec3_post_chain_reset(a);
-
     /* Re-arm warmup with high Q. */
     filter_q_high(&a->main_filter);
     /* shadow is PBFDAF (no Q) — nothing to boost. */
@@ -551,12 +551,90 @@ static void aec_reset_filter_derived_state(Aec* a) {
     if (a->warmup_frames_remaining < half) a->warmup_frames_remaining = half;
     a->warmup_far_active = 0;
 
+    /* The warm-transfer evidence a later realign reads is about the alignment
+     * being abandoned here: both the inst-ERLE ring and the windowed reading
+     * must go, or the NEXT realign would warm-shift a filter that has none. */
+    a->last_erle_windowed = 0.0f;
+}
+
+static void aec_reset_filter_derived_state(Aec* a) {
+    pbfdkf_reset(&a->main_filter);
+    if (a->has_shadow) pbfdaf_reset(&a->shadow_filter);
+
+    filter_convergence_reset(&a->convergence);
+    aec_reset_filter_latches(a);
+
+    /* AEC3 post chain (filter-output-derived); render-side preserved. */
+    aec3_post_chain_reset(a);
+
     /* clear pending delay shift state */
     a->pending_delay = -1;
     a->has_pending = 0;
     a->pending_delay_ttl = 0;
+}
 
-    a->last_erle_windowed = 0.0f;
+/* Filter-only restart for a caller-side far realign (aec_apply_external_realign
+ * below): the FILTER portion of what aec_reset() does, and nothing else.
+ *
+ * Preserved on purpose -- these are what separate this from aec_reset(), and
+ * they are the whole reason the API exists:
+ *   - the AEC3 post chain. aec3_post_reset() zeroes ola_buf, the synthesis
+ *     overlap-add tail; that is the near-zero output hop (the dark half of the
+ *     spectrogram "vertical line").
+ *   - near_buffer, the MIC half of the block_size analysis frame. Zeroing it
+ *     makes the next hop's near_spec / error_spec_windowed the transform of a
+ *     half-empty frame, which the RES turns straight back into a line. It is
+ *     also not stale: the mic stream did not move, only the far did.
+ *     (Measured: clearing it changes the reconvergence trajectory by nothing
+ *     at all -- it buys no adaptation and costs a corrupted analysis frame.)
+ *
+ * Cleared on purpose:
+ *   - the taps, the per-partition far spectra and the far-power normalizer
+ *     (pbfdkf_reset_taps == pbfdkf_reset minus the two time-domain buffers);
+ *   - far_buffer, the FAR half of that same analysis frame. Unlike near_buffer
+ *     this one IS invalidated by the realign: it was captured at the alignment
+ *     the caller just abandoned, so the next overlap-save block would splice
+ *     two different alignments into one frame and the filter would adapt
+ *     against it. Same argument the warm path already applies to X_buf, which
+ *     is this history in the frequency domain. It reaches no output sample --
+ *     the reference path only ever feeds the echo estimate and the far-side
+ *     analyzers. (Measured: leaving it costs ~10x in settled residual, because
+ *     the spliced frame lands in the first adaptation hops.)
+ *
+ * Deliberately NOT paired with pbfdkf_handle_echo_path_change(). That call is
+ * for a filter that KEEPS its taps across an echo-path change: it re-inits
+ * H_error to its cold value and restarts the excitation counters, which on a
+ * filter whose taps were just zeroed makes the Kalman gain spike once and then
+ * collapse (measured: ~10x worse settled residual, ~45 hops of crawl instead
+ * of ~5). aec_reset() does not make that call either.
+ *
+ * What it adds beyond aec_reset()'s filter subset is the stationarity re-arm.
+ * The AEC3 stationary-render freeze (pbfdkf_process's block_stationary
+ * early-return) is gated on stationarity_active_hops having reached
+ * stationarity_converge_hops -- i.e. on the filter being presumed converged. A
+ * wiped filter is not, and under stationary far the latch otherwise holds the
+ * taps bit-frozen indefinitely (measured: residual pinned at pass-through for
+ * 300+ hops, taps bit-identical). The StationarityEstimator's own render-side
+ * content is preserved, matching _reset_filter_derived_state's
+ * preserve_render_side policy: only the filter-side "has this filter earned
+ * the freeze" counter restarts. */
+static void aec_reset_filter_for_realign(Aec* a) {
+    pbfdkf_reset_taps(&a->main_filter);
+    if (a->has_shadow) pbfdaf_reset_taps(&a->shadow_filter);
+
+    memset(a->main_filter.base.far_buffer, 0,
+           (size_t)a->main_filter.base.block_size * sizeof(float));
+    if (a->has_shadow)
+        memset(a->shadow_filter.far_buffer, 0,
+               (size_t)a->shadow_filter.block_size * sizeof(float));
+
+    filter_convergence_mark_diverged(&a->convergence);
+    aec_reset_filter_latches(a);
+
+    a->stationarity_active_hops = 0;
+    a->block_stationary_next = 0;
+    a->main_filter.base.block_stationary = 0;
+    if (a->has_shadow) a->shadow_filter.block_stationary = 0;
 }
 
 /* _get_simple_mu_scale (orchestrator 1456-1476). Writes a per-bin array into
@@ -1881,27 +1959,37 @@ long aec_far_fft_real_compute_count(const Aec* a) {
            (a->has_shadow ? a->shadow_filter.far_fft_real_compute_count : 0);
 }
 
-static float aec_erle_ring_max_last15(const Aec* a);
-
 int aec_apply_external_realign(Aec* a, int delta_samples) {
     if (a == NULL || a->cfg.delay_mode != AEC_DELAY_EXTERNAL_ALIGNED)
         return -1;
     if (delta_samples == 0) return 0;
-    /* Same evidence gate as the internal MATCHED warm tap-transfer: the
-     * inst-ERLE ring is filled unconditionally every hop, so it is live in
-     * EXTERNAL_ALIGNED mode too. The shift must fit the tap span in BOTH
-     * directions or the learned response would be pushed off the filter. */
+    /* Evidence gate: aec_linear_is_cancelling(), NOT the inst-ERLE ring on its
+     * own. The ring ages out after ~15 far-active frames, so a realign that
+     * arrives after a stretch of far silence -- the common case for a wrapper
+     * that re-measures its alignment between bursts -- would read "not
+     * cancelling" on a filter that is cancelling perfectly well, and fall to
+     * the reset branch below for nothing. That is exactly why
+     * aec_linear_is_cancelling ORs the windowed reading in; this call site
+     * needs it for the same reason Path A's backward quarantine does. Both
+     * thresholds are unchanged. The shift must also fit the tap span in BOTH
+     * directions or the learned response would be pushed off the filter.
+     * (Note the ring-only reading is still all there is when the AEC3 post
+     * chain never runs -- enable_res=0 AND return_res_context=0 leaves
+     * last_erle_windowed at 0 forever. Nothing to recover there; the gate is
+     * as good as the evidence the configuration produces.) */
     int warm_ok = 0;
     if (a->cfg.delay_acquire_warm_transfer) {
-        float wpk = aec_erle_ring_max_last15(a);
         int reach = a->main_filter.base.n_partitions
                     * a->main_filter.base.hop_size;
         int magnitude = delta_samples > 0 ? delta_samples : -delta_samples;
-        warm_ok = (wpk > a->cfg.delay_acquire_inst_erle_db)
-                  && (magnitude < reach);
+        warm_ok = aec_linear_is_cancelling(a) && (magnitude < reach);
     }
-    if (warm_ok) {
-        pbfdaf_warm_shift_ir(&a->main_filter.base, delta_samples);
+    /* A refused shift (pbfdaf_warm_shift_ir == -1) is a soft outcome: the taps
+     * were NOT moved, so they sit at the abandoned alignment exactly like a
+     * gate rejection. Main and shadow are built with the same block/partition
+     * geometry (pbfdaf_init_static at construction takes one blk/np/hop for
+     * both), so the span guard cannot accept one and refuse the other. */
+    if (warm_ok && pbfdaf_warm_shift_ir(&a->main_filter.base, delta_samples) == 0) {
         if (a->has_shadow) pbfdaf_warm_shift_ir(&a->shadow_filter, delta_samples);
         if (delta_samples < 0) {
             /* The alignment retarded, so the far history the filter holds is
@@ -1922,16 +2010,28 @@ int aec_apply_external_realign(Aec* a, int delta_samples) {
                        (size_t)Ssz * sizeof(Complex));
             }
         }
+        /* Alignment token: the far this filter is matched to just moved, on
+         * BOTH outcomes -- a consumer's cross-hop far caches are stale either
+         * way. This is the only bump EXTERNAL_ALIGNED ever has (there is no
+         * estimator to move a ring offset), and it is what makes the mode's
+         * AecLinearContext.generation honest instead of permanently frozen. */
+        if (a->delay_generation != 0xFFFFFFFFu) a->delay_generation++;
         return 1;
     }
-    /* Soft echo-path change, exactly the internal soft-acquisition branch:
-     * excitation/convergence counters restart, the taps stay and re-adapt at
-     * normal step size. No tap wipe, no WOLA restart, no AecState reset. */
-    pbfdkf_handle_echo_path_change(&a->main_filter, 1, 0);
-    if (a->has_shadow) {
-        a->shadow_filter.poor_excitation_counter = AEC3_POOR_EXC_COUNTER_INITIAL_HOPS;
-        a->shadow_filter.call_counter = 0;
-    }
+    /* FILTER RESET. The taps are known to sit at the alignment the caller just
+     * abandoned; keeping them is not "re-adapt from a head start", it is
+     * cancelling against the wrong lag -- a decorrelated copy of the echo the
+     * filter now ADDS. Measured on a converged 300-sample realign, the
+     * counters-only echo-path-change this branch used to be left residual at
+     * 1.3-1.5x the echo (above pass-through) and it stayed there for 300+
+     * hops: the still-latched converged flag pins mu at its floor, and under
+     * stationary far the AEC3 stationarity freeze stops the update outright
+     * (taps bit-identical hop after hop). Wiping the taps and releasing those
+     * latches reconverges on the aec_reset() twin's trajectory instead,
+     * without the reset's synthesis restart -- see
+     * aec_reset_filter_for_realign for exactly what it preserves and why. */
+    aec_reset_filter_for_realign(a);
+    if (a->delay_generation != 0xFFFFFFFFu) a->delay_generation++;
     return 0;
 }
 
@@ -2302,8 +2402,14 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
                 warm_ok = (wpk > a->cfg.delay_acquire_inst_erle_db)
                           && (new_delay > 0) && (new_delay < reach);
             }
-            if (warm_ok) {
-                pbfdaf_warm_shift_ir(&a->main_filter.base, new_delay);
+            /* A refused shift means the taps did NOT move while current_delay
+             * did, so warm success would be a lie -- fall through to the
+             * soft/hard branches. Unreachable at every grid this repo ships
+             * (the guard needs n_partitions*hop_size > 4096, i.e. an explicit
+             * cfg.n_partitions well past the preset geometry), so nothing
+             * changes for a production configuration. */
+            if (warm_ok
+                && pbfdaf_warm_shift_ir(&a->main_filter.base, new_delay) == 0) {
                 if (a->has_shadow) pbfdaf_warm_shift_ir(&a->shadow_filter, new_delay);
             } else if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
                 /* Soft acquisition (mirrors Python 16285fd): apply the ring

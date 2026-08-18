@@ -391,13 +391,20 @@ void pbfdaf_free(PBFDAF* p) {
     if (p->fft) fft_destroy(p->fft);
 }
 
-void pbfdaf_reset(PBFDAF* p) {
+/* Adaptation state only — see the pbfdkf.h prototype for the split rationale.
+ * pbfdaf_reset() below is defined as this plus the analysis-side buffers, so
+ * the two can never drift apart on what "the filter's own state" is. */
+void pbfdaf_reset_taps(PBFDAF* p) {
     int Wsz = p->n_partitions * p->n_freqs;
     memset(p->W, 0, (size_t)Wsz * sizeof(Complex));
     memset(p->X_buf, 0, (size_t)Wsz * sizeof(Complex));
+    memset(p->power, 0, (size_t)p->n_freqs * sizeof(float));
+}
+
+void pbfdaf_reset(PBFDAF* p) {
+    pbfdaf_reset_taps(p);
     memset(p->near_buffer, 0, (size_t)p->block_size * sizeof(float));
     memset(p->far_buffer,  0, (size_t)p->block_size * sizeof(float));
-    memset(p->power, 0, (size_t)p->n_freqs * sizeof(float));
     p->partition_idx = 0;
     memset(p->error_spec_windowed, 0, (size_t)p->n_freqs * sizeof(Complex));
     /* Defensive hardening (far-end-FFT sharing): precomputed_far_spec is documented as
@@ -673,13 +680,19 @@ void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src) {
  * to fft_size) back into W[p]. Keeps X_buf (Python _warm_clear_xbuf default
  * False). NO td_window — Python uses raw irfft here (unlike the TD-constraint
  * round-trip). Uses p->scr_ir instance scratch, not stack — sized exactly
- * n_partitions*hop_size at init (see pbfdkf.h PBFDAF comment). */
-void pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
+ * n_partitions*hop_size at init (see pbfdkf.h PBFDAF comment).
+ *
+ * Returns 0 (applied) / -1 (refused). The span guard below is REACHABLE from
+ * a legal config (n_partitions is admissible up to 256 and hop up to 512), and
+ * a silent refusal is indistinguishable from success to the caller: the taps
+ * would stay at the pre-realign alignment while the caller believes the shift
+ * happened. Reporting it lets the caller fall back to a filter reset. */
+int pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
     int s = shift_samples;
-    if (s == 0) return;
+    if (s == 0) return 0;
     int hop = p->hop_size, nF = p->fft_size, nP = p->n_partitions, K = p->n_freqs;
     int total = nP * hop;
-    if (total <= 0 || total > 4096) return;   /* safety; real max ~2080 */
+    if (total <= 0 || total > 4096) return -1;   /* safety; real max ~2080 */
     if (s > total) s = total;
     if (s < -total) s = -total;
     float *ir = p->scr_ir;
@@ -703,6 +716,7 @@ void pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
         for (int i = 0; i < hop; ++i) p->time_scratch[i] = ir[part * hop + i];
         fft_forward_scratch(p->fft, p->time_scratch, p->W + (size_t)part * K);
     }
+    return 0;
 }
 
 /* ===== PBFDKF (v3.22) ==================================================== */
@@ -874,14 +888,24 @@ void pbfdkf_free(PBFDKF* p) {
     pbfdaf_free(&p->base);
 }
 
-void pbfdkf_reset(PBFDKF* p) {
-    pbfdaf_reset(&p->base);
+/* Kalman-side re-arm shared by pbfdkf_reset and pbfdkf_reset_taps. */
+static void pbfdkf_rearm_kalman(PBFDKF* p) {
     int K = p->base.n_freqs;
     for (int k = 0; k < K; ++k) {
         p->R[k] = 1e-2f;
         p->error_psd[k] = 1e-2f;
         p->Q[k] = p->Q_high[k];
     }
+}
+
+void pbfdkf_reset(PBFDKF* p) {
+    pbfdaf_reset(&p->base);
+    pbfdkf_rearm_kalman(p);
+}
+
+void pbfdkf_reset_taps(PBFDKF* p) {
+    pbfdaf_reset_taps(&p->base);
+    pbfdkf_rearm_kalman(p);
 }
 
 void pbfdkf_handle_echo_path_change(PBFDKF* p, int delay_change, int gain_change) {

@@ -202,6 +202,17 @@ int    pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
 void pbfdaf_free(PBFDAF* p);
 void pbfdaf_reset(PBFDAF* p);
 
+/* Adaptation-only wipe: taps (W), the per-partition far SPECTRUM history
+ * (X_buf) and the far-power normalizer, leaving the time-domain analysis
+ * buffers (near_buffer/far_buffer, the block_size overlap-save history that
+ * feeds near_spec/far_spec/error_spec_windowed and supplies the near term of
+ * the linear output) untouched. pbfdaf_reset() is this plus those buffers.
+ *
+ * For a caller that must restart the filter mid-stream WITHOUT splicing a
+ * half-empty analysis frame into the spectra a post-filter consumes: the
+ * taps are what a realign invalidates, the analysis history is not. */
+void pbfdaf_reset_taps(PBFDAF* p);
+
 /* mu_scale: NULL ⇒ scalar; else per-bin array of n_freqs fp32. Output written
  * to `output` (length hop_size). */
 void pbfdaf_process(PBFDAF* p,
@@ -211,8 +222,14 @@ void pbfdaf_process(PBFDAF* p,
                        float*       output);
 
 void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src);
-/* Warm tap-transfer: shift learned IR left by shift_samples (v3.24.1). */
-void pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples);
+/* Warm tap-transfer: shift the learned IR by shift_samples (positive = left,
+ * toward tap 0; negative = right). Returns 0 when the shift was applied and
+ * -1 when it was REFUSED by the scr_ir span guard (a filter whose
+ * n_partitions*hop_size falls outside the scratch this routine can stage the
+ * concatenated IR in). A refusal leaves the filter untouched, so a caller
+ * that changed its alignment must not report warm success on -1: the taps
+ * still sit at the old alignment. */
+int pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples);
 
 /* ── PBFDKF (per-bin H_error Kalman) ────────────────────────────── */
 
@@ -296,6 +313,9 @@ int    pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
                            int sample_rate, FftHandle* shared_fft);
 void pbfdkf_free(PBFDKF* p);
 void pbfdkf_reset(PBFDKF* p);
+/* pbfdaf_reset_taps for the Kalman filter: same adaptation-only scope, plus
+ * the per-bin R/error_psd/Q re-arm pbfdkf_reset performs. */
+void pbfdkf_reset_taps(PBFDKF* p);
 
 /* mu_scale: NULL ⇒ scalar broadcast; else per-bin [n_freqs] fp32 (already
  * post-RSA-mask, matching the array the Python _update_weights_aec3 receives). */

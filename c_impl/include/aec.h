@@ -390,10 +390,13 @@ typedef struct Aec {
     int    delay_quarantine_hops;
     /* Alignment-generation token for external consumers (AecLinearContext).
      * Bumped (saturating, never wrapping) at EVERY write that changes the
-     * ring read offset -- first acquisition, confirmed shift (soft AND hard
-     * recovery paths share the same write site), and aec_reset(). External
+     * alignment the filter is matched to -- first acquisition, confirmed shift
+     * (soft AND hard recovery paths share the same write site), aec_reset(),
+     * and aec_apply_external_realign() on both its outcomes (the one bump
+     * EXTERNAL_ALIGNED has, since it owns no ring offset to move). External
      * pollers cannot reconstruct this from delay_samples differences alone:
-     * the soft-recovery paths deliberately set no other flag. */
+     * the soft-recovery paths deliberately set no other flag, and in
+     * EXTERNAL_ALIGNED delay_samples is 0 by contract. */
     unsigned int delay_generation;
     unsigned int delay_gen_hop_start;  /* snapshot at hop entry (CHANGED detect) */
     int    far_hop_aligned;    /* 1 = this hop's far_hop was ring-compensated
@@ -701,22 +704,44 @@ void aec_reset(Aec* a);
  * far stream advances (delay grew, including the first acquisition from raw
  * far where old_alignment is 0), negative when it retards.
  *
- * When the filter is demonstrably cancelling (same inst-ERLE gate as the
- * internal MATCHED warm tap-transfer) and the shift fits the tap span, the
- * learned IR is shifted by delta and cancellation survives the realign.
- * Otherwise the filter re-adapts from its current taps via the soft
- * echo-path-change path (excitation counters only, no tap wipe, no WOLA
- * restart). Never touches synthesis history, so output stays continuous
- * either way.
+ * When the filter is demonstrably cancelling (aec_linear_is_cancelling(), the
+ * same two-reading test the backward-delay quarantine uses -- NOT the
+ * inst-ERLE ring alone, which ages out across a stretch of far silence and
+ * would send a perfectly good filter down the reset path) and the shift fits
+ * the tap span, the learned IR is shifted by delta and cancellation survives
+ * the realign.
  *
- * Direction asymmetry: an ADVANCE (delta > 0) is seamless. A RETARD
- * (delta < 0) also clears the filter's far history -- the held history is
- * ahead of the new stream and convolving it against the shifted taps
- * mis-estimates the echo -- which costs a bounded <= 2-hop pass-through
- * transient while the partition ring refills; cancellation resumes outright
- * afterwards (regression-pinned in test_external_realign.c).
+ * Otherwise the filter is RESET -- taps, far spectra, far analysis history and
+ * the convergence/mu/stationarity latches -- because taps that were not
+ * shifted sit at the alignment the caller just abandoned: they do not "re-adapt
+ * from a head start", they subtract a decorrelated copy of the echo (measured
+ * 1.3-1.5x the echo, i.e. worse than no filter at all, held for hundreds of
+ * hops by the converged-mu floor and the stationary-render freeze). The reset
+ * is FILTER-ONLY: the synthesis overlap-add and the mic-side analysis frame
+ * are untouched, so the output stays continuous -- that is the whole
+ * difference from aec_reset(), whose extra reach is exactly the spectrogram
+ * "vertical line". Reconvergence tracks an aec_reset() twin's trajectory.
  *
- * Returns 1 when the warm tap-transfer ran, 0 when the soft path ran, and
+ * Either outcome bumps the alignment generation an AecLinearContext consumer
+ * polls: the far this filter is matched to moved, so cross-hop far caches are
+ * stale whichever branch ran.
+ *
+ * Direction asymmetry. A RETARD (delta < 0) also clears the filter's
+ * per-partition far spectra -- the held history is ahead of the new stream and
+ * convolving it against the shifted taps mis-estimates the echo -- so the echo
+ * is exposed until the partition ring refills past the shifted response. The
+ * bound is ceil((|delta| + the response's own tap offset) / hop_size) + 1
+ * hops, i.e. at worst n_partitions + 1 when the response sits at the end of
+ * the tap span; measured on a 256-sample hop with a 1024-sample span:
+ * delta=-300 at tap 0 -> 2 hops, delta=-768 at tap 100 -> 4 hops, delta=-900
+ * at tap 60 -> 4 hops. Within that window the residual is NOT bounded by the
+ * echo either: partially-refilled history convolved against the shifted taps
+ * measured 1.30x the echo on the -900 case. Cancellation resumes outright
+ * afterwards. An ADVANCE (delta > 0) keeps the history and settles within a
+ * hop; the far samples the caller's own jump skipped are unrecoverable by
+ * either direction, since they were never presented to the filter.
+ *
+ * Returns 1 when the warm tap-transfer ran, 0 when the filter reset ran, and
  * -1 on a NULL instance or a mode other than AEC_DELAY_EXTERNAL_ALIGNED.
  * delta_samples == 0 is a no-op returning 0.
  */
@@ -949,7 +974,11 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx);
  *     delay_samples == 0 and delay_state == LOCKED, because the caller has
  *     CONTRACTED that far is already aligned -- this is the one mode where
  *     "aligned" is an input, not a measurement. delay_confidence == 1.0 and
- *     generation never moves while processing. (Before delay_mode existed
+ *     generation never moves while PROCESSING -- there is no estimator to
+ *     re-lock -- but aec_apply_external_realign() bumps it out of band, on
+ *     both its warm and reset outcomes: that call is the caller telling this
+ *     instance its contracted alignment just changed, which is exactly the
+ *     event a cached far ring has to be invalidated on. (Before delay_mode existed
  *     this configuration -- enable_delay_est=0 -- reported delay_samples=-1
  *     / UNLOCKED, because the library could not tell "caller pre-aligned"
  *     apart from "estimator switched off and nobody aligned anything".
