@@ -179,6 +179,11 @@ float aec_state_filter_analyzer_max_echo_path_gain(const AecState *s) {
 
 /* ── mutators ──────────────────────────────────────────────────────────── */
 
+void aec_state_set_taps_provider(AecState *s, FaTapsProvider fn, void *ctx) {
+    if (!s->has_filter_analyzer) return;
+    fa_set_taps_provider(&s->filter_analyzer, fn, ctx);
+}
+
 void aec_state_update_capture_saturation(AecState *s, int saturated) {
     s->capture_signal_saturation = saturated ? 1 : 0;
 }

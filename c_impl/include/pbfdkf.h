@@ -321,7 +321,17 @@ float pbfdaf_get_error_energy(PBFDAF* p);
 float pbfdkf_get_error_energy(PBFDKF* p);
 
 /* get_time_domain_filter: concat per-partition irfft(W[p])[:hop] →
- * out[n_partitions × hop_size] (caller-owned). Mirrors filters.py:397. */
+ * out[n_partitions × hop_size] (caller-owned). Mirrors filters.py:397.
+ *
+ * _range materializes only partitions [first_partition, first_partition+
+ * n_parts), writing them at their natural offsets in that same full-length
+ * layout and leaving every other tap in `out` untouched; the whole-filter
+ * call is exactly the all-partitions case of it. One irfft per partition is
+ * the dominant cost here, so a consumer that reads back only part of the
+ * impulse response should ask for that part: the taps it does not read must
+ * not be paid for. The range is clamped to the partition count. */
+void pbfdaf_get_time_domain_filter_range(PBFDAF* p, int first_partition,
+                                         int n_parts, float* out);
 void pbfdaf_get_time_domain_filter(PBFDAF* p, float* out);
 
 /* scale_filter: W *= (float32)scale (in place, all partitions). */

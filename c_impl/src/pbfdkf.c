@@ -924,15 +924,30 @@ float pbfdkf_get_error_energy(PBFDKF* p) {
     return pbfdaf_get_error_energy(&p->base);
 }
 
-/* Concatenate per-partition irfft(W[p])[:hop] → out[n_partitions × hop]. */
-void pbfdaf_get_time_domain_filter(PBFDAF* p, float* out) {
-    int N = p->n_partitions, hop = p->hop_size;
-    for (int part = 0; part < N; ++part) {
+/* Concatenate irfft(W[p])[:hop] for partitions [first_partition,
+ * first_partition+n_parts) → out[part*hop .. part*hop+hop-1], indexed against
+ * the SAME full [n_partitions × hop] layout the whole-filter call produces.
+ * Taps belonging to partitions outside the requested range are not written
+ * (they keep whatever the caller's buffer already held). The range is clamped
+ * to [0, n_partitions), so an out-of-range request degrades to the overlap
+ * rather than reading past W. */
+void pbfdaf_get_time_domain_filter_range(PBFDAF* p, int first_partition,
+                                         int n_parts, float* out) {
+    int hop = p->hop_size;
+    int first = first_partition;
+    int last  = first_partition + n_parts;     /* exclusive */
+    if (first < 0) first = 0;
+    if (last > p->n_partitions) last = p->n_partitions;
+    for (int part = first; part < last; ++part) {
         const Complex* Wp = p->W + (size_t)part * p->n_freqs;
         fft_inverse(p->fft, Wp, p->time_scratch);
         for (int i = 0; i < hop; ++i)
             out[(size_t)part * hop + i] = p->time_scratch[i];
     }
+}
+
+void pbfdaf_get_time_domain_filter(PBFDAF* p, float* out) {
+    pbfdaf_get_time_domain_filter_range(p, 0, p->n_partitions, out);
 }
 
 /* W *= np.complex64(scale): scalar (real) value-cast to f32, multiply each

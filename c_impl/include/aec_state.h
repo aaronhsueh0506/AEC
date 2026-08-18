@@ -187,6 +187,14 @@ void aec_state_init(AecState *s, const AecStateConfig *cfg,
 
 /* ── public mutators ───────────────────────────────────────────────────── */
 
+/* Forward the FilterAnalyzer's on-demand tap materializer (see
+ * fa_set_taps_provider) so the owner of the tap buffer can produce just the
+ * slice step 1b consumes. No-op when the analyzer is disabled. Cleared by
+ * aec_state_init(), so re-install after every re-init. With no provider
+ * installed, filter_taps_full must be fully materialized by the caller, as
+ * before. */
+void aec_state_set_taps_provider(AecState *s, FaTapsProvider fn, void *ctx);
+
 void aec_state_update_capture_saturation(AecState *s, int saturated);
 
 /* handle_echo_path_change. delay_change: a DelayAdjustment enum value

@@ -45,6 +45,12 @@
  * the stale hop=160/sr=16000 assumption. All are now computed live in
  * fa_init() from hop_size/sample_rate -- see the struct fields below. */
 
+/* On-demand tap materializer (see fa_set_taps_provider). Called from inside
+ * fa_update(), after the region has advanced and before the taps are read,
+ * with the inclusive [first, last] filter_taps index span that call will
+ * touch. */
+typedef void (*FaTapsProvider)(void *ctx, int first, int last);
+
 /* ConsistentFilterDetector mirror state (reset each full-filter sweep). */
 typedef struct {
     float  active_render_threshold;  /* (active_render_limit^2) * hop_size      */
@@ -85,6 +91,9 @@ typedef struct {
     int    abs_scratch_len;
     float *render_sq_scratch;        /* length >= render_block_len at every fa_update call */
     int    render_sq_scratch_len;
+
+    FaTapsProvider taps_provider;    /* NULL == caller pre-fills filter_taps  */
+    void          *taps_provider_ctx;
 } FilterAnalyzer;
 
 /* h_highpass_storage must hold at least `size` floats (filter_taps length).
@@ -106,10 +115,30 @@ void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
 
 void fa_reset(FilterAnalyzer *m);
 
+/* Install (or clear, with fn == NULL) the on-demand tap materializer.
+ *
+ * The region cycles one hop-sized block per fa_update() call, so only a
+ * hop-sized slice of the impulse response -- plus the two taps preceding it
+ * that the 3-tap HPF needs -- is consumed per hop; the rest of the tap array
+ * is never looked at. Producing the whole impulse response every hop
+ * therefore pays for an inverse FFT per partition to read back one
+ * partition's worth of taps. With a provider installed, fa_update() asks for
+ * exactly the span it is about to read (after the region has advanced, so the
+ * request is the real span and not a prediction) and the owner materializes
+ * only that. Taps outside the requested span are left as they were; nothing
+ * in this module reads them.
+ *
+ * Cleared by fa_init(), preserved across fa_reset(): re-install after any
+ * re-init of the owning object. */
+void fa_set_taps_provider(FilterAnalyzer *m, FaTapsProvider fn, void *ctx);
+
 /* Per-hop update. filter_taps (float32, length == size) and render_block
  * (float32, length render_block_len). Requires m->abs_scratch_len >= size
  * and m->render_sq_scratch_len >= render_block_len (both set at fa_init);
- * no-ops (state unchanged) if either scratch buffer is undersized. */
+ * no-ops (state unchanged) if either scratch buffer is undersized.
+ *
+ * With a provider installed, filter_taps need only be VALID over the span the
+ * provider fills for this call; without one it must be fully materialized. */
 void fa_update(FilterAnalyzer *m, const float *filter_taps,
                const float *render_block, int render_block_len);
 

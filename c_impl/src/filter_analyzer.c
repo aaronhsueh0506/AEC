@@ -182,6 +182,12 @@ void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
     m->abs_scratch_len = abs_scratch_len;
     m->render_sq_scratch = render_sq_scratch;
     m->render_sq_scratch_len = render_sq_scratch_len;
+    /* No provider by default: a caller that hands fa_update a fully
+     * materialized tap array (the parity harnesses) needs no hook, and one
+     * that materializes on demand installs it after init. fa_reset()
+     * deliberately leaves it alone -- it is wiring, not analyzer state. */
+    m->taps_provider = NULL;
+    m->taps_provider_ctx = NULL;
     if (m->h_highpass != NULL && size > 0) {
         memset(m->h_highpass, 0, (size_t)size * sizeof(float));
     }
@@ -211,6 +217,11 @@ static void fa_set_region(FilterAnalyzer *m, int size) {
     }
     m->region_end = m->region_start + block - 1;
     if (m->region_end > size - 1) m->region_end = size - 1;
+}
+
+void fa_set_taps_provider(FilterAnalyzer *m, FaTapsProvider fn, void *ctx) {
+    m->taps_provider = fn;
+    m->taps_provider_ctx = ctx;
 }
 
 /* filter_analyzer.cc:161-187: zero region, then causal 3-tap convolution.
@@ -280,6 +291,23 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     if (m->blocks_since_reset <= m->convergence_threshold_hops)
         m->blocks_since_reset += 1;
     fa_set_region(m, size);
+    if (m->taps_provider != NULL) {
+        /* Ask the owner to materialize exactly the taps fa_preprocess() is
+         * about to read, and nothing else. That loop runs
+         * i = max(FA_HPF_LEN-1, region_start) .. region_end and touches
+         * filter_taps[i], [i-1], [i-2], so the closed span is
+         * [region_start-(FA_HPF_LEN-1), region_end] CLAMPED AT 0 -- the two
+         * HPF history taps are taken from before the region, never wrapped
+         * around from the far end of the buffer, so a region starting at 0
+         * needs no carry from the last block. Everything outside the span
+         * keeps its previous contents: this module is the only reader of
+         * filter_taps (the peak search, the gain and the consistency
+         * detector all run on h_highpass, which this object owns and which
+         * init/reset zero), and it never reads past the current span. */
+        int span_lo = m->region_start - (FA_HPF_LEN - 1);
+        if (span_lo < 0) span_lo = 0;
+        m->taps_provider(m->taps_provider_ctx, span_lo, m->region_end);
+    }
     fa_preprocess(m, filter_taps);
     h = m->h_highpass;
 

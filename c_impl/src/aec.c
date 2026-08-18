@@ -683,6 +683,33 @@ static int next_pow2(int x) {
 }
 
 
+/* FilterAnalyzer tap materializer (installed with aec_state_set_taps_provider
+ * on every AecState init below).
+ *
+ * The analyzer consumes one hop-sized region of the main filter's impulse
+ * response per hop and is the only reader of a->filter_taps_full, so only the
+ * partitions overlapping the span it asks for have to be inverse-transformed;
+ * the remaining partitions' taps stay at their previous values, unread. The
+ * span arrives in tap indices, so the partition mapping is derived from the
+ * filter's own layout rather than assuming the region lines up with a
+ * partition boundary -- it does not, for the sweep that follows an analyzer
+ * reset (that sweep's regions are offset by one sample until the next wrap),
+ * and it need not for a grid whose region size differs from the tap extent of
+ * one partition. */
+static void aec_fill_filter_taps(void* ctx, int first, int last) {
+    Aec* a = (Aec*)ctx;
+    PBFDAF* f = &a->main_filter.base;
+    int hop = f->hop_size;
+    int p_first, p_last;
+    if (hop <= 0 || f->n_partitions <= 0 || last < first || first < 0) return;
+    p_first = first / hop;
+    p_last  = last  / hop;
+    if (p_last > f->n_partitions - 1) p_last = f->n_partitions - 1;
+    if (p_last < p_first) return;
+    pbfdaf_get_time_domain_filter_range(f, p_first, p_last - p_first + 1,
+                                        a->filter_taps_full);
+}
+
 /* Clear + recreate the AEC3 post chain sub-objects (mirrors _reset_aec3_post
  * with preserve_render_side=True: StationarityEstimator + non_zero_render_seen
  * + active_hops are preserved; everything else re-init'd). */
@@ -740,6 +767,7 @@ static void aec3_post_chain_reset(Aec* a) {
          * buffer was originally sized to. */
         acfg.fa_scratch_size = a->n_partitions * a->hop_size;
         aec_state_init(&a->a3_state, &acfg, &a->a3_state_st);
+        aec_state_set_taps_provider(&a->a3_state, aec_fill_filter_taps, a);
     }
     {
         ReeEchoModelConfig em;
@@ -1521,6 +1549,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
             acfg.filter_taps_size = np * hop;
             acfg.fa_scratch_size = np * hop;
             aec_state_init(&a->a3_state, &acfg, s);
+            aec_state_set_taps_provider(&a->a3_state, aec_fill_filter_taps, a);
         }
     }
 
@@ -2915,7 +2944,14 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
 
         /* ── aec3_post_run → final_output ── */
         {
-            pbfdaf_get_time_domain_filter(&a->main_filter.base, a->filter_taps_full);
+            /* filter_taps_full is materialized on demand by
+             * aec_fill_filter_taps(), driven from inside the FilterAnalyzer
+             * once it knows which region it is about to read -- not
+             * whole-filter up front here, which cost an inverse FFT per
+             * partition every hop to hand the analyzer one region's worth of
+             * taps. The buffer and its length are still passed exactly as
+             * before; only the partitions covering the analyzer's current
+             * region are refreshed inside the call below. */
 
             Aec3PostRunIn in;
             memset(&in, 0, sizeof(in));
