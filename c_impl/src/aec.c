@@ -555,6 +555,18 @@ static void aec_reset_filter_latches(Aec* a) {
      * being abandoned here: both the inst-ERLE ring and the windowed reading
      * must go, or the NEXT realign would warm-shift a filter that has none. */
     a->last_erle_windowed = 0.0f;
+
+    /* Per-hop stationary-render latch. Unobservable for the
+     * _reset_filter_derived_state caller rather than merely untested there:
+     * both of its call sites follow with pbfdkf_handle_echo_path_change() +
+     * shadow call_counter = 0, and BOTH filters check
+     * `call_counter <= n_partitions || poor_excitation_counter < n_partitions`
+     * and return BEFORE they ever read block_stationary -- so for the recovery
+     * hop and the n_partitions hops after it the latch cannot decide anything,
+     * and step 10 recomputes it from the live estimator every one of those
+     * hops. The filters' own copies need no clear either: step 8 re-assigns
+     * both from this field before any consumer runs. */
+    a->block_stationary_next = 0;
 }
 
 static void aec_reset_filter_derived_state(Aec* a) {
@@ -608,7 +620,8 @@ static void aec_reset_filter_derived_state(Aec* a) {
  * collapse (measured: ~10x worse settled residual, ~45 hops of crawl instead
  * of ~5). aec_reset() does not make that call either.
  *
- * What it adds beyond aec_reset()'s filter subset is the stationarity re-arm.
+ * What it adds beyond aec_reset()'s filter subset is the coarse/leakage
+ * sustain counters (see the call site) and the stationarity re-arm.
  * The AEC3 stationary-render freeze (pbfdkf_process's block_stationary
  * early-return) is gated on stationarity_active_hops having reached
  * stationarity_converge_hops -- i.e. on the filter being presumed converged. A
@@ -631,10 +644,27 @@ static void aec_reset_filter_for_realign(Aec* a) {
     filter_convergence_mark_diverged(&a->convergence);
     aec_reset_filter_latches(a);
 
+    /* Coarse-filter-quality and leakage SUSTAIN counters. All three count
+     * evidence ABOUT the taps just zeroed -- the coarse-vs-refined error ratio
+     * and the leakage-diverged bin fraction -- so a restarted filter must not
+     * inherit them, or the previous alignment's history fires a rescue on the
+     * new one.
+     *
+     * They sit HERE rather than in aec_reset_filter_latches, where the
+     * reference keeps them, because the C internal recovery paths have never
+     * cleared them and hoisting them would not be a refactor: unlike
+     * block_stationary_next above, nothing dominates these. All three are
+     * consumed later in the SAME hop as the delay-acquisition site that calls
+     * the shared helper (the poor-coarse rescue and the
+     * disallow_leakage_diverged gate), so a counter within one hop of its
+     * threshold at a recovery would decide differently. Closing that gap is an
+     * audio change to MATCHED and needs its own evidence; this entry point is
+     * reference-aligned either way -- the same fields are clear on return. */
+    a->poor_coarse_counter = 0;
+    a->coarse_reset_hangover = 0;
+    a->leakage_div_sustained_counter = 0;
+
     a->stationarity_active_hops = 0;
-    a->block_stationary_next = 0;
-    a->main_filter.base.block_stationary = 0;
-    if (a->has_shadow) a->shadow_filter.block_stationary = 0;
 }
 
 /* _get_simple_mu_scale (orchestrator 1456-1476). Writes a per-bin array into

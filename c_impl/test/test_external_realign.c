@@ -211,7 +211,7 @@ int main(void)
     CHECK(worst < 0.15f * echo_rms(HOPS),
           "negative-delta realign cancels outright after the 2-hop refill");
 
-    /* --- Row 4: API contract + soft path. */
+    /* --- Row 4: API contract + reset path. */
     CHECK(aec_apply_external_realign(&aec, 0) == 0, "delta 0 is a no-op");
     CHECK(aec_apply_external_realign(NULL, D) == -1, "NULL is rejected");
     {
@@ -314,6 +314,53 @@ int main(void)
         CHECK(worst < 0.1f, msg);
         aec_destroy(&sres);
         aec_destroy(&sref);
+    }
+
+    /* --- Row 7: the reset path leaves no coarse/leakage sustain evidence
+     * behind. Those counters accumulate evidence ABOUT the taps -- how the
+     * refined error compares to the coarse one, how many bins sit on the
+     * leakage-diverged branch -- so carrying them across a tap wipe lets the
+     * abandoned alignment's history drive the new filter's detectors.
+     *
+     * This is a STATE row on purpose, and the reason is worth stating: the
+     * contamination is invisible in the audio. After the wipe erl_per_bin is
+     * all zeros, so both arms of the H_error leakage refresh add the same
+     * zero and the output stream is bit-identical whether or not the counters
+     * were cleared (checked directly: 140 hops x 256 samples, byte-for-byte).
+     * The evidence is therefore the counter itself, plus the invariant that a
+     * counter starting at zero and stepping by at most one per hop cannot
+     * exceed the hop index -- which is what actually separates a cleared
+     * counter from one still draining its pre-realign value.
+     *
+     * The pre-call check is not decoration: without a scene that genuinely
+     * dirties the counter, everything below would be an identity. Only
+     * leakage_div_sustained_counter is dirty here -- poor_coarse_counter
+     * cannot be observed non-zero at all on this grid (its threshold is one
+     * hop, so it fires and self-clears within the hop that sets it), and
+     * coarse_reset_hangover only arms behind that fire. Those two are pinned
+     * by the same statement but carry no can-fail evidence of their own. */
+    {
+        Aec ctr;
+        int k;
+        CHECK(make_external_ctx(&ctr, 0, 1) == 0, "counter-hygiene instance: create");
+        for (h = 0; h <= HOPS; ++h) run_hop(&ctr, h, 0, out);
+        CHECK(ctr.leakage_div_sustained_counter > 0,
+              "counter-hygiene: the scene really does dirty the leakage counter");
+        CHECK(aec_apply_external_realign(&ctr, D - 0) == 0,
+              "counter-hygiene: takes the reset path");
+        CHECK(ctr.poor_coarse_counter == 0 &&
+              ctr.coarse_reset_hangover == 0 &&
+              ctr.leakage_div_sustained_counter == 0,
+              "counter-hygiene: coarse/leakage counters cleared by the realign");
+        char msg[112];
+        for (k = 1; k <= 3; ++k) {
+            run_hop(&ctr, HOPS + k, D, out);
+            snprintf(msg, sizeof msg,
+                     "counter-hygiene +%d: leakage counter %d <= %d (no pre-realign drain)",
+                     k, ctr.leakage_div_sustained_counter, k);
+            CHECK(ctr.leakage_div_sustained_counter <= k, msg);
+        }
+        aec_destroy(&ctr);
     }
 
     aec_destroy(&aec);
