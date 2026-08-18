@@ -60,6 +60,10 @@ typedef struct {
     float  tm_gain_early;           /* 0.01 */
     float  tm_gain_late;            /* 0.01 */
     int    erle_onset_comp_in_dominant; /* False */
+    /* Authoring inputs to the per-hop decay below (together with hop_size /
+     * sample_rate). ree_init() folds them into reverb_decay_per_hop{,_mild}
+     * once and nothing reads them again, so writing them on a live instance
+     * changes nothing. */
     float  reverb_decay;            /* 0.83 */
     float  reverb_mild_decay_scale; /* 1.0 */
     int    reverb_enabled;          /* True */
@@ -67,6 +71,15 @@ typedef struct {
     int    sample_rate;             /* live rate; drives noise_floor_growth_per_hop
                                       * and the reverb-decay wall-clock rescale below */
     float  noise_floor_growth_per_hop; /* live-computed; see ree_init() */
+    /* Per-hop reverb decay, both dominant_nearend branches, resolved once in
+     * ree_init(). Every input is init-fixed, so the powf() is loop-invariant
+     * and the per-hop path only selects between these two. The mild branch
+     * cannot be derived from the steady one: the × scale happens in f32
+     * BEFORE the exponentiation, so each needs its own powf(). Both are 0
+     * when reverb is disabled, which the readers already treat as "no reverb
+     * update". */
+    float  reverb_decay_per_hop;       /* dominant_nearend == 0 */
+    float  reverb_decay_per_hop_mild;  /* dominant_nearend != 0 */
     float  reverb_tail_strength;    /* 1.0 */
     int    use_aec3_residual_noise_gate; /* True */
     int    use_stationarity_properties;  /* True in production — when set, the
@@ -157,9 +170,9 @@ void ree_init(ResidualEchoEstimator *r,
 void ree_reset(ResidualEchoEstimator *r);
 
 /* Public wrapper for _reverb_decay(dominant_nearend) (static config path):
- * decay = reverb_decay (× mild_decay_scale if dominant_nearend), then
- * pow(decay, hop/64) when hop != 64. Returns 0 when reverb disabled. Used by
- * the orchestrator's avg-render-reverb step (decay_steady = dominant=False). */
+ * selects the matching reverb_decay_per_hop{,_mild} resolved at init, so it
+ * is a field read, not an exponentiation. Returns 0 when reverb disabled.
+ * Used by the orchestrator's avg-render-reverb step (dominant=False). */
 float ree_reverb_decay_value(const ResidualEchoEstimator *r,
                              int dominant_nearend);
 

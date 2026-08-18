@@ -1,8 +1,9 @@
 /* residual_echo_estimator.c — C port of residual_echo_estimator.py.
  * All-float32 arithmetic in the R² paths (every input is f32 and every scalar
  * multiplier is value-cast to f32 inside the numpy array op). powf() for the
- * per-hop reverb decay runs in float32 (converted from the former double
- * pow(); drift accepted). Built with -ffp-contract=off. */
+ * reverb decay runs in float32 (converted from the former double pow(); drift
+ * accepted) and is evaluated at init, not per hop. Built with
+ * -ffp-contract=off. */
 #include "residual_echo_estimator.h"
 #include "aec3_scale.h"
 
@@ -73,6 +74,23 @@ void ree_init(ResidualEchoEstimator *r,
     r->reverb_decay = reverb_decay;
     r->reverb_mild_decay_scale = reverb_mild_decay_scale;
     r->reverb_enabled = reverb_enabled ? 1 : 0;
+    /* Resolve both dominant_nearend branches of _reverb_decay() here: the
+     * powf() argument and exponent are config + grid only, so the per-hop
+     * path (called 2-3x per hop) just reads the cached value. The mild branch
+     * keeps the f32 multiply-then-exponentiate order of the original
+     * expression -- scaling after the powf() is a different number. */
+    if (r->reverb_enabled) {
+        float d_mild = reverb_decay;
+        d_mild *= reverb_mild_decay_scale;
+        r->reverb_decay_per_hop =
+            aec3_per_block_growth_to_per_hop(reverb_decay, hop_size,
+                                             sample_rate);
+        r->reverb_decay_per_hop_mild =
+            aec3_per_block_growth_to_per_hop(d_mild, hop_size, sample_rate);
+    } else {
+        r->reverb_decay_per_hop = 0.0f;
+        r->reverb_decay_per_hop_mild = 0.0f;
+    }
     r->reverb_tail_strength = reverb_tail_strength;
     r->use_aec3_residual_noise_gate = use_aec3_residual_noise_gate ? 1 : 0;
     r->use_stationarity_properties = use_stationarity_properties ? 1 : 0;
@@ -185,23 +203,19 @@ static float ree_echo_path_gain(const ResidualEchoEstimator *r,
 }
 
 /* _reverb_decay(dominant_nearend): static config path (decay estimator not
- * bound). Returns the per-hop decay (float32). */
+ * bound). Returns the per-hop decay (float32).
+ *
+ * The wall-clock-preserving rescale (accounts for BOTH hop_size AND
+ * sample_rate -- see the header comment / residual_echo_estimator.py's
+ * _reverb_decay() docstring for the full derivation) depends on nothing but
+ * config and grid, so both branches are exponentiated once in ree_init() and
+ * this reduces to the branch select. Anything that made reverb_decay,
+ * reverb_mild_decay_scale, reverb_enabled, hop_size or sample_rate mutable
+ * after init would have to recompute the two cached values with it. */
 static float ree_reverb_decay(const ResidualEchoEstimator *r,
                               int dominant_nearend) {
-    float d;
-    if (!r->reverb_enabled) {
-        return 0.0f;
-    }
-    d = r->reverb_decay;
-    if (dominant_nearend) {
-        d *= r->reverb_mild_decay_scale;
-    }
-    /* Wall-clock-preserving rescale (accounts for BOTH hop_size AND
-     * sample_rate) -- see the header comment / residual_echo_estimator.py's
-     * _reverb_decay() docstring for the full derivation. The former
-     * hop_size/64-only formula was 3x too fast at 48 kHz. */
-    d = aec3_per_block_growth_to_per_hop(d, r->hop_size, r->sample_rate);
-    return d;
+    return dominant_nearend ? r->reverb_decay_per_hop_mild
+                            : r->reverb_decay_per_hop;
 }
 
 float ree_reverb_decay_value(const ResidualEchoEstimator *r,
