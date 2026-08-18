@@ -463,14 +463,24 @@ int aec3_post_run(Aec3Post *p,
     sk_cabs_np_f32(sc->sel_esw, sc->abs_error, nb);
     sk_cabs_np_f32(in->echo_spec, sc->abs_echo_coh, nb);
     sk_cabs_np_f32(sc->nsw_e1, sc->abs_nsw_e1, nb);
-    sk_cabs_np_f32(sc->ybase, sc->abs_ybase, nb);
+    /* |y_base| has exactly one consumer: the E2 output-capture guard inside
+     * aec3_post_apply_output(), which context_only never reaches (Step 21
+     * returns the linear residual instead), so the pass is dead in that mode.
+     * ybase ITSELF is still formed above -- it is exported as the linear
+     * context's near_spec. NULL rather than a stale pointer marks the
+     * uncomputed magnitude, so a future reader faults instead of silently
+     * consuming the previous hop's scratch. The sibling abs_nsw_e1 pass is
+     * deliberately NOT conditional: aec3_post_compute_psds() consumes it
+     * whenever erle_windowed_capture_psd is set, in every mode. */
+    if (!in->context_only)
+        sk_cabs_np_f32(sc->ybase, sc->abs_ybase, nb);
     mag.abs_near = sc->abs_near;
     mag.abs_far = sc->abs_far;
     mag.abs_sel_echo = sc->abs_sel_echo;
     mag.abs_error = sc->abs_error;
     mag.abs_echo_coh = sc->abs_echo_coh;
     mag.abs_nsw_e1 = sc->abs_nsw_e1;
-    mag.abs_ybase = sc->abs_ybase;
+    mag.abs_ybase = in->context_only ? NULL : sc->abs_ybase;
 
     /* ── Step 3: PSDs + E1 (3037-3052) ───────────────────────────────────── */
     aec3_post_compute_psds(p, &mag);

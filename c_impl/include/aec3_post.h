@@ -212,6 +212,9 @@ typedef struct {
     const float *abs_error;    /* |error_spec|=|sel_esw| (error_psd, E2) */
     const float *abs_echo_coh; /* |filter.echo_spec| (coh syy)          */
     const float *abs_nsw_e1;   /* |esw_orig+echo_orig| (E1 capture_psd)  */
+    /* Read only by aec3_post_apply_output()'s E2 guard, so aec3_post_run()
+     * leaves it NULL whenever that call cannot happen (context_only). Any
+     * new consumer outside apply_output() must compute it for itself. */
     const float *abs_ybase;    /* |sel_esw+sel_echo|   (E2 guard)        */
 } Aec3PostAbs;
 
