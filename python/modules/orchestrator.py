@@ -1208,8 +1208,39 @@ class AEC:
         if self.shadow_filter is not None:
             self.shadow_filter.reset()
 
-        # Filter convergence + EPC
+        # Filter convergence
         self._convergence.reset()
+
+        # Everything downstream of the taps.
+        self._reset_filter_latches()
+
+        # Clear AEC3 post chain (filter-output-derived); preserve
+        # render-side stationarity tracker per the input-side rule.
+        self._reset_aec3_post(preserve_render_side=True)
+
+        # Clear cross-recovery state that would otherwise mis-fire.
+        # _pending_delay: stale pending shift could pair with a later rogue
+        #   estimate and trigger a spurious force_delay (audio bug).
+        # NOTE: _divergence_source_counts / _last_divergence_source /
+        # _dominant_nearend_hold are session-cumulative diagnostic counters
+        # and MUST survive recovery — they are only cleared in full
+        # AEC.reset().
+        if hasattr(self, '_pending_delay'):
+            del self._pending_delay
+        if hasattr(self, '_pending_delay_ttl'):
+            del self._pending_delay_ttl
+
+    def _reset_filter_latches(self) -> None:
+        """The filter-DERIVED latches, EMAs and detectors — everything
+        downstream of the taps that a restarted filter must not carry forward.
+
+        Shared verbatim by ``_reset_filter_derived_state`` above and by
+        ``_reset_filter_for_realign`` below, so the two can never disagree
+        about what a restarted filter is allowed to remember. Everything the
+        two callers DO differ on — which filter wipe they pair this with,
+        which convergence call they make, and what else travels with it (the
+        AEC3 post chain, the pending-delay state) — stays at the call sites.
+        """
         self._epc_det.reset()
 
         # Filter-output power / smoother / err quantities
@@ -1281,10 +1312,6 @@ class AEC:
         self._leakage_div_sustained_counter = 0
         self._block_stationary_for_next_hop = False
 
-        # Clear AEC3 post chain (filter-output-derived); preserve
-        # render-side stationarity tracker per the input-side rule.
-        self._reset_aec3_post(preserve_render_side=True)
-
         # Re-arm warmup so the second-pass training starts with high mu.
         # Boost Q on both filters (high-Q convergence mode).
         for filt in [self.filter, self.shadow_filter]:
@@ -1298,17 +1325,149 @@ class AEC:
                                    self.config.warmup_frames // 2)
         self._warmup_far_active = False
 
-        # Clear cross-recovery state that would otherwise mis-fire.
-        # _pending_delay: stale pending shift could pair with a later rogue
-        #   estimate and trigger a spurious force_delay (audio bug).
-        # NOTE: _divergence_source_counts / _last_divergence_source /
-        # _dominant_nearend_hold are session-cumulative diagnostic counters
-        # and MUST survive recovery — they are only cleared in full
-        # AEC.reset().
-        if hasattr(self, '_pending_delay'):
-            del self._pending_delay
-        if hasattr(self, '_pending_delay_ttl'):
-            del self._pending_delay_ttl
+    def _reset_filter_for_realign(self) -> None:
+        """Filter-only restart for a caller-side far realign
+        (``apply_external_realign`` below): the FILTER portion of what
+        ``reset()`` does, and nothing else.
+
+        PRESERVED on purpose — these are what separate this from ``reset()``,
+        and they are the whole reason the entry point exists:
+
+          • the AEC3 post chain. ``_reset_aec3_post`` zero-fills
+            ``_aec3_ola_buf``, the synthesis overlap-add tail; that is the
+            near-zero output hop, the dark half of the spectrogram "vertical
+            line".
+          • ``near_buffer``, the MIC half of the block_size analysis frame.
+            Zeroing it makes the next hop's near_spec / error_spec_windowed
+            the transform of a half-empty frame, which the RES turns straight
+            back into a line. It is also not stale: the mic stream did not
+            move, only the far did.
+          • the delay-side state and ``_frame_count`` — this is a realign, not
+            a new stream.
+
+        CLEARED on purpose:
+
+          • the taps, the per-partition far spectra and the far-power
+            normalizer (``reset_taps`` == ``reset`` minus the two time-domain
+            analysis buffers);
+          • ``far_buffer``, the FAR half of that same analysis frame. Unlike
+            ``near_buffer`` this one IS invalidated by the realign: it was
+            captured at the alignment the caller just abandoned, so the next
+            overlap-save block would splice two different alignments into one
+            frame and the filter would adapt against it. Same argument the
+            warm path applies to ``X_buf``, which is this history in the
+            frequency domain. It reaches no output sample — the reference path
+            only feeds the echo estimate and the far-side analyzers. Measured:
+            the SHADOW's copy is the one that costs, ~10x in settled residual,
+            because the spliced frame reaches the shadow-advantage and DT
+            signals that gate the main filter's step size; the main filter's
+            own copy is inert on that scene, and is cleared for the same
+            reason rather than because it was measured.
+
+        Deliberately NOT paired with ``handle_echo_path_change()``. That call
+        is for a filter that KEEPS its taps across an echo-path change: it
+        re-inits H_error to its cold value and restarts the excitation
+        counters, which on a filter whose taps were just zeroed spikes the
+        Kalman gain once and then collapses it. ``reset()`` does not make that
+        call either.
+
+        What it adds beyond ``reset()``'s filter subset is the stationarity
+        re-arm. The AEC3 stationary-render freeze is gated on
+        ``_aec3_stationarity_active_hops`` having reached its converge
+        threshold — i.e. on the filter being presumed converged. A wiped
+        filter is not, and under stationary far the latch would otherwise hold
+        the taps frozen indefinitely. The StationarityEstimator's own
+        render-side content is preserved, matching
+        ``_reset_filter_derived_state``'s ``preserve_render_side`` policy:
+        only the filter-side "has this filter earned the freeze" counter
+        restarts.
+        """
+        self.filter.reset_taps()
+        self.filter.far_buffer.fill(0)
+        if self.shadow_filter is not None:
+            self.shadow_filter.reset_taps()
+            self.shadow_filter.far_buffer.fill(0)
+
+        # mark_diverged directly, not _maybe_mark_diverged: the per-source
+        # divergence census this engine keeps is about ITS OWN recovery paths,
+        # and a caller-driven realign is not one of them.
+        self._convergence.mark_diverged()
+        self._reset_filter_latches()
+
+        # Stationarity re-arm (see the docstring). The per-hop
+        # `_block_stationary_for_next_hop` half is already cleared by
+        # _reset_filter_latches; the filters' own `_block_stationary` flags
+        # are re-assigned from it before every update and need no clear here.
+        self._aec3_stationarity_active_hops = 0
+
+    def apply_external_realign(self, delta_samples: int) -> int:
+        """Realign an ``EXTERNAL_ALIGNED`` instance across a caller-side change
+        of the far alignment, WITHOUT the full ``reset()`` that re-exposes the
+        echo and restarts the WOLA sequence (the spectrogram "vertical line").
+
+        ``delta_samples = new_alignment - old_alignment``: positive when the
+        aligned far stream ADVANCED (the applied delay grew, first acquisition
+        from raw far included, where the old alignment is 0), negative when it
+        RETARDED.
+
+        When the filter is demonstrably cancelling (``linear_is_cancelling()``,
+        the same two-reading test the backward-delay quarantine uses — NOT the
+        inst-ERLE ring alone, which ages out across a stretch of far silence
+        and would send a perfectly good filter down the reset path) and the
+        shift fits the tap span, the learned IR is shifted by delta and the
+        cancellation survives the realign.
+
+        Otherwise the filter is RESET — taps, far spectra, far analysis history
+        and the convergence/mu/stationarity latches — because taps that were
+        not shifted sit at the alignment the caller just abandoned: they do not
+        re-adapt from a head start, they subtract a decorrelated copy of the
+        echo, which the filter then ADDS. The reset is FILTER-ONLY: the
+        synthesis overlap-add and the mic-side analysis frame are untouched, so
+        the output stays continuous. That separation is the whole difference
+        from ``reset()`` and the reason this entry point exists; see
+        ``_reset_filter_for_realign``.
+
+        DIRECTION ASYMMETRY. A retard (delta < 0) also costs the filter's
+        per-partition far history, which ``warm_shift_ir`` clears for that
+        direction: the echo is exposed until the partition ring refills past
+        the shifted response, bounded by
+        ``ceil((|delta| + the response's own tap offset) / hop_size) + 1`` hops
+        (at worst ``n_partitions + 1``), and the residual inside that window is
+        not bounded by the echo either. An advance (delta > 0) keeps the
+        history and settles within a hop.
+
+        Returns 1 when the warm tap-transfer ran, 0 when the filter reset ran,
+        and -1 when the instance is not in ``EXTERNAL_ALIGNED`` mode (the only
+        mode with no alignment of its own to move, hence the only one whose
+        alignment a caller may change). ``delta_samples == 0`` is a no-op that
+        also returns 0 — the two are not distinguished, matching C, so a caller
+        counting outcomes sees a no-op realign as a soft one; the caller knows
+        its own delta and can tell them apart from that. The C side
+        additionally bumps an ``AecLinearContext`` alignment-generation token
+        on both outcomes, which has no counterpart here because this reference
+        exposes no such context.
+        """
+        if self.config.delay_mode is not AecDelayMode.EXTERNAL_ALIGNED:
+            return -1
+        delta = int(delta_samples)
+        if delta == 0:
+            return 0
+        # The shift must fit the tap span in BOTH directions or the learned
+        # response would be pushed off the filter. (The windowed half of the
+        # evidence is only maintained when the AEC3 post chain runs — with
+        # enable_res and return_res_context both off, the ring is all there is.
+        # Nothing to recover there: the gate is as good as the evidence the
+        # configuration produces.)
+        warm_ok = (self.config.delay_acquire_warm_transfer
+                   and self.linear_is_cancelling()
+                   and abs(delta) < self.filter.tap_span)
+        if warm_ok:
+            for filt in (self.filter, self.shadow_filter):
+                if filt is not None:
+                    filt.warm_shift_ir(delta)
+            return 1
+        self._reset_filter_for_realign()
+        return 0
 
     @property
     def hop_size(self) -> int:
@@ -1478,11 +1637,21 @@ class AEC:
                     # reach → no cancellation → no line), shifting by delay > IR
                     # length just zeros the taps while skipping the derived-state
                     # reset → measured up to −6.65 dB echo cost. So gate it.
+                    #
+                    # This gate reads the inst-ERLE ring ALONE, not
+                    # linear_is_cancelling(), which ORs the windowed reading
+                    # in. Deliberate and not a copy of it: the ring's ~15-frame
+                    # aging is a liability for a CALLER-driven realign that can
+                    # arrive after far silence (apply_external_realign, which
+                    # therefore uses linear_is_cancelling), but this site fires
+                    # only on the estimator's own first acquisition, which is
+                    # far-active by construction, and widening it here would
+                    # change the acquisition trajectory.
                     _warm_ok = False
                     if getattr(self.config, 'delay_acquire_warm_transfer', False) \
                             and self.filter is not None:
                         _wpk = max(list(self._erle_slope_buf)[-15:] or [0.0])
-                        _reach = self.filter.n_partitions * self.filter.hop_size
+                        _reach = self.filter.tap_span
                         _warm_ok = (_wpk > float(getattr(
                             self.config, 'delay_acquire_inst_erle_db', 4.0))
                             and 0 < int(new_delay) < _reach)
@@ -2902,12 +3071,14 @@ class AEC:
         """Is this instance's linear filter demonstrably cancelling right now?
 
         The single definition of "cancelling" behind the backward-jump
-        quarantine (``delay_backward_quarantine_enabled``), public so that a
+        quarantine (``delay_backward_quarantine_enabled``) and behind
+        ``apply_external_realign``'s warm-transfer gate, public so that a
         wrapper owning its own shared delay estimator
         (``pipelines/4ch_aec_bf_nr_res/pipeline.py``) asks the SAME question
         of its lanes that this engine asks of itself, thresholds included,
         instead of restating them. Mirrors C's
-        ``aec_linear_is_cancelling()``.
+        ``aec_linear_is_cancelling()``. The internal MATCHED acquisition gate
+        deliberately does NOT use it — see the note at that site.
 
         TWO readings, because neither alone answers the question over the
         whole life of a lock: windowed ERLE is the sustained evidence but

@@ -480,6 +480,13 @@ class AecConfig:
     # neutral-to-up (DT deg +0.089 firing-subset / +0.019 full-corpus, FS echo
     # +0.009), NE byte-equal, zero ship-bar risk. Fires on ~117/600 FS+DT cases;
     # non-firing cases are byte-equal to the zero-reset path.
+    #
+    # TWO MECHANISMS, never both live on one instance. Besides the MATCHED
+    # first acquisition described above, this flag also enables the warm
+    # tap-transfer inside AEC.apply_external_realign(), the caller-driven
+    # realign that only EXTERNAL_ALIGNED has. Clearing it to study acquisition
+    # therefore also turns every external realign into a filter reset, i.e.
+    # reinstates the "vertical line" in a mode that has no acquisition at all.
     delay_acquire_warm_transfer: bool = True
 
     # ── Shadow filter (dual-filter divergence control) ──────────────────

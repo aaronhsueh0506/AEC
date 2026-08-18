@@ -146,42 +146,95 @@ class PBFDAF:
         self._initial_state_far_energy_floor: float = 1e-4
         self._last_initial_state_active: bool = True
 
-    def reset(self):
+    @property
+    def tap_span(self) -> int:
+        """How far back this filter can model an echo, in samples.
+
+        One spelling of ``n_partitions * hop_size``, shared by
+        ``get_time_domain_filter()``'s buffer, ``warm_shift_ir()``'s clamp and
+        the orchestrator's two warm-transfer span guards, so a change to how
+        reach is derived cannot leave one of them behind.
+        """
+        return self.n_partitions * self.hop_size
+
+    def reset_taps(self):
+        """The ADAPTATION state alone: the taps, the per-partition far spectra
+        they are convolved against, and the far-power normalizer.
+
+        Split out of ``reset()`` so that the boundary between "the filter's own
+        state" and the time-domain ANALYSIS state — ``near_buffer`` /
+        ``far_buffer`` (the two halves of the overlap-save frame), the
+        partition cursor and the last windowed error spectrum — has a single
+        definition and the two can never drift apart. ``reset()`` below is this
+        plus those; the external-realign filter restart
+        (``AEC._reset_filter_for_realign``) is this plus ``far_buffer`` alone,
+        because a caller-side realign invalidates the FAR half of the analysis
+        frame and nothing on the mic side.
+        """
         self.W.fill(0)
         self.X_buf.fill(0)
+        self.power.fill(0)
+
+    def reset(self):
+        self.reset_taps()
         self.near_buffer.fill(0)
         self.far_buffer.fill(0)
-        self.power.fill(0)
         self.partition_idx = 0
         self.error_spec_windowed.fill(0)
 
     def warm_shift_ir(self, shift_samples: int) -> None:
-        """EXPERIMENT: warm delay-realign — shift the learned impulse response
-        LEFT by ``shift_samples`` (toward tap 0), zero-filling the freed tail,
-        instead of zeroing the whole filter. When the ring buffer realigns by D
-        samples (delay acquired), the echo that the filter modelled at tap ~D
-        moves to tap ~0; shifting the IR by D preserves that cancellation across
-        the realign rather than re-converging from scratch (the cold-start
-        "vertical line"). Time-domain shift = exact across partition boundaries.
+        """Warm delay-realign — shift the learned impulse response by
+        ``shift_samples`` taps, zero-filling the freed end, instead of zeroing
+        the whole filter. When the alignment of the far stream this filter sees
+        moves by D samples, the echo the filter modelled at tap ~t moves to tap
+        ~t-D; shifting the IR by D preserves that cancellation across the
+        realign rather than re-converging from scratch (the cold-start
+        "vertical line"). Time-domain shift = exact across partition
+        boundaries.
+
+        SIGNED. Positive = the aligned far stream ADVANCED (the applied delay
+        grew, including a first acquisition from raw far), so the response
+        moves toward tap 0 and the IR shifts LEFT. Negative = it RETARDED, so
+        the response moves toward later taps and the IR shifts RIGHT. A shift
+        larger than the tap span in either direction is clamped to it, which
+        empties the filter — callers gate on the span themselves
+        (``AEC.apply_external_realign``) rather than relying on that. The C
+        port additionally REFUSES a shift (returning -1) on a filter whose
+        span overflows its static IR scratch; that is an allocation artifact
+        of a fixed pool, not an algorithm rule, and has no counterpart here.
+
+        This method also owns the per-partition far history ``X_buf`` for both
+        directions, because "is the history the filter holds still valid after
+        this shift" is one question and only the sign answers it. See the
+        branch below.
         """
         s = int(shift_samples)
-        if s <= 0:
+        if s == 0:
             return
         hop, nF, nP = self.hop_size, self.fft_size, self.n_partitions
-        ir = np.zeros(nP * hop, dtype=np.float32)
-        for p in range(nP):
-            ir[p * hop:(p + 1) * hop] = np.fft.irfft(self.W[p], nF)[:hop]
-        s = min(s, len(ir))
+        ir = self.get_time_domain_filter()
+        total = self.tap_span
+        s = max(-total, min(s, total))
         ir_new = np.zeros_like(ir)
-        ir_new[:len(ir) - s] = ir[s:]
+        if s > 0:
+            ir_new[:total - s] = ir[s:]
+        else:
+            ir_new[-s:] = ir[:total + s]
         for p in range(nP):
             blk = np.zeros(nF, dtype=np.float32)
             blk[:hop] = ir_new[p * hop:(p + 1) * hop]
             self.W[p] = np.fft.rfft(blk, nF).astype(np.complex64)
-        # Keep X_buf by default — clearing it loses the immediate cancellation
-        # (measured: line removal -16.8 vs -23.9 dB, steady 11.5 vs 12.2). The
-        # opt-in clear is kept for experimentation.
-        if getattr(self, '_warm_clear_xbuf', False):
+        # An ADVANCE keeps X_buf: it only leaves a gap in the history, which
+        # settles within a hop, and clearing it loses the immediate
+        # cancellation (measured: line removal -16.8 vs -23.9 dB, steady 11.5
+        # vs 12.2). The opt-in flag is kept for experimentation.
+        #
+        # A RETARD clears it: the held history is AHEAD of the new stream, so
+        # the next hops replay samples X_buf already contains, and convolving
+        # that duplicated context against the shifted taps mis-estimates the
+        # echo for dozens of hops. The cost is a bounded refill transient
+        # instead — see AEC.apply_external_realign for the bound.
+        if s < 0 or getattr(self, '_warm_clear_xbuf', False):
             self.X_buf.fill(0)
 
     def zero_filter_partitions(self, old_size: int, new_size: int) -> None:
@@ -495,7 +548,7 @@ class PBFDAF:
         Consumed by AEC3-aligned FilterAnalyzer for peak/consistency
         analysis.
         """
-        full = np.zeros(self.n_partitions * self.hop_size, dtype=np.float32)
+        full = np.zeros(self.tap_span, dtype=np.float32)
         for p in range(self.n_partitions):
             w_time = np.fft.irfft(self.W[p], self.fft_size).astype(np.float32)
             full[p * self.hop_size:(p + 1) * self.hop_size] = w_time[:self.hop_size]
@@ -654,8 +707,22 @@ class PBFDKF(PBFDAF):
         if delay_change:
             self.H_error_per_bin.fill(np.float32(_aec3_scale.H_ERROR_INIT_FLOAT))
 
-    def reset(self):
-        super().reset()
+    def _rearm_kalman(self):
+        """Everything a restart owes the Kalman side, shared by ``reset()`` and
+        ``reset_taps()`` so the two cannot disagree about it. The
+        measurement-noise and error-PSD trackers and the process noise are
+        statistics OF the taps: a wipe or a realign invalidates them together
+        with the taps themselves, whichever of the two ran.
+
+        Two members go along for the ride and are not that. ``P`` is carried
+        state with no consumer left in this class (and none in the C port,
+        whose PBFDKF has no such array). The ``_p_max_override`` /
+        ``_p_floor_beta`` countdowns are the TEARDOWN half of the warmup
+        re-arm the orchestrator performs after a restart; they live here so a
+        restart cannot inherit a countdown from the run it replaced. Both mean
+        the PBFDKF override of ``reset_taps`` is slightly wider than the base
+        class's "adaptation state alone" boundary.
+        """
         self.P.fill(0.01)
         self.R.fill(1e-2)
         self._error_psd.fill(1e-2)
@@ -673,6 +740,14 @@ class PBFDKF(PBFDAF):
                 delattr(self, attr)
             except AttributeError:
                 pass
+
+    def reset(self):
+        super().reset()
+        self._rearm_kalman()
+
+    def reset_taps(self):
+        super().reset_taps()
+        self._rearm_kalman()
 
     def _update_weights(self, curr_p: int, mu_scale,
                         error_override: Optional[np.ndarray] = None):

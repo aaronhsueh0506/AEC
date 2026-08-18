@@ -41,6 +41,96 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-18 — Python: `AEC.apply_external_realign()`, the caller-side far realign that is not a reset (behaviour-hash bump)
+
+### Added
+
+`AEC.apply_external_realign(delta_samples)` gives an `EXTERNAL_ALIGNED`
+instance a response to its caller changing the far alignment other than
+`reset()`. It is the Python specification of the C
+`aec_apply_external_realign()` shipped in `05dbcde` / `68549b8`; the reference
+had none, so `pipelines/4ch_aec_bf_nr_res/pipeline.py` was still resetting all
+four lanes on every admitted shared-delay change — the behaviour the C side
+abandoned, and the spectrogram "vertical line" it produces (dozens of hops of
+re-exposed echo plus one near-zero output hop).
+
+* Evidence gate: `linear_is_cancelling()` — both readings, not the inst-ERLE
+  ring alone, which ages out across a stretch of far silence — AND `|delta|`
+  inside the tap span.
+* Warm outcome (returns 1): `PBFDAF.warm_shift_ir()` now takes a SIGNED shift.
+  Positive = the aligned far advanced, the IR moves toward tap 0; negative =
+  it retarded, the IR walks the other way and the per-partition far history
+  (`X_buf`) is cleared, because a held history that is AHEAD of the new stream
+  mis-estimates the echo against the shifted taps. The retard therefore costs
+  a bounded refill transient, `ceil((|delta| + the response's tap offset) /
+  hop_size) + 1` hops, whose residual is not bounded by the echo either.
+* Reject outcome (returns 0): a FILTER-ONLY restart,
+  `_reset_filter_for_realign()`. Taps, per-partition far spectra, far-power
+  normalizer, the far half of the analysis frame, and the convergence / mu /
+  stationarity latches go; the AEC3 post chain (i.e. the synthesis overlap-add)
+  and the MIC half of the analysis frame stay. Unshifted taps sit at the
+  alignment the caller abandoned and subtract a decorrelated copy of the echo,
+  so keeping them is worse than having no filter; wiping them without the
+  synthesis restart is the whole reason the entry point exists.
+* `-1` outside `EXTERNAL_ALIGNED`; `delta_samples == 0` is a no-op returning 0.
+
+Refactors that support it and change nothing on their own: `PBFDAF.reset()` is
+now `reset_taps()` (adaptation state) plus the two time-domain analysis
+buffers, and `_reset_filter_derived_state()` is `_reset_filter_latches()` plus
+the AEC3 post chain and the pending-delay clear — both halves shared verbatim
+with the realign path, so the two restarts cannot disagree about what a
+restarted filter may remember. `PBFDAF.tap_span` and the existing
+`get_time_domain_filter()` become the single spelling of the filter's reach and
+of its concatenated IR, replacing the three and two open-coded copies the two
+warm-transfer sites had between them.
+
+`python/tests/test_external_realign.py` carries six tests over the C test's
+semantics, with a `reset()` twin as the can-fail control on both the warm path
+(the defect reproduces) and the reject path (the trajectory to match, and the
+silent output hop to avoid). Reverting each mechanism turns its own row red.
+
+### ⚠ Contract-version event: the AIAEC behaviour hash moves
+
+The note carried since the 2026-08-13 entry — that `python/` is left untouched
+because the AIAEC dataset contract pins an AST hash of the mirrored
+`lib/aec/python` tree, and any edit there invalidates existing shards and
+checkpoints — is cashed in here. The hash
+(`AIAEC/dataset_gen/aec_behavior_hash.py`, schema `canon-ast-1`) moves with ANY
+change under `python/modules/`:
+
+```
+8198bd0e29e4530f16a1ada6eafb86148e09ec749d10e84771bf2c86598143cd
+  -> 7c9249dee507f31837e6025c91ca855c05c59febcdee1cad5189cba7ce49cf88
+```
+
+No shard needs rematerializing and no checkpoint is invalidated: the pair is
+recorded in `ACCEPTED_BEHAVIOR_HASH_MIGRATIONS`
+(Audio_ALG `AIAEC/dataset_gen/linear_aec.py`) with the byte-identity evidence
+the table requires — `linear_error` and `echo_hat` render byte-for-byte
+unchanged (2,048,000 bytes per stem) on the frozen frontend's 32 s,
+16 kHz/512/256, 400 ms-delay scene, which reaches both refactored reset helpers
+on that render, and `warm_shift_ir`'s positive-shift output is pinned
+byte-identical to the pre-change body across 30 (grid, shift) pairs on three
+grids. The migration entry goes live when Audio_ALG's `lib/aec` pin moves to
+this commit; the two are one coordinated event.
+
+`__version__` is deliberately still `4.0.0rc1` — it is stripped from the
+behaviour hash by design, and the fold-in stays scheduled for the next
+coordinated contract-breaking release.
+
+### Notes
+
+- `aec_process()` output is unchanged for any caller that never invokes the
+  new entry point: the two splits re-group the same statements in the same
+  order (one independent pair transposed — the AEC3 post chain now runs after
+  the warmup re-arm), and `warm_shift_ir`'s added arm is the `s < 0` one, which
+  the single existing caller's `0 < new_delay < reach` gate cannot reach.
+- `pytest python/tests`: 243 passed (237 before, +6 new rows).
+- Python-only step. `c_impl/` is untouched here; the C side already carries
+  this mechanism.
+
+---
+
 ## [Unreleased] — 2026-08-17 — `delay_backward_quarantine_*`: bounded backward-jump quarantine on a delay CHANGE (default OFF)
 
 ### The defect
