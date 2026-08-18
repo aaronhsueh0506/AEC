@@ -1976,6 +1976,13 @@ void aec_destroy(Aec* a) {
 
 int aec_hop_size(const Aec* a) { return a->hop_size; }
 
+
+/* Saturating alignment-generation bump: every path that moves (or wipes)
+ * the far alignment increments the AecLinearContext generation token;
+ * saturation never wraps back to a previously observed value. */
+static void aec_bump_delay_generation(Aec* a) {
+    if (a->delay_generation != 0xFFFFFFFFu) { a->delay_generation++; }
+}
 /* Far-end-FFT-sharing instrumentation: how many times THIS instance has
  * actually run its own far-end rfft (not borrowed one, whether from its own
  * internal shadow->main dedup or an external aec_process_context_shared_far()
@@ -2009,8 +2016,7 @@ int aec_apply_external_realign(Aec* a, int delta_samples) {
      * as good as the evidence the configuration produces.) */
     int warm_ok = 0;
     if (a->cfg.delay_acquire_warm_transfer) {
-        int reach = a->main_filter.base.n_partitions
-                    * a->main_filter.base.hop_size;
+        int reach = pbfdaf_tap_span(&a->main_filter.base);
         int magnitude = delta_samples > 0 ? delta_samples : -delta_samples;
         warm_ok = aec_linear_is_cancelling(a) && (magnitude < reach);
     }
@@ -2045,7 +2051,7 @@ int aec_apply_external_realign(Aec* a, int delta_samples) {
          * way. This is the only bump EXTERNAL_ALIGNED ever has (there is no
          * estimator to move a ring offset), and it is what makes the mode's
          * AecLinearContext.generation honest instead of permanently frozen. */
-        if (a->delay_generation != 0xFFFFFFFFu) a->delay_generation++;
+        aec_bump_delay_generation(a);
         return 1;
     }
     /* FILTER RESET. The taps are known to sit at the alignment the caller just
@@ -2061,7 +2067,7 @@ int aec_apply_external_realign(Aec* a, int delta_samples) {
      * without the reset's synthesis restart -- see
      * aec_reset_filter_for_realign for exactly what it preserves and why. */
     aec_reset_filter_for_realign(a);
-    if (a->delay_generation != 0xFFFFFFFFu) a->delay_generation++;
+    aec_bump_delay_generation(a);
     return 0;
 }
 
@@ -2084,7 +2090,7 @@ void aec_reset(Aec* a) {
         a->delay_quarantine_left = -1;
     }
     /* Reset invalidates any alignment context an external consumer cached. */
-    if (a->delay_generation != 0xFFFFFFFFu) a->delay_generation++;
+    aec_bump_delay_generation(a);
     a->far_hop_aligned = 0;
     a->duty_active = 0; a->duty_stable_hops = 0; a->duty_pos = 0;
     a->duty_last_delay = -1; a->duty_erle_peak = 0.0f;
@@ -2418,7 +2424,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             /* Single bump site covers warm-transfer, soft and hard branches
              * below alike -- generation tracks the ring offset, not the
              * recovery flavour. */
-            if (a->delay_generation != 0xFFFFFFFFu) a->delay_generation++;
+            aec_bump_delay_generation(a);
             /* Warm tap-transfer (orch 1407-1422): if the filter is already
              * cancelling (inst-ERLE peak > thresh) AND the delay fits the tap
              * reach, shift the learned IR by the delay instead of zeroing — the
@@ -2427,8 +2433,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             int warm_ok = 0;
             if (a->cfg.delay_acquire_warm_transfer) {
                 float wpk = aec_erle_ring_max_last15(a);
-                int reach = a->main_filter.base.n_partitions
-                            * a->main_filter.base.hop_size;
+                int reach = pbfdaf_tap_span(&a->main_filter.base);
                 warm_ok = (wpk > a->cfg.delay_acquire_inst_erle_db)
                           && (new_delay > 0) && (new_delay < reach);
             }
@@ -2514,7 +2519,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
                 /* Same single-site rule as Path A: the soft-realign branch
                  * below deliberately sets no other flag, so this bump is the
                  * ONLY externally visible trace of a soft shift. */
-                if (a->delay_generation != 0xFFFFFFFFu) a->delay_generation++;
+                aec_bump_delay_generation(a);
                 a->has_pending = 0; a->pending_delay = -1; a->pending_delay_ttl = 0;
                 if (a->cfg.dt_aware_recovery_soft && a->ne_recent_frames > 0) {
                     /* Soft realign (mirrors Python 16285fd): the ring read

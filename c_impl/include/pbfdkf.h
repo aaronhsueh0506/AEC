@@ -340,6 +340,12 @@ void pbfdkf_copy_weights_from(PBFDKF* dst, const PBFDKF* src);
 float pbfdaf_get_error_energy(PBFDAF* p);
 float pbfdkf_get_error_energy(PBFDKF* p);
 
+/* The filter's reach in taps (n_partitions * hop): the single spelling of
+ * the span every warm-transfer eligibility check compares a delay against. */
+static inline int pbfdaf_tap_span(const PBFDAF* p) {
+    return p->n_partitions * p->hop_size;
+}
+
 /* get_time_domain_filter: concat per-partition irfft(W[p])[:hop] →
  * out[n_partitions × hop_size] (caller-owned). Mirrors filters.py:397.
  *

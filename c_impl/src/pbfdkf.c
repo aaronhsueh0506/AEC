@@ -696,10 +696,7 @@ int pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
     if (s > total) s = total;
     if (s < -total) s = -total;
     float *ir = p->scr_ir;
-    for (int part = 0; part < nP; ++part) {
-        fft_inverse(p->fft, p->W + (size_t)part * K, p->time_scratch);
-        for (int i = 0; i < hop; ++i) ir[part * hop + i] = p->time_scratch[i];
-    }
+    pbfdaf_get_time_domain_filter(p, ir);
     if (s > 0) {
         for (int i = 0; i < total - s; ++i) ir[i] = ir[i + s]; /* read-ahead safe */
         for (int i = total - s; i < total; ++i) ir[i] = 0.0f;
