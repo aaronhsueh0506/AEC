@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <math.h>
 
 /* DelayAdjustment enum mirror (delay/delay_types.py). */
@@ -2294,14 +2295,43 @@ int aec_linear_is_cancelling(const Aec* a) {
  * time-domain far signal in this function (saturation detection, delay
  * estimation, mu_scale, ...) is unaffected by far-end-FFT sharing and
  * still needs it. */
+/* Microsecond monotonic stamp for the per-stage diagnostic timing. Truncated
+ * to 32 bits: every consumer subtracts two stamps in UNSIGNED arithmetic, so
+ * the difference is exact for any interval shorter than the ~71.6 minute
+ * wrap, which no hop approaches. */
+static uint32_t aec_now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)((uint64_t)ts.tv_sec * 1000000ull
+                      + (uint64_t)ts.tv_nsec / 1000ull);
+}
+
+void aec_get_last_timing(const Aec* a, AecStageTiming* out) {
+    if (!out) return;
+    if (!a) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+    *out = a->last_timing;
+}
+
 static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
                               const Complex* shared_far_spec) {
     const int hop = a->hop_size, K = a->n_freqs, N = a->n_partitions;
     int stationarity_block_for_post;
+    /* Stage stamps. t_stage closes one stage and opens the next where they
+     * are adjacent, so three windows cost four reads, not six. */
+    uint32_t t_stage, t_mark;
     /* AecLinearContext bookkeeping: CHANGED is "generation moved during this
      * hop", so snapshot at entry; far_hop_aligned is re-derived every hop. */
     a->delay_gen_hop_start = a->delay_generation;
     a->far_hop_aligned = 0;
+    /* Cleared per hop so a stage that does not run this hop reports 0 rather
+     * than the previous hop's figure. */
+    a->last_timing.frontend_us = 0;
+    a->last_timing.linear_us = 0;
+    a->last_timing.res_us = 0;
+    t_stage = aec_now_us();
     memcpy(a->near_hop, mic_in, (size_t)hop * sizeof(float));
     memcpy(a->far_hop,  ref_in, (size_t)hop * sizeof(float));
 
@@ -2729,6 +2759,11 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         }
     }
 
+    /* One stamp closes the pre-filter run (stages 1-8.5) and opens the main
+     * filter. */
+    t_mark = aec_now_us();
+    a->last_timing.frontend_us = t_mark - t_stage;
+
     /* 9. MAIN filter. */
     /* FFT dedup: the shadow ran pre-main on the SAME far_hop with an identical
      * far_buffer (lockstep shift + paired reset), so reuse its far_spec instead
@@ -2760,6 +2795,8 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             pbfdkf_process(&a->main_filter, a->near_hop, a->far_hop, NULL,
                            main_mu_scalar, a->raw_output);
     }
+
+    a->last_timing.linear_us = aec_now_us() - t_mark;
 
     /* 10. stationarity refresh for NEXT hop (StationarityEstimator on
      *     |filter.far_spec|²; first-render latch; block-stationary push). */
@@ -2975,6 +3012,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
     }
 
     /* 17. RES / post block (enable_res). */
+    t_stage = aec_now_us();
     int is_stationary_dt = 0;
     float dt_indicator = 0.0f;
     float erle_windowed = 0.0f;
@@ -3217,6 +3255,8 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
     }
     /* enable_res==False C-parity fallback (orchestrator 2313-2316) is unused
      * here since balanced always has enable_res=True. */
+
+    a->last_timing.res_us = aec_now_us() - t_stage;
 
     /* 19. power EMAs (sample loop; read by NEXT frame's step 17). */
     {

@@ -344,8 +344,8 @@ filter bank、降取樣 render ring 與兩個 lag histogram 都是依 init 設�
 | 格點 | n=1 | n=2 | n=3 | n=4 | n=5（預設） |
 |---|---:|---:|---:|---:|---:|
 | 8 kHz / 256（legacy） | 252,768 B | 258,496 B | 264,224 B | 269,952 B | 275,680 B |
-| 16 kHz / 256 | 356,848 B | 362,576 B | 368,304 B | 374,032 B | 379,760 B |
-| 16 kHz / 512 | 485,920 B | 491,648 B | 497,376 B | 503,104 B | 508,832 B |
+| 16 kHz / 256 | 356,864 B | 362,592 B | 368,320 B | 374,048 B | 379,776 B |
+| 16 kHz / 512 | 485,936 B | 491,664 B | 497,392 B | 503,120 B | 508,848 B |
 | 48 kHz / 1024 | 1,144,144 B | 1,149,872 B | 1,155,600 B | 1,161,328 B | 1,167,056 B |
 
 NE10 backend 在每一格都少 608 B（16 kHz/512 與 48 kHz/1024 少 1,376 B / 2,912 B）；
@@ -374,13 +374,13 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | `delay_mode` | 記憶池 | 相對 `MATCHED n=5` |
 |---|---:|---:|
-| `MATCHED` n=5（預設） | 379,760 B | — |
-| `MATCHED` n=1 | 356,848 B | −22,912 B |
-| `FIXED`，`fixed_delay_samples = 0` | 215,264 B | −164,496 B |
-| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 216,864 B | −162,896 B |
-| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 221,664 B | −158,096 B |
+| `MATCHED` n=5（預設） | 379,776 B | — |
+| `MATCHED` n=1 | 356,864 B | −22,912 B |
+| `FIXED`，`fixed_delay_samples = 0` | 215,280 B | −164,496 B |
+| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 216,880 B | −162,896 B |
+| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 221,680 B | −158,096 B |
 | `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 247,264 B | −132,496 B |
-| `EXTERNAL_ALIGNED` | 214,752 B | −165,008 B |
+| `EXTERNAL_ALIGNED` | 214,768 B | −165,008 B |
 
 #### 環形緩衝大小公式
 
@@ -416,20 +416,20 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | 格點 | fixed=0 | 25 ms | 100 ms | 500 ms |
 |---|---:|---:|---:|---:|
-| 16 kHz / 256 | 215,264 B | 216,864 B | 221,664 B | 247,264 B |
-| 16 kHz / 512 | 344,848 B | 346,448 B | 351,248 B | 376,848 B |
-| 48 kHz / 1024 | 740,576 B | 745,376 B | 759,776 B | 836,576 B |
+| 16 kHz / 256 | 215,280 B | 216,880 B | 221,680 B | 247,280 B |
+| 16 kHz / 512 | 344,864 B | 346,464 B | 351,264 B | 376,864 B |
+| 48 kHz / 1024 | 740,592 B | 745,392 B | 759,792 B | 836,592 B |
 
 > **注意**：`fixed_delay_samples` 很大時 `FIXED` 也可能比 `MATCHED n=5` 更
 > 耗記憶體（48 kHz/1024、2500 ms 為 1,220,576 B，高於 `MATCHED n=5` 的
 > 1,167,056 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
 > 記憶體，正確作法是讓呼叫端自己補償掉大延遲後改用 `EXTERNAL_ALIGNED`。
 
-另外一個明顯的開關（16 kHz/256 KISS，相對 379,760 B）：
+另外一個明顯的開關（16 kHz/256 KISS，相對 379,776 B）：
 
 | 設定 | 記憶池 | 差異 |
 |---|---:|---:|
-| `enable_shadow = 0` | 347,200 B | −32,560 B |
+| `enable_shadow = 0` | 347,216 B | −32,560 B |
 
 `enable_res` 與 `enable_cng` **不影響**記憶池大小（相關緩衝區一律配置）。
 
@@ -477,6 +477,7 @@ aec_reset(&aec);    /* 或 aec_reset(aec) */
 | `aec_far_fft_real_compute_count` | 回傳累計次數 | — | **會 crash** |
 | `aec_get_res_context` | 回傳 `void`，填入結構 | — | **靜默 no-op**（你的結構完全不被寫入） |
 | `aec_debug_status` | 回傳 `void`，填入結構 | — | **靜默 no-op**（你的結構完全不被寫入） |
+| `aec_get_last_timing` | 無 | 把 `*out` 清零 | `a` 為 `NULL` 清零 `out`；`out` 為 `NULL` 直接返回（安全） |
 | `aec_get_mem_breakdown` | 回傳 `1` | 回傳 `0`（`cfg` 無效）並把 `*out` 清零 | `cfg` 為 `NULL` 回 `0`；`out` 為 `NULL` 回 `0`（安全） |
 | `aec_linear_is_cancelling` | 回傳 `1`（正在消除）或 `0` | — | 回傳 `0`（安全；`0` 代表「沒有證據顯示正在消除」，不代表 filter 壞掉） |
 | `aec_is_valid_sample_rate` | 支援回傳 `1` | 不支援回傳 `0` | 不適用（傳入 int） |
@@ -611,6 +612,32 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | `ne_recent_threshold` | `float` | `0.3` | 0 – 1000 | 判定近端有聲音的能量門檻。近端偵測過鈍可調低。 |
 | `filter_misadjustment_scale_min` | `float` | `0.5` | 0 – 1000 | 回音估計修正倍率下限。 |
 | `filter_misadjustment_scale_max` | `float` | `2.0` | 0 – 1000 | 回音估計修正倍率上限。 |
+
+### 6.6b 逐階段耗時（`aec_get_last_timing`）
+
+```c
+typedef struct AecStageTiming AecStageTiming;   /* frontend_us / linear_us / res_us */
+void aec_get_last_timing(const Aec* a, AecStageTiming* out);
+```
+
+最近一個 hop 內三個最大階段的 wall-clock 成本（微秒，`CLOCK_MONOTONIC`）。
+純診斷：引擎自己不回讀，處理結果不受影響。`a` 為 `NULL` 時把 `out` 清零而不是
+失敗；`out` 不得為 `NULL`。
+
+- `frontend_us`：進入點到主濾波器之前——mic HPF、飽和偵測、延遲估計與環形對齊、
+  render activity、`mu_scale`、mic-clip、RSA 更新，以及 shadow filter。
+  `AEC_DELAY_EXTERNAL_ALIGNED` 下估計器不跑，這一項會很小。
+- `linear_us`：主自適應濾波器；若本實例自己算 far-end FFT（而不是透過
+  `aec_process_context_shared_far()` 借用），FFT 也算在這裡。
+- `res_us`：AEC3 post/RES 區塊。只要 `enable_res` **或** `return_res_context`
+  其中之一為真就會跑，所以 context-only 的呼叫端也會看到真實數字。
+
+三者**刻意不等於**整個呼叫：餘額是 stationarity refresh、`e2_coarse`/ERL
+publish、DT analyzer、EPV、`shadow_rise`、misadjustment estimator、power EMA
+與收斂偵測。要呈現完整分解的呼叫端得自己把餘額算出來。
+
+每次 `aec_process*()` 進入時清零，所以一個 hop 只會回報它真的跑到的階段。
+解析度是微秒，低於 1 µs 的階段會讀到 0。
 
 ### 6.7 靜態記憶體拆解（`aec_get_mem_breakdown`）
 

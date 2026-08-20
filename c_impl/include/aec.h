@@ -11,6 +11,8 @@
 extern "C" {
 #endif
 
+#include <stdint.h>
+
 #include "fft_wrapper.h"
 #include "hpf.h"
 #include "saturation.h"
@@ -689,7 +691,45 @@ typedef struct Aec {
 
     /* Immutable all-zero reference used on streaming FIFO underrun. */
     float* fifo_zero_ref;
+
+    /* Per-hop stage timing -- see AecStageTiming below. Appended at the end
+     * so every field above keeps its offset. */
+    struct AecStageTiming {
+        uint32_t frontend_us;
+        uint32_t linear_us;
+        uint32_t res_us;
+    } last_timing;
 } Aec;
+
+/**
+ * Per-hop wall-clock cost of the three largest stages inside aec_process*(),
+ * in microseconds. Diagnostic only: nothing in the engine reads these back
+ * and they do not affect processing. Stamped with CLOCK_MONOTONIC.
+ *
+ *   frontend_us  everything from entry up to the main filter -- mic HPF,
+ *                saturation, delay estimation and ring alignment, render
+ *                activity, mu_scale, mic-clip, RSA update, and the shadow
+ *                filter. Cheap under AEC_DELAY_EXTERNAL_ALIGNED, where the
+ *                delay estimator does not run.
+ *   linear_us    the main adaptive filter (pbfdkf_process), including the
+ *                far-end FFT when this instance computes its own.
+ *   res_us       the AEC3 post/RES block. Runs whenever enable_res OR
+ *                return_res_context is set, so a context-only caller pays it
+ *                too and sees a real number here.
+ *
+ * The three do NOT sum to the call: the remainder is the stationarity
+ * refresh, e2_coarse/ERL publish, the DT analyzer, EPV, shadow_rise, the
+ * misadjustment estimator, the power EMAs and convergence detection. A
+ * caller presenting a breakdown must carry that remainder explicitly.
+ *
+ * Cleared at the top of every aec_process*() call, so a hop reports only what
+ * it actually reached. Resolution is microseconds: a stage under 1 us reads 0.
+ */
+typedef struct AecStageTiming AecStageTiming;
+
+/* Copies the last hop's stage timings into `out`. A NULL instance zeroes
+ * `out` rather than failing; `out` must not be NULL. */
+void aec_get_last_timing(const Aec* a, AecStageTiming* out);
 
 int  aec_create(Aec* a, const AecConfig* cfg);
 void aec_destroy(Aec* a);

@@ -41,6 +41,57 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-20 — `aec_get_last_timing()`: per-hop cost of the three largest stages (ABI: `sizeof(Aec)` +16 B)
+
+### Added
+
+1. **`aec_get_last_timing(const Aec*, AecStageTiming*)`** — the per-hop
+   wall-clock cost of `frontend`, `linear` and `res`, in microseconds. A
+   pipeline could already time a whole `aec_process*()` call from outside, but
+   the three stages inside it were opaque, and on the 4-lane spatial pipeline
+   that opaque block is the largest single item in the hop. Diagnostic only:
+   nothing in the engine reads the record back and no processing depends on it.
+
+   - `frontend_us` — entry through the shadow filter: mic HPF, saturation,
+     delay estimation and ring alignment, render activity, `mu_scale`,
+     mic-clip, RSA update. Cheap under `AEC_DELAY_EXTERNAL_ALIGNED`, where the
+     estimator does not run.
+   - `linear_us` — the main adaptive filter, including the far-end FFT on an
+     instance that computes its own rather than borrowing one through
+     `aec_process_context_shared_far()`.
+   - `res_us` — the AEC3 post/RES block. It runs when EITHER `enable_res` or
+     `return_res_context` is set, so a context-only caller pays it and sees a
+     real number here rather than a zero.
+
+   The three deliberately do not sum to the call. The remainder — stationarity
+   refresh, `e2_coarse`/ERL publish, the DT analyzer, EPV, `shadow_rise`, the
+   misadjustment estimator, the power EMAs and convergence detection — is left
+   for the caller to carry explicitly, because attributing it would mean
+   inventing boundaries the code does not have.
+
+   Cleared at the top of every `aec_process*()` call, so a hop reports only
+   the stages it actually reached. Microsecond resolution: a stage under 1 us
+   reads 0.
+
+### ABI
+
+`sizeof(Aec)` 5816 -> 5832 B; `ALIGN16(sizeof(Aec))` 5824 -> 5840, so
+`aec_get_mem_size()` grows **+16 B per instance** (measured: 379152 -> 379168
+at 16 kHz balanced). Every caller that carves an `Aec` out of its own pool
+moves with it — in this stack that is five pipeline layout versions, one per
+pool: the mono pipeline, the mono ULCNet variant, the 4ch core (four lanes, so
++64 B), the 4ch wrapper and the 4ch ULCNet wrapper. Carve order and buffer set
+are unchanged, so no `build_flags_hash` moves and each downstream
+`layout_version` counter is the only signal that a persisted descriptor is
+stale.
+
+The engine now calls `clock_gettime(CLOCK_MONOTONIC)`, which it previously
+never did — four reads per hop. This is a new libc-time dependency for
+integrators who were linking against a time-free library.
+
+**Output contract intact**: the timing writes touch no signal path; all
+15 `test-*` targets and `selftest` pass unchanged.
+
 ## [Unreleased] — 2026-08-19 — runtime strength retarget: `aec_set_preset()` + a dB-domain ramp (ABI: `sizeof(Aec)` +16 B)
 
 ### Added
