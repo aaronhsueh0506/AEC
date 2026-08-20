@@ -605,8 +605,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
-all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
+.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -717,6 +717,18 @@ TEST_CS_TARGET = $(BIN_DIR)/test_counter_saturation
 TEST_LC_SRCS   = $(TEST_DIR)/test_linear_context.c
 TEST_LC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_LC_SRCS))
 TEST_LC_TARGET = $(BIN_DIR)/test_linear_context
+
+# Permanent runtime-strength-retarget regression test
+# (suppression_gain_set_split_floor_far_active_db + aec_set_preset). Proves the
+# immediate retarget lands on the constructed float, that a ramp advances once
+# per aec_process and lands exactly on the predicted hop, that a retarget
+# mid-ramp continues from the live value, that reset drops ramp progress but
+# keeps the target, that rejection writes nothing, and that a
+# spatial_linear_context lane never advances the ramp at all. Needs the full
+# Aec and SuppressionGain types.
+TEST_RP_SRCS   = $(TEST_DIR)/test_runtime_preset.c
+TEST_RP_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_RP_SRCS))
+TEST_RP_TARGET = $(BIN_DIR)/test_runtime_preset
 
 # Permanent matched-filter-bank-size regression test
 # (AecConfig::delay_num_filters -> delay_aec3_get_mem_size/delay_aec3_init ->
@@ -973,7 +985,7 @@ $(TEST_DR_TARGET): $(TEST_DR_OBJS) | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -1009,6 +1021,10 @@ test-process-context: $(TEST_PC_TARGET)
 # Builds AND runs, same convention as test-counter-saturation above.
 test-linear-context: $(TEST_LC_TARGET)
 	"$(abspath $(TEST_LC_TARGET))"
+
+# Builds AND runs, same convention as test-counter-saturation above.
+test-runtime-preset: $(TEST_RP_TARGET)
+	"$(abspath $(TEST_RP_TARGET))"
 
 # Builds AND runs, same convention as test-counter-saturation above.
 test-delay-num-filters: $(TEST_DNF_TARGET)
@@ -1102,6 +1118,10 @@ $(TEST_PC_TARGET): $(OBJS) $(TEST_PC_OBJS) $(AC_LIB) | _cfg_guard
 $(TEST_LC_TARGET): $(OBJS) $(TEST_LC_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_linear_context [$(BACKEND)] -> $@"
+
+$(TEST_RP_TARGET): $(OBJS) $(TEST_RP_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_runtime_preset [$(BACKEND)] -> $@"
 
 $(TEST_DNF_TARGET): $(OBJS) $(TEST_DNF_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)

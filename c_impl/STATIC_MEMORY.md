@@ -80,8 +80,14 @@ build measured on the current host, at the default `delay_mode = MATCHED` /
 
 | Backend | 256 / 128 | 512 / 256 |
 |---|---:|---:|
-| KISS | 379,712 B | 508,784 B |
-| NE10 | 379,104 B | 507,408 B |
+| KISS | 379,760 B | 508,832 B |
+| NE10 | 379,152 B | 507,456 B |
+
+These four figures were re-measured with `make test-delay-num-filters` on both
+backends. They are a reconciliation, not an increment: the previous table was
+one ABI generation behind the manual's, so it moved by 48 B rather than by the
+16 B that the current `sizeof(Aec)` growth accounts for on its own. Both
+documents now report the same numbers.
 
 The delay configuration moves these numbers, because the matched-filter bank,
 the down-sampled render ring and both lag histograms are carved from this same

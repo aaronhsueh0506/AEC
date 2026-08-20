@@ -54,6 +54,11 @@ void suppression_gain_init(SuppressionGain *sg,
      * gets both a debug assert AND a release-path skip). Never fires for
      * the validated {16000} whitelist (table_len == n_bins == 257 there). */
     assert(tun->table_len == cfg->n_bins);
+    /* Seed the live floor equal to its target: an instance whose runtime
+     * setter is never called then applies exactly cfg->split_floor_far_active,
+     * as it did before the retarget path existed. */
+    sg->split_floor_far_active_live = cfg->split_floor_far_active;
+    sg->split_floor_ramp_ratio = 1.0f;
     sg->last_gain = last_gain;
     sg->last_nearend = last_nearend;
     sg->last_echo = last_echo;
@@ -103,6 +108,88 @@ void suppression_gain_init(SuppressionGain *sg,
 
 void suppression_gain_set_initial_state(SuppressionGain *sg, int state) {
     sg->initial_state = state ? 1 : 0;
+}
+
+/* Bounds for the runtime retarget. The dB range is the config validator's
+ * (aec.c, AEC_CK_RANGE_F on min_gain_floor_far_active_db) so a running
+ * instance cannot be pushed somewhere init would have refused. */
+#define SG_SPLIT_FLOOR_DB_MIN   (-300.0f)
+#define SG_SPLIT_FLOOR_DB_MAX     (50.0f)
+#define SG_SPLIT_FLOOR_RAMP_MS_MAX (60000.0f)
+
+/* One step of the dB-linear (power-geometric) walk toward the target. Idle
+ * whenever live == target, which is every hop of an instance whose setter was
+ * never called -- that is what keeps the default path byte-identical. */
+static void advance_split_floor_ramp(SuppressionGain *sg) {
+    float live = sg->split_floor_far_active_live;
+    float target = sg->cfg.split_floor_far_active;
+    float value;
+    if (live == target) return;
+    value = live * sg->split_floor_ramp_ratio;
+    /* Land exactly instead of approaching asymptotically: a 1-ULP residue
+     * would leave the ramp nominally live for the rest of the stream. */
+    if (sg->split_floor_ramp_ratio == 1.0f ||
+        (sg->split_floor_ramp_ratio > 1.0f ? (value >= target)
+                                           : (value <= target))) {
+        value = target;
+    }
+    sg->split_floor_far_active_live = value;
+}
+
+int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
+                                                   float db, float ramp_ms) {
+    float target, live, ratio;
+    int hops;
+
+    if (!sg) return -1;
+    /* isfinite() first: the range comparisons below are false for NaN, which
+     * would read as "out of range" anyway, but saying so explicitly keeps the
+     * rejection reason legible. */
+    if (!isfinite(db) || db < SG_SPLIT_FLOOR_DB_MIN ||
+        db > SG_SPLIT_FLOOR_DB_MAX) {
+        return -1;
+    }
+    if (!isfinite(ramp_ms) || ramp_ms < 0.0f ||
+        ramp_ms > SG_SPLIT_FLOOR_RAMP_MS_MAX) {
+        return -1;
+    }
+
+    /* Same expression aec_carve() uses, so ramp_ms == 0 lands on exactly the
+     * float a fresh instance built with this dB would hold. */
+    target = powf(10.0f, db / 10.0f);
+    live = sg->split_floor_far_active_live;
+
+    hops = 0;
+    if (ramp_ms > 0.0f && target > 0.0f && live > 0.0f && live != target) {
+        /* aec3_ms_to_hops() ends in a float->int conversion that would be
+         * undefined for a large enough input; the SG_SPLIT_FLOOR_RAMP_MS_MAX
+         * check above is what keeps it in range, since sr and hop_size only
+         * ever come from the library's fixed grid table (worst case
+         * 60 s * 48000/128 = 22500 hops). Using the shared helper rather than
+         * open-coding the division is also what makes this path round exactly
+         * the way every other ms-authored constant does -- and the way the
+         * Python reference's float32 twin does. */
+        hops = aec3_ms_to_hops(ramp_ms, sg->cfg.hop_size, sg->cfg.sr);
+        if (hops < 1) hops = 1;
+    }
+
+    /* Everything validated; only now write. */
+    sg->cfg.split_floor_far_active = target;
+    if (hops == 0) {
+        sg->split_floor_far_active_live = target;
+        sg->split_floor_ramp_ratio = 1.0f;
+        return 0;
+    }
+    ratio = powf(target / live, 1.0f / (float)hops);
+    if (ratio == 1.0f) {
+        /* Step too small (or ramp too short) for the per-hop factor to be
+         * representable as anything but identity: land now rather than stall. */
+        sg->split_floor_far_active_live = target;
+        sg->split_floor_ramp_ratio = 1.0f;
+        return 0;
+    }
+    sg->split_floor_ramp_ratio = ratio;
+    return 0;
 }
 
 int suppression_gain_is_dominant_nearend(const SuppressionGain *sg) {
@@ -310,8 +397,9 @@ static void get_min_gain(SuppressionGain *sg, const float *weighted_residual,
         if (sg->far_active_latched) {
             /* DT (near recently present) lifts the floor toward near-protection;
              * FS (far-active, no near) keeps the aggressive far_active floor. */
-            base_floor = sg->dt_protect_active ? c->split_floor_dt
-                                               : c->split_floor_far_active;
+            base_floor = sg->dt_protect_active
+                             ? c->split_floor_dt
+                             : sg->split_floor_far_active_live;
         } else {
             base_floor = c->split_floor_far_silent;
         }
@@ -469,6 +557,8 @@ const float *suppression_gain_get_gain(
     int low_noise_render;
     float render_x2_sum = 0.0f;
     int hf_lim_applied;
+
+    advance_split_floor_ramp(sg);
 
     suppression_gain_update_dominant_nearend(
         sg, nearend_spectrum, residual_echo, residual_echo_unbounded,

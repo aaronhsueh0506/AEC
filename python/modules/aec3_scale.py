@@ -33,6 +33,8 @@ AEC3_BLOCK_MS = 4.0               # 64 / 16000 * 1000
 AEC3_FFT_LENGTH_BY_2 = 64
 
 
+import numpy as np
+
 def psd_int16_to_float(value: float) -> float:
     """Convert an AEC3 PSD-scale constant (int16²) to our float[-1,1] PSD scale."""
     return value * PSD_SCALE_INV
@@ -60,6 +62,29 @@ def ms_to_hops(ms: float, hop_samples: int, sample_rate: int) -> int:
         return 0
     hops = int(round(ms * 1e-3 * sample_rate / hop_samples))
     return max(1, hops)
+
+
+def ms_to_hops_f32(ms: float, hop_samples: int, sample_rate: int) -> int:
+    """``ms_to_hops`` computed the way the shipping C helper computes it.
+
+    ``ms_to_hops`` above works in double, which is right for a reference. This
+    variant exists for the one quantity that must agree with C's
+    ``aec3_ms_to_hops`` HOP FOR HOP -- the runtime split-floor ramp length, a
+    control input a caller chooses rather than a constant baked at build time.
+
+    The rounding RULE is not the difference: both round half to even. The
+    precision is. C evaluates ``ms * 1e-3f * (float)sr / (float)hop`` in
+    float32, so a value that is exactly a half hop in double need not be one in
+    float -- at 16 kHz / hop 128, ``ms = 20`` is exactly 2.5 hops in double
+    (which rounds to 2) and 2.5000002 in float (which rounds to 3). The casts
+    below reproduce C's operand types and left-to-right order; ``np.rint``
+    matches ``lrintf`` under the default rounding mode.
+    """
+    if ms <= 0:
+        return 0
+    f32 = np.float32
+    hops = f32(f32(ms) * f32(1e-3)) * f32(sample_rate) / f32(hop_samples)
+    return max(1, int(np.rint(hops)))
 
 
 def per_block_rate_to_per_hop(per_block_rate: float,

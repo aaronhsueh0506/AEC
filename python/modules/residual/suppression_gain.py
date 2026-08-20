@@ -518,7 +518,13 @@ class SuppressionGain:
         # v3.22 split min-gain floor (default ON). Precompute power-domain
         # floors from amplitude-dB; see AecConfig.min_gain_split_floor_* .
         self._split_floor_enabled = bool(split_floor_enabled)
+        # ``_split_floor_far_active`` is the TARGET; ``_live`` is what
+        # _get_min_gain actually applies. They are seeded equal and stay equal
+        # unless set_split_floor_far_active_db asks for a ramp, so a caller that
+        # never touches the setter sees the pre-ramp arithmetic unchanged.
         self._split_floor_far_active = float(10.0 ** (split_floor_far_active_db / 10.0))
+        self._split_floor_far_active_live = self._split_floor_far_active
+        self._split_floor_ramp_ratio = 1.0
         self._split_floor_far_silent = float(10.0 ** (split_floor_far_silent_db / 10.0))
         # DT-gated floor: used in place of far_active when the orchestrator sets
         # _dt_protect_active (double-talk). Default == near far_active so an
@@ -620,6 +626,72 @@ class SuppressionGain:
             self._max_dec_lf_nearend = float(self._config.nearend_tuning.max_dec_factor_lf)
             self._max_dec_lf_normal = float(self._config.normal_tuning.max_dec_factor_lf)
 
+    # ── Runtime far-active floor retarget ────────────────────────────────
+    # The far-active split floor is the ONLY field the three shipped presets
+    # differ in, so retargeting it IS a runtime preset change. Target lives in
+    # ``_split_floor_far_active``; ``_live`` walks toward it. A ramp is
+    # geometric in the power domain, which is linear in dB, so no logarithm is
+    # evaluated per hop. Nothing else in the suppressor is disturbed: no
+    # smoothing history, no latch, no dominant-nearend counter.
+    #
+    # Contract (mirrored by the C twin, which returns -1 where this raises):
+    # call between hops only; ramp_ms == 0 applies immediately; a call during
+    # an active ramp restarts from the CURRENT live value; nothing is written
+    # unless every argument validates.
+    SPLIT_FLOOR_DB_MIN = -300.0
+    SPLIT_FLOOR_DB_MAX = 50.0
+    SPLIT_FLOOR_RAMP_MS_MAX = 60000.0
+
+    def set_split_floor_far_active_db(self, db: float,
+                                      ramp_ms: float = 0.0) -> None:
+        db = float(db)
+        ramp_ms = float(ramp_ms)
+        # Validate everything before writing anything: the C twin must be able
+        # to report failure with the instance provably untouched.
+        if not np.isfinite(db) or not (self.SPLIT_FLOOR_DB_MIN <= db
+                                       <= self.SPLIT_FLOOR_DB_MAX):
+            raise ValueError(
+                "split_floor_far_active_db must be finite and within "
+                f"[{self.SPLIT_FLOOR_DB_MIN}, {self.SPLIT_FLOOR_DB_MAX}]: {db}")
+        if not np.isfinite(ramp_ms) or not (0.0 <= ramp_ms
+                                            <= self.SPLIT_FLOOR_RAMP_MS_MAX):
+            raise ValueError(
+                "ramp_ms must be finite and within "
+                f"[0, {self.SPLIT_FLOOR_RAMP_MS_MAX}]: {ramp_ms}")
+        target = float(10.0 ** (db / 10.0))
+        live = self._split_floor_far_active_live
+        hops = 0
+        if ramp_ms > 0.0 and target > 0.0 and live > 0.0 and live != target:
+            from .. import aec3_scale as _aec3_scale
+            hops = _aec3_scale.ms_to_hops_f32(
+                ramp_ms, self._hop_size, self._sr)
+        self._split_floor_far_active = target
+        if hops == 0:
+            self._split_floor_far_active_live = target
+            self._split_floor_ramp_ratio = 1.0
+            return
+        ratio = float((target / live) ** (1.0 / hops))
+        if ratio == 1.0:
+            # ramp_ms so short (or the step so small) that the per-hop factor
+            # rounds to identity; land now rather than stall forever.
+            self._split_floor_far_active_live = target
+            self._split_floor_ramp_ratio = 1.0
+            return
+        self._split_floor_ramp_ratio = ratio
+
+    def _advance_split_floor_ramp(self) -> None:
+        live = self._split_floor_far_active_live
+        target = self._split_floor_far_active
+        if live == target:
+            return
+        ratio = self._split_floor_ramp_ratio
+        value = live * ratio
+        # Land exactly on the target rather than leaving a 1-ULP residue that
+        # would keep the ramp nominally active for the rest of the stream.
+        if ratio == 1.0 or (value >= target if ratio > 1.0 else value <= target):
+            value = target
+        self._split_floor_far_active_live = value
+
     def set_initial_state(self, state: bool) -> None:
         self._initial_state = bool(state)
 
@@ -673,6 +745,7 @@ class SuppressionGain:
             nearend_spectrum, echo_for_det, comfort_noise_spectrum, self._initial_state
         )
         low_noise_render = self._low_render.detect(render_block)
+        self._advance_split_floor_ramp()
         # Split min-gain floor: per-recording far-active LATCH (applied in
         # _get_min_gain; see AecConfig.min_gain_split_floor_*). Latch fires from
         # the FIRST far-active frame on instantaneous render energy — NOT
@@ -941,7 +1014,7 @@ class SuppressionGain:
                 # DT (near recently present) lifts the floor toward near-protection;
                 # FS (far-active, no near) keeps the aggressive far_active floor.
                 base_floor = (self._split_floor_dt if self._dt_protect_active
-                              else self._split_floor_far_active)
+                              else self._split_floor_far_active_live)
             else:
                 base_floor = self._split_floor_far_silent
             np.maximum(min_gain, base_floor, out=min_gain)

@@ -34,7 +34,13 @@ backend is KISS FFT (float32)** on the host/reference build (`make`, malloc);
 the embedded deployment (`make BACKEND=ne10`, caller pool via
 `aec_get_mem_size`/`aec_init`) ships from the same main branch — NE10 vs KISS
 output is not bit-identical to each other (pre-existing), but each backend's
-static path is byte-equal to its own malloc path. Regression anchors: C-goldens
+static path is byte-equal to its own malloc path. `SIMD=0` and `SIMD=1` are
+likewise not bit-identical: the matched filter's dot product
+(`c_impl/src/delay_aec3.c`) uses four accumulators plus `vfmaq_f32` — reordered
+summation *and* fused rounding — and its NLMS update fuses where the scalar
+spells a separate multiply and add. Every gate here is therefore
+**per configuration**: byte-exact against the same configuration before a
+change, never across configurations. Regression anchors: C-goldens
 (`c_impl/test/parity_delay.c` + `c_impl/test/parity_aec_e2e.c`) and staged
 gates vs the `fp64-baseline` tag (60-case stratified AECMOS within noise bar,
 waveform drift median −95 dB, 1-hour soak stable). See the float32 and SIMD
@@ -86,6 +92,37 @@ residual-gain floor that trades echo suppression against near-end preservation:
 `mild` / `aggressive` are deliberate Pareto operating points on the proven
 single-channel DT-deg-vs-echo wall; all share the same `_aec3_post` chain and
 800-case-tuned base. Full version history → [CHANGELOG.md](CHANGELOG.md).
+
+#### Retargeting a running instance
+
+Because the axis is one scalar clamp, the preset can be changed on a live
+instance without rebuilding it — the filter, the delay lock and every smoothing
+history carry on:
+
+```c
+int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms);   /* aec.h */
+```
+
+`ramp_ms == 0` applies on the next hop (not an error) and lands on exactly the
+floor a fresh instance would hold; a positive value walks there linearly in dB,
+bounded at 60 s — worth using, since mild ↔ aggressive is an 18 dB step into a
+hard clamp. Call between hops, serialised with processing; not thread-safe.
+Returns `0`, or `-1` with nothing written on NULL / out-of-enum preset /
+out-of-range `ramp_ms`. Unlike `aec_config_from_preset()`, which falls back to
+balanced for an unrecognised value, this **refuses** — a setter has a caller to
+tell.
+
+The primitive underneath, `suppression_gain_set_split_floor_far_active_db()`
+(`suppression_gain.h`), is public because the four-channel product's shared
+post-stage suppressor is a `SuppressionGain` no `Aec` owns.
+
+Two things to know before measuring a preset change: lanes built with
+`spatial_linear_context` never reach the suppressor's gain path, so retargeting
+them is inert by construction (the 4-channel core has its own setter for its
+shared post stage); and the far-active floor only binds on far-active,
+non-double-talk hops while the same gain also sets the comfort-noise level, so a
+whole-recording average moves less than the dB step suggests. Full contract and
+A/B guidance → [docs/c_user_manual_zh_TW.md §7.1](docs/c_user_manual_zh_TW.md).
 
 ---
 
@@ -331,7 +368,15 @@ hop = aec.hop_size
 while has_audio:
     out = aec.process(mic_block, ref_block)
     erle = aec.get_erle()
+
+# Retarget the strength axis on the running instance (C twin: aec_set_preset).
+# ramp_ms=0 applies next hop; a positive value walks there linearly in dB.
+aec.set_preset(AecPreset.AGGRESSIVE, ramp_ms=100.0)
 ```
+
+`set_preset()` raises `ValueError` on an unknown preset or an out-of-range
+`ramp_ms`, leaving the instance untouched, where `AecConfig.from_preset()` falls
+back to balanced. Call between hops only.
 
 Preset trade-off:
 

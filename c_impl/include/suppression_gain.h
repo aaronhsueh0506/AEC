@@ -142,6 +142,16 @@ typedef struct {
     int    dt_protect_active;   /* bool — set by orchestrator before get_gain
                                  * (== Python _dt_protect_active); lifts the
                                  * floor to split_floor_dt during double-talk. */
+    /* Runtime retarget of cfg.split_floor_far_active. cfg holds the TARGET;
+     * split_floor_far_active_live is what get_min_gain applies. Seeded equal
+     * in suppression_gain_init and only ever separated by
+     * suppression_gain_set_split_floor_far_active_db, so an instance whose
+     * setter is never called performs exactly the pre-ramp arithmetic.
+     * State and not cfg deliberately: aec_reset() carries cfg/tun forward
+     * verbatim, so a target parked here would survive a reset while ramp
+     * PROGRESS must not. */
+    float  split_floor_far_active_live;
+    float  split_floor_ramp_ratio;  /* per-hop power-domain factor; 1 = idle */
     int    initial_state;       /* bool */
     float  stat_mask_frac;
 
@@ -177,6 +187,35 @@ void suppression_gain_init(SuppressionGain *sg,
                            float *gain_out, float *sum_scratch);
 
 void suppression_gain_set_initial_state(SuppressionGain *sg, int state);
+
+/* Retarget the far-active split floor on a RUNNING instance.
+ *
+ * `db` is the same dB-power quantity AecConfig.min_gain_floor_far_active_db
+ * carries, and is validated against the same [-300, 50] range the config
+ * validator applies -- a runtime call must not be able to install a value
+ * init would have rejected. The target conversion is the same expression
+ * aec_carve() uses, so ramp_ms == 0 lands on exactly the float a fresh
+ * instance constructed with that dB would hold.
+ *
+ * ramp_ms == 0 applies on the next hop. ramp_ms > 0 walks there instead, one
+ * step per get_gain() call, geometrically in the power domain -- which is
+ * linearly in dB, so no logarithm is evaluated per hop. The walk lands on the
+ * target exactly rather than approaching it asymptotically. ramp_ms is bounded
+ * at 60 s: aec3_ms_to_hops() ends in a float->int conversion that is undefined
+ * for a large finite input, so the hop count is computed and range-checked in
+ * a wider type here before that helper is ever reached.
+ *
+ * Touches nothing else: no smoothing history, no far-active latch, no
+ * DominantNearend counter, no initial_state. A call made while a ramp is
+ * running restarts from the CURRENT live value, neither snapping back to the
+ * old target nor inheriting the old ratio.
+ *
+ * Call between hops, serialised with get_gain(); not thread-safe.
+ * Returns 0 on success, -1 on a NULL instance or an out-of-range argument,
+ * in which case NOTHING is written -- every value is computed and validated
+ * before the first store. */
+int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
+                                                   float db, float ramp_ms);
 
 /* is_dominant_nearend — returns the RAW DominantNearendDetector hold state
  * (== _dominant_nearend.is_nearend_state()). The orchestrator reads this BEFORE

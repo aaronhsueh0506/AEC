@@ -1469,6 +1469,40 @@ class AEC:
         self._reset_filter_for_realign()
         return 0
 
+    def set_preset(self, preset, ramp_ms: float = 0.0) -> None:
+        """Retarget the residual-echo strength axis on a running instance.
+
+        The three shipped presets differ in exactly one field
+        (``min_gain_floor_far_active_db``; see ``AecConfig.from_preset``), and
+        that field reaches the suppressor as a single scalar floor — so a
+        preset change at runtime is a retarget, not a rebuild. No filter state,
+        smoothing history, latch or detector counter is disturbed.
+
+        ``ramp_ms = 0`` applies the new floor on the next hop, which lands on
+        exactly the value a fresh instance constructed with ``preset`` would
+        use. A positive ``ramp_ms`` walks there linearly in dB instead, which
+        is what an interactive strength control wants: mild↔aggressive is an
+        18 dB step, and the floor is a hard clamp with no smoothing below it.
+
+        Call between hops only. Raises ``ValueError`` on an unknown preset or
+        an out-of-range ``ramp_ms``, with the instance left untouched (the C
+        twin returns -1 in the same cases).
+        """
+        # Coerce FIRST. AecConfig.from_preset() deliberately falls back to
+        # balanced for anything it does not recognise -- correct for a config
+        # factory, wrong for a setter, which has a caller to tell. Without
+        # this, 99 and None would both be silently accepted as balanced.
+        try:
+            preset = AecPreset(preset)
+        except (TypeError, ValueError):
+            raise ValueError(f"unknown AEC preset: {preset!r}")
+        # Single source of truth for the strength table.
+        db = AecConfig.from_preset(preset).min_gain_floor_far_active_db
+        # Validate through the suppressor first so a rejected call cannot leave
+        # self.config disagreeing with the floor actually in force.
+        self._aec3_sg.set_split_floor_far_active_db(db, ramp_ms)
+        self.config.min_gain_floor_far_active_db = db
+
     @property
     def hop_size(self) -> int:
         return self._hop_size

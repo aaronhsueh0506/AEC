@@ -41,6 +41,82 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-19 — runtime strength retarget: `aec_set_preset()` + a dB-domain ramp (ABI: `sizeof(Aec)` +16 B)
+
+### Added
+
+1. **`aec_set_preset(Aec*, AecPreset, float ramp_ms)`** — change the residual-echo
+   strength on a RUNNING instance. The three shipped presets differ in exactly one
+   field (`min_gain_floor_far_active_db`), and that field reaches the suppressor as
+   a single scalar clamp read once per hop, so a preset change is a retarget rather
+   than a rebuild: the filter, the delay lock, every smoothing history, the
+   far-active latch and the DominantNearend counters all carry on. Unlike
+   `aec_config_from_preset()`, which falls back to balanced for an unknown value,
+   this REFUSES one — a setter has a caller to tell.
+
+2. **`suppression_gain_set_split_floor_far_active_db(SuppressionGain*, float db,
+   float ramp_ms)`** — the primitive underneath it, public because the 4-channel
+   product's shared post-stage suppressor is a `SuppressionGain` that no `Aec`
+   owns. `ramp_ms == 0` applies on the next hop and lands on exactly the float a
+   fresh instance built with that dB would hold; a positive `ramp_ms` walks there
+   linearly in dB (geometrically in the power domain, so no logarithm per hop),
+   bounded at 60 s. `db` is validated against the config validator's own
+   `[-300, 50]`, so a runtime call cannot install a value init would have refused,
+   and every argument is checked before the first store — a refusal leaves the
+   instance bit-identical.
+
+   Note for 4-channel integrators: a lane built with `spatial_linear_context`
+   never reaches `suppression_gain_get_gain()`, so retargeting a lane is inert by
+   construction. Retarget the shared post-stage suppressor instead.
+
+### Changed
+
+3. **ABI: `sizeof(SuppressionGain)` 384 → 392 B, `sizeof(Aec)` 5,808 → 5,816 B,
+   and `ALIGN16(sizeof(Aec))` 5,808 → 5,824 B — a uniform +16 B on every pool
+   total.** Two floats are appended to `SuppressionGain`'s STATE block (the live
+   floor and its per-hop ramp factor); `SuppressionGainConfig`'s layout is
+   unchanged. The growth crosses a 16-byte boundary, so unlike a change that
+   `ALIGN16` absorbs, this one does move the carve base and every offset after it.
+   No per-bin array is added: the SuppressionGain sizing terms and carve are
+   untouched, and every DELTA is unaffected (the 5,728 B/filter step, the `FIXED`
+   ring formula, and every mode-to-mode difference — both sides of a subtraction
+   carry the same +16 and it cancels).
+
+   Measured totals, balanced, all four grids:
+
+   | grid | KISS n=5 | KISS n=1 | NE10 n=5 | NE10 n=1 |
+   |---|---:|---:|---:|---:|
+   | 8 kHz/256 (legacy) | 275,680 | 252,768 | 275,072 | 252,160 |
+   | 16 kHz/256 (default) | 379,760 | 356,848 | 379,152 | 356,240 |
+   | 16 kHz/512 | 508,832 | 485,920 | 507,456 | 484,544 |
+   | 48 kHz/1024 | 1,167,056 | 1,144,144 | 1,164,144 | 1,141,232 |
+
+   `EXTERNAL_ALIGNED` (KISS): 176,208 / 214,752 / 343,824 / 738,528 on the same
+   four grids.
+
+   **A caller that hardcoded a byte count must re-query `aec_get_mem_size()`.**
+   Every downstream pipeline descriptor bumped its `layout_version` for this.
+
+4. **`suppression_gain_get_gain()` reads the live floor rather than
+   `cfg.split_floor_far_active` directly.** The config field is now the ramp's
+   TARGET. They are seeded equal and stay equal on any instance whose setter is
+   never called, so the arithmetic is unchanged there — verified byte-equal over
+   3,600 hops on three product grids against the previous build.
+
+5. **`aec_config_from_preset()` now resolves its strength table through a shared
+   helper** so the factory's documented balanced fallback and the setter's refusal
+   read from one table. No behavioural change.
+
+### Python
+
+6. `AEC.set_preset(preset, ramp_ms=0.0)` and the suppressor primitive mirror the C.
+   The ms→hops conversion is deliberately computed in float32 in the C helper's
+   operation order: both round half to even, but a double disagrees with the
+   shipping C wherever the value lands near a half hop (at 16 kHz/hop 128,
+   `ramp_ms = 20` is exactly 2.5 hops in double and 2.5000002 in float). The
+   behaviour hash moves; the frozen dataset frontend never reaches the changed
+   code (`get_gain` is not called on that path) and renders byte-identical.
+
 ## [Unreleased] — 2026-08-18 — Python: `AEC.apply_external_realign()`, the caller-side far realign that is not a reset (behaviour-hash bump)
 
 ### Added

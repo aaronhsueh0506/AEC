@@ -747,6 +747,51 @@ void aec_reset(Aec* a);
  */
 int aec_apply_external_realign(Aec* a, int delta_samples);
 
+/* The strength table, in one place. mild / balanced / aggressive differ ONLY
+ * in the far-active min-gain floor (the SuppressionGain split-floor power
+ * axis), and this is the single lookup for it.
+ *
+ * Public because a product can own a SuppressionGain that no Aec does -- the
+ * 4-channel core's shared post-stage suppressor is one -- and needs the same
+ * table without constructing an AecConfig to read one float out of it.
+ *
+ * Returns 0 and writes *db_out for an in-enum preset, -1 otherwise. The
+ * REFUSAL is the point: aec_config_from_preset() keeps its documented
+ * balanced fallback for an unknown value, while every setter built on this
+ * has a caller to tell. */
+int aec_preset_floor_db(AecPreset preset, float* db_out);
+
+/* Retarget the residual-echo strength axis on a RUNNING instance.
+ *
+ * The three shipped presets differ in exactly one field
+ * (min_gain_floor_far_active_db; see aec_config_from_preset), and that field
+ * reaches the suppressor as a single scalar clamp read once per hop -- so a
+ * preset change is a retarget, not a rebuild. Nothing else is disturbed: the
+ * filter, the delay state, every smoothing history, the far-active latch and
+ * the DominantNearend counters all carry on.
+ *
+ * ramp_ms == 0 applies on the next hop and lands on exactly the floor a fresh
+ * instance constructed with `preset` would use. A positive ramp_ms walks there
+ * linearly in dB instead, which is what an interactive strength control wants:
+ * mild <-> aggressive is an 18 dB step and the floor is a hard clamp with
+ * nothing downstream to smooth it. 100 ms is a reasonable starting point; it
+ * is the caller's choice, not a policy baked in here. ramp_ms is bounded at
+ * 60 s. A call made while a ramp is running restarts from the current live
+ * value.
+ *
+ * NOTE for the 4-channel pipeline: a lane built with spatial_linear_context
+ * never calls the suppressor's gain path at all, so calling this on such a
+ * lane is inert BY CONSTRUCTION -- the gain that shapes that product's output
+ * comes from its own shared post-stage suppressor. See the 4-channel core's
+ * own preset setter, which targets that shared instance.
+ *
+ * Call between hops, serialised with aec_process(); not thread-safe.
+ * Returns 0 on success, -1 on a NULL instance, an out-of-enum preset (this
+ * entry point REFUSES where aec_config_from_preset falls back to balanced --
+ * a setter has a caller to tell) or an out-of-range ramp_ms. On -1 nothing
+ * is written. */
+int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms);
+
 /* Static-memory companions: place Aec + all backing arrays in a single pool.
  * aec_get_mem_size() returns the total byte requirement; caller allocates once.
  * aec_init() places the Aec struct at mem[0] and returns it; no malloc called. */

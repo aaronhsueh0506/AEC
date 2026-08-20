@@ -343,10 +343,10 @@ filter bank、降取樣 render ring 與兩個 lag histogram 都是依 init 設�
 
 | 格點 | n=1 | n=2 | n=3 | n=4 | n=5（預設） |
 |---|---:|---:|---:|---:|---:|
-| 8 kHz / 256（legacy） | 252,752 B | 258,480 B | 264,208 B | 269,936 B | 275,664 B |
-| 16 kHz / 256 | 356,832 B | 362,560 B | 368,288 B | 374,016 B | 379,744 B |
-| 16 kHz / 512 | 485,904 B | 491,632 B | 497,360 B | 503,088 B | 508,816 B |
-| 48 kHz / 1024 | 1,144,128 B | 1,149,856 B | 1,155,584 B | 1,161,312 B | 1,167,040 B |
+| 8 kHz / 256（legacy） | 252,768 B | 258,496 B | 264,224 B | 269,952 B | 275,680 B |
+| 16 kHz / 256 | 356,848 B | 362,576 B | 368,304 B | 374,032 B | 379,760 B |
+| 16 kHz / 512 | 485,920 B | 491,648 B | 497,376 B | 503,104 B | 508,832 B |
+| 48 kHz / 1024 | 1,144,144 B | 1,149,872 B | 1,155,600 B | 1,161,328 B | 1,167,056 B |
 
 NE10 backend 在每一格都少 608 B（16 kHz/512 與 48 kHz/1024 少 1,376 B / 2,912 B）；
 差異來自 FFT handle，與 delay 設定無關。
@@ -358,6 +358,11 @@ NE10 backend 在每一格都少 608 B（16 kHz/512 與 48 kHz/1024 少 1,376 B /
 > 移動，而所有 delta 不變**（每個 filter 5,728 B、`FIXED` 的 byte/ms 公式、
 > mode 之間的差值）。所以舊呼叫端不能沿用先前記下的常數，**必須重新查詢
 > `aec_get_mem_size()` 並重新 init**（見 CHANGELOG ABI 段）。
+>
+> 本節的絕對值於 2026-08-19 以 `make test-delay-num-filters`（KISS/NE10 各跑
+> 一次）重新量測。這一輪同時**校正**了文件內部原本就不一致的地方：§4／§5 的
+> 表格落後一代（16 B），§7 `--print-mem-size` 的範例輸出落後兩代（32 B）。
+> 兩處現在都等於同一次量測的結果。
 
 每少一個 matched filter 固定省 **5,728 B**（每一格點都一樣）：coefficients
 2,048 B ＋ accumulated error 512 B ＋ render ring 1,536 B ＋ highest-peak
@@ -369,13 +374,13 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | `delay_mode` | 記憶池 | 相對 `MATCHED n=5` |
 |---|---:|---:|
-| `MATCHED` n=5（預設） | 379,744 B | — |
-| `MATCHED` n=1 | 356,832 B | −22,912 B |
-| `FIXED`，`fixed_delay_samples = 0` | 215,248 B | −164,496 B |
-| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 216,848 B | −162,896 B |
-| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 221,648 B | −158,096 B |
-| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 247,248 B | −132,496 B |
-| `EXTERNAL_ALIGNED` | 214,736 B | −165,008 B |
+| `MATCHED` n=5（預設） | 379,760 B | — |
+| `MATCHED` n=1 | 356,848 B | −22,912 B |
+| `FIXED`，`fixed_delay_samples = 0` | 215,264 B | −164,496 B |
+| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 216,864 B | −162,896 B |
+| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 221,664 B | −158,096 B |
+| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 247,264 B | −132,496 B |
+| `EXTERNAL_ALIGNED` | 214,752 B | −165,008 B |
 
 #### 環形緩衝大小公式
 
@@ -411,20 +416,20 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | 格點 | fixed=0 | 25 ms | 100 ms | 500 ms |
 |---|---:|---:|---:|---:|
-| 16 kHz / 256 | 215,248 B | 216,848 B | 221,648 B | 247,248 B |
-| 16 kHz / 512 | 344,832 B | 346,432 B | 351,232 B | 376,832 B |
-| 48 kHz / 1024 | 740,560 B | 745,360 B | 759,760 B | 836,560 B |
+| 16 kHz / 256 | 215,264 B | 216,864 B | 221,664 B | 247,264 B |
+| 16 kHz / 512 | 344,848 B | 346,448 B | 351,248 B | 376,848 B |
+| 48 kHz / 1024 | 740,576 B | 745,376 B | 759,776 B | 836,576 B |
 
 > **注意**：`fixed_delay_samples` 很大時 `FIXED` 也可能比 `MATCHED n=5` 更
-> 耗記憶體（48 kHz/1024、2500 ms 為 1,220,560 B，高於 `MATCHED n=5` 的
-> 1,167,040 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
+> 耗記憶體（48 kHz/1024、2500 ms 為 1,220,576 B，高於 `MATCHED n=5` 的
+> 1,167,056 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
 > 記憶體，正確作法是讓呼叫端自己補償掉大延遲後改用 `EXTERNAL_ALIGNED`。
 
-另外一個明顯的開關（16 kHz/256 KISS，相對 379,744 B）：
+另外一個明顯的開關（16 kHz/256 KISS，相對 379,760 B）：
 
 | 設定 | 記憶池 | 差異 |
 |---|---:|---:|
-| `enable_shadow = 0` | 347,184 B | −32,560 B |
+| `enable_shadow = 0` | 347,200 B | −32,560 B |
 
 `enable_res` 與 `enable_cng` **不影響**記憶池大小（相關緩衝區一律配置）。
 
@@ -648,6 +653,90 @@ aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
 
 先用 preset 調整，不要一開始就自己填 `min_gain_floor_far_active_db`。三個值之間需要
 中間值時，才直接覆寫該欄位。傳入超出 enum 範圍的 preset 值會退回 balanced 的設定。
+
+### 7.1 執行期切換 preset（`aec_set_preset`）
+
+```c
+int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms);
+```
+
+不需要重建實例。三個 preset 只差 `min_gain_floor_far_active_db`，而該欄位是抑制器
+每個 hop 只讀一次的單一純量下限，所以換 preset 是**重新指定目標值**，不是重建：
+濾波器、延遲狀態、每一條平滑歷史、far-active latch 與 DominantNearend 計數器全部
+原封不動繼續跑。
+
+```c
+#include "aec.h"
+
+AecConfig cfg;
+aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+Aec* a = aec_init(pool, aec_get_mem_size(&cfg), &cfg);
+
+for (;;) {
+    /* 使用者把強度旋鈕轉到 aggressive：在兩個 hop 之間呼叫，
+     * 100 ms 內以 dB 線性走到新的地板 */
+    if (ui_strength_changed())
+        (void)aec_set_preset(a, AEC_PRESET_AGGRESSIVE, 100.0f);
+
+    aec_process(a, mic, ref, out);   /* 各恰好 hop 個 float32 */
+}
+```
+
+`ramp_ms` 語意：
+
+| `ramp_ms` | 行為 |
+|---|---|
+| `0.0f` | 下一個 hop 就套用，**不是錯誤**。落點與「用該 preset 從頭建一個新實例」持有的 float 完全相同 |
+| `> 0.0f` | 以 dB 為單位線性走過去，每次 hop 走一步，最後**精確落在**目標值（不是漸近逼近）。上限 60 秒，超過即拒絕 |
+
+有 ramp 的理由：mild ↔ aggressive 是 18 dB 的落差，而這個地板是硬性 clamp，
+下游沒有任何東西會替它平滑。100 ms 是合理的起點，但這是呼叫端的選擇，
+函式庫沒有寫死任何政策。
+
+**回傳與拒絕**：成功回 `0`。以下情況回 `-1` 且**什麼都不寫**——`a == NULL`、
+`preset` 超出 enum 範圍、`ramp_ms` 非有限值或超出 `[0, 60000]`。注意這裡與
+`aec_config_from_preset()` 的差異：那是 config factory，遇到不認得的值**退回
+balanced**；這是 setter，有呼叫端可以回報，所以**直接拒絕**。
+
+**呼叫紀律**：在兩個 hop 之間呼叫，與 `aec_process()`（或你實際使用的處理進入點）
+序列化。**非 thread-safe**。ramp 進行中再呼叫一次，會從**當前的 live 值**重新起走，
+既不會彈回舊目標、也不會沿用舊的步進比例。`aec_reset()` 保留目標值、丟棄 ramp 進度
+（目標存在 config、進度存在 state，這是刻意分開的）。
+
+**底層 primitive**。真正做事的是抑制器自己的入口，它是 public 的，因為四麥克風產品
+共用的那個 post 級抑制器是一個沒有任何 `Aec` 擁有的 `SuppressionGain`：
+
+```c
+#include "suppression_gain.h"   /* §「你需要 include 的 header」列的進階 header */
+
+int suppression_gain_set_split_floor_far_active_db(SuppressionGain* sg,
+                                                   float db, float ramp_ms);
+```
+
+`db` 就是 `AecConfig.min_gain_floor_far_active_db` 那個 dB-power 量，並且用**驗證器
+自己的**範圍 `[-300, 50]` 檢查——執行期呼叫不可能裝進一個 init 當初會拒絕的值。
+`ramp_ms` 語意與上表相同。它同樣不動任何平滑歷史、latch、DominantNearend 計數器
+或 `initial_state`。回 `0` 或 `-1`（NULL 或引數超出範圍），`-1` 時什麼都不寫：
+所有值都先算完、驗完，才寫第一個 store。
+
+**四麥克風產品請勿對 lane 呼叫**。四條 lane 都以 `spatial_linear_context` 建立，
+根本不會走到 `suppression_gain_get_gain()`，所以對 lane 呼叫 `aec_set_preset()`
+**依建構方式即為無效操作**——塑形輸出的 gain 來自該產品自己那一個共用的 post 級
+抑制器。請改用四麥克風核心自己的 setter（`four_aec_nr_res_set_aec_preset()`），
+它針對的就是那個共用實例。
+
+**A/B 量測時該預期什麼**（先讀這段再下結論）：far-active 地板只在
+**far-active 且非 double-talk** 的 hop 上生效。double-talk 期間套用的是 DT 地板，
+而 DT 地板在三個 preset 之間**完全相同**；far-active latch 尚未觸發之前，
+套用的是 far-silent 地板。同一個 gain 還決定注入的 comfort noise 量
+（振幅正比於 `sqrt(1 − G_res²)`，所以地板壓得越深、CNG 反而越多）。三件事合起來
+的結果是：**整段錄音的平均值移動幅度會小於 dB 落差所暗示的量**，而且一個只量
+echo／degradation 的 A/B 會把 CNG 的變化錯記到別的機制頭上。請在 echo 對齊
+或 degradation 對齊的條件下比較，並實際試聽。
+
+Python 對應：`AEC.set_preset(preset, ramp_ms=0.0)`（同樣的語意；不合法的 preset 或
+`ramp_ms` 丟 `ValueError`，實例不變）。回歸測試：`make test-runtime-preset`
+與 `python/tests/test_runtime_preset.py`。
 
 ---
 
@@ -922,7 +1011,7 @@ BIN="$(make -s -C c_impl print-bin-dir BACKEND=kiss)"
 （§6.7）後印一行到 **stdout**（其餘旗標一律印到 stderr）：
 
 ```text
-mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=379728 estimator_bytes=33936 ring_bytes=131072
+mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=379760 estimator_bytes=33936 ring_bytes=131072
 ```
 
 欄位依序：resolved 後的 `sample_rate`／`fft_size`／`hop_size`、`delay_mode`、

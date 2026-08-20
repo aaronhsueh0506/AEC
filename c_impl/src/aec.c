@@ -141,20 +141,25 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->filter_misadjustment_scale_max = 2.0f;
 }
 
-void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
-    aec_config_defaults(cfg, sr);
-    /* mild / balanced / aggressive differ ONLY in the far-active min-gain
-     * floor (the SuppressionGain split-floor power axis). */
+int aec_preset_floor_db(AecPreset p, float* db_out) {
+    if (db_out == NULL) return -1;
     switch (p) {
-        case AEC_PRESET_MILD:     cfg->min_gain_floor_far_active_db = -20.0f; break;
-        case AEC_PRESET_BALANCED:   cfg->min_gain_floor_far_active_db = -28.0f; break;
-        case AEC_PRESET_AGGRESSIVE: cfg->min_gain_floor_far_active_db = -38.0f; break;
-        /* preset enum out of range (F05): no default case existed before —
-         * an out-of-enum-range int silently left min_gain_floor_far_active_db
-         * at aec_config_defaults' -28 dB (balanced), which is already a safe,
-         * defined fallback. Made explicit here rather than left implicit. */
-        default: cfg->min_gain_floor_far_active_db = -28.0f; break;
+        case AEC_PRESET_MILD:       *db_out = -20.0f; return 0;
+        case AEC_PRESET_BALANCED:   *db_out = -28.0f; return 0;
+        case AEC_PRESET_AGGRESSIVE: *db_out = -38.0f; return 0;
+        default: return -1;
     }
+}
+
+void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
+    float db;
+    aec_config_defaults(cfg, sr);
+    /* preset enum out of range (F05): no default case existed before —
+     * an out-of-enum-range int silently left min_gain_floor_far_active_db
+     * at aec_config_defaults' -28 dB (balanced), which is already a safe,
+     * defined fallback. Made explicit here rather than left implicit. */
+    cfg->min_gain_floor_far_active_db =
+        (aec_preset_floor_db(p, &db) == 0) ? db : -28.0f;
 }
 
 /* ── Signal-grid resolver: THE single source of truth ─────────────────────
@@ -1994,6 +1999,21 @@ static void aec_bump_delay_generation(Aec* a) {
 long aec_far_fft_real_compute_count(const Aec* a) {
     return a->main_filter.base.far_fft_real_compute_count +
            (a->has_shadow ? a->shadow_filter.far_fft_real_compute_count : 0);
+}
+
+int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms) {
+    float db;
+    if (a == NULL) return -1;
+    if (aec_preset_floor_db(preset, &db) != 0) return -1;
+    /* Let the suppressor validate and apply first: it refuses without writing
+     * anything, so a rejected call cannot leave a->cfg claiming a floor that
+     * is not in force. */
+    if (suppression_gain_set_split_floor_far_active_db(&a->a3_sg, db,
+                                                       ramp_ms) != 0) {
+        return -1;
+    }
+    a->cfg.min_gain_floor_far_active_db = db;
+    return 0;
 }
 
 int aec_apply_external_realign(Aec* a, int delta_samples) {
