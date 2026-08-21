@@ -41,6 +41,28 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-21 — `AEC_STAGE_TIMING`: the stage timing compiles out
+
+### Added
+
+1. **`-DAEC_STAGE_TIMING=0`** — compiles every per-hop stage stamp out.
+   `aec_get_last_timing()` and `AecStageTiming` stay, and all three fields then
+   read 0 on every hop, which is how a caller distinguishes a build that does
+   not measure from one that does.
+
+   Measuring costs **five `clock_gettime()` calls per hop per instance** —
+   twenty in the four-lane pipeline before its own — which is real on a target
+   where the clock is not a cheap vDSO read. Verified by symbol reference:
+   `aec.o` carries one `clock_gettime` relocation by default and none under
+   `AEC_STAGE_TIMING=0`.
+
+   **Default stays on.** The pipeline stage report is built from these fields,
+   so switching the default would silently empty a working diagnostic; an
+   integrator who does not want the cost sets the flag.
+
+   No ABI change: `sizeof(Aec)` and every offset are unchanged, and
+   `test-static-aec` reports all 669,824 samples byte-equal either way.
+
 ## [Unreleased] — 2026-08-20 — `aec_get_last_timing()`: per-hop cost of the three largest stages (ABI: `sizeof(Aec)` +16 B)
 
 ### Added

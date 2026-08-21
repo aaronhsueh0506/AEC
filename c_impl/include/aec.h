@@ -724,6 +724,11 @@ typedef struct Aec {
  *
  * Cleared at the top of every aec_process*() call, so a hop reports only what
  * it actually reached. Resolution is microseconds: a stage under 1 us reads 0.
+ *
+ * Measuring it costs five clock reads per hop per instance -- twenty in the
+ * four-lane pipeline. Build with -DAEC_STAGE_TIMING=0 to compile them out;
+ * every field then reads 0 on every hop, which is how a caller distinguishes
+ * a build that does not measure from one that does.
  */
 typedef struct AecStageTiming AecStageTiming;
 

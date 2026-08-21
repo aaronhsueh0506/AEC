@@ -2295,6 +2295,17 @@ int aec_linear_is_cancelling(const Aec* a) {
  * time-domain far signal in this function (saturation detection, delay
  * estimation, mu_scale, ...) is unaffected by far-end-FFT sharing and
  * still needs it. */
+/* Per-stage timing is diagnostic, and it costs five clock_gettime() calls per
+ * hop per instance -- twenty in the four-lane pipeline, before its own. Build
+ * with -DAEC_STAGE_TIMING=0 to compile every one of them out; the three
+ * fields then read 0, which is how aec_get_last_timing()'s caller tells "not
+ * measured" from "measured". Default on, because the field is what the
+ * pipeline's stage report is built from. */
+#ifndef AEC_STAGE_TIMING
+#define AEC_STAGE_TIMING 1
+#endif
+
+#if AEC_STAGE_TIMING
 /* Microsecond monotonic stamp for the per-stage diagnostic timing. Truncated
  * to 32 bits: every consumer subtracts two stamps in UNSIGNED arithmetic, so
  * the difference is exact for any interval shorter than the ~71.6 minute
@@ -2305,6 +2316,11 @@ static uint32_t aec_now_us(void) {
     return (uint32_t)((uint64_t)ts.tv_sec * 1000000ull
                       + (uint64_t)ts.tv_nsec / 1000ull);
 }
+#else
+/* Every stamp folds to a constant, so the subtractions fold to zero and no
+ * clock is read. */
+#define aec_now_us() 0u
+#endif
 
 void aec_get_last_timing(const Aec* a, AecStageTiming* out) {
     if (!out) return;
