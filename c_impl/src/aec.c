@@ -2295,20 +2295,17 @@ int aec_linear_is_cancelling(const Aec* a) {
  * time-domain far signal in this function (saturation detection, delay
  * estimation, mu_scale, ...) is unaffected by far-end-FFT sharing and
  * still needs it. */
-/* Per-stage timing is diagnostic and costs five clock_gettime() calls per hop
- * per instance -- twenty in the four-lane pipeline, before that pipeline's own
- * nine. DEFAULT OFF, so a release build carries none of it: a diagnostic that
- * has to be switched off is one that ships on by accident. Build with
- * -DAEC_STAGE_TIMING=1 to measure; the three fields read 0 otherwise, which is
- * how aec_get_last_timing()'s caller tells "not measured" from "measured".
+/* Per-stage timing is diagnostic and costs a handful of clock_gettime() calls
+ * per hop per instance -- AecStageTiming's doc comment (aec.h) carries the
+ * count, and is the only place that should. DEFAULT OFF, so a release build
+ * carries none of it: a diagnostic that has to be switched off is one that
+ * ships on by accident. Build with -DAEC_STAGE_TIMING=1 to measure; every
+ * field reads 0 otherwise, which is how aec_get_last_timing()'s caller tells
+ * "not measured" from "measured".
  *
  * A consumer that reports a breakdown must be built to match: this flag
  * decides what the LIBRARY records, and a display-side flag alone will render
  * zeros against a library that was never asked to fill them in. */
-#ifndef AEC_STAGE_TIMING
-#define AEC_STAGE_TIMING 0
-#endif
-
 #if AEC_STAGE_TIMING
 /* Microsecond monotonic stamp for the per-stage diagnostic timing. Truncated
  * to 32 bits: every consumer subtracts two stamps in UNSIGNED arithmetic, so
@@ -2340,14 +2337,17 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
     const int hop = a->hop_size, K = a->n_freqs, N = a->n_partitions;
     int stationarity_block_for_post;
     /* Stage stamps. t_stage closes one stage and opens the next where they
-     * are adjacent, so three windows cost four reads, not six. */
-    uint32_t t_stage, t_mark;
+     * are adjacent, so the four windows cost seven reads, not eight. t_delay
+     * brackets section 3, which sits INSIDE the frontend window and is
+     * subtracted back out of it so the two never double-count. */
+    uint32_t t_stage, t_mark, t_delay;
     /* AecLinearContext bookkeeping: CHANGED is "generation moved during this
      * hop", so snapshot at entry; far_hop_aligned is re-derived every hop. */
     a->delay_gen_hop_start = a->delay_generation;
     a->far_hop_aligned = 0;
     /* Cleared per hop so a stage that does not run this hop reports 0 rather
      * than the previous hop's figure. */
+    a->last_timing.delay_us = 0;
     a->last_timing.frontend_us = 0;
     a->last_timing.linear_us = 0;
     a->last_timing.res_us = 0;
@@ -2403,6 +2403,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             saturation_soft_clip(a->far_hop, a->far_hop, hop, 0.8);
     }
 
+    t_delay = aec_now_us();
     /* 3. delay estimation + ring-buffer alignment. Duty-cycled analysis is
      * ALWAYS ON (baked in — see the duty_* field doc in aec.h): the estimator
      * is FED every hop regardless (accumulate_ex keeps decimators + ring
@@ -2674,6 +2675,12 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
      * mean_sq(far_hop) ONCE here and reuse it at every call site that would
      * otherwise recompute the identical deterministic value from the same
      * unchanged input. */
+    /* Closes BEFORE the mean_sq below: that reduction is an O(hop) hoist for
+     * the stages after this one, not delay work, and delay_us documents
+     * itself as the filter bank plus the ring. */
+    t_delay = aec_now_us() - t_delay;
+    a->last_timing.delay_us = t_delay;
+
     float far_hop_mean_sq = mean_sq(a->far_hop, hop, a->scr_sq);
 
     /* 4. render activity. */
@@ -2782,7 +2789,14 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
     /* One stamp closes the pre-filter run (stages 1-8.5) and opens the main
      * filter. */
     t_mark = aec_now_us();
-    a->last_timing.frontend_us = t_mark - t_stage;
+    /* Disjoint from delay_us: section 3 is a sub-interval of this window, so
+     * subtracting it leaves the mic HPF / saturation / render-activity /
+     * mu_scale / mic-clip / RSA / shadow remainder. Reads t_delay, the local,
+     * rather than the field it was just stored into: with timing compiled out
+     * both are 0, but only the local folds -- the field would be reloaded
+     * across the opaque calls in between. Unsigned arithmetic is exact here
+     * because the sub-interval can never exceed its container. */
+    a->last_timing.frontend_us = (t_mark - t_stage) - t_delay;
 
     /* 9. MAIN filter. */
     /* FFT dedup: the shadow ran pre-main on the SAME far_hop with an identical

@@ -701,6 +701,7 @@ typedef struct Aec {
     /* Per-hop stage timing -- see AecStageTiming below. Appended at the end
      * so every field above keeps its offset. */
     struct AecStageTiming {
+        uint32_t delay_us;
         uint32_t frontend_us;
         uint32_t linear_us;
         uint32_t res_us;
@@ -712,18 +713,25 @@ typedef struct Aec {
  * in microseconds. Diagnostic only: nothing in the engine reads these back
  * and they do not affect processing. Stamped with CLOCK_MONOTONIC.
  *
- *   frontend_us  everything from entry up to the main filter -- mic HPF,
- *                saturation, delay estimation and ring alignment, render
- *                activity, mu_scale, mic-clip, RSA update, and the shadow
- *                filter. Cheap under AEC_DELAY_EXTERNAL_ALIGNED, where the
- *                delay estimator does not run.
+ *   delay_us     delay estimation and ring alignment: the matched-filter
+ *                bank, the duty-cycle bookkeeping around it, the reference
+ *                ring write and the delay-compensating read. Zero under
+ *                AEC_DELAY_EXTERNAL_ALIGNED (no ring, no estimator) and
+ *                small under AEC_DELAY_FIXED (ring, but the matched filter
+ *                never runs). Under AEC_DELAY_MATCHED this is frequently the
+ *                largest single stage of the hop -- which is why it is
+ *                reported on its own rather than folded into frontend_us.
+ *   frontend_us  the rest of the path from entry up to the main filter --
+ *                mic HPF, saturation, render activity, mu_scale, mic-clip,
+ *                RSA update, and the shadow filter. EXCLUDES delay_us, so
+ *                the two never double-count.
  *   linear_us    the main adaptive filter (pbfdkf_process), including the
  *                far-end FFT when this instance computes its own.
  *   res_us       the AEC3 post/RES block. Runs whenever enable_res OR
  *                return_res_context is set, so a context-only caller pays it
  *                too and sees a real number here.
  *
- * The three do NOT sum to the call: the remainder is the stationarity
+ * The four do NOT sum to the call: the remainder is the stationarity
  * refresh, e2_coarse/ERL publish, the DT analyzer, EPV, shadow_rise, the
  * misadjustment estimator, the power EMAs and convergence detection. A
  * caller presenting a breakdown must carry that remainder explicitly.
@@ -731,13 +739,23 @@ typedef struct Aec {
  * Cleared at the top of every aec_process*() call, so a hop reports only what
  * it actually reached. Resolution is microseconds: a stage under 1 us reads 0.
  *
- * ⚠ OFF unless built with -DAEC_STAGE_TIMING=1. Measuring costs five clock
- * reads per hop per instance -- twenty in the four-lane pipeline, before its
- * own -- so a release build carries none of it and every field reads 0 on
- * every hop. That zero is how a caller distinguishes a build that does not
+ * ⚠ OFF unless built with -DAEC_STAGE_TIMING=1. Measuring costs seven clock
+ * reads per hop PER INSTANCE -- a multi-instance caller multiplies that and
+ * should say so in its own doc rather than have this one guess at its
+ * topology -- so a release build carries none of it and every field reads 0
+ * on every hop -- no clock is read at all; what remains is a few scalar
+ * stores into a struct nothing reads back. That zero is how a caller distinguishes a build that does not
  * measure from one that does; a consumer wanting a breakdown must build the
  * LIBRARY with the flag, not just enable its own display.
  */
+/* Defined here rather than in aec.c so a CONSUMER can write
+ * `#if AEC_STAGE_TIMING` and get a defined macro. Without this, such a test
+ * works only by an undefined identifier evaluating to 0 -- true, but by
+ * accident, and silently wrong under -Wundef. */
+#ifndef AEC_STAGE_TIMING
+#define AEC_STAGE_TIMING 0
+#endif
+
 typedef struct AecStageTiming AecStageTiming;
 
 /* Copies the last hop's stage timings into `out`. A NULL instance zeroes
