@@ -122,6 +122,13 @@ typedef enum {
  *   excitation_limit=150/32768, smoothing_fast=0.7, smoothing_slow=0.1,
  *   matching_filter_threshold=0.3, delay_headroom_samples=32,
  *   detect_pre_echo=True, thresholds=DelaySelectionThresholds(5, 20).
+ *
+ * ⚠ detect_pre_echo=True means the pre-echo histogram is MAINTAINED, not
+ * that its candidate is reported: da_aggregator_aggregate() returns the
+ * dominant highest-peak candidate, a deliberate divergence from upstream at
+ * that one seam (see its comment, and docs/aec_methods.md). Upstream reports
+ * the earliest onset because its estimator feeds a RenderDelayController;
+ * here the reported delay aligns a short PBFDKF directly.
  *   _DOWN_SAMPLING_FACTOR=4, _AEC3_BLOCK_SIZE=64, _SUB_BLOCK_SIZE=16,
  *   _CONSISTENT_ESTIMATE_THRESHOLD=125.
  */

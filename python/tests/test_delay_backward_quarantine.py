@@ -121,7 +121,9 @@ _MIS_WIDE_HOPS = 180         # ON at 2.0 s: reads reach hop 174
 _MIS_DELAY = 6400            # true bulk delay, 400 ms
 _MIS_LOCK_HOP = 32           # measured: where the CORRECT delay is acquired
 _MIS_LOCK = 6336             # measured: the correct lock, on the 64-grid
-_MIS_RELOCK_HOP = 49         # measured: where the wrong delay is accepted OFF
+# Retained as the value that must NEVER be applied: this scene used to re-lock
+# to it on hop 49 and hold it. The selection-seam fix removed that, and
+# test_the_pre_echo_mis_lock_no_longer_happens is what keeps it removed.
 _MIS_WRONG = 4800            # _MIS_DELAY - 1600: the pre-echo answer
 
 # --- the FORWARD-move scene (never quarantined) ---------------------------
@@ -135,11 +137,13 @@ _BWD_HOPS = 600
 _BWD_AT = 375
 _BWD_D0 = 3000               # pre-move delay
 _BWD_D1 = 64                 # post-move: EARLIER, so the direction test fires
-# Measured: unguarded acceptance hop 441, guarded 478 -- 37 hops, strictly
-# inside the 62-hop window, because the old path is GONE and cancellation
-# really collapses. Pinned as the strict "engaged at all" plus "released
-# before expiry" pair.
-_BWD_EXPECTED_DELTA = 37
+# Measured: guarded acceptance lands 36 hops after unguarded, strictly inside
+# the 62-hop window, because the old path is GONE and cancellation really
+# collapses. Pinned as the strict "engaged at all" plus "released before
+# expiry" pair. (Was 37 while the aggregator reported the pre-echo candidate;
+# reporting the dominant peak moves acquisition by one 32-sample grid step in
+# this scene, and the hold with it.)
+_BWD_EXPECTED_DELTA = 36
 
 # --- the multipath / path-addition scene ---------------------------------
 # The old reflection at _MP_OLD survives the whole run at gain g_old; a
@@ -290,52 +294,70 @@ class DelayBackwardQuarantineTests(unittest.TestCase):
         self.assertFalse(AecConfig().delay_backward_quarantine_enabled)
         self.assertEqual(AecConfig().delay_backward_quarantine_s, 1.0)
 
-    def test_defect_reproduces_with_the_mechanism_off(self) -> None:
+    def test_the_pre_echo_mis_lock_no_longer_happens(self) -> None:
+        """This scene used to be the defect; it is now the guard that the
+        estimator fix stays.
+
+        It previously acquired correctly and then re-locked to the pre-echo
+        answer, holding it for the rest of the run -- which is what this
+        quarantine was built to DELAY, never to cure. Curing it was estimator
+        work, done at the selection seam: the aggregator now reports the
+        dominant peak (see test_delay_dominant_selection). The scene is kept
+        because an end-to-end assertion through AEC.process() is what would
+        catch the substitution coming back by another route, which the
+        aggregator-level test cannot see.
+
+        Asserted with the mechanism OFF -- the shipped default -- so it is the
+        estimator being tested and not the guard.
+        """
         delays, _, _ = _mis_off()
-        self.assertEqual(delays[_MIS_LOCK_HOP], _MIS_LOCK,
-                         "the correct delay is acquired first")
-        self.assertEqual(delays[_MIS_RELOCK_HOP], _MIS_WRONG,
-                         "then re-locks to the pre-echo answer (true - 1600)")
-        # Sustained, not a glitch: this is why no confirmation window helps.
-        self.assertEqual(set(delays[_MIS_RELOCK_HOP:]), {_MIS_WRONG},
-                         "the wrong delay is held for the rest of the run")
+        acquired = delays[_MIS_LOCK_HOP]
+        self.assertGreater(acquired, 0, "a delay is acquired")
+        self.assertEqual(set(delays[_MIS_LOCK_HOP:]), {acquired},
+                         "the acquired delay is held for the rest of the run")
+        self.assertNotIn(_MIS_WRONG, delays,
+                         "the pre-echo answer (true - 1600) is never applied")
+        # On the 64-sample grid, and closer to the truth than the value this
+        # scene used to settle on before the seam was fixed.
+        self.assertLessEqual(abs(acquired - _MIS_DELAY), 64,
+                             "the applied delay is within one grid step of "
+                             "the true bulk delay")
 
-    def test_quarantine_delays_the_relock_by_exactly_the_window(self) -> None:
-        """Delayed, not cured -- stated as an assertion so the honest framing
-        cannot drift out of the docs without this going red."""
-        on, _, _ = _mis_on()
-        wide, _, _ = _mis_wide()
-        self.assertEqual(on.index(_MIS_WRONG), _MIS_RELOCK_HOP + _WINDOW_HOPS,
-                         "acceptance lands at unguarded_hop + window_hops")
-        self.assertEqual(wide.index(_MIS_WRONG), _MIS_RELOCK_HOP + _WIDE_HOPS,
-                         "doubling the window moves it by exactly the "
-                         "difference -- the expiry is what releases")
-        # The correct answer is what is APPLIED throughout, which is the
-        # property a consumer sees -- not merely that 4800 arrived later.
-        self.assertEqual(
-            set(on[_MIS_LOCK_HOP:_MIS_RELOCK_HOP + _WINDOW_HOPS]), {_MIS_LOCK},
-            "the correct delay is the applied one for the whole window")
-
-    def test_first_acquisition_is_untouched(self) -> None:
+    def test_this_scene_never_engages_the_quarantine_at_all(self) -> None:
+        """Stronger than the acquisition-prefix claim it replaces: with the
+        selection seam fixed there is no backward candidate here to hold, so
+        the whole trajectory must be identical on and off. Path A stays
+        governed by delay_acquire_protect_converged, which this mechanism does
+        not touch."""
         off, _, _ = _mis_off()
         on, _, _ = _mis_on()
-        self.assertEqual(off[:_MIS_RELOCK_HOP], on[:_MIS_RELOCK_HOP],
-                         "Path A is governed by delay_acquire_protect_"
-                         "converged, which this mechanism does not touch")
+        shared = min(len(off), len(on))
+        self.assertEqual(off[:shared], on[:shared],
+                         "enabling the guard changes nothing in this scene")
 
-    def test_inst_erle_peak_is_the_arm_that_sees_the_pre_echo_defect(self) -> None:
-        """The derivation, made falsifiable. If windowed ERLE alone could see
-        the mis-lock there would be no reason for the second arm -- so measure
-        both at the hop the decision is taken."""
-        _, wins, peaks = _mis_off()
-        win = wins[_MIS_RELOCK_HOP]
-        peak = peaks[_MIS_RELOCK_HOP]
-        self.assertLess(win, 2.5,
-                        f"windowed ERLE at the acceptance hop is {win:.3f} dB "
-                        "-- under its own protection threshold")
-        self.assertGreater(peak, 4.0,
-                           f"the inst-ERLE peak is {peak:.3f} dB -- over "
-                           "delay_acquire_inst_erle_db, so it can")
+    def test_windowed_erle_is_the_arm_that_decides_a_real_backward_move(
+            self) -> None:
+        """Which arm is load-bearing, made falsifiable, at the hop the
+        decision is actually taken.
+
+        ⚠ The inst-ERLE arm no longer has a scene in this file that shows it
+        deciding. The scene that used to -- the pre-echo mis-lock, where
+        windowed ERLE read under its threshold while the inst peak read over
+        delay_acquire_inst_erle_db -- does not occur any more now that the
+        aggregator reports the dominant peak. That arm is therefore currently
+        UNPROVEN here rather than shown unnecessary; finding or building a
+        scene for it is follow-up work, not something to assert without one.
+        """
+        delays, wins, peaks = _bwd(False)
+        hop = _first_change_after(delays, _BWD_AT)
+        self.assertGreater(hop, 0, "the unguarded build accepts the move")
+        self.assertGreater(wins[hop], 2.5,
+                           f"windowed ERLE at the acceptance hop is "
+                           f"{wins[hop]:.3f} dB -- over its own protection "
+                           "threshold, so it is the arm that engages here")
+        self.assertLess(peaks[hop], 4.0,
+                        f"the inst-ERLE peak is {peaks[hop]:.3f} dB -- under "
+                        "delay_acquire_inst_erle_db, so it is not")
 
     def test_a_forward_move_is_never_quarantined(self) -> None:
         off, _, _ = _fwd(False)

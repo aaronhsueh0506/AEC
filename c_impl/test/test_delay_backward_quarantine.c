@@ -162,6 +162,17 @@ static int g_pass = 0;
 #define MOVE_AT     375              /* the echo moves at hop 375 (6 s)       */
 #define MOVE_D0     64               /* pre-move delay: inside the tap reach  */
 #define MOVE_D1     3000             /* post-move delay: FORWARD, unguarded   */
+/* The BACKWARD move: the same generator with the endpoints swapped, so the
+ * post-move delay is EARLIER and the direction test fires. This is now the
+ * only scene that offers the quarantine a backward candidate at all -- the
+ * pre-echo mis-lock that used to supply one is fixed at the estimator (see
+ * block 1), so without this the mechanism would ship with no engaging-path
+ * coverage. Released by the collapse well inside the window, because the old
+ * path is genuinely GONE and cancellation really does fall apart. */
+#define BWD_HOPS    750
+#define BWD_AT      375
+#define BWD_D0      3000             /* pre-move delay                        */
+#define BWD_D1      64               /* post-move delay: EARLIER, guarded     */
 
 /* The window sweep of row 3. 4.0 s is the "no permanent veto" end: 250 hops
  * still expires well inside MIS_HOPS. */
@@ -318,76 +329,47 @@ int main(void) {
             if (off[h] != MIS_WRONG) wrong_sustained = 0;
         mis_off_relock = wrong_hop;
 
+        /* This scene USED to be the defect: it acquired the true path and
+         * then re-locked to the pre-echo answer, holding it to the end --
+         * which this quarantine was built to DELAY, never to cure. Curing it
+         * was estimator work, done at the selection seam (the aggregator now
+         * reports the dominant peak; see test_delay_dominant_selection). The
+         * scene is kept, inverted, because an end-to-end assertion through
+         * aec_process() is what would catch the substitution returning by
+         * another route -- which the aggregator-level test cannot see.
+         * Asserted with the mechanism OFF, the shipped default, so it is the
+         * estimator under test and not the guard. */
         CHECK(locked_hop >= 0, "OFF: acquires the true path first");
-        CHECK(wrong_hop > locked_hop,
-              "OFF: then re-locks to the pre-echo answer (true - 1600)");
-        CHECK(wrong_sustained,
-              "OFF: the wrong delay is SUSTAINED to the end of the run "
-              "(so no K-consecutive confirmation could reject it)");
-        CHECK(off[MIS_HOPS - 1] == MIS_WRONG,
-              "OFF: the run ends on the wrong delay");
-        printf("      (OFF: lock hop %d -> %d, re-lock hop %d -> %d)\n",
-               locked_hop, locked_hop >= 0 ? off[locked_hop] : -1,
-               wrong_hop, MIS_WRONG);
-    }
-
-    /* ---- 2. the quarantine DELAYS it by the window, holding 6336 ---- */
-    rc = run_hops(1, MIS_HOPS, on);
-    CHECK(rc == 0, "mislock scene (quarantine ON): aec_create");
-    if (rc == 0 && mis_off_relock > 0) {
-        int q = window_hops(1.0f);          /* the config default            */
-        int on_relock = -1, held = 1;
-        for (h = 0; h < MIS_HOPS; ++h)
-            if (on[h] == MIS_WRONG) { on_relock = h; break; }
-        /* The correct answer is what is served for the WHOLE window, which is
-         * the property that matters to a consumer: not merely "4800 came
-         * later" but "6336 was applied meanwhile". */
-        for (h = mis_off_relock; h < on_relock && h < MIS_HOPS; ++h)
-            if (!in_lock_class(on[h], MIS_DELAY)) held = 0;
-
-        CHECK(on_relock > mis_off_relock,
-              "ON: the wrong re-lock is DELAYED, not prevented "
-              "(this mechanism deliberately is not a mis-lock cure)");
-        CHECK(on_relock - mis_off_relock >= q,
-              "ON: delayed by at LEAST the configured window");
-        CHECK(on_relock == mis_off_relock + q,
-              "ON: delayed by EXACTLY the window -- the expiry is what "
-              "releases, nothing else");
-        CHECK(held,
-              "ON: the CORRECT delay is the applied one on every hop of the "
-              "quarantine window");
-        /* Path A is a different flag and must be untouched. */
-        CHECK(memcmp(off, on, (size_t)mis_off_relock * sizeof(int)) == 0,
-              "ON: every hop up to the unguarded re-lock is identical "
-              "(first acquisition is never quarantined)");
-        printf("      (ON, window %d hops: re-lock hop %d = %d + %d)\n",
-               q, on_relock, mis_off_relock, q);
-    }
-
-    /* ---- 3. the bound IS the expiry: sweep the window ---- */
-    {
-        int i, all_exact = 1;
-        printf("      window sweep (unguarded re-lock hop %d):\n", mis_off_relock);
-        for (i = 0; i < N_WINDOWS; ++i) {
-            static int sweep[MIS_HOPS];
-            int q = window_hops(g_windows[i]);
-            int relock = -1;
-            rc = run_hops_ex(1, g_windows[i], -1.0f, MIS_HOPS, sweep, NULL);
-            if (rc != 0) { all_exact = 0; continue; }
-            for (h = 0; h < MIS_HOPS; ++h)
-                if (sweep[h] == MIS_WRONG) { relock = h; break; }
-            /* relock < 0 means it was never accepted inside the run, which
-             * this equality rejects on its own. */
-            if (relock != mis_off_relock + q) all_exact = 0;
-            printf("        %.2f s = %3d hops -> re-lock hop %d (expected %d)\n",
-                   (double)g_windows[i], q, relock, mis_off_relock + q);
+        CHECK(wrong_hop < 0,
+              "OFF: the pre-echo answer (true - 1600) is never applied");
+        {
+            int held_one = 1;
+            for (h = locked_hop; h >= 0 && h < MIS_HOPS; ++h)
+                if (off[h] != off[locked_hop]) held_one = 0;
+            CHECK(held_one,
+                  "OFF: the acquired delay is held for the rest of the run");
         }
-        CHECK(all_exact,
-              "sweep: acceptance ALWAYS happens inside the run -- there is no "
-              "permanent-veto path, however long cancellation holds up -- and "
-              "it lands on unguarded_hop + window_hops for every window, so "
-              "the window is the only thing setting it");
+        (void)wrong_sustained;
+        printf("      (OFF: lock hop %d -> %d, never re-locked to %d)\n",
+               locked_hop, locked_hop >= 0 ? off[locked_hop] : -1, MIS_WRONG);
     }
+
+    /* ---- 2 and 3 removed: their subject no longer exists ----
+     * They measured how long the guard delayed the pre-echo re-lock, and
+     * swept the window to prove the expiry was what released it. The
+     * estimator no longer produces that candidate (block 1), so both rows
+     * would be asserting about a scene that cannot happen.
+     *
+     * The claims survive where they are still demonstrable: the multipath
+     * rows below engage the guard and are released by the EXPIRY at exactly
+     * one window (+62 hops on this grid), which is the same "the window is
+     * what sets acceptance" property block 3 swept for -- and unlike the
+     * mis-lock scene, multipath is a real echo-path condition rather than an
+     * estimator defect. The backward-MOVE scene is not a substitute: by the
+     * time that move is accepted here cancellation at the old alignment has
+     * long collapsed, so the predicate never holds and the guard does not
+     * engage at all. Python's own backward-move row does engage and pins the
+     * collapse-release path; see test_delay_backward_quarantine.py. */
 
     /* ---- 4. multipath / path addition: all four gain rows re-lock ---- */
     {
@@ -512,11 +494,17 @@ int main(void) {
                   "windowed ERLE ALONE never engages the quarantine here: "
                   "with the inst-peak arm out of reach the trajectory is the "
                   "unguarded one");
-            CHECK(erle_at_change >= 0.0f && erle_at_change < 2.5f,
-                  "and the reason is measurable: windowed ERLE at the change "
-                  "hop is below its own 2.5 dB protection threshold");
-            printf("      (windowed ERLE at the change hop: %.3f dB)\n",
-                   erle_at_change);
+            /* The companion assertion -- that windowed ERLE at the change
+             * hop reads under its own 2.5 dB threshold, which is WHY only
+             * the fast arm could engage -- measured that value at the
+             * pre-echo re-lock. There is no change hop in this scene any
+             * more, so the reading is simply absent (-1) rather than
+             * under-threshold, and asserting on it would be asserting on
+             * nothing. The remaining row above is still the load-bearing
+             * one: it shows the windowed arm alone leaves the trajectory
+             * unguarded here. */
+            printf("      (no change hop in this scene: windowed ERLE at "
+                   "change = %.3f, i.e. never sampled)\n", erle_at_change);
         }
     }
 

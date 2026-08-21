@@ -229,14 +229,25 @@ the refined filter through `RingBuf` (a delay-line on the reference).
 #### Pre-echo detection (matched-filter accumulated-error)
 
 `MatchedFilter` (`modules/delay/matched_filter.py`) is a bank of `num_filters=5`
-NLMS cross-correlators over staggered lag windows. The winning lag is normally
+NLMS cross-correlators over staggered lag windows. The winning lag is
 `MaxSquarePeakIndex(h) + n·intra_lag_shift` — the strongest squared tap. AEC3
-additionally tracks a **pre-echo lag** so the reported delay snaps to the true
+additionally tracks a **pre-echo lag** so *its* reported delay snaps to the
 echo *onset* rather than the strongest tap (which, with reverb, can sit well
-after onset). `detect_pre_echo` is **default-True** (`echo_path_delay_estimator.py:61`,
-AEC3 strict default `echo_canceller3_config.h:73`): the `PreEchoLagAggregator`
-may override the highest-peak lag with the pre-echo candidate when the
-accumulated-error curve shows a leading peak.
+after onset). `detect_pre_echo` is **default-True** (`echo_path_delay_estimator.py:121`,
+AEC3 strict default `echo_canceller3_config.h:73`) and the `PreEchoLagAggregator`
+runs, but this port **does not report its candidate**.
+
+⚠ **Deliberate divergence at the selection seam.** Upstream substitutes the
+pre-echo candidate for the reported delay while still qualifying it with the
+*dominant* peak's histogram — sound there, because its estimator feeds a
+`RenderDelayController` that wants the earliest onset. Here the reported sample
+delay aligns a short PBFDKF directly, so an onset further ahead of the dominant
+echo than that filter spans puts the echo it must cancel outside the filter,
+while confidence still reads 1.0 because confidence describes the dominant
+histogram and not the substituted delay. The product path therefore reports the
+dominant peak; the pre-echo histogram is still computed as the upstream
+reference and as a diagnostic. Pinned by `test_delay_dominant_selection`
+(Python and C).
 
 The pre-echo locator (`ComputePreEchoLag`, AEC3 `matched_filter.cc:516-524`)
 walks the per-tap-group **accumulated squared error of the filter PREFIX** and

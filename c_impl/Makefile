@@ -878,6 +878,11 @@ TEST_DR_OBJS   = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(filter $(SRC_DIR)/%.
                   $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(filter $(TEST_DIR)/%.c,$(TEST_DR_SRCS)))
 TEST_DR_TARGET = $(BIN_DIR)/test_delay_reset
 
+TEST_DDS_SRCS   = $(SRC_DIR)/delay_aec3.c $(SRC_DIR)/aec3_scale.c $(TEST_DIR)/test_delay_dominant_selection.c
+TEST_DDS_OBJS   = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(filter $(SRC_DIR)/%.c,$(TEST_DDS_SRCS))) \
+                  $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(filter $(TEST_DIR)/%.c,$(TEST_DDS_SRCS)))
+TEST_DDS_TARGET = $(BIN_DIR)/test_delay_dominant_selection
+
 # --- CFG_SIG collision guard + directory creation ---------------------------
 # Single order-only prerequisite for every compile/link/archive rule below
 # (replacing the old bare "| $(OBJ_DIR)"/"| $(BIN_DIR)" prerequisites and
@@ -976,6 +981,18 @@ test-delay-reset: $(TEST_DR_TARGET)
 
 $(TEST_DR_TARGET): $(TEST_DR_OBJS) | _cfg_guard
 	$(CC) $(CFLAGS) -o $@ $(TEST_DR_OBJS) -lm
+
+# Builds AND runs, same shape as test-delay-reset: the permanent regression
+# for the delay-SELECTION seam. Self-contained (a synthetic dual-path signal,
+# no fixture file), and it asserts its own premise -- that the dominant and
+# pre-echo aggregators really did produce different candidates -- before
+# asserting which one was reported.
+.PHONY: test-delay-dominant-selection
+test-delay-dominant-selection: $(TEST_DDS_TARGET)
+	"$(abspath $(TEST_DDS_TARGET))"
+
+$(TEST_DDS_TARGET): $(TEST_DDS_OBJS) | _cfg_guard
+	$(CC) $(CFLAGS) -o $@ $(TEST_DDS_OBJS) -lm
 
 # =============================================================================
 # Phase 2 real rules: only defined once AC_LIB is known (see the dispatch

@@ -17,8 +17,15 @@ candidate). For the first 2 seconds it scans the histogram in
 ``kMatchedFilterWindowSizeSubBlocks`` (=32) -sized windows applying a
 ``0.7×`` penalty per later window — biasing the candidate toward the
 EARLIEST high-confidence lag. After 2 s, the candidate is the simple argmax.
-The reported delay in ``Aggregate`` switches from highest-peak to pre-echo
-candidate when this aggregator is active.
+
+⚠ UPSTREAM DIVERGENCE. AEC3 then REPORTS that pre-echo candidate in
+``Aggregate``. This port does not: the reported delay is always the dominant
+highest-peak candidate. Upstream's estimator feeds a RenderDelayController and
+wants the earliest onset; ours hands the sample delay straight to a short
+PBFDKF, so an onset further ahead of the dominant echo than the filter spans
+puts that echo outside the filter. The pre-echo histogram is still computed --
+it is the reference implementation and a diagnostic -- it just does not select
+the production delay. See test_delay_dominant_selection.py.
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -190,8 +197,10 @@ class MatchedFilterLagAggregator:
     threshold has ever been crossed; cleared only by hard reset.
 
     ``detect_pre_echo`` enables the PreEchoLagAggregator
-    (matched_filter_lag_aggregator.cc:73-99). When active, the reported
-    delay switches from highest-peak candidate to pre-echo candidate.
+    (matched_filter_lag_aggregator.cc:73-99). It is computed for reference and
+    diagnostics only: the reported delay is the highest-peak candidate in
+    both settings. See the module docstring for why this departs from
+    upstream at this one seam.
     """
 
     def __init__(
@@ -257,8 +266,14 @@ class MatchedFilterLagAggregator:
                 if self._significant_candidate_found
                 else DelayQuality.COARSE
             )
-            reported_delay = (
-                self._pre_echo.candidate() if self._pre_echo is not None else candidate
-            )
-            return DelayEstimate(quality=quality, delay=int(reported_delay))
+            # PRODUCT POLICY, and a deliberate departure from upstream at
+            # this seam: the dominant peak is reported, never the pre-echo
+            # candidate. `quality` above is derived from the dominant
+            # histogram, so reporting the other candidate would attach that
+            # confidence to a delay it does not describe -- which is how a
+            # 100 ms-early onset reached a PBFDKF that spans 52 ms, carrying
+            # confidence 1.0. Upstream wants the earliest onset because its
+            # estimator feeds a RenderDelayController; ours aligns a short
+            # filter directly. See the class docstring.
+            return DelayEstimate(quality=quality, delay=int(candidate))
         return None

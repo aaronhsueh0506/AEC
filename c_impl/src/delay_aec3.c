@@ -921,7 +921,17 @@ static int da_aggregator_aggregate(DaLagAggregator *agg, int lag_estimate_valid,
         (hist_val > DA_THRESH_INITIAL && !agg->significant_candidate_found)) {
         *quality_out = agg->significant_candidate_found ? DELAY_QUALITY_REFINED
                                                         : DELAY_QUALITY_COARSE;
-        *delay_out = agg->pre_echo.pre_echo_candidate;  /* pre-echo active */
+        /* PRODUCT POLICY, and a deliberate departure from upstream at this
+         * seam: report the dominant peak, never agg->pre_echo. `quality`
+         * above is derived from the dominant histogram, so reporting the
+         * other candidate would attach that confidence to a delay it does
+         * not describe -- which is how a 100 ms-early onset reached a PBFDKF
+         * spanning 52 ms while carrying confidence 1.0. Upstream wants the
+         * earliest onset because its estimator feeds a RenderDelayController;
+         * this one aligns a short filter directly. The pre-echo histogram is
+         * still maintained above, as the reference and a diagnostic.
+         * Mirrors python/modules/delay/lag_aggregator.py's aggregate(). */
+        *delay_out = candidate;
         return 1;
     }
     return 0;

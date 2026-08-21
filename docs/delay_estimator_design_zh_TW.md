@@ -70,6 +70,15 @@ render/capture（per hop）
    這就是 `delay_backward_quarantine_enabled` / `_s`（預設 OFF，見
    `c_user_manual_zh_TW.md` §6.4）的依據。
 
+   > **⚠ 已由根因修復取代（2026-08-21）。** 上面的分析與量測都成立，但當時
+   > 把它當成「需要在下游擋住」的現象，實際上它是**選擇接縫本身的缺陷**：
+   > aggregator 用 highest-peak 直方圖判定品質、卻回傳 pre-echo 候選，所以
+   > 那個錯值天生自洽、confidence 天生是 1.0——這也正是「連續 K 次確認擋
+   > 不住」的原因。修復是讓 production 只回報 dominant peak（pre-echo 仍
+   > 保留供 AEC3 對照與診斷），見 `test_delay_dominant_selection`。
+   > backward quarantine **維持預設 OFF**，它是候選變動的有界暫留機制，
+   > **不是** pre-echo 誤選的解藥；上面那段「依據」應讀作歷史脈絡。
+
    **機制（三件事，缺一不可）**
 
    1. **只隔離可疑方向**：候選必須比現行延遲**更早**才會被隔離。
