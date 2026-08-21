@@ -725,10 +725,12 @@ typedef struct Aec {
  * Cleared at the top of every aec_process*() call, so a hop reports only what
  * it actually reached. Resolution is microseconds: a stage under 1 us reads 0.
  *
- * Measuring it costs five clock reads per hop per instance -- twenty in the
- * four-lane pipeline. Build with -DAEC_STAGE_TIMING=0 to compile them out;
- * every field then reads 0 on every hop, which is how a caller distinguishes
- * a build that does not measure from one that does.
+ * ⚠ OFF unless built with -DAEC_STAGE_TIMING=1. Measuring costs five clock
+ * reads per hop per instance -- twenty in the four-lane pipeline, before its
+ * own -- so a release build carries none of it and every field reads 0 on
+ * every hop. That zero is how a caller distinguishes a build that does not
+ * measure from one that does; a consumer wanting a breakdown must build the
+ * LIBRARY with the flag, not just enable its own display.
  */
 typedef struct AecStageTiming AecStageTiming;
 

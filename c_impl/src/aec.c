@@ -2295,14 +2295,18 @@ int aec_linear_is_cancelling(const Aec* a) {
  * time-domain far signal in this function (saturation detection, delay
  * estimation, mu_scale, ...) is unaffected by far-end-FFT sharing and
  * still needs it. */
-/* Per-stage timing is diagnostic, and it costs five clock_gettime() calls per
- * hop per instance -- twenty in the four-lane pipeline, before its own. Build
- * with -DAEC_STAGE_TIMING=0 to compile every one of them out; the three
- * fields then read 0, which is how aec_get_last_timing()'s caller tells "not
- * measured" from "measured". Default on, because the field is what the
- * pipeline's stage report is built from. */
+/* Per-stage timing is diagnostic and costs five clock_gettime() calls per hop
+ * per instance -- twenty in the four-lane pipeline, before that pipeline's own
+ * nine. DEFAULT OFF, so a release build carries none of it: a diagnostic that
+ * has to be switched off is one that ships on by accident. Build with
+ * -DAEC_STAGE_TIMING=1 to measure; the three fields read 0 otherwise, which is
+ * how aec_get_last_timing()'s caller tells "not measured" from "measured".
+ *
+ * A consumer that reports a breakdown must be built to match: this flag
+ * decides what the LIBRARY records, and a display-side flag alone will render
+ * zeros against a library that was never asked to fill them in. */
 #ifndef AEC_STAGE_TIMING
-#define AEC_STAGE_TIMING 1
+#define AEC_STAGE_TIMING 0
 #endif
 
 #if AEC_STAGE_TIMING

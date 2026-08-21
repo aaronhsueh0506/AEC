@@ -41,7 +41,7 @@ when verdict requires it.
 
 ---
 
-## [Unreleased] — 2026-08-21 — `AEC_STAGE_TIMING`: the stage timing compiles out
+## [Unreleased] — 2026-08-21 — `AEC_STAGE_TIMING`: the stage timing compiles out, and is OFF by default
 
 ### Added
 
@@ -56,9 +56,14 @@ when verdict requires it.
    `aec.o` carries one `clock_gettime` relocation by default and none under
    `AEC_STAGE_TIMING=0`.
 
-   **Default stays on.** The pipeline stage report is built from these fields,
-   so switching the default would silently empty a working diagnostic; an
-   integrator who does not want the cost sets the flag.
+   **Default OFF.** A diagnostic that has to be switched off is one that ships
+   on by accident, so a release build carries none of it and a profile build
+   asks for it: `-DAEC_STAGE_TIMING=1`, or `make PROFILE=1` in the pipelines
+   repo, which also turns on that repo's own wrapper-side half.
+
+   ⚠ This flag decides what the LIBRARY records. A consumer with its own
+   display-side profiling flag must be built against a library that has this
+   one, or its report renders zeros.
 
    No ABI change: `sizeof(Aec)` and every offset are unchanged, and
    `test-static-aec` reports all 669,824 samples byte-equal either way.
