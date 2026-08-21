@@ -23,7 +23,13 @@ extern "C" {
 #include "render_signal_analyzer.h"
 #include "aec3_post.h"   /* Aec3Post + Aec3PostRunObj/In/Scratch + sub-modules */
 
-typedef enum { AEC_PRESET_MILD = 0, AEC_PRESET_BALANCED, AEC_PRESET_AGGRESSIVE } AecPreset;
+/* Stable public values.  The preset factory resolves these to
+ * min_gain_floor_far_active_db = -20, -28, and -38 dB respectively. */
+typedef enum {
+    AEC_PRESET_MILD       = 0,
+    AEC_PRESET_BALANCED   = 1,
+    AEC_PRESET_AGGRESSIVE = 2
+} AecPreset;
 
 /* ── Delay mode (init-time, immutable for the instance's lifetime) ────────
  * The single source of truth for how the far-end is aligned to the mic.
