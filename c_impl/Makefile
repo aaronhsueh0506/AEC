@@ -110,6 +110,46 @@ ALLOW_DIRTY_PUBLISH ?= 0
 ALLOW_UNTRACKED_PUBLISH ?= 0
 ATTEST_STAMP ?=
 
+# PROFILE=1 turns on the per-hop stage timing (aec_get_last_timing(), aec.h).
+# Off by default: a diagnostic that has to be switched off is one that ships
+# on by accident, and a release build takes none of the clock reads. The
+# header carries the per-hop count, and is the only place that does.
+#
+# Folded into CFG_SIG both by name and through CFLAGS, so a profile build and
+# a release build occupy different obj/bin directories and cannot hand each
+# other a stale object.
+#
+# Same spelling as the two pipeline Makefiles that consume this library, so a
+# profile build of the whole chain is one word everywhere rather than a
+# hand-written -D here and a PROFILE there.
+#
+# Orthogonal to DEBUG/`make debug`, which is about log call sites
+# (AEC_DEBUG_LOG, aec_debug.h) rather than measurement -- profiling a build
+# with logging compiled in measures a binary nobody ships.
+#
+# A target whose libc has no POSIX CLOCK_MONOTONIC combines this with
+# -DAEC_NOW_US=<fn>; see the stamp's comment in src/aec.c.
+PROFILE ?= 0
+ifneq ($(words $(PROFILE)),1)
+$(error PROFILE must be exactly 0 or 1, got '$(PROFILE)')
+endif
+ifneq ($(filter-out 0 1,$(PROFILE)),)
+$(error PROFILE must be exactly 0 or 1, got '$(PROFILE)')
+endif
+# Set through PROFILE_CFLAGS -> CFLAGS rather than EXTRA_CFLAGS, mirroring
+# SIMD right below. EXTRA_CFLAGS is forwarded verbatim to the producer
+# sub-makes and folded into CFG_SIG, so smuggling the -D through it made the
+# flag arrive twice whenever a consumer that also has PROFILE drove this
+# build, splitting byte-identical objects across two keys, and re-keyed
+# producers that never reference the macro at all. CFLAGS is already
+# protected from a command-line assignment (see the FP policy guard below),
+# so the knob cannot be silently dropped either.
+ifeq ($(PROFILE),1)
+PROFILE_CFLAGS := -DAEC_STAGE_TIMING=1
+else
+PROFILE_CFLAGS :=
+endif
+
 SIMD ?= 1
 ifneq ($(words $(SIMD)),1)
 $(error SIMD must be exactly 0 or 1, got '$(SIMD)')
@@ -127,6 +167,7 @@ CFLAGS  = -Wall -Wextra -O2 -std=gnu99
 CFLAGS += -I./include -I./example
 CFLAGS += $(EXTRA_CFLAGS)
 CFLAGS += $(SIMD_CFLAGS)
+CFLAGS += $(PROFILE_CFLAGS)
 LDFLAGS = -lm
 LDFLAGS += $(EXTRA_LDFLAGS)
 
@@ -671,7 +712,7 @@ endif
 # Additional CFG_SIG payload coverage: LINK, TOOLCHAIN_CHECK (the
 # guard-skip knob must not alias a guarded build), SRCS (sorted source
 # list, post-NO_STDIO-filter, so source add/remove keys to a fresh directory).
-CFG_SIG_PAYLOAD := CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) LINK=$(LINK) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) AEC_TESTING=$(AEC_TESTING) NO_STDIO=$(NO_STDIO) DEBUG=$(DEBUG) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK) AC_PRODUCER_SIG=$(AC_PRODUCER_SIG) SRCS=$(sort $(SRCS))
+CFG_SIG_PAYLOAD := CC=$(CC) CXX=$(CXX) AR=$(AR) RANLIB=$(RANLIB) LINK=$(LINK) CFLAGS=$(CFLAGS) CXXFLAGS=$(CXXFLAGS) CPPFLAGS=$(CPPFLAGS) LDFLAGS=$(LDFLAGS) EXTRA_CFLAGS=$(EXTRA_CFLAGS) EXTRA_LDFLAGS=$(EXTRA_LDFLAGS) BACKEND=$(BACKEND) SIMD=$(SIMD) PROFILE=$(PROFILE) WERROR=$(WERROR) AEC_TESTING=$(AEC_TESTING) NO_STDIO=$(NO_STDIO) DEBUG=$(DEBUG) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK) AC_PRODUCER_SIG=$(AC_PRODUCER_SIG) SRCS=$(sort $(SRCS))
 CFG_SIG := $(shell printf '%s' "$(CFG_SIG_PAYLOAD)" | cksum | cut -d' ' -f1)
 
 # OBJ_ROOT / BIN_ROOT: where the keyed obj/bin trees
@@ -1595,6 +1636,37 @@ test-no-testing-symbols:
 	 fi; \
 	 echo "PASS: AEC_TESTING archive exports $$want test-only symbol(s)"
 
+.PHONY: audit-profile
+# audit-profile -- the PROFILE knob keys its own build AND actually changes
+# what gets linked, asserted in BOTH directions so the check cannot pass
+# vacuously. The failure mode it guards is silent by construction: a build
+# that quietly loses the flag reports a full table of zeros, which reads as
+# "these stages cost nothing" rather than as "nobody measured".
+audit-profile:
+	@echo "== audit-profile: BACKEND=$(BACKEND) SIMD=$(SIMD) CC=$(CC) =="
+	@stub='-DAEC_NOW_US=aec_test_stub_now_us -include $(TEST_DIR)/profile_timer_stub.h'; \
+	 p0="$$($(MAKE) -s --no-print-directory PROFILE=0 print-lib-path)"; \
+	 p1="$$($(MAKE) -s --no-print-directory PROFILE=1 print-lib-path)"; \
+	 ps="$$($(MAKE) -s --no-print-directory PROFILE=1 EXTRA_CFLAGS="$$stub" print-lib-path)"; \
+	 px="$$($(MAKE) -s --no-print-directory PROFILE=1 EXTRA_CFLAGS=-DAEC_AUDIT_PROFILE_UNRELATED print-lib-path)"; \
+	 test "$$p0" != "$$p1" || { echo "FATAL: PROFILE=0/1 resolved to the SAME path -- CFG_SIG key-isolation broken" >&2; exit 1; }; \
+	 test "$$p1" != "$$ps" || { echo "FATAL: substituting the stamp did not re-key the build" >&2; exit 1; }; \
+	 echo "PASS: key-isolation (PROFILE=0, PROFILE=1 and stamp-substituted all differ)"; \
+	 $(MAKE) --no-print-directory PROFILE=0 lib >/dev/null; \
+	 $(MAKE) --no-print-directory PROFILE=1 lib >/dev/null; \
+	 $(MAKE) --no-print-directory PROFILE=1 EXTRA_CFLAGS="$$stub" lib >/dev/null; \
+	 $(MAKE) --no-print-directory PROFILE=1 EXTRA_CFLAGS=-DAEC_AUDIT_PROFILE_UNRELATED lib >/dev/null; \
+	 n0="$$(nm -u "$$p0" 2>/dev/null | grep -c clock_gettime || true)"; \
+	 n1="$$(nm -u "$$p1" 2>/dev/null | grep -c clock_gettime || true)"; \
+	 ns="$$(nm -u "$$ps" 2>/dev/null | grep -c clock_gettime || true)"; \
+	 nx="$$(nm -u "$$px" 2>/dev/null | grep -c clock_gettime || true)"; \
+	 echo "-- clock_gettime references: PROFILE=0 $$n0 | PROFILE=1 $$n1 | stamp substituted $$ns | PROFILE=1 with an unrelated EXTRA_CFLAGS $$nx"; \
+	 test "$$n0" -eq 0 || { echo "FATAL: PROFILE=0 archive links a clock" >&2; exit 1; }; \
+	 test "$$n1" -gt 0 || { echo "FATAL: PROFILE=1 archive links NO clock -- the flag did not reach the compile, so every other assertion here is vacuous" >&2; exit 1; }; \
+	 test "$$ns" -eq 0 || { echo "FATAL: the substituted stamp still links CLOCK_MONOTONIC" >&2; exit 1; }; \
+	 test "$$nx" -gt 0 || { echo "FATAL: a command-line EXTRA_CFLAGS dropped PROFILE=1 -- the knob is being silently overridden" >&2; exit 1; }; \
+	 echo "PASS: PROFILE=0 links no clock, PROFILE=1 does, substitution removes it, and a command-line EXTRA_CFLAGS does not defeat it"
+
 .PHONY: audit-no-stdio
 audit-no-stdio:
 	@echo "== audit-no-stdio: BACKEND=$(BACKEND) WERROR=$(WERROR) CC=$(CC) =="
@@ -1706,6 +1778,8 @@ help:
 	@echo "  test-detectors-parity-all  Run detector parity on legacy 8 kHz and all three product grids"
 	@echo "  debug   Build with -g -DAEC_DEBUG"
 	@echo "  publish Copy this build's artifacts to dist/<backend>/<config-hash>/ + update dist/<backend>/current"
+	@echo "  audit-profile   Assert PROFILE keys its own build and actually changes what"
+	@echo "                  is linked, in both directions -- run from c_impl/"
 	@echo "  audit-no-stdio  Build lib with NO_STDIO=1 and verify it (and a minimal linked"
 	@echo "                  binary) carry no fprintf/vfprintf/stderr/etc -- see Makefile comment"
 	@echo "  clean   Remove obj/ and bin/ (dist/ survives -- publish is a deliberate release, not a build cache)"
@@ -1725,7 +1799,7 @@ help:
 	@echo "                            only the 'lib' goal; CLI/bench are not built under this flag)"
 	@echo ""
 	@echo "Objects/binaries live in obj|bin/<backend>-<config-hash>/ -- switching"
-	@echo "BACKEND, EXTRA_CFLAGS, or WERROR always lands in a fresh directory"
+	@echo "BACKEND, SIMD, PROFILE, EXTRA_CFLAGS, or WERROR always lands in a fresh directory"
 	@echo "automatically; no manual clean needed, and two differently-configured"
 	@echo "builds can run concurrently in this same tree."
 

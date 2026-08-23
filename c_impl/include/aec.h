@@ -709,9 +709,10 @@ typedef struct Aec {
 } Aec;
 
 /**
- * Per-hop wall-clock cost of the three largest stages inside aec_process*(),
+ * Per-hop wall-clock cost of the four largest stages inside aec_process*(),
  * in microseconds. Diagnostic only: nothing in the engine reads these back
- * and they do not affect processing. Stamped with CLOCK_MONOTONIC.
+ * and they do not affect processing. The stamp is described at the end of
+ * this comment, along with what a target substitutes it with.
  *
  *   delay_us     delay estimation and ring alignment: the matched-filter
  *                bank, the duty-cycle bookkeeping around it, the reference
@@ -747,6 +748,11 @@ typedef struct Aec {
  * stores into a struct nothing reads back. That zero is how a caller distinguishes a build that does not
  * measure from one that does; a consumer wanting a breakdown must build the
  * LIBRARY with the flag, not just enable its own display.
+ *
+ * The stamp is CLOCK_MONOTONIC, which is POSIX rather than C99. A target
+ * whose libc lacks it combines the flag with -DAEC_NOW_US=<fn> to name its
+ * own microsecond timer -- see the stamp's comment in aec.c for the rules
+ * that substitute has to meet.
  */
 /* Defined here rather than in aec.c so a CONSUMER can write
  * `#if AEC_STAGE_TIMING` and get a defined macro. Without this, such a test

@@ -93,6 +93,170 @@ and repacked, and checkpoints trained on the old distribution retrained.
 No ABI movement: no public struct, allocation size, init signature or enum
 changes.
 
+## [Unreleased] — 2026-08-23 — `make PROFILE=1`, and a substitutable stamp for targets without POSIX time
+
+### Added
+
+1. **`PROFILE=0|1`** — the same one-word switch the two consuming pipelines
+   already spell that way, so a profile build of the whole chain no longer
+   means a hand-written `EXTRA_CFLAGS=-DAEC_STAGE_TIMING=1` here and a
+   `PROFILE=1` there. `PROFILE=1` is exactly `-DAEC_STAGE_TIMING=1`; default
+   0, unchanged behaviour. Orthogonal to `DEBUG`/`make debug`, which is about
+   log call sites (`AEC_DEBUG_LOG`) rather than measurement -- profiling a
+   build with logging compiled in measures a binary nobody ships.
+
+2. **`AEC_NOW_US`** — the microsecond stamp, substitutable at build time.
+   `clock_gettime(CLOCK_MONOTONIC, ...)` is POSIX rather than C99 and this
+   library builds for targets with a reduced libc, so
+
+       make PROFILE=1 EXTRA_CFLAGS='-DAEC_NOW_US=board_timer_us -include my_timer.h'
+
+   names the platform's own timer -- a plain identifier, because this repo's
+   FP policy rejects parentheses in `EXTRA_CFLAGS`. The default is then
+   neither compiled nor linked and `<time.h>` is not included. Verified by
+   symbol reference across all three configurations: `libaec.a` carries zero
+   `clock_gettime` relocations at `PROFILE=0`, one at `PROFILE=1`, and zero
+   again at `PROFILE=1` with the stamp substituted.
+
+   The substitute must be monotonic: a stamp that can go backwards makes the
+   unsigned subtraction produce a nonsense interval near the full 32-bit
+   range rather than a small wrong one. Naming a function that returns a
+   constant is a supported way to keep the flag on and pay nothing.
+
+### Fixed
+
+3. **`PROFILE=1` no longer loses to a command-line `EXTRA_CFLAGS`, and no
+   longer arrives twice.** The knob is set through `PROFILE_CFLAGS` folded
+   into `CFLAGS`, mirroring `SIMD` two lines below it, rather than appended to
+   `EXTRA_CFLAGS`.
+
+   `EXTRA_CFLAGS` was the wrong carrier twice over. A command-line assignment
+   beats a plain `+=`, so `make PROFILE=1 EXTRA_CFLAGS=-DFOO` silently
+   produced the release configuration -- the same objects, the same CFG_SIG
+   directory as `PROFILE=0`, and a report of all zeros with nothing saying
+   why. And because `EXTRA_CFLAGS` is forwarded verbatim to every producer
+   sub-make, a consumer that also has `PROFILE` delivered the same `-D` a
+   second time, splitting byte-identical objects across two CFG_SIG keys and
+   re-keying audio_common and NR, neither of which references the macro.
+   `CFLAGS` has neither problem: a command-line assignment to it is already a
+   hard error, and it is not forwarded.
+
+   The two pipelines now forward `PROFILE` by name, so this library's compile
+   receives the flag from its own knob rather than from a `-D` a consumer
+   hand-wrote. They still define `AEC_STAGE_TIMING` for their OWN translation
+   units, which read it to decide whether to copy this record out -- both
+   sides deriving from one `PROFILE` is what keeps the two views from
+   disagreeing. A pin older than this commit has no knob to receive and
+   degrades to the documented one-half state: the wrapper's own stages
+   measure and the AEC block reads zero.
+
+4. **`audit-profile`** — a regression target for a failure mode that is silent
+   by construction, in the shape of `audit-no-stdio`. It asserts, in both
+   directions, that `PROFILE=0`/`PROFILE=1`/stamp-substituted resolve to three
+   distinct keys, that `PROFILE=0` links no clock, that `PROFILE=1` links one
+   (without which every other assertion here would pass vacuously), that
+   substituting the stamp removes it again, and that a command-line
+   `EXTRA_CFLAGS` does not defeat the knob. Each assertion was mutation-tested
+   to confirm it fails when the property it covers is broken.
+
+   No ABI or behaviour change: `sizeof(Aec)`, every offset and every sample
+   are unchanged in all configurations.
+
+## [Unreleased] — 2026-08-21 — the product delay is the DOMINANT matched-filter peak (BEHAVIOUR CHANGE: `linear_error` moves)
+
+### Changed
+
+1. **`MatchedFilterLagAggregator.aggregate()` / `da_aggregator_aggregate()`
+   report the dominant highest-peak candidate, never the pre-echo one.**
+
+   Both sides qualified the estimate with the *dominant* peak's histogram and
+   then reported the *pre-echo* candidate. That is upstream AEC3's behaviour
+   and correct there -- its estimator feeds a `RenderDelayController` that
+   wants the earliest echo onset. Here the reported sample delay aligns a
+   832-tap PBFDKF (52 ms at 16 kHz) directly, so an onset further ahead of the
+   dominant echo than the filter spans puts the echo it must cancel outside
+   the filter entirely -- while confidence reads 1.0, because confidence
+   described a candidate that was not the one returned.
+
+   Measured on a far-end single-talk capture whose true bulk delay is 6210
+   samples: the applied delay oscillated between 6144 and 4608 ten times and
+   latched on 4608, and 3--13 s ERLE was 1.37 dB. Reporting the dominant peak
+   settles at 6212 with two changes and 5.51 dB -- against a measured oracle
+   linear ceiling of 6.96--7.03 dB for that recording, i.e. within ~1.5 dB of
+   what any linear AEC could do on it.
+
+   The pre-echo histogram is still computed and still reset with the
+   aggregator. It is the upstream reference and a diagnostic; only its role in
+   selecting the production delay is gone. This is an intentional divergence
+   at one seam, not an AEC3 parity fix.
+
+2. **`test_delay_backward_quarantine`'s mis-lock rows are inverted, and two
+   are removed.** That quarantine was built to DELAY this mis-lock, never to
+   cure it -- its own docstring said curing it was estimator work. With the
+   estimator fixed the scene no longer mis-locks, so the row that reproduced
+   the defect now guards that it stays fixed, end-to-end through
+   `aec_process()`. The rows that measured how long acceptance was delayed,
+   and swept the window to prove the expiry released it, are gone with their
+   subject; the multipath rows still engage the guard and are still released
+   by the expiry at exactly one window, which carries that claim.
+
+   ⚠ The inst-ERLE arm of the predicate no longer has a scene demonstrating
+   it is the deciding one -- the pre-echo mis-lock was that scene. It is
+   currently unproven rather than shown unnecessary. `delay_backward_quarantine`
+   remains default OFF.
+
+### Impact
+
+⚠ **This moves samples in `linear_error`.** It is not frontend-equivalent, so
+`aec_behavior_hash` changes and no migration may connect the old waveform to
+the new one. AIAEC corpora must have their `linear_error` channel recomputed
+and repacked, and checkpoints trained on the old distribution retrained.
+No ABI movement: no public struct, allocation size, init signature or enum
+changes.
+
+## [Unreleased] — 2026-08-23 — `make PROFILE=1`, and a substitutable stamp for targets without POSIX time
+
+### Added
+
+1. **`PROFILE=0|1`** — the same one-word switch the two consuming pipelines
+   already spell that way, so a profile build of the whole chain no longer
+   means a hand-written `EXTRA_CFLAGS=-DAEC_STAGE_TIMING=1` here and a
+   `PROFILE=1` there. `PROFILE=1` is exactly `-DAEC_STAGE_TIMING=1`; default
+   0, unchanged behaviour. Orthogonal to `DEBUG`/`make debug`, which is about
+   log call sites (`AEC_DEBUG_LOG`) rather than measurement -- profiling a
+   build with logging compiled in measures a binary nobody ships.
+
+2. **`AEC_NOW_US`** — the microsecond stamp, substitutable at build time.
+   `clock_gettime(CLOCK_MONOTONIC, ...)` is POSIX rather than C99 and this
+   library builds for targets with a reduced libc, so
+
+       make PROFILE=1 EXTRA_CFLAGS='-DAEC_NOW_US=board_timer_us -include my_timer.h'
+
+   names the platform's own timer -- a plain identifier, because this repo's
+   FP policy rejects parentheses in `EXTRA_CFLAGS`. The default is then
+   neither compiled nor linked and `<time.h>` is not included. Verified by
+   symbol reference across all three configurations: `libaec.a` carries zero
+   `clock_gettime` relocations at `PROFILE=0`, one at `PROFILE=1`, and zero
+   again at `PROFILE=1` with the stamp substituted.
+
+   The substitute must be monotonic: a stamp that can go backwards makes the
+   unsigned subtraction produce a nonsense interval near the full 32-bit
+   range rather than a small wrong one. Naming a function that returns a
+   constant is a supported way to keep the flag on and pay nothing.
+
+### Fixed
+
+3. **`PROFILE=1` no longer loses to a command-line `EXTRA_CFLAGS`.** A
+   command-line assignment beats a plain `+=` in a Makefile, so
+   `make PROFILE=1 EXTRA_CFLAGS=-DFOO` built the release configuration --
+   same objects, the same CFG_SIG directory as `PROFILE=0`, and a report of
+   all zeros with nothing anywhere saying why. The append is now `override`.
+   Verified by build-directory hash: the two invocations now resolve to the
+   same profile directory and `PROFILE=0` to a different one.
+
+   No ABI or behaviour change: `sizeof(Aec)`, every offset and every sample
+   are unchanged in all three configurations.
+
 ## [Unreleased] — 2026-08-21 — `AEC_STAGE_TIMING`: the stage timing compiles out, and is OFF by default
 
 ### Added

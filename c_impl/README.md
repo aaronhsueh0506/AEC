@@ -26,11 +26,12 @@ c_impl/
 make            # → bin/<backend>-<config-hash>/aec_wav (CLI binary)
 make lib        # → bin/<backend>-<config-hash>/libaec.a (static library)
 make SIMD=0     # force every optional SIMD path (including matched filter) to scalar
+make PROFILE=1  # compile the per-hop stage timing in (aec_get_last_timing(); off by default)
 make clean
 ```
 
 Artifacts land in a config-hashed `bin/<backend>-<config-hash>/` directory
-(switching `BACKEND`/`SIMD`/`EXTRA_CFLAGS`/`WERROR` always lands in a fresh one
+(switching `BACKEND`/`SIMD`/`PROFILE`/`EXTRA_CFLAGS`/`WERROR` always lands in a fresh one
 automatically — no stale-object risk, no manual clean needed). Run `make
 print-bin-dir` (same flags as your build) to get the exact path, or `make
 publish` to copy this build's artifacts to a stable `dist/<backend>/current/`

@@ -616,28 +616,69 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 ### 6.6b 逐階段耗時（`aec_get_last_timing`）
 
 ```c
-typedef struct AecStageTiming AecStageTiming;   /* frontend_us / linear_us / res_us */
+typedef struct AecStageTiming AecStageTiming;   /* delay_us / frontend_us / linear_us / res_us */
 void aec_get_last_timing(const Aec* a, AecStageTiming* out);
 ```
 
-最近一個 hop 內三個最大階段的 wall-clock 成本（微秒，`CLOCK_MONOTONIC`）。
-純診斷：引擎自己不回讀，處理結果不受影響。`a` 為 `NULL` 時把 `out` 清零而不是
-失敗；`out` 不得為 `NULL`。
+最近一個 hop 內四個最大階段的 wall-clock 成本（微秒，預設用
+`CLOCK_MONOTONIC`）。純診斷：引擎自己不回讀，處理結果不受影響。`a` 為 `NULL`
+時把 `out` 清零而不是失敗；`out` 不得為 `NULL`。
 
-- `frontend_us`：進入點到主濾波器之前——mic HPF、飽和偵測、延遲估計與環形對齊、
+- `delay_us`：延遲估計與環形對齊——matched-filter bank、它周圍的 duty-cycle
+  記帳、參考環寫入與補償讀出。`AEC_DELAY_EXTERNAL_ALIGNED` 下恆為 0（沒有環也
+  沒有估計器），`AEC_DELAY_FIXED` 下很小（有環，但 matched filter 不跑）。
+  `AEC_DELAY_MATCHED` 下這一項經常是整個 hop 最大的單一階段，所以它獨立回報而
+  不是併進 `frontend_us`。
+- `frontend_us`：進入點到主濾波器之前的其餘部分——mic HPF、飽和偵測、
   render activity、`mu_scale`、mic-clip、RSA 更新，以及 shadow filter。
-  `AEC_DELAY_EXTERNAL_ALIGNED` 下估計器不跑，這一項會很小。
+  **不含** `delay_us`，兩者不會重複計算。
 - `linear_us`：主自適應濾波器；若本實例自己算 far-end FFT（而不是透過
   `aec_process_context_shared_far()` 借用），FFT 也算在這裡。
 - `res_us`：AEC3 post/RES 區塊。只要 `enable_res` **或** `return_res_context`
   其中之一為真就會跑，所以 context-only 的呼叫端也會看到真實數字。
 
-三者**刻意不等於**整個呼叫：餘額是 stationarity refresh、`e2_coarse`/ERL
+四者**刻意不等於**整個呼叫：餘額是 stationarity refresh、`e2_coarse`/ERL
 publish、DT analyzer、EPV、`shadow_rise`、misadjustment estimator、power EMA
 與收斂偵測。要呈現完整分解的呼叫端得自己把餘額算出來。
 
 每次 `aec_process*()` 進入時清零，所以一個 hop 只會回報它真的跑到的階段。
 解析度是微秒，低於 1 µs 的階段會讀到 0。
+
+#### 預設關閉
+
+⚠ **量測要建置時開啟**，否則四個欄位每個 hop 都讀 0：
+
+```bash
+make PROFILE=1              # 等同 EXTRA_CFLAGS=-DAEC_STAGE_TIMING=1
+```
+
+每 hop 每實例七次 clock 讀取，所以 release build 一次都不做——會被切掉的診斷
+不會不小心出貨。那個 0 就是呼叫端分辨「沒量」與「量了但很快」的唯一線索；
+想要分解的消費端必須建置**函式庫**時就帶旗標，只開自己的顯示旗標沒有用。
+
+`EXTRA_CFLAGS` 與 `PROFILE` 都折進 config hash，所以 profile build 與 release
+build 各有自己的 `bin/<backend>-<hash>/`，不會互相交出過期的 object。
+
+#### 目標平台沒有 `CLOCK_MONOTONIC` 時
+
+`clock_gettime(CLOCK_MONOTONIC, ...)` 是 POSIX 而非 C99，精簡 libc 的目標平台
+不一定有。這種平台這樣開：
+
+```bash
+make PROFILE=1 EXTRA_CFLAGS='-DAEC_NOW_US=board_timer_us -include my_timer.h'
+```
+
+`AEC_NOW_US` 要是**純識別字**（本 repo 的 FP policy 不允許 `EXTRA_CFLAGS` 出現
+括號），指向一個不收參數、回傳 `uint32_t` 微秒的函式，宣告由整合者自備。指定
+之後預設實作既不編譯也不連結，`<time.h>` 也不會被 include。
+
+替代時鐘必須**單調**：會倒退的 stamp 會讓無號減法產生接近 32-bit 全距的荒謬
+數值，而不是一個小的錯誤值。指向一個永遠回傳同一個值的函式是合法用法——每個
+階段都讀 0，只剩對一個沒人回讀的結構做幾次純量寫入。
+
+兩支包裝這個函式庫的 pipeline 各自有同名慣例的覆寫點
+（`AUDIO_PIPELINE_NOW_US`、`FOUR_AEC_NR_RES_NOW_US`），刻意不共用：一個元件的
+時鐘屬於該元件自己的建置契約。
 
 ### 6.7 靜態記憶體拆解（`aec_get_mem_breakdown`）
 

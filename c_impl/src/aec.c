@@ -8,7 +8,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <math.h>
 
 /* DelayAdjustment enum mirror (delay/delay_types.py). */
@@ -2310,13 +2309,38 @@ int aec_linear_is_cancelling(const Aec* a) {
 /* Microsecond monotonic stamp for the per-stage diagnostic timing. Truncated
  * to 32 bits: every consumer subtracts two stamps in UNSIGNED arithmetic, so
  * the difference is exact for any interval shorter than the ~71.6 minute
- * wrap, which no hop approaches. */
+ * wrap, which no hop approaches.
+ *
+ * CLOCK_MONOTONIC is POSIX, not C99, and this library builds for targets with
+ * a reduced libc (see NO_STDIO). Such a target enables the timing with
+ *
+ *     -DAEC_STAGE_TIMING=1 -DAEC_NOW_US=board_timer_us
+ *
+ * naming a function that takes no argument and returns uint32_t microseconds;
+ * it must be a plain identifier, because this Makefile rejects parentheses in
+ * EXTRA_CFLAGS, and its declaration is the integrator's to supply. The
+ * default below is then neither compiled nor linked and <time.h> is not
+ * included -- the point of the switch is a platform that does not have it.
+ *
+ * A clock that is cheap but not monotonic is the wrong substitute: a stamp
+ * that can go backwards makes the unsigned subtraction produce a nonsense
+ * interval near the full 32-bit range rather than a small wrong one.
+ *
+ * The pipelines that wrap this library each carry their own override for the
+ * same reason, deliberately rather than sharing one: a component's timer is
+ * part of that component's build contract, and audio_common is a producer of
+ * these builds, not a place to key them from. */
+#ifndef AEC_NOW_US
+#include <time.h>
 static uint32_t aec_now_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint32_t)((uint64_t)ts.tv_sec * 1000000ull
                       + (uint64_t)ts.tv_nsec / 1000ull);
 }
+#else
+static uint32_t aec_now_us(void) { return AEC_NOW_US(); }
+#endif
 #else
 /* Every stamp folds to a constant, so the subtractions fold to zero and no
  * clock is read. */

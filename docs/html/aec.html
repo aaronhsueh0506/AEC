@@ -109,6 +109,7 @@ aec_process(a, mic, ref, out);</code></pre>
 </ul>
 <p><code>generation</code> 在<b>每次</b> ring 讀取 offset 改變時 +1(首次擷取、確認位移——含不設任何旗標的 soft-recovery realign——以及 <code>aec_reset()</code>),飽和於 0xFFFFFFFF 不回繞。請輪詢 generation 而不是對 <code>delay_samples</code> 做差分(瞬時 A→B→A 位移對差分不可見)。</p>
 
+<p><b>逐階段耗時</b>:<code>aec_get_last_timing()</code> 回最近一個 hop 的 <code>delay_us</code>/<code>frontend_us</code>/<code>linear_us</code>/<code>res_us</code>(微秒;四者刻意不等於整通呼叫)。<b>預設關閉</b>——<code>make PROFILE=1</code>(即 <code>-DAEC_STAGE_TIMING=1</code>)才會編進去,否則每個 hop 四欄全讀 0;每 hop 每實例七次 clock 讀取,release build 一次都不做。目標平台沒有 POSIX <code>CLOCK_MONOTONIC</code> 時用 <code>-DAEC_NOW_US=board_timer_us</code> 換掉時鐘(純識別字;替代時鐘必須單調)。詳見 <code>docs/c_user_manual_zh_TW.md</code> §6.6b。</p>
 <p><b>Debug</b>:<code>aec_debug_status()</code>(唯讀、零熱路徑成本)回 <code>delay_samples</code>(−1=未擷取)、<code>delay_confidence</code>(0/0.5/1.0)、<code>delay_updates</code>、<code>erle_windowed_db</code>、<code>usable_linear</code>、<code>filter_converged</code>、<code>near_power</code>/<code>out_power</code>(EMA α=0.95)、<code>duty_hops_total</code>/<code>duty_hops_run</code>(matched-filter duty-cycle 機制的**實測**——非估計——engagement census,自 create/init/reset 起累積;僅 <code>MATCHED</code> 累積,其他 mode 恆 0;純診斷,不影響輸出,byte-exact 證明見 CHANGELOG 產品化 A 線 step 4)。</p>
 
 <h2>Block diagram(一個 <code>aec_process()</code> hop 的程式流)</h2>
