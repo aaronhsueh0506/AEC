@@ -61,6 +61,11 @@
  *   # 8k/48k (M5): --sr 8000 / --sr 48000 on the generator; this checker
  *   # reads sr back out of the golden header and applies the matching
  *   # tolerance automatically -- no extra argv needed.
+ *   # Linear-filter-only case (no AEC3 post block on either side) -- pass
+ *   # --no-res to BOTH, or the golden and the replay disagree about which
+ *   # branch produced it:
+ *   python3 ../python/diag/gen_aec_e2e_golden.py /tmp/g.bin balanced --sr 16000 --no-res
+ *   /tmp/p_e2e /tmp/g.bin balanced --no-res
  */
 #include "aec.h"
 
@@ -97,6 +102,10 @@ int main(int argc, char **argv) {
     }
     AecConfig cfg;
     aec_config_from_preset(&cfg, preset, sr);
+    /* Golden produced with --no-res: the AEC3 post block never runs, so the
+     * quantities that steer the filter from outside it are what this case
+     * checks. `out` is then the linear residual, i.e. equal to raw. */
+    if (argc > 3 && !strcmp(argv[3], "--no-res")) cfg.enable_res = 0;
     Aec aec;
     if (aec_create(&aec, &cfg) != 0) { fprintf(stderr, "aec_create\n"); return 2; }
     if (aec_hop_size(&aec) != hop) {

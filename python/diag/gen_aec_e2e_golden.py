@@ -74,10 +74,17 @@ def main():
     ap.add_argument('preset', nargs='?', default='balanced')
     ap.add_argument('--sr', type=int, default=16000,
                      help='sample rate (8000 / 16000 / 48000); default 16000')
+    ap.add_argument('--no-res', action='store_true',
+                    help='linear filter only: enable_res=False with the '
+                         'res-context seam also off. Exercises the branch '
+                         'where the AEC3 post block never runs, so the mu '
+                         'ratio, the converged mu freeze and the ERL/DT '
+                         'trackers have to be advanced outside it.')
     args = ap.parse_args()
 
     sr = args.sr
-    cfg = AecConfig.from_preset(args.preset, sample_rate=sr)
+    cfg = AecConfig.from_preset(args.preset, sample_rate=sr,
+                                enable_res=not args.no_res)
     hop = cfg.hop_size   # was hardcoded "sr*10//1000" (10ms) -- diverged from
                           # AecConfig's real hop once 16kHz's default grid
                           # moved to 256/128 (8ms), crashing aec.process() on

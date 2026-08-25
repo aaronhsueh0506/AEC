@@ -3311,8 +3311,55 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
         }
     }
-    /* enable_res==False C-parity fallback (orchestrator 2313-2316) is unused
-     * here since balanced always has enable_res=True. */
+    /* Python advances three filter-steering quantities outside the RES gate
+     * (orchestrator.py:2633-2676): the mu ratio, the converged mu freeze, and
+     * the ERL/DT trackers. The gate above already performs all three whenever
+     * it runs -- its mu-ratio call is its own last statement, so doing it here
+     * instead would be position-equivalent -- which is why this block fires
+     * only when the gate did not. A caller that wants the linear filter alone,
+     * with neither the internal RES nor the context seam, otherwise steers it
+     * from state that stopped advancing: the mu ratio frozen at its initial
+     * 1.0, and the ERL estimate and DT analyzer frozen at construction.
+     *
+     * has_per_bin_mu is deliberately not cleared here. Its counterpart
+     * (`_per_bin_mu_scale = None`) sits inside the gate on the Python side
+     * too, so in this mode neither implementation clears it and a freeze set
+     * below stands until the caller resets. */
+    if (!a->cfg.enable_res && !a->cfg.return_res_context) {
+        if (a->convergence.converged) {
+            int k;
+            float mu_min = a->cfg.shadow_mu_min;
+            for (k = 0; k < a->n_freqs; ++k) a->per_bin_mu_scale[k] = mu_min;
+            a->has_per_bin_mu = 1;
+            a->simple_mu_ratio = 0.0f;
+        } else {
+            update_simple_mu_ratio(a, a->raw_output, a->far_hop, hop);
+        }
+
+        {
+            float far_pwr = far_hop_mean_sq + 1e-10f;
+            float mic_pwr = mean_sq(a->near_hop, hop, a->scr_sq) + 1e-10f;
+            float raw_err_pwr = mean_sq(a->raw_output, hop, a->scr_sq) + 1e-10f;
+            if (far_pwr > 1e-4f) {
+                float raw_dt_ratio = raw_err_pwr / (far_pwr + 1e-10f);
+                float inst_erl_raw = mic_pwr / far_pwr;
+                if (raw_dt_ratio < 2.0f && inst_erl_raw < 1.5f) {
+                    float inst_erl = inst_erl_raw;
+                    float alpha_erl;
+                    if (inst_erl < 0.001f) inst_erl = 0.001f;
+                    if (inst_erl > 1.0f) inst_erl = 1.0f;
+                    alpha_erl = a->convergence.converged
+                              ? a->alpha_erl_converged
+                              : a->alpha_erl_tracking;
+                    a->erl_estimate = alpha_erl * a->erl_estimate
+                                    + (1.0f - alpha_erl) * inst_erl;
+                }
+            }
+            doubletalk_update_energy_dt(&a->dt_analyzer,
+                                        ra.is_active,
+                                        far_pwr, mic_pwr, a->erl_estimate);
+        }
+    }
 
     a->last_timing.res_us = aec_now_us() - t_stage;
 
