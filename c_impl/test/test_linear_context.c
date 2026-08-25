@@ -832,10 +832,10 @@ static void scenario_far_active_no_echo(int silent_mic, const char *label) {
     Aec a;
     int hop, i, h;
     const int HOPS = 900;
-    unsigned st_far = 24601u, st_near = 917u;
     float *mic, *far;
     double e_out = 0.0, e_mic = 0.0, worst = 0.0;
 
+    g_rng_state = 0x11EC5EEDu;
     aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
     cfg.enable_res = 0;
     cfg.return_res_context = 1;      /* the seam the NN post-filter consumes */
@@ -849,13 +849,9 @@ static void scenario_far_active_no_echo(int silent_mic, const char *label) {
         double eo = 0.0, em = 0.0;
         float out_scratch[4096];
         for (i = 0; i < hop; ++i) {
-            st_far  = st_far  * 1103515245u + 12345u;
-            st_near = st_near * 1103515245u + 12345u;
             /* Loud reference, quiet near, and NO path between them. */
-            far[i] = ((float)((st_far >> 9) & 0x7fffff) / 8388608.0f - 0.5f) * 0.6f;
-            mic[i] = silent_mic
-                   ? 0.0f
-                   : ((float)((st_near >> 9) & 0x7fffff) / 8388608.0f - 0.5f) * 0.05f;
+            far[i] = rng_uniform(0.6f);
+            mic[i] = silent_mic ? 0.0f : rng_uniform(0.05f);
         }
         aec_process(&a, mic, far, out_scratch);
         aec_get_linear_context(&a, &ctx);

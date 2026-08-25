@@ -75,11 +75,8 @@ def main():
     ap.add_argument('--sr', type=int, default=16000,
                      help='sample rate (8000 / 16000 / 48000); default 16000')
     ap.add_argument('--no-res', action='store_true',
-                    help='linear filter only: enable_res=False with the '
-                         'res-context seam also off. Exercises the branch '
-                         'where the AEC3 post block never runs, so the mu '
-                         'ratio, the converged mu freeze and the ERL/DT '
-                         'trackers have to be advanced outside it.')
+                    help='linear filter only (enable_res=False, res-context '
+                         'seam off); pass it to the replay checker too')
     args = ap.parse_args()
 
     sr = args.sr

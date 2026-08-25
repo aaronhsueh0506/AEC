@@ -855,8 +855,7 @@ class AEC:
         # _form_last_selection: AEC3 refined_filter_output_last_selected_ —
         #   previous frame's URO decision (True = refined).
         self._form_prev_output_time: Optional[np.ndarray] = None
-        # Index into the candidate set the crossfade runs over, rather than
-        # the refined/coarse boolean it started as. See _SEL_* above.
+        # Which candidate the previous hop published; see _SEL_* above.
         self._form_last_selection: int = _SEL_REFINED
 
         # AEC3 FilterMisadjustmentEstimator accumulator state.
@@ -2347,45 +2346,6 @@ class AEC:
             self._last_raw_output = raw_output  # save for diagnostic (time-domain echo power)
             final_output = raw_output.copy()
 
-            # return_formed_output: run ONLY the FORM step (AEC3
-            # UseRefinedOutput selection + FormLinearFilterOutput crossfade +
-            # WOLA memory update) that _aec3_post() would otherwise also run
-            # as part of its much heavier R2/SuppressionGain/CNG chain --
-            # _aec3_select_linear_filter_output() is already fully
-            # self-contained (only touches self._form_*/
-            # self._refined_filter_output_last_selected, none of which feed
-            # back into the main/shadow filter's own tap adaptation), so
-            # calling it here does not require or trigger any of that other
-            # machinery. Plain raw_output (no shadow selection at all) is
-            # NOT an equivalent substitute: when a shadow filter exists and
-            # AEC3's UseRefinedOutput picks the coarse/shadow candidate for
-            # some hops, raw_output silently misses that selection entirely.
-            #
-            # Only run this when _aec3_post() below won't ALSO run this hop
-            # (enable_res or return_res_context both false): _aec3_post()
-            # calls this exact same selector itself, and self._form_* is
-            # one-hop WOLA memory -- calling it twice in the same hop would
-            # have the second call read back what the first call just wrote
-            # as "previous hop", corrupting that memory for whichever path
-            # legitimately owns it this hop. See the mirrored capture right
-            # after the _aec3_post() call below for the enable_res/
-            # return_res_context=True case.
-            if (self.config.return_formed_output
-                    and not self.config.enable_res
-                    and not self.config.return_res_context):
-                _coarse_time_fo = (
-                    self._last_shadow_output_time
-                    if self.shadow_filter is not None
-                    and self._last_shadow_output_time is not None
-                    else None
-                )
-                self._aec3_select_linear_filter_output(
-                    e_refined_time=raw_output,
-                    near_end_block=near_end,
-                    e_coarse_time=_coarse_time_fo,
-                )
-                self._formed_output = self._form_prev_output_time.copy()
-
             # FilterMisadjustmentEstimator + ScaleFilter update. AEC3-parity
             # estimator tracks e²_refined / y² to detect over-adaptation.
             # Scale action affects subsequent frames only; current frame's
@@ -2555,12 +2515,14 @@ class AEC:
 
                 final_output = self._aec3_post(raw_output, near_end, far_end)
 
-                # Counterpart of the return_formed_output capture above, for
-                # the enable_res/return_res_context=True case: _aec3_post()
-                # just called this exact same FORM step internally (as part
-                # of building error_spec/_res_formed_output), so
+                # _aec3_post() just ran the FORM step internally, as part of
+                # building error_spec/_res_formed_output, so
                 # self._form_prev_output_time already reflects THIS hop --
-                # just copy it out, no second selector call.
+                # copy it out rather than calling the selector a second time,
+                # which would read back what the first call wrote as
+                # "previous hop" and corrupt that one-hop WOLA memory. This
+                # is the only capture site: AecConfig rejects asking for the
+                # formed output without the chain that produces it.
                 if self.config.return_formed_output:
                     self._formed_output = self._form_prev_output_time.copy()
 
@@ -3294,11 +3256,9 @@ class AEC:
         # AEC3 thresholds (int16, kBlockSize=64) → float[-1,1] equivalents at
         # our hop. Both 30²·kBlockSize and 60²·kBlockSize scale by hop/kBlockSize
         # to express equivalent block-summed energy.
-        int16_scale_sq = np.float32(32768.0) * np.float32(32768.0)
-        thr_30 = (np.float32(30.0) * np.float32(30.0)
-                  * np.float32(hop) / int16_scale_sq)
-        thr_60 = (np.float32(60.0) * np.float32(60.0)
-                  * np.float32(hop) / int16_scale_sq)
+        int16_scale_sq = np.float32(32768.0 ** 2)
+        thr_30 = np.float32(30.0 ** 2 * hop) / int16_scale_sq
+        thr_60 = np.float32(60.0 ** 2 * hop) / int16_scale_sq
         cond_coarse_cleaner = (
             e2_coarse < np.float32(0.9) * e2_refined
             and y2 > thr_30
@@ -3316,29 +3276,25 @@ class AEC:
         # uses the PREVIOUS selector, to_time uses the CURRENT selector.
         # Capture is the third candidate. A linear estimate the quality
         # analyzer has not declared usable, whose residual carries MORE energy
-        # than the microphone it was subtracted from, is not a cancellation --
-        # the filter is adding signal. Passing the capture through instead
-        # makes capture the steady-state fallback, which is what AEC3 does
-        # one stage later (echo_remover.cc:475's Y_fft = UseLinearFilterOutput()
-        # ? E : Y).
+        # than the capture it was subtracted from, is not a cancellation --
+        # the filter is adding signal. Handing the capture through instead
+        # makes capture the steady-state fallback, matching AEC3's
+        # echo_remover.cc:475 one stage later. During the 30-sample transition
+        # the mixture of old residual and capture is not a strict bound.
         #
-        # Doing it here is what keeps the published time hop and its spectrum a
-        # matched pair: selected_esw below is by definition the FFT of
-        # [previous formed hop | this formed hop] and selected_echo_spec is
-        # back-solved from it, so both follow the substitution with no second
-        # WOLA state machine to keep in sync. The refined/coarse crossfade
-        # already here carries the boundary, so no overlap-add history is
-        # discarded and no hop goes to zero. During the 30-sample transition,
-        # the mixture of the old residual and capture is not a strict
-        # sample-by-sample or hop-energy bound.
-        #
-        # usable_linear_estimate() is the verdict as of the PREVIOUS hop --
-        # AecState is updated later in _aec3_post. It is a latched quality
-        # assessment rather than a per-hop signal, so the lag costs one hop at
-        # each edge.
+        # Mirrors linear_filter_select() in the C core, including reading the
+        # analyzer's verdict as of the PREVIOUS hop -- AecState is updated
+        # later in _aec3_post.
         e2_selected = e2_refined if use_refined else e2_coarse
         _selection = _SEL_REFINED if use_refined else _SEL_COARSE
-        if (getattr(self.config, 'output_capture_when_linear_unusable', False)
+        # Only where _aec3_post's own over-output guard cannot reach: with
+        # enable_res that guard still owns the rule and applies it to the
+        # emitted audio, and running both would let its frequency-domain hard
+        # switch overwrite the crossfade this one just started.
+        _capture_gate = (self.config.output_capture_when_linear_unusable
+                         and not self.config.enable_res
+                         and self.config.return_res_context)
+        if (_capture_gate
                 and not self._aec3_state.usable_linear_estimate()
                 and e2_selected > y2):
             _selection = _SEL_CAPTURE

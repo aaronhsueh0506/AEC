@@ -135,40 +135,28 @@ void linear_filter_select(LinearFilterSelect *s,
 
         /* Capture is the third candidate. A linear estimate the quality
          * analyzer has not declared usable, whose residual carries MORE
-         * energy than the microphone it was subtracted from, is not a
+         * energy than the capture it was subtracted from, is not a
          * cancellation at all -- it is the filter adding signal. Handing the
          * capture through instead makes capture the steady-state fallback,
-         * which is what AEC3 does one stage later (echo_remover.cc:475's
-         * Y_fft = UseLinearFilterOutput() ? E : Y).
+         * matching AEC3's echo_remover.cc:475 (Y_fft = UseLinearFilterOutput()
+         * ? E : Y) one stage later. During the 30-sample transition the
+         * mixture of old residual and capture is not a strict bound.
          *
-         * Doing it HERE rather than at the seam is what keeps the published
-         * time hop and its spectrum a matched pair: sel_esw below is by
-         * definition the FFT of [previous formed hop | this formed hop], and
-         * sel_echo is back-solved from it, so both follow the substitution
-         * with no second WOLA state machine to keep in sync. The refined/
-         * coarse crossfade already in place carries the boundary, so no
-         * overlap-add history is discarded and no hop goes to zero. During
-         * the 30-sample transition, the mixture of the old residual and
-         * capture is not a strict sample-by-sample or hop-energy bound.
+         * Related but NOT the same test as the post chain's own over-output
+         * guard (aec3_post.c's E2 step): that one compares the sqrt-Hann
+         * weighted two-hop block in the frequency domain, this one the
+         * current unwindowed hop. Neither subsumes the other.
          *
-         * e2/y2 are the time-domain energies this function already computed;
-         * by Parseval this is the same comparison the post chain's own
-         * over-output guard spells in the frequency domain.
-         *
-         * linear_unusable is the analyzer's verdict as of the PREVIOUS hop --
-         * this step runs before AecState is updated. The verdict is a latched
-         * quality assessment rather than a per-hop signal, so the lag costs a
-         * single hop at each edge. */
+         * linear_unusable is the analyzer's verdict as of the PREVIOUS hop;
+         * see the parameter contract in the header. */
         float e2_selected = use_refined ? e2_refined : e2_coarse;
         int selection = use_refined ? LFS_SEL_REFINED : LFS_SEL_COARSE;
         if (capture_fallback_enabled && linear_unusable && e2_selected > y2)
             selection = LFS_SEL_CAPTURE;
 
-        const float *candidate[3];
-        candidate[LFS_SEL_COARSE]  = e_coarse_time;
-        candidate[LFS_SEL_REFINED] = e_refined_time;
-        candidate[LFS_SEL_CAPTURE] = near_end;
-
+        /* Indexed in LFS_SEL_* order. */
+        const float *candidate[3] = { e_coarse_time, e_refined_time,
+                                      near_end };
         const float *from_time = candidate[s->form_last_selection];
         const float *to_time   = candidate[selection];
         int transition_active = (s->form_last_selection != selection);

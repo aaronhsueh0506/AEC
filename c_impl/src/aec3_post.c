@@ -440,7 +440,15 @@ int aec3_post_run(Aec3Post *p,
                           * reads the previous hop's verdict by construction.
                           * See the parameter's contract in the header. */
                          !aec_state_usable_linear_estimate(obj->state),
-                         c->output_capture_when_linear_unusable,
+                         /* Only where this chain's own over-output guard
+                          * cannot reach. Under enable_res the E2 step below
+                          * still owns the rule and applies it to the emitted
+                          * audio; running both would let E2's frequency-domain
+                          * hard switch overwrite the crossfade the selector
+                          * just started, and would change shipped audio for a
+                          * seam only an external post-filter reads. */
+                         c->output_capture_when_linear_unusable
+                             && in->context_only,
                          sc->sel_esw, sc->sel_echo);
 
     /* ── Step 2: precompute the np.abs magnitude arrays (3037-3052,

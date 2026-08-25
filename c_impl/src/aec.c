@@ -713,6 +713,32 @@ static const float SIMPLE_MU_ALPHA_ATTACK  = 0.3f;
 static const float SIMPLE_MU_ALPHA_HOLD    = 0.99f;
 static const float SIMPLE_MU_ALPHA_RELEASE = 0.95f;
 
+/* ERL tracking (B4) plus the energy-DT update. Both call sites -- inside the
+ * AEC3 post gate and the no-RES path after it -- run the identical sequence,
+ * and the gated one needs mic_pwr/raw_err_pwr afterwards anyway, so the three
+ * powers are passed in rather than recomputed here. */
+static void advance_erl_and_dt(Aec* a, int render_active, float far_pwr,
+                               float mic_pwr, float raw_err_pwr) {
+    if (far_pwr > 1e-4f) {
+        float raw_dt_ratio = raw_err_pwr / (far_pwr + 1e-10f);
+        float inst_erl_raw = mic_pwr / far_pwr;
+        if (raw_dt_ratio < 2.0f && inst_erl_raw < 1.5f) {
+            float inst_erl = inst_erl_raw;
+            float alpha_erl;
+            if (inst_erl < 0.001f) inst_erl = 0.001f;
+            if (inst_erl > 1.0f) inst_erl = 1.0f;
+            /* Per-hop retention EMAs authored at the legacy 10 ms hop grid;
+             * mirrors orchestrator.py's _alpha_erl_*. */
+            alpha_erl = a->convergence.converged ? a->alpha_erl_converged
+                                                 : a->alpha_erl_tracking;
+            a->erl_estimate = alpha_erl * a->erl_estimate
+                            + (1.0f - alpha_erl) * inst_erl;
+        }
+    }
+    doubletalk_update_energy_dt(&a->dt_analyzer, render_active,
+                                far_pwr, mic_pwr, a->erl_estimate);
+}
+
 static void update_simple_mu_ratio(Aec* a, const float* output,
                                    const float* far_end, int n) {
     float error_power = mean_sq(output, n, a->scr_sq) + 1e-10f;
@@ -3101,24 +3127,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         float mic_pwr = mean_sq(a->near_hop, hop, a->scr_sq) + 1e-10f;
         float raw_err_pwr = mean_sq(a->raw_output, hop, a->scr_sq) + 1e-10f;
 
-        /* erl tracking (B4). */
-        if (far_pwr > 1e-4f) {
-            float raw_dt_ratio = raw_err_pwr / (far_pwr + 1e-10f);
-            float inst_erl_raw = mic_pwr / far_pwr;
-            if (raw_dt_ratio < 2.0f && inst_erl_raw < 1.5f) {
-                float inst_erl = inst_erl_raw;
-                if (inst_erl < 0.001f) inst_erl = 0.001f; if (inst_erl > 1.0f) inst_erl = 1.0f;
-                /* Per-hop retention EMAs authored at the legacy 10 ms hop
-                 * grid; mirrors orchestrator.py's _alpha_erl_*. */
-                float alpha_erl = a->convergence.converged
-                                ? a->alpha_erl_converged
-                                : a->alpha_erl_tracking;
-                a->erl_estimate = alpha_erl * a->erl_estimate + (1.0f - alpha_erl) * inst_erl;
-            }
-        }
-
-        doubletalk_update_energy_dt(&a->dt_analyzer, ra.is_active,
-                                    far_pwr, mic_pwr, a->erl_estimate);
+        advance_erl_and_dt(a, ra.is_active, far_pwr, mic_pwr, raw_err_pwr);
 
         /* base DT confidence (simple energy-ratio estimate). */
         float simple_dt = 1.0f - far_pwr / (mic_pwr + far_pwr);
@@ -3340,24 +3349,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             float far_pwr = far_hop_mean_sq + 1e-10f;
             float mic_pwr = mean_sq(a->near_hop, hop, a->scr_sq) + 1e-10f;
             float raw_err_pwr = mean_sq(a->raw_output, hop, a->scr_sq) + 1e-10f;
-            if (far_pwr > 1e-4f) {
-                float raw_dt_ratio = raw_err_pwr / (far_pwr + 1e-10f);
-                float inst_erl_raw = mic_pwr / far_pwr;
-                if (raw_dt_ratio < 2.0f && inst_erl_raw < 1.5f) {
-                    float inst_erl = inst_erl_raw;
-                    float alpha_erl;
-                    if (inst_erl < 0.001f) inst_erl = 0.001f;
-                    if (inst_erl > 1.0f) inst_erl = 1.0f;
-                    alpha_erl = a->convergence.converged
-                              ? a->alpha_erl_converged
-                              : a->alpha_erl_tracking;
-                    a->erl_estimate = alpha_erl * a->erl_estimate
-                                    + (1.0f - alpha_erl) * inst_erl;
-                }
-            }
-            doubletalk_update_energy_dt(&a->dt_analyzer,
-                                        ra.is_active,
-                                        far_pwr, mic_pwr, a->erl_estimate);
+            advance_erl_and_dt(a, ra.is_active, far_pwr, mic_pwr, raw_err_pwr);
         }
     }
 

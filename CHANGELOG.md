@@ -48,11 +48,14 @@ when verdict requires it.
 1. The no-RES/no-context C path now advances the same adaptation, ERL and
    double-talk state as Python. RES-enabled production output is unchanged;
    dedicated no-RES C/Python tests cover the formerly skipped branch.
-2. When filtering quality has not declared the linear estimate usable and the
-   selected residual has more hop energy than its microphone capture, the
-   formed linear seam selects capture as its third candidate. The existing
-   30-sample selection transition remains active, so this is a steady-state
-   fallback rather than a strict bound on every transition sample.
+2. In the context-only path used by an external post-filter, when filtering
+   quality has not declared the linear estimate usable and the selected
+   residual has more hop energy than its microphone capture, the formed
+   linear seam selects capture as its third candidate. The internal-RES path
+   keeps its existing frequency-domain guard and remains byte-identical. The
+   existing 30-sample selection transition remains active, so this is a
+   steady-state fallback rather than a strict bound on every transition
+   sample.
 3. Python and C now make that selection with the same float32 square and
    pairwise-reduction arithmetic. This decision publishes both the formed hop
    and its matching spectrum; precision disagreement at the threshold is

@@ -650,6 +650,22 @@ class AecConfig:
     _canonical_retention_shadow_err_alpha: float = field(default=-1.0, repr=False)
 
     def __post_init__(self):
+        # The formed output is produced by the AEC3 post chain's FORM step,
+        # and its capture fallback is gated on the filtering-quality verdict
+        # that AecState publishes in the same chain. Asking for the formed
+        # output while that chain is off leaves the verdict at its
+        # constructed False for the whole stream, so the fallback degrades to
+        # a bare energy comparison and this seam stops agreeing with the one
+        # the board ships. Require the chain rather than silently serving a
+        # different signal.
+        if self.return_formed_output and not (
+                self.enable_res or self.return_res_context):
+            raise ValueError(
+                "return_formed_output requires enable_res or "
+                "return_res_context: the formed seam is produced by the "
+                "AEC3 post chain"
+            )
+
         # ── signal grid: ONE resolver call, no inline table ──────────────
         # ``frame_size = -1`` is this dataclass's CONVENIENCE-default
         # sentinel (the Python analogue of C's aec_config_defaults() filling
