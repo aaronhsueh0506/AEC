@@ -41,6 +41,34 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-25 — linear seam rejects unusable over-output
+
+### Fixed
+
+1. The no-RES/no-context C path now advances the same adaptation, ERL and
+   double-talk state as Python. RES-enabled production output is unchanged;
+   dedicated no-RES C/Python tests cover the formerly skipped branch.
+2. When filtering quality has not declared the linear estimate usable and the
+   selected residual has more hop energy than its microphone capture, the
+   formed linear seam selects capture as its third candidate. The existing
+   30-sample selection transition remains active, so this is a steady-state
+   fallback rather than a strict bound on every transition sample.
+3. Python and C now make that selection with the same float32 square and
+   pairwise-reduction arithmetic. This decision publishes both the formed hop
+   and its matching spectrum; precision disagreement at the threshold is
+   therefore an output-contract issue, not merely a diagnostic difference.
+
+### Impact
+
+The second and third items can change `linear_error`. The behavior hash must
+change, no waveform-equivalence migration is permitted, and AIAEC data must be
+rematerialized and repacked before training a release checkpoint. Existing
+checkpoints remain useful for an explicit `--input-is-linear-error` diagnostic
+against newly materialized WAVs, but their old frontend contract must not be
+silently restamped.
+
+---
+
 ## [Unreleased] — 2026-08-21 — the product delay is the DOMINANT matched-filter peak (BEHAVIOUR CHANGE: `linear_error` moves)
 
 ### Changed

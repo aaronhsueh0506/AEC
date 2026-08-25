@@ -72,6 +72,9 @@ def test_no_output_limiter_output_is_never_peak_scaled() -> None:
     """A burst meeting the removed limiter's trigger condition is unscaled."""
     cfg = _make_config(16000, 256, enable_shadow=True)
     cfg.return_formed_output = True
+    # This test isolates the removed peak limiter. The independent linear
+    # quality fallback intentionally allows formed_output to choose capture.
+    cfg.output_capture_when_linear_unusable = False
     aec = AEC(cfg)
     hop = aec.hop_size
     rng = np.random.RandomState(0x11317E5)
@@ -120,3 +123,26 @@ def test_get_formed_output_requires_flag_and_a_prior_process_call() -> None:
     hop = aec2.hop_size
     aec2.process(np.zeros(hop, dtype=np.float32), np.zeros(hop, dtype=np.float32))
     aec2.get_formed_output()  # now succeeds
+
+
+@pytest.mark.parametrize("usable,expect_capture", [(True, False), (False, True)])
+def test_capture_fallback_requires_an_unusable_filter(
+    monkeypatch: pytest.MonkeyPatch, usable: bool, expect_capture: bool
+) -> None:
+    """Energy alone must not replace a filter the analyzer has accepted."""
+    cfg = _make_config(16000, 256, enable_shadow=False)
+    cfg.return_res_context = True
+    aec = AEC(cfg)
+    hop = aec.hop_size
+    err = np.full(hop, 0.10, dtype=np.float32)
+    near = np.full(hop, 0.01, dtype=np.float32)
+
+    monkeypatch.setattr(
+        type(aec._aec3_state), "usable_linear_estimate", lambda _self: usable
+    )
+    aec._form_prev_output_time = None
+    aec._form_last_selection = 1  # _SEL_REFINED
+    aec._aec3_select_linear_filter_output(
+        e_refined_time=err, near_end_block=near, e_coarse_time=err
+    )
+    assert (aec._form_last_selection == 2) is expect_capture  # _SEL_CAPTURE

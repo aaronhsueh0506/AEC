@@ -174,11 +174,6 @@ static int g_pass = 0;
 #define BWD_D0      3000             /* pre-move delay                        */
 #define BWD_D1      64               /* post-move delay: EARLIER, guarded     */
 
-/* The window sweep of row 3. 4.0 s is the "no permanent veto" end: 250 hops
- * still expires well inside MIS_HOPS. */
-static const float g_windows[] = { 0.5f, 1.0f, 2.0f, 4.0f };
-#define N_WINDOWS ((int)(sizeof g_windows / sizeof g_windows[0]))
-
 /* The library's own seconds -> cycles conversion, restated (not imported) so
  * a silent change to it fails here instead of being absorbed. */
 static int window_hops(float seconds) {
@@ -309,7 +304,6 @@ static int on[MP_HOPS];
 
 int main(void) {
     int h, rc;
-    int mis_off_relock = -1;
 
     printf("=== delay_backward_quarantine ===\n");
     printf("(window %.2f s = %d hops at %d Hz / hop %d)\n",
@@ -327,8 +321,6 @@ int main(void) {
         }
         for (h = (wrong_hop < 0 ? MIS_HOPS : wrong_hop); h < MIS_HOPS; ++h)
             if (off[h] != MIS_WRONG) wrong_sustained = 0;
-        mis_off_relock = wrong_hop;
-
         /* This scene USED to be the defect: it acquired the true path and
          * then re-locked to the pre-echo answer, holding it to the end --
          * which this quarantine was built to DELAY, never to cure. Curing it

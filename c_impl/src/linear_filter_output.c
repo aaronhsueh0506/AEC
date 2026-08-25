@@ -137,7 +137,7 @@ void linear_filter_select(LinearFilterSelect *s,
          * analyzer has not declared usable, whose residual carries MORE
          * energy than the microphone it was subtracted from, is not a
          * cancellation at all -- it is the filter adding signal. Handing the
-         * capture through instead bounds the seam at "no worse than the mic",
+         * capture through instead makes capture the steady-state fallback,
          * which is what AEC3 does one stage later (echo_remover.cc:475's
          * Y_fft = UseLinearFilterOutput() ? E : Y).
          *
@@ -147,7 +147,9 @@ void linear_filter_select(LinearFilterSelect *s,
          * sel_echo is back-solved from it, so both follow the substitution
          * with no second WOLA state machine to keep in sync. The refined/
          * coarse crossfade already in place carries the boundary, so no
-         * overlap-add history is discarded and no hop goes to zero.
+         * overlap-add history is discarded and no hop goes to zero. During
+         * the 30-sample transition, the mixture of the old residual and
+         * capture is not a strict sample-by-sample or hop-energy bound.
          *
          * e2/y2 are the time-domain energies this function already computed;
          * by Parseval this is the same comparison the post chain's own

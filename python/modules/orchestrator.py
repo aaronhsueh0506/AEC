@@ -2633,9 +2633,9 @@ class AEC:
                     if self.config.enable_res:
                         self._update_simple_mu_ratio(raw_output, far_end)
 
-            # C-parity fix: when RES is disabled, _update_simple_mu_ratio is
-            # never called in PBFDKF path. C always calls update_simple_mu_ratio
-            # regardless. Add call here when RES is off.
+            # Keep the no-RES path aligned with the C process core. In
+            # context-only mode this mirrors C's in-gate update; when both the
+            # post chain and context seam are off, it is the sole update site.
             if (not self.config.enable_res
                     and not self._filter_converged):
                 self._update_simple_mu_ratio(raw_output, far_end)
@@ -3282,19 +3282,25 @@ class AEC:
         # (capture mic minus residual).
         s_refined_time = near_end_block - e_refined_time
         s_coarse_time = near_end_block - e_coarse_time
-        e2_refined = float(np.sum(e_refined_time.astype(np.float64) ** 2))
-        e2_coarse = float(np.sum(e_coarse_time.astype(np.float64) ** 2))
-        y2 = float(np.sum(near_end_block.astype(np.float64) ** 2))
-        s2_refined = float(np.sum(s_refined_time.astype(np.float64) ** 2))
-        s2_coarse = float(np.sum(s_coarse_time.astype(np.float64) ** 2))
+        # The embedded C selector squares and pairwise-reduces float32. Keep
+        # the decision arithmetic in float32 here too: this branch selects
+        # the published time/frequency seam, so a near-threshold f64/f32
+        # disagreement would make Python materialization differ from C.
+        e2_refined = np.sum(e_refined_time * e_refined_time, dtype=np.float32)
+        e2_coarse = np.sum(e_coarse_time * e_coarse_time, dtype=np.float32)
+        y2 = np.sum(near_end_block * near_end_block, dtype=np.float32)
+        s2_refined = np.sum(s_refined_time * s_refined_time, dtype=np.float32)
+        s2_coarse = np.sum(s_coarse_time * s_coarse_time, dtype=np.float32)
         # AEC3 thresholds (int16, kBlockSize=64) → float[-1,1] equivalents at
         # our hop. Both 30²·kBlockSize and 60²·kBlockSize scale by hop/kBlockSize
         # to express equivalent block-summed energy.
-        int16_scale_sq = 32768.0 ** 2
-        thr_30 = (30.0 ** 2) * hop / int16_scale_sq
-        thr_60 = (60.0 ** 2) * hop / int16_scale_sq
+        int16_scale_sq = np.float32(32768.0) * np.float32(32768.0)
+        thr_30 = (np.float32(30.0) * np.float32(30.0)
+                  * np.float32(hop) / int16_scale_sq)
+        thr_60 = (np.float32(60.0) * np.float32(60.0)
+                  * np.float32(hop) / int16_scale_sq)
         cond_coarse_cleaner = (
-            e2_coarse < 0.9 * e2_refined
+            e2_coarse < np.float32(0.9) * e2_refined
             and y2 > thr_30
             and (s2_refined > thr_60 or s2_coarse > thr_60)
         )
@@ -3312,7 +3318,7 @@ class AEC:
         # analyzer has not declared usable, whose residual carries MORE energy
         # than the microphone it was subtracted from, is not a cancellation --
         # the filter is adding signal. Passing the capture through instead
-        # bounds this seam at "no worse than the mic", which is what AEC3 does
+        # makes capture the steady-state fallback, which is what AEC3 does
         # one stage later (echo_remover.cc:475's Y_fft = UseLinearFilterOutput()
         # ? E : Y).
         #
@@ -3322,7 +3328,9 @@ class AEC:
         # back-solved from it, so both follow the substitution with no second
         # WOLA state machine to keep in sync. The refined/coarse crossfade
         # already here carries the boundary, so no overlap-add history is
-        # discarded and no hop goes to zero.
+        # discarded and no hop goes to zero. During the 30-sample transition,
+        # the mixture of the old residual and capture is not a strict
+        # sample-by-sample or hop-energy bound.
         #
         # usable_linear_estimate() is the verdict as of the PREVIOUS hop --
         # AecState is updated later in _aec3_post. It is a latched quality
