@@ -41,6 +41,10 @@ _SIMPLE_MU_ALPHA_HOLD = 0.99
 _SIMPLE_MU_ALPHA_RELEASE = 0.95
 
 
+# Linear-filter output candidates, in the order the crossfade indexes them.
+_SEL_COARSE, _SEL_REFINED, _SEL_CAPTURE = 0, 1, 2
+
+
 class AEC:
     """
     Acoustic Echo Cancellation
@@ -851,7 +855,9 @@ class AEC:
         # _form_last_selection: AEC3 refined_filter_output_last_selected_ —
         #   previous frame's URO decision (True = refined).
         self._form_prev_output_time: Optional[np.ndarray] = None
-        self._form_last_selection: bool = True  # True = refined
+        # Index into the candidate set the crossfade runs over, rather than
+        # the refined/coarse boolean it started as. See _SEL_* above.
+        self._form_last_selection: int = _SEL_REFINED
 
         # AEC3 FilterMisadjustmentEstimator accumulator state.
         # Mirrors `Subtractor::FilterMisadjustmentEstimator`
@@ -1130,7 +1136,7 @@ class AEC:
         self._aec3_pending_gain_change = False
         self._aec3_pending_delay_change = None
         self._form_prev_output_time = None
-        self._form_last_selection = True
+        self._form_last_selection = _SEL_REFINED
         # AvgRenderReverb tail reset (matches AEC3 reverb_model_.Reset() during
         # echo path change handling).
         if hasattr(self, "_aec3_avg_render_reverb"):
@@ -3302,10 +3308,36 @@ class AEC:
         # FFT memory (AEC3 signal_transition.cc + echo_remover.cc:134).
         # AEC3 from/to semantics: both evaluated on CURRENT block — from_time
         # uses the PREVIOUS selector, to_time uses the CURRENT selector.
-        from_time = (e_refined_time if self._form_last_selection
-                     else e_coarse_time)
-        to_time = e_refined_time if use_refined else e_coarse_time
-        _form_transition_active = (self._form_last_selection != use_refined)
+        # Capture is the third candidate. A linear estimate the quality
+        # analyzer has not declared usable, whose residual carries MORE energy
+        # than the microphone it was subtracted from, is not a cancellation --
+        # the filter is adding signal. Passing the capture through instead
+        # bounds this seam at "no worse than the mic", which is what AEC3 does
+        # one stage later (echo_remover.cc:475's Y_fft = UseLinearFilterOutput()
+        # ? E : Y).
+        #
+        # Doing it here is what keeps the published time hop and its spectrum a
+        # matched pair: selected_esw below is by definition the FFT of
+        # [previous formed hop | this formed hop] and selected_echo_spec is
+        # back-solved from it, so both follow the substitution with no second
+        # WOLA state machine to keep in sync. The refined/coarse crossfade
+        # already here carries the boundary, so no overlap-add history is
+        # discarded and no hop goes to zero.
+        #
+        # usable_linear_estimate() is the verdict as of the PREVIOUS hop --
+        # AecState is updated later in _aec3_post. It is a latched quality
+        # assessment rather than a per-hop signal, so the lag costs one hop at
+        # each edge.
+        e2_selected = e2_refined if use_refined else e2_coarse
+        _selection = _SEL_REFINED if use_refined else _SEL_COARSE
+        if (getattr(self.config, 'output_capture_when_linear_unusable', False)
+                and not self._aec3_state.usable_linear_estimate()
+                and e2_selected > y2):
+            _selection = _SEL_CAPTURE
+        _candidate = (e_coarse_time, e_refined_time, near_end_block)
+        from_time = _candidate[self._form_last_selection]
+        to_time = _candidate[_selection]
+        _form_transition_active = (self._form_last_selection != _selection)
         if _form_transition_active:
             _kT = 30  # kTransitionBlock (AEC3 constant)
             _k = np.arange(_kT, dtype=np.float32) + 1.0
@@ -3333,7 +3365,7 @@ class AEC:
         selected_echo_spec = (_near_spec_win - selected_esw).astype(np.complex64)
         # Update AEC3 FFT memory and selection latch.
         self._form_prev_output_time = e_form
-        self._form_last_selection = use_refined
+        self._form_last_selection = _selection
         return selected_esw, selected_echo_spec
 
     def _aec3_post(self, raw_output: np.ndarray, near_end: np.ndarray,

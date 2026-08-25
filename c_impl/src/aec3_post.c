@@ -436,6 +436,11 @@ int aec3_post_run(Aec3Post *p,
                              : in->raw_output,
                          in->error_spec_windowed, in->echo_spec,
                          in->sqrt_hann, obj->fft,
+                         /* AecState is updated later in this run, so this
+                          * reads the previous hop's verdict by construction.
+                          * See the parameter's contract in the header. */
+                         !aec_state_usable_linear_estimate(obj->state),
+                         c->output_capture_when_linear_unusable,
                          sc->sel_esw, sc->sel_echo);
 
     /* ── Step 2: precompute the np.abs magnitude arrays (3037-3052,

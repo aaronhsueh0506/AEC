@@ -42,7 +42,11 @@ typedef struct {
     /* persistent selection state (matches Python init) */
     float *prev_output_time;   /* owned; length hop. _form_prev_output_time */
     int    prev_output_valid;  /* 0 ⇒ Python None ⇒ use zeros(hop) */
-    int    form_last_selection;       /* _form_last_selection,  init True (1) */
+    /* Which candidate the previous hop published: the crossfade below runs
+     * between any two of them, so this is the index into that set rather
+     * than the refined/coarse boolean it started as. Init REFINED, which is
+     * the value Python's _form_last_selection starts at. */
+    int    form_last_selection;       /* LFS_SEL_*, init LFS_SEL_REFINED */
     int    refined_last_selected;     /* _refined_filter_output_last_selected */
 
     /* scratch (owned) */
@@ -92,6 +96,16 @@ void linear_filter_select_free(LinearFilterSelect *s);
  * Updates persistent state (prev_output_time, form_last_selection,
  * refined_last_selected) exactly as the Python tail does.
  */
+/* Output candidates, in the order the crossfade indexes them. */
+#define LFS_SEL_COARSE  0
+#define LFS_SEL_REFINED 1
+#define LFS_SEL_CAPTURE 2
+
+/* linear_unusable            the filtering-quality verdict as of the PREVIOUS
+ *                            hop (this runs before AecState is updated).
+ * capture_fallback_enabled   config's output_capture_when_linear_unusable.
+ * Together they admit LFS_SEL_CAPTURE when the selected residual carries more
+ * energy than the capture -- see the rationale at the selection site. */
 void linear_filter_select(LinearFilterSelect *s,
                           const float *e_refined_time,
                           const float *near_end,
@@ -100,6 +114,8 @@ void linear_filter_select(LinearFilterSelect *s,
                           const Complex *echo_spec,
                           const float *sqrt_hann,
                           FftHandle *fft,
+                          int linear_unusable,
+                          int capture_fallback_enabled,
                           Complex *out_sel_esw,
                           Complex *out_sel_echo);
 

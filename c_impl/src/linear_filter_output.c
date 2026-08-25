@@ -63,7 +63,7 @@ int linear_filter_select_init(LinearFilterSelect *s,
 
 void linear_filter_select_reset(LinearFilterSelect *s) {
     s->prev_output_valid    = 0;     /* Python _form_prev_output_time = None */
-    s->form_last_selection  = 1;     /* True = refined */
+    s->form_last_selection  = LFS_SEL_REFINED;
     s->refined_last_selected = 1;
     if (s->prev_output_time)
         memset(s->prev_output_time, 0, (size_t)s->hop * sizeof(float));
@@ -89,6 +89,8 @@ void linear_filter_select(LinearFilterSelect *s,
                           const Complex *echo_spec,
                           const float *sqrt_hann,
                           FftHandle *fft,
+                          int linear_unusable,
+                          int capture_fallback_enabled,
                           Complex *out_sel_esw,
                           Complex *out_sel_echo) {
     int hop = s->hop, blk = s->block_size, fft_size = s->fft_size, K = s->n_freqs;
@@ -131,12 +133,43 @@ void linear_filter_select(LinearFilterSelect *s,
 
         s->refined_last_selected = use_refined;
 
-        /* from_time = refined if _form_last_selection else coarse
-         * to_time   = refined if use_refined         else coarse */
-        const float *from_time = s->form_last_selection ? e_refined_time
-                                                        : e_coarse_time;
-        const float *to_time   = use_refined ? e_refined_time : e_coarse_time;
-        int transition_active = (s->form_last_selection != use_refined);
+        /* Capture is the third candidate. A linear estimate the quality
+         * analyzer has not declared usable, whose residual carries MORE
+         * energy than the microphone it was subtracted from, is not a
+         * cancellation at all -- it is the filter adding signal. Handing the
+         * capture through instead bounds the seam at "no worse than the mic",
+         * which is what AEC3 does one stage later (echo_remover.cc:475's
+         * Y_fft = UseLinearFilterOutput() ? E : Y).
+         *
+         * Doing it HERE rather than at the seam is what keeps the published
+         * time hop and its spectrum a matched pair: sel_esw below is by
+         * definition the FFT of [previous formed hop | this formed hop], and
+         * sel_echo is back-solved from it, so both follow the substitution
+         * with no second WOLA state machine to keep in sync. The refined/
+         * coarse crossfade already in place carries the boundary, so no
+         * overlap-add history is discarded and no hop goes to zero.
+         *
+         * e2/y2 are the time-domain energies this function already computed;
+         * by Parseval this is the same comparison the post chain's own
+         * over-output guard spells in the frequency domain.
+         *
+         * linear_unusable is the analyzer's verdict as of the PREVIOUS hop --
+         * this step runs before AecState is updated. The verdict is a latched
+         * quality assessment rather than a per-hop signal, so the lag costs a
+         * single hop at each edge. */
+        float e2_selected = use_refined ? e2_refined : e2_coarse;
+        int selection = use_refined ? LFS_SEL_REFINED : LFS_SEL_COARSE;
+        if (capture_fallback_enabled && linear_unusable && e2_selected > y2)
+            selection = LFS_SEL_CAPTURE;
+
+        const float *candidate[3];
+        candidate[LFS_SEL_COARSE]  = e_coarse_time;
+        candidate[LFS_SEL_REFINED] = e_refined_time;
+        candidate[LFS_SEL_CAPTURE] = near_end;
+
+        const float *from_time = candidate[s->form_last_selection];
+        const float *to_time   = candidate[selection];
+        int transition_active = (s->form_last_selection != selection);
 
         if (transition_active) {
             const int kT = 30;
@@ -187,6 +220,6 @@ void linear_filter_select(LinearFilterSelect *s,
         /* UPDATE STATE: _form_prev_output_time = e_form; latches = use_refined */
         memcpy(s->prev_output_time, s->e_form, (size_t)hop * sizeof(float));
         s->prev_output_valid   = 1;
-        s->form_last_selection = use_refined;
+        s->form_last_selection = selection;
     }
 }

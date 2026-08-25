@@ -64,7 +64,19 @@
  *   - shift the ring read offset by one hop/sample -> every
  *     "aligned far byte-equal to far[t-N]" row fails;
  *   - give EXTERNAL_ALIGNED a ring (return the MATCHED size for it) ->
- *     "external: no ring, no estimator" and the pool-difference row fail.
+ *     "external: no ring, no estimator" and the pool-difference row fail;
+ *   - drop the capture candidate from linear_filter_select() -> the
+ *     far-active/no-echo rows fail.
+ *
+ * What the far-active/no-echo scenario does NOT separate, so that no one
+ * reads a green run as more coverage than it is: the analyzer's verdict is
+ * false on every hop of that scenario, so dropping the linear_unusable term
+ * and keeping the bare energy comparison stays green here. Whether the guard
+ * correctly stands down once the filter IS usable is a property of the
+ * converged case, and lives in the C/Python end-to-end parity gate rather
+ * than here. The same goes for the selection latch: with a noise-like
+ * capture, a crossfade that starts from the wrong candidate is not visible
+ * in the energy this scenario measures.
  *
  * Build (standalone, from c_impl/ — mirrors test_process_context.c):
  *   make -C ../../audio_common BACKEND=kiss lib
@@ -810,6 +822,74 @@ static void scenario_ring_filled_saturates(void) {
     g_rng_state = 0x11EC5EEDu;
 }
 
+
+/* far ACTIVE with NO echo path -- the near-end single-talk case the corpus
+ * has no scenario for and the test suite only ever covered as "far silent,
+ * mic silent". A reference this loud with nothing of it in the capture gives
+ * the matched filter no peak to lock, so the delay never becomes solid and
+ * the filtering-quality analyzer never calls the linear estimate usable;
+ * meanwhile the adaptive filter happily fits far-shaped noise onto the near
+ * speech and subtracts something that was never there. The formed seam must
+ * not carry more energy than the capture it came from. */
+static void scenario_far_active_no_echo(int silent_mic, const char *label) {
+    AecConfig cfg;
+    Aec a;
+    int hop, i, h;
+    const int HOPS = 900;
+    unsigned st_far = 24601u, st_near = 917u;
+    float *mic, *far;
+    double e_out = 0.0, e_mic = 0.0, worst = 0.0;
+
+    aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);
+    cfg.enable_res = 0;
+    cfg.return_res_context = 1;      /* the seam the NN post-filter consumes */
+    if (aec_create(&a, &cfg) != 0) { CHECK(0, "create"); return; }
+    hop = aec_hop_size(&a);
+    mic = (float *)malloc((size_t)hop * sizeof(float));
+    far = (float *)malloc((size_t)hop * sizeof(float));
+
+    for (h = 0; h < HOPS; ++h) {
+        AecLinearContext ctx;
+        double eo = 0.0, em = 0.0;
+        float out_scratch[4096];
+        for (i = 0; i < hop; ++i) {
+            st_far  = st_far  * 1103515245u + 12345u;
+            st_near = st_near * 1103515245u + 12345u;
+            /* Loud reference, quiet near, and NO path between them. */
+            far[i] = ((float)((st_far >> 9) & 0x7fffff) / 8388608.0f - 0.5f) * 0.6f;
+            mic[i] = silent_mic
+                   ? 0.0f
+                   : ((float)((st_near >> 9) & 0x7fffff) / 8388608.0f - 0.5f) * 0.05f;
+        }
+        aec_process(&a, mic, far, out_scratch);
+        aec_get_linear_context(&a, &ctx);
+        for (i = 0; i < hop; ++i) {
+            double o = ctx.formed_linear_hop[i], m = mic[i];
+            eo += o * o; em += m * m;
+        }
+        e_out += eo; e_mic += em;
+        if (h > 8 && em > 1e-12 && eo / em > worst) worst = eo / em;
+    }
+
+    if (silent_mic) {
+        /* Nothing to preserve: the seam must stay at digital silence rather
+         * than synthesizing the reference into it. */
+        CHECK(e_out < 1e-9,
+              "far-active/no-echo, silent mic: seam stays silent");
+    } else {
+        CHECK(e_out <= e_mic * 1.02,
+              "far-active/no-echo: seam carries no more energy than capture");
+        CHECK(worst <= 4.0,
+              "far-active/no-echo: no hop exceeds capture by more than 6 dB");
+    }
+    printf("  [%s] out/mic = %.3f, worst hop = %.2f dB\n", label,
+           e_mic > 0.0 ? e_out / e_mic : e_out,
+           worst > 0.0 ? 10.0 * log10(worst) : 0.0);
+
+    free(mic); free(far);
+    aec_destroy(&a);
+}
+
 int main(void) {
     scenario_acquire_and_verify(16000, 0,   1600, "16k/fft256");
     scenario_acquire_and_verify(16000, 512, 1600, "16k/fft512");
@@ -828,6 +908,8 @@ int main(void) {
     scenario_external_has_no_delay_state();
     scenario_unfilled_ring_reads_unlocked();
     scenario_ring_filled_saturates();
+    scenario_far_active_no_echo(/*silent_mic=*/0, "near speech");
+    scenario_far_active_no_echo(/*silent_mic=*/1, "silent mic");
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
