@@ -343,10 +343,10 @@ filter bank、降取樣 render ring 與兩個 lag histogram 都是依 init 設�
 
 | 格點 | n=1 | n=2 | n=3 | n=4 | n=5（預設） |
 |---|---:|---:|---:|---:|---:|
-| 8 kHz / 256（legacy） | 252,768 B | 258,496 B | 264,224 B | 269,952 B | 275,680 B |
-| 16 kHz / 256 | 356,864 B | 362,592 B | 368,320 B | 374,048 B | 379,776 B |
-| 16 kHz / 512 | 485,936 B | 491,664 B | 497,392 B | 503,120 B | 508,848 B |
-| 48 kHz / 1024 | 1,144,144 B | 1,149,872 B | 1,155,600 B | 1,161,328 B | 1,167,056 B |
+| 8 kHz / 256（legacy） | 255,344 B | 261,072 B | 266,800 B | 272,528 B | 278,256 B |
+| 16 kHz / 256 | 362,528 B | 368,256 B | 373,984 B | 379,712 B | 385,440 B |
+| 16 kHz / 512 | 491,056 B | 496,784 B | 502,512 B | 508,240 B | 513,968 B |
+| 48 kHz / 1024 | 1,162,624 B | 1,168,352 B | 1,174,080 B | 1,179,808 B | 1,185,536 B |
 
 NE10 backend 在每一格都少 608 B（16 kHz/512 與 48 kHz/1024 少 1,376 B / 2,912 B）；
 差異來自 FFT handle，與 delay 設定無關。
@@ -374,13 +374,13 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | `delay_mode` | 記憶池 | 相對 `MATCHED n=5` |
 |---|---:|---:|
-| `MATCHED` n=5（預設） | 379,776 B | — |
-| `MATCHED` n=1 | 356,864 B | −22,912 B |
-| `FIXED`，`fixed_delay_samples = 0` | 215,280 B | −164,496 B |
-| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 216,880 B | −162,896 B |
-| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 221,680 B | −158,096 B |
-| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 247,264 B | −132,496 B |
-| `EXTERNAL_ALIGNED` | 214,768 B | −165,008 B |
+| `MATCHED` n=5（預設） | 385,440 B | — |
+| `MATCHED` n=1 | 362,528 B | −22,912 B |
+| `FIXED`，`fixed_delay_samples = 0` | 220,944 B | −164,496 B |
+| `FIXED`，`fixed_delay_samples = 400`（25 ms） | 222,544 B | −162,896 B |
+| `FIXED`，`fixed_delay_samples = 1600`（100 ms） | 227,344 B | −158,096 B |
+| `FIXED`，`fixed_delay_samples = 8000`（500 ms） | 252,944 B | −132,496 B |
+| `EXTERNAL_ALIGNED` | 220,432 B | −165,008 B |
 
 #### 環形緩衝大小公式
 
@@ -416,20 +416,20 @@ histogram 1,536 B ＋ pre-echo histogram 96 B。所以 `n=1` 相對預設 `n=5` 
 
 | 格點 | fixed=0 | 25 ms | 100 ms | 500 ms |
 |---|---:|---:|---:|---:|
-| 16 kHz / 256 | 215,280 B | 216,880 B | 221,680 B | 247,280 B |
-| 16 kHz / 512 | 344,864 B | 346,464 B | 351,264 B | 376,864 B |
-| 48 kHz / 1024 | 740,592 B | 745,392 B | 759,792 B | 836,592 B |
+| 16 kHz / 256 | 220,944 B | 222,544 B | 227,344 B | 252,944 B |
+| 16 kHz / 512 | 349,984 B | 351,584 B | 356,384 B | 381,984 B |
+| 48 kHz / 1024 | 759,056 B | 763,856 B | 778,256 B | 855,056 B |
 
 > **注意**：`fixed_delay_samples` 很大時 `FIXED` 也可能比 `MATCHED n=5` 更
-> 耗記憶體（48 kHz/1024、2500 ms 為 1,220,576 B，高於 `MATCHED n=5` 的
-> 1,167,056 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
+> 耗記憶體（48 kHz/1024、2500 ms 為 1,239,056 B，高於 `MATCHED n=5` 的
+> 1,185,536 B）——環形緩衝終究要放得下那個延遲。要用大 fixed delay 又要省
 > 記憶體，正確作法是讓呼叫端自己補償掉大延遲後改用 `EXTERNAL_ALIGNED`。
 
-另外一個明顯的開關（16 kHz/256 KISS，相對 379,776 B）：
+另外一個明顯的開關（16 kHz/256 KISS，相對 385,440 B）：
 
 | 設定 | 記憶池 | 差異 |
 |---|---:|---:|
-| `enable_shadow = 0` | 347,216 B | −32,560 B |
+| `enable_shadow = 0` | 349,264 B | −36,176 B |
 
 `enable_res` 與 `enable_cng` **不影響**記憶池大小（相關緩衝區一律配置）。
 
@@ -554,7 +554,7 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | `delay_buffer_ms` | `float` | `2048.0` | 0 – 120000 | **`MATCHED` 專用**：參考訊號搜尋環形緩衝長度（ms）。實際樣本數取 `delay_buffer_ms` 與 `max_delay_ms + 4096 samples` 兩者較大者。調高 `max_delay_ms` 時通常要一併調高。`FIXED` / `EXTERNAL_ALIGNED` 下完全無效。 |
 | `delay_est_init_s` | `float` | `0.3` | 0 – 3600 | 延遲估計值需維持穩定多久才視為已鎖定（秒）。 |
 | `delay_est_period_s` | `float` | `0.5` | 0 – 3600 | 鎖定後的重新確認週期（秒）。回音路徑常變動（裝置會移動）可調短。 |
-| `delay_num_filters` | `int` | `5` | 1 – 5（**只在 `MATCHED`**；其他 mode 必須維持 5） | Matched-filter bank 大小（**算力旋鈕**）。可靠搜尋上限隨之縮小：n=1→125ms／2→221ms／3→317ms／4→413ms／5→509ms；每少一組省 ~4.2 MMAC/s 的 full-rate 搜尋算力，**並省 5,728 B 記憶池**（bank、render ring、兩個 histogram 都依 n 從記憶池切出，見 §5 記憶池表）。縮小的正確場景是**上游已先提供 coarse-compensated far**（HAL/系統層自行移除 bulk delay 後才餵進來）、matched filter 只需追殘差的 `MATCHED` 部署——注意這與 `FIXED` 無關：`FIXED`（`fixed_delay_samples`）根本不建 matched filter，`EXTERNAL_ALIGNED` 連 estimator/ring 都沒有。bench/dataset 一律維持 5（見 `delay_estimator_design_zh_TW.md` §5）。`FIXED` / `EXTERNAL_ALIGNED` 根本沒有 matched filter，改這個值會被拒絕（不是忽略）；`0` 在任何 mode 都是錯誤，不是「關閉延遲估計」的入口。 |
+| `delay_num_filters` | `int` | `5` | 1 – 5（**只在 `MATCHED`**；其他 mode 必須維持 5） | Matched-filter bank 大小（**主要是記憶體旋鈕**：出貨的 duty-cycle 已讓 bank 只在少數 hop 實跑，且每 hop 的 decimator/ring 地板與 n 無關，攤提算力 n=5→1 實測只差 ~0.3-0.7µs/hop）。可靠搜尋上限隨之縮小：n=1→125ms／2→221ms／3→317ms／4→413ms／5→509ms；每少一組省 ~4.2 MMAC/s 的 **full-rate** 搜尋算力，**並省 5,728 B 記憶池**（bank、render ring、兩個 histogram 都依 n 從記憶池切出，見 §5 記憶池表）。縮小的正確場景是**上游已先提供 coarse-compensated far**（HAL/系統層自行移除 bulk delay 後才餵進來）、matched filter 只需追殘差的 `MATCHED` 部署——注意這與 `FIXED` 無關：`FIXED`（`fixed_delay_samples`）根本不建 matched filter，`EXTERNAL_ALIGNED` 連 estimator/ring 都沒有。bench/dataset 一律維持 5（見 `delay_estimator_design_zh_TW.md` §5）。`FIXED` / `EXTERNAL_ALIGNED` 根本沒有 matched filter，改這個值會被拒絕（不是忽略）；`0` 在任何 mode 都是錯誤，不是「關閉延遲估計」的入口。 |
 | `delay_acquire_protect_converged` | `int` | `1` | 0 / 1 | filter 已收斂時，保護它不被**首次**延遲擷取破壞（Path A）。 |
 | `delay_backward_quarantine_enabled` | `int` | `0` | 0 / 1 | 上一項的姊妹旗標，管的是**已經鎖定之後的延遲變更**（Path B），預設**關閉**（關閉時輸出與未加此機制的版本逐位元相同）。開啟後只隔離**一種**候選：比現行延遲**更早**（backward／pre-echo 方向）、且線性 filter 在**目前對齊上仍明顯在消除回音**的新估計。候選還必須先通過 Path B 本來的兩個門檻（與現行延遲相差 > 32 樣本、`delay_aec3_confidence()` ≥ 0.5），所以隔離只會花在「不隔離就會被接受」的候選上。**往後跳（延遲變大）永不隔離**，pre-echo 誤歸因不會產生那個方向；**首次取得對齊也不受影響**（那是 `delay_acquire_protect_converged` 的事）。隔離**有上限**（見下一列）：到期就採用。判別依據是 `aec_linear_is_cancelling()`——windowed ERLE > 2.5 dB **或**近期 inst-ERLE 峰值 > `delay_acquire_inst_erle_db`；兩個讀數在其機制未跑過時都是 0，因此指標不存在時自動失效（fail-open），不會誤擋。消除能力崩掉時**立即**放行，不必等到期；這是 hard replacement 常見但不是所有真實路徑變化都必然具備的現象。**沒有「佔優」提前放行**：estimator 對外只有 0／0.5／1.0 三級 confidence，那是 histogram 一致性、不帶品質資訊（誤鎖候選一樣會到 REFINED），Path B 本來就已經在閘它，所以「候選一直被提出」本身就是唯一可用的持續性證據，而窗長就是在量它。**它只延後、不治癒**：誤鎖被推遲一個窗，真正的 pre-echo 修復是 estimator 本身的工作。方向判斷與上限兩者都是必要條件：不看方向、又不設上限的判別式（「只要還在消除就拒絕所有不同候選」）在 multipath／新增路徑場景會無限期否決真正的新路徑（實測舊/新增益 0.4/0.5 到 hop 850 仍不重鎖、0.5/0.5 永不重鎖），現行判別式則四種增益全部重鎖、最壞只慢一個窗。**是否開啟屬部署決策**，需先用實機音檔確認該裝置真的會出現這種誤鎖再開；預設 OFF 是 byte-exact 的安全值。`FIXED` / `EXTERNAL_ALIGNED` 不會重新決定對齊，此旗標對它們無作用。 |
 | `delay_backward_quarantine_s` | `float` | `1.0` | 0 – 3600 | 上一項的隔離窗長（秒），在 `aec_create()` 時按解析後的 hop／取樣率換算成 estimation cycle 數（最小 1，所以小於一個 hop 的窗仍會隔離整整一個 cycle；要關閉請用上一列的 enable，不是把這裡設 0）。enable 為 0 時完全無作用。**預設 1.0 秒的依據**（16 kHz／hop 256 = 62 hops）：下限來自誤鎖動態——pre-echo 重鎖只在首次鎖定後 17 個 hop 就發生，窗必須明顯長於它才涵蓋得到誤鎖最具破壞力的那段（62 是 17 的 3.6 倍）；上限來自真實變化的成本——在多路徑測試場景中 estimator 自己產生新候選就要 488–1515 個 hop，多等 62 個 hop 是其中的 4–13%，而且只有在消除能力**沒有**崩掉時才需要等（崩掉就立即放行）。實測（16 kHz／fft 512／hop 256，true 6400 誤鎖 4800）：窗 0.5/1.0/2.0/4.0 s = 31/62/125/250 hops，誤鎖採用點就從 hop 49 精確移到 80/111/174/299——「到期即採用」是唯一的放行機制，沒有永久 veto 的路徑。 |
@@ -616,11 +616,11 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 ### 6.6b 逐階段耗時（`aec_get_last_timing`）
 
 ```c
-typedef struct AecStageTiming AecStageTiming;   /* delay_us / frontend_us / linear_us / res_us */
+typedef struct AecStageTiming AecStageTiming;   /* delay_us / frontend_us / linear_us / steering_us / res_us */
 void aec_get_last_timing(const Aec* a, AecStageTiming* out);
 ```
 
-最近一個 hop 內四個最大階段的 wall-clock 成本（微秒，預設用
+最近一個 hop 內五個最大階段的 wall-clock 成本（微秒，預設用
 `CLOCK_MONOTONIC`）。純診斷：引擎自己不回讀，處理結果不受影響。`a` 為 `NULL`
 時把 `out` 清零而不是失敗；`out` 不得為 `NULL`。
 
@@ -634,19 +634,23 @@ void aec_get_last_timing(const Aec* a, AecStageTiming* out);
   **不含** `delay_us`，兩者不會重複計算。
 - `linear_us`：主自適應濾波器；若本實例自己算 far-end FFT（而不是透過
   `aec_process_context_shared_far()` 借用），FFT 也算在這裡。
+- `steering_us`：主濾波器與 post 區塊之間的全部工作——stationarity refresh、
+  `e2_coarse`/ERL publish 與 coarse rescue、double-talk analyzer、EPV、
+  `shadow_rise`、misadjustment estimator。它們都不直接動樣本，只決定下一個
+  hop 怎麼適應，但確實是每個 hop 的真實成本；先前它落在 `linear_us` 收尾與
+  `res_us` 起算之間，任何以這些欄位做的分解都會低估整個 hop。
 - `res_us`：AEC3 post/RES 區塊。只要 `enable_res` **或** `return_res_context`
   其中之一為真就會跑，所以 context-only 的呼叫端也會看到真實數字。
 
-四者**刻意不等於**整個呼叫：餘額是 stationarity refresh、`e2_coarse`/ERL
-publish、DT analyzer、EPV、`shadow_rise`、misadjustment estimator、power EMA
-與收斂偵測。要呈現完整分解的呼叫端得自己把餘額算出來。
+五者**刻意不等於**整個呼叫：餘額是 `res_us` 收尾之後才跑的 per-sample power
+EMA 與收斂偵測。要呈現完整分解的呼叫端得自己把餘額算出來。
 
 每次 `aec_process*()` 進入時清零，所以一個 hop 只會回報它真的跑到的階段。
 解析度是微秒，低於 1 µs 的階段會讀到 0。
 
 #### 預設關閉
 
-⚠ **量測要建置時開啟**，否則四個欄位每個 hop 都讀 0：
+⚠ **量測要建置時開啟**，否則五個欄位每個 hop 都讀 0：
 
 ```bash
 make PROFILE=1              # 等同 EXTRA_CFLAGS=-DAEC_STAGE_TIMING=1
@@ -1099,7 +1103,7 @@ BIN="$(make -s -C c_impl print-bin-dir BACKEND=kiss)"
 （§6.7）後印一行到 **stdout**（其餘旗標一律印到 stderr）：
 
 ```text
-mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=379760 estimator_bytes=33936 ring_bytes=131072
+mem: sr=16000 fft=256 hop=128 mode=matched n=5 fixed_delay_samples=-1 total_bytes=385440 estimator_bytes=33936 ring_bytes=131072
 ```
 
 欄位依序：resolved 後的 `sample_rate`／`fft_size`／`hop_size`、`delay_mode`、

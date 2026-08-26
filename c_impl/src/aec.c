@@ -1283,9 +1283,9 @@ size_t aec_get_mem_size(const AecConfig* cfg_in) {
     t = ck_field_size(t, Kz, sizeof(float));           /* per_bin_mu_scale */
     t = ck_field_size_reps(t, (size_t)hop, sizeof(float), 5); /* near_hop far_hop raw shadow final */
     t = ck_field_size(t, ck_mul_size((size_t)np, (size_t)hop), sizeof(float)); /* filter_taps_full */
-    /* per-hop freq-bin scratch (12; see aec.h struct comment) */
+    /* per-hop freq-bin scratch (9; see aec.h struct comment) */
     t = ck_field_size(t, (size_t)hop, sizeof(float));  /* scr_sq */
-    t = ck_field_size_reps(t, Kz, sizeof(float), 11);  /* scr_e2_echo .. scr_erl_arr */
+    t = ck_field_size_reps(t, Kz, sizeof(float), 8);   /* scr_e2_echo .. scr_erl_arr */
     if (cfg->enable_highpass) t = ck_field_size(t, 1, hpf_get_mem_size()); /* mic-path HPF */
 
     if (MEM_SIZE_INVALID(t)) return 0;
@@ -1864,14 +1864,11 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     a->scr_sq        = (float*)ptr; ptr += ALIGN16((size_t)hop * sizeof(float));
     a->scr_e2_echo   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_e2_near   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
-    a->scr_rsa_psd   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_rsa_mask  = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_mu_buf_pre= (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_e2coa_pre = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_mu_buf    = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
-    a->scr_far_psd   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_e2ref_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
-    a->scr_e2coa_arr = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     a->scr_erl_arr   = (float*)ptr; ptr += ALIGN16((size_t)K   * sizeof(float));
     /* mic-path HPF (audio_common f32; arena/pool-resident, hpf_destroy no-ops).
      * R08: hpf_init() returns NULL if hpf_params_valid() (audio_common
@@ -2081,16 +2078,8 @@ int aec_apply_external_realign(Aec* a, int delta_samples) {
              * (measured on the regression scene). A delta > 0 realign only
              * leaves a gap in the history, which settles quietly, so the
              * history is cleared for the retard direction alone. */
-            int Wsz = a->main_filter.base.n_partitions
-                      * a->main_filter.base.n_freqs;
-            memset(a->main_filter.base.X_buf, 0,
-                   (size_t)Wsz * sizeof(Complex));
-            if (a->has_shadow) {
-                int Ssz = a->shadow_filter.n_partitions
-                          * a->shadow_filter.n_freqs;
-                memset(a->shadow_filter.X_buf, 0,
-                       (size_t)Ssz * sizeof(Complex));
-            }
+            pbfdaf_clear_far_history(&a->main_filter.base);
+            if (a->has_shadow) pbfdaf_clear_far_history(&a->shadow_filter);
         }
         /* Alignment token: the far this filter is matched to just moved, on
          * BOTH outcomes -- a consumer's cross-hop far caches are stale either
@@ -2387,7 +2376,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
     const int hop = a->hop_size, K = a->n_freqs, N = a->n_partitions;
     int stationarity_block_for_post;
     /* Stage stamps. t_stage closes one stage and opens the next where they
-     * are adjacent, so the four windows cost seven reads, not eight. t_delay
+     * are adjacent, so the five windows cost seven reads, not ten. t_delay
      * brackets section 3, which sits INSIDE the frontend window and is
      * subtracted back out of it so the two never double-count. */
     uint32_t t_stage, t_mark, t_delay;
@@ -2401,6 +2390,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
     a->last_timing.frontend_us = 0;
     a->last_timing.linear_us = 0;
     a->last_timing.res_us = 0;
+    a->last_timing.steering_us = 0;
     t_stage = aec_now_us();
     memcpy(a->near_hop, mic_in, (size_t)hop * sizeof(float));
     memcpy(a->far_hop,  ref_in, (size_t)hop * sizeof(float));
@@ -2752,9 +2742,12 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
      *    |filter.far_spec|² from the PREVIOUS hop (far_spec set inside step-9
      *    pbfdkf_process). First hop: far_spec is zero. */
     {
-        float *rsa_psd = a->scr_rsa_psd;
-        sk_cmag2_np_f32(a->main_filter.base.far_spec, rsa_psd, K);
-        rsa_update(&a->rsa, rsa_psd, a->far_hop, hop);
+        /* far_cmag2_hold is written by the filter's frontend, which for this
+         * hop has not run yet -- so it still holds |far_spec|² of the PREVIOUS
+         * hop, which is exactly the spectrum this step wants. It tracks
+         * far_spec's own lifecycle (both are zeroed together at init and
+         * neither is cleared by a realign), so the two can never disagree. */
+        rsa_update(&a->rsa, a->main_filter.base.far_cmag2_hold, a->far_hop, hop);
         int poor = rsa_poor_signal_excitation(&a->rsa);
         /* Ceilinged at each filter's own n_partitions (UBSan-confirmed
          * signed-overflow fix): poor_excitation_counter's only production
@@ -2880,7 +2873,13 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
                            main_mu_scalar, a->raw_output);
     }
 
-    a->last_timing.linear_us = aec_now_us() - t_mark;
+    /* One stamp closes the main filter and opens the steering window (steps
+     * 10-16), so the fifth bucket costs no extra clock read. */
+    {
+        uint32_t t_lin_end = aec_now_us();
+        a->last_timing.linear_us = t_lin_end - t_mark;
+        t_mark = t_lin_end;
+    }
 
     /* 10. stationarity refresh for NEXT hop (StationarityEstimator on
      *     |filter.far_spec|²; first-render latch; block-stationary push). */
@@ -2890,8 +2889,9 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         if (!a->non_zero_render_seen && far_max >= a->render_peak_floor)
             a->non_zero_render_seen = 1;
         if (a->non_zero_render_seen) {
-            float *far_psd = a->scr_far_psd;
-            sk_cmag2_np_f32(a->main_filter.base.far_spec, far_psd, K);
+            /* Same hold, read AFTER step 9's frontend -- the current hop's
+             * |far_spec|², which is what the estimator refreshes on. */
+            const float *far_psd = a->main_filter.base.far_cmag2_hold;
             stationarity_estimator_update_noise_estimator(&a->a3_stat, far_psd);
             /* E16: pass avg_reverb from previous hop's aec3_post_compute_x2_reverb —
              * same state Python reads from _aec3_avg_render_reverb.reverb (one-hop stale,
@@ -2959,13 +2959,21 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         float e2_coa = a->main_filter.e2_coarse_for_refresh;
         /* erl[k] = Σ_p |W_p[k]|². zero-init once, then accumulate every
          * partition (including p==0) via the acc kernel — matches the
-         * original zero-fill-then-`+=`-every-partition shape exactly. */
-        for (int k = 0; k < K; ++k) erl_arr[k] = 0.0f;
-        for (int part = 0; part < N; ++part) {
-            const Complex* Wp = a->main_filter.base.W + (size_t)part * K;
-            sk_cmag2_np_acc_f32(Wp, erl_arr, K);
+         * original zero-fill-then-`+=`-every-partition shape exactly.
+         * erl_per_bin persists across hops, so on a hop where nothing wrote W
+         * this sum reproduces the floats already sitting there; the filter's
+         * w_dirty flag (set by every W writer, see pbfdkf.h) says which hops
+         * those are. Clearing it here is what closes the loop -- this is the
+         * flag's only consumer. */
+        if (a->main_filter.base.w_dirty) {
+            for (int k = 0; k < K; ++k) erl_arr[k] = 0.0f;
+            for (int part = 0; part < N; ++part) {
+                const Complex* Wp = a->main_filter.base.W + (size_t)part * K;
+                sk_cmag2_np_acc_f32(Wp, erl_arr, K);
+            }
+            for (int k = 0; k < K; ++k) a->main_filter.erl_per_bin[k] = erl_arr[k];
+            a->main_filter.base.w_dirty = 0;
         }
-        for (int k = 0; k < K; ++k) a->main_filter.erl_per_bin[k] = erl_arr[k];
 
         /* rescue: cond_fire = e2_ref < 0.5*e2_coa; threshold_hops live-computed
          * at construction (poor_coarse_threshold_hops), not a frozen literal. */
@@ -3006,8 +3014,20 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
 
     /* 13. smoothed errs + DT analyzer + regime handler. */
     if (a->has_shadow) {
-        float main_err   = pbfdkf_get_error_energy(&a->main_filter);
-        float shadow_err = pbfdaf_get_error_energy(&a->shadow_filter);
+        /* |error_spec|² for both filters already exists this hop: main's in
+         * scr_e2ref_arr (step 12), the shadow's in scr_e2coa_pre (step 8.5).
+         * Neither error_spec is touched in between, so the arrays hold exactly
+         * what a fresh cmag2 pass would produce, and the two get_error_energy
+         * calls that used to recompute them are just the reduction below.
+         *
+         * The REDUCTION is not shareable, only the arrays: step 8.5 and step
+         * 12 sum with aec3_post_pairwise_sum_f32 while an error ENERGY is a
+         * tail-fold sum, and the two trees round differently by design
+         * (aec_simd_kernels.h documents them as distinct value functions).
+         * Reusing e2_coa / e2_ref here instead of re-reducing would silently
+         * change these two floats. */
+        float main_err   = sk_pairwise_sum_tailfold_f32(a->scr_e2ref_arr, (size_t)K);
+        float shadow_err = sk_pairwise_sum_tailfold_f32(a->scr_e2coa_pre, (size_t)K);
         float as = a->cfg.shadow_err_alpha, oas = 1.0f - as;
         a->main_err_smooth   = as * a->main_err_smooth   + oas * main_err;
         a->shadow_err_smooth = as * a->shadow_err_smooth + oas * shadow_err;
@@ -3095,8 +3115,10 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         if (a->erle_slope_len < a->erle_slope_cap) a->erle_slope_len++;
     }
 
-    /* 17. RES / post block (enable_res). */
+    /* 17. RES / post block (enable_res). One stamp closes the steering
+     * window and opens this one. */
     t_stage = aec_now_us();
+    a->last_timing.steering_us = t_stage - t_mark;
     int is_stationary_dt = 0;
     float dt_indicator = 0.0f;
     float erle_windowed = 0.0f;
@@ -3228,6 +3250,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             in.W0 = a->main_filter.base.W;             /* W[0] */
             in.W_all = a->main_filter.base.W;          /* live, read-only for the call */
             in.X_buf = a->main_filter.base.X_buf;      /* live, read-only for the call */
+            in.x2_cache = a->main_filter.base.x2_cache;   /* |X_buf|² mirror, same lifetime */
             in.sqrt_hann = a->main_filter.base.sqrt_hann;
             in.kalman_P = NULL; in.kalman_P_len = 0;   /* divergence_indicator dead */
             in.partition_idx = a->main_filter.base.partition_idx;

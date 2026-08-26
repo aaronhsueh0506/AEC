@@ -52,12 +52,6 @@ typedef struct PBFDAF {
     int     n_freqs;           /* fft_size/2 + 1 */
     float   mu;
     float   delta;
-    float   alpha_power;       /* far-end power EMA retention. AUTHORING value
-                                * 0.9 at hop=160/16000 (10 ms); the RUNTIME
-                                * value is retimed to this instance's grid by
-                                * pbfdaf_init_scalars() and equals 0.9 only on
-                                * a 10 ms hop. Read the effective value, never
-                                * this comment -- test_rate_structural (d2). */
     int     enable_td_constraint;
 
     float*  td_window;         /* [fft_size] */
@@ -71,7 +65,6 @@ typedef struct PBFDAF {
 
     float*  near_buffer;       /* [block_size] */
     float*  far_buffer;        /* [block_size] */
-    float*  power;             /* [n_freqs] far PSD EMA */
 
     Complex* near_spec;        /* [n_freqs] */
     Complex* echo_spec;        /* [n_freqs] */
@@ -143,20 +136,49 @@ typedef struct PBFDAF {
     float*  scr_x2psum;        /* [n_freqs]      pbfdaf_process X_buf**2 partition sum */
     float*  scr_mu_eff;        /* [n_freqs]      pbfdaf_process per-bin mu */
     float*  scr_ir;            /* [n_partitions*hop_size] pbfdaf_warm_shift_ir IR concat */
-    float*  scr_e2;            /* [n_freqs] pbfdaf_get_error_energy |error_spec|**2 --
-                                 * ALSO pbfdaf_frontend's far_spec cmag2 scratch (far_psd_sum
-                                 * + cold-start/EMA power update), reused across the two
-                                 * phases -- frontend fully writes-then-
-                                 * consumes it within its own call, and get_error_energy fully
-                                 * overwrites-then-reads it within its own call (its only
-                                 * caller, aec.c step 13, runs strictly after that hop's
-                                 * frontend, itself invoked from pbfdaf_process/pbfdkf_process
-                                 * step 9/8.5), so nothing ever reads either phase's data
-                                 * through the other's stale contents -- see pbfdaf_frontend's
-                                 * own comment for the full argument. Saves one
-                                 * ALIGN16(n_freqs*4)-byte field per instance (main + shadow). */
+    float*  scr_e2;            /* [n_freqs] pbfdaf_get_error_energy |error_spec|**2.
+                                 * Fully overwritten before it is read back within that
+                                 * one call, so it carries nothing across hops. */
 
     int is_static;             /* 1 = state placed in caller buffer */
+
+    /* Appended fields (kept last so every offset above is unchanged).
+     *
+     * x2_cache [n_partitions][n_freqs] float — |X_buf[p][k]|² mirrored row for
+     * row. The two X² partition sums (pbfdaf_process's NLMS gate and
+     * pbfdkf_update_weights_aec3's Kalman gain) re-derived this from X_buf with
+     * the scaled-hypot cmag2 kernel on every update call, over a history where
+     * exactly one row changes per hop and that row's |.|² is already computed
+     * by the frontend. The cached float IS the value cmag2 would return -- it
+     * is produced by the same kernel, once, at the hop the partition enters
+     * history -- so the sums stay byte-identical while the divide+sqrt per bin
+     * per partition disappears. Every X_buf writer must write this in the same
+     * breath: pbfdaf_zero_state, pbfdaf_reset_taps, the frontend's row store
+     * and pbfdaf_clear_far_history (the only spelling a caller outside this
+     * file has for wiping the far history).
+     *
+     * far_cmag2_hold [n_freqs] float — |far_spec[k]|², written by the frontend
+     * and zeroed exactly where far_spec is zeroed, so it tracks far_spec's
+     * lifecycle rather than X_buf's. That distinction is load-bearing: a
+     * realign clears X_buf (and x2_cache) but NOT far_spec, so a consumer
+     * wanting |far_spec|² must read this, not an x2_cache row. Read before this
+     * hop's frontend it holds the previous hop's spectrum; read after, the
+     * current one -- which is exactly how the orchestrator's two consumers
+     * (previous-hop RSA, current-hop stationarity) want it. */
+    float*  x2_cache;
+    float*  far_cmag2_hold;
+
+    /* Set by EVERY writer of W in this file -- the two update paths (including
+     * their round-robin TD constraint), copy_weights_from, warm_shift_ir,
+     * scale_filter, reset_taps, zero_state -- and by init, so the first hop
+     * always recomputes. It exists for one consumer: the orchestrator's
+     * per-bin ERL publish, Σ_p|W_p[k]|², which ran every hop over a W that
+     * changes on roughly a quarter of them. That consumer CLEARS the flag when
+     * it has taken the sum; a second consumer must not be added without giving
+     * it its own flag, because clearing is what makes the skip work. Anything
+     * that writes W without setting this serves a stale ERL to the H_error
+     * leakage refresh, which is audible, not cosmetic. */
+    int     w_dirty;
 } PBFDAF;
 
 /* with_process_scratch: 1 allocates the pbfdaf_process()-only scratch
@@ -168,9 +190,9 @@ typedef struct PBFDAF {
  * pbfdaf_free's heap branch) rather than leaving a half-built filter around
  * whose FFT calls would silently no-op on the NULL handle.
  * Also -1, with nothing written to `p`, if p is NULL or sample_rate/hop are
- * non-positive: sample_rate retimes alpha_power and
- * initial_state_threshold_hops, so an unusable rate must be refused here
- * rather than producing a filter whose EMAs never adapt. */
+ * non-positive: sample_rate retimes initial_state_threshold_hops, so an
+ * unusable rate must be refused here rather than producing a filter whose
+ * gates never open. */
 int    pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size,
                     int with_process_scratch, int sample_rate);
@@ -203,7 +225,7 @@ void pbfdaf_free(PBFDAF* p);
 void pbfdaf_reset(PBFDAF* p);
 
 /* Adaptation-only wipe: taps (W), the per-partition far SPECTRUM history
- * (X_buf) and the far-power normalizer, leaving the time-domain analysis
+ * (X_buf), leaving the time-domain analysis
  * buffers (near_buffer/far_buffer, the block_size overlap-save history that
  * feeds near_spec/far_spec/error_spec_windowed and supplies the near term of
  * the linear output) untouched. pbfdaf_reset() is this plus those buffers.
@@ -212,6 +234,13 @@ void pbfdaf_reset(PBFDAF* p);
  * half-empty analysis frame into the spectra a post-filter consumes: the
  * taps are what a realign invalidates, the analysis history is not. */
 void pbfdaf_reset_taps(PBFDAF* p);
+
+/* Wipe the per-partition far SPECTRUM history (X_buf) and its |.|² mirror,
+ * leaving taps and analysis buffers alone. The mirror is why this exists as a
+ * function: a caller memset-ing X_buf on its own would leave x2_cache holding
+ * the magnitudes of a history that is now zero, and the next update would
+ * subtract echo against them. One spelling, both arrays. */
+void pbfdaf_clear_far_history(PBFDAF* p);
 
 /* mu_scale: NULL ⇒ scalar; else per-bin array of n_freqs fp32. Output written
  * to `output` (length hop_size). */
@@ -247,10 +276,10 @@ typedef struct PBFDKF {
     float* R;
     float* error_psd;
     float  alpha_r;            /* error-PSD EMA retention. AUTHORING value 0.95
-                                * at hop=160/16000 (10 ms, same reference as
-                                * alpha_power); retimed at pbfdkf_init(), so
-                                * it equals 0.95 only on a 10 ms hop. Read the
-                                * effective value, never this comment. */
+                                * at hop=160/16000 (10 ms); retimed at
+                                * pbfdkf_init(), so it equals 0.95 only on a
+                                * 10 ms hop. Read the effective value, never
+                                * this comment. */
 
     /* === v3.22 AEC3 H_error per-bin state =========================== */
     float* H_error_per_bin;    /* [n_freqs], init 10000 */

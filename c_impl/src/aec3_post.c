@@ -600,16 +600,29 @@ int aec3_post_run(Aec3Post *p,
                 delay_idx = ((curr_p - delay) % n_part + n_part) % n_part;
                 past_idx = ((curr_p - delay - 1) % n_part + n_part) % n_part;
                 if (in->X_buf != NULL && n_part > 0) {
-                    const Complex *Xd = in->X_buf + (size_t)delay_idx * nb;
-                    const Complex *Xp = in->X_buf + (size_t)past_idx * nb;
                     /* x2 = (np.abs(X)**2).astype(f32) = cmag2_np per bin.
-                     * Fissioned into 2 independent elementwise cmag2 calls:
-                     * disjoint destinations (x2_at_delay/x2_past), disjoint
-                     * nb-contiguous sources (Xd/Xp are two different
-                     * partition-slices of X_buf) -- no ordering dependency
-                     * between them. */
-                    sk_cmag2_np_f32(Xd, sc->x2_at_delay, nb);
-                    sk_cmag2_np_f32(Xp, sc->x2_past, nb);
+                     * When the filter hands over its |X_buf|² mirror, both
+                     * rows are already those floats -- the mirror is filled
+                     * by the same cmag2_np kernel as the partition enters
+                     * history -- so they are copied rather than re-derived.
+                     * The fallback stays fissioned into 2 independent
+                     * elementwise calls: disjoint destinations
+                     * (x2_at_delay/x2_past), disjoint nb-contiguous sources
+                     * (Xd/Xp are two different partition-slices of X_buf) --
+                     * no ordering dependency between them. */
+                    if (in->x2_cache != NULL) {
+                        memcpy(sc->x2_at_delay,
+                               in->x2_cache + (size_t)delay_idx * nb,
+                               (size_t)nb * sizeof(float));
+                        memcpy(sc->x2_past,
+                               in->x2_cache + (size_t)past_idx * nb,
+                               (size_t)nb * sizeof(float));
+                    } else {
+                        const Complex *Xd = in->X_buf + (size_t)delay_idx * nb;
+                        const Complex *Xp = in->X_buf + (size_t)past_idx * nb;
+                        sk_cmag2_np_f32(Xd, sc->x2_at_delay, nb);
+                        sk_cmag2_np_f32(Xp, sc->x2_past, nb);
+                    }
                     x2_present = 1;
                 }
                 /* decay_steady = ree._reverb_decay(dominant_nearend=False) —
@@ -804,8 +817,17 @@ int aec3_post_run(Aec3Post *p,
                                         p->comfort_noise, sc->render_block_scaled,
                                         /*clock_drift=*/0, sat_echo);
 
-                                    /* audio-passive trace stash: mean per-bin gain. */
-                                    {
+                                    /* audio-passive trace stash: mean per-bin
+                                     * gain. Its only reader is aec.c's
+                                     * --debug-trace row, which needs
+                                     * cfg.enable_res AND the aec_process()
+                                     * path; in->context_only is exactly the
+                                     * complement of that (set from
+                                     * !enable_res && return_res_context), so
+                                     * in ctx-only the sum feeds nothing.
+                                     * trace.gain_mean keeps the value
+                                     * aec3_post_reset seeded. */
+                                    if (!in->context_only) {
                                         float gsum = 0.0f;
                                         for (k = 0; k < nb; ++k) gsum += gain[k];
                                         p->trace.gain_mean = (nb > 0) ? gsum / (float)nb : 0.0f;

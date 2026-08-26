@@ -875,12 +875,12 @@
     },
     {
       "id": "pre-echo-earliest-lag-bias-window-2-x-knumblockspersecond-c-da-k-num-b",
-      "name": "pre-echo earliest-lag bias window (2 x kNumBlocksPerSecond; C DA_K_NUM_BLOCKS_PER_SEC * 2 = 500)",
+      "name": "pre-echo earliest-lag bias window (2 x kNumBlocksPerSecond; C DA_K_NUM_BLOCKS_PER_SEC * 2 = 500) -- RETIRED",
       "category": "retime",
       "status": "open",
       "confidence": "high",
       "anchor": "2000 ms of earliest-lag bias (AEC3: first 2 seconds). Rate-relative, hop-independent.",
-      "effective": "Hop-independent at all four grids. By SAMPLE RATE: native 8 kHz -> Python 250 updates x 8 ms = 2000 ms (correct), C 500 x 8 ms = 4000 ms (2x); 16 kHz (both grids) -> both 500 x 4 ms = 2000 ms, agree; 48 kHz -> effective 16 kHz, agree.",
+      "effective": "RETIRED: the pre-echo aggregator path was removed (dominant-peak product policy); DA_K_NUM_BLOCKS_PER_SEC / DA_K_MFW_SUB_BLOCKS deleted with it. Kept as provenance.",
       "consumers": [
         "c_impl/src/delay_aec3.c:809, gating the windowed local-max scan with the 0.7x per-later-window penalty that biases the pre-echo candidate toward the EARLIEST high-confidence lag; after the window expires the candidate becomes a simple argmax. number_updates increments only inside the branch and is reset only on da_pre_echo_reset -- but unlike _PRE_ECHO_UPDATES_TO_REPORT there is no qualifying condition (aggregate() is called once per inner block), so this IS a wall-clock duration, not an evidence count."
       ],

@@ -1478,6 +1478,166 @@ static inline void sk_erl_hold_expire_f32(float *erl, const int *hold,
 }
 #endif
 
+/* ═══════════════════════════════ kernel 27 ═════════════════════════════════
+ * sk_no_audible_echo_gain_f32 — the per-bin soft-blend body of
+ * AEC/c_impl/src/suppression_gain.c gain_to_no_audible_echo(), for the
+ * configuration where soft_blend_enabled and soft_blend_per_bin are both
+ * set. Transcribed statement-for-statement from that loop:
+ *
+ *   enr_bin = echo[k] / (nearend[k] + 1.0f);
+ *   sig     = (enr_bin - thr) / softness;
+ *   if (sig < -50.0f) sig = -50.0f;
+ *   if (sig >  50.0f) sig =  50.0f;
+ *   ne_wb   = 1.0f / (1.0f + fast_exp(sig));
+ *   <tab>_k = ne_wb * nearend_<tab>[k] + (1.0f - ne_wb) * normal_<tab>[k];
+ *   enr = echo[k] / (nearend[k] + 1.0f);
+ *   emr = echo[k] / (masker[k]  + 1.0f);
+ *   g = 1.0f;
+ *   if (enr > enr_tr_k && emr > emr_tr_k) {
+ *       d_lin     = enr_su_k - enr_tr_k;
+ *       denom_lin = d_lin < 1e-30f ? 1e-30f : d_lin;
+ *       g_lin     = (enr_su_k - enr) / denom_lin;
+ *       denom_emr = emr < 1e-30f ? 1e-30f : emr;
+ *       g_emr     = emr_tr_k / denom_emr;
+ *       g         = g_lin > g_emr ? g_lin : g_emr;
+ *   }
+ *   out[k] = g;
+ *
+ * `enr_bin` and `enr` are the same expression over the same operands and so
+ * the same bits; both are written out, mirroring the source, and left to
+ * the compiler to fold.
+ *
+ * The sigmoid's exponential is sk__fast_exp_vec (simd_kernels.h's validated
+ * lane-for-lane twin of fast_math.h's fast_exp, itself domain-safe for NaN
+ * and any magnitude), so this kernel exists only where that does --
+ * SK_HAVE_NEON and not USE_STANDARD_MATH; every other build takes the
+ * scalar entry point, which calls sk__fast_exp_elem, the equally verbatim
+ * scalar twin fast_math.h's own selftest three-way-checks.
+ *
+ * The blend, the two ratios and the two quotients are plain
+ * vmulq/vaddq/vsubq/vdivq with no vfmaq anywhere: the scalar source has no
+ * fmaf call, and AArch64 FDIV is correctly rounded, so each lane rounds
+ * exactly where the scalar expression does.
+ *
+ * Every one of the four selects is compare(vcltq/vcgtq)+select(vbslq), never
+ * vminq/vmaxq, per this header's rule -- FMIN/FMAX propagate a NaN operand
+ * and break +-0.0 ties toward the ordered result, while a C ternary's `<`
+ * and `>` are unordered-false and therefore fall to the OTHER operand. The
+ * final `g_lin > g_emr` max is where that matters most: a NaN g_lin (an
+ * enr_su_k - enr of 0/0, or a NaN reaching the tables) must yield g_emr,
+ * which vmaxq_f32 would not do. The two 1e-30f denominator clamps and the
+ * two +-50.0f sigmoid clamps follow the same rule so the kernel is
+ * unconditionally bit-exact rather than bit-exact-on-the-reachable-domain.
+ *
+ * `cond` computes both arms speculatively. The discarded arm can divide by
+ * zero and produce an Inf or NaN, which is harmless -- no lane's selected
+ * result depends on it, and no FP exception is enabled. */
+
+static inline float sk__no_audible_echo_gain_elem(
+    float nearend, float echo, float masker,
+    float ne_enr_tr, float ne_enr_su, float ne_emr_tr,
+    float no_enr_tr, float no_enr_su, float no_emr_tr,
+    float blend_thr, float blend_softness) {
+    float enr_bin = echo / (nearend + 1.0f);
+    float sig = (enr_bin - blend_thr) / blend_softness;
+    float ne_wb, enr_tr_k, enr_su_k, emr_tr_k, enr, emr, g;
+    if (sig < -50.0f) sig = -50.0f;
+    if (sig > 50.0f) sig = 50.0f;
+    ne_wb = 1.0f / (1.0f + sk__fast_exp_elem(sig));
+    enr_tr_k = (ne_wb * ne_enr_tr + (1.0f - ne_wb) * no_enr_tr);
+    enr_su_k = (ne_wb * ne_enr_su + (1.0f - ne_wb) * no_enr_su);
+    emr_tr_k = (ne_wb * ne_emr_tr + (1.0f - ne_wb) * no_emr_tr);
+    enr = echo / (nearend + 1.0f);
+    emr = echo / (masker + 1.0f);
+    g = 1.0f;
+    if (enr > enr_tr_k && emr > emr_tr_k) {
+        float d_lin = enr_su_k - enr_tr_k;
+        float denom_lin = d_lin < 1e-30f ? 1e-30f : d_lin;
+        float g_lin = (enr_su_k - enr) / denom_lin;
+        float denom_emr = emr < 1e-30f ? 1e-30f : emr;
+        float g_emr = emr_tr_k / denom_emr;
+        g = g_lin > g_emr ? g_lin : g_emr;
+    }
+    return g;
+}
+
+static inline void sk_no_audible_echo_gain_f32_scalar(
+    const float *nearend, const float *echo, const float *masker,
+    const float *ne_enr_tr, const float *ne_enr_su, const float *ne_emr_tr,
+    const float *no_enr_tr, const float *no_enr_su, const float *no_emr_tr,
+    float blend_thr, float blend_softness, float *out, int n) {
+    int k;
+    for (k = 0; k < n; ++k)
+        out[k] = sk__no_audible_echo_gain_elem(
+            nearend[k], echo[k], masker[k],
+            ne_enr_tr[k], ne_enr_su[k], ne_emr_tr[k],
+            no_enr_tr[k], no_enr_su[k], no_emr_tr[k],
+            blend_thr, blend_softness);
+}
+
+#if SK_HAVE_NEON && !defined(USE_STANDARD_MATH)
+static inline void sk_no_audible_echo_gain_f32(
+    const float *nearend, const float *echo, const float *masker,
+    const float *ne_enr_tr, const float *ne_enr_su, const float *ne_emr_tr,
+    const float *no_enr_tr, const float *no_enr_su, const float *no_emr_tr,
+    float blend_thr, float blend_softness, float *out, int n) {
+    int k = 0;
+    float32x4_t one   = vdupq_n_f32(1.0f);
+    float32x4_t vthr  = vdupq_n_f32(blend_thr);
+    float32x4_t vsoft = vdupq_n_f32(blend_softness);
+    float32x4_t vlo   = vdupq_n_f32(-50.0f);
+    float32x4_t vhi   = vdupq_n_f32(50.0f);
+    float32x4_t vtiny = vdupq_n_f32(1e-30f);
+    for (; k + 4 <= n; k += 4) {
+        float32x4_t ne = vld1q_f32(nearend + k);
+        float32x4_t ec = vld1q_f32(echo + k);
+        float32x4_t mk = vld1q_f32(masker + k);
+        float32x4_t enr_bin = vdivq_f32(ec, vaddq_f32(ne, one));
+        float32x4_t sig = vdivq_f32(vsubq_f32(enr_bin, vthr), vsoft);
+        sig = vbslq_f32(vcltq_f32(sig, vlo), vlo, sig);   /* sig<-50 ? -50 : sig */
+        sig = vbslq_f32(vcgtq_f32(sig, vhi), vhi, sig);   /* sig> 50 ?  50 : sig */
+        {
+            float32x4_t ne_wb = vdivq_f32(one, vaddq_f32(one, sk__fast_exp_vec(sig)));
+            float32x4_t inv   = vsubq_f32(one, ne_wb);
+            float32x4_t enr_tr = vaddq_f32(vmulq_f32(ne_wb, vld1q_f32(ne_enr_tr + k)),
+                                           vmulq_f32(inv,   vld1q_f32(no_enr_tr + k)));
+            float32x4_t enr_su = vaddq_f32(vmulq_f32(ne_wb, vld1q_f32(ne_enr_su + k)),
+                                           vmulq_f32(inv,   vld1q_f32(no_enr_su + k)));
+            float32x4_t emr_tr = vaddq_f32(vmulq_f32(ne_wb, vld1q_f32(ne_emr_tr + k)),
+                                           vmulq_f32(inv,   vld1q_f32(no_emr_tr + k)));
+            float32x4_t enr = vdivq_f32(ec, vaddq_f32(ne, one));
+            float32x4_t emr = vdivq_f32(ec, vaddq_f32(mk, one));
+            uint32x4_t  cond = vandq_u32(vcgtq_f32(enr, enr_tr),
+                                         vcgtq_f32(emr, emr_tr));
+            float32x4_t d_lin = vsubq_f32(enr_su, enr_tr);
+            float32x4_t den_l = vbslq_f32(vcltq_f32(d_lin, vtiny), vtiny, d_lin);
+            float32x4_t g_lin = vdivq_f32(vsubq_f32(enr_su, enr), den_l);
+            float32x4_t den_e = vbslq_f32(vcltq_f32(emr, vtiny), vtiny, emr);
+            float32x4_t g_emr = vdivq_f32(emr_tr, den_e);
+            float32x4_t gmax  = vbslq_f32(vcgtq_f32(g_lin, g_emr), g_lin, g_emr);
+            vst1q_f32(out + k, vbslq_f32(cond, gmax, one));
+        }
+    }
+    for (; k < n; ++k)
+        out[k] = sk__no_audible_echo_gain_elem(
+            nearend[k], echo[k], masker[k],
+            ne_enr_tr[k], ne_enr_su[k], ne_emr_tr[k],
+            no_enr_tr[k], no_enr_su[k], no_emr_tr[k],
+            blend_thr, blend_softness);
+}
+#else
+static inline void sk_no_audible_echo_gain_f32(
+    const float *nearend, const float *echo, const float *masker,
+    const float *ne_enr_tr, const float *ne_enr_su, const float *ne_emr_tr,
+    const float *no_enr_tr, const float *no_enr_su, const float *no_emr_tr,
+    float blend_thr, float blend_softness, float *out, int n) {
+    sk_no_audible_echo_gain_f32_scalar(nearend, echo, masker,
+                                        ne_enr_tr, ne_enr_su, ne_emr_tr,
+                                        no_enr_tr, no_enr_su, no_emr_tr,
+                                        blend_thr, blend_softness, out, n);
+}
+#endif
+
 #ifdef __cplusplus
 }
 #endif

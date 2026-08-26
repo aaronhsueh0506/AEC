@@ -323,6 +323,13 @@ typedef struct {
     const Complex *W0;                   /* filter.W[0] (bridge irfft)     */
     const Complex *W_all;                /* filter.W flat (n_part×n_freqs) */
     const Complex *X_buf;                /* filter.X_buf flat (n_part×nf)  */
+    const float   *x2_cache;             /* filter.x2_cache flat (n_part×nf):
+                                          * |X_buf|² row for row. NULL → the
+                                          * two avg-render-reverb rows are
+                                          * derived from X_buf instead, which
+                                          * is what a caller driving this
+                                          * module without a PBFDAF behind it
+                                          * (the parity harness) does.       */
     const float   *sqrt_hann;            /* filter._sqrt_hann_analysis     */
     const float   *kalman_P;             /* filter Kalman P (bridge div);
                                           * NULL/0 → divergence_indicator 0 */

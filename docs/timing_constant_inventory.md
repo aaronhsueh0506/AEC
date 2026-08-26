@@ -283,6 +283,14 @@ Live on the default-ON audio path, semantically a wall-clock duration, and not c
 
 ### `pre-echo earliest-lag bias window (2 x kNumBlocksPerSecond; C DA_K_NUM_BLOCKS_PER_SEC * 2 = 500)`
 
+> **RETIRED.** The pre-echo error/aggregator path this window gated is no
+> longer computed — the reported delay is the dominant matched-filter peak,
+> and the onset-bias machinery it fed was removed outright (state stays
+> carved for layout stability, permanently inert). `DA_K_NUM_BLOCKS_PER_SEC`
+> and `DA_K_MFW_SUB_BLOCKS` were deleted with it; the 16 kHz-native rate
+> limitation they documented now lives on `DA_HIST_WINDOW`'s comment, which
+> is this entry's surviving subject. Record kept as provenance.
+
 - **Verdict**: retime (high confidence, open)
 - **Anchor**: 2000 ms of earliest-lag bias (AEC3: first 2 seconds). Rate-relative, hop-independent.
 - **Effective today**: Hop-independent at all four grids. By SAMPLE RATE: native 8 kHz -> Python 250 updates x 8 ms = 2000 ms (correct), C 500 x 8 ms = 4000 ms (2x); 16 kHz (both grids) -> both 500 x 4 ms = 2000 ms, agree; 48 kHz -> effective 16 kHz, agree.
@@ -458,9 +466,19 @@ Verified to route through a retiming helper. Listed so that a future audit can t
 - **Provenance**: Project-native (explicitly NOT AEC3-sourced, per both files' headers), authored before per-rate multi-grid support existed — epc.py's EchoPathChangeDetector originally took only `config`, with no hop_size/sample_rate parameters at all, which is itself evidence of the single-grid 10 ms assumption. Retimed per-instance in the 2026-08 gap-fix round (669a5b5 / 6805c30, 2026-08-03, 'fix: retime top-level hop-authored constants missed by the AEC3-internal audit'), after the 2026-08-01 grid change. The 10 ms anchor is corroborated arithmetically, not just by the comment: 0.98 and 0.999 give 494.98 ms and 9995.00 ms at a 10 ms hop, which is precisely the '~500 ms / ~10 s' the comment claims — that self-consistency only holds on the 160/16000 grid, so the comment is CURRENTLY ACCURATE and independently corroborating.
 - **Reasoning**: Already retimed in both languages, correctly anchored, with the retention-vs-AEC3-alpha convention documented on both sides. C additionally has a documented fail-safe at epc_shadow.c:44-50: when hop_size<=0 or sample_rate<=0 it falls back to the exact unscaled literals rather than dividing by zero inside the rehop helper — mirroring aec.c's aec_legacy10ms_* fallback. No action. One closing observation carries more weight than the verdict itself: three OTHER constants in these same two files — shadow warmup 50, baseline 0.995, HYS_STREAK_MIN 10 — were left as raw literals in the same pass that retimed these two. That is a strong signal the earlier rounds' file-level coverage was incomplete, and those three still need dispositions of their own in epc.py/epc_shadow.c.
 
-### `PBFDAF far-end power EMA retention (alpha_power)`
+### `PBFDAF far-end power EMA retention (alpha_power)` — RETIRED
 
-- **Verdict**: already retimed (high confidence, closed)
+- **Verdict**: retired — the field, its EMA and the C struct member were removed
+  outright (the separate bit-exact cleanup the reasoning below anticipated).
+  `power[]` had exactly one reader in either port — its own cold-start guard,
+  whose decision provably cannot depend on the value — so the removal is
+  byte-exact; the structural check (d4) now recovers the retimed coefficient
+  from `Aec::alpha_pow`'s near-power EMA instead. The Python twin
+  (`filters.py`) still carries `power`/`alpha_power` as dead state: removing it
+  moves the AIAEC behavior hash, so it waits for the next hash-moving change.
+  The record below is kept as provenance for the retiming decision it closed.
+
+- **Verdict (historical)**: already retimed (high confidence, closed)
 - **Anchor**: 94.91 ms time constant (retention 0.9 at a 10 ms hop). Reference grid hop=160 / sr=16000.
 - **Effective today**: Invariant TC 94.91 ms in both ports: per-hop retention r=0.84487 @8k 256/128, r=0.91917 @16k 256/128 (default), r=0.84487 @16k 512/256, r=0.89370 @48k 1024/512. Until the C use site was corrected the frozen 0.9f meant 75.9 ms at the 8 ms default and 151.9 ms at the 16 ms grids, and Python and C disagreed at every grid except the 16 ms pair (0.9^(8/10) = 0.91924 against a flat 0.9).
 - **Consumer**:

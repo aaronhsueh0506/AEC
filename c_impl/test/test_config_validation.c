@@ -443,7 +443,7 @@ static void test_multi_rate_valid_smoke(void) {
 /* The three direct init entry points below sit UNDER aec_create()'s validator,
  * so a bad sample_rate cannot reach them through the normal path. They are
  * public API though, and since 2026-08 sample_rate is load-bearing there --
- * it retimes alpha_power/alpha_r/initial_state_threshold_hops and the
+ * it retimes alpha_r/initial_state_threshold_hops and the
  * saturation attack/release pair. Before this, sample_rate=0 made hop_seconds
  * infinite and powf() returned 0 or NaN, i.e. an EMA that never adapts or a
  * filter full of NaN, reported by nothing. */

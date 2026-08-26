@@ -80,12 +80,14 @@ build measured on the current host, at the default `delay_mode = MATCHED` /
 
 | Backend | 256 / 128 | 512 / 256 |
 |---|---:|---:|
-| KISS | 379,776 B | 508,848 B |
-| NE10 | 379,168 B | 507,472 B |
+| KISS | 385,440 B | 513,968 B |
+| NE10 | 384,832 B | 512,592 B |
 
-These four figures were re-measured on both backends after `sizeof(Aec)` grew
-by 16 B for the per-hop stage-timing record (`aec_get_last_timing()`), so each
-moved by exactly +16 B and every difference below is unchanged.
+These four figures were re-measured on both backends after the linear filter
+took a per-partition `|X|²` mirror and a far-PSD hold into its own state (and
+gave back the far-power EMA array it no longer maintains), so each moved by
++5,664 B at 256 / 128 and +5,120 B at 512 / 256. Every difference below is
+unchanged: the growth is per instance, not per delay filter.
 
 The delay configuration moves these numbers, because the matched-filter bank,
 the down-sampled render ring and both lag histograms are carved from this same

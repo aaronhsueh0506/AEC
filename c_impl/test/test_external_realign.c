@@ -42,6 +42,7 @@
 #include <string.h>
 
 #include "aec.h"
+#include "aec_simd_kernels.h"
 
 #define SR   16000
 #define FFT  512
@@ -58,6 +59,28 @@
 #define EXTRA (GAP + OBS + TRAJ + 4)
 
 static int g_failures = 0;
+
+/* Count bins where the filter's |X_buf|² mirror disagrees with a fresh
+ * magnitude pass over the history it mirrors. The two X² partition sums read
+ * the mirror, so any row the realign path clears in one array and not the
+ * other feeds the gain magnitudes of a history that is now zero -- a defect
+ * whose signature is a slightly wrong step size, far too small for the
+ * residual bounds below to see, but exact here. */
+static long x2_mirror_mismatches(const PBFDAF *p) {
+    long bad = 0;
+    int part, k;
+    float *ref = (float *)malloc((size_t)p->n_freqs * sizeof(float));
+    if (!ref) return -1;
+    for (part = 0; part < p->n_partitions; ++part) {
+        const Complex *X = p->X_buf + (size_t)part * p->n_freqs;
+        const float *cache = p->x2_cache + (size_t)part * p->n_freqs;
+        sk_cmag2_np_f32(X, ref, p->n_freqs);
+        for (k = 0; k < p->n_freqs; ++k)
+            if (memcmp(&ref[k], &cache[k], sizeof(float)) != 0) ++bad;
+    }
+    free(ref);
+    return bad;
+}
 #define CHECK(cond, msg) do { \
     if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); g_failures++; } \
     else { printf("ok: %s\n", msg); } \
@@ -186,6 +209,15 @@ int main(void)
     CHECK(resid < 0.5f * echo_rms(HOPS), "aligned-far convergence at lag 0");
     rc = aec_apply_external_realign(&back, 0 - D);
     CHECK(rc == 1, "realign(-D) takes the warm tap-transfer path");
+    /* Asserted HERE, before the refill hops: the retard branch is the only
+     * place the far history is wiped mid-stream, and the frontend rewrites one
+     * mirror row per hop, so a few hops of processing would repair the very
+     * inconsistency this is looking for. */
+    CHECK(x2_mirror_mismatches(&back.main_filter.base) == 0,
+          "retard realign leaves the main filter's |X|² mirror consistent with X_buf");
+    CHECK(!back.has_shadow ||
+          x2_mirror_mismatches(&back.shadow_filter) == 0,
+          "retard realign leaves the shadow filter's |X|² mirror consistent with X_buf");
     /* The retard direction (delta < 0) clears the far spectra (see the realign
      * implementation), so the echo is exposed until the partition ring refills
      * past the shifted response. The general bound is

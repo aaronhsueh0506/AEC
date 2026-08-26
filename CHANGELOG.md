@@ -41,6 +41,120 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-26 — the linear filter stops recomputing what it already knows (ABI: `sizeof(Aec)` +16 B, pool +5,664 B at 16 kHz/256)
+
+### Changed
+
+1. **Per-partition `|X|²` is cached, not re-derived.** Both X² partition sums —
+   the main filter's Kalman gain and the shadow's NLMS gate — rebuilt
+   `Σ_p |X_p[k]|²` from the complex far history on every update call, running
+   the scaled-hypot magnitude kernel over every partition of a ring in which
+   exactly one row changes per hop, and whose changed row the frontend had
+   already squared that same hop. The filter now keeps an `|X_buf|²` mirror
+   written as each partition enters history; the sums read it in the same
+   partition order, one add per element, so every float is bit-identical while
+   a divide and a square root per bin per partition disappear. The
+   avg-render-reverb step in the post filter, which squared two more partition
+   rows every hop, reads the same mirror.
+
+   The mirror is wiped wherever the history it mirrors is wiped, through a
+   single `pbfdaf_clear_far_history()` that owns both arrays — a caller
+   clearing `X_buf` alone would leave the sums adding magnitudes of a history
+   that is now zero.
+
+2. **The per-bin ERL publish runs only when the taps moved.** `Σ_p |W_p[k]|²`
+   was recomputed and republished every hop, over a `W` that changes on about a
+   quarter of them (measured 21–26% on two captures) and never during far
+   silence. Every writer of `W` now marks the filter, and the publish — the
+   flag's only consumer — recomputes on those hops and clears it. The published
+   array persists between hops, so the skipped hops serve the floats they would
+   have recomputed.
+
+3. **Three magnitude passes that duplicated an existing array are gone.** The
+   error energies at step 13 reuse the `|error_spec|²` arrays step 12 and step
+   8.5 already filled from the same untouched spectra; the RSA update and the
+   stationarity refresh read a far-PSD hold the frontend writes, instead of
+   squaring `far_spec` a third and fourth time. The REDUCTIONS are untouched
+   and deliberately different — an error energy folds its tail where the
+   e2_ref/e2_coa sums do not, and the two trees round differently by design.
+
+   The hold tracks `far_spec`'s lifecycle, not the history ring's: a realign
+   clears the ring but not the spectrum, so the two genuinely disagree there
+   and the hold is what stays correct.
+
+4. **The far-power EMA is deleted.** `PBFDAF.power` was maintained on every hop
+   of both filters — a cold-start branch, two K-wide reductions and a K-wide
+   combine — and read by nothing: not the gain, not the noise gate, not the
+   orchestrator, not a debug accessor. The array and its grid-retimed retention
+   `alpha_power` are removed with it. `test_rate_structural`'s (d4) check,
+   which recovered that retention from the filter's own state to prove a
+   retimed constant reached the audio path, now recovers `Aec::alpha_pow` —
+   the per-sample near/error power EMA behind convergence detection — the same
+   way; it still separates 0.9025 / 0.95 / 0.983048 across the four grids, so
+   the un-retimed literal still fails it.
+
+   `Aec` also gives up three per-hop scratch arrays: two the far-PSD hold
+   retired, and one that had no reader before this change.
+
+### Added
+
+5. **`AecStageTiming.steering_us`** — the fifth stage bucket, covering
+   everything between the main filter and the post block: the stationarity
+   refresh, the `e2_coarse`/ERL publish and coarse rescue, the double-talk
+   analyzer, EPV, `shadow_rise` and the misadjustment estimator. That window
+   had no stamps at all, so it read as free while costing 1.15–1.22 µs against
+   a four-bucket sum of 10.1–12.5 µs (measured, balanced 16 kHz, two captures x
+   two configurations) — every breakdown built on these fields understated the
+   hop by that 10–12%. It reuses the two stamps that already closed `linear_us` and
+   opened `res_us`, so the count stays seven clock reads per hop and a
+   `PROFILE=0` build is unchanged: no clock is linked and all five fields read
+   0.
+
+   `make audit-profile` gained the matching value-level assertion. It builds
+   the library against a stamp that advances by one per read, so each window's
+   value is the number of stamps it spans, and pins the exact tuple
+   (1, 2, 1, 1, 1). A stamp that is added, removed or moved changes it; a fast
+   or slow machine does not. Without it a missing opening stamp reports 0,
+   which is indistinguishable from a stage that cost under a microsecond.
+
+### ABI
+
+`sizeof(Aec)` 5832 -> 5848 B (`AecStageTiming` 16 -> 20 B). The pool moves by
+more than that, because both filters carry the new `|X|²` mirror and far-PSD
+hold and give back the far-power array, and `Aec` gives back three scratch
+arrays:
+
+| Grid | KISS | NE10 | delta |
+|---|---:|---:|---:|
+| 16 kHz / 256 | 379,776 -> 385,440 | 379,168 -> 384,832 | +5,664 |
+| 16 kHz / 512 | 508,848 -> 513,968 | 507,472 -> 512,592 | +5,120 |
+| 48 kHz / 1024 | 1,167,072 -> 1,185,536 | 1,164,160 -> 1,182,624 | +18,464 |
+| 8 kHz / 256 (legacy) | 275,696 -> 278,256 | 275,088 -> 277,648 | +2,560 |
+
+Measured at `delay_mode = MATCHED`, `delay_num_filters = 5`. The delta is per
+INSTANCE, not per delay filter: every `delay_mode` / `n` / `enable_shadow`
+combination on a grid moves by that grid's constant, and every difference
+between them (5,728 B per delay filter, the `FIXED` byte/ms slope, the mode
+gaps) is unchanged — except `enable_shadow = 0`, which carries one filter
+instead of two and therefore moves by less (+2,048 B at 16 kHz/256).
+
+Every caller that carves an `Aec` out of its own pool moves with it — in this
+stack that is five pipeline layout versions, one per pool: the mono pipeline,
+the mono ULCNet variant, the 4ch core (four lanes, so 4x the per-instance
+delta), the 4ch wrapper and the 4ch ULCNet wrapper. Carve ORDER changes inside
+both filter structs (fields appended at the tail, `power` removed) and inside
+`Aec`, so a persisted descriptor is stale for layout reasons as well as size.
+
+`PBFDAF` loses its public `power` and `alpha_power` fields and gains
+`x2_cache`, `far_cmag2_hold` and `w_dirty`; `Aec3PostRunIn` gains an optional
+`x2_cache` pointer, NULL-safe for a caller driving the post filter without a
+PBFDAF behind it.
+
+**Output contract intact**: byte-identical `aec_process()` output and
+byte-identical `aec_get_res_context()` seam (`formed_hop` + `error_spec`) on
+two captures x two configurations x both FFT backends, per hop, for every step
+above.
+
 ## [Unreleased] — 2026-08-25 — linear seam rejects unusable over-output
 
 ### Fixed

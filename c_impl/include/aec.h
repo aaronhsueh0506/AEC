@@ -577,14 +577,11 @@ typedef struct Aec {
     float* scr_sq;          /* mean_sq() scratch, size hop_size (not K) */
     float* scr_e2_echo;
     float* scr_e2_near;
-    float* scr_rsa_psd;
     float* scr_rsa_mask;
     float* scr_mu_buf_pre;
     float* scr_e2coa_pre;
     float* scr_mu_buf;
-    float* scr_far_psd;
     float* scr_e2ref_arr;
-    float* scr_e2coa_arr;
     float* scr_erl_arr;
 
     /* ── streaming render-hop FIFO (async render/capture decoupling) ──
@@ -705,11 +702,12 @@ typedef struct Aec {
         uint32_t frontend_us;
         uint32_t linear_us;
         uint32_t res_us;
+        uint32_t steering_us;   /* appended; keeps the four offsets above */
     } last_timing;
 } Aec;
 
 /**
- * Per-hop wall-clock cost of the four largest stages inside aec_process*(),
+ * Per-hop wall-clock cost of the five largest stages inside aec_process*(),
  * in microseconds. Diagnostic only: nothing in the engine reads these back
  * and they do not affect processing. The stamp is described at the end of
  * this comment, along with what a target substitutes it with.
@@ -728,14 +726,22 @@ typedef struct Aec {
  *                the two never double-count.
  *   linear_us    the main adaptive filter (pbfdkf_process), including the
  *                far-end FFT when this instance computes its own.
+ *   steering_us  everything between the main filter and the post block: the
+ *                stationarity refresh, the e2_coarse/ERL publish and coarse
+ *                rescue, the double-talk analyzer, EPV, shadow_rise and the
+ *                misadjustment estimator. None of it touches the sample
+ *                stream directly -- it decides how the next hop adapts --
+ *                but it is real per-hop cost, and it used to fall between
+ *                linear_us closing and res_us opening, which made every
+ *                breakdown built on these fields understate the hop.
  *   res_us       the AEC3 post/RES block. Runs whenever enable_res OR
  *                return_res_context is set, so a context-only caller pays it
  *                too and sees a real number here.
  *
- * The four do NOT sum to the call: the remainder is the stationarity
- * refresh, e2_coarse/ERL publish, the DT analyzer, EPV, shadow_rise, the
- * misadjustment estimator, the power EMAs and convergence detection. A
- * caller presenting a breakdown must carry that remainder explicitly.
+ * The five do NOT sum to the call: the remainder inside aec_process*() is the
+ * per-sample power EMAs and convergence detection, which run after res_us
+ * closes. A caller presenting a breakdown must carry that remainder
+ * explicitly.
  *
  * Cleared at the top of every aec_process*() call, so a hop reports only what
  * it actually reached. Resolution is microseconds: a stage under 1 us reads 0.

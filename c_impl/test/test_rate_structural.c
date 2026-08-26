@@ -64,8 +64,8 @@
  *   (d2) adaptation-constant retiming (2026-08-06 batch): the same property
  *       for the five constants that live in the ADAPTATION path rather than
  *       in AecConfig -- Aec::alpha_pow (per-SAMPLE), alpha_erl_tracking/
- *       alpha_erl_converged, PBFDAF::alpha_power (main AND shadow),
- *       PBFDKF::alpha_r, and Saturation::alpha_attack/alpha_release. (d)
+ *       alpha_erl_converged, PBFDKF::alpha_r, and
+ *       Saturation::alpha_attack/alpha_release. (d)
  *       missed them because they are assigned in aec_carve()/pbfdkf_init()/
  *       saturation_init(), not read out of the config struct. This is the C
  *       mirror of python/tests/test_detector_timing_effective_values.py and
@@ -962,7 +962,6 @@ static void test_top_level_constant_retiming(void) {
  * ever sample the 16 ms grids:
  *   alpha_pow                  per-SAMPLE, authored at sr=16000
  *   alpha_erl_{tracking,conv}  per-hop, 10 ms   (5407e71)
- *   alpha_power (PBFDAF)       per-hop, 10 ms   (235d3ec era)
  *   alpha_r     (PBFDKF)       per-hop, 10 ms   (introduced 16 ms at e9cb383;
  *                                               the default moved to 10 ms at
  *                                               83ced18 and every validating
@@ -1002,8 +1001,9 @@ static void test_adaptation_constant_retiming(void) {
         AecConfig cfg;
         aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
         cfg.fft_size = fft;             /* post-defaults override; see (d) */
-        cfg.enable_shadow = 1;          /* shadow_filter carries its own
-                                         * alpha_power off the same reference */
+        cfg.enable_shadow = 1;          /* the shadow is built through its own
+                                         * call site; a retime applied to only
+                                         * one of the two must not pass */
         cfg.enable_saturation = 1;      /* else sat_mic/sat_ref are never
                                          * initialized and would read as zero */
 
@@ -1033,19 +1033,8 @@ static void test_adaptation_constant_retiming(void) {
         check_close("alpha_erl_converged (TC)", sr, fft,
                     -hop_s / log((double)aec.alpha_erl_converged) * 1000.0,
                     9994.999166, ALPHA_TOL);
-        check_close("main_filter alpha_power (TC)", sr, fft,
-                    -hop_s / log((double)aec.main_filter.base.alpha_power) * 1000.0,
-                    94.912216, ALPHA_TOL);
         snprintf(what, sizeof(what), "sr=%d fft=%d: shadow filter present", sr, fft);
         CHECK(aec.has_shadow, what);
-        if (aec.has_shadow) {
-            /* The shadow is a bare PBFDAF constructed through a different call
-             * site than the main filter's PBFDKF. Checking only the main one
-             * would miss a retime applied to just one of the two. */
-            check_close("shadow_filter alpha_power (TC)", sr, fft,
-                        -hop_s / log((double)aec.shadow_filter.alpha_power) * 1000.0,
-                        94.912216, ALPHA_TOL);
-        }
 
         check_close("alpha_r (TC)", sr, fft,
                     -hop_s / log((double)aec.main_filter.alpha_r) * 1000.0,
@@ -1080,8 +1069,6 @@ static void test_adaptation_constant_retiming(void) {
          * cannot be explained that way. */
         if (sr == 16000 && fft == 256) {          /* 8 ms hop vs 10 ms ref */
             check_moved("alpha_erl_tracking", sr, fft, aec.alpha_erl_tracking, 0.99);
-            check_moved("main_filter alpha_power", sr, fft,
-                        aec.main_filter.base.alpha_power, 0.9);
             check_moved("saturation alpha_attack", sr, fft,
                         aec.sat_mic.alpha_attack, 0.3);
         }
@@ -1123,24 +1110,30 @@ static void test_adaptation_constant_retiming(void) {
  * reach the branch, because coverage is asserted separately below. */
 /* ── (d4) retimed constants must reach the AUDIO PATH, not just the struct ──
  * Check (d2) asserts the VALUE each instance ends up with. That is necessary
- * and was not sufficient: pbfdaf_init_scalars() computed the retimed
- * alpha_power into p->alpha_power, (d2) asserted on that field, and the actual
- * far-power EMA a few hundred lines away used a hardcoded 0.9f. The field was
- * set, was tested, and was read by nothing, so C silently diverged from Python
- * at every grid while every test stayed green.
+ * and was not sufficient: a retimed retention can be computed into a field,
+ * asserted on, and then read by nothing -- which is exactly what happened to
+ * PBFDAF::alpha_power, whose far-power EMA was maintained on every hop of
+ * both filters and consumed by no one. That EMA and its retention are gone;
+ * this check now measures the retention that DOES reach audio.
  *
- * This check closes that class by measuring the coefficient the EMA ACTUALLY
- * applied, recovered from the filter's own state:
+ * Aec::alpha_pow is the per-SAMPLE power EMA behind near_power /
+ * raw_error_power, and those two drive convergence detection, the
+ * instantaneous-ERLE ring and the windowed-ERLE guard. It is recovered from
+ * the filter's own state with no access to the coefficient itself:
  *
- *     power_new = a * power_old + (1 - a) * far_psd
- *  => a = (power_new - far_psd) / (power_old - far_psd)
+ *   applying `P = a*P + (1-a)*c²` once per sample over one hop of a CONSTANT
+ *   near level c gives  P_new = a^hop * P_old + (1 - a^hop) * c²
+ *   =>  a = ((P_new - c²) / (P_old - c²)) ^ (1/hop)
  *
- * Two hops of a CONSTANT far-end make power_old, power_new and far_psd all
- * observable through the public AecResContext far_spec plus the filter state,
- * with no access to the coefficient itself -- so the assertion cannot be
- * satisfied by a field nothing reads. */
+ * Two near levels make that well conditioned: settle at the first, then run a
+ * single hop at the second, so the denominator is the gap between them rather
+ * than a converged residual. The mic HPF is off, so near_hop is the constant
+ * the caller passed, sample for sample. */
 static void test_retimed_constants_reach_the_audio_path(void) {
-    const double TOL = 2e-3;   /* fp32 EMA recovery over one hop */
+    const double TOL = 2e-3;    /* fp32 EMA recovery over one hop */
+    const float  C_SETTLE = 0.5f;
+    const float  C_STEP   = 0.1f;
+    const int    SETTLE_HOPS = 40;
 
     for (int r = 0; r < N_GRIDS; ++r) {
         int sr = GRIDS[r].sample_rate;
@@ -1151,8 +1144,8 @@ static void test_retimed_constants_reach_the_audio_path(void) {
 
         aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
         cfg.fft_size = fft;
-        cfg.enable_delay_est = 0;   /* keep far_spec aligned hop to hop */
-        cfg.enable_highpass = 0;
+        cfg.enable_delay_est = 0;
+        cfg.enable_highpass = 0;    /* a DC near level must survive to near_hop */
         cfg.enable_saturation = 0;
         cfg.enable_cng = 0;
         int rc = aec_create(&aec, &cfg);
@@ -1161,72 +1154,47 @@ static void test_retimed_constants_reach_the_audio_path(void) {
         if (rc != 0) continue;
 
         int hop = aec_hop_size(&aec);
-        int K = fft / 2 + 1;
-        float *mic = (float*)calloc((size_t)hop, sizeof(float));
-        float *far = (float*)malloc((size_t)hop * sizeof(float));
+        float *mic = (float*)malloc((size_t)hop * sizeof(float));
+        float *far = (float*)calloc((size_t)hop, sizeof(float));
         float *out = (float*)malloc((size_t)hop * sizeof(float));
-        float *pw_before = (float*)malloc((size_t)K * sizeof(float));
         snprintf(what, sizeof(what), "sr=%d fft=%d: audio-path test allocations", sr, fft);
-        CHECK(mic && far && out && pw_before, what);
-        if (!mic || !far || !out || !pw_before) {
-            free(mic); free(far); free(out); free(pw_before); aec_destroy(&aec); continue;
+        CHECK(mic && far && out, what);
+        if (!mic || !far || !out) {
+            free(mic); free(far); free(out); aec_destroy(&aec); continue;
         }
 
-        /* Deterministic, identical far-end every hop: with a repeating input the
-         * per-bin far_psd is the same on both hops, which is what lets one
-         * subtraction recover `a` exactly. */
-        g_lcg_state = 0x9E37u + (unsigned)r;
-        for (int i = 0; i < hop; ++i) far[i] = 0.25f * (2.0f * lcg_uniform() - 1.0f);
+        for (int i = 0; i < hop; ++i) mic[i] = C_SETTLE;
+        for (int h = 0; h < SETTLE_HOPS; ++h) aec_process(&aec, mic, far, out);
+        const double p_old = (double)aec.near_power;
 
-        /* Warm past the cold-start branch (pwr_sum < 1e-10 memcpy path), which
-         * bypasses the EMA entirely and would recover a = 0. */
-        for (int h = 0; h < 6; ++h) aec_process(&aec, mic, far, out);
-
-        memcpy(pw_before, aec.main_filter.base.power, (size_t)K * sizeof(float));
+        for (int i = 0; i < hop; ++i) mic[i] = C_STEP;
         aec_process(&aec, mic, far, out);
+        const double p_new = (double)aec.near_power;
 
-        /* far_psd for this hop = |far_spec|^2, straight off the filter. */
-        int usable = 0;
-        double a_sum = 0.0, a_worst_err = 0.0;
-        const double a_field_d = (double)aec.main_filter.base.alpha_power;
-        for (int k = 0; k < K; ++k) {
-            const Complex *X = &aec.main_filter.base.far_spec[k];
-            double far_psd = (double)X->r * X->r + (double)X->i * X->i;
-            double num = (double)aec.main_filter.base.power[k] - far_psd;
-            double den = (double)pw_before[k] - far_psd;
-            /* Skip bins where the EMA has already converged (den ~ 0): the
-             * recovery is ill-conditioned there, not wrong. */
-            if (fabs(den) < 1e-9 || far_psd < 1e-12) continue;
-            double a_k = num / den;
-            double err_k = fabs(a_k - a_field_d);
-            if (err_k > a_worst_err) a_worst_err = err_k;
-            a_sum += a_k;
-            usable++;
-        }
+        const double target = (double)C_STEP * (double)C_STEP;
+        const double den = p_old - target;
+        const double num = p_new - target;
+        const double a_field_d = (double)aec.alpha_pow;
 
+        /* Both halves are asserted, not assumed: a settle phase that failed to
+         * move near_power, or a step hop that overshot the target, would make
+         * the recovery meaningless rather than wrong. */
         snprintf(what, sizeof(what),
-                 "sr=%d fft=%d: recovered alpha_power from >=8 usable bins (%d)",
-                 sr, fft, usable);
-        CHECK(usable >= 8, what);
-
-        if (usable >= 8) {
-            double a_meas = a_sum / usable;
-            snprintf(what, sizeof(what),
-                     "sr=%d fft=%d: far-power EMA actually applied alpha=%.6f, "
-                     "matching the retimed field %.6f (not the 0.9 literal)",
-                     sr, fft, a_meas, a_field_d);
-            CHECK(fabs(a_meas - a_field_d) <= TOL, what);
-            /* The mean alone would let a per-bin +err cancel a -err and report
-             * a clean average over a filter that is doing something different
-             * in every bin. Bound the WORST bin too. */
-            snprintf(what, sizeof(what),
-                     "sr=%d fft=%d: worst-bin recovered alpha error %.2e <= %.2e "
-                     "(no per-bin cancellation hiding behind the mean)",
-                     sr, fft, a_worst_err, TOL);
-            CHECK(a_worst_err <= TOL, what);
+                 "sr=%d fft=%d: near-power step is well conditioned "
+                 "(P_old=%.6g P_new=%.6g target=%.6g)", sr, fft, p_old, p_new, target);
+        CHECK(den > 1e-3 && num > 0.0 && num < den, what);
+        if (!(den > 1e-3 && num > 0.0 && num < den)) {
+            free(mic); free(far); free(out); aec_destroy(&aec); continue;
         }
 
-        free(mic); free(far); free(out); free(pw_before);
+        const double a_meas = pow(num / den, 1.0 / (double)hop);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: near-power EMA actually applied alpha=%.6f, "
+                 "matching the retimed field %.6f (not the 0.95 literal)",
+                 sr, fft, a_meas, a_field_d);
+        CHECK(fabs(a_meas - a_field_d) <= TOL, what);
+
+        free(mic); free(far); free(out);
         aec_destroy(&aec);
     }
 }
@@ -1323,7 +1291,7 @@ static void test_render_activity_first_observation(void) {
 
 /* ── (d5) alpha_r is a live constant of the DIRECT PBFDKF API ───────────────
  *
- * alpha_r cannot be pinned the way alpha_power is pinned by (d4), because it
+ * alpha_r cannot be pinned the way alpha_pow is pinned by (d4), because it
  * does not reach audio through `Aec` at all -- and it took two wrong readings
  * to establish why, so the mechanism is recorded here rather than in a commit
  * message:

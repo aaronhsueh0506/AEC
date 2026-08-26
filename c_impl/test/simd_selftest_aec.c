@@ -1893,6 +1893,94 @@ static void test_erl_hold_expire_edge(void) {
     printf("PASS erl_hold_expire_f32_edge (n=0..17+existing x hold/erl offset 1..15 x 3 forms, canary-guarded)\n");
 }
 
+/* ═══════════════════════════ correctness: kernel 27 ══════════════════════
+ * Kernel 27 takes nine input arrays plus two scalars. The two scalars sweep
+ * SG_CFG below: the shipped balanced pair (0.25/0.25) first, then softness
+ * values that drive the sigmoid argument to +-Inf/NaN and a threshold that
+ * is itself NaN -- the sigmoid clamps and the two 1e-30f denominator clamps
+ * only differ between compare+select and FMIN/FMAX on operands like those,
+ * so a corpus without them would pass a kernel written with vminq/vmaxq.
+ * The tuning tables are drawn from the same gen_float() corpus as the
+ * signals, which covers the degenerate enr_su == enr_tr case (d_lin == 0,
+ * the low clamp's only in-domain trigger) by collision. */
+
+#define SG_CFG_COUNT 4
+static const float SG_CFG_THR[SG_CFG_COUNT]  = { 0.25f, 0.25f,  0.0f, 1e30f };
+static const float SG_CFG_SOFT[SG_CFG_COUNT] = { 0.25f, 1e-30f, 0.25f, 1e-30f };
+
+static void test_no_audible_echo_gain_edge(void) {
+    float *ne_arena  = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *ec_arena  = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *mk_arena  = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *ntr_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *nsu_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *nem_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *otr_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *osu_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *oem_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *out_scalar_arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *out_simd_arena   = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    int ni, form, o, c;
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (form = 0; form < EDGE_FORM_COUNT; ++form) {
+            for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
+                int in_off, out_off;
+                edge_offsets_for_form(form, o, &in_off, &out_off);
+
+                edge_fill_canary_f(ne_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(ec_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(mk_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(ntr_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(nsu_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(nem_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(otr_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(osu_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(oem_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(out_scalar_arena, EDGE_ARENA_LEN);
+                edge_fill_canary_f(out_simd_arena, EDGE_ARENA_LEN);
+                fill_floats(ne_arena + in_off, n);
+                fill_floats(ec_arena + in_off, n);
+                fill_floats(mk_arena + in_off, n);
+                fill_floats(ntr_arena + in_off, n);
+                fill_floats(nsu_arena + in_off, n);
+                fill_floats(nem_arena + in_off, n);
+                fill_floats(otr_arena + in_off, n);
+                fill_floats(osu_arena + in_off, n);
+                fill_floats(oem_arena + in_off, n);
+
+                for (c = 0; c < SG_CFG_COUNT; ++c) {
+                    sk_no_audible_echo_gain_f32_scalar(
+                        ne_arena + in_off, ec_arena + in_off, mk_arena + in_off,
+                        ntr_arena + in_off, nsu_arena + in_off, nem_arena + in_off,
+                        otr_arena + in_off, osu_arena + in_off, oem_arena + in_off,
+                        SG_CFG_THR[c], SG_CFG_SOFT[c], out_scalar_arena + out_off, n);
+                    sk_no_audible_echo_gain_f32(
+                        ne_arena + in_off, ec_arena + in_off, mk_arena + in_off,
+                        ntr_arena + in_off, nsu_arena + in_off, nem_arena + in_off,
+                        otr_arena + in_off, osu_arena + in_off, oem_arena + in_off,
+                        SG_CFG_THR[c], SG_CFG_SOFT[c], out_simd_arena + out_off, n);
+                    check_bits_classify("no_audible_echo_gain_f32_edge", n,
+                                         (form * 100 + o) * 10 + c,
+                                         out_simd_arena + out_off,
+                                         out_scalar_arena + out_off, n);
+                }
+                edge_check_canary_f("no_audible_echo_gain_f32_edge:nearend", ne_arena, EDGE_ARENA_LEN, in_off, n);
+                edge_check_canary_f("no_audible_echo_gain_f32_edge:echo", ec_arena, EDGE_ARENA_LEN, in_off, n);
+                edge_check_canary_f("no_audible_echo_gain_f32_edge:masker", mk_arena, EDGE_ARENA_LEN, in_off, n);
+                edge_check_canary_f("no_audible_echo_gain_f32_edge:out_scalar", out_scalar_arena, EDGE_ARENA_LEN, out_off, n);
+                edge_check_canary_f("no_audible_echo_gain_f32_edge:out_simd", out_simd_arena, EDGE_ARENA_LEN, out_off, n);
+            }
+        }
+    }
+    free(ne_arena); free(ec_arena); free(mk_arena);
+    free(ntr_arena); free(nsu_arena); free(nem_arena);
+    free(otr_arena); free(osu_arena); free(oem_arena);
+    free(out_scalar_arena); free(out_simd_arena);
+    printf("PASS no_audible_echo_gain_f32_edge (n=0..17+existing x offset 1..15 x 3 forms x %d cfg, canary-guarded)\n",
+           SG_CFG_COUNT);
+}
+
 /* ═══════════════════════════════ microbench ═══════════════════════════════
  * n=257, ~200k reps, CLOCK_MONOTONIC. `g_bench_sink` (volatile) forces the
  * compiler to keep each call's result live, so the timing loop can't be
@@ -2431,6 +2519,37 @@ static void test_erl_hold_expire(void) {
     printf("PASS erl_hold_expire_f32\n");
 }
 
+/* ═══════════════════════════ correctness: kernel 27 ══════════════════════ */
+
+static void test_no_audible_echo_gain(void) {
+    float ne[SK_TEST_MAX_N], ec[SK_TEST_MAX_N], mk[SK_TEST_MAX_N];
+    float ntr[SK_TEST_MAX_N], nsu[SK_TEST_MAX_N], nem[SK_TEST_MAX_N];
+    float otr[SK_TEST_MAX_N], osu[SK_TEST_MAX_N], oem[SK_TEST_MAX_N];
+    float out_scalar[SK_TEST_MAX_N], out_simd[SK_TEST_MAX_N];
+    int ni, t, c;
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (t = 0; t < TRIALS; ++t) {
+            fill_floats(ne, n); fill_floats(ec, n); fill_floats(mk, n);
+            fill_floats(ntr, n); fill_floats(nsu, n); fill_floats(nem, n);
+            fill_floats(otr, n); fill_floats(osu, n); fill_floats(oem, n);
+            for (c = 0; c < SG_CFG_COUNT; ++c) {
+                sk_no_audible_echo_gain_f32_scalar(ne, ec, mk, ntr, nsu, nem,
+                                                    otr, osu, oem,
+                                                    SG_CFG_THR[c], SG_CFG_SOFT[c],
+                                                    out_scalar, n);
+                sk_no_audible_echo_gain_f32(ne, ec, mk, ntr, nsu, nem,
+                                             otr, osu, oem,
+                                             SG_CFG_THR[c], SG_CFG_SOFT[c],
+                                             out_simd, n);
+                check_bits_classify("no_audible_echo_gain_f32", n, t * 10 + c,
+                                     out_simd, out_scalar, n);
+            }
+        }
+    }
+    printf("PASS no_audible_echo_gain_f32 (%d cfg)\n", SG_CFG_COUNT);
+}
+
 /* ═══════════════════════ NaN corpus: cabs/cmag2 family (STRICT) ═══════════
  * The actual F10 regression gate: sk__cabs_np_neon4 must bit-match
  * sk__cabs_np_elem across every NaN pattern x length combination. Any
@@ -2844,6 +2963,41 @@ static void test_erl_hold_expire_nan(void) {
     printf("PASS erl_hold_expire_f32_nan (soft mismatches so far: %d)\n", g_nan_soft_mismatch_count);
 }
 
+/* Kernel 27's NaN pass is the one that actually pins the compare+select
+ * discipline: with a NaN g_lin and a finite g_emr, the scalar ternary
+ * yields g_emr while an FMAX would yield the NaN. Sprinkling NaN through
+ * all nine inputs is what reaches that state. */
+static void test_no_audible_echo_gain_nan(void) {
+    float ne[SK_TEST_MAX_N], ec[SK_TEST_MAX_N], mk[SK_TEST_MAX_N];
+    float ntr[SK_TEST_MAX_N], nsu[SK_TEST_MAX_N], nem[SK_TEST_MAX_N];
+    float otr[SK_TEST_MAX_N], osu[SK_TEST_MAX_N], oem[SK_TEST_MAX_N];
+    float out_scalar[SK_TEST_MAX_N], out_simd[SK_TEST_MAX_N];
+    int ni, c;
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats_nan_sprinkle(ne, n); fill_floats_nan_sprinkle(ec, n);
+        fill_floats_nan_sprinkle(mk, n);
+        fill_floats_nan_sprinkle(ntr, n); fill_floats_nan_sprinkle(nsu, n);
+        fill_floats_nan_sprinkle(nem, n);
+        fill_floats_nan_sprinkle(otr, n); fill_floats_nan_sprinkle(osu, n);
+        fill_floats_nan_sprinkle(oem, n);
+        for (c = 0; c < SG_CFG_COUNT; ++c) {
+            sk_no_audible_echo_gain_f32_scalar(ne, ec, mk, ntr, nsu, nem,
+                                                otr, osu, oem,
+                                                SG_CFG_THR[c], SG_CFG_SOFT[c],
+                                                out_scalar, n);
+            sk_no_audible_echo_gain_f32(ne, ec, mk, ntr, nsu, nem,
+                                         otr, osu, oem,
+                                         SG_CFG_THR[c], SG_CFG_SOFT[c],
+                                         out_simd, n);
+            check_bits_classify("no_audible_echo_gain_f32_nan", n, c,
+                                 out_simd, out_scalar, n);
+        }
+    }
+    printf("PASS no_audible_echo_gain_f32_nan (soft mismatches so far: %d)\n",
+           g_nan_soft_mismatch_count);
+}
+
 static void bench_coherence_ema_gate(void) {
     Complex echo[BENCH_N], near_spec[BENCH_N];
     float abs_echo[BENCH_N], abs_near[BENCH_N];
@@ -3058,6 +3212,41 @@ static void bench_erl_hold_expire(void) {
     }
 }
 
+static void bench_no_audible_echo_gain(void) {
+    float ne[BENCH_N], ec[BENCH_N], mk[BENCH_N];
+    float ntr[BENCH_N], nsu[BENCH_N], nem[BENCH_N];
+    float otr[BENCH_N], osu[BENCH_N], oem[BENCH_N], out[BENCH_N];
+    fill_bench_floats(ne, BENCH_N); fill_bench_floats(ec, BENCH_N);
+    fill_bench_floats(mk, BENCH_N);
+    fill_bench_floats(ntr, BENCH_N); fill_bench_floats(nsu, BENCH_N);
+    fill_bench_floats(nem, BENCH_N);
+    fill_bench_floats(otr, BENCH_N); fill_bench_floats(osu, BENCH_N);
+    fill_bench_floats(oem, BENCH_N);
+    {
+        double t0, t1; int r;
+        t0 = now_ns();
+        for (r = 0; r < BENCH_REPS; ++r) {
+            sk_no_audible_echo_gain_f32_scalar(ne, ec, mk, ntr, nsu, nem,
+                                                otr, osu, oem, 0.25f, 0.25f, out, BENCH_N);
+            g_bench_sink += out[0];
+        }
+        t1 = now_ns();
+        {
+            double ns_scalar = (t1 - t0) / BENCH_REPS;
+            double t2 = now_ns();
+            for (r = 0; r < BENCH_REPS; ++r) {
+                sk_no_audible_echo_gain_f32(ne, ec, mk, ntr, nsu, nem,
+                                             otr, osu, oem, 0.25f, 0.25f, out, BENCH_N);
+                g_bench_sink += out[0];
+            }
+            {
+                double t3 = now_ns();
+                report_bench("no_audible_echo_gain_f32", ns_scalar, (t3 - t2) / BENCH_REPS);
+            }
+        }
+    }
+}
+
 /* ═══════════════════════════════════ main ══════════════════════════════════ */
 
 int main(void) {
@@ -3085,6 +3274,7 @@ int main(void) {
     test_erl_bin_update();
     test_dec1_floorintmin_s32();
     test_erl_hold_expire();
+    test_no_audible_echo_gain();
 
     printf("\n--- NaN corpus ---\n");
     test_cabs_np_nan();
@@ -3106,6 +3296,7 @@ int main(void) {
     test_noise_spectrum_update_nan();
     test_erl_bin_update_nan();
     test_erl_hold_expire_nan();
+    test_no_audible_echo_gain_nan();
     if (g_nan_soft_mismatch_count > 0) {
         printf("NAN SWEEP: %d mismatch(es) outside the cabs/cmag2 family "
                "-- see BOTH-NAN/HARD-FAIL lines above; classified below\n",
@@ -3136,6 +3327,7 @@ int main(void) {
     test_erl_bin_update_edge();
     test_dec1_floorintmin_s32_edge();
     test_erl_hold_expire_edge();
+    test_no_audible_echo_gain_edge();
     /* Second call: the table below now reflects the edge
      * matrix's own classify tallies too, cumulative with the first printout
      * above -- g_tally/g_hard_fail_count are running totals for the whole
@@ -3164,6 +3356,7 @@ int main(void) {
     bench_erl_bin_update();
     bench_dec1_floorintmin_s32();
     bench_erl_hold_expire();
+    bench_no_audible_echo_gain();
 
     if (g_hard_fail_count > 0) {
         fprintf(stderr,

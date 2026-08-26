@@ -287,6 +287,19 @@ static void nearend_smoother_average(SuppressionGain *sg, const float *spec,
     }
     memcpy(sg->ma_buf + (size_t)idx * nb, spec, (size_t)nb * sizeof(float));
 
+    /* n == 1: the ring is one row, so idx and ma_head are pinned at 0 and
+     * ma_count at 1 for every call, and the reduction below degenerates to
+     * out[k] = ma_buf[k] / 1.0f -- an exact IEEE identity (the divisor is
+     * a power of two and the quotient is representable, for every input
+     * including signed zeros and denormals; -ffast-math is rejected by the
+     * build, so no flush-to-zero can creep in). Copy instead of dividing.
+     * Runtime gate, not compile-time: the 16 kHz/512 and 8 kHz grids run
+     * n == 1, the 16 kHz/256 and 48 kHz grids run n == 2. */
+    if (n == 1) {
+        memcpy(out, sg->ma_buf, (size_t)nb * sizeof(float));
+        return;
+    }
+
     /* mean(buf, axis=0): sum the `ma_count` rows per bin in f32 then divide
      * by count in f32. Sequential-in-f32 reduction over up to `n` rows. */
     for (k = 0; k < nb; ++k) {
@@ -445,6 +458,24 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
         enr_tr_tab = is_ne ? sg->tun.nearend_enr_tr : sg->tun.normal_enr_tr;
         enr_su_tab = is_ne ? sg->tun.nearend_enr_su : sg->tun.normal_enr_su;
         emr_tr_tab = is_ne ? sg->tun.nearend_emr_tr : sg->tun.normal_emr_tr;
+    }
+
+    /* Per-bin soft blend (the shipped balanced configuration): the whole
+     * body below reduces to kernel 27, whose scalar twin is that body
+     * transcribed statement-for-statement. The other three combinations
+     * (blend off, or blend on with a single scalar weight) stay on the
+     * general loop -- they are not what any production preset runs. */
+    if (c->soft_blend_enabled && c->soft_blend_per_bin) {
+        sk_no_audible_echo_gain_f32(nearend, echo, masker,
+                                    sg->tun.nearend_enr_tr,
+                                    sg->tun.nearend_enr_su,
+                                    sg->tun.nearend_emr_tr,
+                                    sg->tun.normal_enr_tr,
+                                    sg->tun.normal_enr_su,
+                                    sg->tun.normal_emr_tr,
+                                    c->soft_blend_enr_thr,
+                                    c->soft_blend_softness, out, n);
+        return;
     }
 
     for (k = 0; k < n; ++k) {
@@ -609,10 +640,30 @@ const float *suppression_gain_get_gain(
                      || c->conservative_hf;
     if (hf_lim_applied) limit_hf_gains(sg, sg->gain);
 
-    /* Stash for next hop. */
+    /* Stash for next hop. last_gain is copied because sg->gain is the
+     * pointer aec_get_res_context hands out as the res-context seam -- it
+     * has to keep naming the same buffer across hops. The other two are
+     * purely internal, so their stash is a pointer swap: nearend and
+     * weighted_residual are both rewritten in full at the top of the next
+     * get_gain (nearend_smoother_average covers every bin, and
+     * weight_echo_for_audibility's three weigh_band calls tile [0,n)
+     * exactly) before get_min_gain reads last_nearend/last_echo, so the
+     * buffer each name refers to is the only thing that changes. Both
+     * pointers are equal-length slices of the same pool -- the swap moves
+     * no memory and grows nothing. A reconfigure re-inits from whatever
+     * pointers the struct holds at that instant (aec.c's SuppressionGain
+     * recreate), so a swap in flight is carried through, not lost. */
     memcpy(sg->last_gain, sg->gain, (size_t)n * sizeof(float));
-    memcpy(sg->last_nearend, sg->nearend, (size_t)n * sizeof(float));
-    memcpy(sg->last_echo, sg->weighted_residual, (size_t)n * sizeof(float));
+    {
+        float *t = sg->last_nearend;
+        sg->last_nearend = sg->nearend;
+        sg->nearend = t;
+    }
+    {
+        float *t = sg->last_echo;
+        sg->last_echo = sg->weighted_residual;
+        sg->weighted_residual = t;
+    }
 
     /* Step 8: sqrt to amplitude domain. sqrt(max(G,0.0f)). The explicit
      * negative clamp stays: under the default fast_sqrt it is redundant

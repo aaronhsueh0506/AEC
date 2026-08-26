@@ -116,10 +116,6 @@ static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu,
     p->sample_rate = sample_rate;
     p->mu = mu;
     p->delta = delta;
-    /* Far-end power EMA, per hop. Authored at the legacy hop=160/16000
-     * (10 ms) grid. Mirrors filters.py PBFDKF.alpha_power. */
-    p->alpha_power = aec3_growth_rehop(0.9f, 160, 16000,
-                                       p->hop_size, p->sample_rate);
     p->enable_td_constraint = 1;
     p->partition_idx = 0;
     p->call_counter = 0;
@@ -142,19 +138,24 @@ static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu,
     p->far_fft_real_compute_count = 0;
     p->constraint_round_robin = 0;
     p->partition_to_constrain = 0;
+    p->w_dirty = 1;
 }
 
 static void pbfdaf_zero_state(PBFDAF* p) {
     int Wsz = p->n_partitions * p->n_freqs;
     memset(p->W,     0, (size_t)Wsz * sizeof(Complex));
+    p->w_dirty = 1;
     memset(p->X_buf, 0, (size_t)Wsz * sizeof(Complex));
+    memset(p->x2_cache, 0, (size_t)Wsz * sizeof(float));
     memset(p->near_buffer, 0, (size_t)p->block_size * sizeof(float));
     memset(p->far_buffer,  0, (size_t)p->block_size * sizeof(float));
-    memset(p->power, 0, (size_t)p->n_freqs * sizeof(float));
     memset(p->near_spec,  0, (size_t)p->n_freqs * sizeof(Complex));
     memset(p->echo_spec,  0, (size_t)p->n_freqs * sizeof(Complex));
     memset(p->error_spec, 0, (size_t)p->n_freqs * sizeof(Complex));
     memset(p->far_spec,   0, (size_t)p->n_freqs * sizeof(Complex));
+    /* Paired with far_spec, not with X_buf -- cmag2_np(0,0) is +0.0f, so a
+     * zeroed hold is what a recompute off the zeroed spectrum would produce. */
+    memset(p->far_cmag2_hold, 0, (size_t)p->n_freqs * sizeof(float));
     memset(p->error_spec_windowed, 0, (size_t)p->n_freqs * sizeof(Complex));
     memset(p->time_scratch, 0, (size_t)p->fft_size * sizeof(float));
     memset(p->spec_scratch, 0, (size_t)p->n_freqs * sizeof(Complex));
@@ -166,10 +167,10 @@ int pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
                     float mu, float delta, int hop_size,
                     int with_process_scratch, int sample_rate) {
     int hop;
-    /* sample_rate is load-bearing, not decorative: it retimes alpha_power and
+    /* sample_rate is load-bearing, not decorative: it retimes
      * initial_state_threshold_hops. aec_create() validates it upstream, but
      * this is public API and a direct caller passing 0 would otherwise build a
-     * filter whose EMAs never adapt, with no error anywhere. Reject rather
+     * filter whose rate-scaled gates never open, with no error anywhere. Reject rather
      * than substitute a default -- guessing the caller's grid is how a silent
      * 1.6x mistiming gets shipped. */
     if (!p || sample_rate <= 0) return -1;
@@ -190,15 +191,16 @@ int pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
     Wsz = p->n_partitions * p->n_freqs;
     p->W     = (Complex*)calloc((size_t)Wsz, sizeof(Complex));
     p->X_buf = (Complex*)calloc((size_t)Wsz, sizeof(Complex));
+    p->x2_cache = (float*)calloc((size_t)Wsz, sizeof(float));
 
     p->near_buffer = (float*)calloc((size_t)p->block_size, sizeof(float));
     p->far_buffer  = (float*)calloc((size_t)p->block_size, sizeof(float));
-    p->power       = (float*)calloc((size_t)p->n_freqs, sizeof(float));
 
     p->near_spec   = (Complex*)calloc((size_t)p->n_freqs, sizeof(Complex));
     p->echo_spec   = (Complex*)calloc((size_t)p->n_freqs, sizeof(Complex));
     p->error_spec  = (Complex*)calloc((size_t)p->n_freqs, sizeof(Complex));
     p->far_spec    = (Complex*)calloc((size_t)p->n_freqs, sizeof(Complex));
+    p->far_cmag2_hold = (float*)calloc((size_t)p->n_freqs, sizeof(float));
     p->error_spec_windowed = (Complex*)calloc((size_t)p->n_freqs, sizeof(Complex));
 
     p->fft         = fft_create(p->fft_size);
@@ -230,7 +232,8 @@ int pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
      * `if (p->fft) fft_destroy(p->fft);` already guards the one non-free
      * teardown call). */
     if (!p->td_window || !p->sqrt_hann || !p->W || !p->X_buf ||
-        !p->near_buffer || !p->far_buffer || !p->power ||
+        !p->x2_cache || !p->far_cmag2_hold ||
+        !p->near_buffer || !p->far_buffer ||
         !p->near_spec || !p->echo_spec || !p->error_spec || !p->far_spec ||
         !p->error_spec_windowed || !p->fft || !p->time_scratch ||
         !p->spec_scratch || !p->scr_fsq ||
@@ -266,7 +269,6 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
     total = ck_field_size(total, Wsz, sizeof(Complex));         /* X_buf */
     total = ck_field_size(total, (size_t)blk, sizeof(float));   /* near_buffer */
     total = ck_field_size(total, (size_t)blk, sizeof(float));   /* far_buffer */
-    total = ck_field_size(total, (size_t)K,   sizeof(float));   /* power */
     total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* near_spec */
     total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* echo_spec */
     total = ck_field_size(total, (size_t)K,   sizeof(Complex)); /* error_spec */
@@ -286,7 +288,10 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
     }
     total = ck_field_size(total, ck_mul_size((size_t)n_partitions, (size_t)hop),
                          sizeof(float));                        /* scr_ir */
-    total = ck_field_size(total, (size_t)K,   sizeof(float));   /* scr_e2 (also frontend's far_cmag2 scratch -- D2) */
+    total = ck_field_size(total, (size_t)K,   sizeof(float));   /* scr_e2 */
+    /* Appended last, mirroring the struct's own tail. */
+    total = ck_field_size(total, Wsz,         sizeof(float));   /* x2_cache */
+    total = ck_field_size(total, (size_t)K,   sizeof(float));   /* far_cmag2_hold */
 
     if (MEM_SIZE_INVALID(total)) return 0;
     return total;
@@ -329,7 +334,6 @@ int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
     p->X_buf      = (Complex*)ptr; ptr += ALIGN16((size_t)Wsz * sizeof(Complex));
     p->near_buffer = (float*)ptr;  ptr += ALIGN16((size_t)blk * sizeof(float));
     p->far_buffer  = (float*)ptr;  ptr += ALIGN16((size_t)blk * sizeof(float));
-    p->power      = (float*)ptr;   ptr += ALIGN16((size_t)K * sizeof(float));
     p->near_spec  = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
     p->echo_spec  = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
     p->error_spec = (Complex*)ptr; ptr += ALIGN16((size_t)K * sizeof(Complex));
@@ -356,6 +360,9 @@ int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
     }
     p->scr_ir       = (float*)ptr; ptr += ALIGN16((size_t)n_partitions * (size_t)hop * sizeof(float));
     p->scr_e2       = (float*)ptr; ptr += ALIGN16((size_t)p->n_freqs * sizeof(float));
+    p->x2_cache     = (float*)ptr; ptr += ALIGN16((size_t)Wsz * sizeof(float));
+    p->far_cmag2_hold = (float*)ptr;
+    ptr += ALIGN16((size_t)K * sizeof(float));
     (void)ptr;
 
     pbfdaf_init_scalars(p, n_partitions, mu, delta, sample_rate);
@@ -382,9 +389,10 @@ void pbfdaf_free(PBFDAF* p) {
     }
     free(p->td_window); free(p->sqrt_hann);
     free(p->W); free(p->X_buf);
-    free(p->near_buffer); free(p->far_buffer); free(p->power);
+    free(p->near_buffer); free(p->far_buffer);
     free(p->near_spec); free(p->echo_spec); free(p->error_spec);
     free(p->far_spec); free(p->error_spec_windowed);
+    free(p->x2_cache); free(p->far_cmag2_hold);
     free(p->time_scratch); free(p->spec_scratch);
     free(p->scr_fsq); free(p->scr_mu_local); free(p->scr_x2psum);
     free(p->scr_mu_eff); free(p->scr_ir); free(p->scr_e2);
@@ -397,8 +405,14 @@ void pbfdaf_free(PBFDAF* p) {
 void pbfdaf_reset_taps(PBFDAF* p) {
     int Wsz = p->n_partitions * p->n_freqs;
     memset(p->W, 0, (size_t)Wsz * sizeof(Complex));
+    p->w_dirty = 1;
+    pbfdaf_clear_far_history(p);
+}
+
+void pbfdaf_clear_far_history(PBFDAF* p) {
+    int Wsz = p->n_partitions * p->n_freqs;
     memset(p->X_buf, 0, (size_t)Wsz * sizeof(Complex));
-    memset(p->power, 0, (size_t)p->n_freqs * sizeof(float));
+    memset(p->x2_cache, 0, (size_t)Wsz * sizeof(float));
 }
 
 void pbfdaf_reset(PBFDAF* p) {
@@ -438,7 +452,7 @@ static void rfft_padded(PBFDAF* p, const float* time_in, int in_len,
     }
 }
 
-/* Shared front-end: buffer shift, FFTs, power EMA, echo, error, windowed-error.
+/* Shared front-end: buffer shift, FFTs, far PSD, echo, error, windowed-error.
  * Identical for PBFDAF and PBFDKF (matches PBFDAF.process lines 191-248).
  * Returns far_hop_energy (the W-update gate). curr_p stored in *out_curr_p. */
 static float pbfdaf_frontend(PBFDAF* p,
@@ -470,52 +484,26 @@ static float pbfdaf_frontend(PBFDAF* p,
     *out_curr_p = curr_p;
     memcpy(p->X_buf + (size_t)curr_p * K, p->far_spec, (size_t)K * sizeof(Complex));
 
-    /* power EMA (cold start: direct init when sum(power)<1e-10 and active far).
-     * cmag2(far_spec[k]) computed ONCE here into instance scratch, reused for
-     * both the far_psd_sum reduction and the cold-start/EMA power update
-     * below (previously recomputed a 2nd time inside sk_cmag2_np_f32/
-     * sk_ema_cmag2_f32, which both derive |far_spec[k]|^2 from scratch
-     * internally). sk_cmag2_np_f32's ternary-based abs and cmag2_np's
-     * fabsf-based abs are bit-exact equivalent for all finite inputs (they
-     * differ only in the sign of an intermediate zero, which never survives
-     * into the squared result) -- already relied upon by the cold-start/EMA
-     * branches just below, which already call these sk_ kernels on this same
-     * far_spec array.
+    /* |far_spec[k]|² for this hop, computed once and kept.
      *
-     * Borrows p->scr_e2 (normally
-     * pbfdaf_get_error_energy's |error_spec|^2 scratch) instead of a
-     * dedicated scr_far_cmag2 field -- cross-phase reuse, safe because this
-     * whole computation (write far_cmag2, read it twice below) is fully
-     * self-contained within THIS call, well before pbfdaf_get_error_energy
-     * runs later in the same hop (aec.c step 13, strictly after step
-     * 8.5/9's pbfdaf_process/pbfdkf_process -- i.e. after pbfdaf_frontend
-     * returns) and unconditionally overwrites every element before reading
-     * any of them back. Same argument aec3_post.c documents for
-     * x2_at_delay's cross-phase reuse. */
-    float *far_cmag2 = p->scr_e2;   /* instance scratch, not stack: [n_freqs] */
+     * The destination is the persistent far_cmag2_hold rather than scratch:
+     * the orchestrator reads the same magnitudes for its RSA update (before
+     * this hop's frontend, so the previous spectrum) and its stationarity
+     * refresh (after, so this one), and a field written and zeroed in lockstep
+     * with far_spec gives both the value they would have recomputed.
+     *
+     * There is deliberately no far-power EMA here any more. It maintained a
+     * `power` array with a cold-start branch, two K-wide reductions and a
+     * K-wide combine on every hop of both filters, and nothing anywhere read
+     * the result -- not the gain, not the noise gate, not the orchestrator,
+     * not a debug accessor. The retention it applied was grid-retimed, which
+     * made it look load-bearing; it was not. */
+    float *far_cmag2 = p->far_cmag2_hold;   /* [n_freqs], persists to the orchestrator */
     sk_cmag2_np_f32(p->far_spec, far_cmag2, K);
-    float pwr_sum = 0.0f;
-    for (int k = 0; k < K; ++k) pwr_sum += p->power[k];
-    float far_psd_sum = 0.0f;
-    for (int k = 0; k < K; ++k)
-        far_psd_sum += far_cmag2[k];
-    if (pwr_sum < 1e-10f && far_psd_sum > 1e-10f) {
-        /* cold start: power = np.abs(far_spec)**2 (already computed above) */
-        memcpy(p->power, far_cmag2, (size_t)K * sizeof(float));
-    } else {
-        /* power = alpha_power*power + (1-alpha_power)*far_psd.
-         * float32-by-design -- textually identical to sk_ema_cmag2_f32_scalar's
-         * own combine (state[i]=alpha*state[i]+beta*mag2), matching the
-         * e2_ref/error_psd precedent below (pbfdkf.c e2_ref_scratch dedup).
-         *
-         * Grid-retimed at init; never write the retention as a literal here.
-         * test_rate_structural check (d4) recovers the coefficient this loop
-         * actually applied. */
-        const float a = p->alpha_power;
-        const float b = 1.0f - p->alpha_power;
-        for (int k = 0; k < K; ++k)
-            p->power[k] = a * p->power[k] + b * far_cmag2[k];
-    }
+    /* X_buf's row curr_p was just set from this same far_spec, so this array
+     * IS |X_buf[curr_p]|². Mirror it once here rather than have both X² sums
+     * re-derive every partition's magnitudes from the complex history. */
+    memcpy(p->x2_cache + (size_t)curr_p * K, far_cmag2, (size_t)K * sizeof(float));
 
     /* echo_spec = Σ_p W[p] * X_buf[(curr_p-p)%N] */
     memset(p->echo_spec, 0, (size_t)K * sizeof(Complex));
@@ -627,12 +615,15 @@ void pbfdaf_process(PBFDAF* p,
          * already folded in.) */
 
         /* x2_partition_sum = (np.abs(X_buf)**2).sum(axis=0) — cmag2_np, summed
-         * sequentially over partitions (n=6<8 → numpy axis-0 sequential). */
+         * sequentially over partitions (n=6<8 → numpy axis-0 sequential).
+         * The magnitudes come from x2_cache, which holds exactly the floats
+         * cmag2_np would return for each row; zero-init then one add per
+         * element per partition keeps the summation order identical. */
         float *x2psum = p->scr_x2psum;   /* instance scratch, not stack: [n_freqs] */
         for (int k = 0; k < K; ++k) x2psum[k] = 0.0f;
         for (int part = 0; part < N; ++part) {
-            const Complex* Xp = p->X_buf + (size_t)part * K;
-            sk_cmag2_np_acc_f32(Xp, x2psum, K);
+            const float* x2p = p->x2_cache + (size_t)part * K;
+            for (int k = 0; k < K; ++k) x2psum[k] += x2p[k];
         }
         float mu_initial_boost = p->initial_state_active ? (0.95f / 0.7f) : 1.0f;
         float ng_thr = (float)AEC3_FILTER_NOISE_GATE_POWER_FLOAT;
@@ -660,6 +651,7 @@ void pbfdaf_process(PBFDAF* p,
         }
         if (p->enable_td_constraint && p->constraint_round_robin)
             p->partition_to_constrain = (p->partition_to_constrain + 1) % N;
+        p->w_dirty = 1;
     }
 
     p->partition_idx = (p->partition_idx + 1) % N;
@@ -668,6 +660,7 @@ void pbfdaf_process(PBFDAF* p,
 void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src) {
     int Wsz = dst->n_partitions * dst->n_freqs;
     memcpy(dst->W, src->W, (size_t)Wsz * sizeof(Complex));
+    dst->w_dirty = 1;
 }
 
 /* Warm tap-transfer (v3.24.1): shift the learned IR by `shift_samples` —
@@ -713,6 +706,7 @@ int pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
         for (int i = 0; i < hop; ++i) p->time_scratch[i] = ir[part * hop + i];
         fft_forward_scratch(p->fft, p->time_scratch, p->W + (size_t)part * K);
     }
+    p->w_dirty = 1;
     return 0;
 }
 
@@ -979,6 +973,7 @@ void pbfdaf_scale_filter(PBFDAF* p, float scale) {
         p->W[i].r = p->W[i].r * scale;
         p->W[i].i = p->W[i].i * scale;
     }
+    p->w_dirty = 1;
 }
 
 void pbfdkf_scale_filter(PBFDKF* p, float scale) {
@@ -1057,18 +1052,18 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
 
     /* X² source. Hybrid startup: partition-sum once call_counter past startup.
      * Python: X2 = (np.abs(X_buf)**2).sum(axis=0)  [partition-sum, n=6<8 →
-     * sequential over part 0..N-1] or (np.abs(X_latest)**2). cmag2_np = the
-     * bit-exact np.abs(.)**2. */
+     * sequential over part 0..N-1] or (np.abs(X_latest)**2). Both read
+     * x2_cache, whose rows are the cmag2_np results for the matching X_buf
+     * rows, produced once each as the row entered history. */
     float *X2 = p->scr_X2;   /* instance scratch, not stack: [n_freqs] */
     if (b->call_counter > p->partition_sum_x2_startup_hops) {
         for (int k = 0; k < K; ++k) X2[k] = 0.0f;
         for (int part = 0; part < N; ++part) {
-            const Complex* Xp = b->X_buf + (size_t)part * K;
-            sk_cmag2_np_acc_f32(Xp, X2, K);
+            const float* x2p = b->x2_cache + (size_t)part * K;
+            for (int k = 0; k < K; ++k) X2[k] += x2p[k];
         }
     } else {
-        const Complex* Xl = b->X_buf + (size_t)curr_p * K;
-        sk_cmag2_np_f32(Xl, X2, K);
+        memcpy(X2, b->x2_cache + (size_t)curr_p * K, (size_t)K * sizeof(float));
     }
 
     float delta32 = (float)b->delta;
@@ -1107,6 +1102,7 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
     }
     if (b->enable_td_constraint && b->constraint_round_robin)
         b->partition_to_constrain = (b->partition_to_constrain + 1) % N;
+    b->w_dirty = 1;
 
     /* E2 fix: scale mu_aec3 by mu_scale_arr before H_error decay so that masked
      * bins (RSA narrowband mask + DT scale) do not decay while their W is frozen.

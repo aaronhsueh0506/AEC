@@ -1,9 +1,9 @@
 /* delay_aec3.h — C port of python/modules/delay/ (the v3.22 AEC3
  * matched-filter delay-estimation package). ⚠ The ENTIRE C delay chain
  * (decimator biquads, matched-filter dot products / NLMS update,
- * error_sum_anchor / x2_sum_threshold / pre-echo aggregator scalars, the
- * confidence getter) now runs float32 unconditionally — an intentional,
- * sampled-cost-free divergence from the Python float64 reference. This
+ * error_sum_anchor / x2_sum_threshold scalars, the confidence getter) now
+ * runs float32 unconditionally — an intentional, sampled-cost-free
+ * divergence from the Python float64 reference. This
  * chain's Python bit-exact parity is retired BY DESIGN: test/parity_delay.c
  * + test/gen_delay_c_golden.c form a C-regression golden (catches
  * accidental future changes) rather than a Python-parity gate.
@@ -123,12 +123,14 @@ typedef enum {
  *   matching_filter_threshold=0.3, delay_headroom_samples=32,
  *   detect_pre_echo=True, thresholds=DelaySelectionThresholds(5, 20).
  *
- * ⚠ detect_pre_echo=True means the pre-echo histogram is MAINTAINED, not
- * that its candidate is reported: da_aggregator_aggregate() returns the
- * dominant highest-peak candidate, a deliberate divergence from upstream at
- * that one seam (see its comment, and docs/aec_methods.md). Upstream reports
- * the earliest onset because its estimator feeds a RenderDelayController;
- * here the reported delay aligns a short PBFDKF directly.
+ * ⚠ detect_pre_echo is a Python-side default with no effect here: the
+ * reported delay is always da_aggregator_aggregate()'s dominant highest-peak
+ * candidate, a deliberate divergence from upstream at that one seam (see its
+ * comment, and docs/aec_methods.md). Upstream reports the earliest onset
+ * because its estimator feeds a RenderDelayController; here the reported
+ * delay aligns a short PBFDKF directly, so the accumulated-error onset
+ * search has no consumer and is not run -- the pre-echo buffers and
+ * histogram below stay at their initialised values.
  *   _DOWN_SAMPLING_FACTOR=4, _AEC3_BLOCK_SIZE=64, _SUB_BLOCK_SIZE=16,
  *   _CONSISTENT_ESTIMATE_THRESHOLD=125.
  */
@@ -169,7 +171,7 @@ typedef enum {
  * deepest lag the bank can actually report is (n-1)*SHIFT + (SIZE-1), so the
  * arithmetically tight bound would be (n-1)*SHIFT + SIZE. The n*SHIFT + SIZE
  * form kept here is the pre-pool formula, and it is kept ON PURPOSE, for
- * three measured reasons rather than caution:
+ * two measured reasons rather than caution:
  *
  *   0. IT IS THE UPSTREAM FORMULA. WebRTC AEC3's MatchedFilter::
  *      GetMaxFilterLag() -- and this repo's Python port of it,
@@ -182,20 +184,6 @@ typedef enum {
  *   1. n=5 reproduces the pre-refactor array sizes EXACTLY (2433 highest-peak
  *      bins, 152 pre-echo bins), so the default configuration is byte-exact
  *      by construction rather than by argument.
- *
- *   2. The pre-echo histogram's SIZE IS BEHAVIOURAL, not just capacity. Its
- *      windowed local-max scan walks fixed 32-bin windows with a 0.7^k
- *      penalty and stops when fewer than 32 bins remain, so the bin count
- *      decides HOW MANY windows are scanned. Under the tight formula, n=2
- *      would yield 56 bins = 1 window covering bins 0..31 -- while that bank
- *      can genuinely report up to bin 55, silently dropping half its own
- *      search range. The headroom form yields 80 bins = 2 windows and covers
- *      it. Checked for every n in [1,5]: the headroom form always scans
- *      exactly the windows that contain the bank's reachable bins, and the
- *      windows it drops are provably all-zero (they sit above the reachable
- *      lag), which can never win the scan because best_value is >= 0 after
- *      the first window. So n=1..5 all keep the behaviour they had when the
- *      arrays were carved at the n=5 bound.
  *
  * The over-sized tail is behaviour-neutral for the highest-peak histogram by
  * the same standing argument as before: bins above the reachable lag are
@@ -213,16 +201,11 @@ typedef enum {
 #define DA_PRE_ECHO_UPDATES_TO_REPORT 50
 #define DA_ACCUMULATED_ERROR_SUBSAMPLE_RATE 4
 #define DA_BLOCK_SIZE_LOG2      6    /* kBlockSizeLog2 (64 = 1<<6) */
-#define DA_K_MFW_SUB_BLOCKS     32   /* kMatchedFilterWindowSizeSubBlocks */
-#define DA_K_NUM_BLOCKS_PER_SEC 250  /* kNumBlocksPerSecond (16000/64) -- FIXED
-                                      * at the 16kHz-native rate; DA_HIST_WINDOW
-                                      * and the ring/histogram arrays it sizes
-                                      * are NOT yet rate-parameterised for
-                                      * sample rates above 16 kHz (tracked
-                                      * alongside the decimator's fixed
-                                      * anti-alias biquad coefficients, which
-                                      * have the same 16kHz-only limitation --
-                                      * see downsampled_ring.py's docstring). */
+/* DA_HIST_WINDOW (above) and the ring/histogram arrays it sizes are fixed
+ * at the 16kHz-native block rate (16000/64 = 250 blocks/s) and are NOT yet
+ * rate-parameterised for sample rates above 16 kHz -- tracked alongside the
+ * decimator's fixed anti-alias biquad coefficients, which have the same
+ * 16kHz-only limitation (see downsampled_ring.py's docstring). */
 /* DA_STABILITY_RESET_HOPS was a frozen #define (3000, = ms_to_hops(30000)
  * only at hop=160/sr=16000, wrong even at sr=16000 since this counter ticks
  * once per DA_AEC3_BLOCK_SIZE=64-sample inner block -- not once per outer
@@ -242,7 +225,8 @@ typedef struct {
 
 /* ---- 48kHz -> 16kHz pre-decimation sidechain ----
  * DelayAec3's own internal decimator/matched-filter/clockdrift constants are
- * all native to a 16kHz feed rate (DA_K_NUM_BLOCKS_PER_SEC etc. above). At
+ * all native to a 16kHz feed rate (250 blocks/s; see the DA_HIST_WINDOW
+ * rate note above). At
  * 48kHz, this stage anti-alias-filters + decimates-by-3 BEFORE any of that
  * internal machinery ever sees a sample, so DelayAec3 always operates on a
  * genuine 16kHz-equivalent stream regardless of the caller's native rate --
@@ -292,17 +276,19 @@ typedef struct {
      * accumulated_error + i*DA_ACC_ERR_SIZE (512 B, likewise). */
     float *filters;             /* [num_filters][DA_FILTER_SIZE] */
     float *accumulated_error;   /* [num_filters][DA_ACC_ERR_SIZE] */
-    /* per-tap-prefix err, last filter (matches Python's single shared
-     * buffer). ONE filter-size buffer at every bank size -- it is
-     * recomputed from scratch for the last searched filter on every update,
-     * so it never needed to be per-filter (plan §3.2.6). */
+    /* per-tap-prefix err, ONE filter-size buffer at every bank size (matches
+     * Python's single shared buffer; plan §3.2.6). Carved and initialised,
+     * not written per update -- see the detect_pre_echo note at the top of
+     * this header. */
     float *instantaneous_error; /* [DA_ACC_ERR_SIZE] */
     int   last_detected_best_lag_filter;
-    int   number_pre_echo_updates;
+    int   number_pre_echo_updates;   /* saturates at
+                                       * DA_PRE_ECHO_UPDATES_TO_REPORT     */
     /* reported lag */
     int   reported_valid;
     int   reported_lag;
-    int   reported_pre_echo_lag;
+    int   reported_pre_echo_lag;     /* not produced; the reported delay is
+                                       * reported_lag                       */
     /* per-update winner lag (transient) */
     int   winner_lag_valid;
     int   winner_lag;
@@ -325,21 +311,12 @@ typedef struct {
 typedef struct {
     int *histogram;   /* pool-carved [hist_size], ALIGN16 */
     int *ring;        /* pool-carved [DA_HIST_WINDOW], ALIGN16 */
-    int hist_size;    /* DA_PE_HIST_SIZE_FOR(num_filters) -- see the
-                        * DA_MAX_FILTER_LAG_FOR headroom note: this count
-                        * decides how many windows the local-max scan walks,
-                        * so it is a BEHAVIOURAL term, not just a capacity. */
+    int hist_size;    /* DA_PE_HIST_SIZE_FOR(num_filters) */
     int ring_index;
     int number_updates;
     int pre_echo_candidate;
     int block_size_log2;
-    int argmax_idx;        /* incremental-argmax tracking (raw bin index, NOT
-                             * shifted by block_size_log2) -- maintained every
-                             * call regardless of which branch (windowed
-                             * local-max vs steady-state) produces
-                             * pre_echo_candidate, so it is already warm by
-                             * the time number_updates crosses the steady-
-                             * state threshold. */
+    int argmax_idx;        /* raw bin index, NOT shifted by block_size_log2 */
     int argmax_valid;
 } DaPreEcho;
 

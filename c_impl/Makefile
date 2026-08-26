@@ -924,6 +924,17 @@ TEST_DDS_OBJS   = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(filter $(SRC_DIR)/%
                   $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(filter $(TEST_DIR)/%.c,$(TEST_DDS_SRCS)))
 TEST_DDS_TARGET = $(BIN_DIR)/test_delay_dominant_selection
 
+# test_delay_kernels #includes src/delay_aec3.c (the shipped TU, so its
+# static kernels are testable) -- it must NOT link delay_aec3.o on top, only
+# aec3_scale.o for delay_aec3_init's one external call. Its object gets its
+# own compile rule: -I. so the quoted include resolves from the c_impl root,
+# and per-object -MD so an edit to the INCLUDED delay_aec3.c rebuilds it (a
+# single link-line -MF would record only one TU's deps and leave this test
+# reusing a stale binary across kernel edits -- the exact failure it exists
+# to prevent).
+TEST_DKN_OBJ    = $(OBJ_DIR)/test_delay_kernels.o
+TEST_DKN_TARGET = $(BIN_DIR)/test_delay_kernels
+
 # --- CFG_SIG collision guard + directory creation ---------------------------
 # Single order-only prerequisite for every compile/link/archive rule below
 # (replacing the old bare "| $(OBJ_DIR)"/"| $(BIN_DIR)" prerequisites and
@@ -1009,7 +1020,9 @@ selftest: $(SELFTEST_TARGET)
 	"$(abspath $(SELFTEST_TARGET))"
 
 $(SELFTEST_TARGET): $(SELFTEST_SRC) | _cfg_guard
-	$(CC) $(CFLAGS) -o $@ $< -lm
+	$(CC) $(CFLAGS) -MD -MP -MF $(OBJ_DIR)/simd_selftest_aec.d -o $@ $< -lm
+
+-include $(OBJ_DIR)/simd_selftest_aec.d
 
 # Builds AND runs (like `selftest`/`test-counter-saturation`, not like
 # `bench` which only builds) -- the permanent delay_aec3_reset() regression
@@ -1034,6 +1047,20 @@ test-delay-dominant-selection: $(TEST_DDS_TARGET)
 
 $(TEST_DDS_TARGET): $(TEST_DDS_OBJS) | _cfg_guard
 	$(CC) $(CFLAGS) -o $@ $(TEST_DDS_OBJS) -lm
+
+# Builds AND runs. NEON-vs-scalar equivalence sweeps for delay_aec3.c's two
+# local kernels (argmax tie-order semantics + decimator carried IIR state);
+# the argmax half is the ONLY check in the repo that can catch a
+# last-match-wins regression -- see the test file's header.
+.PHONY: test-delay-kernels
+test-delay-kernels: $(TEST_DKN_TARGET)
+	"$(abspath $(TEST_DKN_TARGET))"
+
+$(TEST_DKN_OBJ): $(TEST_DIR)/test_delay_kernels.c | _cfg_guard
+	$(CC) $(CFLAGS) -I. -MD -MP -c -o $@ $<
+
+$(TEST_DKN_TARGET): $(TEST_DKN_OBJ) $(OBJ_DIR)/aec3_scale.o | _cfg_guard
+	$(CC) $(CFLAGS) -o $@ $(TEST_DKN_OBJ) $(OBJ_DIR)/aec3_scale.o -lm
 
 # =============================================================================
 # Phase 2 real rules: only defined once AC_LIB is known (see the dispatch
@@ -1666,6 +1693,22 @@ audit-profile:
 	 test "$$ns" -eq 0 || { echo "FATAL: the substituted stamp still links CLOCK_MONOTONIC" >&2; exit 1; }; \
 	 test "$$nx" -gt 0 || { echo "FATAL: a command-line EXTRA_CFLAGS dropped PROFILE=1 -- the knob is being silently overridden" >&2; exit 1; }; \
 	 echo "PASS: PROFILE=0 links no clock, PROFILE=1 does, substitution removes it, and a command-line EXTRA_CFLAGS does not defeat it"
+	@# Value-level half: WHERE the stamps sit, not just whether a clock is
+	@# linked. A counting stamp turns each window into the number of stamps it
+	@# spans, so a stage whose opening stamp went missing reports a different
+	@# integer instead of the 0 that is indistinguishable from "cost nothing".
+	@cnt='-DAEC_NOW_US=aec_test_count_now_us -include $(TEST_DIR)/profile_timer_count.h'; \
+	 pc="$$($(MAKE) -s --no-print-directory PROFILE=1 EXTRA_CFLAGS="$$cnt" print-lib-path)"; \
+	 ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
+	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR))" >&2; exit 1; }; \
+	 $(MAKE) --no-print-directory PROFILE=1 EXTRA_CFLAGS="$$cnt" lib >/dev/null; \
+	 $(MAKE) --no-print-directory -C $(AC_DIR) $(AC_FWD) lib >/dev/null; \
+	 mkdir -p "$(BIN_DIR)"; \
+	 $(CC) $(CFLAGS) -c -o "$(BIN_DIR)/profile_stamp_topology.o" \
+	     $(TEST_DIR)/profile_stamp_topology.c || exit 1; \
+	 $(LINK) $(CFLAGS) -o "$(BIN_DIR)/profile_stamp_topology" \
+	     "$(BIN_DIR)/profile_stamp_topology.o" "$$pc" "$$ac" -lm || exit 1; \
+	 "$(BIN_DIR)/profile_stamp_topology"
 
 .PHONY: audit-no-stdio
 audit-no-stdio:

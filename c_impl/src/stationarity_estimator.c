@@ -17,6 +17,18 @@
 #include <math.h>
 #include <string.h>
 
+/* Bins per accumulator block in update_stationarity_flags' row-major walk.
+ * Purely a working-set knob: every value produces identical output, so it is
+ * chosen for stack cost and for coverage rather than for the last few
+ * percent of speed. 128 keeps the frame at ~1 KiB (against the 4 KiB the
+ * suppressor's own render scratch already puts on this hop's deepest path)
+ * and, being under the smallest shipped bin count, guarantees the blocked
+ * walk actually splits on every grid -- a whole-spectrum accumulator would
+ * leave the base-offset arithmetic below unexercised at 129 bins. It costs
+ * ~6% of the block's own runtime against a 256-bin accumulator at 129 bins,
+ * against a ~4x saving over the column-major walk it replaces. */
+#define STAT_ACC_BLOCK 128
+
 /* ── _NoiseSpectrum ───────────────────────────────────────────────────────── */
 
 static void noise_spectrum_init(NoiseSpectrum *n, int n_freqs,
@@ -215,24 +227,54 @@ void stationarity_estimator_update_stationarity_flags(StationarityEstimator *s,
     if (s->history_filled < s->window_hops) s->history_filled += 1;
 
     /* acum_power = history[:filled].sum(axis=0) + rev   (sequential f32 sum
-     * over storage rows 0..filled-1, matching numpy sum(axis=0) for N<=window). */
-    for (k = 0; k < s->n_freqs; ++k) {
-        float acc = s->history[0 * s->n_freqs + k]; /* row 0 */
-        for (row = 1; row < s->history_filled; ++row) {
-            acc = acc + s->history[row * s->n_freqs + k]; /* f32 add */
-        }
-        /* + rev (zeros if average_reverb is NULL) */
-        if (average_reverb != NULL) {
-            acc = acc + average_reverb[k];          /* f32 add */
-        }
-        /* noise = window_hops * max(self.noise.noise, 1e-30)
-         * THR_RATIO * noise; stationary if acum < that. */
-        {
-            float nz = s->noise.noise[k];
-            float ndenom = nz > 1e-30f ? nz : 1e-30f;              /* np.maximum */
-            float noise_scaled = (float)s->window_hops * ndenom;   /* int*f32 → f32 */
-            float thr = STAT_THR_RATIO * noise_scaled;             /* f32 */
-            s->stationarity_flags[k] = (acc < thr) ? 1 : 0;
+     * over storage rows 0..filled-1, matching numpy sum(axis=0) for N<=window).
+     *
+     * Walked ROW-major over a block of per-bin accumulators rather than
+     * column-major per bin: every bin's own add sequence is unchanged
+     * (row 0, row 1, ... row filled-1, then rev, then the compare), and the
+     * only thing reordered is the interleaving of the INDEPENDENT per-bin
+     * chains, which no float rounding depends on -- bit-exact by
+     * construction, not by measurement. What it buys is contiguous reads:
+     * the column-major form strode every inner add by n_freqs, which neither
+     * the prefetcher nor the vectorizer could follow.
+     *
+     * `acc` is a fixed STAT_ACC_BLOCK-element block and the bins are
+     * processed one block at a time, so the stack cost is constant and no
+     * bound on n_freqs is assumed -- the same hazard detectors.c and
+     * filter_analyzer.c de-stacked their fixed `float[1024]` locals for,
+     * except this one never needs to scale with the runtime dimension at
+     * all. See STAT_ACC_BLOCK for how the block size was chosen. */
+    {
+        float acc[STAT_ACC_BLOCK];
+        int base;
+        for (base = 0; base < s->n_freqs; base += STAT_ACC_BLOCK) {
+            int m = s->n_freqs - base;
+            if (m > STAT_ACC_BLOCK) m = STAT_ACC_BLOCK;
+            for (k = 0; k < m; ++k) {
+                acc[k] = s->history[0 * s->n_freqs + base + k]; /* row 0 */
+            }
+            for (row = 1; row < s->history_filled; ++row) {
+                const float *hrow = s->history + (size_t)row * s->n_freqs + base;
+                for (k = 0; k < m; ++k) {
+                    acc[k] = acc[k] + hrow[k];      /* f32 add */
+                }
+            }
+            /* + rev (zeros if average_reverb is NULL) */
+            if (average_reverb != NULL) {
+                const float *rev = average_reverb + base;
+                for (k = 0; k < m; ++k) {
+                    acc[k] = acc[k] + rev[k];       /* f32 add */
+                }
+            }
+            /* noise = window_hops * max(self.noise.noise, 1e-30)
+             * THR_RATIO * noise; stationary if acum < that. */
+            for (k = 0; k < m; ++k) {
+                float nz = s->noise.noise[base + k];
+                float ndenom = nz > 1e-30f ? nz : 1e-30f;              /* np.maximum */
+                float noise_scaled = (float)s->window_hops * ndenom;   /* int*f32 → f32 */
+                float thr = STAT_THR_RATIO * noise_scaled;             /* f32 */
+                s->stationarity_flags[base + k] = (acc[k] < thr) ? 1 : 0;
+            }
         }
     }
 
