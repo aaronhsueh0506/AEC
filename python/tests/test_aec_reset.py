@@ -185,5 +185,76 @@ class ReturnResContextTests(unittest.TestCase):
         self.assertIsInstance(ctx.erle_factor, float)
 
 
+def _echo_scene(rng, hop, n_hops, delay, erl):
+    """Far-end bursts plus a mic that is a delayed, attenuated copy with
+    near-end on top -- an echo path the delay estimator can lock onto, and a
+    near-end talker on a slower cycle so the run sees single- and
+    double-talk."""
+    history = np.zeros(4096, dtype=np.float32)
+    for h in range(n_hops):
+        gain = 0.4 if (h % 40) < 30 else 0.0
+        ref = (gain * rng.standard_normal(hop)).astype(np.float32)
+        back = delay + np.arange(hop - 1, -1, -1)
+        echo = np.where(back < history.size, history[np.minimum(back, history.size - 1)], 0.0)
+        near = (0.25 * rng.standard_normal(hop)).astype(np.float32) if (h % 130) < 35 else 0.0
+        mic = (erl * echo + near + 0.01 * rng.standard_normal(hop)).astype(np.float32)
+        history = np.concatenate((ref[::-1], history[:-hop]))
+        yield mic, ref
+
+
+class ResetEqualsFreshInstanceTests(unittest.TestCase):
+    """``AEC.reset()`` owes the caller a fresh instance.
+
+    The C twin gate is ``make test-reset-parity``
+    (c_impl/test/test_reset_parity.c); this is the same property on this port,
+    so the two resets cannot drift apart on what they clear. Before the fix
+    both ports carried the filters' AEC3 startup gates, the Kalman H_error and
+    the inst-ERLE slope ring across the call, and the first post-reset hop
+    already diverged.
+    """
+
+    WARM_HOPS = 600
+    TEST_HOPS = 300
+    # The three product grids, same set the C twin runs. The grid matters:
+    # the Kalman H_error residue only steers a decision at the two larger
+    # transforms, so a 16k/256-only gate reports green with it left standing.
+    GRIDS = ((16000, 256), (16000, 512), (48000, 1024))
+
+    def test_warmed_then_reset_matches_a_never_warmed_instance(self) -> None:
+        for sample_rate, frame_size in self.GRIDS:
+            with self.subTest(sample_rate=sample_rate, frame_size=frame_size):
+                self._one_grid(sample_rate, frame_size)
+
+    def _one_grid(self, sample_rate: int, frame_size: int) -> None:
+        cfg = AecConfig(sample_rate=sample_rate, frame_size=frame_size)
+        np.random.seed(42)
+        fresh = AEC(cfg)
+        np.random.seed(42)
+        warmed = AEC(cfg)
+        hop = int(cfg.hop_size)
+
+        # An echo path the compare phase does NOT reuse, so anything the
+        # subject remembers is wrong for what follows.
+        for mic, ref in _echo_scene(np.random.default_rng(1234567), hop,
+                                    self.WARM_HOPS, 611, 0.65):
+            warmed.process(mic, ref)
+        warmed.reset()
+
+        first_bad = None
+        diverged = 0
+        scene_a = _echo_scene(np.random.default_rng(89), hop, self.TEST_HOPS, 293, 0.5)
+        scene_b = _echo_scene(np.random.default_rng(89), hop, self.TEST_HOPS, 293, 0.5)
+        for index, ((mic, ref), (mic_b, ref_b)) in enumerate(zip(scene_a, scene_b)):
+            out_a = fresh.process(mic, ref)
+            out_b = warmed.process(mic_b, ref_b)
+            if not np.array_equal(np.asarray(out_a), np.asarray(out_b)):
+                diverged += 1
+                if first_bad is None:
+                    first_bad = index
+        self.assertEqual(
+            diverged, 0,
+            f'{diverged}/{self.TEST_HOPS} hops differ, first at {first_bad}')
+
+
 if __name__ == '__main__':
     unittest.main()

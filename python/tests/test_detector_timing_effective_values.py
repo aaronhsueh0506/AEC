@@ -20,7 +20,6 @@ Only an effective-value assertion across every grid distinguishes "retimed" from
 Reference grids are NOT uniform -- verified per constant from git provenance:
   * ``self.alpha``            per-SAMPLE, authored at sr=16000
   * ``alpha_erl`` (both)      per-hop, 10 ms  (5407e71 annotates hop as "10ms")
-  * ``alpha_power``           per-hop, 10 ms  (235d3ec era, 20 ms frame)
   * ``_alpha_r``              per-hop, 10 ms  (authored 16 ms at e9cb383, but
                               the default moved to 10 ms at 83ced18 and every
                               validating commit since kept 0.95 there)
@@ -76,8 +75,6 @@ def test_effective_timing_constants_match_their_reference_grid(sample_rate,
         _per_hop(0.99, REF_HOP_10MS, hop, sample_rate), rel=1e-12)
     assert aec._alpha_erl_converged == pytest.approx(
         _per_hop(0.999, REF_HOP_10MS, hop, sample_rate), rel=1e-12)
-    assert filt.alpha_power == pytest.approx(
-        _per_hop(0.9, REF_HOP_10MS, hop, sample_rate), rel=1e-12)
     assert filt._alpha_r == pytest.approx(
         _per_hop(0.95, REF_HOP_10MS, hop, sample_rate), rel=1e-12)
 
@@ -97,7 +94,7 @@ def test_retiming_is_actually_applied_somewhere():
     move, and at 48 kHz the per-sample constant must move.
     """
     aec_16k128, filt_16k128, sat_16k128 = _instance(16000, 256)
-    assert filt_16k128.alpha_power != pytest.approx(0.9, abs=1e-9)
+    assert filt_16k128._alpha_r != pytest.approx(0.95, abs=1e-9)
     assert aec_16k128._alpha_erl_tracking != pytest.approx(0.99, abs=1e-9)
     assert sat_16k128.alpha_attack != pytest.approx(0.3, abs=1e-9)
 
@@ -131,7 +128,6 @@ def test_per_hop_time_constants_are_grid_invariant_in_wall_clock():
         hop = frame_size // 2
         aec, filt, sat = _instance(sample_rate, frame_size)
         for name, value in (('alpha_erl_tracking', aec._alpha_erl_tracking),
-                            ('alpha_power', filt.alpha_power),
                             ('alpha_r', filt._alpha_r),
                             ('sat_release', sat.alpha_release)):
             seen.setdefault(name, []).append(tc_ms(value, hop, sample_rate))

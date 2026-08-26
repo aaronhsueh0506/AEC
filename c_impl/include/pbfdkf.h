@@ -97,8 +97,10 @@ typedef struct PBFDAF {
      * partitions every hop — saves ~58% of the per-hop constraint FFTs and
      * deepens convergence (the old all-every-hop over-constrained). aec_create
      * sets `constraint_round_robin`=1 on BOTH filters (production default). Each
-     * filter keeps its own counter; persists across reset() (mirrors Python —
-     * reset() does not touch it). */
+     * filter keeps its own counter. `constraint_round_robin` is pure config and
+     * never reset; the cursor beside it survives pbfdaf_reset() (the mid-stream
+     * relock path keeps cycling where it left off, mirroring Python) and is
+     * re-armed only by pbfdaf_reset_carried_state(), i.e. by aec_reset(). */
     int      constraint_round_robin;
     int      partition_to_constrain;
 
@@ -235,6 +237,26 @@ void pbfdaf_reset(PBFDAF* p);
  * taps are what a realign invalidates, the analysis history is not. */
 void pbfdaf_reset_taps(PBFDAF* p);
 
+/* Restore the construction-time value of every scalar pbfdaf_reset() carries
+ * forward: the AEC3 startup/excitation/saturation gates (call_counter,
+ * poor_excitation_counter, saturated_capture, block_stationary), the
+ * InitialState tracking pair, the round-robin constraint cursor, and the
+ * last-hop SubtractorOutput peak.
+ *
+ * Separate from pbfdaf_reset() on purpose. pbfdaf_reset()'s other caller is
+ * the mid-stream delay-relock path, which re-arms the excitation gates itself
+ * at each of its call sites (pbfdkf_handle_echo_path_change for the main
+ * filter, the explicit shadow counter writes beside it) and deliberately
+ * carries the rest forward; folding these writes into pbfdaf_reset() would
+ * change what that path does. aec_reset() has no such call site -- its
+ * contract is a fresh instance -- so it calls this straight after.
+ *
+ * poor_excitation_counter is restored to the same rate-scaled expression
+ * aec_carve() and pbfdkf_handle_echo_path_change() use, NOT to the
+ * reference-grid literal the init path writes before aec_carve overwrites
+ * it. */
+void pbfdaf_reset_carried_state(PBFDAF* p);
+
 /* Wipe the per-partition far SPECTRUM history (X_buf) and its |.|² mirror,
  * leaving taps and analysis buffers alone. The mirror is why this exists as a
  * function: a caller memset-ing X_buf on its own would leave x2_cache holding
@@ -345,6 +367,12 @@ void pbfdkf_reset(PBFDKF* p);
 /* pbfdaf_reset_taps for the Kalman filter: same adaptation-only scope, plus
  * the per-bin R/error_psd/Q re-arm pbfdkf_reset performs. */
 void pbfdkf_reset_taps(PBFDKF* p);
+/* pbfdaf_reset_carried_state for the Kalman filter: the same scope on the
+ * shared base, plus the four orchestrator-fed refresh inputs (the coarse
+ * energy pair, the leakage-branch veto and its diagnostic fraction) and the
+ * per-bin H_error the Kalman re-arm leaves alone. Same split rationale --
+ * see the PBFDAF prototype. */
+void pbfdkf_reset_carried_state(PBFDKF* p);
 
 /* mu_scale: NULL ⇒ scalar broadcast; else per-bin [n_freqs] fp32 (already
  * post-RSA-mask, matching the array the Python _update_weights_aec3 receives). */

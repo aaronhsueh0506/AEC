@@ -41,6 +41,145 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-26 — `aec_reset()` returns a fresh instance, as its contract always claimed (BEHAVIOUR CHANGE after a reset; AIAEC behaviour hash moves)
+
+### Fixed
+
+1. **State survived `aec_reset()` that a fresh construction never has.** The
+   header promised an instance indistinguishable from a newly built one on the
+   same config, and the very first post-reset hop already diverged from that
+   twin. Two of the three culprits sit behind the same structural cause: the
+   filter wipes `aec_reset()` calls — `pbfdkf_reset()` / `pbfdaf_reset()` —
+   are ALSO the mid-stream delay-relock wipe, and that caller re-arms the
+   AEC3 startup gates itself at each of its own call sites
+   (`pbfdkf_handle_echo_path_change()` for the refined filter, the explicit
+   shadow counter writes beside it). What the filter functions leave standing
+   is exactly what the relock path is about to overwrite — but `aec_reset()`
+   had no such call site, so it inherited a warm filter's gates.
+
+   `pbfdaf_reset_carried_state()` / `pbfdkf_reset_carried_state()` restore
+   what those functions carry forward, and only `aec_reset()` calls them, so
+   the relock path is unchanged by construction rather than by argument. They
+   cover the startup/excitation/saturation gates (`call_counter`,
+   `poor_excitation_counter`, `saturated_capture`, `block_stationary`), the
+   InitialState tracking triple, the round-robin constraint cursor, the
+   last-hop `SubtractorOutput` peak, the four orchestrator-fed refresh inputs
+   on PBFDKF, and its per-bin `H_error` — which `pbfdkf_rearm_kalman()` never
+   touched, because the relock path gets it from the
+   `handle_echo_path_change(delay_change=1)` that follows it.
+   `poor_excitation_counter` is restored to `aec_carve()`'s rate-scaled value,
+   not to the reference-grid literal the init path writes before `aec_carve`
+   overwrites it.
+
+   Two more, outside the filters: the inst-ERLE slope ring
+   (`erle_slope_len`/`_head`, which `aec_reset_filter_latches` already
+   emptied and `aec_reset()` did not, so `erle_slope_max_recent()` read the
+   previous run's history as this instance's own), and the `AecResContext`
+   stash (`last_far_power`, `last_shadow_dt`, `last_dt_indicator`,
+   `last_is_stationary_dt`) — LAST-HOP values published on a seam an external
+   RES reads, on an instance that now has no last hop.
+
+2. **Deliberately kept.** `delay_generation` still BUMPS rather than zeroing:
+   its contract (aec.h) is an alignment token external pollers compare against
+   a cached value, and a reset that reused a generation a consumer had already
+   seen would be indistinguishable from no reset at all. The delay
+   estimator's clockdrift tracker stays untouched for the reason
+   `delay_aec3_reset()` already states — a 30 s hardware-drift estimate is not
+   reset-scoped audio history. `constraint_round_robin` is config, not state.
+   `Aec3Post::trace` is now restarted, but in `aec3_post_reset()` rather than
+   in `aec_reset()`: it is written by that block and read only by
+   `aec_get_debug_status()`, never by the audio path, so restarting it moves
+   no sample on either caller and stops a `--debug-trace` row printed after a
+   reset from attributing a pre-reset hop to a block that has not run since.
+
+3. **Python twin, and one gap the C side did not have.** `filters.py` grows
+   the same `reset_carried_state()` split, and `AEC.reset()` calls it. Porting
+   the C reset field-for-field surfaced a divergence in the other direction:
+   the near-end recency pair `_ne_above` / `_ne_recent_frames`, which
+   `aec_reset()` has always cleared, survived `AEC.reset()` and kept steering
+   the soft-recovery branches of the next run. It is the only residue in
+   either port that moves the FIRST post-reset hop at 48 kHz/1024, and the
+   only one a 16 kHz-only gate would have missed.
+
+   The construction-time excitation-counter seed now lives in one place
+   (`AEC._seed_poor_excitation_counters()`), called by `__init__` and
+   `reset()`, so the value a reset restores cannot drift from the value
+   construction wrote. Unlike the C twin, whose `aec_carve()` writes both
+   filters unconditionally, this port only seeds the counter when a
+   RenderSignalAnalyzer exists — which is why the restore is the
+   orchestrator's and not the filter's.
+
+### Removed
+
+4. **`PBFDAF.power` / `PBFDAF.alpha_power` (Python).** The far-end power EMA
+   and its retimed coefficient had exactly one reader in either port — their
+   own cold-start guard, whose decision cannot depend on the value — and the C
+   twin dropped them already. The Python side now follows, along with the
+   cold-start branch that was the array's only consumer.
+   `docs/timing_constant_inventory.md` entry `pbfdaf-alpha-power` records the
+   removal in both ports; the entry stays closed rather than being deleted,
+   since it is what answers the audit question for a constant that once
+   existed and it carries the A/B evidence that retired it.
+
+### Testing
+
+`make test-reset-parity` (new, both backends): a never-warmed instance and one
+warmed 600 hops on a different echo path then reset must produce byte-identical
+`out[hop]`, `AecResContext.formed_hop` and `AecResContext.error_spec` over 400
+post-reset hops, at 16 kHz/256, 16 kHz/512 and 48 kHz/1024, with RES enabled
+and context-only. 6/6 green under both `BACKEND=kiss` and `BACKEND=ne10`; 0/400
+hops differ in every case, against 399/400 from hop 1 before the fix.
+`python/tests/test_aec_reset.py::ResetEqualsFreshInstanceTests` is the same
+property on the Python port, over the same three grids — the grid set is
+load-bearing there, since `H_error` residue only steers a decision at the two
+larger transforms.
+
+Mutation-proved by backing out one restore at a time and confirming the gate
+goes red: `call_counter` (hop 1), the InitialState triple (hop 9),
+`partition_to_constrain` (hop 8), `H_error_per_bin` (hop 5), both
+`reset_carried_state` calls together (hop 1), and on the Python side the
+near-end recency pair (hop 0). Six restores stay green when backed out
+individually and that is the correct result, not a weak gate:
+`saturated_capture`, `block_stationary` and `last_s_max_abs` are written every
+hop before any consumer reads them (their own field comments and
+`aec_reset_filter_latches`'s say so); `e2_coarse_for_refresh` /
+`e2_coarse_per_bin_valid` likewise; `poor_excitation_counter` was measured at
+500 on both sides of the reset, since the runtime increment ceilings at
+`n_partitions` and the `< n_partitions` gate cannot tell the two apart; and the
+inst-ERLE slope ring is read only by the delay Path-A `already_cancelling`
+guard, which the gate's scene does not reach. They are restored because the
+contract is "a fresh instance", not because a sample moves today.
+
+Streaming without a reset is unchanged: `aec_wav` output is byte-identical to
+`d5193ad` on 2 captures x 2 configs x 2 backends (`cmp`-verified against
+distinct binaries), and the Python port is byte-identical to the same baseline
+on 2 captures x 2 grids — which is also the measurement behind the dead-field
+removal above. `parity_aec_e2e` PASS at 16 kHz (balanced, mild, aggressive,
+and `--no-res`) and at 48 kHz. Full per-target suite green on both backends
+with `WERROR=1`, plus `audit-profile`, `audit-no-stdio`,
+`test-no-testing-symbols`, and 288 Python tests.
+
+No ABI change: `sizeof(Aec)` stays 5,848 B, `sizeof(PBFDKF)` 504 B,
+`sizeof(PBFDAF)` 336 B, and `aec_get_mem_size()` is identical at 16 kHz/256,
+16 kHz/512 and 48 kHz/1024 — this clears state, it does not add fields.
+
+### Impact
+
+Any caller that reuses an instance across streams gets a different second
+stream: previously it inherited a converged filter's startup gates and Kalman
+`H_error`, which is why the first post-reset hop already differed from a fresh
+twin. That is the fix, not a side effect. A caller that constructs per stream
+sees nothing.
+
+The Python signal path changed, so the AIAEC behaviour hash moves. Dataset
+generation builds a fresh engine per sequence and never calls `reset()`, and
+nothing reads the removed fields, so the materialized `linear_error` is
+byte-identical across the pair — an already-rendered corpus needs no
+rematerialization and travels forward on the sanctioned
+`ACCEPTED_BEHAVIOR_HASH_MIGRATIONS` entry in the integration repo. An
+INTERRUPTED rematerialization is keyed on the raw-text `fingerprint()` instead
+and restarts regardless; completed sequences are unaffected.
+
 ## [Unreleased] — 2026-08-26 — the duty-cycle ERLE watchdog leaks by the clock, not by the hop (BEHAVIOUR CHANGE at 8 kHz/256, 16 kHz/256, 16 kHz/512 and 48 kHz/1024)
 
 ### Fixed

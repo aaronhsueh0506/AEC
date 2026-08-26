@@ -642,18 +642,15 @@ class AEC:
         # detector; we use the current-frame |far|² as a first-order proxy
         # while the delay is locking in.
         from .render.render_signal_analyzer import RenderSignalAnalyzer as _RSA
-        from . import aec3_scale as _aec3_scale
         if hasattr(self.filter, 'n_freqs') and hasattr(self.filter, 'n_partitions'):
             self._render_signal_analyzer = _RSA(
                 n_freqs=self.filter.n_freqs,
                 strong_peak_freeze_duration=self.filter.n_partitions,
             )
-            # Wire RSA into refined filter for the per-bin mask + initialise
-            # its startup counter from the hop-scaled default.
+            # Wire RSA into refined filter for the per-bin mask; the startup
+            # counter is seeded by _seed_poor_excitation_counters() once the
+            # shadow filter exists too.
             self.filter._render_signal_analyzer = self._render_signal_analyzer
-            self.filter._poor_excitation_counter = _aec3_scale.blocks_to_hops(
-                1000, self.config.hop_size, self.config.sample_rate
-            )
         else:
             self._render_signal_analyzer = None
 
@@ -685,17 +682,13 @@ class AEC:
             # PBFDAF shadow AEC3 CoarseFilterUpdateGain protection flags
             # (partition-summed X², noise gate, saturation, poor-excitation,
             # narrowband mask) are PBFDAF defaults.
-            # Wire RSA + poor_excitation counter to shadow. RSA is
-            # single-instance per pipeline; shadow reads the same
-            # narrowband / poor-excitation state. The counter init
-            # matches AEC3 kPoorExcitationCounterInitial (1000 blocks
-            # @ 4 ms = 4 s, scaled to our hop).
+            # Wire RSA to shadow. RSA is single-instance per pipeline;
+            # shadow reads the same narrowband / poor-excitation state. Its
+            # counter is seeded below alongside the refined filter's.
             if self._render_signal_analyzer is not None:
                 self.shadow_filter._render_signal_analyzer = self._render_signal_analyzer
-                self.shadow_filter._poor_excitation_counter = _aec3_scale.blocks_to_hops(
-                    1000, self.config.hop_size, self.config.sample_rate
-                )
             self.shadow_filter._saturated_capture = False
+        self._seed_poor_excitation_counters()
 
         # Echo path change detector (owns active/hangover/EPV-EMAs/prev_total_err).
         # hop_size/sample_rate passed through explicitly (2026-08 gap-fix) so
@@ -894,12 +887,48 @@ class AEC:
         self.raw_error_power_sum = 0.0
         # _conv_counter moved to FilterConvergenceAnalyzer (self._convergence)
 
+    def _seed_poor_excitation_counters(self):
+        """The construction-time excitation-counter seed for both filters.
+
+        Shared by ``__init__`` and ``reset()`` so the two cannot disagree
+        about it -- which is the whole point: ``reset()`` owes the caller a
+        fresh instance, and the value it has to restore is by definition
+        whatever construction wrote. The counter is the orchestrator's to
+        seed rather than the filter's because it is only meaningful when a
+        RenderSignalAnalyzer exists to drive it; without one the filters keep
+        their own class defaults. The C twin has no such condition (aec_carve
+        writes both unconditionally), which is why its restore lives in
+        pbfdaf_reset_carried_state and this one does not.
+        """
+        if self._render_signal_analyzer is None:
+            return
+        from . import aec3_scale as _aec3_scale_seed
+        hops = _aec3_scale_seed.blocks_to_hops(
+            1000, self.config.hop_size, self.config.sample_rate)
+        self.filter._poor_excitation_counter = hops
+        if self.shadow_filter:
+            self.shadow_filter._poor_excitation_counter = hops
+
     def reset(self):
         self.filter.reset()
         if self.shadow_filter:
             self.shadow_filter.reset()
             self.main_err_smooth = 0.0
             self.shadow_err_smooth = 0.0
+        # reset() alone is the MID-STREAM relock wipe: it leaves the AEC3
+        # startup gates standing because its other caller
+        # (_reset_filter_derived_state) re-arms those at its own call sites.
+        # This method promises a fresh instance, so it finishes the job --
+        # including re-applying the construction-time excitation-counter seed
+        # below, which belongs to this class, not to the filter.
+        self.filter.reset_carried_state()
+        if self.shadow_filter:
+            self.shadow_filter.reset_carried_state()
+        self._seed_poor_excitation_counters()
+        # Empty the inst-ERLE slope ring, same as _reset_filter_latches: its
+        # readers take the last 15 entries, so anything left here would be
+        # read as this instance's own history.
+        self._erle_slope_buf.clear()
         # Clear UseRefinedOutput hysteresis + cached coarse output.
         self._last_shadow_output_time = None
         self._refined_filter_output_last_selected = True
@@ -994,6 +1023,11 @@ class AEC:
                       '_dominant_nearend_hold',
                       '_poor_coarse_counter', '_coarse_reset_hangover',
                       '_block_stationary_for_next_hop',
+                      # The near-end recency pair. Mirrors aec_reset()'s
+                      # `ne_above = 0; ne_recent_frames = 0` -- a hold armed
+                      # by the run this reset ends must not still be steering
+                      # the soft-recovery branches of the next one.
+                      '_ne_above', '_ne_recent_frames',
                       '_leakage_div_sustained_counter'):
             if hasattr(self, _attr):
                 delattr(self, _attr)

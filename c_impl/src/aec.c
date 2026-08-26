@@ -2201,6 +2201,12 @@ void aec_reset(Aec* a) {
     a->last_buffering_event = AEC_BUF_NONE;
     pbfdkf_reset(&a->main_filter);
     if (a->has_shadow) pbfdaf_reset(&a->shadow_filter);
+    /* pbfdkf_reset/pbfdaf_reset alone are the MID-STREAM relock wipe: they
+     * leave the startup/excitation gates standing because their other caller
+     * (aec_reset_filter_derived_state) re-arms those at its own call sites.
+     * aec_reset() promises a fresh instance, so it finishes the job here. */
+    pbfdkf_reset_carried_state(&a->main_filter);
+    if (a->has_shadow) pbfdaf_reset_carried_state(&a->shadow_filter);
     render_activity_reset(&a->render_activity);
     filter_convergence_reset(&a->convergence);
     doubletalk_reset(&a->dt_analyzer);
@@ -2221,6 +2227,11 @@ void aec_reset(Aec* a) {
     a->epc_render_forced_remaining = 0;
     a->erle_window_near = 1e-10f; a->erle_window_err = 1e-10f;
     a->erle_factor_prev = 0.0f; a->inst_erle_smooth = 1.0f;
+    /* Empty the inst-ERLE slope ring, same convention as
+     * aec_reset_filter_latches: erle_slope_max_recent() reads erle_slope_buf
+     * only under erle_slope_len, so len=0 leaves the backing store
+     * unreachable and the reader returns the fresh-instance 0.0f. */
+    a->erle_slope_len = 0; a->erle_slope_head = 0;
     a->wn_err_baseline = 1e-8f; a->stat_dt_hangover = 0;
     a->warmup_frames_remaining = a->cfg.warmup_frames;
     a->warmup_far_active = 0;
@@ -2235,6 +2246,13 @@ void aec_reset(Aec* a) {
     a->misadj_inv = 0.0f; a->misadj_overhang = 0;
     a->misadj_stable_count = 0; a->misadj_hangover_remaining = 0;
     a->last_erle_windowed = 0.0f;
+    /* The AecResContext stash. Not a census a consumer may watch accumulate
+     * across a reset (unlike the duty counters above, whose contract says
+     * "cumulative since ... aec_reset"): these are LAST-HOP values and this
+     * instance now has no last hop, so the seam between aec_reset() and the
+     * next process call must read what a fresh instance publishes there. */
+    a->last_far_power = 0.0f; a->last_shadow_dt = 0.0f;
+    a->last_dt_indicator = 0.0f; a->last_is_stationary_dt = 0;
 }
 
 /* ───────────────────────── misadjustment estimator ─────────────────────── */

@@ -127,6 +127,14 @@ void aec3_post_reset(Aec3Post *p) {
     /* mirrors _reset_aec3_post (filter-derived path): OLA / CNG / coherence /
      * avg-reverb cleared. */
     memset(p->ola_buf, 0, (size_t)p->cfg.block_size * sizeof(float));
+    /* Trace stash: written by this block, read only by aec_get_debug_status
+     * (never by the audio path), so restarting it here changes no sample on
+     * either caller -- and it stops a --debug-trace row printed after a reset
+     * from attributing a pre-reset hop's convergence/far-activity/gain to a
+     * block that has not run since. Same values aec3_post_init writes. */
+    p->trace.aec3_converged = 0;
+    p->trace.far_active = 0;
+    p->trace.gain_mean = 0.0f;
     p->cng_seed = 42u;
     p->noise_initialized = 0;
     p->n2_counter = 0;

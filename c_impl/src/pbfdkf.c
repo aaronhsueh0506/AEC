@@ -899,6 +899,37 @@ void pbfdkf_reset_taps(PBFDKF* p) {
     pbfdkf_rearm_kalman(p);
 }
 
+void pbfdaf_reset_carried_state(PBFDAF* p) {
+    p->partition_to_constrain = 0;
+    p->last_s_max_abs = 0.0f;
+    p->call_counter = 0;
+    /* aec_carve()'s value, not pbfdaf_init_scalars()'s 0 / pbfdkf_init()'s
+     * reference-grid 400: those are both overwritten at construction. Same
+     * expression as pbfdkf_handle_echo_path_change above. */
+    p->poor_excitation_counter =
+        aec3_blocks_to_hops(1000, p->hop_size, p->sample_rate);
+    p->saturated_capture = 0;
+    p->block_stationary = 0;
+    p->initial_state_active = 1;
+    p->initial_state_active_render_hops = 0;
+    p->last_initial_state_active = 1;
+}
+
+void pbfdkf_reset_carried_state(PBFDKF* p) {
+    int k, K = p->base.n_freqs;
+    pbfdaf_reset_carried_state(&p->base);
+    p->e2_coarse_per_bin_valid = 0;
+    p->e2_coarse_for_refresh = 0.0f;
+    p->disallow_leakage_diverged = 0;
+    p->last_leakage_div_frac = 0.0f;
+    /* pbfdkf_rearm_kalman (inside pbfdkf_reset) re-arms R/error_psd/Q but
+     * NOT H_error: the mid-stream relock path gets it from the
+     * pbfdkf_handle_echo_path_change(delay_change=1) that follows at each of
+     * its call sites. Same value that path and pbfdkf_init write. */
+    for (k = 0; k < K; ++k)
+        p->H_error_per_bin[k] = (float)AEC3_H_ERROR_INIT_FLOAT;
+}
+
 void pbfdkf_handle_echo_path_change(PBFDKF* p, int delay_change, int gain_change) {
     /* CoarseFilterUpdateGain M3 counter reset (not-gain_change). Was reset to
      * the frozen reference-grid AEC3_POOR_EXC_COUNTER_INITIAL_HOPS (400),

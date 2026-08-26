@@ -42,10 +42,6 @@ class PBFDAF:
         self.n_freqs = self.fft_size // 2 + 1
         self.mu = mu
         self.delta = delta
-        # Far-end power EMA, per hop. Authored at the legacy
-        # hop=160/16000 (10 ms) grid (commit 235d3ec era, frame=20 ms).
-        self.alpha_power = aec3_scale.growth_rehop(
-            0.9, 160, 16000, self.hop_size, self.sample_rate)
         self.enable_td_constraint = True  # can be disabled for diagnosis
         # AEC3 round-robin constraint (adaptive_fir_filter.cc:686-689) — constrain
         # ONE partition per hop (cycling) instead of all every hop; saves ~58% of
@@ -75,9 +71,6 @@ class PBFDAF:
         # Input buffers (block_size = 2 × hop for overlap-save)
         self.near_buffer = np.zeros(self.block_size, dtype=np.float32)
         self.far_buffer = np.zeros(self.block_size, dtype=np.float32)
-
-        # Power estimation
-        self.power = np.zeros(self.n_freqs, dtype=np.float32)
 
         # Output spectra (for RES / coherence DTD)
         self.near_spec = np.zeros(self.n_freqs, dtype=np.complex64)
@@ -158,8 +151,8 @@ class PBFDAF:
         return self.n_partitions * self.hop_size
 
     def reset_taps(self):
-        """The ADAPTATION state alone: the taps, the per-partition far spectra
-        they are convolved against, and the far-power normalizer.
+        """The ADAPTATION state alone: the taps and the per-partition far
+        spectra they are convolved against.
 
         Split out of ``reset()`` so that the boundary between "the filter's own
         state" and the time-domain ANALYSIS state — ``near_buffer`` /
@@ -173,7 +166,6 @@ class PBFDAF:
         """
         self.W.fill(0)
         self.X_buf.fill(0)
-        self.power.fill(0)
 
     def reset(self):
         self.reset_taps()
@@ -181,6 +173,42 @@ class PBFDAF:
         self.far_buffer.fill(0)
         self.partition_idx = 0
         self.error_spec_windowed.fill(0)
+
+    def reset_carried_state(self):
+        """The construction-time value of every scalar ``reset()`` carries
+        forward: the AEC3 startup / saturation gates, the InitialState
+        tracking, the round-robin constraint cursor and the last-hop
+        SubtractorOutput peak.
+
+        Separate from ``reset()`` on purpose. ``reset()``'s other caller is the
+        mid-stream relock path
+        (``AEC._reset_filter_derived_state``), which re-arms the excitation
+        gates itself at each of its call sites and deliberately carries the
+        rest forward; folding these writes into ``reset()`` would change what
+        that path does. ``AEC.reset()`` promises a fresh instance, so it calls
+        this straight after. Mirrors ``pbfdaf_reset_carried_state`` in
+        pbfdkf.c.
+
+        ``_poor_excitation_counter`` is NOT here: unlike the C twin, whose
+        construction path writes it unconditionally, this port's counter is
+        the orchestrator's to seed (it only does so when a
+        RenderSignalAnalyzer exists), so ``AEC.reset()`` re-applies its own
+        construction write rather than this method guessing at it.
+        """
+        self._partition_to_constrain = 0
+        self._call_counter = 0
+        self._saturated_capture = False
+        self._initial_state_active = True
+        self._initial_state_active_render_hops = 0
+        self._last_initial_state_active = True
+        # Lazily created in process() / by the orchestrator, so a fresh
+        # instance has neither -- and both of their readers already spell
+        # that absence as the fresh value via getattr(..., default).
+        for attr in ('_last_s_max_abs', '_block_stationary'):
+            try:
+                delattr(self, attr)
+            except AttributeError:
+                pass
 
     def warm_shift_ir(self, shift_samples: int) -> None:
         """Warm delay-realign — shift the learned impulse response by
@@ -335,14 +363,6 @@ class PBFDAF:
         # Store far-end spectrum
         curr_p = self.partition_idx
         self.X_buf[curr_p] = far_spec
-
-        # Update power estimate (cold start: initialize directly on first active frame)
-        far_psd = np.abs(far_spec) ** 2
-        if np.sum(self.power) < 1e-10 and np.sum(far_psd) > 1e-10:
-            self.power = far_psd.astype(np.float32)
-        else:
-            self.power = (self.alpha_power * self.power +
-                         (1 - self.alpha_power) * far_psd)
 
         # Compute echo estimate
         self.echo_spec.fill(0)
@@ -748,6 +768,23 @@ class PBFDKF(PBFDAF):
     def reset_taps(self):
         super().reset_taps()
         self._rearm_kalman()
+
+    def reset_carried_state(self):
+        """``PBFDAF.reset_carried_state`` plus what this class adds: the
+        orchestrator-fed refresh inputs and the per-bin H_error that
+        ``_rearm_kalman`` leaves alone (the mid-stream relock path gets that
+        one from the ``handle_echo_path_change(delay_change=True)`` following
+        at each of its call sites). Mirrors ``pbfdkf_reset_carried_state``.
+        """
+        super().reset_carried_state()
+        self._e2_coarse_for_refresh = 0.0
+        self._e2_coarse_per_bin = None
+        self._disallow_leakage_diverged = False
+        self.H_error_per_bin.fill(np.float32(aec3_scale.H_ERROR_INIT_FLOAT))
+        try:
+            delattr(self, '_last_leakage_div_frac')
+        except AttributeError:
+            pass
 
     def _update_weights(self, curr_p: int, mu_scale,
                         error_override: Optional[np.ndarray] = None):

@@ -646,8 +646,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
-all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all:
+.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-detectors-parity test-detectors-parity-all
+all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-detectors-parity test-detectors-parity-all:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -879,6 +879,18 @@ TEST_STATIC_MIC ?= ../wav/aec_challenge_blind/doubletalk/0I0XMl3M0ECO0U1N0cJvpg_
 TEST_STATIC_REF ?= ../wav/aec_challenge_blind/doubletalk/0I0XMl3M0ECO0U1N0cJvpg_doubletalk_lpb.wav
 TEST_STATIC_SR  ?= 16000
 
+# Permanent aec_reset() fresh-instance gate: a never-warmed instance and a
+# warmed-then-reset one, on the same config, must produce byte-identical
+# out[hop] / AecResContext.formed_hop / AecResContext.error_spec over the
+# whole post-reset run. aec.h documented that equivalence for a long time
+# while state (the filters' AEC3 startup gates, the Kalman H_error, the
+# inst-ERLE slope ring, the RES-context stash) actually survived the call and
+# diverged the first post-reset hop. Runs the three product grids x both
+# consumption modes under whichever BACKEND the build selected.
+TEST_RPY_SRCS   = $(TEST_DIR)/test_reset_parity.c
+TEST_RPY_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_RPY_SRCS))
+TEST_RPY_TARGET = $(BIN_DIR)/test_reset_parity
+
 # Python/C parity gate for the three detectors (RenderActivity /
 # FilterConvergence / DoubleTalk). detectors.c includes only detectors.h and
 # <math.h>, so this links against nothing else -- no $(OBJS), no audio_common
@@ -1070,7 +1082,7 @@ $(TEST_DKN_TARGET): $(TEST_DKN_OBJ) $(OBJ_DIR)/aec3_scale.o | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-zero-heap test-detectors-parity test-detectors-parity-all
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-detectors-parity test-detectors-parity-all
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -1145,6 +1157,10 @@ test-static-aec: $(TEST_STATIC_TARGET)
 	@test -f "$(TEST_STATIC_MIC)" || { echo "FATAL: TEST_STATIC_MIC not found: $(TEST_STATIC_MIC)" >&2; exit 1; }
 	@test -f "$(TEST_STATIC_REF)" || { echo "FATAL: TEST_STATIC_REF not found: $(TEST_STATIC_REF)" >&2; exit 1; }
 	"$(abspath $(TEST_STATIC_TARGET))" "$(TEST_STATIC_MIC)" "$(TEST_STATIC_REF)" "$(TEST_STATIC_SR)"
+
+# Builds AND runs, same convention as test-counter-saturation above.
+test-reset-parity: $(TEST_RPY_TARGET)
+	"$(abspath $(TEST_RPY_TARGET))"
 
 # Regenerates the golden from the Python reference every run, so the gate
 # compares the CURRENT Python against the CURRENT C rather than a stale blob.
@@ -1247,6 +1263,10 @@ $(TEST_DET_TARGET): $(TEST_DET_SRC) $(SRC_DIR)/detectors.c $(SRC_DIR)/aec3_scale
 $(TEST_STATIC_TARGET): $(OBJS) $(TEST_STATIC_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_static_aec [$(BACKEND)] -> $@"
+
+$(TEST_RPY_TARGET): $(OBJS) $(TEST_RPY_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_reset_parity [$(BACKEND)] -> $@"
 
 $(TEST_ZH_TARGET): $(OBJS) $(TEST_ZH_OBJS) $(AC_LIB) | _cfg_guard
 	+$(MAKE) -C $(AC_DIR) $(AC_FWD) test_zero_heap
@@ -1816,6 +1836,8 @@ help:
 	@echo "                  regression test (test_shared_fft_handle) -- run from c_impl/"
 	@echo "  test-static-aec  Build + run heap-vs-caller-pool byte-equality on a real WAV pair"
 	@echo "                  (override TEST_STATIC_MIC/TEST_STATIC_REF/TEST_STATIC_SR as needed)"
+	@echo "  test-reset-parity  Build + run the permanent aec_reset()-equals-fresh-instance"
+	@echo "                    byte-identity gate (3 grids x full-res/ctx-only)"
 	@echo "  test-zero-heap  Prove caller-pool init/process/reset/destroy performs no allocation"
 	@echo "  test-detectors-parity  Gate detectors.c against the Python reference (regenerates the golden)"
 	@echo "  test-detectors-parity-all  Run detector parity on legacy 8 kHz and all three product grids"
