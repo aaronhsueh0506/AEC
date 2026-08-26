@@ -26,7 +26,12 @@
 
 /* Convert fields authored on the legacy 16 kHz/10 ms grid to the final grid.
  * This runs in aec_carve(), after a caller may have overridden fft_size.
- * Retention alphas use a direct power-law conversion. */
+ * Three conventions, three helpers: hop COUNTS re-round through ms_to_hops,
+ * retention alphas take a power law, and additive per-hop RATES scale
+ * linearly. Picking the wrong one of the three is silent -- each returns a
+ * plausible number -- so the convention lives in the helper's name. */
+#define AEC_LEGACY10MS_HOP  160
+#define AEC_LEGACY10MS_SR   16000
 static int aec_legacy10ms_hops(float legacy_ms, int hop, int sample_rate) {
     return (hop > 0 && sample_rate > 0)
         ? aec3_ms_to_hops(legacy_ms, hop, sample_rate)
@@ -34,8 +39,32 @@ static int aec_legacy10ms_hops(float legacy_ms, int hop, int sample_rate) {
 }
 static float aec_legacy10ms_alpha(float legacy_alpha, int hop, int sample_rate) {
     return (hop > 0 && sample_rate > 0)
-        ? aec3_growth_rehop(legacy_alpha, 160, 16000, hop, sample_rate)
+        ? aec3_growth_rehop(legacy_alpha, AEC_LEGACY10MS_HOP, AEC_LEGACY10MS_SR,
+                            hop, sample_rate)
         : legacy_alpha;
+}
+/* Third convention in the family: an ADDITIVE per-hop amount (a leak, a step)
+ * rather than a retention. It scales LINEARLY with the hop period -- the
+ * power law aec_legacy10ms_alpha() uses belongs to the retention convention
+ * and would be wrong here, since N hops of an additive leak sum to N*leak, not
+ * to leak^N. Exact at the authoring grid by construction, not by rounding
+ * luck: 160/16000 and the reference below are the same division, so the ratio
+ * is exactly 1.0f and the authored value comes back bit-for-bit (the Makefile
+ * pins -ffp-contract=off and rejects -ffast-math, so x/x == 1.0f holds).
+ *
+ * aec3_scale.c has the same arithmetic against a FIXED reference, as
+ * aec3_per_block_rate_to_per_hop() (AEC3's 4 ms block). The generalisation
+ * that would absorb this helper is the additive-rate twin of
+ * aec3_growth_rehop(), which did exactly that for the power-law convention --
+ * but aec3_scale.h/.c is a declared 1:1 port of python/modules/aec3_scale.py,
+ * so that lands there only alongside its Python half. Until then the third
+ * convention lives here with its two siblings. */
+static float aec_legacy10ms_rate(float legacy_per_hop, int hop,
+                                 int sample_rate) {
+    const float ref_s = (float)AEC_LEGACY10MS_HOP / (float)AEC_LEGACY10MS_SR;
+    return (hop > 0 && sample_rate > 0)
+        ? legacy_per_hop * (((float)hop / (float)sample_rate) / ref_s)
+        : legacy_per_hop;
 }
 
 void aec_config_defaults(AecConfig* cfg, int sr) {
@@ -799,6 +828,17 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
 void aec_testing_update_simple_mu_ratio(Aec* a, const float* output,
                                         const float* far_end, int n) {
     update_simple_mu_ratio(a, output, far_end, n);
+}
+
+/* TEST-ONLY hook, same terms as the one above.
+ *
+ * It exists because the authoring grid is NOT a constructible one: hop=160 at
+ * 16 kHz is a 320-sample frame, and AEC_GRID_TABLE admits 256/512/1024 only.
+ * So no aec_create() can produce an instance whose field carries the value the
+ * exactness claim is about, and the claim would otherwise be untestable. */
+float aec_testing_legacy10ms_rate(float legacy_per_hop, int hop,
+                                  int sample_rate) {
+    return aec_legacy10ms_rate(legacy_per_hop, hop, sample_rate);
 }
 #endif
 
@@ -1915,6 +1955,17 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     /* ^ per-SAMPLE ERLE power EMA (applied once per sample, not per hop),
      * so it is retimed off the SAMPLE RATE and is hop-invariant.
      * aec3_growth_rehop() would be wrong here. Mirrors orchestrator.py. */
+    /* Duty-cycle ERLE watchdog leak. The machine's other two spans were
+     * already grid-derived -- hold_hops from delay_est_init_s and K from
+     * delay_est_period_s, both recomputed from hop_s where they are read --
+     * and this leak was the only quantity in that block still frozen at a hop
+     * count. It is converted HERE rather than beside them because it is a
+     * conversion and not a per-hop reading; aec3_scale.h's banner states the
+     * rule (these helpers run once at setup). 0.001 dB/hop was calibrated on
+     * the legacy 10 ms grid = 0.1 dB/s = 60 s to leak the 6 dB collapse
+     * threshold; left as a literal it became 0.125 dB/s at the 8 ms product
+     * grid and 0.0625 dB/s at the 16 ms grids. */
+    a->duty_erle_leak_db = aec_legacy10ms_rate(0.001f, hop, cfg->sample_rate);
     a->frame_count = 0; a->poor_coarse_counter = 0; a->coarse_reset_hangover = 0;
     a->leakage_div_sustained_counter = 0;
     aec_recompute_wallclock_thresholds(a, hop, cfg->sample_rate);
@@ -2497,14 +2548,16 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             a->duty_last_delay = cur;
         }
         if (a->duty_active) {
-            /* ERLE watchdog: leaky peak (~0.1 dB/s at 10 ms hops); resume
-             * full-rate analysis on a >6 dB collapse from that peak. Armed
-             * only once the peak exceeds 6 dB so it cannot fire before the
-             * filter ever converged. */
+            /* ERLE watchdog: leaky peak (0.1 dB/s, at every grid — the leak
+             * is duty_erle_leak_db, derived from the hop at carve time and
+             * exactly the historical 0.001f at the 10 ms grid it was
+             * calibrated on); resume full-rate analysis on a >6 dB collapse
+             * from that peak. Armed only once the peak exceeds 6 dB so it
+             * cannot fire before the filter ever converged. */
             if (a->last_erle_windowed > a->duty_erle_peak)
                 a->duty_erle_peak = a->last_erle_windowed;
             else
-                a->duty_erle_peak -= 0.001f;
+                a->duty_erle_peak -= a->duty_erle_leak_db;
             if (a->duty_erle_peak > 6.0f &&
                 a->last_erle_windowed < a->duty_erle_peak - 6.0f) {
                 a->duty_active = 0;

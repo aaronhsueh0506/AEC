@@ -51,6 +51,11 @@
  *      claim is cheapest to pin -- and it is the only test that would catch
  *      a reporting path reverting to the never-initialised struct (which
  *      answers 0.0, i.e. "estimator present but unconverged").
+ *   7. The ERLE watchdog leaks the RETIMED per-hop amount
+ *      (Aec::duty_erle_leak_db), reconstructed bit-exactly from the peak
+ *      trajectory. test_rate_structural (d2)/(d2b) pin the field's value at
+ *      every grid; only this proves the watchdog branch reads it instead of
+ *      a frozen literal.
  *
  * The census is diagnostic: it must not perturb the signal path. That is not
  * asserted here (a single-process test cannot compare against a build
@@ -69,6 +74,7 @@
  * Also wired into the Makefile: `make test-duty-census`.
  */
 #include "aec.h"
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -112,6 +118,37 @@ static void build_signals(void) {
         g_near[i] = (i >= DELAY) ? 0.5f * g_far[i - DELAY] : 0.0f;
 }
 
+/* Second stimulus, for check 7 only: the same converging echo path for the
+ * first WD_CLEAN_S seconds, then an independent near-end noise floor on top
+ * of it. build_signals()' signal cannot serve here -- its windowed ERLE only
+ * ever climbs, so the watchdog's decay branch is never taken and a leak check
+ * driven by it would pass over an empty loop. The added near-end raises the
+ * error energy without touching the echo path, so erle_windowed falls back
+ * below its running peak while the delay estimate stays exactly where it was
+ * (same far, same single tap) and the duty machine stays armed -- which is
+ * the state the decay branch lives in. Kept separate rather than folded into
+ * build_signals() so checks 1-6 keep measuring the signal they were written
+ * against. Sized by measurement, not by margin: 3 s of clean echo is what
+ * checks 1-3 already show is enough for this topology to converge and arm,
+ * and a 2 s tail yields 248 decay hops -- the same count an 8 s run produced,
+ * so the extra seconds bought nothing. */
+#define WD_SECONDS   5
+#define WD_CLEAN_S   3
+#define WD_SAMPLES   (SR * WD_SECONDS)
+#define WD_HOPS      (WD_SAMPLES / HOP)
+static float g_wd_far[WD_SAMPLES + DELAY];
+static float g_wd_near[WD_SAMPLES + DELAY];
+
+static void build_watchdog_signals(void) {
+    int i;
+    g_rng_state = 0x0DDBA11u;
+    for (i = 0; i < WD_SAMPLES + DELAY; ++i) g_wd_far[i] = rng_uniform(0.35f);
+    for (i = 0; i < WD_SAMPLES + DELAY; ++i)
+        g_wd_near[i] = (i >= DELAY) ? 0.5f * g_wd_far[i - DELAY] : 0.0f;
+    for (i = SR * WD_CLEAN_S; i < WD_SAMPLES + DELAY; ++i)
+        g_wd_near[i] += rng_uniform(0.05f);
+}
+
 /* Run `hops` hops under the given delay_mode and return the census through
  * *total / *run, plus the polled delay_confidence through *conf (check 6).
  * fixed_delay_samples is only meaningful (and only applied) for
@@ -147,6 +184,7 @@ int main(void) {
     char msg[192];
 
     build_signals();
+    build_watchdog_signals();
 
     /* ---- 1/2/3: AEC_DELAY_MATCHED ----------------------------------------- */
     if (run_case(AEC_DELAY_MATCHED, -1, hops, &total, &run, &conf) != 0) {
@@ -264,6 +302,77 @@ int main(void) {
         aec_debug_status(&aec, &st);
         CHECK(st.duty_hops_total == 10,
               "census resumes counting after reset");
+        aec_destroy(&aec);
+    }
+
+    /* ---- 7: the ERLE watchdog leaks the RETIMED amount, on the audio path.
+     *
+     * The leak is the machine's only wall-clock rate, and it was a bare
+     * 0.001f per hop -- 0.1 dB/s only on the 10 ms grid it was calibrated on,
+     * and 0.125 dB/s at this test's 8 ms hop. Aec::duty_erle_leak_db now
+     * carries it, derived once at carve time; test_rate_structural (d2)
+     * asserts that field's VALUE at all four shipped grids and (d2b) its
+     * bit-exactness at the authoring grid.
+     *
+     * What neither of those can show is that the watchdog READS it. A field
+     * can be retimed, asserted on, and then ignored by the branch it was
+     * derived for -- the same failure mode test_rate_structural (d4) exists
+     * for. So this walks the leaky peak hop by hop and reconstructs the
+     * subtraction: on every hop where the peak decayed, the new peak must be
+     * exactly the previous one minus duty_erle_leak_db. Bit-exact, not
+     * within a tolerance -- it is the identical float operation, so anything
+     * else means the branch subtracted a different number.
+     *
+     * Coverage is asserted, not assumed: a stimulus that never arms the duty
+     * machine would satisfy an empty loop. ------------------------------- */
+    {
+        AecConfig cfg;
+        Aec aec;
+        int i, leak_hops = 0, mismatches = 0;
+
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, SR);
+        if (aec_create(&aec, &cfg) != 0) {
+            printf("FAIL: aec_create (watchdog leak case)\n");
+            return 1;
+        }
+
+        /* 0.1 dB/s at this grid's 8 ms hop. Stated as the arithmetic rather
+         * than as a magic literal so the intent survives a grid change; the
+         * bit-exactness claim belongs to the authoring grid, not this one. */
+        snprintf(msg, sizeof msg,
+                 "duty_erle_leak_db = 0.1 dB/s x %d/%d s hop (%.9g/hop)",
+                 HOP, SR, (double)aec.duty_erle_leak_db);
+        CHECK(fabs((double)aec.duty_erle_leak_db * SR / HOP - 0.1) <= 1e-6,
+              msg);
+        snprintf(msg, sizeof msg,
+                 "the 8 ms hop does NOT carry the 10 ms literal (%.9g != "
+                 "0.001)", (double)aec.duty_erle_leak_db);
+        CHECK(aec.duty_erle_leak_db != 0.001f, msg);
+
+        for (i = 0; i < WD_HOPS; ++i) {
+            float prev_peak = aec.duty_erle_peak;
+            int   prev_active = aec.duty_active;
+            aec_process(&aec, &g_wd_near[i * HOP], &g_wd_far[i * HOP], g_out);
+            /* Only the steady decay branch is reconstructible here: arming
+             * jumps the peak to the current ERLE, a rise re-seeds it from
+             * the same, and a watchdog trip zeroes it and disarms. Each of
+             * those is excluded by its own state change, not by a threshold. */
+            if (prev_active && aec.duty_active &&
+                aec.duty_erle_peak < prev_peak) {
+                leak_hops++;
+                if (aec.duty_erle_peak != prev_peak - aec.duty_erle_leak_db)
+                    mismatches++;
+            }
+        }
+
+        snprintf(msg, sizeof msg,
+                 "the watchdog subtracts duty_erle_leak_db itself (%d leak "
+                 "hops, %d mismatched)", leak_hops, mismatches);
+        CHECK(mismatches == 0, msg);
+        snprintf(msg, sizeof msg,
+                 "the decay branch was actually exercised (%d leak hops > 0)",
+                 leak_hops);
+        CHECK(leak_hops > 0, msg);
         aec_destroy(&aec);
     }
 

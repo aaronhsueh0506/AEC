@@ -1,6 +1,6 @@
 # Hop-authored timing-constant inventory
 
-Generated from `docs/timing_constant_inventory.json` by `python/diag/gen_timing_inventory.py`. **80 candidates**, each in exactly one category; **32 still open**.
+Generated from `docs/timing_constant_inventory.json` by `python/diag/gen_timing_inventory.py`. **80 candidates**, each in exactly one category; **31 still open**.
 
 This file is GENERATED, not hand-edited. Regenerating is how the counts, the category exclusivity and the absence of truncation stay true; an edit-in-place would reintroduce exactly the drift that made the first version of this document unusable as release evidence. `gen_timing_inventory.py --check` rebuilds it in memory and fails if the committed text has drifted.
 
@@ -30,8 +30,8 @@ additive per-hop leak (dB/hop): scales LINEARLY, not by a power law:
 
 | category | count |
 |---|---:|
-| Retime | 32 |
-| Already retimed | 14 |
+| Retime | 31 |
+| Already retimed | 15 |
 | Keep: rejected retime | 4 |
 | Keep: event count | 6 |
 | Keep: fixed internal cadence | 2 |
@@ -40,11 +40,11 @@ additive per-hop leak (dB/hop): scales LINEARLY, not by a power law:
 | Not a timing constant | 6 |
 | **total** | **80** |
 
-All 30 distinct source paths cited below exist in the tree.
+All 33 distinct source paths cited below exist in the tree.
 
 ---
 
-## Retime (32)
+## Retime (31)
 
 Live on the default-ON audio path, semantically a wall-clock duration, and not currently routed through a retiming helper.
 
@@ -55,33 +55,32 @@ Live on the default-ON audio path, semantically a wall-clock duration, and not c
 | 3 | `_pending_delay_ttl` | 30 ms (3 hops x 10 ms) | high |
 | 4 | `copy_err_baseline EMA retention (0.995 / 0.005)` | TC = 1995 ms (~2.0 s) at the 10 ms grid; authored AND validated identically | high |
 | 5 | `D4 non-stationary wn_err_baseline slow-track retention` | 2000 ms (TC = 200 hops x 10 ms) | high |
-| 6 | `duty-cycle ERLE watchdog peak leak rate` | 0.1 dB/s (0.001 dB/hop x 100 hops/s); equivalently 60 s to leak the 6 dB collapse threshold | high |
-| 7 | `EchoGeneratingPower delay-centered window pre/post size (_render_pre_window_size / _render_post_window_size)` | +/-10 ms (1 hop each side at the validated 10 ms grid); 3 hops = 30 ms total window | high |
-| 8 | `erle windowed accumulator decay` | 10000 ms (TC = 1/(1-0.999) = 1000 hops x 10 ms) | high |
-| 9 | `erle_coh_gate_alpha` | 200 ms (TC = 1/0.05 = 20 hops x 10 ms) | high |
-| 10 | `ErlEstimator fullband (time-domain) minimum-statistics EMA alpha` | AEC3-native alpha=0.1 per 4 ms block -> 38.0 ms time constant. No empirical anchor exists. | high |
-| 11 | `ErlEstimator fullband hold-expiry recovery growth (doubling toward MAX_ERL)` | AEC3-native 2.0x per 4 ms block; full 0.01->1000 recovery = 16.61 doublings = 66.4 ms. | high |
-| 12 | `ErlEstimator per-bin hold-expiry recovery growth (doubling toward MAX_ERL)` | AEC3-native 2.0x per 4 ms block. Full recovery MIN_ERL 0.01 -> MAX_ERL 1000 is log2(1e5) = 16.61 doublings = 66.4 ms. | high |
-| 13 | `ErlEstimator per-bin minimum-statistics EMA alpha` | AEC3-native alpha=0.1 per 4 ms block -> time constant -4/ln(0.9) = 38.0 ms. This is the only defensible anchor because no empirical-validation commit exists (see evidence). | high |
-| 14 | `FilterAnalyzer ConsistentFilterDetector floor-exclusion window around the IR peak` | 4.0 ms low-side / 8.0 ms high-side — 64 and 128 SAMPLES at AEC3's (and the validating bench's) 16 kHz. This is a SAMPLE-RATE-anchored duration, not a hop-anchored one, which is why a hop-centric audit missed it. | high |
-| 15 | `inst-ERLE smoother retention / new-weight pair` | 33.3 ms (TC = 1/(1-0.7) = 3.33 hops x 10 ms) | high |
-| 16 | `lag-aggregator histogram window DA_HIST_WINDOW = 250 (C frozen at 16 kHz; Python already rate-derived)` | 1000 ms of histogram memory (AEC3 kNumBlocksPerSecond estimates). Rate-relative, hop-independent. | high |
-| 17 | `misadjustment n_hops_target` | 20 ms (2 hops x 10 ms); AEC3's own intent is 4 blocks x 4 ms = 16 ms | high |
-| 18 | `ne_recent_sustain` | 30 ms (3 hops x 10 ms) | high |
-| 19 | `P3f _diverged_min_streak` | 50 ms (5 consecutive far-active hops x 10 ms) | high |
-| 20 | `P3f initial-state / usable_v2 frame margins (50 and 30)` | 500 ms (50 frames) and 300 ms (30 frames) at the 10 ms authoring grid, ON TOP of a warmup_frames base that is itself wall-clock-defined | high |
-| 21 | `PathChangeRegimeHandler.HYS_STREAK_MIN` | 100 ms (10 hops at the 10 ms grid); introduce and validate agree | high |
-| 22 | `poor_excitation_counter initial value 400 (frozen 10 ms-grid AEC3_POOR_EXC_COUNTER_INITIAL_HOPS)` | 4000 ms (AEC3 kPoorExcitationCounterInitial = 1000 blocks x 4 ms). Not hop-authored at all -- it is a block count that was frozen through blocks_to_hops(1000,160,16000)=400 at the 10 ms grid. | high |
-| 23 | `pre-echo earliest-lag bias window (2 x kNumBlocksPerSecond; C DA_K_NUM_BLOCKS_PER_SEC * 2 = 500)` | 2000 ms of earliest-lag bias (AEC3: first 2 seconds). Rate-relative, hop-independent. | high |
-| 24 | `recent inst-ERLE peak window (warm tap-transfer gate)` | 150 ms (15 hops x 10 ms) | high |
-| 25 | `shadow poor_excitation_counter reset on echo-path change (AEC3_POOR_EXC_COUNTER_INITIAL_HOPS = 400)` | 4000 ms (AEC3 kPoorExcitationCounterInitial = 1000 blocks x 64/16000 s); 400 hops at the 10 ms anchor grid | high |
-| 26 | `shadow-copy warmup gate (shadow_frame_count < 50)` | 500 ms (validated) -- authored 800 ms, silently cut to 500 ms by the 2026-03-23 grid unification and accepted there ever since | high |
-| 27 | `stationary-DT wn_err_baseline silence retention` | 200 ms (TC = 20 hops x 10 ms) | high |
-| 28 | `stationary-DT wn_err_baseline speech-active retention` | 10000 ms (TC = 1000 hops x 10 ms) | high |
-| 29 | `delay-shift trigger gate / pending-match tolerance (32 / 16 samples)` | 2.0 ms trigger / 1.0 ms match tolerance (32 and 16 samples at 16 kHz) | medium |
-| 30 | `P3f main_err baseline downward EMA (0.9 / 0.1)` | TC 94.9 ms (repo convention TC = -hop_s/ln(alpha) = -0.010/ln(0.9)); 10 hops by the 1/(1-alpha) convention = 100 ms | medium |
-| 31 | `RenderSignalAnalyzer narrow-band mask counter threshold (_COUNTER_THRESHOLD / RSA_COUNTER_THRESHOLD)` | AMBIGUOUS BY DESIGN -- 50 ms if you preserve our own validated behaviour (5 hops at the 10 ms grid), 20 ms if you restore AEC3 fidelity (5 x 4 ms blocks). The two disagree by 2.5x and the choice must be stated, not assumed. | medium |
-| 32 | `RenderSignalAnalyzer poor-excitation threshold (_POOR_EXCITATION_THRESHOLD / RSA_POOR_EXCITATION_THRESHOLD)` | AMBIGUOUS, same fork as its sibling -- 100 ms (10 hops at the 10 ms grid, our validated behaviour) vs 40 ms (10 x 4 ms AEC3 blocks, AEC3 fidelity) | medium |
+| 6 | `EchoGeneratingPower delay-centered window pre/post size (_render_pre_window_size / _render_post_window_size)` | +/-10 ms (1 hop each side at the validated 10 ms grid); 3 hops = 30 ms total window | high |
+| 7 | `erle windowed accumulator decay` | 10000 ms (TC = 1/(1-0.999) = 1000 hops x 10 ms) | high |
+| 8 | `erle_coh_gate_alpha` | 200 ms (TC = 1/0.05 = 20 hops x 10 ms) | high |
+| 9 | `ErlEstimator fullband (time-domain) minimum-statistics EMA alpha` | AEC3-native alpha=0.1 per 4 ms block -> 38.0 ms time constant. No empirical anchor exists. | high |
+| 10 | `ErlEstimator fullband hold-expiry recovery growth (doubling toward MAX_ERL)` | AEC3-native 2.0x per 4 ms block; full 0.01->1000 recovery = 16.61 doublings = 66.4 ms. | high |
+| 11 | `ErlEstimator per-bin hold-expiry recovery growth (doubling toward MAX_ERL)` | AEC3-native 2.0x per 4 ms block. Full recovery MIN_ERL 0.01 -> MAX_ERL 1000 is log2(1e5) = 16.61 doublings = 66.4 ms. | high |
+| 12 | `ErlEstimator per-bin minimum-statistics EMA alpha` | AEC3-native alpha=0.1 per 4 ms block -> time constant -4/ln(0.9) = 38.0 ms. This is the only defensible anchor because no empirical-validation commit exists (see evidence). | high |
+| 13 | `FilterAnalyzer ConsistentFilterDetector floor-exclusion window around the IR peak` | 4.0 ms low-side / 8.0 ms high-side — 64 and 128 SAMPLES at AEC3's (and the validating bench's) 16 kHz. This is a SAMPLE-RATE-anchored duration, not a hop-anchored one, which is why a hop-centric audit missed it. | high |
+| 14 | `inst-ERLE smoother retention / new-weight pair` | 33.3 ms (TC = 1/(1-0.7) = 3.33 hops x 10 ms) | high |
+| 15 | `lag-aggregator histogram window DA_HIST_WINDOW = 250 (C frozen at 16 kHz; Python already rate-derived)` | 1000 ms of histogram memory (AEC3 kNumBlocksPerSecond estimates). Rate-relative, hop-independent. | high |
+| 16 | `misadjustment n_hops_target` | 20 ms (2 hops x 10 ms); AEC3's own intent is 4 blocks x 4 ms = 16 ms | high |
+| 17 | `ne_recent_sustain` | 30 ms (3 hops x 10 ms) | high |
+| 18 | `P3f _diverged_min_streak` | 50 ms (5 consecutive far-active hops x 10 ms) | high |
+| 19 | `P3f initial-state / usable_v2 frame margins (50 and 30)` | 500 ms (50 frames) and 300 ms (30 frames) at the 10 ms authoring grid, ON TOP of a warmup_frames base that is itself wall-clock-defined | high |
+| 20 | `PathChangeRegimeHandler.HYS_STREAK_MIN` | 100 ms (10 hops at the 10 ms grid); introduce and validate agree | high |
+| 21 | `poor_excitation_counter initial value 400 (frozen 10 ms-grid AEC3_POOR_EXC_COUNTER_INITIAL_HOPS)` | 4000 ms (AEC3 kPoorExcitationCounterInitial = 1000 blocks x 4 ms). Not hop-authored at all -- it is a block count that was frozen through blocks_to_hops(1000,160,16000)=400 at the 10 ms grid. | high |
+| 22 | `pre-echo earliest-lag bias window (2 x kNumBlocksPerSecond; C DA_K_NUM_BLOCKS_PER_SEC * 2 = 500) -- RETIRED` | 2000 ms of earliest-lag bias (AEC3: first 2 seconds). Rate-relative, hop-independent. | high |
+| 23 | `recent inst-ERLE peak window (warm tap-transfer gate)` | 150 ms (15 hops x 10 ms) | high |
+| 24 | `shadow poor_excitation_counter reset on echo-path change (AEC3_POOR_EXC_COUNTER_INITIAL_HOPS = 400)` | 4000 ms (AEC3 kPoorExcitationCounterInitial = 1000 blocks x 64/16000 s); 400 hops at the 10 ms anchor grid | high |
+| 25 | `shadow-copy warmup gate (shadow_frame_count < 50)` | 500 ms (validated) -- authored 800 ms, silently cut to 500 ms by the 2026-03-23 grid unification and accepted there ever since | high |
+| 26 | `stationary-DT wn_err_baseline silence retention` | 200 ms (TC = 20 hops x 10 ms) | high |
+| 27 | `stationary-DT wn_err_baseline speech-active retention` | 10000 ms (TC = 1000 hops x 10 ms) | high |
+| 28 | `delay-shift trigger gate / pending-match tolerance (32 / 16 samples)` | 2.0 ms trigger / 1.0 ms match tolerance (32 and 16 samples at 16 kHz) | medium |
+| 29 | `P3f main_err baseline downward EMA (0.9 / 0.1)` | TC 94.9 ms (repo convention TC = -hop_s/ln(alpha) = -0.010/ln(0.9)); 10 hops by the 1/(1-alpha) convention = 100 ms | medium |
+| 30 | `RenderSignalAnalyzer narrow-band mask counter threshold (_COUNTER_THRESHOLD / RSA_COUNTER_THRESHOLD)` | AMBIGUOUS BY DESIGN -- 50 ms if you preserve our own validated behaviour (5 hops at the 10 ms grid), 20 ms if you restore AEC3 fidelity (5 x 4 ms blocks). The two disagree by 2.5x and the choice must be stated, not assumed. | medium |
+| 31 | `RenderSignalAnalyzer poor-excitation threshold (_POOR_EXCITATION_THRESHOLD / RSA_POOR_EXCITATION_THRESHOLD)` | AMBIGUOUS, same fork as its sibling -- 100 ms (10 hops at the 10 ms grid, our validated behaviour) vs 40 ms (10 x 4 ms AEC3 blocks, AEC3 fidelity) | medium |
 
 ### `_far_power_ema / _mic_power_ema smoothing (0.95)`
 
@@ -127,15 +126,6 @@ Live on the default-ON audio path, semantically a wall-clock duration, and not c
 - **Consumer**: orchestrator.py:2259-2260 / aec.c:2301-2304, third arm of the same tracker, guarded by `if (self._filter_converged and not self._render_activity.is_stationary and far_pwr > 1e-4 and self._wn_err_baseline > 1e-6):`. In-code rationale: "D4: slowly track baseline during non-stationary far-end (converged only). Prevents stale 1e-8 baseline when clip starts with speech far-end -> first stationary transition sees huge jump_ratio -> false stationary DT trigger." Per-hop retention EMA whenever the guard holds; the guard is a state predicate, not a qualifying-evidence counter, so this is a duration.
 - **Provenance**: INTRODUCE 51724f3 (2026-04-16, "feat(aec): v2.3.1 - tuning (D2/D3/D6) + correctness (D4/E2/A3) + algorithm guide"); `git log -S"0.995 * self._wn_err_baseline"` returns only 51724f3 and ebdf051 (R.11 file move). Grid at 51724f3: `git show 51724f3:python/aec.py` lines 70-71 = auto 20 ms, resolving at 178-181 -> 320/160 -> 10 ms. The commit is itself a tuning+correctness release, so introduce and validation coincide at 10 ms.
 - **Reasoning**: Retime via growth_rehop, as the third member of the one-state-variable group. Provenance clean and single-grid. No comment to correct (there is no wall-clock claim). The consequence of leaving it frozen is named by its own rationale: this arm exists to keep the baseline from going stale before the first stationary transition, and at 8k / 16k-512 it tracks 1.6x too slowly, so the staleness window it was added to close reopens by 60 percent. Retiming this one WITHOUT the other two arms would be worse than retiming none, because the three arms' relative rates are what make the tracker behave -- they must be treated as one unit.
-
-### `duty-cycle ERLE watchdog peak leak rate`
-
-- **Verdict**: retime (high confidence, open)
-- **Anchor**: 0.1 dB/s (0.001 dB/hop x 100 hops/s); equivalently 60 s to leak the 6 dB collapse threshold
-- **Effective today**: 8k 256/128 (16 ms) = 0.0625 dB/s (96 s to 6 dB); 16k 256/128 (8 ms, DEFAULT) = 0.125 dB/s (48 s), 1.25x TOO FAST; 16k 512/256 (16 ms) = 0.0625 dB/s (96 s); 48k 1024/512 (10.67 ms) = 0.0938 dB/s (64 s)
-- **Consumer**: aec.c:1714-1728, C-ONLY (intentional divergence -- aec.c:1676-1682 states duty-cycled analysis is ALWAYS ON and baked in; Python always analyses every hop). Subtractive decay applied every hop while duty_active, with no qualifying gate: `if (last_erle_windowed > duty_erle_peak) peak = last_erle_windowed; else peak -= 0.001f;`. The else-branch is a pure per-hop time decay. Firing the >6 dB collapse test sets duty_active=0 and resumes FULL-RATE matched-filter analysis -> changes when the delay estimator re-locks -> real audio consequence, not diagnostics. Note the sibling constants in the same block (hold_hops from delay_est_init_s, K from delay_est_period_s) are already correctly derived from wall-clock config; only this leak is frozen.
-- **Provenance**: INTRODUCE = edfcf92 / 0550875 (2026-07-13, 'perf(aec): full-path optimization - Tier1 byte-identical + FAST_MATH/duty/DS8 flags'), confirmed by `git log -S"duty_erle_peak"` -> {0550875, edfcf92} and `git log -S"duty_active" -- c_impl/src/aec.c` -> {edfcf92}. dbb9f1b (2026-07-14) only appears because of the f32 suffix change 0.001 -> 0.001f, not a value change. Default grid at edfcf92: `frame_size: int = -1 # Auto: sample_rate * 20ms` -> hop 160 @16k = 10 ms. VALIDATE = the same perf campaign (2026-07-13/14), which is where duty-cycling was measured and baked in (2.7x RTF); still the 10 ms grid. Grid flipped 18 days later (d862a38 2026-07-31 / 07572ea 2026-08-01) with no re-bench. The in-code comment 'aec.c:1715-1716 ~0.1 dB/s at 10 ms hops' is therefore ACCURATE ABOUT ITS ANCHOR and STALE ABOUT TODAY -- it is the rare case where the comment names its own grid, which makes it usable as evidence rather than a trap.
-- **Reasoning**: Unambiguous: introduce and validate commits are the same campaign on the same 10 ms grid, and the comment self-declares the anchor. Live, default-ON, C-only, routed through no helper. At the 16k default the watchdog now false-triggers 1.25x sooner (peak bleeds away 25% faster, so a merely quiet stretch of far-end looks like a 6 dB collapse), costing the duty-cycle savings the commit was written to buy; at 8k and 16k/512 it is 2x too slow, so a genuine echo-path change is held in decimated analysis roughly twice as long. Retime as a rate, not a count: leak_per_hop = 0.1f * hop_s (i.e. aec3_per_block-style rate conversion), giving 0.0016 @16ms, 0.0008 @8ms, 0.001067 @10.67ms.
 
 ### `EchoGeneratingPower delay-centered window pre/post size (_render_pre_window_size / _render_post_window_size)`
 
@@ -281,19 +271,11 @@ Live on the default-ON audio path, semantically a wall-clock duration, and not c
 - **Provenance**: (a) The literal 400 = blocks_to_hops(1000, 160, 16000) is documented as such at c_impl/include/aec3_scale.h:77-78 and python/modules/filters.py:556-558. (b) No empirical validation is attached to the NUMBER at all -- AEC3 fidelity is the only justification, and the Python fix commentary at filters.py:233-243 states plainly that this is 'currently a no-behavioral-effect fix'. Anchor is therefore the AEC3 semantic 4 s, not a measured span, and is grid-independent.
 - **Reasoning**: RETIME for consistency; do NOT claim an audio win. Confirmed on both sides. The gate compares the counter against n_partitions, which is 4-7 at every supported grid, so 400 and 500 are equally 'vastly larger' and today the difference is unobservable -- the same honest framing filters.py:233-243 already uses for the Python twin. Worth closing anyway for two reasons: the C main filter and the C shadow now recover from an echo-path change with DIFFERENT counters (main via pbfdkf_handle_echo_path_change -> correct 500 at the default grid, shadow via the open-coded 400), and a future n_partitions or grid change could make that asymmetry audible. Replace the three AEC3_POOR_EXC_COUNTER_INITIAL_HOPS uses in aec.c with aec3_blocks_to_hops(1000, hop, cfg->sample_rate); after that the #define at aec3_scale.h:78 has no remaining reader and should be deleted rather than left as another frozen-value trap.
 
-### `pre-echo earliest-lag bias window (2 x kNumBlocksPerSecond; C DA_K_NUM_BLOCKS_PER_SEC * 2 = 500)`
-
-> **RETIRED.** The pre-echo error/aggregator path this window gated is no
-> longer computed — the reported delay is the dominant matched-filter peak,
-> and the onset-bias machinery it fed was removed outright (state stays
-> carved for layout stability, permanently inert). `DA_K_NUM_BLOCKS_PER_SEC`
-> and `DA_K_MFW_SUB_BLOCKS` were deleted with it; the 16 kHz-native rate
-> limitation they documented now lives on `DA_HIST_WINDOW`'s comment, which
-> is this entry's surviving subject. Record kept as provenance.
+### `pre-echo earliest-lag bias window (2 x kNumBlocksPerSecond; C DA_K_NUM_BLOCKS_PER_SEC * 2 = 500) -- RETIRED`
 
 - **Verdict**: retime (high confidence, open)
 - **Anchor**: 2000 ms of earliest-lag bias (AEC3: first 2 seconds). Rate-relative, hop-independent.
-- **Effective today**: Hop-independent at all four grids. By SAMPLE RATE: native 8 kHz -> Python 250 updates x 8 ms = 2000 ms (correct), C 500 x 8 ms = 4000 ms (2x); 16 kHz (both grids) -> both 500 x 4 ms = 2000 ms, agree; 48 kHz -> effective 16 kHz, agree.
+- **Effective today**: RETIRED: the pre-echo aggregator path was removed (dominant-peak product policy); DA_K_NUM_BLOCKS_PER_SEC / DA_K_MFW_SUB_BLOCKS deleted with it. Kept as provenance.
 - **Consumer**: c_impl/src/delay_aec3.c:809, gating the windowed local-max scan with the 0.7x per-later-window penalty that biases the pre-echo candidate toward the EARLIEST high-confidence lag; after the window expires the candidate becomes a simple argmax. number_updates increments only inside the branch and is reset only on da_pre_echo_reset -- but unlike _PRE_ECHO_UPDATES_TO_REPORT there is no qualifying condition (aggregate() is called once per inner block), so this IS a wall-clock duration, not an evidence count.
 - **Provenance**: Same #define family and same provenance as DA_HIST_WINDOW -- AEC3-structural, no bench anchor. Python already correct: lag_aggregator.py:159 `if self._number_updates < self._num_blocks_per_second * 2`, with the docstring at :18-19 ('For the first 2 seconds ... After 2 s, the candidate is the simple argmax') and :119 ('first kNumBlocksPerSecond * 2 (=500) updates') -- note that the '=500' shown there is a 16 kHz illustration inside an otherwise rate-derived implementation, so it reads as authoritative but is not the code's behaviour. C frozen at c_impl/src/delay_aec3.c:809 `if (pe->number_updates < DA_K_NUM_BLOCKS_PER_SEC * 2)` with DA_K_NUM_BLOCKS_PER_SEC = 250 (delay_aec3.h:120).
 - **Reasoning**: RETIME the C side; bundle with DA_HIST_WINDOW since they share the same #define and the same fix. At native 8 kHz the C port keeps the earliest-lag bias engaged for 4 s instead of 2 s, which skews delay selection toward early reflections for twice as long as AEC3 or as our Python reference -- a behavioural divergence, not just a cosmetic one. Fix alongside the histogram window: derive num_blocks_per_second from the effective sample rate at init (delay_aec3.c:1132-1133 already computes the effective rate for da_estimator_init) and store it, exactly as consistent_estimate_threshold is already handled at delay_aec3.c:960-961.
@@ -381,7 +363,7 @@ Live on the default-ON audio path, semantically a wall-clock duration, and not c
 
 ---
 
-## Already retimed (14)
+## Already retimed (15)
 
 Verified to route through a retiming helper. Listed so that a future audit can tell 'checked and correct' from 'never looked at'.
 
@@ -457,6 +439,15 @@ Verified to route through a retiming helper. Listed so that a future audit can t
 - **Provenance**: (a) introduced 24bfe27 2026-05-18 (grid 10 ms); the ms path plus the use_wallclock_trigger_threshold flag added b435601 2026-05-28 (grid 10 ms). The retime is live on the default path in BOTH ports, which I verified rather than inferred. Python: orchestrator.py:439-442 sets use_wallclock_trigger_threshold=True unconditionally — I walked the enclosing blocks and the only guard is `if self.filter is not None:` (orchestrator.py:370) inside AEC.__init__, so it always applies in production; _derive_trigger_threshold (suppression_gain.py:389-400) then returns ms_to_hops(48, hop, sr). C: never sees the 12 at all — aec.c:1211 feeds the pre-derived per-rate AEC3B_SG_TRIGGER_THRESHOLD_HOPS (aec3_balanced_config.h:109 = 3 for the base 16k/fft512 row, :266 R16K256 = 6, :191 R8K = 3, :341 R48K = 4), emitted per grid by gen_aec_balanced_config_h.py:228.
 - **Reasoning**: Already retimed on the default production path — no action required for correctness. It is listed anyway under the check-the-default-path rule, and the residual hazard is real but narrow: DominantNearendConfig's CLASS default is use_wallclock_trigger_threshold=False (suppression_gain.py:141), so any SuppressionGain / _DominantNearendDetector constructed WITHOUT the orchestrator — a direct instantiation, a test, a future entry point — silently gets the raw 12 hops = 96 ms at today's default, a 2x error against the 48 ms AEC3 spec. That is exactly the shape of the bug this campaign exists to catch, just not yet realised. Recommend flipping the class default to True and deleting the legacy branch and the bare 12, so the unflagged path cannot mistime; the flag has served its byte-equal-transition purpose. The grid mapping for the C macros is as follows: the unprefixed AEC3B_ row is 16k/fft512 (hop 256, 3 hops) and R16K256 is 16k/fft256 (hop 128, 6 hops) — the values themselves are correct and grid-consistent.
 
+### `duty-cycle ERLE watchdog peak leak rate`
+
+- **Verdict**: already retimed (high confidence, closed)
+- **Anchor**: 0.1 dB/s (0.001 dB/hop x 100 hops/s); equivalently 60 s to leak the 6 dB collapse threshold
+- **Effective today**: Retimed, so the rate is grid-invariant and equals the anchor at all four grids: 0.1 dB/s everywhere, i.e. 60 s to leak the 6 dB collapse threshold. Per-hop amounts, read back out of the constructed instance: 8k 256/128 (16 ms) = 0.0016; 16k 256/128 (8 ms, DEFAULT) = 0.0008; 16k 512/256 (16 ms) = 0.0016; 48k 1024/512 (10.667 ms) = 0.00106666679. Exact at the 10 ms authoring grid: the retiming helper returns 0.001f bit-for-bit at hop=160/sample_rate=16000, so that grid's behaviour is unchanged by construction rather than by tolerance.
+- **Consumer**: c_impl/src/aec.c:2557-2560, C-ONLY (intentional divergence -- c_impl/src/aec.c:2498-2505 states duty-cycled analysis is ALWAYS ON and baked in; Python always analyses every hop). Subtractive decay applied every hop while duty_active, with no qualifying gate: `if (last_erle_windowed > duty_erle_peak) peak = last_erle_windowed; else peak -= duty_erle_leak_db;`. The else-branch is a pure per-hop time decay. Firing the >6 dB collapse test sets duty_active=0 and resumes FULL-RATE matched-filter analysis -> changes when the delay estimator re-locks -> real audio consequence, not diagnostics. The leak is now converted once at construction (c_impl/src/aec.c:1958-1968, Aec::duty_erle_leak_db in c_impl/include/aec.h:433). The sibling spans in the same block (hold_hops from delay_est_init_s, K from delay_est_period_s) were already derived from the hop where they are read, per pass; this leak was the only quantity in the block still frozen at a hop count.
+- **Provenance**: INTRODUCE = edfcf92 / 0550875 (2026-07-13, 'perf(aec): full-path optimization - Tier1 byte-identical + FAST_MATH/duty/DS8 flags'), confirmed by `git log -S"duty_erle_peak"` -> {0550875, edfcf92} and `git log -S"duty_active" -- c_impl/src/aec.c` -> {edfcf92}. dbb9f1b (2026-07-14) only appears because of the f32 suffix change 0.001 -> 0.001f, not a value change. Default grid at edfcf92: `frame_size: int = -1 # Auto: sample_rate * 20ms` -> hop 160 @16k = 10 ms. VALIDATE = the same perf campaign (2026-07-13/14), which is where duty-cycling was measured and baked in (2.7x RTF); still the 10 ms grid. Grid flipped 18 days later (d862a38 2026-07-31 / 07572ea 2026-08-01) with no re-bench. The in-code comment 'aec.c:1715-1716 ~0.1 dB/s at 10 ms hops' is therefore ACCURATE ABOUT ITS ANCHOR and STALE ABOUT TODAY -- it is the rare case where the comment names its own grid, which makes it usable as evidence rather than a trap.
+- **Reasoning**: RETIMED. Unambiguous anchor: introduce and validate commits are the same campaign on the same 10 ms grid, and the comment self-declared it. Retimed as a RATE, not a count -- an additive per-hop leak scales linearly with the hop period, so the conversion is leak_per_hop = 0.001 * (hop_seconds / 0.010), which is the identity at the authoring grid and therefore leaves 10 ms behaviour bit-identical. Effect of the fix, measured on 832 AEC Challenge blind stems x the two 16 kHz grids (balanced, res enabled): the leaky-peak trajectory moves on 68.0% of streams, the realised duty census on 62, the final delay estimate on 1, and the output bytes on 2 (both at 16k/256; none at 16k/512). That is the intended reach -- the leak only changes a DECISION when the peak is armed (>6 dB) and a collapse lands near the 6 dB edge. Note the shipped grids give the retime no identity row: 16.000 / 8.000 / 16.000 / 10.667 ms hops mean the frozen literal was wrong on all four, so the four-grid assertion in c_impl/test/test_rate_structural.c (d2) fails on every row if it is reverted; (d2b) pins the authoring-grid identity through an AEC_TESTING hook because a 320-sample frame is not a constructible grid, and c_impl/test/test_duty_census.c check 7 reconstructs the subtraction from the peak trajectory so the branch cannot quietly go back to a literal while the field stays correct. The Audio_ALG 4-channel wrapper carries its own copy of this machine and follows separately.
+
 ### `EchoPathChangeDetector EPV_FAST_TC / EPV_SLOW_TC`
 
 - **Verdict**: already retimed (high confidence, closed)
@@ -466,19 +457,9 @@ Verified to route through a retiming helper. Listed so that a future audit can t
 - **Provenance**: Project-native (explicitly NOT AEC3-sourced, per both files' headers), authored before per-rate multi-grid support existed — epc.py's EchoPathChangeDetector originally took only `config`, with no hop_size/sample_rate parameters at all, which is itself evidence of the single-grid 10 ms assumption. Retimed per-instance in the 2026-08 gap-fix round (669a5b5 / 6805c30, 2026-08-03, 'fix: retime top-level hop-authored constants missed by the AEC3-internal audit'), after the 2026-08-01 grid change. The 10 ms anchor is corroborated arithmetically, not just by the comment: 0.98 and 0.999 give 494.98 ms and 9995.00 ms at a 10 ms hop, which is precisely the '~500 ms / ~10 s' the comment claims — that self-consistency only holds on the 160/16000 grid, so the comment is CURRENTLY ACCURATE and independently corroborating.
 - **Reasoning**: Already retimed in both languages, correctly anchored, with the retention-vs-AEC3-alpha convention documented on both sides. C additionally has a documented fail-safe at epc_shadow.c:44-50: when hop_size<=0 or sample_rate<=0 it falls back to the exact unscaled literals rather than dividing by zero inside the rehop helper — mirroring aec.c's aec_legacy10ms_* fallback. No action. One closing observation carries more weight than the verdict itself: three OTHER constants in these same two files — shadow warmup 50, baseline 0.995, HYS_STREAK_MIN 10 — were left as raw literals in the same pass that retimed these two. That is a strong signal the earlier rounds' file-level coverage was incomplete, and those three still need dispositions of their own in epc.py/epc_shadow.c.
 
-### `PBFDAF far-end power EMA retention (alpha_power)` — RETIRED
+### `PBFDAF far-end power EMA retention (alpha_power)`
 
-- **Verdict**: retired — the field, its EMA and the C struct member were removed
-  outright (the separate bit-exact cleanup the reasoning below anticipated).
-  `power[]` had exactly one reader in either port — its own cold-start guard,
-  whose decision provably cannot depend on the value — so the removal is
-  byte-exact; the structural check (d4) now recovers the retimed coefficient
-  from `Aec::alpha_pow`'s near-power EMA instead. The Python twin
-  (`filters.py`) still carries `power`/`alpha_power` as dead state: removing it
-  moves the AIAEC behavior hash, so it waits for the next hash-moving change.
-  The record below is kept as provenance for the retiming decision it closed.
-
-- **Verdict (historical)**: already retimed (high confidence, closed)
+- **Verdict**: already retimed (high confidence, closed)
 - **Anchor**: 94.91 ms time constant (retention 0.9 at a 10 ms hop). Reference grid hop=160 / sr=16000.
 - **Effective today**: Invariant TC 94.91 ms in both ports: per-hop retention r=0.84487 @8k 256/128, r=0.91917 @16k 256/128 (default), r=0.84487 @16k 512/256, r=0.89370 @48k 1024/512. Until the C use site was corrected the frozen 0.9f meant 75.9 ms at the 8 ms default and 151.9 ms at the 16 ms grids, and Python and C disagreed at every grid except the 16 ms pair (0.9^(8/10) = 0.91924 against a flat 0.9).
 - **Consumer**:

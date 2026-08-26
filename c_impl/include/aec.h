@@ -421,14 +421,21 @@ typedef struct Aec {
      * analysis decimates), so the matched filter never sees gapped audio.
      * Full-rate analysis resumes immediately when (a) the estimate changes or
      * loses solidity, or (b) the ERLE watchdog fires: erle_windowed drops
-     * >6 dB below its running peak (peak leaks ~0.1 dB/s; armed only once the
-     * peak exceeds 6 dB, so it cannot fire before first convergence).
+     * >6 dB below its running peak (peak leaks 0.1 dB/s at EVERY grid; armed
+     * only once the peak exceeds 6 dB, so it cannot fire before first
+     * convergence).
      * Sampled 60-case AECMOS cost: <=+0.014 / worst -0.006 — zero-cost. */
     int    duty_active;        /* 1 = decimated analysis in effect */
     int    duty_stable_hops;   /* consecutive solid+unchanged hops (arming) */
     int    duty_pos;           /* position in the 1-in-K analysis cycle */
     int    duty_last_delay;    /* estimate on the previous hop (change detect) */
     float  duty_erle_peak;     /* leaky running peak of erle_windowed (dB) */
+    float  duty_erle_leak_db;  /* per-hop leak of duty_erle_peak (dB), derived
+                                * from the grid at carve time so the wall-clock
+                                * rate stays 0.1 dB/s. Occupies what was tail
+                                * padding ahead of the counters below, so
+                                * sizeof(Aec) and every later offset are
+                                * unchanged.                                  */
     /* Engagement census (productization plan §7 measurement method): the
      * doc comment above claims the duty machine cuts "~90% of the
      * matched-filter cost" as a DESIGN figure, which only materialises on

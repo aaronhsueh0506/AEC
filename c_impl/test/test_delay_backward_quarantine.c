@@ -138,7 +138,21 @@ static int g_pass = 0;
  * UNGUARDED build re-locks in all four gain rows inside MP_HOPS -- a row the
  * unguarded build cannot solve is a statement about the estimator, not about
  * this guard, and would make the comparison vacuous. */
-#define MP_HOPS     1600             /* 25.6 s: the 0.5 row re-locks at 1515  */
+/* MP_HOPS is an OBSERVATION WINDOW, not a property: it has to outlast the
+ * slowest row, and the slowest row is g_old = 0.5, where the surviving path
+ * and the new one have EQUAL gain and the dominant-peak aggregator is close
+ * to a tie. A near-tie is exactly where a change in WHICH hops the matched
+ * filter is engaged on moves the outcome, and the duty machine's ERLE
+ * watchdog leak was retimed on 2026-08-26 (0.001 dB/hop was 0.1 dB/s only on
+ * the retired 10 ms grid; at this test's 8 ms hop it is now 0.0008). That
+ * moved this row's unguarded re-lock from hop 1515 to hop 2071 -- later, but
+ * still a re-lock, still onto the same lock class, and still exactly +62
+ * (one window) behind for the guarded build, which is the property this
+ * block actually asserts. The window was 1600 hops, sized with 1.4% to
+ * spare; it is now 2400 with the margin stated rather than discovered. The
+ * three other rows moved by at most 5 hops. */
+#define MP_HOPS     2400             /* 38.4 s: the 0.5 row re-locks at 2071,
+                                      * 2133 guarded -- ~11% headroom        */
 #define MP_AT       250              /* the new path appears at hop 250       */
 #define MP_OLD      2400             /* surviving old reflection, 150 ms      */
 #define MP_NEW      1600             /* new path: EARLIER, 100 ms             */

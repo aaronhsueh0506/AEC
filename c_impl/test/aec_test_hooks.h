@@ -38,6 +38,18 @@ extern "C" {
 void aec_testing_update_simple_mu_ratio(Aec* a, const float* output,
                                         const float* far_end, int n);
 
+/* Exposes the legacy-10 ms additive-rate retiming helper.
+ *
+ * Why the public API will not do: the claim under test is that the helper
+ * returns its authored argument BIT-FOR-BIT at the grid the constant was
+ * calibrated on (hop=160, sample_rate=16000). That grid is a 320-sample frame,
+ * which AEC_GRID_TABLE does not admit, so no aec_create() can build an
+ * instance carrying that value and no public reader can observe it. Check (d2)
+ * still asserts the four SHIPPED grids through the constructed instance's
+ * field; this hook covers only the unconstructible reference point. */
+float aec_testing_legacy10ms_rate(float legacy_per_hop, int hop,
+                                  int sample_rate);
+
 #ifdef __cplusplus
 }
 #endif

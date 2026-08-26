@@ -41,6 +41,112 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-26 — the duty-cycle ERLE watchdog leaks by the clock, not by the hop (BEHAVIOUR CHANGE at 8 kHz/256, 16 kHz/256, 16 kHz/512 and 48 kHz/1024)
+
+### Fixed
+
+1. **The watchdog's leaky ERLE peak decays 0.1 dB/s at every grid.** The
+   delay-estimator duty machine resumes full-rate matched-filter analysis when
+   `erle_windowed` falls more than 6 dB below a running peak, and that peak
+   leaks so a stale high-water mark cannot hold the machine at full rate
+   forever. The leak was a bare `0.001f` per hop — 0.1 dB/s only on the
+   legacy 10 ms grid it was calibrated on. On the shipped grids it read
+   0.125 dB/s at 16 kHz/256 (25% too fast, so an ordinary quiet stretch of
+   far-end bleeds the peak down and looks like a collapse), 0.0625 dB/s at
+   8 kHz/256 and 16 kHz/512 (a real echo-path change stays in decimated
+   analysis about twice as long), and 0.09375 dB/s at 48 kHz/1024.
+
+   `Aec::duty_erle_leak_db` now carries it, converted once at carve time from
+   the hop. The machine's other two spans were already grid-derived —
+   `hold_hops` from `delay_est_init_s`, `K` from `delay_est_period_s`, both
+   recomputed from the hop where they are read — so this leak was the only
+   quantity in the block still frozen at a hop count.
+   The conversion is linear in the hop period, not a power law: an additive
+   leak sums over N hops, it does not compound. At hop=160/sample_rate=16000
+   the conversion is the identity and returns `0.001f` bit-for-bit, so the
+   grid the constant was calibrated on is untouched by construction rather
+   than within a tolerance.
+
+### Impact
+
+This changes WHEN the watchdog fires, which changes which hops the matched
+filter is engaged on, which can change the delay the estimator reports. It is
+a behaviour change on all four shipped grids — none of them has a 10 ms hop
+(16.000 / 8.000 / 16.000 / 10.667 ms), so the frozen literal was wrong on
+every one of them and there is no grid where old and new coincide.
+
+Measured on 832 AEC Challenge blind stems (far-end singletalk, doubletalk,
+near-end singletalk) at both 16 kHz grids, balanced, RES enabled — 1,664
+streams:
+
+| what moves | streams |
+|---|---:|
+| leaky-peak trajectory | 1,132 (68.0%) |
+| realised duty census (`duty_hops_run`) | 62 (−30 to +35 hops) |
+| final delay estimate | 1 |
+| output samples | 2 (0.12%) |
+
+Both output-moving streams are at 16 kHz/256; none at 16 kHz/512. The two:
+`OjdIdZgJDk6hLAQL07KORA_farend_singletalk` diverges at 16.31 s when the delay
+settles on 584 samples instead of 564 (24.5% of hops differ afterwards,
+max |Δ| 0.16), and `w0QrMwsZ5kGoJjRWvP0iKg_doubletalk` at 28.54 s from a
+26-hop delay excursion that recovers to the same final value (27.1% of hops,
+max |Δ| 0.78). Everything else in the sweep is byte-identical, because the
+leak only changes a DECISION when the peak is armed (>6 dB) and a collapse
+lands within a fraction of a dB of the 6 dB edge — on one worked example the
+old leak had bled the peak to 8.16 dB against a 2.29 dB ERLE (a 5.87 dB
+collapse, no trip) where the retimed one still read 8.33 dB (6.04 dB, trip).
+
+The two reference captures used for seam evidence throughout this changelog —
+the `0I0XMl3M0ECO0U1N0cJvpg` doubletalk clip and the 10 s pair in
+`wav/aec_record` — are byte-identical on output hop, `formed_hop` and
+`error_spec`, at 16 kHz/256 and 16 kHz/512, with RES enabled and
+context-only, with an unchanged duty census and final delay/confidence. The
+leak did reach the branch on all four of those streams — the peak trajectory
+moves on 4,540 of 5,233 hops (doubletalk, 16 kHz/256), 2,379 of 2,616
+(doubletalk, 16 kHz/512), 951 of 1,250 (`aec_record`, 16 kHz/256) and 202 of
+625 (`aec_record`, 16 kHz/512) — but it never reaches a DECISION, because the
+peak tops out at 3.03 / 2.78 / 1.16 / 0.00 dB and the watchdog does not arm
+below 6 dB. The same two captures resampled to 8 kHz and to 48 kHz behave the
+same way at 8 kHz/256 and 48 kHz/1024: the peak moves on 2,390 and 3,512 hops
+of the doubletalk clip and 228 and 679 of `aec_record`, nothing else in either
+trace moves, and output stays byte-identical. Those two grids therefore have
+a proven value change and a proven live branch
+but no output-moving case in hand: the blind corpus is 16 kHz, so the
+1,664-stream sweep above could not cover them.
+
+One synthetic scene in the suite moves visibly and is worth naming, because
+it is the shape a real echo path can take. `test_delay_backward_quarantine`'s
+multipath scene adds a stronger, earlier path while the old reflection
+survives; on the row where the two have EQUAL gain — a near-tie for the
+dominant-peak aggregator, so the most scheduling-sensitive row there is — the
+re-lock moves from hop 1515 (24.2 s) to hop 2071 (33.1 s). It still re-locks,
+still onto the same lock class, and the guarded build still trails the
+unguarded one by exactly one window, which is what that block asserts. The
+three other gain rows move by at most 5 hops. The test's observation window
+grew 1600 -> 2400 hops to outlast the slow row, with the margin now stated in
+the source instead of being 1.4%.
+
+No ABI change: `sizeof(Aec)` stays 5,848 B, every field offset is unchanged
+(the new float occupies what was tail padding ahead of the census counters),
+and `aec_get_mem_size()` is identical at all four grids. No pipeline layout
+version moves. Python is untouched: the duty machine is a documented C-only
+divergence — the Python orchestrator analyses every hop — so the AIAEC
+behavior hash does not move. The 4-channel wrapper in the integration repo
+holds its own copy of this machine and follows separately.
+
+`docs/timing_constant_inventory.md` entry `duty-cycle ERLE watchdog peak leak
+rate` moves to already-retimed/closed; Retime 32 -> 31, already retimed
+14 -> 15. Regenerating that file also repaired drift it was already carrying:
+`gen_timing_inventory.py --check` failed before this change, because two
+entries (the retired pre-echo bias window and the retired PBFDAF
+`alpha_power`) had been annotated by hand in the Markdown with blockquotes
+the JSON does not produce. The JSON already recorded both retirements in its
+own fields, so the verdicts are unchanged and the prose remains in git
+history — but the document is generated, and it is now generated again.
+
+---
+
 ## [Unreleased] — 2026-08-26 — the linear filter stops recomputing what it already knows (ABI: `sizeof(Aec)` +16 B, pool +5,664 B at 16 kHz/256)
 
 ### Changed

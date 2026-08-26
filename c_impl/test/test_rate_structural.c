@@ -75,6 +75,20 @@
  *       the 10 ms/per-sample constants MUST move where the grids differ --
  *       including alpha_r, whose anchor moved to 10 ms on 2026-08-07, so a
  *       16 ms grid is now one of the places it has to move.
+ *       (d2) also covers the one ADDITIVE per-hop rate in the same family,
+ *       the duty-cycle ERLE watchdog leak (0.1 dB/s, asserted through the
+ *       60 s span it takes to leak the watchdog's 6 dB threshold) --
+ *       and unlike every retention above it has no identity grid among the
+ *       four, so a reverted literal fails on all four rows.
+ *
+ *   (d2b) that additive rate is EXACT at its authoring grid: the retimed
+ *       expression returns the authored 0.001 dB/hop bit-for-bit at
+ *       hop=160/sample_rate=16000, which is what makes the retime leave the
+ *       10 ms grid's behaviour untouched. That grid is a 320-sample frame and
+ *       therefore unconstructible, so the value is read through an
+ *       AEC_TESTING hook. The drift check tying that hook's answer to the
+ *       field aec_carve() actually stored lives in (d2), where the
+ *       constructed instance already exists.
  *
  *   (e) external RES/NR seam WOLA identity: with internal RES disabled and
  *       return_res_context enabled, reconstruct ctx.error_spec with the
@@ -1052,6 +1066,46 @@ static void test_adaptation_constant_retiming(void) {
         CHECK(aec.sat_ref.alpha_attack == aec.sat_mic.alpha_attack &&
               aec.sat_ref.alpha_release == aec.sat_mic.alpha_release, what);
 
+        /* Duty-cycle ERLE watchdog leak, per-hop, 10 ms reference. The third
+         * convention in this file: an ADDITIVE amount subtracted once per hop,
+         * so its wall-clock meaning is a RATE (dB per second) and it scales
+         * linearly, not by the power law the retentions above use. Asserted
+         * through the span that rate implies, so the target is the same
+         * number at every grid.
+         *
+         * Note what is NOT here: an identity row. Every shipped grid is a
+         * 16.000 / 8.000 / 16.000 / 10.667 ms hop, so none of them is the
+         * 10 ms grid this constant was calibrated on -- the authored 0.001f
+         * literal is wrong on all four, and reverting the retime fails this
+         * assertion on all four rows rather than on a convenient subset. The
+         * reference point itself is unconstructible (hop=160 is a 320-sample
+         * frame, which AEC_GRID_TABLE does not admit) and is pinned separately,
+         * bit-for-bit, in (d2b) below -- which is also why the last check here
+         * ties this instance's field to that same helper. */
+        {
+            /* Expressed as the span the anchor itself is stated in -- how long
+             * the peak takes to leak the watchdog's whole 6 dB collapse
+             * threshold -- so it goes through check_close like every other
+             * wall-clock row here, prints in the same units, and reads against
+             * the same 60 s figure the inventory records. Dividing out to
+             * dB/s would have needed a private comparison printing "ms". */
+            double leak_db_per_s = (double)aec.duty_erle_leak_db / hop_s;
+            check_close("duty_erle watchdog 6 dB collapse span", sr, fft,
+                        6.0 / leak_db_per_s * 1000.0, 60000.0, ALPHA_TOL);
+            check_moved("duty_erle_leak_db", sr, fft,
+                        (double)aec.duty_erle_leak_db, 0.001);
+
+            /* The hook (d2b) reads the authoring grid through must not drift
+             * from what aec_carve() actually stored; asserted here, where the
+             * constructed instance already exists. */
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d: duty_erle_leak_db (%.9g) is the retiming "
+                     "helper's own answer for this grid", sr, fft,
+                     (double)aec.duty_erle_leak_db);
+            CHECK(aec.duty_erle_leak_db ==
+                      aec_testing_legacy10ms_rate(0.001f, hop, sr), what);
+        }
+
         /* Negative space, half 1 -- the 16 ms family MUST NOT move on a 16 ms
          * grid (8000/256 and 16000/512 both have a 16.000 ms hop). A reviewer
          * seeing these unchanged is looking at correct behaviour, and retiming
@@ -1086,6 +1140,52 @@ static void test_adaptation_constant_retiming(void) {
 
         aec_destroy(&aec);
     }
+}
+
+/* ── (d2b) the additive-rate retime is EXACT at its authoring grid ───────
+ * (d2) proves the four shipped grids carry 0.1 dB/s. It cannot prove the one
+ * property that decides whether this retime is a behaviour change or a
+ * rewrite: that at hop=160/sample_rate=16000, the grid the 0.001 dB/hop leak
+ * was calibrated on, the retimed expression still yields that literal
+ * BIT-FOR-BIT. A tolerance would not do -- one ulp of drift there is a
+ * different stream on a grid whose behaviour is supposed to be untouched --
+ * and that grid is unconstructible (320-sample frame; AEC_GRID_TABLE admits
+ * 256/512/1024 only), so the value cannot be read out of an Aec at all.
+ * Hence the AEC_TESTING hook.
+ *
+ * Exactness here is structural rather than lucky: 160/16000 and the helper's
+ * own reference are the same division, so the ratio is exactly 1.0f and the
+ * multiply is an identity. The equality is therefore asserted with ==, and
+ * the third check below shows it is a property of the REFERENCE GRID and not
+ * of the value 0.001f in particular. */
+static void test_additive_rate_reference_exactness(void) {
+    char what[192];
+
+    float at_ref = aec_testing_legacy10ms_rate(0.001f, 160, 16000);
+    snprintf(what, sizeof(what),
+             "legacy10ms_rate(0.001f, 160, 16000) == 0.001f bit-for-bit "
+             "(got %.9g, bits %s)", (double)at_ref,
+             at_ref == 0.001f ? "equal" : "DIFFERENT");
+    CHECK(at_ref == 0.001f, what);
+
+    /* Same grid, unrelated magnitude. Not a restatement of the check above:
+     * a hook (or a helper) that simply returned 0.001f would satisfy that one
+     * and fail this one, which is the difference between "the identity at the
+     * reference grid" and "hardcodes the constant this retime happens to
+     * carry". Keep both. */
+    float other = aec_testing_legacy10ms_rate(0.25f, 160, 16000);
+    snprintf(what, sizeof(what),
+             "legacy10ms_rate is the IDENTITY at the reference grid, for any "
+             "authored value (0.25f -> %.9g)", (double)other);
+    CHECK(other == 0.25f, what);
+
+    /* Degenerate grid: fall back to the authored value ("not retimed"), the
+     * same well-defined degradation aec3_growth_rehop() documents, rather
+     * than to a division by zero. */
+    CHECK(aec_testing_legacy10ms_rate(0.001f, 0, 16000) == 0.001f &&
+          aec_testing_legacy10ms_rate(0.001f, 160, 0) == 0.001f,
+          "legacy10ms_rate falls back to the authored value on a "
+          "non-positive grid");
 }
 
 /* ── (d3) F2.4 mu-holdoff re-arm regression ─────────────────────────────
@@ -1654,6 +1754,7 @@ int main(void) {
     test_mem_size_consistency();
     test_top_level_constant_retiming();
     test_adaptation_constant_retiming();
+    test_additive_rate_reference_exactness();
     test_retimed_constants_reach_the_audio_path();
     test_alpha_r_reaches_the_direct_pbfdkf_path();
     test_simple_mu_frozen_exception();
