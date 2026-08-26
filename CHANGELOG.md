@@ -52,18 +52,49 @@ when verdict requires it.
    quality has not declared the linear estimate usable and the selected
    residual has more hop energy than its microphone capture, the formed
    linear seam selects capture as its third candidate. The internal-RES path
-   keeps its existing frequency-domain guard and remains byte-identical. The
-   existing 30-sample selection transition remains active, so this is a
-   steady-state fallback rather than a strict bound on every transition
+   cannot reach it: the candidate is admitted only under `context_only`
+   (`!enable_res && return_res_context`), so with `enable_res` the selection is
+   the plain refined/coarse one and the existing frequency-domain guard still
+   owns the rule -- byte-identical by construction, in C and in Python, with no
+   capture needed to establish it. Running both would let that guard's
+   frequency-domain hard switch overwrite the crossfade this selection just
+   started. The existing 30-sample selection transition remains active, so this
+   is a steady-state fallback rather than a strict bound on every transition
    sample.
 3. Python and C now make that selection with the same float32 square and
    pairwise-reduction arithmetic. This decision publishes both the formed hop
    and its matching spectrum; precision disagreement at the threshold is
    therefore an output-contract issue, not merely a diagnostic difference.
+   C already reduced in float32, so this moves Python only -- onto C's answer,
+   in EVERY configuration including `enable_res=1`. Measured disagreement
+   between the old float64 reduction and the new one, replaying the selector
+   both ways: 18 of 5043 hops (0.36%) and 3 of 5233 (0.06%) on two AEC
+   Challenge double-talk captures under `wav/`, 0 of 1250 on the 10 s pair in
+   `wav/aec_record`. Any Python-side 800-case baseline predating this entry is
+   stale.
+
+### Changed
+
+4. **`AecConfig` rejects `return_formed_output` without the chain that
+   produces it.** The flag now requires `enable_res` or `return_res_context`,
+   and the FORM-only branch that ran the selector standalone is deleted. That
+   configuration never entered the post chain, so the filtering-quality
+   verdict stayed at its constructed `False` for the whole stream and the
+   capture fallback above degraded to a bare energy comparison -- a different
+   signal from the one the shipped seam produces. A caller asking for the
+   formed output alone now raises `ValueError` at construction and must add
+   `return_res_context=True`. Python-only: the C config has no such field, and
+   `aec_get_res_context()` already leaves the formed seam NULL unless the
+   chain ran.
 
 ### Impact
 
-The second and third items can change `linear_error`. The behavior hash must
+All four items change what some caller receives. Items 2 and 3 change
+`linear_error` on the context seam; item 3 additionally moves Python's
+`enable_res=1` selector decision; item 1 moves the C output of the linear-only
+`enable_res=0 && return_res_context=0` configuration, whose filter now steers
+from state that used to stop advancing; item 4 turns a previously constructible
+Python config into a construction error. The behavior hash must
 change, no waveform-equivalence migration is permitted, and AIAEC data must be
 rematerialized and repacked before training a release checkpoint. Existing
 checkpoints remain useful for an explicit `--input-is-linear-error` diagnostic

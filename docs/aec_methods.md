@@ -143,7 +143,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | ERLE coordinate fixes | `erle_render_x2_psd_scale` | **ON** | revives reverb model (PSD-scale bug fix) |
 | | `reverb_tail_strength` | 1.0 | reverb-tail R² scale |
 | | `erle_windowed_capture_psd` | **ON** | E1 Y2/E2 sqrt-Hann coordinate consistency |
-| | `output_capture_when_linear_unusable` | **ON** | E2 output base = Y on diverged frames |
+| | `output_capture_when_linear_unusable` | **ON** | two mutually exclusive roles: E2 output base = Y on diverged frames under `enable_res`; capture admitted as the FORM step's third candidate in context-only (§3) |
 | Delay-acquire guard | `delay_acquire_protect_converged` | **ON** | reject spurious late FIRST acquisition (Path A only) |
 | Delay-change quarantine (OFF) | `delay_backward_quarantine_enabled` | 0 (**OFF**) | hold a backward (pre-echo-direction) delay-change candidate while the filter still cancels; bounded window then accepts (delays, does not cure) |
 | | `delay_backward_quarantine_s` | 1.0 | quarantine window in seconds (converted to estimator cycles at init, floor 1) |
@@ -169,7 +169,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `saturation_threshold` | 0.95 | |
 | | `saturation_softclip_ref` | **ON** | |
 | Mode / output | `mode` | `PBFDKF` | |
-| | `return_res_context` | OFF | switches `process()` return type (§4) |
+| | `return_res_context` | OFF | switches `process()` return type (§4); with `enable_res=False` it selects the context-only seam, whose FORM step admits the capture candidate (§3) |
 | | `clear_filter_history` | OFF | |
 
 The **DT-aware recovery group** (the v3.23.0 addition) is the only default-ON
@@ -347,7 +347,30 @@ mirrors AEC3's `render_signal_analyzer.cc`. Two outputs:
 
 After the refined filter produces the linear residual error spectrum
 `E(k)`, `AEC._aec3_post()` (in `modules/orchestrator.py`) runs the
-AEC3-aligned suppression chain:
+AEC3-aligned suppression chain.
+
+Its first step is the **FORM** stage, `_aec3_select_linear_filter_output`,
+mirrored by `linear_filter_select()` in `c_impl/src/linear_filter_output.c`.
+It picks one of **three** time-domain candidates — coarse (shadow), refined,
+and the capture itself (`_SEL_COARSE` / `_SEL_REFINED` / `_SEL_CAPTURE`;
+`LFS_SEL_*` in C) — carries any change across the 30-sample AEC3
+`SignalTransition` crossfade, and publishes the formed hop and its matching
+WOLA spectrum as a pair, so `E(k)` entering the rest of the chain is the
+FORMED output, not necessarily what the refined filter produced.
+
+The capture candidate is admitted only when all four hold:
+`output_capture_when_linear_unusable` is set (default ON), the
+FilteringQualityAnalyzer has not declared the linear estimate usable (the
+verdict as of the PREVIOUS hop — AecState updates later in `_aec3_post`), the
+selected residual carries more hop energy than the capture, and the instance
+is in **context-only** mode (`enable_res=False` with
+`return_res_context=True`). Under `enable_res` the chain's own E2 output-base
+switch still owns that rule and the emitted audio is unchanged; running both
+would let E2's frequency-domain hard switch overwrite the crossfade FORM just
+started. Because the 30-sample transition stays active, the capture candidate
+is a steady-state fallback, not a strict per-sample bound.
+
+The chain itself:
 
 ### 3.1 StationarityEstimator
 
@@ -525,6 +548,15 @@ Exposes `echo_spec` / per-bin Kalman state so the linear stage can feed
 an external (or NN) post-filter. Enabled via
 `AecConfig.return_res_context = True`; switches `aec.process()` return
 type to `(out, AecResContext)`.
+
+With `enable_res=False` (context-only) this is the **only** mode in which the
+FORM step admits the capture candidate (§3): the context path returns the
+linear residual before the E2 output-base switch, so without it the seam would
+carry an over-output that the emitted audio never does. `formed_output`,
+`error_spec`, `echo_spec` and `near_spec` all follow the selection as a
+matched set. `AecConfig.return_formed_output` requires this flag or
+`enable_res` and raises at construction otherwise — the formed seam is
+produced by the post chain and cannot be requested without it.
 
 ### `trace_p52_regime_handler`
 Per-frame regime-handler trace flag (default OFF). Classifier in

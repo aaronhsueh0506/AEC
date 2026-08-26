@@ -3931,7 +3931,7 @@ class AEC:
         # Apply gain to the linear residual (E2: switch to raw capture Y when the
         # linear filter is unusable, matching AEC3 echo_remover.cc:475
         # Y_fft = UseLinearFilterOutput() ? E : Y). Y = near_spec_win =
-        # error_spec + _sel_echo_spec (windowed capture). Default OFF → always E.
+        # error_spec + _sel_echo_spec (windowed capture). Default ON.
         _out_base = error_spec
         if (getattr(self.config, "output_capture_when_linear_unusable", False)
                 and not _effective_usable_linear):

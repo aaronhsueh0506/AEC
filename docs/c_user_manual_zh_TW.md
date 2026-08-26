@@ -835,6 +835,26 @@ while (app_read_hop(mic, ref, hop)) {
 }
 ```
 
+> **這個模式下 formed 線性 seam 可能改送擷取訊號。**
+>
+> `enable_res = 0` 時，後級最後那個「套用抑制並寫出時域訊號」的階段不會執行，它內建的
+> 過輸出保護也就跟著不執行——那道保護守的是 `aec_process()` 真正輸出的音訊，守不到只給
+> 外部後處理讀的 seam。所以在 context-only 模式下改由 formed 線性輸出的選擇器承擔：當
+> filtering-quality 分析器**尚未**判定線性估計可用、且被選中的殘差在這個 hop 的能量
+> **高於**擷取訊號時，選擇器會把擷取訊號本身當成 refined／coarse 之外的**第三個候選**
+> 送出。殘差比被減數還大，代表線性估計不是在消除回音，而是在加訊號。
+>
+> 對讀 `AecResContext` 的人的影響：這些 hop 上 `error_spec` / `formed_hop` 是擷取訊號而
+> 不是線性殘差，`echo_spec` 隨之趨近 0（`near_spec = error_spec + echo_spec` 的恆等式仍
+> 然成立；連續落在擷取訊號時才會趨近 0，單一 hop 因為前半個 block 仍是前一 hop 的
+> formed 輸出而不會恰為 0）。切換由既有的 30-sample 交叉淡入承接，所以這是**穩態的
+> 退回**，不是逐樣本的硬上界——過渡中那 30 個樣本是兩者的混合。
+>
+> 這條規則由 `output_capture_when_linear_unusable` 控制（預設開啟），且**只**在
+> context-only 生效。`enable_res = 1` 的產品路徑不受影響：那裡仍由後級輸出階段自己的
+> 保護負責，輸出逐位元不變；兩個保護同時作用會讓後者的頻域硬切覆蓋掉前者剛啟動的
+> 交叉淡入。四麥克風 pipeline 的四條 lane 全部落在這個模式。
+
 > **四個處理進入點可以自由混用。**
 >
 > `aec_process()`、`aec_process_capture()`、`aec_process_context()`、
@@ -874,7 +894,7 @@ for (int ch = 1; ch < n_lanes; ++ch)
 | 欄位 | 說明 |
 |---|---|
 | `n_freqs` / `hop_size` | 陣列長度。所有頻域陣列長度都是 `n_freqs`。 |
-| `error_spec` | 線性輸出的頻譜 E(f)，**audio 尺度**（與 [-1,1] 時域一致）。 |
+| `error_spec` | formed 線性輸出的頻譜 E(f)，**audio 尺度**（與 [-1,1] 時域一致）。**在 context-only 模式（`enable_res = 0` 且 `return_res_context = 1`）下不保證是線性殘差**：線性估計尚未被判定可用、且選中的殘差能量高於擷取訊號時，送出的是擷取訊號本身（見 §8.1）。 |
 | `echo_spec` / `near_spec` | 對應的回音估計與擷取訊號頻譜，滿足 `near_spec = error_spec + echo_spec`。 |
 | `res_gain` | 抑制增益，振幅 [0, 1]。**`spatial_linear_context = 1` 時為 `NULL`** —— 代表「沒有計算」，若誤讀成全 0 會變成「全部靜音」。**使用前務必檢查非 NULL。** |
 | `r2` | 殘留回音功率譜。**int16² 尺度**：要換成 audio 功率尺度須除以 32768²。 |

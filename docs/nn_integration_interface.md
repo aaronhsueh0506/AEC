@@ -19,7 +19,7 @@ Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, re
 
 | field | shape / type | meaning (model input) |
 |---|---|---|
-| `error_spec` | (n_freqs,) complex64 | **E(f)** — reconstructing 50%-overlap sqrt-Hann STFT of the selected/crossfaded linear output. |
+| `error_spec` | (n_freqs,) complex64 | **E(f)** — reconstructing 50%-overlap sqrt-Hann STFT of the selected/crossfaded formed output. On the context-only seam the selection can be the capture itself — see *The capture candidate* below. |
 | `echo_spec` | (n_freqs,) complex64 | Matching windowed **Ŷ(f)** residual-echo reference. |
 | `near_spec` | (n_freqs,) complex64 | Matching windowed capture spectrum; exactly `error_spec + echo_spec`. |
 | `far_spec` | (n_freqs,) complex64 | PBFDKF far-end spectrum used by the adaptive filter; not a downstream WOLA synthesis frame. |
@@ -30,10 +30,43 @@ Enable with `AecConfig.return_res_context = True`; then `aec.process(mic_hop, re
 | `divergence` | float [0,1] | filter divergence indicator. |
 | `over_sub` | float | dynamic over-subtraction factor. |
 | `erl_estimate` | float | dynamic echo-return-loss (render-based residual). |
-| `raw_output` | (hop_size,) float | Refined PBFDKF output before refined/coarse selection. |
-| `formed_output` | (hop_size,) float | Current selected/crossfaded hop underlying `error_spec`; use this when a downstream block performs its own STFT. |
+| `raw_output` | (hop_size,) float | Refined PBFDKF output before output selection. This is also what the context-only entry point returns as its audio, and it carries **no** over-output guard — see *The capture candidate* below. |
+| `formed_output` | (hop_size,) float | Current selected/crossfaded hop underlying `error_spec`; use this when a downstream block performs its own STFT. This, not `raw_output`, is the guarded seam — see *The capture candidate* below. |
 
 These are produced every hop by the production linear AEC with zero extra cost (already computed internally).
+
+### The capture candidate (context-only seam)
+
+The formed seam has a THIRD output candidate beside the refined and coarse
+linear residuals: the capture itself. When the filtering-quality analyzer has
+not declared the linear estimate usable AND the selected residual carries more
+hop energy than the capture it was subtracted from, `error_spec` /
+`formed_output` / `formed_linear_hop` become the capture — a residual louder
+than what it was subtracted from means the filter is adding signal, not
+cancelling it. The existing 30-sample selection transition carries the
+boundary, so this is a steady-state fallback, not a per-sample bound.
+`near_spec == error_spec + echo_spec` still holds: `echo_spec` is back-solved
+from the published spectrum, so on a capture hop it stops describing the
+filter's echo estimate and simply closes that identity.
+
+The scope is narrow and worth reading twice:
+
+- It runs **only** on the context-only seam — `enable_res=0` with
+  `return_res_context=1` — and only while `output_capture_when_linear_unusable`
+  is set (default ON). With the internal RES enabled the seam is the plain
+  refined/coarse selection: that configuration's guard sits one stage later,
+  rewrites only the emitted audio, and never touches the exported `error_spec`.
+- It never touches `raw_output`. The context-only entry point returns the raw
+  linear residual as its audio, so a consumer that trains on the returned
+  waveform instead of `formed_output` / `error_spec` gets no guard at all.
+- Python `AecConfig` rejects `return_formed_output` unless `enable_res` or
+  `return_res_context` is set. The formed seam is produced by the post chain
+  and cannot be requested without it; asking anyway raises at construction.
+
+The case this exists for: a loud far end whose echo never reaches the
+microphone. The filter has nothing to cancel, the quality analyzer never
+declares the estimate usable, and an unguarded seam hands the model a residual
+with far-end energy injected into it that the shipped audio never carried.
 
 ## The time-domain seam: `AecLinearContext` (aligned far + delay status)
 For post-filters that take the **time-domain aligned far-end** as a second input
@@ -42,7 +75,7 @@ on both streams), `aec_get_linear_context()` exposes:
 
 | field | type | meaning |
 |---|---|---|
-| `formed_linear_hop` | (hop,) float | formed linear error (same hop `formed_output` reflects). |
+| `formed_linear_hop` | (hop,) float | formed linear output (the same hop `formed_output` reflects, capture substitution included — see *The capture candidate*). |
 | `aligned_far_hop` | (hop,) float | **the exact time-domain far the PBFDKF consumed this hop** (aliases the internal buffer; valid until the next process/reset). NOT `far_spec`: that is a rectangular overlap-save FFT, unusable as a sqrt-Hann analysis frame. |
 | `delay_samples` | int | applied ring offset. Meaning depends on `delay_mode` — see below. |
 | `delay_confidence` | float | 0 / 0.5 / 1 under `MATCHED`; always 1.0 under `FIXED`/`EXTERNAL_ALIGNED` (an out-of-band or contractual alignment carries no estimator uncertainty to report). |
@@ -83,7 +116,7 @@ alignment there is a caller contract, not a search, so it is not detectable
 at this seam either way.
 Fail-open policy (bypass the far-conditioned model, emit the linear error)
 belongs to the integrator. Regression coverage: `test/test_linear_context.c`
-(194 checks).
+(201 checks, including the capture-fallback and far-active/no-echo scenarios).
 
 A second `MATCHED`-only failure mode is visible at this seam only through
 `generation`: the estimator can acquire correctly and then re-lock to an

@@ -260,21 +260,28 @@ gain so a downstream stage runs entirely in the frequency domain:
 | `res_gain`, `comfort_noise` | the AEC3 SuppressionGain + CNG this frame |
 | `erle_factor`, `dt_indicator`, `divergence`, `over_sub`, `erl_estimate` | per-frame telemetry |
 
-**Lightweight variant — just the formed linear hop, no RES/CNG context.** A caller that only
-wants `formed_output` (e.g. a dataset-gen tool building a "clean linear AEC error" channel,
-with no interest in `error_spec`/`res_gain`/telemetry) doesn't need to opt into the full
-`AecResContext` — `enable_res=False` with `return_res_context=True` still runs the entire
-`_aec3_post` chain (`ResidualEchoEstimator` + `SuppressionGain` + CNG) purely to populate a
-context most of whose fields go unread. Set `AecConfig.return_formed_output = True` instead:
-`aec.process()`'s return shape/type is **unchanged** (still just `linear_out`, or `(linear_out,
-AecResContext)` if `return_res_context` is *also* set), and after each `process()` call
-`aec.get_formed_output()` returns the same value `AecResContext.formed_output` would have —
-computed by running only the AEC3 `UseRefinedOutput`/`FormLinearFilterOutput` selection-and-
-crossfade step, not the heavier gain/CNG chain around it. Independent of `enable_res`: it
-does not skip RES/CNG when `enable_res=True` — only an additional value becomes readable.
-Note this is the *selected and crossfaded* linear output, not the raw main-filter output,
-which is why a consumer needing the linear residual must read it. Byte-identical to
-`context.formed_output` in every configuration; see `python/tests/test_formed_output_seam.py`.
+**Reading the formed linear hop without building the full `AecResContext`.** A caller that only
+wants `formed_output` (e.g. a dataset-gen tool building a "clean linear AEC error" channel, with
+no interest in `error_spec`/`res_gain`/telemetry) doesn't need to read the whole context object.
+Set `AecConfig.return_formed_output = True` **together with** `enable_res=True` or
+`return_res_context=True`: `aec.process()`'s return shape/type is **unchanged** (still just
+`linear_out`, or `(linear_out, AecResContext)` if `return_res_context` is *also* set), and after
+each `process()` call `aec.get_formed_output()` returns the same value
+`AecResContext.formed_output` would have.
+
+This reads back a value the post chain already computed for its own gate — it is **not** a
+lighter path that skips that chain. `AecConfig` raises `ValueError` at construction if
+`return_formed_output` is set while both `enable_res` and `return_res_context` are false. The
+standalone FORM-only selector that configuration once ran had no `AecState` behind it, so the
+capture fallback's usable-linear verdict stayed at its constructed `False` for the whole stream
+and the seam silently diverged from the one the board ships; it was deleted rather than kept as a
+second contract.
+
+Note this is the *selected and crossfaded* linear output, not the raw main-filter output — and in
+context-only mode (`enable_res=False`, `return_res_context=True`) the selection can be the capture
+itself on a hop the filtering-quality analyzer has not cleared, see §3 of
+[docs/aec_methods.md](docs/aec_methods.md). Byte-identical to `context.formed_output` in every
+supported configuration; see `python/tests/test_formed_output_seam.py`.
 
 This seam is **already exercised** in the
 [Audio_ALG](https://github.com/aaronhsueh0506/Audio_ALG) integration repo, whose
