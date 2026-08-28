@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AEC 參數效果對照</title>
+<style>
+body{font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;margin:0 auto;padding:0 1rem 3rem;line-height:1.55;color:#1a1a1a;max-width:70rem}
+nav{padding:.6rem 0;border-bottom:2px solid #2a6;margin-bottom:1rem;font-size:.95rem}
+nav a{margin-right:1rem;color:#164;text-decoration:none;font-weight:600}
+nav a:hover{text-decoration:underline}
+nav .sep{color:#999;margin-right:1rem}
+h1{font-size:1.5rem;border-bottom:1px solid #ccc;padding-bottom:.3rem}
+h2{font-size:1.15rem;margin-top:1.6rem;border-left:4px solid #2a6;padding-left:.5rem}
+h3{font-size:1rem;margin-top:1.1rem;color:#164}
+table{border-collapse:collapse;margin:.6rem 0;font-size:.86rem}
+th,td{border:1px solid #bbb;padding:.25rem .5rem;text-align:left;vertical-align:top}
+th{background:#eef5f0}
+pre{background:#f4f6f5;border:1px solid #dde;padding:.6rem;overflow-x:auto;font-size:.8rem;line-height:1.35}
+code{font-family:ui-monospace,Menlo,monospace;font-size:.86em;background:#f2f2f2;padding:0 .15em}
+pre code{background:none;padding:0}
+.note{background:#fff8e6;border:1px solid #e0c878;padding:.4rem .6rem;font-size:.88rem;margin:.5rem 0}
+.warn{background:#fdeeee;border:1px solid #e0a0a0;padding:.4rem .6rem;font-size:.88rem;margin:.5rem 0}
+.small{font-size:.82rem;color:#555}
+.tblwrap{overflow-x:auto}
+.dead{color:#a00;font-weight:600}
+</style>
+</head>
+<body>
+<nav>
+<a href="../../../Audio_ALG/docs/html/index.html">index</a>
+<a href="aec.html">aec</a>
+<a href="../../../NR/docs/html/nr.html">nr</a>
+<a href="../../../audio_common/docs/html/audio_common.html">audio_common</a>
+<span class="sep">|</span>
+<a href="aec_c_api.html">AEC API</a>
+<a href="aec_c_api_params.html"><b>AEC 參數</b></a>
+<a href="../../../NR/docs/html/nr_c_api.html">NR API</a>
+<a href="../../../audio_common/docs/html/audio_common_c_api.html">audio_common API</a>
+<a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a>
+</nav>
+
+<p class="small">本頁是 <a href="aec_c_api.html">aec_c_api.html</a> 的第 8 節,因單頁篇幅上限拆出。呼叫順序、delay mode、每-hop 入口與診斷仍在該頁。</p>
+
+<h1>AEC 參數效果對照 — <code>AecConfig</code></h1>
+<h3>8.1 抑制強度 — 三個 preset 只差一個欄位</h3>
+<div class="tblwrap"><table>
+<tr><th>Preset</th><th><code>min_gain_floor_far_active_db</code></th><th>效果</th></tr>
+<tr><td><code>AEC_PRESET_MILD</code></td><td>−20.0</td><td>遠端單講時 echo 壓得最淺,近端被誤削的風險最低</td></tr>
+<tr><td><code>AEC_PRESET_BALANCED</code></td><td><b>−28.0</b>(預設)</td><td>—</td></tr>
+<tr><td><code>AEC_PRESET_AGGRESSIVE</code></td><td>−38.0</td><td>echo 壓最深,近端被誤削風險最高</td></tr>
+</table></div>
+<p>合法範圍 <code>[-300, 50]</code>。可用 <code>aec_preset_floor_db()</code> 純查表(不需要 instance),或用 <code>aec_set_preset()</code> 執行期改(§9)。</p>
+<div class="warn"><b>量測前務必知道</b>:這個地板<b>只在 far-active 且非 double-talk 的 hop 咬得到</b>。DT 期間走的是 <code>min_gain_floor_dt_db</code>(−16 dB,<b>三個 preset 完全相同</b>);far-active latch 觸發前用的是 far-silent 地板。而且同一個 gain 也決定 comfort noise 的量 → <b>只量 echo／degradation 的 A/B 會把 CNG 的變化錯記到別的機制</b>。請在 echo 對齊或 degradation 對齊的條件下比較,並實際試聽。</div>
+
+<h3 id="hpf">8.2 前端 HPF</h3>
+<div class="tblwrap"><table>
+<tr><th>欄位</th><th>預設</th><th>範圍</th><th>效果</th></tr>
+<tr><td><code>enable_highpass</code></td><td><b>1</b></td><td>0 或 1</td><td><b>只作用於 mic 路徑</b>。關掉時 <code>highpass_cutoff_hz</code> 完全惰性,連 pool 都不佔</td></tr>
+<tr><td><code>highpass_cutoff_hz</code></td><td><b>80.0</b></td><td>啟用時:finite、<code>&gt;0</code>、<b><code>&lt; 0.45 × sample_rate</code></b>(16k → 上限 7200 Hz)</td><td>切掉 mic 的 DC／rumble。調高(如 150 Hz)→ 風噪、桌面震動更乾淨,但男聲基頻可能被削</td></tr>
+</table></div>
+<div class="note"><b>far(ref)路徑沒有 HPF,連實例都不存在</b>——整個 lib 只有一個 <code>hp_mic</code>。這是刻意的設定,不要試圖用 config 打開 far HPF。若 ref 需要 HPF,請在餵進 AEC <b>之前</b>用 audio_common 的 <code>hpf.h</code> 自己做,但先確認你真的需要。</div>
+
+<h3>8.3 輸入電平 / gain</h3>
+<p><b>AEC 的 <code>AecConfig</code> 沒有任何 gain 欄位</b>。輸入電平調整屬於 AEC <b>之前</b>的前級,由 audio_common 或 pipeline 層負責:</p>
+<div class="tblwrap"><table>
+<tr><th>模組</th><th>位置</th><th>特性</th></tr>
+<tr><td><code>AudioPreGain</code></td><td><code>audio_common/include/audio_pre_gain.h</code></td><td>mono、<b>振幅</b> dB(<code>10^(db/20)</code>)、<b>不做 clipping</b>、有 runtime <code>audio_pre_gain_set_db()</code></td></tr>
+<tr><td><code>FixGain</code></td><td><code>Audio_ALG/pipelines/third_party/gain/fix_gain.h</code></td><td>多聲道、per-channel gain + 選配 clip、<b>沒有 retune 路徑</b>(改值要重建 instance)</td></tr>
+</table></div>
+<div class="warn">電平會直接改變 AEC 行為:<code>saturation_threshold</code>(預設 0.95)判定 clipping、<code>saturation_softclip_ref</code>(預設 1)會對參考訊號做 soft-clip 以貼近實際被 clip 的喇叭輸出。<b>把 pre-gain 調到讓 ref 常態接近滿刻度,會讓線性模型失準、ERLE 下降。</b>詳見 <a href="../../../audio_common/docs/html/audio_common_c_api.html">audio_common API</a>。</div>
+
+<h3>8.4 其餘欄位分組速查</h3>
+<div class="tblwrap"><table>
+<tr><th>欄位</th><th>預設</th><th>範圍</th><th>調了會怎樣</th></tr>
+<tr><td colspan="4" style="background:#eef5f0"><b>線性濾波器</b></td></tr>
+<tr><td><code>filter_length</code></td><td>16k → <b>832</b>(52 ms)</td><td><code>1..4096</code></td><td>echo tail 覆蓋長度。太短 → 長混響殘留;太長 → MAC 與 RAM 線性上升</td></tr>
+<tr><td><code>n_partitions</code></td><td><code>0</code>(= 由 filter_length 推導)</td><td><code>0</code> 或 <code>1..256</code></td><td>直接覆寫 partition 數,實際 tap span = <code>n_partitions × hop</code></td></tr>
+<tr><td><code>mu</code></td><td>0.3</td><td><code>[0,10]</code></td><td>主 PBFDKF step size。大 → 收斂快但 DT 下易發散</td></tr>
+<tr><td><code>kalman_q_high</code> / <code>_low</code></td><td>1e-3 / 1e-6</td><td><code>[0,1]</code></td><td>未收斂 / 收斂後的 process noise。high 大 → 追蹤快;low 小 → 穩態 misadjustment 低</td></tr>
+<tr><td><code>enable_shadow</code></td><td>1</td><td>0/1</td><td>關掉會<b>同時失去</b> shadow-based double-talk 偵測與 echo-path-change 偵測,且 pool 變小</td></tr>
+<tr><td><code>warmup_frames</code></td><td>100 hops(1000 ms)</td><td><code>[0,1e6]</code></td><td>暖機期間 mu 不受 converged 壓制。以 hop 計,會 retime</td></tr>
+<tr><td colspan="4" style="background:#eef5f0"><b>Double-talk 保護</b></td></tr>
+<tr><td><code>dt_aware_res_floor_enabled</code></td><td>1</td><td>0/1</td><td>啟用 DT 專用地板</td></tr>
+<tr><td><code>min_gain_floor_dt_db</code></td><td><b>−16.0</b></td><td><code>[-300,50]</code></td><td>DT 期間改用的較淺地板,比 far-active 地板高 12 dB → 保護近端語音。<b>三個 preset 相同</b></td></tr>
+<tr><td><code>ne_recent_threshold</code></td><td>0.3</td><td><code>[0,1000]</code></td><td>超過才算「近端剛出現」。只讀 energy DT,遠端單講時 ≈0 → <b>不影響 far-single-talk 的 echo 深度</b></td></tr>
+<tr><td><code>ne_recent_hold</code></td><td>150 hops(1500 ms)</td><td><code>[0,1e6]</code></td><td>觸發後 hold 多久。會 retime</td></tr>
+<tr><td><code>ne_recent_sustain</code></td><td>3</td><td><code>[0,1e6]</code></td><td>需連續幾 hop 超門檻才 arm。<b>事件計數,刻意不 retime</b></td></tr>
+<tr><td><code>dt_aware_recovery_soft</code></td><td>1</td><td>0/1</td><td>近端剛出現時走軟性 realign,避免 DT 中把濾波器打掉</td></tr>
+<tr><td colspan="4" style="background:#eef5f0"><b>飽和 / CNG</b></td></tr>
+<tr><td><code>enable_saturation</code></td><td>1</td><td>0/1</td><td>建構 ref/mic 飽和偵測器</td></tr>
+<tr><td><code>saturation_threshold</code></td><td>0.95</td><td><code>[0,10]</code></td><td>判定 clipping 的振幅門檻。偵測到會讓 AEC3 進保守模式</td></tr>
+<tr><td><code>saturation_softclip_ref</code></td><td>1</td><td>0/1</td><td>對 ref 做 soft-clip 以貼近被 clip 的喇叭輸出 → 改善大音量下的 ERLE</td></tr>
+<tr><td><code>enable_cng</code></td><td>1</td><td>0/1</td><td>深度抑制段落注入舒適噪音。關掉 → 聽起來「抽真空」。<b>只有 <code>enable_res==1</code> 時才有效</b></td></tr>
+<tr><td colspan="4" style="background:#eef5f0"><b>Delay 取得行為(僅 MATCHED)</b></td></tr>
+<tr><td><code>max_delay_ms</code> / <code>delay_buffer_ms</code></td><td>1024 / 2048</td><td><code>[0,60000]</code>／<code>[0,120000]</code></td><td>共同決定 search ring 大小,而 ring 大小<b>同時是 estimate 的准入閘</b> → <b>改小會改變預設路徑的音訊</b></td></tr>
+<tr><td><code>delay_est_init_s</code></td><td>0.3</td><td><code>[0,3600]</code></td><td>進入 duty-cycle 省電抽樣前需連續穩定的秒數。調大 → 更晚省電</td></tr>
+<tr><td><code>delay_est_period_s</code></td><td>0.5</td><td><code>[0,3600]</code></td><td>duty 期間多久跑一次 matched filter。調大 → 更省 MIPS,但 delay 變動偵測更慢</td></tr>
+<tr><td><code>delay_acquire_protect_converged</code></td><td>1</td><td>0/1</td><td>已在消除時不做首次 realign。關掉 → 首鎖更積極,但可能打掉已收斂的濾波器</td></tr>
+<tr><td><code>delay_acquire_warm_transfer</code></td><td>1</td><td>0/1</td><td>符合閘門時<b>平移已學到的 IR</b> 而非清零,避免 spectrogram 上的垂直線</td></tr>
+<tr><td><code>delay_acquire_protect_inst_erle</code></td><td class="dead">0(OFF)</td><td>0/1</td><td class="dead">A/B 已否決的選項,維持關閉</td></tr>
+<tr><td><code>delay_backward_quarantine_enabled</code></td><td class="dead">0(OFF)</td><td>0/1</td><td class="dead">預設關,出貨路徑與沒有這個機制的 build 逐位元相同</td></tr>
+</table></div>
+
+<h3>8.5 死旋鈕(會通過驗證,但訊號路徑上永不讀取)</h3>
+<div class="tblwrap"><table>
+<tr><th>欄位</th><th>狀態</th></tr>
+<tr><td class="dead"><code>epc_mu_floor</code></td><td class="dead"><b>完全 dead</b>。全 repo 只有三處命中:宣告、賦預設值 0.5、range 驗證。<code>epc_init()</code> 的簽章根本<b>沒有</b> mu_floor 參數,<code>EpcDetector</code> 的 config slice 也沒有這個欄位。<b>視為 reserved／no-op,調它不會有任何效果。</b></td></tr>
+<tr><td><code>enable_delay_est</code></td><td>deprecated 鏡像,只在 translation layer 被讀,下游一律讀 <code>delay_mode</code></td></tr>
+</table></div>
+
+</body>
+</html>

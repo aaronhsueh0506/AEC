@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AEC C API 使用說明</title>
+<style>
+body{font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;margin:0 auto;padding:0 1rem 3rem;line-height:1.55;color:#1a1a1a;max-width:70rem}
+nav{padding:.6rem 0;border-bottom:2px solid #2a6;margin-bottom:1rem;font-size:.95rem}
+nav a{margin-right:1rem;color:#164;text-decoration:none;font-weight:600}
+nav a:hover{text-decoration:underline}
+nav .sep{color:#999;margin-right:1rem}
+h1{font-size:1.5rem;border-bottom:1px solid #ccc;padding-bottom:.3rem}
+h2{font-size:1.15rem;margin-top:1.6rem;border-left:4px solid #2a6;padding-left:.5rem}
+h3{font-size:1rem;margin-top:1.1rem;color:#164}
+table{border-collapse:collapse;margin:.6rem 0;font-size:.86rem}
+th,td{border:1px solid #bbb;padding:.25rem .5rem;text-align:left;vertical-align:top}
+th{background:#eef5f0}
+pre{background:#f4f6f5;border:1px solid #dde;padding:.6rem;overflow-x:auto;font-size:.8rem;line-height:1.35}
+code{font-family:ui-monospace,Menlo,monospace;font-size:.86em;background:#f2f2f2;padding:0 .15em}
+pre code{background:none;padding:0}
+.note{background:#fff8e6;border:1px solid #e0c878;padding:.4rem .6rem;font-size:.88rem;margin:.5rem 0}
+.warn{background:#fdeeee;border:1px solid #e0a0a0;padding:.4rem .6rem;font-size:.88rem;margin:.5rem 0}
+.small{font-size:.82rem;color:#555}
+.tblwrap{overflow-x:auto}
+.dead{color:#a00;font-weight:600}
+</style>
+</head>
+<body>
+<nav>
+<a href="../../../Audio_ALG/docs/html/index.html">index</a>
+<a href="aec.html">aec</a>
+<a href="../../../NR/docs/html/nr.html">nr</a>
+<a href="../../../audio_common/docs/html/audio_common.html">audio_common</a>
+<span class="sep">|</span>
+<a href="aec_c_api.html"><b>AEC API</b></a>
+<a href="aec_c_api_params.html">AEC 參數</a>
+<a href="../../../NR/docs/html/nr_c_api.html">NR API</a>
+<a href="../../../audio_common/docs/html/audio_common_c_api.html">audio_common API</a>
+<a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a>
+</nav>
+
+<h1>AEC C API 使用說明 — <code>lib/aec/c_impl</code></h1>
+<p class="small">本頁是<b>整合者視角</b>的 API 說明:init/process 要呼叫什麼、input/output 怎麼給、每個參數調了會有什麼結果、跟 NN 後級搭配時要怎麼用。演算法內部機制見 <a href="aec.html">aec.html</a>;完整欄位與錯誤語意的 canonical 出處是 <code>AEC/docs/c_user_manual_zh_TW.md</code>。<b>函式內部自行呼叫的子模組不在本頁範圍。</b></p>
+
+<h2>1. 你只需要一個 header</h2>
+<pre>#include "aec.h"    /* 唯一使用者面 header */</pre>
+<p>Include path <b>必須同時</b>有兩個目錄——<code>aec.h</code> 會 include audio_common 的 <code>fft_wrapper.h</code> 與 <code>hpf.h</code>:</p>
+<pre>-I&lt;AEC&gt;/c_impl/include  -I&lt;audio_common&gt;/include</pre>
+<div class="note"><code>include/</code> 底下另有 29 個 header,<b>全部是內部的</b>。<code>aec.h</code> 之所以 include 其中 7 個(外加 audio_common 的 <code>fft_wrapper.h</code> 與 <code>hpf.h</code>),是因為 <code>Aec</code> 與 <code>AecConfig</code> <b>不是 opaque struct</b>(子模組 by value 內嵌),編譯器需要完整定義——那是<b>編譯依賴,不是 API surface</b>。<code>pbfdkf.h</code>／<code>delay_aec3.h</code>／<code>aec3_post.h</code>／<code>suppression_gain.h</code> 這些不要直接呼叫。<br>唯一例外:自行在 AEC <b>之外</b>做 post-beam RES 時(4ch 就是這樣),才會用到 <code>suppression_gain.h</code> 的 primitive。</div>
+
+<h2>2. 這個 lib 可以設定的 grid</h2>
+<p>訊號格點由 <code>(sample_rate, fft_size)</code> <b>成對</b>決定,必須命中下表其中一列(<code>aec.c:227-233</code>);<code>hop = fft_size/2</code>、<code>n_freqs = fft_size/2+1</code>。</p>
+<div class="tblwrap"><table>
+<tr><th>sample_rate</th><th>fft_size = frame</th><th>hop</th><th>hop 時長</th><th>n_freqs</th><th>狀態</th></tr>
+<tr><td><b>16000</b></td><td><b>256</b></td><td><b>128</b></td><td>8 ms</td><td>129</td><td><b>產品預設(低延遲、低運算)</b></td></tr>
+<tr><td><b>16000</b></td><td><b>512</b></td><td><b>256</b></td><td>16 ms</td><td>257</td><td><b>產品替代</b></td></tr>
+<tr><td><b>48000</b></td><td><b>1024</b></td><td><b>512</b></td><td>10.667 ms</td><td>513</td><td><b>產品</b></td></tr>
+<tr><td>8000</td><td>256</td><td>128</td><td>16 ms</td><td>129</td><td class="dead">LEGACY,非產品 grid</td></tr>
+</table></div>
+<p><b>兩個產品 sample rate(16k／48k),而 16 kHz 是唯一有兩種 hop 可選的。</b></p>
+<div class="warn"><code>fft_size = 0</code>(auto)<b>一律被拒</b>(<code>aec.c:238</code>)。16 kHz 有兩個合法 grid,library <b>不猜</b>——建立實例前必須 resolve 成明確值。只有 <code>aec_config_defaults()</code>／<code>aec_config_from_preset()</code> 會替你填該 rate 的<b>第一列</b>作為預設。</div>
+<h3>16k 選 hop 128 還是 256</h3>
+<div class="tblwrap"><table>
+<tr><th></th><th>fft 256 / hop 128</th><th>fft 512 / hop 256</th></tr>
+<tr><td>延遲</td><td>8 ms/hop,<b>較低</b></td><td>16 ms/hop</td></tr>
+<tr><td>頻率解析度</td><td>129 bins</td><td>257 bins,<b>較高</b>——長混響與 tonal echo 分得更開</td></tr>
+<tr><td>每秒運算次數</td><td>加倍 → CPU 較高</td><td>減半 → CPU 較低</td></tr>
+<tr><td>記憶體(balanced/MATCHED n=5)</td><td>KISS 385,440 B／NE10 384,832 B</td><td>KISS 513,968 B／NE10 512,592 B</td></tr>
+<tr><td>partition 數</td><td><code>filter_length 832 / 128</code> → 7</td><td><code>832 / 256</code> → 4</td></tr>
+</table></div>
+<p class="small">所有以「10 ms 為單位」撰寫的時間常數,都會在 <code>aec_carve()</code> 依實際 hop 自動 retime(<code>aec.c:1448-1455</code>),換 grid 不需要手動換算 tuning。</p>
+<div class="warn"><b>NR 的 grid 表與這裡不完全相同</b>:NR 另外支援 8k/128,而它的 8 kHz 預設是 128 不是 256。串成一條鏈時<b>不要各自呼叫各自的 default</b>,要由上層 resolve 出同一組 <code>(sample_rate, fft_size, hop)</code> 明確傳給兩邊。</div>
+
+<h2>3. 建立與生命週期</h2>
+<h3>Static pool(板端路徑)</h3>
+<pre>AecConfig cfg;
+aec_config_from_preset(&amp;cfg, AEC_PRESET_BALANCED, 16000);
+cfg.fft_size = 256;                       /* 明確指定,不要留 0 */
+cfg.delay_mode = AEC_DELAY_MATCHED;       /* 三態之一,見 §4 */
+
+size_t bytes = aec_get_mem_size(&amp;cfg);    /* 0 = cfg 無效 */
+void  *pool  = board_alloc_aligned(16, bytes);   /* 基底必須 16-byte 對齊 */
+Aec   *aec   = pool ? aec_init(pool, bytes, &amp;cfg) : NULL;
+if (!aec) { /* cfg 無效 / 未對齊 / pool 太小 */ }
+
+int hop = aec_hop_size(aec);              /* 128 */
+while (streaming) aec_process(aec, mic, ref, out);
+
+aec_destroy(aec);      /* static instance 不會釋放 caller pool */
+board_free(pool);</pre>
+
+<h3>Heap(桌面/測試)</h3>
+<pre>Aec aec;                                  /* caller 擁有這個 struct */
+if (aec_create(&amp;aec, &amp;cfg) != 0) { /* cfg 無效或 malloc 失敗 */ }
+aec_destroy(&amp;aec);                        /* 會 free 內部 arena */</pre>
+
+<div class="tblwrap"><table>
+<tr><th>規則</th><th>細節</th></tr>
+<tr><td>對齊</td><td><b>16 bytes</b>。<code>aec_init()</code> 在寫入任何 byte <b>之前</b>就檢查,未對齊回 NULL 且不動 pool</td></tr>
+<tr><td>查 size 與 init 必須用<b>同一份</b> cfg</td><td>兩者各自獨立計算,<b>傳不同 cfg 不會被偵測</b>(只有 <code>mem_size &lt; need</code> 這一層防護)。這是契約要求,程式不強制</td></tr>
+<tr><td>不要把 byte 數寫死</td><td>數值隨 backend／config／struct 大小整批移動。永遠用當前 cfg 呼叫 <code>aec_get_mem_size()</code></td></tr>
+<tr><td>init-time immutable</td><td><code>sample_rate</code>／<code>fft_size</code>／<code>delay_mode</code>／<code>delay_num_filters</code>／<code>filter_length</code>／<code>n_partitions</code>。改了必須重查 size 並重新 init</td></tr>
+<tr><td>拆解查詢</td><td><code>aec_get_mem_breakdown(&amp;cfg,&amp;bd)</code> → <code>total_bytes</code>／<code>estimator_bytes</code>／<code>ring_bytes</code>。<b>內部會重跑一次 validate,不要放 hot path</b></td></tr>
+</table></div>
+
+<h2>4. Delay mode — 三選一,init-time 決定</h2>
+<p>這是<b>整合時最先要決定</b>的事,因為它同時改變 pool layout 與 API 可用性。</p>
+<div class="tblwrap"><table>
+<tr><th></th><th><code>AEC_DELAY_MATCHED</code>(預設)</th><th><code>AEC_DELAY_FIXED</code></th><th><code>AEC_DELAY_EXTERNAL_ALIGNED</code></th></tr>
+<tr><td>什麼時候用</td><td>一般產品:延遲未知或會變</td><td>route delay 已由 bring-up 量得且固定</td><td>HAL／上游保證 ref 已對齊</td></tr>
+<tr><td>要設的欄位</td><td><code>delay_num_filters = 1..5</code></td><td><code>fixed_delay_samples &gt;= 0</code></td><td>(兩者都維持預設)</td></tr>
+<tr><td><code>fixed_delay_samples</code> 必須是</td><td><code>-1</code></td><td><code>0 .. 120*sr</code></td><td><code>-1</code></td></tr>
+<tr><td>matched-filter estimator</td><td>有</td><td>無</td><td>無</td></tr>
+<tr><td>reference ring</td><td>有(大)</td><td>有(<code>fixed_delay + hop</code>,精確界)</td><td><b>完全沒有</b></td></tr>
+<tr><td><code>estimator_bytes</code></td><td>&gt; 0</td><td>0</td><td>0</td></tr>
+<tr><td><code>delay_confidence</code></td><td>0.0／0.5／1.0(估計器自報)</td><td>恆 1.0</td><td>恆 1.0</td></tr>
+<tr><td><code>aec_apply_external_realign()</code></td><td>回 <code>-1</code></td><td>回 <code>-1</code></td><td><b>唯一合法</b></td></tr>
+</table></div>
+<p class="small"><code>enable_delay_est</code> 是 <b>deprecated 鏡像欄位</b>,只在「值為 0 且 <code>delay_mode</code> 還停在預設」時才會被翻譯成另外兩態。新整合請<b>只用 <code>delay_mode</code></b>。</p>
+
+<h3><code>delay_num_filters</code> 的取捨(僅 MATCHED)</h3>
+<div class="tblwrap"><table>
+<tr><th>n</th><th>可靠搜尋範圍</th><th>相對 n=5 省下的記憶體</th></tr>
+<tr><td>1</td><td>125 ms</td><td>−22,912 B</td></tr>
+<tr><td>2</td><td>221 ms</td><td>−17,184 B</td></tr>
+<tr><td>3</td><td>317 ms</td><td>−11,456 B</td></tr>
+<tr><td>4</td><td>413 ms</td><td>−5,728 B</td></tr>
+<tr><td><b>5</b>(預設)</td><td><b>509 ms</b></td><td>—</td></tr>
+</table></div>
+<p class="small">每少一顆另外省約 4.2 MMAC/s。非 MATCHED 模式下此欄位<b>必須</b>維持預設 5,否則 validate 失敗。</p>
+
+<h3>四個 grid 的 pool 實測(balanced、MATCHED n=5)</h3>
+<div class="tblwrap"><table>
+<tr><th>sr / fft</th><th><code>BACKEND=kiss</code></th><th><code>BACKEND=ne10</code></th><th>其中 estimator</th><th>其中 ring</th></tr>
+<tr><td>16000 / 256</td><td>385,440</td><td>384,832</td><td>33,936</td><td>131,072</td></tr>
+<tr><td>16000 / 512</td><td>513,968</td><td>512,592</td><td>33,936</td><td>131,072</td></tr>
+<tr><td>48000 / 1024</td><td>1,185,536</td><td>1,182,624</td><td>35,312</td><td>393,216</td></tr>
+<tr><td>8000 / 256(legacy)</td><td>278,256</td><td>277,648</td><td>33,936</td><td>65,536</td></tr>
+</table></div>
+<p class="small">此表為 <code>aec_get_mem_size()</code>／<code>aec_get_mem_breakdown()</code> 的實測輸出(<code>sizeof(Aec)</code> = 5848、<code>sizeof(AecConfig)</code> = 204)。<b>這些絕對值會隨 <code>Aec</code>／<code>AecConfig</code> 結構大小整批移動</b>——結構一動就必須重新查 <code>aec_get_mem_size()</code>,不可沿用先前記下的常數。相對地,每 filter 的 5,728 B delta 不隨結構改變。</p>
+
+<h2>5. 每-hop 處理入口 — 選哪一個</h2>
+<p><b>所有入口的所有 buffer 一律是 <code>hop_size</code> 個 <code>float</code></b>;函式<b>沒有長度參數</b>,傳錯長度不會替你報錯。</p>
+<div class="tblwrap"><table>
+<tr><th>入口</th><th>什麼時候用</th><th>輸出</th></tr>
+<tr><td><code>aec_process(a, mic, ref, out)</code></td><td><b>預設</b>:lockstep,要拿時域輸出</td><td><code>out</code>,依 §7 三種模式</td></tr>
+<tr><td><code>aec_process_context(a, mic, ref)</code></td><td><b>接 NN 後級</b>:只讀 context,永不取時域音訊。比上者恰好省一次 O(hop) memcpy</td><td>—</td></tr>
+<tr><td><code>aec_process_context_shared_far(a, mic, ref, far_spec)</code></td><td>多 lane <b>每 hop 看到完全相同的 far</b>:一條 lane 自算 FFT,其餘借用</td><td>—</td></tr>
+<tr><td><code>aec_analyze_render(a, ref)</code> + <code>aec_process_capture(a, mic, out)</code></td><td>render 與 capture <b>分執行緒</b>(SPSC)</td><td><code>out</code></td></tr>
+</table></div>
+<div class="note"><b>Aliasing 很寬鬆</b>:<code>aec_process_core()</code> 在最開頭就把 <code>mic</code>／<code>ref</code> memcpy 進內部 buffer,之後<b>再也不讀</b>;<code>out</code> 直到最後一行才寫。所以 <code>out</code> 可以 alias <code>mic</code> 或 <code>ref</code>,<code>mic</code> 與 <code>ref</code> 也可以互相 alias。</div>
+<div class="note"><b>四個入口推進完全相同的 state</b>(都經 <code>aec_process_core</code>),差別只在要不要把結果複製出來 → <b>可在同一 instance 上任意交錯,不需要中間 reset</b>。單執行緒下先 <code>aec_analyze_render(ref)</code> 再 <code>aec_process_capture(mic,out)</code>,輸出與 <code>aec_process(mic,ref,out)</code> <b>逐位元相同</b>。</div>
+
+<h3>Streaming 的回傳值 <code>AecBufferingEvent</code></h3>
+<div class="tblwrap"><table>
+<tr><th>值</th><th>意義</th></tr>
+<tr><td><code>AEC_BUF_NONE</code></td><td>正常</td></tr>
+<tr><td><code>AEC_BUF_RENDER_UNDERRUN</code></td><td>capture 跑在前面,FIFO 空 → 該 hop 用<b>靜音 ref</b> 處理</td></tr>
+<tr><td><code>AEC_BUF_RENDER_OVERRUN</code></td><td>render 堆積超過 FIFO:<code>aec_analyze_render</code> 丟新的;<code>aec_process_capture</code> 跳過陳舊 backlog</td></tr>
+<tr><td class="dead"><code>AEC_BUF_API_SKEW</code></td><td class="dead"><b>保留,目前不會被回傳</b>——library 內沒有任何寫入點</td></tr>
+</table></div>
+<p class="small">Threading:<b>SPSC only</b>。恰一條 thread 呼 <code>aec_analyze_render</code>、恰一條呼 <code>aec_process_capture</code>,不需外部鎖。<b>不涵蓋</b>:第二條 producer/consumer、與 render/capture 併發呼叫 <code>aec_reset()</code>/<code>aec_destroy()</code>、把 offline <code>aec_process()</code> 與 streaming pair 混用。</p>
+
+<h2>6. 搭配 NN model:不需要 DSP 後級時怎麼用</h2>
+<p>線性 AEC 常常只當前級,殘留回音抑制交給 NN(Align-ULCNet 等)。此時<b>不要</b>照預設整條跑完再丟掉後半段——那是白算的。正確做法:</p>
+<pre>AecConfig cfg;
+aec_config_from_preset(&amp;cfg, AEC_PRESET_BALANCED, 16000);
+cfg.fft_size           = 256;
+cfg.enable_res         = 0;   /* 不跑 DSP 殘留抑制器,NN 取代它 */
+cfg.return_res_context = 1;   /* 但 post block 仍跑,把頻域 seam 填好 */
+
+/* ... init 同 §3 ... */
+
+AecResContext    ctx;
+AecLinearContext lin;
+
+aec_process_context(aec, mic, ref);     /* 不要 aec_process:沒有時域輸出要拿 */
+aec_get_res_context(aec, &amp;ctx);         /* 頻域 seam */
+aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對齊 far */
+/* → 把 ctx/lin 餵給 NN,在下一次 process 之前用完 */</pre>
+<div class="tblwrap"><table>
+<tr><th>要關的</th><th>為什麼</th></tr>
+<tr><td><code>enable_res = 0</code></td><td>NN 取代 <code>SuppressionGain</code>。輸出保持線性殘差,不套 DSP 抑制</td></tr>
+<tr><td><code>enable_cng</code> 自動失效</td><td>CNG 是在 <code>aec3_post_apply_output()</code> 內注入的,<code>enable_res=0</code> 時該函式根本不會被呼叫 → <b>不必特別關,它已經是 inert</b></td></tr>
+<tr><td><code>return_res_context = 1</code></td><td><b>關鍵</b>。若也設 0,post block <b>整段不跑</b>,<code>error_spec</code>／<code>res_gain</code>／<code>r2</code>／<code>comfort_noise</code>／<code>formed_hop</code> <b>全部是 NULL</b></td></tr>
+<tr><td><code>spatial_linear_context = 1</code></td><td>只有多 lane fused post-stage 才用(4ch)。本 lane 的 <code>G_res</code> 完全不算(<code>res_gain</code> 回 NULL),但 DominantNearend hold-state 仍每 hop 更新。<b>強制</b>要求 <code>enable_res==0 &amp;&amp; return_res_context==1</code></td></tr>
+</table></div>
+<div class="warn"><b>borrowed pointer 的效期只到下一次 process。</b><code>AecResContext</code>／<code>AecLinearContext</code> 的每個指標都 alias 內部 per-hop buffer,<b>四個 process 入口任一個</b>都會覆寫它們。要跨 hop 保存必須自己複製走。</div>
+<div class="note"><b>接 NR 時 <code>r2</code> 要先換尺度</b>:<code>AecResContext.r2</code> 與 <code>comfort_noise</code> 是 <b>int16² scale</b>,要除以 <code>32768²</code> 才是 audio power。<code>res_gain</code> 則是 amplitude <code>[0,1]</code>。<br><b>用 <code>generation</code> 做快取失效</b>:<code>AecLinearContext.generation</code> 每次 ring offset 改變就 +1(飽和不 wrap)。只比較 <code>delay_samples</code> 會漏掉 A→B→A 的暫態。</div>
+<p class="small">完整的 NN seam 規格(三個 swap point、wiring contract)見 <code>AEC/docs/nn_integration_interface.md</code>。</p>
+
+<h2>7. 三種輸出模式</h2>
+<div class="tblwrap"><table>
+<tr><th><code>enable_res</code></th><th><code>return_res_context</code></th><th>post block</th><th><code>out</code> 內容</th><th>context 頻域欄位</th></tr>
+<tr><td>1</td><td>任意</td><td>跑</td><td>RES 抑制後 + CNG</td><td>全部有效</td></tr>
+<tr><td>0</td><td>1</td><td>跑(<code>context_only</code>)</td><td><b>線性殘差</b></td><td>全部有效</td></tr>
+<tr><td>0</td><td>0</td><td><b>不跑</b></td><td>線性殘差</td><td class="dead">大部分是 <b>NULL</b>;只剩診斷用的 <code>echo_spec</code>／<code>near_spec</code></td></tr>
+</table></div>
+<p class="small">AEC <b>不做</b>最終 peak limiter。產品需要 limiter／AGC／DRC 時放在整條 chain 的最後。</p>
+
+<h2>8. 參數設定與效果</h2>
+<p>逐欄位的可調範圍與「調了會怎樣」獨立成頁:<a href="aec_c_api_params.html"><b>AEC 參數效果對照</b></a>。本頁其餘各節不依賴它。</p>
+
+<h2>9. 執行期控制</h2>
+<div class="tblwrap"><table>
+<tr><th>函式</th><th>語意</th><th>回傳</th></tr>
+<tr><td><code>aec_set_preset(a, preset, ramp_ms)</code></td><td><b>只改 <code>min_gain_floor_far_active_db</code> 這一個純量</b>。濾波器／delay state／所有平滑歷史／far-active latch／DominantNearend 計數器<b>全部不動</b>。<code>ramp_ms==0</code> → 下一 hop 生效,落點與「一開始就用該 preset 建構」<b>逐位元相同</b>;<code>&gt;0</code> → 在 dB 上線性走,且<b>精確落到 target</b>(不是漸近逼近)</td><td><code>0</code>／<code>-1</code>。<code>-1</code> 時<b>一個 byte 都沒寫</b></td></tr>
+<tr><td><code>aec_apply_external_realign(a, delta)</code></td><td><b>僅 EXTERNAL_ALIGNED</b>。<code>delta = 新對齊 − 舊對齊</code>。條件符合時<b>平移已學到的 IR</b>,否則做 filter-only reset(保留 synthesis OLA,輸出連續無垂直線)</td><td><code>1</code>=warm transfer／<code>0</code>=filter reset 或 <code>delta==0</code>／<code>-1</code>=NULL 或 mode 不對</td></tr>
+<tr><td><code>aec_reset(a)</code></td><td>回到「全新 instance」狀態。會重啟 WOLA → spectrogram 上會有垂直線。若只是外部對齊改變,<b>請用上一個函式而不是這個</b></td><td><code>void</code>,<b>⚠ 無 NULL 檢查</b></td></tr>
+</table></div>
+<div class="warn"><code>aec_set_preset()</code> 對非法 preset 是<b>拒絕</b>(回 −1),與 <code>aec_config_from_preset()</code> 靜默退回 balanced 的行為<b>相反</b>。<code>ramp_ms</code> 範圍 <code>[0, 60000]</code>,<code>ramp_ms==0</code> <b>不是</b>錯誤。ramp 進行中再呼叫 → 從當前 live 值重新起走。<br>全部必須<b>在 hop 之間</b>呼叫、與 <code>process()</code> 序列化;<b>非 thread-safe</b>。<code>aec_reset()</code> 另外要求 render/capture thread 已靜止。</div>
+<div class="note">若 lane 是用 <code>spatial_linear_context=1</code> 建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請用 <code>four_aec_nr_res_set_aec_preset()</code>,它針對的是共用的 post 級抑制器。</div>
+
+<h2>10. 狀態查詢與診斷</h2>
+<div class="tblwrap"><table>
+<tr><th>函式</th><th>成本</th><th>NULL 檢查</th><th>build flag</th></tr>
+<tr><td><code>aec_get_res_context()</code></td><td>免費</td><td>有</td><td>—</td></tr>
+<tr><td><code>aec_get_linear_context()</code></td><td>免費</td><td>有</td><td>—</td></tr>
+<tr><td><code>aec_debug_status()</code></td><td>免費(欄位本來就每 hop 維護)</td><td>有</td><td>—</td></tr>
+<tr><td><code>aec_linear_is_cancelling()</code></td><td>免費</td><td>有</td><td>—</td></tr>
+<tr><td><code>aec_get_last_timing()</code></td><td>一次 struct 複製</td><td>有</td><td><b>需 <code>-DAEC_STAGE_TIMING=1</code></b></td></tr>
+<tr><td><code>aec_get_mem_breakdown()</code></td><td><b>會重跑 validate,不要放 hot path</b></td><td>有</td><td>—</td></tr>
+<tr><td><code>aec_hop_size()</code></td><td>免費</td><td class="dead">⚠ 無</td><td>—</td></tr>
+<tr><td><code>aec_far_fft_real_compute_count()</code></td><td>免費</td><td class="dead">⚠ 無</td><td>—</td></tr>
+<tr><td><code>aec_last_buffering_event()</code></td><td>免費</td><td class="dead">⚠ 無</td><td>—</td></tr>
+</table></div>
+<div class="warn"><b>NULL 檢查是不對稱的</b>,不要一律假設 NULL-safe。上表標 ⚠ 的三個、以及 <code>aec_reset()</code> 與四個 <code>aec_process*</code> 入口,傳 NULL 會直接解參考。</div>
+
+<h3><code>AecDebugStatus</code> — 板端監看的主力</h3>
+<div class="tblwrap"><table>
+<tr><th>欄位</th><th>怎麼判讀</th></tr>
+<tr><td><code>delay_samples</code></td><td>目前套用的延遲;<code>-1</code> = 尚未取得</td></tr>
+<tr><td><code>delay_confidence</code></td><td>MATCHED 下 0.0／0.5／1.0;FIXED/EXTERNAL 恆 1.0(對齊是 caller 契約,沒有不確定性可報)</td></tr>
+<tr><td><code>delay_updates</code></td><td>matched-filter 更新次數。<b>非 MATCHED 恆 0</b></td></tr>
+<tr><td><code>erle_windowed_db</code></td><td><b>只在 post chain 跑過的 hop 更新</b> → <code>enable_res=0 &amp;&amp; return_res_context=0</code> 時<b>永遠是 0.0</b>,不是「沒有回音消除」</td></tr>
+<tr><td><code>usable_linear</code> / <code>filter_converged</code></td><td>兩個 gate/latch 狀態</td></tr>
+<tr><td><code>near_power</code> / <code>out_power</code></td><td><b>EMA(alpha=0.95),不是瞬時值</b>。<code>out_power</code> 是線性、<b>pre-RES-gain</b> 的輸出功率</td></tr>
+<tr><td><code>duty_hops_total</code> / <code>duty_hops_run</code></td><td>matched-filter 實際參與率。<b>非 MATCHED 時兩者恆 0</b>;<code>aec_reset()</code> 會清零</td></tr>
+</table></div>
+<p class="small">建議 poll 頻率:每秒一次。這是 pull 型結構化快照,<b>在 release build 一樣可用</b>(<code>NO_STDIO=1</code> 的 archive 仍匯出 <code>aec_debug_status</code>)——詳見 <a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a> 的 DEBUG 章節。</p>
+
+<h3><code>AecStageTiming</code>(需 build flag)</h3>
+<p>五個 <code>uint32_t</code> 微秒欄位:<code>delay_us</code>／<code>frontend_us</code>／<code>linear_us</code>／<code>res_us</code>／<code>steering_us</code>。</p>
+<div class="warn"><b>五者相加不等於整個呼叫</b>——<code>res_us</code> 收尾後還有 per-sample power EMA 與收斂偵測。做 breakdown 的 caller 必須明確帶出這個 remainder,否則百分比會說謊。<code>delay_us</code> 已從 <code>frontend_us</code> 減回去,兩者不重複計。解析度 μs,小於 1 μs 的 stage 讀 0。<br><b>必須建 library 本身</b>(<code>PROFILE=1</code>);只在 consumer 端開 flag 只會拿到一堆 0——而且函式<b>不會告訴你</b>它沒被啟用。</div>
+<p class="small">缺 POSIX <code>CLOCK_MONOTONIC</code> 的板子:加 <code>-DAEC_NOW_US=&lt;fn&gt;</code>,<code>fn</code> 必須是無參數、回傳 <code>uint32_t</code> 微秒的<b>純識別字</b>,且必須單調。</p>
+
+<h2>11. 建置旗標</h2>
+<div class="tblwrap"><table>
+<tr><th>旗標</th><th>預設</th><th>效果</th><th>影響</th></tr>
+<tr><td><code>BACKEND=ne10|kiss</code></td><td><code>ne10</code></td><td><code>ne10</code> = ARM NEON(嵌入式交付品);<code>kiss</code> = 可攜、可位元重現</td><td><b>兩者輸出不 bit-identical,<code>aec_get_mem_size()</code> 數值也不同</b></td></tr>
+<tr><td><code>SIMD=0|1</code></td><td><code>1</code></td><td><code>0</code> → <code>-DSIMD_KERNELS_FORCE_SCALAR</code></td><td>數值可能微差;ABI 不變</td></tr>
+<tr><td><code>PROFILE=0|1</code></td><td><code>0</code></td><td><code>1</code> → <code>-DAEC_STAGE_TIMING=1</code></td><td>每 hop 每 instance 7 次 clock 讀取。<b>struct layout 不變,ABI 相容</b></td></tr>
+<tr><td><code>NO_STDIO=0|1</code></td><td><code>0</code></td><td><code>1</code> → archive 中不再有任何 <code>fprintf</code>/<code>stderr</code> 引用</td><td><b>只用於 <code>lib</code> target</b>(CLI 直接用 <code>FILE*</code> API)。驗證:<code>make audit-no-stdio</code></td></tr>
+<tr><td><code>AEC_DEBUG</code></td><td>未定義</td><td><code>make debug</code>:開啟 log 呼叫點(level 0..3)</td><td>與 <code>PROFILE</code> 正交</td></tr>
+<tr><td><code>AEC_TESTING</code></td><td><code>0</code></td><td>編入內部測試 hook</td><td class="dead"><b>絕不可出貨</b></td></tr>
+</table></div>
+<p><code>-ffp-contract=off</code> 是<b>強制</b>的,在所有 caller 旗標<b>之後</b>才 append,無法被覆蓋。Makefile 在 parse 時就<b>拒絕</b> <code>EXTRA_CFLAGS</code> 內出現 <code>-Ofast</code>／<code>-ffast-math</code>／<code>-ffp-contract=</code>,也拒絕覆寫 <code>CFLAGS</code> 等變數;唯二 hook 是 <code>EXTRA_CFLAGS</code>／<code>EXTRA_LDFLAGS</code>。</p>
+<p class="small">輸出目錄由 config hash 決定(<code>bin/&lt;backend&gt;-&lt;hash&gt;/</code>),切換旗標不會產生 stale object。用 <code>make print-lib-path</code>(帶相同旗標)取路徑,<b>不要自行拼 <code>bin/</code> 路徑</b>。AEC 的測試要<b>逐 <code>test-*</code> target 跑</b>——<code>make test</code> 是 no-op 陷阱。</p>
+
+<h2>12. 整合檢查清單</h2>
+<ul>
+<li><code>(sample_rate, fft_size)</code> 命中 §2 表其中一列,且與鏈上其他 lib <b>同一組</b>。</li>
+<li><code>fft_size</code> 明確指定,沒有留 <code>0</code>。</li>
+<li><code>delay_mode</code> 明確選定;<code>fixed_delay_samples</code> 依 mode 是 <code>-1</code> 或 <code>&gt;=0</code>。</li>
+<li>查 pool size 與 <code>aec_init()</code> 用<b>同一份</b> cfg;基底 16-byte 對齊。</li>
+<li>每次 process 恰好傳一個 hop;<code>ref</code> 是<b>實際送往喇叭</b>的 render reference,且與 mic 同 sample clock。</li>
+<li>borrowed context pointer 沒有跨下一次 process 保存。</li>
+<li>接 NR 時 <code>r2</code>／<code>comfort_noise</code> 已除以 <code>32768²</code>。</li>
+<li>接 NN 時 <code>enable_res=0</code> <b>且</b> <code>return_res_context=1</code>(只設前者會拿到一堆 NULL)。</li>
+<li>stream boundary 有 <code>aec_reset()</code>;外部對齊改變則改用 <code>aec_apply_external_realign()</code>。</li>
+<li>application 與 archive 使用相同 <code>BACKEND</code>／<code>SIMD</code>／FP 旗標。</li>
+<li>最終 float→PCM 前做 saturating conversion;limiter 只放在整條 chain 最後。</li>
+</ul>
+
+<h2>相關檔案與測試路徑</h2>
+<ul class="small">
+<li><code>AEC/c_impl/include/aec.h</code> — 唯一使用者面 header</li>
+<li><code>AEC/c_impl/STATIC_MEMORY.md</code> — caller-pool 契約與可編譯範例(由 <code>test/docs_smoke.sh</code> 實際跑)</li>
+<li><code>AEC/docs/c_user_manual_zh_TW.md</code> — canonical 手冊(完整欄位、錯誤語意表、疑難排解)</li>
+<li><code>AEC/docs/nn_integration_interface.md</code> — NN seam 規格(三個 swap point)</li>
+<li><code>AEC/c_impl/example/aec_wav.c</code> — CLI,含 <code>--debug-log</code>／<code>--debug-trace</code></li>
+</ul>
+</body>
+</html>
