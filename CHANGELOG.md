@@ -41,6 +41,39 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-08-30 — preserve FilterAnalyzer's IR exclusion span at 48 kHz
+
+### Fixed
+
+1. **The ConsistentFilterDetector peak-exclusion window was frozen in
+   16 kHz samples.** Its 64-sample low side and 128-sample high side encode
+   4 ms / 8 ms at the rate where AEC3 and this port were validated. At
+   48 kHz the literals narrowed the window to 1.33 ms / 2.67 ms, changing the
+   impulse-response floor and secondary-peak test on a default-ON path.
+   Python and C now use 192 / 384 at 48 kHz and retain 64 / 128 at both
+   16 kHz grids. The legacy 8 kHz grid is outside this correction's release
+   scope and also retains its established 64 / 128 values.
+
+2. **No static-pool or processing-API change.** The C implementation stores
+   `sample_rate` in the former duplicate `FilterAnalyzer` threshold slot; the
+   live threshold remains in `FaConsistentDetector`. Consequently
+   `sizeof(FilterAnalyzer)`, `sizeof(Aec)`, static-pool offsets and public
+   process entry points remain unchanged. Exact effective-value tests cover
+   all supported grids in both ports; the 48 kHz structural paths remain
+   finite and the two 16 kHz grids retain their previous numeric window.
+
+### Compatibility
+
+3. This is an intentional audio-path correction at 48 kHz, so newly
+   materialized 48 kHz `linear_error` data must
+   record the new frontend behavior hash. Existing 16 kHz data may be carried
+   forward by AIAEC's rate-scoped migration gate: the exact
+   recorded-hash-to-current-hash pair is backed by measured 16 kHz byte
+   equality. The gate explicitly rejects old 48 kHz material, which must be
+   rematerialized with this frontend.
+
+---
+
 ## [Unreleased] — 2026-08-26 — `aec_reset()` returns a fresh instance, as its contract always claimed (BEHAVIOUR CHANGE after a reset; AIAEC behaviour hash moves)
 
 ### Fixed

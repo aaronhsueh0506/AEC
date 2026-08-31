@@ -9,9 +9,13 @@ Python reference implementation + C implementation.
 **Release**: v4.0.0rc1 — Python `aec.py` `__version__ = "4.0.0rc1"`.
 **Not ship-ready.** The AEC3 Tier-2 audit, top-level timing retiming, and 16 kHz
 default-grid flip change production output; the 800-case bench has not been
-rerun, and 48 kHz still has structural evidence only. See `[4.0.0]` "Known
-limitations" in [CHANGELOG.md](CHANGELOG.md); do not tag or publish until those
-close. The `4.x` major bump records the public-ABI and output-contract breaks
+rerun — that bench is the outstanding release-grade evidence, and it is a
+16 kHz measurement. Native 48 kHz carries smoke and spot-check evidence, which
+is sufficient for dataset generation; 48 kHz never gets an AECMOS number, so
+its release verdict stays parity/structural.
+See `[4.0.0]` "Known limitations" in [CHANGELOG.md](CHANGELOG.md); do not tag
+or publish until those close. The `4.x` major bump records the public-ABI and
+output-contract breaks
 listed there (custom output limiter removed, `AecConfig`/`AecResContext`
 layout changes, 16 kHz default grid 512/256 → 256/128), **not** a new algorithm
 generation. The production algorithm is the v3.21 AEC3-aligned `_aec3_post`
@@ -132,7 +136,7 @@ A/B guidance → [docs/c_user_manual_zh_TW.md §7.1](docs/c_user_manual_zh_TW.md
 
 | Field | Value |
 |---|---|
-| Sample rate | 8 / 16 / 48 kHz (whitelisted no-padding grids) |
+| Sample rate | 8 / 16 / 48 kHz (whitelisted no-padding grids); 16 / 48 kHz are the product grids |
 | Bit depth | 16-bit PCM or 32-bit float |
 | Channels | mono |
 | Frame / hop | 8k: 256/128; 16k: 256/128 default or 512/256; 48k: 1024/512 |
@@ -155,7 +159,7 @@ per-region breakdown → [c_impl/STATIC_MEMORY.md](c_impl/STATIC_MEMORY.md).
 
 | Limitation | Detail |
 |---|---|
-| Supported SR              | 8 / 16 / 48 kHz only — 32 kHz / 44.1 kHz need external resample |
+| Supported SR              | 8 / 16 / 48 kHz whitelisted no-padding grids; all four (8k 256/128, 16k 256/128, 16k 512/256, 48k 1024/512) are covered by the C/Python timing-parity gate. Product validation targets 16 / 48 kHz: AECMOS is only meaningful at 16 kHz, and 8 kHz is a legacy standalone/mono grid that retimes carry only when they are shown to be safe there. Other rates, including 32 kHz / 44.1 kHz, need external resampling. |
 | Channel count             | mono only — no mic array / stereo reference |
 | Echo nonlinearity         | linear filter + RES; no dedicated nonlinear model. High speaker distortion produces residual harmonic leakage |
 | Delay direction           | positive only (mic lags ref). Negative-delay scenarios must be aligned upstream |
@@ -173,7 +177,7 @@ C; equivalent Python flags differ only in syntax (`--mode pbfdkf` etc.).
 
 | Symptom | Diagnosis & adjustment |
 |---|---|
-| **Residual echo too high (FS / NE)** | 1. With `--no-res`, output should be a clean linear-AEC residual. Echo still dominating → ref signal is wrong, mic-ref delay > filter length, or sample rates differ. 2. `--preset aggressive` for stronger RES (cost: more NE compression). 3. `--filter-length-ms 100` for big rooms / long reverb. |
+| **Residual echo too high (FS / NE)** | 1. With `--no-res`, output should be a clean linear-AEC residual. Echo still dominating → ref signal is wrong, mic-ref delay > filter length, or sample rates differ. 2. `--preset aggressive` for stronger RES (cost: more NE compression). 3. For big rooms, increase `AecConfig.filter_length` through the C API before `aec_get_mem_size()`/`aec_init()` and recreate the instance. The value is in samples; there is no `--filter-length` or `--filter-length-ms` CLI flag. |
 | **NE clipped during double-talk** | Lower preset → `--preset mild` (−20 dB floor, near-priority: keeps more near-end at the cost of more echo leak). Don't tweak individual RES knobs — preset values are co-tuned. |
 | **Slow startup / first-second echo** | Filter convergence needs ≥ 0.5 s of meaningful far energy. Normal adaptive behavior. Consider muting output during application warm-up (e.g. play a "connecting…" cue). |
 | **Echo spikes when device moves** | Echo path changes → EPC fires → ~200 ms re-convergence with brief leak. Usually self-recovers. For frequent movement, increase filter length. |

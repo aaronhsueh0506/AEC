@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from modules.config import AecConfig  # noqa: E402
 from modules.enums import AecPreset  # noqa: E402
 from modules.epc import EchoPathChangeDetector  # noqa: E402
+from modules.state.filter_analyzer import FilterAnalyzer  # noqa: E402
 
 # The three grids the task calls out explicitly, plus 8 kHz (this repo's
 # fourth whitelisted grid, and same hop_ms as 16k/512 -- a useful extra
@@ -160,6 +161,29 @@ class TopLevelConstantRetimingTests(unittest.TestCase):
             self.assertEqual(
                 cfg.ne_recent_sustain, 3,
                 msg=f"sr={sr} fs={fs}: ne_recent_sustain must stay literal 3")
+
+    def test_filter_analyzer_ir_exclusion_window_scales_with_rate(self) -> None:
+        """The AEC3 64/128-sample window means 4/8 ms at 16 kHz.
+
+        It indexes the time-domain impulse response, so changing the FFT/hop
+        at the same rate must not move it, while 48 kHz needs 192/384 samples.
+        Legacy 8 kHz is deliberately unchanged by this product-grid fix.
+        """
+        expected = {
+            (8000, 256): (64, 128),
+            (16000, 256): (64, 128),
+            (16000, 512): (64, 128),
+            (48000, 1024): (192, 384),
+        }
+        for sr, fs in GRIDS:
+            cfg = self._cfg(sr, fs)
+            analyzer = FilterAnalyzer(
+                hop_size=cfg.hop_size, sample_rate=cfg.sample_rate)
+            actual = (
+                analyzer._consistent._floor_low_offset,
+                analyzer._consistent._floor_high_offset,
+            )
+            self.assertEqual(actual, expected[(sr, fs)])
 
     def test_pre_fix_regression_would_have_failed(self) -> None:
         """Sanity-check the tolerance band itself: the OLD (frozen-literal,

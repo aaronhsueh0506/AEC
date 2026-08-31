@@ -38,8 +38,8 @@ _HPF_COEFFS = np.array([0.7929742, -0.36072128, -0.47047766], dtype=np.float32)
 # ConsistentFilterDetector thresholds (filter_analyzer.cc:264-265 verbatim).
 _FLOOR_RATIO = 10.0
 _SECONDARY_RATIO = 2.0
-_FLOOR_LOW_OFFSET = 64
-_FLOOR_HIGH_OFFSET = 128
+_FLOOR_LOW_SAMPLES_16K = 64
+_FLOOR_HIGH_SAMPLES_16K = 128
 
 # AEC3 EchoCanceller3Config::render_levels.active_render_limit default = 100.f
 # (int16 amplitude). Threshold per block = (limit^2) * block_length.
@@ -53,9 +53,22 @@ class _ConsistentFilterDetector:
     region_start == 0) — see filter_analyzer.cc:232-238.
     """
 
-    def __init__(self, active_render_threshold: float, consistent_hold_hops: int) -> None:
+    def __init__(
+        self,
+        active_render_threshold: float,
+        consistent_hold_hops: int,
+        sample_rate: int,
+    ) -> None:
         self._active_render_threshold = active_render_threshold
         self._consistent_hold_hops = consistent_hold_hops
+        # AEC3's 64/128-sample exclusion window is 4/8 ms at its native
+        # 16 kHz rate. These index time-domain impulse-response samples, so
+        # the 48 kHz product grid needs 192/384 samples. The legacy 8 kHz
+        # grid deliberately retains its established 64/128-sample behaviour;
+        # it is outside this 48 kHz correction's release scope.
+        scale = 3 if int(sample_rate) == 48000 else 1
+        self._floor_low_offset = _FLOOR_LOW_SAMPLES_16K * scale
+        self._floor_high_offset = _FLOOR_HIGH_SAMPLES_16K * scale
         self.reset()
 
     def reset(self) -> None:
@@ -80,9 +93,13 @@ class _ConsistentFilterDetector:
         if region_start == 0:
             self._floor_accum = 0.0
             self._secondary_peak = 0.0
-            self._floor_low_limit = peak_index - _FLOOR_LOW_OFFSET if peak_index >= _FLOOR_LOW_OFFSET else 0
+            self._floor_low_limit = (
+                peak_index - self._floor_low_offset
+                if peak_index >= self._floor_low_offset else 0
+            )
             self._floor_high_limit = (
-                0 if peak_index > size - (_FLOOR_HIGH_OFFSET + 1) else peak_index + _FLOOR_HIGH_OFFSET
+                0 if peak_index > size - (self._floor_high_offset + 1)
+                else peak_index + self._floor_high_offset
             )
 
         # Lower sweep: region_start .. min(region_end+1, floor_low_limit)
@@ -155,7 +172,8 @@ class FilterAnalyzer:
             1500.0, hop_size, sample_rate
         )
         self._consistent = _ConsistentFilterDetector(
-            self._active_render_threshold, self._consistent_hold_hops
+            self._active_render_threshold, self._consistent_hold_hops,
+            sample_rate,
         )
         self._region_start = 0
         self._region_end = 0

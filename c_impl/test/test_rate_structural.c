@@ -185,6 +185,47 @@ static void test_cola(void) {
     }
 }
 
+/* FilterAnalyzer's AEC3 64/128-sample peak-exclusion window is 4/8 ms
+ * at 16 kHz. It indexes impulse-response samples, so the 48-kHz product
+ * grid needs 192/384 rather than the old literals. Legacy 8 kHz remains
+ * frozen at its established values and is not retuned by this test. */
+static void test_filter_analyzer_rate_scaled_exclusion_window(void) {
+    static const int expected_low[] = { 64, 64, 64, 192 };
+    static const int expected_high[] = { 128, 128, 128, 384 };
+    enum { SIZE = 1024, PEAK = 500 };
+    float taps[SIZE], highpass[SIZE], abs_scratch[SIZE];
+    float render[512], render_sq[512];
+
+    for (int r = 0; r < N_GRIDS; ++r) {
+        FilterAnalyzer analyzer;
+        int sr = GRIDS[r].sample_rate;
+        int hop = GRIDS[r].fft_size / 2;
+        char what[160];
+        memset(taps, 0, sizeof(taps));
+        memset(render, 0, sizeof(render));
+        fa_init(&analyzer, highpass, SIZE, 100.0f, 0, 1.0f,
+                abs_scratch, SIZE, render_sq, 512, hop, sr);
+
+        /* Force the next update to begin a full-filter sweep. The detector
+         * publishes its derived limits at that boundary, before the rest of
+         * the sweep is needed. */
+        analyzer.region_end = SIZE - 1;
+        analyzer.peak_index = PEAK;
+        fa_update(&analyzer, taps, render, hop);
+
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: FilterAnalyzer low exclusion is %d samples",
+                 sr, GRIDS[r].fft_size, expected_low[r]);
+        CHECK(analyzer.consistent.floor_low_limit == PEAK - expected_low[r],
+              what);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: FilterAnalyzer high exclusion is %d samples",
+                 sr, GRIDS[r].fft_size, expected_high[r]);
+        CHECK(analyzer.consistent.floor_high_limit == PEAK + expected_high[r],
+              what);
+    }
+}
+
 /* Small LCG, same shape as test_zero_heap_aec.c's lcg_sample -- deterministic,
  * no libc rand() portability concerns. Returns uniform [0, 1). */
 static unsigned g_lcg_state;
@@ -1745,6 +1786,7 @@ static void test_simple_mu_frozen_exception(void) {
 
 int main(void) {
     test_cola();
+    test_filter_analyzer_rate_scaled_exclusion_window();
     test_impulse_linear_path();
     test_impulse_res_enabled();
     test_res_context_wola_identity();

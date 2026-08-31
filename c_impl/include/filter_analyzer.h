@@ -65,7 +65,7 @@ typedef struct {
 } FaConsistentDetector;
 
 typedef struct {
-    float  active_render_threshold;  /* (active_render_limit^2) * hop_size      */
+    int    sample_rate;              /* scales the 48-kHz IR exclusion window  */
     int    bounded_erl;              /* bool                                    */
     float  default_gain;
     FaConsistentDetector consistent;

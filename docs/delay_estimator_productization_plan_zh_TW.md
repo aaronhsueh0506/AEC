@@ -1,6 +1,9 @@
 # AEC delay estimator 產品化實作計畫
 
-狀態：規劃文件，尚未授權 push。
+狀態：歷史實作計畫；產品化 A 線已實作並推送。本文保留設計依據與
+驗證順序，不代表目前分支、commit 或 push 狀態。現行 API 與行為以
+`c_user_manual_zh_TW.md`、`delay_estimator_design_zh_TW.md`、公開 header
+及測試為準；尚未完成的 pre-echo/safe-window 研究仍屬 B 線。
 範圍：`AEC/`、`Audio_ALG/pipelines/`、`Audio_ALG/pipelines/4ch_aec_bf_nr_res/`、`Audio_ALG/AIAEC/`。
 目標：讓產品能在初始化時選擇 delay 模式與 matched-filter bank 大小，同時讓 C static pool 的實際 RAM 隨設定縮小；另將 pre-echo 正確性修復與 PBFDKF delay controller 重新拆開驗證。
 

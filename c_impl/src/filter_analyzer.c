@@ -20,8 +20,14 @@ static const float FA_HPF_COEFFS[3] = {
 /* ConsistentFilterDetector thresholds (filter_analyzer.cc:264-265 verbatim). */
 #define FA_FLOOR_RATIO        10.0f
 #define FA_SECONDARY_RATIO     2.0f
-#define FA_FLOOR_LOW_OFFSET    64
-#define FA_FLOOR_HIGH_OFFSET   128
+#define FA_FLOOR_LOW_SAMPLES_16K    64
+#define FA_FLOOR_HIGH_SAMPLES_16K  128
+
+static int fa_floor_scale(int sample_rate) {
+    /* Preserve the established legacy-8-kHz behaviour. This correction is
+     * scoped to the 48-kHz product grid; both 16-kHz grids remain x1. */
+    return sample_rate == 48000 ? 3 : 1;
+}
 
 /* ---------------------------------------------------------------------------
  * numpy 1.26 pairwise summation (float32 accumulate). Mirrors
@@ -79,18 +85,22 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
                      int region_start, int region_end,
                      const float *render_block, int render_block_len,
                      int peak_index, int delay_blocks,
+                     int sample_rate,
                      float *scratch, float *render_sq_scratch) {
     int hi_lower, lo_upper;
 
     if (region_start == 0) {
+        int scale = fa_floor_scale(sample_rate);
+        int floor_low_offset = FA_FLOOR_LOW_SAMPLES_16K * scale;
+        int floor_high_offset = FA_FLOOR_HIGH_SAMPLES_16K * scale;
         c->floor_accum = 0.0f;
         c->secondary_peak = 0.0f;
         c->floor_low_limit =
-            (peak_index >= FA_FLOOR_LOW_OFFSET) ? peak_index - FA_FLOOR_LOW_OFFSET : 0;
+            (peak_index >= floor_low_offset) ? peak_index - floor_low_offset : 0;
         c->floor_high_limit =
-            (peak_index > size - (FA_FLOOR_HIGH_OFFSET + 1))
+            (peak_index > size - (floor_high_offset + 1))
                 ? 0
-                : peak_index + FA_FLOOR_HIGH_OFFSET;
+                : peak_index + floor_high_offset;
     }
 
     /* Lower sweep: region_start .. min(region_end+1, floor_low_limit) */
@@ -158,11 +168,11 @@ void fa_init(FilterAnalyzer *m, float *h_highpass_storage, int size,
              float *render_sq_scratch, int render_sq_scratch_len,
              int hop_size, int sample_rate) {
     m->hop_size = hop_size;
-    m->active_render_threshold =
-        (active_render_limit * active_render_limit) * (float)hop_size;
+    m->sample_rate = sample_rate;
     m->bounded_erl = bounded_erl ? 1 : 0;
     m->default_gain = default_gain;
-    m->consistent.active_render_threshold = m->active_render_threshold;
+    m->consistent.active_render_threshold =
+        (active_render_limit * active_render_limit) * (float)hop_size;
     /* AEC3 verbatim: 5s convergence threshold, 1.5s consistency hold. Were
      * frozen #defines (500/150, correct only at hop=160/sr=16000); computed
      * live here. */
@@ -355,6 +365,7 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     m->consistent_estimate = cd_detect(
         &m->consistent, h, size, m->region_start, m->region_end,
         render_block, render_block_len, m->peak_index, m->delay_blocks,
+        m->sample_rate,
         m->abs_scratch, m->render_sq_scratch);
 }
 
