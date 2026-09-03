@@ -153,9 +153,15 @@ typedef enum {
 #define DA_FILTER_SIZE          (DA_WINDOW_SIZE_SB * DA_SUB_BLOCK_SIZE)        /* 512 */
 #define DA_FILTER_INTRA_SHIFT   (DA_ALIGNMENT_SHIFT_SB * DA_SUB_BLOCK_SIZE)   /* 384 */
 #define DA_ACC_ERR_SIZE         (DA_FILTER_SIZE / 4)   /* 128 ; subsample rate 4 */
-/* DA_HIST_WINDOW is a TIME window (250 estimates ~= 1 s at the 64-sample
- * inner-block cadence), not a geometry term: it does NOT scale with n. Both
- * aggregator rings stay this length at every bank size. */
+/* DA_HIST_WINDOW is the CAPACITY of both aggregator rings: a TIME window
+ * (~1 s of estimates at the 64-sample inner-block cadence), not a geometry
+ * term, so it does NOT scale with n. The window actually used is
+ * round(feed_rate / 64) (Python lag_aggregator._num_blocks_per_second):
+ * 250 at the 16 kHz feed every product grid lands on (48 kHz is resampled
+ * to a 16 kHz-equivalent feed first), 125 at the LEGACY native 8 kHz feed
+ * -- see DaHighestPeak.window / DaPreEcho.window and da_hist_window_for_rate()
+ * in delay_aec3.c. The carve stays at the capacity so the pool image is
+ * grid-invariant. */
 #define DA_HIST_WINDOW          250
 #define DA_HEADROOM             (32 / DA_DOWN_SAMPLING_FACTOR)      /* 8 */
 
@@ -298,6 +304,7 @@ typedef struct {
     int *histogram;   /* pool-carved [hist_size], ALIGN16 */
     int *ring;        /* pool-carved [DA_HIST_WINDOW], ALIGN16 */
     int hist_size;    /* DA_HP_HIST_SIZE_FOR(num_filters) */
+    int window;       /* da_hist_window_for_rate(feed rate): ring entries in use */
     int ring_index;
     int candidate;
     int candidate_valid;   /* internal-only: 0 forces a da_argmax_i rescan on
@@ -312,6 +319,7 @@ typedef struct {
     int *histogram;   /* pool-carved [hist_size], ALIGN16 */
     int *ring;        /* pool-carved [DA_HIST_WINDOW], ALIGN16 */
     int hist_size;    /* DA_PE_HIST_SIZE_FOR(num_filters) */
+    int window;       /* da_hist_window_for_rate(feed rate): ring entries in use */
     int ring_index;
     int number_updates;
     int pre_echo_candidate;

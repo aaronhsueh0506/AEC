@@ -795,7 +795,7 @@ static void da_argmax_incremental_update(int *histogram, int hist_size,
 
 static void da_highest_peak_reset(DaHighestPeak *hp) {
     memset(hp->histogram, 0, (size_t)hp->hist_size * sizeof(int));
-    memset(hp->ring, 0, (size_t)DA_HIST_WINDOW * sizeof(int));
+    memset(hp->ring, 0, (size_t)hp->window * sizeof(int));
     hp->ring_index = 0;
     /* candidate is NOT reset in Python HighestPeakAggregator.reset; preserve.
      * candidate_valid IS reset (internal-only guard, no Python equivalent --
@@ -805,7 +805,8 @@ static void da_highest_peak_reset(DaHighestPeak *hp) {
     hp->candidate_valid = 0;
 }
 
-static void da_highest_peak_init(DaHighestPeak *hp) {
+static void da_highest_peak_init(DaHighestPeak *hp, int window) {
+    hp->window = window;
     da_highest_peak_reset(hp);
     hp->candidate = -1;
 }
@@ -816,7 +817,7 @@ static void da_highest_peak_aggregate(DaHighestPeak *hp, int lag) {
     if (clamped_lag < 0) clamped_lag = 0;
     else if (clamped_lag >= hp->hist_size) clamped_lag = hp->hist_size - 1;
     hp->ring[hp->ring_index] = clamped_lag;
-    hp->ring_index = (hp->ring_index + 1) % DA_HIST_WINDOW;
+    hp->ring_index = (hp->ring_index + 1) % hp->window;
     if (old_lag == clamped_lag && hp->candidate_valid) {
         /* net-unchanged: evicted bin == inserted bin, histogram provably
          * untouched, existing candidate/M pair still exactly correct. */
@@ -846,7 +847,7 @@ static int da_get_ds_block_size_log2(int down_sampling_factor) {
 static void da_pre_echo_reset(DaPreEcho *pe) {
     int i;
     memset(pe->histogram, 0, (size_t)pe->hist_size * sizeof(int));
-    for (i = 0; i < DA_HIST_WINDOW; ++i) pe->ring[i] = -1;
+    for (i = 0; i < pe->window; ++i) pe->ring[i] = -1;
     pe->ring_index = 0;
     pe->number_updates = 0;
     pe->pre_echo_candidate = 0;
@@ -854,16 +855,17 @@ static void da_pre_echo_reset(DaPreEcho *pe) {
     pe->argmax_valid = 0;
 }
 
-static void da_pre_echo_init(DaPreEcho *pe) {
+static void da_pre_echo_init(DaPreEcho *pe, int window) {
+    pe->window = window;
     pe->block_size_log2 = da_get_ds_block_size_log2(DA_DOWN_SAMPLING_FACTOR);
     da_pre_echo_reset(pe);
 }
 
 /* ---------------------------------------------------------- lag aggregator */
 
-static void da_aggregator_init(DaLagAggregator *agg) {
-    da_highest_peak_init(&agg->highest_peak);
-    da_pre_echo_init(&agg->pre_echo);
+static void da_aggregator_init(DaLagAggregator *agg, int window) {
+    da_highest_peak_init(&agg->highest_peak, window);
+    da_pre_echo_init(&agg->pre_echo, window);
     agg->significant_candidate_found = 0;
 }
 
@@ -970,12 +972,27 @@ static void da_clockdrift_update(DaClockdrift *cd, int delay_estimate) {
 
 /* --------------------------------------------------- EchoPathDelayEstimator */
 
+/* Ring entries in use by both lag aggregators: 1 s of 64-sample inner
+ * blocks at the feed rate, clamped to the carved capacity DA_HIST_WINDOW. */
+static int da_hist_window_for_rate(int sample_rate) {
+    int w = aec3_ms_to_hops(1000.0f, DA_AEC3_BLOCK_SIZE, sample_rate);
+    if (w < 1) w = 1;
+    if (w > DA_HIST_WINDOW) w = DA_HIST_WINDOW;
+    return w;
+}
+
 static void da_estimator_init(DaEstimator *e, int sample_rate, int num_filters) {
     da_decimator_init(&e->capture_decimator);
     da_decimator_init(&e->render_decimator);
     da_ring_reset(&e->render_ring);
     da_matched_filter_init(&e->matched_filter, num_filters);
-    da_aggregator_init(&e->aggregator);
+    /* Histogram window = 1 s of inner blocks at the feed rate, the Python
+     * lag_aggregator._num_blocks_per_second (round(sr / 64)): 250 at 16 kHz
+     * (and at 48 kHz, which feeds this estimator its 16 kHz-equivalent
+     * stream), 125 at the LEGACY native 8 kHz feed. Was the bare capacity
+     * (250) at every rate, i.e. a 2 s window at 8 kHz. Routed through the
+     * canonical aec3_ms_to_hops() like the two thresholds around it. */
+    da_aggregator_init(&e->aggregator, da_hist_window_for_rate(sample_rate));
     da_clockdrift_init(&e->clockdrift, sample_rate);
     /* AEC3 kNumBlocksPerSecondBy2 = 125 blocks (~500 ms). Was a frozen
      * #define (DA_CONSISTENT_EST_THR=125, correct only at sr=16000);
