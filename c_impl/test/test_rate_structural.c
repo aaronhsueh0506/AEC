@@ -3,7 +3,7 @@
  * (mirrors test_config_validation.c / test_static_aec.c's own header
  * recipe). It is wired to the `make test-rate-structural` target.
  *
- * Ten checks, run at each of the four whitelisted grids
+ * The following checks run at each of the four whitelisted grids
  * (8000/256, 16000/256, 16000/512, 48000/1024):
  *
  *   (a) COLA: the rate's own synthesis window (Aec3BalancedRateDims::
@@ -1784,6 +1784,39 @@ static void test_simple_mu_frozen_exception(void) {
     }
 }
 
+/* ── (d7) all filter-restart paths discard evidence from abandoned taps ── */
+static void test_filter_restart_clears_derived_counters(void) {
+    for (int r = 0; r < N_GRIDS; ++r) {
+        int sr = GRIDS[r].sample_rate;
+        int fft = GRIDS[r].fft_size;
+        AecConfig cfg;
+        Aec aec;
+        char what[192];
+
+        aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, sr);
+        cfg.fft_size = fft;
+        int rc = aec_create(&aec, &cfg);
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: aec_create() for filter-latch reset", sr, fft);
+        CHECK(rc == 0, what);
+        if (rc != 0) continue;
+
+        aec.poor_coarse_counter = 17;
+        aec.coarse_reset_hangover = 23;
+        aec.leakage_div_sustained_counter = 31;
+        aec_testing_reset_filter_latches(&aec);
+
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: common restart clears coarse/leakage evidence",
+                 sr, fft);
+        CHECK(aec.poor_coarse_counter == 0 &&
+              aec.coarse_reset_hangover == 0 &&
+              aec.leakage_div_sustained_counter == 0, what);
+
+        aec_destroy(&aec);
+    }
+}
+
 int main(void) {
     test_cola();
     test_filter_analyzer_rate_scaled_exclusion_window();
@@ -1800,6 +1833,7 @@ int main(void) {
     test_retimed_constants_reach_the_audio_path();
     test_alpha_r_reaches_the_direct_pbfdkf_path();
     test_simple_mu_frozen_exception();
+    test_filter_restart_clears_derived_counters();
     test_mu_holdoff_rearm_guard();
     test_render_activity_first_observation();
 

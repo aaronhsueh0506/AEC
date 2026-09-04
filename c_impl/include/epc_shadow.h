@@ -78,7 +78,13 @@ typedef struct ShadowCopy {
     ShadowCopyGateMode gate_mode;
     float  copy_err_baseline;
     int    copy_counter;
-    int    streak;
+    /* Per-grid EMA retention, set once at init and never cleared by
+     * shadow_copy_reset(). It takes the slot of the former `streak` counter:
+     * on the energy path streak and copy_counter were always advanced and
+     * reset together, and SC_GATE_STREAK did not otherwise use copy_counter,
+     * so one counter serves both paths and sizeof(ShadowCopy), sizeof(Aec)
+     * and every pool offset stay unchanged. */
+    float  copy_err_baseline_retention;
     int    main_paused;
     int    pause_resume;
     /* Config slice */
@@ -88,7 +94,11 @@ typedef struct ShadowCopy {
 } ShadowCopy;
 
 void shadow_copy_init(ShadowCopy* s, ShadowCopyGateMode mode,
-                         float threshold, int hysteresis, int epc_hangover);
+                      float threshold, int hysteresis, int epc_hangover);
+void shadow_copy_init_for_grid(ShadowCopy* s, ShadowCopyGateMode mode,
+                               float threshold, int hysteresis,
+                               int epc_hangover, int hop_size,
+                               int sample_rate);
 void shadow_copy_reset(ShadowCopy* s);
 ShadowCopyDecision shadow_copy_update(
     ShadowCopy* s,

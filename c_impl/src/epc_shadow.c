@@ -125,25 +125,49 @@ void epc_tick_hangover(EpcDetector* e) {
 /* ── ShadowCopyController ─────────────────────────────────────── */
 
 static const float SC_BASELINE_INIT       = 1e-6f;
+static const float SC_BASELINE_RETENTION  = 0.995f;
+/* A hop COUNT on every grid, not a duration: retiming it to 100 ms (12 hops
+ * at 16 kHz/128) measurably broke a near-end single-talk case on the 90-case
+ * blind subset (deg 2.33 -> 1.54, output 5 dB under the capture for 26 s)
+ * because the rescue streak stopped completing; 11 fails too, 10 passes. */
 static const int   SC_HYS_STREAK_MIN      = 10;
 static const int   SC_AEC3_STREAK_FRAMES  = 5;
 
-void shadow_copy_init(ShadowCopy* s, ShadowCopyGateMode mode,
-                         float threshold, int hysteresis, int epc_hangover) {
+void shadow_copy_init_for_grid(ShadowCopy* s, ShadowCopyGateMode mode,
+                               float threshold, int hysteresis,
+                               int epc_hangover, int hop_size,
+                               int sample_rate) {
     s->gate_mode = mode;
     s->copy_err_baseline = SC_BASELINE_INIT;
     s->copy_counter = 0;
-    s->streak       = 0;
+    if (hop_size > 0 && sample_rate > 0) {
+        s->copy_err_baseline_retention = aec3_growth_rehop(
+            SC_BASELINE_RETENTION, 160, 16000, hop_size, sample_rate);
+    } else {
+        s->copy_err_baseline_retention = SC_BASELINE_RETENTION;
+    }
     s->main_paused  = 0;
     s->pause_resume = 0;
     s->shadow_copy_threshold  = threshold;
-    s->shadow_copy_hysteresis = hysteresis;
+    /* The two former counters advanced and reset together, so the old
+     * `copy_counter >= hysteresis && streak >= SC_HYS_STREAK_MIN` is one
+     * counter against the larger threshold. */
+    s->shadow_copy_hysteresis = hysteresis > SC_HYS_STREAK_MIN
+                              ? hysteresis : SC_HYS_STREAK_MIN;
     s->epc_hangover           = epc_hangover;
 }
+
+/* Pre-multirate entry point: the legacy 160/16000 grid, where the retention
+ * is the authored 0.995. The product AEC calls shadow_copy_init_for_grid(). */
+void shadow_copy_init(ShadowCopy* s, ShadowCopyGateMode mode,
+                      float threshold, int hysteresis, int epc_hangover) {
+    shadow_copy_init_for_grid(s, mode, threshold, hysteresis, epc_hangover,
+                              160, 16000);
+}
+
 void shadow_copy_reset(ShadowCopy* s) {
     s->copy_err_baseline = SC_BASELINE_INIT;
     s->copy_counter = 0;
-    s->streak       = 0;
     s->main_paused  = 0;
     s->pause_resume = 0;
 }
@@ -183,7 +207,9 @@ ShadowCopyDecision shadow_copy_update(
     int   is_stable_fs = far_active && (err_balance < 0.3f) && !epc_active;
     if (is_stable_fs) {
         float best_err = (main_err_smooth < shadow_err_smooth) ? main_err_smooth : shadow_err_smooth;
-        s->copy_err_baseline = 0.995f * s->copy_err_baseline + 0.005f * best_err;
+        float retention = s->copy_err_baseline_retention;
+        s->copy_err_baseline = retention * s->copy_err_baseline
+                             + (1.0f - retention) * best_err;
     }
     int error_is_normal = main_err_smooth < (s->copy_err_baseline * 4.0f + 1e-10f);
     int not_saturating  = saturation_level < 0.3f;
@@ -193,15 +219,15 @@ ShadowCopyDecision shadow_copy_update(
 
     if (s->gate_mode == SC_GATE_STREAK) {
         if (copy_allowed && shadow_err_smooth < main_err_smooth * threshold) {
-            s->streak++;
-            if (s->streak >= SC_AEC3_STREAK_FRAMES) {
-                s->streak = 0;
+            s->copy_counter++;
+            if (s->copy_counter >= SC_AEC3_STREAK_FRAMES) {
+                s->copy_counter = 0;
                 s->main_paused = 1;
                 s->pause_resume = s->epc_hangover;
                 d.boost_q = 1;
             }
         } else {
-            s->streak = 0;
+            s->copy_counter = 0;
         }
         if (s->main_paused) {
             if (s->pause_resume > 0) s->pause_resume--;
@@ -219,15 +245,11 @@ ShadowCopyDecision shadow_copy_update(
     if (copy_allowed) {
         if (shadow_err_smooth < main_err_smooth * threshold) {
             s->copy_counter++;
-            s->streak++;
         } else {
             s->copy_counter = 0;
-            s->streak       = 0;
         }
-        if (s->copy_counter >= s->shadow_copy_hysteresis
-            && s->streak >= SC_HYS_STREAK_MIN) {
+        if (s->copy_counter >= s->shadow_copy_hysteresis) {
             s->copy_counter = 0;
-            s->streak       = 0;
             s->main_paused  = 1;
             s->pause_resume = s->epc_hangover;
             d.boost_q = 1;
@@ -241,7 +263,6 @@ ShadowCopyDecision shadow_copy_update(
         }
     } else {
         s->copy_counter = 0;
-        s->streak       = 0;
         s->main_paused  = 0;
     }
     d.pause_main = s->main_paused;

@@ -38,6 +38,14 @@ extern "C" {
 void aec_testing_update_simple_mu_ratio(Aec* a, const float* output,
                                         const float* far_end, int n);
 
+/* Drives the latch-reset portion shared by internal delay recovery and
+ * external realignment.
+ *
+ * Why the public API will not do: every public caller also resets or shifts
+ * filters and delay state, so it cannot isolate whether the shared seam itself
+ * clears evidence derived from the discarded taps. */
+void aec_testing_reset_filter_latches(Aec* a);
+
 /* Exposes the legacy-10 ms additive-rate retiming helper.
  *
  * Why the public API will not do: the claim under test is that the helper

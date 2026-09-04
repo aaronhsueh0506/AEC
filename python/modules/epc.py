@@ -194,13 +194,24 @@ class PathChangeRegimeHandler:
     State (private):
         _copy_err_baseline : EMA of best(main, shadow) error during stable FS
         _copy_counter      : consecutive frames shadow < main * threshold
-        _streak            : same as above (kept for parity with original two-counter logic)
+        _streak            : legacy mirror of _copy_counter (Python state is
+                             retained for checkpoint/debug compatibility)
         _main_paused       : main filter weight update currently frozen
         _pause_resume      : countdown to un-pause
     """
 
     BASELINE_INIT = 1e-6
-    HYS_STREAK_MIN = 10  # additional streak gate beyond shadow_copy_hysteresis
+    # HYS_STREAK_MIN stays a hop COUNT on every grid. Retiming it to 100 ms
+    # (12 hops at the shipped 16 kHz/128 grid) was measured on the 90-case
+    # blind subset: one near-end single-talk clip with a loud, echo-free
+    # reference lost 0.79 deg MOS (output held 5 dB below the capture for
+    # 26 s) because the rescue streak no longer completed; 11 hops fails the
+    # same way and 10 restores the capture. The gate is a consecutive-hop
+    # count whose validated value is 10, not a duration.
+    HYS_STREAK_MIN = 10
+    # Authored on the legacy 10 ms grid; live instances use the
+    # wall-clock-preserving retention built in __init__.
+    COPY_ERR_BASELINE_RETENTION = 0.995
     AEC3_STREAK_FRAMES = 5  # gate_mode='streak_only' uses pure 5-block AEC3 rule
 
     # Gate-mode choices for Phase C1 ablation. S0=energy is the v2.8.1 baseline.
@@ -212,6 +223,10 @@ class PathChangeRegimeHandler:
     def __init__(self, config: 'AecConfig', gate_mode: str = 'energy'):
         self.config = config
         self.gate_mode = gate_mode
+        self._hys_streak_min = self.HYS_STREAK_MIN
+        self._copy_err_baseline_retention = _aec3_scale.growth_rehop(
+            self.COPY_ERR_BASELINE_RETENTION, 160, 16000,
+            config.hop_size, config.sample_rate)
         self._copy_err_baseline = self.BASELINE_INIT
         self._copy_counter = 0
         self._streak = 0
@@ -236,6 +251,14 @@ class PathChangeRegimeHandler:
     @property
     def copy_counter(self) -> int:
         return self._copy_counter
+
+    @property
+    def hys_streak_min(self) -> int:
+        return self._hys_streak_min
+
+    @property
+    def copy_err_baseline_retention(self) -> float:
+        return self._copy_err_baseline_retention
 
     def _dt_safe(self, dt_from_energy: float, dt_from_coherence: float,
                  delay_reliable: bool) -> bool:
@@ -274,8 +297,9 @@ class PathChangeRegimeHandler:
         is_stable_fs = far_active and err_balance < 0.3 and not epc_active
         if is_stable_fs:
             best_err = min(main_err_smooth, shadow_err_smooth)
-            self._copy_err_baseline = (0.995 * self._copy_err_baseline
-                                        + 0.005 * best_err)
+            retention = self._copy_err_baseline_retention
+            self._copy_err_baseline = (retention * self._copy_err_baseline
+                                        + (1.0 - retention) * best_err)
 
         error_is_normal = main_err_smooth < self._copy_err_baseline * 4.0 + 1e-10
         not_saturating = saturation_level < 0.3
@@ -320,7 +344,7 @@ class PathChangeRegimeHandler:
                 self._streak = 0
 
             if (self._copy_counter >= self.config.shadow_copy_hysteresis
-                    and self._streak >= self.HYS_STREAK_MIN):
+                    and self._streak >= self._hys_streak_min):
                 self._copy_counter = 0
                 self._streak = 0
                 self._main_paused = True

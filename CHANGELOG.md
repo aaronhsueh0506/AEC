@@ -41,6 +41,55 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-09-04 — retime the shadow-copy baseline and discard abandoned-filter evidence
+
+### Fixed
+
+1. **The shadow-copy error baseline was still an EMA in hops.** The
+   `0.995 old + 0.005 new` copy-error baseline encoded an approximately 2 s
+   pole on the former 160-sample/16 kHz grid. Both ports now derive the
+   retention from each instance's hop/sample-rate grid (0.996 at 8 ms,
+   0.992 at 16 ms, 0.9947 at 48 kHz). The sibling `HYS_STREAK_MIN=10` gate
+   stays a 10-hop count on every grid: retiming it to 100 ms (12 hops at the
+   shipped 16 kHz/128 grid) was measured on the 90-case blind subset and
+   broke one near-end single-talk clip with a loud, echo-free reference (deg
+   MOS 2.33 -> 1.54, output 5 dB under the capture for 26 s) because the
+   rescue streak stopped completing; 11 hops fails the same way and 10
+   restores it. The retention change alone is neutral on that clip and on
+   the subset (far-end echo MOS +0.006, double-talk within 0.004). Tests
+   pin, per product grid, which hop triggers the copy and which coefficient
+   the EMA actually applies.
+
+2. **C internal delay recovery retained three decisions derived from taps it
+   had just abandoned.** `poor_coarse_counter`, `coarse_reset_hangover` and
+   `leakage_div_sustained_counter` were already cleared by Python's shared
+   filter-latch reset and by C external realignment, but not by C's
+   delay-first/delay-shift hard restart. They now live in C's common latch
+   reset as well, so stale pre-reset evidence cannot fire a recovery decision
+   later in the same hop.
+
+### Compatibility
+
+3. **No public processing API or static-pool layout changes.** C retires the
+   redundant shadow `streak` counter and stores the per-grid EMA retention in
+   its slot; the existing copy counter carries the equivalent max-threshold
+   decision, so `sizeof(ShadowCopy)`, `sizeof(Aec)` and every pool offset
+   stay unchanged. The pre-multirate `shadow_copy_init()` entry point remains
+   as a legacy-grid wrapper around the grid-aware initializer: it keeps the
+   authored 0.995 retention, with the EMA weighting the new sample by
+   `1 - retention` instead of the former `0.005` literal.
+
+4. **The AIAEC 16 kHz behaviour hash moves and old `linear_error` must be
+   rematerialized.** This is a live retune, not a hash-only refactor: on
+   AIAEC's frozen 512/256 grid the baseline retention becomes 0.992 instead
+   of 0.995, which moves `error_is_normal` and therefore the copy decisions,
+   and the C hard restart now clears evidence it used to keep. The old
+   identity therefore cannot enter AIAEC's byte-equivalent migration table.
+   Existing mic/far/target WAVs may be kept; recompute only `linear_error`,
+   repack, and retrain checkpoints that consume that channel.
+
+---
+
 ## [Unreleased] — 2026-08-30 — preserve FilterAnalyzer's IR exclusion span at 48 kHz
 
 ### Fixed

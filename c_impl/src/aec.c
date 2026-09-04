@@ -578,6 +578,15 @@ static void aec_reset_filter_latches(Aec* a) {
     a->shadow_frame_count = 0;
     shadow_copy_reset(&a->regime);
 
+    /* Evidence about the taps being abandoned must not survive a restart.
+     * Python clears these on delay_first/delay_shift through the same shared
+     * latch reset, and C already cleared them for external realignment. Keep
+     * the rule at this common seam so an internal recovery cannot consume
+     * pre-reset evidence later in the same hop. */
+    a->poor_coarse_counter = 0;
+    a->coarse_reset_hangover = 0;
+    a->leakage_div_sustained_counter = 0;
+
     /* Re-arm warmup with high Q. */
     filter_q_high(&a->main_filter);
     /* shadow is PBFDAF (no Q) — nothing to boost. */
@@ -654,8 +663,8 @@ static void aec_reset_filter_derived_state(Aec* a) {
  * collapse (measured: ~10x worse settled residual, ~45 hops of crawl instead
  * of ~5). aec_reset() does not make that call either.
  *
- * What it adds beyond aec_reset()'s filter subset is the coarse/leakage
- * sustain counters (see the call site) and the stationarity re-arm.
+ * What it adds beyond the common filter-derived latch reset above is the
+ * stationarity re-arm.
  * The AEC3 stationary-render freeze (pbfdkf_process's block_stationary
  * early-return) is gated on stationarity_active_hops having reached
  * stationarity_converge_hops -- i.e. on the filter being presumed converged. A
@@ -677,26 +686,6 @@ static void aec_reset_filter_for_realign(Aec* a) {
 
     filter_convergence_mark_diverged(&a->convergence);
     aec_reset_filter_latches(a);
-
-    /* Coarse-filter-quality and leakage SUSTAIN counters. All three count
-     * evidence ABOUT the taps just zeroed -- the coarse-vs-refined error ratio
-     * and the leakage-diverged bin fraction -- so a restarted filter must not
-     * inherit them, or the previous alignment's history fires a rescue on the
-     * new one.
-     *
-     * They sit HERE rather than in aec_reset_filter_latches, where the
-     * reference keeps them, because the C internal recovery paths have never
-     * cleared them and hoisting them would not be a refactor: unlike
-     * block_stationary_next above, nothing dominates these. All three are
-     * consumed later in the SAME hop as the delay-acquisition site that calls
-     * the shared helper (the poor-coarse rescue and the
-     * disallow_leakage_diverged gate), so a counter within one hop of its
-     * threshold at a recovery would decide differently. Closing that gap is an
-     * audio change to MATCHED and needs its own evidence; this entry point is
-     * reference-aligned either way -- the same fields are clear on return. */
-    a->poor_coarse_counter = 0;
-    a->coarse_reset_hangover = 0;
-    a->leakage_div_sustained_counter = 0;
 
     a->stationarity_active_hops = 0;
 }
@@ -828,6 +817,15 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
 void aec_testing_update_simple_mu_ratio(Aec* a, const float* output,
                                         const float* far_end, int n) {
     update_simple_mu_ratio(a, output, far_end, n);
+}
+
+/* TEST-ONLY hook for the common filter-restart seam.  The three counters are
+ * otherwise writable from the public struct, but no public operation invokes
+ * just this shared latch reset without also changing the filters and delay
+ * state.  Keeping the hook this narrow lets the structural test prove that an
+ * internal restart cannot retain pre-reset evidence. */
+void aec_testing_reset_filter_latches(Aec* a) {
+    aec_reset_filter_latches(a);
 }
 
 /* TEST-ONLY hook, same terms as the one above.
@@ -1628,7 +1626,8 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     doubletalk_init(&a->dt_analyzer, 1.5, 3.0, hop, cfg->sample_rate);
     epc_init(&a->epc, a->cfg.epc_hangover, cfg->epc_total_rise, cfg->epc_delta_threshold,
              hop, cfg->sample_rate);
-    shadow_copy_init(&a->regime, SC_GATE_ENERGY, 0.65, 3, a->cfg.epc_hangover);
+    shadow_copy_init_for_grid(&a->regime, SC_GATE_ENERGY, 0.65, 3,
+                              a->cfg.epc_hangover, hop, cfg->sample_rate);
     rsa_init(&a->rsa, a->rsa_counters, K, np);
 
     /* aec3_post backing (reuses a->post_fft, the shared handle constructed

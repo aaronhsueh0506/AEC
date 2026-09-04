@@ -83,8 +83,57 @@ class HandlerActionTests(unittest.TestCase):
         self.assertTrue(fired, 'boost_q never fired on sustained shadow-better streak')
         # By the time boost_q fires, main should be paused
         self.assertTrue(h.main_paused, 'pause not set after boost_q')
-        # Hysteresis + streak min — must take at least HYS_STREAK_MIN frames
-        self.assertGreaterEqual(boost_frame, h.HYS_STREAK_MIN - 1)
+        # Hysteresis + streak min: the validated 10-hop count on every grid.
+        self.assertEqual(boost_frame, h.hys_streak_min - 1)
+
+    def test_shadow_retention_is_retimed_and_streak_count_is_kept(self):
+        expected = {
+            (8000, 256, 128): (10, 0.9920120080140337),
+            (16000, 256, 128): (10, 0.9959979959889647),
+            (16000, 512, 256): (10, 0.9920120080140337),
+            (48000, 1024, 512): (10, 0.9946675569416230),
+        }
+        for (sample_rate, frame_size, hop_size), (hops, retention) in expected.items():
+            cfg = AecConfig(sample_rate=sample_rate, frame_size=frame_size,
+                            hop_size=hop_size)
+            h = PathChangeRegimeHandler(cfg)
+            self.assertEqual(h.hys_streak_min, hops)
+            self.assertAlmostEqual(
+                h.copy_err_baseline_retention, retention, places=12)
+
+            # Pin the consumers, not only the derived fields: the streak
+            # count decides the first eligible boost hop, and the retention
+            # is the coefficient actually applied by the EMA.
+            h._copy_err_baseline = 10.0
+            decisions = [
+                h.update(shadow_frame_count=200 + i, far_pwr=1e-2,
+                         main_err_smooth=1e-3, shadow_err_smooth=1e-7,
+                         epc_active=False, saturation_level=0.0,
+                         dt_from_energy=0.0)
+                for i in range(hops)
+            ]
+            self.assertFalse(any(d.boost_q for d in decisions[:-1]))
+            self.assertTrue(decisions[-1].boost_q)
+
+            h.reset()
+            h._copy_err_baseline = 1.0
+            h.update(shadow_frame_count=200, far_pwr=1e-2,
+                     main_err_smooth=0.0, shadow_err_smooth=0.0,
+                     epc_active=False, saturation_level=0.0,
+                     dt_from_energy=0.0)
+            self.assertAlmostEqual(h.copy_err_baseline, retention, places=12)
+
+    def test_legacy_grid_keeps_authored_shadow_timing_exact(self):
+        # The 320/160 grid is not a supported top-level AecConfig today, but
+        # the handler itself accepts a config-like object. This pins the
+        # provenance identity row rather than recomputing an expectation from
+        # the source under test.
+        cfg = AecConfig()
+        cfg.frame_size = 320
+        cfg.hop_size = 160
+        h = PathChangeRegimeHandler(cfg)
+        self.assertEqual(h.hys_streak_min, 10)
+        self.assertEqual(h.copy_err_baseline_retention, 0.995)
 
     def test_reverse_copy_fires_when_main_beats_shadow(self):
         """main_err << shadow_err while copy_allowed → decision.reverse_copy."""

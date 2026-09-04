@@ -632,7 +632,9 @@ static void section_epc_shadow(void) {
      * copy_allowed with a direct baseline poke (bypass the slow EMA
      * ramp-up; the increment/self-fire logic under test still runs for
      * real). */
-    shadow_copy_init(&s, SC_GATE_STREAK, /*threshold=*/0.9f, /*hysteresis=*/10, /*epc_hangover=*/5);
+    shadow_copy_init_for_grid(&s, SC_GATE_STREAK, /*threshold=*/0.9f,
+                              /*hysteresis=*/10, /*epc_hangover=*/5,
+                              /*hop_size=*/128, /*sample_rate=*/16000);
     s.copy_err_baseline = 10.0f;   /* fast-forward past the EMA ramp */
     {
         /* Mirrors epc_shadow.c's `static const int SC_AEC3_STREAK_FRAMES = 5`
@@ -649,12 +651,63 @@ static void section_epc_shadow(void) {
                 /*dt_from_energy=*/0.0f, /*dt_from_coherence=*/0.0f,
                 /*delay_reliable=*/1);
             (void)dec;
-            if (s.streak > max_seen) max_seen = s.streak;
-            CHECK(s.streak < SC_AEC3_STREAK_FRAMES_MIRROR,
+            if (s.copy_counter > max_seen) max_seen = s.copy_counter;
+            CHECK(s.copy_counter < SC_AEC3_STREAK_FRAMES_MIRROR,
                   "ShadowCopy(STREAK): streak never reaches/exceeds its own fire threshold"
                   " (self-resets in the same call it would cross it)");
         }
         CHECK(max_seen > 0, "ShadowCopy(STREAK): streak actually grows under sustained qualifying calls");
+    }
+    {
+        ShadowCopy g8, g128, g256, g48, legacy;
+        shadow_copy_init_for_grid(&g8, SC_GATE_ENERGY, 0.65f, 3, 5,
+                                  128, 8000);
+        shadow_copy_init_for_grid(&g128, SC_GATE_ENERGY, 0.65f, 3, 5,
+                                  128, 16000);
+        shadow_copy_init_for_grid(&g256, SC_GATE_ENERGY, 0.65f, 3, 5,
+                                  256, 16000);
+        shadow_copy_init_for_grid(&g48, SC_GATE_ENERGY, 0.65f, 3, 5,
+                                  512, 48000);
+        shadow_copy_init(&legacy, SC_GATE_ENERGY, 0.65f, 3, 5);
+        CHECK(g8.shadow_copy_hysteresis == 10 &&
+              g128.shadow_copy_hysteresis == 10 &&
+              g256.shadow_copy_hysteresis == 10 &&
+              g48.shadow_copy_hysteresis == 10,
+              "ShadowCopy: the 10-hop streak minimum is a hop count on every product grid");
+        CHECK(fabsf(g8.copy_err_baseline_retention - 0.992012008f) < 1e-7f &&
+              fabsf(g128.copy_err_baseline_retention - 0.995997996f) < 1e-7f &&
+              fabsf(g256.copy_err_baseline_retention - 0.992012008f) < 1e-7f &&
+              fabsf(g48.copy_err_baseline_retention - 0.994667557f) < 1e-7f,
+              "ShadowCopy: copy-error EMA keeps its ~2 s envelope on every product grid");
+        CHECK(legacy.shadow_copy_hysteresis == 10 &&
+              legacy.copy_err_baseline_retention == 0.995f,
+              "ShadowCopy: legacy 10 ms authoring grid keeps its authored coefficients");
+        {
+            ShadowCopy* grids[] = {&g8, &g128, &g256, &g48};
+            const int fire_hops[] = {10, 10, 10, 10};
+            const float retentions[] = {
+                0.992012008f, 0.995997996f,
+                0.992012008f, 0.994667557f,
+            };
+            for (int grid = 0; grid < 4; ++grid) {
+                ShadowCopy* live = grids[grid];
+                live->copy_err_baseline = 10.0f;
+                for (int i = 0; i < fire_hops[grid]; ++i) {
+                    ShadowCopyDecision d = shadow_copy_update(
+                        live, 200 + i, 1e-2f, 1e-3f, 1e-7f,
+                        0, 0.0f, 0.0f, 0.0f, 1);
+                    CHECK(d.boost_q == (i == fire_hops[grid] - 1),
+                          "ShadowCopy: the 10-hop streak minimum decides the live boost hop");
+                }
+
+                shadow_copy_reset(live);
+                live->copy_err_baseline = 1.0f;
+                (void)shadow_copy_update(live, 200, 1e-2f, 0.0f, 0.0f,
+                                         0, 0.0f, 0.0f, 0.0f, 1);
+                CHECK(fabsf(live->copy_err_baseline - retentions[grid]) < 1e-7f,
+                      "ShadowCopy: retimed retention is applied by the live EMA");
+            }
+        }
     }
     printf("section_epc_shadow: done (%ld checks so far, %ld fails)\n", g_checks, g_fails);
 }
