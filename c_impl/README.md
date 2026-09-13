@@ -38,22 +38,24 @@ publish` to copy this build's artifacts to a stable `dist/<backend>/current/`
 handoff path.
 
 Compile flags (already in Makefile): `-O2 -I include -I example`, plus
-`-ffp-contract=off` appended **last** (see "Unified
-FP-contraction policy" below). `-ffp-contract=off` is **required** (no FMA
-fusion — load-bearing for build determinism and golden stability across
-builds/compilers; see Precision & regression anchors below).
+`-ffp-contract=off -fno-math-errno` appended **last** (see "Unified
+FP-contraction policy" below). Both flags are **required**: no FMA fusion
+is load-bearing for build determinism and golden stability across
+builds/compilers (see Precision & regression anchors below), and
+`-fno-math-errno` lets the guarded AArch64 `sqrtf` in `fast_math.h` lower to
+a single `FSQRT` with no errno-checking libm fallback.
 
 ### Unified FP-contraction policy
 
-`-ffp-contract=off` is no longer just an AEC convention — it is a **repo-wide
+`-ffp-contract=off -fno-math-errno` is no longer just an AEC convention — it is a **repo-wide
 policy spanning all four repos** (`audio_common`, `NR/c_impl`, `AEC/c_impl`,
 `Audio_ALG/pipelines`): every translation unit any of their Makefiles compile
 — each repo's own sources *and* the vendored KISS/NE10 C and C++ TUs alike —
-builds with this flag. In every one of the four Makefiles the flag is
+builds with both flags. In every one of the four Makefiles the flags are
 appended **last** in the CFLAGS/CXXFLAGS assembly (after `EXTRA_CFLAGS`, after
 any BACKEND-conditional append, after `WERROR`/`NO_STDIO`), so nothing a
-caller passes can land after it and override it — AEC's Makefile previously
-carry the flag as the *third* token of the base CFLAGS assignment (before
+caller passes can land after them and override them — AEC's Makefile previously
+carried the contraction flag as the *third* token of the base CFLAGS assignment (before
 `EXTRA_CFLAGS` was folded in), before being moved to its current
 trailing position. Each Makefile also rejects outright, at parse time, an
 `EXTRA_CFLAGS` (or `CFLAGS=` override) containing `-Ofast`, `-ffast-math`, or

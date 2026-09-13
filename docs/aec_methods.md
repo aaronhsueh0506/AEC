@@ -687,23 +687,31 @@ within a **2e-2 float32 tolerance** (not strict equality) and is the
 
 ### Math backends
 
-`c_impl/include/fast_math.h` provides two implementations selected at compile
-time (orthogonal to the FFT-backend choice above):
+The shared `audio_common/include/fast_math.h` (sibling repo, header-only)
+provides two implementations selected at compile time (orthogonal to the
+FFT-backend choice above):
 
 * **Default (production): `fast_math.h` approximations.** `fast_exp` (LUT +
-  Taylor), `fast_log`/`fast_log10` (IEEE-754 + Taylor), `fast_sqrt`
-  (Newton-Raphson). These add a documented **~1e-5 .. 1e-4 tolerance** in the
-  stages that call `exp`/`sqrt` (SuppressionGain Wiener mapping, CNG gain, dB
-  conversions) — on top of the float32-FFT tolerance above.
+  Taylor), `fast_log`/`fast_log10` (IEEE-754 range reduction + degree-4
+  minimax), and `fast_sqrt` (correctly-rounded AArch64 hardware FSQRT;
+  Newton-Raphson only as a portable non-AArch64 fallback). `fast_exp` has a
+  worst relative error of **3.9e-3** (about 0.034 dB on a gain), which reaches
+  the stages that call `exp` (SuppressionGain near-end sigmoid, CNG gain, dB
+  conversions) on top of the float32-FFT tolerance above; the AArch64
+  `fast_sqrt` is correctly rounded and adds none. The E2E parity gate measures
+  the combined effect at ~1.7e-5 (linear) / ~7e-4 (final output) against the
+  2e-2 tolerance.
 * **`-DUSE_STANDARD_MATH`: libm.** Swaps the approximations for `expf`/`logf`/
-  `sqrtf` (`fast_math.h:77-84`). Historically this isolated the non-FFT logic
+  `sqrtf` (the `USE_STANDARD_MATH` block at the top of `fast_math.h`). Historically this isolated the non-FFT logic
   for the bit-exact parity checks; with all production math now float32 by
   design (not just approximated), this flag no longer implies a parity claim
   — it remains available as a precision/perf toggle only.
 
-`-ffp-contract=off` is mandatory in `CFLAGS` on both backends and on both math
-modes — it is retained for build determinism and golden stability (no fused
-multiply-add reassociation), independent of any Python-parity target. The C
+`-ffp-contract=off -fno-math-errno` is mandatory in `CFLAGS` on both backends
+and on both math modes — the first flag retains build determinism (no fused
+multiply-add reassociation), independent of any Python-parity target; the
+second makes guarded AArch64 `sqrtf` lower to `FSQRT` without an errno
+fallback. The DSP pipeline does not read math `errno`. The C
 structure mirrors the Python class boundaries one-to-one (`PBFDKF`,
 `ShadowFilter`, `AecState`, `SuppressionGain`, `EchoPathDelayEstimator`, …), so
 a module-level regression isolates any divergence to a single stage. See

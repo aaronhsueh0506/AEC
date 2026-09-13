@@ -20,7 +20,7 @@ numerical tolerance (not bit-equal — see the float32 campaign note below):
   `preprocessing`, `erle`, `dataclasses`, `config`, `orchestrator`,
   `debug_logger`).
 - `c_impl/` — production C port. Mirrors the Python class structure
-  (`PBFDKF`, `ShadowFilter`, etc.). Built with `-ffp-contract=off` mandatory.
+  (`PBFDKF`, `ShadowFilter`, etc.). Built with `-ffp-contract=off -fno-math-errno` mandatory.
 
 Algorithm version is tracked by `__version__` in [aec.py](../python/aec.py)
 (currently **3.23.0**; BALANCED changed in 3.23.0 — no-PA matched-filter
@@ -148,13 +148,13 @@ bin="$(make -s print-bin-dir)"
 "$bin/aec_wav" mic.wav ref.wav out.wav --debug-level 2 --debug-log /tmp/aec.log
 ```
 
-`-ffp-contract=off` in `CFLAGS` is mandatory for build determinism and golden
+`-ffp-contract=off -fno-math-errno` in `CFLAGS` is mandatory for build determinism and golden
 stability (no FMA reassociation drift between compilers/builds) — retained
 post-campaign even though Python↔C is no longer a byte-equal target. As of
 the build hardening work this is a **unified policy across all four repos**
 (`audio_common`, `NR/c_impl`, `AEC/c_impl`, `Audio_ALG/pipelines`): every TU
 each Makefile compiles, own code and vendored KISS/NE10 alike, builds with
-the flag appended LAST (after `EXTRA_CFLAGS`/`BACKEND`/`WERROR`/`NO_STDIO`)
+the flags appended LAST (after `EXTRA_CFLAGS`/`BACKEND`/`WERROR`/`NO_STDIO`)
 so nothing can override it, with parse-time rejection of an `EXTRA_CFLAGS`
 containing `-Ofast`/`-ffast-math`/`-ffp-contract=<anything>`, and
 outright rejection of any command-line `CFLAGS=`/`CXXFLAGS=`/`LDFLAGS=`

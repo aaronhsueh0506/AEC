@@ -299,7 +299,9 @@ endif
 # $(FP_POLICY)`, appended LAST), so there is exactly one `:=` definition of
 # FP_POLICY in this file, just moved. Same fix audio_common already applied
 # to its own FP_POLICY/FFT_WRAPPER_ALIAS_CFLAGS two rounds ago.
-FP_POLICY := -ffp-contract=off
+# Keep scalar/NEON operation ordering stable and let audio_common's guarded
+# AArch64 sqrtf calls lower to FSQRT without an errno-checking libm fallback.
+FP_POLICY := -ffp-contract=off -fno-math-errno
 
 # FP_ALLOWED_CHARS_RE (added alongside the FP-policy allow-list redesign
 # below -- replicated from audio_common's identical fix, see the "REDESIGN"

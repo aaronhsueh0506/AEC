@@ -135,7 +135,7 @@ test -n "$AC_LIB" || { echo "FATAL: could not resolve audio_common archive path"
 echo "--- AEC test_counter_saturation UBSan build (AC_DIR=$AC_DIR EXTRA_CFLAGS=$EXTRA_CFLAGS) ---"
 # shellcheck disable=SC2046
 "$CC" -Wall -Wextra -O2 -std=gnu99 -I./include -I./example -I"$AC_DIR/include" \
-    -ffp-contract=off $EXTRA_CFLAGS \
+    -ffp-contract=off -fno-math-errno $EXTRA_CFLAGS \
     -fsanitize=undefined -fno-sanitize-recover=all \
     -o "$BIN" test/test_counter_saturation.c $(find src -name '*.c') \
     "$AC_LIB" -lm
