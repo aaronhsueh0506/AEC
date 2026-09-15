@@ -49,7 +49,7 @@ What is asserted:
          quarantine there.
   7. EARLY RELEASE ON COLLAPSE IS REAL, not just the expiry wearing off: the
      backward MOVE (old path removed, so cancellation genuinely collapses) is
-     accepted 37 hops late -- strictly INSIDE the 62-hop window, so what
+     accepted 35 hops late -- strictly INSIDE the 62-hop window, so what
      released it was the collapse.
 
 Mutation checks (each breaks one line and must go red here):
@@ -57,7 +57,7 @@ Mutation checks (each breaks one line and must go red here):
     fails: the forward move is held and the trajectories stop matching;
   - drop the expiry -> rows 2 and 5 fail (nothing is ever accepted);
   - drop the cancellation test from the predicate -> row 7 fails: the
-    backward move is held for the full window instead of 37 hops;
+    backward move is held for the full window instead of 35 hops;
   - drop the inst-ERLE-peak arm -> row 2 fails;
   - drop the windowed-ERLE arm -> row 7's "the quarantine engages at all"
     assertion fails (guarded == unguarded);
@@ -137,13 +137,13 @@ _BWD_HOPS = 600
 _BWD_AT = 375
 _BWD_D0 = 3000               # pre-move delay
 _BWD_D1 = 64                 # post-move: EARLIER, so the direction test fires
-# Measured: guarded acceptance lands 36 hops after unguarded, strictly inside
+# Measured: guarded acceptance lands 35 hops after unguarded, strictly inside
 # the 62-hop window, because the old path is GONE and cancellation really
 # collapses. Pinned as the strict "engaged at all" plus "released before
-# expiry" pair. (Was 37 while the aggregator reported the pre-echo candidate;
-# reporting the dominant peak moves acquisition by one 32-sample grid step in
-# this scene, and the hold with it.)
-_BWD_EXPECTED_DELTA = 36
+# expiry" pair. (Was 36 with a non-causal constraint-window fade; the strict
+# AEC3 half-zero constraint removes that circular leakage and moves the
+# cancellation-collapse release one hop earlier.)
+_BWD_EXPECTED_DELTA = 35
 
 # --- the multipath / path-addition scene ---------------------------------
 # The old reflection at _MP_OLD survives the whole run at gain g_old; a

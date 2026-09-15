@@ -1817,6 +1817,41 @@ static void test_filter_restart_clears_derived_counters(void) {
     }
 }
 
+/* The partition constraint is an overlap-save validity boundary, not a
+ * cosmetic taper: AEC3 keeps every causal coefficient and clears the complete
+ * circular half.  Pin the actual table at every supported grid so a future
+ * smoothing retune cannot silently put non-causal taps back into W. */
+static void test_td_constraint_strict_half_zero(void) {
+    for (int r = 0; r < N_GRIDS; ++r) {
+        int sr = GRIDS[r].sample_rate;
+        int fft = GRIDS[r].fft_size;
+        int hop = fft / 2;
+        PBFDAF filter;
+        char what[192];
+        int ok = 1;
+
+        if (pbfdaf_init(&filter, fft, 2, 0.3f, 1e-6f,
+                        hop, 1, sr) != 0) {
+            snprintf(what, sizeof(what),
+                     "sr=%d fft=%d: build filter for TD constraint", sr, fft);
+            CHECK(0, what);
+            continue;
+        }
+        for (int i = 0; i < fft; ++i) {
+            float expected = i < hop ? 1.0f : 0.0f;
+            if (filter.td_window[i] != expected) {
+                ok = 0;
+                break;
+            }
+        }
+        snprintf(what, sizeof(what),
+                 "sr=%d fft=%d: TD constraint is [ones(hop), zeros(hop)]",
+                 sr, fft);
+        CHECK(ok, what);
+        pbfdaf_free(&filter);
+    }
+}
+
 int main(void) {
     test_cola();
     test_filter_analyzer_rate_scaled_exclusion_window();
@@ -1834,6 +1869,7 @@ int main(void) {
     test_alpha_r_reaches_the_direct_pbfdkf_path();
     test_simple_mu_frozen_exception();
     test_filter_restart_clears_derived_counters();
+    test_td_constraint_strict_half_zero();
     test_mu_holdoff_rearm_guard();
     test_render_activity_first_observation();
 

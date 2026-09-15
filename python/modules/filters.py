@@ -51,15 +51,12 @@ class PBFDAF:
         self._constraint_round_robin = False
         self._partition_to_constrain = 0
 
-        # Time-domain constraint window: 50% truncation with smooth non-causal fade.
-        # Fade is placed in the NON-CAUSAL region [hop:hop+fade_len] so the causal
-        # taps [0:hop] are preserved at 1.0. Prior bug placed the fade at
-        # [hop-fade_len:hop], attenuating the last 40 causal taps → dead zone.
-        self._td_window = np.ones(self.fft_size, dtype=np.float32)
-        fade_len = self.hop_size // 4  # 40 samples for hop=160
-        fade = 0.5 * (1.0 - np.cos(np.pi * np.arange(fade_len) / fade_len))
-        self._td_window[self.hop_size:self.hop_size + fade_len] = fade[::-1].astype(np.float32)
-        self._td_window[self.hop_size + fade_len:] = 0.0
+        # AEC3 AdaptiveFirFilter::Constrain: retain the complete causal half of
+        # each overlap-save partition and clear its circular/non-causal half.
+        # A non-causal fade leaks wrap-around energy into the next valid hop;
+        # moving that fade before `hop` instead would discard valid filter taps.
+        self._td_window = np.zeros(self.fft_size, dtype=np.float32)
+        self._td_window[:self.hop_size] = 1.0
 
         # Filter weights [n_partitions, n_freqs]
         self.W = np.zeros((n_partitions, self.n_freqs), dtype=np.complex64)
@@ -541,7 +538,7 @@ class PBFDAF:
             p_idx = (curr_p - p) % self.n_partitions
             grad = _err_grad * np.conj(self.X_buf[p_idx])
             self.W[p] += mu_eff * grad
-            # Time-domain constraint: fade out non-causal part (raised cosine).
+            # Time-domain overlap-save constraint: clear the non-causal half.
             # Round-robin (default OFF): constrain only the scheduled partition.
             if self.enable_td_constraint and (
                     not self._constraint_round_robin
@@ -923,7 +920,7 @@ class PBFDKF(PBFDAF):
             K = mu_aec3 * np.conj(X)             # per-bin AEC3 K
             K_scaled = K * mu_scale_arr          # apply DT scale
             self.W[p] += K_scaled * _err_grad
-            # Time-domain constraint (raised cosine fade).
+            # Time-domain overlap-save constraint: clear the non-causal half.
             # Round-robin (default OFF): constrain only the scheduled partition.
             if self.enable_td_constraint and (
                     not self._constraint_round_robin

@@ -88,22 +88,15 @@ static void pbfdaf_compute_sizes(int hop_size, int* out_hop, int* out_blk,
 /* td_window + sqrt-Hann analysis window (P0.4 canonical periodic sqrt-Hann,
  * denom = block_size). */
 static void pbfdaf_fill_windows(PBFDAF* p) {
-    int fade_len = p->hop_size / 4;
     memset(p->td_window, 0, (size_t)p->fft_size * sizeof(float));
-    /* E1 fix: all causal taps [0:hop] preserved at 1.0.  Prior code placed the
-     * descending fade in [hop-fade_len:hop], suppressing the last 40 causal taps
-     * → dead zone in every partition of the 832-tap IR. */
+    /* AEC3 AdaptiveFirFilter::Constrain: keep the causal half of each
+     * partition and clear the second half exactly.  Any non-zero coefficient
+     * at or beyond hop belongs to the circular/non-causal half of this
+     * overlap-save partition and leaks wrap-around energy into the next valid
+     * hop.  Keep every causal tap; a fade in [hop-fade_len, hop) would shorten
+     * the effective filter for no overlap-save benefit. */
     for (int i = 0; i < p->hop_size; ++i) p->td_window[i] = 1.0f;
-    /* Non-causal fade [hop:hop+fade_len]: descending from ~1.0 to 0.0.
-     * float32-by-design (Python double parity retired). */
-    for (int i = 0; i < fade_len; ++i) {
-        int idx = p->hop_size + i;
-        if (idx < p->fft_size) {
-            float v = 0.5f * (1.0f - cosf(M_PI_AEC * (float)(fade_len - 1 - i) / (float)fade_len));
-            p->td_window[idx] = v;
-        }
-    }
-    /* [hop+fade_len, fft_size) stays 0. */
+    /* [hop, fft_size) stays 0. */
     for (int i = 0; i < p->block_size; ++i) {
         float h = 0.5f * (1.0f - cosf(2.0f * M_PI_AEC * (float)i / (float)p->block_size));
         p->sqrt_hann[i] = sqrtf(h);
