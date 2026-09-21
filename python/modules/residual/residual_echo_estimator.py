@@ -279,6 +279,7 @@ class ResidualEchoEstimator:
         self._reverb_decay_est = ReverbDecayEstimator(
             n_partitions=int(n_partitions),
             hop_size=int(hop_size),
+            sample_rate=int(self._sr),
             default_decay=float(self._reverb_cfg.decay),
             mild_decay=(float(self._reverb_cfg.decay)
                         * float(self._reverb_cfg.mild_decay_scale)),

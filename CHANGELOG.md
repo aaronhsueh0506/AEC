@@ -41,6 +41,25 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-09-21 — fix adaptive reverb-decay units
+
+### Fixed
+
+1. The optional partition-energy reverb-decay estimator stored its fitted
+   slope per sample even though the residual-echo consumer retimes an AEC3
+   per-4-ms-block value. This made the estimate about 64 times too sticky at
+   16 kHz and sample-rate dependent. The estimator now converts each fitted
+   partition slope to the 4 ms convention using the live sample rate and hop.
+   Parameterized tests cover 8/16/48 kHz at 8/16 ms hops; the C parity-support
+   implementation uses the same 64-sample convention on its fixed 16 kHz grid.
+
+### Compatibility
+
+2. `use_adaptive_decay` remains disabled by default, so the shipped fixed-decay
+   processing path and public API are unchanged.
+
+---
+
 ## [Unreleased] — 2026-09-04 — retime the shadow-copy baseline and discard abandoned-filter evidence
 
 ### Fixed

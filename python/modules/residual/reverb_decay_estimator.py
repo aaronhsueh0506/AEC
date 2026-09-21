@@ -29,6 +29,8 @@ from typing import Optional
 
 import numpy as np
 
+from ..aec3_scale import AEC3_BLOCK_SAMPLES_16K
+
 
 _K_EARLY_REVERB_MIN_SIZE_BLOCKS = 3
 _K_BLOCKS_PER_SECTION = 6
@@ -201,9 +203,11 @@ class ReverbDecayEstimator:
                  default_decay: float = 0.85,
                  mild_decay: float = 0.5,
                  use_adaptive: bool = True,
-                 use_aec3_block_energy: bool = False) -> None:
+                 use_aec3_block_energy: bool = False,
+                 sample_rate: int = 16000) -> None:
         self._n_partitions = int(n_partitions)
         self._hop_size = int(hop_size)
+        self._sample_rate = int(sample_rate)
         self._default_decay = float(default_decay)
         self._mild_decay = float(mild_decay)
         self._use_adaptive = bool(use_adaptive)
@@ -337,12 +341,15 @@ class ReverbDecayEstimator:
         if den == 0.0:
             return
         slope_per_partition = num / den
-        # slope_per_partition is in log2 per partition (our unit = hop = 160 samples).
-        # Divide by hop_size (samples/partition) → log2 per sample.
-        # AEC3 convention: decay stored per-block (4 ms @16kHz = 64 samples); here
-        # per-sample then raised to hop power at apply time: decay_per_hop = decay^hop.
-        decay_log2_per_sample = slope_per_partition / max(1, self._hop_size)
-        decay_new = float(math.pow(2.0, decay_log2_per_sample))
+        # Store the fitted slope in AEC3's 4 ms-block convention: the consumer
+        # retimes this value from 4 ms to the live hop (a per-sample value
+        # retimed that way is 64x too sticky at 16 kHz and sample-rate
+        # dependent).
+        block_samples = (AEC3_BLOCK_SAMPLES_16K / 16000.0) * max(1, self._sample_rate)
+        decay_log2_per_block = (
+            slope_per_partition * block_samples / max(1, self._hop_size)
+        )
+        decay_new = float(math.pow(2.0, decay_log2_per_block))
         decay_new = max(0.97 * self._decay, decay_new)
         decay_new = min(decay_new, _K_MAX_DECAY)
         decay_new = max(decay_new, _K_MIN_DECAY)

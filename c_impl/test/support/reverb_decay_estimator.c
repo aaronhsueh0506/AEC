@@ -302,7 +302,7 @@ void rde_update_legacy(ReverbDecayEstimator *r,
     double x[256];
     double tmp[256];
     double x_mean, y_mean, num, den;
-    double slope_per_partition, decay_log2_per_sample, decay_new;
+    double slope_per_partition, decay_log2_per_block, decay_new;
     int hop_eff;
 
     if (stationary_signal) return;
@@ -345,8 +345,14 @@ void rde_update_legacy(ReverbDecayEstimator *r,
 
     slope_per_partition = num / den;
     hop_eff = (r->hop_size > 1) ? r->hop_size : 1;   /* max(1, hop_size) */
-    decay_log2_per_sample = slope_per_partition / (double)hop_eff;
-    decay_new = pow(2.0, decay_log2_per_sample);
+    /* Historical support port uses its generator's 16 kHz grid.  Store the
+     * estimate in AEC3's 4 ms (64-sample) convention, matching Python's
+     * default sample_rate=16000.  The old per-sample value was subsequently
+     * retimed as a per-block value and was therefore about 64x too sticky. */
+    decay_log2_per_block = slope_per_partition *
+                           (double)RDE_K_FFT_LENGTH_BY_2 /
+                           (double)hop_eff;
+    decay_new = pow(2.0, decay_log2_per_block);
     if (0.97 * r->decay > decay_new) decay_new = 0.97 * r->decay; /* max */
     if (decay_new > RDE_K_MAX_DECAY) decay_new = RDE_K_MAX_DECAY; /* min */
     if (decay_new < RDE_K_MIN_DECAY) decay_new = RDE_K_MIN_DECAY; /* max */
