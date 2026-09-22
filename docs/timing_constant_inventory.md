@@ -1,6 +1,6 @@
 # Hop-authored timing-constant inventory
 
-Generated from `docs/timing_constant_inventory.json` by `python/diag/gen_timing_inventory.py`. **80 candidates**, each in exactly one category; **27 still open**.
+Generated from `docs/timing_constant_inventory.json` by `python/diag/gen_timing_inventory.py`. **80 candidates**, each in exactly one category; **26 still open**.
 
 This file is GENERATED, not hand-edited. Regenerating is how the counts, the category exclusivity and the absence of truncation stay true; an edit-in-place would reintroduce exactly the drift that made the first version of this document unusable as release evidence. `gen_timing_inventory.py --check` rebuilds it in memory and fails if the committed text has drifted.
 
@@ -30,8 +30,8 @@ additive per-hop leak (dB/hop): scales LINEARLY, not by a power law:
 
 | category | count |
 |---|---:|
-| Retime | 27 |
-| Already retimed | 17 |
+| Retime | 26 |
+| Already retimed | 18 |
 | Keep: rejected retime | 5 |
 | Keep: event count | 6 |
 | Keep: fixed internal cadence | 2 |
@@ -44,7 +44,7 @@ All 35 distinct source paths cited below exist in the tree.
 
 ---
 
-## Retime (27)
+## Retime (26)
 
 Live on the default-ON audio path, semantically a wall-clock duration, and not currently routed through a retiming helper.
 
@@ -70,13 +70,12 @@ Live on the default-ON audio path, semantically a wall-clock duration, and not c
 | 18 | `poor_excitation_counter initial value 400 (frozen 10 ms-grid AEC3_POOR_EXC_COUNTER_INITIAL_HOPS)` | 4000 ms (AEC3 kPoorExcitationCounterInitial = 1000 blocks x 4 ms). Not hop-authored at all -- it is a block count that was frozen through blocks_to_hops(1000,160,16000)=400 at the 10 ms grid. | high |
 | 19 | `recent inst-ERLE peak window (warm tap-transfer gate)` | 150 ms (15 hops x 10 ms) | high |
 | 20 | `shadow poor_excitation_counter reset on echo-path change (AEC3_POOR_EXC_COUNTER_INITIAL_HOPS = 400)` | 4000 ms (AEC3 kPoorExcitationCounterInitial = 1000 blocks x 64/16000 s); 400 hops at the 10 ms anchor grid | high |
-| 21 | `shadow-copy warmup gate (shadow_frame_count < 50)` | 500 ms (validated) -- authored 800 ms, silently cut to 500 ms by the 2026-03-23 grid unification and accepted there ever since | high |
-| 22 | `stationary-DT wn_err_baseline silence retention` | 200 ms (TC = 20 hops x 10 ms) | high |
-| 23 | `stationary-DT wn_err_baseline speech-active retention` | 10000 ms (TC = 1000 hops x 10 ms) | high |
-| 24 | `delay-shift trigger gate / pending-match tolerance (32 / 16 samples)` | 2.0 ms trigger / 1.0 ms match tolerance (32 and 16 samples at 16 kHz) | medium |
-| 25 | `P3f main_err baseline downward EMA (0.9 / 0.1)` | TC 94.9 ms (repo convention TC = -hop_s/ln(alpha) = -0.010/ln(0.9)); 10 hops by the 1/(1-alpha) convention = 100 ms | medium |
-| 26 | `RenderSignalAnalyzer narrow-band mask counter threshold (_COUNTER_THRESHOLD / RSA_COUNTER_THRESHOLD)` | AMBIGUOUS BY DESIGN -- 50 ms if you preserve our own validated behaviour (5 hops at the 10 ms grid), 20 ms if you restore AEC3 fidelity (5 x 4 ms blocks). The two disagree by 2.5x and the choice must be stated, not assumed. | medium |
-| 27 | `RenderSignalAnalyzer poor-excitation threshold (_POOR_EXCITATION_THRESHOLD / RSA_POOR_EXCITATION_THRESHOLD)` | AMBIGUOUS, same fork as its sibling -- 100 ms (10 hops at the 10 ms grid, our validated behaviour) vs 40 ms (10 x 4 ms AEC3 blocks, AEC3 fidelity) | medium |
+| 21 | `stationary-DT wn_err_baseline silence retention` | 200 ms (TC = 20 hops x 10 ms) | high |
+| 22 | `stationary-DT wn_err_baseline speech-active retention` | 10000 ms (TC = 1000 hops x 10 ms) | high |
+| 23 | `delay-shift trigger gate / pending-match tolerance (32 / 16 samples)` | 2.0 ms trigger / 1.0 ms match tolerance (32 and 16 samples at 16 kHz) | medium |
+| 24 | `P3f main_err baseline downward EMA (0.9 / 0.1)` | TC 94.9 ms (repo convention TC = -hop_s/ln(alpha) = -0.010/ln(0.9)); 10 hops by the 1/(1-alpha) convention = 100 ms | medium |
+| 25 | `RenderSignalAnalyzer narrow-band mask counter threshold (_COUNTER_THRESHOLD / RSA_COUNTER_THRESHOLD)` | AMBIGUOUS BY DESIGN -- 50 ms if you preserve our own validated behaviour (5 hops at the 10 ms grid), 20 ms if you restore AEC3 fidelity (5 x 4 ms blocks). The two disagree by 2.5x and the choice must be stated, not assumed. | medium |
+| 26 | `RenderSignalAnalyzer poor-excitation threshold (_POOR_EXCITATION_THRESHOLD / RSA_POOR_EXCITATION_THRESHOLD)` | AMBIGUOUS, same fork as its sibling -- 100 ms (10 hops at the 10 ms grid, our validated behaviour) vs 40 ms (10 x 4 ms AEC3 blocks, AEC3 fidelity) | medium |
 
 ### `_far_power_ema / _mic_power_ema smoothing (0.95)`
 
@@ -258,15 +257,6 @@ Live on the default-ON audio path, semantically a wall-clock duration, and not c
 - **Provenance**: INTRODUCE = c5c09c4 (2026-06-03, 'WS5.6: C port end-to-end BIT-EXACT to Python aec.py (v3.22 cutover)'), per `git log -S"AEC3_POOR_EXC_COUNTER_INITIAL_HOPS"` -> {c5c09c4, 7871a30, d70b2fc}. Grid at c5c09c4: hop 160 @16k = 10 ms, so blocks_to_hops(1000,160,16000) = 400 was correct then and aec3_scale.h:77 documents exactly that derivation. VALIDATE = the same C-cutover parity campaign (bit-exactness against Python on the 10 ms grid) -- i.e. it was validated as a PARITY value, never as an independently tuned audio value. The Python side and one C layer have ALREADY been fixed to the helper: filters.py:239-243 (`_aec3_scale.blocks_to_hops(1000, self.hop_size, self.sample_rate)`) and pbfdkf.c:880-884 (`aec3_blocks_to_hops(1000, hop_size, sample_rate)`), both carrying comments describing this exact freeze bug. Construction path is also correct: aec.c:983/1001.
 - **Reasoning**: Live and default-ON, and it is a genuine hop-authored duration (derived from an AEC3 block count) routed through no helper at aec.c:1769/1780/1815. Verdict is retime -- purely for consistency with the identical fix already applied one layer down in pbfdkf.c and filters.py -- but there is NO audio-impact claim to bank here: the sole consumer is a `< n_partitions` comparison that both values clear trivially, so this is hygiene, not a release blocker. It is worth doing anyway for the reason both existing fix comments give: a future n_partitions or grid change could silently resurrect a real bug. Fix = `aec3_blocks_to_hops(1000, a->hop_size, a->cfg.sample_rate)` at aec.c:1769/1780/1815 and pbfdkf.c:735, plus filters.py:558.
 
-### `shadow-copy warmup gate (shadow_frame_count < 50)`
-
-- **Verdict**: retime (high confidence, open)
-- **Anchor**: 500 ms (validated) -- authored 800 ms, silently cut to 500 ms by the 2026-03-23 grid unification and accepted there ever since
-- **Effective today**: 8k 256/128 (hop 16 ms) = 800 ms; 16k 256/128 (hop 8 ms, DEFAULT) = 400 ms (0.8x); 16k 512/256 (hop 16 ms) = 800 ms; 48k 1024/512 (hop 10.667 ms) = 533 ms. Retiming to the 500 ms anchor gives 31 / 63 / 31 / 47 hops respectively.
-- **Consumer**: python/modules/epc.py:262 `if shadow_frame_count < 50: return decision` and c_impl/src/epc_shadow.c:176 `if (shadow_frame_count < 50) return d;` -- an early return at the TOP of PathChangeRegimeHandler.update()/shadow_copy_update(), before any counter is touched. shadow_frame_count itself is incremented UNCONDITIONALLY once per hop whenever a shadow filter exists (python/modules/orchestrator.py:1778, c_impl/src/aec.c:1934), never reset on non-qualifying hops -> it is wall-clock, NOT an evidence count. The CONV_FRAMES / ne_recent_sustain=3 exception does not apply.
-- **Provenance**: (a) INTRODUCE = 7be26e8 (2026-03-17) -- commit body literally says "加入50-frame warm-up guard"; `git show 7be26e8:python/aec.py | grep frame_size` -> `frame_size: int = 512 / hop_size: int = 256` @16k = 16 ms -> authored span 800 ms. (b) The grid was unified to 320/160 (10 ms) at 9735b0f (2026-03-23), a commit that WAS re-benched at the new grid ("Latency reduced from 16ms to 10ms; FS ERLE improved +1.0 dB") with the 50 unchanged. Last targeted EMPIRICAL validation of this specific handler = cbd38ea (2026-05-11), the revert of the P52 A.0 retirement attempt; its cohort evidence (qNvSMyUSXUyrDGpOw7s6qg_farend_singletalk, main W diverges to ERLE_main -27 dB without the handler) is quoted verbatim in the PathChangeRegimeHandler docstring at python/modules/epc.py:169-181. `git show cbd38ea:python/modules/config.py | grep frame_size` -> `frame_size: int = -1 # Auto: sample_rate * 20ms` -> 320/160 @16k = 10 ms. So VALIDATED SPAN = 500 ms. The 10 ms grid held continuously from 2026-03-23 to d862a38 (2026-07-31), so every 800-case bench in between measured 500 ms.
-- **Reasoning**: RETIME, confirmed. Genuine warm-up duration guarding boost_q / pause_main / reverse_copy against pre-convergence shadow copies -- exactly the degradation 7be26e8 was written to prevent, so under-timing it by 20% at the new default is a real risk-window shrink. No retime helper on either side. Retime to aec3_ms_to_hops(500, hop, sr) in C and aec3_scale.ms_to_hops(500, hop, sr) in Python; both must move together or Python/C diverge. One caveat worth recording: the Python increment is additionally gated on `self._freq_near_queue is None` (orchestrator.py:1777), so in the frequency-domain near-queue mode the counter does not advance at all -- irrelevant on the default path but it means the C mirror at aec.c:1934 is not a literal one-to-one guard.
-
 ### `stationary-DT wn_err_baseline silence retention`
 
 - **Verdict**: retime (high confidence, open)
@@ -323,7 +313,7 @@ Live on the default-ON audio path, semantically a wall-clock duration, and not c
 
 ---
 
-## Already retimed (17)
+## Already retimed (18)
 
 Verified to route through a retiming helper. Listed so that a future audit can tell 'checked and correct' from 'never looked at'.
 
@@ -474,6 +464,15 @@ Verified to route through a retiming helper. Listed so that a future audit can t
 - **Consumer**: preprocessing.py:99-103 — asymmetric EMA `saturation_level = alpha*saturation_level + (1-alpha)*raw_sat`, alpha chosen per hop by whether raw_sat is rising. The constant multiplies the OLD state, i.e. RETENTION convention, so aec3_scale.growth_rehop (direct power law) is the correct helper, not per_block_ema_alpha_to_per_hop — I checked the update line rather than trusting the field name. detect() is called once per hop from orchestrator.py:1395-1396 on far_end and near_end. No counter, so no reset question. DEFAULT-ON: config.enable_saturation_detect defaults True (config.py:380) and both detectors are constructed with the live config.hop_size/sample_rate at orchestrator.py:761-766. C mirror saturation.c:26-36 uses the identical aec3_growth_rehop(·, 256, 16000, hop, sr).
 - **Provenance**: INTRODUCE = VALIDATE, which is what makes this one clean. 243d67c (2026-03-23, 'v1.10.0: HP filter + saturation detect + anti-blackout — DT ERLE 10.8dB surpasses AEC3') both introduces SaturationDetector and carries its own AEC Challenge bench in the commit message (FS ERLE 14.8 dB +0.5, DT ERLE 10.8 dB +1.4, DT PESQ 1.16 vs AEC3 1.09). Default grid at that commit, read from git show 243d67c:python/aec.py (config.py did not exist yet; git ls-tree confirms python/aec.py held AecConfig): `sample_rate: int = 16000` / `frame_size: int = 512` / `hop_size: int = 256` => 16 ms. So the 16 ms anchor is backed by a bench in the same commit, not inferred. RE-VALIDATED at dc31dd2 (2026-08-06): 90-case blind A/B, eval/ab_evidence/2026-08-06-adaptation-retiming/, NO_PREALIGN=1, --preset balanced --filter 52 --cng, grids 16k/256(hop 128) and 16k/512(hop 256); worst Δecho −0.0169 / worst Δdeg −0.0133 against a ±0.05 abort band. Its README documents the 256-vs-160 reference split as deliberate ('retiming them off the 10 ms reference would be wrong by 1.6x'), and the commit message records a mutation test that reverting the reference to 10 ms fails. That mutation was originally written against alpha_r, which shared the 16 ms reference at the time; alpha_r moved to a 10 ms anchor at d7e94f7 and the saturation pair is now the only 16 ms family member, so the mutation is stated against alpha_release (494.98 ms where 791.97 ms is expected). The in-code comment (preprocessing.py:68-73, saturation.c:31-33) is CURRENTLY ACCURATE.
 - **Reasoning**: Already retimed, in both languages, against the correct 16 ms reference — this is one of the two constants that avoided the 1.6x trap. Python and C agree textually and are now pinned by dc31dd2's test_rate_structural (d2) check, which asserts the effective value on all four grids and is mutation-tested both ways (reverting to the literal fails; retiming off 10 ms fails). One honest caveat on the 2026-08-06 A/B: it establishes 'no harm', not 'no effect' — its own README says so — so it confirms the retiming did not regress the corpus but could not by itself have distinguished a correct anchor from a mildly wrong one. The anchor stands on 243d67c's same-commit bench. No action.
+
+### `shadow-copy warmup gate (shadow_frame_count < 50)`
+
+- **Verdict**: already retimed (high confidence, closed)
+- **Anchor**: 500 ms (validated) -- authored 800 ms, silently cut to 500 ms by the 2026-03-23 grid unification and accepted there ever since
+- **Effective today**: Before: 8k/128 = 800 ms, 16k/128 = 400 ms, 16k/256 = 800 ms and 48k/512 = 533 ms. Now derived from the validated 500 ms anchor: 31 / 62 / 31 / 47 hops respectively (the 16k/128 half-hop rounds to 62 under the shared float32 rule).
+- **Consumer**: python/modules/epc.py:231 derives _shadow_copy_warmup_hops and :288 compares shadow_frame_count against it; c_impl/src/aec.c:3119 passes the grid-derived warmup_hops to c_impl/src/epc_shadow.c:201. The comparison is an early return at the TOP of PathChangeRegimeHandler.update()/shadow_copy_update(), before any evidence counter is touched. shadow_frame_count itself advances once per processed hop while the shadow path exists, so it is wall-clock, NOT an evidence count. The CONV_FRAMES / ne_recent_sustain=3 exception does not apply.
+- **Provenance**: (a) INTRODUCE = 7be26e8 (2026-03-17) -- commit body literally says "加入50-frame warm-up guard"; `git show 7be26e8:python/aec.py | grep frame_size` -> `frame_size: int = 512 / hop_size: int = 256` @16k = 16 ms -> authored span 800 ms. (b) The grid was unified to 320/160 (10 ms) at 9735b0f (2026-03-23), a commit that WAS re-benched at the new grid ("Latency reduced from 16ms to 10ms; FS ERLE improved +1.0 dB") with the 50 unchanged. Last targeted EMPIRICAL validation of this specific handler = cbd38ea (2026-05-11), the revert of the P52 A.0 retirement attempt; its cohort evidence (qNvSMyUSXUyrDGpOw7s6qg_farend_singletalk, main W diverges to ERLE_main -27 dB without the handler) is quoted verbatim in the PathChangeRegimeHandler docstring at python/modules/epc.py:169-181. `git show cbd38ea:python/modules/config.py | grep frame_size` -> `frame_size: int = -1 # Auto: sample_rate * 20ms` -> 320/160 @16k = 10 ms. So VALIDATED SPAN = 500 ms. The 10 ms grid held continuously from 2026-03-23 to d862a38 (2026-07-31), so every 800-case bench in between measured 500 ms.
+- **Reasoning**: RETIMED. This genuine warm-up duration guards boost_q / pause_main / reverse_copy against pre-convergence shadow copies -- exactly the degradation 7be26e8 was written to prevent, so under-timing it by 20% at the new default was a real risk-window shrink. C now uses aec3_ms_to_hops(500, hop, sr) and Python uses aec3_scale.ms_to_hops_f32(500, hop, sr). One caveat worth recording: the Python increment is additionally gated on self._freq_near_queue is None (orchestrator.py:1777), so in the frequency-domain near-queue mode the counter does not advance at all -- irrelevant on the default path but it means the C mirror at aec.c:1934 is not a literal one-to-one guard.
 
 ### `SuppressorTuning.max_inc_factor / max_dec_factor_lf (per-hop gain ratchet)`
 
@@ -761,7 +760,7 @@ Written and never read, or gated behind a condition that cannot hold on the prod
 - **Verdict**: dead / unreachable (high confidence, closed)
 - **Anchor**: n/a — never validated; nominal AEC3 authoring is 0.97 per 4 ms block (retention time constant -4/ln(0.97) = 131 ms)
 - **Effective today**: n/a at all four grids (module never instantiated). Hypothetically at 0.97-per-hop: 525 ms @8k(16 ms), 263 ms @16k/128(8 ms), 525 ms @16k/256(16 ms), 350 ms @48k(10.667 ms) vs a 131 ms AEC3 intent.
-- **Consumer**: reverb_decay_estimator.py:346 (_update_legacy) and :473 (_estimate_decay) — a multiplicative floor limiting how fast the decay estimate may fall, applied once per update with no conversion. Unreachable in production. Not a counter.
+- **Consumer**: reverb_decay_estimator.py:353 (_update_legacy) and :479 (_estimate_decay) — a multiplicative floor limiting how fast the decay estimate may fall, applied once per update with no conversion. Unreachable in production. Not a counter.
 - **Provenance**: INTRODUCE: 82c1600 2026-05-18, same commit and same 10 ms default grid as the sibling 0.2. NO VALIDATION COMMIT: gated off by ReverbConfig.use_adaptive_decay=False (residual_echo_estimator.py:113) since introduction, never overridden, and never ported to C.
 - **Reasoning**: Dead for the same reason as the sibling. The finding about the six neighbours is recorded here so the next audit does not re-derive it: _K_MIN_DECAY=0.02 / _K_MAX_DECAY=0.95 (:35-36), _K_EARLY_REVERB_MIN_SIZE_BLOCKS=3 (:33), _K_BLOCKS_PER_SECTION=6 (:34), kNumSectionsToAnalyze=9 (:168) and size_late_reverb>=5 (:467) index 64-sample sub-blocks of the time-domain impulse response, not hops — those are IR-structural and would NOT be retimed even if the module were enabled. NO ACTION while default-OFF.
 
@@ -770,7 +769,7 @@ Written and never read, or gated behind a condition that cannot hold on the prod
 - **Verdict**: dead / unreachable (high confidence, closed)
 - **Anchor**: n/a — never validated on any grid; nominal AEC3 authoring is alpha=0.2 per 4 ms block (17.9 ms time constant), but this port has never run in production
 - **Effective today**: n/a at all four grids — _reverb_decay_est is None for the entire life of the process. If ever enabled, the raw 0.2-per-hop would give time constants of 71.6 ms @8k(16 ms), 35.8 ms @16k/128(8 ms), 71.6 ms @16k/256(16 ms), 47.7 ms @48k(10.667 ms) against a 17.9 ms AEC3 intent — i.e. 2x to 4x too slow.
-- **Consumer**: reverb_decay_estimator.py:319 (_update_legacy) and :381 (_update_aec3_strict) smooth the decay scalar. The only live caller chain is python/diag/gen_reverb_decay_estimator_golden.py; residual_echo_estimator.c:132-146 (ree_update_reverb_models) explicitly comments 'adaptive decay estimator not bound'. No counter, no reset question.
+- **Consumer**: reverb_decay_estimator.py:323 (_update_legacy) and :388 (_update_aec3_strict) smooth the decay scalar. The only live caller chain is python/diag/gen_reverb_decay_estimator_golden.py; residual_echo_estimator.c:132-146 (ree_update_reverb_models) explicitly comments 'adaptive decay estimator not bound'. No counter, no reset question.
 - **Provenance**: INTRODUCE: 82c1600 2026-05-18 'v3.21 Phase C.3 + C.4' (same commit as ReverbFrequencyResponse); default grid then 320/160 @16k = 10 ms. NO VALIDATION COMMIT EXISTS: the module has been gated off since introduction. Verified gate: residual_echo_estimator.py:107 comment '``use_adaptive_decay = False`` is AEC3-strict default' and :113 `use_adaptive_decay: bool = False`; grep over python/modules shows NO override anywhere (only orchestrator.py:3388 calls attach_reverb_decay_estimator, which early-returns at residual_echo_estimator.py:275 `if not self._reverb_cfg.use_adaptive_decay: return`). No C port: `ls c_impl/src | grep reverb` returns only reverb_frequency_response.c and reverb_model.c.
 - **Reasoning**: Dead on the default path, established by reading the gate and grepping for any override. Kept in the inventory rather than dropped. NO ACTION while default-OFF; retiming through per_block_ema_alpha_to_per_hop must be a hard precondition of ever flipping use_adaptive_decay, and the C port would have to be written from scratch.
 

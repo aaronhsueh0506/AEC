@@ -41,6 +41,48 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-09-22 — validated DT floor and cross-port fixes
+
+### Changed (measured output trade-off)
+
+1. The default double-talk RES floor is `-20 dB` instead of `-16 dB`.  This
+   does not change the latch or pretend to repair near/far classification; it
+   chooses a different point on the existing floor trade-off.  On the paired
+   832-file set, `-20` versus `-16` improves far-end-single-talk echo MOS by
+   `+0.053/+0.064` and ERLE by `+0.46/+0.53 dB` (movement/static), while
+   double-talk degradation MOS changes by `-0.027/-0.030`; near-end-only is
+   neutral.  The same gain also controls comfort-noise injection, so the
+   release evidence includes both AECMOS and raw ERLE/band-energy measures.
+2. Python's dB-to-power floor conversion now uses explicit float32 operands,
+   matching C `powf`.  The former Python binary64 expression differed by one
+   ULP for `-16/-28/-38 dB`; the conversion is initialization/runtime-preset
+   control work, not a per-hop cost.
+
+### Changed (same policy with the defaults)
+
+3. The double-talk floor decision moved inside `aec3_post_run()`, immediately
+   before its suppression-gain consumer. C and Python still use the existing
+   near-recent latch policy; the move makes one site own and export the exact
+   per-hop decision. Apart from the selected `-20 dB` value, the RES output is
+   byte-identical to the previous policy (90 blind stems x 256/512 grid x CNG
+   on/off, 360 renders, 0 differ).
+4. `AecResContext` adds `res_floor_protect` (that per-hop floor decision, for
+   fused consumers to OR across lanes) and `usable_linear` (this hop's
+   usable-linear-estimate verdict: with 0 the exported `r2` is the conservative
+   nonlinear estimate, not one derived from the linear echo estimate). Additive
+   public C-struct ABI change; applications and static pipeline pools must be
+   rebuilt together.
+
+### Fixed
+
+5. The shadow-copy warm-up was a fixed 50 hops, so it spanned 400--800 ms over
+   the supported grids although its last validated operating point was 500 ms.
+   Both ports now derive the hop count from 500 ms using the shared float32
+   timing rule (31/62/31/47 hops at 8k/128, 16k/128, 16k/256 and 48k/512).
+   The paired 360-render policy check remains byte-identical.
+
+---
+
 ## [Unreleased] — 2026-09-21 — fix adaptive reverb-decay units
 
 ### Fixed
@@ -2410,9 +2452,11 @@ chain with the v3.22 split min-gain floor.
   the ports cannot drift apart per-grid either. **No audio effect in C**: the
   chain it feeds (`dt_from_shadow` → `AecResContext.shadow_dt`) has no reader
   anywhere outside the AEC's own equality test — verified by tree-wide grep.
-  In Python the same signal does reach an audio path
-  (`dt_from_shadow > 0.5` → `_ne_evidence` → `refined_usable`), so the C port
-  is missing that consumer entirely. That gap is recorded, not fixed here.
+  Python also reads it in the P3f filter-state classifier
+  (`dt_from_shadow > 0.5` → `_ne_evidence`), but that classifier only writes
+  diagnostics; the live AEC3 `usable_linear_estimate()` and RES gain do not
+  consume its `refined_usable` result. There is therefore no C/Python audio
+  path gap at this point.
 
 - **16 kHz default signal grid** — `aec_config_defaults()` /
   `AecConfig.__post_init__` now default 16 kHz to the low-latency/low-compute

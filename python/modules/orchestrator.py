@@ -774,7 +774,10 @@ class AEC:
             'saturation_level': 0.0,
             'erle_windowed': 0.0,
             # DT / filter debug fields
-            'dt_indicator': 0.0,        # final DT confidence fed to RES
+            # Exported DT telemetry/context.  The mono RES does not consume
+            # this value; its floor decision is exposed separately as
+            # AecResContext.res_floor_protect.
+            'dt_indicator': 0.0,
             'main_err_smooth': 0.0,     # main filter error EMA
             'shadow_err_smooth': 0.0,   # shadow filter error EMA
             'main_paused': False,       # True = main filter weights frozen this frame
@@ -1624,11 +1627,11 @@ class AEC:
         # Held "near-end seen recently" gate for DT-aware soft recovery.
         # Reads the previous frame's DT indicators (attributes), holds for a
         # window so the soft path covers the recovery tail that overfits
-        # near-end. Pure far-end single-talk never raises the indicator, so
-        # its recoveries stay aggressive (FS echo preserved).
-        # Use dt_from_energy ONLY: it is genuinely ~0 in far-end single-talk
-        # (mic ≈ echo ⇒ mic_pwr − far·ERL ≈ 0), whereas dt_from_shadow
+        # near-end. Use dt_from_energy ONLY: it is normally low in far-end
+        # single-talk (mic ≈ echo ⇒ mic_pwr − far·ERL ≈ 0), whereas dt_from_shadow
         # false-fires on FS echo-path changes and would soften FS recoveries.
+        # Loud residual echo can still false-arm the energy gate; the selected
+        # DT floor accounts for that measured product trade-off.
         # Require the indicator to stay above threshold for `sustain` frames
         # before arming: real near-end speech sustains; FS energy transients
         # are 1-2 frames and must not arm the soft path.
@@ -2601,6 +2604,11 @@ class AEC:
                         res_gain=getattr(self, '_res_gain', None),
                         comfort_noise=getattr(self, '_res_comfort_noise', None),
                         r2=getattr(self, '_res_r2', None),
+                        res_floor_protect=bool(
+                            getattr(self._aec3_sg, '_dt_protect_active', False)),
+                        usable_linear=bool(
+                            self._aec3_state is not None
+                            and self._aec3_state.usable_linear_estimate()),
                     )
 
                 # Update per-bin mu_scale AFTER RES. echo_psd/error_psd were
@@ -3912,15 +3920,12 @@ class AEC:
             if self._aec3_n2_counter < self._aec3_cng_n2_initial_duration_hops
             else self._aec3_n2
         )
-        # Feed per-bin stationary mask to SuppressionGain for its
-        # NE-presence proxy. Reuses _stationary_mask computed above for
-        # the existing zeroing block (no extra compute).
-        # DT-gated min-gain floor lift: during double-talk (near recently
-        # present) protect near-end by lifting the RES floor; FS (no near)
-        # keeps the aggressive far_active floor. Default-OFF flag → no-op.
+        # DT-gated min-gain floor lift. The near-recent latch is the product
+        # policy; C decides it at the corresponding post-stage site.
+        _ne_recent = getattr(self, '_ne_recent_frames', 0) > 0
         self._aec3_sg._dt_protect_active = bool(
             getattr(self.config, 'dt_aware_res_floor_enabled', False)
-            and getattr(self, '_ne_recent_frames', 0) > 0)
+            and _ne_recent)
         gain = self._aec3_sg.get_gain(
             aec_state=self._aec3_state,
             nearend_spectrum=nearend_pwr,

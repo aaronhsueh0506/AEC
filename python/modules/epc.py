@@ -213,6 +213,7 @@ class PathChangeRegimeHandler:
     # wall-clock-preserving retention built in __init__.
     COPY_ERR_BASELINE_RETENTION = 0.995
     AEC3_STREAK_FRAMES = 5  # gate_mode='streak_only' uses pure 5-block AEC3 rule
+    SHADOW_COPY_WARMUP_MS = 500.0
 
     # Gate-mode choices for Phase C1 ablation. S0=energy is the v2.8.1 baseline.
     GATE_ENERGY = 'energy'                # S0: dt_from_energy < 0.3
@@ -227,6 +228,8 @@ class PathChangeRegimeHandler:
         self._copy_err_baseline_retention = _aec3_scale.growth_rehop(
             self.COPY_ERR_BASELINE_RETENTION, 160, 16000,
             config.hop_size, config.sample_rate)
+        self._shadow_copy_warmup_hops = _aec3_scale.ms_to_hops_f32(
+            self.SHADOW_COPY_WARMUP_MS, config.hop_size, config.sample_rate)
         self._copy_err_baseline = self.BASELINE_INIT
         self._copy_counter = 0
         self._streak = 0
@@ -282,7 +285,7 @@ class PathChangeRegimeHandler:
                dt_from_coherence: float = 0.0,
                delay_reliable: bool = False) -> RegimeHandlerDecision:
         decision = RegimeHandlerDecision()
-        if shadow_frame_count < 50:
+        if shadow_frame_count < self._shadow_copy_warmup_hops:
             return decision
 
         threshold = self.config.shadow_copy_threshold

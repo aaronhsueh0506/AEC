@@ -206,7 +206,7 @@ typedef struct AecConfig {
                                                * Path A/B/EPV/shadow_rise realign
                                                * while near recently present */
     int    dt_aware_res_floor_enabled;        /* 1 — DT-gated RES min-gain floor */
-    float  min_gain_floor_dt_db;              /* -16.0 — DT floor (dB) */
+    float  min_gain_floor_dt_db;              /* -20.0 — DT floor (dB) */
     /* ne_recent gate parameters (mirror AecConfig.ne_recent_*). threshold is
      * float32-by-design (Python bit-exact parity retired; f32/f64 drift
      * across this threshold is accepted). ne_recent_hold is wall-clock-
@@ -1047,6 +1047,18 @@ typedef struct AecResContext {
     int            filter_converged;
     int            filter_once_converged;
     int            epc_active;
+    int            res_floor_protect;  /* this hop's near-recent-latch DT floor
+                                        * decision; a fused consumer ORs the
+                                        * contributing lanes' flags */
+    int            usable_linear;      /* this hop's usable-linear-estimate
+                                        * verdict. 0: r2 is the conservative
+                                        * nonlinear estimate (far-end power
+                                        * times a default echo-path gain), not
+                                        * one derived from the linear echo
+                                        * estimate -- it can stand well above a
+                                        * residual that is not there at all.
+                                        * Also 0 when the post block did not
+                                        * run (r2 is NULL then) */
 } AecResContext;
 
 void aec_get_res_context(const Aec* a, AecResContext* ctx);

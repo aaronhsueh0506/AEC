@@ -130,7 +130,7 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `min_gain_floor_far_silent_db` | −12 | pure-NE floor |
 | | `min_gain_far_latch_power` | 1e6 | far-active latch |
 | **DT-aware recovery group** | `dt_aware_recovery_soft` | **ON** | soft (non-destructive) delay/EPC recovery (§2.3) |
-| | `dt_aware_res_floor_enabled` | **ON** | DT-gated RES floor lift (§3.4) |
+| | `dt_aware_res_floor_enabled` | **ON** | RES floor lift (§3.4); default source is the near-recent latch alone |
 | | `min_gain_floor_dt_db` | −20 | floor used in double-talk |
 | | `ne_recent_threshold` | 0.3 | near-recent gate arm threshold |
 | | `ne_recent_hold` | 150 | 10 ms authored basis; approximately 1.5 s after grid retiming |
@@ -172,10 +172,11 @@ shows their public configuration values, not necessarily the internal hop count.
 | | `return_res_context` | OFF | switches `process()` return type (§4); with `enable_res=False` it selects the context-only seam, whose FORM step admits the capture candidate (§3) |
 | | `clear_filter_history` | OFF | |
 
-The **DT-aware recovery group** (the v3.23.0 addition) is the only default-ON
-group whose two halves act in tandem: `dt_aware_recovery_soft` softens the
-delay/EPC recovery (§2.3) and `dt_aware_res_floor_enabled` lifts the RES floor
-(§3.4), both gated on the shared `ne_recent_*` near-recent latch.
+The **DT-aware recovery group** (the v3.23.0 addition) has two halves:
+`dt_aware_recovery_soft` softens the delay/EPC recovery (§2.3), gated on the
+`ne_recent_*` near-recent latch, and `dt_aware_res_floor_enabled` lifts the RES
+floor (§3.4), gated on the same `ne_recent_*` latch. The exact per-hop floor
+decision is exported to fused consumers as `res_floor_protect`.
 
 ---
 
@@ -378,8 +379,11 @@ The chain itself:
 `stationarity_estimator.cc`. Per-frame per-bin EMA of render PSD plus a
 running coefficient-of-variation gate. Two consumers:
 
-* `_aec3_post` zeros R² (residual echo PSD estimate) on stationary bands
-  so a steady hum doesn't drive the suppressor.
+* `_aec3_post` zeros R² (residual echo PSD estimate) on stationary bands, so a
+  steady far-end hum the filter has nothing to learn from does not drive the
+  suppressor against a near end speaking over it. The zeroing fires whenever
+  the filter has converged and the stationarity mask does, regardless of the
+  usable-linear verdict; this preserves the previous release's policy.
 * Refined filter skips W update on block-stationary frames, preventing
   the PBFDKF from learning mic-as-echo coupling against an uncorrelated
   stationary input (the `9xJH` / `E0l0` / `wJVP` NE-outlier class).
@@ -490,28 +494,31 @@ else:
     base_floor = self._split_floor_far_silent                       # pure NE: −12 dB
 ```
 
-The orchestrator sets `sg._dt_protect_active` immediately before `get_gain`
-(`orchestrator.py:3444`):
+The current `-20 dB` default is a measured Pareto choice, not a free detector
+improvement.  Against `-16 dB` on 832 paired files it recovers roughly
+0.46--0.53 dB far-end-single-talk ERLE and 0.053--0.064 echo MOS, while
+double-talk degradation MOS falls 0.027--0.030; near-end-only is neutral.
+The earlier `-16 dB` setting deliberately spent that echo headroom on near-end
+protection after the round-robin filter-constraint change.  Returning to
+`-20 dB` reverses that small policy exchange; it does not make the near/far
+latch more accurate.
+
+The orchestrator sets `sg._dt_protect_active` immediately before `get_gain`:
 
 ```python
 self._aec3_sg._dt_protect_active = bool(
     self.config.dt_aware_res_floor_enabled        # default True
-    and self._ne_recent_frames > 0)               # near recently present
+    and _ne_recent)
 ```
 
-`_ne_recent_frames` is the held "near-end seen recently" gate (same mechanism
-that arms `dt_aware_recovery_soft`, §2.3): the `_dt_from_energy` indicator
-must stay above `ne_recent_threshold` (0.3) for `ne_recent_sustain` (3) frames
-to arm, then holds for the grid-retimed duration authored by
-`ne_recent_hold=150` (approximately 1.5 s).
-Far-end single-talk never sustains the indicator, so FS recoveries keep the −28 dB
-floor and FS echo depth is preserved; the energy gate does false-arm a little on
-loud FS echo (the bounded FS cost). Config (`AecConfig`):
+The floor is armed by the energy-based `_ne_recent_frames` latch alone — the
+same gate `dt_aware_recovery_soft` uses. Config (`AecConfig`):
 `dt_aware_res_floor_enabled`, `min_gain_floor_dt_db` (−20),
-`ne_recent_threshold`/`ne_recent_hold`/`ne_recent_sustain`. On the
-no-pre-align baseline (on top of `dt_aware_recovery_soft`): DT_static deg
-2.016→2.074, DT_movement 2.088→2.140 (both exceed the pre-align result), at a
-bounded echo cost (DT echo 4.28→4.22, FS echo 3.59→3.54), all ship bars held.
+`ne_recent_threshold`/`ne_recent_hold`/`ne_recent_sustain`. Enabling
+`dt_aware_res_floor_enabled` itself with the default latch source, on the
+no-pre-align baseline (on top of `dt_aware_recovery_soft`): DT_static deg 2.016→2.074, DT_movement 2.088→2.140
+(both exceed the pre-align result), at a bounded echo cost (DT echo
+4.28→4.22, FS echo 3.59→3.54), all ship bars held.
 
 ### 3.5 Comfort noise (CNG)
 

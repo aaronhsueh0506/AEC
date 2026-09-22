@@ -29,6 +29,12 @@ import numpy as np
 from ..freq_utils import hz_to_bin
 
 
+def _db_to_power_f32(db: float) -> float:
+    """Mirror C ``powf(10.0f, db / 10.0f)`` including float32 operands."""
+    db32 = np.float32(db)
+    return float(np.float32(10.0) ** (db32 / np.float32(10.0)))
+
+
 # --------------------------------------------------------------- AEC3 defaults
 
 @dataclass(frozen=True)
@@ -522,14 +528,18 @@ class SuppressionGain:
         # _get_min_gain actually applies. They are seeded equal and stay equal
         # unless set_split_floor_far_active_db asks for a ramp, so a caller that
         # never touches the setter sees the pre-ramp arithmetic unchanged.
-        self._split_floor_far_active = float(10.0 ** (split_floor_far_active_db / 10.0))
+        # Match C powf exactly so the floor itself cannot differ by one ULP
+        # before either port's ordinary FFT precision differences enter.
+        self._split_floor_far_active = _db_to_power_f32(
+            split_floor_far_active_db)
         self._split_floor_far_active_live = self._split_floor_far_active
         self._split_floor_ramp_ratio = 1.0
-        self._split_floor_far_silent = float(10.0 ** (split_floor_far_silent_db / 10.0))
+        self._split_floor_far_silent = _db_to_power_f32(
+            split_floor_far_silent_db)
         # DT-gated floor: used in place of far_active when the orchestrator sets
         # _dt_protect_active (double-talk). Default == near far_active so an
         # un-set flag is behaviourally neutral.
-        self._split_floor_dt = float(10.0 ** (split_floor_dt_db / 10.0))
+        self._split_floor_dt = _db_to_power_f32(split_floor_dt_db)
         self._dt_protect_active = False
         self._split_floor_latch_power = float(split_floor_latch_power)
         self._far_active_latched = False
@@ -658,7 +668,7 @@ class SuppressionGain:
             raise ValueError(
                 "ramp_ms must be finite and within "
                 f"[0, {self.SPLIT_FLOOR_RAMP_MS_MAX}]: {ramp_ms}")
-        target = float(10.0 ** (db / 10.0))
+        target = _db_to_power_f32(db)
         live = self._split_floor_far_active_live
         hops = 0
         if ramp_ms > 0.0 and target > 0.0 and live > 0.0 and live != target:
@@ -670,7 +680,13 @@ class SuppressionGain:
             self._split_floor_far_active_live = target
             self._split_floor_ramp_ratio = 1.0
             return
-        ratio = float((target / live) ** (1.0 / hops))
+        # Keep the retarget walk in float32, matching C's ``float`` state and
+        # ``powf``.  Besides parity, this guarantees that the same hop which
+        # lands in C also crosses (and snaps to) the target in Python.
+        ratio = float(
+            np.float32(target / live)
+            ** (np.float32(1.0) / np.float32(hops))
+        )
         if ratio == 1.0:
             # ramp_ms so short (or the step so small) that the per-hop factor
             # rounds to identity; land now rather than stall forever.
@@ -685,7 +701,7 @@ class SuppressionGain:
         if live == target:
             return
         ratio = self._split_floor_ramp_ratio
-        value = live * ratio
+        value = float(np.float32(live) * np.float32(ratio))
         # Land exactly on the target rather than leaving a 1-ULP residue that
         # would keep the ramp nominally active for the rest of the stream.
         if ratio == 1.0 or (value >= target if ratio > 1.0 else value <= target):

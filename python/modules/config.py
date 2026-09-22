@@ -186,8 +186,10 @@ class AecConfig:
     # so this also DEEPENS linear convergence → +echo. 800-case no-PA validated
     # (vs full-constraint): echo up every far-active bucket (FS +0.055/+0.073,
     # DT +0.043/+0.055) at −0.031 DT deg; the DT cost is neutralised by the
-    # min_gain_floor_dt_db −20→−16 re-tune below (round-robin freed FS-echo
-    # headroom to spend on DT near-protection). Propagated to main + shadow.
+    # The historical −20→−16 re-tune spent round-robin's FS-echo headroom
+    # on DT near protection.  The current −20 operating point deliberately
+    # returns that small amount of headroom to residual-echo suppression; see
+    # min_gain_floor_dt_db below for the full-corpus trade-off.
     constraint_round_robin: bool = True
 
     # ── v3.22 C': Coherence-based ERLE gate (Γ²_ŶY) ──
@@ -235,15 +237,15 @@ class AecConfig:
     # 2.016->2.074, DT_movement 2.088->2.140 (both EXCEED pre-align), at a
     # bounded echo cost (DT echo 4.28->4.22, FS echo 3.59->3.54, all bars hold).
     # Energy gate false-arms a little on loud FS echo (hence the FS cost).
-    # Re-tuned -20->-16 alongside constraint_round_robin: round-robin's deeper
-    # linear convergence lifts FS echo, freeing headroom to raise this DT-only
-    # floor and neutralise round-robin's −0.031 DT-deg cost. 800-case no-PA
-    # validated (round-robin + this −16): vs full-constraint baseline, DT deg
-    # back to baseline (DT_static +0.002, DT_movement −0.004) while echo stays
-    # up everywhere (FS +0.029/+0.022, DT +0.014/+0.027), all four bars hold.
+    # The former -16 dB setting spent round-robin's extra FS-echo headroom on
+    # near-end protection. The selected -20 dB point returns part of it to
+    # echo suppression; the paired-corpus trade-off is recorded below.
     dt_aware_res_floor_enabled: bool = True
-    min_gain_floor_dt_db: float = -16.0
-
+    # 832-file paired A/B versus -16 dB: FS echo MOS +0.053/+0.064 and ERLE
+    # +0.46/+0.53 dB (movement/static), for DT degradation MOS
+    # -0.027/-0.030; NE-only is neutral.  This is a selected Pareto point,
+    # not a claim that the near/far detector is now correct.
+    min_gain_floor_dt_db: float = -20.0
     # ── linear-filter cold-start DEADLOCK breaker (PBFDKF Kalman gain) ──
     # mu = H_error/(0.5·H_error·X² + n·E²); H_error refreshed by
     # `H_error += leakage × Σ|W|²`. Σ|W|² is ~0 before the filter adapts, so on
@@ -583,9 +585,9 @@ class AecConfig:
     # (Path A/B, EPV, shadow_rise) fire at far-only moments but their
     # aggressive re-convergence tail overfits near-end speech that arrives
     # shortly after. A held "near-end seen recently" flag lets the soft
-    # (non-destructive) recovery path cover that tail without touching pure
-    # far-end single-talk (which never raises the near-end indicator, so its
-    # recoveries stay aggressive and FS echo depth is preserved).
+    # (non-destructive) recovery path cover that tail. The indicator is
+    # normally low in far-end single-talk but can false-arm on loud residual
+    # echo; that measured trade-off is why its RES floor is not set shallower.
     ne_recent_threshold: float = 0.3
     # 150 hops = 1500 ms @ legacy hop=160/sample_rate=16000 (10 ms) grid,
     # zero rate conversion; retimed live in __post_init__ below (2026-08

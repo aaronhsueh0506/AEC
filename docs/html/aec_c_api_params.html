@@ -51,7 +51,7 @@ pre code{background:none;padding:0}
 <tr><td><code>AEC_PRESET_AGGRESSIVE</code></td><td>−38.0</td><td>echo 壓最深,近端被誤削風險最高</td></tr>
 </table></div>
 <p>合法範圍 <code>[-300, 50]</code>。可用 <code>aec_preset_floor_db()</code> 純查表(不需要 instance),或用 <code>aec_set_preset()</code> 執行期改(§9)。</p>
-<div class="warn"><b>量測前務必知道</b>:這個地板<b>只在 far-active 且非 double-talk 的 hop 咬得到</b>。DT 期間走的是 <code>min_gain_floor_dt_db</code>(−16 dB,<b>三個 preset 完全相同</b>);far-active latch 觸發前用的是 far-silent 地板。而且同一個 gain 也決定 comfort noise 的量 → <b>只量 echo／degradation 的 A/B 會把 CNG 的變化錯記到別的機制</b>。請在 echo 對齊或 degradation 對齊的條件下比較,並實際試聽。</div>
+<div class="warn"><b>量測前務必知道</b>:這個地板<b>只在 far-active 且非 double-talk 的 hop 咬得到</b>。DT 期間走的是 <code>min_gain_floor_dt_db</code>(−20 dB,<b>三個 preset 完全相同</b>);far-active latch 觸發前用的是 far-silent 地板。而且同一個 gain 也決定 comfort noise 的量 → <b>只量 echo／degradation 的 A/B 會把 CNG 的變化錯記到別的機制</b>。請在 echo 對齊或 degradation 對齊的條件下比較,並實際試聽。</div>
 
 <h3 id="hpf">8.2 前端 HPF</h3>
 <div class="tblwrap"><table>
@@ -82,8 +82,8 @@ pre code{background:none;padding:0}
 <tr><td><code>warmup_frames</code></td><td>100 hops(1000 ms)</td><td><code>[0,1e6]</code></td><td>暖機期間 mu 不受 converged 壓制。以 hop 計,會 retime</td></tr>
 <tr><td colspan="4" style="background:#eef5f0"><b>Double-talk 保護</b></td></tr>
 <tr><td><code>dt_aware_res_floor_enabled</code></td><td>1</td><td>0/1</td><td>啟用 DT 專用地板</td></tr>
-<tr><td><code>min_gain_floor_dt_db</code></td><td><b>−16.0</b></td><td><code>[-300,50]</code></td><td>DT 期間改用的較淺地板,比 far-active 地板高 12 dB → 保護近端語音。<b>三個 preset 相同</b></td></tr>
-<tr><td><code>ne_recent_threshold</code></td><td>0.3</td><td><code>[0,1000]</code></td><td>超過才算「近端剛出現」。只讀 energy DT,遠端單講時 ≈0 → <b>不影響 far-single-talk 的 echo 深度</b></td></tr>
+<tr><td><code>min_gain_floor_dt_db</code></td><td><b>−20.0</b></td><td><code>[-300,50]</code></td><td>DT 期間改用的較淺地板,比 balanced far-active 地板高 8 dB → 保護近端語音。<b>三個 preset 相同</b></td></tr>
+<tr><td><code>ne_recent_threshold</code></td><td>0.3</td><td><code>[0,1000]</code></td><td>超過才算「近端剛出現」。只讀 energy DT；遠端單講時通常很低，但 loud residual echo 仍可能誤觸，這也是 DT floor 不能無限制調淺的原因。</td></tr>
 <tr><td><code>ne_recent_hold</code></td><td>150 hops(1500 ms)</td><td><code>[0,1e6]</code></td><td>觸發後 hold 多久。會 retime</td></tr>
 <tr><td><code>ne_recent_sustain</code></td><td>3</td><td><code>[0,1e6]</code></td><td>需連續幾 hop 超門檻才 arm。<b>事件計數,刻意不 retime</b></td></tr>
 <tr><td><code>dt_aware_recovery_soft</code></td><td>1</td><td>0/1</td><td>近端剛出現時走軟性 realign,避免 DT 中把濾波器打掉</td></tr>

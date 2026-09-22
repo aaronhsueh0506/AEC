@@ -152,10 +152,13 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     /* DT-deg recovery stack (default ON, mirrors Python 16285fd). */
     cfg->dt_aware_recovery_soft = 1;
     cfg->dt_aware_res_floor_enabled = 1;
-    /* -16 (re-tuned from -20 alongside constraint_round_robin): round-robin's
-     * deeper linear convergence lifts FS echo, freeing headroom to raise this
-     * DT-only floor and neutralise round-robin's DT-deg cost. */
-    cfg->min_gain_floor_dt_db = -16.0f;
+    /* -20 dB restores part of the residual-echo suppression lost when the
+     * near-recent latch false-arms in far-end single talk.  On the 832-file
+     * paired set versus -16 dB it improves FS echo MOS by 0.053/0.064 and
+     * ERLE by 0.46/0.53 dB (movement/static), at a measured DT degradation
+     * MOS cost of 0.027/0.030.  This is the selected Pareto point, not a
+     * detector fix; the latch policy remains unchanged. */
+    cfg->min_gain_floor_dt_db = -20.0f;
     cfg->ne_recent_threshold = 0.3f;   /* float32-by-design (Python bit-exact parity retired) */
     cfg->ne_recent_hold = 150;
     /* ne_recent_sustain: genuine event count (consecutive near-end-active
@@ -2470,9 +2473,11 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
      * Python orchestrator 16285fd). Reads the PREVIOUS frame's dt_from_energy
      * (doubletalk_update_energy_dt runs later in this frame, in the RES block),
      * so the value here is the prior hop's — exactly like Python's _dt_from_energy
-     * property read at the top of process(). dt_from_energy ONLY: it is ~0 in
-     * far-end single-talk (mic ≈ echo), so FS never arms the gate (FS echo depth
-     * preserved). Require `sustain` consecutive frames above threshold before
+     * property read at the top of process(). dt_from_energy ONLY: it is
+     * normally low in far-end single-talk (mic ≈ echo), while dt_from_shadow
+     * false-fires more often on path changes. Loud residual echo can still
+     * false-arm this gate; the selected DT floor accounts for that measured
+     * trade-off. Require `sustain` consecutive frames above threshold before
      * arming, then hold for `hold` frames. */
     {
         float ne_ind = a->dt_analyzer.dt_from_energy;
@@ -3104,8 +3109,16 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
         doubletalk_update_shadow_dt(&a->dt_analyzer, a->shadow_frame_count,
                                     far_excited, a->main_err_smooth, a->shadow_err_smooth);
         int delay_reliable = a->has_delay && (delay_aec3_confidence(&a->delay) >= 0.5f);
+        /* The shadow-copy warm-up is a 500 ms wall-clock guard, not a fixed
+         * hop count. Keep it outside persistent state so this correction
+         * does not change Aec/arena layout; the conversion is negligible next
+         * to the two adaptive filters and preserves the canonical per-grid
+         * rounding rule. */
+        int shadow_warmup_hops =
+            aec3_ms_to_hops(500.0f, hop, a->cfg.sample_rate);
         ShadowCopyDecision dec = shadow_copy_update(
-            &a->regime, a->shadow_frame_count, far_hop_mean_sq,
+            &a->regime, a->shadow_frame_count, shadow_warmup_hops,
+            far_hop_mean_sq,
             a->main_err_smooth, a->shadow_err_smooth,
             a->epc.active, a->saturation_level,
             a->dt_analyzer.dt_from_energy, 0.0, delay_reliable);
@@ -3290,8 +3303,8 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
          * is a counter decrement only). */
         if (a->epc_render_forced_remaining > 0) a->epc_render_forced_remaining--;
 
-        /* shadow_dt stash for RES context. Both operands received from
-         * DoubleTalk (Stage-3, double) — cast at the receive/compare site. */
+        /* shadow_dt stash for exported context telemetry. The in-tree RES
+         * does not consume it. Both operands come from DoubleTalk. */
         float shadow_dt_v = a->dt_analyzer.dt_from_energy;
         if (a->dt_analyzer.dt_from_shadow > shadow_dt_v) shadow_dt_v = a->dt_analyzer.dt_from_shadow;
         if (a->epc.active) shadow_dt_v *= 0.08f;
@@ -3382,12 +3395,11 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             obj.state = &a->a3_state; obj.ree = &a->a3_ree; obj.sg = &a->a3_sg;
             obj.stationarity = &a->a3_stat; obj.lfs = &a->a3_lfs; obj.fft = a->post_fft;
 
-            /* DT-gated min-gain floor lift (mirrors Python 16285fd): during
-             * double-talk (near recently present) protect near-end by lifting
-             * the RES floor; FS (no near) keeps the aggressive far_active floor.
-             * Set on the SG just before get_gain (driven inside aec3_post_run). */
-            a->a3_sg.dt_protect_active =
-                (a->cfg.dt_aware_res_floor_enabled && a->ne_recent_frames > 0) ? 1 : 0;
+            /* DT-gated min-gain floor lift: pass the product latch and enable
+             * switch into aec3_post_run(), which owns the final decision next
+             * to the suppression-gain consumer and exports that same result. */
+            in.dt_floor_enabled = a->cfg.dt_aware_res_floor_enabled;
+            in.nearend_recent = a->ne_recent_frames > 0;
 
             int pgc = a->pending_gain_change, pdc = a->pending_delay_change;
             aec3_post_run(&a->post, &in, &obj, &a->a3_sc, a->final_out, &pgc, &pdc);
@@ -3751,6 +3763,8 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
         ctx->res_gain      = a->cfg.spatial_linear_context ? NULL : a->a3_sg.gain;
         ctx->r2            = a->a3_sc.r2;
         ctx->comfort_noise = a->post.comfort_noise;
+        ctx->res_floor_protect = a->a3_sg.dt_protect_active;
+        ctx->usable_linear = aec_state_usable_linear_estimate(&a->a3_state);
     } else {
         /* Diagnostic-only raw PBFDKF spectra when the post block did not run.
          * No reconstructing error spectrum is available in this mode. */

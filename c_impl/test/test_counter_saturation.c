@@ -42,6 +42,7 @@
  * shape as test/run_selftest_ubsan.sh) and must exit 0 with no diagnostic.
  */
 #include "aec.h"
+#include "aec3_scale.h"
 #include "delay_pool_test_util.h"
 #include "wav_io.h"
 
@@ -645,7 +646,8 @@ static void section_epc_shadow(void) {
         int max_seen = 0;
         for (i = 0; i < 100; i++) {
             ShadowCopyDecision dec = shadow_copy_update(
-                &s, /*shadow_frame_count=*/100, /*far_pwr=*/1.0f,
+                &s, /*shadow_frame_count=*/100, /*warmup_hops=*/50,
+                /*far_pwr=*/1.0f,
                 /*main_err_smooth=*/1.0f, /*shadow_err_smooth=*/0.5f,
                 /*epc_active=*/0, /*saturation_level=*/0.0f,
                 /*dt_from_energy=*/0.0f, /*dt_from_coherence=*/0.0f,
@@ -683,6 +685,32 @@ static void section_epc_shadow(void) {
               legacy.copy_err_baseline_retention == 0.995f,
               "ShadowCopy: legacy 10 ms authoring grid keeps its authored coefficients");
         {
+            const int expected_warmup_hops[] = {31, 62, 31, 47};
+            const int hop_sizes[] = {128, 128, 256, 512};
+            const int sample_rates[] = {8000, 16000, 16000, 48000};
+            for (int grid = 0; grid < 4; ++grid) {
+                int warmup_hops = aec3_ms_to_hops(
+                    500.0f, hop_sizes[grid], sample_rates[grid]);
+                ShadowCopy warmup;
+                shadow_copy_init_for_grid(
+                    &warmup, SC_GATE_ENERGY, 0.65f, 3, 5,
+                    hop_sizes[grid], sample_rates[grid]);
+                warmup.copy_err_baseline = 1.0f;
+                (void)shadow_copy_update(
+                    &warmup, warmup_hops - 1, warmup_hops,
+                    1e-2f, 0.0f, 0.0f, 0, 0.0f, 0.0f, 0.0f, 1);
+                CHECK(warmup_hops == expected_warmup_hops[grid],
+                      "ShadowCopy: 500 ms warm-up is converted for each product grid");
+                CHECK(warmup.copy_err_baseline == 1.0f,
+                      "ShadowCopy: frame immediately before warm-up leaves state untouched");
+                (void)shadow_copy_update(
+                    &warmup, warmup_hops, warmup_hops,
+                    1e-2f, 0.0f, 0.0f, 0, 0.0f, 0.0f, 0.0f, 1);
+                CHECK(warmup.copy_err_baseline < 1.0f,
+                      "ShadowCopy: frame at the 500 ms boundary begins state updates");
+            }
+        }
+        {
             ShadowCopy* grids[] = {&g8, &g128, &g256, &g48};
             const int fire_hops[] = {10, 10, 10, 10};
             const float retentions[] = {
@@ -694,7 +722,7 @@ static void section_epc_shadow(void) {
                 live->copy_err_baseline = 10.0f;
                 for (int i = 0; i < fire_hops[grid]; ++i) {
                     ShadowCopyDecision d = shadow_copy_update(
-                        live, 200 + i, 1e-2f, 1e-3f, 1e-7f,
+                        live, 200 + i, 50, 1e-2f, 1e-3f, 1e-7f,
                         0, 0.0f, 0.0f, 0.0f, 1);
                     CHECK(d.boost_q == (i == fire_hops[grid] - 1),
                           "ShadowCopy: the 10-hop streak minimum decides the live boost hop");
@@ -702,7 +730,7 @@ static void section_epc_shadow(void) {
 
                 shadow_copy_reset(live);
                 live->copy_err_baseline = 1.0f;
-                (void)shadow_copy_update(live, 200, 1e-2f, 0.0f, 0.0f,
+                (void)shadow_copy_update(live, 200, 50, 1e-2f, 0.0f, 0.0f,
                                          0, 0.0f, 0.0f, 0.0f, 1);
                 CHECK(fabsf(live->copy_err_baseline - retentions[grid]) < 1e-7f,
                       "ShadowCopy: retimed retention is applied by the live EMA");

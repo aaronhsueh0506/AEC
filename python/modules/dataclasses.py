@@ -113,6 +113,13 @@ class AecResContext:
     res_gain: Optional[np.ndarray] = None       # (n_freqs,) real AEC3 suppression gain G_res
     comfort_noise: Optional[np.ndarray] = None  # (n_freqs,) real CNG power N² (int16²-scaled)
     r2: Optional[np.ndarray] = None             # (n_freqs,) real residual-echo PSD R² (int16²-scaled)
+    # This frame's near-recent-latch DT floor decision; a fused consumer ORs
+    # the contributing lanes' flags for its own suppressor.
+    res_floor_protect: bool = False
+    # This frame's usable-linear-estimate verdict (C: AecResContext.usable_linear
+    # holds the semantics). None: no verdict, as on a context fused from
+    # several lanes.
+    usable_linear: Optional[bool] = None
 
 
 @dataclass

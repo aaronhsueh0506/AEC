@@ -52,9 +52,10 @@ def _stable_baseline(h: PathChangeRegimeHandler):
 class HandlerActionTests(unittest.TestCase):
 
     def test_warmup_returns_no_decision(self):
-        """First 50 frames: handler returns all-False decision regardless of input."""
+        """The first 500 ms-derived interval returns no decision."""
         h = _mk()
-        for i in range(50):
+        self.assertEqual(h._shadow_copy_warmup_hops, 62)
+        for i in range(h._shadow_copy_warmup_hops):
             d = h.update(shadow_frame_count=i, far_pwr=1e-2,
                          main_err_smooth=1.0, shadow_err_smooth=1e-6,
                          epc_active=False, saturation_level=0.0,
@@ -62,6 +63,30 @@ class HandlerActionTests(unittest.TestCase):
             self.assertFalse(d.boost_q)
             self.assertFalse(d.reverse_copy)
             self.assertFalse(d.pause_main)
+
+    def test_warmup_is_500_ms_on_every_product_grid(self):
+        expected = {
+            (8000, 256, 128): 31,
+            (16000, 256, 128): 62,
+            (16000, 512, 256): 31,
+            (48000, 1024, 512): 47,
+        }
+        for (sample_rate, frame_size, hop_size), warmup_hops in expected.items():
+            h = PathChangeRegimeHandler(AecConfig(
+                sample_rate=sample_rate, frame_size=frame_size,
+                hop_size=hop_size))
+            self.assertEqual(h._shadow_copy_warmup_hops, warmup_hops)
+            h._copy_err_baseline = 1.0
+            h.update(shadow_frame_count=warmup_hops - 1, far_pwr=1e-2,
+                     main_err_smooth=0.0, shadow_err_smooth=0.0,
+                     epc_active=False, saturation_level=0.0,
+                     dt_from_energy=0.0)
+            self.assertEqual(h.copy_err_baseline, 1.0)
+            h.update(shadow_frame_count=warmup_hops, far_pwr=1e-2,
+                     main_err_smooth=0.0, shadow_err_smooth=0.0,
+                     epc_active=False, saturation_level=0.0,
+                     dt_from_energy=0.0)
+            self.assertLess(h.copy_err_baseline, 1.0)
 
     def test_boost_q_fires_after_hysteresis_streak(self):
         """Shadow << main for shadow_copy_hysteresis + HYS_STREAK_MIN frames

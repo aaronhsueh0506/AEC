@@ -103,6 +103,7 @@ void shadow_copy_reset(ShadowCopy* s);
 ShadowCopyDecision shadow_copy_update(
     ShadowCopy* s,
     int    shadow_frame_count,
+    int    warmup_hops,
     float  far_pwr,
     float  main_err_smooth,
     float  shadow_err_smooth,

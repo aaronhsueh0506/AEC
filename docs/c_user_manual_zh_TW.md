@@ -280,7 +280,8 @@ max 923 ms、約 5% 超出 509 ms）與板端/離線的建議做法（系統延�
 | 48 kHz / 1024 | 10.667 ms（1 hop） | 0 ms |
 
 開啟殘留回音抑制時固定多一個 hop 的延遲；關閉後線性路徑沒有額外延遲。
-沒有任何 look-ahead。
+沒有任何 look-ahead。若外部要把 dry／linear 路徑與抑制後的輸出混合，必須先補償
+這一個 hop（16 kHz／256 為 128 個樣本、8 ms），否則會聽成額外的回音。
 
 ---
 
@@ -540,7 +541,7 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | 欄位 | 型別 | 預設 | 允許範圍 | 說明／何時調整 |
 |---|---|---:|---|---|
 | `min_gain_floor_far_active_db` | `float` | `-28.0` | -300 – 50 | **這是三個 preset 唯一的差別**，也是主要的強度旋鈕。遠端在說話時允許的最低增益。**調低**（例如 -38）＝回音壓得更乾淨，但 double-talk 時近端更容易被壓掉；**調高**（例如 -20）＝近端保留較好，回音殘留較多。優先用 preset（§7）而不是自己填數字。 |
-| `min_gain_floor_dt_db` | `float` | `-16.0` | -300 – 50 | double-talk 期間專用的最低增益，與上一項分開。**調高**可在雙方同時說話時多保留近端。需 `dt_aware_res_floor_enabled = 1` 才生效。 |
+| `min_gain_floor_dt_db` | `float` | `-20.0` | -300 – 50 | double-talk 期間專用的最低增益，與上一項分開。**調高**可在雙方同時說話時多保留近端。需 `dt_aware_res_floor_enabled = 1` 才生效。 |
 | `dt_aware_res_floor_enabled` | `int` | `1` | 0 / 1 | 是否啟用上面這個 double-talk 專用下限。 |
 | `dt_aware_recovery_soft` | `int` | `1` | 0 / 1 | 近端最近有聲音時，改用非破壞性的方式做重新對齊，避免把近端語音削掉。 |
 
@@ -904,6 +905,8 @@ for (int ch = 1; ch < n_lanes; ++ch)
 | `r2` | 殘留回音功率譜。**int16² 尺度**：要換成 audio 功率尺度須除以 32768²。 |
 | `comfort_noise` | 舒適噪音功率譜。同樣是 int16² 尺度。 |
 | `linear_hop` / `formed_hop` | 時域中間結果。 |
+| `res_floor_protect` | 本 hop 是否啟用 double-talk RES floor 保護。它就是近端最近有聲音 latch 的實際決定；4ch post-beam consumer 只對有貢獻的 lane 做 OR，不能再用 `dt_indicator` 自行推導另一套規則。 |
+| `usable_linear` | 本 hop 的可用線性估計判定。`0` 時 `r2` 是保守的非線性估計（遠端功率乘上預設 echo-path 增益），並非由線性回音估計推導，可能遠高於根本不存在的殘留回音。 |
 | `far_power`、`erle_factor`、`dt_indicator`、`divergence`、`saturation_level`、`erl_estimate`、`shadow_dt`、`is_stationary_dt`、`filter_converged`、`filter_once_converged`、`epc_active` | 供外部判斷／診斷用的純量狀態。 |
 
 > ⚠️ 所有 pointer 欄位都直接指向實例內部的 per-hop 緩衝區，**不是複本**。
@@ -1008,7 +1011,7 @@ unsigned long long duty_hops_run;    /* 其中真的跑了 matched filter 的數
 |---|---|
 | 換較溫和的 preset | `AEC_PRESET_BALANCED` → `AEC_PRESET_MILD` |
 | 或直接調 `min_gain_floor_far_active_db` | **調高**（例如 -28 → -20） |
-| 放寬 double-talk 專用下限 `min_gain_floor_dt_db` | **調高**（例如 -16 → -12），需 `dt_aware_res_floor_enabled = 1` |
+| 放寬 double-talk 專用下限 `min_gain_floor_dt_db` | **調高**（例如 -20 → -16），需 `dt_aware_res_floor_enabled = 1` |
 | 近端一停就被壓掉 → 延長保護 `ne_recent_hold` | **調高**（單位是 10 ms） |
 | 近端偵測太不敏感 → `ne_recent_threshold` | **調低** |
 | 確認 `dt_aware_recovery_soft = 1` | 維持開啟 |

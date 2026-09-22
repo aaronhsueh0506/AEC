@@ -187,6 +187,7 @@ static int dt_safe(const ShadowCopy* s,
 ShadowCopyDecision shadow_copy_update(
     ShadowCopy* s,
     int    shadow_frame_count,
+    int    warmup_hops,
     float  far_pwr,
     float  main_err_smooth,
     float  shadow_err_smooth,
@@ -197,7 +198,7 @@ ShadowCopyDecision shadow_copy_update(
     int    delay_reliable) {
 
     ShadowCopyDecision d = {0,0,0};
-    if (shadow_frame_count < 50) return d;
+    if (shadow_frame_count < warmup_hops) return d;
 
     float threshold = s->shadow_copy_threshold;
     int   far_active = far_pwr > 1e-4f;

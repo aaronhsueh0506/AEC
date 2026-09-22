@@ -358,6 +358,8 @@ typedef struct {
     int            current_delay;        /* int(self._current_delay)       */
     int            delay_active;         /* self._delay_active             */
     float          saturation_level;     /* self._saturation_level         */
+    int            nearend_recent;        /* self._ne_recent_frames > 0: the energy-
+                                             * based near-recent latch (bool) */
     int            pending_gain_change;  /* _aec3_pending_gain_change (in) */
     int            pending_delay_change; /* _aec3_pending_delay_change:
                                           *  -1 == None, else DelayAdjustment */
@@ -371,6 +373,7 @@ typedef struct {
     /* ── config flags ───────────────────────────────────────────────────── */
     int            erle_coh_gate_enabled;
     int            use_stationarity_properties; /* sg echo_audibility flag */
+    int            dt_floor_enabled;      /* AecConfig.dt_aware_res_floor_enabled */
     int            context_only;          /* expose gain/R²/CNG seam but skip
                                              * unused private time synthesis */
     int            spatial_linear_context; /* this lane's own G_res is never

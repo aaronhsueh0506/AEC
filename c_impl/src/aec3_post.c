@@ -695,6 +695,14 @@ int aec3_post_run(Aec3Post *p,
                     int usable =
                         aec_state_usable_linear_estimate(obj->state);
 
+                    /* ── DT-gated min-gain floor lift (read at Step 20) ──
+                     * The energy-based near-recent latch is the product
+                     * policy. Keep the decision beside the gain consumer and
+                     * export the exact result through AecResContext so fused
+                     * consumers do not derive a second rule. */
+                    obj->sg->dt_protect_active =
+                        (in->dt_floor_enabled && in->nearend_recent) ? 1 : 0;
+
                     /* _w_mag2 = |filter.W|² (cmag2_np), an n_part × nb
                      * row-major block. in->W_all and sc->w_mag2 are single
                      * contiguous flat blocks with row stride exactly nb at

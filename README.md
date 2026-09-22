@@ -23,7 +23,7 @@ chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the
 v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the
 no-pre-align (no-PA) online-delay path and ships a default-ON DT-deg recovery
 stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`,
-`min_gain_floor_dt_db = −16`). Three Pareto presets — `mild` / `balanced` /
+`min_gain_floor_dt_db = −20`). Three Pareto presets — `mild` / `balanced` /
 `aggressive` — differ only in the far-active min-gain floor; **`balanced` is
 production** and meets all four historical ship bars. See `[3.23.0]` in the
 changelog for that release's evidence.
@@ -263,6 +263,8 @@ gain so a downstream stage runs entirely in the frequency domain:
 | `far_spec` | X(f) — PBFDKF render spectrum (shared reference/diagnostic coordinate) |
 | `res_gain`, `comfort_noise` | the AEC3 SuppressionGain + CNG this frame |
 | `erle_factor`, `dt_indicator`, `divergence`, `over_sub`, `erl_estimate` | per-frame telemetry |
+| `res_floor_protect` | this frame's near-recent-latch DT floor decision; a fused consumer ORs the contributing lanes' flags for its own suppressor |
+| `usable_linear` | this frame's usable-linear-estimate verdict; `False` means `r2` is the conservative nonlinear estimate (far-end power times a default echo-path gain), not one derived from the linear echo estimate — see `docs/aec_methods.md` §3.4 |
 
 **Reading the formed linear hop without building the full `AecResContext`.** A caller that only
 wants `formed_output` (e.g. a dataset-gen tool building a "clean linear AEC error" channel, with

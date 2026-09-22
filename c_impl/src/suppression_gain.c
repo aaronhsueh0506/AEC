@@ -154,8 +154,8 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
         return -1;
     }
 
-    /* Same expression aec_carve() uses, so ramp_ms == 0 lands on exactly the
-     * float a fresh instance built with this dB would hold. */
+    /* Same expression aec_carve() and the Python float32 twin use, so
+     * ramp_ms == 0 lands on exactly the value a fresh instance holds. */
     target = powf(10.0f, db / 10.0f);
     live = sg->split_floor_far_active_live;
 

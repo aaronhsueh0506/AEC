@@ -66,6 +66,14 @@ def _target(sg: SuppressionGain) -> float:
     return sg._split_floor_far_active
 
 
+def test_direct_suppressor_dt_floor_matches_aec_default():
+    """Direct users and the top-level AEC must not silently get two floors."""
+    sg = SuppressionGain(n_bins=129, sr=16000, hop_size=128)
+    db = np.float32(AecConfig().min_gain_floor_dt_db)
+    expected = float(np.float32(10.0) ** (db / np.float32(10.0)))
+    assert sg._split_floor_dt == expected
+
+
 # ── 1. default path ──────────────────────────────────────────────────────
 
 def test_untouched_instance_matches_target():
