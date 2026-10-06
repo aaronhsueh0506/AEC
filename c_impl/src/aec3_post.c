@@ -676,6 +676,17 @@ int aec3_post_run(Aec3Post *p,
             if (aec_state_transition_triggered(obj->state))
                 suppression_gain_set_initial_state(obj->sg, 0);
 
+            /* Linear-only context: Steps 13-20 produce R², comfort noise and
+             * G_res (and advance the REE / CNG / suppression-gain state that
+             * only they read). Nothing after this point writes AecState, the
+             * stationarity estimator, the avg-render reverb or the pending
+             * echo-path flags, so the linear filter and the formed output
+             * are unaffected. Step 21's context_only return follows. */
+            if (in->linear_context_only) {
+                memcpy(out, in->raw_output, (size_t)hop * sizeof(float));
+                goto post_done;
+            }
+
             /* ── Step 13: converged_enough + dominant_ne (3344-3349) ─────── */
             {
                 int converged_enough = (in->stationarity_active_hops
@@ -879,6 +890,7 @@ int aec3_post_run(Aec3Post *p,
         }
     }
 
+post_done:
     if (out_pending_gain_change) *out_pending_gain_change = pgc;
     if (out_pending_delay_change) *out_pending_delay_change = pdc;
     return 0;

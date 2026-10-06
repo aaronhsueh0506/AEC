@@ -376,6 +376,10 @@ typedef struct {
     int            dt_floor_enabled;      /* AecConfig.dt_aware_res_floor_enabled */
     int            context_only;          /* expose gain/R²/CNG seam but skip
                                              * unused private time synthesis */
+    int            linear_context_only;   /* nothing reads R², comfort noise
+                                             * or G_res: stop after the AecState
+                                             * update (none of the skipped
+                                             * state feeds the linear filter) */
     int            spatial_linear_context; /* this lane's own G_res is never
                                              * consumed (a downstream fused/
                                              * beamformed stage recomputes an

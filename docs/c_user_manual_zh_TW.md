@@ -534,7 +534,7 @@ cfg.enable_cng = 0;          /* 只覆寫你真的要改的 */
 | `enable_shadow` | `1` | 輔助 filter，用於偵測回音路徑變化。關閉會少掉 32,560 B（16 kHz），但路徑突變後的恢復會變慢。 |
 | `saturation_softclip_ref` | `1` | 對參考訊號套用軟限幅。`enable_saturation = 0` 時無作用。 |
 | `return_res_context` | `0` | 進階整合用，見 §8。 |
-| `spatial_linear_context` | `0` | 進階整合用，見 §8。**只有在 `enable_res = 0` 且 `return_res_context = 1` 時才合法**，其他組合會被驗證拒絕。 |
+| `spatial_linear_context` | `0` | 進階整合用，見 §8。`1`：不計算這條 lane 自己的 `res_gain`。`2`（`AEC_CONTEXT_LINEAR_ONLY`）：呼叫端只讀 context 的線性半邊（`formed_hop`、`error_spec`、`echo_spec`、`near_spec`、`far_spec`、delay 與判定欄位）時使用，post 區塊在 AecState 更新後停止，跳過 R²／comfort noise／抑制增益；線性輸出與 `0`／`1` **逐位元相同**，`res_gain`、`r2`、`comfort_noise` 讀為 `NULL`、`res_floor_protect` 為 0，本機實測 `aec_process_context()` 省約 11–14 %。**只有在 `enable_res = 0` 且 `return_res_context = 1` 時才合法**，其他組合與 0..2 以外的值會被驗證拒絕。 |
 
 ### 6.3 抑制強度
 
@@ -901,9 +901,9 @@ for (int ch = 1; ch < n_lanes; ++ch)
 | `n_freqs` / `hop_size` | 陣列長度。所有頻域陣列長度都是 `n_freqs`。 |
 | `error_spec` | formed 線性輸出的頻譜 E(f)，**audio 尺度**（與 [-1,1] 時域一致）。**在 context-only 模式（`enable_res = 0` 且 `return_res_context = 1`）下不保證是線性殘差**：線性估計尚未被判定可用、且選中的殘差能量高於擷取訊號時，送出的是擷取訊號本身（見 §8.1）。 |
 | `echo_spec` / `near_spec` | 對應的回音估計與擷取訊號頻譜，滿足 `near_spec = error_spec + echo_spec`。 |
-| `res_gain` | 抑制增益，振幅 [0, 1]。**`spatial_linear_context = 1` 時為 `NULL`** —— 代表「沒有計算」，若誤讀成全 0 會變成「全部靜音」。**使用前務必檢查非 NULL。** |
-| `r2` | 殘留回音功率譜。**int16² 尺度**：要換成 audio 功率尺度須除以 32768²。 |
-| `comfort_noise` | 舒適噪音功率譜。同樣是 int16² 尺度。 |
+| `res_gain` | 抑制增益，振幅 [0, 1]。**`spatial_linear_context` 為 1 或 2 時為 `NULL`** —— 代表「沒有計算」，若誤讀成全 0 會變成「全部靜音」。**使用前務必檢查非 NULL。** |
+| `r2` | 殘留回音功率譜。**int16² 尺度**：要換成 audio 功率尺度須除以 32768²。`spatial_linear_context = 2` 時為 `NULL`。 |
+| `comfort_noise` | 舒適噪音功率譜。同樣是 int16² 尺度。`spatial_linear_context = 2` 時為 `NULL`。 |
 | `linear_hop` / `formed_hop` | 時域中間結果。 |
 | `res_floor_protect` | 本 hop 是否啟用 double-talk RES floor 保護。它就是近端最近有聲音 latch 的實際決定；4ch post-beam consumer 只對有貢獻的 lane 做 OR，不能再用 `dt_indicator` 自行推導另一套規則。 |
 | `usable_linear` | 本 hop 的可用線性估計判定。`0` 時 `r2` 是保守的非線性估計（遠端功率乘上預設 echo-path 增益），並非由線性回音估計推導，可能遠高於根本不存在的殘留回音。 |

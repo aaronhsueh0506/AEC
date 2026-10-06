@@ -284,6 +284,65 @@ static void test_highpass_cutoff(void) {
  * break the real path. get_mem_size>0, init OK, one hop of process runs.
  * aec_destroy() deliberately NOT called here — lifecycle/leak coverage is
  * test_static_aec.c's job (this test only touches config validation). */
+/* spatial_linear_context level 2 (AEC_CONTEXT_LINEAR_ONLY) skips the
+ * residual-echo half of the post block, so like level 1 it only makes sense
+ * under context_only; levels above 2 do not exist. */
+static void test_linear_only_level_requires_context_only(void) {
+    AecConfig valid_cfg; base_cfg(&valid_cfg);
+    size_t sz = aec_get_mem_size(&valid_cfg);
+    void* mem = malloc(sz);
+    CHECK(sz > 0 && mem != NULL, "linear-only level test setup: pool allocated");
+
+    {
+        AecConfig cfg; base_cfg(&cfg);
+        cfg.enable_res = 0; cfg.return_res_context = 0;
+        cfg.spatial_linear_context = AEC_CONTEXT_LINEAR_ONLY;
+        check_rejected("spatial_linear_context=2, return_res_context=0", &cfg, mem, sz);
+    }
+    {
+        AecConfig cfg; base_cfg(&cfg);
+        cfg.enable_res = 1; cfg.return_res_context = 1;
+        cfg.spatial_linear_context = AEC_CONTEXT_LINEAR_ONLY;
+        check_rejected("spatial_linear_context=2, enable_res=1", &cfg, mem, sz);
+    }
+    {
+        AecConfig cfg; base_cfg(&cfg);
+        cfg.enable_res = 0; cfg.return_res_context = 1;
+        cfg.spatial_linear_context = AEC_CONTEXT_LINEAR_ONLY + 1;
+        check_rejected("spatial_linear_context=3 (no such level)", &cfg, mem, sz);
+    }
+    {
+        AecConfig cfg; base_cfg(&cfg);
+        cfg.enable_res = 0; cfg.return_res_context = 1;
+        cfg.spatial_linear_context = -1;
+        check_rejected("spatial_linear_context=-1", &cfg, mem, sz);
+    }
+    {
+        AecConfig cfg; base_cfg(&cfg);
+        cfg.enable_res = 0; cfg.return_res_context = 1;
+        cfg.spatial_linear_context = AEC_CONTEXT_LINEAR_ONLY;
+        Aec a;
+        int rc = aec_create(&a, &cfg);
+        CHECK(rc == 0, "spatial_linear_context=2 with context_only satisfied: aec_create() succeeds");
+        if (rc == 0) {
+            int hop = aec_hop_size(&a);
+            float* mic = (float*)calloc((size_t)hop, sizeof(float));
+            float* ref = (float*)calloc((size_t)hop, sizeof(float));
+            AecResContext ctx;
+            aec_process_context(&a, mic, ref);
+            aec_get_res_context(&a, &ctx);
+            CHECK(ctx.res_gain == NULL && ctx.r2 == NULL && ctx.comfort_noise == NULL,
+                  "spatial_linear_context=2: res_gain, r2 and comfort_noise are NULL");
+            CHECK(ctx.formed_hop != NULL && ctx.error_spec != NULL &&
+                  ctx.echo_spec != NULL && ctx.near_spec != NULL && ctx.far_spec != NULL,
+                  "spatial_linear_context=2: the linear half is still exposed");
+            aec_destroy(&a);
+            free(mic); free(ref);
+        }
+    }
+    free(mem);
+}
+
 /* spatial_linear_context's whole premise (aec3_post_run Step 20/21) is that
  * apply_output() never reads the skipped gain -- true only under
  * context_only (enable_res==0 && return_res_context==1). Every other
@@ -313,13 +372,13 @@ static void test_spatial_linear_context_requires_context_only(void) {
                        &cfg, mem, sz);
     }
     {
-        /* Out-of-{0,1} value: caught by the plain AEC_CK_BOOL, same as any
-         * other toggle field, ahead of the compound check. */
+        /* Out-of-range value: caught by the range check ahead of the
+         * compound check. */
         AecConfig cfg; base_cfg(&cfg);
         cfg.enable_res = 0;
         cfg.return_res_context = 1;
-        cfg.spatial_linear_context = 2;
-        check_rejected("spatial_linear_context=2 (not a bool)", &cfg, mem, sz);
+        cfg.spatial_linear_context = 3;
+        check_rejected("spatial_linear_context=3 (no such level)", &cfg, mem, sz);
     }
 
     {
@@ -1027,6 +1086,7 @@ int main(void) {
     test_highpass_cutoff();
     test_misaligned_base();
     test_spatial_linear_context_requires_context_only();
+    test_linear_only_level_requires_context_only();
     test_signal_grid_resolver();
     test_delay_mode_translation();
     test_delay_mode_illegal_combinations();

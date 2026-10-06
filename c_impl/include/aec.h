@@ -58,6 +58,11 @@ typedef enum AecDelayMode {
     AEC_DELAY_EXTERNAL_ALIGNED = 2
 } AecDelayMode;
 
+/* AecConfig.spatial_linear_context levels. 0: full context. 1: this lane's own
+ * G_res is not computed. 2: linear half of the context only. */
+#define AEC_CONTEXT_NO_GAIN     1
+#define AEC_CONTEXT_LINEAR_ONLY 2
+
 typedef struct AecConfig {
     int    sample_rate;        /* 16000 */
     int    fft_size;           /* frame size; 256/512 @16k, 1024 @48k */
@@ -98,7 +103,19 @@ typedef struct AecConfig {
      * Only valid when enable_res==0 && return_res_context==1 (the
      * context-only seam); aec_validate_config() rejects any other
      * combination, since apply_output() -- the only consumer of the skipped
-     * gain -- only runs when that seam is NOT active. Default 0 (memset). */
+     * gain -- only runs when that seam is NOT active. Default 0 (memset).
+     *
+     * AEC_CONTEXT_LINEAR_ONLY (2) goes one step further, for a caller that
+     * reads only the linear half of AecResContext / AecLinearContext
+     * (formed_hop, error_spec, echo_spec, near_spec, far_spec, the delay and
+     * verdict fields) and none of the residual-echo half: the post block
+     * then stops after the AecState update. The reverb/residual estimator,
+     * the stationarity R^2 zeroing, comfort-noise tracking and the
+     * suppression gain run only for res_gain / r2 / comfort_noise, and
+     * nothing downstream of them feeds the linear filter, so every linear
+     * output is bit-identical to levels 0 and 1. res_gain, r2 and
+     * comfort_noise read NULL and res_floor_protect reads 0. Same validity
+     * rule as 1. */
     int    spatial_linear_context; /* 0 */
 
     /* scalar tunables (balanced base). shadow_err_alpha/warmup_frames/
@@ -1020,6 +1037,8 @@ typedef struct AecResContext {
      * SuppressionGain G_res(f), amplitude [0..1]. r2 = residual-echo PSD R²(f)
      * and comfort_noise = CNG N²(f), BOTH int16²-scaled (divide by 32768² to
      * reach the |E|² audio-power scale, as run_res does). All length n_freqs.
+     * Under spatial_linear_context == AEC_CONTEXT_LINEAR_ONLY, res_gain, r2 and
+     * comfort_noise are NULL and res_floor_protect is 0.
      * The pointers alias the AEC's internal per-hop buffers — read before
      * the next AEC processing call on this instance, whichever entry point
      * it is (aec_process(), aec_process_context(),

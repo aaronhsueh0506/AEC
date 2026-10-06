@@ -270,6 +270,109 @@ static void test_context_matches_full_process_context(
     aec_destroy(&via_context);
 }
 
+/* AEC_CONTEXT_LINEAR_ONLY skips the residual-echo half of the post block (R²,
+ * comfort noise, suppression gain). Nothing it skips feeds the linear
+ * filter, so against an instance configured as `spatial` (0 or 1) and fed
+ * identically, every linear output must be byte-identical on every
+ * hop -- including the AecLinearContext a downstream model reads and the
+ * usable-linear verdict -- while res_gain / r2 / comfort_noise read NULL.
+ * The input carries a delayed, scaled copy of the far end plus near-end
+ * bursts, so the filter converges, the alignment locks and the verdicts
+ * change during the run; a skipped step that did feed back would diverge. */
+static void test_linear_context_only_matches_full(
+        int sample_rate, int fft_size, int enable_shadow, int spatial_linear_context) {
+    AecConfig cfg_full, cfg_lin;
+    context_only_config_grid(&cfg_full, sample_rate, fft_size, spatial_linear_context);
+    cfg_full.enable_shadow = enable_shadow;
+    cfg_lin = cfg_full;
+    cfg_lin.spatial_linear_context = AEC_CONTEXT_LINEAR_ONLY;
+
+    Aec full, lin;
+    char label[160];
+    snprintf(label, sizeof(label), "linear-only sr=%d/fft=%d/shadow=%d/spatial=%d: aec_create(full)",
+             sample_rate, cfg_full.fft_size, enable_shadow, spatial_linear_context);
+    CHECK(aec_create(&full, &cfg_full) == 0, label);
+    snprintf(label, sizeof(label), "linear-only sr=%d/fft=%d/shadow=%d/spatial=%d: aec_create(AEC_CONTEXT_LINEAR_ONLY)",
+             sample_rate, cfg_full.fft_size, enable_shadow, spatial_linear_context);
+    CHECK(aec_create(&lin, &cfg_lin) == 0, label);
+
+    int hop = aec_hop_size(&full);
+    if (hop <= 0 || hop > 1024) { aec_destroy(&full); aec_destroy(&lin); return; }
+
+    enum { HOPS = 600, DELAY_HOPS = 3 };
+    static float far_hist[DELAY_HOPS + 1][1024];
+    float mic[1024], far_now[1024], out[1024];
+    int all_match = 1, nulls_ok = 1, usable_seen[2] = {0, 0}, hops_checked = 0;
+    g_rng_state = 0x71A3C0DEu;
+    for (int i = 0; i < HOPS; ++i) {
+        float burst = (i >= 300 && i < 330) ? 0.5f : 0.02f;   /* double-talk-ish burst */
+        for (int s = 0; s < hop; ++s) far_now[s] = rng_uniform(0.3f);
+        memmove(far_hist[1], far_hist[0], DELAY_HOPS * sizeof(far_hist[0]));
+        memcpy(far_hist[0], far_now, (size_t)hop * sizeof(float));
+        for (int s = 0; s < hop; ++s)
+            mic[s] = 0.5f * far_hist[DELAY_HOPS][s] + rng_uniform(burst);
+
+        aec_process_context(&full, mic, far_now);
+        aec_process_context(&lin,  mic, far_now);
+        (void)out;
+
+        AecResContext ca, cb;
+        aec_get_res_context(&full, &ca);
+        aec_get_res_context(&lin, &cb);
+        AecLinearContext la, lb;
+        aec_get_linear_context(&full, &la);
+        aec_get_linear_context(&lin, &lb);
+        int K = ca.n_freqs;
+
+        if (memcmp(ca.formed_hop, cb.formed_hop, (size_t)hop * sizeof(float)) != 0 ||
+            memcmp(ca.linear_hop, cb.linear_hop, (size_t)hop * sizeof(float)) != 0 ||
+            memcmp(ca.far_spec,   cb.far_spec,   (size_t)K * sizeof(Complex)) != 0 ||
+            memcmp(ca.error_spec, cb.error_spec, (size_t)K * sizeof(Complex)) != 0 ||
+            memcmp(ca.echo_spec,  cb.echo_spec,  (size_t)K * sizeof(Complex)) != 0 ||
+            memcmp(ca.near_spec,  cb.near_spec,  (size_t)K * sizeof(Complex)) != 0 ||
+            ca.usable_linear != cb.usable_linear ||
+            ca.far_power != cb.far_power || ca.erle_factor != cb.erle_factor ||
+            ca.dt_indicator != cb.dt_indicator || ca.divergence != cb.divergence ||
+            ca.saturation_level != cb.saturation_level ||
+            ca.erl_estimate != cb.erl_estimate || ca.shadow_dt != cb.shadow_dt ||
+            ca.is_stationary_dt != cb.is_stationary_dt ||
+            ca.filter_converged != cb.filter_converged ||
+            ca.filter_once_converged != cb.filter_once_converged ||
+            ca.epc_active != cb.epc_active ||
+            la.delay_samples != lb.delay_samples ||
+            la.delay_confidence != lb.delay_confidence ||
+            la.delay_state != lb.delay_state || la.generation != lb.generation ||
+            memcmp(la.formed_linear_hop, lb.formed_linear_hop, (size_t)hop * sizeof(float)) != 0 ||
+            memcmp(la.aligned_far_hop, lb.aligned_far_hop, (size_t)hop * sizeof(float)) != 0) {
+            all_match = 0; break;
+        }
+        if (cb.res_gain != NULL || cb.r2 != NULL || cb.comfort_noise != NULL ||
+            cb.res_floor_protect != 0 ||
+            ca.r2 == NULL || ca.comfort_noise == NULL) nulls_ok = 0;
+        usable_seen[ca.usable_linear != 0] = 1;
+        ++hops_checked;
+    }
+
+    snprintf(label, sizeof(label),
+             "linear-only sr=%d/fft=%d/shadow=%d/spatial=%d: every linear output and the AecLinearContext "
+             "are byte-identical to the full context on all hops",
+             sample_rate, cfg_full.fft_size, enable_shadow, spatial_linear_context);
+    CHECK(all_match && hops_checked == HOPS, label);
+    snprintf(label, sizeof(label),
+             "linear-only sr=%d/fft=%d/shadow=%d/spatial=%d: res_gain/r2/comfort_noise are NULL and "
+             "res_floor_protect is 0 (the full context still exposes r2/comfort_noise)",
+             sample_rate, cfg_full.fft_size, enable_shadow, spatial_linear_context);
+    CHECK(nulls_ok, label);
+    snprintf(label, sizeof(label),
+             "linear-only sr=%d/fft=%d/shadow=%d/spatial=%d: the run exercised both usable_linear verdicts "
+             "(the comparison is not vacuous)",
+             sample_rate, cfg_full.fft_size, enable_shadow, spatial_linear_context);
+    CHECK(usable_seen[0] && usable_seen[1], label);
+
+    aec_destroy(&full);
+    aec_destroy(&lin);
+}
+
 /* aec_process_context() must also work correctly across a reset (state
  * fully re-zeroed, next hop behaves like a fresh instance) -- exercises
  * the same reset path aec_process() itself already relies on. */
@@ -320,6 +423,12 @@ int main(void) {
             }
         }
     }
+
+    for (int g = 0; g < 3; ++g)
+        for (int shadow = 0; shadow <= 1; ++shadow)
+            for (int spatial = 0; spatial <= 1; ++spatial)
+                test_linear_context_only_matches_full(
+                        rates[g], grids[g][0], shadow, spatial);
 
     test_context_survives_reset();
 

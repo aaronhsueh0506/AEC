@@ -378,15 +378,15 @@ static int aec_validate_config(const AecConfig* cfg_in) {
     AEC_CK_BOOL(enable_res);
     AEC_CK_BOOL(saturation_softclip_ref);
     AEC_CK_BOOL(return_res_context);
-    AEC_CK_BOOL(spatial_linear_context);
+    AEC_CK_RANGE_I(spatial_linear_context, 0, AEC_CONTEXT_LINEAR_ONLY);
     AEC_CK_BOOL(delay_acquire_protect_converged);
     AEC_CK_BOOL(delay_acquire_warm_transfer);
     AEC_CK_BOOL(delay_acquire_protect_inst_erle);
     AEC_CK_BOOL(delay_backward_quarantine_enabled);
     AEC_CK_BOOL(dt_aware_recovery_soft);
     AEC_CK_BOOL(dt_aware_res_floor_enabled);
-    /* spatial_linear_context's whole premise is that apply_output() (Step 21)
-     * never reads the skipped gain -- true only when context_only holds
+    /* spatial_linear_context's (levels 1 and 2) whole premise is that
+     * apply_output() (Step 21) never reads the skipped gain -- true only when context_only holds
      * (enable_res==0 && return_res_context==1). Reject any other
      * combination here rather than relying on the aec3_post_run() debug
      * assert alone. */
@@ -3388,7 +3388,9 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
              * exposes NULL for it in this mode), so Step 20 can skip
              * computing the array Step 21 would otherwise never read here
              * either way. */
-            in.spatial_linear_context = a->cfg.spatial_linear_context;
+            in.spatial_linear_context = a->cfg.spatial_linear_context != 0;
+            in.linear_context_only =
+                a->cfg.spatial_linear_context == AEC_CONTEXT_LINEAR_ONLY;
             in.active_render_threshold = AEC3B_ACTIVE_RENDER_THRESHOLD;
 
             Aec3PostRunObj obj;
@@ -3760,10 +3762,19 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx) {
         ctx->echo_spec     = a->a3_sc.sel_echo;
         ctx->near_spec     = a->a3_sc.ybase;
         ctx->formed_hop    = a->a3_lfs.e_form;
-        ctx->res_gain      = a->cfg.spatial_linear_context ? NULL : a->a3_sg.gain;
-        ctx->r2            = a->a3_sc.r2;
-        ctx->comfort_noise = a->post.comfort_noise;
-        ctx->res_floor_protect = a->a3_sg.dt_protect_active;
+        if (a->cfg.spatial_linear_context == AEC_CONTEXT_LINEAR_ONLY) {
+            /* Steps after the AecState update never ran: these three buffers
+             * were not written, so NULL says "not computed". */
+            ctx->res_gain      = NULL;
+            ctx->r2            = NULL;
+            ctx->comfort_noise = NULL;
+            ctx->res_floor_protect = 0;
+        } else {
+            ctx->res_gain      = a->cfg.spatial_linear_context ? NULL : a->a3_sg.gain;
+            ctx->r2            = a->a3_sc.r2;
+            ctx->comfort_noise = a->post.comfort_noise;
+            ctx->res_floor_protect = a->a3_sg.dt_protect_active;
+        }
         ctx->usable_linear = aec_state_usable_linear_estimate(&a->a3_state);
     } else {
         /* Diagnostic-only raw PBFDKF spectra when the post block did not run.
