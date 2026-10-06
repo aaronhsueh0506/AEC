@@ -500,16 +500,12 @@ static float pbfdaf_frontend(PBFDAF* p,
 
     /* echo_spec = Σ_p W[p] * X_buf[(curr_p-p)%N] */
     memset(p->echo_spec, 0, (size_t)K * sizeof(Complex));
-    for (int part = 0; part < p->n_partitions; ++part) {
-        int p_idx = curr_p - part;
-        while (p_idx < 0) p_idx += p->n_partitions;
-        const Complex* Wp = p->W     + (size_t)part  * K;
-        const Complex* Xp = p->X_buf + (size_t)p_idx * K;
-        /* numpy complex64 mul uses FMA on arm64: re=fma(wr,xr,-(wi*xi)),
-         * im=fma(wr,xi, wi*xr). (Verified 0/300000 vs naive's 25%.) Matches
-         * sk_cmac_np_f32's scalar reference expression-for-expression. */
-        sk_cmac_np_f32(p->echo_spec, Wp, Xp, K);
-    }
+    /* numpy complex64 mul uses FMA on arm64: re=fma(wr,xr,-(wi*xi)),
+     * im=fma(wr,xi, wi*xr). (Verified 0/300000 vs naive's 25%.) The ring
+     * kernel adds each partition's product in partition order, exactly as
+     * one sk_cmac_np_f32 per partition does. */
+    sk_cmac_np_ring_f32(p->echo_spec, p->W, p->X_buf, curr_p,
+                        p->n_partitions, K);
 
     /* IFFT echo, output = near[-hop:] - echo_time[hop:block] */
     fft_inverse(p->fft, p->echo_spec, p->time_scratch);
@@ -1027,7 +1023,36 @@ static void pbfdkf_h_error_refresh(PBFDKF* p, const float *e2_ref_bins) {
          * recomputing cmag2_np() per call site here was pure waste (up to
          * 3x per bin per hop before this change). */
         int n_div = 0;   /* count of bins on the diverged-leakage branch */
-        for (int k = 0; k < K; ++k) {
+        int k0 = 0;
+#if SK_HAVE_NEON
+        /* Four bins a step, the branches as selects: the same compare,
+         * the same floor, a product then a sum (never fused), and the
+         * diverged-bin count as an integer sum of the inverted mask. */
+        {
+            const float32x4_t vlc = vdupq_n_f32(lc_eff);
+            const float32x4_t vld = vdupq_n_f32(ld_eff);
+            const float32x4_t vfloor = vdupq_n_f32(p->h_error_refresh_erl_floor);
+            const int use_floor = p->h_error_refresh_erl_floor > 0.0f;
+            const uint32x4_t vdis = vdupq_n_u32(p->disallow_leakage_diverged ? ~0u : 0u);
+            uint32x4_t div_acc = vdupq_n_u32(0);
+            const uint32x4_t one = vdupq_n_u32(1);
+            for (; k0 + 4 <= K; k0 += 4) {
+                uint32x4_t use_conv = vorrq_u32(
+                    vcleq_f32(vld1q_f32(e2_ref_bins + k0),
+                              vld1q_f32(p->e2_coarse_per_bin + k0)), vdis);
+                float32x4_t leakage = vbslq_f32(use_conv, vlc, vld);
+                float32x4_t erl = vld1q_f32(p->erl_per_bin + k0);
+                if (use_floor)
+                    erl = vbslq_f32(vcltq_f32(erl, vfloor), vfloor, erl);
+                vst1q_f32(p->H_error_per_bin + k0,
+                          vaddq_f32(vld1q_f32(p->H_error_per_bin + k0),
+                                    vmulq_f32(leakage, erl)));
+                div_acc = vaddq_u32(div_acc, vandq_u32(vmvnq_u32(use_conv), one));
+            }
+            n_div = (int)vaddvq_u32(div_acc);
+        }
+#endif
+        for (int k = k0; k < K; ++k) {
             float e2_ref = e2_ref_bins[k];
             int use_conv = (e2_ref <= p->e2_coarse_per_bin[k]) ||
                            p->disallow_leakage_diverged;
@@ -1058,7 +1083,20 @@ static void pbfdkf_h_error_refresh(PBFDKF* p, const float *e2_ref_bins) {
                                     leakage * p->erl_per_bin[k];
     }
     /* np.clip(H_error, floor, ceil). numpy clip: out = min(max(x,lo),hi). */
-    for (int k = 0; k < K; ++k) {
+    int kc = 0;
+#if SK_HAVE_NEON
+    {
+        const float32x4_t vlo = vdupq_n_f32(p->h_error_floor);
+        const float32x4_t vhi = vdupq_n_f32(p->h_error_ceil);
+        for (; kc + 4 <= K; kc += 4) {
+            float32x4_t v = vld1q_f32(p->H_error_per_bin + kc);
+            v = vbslq_f32(vcltq_f32(v, vlo), vlo, v);
+            v = vbslq_f32(vcgtq_f32(v, vhi), vhi, v);
+            vst1q_f32(p->H_error_per_bin + kc, v);
+        }
+    }
+#endif
+    for (int k = kc; k < K; ++k) {
         float v = p->H_error_per_bin[k];
         if (v < p->h_error_floor) v = p->h_error_floor;
         if (v > p->h_error_ceil)  v = p->h_error_ceil;

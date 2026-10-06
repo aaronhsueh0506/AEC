@@ -225,12 +225,61 @@ static int run_decimator_sweep(void) {
     return fails ? 1 : 0;
 }
 
+/* The pair kernel runs the render and capture cascades as the two lanes of
+ * one vector; against two independent generic walks it must give identical
+ * sub-blocks and identical carried filter state, block after block, across
+ * the same regimes (denormal-scale, loud, tones, silence). Cascades whose
+ * coefficients differ, or whose shape is off, must still agree through the
+ * single-call fallback. */
+static int run_decimator_pair_sweep(void) {
+    rs = 0xD1B54A32D192ED03ULL;
+    long pfails = 0, pblocks = 0;
+    DaDecimator pa, pb, ga, gb;
+    float ina[DA_AEC3_BLOCK_SIZE], inb[DA_AEC3_BLOCK_SIZE];
+    float oa[DA_SUB_BLOCK_SIZE], ob[DA_SUB_BLOCK_SIZE], ra[DA_SUB_BLOCK_SIZE], rb[DA_SUB_BLOCK_SIZE];
+    int b, i, variant;
+    for (variant = 0; variant < 3; ++variant) {
+        da_decimator_init(&pa); da_decimator_init(&pb);
+        da_decimator_init(&ga); da_decimator_init(&gb);
+        if (variant == 1) {          /* coefficients differ: single-call fallback */
+            pb.anti_alias.b[0][0] *= 1.0001f; gb.anti_alias.b[0][0] *= 1.0001f;
+        } else if (variant == 2) {   /* off-shape cascade */
+            pb.anti_alias.n_sections = 2; gb.anti_alias.n_sections = 2;
+        }
+        for (b = 0; b < 2000; ++b) {
+            float sa = (b % 5 == 0) ? 1.0e-30f : (b % 7 == 0) ? 0.98f : 0.2f;
+            float sb = (b % 3 == 0) ? 0.5f : (b % 11 == 0) ? 1.0e-30f : 0.05f;
+            for (i = 0; i < DA_AEC3_BLOCK_SIZE; ++i) {
+                ina[i] = (b % 11 == 3) ? ((i & 1) ? sa : -sa) : (b % 13 == 5) ? 0.0f : rnd_f(sa);
+                inb[i] = (b % 17 == 4) ? 0.0f : rnd_f(sb);
+            }
+            da_decimator_decimate_pair(&pa, ina, oa, &pb, inb, ob);
+            da_decimator_decimate_generic(&ga, ina, ra);
+            da_decimator_decimate_generic(&gb, inb, rb);
+            pblocks++;
+            if (memcmp(oa, ra, sizeof oa) != 0 || memcmp(ob, rb, sizeof ob) != 0) {
+                if (++pfails <= 5) printf("  MISMATCH pair out, variant %d block %d\n", variant, b);
+            }
+            if (!cmp_state(&pa.anti_alias, &ga.anti_alias) ||
+                !cmp_state(&pa.noise_reduction, &ga.noise_reduction) ||
+                !cmp_state(&pb.anti_alias, &gb.anti_alias) ||
+                !cmp_state(&pb.noise_reduction, &gb.noise_reduction)) {
+                if (++pfails <= 5) printf("  MISMATCH pair state, variant %d block %d\n", variant, b);
+            }
+        }
+    }
+    printf("decimator pair sweep: %ld state-carrying blocks (3 coefficient/shape variants),"
+           " %ld mismatches -> %s\n", pblocks, pfails, pfails ? "FAIL" : "PASS");
+    return pfails ? 1 : 0;
+}
+
 int main(void) {
     int rc = 0;
     if (!SWEEP_HAS_NEON_BODY)
         printf("note: scalar build -- argmax sweep degenerates to an identity check\n");
     rc |= run_argmax_sweep();
     rc |= run_decimator_sweep();
+    rc |= run_decimator_pair_sweep();
     if (rc == 0) printf("test_delay_kernels: PASS\n");
     return rc;
 }

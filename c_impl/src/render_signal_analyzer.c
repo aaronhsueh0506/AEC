@@ -14,6 +14,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "simd_kernels.h"   /* SK_HAVE_NEON, arm_neon.h */
+
 #define RSA_COUNTER_THRESHOLD          5
 #define RSA_POOR_EXCITATION_THRESHOLD  10
 #define RSA_MAX_ABS_THRESHOLD_FLOAT    (100.0f / 32768.0f)   /* 3.0517578125e-3 */
@@ -51,7 +53,31 @@ static void identify_small_narrow_band_regions(RenderSignalAnalyzer *m,
         return;
     }
     /* k_lo=1, k_hi=n_freqs_by2 (exclusive). Index into counters is k-1. */
-    for (k = 1; k < m->n_freqs_by2; ++k) {
+    k = 1;
+#if SK_HAVE_NEON
+    /* Four bins per step: the same compares in the same f32 arithmetic (the
+     * neighbour max is a greater-than select, not vmaxq, so a NaN neighbour
+     * resolves exactly as the scalar ternary does), then the counter is
+     * (counter + 1) where the peak test held and 0 where it did not. */
+    {
+        const float32x4_t ratio = vdupq_n_f32(RSA_PEAK_RATIO_NARROW);
+        const int64x2_t one = vdupq_n_s64(1);
+        for (; k + 4 <= m->n_freqs_by2; k += 4) {
+            float32x4_t c = vld1q_f32(render_psd + k);
+            float32x4_t l = vld1q_f32(render_psd + k - 1);
+            float32x4_t r = vld1q_f32(render_psd + k + 1);
+            float32x4_t neigh = vbslq_f32(vcgtq_f32(l, r), l, r);
+            int32x4_t hit = vreinterpretq_s32_u32(
+                vcgtq_f32(c, vmulq_f32(ratio, neigh)));
+            int64_t *dst = m->counters + (k - 1);
+            int64x2_t lo = vmovl_s32(vget_low_s32(hit));
+            int64x2_t hi = vmovl_s32(vget_high_s32(hit));
+            vst1q_s64(dst, vandq_s64(vaddq_s64(vld1q_s64(dst), one), lo));
+            vst1q_s64(dst + 2, vandq_s64(vaddq_s64(vld1q_s64(dst + 2), one), hi));
+        }
+    }
+#endif
+    for (; k < m->n_freqs_by2; ++k) {
         float x_center = render_psd[k];
         float x_left   = render_psd[k - 1];
         float x_right  = render_psd[k + 1];
@@ -64,6 +90,80 @@ static void identify_small_narrow_band_regions(RenderSignalAnalyzer *m,
             m->counters[idx] = 0;
         }
     }
+}
+
+/* First index of the maximum of x[0..n-1] (np.argmax), as the plain walk
+ * `if (x[i] > x[best]) best = i` computes it. Two passes: a lane-wise max,
+ * then the first element equal to it. Max over a multiset is order-free and
+ * "first index equal to the max" is the walk's rule. A NaN anywhere makes the
+ * walk's result depend on position (a NaN seed is never beaten; a later NaN
+ * never wins), so any non-finite maximum takes the walk itself. */
+static int rsa_argmax_scan(const float *x, int n) {
+    int best = 0, i;
+    for (i = 1; i < n; ++i) if (x[i] > x[best]) best = i;
+    return best;
+}
+
+static int rsa_argmax_first(const float *x, int n) {
+#if SK_HAVE_NEON
+    if (n >= 8 && !isnan(x[0])) {
+        float32x4_t m0 = vld1q_f32(x), m1 = m0;
+        float best_v;
+        int i = 4;
+        for (; i + 8 <= n; i += 8) {
+            m0 = vmaxq_f32(m0, vld1q_f32(x + i));
+            m1 = vmaxq_f32(m1, vld1q_f32(x + i + 4));
+        }
+        for (; i + 4 <= n; i += 4) m0 = vmaxq_f32(m0, vld1q_f32(x + i));
+        best_v = vmaxvq_f32(vmaxq_f32(m0, m1));
+        for (; i < n; ++i) if (x[i] > best_v) best_v = x[i];
+        if (isfinite(best_v)) {
+            const float32x4_t peak = vdupq_n_f32(best_v);
+            int k;
+            for (k = 0; k + 4 <= n; k += 4) {
+                if (vmaxvq_u32(vceqq_f32(vld1q_f32(x + k), peak))) {
+                    int j;
+                    for (j = k; j < k + 4; ++j) if (x[j] == best_v) return j;
+                }
+            }
+            for (; k < n; ++k) if (x[k] == best_v) return k;
+        }
+    }
+#endif
+    return rsa_argmax_scan(x, n);
+}
+
+/* np.max(np.abs(x)) in float32 with the walk's NaN rule (a NaN never raises
+ * the running max). vmaxq propagates NaN, so a NaN result takes the walk. */
+static float rsa_max_abs_scan(const float *x, int n) {
+    float amax = (n > 0) ? fabsf(x[0]) : 0.0f;
+    int i;
+    for (i = 1; i < n; ++i) {
+        float a = fabsf(x[i]);
+        if (a > amax) amax = a;
+    }
+    return amax;
+}
+
+static float rsa_max_abs(const float *x, int n) {
+#if SK_HAVE_NEON
+    if (n >= 8) {
+        float32x4_t m0 = vabsq_f32(vld1q_f32(x)), m1 = m0;
+        float amax;
+        int i = 4;
+        for (; i + 8 <= n; i += 8) {
+            m0 = vmaxq_f32(m0, vabsq_f32(vld1q_f32(x + i)));
+            m1 = vmaxq_f32(m1, vabsq_f32(vld1q_f32(x + i + 4)));
+        }
+        for (; i + 4 <= n; i += 4) m0 = vmaxq_f32(m0, vabsq_f32(vld1q_f32(x + i)));
+        amax = vmaxvq_f32(vmaxq_f32(m0, m1));
+        if (!isnan(amax)) {
+            for (; i < n; ++i) { float a = fabsf(x[i]); if (a > amax) amax = a; }
+            return amax;
+        }
+    }
+#endif
+    return rsa_max_abs_scan(x, n);
 }
 
 /* Mirrors _identify_strong_narrow_band_component (cc:62-121). */
@@ -88,12 +188,7 @@ static void identify_strong_narrow_band_component(RenderSignalAnalyzer *m,
     }
 
     /* peak_bin = int(np.argmax(X2)) — first index of the maximum. */
-    peak_bin = 0;
-    for (i = 1; i < m->n_freqs; ++i) {
-        if (render_psd[i] > render_psd[peak_bin]) {
-            peak_bin = i;
-        }
-    }
+    peak_bin = rsa_argmax_first(render_psd, m->n_freqs);
 
     /* Non-peak power windows (avoiding ±5 bins around peak). */
     lo_lo = peak_bin - 14; if (lo_lo < 0) lo_lo = 0;
@@ -119,14 +214,7 @@ static void identify_strong_narrow_band_component(RenderSignalAnalyzer *m,
 
     /* max_abs of render time block: np.max(np.abs(render_block)), kept in
      * float32 (float32-by-design; formerly widened via float() to f64). */
-    {
-        float amax = (render_block_len > 0) ? fabsf(render_block[0]) : 0.0f;
-        for (i = 1; i < render_block_len; ++i) {
-            float a = fabsf(render_block[i]);
-            if (a > amax) amax = a;
-        }
-        max_abs = amax;
-    }
+    max_abs = rsa_max_abs(render_block, render_block_len);
 
     peak_level = render_psd[peak_bin];   /* X2[peak_bin], float32-by-design */
 

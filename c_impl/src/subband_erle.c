@@ -12,6 +12,7 @@
  * Built with -ffp-contract=off so per-op float roundings are not fused.
  */
 #include "subband_erle.h"
+#include "simd_kernels.h"   /* SK_HAVE_NEON, arm_neon.h */
 
 #include "aec3_scale.h"   /* aec3_per_bin_psd_threshold */
 
@@ -138,7 +139,30 @@ static void update_accumulated_spectra(SubbandErle *s,
             s->low_render_energy[k] = 0;
         }
     }
-    for (k = 0; k < s->n_bins; ++k) {
+    k = 0;
+#if SK_HAVE_NEON
+    /* Eight bins a step: the same f32 adds, and the compare result OR-ed into
+     * the 0/1 byte flags (the scalar loop only ever sets a flag). */
+    {
+        const float32x4_t thr = vdupq_n_f32(s->x2_band_energy_threshold);
+        const uint8x8_t one = vdup_n_u8(1);
+        for (; k + 8 <= s->n_bins; k += 8) {
+            vst1q_f32(s->y2_acc + k, vaddq_f32(vld1q_f32(s->y2_acc + k), vld1q_f32(y2 + k)));
+            vst1q_f32(s->y2_acc + k + 4, vaddq_f32(vld1q_f32(s->y2_acc + k + 4), vld1q_f32(y2 + k + 4)));
+            vst1q_f32(s->e2_acc + k, vaddq_f32(vld1q_f32(s->e2_acc + k), vld1q_f32(e2 + k)));
+            vst1q_f32(s->e2_acc + k + 4, vaddq_f32(vld1q_f32(s->e2_acc + k + 4), vld1q_f32(e2 + k + 4)));
+            {
+                uint16x8_t m16 = vcombine_u16(
+                    vmovn_u32(vcltq_f32(vld1q_f32(x2 + k), thr)),
+                    vmovn_u32(vcltq_f32(vld1q_f32(x2 + k + 4), thr)));
+                uint8x8_t m8 = vand_u8(vmovn_u16(m16), one);
+                vst1_u8(s->low_render_energy + k,
+                        vorr_u8(vld1_u8(s->low_render_energy + k), m8));
+            }
+        }
+    }
+#endif
+    for (; k < s->n_bins; ++k) {
         s->y2_acc[k] = s->y2_acc[k] + y2[k];     /* f32 += f32 */
         s->e2_acc[k] = s->e2_acc[k] + e2[k];     /* f32 += f32 */
         /* low_render |= x2 < thr : both float32, compare directly. */
@@ -224,9 +248,47 @@ static void update_bands(SubbandErle *s, int converged_filter,
 
 /* _decrease_erle_per_band_for_low_render_signals */
 static void decrease_erle_for_low_render(SubbandErle *s) {
-    int k;
+    int k = 1;
     int n = s->n_bins;
-    for (k = 1; k <= n - 2; ++k) {
+#if SK_HAVE_NEON
+    /* Eight bins a step, the scalar branches as selects: decrement every
+     * counter; where it is at or below the release threshold and the
+     * onset-compensated ERLE sits above the during-onset floor, decay it
+     * (never below that floor); where it is also at or below zero, re-arm
+     * the onset flag and clear the counter. */
+    {
+        const int32x4_t vthr = vdupq_n_s32(
+            s->blocks_for_onset_detection - s->blocks_to_hold_erle);
+        const int32x4_t vone = vdupq_n_s32(1);
+        const int32x4_t vzero = vdupq_n_s32(0);
+        const float32x4_t vdecay = vdupq_n_f32(s->onset_release_decay);
+        const uint8x8_t one8 = vdup_n_u8(1);
+        for (; k + 8 <= n - 1; k += 8) {
+            uint32x4_t re_arm[2];
+            int g;
+            for (g = 0; g < 2; ++g) {
+                int32x4_t hc = vsubq_s32(vld1q_s32(s->hold_counters + k + 4 * g), vone);
+                uint32x4_t below = vcleq_s32(hc, vthr);
+                float32x4_t oc = vld1q_f32(s->erle_onset_compensated + k + 4 * g);
+                float32x4_t du = vld1q_f32(s->erle_during_onsets + k + 4 * g);
+                float32x4_t decayed = vmulq_f32(vdecay, oc);
+                float32x4_t mx = vbslq_f32(vcgtq_f32(decayed, du), decayed, du);
+                uint32x4_t upd = vandq_u32(below, vcgtq_f32(oc, du));
+                vst1q_f32(s->erle_onset_compensated + k + 4 * g, vbslq_f32(upd, mx, oc));
+                re_arm[g] = vandq_u32(below, vcleq_s32(hc, vzero));
+                vst1q_s32(s->hold_counters + k + 4 * g,
+                          vbslq_s32(re_arm[g], vzero, hc));
+            }
+            {
+                uint8x8_t m8 = vand_u8(vmovn_u16(vcombine_u16(
+                    vmovn_u32(re_arm[0]), vmovn_u32(re_arm[1]))), one8);
+                vst1_u8(s->coming_onset + k,
+                        vorr_u8(vld1_u8(s->coming_onset + k), m8));
+            }
+        }
+    }
+#endif
+    for (; k <= n - 2; ++k) {
         s->hold_counters[k] -= 1;
         if (s->hold_counters[k] <=
             (s->blocks_for_onset_detection - s->blocks_to_hold_erle)) {

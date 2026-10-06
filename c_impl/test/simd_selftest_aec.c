@@ -663,6 +663,36 @@ static void test_ema_cmag2(void) {
 }
 
 
+/* ═══════════════════════ correctness: ring cmac ═══════════════════════════ */
+
+static void test_cmac_np_ring(void) {
+    enum { MAX_PART = 9, MAX_K = 130 };
+    static Complex W[MAX_PART * MAX_K], X[MAX_PART * MAX_K];
+    static Complex acc_init[MAX_K], acc_scalar[MAX_K], acc_simd[MAX_K];
+    const int parts[] = {1, 2, 4, 6, 7, 9};
+    const int ks[] = {1, 3, 4, 5, 8, 17, 64, 129};
+    int pi, ki, t, c;
+    for (pi = 0; pi < 6; ++pi) {
+        for (ki = 0; ki < 8; ++ki) {
+            int n_part = parts[pi], K = ks[ki];
+            for (t = 0; t < TRIALS; ++t) {
+                fill_complex(W, n_part * K);
+                fill_complex(X, n_part * K);
+                fill_complex(acc_init, K);
+                for (c = 0; c < n_part; ++c) {
+                    memcpy(acc_scalar, acc_init, (size_t)K * sizeof(Complex));
+                    memcpy(acc_simd, acc_init, (size_t)K * sizeof(Complex));
+                    sk_cmac_np_ring_f32_scalar(acc_scalar, W, X, c, n_part, K);
+                    sk_cmac_np_ring_f32(acc_simd, W, X, c, n_part, K);
+                    check_bits_classify("cmac_np_ring_f32", K, t, (const float *)acc_simd,
+                                        (const float *)acc_scalar, 2 * K);
+                }
+            }
+        }
+    }
+    printf("PASS cmac_np_ring_f32\n");
+}
+
 /* ═══════════════════════════ correctness: kernel 6 ═══════════════════════ */
 
 static void test_cmac_np(void) {
@@ -3259,6 +3289,7 @@ int main(void) {
     test_cmag2_np_acc();
     test_ema_cmag2();
     test_cmac_np();
+    test_cmac_np_ring();
     test_wupdate_nlms();
     test_wupdate_kf();
     test_pairwise_sum();

@@ -19,6 +19,7 @@
  */
 #include "saturation.h"
 #include "aec3_scale.h"
+#include "simd_kernels.h"   /* SK_HAVE_NEON, arm_neon.h */
 #include <math.h>
 #include <stddef.h>
 
@@ -48,14 +49,53 @@ float saturation_detect(Saturation* s, const float* signal, size_t n) {
     long clip_count   = 0;
     long consec_count = 0;
 
+    size_t i = 0;
+#if SK_HAVE_NEON
+    /* Both counts are integer sums of per-sample predicates, so any lane
+     * grouping gives the same totals; every predicate is the scalar one
+     * (fabsf, `>`, `<` on float32 -- a NaN sample fails them all). The loop
+     * body below handles i = 1 .. n-1 for the consecutive test with the
+     * previous sample read from one element back. */
+    {
+        const float32x4_t vthr = vdupq_n_f32(thr);
+        const float32x4_t vhigh = vdupq_n_f32(thr_high);
+        const float32x4_t vtiny = vdupq_n_f32(1e-6f);
+        uint32x4_t clip_acc = vdupq_n_u32(0);
+        uint32x4_t consec_acc = vdupq_n_u32(0);
+        const uint32x4_t one = vdupq_n_u32(1);
+        for (; i + 4 <= n; i += 4) {
+            float32x4_t cur = vld1q_f32(signal + i);
+            clip_acc = vaddq_u32(clip_acc,
+                vandq_u32(vcgtq_f32(vabsq_f32(cur), vthr), one));
+        }
+        clip_count = (long)vaddvq_u32(clip_acc);
+        for (size_t k = i; k < n; ++k)
+            if (fabsf(signal[k]) > thr) clip_count++;
+
+        i = 1;
+        for (; i + 4 <= n; i += 4) {
+            float32x4_t cur = vld1q_f32(signal + i);
+            float32x4_t prev = vld1q_f32(signal + i - 1);
+            uint32x4_t m = vandq_u32(
+                vandq_u32(vcgtq_f32(vabsq_f32(cur), vhigh),
+                          vcgtq_f32(vabsq_f32(prev), vhigh)),
+                vcltq_f32(vabsq_f32(vsubq_f32(cur, prev)), vtiny));
+            consec_acc = vaddq_u32(consec_acc, vandq_u32(m, one));
+        }
+        consec_count = (long)vaddvq_u32(consec_acc);
+    }
+#else
     /* First pass: clip_count + build high_mask implicitly via fabsf. */
-    for (size_t i = 0; i < n; ++i) {
+    for (i = 0; i < n; ++i) {
         float a = fabsf(signal[i]);
         if (a > thr) clip_count++;
     }
+    i = 1;
+#endif
 
-    /* Consecutive-near-peak loop (Python iterates i from 1..n-1) */
-    for (size_t i = 1; i < n; ++i) {
+    /* Consecutive-near-peak loop (Python iterates i from 1..n-1); on NEON
+     * this is the ragged tail of the vector loop above. */
+    for (; i < n; ++i) {
         float a_i  = fabsf(signal[i]);
         float a_im = fabsf(signal[i - 1]);
         if (a_i > thr_high && a_im > thr_high &&

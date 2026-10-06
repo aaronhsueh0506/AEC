@@ -290,6 +290,68 @@ static inline void sk_cmac_np_f32(Complex *acc, const Complex *w,
 }
 #endif
 
+/* ═══════════════════════════ sk_cmac_np_ring_f32 ═══════════════════════════
+ * acc[k] += w_part[k] * x_part[k] for part = 0 .. n_part-1 IN THAT ORDER,
+ * where w_part = W + part*K and x_part is X_buf's row (curr_p - part) mod
+ * n_part -- the partitioned echo accumulation of pbfdkf.c, i.e. exactly
+ * sk_cmac_np_f32 once per partition. The NEON form keeps each four-bin
+ * accumulator in registers across the partitions instead of storing and
+ * reloading it n_part times; every bin still sees the same fma-form product
+ * added in the same partition order, so the result is bit-identical. */
+
+static inline void sk_cmac_np_ring_f32_scalar(Complex *acc, const Complex *W,
+                                               const Complex *X_buf, int curr_p,
+                                               int n_part, int K) {
+    int part;
+    for (part = 0; part < n_part; ++part) {
+        int p_idx = curr_p - part;
+        while (p_idx < 0) p_idx += n_part;
+        sk_cmac_np_f32_scalar(acc, W + (size_t)part * K,
+                              X_buf + (size_t)p_idx * K, K);
+    }
+}
+
+#if SK_HAVE_NEON
+static inline void sk_cmac_np_ring_f32(Complex *acc, const Complex *W,
+                                        const Complex *X_buf, int curr_p,
+                                        int n_part, int K) {
+    int i = 0, part;
+    for (; i + 4 <= K; i += 4) {
+        float32x4x2_t av = sk__cquad_load(acc + i);
+        int p_idx = curr_p;
+        for (part = 0; part < n_part; ++part) {
+            float32x4x2_t wv = sk__cquad_load(W + (size_t)part * K + i);
+            float32x4x2_t xv = sk__cquad_load(X_buf + (size_t)p_idx * K + i);
+            float32x4_t wr = wv.val[0], wi = wv.val[1];
+            float32x4_t xr = xv.val[0], xi = xv.val[1];
+            av.val[0] = vaddq_f32(av.val[0],
+                vfmaq_f32(vnegq_f32(vmulq_f32(wi, xi)), wr, xr));
+            av.val[1] = vaddq_f32(av.val[1],
+                vfmaq_f32(vmulq_f32(wi, xr), wr, xi));
+            p_idx = (p_idx == 0) ? n_part - 1 : p_idx - 1;
+        }
+        sk__cquad_store(acc + i, av);
+    }
+    for (; i < K; ++i) {
+        int p_idx = curr_p;
+        for (part = 0; part < n_part; ++part) {
+            const Complex *w = W + (size_t)part * K + i;
+            const Complex *x = X_buf + (size_t)p_idx * K + i;
+            float wr = w->r, wi = w->i, xr = x->r, xi = x->i;
+            acc[i].r += fmaf(wr, xr, -(wi * xi));
+            acc[i].i += fmaf(wr, xi,  (wi * xr));
+            p_idx = (p_idx == 0) ? n_part - 1 : p_idx - 1;
+        }
+    }
+}
+#else
+static inline void sk_cmac_np_ring_f32(Complex *acc, const Complex *W,
+                                        const Complex *X_buf, int curr_p,
+                                        int n_part, int K) {
+    sk_cmac_np_ring_f32_scalar(acc, W, X_buf, curr_p, n_part, K);
+}
+#endif
+
 /* ═══════════════════════════════ kernel 7 ══════════════════════════════════
  * sk_wupdate_nlms_f32 — the PBFDAF NLMS coarse-filter W-update, per-bin, for
  * ONE partition (the outer loop-over-partitions stays scalar at the call

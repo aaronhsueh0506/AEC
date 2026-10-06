@@ -41,6 +41,61 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-10-06 — linear-half context level (`AEC_CONTEXT_LINEAR_ONLY`) and NEON hot spots, all bit-identical
+
+### Added
+
+- **`AecConfig.spatial_linear_context` level 2 (`AEC_CONTEXT_LINEAR_ONLY`).**
+  The field stays an `int` (so `sizeof(AecConfig)` and every pool size are
+  unchanged) and now takes 0 (full context), 1 (this lane's own `res_gain` is
+  not computed -- the existing meaning) or 2. Level 2 is for a caller that
+  reads only the linear half of `AecResContext` / `AecLinearContext`
+  (`formed_hop`, `error_spec`, `echo_spec`, `near_spec`, `far_spec`, the delay
+  and verdict fields): the post block stops after the AecState update,
+  skipping the reverb/residual estimator, the stationarity R² zeroing,
+  comfort-noise tracking and the suppression gain. None of those write
+  anything the linear filter, the AecState, the stationarity estimator, the
+  avg-render reverb or the pending echo-path flags read, so every linear
+  output is byte-identical to levels 0 and 1 (`test_process_context`: 3 grids
+  x shadow on/off x level 0/1, 600 hops each, with the `usable_linear`
+  verdict toggling during the run; skipping the AecState update as well makes
+  that test fail). `res_gain`, `r2` and `comfort_noise` read `NULL` and
+  `res_floor_protect` reads 0. Same validity rule as level 1
+  (`enable_res=0 && return_res_context=1`); values outside 0..2 are rejected.
+  Measured on one core of the dev machine, `aec_process_context()` 7.31 ->
+  6.32 us/hop (16 kHz / 256), 15.85 -> 13.98 (16 kHz / 512), 31.89 -> 27.87
+  (48 kHz / 1024), shadow off; 11-14 % in all six grid x shadow cases.
+
+### Performance (bit-identical; no behaviour change)
+
+Eight scalar or latency-bound hot spots of the linear path now run as NEON,
+each checked against its previous implementation (differential fuzz where the
+function is directly callable, a 12-configuration whole-AEC output hash --
+3 grids x shadow on/off x `aec_process`/`aec_process_context` over 6000 hops
+-- for all of them together, and scalar-build == NEON-build):
+
+- `rsa_update`: the narrow-band counters (int64 lanes), the peak search
+  (two-pass first-index argmax, scalar walk on any non-finite maximum) and
+  the render-block max-abs.
+- `saturation_detect`: both integer counts.
+- `subband_erle`: the accumulated-spectra update and the per-band hold /
+  release loop.
+- `stationarity_estimator`: the flag compute, the hangover update and the
+  neighbour smoothing (16 flags a step, original left neighbour carried).
+- `pbfdkf_h_error_refresh`: the per-bin leakage update and the clip.
+- `sk_cmac_np_ring_f32` (new, `aec_simd_kernels.h`): the partitioned echo
+  accumulation keeps each four-bin accumulator in registers across the
+  partitions; same fma-form product, same partition order.
+- The render and capture decimators run as the two lanes of one vector
+  (`da_decimator_decimate_pair`): same products, same grouping, no fused
+  multiply-add. `test_delay_kernels` gained a state-carrying pair sweep
+  against two generic walks.
+
+Measured on one core of the dev machine, `aec_process_context()` (shadow on,
+16 kHz / 256, 16 kHz / 512, 48 kHz / 1024): 9.02 -> 7.64, 18.23 -> 15.52,
+38.78 -> 34.46 us/hop (-15 %, -15 %, -11 %), on top of level 2's 11-14 % for
+callers that read only the linear half.
+
 ## [Unreleased] — 2026-09-22 — validated DT floor and cross-port fixes
 
 ### Changed (measured output trade-off)

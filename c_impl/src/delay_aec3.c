@@ -460,6 +460,100 @@ static void da_decimator_decimate(DaDecimator *dec, const float *in_block, float
     }
 }
 
+/* The render and capture decimators run back to back on every block, share
+ * no data and (da_decimator_init) carry the same coefficients. The 3-LP + 1-HP
+ * cascade is a long chain of dependent float32 multiplies and adds per
+ * sample, so running both signals through it as the two lanes of one vector
+ * halves the instruction count. Every lane executes exactly the scalar
+ * expressions of da_decimator_decimate above -- the same products, the same
+ * left-associative grouping, no fused multiply-add -- so outputs and filter
+ * states are bit-identical. Off-shape cascades, or two cascades whose
+ * coefficients differ, take two single calls. */
+#if defined(__ARM_NEON) && defined(__aarch64__) && \
+    !defined(SIMD_KERNELS_FORCE_SCALAR)
+static int da_biquad_same_coefficients(const DaBiquad *a, const DaBiquad *b) {
+    /* only the declared sections are initialised; the rows past them are not
+     * part of the filter */
+    return a->n_sections == b->n_sections &&
+           memcmp(a->b, b->b, (size_t)a->n_sections * sizeof(a->b[0])) == 0 &&
+           memcmp(a->a, b->a, (size_t)a->n_sections * sizeof(a->a[0])) == 0;
+}
+
+static int da_decimator_same_coefficients(const DaDecimator *a, const DaDecimator *b) {
+    return da_biquad_same_coefficients(&a->anti_alias, &b->anti_alias) &&
+           da_biquad_same_coefficients(&a->noise_reduction, &b->noise_reduction);
+}
+
+static void da_decimator_decimate_pair(DaDecimator *da, const float *in_a, float *out_a,
+                                       DaDecimator *db, const float *in_b, float *out_b) {
+    if (da->anti_alias.n_sections != 3 || da->noise_reduction.n_sections != 1 ||
+        db->anti_alias.n_sections != 3 || db->noise_reduction.n_sections != 1 ||
+        !da_decimator_same_coefficients(da, db)) {
+        da_decimator_decimate(da, in_a, out_a);
+        da_decimator_decimate(db, in_b, out_b);
+        return;
+    }
+    {
+        const DaBiquad *lp = &da->anti_alias, *hp = &da->noise_reduction;
+        const float32x2_t lb00 = vdup_n_f32(lp->b[0][0]), lb01 = vdup_n_f32(lp->b[0][1]), lb02 = vdup_n_f32(lp->b[0][2]);
+        const float32x2_t lb10 = vdup_n_f32(lp->b[1][0]), lb11 = vdup_n_f32(lp->b[1][1]), lb12 = vdup_n_f32(lp->b[1][2]);
+        const float32x2_t lb20 = vdup_n_f32(lp->b[2][0]), lb21 = vdup_n_f32(lp->b[2][1]), lb22 = vdup_n_f32(lp->b[2][2]);
+        const float32x2_t la00 = vdup_n_f32(lp->a[0][0]), la01 = vdup_n_f32(lp->a[0][1]);
+        const float32x2_t la10 = vdup_n_f32(lp->a[1][0]), la11 = vdup_n_f32(lp->a[1][1]);
+        const float32x2_t la20 = vdup_n_f32(lp->a[2][0]), la21 = vdup_n_f32(lp->a[2][1]);
+        const float32x2_t hb00 = vdup_n_f32(hp->b[0][0]), hb01 = vdup_n_f32(hp->b[0][1]), hb02 = vdup_n_f32(hp->b[0][2]);
+        const float32x2_t ha00 = vdup_n_f32(hp->a[0][0]), ha01 = vdup_n_f32(hp->a[0][1]);
+        float32x2_t lz00 = vset_lane_f32(db->anti_alias.z[0][0], vdup_n_f32(da->anti_alias.z[0][0]), 1);
+        float32x2_t lz01 = vset_lane_f32(db->anti_alias.z[0][1], vdup_n_f32(da->anti_alias.z[0][1]), 1);
+        float32x2_t lz10 = vset_lane_f32(db->anti_alias.z[1][0], vdup_n_f32(da->anti_alias.z[1][0]), 1);
+        float32x2_t lz11 = vset_lane_f32(db->anti_alias.z[1][1], vdup_n_f32(da->anti_alias.z[1][1]), 1);
+        float32x2_t lz20 = vset_lane_f32(db->anti_alias.z[2][0], vdup_n_f32(da->anti_alias.z[2][0]), 1);
+        float32x2_t lz21 = vset_lane_f32(db->anti_alias.z[2][1], vdup_n_f32(da->anti_alias.z[2][1]), 1);
+        float32x2_t hz00 = vset_lane_f32(db->noise_reduction.z[0][0], vdup_n_f32(da->noise_reduction.z[0][0]), 1);
+        float32x2_t hz01 = vset_lane_f32(db->noise_reduction.z[0][1], vdup_n_f32(da->noise_reduction.z[0][1]), 1);
+        int o, j;
+        for (o = 0; o < DA_SUB_BLOCK_SIZE; ++o) {
+            const float32x4_t ga = vld1q_f32(in_a + o * DA_DOWN_SAMPLING_FACTOR);
+            const float32x4_t gb = vld1q_f32(in_b + o * DA_DOWN_SAMPLING_FACTOR);
+            /* (a_j, b_j) pairs: zip1 -> j = 0,1 ; zip2 -> j = 2,3 */
+            const float32x4_t z1 = vzip1q_f32(ga, gb), z2 = vzip2q_f32(ga, gb);
+            for (j = 0; j < DA_DOWN_SAMPLING_FACTOR; ++j) {
+                float32x2_t x = (j == 0) ? vget_low_f32(z1) : (j == 1) ? vget_high_f32(z1)
+                              : (j == 2) ? vget_low_f32(z2) : vget_high_f32(z2);
+                float32x2_t y0 = vadd_f32(vmul_f32(lb00, x), lz00);
+                float32x2_t y1, y2, y3;
+                lz00 = vadd_f32(vsub_f32(vmul_f32(lb01, x), vmul_f32(la00, y0)), lz01);
+                lz01 = vsub_f32(vmul_f32(lb02, x), vmul_f32(la01, y0));
+                y1 = vadd_f32(vmul_f32(lb10, y0), lz10);
+                lz10 = vadd_f32(vsub_f32(vmul_f32(lb11, y0), vmul_f32(la10, y1)), lz11);
+                lz11 = vsub_f32(vmul_f32(lb12, y0), vmul_f32(la11, y1));
+                y2 = vadd_f32(vmul_f32(lb20, y1), lz20);
+                lz20 = vadd_f32(vsub_f32(vmul_f32(lb21, y1), vmul_f32(la20, y2)), lz21);
+                lz21 = vsub_f32(vmul_f32(lb22, y1), vmul_f32(la21, y2));
+                y3 = vadd_f32(vmul_f32(hb00, y2), hz00);
+                hz00 = vadd_f32(vsub_f32(vmul_f32(hb01, y2), vmul_f32(ha00, y3)), hz01);
+                hz01 = vsub_f32(vmul_f32(hb02, y2), vmul_f32(ha01, y3));
+                if (j == 0) { out_a[o] = vget_lane_f32(y3, 0); out_b[o] = vget_lane_f32(y3, 1); }
+            }
+        }
+        da->anti_alias.z[0][0] = vget_lane_f32(lz00, 0); db->anti_alias.z[0][0] = vget_lane_f32(lz00, 1);
+        da->anti_alias.z[0][1] = vget_lane_f32(lz01, 0); db->anti_alias.z[0][1] = vget_lane_f32(lz01, 1);
+        da->anti_alias.z[1][0] = vget_lane_f32(lz10, 0); db->anti_alias.z[1][0] = vget_lane_f32(lz10, 1);
+        da->anti_alias.z[1][1] = vget_lane_f32(lz11, 0); db->anti_alias.z[1][1] = vget_lane_f32(lz11, 1);
+        da->anti_alias.z[2][0] = vget_lane_f32(lz20, 0); db->anti_alias.z[2][0] = vget_lane_f32(lz20, 1);
+        da->anti_alias.z[2][1] = vget_lane_f32(lz21, 0); db->anti_alias.z[2][1] = vget_lane_f32(lz21, 1);
+        da->noise_reduction.z[0][0] = vget_lane_f32(hz00, 0); db->noise_reduction.z[0][0] = vget_lane_f32(hz00, 1);
+        da->noise_reduction.z[0][1] = vget_lane_f32(hz01, 0); db->noise_reduction.z[0][1] = vget_lane_f32(hz01, 1);
+    }
+}
+#else
+static void da_decimator_decimate_pair(DaDecimator *da, const float *in_a, float *out_a,
+                                       DaDecimator *db, const float *in_b, float *out_b) {
+    da_decimator_decimate(da, in_a, out_a);
+    da_decimator_decimate(db, in_b, out_b);
+}
+#endif
+
 /* ------------------------------------------------------------------- ring */
 
 static void da_ring_reset(DaRing *r) {
@@ -1082,8 +1176,8 @@ static int da_estimator_process_inner_block(DaEstimator *e, const float *render_
     int agg_delay = 0;
     DelayQuality agg_quality = DELAY_QUALITY_COARSE;
 
-    da_decimator_decimate(&e->render_decimator, render_block, render_sub);
-    da_decimator_decimate(&e->capture_decimator, capture_block, capture_sub);
+    da_decimator_decimate_pair(&e->render_decimator, render_block, render_sub,
+                               &e->capture_decimator, capture_block, capture_sub);
     da_ring_push(&e->render_ring, render_sub, DA_SUB_BLOCK_SIZE);
     if (!run_matched_filter) return 0;   /* fed, not analysed (see above) */
     da_matched_filter_update(&e->matched_filter, &e->render_ring, capture_sub,
