@@ -683,6 +683,7 @@ int aec3_post_run(Aec3Post *p,
              * echo-path flags, so the linear filter and the formed output
              * are unaffected. Step 21's context_only return follows. */
             if (in->linear_context_only) {
+                assert(in->context_only);
                 memcpy(out, in->raw_output, (size_t)hop * sizeof(float));
                 goto post_done;
             }

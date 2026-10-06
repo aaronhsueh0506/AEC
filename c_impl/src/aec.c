@@ -386,10 +386,10 @@ static int aec_validate_config(const AecConfig* cfg_in) {
     AEC_CK_BOOL(dt_aware_recovery_soft);
     AEC_CK_BOOL(dt_aware_res_floor_enabled);
     /* spatial_linear_context's (levels 1 and 2) whole premise is that
-     * apply_output() (Step 21) never reads the skipped gain -- true only when context_only holds
-     * (enable_res==0 && return_res_context==1). Reject any other
-     * combination here rather than relying on the aec3_post_run() debug
-     * assert alone. */
+     * apply_output() (Step 21) never reads the skipped gain -- true only
+     * when context_only holds (enable_res==0 && return_res_context==1).
+     * Reject any other combination here rather than relying on the
+     * aec3_post_run() debug assert alone. */
     if (cfg->spatial_linear_context &&
         (cfg->enable_res || !cfg->return_res_context)) return 0;
 

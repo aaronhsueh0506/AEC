@@ -1082,26 +1082,8 @@ static void pbfdkf_h_error_refresh(PBFDKF* p, const float *e2_ref_bins) {
             p->H_error_per_bin[k] = p->H_error_per_bin[k] +
                                     leakage * p->erl_per_bin[k];
     }
-    /* np.clip(H_error, floor, ceil). numpy clip: out = min(max(x,lo),hi). */
-    int kc = 0;
-#if SK_HAVE_NEON
-    {
-        const float32x4_t vlo = vdupq_n_f32(p->h_error_floor);
-        const float32x4_t vhi = vdupq_n_f32(p->h_error_ceil);
-        for (; kc + 4 <= K; kc += 4) {
-            float32x4_t v = vld1q_f32(p->H_error_per_bin + kc);
-            v = vbslq_f32(vcltq_f32(v, vlo), vlo, v);
-            v = vbslq_f32(vcgtq_f32(v, vhi), vhi, v);
-            vst1q_f32(p->H_error_per_bin + kc, v);
-        }
-    }
-#endif
-    for (int k = kc; k < K; ++k) {
-        float v = p->H_error_per_bin[k];
-        if (v < p->h_error_floor) v = p->h_error_floor;
-        if (v > p->h_error_ceil)  v = p->h_error_ceil;
-        p->H_error_per_bin[k] = v;
-    }
+    /* np.clip(H_error, floor, ceil): low bound checked first, then high. */
+    sk_clip_f32(p->H_error_per_bin, p->h_error_floor, p->h_error_ceil, K);
 }
 
 /* AEC3-aligned per-bin Kalman gain via H_error

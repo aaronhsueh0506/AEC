@@ -301,7 +301,7 @@ static void test_linear_context_only_matches_full(
 
     enum { HOPS = 600, DELAY_HOPS = 3 };
     static float far_hist[DELAY_HOPS + 1][1024];
-    float mic[1024], far_now[1024], out[1024];
+    float mic[1024], far_now[1024];
     int all_match = 1, nulls_ok = 1, usable_seen[2] = {0, 0}, hops_checked = 0;
     g_rng_state = 0x71A3C0DEu;
     for (int i = 0; i < HOPS; ++i) {
@@ -314,7 +314,6 @@ static void test_linear_context_only_matches_full(
 
         aec_process_context(&full, mic, far_now);
         aec_process_context(&lin,  mic, far_now);
-        (void)out;
 
         AecResContext ca, cb;
         aec_get_res_context(&full, &ca);
