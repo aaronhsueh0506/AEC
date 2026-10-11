@@ -1,5 +1,5 @@
 commit d7e94f7e101889e4101a874ebfa270f338818ed0
-Author: aaron <aaron.hsueh@explorers-residence.com>
+Author: aaron
 Date:   Fri Aug 7 07:32:04 2026 +0800
 
     fix: alpha_r bypass, on the 10 ms anchor
@@ -43,7 +43,7 @@ Date:   Fri Aug 7 07:32:04 2026 +0800
  .../tests/test_detector_timing_effective_values.py |  7 ++++---
  4 files changed, 32 insertions(+), 24 deletions(-)
 commit d7e94f7e101889e4101a874ebfa270f338818ed0
-Author: aaron <aaron.hsueh@explorers-residence.com>
+Author: aaron
 Date:   Fri Aug 7 07:32:04 2026 +0800
 
     fix: alpha_r bypass, on the 10 ms anchor
