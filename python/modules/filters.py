@@ -993,7 +993,7 @@ class PBFDKF(PBFDAF):
             use_converged_mask = (
                 e2_refined_per_bin <= self._e2_coarse_per_bin
             ) | self._disallow_leakage_diverged
-            # Diag (2026-05-27): fraction of bins taking the diverged-leakage
+            # Diag: fraction of bins taking the diverged-leakage
             # branch this hop. Stashed for the orchestrator _hf_chain_trace.
             self._last_leakage_div_frac = float(np.mean(~use_converged_mask))
             leakage_arr = np.where(
@@ -1016,7 +1016,7 @@ class PBFDKF(PBFDAF):
             use_converged = (
                 e2_ref_sum <= e2_coa_sum or self._disallow_leakage_diverged
             )
-            # Diag (2026-05-27): scalar path is all-or-nothing, so frac is 0 or 1.
+            # Diag: scalar path is all-or-nothing, so frac is 0 or 1.
             self._last_leakage_div_frac = 0.0 if use_converged else 1.0
             leakage = _lc_eff if use_converged else _ld_eff
             self.H_error_per_bin = (

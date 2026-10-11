@@ -56,9 +56,9 @@ class SuppressorTuning:
 #   normal_tuning   = (mask_lf=(0.3, 0.4, 0.3),  mask_hf=(0.07, 0.1, 0.3))
 #   nearend_tuning  = (mask_lf=(1.09, 1.1, 0.3), mask_hf=(0.1, 0.3, 0.3))
 # Tuple order: (enr_transparent, enr_suppress, emr_transparent).
-# Earlier port had nearend_tuning hardcoded to (0.4,0.4,0.4) placeholder
-# values — 2.7-4× looser than AEC3 → nearend-state gain rules suppressed
-# much less aggressively than design intent. Aligned 2026-05-27.
+# AEC3's nearend tuning is 2.7-4× tighter than a (0.4,0.4,0.4) placeholder
+# would be; looser values suppress nearend-state gain rules much less
+# aggressively than design intent.
 _DEFAULT_NEAREND_TUNING = SuppressorTuning(
     mask_lf=MaskTuning(1.09, 1.1, 0.3),
     mask_hf=MaskTuning(0.1, 0.3, 0.3),
@@ -82,7 +82,7 @@ class HighFrequencySuppressionConfig:
     # Use 1-bin width (= 31.25 Hz @ our fft=512) to match AEC3's strict
     # single-cell semantic. Prior 125 Hz freq-width interpretation made
     # the cap 4× more aggressive at our fft resolution.
-    # Restored to AEC3 strict single-cell 2026-05-27.
+    # AEC3 strict single-cell.
     limiting_gain_freq_hz: float = 2000.0
     limiting_gain_width_hz: float = 31.25
 

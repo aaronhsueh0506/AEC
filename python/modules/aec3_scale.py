@@ -285,13 +285,13 @@ def growth_rehop(retention_at_ref: float, ref_hop_samples: int, ref_sample_rate:
 H_ERROR_INIT_FLOAT = 10000.0
 H_ERROR_FLOOR_FLOAT = 1e-3
 # AEC3 ceiling (refined_filter_update_gain.cc kHErrorCeiling = 2.0 in
-# echo_canceller3_config.h:96 refined.error_ceil). Aligned to AEC3 2026-05-27;
-# prior Python 100.0 was inflated and let H_error dominate mu denom, blocking
-# recovery from over-estimation states.
+# echo_canceller3_config.h:96 refined.error_ceil). Aligned to AEC3;
+# a larger ceiling would inflate H_error, let it dominate the mu denominator and
+# block recovery from over-estimation states.
 H_ERROR_CEIL_FLOAT = 2.0
 # AEC3 production ceiling (refined_filter_update_gain.cc kHErrorCeiling = 2.0).
-# Retained for back-compat with any consumer referencing this name; now
-# numerically identical to H_ERROR_CEIL_FLOAT after the 2026-05-27 alignment.
+# Retained for back-compat with any consumer referencing this name;
+# numerically identical to H_ERROR_CEIL_FLOAT.
 H_ERROR_CEIL_AEC3_FLOAT = 2.0
 
 # AEC3 steady refined config (echo_canceller3_config.h:92-97):
@@ -303,7 +303,7 @@ H_ERROR_CEIL_AEC3_FLOAT = 2.0
 # Earlier defaults (1e-3 / 1e-1 base) produced 2.5e-3 / 2.5e-1 — 20× / 2× too soft
 # (closer to AEC3 INITIAL profile 0.005 / 0.5). Soft leakage keeps H_error
 # inflated → mu stays large → filter over-adapts → linear-filter over-estimation
-# artifact in weak-echo cases (FS quiet-mic). Aligned to AEC3 steady 2026-05-27.
+# artifact in weak-echo cases (FS quiet-mic). Aligned to AEC3 steady.
 LEAKAGE_CONVERGED_PER_HOP_DEFAULT = per_block_rate_to_per_hop(5e-5, 160, 16000)  # 1.25e-4
 LEAKAGE_DIVERGED_PER_HOP_DEFAULT = per_block_rate_to_per_hop(5e-2, 160, 16000)   # 0.125
 
@@ -313,7 +313,7 @@ LEAKAGE_DIVERGED_PER_HOP_DEFAULT = per_block_rate_to_per_hop(5e-2, 160, 16000)  
 LEAKAGE_CONVERGED_TRANSIENT_PER_HOP = per_block_rate_to_per_hop(5e-3, 160, 16000)  # 1.25e-2
 LEAKAGE_DIVERGED_TRANSIENT_PER_HOP  = per_block_rate_to_per_hop(5e-1, 160, 16000)  # 1.25
 
-# Gate 0 Variant D1_corrected: AEC3 SetConfig(refined_initial) leakage rates (corrected 2026-05-26).
+# Gate 0 Variant D1_corrected: AEC3 SetConfig(refined_initial) leakage rates.
 # Source: echo_canceller3_config.h FilterConfig refined_initial (lines 102-107):
 #   refined_initial.leakage_converged = 0.005f  (vs 0.00005 normal refined → 100×)
 #   refined_initial.leakage_diverged  = 0.5f    (vs 0.05 normal refined → 10×)

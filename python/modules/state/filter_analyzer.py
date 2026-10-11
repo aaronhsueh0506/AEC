@@ -156,10 +156,9 @@ class FilterAnalyzer:
         hop_size: int = 160,
         sample_rate: int = 16000,
     ) -> None:
-        # hop_size/sample_rate were previously not parameters at all -- every
-        # time-based constant below was hardcoded against the stale
-        # hop=160/sr=16000 assumption (_rates.HOP_SAMPLES), which matches
-        # none of the currently supported grids.
+        # hop_size/sample_rate parametrize every time-based constant below;
+        # a hardcoded hop=160/sr=16000 assumption (_rates.HOP_SAMPLES)
+        # matches none of the currently supported grids.
         self._hop_size = int(hop_size)
         self._active_render_threshold = float((active_render_limit ** 2) * self._hop_size)
         self._bounded_erl = bool(bounded_erl)

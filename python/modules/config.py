@@ -38,7 +38,7 @@ class SignalGrid(NamedTuple):
     is_legacy: bool        # True for 8 kHz: supported, not a product grid
 
 
-# 8 kHz is a LEGACY grid (productization plan §11.2, decided): supported by
+# 8 kHz is a LEGACY grid: supported by
 # this library and by the Audio_ALG MONO pipeline, but NOT a product grid
 # and NOT supported by the Audio_ALG 4-CHANNEL pipeline, whose public API
 # contracts to exactly the three product grids. Kept because real tests
@@ -277,7 +277,7 @@ class AecConfig:
     # enr_threshold=0.25: DNE-canonical pivot (0.25 = echo < 0.25×ne → nearend dominant).
     # softness=0.25: ENR range over which the transition occurs (±1 std = 0-0.5 ENR).
     #
-    # DEFAULT ON (v3.22, 2026-05-30) — 800-case verdict: FS echo +0.042 avg
+    # DEFAULT ON — 800-case verdict: FS echo +0.042 avg
     # (縮小 FS_movement −0.080 gap vs AEC2 → −0.036); DT deg −0.040 but
     # +0.107/+0.230 buffer over AEC3 ship target. All ship targets met.
     soft_nearend_blend_enabled: bool = True
@@ -305,7 +305,7 @@ class AecConfig:
     #   1.07e7 = -20dBFS per-bin in int16² units (calibration reference).
     #   nl_alpha=0.1 → 10% addition at -20dBFS, grows quadratically louder.
     #
-    # DEFAULT ON (v3.22, 2026-05-31) — 800-case vs d3 baseline:
+    # DEFAULT ON — 800-case vs d3 baseline:
     # FS echo +0.079/+0.106 (FS_movement 3.483→3.589, beats AEC2 3.519 by +0.070).
     # DT deg −0.027/−0.031 (still +0.08/+0.20 above AEC3 ship target).
     # NE deg −0.029 (still +0.45 above AEC3). All ship targets met.
@@ -327,7 +327,7 @@ class AecConfig:
     # residual leaks 15-22 dB vs AEC3; reverb model is DEAD across all cases).
     # When ON, scale `_x2_reverb_for_erle` by _PSD_SCALE to match far_psd and
     # the threshold. Validated revival on aec_record: quality 0→32%, reverb
-    # tail 0→73%, far-offset −18→−30 dB. DEFAULT ON (v3.22, 2026-05-30) —
+    # tail 0→73%, far-offset −18→−30 dB. DEFAULT ON —
     # reverb-revival bug fix. 800-case on the E1-ON baseline: FS echo +0.07
     # (deg held), DT echo +0.03 / deg −0.02 (affordable — post-fix DT deg 1.99
     # still beats AEC3's 1.86, and A1 near-protection recovers it). The shelved
@@ -355,7 +355,7 @@ class AecConfig:
     # windowed-capture reconstruction the selection path uses at
     # orchestrator:2889) so Y2/E2 share the sqrt-Hann coordinate. ERLE-estimator
     # ONLY (ERL / saturation keep the rectangular capture_psd). SOFT-nores
-    # (post-filter). DEFAULT ON (v3.22, 2026-05-30) — confirmed correctness fix.
+    # (post-filter). DEFAULT ON — confirmed correctness fix.
     # The clamps this ERLE feeds (1.0/4.0/1.5) are AEC3-canonical
     # (echo_canceller3_config.h:123-125), built for the CONSISTENT coordinate, so
     # the mixed rect/Hann ERLE was the bug (no orphaned clamp-tune to re-derive).
@@ -378,7 +378,7 @@ class AecConfig:
     # (genuine over-output). The blanket switch (no |E|>|Y| guard) re-leaked echo
     # on unusable-but-cancelling frames → 800-case FS echo −0.023; the guard aims
     # to keep the DT/NE deg gains (+0.013/+0.014) without that regress. SOFT-nores
-    # (gain unchanged). VERDICT (2026-05-30): guarded version ≈ 0.000 on 800-case
+    # (gain unchanged). VERDICT: guarded version ≈ 0.000 on 800-case
     # AECMOS — NOT because the gate rarely fires, but because perceptual effect is
     # neutral. Gate/fire trace: usable_linear=False opens 30.8% of frames overall;
     # |E|>|Y| fires 34.5% of those (10.6% of all frames); FS_movement highest
@@ -390,7 +390,7 @@ class AecConfig:
     # AEC_OUT_CAPTURE_UNUSABLE=0 forces OFF.
     output_capture_when_linear_unusable: bool = True
 
-    # P4 fix [DEFAULT ON, 2026-06-02]: protect a working alignment from a spurious
+    # P4 fix [DEFAULT ON]: protect a working alignment from a spurious
     # late first-acquisition. When the linear filter is already cancelling
     # (>2.5 dB windowed ERLE) at the current alignment, reject Path-A delay
     # acquisition (which would reset the filter + apply a spurious large shift).
@@ -497,7 +497,7 @@ class AecConfig:
     # Per-hop EMA alpha (EMA lag ~44.8 ms @ this literal's legacy hop=160/
     # sample_rate=16000 = 10 ms grid) smoothing main/shadow error energies.
     # Wall-clock-authored with zero rate conversion; retimed live in
-    # __post_init__ below (2026-08 gap-fix) -- see that block's comment.
+    # __post_init__ below -- see that block's comment.
     shadow_err_alpha: float = 0.80
     shadow_mu_min: float = 0.5
     shadow_copy_hysteresis: int = 3
@@ -511,7 +511,7 @@ class AecConfig:
     # Both hop counts below are wall-clock-authored @ legacy hop=160/
     # sample_rate=16000 (10 ms) grid (100 hops = 1000 ms hold-off,
     # 30 hops = 300 ms required stability), zero rate conversion; retimed
-    # live in __post_init__ below (2026-08 gap-fix).
+    # live in __post_init__ below.
     filter_misadjustment_hangover_frames: int = 100
     filter_misadjustment_stable_frames: int = 30
     filter_misadjustment_scale_min: float = 0.5
@@ -526,15 +526,14 @@ class AecConfig:
     # every preset -- 100 is the actual production/live value, this 80 is
     # only reachable via a bare ``AecConfig()``. Both are wall-clock-
     # authored with zero rate conversion; retimed live in __post_init__
-    # below (2026-08 gap-fix).
+    # below.
     warmup_frames: int = 80
 
     # ── Echo-path-change detection (requires shadow) ────────────────────
     epc_delta_threshold: float = 0.3
     epc_total_rise: float = 1.5
     # 20 hops = 200 ms @ legacy hop=160/sample_rate=16000 (10 ms) grid,
-    # zero rate conversion; retimed live in __post_init__ below (2026-08
-    # gap-fix).
+    # zero rate conversion; retimed live in __post_init__ below.
     epc_hangover: int = 20
 
     # ── Delay estimation (matched-filter + ring buffer) ─────────────────
@@ -590,8 +589,7 @@ class AecConfig:
     # echo; that measured trade-off is why its RES floor is not set shallower.
     ne_recent_threshold: float = 0.3
     # 150 hops = 1500 ms @ legacy hop=160/sample_rate=16000 (10 ms) grid,
-    # zero rate conversion; retimed live in __post_init__ below (2026-08
-    # gap-fix).
+    # zero rate conversion; retimed live in __post_init__ below.
     ne_recent_hold: int = 150
     # Genuine consecutive-event count (near-end-active hops required to ARM
     # the hold above), NOT a duration -- intentionally left unretimed.
@@ -702,31 +700,27 @@ class AecConfig:
 
         self._resolve_delay_mode()
 
-        # Wall-clock-authored top-level (non-AEC3) constants (2026-08
-        # gap-fix, follow-up to the AEC3-internal per-block/hop-count
-        # constant audit). shadow_err_alpha / warmup_frames / epc_hangover /
+        # Wall-clock-authored top-level (non-AEC3) constants.
+        # shadow_err_alpha / warmup_frames / epc_hangover /
         # ne_recent_hold / filter_misadjustment_{stable,hangover}_frames
-        # were literal hop counts / per-hop EMA alphas frozen at the legacy
-        # hop=160/sample_rate=16000 (10 ms) grid that predates this repo's
-        # own multi-rate history, with zero rate conversion when the
-        # 16 kHz default flipped to 8 ms hop (2026-08-01) or at 8/48 kHz.
+        # are authored as literal hop counts / per-hop EMA alphas at the
+        # hop=160/sample_rate=16000 (10 ms) grid, with no rate conversion
+        # of their own.
         # Retimed here via aec3_scale.ms_to_hops()/growth_rehop() so they
         # cover approximately the same wall-clock duration at every grid.
         #
-        # IDEMPOTENCY + CROSS-GRID PRECISION (2026-08-04 gap-fix, revised
-        # same day): an earlier version of this fix tracked "which grid is
-        # the CURRENT field value calibrated for" and rebased from that --
-        # correct for repeated same-grid reconstruction, but still lossy
+        # IDEMPOTENCY + CROSS-GRID PRECISION: rebasing from the field's current value
+        # (tracking "which grid is the CURRENT field value calibrated for") is
+        # correct for repeated same-grid reconstruction, but lossy
         # across a CHAIN of different grids, because ``ms_to_hops()`` rounds
-        # to the nearest integer hop and each step in the chain rebased from
+        # to the nearest integer hop and each step in the chain would rebase from
         # the PREVIOUS step's already-rounded hop count instead of the
         # original canonical millisecond value (e.g. 16k/512 -> 48k/1024 ->
-        # 16k/512 landed one hop off the true original -- confirmed by
-        # direct measurement, not just theory). Fixed by capturing the
-        # canonical ms/retention values ONCE (into the ``_canonical_*``
+        # 16k/512 would land one hop off the true original). So the
+        # canonical ms/retention values are captured ONCE (into the ``_canonical_*``
         # fields above, pinned for the lifetime of the value chain since
         # they are regular fields that survive replace()/asdict()
-        # roundtrips unchanged) and ALWAYS re-deriving the live fields
+        # roundtrips unchanged) and the live fields are ALWAYS re-derived
         # fresh from that pinned canonical value + whatever grid was just
         # resolved above -- a pure function of (canonical, grid) with no
         # dependency on the field's own previous value, so however many

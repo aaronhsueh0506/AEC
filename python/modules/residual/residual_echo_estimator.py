@@ -70,7 +70,7 @@ class EpStrengthConfig:
     # not AEC3 port values — they massively under-estimated R² (2500×) in
     # nonlinear mode → opening-farend leaks through during convergence
     # window (~400 ms usable_linear gate + ~2 s ERLE warmup). Restored to
-    # AEC3 strict default 2026-05-27.
+    # AEC3 strict default.
     default_gain: float = 1.0
     bounded_erl: bool = False
     erle_onset_compensation_in_dominant_nearend: bool = False
@@ -114,8 +114,8 @@ class ReverbConfig:
     use_freq_response: bool = True
     # AEC3 echo_canceller3_config.h:139 default = true. AEC3 strict semantic:
     # `tail_response[k] = max(tail, raw_tail_partition)` per bin, then
-    # neighbour-max smoothing. Restored 2026-05-27 after ReverbFrequencyResponse
-    # got fft-resolution-aware windows (raw_tail pre-smoothed over ±125 Hz
+    # neighbour-max smoothing. Requires ReverbFrequencyResponse's
+    # fft-resolution-aware windows (raw_tail pre-smoothed over ±125 Hz
     # before the max; neighbour-max window also widened to ±125 Hz).
     conservative_tail_freq_response: bool = True
 
@@ -135,10 +135,10 @@ class ResidualEchoEstimator:
         hop_size: int = 160,
         # R0.2: use corrected residual noise gate constant (27509.42 int16²)
         # vs buggy 27509562 (1000× too large — see aec3_scale.py:134-149).
-        # Default flipped to True 2026-05-27 for AEC3 alignment.
+        # Default True for AEC3 alignment.
         use_aec3_residual_noise_gate: bool = True,
         # R0.3: AEC3 EchoGeneratingPower delay-centered window (pre=1, post=1)
-        # vs legacy ring buffer (pre=0). Default flipped to True 2026-05-27.
+        # vs legacy ring buffer (pre=0). Default True.
         use_aec3_echo_gen_window: bool = True,
         # AEC3 UseStationarityProperties gate: when True, skip the nonlinear-path
         # noise gate (residual_echo_estimator.cc:121-129). AEC3 skips when

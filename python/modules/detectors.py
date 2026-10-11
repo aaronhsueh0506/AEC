@@ -207,8 +207,7 @@ class DoubleTalkAnalyzer:
     dt_from_coherence diagnostic is now permanently 0.0.
     """
 
-    # Shadow-filter DT blind period, 200 ms (commit 6cd995e shortened it from
-    # 500 ms). 20 hops only AT the 10 ms reference hop, hence the retime.
+    # Shadow-filter DT blind period, 200 ms (shortened from 500 ms). 20 hops only AT the 10 ms reference hop, hence the retime.
     SHADOW_FRAME_GATE_MS = 200.0
     # Dimensionless level gates -- grid-invariant.
     ERL_CEILING_FLOOR = 0.01

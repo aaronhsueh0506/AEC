@@ -67,7 +67,7 @@ class SaturationDetector:
         self.saturation_level = 0.0
         # Asymmetric per-hop EMA (detect() is called once per hop). Reference
         # grid is hop=256/16000 (16 ms), NOT the 10 ms grid used by the older
-        # constants: commit 243d67c (2026-03-23) authored these against a
+        # constants: these are authored against a
         # config declaring frame_size=512/hop_size=256. The defaults above
         # reproduce the authored values so standalone/diagnostic use is
         # unchanged.

@@ -465,8 +465,8 @@ class AEC:
             # NOTE: per-bin |X|² energy actually tracks the real frame =
             # block_size = 2×hop = 320 (= 5× vs AEC3's 64), not fft_size = 512
             # (= 4×); the 4× is a single-constant approximation that is
-            # AECMOS-insensitive (Tier-C 2026-05-29: 4× vs 1× ≈ 0.000). A
-            # signal-adaptive per-bin floor is deferred to v3.22 Arc 3.
+            # AECMOS-insensitive (Tier-C: 4× vs 1× ≈ 0.000). A
+            # signal-adaptive per-bin floor is deferred.
             import dataclasses as _dc
             from .residual.residual_echo_estimator import EchoModelConfig
             from .residual.suppression_gain import EchoAudibilityConfig
@@ -691,7 +691,7 @@ class AEC:
         self._seed_poor_excitation_counters()
 
         # Echo path change detector (owns active/hangover/EPV-EMAs/prev_total_err).
-        # hop_size/sample_rate passed through explicitly (2026-08 gap-fix) so
+        # hop_size/sample_rate passed through explicitly so
         # EPV_FAST_TC/EPV_SLOW_TC retime for the real grid -- see epc.py.
         self._epc_det = EchoPathChangeDetector(
             self.config, hop_size=self.config.hop_size,
@@ -716,7 +716,7 @@ class AEC:
         # Dynamic ERL estimate for render-based echo (B4)
         self._erl_estimate = 0.1  # initial -20dB, conservative
         # ERL tracker per-hop retention EMAs, authored at the legacy
-        # hop=160/16000 (10 ms) grid (commit 5407e71, whose config header
+        # hop=160/16000 (10 ms) grid (the config header
         # annotates hop_size as '10ms'). Both the primary site and the
         # nores C2-parity site read these, so they cannot drift apart.
         from . import aec3_scale as _aec3s
@@ -2103,7 +2103,7 @@ class AEC:
                 # the refined gain disallows the leakage_diverged branch.
                 # AEC3 does NOT freeze the coarse adaptation here. The
                 # `shadow_mu_scale = 0.0` freeze was a pre-alignment
-                # divergence — retired 2026-05-28.
+                # divergence — retired.
                 # Capture shadow filter time-domain residual for
                 # UseRefinedOutput parity in `_aec3_post`.
                 # E15: shadow already ran pre-main above to publish current-hop
@@ -3632,7 +3632,7 @@ class AEC:
         # active_render threshold = 100²×64/32768² ≈ 5.96e-4 (AEC3 aec_state.cc
         # active_render_limit²×kBlockSize). NOTE: this keeps AEC3's block-SUM ×64
         # against our per-sample MEAN far_pwr; the mean-correct AEC3-equivalent is
-        # 100²/32768² ≈ 9.31e-6, but Tier-C (2026-05-29) validated 9.31e-6 as a
+        # 100²/32768² ≈ 9.31e-6, but Tier-C validated 9.31e-6 as a
         # net regression (FS echo −0.033 + 25 catastrophic cases), so 5.96e-4 is
         # the empirically-tuned production value, NOT a strict alignment. Re-tuning
         # for our hop/fft is deferred to v3.22 Arc 4.
@@ -3740,7 +3740,7 @@ class AEC:
         # stays alive past per-frame convergence loss. The previous binary
         # ``1.0 if converged else None`` proxy froze the tail immediately
         # when the filter lost convergence, inflating R²_reverb on cohort
-        # tail. Replaced 2026-05-28 (Tier A #5 consumer wire-up).
+        # tail. Replaced (Tier A #5 consumer wire-up).
         _filter_q = self._aec3_state.get_inst_linear_quality_estimate()
         _stationary_block = self._aec3_stationarity.is_block_stationary()
         # JustResetEchoPath linear-path override (use_aec3_just_reset_gate_on_
@@ -3976,7 +3976,7 @@ class AEC:
                 and not _effective_usable_linear):
             _y_base = (error_spec + _sel_echo_spec).astype(error_spec.dtype,
                                                            copy=False)
-            # Surgical guard (v3.22, 2026-05-30): fall back to the capture Y ONLY
+            # Surgical guard: fall back to the capture Y ONLY
             # when the residual is genuinely worse than the mic (diverged
             # over-output, |E|>|Y|). Trace verdict: the usable_linear gate opens
             # 44-100% of frames, but |E|>|Y| fires <1% of unusable frames

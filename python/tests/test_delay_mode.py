@@ -328,7 +328,7 @@ class DelayModeBehaviourTests(unittest.TestCase):
         self.assertEqual(aec._ref_ring_filled, 0)
 
 
-# ── plan §3.2.8-9: the ring is sized per mode ────────────────────────────────
+# ── the ring is sized per mode ────────────────────────────────
 
 # (sample_rate, fft_size) x fixed delay rows worth distinguishing: the
 # degenerate 0, a delay below one hop, one exactly one hop, an exact hop

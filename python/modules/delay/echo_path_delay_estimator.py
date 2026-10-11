@@ -210,10 +210,9 @@ class EchoPathDelayEstimator:
         # signal chain consistently, not just the matched filter +
         # aggregator: the outer 48kHz anti-alias sidechain (_resample48_*)
         # AND the inner decimators / ring buffer / pending edge-chunker
-        # buffers. Previously only the sidechain was reset here (added
-        # alongside the sidechain itself) while the inner decimator biquad
-        # memory, ring-buffer audio history and pending partial-block
-        # samples were left stale -- a freshly-reset sidechain feeding a
+        # buffers. Resetting only the sidechain would leave the inner decimator
+        # biquad memory, ring-buffer audio history and pending partial-block
+        # samples stale -- a freshly-reset sidechain feeding a
         # stale inner estimator, which could let pre-reset echo-path audio
         # in the ring contaminate the matched filter's first correlation
         # windows after reset. clockdrift is deliberately left untouched

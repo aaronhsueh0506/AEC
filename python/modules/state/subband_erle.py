@@ -65,9 +65,8 @@ class SubbandErleEstimator:
         # period (6 native 4ms blocks = 24ms) carry the same factor of 6,
         # so it cancels: rescale by passing plain hop_size against
         # per_block_ema_alpha_to_per_hop's fixed single-native-block (4ms)
-        # denominator -- NOT 6*hop_size (an earlier fix on 2026-08-01 passed
-        # 6*hop_size, which compares 6 real hops against only 1 native
-        # block, inflating the exponent 6x too far; caught in review).
+        # denominator -- NOT 6*hop_size (which would compare 6 real hops
+        # against only 1 native block, inflating the exponent 6x).
         self._alpha_up = _aec3_scale.per_block_ema_alpha_to_per_hop(
             0.05, hop_size, sample_rate
         )
