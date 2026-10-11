@@ -116,9 +116,9 @@ out-of-range `ramp_ms`. Unlike `aec_config_from_preset()`, which falls back to
 balanced for an unrecognised value, this **refuses** — a setter has a caller to
 tell.
 
-The primitive underneath, `suppression_gain_set_split_floor_far_active_db()`
-(`suppression_gain.h`), is public because the four-channel product's shared
-post-stage suppressor is a `SuppressionGain` no `Aec` owns.
+The primitive underneath, `suppression_gain_set_split_floor_far_active_db()`,
+is internal; a caller that owns a post-stage suppressor outside any `Aec` (the
+four-channel product) uses `aec_res_set_preset()` from `aec_res.h`.
 
 Two things to know before measuring a preset change: lanes built with
 `spatial_linear_context` never reach the suppressor's gain path, so retargeting

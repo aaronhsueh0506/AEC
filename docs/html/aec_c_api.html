@@ -35,6 +35,7 @@ pre code{background:none;padding:0}
 <span class="sep">|</span>
 <a href="aec_c_api.html"><b>AEC API</b></a>
 <a href="aec_c_api_params.html">AEC 參數</a>
+<a href="aec_res.html">AEC RES 級</a>
 <a href="../../../NR/docs/html/nr_c_api.html">NR API</a>
 <a href="../../../audio_common/docs/html/audio_common_c_api.html">audio_common API</a>
 <a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a>
@@ -47,7 +48,7 @@ pre code{background:none;padding:0}
 <pre>#include "aec.h"    /* 唯一使用者面 header */</pre>
 <p>Include path <b>必須同時</b>有兩個目錄——<code>aec.h</code> 會 include audio_common 的 <code>fft_wrapper.h</code> 與 <code>hpf.h</code>:</p>
 <pre>-I&lt;AEC&gt;/c_impl/include  -I&lt;audio_common&gt;/include</pre>
-<div class="note"><code>include/</code> 底下另有 29 個 header,<b>全部是內部的</b>。<code>aec.h</code> 之所以 include 其中 7 個(外加 audio_common 的 <code>fft_wrapper.h</code> 與 <code>hpf.h</code>),是因為 <code>Aec</code> 與 <code>AecConfig</code> <b>不是 opaque struct</b>(子模組 by value 內嵌),編譯器需要完整定義——那是<b>編譯依賴,不是 API surface</b>。<code>pbfdkf.h</code>／<code>delay_aec3.h</code>／<code>aec3_post.h</code>／<code>suppression_gain.h</code> 這些不要直接呼叫。<br>唯一例外:自行在 AEC <b>之外</b>做 post-beam RES 時(4ch 就是這樣),才會用到 <code>suppression_gain.h</code> 的 primitive。</div>
+<div class="note"><code>include/</code> 底下另有 31 個 header,其中 <code>aec_res.h</code> 是第二個對外 header,其餘 30 個<b>全部是內部的</b>。<code>aec.h</code> 之所以 include 其中 7 個(外加 audio_common 的 <code>fft_wrapper.h</code> 與 <code>hpf.h</code>),是因為 <code>Aec</code> 與 <code>AecConfig</code> <b>不是 opaque struct</b>(子模組 by value 內嵌),編譯器需要完整定義——那是<b>編譯依賴,不是 API surface</b>。<code>pbfdkf.h</code>／<code>delay_aec3.h</code>／<code>aec3_post.h</code>／<code>suppression_gain.h</code> 這些不要直接呼叫。<br>唯一例外:自行在 AEC <b>之外</b>做 post-beam RES 時(4ch 就是這樣),改用另一個對外 header <code>aec_res.h</code>(見 <a href="aec_res.html">AEC RES 級</a>),不必再直接呼叫 <code>suppression_gain.h</code>。</div>
 
 <h2>2. 這個 lib 可以設定的 grid</h2>
 <p>訊號格點由 <code>(sample_rate, fft_size)</code> <b>成對</b>決定,必須命中下表其中一列(<code>aec.c:227-233</code>);<code>hop = fft_size/2</code>、<code>n_freqs = fft_size/2+1</code>。</p>
@@ -210,7 +211,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <tr><td><code>aec_reset(a)</code></td><td>回到「全新 instance」狀態。會重啟 WOLA → spectrogram 上會有垂直線。若只是外部對齊改變,<b>請用上一個函式而不是這個</b></td><td><code>void</code>,<b>⚠ 無 NULL 檢查</b></td></tr>
 </table></div>
 <div class="warn"><code>aec_set_preset()</code> 對非法 preset 是<b>拒絕</b>(回 −1),與 <code>aec_config_from_preset()</code> 靜默退回 balanced 的行為<b>相反</b>。<code>ramp_ms</code> 範圍 <code>[0, 60000]</code>,<code>ramp_ms==0</code> <b>不是</b>錯誤。ramp 進行中再呼叫 → 從當前 live 值重新起走。<br>全部必須<b>在 hop 之間</b>呼叫、與 <code>process()</code> 序列化;<b>非 thread-safe</b>。<code>aec_reset()</code> 另外要求 render/capture thread 已靜止。</div>
-<div class="note">若 lane 是用 <code>spatial_linear_context=1</code> 建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請用 <code>four_aec_nr_res_set_aec_preset()</code>,它針對的是共用的 post 級抑制器。</div>
+<div class="note">若 lane 是用 <code>spatial_linear_context=1</code> 建立的(4ch),<code>aec_set_preset()</code> <b>依構造為 inert</b>——該 lane 根本不跑 suppressor 的 gain path。4ch 要改強度請用 <code>four_aec_nr_res_set_aec_preset()</code>,它針對的是共用的 post 級抑制器;自行組合多 lane 時,該共用抑制器就是 <a href="aec_res.html"><code>AecRes</code></a>,用 <code>aec_res_set_preset()</code>。</div>
 
 <h2>10. 狀態查詢與診斷</h2>
 <div class="tblwrap"><table>
@@ -276,6 +277,7 @@ aec_get_linear_context(aec, &amp;lin);      /* 時域 seam:線性殘差 + 已對
 <h2>相關檔案與測試路徑</h2>
 <ul class="small">
 <li><code>AEC/c_impl/include/aec.h</code> — 唯一使用者面 header</li>
+<li><code>AEC/c_impl/include/aec_res.h</code> — 另一個對外 header:獨立的 RES 級與舒適噪音填補(<a href="aec_res.html">說明頁</a>)</li>
 <li><code>AEC/c_impl/STATIC_MEMORY.md</code> — caller-pool 契約與可編譯範例(由 <code>test/docs_smoke.sh</code> 實際跑)</li>
 <li><code>AEC/docs/c_user_manual_zh_TW.md</code> — canonical 手冊(完整欄位、錯誤語意表、疑難排解)</li>
 <li><code>AEC/docs/nn_integration_interface.md</code> — NN seam 規格(三個 swap point)</li>

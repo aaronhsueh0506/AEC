@@ -11,16 +11,18 @@
 #include "aec.h"        /* c_impl/include/aec.h — 標準整合只需要這一個 */
 ```
 
-一般整合只 include `aec.h`。另有兩個 header 屬於**進階、範圍較窄的對外介面**，
+一般整合只 include `aec.h`。另有一個 header 屬於**進階、範圍較窄的對外介面**，
 只有要在 AEC 之外自己跑一套 residual-echo suppression 的整合才需要
-（本專案的四麥克風 pipeline 就是這樣用的，見 `4ch_aec_bf_nr_res/4aec_nr_res.c`）：
+（四麥克風 pipeline 的 post-beam RES 就是這種用法）：
 
 | Header | 何時需要 |
 |---|---|
-| `suppression_gain.h` | 自己建一個 `SuppressionGain`，對 beamformer 之後的訊號做 RES |
-| `aec3_balanced_config.h` | 取用與 balanced preset 相同的 RES 調校常數 |
+| `aec_res.h` | 對 beamformer 之後的融合頻譜算 RES 增益，並用 `aec_cng_fill()` 填舒適噪音（§8.6） |
 
-`c_impl/include/` 底下其餘約 27 個 header（`aec3_post.h`、`pbfdkf.h`、`delay_aec3.h` 等）
+`suppression_gain.h` 與 `aec3_balanced_config.h` 同為內部 header。四麥克風 pipeline
+目前仍直接 include 這兩個；改接 `aec_res.h` 之後它們不再需要對外。
+
+`c_impl/include/` 底下其餘 30 個 header（`aec3_post.h`、`pbfdkf.h`、`delay_aec3.h`、`suppression_gain.h` 等）
 全部是**內部實作**用的，會隨版本改變，請勿直接 include，也不要依賴其中任何型別或函式。
 注意 `aec.h` 目前會把 `struct Aec` 完整攤開，因此它們仍必須留在 include 路徑上
 才能編譯——「留在路徑上」不等於「可以使用」。
@@ -776,11 +778,12 @@ balanced**；這是 setter，有呼叫端可以回報，所以**直接拒絕**�
 既不會彈回舊目標、也不會沿用舊的步進比例。`aec_reset()` 保留目標值、丟棄 ramp 進度
 （目標存在 config、進度存在 state，這是刻意分開的）。
 
-**底層 primitive**。真正做事的是抑制器自己的入口，它是 public 的，因為四麥克風產品
-共用的那個 post 級抑制器是一個沒有任何 `Aec` 擁有的 `SuppressionGain`：
+**底層 primitive**。真正做事的是抑制器自己的入口。四麥克風產品共用的那個 post 級
+抑制器是一個沒有任何 `Aec` 擁有的 `SuppressionGain`；以 `aec_res.h` 組合多 lane 時，
+對應的入口是 `aec_res_set_preset()`（§8.6），語意相同。底層函式為：
 
 ```c
-#include "suppression_gain.h"   /* §「你需要 include 的 header」列的進階 header */
+#include "suppression_gain.h"   /* 內部 header；一般整合改用 aec_res_set_preset() */
 
 int suppression_gain_set_split_floor_far_active_db(SuppressionGain* sg,
                                                    float db, float ramp_ms);
@@ -981,6 +984,51 @@ unsigned long long duty_hops_run;    /* 其中真的跑了 matched filter 的數
   A 線 step 4 條目）。
 - `example/aec_wav.c` 每次執行結尾印一行（附錄 A「Duty census 診斷輸出」）。
 - 永久回歸測試：`make test-duty-census`（`test/test_duty_census.c`）。
+
+
+### 8.6 獨立的 RES 級（`aec_res.h`）
+
+多條線性 AEC lane 先融合、再對融合後的頻譜算**一次**殘留回音抑制時使用（四麥克風
+pipeline 的 post-beam RES）。它把 `Aec` 內部那個抑制器獨立出來，設定來自 lane 自己用的
+同一個建構函式，所以同一個 `AecConfig` 建出的 `AecRes` 與 lane 內的抑制器設定逐位元相同。
+
+```c
+#include "aec_res.h"
+
+size_t bytes = aec_res_get_mem_size(&cfg);        /* 0 = cfg 無效 */
+AecRes* res  = aec_res_init(mem, bytes, &cfg);    /* mem 16-byte 對齊；NULL = 失敗 */
+
+AecResInput in = {0};
+in.error_spec = fused_error;   in.near_spec = fused_near;      /* audio 尺度 */
+in.r2 = fused_r2;              in.comfort_noise = fused_comfort; /* int16² 尺度 */
+in.render_hop = aligned_ref;   /* hop_size 個樣本，audio 尺度 */
+in.all_converged = all_ok;     in.max_dt = worst_dt;
+in.max_saturation = worst_sat; in.clock_drift = drift;
+
+const float* g_res = aec_res_process(res, &in);   /* n_bins 個增益，[0,1] */
+aec_cng_fill(&rng, spec, fused_comfort, g_res, g_nr, 0.31622777f, aec_res_n_bins(res));
+```
+
+| 函式 | 說明 |
+|---|---|
+| `aec_res_get_mem_size(cfg)` | 所需 byte 數；`cfg` 為 NULL 或無效回 0。只有 `sample_rate`、`fft_size`、兩個最小增益地板會影響抑制器。 |
+| `aec_res_init(mem, bytes, cfg)` | 在呼叫端的記憶體內建立；不配置記憶體、不用 stdio、不需 destroy。記憶體 NULL／未對齊／過小或 `cfg` 無效回 NULL。 |
+| `aec_res_reset(r)` | 清除抑制器全部狀態；**保留**目前的 far-active 地板目標（含 `aec_res_set_preset` 改過的）。 |
+| `aec_res_process(r, in)` | 一個 hop。回傳的 `n_bins` 個增益由 `r` 擁有，到下一次對 `r` 的呼叫前有效；`r`／`in` 或任一輸入陣列為 NULL 回 NULL。 |
+| `aec_res_set_preset(r, preset, ramp_ms)` | 與 `aec_set_preset()` 同語意（只改 far-active 地板，`ramp_ms` 範圍 `[0, 60000]`，`-1` 時什麼都不寫）。 |
+| `aec_res_split_floor(r, &live, &target)` | 讀 far-active 地板（功率比）：`live` 是現行值，`target` 是正走向的值，後者跨 reset 保留。 |
+| `aec_res_n_bins(r)`／`aec_res_hop_size(r)` | 陣列長度（`fft_size/2 + 1`、`fft_size/2`）。 |
+| `aec_cng_fill(&rng, spec, cn, g_res, g_nr, nr_floor, n)` | 在 bin `1 … n-2` 加舒適噪音：`sqrt(cn/32768²)·sqrt(1-g_res²)·max(g_nr, nr_floor)` 乘上由 `rng` 遞推選出的隨機相位（`rng = (rng·69069+1) & 0x7FFFFFFF`，取高 5 bit 查 32 點 √2·sin 表，虛部取 +8）。`g_nr` 可為 NULL（視為 1）。 |
+
+`aec_res_process` 做的前處理：近端功率 `|near|²`（`all_converged` 時取 `min(|error|², |near|²)`）乘 32768²；
+參考乘 32768；`all_converged` 讓抑制器離開初始狀態；`max_dt > 0.2` 啟用 double-talk 地板；
+`max_saturation > 0.5` 視為飽和回音。`r2` 同時當作 bounded 與 unbounded 殘留估計。
+`aec_cng_fill` 的算式與兩條 pipeline 的迴圈逐位元相同，**不同於** `Aec` 內部的批次化填補
+（`inv_psd_scale`＋`sk_fast_sqrt`），兩者的輸出不可互相比對。
+
+測試：`make test-aec-res`（設定與 lane 相等且等於 checked-in digest、增益與 pipeline 做法逐位元相同、
+comfort-noise 迴圈逐位元相同、API 契約）、`make test-zero-heap`、`make audit-no-stdio`。
+完整頁面見 [`docs/html/aec_res.html`](html/aec_res.html)。
 
 ---
 

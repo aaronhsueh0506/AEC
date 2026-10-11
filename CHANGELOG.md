@@ -41,6 +41,48 @@ when verdict requires it.
 
 ---
 
+## [Unreleased] — 2026-10-09 — standalone RES stage (`aec_res.h`), output-hash and NEON-twin gates
+
+### Added
+
+- **`aec_res.h` / `src/aec_res.c`: the residual-echo suppression gain as a
+  standalone stage.** `aec_res_get_mem_size` / `aec_res_init` /
+  `aec_res_reset` / `aec_res_process` / `aec_res_set_preset` /
+  `aec_res_split_floor` / `aec_res_n_bins` / `aec_res_hop_size`, plus
+  `aec_cng_fill` (the comfort-noise fill of the multi-lane pipelines). For
+  integrations that fuse several linear AEC outputs and need one RES gain on
+  the fused spectra. Caller-owned memory, no heap, no stdio. The suppressor is
+  configured by the same code a lane uses, so equal `AecConfig` gives
+  bit-identical configuration. See `docs/html/aec_res.html` and
+  `docs/c_user_manual_zh_TW.md` §8.6.
+- **`make test-output-hash`.** Hashes the emitted hop and every
+  `AecResContext` / `AecLinearContext` field over a seeded 6000-hop scene for
+  3 grids x shadow on/off x {`aec_process`, `aec_process_context` levels 0, 1,
+  2} against checked-in digests per FFT build (`kiss`, `ne10_neon`,
+  `ne10_scalar`); also checks that the gain-path-free digest does not depend on
+  the context level.
+- **`make test-neon-twins`.** NEON-vs-scalar equivalence for the first-maximum
+  tie rule of `rsa_argmax_first` and the hold-counter boundary of
+  `decrease_erle_for_low_render`, which the output hash cannot see.
+- **`make test-aec-res`.** `aec_res` against the library and the multi-lane
+  pipelines' own code: the suppressor configuration equals a heap lane's and a
+  caller-pool lane's and the checked-in digests on every supported grid and
+  preset; the gain is bit-identical per hop over long randomised runs against
+  a transcription of the pipelines' RES stage (preset retarget and reset
+  included); `aec_cng_fill` gives bit-identical spectra and generator state;
+  argument checks, sizing, alignment, no write outside the block, reset and
+  preset semantics.
+
+### Changed
+
+- `aec_build_sg_config()` (internal, `aec_config_build.h`) now builds the
+  `SuppressionGainConfig` / `SuppressionGainTuning` that `aec_carve` built
+  inline. No change to library output (`make test-output-hash` unchanged).
+- `test/test_zero_heap_aec.c` and `test/no_stdio_main.c` also exercise `aec_res`.
+- Archived A/B evidence: the harness copy and source diffs whose headers named
+  build-host directories, and author addresses in two archived diffs, were
+  removed from the tree; per-case scores and READMEs remain.
+
 ## [Unreleased] — 2026-10-06 — linear-half context level (`AEC_CONTEXT_LINEAR_ONLY`) and NEON hot spots, all bit-identical
 
 ### Added
