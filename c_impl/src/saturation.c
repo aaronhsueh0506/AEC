@@ -28,7 +28,7 @@ void saturation_init(Saturation* s, float threshold,
     s->threshold        = threshold;
     s->saturation_level = 0.0f;
     /* Asymmetric per-hop EMA. Reference grid is hop=256/16000 (16 ms),
-     * NOT 10 ms: authored by commit 243d67c against frame 512/hop 256.
+     * NOT 10 ms: authored against frame 512/hop 256.
      * Mirrors preprocessing.py SaturationDetector. */
     s->alpha_attack  = aec3_growth_rehop(0.3f,  256, 16000,
                                          hop_size, sample_rate);
