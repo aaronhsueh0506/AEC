@@ -1936,7 +1936,7 @@ help:
 	@echo "   AC_LIB the same way phase 1 does -- see the two-phase dispatch"
 	@echo "   comment in this Makefile -- and pass it: make print-bin-dir AC_LIB=\"...\")"
 	@echo "  ./bin/<backend>-<config-hash>/aec_wav <mic.wav> <ref.wav> <out.wav> [options]"
-	@echo "  ./bin/<backend>-<config-hash>/bench_rtf [--seconds N] [--repeat M] [--preset mild|balanced|aggressive]"
+	@echo "  ./bin/<backend>-<config-hash>/bench_rtf [--seconds N] [--repeat M] [--preset mild|balanced|aggressive] [--sr HZ] [--fft N] [--stage full|linear|both] [--scene noise|bursts]"
 	@echo "  make BACKEND=kiss|ne10   (default: ne10; kiss is the portable/bit-reproducible reference)"
 	@echo "  make AC_DIR=<path>       (override audio_common location)"
 	@echo "  make WERROR=1            (opt-in: -Werror for this repo's own sources)"
