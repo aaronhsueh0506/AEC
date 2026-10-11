@@ -970,6 +970,8 @@ TEST_DDS_TARGET = $(BIN_DIR)/test_delay_dominant_selection
 # to prevent).
 TEST_DKN_OBJ    = $(OBJ_DIR)/test_delay_kernels.o
 TEST_DKN_TARGET = $(BIN_DIR)/test_delay_kernels
+TEST_NT_OBJ     = $(OBJ_DIR)/test_neon_twins.o
+TEST_NT_TARGET  = $(BIN_DIR)/test_neon_twins
 
 # --- CFG_SIG collision guard + directory creation ---------------------------
 # Single order-only prerequisite for every compile/link/archive rule below
@@ -1102,6 +1104,19 @@ $(TEST_DKN_OBJ): $(TEST_DIR)/test_delay_kernels.c | _cfg_guard
 
 $(TEST_DKN_TARGET): $(TEST_DKN_OBJ) $(OBJ_DIR)/aec3_scale.o | _cfg_guard
 	$(CC) $(CFLAGS) -o $@ $(TEST_DKN_OBJ) $(OBJ_DIR)/aec3_scale.o -lm
+
+# Builds AND runs. NEON-vs-scalar twins of two kernels the whole-output hash
+# cannot see (first-maximum tie order; onset re-arm boundary). Includes the
+# shipped source files, so it links only aec3_scale.o, like test-delay-kernels.
+.PHONY: test-neon-twins
+test-neon-twins: $(TEST_NT_TARGET)
+	"$(abspath $(TEST_NT_TARGET))"
+
+$(TEST_NT_OBJ): $(TEST_DIR)/test_neon_twins.c | _cfg_guard
+	$(CC) $(CFLAGS) -I. -MD -MP -c -o $@ $<
+
+$(TEST_NT_TARGET): $(TEST_NT_OBJ) $(OBJ_DIR)/aec3_scale.o | _cfg_guard
+	$(CC) $(CFLAGS) -o $@ $(TEST_NT_OBJ) $(OBJ_DIR)/aec3_scale.o -lm
 
 # =============================================================================
 # Phase 2 real rules: only defined once AC_LIB is known (see the dispatch
