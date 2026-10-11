@@ -1748,6 +1748,75 @@ static inline float sk_max_abs_f32(const float *x, int n) {
 }
 #endif
 
+/* ═════════════════════ sk_noise_floor_track_f32 ═══════════════════════════════
+ * Per-bin tracker of a stationary noise floor with a hold counter:
+ *   if (psd[k] < floor[k])        { floor[k] = psd[k]; count[k] = 0; }
+ *   else if (count[k] >= hold)    { ramp = floor[k] * growth;
+ *                                   floor[k] = (ramp > min_floor) ? ramp : min_floor; }
+ *   else                          { count[k] += 1; }
+ * The NEON form evaluates the three arms for every lane and selects with the
+ * same compares: `<` and `>` are unordered-false for a NaN operand exactly as
+ * in the scalar test (a NaN psd or floor takes the hold/ramp arms), the ramp
+ * clamp is compare + select rather than vmaxq, and the speculative count + 1
+ * wraps harmlessly in a lane that does not select it (the scalar increment
+ * only runs for count < hold). */
+
+static inline void sk__noise_floor_track_elem(float *fl, int *cnt, float psd,
+                                              float growth, float min_floor,
+                                              int hold) {
+    if (psd < *fl) {
+        *fl = psd;
+        *cnt = 0;
+    } else if (*cnt >= hold) {
+        float ramp = *fl * growth;
+        *fl = (ramp > min_floor) ? ramp : min_floor;
+    } else {
+        *cnt += 1;
+    }
+}
+
+static inline void sk_noise_floor_track_f32_scalar(float *fl, int *cnt, const float *psd,
+                                                   float growth, float min_floor,
+                                                   int hold, int n) {
+    int k;
+    for (k = 0; k < n; ++k)
+        sk__noise_floor_track_elem(&fl[k], &cnt[k], psd[k], growth, min_floor, hold);
+}
+
+#if SK_HAVE_NEON
+static inline void sk_noise_floor_track_f32(float *fl, int *cnt, const float *psd,
+                                            float growth, float min_floor,
+                                            int hold, int n) {
+    int k = 0;
+    const float32x4_t vgrowth = vdupq_n_f32(growth);
+    const float32x4_t vmin = vdupq_n_f32(min_floor);
+    const int32x4_t vhold = vdupq_n_s32(hold);
+    const int32x4_t vone = vdupq_n_s32(1);
+    for (; k + 4 <= n; k += 4) {
+        float32x4_t f = vld1q_f32(fl + k);
+        float32x4_t p = vld1q_f32(psd + k);
+        int32x4_t c = vld1q_s32(cnt + k);
+        uint32x4_t down = vcltq_f32(p, f);
+        uint32x4_t expired = vcgeq_s32(c, vhold);
+        float32x4_t ramp = vmulq_f32(f, vgrowth);
+        float32x4_t ramped = vbslq_f32(vcgtq_f32(ramp, vmin), ramp, vmin);
+        float32x4_t f_new = vbslq_f32(down, p, vbslq_f32(expired, ramped, f));
+        int32x4_t c_new = vbslq_s32(down, vdupq_n_s32(0),
+                                    vbslq_s32(expired, c, vaddq_s32(c, vone)));
+        vst1q_f32(fl + k, f_new);
+        vst1q_s32(cnt + k, c_new);
+    }
+    for (; k < n; ++k)
+        sk__noise_floor_track_elem(&fl[k], &cnt[k], psd[k], growth, min_floor, hold);
+}
+#else
+static inline void sk_noise_floor_track_f32(float *fl, int *cnt, const float *psd,
+                                            float growth, float min_floor,
+                                            int hold, int n) {
+    sk_noise_floor_track_f32_scalar(fl, cnt, psd, growth, min_floor, hold, n);
+}
+#endif
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,6 +5,7 @@
  * evaluated at init, not per hop. Built with -ffp-contract=off. */
 #include "residual_echo_estimator.h"
 #include "aec3_scale.h"
+#include "aec_simd_kernels.h"
 
 #include <math.h>
 #include <string.h>
@@ -165,26 +166,13 @@ void ree_update_reverb_models(ResidualEchoEstimator *r,
 /* UpdateRenderNoisePower (cc:325-359). */
 static void ree_update_render_noise_power(ResidualEchoEstimator *r,
                                           const float *render_psd) {
-    const int N = r->n_bins;
-    const int hold = r->noise_floor_hold_hops;
-    const float min_floor = r->echo_model.min_noise_floor_power;
-    int k;
-    for (k = 0; k < N; ++k) {
-        if (render_psd[k] < r->x2_noise_floor[k]) {
-            /* decrease rapidly: snap floor down (astype f32 no-op). */
-            r->x2_noise_floor[k] = render_psd[k];
-            r->x2_noise_floor_counter[k] = 0;
-        } else {
-            /* not_down */
-            if (r->x2_noise_floor_counter[k] >= hold) {
-                /* ramp up (wall-clock-rescaled growth), max vs min. */
-                float ramp = r->x2_noise_floor[k] * r->noise_floor_growth_per_hop;
-                r->x2_noise_floor[k] = (ramp > min_floor) ? ramp : min_floor;
-            } else {
-                r->x2_noise_floor_counter[k] += 1;
-            }
-        }
-    }
+    /* Snap the floor down to a lower PSD at once; otherwise count hops and,
+     * once the hold has elapsed, ramp it up by the wall-clock-rescaled growth,
+     * never below the model's floor. */
+    sk_noise_floor_track_f32(r->x2_noise_floor, r->x2_noise_floor_counter,
+                             render_psd, r->noise_floor_growth_per_hop,
+                             r->echo_model.min_noise_floor_power,
+                             r->noise_floor_hold_hops, r->n_bins);
 }
 
 /* GetEchoPathGain → returns g*g (python float). */

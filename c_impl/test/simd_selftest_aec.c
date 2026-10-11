@@ -3323,6 +3323,104 @@ static void test_max_abs(void) {
     printf("PASS max_abs_f32 (finite, NaN sprinkle strict, offsets 1..15 canary-guarded)\n");
 }
 
+/* Counter and PSD generator for the noise-floor tracker: counters straddle the
+ * hold value so all three arms are taken, PSDs straddle the floors. */
+static void fill_noise_floor_case(float *fl, int *cnt, float *psd, int n, int hold, int nan_mode) {
+    int i;
+    fill_floats(fl, n);
+    fill_floats(psd, n);
+    for (i = 0; i < n; ++i) {
+        uint32_t r = lcg_next();
+        if ((r & 7u) == 0u) cnt[i] = (int)gen_int32();
+        else cnt[i] = (int)((r >> 8) % (hold > 0 ? 2ull * (uint64_t)hold + 3ull : 5ull)) - 1;
+        if ((r & 24u) == 8u) psd[i] = fl[i];                          /* tie arm */
+        else if ((r & 24u) == 16u) psd[i] = fl[i] * 0.5f;             /* below   */
+        else if ((r & 24u) == 24u && fl[i] > 0.0f) psd[i] = fl[i] * 2.0f;
+    }
+    if (nan_mode) {
+        for (i = 0; i < n; i += 3) {
+            if (i % 2) fl[i] = nan_pool[i % NAN_POOL_COUNT];
+            else psd[i] = nan_pool[i % NAN_POOL_COUNT];
+        }
+    }
+}
+
+static void test_noise_floor_track(void) {
+    float fl_i[SK_TEST_MAX_N], fl_s[SK_TEST_MAX_N], fl_v[SK_TEST_MAX_N], psd[SK_TEST_MAX_N];
+    int c_i[SK_TEST_MAX_N], c_s[SK_TEST_MAX_N], c_v[SK_TEST_MAX_N];
+    float *fa_s = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *fa_v = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *pa = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    int *ca_s = (int *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(int));
+    int *ca_v = (int *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(int));
+    static const int holds[] = { 0, 1, 50, 400, INT_MAX };
+    static const float growths[] = { 1.0004f, 1.0f, 0.5f, 3.0e38f };
+    static const float mins[] = { 1.0e-6f, 0.0f, 1.0e30f };
+    int ni, t, o, hi;
+    for (hi = 0; hi < (int)(sizeof holds / sizeof holds[0]); ++hi) {
+        int hold = holds[hi];
+        float growth = growths[hi % 4], min_floor = mins[hi % 3];
+        for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+            int n = N_LIST[ni];
+            for (t = 0; t < TRIALS; ++t) {
+                fill_noise_floor_case(fl_i, c_i, psd, n, hold, 0);
+                memcpy(fl_s, fl_i, (size_t)n * sizeof(float)); memcpy(fl_v, fl_i, (size_t)n * sizeof(float));
+                memcpy(c_s, c_i, (size_t)n * sizeof(int));     memcpy(c_v, c_i, (size_t)n * sizeof(int));
+                sk_noise_floor_track_f32_scalar(fl_s, c_s, psd, growth, min_floor, hold, n);
+                sk_noise_floor_track_f32(fl_v, c_v, psd, growth, min_floor, hold, n);
+                check_bits_classify("noise_floor_track_f32", n, t, fl_v, fl_s, n);
+                check_ints_or_die("noise_floor_track_f32:count", n, t, c_v, c_s, n);
+            }
+        }
+        for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+            int n = NAN_N_LIST[ni];
+            fill_noise_floor_case(fl_i, c_i, psd, n, hold, 1);
+            memcpy(fl_s, fl_i, (size_t)n * sizeof(float)); memcpy(fl_v, fl_i, (size_t)n * sizeof(float));
+            memcpy(c_s, c_i, (size_t)n * sizeof(int));     memcpy(c_v, c_i, (size_t)n * sizeof(int));
+            sk_noise_floor_track_f32_scalar(fl_s, c_s, psd, growth, min_floor, hold, n);
+            sk_noise_floor_track_f32(fl_v, c_v, psd, growth, min_floor, hold, n);
+            check_bits_classify("noise_floor_track_f32_nan", n, 0, fl_v, fl_s, n);
+            check_ints_or_die("noise_floor_track_f32_nan:count", n, 0, c_v, c_s, n);
+        }
+        for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+            int n = N_LIST[ni];
+            for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
+                int po = ((o + 7) % 15) + 1;
+                edge_fill_canary_f(fa_s, EDGE_ARENA_LEN); edge_fill_canary_f(fa_v, EDGE_ARENA_LEN);
+                edge_fill_canary_f(pa, EDGE_ARENA_LEN);
+                edge_fill_canary_i(ca_s, EDGE_ARENA_LEN); edge_fill_canary_i(ca_v, EDGE_ARENA_LEN);
+                fill_noise_floor_case(fl_i, c_i, psd, n, hold, 0);
+                memcpy(fa_s + o, fl_i, (size_t)n * sizeof(float)); memcpy(fa_v + o, fl_i, (size_t)n * sizeof(float));
+                memcpy(ca_s + o, c_i, (size_t)n * sizeof(int));    memcpy(ca_v + o, c_i, (size_t)n * sizeof(int));
+                memcpy(pa + po, psd, (size_t)n * sizeof(float));
+                sk_noise_floor_track_f32_scalar(fa_s + o, ca_s + o, pa + po, growth, min_floor, hold, n);
+                sk_noise_floor_track_f32(fa_v + o, ca_v + o, pa + po, growth, min_floor, hold, n);
+                check_bits_classify("noise_floor_track_f32_edge", n, o, fa_v + o, fa_s + o, n);
+                check_ints_or_die("noise_floor_track_f32_edge:count", n, o, ca_v + o, ca_s + o, n);
+                edge_check_canary_f("noise_floor_track_f32_edge:floor_scalar", fa_s, EDGE_ARENA_LEN, o, n);
+                edge_check_canary_f("noise_floor_track_f32_edge:floor_simd", fa_v, EDGE_ARENA_LEN, o, n);
+                edge_check_canary_f("noise_floor_track_f32_edge:psd", pa, EDGE_ARENA_LEN, po, n);
+                edge_check_canary_i("noise_floor_track_f32_edge:count_scalar", ca_s, EDGE_ARENA_LEN, o, n);
+                edge_check_canary_i("noise_floor_track_f32_edge:count_simd", ca_v, EDGE_ARENA_LEN, o, n);
+            }
+        }
+    }
+    free(fa_s); free(fa_v); free(pa); free(ca_s); free(ca_v);
+    printf("PASS noise_floor_track_f32 (5 hold values, finite + NaN sprinkle + offsets 1..15 canary-guarded)\n");
+}
+
+static void bench_noise_floor_track(void) {
+    float fl0[BENCH_N], fl[BENCH_N], psd[BENCH_N];
+    int c0[BENCH_N], c[BENCH_N];
+    int i;
+    fill_bench_floats(fl0, BENCH_N); fill_bench_floats(psd, BENCH_N);
+    for (i = 0; i < BENCH_N; ++i) { fl0[i] = fabsf(fl0[i]) + 1.0f; psd[i] = fabsf(psd[i]) + 1.0f; c0[i] = i % 60; }
+    memcpy(fl, fl0, sizeof fl); memcpy(c, c0, sizeof c);
+    NEW_BENCH("noise_floor_track_f32",
+              (sk_noise_floor_track_f32_scalar(fl, c, psd, 1.0004f, 1.0e-6f, 50, BENCH_N), g_bench_sink += fl[0]),
+              (sk_noise_floor_track_f32(fl, c, psd, 1.0004f, 1.0e-6f, 50, BENCH_N), g_bench_sink += fl[0]));
+}
+
 static void bench_max_abs(void) {
     float x[BENCH_N];
     fill_bench_floats(x, BENCH_N);
@@ -3360,6 +3458,7 @@ int main(void) {
     test_erl_hold_expire();
     test_no_audible_echo_gain();
     test_max_abs();
+    test_noise_floor_track();
 
     printf("\n--- NaN corpus ---\n");
     test_cabs_np_nan();
@@ -3443,6 +3542,7 @@ int main(void) {
     bench_erl_hold_expire();
     bench_no_audible_echo_gain();
     bench_max_abs();
+    bench_noise_floor_track();
 
     if (g_hard_fail_count > 0) {
         fprintf(stderr,
