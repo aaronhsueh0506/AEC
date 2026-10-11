@@ -547,6 +547,95 @@ static void da_decimator_decimate_pair(DaDecimator *da, const float *in_a, float
 }
 #endif
 
+/* The 48 kHz -> 16 kHz anti-alias cascades of the capture and render signals
+ * share no data and carry the same coefficients, and each is a dependent chain
+ * of float32 multiplies and adds per sample. Both are filtered together as the
+ * two lanes of one vector, with the expressions of da_biquad_process1 and the
+ * same left-associative grouping, no fused multiply-add, so outputs and
+ * carried states are bit-identical to two da_resample48_channel() calls. The
+ * kept-sample selection and the phase update are those of
+ * da_resample48_channel(); both channels have one length, one cap and one
+ * phase, so they produce the same count, which is returned. Cascades that are
+ * not the 4-section shape, or whose coefficients differ, take two single
+ * calls. */
+#if defined(__ARM_NEON) && defined(__aarch64__) && \
+    !defined(SIMD_KERNELS_FORCE_SCALAR)
+static int da_resample48_pair(DaBiquad *bq_a, const float *in_a, float *out_a,
+                              DaBiquad *bq_b, const float *in_b, float *out_b,
+                              int n_in, int out_cap, int *phase) {
+    int i, count = 0;
+    const int p = *phase;
+    if (bq_a->n_sections != 4 || bq_b->n_sections != 4 ||
+        !da_biquad_same_coefficients(bq_a, bq_b)) {
+        int pa = p, pb = p;
+        count = da_resample48_channel(bq_a, in_a, n_in, out_a, out_cap, &pa);
+        (void)da_resample48_channel(bq_b, in_b, n_in, out_b, out_cap, &pb);
+        *phase = pa;
+        return count;
+    }
+    {
+        const DaBiquad *c = bq_a;
+        const float32x2_t b00 = vdup_n_f32(c->b[0][0]), b01 = vdup_n_f32(c->b[0][1]), b02 = vdup_n_f32(c->b[0][2]);
+        const float32x2_t b10 = vdup_n_f32(c->b[1][0]), b11 = vdup_n_f32(c->b[1][1]), b12 = vdup_n_f32(c->b[1][2]);
+        const float32x2_t b20 = vdup_n_f32(c->b[2][0]), b21 = vdup_n_f32(c->b[2][1]), b22 = vdup_n_f32(c->b[2][2]);
+        const float32x2_t b30 = vdup_n_f32(c->b[3][0]), b31 = vdup_n_f32(c->b[3][1]), b32 = vdup_n_f32(c->b[3][2]);
+        const float32x2_t a00 = vdup_n_f32(c->a[0][0]), a01 = vdup_n_f32(c->a[0][1]);
+        const float32x2_t a10 = vdup_n_f32(c->a[1][0]), a11 = vdup_n_f32(c->a[1][1]);
+        const float32x2_t a20 = vdup_n_f32(c->a[2][0]), a21 = vdup_n_f32(c->a[2][1]);
+        const float32x2_t a30 = vdup_n_f32(c->a[3][0]), a31 = vdup_n_f32(c->a[3][1]);
+        float32x2_t z00 = vset_lane_f32(bq_b->z[0][0], vdup_n_f32(bq_a->z[0][0]), 1);
+        float32x2_t z01 = vset_lane_f32(bq_b->z[0][1], vdup_n_f32(bq_a->z[0][1]), 1);
+        float32x2_t z10 = vset_lane_f32(bq_b->z[1][0], vdup_n_f32(bq_a->z[1][0]), 1);
+        float32x2_t z11 = vset_lane_f32(bq_b->z[1][1], vdup_n_f32(bq_a->z[1][1]), 1);
+        float32x2_t z20 = vset_lane_f32(bq_b->z[2][0], vdup_n_f32(bq_a->z[2][0]), 1);
+        float32x2_t z21 = vset_lane_f32(bq_b->z[2][1], vdup_n_f32(bq_a->z[2][1]), 1);
+        float32x2_t z30 = vset_lane_f32(bq_b->z[3][0], vdup_n_f32(bq_a->z[3][0]), 1);
+        float32x2_t z31 = vset_lane_f32(bq_b->z[3][1], vdup_n_f32(bq_a->z[3][1]), 1);
+        for (i = 0; i < n_in; ++i) {
+            float32x2_t x = vld1_lane_f32(in_b + i, vld1_dup_f32(in_a + i), 1);
+            float32x2_t y0 = vadd_f32(vmul_f32(b00, x), z00);
+            float32x2_t y1, y2, y3;
+            z00 = vadd_f32(vsub_f32(vmul_f32(b01, x), vmul_f32(a00, y0)), z01);
+            z01 = vsub_f32(vmul_f32(b02, x), vmul_f32(a01, y0));
+            y1 = vadd_f32(vmul_f32(b10, y0), z10);
+            z10 = vadd_f32(vsub_f32(vmul_f32(b11, y0), vmul_f32(a10, y1)), z11);
+            z11 = vsub_f32(vmul_f32(b12, y0), vmul_f32(a11, y1));
+            y2 = vadd_f32(vmul_f32(b20, y1), z20);
+            z20 = vadd_f32(vsub_f32(vmul_f32(b21, y1), vmul_f32(a20, y2)), z21);
+            z21 = vsub_f32(vmul_f32(b22, y1), vmul_f32(a21, y2));
+            y3 = vadd_f32(vmul_f32(b30, y2), z30);
+            z30 = vadd_f32(vsub_f32(vmul_f32(b31, y2), vmul_f32(a30, y3)), z31);
+            z31 = vsub_f32(vmul_f32(b32, y2), vmul_f32(a31, y3));
+            if (((i + p) % DA_RESAMPLE48_FACTOR) == 0 && count < out_cap) {
+                out_a[count] = vget_lane_f32(y3, 0);
+                out_b[count] = vget_lane_f32(y3, 1);
+                ++count;
+            }
+        }
+        bq_a->z[0][0] = vget_lane_f32(z00, 0); bq_b->z[0][0] = vget_lane_f32(z00, 1);
+        bq_a->z[0][1] = vget_lane_f32(z01, 0); bq_b->z[0][1] = vget_lane_f32(z01, 1);
+        bq_a->z[1][0] = vget_lane_f32(z10, 0); bq_b->z[1][0] = vget_lane_f32(z10, 1);
+        bq_a->z[1][1] = vget_lane_f32(z11, 0); bq_b->z[1][1] = vget_lane_f32(z11, 1);
+        bq_a->z[2][0] = vget_lane_f32(z20, 0); bq_b->z[2][0] = vget_lane_f32(z20, 1);
+        bq_a->z[2][1] = vget_lane_f32(z21, 0); bq_b->z[2][1] = vget_lane_f32(z21, 1);
+        bq_a->z[3][0] = vget_lane_f32(z30, 0); bq_b->z[3][0] = vget_lane_f32(z30, 1);
+        bq_a->z[3][1] = vget_lane_f32(z31, 0); bq_b->z[3][1] = vget_lane_f32(z31, 1);
+    }
+    *phase = (p + n_in) % DA_RESAMPLE48_FACTOR;
+    return count;
+}
+#else
+static int da_resample48_pair(DaBiquad *bq_a, const float *in_a, float *out_a,
+                              DaBiquad *bq_b, const float *in_b, float *out_b,
+                              int n_in, int out_cap, int *phase) {
+    int pa = *phase, pb = *phase;
+    int count = da_resample48_channel(bq_a, in_a, n_in, out_a, out_cap, &pa);
+    (void)da_resample48_channel(bq_b, in_b, n_in, out_b, out_cap, &pb);
+    *phase = pa;
+    return count;
+}
+#endif
+
 /* ------------------------------------------------------------------- ring */
 
 static void da_ring_reset(DaRing *r) {
@@ -1426,27 +1515,16 @@ int delay_aec3_accumulate_ex(DelayAec3 *d, const float *near, const float *far,
     if (d->rate_factor > 1) {
         /* Anti-alias-filter + decimate both channels to the estimator's
          * fixed 16kHz-native feed rate before it ever sees a sample (see
-         * delay_aec3_init()'s comment). Two independent phase-continuous
-         * filter chains since near/far are independent signals; the
-         * per-channel resample48_channel() calls share d->resample48.phase
-         * only conceptually -- each channel tracks its own phase via the
-         * same *phase argument, which is safe because both are fed the
-         * exact same hop length every call, so their phases stay identical;
-         * kept as two calls (not one shared phase var reused blindly) so a
-         * future caller feeding mismatched hop lengths per channel can't
-         * silently desync them. */
-        int near_phase = d->resample48.phase;
-        int far_phase = d->resample48.phase;
-        int n_near = da_resample48_channel(&d->resample48.near_lp, near, hop,
-                                           d->near16_scratch, d->resample_cap,
-                                           &near_phase);
-        int n_far = da_resample48_channel(&d->resample48.far_lp, far, hop,
-                                          d->far16_scratch, d->resample_cap,
-                                          &far_phase);
-        d->resample48.phase = near_phase;   /* == far_phase, see comment above */
+         * delay_aec3_init()'s comment). The two channels are independent
+         * phase-continuous filter chains that are fed one hop length per
+         * call, so they share one phase and one output count. */
+        int phase = d->resample48.phase;
+        hop_fed = da_resample48_pair(&d->resample48.near_lp, near, d->near16_scratch,
+                                     &d->resample48.far_lp, far, d->far16_scratch,
+                                     hop, d->resample_cap, &phase);
+        d->resample48.phase = phase;
         near_fed = d->near16_scratch;
         far_fed = d->far16_scratch;
-        hop_fed = (n_near < n_far) ? n_near : n_far;
     }
     /* NOTE: estimate_delay takes (render, capture) = (far, near). */
     produced = da_estimator_estimate_delay(&d->est, far_fed, near_fed, hop_fed,

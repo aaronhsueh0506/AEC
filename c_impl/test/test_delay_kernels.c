@@ -5,7 +5,9 @@
  * so the E2E dumps and the delay golden pass even with last-match-wins
  * semantics -- only this sweep fails. The decimator half proves the
  * register-specialized cascade against the generic walk across carried IIR
- * state, which a per-block re-zeroing comparison would not.
+ * state, which a per-block re-zeroing comparison would not. The two-lane
+ * decimator and 48 kHz resampler kernels are checked against their
+ * single-channel references the same way.
  *
  * On builds without the NEON body (non-aarch64, or
  * SIMD_KERNELS_FORCE_SCALAR) the argmax half degenerates to comparing the
@@ -273,6 +275,64 @@ static int run_decimator_pair_sweep(void) {
     return pfails ? 1 : 0;
 }
 
+/* The 48 kHz anti-alias pair runs the capture and render cascades as the two
+ * lanes of one vector; against two da_resample48_channel() calls it must give
+ * identical kept samples, kept count, carried filter state and phase, call
+ * after call, for hop lengths that are not multiples of the decimation factor
+ * or of the vector width, and when the output cap truncates. Cascades whose
+ * coefficients differ, or whose shape is off, must agree through the
+ * single-call fallback. */
+static int run_resample48_pair_sweep(void) {
+    rs = 0xA24BAED4963EE407ULL;
+    long rfails = 0, calls = 0;
+    DaBiquad pa, pb, ga, gb;
+    float ina[1100], inb[1100];
+    float oa[1100], ob[1100], ra[1100], rb[1100];
+    static const int lens[] = { 0, 1, 2, 3, 4, 5, 7, 8, 255, 256, 257, 511, 512, 513, 1023, 1024, 1100 };
+    int variant, c, i;
+    for (variant = 0; variant < 4; ++variant) {
+        int pph = 0, gph = 0;
+        da_biquad_init_resample48(&pa); da_biquad_init_resample48(&pb);
+        da_biquad_init_resample48(&ga); da_biquad_init_resample48(&gb);
+        if (variant == 1) {          /* coefficients differ: single-call fallback */
+            pb.b[1][0] *= 1.0001f; gb.b[1][0] *= 1.0001f;
+        } else if (variant == 2) {   /* one off-shape cascade */
+            pb.n_sections = 3; gb.n_sections = 3;
+        } else if (variant == 3) {   /* both off-shape, equal coefficients */
+            pa.n_sections = 3; ga.n_sections = 3;
+            pb.n_sections = 3; gb.n_sections = 3;
+        }
+        for (c = 0; c < 3000; ++c) {
+            int n = lens[c % (int)(sizeof lens / sizeof lens[0])];
+            float sa = (c % 5 == 0) ? 1.0e-30f : (c % 7 == 0) ? 0.98f : 0.2f;
+            float sb = (c % 3 == 0) ? 0.5f : (c % 11 == 0) ? 1.0e-30f : 0.05f;
+            int cap = (c % 4 == 3) ? n / 3 : (n + 2) / 3 + 1;
+            int pn, gn_a, gn_b, ph_a = gph, ph_b = gph;
+            for (i = 0; i < n; ++i) {
+                ina[i] = (c % 11 == 3) ? ((i & 1) ? sa : -sa) : (c % 13 == 5) ? 0.0f : rnd_f(sa);
+                inb[i] = (c % 17 == 4) ? 0.0f : rnd_f(sb);
+            }
+            memset(oa, 0, sizeof oa); memset(ob, 0, sizeof ob);
+            memset(ra, 0, sizeof ra); memset(rb, 0, sizeof rb);
+            pn = da_resample48_pair(&pa, ina, oa, &pb, inb, ob, n, cap, &pph);
+            gn_a = da_resample48_channel(&ga, ina, n, ra, cap, &ph_a);
+            gn_b = da_resample48_channel(&gb, inb, n, rb, cap, &ph_b);
+            gph = ph_a;
+            calls++;
+            if (pn != gn_a || gn_a != gn_b || pph != gph ||
+                memcmp(oa, ra, sizeof oa) != 0 || memcmp(ob, rb, sizeof ob) != 0) {
+                if (++rfails <= 5) printf("  MISMATCH resample out, variant %d call %d n=%d\n", variant, c, n);
+            }
+            if (!cmp_state(&pa, &ga) || !cmp_state(&pb, &gb)) {
+                if (++rfails <= 5) printf("  MISMATCH resample state, variant %d call %d n=%d\n", variant, c, n);
+            }
+        }
+    }
+    printf("resample48 pair sweep: %ld state-carrying calls (4 coefficient/shape variants),"
+           " %ld mismatches -> %s\n", calls, rfails, rfails ? "FAIL" : "PASS");
+    return rfails ? 1 : 0;
+}
+
 int main(void) {
     int rc = 0;
     if (!SWEEP_HAS_NEON_BODY)
@@ -280,6 +340,7 @@ int main(void) {
     rc |= run_argmax_sweep();
     rc |= run_decimator_sweep();
     rc |= run_decimator_pair_sweep();
+    rc |= run_resample48_pair_sweep();
     if (rc == 0) printf("test_delay_kernels: PASS\n");
     return rc;
 }
