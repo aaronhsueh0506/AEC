@@ -58,7 +58,7 @@ was hypothesised, tested, and refuted by this control.
 
 Caveat on scope: the control bounds the metric's response to a *bit-level*
 change. It does not bound its response to a larger but still semantically
-neutral change. `noisefloor_control.diff` is the exact perturbation.
+neutral change. The perturbation is `alpha_release` 0.95f -> 0.9500001f.
 
 ## Investigation of every case past −0.1
 
@@ -263,7 +263,7 @@ python3 eval/simple_mu_branch_census.py --policy retimed --frame-size 256 \
 |---|---|
 | `AB_REPORT.md` | **generated** per-case statistics: mean/median/p10/worst-5 per bucket, counts below −0.05 and −0.1, every case past the deep threshold, and the control run |
 | `{c,py}_{base,cand}_g{256,512}.scores.json` | per-case `bucket`/`echo`/`deg`, 90 cases each |
-| `noisefloor_{base,cand}_g{256,512}.scores.json`, `noisefloor_control.diff` | the control run and the exact 1.1e-7 perturbation |
+| `noisefloor_{base,cand}_g{256,512}.scores.json` | the control run (the 1.1e-7 perturbation of `alpha_release`) |
 | `{c,py}_wav_comparison_g{256,512}.json` | per-case SHA-256, sample count, rate, max/RMS diff |
 | `interaction_matrix_g{256,512}.json`, `interaction_matrix.txt` | all 16 settings, both grids |
 | `probes/` | per-case state trajectory + physical measures, 16 stems × 2 grids |

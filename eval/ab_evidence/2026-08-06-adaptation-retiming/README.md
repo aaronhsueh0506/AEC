@@ -8,8 +8,8 @@ in opposite directions and cancelled in the mean.
 ## What was compared
 
 Baseline and candidate differ **only** in four files under `python/modules/`,
-swapped in and out around each render. `variant_diff/` carries the exact unified
-diff; it is five constants and nothing else:
+swapped in and out around each render. The difference is five constants and
+nothing else:
 
 | constant | file | baseline | candidate |
 |---|---|---|---|
@@ -39,10 +39,9 @@ by 1.6x.
 | Grids | 16000/256 (hop 128) and 16000/512 (hop 256) |
 | Pre-align | **`NO_PREALIGN=1`** |
 | Scorer | `python/bench_aecmos.py --baseline` |
-| Harness | `run_ab.sh` (copy of the script that produced these files) |
 
-`NO_PREALIGN=1` is mandatory and is the single most important line in
-`run_ab.sh`. The eval driver's **default** is an offline GCC-PHAT pre-align
+`NO_PREALIGN=1` is mandatory and is the single most important setting of
+the harness. The eval driver's **default** is an offline GCC-PHAT pre-align
 crutch, which hides exactly the class of timing error this change is about; a
 run without it would be worthless here regardless of what the numbers said.
 
@@ -70,5 +69,3 @@ bucket passed.
 |---|---|
 | `b2_{base,cand}_{g256,g512}.scores.json` | per-case `bucket`/`echo`/`deg` for all 90 cases, plus bucket means |
 | `summary_table.md` | the bucket table above, generated from those four files |
-| `variant_diff/*.diff` | exact baseline→candidate source diff |
-| `run_ab.sh` | the harness, including the `NO_PREALIGN=1` invocation |
