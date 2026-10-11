@@ -486,14 +486,7 @@ static float pbfdaf_frontend(PBFDAF* p,
 
     /* AEC3 SubtractorOutput.s_*_max_abs = max|echo_time[hop:block]| on the
      * valid hop. (np.max(np.abs(.)) over hop floats.) */
-    {
-        float smax = 0.0f;
-        for (int i = 0; i < hop; ++i) {
-            float a = fabsf(p->time_scratch[hop + i]);
-            if (a > smax) smax = a;
-        }
-        p->last_s_max_abs = smax;
-    }
+    p->last_s_max_abs = sk_max_abs_f32(p->time_scratch + hop, hop);
 
     /* error_spec: zero-pad, valid region [hop, block) = output */
     memset(p->time_scratch, 0, (size_t)p->fft_size * sizeof(float));

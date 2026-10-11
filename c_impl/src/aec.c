@@ -2872,8 +2872,7 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
     /* 10. stationarity refresh for NEXT hop (StationarityEstimator on
      *     |filter.far_spec|²; first-render latch; block-stationary push). */
     {
-        float far_max = 0.0f;
-        for (int i = 0; i < hop; ++i) { float v = fabsf(a->far_hop[i]); if (v > far_max) far_max = v; }
+        float far_max = sk_max_abs_f32(a->far_hop, hop);
         if (!a->non_zero_render_seen && far_max >= a->render_peak_floor)
             a->non_zero_render_seen = 1;
         if (a->non_zero_render_seen) {

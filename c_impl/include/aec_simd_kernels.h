@@ -1696,6 +1696,58 @@ static inline void sk_no_audible_echo_gain_f32(
 }
 #endif
 
+/* ═══════════════════════════ sk_max_abs_f32 ════════════════════════════════
+ * Largest |x[i]| of n floats, the running maximum seeded at +0.0f and raised
+ * only by a strictly larger magnitude:
+ *   m = 0.0f; for i: { a = fabsf(x[i]); if (a > m) m = a; }
+ * A NaN (quiet or signaling) never compares greater, so it never raises the
+ * maximum; n == 0 gives 0.0f. The NEON form keeps the compare + select of the
+ * scalar test (never vmaxq/vmaxnmq: the former propagates NaN, the latter
+ * quiets a signaling NaN into the result). The lane accumulators only ever
+ * hold values that passed the compare, so they are never NaN and the final
+ * horizontal maximum is exact in any lane order; the seed and the magnitudes
+ * are non-negative, so no signed zero can differ. */
+
+static inline float sk_max_abs_f32_scalar(const float *x, int n) {
+    float m = 0.0f;
+    int i;
+    for (i = 0; i < n; ++i) {
+        float a = fabsf(x[i]);
+        if (a > m) m = a;
+    }
+    return m;
+}
+
+#if SK_HAVE_NEON
+static inline float sk_max_abs_f32(const float *x, int n) {
+    float m = 0.0f;
+    int i = 0;
+    if (n >= 4) {
+        float32x4_t m0 = vdupq_n_f32(0.0f), m1 = m0;
+        for (; i + 8 <= n; i += 8) {
+            float32x4_t a0 = vabsq_f32(vld1q_f32(x + i));
+            float32x4_t a1 = vabsq_f32(vld1q_f32(x + i + 4));
+            m0 = vbslq_f32(vcgtq_f32(a0, m0), a0, m0);
+            m1 = vbslq_f32(vcgtq_f32(a1, m1), a1, m1);
+        }
+        for (; i + 4 <= n; i += 4) {
+            float32x4_t a0 = vabsq_f32(vld1q_f32(x + i));
+            m0 = vbslq_f32(vcgtq_f32(a0, m0), a0, m0);
+        }
+        m = vmaxvq_f32(vbslq_f32(vcgtq_f32(m1, m0), m1, m0));
+    }
+    for (; i < n; ++i) {
+        float a = fabsf(x[i]);
+        if (a > m) m = a;
+    }
+    return m;
+}
+#else
+static inline float sk_max_abs_f32(const float *x, int n) {
+    return sk_max_abs_f32_scalar(x, n);
+}
+#endif
+
 #ifdef __cplusplus
 }
 #endif

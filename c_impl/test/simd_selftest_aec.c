@@ -3274,6 +3274,62 @@ static void bench_no_audible_echo_gain(void) {
     }
 }
 
+/* ═══════════════════ kernels added after the numbered set ═══════════════════
+ * Each test below runs, per kernel: the finite corpus (random bit patterns and
+ * the special-value pool) at every length of N_LIST, the NaN-sprinkle corpus,
+ * and the offset + canary matrix (payload at element offsets 1..15 of a
+ * canary-filled arena, untouched guard words checked afterwards). Scalar and
+ * NEON results must be bit-identical; where a NaN can reach an output the
+ * comparison is check_bits_classify, otherwise it is strict. */
+
+#define NEW_BENCH(name, scalar_stmt, simd_stmt) do {                              \
+        double t0_, t1_, t2_, t3_; int r_;                                        \
+        t0_ = now_ns();                                                           \
+        for (r_ = 0; r_ < BENCH_REPS; ++r_) { scalar_stmt; }                      \
+        t1_ = now_ns();                                                           \
+        t2_ = now_ns();                                                           \
+        for (r_ = 0; r_ < BENCH_REPS; ++r_) { simd_stmt; }                        \
+        t3_ = now_ns();                                                           \
+        report_bench(name, (t1_ - t0_) / BENCH_REPS, (t3_ - t2_) / BENCH_REPS);   \
+    } while (0)
+
+static void test_max_abs(void) {
+    float x[SK_TEST_MAX_N];
+    float *arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    int ni, t, o;
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (t = 0; t < TRIALS; ++t) {
+            fill_floats(x, n);
+            check_scalar_bits_or_die("max_abs_f32", n, t, sk_max_abs_f32(x, n), sk_max_abs_f32_scalar(x, n));
+        }
+    }
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats_nan_sprinkle(x, n);
+        check_scalar_bits_or_die("max_abs_f32_nan", n, 0, sk_max_abs_f32(x, n), sk_max_abs_f32_scalar(x, n));
+    }
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
+            edge_fill_canary_f(arena, EDGE_ARENA_LEN);
+            fill_floats(arena + o, n);
+            check_scalar_bits_or_die("max_abs_f32_edge", n, o,
+                                      sk_max_abs_f32(arena + o, n), sk_max_abs_f32_scalar(arena + o, n));
+            edge_check_canary_f("max_abs_f32_edge:x", arena, EDGE_ARENA_LEN, o, n);
+        }
+    }
+    free(arena);
+    printf("PASS max_abs_f32 (finite, NaN sprinkle strict, offsets 1..15 canary-guarded)\n");
+}
+
+static void bench_max_abs(void) {
+    float x[BENCH_N];
+    fill_bench_floats(x, BENCH_N);
+    NEW_BENCH("max_abs_f32", g_bench_sink += sk_max_abs_f32_scalar(x, BENCH_N),
+                             g_bench_sink += sk_max_abs_f32(x, BENCH_N));
+}
+
 /* ═══════════════════════════════════ main ══════════════════════════════════ */
 
 int main(void) {
@@ -3303,6 +3359,7 @@ int main(void) {
     test_dec1_floorintmin_s32();
     test_erl_hold_expire();
     test_no_audible_echo_gain();
+    test_max_abs();
 
     printf("\n--- NaN corpus ---\n");
     test_cabs_np_nan();
@@ -3385,6 +3442,7 @@ int main(void) {
     bench_dec1_floorintmin_s32();
     bench_erl_hold_expire();
     bench_no_audible_echo_gain();
+    bench_max_abs();
 
     if (g_hard_fail_count > 0) {
         fprintf(stderr,
