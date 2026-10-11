@@ -1,6 +1,7 @@
 /* Top-level PBFDKF AEC orchestration with the AEC3-style post-filter chain.
  * Python defines the algorithm; this file is the float32 C implementation. */
 #include "aec.h"
+#include "aec_config_build.h"
 #include "aec_debug.h"
 #include "aec3_balanced_config.h"
 #include "aec3_scale.h"
@@ -1416,6 +1417,91 @@ static void aec_recompute_wallclock_thresholds(Aec* a, int hop, int sample_rate)
     a->stat_dt_hangover_hops = aec3_ms_to_hops(800.0f, hop, sample_rate);
 }
 
+/* Suppression-gain configuration and per-bin tuning for `cfg`, which must be a
+ * validated, resolved config (see aec_resolve_valid_config). aec_carve and
+ * aec_res both build a suppressor through this one function, so a lane and a
+ * standalone RES instance cannot be configured differently. The tuning tables
+ * are the static per-rate tables, not copies. Returns 0, or -1 when no signal
+ * grid or per-rate row exists for cfg. */
+int aec_build_sg_config(const AecConfig* cfg, SuppressionGainConfig* out_cfg,
+                        SuppressionGainTuning* out_tun) {
+    AecSignalGrid grid;
+    const Aec3BalancedRateDims* rd;
+    SuppressionGainConfig scfg;
+    SuppressionGainTuning stun;
+    int hop, K;
+    if (!cfg || !out_cfg || !out_tun) return -1;
+    if (!aec_resolve_signal_grid(cfg->sample_rate, cfg->fft_size, &grid)) return -1;
+    rd = aec3b_rate_cfg(cfg->sample_rate, cfg->fft_size);
+    if (!rd) return -1;
+    hop = grid.hop_size;
+    K = grid.n_freqs;
+    memset(&scfg, 0, sizeof(scfg));
+    scfg.n_bins = K; scfg.sr = cfg->sample_rate; scfg.hop_size = hop;
+    /* Bin scalars come from the per-rate row; last_permanent_lf_smoothing_band
+     * and lf_smoothing_during_initial_phase are rate-invariant constants. */
+    scfg.last_lf_band = rd->sg_last_lf_band;
+    scfg.first_hf_band = rd->sg_first_hf_band;
+    scfg.last_lf_smoothing_band = rd->sg_last_lf_smoothing_band;
+    scfg.last_permanent_lf_smoothing_band = AEC3B_SG_LAST_PERMANENT;
+    scfg.lf_smoothing_during_initial_phase = AEC3B_SG_LF_SMOOTHING_INITIAL;
+    scfg.lf_clamp_bin = rd->sg_lf_clamp_bin;
+    scfg.dne_lf_end = rd->sg_dne_lf_end;
+    scfg.nearend_smoother_n = rd->sg_nearend_smoother_n;
+    scfg.aud_lf_end_bin = rd->sg_aud_lf_end_bin; scfg.aud_mf_end_bin = rd->sg_aud_mf_end_bin;
+    /* Absolute-power floor, render limits and low-render threshold are per-rate. */
+    scfg.floor_power = rd->sg_floor_power;
+    scfg.aud_thr_lf = AEC3B_SG_AUD_THR_LF; scfg.aud_thr_mf = AEC3B_SG_AUD_THR_MF;
+    scfg.aud_thr_hf = AEC3B_SG_AUD_THR_HF;
+    scfg.low_render_limit = rd->sg_low_render_limit;
+    scfg.normal_render_limit = rd->sg_normal_render_limit;
+    scfg.hf_lgb = rd->sg_hf_lgb; scfg.hf_biq = AEC3B_SG_HF_BIQ;
+    scfg.conservative_hf = AEC3B_SG_CONSERVATIVE_HF;
+    scfg.max_inc_normal = rd->sg_max_inc;
+    scfg.max_inc_nearend = rd->sg_max_inc;
+    scfg.max_dec_lf_normal = rd->sg_max_dec_lf;
+    scfg.max_dec_lf_nearend = rd->sg_max_dec_lf;
+    scfg.floor_first_increase = 0.00001f;
+    scfg.low_render_threshold = rd->sg_low_render_threshold;
+    scfg.split_floor_enabled = 1;
+    scfg.split_floor_far_active =
+        powf(10.0f, cfg->min_gain_floor_far_active_db / 10.0f);
+    scfg.split_floor_far_silent = AEC3B_SG_SPLIT_FLOOR_FAR_SILENT;
+    /* Double-talk floor: 10^(min_gain_floor_dt_db/10). */
+    scfg.split_floor_dt =
+        powf(10.0f, cfg->min_gain_floor_dt_db / 10.0f);
+    scfg.split_floor_latch_power = AEC3B_SG_SPLIT_FLOOR_LATCH_POWER;
+    scfg.soft_blend_enabled = AEC3B_SG_SOFT_BLEND_ENABLED;
+    scfg.soft_blend_per_bin = AEC3B_SG_SOFT_BLEND_PER_BIN;
+    scfg.soft_blend_enr_thr = (float)AEC3B_SG_SOFT_BLEND_ENR_THR;
+    scfg.soft_blend_softness = (float)AEC3B_SG_SOFT_BLEND_SOFTNESS;
+    scfg.dne_enr_threshold = AEC3B_SG_DNE_ENR_THRESHOLD;
+    scfg.dne_enr_exit_threshold = AEC3B_SG_DNE_ENR_EXIT_THRESHOLD;
+    scfg.dne_snr_threshold = AEC3B_SG_DNE_SNR_THRESHOLD;
+    scfg.dne_use_during_initial_phase = AEC3B_SG_DNE_USE_DURING_INITIAL_PHASE;
+    scfg.dne_use_unbounded_echo = AEC3B_SG_DNE_USE_UNBOUNDED_ECHO;
+    scfg.dne_lf_endpoint_bin = rd->sg_dne_lf_endpoint_bin;
+    scfg.dne_trigger_threshold_hops = rd->sg_trigger_threshold_hops;
+    scfg.dne_hold_duration_hops = rd->sg_hold_duration_hops;
+    scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10f;
+    /* Per-bin tuning tables are the static per-rate arrays; their length is
+     * checked against n_bins in suppression_gain_init. */
+    stun.nearend_enr_tr = rd->sg_nearend_enr_tr; stun.nearend_enr_su = rd->sg_nearend_enr_su;
+    stun.nearend_emr_tr = rd->sg_nearend_emr_tr;
+    stun.normal_enr_tr  = rd->sg_normal_enr_tr;  stun.normal_enr_su  = rd->sg_normal_enr_su;
+    stun.normal_emr_tr  = rd->sg_normal_emr_tr;
+    stun.table_len      = rd->sg_table_len;
+    *out_cfg = scfg;
+    *out_tun = stun;
+    return 0;
+}
+
+int aec_resolve_valid_config(const AecConfig* in, AecConfig* out) {
+    if (!in || !out || !aec_validate_config(in)) return 0;
+    *out = aec_resolved_config(in);
+    return 1;
+}
+
 static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
                       int hop, int blk, int fft, int K, int np,
                       int buf_samp, int fcap, int is_static) {
@@ -1431,6 +1517,9 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     const Aec3BalancedRateDims* rd = aec3b_rate_cfg(
         cfg->sample_rate, cfg->fft_size);
     if (!rd) return -1;
+    SuppressionGainConfig scfg;
+    SuppressionGainTuning stun;
+    if (aec_build_sg_config(cfg, &scfg, &stun) != 0) return -1;
 
     a->cfg = *cfg;
     a->hop_size = hop; a->block_size = blk; a->fft_size = fft;
@@ -1772,68 +1861,6 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
     /* SuppressionGain */
     {
         SuppressionGain* sg = &a->a3_sg;
-        SuppressionGainConfig scfg; SuppressionGainTuning stun;
-        memset(&scfg, 0, sizeof(scfg));
-        scfg.n_bins = K; scfg.sr = cfg->sample_rate; scfg.hop_size = hop;
-        /* M4: the 9 Hz-anchored bin scalars now come from rd (byte-
-         * identical at 16 kHz -- see the M4 report's replaced-macro
-         * inventory). last_permanent_lf_smoothing_band / lf_smoothing_
-         * during_initial_phase are rate-invariant fixed constants (0 / 1)
-         * and stay direct macro uses. */
-        scfg.last_lf_band = rd->sg_last_lf_band;
-        scfg.first_hf_band = rd->sg_first_hf_band;
-        scfg.last_lf_smoothing_band = rd->sg_last_lf_smoothing_band;
-        scfg.last_permanent_lf_smoothing_band = AEC3B_SG_LAST_PERMANENT;
-        scfg.lf_smoothing_during_initial_phase = AEC3B_SG_LF_SMOOTHING_INITIAL;
-        scfg.lf_clamp_bin = rd->sg_lf_clamp_bin;
-        scfg.dne_lf_end = rd->sg_dne_lf_end;
-        scfg.nearend_smoother_n = rd->sg_nearend_smoother_n;
-        scfg.aud_lf_end_bin = rd->sg_aud_lf_end_bin; scfg.aud_mf_end_bin = rd->sg_aud_mf_end_bin;
-        /* M4: rate-varying SG absolute-power floor. */
-        scfg.floor_power = rd->sg_floor_power;
-        scfg.aud_thr_lf = AEC3B_SG_AUD_THR_LF; scfg.aud_thr_mf = AEC3B_SG_AUD_THR_MF;
-        scfg.aud_thr_hf = AEC3B_SG_AUD_THR_HF;
-        /* M4: rate-varying SG render-limit floats. */
-        scfg.low_render_limit = rd->sg_low_render_limit;
-        scfg.normal_render_limit = rd->sg_normal_render_limit;
-        scfg.hf_lgb = rd->sg_hf_lgb; scfg.hf_biq = AEC3B_SG_HF_BIQ;
-        scfg.conservative_hf = AEC3B_SG_CONSERVATIVE_HF;
-        scfg.max_inc_normal = rd->sg_max_inc;
-        scfg.max_inc_nearend = rd->sg_max_inc;
-        scfg.max_dec_lf_normal = rd->sg_max_dec_lf;
-        scfg.max_dec_lf_nearend = rd->sg_max_dec_lf;
-        scfg.floor_first_increase = 0.00001f;
-        /* M4: rate-varying SG absolute-power threshold. */
-        scfg.low_render_threshold = rd->sg_low_render_threshold;
-        scfg.split_floor_enabled = 1;
-        scfg.split_floor_far_active =
-            powf(10.0f, cfg->min_gain_floor_far_active_db / 10.0f);
-        scfg.split_floor_far_silent = AEC3B_SG_SPLIT_FLOOR_FAR_SILENT;
-        /* DT-gated floor: 10^(min_gain_floor_dt_db/10) (mirrors aec_create). */
-        scfg.split_floor_dt =
-            powf(10.0f, cfg->min_gain_floor_dt_db / 10.0f);
-        scfg.split_floor_latch_power = AEC3B_SG_SPLIT_FLOOR_LATCH_POWER;
-        scfg.soft_blend_enabled = AEC3B_SG_SOFT_BLEND_ENABLED;
-        scfg.soft_blend_per_bin = AEC3B_SG_SOFT_BLEND_PER_BIN;
-        scfg.soft_blend_enr_thr = (float)AEC3B_SG_SOFT_BLEND_ENR_THR;
-        scfg.soft_blend_softness = (float)AEC3B_SG_SOFT_BLEND_SOFTNESS;
-        scfg.dne_enr_threshold = AEC3B_SG_DNE_ENR_THRESHOLD;
-        scfg.dne_enr_exit_threshold = AEC3B_SG_DNE_ENR_EXIT_THRESHOLD;
-        scfg.dne_snr_threshold = AEC3B_SG_DNE_SNR_THRESHOLD;
-        scfg.dne_use_during_initial_phase = AEC3B_SG_DNE_USE_DURING_INITIAL_PHASE;
-        scfg.dne_use_unbounded_echo = AEC3B_SG_DNE_USE_UNBOUNDED_ECHO;
-        scfg.dne_lf_endpoint_bin = rd->sg_dne_lf_endpoint_bin;
-        scfg.dne_trigger_threshold_hops = rd->sg_trigger_threshold_hops;
-        scfg.dne_hold_duration_hops = rd->sg_hold_duration_hops;
-        scfg.stat_aware_ne_proxy_enabled = 0; scfg.stat_aware_ne_proxy_threshold = 0.10f;
-        /* M4: the six per-bin tuning table pointers now come from rd
-         * (pointer-identical to the legacy AEC3B_SG_* arrays at 16 kHz) +
-         * their length, asserted == n_bins in suppression_gain_init. */
-        stun.nearend_enr_tr = rd->sg_nearend_enr_tr; stun.nearend_enr_su = rd->sg_nearend_enr_su;
-        stun.nearend_emr_tr = rd->sg_nearend_emr_tr;
-        stun.normal_enr_tr  = rd->sg_normal_enr_tr;  stun.normal_enr_su  = rd->sg_normal_enr_su;
-        stun.normal_emr_tr  = rd->sg_normal_emr_tr;
-        stun.table_len      = rd->sg_table_len;
         float *last_gain = P_FSLICE(0); float *last_ne = P_FSLICE(0); float *last_echo = P_FSLICE(0);
         float *ma   = (float*)ptr; ptr += ALIGN16((size_t)rd->sg_nearend_smoother_n * K * sizeof(float));
         float *ne_s = P_FSLICE(0); float *wr_s = P_FSLICE(0);
