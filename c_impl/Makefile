@@ -648,8 +648,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-detectors-parity test-detectors-parity-all
-all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-detectors-parity test-detectors-parity-all:
+.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-aec-res test-detectors-parity test-detectors-parity-all
+all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-aec-res test-detectors-parity test-detectors-parity-all:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -935,6 +935,14 @@ else
 TEST_OH_VARIANT := ne10_neon
 endif
 
+# Standalone RES stage (aec_res.h): configuration equality with an Aec lane,
+# gain and comfort-noise equality with the multi-lane pipelines' stage, API
+# contract. The test includes src/aec_res.c for the struct, so it links the
+# library objects without aec_res.o.
+TEST_AR_OBJS    = $(OBJ_DIR)/test_aec_res.o
+TEST_AR_TARGET  = $(BIN_DIR)/test_aec_res
+TEST_AR_GOLDEN  = $(TEST_DIR)/golden/sg_config.txt
+
 # Standalone bit-exactness + microbench harness for the AEC-only kernel split
 # (aec_simd_kernels.h). Header-only + <math.h> -- no audio_common archive
 # link needed (unlike bench_rtf/aec_wav), so this target does not depend on
@@ -1029,6 +1037,9 @@ $(OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c | _cfg_guard
 # test/test_output_hash.c.
 $(OBJ_DIR)/test_output_hash.o: $(TEST_DIR)/test_output_hash.c | _cfg_guard
 	$(CC) $(CFLAGS) -ffp-contract=off -MD -MP -c -o $@ $<
+
+$(OBJ_DIR)/test_aec_res.o: $(TEST_DIR)/test_aec_res.c | _cfg_guard
+	$(CC) $(CFLAGS) -I. -MD -MP -c -o $@ $<
 
 $(OBJ_DIR)/test_zero_heap_aec.o: $(TEST_DIR)/test_zero_heap_aec.c | _cfg_guard
 	$(CC) $(CFLAGS) -fno-builtin -I$(AC_DIR)/test -MD -MP -c -o $@ $<
@@ -1126,7 +1137,7 @@ $(TEST_NT_TARGET): $(TEST_NT_OBJ) $(OBJ_DIR)/aec3_scale.o | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-detectors-parity test-detectors-parity-all
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-aec-res test-detectors-parity test-detectors-parity-all
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -1161,6 +1172,9 @@ test-process-context: $(TEST_PC_TARGET)
 
 test-output-hash: $(TEST_OH_TARGET)
 	"$(abspath $(TEST_OH_TARGET))" "$(TEST_OH_GOLDEN)" $(TEST_OH_VARIANT)
+
+test-aec-res: $(TEST_AR_TARGET)
+	"$(abspath $(TEST_AR_TARGET))" "$(TEST_AR_GOLDEN)"
 
 # Builds AND runs, same convention as test-counter-saturation above.
 test-linear-context: $(TEST_LC_TARGET)
@@ -1269,6 +1283,10 @@ $(TEST_PC_TARGET): $(OBJS) $(TEST_PC_OBJS) $(AC_LIB) | _cfg_guard
 $(TEST_OH_TARGET): $(OBJS) $(TEST_OH_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_output_hash [$(BACKEND)] -> $@"
+
+$(TEST_AR_TARGET): $(filter-out $(OBJ_DIR)/aec_res.o,$(OBJS)) $(TEST_AR_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_aec_res [$(BACKEND)] -> $@"
 
 $(TEST_LC_TARGET): $(OBJS) $(TEST_LC_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
