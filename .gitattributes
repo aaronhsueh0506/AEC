@@ -1,6 +1,6 @@
 
-# Archived A/B evidence: these files are verbatim `git show` captures and
-# must stay byte-faithful to the commits they document. C comment blocks carry
+# Archived A/B evidence: these files are `git show` captures (author addresses
+# stripped) and must otherwise stay byte-faithful to the commits they document. C comment blocks carry
 # trailing spaces on ` * ` continuation lines, so a whitespace check would flag
 # them forever.
 #
