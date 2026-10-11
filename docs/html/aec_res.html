@@ -135,7 +135,7 @@ t              各 lane 線性 AEC 完成
 <p class="small">記憶體(balanced,kiss／ne10 相同):16k/256 = 7,904 B、16k/512 = 14,048 B、48k/1024 = 29,408 B、8k/256 = 7,392 B(<code>aec_res_get_mem_size()</code> 實測;不隨 BACKEND／SIMD 改變,但會隨 <code>AecRes</code> 結構大小改變,請以函式回傳值為準)。</p>
 
 <h2>7. 延遲與 warm-up</h2>
-<p>無演算法延遲(同 hop 內回傳)。實例以 <code>initial_state = 1</code> 起始:初始階段是否啟用 DominantNearend 觸發與低頻平滑,由設定中的 <code>dne_use_during_initial_phase</code>／<code>lf_smoothing_during_initial_phase</code> 決定;第一次 <code>all_converged</code> 為真的 hop 離開初始狀態,之後不會回去,直到 <code>aec_res_reset()</code>。</p>
+<p>無演算法延遲(同 hop 內回傳)。實例以 <code>initial_state = 1</code> 起始:初始階段是否啟用 DominantNearend 觸發與低頻平滑,由設定中的 <code>dne_use_during_initial_phase</code>／<code>lf_smoothing_during_initial_phase</code> 決定;第一次 <code>all_converged</code> 為真的 hop 離開初始狀態,之後不會回去,直到 <code>aec_res_reset()</code>。設定來自 <code>AecConfig</code> 的共同建構函式,其中這兩個旗標固定為 1,所以經由本介面,初始狀態對增益沒有影響;離開初始狀態的判斷與狀態仍保留,供旗標被關閉的設定使用。</p>
 
 <h2>8. 多 lane pipeline 原本向 AEC 內部取用的符號</h2>
 <p>4ch pipeline(<code>Audio_ALG/pipelines/4ch_aec_bf_nr_res/4aec_nr_res.c</code>)目前自己 include 內部 header 重做這一級。對應如下;「已提供」表示 <code>aec_res.h</code> 能取代,pipeline 端改接線是另一項工作。</p>
@@ -155,7 +155,7 @@ t              各 lane 線性 AEC 完成
 <ul class="small">
 <li><code>AEC/c_impl/include/aec_res.h</code>、<code>AEC/c_impl/src/aec_res.c</code></li>
 <li><code>AEC/c_impl/include/aec_config_build.h</code> — 庫內部:<code>aec_build_sg_config</code>／<code>aec_resolve_valid_config</code>(非對外 API)</li>
-<li><code>AEC/c_impl/test/test_aec_res.c</code>、<code>test/golden/sg_config.txt</code> — <code>make test-aec-res</code></li>
+<li><code>AEC/c_impl/test/test_aec_res.c</code>、<code>test/golden/sg_config.txt</code> — <code>make test-aec-res</code>(含 render 的 ×32768 縮放、離開初始狀態、飽和後復原限制的判別案例)</li>
 <li><code>AEC/c_impl/test/test_zero_heap_aec.c</code>（含 AecRes 週期）、<code>test/no_stdio_main.c</code>（<code>make audit-no-stdio</code>）</li>
 <li><code>AEC/docs/c_user_manual_zh_TW.md</code> §8.6</li>
 </ul>
