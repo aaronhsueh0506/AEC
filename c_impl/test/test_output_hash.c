@@ -26,7 +26,23 @@
  * library's own policy shows up in the output digests alone.
  *
  * Also checked without any golden: the gain-path-free digest is identical
- * across context levels 0, 1 and 2. */
+ * across context levels 0, 1 and 2.
+ *
+ * What the digests cannot see (changing these leaves every row unchanged):
+ *  - floor_first_increase, the lower bound of the per-hop maximum gain: it
+ *    binds only on the hop after a saturated echo has taken the gain to ~0,
+ *    which the scene never produces. test-aec-res pins the configured value
+ *    and the limit.
+ *  - the initial Q_high / Q_low / Q of the main filter (pbfdkf_init_scalars):
+ *    aec_carve overwrites all three for every bin before the first hop.
+ *  - alpha_r, the smoothing of the error PSD: that PSD feeds R, which nothing
+ *    reads, and the scalar fallback of the H-error refresh, which the library
+ *    reaches only without a shadow filter and where the PSD sum is compared
+ *    with a zero reference. test-rate-structural pins the time constant and
+ *    the fallback on a stand-alone filter.
+ *  - the 0.1 step of the fullband ERL (erl_time_domain): no library code reads
+ *    that value.
+ */
 #include "aec.h"
 #include <math.h>
 #include <stdint.h>
