@@ -15,7 +15,7 @@
  * read by resolve_startup_hops() as "compute the live, grid-correct hop
  * count instead". A caller that explicitly sets either field to ANY OTHER
  * value -- including 200, which happens to be the auto-computed value at
- * the legacy hop=160/sr=16000 grid -- gets it honored verbatim. -1 (not a
+ * the reference hop=160/sr=16000 grid -- gets it honored verbatim. -1 (not a
  * reachable hop count) is used specifically so no legitimate explicit value
  * can ever collide with the "unset" marker. */
 #define AEC_STATE_STARTUP_HOPS_AUTO (-1)
@@ -237,18 +237,16 @@ void aec_state_update(AecState *s,
     int  analyzer_delay_storage[1];
     const int *analyzer_delays = NULL;
     int  analyzer_delays_len = 0;
-    /* M4 (multi-rate consumption switch): filter_taps_full_len is a live,
-     * per-hop value (aec.c recomputes it every hop as n_partitions*hop from
-     * the then-current dims), not a construction-time constant like
-     * cfg.filter_taps_size -- so, unlike the SuppressionGain tuning-table
-     * length check (a pure init-time assert), this gets BOTH a debug assert
-     * (catches a real per-hop wiring bug immediately) AND a release-path
-     * guard (skips fa_update instead of letting it read filter_taps_full
-     * against s->filter_analyzer's h_highpass/abs_scratch buffers, which
-     * are sized from cfg.filter_taps_size, with a mismatched length -- an
-     * OOB read if filter_taps_full_len is too short). Never fires for the
-     * validated {16000} whitelist (both are n_partitions*hop for the same
-     * np/hop pair every hop there). */
+    /* filter_taps_full_len is a live, per-hop value (aec.c recomputes it every
+     * hop as n_partitions*hop from the then-current dims), not a
+     * construction-time constant like cfg.filter_taps_size -- so, unlike the
+     * SuppressionGain tuning-table length check (a pure init-time assert), this
+     * gets BOTH a debug assert (catches a real per-hop wiring bug immediately)
+     * AND a release-path guard (skips fa_update instead of letting it read
+     * filter_taps_full against s->filter_analyzer's h_highpass/abs_scratch
+     * buffers, which are sized from cfg.filter_taps_size, with a mismatched
+     * length -- an OOB read if filter_taps_full_len is too short). Never fires:
+     * both are n_partitions*hop for the same np/hop pair every hop. */
     assert(filter_taps_full == NULL
            || filter_taps_full_len == s->cfg.filter_taps_size);
     if (s->has_filter_analyzer && filter_taps_full != NULL

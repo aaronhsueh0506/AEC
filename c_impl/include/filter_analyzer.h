@@ -1,4 +1,4 @@
-/* filter_analyzer.h — C port (float32-by-design; parity retired) of
+/* filter_analyzer.h — C port (float32) of
  * python/modules/state/filter_analyzer.py (single-channel AEC3 FilterAnalyzer,
  * mirrors AEC3 filter_analyzer.{cc,h}).
  *
@@ -12,11 +12,8 @@
  * processing HOP_SAMPLES samples per call. The HPF is the AEC3 verbatim 3-tap
  * minimum-phase ~600 Hz cutoff filter.
  *
- * FLOAT32-BY-DESIGN notes (originally captured from numpy 1.26 -> C parity on
- * a real balanced/DT case wav/aec_challenge_blind/doubletalk/0I0XMl3M...
- * _doubletalk_*.wav, preset=balanced fl=832 hop=160; the module now runs
- * entirely in float32 — the former fp64 accumulation paths below were
- * converted for uniformity as part of the f32 campaign, drift accepted):
+ * FLOAT32 notes (shapes for preset=balanced fl=832 hop=160; drift versus
+ * Python accepted):
  *   - filter_taps : float32, size 960 (6 partitions * 160).
  *   - render_block: float32, size 160 (= render_block_scaled, int16 amplitude).
  *   - _h_highpass : float32. HPF taps (float32) * filter_taps (float32) all f32.
@@ -27,8 +24,7 @@
  *       * seg.max(initial=0.0)             -> float32 max, stored directly.
  *       * render active power
  *         (render_block**2).sum() -> float32 PAIRWISE sum
- *         (f32_pairwise_sum, formerly f64_pairwise_sum) compared >
- *         _active_render_threshold (float32).
+ *         (f32_pairwise_sum) compared > _active_render_threshold (float32).
  *   - peak find: h[k]*h[k] in float32; np.argmax returns FIRST max index.
  *
  * Build with -ffp-contract=off so the float32 multiply/add/compare is not fused.
@@ -38,12 +34,12 @@
 
 #include <stddef.h>
 
-/* hop_size/sample_rate were previously not parameters at all -- every
- * time-based constant below (active_render_threshold's block-length factor,
- * the region-cycling block size, the delay_blocks conversion, the 5s
- * convergence threshold, the 1.5s consistency hold) was hardcoded against
- * the stale hop=160/sr=16000 assumption. All are now computed live in
- * fa_init() from hop_size/sample_rate -- see the struct fields below. */
+/* hop_size/sample_rate parameters: every time-based constant below
+ * (active_render_threshold's block-length factor, the region-cycling block
+ * size, the delay_blocks conversion, the 5s convergence threshold, the 1.5s
+ * consistency hold) is computed live in fa_init() from hop_size/sample_rate
+ * rather than hardcoded against hop=160/sr=16000 -- see the struct fields
+ * below. */
 
 /* On-demand tap materializer (see fa_set_taps_provider). Called from inside
  * fa_update(), after the region has advanced and before the taps are read,
@@ -83,9 +79,8 @@ typedef struct {
     int    convergence_threshold_hops; /* live-computed, was FA_CONVERGENCE_THRESHOLD_HOPS=500 */
     float *h_highpass;               /* owned by caller; length `size`, f32     */
 
-    /* De-stacked fa_update() scratch (formerly `float abs_scratch[1024]` /
-     * `float render_sq_scratch[1024]` fixed-size locals -- a stack-overflow
-     * hazard once the runtime filter length can exceed 1024, e.g. a
+    /* fa_update() scratch (abs_scratch / render_sq_scratch): kept off the stack,
+     * which would overflow once the runtime filter length exceeds 1024 (e.g. a
      * higher-sample-rate build). Both owned by caller; see fa_init. */
     float *abs_scratch;              /* length >= size (ConsistentFilterDetector abs-slice sums) */
     int    abs_scratch_len;
@@ -150,9 +145,7 @@ int    fa_peak_index(const FilterAnalyzer *m);
 const float *fa_get_adjusted_filters(const FilterAnalyzer *m);
 
 /* float32 pairwise sum (numpy-1.26-shaped reduction tree; exposed for the
- * parity test). The former fa_f64_pairwise_sum twin (a float64 accumulator
- * variant for the render active-power sum) was deleted after the f32
- * campaign made it identical to this one. */
+ * parity test). */
 float  fa_f32_pairwise_sum(const float *a, size_t n);
 
 #endif /* FILTER_ANALYZER_H */

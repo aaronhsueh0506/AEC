@@ -2,11 +2,9 @@
  *
  * Every function mirrors the Python semantics structurally, including the
  * round-half-to-even behaviour of Python's int(round(.)) via lrintf() under
- * the default FE_TONEAREST rounding mode. Float32-by-design (init-only
- * helpers; converted for uniformity as part of the f32 campaign, drift
- * accepted — formerly fp64 to mirror Python exactly). Built with
- * -ffp-contract=off (Makefile), so no fused multiply-add reorders the float
- * ops away from the reference.
+ * the default FE_TONEAREST rounding mode. Float32 (init-only helpers; drift
+ * versus Python accepted). Built with -ffp-contract=off (Makefile), so no
+ * fused multiply-add reorders the float ops away from the reference.
  */
 #include "aec3_scale.h"
 
@@ -91,7 +89,7 @@ float aec3_growth_rehop(float retention_at_ref, int ref_hop_samples,
      * hop_seconds Inf or negative, so powf() returns 0 or NaN and silently
      * poisons an EMA that is only ever read, never validated. Falling back to
      * the authoring value is the one well-defined answer -- it degrades to "not
-     * retimed" (the pre-2026-08 behaviour) instead of to a dead filter.
+     * retimed" instead of to a dead filter.
      *
      * The top-level AecConfig validator already rejects these, so this is
      * unreachable through aec_create(); it exists for the direct pbfdaf_init()/

@@ -9,20 +9,18 @@
 
 /* ── EchoPathChangeDetector ───────────────────────────────────── */
 
-/* Legacy-grid EPV time constants (TC ~50 frames / ~1000 frames @ the legacy
+/* Reference-grid EPV time constants (TC ~50 frames / ~1000 frames @
  * hop=160/sample_rate=16000 = 10 ms hop, i.e. ~500 ms / ~10 s wall-clock).
- * Project-native (NOT AEC3-sourced), authored before per-rate multi-grid
- * support existed, with zero rate conversion. Both use the RETENTION
- * convention (epc_update_epv(): ``fast <- EPV_FAST_TC*fast + (1-EPV_FAST_TC)
- * *new`` -- the constant multiplies the OLD state directly), so
- * aec3_growth_rehop (a direct power law), NOT
+ * Project-native (NOT AEC3-sourced), authored against that grid. Both use the
+ * RETENTION convention (epc_update_epv(): ``fast <- EPV_FAST_TC*fast +
+ * (1-EPV_FAST_TC)*new`` -- the constant multiplies the OLD state directly),
+ * so aec3_growth_rehop (a direct power law), NOT
  * aec3_per_block_ema_alpha_to_per_hop's AEC3-new-sample-weight form, is the
  * correct helper. epc_init() retimes these into each EpcDetector instance's
- * epv_fast_tc/epv_slow_tc via aec3_growth_rehop() (2026-08 gap-fix) so the
- * wall-clock envelopes match at every grid; epc_update_epv() reads the
- * retimed per-instance fields, NOT these module constants directly. Must
- * match epc.py's EchoPathChangeDetector.EPV_FAST_TC/EPV_SLOW_TC (Python
- * side). */
+ * epv_fast_tc/epv_slow_tc via aec3_growth_rehop() so the wall-clock envelopes
+ * match at every grid; epc_update_epv() reads the retimed per-instance
+ * fields, NOT these module constants directly. Must match epc.py's
+ * EchoPathChangeDetector.EPV_FAST_TC/EPV_SLOW_TC (Python side). */
 static const float EPV_FAST_TC = 0.98f;
 static const float EPV_SLOW_TC = 0.999f;
 static const float EPV_LOW     = 0.25f;
@@ -42,9 +40,9 @@ void epc_init(EpcDetector* e, int hangover, float total_rise,
         e->epv_fast_tc = aec3_growth_rehop(EPV_FAST_TC, 160, 16000, hop_size, sample_rate);
         e->epv_slow_tc = aec3_growth_rehop(EPV_SLOW_TC, 160, 16000, hop_size, sample_rate);
     } else {
-        /* Invalid/unrecognized grid: fall back to the exact pre-fix
-         * (unscaled) literals rather than divide-by-zero inside the rehop
-         * helper -- mirrors aec.c's aec_legacy10ms_* fallback. */
+        /* Invalid/unrecognized grid: fall back to the unscaled reference-grid
+         * literals rather than divide by zero inside the rehop helper -- mirrors
+         * aec.c's aec_legacy10ms_* fallback. */
         e->epv_fast_tc = EPV_FAST_TC;
         e->epv_slow_tc = EPV_SLOW_TC;
     }
@@ -127,9 +125,9 @@ void epc_tick_hangover(EpcDetector* e) {
 static const float SC_BASELINE_INIT       = 1e-6f;
 static const float SC_BASELINE_RETENTION  = 0.995f;
 /* A hop COUNT on every grid, not a duration: retiming it to 100 ms (12 hops
- * at 16 kHz/128) measurably broke a near-end single-talk case on the 90-case
- * blind subset (deg 2.33 -> 1.54, output 5 dB under the capture for 26 s)
- * because the rescue streak stopped completing; 11 fails too, 10 passes. */
+ * at 16 kHz/128) broke a near-end single-talk case, because the rescue streak
+ * stopped completing and the output stayed ~5 dB under the capture; 11 fails
+ * too, 10 passes. */
 static const int   SC_HYS_STREAK_MIN      = 10;
 static const int   SC_AEC3_STREAK_FRAMES  = 5;
 

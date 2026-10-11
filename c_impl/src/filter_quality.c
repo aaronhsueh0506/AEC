@@ -40,23 +40,19 @@ void fq_update(FilteringQualityAnalyzer *m,
     int filter_update = active_render && !saturated_capture;
     int startup_ok, reset_ok, usable, gate3;
 
-    /* All three counters below: UBSan-confirmed signed-overflow fix,
-     * floored at INT_MAX rather than at either gate threshold
-     * (FQ_STARTUP_HOPS / FQ_RESET_HOPS). Unlike a pure boolean-gate
-     * counter, all three raw values are read bit-exact by
-     * test/historical/parity_filter_quality.c (`got[3..4]` via fq_startup_blocks/
-     * fq_reset_blocks, `got[6]` via m.convergence_hops_counter directly),
-     * which mirrors this module's Python reference's own unbounded
-     * counters over a multi-frame sequence -- capping at the gate
-     * threshold would still satisfy the `> FQ_STARTUP_HOPS`/
-     * `> FQ_RESET_HOPS` booleans, but would desync the raw value from the
-     * golden the very next hop (same trap as erl_estimator.c's
-     * hold_counter_time_domain -- see that fix's comment).
-     * convergence_hops_counter specifically is also documented in the
-     * header as "diagnostic only (no gate consumes it)" -- the textbook
-     * case for a saturating diagnostic counter. Capping at INT_MAX instead
-     * is a no-op for every practically-reachable hop count while
-     * eliminating the UB at the true overflow boundary. */
+    /* All three counters below are floored at INT_MAX (to avoid signed overflow)
+     * rather than at either gate threshold (FQ_STARTUP_HOPS / FQ_RESET_HOPS).
+     * Unlike a pure boolean-gate counter, all three raw values are compared
+     * bit-exact by test/historical/parity_filter_quality.c (`got[3..4]` via
+     * fq_startup_blocks/fq_reset_blocks, `got[6]` via m.convergence_hops_counter
+     * directly), which mirrors this module's Python reference's own unbounded
+     * counters over a multi-frame sequence -- capping at the gate threshold would
+     * still satisfy the `> FQ_STARTUP_HOPS`/`> FQ_RESET_HOPS` booleans, but would
+     * desync the raw value from the reference the very next hop (same constraint
+     * as erl_estimator.c's hold_counter_time_domain).
+     * convergence_hops_counter specifically is also documented in the header as
+     * "diagnostic only (no gate consumes it)". Capping at INT_MAX is a no-op for
+     * every practically reachable hop count. */
     if (filter_update) {
         if (m->filter_update_blocks_since_reset < INT_MAX)
             m->filter_update_blocks_since_reset += 1;

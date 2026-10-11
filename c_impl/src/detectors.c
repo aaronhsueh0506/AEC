@@ -1,13 +1,13 @@
 /* detectors.c — RenderActivity / FilterConvergence / DoubleTalk ports.
- * All scalar math in float32 by design (Python fp64 bit-exact parity
- * retired; the resulting drift is accepted).
+ * All scalar math in float32 (drift versus the Python fp64 reference is
+ * accepted).
  */
 #include "detectors.h"
 #include "aec3_scale.h"
 #include <math.h>
 
-/* Every wall-clock constant below is authored against this repo's legacy
- * hop=160 @ 16000 Hz (10.000 ms) grid and retimed to the live grid in the
+/* Every wall-clock constant below is authored against the hop=160 @
+ * 16000 Hz (10.000 ms) reference grid and retimed to the live grid in the
  * *_init functions. Mirrors python/modules/detectors.py; the values are
  * gated against it by test/modules/parity_detectors.c. */
 #define DET_REF_HOP 160
@@ -276,7 +276,7 @@ void doubletalk_update_energy_dt(DoubleTalk* d,
     }
 }
 
-/* ── FilterPlateauDetector (v3.10.0 + v3.10.3 F4/H3) ─────────── */
+/* ── FilterPlateauDetector ──────────────────────────────────── */
 
 void filter_plateau_init(FilterPlateauDetector* p) {
     p->grace_frames     = 400;
@@ -318,7 +318,7 @@ int filter_plateau_update(FilterPlateauDetector* p,
     float far_ratio = (float)p->far_active_count / (float)denom;
     float dt_ratio  = (float)p->dt_signal_count  / (float)denom;
 
-    /* v3.10.3 F4: require dt_signal_present in the current frame too. */
+    /* require dt_signal_present in the current frame too. */
     int criteria_met = (far_ratio > p->far_active_ratio)
                     && (erle_windowed_db < p->erle_max_db)
                     && (dt_ratio > p->dt_signal_ratio)
@@ -329,7 +329,7 @@ int filter_plateau_update(FilterPlateauDetector* p,
     p->consecutive_match++;
     if (p->consecutive_match < FILTER_PLATEAU_CONSECUTIVE_REQUIRED) return 0;
 
-    /* Fire — also reset cumulative counters (v3.10.3 H3). */
+    /* Fire — also reset cumulative counters. */
     p->consecutive_match  = 0;
     p->attempts++;
     p->cooldown_remaining = FILTER_PLATEAU_POST_RESET_GRACE_FRAMES;

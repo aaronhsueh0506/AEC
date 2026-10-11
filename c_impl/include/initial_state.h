@@ -1,5 +1,5 @@
 /* initial_state.h — C port of python/modules/state/initial_state.py
- * (which mirrors docs/aec3_extracts/src/aec3/aec_state.cc:327-353).
+ * (which mirrors AEC3 aec_state.cc, InitialState).
  *
  * AecState::InitialState — cold-start state machine. Tracks whether the filter
  * is still in the initial-state regime; transitions out once enough
@@ -12,9 +12,9 @@
  *   This module carries NO float arithmetic in its update path. The only
  *   numeric op is the constructor threshold
  *     _initial_state_hops = int(initial_state_seconds * HOPS_PER_SECOND)
- *   which is a float32 multiply (float32-by-design; converted for uniformity,
- *   drift accepted — formerly a Python f64 multiply) followed by int()
- *   truncation toward zero. Reproduced as (int)((float)seconds * HOPS_PER_SECOND).
+ *   which is a float32 multiply (drift versus Python accepted) followed by
+ *   int() truncation toward zero. Reproduced as
+ *   (int)((float)seconds * HOPS_PER_SECOND).
  *   All run-time state is integer/bool:
  *     _strong_not_saturated_render_blocks : int (monotonic counter)
  *     _initial_state, _transition_triggered : bool.
@@ -33,8 +33,8 @@ typedef struct {
 
 /* conservative_initial_phase: 0/1 ; initial_state_seconds: config float (default 2.5) ;
  * hop_size/sample_rate: live grid, used to compute initial_state_hops/
- * conservative_hops via aec3_ms_to_hops() instead of the frozen hop=160/
- * sr=16000 assumption the module-level HOPS_PER_SECOND=100 used to bake in. */
+ * conservative_hops via aec3_ms_to_hops() rather than assuming
+ * hop=160/sr=16000 (HOPS_PER_SECOND=100). */
 void initial_state_init(InitialState *s, int conservative_initial_phase,
                         float initial_state_seconds,
                         int hop_size, int sample_rate);

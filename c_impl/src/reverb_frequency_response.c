@@ -67,7 +67,7 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
     tail_row = frequency_response + (size_t)(n_partitions - 1) * (size_t)N;
 
     /* Average-decay scalar over k>=1 (kSkipBins=1). np.sum -> f32 pairwise
-     * (float32-by-design; formerly widened via python float() -> f64). */
+     * (float32). */
     direct_energy = f32_pairwise_sum(direct + 1, (size_t)(N - 1));
     if (direct_energy == 0.0f) {
         average_decay = 0.0f;
@@ -101,7 +101,7 @@ void reverb_freq_resp_update(ReverbFrequencyResponse *r,
     /* Neighbour-max smoothing (k=1..N-2), ascending in-place — AEC3 cc:101-105.
      * AEC3 runs ascending so tail[k-1] is the ALREADY-RAISED value from
      * iteration k-1; a strong peak propagates rightward as a >=0.5/bin skirt.
-     * Mirror Python fix: `tail[k] = max(tail[k], 0.5*(tail[k-1]+tail[k+1]))`. */
+     * Mirrors Python: `tail[k] = max(tail[k], 0.5*(tail[k-1]+tail[k+1]))`. */
     if (N >= 3) {
         int M = N - 2;
         for (k = 1; k <= M; ++k) {

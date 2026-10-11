@@ -21,8 +21,7 @@ float fsb_f32_pairwise_sum(const float *a, size_t n) {
 }
 
 /* np.mean over a float32 array: float32 pairwise sum / float32(n), kept in
- * float32 (float32-by-design; formerly widened via the float() cast in
- * `p_trace = float(np.mean(P))`). */
+ * float32. */
 float fsb_f32_mean(const float *a, size_t n) {
     float s;
     if (n == 0) {

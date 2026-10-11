@@ -1,8 +1,7 @@
-/* epc_shadow.h — Wave 3: ports of EchoPathChangeDetector +
- * ShadowCopyController (aec.py 2726-3006).
+/* epc_shadow.h — ports of EchoPathChangeDetector + ShadowCopyController
+ * (aec.py).
  *
- * All scalar math float32-by-design (Python fp64 bit-exact parity retired;
- * the resulting drift is accepted).
+ * All scalar math float32 (drift versus Python accepted).
  */
 #ifndef AEC_EPC_SHADOW_H
 #define AEC_EPC_SHADOW_H
@@ -35,18 +34,17 @@ typedef struct EpcDetector {
     float  epc_total_rise;
     float  epc_delta_threshold;
     /* EPV_FAST_TC/EPV_SLOW_TC retimed for the live (hop_size, sample_rate)
-     * grid at epc_init() time (2026-08 gap-fix) -- see epc_init()'s doc
-     * comment in epc_shadow.c. Config slice (fixed for the instance's
-     * lifetime; NOT touched by epc_reset()). */
+     * grid at epc_init() time -- see epc_init()'s doc comment in epc_shadow.c.
+     * Config slice (fixed for the instance's lifetime; NOT touched by
+     * epc_reset()). */
     float  epv_fast_tc;
     float  epv_slow_tc;
 } EpcDetector;
 
-/* hop_size/sample_rate were previously not parameters at all -- EPV_FAST_TC/
- * EPV_SLOW_TC (module constants in epc_shadow.c) were per-hop EMA alphas
- * hardcoded against the legacy hop=160/sample_rate=16000 grid with zero rate
- * conversion. Now required so epc_init() can retime them per-instance (see
- * epc_shadow.c). Must match epc.py's EchoPathChangeDetector.__init__
+/* hop_size/sample_rate are required so epc_init() can retime
+ * EPV_FAST_TC/EPV_SLOW_TC (module constants in epc_shadow.c, per-hop EMA
+ * alphas authored against the hop=160/sample_rate=16000 grid) per instance
+ * (see epc_shadow.c). Must match epc.py's EchoPathChangeDetector.__init__
  * (Python side). */
 void epc_init(EpcDetector* e, int hangover, float total_rise,
                  float delta_threshold, int hop_size, int sample_rate);

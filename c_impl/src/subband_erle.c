@@ -3,12 +3,12 @@
  * Per-bin ERLE estimator with onset compensation (AEC3 SubbandErleEstimator,
  * single capture channel). See subband_erle.h for the parity contract.
  *
- * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity
- * retired, drift accepted). All per-bin ERLE arithmetic is float32 end-to-end
- * (scalars combined with the f32 arrays round once, in float). The lone
- * threshold quantity _x2_band_energy_threshold is float32 too (it is the
- * result of the float32 aec3_per_bin_psd_threshold() helper, stored at init); the
- * low-render test `low |= x2(f32) < thr(f32)` is now a plain float32 compare.
+ * PRECISION: float32 (drift versus Python accepted). All per-bin ERLE
+ * arithmetic is float32 end-to-end (scalars combined with the f32 arrays
+ * round once, in float). The lone threshold quantity
+ * _x2_band_energy_threshold is float32 too (the result of the float32
+ * aec3_per_bin_psd_threshold() helper, stored at init); the low-render test
+ * `low |= x2(f32) < thr(f32)` is a plain float32 compare.
  * Built with -ffp-contract=off so per-op float roundings are not fused.
  */
 #include "subband_erle.h"
@@ -48,10 +48,8 @@ void subband_erle_init(SubbandErle *s, int n_bins,
      * (6 hops) and AEC3's reference update period (6 native 4ms blocks =
      * 24ms) carry the same factor of 6, so it cancels: pass plain hop_size
      * against the shared EMA helper's fixed single-native-block (4ms)
-     * denominator, NOT SE_POINTS_TO_ACCUMULATE*hop_size (an earlier fix on
-     * 2026-08-01 passed the latter, which compares 6 real hops against only
-     * 1 native block, inflating the exponent 6x too far; caught in
-     * review). */
+     * denominator, NOT SE_POINTS_TO_ACCUMULATE*hop_size (which would compare 6
+     * real hops against only 1 native block and inflate the exponent 6x). */
     s->alpha_up = aec3_per_block_ema_alpha_to_per_hop(
         0.05f, hop_size, sample_rate);
     s->alpha_down = aec3_per_block_ema_alpha_to_per_hop(
@@ -107,9 +105,7 @@ void subband_erle_reset(SubbandErle *s) {
  * All-float32, single rounding per op:
  *   diff = new_val - prev          -> float32
  *   v    = prev + alpha * diff     -> float32
- *   v    = clip(v, min_v, max_v)   -> float32
- * (previously widened alpha*diff to float64 to mirror numpy's Python-float ×
- * f32-scalar promotion; that widen-then-narrow round trip is retired.) */
+ *   v    = clip(v, min_v, max_v)   -> float32 */
 static float smoothed_update(const SubbandErle *s, float prev, float new_val,
                              int low_render, float min_v, float max_v) {
     float alpha = s->alpha_up;

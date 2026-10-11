@@ -3,9 +3,8 @@
  *
  * The else-branch reduction (max over |render_block|) runs in float32 to match
  * `np.abs(render_block).max()` on a float32 array; the resulting f32 scalar and
- * the margin/gain multiplies + the final compare are now all float32-by-design
- * (formerly promoted to double via Python `float(...)`; converted for
- * uniformity, drift accepted). The usable-branch comparisons are f32 vs f32.
+ * the margin/gain multiplies + the final compare are all float32 (drift versus
+ * Python accepted). The usable-branch comparisons are f32 vs f32.
  * Built with -ffp-contract=off so nothing fuses.
  */
 #include "saturation_detector.h"

@@ -1,31 +1,25 @@
-/* pbfdkf.h — C port of python/modules/filters.py PBFDAF + PBFDKF (v3.22).
+/* pbfdkf.h — C port of python/modules/filters.py PBFDAF + PBFDKF.
  *
  * Partitioned Block Frequency-Domain Adaptive Filter with overlap-save.
  *   PBFDAF — NLMS update (shadow / coarse filter).
- *   PBFDKF — v3.21/v3.22 redesign: per-bin AEC3 H_error Kalman gain + leakage
- *            refresh (refined_filter_update_gain.cc:104-138). REPLACES the old
- *            v3.10 P-denominator Kalman body. The legacy P/Q/R fields are gone.
+ *   PBFDKF — per-bin AEC3 H_error Kalman gain + leakage refresh
+ *            (refined_filter_update_gain.cc:104-138).
  *
- * v3.10 → v3.22 PBFDKF change (the crux of this port):
- *   OLD (v3.10): K = P·conj(X) / (Σ_p P·|X|² + R + δ), with R-EMA, Q-modulation,
- *                P-Riccati update (1-KX)·P + Q, KX-blend, P_floor/p_max clamps.
- *   NEW (v3.22): per-bin H_error state. mu[k] = H_error / (0.5·H_error·X² +
- *                n·E²_refined + δ); W[p] += mu·conj(X[p])·mu_scale·error_spec;
- *                H_error -= 0.5·mu·X²·H_error (decay, active branch only);
- *                always-on refresh H_error += leakage·erl, clamp[floor,ceil].
- *                leakage = converged/diverged chosen per-bin by E²_ref≤E²_coa,
- *                transient (initial_state) profile for first 250 active hops.
+ * PBFDKF update:
+ *   per-bin H_error state. mu[k] = H_error / (0.5·H_error·X² +
+ *   n·E²_refined + δ); W[p] += mu·conj(X[p])·mu_scale·error_spec;
+ *   H_error -= 0.5·mu·X²·H_error (decay, active branch only);
+ *   always-on refresh H_error += leakage·erl, clamp[floor,ceil].
+ *   leakage = converged/diverged chosen per-bin by E²_ref≤E²_coa,
+ *   transient (initial_state) profile for the first 250 active hops.
  *
  * Design rules (parity):
  *   - All array dtypes mirror Python: np.complex64 ⇒ Complex; np.float32 ⇒
- *     float. The FFT primitive (fft_pocketfft.c, vendored numpy pocketfft) is
- *     now BIT-EXACT vs np.fft. FFT-derived arrays here are still rtol<1e-4 (NOT
- *     bit-exact), but the residual is pbfdkf's own fp32 accumulator drift, not
- *     the FFT. The H_error / mu / leakage-refresh ARITHMETIC is exact
- *     given identical inputs, but its inputs (|error_spec|², |X|²) come THROUGH
- *     the FFT, so H_error / error_psd / R inherit the ≤1-ULP FFT drift too —
- *     they are rtol-bounded, NOT bit-exact. Only the integer control state
- *     (call_counter / partition_idx / initial_state) is bit-exact.
+ *     float. The H_error / mu / leakage-refresh ARITHMETIC is exact given
+ *     identical inputs, but its inputs (|error_spec|², |X|²) come THROUGH the
+ *     FFT, so H_error / error_psd / R are rtol-bounded (<1e-4) against
+ *     Python, NOT bit-exact. Only the integer control state (call_counter /
+ *     partition_idx / initial_state) is bit-exact.
  *   - One struct per Python class. PBFDKF embeds a PBFDAF as `base`.
  *   - Built with -ffp-contract=off (Makefile) — no FMA fusion.
  */
@@ -95,7 +89,7 @@ typedef struct PBFDAF {
     /* AEC3 round-robin TD constraint (adaptive_fir_filter.cc:686-689): constrain
      * ONE partition per hop (cycling `partition_to_constrain`) instead of all
      * partitions every hop — saves ~58% of the per-hop constraint FFTs and
-     * deepens convergence (the old all-every-hop over-constrained). aec_create
+     * deepens convergence (constraining all of them every hop over-constrains). aec_create
      * sets `constraint_round_robin`=1 on BOTH filters (production default). Each
      * filter keeps its own counter. `constraint_round_robin` is pure config and
      * never reset; the cursor beside it survives pbfdaf_reset() (the mid-stream
@@ -187,7 +181,7 @@ typedef struct PBFDAF {
  * (scr_mu_local/scr_x2psum/scr_mu_eff). Pass 0 when the instance is only
  * driven via pbfdaf_frontend() (the PBFDKF base) — pbfdaf_process() must
  * NOT be called on such an instance. */
-/* F04: returns 0 on success, -1 if the nested fft_create() allocation failed
+/* Returns 0 on success, -1 if the nested fft_create() allocation failed
  * (OOM) — the filter's arrays are all freed before returning (mirrors
  * pbfdaf_free's heap branch) rather than leaving a half-built filter around
  * whose FFT calls would silently no-op on the NULL handle.
@@ -214,10 +208,10 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
  * exactly once, after every borrower is done with it. Precondition:
  * single-threaded, fully sequential use — at most one transform in flight
  * across ALL borrowers of shared_fft at any time, and no borrower may retain
- * a pointer into the handle's internal scratch across calls. F04: returns 0
- * on success, -1 if the pool base/size checks reject the inputs (F05/F07,
- * nothing written to `mem`), shared_fft is NULL, or sample_rate/resolved hop
- * is non-positive. Invalid arguments are rejected before writing `p` or mem. */
+ * a pointer into the handle's internal scratch across calls. Returns 0 on
+ * success, -1 if the pool base/size checks reject the inputs (nothing written
+ * to `mem`), shared_fft is NULL, or sample_rate/resolved hop is non-positive.
+ * Invalid arguments are rejected before writing `p` or mem. */
 int    pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
                            int block_size, int n_partitions,
                            float mu, float delta, int hop_size,
@@ -293,8 +287,8 @@ typedef struct PBFDKF {
     float* Q_low;              /* config kalman_q_low */
     float* Q;
     /* Measurement-noise EMA [n_freqs] (error_psd EMA + R = max(error_psd,δ)).
-     * R is computed in the active path but no longer feeds the H_error gain;
-     * retained because the Python class still maintains it per hop. */
+     * R is computed in the active path but does not feed the H_error gain;
+     * retained because the Python class maintains it per hop. */
     float* R;
     float* error_psd;
     float  alpha_r;            /* error-PSD EMA retention. AUTHORING value 0.95
@@ -303,7 +297,7 @@ typedef struct PBFDKF {
                                 * 10 ms hop. Read the effective value, never
                                 * this comment. */
 
-    /* === v3.22 AEC3 H_error per-bin state =========================== */
+    /* === AEC3 H_error per-bin state ================================= */
     float* H_error_per_bin;    /* [n_freqs], init 10000 */
     float  h_error_floor;      /* 1e-3 */
     float  h_error_ceil;       /* 2.0 */
@@ -333,12 +327,12 @@ typedef struct PBFDKF {
      * independent of n_freqs (embedded task stacks are small). */
     float* e2_ref_scratch;
 
-    /* More de-stacked per-hop scratch (same rationale as e2_ref_scratch
-     * above): each was a float[8192] local in pbfdkf.c. scr_mu_local and
+    /* More per-hop scratch (same rationale as e2_ref_scratch above), kept off
+     * the stack: each is n_freqs long (up to 8192). scr_mu_local and
      * scr_X2/scr_mu_aec3 have overlapping live ranges within their call
      * (mu_scale_arr / X2 / mu_aec3 are all read together at the tail of
-     * pbfdkf_update_weights_aec3), so each gets its own field — see the
-     * use sites in pbfdkf.c for the exact live-range reasoning. */
+     * pbfdkf_update_weights_aec3), so each gets its own field — see the use
+     * sites in pbfdkf.c for the exact live-range reasoning. */
     float* scr_mu_local;       /* [n_freqs] pbfdkf_process mu broadcast */
     float* scr_X2;             /* [n_freqs] pbfdkf_update_weights_aec3 X_buf**2 */
     float* scr_mu_aec3;        /* [n_freqs] pbfdkf_update_weights_aec3 per-bin mu */
@@ -346,7 +340,7 @@ typedef struct PBFDKF {
     int is_static;               /* 1 = state placed in caller buffer */
 } PBFDKF;
 
-/* F04: returns 0 on success, -1 if the nested pbfdaf_init() (base filter's
+/* Returns 0 on success, -1 if the nested pbfdaf_init() (base filter's
  * fft_create()) failed (OOM) or rejected p/sample_rate/hop — alpha_r is
  * retimed off the same grid, so a bad rate is refused here too. */
 int    pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
@@ -354,8 +348,8 @@ int    pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
 size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size);
 /* shared_fft: forwarded verbatim to the base filter's pbfdaf_init_static() —
  * see that function's doc comment (REQUIRED, non-NULL, borrowed not
- * owned). F04: returns 0 on success, -1 if the pool base/size checks reject
- * the inputs (F05/F07, nothing written to `mem`), shared_fft is NULL, or
+ * owned). Returns 0 on success, -1 if the pool base/size checks reject the
+ * inputs (nothing written to `mem`), shared_fft is NULL, or
  * sample_rate/resolved hop is non-positive. Invalid arguments are rejected
  * before writing `p` or mem. */
 int    pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
@@ -389,11 +383,10 @@ void pbfdkf_handle_echo_path_change(PBFDKF* p, int delay_change, int gain_change
 /* W copy only (H_error / R untouched). */
 void pbfdkf_copy_weights_from(PBFDKF* dst, const PBFDKF* src);
 
-/* sum(|error_spec|**2) via cmag2_np + pairwise float32 sum (float32-by-design,
- * no double promotion). Not const: needs p->scr_e2 instance scratch (was a
- * float[8192] stack local) — all call sites already pass non-const Aec-owned
- * filters, so dropping const costs nothing and avoids a separate mutable-
- * pointer workaround. */
+/* sum(|error_spec|**2) via cmag2_np + pairwise float32 sum (no double
+ * promotion). Not const: needs p->scr_e2 instance scratch (n_freqs up to
+ * 8192, kept off the stack) — all call sites already pass non-const
+ * Aec-owned filters, so dropping const costs nothing. */
 float pbfdaf_get_error_energy(PBFDAF* p);
 float pbfdkf_get_error_energy(PBFDKF* p);
 

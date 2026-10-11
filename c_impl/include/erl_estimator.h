@@ -8,30 +8,24 @@
  * hold counter is armed for _HOLD_HOPS (=400) hops; bins whose hold counter has
  * expired double (slow recovery) toward _MAX_ERL each update.
  *
- * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity is
- * retired for this module; drift accepted). Real-pipeline shapes (single DT
- * case, preset=balanced, hop=160):
+ * PRECISION: float32 (drift versus Python accepted). Shapes (preset=balanced,
+ * hop=160):
  *   render_psd / capture_psd : float32 (257,)        — inputs X², Y²
  *   self._erl                : float32 (257,)        — per-bin estimate
  *   self._hold_counters      : int32   (255,)        — sized n_bins-2
- *   self._x2_min             : float32 scalar (was 44015068.0 f64)
- *   self._erl_time_domain    : float32 scalar (was f64)
+ *   self._x2_min             : float32 scalar
+ *   self._erl_time_domain    : float32 scalar
  *
- *   Per-bin update, all float32, single rounding per op (no more widen-to-
- *   double-then-narrow):
+ *   Per-bin update, all float32, single rounding per op:
  *     new_erl   = y2[k] / x2[k]                  -> float32
  *     delta     = 0.1f * (new_erl - erl[k])      -> float32
  *     erl[k]    = erl[k] + delta                 -> float32
  *     erl[k]    = max(erl[k], 0.01f)             -> float32 compare
  *     erl[k]    = min(1000.0f, 2.0f*erl[k])      -> float32 compare (doubling)
- *   The old "must promote to double because numpy's max()/min() builtins
- *   compare in double" concern no longer applies — this is native C float32
- *   arithmetic, so the compares run directly in float.
  *
  *   Fullband: x2_sum/y2_sum are numpy-pairwise float32 sums
  *   (f32_pairwise_sum); the ratio/EMA/doubling that follow are float32
- *   end-to-end (previously widened to float64 to mirror Python's
- *   `float(np.sum(...))`; that widening is no longer needed or done).
+ *   end-to-end.
  *
  * Built with -ffp-contract=off so the per-op roundings are not fused.
  */
@@ -53,9 +47,9 @@ extern "C" {
  * of that call is stored directly at the `x2_min` store in
  * erl_estimator_init(). _HOLD_HOPS = int(4.0 * HOPS_PER_SECOND) = 400. */
 #define ERL_AEC3_X2_MIN  44015068.0f
-/* hold_hops (AEC3 1000 blocks, ~4 s) was a frozen #define (400, correct only
- * at hop=160/sr=16000); now computed live in erl_estimator_init() from
- * hop_size/sample_rate -- see the ErlEstimator.hold_hops field below. */
+/* hold_hops (AEC3 1000 blocks, ~4 s; 400 at hop=160/sr=16000) is computed
+ * live in erl_estimator_init() from hop_size/sample_rate -- see the
+ * ErlEstimator.hold_hops field below. */
 
 /* numpy 1.26 pairwise float32 sum (declared in reverb_frequency_response.c).
  * Reused here for float(np.sum(x2)) / float(np.sum(y2)). */

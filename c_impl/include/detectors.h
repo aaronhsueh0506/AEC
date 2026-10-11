@@ -14,12 +14,12 @@ typedef struct RenderActivity {
     float  env_var;
     int    active_prev;
     int    is_stationary;
-    /* De-stacked render_activity_update() scratch (formerly a fixed
-     * `float blocks[1024]` local -- a stack-overflow hazard once the
-     * runtime hop can require more than 1024/PAIR_BLOCK=8 blocks, e.g. a
-     * higher-sample-rate build). Owned by caller; length >=
-     * ceil(n/8) for the `n` passed to render_activity_update (n is always
-     * the instance's hop_size at every call site). */
+    /* render_activity_update() scratch, kept off the stack (a fixed
+     * `float blocks[1024]` local would overflow once the runtime hop can
+     * require more than 1024/PAIR_BLOCK=8 blocks, e.g. a higher-sample-rate
+     * build). Owned by caller; length >= ceil(n/8) for the `n` passed to
+     * render_activity_update (n is always the instance's hop_size at every call
+     * site). */
     float* pairwise_scratch;
     int    pairwise_scratch_len;
     /* Retimed from the authored 10 ms-hop value in render_activity_init. */
@@ -97,7 +97,7 @@ void doubletalk_update_energy_dt(DoubleTalk* d,
                                     int far_active, float far_pwr,
                                     float mic_pwr, float erl_estimate);
 
-/* ── FilterPlateauDetector (v3.10.0 + v3.10.3 F4/H3) ─────── */
+/* ── FilterPlateauDetector ─────────────────────────────────── */
 /* Detects filter stuck below ERLE convergence threshold for sustained
  * time despite far activity. May fire up to max_attempts times per session.
  * Mirrors aec.py:2710-2848. */

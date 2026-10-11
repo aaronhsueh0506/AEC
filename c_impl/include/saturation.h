@@ -1,12 +1,10 @@
-/* saturation.h — 1:1 port of python/aec.py SaturationDetector
- * (lines 1034-1094).
+/* saturation.h — port of python/aec.py SaturationDetector.
  *
  * Detects clipping in a signal and returns a smoothed saturation level
  * in [0, 1] via an asymmetric EMA. Also offers a static soft_clip helper.
  *
- * Float32-by-design: state and accumulation run in `float`, matching sample
- * I/O (converted for uniformity as part of the f32 campaign; the reference
- * Python ran fp64, drift accepted).
+ * Float32: state and accumulation run in `float`, matching sample I/O (the
+ * reference Python ran fp64; drift accepted).
  */
 #ifndef AEC_SATURATION_H
 #define AEC_SATURATION_H

@@ -1,19 +1,17 @@
 /* suppression_gain.h — C port of python/modules/residual/suppression_gain.py
- * (WS5). Single-channel + single-band AEC3 SuppressionGain.
+ * Single-channel + single-band AEC3 SuppressionGain.
  *
- * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity is
- * retired for this module; drift accepted). Produces gain[n_bins] (amplitude
- * domain, sqrt'd) at float32 precision throughout: ENR/EMR/min/max/CNG math
- * and every per-bin array (gain, tuning tables) are float32, single rounding
- * per op (the old "scalar f32 * pyfloat -> f64, then narrow back to f32"
- * numpy-parity round trips are retired). Pairwise float32 sums (np.sum /
+ * PRECISION: float32 (drift versus Python accepted). Produces gain[n_bins]
+ * (amplitude domain, sqrt'd) at float32 precision throughout:
+ * ENR/EMR/min/max/CNG math and every per-bin array (gain, tuning tables) are
+ * float32, single rounding per op. Pairwise float32 sums (np.sum /
  * np.mean-equivalent) replicated by f32_pairwise_sum().
  *
  * Build: gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Ic_impl/include
  *   link: suppression_gain.c freq_utils.c aec3_scale.c reverb_frequency_response.c
  *
  * The caller owns all per-bin storage (passed at init) to keep the port
- * malloc-free in the audio path, matching the other WS5 modules.
+ * malloc-free in the audio path, matching the other state modules.
  */
 #ifndef SUPPRESSION_GAIN_H
 #define SUPPRESSION_GAIN_H
@@ -98,11 +96,8 @@ typedef struct {
     /* LowNoiseRenderDetector power IIR rate conversion (mirrors Python's
      * _LowNoiseRenderDetector use_wallclock_ema_alpha kwarg). Default OFF
      * (0, matching the caller's memset-to-zero SuppressionGainConfig and
-     * Python's `bool = False` default): keeps the legacy literal
-     * 0.9f/0.1f IIR. This mechanism was exposed as default-OFF research
-     * substrate before, removed as dead code, and must not be turned back
-     * on without its own bench pass + sign-off -- see CHANGELOG's
-     * "Explicitly held back" entry. Do not flip this to 1 without that. */
+     * Python's `bool = False` default): keeps the literal 0.9f/0.1f IIR. The
+     * wall-clock form is not validated; leave this at 0. */
     int    use_wallclock_ema_alpha;              /* bool */
 } SuppressionGainConfig;
 
@@ -115,12 +110,10 @@ typedef struct {
     const float *normal_enr_su;
     const float *normal_emr_tr;
 
-    /* M4 (multi-rate consumption switch): length the caller's per-rate
-     * lookup row baked the six arrays above at (aec3b_rate_cfg(sr)->
-     * sg_table_len -- pointer-identical to AEC3B_N_BINS at 16 kHz).
-     * suppression_gain_init asserts this == cfg->n_bins; appended here
-     * (not inserted above) per the struct-fields-append-only rule for this
-     * campaign. */
+    /* Length the caller's per-rate lookup row baked the six arrays above at
+     * (aec3b_rate_cfg(sr)->sg_table_len -- pointer-identical to AEC3B_N_BINS at
+     * 16 kHz). suppression_gain_init asserts this == cfg->n_bins; appended here
+     * (not inserted above) so existing field offsets are unchanged. */
     int table_len;
 } SuppressionGainTuning;
 

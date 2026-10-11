@@ -15,11 +15,9 @@ void filter_delay_init(FilterDelay *fd, int *delays_storage,
     /* delay_headroom_blocks = int(delay_headroom_samples) // hop_size.
      * Python `//` is floor division; for the non-negative headroom (always
      * >= 0 in practice) C's `/` on non-negative ints is identical. Clamp to
-     * floor semantics defensively in case of a negative input. Was
-     * `/ FILTER_DELAY_HOP_SAMPLES` (frozen at 160); uses the live hop_size
-     * now (numerically inert either way while delay_headroom_samples stays
-     * well under any real hop_size, but no longer silently wrong if it
-     * ever isn't). */
+     * floor semantics defensively in case of a negative input. Uses the live
+     * hop_size (numerically inert while delay_headroom_samples stays well under
+     * any real hop_size, but not silently wrong if it ever isn't). */
     int blocks = delay_headroom_samples / hop_size;
     if (delay_headroom_samples < 0 &&
         blocks * hop_size != delay_headroom_samples) {
@@ -27,8 +25,8 @@ void filter_delay_init(FilterDelay *fd, int *delays_storage,
     }
 
     fd->delay_headroom_blocks = blocks;
-    /* AEC3 2 s (= 500 blocks) filter-adaptation threshold. Was a frozen
-     * #define (200, correct only at hop=160/sr=16000); computed live here. */
+    /* AEC3 2 s (= 500 blocks) filter-adaptation threshold, computed live from
+     * the grid. */
     fd->filter_adaptation_threshold_hops =
         aec3_ms_to_hops(2000.0f, hop_size, sample_rate);
     fd->num_channels = num_capture_channels;

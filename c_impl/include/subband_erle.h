@@ -15,9 +15,7 @@
  *   - per-hop onset release decay of _erle_onset_compensated.
  *   - endpoints (bin 0, n-1) mirror their interior neighbour.
  *
- * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity is
- * retired for this module; drift accepted). Real pipeline shapes (captured
- * on a real doubletalk case):
+ * PRECISION: float32 (drift versus Python accepted). Shapes:
  *     x2 / y2 / e2          : float32 (257,)
  *     converged_filter      : bool scalar
  *     coh_gate_mask         : bool (257,)  (present, not None)
@@ -28,13 +26,12 @@
  *     _x2_band_energy_threshold                           : float32 scalar
  *       (its SOURCE constant SE_X2_BAND_ENERGY_THRESHOLD is only ever an
  *       argument to the shared aec3_per_bin_psd_threshold() helper
- *       (aec3_scale.h/.c, itself float32-typed and outside this conversion's
- *       file set); the float32 result is stored directly at the store in
- *       subband_erle_init())
+ *       (aec3_scale.h/.c, float32-typed); the float32 result is stored
+ *       directly in subband_erle_init())
  *   All per-bin ERLE arithmetic is float32 end-to-end (alpha, min_erle,
  *   max_erle[k], 1e-30f, 10.0f are float32 scalars combined with the float32
  *   arrays; single rounding per op, no widen-then-narrow). The x2 band-energy
- *   gate `x2(f32) < thr(f32)` is now a plain float32 compare.
+ *   gate `x2(f32) < thr(f32)` is a plain float32 compare.
  *   Built with -ffp-contract=off so the per-op float roundings are not fused.
  *
  * STORAGE: caller supplies all per-bin arrays (length n_bins each). Sizes:
@@ -49,9 +46,9 @@
 
 /* ── Constants (mirrored from subband_erle.py) ──────────────────────────────
  * blocks_to_hold_erle/blocks_for_onset_detection/alpha_up/alpha_down/
- * onset_release_decay were frozen #defines or literals (correct only at the
- * legacy hop=160/sr=16000 grid); all five are now computed live in
- * subband_erle_init() from hop_size/sample_rate -- see the struct fields. */
+ * onset_release_decay are computed live in subband_erle_init() from
+ * hop_size/sample_rate (they are authored against the hop=160/sr=16000
+ * grid) -- see the struct fields. */
 #define SE_POINTS_TO_ACCUMULATE   6
 #define SE_UNBOUNDED_ERLE_MAX     100000.0f
 /* AEC3 kX2BandEnergyThreshold source value (scaled per hop in init). Passed

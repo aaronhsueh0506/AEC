@@ -1,26 +1,17 @@
-/* pbfdkf.c — PBFDAF base (NLMS) + PBFDKF derived (v3.22 per-bin H_error Kalman).
+/* pbfdkf.c — PBFDAF base (NLMS) + PBFDKF derived (per-bin H_error Kalman).
  *
- * 1:1 port of python/modules/filters.py. Numerical-fidelity notes:
- *  - The FFT primitive (fft_pocketfft.c, vendored numpy-1.26.4 pocketfft) is now
- *    BIT-EXACT vs np.fft (parity_fft.c: 0 mismatches). FFT-derived arrays
- *    (error_spec / echo_spec / W after the TD-constraint FFT round-trip) are
- *    still rtol<1e-4 — but that residual is pbfdkf's own fp32 accumulator drift
- *    over the case, NOT the FFT. See parity_pbfdkf.c.
+ * Port of python/modules/filters.py. Numerical notes:
  *  - The H_error / mu / leakage-refresh ARITHMETIC is reproduced op-for-op in
- *    the same dtype/order as Python (parity rules in
- *    project_c_port_parity_rules.md), so it is exact GIVEN identical inputs.
+ *    the same dtype/order as Python, so it is exact GIVEN identical inputs.
  *    But H_error's gain denom consumes |error_spec|² and |X|² (FFT outputs)
  *    and error_psd accumulates |error_spec|², so H_error / error_psd / R are
  *    rtol-bounded (<1e-4), not bit-exact. Only the integer control state
  *    (call_counter / partition_idx / initial_state) is bit-exact.
- *  - np.float32 ⇒ float; np.complex64 ⇒ Complex. float32-by-design: the old
- *    "scalar pyfloat×f32 promotes through double" parity nuance is retired —
- *    Python bit-exact parity is no longer a goal, so scalar promotions here
- *    are done directly in float32 (single literals get the `f` suffix).
+ *  - np.float32 ⇒ float; np.complex64 ⇒ Complex. Scalar promotions are done
+ *    directly in float32 (single literals get the `f` suffix).
  *
- * v3.10 → v3.22 change: the old P-denominator Kalman body (P/Q/R Riccati +
- * KX-blend + P_floor/p_max clamps) is GONE. The active update is the AEC3
- * per-bin H_error gain + always-on leakage refresh.
+ * The active update is the AEC3 per-bin H_error gain + always-on leakage
+ * refresh.
  */
 #include "pbfdkf.h"
 #include "aec3_scale.h"
@@ -53,25 +44,17 @@ static size_t ck_field_size_reps(size_t total, size_t count, size_t elem_size,
 
 /* pairwise float32 sum matching numpy's reduction EXACTLY: an 8-accumulator
  * unrolled leaf for n<=128 (numpy NPY_PW_BLOCKSIZE), then a recursive split at
- * n/2 rounded down to a multiple of 8. Verified 0/5000 mismatch vs np.sum over
- * f32 across lengths {80,160,257,320,512}. Used for np.sum(far_end**2).
- * Body delegates to simd_kernels.h's sk_pairwise_sum_tailfold_f32, which
- * reproduces this exact tree (verbatim source for that kernel's `_scalar`
- * twin) plus a bit-identical NEON path; local symbol/signature kept so call
- * sites are unchanged. */
+ * n/2 rounded down to a multiple of 8. Used for np.sum(far_end**2). Delegates
+ * to simd_kernels.h's sk_pairwise_sum_tailfold_f32, which reproduces this
+ * exact tree (verbatim source for that kernel's `_scalar` twin) plus a
+ * bit-identical NEON path. */
 static float pairwise_sum_f32(const float* a, int n) {
     return sk_pairwise_sum_tailfold_f32(a, (size_t)n);
 }
 
-/* numpy |complex64|**2 (np.abs(z)**2) is now computed exclusively via the
- * sk_cmag2_np_f32/sk_ema_cmag2_f32/sk__cmag2_np_elem kernel family
- * (aec_simd_kernels.h) -- this file's own former scalar `cmag2_np(er, ei)`
- * helper (a scaled-hypot with an fmaf, bit-exact to those kernels for all
- * finite inputs: they differ only in the sign of an intermediate zero, which
- * never survives into the squared result) is retired now that its last call
- * site (pbfdaf_frontend's far_psd_sum loop) was folded into the
- * sk_cmag2_np_f32 call just below it. Referenced by name only in comments
- * below (e2_ref_scratch dedup) for historical context. */
+/* numpy |complex64|**2 (np.abs(z)**2) is computed by the
+ * sk_cmag2_np_f32 / sk_ema_cmag2_f32 / sk__cmag2_np_elem kernel family
+ * (aec_simd_kernels.h). */
 
 /* Compute derived sizes. */
 static void pbfdaf_compute_sizes(int hop_size, int* out_hop, int* out_blk,
@@ -117,10 +100,8 @@ static void pbfdaf_init_scalars(PBFDAF* p, int n_partitions, float mu,
     p->block_stationary = 0;
     p->initial_state_active = 1;
     p->initial_state_active_render_hops = 0;
-    /* AEC3 kInitialStateSeconds-equivalent threshold; was a bare literal 250
-     * (= 2.5s only at the legacy hop=160/sr=16000 grid). Rescaled via
-     * aec3_ms_to_hops so the window stays 2.5s at any grid. Mirrors
-     * filters.py's PBFDAF._initial_state_threshold_hops. */
+    /* AEC3 kInitialStateSeconds-equivalent threshold: 2.5 s at any grid via
+     * aec3_ms_to_hops. Mirrors filters.py's PBFDAF._initial_state_threshold_hops. */
     p->initial_state_threshold_hops =
         aec3_ms_to_hops(2500.0f, p->hop_size, sample_rate);
     p->initial_state_far_energy_floor = 1e-4f;
@@ -211,19 +192,15 @@ int pbfdaf_init(PBFDAF* p, int block_size, int n_partitions,
     p->scr_ir       = (float*)malloc((size_t)p->n_partitions * (size_t)p->hop_size * sizeof(float));
     p->scr_e2       = (float*)malloc((size_t)p->n_freqs * sizeof(float));
 
-    /* F04 (extending the existing fft_create() OOM
-     * convention to every malloc'd/calloc'd scratch field above): any of
-     * these can return NULL under real OOM, and pbfdaf_fill_windows() below
-     * writes straight through p->td_window/p->sqrt_hann unconditionally --
-     * a NULL td_window/sqrt_hann would be an immediate NULL-deref crash
-     * before we ever reach the old `if (!p->fft)` check. Check every
-     * pointer BEFORE calling pbfdaf_init_scalars()/pbfdaf_fill_windows(),
-     * not after. scr_mu_local/scr_x2psum/scr_mu_eff are only required
-     * non-NULL when with_process_scratch requested them (they're
-     * deliberately NULL otherwise -- not an OOM). pbfdaf_free(p) tolerates
-     * a partially-NULL struct (free(NULL) is a no-op for every field, and
-     * `if (p->fft) fft_destroy(p->fft);` already guards the one non-free
-     * teardown call). */
+    /* Any of the allocations above can return NULL under real OOM, and
+     * pbfdaf_fill_windows() below writes straight through p->td_window /
+     * p->sqrt_hann, so every pointer is checked BEFORE calling
+     * pbfdaf_init_scalars()/pbfdaf_fill_windows(). scr_mu_local / scr_x2psum /
+     * scr_mu_eff are only required non-NULL when with_process_scratch requested
+     * them (they are deliberately NULL otherwise -- not an OOM). pbfdaf_free(p)
+     * tolerates a partially-NULL struct (free(NULL) is a no-op for every field,
+     * and `if (p->fft) fft_destroy(p->fft);` guards the one non-free teardown
+     * call). */
     if (!p->td_window || !p->sqrt_hann || !p->W || !p->X_buf ||
         !p->x2_cache || !p->far_cmag2_hold ||
         !p->near_buffer || !p->far_buffer ||
@@ -250,11 +227,10 @@ size_t pbfdaf_get_mem_size(int block_size, int n_partitions, int hop_size,
     if (n_partitions <= 0 || K <= 0) return 0;
     size_t Wsz = ck_mul_size((size_t)n_partitions, (size_t)K);
 
-    /* Checked size arithmetic (F05): saturating ck_* helpers (mem_align.h);
-     * MEM_SIZE_INVALID(total) at the end reports failure (0) on overflow
-     * instead of a small wrapped total. Field order/grouping unchanged from
-     * the previous unchecked `total += ALIGN16(...)` walk — pbfdaf_init_
-     * static's carve order must stay in lockstep with this one. */
+    /* Checked size arithmetic: saturating ck_* helpers (mem_align.h);
+     * MEM_SIZE_INVALID(total) at the end reports failure (0) on overflow instead
+     * of a small wrapped total. pbfdaf_init_static's carve order must stay in
+     * lockstep with this one. */
     size_t total = 0;
     total = ck_field_size(total, (size_t)fft, sizeof(float));   /* td_window */
     total = ck_field_size(total, (size_t)blk, sizeof(float));   /* sqrt_hann */
@@ -299,15 +275,14 @@ int pbfdaf_init_static(PBFDAF* p, void* mem, size_t mem_size,
     if (!p || !mem || !shared_fft || sample_rate <= 0) return -1;
     hop = (hop_size > 0) ? hop_size : block_size / 2;
     if (hop <= 0) return -1;
-    /* F07: reject a misaligned pool base before any pool write — hardens a
-     * caller invoking this directly (the parent aec_carve always carves
-     * ALIGN16 offsets off an already-aligned base, so this never fires
-     * there). */
+    /* Reject a misaligned pool base before any pool write -- hardens a caller
+     * invoking this directly (the parent aec_carve always carves ALIGN16 offsets
+     * off an already-aligned base, so this never fires there). */
     if (!MEM_IS_ALIGNED16(mem)) return -1;
     {
-        /* pbfdaf_get_mem_size returning 0 means "invalid" (F05); a real
-         * config's size is always > 0, so 0 is an unambiguous failure here
-         * rather than `mem_size < 0`, which is never true for a size_t. */
+        /* pbfdaf_get_mem_size returning 0 means "invalid"; a real config's size is
+         * always > 0, so 0 is an unambiguous failure here rather than
+         * `mem_size < 0`, which is never true for a size_t. */
         size_t need = pbfdaf_get_mem_size(block_size, n_partitions, hop_size,
                                           with_process_scratch);
         if (need == 0 || mem_size < need) return -1;
@@ -414,18 +389,15 @@ void pbfdaf_reset(PBFDAF* p) {
     memset(p->far_buffer,  0, (size_t)p->block_size * sizeof(float));
     p->partition_idx = 0;
     memset(p->error_spec_windowed, 0, (size_t)p->n_freqs * sizeof(Complex));
-    /* Defensive hardening (far-end-FFT sharing): precomputed_far_spec is documented as
-     * one-shot -- set and consumed within the same pbfdaf_frontend() call,
-     * cleared there immediately after the memcpy. Today that means it is
-     * already NULL by the time any reset() call can observe it (reset
-     * never runs mid-hop), so this has never been a live bug -- but with
-     * cross-instance sharing (aec_process_context_shared_far()) now
-     * setting this from outside the instance, a caller that resets an
-     * instance between setting the pointer and this instance's own
-     * process call would otherwise leave a stale, potentially
-     * caller-freed pointer sitting on the struct. Clearing it here removes
-     * that possibility entirely rather than relying on every caller to
-     * get the ordering right on its own. */
+    /* precomputed_far_spec is one-shot: set and consumed within the same
+     * pbfdaf_frontend() call, cleared there right after the memcpy. It is
+     * therefore already NULL when any reset() can observe it (reset never runs
+     * mid-hop). With cross-instance sharing (aec_process_context_shared_far())
+     * setting it from outside the instance, a caller that resets an instance
+     * between setting the pointer and this instance's own process call would
+     * otherwise leave a stale, possibly caller-freed pointer on the struct;
+     * clearing it here removes that possibility without relying on every caller
+     * getting the ordering right. */
     p->precomputed_far_spec = NULL;
     p->far_fft_real_compute_count = 0;
 }
@@ -542,7 +514,7 @@ static float pbfdaf_frontend(PBFDAF* p,
     }
 
     /* far_hop_energy = np.sum(far_end**2) / hop. Reproduce np.sum (pairwise f32)
-     * over far_end**2, then divide in float32 (float32-by-design). */
+     * over far_end**2, then divide in float32. */
     {
         float *fsq = p->scr_fsq;   /* instance scratch, not stack: [hop_size] */
         for (int i = 0; i < hop; ++i) fsq[i] = far_end[i] * far_end[i];
@@ -580,19 +552,14 @@ void pbfdaf_process(PBFDAF* p,
         int any_pos = 0;
         for (int k = 0; k < K; ++k) if (mu_arr[k] > 0.0f) { any_pos = 1; break; }
         if (!any_pos) { p->partition_idx = (p->partition_idx + 1) % N; return; }
-        /* E22: increment before saturation gate (mirrors AEC3/PBFDKF).
-         * UBSan-confirmed signed-overflow fix, floored at LONG_MAX: unlike
-         * poor_excitation_counter (fixed above with a tight
-         * n_partitions cap), call_counter's raw value is read bit-exact by
-         * test/historical/parity_pbfdkf.c (`flt.base.call_counter != exp_call`,
-         * explicitly documented above as one of the 3 fields this port
-         * keeps bit-exact) -- capping at N/the startup threshold would
-         * still satisfy the `<= N` gate below, but would desync the raw
-         * value from Python's unbounded golden the very next call (same
-         * trap as erl_estimator.c's hold_counter_time_domain -- see that
-         * fix's comment). Capping at LONG_MAX instead is a no-op for
-         * every practically-reachable call count while eliminating the UB
-         * at the true overflow boundary. */
+        /* Increment before the saturation gate (mirrors AEC3/PBFDKF), floored at
+         * LONG_MAX to avoid signed overflow. call_counter's raw value is compared
+         * bit-exact against Python's unbounded counter
+         * (test/historical/parity_pbfdkf.c), so capping at N / the startup threshold
+         * -- which would still satisfy the `<= N` gate below -- would desync the raw
+         * value on the next call (same constraint as erl_estimator.c's
+         * hold_counter_time_domain). Capping at LONG_MAX changes nothing for any
+         * practically reachable call count. */
         if (p->call_counter < LONG_MAX) p->call_counter += 1;
         if (p->saturated_capture) { p->partition_idx = (p->partition_idx + 1) % N; return; }
         if (p->call_counter <= N || p->poor_excitation_counter < N) {
@@ -652,17 +619,16 @@ void pbfdaf_copy_weights_from(PBFDAF* dst, const PBFDAF* src) {
     dst->w_dirty = 1;
 }
 
-/* Warm tap-transfer (v3.24.1): shift the learned IR by `shift_samples` —
- * positive = LEFT (toward tap 0, the aligned far advanced), negative = RIGHT
- * (the aligned far retarded), zero-filling the freed end, INSTEAD of zeroing
- * the filter —
- * so the cold-start cancellation survives a delay realign (the "1.14s vertical
- * line" fix). Mirrors filters.py:139-166: raw irfft per partition (first hop
- * taps) -> concatenate -> left-shift by s -> rfft each hop block (zero-padded
- * to fft_size) back into W[p]. Keeps X_buf (Python _warm_clear_xbuf default
- * False). NO td_window — Python uses raw irfft here (unlike the TD-constraint
- * round-trip). Uses p->scr_ir instance scratch, not stack — sized exactly
- * n_partitions*hop_size at init (see pbfdkf.h PBFDAF comment).
+/* Warm tap-transfer: shift the learned IR by `shift_samples` -- positive =
+ * LEFT (toward tap 0, the aligned far advanced), negative = RIGHT (the
+ * aligned far retarded), zero-filling the freed end -- instead of zeroing
+ * the filter, so the cold-start cancellation survives a delay realign.
+ * Mirrors filters.py: raw irfft per partition (first hop taps) ->
+ * concatenate -> left-shift by s -> rfft each hop block (zero-padded to
+ * fft_size) back into W[p]. Keeps X_buf (Python _warm_clear_xbuf default
+ * False). NO td_window -- Python uses a raw irfft here (unlike the
+ * TD-constraint round-trip). Uses p->scr_ir instance scratch, not stack --
+ * sized exactly n_partitions*hop_size at init (see pbfdkf.h PBFDAF comment).
  *
  * Returns 0 (applied) / -1 (refused). The span guard below is REACHABLE from
  * a legal config (n_partitions is admissible up to 256 and hop up to 512), and
@@ -699,7 +665,7 @@ int pbfdaf_warm_shift_ir(PBFDAF* p, int shift_samples) {
     return 0;
 }
 
-/* ===== PBFDKF (v3.22) ==================================================== */
+/* ===== PBFDKF ============================================================ */
 
 static void pbfdkf_init_scalars(PBFDKF* p) {
     int K = p->base.n_freqs;
@@ -713,8 +679,8 @@ static void pbfdkf_init_scalars(PBFDKF* p) {
         p->erl_per_bin[k] = 0.1f;
         p->e2_coarse_per_bin[k] = 0.0f;
     }
-    /* Measurement-noise PSD EMA, per hop. 10 ms reference, TC 194.96 ms
-     * (provenance: CHANGELOG 4.0.0 item 17). Mirrors filters.py. */
+    /* Measurement-noise PSD EMA, per hop: 10 ms reference, TC 194.96 ms. Mirrors
+     * filters.py. */
     p->alpha_r = aec3_growth_rehop(0.95f, 160, 16000,
                                    p->base.hop_size, p->base.sample_rate);
     p->h_error_floor = (float)AEC3_H_ERROR_FLOOR_FLOAT;
@@ -755,11 +721,11 @@ int pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
     p->is_static = 0;
     if (pbfdaf_init(&p->base, block_size, n_partitions, mu, delta, hop_size, 0,
                      sample_rate) != 0)
-        return -1;   /* F04: base filter's nested fft_create() failed (OOM), or
-                      * (2026-08) sample_rate/hop rejected -- alpha_r here is
-                      * retimed off the same grid, so a bad rate must not get
-                      * past this point. pbfdaf_init already freed its own
-                      * partial state or wrote nothing at all. */
+        return -1;   /* base filter's nested fft_create() failed (OOM), or sample_rate/hop
+                      * was rejected -- alpha_r here is retimed off the same grid,
+                      * so a bad rate must not get past this point. pbfdaf_init
+                      * already freed its own partial state or wrote nothing at
+                      * all. */
     int K = p->base.n_freqs;
     p->Q_high = (float*)malloc((size_t)K * sizeof(float));
     p->Q_low  = (float*)malloc((size_t)K * sizeof(float));
@@ -774,14 +740,13 @@ int pbfdkf_init(PBFDKF* p, int block_size, int n_partitions,
     p->scr_X2       = (float*)malloc((size_t)K * sizeof(float));
     p->scr_mu_aec3  = (float*)malloc((size_t)K * sizeof(float));
 
-    /* F04: pbfdkf_init_scalars() below writes straight
-     * through p->Q_high[k]/Q_low[k]/.../e2_coarse_per_bin[k] unconditionally
-     * -- any NULL among the 12 mallocs above would be an immediate NULL-deref
-     * crash right there, not just on some later process() call. Check every
-     * pointer BEFORE calling pbfdkf_init_scalars(). pbfdkf_free(p) already
-     * tolerates a partially-NULL struct (free(NULL) is a no-op for each of
-     * these fields; the base filter is fully built at this point so
-     * pbfdaf_free(&p->base) inside it is unaffected). */
+    /* pbfdkf_init_scalars() below writes straight through p->Q_high[k] /
+     * Q_low[k] / .../ e2_coarse_per_bin[k] unconditionally -- any NULL among the
+     * 12 mallocs above would be an immediate NULL-deref crash right there, not
+     * just on some later process() call. Check every pointer BEFORE calling
+     * pbfdkf_init_scalars(). pbfdkf_free(p) tolerates a partially-NULL struct
+     * (free(NULL) is a no-op for each of these fields; the base filter is fully
+     * built at this point, so pbfdaf_free(&p->base) inside it is unaffected). */
     if (!p->Q_high || !p->Q_low || !p->Q || !p->R || !p->error_psd ||
         !p->H_error_per_bin || !p->erl_per_bin || !p->e2_coarse_per_bin ||
         !p->e2_ref_scratch || !p->scr_mu_local || !p->scr_X2 || !p->scr_mu_aec3) {
@@ -801,13 +766,13 @@ size_t pbfdkf_get_mem_size(int block_size, int n_partitions, int hop_size) {
     if (n_partitions <= 0 || K <= 0) return 0;
     size_t total = pbfdaf_get_mem_size(block_size, n_partitions, hop_size, 0);
     if (total == 0) return 0;   /* base PBFDAF sizing rejected its own inputs */
-    /* Checked size arithmetic (F05): 12 identically-sized K-length float
-     * fields (Q_high, Q_low, Q, R, error_psd, H_error_per_bin, erl_per_bin,
+    /* Checked size arithmetic: 12 identically-sized K-length float fields
+     * (Q_high, Q_low, Q, R, error_psd, H_error_per_bin, erl_per_bin,
      * e2_coarse_per_bin, e2_ref_scratch, scr_mu_local, scr_X2, scr_mu_aec3),
-     * each individually ALIGN16'd by pbfdkf_init_static below — order/
-     * grouping unchanged, only the arithmetic is wrapped (mem_align.h
-     * ck_field_size_reps composes ck_mul_size/ck_align16_size/ck_add_size
-     * with the same saturate-to-SIZE_MAX-on-overflow behavior). */
+     * each individually ALIGN16'd by pbfdkf_init_static below
+     * (mem_align.h ck_field_size_reps composes
+     * ck_mul_size/ck_align16_size/ck_add_size with the same
+     * saturate-to-SIZE_MAX-on-overflow behavior). */
     total = ck_field_size_reps(total, (size_t)K, sizeof(float), 12);
 
     if (MEM_SIZE_INVALID(total)) return 0;
@@ -822,12 +787,12 @@ int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
     if (!p || !mem || !shared_fft || sample_rate <= 0) return -1;
     hop = (hop_size > 0) ? hop_size : block_size / 2;
     if (hop <= 0) return -1;
-    /* F07: reject a misaligned pool base before any pool write (see the
-     * matching guard in pbfdaf_init_static above). */
+    /* Reject a misaligned pool base before any pool write (see the matching
+     * guard in pbfdaf_init_static above). */
     if (!MEM_IS_ALIGNED16(mem)) return -1;
     {
-        /* pbfdkf_get_mem_size returning 0 means "invalid" (F05); guard the
-         * same 0-vs-`mem_size < 0` ambiguity as pbfdaf_init_static above. */
+        /* pbfdkf_get_mem_size returning 0 means "invalid"; same 0-vs-`mem_size < 0`
+         * reasoning as pbfdaf_init_static above. */
         size_t need = pbfdkf_get_mem_size(block_size, n_partitions, hop_size);
         if (need == 0 || mem_size < need) return -1;
     }
@@ -836,7 +801,7 @@ int pbfdkf_init_static(PBFDKF* p, void* mem, size_t mem_size,
     if (pbfdaf_init_static(&p->base, mem, base_sz,
                        block_size, n_partitions, mu, delta, hop_size, 0,
                        sample_rate, shared_fft) != 0)
-        return -1;   /* F07: base filter's pool base/size checks rejected the inputs */
+        return -1;   /* base filter's pool base/size checks rejected the inputs */
     uint8_t* ptr = (uint8_t*)mem + base_sz;
     int K = p->base.n_freqs;
     p->Q_high    = (float*)ptr; ptr += ALIGN16((size_t)K * sizeof(float));
@@ -920,13 +885,11 @@ void pbfdkf_reset_carried_state(PBFDKF* p) {
 }
 
 void pbfdkf_handle_echo_path_change(PBFDKF* p, int delay_change, int gain_change) {
-    /* CoarseFilterUpdateGain M3 counter reset (not-gain_change). Was reset to
-     * the frozen reference-grid AEC3_POOR_EXC_COUNTER_INITIAL_HOPS (400),
-     * silently undoing the correctly rate-scaled value aec.c's construction
-     * path sets via the identical aec3_blocks_to_hops(1000, hop, sr) call --
-     * every echo-path-change event after construction re-clobbered it back
-     * to the reference-grid constant. Mirrors filters.py's
-     * _poor_excitation_counter fix. */
+    /* CoarseFilterUpdateGain M3 counter reset (not-gain_change): set to the
+     * rate-scaled value aec.c's construction path sets via the identical
+     * aec3_blocks_to_hops(1000, hop, sr) call, not to the reference-grid
+     * constant AEC3_POOR_EXC_COUNTER_INITIAL_HOPS (400). Mirrors filters.py's
+     * _poor_excitation_counter. */
     if (!gain_change) {
         p->base.poor_excitation_counter =
             aec3_blocks_to_hops(1000, p->base.hop_size, p->base.sample_rate);
@@ -944,10 +907,9 @@ void pbfdkf_copy_weights_from(PBFDKF* dst, const PBFDKF* src) {
 }
 
 /* sum(|error_spec|**2) — cmag2_np into a scratch then the numpy-1.26 pairwise
- * float32 sum, returned as float32 (float32-by-design, no double promotion).
- * Not const: writes through p->scr_e2 instance scratch (was a fixed-size
- * stack local, n_freqs up to 8192 entries) — see the pbfdkf.h prototype
- * comment for the const rationale. */
+ * float32 sum, returned as float32 (no double promotion). Not const: writes
+ * through p->scr_e2 instance scratch (n_freqs up to 8192 entries, kept off
+ * the stack) — see the pbfdkf.h prototype comment for the const rationale. */
 float pbfdaf_get_error_energy(PBFDAF* p) {
     int K = p->n_freqs;
     float *e2 = p->scr_e2;   /* instance scratch, not stack: [n_freqs] */
@@ -1020,8 +982,7 @@ static void pbfdkf_h_error_refresh(PBFDKF* p, const float *e2_ref_bins) {
          * frame), precomputed once by the caller (pbfdkf_process) and shared
          * with the error_psd EMA loop + pbfdkf_update_weights_aec3's mu gate
          * -- all three read the same untouched b->error_spec this hop, so
-         * recomputing cmag2_np() per call site here was pure waste (up to
-         * 3x per bin per hop before this change). */
+         * recomputing cmag2_np() per call site here would be pure waste. */
         int n_div = 0;   /* count of bins on the diverged-leakage branch */
         int k0 = 0;
 #if SK_HAVE_NEON
@@ -1148,7 +1109,7 @@ static void pbfdkf_update_weights_aec3(PBFDKF* p, int curr_p,
         b->partition_to_constrain = (b->partition_to_constrain + 1) % N;
     b->w_dirty = 1;
 
-    /* E2 fix: scale mu_aec3 by mu_scale_arr before H_error decay so that masked
+    /* Scale mu_aec3 by mu_scale_arr before the H_error decay so that masked
      * bins (RSA narrowband mask + DT scale) do not decay while their W is frozen.
      * Mirrors AEC3 refined_filter_update_gain.cc:113-119. */
     for (int k = 0; k < K; ++k) mu_aec3[k] *= mu_scale_arr[k];
@@ -1192,18 +1153,14 @@ void pbfdkf_process(PBFDKF* p,
          * pbfdkf_h_error_refresh's per-bin branch (all 4 call sites in this
          * function, including both refresh-only early-returns below): all of
          * them read the SAME b->error_spec, set once by pbfdaf_frontend above
-         * and untouched for the rest of this hop. Previously recomputed via
-         * cmag2_np() up to 3x per bin on the full-update path -- same
-         * deterministic function of the same floats, so reusing the value
-         * changes nothing bit-wise. */
+         * and untouched for the rest of this hop. */
         float *e2_ref = p->e2_ref_scratch;   /* instance scratch, not stack */
         sk_cmag2_np_f32(b->error_spec, e2_ref, K);
 
         /* startup / poor-excitation / saturation gates → refresh only.
-         * UBSan-confirmed signed-overflow fix, floored at LONG_MAX -- same
-         * bit-exact-parity reasoning as pbfdaf_process's call_counter
-         * increment above (test/historical/parity_pbfdkf.c asserts this exact field
-         * on the PBFDKF/main-filter path). */
+         * call_counter is floored at LONG_MAX, as in pbfdaf_process's increment
+         * above (test/historical/parity_pbfdkf.c asserts this exact field on the
+         * PBFDKF/main-filter path). */
         if (b->call_counter < LONG_MAX) b->call_counter += 1;
         if (b->call_counter <= N || b->poor_excitation_counter < N ||
             b->saturated_capture) {
@@ -1222,7 +1179,7 @@ void pbfdkf_process(PBFDKF* p,
         /* error_psd EMA + R = max(error_psd, delta).
          * error_psd = |error_spec|**2;
          * _error_psd = _alpha_r*_error_psd + (1-_alpha_r)*error_psd.
-         * float32-by-design (the old double-promotion parity nuance is retired).
+         * float32 throughout.
          *
          * Grid-retimed at init; the direct-PBFDKF scalar fallback of the
          * H_error refresh consumes this value. Never a literal here. */

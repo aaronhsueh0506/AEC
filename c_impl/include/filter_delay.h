@@ -35,10 +35,10 @@
 #ifndef FILTER_DELAY_H
 #define FILTER_DELAY_H
 
-/* delay_headroom_blocks and filter_adaptation_threshold_hops were frozen at
- * a hop=160/sr=16000 assumption (FILTER_DELAY_HOP_SAMPLES=160,
- * FILTER_ADAPTATION_THRESHOLD_HOPS=200); both are now computed live in
- * filter_delay_init() from hop_size/sample_rate -- see the struct fields. */
+/* delay_headroom_blocks and filter_adaptation_threshold_hops are computed
+ * live in filter_delay_init() from hop_size/sample_rate (a hop=160/sr=16000
+ * assumption would give FILTER_DELAY_HOP_SAMPLES=160,
+ * FILTER_ADAPTATION_THRESHOLD_HOPS=200) -- see the struct fields. */
 
 /* DelayEstimate POD (python modules/delay/delay_types.DelayEstimate).
  * `quality` is DelayQuality (0=COARSE, 1=REFINED); `delay` is in samples.

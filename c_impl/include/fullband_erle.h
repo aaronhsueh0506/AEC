@@ -5,17 +5,14 @@
  *   - fb_erle_log2()              : EMA in log2 domain (erle_time_domain_log2)
  *   - get_inst_linear_quality_estimate(): rolling [0,1] linear-filter quality
  *
- * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity is
- * retired for this module; drift accepted). Real-pipeline shapes (captured
- * from a real BALANCED doubletalk case):
+ * PRECISION: float32 (drift versus Python accepted):
  *   - The per-bin inputs x2 / y2 / e2 are float32 arrays (length n_freqs=257).
  *   - np.sum-equivalent over a float32 array is numpy PAIRWISE summation in
  *     float32 (NOT naive left-to-right). fb_erle_pairwise_sum() below
  *     replicates that tree shape.
  *   - Every downstream scalar op (acum +=, ratio, log2, EMA, max/min,
- *     quality) is float32 end-to-end now (previously widened to float64 to
- *     mirror Python's `float(np.sum(...))`; that widen is retired). log2()
- *     is now log2f() (fast_log2 takes/returns float).
+ *     quality) is float32 end-to-end; log2() is log2f() (fast_log2 takes and
+ *     returns float).
  *   - converged_filter is a bool.
  *   - _erle_log2 is Optional[float]: a NULL state before the first 6-point
  *     accumulation fires. We carry it as (has_erle_log2, erle_log2).
@@ -23,9 +20,8 @@
  *     exposes a *valid flag so the caller can mirror the None.
  *   - x2_band_energy_threshold's SOURCE constant (FBERLE_X2_BAND_ENERGY_THRESHOLD)
  *     is only ever an argument to the shared aec3_per_bin_psd_threshold()
- *     helper (aec3_scale.h/.c, itself float32-typed and outside this
- *     conversion's file set); the float32 result is stored directly at the
- *     store in fb_erle_init().
+ *     helper (aec3_scale.h/.c, float32-typed); the float32 result is stored
+ *     directly in fb_erle_init().
  *
  * Built with -ffp-contract=off so the per-op float rounding matches across
  * builds.
@@ -33,11 +29,9 @@
  * Time constants (see fullband_erle.py docstring):
  *   POINTS_TO_ACCUMULATE = 6 (a count, NOT rescaled).
  *   BLOCKS_TO_HOLD_ERLE  = int(0.4 * HOPS_PER_SECOND) = 40 hops.
- *   0.0004 max/min envelope forget step — IS AEC3-native (verbatim literal
+ *   0.0004 max/min envelope forget step — AEC3-native (verbatim literal
  *   + comment in fullband_erle_estimator.cc's UpdateMaxMin(), same 6-point
- *   cadence as quality_alpha/td_alpha); now rescaled live like its siblings
- *   (an earlier "kept verbatim, not rescaled" claim here was a provenance
- *   error, corrected 2026-08-02).
+ *   cadence as quality_alpha/td_alpha); rescaled live like its siblings.
  */
 #ifndef FULLBAND_ERLE_H
 #define FULLBAND_ERLE_H
@@ -60,10 +54,9 @@ float fb_erle_pairwise_sum(const float *a, size_t n);
  * in fb_erle_init() and stored into ErleInstantaneous.maxmin_forget below,
  * not used directly at the point of use any more. */
 #define FBERLE_MAXMIN_FORGET        0.0004f
-/* blocks_to_hold_erle/quality_alpha/td_alpha were frozen #defines (40 hops,
- * 0.07f, 0.05f -- correct only at the legacy hop=160/sr=16000 grid) and are
- * now computed live in fb_erle_init() from hop_size/sample_rate instead;
- * see the struct fields below. */
+/* blocks_to_hold_erle/quality_alpha/td_alpha are computed live in
+ * fb_erle_init() from hop_size/sample_rate (40 hops, 0.07f and 0.05f at the
+ * hop=160/sr=16000 reference grid); see the struct fields below. */
 
 /* ── _ErleInstantaneous (FullBandErleEstimator::ErleInstantaneous) ──────────── */
 typedef struct {

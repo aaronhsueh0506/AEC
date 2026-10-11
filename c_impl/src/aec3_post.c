@@ -1,9 +1,5 @@
 /* aec3_post.c — C port of the AEC3 post-filter DRIVER (AEC._aec3_post).
- * WS5 Phase 5.5. See aec3_post.h for the stage breakdown + parity rules.
- *
- * Build: gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99
- *        -Ic_impl/include -Ic_impl/lib/pocketfft
- *   link: aec3_post.c reverb_model.c fft_pocketfft.c pocketfft.c -lm
+ * See aec3_post.h for the stage breakdown + parity rules.
  */
 #include "aec3_post.h"
 
@@ -63,9 +59,9 @@ void aec3_post_config_defaults(Aec3PostConfig *cfg) {
     cfg->cng_n2_update_onset_hops = 20;
     cfg->cng_n2_initial_duration_hops = 400;
     cfg->noise_floor_int16sq = 68.50682420305405f;
-    /* M4: default == block_size (the 16 kHz row's synth_window_len); the
-     * caller (aec.c) overrides with the per-rate lookup value, same as
-     * every other cfg field below block_size above. */
+    /* default == block_size (the 16 kHz row's synth_window_len); the caller
+     * (aec.c) overrides with the per-rate lookup value, same as every other cfg
+     * field below block_size above. */
     cfg->synth_window_len = cfg->block_size;
 }
 
@@ -86,13 +82,12 @@ void aec3_post_init(Aec3Post *p, const Aec3PostConfig *cfg,
     p->trace.aec3_converged = 0;
     p->trace.far_active = 0;
     p->trace.gain_mean = 0.0f;
-    /* Convergence-flags y2 threshold (step 4 below): was a bare literal
-     * 3.73e-4f = 50^2*64/32768^2, correct only at the legacy hop=160
-     * grid but compared against y2_time summed over the LIVE hop_size.
-     * Rescaled live via the same helper suppression_gain.c already uses
-     * for this identical AEC3 constant (aec3_block_energy_scale is a pure
-     * sample-count ratio -- hop_size only, no sample_rate). Mirrors
-     * orchestrator.py's _y2_threshold. */
+    /* Convergence-flags y2 threshold (step 4 below): 3.73e-4f = 50^2*64/32768^2
+     * at the reference grid, rescaled to the live hop_size (it is compared
+     * against y2_time summed over the LIVE hop_size) via the helper
+     * suppression_gain.c uses for this identical AEC3 constant
+     * (aec3_block_energy_scale is a pure sample-count ratio -- hop_size only, no
+     * sample_rate). Mirrors orchestrator.py's _y2_threshold. */
     p->y2_thr = aec3_block_energy_scale(50.0f * 50.0f * 64.0f, cfg->hop_size)
               / (32768.0f * 32768.0f);
     p->fft = fft;
@@ -154,15 +149,14 @@ void aec3_post_reset(Aec3Post *p) {
  * .astype(f32) is a no-op. mag is the captured np.abs(c64) f32 value. */
 static void psd_from_abs(const float *mag, int n, float *out) {
     /* sk_sq_scale_f32(mag, scale, ...) computes out[i]=(mag[i]*mag[i])*scale
-     * -- textually identical op sequence to this loop's body, and
+     * -- the textually identical op sequence to this loop's body, and
      * (float)PSD_SCALE (2^30, exact in f32) folds to the same constant
-     * regardless of call path. Same established bit-exact scale-multiply
-     * pattern already used at lines 270/272 in this file and in
-     * suppression_gain.c:112 (there with scale=1.0f). */
+     * regardless of call path. Same bit-exact scale-multiply pattern as in
+     * suppression_gain.c (there with scale=1.0f). */
     sk_sq_scale_f32(mag, (float)PSD_SCALE, out, n);
 }
 
-/* ── stage 1-2: PSDs (+ E1 capture_psd_erle) ───────────────────────────── */
+/* ── stage 1-2: PSDs (+ capture_psd_erle) ────────────────────────────── */
 void aec3_post_compute_psds(Aec3Post *p, const Aec3PostAbs *mag) {
     int nb = p->cfg.n_bins;
     psd_from_abs(mag->abs_near, nb, p->near_psd);
@@ -261,7 +255,7 @@ void aec3_post_compute_comfort_noise(Aec3Post *p, int saturated_capture) {
     }
 }
 
-/* ── stage 6: E2 select + gain apply + CNG inject + irfft + OLA ─────────── */
+/* ── stage 6: select + gain apply + CNG inject + irfft + OLA ──────────── */
 void aec3_post_apply_output(Aec3Post *p,
                             const Complex *error_spec,
                             const Complex *echo_spec_sel,
@@ -275,7 +269,7 @@ void aec3_post_apply_output(Aec3Post *p,
     int hop = c->hop_size;
     int k;
 
-    /* E2: _out_base = error_spec; switch to y_base = error_spec + sel_echo when
+    /* _out_base = error_spec; switch to y_base = error_spec + sel_echo when
      * (output_capture_when_linear_unusable && !usable && |E|>|Y|). */
     {
         const Complex *out_base = error_spec;
@@ -285,7 +279,7 @@ void aec3_post_apply_output(Aec3Post *p,
             /* |abs|^2 == (abs*abs)*1.0f bit-for-bit (multiplying by 1.0f is
              * an exact IEEE no-op, incl. sign of ±0.0f), so sk_sq_scale_f32
              * with scale=1.0f reproduces the source square verbatim.
-             * pairwise_sum_f32 now delegates to sk_pairwise_sum_f32 (see its
+             * pairwise_sum_f32 delegates to sk_pairwise_sum_f32 (see its
              * definition above). */
             sk_sq_scale_f32(mag->abs_error, 1.0f, se2, nb);
             se = pairwise_sum_f32(se2, (size_t)nb);
@@ -313,7 +307,7 @@ void aec3_post_apply_output(Aec3Post *p,
          * exact); PSD_SCALE's double literal never touches the per-element
          * math. Split into: plain scalar multiply into p->nf as scratch
          * (provably dead here -- whatever nf held before, whether leftover
-         * se2 scratch from the E2 block above or a previous hop's contents,
+         * se2 scratch from the output-select block above or a previous hop's contents,
          * is never read again: every element is overwritten by this
          * multiply before anything reads nf back), then the floor clamp via
          * sk_clip_f32(v, 0, +inf) (the source has no upper bound either --
@@ -396,12 +390,12 @@ void aec3_post_process(Aec3Post *p,
  * lines 3001-3689). Drives the sub-modules in the exact Python order.
  * ──────────────────────────────────────────────────────────────────────── */
 
-/* f32 pairwise sum of x[i]² (Stage 3a: the former f64 upcast used to match
- * float(np.sum(arr.astype(np.float64) ** 2)) is retired — accumulates in f32
- * throughout, same pairwise/unrolled-by-8 structure and split order as
- * pairwise_sum_f32 above; drift vs the numpy reference accepted). Delegates
- * to the shared kernel (sk_sum_sq_pairwise_f32 replicates this exact tree
- * verbatim — this file is its documented reference source). */
+/* f32 pairwise sum of x[i]²: accumulates in f32 throughout, same
+ * pairwise/unrolled-by-8 structure and split order as pairwise_sum_f32
+ * above; drift vs the numpy reference (float(np.sum(arr.astype(np.float64)
+ * ** 2))) is accepted. Delegates to the shared kernel
+ * (sk_sum_sq_pairwise_f32 replicates this exact tree verbatim — this file is
+ * its documented reference source). */
 static float sum_sq_f32_pairwise(const float *a, size_t n) {
     return sk_sum_sq_pairwise_f32(a, n);
 }
@@ -449,9 +443,9 @@ int aec3_post_run(Aec3Post *p,
                           * See the parameter's contract in the header. */
                          !aec_state_usable_linear_estimate(obj->state),
                          /* Only where this chain's own over-output guard
-                          * cannot reach. Under enable_res the E2 step below
-                          * still owns the rule and applies it to the emitted
-                          * audio; running both would let E2's frequency-domain
+                          * cannot reach. Under enable_res the output-capture step
+                          * below still owns the rule and applies it to the emitted
+                          * audio; running both would let its frequency-domain
                           * hard switch overwrite the crossfade the selector
                           * just started, and would change shipped audio for a
                           * seam only an external post-filter reads. */
@@ -461,8 +455,8 @@ int aec3_post_run(Aec3Post *p,
 
     /* ── Step 2: precompute the np.abs magnitude arrays (3037-3052,
      *            3267-3270, 3629-3630). sel_esw/sel_echo come from Step 1.   */
-    /* E1 near_spec_win = error_spec_windowed + echo_spec (ORIGINAL); E2
-     * y_base = sel_esw + sel_echo (SELECTED). Fissioned into 2 independent
+    /* near_spec_win = error_spec_windowed + echo_spec (ORIGINAL); y_base =
+     * sel_esw + sel_echo (SELECTED). Fissioned into 2 independent
      * elementwise complex adds -- disjoint destinations (nsw_e1/ybase are
      * separate caller-owned scratch buffers), so splitting the single
      * per-k loop into 2 full-range sk_cadd_f32 calls changes nothing:
@@ -484,7 +478,7 @@ int aec3_post_run(Aec3Post *p,
     sk_cabs_np_f32(sc->sel_esw, sc->abs_error, nb);
     sk_cabs_np_f32(in->echo_spec, sc->abs_echo_coh, nb);
     sk_cabs_np_f32(sc->nsw_e1, sc->abs_nsw_e1, nb);
-    /* |y_base| has exactly one consumer: the E2 output-capture guard inside
+    /* |y_base| has exactly one consumer: the output-capture guard inside
      * aec3_post_apply_output(), which context_only never reaches (Step 21
      * returns the linear residual instead), so the pass is dead in that mode.
      * ybase ITSELF is still formed above -- it is exported as the linear
@@ -503,15 +497,15 @@ int aec3_post_run(Aec3Post *p,
     mag.abs_nsw_e1 = sc->abs_nsw_e1;
     mag.abs_ybase = in->context_only ? NULL : sc->abs_ybase;
 
-    /* ── Step 3: PSDs + E1 (3037-3052) ───────────────────────────────────── */
+    /* ── Step 3: PSDs + windowed-capture PSD (3037-3052) ───────────────────────────────────── */
     aec3_post_compute_psds(p, &mag);
 
-    /* render_block_scaled = (far_end * 32768).astype(f32) (3056). */
+    /* render_block_scaled = (far_end * 32768).astype(f32). */
     for (k = 0; k < hop; ++k)
         sc->render_block_scaled[k] = (float)(in->far_end[k] * 32768.0f);
-    /* far_pwr = mean(far_end²) (pairwise f32; 3053). sk_sq_scale_f32 with
+    /* far_pwr = mean(far_end²) (pairwise f32). sk_sq_scale_f32 with
      * scale=1.0f is bit-exact to x*x (exact IEEE no-op multiply) -- same
-     * established pattern as lines 270/272 above and suppression_gain.c:112. */
+     * pattern as above and suppression_gain.c. */
     {
         float *fsq = sc->nearend_pwr;   /* borrow scratch */
         sk_sq_scale_f32(in->far_end, 1.0f, fsq, hop);
@@ -530,7 +524,7 @@ int aec3_post_run(Aec3Post *p,
         refined_conv = (e2_refined < 0.5f * y2_time) && (y2_time > y2_thr);
         if (in->shadow_present) {
             /* Parseval map: (2·Σ|E[1:-1]|² + |E[0]|² + |E[-1]|²)/fft_size,
-             * cmag2_np per bin, f32 sums (Stage 3a; was f64 sums, 3095-3098). */
+             * cmag2_np per bin, f32 sums. */
             const Complex *es = in->shadow_error_spec;
             float inner = 0.0f;
             /* (np.abs(c)²) per bin (cmag2_np), NOT er*er+ei*ei. Batched via
@@ -555,19 +549,12 @@ int aec3_post_run(Aec3Post *p,
         aec3_converged = refined_conv || coarse_conv;
         p->trace.aec3_converged = aec3_converged;   /* audio-passive trace stash */
 
-        /* Step 5 (filter_state_bridge, formerly here) was dead code: every
-         * output field of the FilterStateBridge it built (including the
-         * unconditional per-hop IRFFT into what was then sc->bridge_taps) was
-         * discarded -- the only downstream consumer, AecState.update, already
-         * reads the live aec3_converged local directly (see Step 11 below),
-         * which is bit-for-bit what bridge.filter_converged would have held
-         * anyway (a pure passthrough in filter_state_bridge_build). Removed;
-         * see filter_state_bridge_build itself (still exercised directly by
-         * test/historical/parity_filter_state_bridge.c) for that function's own
-         * behaviour. The now-write-only-by-nobody sc->bridge_taps scratch
-         * field ([fft_size] float, in Aec3PostRunScratch) was later removed
-         * from the struct entirely (aec.c's pool-size accounting + carve, and
-         * this driver's caller struct in aec3_post.h). */
+        /* The filter_state_bridge step is not run here: every output field of the
+         * FilterStateBridge it would build was unused downstream -- AecState.update
+         * reads the live aec3_converged local directly (see Step 11 below), which is
+         * what bridge.filter_converged would hold anyway (a pure passthrough in
+         * filter_state_bridge_build). filter_state_bridge_build itself is still
+         * exercised directly by test/historical/parity_filter_state_bridge.c. */
         {
             /* ── Step 6: ext_delay (3126-3131) ───────────────────────────── */
             FilterDelayEstimate ext;
@@ -648,9 +635,8 @@ int aec3_post_run(Aec3Post *p,
 
             /* ── Step 11: aec_state.update (3302-3319) ───────────────────── */
             {
-                /* far_pwr = mean(far_end²), f32 pairwise-sum / n (Stage 3a: the
-                 * former f64 widen used to match numpy's float(np.mean(...))
-                 * exactly is retired — plain f32 compare now, drift accepted). */
+                /* far_pwr = mean(far_end²), f32 pairwise-sum / n; a plain f32 compare
+                 * against numpy's float(np.mean(...)), drift accepted. */
                 float far_pwr = pairwise_sum_f32(sc->nearend_pwr,
                                                  (size_t)hop) / (float)hop;
                 int active_render = (far_pwr > in->active_render_threshold);

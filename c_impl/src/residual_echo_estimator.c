@@ -1,9 +1,8 @@
 /* residual_echo_estimator.c — C port of residual_echo_estimator.py.
  * All-float32 arithmetic in the R² paths (every input is f32 and every scalar
  * multiplier is value-cast to f32 inside the numpy array op). powf() for the
- * reverb decay runs in float32 (converted from the former double pow(); drift
- * accepted) and is evaluated at init, not per hop. Built with
- * -ffp-contract=off. */
+ * reverb decay runs in float32 (drift versus Python accepted) and is
+ * evaluated at init, not per hop. Built with -ffp-contract=off. */
 #include "residual_echo_estimator.h"
 #include "aec3_scale.h"
 
@@ -60,9 +59,9 @@ void ree_init(ResidualEchoEstimator *r,
     r->hop_size = hop_size;
     r->sample_rate = sample_rate;
     /* AEC3 UpdateRenderNoisePower per-block growth (x2_noise_floor *= 1.1,
-     * cc:325-359) -- was a bare per-hop literal with no rate conversion at
-     * all; rescaled live here so the wall-clock recovery-after-hold rate is
-     * preserved at any grid. Mirrors residual_echo_estimator.py. */
+     * cc:325-359), rescaled to the live grid so the wall-clock
+     * recovery-after-hold rate is preserved at any grid. Mirrors
+     * residual_echo_estimator.py. */
     r->noise_floor_growth_per_hop =
         aec3_per_block_growth_to_per_hop(1.1f, hop_size, sample_rate);
     r->echo_model = *echo_model;
@@ -77,7 +76,7 @@ void ree_init(ResidualEchoEstimator *r,
     /* Resolve both dominant_nearend branches of _reverb_decay() here: the
      * powf() argument and exponent are config + grid only, so the per-hop
      * path (called 2-3x per hop) just reads the cached value. The mild branch
-     * keeps the f32 multiply-then-exponentiate order of the original
+     * keeps the f32 multiply-then-exponentiate order of the reference
      * expression -- scaling after the powf() is a different number. */
     if (r->reverb_enabled) {
         float d_mild = reverb_decay;
@@ -284,9 +283,9 @@ void ree_estimate(ResidualEchoEstimator *r,
     ree_update_render_noise_power(r, render_psd);
 
     /* push current render to both history deques unconditionally (appendleft).
-     * E10 fix: delay_render_buf was pushed only inside the nonlinear path, so
-     * linear hops left it stale → wrong EchoGeneratingPower on linear→nonlinear
-     * transitions.  Push at the top so every hop keeps both deques current. */
+     * delay_render_buf must be pushed on linear hops too, or it goes stale and
+     * gives a wrong EchoGeneratingPower on linear→nonlinear transitions; push at
+     * the top so every hop keeps both deques current. */
     ree_appendleft(r->reverb_render_history, N, &r->reverb_buf_count,
                    &r->reverb_buf_head, render_psd);
     ree_appendleft(r->delay_render_buf, N, &r->delay_buf_count,
@@ -345,7 +344,7 @@ void ree_estimate(ResidualEchoEstimator *r,
                 int pre = r->render_pre_window_size;   /* 1 */
                 int post = r->render_post_window_size; /* 1 */
                 int idx_start, idx_stop, i;
-                /* delay_render_buf already pushed at the top of ree_estimate (E10). */
+                /* delay_render_buf already pushed at the top of ree_estimate. */
                 idx_start = delay - pre;
                 if (idx_start < 0) idx_start = 0;
                 idx_stop = delay + post;
@@ -403,9 +402,9 @@ void ree_estimate(ResidualEchoEstimator *r,
             /* AEC3 cc:121-129 noise gate — SKIPPED when
              * use_stationarity_properties=True (matches Python
              * `if not self._use_stationarity_properties:`). Production sets
-             * this True, so the gate does not run; the earlier `transparent_mode`
-             * guard here was a port bug (transparent_mode is always False on
-             * this path, so the gate fired and collapsed x2 to 0). */
+             * this True, so the gate does not run; a `transparent_mode` guard
+             * must not be used instead (transparent_mode is always False on
+             * this path, so the gate would fire and collapse x2 to 0). */
             if (!r->use_stationarity_properties) {
                 /* noise gate (cc:121-129). */
                 float ng = r->use_aec3_residual_noise_gate

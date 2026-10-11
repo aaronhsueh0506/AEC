@@ -1,12 +1,9 @@
 /* stationarity_estimator.c — C port of
  * python/modules/state/stationarity_estimator.py.
  *
- * All per-bin math is float32-by-design (converted for uniformity as part of
- * the f32 campaign; formerly matched numpy<2 weak promotion by keeping Python
- * float scalars in fp64 and casting to float32 at the point they combined with
- * the float32 arrays). Each op is a separate float32 rounding; -ffp-contract=off
- * keeps the compiler from fusing them. The scalar pre-compute of alpha /
- * 1.0/avg_init now runs directly in float32.
+ * All per-bin math is float32. Each op is a separate float32 rounding;
+ * -ffp-contract=off keeps the compiler from fusing them. The scalar
+ * pre-compute of alpha / 1.0/avg_init runs directly in float32.
  */
 #include "stationarity_estimator.h"
 
@@ -59,7 +56,7 @@ static void noise_spectrum_reset(NoiseSpectrum *n) {
     n->block_counter = 0;
 }
 
-/* _alpha_now (float32-by-design; formerly returned a widened float64). */
+/* _alpha_now (float32). */
 static float noise_spectrum_alpha_now(const NoiseSpectrum *n) {
     if (n->block_counter > (n->init_phase + n->avg_init)) {
         return n->alpha;
@@ -69,26 +66,21 @@ static float noise_spectrum_alpha_now(const NoiseSpectrum *n) {
 
 static void noise_spectrum_update(NoiseSpectrum *n, const float *spectrum) {
     int k;
-    /* UBSan-confirmed signed-overflow fix, floored at INT_MAX: unlike a
-     * pure boolean-gate counter, block_counter's raw value also feeds
-     * noise_spectrum_alpha_now()'s tilt arithmetic
-     * (`block_counter - avg_init`) for as long as it's <=
-     * (init_phase + avg_init) -- capping at that threshold (the value the
-     * `>` gates below would otherwise use) would leave block_counter
-     * permanently AT the threshold instead of past it, which would keep
-     * re-entering the tilt-arithmetic branch forever with a frozen input
-     * instead of settling on the constant `alpha` AEC3 intends once
-     * warmup completes. Not read bit-exact by any parity harness
-     * (test/historical/parity_stationarity_estimator.c never reads block_counter),
-     * so there's no golden-drift constraint either way -- INT_MAX is
-     * simply the boundary-only fix that's trivially safe to prove
-     * correct: it's a no-op for every practically-reachable block count
-     * while eliminating the UB at the true overflow boundary. */
+    /* Floored at INT_MAX to avoid signed overflow: unlike a pure boolean-gate
+     * counter, block_counter's raw value also feeds
+     * noise_spectrum_alpha_now()'s tilt arithmetic (`block_counter - avg_init`)
+     * for as long as it's <= (init_phase + avg_init) -- capping at that
+     * threshold (the value the `>` gates below would otherwise use) would leave
+     * block_counter permanently AT the threshold instead of past it, which would
+     * keep re-entering the tilt-arithmetic branch forever with a frozen input
+     * instead of settling on the constant `alpha` AEC3 intends once warmup
+     * completes. INT_MAX is the boundary-only guard: a no-op for every
+     * practically reachable block count. */
     if (n->block_counter < INT_MAX) n->block_counter += 1;
 
     if (n->block_counter <= n->avg_init) {
         /* noise += (1.0/avg_init) * spectrum.astype(f32); scalar (1.0/avg_init)
-         * computed and applied directly in float32 (float32-by-design). */
+         * computed and applied directly in float32. */
         float inv = 1.0f / (float)n->avg_init;
         for (k = 0; k < n->n_freqs; ++k) {
             float tmp = inv * spectrum[k];          /* f32 mul */
@@ -303,16 +295,14 @@ void stationarity_estimator_update_stationarity_flags(StationarityEstimator *s,
      * (row 0, row 1, ... row filled-1, then rev, then the compare), and the
      * only thing reordered is the interleaving of the INDEPENDENT per-bin
      * chains, which no float rounding depends on -- bit-exact by
-     * construction, not by measurement. What it buys is contiguous reads:
-     * the column-major form strode every inner add by n_freqs, which neither
-     * the prefetcher nor the vectorizer could follow.
+     * construction. What it buys is contiguous reads: a column-major form
+     * strides every inner add by n_freqs, which neither the prefetcher nor the
+     * vectorizer can follow.
      *
      * `acc` is a fixed STAT_ACC_BLOCK-element block and the bins are
      * processed one block at a time, so the stack cost is constant and no
-     * bound on n_freqs is assumed -- the same hazard detectors.c and
-     * filter_analyzer.c de-stacked their fixed `float[1024]` locals for,
-     * except this one never needs to scale with the runtime dimension at
-     * all. See STAT_ACC_BLOCK for how the block size was chosen. */
+     * bound on n_freqs is assumed. See STAT_ACC_BLOCK for how the block size was
+     * chosen. */
     {
         float acc[STAT_ACC_BLOCK];
         int base;

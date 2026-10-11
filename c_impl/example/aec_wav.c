@@ -1,10 +1,10 @@
-/* aec_wav.c — WAV processing CLI on top of aec (Wave 5).
+/* aec_wav.c — WAV processing CLI on top of aec.
  *
- * User fixes:
- *   1. balanced reverb 0.85/1.6 — set in aec_config_from_preset
- *   2. CNG default OFF, --cng to enable (was: forced ON in old aec_dump)
- *   3. --preset mild now parses (old parse_preset silently fell back to balanced)
- *   6. Hop size dynamic (no [160] magic) — aec derives from sample_rate
+ * Notes:
+ *   - balanced reverb 0.85/1.6 is set in aec_config_from_preset.
+ *   - CNG is OFF by default; --cng enables it.
+ *   - --preset mild/balanced/aggressive are all parsed.
+ *   - The hop size is derived from sample_rate by aec (no fixed [160]).
  *
  * Plus --debug-level for log infra.
  */
@@ -105,7 +105,7 @@ int main(int argc, char* argv[]) {
      * a magic value as "not given" would make an explicit, legal user value
      * indistinguishable from "unset". Each is handed to aec_create()
      * UNVALIDATED on purpose -- aec_validate_config() is the single range
-     * and mode/field-compatibility authority (productization plan §2.1), so
+     * and mode/field-compatibility authority, so
      * an illegal value or combination fails the run there rather than being
      * silently clamped or ignored into a different configuration than the
      * one asked for. */
@@ -163,9 +163,9 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "ERROR: cannot open input wavs\n"); return 3;
     }
 
-    /* F05: reject an unsupported sample rate (or a mic/ref rate mismatch)
+    /* Reject an unsupported sample rate (or a mic/ref rate mismatch)
      * before ever constructing an AecConfig — aec_create would reject the
-     * same rate today via aec_validate_config, but failing here gives a
+     * same rate via aec_validate_config, but failing here gives a
      * clear, WAV-specific message instead of a bare aec_create() failure. */
     if (!aec_is_valid_sample_rate(mr->info.sample_rate)) {
         fprintf(stderr,
@@ -220,8 +220,8 @@ int main(int argc, char* argv[]) {
     if (have_fixed_delay)        cfg.fixed_delay_samples = fixed_delay_samples;
 
     /* --print-mem-size: answer the static-pool question and exit, before
-     * any debug/log setup or Aec construction — no audio is touched (plan
-     * §3.4.6 RAM acceptance test 6). aec_get_mem_breakdown() runs the same
+     * any debug/log setup or Aec construction — no audio is touched.
+     * aec_get_mem_breakdown() runs the same
      * aec_validate_config() every other entry point does, so an illegal
      * mode/field combination fails HERE with the library's own validation
      * outcome (fail-fast), not a silently-different config. */
@@ -267,9 +267,7 @@ int main(int argc, char* argv[]) {
     aec_debug_set_frame(0, hop, sr);
 
     /* Default to float32 output for parity-friendly comparison; override
-     * via AEC_OUT_FLOAT=0 if 16-bit PCM needed. v3.10.4 fix: env var key
-     * was AEC_FP32_WAV but wav_io.h:215 reads AEC_OUT_FLOAT — keys agree
-     * now so the float32 default actually takes effect. */
+     * via AEC_OUT_FLOAT=0 if 16-bit PCM needed (the key wav_io.h reads). */
     if (!getenv("AEC_OUT_FLOAT")) setenv("AEC_OUT_FLOAT", "1", 1);
     WavWriter* ww = wav_open_write(out_path, sr, 1);
     if (!ww) { fprintf(stderr, "ERROR: cannot write output\n"); return 3; }
@@ -313,8 +311,8 @@ int main(int argc, char* argv[]) {
             delay_mode_name(cfg.delay_mode), cfg.delay_num_filters,
             cfg.fixed_delay_samples);
 
-    /* Duty-cycle engagement census for this run (plan §7 measurement method
-     * -- see the duty_hops_* doc in aec.h). Printed unconditionally: it is
+    /* Duty-cycle engagement census for this run (see the duty_hops_* doc in
+     * aec.h). Printed unconditionally: it is
      * one line, and the whole point is that the "~90% of the matched-filter
      * cost" design figure stops being an assumption and becomes a number a
      * bench can read off every run. */

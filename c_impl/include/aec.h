@@ -166,11 +166,11 @@ typedef struct AecConfig {
     float  kalman_q_high;          /* 1e-3 */
     float  kalman_q_low;           /* 1e-6 */
     int    delay_acquire_protect_converged;   /* 1 */
-    /* Warm tap-transfer on first delay acquisition (v3.24.1, default ON):
-     * shift the learned IR by the acquired delay instead of zeroing, so the
-     * cold-start cancellation survives the realign (the "1.14s vertical line"
-     * fix). Gated on inst-ERLE peak > _inst_erle_db AND delay < tap reach.
-     * _protect_inst_erle is the A/B-rejected option-A (block the realign). */
+    /* Warm tap-transfer on first delay acquisition (default ON): shift the
+     * learned IR by the acquired delay instead of zeroing, so the cold-start
+     * cancellation survives the realign. Gated on inst-ERLE peak > _inst_erle_db
+     * AND delay < tap reach. _protect_inst_erle selects the alternative (block
+     * the realign), default OFF. */
     int    delay_acquire_warm_transfer;       /* 1 */
     float  delay_acquire_inst_erle_db;        /* 4.0 */
     int    delay_acquire_protect_inst_erle;   /* 0 */
@@ -207,16 +207,14 @@ typedef struct AecConfig {
      * So a mis-lock is DELAYED by at most the window, never cured. Curing it
      * is estimator work, out of scope for this guard.
      *
-     * History (one line, so it is not re-derived): the first version of this
-     * mechanism refused ALL differing candidates while cancelling, with no
-     * bound. In multipath / path-addition scenes the surviving old reflection
-     * keeps ERLE up, so a genuine new path was vetoed indefinitely -- measured
-     * at old/new gains 0.4/0.5 with no re-lock through hop 850, and 0.5/0.5
-     * never. Candidate direction + a bound are what replaced it. */
+     * Why a bound: refusing ALL differing candidates while cancelling, with
+     * no bound, vetoes a genuine new path indefinitely in multipath /
+     * path-addition scenes, where the surviving old reflection keeps ERLE up.
+     * Candidate direction + a bound avoid that. */
     int    delay_backward_quarantine_enabled; /* 0 */
     float  delay_backward_quarantine_s;       /* 1.0 */
 
-    /* DT-deg recovery stack (default ON, mirrors Python 16285fd). The
+    /* DT-deg recovery stack (default ON, mirrors Python). The
      * energy-based held near-end gate (_ne_recent_frames) arms two levers
      * during double-talk only (FS never raises dt_from_energy): */
     int    dt_aware_recovery_soft;            /* 1 — soft (non-destructive)
@@ -225,11 +223,10 @@ typedef struct AecConfig {
     int    dt_aware_res_floor_enabled;        /* 1 — DT-gated RES min-gain floor */
     float  min_gain_floor_dt_db;              /* -20.0 — DT floor (dB) */
     /* ne_recent gate parameters (mirror AecConfig.ne_recent_*). threshold is
-     * float32-by-design (Python bit-exact parity retired; f32/f64 drift
-     * across this threshold is accepted). ne_recent_hold is wall-clock-
-     * authored @ 10 ms hop and retimed live in aec_carve();
-     * ne_recent_sustain is a genuine consecutive-event count
-     * (NOT a duration) and is intentionally left unretimed. */
+     * float32 (f32/f64 drift across this threshold versus Python is accepted).
+     * ne_recent_hold is wall-clock-authored @ 10 ms hop and retimed live in
+     * aec_carve(); ne_recent_sustain is a consecutive-event count (NOT a
+     * duration) and is left unretimed. */
     float  ne_recent_threshold;               /* 0.3 */
     int    ne_recent_hold;                    /* 150 hops = 1500 ms @ 10 ms hop */
     int    ne_recent_sustain;                 /* 3 (event count, not retimed) */
@@ -345,7 +342,7 @@ typedef struct AecSignalGrid {
  * (including fft_size == 0). `out` may be NULL for a pure validity query. */
 int aec_resolve_signal_grid(int sample_rate, int fft_size, AecSignalGrid* out);
 
-/* Sample-rate whitelist query (F05: no sample-rate validation anywhere).
+/* Sample-rate whitelist query.
  * "Is there at least one supported grid at this rate" -- a read of the SAME
  * grid table aec_resolve_signal_grid() uses, for callers (e.g.
  * example/aec_wav.c) that need to reject an unsupported input WAV rate
@@ -393,8 +390,7 @@ typedef struct Aec {
      * it exists for MATCHED and FIXED alike and only EXTERNAL_ALIGNED has
      * none (mirrors Python's `_delay_active`). Ask aec_ring_active(&cfg)
      * (aec.c) for "is there a ring" -- never has_delay, and never a
-     * re-spelled delay_mode comparison, so the two questions cannot silently
-     * merge again. */
+     * re-spelled delay_mode comparison, so the two questions cannot merge. */
     DelayAec3 delay;       int has_delay;
     float* ref_ring;       int ref_ring_size, ref_ring_write, ref_ring_filled;
     int    current_delay;  /* MATCHED: -1 until first acquisition.
@@ -440,8 +436,7 @@ typedef struct Aec {
      * loses solidity, or (b) the ERLE watchdog fires: erle_windowed drops
      * >6 dB below its running peak (peak leaks 0.1 dB/s at EVERY grid; armed
      * only once the peak exceeds 6 dB, so it cannot fire before first
-     * convergence).
-     * Sampled 60-case AECMOS cost: <=+0.014 / worst -0.006 — zero-cost. */
+     * convergence). */
     int    duty_active;        /* 1 = decimated analysis in effect */
     int    duty_stable_hops;   /* consecutive solid+unchanged hops (arming) */
     int    duty_pos;           /* position in the 1-in-K analysis cycle */
@@ -453,20 +448,19 @@ typedef struct Aec {
                                 * padding ahead of the counters below, so
                                 * sizeof(Aec) and every later offset are
                                 * unchanged.                                  */
-    /* Engagement census (productization plan §7 measurement method): the
-     * doc comment above claims the duty machine cuts "~90% of the
-     * matched-filter cost" as a DESIGN figure, which only materialises on
-     * hops the machine actually decimates -- on an echo path whose estimate
-     * keeps moving it re-arms every time and never decimates at all. These
-     * two counters make the REALISED saving measurable per run instead of
-     * assumed: duty_hops_run / duty_hops_total is the true matched-filter
-     * engagement, and 1 minus that ratio the true saving. Incremented at the
-     * single call site that consumes run_filter (aec_process_core), so the
-     * census cannot drift from what was actually executed. uint64 because a
-     * long-running stream at a 128-sample hop passes 2^31 hops in ~2 years
-     * of continuous audio. Diagnostic only -- nothing in the library reads
-     * them back; exposed read-only via AecDebugStatus and printed by
-     * example/aec_wav.c. Cumulative since aec_create/aec_init/aec_reset. */
+    /* Engagement census: the doc comment above gives "~90% of the matched-filter
+     * cost" as a DESIGN figure for the duty machine, which only materialises on
+     * hops it actually decimates -- on an echo path whose estimate keeps moving
+     * it re-arms every time and never decimates at all. These two counters make
+     * the REALISED saving measurable per run: duty_hops_run / duty_hops_total is
+     * the true matched-filter engagement, and 1 minus that ratio the true
+     * saving. Incremented at the single call site that consumes run_filter
+     * (aec_process_core), so the census cannot drift from what was actually
+     * executed. uint64 because a long-running stream at a 128-sample hop passes
+     * 2^31 hops in ~2 years of continuous audio. Diagnostic only -- nothing in
+     * the library reads them back; exposed read-only via AecDebugStatus and
+     * printed by example/aec_wav.c. Cumulative since
+     * aec_create/aec_init/aec_reset. */
     unsigned long long duty_hops_total;  /* hops through the delay block   */
     unsigned long long duty_hops_run;    /* of those, hops that actually
                                           * ran the matched filter
@@ -478,9 +472,8 @@ typedef struct Aec {
 
     /* detectors / EPC / regime / RSA */
     RenderActivity    render_activity;
-    /* De-stacked RenderActivity scratch (formerly a fixed `float[1024]`
-     * local inside render_activity_update()); pool-carved, sized
-     * ceil(hop_size/8) -- see detectors.h. */
+    /* RenderActivity scratch: pool-carved, sized ceil(hop_size/8) -- see
+     * detectors.h. */
     float*            ra_pairwise_scratch;
     FilterConvergence convergence;
     DoubleTalk        dt_analyzer;
@@ -508,9 +501,7 @@ typedef struct Aec {
     float  render_peak_floor;
     int    block_stationary_next;   /* _block_stationary_for_next_hop latch */
 
-    /* per-frame scalars (mirror orchestrator instance fields). float32-by-
-     * design (Stage-2 f32 conversion; Python f64 bit-exact parity retired,
-     * f32/f64 drift accepted — see aec.c). */
+    /* per-frame scalars (mirror orchestrator instance fields); float32. */
     float  saturation_level;
     float  erl_estimate;
     float  main_err_smooth, shadow_err_smooth;
@@ -549,12 +540,10 @@ typedef struct Aec {
      * 2*leakage_div_sustain_hops). Mirrors
      * orchestrator._leakage_div_sustained_counter. */
     int    leakage_div_sustained_counter;
-    /* Live-computed thresholds for the four counters above (+
-     * stat_dt_hangover), all previously frozen at the legacy hop=160/
-     * sr=16000 grid's hop-count result (2/10/5/80) instead of being
+    /* Live-computed thresholds for the four counters above (+ stat_dt_hangover),
      * recomputed for the live hop_size/sample_rate -- see aec.c's
-     * poor-coarse-rescue / Track-F / stationary-DT-hangover blocks.
-     * Mirrors orchestrator.py's _aec3_scale.blocks_to_hops(5)/(25) and
+     * poor-coarse-rescue / Track-F / stationary-DT-hangover blocks. Mirrors
+     * orchestrator.py's _aec3_scale.blocks_to_hops(5)/(25) and
      * ms_to_hops(50.0)/(800.0) calls at those same sites. */
     int    poor_coarse_threshold_hops;    /* was hardcoded 2 */
     int    coarse_reset_hangover_hops;    /* was hardcoded 10 */
@@ -587,17 +576,13 @@ typedef struct Aec {
     float* final_out;
     float* filter_taps_full;   /* [n_partitions × hop] */
 
-    /* per-hop freq-bin scratch (Tier-1 stack-safety fix): these used to be
-     * `float x[8192]` locals inside aec_process() / mean_sq(), sized far
-     * beyond the actual n_freqs (K) they ever hold and with no assertion
-     * tying 8192 to fft_size — a larger FFT config would silently smash the
-     * stack, and some scopes stacked 2-3 of them at once (~96 KB worst case
-     * in one block), which is unsafe headroom for an embedded RTOS task
-     * stack (often 16-64 KB total). Moved into the Aec instance (malloc'd in
-     * aec_create, pool-carved in aec_init, sized exactly K — or hop for
-     * scr_sq, which mean_sq() only ever runs over hop-length buffers) so
-     * stack usage no longer depends on n_freqs at all. Bit-exact: same
-     * values, same order, only storage location changed. */
+    /* per-hop freq-bin scratch: kept in the Aec instance (malloc'd in
+     * aec_create, pool-carved in aec_init), sized exactly K -- or hop for scr_sq,
+     * which mean_sq() only ever runs over hop-length buffers -- rather than as
+     * fixed-size locals, so stack usage does not depend on n_freqs. A fixed
+     * 8192-entry local (some scopes stacking 2-3 of them, ~96 KB worst case)
+     * would be unsafe headroom for an embedded RTOS task stack (often 16-64 KB
+     * total). */
     float* scr_sq;          /* mean_sq() scratch, size hop_size (not K) */
     float* scr_e2_echo;
     float* scr_e2_near;
@@ -633,8 +618,8 @@ typedef struct Aec {
      *     fifo_write next observes the incremented value.
      *   - fifo_read: consumer-owned monotonic unsigned read sequence number,
      *     same wraparound treatment. Sole writer: the capture thread, in
-     *     aec_process_capture() — including its own catch-up path (unlike
-     *     the earlier design, the producer never touches fifo_read here).
+     *     aec_process_capture() — including its own catch-up path (the producer
+     *     never touches fifo_read).
      *     Plain-loaded by its own thread; RELEASE-stored only AFTER
      *     aec_process() has returned for the claimed hop (see the
      *     slot-lifetime note below), so that store both publishes the new
@@ -678,16 +663,14 @@ typedef struct Aec {
      *     conservative than strictly necessary (it can turn one extra
      *     producer call into a reported drop-new under sustained skew) but
      *     needs no change inside aec_process() itself.
-     *   - fifo_count: RETIRED by this rewrite — always 0. Kept ONLY so every
-     *     field below it keeps its pre-existing byte offset (layout
-     *     stability). Nothing in aec.c reads or writes it except the
-     *     zeroing at init/reset.
+     *   - fifo_count: always 0 (unused). Kept only so every field below it
+     *     keeps its byte offset (layout stability). Nothing in aec.c reads or
+     *     writes it except the zeroing at init/reset.
      *   - fifo_zero_ref: an immutable all-zero hop, carved from the pool at
      *     init and re-zeroed at reset — otherwise never written by either
-     *     streaming thread. This is the underrun reference: unlike the
-     *     earlier design (which memset a ring slot in place on underrun),
-     *     the ring itself is never written by the capture thread, so
-     *     aec_process_capture() has nothing to race against on this path.
+     *     streaming thread. This is the underrun reference: the ring itself is
+     *     never written by the capture thread, so aec_process_capture() has
+     *     nothing to race against on this path.
      *   - render_call_count / capture_call_count / last_buffering_event:
      *     each is written by exactly one side (render_call_count only by
      *     the render thread, the other two only by the capture thread), so
@@ -706,7 +689,7 @@ typedef struct Aec {
      * test/test_fifo_spsc.c's header comment). */
     float* render_fifo;        /* [fifo_cap_hops × hop_size] ring of render hops */
     int    fifo_cap_hops;      /* capacity in hops — forced to a power of two, see aec_derive_dims */
-    int    fifo_count;         /* RETIRED — always 0, kept only for layout stability, see above */
+    int    fifo_count;         /* always 0, kept for layout stability, see above */
     int    fifo_read, fifo_write;  /* fifo_read: consumer-owned monotonic unsigned cursor; fifo_write: producer-owned monotonic unsigned cursor (see above) */
     long   render_call_count, capture_call_count;  /* single-writer-per-field stats, plain ops (see above) */
     int    last_buffering_event;   /* AecBufferingEvent of the last capture step — relaxed-atomic (see above) */
@@ -755,9 +738,8 @@ typedef struct Aec {
  *                rescue, the double-talk analyzer, EPV, shadow_rise and the
  *                misadjustment estimator. None of it touches the sample
  *                stream directly -- it decides how the next hop adapts --
- *                but it is real per-hop cost, and it used to fall between
- *                linear_us closing and res_us opening, which made every
- *                breakdown built on these fields understate the hop.
+ *                but it is real per-hop cost, reported so that the
+ *                breakdown covers the whole hop.
  *   res_us       the AEC3 post/RES block. Runs whenever enable_res OR
  *                return_res_context is set, so a context-only caller pays it
  *                too and sees a real number here.
@@ -805,7 +787,7 @@ void aec_reset(Aec* a);
 /**
  * Realign an AEC_DELAY_EXTERNAL_ALIGNED instance across a caller-side change
  * of the far alignment, WITHOUT the full reset that exposes echo again and
- * restarts the WOLA sequence (the spectrogram "vertical line").
+ * restarts the WOLA sequence (an audible discontinuity).
  *
  * delta_samples = new_alignment - old_alignment: positive when the aligned
  * far stream advances (delay grew, including the first acquisition from raw
@@ -821,13 +803,13 @@ void aec_reset(Aec* a);
  * Otherwise the filter is RESET -- taps, far spectra, far analysis history and
  * the convergence/mu/stationarity latches -- because taps that were not
  * shifted sit at the alignment the caller just abandoned: they do not "re-adapt
- * from a head start", they subtract a decorrelated copy of the echo (measured
- * 1.3-1.5x the echo, i.e. worse than no filter at all, held for hundreds of
+ * from a head start", they subtract a decorrelated copy of the echo (1.3-1.5x
+ * the echo, i.e. worse than no filter at all, held for hundreds of
  * hops by the converged-mu floor and the stationary-render freeze). The reset
  * is FILTER-ONLY: the synthesis overlap-add and the mic-side analysis frame
  * are untouched, so the output stays continuous -- that is the whole
- * difference from aec_reset(), whose extra reach is exactly the spectrogram
- * "vertical line". Reconvergence tracks an aec_reset() twin's trajectory.
+ * difference from aec_reset(), whose extra reach is the synthesis restart.
+ * Reconvergence tracks an aec_reset() twin's trajectory.
  *
  * Either outcome bumps the alignment generation an AecLinearContext consumer
  * polls: the far this filter is matched to moved, so cross-hop far caches are
@@ -839,11 +821,11 @@ void aec_reset(Aec* a);
  * is exposed until the partition ring refills past the shifted response. The
  * bound is ceil((|delta| + the response's own tap offset) / hop_size) + 1
  * hops, i.e. at worst n_partitions + 1 when the response sits at the end of
- * the tap span; measured on a 256-sample hop with a 1024-sample span:
+ * the tap span; for a 256-sample hop with a 1024-sample span:
  * delta=-300 at tap 0 -> 2 hops, delta=-768 at tap 100 -> 4 hops, delta=-900
  * at tap 60 -> 4 hops. Within that window the residual is NOT bounded by the
  * echo either: partially-refilled history convolved against the shifted taps
- * measured 1.30x the echo on the -900 case. Cancellation resumes outright
+ * gave 1.30x the echo on the -900 case. Cancellation resumes outright
  * afterwards. An ADVANCE (delta > 0) keeps the history and settles within a
  * hop; the far samples the caller's own jump skipped are unrecoverable by
  * either direction, since they were never presented to the filter.
@@ -976,7 +958,7 @@ int aec_linear_is_cancelling(const Aec* a);
  * buffers a render hop; aec_process_capture() consumes the delay-aligned
  * render and produces output. Both return the buffering event observed.
  *
- * THREADING CONTRACT (F09, SPSC only): exactly ONE thread may call
+ * THREADING CONTRACT (SPSC only): exactly ONE thread may call
  * aec_analyze_render() and exactly ONE (possibly different) thread may call
  * aec_process_capture() on a given Aec — single-producer/single-consumer.
  * Under that contract the two functions may run fully concurrently with no
@@ -1107,9 +1089,8 @@ void aec_get_res_context(const Aec* a, AecResContext* ctx);
  *     products must choose n from a measured route-delay envelope and own the
  *     fail-open/recovery policy. The getter itself mutates no state.
  *
- * PER-MODE SEMANTICS (cfg.delay_mode; productization plan appendix 11.1) --
- * the three modes make the previously implicit alignment state explicit,
- * and none of them changes a single output sample:
+ * PER-MODE SEMANTICS (cfg.delay_mode) --
+ * the three modes make the alignment state explicit:
  *
  *   AEC_DELAY_MATCHED
  *     Unchanged: delay_samples is the applied ring offset (-1 before the
@@ -1223,12 +1204,12 @@ typedef struct AecDebugStatus {
 
 void aec_debug_status(const Aec* a, AecDebugStatus* out);
 
-/* ── Static-pool memory breakdown (plan §3.4.6 RAM acceptance test 6) ─────
+/* ── Static-pool memory breakdown ─────
  * `aec_get_mem_size()` returns one total; this labels two subsets of that
  * same total instead of a caller (e.g. a CLI's --print-mem-size) having to
  * re-derive them from the config by hand -- which would be exactly the
- * kind of second, driftable size computation the pool-first refactor (plan
- * §3) exists to avoid. total_bytes is always aec_get_mem_size(cfg) itself,
+ * kind of second, driftable size computation the pool-first design
+ * exists to avoid. total_bytes is always aec_get_mem_size(cfg) itself,
  * called from inside this function, so the two can never disagree.
  *
  *   estimator_bytes  delay_aec3_get_mem_size() for the resolved

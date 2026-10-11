@@ -1,6 +1,6 @@
 /* linear_filter_output.h — C port of
- * AEC._aec3_select_linear_filter_output (python/modules/orchestrator.py
- * lines 2894-2999): AEC3 UseRefinedOutput + FormLinearFilterOutput parity.
+ * AEC._aec3_select_linear_filter_output (python/modules/orchestrator.py):
+ * AEC3 UseRefinedOutput + FormLinearFilterOutput parity.
  *
  * Per hop it picks the cleaner of the refined (main) / coarse (shadow) linear
  * filter time-domain residuals via the AEC3 UseRefinedOutput predicate, runs a
@@ -9,9 +9,7 @@
  * the selected windowed error spectrum + selected echo spectrum that feed RES +
  * SuppressionGain.
  *
- * Numerical fidelity (float32-by-design; converted for uniformity as part of
- * the f32 campaign, drift accepted — see project_c_port_parity_rules.md for
- * the retired fp64 parity history):
+ * Numerical fidelity (float32; drift versus Python accepted):
  *  - the e2/y2/s2 block sum-of-squares are np.sum over float32 (each f32
  *    sample squared in float32) → PAIRWISE-summed in float32
  *    (pairwise_sum_f32, matching pbfdkf.c's pairwise_sum_f32 tree shape).
@@ -19,7 +17,7 @@
  *  - the crossfade ramp stays float32 (s = (k+1)/(kT+1) is f32_array / pyfloat
  *    → f32; (1-s) is pyfloat - f32_array → f32; products/sum f32).
  *  - the rfft of [e_old | e_form]·sqrt_hann (length block_size, zero-padded to
- *    fft_size) goes through the vendored bit-exact pocketfft (fft_forward).
+ *    fft_size) goes through the library FFT (fft_forward).
  *  - complex64 add / subtract are elementwise (no FMA needed).
  *  - built with -ffp-contract=off so each float op rounds separately.
  *

@@ -7,16 +7,13 @@
  *   - StationarityEstimator : history ring of render PSDs → per-bin
  *     stationarity flags + hangover + 3-bin smoothing + is_block_stationary.
  *
- * FLOAT32-BY-DESIGN (numpy 1.26 → C):
+ * FLOAT32 (numpy 1.26 → C):
  *   The real pipeline feeds a float32 render_psd (= |far_spec|² .astype(f32))
  *   and average_reverb is always None (→ float32 zeros). Every scalar in this
- *   module — formerly kept as fp64 to mirror numpy's weak-promotion rule
- *   (Python float scalars cast to float32 at the point they combine with the
- *   float32 arrays) — is now float32 throughout, converted for uniformity as
- *   part of the f32 campaign (drift accepted). All arrays here are therefore
- *   `float`, the hangover counter is int32, and the flags are bytes (bool).
- *   Built with -ffp-contract=off so the compiler does not fuse the three-step
- *   float32 roundings.
+ *   module is float32 throughout (drift versus Python accepted). All arrays
+ *   here are therefore `float`, the hangover counter is int32, and the flags
+ *   are bytes (bool). Built with -ffp-contract=off so the compiler does not
+ *   fuse the three-step float32 roundings.
  *
  *   window_hops / hangover_hops are derived from AEC3 block counts (13 / 12) via
  *   aec3_blocks_to_hops(); at hop=160/sr=16000 both = 5.
@@ -39,9 +36,7 @@
 
 /* ── _NoiseSpectrum ───────────────────────────────────────────────────────
  * Per-bin slow noise-floor tracker (stationarity_estimator.cc:159-242). All
- * arithmetic float32, including the scalars (1/avg_init, alpha, ...), which
- * are float32-by-design (formerly stored as double and cast to float at each
- * multiply to mirror numpy weak promotion). */
+ * arithmetic float32, including the scalars (1/avg_init, alpha, ...). */
 typedef struct {
     int    n_freqs;
     float  min_noise;     /* _min  (Python float)            */

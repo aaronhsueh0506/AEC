@@ -1,6 +1,6 @@
-/* filter_analyzer.c — C port (float32-by-design; parity retired) of
- * python/modules/state/filter_analyzer.py. See header for the parity contract.
- * Build with -ffp-contract=off. */
+/* filter_analyzer.c — C port (float32) of
+ * python/modules/state/filter_analyzer.py. See header for the parity
+ * contract. Build with -ffp-contract=off. */
 #include "filter_analyzer.h"
 #include "aec3_scale.h"
 
@@ -37,10 +37,9 @@ static int fa_floor_scale(int sample_rate) {
  *   n > 128   -> split at n2 = (n/2) floored to a multiple of 8, recurse, add.
  * Every op is a float32 add (no f64 widening).
  * Body delegates to simd_kernels.h's sk_pairwise_sum_tailfold_b_f32 (this
- * exact tree is that kernel's `_scalar` twin verbatim source; byte-identical
- * local copies also live in reverb_frequency_response.c/filter_state_bridge.c/
- * fullband_erle.c, all now delegating to the same shared kernel); local
- * symbol/signature kept so call sites are unchanged. */
+ * exact tree is that kernel's `_scalar` twin verbatim source; identical local
+ * copies in reverb_frequency_response.c/filter_state_bridge.c/
+ * fullband_erle.c delegate to the same shared kernel). */
 float fa_f32_pairwise_sum(const float *a, size_t n) {
     return sk_pairwise_sum_tailfold_b_f32(a, n);
 }
@@ -130,27 +129,23 @@ static int cd_detect(FaConsistentDetector *c, const float *h, int size,
     if (c->significant_peak) {
         int active, i;
         for (i = 0; i < render_block_len; ++i) {
-            float v = render_block[i];  /* float32-by-design (was astype(np.float64)) */
+            float v = render_block[i];  /* float32 (Python: astype(np.float64)) */
             render_sq_scratch[i] = v * v;
         }
         active = (fa_f32_pairwise_sum(render_sq_scratch, (size_t)render_block_len)
                   > c->active_render_threshold);
         if (c->delay_ref == delay_blocks) {
-            /* UBSan-confirmed signed-overflow fix, floored at LONG_MAX (not
-             * at the FA_CONSISTENT_HOLD_HOPS threshold the boolean below
-             * reads): unlike a pure boolean-gate counter, this field's raw
-             * value is read bit-exact by test/historical/parity_filter_analyzer.c
-             * (`m.consistent.counter != e_counter`), which mirrors the
-             * Python ConsistentFilterDetector's own unbounded `_counter`
-             * accumulator. Capping at the threshold would still make the
-             * `> FA_CONSISTENT_HOLD_HOPS` boolean below match, but would
-             * desync the raw value from Python's golden the very next hop
-             * (same trap as erl_estimator.c's hold_counter_time_domain --
-             * see that fix's comment). Capping at LONG_MAX instead is a
-             * no-op for every practically-reachable state (this counter
-             * only advances on active-render hops with a held delay
-             * estimate) while eliminating the UB at the true overflow
-             * boundary. */
+            /* Floored at LONG_MAX to avoid signed overflow (not at the
+             * FA_CONSISTENT_HOLD_HOPS threshold the boolean below reads): unlike a pure
+             * boolean-gate counter, this field's raw value is compared bit-exact by
+             * test/historical/parity_filter_analyzer.c (`m.consistent.counter !=
+             * e_counter`), which mirrors the Python ConsistentFilterDetector's own
+             * unbounded `_counter` accumulator. Capping at the threshold would still
+             * make the `> FA_CONSISTENT_HOLD_HOPS` boolean below match, but would desync
+             * the raw value from Python the very next hop (same constraint as
+             * erl_estimator.c's hold_counter_time_domain). Capping at LONG_MAX is a
+             * no-op for every practically reachable state (this counter only advances
+             * on active-render hops with a held delay estimate). */
             if (active && c->counter < LONG_MAX) c->counter += 1;
         } else {
             c->counter = 0;
@@ -287,17 +282,15 @@ void fa_update(FilterAnalyzer *m, const float *filter_taps,
     if (m->abs_scratch_len < size || m->render_sq_scratch_len < render_block_len) {
         return;
     }
-    /* Ceilinged at FA_CONVERGENCE_THRESHOLD_HOPS+1 (UBSan-confirmed
-     * signed-overflow fix): the ONLY consumer of blocks_since_reset
-     * anywhere in this file is the `> FA_CONVERGENCE_THRESHOLD_HOPS` check
-     * below (test/historical/parity_filter_analyzer.c does not read this field, only
-     * `consistent.counter` -- see that field's own fix above). Once the
-     * counter exceeds FA_CONVERGENCE_THRESHOLD_HOPS, further increments
-     * can never change that comparison's outcome (already true, stays
-     * true), so gating the increment at the smallest value that still
-     * satisfies `>` is observationally identical to the old unconditional
-     * `+= 1` for every reachable state, while eliminating the eventual
-     * signed overflow. */
+    /* Ceilinged at FA_CONVERGENCE_THRESHOLD_HOPS+1 to avoid signed overflow: the
+     * ONLY consumer of blocks_since_reset in this file is the
+     * `> FA_CONVERGENCE_THRESHOLD_HOPS` check below
+     * (test/historical/parity_filter_analyzer.c does not read this field, only
+     * `consistent.counter`). Once the counter exceeds
+     * FA_CONVERGENCE_THRESHOLD_HOPS, further increments can never change that
+     * comparison's outcome (already true, stays true), so gating the increment
+     * at the smallest value that still satisfies `>` is observationally
+     * identical to an unbounded increment for every reachable state. */
     if (m->blocks_since_reset <= m->convergence_threshold_hops)
         m->blocks_since_reset += 1;
     fa_set_region(m, size);

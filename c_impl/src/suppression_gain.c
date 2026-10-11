@@ -1,18 +1,13 @@
-/* suppression_gain.c — C port of python/modules/residual/suppression_gain.py
- * (WS5). Build with -ffp-contract=off.
+/* suppression_gain.c — C port of python/modules/residual/suppression_gain.py.
+ * Build with -ffp-contract=off.
  *
- * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity is
- * retired for this module; drift accepted):
+ * PRECISION: float32 (drift versus Python accepted):
  *  - Every per-bin array and every scalar (ENR/EMR/min/max/CNG/DNE math,
- *    SuppressionGainConfig thresholds) is float32, single rounding per op.
- *    The old numpy-parity rules ("f32_array op pyfloat -> f32", "scalar f32 *
- *    pyfloat -> f64", "Python builtin max/min compare in double") no longer
- *    apply — this is native C float arithmetic throughout.
+ *    SuppressionGainConfig thresholds) is float32, single rounding per op;
+ *    native C float arithmetic throughout.
  *  - np.sum/np.mean-equivalent reductions over f32 stay pairwise float32
  *    (f32_pairwise_sum / the local float32 pairwise-sum helper below).
- *  - np.exp/np.sqrt equivalents use fast_exp/fast_sqrt (float32; libm
- *    exp()/sqrt() double calls are retired in favour of the float32 helpers
- *    already used elsewhere in this file).
+ *  - np.exp/np.sqrt equivalents use fast_exp/fast_sqrt (float32).
  */
 #include "suppression_gain.h"
 
@@ -43,16 +38,14 @@ void suppression_gain_init(SuppressionGain *sg,
     memset(sg, 0, sizeof(*sg));
     sg->cfg = *cfg;
     sg->tun = *tun;
-    /* M4 (multi-rate consumption switch): tun->table_len is the length the
-     * caller's per-rate lookup row baked the six per-bin tuning arrays at.
-     * gain_to_no_audible_echo's per-bin loop below reads all six at index
-     * [0, cfg->n_bins) -- a mismatch would walk off the end of one of those
-     * static const arrays. Construction-time-only invariant (both n_bins
-     * and the tables come from the same rate-table row for a validated
-     * sample rate), so a debug assert is the whole guard here (unlike
-     * aec_state.c's filter_taps_full_len, which is a per-hop live value and
-     * gets both a debug assert AND a release-path skip). Never fires for
-     * the validated {16000} whitelist (table_len == n_bins == 257 there). */
+    /* tun->table_len is the length the caller's per-rate lookup row baked the six
+     * per-bin tuning arrays at. gain_to_no_audible_echo's per-bin loop below
+     * reads all six at index [0, cfg->n_bins) -- a mismatch would walk off the
+     * end of one of those static const arrays. Construction-time-only invariant
+     * (both n_bins and the tables come from the same rate-table row for a
+     * validated sample rate), so a debug assert is the whole guard here (unlike
+     * aec_state.c's filter_taps_full_len, which is a per-hop live value and gets
+     * both a debug assert AND a release-path skip). */
     assert(tun->table_len == cfg->n_bins);
     /* Seed the live floor equal to its target: an instance whose runtime
      * setter is never called then applies exactly cfg->split_floor_far_active,
@@ -77,15 +70,13 @@ void suppression_gain_init(SuppressionGain *sg,
         sg->last_echo[k] = 0.0f;
     }
     sg->low_render_avg_power = 32768.0f * 32768.0f;
-    /* AEC3 power IIR (average_power = 0.9*avg + 0.1*x2) is per-4ms-block;
-     * a bare hardcoded 0.9f/0.1f has no rate conversion at all (wrong even
-     * at the legacy hop=160/sr=16000 grid: the correct per-hop alpha there
-     * is 1-0.9^2.5 ~= 0.2316, not 0.1). The wall-clock-rescaled form below
-     * mirrors suppression_gain.py's _LowNoiseRenderDetector with
-     * use_wallclock_ema_alpha=True, but -- same as the Python default --
-     * stays OFF (cfg->use_wallclock_ema_alpha=0) until it has its own
-     * bench pass + sign-off; see suppression_gain.h and CHANGELOG's
-     * "Explicitly held back" entry. Do not flip the default without that. */
+    /* AEC3 power IIR (average_power = 0.9*avg + 0.1*x2) is per-4ms-block; a bare
+     * hardcoded 0.9f/0.1f has no rate conversion at all (the correct per-hop
+     * alpha at hop=160/sr=16000 is 1-0.9^2.5 ~= 0.2316, not 0.1). The
+     * wall-clock-rescaled form below mirrors suppression_gain.py's
+     * _LowNoiseRenderDetector with use_wallclock_ema_alpha=True, but -- same as
+     * the Python default -- is OFF (cfg->use_wallclock_ema_alpha=0); see
+     * suppression_gain.h. */
     if (cfg->use_wallclock_ema_alpha) {
         float alpha = aec3_per_block_ema_alpha_to_per_hop(
             0.1f, cfg->hop_size, cfg->sr);
@@ -446,10 +437,9 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
         ne_w = 1.0f / (1.0f + fast_exp(sig_arg));
     }
 
-    /* Resolve tuning tables (or per-bin blend). For per-bin blend we write
-     * the blended tables into the caller-owned weighted_residual scratch? No,
-     * we keep them in local fixed arrays sized by n_bins via the sum_scratch
-     * triple region. To stay malloc-free we recompute per-bin inline below. */
+    /* Resolve tuning tables. With the per-bin blend the blended values are
+     * computed inline per bin below (no malloc, no blended-table scratch), so
+     * the table pointers stay NULL in that case. */
     if (c->soft_blend_enabled) {
         enr_tr_tab = NULL;    /* per-bin path computes inline */
         enr_su_tab = NULL;
@@ -524,7 +514,7 @@ static void gain_to_no_audible_echo(SuppressionGain *sg, const float *nearend,
 }
 
 /* _limit_lf_gains — mirrors Python: np.minimum(gain[:lf_clamp_bin], gain[lf_clamp_bin]).
- * E8 fix: AEC3 native fft=128 uses hardcoded bins 0-2 (≤125 Hz); our fft=512 needs
+ * AEC3 native fft=128 uses hardcoded bins 0-2 (≤125 Hz); our fft=512 needs
  * 9 bins (0-250 Hz).  lf_clamp_bin = hz_to_bin(250 Hz) = 8 at 16 kHz / 512-pt. */
 static void limit_lf_gains(float *gain, int n, int lf_clamp_bin) {
     int k;
@@ -549,7 +539,7 @@ static void limit_hf_gains(SuppressionGain *sg, float *gain) {
         for (k = lgb + 1; k < n; ++k) if (gain[k] > mug) gain[k] = mug;
     }
     if (n >= 2) gain[n - 1] = gain[n - 2];
-    /* conservative_hf path: OFF in balanced; not exercised by the golden. */
+    /* conservative_hf path: OFF in balanced. */
     (void)c;
 }
 
@@ -620,7 +610,7 @@ const float *suppression_gain_get_gain(
     gain_to_no_audible_echo(sg, sg->nearend, sg->weighted_residual,
                             comfort_noise, sg->g_raw);
     /* Step 6: np.maximum(np.minimum(G_raw, max_gain), min_gain).
-     * E7 fix: order is minimum-first then maximum, not np.clip (min(max(x,lo),hi)).
+     * Order is minimum-first then maximum, not np.clip (min(max(x,lo),hi)).
      * When min_gain > max_gain (saturated-echo recovery), min_gain wins. */
     /* minimum(G_raw, max_gain): "if (v>hi) v=hi;" == (hi<v)?hi:v, which
      * matches sk_min_f32(a,b)=(a<b)?a:b with a=max_gain, b=g_raw exactly

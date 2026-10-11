@@ -1,23 +1,22 @@
 /* aec3_post.h — C port of the AEC3 post-filter DRIVER (AEC._aec3_post in
- * python/modules/orchestrator.py). WS5 Phase 5.5.
+ * python/modules/orchestrator.py).
  *
- * This is the STATEFUL INTEGRATION layer that ties the already-bit-exact
- * sub-modules together and adds CNG + OLA. The per-bin float math of
- * AecState / ResidualEchoEstimator / SuppressionGain / the reverb models /
- * the ERLE + stationarity estimators is owned (and parity-tested) by those
- * modules; THIS driver owns the assembly logic the orchestrator method
- * implements directly:
+ * This is the STATEFUL INTEGRATION layer that ties the sub-modules together
+ * and adds CNG + OLA. The per-bin float math of AecState /
+ * ResidualEchoEstimator / SuppressionGain / the reverb models / the ERLE +
+ * stationarity estimators is owned (and parity-tested) by those modules; THIS
+ * driver owns the assembly logic the orchestrator method implements directly:
  *
  *   1. PSD derivation from the fp32 spectra  (|c64|² · _PSD_SCALE, all-f32):
  *        near_psd / far_psd / echo_psd / error_psd
- *   2. E1 windowed-capture Y² for ERLE          (erle_windowed_capture_psd)
+ *   2. windowed-capture Y² for ERLE          (erle_windowed_capture_psd)
  *   3. avg-render-reverb x2_reverb_for_erle: an owned ReverbModel fed
  *        X²[delay+1] with the steady decay, output X²[delay] + reverb
  *        (+ erle_render_x2_psd_scale).
  *   4. coherence Γ²(Ŷ,Y) EMA + ERLE coh-gate mask   (erle_coh_gate, default ON)
  *   5. CNG N2 tracking → comfort_noise: y2_smoothed EMA, n2 track-down/
  *        slow-up, n2_initial transient, noise-floor clamp.
- *   6. E2 output-base select (output_capture_when_linear_unusable, |E|>|Y|
+ *   6. output-base select (output_capture_when_linear_unusable, |E|>|Y|
  *        guard), gain apply, CNG injection (LCG sin-table indices + sqrt(2)·
  *        sin LUT, DC/Nyquist zeroed), irfft, sqrt-Hann synth window, OLA.
  *
@@ -31,9 +30,8 @@
  *   - _PSD_SCALE = 32768² (int16 max²). PSD = (|c64|² in f32) · _PSD_SCALE in
  *     f32 (array · pyfloat → f32, numpy<2 rule), then .astype(f32) no-op.
  *   - coherence Γ²: sye is complex64 (component-wise f32 EMA, scalars value-
- *     cast to f32); syy/see are float32 (Stage 3a: the f64 widen previously
- *     used to match the numpy reference is retired — same EMA computed in f32
- *     throughout, structure/order unchanged, drift accepted). gamma2 =
+ *     cast to f32); syy/see are float32 (the EMA is computed in f32
+ *     throughout; drift versus the numpy reference accepted). gamma2 =
  *     (|sye|²/max(syy·see,1e-30)).astype(f32).
  *   - CNG N2 tracking: y2_smoothed / n2 / n2_initial are float32 arrays; the
  *     per-hop α/freshness/retention/slow-up are python-float scalars value-cast
@@ -42,8 +40,7 @@
  *     scalar).
  *   - CNG LCG: seed (int) recurrence (seed*69069+1) & 0x7FFFFFFF, ix = seed>>26
  *     (0..31), im = (ix+8)&31. uint32 arithmetic reproduces it exactly.
- *   - irfft via fft_pocketfft.c (vendored numpy pocketfft; BIT-EXACT vs
- *     np.fft.irfft, 1/N normalization, fp64 internal).
+ *   - irfft via the library FFT backend (1/N normalization).
  *   - synth window = block_size sqrt-Hann (MATLAB-canonical denom N), provided
  *     by the caller (orchestrator builds it once).
  *
@@ -87,9 +84,9 @@ typedef struct {
 
     /* feature flags (balanced defaults shown) */
     int    erle_coh_gate_enabled;            /* 1 */
-    int    erle_windowed_capture_psd;        /* 1 (E1) */
+    int    erle_windowed_capture_psd;        /* 1 */
     int    erle_render_x2_psd_scale;         /* 1 */
-    int    output_capture_when_linear_unusable; /* 1 (E2) */
+    int    output_capture_when_linear_unusable; /* 1 */
     int    enable_cng;                       /* 1 */
 
     /* coherence Γ²(Ŷ,Y) EMA */
@@ -131,7 +128,7 @@ typedef struct {
     Aec3PostTrace trace;
 
     /* Live-computed convergence-flags y2 threshold (step 4, aec3_post_run).
-     * See aec3_post_init()'s comment; was a frozen literal 3.73e-4f. */
+     * See aec3_post_init()'s comment. */
     float y2_thr;
 
     /* synthesis window (block_size) + sqrt(2)·sin LUT (32), caller-owned,
@@ -164,7 +161,7 @@ typedef struct {
     float   *far_psd;              /* [n_bins] */
     float   *echo_psd;             /* [n_bins] */
     float   *error_psd;            /* [n_bins] */
-    float   *capture_psd_erle;     /* [n_bins] (E1) */
+    float   *capture_psd_erle;     /* [n_bins] */
     float   *x2_reverb_for_erle;   /* [n_bins] */
     unsigned char *coh_gate_mask;  /* [n_bins] */
     float   *comfort_noise;        /* [n_bins] (== n2 or n2_initial alias copy) */
@@ -209,13 +206,13 @@ typedef struct {
     const float *abs_near;     /* |near_spec|       (near_psd, coh see)  */
     const float *abs_far;      /* |far_spec|        (far_psd)            */
     const float *abs_sel_echo; /* |echo_spec_sel|   (echo_psd)           */
-    const float *abs_error;    /* |error_spec|=|sel_esw| (error_psd, E2) */
+    const float *abs_error;    /* |error_spec|=|sel_esw| (error_psd) */
     const float *abs_echo_coh; /* |filter.echo_spec| (coh syy)          */
-    const float *abs_nsw_e1;   /* |esw_orig+echo_orig| (E1 capture_psd)  */
-    /* Read only by aec3_post_apply_output()'s E2 guard, so aec3_post_run()
+    const float *abs_nsw_e1;   /* |esw_orig+echo_orig| (capture_psd for ERLE) */
+    /* Read only by aec3_post_apply_output()'s output-capture guard, so aec3_post_run()
      * leaves it NULL whenever that call cannot happen (context_only). Any
      * new consumer outside apply_output() must compute it for itself. */
-    const float *abs_ybase;    /* |sel_esw+sel_echo|   (E2 guard)        */
+    const float *abs_ybase;    /* |sel_esw+sel_echo|   (output-capture guard) */
 } Aec3PostAbs;
 
 /* Process one hop. Inputs are the raw fp32 spectra the driver reads (already
@@ -264,7 +261,7 @@ void aec3_post_process(Aec3Post *p,
  * calls them in sequence so the driver-only parity test stays byte-equal.
  * ──────────────────────────────────────────────────────────────────────── */
 
-/* Stage 1-2: near/far/echo/error PSDs + (E1) capture_psd_erle. */
+/* Stage 1-2: near/far/echo/error PSDs + capture_psd_erle. */
 void aec3_post_compute_psds(Aec3Post *p, const Aec3PostAbs *mag);
 
 /* Stage 3: avg-render-reverb → p->x2_reverb_for_erle (only when x2_present). */
@@ -281,7 +278,7 @@ void aec3_post_compute_coherence(Aec3Post *p,
 /* Stage 5: CNG N2 tracking → p->comfort_noise. */
 void aec3_post_compute_comfort_noise(Aec3Post *p, int saturated_capture);
 
-/* Stage 6: E2 output-base select + gain apply + CNG inject + irfft + OLA. */
+/* Stage 6: output-base select + gain apply + CNG inject + irfft + OLA. */
 void aec3_post_apply_output(Aec3Post *p,
                             const Complex *error_spec,
                             const Complex *echo_spec_sel,
@@ -295,7 +292,7 @@ void aec3_post_apply_output(Aec3Post *p,
  * aec3_post_process (which takes the sub-module results gain/usable_linear as
  * INPUTS), this drives AecState + ResidualEchoEstimator + SuppressionGain +
  * StationarityEstimator + LinearFilterSelect itself, reproducing every line of
- * the Python method bit-exactly end-to-end.
+ * the Python method end-to-end.
  *
  * The caller owns + constructs all the sub-module objects (exactly as the
  * orchestrator's __init__ does, captured by the golden); aec3_post_run only
@@ -416,8 +413,8 @@ typedef struct {
 typedef struct {
     Complex *sel_esw;            /* [n_freqs] selected error_spec_windowed */
     Complex *sel_echo;           /* [n_freqs] selected echo_spec           */
-    Complex *nsw_e1;             /* [n_freqs] esw_orig + echo_orig (E1)    */
-    Complex *ybase;              /* [n_freqs] sel_esw + sel_echo (E2 guard)*/
+    Complex *nsw_e1;             /* [n_freqs] esw_orig + echo_orig       */
+    Complex *ybase;              /* [n_freqs] sel_esw + sel_echo (guard)  */
     float   *abs_near;           /* [n_freqs] magnitude buffers …          */
     float   *abs_far;
     float   *abs_sel_echo;

@@ -4,7 +4,7 @@
  * AEC3 source operates on int16 PSD scale (PSD ~ int16^2 up to 32768^2) and
  * 4 ms blocks (kBlockSize = 64 @ 16 kHz). Our pipeline runs on float[-1,1] PSD
  * scale and the live config hop_size (50% overlap, frame=2*hop). Constants
- * explicitly labelled as project-native below retain their legacy 16 kHz /
+ * explicitly labelled as project-native below keep their reference 16 kHz /
  * hop=160 authoring grid; that is not the current production default.
  * NEVER paste a raw int16 PSD threshold or 4 ms-block count into ported code —
  * route it through here so the conversion is explicit and uniform.
@@ -14,11 +14,9 @@
  * round() (half-away-from-zero), so bin/hop counts match the reference exactly.
  *
  * These are init-only conversion helpers (called once at setup, not per-hop);
- * every parameter and return value is float32-by-design (formerly double,
- * converted for uniformity as part of the f32 campaign, drift accepted). The
- * #define constants below are left as plain (untyped) literals — they are
- * consumed verbatim by other modules across the codebase and are out of scope
- * for this conversion.
+ * every parameter and return value is float32 (drift versus Python
+ * accepted). The #define constants below are plain (untyped) literals,
+ * consumed verbatim by other modules across the codebase.
  */
 #ifndef AEC3_SCALE_H
 #define AEC3_SCALE_H
@@ -47,14 +45,12 @@ float  aec3_per_block_growth_to_per_hop(float per_block_multiplier, int hop_samp
  * literally ``x <- retention * x + (1 - retention) * new`` (the constant
  * multiplies the OLD state directly; this is the OPPOSITE convention from
  * aec3_per_block_ema_alpha_to_per_hop's AEC3 ``x <- (1-a)x + a*new``, where a
- * multiplies the NEW sample) -- authored against this repo's own legacy
- * hop=160/sample_rate=16000 (10 ms) default, the implicit single-grid
- * assumption that predates per-rate multi-grid support, with zero rate
- * conversion (e.g. aec.c's shadow_err_alpha, epc_shadow.c's EPV_FAST_TC/
- * EPV_SLOW_TC). Same power-law derivation as
- * aec3_per_block_growth_to_per_hop (``g_per_hop = g_per_ref ^
- * (hop_seconds/ref_seconds)``), parameterized reference period instead of
- * the hardcoded AEC3 4 ms block. */
+ * multiplies the NEW sample) -- authored against this repo's own reference
+ * hop=160/sample_rate=16000 (10 ms) grid with no rate conversion (e.g.
+ * aec.c's shadow_err_alpha, epc_shadow.c's EPV_FAST_TC/EPV_SLOW_TC). Same
+ * power-law derivation as aec3_per_block_growth_to_per_hop (``g_per_hop =
+ * g_per_ref ^ (hop_seconds/ref_seconds)``), with a parameterized reference
+ * period instead of the hardcoded AEC3 4 ms block. */
 float  aec3_growth_rehop(float retention_at_ref, int ref_hop_samples, int ref_sample_rate,
                          int hop_samples, int sample_rate);
 

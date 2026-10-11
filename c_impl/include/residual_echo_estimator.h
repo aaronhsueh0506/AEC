@@ -7,7 +7,7 @@
  *   - NonLinear   (usable_linear=False):  R² = X² · echo_path_gain² (+nl) + reverb
  *   - Saturated echo override: R² = Y² (capture power) in either path.
  *
- * PARITY (numpy 1.26 → C, captured from the real balanced pipeline):
+ * PARITY (numpy 1.26 → C, real balanced pipeline shapes):
  *   - render_psd / capture_psd / s2_linear / erle / erle_unbounded are all
  *     float32[257]; frequency_response is float32 (n_partitions × 257).
  *   - r2 / r2_unbounded / _last_r2_* are float32 buffers (`np.empty(f32)` then
@@ -21,12 +21,8 @@
  *   - reverb tail comes from ReverbModel + ReverbFrequencyResponse C ports.
  *   - decay = aec3_per_block_growth_to_per_hop(0.83f, hop_size, sample_rate):
  *     wall-clock-preserving rescale (accounts for BOTH hop_size AND
- *     sample_rate) in float32, then used as a float scaling. The former
- *     formula (0.83f ** (hop/64), ignoring sample_rate) was correct only by
- *     coincidence at sr=16000 -- at 48 kHz it used an exponent 3x too large,
- *     decaying the reverb tail roughly 3x too fast in wall-clock time.
- *     Mirrors residual_echo_estimator.py's _reverb_decay(), fixed there
- *     first (see its docstring for the full derivation).
+ *     sample_rate) in float32, then used as a float scaling. Mirrors
+ *     residual_echo_estimator.py's _reverb_decay().
  *   Built with -ffp-contract=off so the per-op f32 roundings are not fused.
  *
  * The estimator OWNS a ReverbModel and a ReverbFrequencyResponse. The caller

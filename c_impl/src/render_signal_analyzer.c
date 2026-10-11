@@ -213,7 +213,7 @@ static void identify_strong_narrow_band_component(RenderSignalAnalyzer *m,
     }
 
     /* max_abs of render time block: np.max(np.abs(render_block)), kept in
-     * float32 (float32-by-design; formerly widened via float() to f64). */
+     * float32. */
     max_abs = rsa_max_abs(render_block, render_block_len);
 
     peak_level = render_psd[peak_bin];   /* X2[peak_bin], float32-by-design */

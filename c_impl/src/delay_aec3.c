@@ -1,13 +1,11 @@
 /* delay_aec3.c — C port of python/modules/delay/. See delay_aec3.h for the
- * chain overview and parity notes. ⚠ The WHOLE delay chain (decimator
- * biquads, matched-filter dot products / NLMS update, error-sum / anchor
- * scalars, the confidence getter) now runs float32 unconditionally (see the
- * "matched-filter arithmetic" note below) — an intentional,
- * sampled-cost-free divergence from the Python float64 reference, so this
- * file is no longer bit-exact to Python by construction.
- * test/parity_delay.c + test/gen_delay_c_golden.c together form a
- * C-regression harness (catches accidental future changes) rather than a
- * Python-parity gate.
+ * chain overview and parity notes. The whole delay chain (decimator biquads,
+ * matched-filter dot products / NLMS update, error-sum / anchor scalars, the
+ * confidence getter) runs float32 unconditionally (see the "matched-filter
+ * arithmetic" note below) -- an intentional divergence from the Python
+ * float64 reference, so this file is not bit-exact to Python.
+ * test/parity_delay.c + test/gen_delay_c_golden.c form a C-regression
+ * harness, not a Python-parity gate.
  *
  * Build (standalone, do NOT link aec.c):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \
@@ -34,11 +32,9 @@
 
 /* np.dot over float32 inputs.  numpy routes f32 dot through OpenBLAS SDOT
  * (not portably bit-reproducible); we accumulate the float32 products in a
- * float32 running sum -- consistent with the rest of this file, which is
- * float32 throughout (see the file banner: the delay chain's Python
- * bit-exact parity is retired by design, anchored by the C-regression
- * golden instead).  The downstream integer lag / DelayQuality are robust to
- * the sub-ULP difference (verified bit-exact on the golden). */
+ * float32 running sum, consistent with the rest of this file (float32
+ * throughout, see the file banner). The downstream integer lag /
+ * DelayQuality are robust to the sub-ULP difference. */
 static float delay_aec3_dot(const float *a, const float *b, int n) {
     float s = 0.0f;
     int i;
@@ -47,19 +43,18 @@ static float delay_aec3_dot(const float *a, const float *b, int n) {
 }
 
 /* ======================= matched-filter arithmetic =========================
- * The two 512-tap dot products accumulate in float32 (this is exactly what
- * WebRTC's NEON matched filter does, matched_filter_neon in matched_filter.cc),
- * and x²_sum SLIDES across the 16 sub-block iterations (the window advances by
- * one sample per iteration: x2 += new² − old²) instead of being re-summed.
+ * The two 512-tap dot products accumulate in float32 (as WebRTC's NEON matched
+ * filter does, matched_filter_neon in matched_filter.cc), and x²_sum SLIDES
+ * across the 16 sub-block iterations (the window advances by one sample per
+ * iteration: x2 += new² − old²) instead of being re-summed.
  * The saturation gate, the `x2_sum > x2_sum_threshold` excitation gate, the
  * `error_sum < 0.3·anchor` reliability test and the NLMS alpha formula keep
- * the SAME comparisons/expressions — only the precision of the x2_sum / h·x
- * values feeding them changes (f32 vs f64 accumulation, sub-ULP-to-1e-4
- * relative). This intentionally DIVERGES from the Python float64 reference;
- * a 60-case AECMOS sample showed all deltas 0.000 (the integer lag / winner
- * selection is robust to the sub-ULP difference in practice). The delay
- * chain's Python bit-exact parity anchor is retired by design — see
- * test/parity_delay.c for the C-regression golden that replaces it.
+ * the SAME comparisons/expressions as the Python reference -- only the
+ * precision of the x2_sum / h·x values feeding them differs (f32 vs f64
+ * accumulation, sub-ULP-to-1e-4 relative). This intentionally DIVERGES from
+ * the Python float64 reference; the integer lag / winner selection is robust
+ * to the sub-ULP difference. test/parity_delay.c holds the C-regression
+ * golden.
  *
  * On ARM (__ARM_NEON) the f32 dot and the NLMS update use fmla intrinsics
  * and the h² peak search a two-pass max/match reduction; a scalar float path
@@ -290,10 +285,8 @@ static void da_biquad_init_noise_reduction(DaBiquad *bq) {
 }
 
 /* Process one sample through the cascade, returning the float32 output.
- * Direct-form-II transposed, all-float32 (this file's delay chain is float32
- * throughout by design -- diverges from Python's _CascadedBiquad.process,
- * which runs float64; see the file banner / delay_aec3.h for the retired
- * parity anchor).
+ * Direct-form-II transposed, all-float32 (unlike Python's
+ * _CascadedBiquad.process, which runs float64; see the file banner).
  *   out = b0*x + z0
  *   z0  = b1*x - a1*out + z1
  *   z1  = b2*x - a2*out
@@ -562,11 +555,10 @@ static void da_ring_reset(DaRing *r) {
 }
 
 static void da_ring_push(DaRing *r, const float *sub, int n) {
-    /* Values identical to the per-sample-modulo walk, but written as at most
-     * two contiguous memcpy segments -- no integer division in the inner
-     * loop. Same class of fix as da_ring_gather_back below: n (=
-     * DA_SUB_BLOCK_SIZE, currently 16) samples pushed twice per 64-sample
-     * block, so this was ~500K %-ops/sec at 16 kHz. */
+    /* Values identical to a per-sample-modulo walk, but written as at most two
+     * contiguous memcpy segments -- no integer division in the inner loop (n =
+     * DA_SUB_BLOCK_SIZE, currently 16, samples are pushed twice per 64-sample
+     * block). Same approach as da_ring_gather_back below. */
     int first = r->capacity - r->write;
     if (first >= n) {
         memcpy(r->buffer + r->write, sub, (size_t)n * sizeof(float));
@@ -585,9 +577,8 @@ static void da_ring_gather_back(const DaRing *r, int start_offset, int length, f
     /* Values identical to the per-sample-modulo walk, but copied as at most two
      * contiguous reversed segments — no integer division in the inner loop.
      * This gather runs 80x per 64-sample block (5 filters x 16 sub-samples,
-     * 512 taps each), so the old per-sample `% DA_RING_CAPACITY` was ~10M
-     * integer divisions/sec at 16 kHz and dominated the matched-filter cost
-     * (measured 2.8x speedup of the delay-est chain from this change alone). */
+     * 512 taps each), so a per-sample `% DA_RING_CAPACITY` would cost ~10M
+     * integer divisions/sec at 16 kHz and dominate the matched-filter cost. */
     int cap = r->capacity;
     int newest = (r->write - 1 + cap) % cap;
     int end = (newest - start_offset + cap) % cap;
@@ -648,9 +639,8 @@ static int da_matched_filter_core(const DaRing *ring, int alignment_shift_back,
         saturation = (y[i] >= DA_SATURATION_LIMIT || y[i] <= -DA_SATURATION_LIMIT);
         error_sum += e * e;
         if (x2_sum > x2_sum_threshold && !saturation) {
-            /* alpha = smoothing * e / x2_sum, computed directly in float32 (no
-             * more double-then-cast dance -- this file's chain is float32
-             * throughout); h += alpha*x runs in f32 via da_nlms_update_f32. */
+            /* alpha = smoothing * e / x2_sum, computed directly in float32;
+             * h += alpha*x runs in f32 via da_nlms_update_f32. */
             float alpha_f = smoothing * e / x2_sum;
             da_nlms_update_f32(h, x_window, alpha_f, DA_FILTER_SIZE);
             filters_updated = 1;
@@ -803,8 +793,7 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
  * combination breaks the general derivation and has to be excluded
  * structurally, not merely as an optimization).
  *
- * Correctness (re-derived from first principles, not copied from an
- * external claim):
+ * Correctness:
  *
  * Invariant maintained: whenever *candidate_valid is true, `c = *candidate`
  * is provably the first index of the maximum value `M = histogram[c]`
@@ -1032,18 +1021,13 @@ static void da_clockdrift_init(DaClockdrift *cd, int sample_rate) {
 static void da_clockdrift_update(DaClockdrift *cd, int delay_estimate) {
     int d1, d2, d3, probable_up, verified_up, probable_down, verified_down;
     if (delay_estimate == cd->delay_history[0]) {
-        /* Ceilinged at DA_STABILITY_RESET_HOPS+1 (UBSan-confirmed
-         * signed-overflow fix): the ONLY consumer of stability_counter
-         * anywhere in this file/header is the `> DA_STABILITY_RESET_HOPS`
-         * check on the very next line (not read/compared bit-exact by any
-         * parity harness -- this file's own C-regression golden doesn't
-         * exercise DaClockdrift's raw counters, only delay/quality
-         * outputs). Once the counter exceeds DA_STABILITY_RESET_HOPS,
-         * further increments can never change that comparison's outcome
-         * (already true, stays true), so gating the increment at the
-         * smallest value that still satisfies `>` is observationally
-         * identical to the old unconditional `+= 1` for every reachable
-         * state, while eliminating the eventual signed overflow. */
+        /* Ceilinged at DA_STABILITY_RESET_HOPS+1 to avoid signed overflow: the ONLY
+         * consumer of stability_counter in this file/header is the
+         * `> DA_STABILITY_RESET_HOPS` check on the very next line. Once the counter
+         * exceeds DA_STABILITY_RESET_HOPS, further increments can never change that
+         * comparison's outcome (already true, stays true), so gating the increment at
+         * the smallest value that still satisfies `>` is observationally identical to
+         * an unbounded increment for every reachable state. */
         if (cd->stability_counter <= cd->stability_reset_hops) cd->stability_counter += 1;
         if (cd->stability_counter > cd->stability_reset_hops) cd->level = CLOCKDRIFT_NONE;
         return;
@@ -1088,10 +1072,9 @@ static void da_estimator_init(DaEstimator *e, int sample_rate, int num_filters) 
      * canonical aec3_ms_to_hops() like the two thresholds around it. */
     da_aggregator_init(&e->aggregator, da_hist_window_for_rate(sample_rate));
     da_clockdrift_init(&e->clockdrift, sample_rate);
-    /* AEC3 kNumBlocksPerSecondBy2 = 125 blocks (~500 ms). Was a frozen
-     * #define (DA_CONSISTENT_EST_THR=125, correct only at sr=16000);
-     * computed live here (same inner-block-rate basis as clockdrift above).
-     * Routed through aec3_ms_to_hops() -- see stability_reset_hops above. */
+    /* AEC3 kNumBlocksPerSecondBy2 = 125 blocks (~500 ms), computed live from the
+     * rate (same inner-block-rate basis as clockdrift above) via
+     * aec3_ms_to_hops() -- see stability_reset_hops above. */
     e->consistent_estimate_threshold =
         aec3_ms_to_hops(500.0f, DA_AEC3_BLOCK_SIZE, sample_rate);
     e->old_agg_valid = 0;
@@ -1115,33 +1098,25 @@ static void da_estimator_reset_internal(DaEstimator *e, int reset_lag_aggregator
  * signal chain (matched filter + aggregator + decimators + ring buffer +
  * pending edge-chunker samples).
  *
- * Call-site audit: the ONLY caller of
- * delay_aec3_reset() (which calls this) is aec_reset() (aec.c) / AEC.reset()
- * on the Python side -- a top-level cold-start-style reset that recreates
- * AecState/ResidualEchoEstimator/SuppressionGain, clears CNG state, zeroes
- * the OLA buffer, and resets every other subsystem (HPF, saturation
- * detectors, filter taps, regime handler, stationarity estimator, ...) to a
- * pristine state. It is NOT a lightweight per-echo-path-change nudge -- that
- * is the SEPARATE da_estimator_reset_internal(e, 0, 0) call from
+ * The only caller of delay_aec3_reset() (which calls this) is aec_reset()
+ * (aec.c) / AEC.reset() on the Python side -- a top-level cold-start-style
+ * reset that recreates AecState/ResidualEchoEstimator/SuppressionGain, clears
+ * CNG state, zeroes the OLA buffer, and resets every other subsystem (HPF,
+ * saturation detectors, filter taps, regime handler, stationarity estimator,
+ * ...). It is NOT a lightweight per-echo-path-change nudge -- that is the
+ * SEPARATE da_estimator_reset_internal(e, 0, 0) call from
  * da_estimator_process_inner_block (fires on the consistent-estimate
- * stability counter, every ~500 ms in normal steady state), which correctly
- * leaves the whole signal chain (sidechain, decimators, ring, pending)
- * untouched.
+ * stability counter, every ~500 ms in normal steady state), which leaves the
+ * whole signal chain (sidechain, decimators, ring, pending) untouched.
  *
- * Given that, delay_aec3_reset() must clear the ENTIRE chain consistently:
- * the outer 48kHz resample48 sidechain (reset by delay_aec3_reset() itself)
- * AND this estimator's inner decimators / ring buffer / pending samples.
- * Previously only the sidechain was reset (added alongside the sidechain
- * itself) while decimator biquad memory, ring-buffer audio history and
- * pending partial-block samples were left stale -- a freshly-reset
- * sidechain feeding a stale inner estimator, which could let pre-reset
- * echo-path audio in the ring contaminate the matched filter's first
- * correlation windows after reset. da_decimator_init is reused as the
- * reset (it only zeroes coefficients/state, no allocation, so calling it
- * again is a safe, idempotent reset). clockdrift is deliberately left
- * untouched (pre-existing behaviour predating the sidechain, out of scope
- * here -- it tracks a 30s-horizon hardware clock-drift estimate, not
- * reset-scoped audio history). */
+ * delay_aec3_reset() therefore clears the ENTIRE chain consistently: the
+ * outer 48kHz resample48 sidechain (reset by delay_aec3_reset() itself) AND
+ * this estimator's inner decimators / ring buffer / pending samples, so stale
+ * pre-reset echo-path audio cannot contaminate the matched filter's first
+ * correlation windows. da_decimator_init is reused as the reset (it only
+ * zeroes coefficients/state, no allocation, so calling it again is a safe,
+ * idempotent reset). clockdrift is deliberately left untouched: it tracks a
+ * 30s-horizon hardware clock-drift estimate, not reset-scoped audio history. */
 static void da_estimator_reset(DaEstimator *e, int reset_delay_confidence) {
     da_estimator_reset_internal(e, 1, reset_delay_confidence);
     da_decimator_init(&e->capture_decimator);
@@ -1254,7 +1229,7 @@ static int da_estimator_estimate_delay(DaEstimator *e, const float *render_hop,
 
 /* ====================== LegacyDelayShim (public API) ====================== */
 
-/* ─────────────────────── pool layout (plan §3.2/§3.3) ─────────────────────
+/* ─────────────────────── pool layout ─────────────────────────────
  * ONE description of the block, shared by delay_aec3_get_mem_size() and
  * delay_aec3_init(): the query returns `total`, the carve walks the fields in
  * the SAME order with the SAME ALIGN16 bumps and asserts it lands exactly on
@@ -1296,7 +1271,7 @@ static int da_compute_layout(int sample_rate, int hop_size, int num_filters,
     L->ring_capacity = DA_RING_CAPACITY_FOR(n);
     L->hp_hist_size  = DA_HP_HIST_SIZE_FOR(n);
     L->pe_hist_size  = DA_PE_HIST_SIZE_FOR(n);
-    /* 48 kHz-only sidechain scratch (plan §3.2.7): nothing carved at any
+    /* 48 kHz-only sidechain scratch: nothing carved at any
      * other rate, so a 16 kHz instance does not carry two 48 kHz buffers. */
     L->resample_cap  = (sample_rate == 48000)
                      ? DA_RESAMPLE48_CAP_FOR(hop_size) : 0;
@@ -1384,14 +1359,14 @@ int delay_aec3_init(DelayAec3 *d, void *mem, size_t bytes,
     if (!d || !mem) return -1;
     /* Every f32 array below is ALIGN16-bumped off this base, so a misaligned
      * base would misalign the 512-tap banks the NEON matched-filter kernels
-     * load from (plan §11.7). Reject rather than silently de-align. */
+     * load from. Reject rather than silently de-align. */
     if (!MEM_IS_ALIGNED16(mem)) return -1;
     if (!da_compute_layout(sample_rate, hop_size, num_filters, &L)) return -1;
     if (bytes < L.total) return -1;
 
     memset(d, 0, sizeof(*d));
     used = da_delay_carve(d, (uint8_t *)mem, &L);
-    /* Lockstep assertion (plan §3.3): the carve must land EXACTLY on the
+    /* Lockstep assertion: the carve must land EXACTLY on the
      * byte count the query promised -- not "within", exactly. A mismatch
      * means the two field walks have drifted, which is a programming error,
      * so fail construction instead of running on a layout nobody sized. */
@@ -1400,12 +1375,10 @@ int delay_aec3_init(DelayAec3 *d, void *mem, size_t bytes,
     /* DaEstimator's internal clockdrift/consistent-estimate constants
      * (da_estimator_init) are computed in real seconds FROM the sample_rate
      * argument -- they are not hardcoded, so this must be the estimator's
-     * true feed rate, not always "16000". Only 48kHz actually gets resampled
-     * down to a 16kHz-equivalent stream before reaching the estimator (the
-     * sidechain below); native 8kHz/16kHz feed the estimator directly at
-     * their own rate (2026-08-03 fix -- previously this was hardcoded to
-     * 16000 unconditionally, so an 8kHz config silently ran its clockdrift/
-     * consistent-estimate timers at 2x their intended real-time duration). */
+     * true feed rate, not always "16000". Only 48kHz is resampled down to a
+     * 16kHz-equivalent stream before reaching the estimator (the sidechain
+     * below); native 8kHz/16kHz feed the estimator directly at their own
+     * rate. */
     rate_factor = (sample_rate == 48000) ? DA_RESAMPLE48_FACTOR : 1;
     da_estimator_init(&d->est, (rate_factor > 1) ? 16000 : sample_rate,
                       L.num_filters);

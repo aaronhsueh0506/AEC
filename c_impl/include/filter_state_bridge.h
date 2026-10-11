@@ -11,14 +11,14 @@
  * Parity-relevant computations (numpy 1.26 -> C, -ffp-contract=off):
  *   1. filter_taps = np.fft.irfft(W[0], fft_size).astype(np.float32)
  *        - numpy irfft of a complex64 input computes in float64 (pocketfft),
- *          then .astype(float32) truncates. fft_inverse (fft_pocketfft.c) wraps
- *          the vendored numpy-1.26.4 pocketfft, so it is BIT-EXACT vs np.fft.irfft.
+ *          then .astype(float32) truncates; fft_inverse uses the library FFT
+ *          backend.
  *   2. p_trace = np.mean(P)      [P is float32]
  *        - np.mean over a float32 array = float32 PAIRWISE sum / n (in f32),
- *          kept in float32 (float32-by-design; formerly widened via float()).
+ *          kept in float32.
  *   3. divergence_indicator:
  *        e_ratio = 1.0 (default); if a shadow is present and main_e > 1e-12,
- *                  e_ratio = shadow_e / main_e   (float32-by-design; main_e /
+ *                  e_ratio = shadow_e / main_e   (float32; main_e /
  *                  shadow_e are already-provided float32 energies).
  *        div = p_trace * max(0.0, e_ratio - 1.0)     (all float32)
  *        div = 0 when P is empty/missing.
@@ -55,15 +55,13 @@ typedef struct {
 float fsb_f32_pairwise_sum(const float *a, size_t n);
 
 /* np.mean over a flattened float32 array: pairwise sum / n, computed and kept
- * in float32 (float32-by-design; formerly widened to double via
- * float(np.mean(P))). n == 0 -> 0.0 (caller-side: empty P yields div = 0). */
+ * in float32. n == 0 -> 0.0 (caller-side: empty P yields div = 0). */
 float fsb_f32_mean(const float *a, size_t n);
 
 /* NOTE on error energies: the bridge consumes main_e / shadow_e as float32
  * energies (the np.abs/np.sum over error_spec lives inside the PBFDKF/Shadow
  * modules' get_error_energy(), not in this adapter). The bridge's own
- * arithmetic is only e_ratio = shadow_e / main_e, matched in float32
- * (float32-by-design; formerly fp64). */
+ * arithmetic is only e_ratio = shadow_e / main_e, matched in float32. */
 
 /* Build the snapshot.
  *

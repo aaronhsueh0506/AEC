@@ -1,15 +1,11 @@
-/* delay_aec3.h — C port of python/modules/delay/ (the v3.22 AEC3
- * matched-filter delay-estimation package). ⚠ The ENTIRE C delay chain
- * (decimator biquads, matched-filter dot products / NLMS update,
- * error_sum_anchor / x2_sum_threshold scalars, the confidence getter) now
- * runs float32 unconditionally — an intentional, sampled-cost-free
- * divergence from the Python float64 reference. This
- * chain's Python bit-exact parity is retired BY DESIGN: test/parity_delay.c
- * + test/gen_delay_c_golden.c form a C-regression golden (catches
- * accidental future changes) rather than a Python-parity gate.
- *
- * REPLACES the stale v3.10 GCC-PHAT estimator in delay_est.{c,h}. This is a
- * pure-additive module; the cutover that wires it into aec.c happens later.
+/* delay_aec3.h — C port of python/modules/delay/ (the AEC3 matched-filter
+ * delay-estimation package). The ENTIRE C delay chain (decimator biquads,
+ * matched-filter dot products / NLMS update, error_sum_anchor /
+ * x2_sum_threshold scalars, the confidence getter) runs float32
+ * unconditionally -- an intentional divergence from the Python float64
+ * reference. The chain is not bit-exact to Python by design:
+ * test/parity_delay.c + test/gen_delay_c_golden.c form a C-regression golden
+ * rather than a Python-parity gate.
  *
  * Chain (mirrors the Python package):
  *   Decimator x4 (cascaded biquad LP + HP; Python runs float64, C runs
@@ -31,32 +27,28 @@
  *   delay_aec3_is_solid(d)         -> int    (confidence >= 1.0)
  *   delay_aec3_n_updates(d)        -> int    (estimate_count)
  *
- * PARITY NOTES (numpy 1.26 -> C, -ffp-contract=off mandatory) -- historical,
- * describing the retired Python bit-exact target; the C side below is now
- * float32 throughout by construction, not double:
+ * NUMERICS (numpy 1.26 reference; -ffp-contract=off mandatory). The C side is
+ * float32 throughout:
  *   - Decimator biquads: Python b/a/z are float64, each section direct-form-II
  *     transposed, output cast to float32 per sample then strided [::4]. The C
- *     port (DaBiquad) now runs the whole cascade in float32 instead of
- *     mirroring Python's float64 -- an intentional divergence.
- *   - The NLMS update `h += alpha * x_window` is the numpy ARRAY scalar rule:
- *     alpha (a Python double) is value-cast to float32 FIRST, then the
- *     per-tap product and add are computed in float32 (verified 0/20000 vs
- *     the f64-mul candidate which mismatched 99%). The C port now computes
- *     alpha directly as a float32 expression (no double intermediate).
+ *     port (DaBiquad) runs the whole cascade in float32 -- an intentional
+ *     divergence.
+ *   - The NLMS update `h += alpha * x_window` follows the numpy ARRAY scalar
+ *     rule: alpha is value-cast to float32 FIRST, then the per-tap product and
+ *     add are computed in float32. The C port computes alpha directly as a
+ *     float32 expression (no double intermediate).
  *   - `instantaneous * one_over_anchor` and `0.015 * (norm - accumulated)`
  *     are also the array scalar rule (scalar cast to f32, op in f32); the C
- *     port carries one_over_anchor as float32 end to end now.
+ *     port carries one_over_anchor as float32 end to end.
  *   - The dot products `np.dot(h, x)` / `np.dot(x, x)` are float32 inputs.
  *     numpy routes these through OpenBLAS SDOT (a CPU-dispatched AVX kernel
  *     that is NOT portably bit-reproducible). The matched-filter's two
  *     512-tap dot products (da_dot_f32 in delay_aec3.c) accumulate in
  *     float32 directly (WebRTC NEON-matched-filter style). The smaller
- *     16-sample error_sum_anchor dot (delay_aec3_dot) also now accumulates
- *     in float32 (previously double) -- an intentional divergence (60-case
- *     AECMOS sample: all deltas 0.000). The matched-filter peak (argmax h^2)
- *     and the histogram-voted lag are robust to the sub-ULP/f32 accumulation
- *     difference in practice, but are no longer guaranteed bit-exact to
- *     Python by construction.
+ *     16-sample error_sum_anchor dot (delay_aec3_dot) also accumulates in
+ *     float32. The matched-filter peak (argmax h^2) and the histogram-voted
+ *     lag are robust to the sub-ULP/f32 accumulation difference in practice,
+ *     but are not guaranteed bit-exact to Python by construction.
  *   - argmax = numpy argmax = FIRST max index on ties.
  *   - int(round())/lrint not needed here: every quantisation is integer
  *     floor (// ) or bit-shift, reproduced verbatim.
@@ -71,25 +63,22 @@ extern "C" {
 #endif
 
 /* ============================ MEMORY CONTRACT ============================
- * POOL-FIRST, CONFIG-SIZED (productization plan §3.2). Every array whose
- * length depends on the runtime bank size -- the matched-filter coefficient
- * bank, its accumulated-error rows, the down-sampled render ring, and both
- * lag histograms -- is carved from a CALLER-OWNED block by
- * delay_aec3_init(), sized by delay_aec3_get_mem_size() for that exact
- * (sample_rate, hop_size, num_filters) triple. The struct below keeps only
- * scalars, biquad state, the 64-sample edge-chunker buffers, and pointers.
+ * POOL-FIRST, CONFIG-SIZED. Every array whose length depends on the runtime
+ * bank size -- the matched-filter coefficient bank, its accumulated-error
+ * rows, the down-sampled render ring, and both lag histograms -- is carved
+ * from a CALLER-OWNED block by delay_aec3_init(), sized by
+ * delay_aec3_get_mem_size() for that exact (sample_rate, hop_size,
+ * num_filters) triple. The struct below keeps only scalars, biquad state, the
+ * 64-sample edge-chunker buffers, and pointers.
  *
- * This REPLACES the previous "compute shrinks, RAM does not" contract, under
- * which every array was carved at the 5-filter bound so the footprint stayed
- * a single compile-time constant. That trade-off is withdrawn: the pool size
- * is a function of the init config (which it already was for the AEC as a
- * whole -- aec_get_mem_size(cfg)), so a short bank now saves BYTES as well as
- * MACs. n=1 saves ~23 KB against n=5 at every grid.
+ * The pool size is a function of the init config (as for the AEC as a whole
+ * -- aec_get_mem_size(cfg)), so a short bank saves BYTES as well as MACs.
+ * n=1 saves ~23 KB against n=5 at every grid.
  *
  * Consequences the caller must respect:
- *   - There is exactly ONE canonical lifecycle: get_mem_size -> init. No
- *     construct-in-place-from-a-bare-struct entry point exists any more; a
- *     `DelayAec3` that was never handed a pool has NULL array pointers.
+ *   - There is exactly ONE canonical lifecycle: get_mem_size -> init. There
+ *     is no construct-in-place-from-a-bare-struct entry point; a `DelayAec3`
+ *     that was never handed a pool has NULL array pointers.
  *   - num_filters (like sample_rate and hop_size) is init-time IMMUTABLE.
  *     Changing it means re-querying the size and re-initialising, because the
  *     layout differs. Nothing pre-allocates the n=5 maximum "just in case".
@@ -97,9 +86,8 @@ extern "C" {
  *   - Every carved array is ALIGN16 (mem_align.h's project-wide value), which
  *     the NEON matched-filter kernels' 512-tap loads rely on.
  *
- * DA_NUM_FILTERS below is now only the GEOMETRY UPPER BOUND used by
- * validation (and by the reach table in this header) -- it no longer sizes
- * anything. */
+ * DA_NUM_FILTERS below is only the GEOMETRY UPPER BOUND used by validation
+ * (and by the reach table in this header) -- it sizes nothing. */
 
 /* ---- DelayQuality (delay_types.py) ---- */
 typedef enum {
@@ -134,9 +122,7 @@ typedef enum {
  *   _DOWN_SAMPLING_FACTOR=4, _AEC3_BLOCK_SIZE=64, _SUB_BLOCK_SIZE=16,
  *   _CONSISTENT_ESTIMATE_THRESHOLD=125.
  */
-/* Down-sampling factor: 4, the WebRTC-style reference decimation (the
- * bit-exact Python-reference path). An 8x option was sampled (60-case
- * stratified AECMOS) and removed — real farend-singletalk regression. */
+/* Down-sampling factor: 4, the WebRTC-style reference decimation. */
 #define DA_DOWN_SAMPLING_FACTOR 4
 #define DA_AEC3_BLOCK_SIZE      64
 #define DA_SUB_BLOCK_SIZE       (DA_AEC3_BLOCK_SIZE / DA_DOWN_SAMPLING_FACTOR) /* 16 */
@@ -145,7 +131,7 @@ typedef enum {
  * `n` the AEC3 reference itself uses. It sizes NOTHING -- see the MEMORY
  * CONTRACT block at the top of this header. The bank actually searched is
  * DaMatchedFilter::num_filters, fixed at init from AecConfig::
- * delay_num_filters (range [1, DA_NUM_FILTERS], default 5 = unchanged AEC3
+ * delay_num_filters (range [1, DA_NUM_FILTERS], default 5 = the AEC3
  * geometry), and every array is carved to match it. */
 #define DA_NUM_FILTERS          5
 #define DA_WINDOW_SIZE_SB       32
@@ -176,8 +162,7 @@ typedef enum {
  * DA_MAX_FILTER_LAG_FOR(n) DELIBERATELY CARRIES ONE FILTER OF HEADROOM: the
  * deepest lag the bank can actually report is (n-1)*SHIFT + (SIZE-1), so the
  * arithmetically tight bound would be (n-1)*SHIFT + SIZE. The n*SHIFT + SIZE
- * form kept here is the pre-pool formula, and it is kept ON PURPOSE, for
- * two measured reasons rather than caution:
+ * form is used ON PURPOSE, for two reasons:
  *
  *   0. IT IS THE UPSTREAM FORMULA. WebRTC AEC3's MatchedFilter::
  *      GetMaxFilterLag() -- and this repo's Python port of it,
@@ -187,12 +172,12 @@ typedef enum {
  *      aggregator histograms, not describing reach. Diverging here would put
  *      the C port's histogram geometry out of step with both.
  *
- *   1. n=5 reproduces the pre-refactor array sizes EXACTLY (2433 highest-peak
+ *   1. n=5 gives the reference array sizes EXACTLY (2433 highest-peak
  *      bins, 152 pre-echo bins), so the default configuration is byte-exact
  *      by construction rather than by argument.
  *
- * The over-sized tail is behaviour-neutral for the highest-peak histogram by
- * the same standing argument as before: bins above the reachable lag are
+ * The over-sized tail is behaviour-neutral for the highest-peak histogram:
+ * bins above the reachable lag are
  * never incremented, and both da_argmax_i and the incremental-argmax tracker
  * return the FIRST maximum, so an all-zero tail can never win a tie. */
 #define DA_RING_CAPACITY_FOR(n) \
@@ -208,15 +193,14 @@ typedef enum {
 #define DA_ACCUMULATED_ERROR_SUBSAMPLE_RATE 4
 #define DA_BLOCK_SIZE_LOG2      6    /* kBlockSizeLog2 (64 = 1<<6) */
 /* DA_HIST_WINDOW (above) and the ring/histogram arrays it sizes are fixed
- * at the 16kHz-native block rate (16000/64 = 250 blocks/s) and are NOT yet
- * rate-parameterised for sample rates above 16 kHz -- tracked alongside the
- * decimator's fixed anti-alias biquad coefficients, which have the same
- * 16kHz-only limitation (see downsampled_ring.py's docstring). */
-/* DA_STABILITY_RESET_HOPS was a frozen #define (3000, = ms_to_hops(30000)
- * only at hop=160/sr=16000, wrong even at sr=16000 since this counter ticks
- * once per DA_AEC3_BLOCK_SIZE=64-sample inner block -- not once per outer
- * hop); now computed live in delay_aec3_init() from sample_rate, matching
- * the Python ClockdriftDetector fix (see clockdrift_detector.py). */
+ * at the 16kHz-native block rate (16000/64 = 250 blocks/s) and are NOT
+ * rate-parameterised for sample rates above 16 kHz -- the decimator's fixed
+ * anti-alias biquad coefficients have the same 16kHz-only limitation (see
+ * downsampled_ring.py's docstring). */
+/* DA_STABILITY_RESET_HOPS is computed live in delay_aec3_init() from
+ * sample_rate: the counter ticks once per DA_AEC3_BLOCK_SIZE=64-sample inner
+ * block, not once per outer hop. Matches the Python ClockdriftDetector (see
+ * clockdrift_detector.py). */
 
 /* ---- biquad cascade ----
  * Max sections: 4 (the ds4 LP is elliptic, 3 sections; the 48k->16k
@@ -232,20 +216,18 @@ typedef struct {
 /* ---- 48kHz -> 16kHz pre-decimation sidechain ----
  * DelayAec3's own internal decimator/matched-filter/clockdrift constants are
  * all native to a 16kHz feed rate (250 blocks/s; see the DA_HIST_WINDOW
- * rate note above). At
- * 48kHz, this stage anti-alias-filters + decimates-by-3 BEFORE any of that
- * internal machinery ever sees a sample, so DelayAec3 always operates on a
- * genuine 16kHz-equivalent stream regardless of the caller's native rate --
- * exactly mirroring the shared 4ch pipeline's SharedMatchedDelayEstimator
- * (Python pipeline.py), which does the same 48->16 reduction externally
- * before feeding this same estimator. Two independent filter+phase chains
- * (capture/near, render/far) since they're independent signals.
+ * rate note above). At 48kHz, this stage anti-alias-filters + decimates-by-3
+ * BEFORE any of that internal machinery ever sees a sample, so DelayAec3
+ * always operates on a genuine 16kHz-equivalent stream regardless of the
+ * caller's native rate -- mirroring the shared 4ch pipeline's
+ * SharedMatchedDelayEstimator (Python pipeline.py), which does the same
+ * 48->16 reduction externally before feeding this same estimator. Two
+ * independent filter+phase chains (capture/near, render/far) since they're
+ * independent signals.
  *
- * The two scratch buffers this stage needs are POOL-CARVED AND 48 kHz-ONLY
- * (plan §3.2.7): sized DA_RESAMPLE48_CAP_FOR(hop) from the resolved hop, and
- * not carved at all at any other rate -- a 16 kHz instance no longer pays for
- * two 48 kHz scratch arrays it can never use. The old fixed
- * DA_RESAMPLE48_SCRATCH_MAX=192 is gone. */
+ * The two scratch buffers this stage needs are POOL-CARVED AND 48 kHz-ONLY:
+ * sized DA_RESAMPLE48_CAP_FOR(hop) from the resolved hop, and not carved at
+ * all at any other rate. */
 #define DA_RESAMPLE48_FACTOR      3
 /* Output samples per call is at most ceil(hop/3) (the phase only ever moves
  * which samples are kept, never how many, beyond that ceiling); hop/3 + 1 is
@@ -283,7 +265,7 @@ typedef struct {
     float *filters;             /* [num_filters][DA_FILTER_SIZE] */
     float *accumulated_error;   /* [num_filters][DA_ACC_ERR_SIZE] */
     /* per-tap-prefix err, ONE filter-size buffer at every bank size (matches
-     * Python's single shared buffer; plan §3.2.6). Carved and initialised,
+     * Python's single shared buffer). Carved and initialised,
      * not written per update -- see the detect_pre_echo note at the top of
      * this header. */
     float *instantaneous_error; /* [DA_ACC_ERR_SIZE] */
@@ -402,24 +384,24 @@ typedef struct {
  *
  * hop_size is the RESOLVED grid hop (aec_resolve_signal_grid). It sizes only
  * the 48 kHz sidechain scratch; DelayAec3 does not need, and deliberately
- * does not take, an fft_size (plan §2.4).
+ * does not take, an fft_size.
  *
  * num_filters is the number of staggered matched-filter hypotheses actually
- * searched; out-of-range values ([1, DA_NUM_FILTERS] exclusive) are
- * REJECTED here too -- delay_aec3_get_mem_size() returns 0 and
- * delay_aec3_init() returns -1 -- matching the fail-fast rule the
- * top-level aec_validate_config() already applies. A silent clamp at this
- * layer would let a direct low-level caller run a different bank size than
- * requested with no error signal. One shared
- * validity helper feeds both entry points, so a query and an init can never
- * disagree about whether a request is admissible.
+ * searched; out-of-range values ([1, DA_NUM_FILTERS] inclusive) are REJECTED
+ * here too -- delay_aec3_get_mem_size() returns 0 and delay_aec3_init()
+ * returns -1 -- matching the fail-fast rule the top-level
+ * aec_validate_config() applies. A silent clamp at this layer would let a
+ * direct low-level caller run a different bank size than requested with no
+ * error signal. One shared validity helper feeds both entry points, so a
+ * query and an init can never disagree about whether a request is
+ * admissible.
  *
  * Reliable reach shrinks with the bank: (n-1)*DA_FILTER_INTRA_SHIFT +
  * (DA_FILTER_SIZE - 11) downsampled samples at 0.25 ms each, i.e.
  * n=1 -> 125 ms, 2 -> 221 ms, 3 -> 317 ms, 4 -> 413 ms, 5 -> 509 ms. Use a
  * short bank only where the bulk system delay is already compensated
- * out-of-band (AEC3's external-delay-hint stance); bench/dataset runs must
- * stay at 5. */
+ * out-of-band (AEC3's external-delay-hint stance); evaluation runs should stay
+ * at 5. */
 
 /* Bytes this exact config needs. 0 = invalid input (non-positive rate/hop,
  * or a size computation that overflowed). Always ALIGN16-sized, so callers
@@ -462,7 +444,7 @@ int    delay_aec3_estimated_delay(const DelayAec3 *d);   /* -1 until first estim
                                                             * else caller-native-rate
                                                             * samples (rescaled by
                                                             * rate_factor internally) */
-float  delay_aec3_confidence(const DelayAec3 *d);        /* 0.0 / 0.5 / 1.0 (float32, was double) */
+float  delay_aec3_confidence(const DelayAec3 *d);        /* 0.0 / 0.5 / 1.0 (float32) */
 int    delay_aec3_is_solid(const DelayAec3 *d);          /* confidence >= 1.0 */
 int    delay_aec3_n_updates(const DelayAec3 *d);
 int    delay_aec3_has_clockdrift(const DelayAec3 *d);

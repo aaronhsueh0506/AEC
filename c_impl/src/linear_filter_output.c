@@ -11,21 +11,17 @@
 #include <math.h>
 
 /* ---------------------------------------------------------------------------
- * pairwise float32 sum matching numpy's reduction tree shape (float32-by-
- * design; formerly a float64 accumulator mirroring pbfdkf.c's pairwise_sum_f32
- * twin): an 8-accumulator unrolled leaf for n<=128 (numpy NPY_PW_BLOCKSIZE),
- * then a recursive split at n/2 rounded down to a multiple of 8.
+ * pairwise float32 sum matching numpy's reduction tree shape: an
+ * 8-accumulator unrolled leaf for n<=128 (numpy NPY_PW_BLOCKSIZE), then a
+ * recursive split at n/2 rounded down to a multiple of 8.
  * Used for the e2/y2/s2 = np.sum(<arr> ** 2) block energies.
- * Body delegates to simd_kernels.h's sk_pairwise_sum_tailfold_f32 (same
- * kernel pbfdkf.c's twin now uses — this file's tree diffed byte-identical
- * to pbfdkf.c's, modulo whitespace); local symbol/signature kept so call
- * sites are unchanged. */
+ * Body delegates to simd_kernels.h's sk_pairwise_sum_tailfold_f32 (the same
+ * kernel pbfdkf.c's twin uses). */
 static float pairwise_sum_f32(const float *a, int n) {
     return sk_pairwise_sum_tailfold_f32(a, (size_t)n);
 }
 
-/* np.sum(arr ** 2): square and pairwise-sum, both float32 (float32-by-design;
- * formerly upcast each f32 sample to double before squaring/summing). */
+/* np.sum(arr ** 2): square and pairwise-sum, both float32. */
 static float sum_sq_f32(const float *a, int n, float *scratch) {
     for (int i = 0; i < n; ++i) {
         float v = a[i];
@@ -96,11 +92,10 @@ void linear_filter_select(LinearFilterSelect *s,
     int hop = s->hop, blk = s->block_size, fft_size = s->fft_size, K = s->n_freqs;
 
     /* s_refined_time = near - e_refined; s_coarse_time = near - e_coarse
-     * (float32 elementwise). e2/y2/s2 = np.sum(arr ** 2), float32-by-design
-     * (formerly np.sum(arr.astype(f64) ** 2)). Instance scratch, not stack
-     * (see LinearFilterSelect struct comment) — sq is reused sequentially
-     * across the calls below (each sum_sq_f32 call fully consumes it before
-     * the next writes it). */
+     * (float32 elementwise). e2/y2/s2 = np.sum(arr ** 2), float32. Instance
+     * scratch, not stack (see LinearFilterSelect struct comment) — sq is reused
+     * sequentially across the calls below (each sum_sq_f32 call fully consumes
+     * it before the next writes it). */
     float *sq = s->scr_sq;      /* length hop */
     /* e2_refined */
     float e2_refined = sum_sq_f32(e_refined_time, hop, sq);
@@ -143,8 +138,8 @@ void linear_filter_select(LinearFilterSelect *s,
          * mixture of old residual and capture is not a strict bound.
          *
          * Related but NOT the same test as the post chain's own over-output
-         * guard (aec3_post.c's E2 step): that one compares the sqrt-Hann
-         * weighted two-hop block in the frequency domain, this one the
+         * guard (the output-selection step in aec3_post.c): that one compares
+         * the sqrt-Hann weighted two-hop block in the frequency domain, this one the
          * current unwindowed hop. Neither subsumes the other.
          *
          * linear_unusable is the analyzer's verdict as of the PREVIOUS hop;

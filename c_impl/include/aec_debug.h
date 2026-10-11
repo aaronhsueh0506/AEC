@@ -1,4 +1,4 @@
-/* aec_debug.h — Timestamped debug log infrastructure (Plan §Debug Mode).
+/* aec_debug.h — Timestamped debug log infrastructure.
  *
  * Build switches:
  *   AEC_DEBUG    : enable debug log call sites (compile-time)

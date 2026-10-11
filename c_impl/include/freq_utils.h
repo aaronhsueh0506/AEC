@@ -6,8 +6,7 @@
  * for fft_size=512 @ 16 kHz this is 257 bins, 31.25 Hz/bin.
  *
  * Parity: Python int(round(.)) is round-half-to-even -> lrintf() here.
- * Float32-by-design (init-only helper; converted for uniformity as part of
- * the f32 campaign, drift accepted).
+ * Float32 (init-only helper; drift versus Python accepted).
  */
 #ifndef FREQ_UTILS_H
 #define FREQ_UTILS_H

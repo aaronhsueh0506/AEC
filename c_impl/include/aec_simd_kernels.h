@@ -81,7 +81,7 @@ static inline float sk__cmag2_np_elem(float re, float im) {
  * possibly non-NaN, operand — e.g. this is exactly how the `larger==0.0f`
  * early-out below still fires correctly for a NaN paired with a zero
  * component). For all FINITE inputs (incl. -0.0f) this produces bit-identical
- * `larger`/`smaller` to the old vabsq_f32+vmaxq_f32/vminq_f32 form — abs of
+ * `larger`/`smaller` to a vabsq_f32+vmaxq_f32/vminq_f32 form — abs of
  * any finite nonzero value is sign-bit-independent, and a -0.0f/+0.0f sign
  * difference in `smaller` never survives (smaller only feeds ratio*ratio,
  * and (-x)*(-x) == x*x for x==0.0f too) — so this is a NaN-only behavior
@@ -664,9 +664,9 @@ static inline float sk_sum_sq_pairwise_f32(const float *a, size_t n) {
 
 /* ═══════════════════════════════ kernel 16 ═════════════════════════════════
  * sk_coherence_ema_gate_f32 — AEC3-post coherence Γ²(Ŷ,Y) EMA update + the
- * ERLE coh-gate threshold, FUSED into one per-bin pass. Verbatim from
- * AEC/c_impl/src/aec3_post.c aec3_post_compute_coherence(): originally 2
- * separate per-bin loops over the same [0,nb) range —
+ * ERLE coh-gate threshold, FUSED into one per-bin pass. Fuses the two per-bin
+ * loops (over the same [0,nb) range) of aec3_post.c
+ * aec3_post_compute_coherence() —
  *
  *   loop 1 (per k): pr = er*nr + ei*ni;  pi = ei*nr - er*ni;   // echo *
  *                     conj(near), plain mul/add — source does NOT call
@@ -993,8 +993,8 @@ static inline void sk_mask_zero_f32(float *x, const unsigned char *mask, int n) 
 /* ═══════════════════════════════ kernel 21 ═════════════════════════════════
  * sk_pairwise_sum_tailfold_f32 — numpy-style pairwise float32 sum, variant
  * "A". Verbatim tree from AEC/c_impl/src/pbfdkf.c's pw_leaf_f32() +
- * pairwise_sum_f32() (an exact, whitespace-only-diff twin also lives in
- * AEC/c_impl/src/linear_filter_output.c — diff-verified byte-identical).
+ * pairwise_sum_f32() (an identical twin lives in
+ * AEC/c_impl/src/linear_filter_output.c).
  *
  * Two structural differences from kernel 13's sk_pairwise_sum_f32 (so this
  * is a genuinely different value-function, not a restyling):
@@ -1017,8 +1017,8 @@ static inline void sk_mask_zero_f32(float *x, const unsigned char *mask, int n) 
  * i=1) used by the four other pairwise-sum call sites, which is a third
  * distinct value-function: it differs from this one only on signed-zero
  * inputs (e.g. n=1 with a[0]=-0.0f: this kernel returns
- * 0.0f + (-0.0f) = +0.0f; kernel 22 returns -0.0f unchanged) — confirmed by
- * direct probe, see kernel 22's comment.
+ * 0.0f + (-0.0f) = +0.0f; kernel 22 returns -0.0f unchanged), see kernel 22's
+ * comment.
  *
  * NEON leaf: identical q0/q1 accumulation + vpaddq_f32×2 combine order to
  * kernel 13's leaf (bit-identical group-of-8 sums), then the same
@@ -1100,12 +1100,10 @@ static inline float sk_pairwise_sum_tailfold_f32(const float *a, size_t n) {
 /* ═══════════════════════════════ kernel 22 ═════════════════════════════════
  * sk_pairwise_sum_tailfold_b_f32 — numpy-style pairwise float32 sum, variant
  * "B". Verbatim tree from AEC/c_impl/src/filter_analyzer.c's
- * fa_f32_pairwise_sum() (byte-identical, whitespace/line-wrap-only-diff
- * twins also live in AEC/c_impl/src/reverb_frequency_response.c's
- * f32_pairwise_sum(), AEC/c_impl/src/filter_state_bridge.c's
- * fsb_f32_pairwise_sum(), and AEC/c_impl/src/fullband_erle.c's
- * fb_erle_pairwise_sum() — all four diffed byte-for-byte identical modulo
- * cosmetic renaming/line-wrapping).
+ * fa_f32_pairwise_sum() (identical twins live
+ * in AEC/c_impl/src/reverb_frequency_response.c's f32_pairwise_sum(),
+ * AEC/c_impl/src/filter_state_bridge.c's fsb_f32_pairwise_sum(), and
+ * AEC/c_impl/src/fullband_erle.c's fb_erle_pairwise_sum()).
  *
  * Same 8<=n<=128 leaf shape, tail-fold, and n/2-rounded-down-to-a-multiple-
  * of-8 split as kernel 21 (sk_pairwise_sum_tailfold_f32) — differs ONLY in
@@ -1120,12 +1118,10 @@ static inline float sk_pairwise_sum_tailfold_f32(const float *a, size_t n) {
  *     every finite/normal nonzero a[0], but diverge on signed zero: with
  *     a[0] = -0.0f and n==1, this kernel returns -0.0f (copied through
  *     untouched); kernel 21 returns 0.0f + (-0.0f) = +0.0f (IEEE-754
- *     round-to-nearest: an unlike-signed zero sum rounds to +0). Verified
- *     directly with a standalone probe for n=1 and for an all -0.0f array
- *     of length 5: kernel 21 and kernel 22 disagree with each other on
- *     those inputs (each stays internally bit-identical scalar-vs-NEON),
- *     confirming two distinct kernels are required here, not one shared
- *     implementation. */
+ *     round-to-nearest: an unlike-signed zero sum rounds to +0). For n=1 and for
+ *     an all -0.0f array of length 5, kernel 21 and kernel 22 disagree with
+ *     each other (each stays internally bit-identical scalar-vs-NEON), so two
+ *     distinct kernels are required here, not one shared implementation. */
 
 static inline float sk_pairwise_sum_tailfold_b_f32_scalar(const float *a, size_t n) {
     if (n == 0) return 0.0f;
@@ -1468,8 +1464,8 @@ static inline void sk_dec1_floorintmin_s32(int *x, int n) {
 
 /* ═══════════════════════════════ kernel 26 ═════════════════════════════════
  * sk_erl_hold_expire_f32 — bins whose hold counter has expired double toward
- * ERL_MAX_ERL. Verbatim from AEC/c_impl/src/erl_estimator.c
- * erl_estimator_update()'s loop 3 (lines 89-99), for k = 1..n_bins-2:
+ * ERL_MAX_ERL. Taken from AEC/c_impl/src/erl_estimator.c
+ * erl_estimator_update()'s loop 3, for k = 1..n_bins-2:
  *   if (hold_counters[k-1] <= 0) {
  *       doubled = 2.0f * erl[k];
  *       erl[k] = (doubled < ERL_MAX_ERL) ? doubled : ERL_MAX_ERL;

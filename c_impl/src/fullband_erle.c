@@ -1,12 +1,11 @@
 /* fullband_erle.c — C port of python/modules/state/fullband_erle.py.
  *
- * PRECISION: float32-by-design (f32 campaign — Python bit-exact parity
- * retired, drift accepted). The per-bin inputs x2/y2/e2 are float32 arrays;
- * the pairwise sum over them stays float32 (fb_erle_pairwise_sum), no longer
- * widened to double afterward. Every scalar accumulator / ratio / log2 / EMA
- * / max-min / quality op is float32 end-to-end, matching the arrays'
- * precision (the _fast_log2 helper now wraps log2f). Built with
- * -ffp-contract=off so each float op rounds separately.
+ * PRECISION: float32 (drift versus Python accepted). The per-bin inputs
+ * x2/y2/e2 are float32 arrays; the pairwise sum over them stays float32
+ * (fb_erle_pairwise_sum). Every scalar accumulator / ratio / log2 / EMA /
+ * max-min / quality op is float32 end-to-end, matching the arrays' precision
+ * (the _fast_log2 helper wraps log2f). Built with -ffp-contract=off so each
+ * float op rounds separately.
  */
 #include "fullband_erle.h"
 
@@ -32,9 +31,8 @@ float fb_erle_pairwise_sum(const float *a, size_t n) {
     return sk_pairwise_sum_tailfold_b_f32(a, n);
 }
 
-/* _fast_log2(x) = log2f(x) — float32 in, float32 out (was float(np.log2(x))
- * i.e. a float64 log2; now a single-precision log2 to match the rest of the
- * float32 pipeline). */
+/* _fast_log2(x) = log2f(x) — float32 in, float32 out (single-precision log2
+ * to match the rest of the float32 pipeline). */
 static float fast_log2(float x) {
     return log2f(x);
 }
@@ -159,9 +157,8 @@ void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
      * native 4ms blocks = 24ms) carry the same factor of 6, so it cancels:
      * pass plain hop_size against aec3_per_block_ema_alpha_to_per_hop's
      * fixed single-native-block (4ms) denominator, NOT
-     * FBERLE_POINTS_TO_ACCUMULATE*hop_size (an earlier fix on 2026-08-01
-     * passed the latter, which compares 6 real hops against only 1 native
-     * block, inflating the exponent 6x too far; caught in review). */
+     * FBERLE_POINTS_TO_ACCUMULATE*hop_size (which would compare 6 real hops
+     * against only 1 native block and inflate the exponent 6x). */
     s->td_alpha = aec3_per_block_ema_alpha_to_per_hop(
         0.05f, hop_size, sample_rate);
     s->quality_alpha = aec3_per_block_ema_alpha_to_per_hop(
@@ -173,8 +170,8 @@ void fb_erle_init(FullBandErleEstimator *s, int n_freqs,
      * the-6x reasoning), not the EMA formula. */
     float maxmin_forget = aec3_per_block_rate_to_per_hop(
         FBERLE_MAXMIN_FORGET, hop_size, sample_rate);
-    /* AEC3 kBlocksToHoldErle=100 blocks (~400 ms). Was a frozen #define (40
-     * hops, correct only at hop=160/sr=16000); rescaled live here. */
+    /* AEC3 kBlocksToHoldErle=100 blocks (~400 ms), rescaled live to the hop
+     * and sample rate. */
     s->blocks_to_hold_erle = aec3_ms_to_hops(400.0f, hop_size, sample_rate);
     /* The helper (aec3_scale.h/.c) is float32-typed and out of scope for this
      * conversion; its result is stored directly here. */
@@ -216,24 +213,23 @@ void fb_erle_update(FullBandErleEstimator *s,
             }
         }
     }
-    /* UBSan-confirmed signed-overflow fix, floored at INT_MIN -- NOT at 0
-     * (⚠ do not "fix" this the way erle_estimator.c/erl_estimator.c's
-     * LEVEL-check counters were fixed: the gate below is `== 0`, an
-     * EDGE-triggered one-shot check, not a level check. The old unbounded
+    /* Floored at INT_MIN to avoid signed overflow -- NOT at 0
+     * (⚠ do not floor this the way erle_estimator.c/erl_estimator.c's
+     * LEVEL-check counters are bounded: the gate below is `== 0`, an
+     * EDGE-triggered one-shot check, not a level check. An unbounded
      * decrement crosses exactly 0 once per re-arm cycle then keeps
      * counting down (-1, -2, ...), so `== 0` fires exactly once per cycle.
      * Flooring at 0 would PIN the value at 0 once reached, making `== 0`
      * fire on every subsequent hop too -- inst_reset_accumulators() would
      * re-fire every hop instead of once, discarding any partial
-     * accumulation inst_update() makes on those hops and changing
-     * production behaviour (this field's raw value is also read bit-exact
-     * by test/historical/parity_fullband_erle.c: `s.hold_counter_inst_erle !=
-     * exp_hold`, which mirrors the module's Python reference's own
-     * unbounded `_hold_counter_inst_erle`). Flooring at INT_MIN instead
-     * preserves BOTH the one-shot edge-trigger semantics and the bit-exact
-     * golden for every practically-reachable hop count (10 ms hops ->
-     * INT_MIN is ~248 days of continuous uptime away), while eliminating
-     * the UB at the true overflow boundary. */
+     * accumulation inst_update() makes on those hops (this field's raw value
+     * is also compared bit-exact by test/historical/parity_fullband_erle.c:
+     * `s.hold_counter_inst_erle != exp_hold`, which mirrors the module's Python
+     * reference's own unbounded `_hold_counter_inst_erle`). Flooring at
+     * INT_MIN instead preserves BOTH the one-shot edge-trigger semantics and
+     * bit-exactness for every practically reachable hop count (at 10 ms hops
+     * INT_MIN is ~248 days of continuous uptime away), while removing the UB
+     * at the true overflow boundary. */
     if (s->hold_counter_inst_erle > INT_MIN) s->hold_counter_inst_erle -= 1;
     if (s->hold_counter_inst_erle == 0) {
         inst_reset_accumulators(&s->inst);
