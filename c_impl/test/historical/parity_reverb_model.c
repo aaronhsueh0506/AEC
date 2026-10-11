@@ -1,6 +1,6 @@
 /* Historical parity_reverb_model.c — replay the binary golden from
  * python/diag/gen_reverb_golden.py through the C ReverbModel and assert exact
- * (bit-for-bit float32) match. WS5 Phase 5.1 gate.
+ * (bit-for-bit float32) match.
  *
  * Build (from c_impl/):
  *   gcc -O2 -ffp-contract=off -std=gnu99 -Iinclude \

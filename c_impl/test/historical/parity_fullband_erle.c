@@ -1,7 +1,7 @@
 /* Historical parity_fullband_erle.c — replay the binary golden from
  * python/diag/gen_fullband_erle_golden.py through the C FullBandErleEstimator
  * and assert exact (bit-for-bit float64 + exact int/bool) match per frame.
- * WS5 Phase 5.2 gate (the AecState fullband-ERLE layer).
+ * Gate for the AecState fullband-ERLE layer.
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \

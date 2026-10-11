@@ -1,6 +1,6 @@
 /* Historical parity_aec3_scale.c — emit aec3_scale + freq_utils values as `key=%.17g`
  * lines for bit-exact diff against the Python reference
- * (python/diag/parity_aec3_scale_golden.py). Phase 5.0 golden gate.
+ * (python/diag/parity_aec3_scale_golden.py).
  *
  * Build (from c_impl/):
  *   gcc -Wall -O2 -ffp-contract=off -std=gnu99 -Iinclude \

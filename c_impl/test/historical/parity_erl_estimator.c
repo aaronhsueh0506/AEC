@@ -1,7 +1,7 @@
 /* Historical parity_erl_estimator.c — replay the binary golden from
  * python/diag/gen_erl_estimator_golden.py through the C ErlEstimator and assert
  * exact (bit-for-bit float32 + exact int + bit-for-bit float64) match.
- * WS5 Phase 5.2 gate (the AecState ERL layer).
+ * Gate for the AecState ERL layer.
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \

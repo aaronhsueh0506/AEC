@@ -23,7 +23,7 @@ int main(int argc, char* argv[]) {
     /* DoubleTalkAnalyzer config defaults must match Python AecConfig BALANCED:
      *   shadow_dtd_offset=1.5  shadow_dtd_advantage_scale=3.0  */
     RenderActivity     ra;
-    /* M3: render_activity_update()'s former fixed-size stack scratch is now
+    /* render_activity_update()'s former fixed-size stack scratch is now
      * caller-owned (pool-carved in production); this standalone harness
      * mallocs its own copy sized ceil(hop/8), matching detectors.c's
      * PAIR_BLOCK=8. */

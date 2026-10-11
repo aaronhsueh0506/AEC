@@ -1,12 +1,12 @@
 /* Regression test for aec_apply_external_realign(): the 4ch shared-delay
- * wrapper's "vertical line".
+ * wrapper's output discontinuity.
  *
  * An AEC_DELAY_EXTERNAL_ALIGNED instance converges while the caller serves
  * one far alignment; the caller then changes the alignment. The old wrapper
  * response -- full aec_reset() -- wipes the converged filter, so the echo is
  * fully re-exposed for dozens of hops (bright broadband line) and the WOLA
- * restart adds a near-zero output hop (dark line). Measured on this exact
- * scene before the fix: linear residual jumped 0.030 -> 0.075 (~= the 0.076
+ * restart adds a near-zero output hop (dark line). On this exact
+ * scene with the full reset: linear residual jumped 0.030 -> 0.075 (~= the 0.076
  * echo) at the change hop.
  *
  * What this proves:
@@ -23,14 +23,14 @@
  *   5. THE GATE SURVIVES FAR SILENCE. The inst-ERLE ring holds ~15 entries and
  *      every far-silent hop pushes a 0.0 into it, so a realign that arrives
  *      >= 16 hops after the last far burst -- a wrapper that re-measures its
- *      alignment between bursts, i.e. the common case -- used to read "not
+ *      alignment between bursts, i.e. the common case -- would read "not
  *      cancelling" on a filter cancelling at 13 dB and fall to the reset
  *      branch for nothing. aec_linear_is_cancelling()'s windowed reading is
  *      what still knows. (Needs the AEC3 post chain to run -- context-only is
  *      enough -- since that is what maintains the windowed ERLE.)
  *   6. THE RESET BRANCH ACTUALLY RECONVERGES. When the gate legitimately
  *      rejects, the taps sit at the alignment the caller abandoned. Keeping
- *      them (the counters-only echo-path-change this branch used to be) leaves
+ *      them (a counters-only echo-path-change) leaves
  *      the filter SUBTRACTING a decorrelated echo copy: measured 1.3-1.5x the
  *      echo, above pass-through, for 300+ hops. Pinned against an aec_reset()
  *      twin, whose trajectory is the target the filter-only reset has to match

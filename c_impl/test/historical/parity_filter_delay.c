@@ -2,7 +2,7 @@
  * python/diag/gen_filter_delay_golden.py through the C FilterDelay and assert
  * exact (integer) match of filter_delays_blocks / min_direct_path /
  * external_delay_reported and the analyzer length-mismatch error path, over a
- * multi-frame state-evolution sequence. WS5 Phase 5.2 gate.
+ * multi-frame state-evolution sequence.
  *
  * Build (standalone, from repo root):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \

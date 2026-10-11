@@ -13,11 +13,9 @@
  * Run:
  *   ./bin/test_static_aec mic.wav ref.wav [sample_rate]
  *
- * M5 (multi-rate campaign, review F01): optional 3rd argv selects the sample
- * rate used to build AecConfig (default 16000, unchanged). The WAV files
- * themselves must already be at that rate (this test does not resample) --
- * see m5/resample_pairs.py for the 8k/48k doubletalk pair this repo's M5
- * verification run used.
+ * Optional 3rd argv selects the sample rate used to build AecConfig
+ * (default 16000). The WAV files themselves must already be at that rate
+ * (this test does not resample).
  */
 #include "aec.h"
 #include "wav_io.h"

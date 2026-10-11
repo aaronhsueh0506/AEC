@@ -1,5 +1,5 @@
 /* Historical parity_pbfdkf.c — replay the REAL-pipeline binary golden from
- * python/diag/gen_pbfdkf_golden.py through the C PBFDKF v3.22 port over the
+ * python/diag/gen_pbfdkf_golden.py through the C PBFDKF port over the
  * whole ~4186-hop DT case. GATED quantities: (a) the integer control state
  * (call_counter / partition_idx / initial_state*) — BIT-EXACT; (b) the linear
  * output `out` — within an absolute float32 tolerance (measured worst ~7.8e-3).
@@ -10,11 +10,10 @@
  * weight-update loop and the internal state diverges CHAOTICALLY from numpy fp64
  * (measured W max_rel ~1.5e5, H_error ~2). That is expected, not a bug — many
  * different weight trajectories cancel the same echo, so the OUTPUT stays
- * aligned (~7.8e-3) even while W does not. (Under the retired pocketfft backend
- * the whole internal state was bit-exact; the float32 KISS backend trades that
- * for output-level alignment.) The numpy-on-arm64 idioms the C port matches —
+ * aligned (~7.8e-3) even while W does not (the float32 KISS backend is gated at
+ * output level, not by bit-exact internal state). The numpy-on-arm64 idioms the C port matches —
  * np.abs(complex64)**2 scaled-hypot, complex64 FMA multiply, double-coeff EMA
- * (see pbfdkf.c + project_c_port_parity_rules.md) — keep the per-hop port logic
+ * (see pbfdkf.c) — keep the per-hop port logic
  * faithful; the chaotic drift is purely the recursive FFT-roundoff accumulation.
  *
  * Build (from c_impl/), STANDALONE (do NOT link aec.c — old API); the FFT
@@ -73,7 +72,7 @@ int main(int argc, char **argv) {
     /* Build PBFDKF exactly as the orchestrator does: block_size = 2*hop. */
     PBFDKF flt;
     pbfdkf_init(&flt, block_size, N, mu, delta, hop, 16000);
-    /* v3.24.0 round-robin TD constraint (config default ON; aec.c:432 sets it on
+    /* Round-robin TD constraint (config default ON; aec.c:432 sets it on
      * the production main filter). pbfdkf_init defaults it OFF, so the isolated
      * replay MUST enable it to match the golden (generated via aec.process with
      * constraint_round_robin=True) — else W diverges at the first constrained

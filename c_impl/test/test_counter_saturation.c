@@ -1,9 +1,7 @@
-/* test_counter_saturation.c — permanent, checked-in regression test for
- * counter-saturation fixes across this repo's C AEC implementation (every
- * ad hoc UBSan probe previously used to verify these fixes was throwaway
- * and never committed -- this file replaces that with a permanent `make
- * test-counter-saturation` target that runs every time, plus a permanent
- * UBSan build recipe, see test/run_counter_saturation_ubsan.sh).
+/* test_counter_saturation.c — regression test for counter-saturation
+ * across this repo's C AEC implementation (a permanent `make
+ * test-counter-saturation` target, plus a permanent UBSan build recipe, see
+ * test/run_counter_saturation_ubsan.sh).
  *
  * For every struct-field increment/decrement site an exhaustive grep sweep
  * verified as genuinely unbounded, plus a representative sample of sites
@@ -487,9 +485,8 @@ static void section_delay_aec3(void) {
      * expectation too and can't spuriously pass by silently reading fewer
      * hops than a hardcoded literal would have demanded.
      *
-     * Independently confirmed against the actual checked-in fixture (Python
-     * `wave` module, read directly off the file headers): both
-     * aec_record_{mic,ref}_10s.wav are mono/16 kHz/160000 samples exactly
+     * The checked-in fixtures aec_record_{mic,ref}_10s.wav are mono/16 kHz/160000
+     * samples exactly
      * (10.000s, evenly divisible by hop=160 with zero remainder), so a
      * complete, untruncated read of either file processes EXACTLY 1000
      * hops. The sanity CHECK just below ties that independently-verified
@@ -506,8 +503,8 @@ static void section_delay_aec3(void) {
           " 1000 hops at hop=160 (confirmed via Python `wave`: num_samples=160000 for"
           " both files); if this fails the fixture changed duration");
 
-    /* Pool-first construction (plan step 2): DelayAec3 is a metadata struct
-     * now, so this section owns the block the estimator's arrays live in.
+    /* Pool-first construction: DelayAec3 is a metadata struct,
+     * so this section owns the block the estimator's arrays live in.
      * Sized for the exact (16 kHz, hop=160, full bank) triple it drives. */
     {
         const char *why = NULL;

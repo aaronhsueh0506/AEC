@@ -1,16 +1,16 @@
-/* test_fifo_spsc.c — F09 regression test (async render/capture FIFO data
+/* test_fifo_spsc.c — regression test (async render/capture FIFO data
  * race). Exercises the streaming API (aec_analyze_render() / aec_process_
- * capture(), aec.h ~F09 doc block) under real SPSC concurrency: one render
+ * capture(), aec.h doc block) under real SPSC concurrency: one render
  * thread, one capture thread, both hammering the same Aec instance with no
  * external lock, exactly the shape aec.h's threading contract promises is
  * safe.
  *
- * This test targets the F09 Variant A' rewrite (drop-new + consumer
- * catch-up, see aec.h/aec.c): fifo_write is written ONLY by the render
+ * This test targets the drop-new + consumer catch-up FIFO
+ * (see aec.h/aec.c): fifo_write is written ONLY by the render
  * thread and fifo_read is written ONLY by the capture thread (each a plain
  * monotonic unsigned cursor, published with a single acquire/release pair —
  * no RMW anywhere). This test PASSES ThreadSanitizer with ZERO suppressions
- * (see STEP 4 of the implementation report / the TSan build recipe below) —
+ * (see the TSan build recipe below) —
  * that is the proof artifact for the redesign's race-freedom claim.
  *
  * Two modes:
@@ -42,12 +42,10 @@
  *   --singlethread <path>  — single-thread reference run: strict lockstep
  *                             (analyze_render immediately followed by
  *                             process_capture, alternating, same thread) on
- *                             the SAME deterministic LCG signal as before
- *                             the F09 Variant A' rewrite (this mode is
- *                             intentionally left byte-for-byte unchanged —
- *                             same lcg_next()/fill_hop(), same n_hops=4000 —
- *                             so a pre-rewrite dump and a post-rewrite dump
- *                             can be `cmp`'d: the streaming API's lockstep
+ *                             a deterministic LCG signal (same
+ *                             lcg_next()/fill_hop(), same n_hops=4000 across
+ *                             revisions, so dumps from different builds can
+ *                             be `cmp`'d: the streaming API's lockstep
  *                             behaviour must not change, aec.h's documented
  *                             lockstep-equivalence contract), dumping raw
  *                             float32 output to <path>.
@@ -97,9 +95,8 @@ static int g_pass = 0;
  * mechanism, not echo-cancellation quality, so any bounded, non-degenerate
  * signal is enough to keep aec_process()'s DSP well away from saturation/
  * NaN territory while still doing real (non-trivial) work per hop.
- * UNCHANGED by the F09 Variant A' rewrite: run_singlethread_dump() below
- * still drives both ref and mic from these two functions exactly as
- * before, so a pre-rewrite and post-rewrite dump remain comparable. */
+ * run_singlethread_dump() below drives both ref and mic from these two
+ * functions, so dumps from different builds remain comparable. */
 static unsigned int lcg_state_far = 0x9E3779B9u;
 static unsigned int lcg_state_near = 0x2545F491u;
 
@@ -194,7 +191,7 @@ typedef struct {
     Aec* a;
     int  hop;
     long underrun_count;
-    long overrun_count;        /* F09 Variant A': catch-up events (consumer-observed) */
+    long overrun_count;        /* catch-up events (consumer-observed) */
     int  all_finite;
     int  integrity_ok;         /* every non-underrun hop matched its regenerated expected hop */
     int  monotonic_ok;         /* decoded call_seq strictly increasing across consumed hops */
@@ -385,9 +382,9 @@ static void run_stress_test(void) {
      * producer's fixed N_HOPS budget runs out long before the consumer's
      * does, so the ring drains and the consumer runs dry for the rest
      * (underrun); the jitter above makes both outcomes robust to exact
-     * relative thread speed on whatever host runs this. F09 Variant A'
-     * additionally gives the CONSUMER its own overrun path (catch-up, fired
-     * when it finds the ring completely full) alongside the producer's. */
+     * relative thread speed on whatever host runs this. The CONSUMER also has
+     * its own overrun path (catch-up, fired when it finds the ring completely
+     * full) alongside the producer's. */
     CHECK(pa.overrun_count >= 1, "stress: drop-new (producer overrun) path was exercised");
     CHECK(ca.underrun_count >= 1, "stress: underrun path was exercised");
     CHECK(ca.overrun_count >= 1, "stress: catch-up (consumer overrun) path was exercised");
@@ -444,19 +441,18 @@ static void run_stress_test(void) {
            ca.gaps_total, trailing_drops, leftover, ca.last_consumed_call_seq);
     CHECK(trailing_drops >= 0, "stress: trailing_drops is non-negative (sanity on the residual accounting)");
     CHECK(ca.gaps_total + trailing_drops == pa.overrun_count + skip_totals,
-          "stress: gaps_total + trailing_drops == producer_drops + skip_totals (F09 Variant A' identity)");
+          "stress: gaps_total + trailing_drops == producer_drops + skip_totals (FIFO identity)");
 
     aec_destroy(&a);
 }
 
-/* ── single-thread lockstep reference dump (byte-identity dance) ─────────
+/* ── single-thread lockstep reference dump (byte-identity check) ─────────
  * Strict alternation on ONE thread: aec_analyze_render(ref) immediately
  * followed by aec_process_capture(mic, out) — the FIFO stays pass-through
  * (aec.h's documented lockstep equivalence), so this must produce identical
- * output whether run against the pre-F09-Variant-A' or post-rewrite aec.c.
- * Left byte-for-byte unchanged by the F09 Variant A' rewrite (same
- * lcg_next()/fill_hop(), same n_hops=4000) so a pre-rewrite dump and a
- * post-rewrite dump can be `cmp`'d directly. */
+ * output on any build of aec.c; the signal is fixed (same
+ * lcg_next()/fill_hop(), same n_hops=4000) so dumps from different builds can
+ * be `cmp`'d directly. */
 static void run_singlethread_dump(const char* path) {
     AecConfig cfg;
     aec_config_from_preset(&cfg, AEC_PRESET_BALANCED, 16000);

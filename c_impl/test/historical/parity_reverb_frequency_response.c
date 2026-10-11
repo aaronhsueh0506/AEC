@@ -1,7 +1,7 @@
 /* Historical parity_reverb_frequency_response.c — replay the binary golden from
  * python/diag/gen_reverb_frequency_response_golden.py through the C
  * ReverbFrequencyResponse and assert exact (bit-for-bit) match of
- * tail_response (float32) and average_decay (float64). WS5 Phase 5.1 gate.
+ * tail_response (float32) and average_decay (float64).
  *
  * Build (standalone, from c_impl/):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Iinclude \

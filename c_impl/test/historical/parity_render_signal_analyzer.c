@@ -1,7 +1,7 @@
 /* Historical parity_render_signal_analyzer.c — replay the binary golden from
  * python/diag/gen_render_signal_analyzer_golden.py through the C
  * RenderSignalAnalyzer and assert exact match on counters / narrow_peak_band /
- * poor_signal_excitation / masked-mu. WS5 Phase 5.1 gate.
+ * poor_signal_excitation / masked-mu.
  *
  * Build (standalone, from repo root):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \

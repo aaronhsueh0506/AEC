@@ -1,5 +1,5 @@
 /*
- * test_wav_io_shim.c - F06 remediation smoke test for THIS repo's
+ * test_wav_io_shim.c - smoke test for THIS repo's
  * example/wav_io.h shim onto the shared audio_common/include/wav_io.h.
  *
  * The exhaustive negative-corpus coverage (malformed headers, odd-chunk
@@ -16,8 +16,7 @@
  * Standalone by design (like test/simd_selftest_aec.c): does not link
  * against libaec.a or any src object, so it builds and runs
  * independently of the rest of this repo's C sources. Not wired into the
- * Makefile (kept out of scope for this change -- see the F06 task notes);
- * build directly, e.g.:
+ * Makefile; build directly, e.g.:
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
  *       -I./include -I./example -I../../audio_common/include \
  *       -o /tmp/test_wav_io_shim test/test_wav_io_shim.c -lm

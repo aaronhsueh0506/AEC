@@ -1,4 +1,4 @@
-/* Historical parity_pbfdkf_loc.c — first-divergence localizer for the PBFDKF v3.22 C port.
+/* Historical parity_pbfdkf_loc.c — first-divergence localizer for the PBFDKF C port.
  * Same golden as parity_pbfdkf.c, but instead of a gate it reports, per quantity,
  * the FIRST hop with any bit-exact (!=) mismatch and dumps the first few
  * diverging bins (C value, Py value, ULP gap). Because hop 0 starts from
@@ -7,10 +7,9 @@
  *
  * NOTE: under the KISS FFT (float32) backend the C output is NOT bit-exact to
  * numpy fp64, so this localizer reports a "first mismatch" hop (~71) that is
- * merely the onset of expected float32 ULP drift, NOT a port bug. It was written
- * for the retired pocketfft backend (numpy-precision) where a hop-0 mismatch
- * really did pinpoint a wrong op; to use it that way again you need a
- * numpy-precision FFT. For the production gate see parity_pbfdkf.c (int state
+ * merely the onset of expected float32 ULP drift, NOT a port bug. It is only a
+ * precise localizer with a numpy-precision FFT, where a hop-0 mismatch pinpoints
+ * a wrong op. For the production gate see parity_pbfdkf.c (int state
  * bit-exact + output tolerance) and parity_aec_e2e.c.
  *
  * Build (from c_impl/); the FFT wrapper now lives in the shared audio_common
@@ -84,7 +83,7 @@ int main(int argc, char **argv) {
 
     PBFDKF flt;
     pbfdkf_init(&flt, block_size, N, mu, delta, hop, 16000);
-    flt.base.constraint_round_robin = 1;  /* v3.24.0 default-ON (aec.c:432) — match golden */
+    flt.base.constraint_round_robin = 1;  /* default ON (aec.c:432) — match golden */
     for (int k = 0; k < K; ++k) { flt.Q_high[k]=q_high; flt.Q_low[k]=q_low; flt.Q[k]=q_high; }
     flt.base.initial_state_threshold_hops = init_thr;
 

@@ -1,19 +1,16 @@
-/* test_lifecycle.c — F03/F04 review remediation regression test.
+/* test_lifecycle.c — create/destroy lifecycle regression test.
  *
- * F03 was "dynamic AEC leaks 87 allocations / 184,144 B per create/destroy
- * lifecycle" (aec_create() used to do ~87 individual per-array mallocs that
- * aec_destroy() never freed). The fix (aec.c: aec_carve(), shared by
- * aec_create() and aec_init()) folds every one of those arrays into a
- * single arena; aec_destroy() now frees it with one free(). This test
- * repeatedly create/process/reset/destroy's an Aec so a leak checker
- * (`leaks --atExit`) run over it proves the fix: a real per-cycle leak
- * would show up as N-times-repeated allocations; a correct teardown stays
- * flat regardless of the iteration count.
+ * Leak check: aec_create() carves every sub-module array out of a single
+ * arena (aec.c: aec_carve(), shared by aec_create() and aec_init());
+ * aec_destroy() frees it with one free(). This test repeatedly
+ * create/process/reset/destroy's an Aec so a leak checker
+ * (`leaks --atExit`) run over it shows there is no per-cycle leak: a real
+ * leak would show up as N-times-repeated allocations; a correct teardown
+ * stays flat regardless of the iteration count.
  *
- * F04 was "no allocation-failure rollback; void nested inits" — this test
- * doesn't force an OOM (there's no portable way to do that here), but it
- * does exercise the two cheap, always-checkable safety properties the fix
- * guarantees:
+ * Allocation-failure safety: this test doesn't force an OOM (there's no
+ * portable way to do that here), but it does exercise the two cheap,
+ * always-checkable safety properties:
  *   - aec_destroy(NULL) is a safe no-op.
  *   - Calling aec_destroy() twice on the same successfully-created instance
  *     is safe (idempotent: the second call frees nothing and dereferences

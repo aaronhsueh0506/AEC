@@ -4,7 +4,7 @@
  * every driver-assembled intermediate (PSDs / E1 capture_psd_erle /
  * x2_reverb_for_erle / coh_gate_mask / comfort_noise / pre-irfft e_out_spec)
  * across the full DT/FS/NE run (startup + the n2_initial transient + a
- * mid-stream reset). WS5 gate.
+ * mid-stream reset).
  *
  * VERDICT: the NON-FFT stages the DRIVER OWNS (PSDs / E1 capture_psd_erle /
  * x2_reverb_for_erle / coh_gate_mask / comfort_noise — all replayed from the
@@ -14,7 +14,7 @@
  * ULP scale under the KISS float32 backend (fft_wrapper.c + lib/kiss_fft/
  * kiss_fft.c, now vendored in the shared audio_common layer): measured
  * e_out_spec max ~1.2e-7, out max ~6e-8. They are gated within POST_TOL, not
- * bit-for-bit. (Under the retired pocketfft backend both were bit-exact.) A
+ * bit-for-bit. A
  * real driver regression diverges by O(0.1), well above tol.
  *
  * Build (standalone, from anywhere):
@@ -128,7 +128,7 @@ int main(int argc, char **argv) {
     aec3_post_config_defaults(&cfg);
     cfg.n_bins = n_bins; cfg.fft_size = fft_size;
     cfg.block_size = block_size; cfg.hop_size = hop;
-    /* M4: synth_window (below) is read at exactly block_size width. */
+    /* synth_window (below) is read at exactly block_size width. */
     cfg.synth_window_len = block_size;
     cfg.erle_coh_gate_enabled = hdr_i[5];
     cfg.erle_windowed_capture_psd = hdr_i[6];

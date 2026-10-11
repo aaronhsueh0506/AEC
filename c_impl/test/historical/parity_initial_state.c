@@ -2,7 +2,7 @@
  * python/diag/gen_initial_state_golden.py through the C InitialState and assert
  * exact (integer/bool) match across every frame of every config, including the
  * constructor threshold, the transition edge, saturation-gated counter, and a
- * mid-run reset(). WS5 Phase 5.2 gate.
+ * mid-run reset().
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \

@@ -15,7 +15,7 @@
  *      capture skips straight to the freshest buffered hop (instead of
  *      draining the backlog oldest-first), reports AEC_BUF_RENDER_OVERRUN,
  *      heals the occupancy to <=1, and the following render+capture pair is
- *      back to NONE/NONE (F09 Variant A').
+ *      back to NONE/NONE.
  *
  * Build (from c_impl/); the FFT wrapper now lives in the shared audio_common
  * archive:
@@ -99,7 +99,7 @@ int main(void) {
     aec_reset(&a_str);
     /* fifo_cap is 32 @ 16 kHz (AEC_STREAM_FIFO_MS=320 / hop=10 ms, rounded up
      * to the next power of two by aec_derive_dims -- already a power of two
-     * at this rate, so no growth). F09 Variant A' is drop-new: the ring
+     * at this rate, so no growth). The streaming FIFO is drop-new: the ring
      * fills after the first 32 renders (fifo_write - fifo_read reaches cap
      * with zero capture calls to drain it), and every render after that is
      * dropped, so pushing 100 renders with no intervening capture must
@@ -140,7 +140,7 @@ int main(void) {
            underrun_ok ? "PASS" : "FAIL", recovered ? "PASS" : "FAIL");
     if (!underrun_ok || !recovered) return 1;
 
-    /* ---- Check 4: consumer catch-up (F09 Variant A') ---- */
+    /* ---- Check 4: consumer catch-up ---- */
     aec_reset(&a_str);
     /* Fill the ring to exactly capacity with no intervening captures --
      * every one of these must report NONE (see Check 2's byte-exact count

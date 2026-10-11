@@ -1,14 +1,12 @@
 /* Historical parity_filter_state_bridge.c — replay the binary golden from
  * python/diag/gen_filter_state_bridge_golden.py through the C
  * filter_state_bridge across a multi-frame sequence with evolving filter state.
- * WS5 Phase 5.2 gate.
  *
  * All control fields (regime / filter_converged / main_paused / mu_final /
  * external_delay / any_coarse / all_div / divergence_indicator) are replayed
  * from golden inputs and stay BIT-EXACT. The one FFT-derived output —
  * filter_taps = irfft(W0) — drifts by the KISS float32 FFT tolerance
  * (measured worst ~3e-8), so it is gated within FSB_TAPS_TOL, not bit-for-bit.
- * (Under the retired pocketfft backend filter_taps was bit-exact too.)
  *
  * Build (from c_impl/); the FFT wrapper now lives in the shared audio_common
  * archive:

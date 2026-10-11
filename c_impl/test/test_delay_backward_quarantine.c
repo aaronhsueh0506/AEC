@@ -19,9 +19,9 @@
  * cure one. Curing pre-echo mis-attribution is estimator work and is not what
  * this guard is for.
  *
- * WHY BOUNDED AND DIRECTIONAL: the unbounded, direction-blind predicate this
- * replaced -- and the multipath measurement that killed it -- are written up
- * once, on delay_backward_quarantine_enabled in aec.h. Row 4 below is the
+ * WHY BOUNDED AND DIRECTIONAL: the case against an unbounded,
+ * direction-blind predicate is written up on
+ * delay_backward_quarantine_enabled in aec.h. Row 4 below is the
  * permanent guard against that regression.
  *
  * What this test proves:
@@ -55,9 +55,7 @@
  *      the move scene green and turns the multipath one red).
  *   6. OFF IS THE UNCHANGED PATH: the enable defaults to 0, and with it off
  *      the trajectory is identical to a build that has no mechanism at all --
- *      pinned here as "row 1 still reproduces", with the audio-byte half
- *      proven out of band (rendering the seam config before and after this
- *      change: 512000 bytes byte-identical).
+ *      pinned here as "row 1 still reproduces".
  *   7. WHICH ERLE READING DOES THE WORK is falsifiable, not asserted in
  *      prose: with the inst-ERLE-peak arm configured out of reach the
  *      quarantine stops engaging, and the windowed reading it was left with
@@ -143,14 +141,12 @@ static int g_pass = 0;
  * and the new one have EQUAL gain and the dominant-peak aggregator is close
  * to a tie. A near-tie is exactly where a change in WHICH hops the matched
  * filter is engaged on moves the outcome, and the duty machine's ERLE
- * watchdog leak was retimed on 2026-08-26 (0.001 dB/hop was 0.1 dB/s only on
- * the retired 10 ms grid; at this test's 8 ms hop it is now 0.0008). That
- * moved this row's unguarded re-lock from hop 1515 to hop 2071 -- later, but
- * still a re-lock, still onto the same lock class, and still exactly +62
- * (one window) behind for the guarded build, which is the property this
- * block actually asserts. The window was 1600 hops, sized with 1.4% to
- * spare; it is now 2400 with the margin stated rather than discovered. The
- * three other rows moved by at most 5 hops. */
+ * watchdog leak is rate-retimed (0.001 dB/hop is 0.1 dB/s only on the 10 ms
+ * grid; at this test's 8 ms hop it is 0.0008), which puts this row's
+ * unguarded re-lock near hop 2071 -- still a re-lock, onto the same lock
+ * class, and exactly +62 (one window) behind for the guarded build, which is
+ * the property this block asserts. The window is 2400 hops, sized with the
+ * margin stated. */
 #define MP_HOPS     2400             /* 38.4 s: the 0.5 row re-locks at 2071,
                                       * 2133 guarded -- ~11% headroom        */
 #define MP_AT       250              /* the new path appears at hop 250       */
@@ -179,9 +175,8 @@ static int g_pass = 0;
 /* The BACKWARD move: the same generator with the endpoints swapped, so the
  * post-move delay is EARLIER and the direction test fires. This is now the
  * only scene that offers the quarantine a backward candidate at all -- the
- * pre-echo mis-lock that used to supply one is fixed at the estimator (see
- * block 1), so without this the mechanism would ship with no engaging-path
- * coverage. Released by the collapse well inside the window, because the old
+ * pre-echo mis-lock is handled at the estimator (see block 1), so without
+ * this the mechanism would have no engaging-path coverage. Released by the collapse well inside the window, because the old
  * path is genuinely GONE and cancellation really does fall apart. */
 #define BWD_HOPS    750
 #define BWD_AT      375
@@ -335,14 +330,12 @@ int main(void) {
         }
         for (h = (wrong_hop < 0 ? MIS_HOPS : wrong_hop); h < MIS_HOPS; ++h)
             if (off[h] != MIS_WRONG) wrong_sustained = 0;
-        /* This scene USED to be the defect: it acquired the true path and
-         * then re-locked to the pre-echo answer, holding it to the end --
-         * which this quarantine was built to DELAY, never to cure. Curing it
-         * was estimator work, done at the selection seam (the aggregator now
-         * reports the dominant peak; see test_delay_dominant_selection). The
-         * scene is kept, inverted, because an end-to-end assertion through
-         * aec_process() is what would catch the substitution returning by
-         * another route -- which the aggregator-level test cannot see.
+        /* This is the pre-echo mis-lock scene: the matched filter acquires
+         * the true path and must NOT then re-lock to the pre-echo answer.
+         * The aggregator reports the dominant peak (see
+         * test_delay_dominant_selection); an end-to-end assertion through
+         * aec_process() catches the pre-echo answer returning by another
+         * route, which the aggregator-level test cannot see.
          * Asserted with the mechanism OFF, the shipped default, so it is the
          * estimator under test and not the guard. */
         CHECK(locked_hop >= 0, "OFF: acquires the true path first");
@@ -360,16 +353,14 @@ int main(void) {
                locked_hop, locked_hop >= 0 ? off[locked_hop] : -1, MIS_WRONG);
     }
 
-    /* ---- 2 and 3 removed: their subject no longer exists ----
-     * They measured how long the guard delayed the pre-echo re-lock, and
-     * swept the window to prove the expiry was what released it. The
-     * estimator no longer produces that candidate (block 1), so both rows
-     * would be asserting about a scene that cannot happen.
+    /* ---- no window-sweep rows on the pre-echo scene ----
+     * The estimator does not produce the pre-echo candidate (block 1), so a
+     * window sweep on that scene would assert about a scene that cannot
+     * happen.
      *
-     * The claims survive where they are still demonstrable: the multipath
-     * rows below engage the guard and are released by the EXPIRY at exactly
-     * one window (+62 hops on this grid), which is the same "the window is
-     * what sets acceptance" property block 3 swept for -- and unlike the
+     * The window property is demonstrated where it is reproducible: the
+     * multipath rows below engage the guard and are released by the EXPIRY
+     * at exactly one window (+62 hops on this grid) -- and unlike the
      * mis-lock scene, multipath is a real echo-path condition rather than an
      * estimator defect. The backward-MOVE scene is not a substitute: by the
      * time that move is accepted here cancellation at the old alignment has
@@ -502,12 +493,10 @@ int main(void) {
                   "unguarded one");
             /* The companion assertion -- that windowed ERLE at the change
              * hop reads under its own 2.5 dB threshold, which is WHY only
-             * the fast arm could engage -- measured that value at the
-             * pre-echo re-lock. There is no change hop in this scene any
-             * more, so the reading is simply absent (-1) rather than
-             * under-threshold, and asserting on it would be asserting on
-             * nothing. The remaining row above is still the load-bearing
-             * one: it shows the windowed arm alone leaves the trajectory
+             * the fast arm could engage -- has no subject here: there is no
+             * change hop in this scene, so the reading is absent (-1) rather
+             * than under-threshold, and asserting on it would be asserting on
+             * nothing. The row above is the load-bearing one: it shows the windowed arm alone leaves the trajectory
              * unguarded here. */
             printf("      (no change hop in this scene: windowed ERLE at "
                    "change = %.3f, i.e. never sampled)\n", erle_at_change);

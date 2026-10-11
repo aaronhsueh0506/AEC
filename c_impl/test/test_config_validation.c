@@ -1,5 +1,4 @@
-/* test_config_validation.c — negative-input tests for the F05/F07 review
- * remediation: aec_validate_config() (aec.c) is the single source of truth
+/* test_config_validation.c — negative-input tests: aec_validate_config() (aec.c) is the single source of truth
  * for AecConfig bounds-checking, wired into all three public entry points
  * that derive sizes/state from a config. This test proves each entry point
  * actually rejects a bad config through its OWN existing failure
@@ -7,7 +6,7 @@
  *   - aec_get_mem_size(cfg)        -> 0
  *   - aec_init(mem, mem_size, cfg) -> NULL
  *   - aec_create(&a, cfg)          -> nonzero
- * plus the F07 misaligned-pool-base guard in aec_init(), and a smoke test
+ * plus the misaligned-pool-base guard in aec_init(), and a smoke test
  * that the otherwise-valid 16 kHz balanced config still works end to end
  * (byte-identical-output gate lives elsewhere; this is just "didn't break").
  *
@@ -78,11 +77,9 @@ static void test_sample_rate(void) {
     void* mem = malloc(sz);
     CHECK(mem != NULL, "sample_rate test setup: malloc aligned pool");
 
-    /* M5 (multi-rate campaign, review F01): the whitelist widened from
-     * {16000} to {8000, 16000, 48000} — 8000/48000 moved out of this
-     * negative list (see test_multi_rate_valid_smoke below for their
-     * positive coverage). 44100 has no per-rate table and stays rejected,
-     * alongside the always-invalid 0/-1/INT_MAX. */
+    /* The whitelist is {8000, 16000, 48000} (see test_multi_rate_valid_smoke
+     * below for the positive coverage). 44100 has no per-rate table and is
+     * rejected, alongside the always-invalid 0/-1/INT_MAX. */
     int bad_rates[] = { 0, -1, 44100, INT_MAX };
     for (size_t i = 0; i < sizeof(bad_rates) / sizeof(bad_rates[0]); ++i) {
         AecConfig cfg; base_cfg(&cfg);
@@ -111,7 +108,7 @@ static void test_filter_length(void) {
     free(mem);
 }
 
-/* F07: aec_init() must reject a misaligned pool base BEFORE writing
+/* aec_init() must reject a misaligned pool base BEFORE writing
  * anything to it. Prefill a raw buffer with a 0xA5 sentinel, hand aec_init
  * a deliberately-misaligned pointer +1..+15 into it, and assert (a) NULL
  * comes back and (b) not a single byte of the sentinel region changed. */
@@ -149,15 +146,14 @@ static void test_misaligned_base(void) {
     free(raw);
 }
 
-/* Regression: highpass_cutoff_hz used to be checked with a
- * flat, rate-blind [0, 20000] Hz range regardless of enable_highpass, while
- * hpf_init() (audio_common hpf.c, called from aec_carve whenever
- * enable_highpass is set) separately rejects any cutoff_hz that isn't finite,
- * isn't > 0, or isn't < 0.45*sample_rate -- silently returning NULL and
- * leaving the AEC instance with no mic-path HPF, with no error surfaced
- * anywhere. E.g. {sample_rate=8000, highpass_cutoff_hz=4000} used to sail
- * through aec_validate_config and then silently drop the HPF underneath.
- * aec_validate_config now mirrors hpf_params_valid exactly when
+/* highpass_cutoff_hz must be checked against hpf_init()'s rate-relative rule,
+ * not a flat, rate-blind [0, 20000] Hz range: hpf_init() (audio_common
+ * hpf.c, called from aec_carve whenever enable_highpass is set) rejects any
+ * cutoff_hz that isn't finite, isn't > 0, or isn't < 0.45*sample_rate --
+ * silently returning NULL and leaving the AEC instance with no mic-path HPF,
+ * with no error surfaced anywhere. E.g. {sample_rate=8000,
+ * highpass_cutoff_hz=4000} would pass a flat range and then silently drop the
+ * HPF underneath. aec_validate_config mirrors hpf_params_valid exactly when
  * enable_highpass=1, so every combination below that hpf_init would reject
  * must now be rejected here too (all three public entry points), and every
  * combination hpf_init would accept must still sail through end-to-end. */
@@ -435,7 +431,7 @@ static void test_valid_config_smoke(void) {
     free(mem);
 }
 
-/* M5: positive smoke at all three whitelisted rates -- get_mem_size>0,
+/* Positive smoke at all three whitelisted rates -- get_mem_size>0,
  * aec_init/aec_create both succeed, one hop of aec_process runs clean at
  * 8000/16000/48000. Mirrors test_valid_config_smoke's 16k-only shape;
  * kept as a separate function since that one is referenced by name
@@ -501,11 +497,11 @@ static void test_multi_rate_valid_smoke(void) {
 
 /* The three direct init entry points below sit UNDER aec_create()'s validator,
  * so a bad sample_rate cannot reach them through the normal path. They are
- * public API though, and since 2026-08 sample_rate is load-bearing there --
+ * public API though, and sample_rate is load-bearing there --
  * it retimes alpha_r/initial_state_threshold_hops and the
- * saturation attack/release pair. Before this, sample_rate=0 made hop_seconds
- * infinite and powf() returned 0 or NaN, i.e. an EMA that never adapts or a
- * filter full of NaN, reported by nothing. */
+ * saturation attack/release pair. An unchecked sample_rate=0 would make
+ * hop_seconds infinite and powf() return 0 or NaN, i.e. an EMA that never
+ * adapts or a filter full of NaN, reported by nothing. */
 static void test_direct_init_rejects_bad_rate(void) {
     PBFDAF f;
     PBFDAF f_before;
@@ -610,11 +606,10 @@ static void test_direct_init_rejects_bad_rate(void) {
 }
 
 /* ── shared signal-grid resolver: lockstep across every entry point ───────
- * (sample_rate, fft_size) used to be admissibility-checked by an inline
- * table inside aec_validate_config() while aec_derive_dims() separately
- * re-derived `hop = fft/2` / `K = fft/2+1`, and AEC3B_RATE_TABLE carried a
- * THIRD copy of the same geometry. Nothing forced the three to agree. They
- * now all read one resolver, and this section is what keeps that true.
+ * (sample_rate, fft_size) admissibility (aec_validate_config()), the
+ * `hop = fft/2` / `K = fft/2+1` derivation (aec_derive_dims()) and
+ * AEC3B_RATE_TABLE's geometry columns all read one resolver, and this section
+ * is what keeps that true.
  *
  * Proven here, on all four supported grids (the three product grids plus
  * the 8 kHz legacy one):
@@ -631,7 +626,7 @@ static void test_direct_init_rejects_bad_rate(void) {
  *      16 kHz has TWO production grids, so a library that guessed would
  *      silently pick one.
  *
- * Mutation checks (measured, not assumed):
+ * Mutation checks:
  *   - editing one AEC_GRID_TABLE row's hop (16k/512: 256 -> 128) turns rows
  *     1 and 2's "as tabled" / "AEC3B_RATE_TABLE agrees" red (2 failures) --
  *     the table is genuinely load-bearing, not decoration;
@@ -642,7 +637,7 @@ static void test_direct_init_rejects_bad_rate(void) {
  *     pair is the isolation test for "one entry point bypassed the
  *     resolver": on its own the bypass is value-identical today, and it is
  *     the DIVERGENCE it permits that this section catches.
- *   - KNOWN GAP (measured, recorded rather than papered over): removing the
+ *   - KNOWN GAP: removing the
  *     aec_resolve_signal_grid() call from aec_validate_config() alone does
  *     NOT turn this section red. Rejection still happens one layer later,
  *     because aec3b_rate_cfg() returns NULL for an unsupported pair and
@@ -651,7 +646,7 @@ static void test_direct_init_rejects_bad_rate(void) {
  *     contract (all three entry points reject) is what this section pins,
  *     and it holds either way; collapsing that second gate onto the
  *     resolver means sourcing AEC3B_RATE_TABLE's four grid columns from
- *     AEC_GRID_TABLE, which is a follow-up, not part of this step. The
+ *     AEC_GRID_TABLE, which is future work. The
  *     "AEC3B_RATE_TABLE agrees with the resolver" row above is what keeps
  *     the two honest until then. */
 static void test_signal_grid_resolver(void) {
@@ -1021,11 +1016,10 @@ static void test_delay_mode_illegal_combinations(void) {
                 snprintf(label, sizeof(label),
                          "%s: current_delay seeded from the config", ok[i].tag);
                 CHECK(a.current_delay == ok[i].fixed, label);
-                /* Plan §3.2.8: the FIXED ring is sized for THIS delay -- the
+                /* The FIXED ring is sized for THIS delay -- the
                  * tight `fixed + hop` bound -- not from the MATCHED search
-                 * budget it used to borrow (which also pulled in a legacy
-                 * +4096 headroom that has no meaning for an immutable
-                 * delay). The sizing rule itself, and the alignment
+                 * budget (whose +4096 headroom has no meaning for an
+                 * immutable delay). The sizing rule itself, and the alignment
                  * behaviour of the exact-fit ring, live in
                  * test_linear_context.c / test_delay_num_filters.c; this row
                  * only pins that a VALIDATED config lands on it. */

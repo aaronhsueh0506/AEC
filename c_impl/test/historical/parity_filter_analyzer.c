@@ -2,7 +2,7 @@
  * python/diag/gen_filter_analyzer_golden.py through the C FilterAnalyzer and
  * assert bit-exact match on the high-pass-filtered taps + peak_index +
  * delay_blocks + gain + consistent flag + the ConsistentFilterDetector
- * internal accumulators, for every per-hop step. WS5 Phase 5.2 gate.
+ * internal accumulators, for every per-hop step.
  *
  * Build (standalone, from repo root):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
@@ -39,7 +39,7 @@ int main(int argc, char **argv) {
     block     = malloc((size_t)hop * sizeof(float));
     exp_h     = malloc((size_t)size * sizeof(float));
     h_storage = malloc((size_t)size * sizeof(float));
-    /* M3: fa_update()'s former fixed-size stack scratch is now caller-owned
+    /* fa_update()'s former fixed-size stack scratch is now caller-owned
      * (pool-carved in production); this standalone harness mallocs its own
      * copies sized exactly to what fa_update requires (size / hop). */
     abs_scratch       = malloc((size_t)size * sizeof(float));

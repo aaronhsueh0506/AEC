@@ -10,8 +10,7 @@
  * saving is nothing like the design figure. The census makes it measurable:
  * duty_hops_run/duty_hops_total is the realised engagement, so the saving
  * stops being a design intention and becomes a number a bench (or
- * example/aec_wav.c's one-line report) can print every run (productization
- * plan §7 measurement method).
+ * example/aec_wav.c's one-line report) can print every run.
  *
  * What this test proves (nothing else in the suite does):
  *   1. duty_hops_total counts EVERY hop through the delay block under
@@ -61,7 +60,7 @@
  * asserted here (a single-process test cannot compare against a build
  * without the counters); it is verified out-of-band by rendering real
  * recordings through the pre-census and post-census builds and comparing
- * output bytes (see the productization-plan step-4 CHANGELOG entry).
+ * output bytes.
  *
  * Build (standalone, from c_impl/ -- mirrors test_delay_num_filters.c):
  *   make -C ../../audio_common BACKEND=ne10 lib

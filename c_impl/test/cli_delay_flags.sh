@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 #
 # cli_delay_flags.sh — regression test for aec_wav's --delay-mode /
-# --delay-num-filters / --fixed-delay / --print-mem-size options
-# (productization plan §9.4 / §3.4.6 RAM acceptance test 6).
+# --delay-num-filters / --fixed-delay / --print-mem-size options.
 #
 # SCOPE: this tests the CLI PLUMBING only — that a value typed on the command
 # line lands in the AecConfig handed to aec_create()/aec_get_mem_breakdown(),
 # that an illegal mode/field combination is REJECTED rather than silently
-# clamped (aec_validate_config is the single authority, per plan §2.1), and
+# clamped (aec_validate_config is the single authority), and
 # that --print-mem-size reports the SAME number the library itself would
 # return. It does not duplicate what the C regression tests already cover:
 # the bank-size GEOMETRY is test_delay_num_filters.c's job, the ring-size
@@ -146,7 +145,7 @@ for bad in 0 6 99 -1; do
     fi
 done
 # (e) --delay-num-filters other than the default under a mode with no bank
-#     to size (FIXED / external) — plan §2.1: a non-default n outside
+#     to size (FIXED / external): a non-default n outside
 #     MATCHED would silently promise a compute saving that mode already
 #     gives in full.
 if "$AEC_WAV" "$MIC" "$REF" "$TMP/o5e.wav" --cng --delay-mode fixed --fixed-delay 1600 --delay-num-filters 2 >/dev/null 2>&1; then
@@ -200,7 +199,7 @@ else
     ck ok "--print-mem-size does not process audio (no Processed/duty line)"
 fi
 
-# --- 8b. every field plan §3.4.6 test 6 requires is present -----------------
+# --- 8b. every required field is present -----------------
 line="$(grep '^mem: ' <<<"$out")"
 for field in sr= fft= hop= mode= n= fixed_delay_samples= total_bytes= estimator_bytes= ring_bytes=; do
     if grep -q "$field" <<<"$line"; then ck ok "print-mem-size line has $field"

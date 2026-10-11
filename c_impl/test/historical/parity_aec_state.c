@@ -1,7 +1,7 @@
 /* Historical parity_aec_state.c — replay the binary golden from
  * python/diag/gen_aec_state_golden.py through the C aec_state integration
  * layer and assert bit-exact agreement on every public-query output across the
- * FULL real doubletalk case (WS5 Phase 5.2 capstone).
+ * FULL real doubletalk case.
  *
  * The golden hooks the REAL balanced pipeline: per update() it dumps every
  * input + every post-update query output; per handle_echo_path_change it dumps
@@ -90,7 +90,7 @@ int main(int argc, char **argv) {
     cfg.erle_max_l = erle_max_l;
     cfg.erle_max_h = erle_max_h;
     cfg.filter_taps_size = filter_taps_size > 0 ? filter_taps_size : 960;
-    /* M3: FilterAnalyzer's de-stacked fa_update() scratch is now
+    /* FilterAnalyzer's de-stacked fa_update() scratch is now
      * caller-owned; this harness only knows filter_taps_size, so size
      * fa_abs_scratch to it directly (the runtime np*hop bound production
      * code uses is not available at this layer). */

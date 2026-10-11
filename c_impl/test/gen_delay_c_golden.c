@@ -1,22 +1,22 @@
 /* gen_delay_c_golden.c — write a C-REGRESSION golden for the delay estimator.
  *
- * The delay chain's matched-filter arithmetic is now hardcoded to the
+ * The delay chain's matched-filter arithmetic is hardcoded to the
  * float32/sliding-x2/NEON path and the duty-cycle analysis schedule is
  * always on (see delay_aec3.c's "matched-filter arithmetic" note and
  * aec.c's duty-cycle state machine) — both are INTENTIONAL, sampled-cost-
- * free divergences from the old Python float64 reference. The old
+ * free divergences from the Python float64 reference. The
  * python/diag/gen_delay_golden.py golden (near/far audio + Python
- * LegacyDelayShim's expected outputs) is therefore no longer a meaningful
- * bit-exact target: comparing today's C against it will show routine
+ * LegacyDelayShim's expected outputs) is therefore not a meaningful
+ * bit-exact target: comparing the C code against it shows routine
  * mismatches that are not bugs.
  *
- * This tool replaces that anchor with a same-format, C-produced-and-
- * consumed golden: it runs the CURRENT delay_aec3_accumulate() over the
+ * This tool produces a same-format, C-produced-and-consumed golden
+ * instead: it runs the CURRENT delay_aec3_accumulate() over the
  * same raw (unaligned) doubletalk case gen_delay_golden.py used, and
  * records THIS run's own outputs as "expected". test/parity_delay.c then
  * replays the golden and checks bit-exact reproducibility hop-by-hop. This
  * catches accidental regressions in delay_aec3.c (any change that alters
- * the recorded trace fails the check) — it no longer proves Python parity.
+ * the recorded trace fails the check) — it does not prove Python parity.
  * Regenerate intentionally (re-run this tool) whenever a deliberate change
  * to the delay estimator changes its output trace.
  *
@@ -28,7 +28,7 @@
  *   /tmp/gen_delay_golden /tmp/delay_golden.bin \
  *       ../wav/aec_challenge_blind/doubletalk/0I0XMl3M0ECO0U1N0cJvpg_doubletalk
  *
- * M5 (multi-rate campaign, review F01): the delay chain's own block size
+ * The delay chain's own block size
  * (DA_AEC3_BLOCK_SIZE=64, /4 decimation) is fixed regardless of input sample
  * rate -- the accumulate() API just buffers whatever hop it is handed into
  * that fixed-size block (see delay_aec3.h/.c), so this generator only needs
@@ -91,7 +91,7 @@ int main(int argc, char **argv) {
     fwrite(hdr, sizeof(int32_t), 2, f);
 
     DelayAec3 d;
-    /* Pool-first construction (plan step 2) at the default full bank; the
+    /* Pool-first construction at the default full bank; the
      * pool lives for the whole generation run, so it is never freed. */
     {
         const char *why = NULL;

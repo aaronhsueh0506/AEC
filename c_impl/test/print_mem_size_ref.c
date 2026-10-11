@@ -1,7 +1,6 @@
 /* print_mem_size_ref.c — independent reference tool backing
  * cli_delay_flags.sh's "aec_wav --print-mem-size's number equals
- * aec_get_mem_size()'s" cross-check (productization plan §3.4.6 RAM
- * acceptance tests 6/9).
+ * aec_get_mem_size()'s" cross-check.
  *
  * Deliberately NOT part of aec_wav.c / example/: this tool builds an
  * AecConfig from the same CLI-shaped inputs and calls

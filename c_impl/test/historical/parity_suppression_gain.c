@@ -1,7 +1,7 @@
 /* Historical parity_suppression_gain.c — replay the binary golden from
  * python/diag/gen_suppression_gain_golden.py through the C SuppressionGain and
  * assert exact bit-for-bit float32 match on the gain[n_bins] output across all
- * 3 real cases (doubletalk / farend_singletalk / nearend_singletalk). WS5 gate.
+ * 3 real cases (doubletalk / farend_singletalk / nearend_singletalk).
  *
  * Build (standalone, from anywhere; fast_math.h now lives in the shared
  * audio_common layer, so its include dir must be on -I too):
@@ -157,7 +157,7 @@ int main(int argc, char **argv) {
         tun.normal_enr_tr = t_no_enr_tr;
         tun.normal_enr_su = t_no_enr_su;
         tun.normal_emr_tr = t_no_emr_tr;
-        /* M4: the six tables above were just read at N_BINS==n_bins width
+        /* the six tables above were just read at N_BINS==n_bins width
          * (see the `rd(f, t_ne_enr_tr, (size_t)N_BINS * 4)` reads above),
          * so table_len == n_bins here. */
         tun.table_len = n_bins;

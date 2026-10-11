@@ -1,7 +1,5 @@
 /* test_rate_structural.c — per-rate unity/impulse/COLA structural checks.
- * Standalone-gcc convention
- * (mirrors test_config_validation.c / test_static_aec.c's own header
- * recipe). It is wired to the `make test-rate-structural` target.
+ * Wired to the `make test-rate-structural` target.
  *
  * The following checks run at each of the four whitelisted grids
  * (8000/256, 16000/256, 16000/512, 48000/1024):
@@ -11,8 +9,8 @@
  *       sqrt-Hann 50%-overlap perfect-reconstruction identity --
  *       w[i]^2 + w[i+hop_size]^2 == 1 for i in [0, hop_size) -- within 1e-6.
  *       This is the actual OLA correctness property the synthesis stage
- *       depends on; M4 already asserted synth_window_len == block_size at
- *       carve time, this test asserts the WINDOW SHAPE itself reconstructs.
+ *       depends on; carve time asserts synth_window_len == block_size, this
+ *       test asserts the WINDOW SHAPE itself reconstructs.
  *
  *   (b) impulse-through-linear-path: build an Aec at each rate with
  *       cfg.enable_res = 0 (linear-only output, same knob aec_wav.c's
@@ -26,11 +24,9 @@
  *           cancels at every rate, not a quality bar).
  *
  *   (b2) impulse-through-full-post-chain: identical excitation, cfg.enable_res
- *       = 1 -- the actual production path. Added alongside the 16kHz default
- *       grid flip (512/256 -> 256/128): (b) alone never touched the AEC3
+ *       = 1 -- the actual production path. (b) alone never touches the AEC3
  *       post-chain (SuppressionGain/ResidualEchoEstimator/CNG), which reads
- *       a per-(sample_rate, fft_size) tuning row from aec3b_rate_cfg() that
- *       nothing had exercised end-to-end before this.
+ *       a per-(sample_rate, fft_size) tuning row from aec3b_rate_cfg().
  *
  *   (c) aec_get_mem_size monotonicity/consistency: pool size must increase
  *       8k < 16k < 48k (bigger FFT/filter/n_partitions at higher rates), and
@@ -39,42 +35,35 @@
  *       affecting one).
  *
  *   (c2) aec_init (static pool) byte-equal to aec_create (heap), full
- *       post-chain, every grid -- test_static_aec.c only ever exercised this
- *       at whichever fft_size happened to be the rate's *default*; this
- *       loops all four grids explicitly so a default flip can't silently
- *       leave the non-default grid's static path unchecked.
+ *       post-chain, every grid -- looping all four grids explicitly so a
+ *       default flip can't silently leave the non-default grid's static path
+ *       unchecked.
  *
- *   (d) top-level (non-AEC3) constant retiming (2026-08 gap-fix): proves
+ *   (d) top-level (non-AEC3) constant retiming: proves
  *       shadow_err_alpha / warmup_frames / epc_hangover / ne_recent_hold /
  *       filter_misadjustment_{stable,hangover}_frames and EpcDetector's
- *       EPV_FAST_TC/EPV_SLOW_TC now cover approximately the SAME
- *       wall-clock duration at every grid -- these are project-native
- *       (non-AEC3) constants that were literal hop counts / per-hop EMA
- *       constants frozen at the legacy hop=160/sample_rate=16000 (10 ms)
- *       grid with zero rate conversion, exactly the same bug class the
- *       AEC3-internal per-block/hop-count constant audit fixed for
- *       subband_erle/fullband_erle/etc, just missed in that pass because
- *       these live in aec.c/epc_shadow.c/config.py/epc.py instead. Builds
- *       via aec_config_from_preset() THEN overrides cfg.fft_size (mirrors
- *       aec_wav.c's --fft-size flag) before aec_create() -- the exact
- *       post-defaults grid-override path that forced retiming to live in
- *       aec_carve() rather than aec_config_defaults() (see aec.c's
+ *       EPV_FAST_TC/EPV_SLOW_TC cover approximately the SAME wall-clock
+ *       duration at every grid -- these are project-native (non-AEC3)
+ *       constants authored as literal hop counts / per-hop EMA constants at
+ *       the hop=160/sample_rate=16000 (10 ms) grid. Builds via
+ *       aec_config_from_preset() THEN overrides cfg.fft_size (mirrors
+ *       aec_wav.c's --fft-size flag) before aec_create() -- the post-defaults
+ *       grid-override path that makes retiming live in aec_carve() rather
+ *       than aec_config_defaults() (see aec.c's
  *       aec_legacy10ms_hops()/aec_legacy10ms_alpha() doc comment).
  *
- *   (d2) adaptation-constant retiming (2026-08-06 batch): the same property
- *       for the five constants that live in the ADAPTATION path rather than
- *       in AecConfig -- Aec::alpha_pow (per-SAMPLE), alpha_erl_tracking/
- *       alpha_erl_converged, PBFDKF::alpha_r, and
- *       Saturation::alpha_attack/alpha_release. (d)
- *       missed them because they are assigned in aec_carve()/pbfdkf_init()/
- *       saturation_init(), not read out of the config struct. This is the C
- *       mirror of python/tests/test_detector_timing_effective_values.py and
- *       exists so the C/Python agreement is a REGRESSION GATE rather than a
- *       one-off manual comparison. Includes both halves of the negative space:
- *       the 16 ms-authored saturation pair must NOT move on a 16 ms grid, and
- *       the 10 ms/per-sample constants MUST move where the grids differ --
- *       including alpha_r, whose anchor moved to 10 ms on 2026-08-07, so a
- *       16 ms grid is now one of the places it has to move.
+ *   (d2) adaptation-constant retiming: the same property for the five
+ *       constants that live in the ADAPTATION path rather than in AecConfig --
+ *       Aec::alpha_pow (per-SAMPLE), alpha_erl_tracking/alpha_erl_converged,
+ *       PBFDKF::alpha_r, and Saturation::alpha_attack/alpha_release. They are
+ *       assigned in aec_carve()/pbfdkf_init()/saturation_init(), not read out
+ *       of the config struct. This is the C mirror of
+ *       python/tests/test_detector_timing_effective_values.py, so the C/Python
+ *       agreement is a REGRESSION GATE. Includes both halves of the negative
+ *       space: the 16 ms-authored saturation pair must NOT move on a 16 ms
+ *       grid, and the 10 ms/per-sample constants MUST move where the grids
+ *       differ -- including alpha_r, whose anchor is 10 ms, so a 16 ms grid is
+ *       one of the places it has to move.
  *       (d2) also covers the one ADDITIVE per-hop rate in the same family,
  *       the duty-cycle ERLE watchdog leak (0.1 dB/s, asserted through the
  *       60 s span it takes to leak the watchdog's 6 dB threshold) --
@@ -114,10 +103,10 @@
  *       actual "removing the state-updating prefix must fail" mutation
  *       proof for the spatial_linear_context design in (e2) -- deterministic
  *       by construction rather than dependent on an incidental signal
- *       reaching these states. Mutation-tested by temporarily dropping
- *       get_gain()'s call to suppression_gain_update_dominant_nearend():
- *       confirmed to fail at all 4 grids (unlike (e2)'s dependence on
- *       whether a specific synthetic signal happens to reach these states).
+ *       reaching these states. Dropping get_gain()'s call to
+ *       suppression_gain_update_dominant_nearend() fails at all 4 grids
+ *       (unlike (e2)'s dependence on whether a specific synthetic signal
+ *       happens to reach these states).
  *
 
  * Build (standalone, KISS FFT backend; from c_impl/):
@@ -237,22 +226,19 @@ static float lcg_uniform(void) {
 /* ── (b) impulse-through-linear-path (and, parametrized, through the full
  * AEC3 post-chain) ────────────────────────────────────────────────────── */
 static void run_impulse_test(int enable_res, const char *label) {
-    /* A perfectly PERIODIC impulse train turned out to be an adversarial
-     * input for the online delay estimator: an exactly-periodic comb is
-     * ambiguous under any matched filter (every period-multiple offset
-     * correlates equally well), and empirically this let the estimator
-     * drift onto a spurious, non-alias, WRONG lag partway through a long
-     * run at 16k/48k (delay jumped from a converging 1472 to a stuck 6336
-     * around hop 900, killing cancellation for the remainder -- reproduced
-     * and root-caused during M5 development, not a rate-specific bug: it's
-     * a generic property of feeding any exactly-periodic signal to a
-     * correlation-based delay estimator). Using an i.i.d. sparse random
-     * impulse train instead (mean spacing PULSE_MEAN_PERIOD, LCG-driven
-     * position AND amplitude) keeps the "impulse train" character (mostly-
-     * zero signal, discrete non-zero impulses) while removing the exact
-     * periodicity that made the true delay ambiguous -- and is in fact the
-     * more standard choice for system-identification excitation for
-     * exactly this reason. */
+    /* A perfectly PERIODIC impulse train is an adversarial input for the online
+     * delay estimator: an exactly-periodic comb is ambiguous under any matched
+     * filter (every period-multiple offset correlates equally well), and this
+     * can let the estimator drift onto a spurious, non-alias, WRONG lag partway
+     * through a long run at 16k/48k (e.g. delay jumping from a converging 1472
+     * to a stuck 6336 around hop 900, killing cancellation for the remainder).
+     * It is not a rate-specific bug but a generic property of feeding any
+     * exactly-periodic signal to a correlation-based delay estimator. An i.i.d.
+     * sparse random impulse train (mean spacing PULSE_MEAN_PERIOD, LCG-driven
+     * position AND amplitude) keeps the "impulse train" character (mostly-zero
+     * signal, discrete non-zero impulses) while removing the exact periodicity
+     * that makes the true delay ambiguous -- and is the more standard choice for
+     * system-identification excitation for exactly this reason. */
     const float PULSE_PROB = 1.0f / 37.0f;   /* mean spacing ~37 samples */
     const int ECHO_DELAY = 41;               /* samples */
     const float ECHO_SCALE = 0.5f;
@@ -340,9 +326,9 @@ static void test_impulse_linear_path(void) {
 
 /* Same excitation, full AEC3 post-chain (RES) enabled -- the actual
  * production path (BALANCED ships with enable_res=1). test_impulse_linear_path
- * above only ever exercised the linear PBFDKF filter; M5 added a 16000/256
- * grid with its own aec3b_rate_cfg() tuning row (CNG/REE/SG parameters), and
- * nothing had run that row's post-chain end-to-end before this. */
+ * above only ever exercised the linear PBFDKF filter; the 16000/256
+ * grid has its own aec3b_rate_cfg() tuning row (CNG/REE/SG parameters) that
+ * only this test runs end-to-end. */
 static void test_impulse_res_enabled(void) {
     run_impulse_test(1, "RES-enabled");
 }
@@ -905,16 +891,14 @@ static void test_mem_size_consistency(void) {
     }
 }
 
-/* ── (d) top-level (non-AEC3) constant retiming (2026-08 gap-fix) ───────
- * See file header comment. Legacy target: the wall-clock duration/TC each
- * constant was authored to cover at the legacy hop=160/sample_rate=16000
- * (10 ms) grid, before per-rate multi-grid support existed. A relative
- * tolerance of 15% comfortably covers integer-hop-count rounding at the
- * smallest field (epc_hangover, ~12-25 hops depending on grid) while
- * still failing hard against the pre-fix bug class, where the SAME hop
- * COUNT was frozen at every grid (e.g. warmup_frames=100 covered 0.8 s /
- * 1.6 s / 1.067 s at 16k/256, 16k/512, 48k/1024 respectively -- up to 2x
- * apart, far outside a 15% band). */
+/* ── (d) top-level (non-AEC3) constant retiming ──────────────────────────
+ * See file header comment. Target: the wall-clock duration/TC each constant
+ * is authored to cover at the hop=160/sample_rate=16000 (10 ms) grid. A
+ * relative tolerance of 15% comfortably covers integer-hop-count rounding at
+ * the smallest field (epc_hangover, ~12-25 hops depending on grid) while
+ * still failing hard against a hop COUNT frozen at every grid (e.g.
+ * warmup_frames=100 would cover 0.8 s / 1.6 s / 1.067 s at 16k/256, 16k/512,
+ * 48k/1024 respectively -- up to 2x apart, far outside a 15% band). */
 static void check_close(const char *label, int sr, int fft, double actual_ms,
                         double target_ms, double rel_tol) {
     double rel_err = fabs(actual_ms - target_ms) / target_ms;
@@ -995,33 +979,28 @@ static void test_top_level_constant_retiming(void) {
     }
 }
 
-/* ── (d2) adaptation-constant retiming (2026-08-06 batch) ───────────────
+/* ── (d2) adaptation-constant retiming ──────────────────────────────────
  * The C mirror of python/tests/test_detector_timing_effective_values.py.
  *
  * (d) above covers the constants that live in AecConfig/EpcDetector. This
  * covers the five that live in the ADAPTATION path -- Aec's own EMAs, the
  * PBFDAF/PBFDKF filter EMAs and the saturation detector's attack/release --
- * which the earlier pass missed because they are set in aec_carve()/
- * pbfdkf_init()/saturation_init() rather than read out of the config struct.
+ * which are set in aec_carve()/pbfdkf_init()/saturation_init() rather than
+ * read out of the config struct.
  *
  * This asserts the value each instance ACTUALLY ENDS UP WITH at every grid,
- * not that a retiming call appears in the source. That distinction is the
- * reason the file exists: an external reviewer read the sources and concluded
- * the retiming had never been applied, because two of the seven values are
- * legitimately IDENTICAL to their authored literal on two of the four grids.
- * Only an effective-value assertion separates "retimed" from "not retimed".
+ * not that a retiming call appears in the source. Only an effective-value
+ * assertion separates "retimed" from "not retimed": two of the seven values
+ * are legitimately IDENTICAL to their authored literal on two of the four
+ * grids.
  *
- * The reference grids are NOT uniform, verified per constant from git
- * provenance -- retiming a 16 ms constant off the 10 ms reference is wrong by
- * exactly 1.6x, which is inside no sane tolerance but is invisible if you only
- * ever sample the 16 ms grids:
+ * The reference grids are NOT uniform -- retiming a 16 ms constant off the
+ * 10 ms reference is wrong by exactly 1.6x, which is inside no sane tolerance
+ * but is invisible if you only ever sample the 16 ms grids:
  *   alpha_pow                  per-SAMPLE, authored at sr=16000
- *   alpha_erl_{tracking,conv}  per-hop, 10 ms   (5407e71)
- *   alpha_r     (PBFDKF)       per-hop, 10 ms   (introduced 16 ms at e9cb383;
- *                                               the default moved to 10 ms at
- *                                               83ced18 and every validating
- *                                               commit since kept 0.95 there)
- *   saturation attack/release  per-hop, 16 ms   (243d67c, frame 512/hop 256)
+ *   alpha_erl_{tracking,conv}  per-hop, 10 ms
+ *   alpha_r     (PBFDKF)       per-hop, 10 ms
+ *   saturation attack/release  per-hop, 16 ms   (frame 512/hop 256)
  *
  * Targets are the wall-clock TC each retention covers on its OWN reference
  * grid, so a correct retiming reproduces the same number at every rate. */
@@ -1148,9 +1127,9 @@ static void test_adaptation_constant_retiming(void) {
         }
 
         /* Negative space, half 1 -- the 16 ms family MUST NOT move on a 16 ms
-         * grid (8000/256 and 16000/512 both have a 16.000 ms hop). A reviewer
-         * seeing these unchanged is looking at correct behaviour, and retiming
-         * them off the 10 ms reference by mistake would move them HERE. */
+         * grid (8000/256 and 16000/512 both have a 16.000 ms hop). Unchanged values
+         * here are correct; retiming them off the 10 ms reference by mistake would
+         * move them HERE. */
         if (hop * 1000 == 16 * sr) {
             check_identity("saturation alpha_attack", sr, fft,
                            aec.sat_mic.alpha_attack, 0.3);
@@ -1171,9 +1150,8 @@ static void test_adaptation_constant_retiming(void) {
             check_moved("alpha_pow", sr, fft, aec.alpha_pow, 0.95);
         }
         if (hop * 1000 == 16 * sr) {
-            /* alpha_r moved from the 16 ms family to the 10 ms family on
-             * 2026-08-07, so a 16 ms grid is no longer its identity point --
-             * it must MOVE here. This assertion is the one that fails if the
+            /* alpha_r is anchored at 10 ms, so a 16 ms grid is not its identity
+             * point -- it must MOVE here. This assertion is the one that fails if the
              * anchor is ever silently reverted to 256/16000. */
             check_moved("alpha_r (10 ms anchor)", sr, fft,
                         aec.main_filter.alpha_r, 0.95);
@@ -1234,18 +1212,15 @@ static void test_additive_rate_reference_exactness(void) {
  * must let it run down, or marginal-DT oscillation re-arms it every hop and
  * the adaptation step size never releases.
  *
- * This shipped correct, was silently reverted by a "remove dead flag branches"
- * cleanup (2f3699f, 2026-05-27) that collapsed
+ * Collapsing
  *     if (!cfg.mu_holdoff_no_reset || holdoff == 0)
- * to an unconditional arm -- keeping the arm the flag had DISABLED, because
- * mu_holdoff_no_reset lived in _LEGACY_HARDCODE_TRUE -- and stayed reverted for
- * ten weeks in both ports. Nothing caught it: the counter is internal state, no
- * test asserted on it, and a mu freeze under marginal DT does not move a bucket
- * average enough to break the benchmark.
+ * to an unconditional arm would otherwise go unnoticed: the counter is
+ * internal state, and a mu freeze under marginal DT does not move a bucket
+ * average enough to break a benchmark.
  *
  * The observable signature is exact and stimulus-independent: with the guard,
  * the counter only ever goes 0 -> armed, or n -> n-1. Without it, a hop inside
- * an active window jumps it back UP (measured: ... 18, 20, 19 ...). So the
+ * an active window jumps it back UP (e.g. ... 18, 20, 19 ...). So the
  * assertion is "an increase is legal only from zero" -- no threshold, no
  * tolerance, and it cannot be satisfied by a stimulus that simply fails to
  * reach the branch, because coverage is asserted separately below. */
@@ -1433,9 +1408,7 @@ static void test_render_activity_first_observation(void) {
 /* ── (d5) alpha_r is a live constant of the DIRECT PBFDKF API ───────────────
  *
  * alpha_r cannot be pinned the way alpha_pow is pinned by (d4), because it
- * does not reach audio through `Aec` at all -- and it took two wrong readings
- * to establish why, so the mechanism is recorded here rather than in a commit
- * message:
+ * does not reach audio through `Aec` at all:
  *
  *   Aec + shadow ON (default)  error_psd is never read. The orchestrator
  *                              publishes e2_coarse_per_bin every hop, and the
@@ -1446,10 +1419,8 @@ static void test_render_activity_first_observation(void) {
  *                              is likewise assigned only inside
  *                              `if (a->has_shadow)` (aec.c), so it stays 0.0f
  *                              and `use_conv = (e2_ref_sum <= e2_coa_sum)` is
- *                              constant-false whatever the coefficient is.
- *                              Confirmed empirically: 90 cases x 2 grids with
- *                              --no-shadow are byte-identical
- *                              (eval/ab_evidence/2026-08-07-alpha-r/).
+ *                              constant-false whatever the coefficient is
+ *                              (--no-shadow runs are byte-identical).
  *   direct pbfdkf_process()    the caller supplies its own
  *                              e2_coarse_for_refresh, both sides of the
  *                              comparison vary, and alpha_r selects the
@@ -1460,14 +1431,13 @@ static void test_render_activity_first_observation(void) {
  * a supported entry point (pbfdkf.h), and pins two things:
  *
  *   (1) the coefficient the EMA actually APPLIED, recovered from two runs that
- *       differ only in error_psd's starting value -- not the stored field,
- *       which is what the pre-5232ab6 tests asserted while the loop ran on a
- *       hardcoded literal;
+ *       differ only in error_psd's starting value -- not the stored field
+ *       alone, which would pass while the loop ran on a hardcoded literal;
  *   (2) that the recovered coefficient selects the leakage branch, so the
  *       constant has a downstream effect and not merely a value.
  *
  * Mutations that must fail: reverting the use site to `0.95f`; reverting the
- * reference hop to 256 (the introduce grid); deleting the EMA. */
+ * reference hop to 256 (the 16 ms grid); deleting the EMA. */
 typedef struct {
     double psd_sum;         /* sum(error_psd) after the measured hop */
     float  div_frac;        /* last_leakage_div_frac after the measured hop */

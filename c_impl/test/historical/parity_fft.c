@@ -8,8 +8,8 @@
  * (the mismatch COUNT is large — most values differ in the low bits). The
  * decisive question is the MAGNITUDE: measured fwd max ~1.6e-5, inv max ~4.8e-7,
  * both far under FFT_TOL. A real FFT/scaling regression diverges by O(0.1), so
- * the tolerance still catches it. (Under the retired pocketfft backend this was
- * a strict 0/0 bit-exact check; KISS trades that for the float32 tolerance.)
+ * the tolerance still catches it. (The KISS float32 FFT is gated by tolerance,
+ * not by a strict 0/0 bit-exact check.)
  *
  * Build (standalone, from anywhere):
  *   make -C <path-to-audio_common> BACKEND=kiss lib

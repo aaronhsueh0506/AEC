@@ -1,4 +1,4 @@
-/* parity_saturation.c — Wave 1.2 gate.
+/* parity_saturation.c — parity gate.
  *
  * Reads sat_{ref,mic}.bin (flat dump of Python SaturationDetector.detect()
  * input/output per frame) and asserts C port produces identical levels.

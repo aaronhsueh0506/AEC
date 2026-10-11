@@ -1,12 +1,11 @@
 /* test_shared_fft_handle.c — shared-FFT-handle regression test.
  *
- * aec_create()/aec_init() used to carve/construct THREE separate FftHandles
- * per instance (main_filter.base.fft, shadow_filter.fft, post_fft), one for
- * each sub-module, all at the identical fft_size. They now share exactly
- * ONE: aec_carve() constructs it once and hands the same pointer to
- * pbfdkf_init_static()/pbfdaf_init_static() via their new required
- * `shared_fft` parameter; pbfdaf_free()'s static-path branch no longer
- * destroys it (ownership stays with post_fft, torn down once by
+ * aec_create()/aec_init() share exactly ONE FftHandle across the
+ * sub-modules (main_filter.base.fft, shadow_filter.fft, post_fft), all at
+ * the identical fft_size: aec_carve() constructs it once and hands the same
+ * pointer to pbfdkf_init_static()/pbfdaf_init_static() via their required
+ * `shared_fft` parameter; pbfdaf_free()'s static-path branch does not
+ * destroy it (ownership stays with post_fft, torn down once by
  * aec_destroy()). This test proves:
  *
  *   1. All three FftHandle pointers on a live instance are the exact SAME

@@ -129,7 +129,7 @@ static void test_entry_points_may_be_freely_interleaved(void) {
          * adaptive filter has no real echo path to converge onto; the
          * abrupt quiet->loud transition then forces a transient output
          * overshoot above the near peak, which is exactly the condition the
-         * removed limiter used to act on. */
+         * condition an output limiter would act on. */
         float amp = (i >= 40 && i < 50) ? 0.9f : 0.02f;
         float near_peak = 0.0f;
         for (int s = 0; s < hop; ++s) {
@@ -411,7 +411,7 @@ int main(void) {
      * pipelines/README.md "Parameter Alignment") x shadow on/off x
      * spatial_linear_context on/off -- the last axis is the exact config
      * the 4ch wrapper uses for every lane (enable_res=0/return_res_
-     * context=1/spatial_linear_context=1), previously untested here. */
+     * context=1/spatial_linear_context=1). */
     static const int grids[][1] = { {0}, {512}, {0} };
     static const int rates[]    = { 16000, 16000, 48000 };
     for (int g = 0; g < 3; ++g) {

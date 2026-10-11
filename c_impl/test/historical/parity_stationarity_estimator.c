@@ -1,7 +1,7 @@
 /* Historical parity_stationarity_estimator.c — replay the binary golden from
  * python/diag/gen_stationarity_estimator_golden.py through the C
  * StationarityEstimator and assert exact (bit-for-bit float32 + exact int/bool)
- * match. WS5 Phase 5.1 gate.
+ * match.
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \

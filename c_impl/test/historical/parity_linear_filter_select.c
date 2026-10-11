@@ -9,8 +9,8 @@
  * KISS FFT, float32) — one FFT deep, no recursion. The e2/y2/s2 sums are
  * np.sum-pairwise in f64 and the crossfade ramp + complex add/sub are reproduced
  * op-for-op in matching dtype (see linear_filter_output.c), so the divergence is
- * ULP-scale, not algorithmic. (Under the retired pocketfft backend this was a
- * strict 0/0 bit-pattern check; KISS trades that for the float32 tolerance.)
+ * ULP-scale, not algorithmic (the KISS float32 FFT is gated by tolerance, not
+ * by a strict 0/0 bit-pattern check).
  *
  * Build (from c_impl/), STANDALONE (do NOT link aec.c); the FFT wrapper now
  * lives in the shared audio_common archive:

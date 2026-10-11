@@ -12,7 +12,7 @@
  * logic stays bit-exact; only the FFT layer carries this documented
  * tolerance. PASS = both the linear and final output stay under TOL_E2E(sr).
  *
- * M5 (multi-rate campaign, review F01) per-rate tolerance investigation:
+ * Per-rate tolerance:
  * at 8 kHz the same case measures EVEN SMALLER (max ~3.5e-5) — the smaller
  * FFT_SIZE=256 accumulates less float32 rounding. At 48 kHz (FFT_SIZE=1024,
  * n_partitions=7, filter_taps=3360) the measured max jumps to ~6.4e-2,
@@ -25,7 +25,7 @@
  *     precision gap scales with the much larger transform (FFT 256->1024,
  *     4x) and filter length (3360 vs 832 taps, 4x), well beyond what added
  *     butterfly stages alone would predict — consistent with mu/delta/
- *     kalman_q (AecConfig scalars, NOT part of the M2 per-rate table —
+ *     kalman_q (AecConfig scalars, NOT part of the per-rate table —
  *     Python uses the identical untuned constants at 48k) giving relatively
  *     less regularization at the larger transform size, so ordinary
  *     float32-vs-float64 rounding gets amplified more through the adaptive
@@ -58,7 +58,7 @@
  *       $(make -s -C ../../audio_common BACKEND=kiss print-lib-path) -lm -o /tmp/p_e2e
  *   python3 ../python/diag/gen_aec_e2e_golden.py /tmp/aec_e2e_golden.bin balanced --sr 16000
  *   /tmp/p_e2e /tmp/aec_e2e_golden.bin [preset]      # preset: balanced|mild|aggressive
- *   # 8k/48k (M5): --sr 8000 / --sr 48000 on the generator; this checker
+ *   # 8k/48k: --sr 8000 / --sr 48000 on the generator; this checker
  *   # reads sr back out of the golden header and applies the matching
  *   # tolerance automatically -- no extra argv needed.
  *   # Linear-filter-only case (no AEC3 post block on either side) -- pass
@@ -71,7 +71,7 @@
 
 /* Max allowed |C - Python| per sample. 16k/8k measured max is ~1e-4 (tons of
  * headroom under 2e-2); 48k's much bigger FFT/filter measures ~6.4e-2 (see
- * the file banner's M5 investigation) -- TOL_E2E_48K carries that rate's own,
+ * the file banner's per-rate tolerance note) -- TOL_E2E_48K carries that rate's own,
  * separately-justified ceiling rather than loosening the shared constant. */
 #define TOL_E2E      2.0e-2
 #define TOL_E2E_48K  1.0e-1

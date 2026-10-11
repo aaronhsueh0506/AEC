@@ -1,7 +1,7 @@
 /* Historical parity_reverb_decay_estimator.c — replay the binary golden from
  * python/diag/gen_reverb_decay_estimator_golden.py through the C
  * ReverbDecayEstimator and assert exact (bit-for-bit) match of the recorded
- * per-update state.  WS5 Phase 5.1 gate.
+ * per-update state.
  *
  * Build (standalone, from c_impl/):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 -Itest/support \

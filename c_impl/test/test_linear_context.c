@@ -18,8 +18,7 @@
  *      bound (its unbounded form is signed-overflow UB after ~37 h of
  *      continuous 16 kHz audio; the INT_MAX-seeded UBSan variant of this
  *      property lives in test_counter_saturation.c).
- *   5. The PER-MODE seam semantics (AecDelayMode; productization plan
- *      appendix 11.1) — each of MATCHED / FIXED / EXTERNAL_ALIGNED reports
+ *   5. The PER-MODE seam semantics (AecDelayMode) — each of MATCHED / FIXED / EXTERNAL_ALIGNED reports
  *      exactly one story about delay_samples / confidence / state /
  *      generation, and the far content it exposes matches that story:
  *        MATCHED           unchanged (scenarios 1-2 above)
@@ -32,11 +31,11 @@
  *        EXTERNAL_ALIGNED  the exposed far IS the caller's own far (byte
  *                          for byte, every hop); delay_samples == 0;
  *                          LOCKED from hop 0; generation frozen
- *   6. The PER-MODE reference-ring SIZING (productization plan §3.2.8-9):
+ *   6. The PER-MODE reference-ring SIZING:
  *      FIXED carves exactly `fixed_delay_samples + hop` -- so
  *      max_delay_ms/delay_buffer_ms are inert there -- and still serves the
  *      caller's far delayed by exactly that many samples across hundreds of
- *      wraps of the now much smaller ring, including through aec_reset()'s
+ *      wraps of the small ring, including through aec_reset()'s
  *      refill. EXTERNAL_ALIGNED carries no ring at all, and its pool is
  *      FIXED(0)'s minus exactly one hop-sized array.
  *
@@ -121,10 +120,9 @@ static float rng_uniform(float amp) {
  * for the largest scenario (48 kHz: 1500 hops x 512). */
 /* Sized for the largest scenario: 500 acquisition + 5000 shift hops at
  * 48 kHz/hop 512. The generous shift budget is deliberate: even with the
- * ERLE watchdog LIVE in this enable_res=0 context-only config (since the
- * Python-parity fix that widened the last_erle_windowed cache condition to
- * enable_res || return_res_context, commit 87fe169 -- see the note above
- * that cache write in aec.c; the watchdog used to be dead here), a
+ * ERLE watchdog LIVE in this enable_res=0 context-only config (the
+ * last_erle_windowed cache condition is enable_res || return_res_context --
+ * see the note above that cache write in aec.c), a
  * confirmed delay shift still needs seconds of audio to re-lock (ERLE
  * collapse resumes full-rate matched-filter analysis, then consensus must
  * rebuild). The measured re-lock hop count is printed as info. */
@@ -500,7 +498,7 @@ static void scenario_fixed_zero_delay(void) {
     g_rng_state = 0x11EC5EEDu;
 }
 
-/* ── plan §3.2.8: the FIXED ring is sized for the delay, not for a search ── */
+/* ── the FIXED ring is sized for the delay, not for a search ──────────── */
 
 /* FIXED carves exactly `fixed_delay_samples + hop` samples -- the tight bound
  * derived in aec_ref_ring_samples() -- instead of the MATCHED search ring
@@ -526,7 +524,7 @@ static void scenario_fixed_ring_exact_size(void) {
     };
     char msg[224];
     unsigned r;
-    printf("--- FIXED reference-ring capacity (plan step 3) ---\n");
+    printf("--- FIXED reference-ring capacity ---\n");
     for (r = 0; r < sizeof rows / sizeof rows[0]; ++r) {
         AecConfig cfg, wide;
         Aec a, b;
@@ -549,7 +547,7 @@ static void scenario_fixed_ring_exact_size(void) {
         snprintf(msg, sizeof msg, "%s: ring carved, no estimator", rows[r].tag);
         CHECK(a.ref_ring != NULL && !a.has_delay, msg);
 
-        /* (b) the search-ring knobs no longer reach this mode. */
+        /* (b) the search-ring knobs do not reach this mode. */
         wide = cfg;
         wide.max_delay_ms = 60000.0f;
         wide.delay_buffer_ms = 120000.0f;
@@ -639,7 +637,7 @@ static void scenario_fixed_ring_wraps(int sr, int fft, int fixed, int hops,
 
 /* aec_reset() empties the exact-fit ring, so FIXED must serve the RAW far
  * again for exactly the same fill window it did at init, then re-lock and
- * read correctly -- there is no longer any slack that could hide an
+ * read correctly -- there is no slack that could hide an
  * off-by-one refill. */
 static void scenario_fixed_reset_refill(void) {
     const int fixed = 1600;

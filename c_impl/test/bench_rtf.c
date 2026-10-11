@@ -1,8 +1,7 @@
 /* bench_rtf.c — per-module real-time-factor (RTF) benchmark harness.
  *
- * Standalone, zero-host-dependency timing harness for the NEON optimization
- * campaign: measures wall-clock cost of aec_process() over a long synthetic
- * (or --wav) input, with and without the AEC3 post-filter (enable_res), so
+ * Standalone, zero-host-dependency timing harness: measures wall-clock cost
+ * of aec_process() over a long synthetic (or --wav) input, with and without the AEC3 post-filter (enable_res), so
  * the post-filter's own cost can be isolated as a derived third line.
  *
  * No Python, no corpus, no network required by default — a deterministic

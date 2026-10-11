@@ -6,12 +6,12 @@
  *   is_solid        (int, EXACT)
  *   confidence      (double 0.0/0.5/1.0, EXACT)
  *
- * ⚠ The delay chain's matched-filter arithmetic is now hardcoded to the
+ * NOTE: The delay chain's matched-filter arithmetic is hardcoded to the
  * float32/sliding-x2/NEON path (see delay_aec3.c's "matched-filter
  * arithmetic" note) — an intentional, sampled-cost-free divergence from the
  * Python float64 reference. python/diag/gen_delay_golden.py's golden (built
- * from Python's LegacyDelayShim output) is no longer guaranteed to match and
- * is not the primary target any more; the recommended golden is now the
+ * from Python's LegacyDelayShim output) is not guaranteed to match and
+ * is not the primary target; the recommended golden is the
  * C-REGRESSION one from test/gen_delay_c_golden.c (records this C code's own
  * output as "expected", so this checker instead catches accidental future
  * changes to delay_aec3.c). Both goldens share the same binary layout, so
@@ -53,7 +53,7 @@ int main(int argc, char **argv) {
     far  = malloc((size_t)hop * sizeof(float));
     if (!near || !far) { fprintf(stderr, "oom\n"); return 2; }
 
-    /* Pool-first construction (plan step 2): DelayAec3 carries no arrays of
+    /* Pool-first construction: DelayAec3 carries no arrays of
      * its own, so the golden replay owns the block too, for the whole replay.
      * The golden was recorded at the default full bank, so this replays at
      * DA_NUM_FILTERS. */

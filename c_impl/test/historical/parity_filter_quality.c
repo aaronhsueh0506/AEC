@@ -3,7 +3,7 @@
  * FilteringQualityAnalyzer and assert exact match on the full observable state
  * (linear_filter_usable / gate1 / gate2 / startup_blocks / reset_blocks /
  *  convergence_seen / convergence_hops_counter / overall_usable) over a
- * multi-frame sequence (state evolution incl. reset semantics). WS5 Phase 5.2.
+ * multi-frame sequence (state evolution incl. reset semantics).
  *
  * Build (standalone, from repo root):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \

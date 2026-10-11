@@ -1,6 +1,6 @@
 /* Historical parity_subband_erle.c — replay the binary golden from
  * python/diag/gen_subband_erle_golden.py through the C SubbandErle and assert
- * exact (bit-for-bit float32 + exact int/bool) match. WS5 Phase 5.2 gate.
+ * exact (bit-for-bit float32 + exact int/bool) match.
  *
  * Build (standalone, from anywhere):
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \

@@ -33,12 +33,9 @@
  * same discipline as the finite corpus); every other kernel in the file is
  * checked via `check_bits_classify()`.
  *
- * Re-review finding R07 (this revision) replaces what used to be a
- * report-only "soft" check on that second group with a real classified
- * pass/fail gate. The old `check_bits_soft()` tallied a raw mismatch count
- * that main() printed but never acted on -- no CI could fail on it even if
- * the count changed. `check_bits_classify()` (see its own header comment
- * below) instead sorts every scalar-vs-NEON element divergence into one of
+ * That second group is a classified pass/fail gate, not a report-only
+ * check: `check_bits_classify()` (see its own header comment
+ * below) sorts every scalar-vs-NEON element divergence into one of
  * three buckets -- bit-exact / both-NaN (payload unspecified, in contract) /
  * HARD FAIL (a genuine finite-vs-NaN divergence or an unexplained finite
  * bit mismatch) -- tallies each bucket per kernel, prints a summary table,
@@ -231,7 +228,7 @@ static void fill_bench_complex(Complex *a, int n) {
  *      floats too"): one NaN-sprinkled run per kernel, checked with
  *      check_bits_classify (classifies each divergence as bit-exact /
  *      both-NaN-payload-unspecified / HARD FAIL rather than a blanket
- *      report-and-continue) -- these kernels were audited to already avoid
+ *      report-and-continue) -- these kernels already avoid
  *      vmaxq_f32/vminq_f32/vabsq_f32 (see the header's "NaN semantics"
  *      note), so a HARD FAIL here would be a NEW finding outside the cabs
  *      family; a both-NaN classification is the expected, in-contract
@@ -2665,9 +2662,9 @@ static void test_ema_cmag2_nan(void) {
     printf("PASS ema_cmag2_f32_nan\n");
 }
 
-/* ═══════════════ NaN corpus: every other kernel (CLASSIFIED, R07) ═════════
+/* ═══════════════ NaN corpus: every other kernel (CLASSIFIED) ═════════
  * Not part of the original F10 fix's own regression gate -- these kernels
- * don't use sk__cabs_np_neon4 and were audited to already avoid
+ * don't use sk__cabs_np_neon4 and already avoid
  * vmaxq_f32/vminq_f32/vabsq_f32 (see header). Run per the review's "every
  * kernel in this file" instruction; check_bits_classify()
  * sorts each divergence into bit-exact / both-NaN (in contract) / HARD FAIL,

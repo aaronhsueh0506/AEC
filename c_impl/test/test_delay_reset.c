@@ -4,8 +4,8 @@
  * state + decimation phase) AND the INNER DaEstimator's decimators / ring
  * buffer / pending edge-chunker samples.
  *
- * Bug this guards against: reset() used to clear only the outer sidechain
- * (added alongside the sidechain itself), leaving the inner chain's biquad
+ * Bug this guards against: reset() clearing only the outer sidechain,
+ * leaving the inner chain's biquad
  * memory / ring-buffer audio history / pending partial-block samples stale
  * -- a mixed fresh/stale reset. Call-site audit
  * (delay_aec3_reset's only caller is aec_reset(), a full top-level

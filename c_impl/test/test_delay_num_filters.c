@@ -2,18 +2,13 @@
  * matched-filter bank size (AecConfig::delay_num_filters -> the pool layout
  * -> DaMatchedFilter::num_filters).
  *
- * Background, in two steps. First DA_NUM_FILTERS stopped being the loop
- * bound: it used to be BOTH the static array bound and the loop bound, so the
- * bank was pinned at 5 with no way to trade reach for MACs. 5 is correct for
+ * Background: DA_NUM_FILTERS is purely the validation upper bound; the
+ * bank, the render ring and both lag histograms are POOL-CARVED to the
+ * configured n, so a short bank saves BYTES as well as MACs. 5 is correct for
  * bench/dataset (it is what the published scores were measured at), but the
  * embedded target compensates the bring-up-measured system delay out-of-band
  * and only needs the matched filter to track the residual, where each dropped
  * filter removes ~4.2 MMAC/s of full-rate search.
- *
- * Then (productization plan step 2) it stopped sizing anything at all: the
- * bank, the render ring and both lag histograms are POOL-CARVED to the
- * configured n, so a short bank now saves BYTES as well as MACs.
- * DA_NUM_FILTERS is purely the validation upper bound.
  *
  * What this test proves (nothing else in the suite can):
  *   1. The default is still 5, on aec_config_defaults AND on all three
@@ -40,8 +35,7 @@
  *      alignment shift early, and 400 ms at n=5 happens to be one of those
  *      points (reports 4800 instead of 6336, deterministically, on every
  *      seed tried). That is pre-existing upstream-port behaviour, unrelated
- *      to the bank size — verified identical on a build of the sources as
- *      they were before this knob existed — and matched_filter.py's own
+ *      to the bank size, and matched_filter.py's own
  *      header already warns that detect_pre_echo can produce noisy
  *      estimates on material without real pre-echo. Sitting the control
  *      case on a known artifact would just make this test look flaky, so it
@@ -54,16 +48,12 @@
  *      a silent clamp would let direct callers run a different bank than
  *      requested with no error signal), plus the pool rejection
  *      contract (NULL / misaligned base / one byte short).
- *   5. Plan §3.4.1: on any one grid mem(n=1) < ... < mem(n=5), on all four
- *      grids -- every one of those numbers was IDENTICAL before step 2.
+ *   5. On any one grid mem(n=1) < ... < mem(n=5), on all four grids.
  *      Non-MATCHED modes, which carve no estimator, land below even n=1.
- *   5b. Plan §3.2.8 / §3.4 (step 3): the FIXED pool then scales with
- *      fixed_delay_samples -- exactly EXTERNAL_ALIGNED plus one
- *      ALIGN16((fixed + hop) * 4) ring -- where before step 3 every FIXED
- *      delay produced the same number (the MATCHED search-ring size).
- *   6. Plan §3.4.3: aec_create() (heap arena) and aec_init() (caller pool)
- *      stay sample-exact at every bank size, now that the layout depends on
- *      the bank size.
+ *   5b. The FIXED pool scales with fixed_delay_samples -- exactly
+ *      EXTERNAL_ALIGNED plus one ALIGN16((fixed + hop) * 4) ring.
+ *   6. aec_create() (heap arena) and aec_init() (caller pool) stay
+ *      sample-exact at every bank size (the layout depends on it).
  *
  * Build (standalone, from c_impl/ — mirrors test_linear_context.c):
  *   make -C ../../audio_common BACKEND=kiss lib
@@ -368,7 +358,7 @@ static void test_low_level_init_contract(void) {
         }
     }
 
-    /* The 48 kHz sidechain scratch is 48 kHz-ONLY (plan §3.2.7): the same
+    /* The 48 kHz sidechain scratch is 48 kHz-ONLY: the same
      * bank costs strictly more at 48 kHz than at 16 kHz, and the difference
      * is exactly the two ALIGN16'd scratch buffers. */
     for (n = 1; n <= DA_NUM_FILTERS; ++n) {
@@ -384,12 +374,11 @@ static void test_low_level_init_contract(void) {
 
 /* ------------------------------------------- pool geometry, HAND-COMPUTED */
 
-/* Plan §3.2/§3.4. The three n-dependent array lengths, pinned against
- * LITERALS derived by hand from the AEC3 geometry -- NOT against
- * DA_*_FOR(n), which is the very thing under test. An earlier draft of this
- * test read those macros back, which made every row a tautology: pinning the
- * macros to the old fixed n=5 bound (exactly the regression this file is
- * supposed to catch) left it fully green. Measured, then fixed.
+/* The three n-dependent array lengths, pinned against LITERALS derived by
+ * hand from the AEC3 geometry -- NOT against DA_*_FOR(n), which is the very
+ * thing under test (reading those macros back would make every row a
+ * tautology: pinning the macros to a fixed n=5 bound, exactly the regression
+ * this file exists to catch, would leave it green).
  *
  *   ring capacity = (32 + 24*(n-1) + 1) * 16
  *   highest-peak bins = n*384 + 512 + 1
@@ -445,10 +434,8 @@ static void test_pool_geometry_literals(void) {
 
 /* ----------------------------------------------- pool size vs the bank size */
 
-/* Plan §3.4.1: on any one grid the pool must SHRINK monotonically as the bank
- * shrinks. Before plan step 2 every one of these numbers was identical (the
- * arrays were carved at the 5-filter bound), so this is the assertion that
- * pins the whole point of that step. Prints the measured table as it goes --
+/* On any one grid the pool must SHRINK monotonically as the bank shrinks
+ * (arrays carved at the 5-filter bound would give identical numbers). Prints the measured table as it goes --
  * that printout is the source of the byte table in the manual, rather than
  * any hardcoded expectation here. */
 static void test_mem_size_shrinks_with_bank(void) {
@@ -487,10 +474,10 @@ static void test_mem_size_shrinks_with_bank(void) {
             prev = got;
         }
         /* The estimator is a MATCHED-only cost: with no estimator to carve,
-         * the pool must land strictly below even the smallest bank. Since
-         * plan step 3 the FIXED figure below is also the FLOOR of that mode
-         * (fixed_delay_samples=0, i.e. a hop-sized ring) rather than one
-         * fixed number for the whole mode -- see
+         * the pool must land strictly below even the smallest bank. The
+         * FIXED figure below is the FLOOR of that mode
+         * (fixed_delay_samples=0, i.e. a hop-sized ring), not one
+         * number for the whole mode -- see
          * test_fixed_pool_scales_with_the_delay(). */
         {
             AecConfig c1, cf, ce;
@@ -515,16 +502,14 @@ static void test_mem_size_shrinks_with_bank(void) {
     }
 }
 
-/* Plan §3.2.8 / §3.4: the FIXED pool is a function of fixed_delay_samples,
- * not one flat number for the mode. Before plan step 3 every row of this
- * table was IDENTICAL (the ring was sized from the MATCHED search budget,
- * max(delay_buffer_ms, max_delay_ms + 4096), whatever the delay was), so
- * this is the assertion that pins the whole point of that step.
+/* The FIXED pool is a function of fixed_delay_samples, not one flat number
+ * for the mode (a ring sized from the MATCHED search budget,
+ * max(delay_buffer_ms, max_delay_ms + 4096), would give identical rows).
  *
  * Three separable claims:
  *   a) strictly monotonic in the delay, by the EXACT ALIGN16 ring step --
  *      "> prev" alone would still pass if the ring shrank by the wrong term;
- *   b) a small fixed delay is DRAMATICALLY cheaper than the old search-ring
+ *   b) a small fixed delay is DRAMATICALLY cheaper than search-ring
  *      sizing -- pinned as a hard ratio against the MATCHED n=5 pool, not
  *      as a hardcoded KiB figure;
  *   c) the whole difference between EXTERNAL_ALIGNED and FIXED(d) is the
@@ -622,9 +607,9 @@ static void test_fixed_pool_scales_with_the_delay(void) {
 
 /* ---------------------------------------- heap vs caller-pool, every bank size */
 
-/* Plan §3.4.3. Runs the same signal through aec_create() (library-owned
+/* Runs the same signal through aec_create() (library-owned
  * arena) and aec_init() (caller-owned pool) at every bank size and demands
- * sample-exact agreement -- the layout is now n-dependent, so this is where a
+ * sample-exact agreement -- the layout is n-dependent, so this is where a
  * carve that walked a different order on one of the two paths would show up. */
 static void test_heap_vs_pool_parity_every_n(void) {
     char msg[160];
