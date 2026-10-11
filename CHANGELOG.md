@@ -71,7 +71,10 @@ when verdict requires it.
   a transcription of the pipelines' RES stage (preset retarget and reset
   included); `aec_cng_fill` gives bit-identical spectra and generator state;
   argument checks, sizing, alignment, no write outside the block, reset and
-  preset semantics.
+  preset semantics; plus constructed cases the transcription cannot reach: a
+  render block straddling the split-floor latch power (pins the exact 32768
+  scale), the initial-state exit with the two initial-phase flags cleared, and
+  the first recovery hop after a saturated echo (pins `floor_first_increase`).
 
 ### Changed
 
@@ -82,6 +85,14 @@ when verdict requires it.
 - Archived A/B evidence: the harness copy and source diffs whose headers named
   build-host directories, and author addresses in two archived diffs, were
   removed from the tree; per-case scores and READMEs remain.
+- `test/test_output_hash.c` lists the constants its digests cannot see
+  (`floor_first_increase`, the initial `Q_high`/`Q_low`/`Q` of the main filter,
+  `alpha_r`, the fullband ERL step) and the gate that covers each.
+- Comments in the library sources, headers, example, tests and the Python
+  reference are release-style: development history and internal tags are
+  removed, contracts and numerical reasons stay. No code change (the token
+  streams of every C file are identical, except two printed message texts in
+  the tests).
 
 ## [Unreleased] — 2026-10-06 — linear-half context level (`AEC_CONTEXT_LINEAR_ONLY`) and NEON hot spots, all bit-identical
 
