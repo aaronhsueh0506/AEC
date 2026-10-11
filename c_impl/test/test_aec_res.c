@@ -13,10 +13,16 @@
  *     loops, bit-identical spectrum and generator state.
  *  D  contract: argument checks, sizing, alignment, no write outside the
  *     block, reset and preset semantics.
+ *  E  details the comparison in B does not discriminate: the exact 32768
+ *     scale of the render block (a block straddling the split-floor latch
+ *     power), the initial-state exit (with the two flags that make it inert in
+ *     the shipped configuration cleared), and the floor_first_increase limit on
+ *     the first recovery hop after a saturated echo.
  *
  * usage: test_aec_res <sg_config golden> */
 #include "src/aec_res.c"
 
+#include "aec_simd_kernels.h"
 #include "support/sha256.h"
 
 #include <stdio.h>
@@ -568,12 +574,216 @@ static void test_contract(void) {
     free(sp); free(r2); free(cn); free(rend); free(blk);
 }
 
+/* ---- E: stage details the transcription in B does not discriminate ---- */
+
+/* Inputs with a weak near-end and a strong residual-echo estimate: the gain
+ * is driven to the floors, so a change of which floor applies shows. */
+static void echo_dominated_inputs(int n, Complex* err, Complex* near, float* r2, float* cn) {
+    int k;
+    for (k = 0; k < n; ++k) {
+        err[k].r = 1e-4f * srand_f(); err[k].i = 1e-4f * srand_f();
+        near[k].r = 1e-3f * srand_f(); near[k].i = 1e-3f * srand_f();
+        r2[k] = 1e12f;
+        cn[k] = 1e2f;
+    }
+}
+
+/* render_hop is scaled by exactly 32768 to the int16 power scale. The scaled
+ * mean power of a constant block is compared with the split-floor latch
+ * power; levels 3e-5 (relative power) either side of it are separated by the
+ * scale factors 32767 and 32769 (relative power change 6.1e-5), and a block
+ * of equal samples has an exact mean. */
+static void test_render_scale(void) {
+    int g, p, side;
+    for (g = 0; g < N_GRIDS; ++g) {
+        for (p = 0; p < N_PRESETS; ++p) {
+            AecConfig cfg = make_cfg(g, p);
+            size_t need = aec_res_get_mem_size(&cfg);
+            void* mem = aligned_block(need);
+            AecRes* r = aec_res_init(mem, need, &cfg);
+            int n, hop, k;
+            Complex *err, *near;
+            float *r2, *cn, *rend, *gain_by_side[2];
+            int latched[2] = {-1, -1};
+            AecResInput in;
+            char id[48];
+            snprintf(id, sizeof id, "%d/%d/preset%d", GRIDS[g][0], GRIDS[g][1], p);
+            if (!r) { CHECK(0, "%s: init", id); free(mem); continue; }
+            n = r->n_bins; hop = r->hop_size;
+            err = (Complex*)calloc((size_t)n, sizeof(Complex));
+            near = (Complex*)calloc((size_t)n, sizeof(Complex));
+            r2 = (float*)calloc((size_t)n, sizeof(float));
+            cn = (float*)calloc((size_t)n, sizeof(float));
+            rend = (float*)calloc((size_t)hop, sizeof(float));
+            gain_by_side[0] = (float*)calloc((size_t)n, sizeof(float));
+            gain_by_side[1] = (float*)calloc((size_t)n, sizeof(float));
+            echo_dominated_inputs(n, err, near, r2, cn);
+            in.error_spec = err; in.near_spec = near; in.r2 = r2; in.comfort_noise = cn;
+            in.render_hop = rend; in.all_converged = 0; in.max_dt = 0.0f;
+            in.max_saturation = 0.0f; in.clock_drift = 0;
+            CHECK(r->sg_cfg.split_floor_latch_power > 1.0f &&
+                  r->sg_cfg.split_floor_latch_power < 32768.0f * 32768.0f,
+                  "%s: the latch power is reachable by a render block", id);
+            for (side = 0; side < 2; ++side) {
+                /* scaled sample level s with s*s = latch * (1 -/+ 3e-5); v = s / 32768 is exact */
+                float s = (float)sqrt((double)r->sg_cfg.split_floor_latch_power *
+                                      (side ? 1.0 + 3e-5 : 1.0 - 3e-5));
+                float v = s / 32768.0f;
+                const float* out;
+                for (k = 0; k < hop; ++k) rend[k] = v;
+                aec_res_reset(r);
+                out = aec_res_process(r, &in);
+                latched[side] = r->sg.far_active_latched;
+                if (out) memcpy(gain_by_side[side], out, (size_t)n * sizeof(float));
+            }
+            CHECK(latched[0] == 0, "%s: a block just below the latch power does not latch", id);
+            CHECK(latched[1] == 1, "%s: a block just above the latch power latches", id);
+            CHECK(memcmp(gain_by_side[0], gain_by_side[1], (size_t)n * sizeof(float)) != 0,
+                  "%s: the latch changes the gain", id);
+            free(err); free(near); free(r2); free(cn); free(rend);
+            free(gain_by_side[0]); free(gain_by_side[1]); free(mem);
+        }
+    }
+}
+
+/* The suppressor starts in its initial state and leaves it when every filter
+ * has converged. Both initial-state reads in the suppressor are OR-ed with a
+ * flag the shared configuration builder sets to 1 (dne_use_during_initial_phase,
+ * lf_smoothing_during_initial_phase), so through AecRes as shipped the state
+ * has no effect on the gain. This test clears the two flags in the stored and
+ * the transcribed configuration; the gain then depends on the state, and the
+ * stage must track the transcription through the transition. */
+static void test_initial_phase(void) {
+    int g;
+    for (g = 0; g < N_GRIDS; ++g) {
+        AecConfig cfg = make_cfg(g, 1);
+        Aec lane;
+        size_t need = aec_res_get_mem_size(&cfg);
+        void* mem = aligned_block(need);
+        void* mem_on = aligned_block(need);
+        AecRes *r = aec_res_init(mem, need, &cfg), *r_on = aec_res_init(mem_on, need, &cfg);
+        RefPost ref;
+        int n, hop, hh, k, same_ref = 1, flags_matter = 0;
+        Complex *err, *near;
+        float *r2, *cn, *rend;
+        AecResInput in;
+        char id[32];
+        snprintf(id, sizeof id, "%d/%d", GRIDS[g][0], GRIDS[g][1]);
+        if (!r || !r_on || aec_create(&lane, &cfg) != 0) { CHECK(0, "%s: setup", id); continue; }
+
+        memset(&ref, 0, sizeof ref);
+        n = ref.n_freqs = lane.n_freqs;
+        hop = ref.hop_size = lane.hop_size;
+        ref.post_sg_cfg = lane.a3_sg.cfg;
+        ref.post_sg_tun = lane.a3_sg.tun;
+        ref.post_sg_cfg.dne_use_during_initial_phase = 0;
+        ref.post_sg_cfg.lf_smoothing_during_initial_phase = 0;
+        ref.post_sg_storage = (float*)calloc((size_t)(10 + ref.post_sg_cfg.nearend_smoother_n) * n,
+                                             sizeof(float));
+        ref.post_near_power = (float*)calloc((size_t)n, sizeof(float));
+        ref.error_power = (float*)calloc((size_t)n, sizeof(float));
+        ref.render_i16 = (float*)calloc((size_t)hop, sizeof(float));
+        ref_sg_init(&ref);
+        r->sg_cfg.dne_use_during_initial_phase = 0;
+        r->sg_cfg.lf_smoothing_during_initial_phase = 0;
+        aec_res_reset(r);
+        CHECK(r->sg.initial_state == 1 && r_on->sg.initial_state == 1,
+              "%s: instances start in the initial state", id);
+
+        err = (Complex*)calloc((size_t)n, sizeof(Complex));
+        near = (Complex*)calloc((size_t)n, sizeof(Complex));
+        r2 = (float*)calloc((size_t)n, sizeof(float));
+        cn = (float*)calloc((size_t)n, sizeof(float));
+        rend = (float*)calloc((size_t)hop, sizeof(float));
+        for (hh = 0; hh < 400; ++hh) {
+            /* near-end speech over a weak echo; every filter converged from hop 150 on */
+            int all_conv = hh >= 150;
+            const float *a, *b, *c;
+            for (k = 0; k < n; ++k) {
+                err[k].r = 0.06f * srand_f(); err[k].i = 0.06f * srand_f();
+                near[k].r = 0.2f * srand_f(); near[k].i = 0.2f * srand_f();
+                r2[k] = 0.12f * (near[k].r * near[k].r + near[k].i * near[k].i) * 1.0737418e9f * (0.8f + 0.4f * urand());
+                cn[k] = 1e3f * urand();
+            }
+            for (k = 0; k < hop; ++k) rend[k] = 0.05f * srand_f();
+            ref.aligned_ref = rend; ref.fused_near = near; ref.fused_r2 = r2; ref.fused_comfort = cn;
+            ref_mag2(ref.error_power, err, n);
+            a = ref_post_res_gain(&ref, all_conv, 0.0f, 0.0f, 0);
+            in.error_spec = err; in.near_spec = near; in.r2 = r2; in.comfort_noise = cn;
+            in.render_hop = rend; in.all_converged = all_conv; in.max_dt = 0.0f;
+            in.max_saturation = 0.0f; in.clock_drift = 0;
+            b = aec_res_process(r, &in);
+            c = aec_res_process(r_on, &in);
+            if (!a || !b || !c) { same_ref = 0; break; }
+            if (memcmp(a, b, (size_t)n * sizeof(float)) != 0) {
+                same_ref = 0;
+                CHECK(0, "%s: gain differs from the transcription at hop %d", id, hh);
+                break;
+            }
+            if (!all_conv && memcmp(b, c, (size_t)n * sizeof(float)) != 0) flags_matter = 1;
+        }
+        CHECK(same_ref, "%s: gain equals the transcription through the initial-state exit", id);
+        CHECK(flags_matter, "%s: with the two flags cleared the initial state changes the gain", id);
+        CHECK(r->sg.initial_state == 0 && ref.post_sg.initial_state == 0,
+              "%s: the stage leaves the initial state when all filters converged", id);
+
+        aec_destroy(&lane);
+        free(ref.post_sg_storage); free(ref.post_near_power); free(ref.error_power);
+        free(ref.render_i16); free(err); free(near); free(r2); free(cn); free(rend);
+        free(mem); free(mem_on);
+    }
+}
+
+/* After a saturated-echo hop the minimum gain is 0 and the maximum gain is
+ * last_gain * increase, raised to floor_first_increase so that a gain that has
+ * fallen to ~0 can start to recover. The limit is in the suppressor's power
+ * domain; the returned gain is its square root. */
+static void test_saturated_recovery(void) {
+    int g;
+    for (g = 0; g < N_GRIDS; ++g) {
+        AecConfig cfg = make_cfg(g, 1);
+        size_t need = aec_res_get_mem_size(&cfg);
+        void* mem = aligned_block(need);
+        AecRes* r = aec_res_init(mem, need, &cfg);
+        int n, hop, k, hh, flat = 1;
+        Complex *err, *near;
+        float *r2, *cn, *rend, ffi, ffi_amp;
+        const float* out = NULL;
+        AecResInput in;
+        char id[32];
+        snprintf(id, sizeof id, "%d/%d", GRIDS[g][0], GRIDS[g][1]);
+        if (!r) { CHECK(0, "%s: init", id); free(mem); continue; }
+        n = r->n_bins; hop = r->hop_size;
+        ffi = r->sg_cfg.floor_first_increase;
+        sk_fast_sqrt_f32(&ffi, &ffi_amp, 1);
+        err = (Complex*)calloc((size_t)n, sizeof(Complex));
+        near = (Complex*)calloc((size_t)n, sizeof(Complex));
+        r2 = (float*)calloc((size_t)n, sizeof(float));
+        cn = (float*)calloc((size_t)n, sizeof(float));
+        rend = (float*)calloc((size_t)hop, sizeof(float));
+        echo_dominated_inputs(n, err, near, r2, cn);
+        in.error_spec = err; in.near_spec = near; in.r2 = r2; in.comfort_noise = cn;
+        in.render_hop = rend; in.all_converged = 0; in.max_dt = 0.0f;
+        in.max_saturation = 1.0f; in.clock_drift = 0;
+        for (hh = 0; hh < 6; ++hh) out = aec_res_process(r, &in);   /* gain collapses */
+        CHECK(out != NULL && out[n / 2] < ffi_amp, "%s: saturated echo collapses the gain below the floor", id);
+        for (k = 0; k < n; ++k) r2[k] = 0.0f;                       /* echo gone, still saturated */
+        out = aec_res_process(r, &in);
+        if (out) for (k = 1; k < n - 1; ++k) if (out[k] != ffi_amp) flat = 0;
+        CHECK(out != NULL && flat, "%s: the first recovery hop is limited to floor_first_increase", id);
+        free(err); free(near); free(r2); free(cn); free(rend); free(mem);
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) { fprintf(stderr, "usage: %s <sg_config golden>\n", argv[0]); return 2; }
     test_config(argv[1]);
     test_gain();
     test_cng();
     test_contract();
+    test_render_scale();
+    test_initial_phase();
+    test_saturated_recovery();
     printf("test_aec_res: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
