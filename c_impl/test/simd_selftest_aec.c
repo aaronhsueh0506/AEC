@@ -3480,6 +3480,77 @@ static void bench_raise_to(void) {
               (sk_raise_to_f32(x, lo, BENCH_N), g_bench_sink += x[0]));
 }
 
+/* Flags carry any byte value (non-zero means set); hangovers are zero about
+ * half the time and otherwise any int32, INT32_MIN and INT32_MAX included. */
+static void fill_stationary_case(unsigned char *flags, int32_t *hang, int n) {
+    int i;
+    for (i = 0; i < n; ++i) {
+        uint32_t r = lcg_next();
+        flags[i] = ((r & 3u) == 0u) ? 0 : (((r & 12u) == 0u) ? (unsigned char)(r >> 16) : 1);
+        hang[i] = ((r & 0x10000u) != 0u) ? 0 : (int32_t)gen_int32();
+    }
+}
+
+static void test_stationary_mask(void) {
+    unsigned char f[SK_TEST_MAX_N], m_s[SK_TEST_MAX_N], m_v[SK_TEST_MAX_N];
+    int32_t h[SK_TEST_MAX_N];
+    unsigned char *fa = (unsigned char *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN);
+    unsigned char *ma_s = (unsigned char *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN);
+    unsigned char *ma_v = (unsigned char *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN);
+    int32_t *ha = (int32_t *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(int32_t));
+    int ni, t, o;
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (t = 0; t < TRIALS; ++t) {
+            int cs, cv, cv0;
+            fill_stationary_case(f, h, n);
+            memset(m_s, 0xAB, sizeof m_s); memset(m_v, 0xAB, sizeof m_v);
+            cs = sk_stationary_mask_u8_scalar(f, h, m_s, n);
+            cv = sk_stationary_mask_u8(f, h, m_v, n);
+            cv0 = sk_stationary_mask_u8(f, h, NULL, n);
+            g_total_checks += n + 2;
+            if (cs != cv || cs != cv0 || memcmp(m_s, m_v, (size_t)n) != 0 ||
+                sk_stationary_mask_u8_scalar(f, h, NULL, n) != cs) {
+                fprintf(stderr, "MISMATCH kernel=stationary_mask_u8 n=%d trial=%d count %d/%d/%d\n", n, t, cs, cv, cv0);
+                exit(1);
+            }
+        }
+    }
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
+            int ho = ((o + 7) % 15) + 1, cs, cv;
+            memset(fa, 0xAA, (size_t)EDGE_ARENA_LEN);
+            edge_fill_canary_b(ma_s, EDGE_ARENA_LEN); edge_fill_canary_b(ma_v, EDGE_ARENA_LEN);
+            edge_fill_canary_i((int *)ha, EDGE_ARENA_LEN);
+            fill_stationary_case(f, h, n);
+            memcpy(fa + o, f, (size_t)n); memcpy(ha + ho, h, (size_t)n * sizeof(int32_t));
+            cs = sk_stationary_mask_u8_scalar(fa + o, ha + ho, ma_s + o, n);
+            cv = sk_stationary_mask_u8(fa + o, ha + ho, ma_v + o, n);
+            g_total_checks += n + 1;
+            if (cs != cv || memcmp(ma_s + o, ma_v + o, (size_t)n) != 0) {
+                fprintf(stderr, "MISMATCH kernel=stationary_mask_u8_edge n=%d offset=%d\n", n, o);
+                exit(1);
+            }
+            edge_check_canary_b("stationary_mask_u8_edge:mask_scalar", ma_s, EDGE_ARENA_LEN, o, n);
+            edge_check_canary_b("stationary_mask_u8_edge:mask_simd", ma_v, EDGE_ARENA_LEN, o, n);
+            edge_check_canary_i("stationary_mask_u8_edge:hang", (int *)ha, EDGE_ARENA_LEN, ho, n);
+        }
+    }
+    free(fa); free(ma_s); free(ma_v); free(ha);
+    printf("PASS stationary_mask_u8 (flags any byte, hangovers incl. INT32 extremes, NULL mask, offsets 1..15 canary-guarded)\n");
+}
+
+static void bench_stationary_mask(void) {
+    unsigned char f[BENCH_N], m[BENCH_N];
+    int32_t h[BENCH_N];
+    int32_t *volatile hv = h;   /* opaque to the optimizer: the work cannot be hoisted */
+    fill_stationary_case(f, h, BENCH_N);
+    NEW_BENCH("stationary_mask_u8",
+              (hv[r_ & 7] = (r_ & 1) ? 0 : 5, g_bench_sink += sk_stationary_mask_u8_scalar(f, hv, m, BENCH_N)),
+              (hv[r_ & 7] = (r_ & 1) ? 0 : 5, g_bench_sink += sk_stationary_mask_u8(f, hv, m, BENCH_N)));
+}
+
 static void bench_max_abs(void) {
     float x[BENCH_N];
     fill_bench_floats(x, BENCH_N);
@@ -3519,6 +3590,7 @@ int main(void) {
     test_max_abs();
     test_noise_floor_track();
     test_raise_to();
+    test_stationary_mask();
 
     printf("\n--- NaN corpus ---\n");
     test_cabs_np_nan();
@@ -3604,6 +3676,7 @@ int main(void) {
     bench_max_abs();
     bench_noise_floor_track();
     bench_raise_to();
+    bench_stationary_mask();
 
     if (g_hard_fail_count > 0) {
         fprintf(stderr,

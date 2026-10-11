@@ -365,10 +365,7 @@ void stationarity_estimator_update_stationarity_flags(StationarityEstimator *s,
 
 void stationarity_estimator_band_stationary_mask(const StationarityEstimator *s,
                                                  unsigned char *out) {
-    int k;
-    for (k = 0; k < s->n_freqs; ++k) {
-        out[k] = (unsigned char)(s->stationarity_flags[k] && s->hangovers[k] == 0);
-    }
+    (void)sk_stationary_mask_u8(s->stationarity_flags, s->hangovers, out, s->n_freqs);
 }
 
 int stationarity_estimator_is_band_stationary(const StationarityEstimator *s, int k) {
@@ -376,10 +373,7 @@ int stationarity_estimator_is_band_stationary(const StationarityEstimator *s, in
 }
 
 int stationarity_estimator_is_block_stationary(const StationarityEstimator *s) {
-    int k, count = 0;
-    for (k = 0; k < s->n_freqs; ++k) {
-        if (s->stationarity_flags[k] && s->hangovers[k] == 0) count++;
-    }
+    int count = sk_stationary_mask_u8(s->stationarity_flags, s->hangovers, NULL, s->n_freqs);
     /* float(np.mean(mask)) > BLOCK_FRACTION; mean = count / n_freqs (float32-by-design) */
     return ((float)count / (float)s->n_freqs) > STAT_BLOCK_FRACTION;
 }

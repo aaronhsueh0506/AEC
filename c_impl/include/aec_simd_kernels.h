@@ -1847,6 +1847,67 @@ static inline void sk_raise_to_f32(float *x, const float *lo, int n) {
 }
 #endif
 
+/* ═════════════════════════ sk_stationary_mask_u8 ═════════════════════════════
+ * Bins that are flagged stationary and have no hangover left:
+ *   m[k] = (flags[k] != 0) && (hang[k] == 0)      -- stored as a 0/1 byte
+ * Returns how many bins are set. `mask` may be NULL when only the count is
+ * wanted. Pure integer logic, exact in any order. */
+
+static inline int sk__stationary_elem(unsigned char flag, int32_t hang) {
+    return flag != 0 && hang == 0;
+}
+
+static inline int sk_stationary_mask_u8_scalar(const unsigned char *flags,
+                                               const int32_t *hang,
+                                               unsigned char *mask, int n) {
+    int k, count = 0;
+    for (k = 0; k < n; ++k) {
+        int m = sk__stationary_elem(flags[k], hang[k]);
+        if (mask) mask[k] = (unsigned char)m;
+        count += m;
+    }
+    return count;
+}
+
+#if SK_HAVE_NEON
+static inline int sk_stationary_mask_u8(const unsigned char *flags,
+                                        const int32_t *hang,
+                                        unsigned char *mask, int n) {
+    int k = 0, count = 0;
+    /* each byte lane of the accumulator gains at most 1 per step, so it is
+     * folded into the count before it could pass 255 */
+    while (k + 16 <= n) {
+        int steps = (n - k) / 16, j;
+        uint8x16_t acc = vdupq_n_u8(0);
+        if (steps > 255) steps = 255;
+        for (j = 0; j < steps; ++j, k += 16) {
+            uint8x16_t f = vld1q_u8(flags + k);
+            uint16x8_t z01 = vcombine_u16(vmovn_u32(vceqzq_s32(vld1q_s32(hang + k))),
+                                          vmovn_u32(vceqzq_s32(vld1q_s32(hang + k + 4))));
+            uint16x8_t z23 = vcombine_u16(vmovn_u32(vceqzq_s32(vld1q_s32(hang + k + 8))),
+                                          vmovn_u32(vceqzq_s32(vld1q_s32(hang + k + 12))));
+            uint8x16_t z = vcombine_u8(vmovn_u16(z01), vmovn_u16(z23));
+            uint8x16_t m = vshrq_n_u8(vandq_u8(vtstq_u8(f, f), z), 7);
+            if (mask) vst1q_u8(mask + k, m);
+            acc = vaddq_u8(acc, m);
+        }
+        count += (int)vaddlvq_u8(acc);
+    }
+    for (; k < n; ++k) {
+        int m = sk__stationary_elem(flags[k], hang[k]);
+        if (mask) mask[k] = (unsigned char)m;
+        count += m;
+    }
+    return count;
+}
+#else
+static inline int sk_stationary_mask_u8(const unsigned char *flags,
+                                        const int32_t *hang,
+                                        unsigned char *mask, int n) {
+    return sk_stationary_mask_u8_scalar(flags, hang, mask, n);
+}
+#endif
+
 #ifdef __cplusplus
 }
 #endif
