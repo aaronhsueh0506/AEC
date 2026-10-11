@@ -574,7 +574,6 @@ const float *suppression_gain_get_gain(
     int saturated_echo) {
     const SuppressionGainConfig *c = &sg->cfg;
     int n = c->n_bins;
-    int k;
     int low_noise_render;
     float render_x2_sum = 0.0f;
     int hf_lim_applied;
@@ -617,12 +616,8 @@ const float *suppression_gain_get_gain(
      * (including the signed-zero tie case, since b is returned unmodified
      * on the false branch just like the original's implicit "else v"). */
     sk_min_f32(sg->gain, sg->max_gain, sg->g_raw, n);
-    /* maximum(., min_gain): per-bin array bound, no matching two-array-max
-     * kernel exists (only sk_min_f32 is available) -- kept as plain C,
-     * unchanged from the original "if (v<lo) v=lo;" expression. */
-    for (k = 0; k < n; ++k) {
-        if (sg->gain[k] < sg->min_gain[k]) sg->gain[k] = sg->min_gain[k];
-    }
+    /* maximum(., min_gain): per-bin array bound, "if (v<lo) v=lo;". */
+    sk_raise_to_f32(sg->gain, sg->min_gain, n);
 
     /* Step 7: LF + HF limiters */
     limit_lf_gains(sg->gain, n, sg->cfg.lf_clamp_bin);

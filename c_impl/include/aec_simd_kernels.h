@@ -1817,6 +1817,36 @@ static inline void sk_noise_floor_track_f32(float *fl, int *cnt, const float *ps
 }
 #endif
 
+/* ═══════════════════════════ sk_raise_to_f32 ═══════════════════════════════
+ * In-place per-bin lower bound given by an array:
+ *   if (x[k] < lo[k]) x[k] = lo[k];
+ * The compare is unordered-false when either operand is NaN, so x is then left
+ * as it is, and a tie leaves x untouched (a signed zero is never swapped); the
+ * NEON compare + select reproduces both. `x` and `lo` must not overlap. */
+
+static inline void sk_raise_to_f32_scalar(float *x, const float *lo, int n) {
+    int k;
+    for (k = 0; k < n; ++k)
+        if (x[k] < lo[k]) x[k] = lo[k];
+}
+
+#if SK_HAVE_NEON
+static inline void sk_raise_to_f32(float *x, const float *lo, int n) {
+    int k = 0;
+    for (; k + 4 <= n; k += 4) {
+        float32x4_t v = vld1q_f32(x + k);
+        float32x4_t b = vld1q_f32(lo + k);
+        vst1q_f32(x + k, vbslq_f32(vcltq_f32(v, b), b, v));
+    }
+    for (; k < n; ++k)
+        if (x[k] < lo[k]) x[k] = lo[k];
+}
+#else
+static inline void sk_raise_to_f32(float *x, const float *lo, int n) {
+    sk_raise_to_f32_scalar(x, lo, n);
+}
+#endif
+
 #ifdef __cplusplus
 }
 #endif

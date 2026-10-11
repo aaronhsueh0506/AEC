@@ -473,7 +473,7 @@ typedef struct {
  * 32 total, so 24 silently overflowed (FATAL: kernel tally table full) the
  * first time this file was run after adding the edge matrix. 40 leaves
  * headroom for future additions. */
-#define MAX_TALLY_KERNELS 64
+#define MAX_TALLY_KERNELS 128
 static kernel_tally_t g_tally[MAX_TALLY_KERNELS];
 static int g_tally_count = 0;
 static int g_hard_fail_count = 0;
@@ -3421,6 +3421,65 @@ static void bench_noise_floor_track(void) {
               (sk_noise_floor_track_f32(fl, c, psd, 1.0004f, 1.0e-6f, 50, BENCH_N), g_bench_sink += fl[0]));
 }
 
+static void test_raise_to(void) {
+    float x_i[SK_TEST_MAX_N], lo[SK_TEST_MAX_N], x_s[SK_TEST_MAX_N], x_v[SK_TEST_MAX_N];
+    float *xa_s = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *xa_v = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    float *la = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
+    int ni, t, o, i;
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (t = 0; t < TRIALS; ++t) {
+            fill_floats(x_i, n);
+            fill_floats(lo, n);
+            for (i = 0; i < n; i += 5) lo[i] = x_i[i];                 /* ties, incl. +-0 pairs */
+            for (i = 3; i < n; i += 7) lo[i] = -x_i[i];                /* sign-flipped, zero tie */
+            memcpy(x_s, x_i, (size_t)n * sizeof(float)); memcpy(x_v, x_i, (size_t)n * sizeof(float));
+            sk_raise_to_f32_scalar(x_s, lo, n);
+            sk_raise_to_f32(x_v, lo, n);
+            check_bits_classify("raise_to_f32", n, t, x_v, x_s, n);
+        }
+    }
+    for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
+        int n = NAN_N_LIST[ni];
+        fill_floats_nan_sprinkle(x_i, n);
+        fill_floats_nan_sprinkle(lo, n);
+        for (i = 0; i < n; i += 2) lo[i] = gen_float();
+        memcpy(x_s, x_i, (size_t)n * sizeof(float)); memcpy(x_v, x_i, (size_t)n * sizeof(float));
+        sk_raise_to_f32_scalar(x_s, lo, n);
+        sk_raise_to_f32(x_v, lo, n);
+        check_bits_classify("raise_to_f32_nan", n, 0, x_v, x_s, n);
+    }
+    for (ni = 0; ni < N_LIST_COUNT; ++ni) {
+        int n = N_LIST[ni];
+        for (o = 1; o <= EDGE_OFFSET_MAX; ++o) {
+            int lo_off = ((o + 7) % 15) + 1;
+            edge_fill_canary_f(xa_s, EDGE_ARENA_LEN); edge_fill_canary_f(xa_v, EDGE_ARENA_LEN);
+            edge_fill_canary_f(la, EDGE_ARENA_LEN);
+            fill_floats(x_i, n); fill_floats(lo, n);
+            memcpy(xa_s + o, x_i, (size_t)n * sizeof(float)); memcpy(xa_v + o, x_i, (size_t)n * sizeof(float));
+            memcpy(la + lo_off, lo, (size_t)n * sizeof(float));
+            sk_raise_to_f32_scalar(xa_s + o, la + lo_off, n);
+            sk_raise_to_f32(xa_v + o, la + lo_off, n);
+            check_bits_classify("raise_to_f32_edge", n, o, xa_v + o, xa_s + o, n);
+            edge_check_canary_f("raise_to_f32_edge:x_scalar", xa_s, EDGE_ARENA_LEN, o, n);
+            edge_check_canary_f("raise_to_f32_edge:x_simd", xa_v, EDGE_ARENA_LEN, o, n);
+            edge_check_canary_f("raise_to_f32_edge:lo", la, EDGE_ARENA_LEN, lo_off, n);
+        }
+    }
+    free(xa_s); free(xa_v); free(la);
+    printf("PASS raise_to_f32 (finite with ties and zero signs, NaN sprinkle, offsets 1..15 canary-guarded)\n");
+}
+
+static void bench_raise_to(void) {
+    float x0[BENCH_N], x[BENCH_N], lo[BENCH_N];
+    fill_bench_floats(x0, BENCH_N); fill_bench_floats(lo, BENCH_N);
+    memcpy(x, x0, sizeof x);
+    NEW_BENCH("raise_to_f32",
+              (sk_raise_to_f32_scalar(x, lo, BENCH_N), g_bench_sink += x[0]),
+              (sk_raise_to_f32(x, lo, BENCH_N), g_bench_sink += x[0]));
+}
+
 static void bench_max_abs(void) {
     float x[BENCH_N];
     fill_bench_floats(x, BENCH_N);
@@ -3459,6 +3518,7 @@ int main(void) {
     test_no_audible_echo_gain();
     test_max_abs();
     test_noise_floor_track();
+    test_raise_to();
 
     printf("\n--- NaN corpus ---\n");
     test_cabs_np_nan();
@@ -3543,6 +3603,7 @@ int main(void) {
     bench_no_audible_echo_gain();
     bench_max_abs();
     bench_noise_floor_track();
+    bench_raise_to();
 
     if (g_hard_fail_count > 0) {
         fprintf(stderr,
