@@ -42,6 +42,14 @@
  *    the fallback on a stand-alone filter.
  *  - the 0.1 step of the fullband ERL (erl_time_domain): no library code reads
  *    that value.
+ *  - the 48 kHz anti-alias filter of the delay estimator (da_resample48_pair):
+ *    one unit in the last place of the filtered stream does not move the integer
+ *    delay estimate, so no digest changes. test-delay-kernels compares the pair
+ *    kernel with two single-channel calls bit for bit.
+ *  - the hop peak magnitude of the echo estimate (last_s_max_abs): it reaches the
+ *    post block only through the saturated-echo test, which the scene never
+ *    trips; the render-block peak only sets a one-time latch. The self-test of
+ *    sk_max_abs_f32 (make selftest) is the gate.
  */
 #include "aec.h"
 #include <math.h>
