@@ -94,6 +94,52 @@ when verdict requires it.
   streams of every C file are identical, except two printed message texts in
   the tests).
 
+### Performance (bit-identical; no behaviour change)
+
+Five hot spots now run as NEON, each with a scalar twin of identical
+arithmetic (`-ffp-contract=off`, no estimate instructions, divides stay
+divides). Output is byte-identical: `make test-output-hash` (30 rows) is
+unchanged on `kiss` and `ne10` x `SIMD=0/1`, and a whole-output hash of 54
+further runs (3 grids x shadow on/off x entry points, 6000 hops each, three
+scene seeds) is identical on five build variants.
+
+- `da_resample48_pair` (`delay_aec3.c`): the capture and render 48 kHz
+  anti-alias cascades, two dependent chains of float32 multiply-adds, run as the
+  two lanes of one vector. Only the 48 kHz grid is affected: -12.7 % full,
+  -20.1 % linear-only.
+- `sk_max_abs_f32`: the hop peak magnitude of the echo estimate (main and
+  shadow filter) and of the render block: -1.3 to -1.5 % full, -2.4 to -3.2 %
+  linear-only on all three grids.
+- `sk_noise_floor_track_f32`: the render noise floor and hold counter of the
+  residual echo estimator: -1.6 to -1.7 % full (the post stage; no change
+  linear-only).
+- `sk_raise_to_f32`: the per-bin lower bound on the suppression gain: -1.6 to
+  -1.7 % full (no change linear-only).
+- `sk_stationary_mask_u8`: the stationary-bin mask and count: -2.0 to -2.2 %
+  full, -1.5 % linear-only.
+
+Per-hop cost of `bench_rtf` (`balanced`, comfort noise on, speech-like scene,
+`--stage full|linear`), median of 30 interleaved runs, one core of the dev
+machine (Apple M4, NE10), microseconds per hop:
+
+| grid (rate / FFT) | full before -> after | linear-only before -> after |
+|---|---|---|
+| 16 kHz / 256 | 8.83 -> 8.24 (-6.7 %) | 5.08 -> 4.87 (-4.1 %) |
+| 16 kHz / 512 | 18.10 -> 16.84 (-7.0 %) | 10.86 -> 10.43 (-4.0 %) |
+| 48 kHz / 1024 | 39.50 -> 32.22 (-18.4 %) | 24.75 -> 18.88 (-23.7 %) |
+
+The per-kernel figures above are each measured against the preceding commit.
+
+### Added (benchmark and tests)
+
+- `bench_rtf` takes `--sr`, `--fft`, `--stage full|linear|both` and
+  `--scene noise|bursts` (a 12 s speech-like scene with far-end bursts, double
+  talk and a level step), reports the median pass next to the fastest, and with
+  `PROFILE=1` prints the mean stage buckets.
+- `test_delay_kernels` checks the 48 kHz pair kernel against two single-channel
+  calls across carried state, odd lengths, output-cap truncation and the
+  single-call fallbacks; `make selftest` covers the four new kernels.
+
 ## [Unreleased] — 2026-10-06 — linear-half context level (`AEC_CONTEXT_LINEAR_ONLY`) and NEON hot spots, all bit-identical
 
 ### Added
