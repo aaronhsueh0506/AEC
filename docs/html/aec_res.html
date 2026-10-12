@@ -149,7 +149,7 @@ t              各 lane 線性 AEC 完成
 <tr><td><code>AEC3B_SQRT2_SIN_LUT</code>(<code>aec3_balanced_config.h</code>)</td><td>舒適噪音填補</td><td><code>aec_cng_fill</code></td></tr>
 <tr><td><code>delay_aec3_*</code>(<code>delay_aec3.h</code>)</td><td>共用延遲估計器</td><td><b>仍是內部符號</b>,不在 RES 級範圍內,本介面不提供</td></tr>
 </table></div>
-<div class="note"><code>aec_cng_fill</code> 與 <code>Aec</code> 自己的舒適噪音(<code>aec3_post.c</code>)<b>同配方、不同算式</b>:同一個亂數遞推與查表,但本函式用 libm 的 <code>sqrtf</code>／除法,與兩條 pipeline 的迴圈逐位元相同;<code>Aec</code> 內部則是批次化的 <code>inv_psd_scale</code>＋<code>sk_fast_sqrt</code>。兩者不要混用在要求位元一致的比對中。</div>
+<div class="note"><code>aec_cng_fill</code> 與 <code>Aec</code> 自己的舒適噪音(<code>aec3_post.c</code>)<b>同配方、不同算式</b>:同一個亂數遞推與查表,但本函式用 libm 的 <code>sqrtf</code>／除法,與兩條 pipeline 的迴圈逐位元相同;<code>Aec</code> 內部則是批次化的 <code>inv_psd_scale</code>＋<code>sk_fast_sqrt_f32</code>。兩者不要混用在要求位元一致的比對中。</div>
 
 <h2>9. 相關檔案與測試</h2>
 <ul class="small">

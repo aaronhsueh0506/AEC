@@ -1023,7 +1023,7 @@ aec_cng_fill(&rng, spec, fused_comfort, g_res, g_nr, 0.31622777f, aec_res_n_bins
 參考乘 32768；`all_converged` 讓抑制器離開初始狀態；`max_dt > 0.2` 啟用 double-talk 地板；
 `max_saturation > 0.5` 視為飽和回音。`r2` 同時當作 bounded 與 unbounded 殘留估計。
 `aec_cng_fill` 的算式與兩條 pipeline 的迴圈逐位元相同，**不同於** `Aec` 內部的批次化填補
-（`inv_psd_scale`＋`sk_fast_sqrt`），兩者的輸出不可互相比對。
+（`inv_psd_scale`＋`sk_fast_sqrt_f32`），兩者的輸出不可互相比對。
 
 測試：`make test-aec-res`（設定與 lane 相等且等於 checked-in digest、增益與 pipeline 做法逐位元相同、
 comfort-noise 迴圈逐位元相同、API 契約）、`make test-zero-heap`、`make audit-no-stdio`。
