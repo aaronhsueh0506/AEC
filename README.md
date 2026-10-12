@@ -422,7 +422,7 @@ python3 python/eval_aec_challenge.py wav/aec_challenge_blind/ --all-presets
 
 # C-side release gates (including real-WAV heap/pool byte equality)
 make -C c_impl test-static-aec
-make -C c_impl test-rate-structural test-process-context
+make -C c_impl test-rate-structural test-process-context test-avg-reverb-slots
 ```
 
 ---

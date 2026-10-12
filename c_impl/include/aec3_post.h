@@ -269,6 +269,14 @@ void aec3_post_compute_x2_reverb(Aec3Post *p, int x2_present,
                                  const float *x2_at_delay, const float *x2_past,
                                  float decay_steady);
 
+/* Ring slots the average-render reverb reads. delay_idx is the partition
+ * `delay` blocks older than the newest one (partition_idx - 1), past_idx the
+ * one just older than that. The ring holds n_part blocks, so delay is capped
+ * at n_part - 2 (and floored at 0): beyond that past_idx would wrap onto the
+ * newest partition. Requires n_part >= 1. */
+void aec3_post_avg_reverb_slots(int n_part, int partition_idx, int delay,
+                                int *delay_idx, int *past_idx);
+
 /* Stage 4: coherence Γ²(Ŷ,Y) EMA → p->coh_gate_mask (when erle_coh_gate). */
 void aec3_post_compute_coherence(Aec3Post *p,
                                  const Complex *echo_spec_for_coh,

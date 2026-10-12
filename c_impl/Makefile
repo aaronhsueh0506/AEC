@@ -648,8 +648,8 @@ CFLAGS    += $(FP_POLICY)
 AC_FWD = BACKEND=$(BACKEND) SIMD=$(SIMD) WERROR=$(WERROR) CC='$(CC)' CXX='$(CXX)' EXTRA_CFLAGS='$(EXTRA_CFLAGS)' NO_STDIO=$(NO_STDIO) TOOLCHAIN_CHECK=$(TOOLCHAIN_CHECK)
 
 ifeq ($(AC_LIB),)
-.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-aec-res test-detectors-parity test-detectors-parity-all
-all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-aec-res test-detectors-parity test-detectors-parity-all:
+.PHONY: all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-aec-res test-detectors-parity test-detectors-parity-all
+all bench test-counter-saturation test-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-aec-res test-detectors-parity test-detectors-parity-all:
 	+@ac="$$($(MAKE) -s --no-print-directory -C $(AC_DIR) $(AC_FWD) print-lib-path)"; \
 	 test -n "$$ac" || { echo "FATAL: could not resolve audio_common archive path (AC_DIR=$(AC_DIR) -- is audio_common present as a sibling of this repo?)" >&2; exit 1; }; \
 	 $(MAKE) --no-print-directory $@ AC_LIB="$$ac"
@@ -857,6 +857,12 @@ TEST_CV_TARGET = $(BIN_DIR)/test_config_validation
 TEST_PC_SRCS   = $(TEST_DIR)/test_process_context.c
 TEST_PC_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_PC_SRCS))
 TEST_PC_TARGET = $(BIN_DIR)/test_process_context
+
+# Average-render-reverb ring-slot selection (aec3_post_avg_reverb_slots): the
+# delayed and the one-older partition must never alias the newest one.
+TEST_ARS_SRCS   = $(TEST_DIR)/test_avg_reverb_slots.c
+TEST_ARS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_ARS_SRCS))
+TEST_ARS_TARGET = $(BIN_DIR)/test_avg_reverb_slots
 
 # Permanent shared-far-end-FFT regression test
 # (aec_process_context_shared_far()): proves borrowing an externally-computed
@@ -1137,7 +1143,7 @@ $(TEST_NT_TARGET): $(TEST_NT_OBJ) $(OBJ_DIR)/aec3_scale.o | _cfg_guard
 # rebuilt something, so $(TARGET)/$(BENCH_TARGET) only relink when it did.
 # =============================================================================
 ifneq ($(AC_LIB),)
-.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-aec-res test-detectors-parity test-detectors-parity-all
+.PHONY: all bench FORCE test-counter-saturation test-rate-structural _run-rate-structural test-config-validation test-process-context test-avg-reverb-slots test-linear-context test-res-nearend-gate test-runtime-preset test-delay-num-filters test-duty-census test-delay-backward-quarantine test-external-realign test-cli-delay-flags test-shared-far-spec test-shared-fft-handle test-static-aec test-reset-parity test-zero-heap test-output-hash test-aec-res test-detectors-parity test-detectors-parity-all
 all: $(TARGET)
 bench: $(BENCH_TARGET)
 
@@ -1169,6 +1175,9 @@ test-config-validation: $(TEST_CV_TARGET)
 # Builds AND runs, same convention as test-counter-saturation above.
 test-process-context: $(TEST_PC_TARGET)
 	"$(abspath $(TEST_PC_TARGET))"
+
+test-avg-reverb-slots: $(TEST_ARS_TARGET)
+	"$(abspath $(TEST_ARS_TARGET))"
 
 test-output-hash: $(TEST_OH_TARGET)
 	"$(abspath $(TEST_OH_TARGET))" "$(TEST_OH_GOLDEN)" $(TEST_OH_VARIANT)
@@ -1279,6 +1288,10 @@ $(TEST_CV_TARGET): $(OBJS) $(TEST_CV_OBJS) $(AC_LIB) | _cfg_guard
 $(TEST_PC_TARGET): $(OBJS) $(TEST_PC_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "test_process_context [$(BACKEND)] -> $@"
+
+$(TEST_ARS_TARGET): $(OBJS) $(TEST_ARS_OBJS) $(AC_LIB) | _cfg_guard
+	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_avg_reverb_slots [$(BACKEND)] -> $@"
 
 $(TEST_OH_TARGET): $(OBJS) $(TEST_OH_OBJS) $(AC_LIB) | _cfg_guard
 	$(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -1894,6 +1907,7 @@ help:
 	@echo "                  regression test (test_delay_reset) -- run from c_impl/"
 	@echo "  test-rate-structural  Build + run the permanent per-rate structural"
 	@echo "                  regression test (test_rate_structural) -- run from c_impl/"
+	@echo "  test-avg-reverb-slots  Build + run the average-render-reverb ring-slot test"
 	@echo "  test-process-context  Build + run the permanent context-only-processing"
 	@echo "                  regression test (test_process_context) -- run from c_impl/"
 	@echo "  test-delay-num-filters  Build + run the permanent matched-filter-bank-size"

@@ -76,6 +76,25 @@ when verdict requires it.
   scale), the initial-state exit with the two initial-phase flags cleared, and
   the first recovery hop after a saturated echo (pins `floor_first_increase`).
 
+### Fixed
+
+- **Average-render reverb read the newest partition as its "one-older" slot.**
+  The ERLE render power `X2[delay] + reverb(X2[delay + 1])` is read from the
+  filter's own `n_partitions`-slot ring, so the delay (in partitions) can be at
+  most `n_partitions - 2` for `delay + 1` to stay older than the newest slot.
+  The C library capped it at `n_partitions - 1`: with the direct-path delay at
+  the last partition the "past" slot wrapped onto the newest one and fed the
+  reverb model the current block. The Python reference and AEC3 (whose ring is
+  longer than any delay) never alias. The slot arithmetic is now one function,
+  `aec3_post_avg_reverb_slots()`, with the cap `n_partitions - 2`; it differs
+  from the previous output only on hops where the delay estimate is at or beyond the
+  last partition. `make test-output-hash` is unchanged on `kiss`, `ne10_neon`
+  and `ne10_scalar` because the seeded scene never reaches that delay.
+- `make test-avg-reverb-slots` (`test/test_avg_reverb_slots.c`) checks the
+  slots against a step-by-step walk for ring sizes 2..9, every write position
+  and delays from -3 to beyond the ring length, and that the past slot never
+  aliases the newest one. It is part of the C-side release gates.
+
 ### Changed
 
 - `aec_build_sg_config()` (internal, `aec_config_build.h`) now builds the

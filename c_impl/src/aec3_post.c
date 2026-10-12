@@ -168,6 +168,15 @@ void aec3_post_compute_psds(Aec3Post *p, const Aec3PostAbs *mag) {
     }
 }
 
+void aec3_post_avg_reverb_slots(int n_part, int partition_idx, int delay,
+                                int *delay_idx, int *past_idx) {
+    int curr_p = ((partition_idx - 1) % n_part + n_part) % n_part;
+    if (delay > n_part - 2) delay = n_part - 2;
+    if (delay < 0) delay = 0;
+    *delay_idx = ((curr_p - delay) % n_part + n_part) % n_part;
+    *past_idx = ((curr_p - delay - 1) % n_part + n_part) % n_part;
+}
+
 /* ── stage 3: avg-render-reverb x2_reverb_for_erle ─────────────────────── */
 void aec3_post_compute_x2_reverb(Aec3Post *p, int x2_present,
                                  const float *x2_at_delay, const float *x2_past,
@@ -587,13 +596,11 @@ int aec3_post_run(Aec3Post *p,
             {
                 int x2_present = 0;
                 float decay_steady = 0.0f;
-                int curr_p = ((in->partition_idx - 1) % n_part + n_part) % n_part;
                 int delay = aec_state_min_direct_path_filter_delay(obj->state);
-                int delay_idx, past_idx;
-                if (delay < 0) delay = 0;
-                if (delay > n_part - 1) delay = n_part - 1;
-                delay_idx = ((curr_p - delay) % n_part + n_part) % n_part;
-                past_idx = ((curr_p - delay - 1) % n_part + n_part) % n_part;
+                int delay_idx = 0, past_idx = 0;
+                if (n_part > 0)
+                    aec3_post_avg_reverb_slots(n_part, in->partition_idx, delay,
+                                               &delay_idx, &past_idx);
                 if (in->X_buf != NULL && n_part > 0) {
                     /* x2 = (np.abs(X)**2).astype(f32) = cmag2_np per bin.
                      * When the filter hands over its |X_buf|² mirror, both

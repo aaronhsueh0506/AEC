@@ -585,8 +585,9 @@ classifier never modifies audio.
 * `python/run_one_case.py` — single-case dev tool with diagnostic
   5-panel PNG (waveforms + spectrograms + ERLE).
 * `c_impl/Makefile` release gates — `test-static-aec`,
-  `test-rate-structural`, and `test-process-context` cover C pool parity,
-  supported grids, and the external context seam.
+  `test-rate-structural`, `test-process-context` and `test-avg-reverb-slots`
+  cover C pool parity, supported grids, the external context seam and the
+  average-render-reverb ring slots.
 * `python/tests/test_p52_regime.py` — pytest for the regime classifier
   anti-loophole contract.
 
