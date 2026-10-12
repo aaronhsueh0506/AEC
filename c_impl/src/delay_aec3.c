@@ -895,7 +895,7 @@ static void da_matched_filter_update(DaMatchedFilter *mf, const DaRing *ring,
  *    unsafe THROUGH this branch, only through the two branches below it.
  *
  *  - A == c (the tracked candidate itself lost a count): after
- *    the decrement c's own value drops to M-1, so (c,M) can no longer be
+ *    the decrement c's own value drops to M-1, so (c,M) cannot be
  *    trusted -- there may be an UNTRACKED bin already tied at value M (it
  *    must be at some index > c, since c was defined as the first index
  *    reaching M, so nothing below c could already equal M). If the insert at

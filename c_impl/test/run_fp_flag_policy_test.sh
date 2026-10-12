@@ -4,26 +4,19 @@
 # conflict check in ../Makefile's "Conflict detection" block (search
 # "FP_INPUT_FLAGS" there).
 #
-# BACKGROUND: this repo's Makefile used to check ONLY $(CFLAGS), via three
-# separate $(findstring PATTERN,$(CFLAGS)) substring searches -- this was
-# both too narrow (CXXFLAGS/CPPFLAGS could carry
-# -Ofast/-ffast-math/-ffp-contract=<x> straight past it, e.g.
-# `env CXXFLAGS=-Ofast make ... lib`) and too broad ($(findstring) does a
-# plain substring search, so a harmless `-DROUND9_NOTE=-Ofastness` macro
-# define -- not the compiler flag -Ofast at all -- used to be rejected
-# anyway). That was fixed with an exact-TOKEN $(filter) check preceded by a
-# hand-picked 9-item DENY-list (single quote, double quote, backslash,
-# backtick, a literal "$(" sequence, semicolon, pipe, ampersand, and an
-# @-prefixed response-file token) rejecting known shell-quoting/escaping/
-# expansion/response-file bypass shapes.
+# CONTRACT: the Makefile checks CFLAGS, CXXFLAGS and CPPFLAGS together with an
+# exact-TOKEN $(filter): a bare -Ofast/-ffast-math/-ffp-contract=<x> token in
+# any of them is rejected (e.g. `env CXXFLAGS=-Ofast make ... lib`), while a
+# harmless `-DROUND9_NOTE=-Ofastness` macro define -- not the compiler flag
+# -Ofast at all -- is accepted. Before that check, every character outside an
+# allow-list is rejected, which covers the shell quoting, escaping,
+# expansion and response-file bypass shapes.
 #
-# ALLOW-LIST REDESIGN (replicated from audio_common's identical fix -- see
-# that repo's Makefile for the full writeup): a later audit found the
-# 9-item deny-list does NOT catch bare glob characters (*, ?, [, ]), tilde
-# (~), or -- most seriously -- real shell REDIRECTION (>, <) or process
-# substitution (<(...)). Replaced with a single character-class ALLOW-list
-# (see the Makefile's "REDESIGN"/"The allow-list itself" comments) covering
-# the input as a whole -- everything NOT in
+# ALLOW-LIST: a character deny-list cannot catch bare glob characters (*, ?,
+# [, ]), tilde (~), or -- most seriously -- real shell REDIRECTION (>, <) or
+# process substitution (<(...)). The Makefile applies a single
+# character-class ALLOW-list (see its "The allow-list itself" comment)
+# covering the input as a whole -- everything NOT in
 # [A-Za-z0-9_./=,+- ] (plus space) is rejected outright. The single-quote
 # check survives as a Make-native (non-shell) pre-check, kept for a
 # DIFFERENT reason (it gates the allow-list's own $(shell)-based
@@ -67,9 +60,8 @@
 #      UNQUOTED tokens that merely CONTAIN -Ofast/ffast-math as a substring
 #      of a larger identifier, not the compiler flag itself -> both must
 #      SUCCEED (the exact-token $(filter) check must not false-positive on
-#      either, exactly the class of false rejection the old
-#      $(findstring ...) check used to produce, AND every character in
-#      both tokens is in the allow-list's own allowed set)
+#      either -- a substring $(findstring ...) check would -- AND every
+#      character in both tokens is in the allow-list's own allowed set)
 #
 # Also re-confirms the OTHER two things a naive re-implementation could
 # regress: (i) an actual bare -Ofast/-ffast-math/-ffp-contract=<x> token,
@@ -109,33 +101,25 @@
 # be FP_ALLOWLIST_RC -- see the "link-flags character-safety coverage"
 # section below.)
 #
-# LINK-FLAGS (LDFLAGS/EXTRA_LDFLAGS) CHARACTER-SAFETY COVERAGE (regression
-# review, replicated from audio_common's identical fix -- see that repo's
-# Makefile/test suite (search "S25") for the full writeup this section
-# mirrors): the allow-list above originally validated FP_INPUT_FLAGS only
-# (CFLAGS/CXXFLAGS/CPPFLAGS) -- LDFLAGS (a plain `-lm` literal plus whatever
-# EXTRA_LDFLAGS folds in) was never inspected at all, even though it is
-# embedded in every real link recipe ($(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS))
-# exactly the same way CFLAGS is embedded in every compile recipe.
-# Confirmed empirically: `make print-obj-dir
-# EXTRA_LDFLAGS=';echo LINK_FLAG_INJECTION'` used to pass every check above
-# untouched -- no FP policy error at all -- while the exact same payload via
-# EXTRA_CFLAGS on the same target was correctly rejected. Fixed in the
-# Makefile by introducing SHELL_SAFE_INPUT_FLAGS (= FP_INPUT_FLAGS plus the
-# fully-assembled LDFLAGS) and routing the single-quote pre-check and the
-# allow-list itself through it instead of FP_INPUT_FLAGS directly
-# (FP_ALLOWLIST_RC -> SHELL_SAFE_ALLOWLIST_RC / FP_DISALLOWED_CHARS ->
-# SHELL_SAFE_DISALLOWED_CHARS, renamed to make the widened scope explicit).
-# The cases further below (after case 26) replicate this file's own
+# LINK-FLAGS (LDFLAGS/EXTRA_LDFLAGS) CHARACTER-SAFETY COVERAGE: the allow-list
+# covers LDFLAGS (a plain `-lm` literal plus whatever EXTRA_LDFLAGS folds in)
+# as well as CFLAGS/CXXFLAGS/CPPFLAGS, because LDFLAGS is embedded in every
+# real link recipe ($(LINK) $(CFLAGS) -o $@ $^ $(LDFLAGS)) exactly the same
+# way CFLAGS is embedded in every compile recipe:
+# `make print-obj-dir EXTRA_LDFLAGS=';echo LINK_FLAG_INJECTION'` must be
+# rejected like the same payload via EXTRA_CFLAGS. The Makefile routes the
+# single-quote pre-check and the allow-list through SHELL_SAFE_INPUT_FLAGS
+# (= FP_INPUT_FLAGS plus the fully-assembled LDFLAGS; SHELL_SAFE_ALLOWLIST_RC
+# and SHELL_SAFE_DISALLOWED_CHARS are its result variables).
+# The cases further below (after case 26) replay this file's own
 # EXTRA_CFLAGS matrix -- the literal reported injection payload, the
 # glob/tilde/redirect/process-substitution set (this file's cases 11-17),
 # and a positive control -- against EXTRA_LDFLAGS instead, and extend the
-# internal-variable override-rejection coverage to the two names this fix
-# introduces/renames (SHELL_SAFE_INPUT_FLAGS is new; SHELL_SAFE_ALLOWLIST_RC
-# is FP_ALLOWLIST_RC's rename), this time via an EXTRA_LDFLAGS payload
-# specifically (cases 19-26's own EXTRA_CFLAGS payload already covers the
-# CFLAGS-side vector; an override here must not be able to let an
-# EXTRA_LDFLAGS injection payload back through either).
+# internal-variable override-rejection coverage to SHELL_SAFE_INPUT_FLAGS
+# and SHELL_SAFE_ALLOWLIST_RC, this time via an EXTRA_LDFLAGS payload
+# (cases 19-26's own EXTRA_CFLAGS payload covers the CFLAGS-side vector; an
+# override here must not be able to let an EXTRA_LDFLAGS injection payload
+# back through either).
 #
 # Usage: ./test/run_fp_flag_policy_test.sh
 #   (from anywhere; cd's to this repo root itself via the script's own

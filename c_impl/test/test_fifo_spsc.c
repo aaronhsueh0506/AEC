@@ -280,7 +280,7 @@ static void* consumer_main(void* arg) {
                 ca->monotonic_ok = 0;
 
             /* Assertion 4: accumulate the call_seq-domain gap (missing
-             * call_seq values strictly between this hop and the previously
+             * call_seq values strictly between this hop and the last
              * consumed one; the very first consumed hop's "gap" is
              * everything from 0 up to call_seq-1). */
             if (ca->have_consumed)

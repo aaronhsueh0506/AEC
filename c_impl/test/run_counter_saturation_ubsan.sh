@@ -1,8 +1,7 @@
 #!/bin/sh
 # run_counter_saturation_ubsan.sh - UBSan probe for
-# test/test_counter_saturation.c -- the permanent, checked-in
-# counter-saturation regression test (replacing what used to be an ad hoc
-# UBSan probe run by hand).
+# test/test_counter_saturation.c -- the checked-in counter-saturation
+# regression test.
 #
 # Standalone script rather than a new UBSan-flavoured Makefile target --
 # same shape/rationale as test/run_selftest_ubsan.sh (kept consistent with
@@ -11,10 +10,10 @@
 #
 # Unlike simd_selftest_aec (header-only, no audio_common archive link
 # needed), test_counter_saturation.c exercises the full Aec type (its
-# aec.c/pbfdkf.c-embedded fixes), so this script compiles EVERY src/*.c TU
+# aec.c/pbfdkf.c counter paths), so this script compiles EVERY src/*.c TU
 # (this repo's own code) under -fsanitize=undefined together with the test
 # file, and links against audio_common's ordinary (non-sanitized) archive --
-# none of this round's fixes touch audio_common's own code, and linking a
+# the code under test is this repo's own, and linking a
 # sanitizer-instrumented TU against plain object code is well-supported
 # (UBSan is a per-TU instrumentation, not an ABI change); it just means
 # audio_common's own internals aren't independently checked here (that is
@@ -26,23 +25,22 @@
 # ">>> PASS" (0 failed checks) -- either a UBSan trap or a reported check
 # failure is a real finding, not noise.
 #
-# ASan is intentionally NOT wired here: this development host's ASan runtime
-# is broken (see project memory) -- ASan stays a Linux-CI item. -fsanitize=
+# ASan is intentionally NOT wired here: its runtime is not usable on every
+# development host -- ASan stays a Linux-CI item. -fsanitize=
 # undefined only.
 #
 # Usage: ./test/run_counter_saturation_ubsan.sh [--use-standard-math]
 #   (from anywhere; cd's to this repo root itself via the script's own
 #   location, no assumption about caller cwd)
 #
-# Scratch isolation (review finding, P2): this script used to build straight
-# into this repo's own real bin/ AND drive audio_common's real (default)
-# obj/bin trees via its `make ... lib` / `make ... print-lib-path` calls --
-# racing any concurrent real build (a developer's own terminal, AEC's/NR's
-# own build pulling in audio_common, CI, or even a second concurrent
-# invocation of this same script with a different --use-standard-math
-# setting). Everything this run touches now lives under one mktemp -d
-# SCRATCH, removed by a single trap covering normal exit and both signals --
-# the same isolation discipline audio_common's own
+# Scratch isolation: everything this run touches lives under one mktemp -d
+# SCRATCH, so it cannot race a concurrent real build in this repo's own bin/
+# or in audio_common's default obj/bin trees (reached via the `make ... lib` /
+# `make ... print-lib-path` calls) -- a developer's own terminal, AEC's/NR's
+# own build pulling in audio_common, CI, or a second concurrent invocation of
+# this same script with a different --use-standard-math setting. The scratch
+# is removed by a single trap covering normal exit and both signals -- the
+# same isolation discipline audio_common's own
 # scripts/test_build_isolation.sh applies to its own scratch builds.
 # OBJ_ROOT/BIN_ROOT are audio_common's OWN placement knobs and are passed
 # with IDENTICAL values to both the `lib` build

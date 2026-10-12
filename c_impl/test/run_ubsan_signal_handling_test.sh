@@ -3,14 +3,14 @@
 # signal-handling fix in test/run_counter_saturation_ubsan.sh and
 # test/run_selftest_ubsan.sh (regression review).
 #
-# THE BUG THIS GUARDS AGAINST: both scripts used to register one combined
-# trap for normal exit AND both signals:
+# THE FAILURE THIS GUARDS AGAINST: one combined trap for normal exit AND
+# both signals:
 #     trap 'rm -rf "$SCRATCH"' EXIT INT TERM
 # The INT/TERM handler is just the cleanup command -- no explicit `exit`.
 # Bash defers running a pending trap until the shell's current foreground
 # child returns control to it, and then (absent an explicit exit) simply
-# resumes the script at the next statement. Confirmed via direct repro
-# (see session history): sending SIGTERM while the compiled test binary
+# resumes the script at the next statement. Reproduced directly:
+# sending SIGTERM while the compiled test binary
 # itself was running let the run continue to completion and print a false
 # ">>> PASS" / "UBSan probe: PASS", exit 0, as if nothing had interrupted
 # it -- exactly what a caller (timeout wrapper, supervisor doing graceful
@@ -133,12 +133,12 @@
 #      capable of killing (or being fooled by) an unrelated process
 #      anywhere on the system whose command line happens to contain that
 #      same text (another user's process, or a second concurrent run of
-#      this very test suite). Fixed two ways: (a) the decoy/real_bin
-#      pattern now carries a per-invocation-unique component (this script's
+#      this very test suite). Guarded two ways: (a) the decoy/real_bin
+#      pattern carries a per-invocation-unique component (this script's
 #      own $$ plus two RANDOM draws by default, or an explicit caller-
 #      supplied id -- see run_decoy_trial/start_decoy_instance), so even a
 #      fully independent concurrent run of this suite never shares a
-#      literal pattern; (b) cleanup itself no longer does ANY name-based
+#      literal pattern; (b) cleanup itself does NO name-based
 #      pgrep/pkill -- it captures target_pid's children via
 #      `pgrep -P "$target_pid"` while target_pid is still alive (an
 #      orphaned child reparents once its parent dies, so the same query
@@ -412,8 +412,8 @@ snapshot_one_entry() {
         fi
         echo "F $path $leaf"
     elif [ ! -e "$path" ]; then
-        # regression review: this path was recorded by find's own listing
-        # (stage 1) but no longer exists by the time this function runs
+        # This path was recorded by find's own listing
+        # (stage 1) but is gone by the time this function runs
         # (stage 2) -- e.g. a symlink removed out from under a concurrent
         # snapshot, or any other entry that vanished mid-walk. Silently
         # dropping it would produce a snapshot that is quietly SHORTER
@@ -421,13 +421,10 @@ snapshot_one_entry() {
         echo "FATAL: snapshot: '$path' was recorded by find but no longer exists (removed between listing and processing) -- refusing to silently drop it from the snapshot" >&2
         exit 1
     else
-        # regression review: reachable at all now only because
-        # snapshot_tree_root's find call no longer pre-filters by -type --
-        # a fifo/socket/device-node/anything-else entry used to be
-        # silently EXCLUDED from find's own output before this function
-        # ever ran on it (invisible, not FATAL); now it is listed and
-        # explicitly refused here, identifying which kind it is where
-        # that's cheap to determine.
+        # reached for every entry type because snapshot_tree_root's find
+        # call does not pre-filter by -type: a fifo/socket/device-node/
+        # anything-else entry is listed and explicitly refused here,
+        # identifying which kind it is where that's cheap to determine.
         kind="an entry of an unrecognized type"
         [ -p "$path" ] 2>/dev/null && kind="a FIFO"
         [ -S "$path" ] 2>/dev/null && kind="a Unix domain socket"
@@ -462,12 +459,12 @@ snapshot_one_entry() {
 #     listing.
 #   stage 2: read list_file (NOT a live pipe/process substitution of find
 #     directly) in a `while ... done < list_file` loop that calls
-#     snapshot_one_entry per entry -- classifying EVERY entry type now
-#     that find no longer pre-filters, FATALing on anything it doesn't
+#     snapshot_one_entry per entry -- classifying EVERY entry type (find does
+#     not pre-filter), FATALing on anything it doesn't
 #     explicitly recognize (see snapshot_one_entry) -- with the loop's own
 #     output redirected into out_file.
 # Reading from a plain file with `< list_file` keeps this while loop in
-# the CURRENT shell, same as the process-substitution form it replaces
+# the CURRENT shell, same as a process-substitution form would
 # (NOT `find ... | while ...`: a pipe's right-hand side runs in a SUBSHELL
 # in bash, so an `exit` inside snapshot_one_entry, called from the loop
 # body, would only terminate that subshell and this function would sail on
@@ -706,15 +703,13 @@ run_normal_trial() {
     fi
 }
 
-# --- decoy-process trial (guards wait_for_binary's descendant scoping,
-# regression review) ---------------------------------------------------------
-# old_unscoped_wait_for_binary is a VERBATIM copy of the ORIGINAL,
-# system-wide-matching wait_for_binary this test used to call (pre-fix).
-# It is never used by any real trial above -- it exists solely so
-# run_decoy_trial can empirically prove the OLD code really would have been
-# fooled by a same-pattern decoy process, the same "reproduce the old bug,
-# don't just assert the new behaviour" discipline this file already applies
-# to the trap bug (see header).
+# --- decoy-process trial (guards wait_for_binary's descendant scoping) -------
+# old_unscoped_wait_for_binary is a VERBATIM copy of the original,
+# system-wide-matching wait_for_binary. It is never used by any real trial
+# above -- it exists solely so run_decoy_trial can empirically prove that
+# unscoped matching really is fooled by a same-pattern decoy process, the
+# same "reproduce the failure, don't just assert the new behaviour"
+# discipline this file already applies to the trap failure (see header).
 old_unscoped_wait_for_binary() {
     local binpat="$1"
     local start=$SECONDS
@@ -1028,8 +1023,8 @@ EOF
     fi
 
     # cleanup: decoy + target's whole subtree (never leave these running) --
-    # PID-scoped (regression review P2 fix), see pid_scoped_cleanup's own
-    # comment for why this is no longer a system-wide pkill/pgrep-by-name.
+    # PID-scoped, see pid_scoped_cleanup's own
+    # comment for why this is not a system-wide pkill/pgrep-by-name.
     pid_scoped_cleanup "$label" "$decoy_pid" "$target_pid"
 }
 

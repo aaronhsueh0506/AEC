@@ -32,8 +32,8 @@ typedef struct {
 } InitialState;
 
 /* conservative_initial_phase: 0/1 ; initial_state_seconds: config float (default 2.5) ;
- * hop_size/sample_rate: live grid, used to compute initial_state_hops/
- * conservative_hops via aec3_ms_to_hops() rather than assuming
+ * hop_size/sample_rate: live grid, inputs to the initial_state_hops/
+ * conservative_hops computation via aec3_ms_to_hops() rather than assuming
  * hop=160/sr=16000 (HOPS_PER_SECOND=100). */
 void initial_state_init(InitialState *s, int conservative_initial_phase,
                         float initial_state_seconds,

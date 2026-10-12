@@ -12,7 +12,7 @@ RANLIB  ?= ranlib
 # unconditionally includes them so the payload string has the same stable
 # shape as audio_common's and NR's, and so a future use of any of them here
 # keys builds correctly instead of silently aliasing with a build that
-# didn't set it. NO_STDIO is no longer a placeholder:
+# didn't set it. NO_STDIO is a live switch:
 # NO_STDIO=1 adds -DAEC_NO_STDIO to CFLAGS below and excludes src/aec_debug.c
 # from the library sources, producing a stdio-free libaec.a -- see the
 # NO_STDIO block further down and the `audit-no-stdio` target.
@@ -176,7 +176,7 @@ EXAMPLE_DIR = example
 TEST_DIR    = test
 
 # Shared DSP layer (FFT backend + fast_math) lives in audio_common, vendored
-# out of this repo (same API this repo used to own: Complex, fft_create,
+# out of this repo (API: Complex, fft_create,
 # fft_get_mem_size/fft_init, fft_forward/inverse/power/apply_gain, ALIGN16).
 # AC_DIR resolves whether audio_common sits next to this repo (SE/audio_common)
 # or nested deeper (e.g. an Audio_ALG submodule checkout).
@@ -184,7 +184,7 @@ AC_DIR ?= $(firstword $(wildcard ../../audio_common ../../../../audio_common))
 
 # FFT backend selection. KISS/NE10 compute in float32 -> ~1e-5 vs numpy's fp64
 # np.fft (a documented tolerance; the non-FFT C logic stays bit-exact to Python).
-#   BACKEND=ne10 (default everywhere since 2026-08-18)
+#   BACKEND=ne10 (default)
 #                          -> ARM NEON NE10 R2C/C2R (the embedded deliverable)
 #   BACKEND=kiss           -> portable KISS FFT, deterministic (pass explicitly
 #                             for bit-reproducible reference builds / non-NEON hosts)
@@ -259,46 +259,26 @@ ifeq ($(NO_STDIO),1)
   CFLAGS += -DAEC_NO_STDIO
 endif
 
-# --- FP-contraction policy: unified across all four repos. This flag
-# USED TO be the third token in the base CFLAGS assignment
-# above (`-Wall -Wextra -O2 -ffp-contract=off -std=gnu99`) -- i.e. BEFORE
-# EXTRA_CFLAGS/BACKEND/WERROR/NO_STDIO were folded in, so a caller passing
-# EXTRA_CFLAGS=-ffp-contract=fast (or -Ofast/-ffast-math, which imply
-# contraction) would land LATER on the compile line and silently win,
-# re-enabling FMA reassociation despite this repo's documented
-# build-determinism policy (see README's build-flags section).
-# Moved here -- appended LAST, after every other CFLAGS append in this file
+# --- FP-contraction policy: unified across all four repos. FP_POLICY is
+# appended to CFLAGS LAST, after every other CFLAGS append in this file
 # (EXTRA_CFLAGS, the BACKEND-conditional -I$(AC_DIR)/include, WERROR,
-# NO_STDIO), and BEFORE CFG_SIG_PAYLOAD is computed below (so it
-# automatically participates in CFG_SIG, no separate payload entry needed)
-# -- so nothing can override it any more. See audio_common's Makefile for
-# the full cross-repo design writeup and scripts/audit_fp_contract.sh (in
-# audio_common) for the disassembly-level verification.
+# NO_STDIO), and BEFORE CFG_SIG_PAYLOAD is computed below. A caller's
+# EXTRA_CFLAGS=-ffp-contract=fast (or -Ofast/-ffast-math, which imply
+# contraction) therefore cannot land later on the compile line and win, and
+# the policy participates in CFG_SIG without a separate payload entry. See
+# README's build-flags section, audio_common's Makefile for the cross-repo
+# design and scripts/audit_fp_contract.sh (in audio_common) for the
+# disassembly-level verification.
 #
-# --- Bare-literal policy flag, defined early to close a `make -e`
-# environment-override gap --------------------------------------------------
+# --- Bare-literal policy flag, defined early ---------------------------------
 # FP_POLICY is a plain, dependency-free `:=` literal (no reference to CFLAGS
-# or anything else computed above) that used to be defined much further down
-# this file, immediately ahead of CFG_SIG_PAYLOAD -- for a reason that still
-# applies and is unaffected by this move (see the "FP-contraction policy"
-# comment above: FP_POLICY's CFLAGS append still needs to happen AFTER every
-# other CFLAGS append in this file, and BEFORE CFG_SIG_PAYLOAD is computed --
-# both still true with only the bare literal relocated here). FP_POLICY is
-# ALSO listed in the "Command-line override rejection" foreach directly
-# below, and that combination used to be a real gap under `make -e`,
-# empirically confirmed: `env FP_POLICY=-ffp-contract=fast make -e -n
-# BACKEND=kiss lib` used to sail straight through with no error (rc=0),
-# silently dropping -ffp-contract=off from the dry-run compile line (see the
-# foreach's own comment for the full mechanism -- $(origin FP_POLICY) only
-# flips from plain "environment" to "environment override" once a makefile
-# assignment to FP_POLICY has actually been PARSED, which never happened
-# before the foreach ran while the bare `:=` sat all the way down at its old
-# position, well after this foreach). Duplicating only the bare literal up
-# here -- ahead of the foreach in file order -- fixes it; the original site
-# further below still holds its OTHER job unchanged (`CFLAGS +=
-# $(FP_POLICY)`, appended LAST), so there is exactly one `:=` definition of
-# FP_POLICY in this file, just moved. Same fix audio_common already applied
-# to its own FP_POLICY/FFT_WRAPPER_ALIAS_CFLAGS two rounds ago.
+# or anything else computed above). It is defined ahead of the "Command-line
+# override rejection" foreach below, which also lists FP_POLICY:
+# $(origin FP_POLICY) only flips from plain "environment" to "environment
+# override" once a makefile assignment to FP_POLICY has been PARSED, so
+# `env FP_POLICY=-ffp-contract=fast make -e ...` is rejected only when the
+# assignment precedes the foreach. This is the only `:=` definition of
+# FP_POLICY; `CFLAGS += $(FP_POLICY)` further below is its other use.
 # Keep scalar/NEON operation ordering stable and let audio_common's guarded
 # AArch64 sqrtf calls lower to FSQRT without an errno-checking libm fallback.
 FP_POLICY := -ffp-contract=off -fno-math-errno
@@ -336,40 +316,28 @@ $(foreach v,CFLAGS CXXFLAGS CPPFLAGS LDFLAGS FP_POLICY FP_ALLOWED_CHARS_RE,\
 # BEFORE CFG_SIG is computed, so a rejected build never creates an obj/bin
 # directory.
 #
-# CORRECTED UNDERSTANDING (this used to check $(CFLAGS) alone, reasoning that
-# this repo has no C++ TUs of its own so CXXFLAGS/CPPFLAGS "didn't matter" --
-# but that reasoning missed the gap: CXXFLAGS/CPPFLAGS are
-# still two of the five names the "Command-line override rejection" foreach
-# above rejects a command-line/`-e` override of, and both already
-# participate in CFG_SIG_PAYLOAD below (see this file's own top comment) --
-# a PLAIN ENVIRONMENT CXXFLAGS or CPPFLAGS is deliberately allowed to fold in
-# normally via that same foreach's origin logic, never going through
-# EXTRA_CFLAGS at all, so `env CXXFLAGS=-Ofast make BACKEND=kiss lib` used to
-# sail straight through this block entirely: no check here ever inspected
-# $(CXXFLAGS), so the day either variable starts feeding a real compile
-# recipe (this file already carries the placeholder plumbing for that, see
-# the top-of-file comment), a live -Ofast/-ffast-math/-ffp-contract=<x>
-# could ride in completely unchecked. The check below inspects all three
-# variables together so no combination of CFLAGS/CXXFLAGS/CPPFLAGS --
+# CXXFLAGS and CPPFLAGS are checked as well as CFLAGS: both are two of the
+# five names the "Command-line override rejection" foreach above covers,
+# both participate in CFG_SIG_PAYLOAD below (see this file's own top
+# comment), and a plain environment CXXFLAGS or CPPFLAGS folds in normally
+# via that foreach's origin logic, never going through EXTRA_CFLAGS. A live
+# -Ofast/-ffast-math/-ffp-contract=<x> in either would otherwise ride in
+# unchecked once either variable feeds a real compile recipe (the
+# top-of-file comment describes that plumbing). The check below inspects all
+# three variables together, so no combination of CFLAGS/CXXFLAGS/CPPFLAGS --
 # command-line-folded, EXTRA_CFLAGS-folded, or a plain environment value --
-# can carry any of these three patterns past this gate, today or once either
-# variable is actually consumed. This position (after every CFLAGS/CXXFLAGS/
-# CPPFLAGS append earlier in this file and before FP_POLICY's own append
-# just below) is the same position already relied on to see CFLAGS's
-# fully-composed value, and is equally late enough for CXXFLAGS and
-# CPPFLAGS: neither is ever appended to anywhere else in this file (each is
-# a single bare `+=` at the top of this file -- see that line's own
-# comment), both fully resolved well before this point.
+# can carry any of these three patterns past this gate. This position (after
+# every CFLAGS/CXXFLAGS/CPPFLAGS append earlier in this file and before
+# FP_POLICY's own append just below) sees CFLAGS's fully-composed value, and
+# is equally late enough for CXXFLAGS and CPPFLAGS: neither is appended to
+# anywhere else in this file (each is a single bare `+=` at the top of this
+# file -- see that line's own comment).
 #
-# This guards against a substring-matching false positive from the start,
-# rather than retrofitting it later: $(findstring ...) does a plain
-# SUBSTRING search over the whole concatenated text, so it false-positives
-# on any token that
+# The check matches whole words: $(findstring ...) does a plain SUBSTRING
+# search over the whole concatenated text, so it would reject any token that
 # merely CONTAINS one of these patterns as part of a larger identifier --
 # e.g. a harmless `-DBUILD_NOTE=-Ofastness` macro definition is not the
-# compiler flag -Ofast at all, yet a naive $(findstring -Ofast,...) check
-# (as this block
-# used to be) would reject it anyway. $(filter PATTERN...,TEXT) instead
+# compiler flag -Ofast at all. $(filter PATTERN...,TEXT) instead
 # splits TEXT on whitespace into WORDS and matches each whole word against
 # PATTERN (a trailing %% is a single wildcard, used here for
 # -ffp-contract=<anything>), so it only ever matches a complete flag token,
@@ -434,41 +402,36 @@ SHELL_SAFE_INPUT_FLAGS := $(FP_INPUT_FLAGS) $(LDFLAGS)
 # -DBUILD_NOTE=-Ofastness or -DTEXT=ffast-math, contains none of the
 # characters checked for below and so is untouched by this block.)
 #
-# REDESIGN (replicated from audio_common's identical fix -- see that
-# repo's Makefile for the full writeup this comment summarizes): the
-# character-by-character DENY-list this block used to be (single quote,
-# double quote, backslash, backtick, a literal "$(" sequence, semicolon,
-# pipe, ampersand, and an @-prefixed response-file token) is structurally
-# unable to keep up -- a live audit found it does NOT catch bare glob
-# characters (*, ?, [, ]), tilde (~), or -- most seriously -- real shell
-# REDIRECTION (>, <) or process substitution (<(...)): none of these are
-# Make's own syntax, so Make cannot pre-resolve or reject them the way it
-# happens to catch ${VAR}-style expansions (GNU Make treats ${...}
-# identically to $(...) and resolves it itself before any check runs -- a
-# different, unrelated mechanism from the deny-list). If a recipe line
-# containing an unbanned '>' or '<' is ever actually executed by a real
-# shell (not a dry run), it silently redirects the compiler invocation's
-# own stdout/stdin to an arbitrary path -- a real, unconditional risk,
-# independent of any -Ofast/-ffast-math/-ffp-contract semantics. Separately,
-# the old "$(" entry was likely DEAD CODE for well-formed input all along:
+# An ALLOW-list is used rather than a character DENY-list. A deny-list
+# (single quote, double quote, backslash, backtick, a literal "$(" sequence,
+# semicolon, pipe, ampersand, an @-prefixed response-file token) cannot keep
+# up: it does not catch bare glob characters (*, ?, [, ]), tilde (~), or --
+# most seriously -- real shell REDIRECTION (>, <) or process substitution
+# (<(...)). None of these are Make's own syntax, so Make cannot pre-resolve
+# or reject them the way it handles ${VAR}-style expansions (GNU Make treats
+# ${...} identically to $(...) and resolves it itself before any check
+# runs). If a recipe line containing an unrejected '>' or '<' is executed by
+# a real shell (not a dry run), it redirects the compiler invocation's own
+# stdout/stdin to an arbitrary path -- a real, unconditional risk,
+# independent of any -Ofast/-ffast-math/-ffp-contract semantics. A literal
+# "$(" entry would be dead code for well-formed input:
 # `make ... 'CFLAGS=-O2 $(shell echo INJECTED)'` lets GNU Make's OWN parser
 # resolve the well-formed $(...) reference at command-line-parsing time --
 # "INJECTED" lands in CFLAGS as plain text, no literal "$(" substring ever
 # reaches the check -- while an UNBALANCED `$(unbalanced` (no closing paren)
 # makes Make itself abort with its own "unterminated variable reference.
-# Stop." before any makefile-level check runs at all. Either way the
-# findstring-based "$(" check never actually fires for the cases it was
-# meant to catch.
+# Stop." before any makefile-level check runs at all.
 #
-# Replaced here with a single ALLOW-list covering the input as a whole.
+# The block therefore applies a single ALLOW-list covering the input as a
+# whole.
 # GNU Make has no native regex/character-class function, so this
 # necessarily shells out to `grep -E` -- a $(shell ...) call, the same
 # technique this file already uses for CFG_SIG's cksum computation below.
 # Embedding untrusted, Make-supplied text inside a constructed shell
 # command is exactly the kind of thing that can reintroduce the very
 # problem being fixed if done carelessly, so the embedding strategy is
-# deliberately narrow and was verified directly (not assumed) by
-# audio_common's own phase of this fix: SHELL_SAFE_INPUT_FLAGS (CFLAGS/
+# deliberately narrow and was verified directly (not assumed):
+# SHELL_SAFE_INPUT_FLAGS (CFLAGS/
 # CXXFLAGS/CPPFLAGS/LDFLAGS, fully-assembled -- see the "link-flags
 # character-safety coverage" comment above for why LDFLAGS is folded in
 # here too) is embedded SINGLE-QUOTED in the shell command text below
@@ -479,10 +442,10 @@ SHELL_SAFE_INPUT_FLAGS := $(FP_INPUT_FLAGS) $(LDFLAGS)
 # break this embedding is a literal single quote in SHELL_SAFE_INPUT_FLAGS
 # itself (which would close the quoted string early and hand whatever
 # follows to the shell as live syntax) -- which is why the single-quote
-# check below is the ONE survivor from the old 9-item deny-list, kept for
-# this entirely different, structural reason (safe shell-embedding), not
-# merely because it's also a disallowed character (the allow-list below
-# would reject it either way). It MUST run first, and MUST stay a pure
+# check below is kept ahead of the allow-list, for this structural reason
+# (safe shell-embedding), not merely because it's also a disallowed
+# character (the allow-list below would reject it either way). It MUST run
+# first, and MUST stay a pure
 # $(findstring) check with zero shell involvement, so it can gate the
 # shell-embedding step that follows it.
 ifneq ($(findstring ',$(SHELL_SAFE_INPUT_FLAGS)),)
@@ -513,15 +476,14 @@ endif
 # Linux host, since POSIX bracket-expression ranges are locale-defined by
 # design and C locale pins them to the unambiguous ASCII ordering on both).
 #
-# Every one of the FORMER 9-item deny-list's targets (single quote, double
-# quote, backslash, backtick, a literal "$(", semicolon, pipe, ampersand,
-# @-response-file) is a character NOT in this allowed set, so all of them
-# are rejected by construction now -- confirmed by re-running every one of
-# that deny-list's own negative test cases in
-# test/run_fp_flag_policy_test.sh after removing the 8 that are now
-# redundant; only the single-quote check above survives, for the shell-
-# embedding reason given there, not because the allow-list fails to cover
-# it (a lone single quote is ALSO rejected by the allow-list on its own).
+# The usual targets of a character deny-list (single quote, double quote,
+# backslash, backtick, a literal "$(", semicolon, pipe, ampersand,
+# @-response-file) are characters NOT in this allowed set, so all of them
+# are rejected by construction; test/run_fp_flag_policy_test.sh carries the
+# negative cases. The single-quote check above stays separate for the
+# shell-embedding reason given there, not because the allow-list fails to
+# cover it (a lone single quote is ALSO rejected by the allow-list on its
+# own).
 #
 # FP_ALLOWED_CHARS_RE itself is NOT defined here -- it is a bare, early
 # `:=` literal (see the "Bare-literal policy flag" / "Command-line override
@@ -668,8 +630,8 @@ AC_PRODUCER_SIG := $(notdir $(patsubst %/,%,$(dir $(AC_LIB))))
 endif
 
 # Algorithm sources (auto-detected — drop a new file in src/ to add it).
-# fft_wrapper*.c no longer live here; they're part of the audio_common archive
-# linked above. Declared HERE, before CFG_SIG_PAYLOAD,
+# The FFT wrapper sources are part of the audio_common archive linked above,
+# not of src/. Declared HERE, before CFG_SIG_PAYLOAD,
 # because the payload folds in the sorted source list -- adding or removing a
 # source file must key to a fresh obj/bin directory (see the fresh-archive
 # recipe below for the other half of the stale-member fix).
@@ -689,11 +651,11 @@ endif
 # --- Hash-keyed object/binary directory + full-coverage CFG_SIG ------------
 # obj/<backend>-<sig>/ AND bin/<backend>-<sig>/ -- see
 # audio_common's Makefile for the full rationale (identical design, applied
-# here). BIN_DIR used to be flat (`bin`), so an ne10 build after a kiss
-# build -- or two same-backend builds differing only in EXTRA_CFLAGS/WERROR,
-# or a stale mtime from a differently-flagged prior build -- could silently
-# deliver the wrong `aec_wav`/`libaec.a` to whatever last happened to write
-# that flat path. Payload coverage (USER-MANDATED): CC CXX AR RANLIB CFLAGS
+# here). A flat bin/ would let an ne10 build after a kiss build -- or two
+# same-backend builds differing only in EXTRA_CFLAGS/WERROR, or a stale
+# mtime from a differently-flagged prior build -- silently deliver the wrong
+# `aec_wav`/`libaec.a`; the hash-keyed directories prevent that. Payload
+# coverage: CC CXX AR RANLIB CFLAGS
 # CXXFLAGS CPPFLAGS LDFLAGS EXTRA_CFLAGS EXTRA_LDFLAGS BACKEND WERROR
 # NO_STDIO DEBUG, PLUS (consumer-specific) AC_PRODUCER_SIG -- the resolved
 # producer's own config identity (empty when AC_LIB isn't resolved yet, e.g.
@@ -742,9 +704,8 @@ BENCH_SRCS = $(TEST_DIR)/bench_rtf.c
 BENCH_OBJS = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(BENCH_SRCS))
 BENCH_TARGET = $(BIN_DIR)/bench_rtf
 
-# Permanent counter-saturation regression test (replaces ad hoc/throwaway
-# UBSan probes used to verify counter-overflow fixes with a checked-in test
-# that runs going forward). Needs the
+# Counter-saturation regression test (counter-overflow behaviour; also run
+# under UBSan by test/run_counter_saturation_ubsan.sh). Needs the
 # full Aec type (aec.c/pbfdkf.c's FFT-backed sections), so -- unlike
 # SELFTEST_TARGET below -- this lives in the two-phase/AC_LIB-dependent part
 # of this Makefile, same as $(TARGET)/$(BENCH_TARGET).
@@ -826,25 +787,19 @@ TEST_PMR_SRCS   = $(TEST_DIR)/print_mem_size_ref.c
 TEST_PMR_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_PMR_SRCS))
 TEST_PMR_TARGET = $(BIN_DIR)/print_mem_size_ref
 
-# Permanent per-rate structural regression test (M5 multi-rate campaign;
-# formerly standalone-gcc-only and not wired into any Makefile target, so a
-# grid regression (e.g. the hop-authored top-level constant retiming this
-# test's check (d) covers) could pass 107/107 by hand once and then silently
-# break with no CI gate noticing). Needs the full Aec type, same as
-# TEST_CS_TARGET above -- reuses
-# the already-built $(OBJS) rather than test_rate_structural.c's own header
-# comment's standalone `$(find src -name '*.c')` recipe (that recipe predates
-# this Makefile wiring and remains valid for a from-scratch manual build).
+# Per-rate structural regression test: gates the supported grids, including
+# the hop-authored top-level constant retiming that its check (d) covers.
+# Needs the full Aec type, same as TEST_CS_TARGET above -- reuses the
+# already-built $(OBJS); test_rate_structural.c's own header comment gives a
+# standalone `$(find src -name '*.c')` recipe for a from-scratch manual
+# build.
 TEST_RS_SRCS   = $(TEST_DIR)/test_rate_structural.c
 TEST_RS_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_RS_SRCS))
 TEST_RS_TARGET = $(BIN_DIR)/test_rate_structural
 
-# Config-validation regression test. Wired 2026-08-06 for exactly the reason
-# the comment above describes: it had lived as a standalone-gcc recipe with no
-# target, so its checks only ever ran when someone remembered to compile it by
-# hand. Its newest section (test_direct_init_rejects_bad_rate) gates the
-# pbfdaf_init/pbfdkf_init/saturation_init sample_rate preconditions, which is
-# not a gate at all unless something runs it.
+# Config-validation regression test. Its section
+# test_direct_init_rejects_bad_rate gates the pbfdaf_init/pbfdkf_init/
+# saturation_init sample_rate preconditions.
 TEST_CV_SRCS   = $(TEST_DIR)/test_config_validation.c
 TEST_CV_OBJS   = $(patsubst $(TEST_DIR)/%.c,$(OBJ_DIR)/%.o,$(TEST_CV_SRCS))
 TEST_CV_TARGET = $(BIN_DIR)/test_config_validation
@@ -1445,12 +1400,10 @@ print-lib-path:
 #     triggered the refusal. (c) is checked, and FATALs, BEFORE (a)/(b) are
 #     even computed, and is UNCONDITIONAL for BOTH repos -- no escape hatch
 #     admits an identity-less checkout on either side, because neither the
-#     commit nor the untracked enumeration can be named for it (a prior
-#     version folded "unknown" into the same dirty-violation flag that
-#     ALLOW_DIRTY_PUBLISH=1 short-circuits, so a dirty-publish escape hatch
-#     could previously admit an identity-less checkout -- closed by making
-#     the identity check its own unconditional gate with no knob reaching
-#     it). The two escape hatches for (a)/(b) remain separate and
+#     commit nor the untracked enumeration can be named for it; the identity
+#     check is its own unconditional gate and no knob, in particular not
+#     ALLOW_DIRTY_PUBLISH=1, reaches it). The two escape hatches for (a)/(b)
+#     remain separate and
 #     orthogonal: ALLOW_DIRTY_PUBLISH=1 admits tracked changes and records
 #     dirty_diff_sha256 (sha256 of `git diff --binary HEAD`) for whichever
 #     repo(s) are dirty; ALLOW_UNTRACKED_PUBLISH=1 admits untracked files
@@ -1484,8 +1437,9 @@ DIST_LOCK         = $(DIST_ROOT)/.lock.$(BACKEND)
 
 .PHONY: publish
 # Dry-run guard: this recipe mentions $(MAKE), so GNU make executes it for
-# real under -n/-q/-t (all three share that rule) -- which used to mkdir
-# $(DIST_ROOT) persistently and take/release the real publish lock on every
+# real under -n/-q/-t (all three share that rule) -- which, unguarded, would
+# mkdir $(DIST_ROOT) persistently and take/release the real publish lock on
+# every
 # dry run. The word-scan below detects those flags in MAKEFLAGS and
 # branches:
 #   -t  prints a one-line note and exits 0 WITHOUT recursing (recursing
@@ -1731,9 +1685,9 @@ endif
 #          alone shows exactly these three; libaec.a alone shows none). The
 #          honest, achievable assertion on this backend is therefore that
 #          NONE of fprintf/vfprintf/printf/puts/fputs (the exact symbols
-#          aec_debug.c itself used to contribute -- confirmed by diffing
-#          this same nm against a NO_STDIO=0 link, where exactly those two
-#          symbols additionally appear) show up; the three KISS-FFT-owned
+#          aec_debug.c itself contributes to a NO_STDIO=0 link, where exactly
+#          those two symbols additionally appear) show up; the three
+#          KISS-FFT-owned
 #          symbols are reported, not gated.
 #   5. Run the linked executable; exit code must be 0 (aec_create +
 #      one hop of aec_process + aec_destroy all succeeded with no stdio

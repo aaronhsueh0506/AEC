@@ -13,7 +13,7 @@
  * Run:
  *   ./bin/test_static_aec mic.wav ref.wav [sample_rate]
  *
- * Optional 3rd argv selects the sample rate used to build AecConfig
+ * Optional 3rd argv selects the sample rate for building AecConfig
  * (default 16000). The WAV files themselves must already be at that rate
  * (this test does not resample).
  */

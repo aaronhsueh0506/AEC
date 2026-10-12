@@ -86,7 +86,7 @@
  *     wrong reason, so ALSO run the Python mirror, whose move-scene row is
  *     red under this mutation;
  *   - ignore delay_backward_quarantine_enabled (always on) -> row 1 fails
- *     (the defect no longer reproduces with the mechanism off);
+ *     (the defect does not reproduce with the mechanism off);
  *   - change the enable default to 1 -> row 1 fails for the same reason;
  *   - ignore delay_backward_quarantine_s (hardcode the window) -> row 3 fails;
  *   - move the quarantine onto Path A -> row 2's first-acquisition equality

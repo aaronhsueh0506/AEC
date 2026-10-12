@@ -771,7 +771,7 @@ static void update_simple_mu_ratio(Aec* a, const float* output,
  * directly. Going through aec_process() cannot substitute: simple_mu_ratio is
  * read EARLIER in the same hop to scale mu, so it feeds back into the very
  * error signal the two-point coefficient recovery has to hold constant, and the
- * two probes would no longer differ in one variable only.
+ * two probes would not differ in one variable only.
  *
  * Declared in test/aec_test_hooks.h, which is not installed. */
 void aec_testing_update_simple_mu_ratio(Aec* a, const float* output,
@@ -1525,7 +1525,7 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
             size_t da_sz = delay_aec3_get_mem_size(cfg->sample_rate, hop,
                                                    cfg->delay_num_filters);
             /* Unreachable for a validated config (aec_get_mem_size already
-             * queried the identical triple and refused to size the pool if
+             * queried the identical triple and declined to size the pool if
              * it came back 0), but this carve must never walk past a block
              * it could not size. Nothing has been constructed yet at this
              * point, so there is nothing to unwind. */
@@ -1990,7 +1990,7 @@ int aec_hop_size(const Aec* a) { return a->hop_size; }
 
 /* Saturating alignment-generation bump: every path that moves (or wipes)
  * the far alignment increments the AecLinearContext generation token;
- * saturation never wraps back to a previously observed value. */
+ * saturation never wraps back to an earlier observed value. */
 static void aec_bump_delay_generation(Aec* a) {
     if (a->delay_generation != 0xFFFFFFFFu) { a->delay_generation++; }
 }
