@@ -205,6 +205,21 @@ malloc path (`test_static_aec.c`).
   `epc_hangover`/`ne_recent_hold`/`filter_misadjustment_{stable,hangover}_
   frames`/`EPV_FAST_TC`/`EPV_SLOW_TC` cover approximately the same
   wall-clock duration at every grid. 107 checks total.
+- **Kernel gates** (NEON twins against their scalar twins; `sk_max_abs_f32` and
+  `sk_stationary_mask_u8` also against the loop each replaces): `make selftest` (the `sk_` kernels of `aec_simd_kernels.h`),
+  `make test-output-hash`, `make test-aec-res`, `make test-neon-twins` and
+  `make test-delay-kernels`. The last one is the only gate that sees the 48 kHz
+  anti-alias pair kernel of `delay_aec3.c`: one unit in the last place of the
+  filtered stream does not move the integer delay estimate, so no
+  `test-output-hash` digest changes. With `SIMD=0` the NEON twin does not exist
+  and `selftest`, `test-neon-twins` and `test-delay-kernels` compare scalar code
+  with itself. The scalar twins are then held by the checked-in digests of
+  `test-output-hash` only where an output depends on the kernel (the render
+  noise floor, the gain lower bound, the stationary mask); the hop peak magnitude
+  (`sk_max_abs_f32`) and the mask's fold limit are invisible to those digests, so
+  the written-out reference loops in `make selftest` are their gate.
+  "Bit-identical" for a kernel means the same bits except the payload bits of a
+  NaN result.
 
 The remaining per-module `test/historical/parity_*.c` ⟷ `python/diag/gen_*_golden.py`
 harnesses are kept as **historical** diagnostics — they compare against fp64

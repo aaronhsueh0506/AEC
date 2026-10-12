@@ -460,8 +460,8 @@ static void da_decimator_decimate(DaDecimator *dec, const float *in_block, float
  * halves the instruction count. Every lane executes exactly the scalar
  * expressions of da_decimator_decimate above -- the same products, the same
  * left-associative grouping, no fused multiply-add -- so outputs and filter
- * states are bit-identical. Off-shape cascades, or two cascades whose
- * coefficients differ, take two single calls. */
+ * states are bit-identical (except the payload bits of a NaN). Off-shape
+ * cascades, or two cascades whose coefficients differ, take two single calls. */
 #if defined(__ARM_NEON) && defined(__aarch64__) && \
     !defined(SIMD_KERNELS_FORCE_SCALAR)
 static int da_biquad_same_coefficients(const DaBiquad *a, const DaBiquad *b) {
@@ -552,12 +552,12 @@ static void da_decimator_decimate_pair(DaDecimator *da, const float *in_a, float
  * of float32 multiplies and adds per sample. Both are filtered together as the
  * two lanes of one vector, with the expressions of da_biquad_process1 and the
  * same left-associative grouping, no fused multiply-add, so outputs and
- * carried states are bit-identical to two da_resample48_channel() calls. The
- * kept-sample selection and the phase update are those of
- * da_resample48_channel(); both channels have one length, one cap and one
- * phase, so they produce the same count, which is returned. Cascades that are
- * not the 4-section shape, or whose coefficients differ, take two single
- * calls. */
+ * carried states are bit-identical to two da_resample48_channel() calls (except
+ * the payload bits of a NaN). The kept-sample selection and the phase update
+ * are those of da_resample48_channel(); both channels have one length, one cap
+ * and one phase, so they produce the same count, which is returned. Cascades
+ * that are not the 4-section shape, or whose coefficients differ, take two
+ * single calls. */
 #if defined(__ARM_NEON) && defined(__aarch64__) && \
     !defined(SIMD_KERNELS_FORCE_SCALAR)
 static int da_resample48_pair(DaBiquad *bq_a, const float *in_a, float *out_a,

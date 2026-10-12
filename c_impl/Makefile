@@ -1918,6 +1918,8 @@ help:
 	@echo "  test-output-hash  Hash the emitted hop and every AecResContext/AecLinearContext field over a"
 	@echo "                  seeded scene (3 grids x shadow x entry points) against test/golden/output_hash.txt"
 	@echo "  test-neon-twins  NEON-vs-scalar twins: rsa_argmax_first tie order, onset re-arm boundary"
+	@echo "  test-delay-kernels  NEON-vs-scalar sweeps of delay_aec3.c's kernels: argmax tie order, decimator and"
+	@echo "                  48 kHz anti-alias pair (the only gate that sees the pair kernel; scalar vs itself with SIMD=0)"
 	@echo "  test-aec-res    Standalone RES stage (aec_res.h): config, gain, comfort-noise and API contract"
 	@echo "  test-detectors-parity  Gate detectors.c against the Python reference (regenerates the golden)"
 	@echo "  test-detectors-parity-all  Run detector parity on legacy 8 kHz and all three product grids"

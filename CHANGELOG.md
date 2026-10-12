@@ -98,10 +98,13 @@ when verdict requires it.
 
 Five hot spots now run as NEON, each with a scalar twin of identical
 arithmetic (`-ffp-contract=off`, no estimate instructions, divides stay
-divides). Output is byte-identical: `make test-output-hash` (30 rows) is
-unchanged on `kiss` and `ne10` x `SIMD=0/1`, and a whole-output hash of 54
-further runs (3 grids x shadow on/off x entry points, 6000 hops each, three
-scene seeds) is identical on five build variants.
+divides). Output is byte-identical except the payload bits of a NaN result:
+`make test-output-hash` (30 rows) is unchanged on `kiss` and `ne10` x
+`SIMD=0/1`, and a whole-output hash of 54 further runs (3 grids x shadow on/off
+x entry points, 6000 hops each, three scene seeds) is identical on five build
+variants. Only `da_resample48_pair` can return a NaN with another payload than
+the scalar chain (about 16 % of the calls of a random-bit-pattern differential
+test); the four `sk_` kernels returned identical bits in every call of that test.
 
 - `da_resample48_pair` (`delay_aec3.c`): the capture and render 48 kHz
   anti-alias cascades, two dependent chains of float32 multiply-adds, run as the
@@ -138,7 +141,20 @@ The per-kernel figures above are each measured against the preceding commit.
   `PROFILE=1` prints the mean stage buckets.
 - `test_delay_kernels` checks the 48 kHz pair kernel against two single-channel
   calls across carried state, odd lengths, output-cap truncation and the
-  single-call fallbacks; `make selftest` covers the four new kernels.
+  single-call fallbacks; `make selftest` covers the four new kernels, and
+  `sk_max_abs_f32` and `sk_stationary_mask_u8` also against the loop each stands
+  for, written out in the test.
+- Kernel gates: `make selftest`, `make test-output-hash`, `make test-aec-res`,
+  `make test-neon-twins` and `make test-delay-kernels` form the gate list for
+  these kernels, and `test-delay-kernels` stays in it because it is the only gate
+  that sees the 48 kHz anti-alias pair kernel: one unit in the last place of the
+  filtered stream does not move the integer delay estimate, so no
+  `test-output-hash` digest changes, and `selftest` covers the `sk_` kernels of
+  `aec_simd_kernels.h`, not `delay_aec3.c`. With `SIMD=0` that test compares the
+  scalar chain with itself. The selftest's `sk_stationary_mask_u8` cases include
+  every bin set up to n = 65549: they are the only gate for the byte-accumulator
+  fold limit (255 steps of 16 bins) and, with `test-output-hash`, a gate for the
+  lane sum.
 
 ## [Unreleased] — 2026-10-06 — linear-half context level (`AEC_CONTEXT_LINEAR_ONLY`) and NEON hot spots, all bit-identical
 
