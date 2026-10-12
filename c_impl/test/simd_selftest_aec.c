@@ -3293,6 +3293,24 @@ static void bench_no_audible_echo_gain(void) {
         report_bench(name, (t1_ - t0_) / BENCH_REPS, (t3_ - t2_) / BENCH_REPS);   \
     } while (0)
 
+/* The loop sk_max_abs_f32 stands for, written out, so the scalar twin has a reference
+ * that does not share its code (with SIMD off the kernel is the scalar twin). */
+static float ref_max_abs_loop(const float *x, int n) {
+    float smax = 0.0f;
+    int i;
+    for (i = 0; i < n; ++i) {
+        float a = fabsf(x[i]);
+        if (a > smax) smax = a;
+    }
+    return smax;
+}
+
+static void check_max_abs_all(const char *kernel, const float *x, int n, int trial) {
+    float ref = ref_max_abs_loop(x, n);
+    check_scalar_bits_or_die(kernel, n, trial, sk_max_abs_f32_scalar(x, n), ref);
+    check_scalar_bits_or_die(kernel, n, trial, sk_max_abs_f32(x, n), ref);
+}
+
 static void test_max_abs(void) {
     float x[SK_TEST_MAX_N];
     float *arena = (float *)edge_aligned_alloc((size_t)EDGE_ARENA_LEN * sizeof(float));
@@ -3302,12 +3320,14 @@ static void test_max_abs(void) {
         for (t = 0; t < TRIALS; ++t) {
             fill_floats(x, n);
             check_scalar_bits_or_die("max_abs_f32", n, t, sk_max_abs_f32(x, n), sk_max_abs_f32_scalar(x, n));
+            check_max_abs_all("max_abs_f32_ref", x, n, t);
         }
     }
     for (ni = 0; ni < NAN_N_LIST_COUNT; ++ni) {
         int n = NAN_N_LIST[ni];
         fill_floats_nan_sprinkle(x, n);
         check_scalar_bits_or_die("max_abs_f32_nan", n, 0, sk_max_abs_f32(x, n), sk_max_abs_f32_scalar(x, n));
+        check_max_abs_all("max_abs_f32_nan_ref", x, n, 0);
     }
     for (ni = 0; ni < N_LIST_COUNT; ++ni) {
         int n = N_LIST[ni];
@@ -3316,11 +3336,12 @@ static void test_max_abs(void) {
             fill_floats(arena + o, n);
             check_scalar_bits_or_die("max_abs_f32_edge", n, o,
                                       sk_max_abs_f32(arena + o, n), sk_max_abs_f32_scalar(arena + o, n));
+            check_max_abs_all("max_abs_f32_edge_ref", arena + o, n, o);
             edge_check_canary_f("max_abs_f32_edge:x", arena, EDGE_ARENA_LEN, o, n);
         }
     }
     free(arena);
-    printf("PASS max_abs_f32 (finite, NaN sprinkle strict, offsets 1..15 canary-guarded)\n");
+    printf("PASS max_abs_f32 (finite, NaN sprinkle strict, offsets 1..15 canary-guarded, written-out reference loop)\n");
 }
 
 /* Counter and PSD generator for the noise-floor tracker: counters straddle the
@@ -3541,6 +3562,65 @@ static void test_stationary_mask(void) {
     printf("PASS stationary_mask_u8 (flags any byte, hangovers incl. INT32 extremes, NULL mask, offsets 1..15 canary-guarded)\n");
 }
 
+/* The loops sk_stationary_mask_u8 stands for, written out. */
+static int ref_stationary_loop(const unsigned char *flags, const int32_t *hang,
+                               unsigned char *mask, int n) {
+    int k, count = 0;
+    for (k = 0; k < n; ++k) {
+        if (mask) mask[k] = (unsigned char)(flags[k] && hang[k] == 0);
+        if (flags[k] && hang[k] == 0) count++;
+    }
+    return count;
+}
+
+/* The NEON form folds its byte accumulator after at most 255 steps of 16 bins and sums the
+ * 16 lanes into an int: n >= 4096 puts 256 steps in one pass and 16 * 255 per fold exceeds
+ * a byte. Random data seldom reaches either, so every bin set (flags 1 and 0xFF) and one
+ * mixed pattern are checked at lengths around the fold limit against the written-out loops. */
+static void test_stationary_mask_large(void) {
+    static const int N_BIG[] = {16, 255, 256, 257, 4079, 4080, 4081, 4095, 4096, 4097, 4111,
+                                4112, 8191, 8192, 8208, 65536, 65549};
+    const int n_big = (int)(sizeof(N_BIG) / sizeof(N_BIG[0]));
+    int max_n = 65549, ni, pass, k;
+    unsigned char *f = (unsigned char *)malloc((size_t)max_n);
+    unsigned char *m_ref = (unsigned char *)malloc((size_t)max_n);
+    unsigned char *m_s = (unsigned char *)malloc((size_t)max_n);
+    unsigned char *m_v = (unsigned char *)malloc((size_t)max_n);
+    int32_t *h = (int32_t *)malloc((size_t)max_n * sizeof(int32_t));
+    if (!f || !m_ref || !m_s || !m_v || !h) { fprintf(stderr, "alloc failed\n"); exit(1); }
+    for (ni = 0; ni < n_big; ++ni) {
+        int n = N_BIG[ni];
+        for (pass = 0; pass < 3; ++pass) {
+            int cr, cs, cv, cv0;
+            for (k = 0; k < n; ++k) {
+                if (pass == 2) {
+                    f[k] = (unsigned char)(lcg_next() & 0xFFu);
+                    h[k] = ((lcg_next() & 3u) != 0u) ? 0 : (int32_t)(lcg_next() | 1u);
+                } else {
+                    f[k] = (unsigned char)(pass == 0 ? 0x01 : 0xFF);
+                    h[k] = 0;
+                }
+            }
+            memset(m_ref, 0xAB, (size_t)n); memset(m_s, 0xAB, (size_t)n); memset(m_v, 0xAB, (size_t)n);
+            cr = ref_stationary_loop(f, h, m_ref, n);
+            cs = sk_stationary_mask_u8_scalar(f, h, m_s, n);
+            cv = sk_stationary_mask_u8(f, h, m_v, n);
+            cv0 = sk_stationary_mask_u8(f, h, NULL, n);
+            g_total_checks += n + 3;
+            if (pass < 2 && cr != n) { fprintf(stderr, "reference count %d != n=%d\n", cr, n); exit(1); }
+            if (cr != cs || cr != cv || cr != cv0 || memcmp(m_ref, m_s, (size_t)n) != 0 ||
+                memcmp(m_ref, m_v, (size_t)n) != 0) {
+                fprintf(stderr,
+                    "MISMATCH kernel=stationary_mask_u8_large n=%d pass=%d count ref/scalar/simd/simd-null %d/%d/%d/%d\n",
+                    n, pass, cr, cs, cv, cv0);
+                exit(1);
+            }
+        }
+    }
+    free(f); free(m_ref); free(m_s); free(m_v); free(h);
+    printf("PASS stationary_mask_u8_large (all bins set up to n=65549, byte-fold and lane-sum limits, written-out reference loop)\n");
+}
+
 static void bench_stationary_mask(void) {
     unsigned char f[BENCH_N], m[BENCH_N];
     int32_t h[BENCH_N];
@@ -3591,6 +3671,7 @@ int main(void) {
     test_noise_floor_track();
     test_raise_to();
     test_stationary_mask();
+    test_stationary_mask_large();
 
     printf("\n--- NaN corpus ---\n");
     test_cabs_np_nan();
