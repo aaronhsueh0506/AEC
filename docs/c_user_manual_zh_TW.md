@@ -1098,7 +1098,7 @@ mic, ref (hop 個 float)
 
 測試：單聲道鏈的行為由 `Audio_ALG` 的 `pipelines/mono_aec_nr_res` 測試涵蓋；本函式庫端的
 對應契約是 `make test-aec-res`、`make test-linear-context` 與 `make test-process-context`。
-元件頁見 [`docs/html/aec.html`](html/aec.html)。
+元件頁見 [`docs/html/aec.html`](html/aec.html)（細節頁 [`docs/html/aec_detail.html`](html/aec_detail.html)）。
 
 ---
 

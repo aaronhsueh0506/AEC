@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AEC C library 細節(quarantine、runtime 強度、耗時與 debug)</title>
+<style>
+body{font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;margin:0;padding:0 1rem 3rem;line-height:1.55;color:#1a1a1a;max-width:70rem;margin-left:auto;margin-right:auto}
+nav{padding:.6rem 0;border-bottom:2px solid #2a6;margin-bottom:1rem;font-size:.95rem}
+nav a{margin-right:1rem;color:#164;text-decoration:none;font-weight:600}
+nav a:hover{text-decoration:underline}
+h1{font-size:1.5rem;border-bottom:1px solid #ccc;padding-bottom:.3rem}
+h2{font-size:1.15rem;margin-top:1.6rem;border-left:4px solid #2a6;padding-left:.5rem}
+table{border-collapse:collapse;margin:.6rem 0;font-size:.88rem}
+th,td{border:1px solid #bbb;padding:.25rem .5rem;text-align:left;vertical-align:top}
+th{background:#eef5f0}
+pre{background:#f4f6f5;border:1px solid #dde;padding:.6rem;overflow-x:auto;font-size:.8rem;line-height:1.35}
+code{font-family:ui-monospace,Menlo,monospace;font-size:.86em;background:#f2f2f2;padding:0 .15em}
+pre code{background:none;padding:0}
+.note{background:#fff8e6;border:1px solid #e0c878;padding:.4rem .6rem;font-size:.88rem;margin:.5rem 0}
+.small{font-size:.82rem;color:#555}
+.tblwrap{overflow-x:auto}
+</style>
+</head>
+<body>
+<nav><a href="../../../Audio_ALG/docs/html/index.html">index</a><a href="aec.html">aec</a><a href="aec_detail.html"><b>aec 細節</b></a><a href="../../../NR/docs/html/nr.html">nr</a><a href="../../../audio_common/docs/html/audio_common.html">audio_common</a><a href="aec_c_api.html">AEC API</a><a href="aec_res.html">AEC RES 級</a><a href="../../../NR/docs/html/nr_c_api.html">NR API</a><a href="../../../audio_common/docs/html/audio_common_c_api.html">audio_common API</a><a href="../../../Audio_ALG/docs/html/integration_example.html">串接範例</a></nav>
+<h1>AEC C library 細節 — delay quarantine、記憶體拆解、執行期強度、耗時與 debug</h1>
+
+<h2>概要</h2>
+<p>本頁收 <a href="aec.html">aec</a> 的「API 用法」中會把單頁撐過 30 KB 的細節:backward-jump quarantine 與記憶體拆解、<code>aec_set_preset()</code> 的 ramp 語意與量測注意事項、逐階段耗時與 debug 狀態。呼叫順序、delay mode 表、process 進入點、seam 契約、block diagram、泳道圖、I/O 表、State 表、延遲與檔案清單仍留在原頁。</p>
+
+<h2>Delay backward-jump quarantine 與記憶體拆解</h2>
+<p class="small"><b>Backward-jump quarantine</b>(<code>cfg.delay_backward_quarantine_enabled</code>,<b>預設 0</b>=關閉,關閉時輸出逐位元不變;<code>_s</code> 預設 1.0 秒,於 <code>aec_carve()</code> 依 resolved hop 換算成 estimation cycle 數、下限 1):僅作用於 <code>MATCHED</code> 的 Path B(鎖定後的延遲變更)。只隔離「比現行延遲**更早**、且線性 filter 在目前對齊上仍明顯在消除回音」的候選——判別式是新公開的唯讀 <code>aec_linear_is_cancelling(const Aec*)</code>(windowed ERLE &gt; 2.5 dB **或** 近期 inst-ERLE 峰值 &gt; <code>delay_acquire_inst_erle_db</code>;兩個讀數未被填過時為 0 ⇒ fail-open),多實例的呼叫端(4 聲道 wrapper)用同一支函式問同一個問題。往後跳的候選與首次擷取完全不受影響;隔離**有上限**,窗到期即採用,消除能力崩掉則立即放行——所以它**只延後、不治癒** pre-echo 誤鎖。實測(16k/fft 512/hop 256,true 6400 誤鎖 4800):窗 0.5/1.0/2.0/4.0 s = 31/62/125/250 hops,誤鎖採用點由 hop 49 移到 80/111/174/299;multipath 新增路徑四種增益全部重鎖、最壞慢一個窗。</p>
+<p class="small">拆解成 estimator/ring 兩個具名子集用 <code>aec_get_mem_breakdown(&amp;cfg, &amp;out)</code>(<code>AecMemBreakdown{total_bytes, estimator_bytes, ring_bytes}</code>;<code>total_bytes</code> 就是 <code>aec_get_mem_size()</code> 本身,不是另一套算式)。四格點 × n=1..5 與 <code>FIXED</code> 多個 delay 值的完整實測表見 <code>lib/aec/docs/c_user_manual_zh_TW.md</code> §4/§6.7。</p>
+<h2>執行期改強度(aec_set_preset)的細節</h2>
+<p class="small"><code>ramp_ms == 0</code> 下一個 hop 套用(<b>不是錯誤</b>),落點與「用該 preset 從頭建一個新實例」持有的 float 完全相同;<code>&gt; 0</code> 以 dB 線性走過去、每 hop 一步、<b>精確落在</b>目標(非漸近),上限 60 s。mild ↔ aggressive 是 18 dB 落差且地板是硬 clamp、下游無平滑,所以 ramp 有其必要。ramp 途中再呼叫會從<b>當前 live 值</b>重新起走;<code>aec_reset()</code> 保留目標、丟棄 ramp 進度。回 0,或 −1(NULL / 超出 enum 的 preset / 超出範圍的 ramp_ms)且<b>什麼都不寫</b>——與 <code>aec_config_from_preset()</code> 遇到不認得的值退回 balanced 相反,setter <b>直接拒絕</b>。在兩個 hop 之間呼叫、與 process 序列化;<b>非 thread-safe</b>。</p>
+<p class="small">底層 primitive <code>suppression_gain_set_split_floor_far_active_db(SuppressionGain*, float db, float ramp_ms)</code>(<code>suppression_gain.h</code>)是 public 的,因為四麥克風產品共用的 post 級抑制器是一個沒有任何 <code>Aec</code> 擁有的 <code>SuppressionGain</code>。<code>db</code> 以<b>驗證器自己的</b>範圍 <code>[−300, 50]</code> 檢查(執行期不可能裝進 init 當初會拒絕的值);同樣不動平滑歷史/latch/DNE 計數器/<code>initial_state</code>。</p>
+<p class="small"><b>兩件量測前必須知道的事。</b>(1)以 <code>spatial_linear_context</code> 建的 lane 從不走到 <code>suppression_gain_get_gain()</code>,對它呼叫本函式<b>依建構方式即為無效操作</b>;四麥克風產品要改的是 pipeline 自己那一個共用的 post 級抑制器(<code>AecRes</code>),用 <code>audio_pipeline_4ch_set_aec_preset()</code>。(2)far-active 地板只在 <b>far-active 且非 double-talk</b> 的 hop 生效——DT 期間套的是 DT 地板(三個 preset <b>完全相同</b>),latch 觸發前套的是 far-silent 地板;同一個 gain 還決定 comfort noise 量(振幅 ∝ <code>sqrt(1 − G_res²)</code>,地板越深 CNG 越多)。所以整段錄音的平均移動幅度會<b>小於</b> dB 落差,只量 echo/degradation 的 A/B 會把 CNG 變化錯記到別的機制。請在 echo 對齊或 degradation 對齊的條件下比較,並實際試聽。Python 對應 <code>AEC.set_preset(preset, ramp_ms=0.0)</code>(不合法引數丟 <code>ValueError</code>)。</p>
+<h2>逐階段耗時與 debug</h2>
+<p><b>逐階段耗時</b>:<code>aec_get_last_timing()</code> 回最近一個 hop 的 <code>delay_us</code>/<code>frontend_us</code>/<code>linear_us</code>/<code>steering_us</code>/<code>res_us</code>(微秒;五者刻意不等於整通呼叫——<code>steering_us</code> 涵蓋主濾波器到 post 之間的 stationarity refresh/ERL 發布/DT analyzer/EPV/misadjustment,補上原本量不到的 ~13% 盲區)。<b>預設關閉</b>——<code>make PROFILE=1</code>(即 <code>-DAEC_STAGE_TIMING=1</code>)才會編進去,否則每個 hop 五欄全讀 0;每 hop 每實例七次 clock 讀取,release build 一次都不做。目標平台沒有 POSIX <code>CLOCK_MONOTONIC</code> 時用 <code>-DAEC_NOW_US=board_timer_us</code> 換掉時鐘(純識別字;替代時鐘必須單調)。詳見 <code>docs/c_user_manual_zh_TW.md</code> §6.6b。</p>
+<p><b>Debug</b>:<code>aec_debug_status()</code>(唯讀、零熱路徑成本)回 <code>delay_samples</code>(−1=未擷取)、<code>delay_confidence</code>(0/0.5/1.0)、<code>delay_updates</code>、<code>erle_windowed_db</code>、<code>usable_linear</code>、<code>filter_converged</code>、<code>near_power</code>/<code>out_power</code>(EMA α=0.95)、<code>duty_hops_total</code>/<code>duty_hops_run</code>(matched-filter duty-cycle 機制的**實測**——非估計——engagement census,自 create/init/reset 起累積;僅 <code>MATCHED</code> 累積,其他 mode 恆 0;純診斷,不影響輸出,byte-exact 證明見 CHANGELOG 產品化 A 線 step 4)。</p>
+
+<h2>相關檔案與測試路徑</h2>
+<ul>
+<li><code>lib/aec/c_impl/aec.h</code>、<code>lib/aec/c_impl/aec.c</code>、<code>lib/aec/c_impl/suppression_gain.h</code>;使用手冊 <code>lib/aec/docs/c_user_manual_zh_TW.md</code>;完整清單見 <a href="aec.html">aec</a>。</li>
+</ul>
+</body>
+</html>
