@@ -11,16 +11,16 @@
 #include "aec.h"        /* c_impl/include/aec.h — 標準整合只需要這一個 */
 ```
 
-一般整合只 include `aec.h`。另有一個 header 屬於**進階、範圍較窄的對外介面**，
-只有要在 AEC 之外自己跑一套 residual-echo suppression 的整合才需要
-（四麥克風 pipeline 的 post-beam RES 就是這種用法）：
+只要自己用 `aec_process()` 取得時域輸出，就只需要 `aec.h`。另有一個 header 屬於
+**對外公開、範圍較窄的介面**，在自己組合頻域後處理鏈時需要（單聲道與四麥克風
+pipeline 都是這種用法）：
 
 | Header | 何時需要 |
 |---|---|
-| `aec_res.h` | 對 beamformer 之後的融合頻譜算 RES 增益，並用 `aec_cng_fill()` 填舒適噪音（§8.6） |
+| `aec_res.h` | `aec_cng_fill()` 舒適噪音填補（單聲道、四麥克風 pipeline 都用）；以及對 beamformer 之後的融合頻譜算 RES 增益的 `AecRes`（§8.6、§8.7） |
 
-`suppression_gain.h` 與 `aec3_balanced_config.h` 同為內部 header。四麥克風 pipeline
-目前仍直接 include 這兩個；改接 `aec_res.h` 之後它們不再需要對外。
+`suppression_gain.h` 與 `aec3_balanced_config.h` 是內部 header。Audio_ALG 的各條 pipeline
+只 include `aec.h` 與 `aec_res.h`，不直接 include 這兩個。
 
 `c_impl/include/` 底下其餘 30 個 header（`aec3_post.h`、`pbfdkf.h`、`delay_aec3.h`、`suppression_gain.h` 等）
 全部是**內部實作**用的，會隨版本改變，請勿直接 include，也不要依賴其中任何型別或函式。
@@ -362,10 +362,8 @@ NE10 backend 在每一格都少 608 B（16 kHz/512 與 48 kHz/1024 少 1,376 B /
 > mode 之間的差值）。所以舊呼叫端不能沿用先前記下的常數，**必須重新查詢
 > `aec_get_mem_size()` 並重新 init**（見 CHANGELOG ABI 段）。
 >
-> 本節的絕對值於 2026-08-19 以 `make test-delay-num-filters`（KISS/NE10 各跑
-> 一次）重新量測。這一輪同時**校正**了文件內部原本就不一致的地方：§4／§5 的
-> 表格落後一代（16 B），§7 `--print-mem-size` 的範例輸出落後兩代（32 B）。
-> 兩處現在都等於同一次量測的結果。
+> 本節的絕對值由 `make test-delay-num-filters`（KISS/NE10 各跑一次）量得；
+> §4／§5 的表格與附錄 A `--print-mem-size` 的範例輸出都等於同一次量測的結果。
 
 每少一個 matched filter 固定省 **5,728 B**（每一格點都一樣）：coefficients
 2,048 B ＋ accumulated error 512 B ＋ render ring 1,536 B ＋ highest-peak
@@ -779,8 +777,9 @@ balanced**；這是 setter，有呼叫端可以回報，所以**直接拒絕**�
 （目標存在 config、進度存在 state，這是刻意分開的）。
 
 **底層 primitive**。真正做事的是抑制器自己的入口。四麥克風產品共用的那個 post 級
-抑制器是一個沒有任何 `Aec` 擁有的 `SuppressionGain`；以 `aec_res.h` 組合多 lane 時，
-對應的入口是 `aec_res_set_preset()`（§8.6），語意相同。底層函式為：
+抑制器是 pipeline 自己持有的一個 `AecRes`（沒有任何 `Aec` 擁有它）；對它的入口是
+`aec_res_set_preset()`（§8.6），語意與 `aec_set_preset()` 相同。`AecRes` 內部包的
+是 `SuppressionGain`，其底層函式為（內部 header，整合端不需要直接呼叫）：
 
 ```c
 #include "suppression_gain.h"   /* 內部 header；一般整合改用 aec_res_set_preset() */
@@ -798,8 +797,8 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain* sg,
 **四麥克風產品請勿對 lane 呼叫**。四條 lane 都以 `spatial_linear_context` 建立，
 根本不會走到 `suppression_gain_get_gain()`，所以對 lane 呼叫 `aec_set_preset()`
 **依建構方式即為無效操作**——塑形輸出的 gain 來自該產品自己那一個共用的 post 級
-抑制器。請改用四麥克風核心自己的 setter（`four_aec_nr_res_set_aec_preset()`），
-它針對的就是那個共用實例。
+抑制器。請改用四麥克風 pipeline 自己的 setter（`audio_pipeline_4ch_set_aec_preset()`），
+它針對的就是那個共用的 `AecRes`。
 
 **A/B 量測時該預期什麼**（先讀這段再下結論）：far-active 地板只在
 **far-active 且非 double-talk** 的 hop 上生效。double-talk 期間套用的是 DT 地板，
@@ -1029,6 +1028,77 @@ aec_cng_fill(&rng, spec, fused_comfort, g_res, g_nr, 0.31622777f, aec_res_n_bins
 測試：`make test-aec-res`（設定與 lane 相等且等於 checked-in digest、增益與 pipeline 做法逐位元相同、
 comfort-noise 迴圈逐位元相同、API 契約）、`make test-zero-heap`、`make audit-no-stdio`。
 完整頁面見 [`docs/html/aec_res.html`](html/aec_res.html)。
+
+### 8.7 線性對齊 context（`aec_get_linear_context`）
+
+給需要「與線性 filter 讀到的**同一段**對齊後參考訊號」的後級（頻域 NN 後濾波、
+多 lane 的 RES）使用的唯讀檢視：
+
+```c
+AecLinearContext lin;
+aec_get_linear_context(&aec, &lin);   /* 在該 hop 的處理呼叫之後、下一次處理呼叫之前讀 */
+```
+
+| 欄位 | 說明 |
+|---|---|
+| `hop_size` | `formed_linear_hop`、`aligned_far_hop` 的長度 |
+| `formed_linear_hop` | `enable_res` 或 `return_res_context` 為 1 時是 formed 線性殘差；否則是原始線性輸出 |
+| `aligned_far_hop` | 本 hop 線性 filter 實際讀的參考訊號，**指向實例內部緩衝區**，不是複本，下一次處理或 reset 呼叫後失效 |
+| `delay_samples`／`delay_confidence` | 目前套用的環形緩衝偏移（尚未取得對齊為 `-1`）與估計器的 0.0／0.5／1.0 信心 |
+| `delay_state` | `AEC_LINEAR_DELAY_UNLOCKED`（`aligned_far_hop` 是**未補償**的原始參考訊號）、`LOCKED`、`CHANGED`（偏移在**這個 hop** 內改變，應清掉依賴舊對齊的快取） |
+| `generation` | 每次環形偏移改變（首次取得、確認的位移、reset）加 1，飽和不回繞；用來判斷跨 hop 的快取是否失效，只比較 `delay_samples` 會漏掉兩次輪詢之間的 A→B→A |
+
+`delay_mode` 對這些欄位的語意：`MATCHED` 如上；`FIXED` 的 `delay_samples` 恆等於
+`fixed_delay_samples`、信心恆為 1.0、`generation` 只在 `aec_reset()` 變動，且前
+`ceil(fixed_delay_samples / hop)` 個 hop 因為環形緩衝尚未填滿而回 `UNLOCKED`；
+`EXTERNAL_ALIGNED` 的 `aligned_far_hop` 就是呼叫端自己的參考訊號，
+`delay_samples` 為 0、恆為 `LOCKED`，`generation` 只被 `aec_apply_external_realign()` 與 reset 推進。
+
+另一個唯讀查詢 `aec_linear_is_cancelling(a)` 回 `1` 代表線性 filter 此刻**有證據**正在
+消除回音（上一個 hop 的 windowed ERLE 超過 2.5 dB，或近期 inst-ERLE 峰值超過
+`delay_acquire_inst_erle_db`），回 `0` 只代表沒有證據，不代表 filter 壞掉。
+
+### 8.8 單聲道整鏈：AEC → NR → RES 增益融合 → 合成
+
+Audio_ALG 的單聲道 pipeline（`pipelines/mono_aec_nr_res`）就是用上面的公開介面接起來的。
+AEC 以 `enable_res = 0`、`return_res_context = 1` 建立（`spatial_linear_context` 維持 preset
+的 `0`，所以 `res_gain`、`r2`、`comfort_noise` 都有值），AEC 自己**不**把抑制套到時域，
+抑制增益留給 pipeline 與 NR 的增益合併後一次套用。每個 hop 的呼叫順序：
+
+```
+mic, ref (hop 個 float)
+  │
+  ▼  aec_process_context(a, mic, ref)          線性 filter + post 區塊；不寫 out
+  ▼  aec_get_res_context(a, &ctx)              error_spec / near_spec / far_spec /
+  │                                            r2 / comfort_noise / res_gain / 純量判定
+  ▼  aec_get_linear_context(a, &lin)           aligned_far_hop、delay_state
+  │      （以上指標都借自 AEC 的 per-hop 緩衝，下一次 AEC 處理呼叫前有效）
+  ▼  anr_process_gain(nr, ctx.error_spec,      NR 增益：r2 / 32768² 併入噪音底
+  │                     r2 / 32768², NULL)     ；anr_get_gain() 取得 g_nr
+  ▼  g_total[k] = min(g_nr[k], ctx.res_gain[k])
+  ▼  spec[k]    = ctx.error_spec[k] · g_total[k]
+  ▼  aec_cng_fill(&rng, spec, ctx.comfort_noise, ctx.res_gain, g_nr,
+  │               0.31622777f, n_freqs)        只填被 RES 切掉的 bin，量依 g_nr 縮放
+  ▼  ac_istft_push(istft, spec, out)           反 FFT + sqrt-Hann 合成 + OLA → hop 個 sample
+```
+
+要點：
+
+- **哪一個進入點**：下游不讀時域輸出時用 `aec_process_context()`，省一次 hop 長度的
+  memcpy；只做 AEC（不接 NR／RES）的組態才用 `aec_process()` 直接寫 `out`。
+- **增益取最小值，不是相乘**：`g_total = min(G_nr, G_res)`。`G_res`（取 min 之前的值）
+  同時決定舒適噪音的量，所以填補只反映 AEC 的抑制，NR 增益再以 `-10 dB`
+  （`0.31622777f`）為下限縮放填補量。
+- **`aec_cng_fill` 的亂數狀態 `rng` 由呼叫端持有**，pipeline 的種子是 `0x9e3779b9`；
+  `aec_reset()` 之外，pipeline 的 reset 還要同時清 NR 狀態、合成 OLA 與暫存增益，並把 `rng` 設回種子。
+- **`aec_set_preset()` 對這條鏈有效**：單聲道 pipeline 的 `G_res` 來自 `Aec` 自己的
+  post 區塊，所以強度旋鈕直接用 `aec_set_preset()`（§7.1）；四麥克風 pipeline 的
+  `G_res` 來自共用的 `AecRes`，才需要 `aec_res_set_preset()`（§8.6）。
+- 下游若另有噪音抑制或 CNG，不要在 `aec_cng_fill` 之外再疊一層（§6.2）。
+
+測試：單聲道鏈的行為由 `Audio_ALG` 的 `pipelines/mono_aec_nr_res` 測試涵蓋；本函式庫端的
+對應契約是 `make test-aec-res`、`make test-linear-context` 與 `make test-process-context`。
+元件頁見 [`docs/html/aec.html`](html/aec.html)。
 
 ---
 
