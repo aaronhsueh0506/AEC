@@ -86,15 +86,14 @@ class ReverbConfig:
       returns the static value (use_adaptive_echo_decay_ flag in
       reverb_decay_estimator.cc:92 = (default_len < 0)).
 
-    ``decay = 0.83`` is the AEC3 per-block (4 ms) multiplier. The
-    physical wall-clock T_60 at AEC3 = ``log(0.001)/log(0.83)*4ms``
-    ≈ 148 ms — typical echo-path (mic→speaker→mic) reverberation.
-    Per-hop conversion at our 10 ms hop is applied at call site in
-    ``ResidualEchoEstimator._reverb_decay()``:
-        d_per_hop = 0.83 ** (hop_size / 64)  ≈ 0.624 at hop=160
-    Using 0.83 verbatim per-hop would give T_60 ≈ 371 ms (2.5× too
-    long), inflating R²_reverb steady-state by 2.2× when scaling is
-    held stale during sustained NE without filter convergence.
+    ``decay = 0.83`` is the AEC3 per-block (4 ms) multiplier on reverb
+    POWER. Power falls by 0.001 (-30 dB) after ``log(0.001)/log(0.83)*4 ms``
+    = 148 ms; the -60 dB (power 1e-6) time is 296.6 ms.
+    Per-hop conversion is applied in ``ResidualEchoEstimator._reverb_decay()``:
+        d_per_hop = 0.83 ** (hop_seconds / 0.004)  = 0.628 at a 10 ms hop
+    Using 0.83 verbatim per hop would give a -60 dB time of 742 ms (2.5x too
+    long) and a steady-state factor D/(1-D) of 4.88 instead of 1.69.
+    The injection form of the per-hop update is described in ``_reverb_decay()``.
 
     ``mild_decay_scale = 1.0`` keeps mild_decay == decay (AEC3 strict —
     default_len == nearend_len). The legacy 0.5 Python value was a
@@ -567,30 +566,30 @@ class ResidualEchoEstimator:
         return float(g * g)
 
     def _reverb_decay(self, dominant_nearend: bool) -> float:
-        """``aec_state.ReverbDecay(mild=dominant_nearend)`` with wall-clock
-        rate alignment to AEC3.
+        """``aec_state.ReverbDecay(mild=dominant_nearend)`` at the hop rate.
 
-        When the adaptive estimator is bound + active, query it. Otherwise
-        fall back to the static config decay × mild_decay_scale.
+        Static config decay x ``mild_decay_scale``, or the adaptive estimator
+        output when bound and active. AEC3's value is a per-block (4 ms,
+        250 blocks/s) power multiplier, so it is raised to
+        ``hop_seconds / block_seconds`` (``aec3_scale.per_block_growth_to_per_hop``),
+        n = ``hop_size * 250 / sample_rate`` blocks per hop (2 at 16 kHz hop 128,
+        4 at hop 256, 2.67 at 48 kHz hop 512).
 
-        AEC3 spec uses ``decay`` as the per-block (4 ms / 64-sample)
-        multiplier in ``reverb_[k] = (reverb_[k] + injection) * decay``
-        applied per ``ReverbModel::UpdateReverb`` call. Our pipeline calls
-        the same update once per hop, so the AEC3 constant 0.83 applied
-        verbatim would decay at the wrong wall-clock rate — inflating
-        R²_reverb steady-state when the filter is unconverged and the
-        scaling input is held stale.
-
-        Wall-clock alignment via ``aec3_scale.per_block_growth_to_per_hop``
-        (``d_per_hop = d_aec3 ** (hop_seconds / block_seconds)``), which
-        accounts for BOTH hop_size and sample_rate. The previous formula
-        (``d ** (hop_size / 64)``) only accounted for hop_size and was
-        correct only by coincidence at sr=16000 (AEC3's own reference
-        rate) — at 48 kHz it used an exponent 3x too large (512/64=8
-        instead of the true 512*250/48000≈2.67), decaying the reverb tail
-        roughly 3x too fast in wall-clock time. The conversion is applied
-        to BOTH static-config decay and the adaptive estimator output,
-        since both feed the same per-hop ReverbModel.update call.
+        Injection form: AEC3 runs ``r = (r + P s) d`` once per block. This model
+        runs ``r = (r + P s) D`` once per hop, D = d^n, with the hop power P held
+        constant. n per-block updates would inject P s with weight
+        d(1-D)/(1-d); the per-hop update injects it with weight D. For a
+        constant P s the steady state is D/(1-D) here and d/(1-d) in AEC3
+        (4.88 for AEC3 with d = 0.83, 1.69 here with D = 0.628 at n = 2.5).
+        Scaling the injected power by d(1-D)/((1-d)D) (2.20 at n = 2, 5.41 at
+        n = 4) removes the difference. The scaling is not applied: it was
+        measured within 1 dB of the AEC3 residual-echo estimate and rejected
+        for its near-end cost.
+        The average-render reverb that feeds the ERLE estimators uses the same
+        per-hop form without compensation. On a synthetic echo test signal its
+        subband low-render decision differs from the per-block model (hop power
+        spread evenly over the blocks) for about 8 % (hop 128) to 11 %
+        (hop 256) of the far-active bins; the fullband gate does not change.
         """
         if not self._reverb_cfg.enabled:
             return 0.0

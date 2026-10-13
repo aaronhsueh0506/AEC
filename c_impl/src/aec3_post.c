@@ -627,8 +627,8 @@ int aec3_post_run(Aec3Post *p,
                     }
                     x2_present = 1;
                 }
-                /* decay_steady = ree._reverb_decay(dominant_nearend=False) —
-                 * powf(reverb_decay, hop/64) at our hop (NOT verbatim 0.83). */
+                /* decay_steady = ree._reverb_decay(False): AEC3 per-block power
+                 * multiplier 0.83^(hop_seconds/0.004), applied once per hop. */
                 decay_steady = ree_reverb_decay_value(obj->ree, 0);
                 aec3_post_compute_x2_reverb(p, x2_present, sc->x2_at_delay,
                                             sc->x2_past, decay_steady);
