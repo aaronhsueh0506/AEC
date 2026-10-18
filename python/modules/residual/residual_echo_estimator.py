@@ -152,6 +152,9 @@ class ResidualEchoEstimator:
         # See AecConfig.nl_r2_* for full spec.
         nl_r2_enabled: bool = False,
         nl_r2_alpha: float = 0.1,
+        # See AecConfig.nl_r2_cap_multiple for the full rationale. 0.0 =
+        # uncapped (pre-existing behaviour).
+        nl_r2_cap_multiple: float = 0.0,
     ) -> None:
         self._n_bins = int(n_bins)
         self._echo_model = echo_model
@@ -244,6 +247,13 @@ class ResidualEchoEstimator:
         self._nl_r2_enabled = bool(nl_r2_enabled)
         self._nl_r2_alpha = float(nl_r2_alpha)
         self._nl_norm_power = float(_aec3_scale.nl_r2_norm_power(self._hop_size))
+        # Tail cap on r2_nl -- see AecConfig.nl_r2_cap_multiple. The raw
+        # formula is unbounded (calibrated against a fixed -20dBFS
+        # reference, not the signal's own level) and reaches 1e16-1e18 on
+        # loud cold-start render; capping at a multiple of the direct term
+        # removes that tail without touching the (much smaller) range that
+        # actually drives the suppression-gain decision. 0.0 = uncapped.
+        self._nl_r2_cap_multiple = float(nl_r2_cap_multiple)
         # Per-bin residual noise gate — AEC3 27509.42 int16² scaled to our frame.
         self._noise_gate_power = float(
             _aec3_scale.per_bin_psd_threshold(27509.42, self._hop_size)
@@ -484,6 +494,13 @@ class ResidualEchoEstimator:
                 if self._nl_r2_enabled and self._nl_r2_alpha > 0.0:
                     r2_nl = (self._nl_r2_alpha
                              * x2 ** 2 / self._nl_norm_power).astype(np.float32)
+                    if self._nl_r2_cap_multiple > 0.0:
+                        # Cap only the tail, at a multiple of the
+                        # already-computed direct term (r2 here ==
+                        # x2*echo_path_gain, pre-nl). See __init__ note.
+                        np.minimum(
+                            r2_nl, r2 * self._nl_r2_cap_multiple, out=r2_nl
+                        )
                     r2 += r2_nl
                     r2_unbounded += r2_nl
             # AEC3 cc:294-300 — UpdateReverb(kNonLinear) + AddReverb.
