@@ -1162,17 +1162,20 @@ class AecConfig:
                                               axis, and the most near-end loss.
 
         ``min_gain_split_floor_enabled`` is the single gate for ALL THREE floor
-        variants in ``suppression_gain.py``'s ``_get_min_gain`` — far-active
-        (``min_gain_floor_far_active_db``), far-silent/pure-NE
-        (``min_gain_floor_far_silent_db``, the one that protects near-end
-        singletalk at zero echo cost), AND the DT-lifted floor
-        (``min_gain_floor_dt_db``). no_floor removes all three in one switch,
-        not just the far-active one mild/aggressive vary — including the
-        pure-NE floor, so unlike mild/balanced/aggressive (NE-neutral by
-        construction: see commit ec47063's 800-case NE deg 4.052/4.047/4.046),
-        no_floor is expected to cost near-end-only quality too, not just DT.
-        ``dt_aware_res_floor_enabled`` also becomes behaviorally inert under
-        no_floor (its only consumer is inside this same gate).
+        variants in ``suppression_gain.py``'s ``_get_min_gain`` — far-silent
+        (``min_gain_floor_far_silent_db``, applied when the per-recording
+        far-active latch never fires — NOT simply "pure NE": some NE-scenario
+        recordings have non-trivial far-end energy and DO latch, landing on
+        far-active/DT instead), far-active (``min_gain_floor_far_active_db``),
+        AND the DT-lifted floor (``min_gain_floor_dt_db``). no_floor removes
+        all three in one switch, not just the far-active one mild/aggressive
+        vary. Unlike mild/balanced/aggressive (NE-neutral by construction on
+        unlatched NE: see commit ec47063's 800-case NE deg 4.052/4.047/4.046),
+        no_floor is expected to cost near-end-only quality too — via
+        far_silent on unlatched recordings, or via far_active/DT (same as a
+        DT case) on latched ones. ``dt_aware_res_floor_enabled`` also becomes
+        behaviorally inert under no_floor (its only consumer is inside this
+        same gate).
 
         mild/aggressive/no_floor deliberately sit off the balanced ship-bar set
         (Pareto picks), not within it — the DT-deg vs echo trade is a proven
