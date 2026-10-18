@@ -1,15 +1,21 @@
 /* Historical parity_aec3_post_run.c — replay the binary golden from
  * python/diag/gen_aec3_post_run_golden.py through the FULL-orchestration C
  * driver (aec3_post_run) and check out[hop] within the float32 FFT tolerance
- * (the full recursive run accumulates KISS float32 drift — measured worst
- * ~1.6e-4) across the whole doubletalk case (~4186 hops). usable_linear is a
- * boolean ERLE gate and is asserted BIT-EXACT per hop.
+ * across the whole doubletalk case (~2616 hops at the 16 kHz 512/256 grid
+ * this generator drives). usable_linear is a boolean ERLE gate and is
+ * asserted BIT-EXACT per hop.
  *
  * This is the integration-core gate: aec3_post_run drives AecState +
  * ResidualEchoEstimator + SuppressionGain + StationarityEstimator +
  * LinearFilterSelect itself (gain / usable_linear / r2 are NOT injected), so a
  * mismatch in ANY sub-module call sequence shows up here. (Under the retired
  * pocketfft backend out[hop] was bit-exact too.)
+ *
+ * STATUS (2026-10-18): runs end-to-end at the 512/256 grid (~2616 hops).
+ * usable_linear is bit-exact for all hops; out[hop] diverges beyond OUT_TOL
+ * starting around hop 135, growing to a max abs diff of ~5.9e-2 by hop
+ * ~2134 (new finding, not yet re-measured against the residual echo
+ * estimator fix landing separately -- re-run after that lands).
  *
  * Build (standalone; the FFT wrapper now lives in the shared audio_common
  * archive, built once for BACKEND=kiss and linked in):
@@ -37,9 +43,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* out[hop] = full recursive post-filter output: KISS float32 FFT drift
- * accumulated over ~4186 hops, measured worst ~1.6e-4. 2e-2 matches the
- * project-wide e2e gate (parity_aec_e2e.c) and catches real O(0.1) regressions. */
+/* out[hop] = full recursive post-filter output, accumulating KISS float32
+ * FFT drift over the run. 2e-2 matches the project-wide e2e gate
+ * (parity_aec_e2e.c) and catches real O(0.1) regressions; see the
+ * STATUS note above. */
 #define OUT_TOL 2.0e-2
 
 static int rd(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
@@ -184,7 +191,17 @@ int main(int argc, char **argv) {
     acfg.erle_min = st_d[1];
     acfg.erle_max_l = st_d[2];
     acfg.erle_max_h = st_d[3];
-    acfg.filter_taps_size = cnt_i[3] > 0 ? cnt_i[3] : 960;
+    if (cnt_i[3] <= 0) {
+        /* Golden always captures a positive filter_taps_size for the real
+         * FilterAnalyzer-enabled case this harness replays; a stale
+         * hop-derived guess here (the old "960" == 6 * hop=160) would
+         * silently mis-size fa_h_highpass/fa_abs_scratch below instead of
+         * surfacing the gap. */
+        fprintf(stderr, "filter_taps_size missing from golden (cnt_i[3]=%d)\n",
+                cnt_i[3]);
+        return 2;
+    }
+    acfg.filter_taps_size = cnt_i[3];
     /* FilterAnalyzer's de-stacked fa_update() scratch is now
      * caller-owned; this harness only knows filter_taps_size, so size
      * fa_abs_scratch to it directly. */
@@ -315,13 +332,14 @@ int main(int argc, char **argv) {
 
     /* ── StationarityEstimator ───────────────────────────────────────────── */
     StationarityEstimator stat;
-    int win_hops = 5;   /* blocks_to_hops(13,160,16000); init() recomputes */
+    int win_hops = 3;   /* blocks_to_hops(13,256,16000); init() recomputes */
     float *stat_noise = malloc((size_t)n_bins * sizeof(float));
     int32_t *stat_hang = malloc((size_t)n_bins * sizeof(int32_t));
     unsigned char *stat_flags = malloc((size_t)n_bins);
     /* history needs window_hops × n_freqs; init() computes window_hops, but we
      * need to size the buffer beforehand. window_hops = blocks_to_hops(13,...) =
-     * 5 at 16k/160. Allocate generously (16 rows) to be safe. */
+     * 3 at 16k/hop=256 (this harness's grid; was 5 at the old, invalid
+     * hop=160). Allocate generously (16 rows) to be safe regardless of hop. */
     (void)win_hops;
     float *stat_hist = malloc((size_t)16 * (size_t)n_bins * sizeof(float));
     stationarity_estimator_init(&stat, n_bins, hop, 16000,

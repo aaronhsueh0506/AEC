@@ -13,7 +13,8 @@ error_spec / _last_shadow_output_time / _last_s_max_abs, _current_delay /
 _delay_active, _saturation_level, the pending EPV flags PRE-call, the
 filter_taps via get_time_domain_filter, the stationarity read-state) + the args
 (raw_output / near / far) + the returned ``out[hop]``. We capture the WHOLE case
-(~4186 hops). The construction config of every sub-module is captured live off
+(~2616 hops at the 512/256 grid this generator drives). The construction
+config of every sub-module is captured live off
 the orchestrator's instances (same extraction the per-module goldens use), so
 the C parity test rebuilds them faithfully.
 
@@ -36,10 +37,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 WAV = os.path.join(ROOT, 'wav', 'aec_challenge_blind')
 CASE = os.path.join(WAV, 'doubletalk', '0I0XMl3M0ECO0U1N0cJvpg_doubletalk')
 
-HOP = 160
 SR = 16000
 FL = 832
-MAX_HOPS = 4200   # whole DT case (~4186 hops)
+# 16 kHz has two valid product grids (frame=256/hop=128, frame=512/hop=256);
+# the module-level hardcoded HOP=160 this used to carry matched neither (it
+# was the legacy hop=160/sr=16000 grid -- see orchestrator.py's references to
+# it -- before config._GRID_TABLE dropped it). The loop below now reads the
+# resolved hop straight off the live AEC instance instead of a constant,
+# the same pattern gen_residual_echo_estimator_golden.py uses. frame_size=512
+# is passed explicitly below (matching that sibling generator's choice) so
+# the hop used here is 256, not the product default of 128.
+MAX_HOPS = 4200   # whole DT case (~2616 hops at hop=256; was ~4186 at hop=160)
 
 
 def _w_i32(f, *vals):
@@ -182,9 +190,11 @@ def capture_ree_config(ree):
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else '/tmp/aec3_post_run_golden.bin'
 
-    cfg = AecConfig.from_preset('balanced', sample_rate=SR, filter_length=FL)
+    cfg = AecConfig.from_preset('balanced', sample_rate=SR, frame_size=512,
+                                 filter_length=FL)
     np.random.seed(0)
     aec = AEC(cfg)
+    hop = aec.hop_size
     flt = aec.filter
     K = flt.n_freqs
     N = flt.n_partitions
@@ -345,8 +355,8 @@ def main():
     ResidualEchoEstimator.reset = patched_reset
     try:
         cnt = 0
-        for i in range(0, n - HOP, HOP):
-            aec.process(mic[i:i + HOP], ref[i:i + HOP])
+        for i in range(0, n - hop, hop):
+            aec.process(mic[i:i + hop], ref[i:i + hop])
             cnt += 1
             if cnt >= MAX_HOPS:
                 break
