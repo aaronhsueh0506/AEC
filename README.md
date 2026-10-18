@@ -7,12 +7,16 @@ multi-ERLE, shadow filter, and post-filter residual echo suppression.
 Python reference implementation + C implementation.
 
 **Release**: v4.0.0rc1 — Python `aec.py` `__version__ = "4.0.0rc1"`.
-**Not ship-ready.** The AEC3 Tier-2 audit, top-level timing retiming, and 16 kHz
-default-grid flip change production output; the 800-case bench has not been
-rerun — that bench is the outstanding release-grade evidence, and it is a
-16 kHz measurement. Native 48 kHz carries smoke and spot-check evidence, which
-is sufficient for dataset generation; 48 kHz never gets an AECMOS number, so
-its release verdict stays parity/structural.
+**Not ship-ready.** The AEC3 Tier-2 audit and top-level timing retiming still
+change production output and remain unreviewed. The 800-case bench (balanced,
+current 16 kHz default grid, `--cng`) was rerun 2026-10-19 under the official
+per-bucket AECMOS segmentation — see "ours, official segmentation" below —
+but **only for ours**: AEC3/Speex have not been rerun under that same method
+and grid, so the AEC3-relative ship bars this doc used to claim (FS_movement
+echo > 3.5, "beats AEC3 on every deg axis") are **not re-verified** and should
+not be read as still holding. Native 48 kHz carries smoke and spot-check
+evidence, which is sufficient for dataset generation; 48 kHz never gets an
+AECMOS number, so its release verdict stays parity/structural.
 See `[4.0.0]` "Known limitations" in [CHANGELOG.md](CHANGELOG.md); do not tag
 or publish until those close. The `4.x` major bump records the public-ABI and
 output-contract breaks
@@ -23,10 +27,11 @@ chain (AecState + ResidualEchoEstimator + SuppressionGain + CNG) with the
 v3.22 split min-gain floor (DT/NE near-end preservation). **3.23.0** fixes the
 no-pre-align (no-PA) online-delay path and ships a default-ON DT-deg recovery
 stack (`dt_aware_recovery_soft` + `dt_aware_res_floor`,
-`min_gain_floor_dt_db = −20`). Three Pareto presets — `mild` / `balanced` /
-`aggressive` — differ only in the far-active min-gain floor; **`balanced` is
-production** and meets all four historical ship bars. See `[3.23.0]` in the
-changelog for that release's evidence.
+`min_gain_floor_dt_db = −20`). Four Pareto presets — `mild` / `balanced` /
+`aggressive` / `no_floor` — share a two-field strength axis (aggressive also
+deepens the DT floor; see "Presets" below); **`balanced` is production** and
+historically met all four ship bars (re-verification pending, see above). See
+`[3.23.0]` in the changelog for that release's evidence.
 
 **Float32 campaign** (2026-07-15, on top of 3.23.0): all production C is now
 float32 end-to-end (delay chain, orchestrator scalars, post/state modules,
@@ -58,7 +63,12 @@ entries under [CHANGELOG.md](CHANGELOG.md) `[4.0.0]`.
 fl=832 (52 ms) / --cng`, local AECMOS ONNX, full AEC Challenge 2021 blind
 corpus (echo↑ deg↑). **No pre-alignment** — every engine self-aligns online
 (ours via its in-pipeline matched-filter `EchoPathDelayEstimator`; AEC3 via its
-internal `RenderDelayController`; Speex internally), exactly as in production:
+internal `RenderDelayController`; Speex internally), exactly as in production.
+**Legacy scoring** (whole-clip / first-20s window, pre-2026-09-26) **on the
+16 kHz 512/256 grid** (the pre-4.0.0rc1 default) — not comparable to the
+official-segmentation, 256/128-grid numbers in the next section; the jump
+between the two sections' "ours" DT_static deg (2.074 → 3.375) is the sum of
+a scoring-window change and a grid change, not a regression:
 
 | Bucket | n | **ours** echo / deg | AEC3 echo / deg | Speex echo / deg |
 |---|---|---|---|---|
@@ -68,19 +78,42 @@ internal `RenderDelayController`; Speex internally), exactly as in production:
 | DT_movement | 114 | 4.114 / 2.140 | 4.456 / 1.816 | 3.272 / 3.301 |
 | NE          | 200 | 4.998 / 4.021 | 4.999 / 3.410 | 4.998 / 4.128 |
 
-- **Echo cancellation: AEC3 > ours > Speex.** AEC3 cuts the most; Speex is a
-  weak canceller (FS ~2.8, DT ~3.3); ours sits in between (FS ~3.5, DT ~4.2).
-- **Near-end preservation (deg): Speex > ours > AEC3.** AEC3 pays for its echo
-  cancellation with the worst DT deg (1.82) and NE deg (3.41); ours holds the
-  middle and **beats AEC3 on every degradation axis** (DT deg 2.07/2.14 vs 1.82,
-  NE deg 4.02 vs 3.41) while **approaching AEC3 on echo** (FS_movement 3.519 vs
-  3.790, within 0.27). This is the ship target: *approach AEC3 on echo, beat it
-  on deg.* All four ship bars met; **FS_movement 3.519 > 3.5** is the primary gate.
+- (legacy scoring) **Echo cancellation: AEC3 > ours > Speex.** AEC3 cuts the
+  most; Speex is a weak canceller (FS ~2.8, DT ~3.3); ours sits in between
+  (FS ~3.5, DT ~4.2).
+- (legacy scoring) **Near-end preservation (deg): Speex > ours > AEC3.** AEC3
+  pays for its echo cancellation with the worst DT deg (1.82) and NE deg
+  (3.41); ours holds the middle and **beats AEC3 on every degradation axis**
+  (DT deg 2.07/2.14 vs 1.82, NE deg 4.02 vs 3.41) while **approaching AEC3 on
+  echo** (FS_movement 3.519 vs 3.790, within 0.27). This was the ship target
+  under this grid/method: *approach AEC3 on echo, beat it on deg.* All four
+  ship bars met **under legacy scoring on the 512/256 grid**; **not
+  re-verified** on the current 256/128 default grid or under official
+  segmentation (see below) — AEC3/Speex have not been rerun either way.
 - These numbers reflect the v3.23.0 matched-filter pre-echo fix (the delay
   estimator now holds the true echo-path delay online instead of collapsing
   toward 0) plus the default-ON DT-deg recovery stack (soft acquire-reset +
   DT-gated RES floor), which trades a little echo for DT-deg headroom above the
-  pre-align reference while keeping all four ship bars.
+  pre-align reference while keeping all four ship bars **under this legacy
+  measurement**.
+
+**ours, official per-bucket segmentation, 16 kHz 256/128 grid (current
+default)** — `balanced / fl=832 (52 ms) / --cng`, full AEC Challenge 2021
+blind corpus, no pre-alignment, 2026-10-19. This is the first 800-case run
+scored with the official AECMOS segmentation (`bench_aecmos.py`'s default
+since 2026-09-26); no prior baseline exists under this exact method+grid, so
+there is no Δ to report yet — this run **is** the new baseline. Saved at
+`../.research/2026-10-19/aec800/scores.json` (sibling to this repo, the
+campaign's research-data convention). AEC3/Speex comparison under the
+same method+grid has not been run:
+
+| Bucket | n | **ours** echo / deg |
+|---|---|---|
+| FS_static   | 169 | 3.804 / 4.986 |
+| FS_movement | 131 | 3.707 / 4.999 |
+| DT_static   | 186 | 3.984 / 3.375 |
+| DT_movement | 114 | 3.644 / 3.361 |
+| NE          | 200 | 4.998 / 3.986 |
 
 ### Presets — a strength axis, four operating points
 
