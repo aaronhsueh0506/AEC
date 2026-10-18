@@ -2,10 +2,11 @@
  * retarget: suppression_gain_set_split_floor_far_active_db() and its
  * aec_set_preset() wrapper.
  *
- * Why the seam exists: the three shipped presets differ in exactly one field,
- * min_gain_floor_far_active_db (aec_config_from_preset), and that field
- * reaches the suppressor as a single scalar clamp read once per hop. So a
- * preset change never actually needed a rebuild -- but the only way to get one
+ * Why the seam exists: mild/balanced differ in exactly one field,
+ * min_gain_floor_far_active_db; aggressive also differs in a second,
+ * min_gain_floor_dt_db (aec_config_from_preset). Both reach the suppressor
+ * as a single scalar clamp each, read once per hop. So a preset change
+ * never actually needed a rebuild -- but the only way to get one
  * was to construct a new Aec, discarding the filter, the delay lock and every
  * smoothing history. The floor is a hard clamp with nothing downstream to
  * smooth it and mild<->aggressive is an 18 dB step, so the retarget also has
@@ -264,6 +265,9 @@ static void run_reset_and_isolation(void) {
               a.a3_sg.split_floor_far_active_live ==
                   floor_of(PRESET_DB_AGGRESSIVE),
           "reset: lands on the latest TARGET and drops ramp progress");
+    CHECK(a.a3_sg.cfg.split_floor_dt == floor_of(-30.0f),
+          "reset: the dt floor (no ramp, already landed) survives reset "
+          "at aggressive's target too, not just far-active");
     aec_destroy(&a);
 }
 
@@ -297,6 +301,30 @@ static void run_rejection_is_total(void) {
               == -1, "rejection: NULL suppressor");
     CHECK(aec_set_preset(NULL, AEC_PRESET_MILD, 0.0f) == -1,
           "rejection: NULL instance");
+
+    /* suppression_gain_set_split_floor_dt_db() has no ramp_ms, so only the
+     * db range needs this table -- same rejection discipline as the
+     * far-active setter above, checked independently since it is a
+     * separate function with its own validation. */
+    {
+        static const struct { float db; const char *what; } DT_BAD[] = {
+            { (float)NAN,      "db NaN" },
+            { (float)INFINITY, "db Inf" },
+            { -301.0f,         "db below the validator's range" },
+            {   51.0f,         "db above the validator's range" },
+        };
+        for (i = 0; i < sizeof(DT_BAD) / sizeof(DT_BAD[0]); ++i) {
+            SuppressionGain before = a.a3_sg;
+            char msg[128];
+            snprintf(msg, sizeof(msg), "dt rejected and untouched: %s",
+                     DT_BAD[i].what);
+            CHECK(suppression_gain_set_split_floor_dt_db(
+                      &a.a3_sg, DT_BAD[i].db) == -1 &&
+                      memcmp(&before, &a.a3_sg, sizeof(before)) == 0, msg);
+        }
+        CHECK(suppression_gain_set_split_floor_dt_db(NULL, -20.0f) == -1,
+              "rejection: NULL suppressor (dt setter)");
+    }
     CHECK(aec_set_preset(&a, (AecPreset)77, 0.0f) == -1 &&
               a.cfg.min_gain_floor_far_active_db == PRESET_DB_MILD,
           "rejection: out-of-enum preset REFUSED and cfg untouched (the config "

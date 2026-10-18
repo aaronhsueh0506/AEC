@@ -1,8 +1,9 @@
 """Runtime retarget of the residual-echo strength axis (``AEC.set_preset``).
 
-Why this test exists: the three shipped presets differ in exactly one field,
-``min_gain_floor_far_active_db`` (``AecConfig.from_preset``), and that field
-reaches the suppressor as a single scalar clamp read once per hop. So a preset
+Why this test exists: mild/balanced differ in exactly one field,
+``min_gain_floor_far_active_db``; aggressive also differs in a second,
+``min_gain_floor_dt_db`` (``AecConfig.from_preset``). Both reach the
+suppressor as a single scalar clamp each, read once per hop. So a preset
 change has never actually needed a rebuild — but until now the only way to get
 one was to construct a new AEC, which throws away the filter, the noise
 estimate and the whole smoothing history. An integrator exposing a strength

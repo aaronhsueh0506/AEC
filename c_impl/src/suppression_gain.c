@@ -108,6 +108,19 @@ void suppression_gain_set_initial_state(SuppressionGain *sg, int state) {
 #define SG_SPLIT_FLOOR_DB_MAX     (50.0f)
 #define SG_SPLIT_FLOOR_RAMP_MS_MAX (60000.0f)
 
+/* Shared by both split-floor setters below: range-checked dB -> power
+ * conversion. Returns 0 and writes *power_out on success, -1 (nothing
+ * written) on an out-of-range/non-finite db -- same expression aec_carve()
+ * and the Python float32 twin use, so ramp_ms == 0 lands on exactly the
+ * value a fresh instance holds. */
+static int sg_split_floor_db_to_power(float db, float *power_out) {
+    if (!isfinite(db) || db < SG_SPLIT_FLOOR_DB_MIN || db > SG_SPLIT_FLOOR_DB_MAX) {
+        return -1;
+    }
+    *power_out = powf(10.0f, db / 10.0f);
+    return 0;
+}
+
 /* One step of the dB-linear (power-geometric) walk toward the target. Idle
  * whenever live == target, which is every hop of an instance whose setter was
  * never called -- that is what keeps the default path byte-identical. */
@@ -133,21 +146,12 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
     int hops;
 
     if (!sg) return -1;
-    /* isfinite() first: the range comparisons below are false for NaN, which
-     * would read as "out of range" anyway, but saying so explicitly keeps the
-     * rejection reason legible. */
-    if (!isfinite(db) || db < SG_SPLIT_FLOOR_DB_MIN ||
-        db > SG_SPLIT_FLOOR_DB_MAX) {
-        return -1;
-    }
+    if (sg_split_floor_db_to_power(db, &target) != 0) return -1;
     if (!isfinite(ramp_ms) || ramp_ms < 0.0f ||
         ramp_ms > SG_SPLIT_FLOOR_RAMP_MS_MAX) {
         return -1;
     }
 
-    /* Same expression aec_carve() and the Python float32 twin use, so
-     * ramp_ms == 0 lands on exactly the value a fresh instance holds. */
-    target = powf(10.0f, db / 10.0f);
     live = sg->split_floor_far_active_live;
 
     hops = 0;
@@ -190,12 +194,10 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
  * immediately. See aec.h's aec_set_preset() comment for why this is a
  * deliberate asymmetry with the far-active setter above, not an oversight. */
 int suppression_gain_set_split_floor_dt_db(SuppressionGain *sg, float db) {
+    float target;
     if (!sg) return -1;
-    if (!isfinite(db) || db < SG_SPLIT_FLOOR_DB_MIN ||
-        db > SG_SPLIT_FLOOR_DB_MAX) {
-        return -1;
-    }
-    sg->cfg.split_floor_dt = powf(10.0f, db / 10.0f);
+    if (sg_split_floor_db_to_power(db, &target) != 0) return -1;
+    sg->cfg.split_floor_dt = target;
     return 0;
 }
 
@@ -413,9 +415,20 @@ static void get_min_gain(SuppressionGain *sg, const float *weighted_residual,
         float base_floor;
         if (sg->far_active_latched) {
             /* DT (near recently present) lifts the floor toward near-protection;
-             * FS (far-active, no near) keeps the aggressive far_active floor. */
+             * FS (far-active, no near) keeps the aggressive far_active floor.
+             * fmaxf(), not plain c->split_floor_dt: suppression_gain_set_
+             * split_floor_dt_db() steps instantly while suppression_gain_
+             * set_split_floor_far_active_db() ramps (see both setters'
+             * comments) -- mid-ramp into a preset whose dt target is DEEPER
+             * than the preset being ramped away from, dt would otherwise
+             * briefly be numerically deeper than the far-active floor
+             * currently in force, inverting "DT floor protects near-end"
+             * for that window. At any steady state (no ramp in flight, the
+             * only case every existing golden/test exercises) dt >=
+             * far_active already holds for all three presets, so this is a
+             * no-op there -- matches the Python mirror's max(). */
             base_floor = sg->dt_protect_active
-                             ? c->split_floor_dt
+                             ? fmaxf(c->split_floor_dt, sg->split_floor_far_active_live)
                              : sg->split_floor_far_active_live;
         } else {
             base_floor = c->split_floor_far_silent;

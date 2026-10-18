@@ -9,8 +9,9 @@ we capture the LIVE balanced instance's exact values once and emit them as C
 literals. aec_create() then bakes them straight into the sub-module init calls,
 mirroring c_impl/test/historical/parity_aec3_post_run.c.
 
-mild / aggressive differ from balanced ONLY in split_floor_far_active_db
-(mild -20 / balanced -28 / aggressive -38), applied at runtime in
+mild differs from balanced ONLY in split_floor_far_active_db (mild -20 /
+balanced -28); aggressive also differs in split_floor_dt (-38 / -30 vs
+balanced's -28 / -20). Both fields are applied at runtime in
 aec_config_from_preset — so only the balanced base is baked here.
 
 M2 (multi-rate campaign) extension: on top of the legacy 16 kHz block (kept

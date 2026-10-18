@@ -659,17 +659,20 @@ class SuppressionGain:
     SPLIT_FLOOR_DB_MAX = 50.0
     SPLIT_FLOOR_RAMP_MS_MAX = 60000.0
 
+    def _check_split_floor_db(self, db: float, name: str) -> None:
+        if not np.isfinite(db) or not (self.SPLIT_FLOOR_DB_MIN <= db
+                                       <= self.SPLIT_FLOOR_DB_MAX):
+            raise ValueError(
+                f"{name} must be finite and within "
+                f"[{self.SPLIT_FLOOR_DB_MIN}, {self.SPLIT_FLOOR_DB_MAX}]: {db}")
+
     def set_split_floor_far_active_db(self, db: float,
                                       ramp_ms: float = 0.0) -> None:
         db = float(db)
         ramp_ms = float(ramp_ms)
         # Validate everything before writing anything: the C twin must be able
         # to report failure with the instance provably untouched.
-        if not np.isfinite(db) or not (self.SPLIT_FLOOR_DB_MIN <= db
-                                       <= self.SPLIT_FLOOR_DB_MAX):
-            raise ValueError(
-                "split_floor_far_active_db must be finite and within "
-                f"[{self.SPLIT_FLOOR_DB_MIN}, {self.SPLIT_FLOOR_DB_MAX}]: {db}")
+        self._check_split_floor_db(db, "split_floor_far_active_db")
         if not np.isfinite(ramp_ms) or not (0.0 <= ramp_ms
                                             <= self.SPLIT_FLOOR_RAMP_MS_MAX):
             raise ValueError(
@@ -727,11 +730,7 @@ class SuppressionGain:
     # behavior; see aec_set_preset's mirrored comment in aec.c.
     def set_split_floor_dt_db(self, db: float) -> None:
         db = float(db)
-        if not np.isfinite(db) or not (self.SPLIT_FLOOR_DB_MIN <= db
-                                       <= self.SPLIT_FLOOR_DB_MAX):
-            raise ValueError(
-                "split_floor_dt_db must be finite and within "
-                f"[{self.SPLIT_FLOOR_DB_MIN}, {self.SPLIT_FLOOR_DB_MAX}]: {db}")
+        self._check_split_floor_db(db, "split_floor_dt_db")
         self._split_floor_dt = _db_to_power_f32(db)
 
     def set_initial_state(self, state: bool) -> None:
@@ -1068,7 +1067,25 @@ class SuppressionGain:
                 # DT (near recently present) lifts the floor toward near-protection;
                 # FS (far-active, no near) keeps the aggressive far_active floor.
                 if self._dt_protect_active:
-                    base_floor = self._split_floor_dt
+                    # max(), not plain _split_floor_dt: set_split_floor_dt_db
+                    # steps instantly while set_split_floor_far_active_db ramps
+                    # (see both setters' docstrings) -- for a RAMPED retarget
+                    # into aggressive, dt lands on its new (deeper) target
+                    # immediately while far_active_live is still mid-walk from
+                    # a shallower preset, so for part of that walk dt would be
+                    # NUMERICALLY DEEPER than the far-active floor currently in
+                    # force, inverting the entire "DT floor protects near-end"
+                    # intent (a DT hop would be suppressed MORE than a
+                    # simultaneous FS hop at that instant). max() keeps the
+                    # floor pinned to whichever is currently shallower (safer)
+                    # -- at any steady state (no ramp in flight, the only case
+                    # every existing golden/test exercises) dt >= far_active
+                    # already holds for all three presets, so this is a no-op
+                    # there and only changes behavior during an actual
+                    # in-flight ramp into a preset whose dt target is deeper
+                    # than the preset being ramped away from.
+                    base_floor = max(self._split_floor_dt,
+                                     self._split_floor_far_active_live)
                 elif ne_wb_floor is not None:
                     # Stage 3 variant i: per-bin blend toward the DT floor by
                     # how near-dominant THIS bin is, instead of the scalar

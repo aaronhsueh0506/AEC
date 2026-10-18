@@ -879,7 +879,13 @@ def main():
 
     from aec import AecPreset
     if args.all_presets:
-        for p in AecPreset:
+        # NO_FLOOR is deliberately excluded: it sits off the comparable
+        # Pareto axis (AecConfig.from_preset's docstring) the same way
+        # --preset's own choices= list already excludes it, so iterating
+        # the raw enum here would silently add a 4th, much-more-expensive,
+        # not-directly-comparable render to every existing --all-presets
+        # caller (e.g. a full 800-case sweep) without them asking for it.
+        for p in (AecPreset.MILD, AecPreset.BALANCED, AecPreset.AGGRESSIVE):
             preset_dir = os.path.join(out_dir, p.value)
             os.makedirs(preset_dir, exist_ok=True)
             print(f"\n{'#'*60}")

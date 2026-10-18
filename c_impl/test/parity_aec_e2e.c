@@ -104,6 +104,18 @@ int main(int argc, char **argv) {
     if (argc > 2) {
         if (!strcmp(argv[2], "mild")) preset = AEC_PRESET_MILD;
         else if (!strcmp(argv[2], "aggressive")) preset = AEC_PRESET_AGGRESSIVE;
+        else if (strcmp(argv[2], "balanced") != 0) {
+            /* Fail loud, not silently-balanced: the C AecPreset enum has no
+             * NO_FLOOR member (Python-only by design), so a golden generated
+             * with gen_aec_e2e_golden.py's `no_floor` would otherwise get
+             * silently replayed against a BALANCED instance here -- a
+             * confusing, guaranteed false "parity regression" rather than
+             * the clear "unsupported preset" this is. */
+            fprintf(stderr, "unknown or unsupported preset '%s' (mild/"
+                            "balanced/aggressive only -- no_floor has no C "
+                            "enum member)\n", argv[2]);
+            return 2;
+        }
     }
     AecConfig cfg;
     aec_config_from_preset(&cfg, preset, sr);

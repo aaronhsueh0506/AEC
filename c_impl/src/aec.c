@@ -176,12 +176,24 @@ void aec_config_defaults(AecConfig* cfg, int sr) {
     cfg->live_observer_corrob_margin_db = 0.0f;
 }
 
+/* The preset strength table, in ONE place: both floors per preset, so
+ * aec_preset_floor_db() and aec_preset_dt_floor_db() below can't drift
+ * relative to each other the way two independent switch statements would
+ * invite. Row order matches the AecPreset enum (aec.h). */
+static const struct { float far_active_db, dt_db; } AEC_PRESET_FLOORS[] = {
+    [AEC_PRESET_MILD]       = { -20.0f, -20.0f },
+    [AEC_PRESET_BALANCED]   = { -28.0f, -20.0f },
+    [AEC_PRESET_AGGRESSIVE] = { -38.0f, -30.0f },
+};
+
 int aec_preset_floor_db(AecPreset p, float* db_out) {
     if (db_out == NULL) return -1;
     switch (p) {
-        case AEC_PRESET_MILD:       *db_out = -20.0f; return 0;
-        case AEC_PRESET_BALANCED:   *db_out = -28.0f; return 0;
-        case AEC_PRESET_AGGRESSIVE: *db_out = -38.0f; return 0;
+        case AEC_PRESET_MILD:
+        case AEC_PRESET_BALANCED:
+        case AEC_PRESET_AGGRESSIVE:
+            *db_out = AEC_PRESET_FLOORS[p].far_active_db;
+            return 0;
         default: return -1;
     }
 }
@@ -191,9 +203,11 @@ int aec_preset_floor_db(AecPreset p, float* db_out) {
 int aec_preset_dt_floor_db(AecPreset p, float* db_out) {
     if (db_out == NULL) return -1;
     switch (p) {
-        case AEC_PRESET_MILD:       *db_out = -20.0f; return 0;
-        case AEC_PRESET_BALANCED:   *db_out = -20.0f; return 0;
-        case AEC_PRESET_AGGRESSIVE: *db_out = -30.0f; return 0;
+        case AEC_PRESET_MILD:
+        case AEC_PRESET_BALANCED:
+        case AEC_PRESET_AGGRESSIVE:
+            *db_out = AEC_PRESET_FLOORS[p].dt_db;
+            return 0;
         default: return -1;
     }
 }
