@@ -846,6 +846,10 @@ class AEC:
             getattr(self.config, 'live_observer_corrob_margin_db', 0.0))
         self._observer_obs_err_ema = 0.0
         self._observer_main_err_ema = 0.0
+        # Injection-only NE discriminator (config.py's live_observer_
+        # inject_dt_energy_max docstring has the full rationale).
+        self._observer_inject_dt_energy_max = float(
+            getattr(self.config, 'live_observer_inject_dt_energy_max', 0.5))
         # Construction-time default. The per-hop assignment below only runs
         # inside `if self._delay_active:` (process()'s ring-write block),
         # which has no `else:` clause -- for delay_mode EXTERNAL_ALIGNED
@@ -4437,6 +4441,12 @@ class AEC:
         if getattr(self.config, 'live_observer_enabled', False):
             _lo_trustworthy = _trustworthy
             _lo_mu_scale = 1.0 if _lo_trustworthy else 0.0
+            # Diagnostic-only (no effect on r2/control flow): exposes the
+            # lagged DNE verdict _lo_trustworthy folds in, so a trace can
+            # tell "gate passed because DNE missed this hop" apart from
+            # "gate passed because render/linear-estimate wasn't ready".
+            self._diag['lo_trustworthy'] = bool(_lo_trustworthy)
+            self._diag['lo_dne_lagged'] = bool(self._aec3_sg.is_dominant_nearend())
             if self._observer_far_end is not None:
                 # The observer adapts under the live (imperfect) gate above.
                 # Injection guard (AMEND_12/13/15, config.py's live_observer_
@@ -4474,7 +4484,31 @@ class AEC:
                 _corroborated = (self._observer_obs_err_ema
                                   <= self._observer_corrob_margin
                                   * self._observer_main_err_ema)
-                if _corroborated and _lo_trustworthy:
+                # Diagnostic-only: the raw EMA ratio and the corroboration
+                # verdict, for offline trace analysis of the injection gate.
+                self._diag['lo_err_ratio'] = (
+                    self._observer_obs_err_ema / self._observer_main_err_ema
+                    if self._observer_main_err_ema > 0.0 else float('inf'))
+                self._diag['lo_corroborated'] = bool(_corroborated)
+                # Injection-only NE discriminator (config.py's
+                # live_observer_inject_dt_energy_max docstring has the full
+                # rationale + trace numbers): the corroboration margin above
+                # cannot tell IrQvqOTCmEWMXn9k2ICtRQ_doubletalk_with_movement's
+                # false-positive injections (near-end active, EMA ratio
+                # happens to still read corroborated) apart from legitimate
+                # ones elsewhere -- their EMA-ratio distributions overlap.
+                # `self._dt_from_energy` (continuous, not the hysteresis-
+                # latched `_dt_protect_active`) does separate them cleanly.
+                # Scoped to injection only, not the observer's own learning/
+                # mu_scale above -- a learning mistake is cheap (see the
+                # tail-evidence comment above), so that gate is left on the
+                # existing lagged-DNE design.
+                _lo_ne_evidence = (float(self._dt_from_energy)
+                                    > self._observer_inject_dt_energy_max)
+                _lo_injected = bool(_corroborated and _lo_trustworthy
+                                     and not _lo_ne_evidence)
+                self._diag['lo_injected'] = _lo_injected
+                if _lo_injected:
                     _lo_diff = (np.abs(self._observer_filter.echo_spec
                                         - _sel_echo_spec) ** 2).astype(np.float32)
                     _lo_cap = (np.abs(_sel_esw) ** 2).astype(np.float32)

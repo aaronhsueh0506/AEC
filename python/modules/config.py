@@ -404,6 +404,60 @@ class AecConfig:
     # hop's evidence is zero. See DIAG_PLAN_AMEND_12.md.
     live_observer_corrob_ms: float = 100.0
     live_observer_corrob_margin_db: float = 0.0
+    # Injection-only near-end discriminator, added after the corroboration
+    # guard above was found insufficient on
+    # IrQvqOTCmEWMXn9k2ICtRQ_doubletalk_with_movement (AMEND_29/32's worst
+    # DT_movement_deg case, -0.117 MOS). A per-hop trace showed the
+    # corroboration margin itself (`live_observer_corrob_margin_db`) cannot
+    # separate this file's false-positive injections from legitimate ones
+    # elsewhere (xFk7.../fid0): the EMA error-ratio distributions overlap
+    # almost completely (IrQv false-positive median ~0.82 vs xFk7 legitimate
+    # median ~0.84; fid0 legitimate ratios are even lower/stricter at
+    # ~0.73/~0.21). A minimum-consecutive-corroboration streak was tried
+    # next and also failed: fid0's own legitimate injection is itself bursty
+    # (many 1-35-hop runs interleaved with a few 50-100-hop runs), so any
+    # streak long enough to zero out IrQv's longest false-positive run
+    # (38 hops) also zeroes fid0 grid A down to 1.1% of its baseline
+    # injected hops.
+    # What DOES separate them cleanly: `self._dt_from_energy`, the SAME
+    # continuous NE-evidence signal already used at the 0.3 threshold
+    # elsewhere in this codebase (epc.py's
+    # `PathChangeRegimeHandler.GATE_ENERGY`; orchestrator.py's own
+    # `_ne_evidence = dt_from_energy > 0.3` for refined_usable, ~line 3231)
+    # -- NOT the hysteresis-latched `_dt_protect_active` flag the tail-evidence
+    # learning gate above deliberately avoids (that latch is armed on
+    # ~100% of far-only hops on fid0's own W2 window; the raw continuous
+    # value is not). On IrQv's false-positive hops dt_from_energy's median
+    # is ~0.84-0.91 (near-end clearly active); on xFk7's and fid0's
+    # legitimate hops it is ~0.00-0.002 (near-silent).
+    # Threshold tuning: the 0.3 value reused elsewhere in this codebase
+    # (same constant) was tried FIRST and does separate the cases, but costs
+    # more of fid0's own ERLE benefit than the evidence justifies: at 0.3,
+    # fid0 grid B's full-file ERLE delta drops from +7.12 dB to +5.70 dB
+    # (−1.42 dB, ~20% of the feature's headline benefit) while grid A is
+    # untouched (+0.64 dB both ways). NOT traced per-hop whether the lost
+    # grid-B hops (dt_from_energy in (0.3, 0.5]) are genuine double-talk or
+    # proxy noise on far-only content -- avoid over-claiming here. At 0.5
+    # the SAME IrQv case is fixed to the same practical degree (AECMOS
+    # DT_movement_deg delta −0.117 -> +0.0008, i.e. the measured cost is
+    # gone) while fid0 grid B only drops
+    # to +6.91 dB (−0.22 dB, ~3%) and grid A is unaffected; xFk7 (the
+    # legitimate-detection control file) is BYTE-IDENTICAL at both 0.3 and
+    # 0.5 since its dt_from_energy is ~0 throughout. 0.5 is the shipped
+    # default on that trade-off, not 0.3 -- this is evidence-driven, not a
+    # re-use of the existing 0.3 constant for its own sake (feedback_
+    # registered_guards_and_claim_scope: don't recommend past what was
+    # measured; 0.3 was measured to overcorrect here).
+    # Deliberately scoped to INJECTION only (not the observer's own
+    # learning/mu_scale above): a learning mistake costs at most a missed
+    # suppression opportunity (see the tail-evidence comment a few hundred
+    # lines up), so the existing lagged-DNE gate on learning is left as-is;
+    # this is the narrower, injection-only lever the plan called for when a
+    # DNE-based check alone did not separate the cases (DNE itself reads
+    # False on 100% of IrQv's false-positive hops here, even with the
+    # existing one-hop-lag design matching the learning gate's own timing --
+    # the gap is DNE's sensitivity on this file, not the lag).
+    live_observer_inject_dt_energy_max: float = 0.5
     # ── linear-filter cold-start DEADLOCK breaker (PBFDKF Kalman gain) ──
     # mu = H_error/(0.5·H_error·X² + n·E²); H_error refreshed by
     # `H_error += leakage × Σ|W|²`. Σ|W|² is ~0 before the filter adapts, so on
@@ -980,7 +1034,7 @@ class AecConfig:
                       'tail_evidence_strength', 'tail_evidence_max_hz',
                       'tail_evidence_ema_tau_ms', 'tail_evidence_warmup_ms',
                       'live_observer_shift_ms', 'live_observer_max_hz',
-                      'live_observer_corrob_ms'):
+                      'live_observer_corrob_ms', 'live_observer_inject_dt_energy_max'):
             if getattr(self, _name) < 0:
                 raise ValueError(f"{_name} must be >= 0, got {getattr(self, _name)}")
         if not 0.0 < self.live_observer_mu <= 2.0:
