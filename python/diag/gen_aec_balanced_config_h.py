@@ -639,7 +639,12 @@ def emit_rate_table(w):
     w('    int cng_n2_update_onset_hops;\n')
     w('    int cng_n2_initial_duration_hops;\n')
     w('    int ree_noise_floor_hold_hops;\n')
-    w('    float ree_reverb_smoothing_base;\n')
+    # double, not float: ree_init()'s smoothing_base flows straight into a
+    # float64 EMA (ReverbFrequencyResponse.average_decay) that must match
+    # Python's plain-float _smoothing_base bit-for-bit; narrowing it to
+    # float32 here would re-round an already-correct double and bias every
+    # EMA step. See reverb_frequency_response.h.
+    w('    double ree_reverb_smoothing_base;\n')
     w('    float sg_max_inc;\n')
     w('    float sg_max_dec_lf;\n')
     w('    int sg_trigger_threshold_hops;\n')

@@ -411,7 +411,7 @@ typedef struct {
     int cng_n2_update_onset_hops;
     int cng_n2_initial_duration_hops;
     int ree_noise_floor_hold_hops;
-    float ree_reverb_smoothing_base;
+    double ree_reverb_smoothing_base;
     float sg_max_inc;
     float sg_max_dec_lf;
     int sg_trigger_threshold_hops;

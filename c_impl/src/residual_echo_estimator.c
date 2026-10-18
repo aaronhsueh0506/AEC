@@ -1,8 +1,10 @@
 /* residual_echo_estimator.c — C port of residual_echo_estimator.py.
  * All-float32 arithmetic in the R² paths (every input is f32 and every scalar
- * multiplier is value-cast to f32 inside the numpy array op). powf() for the
- * reverb decay runs in float32 (drift versus Python accepted) and is
- * evaluated at init, not per hop. Built with -ffp-contract=off. */
+ * multiplier is value-cast to f32 inside the numpy array op). The reverb
+ * decay's pow() runs in double precision (matching Python's float64
+ * exponentiation, single-narrowed to float32 at the end -- see
+ * aec3_scale.h's aec3_per_block_growth_to_per_hop) and is evaluated at init,
+ * not per hop. Built with -ffp-contract=off. */
 #include "residual_echo_estimator.h"
 #include "aec3_scale.h"
 #include "aec_simd_kernels.h"
@@ -39,7 +41,7 @@ void ree_init(ResidualEchoEstimator *r,
               const ReeEchoModelConfig *echo_model,
               float default_gain, float tm_gain,
               int erle_onset_comp_in_dominant,
-              float reverb_decay, float reverb_mild_decay_scale,
+              double reverb_decay, double reverb_mild_decay_scale,
               int reverb_enabled, float reverb_tail_strength,
               int use_aec3_residual_noise_gate,
               int use_stationarity_properties,
@@ -49,7 +51,7 @@ void ree_init(ResidualEchoEstimator *r,
               float residual_noise_gate_power,
               int noise_floor_hold_hops,
               int use_freq_response, int reverb_use_conservative,
-              float reverb_smoothing_base,
+              double reverb_smoothing_base,
               float *x2_noise_floor, int *x2_noise_floor_counter,
               float *reverb_model_storage, float *reverb_tail_storage,
               float *render_history_storage,
@@ -63,9 +65,10 @@ void ree_init(ResidualEchoEstimator *r,
     /* AEC3 UpdateRenderNoisePower per-block growth (x2_noise_floor *= 1.1,
      * cc:325-359), rescaled to the live grid so the wall-clock
      * recovery-after-hold rate is preserved at any grid. Mirrors
-     * residual_echo_estimator.py. */
+     * residual_echo_estimator.py. 1.1 (not 1.1f): the exponentiation must
+     * run on the full-precision double literal -- see aec3_scale.h. */
     r->noise_floor_growth_per_hop =
-        aec3_per_block_growth_to_per_hop(1.1f, hop_size, sample_rate);
+        aec3_per_block_growth_to_per_hop(1.1, hop_size, sample_rate);
     r->echo_model = *echo_model;
     r->default_gain_early = default_gain;
     r->default_gain_late = default_gain;
@@ -76,12 +79,14 @@ void ree_init(ResidualEchoEstimator *r,
     r->reverb_mild_decay_scale = reverb_mild_decay_scale;
     r->reverb_enabled = reverb_enabled ? 1 : 0;
     /* Resolve both dominant_nearend branches of _reverb_decay() here: the
-     * powf() argument and exponent are config + grid only, so the per-hop
+     * pow() argument and exponent are config + grid only, so the per-hop
      * path (called 2-3x per hop) just reads the cached value. The mild branch
-     * keeps the f32 multiply-then-exponentiate order of the reference
-     * expression -- scaling after the powf() is a different number. */
+     * keeps the double-precision multiply-then-exponentiate order of the
+     * reference expression (Python's `d *= float(mild_decay_scale)`,
+     * float64 throughout) -- scaling after the pow() is a different number,
+     * and scaling in float32 is 1 ULP off from Python for this constant. */
     if (r->reverb_enabled) {
-        float d_mild = reverb_decay;
+        double d_mild = reverb_decay;
         d_mild *= reverb_mild_decay_scale;
         r->reverb_decay_per_hop =
             aec3_per_block_growth_to_per_hop(reverb_decay, hop_size,
@@ -153,7 +158,7 @@ void ree_update_reverb_models(ResidualEchoEstimator *r,
                               const float *frequency_response,
                               int n_partitions,
                               int filter_delay_blocks,
-                              float filter_quality,
+                              double filter_quality,
                               int filter_quality_is_none,
                               int stationary_block) {
     /* Only the freq-resp branch is wired (adaptive decay estimator not bound). */

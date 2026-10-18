@@ -73,11 +73,16 @@ float aec3_block_energy_scale(float value_int16sq, int hop_samples) {
     return value_int16sq * ((float)hop_samples / (float)AEC3_BLOCK_SAMPLES_16K);
 }
 
-float aec3_per_block_growth_to_per_hop(float per_block_multiplier,
+float aec3_per_block_growth_to_per_hop(double per_block_multiplier,
                                        int hop_samples, int sample_rate) {
-    float block_seconds = (float)AEC3_BLOCK_SAMPLES_16K / 16000.0f;
-    float hop_seconds = (float)hop_samples / (float)sample_rate;
-    return powf(per_block_multiplier, hop_seconds / block_seconds);
+    /* double throughout, narrowed once at return -- see aec3_scale.h. Python
+     * computes `per_block_multiplier ** (hop_seconds / block_seconds)` in
+     * float64 and only narrows to float32 when the result later multiplies a
+     * float32 array; mirroring that order (not powf() on a pre-narrowed
+     * float32 base) is required for bit-exactness. */
+    double block_seconds = (double)AEC3_BLOCK_SAMPLES_16K / 16000.0;
+    double hop_seconds = (double)hop_samples / (double)sample_rate;
+    return (float)pow(per_block_multiplier, hop_seconds / block_seconds);
 }
 
 double aec3_ema_alpha_from_tau_ms(double tau_ms, double hop_ms) {

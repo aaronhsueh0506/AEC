@@ -23,10 +23,13 @@
  *     computed above). nl_r2_cap_multiple<=0.0 disables the cap (uncapped,
  *     prior behaviour).
  *   - reverb tail comes from ReverbModel + ReverbFrequencyResponse C ports.
- *   - decay = aec3_per_block_growth_to_per_hop(0.83f, hop_size, sample_rate):
+ *   - decay = aec3_per_block_growth_to_per_hop(0.83, hop_size, sample_rate):
  *     wall-clock-preserving rescale (accounts for BOTH hop_size AND
- *     sample_rate) in float32, then used as a float scaling. Mirrors
- *     residual_echo_estimator.py's _reverb_decay().
+ *     sample_rate), computed in double precision and narrowed to float32
+ *     once at the end (mirrors Python: float64 exponentiation, single
+ *     narrowing when the result multiplies the float32 reverb array), then
+ *     used as a float scaling. Mirrors residual_echo_estimator.py's
+ *     _reverb_decay().
  *   Built with -ffp-contract=off so the per-op f32 roundings are not fused.
  *
  * The estimator OWNS a ReverbModel and a ReverbFrequencyResponse. The caller
@@ -72,12 +75,13 @@ typedef struct {
                                       * and the reverb-decay wall-clock rescale below */
     float  noise_floor_growth_per_hop; /* live-computed; see ree_init() */
     /* Per-hop reverb decay, both dominant_nearend branches, resolved once in
-     * ree_init(). Every input is init-fixed, so the powf() is loop-invariant
+     * ree_init(). Every input is init-fixed, so the pow() is loop-invariant
      * and the per-hop path only selects between these two. The mild branch
-     * cannot be derived from the steady one: the × scale happens in f32
-     * BEFORE the exponentiation, so each needs its own powf(). Both are 0
-     * when reverb is disabled, which the readers already treat as "no reverb
-     * update". */
+     * cannot be derived from the steady one: the × scale happens in double
+     * precision BEFORE the exponentiation (mirroring Python's `d *=
+     * float(mild_decay_scale)`, float64 throughout), so each needs its own
+     * pow(). Both are 0 when reverb is disabled, which the readers already
+     * treat as "no reverb update". */
     float  reverb_decay_per_hop;       /* dominant_nearend == 0 */
     float  reverb_decay_per_hop_mild;  /* dominant_nearend != 0 */
     float  reverb_tail_strength;    /* 1.0 */
@@ -151,7 +155,7 @@ void ree_init(ResidualEchoEstimator *r,
               const ReeEchoModelConfig *echo_model,
               float default_gain, float tm_gain,
               int erle_onset_comp_in_dominant,
-              float reverb_decay, float reverb_mild_decay_scale,
+              double reverb_decay, double reverb_mild_decay_scale,
               int reverb_enabled, float reverb_tail_strength,
               int use_aec3_residual_noise_gate,
               int use_stationarity_properties,
@@ -161,7 +165,7 @@ void ree_init(ResidualEchoEstimator *r,
               float residual_noise_gate_power,
               int noise_floor_hold_hops,
               int use_freq_response, int reverb_use_conservative,
-              float reverb_smoothing_base,
+              double reverb_smoothing_base,
               float *x2_noise_floor, int *x2_noise_floor_counter,
               float *reverb_model_storage, float *reverb_tail_storage,
               float *render_history_storage,
@@ -188,7 +192,7 @@ void ree_update_reverb_models(ResidualEchoEstimator *r,
                               const float *frequency_response,
                               int n_partitions,
                               int filter_delay_blocks,
-                              float filter_quality,
+                              double filter_quality,
                               int filter_quality_is_none,
                               int stationary_block);
 

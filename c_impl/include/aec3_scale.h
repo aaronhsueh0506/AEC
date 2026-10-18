@@ -38,7 +38,20 @@ float  aec3_fft_density_scale(float value_int16sq, int fft_size);
 float  aec3_per_bin_psd_threshold(float calibrated_value, int hop_size, int ref_hop);
 float  aec3_nl_r2_norm_power(int hop_size, int ref_hop);
 float  aec3_block_energy_scale(float value_int16sq, int hop_samples);
-float  aec3_per_block_growth_to_per_hop(float per_block_multiplier, int hop_samples, int sample_rate);
+/* per_block_multiplier is double, NOT float like this file's other helpers:
+ * Python's residual_echo_estimator.py keeps the AEC3 reverb-decay config
+ * constant (0.83) as a python float (float64) and exponentiates it in
+ * float64 before the result is ever narrowed to float32 (the single
+ * narrowing numpy does when the scalar multiplies a float32 array). Taking
+ * a float32 base here and calling powf() double-rounds: the base is
+ * narrowed to float32 BEFORE exponentiating, which is a different (and
+ * less accurate) float32 result than exponentiating in float64 and
+ * narrowing once at the end -- by exactly 1 ULP for the reverb-decay case
+ * (0.83 at the default 512-fft grid), which an unbounded IIR state
+ * (ResidualEchoEstimator's reverb accumulator) carries forward forever.
+ * Callers must pass the full-precision config constant (the
+ * AEC3B_REE_REVERB_DECAY/_MILD_SCALE macros already are double literals). */
+float  aec3_per_block_growth_to_per_hop(double per_block_multiplier, int hop_samples, int sample_rate);
 /* Generalizes aec3_per_block_growth_to_per_hop's fixed AEC3-4ms-block
  * reference to an ARBITRARY reference grid. For PROJECT-NATIVE (non-AEC3)
  * per-hop RETENTION-convention EMA constants -- i.e. ones whose update is
