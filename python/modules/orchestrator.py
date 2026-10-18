@@ -1066,11 +1066,15 @@ class AEC:
     def _apply_delay_shift_hard_reset(self, target_delay: int) -> None:
         """Commit ``target_delay`` as the new ring-read alignment and run the
         full delay-shift recovery chain (filter-derived-state reset, EPC
-        force_delay, Kalman Q/P boost, rearm). Factored out of Path B's
-        default branch so the bad-relock judgment below (AMEND_34) can reuse
-        the identical recovery when it reverts to the PRE-shift delay, not
-        just when Path B first shifts away from it — a revert is itself a
-        delay change and taps need the same chance to re-adapt cleanly.
+        force_delay, Kalman Q/P boost, rearm). Used when Path B first shifts
+        to a NEW, unverified delay: nothing is known yet about whether that
+        delay is good, so taps are treated as unknown and given every
+        caution the chain provides.
+
+        NOT used for AMEND_34's bad-relock revert — a revert restores taps
+        that were already demonstrated good, which is a different situation
+        with a different, lighter recovery; see
+        ``_apply_delay_shift_soft_revert`` below.
         """
         self._current_delay = target_delay
         self._reset_filter_derived_state(reason='delay_shift',
@@ -1087,6 +1091,117 @@ class AEC:
         from .delay.delay_types import DelayAdjustment as _DA
         self._aec3_pending_delay_change = _DA.NEW_DETECTED_DELAY
         self._rearm_filters_for_delay_change()
+
+    def _apply_delay_shift_soft_revert(
+            self, target_delay: int, bad_delay: int,
+            pre_W: np.ndarray, pre_shadow_W: Optional[np.ndarray],
+            pre_H_error: Optional[np.ndarray],
+            pre_shadow_H_error: Optional[np.ndarray]) -> None:
+        """AMEND_34's bad-relock revert: restore ``target_delay`` (the
+        PRE-shift delay) and the exact pre-shift tap/covariance snapshot,
+        WITHOUT running ``_apply_delay_shift_hard_reset``'s "new, unverified
+        delay" recovery chain.
+
+        A revert is not a new delay the system has yet to verify — it is a
+        return to a delay/tap pair that was demonstrably cancelling well
+        right before the rejected excursion (that is the whole premise the
+        judgment reverted on). Running the hard-reset chain anyway, and
+        overwriting its freshly-zeroed taps with the snapshot afterward (the
+        pattern this replaces), still fires every side effect keyed off
+        "echo path just changed" even though confidence in THIS path was
+        never actually lost:
+          - the Kalman Q/P-override boost perturbs taps that do not need
+            faster, noisier re-adaptation;
+          - ``handle_echo_path_change`` resets H_error_per_bin to its
+            cold-start value, which IS the Kalman step size (mu_aec3 =
+            H_error / denom) — strictly worse than the Q-boost for taps
+            that are already good, so H_error is snapshotted and restored
+            below instead, same treatment as W;
+          - ``_maybe_mark_diverged('delay_shift')`` tells RES/EPC that
+            confidence in the estimate was just lost, when it was not;
+          - queuing ``_aec3_pending_delay_change`` drives
+            ``AecState._full_reset`` -> ``SuppressionGain.
+            set_initial_state(True)``, which (per
+            dominant_nearend_detector.cc's ``trigger_initial_gate`` and the
+            LF-smoothing gate in ``get_gain``) disables near-end protection
+            for the recovery window -- measured on a real double-talk file
+            as several dB of extra suppression in the second or so right
+            after the revert fires, on frames that are mostly near-end-quiet
+            (i.e. the extra suppression was protecting nothing).
+          - ``_epc_det.force_delay()`` zeros ``raw_dt`` / stationary-DT for
+            ``epc_hangover`` hops (orchestrator's EPC-gate block) and blocks
+            the shadow-copy regime gate for the same window — both are
+            "treat this filter as disrupted" behavior this path does not
+            need, so it is skipped here (unlike the forward-shift / first-
+            acquisition paths, which keep it).
+
+        What a revert DOES still have to do, because it is a real delay
+        CHANGE even though the taps are trusted:
+          - re-point the ring-read alignment (``_current_delay``);
+          - restore the snapshot taps (and H_error) verbatim;
+          - flush the per-partition far history (``X_buf``). ``X_buf`` is a
+            fixed-depth FIFO of only the last ``n_partitions`` hops, all read
+            at the one constant (rejected) offset right up to this instant —
+            structurally the same "last few hops, one constant offset, about
+            to become a different offset" situation ``warm_shift_ir`` faces
+            at a live IR shift, just with the IR itself replaced wholesale
+            by the snapshot rather than shifted in place. The same
+            ADVANCE/RETARD sign rule is reused for that reason: an ADVANCE
+            leaves only a sub-hop gap that closes within a hop, so ``X_buf``
+            is left alone; a RETARD leaves ``X_buf`` holding samples that are
+            AHEAD of what the restored alignment will read next, which
+            mis-estimates the echo for many hops, so it is cleared and
+            refilled at the taps' normal (unboosted) adaptation rate. Only
+            the RETARD branch has been measured here (both validation files'
+            reverts happen to be RETARD-direction); the ADVANCE branch rests
+            on the same reasoning ``warm_shift_ir``'s own docstring already
+            flags as unmeasured for its own (live-shift) RETARD case — carry
+            that caveat forward, don't treat this as independently verified;
+          - reinitialize the windowed-ERLE judgment accumulators
+            (``_erle_window_near`` / ``_erle_window_err``) so a LATER
+            judgment episode is not compared against the collapsed ~0 dB
+            reading the rejected excursion produced;
+          - reinitialize ``main_err_smooth`` / ``shadow_err_smooth``: both
+            are plain per-hop EMAs of actual error power with no other
+            reset path, so they spent the whole judgment window tracking the
+            rejected excursion's (likely elevated) error. Left alone they
+            would feed one EMA time-constant of stale "bad echo" readings
+            into ``update_shadow_rise`` / the shadow-copy regime gate /
+            ``DoubleTalkAnalyzer`` right when the restored taps are already
+            cancelling well again — same "don't let a future decision be
+            corrupted by the rejected excursion" reasoning as the ERLE
+            windows, just for the two other EMAs fed by the same raw error;
+          - drop any still-pending ``_pending_delay`` (same cross-recovery
+            hygiene ``_reset_filter_derived_state`` does), so a stale
+            pending value from mid-excursion cannot pair with a later rogue
+            estimate.
+        """
+        self._current_delay = target_delay
+        self.filter.W[:] = pre_W
+        if pre_H_error is not None and hasattr(self.filter, 'H_error_per_bin'):
+            self.filter.H_error_per_bin[:] = pre_H_error
+        if self.shadow_filter is not None:
+            if pre_shadow_W is not None:
+                self.shadow_filter.W[:] = pre_shadow_W
+            if (pre_shadow_H_error is not None
+                    and hasattr(self.shadow_filter, 'H_error_per_bin')):
+                self.shadow_filter.H_error_per_bin[:] = pre_shadow_H_error
+        # Sign rule mirrors warm_shift_ir: RETARD (negative) invalidates the
+        # held far history, ADVANCE (positive) leaves a sub-hop gap that
+        # settles on its own.
+        _revert_delta = int(target_delay) - int(bad_delay)
+        if _revert_delta < 0:
+            self.filter.X_buf.fill(0)
+            if self.shadow_filter is not None:
+                self.shadow_filter.X_buf.fill(0)
+        self._erle_window_near = 1e-10
+        self._erle_window_err = 1e-10
+        self.main_err_smooth = 0.0
+        self.shadow_err_smooth = 0.0
+        if hasattr(self, '_pending_delay'):
+            del self._pending_delay
+        if hasattr(self, '_pending_delay_ttl'):
+            del self._pending_delay_ttl
 
     def reset(self):
         self.filter.reset()
@@ -1916,7 +2031,8 @@ class AEC:
                 # file this was built against).
                 if getattr(self, '_delay_shift_judgment', None) is not None:
                     (_pre_delay, _pre_erle, _hops_left,
-                     _pre_W, _pre_shadow_W) = self._delay_shift_judgment
+                     _pre_W, _pre_shadow_W,
+                     _pre_H_error, _pre_shadow_H_error) = self._delay_shift_judgment
                     _hops_left -= 1
                     if _hops_left <= 0:
                         _cur_erle = float(self._diag.get('erle_windowed', 0.0))
@@ -1940,26 +2056,28 @@ class AEC:
                                          < self.near_power * (1.0 - 1e-9))
                         if _has_estimate and _cur_erle < _pre_erle - 1.0:
                             _bad_delay = self._current_delay
-                            # Order matters: _apply_delay_shift_hard_reset
-                            # calls _reset_filter_derived_state, which always
-                            # wipes filter/shadow_filter.W via .reset() (the
-                            # right move for an ordinary forward shift, where
-                            # there is no known-good tap set to keep) --
-                            # restoring the pre-shift snapshot BEFORE that
-                            # call had it immediately zeroed again. Call the
-                            # reset chain first, then overwrite the
-                            # just-wiped taps with the snapshot.
-                            self._apply_delay_shift_hard_reset(_pre_delay)
-                            self.filter.W[:] = _pre_W
-                            if self.shadow_filter is not None and _pre_shadow_W is not None:
-                                self.shadow_filter.W[:] = _pre_shadow_W
+                            # Soft revert (replaces the old hard-reset +
+                            # tap-overwrite pattern): _pre_W/_pre_shadow_W
+                            # are a snapshot of taps that were demonstrably
+                            # cancelling well right before this rejected
+                            # excursion -- a revert is "return to trusted
+                            # state", not "new, unverified delay", so it
+                            # must not run the full hard-reset chain (Kalman
+                            # Q-boost, mark_diverged, AecState full_reset ->
+                            # SuppressionGain initial_state). See
+                            # _apply_delay_shift_soft_revert's docstring.
+                            self._apply_delay_shift_soft_revert(
+                                _pre_delay, _bad_delay,
+                                _pre_W, _pre_shadow_W,
+                                _pre_H_error, _pre_shadow_H_error)
                             if not hasattr(self, '_delay_reject_values'):
                                 self._delay_reject_values = []
                             self._delay_reject_values.append(_bad_delay)
                         self._delay_shift_judgment = None
                     else:
                         self._delay_shift_judgment = (
-                            _pre_delay, _pre_erle, _hops_left, _pre_W, _pre_shadow_W)
+                            _pre_delay, _pre_erle, _hops_left, _pre_W, _pre_shadow_W,
+                            _pre_H_error, _pre_shadow_H_error)
 
                 # Path A: first delay acquisition. Heavy action (resets filter
                 # taps + downstream derived state). Demands solid PAR.
@@ -2117,6 +2235,21 @@ class AEC:
                         _pre_shift_shadow_W = (self.shadow_filter.W.copy()
                                                if self.shadow_filter is not None
                                                else None)
+                        # Soft-revert fix: H_error_per_bin (PBFDKF's per-bin
+                        # error covariance -- the step-size driver, mu_aec3 =
+                        # H_error/denom) is a statistic OF the taps, same as
+                        # W, so a revert must restore it alongside W rather
+                        # than let handle_echo_path_change's cold-start reset
+                        # (kHErrorInitial) ride along. See
+                        # _apply_delay_shift_soft_revert's docstring.
+                        _pre_shift_H_error = (self.filter.H_error_per_bin.copy()
+                                              if hasattr(self.filter, 'H_error_per_bin')
+                                              else None)
+                        _pre_shift_shadow_H_error = (
+                            self.shadow_filter.H_error_per_bin.copy()
+                            if (self.shadow_filter is not None
+                                and hasattr(self.shadow_filter, 'H_error_per_bin'))
+                            else None)
                         self._current_delay = new_delay
                         del self._pending_delay
                         if hasattr(self, '_pending_delay_ttl'):
@@ -2192,11 +2325,12 @@ class AEC:
                         # (not merely "not yet better" -- a relock that is
                         # simply slow to pay off is not what this guards
                         # against), it's a confirmed-bad relock -- revert to the
-                        # pre-shift delay (itself run through the hard-reset
-                        # recovery chain, regardless of which treatment
-                        # applied the forward shift, since by this point the
-                        # softer treatment already failed to prevent the
-                        # damage) and refuse to re-accept this SAME candidate
+                        # pre-shift delay and tap/H_error snapshot via the
+                        # SOFT revert (_apply_delay_shift_soft_revert, not
+                        # the hard-reset chain -- regardless of which
+                        # treatment applied the forward shift, the snapshot
+                        # being restored is demonstrated-good either way)
+                        # and refuse to re-accept this SAME candidate
                         # for the rest of this instance's life, so a bad lag
                         # gets one correction attempt, not an infinite retry
                         # loop converging on the same wrong answer. A good
@@ -2228,7 +2362,8 @@ class AEC:
                         _judgment_hops = _DELAY_SHIFT_JUDGMENT_HOPS
                         self._delay_shift_judgment = (
                             old_delay_before_shift, _pre_shift_erle,
-                            _judgment_hops, _pre_shift_W, _pre_shift_shadow_W)
+                            _judgment_hops, _pre_shift_W, _pre_shift_shadow_W,
+                            _pre_shift_H_error, _pre_shift_shadow_H_error)
                     else:
                         self._pending_delay = new_delay
                         self._pending_delay_ttl = 3
