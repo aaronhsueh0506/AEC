@@ -214,6 +214,21 @@ def test_set_preset_rejects_unknown_preset():
     assert aec.config.min_gain_floor_far_active_db == before
 
 
+def test_set_preset_rejects_no_floor():
+    """NO_FLOOR changes min_gain_split_floor_enabled, a boolean this ramped
+    scalar retarget cannot represent -- it must raise, not silently land on
+    balanced's -28 dB while leaving split_floor_enabled untouched (which
+    would look like a successful retarget but change nothing)."""
+    aec = AEC(AecConfig.from_preset(AecPreset.BALANCED))
+    before_db = aec.config.min_gain_floor_far_active_db
+    before_live = _live(aec._aec3_sg)
+    with pytest.raises(ValueError):
+        aec.set_preset(AecPreset.NO_FLOOR)
+    assert aec.config.min_gain_floor_far_active_db == before_db
+    assert aec.config.min_gain_split_floor_enabled is True
+    assert _live(aec._aec3_sg) == before_live
+
+
 # ── mutation: the exact-landing branch must be load-bearing ──────────────
 
 def test_mutation_without_exact_landing_the_ramp_never_lands(monkeypatch):

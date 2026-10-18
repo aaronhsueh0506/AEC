@@ -1145,18 +1145,36 @@ class AecConfig:
 
     @classmethod
     def from_preset(cls, preset: 'AecPreset', **kwargs) -> 'AecConfig':
-        """Three Pareto operating points on the residual-echo strength axis.
+        """Four Pareto operating points on the residual-echo strength axis.
 
         All presets share the same AEC3 post-filter chain + the 800-case-tuned
-        base (CNG, shadow/Kalman warmup). They differ ONLY on
+        base (CNG, shadow/Kalman warmup). The first three differ ONLY on
         ``min_gain_floor_far_active_db`` — the far-active residual-gain floor
-        that trades echo suppression against near-end preservation:
+        that trades echo suppression against near-end preservation. The fourth
+        removes the floor mechanism entirely instead of deepening it further:
 
-          mild      near-priority  (higher floor → more near kept, more echo leak)
-          balanced    −28 dB         the shipped all-four-bars-met operating point
-          aggressive  echo-priority  (deeper floor → more echo killed, more near loss)
+          mild       near-priority  −20 dB   (higher floor → more near kept, more echo leak)
+          balanced   shipped         −28 dB   the shipped all-four-bars-met operating point
+          aggressive echo-priority  −38 dB   (deeper floor → more echo killed, more near loss)
+          no_floor   floor OFF      (n/a)    ``min_gain_split_floor_enabled=False`` — gain is
+                                              purely audibility/R²-derived (AEC3-like), with no
+                                              fixed-dB clamp at all; the deepest point on the same
+                                              axis, and the most near-end loss.
 
-        mild/aggressive deliberately sit off the balanced ship-bar set
+        ``min_gain_split_floor_enabled`` is the single gate for ALL THREE floor
+        variants in ``suppression_gain.py``'s ``_get_min_gain`` — far-active
+        (``min_gain_floor_far_active_db``), far-silent/pure-NE
+        (``min_gain_floor_far_silent_db``, the one that protects near-end
+        singletalk at zero echo cost), AND the DT-lifted floor
+        (``min_gain_floor_dt_db``). no_floor removes all three in one switch,
+        not just the far-active one mild/aggressive vary — including the
+        pure-NE floor, so unlike mild/balanced/aggressive (NE-neutral by
+        construction: see commit ec47063's 800-case NE deg 4.052/4.047/4.046),
+        no_floor is expected to cost near-end-only quality too, not just DT.
+        ``dt_aware_res_floor_enabled`` also becomes behaviorally inert under
+        no_floor (its only consumer is inside this same gate).
+
+        mild/aggressive/no_floor deliberately sit off the balanced ship-bar set
         (Pareto picks), not within it — the DT-deg vs echo trade is a proven
         single-channel DSP wall, so a strength axis is the honest way to expose it.
         """
@@ -1168,11 +1186,15 @@ class AecConfig:
             warmup_frames=100,
             kalman_q_high=1e-3,
         )
-        # Strength axis: far-active min-gain floor (dataclass default −28 = balanced).
+        # Strength axis: far-active min-gain floor (dataclass default −28 = balanced),
+        # or — for no_floor — remove the floor mechanism itself. min_gain_floor_
+        # far_active_db is inert when min_gain_split_floor_enabled=False, so no_floor
+        # deliberately does not also set it.
         strength = {
             AecPreset.MILD:     dict(min_gain_floor_far_active_db=-20.0),
             AecPreset.BALANCED:   dict(),
             AecPreset.AGGRESSIVE: dict(min_gain_floor_far_active_db=-38.0),
+            AecPreset.NO_FLOOR:   dict(min_gain_split_floor_enabled=False),
         }
         defaults = {**base, **strength.get(preset, {})}
         defaults.update(kwargs)

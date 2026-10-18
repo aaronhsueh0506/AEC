@@ -1889,6 +1889,18 @@ class AEC:
             preset = AecPreset(preset)
         except (TypeError, ValueError):
             raise ValueError(f"unknown AEC preset: {preset!r}")
+        # NO_FLOOR changes a boolean (min_gain_split_floor_enabled), not the
+        # ramped scalar this setter walks -- "ramp the floor towards disabled"
+        # has no numeric meaning, and silently landing on balanced's -28 dB
+        # while leaving split_floor_enabled untouched would leave the instance
+        # looking retargeted but behaviorally unchanged. Reject rather than
+        # construct a misleading partial retarget; NO_FLOOR is construction-
+        # time only (AecConfig.from_preset(AecPreset.NO_FLOOR)).
+        if preset is AecPreset.NO_FLOOR:
+            raise ValueError(
+                "AecPreset.NO_FLOOR is construction-time only: it disables "
+                "min_gain_split_floor_enabled, which this runtime retarget "
+                "(a ramp over min_gain_floor_far_active_db) cannot represent")
         # Single source of truth for the strength table.
         db = AecConfig.from_preset(preset).min_gain_floor_far_active_db
         # Validate through the suppressor first so a rejected call cannot leave

@@ -23,6 +23,7 @@ class AecPreset(Enum):
     MILD     = "mild"       # near-priority: more near-end kept, more echo leak
     BALANCED   = "balanced"     # production: all four ship bars met (AEC3 residual chain)
     AGGRESSIVE = "aggressive"   # echo-priority: deeper suppression, more near-end loss
+    NO_FLOOR   = "no_floor"     # floor mechanism OFF: gain is purely R²-derived, most echo killed, most near-end loss
 
 
 class AecDelayMode(Enum):
