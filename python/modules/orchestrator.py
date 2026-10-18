@@ -1899,20 +1899,28 @@ class AEC:
             preset = AecPreset(preset)
         except (TypeError, ValueError):
             raise ValueError(f"unknown AEC preset: {preset!r}")
-        # NO_FLOOR changes a boolean (min_gain_split_floor_enabled), not the
-        # ramped scalar this setter walks -- "ramp the floor towards disabled"
-        # has no numeric meaning, and silently landing on balanced's -28 dB
-        # while leaving split_floor_enabled untouched would leave the instance
-        # looking retargeted but behaviorally unchanged. Reject rather than
-        # construct a misleading partial retarget; NO_FLOOR is construction-
-        # time only (AecConfig.from_preset(AecPreset.NO_FLOOR)).
-        if preset is AecPreset.NO_FLOOR:
-            raise ValueError(
-                "AecPreset.NO_FLOOR is construction-time only: it disables "
-                "min_gain_split_floor_enabled, which this runtime retarget "
-                "(a ramp over min_gain_floor_far_active_db) cannot represent")
         # Single source of truth for the strength table.
         target_cfg = AecConfig.from_preset(preset)
+        # Checked on the PROPERTY (min_gain_split_floor_enabled), not on
+        # `preset is AecPreset.NO_FLOOR` -- a name check only catches
+        # retargeting TO NO_FLOOR, not retargeting AWAY FROM an instance that
+        # was constructed with it in the first place. This setter only ever
+        # touches min_gain_floor_far_active_db/_dt_db; split_floor_enabled
+        # changes a boolean "ramp the floor towards disabled" has no numeric
+        # meaning for, so an instance built with NO_FLOOR and then retargeted
+        # to e.g. BALANCED would otherwise update self.config's two floor
+        # fields while split_floor_enabled silently stayed False forever --
+        # looking retargeted but behaviorally unchanged, in either direction.
+        # Reject rather than construct a misleading partial retarget;
+        # NO_FLOOR is construction-time only (AecConfig.from_preset(
+        # AecPreset.NO_FLOOR)).
+        if target_cfg.min_gain_split_floor_enabled != self.config.min_gain_split_floor_enabled:
+            raise ValueError(
+                "cannot retarget across min_gain_split_floor_enabled at "
+                "runtime (NO_FLOOR <-> mild/balanced/aggressive): that field "
+                "changes a boolean, which this setter's ramp over "
+                "min_gain_floor_far_active_db cannot represent. Construct a "
+                "new AEC(AecConfig.from_preset(...)) instead")
         db = target_cfg.min_gain_floor_far_active_db
         dt_db = target_cfg.min_gain_floor_dt_db
         # Validate through the suppressor first so a rejected call cannot leave

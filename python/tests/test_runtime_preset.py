@@ -262,6 +262,25 @@ def test_set_preset_rejects_no_floor():
     assert _live(aec._aec3_sg) == before_live
 
 
+def test_set_preset_rejects_retargeting_away_from_no_floor():
+    """The symmetric case of the guard above: an instance CONSTRUCTED with
+    NO_FLOOR must also reject retargeting to a ramped preset -- a name check
+    on the incoming preset alone (`preset is AecPreset.NO_FLOOR`) only catches
+    retargeting INTO NO_FLOOR, not away from an instance that already has
+    split_floor_enabled=False baked in. Without this, set_preset(BALANCED)
+    would update the two floor fields while split_floor_enabled stayed False
+    forever, silently keeping no_floor behavior under a 'balanced' label."""
+    aec = AEC(AecConfig.from_preset(AecPreset.NO_FLOOR))
+    assert aec.config.min_gain_split_floor_enabled is False
+    before_db = aec.config.min_gain_floor_far_active_db
+    before_dt_db = aec.config.min_gain_floor_dt_db
+    with pytest.raises(ValueError):
+        aec.set_preset(AecPreset.BALANCED)
+    assert aec.config.min_gain_floor_far_active_db == before_db
+    assert aec.config.min_gain_floor_dt_db == before_dt_db
+    assert aec.config.min_gain_split_floor_enabled is False
+
+
 # ── mutation: the exact-landing branch must be load-bearing ──────────────
 
 def test_mutation_without_exact_landing_the_ramp_never_lands(monkeypatch):
