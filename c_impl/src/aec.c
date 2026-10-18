@@ -1826,15 +1826,27 @@ static int aec_carve(Aec* a, uint8_t* ptr, const AecConfig* cfg,
          * (bin_hz = sample_rate/frame_size, frame_size==fft here);
          * err_ema_alpha = exp(-hop_ms/corrob_ms) (corrob_ms floored at
          * 1e-6, matching Python's max(1e-6, ...) guard); corrob_margin =
-         * 10^(margin_db/10). Computed in double, cast once at the end --
-         * these are scalar constants fixed for the instance's lifetime,
-         * not a per-hop array, so the usual per-bin f32-exactness
-         * discipline does not apply (same tier as the other derived
-         * scalars in this block, e.g. y2_thr above). */
+         * 10^(margin_db/10). These are scalar constants fixed for the
+         * instance's lifetime, not a per-hop array, so the usual per-bin
+         * f32-exactness discipline does not apply (same tier as the other
+         * derived scalars in this block, e.g. y2_thr above).
+         *
+         * observer_max_bin is float32-safe: bin_hz = sample_rate/fft is
+         * exact in float32 for every supported (rate, fft) grid (fft is
+         * always a power of two), and the ceil() it feeds sits far enough
+         * from an integer boundary for every live_observer_max_hz in
+         * [1, 24000] on all three grids that float32 rounding cannot shift
+         * the result (checked exhaustively). err_ema_alpha/corrob_margin
+         * stay double: they feed observer_err_ema_alpha/observer_corrob_
+         * margin, which drive observer_obs_err_ema/observer_main_err_ema's
+         * per-hop recursion (see that pair's own comment) -- a float32
+         * hop_ms/corrob_ms here would hand that recursion a different
+         * alpha than computing it in double throughout, defeating the
+         * point of keeping the recursion itself in double. */
         pcfg.observer_enabled = cfg->live_observer_enabled;
         if (cfg->live_observer_enabled) {
-            double bin_hz = (double)cfg->sample_rate / (double)fft;
-            pcfg.observer_max_bin = (int)ceil((double)cfg->live_observer_max_hz / bin_hz);
+            float bin_hz = (float)cfg->sample_rate / (float)fft;
+            pcfg.observer_max_bin = (int)ceilf((float)cfg->live_observer_max_hz / bin_hz);
             double hop_ms = 1000.0 * (double)hop / (double)cfg->sample_rate;
             double corrob_ms = (double)cfg->live_observer_corrob_ms;
             if (corrob_ms < 1e-6) corrob_ms = 1e-6;
@@ -2751,18 +2763,21 @@ static void aec_process_core(Aec* a, const float* mic_in, const float* ref_in,
             a->delay_shift_judgment_hops_left -= 1;
             if (a->delay_shift_judgment_hops_left <= 0) {
                 float cur_erle = a->last_erle_windowed;
-                /* AMEND_35: double, not float, for this ONE comparison --
-                 * near_power*(1.0f-1e-9f) collapses to near_power exactly in
-                 * float32 (ULP spacing already exceeds the 1e-9 relative
-                 * cut), which would silently turn this into a bare strict
-                 * '<' with no slack. Doing the comparison in double keeps
-                 * the intended tiny tolerance, matching Python's float64
-                 * semantics for this specific check -- not a general
-                 * double/float exception: erle_windowed itself and
-                 * everything else in this block stays float, matching
-                 * last_erle_windowed's own precision. */
-                int has_estimate = ((double)a->raw_error_power
-                                    < (double)a->near_power * (1.0 - 1e-9));
+                /* Plain float32 '<', no epsilon: raw_error_power and
+                 * near_power are both C `float`, so the smallest possible
+                 * gap between two distinct values is one float32 ULP
+                 * (>=~6e-8 relative) -- already >50x past the 1e-9 relative
+                 * slack Python's float64 version of this check uses. Any
+                 * float32 value strictly less than near_power is therefore
+                 * already below near_power*(1-1e-9) too; the margin cannot
+                 * change the outcome for float32 operands (exhaustively
+                 * verified over every finite non-negative float32 value of
+                 * near_power against its immediate float32 neighbors). A
+                 * double promotion here would not add precision raw_error_
+                 * power/near_power do not already have -- both are
+                 * quantized to float32 by the EMAs that produce them,
+                 * independent of how this one comparison is evaluated. */
+                int has_estimate = (a->raw_error_power < a->near_power);
                 if (has_estimate && cur_erle
                         < a->delay_shift_judgment_pre_erle - 1.0f) {
                     int bad_delay = a->current_delay;
