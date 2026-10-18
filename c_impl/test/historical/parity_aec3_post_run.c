@@ -11,14 +11,35 @@
  * mismatch in ANY sub-module call sequence shows up here. (Under the retired
  * pocketfft backend out[hop] was bit-exact too.)
  *
- * STATUS (2026-10-18): runs end-to-end at the 512/256 grid (~2616 hops).
- * usable_linear is bit-exact for all hops; out[hop] diverges beyond OUT_TOL
- * starting around hop 135, growing to a max abs diff of ~5.9e-2 by hop
- * ~2134 (new finding, not yet re-measured against the residual echo
- * estimator fix landing separately -- re-run after that lands).
+ * STATUS (2026-10-19): re-measured after the residual-echo-estimator/reverb
+ * double-narrowing fix (c1898c0) plus unrelated aec.c/preset changes landed
+ * on main. max abs diff is UNCHANGED at ~5.938e-2 (same order as the prior
+ * 2026-10-18 reading) -- none of those commits touch this divergence, and
+ * none of the files this harness links (aec3_post.c, residual_echo_
+ * estimator.c, reverb_frequency_response.c, aec3_scale.c, ...) changed
+ * between the two readings except c1898c0 itself, which this harness
+ * exercises end-to-end and still diverges by the same amount either side of.
+ * usable_linear remains bit-exact for all 2616 hops. The per-sample mism
+ * count (~88% of (hop,bin) pairs) is NOT itself meaningful -- the `!=`
+ * compare flags any nonzero float difference including ordinary KISS-FFT
+ * noise-floor drift, so first_out_hop==0 is expected and uninformative; the
+ * number that matters is out_maxd against OUT_TOL. Hypothesis, not yet
+ * confirmed: this is a narrow-replay reconstruction artifact specific to
+ * this harness (it rebuilds AecState/SuppressionGain/etc. per hop from
+ * captured fields rather than running one continuous live instance the way
+ * aec_process() does), not a production defect -- the SAME recursive
+ * aec3_post chain, driven through the real aec_process() entry point, stays
+ * within the identical 2e-2 tolerance in the maintained parity_aec_e2e.c
+ * (confirmed passing, including --live-observer, same day). Needs an actual
+ * per-hop state diff against aec3_post_run's call sequence to confirm, not
+ * done here -- this directory is explicitly archival/non-maintained
+ * (see README.md), so this is a documented hint for whoever picks it up
+ * next, not a release-blocking finding.
  *
  * Build (standalone; the FFT wrapper now lives in the shared audio_common
- * archive, built once for BACKEND=kiss and linked in):
+ * archive, built once for BACKEND=kiss and linked in; pbfdkf.c is now
+ * required too -- aec3_post_run calls pbfdaf_process() for the A21 Stage 2
+ * live observer, added after this harness was first written):
  *   make -C .../audio_common BACKEND=kiss lib
  *   gcc -Wall -Wextra -O2 -ffp-contract=off -std=gnu99 \
  *       -I.../c_impl/include -I.../audio_common/include \
@@ -29,7 +50,7 @@
  *       .../saturation_detector.c .../filter_delay.c .../initial_state.c \
  *       .../filter_analyzer.c .../residual_echo_estimator.c \
  *       .../suppression_gain.c .../stationarity_estimator.c \
- *       .../linear_filter_output.c .../filter_state_bridge.c \
+ *       .../linear_filter_output.c .../filter_state_bridge.c .../pbfdkf.c \
  *       .../test/historical/parity_aec3_post_run.c \
  *       $(make -s -C .../audio_common BACKEND=kiss print-lib-path) -lm -o /tmp/p_post_run
  *   python3 .../python/diag/gen_aec3_post_run_golden.py /tmp/aec3_post_run_golden.bin
