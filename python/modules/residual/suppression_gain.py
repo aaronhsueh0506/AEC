@@ -715,6 +715,25 @@ class SuppressionGain:
             value = target
         self._split_floor_far_active_live = value
 
+    # ── Runtime DT-floor retarget ────────────────────────────────────────
+    # Unlike the far-active floor above, the DT-lifted floor has no ramp: it
+    # is a hard per-hop override (see _get_min_gain), not a value the gain
+    # rule reads continuously while converging toward a target, so there is
+    # no "smooth transition" to walk -- a preset switch steps it immediately.
+    # This is a deliberate asymmetry with set_split_floor_far_active_db's
+    # ramp, not an oversight: giving dt a second ratio/live pair would only
+    # matter while BOTH a ramp is active AND dt_protect_active is true for
+    # the same hops, which a caller can avoid by not relying on mid-ramp DT
+    # behavior; see aec_set_preset's mirrored comment in aec.c.
+    def set_split_floor_dt_db(self, db: float) -> None:
+        db = float(db)
+        if not np.isfinite(db) or not (self.SPLIT_FLOOR_DB_MIN <= db
+                                       <= self.SPLIT_FLOOR_DB_MAX):
+            raise ValueError(
+                "split_floor_dt_db must be finite and within "
+                f"[{self.SPLIT_FLOOR_DB_MIN}, {self.SPLIT_FLOOR_DB_MAX}]: {db}")
+        self._split_floor_dt = _db_to_power_f32(db)
+
     def set_initial_state(self, state: bool) -> None:
         self._initial_state = bool(state)
 

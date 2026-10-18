@@ -205,10 +205,13 @@ static const float* ref_post_res_gain(RefPost* p, int all_converged, float max_d
 }
 
 static int ref_set_preset(RefPost* p, AecPreset preset, float ramp_ms) {
-    float db;
+    float db, dt_db;
     if (aec_preset_floor_db(preset, &db) != 0) return -1;
+    if (aec_preset_dt_floor_db(preset, &dt_db) != 0) return -1;
     if (suppression_gain_set_split_floor_far_active_db(&p->post_sg, db, ramp_ms) != 0) return -1;
+    if (suppression_gain_set_split_floor_dt_db(&p->post_sg, dt_db) != 0) return -1;
     p->post_sg_cfg.split_floor_far_active = p->post_sg.cfg.split_floor_far_active;
+    p->post_sg_cfg.split_floor_dt = p->post_sg.cfg.split_floor_dt;
     return 0;
 }
 

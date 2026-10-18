@@ -186,13 +186,27 @@ int aec_preset_floor_db(AecPreset p, float* db_out) {
     }
 }
 
+/* Only aggressive differs from the shared -20 dB dt-floor default -- see
+ * aec.h's comment on this function and on aec_preset_floor_db(). */
+int aec_preset_dt_floor_db(AecPreset p, float* db_out) {
+    if (db_out == NULL) return -1;
+    switch (p) {
+        case AEC_PRESET_MILD:       *db_out = -20.0f; return 0;
+        case AEC_PRESET_BALANCED:   *db_out = -20.0f; return 0;
+        case AEC_PRESET_AGGRESSIVE: *db_out = -30.0f; return 0;
+        default: return -1;
+    }
+}
+
 void aec_config_from_preset(AecConfig* cfg, AecPreset p, int sr) {
-    float db;
+    float db, dt_db;
     aec_config_defaults(cfg, sr);
-    /* preset enum out of range: min_gain_floor_far_active_db stays at
-     * aec_config_defaults' -28 dB (balanced), a safe defined fallback. */
+    /* preset enum out of range: both floors stay at aec_config_defaults'
+     * -28 dB / -20 dB (balanced), a safe defined fallback. */
     cfg->min_gain_floor_far_active_db =
         (aec_preset_floor_db(p, &db) == 0) ? db : -28.0f;
+    cfg->min_gain_floor_dt_db =
+        (aec_preset_dt_floor_db(p, &dt_db) == 0) ? dt_db : -20.0f;
 }
 
 /* ── Signal-grid resolver: the single source of truth ─────────────────────
@@ -2236,17 +2250,26 @@ long aec_far_fft_real_compute_count(const Aec* a) {
 }
 
 int aec_set_preset(Aec* a, AecPreset preset, float ramp_ms) {
-    float db;
+    float db, dt_db;
     if (a == NULL) return -1;
     if (aec_preset_floor_db(preset, &db) != 0) return -1;
+    if (aec_preset_dt_floor_db(preset, &dt_db) != 0) return -1;
     /* Let the suppressor validate and apply first: it refuses without writing
      * anything, so a rejected call cannot leave a->cfg claiming a floor that
-     * is not in force. */
+     * is not in force. Both lookups above come from the same in-enum
+     * `preset` already checked valid by the first call, so dt_db is always
+     * in SuppressionGain's range and this second setter cannot itself fail
+     * -- checked anyway, not assumed, to match the far-active setter's own
+     * discipline. */
     if (suppression_gain_set_split_floor_far_active_db(&a->a3_sg, db,
                                                        ramp_ms) != 0) {
         return -1;
     }
+    if (suppression_gain_set_split_floor_dt_db(&a->a3_sg, dt_db) != 0) {
+        return -1;
+    }
     a->cfg.min_gain_floor_far_active_db = db;
+    a->cfg.min_gain_floor_dt_db = dt_db;
     return 0;
 }
 

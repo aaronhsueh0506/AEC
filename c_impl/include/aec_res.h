@@ -78,8 +78,12 @@ int aec_res_hop_size(const AecRes* r);
 const float* aec_res_process(AecRes* r, const AecResInput* in);
 
 /* Retargets the far-end-active gain floor to the preset's floor, reaching it
- * after ramp_ms (0: next hop). Returns 0, or -1 for NULL, an unknown preset or
- * an out-of-range ramp, in which case nothing changes. */
+ * after ramp_ms (0: next hop); also retargets the DT-lifted floor (only
+ * aggressive's differs from the shared -20 dB default -- see aec.h's
+ * aec_preset_dt_floor_db()), which has no ramp and steps immediately
+ * regardless of ramp_ms -- same semantics as aec_set_preset(). Returns 0, or
+ * -1 for NULL, an unknown preset or an out-of-range ramp, in which case
+ * nothing changes. */
 int aec_res_set_preset(AecRes* r, AecPreset preset, float ramp_ms);
 
 /* Reads the far-end-active floor as a power ratio: `live` is the value in force

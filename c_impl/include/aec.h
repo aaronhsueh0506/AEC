@@ -944,9 +944,13 @@ void aec_reset(Aec* a);
  */
 int aec_apply_external_realign(Aec* a, int delta_samples);
 
-/* The strength table, in one place. mild / balanced / aggressive differ ONLY
- * in the far-active min-gain floor (the SuppressionGain split-floor power
- * axis), and this is the single lookup for it.
+/* The strength table, in one place. mild / balanced differ from each other
+ * ONLY in the far-active min-gain floor (the SuppressionGain split-floor
+ * power axis); aggressive ALSO deepens the DT-lifted floor -- see
+ * aec_preset_dt_floor_db() below -- which the shared dataclass default
+ * leaves at -20 dB for mild/balanced (their far_active values are already
+ * at or above -20, so a distinct dt floor would not be visible for them).
+ * This is the single lookup for the far-active value.
  *
  * Public because a product can own a SuppressionGain that no Aec does -- the
  * 4-channel core's shared post-stage suppressor is one -- and needs the same
@@ -958,23 +962,38 @@ int aec_apply_external_realign(Aec* a, int delta_samples);
  * has a caller to tell. */
 int aec_preset_floor_db(AecPreset preset, float* db_out);
 
+/* Companion lookup for the DT-lifted floor (min_gain_floor_dt_db) -- see
+ * aec_preset_floor_db() above for why only aggressive's entry differs from
+ * the shared -20 dB default. Same contract: 0 and *db_out written for an
+ * in-enum preset, -1 (nothing written) otherwise. */
+int aec_preset_dt_floor_db(AecPreset preset, float* db_out);
+
 /* Retarget the residual-echo strength axis on a RUNNING instance.
  *
- * The three shipped presets differ in exactly one field
- * (min_gain_floor_far_active_db; see aec_config_from_preset), and that field
- * reaches the suppressor as a single scalar clamp read once per hop -- so a
- * preset change is a retarget, not a rebuild. Nothing else is disturbed: the
- * filter, the delay state, every smoothing history, the far-active latch and
- * the DominantNearend counters all carry on.
+ * mild/balanced/aggressive differ in two fields now
+ * (min_gain_floor_far_active_db and, for aggressive only,
+ * min_gain_floor_dt_db; see aec_config_from_preset) -- a preset change is
+ * still a retarget, not a rebuild. Nothing else is disturbed: the filter,
+ * the delay state, every smoothing history, the far-active latch and the
+ * DominantNearend counters all carry on.
  *
- * ramp_ms == 0 applies on the next hop and lands on exactly the floor a fresh
- * instance constructed with `preset` would use. A positive ramp_ms walks there
- * linearly in dB instead, which is what an interactive strength control wants:
- * mild <-> aggressive is an 18 dB step and the floor is a hard clamp with
- * nothing downstream to smooth it. 100 ms is a reasonable starting point; it
- * is the caller's choice, not a policy baked in here. ramp_ms is bounded at
- * 60 s. A call made while a ramp is running restarts from the current live
- * value.
+ * ramp_ms only governs the far-active floor, which the gain rule reads
+ * every hop so a smooth walk is meaningful there. The DT floor is a hard
+ * per-hop override (applied only while dt_protect_active), not a value the
+ * gain rule converges toward continuously, so it has no ramp -- it STEPS
+ * immediately regardless of ramp_ms. Deliberate asymmetry: during a
+ * mid-ramp window where dt_protect_active is also true, the far-active
+ * floor is still partway to its target while the DT floor has already
+ * landed. The Python twin matches this hop-for-hop.
+ *
+ * ramp_ms == 0 applies the far-active floor on the next hop and lands on
+ * exactly the floor a fresh instance constructed with `preset` would use. A
+ * positive ramp_ms walks there linearly in dB instead, which is what an
+ * interactive strength control wants: mild <-> aggressive is an 18 dB step
+ * and the floor is a hard clamp with nothing downstream to smooth it. 100 ms
+ * is a reasonable starting point; it is the caller's choice, not a policy
+ * baked in here. ramp_ms is bounded at 60 s. A call made while a ramp is
+ * running restarts from the current live value.
  *
  * NOTE for the 4-channel pipeline: a lane built with spatial_linear_context
  * never calls the suppressor's gain path at all, so calling this on such a

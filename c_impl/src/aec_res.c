@@ -147,14 +147,20 @@ const float* aec_res_process(AecRes* r, const AecResInput* in) {
 }
 
 int aec_res_set_preset(AecRes* r, AecPreset preset, float ramp_ms) {
-    float db;
+    float db, dt_db;
     if (!r) return -1;
     if (aec_preset_floor_db(preset, &db) != 0) return -1;
+    if (aec_preset_dt_floor_db(preset, &dt_db) != 0) return -1;
     /* The suppressor validates and applies first and writes nothing on refusal,
-     * so a rejected ramp leaves the stored configuration untouched. */
+     * so a rejected ramp leaves the stored configuration untouched. Same
+     * documented semantics as aec_set_preset(): ramp_ms governs far-active
+     * only, the DT floor steps immediately. */
     if (suppression_gain_set_split_floor_far_active_db(&r->sg, db, ramp_ms) != 0)
         return -1;
+    if (suppression_gain_set_split_floor_dt_db(&r->sg, dt_db) != 0)
+        return -1;
     r->sg_cfg.split_floor_far_active = r->sg.cfg.split_floor_far_active;
+    r->sg_cfg.split_floor_dt = r->sg.cfg.split_floor_dt;
     return 0;
 }
 

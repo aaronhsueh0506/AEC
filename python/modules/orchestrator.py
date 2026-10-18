@@ -1865,17 +1865,27 @@ class AEC:
     def set_preset(self, preset, ramp_ms: float = 0.0) -> None:
         """Retarget the residual-echo strength axis on a running instance.
 
-        The three shipped presets differ in exactly one field
-        (``min_gain_floor_far_active_db``; see ``AecConfig.from_preset``), and
-        that field reaches the suppressor as a single scalar floor — so a
-        preset change at runtime is a retarget, not a rebuild. No filter state,
-        smoothing history, latch or detector counter is disturbed.
+        mild/balanced/aggressive differ in two fields now
+        (``min_gain_floor_far_active_db`` and, for aggressive only,
+        ``min_gain_floor_dt_db``; see ``AecConfig.from_preset``) — a preset
+        change at runtime is still a retarget, not a rebuild. No filter
+        state, smoothing history, latch or detector counter is disturbed.
 
-        ``ramp_ms = 0`` applies the new floor on the next hop, which lands on
-        exactly the value a fresh instance constructed with ``preset`` would
-        use. A positive ``ramp_ms`` walks there linearly in dB instead, which
-        is what an interactive strength control wants: mild↔aggressive is an
-        18 dB step, and the floor is a hard clamp with no smoothing below it.
+        ``ramp_ms`` only governs the far-active floor, which the gain rule
+        reads every hop so a smooth walk is meaningful there. The DT floor is
+        a hard per-hop override (applied only while ``dt_protect_active``),
+        not a continuously-converging value, so it has no ramp to speak of —
+        it STEPS immediately regardless of ``ramp_ms``. A deliberate
+        asymmetry: during a mid-ramp window where ``dt_protect_active`` is
+        also true, the far-active floor is still partway to its target while
+        the DT floor has already landed. The C twin matches this hop-for-hop.
+
+        ``ramp_ms = 0`` applies the new far-active floor on the next hop,
+        which lands on exactly the value a fresh instance constructed with
+        ``preset`` would use. A positive ``ramp_ms`` walks there linearly in
+        dB instead, which is what an interactive strength control wants:
+        mild↔aggressive is an 18 dB step, and the floor is a hard clamp with
+        no smoothing below it.
 
         Call between hops only. Raises ``ValueError`` on an unknown preset or
         an out-of-range ``ramp_ms``, with the instance left untouched (the C
@@ -1902,11 +1912,15 @@ class AEC:
                 "min_gain_split_floor_enabled, which this runtime retarget "
                 "(a ramp over min_gain_floor_far_active_db) cannot represent")
         # Single source of truth for the strength table.
-        db = AecConfig.from_preset(preset).min_gain_floor_far_active_db
+        target_cfg = AecConfig.from_preset(preset)
+        db = target_cfg.min_gain_floor_far_active_db
+        dt_db = target_cfg.min_gain_floor_dt_db
         # Validate through the suppressor first so a rejected call cannot leave
         # self.config disagreeing with the floor actually in force.
         self._aec3_sg.set_split_floor_far_active_db(db, ramp_ms)
+        self._aec3_sg.set_split_floor_dt_db(dt_db)
         self.config.min_gain_floor_far_active_db = db
+        self.config.min_gain_floor_dt_db = dt_db
 
     @property
     def hop_size(self) -> int:

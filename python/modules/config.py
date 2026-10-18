@@ -1148,18 +1148,39 @@ class AecConfig:
         """Four Pareto operating points on the residual-echo strength axis.
 
         All presets share the same AEC3 post-filter chain + the 800-case-tuned
-        base (CNG, shadow/Kalman warmup). The first three differ ONLY on
-        ``min_gain_floor_far_active_db`` — the far-active residual-gain floor
-        that trades echo suppression against near-end preservation. The fourth
-        removes the floor mechanism entirely instead of deepening it further:
+        base (CNG, shadow/Kalman warmup). mild/balanced differ from each
+        other ONLY on ``min_gain_floor_far_active_db`` — the far-active
+        residual-gain floor that trades echo suppression against near-end
+        preservation. aggressive ALSO deepens ``min_gain_floor_dt_db`` (see
+        below); the fourth tier removes the floor mechanism entirely instead
+        of deepening it further:
 
-          mild       near-priority  −20 dB   (higher floor → more near kept, more echo leak)
-          balanced   shipped         −28 dB   the shipped all-four-bars-met operating point
-          aggressive echo-priority  −38 dB   (deeper floor → more echo killed, more near loss)
-          no_floor   floor OFF      (n/a)    ``min_gain_split_floor_enabled=False`` — gain is
-                                              purely audibility/R²-derived (AEC3-like), with no
-                                              fixed-dB clamp at all; the deepest point on the same
-                                              axis, and the most near-end loss.
+          mild       near-priority  −20 dB / −20 dB  (higher floor → more near kept, more echo leak)
+          balanced   shipped         −28 dB / −20 dB  the shipped all-four-bars-met operating point
+          aggressive echo-priority  −38 dB / −30 dB  (deeper floors → more echo killed, more near loss)
+          no_floor   floor OFF      (n/a)            ``min_gain_split_floor_enabled=False`` — gain is
+                                                       purely audibility/R²-derived (AEC3-like), with no
+                                                       fixed-dB clamp at all; the deepest point on the same
+                                                       axis, and the most near-end loss.
+
+        (far_active dB / dt dB above.) mild/balanced leave ``min_gain_floor_
+        dt_db`` at its shared dataclass default (−20) because their own
+        far_active values are already at or above it — widening it would not
+        change their behavior, only aggressive's deepened far_active (−38)
+        makes a distinct, shallower dt floor (−30) actually visible: without
+        this, the DT-lifted floor (``dt_protect_active``, see below) hard-
+        overrides far_active with the SAME shared −20 dB for all three
+        presets whenever it fires — which includes a measured ~30% false-arm
+        rate on pure far-end-singletalk hops (see dt_aware_res_floor_enabled
+        below) — so mild/balanced/aggressive used to collapse to
+        indistinguishable behavior on exactly the hops where a user would
+        most expect to hear the strength difference. 47-case dev-pool
+        measurement (both grids, vs today's shared-−20 aggressive): DT_static
+        echo MOS +0.17/+0.14, deg −0.16/−0.14; near-end 200ms clean-anchored
+        guard (44-case mix battery) drops from 42/48→39/48 (grid A) and
+        44/48→43/48 (grid B) — a real, bounded near-end cost, consistent
+        with aggressive's own definition (echo-priority, more near-end loss),
+        not a free lunch.
 
         ``min_gain_split_floor_enabled`` is the single gate for ALL THREE floor
         variants in ``suppression_gain.py``'s ``_get_min_gain`` — far-silent
@@ -1192,11 +1213,14 @@ class AecConfig:
         # Strength axis: far-active min-gain floor (dataclass default −28 = balanced),
         # or — for no_floor — remove the floor mechanism itself. min_gain_floor_
         # far_active_db is inert when min_gain_split_floor_enabled=False, so no_floor
-        # deliberately does not also set it.
+        # deliberately does not also set it. aggressive additionally deepens
+        # min_gain_floor_dt_db (dataclass default −20, shared by mild/balanced
+        # unchanged) -- see the docstring above for why only aggressive needs it.
         strength = {
             AecPreset.MILD:     dict(min_gain_floor_far_active_db=-20.0),
             AecPreset.BALANCED:   dict(),
-            AecPreset.AGGRESSIVE: dict(min_gain_floor_far_active_db=-38.0),
+            AecPreset.AGGRESSIVE: dict(min_gain_floor_far_active_db=-38.0,
+                                       min_gain_floor_dt_db=-30.0),
             AecPreset.NO_FLOOR:   dict(min_gain_split_floor_enabled=False),
         }
         defaults = {**base, **strength.get(preset, {})}

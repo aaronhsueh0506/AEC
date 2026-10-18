@@ -183,6 +183,22 @@ int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
     return 0;
 }
 
+/* The DT-lifted floor has no ramp state: it is a hard per-hop override
+ * (get_min_gain, only while dt_protect_active is true), not a value the gain
+ * rule converges toward continuously the way split_floor_far_active_live is
+ * -- so there is nothing to walk and no "live" vs "target" split. Steps
+ * immediately. See aec.h's aec_set_preset() comment for why this is a
+ * deliberate asymmetry with the far-active setter above, not an oversight. */
+int suppression_gain_set_split_floor_dt_db(SuppressionGain *sg, float db) {
+    if (!sg) return -1;
+    if (!isfinite(db) || db < SG_SPLIT_FLOOR_DB_MIN ||
+        db > SG_SPLIT_FLOOR_DB_MAX) {
+        return -1;
+    }
+    sg->cfg.split_floor_dt = powf(10.0f, db / 10.0f);
+    return 0;
+}
+
 int suppression_gain_is_dominant_nearend(const SuppressionGain *sg) {
     return sg->dne_nearend_state ? 1 : 0;
 }

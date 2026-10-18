@@ -210,6 +210,16 @@ void suppression_gain_set_initial_state(SuppressionGain *sg, int state);
 int suppression_gain_set_split_floor_far_active_db(SuppressionGain *sg,
                                                    float db, float ramp_ms);
 
+/* The DT-lifted floor's runtime retarget. No ramp_ms: unlike the far-active
+ * floor above, split_floor_dt is a hard per-hop override, not a value the
+ * gain rule reads continuously while converging, so there is no "live" vs
+ * "target" to walk between -- the new value is in force for the very next
+ * hop where dt_protect_active is true. Touches nothing else.
+ *
+ * Returns 0 on success, -1 on a NULL instance or an out-of-range db, in
+ * which case nothing is written. */
+int suppression_gain_set_split_floor_dt_db(SuppressionGain *sg, float db);
+
 /* is_dominant_nearend — returns the RAW DominantNearendDetector hold state
  * (== _dominant_nearend.is_nearend_state()). The orchestrator reads this BEFORE
  * get_gain (one-hop lag: it reflects the previous hop's get_gain update). */

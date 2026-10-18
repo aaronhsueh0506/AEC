@@ -105,6 +105,39 @@ def test_set_preset_mirrors_config_and_floor():
     assert _live(aec._aec3_sg) == _live(_sg(PRESET_DB[AecPreset.AGGRESSIVE]))
 
 
+def _dt_live(sg) -> float:
+    return sg._split_floor_dt
+
+
+def test_set_preset_steps_dt_floor_immediately_even_with_a_ramp():
+    """aggressive is the only preset whose dt floor differs from the shared
+    -20 dB default. The far-active floor ramps over ramp_ms; the dt floor has
+    no ramp state at all and must already be at its target the instant
+    set_preset returns, regardless of ramp_ms."""
+    aec = AEC(AecConfig.from_preset(AecPreset.BALANCED))
+    assert aec.config.min_gain_floor_dt_db == -20.0
+    aec.set_preset(AecPreset.AGGRESSIVE, ramp_ms=5000.0)
+    assert aec.config.min_gain_floor_dt_db == -30.0
+    expected = float(np.float32(10.0) ** (np.float32(-30.0) / np.float32(10.0)))
+    assert _dt_live(aec._aec3_sg) == expected
+    # far-active is still mid-ramp (5 s requested) while dt already landed.
+    assert _live(aec._aec3_sg) != _live(_sg(PRESET_DB[AecPreset.AGGRESSIVE]))
+
+    aec.set_preset(AecPreset.MILD)
+    assert aec.config.min_gain_floor_dt_db == -20.0
+
+
+def test_set_split_floor_dt_db_rejects_out_of_range():
+    sg = _sg(-20.0)
+    before = _dt_live(sg)
+    with pytest.raises(ValueError):
+        sg.set_split_floor_dt_db(float("nan"))
+    assert _dt_live(sg) == before
+    with pytest.raises(ValueError):
+        sg.set_split_floor_dt_db(-301.0)
+    assert _dt_live(sg) == before
+
+
 # ── 3. ramp_ms > 0 is monotonic and lands exactly ────────────────────────
 
 def test_ramp_is_monotonic_and_lands_exactly():
